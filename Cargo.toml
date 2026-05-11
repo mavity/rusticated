@@ -1,0 +1,34 @@
+[package]
+name = "fast-std"
+description = "Fast, standard-library-shaped async platform layer for brush-async"
+version = "0.1.0"
+categories.workspace = true
+edition.workspace = true
+keywords.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+bench = false
+
+[lints]
+workspace = true
+
+[features]
+default = []
+mock = []
+
+[dependencies]
+compio-buf = { version = "0.8.2-rc.1", path = "../compio-no-std/compio-buf" }
+compio-io = { version = "0.10.0-rc.1", path = "../compio-no-std/compio-io" }
+getrandom = { version = "0.4.2" }
+thiserror = "2.0.18"
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+compio-executor = { path = "../compio-no-std/compio-executor" }
+compio = { path = "../compio-no-std/compio", default-features = false, features = ["runtime", "io", "fs", "net", "process", "time", "signal"] }
+
+[target.'cfg(unix)'.dependencies]
+reedline-async = { path = "../reedline-async" }
