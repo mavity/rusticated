@@ -1,8 +1,128 @@
 ﻿//! Process execution and management
+
 #[cfg(not(target_family = "wasm"))]
-pub use compio::process::{Child, Command};
+mod native_process {
+    use std::{ffi::OsStr, io, process};
+
+    use compio_buf::{BufResult, IntoInner};
+
+    /// A running child process.
+    ///
+    /// Created by [`Command::spawn`].
+    pub struct Child(Option<process::Child>);
+
+    impl Child {
+        /// Wait asynchronously for the child process to exit.
+        ///
+        /// Consumes the underlying child handle.  Further calls to `wait`
+        /// return an error.
+        pub async fn wait(&mut self) -> io::Result<process::ExitStatus> {
+            let Some(child) = self.0.take() else {
+                return Err(io::Error::other(
+                    "child process already waited",
+                ));
+            };
+            // Run the blocking `Child::wait()` call in the proactor thread pool.
+            let op = compio_driver::op::Asyncify::new(move || {
+                let mut c = child;
+                let result = c.wait();
+                BufResult(Ok(0usize), result)
+            });
+            match crate::rt::native::OpFuture::new(op).await {
+                Err(e) => Err(e),
+                Ok(buf_result) => {
+                    // into_inner extracts the `D` from `Asyncify<F, D>` via the
+                    // `BufResult<usize, Asyncify<F,D>>::into_inner()` impl.
+                    let BufResult(_, exit_result) = buf_result.into_inner();
+                    exit_result
+                }
+            }
+        }
+
+        /// Non-blocking poll to check if the child has exited.
+        pub fn try_wait(&mut self) -> io::Result<Option<process::ExitStatus>> {
+            self.0.as_mut().map_or(Ok(None), |child| child.try_wait())
+        }
+
+        /// Send a kill signal to the child process.
+        pub fn kill(&mut self) -> io::Result<()> {
+            self.0.as_mut().map_or_else(
+                || Err(io::Error::other("child process already waited")),
+                |child| child.kill(),
+            )
+        }
+    }
+
+    /// A builder for spawning child processes.
+    ///
+    /// Wraps [`std::process::Command`] to add an async-friendly `spawn`.
+    pub struct Command(process::Command);
+
+    impl Command {
+        /// Create a new command for `program`.
+        pub fn new<S: AsRef<OsStr>>(program: S) -> Self {
+            Self(process::Command::new(program))
+        }
+
+        /// Append a single argument.
+        pub fn arg<S: AsRef<OsStr>>(&mut self, arg: S) -> &mut Self {
+            self.0.arg(arg);
+            self
+        }
+
+        /// Append multiple arguments.
+        pub fn args<I, S>(&mut self, args: I) -> &mut Self
+        where
+            I: IntoIterator<Item = S>,
+            S: AsRef<OsStr>,
+        {
+            self.0.args(args);
+            self
+        }
+
+        /// Set an environment variable for the child process.
+        pub fn env<K, V>(&mut self, key: K, val: V) -> &mut Self
+        where
+            K: AsRef<OsStr>,
+            V: AsRef<OsStr>,
+        {
+            self.0.env(key, val);
+            self
+        }
+
+        /// Configure stdin for the child process.
+        pub fn stdin<T: Into<process::Stdio>>(&mut self, cfg: T) -> &mut Self {
+            self.0.stdin(cfg);
+            self
+        }
+
+        /// Configure stdout for the child process.
+        pub fn stdout<T: Into<process::Stdio>>(&mut self, cfg: T) -> &mut Self {
+            self.0.stdout(cfg);
+            self
+        }
+
+        /// Configure stderr for the child process.
+        pub fn stderr<T: Into<process::Stdio>>(&mut self, cfg: T) -> &mut Self {
+            self.0.stderr(cfg);
+            self
+        }
+
+        /// Spawn the command as a child process.
+        ///
+        /// The underlying `fork`/`exec` (or `CreateProcess` on Windows) is
+        /// synchronous but completes almost immediately.
+        pub fn spawn(&mut self) -> io::Result<Child> {
+            self.0.spawn().map(|c| Child(Some(c)))
+        }
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub use native_process::{Child, Command};
 #[cfg(not(target_family = "wasm"))]
 pub use std::process::{ExitStatus as ChildExitStatus, Stdio};
+
 
 #[cfg(target_family = "wasm")]
 use crate::abi::imports;

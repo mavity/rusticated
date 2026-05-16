@@ -9,14 +9,14 @@ pub use wasm::*;
 #[cfg(not(target_family = "wasm"))]
 mod native {
     /// Get terminal size
-    pub fn get_size(_handle: u64) -> std::io::Result<(u16, u16)> {
+    pub const fn get_size(_handle: u64) -> std::io::Result<(u16, u16)> {
         // Implementation for native (likely using crossterm or nix)
         // For now dummy or placeholder if not using full compio-tty
         Ok((80, 24))
     }
 
     /// Set terminal mode
-    pub fn set_mode(_handle: u64, _mode: u32) -> std::io::Result<()> {
+    pub const fn set_mode(_handle: u64, _mode: u32) -> std::io::Result<()> {
         Ok(())
     }
 }

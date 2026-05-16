@@ -1,7 +1,16 @@
-﻿//! Runtime abstractions — WASM completion registry and host entry point.
+﻿//! Runtime abstractions — proactor-backed executor and WASM completion registry.
 //!
-//! On native targets, callers use `compio` directly.
-//! On WASM the host drives the proactor by calling `run()` (exported as a C symbol).
+//! On native targets, [`block_on`] runs a future to completion using the
+//! thread-local [`compio_driver::Proactor`].
+//!
+//! On WASM the host drives the proactor by calling `run()` (exported as a C
+//! symbol).
+
+#[cfg(not(target_family = "wasm"))]
+pub mod native;
+
+#[cfg(not(target_family = "wasm"))]
+pub use native::block_on;
 
 #[cfg(target_family = "wasm")]
 pub mod wasm;

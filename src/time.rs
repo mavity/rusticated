@@ -1,6 +1,21 @@
 ﻿//! Time handling and async sleeps
+
 #[cfg(not(target_family = "wasm"))]
-pub use compio::time::sleep;
+/// Sleep asynchronously for `duration`.
+///
+/// Runs [`std::thread::sleep`] in the proactor thread pool so that other
+/// futures can make progress while waiting.
+pub async fn sleep(duration: std::time::Duration) {
+    use compio_buf::BufResult;
+    let op = compio_driver::op::Asyncify::<_, ()>::new(move || {
+        std::thread::sleep(duration);
+        BufResult(Ok(0usize), ())
+    });
+    // Ignore errors — if the proactor is broken, the sleep still occurs
+    // inside the thread pool (the future just never wakes up cleanly).
+    let _ = crate::rt::native::OpFuture::new(op).await;
+}
+
 
 #[cfg(target_family = "wasm")]
 use crate::abi::imports;

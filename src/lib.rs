@@ -13,10 +13,14 @@ pub mod fs;
 pub mod io;
 /// Path extensions
 pub mod path;
+/// Process execution and management
+pub mod process;
 /// Runtime engine abstraction
 pub mod rt;
 /// OS signal abstractions
 pub mod signal;
+/// Time and async sleep utilities
+pub mod time;
 /// Terminal interface types
 pub mod tty;
 

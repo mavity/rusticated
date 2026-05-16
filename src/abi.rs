@@ -16,8 +16,8 @@ impl Overlapped {
     /// Flag indicating the host has completed the requested operation
     pub const FLAG_COMPLETED: u32 = 1;
 
-    /// Checks whether the FLAG_COMPLETED bit is set
-    pub fn is_complete(&self) -> bool {
+    /// Checks whether the `FLAG_COMPLETED` bit is set
+    pub const fn is_complete(&self) -> bool {
         (self.flags & Self::FLAG_COMPLETED) != 0
     }
 }
