@@ -16,7 +16,7 @@ pub mod waker;
 pub mod windows;
 
 #[cfg(not(target_family = "wasm"))]
-pub use executor::{PollStatus, poll_step, run, spawn};
+pub use executor::{Either, JoinHandle, PollStatus, Select, poll_step, select, spawn};
 
 #[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
 pub use linux_epoll::{WaitReadable, WaitWritable};
@@ -78,5 +78,8 @@ pub fn wait_writable(fd: i32) -> WaitWritable {
 #[cfg(target_family = "wasm")]
 pub mod wasm;
 
+// Export the WASM Rust consumer API explicitly, deliberately excluding the
+// host-ABI `run()` symbol (which stays as `#[no_mangle] pub extern "C"` in
+// wasm.rs for the host linker, but is not a Rust-level public API).
 #[cfg(target_family = "wasm")]
-pub use wasm::*;
+pub use wasm::{OverlappedBufferFuture, OverlappedFuture, poll_step, submit_main};

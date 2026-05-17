@@ -4,7 +4,7 @@ use crate::collections::VecDeque;
 use crate::future::Future;
 use crate::io;
 use crate::pin::Pin;
-use crate::task::{Context, Poll};
+use crate::task::{Context, Poll, Waker};
 use crate::time::Duration;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -24,6 +24,8 @@ use super::windows::Driver;
     target_os = "netbsd"
 ))]
 use super::bsd::Driver;
+
+// ─── Task ────────────────────────────────────────────────────────────────────
 
 /// A task in the per-thread run queue.
 struct Task {
@@ -55,34 +57,171 @@ pub(crate) fn with_driver<R>(f: impl FnOnce(&mut Driver) -> R) -> io::Result<R> 
     })
 }
 
-/// Submit a future to the per-thread task queue.
+// ─── JoinHandle ──────────────────────────────────────────────────────────────
+
+/// Shared state between a spawned task and its [`JoinHandle`].
+struct JoinState<T> {
+    /// The task's return value, written on completion.
+    result: Option<T>,
+    /// Waker stored by the [`JoinHandle`] awaiter; woken when the task finishes.
+    waker: Option<Waker>,
+}
+
+/// Internal future that drives `F` and deposits its output into [`JoinState`].
+///
+/// This is the actual payload stored in the executor's task queue.
+struct JoinFuture<T> {
+    inner: Pin<Box<dyn Future<Output = T>>>,
+    state: Arc<RefCell<JoinState<T>>>,
+}
+
+// JoinFuture<T> is Unpin: Pin<Box<dyn Future>> is Unpin (Box is always Unpin),
+// and Arc<RefCell<...>> is Unpin.
+impl<T: 'static> Future for JoinFuture<T> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let this = Pin::into_inner(self);
+        match this.inner.as_mut().poll(cx) {
+            Poll::Ready(val) => {
+                let mut state = this.state.borrow_mut();
+                state.result = Some(val);
+                if let Some(w) = state.waker.take() {
+                    w.wake();
+                }
+                Poll::Ready(())
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// A handle to a spawned task that can be awaited for its return value.
+///
+/// Dropping the handle does not cancel the task — it continues to run; its
+/// output is simply discarded when it completes.
+pub struct JoinHandle<T> {
+    state: Arc<RefCell<JoinState<T>>>,
+}
+
+impl<T> Future for JoinHandle<T> {
+    type Output = T;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
+        let mut state = self.state.borrow_mut();
+        if let Some(val) = state.result.take() {
+            Poll::Ready(val)
+        } else {
+            state.waker = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+}
+
+// ─── spawn ───────────────────────────────────────────────────────────────────
+
+/// Submit a future to the per-thread task queue, returning a [`JoinHandle`]
+/// that can be awaited to obtain the task's output.
 ///
 /// The future is polled on the current thread by each subsequent
 /// [`poll_step`] call. Multiple tasks can be in flight concurrently; they
 /// are polled round-robin within each step.
-pub fn spawn<F>(future: F)
+///
+/// Dropping the returned handle does not cancel the task.
+pub fn spawn<F, T>(future: F) -> JoinHandle<T>
 where
-    F: Future<Output = ()> + 'static,
+    F: Future<Output = T> + 'static,
+    T: 'static,
 {
+    let state = Arc::new(RefCell::new(JoinState {
+        result: None,
+        waker: None,
+    }));
+    let handle = JoinHandle {
+        state: Arc::clone(&state),
+    };
+    let wrapper = JoinFuture {
+        inner: Box::pin(future),
+        state,
+    };
     // Mark woken=true so the task is polled on the very first poll_step.
     let woken = Arc::new(AtomicBool::new(true));
     TASKS.with(|q| {
         q.borrow_mut().push_back(Task {
-            future: Box::pin(future),
+            future: Box::pin(wrapper),
             woken,
         })
     });
+    handle
 }
 
-/// Submit a top-level future to the runtime.
+/// Internal helper: spawn a `Future<Output = ()>` and discard the handle.
 ///
-/// Equivalent to [`spawn`]. Kept for backwards compatibility.
-pub fn run<F>(future: F)
+/// Used by test `block_on` utilities and platform bootstrapping code within
+/// this crate. Not part of the public API.
+pub(crate) fn run<F>(future: F)
 where
     F: Future<Output = ()> + 'static,
 {
-    spawn(future);
+    let _ = spawn(future);
 }
+
+// ─── select ──────────────────────────────────────────────────────────────────
+
+/// The output of [`select`]: whichever branch completed first.
+pub enum Either<A, B> {
+    /// The first (left) future completed first.
+    Left(A),
+    /// The second (right) future completed first.
+    Right(B),
+}
+
+/// Drives two futures concurrently, resolving with whichever completes first.
+///
+/// Both sides are pinned on the heap. The losing future is dropped.
+/// See [`select`] for construction.
+pub struct Select<FA, FB> {
+    a: Pin<Box<FA>>,
+    b: Pin<Box<FB>>,
+}
+
+impl<FA: Future, FB: Future> Future for Select<FA, FB> {
+    type Output = Either<FA::Output, FB::Output>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // Poll left first; if it resolves, the right future is dropped.
+        if let Poll::Ready(a) = self.a.as_mut().poll(cx) {
+            return Poll::Ready(Either::Left(a));
+        }
+        // Poll right; if it resolves, the left future is dropped.
+        if let Poll::Ready(b) = self.b.as_mut().poll(cx) {
+            return Poll::Ready(Either::Right(b));
+        }
+        Poll::Pending
+    }
+}
+
+/// Race two futures: resolve with whichever one completes first.
+///
+/// When both are immediately ready, the left wins (it is polled first).
+/// The losing future is dropped when the [`Select`] future resolves.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// match std::rt::select(future_a, future_b).await {
+///     std::rt::Either::Left(a)  => { /* a completed first */ }
+///     std::rt::Either::Right(b) => { /* b completed first */ }
+/// }
+/// ```
+pub fn select<FA: Future, FB: Future>(a: FA, b: FB) -> Select<FA, FB> {
+    Select {
+        a: Box::pin(a),
+        b: Box::pin(b),
+    }
+}
+
+// ─── PollStatus / poll_step ──────────────────────────────────────────────────
 
 /// Outcome of one [`poll_step`] iteration.
 ///
@@ -155,4 +294,179 @@ pub fn poll_step() -> io::Result<PollStatus> {
             next_deadline: next_deadline(),
         }
     })
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::rc::Rc;
+    use core::cell::Cell;
+
+    /// Spin the executor until all tasks have completed (no I/O in unit tests).
+    fn drive_until_done() {
+        loop {
+            match poll_step().unwrap() {
+                PollStatus::Done => break,
+                PollStatus::Ready | PollStatus::Idle { .. } => continue,
+            }
+        }
+    }
+
+    // ── JoinHandle ───────────────────────────────────────────────────────────
+
+    /// A spawned future returning a non-unit value is retrievable via its handle.
+    #[test]
+    fn join_handle_resolves_with_task_output() {
+        let result: Rc<Cell<u32>> = Rc::new(Cell::new(0));
+        let result2 = Rc::clone(&result);
+
+        let handle = spawn(async { 42u32 });
+        let _ = spawn(async move {
+            result2.set(handle.await);
+        });
+
+        drive_until_done();
+        assert_eq!(result.get(), 42);
+    }
+
+    /// The handle waits even when the producer task is queued after the consumer.
+    #[test]
+    fn join_handle_waits_for_producer() {
+        let result: Rc<Cell<u32>> = Rc::new(Cell::new(0));
+        let result2 = Rc::clone(&result);
+
+        // Consumer spawned first — it will see Pending on its first poll,
+        // then be correctly woken when the producer completes.
+        let handle = spawn(async { 99u32 });
+        let _ = spawn(async move {
+            result2.set(handle.await);
+        });
+
+        drive_until_done();
+        assert_eq!(result.get(), 99);
+    }
+
+    /// Dropping the JoinHandle does not prevent the task from running.
+    #[test]
+    fn drop_join_handle_task_still_runs() {
+        let ran: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+        let ran2 = Rc::clone(&ran);
+
+        // Drop the handle immediately after spawning.
+        drop(spawn(async move {
+            ran2.set(true);
+        }));
+
+        drive_until_done();
+        assert!(ran.get(), "task should run even after handle is dropped");
+    }
+
+    /// A task spawned from inside another async task is correctly scheduled.
+    #[test]
+    fn nested_spawn_resolves() {
+        let result: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+        let result2 = Rc::clone(&result);
+
+        let _ = spawn(async move {
+            let handle = spawn(async { true });
+            result2.set(handle.await);
+        });
+
+        drive_until_done();
+        assert!(result.get());
+    }
+
+    /// Multiple independent tasks all complete and their side-effects accumulate.
+    #[test]
+    fn multiple_tasks_all_run() {
+        let counter: Rc<Cell<u32>> = Rc::new(Cell::new(0));
+        for _ in 0..5 {
+            let c = Rc::clone(&counter);
+            let _ = spawn(async move {
+                c.set(c.get() + 1);
+            });
+        }
+        drive_until_done();
+        assert_eq!(counter.get(), 5);
+    }
+
+    // ── select ───────────────────────────────────────────────────────────────
+
+    /// When left is immediately ready, select resolves with Left.
+    #[test]
+    fn select_left_wins_when_immediately_ready() {
+        let winner: Rc<Cell<u8>> = Rc::new(Cell::new(0));
+        let w2 = Rc::clone(&winner);
+
+        let _ = spawn(async move {
+            let r = select(async { 1u8 }, core::future::pending::<u8>()).await;
+            match r {
+                Either::Left(v) => w2.set(v),
+                Either::Right(_) => w2.set(99),
+            }
+        });
+
+        drive_until_done();
+        assert_eq!(winner.get(), 1);
+    }
+
+    /// When right is immediately ready (left never resolves), select resolves with Right.
+    #[test]
+    fn select_right_wins_when_left_never_resolves() {
+        let winner: Rc<Cell<u8>> = Rc::new(Cell::new(0));
+        let w2 = Rc::clone(&winner);
+
+        let _ = spawn(async move {
+            let r = select(core::future::pending::<u8>(), async { 2u8 }).await;
+            match r {
+                Either::Left(_) => w2.set(99),
+                Either::Right(v) => w2.set(v),
+            }
+        });
+
+        drive_until_done();
+        assert_eq!(winner.get(), 2);
+    }
+
+    /// When both sides are immediately ready, left wins (it is polled first).
+    #[test]
+    fn select_left_wins_when_both_immediately_ready() {
+        let winner: Rc<Cell<u8>> = Rc::new(Cell::new(0));
+        let w2 = Rc::clone(&winner);
+
+        let _ = spawn(async move {
+            let r = select(async { 10u8 }, async { 20u8 }).await;
+            match r {
+                Either::Left(v) | Either::Right(v) => w2.set(v),
+            }
+        });
+
+        drive_until_done();
+        assert_eq!(
+            winner.get(),
+            10,
+            "left is polled first so it wins when both ready"
+        );
+    }
+
+    /// select can be composed: one arm is itself a JoinHandle.
+    #[test]
+    fn select_with_join_handle_arm() {
+        let result: Rc<Cell<u32>> = Rc::new(Cell::new(0));
+        let r2 = Rc::clone(&result);
+
+        let _ = spawn(async move {
+            let fast = spawn(async { 7u32 });
+            let r = select(fast, core::future::pending::<u32>()).await;
+            match r {
+                Either::Left(v) => r2.set(v),
+                Either::Right(v) => r2.set(v),
+            }
+        });
+
+        drive_until_done();
+        assert_eq!(result.get(), 7);
+    }
 }

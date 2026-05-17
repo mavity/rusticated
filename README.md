@@ -91,7 +91,14 @@ Child process tracking relies on blocking `wait()` methods unless special OS fac
 ### 5. Signal Handling (`src/signal.rs`)
 * **Windows**: **Stubbed.** Calling `ctrl_c()` returns an error: `"ctrl_c: Windows console-event backend pending"`. Resolution requires invoking `SetConsoleCtrlHandler` natively and notifying the IOCP driver.
 
-### 6. I/O Trait Extensions (`src/io.rs`)
-* **Ergonomics Missing**: The crate successfully defines the `AsyncRead` and `AsyncWrite` trait boundaries, but provides zero utility methods to satisfy typical caller requirements. There is no `AsyncReadExt` to provide `read_exact`, `read_to_end`, or `read_to_string`. There are also no `BufReader` / `BufWriter` wrappers. 
 
-Our goal next is to drive the system to completion, including **Windows Overlapped I/O Operations** and the **Linux `io_uring` engine** and with that and related work bridge ALL the architectural gaps in fs.rs and `net.rs`.
+# Demo executable
+
+With all the above in mind we want to produce an executable that would be like a demo or a hello world inside fast-std for the demonstration of the fast-std facilities.
+
+Themandate (non-negotiable) is to have an executable that depends visibly only on std, no overt sign of fast-std references anywhere. However it must be built on top of our custom fast-std as target. It should write to console (1), read single line input from console (2) check if that input resolves into a file and if so, read the last byte of that file and print it out (3).
+
+NOTES:
+
+1. `fast-std` is a custom target, not a create to import. Its exports therefore are not imported from crates, but as the target std.
+
