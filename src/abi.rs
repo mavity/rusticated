@@ -1,3 +1,7 @@
+//! WASM host ABI definitions: `Overlapped` struct and host imports.
+
+#![allow(clippy::doc_markdown, clippy::missing_safety_doc)]
+
 /// Overlapped I/O structure for host-guest WASM communication
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
@@ -71,6 +75,13 @@ pub mod imports {
         );
         /// Query metadata for a path. Result_ext = handle to a stat-info struct.
         pub fn path_stat(overlapped: *mut Overlapped, path_ptr: *const u8, path_len: u32);
+
+        /// Get file size from a stat handle.
+        pub fn stat_len(stat_handle: u64) -> u64;
+        /// Check if a stat handle represents a directory.
+        pub fn stat_is_dir(stat_handle: u64) -> u32;
+        /// Check if a stat handle represents a regular file.
+        pub fn stat_is_file(stat_handle: u64) -> u32;
 
         /// Create listener or connection. Result_ext = Socket Handle.
         pub fn net_open(

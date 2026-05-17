@@ -1,5 +1,25 @@
 //! File system utilities
 
+// WASM stub code intentionally trades clippy purity for clarity at the host
+// ABI boundary: pointer-sized casts and host-contract truncations are
+// inherent. Allows are scoped to the WASM target.
+#![cfg_attr(
+    target_family = "wasm",
+    allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::missing_const_for_fn,
+        clippy::doc_markdown,
+        clippy::type_complexity,
+        clippy::unnecessary_wraps,
+        clippy::needless_pass_by_value,
+        clippy::struct_field_names,
+        clippy::len_without_is_empty,
+        clippy::use_self,
+    )
+)]
+
 // ——— Native Linux —————————————————————————————————————————————————————————
 
 #[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
@@ -181,6 +201,12 @@ mod native_linux {
 pub use native_stub::{File, OpenOptions};
 
 #[cfg(all(not(target_family = "wasm"), not(target_os = "linux")))]
+#[allow(
+    clippy::unused_async,
+    clippy::missing_const_for_fn,
+    clippy::doc_markdown,
+    dead_code
+)]
 mod native_stub {
     use std::io;
 
@@ -265,7 +291,7 @@ mod native_stub {
 #[cfg(target_family = "wasm")]
 use crate::abi::imports;
 #[cfg(target_family = "wasm")]
-use crate::rt::wasm::OverlappedFuture;
+use crate::rt::wasm::OverlappedBufferFuture;
 
 /// WASM file handle.
 #[cfg(target_family = "wasm")]
@@ -293,17 +319,18 @@ impl File {
 
 #[cfg(target_family = "wasm")]
 impl crate::io::AsyncRead for File {
-    async fn read(&mut self, mut buf: Vec<u8>) -> (std::io::Result<usize>, Vec<u8>) {
-        let ptr = buf.as_mut_ptr();
-        let len = buf.capacity() as u32;
+    async fn read(&mut self, buf: Vec<u8>) -> (std::io::Result<usize>, Vec<u8>) {
         let handle = self.handle;
 
-        let (err, bytes_read, _) = OverlappedFuture::new(move |ov| {
-            // SAFETY: `ptr` and `len` are valid for the duration of this
-            // overlapped operation — `buf` lives in the enclosing async frame.
-            unsafe { imports::read(ov, handle, ptr, len) };
-        })
-        .await;
+        let (err, bytes_read, _, mut buf) =
+            OverlappedBufferFuture::new(buf, move |ov, ptr, len| {
+                // SAFETY: `ptr`/`len` describe the buffer owned by the future's
+                // state, kept alive by an `Rc` clone in the completion registry
+                // until the host signals completion — even if this future is
+                // dropped.
+                unsafe { imports::read(ov, handle, ptr, len) };
+            })
+            .await;
 
         if err != 0 {
             return (Err(std::io::Error::from_raw_os_error(err as i32)), buf);
@@ -318,16 +345,18 @@ impl crate::io::AsyncRead for File {
 #[cfg(target_family = "wasm")]
 impl crate::io::AsyncWrite for File {
     async fn write(&mut self, buf: Vec<u8>) -> (std::io::Result<usize>, Vec<u8>) {
-        let ptr = buf.as_ptr();
-        let len = buf.len() as u32;
         let handle = self.handle;
+        // For writes we only consume `len`, not capacity.
+        let used = buf.len() as u32;
 
-        let (err, bytes_written, _) = OverlappedFuture::new(move |ov| {
-            // SAFETY: `ptr` and `len` are valid for the duration of this
-            // overlapped operation — `buf` lives in the enclosing async frame.
-            unsafe { imports::write(ov, handle, ptr, len) };
-        })
-        .await;
+        let (err, bytes_written, _, buf) =
+            OverlappedBufferFuture::new(buf, move |ov, ptr, _cap| {
+                // SAFETY: `ptr` points into the future-owned buffer (lifetime
+                // pinned via the completion registry's `Rc` clone). `used`
+                // bytes are valid because the caller filled them in.
+                unsafe { imports::write(ov, handle, ptr, used) };
+            })
+            .await;
 
         if err != 0 {
             return (Err(std::io::Error::from_raw_os_error(err as i32)), buf);
@@ -404,8 +433,7 @@ impl OpenOptions {
             .as_ref()
             .to_str()
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid path"))?;
-        let path_ptr = path_str.as_ptr();
-        let path_len = path_str.len() as u32;
+        let path_bytes = path_str.as_bytes().to_vec();
 
         let mut flags = 0u32;
         if self.read {
@@ -427,12 +455,14 @@ impl OpenOptions {
             flags |= 32;
         }
 
-        let (err, handle, _) = OverlappedFuture::new(move |ov| {
-            // SAFETY: `path_ptr` and `path_len` refer to the `path_str` slice
-            // which lives in the enclosing async frame.
-            unsafe { imports::path_open(ov, path_ptr, path_len, flags) };
-        })
-        .await;
+        let (err, handle, _, _path) =
+            OverlappedBufferFuture::new(path_bytes, move |ov, ptr, len| {
+                // SAFETY: `ptr`/`len` describe the future-owned path buffer;
+                // it outlives any cancellation thanks to the completion
+                // registry's `Rc` clone.
+                unsafe { imports::path_open(ov, ptr.cast_const(), len, flags) };
+            })
+            .await;
 
         if err != 0 {
             return Err(std::io::Error::from_raw_os_error(err as i32));
@@ -462,22 +492,20 @@ impl DirReader {
     ///
     /// Returns `None` when all entries have been read.
     pub async fn read_entries(&mut self) -> std::io::Result<Option<Vec<String>>> {
-        let mut buf = vec![0u8; 4096];
-        let ptr = buf.as_mut_ptr();
-        let len = buf.len() as u32;
+        let buf = vec![0u8; 4096];
+        let handle = self.handle;
+        let continued = self.continued;
 
-        let (err, bytes_read, next_continued) = OverlappedFuture::new({
-            let handle = self.handle;
-            let continued = self.continued;
-            move |ov| {
-                // SAFETY: `ptr` and `len` are valid; `buf` lives in this frame.
+        let (err, bytes_read, next_continued, buf) =
+            OverlappedBufferFuture::new(buf, move |ov, ptr, len| {
+                // SAFETY: `ptr`/`len` describe the future-owned buffer; the
+                // completion registry keeps it alive across any drop.
                 unsafe {
                     (*ov).continued = continued;
                     imports::dir_read(ov, handle, ptr, len);
                 }
-            }
-        })
-        .await;
+            })
+            .await;
 
         if err != 0 {
             return Err(std::io::Error::from_raw_os_error(err as i32));
@@ -506,17 +534,20 @@ pub struct Metadata {
 impl Metadata {
     /// Returns `true` if this metadata describes a regular file.
     pub fn is_file(&self) -> bool {
-        true
+        // SAFETY: The host implements `stat_is_file` via the ABI correctly.
+        unsafe { crate::abi::imports::stat_is_file(self.handle) != 0 }
     }
 
     /// Returns `true` if this metadata describes a directory.
     pub fn is_dir(&self) -> bool {
-        false
+        // SAFETY: The host implements `stat_is_dir` via the ABI correctly.
+        unsafe { crate::abi::imports::stat_is_dir(self.handle) != 0 }
     }
 
     /// Returns the size of the file in bytes.
     pub fn len(&self) -> u64 {
-        0
+        // SAFETY: The host implements `stat_len` via the ABI correctly.
+        unsafe { crate::abi::imports::stat_len(self.handle) }
     }
 }
 
@@ -527,12 +558,12 @@ pub async fn metadata<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<Met
         .as_ref()
         .to_str()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid path"))?;
-    let path_ptr = path_str.as_ptr();
-    let path_len = path_str.len() as u32;
+    let path_bytes = path_str.as_bytes().to_vec();
 
-    let (err, handle, _) = OverlappedFuture::new(move |ov| {
-        // SAFETY: `path_ptr` and `path_len` refer to `path_str` in this frame.
-        unsafe { imports::path_stat(ov, path_ptr, path_len) };
+    let (err, handle, _, _path) = OverlappedBufferFuture::new(path_bytes, move |ov, ptr, len| {
+        // SAFETY: `ptr`/`len` describe the future-owned path buffer; the
+        // completion registry keeps it alive across any drop.
+        unsafe { imports::path_stat(ov, ptr.cast_const(), len) };
     })
     .await;
 

@@ -10,6 +10,8 @@
 //! Exposing them as free `cfg`-gated functions keeps `brush-core` itself
 //! free of `cfg(unix|windows)` blocks while preserving zero-cost dispatch.
 
+#![allow(clippy::missing_const_for_fn)]
+
 use std::borrow::Cow;
 use std::path::PathBuf;
 

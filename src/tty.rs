@@ -22,11 +22,14 @@ mod native {
 }
 
 #[cfg(target_family = "wasm")]
+#[allow(clippy::cast_possible_truncation, clippy::unnecessary_wraps)]
 mod wasm {
     use crate::abi::imports;
 
     /// Get terminal size for WASM
     pub fn get_size(handle: u64) -> std::io::Result<(u16, u16)> {
+        // SAFETY: `tty_get_size` is a side-effect-free host import that
+        // accepts any handle value.
         let res = unsafe { imports::tty_get_size(handle) };
         let cols = (res >> 16) as u16;
         let rows = (res & 0xFFFF) as u16;
@@ -35,6 +38,8 @@ mod wasm {
 
     /// Set terminal mode for WASM
     pub fn set_mode(handle: u64, mode: u32) -> std::io::Result<()> {
+        // SAFETY: `tty_set_mode` is a host import that accepts any handle
+        // and mode value.
         unsafe { imports::tty_set_mode(handle, mode) };
         Ok(())
     }

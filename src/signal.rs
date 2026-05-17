@@ -1,4 +1,19 @@
-//! OS signal abstractions
+//! OS signal abstractions.
+//!
+//! - **Unix**: a `SIGINT` handler writes one byte to a self-pipe; [`ctrl_c`] awaits readability on
+//!   the pipe through the runtime's epoll/kqueue driver. No polling.
+//! - **Windows**: backend pending — [`ctrl_c`] returns an error until the IOCP/console event
+//!   integration lands.
+//! - **WASM**: host import [`crate::abi::imports::signal_wait`] drives the completion.
+
+#![cfg_attr(
+    target_family = "wasm",
+    allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+    )
+)]
 
 #[cfg(not(target_family = "wasm"))]
 mod native_signal {
@@ -21,11 +36,20 @@ mod native_signal {
     #[cfg(unix)]
     const O_NONBLOCK: i32 = 0o0_004_000;
 
+    /// POSIX `SIGINT`.
+    #[cfg(unix)]
+    const SIGINT: i32 = 2;
+
+    /// Signal handler function pointer type, matching `libc::sighandler_t`.
+    #[cfg(unix)]
+    type SigHandlerFn = extern "C" fn(i32);
+
     #[cfg(unix)]
     extern "C" {
         fn pipe2(pipefd: *mut i32, flags: i32) -> i32;
         fn write(fd: i32, buf: *const u8, count: usize) -> isize;
         fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
+        fn signal(signum: i32, handler: SigHandlerFn) -> usize;
     }
 
     #[cfg(unix)]
@@ -44,17 +68,12 @@ mod native_signal {
 
     /// Async-signal-safe handler: writes one byte to the signal pipe.
     #[cfg(unix)]
-    extern "C" fn sigint_handler(_sig: libc::c_int) {
+    extern "C" fn sigint_handler(_sig: i32) {
         if let Some(&[_, tx]) = SIGNAL_PIPE.get() {
             // SAFETY: `write(2)` is async-signal-safe.
             unsafe { write(tx, b"\x00".as_ptr(), 1) };
         }
     }
-
-    // ── Windows: AtomicBool set by console ctrl handler ───────────────────────
-
-    #[cfg(windows)]
-    static CTRL_C_RECEIVED: AtomicBool = AtomicBool::new(false);
 
     // ── Handler installation ──────────────────────────────────────────────────
 
@@ -78,39 +97,22 @@ mod native_signal {
         // SAFETY: `sigint_handler` only calls `write(2)`, which is
         // async-signal-safe.
         unsafe {
-            libc::signal(libc::SIGINT, sigint_handler as libc::sighandler_t);
+            signal(SIGINT, sigint_handler);
         }
         Ok(())
     }
 
     #[cfg(windows)]
+    #[allow(clippy::unnecessary_wraps, clippy::missing_const_for_fn)]
     fn install_handler() -> io::Result<()> {
-        // SAFETY: `console_ctrl_handler` is a valid PHANDLER_ROUTINE.
-        let ok = unsafe {
-            windows_sys::Win32::System::Console::SetConsoleCtrlHandler(
-                Some(console_ctrl_handler),
-                windows_sys::Win32::Foundation::TRUE,
-            )
-        };
-        if ok == 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    }
-
-    #[cfg(windows)]
-    unsafe extern "system" fn console_ctrl_handler(event: u32) -> i32 {
-        const CTRL_C_EVENT: u32 = 0;
-        if event == CTRL_C_EVENT {
-            CTRL_C_RECEIVED.store(true, Ordering::Release);
-            1i32
-        } else {
-            0i32
-        }
+        // The Windows console-event integration is pending. We accept the
+        // request so `setup_handler` succeeds and `ctrl_c_impl` returns a
+        // clear error.
+        Ok(())
     }
 
     #[cfg(not(any(unix, windows)))]
+    #[allow(clippy::unnecessary_wraps)]
     fn install_handler() -> io::Result<()> {
         Ok(())
     }
@@ -129,29 +131,24 @@ mod native_signal {
     }
 
     #[cfg(windows)]
+    #[allow(clippy::unused_async, clippy::unnecessary_wraps)]
     async fn ctrl_c_impl() -> io::Result<()> {
-        // Spin in a background thread until the flag is set.
-        crate::rt::native::spawn_blocking(|| {
-            loop {
-                if CTRL_C_RECEIVED.swap(false, Ordering::AcqRel) {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-        })?
-        .await
+        Err(io::Error::other(
+            "ctrl_c: Windows console-event backend pending",
+        ))
     }
 
     #[cfg(not(any(unix, windows)))]
+    #[allow(clippy::unused_async)]
     async fn ctrl_c_impl() -> io::Result<()> {
         Err(io::Error::other("ctrl_c not supported on this platform"))
     }
 
     /// Wait asynchronously until Ctrl-C (SIGINT) is received.
     ///
-    /// Installs a platform signal handler on first call.  On Unix the
-    /// implementation waits on a pipe that the signal handler writes to;
-    /// no spinning occurs.
+    /// On Unix this installs a signal handler on first call and awaits the
+    /// self-pipe through the runtime's reactor — no polling, no extra
+    /// thread.
     pub async fn ctrl_c() -> io::Result<()> {
         setup_handler()?;
         ctrl_c_impl().await
@@ -161,7 +158,7 @@ mod native_signal {
 #[cfg(not(target_family = "wasm"))]
 pub use native_signal::ctrl_c;
 
-// ——— WASM ——————————————————————————————————————————————————————————————————
+// ─── WASM ────────────────────────────────────────────────────────────────────
 
 #[cfg(target_family = "wasm")]
 use crate::abi::imports;

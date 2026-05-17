@@ -1,8 +1,53 @@
 //! Process execution and management
 
+#![cfg_attr(
+    target_family = "wasm",
+    allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::missing_const_for_fn,
+        clippy::doc_markdown,
+        clippy::type_complexity,
+        clippy::unnecessary_wraps,
+        clippy::needless_pass_by_value,
+        clippy::undocumented_unsafe_blocks,
+    )
+)]
+
 #[cfg(not(target_family = "wasm"))]
 mod native_process {
     use std::{ffi::OsStr, io, process};
+
+    // ─── Linux pidfd async wait ──────────────────────────────────────────────
+
+    /// Linux syscall number for `pidfd_open` on x86_64 / aarch64 / riscv64.
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    const SYS_PIDFD_OPEN: i64 = 434;
+
+    #[cfg(target_os = "linux")]
+    extern "C" {
+        fn syscall(num: i64, ...) -> i64;
+        fn close(fd: std::os::raw::c_int) -> std::os::raw::c_int;
+    }
+
+    /// Open a pidfd referring to the given pid.
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    fn pidfd_open(pid: u32) -> io::Result<i32> {
+        // SAFETY: variadic syscall with two ABI-correct arguments.
+        let r = unsafe { syscall(SYS_PIDFD_OPEN, pid as i64, 0i64) };
+        if r < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(r as i32)
+        }
+    }
 
     /// A running child process.
     ///
@@ -12,18 +57,49 @@ mod native_process {
     impl Child {
         /// Wait asynchronously for the child process to exit.
         ///
-        /// Consumes the underlying child handle.  Further calls to `wait`
+        /// On Linux this opens a `pidfd` and awaits readability through the
+        /// runtime's epoll driver — no thread, no polling.
+        ///
+        /// Consumes the underlying child handle. Further calls to `wait`
         /// return an error.
+        #[cfg_attr(
+            not(all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )),
+            allow(clippy::unused_async)
+        )]
         pub async fn wait(&mut self) -> io::Result<process::ExitStatus> {
-            let Some(child) = self.0.take() else {
-                return Err(io::Error::other("child process already waited"));
-            };
-            // Run the blocking `Child::wait()` call on a background thread.
-            crate::rt::native::spawn_blocking(move || {
-                let mut c = child;
-                c.wait()
-            })?
-            .await?
+            #[cfg(all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            ))]
+            {
+                let Some(mut child) = self.0.take() else {
+                    return Err(io::Error::other("child process already waited"));
+                };
+                let pid = child.id();
+                let pidfd = pidfd_open(pid)?;
+                let res = crate::rt::native::wait_readable(pidfd).await;
+                // SAFETY: pidfd was obtained from `pidfd_open` and is owned by us.
+                unsafe { close(pidfd) };
+                res?;
+                // After the pidfd reports readable, `wait()` returns immediately.
+                child.wait()
+            }
+
+            #[cfg(not(all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )))]
+            {
+                let Some(_child) = self.0.take() else {
+                    return Err(io::Error::other("child process already waited"));
+                };
+                Err(io::Error::other(
+                    "Child::wait: async backend pending on this platform",
+                ))
+            }
         }
 
         /// Non-blocking poll to check if the child has exited.
@@ -113,7 +189,7 @@ pub use std::process::{ExitStatus as ChildExitStatus, Stdio};
 #[cfg(target_family = "wasm")]
 use crate::abi::imports;
 #[cfg(target_family = "wasm")]
-use crate::rt::wasm::OverlappedFuture;
+use crate::rt::wasm::{OverlappedBufferFuture, OverlappedFuture};
 
 #[cfg(target_family = "wasm")]
 /// WASM Child process
@@ -233,11 +309,11 @@ impl Command {
         }
         config.push(0); // End of env
 
-        let cfg_ptr = config.as_ptr();
-        let cfg_len = config.len() as u32;
-
-        let (err, handle, _) = OverlappedFuture::new(move |ov| {
-            unsafe { imports::process_spawn(ov, cfg_ptr, cfg_len) };
+        let (err, handle, _, _config) = OverlappedBufferFuture::new(config, move |ov, ptr, len| {
+            // SAFETY: `ptr`/`len` describe the future-owned config buffer;
+            // the completion registry's `Rc` clone keeps it alive across
+            // any cancellation.
+            unsafe { imports::process_spawn(ov, ptr.cast_const(), len) };
         })
         .await;
 

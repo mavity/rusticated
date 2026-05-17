@@ -1,5 +1,18 @@
 //! Environment variable handling
 
+#![cfg_attr(
+    target_family = "wasm",
+    allow(
+        clippy::cast_possible_truncation,
+        clippy::undocumented_unsafe_blocks,
+        clippy::no_effect_underscore_binding,
+        clippy::needless_pass_by_value,
+        clippy::missing_const_for_fn,
+        clippy::doc_markdown,
+        clippy::unreadable_literal,
+    )
+)]
+
 #[cfg(not(target_family = "wasm"))]
 /// Get args for native
 pub fn get_args() -> Vec<String> {
