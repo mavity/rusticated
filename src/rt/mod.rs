@@ -42,19 +42,34 @@ pub fn wait_writable(h: u64) -> WaitWritable {
 
 #[cfg(all(
     not(target_family = "wasm"),
-    any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd")
+    any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    )
 ))]
 pub use bsd::{WaitReadable, WaitWritable};
 #[cfg(all(
     not(target_family = "wasm"),
-    any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd")
+    any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    )
 ))]
 pub fn wait_readable(fd: i32) -> WaitReadable {
     WaitReadable::new(fd)
 }
 #[cfg(all(
     not(target_family = "wasm"),
-    any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd")
+    any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    )
 ))]
 pub fn wait_writable(fd: i32) -> WaitWritable {
     WaitWritable::new(fd)

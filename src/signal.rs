@@ -103,12 +103,43 @@ mod native_signal {
     }
 
     #[cfg(windows)]
+    static WINDOWS_WAKER: std::sync::Mutex<Option<std::task::Waker>> = std::sync::Mutex::new(None);
+    #[cfg(windows)]
+    static CTRL_C_TRIGGERED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    #[cfg(windows)]
+    extern "system" fn windows_ctrl_handler(ctrl_type: u32) -> i32 {
+        if ctrl_type == 0 {
+            // CTRL_C_EVENT
+            CTRL_C_TRIGGERED.store(true, std::sync::atomic::Ordering::Release);
+            if let Ok(mut lock) = WINDOWS_WAKER.lock() {
+                if let Some(waker) = lock.take() {
+                    waker.wake();
+                }
+            }
+            1 // TRUE: we handled it
+        } else {
+            0 // FALSE: not handled
+        }
+    }
+
+    #[cfg(windows)]
     #[allow(clippy::unnecessary_wraps, clippy::missing_const_for_fn)]
     fn install_handler() -> io::Result<()> {
-        // The Windows console-event integration is pending. We accept the
-        // request so `setup_handler` succeeds and `ctrl_c_impl` returns a
-        // clear error.
-        Ok(())
+        unsafe extern "system" {
+            fn SetConsoleCtrlHandler(
+                handler: Option<extern "system" fn(u32) -> i32>,
+                add: i32,
+            ) -> i32;
+        }
+        // SAFETY: We pass a valid function pointer to SetConsoleCtrlHandler.
+        let res = unsafe { SetConsoleCtrlHandler(Some(windows_ctrl_handler), 1) };
+        if res == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -133,9 +164,25 @@ mod native_signal {
     #[cfg(windows)]
     #[allow(clippy::unused_async, clippy::unnecessary_wraps)]
     async fn ctrl_c_impl() -> io::Result<()> {
-        Err(io::Error::other(
-            "ctrl_c: Windows console-event backend pending",
-        ))
+        struct CtrlC;
+        impl std::future::Future for CtrlC {
+            type Output = io::Result<()>;
+            fn poll(
+                self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Self::Output> {
+                if let Ok(mut lock) = WINDOWS_WAKER.lock() {
+                    *lock = Some(cx.waker().clone());
+                }
+
+                if CTRL_C_TRIGGERED.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                    std::task::Poll::Ready(Ok(()))
+                } else {
+                    std::task::Poll::Pending
+                }
+            }
+        }
+        CtrlC.await
     }
 
     #[cfg(not(any(unix, windows)))]

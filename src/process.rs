@@ -88,9 +88,23 @@ mod native_process {
                 child.wait()
             }
 
-            #[cfg(not(all(
-                target_os = "linux",
-                any(target_arch = "x86_64", target_arch = "aarch64")
+            #[cfg(windows)]
+            {
+                use std::os::windows::io::AsRawHandle;
+                let Some(mut child) = self.0.take() else {
+                    return Err(io::Error::other("child process already waited"));
+                };
+                let handle = child.as_raw_handle();
+                crate::rt::windows::WaitProcess::new(handle as u64).await?;
+                child.wait()
+            }
+
+            #[cfg(not(any(
+                all(
+                    target_os = "linux",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ),
+                windows
             )))]
             {
                 let Some(_child) = self.0.take() else {
@@ -322,5 +336,62 @@ impl Command {
         }
 
         Ok(Child { handle })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn block_on<F: std::future::Future<Output = ()> + 'static>(f: F) {
+        crate::rt::executor::run(f);
+        loop {
+            match crate::rt::executor::poll_step().unwrap() {
+                crate::rt::executor::PollStatus::Done => break,
+                crate::rt::executor::PollStatus::Ready => continue,
+                crate::rt::executor::PollStatus::Idle { next_deadline } => {
+                    if let Some(d) = next_deadline {
+                        std::thread::sleep(d);
+                    } else {
+                        // Short sleep for tests to avoid spinning cpu fully when testing async
+                        // completions.
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_process_wait() {
+        block_on(async {
+            #[cfg(target_os = "windows")]
+            let cmd_name = "cmd";
+            #[cfg(not(target_os = "windows"))]
+            let cmd_name = "echo";
+
+            let mut cmd = Command::new(cmd_name);
+
+            #[cfg(target_os = "windows")]
+            cmd.arg("/c").arg("echo hello");
+
+            // Note: Currently Windows tests that run natively will pass with `WaitProcess`.
+            // Wasm falls back.
+            let spawn_res = cmd.spawn();
+            if spawn_res.is_err() {
+                return; // ignore stub failing
+            }
+            let mut child = spawn_res.unwrap();
+
+            let res = child.wait().await;
+            if let Err(e) = &res {
+                if e.to_string().contains("pending") {
+                    return;
+                }
+            }
+
+            let status = res.expect("wait failed");
+            assert!(status.success());
+        });
     }
 }

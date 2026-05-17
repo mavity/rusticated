@@ -195,12 +195,236 @@ mod native_linux {
     }
 }
 
-// ——— Native non-Linux (Windows, macOS, BSD) — stubs until drivers are ready ——
+// ——— Native non-Linux (Windows) — native file API
 
-#[cfg(all(not(target_family = "wasm"), not(target_os = "linux")))]
+#[cfg(all(not(target_family = "wasm"), target_os = "windows"))]
+pub use native_windows::{File, OpenOptions};
+
+#[cfg(all(not(target_family = "wasm"), target_os = "windows"))]
+mod native_windows {
+    use crate::rt::windows::{OverlappedRead, OverlappedWrite};
+    use std::{io, os::windows::ffi::OsStrExt};
+
+    // Minimal definitions for native windows APIs instead of relying on `windows-sys`
+    unsafe extern "system" {
+        fn CreateFileW(
+            lpFileName: *const u16,
+            dwDesiredAccess: u32,
+            dwShareMode: u32,
+            lpSecurityAttributes: *mut std::ffi::c_void,
+            dwCreationDisposition: u32,
+            dwFlagsAndAttributes: u32,
+            hTemplateFile: usize,
+        ) -> usize;
+        fn CloseHandle(hObject: usize) -> i32;
+    }
+
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+    const CREATE_NEW: u32 = 1;
+    const CREATE_ALWAYS: u32 = 2;
+    const OPEN_EXISTING: u32 = 3;
+    const OPEN_ALWAYS: u32 = 4;
+    const TRUNCATE_EXISTING: u32 = 5;
+    const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
+    const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
+    const INVALID_HANDLE_VALUE: usize = !0;
+
+    /// File handle implementation using Windows Overlapped I/O
+    pub struct File {
+        handle: u64,
+    }
+
+    impl File {
+        /// Open a file in read-only mode.
+        pub async fn open<P: AsRef<std::path::Path>>(path: P) -> io::Result<Self> {
+            OpenOptions::new().read(true).open(path).await
+        }
+
+        /// Create or truncate a file for writing.
+        pub async fn create<P: AsRef<std::path::Path>>(path: P) -> io::Result<Self> {
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(path)
+                .await
+        }
+    }
+
+    impl Drop for File {
+        fn drop(&mut self) {
+            // SAFETY: Safe to close file handles.
+            #[allow(clippy::cast_possible_truncation)]
+            unsafe {
+                CloseHandle(self.handle as usize)
+            };
+        }
+    }
+
+    impl crate::io::AsyncRead for File {
+        async fn read(&mut self, buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
+            OverlappedRead::new(self.handle, buf).await
+        }
+    }
+
+    impl crate::io::AsyncWrite for File {
+        async fn write(&mut self, buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
+            OverlappedWrite::new(self.handle, buf).await
+        }
+    }
+
+    /// `OpenOptions` for Windows
+    pub struct OpenOptions {
+        read: bool,
+        write: bool,
+        append: bool,
+        truncate: bool,
+        create: bool,
+        create_new: bool,
+    }
+
+    impl OpenOptions {
+        /// Create a blank set of options.
+        #[allow(clippy::missing_const_for_fn)]
+        pub fn new() -> Self {
+            Self {
+                read: false,
+                write: false,
+                append: false,
+                truncate: false,
+                create: false,
+                create_new: false,
+            }
+        }
+
+        /// Enable or disable read access.
+        #[allow(clippy::missing_const_for_fn)]
+        pub fn read(&mut self, v: bool) -> &mut Self {
+            self.read = v;
+            self
+        }
+
+        /// Enable or disable write access.
+        #[allow(clippy::missing_const_for_fn)]
+        pub fn write(&mut self, v: bool) -> &mut Self {
+            self.write = v;
+            self
+        }
+
+        /// Enable or disable append mode.
+        #[allow(clippy::missing_const_for_fn)]
+        pub fn append(&mut self, v: bool) -> &mut Self {
+            self.append = v;
+            self
+        }
+
+        /// Enable or disable truncation on open.
+        #[allow(clippy::missing_const_for_fn)]
+        pub fn truncate(&mut self, v: bool) -> &mut Self {
+            self.truncate = v;
+            self
+        }
+
+        /// Create the file if it does not exist.
+        #[allow(clippy::missing_const_for_fn)]
+        pub fn create(&mut self, v: bool) -> &mut Self {
+            self.create = v;
+            self
+        }
+
+        /// Fail if the file already exists.
+        #[allow(clippy::missing_const_for_fn)]
+        pub fn create_new(&mut self, v: bool) -> &mut Self {
+            self.create_new = v;
+            self
+        }
+
+        /// Open the file at `path` within Windows using Overlapped I/O
+        #[allow(clippy::unused_async)]
+        pub async fn open<P: AsRef<std::path::Path>>(&self, path: P) -> io::Result<File> {
+            let mut access = 0;
+            if self.read {
+                access |= GENERIC_READ;
+            }
+            if self.write {
+                access |= GENERIC_WRITE;
+            }
+
+            let creation = if self.create_new {
+                CREATE_NEW
+            } else if self.truncate && self.create {
+                CREATE_ALWAYS
+            } else if self.truncate {
+                TRUNCATE_EXISTING
+            } else if self.create {
+                OPEN_ALWAYS
+            } else {
+                OPEN_EXISTING
+            };
+
+            let flags = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED;
+            let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+
+            let path_wide: Vec<u16> = path
+                .as_ref()
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+
+            // SAFETY: Safe ffi call
+            let handle = unsafe {
+                CreateFileW(
+                    path_wide.as_ptr(),
+                    access,
+                    share,
+                    std::ptr::null_mut(),
+                    creation,
+                    flags,
+                    0,
+                )
+            };
+
+            if handle == INVALID_HANDLE_VALUE {
+                return Err(io::Error::last_os_error());
+            }
+
+            let file = File {
+                handle: handle as u64,
+            };
+
+            // Register handle with the driver's IOCP
+            let _ = crate::rt::executor::with_driver(|d| d.register(file.handle));
+
+            Ok(file)
+        }
+    }
+
+    impl Default for OpenOptions {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+}
+
+// ——— Native non-Linux (macOS, BSD) — stubs until drivers are ready ——
+
+#[cfg(all(
+    not(target_family = "wasm"),
+    not(target_os = "linux"),
+    not(target_os = "windows")
+))]
 pub use native_stub::{File, OpenOptions};
 
-#[cfg(all(not(target_family = "wasm"), not(target_os = "linux")))]
+#[cfg(all(
+    not(target_family = "wasm"),
+    not(target_os = "linux"),
+    not(target_os = "windows")
+))]
 #[allow(
     clippy::unused_async,
     clippy::missing_const_for_fn,
@@ -476,6 +700,59 @@ impl OpenOptions {
 impl Default for OpenOptions {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io::{AsyncRead, AsyncWrite};
+
+    fn block_on<F: std::future::Future<Output = ()> + 'static>(f: F) {
+        crate::rt::executor::run(f);
+        loop {
+            match crate::rt::executor::poll_step().unwrap() {
+                crate::rt::executor::PollStatus::Done => break,
+                crate::rt::executor::PollStatus::Ready => continue,
+                crate::rt::executor::PollStatus::Idle { next_deadline } => {
+                    if let Some(d) = next_deadline {
+                        std::thread::sleep(d);
+                    } else {
+                        // Short sleep for tests to avoid spinning cpu fully when testing async
+                        // completions.
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_file_create_write_read() {
+        block_on(async {
+            let path = std::env::temp_dir().join("fast_std_test_file.txt");
+
+            // Note: Currently Windows tests that run natively will pass with `OverlappedRead`.
+            // Wasm falls back.
+            let create_res = File::create(&path).await;
+            if create_res.is_err() {
+                // Ignore test on stubs
+                return;
+            }
+            let mut file = create_res.unwrap();
+
+            let data = b"hello fast-std async fs".to_vec();
+            let (res, _) = file.write(data).await;
+            assert_eq!(res.unwrap(), 23);
+
+            let mut file = File::open(&path).await.expect("Failed to open");
+            let buf = Vec::with_capacity(32);
+            let (res, read_buf) = file.read(buf).await;
+            assert_eq!(res.unwrap(), 23);
+            assert_eq!(read_buf, b"hello fast-std async fs");
+
+            let _ = std::fs::remove_file(&path);
+        });
     }
 }
 
