@@ -1,10 +1,8 @@
-﻿//! Process execution and management
+//! Process execution and management
 
 #[cfg(not(target_family = "wasm"))]
 mod native_process {
     use std::{ffi::OsStr, io, process};
-
-    use compio_buf::{BufResult, IntoInner};
 
     /// A running child process.
     ///
@@ -18,25 +16,14 @@ mod native_process {
         /// return an error.
         pub async fn wait(&mut self) -> io::Result<process::ExitStatus> {
             let Some(child) = self.0.take() else {
-                return Err(io::Error::other(
-                    "child process already waited",
-                ));
+                return Err(io::Error::other("child process already waited"));
             };
-            // Run the blocking `Child::wait()` call in the proactor thread pool.
-            let op = compio_driver::op::Asyncify::new(move || {
+            // Run the blocking `Child::wait()` call on a background thread.
+            crate::rt::native::spawn_blocking(move || {
                 let mut c = child;
-                let result = c.wait();
-                BufResult(Ok(0usize), result)
-            });
-            match crate::rt::native::OpFuture::new(op).await {
-                Err(e) => Err(e),
-                Ok(buf_result) => {
-                    // into_inner extracts the `D` from `Asyncify<F, D>` via the
-                    // `BufResult<usize, Asyncify<F,D>>::into_inner()` impl.
-                    let BufResult(_, exit_result) = buf_result.into_inner();
-                    exit_result
-                }
-            }
+                c.wait()
+            })?
+            .await?
         }
 
         /// Non-blocking poll to check if the child has exited.
@@ -122,7 +109,6 @@ mod native_process {
 pub use native_process::{Child, Command};
 #[cfg(not(target_family = "wasm"))]
 pub use std::process::{ExitStatus as ChildExitStatus, Stdio};
-
 
 #[cfg(target_family = "wasm")]
 use crate::abi::imports;

@@ -1,21 +1,17 @@
-﻿//! Time handling and async sleeps
+//! Time handling and async sleeps
 
 #[cfg(not(target_family = "wasm"))]
 /// Sleep asynchronously for `duration`.
 ///
-/// Runs [`std::thread::sleep`] in the proactor thread pool so that other
-/// futures can make progress while waiting.
+/// Runs [`std::thread::sleep`] on a background thread so that other futures
+/// can make progress while waiting.
 pub async fn sleep(duration: std::time::Duration) {
-    use compio_buf::BufResult;
-    let op = compio_driver::op::Asyncify::<_, ()>::new(move || {
-        std::thread::sleep(duration);
-        BufResult(Ok(0usize), ())
-    });
-    // Ignore errors — if the proactor is broken, the sleep still occurs
-    // inside the thread pool (the future just never wakes up cleanly).
-    let _ = crate::rt::native::OpFuture::new(op).await;
+    // Ignore errors — if the driver is unavailable, sleep still occurs on the
+    // background thread; the future just never wakes up cleanly.
+    if let Ok(handle) = crate::rt::native::spawn_blocking(move || std::thread::sleep(duration)) {
+        let _ = handle.await;
+    }
 }
-
 
 #[cfg(target_family = "wasm")]
 use crate::abi::imports;
@@ -34,24 +30,30 @@ pub async fn sleep(duration: std::time::Duration) {
 
 #[cfg(target_family = "wasm")]
 #[derive(Clone, Copy, Debug)]
+/// A measurement of the host's monotonic clock (milliseconds since epoch).
 pub struct Instant(u64);
 
 #[cfg(target_family = "wasm")]
 impl Instant {
+    /// Returns the current instant from the WASM host clock.
     pub fn now() -> Self {
         Self(unsafe { imports::get_time() as u64 })
     }
 
+    /// Returns the duration elapsed from `earlier` to `self`.
     pub fn duration_since(&self, earlier: Instant) -> std::time::Duration {
         std::time::Duration::from_millis(self.0.saturating_sub(earlier.0))
     }
 
+    /// Returns the time elapsed since this instant was created.
     pub fn elapsed(&self) -> std::time::Duration {
         Self::now().duration_since(*self)
     }
 }
 
 #[cfg(target_family = "wasm")]
+/// System time type (re-export of [`std::time::SystemTime`]).
 pub type SystemTime = std::time::SystemTime;
 #[cfg(target_family = "wasm")]
+/// System time error type (re-export of [`std::time::SystemTimeError`]).
 pub type SystemTimeError = std::time::SystemTimeError;

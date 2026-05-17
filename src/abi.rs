@@ -26,13 +26,13 @@ impl Overlapped {
 #[cfg(target_family = "wasm")]
 pub mod imports {
     use super::Overlapped;
-    
+
     #[link(wasm_import_module = "env")]
     unsafe extern "C" {
         /// Ask for the system time (returns nanos since epoch).
         pub fn get_time() -> u64;
 
-        /// One-shot retrieval for argv/env. 
+        /// One-shot retrieval for argv/env.
         /// Returns: (Count of items in high 32 bits | Total bytes written in low 32 bits).
         pub fn get_args(strings_ptr: *mut u8, strings_len: u32) -> u64;
         /// One-shot retrieval for argv/env.
@@ -46,19 +46,40 @@ pub mod imports {
         /// Unified read. Result_ext = bytes transferred.
         pub fn read(overlapped: *mut Overlapped, handle: u64, buffer_ptr: *mut u8, buffer_len: u32);
         /// Unified write. Result_ext = bytes transferred.
-        pub fn write(overlapped: *mut Overlapped, handle: u64, buffer_ptr: *const u8, buffer_len: u32);
+        pub fn write(
+            overlapped: *mut Overlapped,
+            handle: u64,
+            buffer_ptr: *const u8,
+            buffer_len: u32,
+        );
         /// Close handle (Sync)
         pub fn handle_close(handle: u64);
 
         /// Open a file or directory. Result_ext = Handle.
-        pub fn path_open(overlapped: *mut Overlapped, path_ptr: *const u8, path_len: u32, flags: u32);
+        pub fn path_open(
+            overlapped: *mut Overlapped,
+            path_ptr: *const u8,
+            path_len: u32,
+            flags: u32,
+        );
         /// Read directory entries into buffer (linear names, null-separated).
-        pub fn dir_read(overlapped: *mut Overlapped, handle: u64, buffer_ptr: *mut u8, buffer_len: u32);
+        pub fn dir_read(
+            overlapped: *mut Overlapped,
+            handle: u64,
+            buffer_ptr: *mut u8,
+            buffer_len: u32,
+        );
         /// Query metadata for a path. Result_ext = handle to a stat-info struct.
         pub fn path_stat(overlapped: *mut Overlapped, path_ptr: *const u8, path_len: u32);
 
         /// Create listener or connection. Result_ext = Socket Handle.
-        pub fn net_open(overlapped: *mut Overlapped, addr_ptr: *const u8, addr_len: u32, port: u16, flags: u32);
+        pub fn net_open(
+            overlapped: *mut Overlapped,
+            addr_ptr: *const u8,
+            addr_len: u32,
+            port: u16,
+            flags: u32,
+        );
         /// Await a new connection. Result_ext = Client Handle.
         pub fn net_accept(overlapped: *mut Overlapped, listen_handle: u64);
 

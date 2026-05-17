@@ -14,7 +14,7 @@ So that is what it is: a frugal, completion-based async platform layer for Linux
 
 A minimal replacement for the async I/O portions of `std`, shaped like `std` but built on native completion APIs:
 
-- **Linux**: io_uring
+- **Linux**: io_uring (kernel 5.1+) with automatic epoll fallback for older kernels — selected at runtime, not at build time
 - **Windows**: IOCP
 - **macOS**: kqueue
 - **WASM**: custom host function imports (not WASIP1)
@@ -41,7 +41,7 @@ A minimal replacement for the async I/O portions of `std`, shaped like `std` but
 - **No extension traits** in this crate — callers write their own loops.
 - `AsyncRead::read` and `AsyncWrite::write` take and return `Vec<u8>` by value. The caller owns the buffer; the kernel borrows it for the duration of the operation.
 - Sync for: env, path, time (Instant), terminal control. Async for: all I/O.
-- `rt` on WASM is a self-contained proactor (`OverlappedFuture` + completion registry + `tick()`). On native it is a minimal single-threaded executor layered over `compio-driver` (io_uring/IOCP/kqueue) — no thread pinning, no cross-thread wakers.
+- `rt` on WASM is a self-contained proactor (`OverlappedFuture` + completion registry + `tick()`). On native it is a minimal single-threaded executor with its own proactor — no thread pinning, no cross-thread wakers.
 
 ## What it is not
 
@@ -49,4 +49,11 @@ Not a general async runtime. Not compatible with `tokio` traits. Not targeting b
 
 ## Dependency strategy
 
-The only external async dependency is `compio-driver` (raw OS completion queue bindings). All executor and scheduling logic is internal to `rt/`. `compio-buf` is used internally by the driver for kernel-pinned buffers but does not appear in the public API.
+No external async or I/O dependencies. All OS bindings are `extern "C"` / `extern "system"` declarations against libraries the OS always provides:
+
+- **Linux**: `syscall(2)` for io_uring (syscall numbers 425/426/427 are stable kernel ABI, identical on glibc and musl); standard libc for epoll, signalfd, timerfd, fork, execve. `#[repr(C)]` struct definitions for `io_uring_sqe`/`io_uring_cqe`/`epoll_event` inline — these are stable kernel ABI.
+- **Windows**: `extern "system" #[link(name = "kernel32")]` for IOCP, file, and process APIs — always present, no install step.
+- **macOS**: `extern "C"` against `libSystem.dylib` for kqueue, kevent, and POSIX calls — always linked.
+- **WASM**: `extern "C" #[link(wasm_import_module)]` host imports already in `abi.rs`.
+
+All executor and scheduling logic is self-contained in `rt/`. Logic derived from `compio-driver` source is ported directly, not imported as a crate dependency.

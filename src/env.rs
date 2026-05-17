@@ -1,4 +1,4 @@
-﻿//! Environment variable handling
+//! Environment variable handling
 
 #[cfg(not(target_family = "wasm"))]
 /// Get args for native
@@ -39,12 +39,14 @@ pub fn get_env() -> Vec<(String, String)> {
     let _ = unsafe { imports::get_env(buf.as_mut_ptr(), bytes_needed) };
 
     let vars = parse_null_separated(buf);
-    vars.into_iter().filter_map(|s| {
-        let mut parts = s.splitn(2, '=');
-        let k = parts.next()?.to_string();
-        let v = parts.next()?.to_string();
-        Some((k, v))
-    }).collect()
+    vars.into_iter()
+        .filter_map(|s| {
+            let mut parts = s.splitn(2, '=');
+            let k = parts.next()?.to_string();
+            let v = parts.next()?.to_string();
+            Some((k, v))
+        })
+        .collect()
 }
 
 #[cfg(target_family = "wasm")]

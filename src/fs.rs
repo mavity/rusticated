@@ -1,139 +1,170 @@
-﻿//! File system utilities
+//! File system utilities
 
-#[cfg(not(target_family = "wasm"))]
-mod native_fs {
-    use std::{io, path::Path};
+// ——— Native Linux —————————————————————————————————————————————————————————
 
-    use compio_buf::{BufResult, IntoInner};
-    use compio_driver::{AsRawFd, SharedFd, op};
-    use compio_driver::op::BufResultExt;
+#[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
+pub use native_linux::{File, OpenOptions};
 
-    use crate::io::{AsyncRead, AsyncWrite};
-    use crate::rt::native::{OpFuture, with_proactor};
+#[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
+mod native_linux {
+    use std::{ffi::CString, io, os::unix::ffi::OsStrExt as _};
 
-    /// An open file handle providing async positioned I/O.
+    extern "C" {
+        fn open(pathname: *const u8, flags: i32, mode: u32) -> i32;
+        fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
+        fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+        fn close(fd: i32) -> i32;
+    }
+
+    const O_RDONLY: i32 = 0;
+    const O_WRONLY: i32 = 1;
+    const O_RDWR: i32 = 2;
+    const O_CREAT: i32 = 0o100;
+    const O_TRUNC: i32 = 0o1000;
+    const O_APPEND: i32 = 0o2000;
+    const O_CLOEXEC: i32 = 0o2_000_000;
+    const O_EXCL: i32 = 0o200;
+
+    /// An open file descriptor providing async I/O.
     pub struct File {
-        inner: SharedFd<std::fs::File>,
-        pos: u64,
+        fd: i32,
     }
 
     impl File {
         /// Open a file in read-only mode.
-        pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-            OpenOptions::new().read(true).open(path)
+        pub async fn open<P: AsRef<std::path::Path>>(path: P) -> io::Result<Self> {
+            OpenOptions::new().read(true).open(path).await
         }
 
-        /// Create a file, truncating if it already exists.
-        pub fn create<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        /// Create or truncate a file for writing.
+        pub async fn create<P: AsRef<std::path::Path>>(path: P) -> io::Result<Self> {
             OpenOptions::new()
                 .write(true)
                 .create(true)
                 .truncate(true)
                 .open(path)
+                .await
         }
     }
 
-    impl AsyncRead for File {
-        async fn read(&mut self, buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
-            // The OS writes into the buffer starting at byte 0.  Callers must
-            // pass a Vec with `len == 0` so that `advance_to(n)` sets the
-            // correct length after the read.
-            let op = op::ReadAt::new(self.inner.clone(), self.pos, buf);
-            match OpFuture::new(op).await {
-                Err(e) => (Err(e), Vec::new()),
-                Ok(buf_result) => {
-                    // Extract the Vec<u8> from inside ReadAt.
-                    let buf_result = buf_result.into_inner();
-                    // SAFETY: compio-driver wrote exactly `n` valid bytes into
-                    // the buffer beginning at position 0.  `map_advanced` calls
-                    // `Vec::set_len(n)` only when the result is `Ok(n)`.
-                    let BufResult(result, buf) = unsafe { buf_result.map_advanced() };
-                    if let Ok(n) = result {
-                        self.pos += n as u64;
-                    }
-                    (result, buf)
-                }
+    impl Drop for File {
+        fn drop(&mut self) {
+            unsafe { close(self.fd) };
+        }
+    }
+
+    impl crate::io::AsyncRead for File {
+        async fn read(&mut self, mut buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
+            let n = unsafe { read(self.fd, buf.as_mut_ptr(), buf.capacity()) };
+            if n < 0 {
+                (Err(io::Error::last_os_error()), buf)
+            } else {
+                unsafe { buf.set_len(n as usize) };
+                (Ok(n as usize), buf)
             }
         }
     }
 
-    impl AsyncWrite for File {
+    impl crate::io::AsyncWrite for File {
         async fn write(&mut self, buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
-            let op = op::WriteAt::new(self.inner.clone(), self.pos, buf);
-            match OpFuture::new(op).await {
-                Err(e) => (Err(e), Vec::new()),
-                Ok(buf_result) => {
-                    // Extract the Vec<u8> from inside WriteAt.
-                    let BufResult(result, buf) = buf_result.into_inner();
-                    if let Ok(n) = result {
-                        self.pos += n as u64;
-                    }
-                    (result, buf)
-                }
+            let n = unsafe { write(self.fd, buf.as_ptr(), buf.len()) };
+            if n < 0 {
+                (Err(io::Error::last_os_error()), buf)
+            } else {
+                (Ok(n as usize), buf)
             }
         }
     }
 
     /// Builder for opening files with specific options.
     pub struct OpenOptions {
-        inner: std::fs::OpenOptions,
+        read: bool,
+        write: bool,
+        append: bool,
+        truncate: bool,
+        create: bool,
+        create_new: bool,
     }
 
     impl OpenOptions {
         /// Create a blank set of options.
         pub fn new() -> Self {
             Self {
-                inner: std::fs::OpenOptions::new(),
+                read: false,
+                write: false,
+                append: false,
+                truncate: false,
+                create: false,
+                create_new: false,
             }
         }
 
         /// Enable or disable read access.
-        pub fn read(&mut self, read: bool) -> &mut Self {
-            self.inner.read(read);
+        pub fn read(&mut self, v: bool) -> &mut Self {
+            self.read = v;
             self
         }
 
         /// Enable or disable write access.
-        pub fn write(&mut self, write: bool) -> &mut Self {
-            self.inner.write(write);
+        pub fn write(&mut self, v: bool) -> &mut Self {
+            self.write = v;
             self
         }
 
         /// Enable or disable append mode.
-        pub fn append(&mut self, append: bool) -> &mut Self {
-            self.inner.append(append);
+        pub fn append(&mut self, v: bool) -> &mut Self {
+            self.append = v;
             self
         }
 
         /// Enable or disable truncation on open.
-        pub fn truncate(&mut self, truncate: bool) -> &mut Self {
-            self.inner.truncate(truncate);
+        pub fn truncate(&mut self, v: bool) -> &mut Self {
+            self.truncate = v;
             self
         }
 
         /// Create the file if it does not exist.
-        pub fn create(&mut self, create: bool) -> &mut Self {
-            self.inner.create(create);
+        pub fn create(&mut self, v: bool) -> &mut Self {
+            self.create = v;
             self
         }
 
         /// Fail if the file already exists.
-        pub fn create_new(&mut self, create_new: bool) -> &mut Self {
-            self.inner.create_new(create_new);
+        pub fn create_new(&mut self, v: bool) -> &mut Self {
+            self.create_new = v;
             self
         }
 
         /// Open the file at `path` according to the options.
-        ///
-        /// The underlying system call is synchronous (file open is not
-        /// typically the bottleneck), but the file handle is registered with
-        /// the proactor so that subsequent reads and writes are asynchronous.
-        pub fn open<P: AsRef<Path>>(&self, path: P) -> io::Result<File> {
-            let std_file = self.inner.open(path.as_ref())?;
-            let fd = SharedFd::new(std_file);
-            // Register with the IOCP (no-op on io_uring and polling drivers).
-            with_proactor(|p| p.attach(fd.as_raw_fd()))??;
-            Ok(File { inner: fd, pos: 0 })
+        pub async fn open<P: AsRef<std::path::Path>>(&self, path: P) -> io::Result<File> {
+            let cpath = CString::new(path.as_ref().as_os_str().as_bytes())
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains null"))?;
+            let mut flags = O_CLOEXEC;
+            if self.read && self.write {
+                flags |= O_RDWR;
+            } else if self.write {
+                flags |= O_WRONLY;
+            } else {
+                flags |= O_RDONLY;
+            }
+            if self.create {
+                flags |= O_CREAT;
+            }
+            if self.truncate {
+                flags |= O_TRUNC;
+            }
+            if self.append {
+                flags |= O_APPEND;
+            }
+            if self.create_new {
+                flags |= O_EXCL | O_CREAT;
+            }
+
+            let fd = unsafe { open(cpath.as_ptr() as _, flags, 0o666) };
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(File { fd })
         }
     }
 
@@ -144,8 +175,90 @@ mod native_fs {
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
-pub use native_fs::{File, OpenOptions};
+// ——— Native non-Linux (Windows, macOS, BSD) — stubs until drivers are ready ——
+
+#[cfg(all(not(target_family = "wasm"), not(target_os = "linux")))]
+pub use native_stub::{File, OpenOptions};
+
+#[cfg(all(not(target_family = "wasm"), not(target_os = "linux")))]
+mod native_stub {
+    use std::io;
+
+    /// File handle stub — not yet implemented on this platform.
+    pub struct File;
+
+    impl File {
+        /// Open a file (stub).
+        pub async fn open<P: AsRef<std::path::Path>>(_path: P) -> io::Result<Self> {
+            Err(io::Error::other(
+                "fs::File not yet implemented on this platform",
+            ))
+        }
+
+        /// Create a file (stub).
+        pub async fn create<P: AsRef<std::path::Path>>(_path: P) -> io::Result<Self> {
+            Err(io::Error::other(
+                "fs::File not yet implemented on this platform",
+            ))
+        }
+    }
+
+    impl crate::io::AsyncRead for File {
+        async fn read(&mut self, buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
+            (Err(io::Error::other("not implemented")), buf)
+        }
+    }
+
+    impl crate::io::AsyncWrite for File {
+        async fn write(&mut self, buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
+            (Err(io::Error::other("not implemented")), buf)
+        }
+    }
+
+    /// OpenOptions stub.
+    pub struct OpenOptions;
+
+    impl OpenOptions {
+        /// Create a blank set of options.
+        pub fn new() -> Self {
+            Self
+        }
+        /// Enable or disable read access.
+        pub fn read(&mut self, _: bool) -> &mut Self {
+            self
+        }
+        /// Enable or disable write access.
+        pub fn write(&mut self, _: bool) -> &mut Self {
+            self
+        }
+        /// Enable or disable append mode.
+        pub fn append(&mut self, _: bool) -> &mut Self {
+            self
+        }
+        /// Enable or disable truncation on open.
+        pub fn truncate(&mut self, _: bool) -> &mut Self {
+            self
+        }
+        /// Create the file if it does not exist.
+        pub fn create(&mut self, _: bool) -> &mut Self {
+            self
+        }
+        /// Fail if the file already exists.
+        pub fn create_new(&mut self, _: bool) -> &mut Self {
+            self
+        }
+        /// Open the file (stub).
+        pub async fn open<P: AsRef<std::path::Path>>(&self, _path: P) -> io::Result<File> {
+            Err(io::Error::other("not implemented"))
+        }
+    }
+
+    impl Default for OpenOptions {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+}
 
 // ——— WASM ——————————————————————————————————————————————————————————————————
 
@@ -193,10 +306,7 @@ impl crate::io::AsyncRead for File {
         .await;
 
         if err != 0 {
-            return (
-                Err(std::io::Error::from_raw_os_error(err as i32)),
-                buf,
-            );
+            return (Err(std::io::Error::from_raw_os_error(err as i32)), buf);
         }
 
         // SAFETY: The WASM host wrote `bytes_read` valid bytes at position 0.
@@ -220,10 +330,7 @@ impl crate::io::AsyncWrite for File {
         .await;
 
         if err != 0 {
-            return (
-                Err(std::io::Error::from_raw_os_error(err as i32)),
-                buf,
-            );
+            return (Err(std::io::Error::from_raw_os_error(err as i32)), buf);
         }
 
         (Ok(bytes_written as usize), buf)
@@ -435,4 +542,3 @@ pub async fn metadata<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<Met
 
     Ok(Metadata { handle })
 }
-

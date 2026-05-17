@@ -77,15 +77,10 @@ default = []
 [dependencies]
 thiserror = "2.0.18"
 
-[target.'cfg(not(target_family = "wasm"))'.dependencies]
-compio-driver = { version = "0.12.0-rc.1", path = "../compio-no-std/compio-driver" }
-compio-buf = { version = "0.8.2-rc.1", path = "../compio-no-std/compio-buf" }
-
 [target.'cfg(target_family = "wasm")'.dependencies]
 getrandom = { version = "0.4.2" }
 
 [target.'cfg(unix)'.dependencies]
-reedline-async = { path = "../reedline-async" }
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]

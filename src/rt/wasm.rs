@@ -1,11 +1,11 @@
-﻿//! Wasm backend implementation
+//! Wasm backend implementation
 
+use crate::abi::Overlapped;
+use crate::abi::imports;
 use std::cell::{OnceCell, RefCell};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
-use crate::abi::Overlapped;
-use crate::abi::imports;
 
 #[cfg(target_family = "wasm")]
 #[unsafe(no_mangle)]
@@ -60,12 +60,16 @@ fn tick() {
 
 fn dummy_waker() -> Waker {
     use std::task::{RawWaker, RawWakerVTable};
-    unsafe fn clone(_: *const ()) -> RawWaker { dummy_raw_waker() }
+    unsafe fn clone(_: *const ()) -> RawWaker {
+        dummy_raw_waker()
+    }
     unsafe fn wake(_: *const ()) {}
     unsafe fn wake_by_ref(_: *const ()) {}
     unsafe fn drop(_: *const ()) {}
     static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop);
-    fn dummy_raw_waker() -> RawWaker { RawWaker::new(std::ptr::null(), &VTABLE) }
+    fn dummy_raw_waker() -> RawWaker {
+        RawWaker::new(std::ptr::null(), &VTABLE)
+    }
     unsafe { Waker::from_raw(dummy_raw_waker()) }
 }
 
@@ -99,19 +103,27 @@ impl Future for OverlappedFuture {
             let ptr: *mut Overlapped = &mut *self.overlapped;
             op(ptr);
             self.started = true;
-            
+
             // Check for synchronous completion
             if self.overlapped.is_complete() {
-                return Poll::Ready((self.overlapped.error, self.overlapped.result_ext, self.overlapped.continued));
+                return Poll::Ready((
+                    self.overlapped.error,
+                    self.overlapped.result_ext,
+                    self.overlapped.continued,
+                ));
             }
-            
+
             // Otherwise register for later
             register_overlapped(ptr, cx.waker().clone());
             return Poll::Pending;
         }
 
         if self.overlapped.is_complete() {
-            Poll::Ready((self.overlapped.error, self.overlapped.result_ext, self.overlapped.continued))
+            Poll::Ready((
+                self.overlapped.error,
+                self.overlapped.result_ext,
+                self.overlapped.continued,
+            ))
         } else {
             Poll::Pending
         }
@@ -136,5 +148,3 @@ pub extern "C" fn run() {
 
     tick();
 }
-
-
