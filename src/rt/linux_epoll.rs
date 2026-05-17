@@ -1,12 +1,10 @@
 #![cfg(target_os = "linux")]
 
-use std::{
-    collections::HashMap,
-    future::Future,
-    io,
-    pin::Pin,
-    task::{Context, Poll},
-};
+use crate::collections::HashMap;
+use crate::future::Future;
+use crate::io;
+use crate::pin::Pin;
+use crate::task::{Context, Poll};
 
 use super::executor::with_driver;
 use super::ready::{consume_ready, mark_ready};
@@ -128,7 +126,7 @@ impl Driver {
                 break n;
             }
             let e = io::Error::last_os_error();
-            if e.kind() == io::ErrorKind::Interrupted {
+            if e.kind() == crate::io::ErrorKind::Interrupted {
                 continue;
             }
             return Err(e);

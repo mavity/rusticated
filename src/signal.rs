@@ -17,13 +17,11 @@
 
 #[cfg(not(target_family = "wasm"))]
 mod native_signal {
-    use std::{
-        io,
-        sync::atomic::{AtomicBool, Ordering},
-    };
+    use crate::io;
+    use core::sync::atomic::{AtomicBool, Ordering};
 
     #[cfg(unix)]
-    use std::sync::OnceLock;
+    use core::sync::OnceLock;
 
     // ── Unix: pipe-based async signal ─────────────────────────────────────────
 
@@ -45,7 +43,7 @@ mod native_signal {
     type SigHandlerFn = extern "C" fn(i32);
 
     #[cfg(unix)]
-    extern "C" {
+    unsafe extern "C" {
         fn pipe2(pipefd: *mut i32, flags: i32) -> i32;
         fn write(fd: i32, buf: *const u8, count: usize) -> isize;
         fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
@@ -103,17 +101,19 @@ mod native_signal {
     }
 
     #[cfg(windows)]
-    static WINDOWS_WAKER: std::sync::Mutex<Option<std::task::Waker>> = std::sync::Mutex::new(None);
+    static WINDOWS_WAKER: crate::sync::SpinMutex<Option<core::task::Waker>> =
+        crate::sync::SpinMutex::new(None);
     #[cfg(windows)]
-    static CTRL_C_TRIGGERED: std::sync::atomic::AtomicBool =
-        std::sync::atomic::AtomicBool::new(false);
+    static CTRL_C_TRIGGERED: core::sync::atomic::AtomicBool =
+        core::sync::atomic::AtomicBool::new(false);
 
     #[cfg(windows)]
     extern "system" fn windows_ctrl_handler(ctrl_type: u32) -> i32 {
         if ctrl_type == 0 {
             // CTRL_C_EVENT
-            CTRL_C_TRIGGERED.store(true, std::sync::atomic::Ordering::Release);
-            if let Ok(mut lock) = WINDOWS_WAKER.lock() {
+            CTRL_C_TRIGGERED.store(true, core::sync::atomic::Ordering::Release);
+            {
+                let mut lock = WINDOWS_WAKER.lock();
                 if let Some(waker) = lock.take() {
                     waker.wake();
                 }
@@ -165,20 +165,18 @@ mod native_signal {
     #[allow(clippy::unused_async, clippy::unnecessary_wraps)]
     async fn ctrl_c_impl() -> io::Result<()> {
         struct CtrlC;
-        impl std::future::Future for CtrlC {
+        impl core::future::Future for CtrlC {
             type Output = io::Result<()>;
             fn poll(
-                self: std::pin::Pin<&mut Self>,
-                cx: &mut std::task::Context<'_>,
-            ) -> std::task::Poll<Self::Output> {
-                if let Ok(mut lock) = WINDOWS_WAKER.lock() {
-                    *lock = Some(cx.waker().clone());
-                }
+                self: core::pin::Pin<&mut Self>,
+                cx: &mut core::task::Context<'_>,
+            ) -> core::task::Poll<Self::Output> {
+                *WINDOWS_WAKER.lock() = Some(cx.waker().clone());
 
-                if CTRL_C_TRIGGERED.swap(false, std::sync::atomic::Ordering::AcqRel) {
-                    std::task::Poll::Ready(Ok(()))
+                if CTRL_C_TRIGGERED.swap(false, core::sync::atomic::Ordering::AcqRel) {
+                    core::task::Poll::Ready(Ok(()))
                 } else {
-                    std::task::Poll::Pending
+                    core::task::Poll::Pending
                 }
             }
         }
@@ -214,7 +212,7 @@ use crate::rt::wasm::OverlappedFuture;
 
 /// Wait for a POSIX signal by number on WASM.
 #[cfg(target_family = "wasm")]
-pub async fn signal_wait(signum: u32) -> std::io::Result<()> {
+pub async fn signal_wait(signum: u32) -> crate::io::Result<()> {
     let (err, _, _) = OverlappedFuture::new(move |ov| {
         // SAFETY: `ov` is a valid overlapped pointer supplied by the runtime.
         unsafe { imports::signal_wait(ov, signum) };
@@ -222,7 +220,7 @@ pub async fn signal_wait(signum: u32) -> std::io::Result<()> {
     .await;
 
     if err != 0 {
-        return Err(std::io::Error::from_raw_os_error(err as i32));
+        return Err(crate::io::Error::from_raw_os_error(err as i32));
     }
 
     Ok(())
@@ -230,6 +228,6 @@ pub async fn signal_wait(signum: u32) -> std::io::Result<()> {
 
 /// Wait asynchronously until Ctrl-C (SIGINT = 2) is received.
 #[cfg(target_family = "wasm")]
-pub async fn ctrl_c() -> std::io::Result<()> {
+pub async fn ctrl_c() -> crate::io::Result<()> {
     signal_wait(2).await
 }

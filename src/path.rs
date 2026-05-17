@@ -12,8 +12,68 @@
 
 #![allow(clippy::missing_const_for_fn)]
 
-use std::borrow::Cow;
-use std::path::PathBuf;
+use crate::borrow::Cow;
+use crate::string::String;
+
+/// An owned, mutable platform path string.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct PathBuf(String);
+
+impl PathBuf {
+    /// Creates a new, empty `PathBuf`.
+    pub fn new() -> Self {
+        Self(String::new())
+    }
+
+    /// Extends the path with a component.
+    pub fn push(&mut self, component: &str) {
+        if !self.0.is_empty() && !matches!(self.0.as_bytes().last(), Some(b'/' | b'\\')) {
+            self.0.push('/');
+        }
+        self.0.push_str(component);
+    }
+
+    /// Returns the path as a `str`.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Returns the path as a byte slice.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+
+    /// Returns a mutable reference to the inner [`String`].
+    pub fn as_mut_string(&mut self) -> &mut String {
+        &mut self.0
+    }
+}
+
+impl From<&str> for PathBuf {
+    fn from(s: &str) -> Self {
+        Self(s.into())
+    }
+}
+
+impl From<String> for PathBuf {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl AsRef<str> for PathBuf {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl core::fmt::Display for PathBuf {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 #[cfg(any(windows, target_os = "redox"))]
 const PATH_SEPARATORS: [char; 2] = ['/', '\\'];
@@ -132,13 +192,13 @@ pub fn push_for_pattern(path: &mut PathBuf, component: &str) {
     }
     #[cfg(windows)]
     {
-        let bytes = path.as_os_str().as_encoded_bytes();
+        let bytes = path.as_bytes();
         let needs_sep = !bytes.is_empty() && !matches!(bytes.last(), Some(b'/' | b'\\'));
-        let buf = path.as_mut_os_string();
+        let buf = path.as_mut_string();
         if needs_sep {
-            buf.push("/");
+            buf.push_str("/");
         }
-        buf.push(component);
+        buf.push_str(component);
     }
 }
 

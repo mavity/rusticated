@@ -1,5 +1,5 @@
-use std::cell::RefCell;
-use std::collections::HashSet;
+use crate::cell::RefCell;
+use crate::collections::HashSet;
 
 thread_local! {
     /// Tokens for I/O events that have fired but whose futures have not yet
@@ -8,9 +8,7 @@ thread_local! {
 }
 
 pub(crate) fn mark_ready(token: u64) {
-    READY.with(|r| {
-        r.borrow_mut().insert(token);
-    });
+    READY.with(|r| { r.borrow_mut().insert(token); });
 }
 
 pub(crate) fn consume_ready(token: u64) -> bool {

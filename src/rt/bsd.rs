@@ -5,10 +5,10 @@
     target_os = "netbsd"
 ))]
 
-use std::future::Future;
-use std::io;
-use std::pin::Pin;
-use std::task::{Context, Poll};
+use crate::future::Future;
+use crate::io;
+use crate::pin::Pin;
+use crate::task::{Context, Poll};
 
 /// macOS / BSD kqueue driver.
 pub struct Driver {

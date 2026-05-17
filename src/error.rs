@@ -1,11 +1,10 @@
 ﻿//! Error types.
 
-use std::path::PathBuf;
-
+use crate::string::String;
 use thiserror::Error;
 
 /// Result alias.
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = core::result::Result<T, Error>;
 
 /// Errors from I/O and system calls.
 #[derive(Debug, Error)]
@@ -19,15 +18,15 @@ pub enum Error {
     #[error("i/o error on {path}: {source}")]
     Io {
         /// Path that the failing operation referred to.
-        path: PathBuf,
+        path: String,
         /// Underlying I/O error.
         #[source]
-        source: std::io::Error,
+        source: crate::io::Error,
     },
 
     /// A path-free I/O failure.
     #[error("i/o error: {0}")]
-    PlainIo(#[from] std::io::Error),
+    PlainIo(#[from] crate::io::Error),
 
     /// A name could not be resolved.
     #[error("not found: {0}")]
@@ -40,10 +39,11 @@ pub enum Error {
 
 impl Error {
     /// Convenience constructor for a path-bound I/O error.
-    pub fn io(path: impl Into<PathBuf>, source: std::io::Error) -> Self {
+    pub fn io(path: impl Into<String>, source: crate::io::Error) -> Self {
         Self::Io {
             path: path.into(),
             source,
         }
     }
 }
+

@@ -1,11 +1,10 @@
-use std::{
-    cell::RefCell,
-    future::Future,
-    io,
-    pin::Pin,
-    task::{Context, Poll},
-    time::Duration,
-};
+use crate::boxed::Box;
+use crate::cell::RefCell;
+use crate::future::Future;
+use crate::io;
+use crate::pin::Pin;
+use crate::task::{Context, Poll};
+use crate::time::Duration;
 
 use super::{timers::next_deadline, waker::noop_waker};
 
@@ -25,8 +24,8 @@ use super::bsd::Driver;
 
 thread_local! {
     static MAIN_FUTURE: RefCell<Option<Pin<Box<dyn Future<Output = ()>>>>> =
-        const { RefCell::new(None) };
-    static DRIVER: RefCell<Option<Driver>> = const { RefCell::new(None) };
+        RefCell::new(None);
+    static DRIVER: RefCell<Option<Driver>> = RefCell::new(None);
 }
 
 pub(crate) fn with_driver<R>(f: impl FnOnce(&mut Driver) -> R) -> io::Result<R> {

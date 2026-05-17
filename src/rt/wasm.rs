@@ -32,11 +32,13 @@
 
 use crate::abi::Overlapped;
 use crate::abi::imports;
-use std::cell::{OnceCell, RefCell, UnsafeCell};
-use std::future::Future;
-use std::pin::Pin;
-use std::rc::Rc;
-use std::task::{Context, Poll, Waker};
+use crate::boxed::Box;
+use crate::rc::Rc;
+use crate::vec::Vec;
+use crate::cell::{OnceCell, RefCell, UnsafeCell};
+use crate::future::Future;
+use crate::pin::Pin;
+use crate::task::{Context, Poll, Waker};
 
 #[unsafe(no_mangle)]
 extern "Rust" fn __getrandom_v03_custom(dest: *mut u8, len: usize) -> Result<(), getrandom::Error> {
@@ -165,7 +167,7 @@ fn tick() {
 }
 
 fn noop_waker() -> Waker {
-    use std::task::{RawWaker, RawWakerVTable};
+    use core::task::{RawWaker, RawWakerVTable};
     unsafe fn clone(_: *const ()) -> RawWaker {
         raw()
     }
@@ -174,7 +176,7 @@ fn noop_waker() -> Waker {
     unsafe fn drop_(_: *const ()) {}
     static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop_);
     fn raw() -> RawWaker {
-        RawWaker::new(std::ptr::null(), &VTABLE)
+        RawWaker::new(core::ptr::null(), &VTABLE)
     }
     // SAFETY: VTable functions match the contract — all no-ops, clone returns
     // an identical waker.

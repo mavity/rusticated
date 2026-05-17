@@ -6,12 +6,14 @@
     clippy::cast_possible_truncation
 )]
 
-use std::collections::HashMap;
-use std::future::Future;
-use std::io;
-use std::pin::Pin;
-use std::ptr;
-use std::task::{Context, Poll, Waker};
+use crate::collections::HashMap;
+use crate::boxed::Box;
+use crate::vec::Vec;
+use crate::future::Future;
+use crate::io;
+use crate::pin::Pin;
+use crate::ptr;
+use crate::task::{Context, Poll, Waker};
 
 use crate::rt::executor::with_driver;
 use crate::rt::ready::{consume_ready, mark_ready};
@@ -51,8 +53,8 @@ unsafe extern "system" {
     fn RegisterWaitForSingleObject(
         new_wait_object: *mut usize,
         object: usize,
-        callback: Option<unsafe extern "system" fn(*mut std::ffi::c_void, u8)>,
-        context: *mut std::ffi::c_void,
+        callback: Option<unsafe extern "system" fn(*mut core::ffi::c_void, u8)>,
+        context: *mut core::ffi::c_void,
         milliseconds: u32,
         flags: u32,
     ) -> i32;
@@ -207,7 +209,7 @@ impl Future for WaitWritable {
     }
 }
 
-unsafe extern "system" fn wait_callback(context: *mut std::ffi::c_void, _timer_fired: u8) {
+unsafe extern "system" fn wait_callback(context: *mut core::ffi::c_void, _timer_fired: u8) {
     // context points to WaitProcess
     let wp = context as *const WaitProcess;
     let token = unsafe { (*wp).token };
@@ -440,7 +442,7 @@ impl Future for WaitProcess {
 
         if !self.registered {
             // SAFETY: Calling RegisterWaitForSingleObject
-            let self_ptr = self.as_mut().get_mut() as *mut Self as *mut std::ffi::c_void;
+            let self_ptr = self.as_mut().get_mut() as *mut Self as *mut core::ffi::c_void;
             let res = unsafe {
                 RegisterWaitForSingleObject(
                     &mut self.wait_handle,

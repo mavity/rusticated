@@ -27,9 +27,10 @@ pub use native_linux::{File, OpenOptions};
 
 #[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
 mod native_linux {
-    use std::{ffi::CString, io, os::unix::ffi::OsStrExt as _};
+    use alloc::vec::Vec;
+    use crate::{ffi::{CString, OsStrExt as _}, io};
 
-    extern "C" {
+    unsafe extern "C" {
         fn open(pathname: *const u8, flags: i32, mode: u32) -> i32;
         fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
         fn write(fd: i32, buf: *const u8, count: usize) -> isize;
@@ -52,12 +53,12 @@ mod native_linux {
 
     impl File {
         /// Open a file in read-only mode.
-        pub async fn open<P: AsRef<std::path::Path>>(path: P) -> io::Result<Self> {
+        pub async fn open<P: AsRef<str>>(path: P) -> io::Result<Self> {
             OpenOptions::new().read(true).open(path).await
         }
 
         /// Create or truncate a file for writing.
-        pub async fn create<P: AsRef<std::path::Path>>(path: P) -> io::Result<Self> {
+        pub async fn create<P: AsRef<str>>(path: P) -> io::Result<Self> {
             OpenOptions::new()
                 .write(true)
                 .create(true)
@@ -156,8 +157,8 @@ mod native_linux {
         }
 
         /// Open the file at `path` according to the options.
-        pub async fn open<P: AsRef<std::path::Path>>(&self, path: P) -> io::Result<File> {
-            let cpath = CString::new(path.as_ref().as_os_str().as_bytes())
+        pub async fn open<P: AsRef<str>>(&self, path: P) -> io::Result<File> {
+            let cpath = CString::new(path.as_ref())
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains null"))?;
             let mut flags = O_CLOEXEC;
             if self.read && self.write {
@@ -202,8 +203,9 @@ pub use native_windows::{File, OpenOptions};
 
 #[cfg(all(not(target_family = "wasm"), target_os = "windows"))]
 mod native_windows {
+    use alloc::vec::Vec;
+    use crate::{io, ffi::OsStrExt};
     use crate::rt::windows::{OverlappedRead, OverlappedWrite};
-    use std::{io, os::windows::ffi::OsStrExt};
 
     // Minimal definitions for native windows APIs instead of relying on `windows-sys`
     unsafe extern "system" {
@@ -211,11 +213,12 @@ mod native_windows {
             lpFileName: *const u16,
             dwDesiredAccess: u32,
             dwShareMode: u32,
-            lpSecurityAttributes: *mut std::ffi::c_void,
+            lpSecurityAttributes: *mut core::ffi::c_void,
             dwCreationDisposition: u32,
             dwFlagsAndAttributes: u32,
             hTemplateFile: usize,
         ) -> usize;
+        #[allow(dead_code)]
         fn CloseHandle(hObject: usize) -> i32;
     }
 
@@ -240,28 +243,13 @@ mod native_windows {
 
     impl File {
         /// Open a file in read-only mode.
-        pub async fn open<P: AsRef<std::path::Path>>(path: P) -> io::Result<Self> {
+        pub async fn open<P: AsRef<str>>(path: P) -> io::Result<Self> {
             OpenOptions::new().read(true).open(path).await
         }
 
         /// Create or truncate a file for writing.
-        pub async fn create<P: AsRef<std::path::Path>>(path: P) -> io::Result<Self> {
-            OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(path)
-                .await
-        }
-    }
-
-    impl Drop for File {
-        fn drop(&mut self) {
-            // SAFETY: Safe to close file handles.
-            #[allow(clippy::cast_possible_truncation)]
-            unsafe {
-                CloseHandle(self.handle as usize)
-            };
+        pub async fn create<P: AsRef<str>>(path: P) -> io::Result<Self> {
+            OpenOptions::new().write(true).create(true).truncate(true).open(path).await
         }
     }
 
@@ -345,7 +333,7 @@ mod native_windows {
 
         /// Open the file at `path` within Windows using Overlapped I/O
         #[allow(clippy::unused_async)]
-        pub async fn open<P: AsRef<std::path::Path>>(&self, path: P) -> io::Result<File> {
+        pub async fn open<P: AsRef<str>>(&self, path: P) -> io::Result<File> {
             let mut access = 0;
             if self.read {
                 access |= GENERIC_READ;
@@ -369,11 +357,10 @@ mod native_windows {
             let flags = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED;
             let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 
-            let path_wide: Vec<u16> = path
+            let path_wide: alloc::vec::Vec<u16> = path
                 .as_ref()
-                .as_os_str()
                 .encode_wide()
-                .chain(std::iter::once(0))
+                .chain(core::iter::once(0))
                 .collect();
 
             // SAFETY: Safe ffi call
@@ -382,7 +369,7 @@ mod native_windows {
                     path_wide.as_ptr(),
                     access,
                     share,
-                    std::ptr::null_mut(),
+                    core::ptr::null_mut(),
                     creation,
                     flags,
                     0,
@@ -432,21 +419,21 @@ pub use native_stub::{File, OpenOptions};
     dead_code
 )]
 mod native_stub {
-    use std::io;
+    use crate::io;
 
     /// File handle stub — not yet implemented on this platform.
     pub struct File;
 
     impl File {
         /// Open a file (stub).
-        pub async fn open<P: AsRef<std::path::Path>>(_path: P) -> io::Result<Self> {
+        pub async fn open<P: AsRef<str>>(_path: P) -> io::Result<Self> {
             Err(io::Error::other(
                 "fs::File not yet implemented on this platform",
             ))
         }
 
         /// Create a file (stub).
-        pub async fn create<P: AsRef<std::path::Path>>(_path: P) -> io::Result<Self> {
+        pub async fn create<P: AsRef<str>>(_path: P) -> io::Result<Self> {
             Err(io::Error::other(
                 "fs::File not yet implemented on this platform",
             ))
@@ -498,7 +485,7 @@ mod native_stub {
             self
         }
         /// Open the file (stub).
-        pub async fn open<P: AsRef<std::path::Path>>(&self, _path: P) -> io::Result<File> {
+        pub async fn open<P: AsRef<str>>(&self, _path: P) -> io::Result<File> {
             Err(io::Error::other("not implemented"))
         }
     }
@@ -516,6 +503,10 @@ mod native_stub {
 use crate::abi::imports;
 #[cfg(target_family = "wasm")]
 use crate::rt::wasm::OverlappedBufferFuture;
+#[cfg(target_family = "wasm")]
+use crate::string::String;
+#[cfg(target_family = "wasm")]
+use crate::vec::Vec;
 
 /// WASM file handle.
 #[cfg(target_family = "wasm")]
@@ -526,12 +517,12 @@ pub struct File {
 #[cfg(target_family = "wasm")]
 impl File {
     /// Open a file in read-only mode.
-    pub async fn open<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<File> {
+    pub async fn open<P: AsRef<str>>(path: P) -> crate::io::Result<File> {
         OpenOptions::new().read(true).open(path).await
     }
 
     /// Create a file, truncating if it already exists.
-    pub async fn create<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<File> {
+    pub async fn create<P: AsRef<str>>(path: P) -> crate::io::Result<File> {
         OpenOptions::new()
             .write(true)
             .create(true)
@@ -543,7 +534,7 @@ impl File {
 
 #[cfg(target_family = "wasm")]
 impl crate::io::AsyncRead for File {
-    async fn read(&mut self, buf: Vec<u8>) -> (std::io::Result<usize>, Vec<u8>) {
+    async fn read(&mut self, buf: Vec<u8>) -> (crate::io::Result<usize>, Vec<u8>) {
         let handle = self.handle;
 
         let (err, bytes_read, _, mut buf) =
@@ -557,7 +548,7 @@ impl crate::io::AsyncRead for File {
             .await;
 
         if err != 0 {
-            return (Err(std::io::Error::from_raw_os_error(err as i32)), buf);
+            return (Err(crate::io::Error::from_raw_os_error(err as i32)), buf);
         }
 
         // SAFETY: The WASM host wrote `bytes_read` valid bytes at position 0.
@@ -568,7 +559,7 @@ impl crate::io::AsyncRead for File {
 
 #[cfg(target_family = "wasm")]
 impl crate::io::AsyncWrite for File {
-    async fn write(&mut self, buf: Vec<u8>) -> (std::io::Result<usize>, Vec<u8>) {
+    async fn write(&mut self, buf: Vec<u8>) -> (crate::io::Result<usize>, Vec<u8>) {
         let handle = self.handle;
         // For writes we only consume `len`, not capacity.
         let used = buf.len() as u32;
@@ -583,7 +574,7 @@ impl crate::io::AsyncWrite for File {
             .await;
 
         if err != 0 {
-            return (Err(std::io::Error::from_raw_os_error(err as i32)), buf);
+            return (Err(crate::io::Error::from_raw_os_error(err as i32)), buf);
         }
 
         (Ok(bytes_written as usize), buf)
@@ -652,12 +643,8 @@ impl OpenOptions {
     }
 
     /// Open the file at `path` according to the options.
-    pub async fn open<P: AsRef<std::path::Path>>(&self, path: P) -> std::io::Result<File> {
-        let path_str = path
-            .as_ref()
-            .to_str()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid path"))?;
-        let path_bytes = path_str.as_bytes().to_vec();
+    pub async fn open<P: AsRef<str>>(&self, path: P) -> crate::io::Result<File> {
+        let path_bytes = path.as_ref().as_bytes().to_vec();
 
         let mut flags = 0u32;
         if self.read {
@@ -689,7 +676,7 @@ impl OpenOptions {
             .await;
 
         if err != 0 {
-            return Err(std::io::Error::from_raw_os_error(err as i32));
+            return Err(crate::io::Error::from_raw_os_error(err as i32));
         }
 
         Ok(File { handle })
@@ -768,8 +755,8 @@ impl DirReader {
     /// Read the next batch of directory entries.
     ///
     /// Returns `None` when all entries have been read.
-    pub async fn read_entries(&mut self) -> std::io::Result<Option<Vec<String>>> {
-        let buf = vec![0u8; 4096];
+    pub async fn read_entries(&mut self) -> crate::io::Result<Option<Vec<String>>> {
+        let buf = alloc::vec![0u8; 4096];
         let handle = self.handle;
         let continued = self.continued;
 
@@ -785,7 +772,7 @@ impl DirReader {
             .await;
 
         if err != 0 {
-            return Err(std::io::Error::from_raw_os_error(err as i32));
+            return Err(crate::io::Error::from_raw_os_error(err as i32));
         }
 
         self.continued = next_continued;
@@ -793,7 +780,7 @@ impl DirReader {
         let entries = buf[..bytes_read as usize]
             .split(|&b| b == 0)
             .filter(|s| !s.is_empty())
-            .map(|s| String::from_utf8_lossy(s).to_string())
+            .map(|s| String::from_utf8_lossy(s).into_owned())
             .collect();
 
         Ok(Some(entries))
@@ -830,12 +817,8 @@ impl Metadata {
 
 /// Query metadata for `path`.
 #[cfg(target_family = "wasm")]
-pub async fn metadata<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<Metadata> {
-    let path_str = path
-        .as_ref()
-        .to_str()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid path"))?;
-    let path_bytes = path_str.as_bytes().to_vec();
+pub async fn metadata<P: AsRef<str>>(path: P) -> crate::io::Result<Metadata> {
+    let path_bytes = path.as_ref().as_bytes().to_vec();
 
     let (err, handle, _, _path) = OverlappedBufferFuture::new(path_bytes, move |ov, ptr, len| {
         // SAFETY: `ptr`/`len` describe the future-owned path buffer; the
@@ -845,7 +828,7 @@ pub async fn metadata<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<Met
     .await;
 
     if err != 0 {
-        return Err(std::io::Error::from_raw_os_error(err as i32));
+        return Err(crate::io::Error::from_raw_os_error(err as i32));
     }
 
     Ok(Metadata { handle })
