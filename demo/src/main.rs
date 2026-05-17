@@ -44,7 +44,7 @@ async fn async_main() {
 
     write_all(&mut out, b"Created demo file `fast_std_demo.txt`.\n").await;
     if let Ok(last_byte) = read_last_byte(path).await {
-        let msg = format!("Last byte in file: {}\n", last_byte as char);
+        let msg = format!("Last byte in file: {:?}\n", last_byte as char);
         write_all(&mut out, msg.as_bytes()).await;
     } else {
         write_all(&mut out, b"Unable to read last byte from demo file\n").await;
