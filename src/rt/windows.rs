@@ -114,36 +114,39 @@ impl Driver {
     }
 
     pub fn poll_nonblocking(&mut self) -> io::Result<bool> {
-        let mut bytes = 0;
-        let mut key = 0;
-        let mut overlapped: *mut Overlapped = ptr::null_mut();
+        let mut had_events = false;
+        loop {
+            let mut bytes: u32 = 0;
+            let mut key: usize = 0;
+            let mut overlapped: *mut Overlapped = ptr::null_mut();
 
-        let res = unsafe {
-            GetQueuedCompletionStatus(
-                self.iocp,
-                &mut bytes,
-                &mut key,
-                &mut overlapped,
-                0, // No block
-            )
-        };
+            let res = unsafe {
+                GetQueuedCompletionStatus(
+                    self.iocp,
+                    &mut bytes,
+                    &mut key,
+                    &mut overlapped,
+                    0, // zero timeout — non-blocking
+                )
+            };
 
-        if res != 0 {
-            let token = key as u64;
-            mark_ready(token);
-            if let Some(waker) = self.wakers.remove(&token) {
-                waker.wake();
-            }
-            Ok(true)
-        } else {
-            let err = io::Error::last_os_error();
-            if err.raw_os_error() == Some(258) {
-                // WAIT_TIMEOUT
-                Ok(false)
+            if res != 0 {
+                let token = key as u64;
+                mark_ready(token);
+                if let Some(waker) = self.wakers.remove(&token) {
+                    waker.wake();
+                }
+                had_events = true;
             } else {
-                Err(err)
+                // GetLastError() == 258 (WAIT_TIMEOUT) means the queue is empty.
+                let err = unsafe { GetLastError() };
+                if err == 258 {
+                    break;
+                }
+                return Err(io::Error::from_raw_os_error(err as i32));
             }
         }
+        Ok(had_events)
     }
 
     pub(crate) fn register_waker(&mut self, token: u64, waker: Waker) {

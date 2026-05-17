@@ -2,8 +2,7 @@
 //!
 //! - **Unix**: a `SIGINT` handler writes one byte to a self-pipe; [`ctrl_c`] awaits readability on
 //!   the pipe through the runtime's epoll/kqueue driver. No polling.
-//! - **Windows**: backend pending — [`ctrl_c`] returns an error until the IOCP/console event
-//!   integration lands.
+//! - **Windows**: `SetConsoleCtrlHandler` routes console events through a future-based interface.
 //! - **WASM**: host import [`crate::abi::imports::signal_wait`] drives the completion.
 
 #![cfg_attr(
@@ -29,10 +28,27 @@ mod native_signal {
     #[cfg(unix)]
     static SIGNAL_PIPE: OnceLock<[i32; 2]> = OnceLock::new();
 
-    #[cfg(unix)]
+    // O_CLOEXEC differs between Linux and BSD/macOS.
+    #[cfg(target_os = "linux")]
     const O_CLOEXEC: i32 = 0o2_000_000;
-    #[cfg(unix)]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+    ))]
+    const O_CLOEXEC: i32 = 0x0100_0000;
+
+    // O_NONBLOCK differs between Linux and BSD/macOS.
+    #[cfg(target_os = "linux")]
     const O_NONBLOCK: i32 = 0o0_004_000;
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+    ))]
+    const O_NONBLOCK: i32 = 0x0000_0004;
 
     /// POSIX `SIGINT`.
     #[cfg(unix)]
@@ -154,10 +170,15 @@ mod native_signal {
     async fn ctrl_c_impl() -> io::Result<()> {
         let [rx, _] = get_signal_pipe()?;
         crate::rt::wait_readable(rx).await?;
-        // Drain the signalling byte so the pipe doesn't re-fire immediately.
+        // Drain ALL bytes so accumulated signals don't re-fire ctrl_c immediately.
         let mut b = 0u8;
-        // SAFETY: `rx` is readable; the read will not block (O_NONBLOCK).
-        unsafe { read(rx, &mut b, 1) };
+        loop {
+            // SAFETY: `rx` is O_NONBLOCK; read returns -1/EAGAIN when empty.
+            let n = unsafe { read(rx, &mut b, 1) };
+            if n <= 0 {
+                break;
+            }
+        }
         Ok(())
     }
 

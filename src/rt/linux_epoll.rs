@@ -44,6 +44,8 @@ pub struct Driver {
     /// fds currently registered (even if ONESHOT-disabled) so we can
     /// choose `EPOLL_CTL_MOD` vs `EPOLL_CTL_ADD` correctly.
     registered_fds: HashMap<i32, ()>,
+    /// Wakers indexed by completion token; fired when epoll reports readiness.
+    wakers: HashMap<u64, crate::task::Waker>,
     next_token: u64,
 }
 
@@ -58,6 +60,7 @@ impl Driver {
         Ok(Self {
             epfd,
             registered_fds: HashMap::new(),
+            wakers: HashMap::new(),
             next_token: 1,
         })
     }
@@ -107,6 +110,11 @@ impl Driver {
         Ok(token)
     }
 
+    /// Store a waker to be called when `token` next fires.
+    pub(crate) fn register_waker(&mut self, token: u64, waker: crate::task::Waker) {
+        self.wakers.insert(token, waker);
+    }
+
     /// Poll for already-ready events without blocking.
     ///
     /// Returns `true` if at least one event was processed.
@@ -134,6 +142,9 @@ impl Driver {
         for ev in &evbuf[..n as usize] {
             // ONESHOT fired: the fd is now disabled (not removed).
             mark_ready(ev.data);
+            if let Some(waker) = self.wakers.remove(&ev.data) {
+                waker.wake();
+            }
         }
         Ok(n > 0)
     }
@@ -170,18 +181,19 @@ impl WaitReadable {
 impl Future for WaitReadable {
     type Output = io::Result<()>;
 
-    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         if self.registered {
-            return if consume_ready(self.token) {
-                Poll::Ready(Ok(()))
-            } else {
-                Poll::Pending
-            };
+            if consume_ready(self.token) {
+                return Poll::Ready(Ok(()));
+            }
+            let _ = with_driver(|d| d.register_waker(self.token, cx.waker().clone()));
+            return Poll::Pending;
         }
         match with_driver(|d| d.register_read(self.fd)) {
             Ok(Ok(token)) => {
                 self.token = token;
                 self.registered = true;
+                let _ = with_driver(|d| d.register_waker(token, cx.waker().clone()));
                 Poll::Pending
             }
             Ok(Err(e)) | Err(e) => Poll::Ready(Err(e)),
@@ -189,7 +201,7 @@ impl Future for WaitReadable {
     }
 }
 
-// â”€â”€ WaitWritable
+// ── WaitWritable
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Future that resolves when `fd` becomes writable.
@@ -213,18 +225,19 @@ impl WaitWritable {
 impl Future for WaitWritable {
     type Output = io::Result<()>;
 
-    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         if self.registered {
-            return if consume_ready(self.token) {
-                Poll::Ready(Ok(()))
-            } else {
-                Poll::Pending
-            };
+            if consume_ready(self.token) {
+                return Poll::Ready(Ok(()));
+            }
+            let _ = with_driver(|d| d.register_waker(self.token, cx.waker().clone()));
+            return Poll::Pending;
         }
         match with_driver(|d| d.register_write(self.fd)) {
             Ok(Ok(token)) => {
                 self.token = token;
                 self.registered = true;
+                let _ = with_driver(|d| d.register_waker(token, cx.waker().clone()));
                 Poll::Pending
             }
             Ok(Err(e)) | Err(e) => Poll::Ready(Err(e)),

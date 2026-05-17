@@ -181,13 +181,20 @@ pub trait AsyncWrite {
 /// Extension methods for [`AsyncRead`].
 pub trait AsyncReadExt: AsyncRead {
     /// Read exactly the capacity of the buffer.
+    ///
+    /// Each `read` call writes from byte 0 of the supplied vec; this method
+    /// uses a scratch buffer for each partial read and accumulates results
+    /// into `buf` so that partial reads are assembled correctly.
     async fn read_exact(&mut self, mut buf: Vec<u8>) -> (Result<()>, Vec<u8>) {
-        let cap = buf.capacity();
-        let mut read_total = 0;
+        let target = buf.capacity();
+        buf.clear();
 
-        while read_total < cap {
-            let (res, returned_buf) = self.read(buf).await;
-            buf = returned_buf;
+        // Reuse a single scratch allocation across loop iterations.
+        let mut scratch: Vec<u8> = Vec::with_capacity(target);
+
+        while buf.len() < target {
+            let (res, returned) = self.read(scratch).await;
+            scratch = returned;
 
             match res {
                 Ok(0) => {
@@ -200,16 +207,8 @@ pub trait AsyncReadExt: AsyncRead {
                     );
                 }
                 Ok(n) => {
-                    read_total += n;
-                    // We must prepare buf for the next read by keeping capacity
-                    // However, `read` method is expected to write starting at position 0.
-                    // Wait, if it writes at position 0, `read_exact` needs to assemble it!
-                    // This implies the trait `read` must accept an offset, or we collect multiple
-                    // buffers. Let's rely on standard practice: `read` writes
-                    // to length? No, the trait says: "Callers should pass a
-                    // Vec<u8> with len == 0 and sufficient capacity.
-                    // The implementation writes bytes starting at position 0 and returns the Vec
-                    // with len set"
+                    buf.extend_from_slice(&scratch[..n]);
+                    scratch.clear();
                 }
                 Err(e) => {
                     return (Err(e), buf);

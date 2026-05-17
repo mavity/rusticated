@@ -220,6 +220,7 @@ pub fn normalize_separators(s: &str) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vec::Vec;
 
     #[test]
     fn separators_basic() {

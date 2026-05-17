@@ -16,7 +16,7 @@ pub mod waker;
 pub mod windows;
 
 #[cfg(not(target_family = "wasm"))]
-pub use executor::{PollStatus, poll_step, run};
+pub use executor::{PollStatus, poll_step, run, spawn};
 
 #[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
 pub use linux_epoll::{WaitReadable, WaitWritable};

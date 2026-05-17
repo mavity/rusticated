@@ -221,7 +221,6 @@ mod native_windows {
             dwFlagsAndAttributes: u32,
             hTemplateFile: usize,
         ) -> usize;
-        #[allow(dead_code)]
         fn CloseHandle(hObject: usize) -> i32;
     }
 
@@ -258,6 +257,13 @@ mod native_windows {
                 .truncate(true)
                 .open(path)
                 .await
+        }
+    }
+
+    impl Drop for File {
+        fn drop(&mut self) {
+            // SAFETY: handle is a valid HANDLE opened by CreateFileW and not yet closed.
+            unsafe { CloseHandle(self.handle as usize) };
         }
     }
 
@@ -702,6 +708,7 @@ impl Default for OpenOptions {
 mod tests {
     use super::*;
     use crate::io::{AsyncRead, AsyncWrite};
+    use crate::vec::Vec;
 
     fn block_on<F: std::future::Future<Output = ()> + 'static>(f: F) {
         crate::rt::executor::run(f);
@@ -729,7 +736,7 @@ mod tests {
 
             // Note: Currently Windows tests that run natively will pass with `OverlappedRead`.
             // Wasm falls back.
-            let create_res = File::create(&path).await;
+            let create_res = File::create(path.to_str().unwrap()).await;
             if create_res.is_err() {
                 // Ignore test on stubs
                 return;
@@ -740,7 +747,9 @@ mod tests {
             let (res, _) = file.write(data).await;
             assert_eq!(res.unwrap(), 23);
 
-            let mut file = File::open(&path).await.expect("Failed to open");
+            let mut file = File::open(path.to_str().unwrap())
+                .await
+                .expect("Failed to open");
             let buf = Vec::with_capacity(32);
             let (res, read_buf) = file.read(buf).await;
             assert_eq!(res.unwrap(), 23);

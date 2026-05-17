@@ -638,6 +638,7 @@ impl Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
 
     fn block_on<F: core::future::Future<Output = ()> + 'static>(f: F) {
         crate::rt::executor::run(f);
