@@ -484,14 +484,22 @@ mod windows_tty {
             // GetStdHandle returns NULL (0) on failure; INVALID_HANDLE_VALUE
             // (usize::MAX) is also an error sentinel.
             assert_ne!(t.handle, 0, "stdin handle should not be NULL");
-            assert_ne!(t.handle, usize::MAX, "stdin handle should not be INVALID_HANDLE_VALUE");
+            assert_ne!(
+                t.handle,
+                usize::MAX,
+                "stdin handle should not be INVALID_HANDLE_VALUE"
+            );
         }
 
         #[test]
         fn stdout_handle_is_valid() {
             let t = stdout();
             assert_ne!(t.handle, 0, "stdout handle should not be NULL");
-            assert_ne!(t.handle, usize::MAX, "stdout handle should not be INVALID_HANDLE_VALUE");
+            assert_ne!(
+                t.handle,
+                usize::MAX,
+                "stdout handle should not be INVALID_HANDLE_VALUE"
+            );
         }
 
         // ── ConsoleReadFuture internal state ─────────────────────────────────
@@ -589,7 +597,10 @@ mod windows_tty {
                 // inside ConsoleReadFuture::poll and verifies the buffer is returned.
                 let buf = Vec::with_capacity(8);
                 let (res, returned_buf) = ConsoleReadFuture::new(0, buf).await;
-                assert!(res.is_err(), "NULL handle must cause RegisterWaitForSingleObject to fail");
+                assert!(
+                    res.is_err(),
+                    "NULL handle must cause RegisterWaitForSingleObject to fail"
+                );
                 assert_eq!(
                     returned_buf.capacity(),
                     8,
@@ -690,7 +701,7 @@ mod wasm_tty {
 
 // ─── Shared tests ─────────────────────────────────────────────────────────────
 
-#[cfg(all(test, not(target_family = "wasm")))]  
+#[cfg(all(test, not(target_family = "wasm")))]
 mod shared_tests {
     /// `set_mode` is a const stub that always returns `Ok(())` on every native
     /// platform.  This test confirms the public re-export dispatches correctly.
