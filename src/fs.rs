@@ -27,8 +27,11 @@ pub use native_linux::{File, OpenOptions};
 
 #[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
 mod native_linux {
+    use crate::{
+        ffi::{CString, OsStrExt as _},
+        io,
+    };
     use alloc::vec::Vec;
-    use crate::{ffi::{CString, OsStrExt as _}, io};
 
     unsafe extern "C" {
         fn open(pathname: *const u8, flags: i32, mode: u32) -> i32;
@@ -203,9 +206,9 @@ pub use native_windows::{File, OpenOptions};
 
 #[cfg(all(not(target_family = "wasm"), target_os = "windows"))]
 mod native_windows {
-    use alloc::vec::Vec;
-    use crate::{io, ffi::OsStrExt};
     use crate::rt::windows::{OverlappedRead, OverlappedWrite};
+    use crate::{ffi::OsStrExt, io};
+    use alloc::vec::Vec;
 
     // Minimal definitions for native windows APIs instead of relying on `windows-sys`
     unsafe extern "system" {
@@ -249,7 +252,12 @@ mod native_windows {
 
         /// Create or truncate a file for writing.
         pub async fn create<P: AsRef<str>>(path: P) -> io::Result<Self> {
-            OpenOptions::new().write(true).create(true).truncate(true).open(path).await
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(path)
+                .await
         }
     }
 

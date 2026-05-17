@@ -1,4 +1,4 @@
-﻿//! Process execution and management
+//! Process execution and management
 
 #![cfg_attr(
     target_family = "wasm",
@@ -17,9 +17,9 @@
 
 #[cfg(not(target_family = "wasm"))]
 mod native_process {
+    use crate::io;
     use crate::string::String;
     use crate::vec::Vec;
-    use crate::io;
 
     // ── Linux pidfd async wait ────────────────────────────────────────────────
 
@@ -80,12 +80,20 @@ mod native_process {
         lp_reserved: *mut u16,
         lp_desktop: *mut u16,
         lp_title: *mut u16,
-        dw_x: u32, dw_y: u32, dw_x_size: u32, dw_y_size: u32,
-        dw_x_count_chars: u32, dw_y_count_chars: u32,
-        dw_fill_attribute: u32, dw_flags: u32,
-        w_show_window: u16, cb_reserved2: u16,
+        dw_x: u32,
+        dw_y: u32,
+        dw_x_size: u32,
+        dw_y_size: u32,
+        dw_x_count_chars: u32,
+        dw_y_count_chars: u32,
+        dw_fill_attribute: u32,
+        dw_flags: u32,
+        w_show_window: u16,
+        cb_reserved2: u16,
         lp_reserved2: *mut u8,
-        h_std_input: usize, h_std_output: usize, h_std_error: usize,
+        h_std_input: usize,
+        h_std_output: usize,
+        h_std_error: usize,
     }
 
     #[cfg(windows)]
@@ -123,9 +131,13 @@ mod native_process {
 
     impl ChildExitStatus {
         /// Returns `true` if the process exited with code 0.
-        pub fn success(&self) -> bool { self.0 == 0 }
+        pub fn success(&self) -> bool {
+            self.0 == 0
+        }
         /// Returns the raw exit code.
-        pub fn code(&self) -> Option<i32> { Some(self.0) }
+        pub fn code(&self) -> Option<i32> {
+            Some(self.0)
+        }
     }
 
     // ── Stdio ─────────────────────────────────────────────────────────────────
@@ -142,11 +154,17 @@ mod native_process {
 
     impl Stdio {
         /// Create a `Stdio` that inherits the parent's handle.
-        pub fn inherit() -> Self { Self::Inherit }
+        pub fn inherit() -> Self {
+            Self::Inherit
+        }
         /// Create a `Stdio` that discards all I/O.
-        pub fn null() -> Self { Self::Null }
+        pub fn null() -> Self {
+            Self::Null
+        }
         /// Create a `Stdio` that sets up a pipe.
-        pub fn piped() -> Self { Self::Piped }
+        pub fn piped() -> Self {
+            Self::Piped
+        }
     }
 
     // ── Child ─────────────────────────────────────────────────────────────────
@@ -181,13 +199,20 @@ mod native_process {
                 if r < 0 {
                     return Err(io::Error::last_os_error());
                 }
-                let code = if status & 0x7f == 0 { (status >> 8) & 0xff } else { -1 };
+                let code = if status & 0x7f == 0 {
+                    (status >> 8) & 0xff
+                } else {
+                    -1
+                };
                 return Ok(ChildExitStatus(code));
             }
-            #[cfg(all(unix, not(all(
-                target_os = "linux",
-                any(target_arch = "x86_64", target_arch = "aarch64")
-            ))))]
+            #[cfg(all(
+                unix,
+                not(all(
+                    target_os = "linux",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ))
+            ))]
             {
                 let mut status = 0i32;
                 // SAFETY: self.pid is valid.
@@ -195,7 +220,11 @@ mod native_process {
                 if r < 0 {
                     return Err(io::Error::last_os_error());
                 }
-                let code = if status & 0x7f == 0 { (status >> 8) & 0xff } else { -1 };
+                let code = if status & 0x7f == 0 {
+                    (status >> 8) & 0xff
+                } else {
+                    -1
+                };
                 return Ok(ChildExitStatus(code));
             }
             #[cfg(windows)]
@@ -207,7 +236,9 @@ mod native_process {
                 return Ok(ChildExitStatus(code as i32));
             }
             #[cfg(not(any(unix, windows)))]
-            Err(io::Error::other("Child::wait: not supported on this platform"))
+            Err(io::Error::other(
+                "Child::wait: not supported on this platform",
+            ))
         }
 
         /// Non-blocking check if the child has exited.
@@ -223,7 +254,11 @@ mod native_process {
                 if r == 0 {
                     return Ok(None);
                 }
-                let code = if status & 0x7f == 0 { (status >> 8) & 0xff } else { -1 };
+                let code = if status & 0x7f == 0 {
+                    (status >> 8) & 0xff
+                } else {
+                    -1
+                };
                 return Ok(Some(ChildExitStatus(code)));
             }
             #[cfg(windows)]
@@ -364,8 +399,7 @@ mod native_process {
                 argv_storage.push(b);
             }
             // Null-terminated pointer array.
-            let mut argv_ptrs: Vec<*const u8> =
-                argv_storage.iter().map(|v| v.as_ptr()).collect();
+            let mut argv_ptrs: Vec<*const u8> = argv_storage.iter().map(|v| v.as_ptr()).collect();
             argv_ptrs.push(core::ptr::null());
 
             let mut pid = 0i32;
@@ -403,16 +437,26 @@ mod native_process {
                 lp_reserved: core::ptr::null_mut(),
                 lp_desktop: core::ptr::null_mut(),
                 lp_title: core::ptr::null_mut(),
-                dw_x: 0, dw_y: 0, dw_x_size: 0, dw_y_size: 0,
-                dw_x_count_chars: 0, dw_y_count_chars: 0,
-                dw_fill_attribute: 0, dw_flags: 0,
-                w_show_window: 0, cb_reserved2: 0,
+                dw_x: 0,
+                dw_y: 0,
+                dw_x_size: 0,
+                dw_y_size: 0,
+                dw_x_count_chars: 0,
+                dw_y_count_chars: 0,
+                dw_fill_attribute: 0,
+                dw_flags: 0,
+                w_show_window: 0,
+                cb_reserved2: 0,
                 lp_reserved2: core::ptr::null_mut(),
-                h_std_input: 0, h_std_output: 0, h_std_error: 0,
+                h_std_input: 0,
+                h_std_output: 0,
+                h_std_error: 0,
             };
             let mut pi = ProcessInformation {
-                h_process: 0, h_thread: 0,
-                dw_process_id: 0, dw_thread_id: 0,
+                h_process: 0,
+                h_thread: 0,
+                dw_process_id: 0,
+                dw_thread_id: 0,
             };
             // SAFETY: si/pi are validly initialised; cmdline is null-terminated.
             let ok = unsafe {
@@ -434,7 +478,9 @@ mod native_process {
             }
             // SAFETY: h_thread is a valid handle.
             unsafe { CloseHandle(pi.h_thread) };
-            Ok(Child { handle: pi.h_process })
+            Ok(Child {
+                handle: pi.h_process,
+            })
         }
 
         #[cfg(not(any(unix, windows)))]
@@ -530,7 +576,11 @@ pub struct Command {
 impl Command {
     /// Create a new command.
     pub fn new<S: Into<String>>(program: S) -> Self {
-        Self { program: program.into(), args: Vec::new(), env: Vec::new() }
+        Self {
+            program: program.into(),
+            args: Vec::new(),
+            env: Vec::new(),
+        }
     }
 
     /// Add an argument.
@@ -571,12 +621,11 @@ impl Command {
         }
         config.push(0); // end-of-env
 
-        let (err, handle, _, _config) =
-            OverlappedBufferFuture::new(config, move |ov, ptr, len| {
-                // SAFETY: `ptr`/`len` describe the future-owned config buffer.
-                unsafe { imports::process_spawn(ov, ptr.cast_const(), len) };
-            })
-            .await;
+        let (err, handle, _, _config) = OverlappedBufferFuture::new(config, move |ov, ptr, len| {
+            // SAFETY: `ptr`/`len` describe the future-owned config buffer.
+            unsafe { imports::process_spawn(ov, ptr.cast_const(), len) };
+        })
+        .await;
 
         if err != 0 {
             return Err(crate::io::Error::from_raw_os_error(err as i32));

@@ -8,7 +8,9 @@ thread_local! {
 }
 
 pub(crate) fn mark_ready(token: u64) {
-    READY.with(|r| { r.borrow_mut().insert(token); });
+    READY.with(|r| {
+        r.borrow_mut().insert(token);
+    });
 }
 
 pub(crate) fn consume_ready(token: u64) -> bool {

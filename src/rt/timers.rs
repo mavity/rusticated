@@ -1,6 +1,6 @@
-use crate::vec::Vec;
 use crate::cell::RefCell;
 use crate::time::{Duration, Instant};
+use crate::vec::Vec;
 
 thread_local! {
     /// Sorted (by deadline ascending) list of pending timers. Each entry is a

@@ -1,4 +1,4 @@
-﻿//! Error types.
+//! Error types.
 
 use crate::string::String;
 use thiserror::Error;
@@ -46,4 +46,3 @@ impl Error {
         }
     }
 }
-

@@ -1,4 +1,4 @@
-﻿//! Time handling and async sleeps.
+//! Time handling and async sleeps.
 //!
 //! `sleep` is implemented without threads or platform timer backends: on
 //! native targets a [`Sleep`] future registers a deadline in a thread-local
@@ -20,13 +20,15 @@
 /// Re-export `core::time::Duration` as the canonical duration type.
 pub use core::time::Duration;
 
-// â”€â”€â”€ Native Instant â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â”€â”€â”€ Native Instant
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[cfg(not(target_family = "wasm"))]
 mod native_instant {
     use core::time::Duration;
 
-    // â”€â”€ Unix: clock_gettime(CLOCK_MONOTONIC) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â”€â”€ Unix: clock_gettime(CLOCK_MONOTONIC)
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[cfg(unix)]
     #[repr(C)]
@@ -43,7 +45,8 @@ mod native_instant {
     #[cfg(unix)]
     const CLOCK_MONOTONIC: i32 = 1;
 
-    // â”€â”€ Windows: QueryPerformanceCounter â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â”€â”€ Windows: QueryPerformanceCounter
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[cfg(windows)]
     unsafe extern "system" {
@@ -78,7 +81,10 @@ mod native_instant {
         pub fn now() -> Self {
             #[cfg(unix)]
             {
-                let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+                let mut ts = Timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                };
                 // SAFETY: ts is valid for the call duration.
                 unsafe { clock_gettime(CLOCK_MONOTONIC, &mut ts) };
                 let nanos = (ts.tv_sec as u64)
@@ -137,7 +143,8 @@ mod native_instant {
 #[cfg(not(target_family = "wasm"))]
 pub use native_instant::Instant;
 
-// â”€â”€â”€ Native SystemTime â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â”€â”€â”€ Native SystemTime
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// A simple wall-clock timestamp (nanoseconds since the Unix epoch).
 #[cfg(not(target_family = "wasm"))]
@@ -156,15 +163,16 @@ impl core::fmt::Display for SystemTimeError {
     }
 }
 
-// â”€â”€â”€ Native Sleep future â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â”€â”€â”€ Native Sleep future
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[cfg(not(target_family = "wasm"))]
 mod native_time {
+    use super::Instant;
     use core::future::Future;
     use core::pin::Pin;
     use core::task::{Context, Poll};
     use core::time::Duration;
-    use super::Instant;
 
     /// Future that resolves once a target [`Instant`] has been reached.
     pub struct Sleep {
@@ -215,7 +223,8 @@ mod native_time {
 #[cfg(not(target_family = "wasm"))]
 pub use native_time::{Sleep, sleep};
 
-// â”€â”€â”€ WASM â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â”€â”€â”€ WASM
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[cfg(target_family = "wasm")]
 use crate::abi::imports;
@@ -291,4 +300,3 @@ impl core::fmt::Display for SystemTimeError {
         f.write_str("system time error")
     }
 }
-

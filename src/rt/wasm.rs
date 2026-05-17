@@ -33,12 +33,12 @@
 use crate::abi::Overlapped;
 use crate::abi::imports;
 use crate::boxed::Box;
-use crate::rc::Rc;
-use crate::vec::Vec;
 use crate::cell::{OnceCell, RefCell, UnsafeCell};
 use crate::future::Future;
 use crate::pin::Pin;
+use crate::rc::Rc;
 use crate::task::{Context, Poll, Waker};
+use crate::vec::Vec;
 
 #[unsafe(no_mangle)]
 extern "Rust" fn __getrandom_v03_custom(dest: *mut u8, len: usize) -> Result<(), getrandom::Error> {

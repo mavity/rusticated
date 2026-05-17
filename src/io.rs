@@ -40,19 +40,31 @@ impl Error {
     /// Returns the last OS-level error (reads `errno` on Unix, `GetLastError` on Windows).
     #[inline]
     pub fn last_os_error() -> Self {
-        Self { kind: ErrorKind::Other, code: last_error_code(), msg: "" }
+        Self {
+            kind: ErrorKind::Other,
+            code: last_error_code(),
+            msg: "",
+        }
     }
 
     /// Constructs an error from a raw OS error code.
     #[inline]
     pub fn from_raw_os_error(code: i32) -> Self {
-        Self { kind: ErrorKind::Other, code, msg: "" }
+        Self {
+            kind: ErrorKind::Other,
+            code,
+            msg: "",
+        }
     }
 
     /// Constructs a synthesised error with a static message and `Other` kind.
     #[inline]
     pub fn other(msg: &'static str) -> Self {
-        Self { kind: ErrorKind::Other, code: 0, msg }
+        Self {
+            kind: ErrorKind::Other,
+            code: 0,
+            msg,
+        }
     }
 
     /// Constructs a synthesised error with the specified kind and message.
@@ -64,7 +76,11 @@ impl Error {
     /// Returns the raw OS error code if this is an OS-level error.
     #[inline]
     pub fn raw_os_error(&self) -> Option<i32> {
-        if self.code != 0 { Some(self.code) } else { None }
+        if self.code != 0 {
+            Some(self.code)
+        } else {
+            None
+        }
     }
 
     /// Returns the error kind.

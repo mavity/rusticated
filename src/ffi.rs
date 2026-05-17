@@ -75,7 +75,9 @@ impl OsStrExt for str {
 
     #[inline]
     fn encode_wide(&self) -> EncodeWide<'_> {
-        EncodeWide { inner: self.encode_utf16() }
+        EncodeWide {
+            inner: self.encode_utf16(),
+        }
     }
 }
 

@@ -6,14 +6,14 @@
     clippy::cast_possible_truncation
 )]
 
-use crate::collections::HashMap;
 use crate::boxed::Box;
-use crate::vec::Vec;
+use crate::collections::HashMap;
 use crate::future::Future;
 use crate::io;
 use crate::pin::Pin;
 use crate::ptr;
 use crate::task::{Context, Poll, Waker};
+use crate::vec::Vec;
 
 use crate::rt::executor::with_driver;
 use crate::rt::ready::{consume_ready, mark_ready};
