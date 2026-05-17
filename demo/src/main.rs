@@ -1,6 +1,6 @@
 use fast_std::fs::File;
 use fast_std::io::{AsyncRead, AsyncWrite};
-use fast_std::rt::{poll_step, PollStatus, spawn};
+use fast_std::rt::{PollStatus, poll_step, spawn};
 use fast_std::tty::{stdin, stdout};
 use fast_std::vec::Vec;
 
@@ -96,7 +96,10 @@ async fn read_last_byte(path: &str) -> fast_std::io::Result<u8> {
     let (result, buf) = file.read(buf).await;
     let n = result?;
     if n == 0 {
-        Err(fast_std::io::Error::new(fast_std::io::ErrorKind::UnexpectedEof, "empty file"))
+        Err(fast_std::io::Error::new(
+            fast_std::io::ErrorKind::UnexpectedEof,
+            "empty file",
+        ))
     } else {
         Ok(buf[n - 1])
     }
