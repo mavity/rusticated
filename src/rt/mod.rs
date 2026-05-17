@@ -1,25 +1,67 @@
-﻿//! Runtime abstractions.
-//!
-//! `fast-std` follows a **host-driven** model on every platform: the library
-//! never owns the thread or blocks. The host (the caller of `fast-std`) hands
-//! work to the runtime via [`run`] and pumps it via [`poll_step`].
-//!
-//! On native targets, [`native`] implements `poll_step` using a non-blocking
-//! reactor poll (epoll/kqueue/IOCP). On WASM the [`wasm`] module exposes the
-//! same surface via a host import boundary.
-//!
-//! Blocking primitives (`block_on`, `spawn_blocking`) are intentionally absent
-//! from the default build. Thread spawning is available only with the
-//! `threads` feature, and never on WASM.
+#![allow(missing_docs, dead_code)]
 
 #[cfg(not(target_family = "wasm"))]
-pub mod native;
+pub mod bsd;
+#[cfg(not(target_family = "wasm"))]
+pub mod executor;
+#[cfg(not(target_family = "wasm"))]
+pub mod linux_epoll;
+#[cfg(not(target_family = "wasm"))]
+pub mod ready;
+#[cfg(not(target_family = "wasm"))]
+pub mod timers;
+#[cfg(not(target_family = "wasm"))]
+pub mod waker;
+#[cfg(not(target_family = "wasm"))]
+pub mod windows;
 
 #[cfg(not(target_family = "wasm"))]
-pub use native::{poll_step, run};
+pub use executor::{PollStatus, poll_step, run};
+
+#[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
+pub use linux_epoll::{WaitReadable, WaitWritable};
+#[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
+pub fn wait_readable(fd: i32) -> WaitReadable {
+    WaitReadable::new(fd)
+}
+#[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
+pub fn wait_writable(fd: i32) -> WaitWritable {
+    WaitWritable::new(fd)
+}
+
+#[cfg(all(not(target_family = "wasm"), windows))]
+pub use windows::{WaitReadable, WaitWritable};
+#[cfg(all(not(target_family = "wasm"), windows))]
+pub fn wait_readable(h: u64) -> WaitReadable {
+    WaitReadable::new(h)
+}
+#[cfg(all(not(target_family = "wasm"), windows))]
+pub fn wait_writable(h: u64) -> WaitWritable {
+    WaitWritable::new(h)
+}
+
+#[cfg(all(
+    not(target_family = "wasm"),
+    any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd")
+))]
+pub use bsd::{WaitReadable, WaitWritable};
+#[cfg(all(
+    not(target_family = "wasm"),
+    any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd")
+))]
+pub fn wait_readable(fd: i32) -> WaitReadable {
+    WaitReadable::new(fd)
+}
+#[cfg(all(
+    not(target_family = "wasm"),
+    any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd")
+))]
+pub fn wait_writable(fd: i32) -> WaitWritable {
+    WaitWritable::new(fd)
+}
 
 #[cfg(target_family = "wasm")]
 pub mod wasm;
 
 #[cfg(target_family = "wasm")]
-pub use wasm::{OverlappedBufferFuture, OverlappedFuture, poll_step, run, submit_main};
+pub use wasm::*;

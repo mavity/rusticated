@@ -122,7 +122,7 @@ mod native_signal {
     #[cfg(unix)]
     async fn ctrl_c_impl() -> io::Result<()> {
         let [rx, _] = get_signal_pipe()?;
-        crate::rt::native::wait_readable(rx).await?;
+        crate::rt::wait_readable(rx).await?;
         // Drain the signalling byte so the pipe doesn't re-fire immediately.
         let mut b = 0u8;
         // SAFETY: `rx` is readable; the read will not block (O_NONBLOCK).

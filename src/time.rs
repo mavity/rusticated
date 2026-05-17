@@ -52,12 +52,12 @@ mod native_time {
         fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
             if Instant::now() >= self.deadline {
                 if let Some(id) = self.timer_id.take() {
-                    crate::rt::native::cancel_timer(id);
+                    crate::rt::timers::cancel_timer(id);
                 }
                 return Poll::Ready(());
             }
             if self.timer_id.is_none() {
-                self.timer_id = Some(crate::rt::native::register_timer(self.deadline));
+                self.timer_id = Some(crate::rt::timers::register_timer(self.deadline));
             }
             Poll::Pending
         }
@@ -66,7 +66,7 @@ mod native_time {
     impl Drop for Sleep {
         fn drop(&mut self) {
             if let Some(id) = self.timer_id.take() {
-                crate::rt::native::cancel_timer(id);
+                crate::rt::timers::cancel_timer(id);
             }
         }
     }

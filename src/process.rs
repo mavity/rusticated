@@ -80,7 +80,7 @@ mod native_process {
                 };
                 let pid = child.id();
                 let pidfd = pidfd_open(pid)?;
-                let res = crate::rt::native::wait_readable(pidfd).await;
+                let res = crate::rt::wait_readable(pidfd).await;
                 // SAFETY: pidfd was obtained from `pidfd_open` and is owned by us.
                 unsafe { close(pidfd) };
                 res?;

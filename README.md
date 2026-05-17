@@ -57,3 +57,41 @@ No external async or I/O dependencies. All OS bindings are `extern "C"` / `exter
 - **WASM**: `extern "C" #[link(wasm_import_module)]` host imports already in `abi.rs`.
 
 All executor and scheduling logic is self-contained in `rt/`. Logic derived from `compio-driver` source is ported directly, not imported as a crate dependency.
+
+
+# Gaps
+
+
+Based on a thorough review of the fast-std codebase, there are significant gaps. While the foundational loop and token registry are correctly modeled as a proactor (completion-based) system matching the WASM host logic, many actual OS-level I/O integrations are either completely stubbed out or relying on non-compliant fallbacks.
+
+Here is an in-depth breakdown of the outstanding features and I/O implementations required to achieve parity across all platforms:
+
+### 1. Underlying Runtime Backends (`src/rt/`)
+The event loop drivers are the bridges between Rust's `Future` model and the OS.
+* **`linux_uring.rs` (Missing)**: As discussed, the `io_uring` backend is entirely absent. `epoll` acts via readiness (telling you *when* to read), but io.rs expressly declares `AsyncRead`/`AsyncWrite` as an owned-buffer model (proactor). You need `io_uring` to natively pass buffer ownership to the kernel via `SQE` and reap them via `CQE`.
+* **bsd.rs (Stubbed)**: macOS and FreeBSD currently use dead stubs. Requires `kqueue`/`kevent` integration mapping `EVFILT_READ` and `EVFILT_WRITE` to the token registry.
+* **windows.rs (Overlapped OPs Missing)**: We just implemented the IOCP loop and handle registration, but we have not implemented the actual I/O operations (like `OverlappedBufferFuture` found in `wasm.rs`). You cannot do pure non-blocking file I/O on Windows via "readiness" polling; you *must* use `ReadFile`/`WriteFile` populated with an `OVERLAPPED` structure, which currently does not exist for Windows in this tree.
+
+### 2. File System I/O (`src/fs.rs`)
+The file system abstraction is exceptionally incomplete.
+* **Windows, macOS, BSD**: **Completely missing.** `fs::File` uses a `native_stub` module that immediately returns `io::Error::other("fs::File not yet implemented on this platform")`. 
+* **Linux**: **Fundamentally flawed (Blocking).** The Unix file abstraction currently drops down to raw `unsafe { read(self.fd, buf.as_mut_ptr(), ...) }` bypassing the async loop entirely. File I/O on Linux is notoriously unsuited for `epoll` (local disks always report "ready"). You must either bridge this to the missing `linux_uring.rs` or spawn a blocking threadpool.
+* **General Missing Features**: Missing directories (`DirBuilder`, `read_dir`, `remove_dir_all`), metadata reading (`metadata`, `symlink_metadata`), and permission manipulations. 
+
+### 3. Networking (`src/net.rs`)
+* **Completely Missing**: There is no `src/net.rs` present in the library. A functioning standard library replacement fundamentally requires `TcpListener`, `TcpStream`, and `UdpSocket`. To support the `AsyncRead`/`AsyncWrite` ownership model, these need `WSARecv`/`WSASend` with IOCP on Windows, and `io_uring` or `epoll` + non-blocking socket loops on Linux/macOS.
+
+### 4. Process Management (`src/process.rs`)
+Child process tracking relies on blocking `wait()` methods unless special OS facilities are tapped.
+* **Linux**: Functional. Seamlessly maps child PIDs to `pidfd_open` and yields back to `WaitReadable` on the `epoll` runtime.
+* **Windows & macOS / BSD**: **Stubbed**. Awaiting a process will immediately return `"Child::wait: async backend pending on this platform"`.
+  * *Windows Resolution*: You need to call `RegisterWaitForSingleObject` to push the Process Handle onto the system thread pool and signal your IOCP Queue when it terminates.
+  * *macOS Resolution*: Must be bridged to `kqueue` using the `EVFILT_PROC` filter.
+
+### 5. Signal Handling (`src/signal.rs`)
+* **Windows**: **Stubbed.** Calling `ctrl_c()` returns an error: `"ctrl_c: Windows console-event backend pending"`. Resolution requires invoking `SetConsoleCtrlHandler` natively and notifying the IOCP driver.
+
+### 6. I/O Trait Extensions (`src/io.rs`)
+* **Ergonomics Missing**: The crate successfully defines the `AsyncRead` and `AsyncWrite` trait boundaries, but provides zero utility methods to satisfy typical caller requirements. There is no `AsyncReadExt` to provide `read_exact`, `read_to_end`, or `read_to_string`. There are also no `BufReader` / `BufWriter` wrappers. 
+
+Our goal next is to drive the system to completion, including **Windows Overlapped I/O Operations** and the **Linux `io_uring` engine** and with that and related work bridge ALL the architectural gaps in fs.rs and `net.rs`.
