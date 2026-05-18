@@ -25,14 +25,14 @@ mod native_env {
     #[cfg(target_os = "linux")]
     fn read_args() -> Vec<String> {
         unsafe extern "C" {
-            fn open(pathname: *const u8, flags: i32) -> i32;
+            fn open(pathname: *const u8, flags: i32, mode: u32) -> i32;
             fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
             fn close(fd: i32) -> i32;
         }
         const O_RDONLY: i32 = 0;
         let path = b"/proc/self/cmdline\0";
-        // SAFETY: path is a valid C string.
-        let fd = unsafe { open(path.as_ptr(), O_RDONLY) };
+        // SAFETY: path is a valid C string; mode is ignored for O_RDONLY.
+        let fd = unsafe { open(path.as_ptr(), O_RDONLY, 0) };
         if fd < 0 {
             return Vec::new();
         }
