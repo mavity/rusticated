@@ -60,14 +60,14 @@ struct_excessive_bools = "allow"
 [package]
 name = "rusticated"
 description = "Fast, standard-library-shaped async platform layer for brush-async"
-version = "0.1.1"
+version = "0.1.2"
 categories = ["asynchronous", "development-tools", "embedded"]
 edition.workspace = true
-keywords = ["async", "async-io", "io", "embedded", "platform", "runtime", "wasm", "wasi"]
+keywords = ["async", "io", "embedded", "runtime", "wasm"]
 license.workspace = true
 readme.workspace = true
 repository.workspace = true
-documentation = "https://docs.rs/rustic"
+documentation = "https://docs.rs/rusticated"
 rust-version.workspace = true
 
 [lib]
