@@ -1,3 +1,4 @@
+use chrono;
 use fast_std::fs::File;
 use fast_std::io::{AsyncRead, AsyncWrite};
 use fast_std::rt::{PollStatus, poll_step, spawn};
@@ -53,10 +54,13 @@ async fn async_main() {
     match std::env::current_exe().and_then(|exe| std::fs::metadata(&exe).map(|m| (exe, m))) {
         Ok((exe, meta)) => match meta.modified() {
             Ok(modified) => {
+                let dt = chrono::DateTime::<chrono::Local>::from(modified);
+                let ago = format_age(modified);
                 let msg = format!(
-                    "Executable: {}\nLast modified: {:?}\n",
+                    "Executable: {}\nLast modified: {} ({})\n",
                     exe.display(),
-                    modified
+                    dt.format("%Y-%m-%d %H:%M:%S"),
+                    ago,
                 );
                 write_all(&mut out, msg.as_bytes()).await;
             }
@@ -69,6 +73,27 @@ async fn async_main() {
             let msg = format!("Could not locate current executable: {}\n", e);
             write_all(&mut out, msg.as_bytes()).await;
         }
+    }
+}
+
+fn format_age(t: std::time::SystemTime) -> String {
+    match std::time::SystemTime::now().duration_since(t) {
+        Ok(d) => {
+            let secs = d.as_secs();
+            if secs < 60 {
+                "just now".to_string()
+            } else if secs < 3600 {
+                let m = secs / 60;
+                format!("{} minute{} ago", m, if m == 1 { "" } else { "s" })
+            } else if secs < 86400 {
+                let h = secs / 3600;
+                format!("{} hour{} ago", h, if h == 1 { "" } else { "s" })
+            } else {
+                let days = secs / 86400;
+                format!("{} day{} ago", days, if days == 1 { "" } else { "s" })
+            }
+        }
+        Err(_) => "in the future".to_string(),
     }
 }
 
