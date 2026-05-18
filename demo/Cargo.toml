@@ -7,3 +7,4 @@ rust-version = "1.88.0"
 
 [dependencies]
 fast-std = { path = ".." }
+chrono = "0.4"
