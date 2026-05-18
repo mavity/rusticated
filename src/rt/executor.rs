@@ -1,5 +1,5 @@
 use crate::boxed::Box;
-use crate::cell::RefCell;
+use crate::cell::{Cell, RefCell};
 use crate::collections::VecDeque;
 use crate::future::Future;
 use crate::io;
@@ -35,25 +35,30 @@ struct Task {
     woken: Arc<AtomicBool>,
 }
 
+// ── Thread-local executor state ───────────────────────────────────────────────
+// TASKS: per-thread run queue. DRIVER: per-thread I/O reactor.
+// TASK_DEPTH: approximate queue depth (available for work-stealing hints).
+
 thread_local! {
     static TASKS: RefCell<VecDeque<Task>> = RefCell::new(VecDeque::new());
     static DRIVER: RefCell<Option<Driver>> = RefCell::new(None);
-    /// Approximate depth of the local run queue. Future work-stealing logic
-    /// can read peer depth counters (via a global thread registry) to pick
-    /// steal targets without probing their queues directly.
-    static TASK_DEPTH: RefCell<usize> = RefCell::new(0);
+    static TASK_DEPTH: Cell<usize> = Cell::new(0);
+}
+
+fn tasks_mut<R>(f: impl FnOnce(&mut VecDeque<Task>) -> R) -> R {
+    TASKS.with(|q| f(&mut *q.borrow_mut()))
 }
 
 pub(crate) fn with_driver<R>(f: impl FnOnce(&mut Driver) -> R) -> io::Result<R> {
-    DRIVER.with(|cell| {
+    DRIVER.with(|cell| -> io::Result<R> {
         let mut borrow = cell.borrow_mut();
         if borrow.is_none() {
             *borrow = Some(Driver::new()?);
         }
-        let Some(driver) = borrow.as_mut() else {
-            return Err(io::Error::other("driver init race"));
-        };
-        Ok(f(driver))
+        match borrow.as_mut() {
+            Some(d) => Ok(f(d)),
+            None => Err(io::Error::other("driver init failed")),
+        }
     })
 }
 
@@ -146,8 +151,8 @@ where
     };
     // Mark woken=true so the task is polled on the very first poll_step.
     let woken = Arc::new(AtomicBool::new(true));
-    TASKS.with(|q| {
-        q.borrow_mut().push_back(Task {
+    tasks_mut(|q| {
+        q.push_back(Task {
             future: Box::pin(wrapper),
             woken,
         })
@@ -254,12 +259,12 @@ pub fn poll_step() -> io::Result<PollStatus> {
 
     // Only poll tasks whose waker flag was set since the last step.
     // Tasks spawned during polling are picked up on the next step.
-    let n = TASKS.with(|q| q.borrow().len());
+    let n = tasks_mut(|q| q.len());
     let mut made_progress = false;
     let mut remaining = 0usize;
 
     for _ in 0..n {
-        let task = TASKS.with(|q| q.borrow_mut().pop_front());
+        let task = tasks_mut(|q| q.pop_front());
         let Some(mut task) = task else { break };
 
         if task.woken.swap(false, Ordering::AcqRel) {
@@ -272,18 +277,18 @@ pub fn poll_step() -> io::Result<PollStatus> {
                     // task dropped — not re-queued
                 }
                 Poll::Pending => {
-                    TASKS.with(|q| q.borrow_mut().push_back(task));
+                    tasks_mut(|q| q.push_back(task));
                     remaining += 1;
                 }
             }
         } else {
             // Not yet woken — return to queue without polling.
-            TASKS.with(|q| q.borrow_mut().push_back(task));
+            tasks_mut(|q| q.push_back(task));
             remaining += 1;
         }
     }
 
-    TASK_DEPTH.with(|d| *d.borrow_mut() = remaining);
+    TASK_DEPTH.with(|d| d.set(remaining));
 
     Ok(if remaining == 0 && !had_events {
         PollStatus::Done

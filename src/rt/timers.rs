@@ -1,24 +1,20 @@
-use crate::cell::RefCell;
+use crate::cell::{Cell, RefCell};
 use crate::time::{Duration, Instant};
 use crate::vec::Vec;
 
 thread_local! {
-    /// Sorted (by deadline ascending) list of pending timers. Each entry is a
-    /// `(deadline, id)` pair; the matching `Sleep` future polls by checking
-    /// `Instant::now() >= deadline`.
     static TIMERS: RefCell<Vec<(Instant, u64)>> = RefCell::new(Vec::new());
-    static NEXT_TIMER_ID: RefCell<u64> = RefCell::new(1);
+    static NEXT_TIMER_ID: Cell<u64> = Cell::new(1);
+}
+
+fn with_timers<R>(f: impl FnOnce(&mut Vec<(Instant, u64)>) -> R) -> R {
+    TIMERS.with(|t| f(&mut *t.borrow_mut()))
 }
 
 pub(crate) fn register_timer(deadline: Instant) -> u64 {
-    let id = NEXT_TIMER_ID.with(|n| {
-        let mut n = n.borrow_mut();
-        let id = *n;
-        *n = n.wrapping_add(1);
-        id
-    });
-    TIMERS.with(|t| {
-        let mut t = t.borrow_mut();
+    let id = NEXT_TIMER_ID.with(|c| c.get());
+    NEXT_TIMER_ID.with(|c| c.set(id.wrapping_add(1)));
+    with_timers(|t| {
         // Insert maintaining ascending order by deadline.
         let pos = t.partition_point(|(d, _)| *d <= deadline);
         t.insert(pos, (deadline, id));
@@ -27,8 +23,7 @@ pub(crate) fn register_timer(deadline: Instant) -> u64 {
 }
 
 pub(crate) fn cancel_timer(id: u64) {
-    TIMERS.with(|t| {
-        let mut t = t.borrow_mut();
+    with_timers(|t| {
         if let Some(pos) = t.iter().position(|(_, i)| *i == id) {
             t.remove(pos);
         }
@@ -36,8 +31,7 @@ pub(crate) fn cancel_timer(id: u64) {
 }
 
 pub(crate) fn next_deadline() -> Option<Duration> {
-    TIMERS.with(|t| {
-        let t = t.borrow();
+    with_timers(|t| {
         t.first().map(|(d, _)| {
             let now = Instant::now();
             if *d <= now { Duration::ZERO } else { *d - now }

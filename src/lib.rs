@@ -2,8 +2,54 @@
 //! Fast, standard-library-shaped async platform layer for brush-async
 
 #![no_std]
+#![feature(thread_local)]
 
 extern crate alloc;
+// The test harness is std-based; bring std in for test builds only.
+#[cfg(test)]
+extern crate std;
+
+/// Declares one or more thread-local values, initialised lazily on first access.
+///
+/// Works identically to `std::thread_local!` but is implemented using the nightly
+/// `#[thread_local]` attribute. Values are not dropped on thread exit.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// thread_local! {
+///     static COUNTER: crate::cell::Cell<u32> = crate::cell::Cell::new(0);
+/// }
+/// COUNTER.with(|c| c.set(c.get() + 1));
+/// ```
+#[macro_export]
+macro_rules! thread_local {
+    () => {};
+    ($(#[$attr:meta])* static $name:ident: $t:ty = $init:expr; $($rest:tt)*) => {
+        $(#[$attr])*
+        static $name: $crate::thread::LocalKey<$t> = {
+            #[thread_local]
+            static STORAGE: $crate::cell::UnsafeCell<::core::option::Option<$t>> =
+                $crate::cell::UnsafeCell::new(::core::option::Option::None);
+
+            fn __get() -> *const $t {
+                // SAFETY: `#[thread_local]` guarantees exclusive single-thread
+                // access; this function must not be called re-entrantly.
+                unsafe {
+                    let ptr = STORAGE.get();
+                    if (*ptr).is_none() {
+                        *ptr = ::core::option::Option::Some($init);
+                    }
+                    // SAFETY: initialised just above.
+                    (*ptr).as_ref().unwrap_unchecked() as *const _
+                }
+            }
+
+            $crate::thread::LocalKey::new(__get)
+        };
+        $crate::thread_local!($($rest)*);
+    };
+}
 
 /// Shared ABI definitions
 pub mod abi;
@@ -29,6 +75,8 @@ pub mod rt;
 pub mod signal;
 /// Synchronisation primitives
 pub mod sync;
+/// Thread-local storage key type.
+pub mod thread;
 /// Time and async sleep utilities
 pub mod time;
 /// Terminal interface types
@@ -85,7 +133,3 @@ pub mod vec {
 }
 
 pub use error::{Error, Result};
-
-#[cfg(not(target_family = "wasm"))]
-#[macro_use]
-extern crate std;

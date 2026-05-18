@@ -140,9 +140,12 @@ impl Driver {
             return Err(e);
         };
         for ev in &evbuf[..n as usize] {
+            // SAFETY: `data` is a field of a `#[repr(C, packed)]` struct;
+            // we copy it via `read_unaligned` to avoid a misaligned reference.
+            let token = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(ev.data)) };
             // ONESHOT fired: the fd is now disabled (not removed).
-            mark_ready(ev.data);
-            if let Some(waker) = self.wakers.remove(&ev.data) {
+            mark_ready(token);
+            if let Some(waker) = self.wakers.remove(&token) {
                 waker.wake();
             }
         }

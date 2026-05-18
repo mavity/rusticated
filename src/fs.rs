@@ -27,10 +27,7 @@ pub use native_linux::{File, OpenOptions};
 
 #[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
 mod native_linux {
-    use crate::{
-        ffi::{CString, OsStrExt as _},
-        io,
-    };
+    use crate::{ffi::CString, io};
     use alloc::vec::Vec;
 
     unsafe extern "C" {
