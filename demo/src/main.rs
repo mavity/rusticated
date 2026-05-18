@@ -49,6 +49,27 @@ async fn async_main() {
     } else {
         write_all(&mut out, b"Unable to read last byte from demo file\n").await;
     }
+
+    match std::env::current_exe().and_then(|exe| std::fs::metadata(&exe).map(|m| (exe, m))) {
+        Ok((exe, meta)) => match meta.modified() {
+            Ok(modified) => {
+                let msg = format!(
+                    "Executable: {}\nLast modified: {:?}\n",
+                    exe.display(),
+                    modified
+                );
+                write_all(&mut out, msg.as_bytes()).await;
+            }
+            Err(e) => {
+                let msg = format!("Could not read modification time: {}\n", e);
+                write_all(&mut out, msg.as_bytes()).await;
+            }
+        },
+        Err(e) => {
+            let msg = format!("Could not locate current executable: {}\n", e);
+            write_all(&mut out, msg.as_bytes()).await;
+        }
+    }
 }
 
 async fn write_all(writer: &mut impl AsyncWrite, bytes: &[u8]) {
