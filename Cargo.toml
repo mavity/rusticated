@@ -7,6 +7,9 @@ license = "MIT"
 readme = "README.md"
 repository = "https://github.com/mavity/rusticated"
 rust-version = "1.88.0"
+homepage = "https://github.com/mavity/rustic"
+documentation = "https://docs.rs/rustic"
+license-file = "LICENSE"
 
 [workspace.lints.rust]
 warnings = { level = "deny" }
@@ -57,13 +60,14 @@ struct_excessive_bools = "allow"
 [package]
 name = "rusticated"
 description = "Fast, standard-library-shaped async platform layer for brush-async"
-version = "0.1.0"
-categories = ["command-line-utilities", "development-tools"]
+version = "0.1.1"
+categories = ["asynchronous", "development-tools", "embedded"]
 edition.workspace = true
-keywords = ["cli", "shell", "bash"]
+keywords = ["async", "async-io", "io", "embedded", "platform", "runtime", "wasm", "wasi"]
 license.workspace = true
 readme.workspace = true
 repository.workspace = true
+documentation = "https://docs.rs/rustic"
 rust-version.workspace = true
 
 [lib]
