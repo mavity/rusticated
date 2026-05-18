@@ -5,7 +5,7 @@ members = ["demo"]
 edition = "2024"
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/oyin-bo/rustic"
+repository = "https://github.com/mavity/rustic"
 rust-version = "1.88.0"
 
 [workspace.lints.rust]
