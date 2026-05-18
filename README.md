@@ -1,4 +1,4 @@
-# FAST-STD
+# Rustic
 
 This is a custom target crate meant to handle extremely efficiency-consciouis and resource-frugal implementation of Rust std for embedded and performance-sensitive environments.
 
@@ -62,7 +62,7 @@ All executor and scheduling logic is self-contained in `rt/`. Logic derived from
 # Gaps
 
 
-Based on a thorough review of the fast-std codebase, there are significant gaps. While the foundational loop and token registry are correctly modeled as a proactor (completion-based) system matching the WASM host logic, many actual OS-level I/O integrations are either completely stubbed out or relying on non-compliant fallbacks.
+Based on a thorough review of the rustic codebase, there are significant gaps. While the foundational loop and token registry are correctly modeled as a proactor (completion-based) system matching the WASM host logic, many actual OS-level I/O integrations are either completely stubbed out or relying on non-compliant fallbacks.
 
 Here is an in-depth breakdown of the outstanding features and I/O implementations required to achieve parity across all platforms:
 
@@ -94,11 +94,11 @@ Child process tracking relies on blocking `wait()` methods unless special OS fac
 
 # Demo executable
 
-With all the above in mind we want to produce an executable that would be like a demo or a hello world inside fast-std for the demonstration of the fast-std facilities.
+With all the above in mind we want to produce an executable that would be like a demo or a hello world inside rustic for the demonstration of the rustic facilities.
 
-Themandate (non-negotiable) is to have an executable that depends visibly only on std, no overt sign of fast-std references anywhere. However it must be built on top of our custom fast-std as target. It should write to console (1), read single line input from console (2) check if that input resolves into a file and if so, read the last byte of that file and print it out (3).
+Themandate (non-negotiable) is to have an executable that depends visibly only on std, no overt sign of rustic references anywhere. However it must be built on top of our custom rustic as target. It should write to console (1), read single line input from console (2) check if that input resolves into a file and if so, read the last byte of that file and print it out (3).
 
 NOTES:
 
-1. `fast-std` is a custom target, not a create to import. Its exports therefore are not imported from crates, but as the target std.
+1. `rustic` is a custom target, not a create to import. Its exports therefore are not imported from crates, but as the target std.
 

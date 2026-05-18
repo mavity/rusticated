@@ -538,7 +538,7 @@ mod windows_tty {
         #[test]
         fn write_to_real_file_handle() {
             block_on(async {
-                let path = std::env::temp_dir().join("fast_std_tty_write_test.bin");
+                let path = std::env::temp_dir().join("rustic_tty_write_test.bin");
                 // Open with std so we get a proper Windows HANDLE via AsRawHandle.
                 let file = std::fs::OpenOptions::new()
                     .write(true)
@@ -550,7 +550,7 @@ mod windows_tty {
                 // Wrap the raw handle in our Tty (private field, accessible here).
                 let mut tty = Tty { handle: raw };
 
-                let data = b"fast-std tty write test".to_vec();
+                let data = b"rustic tty write test".to_vec();
                 let expected_len = data.len();
                 let (res, _returned_buf) = tty.write(data).await;
                 assert_eq!(
@@ -562,7 +562,7 @@ mod windows_tty {
                 drop(file);
 
                 let on_disk = std::fs::read(&path).expect("read back temp file");
-                assert_eq!(on_disk, b"fast-std tty write test");
+                assert_eq!(on_disk, b"rustic tty write test");
                 let _ = std::fs::remove_file(&path);
             });
         }

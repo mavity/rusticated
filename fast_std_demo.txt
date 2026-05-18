@@ -1,1 +1,1 @@
-fast-std demo file contents
+rustic demo file contents
