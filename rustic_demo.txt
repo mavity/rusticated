@@ -1,1 +1,1 @@
-rustic demo file contents
+rusticated demo file contents

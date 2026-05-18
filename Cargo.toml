@@ -5,7 +5,7 @@ members = ["demo"]
 edition = "2024"
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/mavity/rustic"
+repository = "https://github.com/mavity/rusticated"
 rust-version = "1.88.0"
 
 [workspace.lints.rust]
@@ -16,7 +16,7 @@ nonstandard_style = { level = "deny" }
 rust_2018_idioms = { level = "deny", priority = -1 }
 unsafe_op_in_unsafe_fn = "deny"
 unknown_lints = { level = "allow", priority = -100 }
-# rustic intentionally uses native `async fn` in traits (no async-trait crate).
+# rusticated intentionally uses native `async fn` in traits (no async-trait crate).
 async_fn_in_trait = { level = "allow", priority = 1 }
 
 [workspace.lints.rustdoc]
@@ -55,7 +55,7 @@ similar_names = "allow"
 struct_excessive_bools = "allow"
 
 [package]
-name = "rustic"
+name = "rusticated"
 description = "Fast, standard-library-shaped async platform layer for brush-async"
 version = "0.1.0"
 categories = ["command-line-utilities", "development-tools"]
@@ -74,7 +74,7 @@ workspace = true
 
 [features]
 default = []
-# Opt-in: allow the host to spawn OS threads explicitly. rustic itself never
+# Opt-in: allow the host to spawn OS threads explicitly. rusticated itself never
 # spawns threads — this flag merely promises that doing so is acceptable on
 # the target platform. Never available on WASM.
 threads = []

@@ -729,7 +729,7 @@ mod tests {
     #[test]
     fn test_file_create_write_read() {
         block_on(async {
-            let path = std::env::temp_dir().join("rustic_test_file.txt");
+            let path = std::env::temp_dir().join("rusticated_test_file.txt");
 
             // Note: Currently Windows tests that run natively will pass with `OverlappedRead`.
             // Wasm falls back.
@@ -740,7 +740,7 @@ mod tests {
             }
             let mut file = create_res.unwrap();
 
-            let data = b"hello rustic async fs".to_vec();
+            let data = b"hello rusticated async fs".to_vec();
             let (res, _) = file.write(data).await;
             assert_eq!(res.unwrap(), 23);
 
@@ -750,7 +750,7 @@ mod tests {
             let buf = Vec::with_capacity(32);
             let (res, read_buf) = file.read(buf).await;
             assert_eq!(res.unwrap(), 23);
-            assert_eq!(read_buf, b"hello rustic async fs");
+            assert_eq!(read_buf, b"hello rusticated async fs");
 
             let _ = std::fs::remove_file(&path);
         });

@@ -1,15 +1,15 @@
 use chrono;
-use rustic::fs::File;
-use rustic::io::{AsyncRead, AsyncWrite};
-use rustic::rt::{PollStatus, poll_step, spawn};
-use rustic::tty::{stdin, stdout};
-use rustic::vec::Vec;
+use rusticated::fs::File;
+use rusticated::io::{AsyncRead, AsyncWrite};
+use rusticated::rt::{PollStatus, poll_step, spawn};
+use rusticated::tty::{stdin, stdout};
+use rusticated::vec::Vec;
 
 fn main() {
     spawn(async_main());
 
     loop {
-        match poll_step().expect("rustic runtime poll failed") {
+        match poll_step().expect("rusticated runtime poll failed") {
             PollStatus::Done => break,
             PollStatus::Ready => continue,
             PollStatus::Idle { .. } => {
@@ -23,7 +23,7 @@ async fn async_main() {
     let mut out = stdout();
     let mut input = stdin();
 
-    write_all(&mut out, b"rustic demo: type a line and press Enter\n").await;
+    write_all(&mut out, b"rusticated demo: type a line and press Enter\n").await;
     write_all(&mut out, b"> ").await;
 
     let line = read_line(&mut input).await;
@@ -35,15 +35,15 @@ async fn async_main() {
         write_all(&mut out, b"Failed to read line\n").await;
     }
 
-    let path = "rustic_demo.txt";
-    let contents = b"rustic demo file contents\n".to_vec();
+    let path = "rusticated_demo.txt";
+    let contents = b"rusticated demo file contents\n".to_vec();
     if let Err(err) = write_demo_file(path, contents).await {
         let msg = format!("Failed to write demo file: {}\n", err);
         write_all(&mut out, msg.as_bytes()).await;
         return;
     }
 
-    write_all(&mut out, b"Created demo file `rustic_demo.txt`.\n").await;
+    write_all(&mut out, b"Created demo file `rusticated_demo.txt`.\n").await;
     if let Ok(last_byte) = read_last_byte(path).await {
         let msg = format!("Last byte in file: {:?}\n", last_byte as char);
         write_all(&mut out, msg.as_bytes()).await;
@@ -113,7 +113,7 @@ async fn write_all(writer: &mut impl AsyncWrite, bytes: &[u8]) {
     }
 }
 
-async fn read_line(reader: &mut impl AsyncRead) -> rustic::io::Result<Vec<u8>> {
+async fn read_line(reader: &mut impl AsyncRead) -> rusticated::io::Result<Vec<u8>> {
     let mut result = Vec::new();
     loop {
         let buf = Vec::with_capacity(128);
@@ -130,20 +130,20 @@ async fn read_line(reader: &mut impl AsyncRead) -> rustic::io::Result<Vec<u8>> {
     Ok(result)
 }
 
-async fn write_demo_file(path: &str, bytes: Vec<u8>) -> rustic::io::Result<()> {
+async fn write_demo_file(path: &str, bytes: Vec<u8>) -> rusticated::io::Result<()> {
     let mut file = File::create(path).await?;
     let (result, _buf) = file.write(bytes).await;
     result.map(|_| ())
 }
 
-async fn read_last_byte(path: &str) -> rustic::io::Result<u8> {
+async fn read_last_byte(path: &str) -> rusticated::io::Result<u8> {
     let mut file = File::open(path).await?;
     let buf = Vec::with_capacity(1024);
     let (result, buf) = file.read(buf).await;
     let n = result?;
     if n == 0 {
-        Err(rustic::io::Error::new(
-            rustic::io::ErrorKind::UnexpectedEof,
+        Err(rusticated::io::Error::new(
+            rusticated::io::ErrorKind::UnexpectedEof,
             "empty file",
         ))
     } else {
