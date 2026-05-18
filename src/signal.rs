@@ -17,16 +17,18 @@
 #[cfg(not(target_family = "wasm"))]
 mod native_signal {
     use crate::io;
-    use core::sync::atomic::{AtomicBool, Ordering};
-
     #[cfg(unix)]
-    use core::sync::OnceLock;
+    use core::sync::atomic::AtomicI32;
+    use core::sync::atomic::{AtomicBool, Ordering};
 
     // ── Unix: pipe-based async signal ─────────────────────────────────────────
 
-    /// Pipe fds `[read_end, write_end]` used for async Ctrl-C notification.
+    /// Read end of the async Ctrl-C notification pipe (-1 = uninitialised).
     #[cfg(unix)]
-    static SIGNAL_PIPE: OnceLock<[i32; 2]> = OnceLock::new();
+    static SIGNAL_PIPE_READ: AtomicI32 = AtomicI32::new(-1);
+    /// Write end of the async Ctrl-C notification pipe (-1 = uninitialised).
+    #[cfg(unix)]
+    static SIGNAL_PIPE_WRITE: AtomicI32 = AtomicI32::new(-1);
 
     // O_CLOEXEC differs between Linux and BSD/macOS.
     #[cfg(target_os = "linux")]
@@ -68,22 +70,28 @@ mod native_signal {
 
     #[cfg(unix)]
     fn get_signal_pipe() -> io::Result<[i32; 2]> {
-        SIGNAL_PIPE
-            .get_or_try_init(|| {
-                let mut fds = [0i32; 2];
-                // SAFETY: `fds` is a valid 2-element array.
-                if unsafe { pipe2(fds.as_mut_ptr(), O_CLOEXEC | O_NONBLOCK) } < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(fds)
-            })
-            .copied()
+        let r = SIGNAL_PIPE_READ.load(Ordering::Acquire);
+        if r != -1 {
+            let w = SIGNAL_PIPE_WRITE.load(Ordering::Acquire);
+            return Ok([r, w]);
+        }
+        let mut fds = [0i32; 2];
+        // SAFETY: `fds` is a valid 2-element array.
+        if unsafe { pipe2(fds.as_mut_ptr(), O_CLOEXEC | O_NONBLOCK) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // Store write end before read end so sigint_handler never observes a
+        // valid read fd paired with an uninitialised write fd.
+        SIGNAL_PIPE_WRITE.store(fds[1], Ordering::Release);
+        SIGNAL_PIPE_READ.store(fds[0], Ordering::Release);
+        Ok(fds)
     }
 
     /// Async-signal-safe handler: writes one byte to the signal pipe.
     #[cfg(unix)]
     extern "C" fn sigint_handler(_sig: i32) {
-        if let Some(&[_, tx]) = SIGNAL_PIPE.get() {
+        let tx = SIGNAL_PIPE_WRITE.load(Ordering::Acquire);
+        if tx != -1 {
             // SAFETY: `write(2)` is async-signal-safe.
             unsafe { write(tx, b"\x00".as_ptr(), 1) };
         }

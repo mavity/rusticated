@@ -2,17 +2,19 @@ use crate::cell::RefCell;
 use crate::collections::HashSet;
 
 thread_local! {
-    /// Tokens for I/O events that have fired but whose futures have not yet
-    /// been re-polled to observe the result.
     static READY: RefCell<HashSet<u64>> = RefCell::new(HashSet::new());
 }
 
+fn with_ready<R>(f: impl FnOnce(&mut HashSet<u64>) -> R) -> R {
+    READY.with(|r| f(&mut *r.borrow_mut()))
+}
+
 pub(crate) fn mark_ready(token: u64) {
-    READY.with(|r| {
-        r.borrow_mut().insert(token);
+    with_ready(|r| {
+        r.insert(token);
     });
 }
 
 pub(crate) fn consume_ready(token: u64) -> bool {
-    READY.with(|r| r.borrow_mut().remove(&token))
+    with_ready(|r| r.remove(&token))
 }
