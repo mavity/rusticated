@@ -20,8 +20,11 @@ const EPOLL_CTL_MOD: i32 = 3;
 /// POSIX errno 17: file exists (returned by EPOLL_CTL_ADD on a known fd).
 const EEXIST: i32 = 17;
 
-/// `epoll_event` layout: packed 4+8 bytes on x86_64/aarch64 Linux.
-#[repr(C, packed)]
+/// `epoll_event` layout: the kernel uses `__attribute__((packed))` only on
+/// x86/x86_64. On aarch64/riscv64/etc. the struct has natural alignment —
+/// `data: u64` sits at offset 8 (4 bytes padding after `events: u32`).
+#[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), repr(C, packed))]
+#[cfg_attr(not(any(target_arch = "x86", target_arch = "x86_64")), repr(C))]
 #[derive(Copy, Clone)]
 struct EpollEvent {
     events: u32,
