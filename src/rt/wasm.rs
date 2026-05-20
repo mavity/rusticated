@@ -355,4 +355,3 @@ pub fn poll_step() {
 pub extern "C" fn is_done() -> u32 {
     MAIN_DONE.with(|done| if done.get().is_some() { 1 } else { 0 })
 }
-

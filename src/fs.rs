@@ -527,57 +527,93 @@ pub struct Metadata {
 #[cfg(not(target_family = "wasm"))]
 impl Metadata {
     /// File size in bytes.
-    pub fn len(&self) -> u64 { self.size }
+    pub fn len(&self) -> u64 {
+        self.size
+    }
     /// `true` if this is a regular file.
     pub fn is_file(&self) -> bool {
         #[cfg(unix)]
-        { (self.mode & 0o170000) == 0o100000 }
+        {
+            (self.mode & 0o170000) == 0o100000
+        }
         #[cfg(windows)]
-        { (self.mode & 0x10) == 0 } // FILE_ATTRIBUTE_DIRECTORY is 0x10
+        {
+            (self.mode & 0x10) == 0
+        } // FILE_ATTRIBUTE_DIRECTORY is 0x10
     }
     /// `true` if this is a directory.
     pub fn is_dir(&self) -> bool {
         #[cfg(unix)]
-        { (self.mode & 0o170000) == 0o040000 }
+        {
+            (self.mode & 0o170000) == 0o040000
+        }
         #[cfg(windows)]
-        { (self.mode & 0x10) != 0 }
+        {
+            (self.mode & 0x10) != 0
+        }
     }
     /// `true` if the path itself is a symbolic link (stat taken without following links).
     pub fn is_symlink(&self) -> bool {
         #[cfg(unix)]
-        { (self.mode & 0o170000) == 0o120000 }
+        {
+            (self.mode & 0o170000) == 0o120000
+        }
         #[cfg(windows)]
-        { (self.mode & 0x400) != 0 } // FILE_ATTRIBUTE_REPARSE_POINT is 0x400
+        {
+            (self.mode & 0x400) != 0
+        } // FILE_ATTRIBUTE_REPARSE_POINT is 0x400
     }
     /// `true` if the file is read-only.
     pub fn readonly(&self) -> bool {
         #[cfg(unix)]
-        { (self.mode & 0o222) == 0 }
+        {
+            (self.mode & 0o222) == 0
+        }
         #[cfg(windows)]
-        { (self.mode & 0x1) != 0 } // FILE_ATTRIBUTE_READONLY is 0x1
+        {
+            (self.mode & 0x1) != 0
+        } // FILE_ATTRIBUTE_READONLY is 0x1
     }
     /// Modification time as nanoseconds since UNIX epoch, or 0.
-    pub fn modified_ns(&self) -> u64 { self.modified_ns }
+    pub fn modified_ns(&self) -> u64 {
+        self.modified_ns
+    }
     /// Last access time as nanoseconds since UNIX epoch, or 0.
-    pub fn accessed_ns(&self) -> u64 { self.accessed_ns }
+    pub fn accessed_ns(&self) -> u64 {
+        self.accessed_ns
+    }
     /// Creation/birth time as nanoseconds since UNIX epoch, or 0.
-    pub fn created_ns(&self) -> u64 { self.created_ns }
+    pub fn created_ns(&self) -> u64 {
+        self.created_ns
+    }
 
     /// Unix permission bits; synthesised from readonly on non-Unix hosts.
     pub fn mode(&self) -> u32 {
         #[cfg(unix)]
-        { self.mode }
+        {
+            self.mode
+        }
         #[cfg(not(unix))]
-        { if self.readonly() { 0o444 } else { 0o666 } }
+        {
+            if self.readonly() { 0o444 } else { 0o666 }
+        }
     }
     /// Number of hard links; 0 on platforms that do not expose it.
-    pub fn nlink(&self) -> u64 { self.nlink }
+    pub fn nlink(&self) -> u64 {
+        self.nlink
+    }
     /// Owner user-ID (Unix); 0 on non-Unix.
-    pub fn uid(&self) -> u32 { self.uid }
+    pub fn uid(&self) -> u32 {
+        self.uid
+    }
     /// Owner group-ID (Unix); 0 on non-Unix.
-    pub fn gid(&self) -> u32 { self.gid }
+    pub fn gid(&self) -> u32 {
+        self.gid
+    }
     /// Inode / file-index; 0 on platforms that do not expose it.
-    pub fn inode(&self) -> u64 { self.inode }
+    pub fn inode(&self) -> u64 {
+        self.inode
+    }
 }
 
 /// Query metadata for `path` without following symbolic links.
@@ -609,12 +645,28 @@ pub async fn metadata<P: AsRef<str>>(path: P) -> crate::io::Result<Metadata> {
         unsafe extern "C" {
             fn lstat(pathname: *const u8, statbuf: *mut Stat) -> i32;
         }
-        let cpath = crate::ffi::CString::new(path.as_ref())
-            .map_err(|_| crate::io::Error::new(crate::io::ErrorKind::InvalidInput, "path contains null"))?;
+        let cpath = crate::ffi::CString::new(path.as_ref()).map_err(|_| {
+            crate::io::Error::new(crate::io::ErrorKind::InvalidInput, "path contains null")
+        })?;
         let mut st = Stat {
-            st_dev: 0, st_ino: 0, st_nlink: 0, st_mode: 0, st_uid: 0, st_gid: 0, __pad0: 0,
-            st_rdev: 0, st_size: 0, st_blksize: 0, st_blocks: 0, st_atime: 0, st_atime_nsec: 0,
-            st_mtime: 0, st_mtime_nsec: 0, st_ctime: 0, st_ctime_nsec: 0, __unused: [0; 3],
+            st_dev: 0,
+            st_ino: 0,
+            st_nlink: 0,
+            st_mode: 0,
+            st_uid: 0,
+            st_gid: 0,
+            __pad0: 0,
+            st_rdev: 0,
+            st_size: 0,
+            st_blksize: 0,
+            st_blocks: 0,
+            st_atime: 0,
+            st_atime_nsec: 0,
+            st_mtime: 0,
+            st_mtime_nsec: 0,
+            st_ctime: 0,
+            st_ctime_nsec: 0,
+            __unused: [0; 3],
         };
         let res = unsafe { lstat(cpath.as_ptr() as *const u8, &mut st) };
         if res < 0 {
@@ -661,9 +713,18 @@ pub async fn metadata<P: AsRef<str>>(path: P) -> crate::io::Result<Metadata> {
         path_u16.push(0);
         let mut data = WIN32_FILE_ATTRIBUTE_DATA {
             dwFileAttributes: 0,
-            ftCreationTime: FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 },
-            ftLastAccessTime: FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 },
-            ftLastWriteTime: FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 },
+            ftCreationTime: FILETIME {
+                dwLowDateTime: 0,
+                dwHighDateTime: 0,
+            },
+            ftLastAccessTime: FILETIME {
+                dwLowDateTime: 0,
+                dwHighDateTime: 0,
+            },
+            ftLastWriteTime: FILETIME {
+                dwLowDateTime: 0,
+                dwHighDateTime: 0,
+            },
             nFileSizeHigh: 0,
             nFileSizeLow: 0,
         };

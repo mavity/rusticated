@@ -181,7 +181,7 @@ impl Driver {
             }
         }
 
-        Ok(Self { 
+        Ok(Self {
             timer_handle,
             wakers: RefCell::new(HashMap::new()),
         })
@@ -189,8 +189,8 @@ impl Driver {
 
     pub fn set_timeout(&mut self, ms: Option<u32>) -> io::Result<()> {
         let due_time: i64 = match ms {
-            Some(0) => return Ok(()), // SleepEx handles 0 timeout natively
-            Some(ms) => -( (ms as i64) * 10000 ), // relative time in 100ns units (negative)
+            Some(0) => return Ok(()),           // SleepEx handles 0 timeout natively
+            Some(ms) => -((ms as i64) * 10000), // relative time in 100ns units (negative)
             None => return Ok(()),
         };
 
@@ -239,7 +239,9 @@ unsafe extern "system" fn timer_apc_callback(_arg: *mut core::ffi::c_void, _low:
 unsafe extern "system" fn wake_apc_callback(data: usize) {
     let token = data as u64;
     mark_ready(token);
-    let waker = crate::rt::executor::with_driver(|d| d.wakers.borrow_mut().remove(&token)).ok().flatten();
+    let waker = crate::rt::executor::with_driver(|d| d.wakers.borrow_mut().remove(&token))
+        .ok()
+        .flatten();
     if let Some(w) = waker {
         w.wake();
     }
@@ -287,7 +289,7 @@ impl Future for OverlappedRead {
         if !self.started {
             let handle = self.handle;
             let state_ptr = Rc::into_raw(Rc::clone(&self.state));
-            
+
             let (buf_ptr, buf_cap) = unsafe {
                 let buf = &mut *self.state.buffer.get();
                 let b = buf.as_mut().unwrap();
@@ -419,8 +421,14 @@ impl Drop for OverlappedWrite {
 
 // ─── Waiters ─────────────────────────────────────────────────────────────────
 
-pub struct WaitReadable { h: u64 }
-impl WaitReadable { pub fn new(h: u64) -> Self { Self { h } } }
+pub struct WaitReadable {
+    h: u64,
+}
+impl WaitReadable {
+    pub fn new(h: u64) -> Self {
+        Self { h }
+    }
+}
 impl Future for WaitReadable {
     type Output = io::Result<()>;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -433,8 +441,14 @@ impl Future for WaitReadable {
     }
 }
 
-pub struct WaitWritable { h: u64 }
-impl WaitWritable { pub fn new(h: u64) -> Self { Self { h } } }
+pub struct WaitWritable {
+    h: u64,
+}
+impl WaitWritable {
+    pub fn new(h: u64) -> Self {
+        Self { h }
+    }
+}
 impl Future for WaitWritable {
     type Output = io::Result<()>;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {

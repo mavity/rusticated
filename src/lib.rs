@@ -62,9 +62,11 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     #[cfg(windows)]
     unsafe {
         let mut handle: core::primitive::usize = 0;
-        unsafe extern "system" { fn GetStdHandle(nStdHandle: u32) -> core::primitive::usize; }
+        unsafe extern "system" {
+            fn GetStdHandle(nStdHandle: u32) -> core::primitive::usize;
+        }
         handle = GetStdHandle(0xFFFFFFF5); // STD_ERROR_HANDLE is -11
-        
+
         let msg = b"RUSTICATED PANIC! ";
         unsafe extern "system" {
             #[link_name = "WriteFile"]
@@ -78,8 +80,14 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
             fn ExitProcess(uExitCode: u32) -> !;
         }
         let mut written = 0;
-        WriteFileLibRs(handle, msg.as_ptr(), msg.len() as u32, &mut written, core::ptr::null_mut());
-        
+        WriteFileLibRs(
+            handle,
+            msg.as_ptr(),
+            msg.len() as u32,
+            &mut written,
+            core::ptr::null_mut(),
+        );
+
         let crash = crate::rt::windows::CRASH_REASON.load(core::sync::atomic::Ordering::SeqCst);
         let mut buf = [b'0'; 11];
         let mut n = crash.abs() as u32;
@@ -99,14 +107,32 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
             i -= 1;
         }
         let reason_msg = &buf[i + 1..11];
-        WriteFileLibRs(handle, reason_msg.as_ptr(), reason_msg.len() as u32, &mut written, core::ptr::null_mut());
-        
+        WriteFileLibRs(
+            handle,
+            reason_msg.as_ptr(),
+            reason_msg.len() as u32,
+            &mut written,
+            core::ptr::null_mut(),
+        );
+
         let msg3 = b"\n";
-        WriteFileLibRs(handle, msg3.as_ptr(), msg3.len() as u32, &mut written, core::ptr::null_mut());
+        WriteFileLibRs(
+            handle,
+            msg3.as_ptr(),
+            msg3.len() as u32,
+            &mut written,
+            core::ptr::null_mut(),
+        );
 
         if let Some(loc) = info.location() {
             let file = loc.file();
-            WriteFileLibRs(handle, file.as_ptr(), file.len() as u32, &mut written, core::ptr::null_mut());
+            WriteFileLibRs(
+                handle,
+                file.as_ptr(),
+                file.len() as u32,
+                &mut written,
+                core::ptr::null_mut(),
+            );
             let line = loc.line();
             // simple u32 to string
             let mut line_buf = [b'0'; 11];
@@ -122,13 +148,25 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
                     line_i -= 1;
                 }
             }
-            WriteFileLibRs(handle, b":".as_ptr(), 1, &mut written, core::ptr::null_mut());
+            WriteFileLibRs(
+                handle,
+                b":".as_ptr(),
+                1,
+                &mut written,
+                core::ptr::null_mut(),
+            );
             let lmsg = &line_buf[line_i + 1..11];
-            WriteFileLibRs(handle, lmsg.as_ptr(), lmsg.len() as u32, &mut written, core::ptr::null_mut());
+            WriteFileLibRs(
+                handle,
+                lmsg.as_ptr(),
+                lmsg.len() as u32,
+                &mut written,
+                core::ptr::null_mut(),
+            );
         }
         ExitProcess(1)
     }
-    
+
     #[cfg(not(windows))]
     loop {}
 }
@@ -141,14 +179,20 @@ unsafe impl core::alloc::GlobalAlloc for SystemAllocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
         #[cfg(unix)]
         {
-            unsafe extern "C" { fn malloc(size: core::primitive::usize) -> *mut u8; }
+            unsafe extern "C" {
+                fn malloc(size: core::primitive::usize) -> *mut u8;
+            }
             unsafe { malloc(layout.size()) }
         }
         #[cfg(windows)]
         {
             unsafe extern "system" {
                 fn GetProcessHeap() -> core::primitive::usize;
-                fn HeapAlloc(hHeap: core::primitive::usize, dwFlags: u32, dwBytes: core::primitive::usize) -> *mut u8;
+                fn HeapAlloc(
+                    hHeap: core::primitive::usize,
+                    dwFlags: u32,
+                    dwBytes: core::primitive::usize,
+                ) -> *mut u8;
             }
             unsafe { HeapAlloc(GetProcessHeap(), 0, layout.size()) }
         }
@@ -157,7 +201,9 @@ unsafe impl core::alloc::GlobalAlloc for SystemAllocator {
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: core::alloc::Layout) {
         #[cfg(unix)]
         {
-            unsafe extern "C" { fn free(p: *mut u8); }
+            unsafe extern "C" {
+                fn free(p: *mut u8);
+            }
             unsafe { free(ptr) }
         }
         #[cfg(windows)]
@@ -166,7 +212,9 @@ unsafe impl core::alloc::GlobalAlloc for SystemAllocator {
                 fn GetProcessHeap() -> core::primitive::usize;
                 fn HeapFree(hHeap: core::primitive::usize, dwFlags: u32, lpMem: *mut u8) -> i32;
             }
-            unsafe { HeapFree(GetProcessHeap(), 0, ptr); }
+            unsafe {
+                HeapFree(GetProcessHeap(), 0, ptr);
+            }
         }
     }
 }

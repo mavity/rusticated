@@ -5,10 +5,10 @@ extern crate alloc;
 
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 use std::fs::File;
 use std::io::{AsyncRead, AsyncWrite};
 use std::tty::{stdin, stdout};
-use alloc::vec::Vec;
 
 std::spawn!(async_main());
 
@@ -16,7 +16,11 @@ async fn async_main() {
     let mut out = stdout();
     let mut input = stdin();
 
-    write_all(&mut out, b"rusticated demo: type a line and press Enter (5s timeout)\n").await;
+    write_all(
+        &mut out,
+        b"rusticated demo: type a line and press Enter (5s timeout)\n",
+    )
+    .await;
     write_all(&mut out, b"> ").await;
 
     let timeout_fut = std::time::sleep(core::time::Duration::from_secs(5));

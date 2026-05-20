@@ -213,12 +213,11 @@ pub fn poll_step() -> io::Result<PollStatus> {
 ///
 /// If `deadline` is `None`, blocks indefinitely.
 pub fn poll_step_idle(deadline: Option<Duration>) -> io::Result<PollStatus> {
-    
     // We compute the remaining timeout based on `deadline`.
     // We already have `now_ns()` so we could do math, but it's simpler:
     // Actually, `deadline` is already the duration from `now` since `next_deadline()` returns duration.
     // Wait, the specification says: `deadline: Option<Duration>`.
-    
+
     poll_step_internal(Some(deadline))
 }
 
@@ -238,16 +237,16 @@ fn poll_step_internal(timeout: Option<Option<Duration>>) -> io::Result<PollStatu
         if let Some(ms) = _timeout_ms {
             d.set_timeout(Some(ms))?;
         }
-        
+
         #[cfg(windows)]
-        { 
+        {
             // In Windows, waitable timers via SetWaitableTimer trigger APCs.
             // On sleep, SleepEx waits until either the timeout elapses OR an APC executes.
             // When an APC executes (such as our wakeup tick from the timer or I/O callback),
             // SleepEx returns WAIT_IO_COMPLETION.
             // So if `blocking` is true but there's a 0ms deadline (i.e. instant timeout),
             // we should still drop right through.
-            d.poll(_blocking, _timeout_ms) 
+            d.poll(_blocking, _timeout_ms)
         }
         #[cfg(not(windows))]
         {
@@ -299,16 +298,18 @@ fn poll_step_internal(timeout: Option<Option<Duration>>) -> io::Result<PollStatu
     let live_io = 0;
 
     let expired = crate::rt::timers::wake_expired();
-    
-    Ok(if remaining == 0 && live_io == 0 && !had_events && !expired {
-        PollStatus::Done
-    } else if made_progress || had_events || expired {
-        PollStatus::Ready
-    } else {
-        PollStatus::Idle {
-            next_deadline: next_deadline(),
-        }
-    })
+
+    Ok(
+        if remaining == 0 && live_io == 0 && !had_events && !expired {
+            PollStatus::Done
+        } else if made_progress || had_events || expired {
+            PollStatus::Ready
+        } else {
+            PollStatus::Idle {
+                next_deadline: next_deadline(),
+            }
+        },
+    )
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

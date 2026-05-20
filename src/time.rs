@@ -35,7 +35,10 @@ pub fn now_ns() -> u64 {
         unsafe extern "C" {
             fn clock_gettime(clk_id: i32, tp: *mut Timespec) -> i32;
         }
-        let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let mut ts = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         unsafe { clock_gettime(0, &mut ts) }; // CLOCK_REALTIME is 0
         (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64)
     }
@@ -239,11 +242,17 @@ mod native_time {
                 return Poll::Ready(());
             }
             if self.timer_id.is_none() {
-                self.timer_id = Some(crate::rt::timers::register_timer(self.deadline, cx.waker().clone()));
+                self.timer_id = Some(crate::rt::timers::register_timer(
+                    self.deadline,
+                    cx.waker().clone(),
+                ));
             }
             // Overwrite waker if already registered
             crate::rt::timers::cancel_timer(self.timer_id.unwrap());
-            self.timer_id = Some(crate::rt::timers::register_timer(self.deadline, cx.waker().clone()));
+            self.timer_id = Some(crate::rt::timers::register_timer(
+                self.deadline,
+                cx.waker().clone(),
+            ));
             Poll::Pending
         }
     }

@@ -19,7 +19,9 @@ fn write_overlapped(
 ) -> anyhow::Result<()> {
     let base = ov_ptr as usize;
     let end = base.checked_add(24).context("ov_ptr overflow")?;
-    let slice = mem.get_mut(base..end).context("ov_ptr out of WASM memory bounds")?;
+    let slice = mem
+        .get_mut(base..end)
+        .context("ov_ptr out of WASM memory bounds")?;
     slice[0..4].copy_from_slice(&1u32.to_le_bytes()); // flags = FLAG_COMPLETED
     slice[4..8].copy_from_slice(&error.to_le_bytes());
     slice[8..16].copy_from_slice(&continued.to_le_bytes());
@@ -29,7 +31,9 @@ fn write_overlapped(
 
 fn guest_slice<'a>(mem: &'a mut [u8], ptr: u32, len: u32) -> anyhow::Result<&'a mut [u8]> {
     let start = ptr as usize;
-    let end = start.checked_add(len as usize).context("ptr+len overflow")?;
+    let end = start
+        .checked_add(len as usize)
+        .context("ptr+len overflow")?;
     mem.get_mut(start..end)
         .with_context(|| format!("guest ptr={ptr} len={len} out of WASM memory bounds"))
 }
@@ -44,11 +48,15 @@ fn get_memory(caller: &mut Caller<'_, HostState>) -> anyhow::Result<Memory> {
 // ── Register all env imports with the Linker ─────────────────────────────────
 
 pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
-    linker.func_wrap("env", "host_panic", |_: Caller<'_, HostState>| -> anyhow::Result<()> {
-        println!("*** WASM INVOKED HOST PANIC ***");
-        let _ = std::io::Write::flush(&mut std::io::stdout());
-        Err(anyhow::anyhow!("WASM Panicked!"))
-    })?;
+    linker.func_wrap(
+        "env",
+        "host_panic",
+        |_: Caller<'_, HostState>| -> anyhow::Result<()> {
+            println!("*** WASM INVOKED HOST PANIC ***");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            Err(anyhow::anyhow!("WASM Panicked!"))
+        },
+    )?;
 
     // get_time() -> u64  (nanoseconds since Unix epoch)
     linker.func_wrap("env", "get_time", |_caller: Caller<'_, HostState>| -> u64 {
@@ -67,8 +75,7 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let data = mem.data_mut(&mut caller);
             let buf = guest_slice(data, ptr, len)?;
             // Read cryptographic random bytes from /dev/urandom.
-            let mut f = std::fs::File::open("/dev/urandom")
-                .context("open /dev/urandom")?;
+            let mut f = std::fs::File::open("/dev/urandom").context("open /dev/urandom")?;
             std::io::Read::read_exact(&mut f, buf).context("read /dev/urandom")?;
             Ok(())
         },
@@ -143,16 +150,21 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         "env",
         "timer_set",
         |mut caller: Caller<'_, HostState>, ov_ptr: u32, delay_ms: u32| -> anyhow::Result<()> {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(delay_ms as u64);
+            let deadline =
+                std::time::Instant::now() + std::time::Duration::from_millis(delay_ms as u64);
             caller.data_mut().timers.insert(ov_ptr, deadline);
             Ok(())
         },
     )?;
 
     // timer_cancel(ov)
-    linker.func_wrap("env", "timer_cancel", |mut caller: Caller<'_, HostState>, ov_ptr: u32| {
-        caller.data_mut().timers.remove(&ov_ptr);
-    })?;
+    linker.func_wrap(
+        "env",
+        "timer_cancel",
+        |mut caller: Caller<'_, HostState>, ov_ptr: u32| {
+            caller.data_mut().timers.remove(&ov_ptr);
+        },
+    )?;
 
     // read(ov, handle, ptr, len)
     // Regular files: synchronous read inside the import.
@@ -168,16 +180,16 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
          -> anyhow::Result<()> {
             let mem_ok = get_memory(&mut caller)?;
             let (data, host) = mem_ok.data_and_store_mut(&mut caller);
-            
+
             let is_file = host.is_regular_file(handle);
 
             if is_file {
                 // Files are always ready — read synchronously.
                 let buf = guest_slice(data, guest_ptr, guest_len)?;
-                
+
                 let mut error = 0;
                 let mut read = 0;
-                
+
                 if let Some(HandleKind::File(f)) = host.handles.get_mut(&handle) {
                     use std::io::Read;
                     match f.read(buf) {
@@ -187,19 +199,31 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                 } else {
                     anyhow::bail!("read: invalid handle {}", handle);
                 }
-                
+
                 write_overlapped(data, ov_ptr, error, 0, read as u64)?;
             } else {
-                let fd = host.fd_for(handle).with_context(|| format!("read: invalid handle {}", handle))?;
+                let fd = host
+                    .fd_for(handle)
+                    .with_context(|| format!("read: invalid handle {}", handle))?;
                 if fd == 0 {
                     // stdin: fulfilled by the reader thread in poll_completions.
-                    host.stdin_pending = Some(PendingOp { ov_ptr, guest_ptr, guest_len, _fd: fd });
+                    host.stdin_pending = Some(PendingOp {
+                        ov_ptr,
+                        guest_ptr,
+                        guest_len,
+                        _fd: fd,
+                    });
                 } else {
                     // Other stream fds: register with epoll; completion happens in poll_completions().
                     let token = host.epoll.register_read(fd)?;
                     host.epoll.pending.insert(
                         token,
-                        PendingOp { ov_ptr, guest_ptr, guest_len, _fd: fd },
+                        PendingOp {
+                            ov_ptr,
+                            guest_ptr,
+                            guest_len,
+                            _fd: fd,
+                        },
                     );
                 }
             }
@@ -221,10 +245,10 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let (data, host) = mem.data_and_store_mut(&mut caller);
             let src = guest_slice(data, buf_ptr, buf_len)?.to_vec();
             use std::io::Write;
-            
+
             let mut error = 0;
             let mut written = 0;
-            
+
             if let Some(kind) = host.handles.get_mut(&handle) {
                 match kind {
                     HandleKind::Fd(fd) => {
@@ -320,8 +344,8 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let path_bytes = guest_slice(data, path_ptr, path_len)?.to_vec();
             let path = std::str::from_utf8(&path_bytes).context("path_stat: non-UTF-8 path")?;
             // symlink_metadata (lstat semantics) so is_symlink is meaningful.
-            let meta = std::fs::symlink_metadata(path)
-                .with_context(|| format!("path_stat: {path:?}"))?;
+            let meta =
+                std::fs::symlink_metadata(path).with_context(|| format!("path_stat: {path:?}"))?;
             let to_ns = |t: std::io::Result<std::time::SystemTime>| {
                 t.ok()
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
@@ -336,7 +360,13 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             #[cfg(unix)]
             let (mode, nlink, uid, gid, inode) = {
                 use std::os::unix::fs::MetadataExt;
-                (meta.mode(), meta.nlink(), meta.uid(), meta.gid(), meta.ino())
+                (
+                    meta.mode(),
+                    meta.nlink(),
+                    meta.uid(),
+                    meta.gid(),
+                    meta.ino(),
+                )
             };
             #[cfg(windows)]
             let (mode, nlink, uid, gid, inode) = {
@@ -355,9 +385,18 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                 (perms, 0u64, 0u32, 0u32, 0u64)
             };
             let stat = StatInfo {
-                len: meta.len(), is_dir: meta.is_dir(), is_symlink, readonly,
-                mode, nlink, uid, gid, inode,
-                mtime_ns, atime_ns, ctime_ns,
+                len: meta.len(),
+                is_dir: meta.is_dir(),
+                is_symlink,
+                readonly,
+                mode,
+                nlink,
+                uid,
+                gid,
+                inode,
+                mtime_ns,
+                atime_ns,
+                ctime_ns,
             };
             let stat_handle = host.alloc_stat(stat);
             write_overlapped(data, ov_ptr, 0, 0, stat_handle)
@@ -365,69 +404,141 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     )?;
 
     // stat_len(stat_handle) -> u64
-    linker.func_wrap("env", "stat_len", |caller: Caller<'_, HostState>, h: u64| -> u64 {
-        caller.data().stats.get(&h).map(|s| s.len).unwrap_or(0)
-    })?;
+    linker.func_wrap(
+        "env",
+        "stat_len",
+        |caller: Caller<'_, HostState>, h: u64| -> u64 {
+            caller.data().stats.get(&h).map(|s| s.len).unwrap_or(0)
+        },
+    )?;
 
     // stat_is_dir(stat_handle) -> u32
-    linker.func_wrap("env", "stat_is_dir", |caller: Caller<'_, HostState>, h: u64| -> u32 {
-        caller.data().stats.get(&h).map(|s| s.is_dir as u32).unwrap_or(0)
-    })?;
+    linker.func_wrap(
+        "env",
+        "stat_is_dir",
+        |caller: Caller<'_, HostState>, h: u64| -> u32 {
+            caller
+                .data()
+                .stats
+                .get(&h)
+                .map(|s| s.is_dir as u32)
+                .unwrap_or(0)
+        },
+    )?;
 
     // stat_is_file(stat_handle) -> u32
-    linker.func_wrap("env", "stat_is_file", |caller: Caller<'_, HostState>, h: u64| -> u32 {
-        caller.data().stats.get(&h).map(|s| if s.is_dir { 0 } else { 1 }).unwrap_or(0)
-    })?;
+    linker.func_wrap(
+        "env",
+        "stat_is_file",
+        |caller: Caller<'_, HostState>, h: u64| -> u32 {
+            caller
+                .data()
+                .stats
+                .get(&h)
+                .map(|s| if s.is_dir { 0 } else { 1 })
+                .unwrap_or(0)
+        },
+    )?;
 
     // stat_mtime(stat_handle) -> u64  (nanoseconds since UNIX epoch)
-    linker.func_wrap("env", "stat_mtime", |caller: Caller<'_, HostState>, h: u64| -> u64 {
-        caller.data().stats.get(&h).map(|s| s.mtime_ns).unwrap_or(0)
-    })?;
+    linker.func_wrap(
+        "env",
+        "stat_mtime",
+        |caller: Caller<'_, HostState>, h: u64| -> u64 {
+            caller.data().stats.get(&h).map(|s| s.mtime_ns).unwrap_or(0)
+        },
+    )?;
 
     // stat_atime(stat_handle) -> u64
-    linker.func_wrap("env", "stat_atime", |caller: Caller<'_, HostState>, h: u64| -> u64 {
-        caller.data().stats.get(&h).map(|s| s.atime_ns).unwrap_or(0)
-    })?;
+    linker.func_wrap(
+        "env",
+        "stat_atime",
+        |caller: Caller<'_, HostState>, h: u64| -> u64 {
+            caller.data().stats.get(&h).map(|s| s.atime_ns).unwrap_or(0)
+        },
+    )?;
 
     // stat_ctime(stat_handle) -> u64
-    linker.func_wrap("env", "stat_ctime", |caller: Caller<'_, HostState>, h: u64| -> u64 {
-        caller.data().stats.get(&h).map(|s| s.ctime_ns).unwrap_or(0)
-    })?;
+    linker.func_wrap(
+        "env",
+        "stat_ctime",
+        |caller: Caller<'_, HostState>, h: u64| -> u64 {
+            caller.data().stats.get(&h).map(|s| s.ctime_ns).unwrap_or(0)
+        },
+    )?;
 
     // stat_is_symlink(stat_handle) -> u32
-    linker.func_wrap("env", "stat_is_symlink", |caller: Caller<'_, HostState>, h: u64| -> u32 {
-        caller.data().stats.get(&h).map(|s| s.is_symlink as u32).unwrap_or(0)
-    })?;
+    linker.func_wrap(
+        "env",
+        "stat_is_symlink",
+        |caller: Caller<'_, HostState>, h: u64| -> u32 {
+            caller
+                .data()
+                .stats
+                .get(&h)
+                .map(|s| s.is_symlink as u32)
+                .unwrap_or(0)
+        },
+    )?;
 
     // stat_readonly(stat_handle) -> u32
-    linker.func_wrap("env", "stat_readonly", |caller: Caller<'_, HostState>, h: u64| -> u32 {
-        caller.data().stats.get(&h).map(|s| s.readonly as u32).unwrap_or(0)
-    })?;
+    linker.func_wrap(
+        "env",
+        "stat_readonly",
+        |caller: Caller<'_, HostState>, h: u64| -> u32 {
+            caller
+                .data()
+                .stats
+                .get(&h)
+                .map(|s| s.readonly as u32)
+                .unwrap_or(0)
+        },
+    )?;
 
     // stat_mode(stat_handle) -> u32
-    linker.func_wrap("env", "stat_mode", |caller: Caller<'_, HostState>, h: u64| -> u32 {
-        caller.data().stats.get(&h).map(|s| s.mode).unwrap_or(0)
-    })?;
+    linker.func_wrap(
+        "env",
+        "stat_mode",
+        |caller: Caller<'_, HostState>, h: u64| -> u32 {
+            caller.data().stats.get(&h).map(|s| s.mode).unwrap_or(0)
+        },
+    )?;
 
     // stat_nlink(stat_handle) -> u64
-    linker.func_wrap("env", "stat_nlink", |caller: Caller<'_, HostState>, h: u64| -> u64 {
-        caller.data().stats.get(&h).map(|s| s.nlink).unwrap_or(0)
-    })?;
+    linker.func_wrap(
+        "env",
+        "stat_nlink",
+        |caller: Caller<'_, HostState>, h: u64| -> u64 {
+            caller.data().stats.get(&h).map(|s| s.nlink).unwrap_or(0)
+        },
+    )?;
 
     // stat_uid(stat_handle) -> u32
-    linker.func_wrap("env", "stat_uid", |caller: Caller<'_, HostState>, h: u64| -> u32 {
-        caller.data().stats.get(&h).map(|s| s.uid).unwrap_or(0)
-    })?;
+    linker.func_wrap(
+        "env",
+        "stat_uid",
+        |caller: Caller<'_, HostState>, h: u64| -> u32 {
+            caller.data().stats.get(&h).map(|s| s.uid).unwrap_or(0)
+        },
+    )?;
 
     // stat_gid(stat_handle) -> u32
-    linker.func_wrap("env", "stat_gid", |caller: Caller<'_, HostState>, h: u64| -> u32 {
-        caller.data().stats.get(&h).map(|s| s.gid).unwrap_or(0)
-    })?;
+    linker.func_wrap(
+        "env",
+        "stat_gid",
+        |caller: Caller<'_, HostState>, h: u64| -> u32 {
+            caller.data().stats.get(&h).map(|s| s.gid).unwrap_or(0)
+        },
+    )?;
 
     // stat_inode(stat_handle) -> u64
-    linker.func_wrap("env", "stat_inode", |caller: Caller<'_, HostState>, h: u64| -> u64 {
-        caller.data().stats.get(&h).map(|s| s.inode).unwrap_or(0)
-    })?;
+    linker.func_wrap(
+        "env",
+        "stat_inode",
+        |caller: Caller<'_, HostState>, h: u64| -> u64 {
+            caller.data().stats.get(&h).map(|s| s.inode).unwrap_or(0)
+        },
+    )?;
 
     // dir_read(ov, handle, ptr, len) — stub: no entries
     linker.func_wrap(
@@ -466,7 +577,10 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     linker.func_wrap(
         "env",
         "net_accept",
-        |mut caller: Caller<'_, HostState>, ov_ptr: u32, _listen_handle: u64| -> anyhow::Result<()> {
+        |mut caller: Caller<'_, HostState>,
+         ov_ptr: u32,
+         _listen_handle: u64|
+         -> anyhow::Result<()> {
             let mem = get_memory(&mut caller)?;
             let data = mem.data_mut(&mut caller);
             write_overlapped(data, ov_ptr, libc::ENOSYS as u32, 0, 0)
@@ -492,7 +606,10 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     linker.func_wrap(
         "env",
         "process_wait",
-        |mut caller: Caller<'_, HostState>, ov_ptr: u32, _process_handle: u64| -> anyhow::Result<()> {
+        |mut caller: Caller<'_, HostState>,
+         ov_ptr: u32,
+         _process_handle: u64|
+         -> anyhow::Result<()> {
             let mem = get_memory(&mut caller)?;
             let data = mem.data_mut(&mut caller);
             write_overlapped(data, ov_ptr, libc::ENOSYS as u32, 0, 0)
@@ -518,12 +635,18 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     )?;
 
     // tty_set_mode(handle, mode) — no-op
-    linker.func_wrap("env", "tty_set_mode", |_: Caller<'_, HostState>, _h: u64, _mode: u32| {})?;
+    linker.func_wrap(
+        "env",
+        "tty_set_mode",
+        |_: Caller<'_, HostState>, _h: u64, _mode: u32| {},
+    )?;
 
     // tty_get_size(handle) -> u32  (80 cols × 24 rows)
-    linker.func_wrap("env", "tty_get_size", |_: Caller<'_, HostState>, _h: u64| -> u32 {
-        (80u32 << 16) | 24
-    })?;
+    linker.func_wrap(
+        "env",
+        "tty_get_size",
+        |_: Caller<'_, HostState>, _h: u64| -> u32 { (80u32 << 16) | 24 },
+    )?;
 
     Ok(())
 }
@@ -542,9 +665,12 @@ pub fn poll_completions(
 ) -> anyhow::Result<bool> {
     let mut progress = false;
     let now = std::time::Instant::now();
-    
+
     // 1. Check timers
-    let expired: Vec<u32> = store.data().timers.iter()
+    let expired: Vec<u32> = store
+        .data()
+        .timers
+        .iter()
         .filter(|&(_, &deadline)| now >= deadline)
         .map(|(&ov, _)| ov)
         .collect();
@@ -584,9 +710,11 @@ pub fn poll_completions(
         }
     } else if store.data().stdin_pending.is_some() && timeout_ms > 0 {
         // No data yet but caller is willing to block briefly — wait for stdin.
-        match store.data_mut().stdin_rx.recv_timeout(
-            std::time::Duration::from_millis(timeout_ms as u64)
-        ) {
+        match store
+            .data_mut()
+            .stdin_rx
+            .recv_timeout(std::time::Duration::from_millis(timeout_ms as u64))
+        {
             Ok(bytes) => {
                 store.data_mut().stdin_buf.extend_from_slice(&bytes);
                 // Retry immediately now that we have data.
@@ -613,11 +741,13 @@ pub fn poll_completions(
     if !fired.is_empty() {
         let (mem, host) = memory.data_and_store_mut(&mut *store);
         for token in fired {
-            let Some(op) = host.epoll.pending.remove(&token) else { continue };
+            let Some(op) = host.epoll.pending.remove(&token) else {
+                continue;
+            };
             let _ = write_overlapped(mem, op.ov_ptr, 0, 0, 0); // EOF stub
             progress = true;
         }
     }
-    
+
     Ok(progress)
 }

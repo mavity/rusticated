@@ -123,14 +123,8 @@ impl Driver {
         let timeout = timeout_ms.map(|t| t as i32).unwrap_or(-1);
         let n = loop {
             // SAFETY: pointer + length describe the local array.
-            let n = unsafe {
-                epoll_wait(
-                    self.epfd,
-                    evbuf.as_mut_ptr(),
-                    evbuf.len() as i32,
-                    timeout,
-                )
-            };
+            let n =
+                unsafe { epoll_wait(self.epfd, evbuf.as_mut_ptr(), evbuf.len() as i32, timeout) };
             if n >= 0 {
                 break n;
             }
