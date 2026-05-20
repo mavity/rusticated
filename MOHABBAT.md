@@ -269,26 +269,22 @@ To produce mohabbat.bat we need brots, washmhosts, and brain. To run
 mohabbat.bat we need mohabbat.bat. The first one must come from a
 non-mohabbat build path.
 
-### The solution: `mohabbat`'s native side does the first build.
+### The solution: `mohabbat/build.rs` does the first build.
 
-The `mohabbat/` crate is dual-purpose:
+The `mohabbat/` crate has an extremely flat layout and is composed of two active parts:
 
-- **As a native binary** (`cargo run -p mohabbat`): orchestrates the
-  first build of `mohabbat.bat`. Pure Rust, uses std, can shell out to
-  cargo.
-- **As a WASM module** (`cargo build -p mohabbat --target
-  wasm32-unknown-unknown`): the brain that goes inside vegetables.
+- **The Native Builder** (`build.rs`): orchestrates the first build of `mohabbat.bat`. It is executed by Cargo during a normal build of the crate. It is pure Rust, uses std, and shells out to cargo to build components.
+- **The WASM Brain** (`src/main.rs`): the builder logic compiled to `wasm32-unknown-unknown` that lives inside every vegetable.
 
-The two builds share most code. The split is a feature flag and a
-different `[[bin]]` selection, or two `[[bin]]` entries with `required-
-features`.
+Rather than having a separate native binary target, the simple act of compiling the crate (`cargo build -p mohabbat`) triggers `build.rs` which performs the entire assembly as a side-effect, creating `mohabbat.bat` in the repository root.
+
+Shared logic between `build.rs` and the brain (such as format constants, Brotli compression/decompression, and stitching) lives in `src/logic.rs` (or similar, imported by `build.rs` with `#[path]`).
 
 ### The first build, step by step
 
-Run by `cargo run -p mohabbat` (native, on the developer's machine).
+Triggered by `cargo build -p mohabbat` (native, on the developer's machine).
 
-This single command does everything via `mohabbat/build.rs` plus the
-binary's `main`. The build.rs prepares assets, main stitches them.
+This single command does everything via `mohabbat/build.rs`. The `build.rs` prepares assets and stitches them into the final `.bat`.
 
 #### Step 1 — workspace setup
 
@@ -341,15 +337,12 @@ incremental story — `target/tree` is persistent.
 #### Step 4 — build the brain
 
 ```
-cargo build -p mohabbat --release --target wasm32-unknown-unknown \
-    --no-default-features --features brain
+cargo build -p mohabbat --release --target wasm32-unknown-unknown
 ```
 
 Output at `target/tree/wasm32-unknown-unknown/release/mohabbat.wasm`.
 
-The `brain` feature disables the native-only code paths (cargo
-shell-out, etc. — those parts use rusticated's process module, which
-already exists for WASM target).
+When `mohabbat` is compiled targeting WASM, `build.rs` immediately exits early (yielding no operations), and `src/main.rs` compiles the `#[cfg(target_arch = "wasm32")]` block which contains the real builder logic.
 
 #### Step 5 — assemble brots and washmhosts per target
 
@@ -391,7 +384,9 @@ For each present brot:
 3. Write `mohabbat.bat` at the repo root.
 4. On POSIX, `chmod +x`.
 
-Done. `cargo run -p mohabbat` has produced `mohabbat.bat`.
+Done. `cargo build -p mohabbat` has produced `mohabbat.bat`.
+
+Note: Cargo will still follow through and compile `mohabbat/src/main.rs` into a native binary after `build.rs` finishes. We handle this by making `src/main.rs` conditionally compiled: when built natively, it's just a tiny stub CLI that prints `"mohabbat.bat generated at workspace root"`. The "real" main output is the side-effect `mohabbat.bat`. 
 
 ### Subsequent uses
 
@@ -400,7 +395,7 @@ vegetable — including a new `mohabbat.bat` — without invoking cargo on
 the workspace at all. The brain inside `mohabbat.bat` does Mode A or
 Mode B from §5.
 
-The native `cargo run -p mohabbat` path is still useful for clean
+The native `cargo build -p mohabbat` path is still useful for clean
 rebuilds, for CI, and for refreshing the seed before publishing.
 
 ---
@@ -417,13 +412,17 @@ rusticated/
 │   ├── Cargo.toml
 │   ├── build.rs                emits linker script for .mohabbat_meta
 │   └── src/main.rs
-├── mohabbat/                   NEW: builder, dual native+wasm
-│   ├── Cargo.toml              two [[bin]] targets, or feature-gated
-│   ├── build.rs                orchestrates the first-build pipeline
+├── mohabbat/                   NEW: builder, flattened
+│   ├── Cargo.toml
+│   ├── build.rs                THE BUILDER: probes, cross-builds, patches,
+│   │                           and performs the first stitch natively.
 │   └── src/
-│       ├── main_native.rs      stitch logic, brotli, patching
-│       ├── main_brain.rs       runs inside washmhost as the brain
-│       └── shared/             pool format, slot table, magic, patcher
+│       ├── main.rs             THE BRAIN + NATIVE STUB.
+│       │                       #[cfg(wasm32)]: The builder logic running in washmhost.
+│       │                       #[cfg(not(wasm32))]: A tiny dummy CLI that prints success.
+│       └── logic.rs            SHARED LOGIC: format constants, pool layout,
+│                               patching, and stitch routines shared by 
+│                               build.rs and main.rs (via #[path]).
 ├── mohabbat.bat                produced artifact, checked in for crates.io
 ├── target/
 │   └── tree/                   sandbox for sub-cargo builds
@@ -447,15 +446,15 @@ Strategy:
    targets, produced on a CI machine that has every toolchain.
 2. When packaged for crates.io, `mohabbat.bat` is included in the
    crate sources (`include = ["mohabbat.bat", ...]` in Cargo.toml).
-3. On `cargo install`, `mohabbat/build.rs` runs:
-   - Tries to build brots and washmhosts locally for every target.
+3. On `cargo build -p mohabbat` (or download/install where a build runs):
+   - `build.rs` tries to build brots and washmhosts locally for every target.
    - For targets where local build fails, borrows the corresponding
      brot and washmhost from the bundled `mohabbat.bat` seed.
    - Always rebuilds the brain locally so the user gets the current
      version of the builder logic.
-4. The final stitched `mohabbat.bat` (placed in the user's install
-   directory) thus carries: current brain + mix of fresh and borrowed
-   native components.
+4. `build.rs` writes the final stitched `mohabbat.bat` (placed in the repo root
+   or crate extraction directory) which carries: current brain + mix of fresh 
+   and borrowed native components.
 
 Complications:
 
@@ -642,9 +641,9 @@ A consolidated list. Most are mentioned above; this is the index.
 
 ### Testing
 
-- Unit tests for the patcher live in `mohabbat/`'s native side. Build
-  a tiny ELF/PE/Mach-O fixture containing the magic, patch it, read it
-  back, assert.
+- Unit tests for the patcher live in `mohabbat/src/logic.rs` (tested
+  during `cargo test`). Build a tiny ELF/PE/Mach-O fixture containing 
+  the magic, patch it, read it back, assert.
 - Integration test: produce a tiny vegetable wrapping a hello-world
   WASM, run it on the host platform, assert exit code 0 and stdout.
 - Cross-platform CI: GitHub Actions matrix with one job per Modern
@@ -669,9 +668,9 @@ verifiable.
 2. Create empty `brot/` crate. Add a `_start` for one platform (Linux
    x64). Make it print "brot" and exit. Confirm size < 100 KB.
 3. Add the `.mohabbat_meta` section with the magic and six zero u64s.
-   Write a stand-alone patcher utility that opens the file, finds the
-   magic, writes test values, verify by reading them back from a
-   modified `_start`.
+   Write a stand-alone patcher utility in `mohabbat/src/logic.rs` that 
+   opens the file, finds the magic, writes test values, verify by 
+   reading them back from a modified `_start`.
 4. Add brotli decoder, allocator, file read, decompression. Make brot
    dump the decompressed pool to stdout and exit. Drive it from a tiny
    test vegetable assembled by hand.
@@ -683,12 +682,12 @@ verifiable.
    x64 (needs macOS or osxcross), then macOS arm64.
 7. Build the real washmhost statically for all six targets.
    Verify each runs the existing demo WASM.
-8. Build the native side of `mohabbat/` (no brain yet). Drive
+8. Build the `build.rs` side of `mohabbat/` (no brain yet). Drive
    end-to-end: produce a vegetable that wraps the existing demo WASM.
    Run it on each host platform.
 9. Write the brain. Reuse the patcher and stitcher code by sharing it
-   between native and wasm builds via the `shared/` module.
-10. Build mohabbat.bat from itself: native side produces the first one,
+   between `build.rs` and the brain via the `logic.rs` module.
+10. Build mohabbat.bat from itself: `build.rs` produces the first one,
     then use it to wrap a fresh `mohabbat.wasm` and produce a second
     one. Diff the two to make sure self-replication is stable.
 11. Wire the seed-borrow path. Verify partial builds work.
