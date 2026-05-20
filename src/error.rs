@@ -4,12 +4,12 @@ use crate::string::String;
 use thiserror::Error;
 
 /// Result alias.
-pub type Result<T> = core::result::Result<T, Error>;
+pub type Result<T> = core::result::Result<T, SystemError>;
 
 /// Errors from I/O and system calls.
 #[derive(Debug, Error)]
 #[non_exhaustive]
-pub enum Error {
+pub enum SystemError {
     /// The requested operation is not supported on this target.
     #[error("operation not supported: {0}")]
     Unsupported(&'static str),
@@ -37,7 +37,7 @@ pub enum Error {
     Other(String),
 }
 
-impl Error {
+impl SystemError {
     /// Convenience constructor for a path-bound I/O error.
     pub fn io(path: impl Into<String>, source: crate::io::Error) -> Self {
         Self::Io {
@@ -46,3 +46,6 @@ impl Error {
         }
     }
 }
+
+#[allow(unused_imports)]
+pub use core::error::*;

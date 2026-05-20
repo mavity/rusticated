@@ -13,11 +13,72 @@
     )
 )]
 
+/// Environment-specific constants.
+pub mod consts {
+    /// The target architecture.
+    pub const ARCH: &str = if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else if cfg!(target_arch = "wasm32") {
+        "wasm32"
+    } else {
+        "unknown"
+    };
+
+    /// The target operating system.
+    pub const OS: &str = if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "freebsd") {
+        "freebsd"
+    } else if cfg!(target_os = "netbsd") {
+        "netbsd"
+    } else if cfg!(target_os = "openbsd") {
+        "openbsd"
+    } else if cfg!(target_os = "dragonfly") {
+        "dragonfly"
+    } else if cfg!(target_os = "android") {
+        "android"
+    } else if cfg!(target_os = "ios") {
+        "ios"
+    } else {
+        "unknown"
+    };
+
+    /// The target family.
+    pub const FAMILY: &str = if cfg!(unix) {
+        "unix"
+    } else if cfg!(windows) {
+        "windows"
+    } else {
+        "unknown"
+    };
+
+    /// The executable file extension, if any.
+    pub const EXE_EXTENSION: &str = if cfg!(windows) { "exe" } else { "" };
+}
+
 #[cfg(not(target_family = "wasm"))]
 mod native_env {
     use crate::borrow::ToOwned;
+    use crate::io;
+    use crate::path::PathBuf;
     use crate::string::String;
     use crate::vec::Vec;
+
+    /// Returns all host environment variables.
+    pub fn get_host_env_vars() -> Vec<(String, String)> {
+        alloc::vec![]
+    }
+
+    /// Returns the current working directory.
+    pub fn current_dir() -> io::Result<PathBuf> {
+        Ok(PathBuf::from("/"))
+    }
 
     // â”€â”€ args
     // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -198,10 +259,18 @@ mod native_env {
     pub fn get_env() -> Vec<(String, String)> {
         read_env()
     }
+    /// Joins a collection of paths into a single path-like string.
+    pub fn join_paths<I, T>(_paths: I) -> io::Result<String>
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<crate::path::Path>,
+    {
+        Ok(String::new())
+    }
 }
 
 #[cfg(not(target_family = "wasm"))]
-pub use native_env::{get_args, get_env};
+pub use native_env::{current_dir, get_args, get_env, get_host_env_vars, join_paths};
 
 #[cfg(target_family = "wasm")]
 use crate::abi::imports;

@@ -81,14 +81,17 @@ documentation = "https://docs.rs/rusticated"
 rust-version.workspace = true
 
 [lib]
-name = "std"
+name = "rusticated"
 bench = false
 
 [lints]
 workspace = true
 
 [features]
-default = []
+default = ["panic-handler"]
+std = []
+# Provide a panic handler implementation.
+panic-handler = []
 # Opt-in: allow the host to spawn OS threads explicitly. rusticated itself never
 # spawns threads — this flag merely promises that doing so is acceptable on
 # the target platform. Never available on WASM.
@@ -96,8 +99,9 @@ threads = []
 
 [dependencies]
 thiserror = { version = "2.0.18", default-features = false }
-hashbrown = "0.15"
+hashbrown = { version = "0.15", default-features = false, features = ["alloc", "inline-more", "default-hasher"] }
 dlmalloc = { version = "0.2", features = ["global"] }
+spin = { version = "0.9.8", default-features = false, features = ["mutex", "spin_mutex", "rwlock", "once", "lazy"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 getrandom = { version = "0.4.2" }

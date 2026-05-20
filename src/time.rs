@@ -62,6 +62,65 @@ pub fn now_ns() -> u64 {
     }
 }
 
+/// Chrono-compatible UTC module for shell history timestamping.
+pub mod chrono {
+    /// UTC time source.
+    pub struct Utc;
+
+    impl Utc {
+        /// Returns the current time in nanoseconds since epoch.
+        pub fn now() -> u64 {
+            crate::time::now_ns()
+        }
+    }
+}
+
+/// A measurement of the system clock.
+#[cfg(not(target_family = "wasm"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SystemTime(Duration);
+
+#[cfg(not(target_family = "wasm"))]
+impl SystemTime {
+    /// The UNIX epoch (January 1, 1970 00:00:00 UTC).
+    pub const UNIX_EPOCH: Self = Self(Duration::ZERO);
+
+    /// Returns the system time corresponding to "now".
+    pub fn now() -> Self {
+        Self(Duration::from_nanos(now_ns()))
+    }
+
+    /// Returns the amount of time elapsed since this system time was created.
+    pub fn duration_since(&self, earlier: SystemTime) -> Result<Duration, Error> {
+        if self.0 >= earlier.0 {
+            Ok(self.0 - earlier.0)
+        } else {
+            // Ideally we'd have a specific error for this, but SystemTimeError is in std.
+            Err(Error)
+        }
+    }
+}
+
+/// An error returned from system time calculations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Error;
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "second time provided was later than self")
+    }
+}
+
+impl core::error::Error for Error {}
+
+/// The UNIX epoch (January 1, 1970 00:00:00 UTC).
+#[cfg(not(target_family = "wasm"))]
+pub const UNIX_EPOCH: SystemTime = SystemTime(Duration::ZERO);
+
+/// Error returned when a `SystemTime` subtraction underflows.
+#[cfg(not(target_family = "wasm"))]
+pub type SystemTimeError = Error;
+
 // ——— Native Instant
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -185,28 +244,8 @@ mod native_instant {
 #[cfg(not(target_family = "wasm"))]
 pub use native_instant::Instant;
 
-// â”€â”€â”€ Native SystemTime
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-/// A simple wall-clock timestamp (nanoseconds since the Unix epoch).
-#[cfg(not(target_family = "wasm"))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SystemTime(pub u64);
-
-/// Error returned when a `SystemTime` subtraction underflows.
-#[cfg(not(target_family = "wasm"))]
-#[derive(Debug)]
-pub struct SystemTimeError;
-
-#[cfg(not(target_family = "wasm"))]
-impl core::fmt::Display for SystemTimeError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("system time error")
-    }
-}
-
-// â”€â”€â”€ Native Sleep future
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ——— Native Sleep future
+// ————————————————————————————————————————————————————————
 
 #[cfg(not(target_family = "wasm"))]
 mod native_time {
