@@ -1,0 +1,13 @@
+{
+  "name": "rusticated-node-host",
+  "version": "0.1.0",
+  "description": "Node.js host for rusticated WASM modules",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "node-pty": "^1.1.0"
+  }
+}

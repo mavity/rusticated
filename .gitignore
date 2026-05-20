@@ -1,1 +1,5 @@
-target/
+/target/
+/harness/node_modules/
+/node-host/node_modules/
+/rusticated_demo.txt
+/harness-capture.md

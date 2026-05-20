@@ -75,21 +75,40 @@ mod native_env {
 
     #[cfg(windows)]
     fn read_args() -> Vec<String> {
+        #[link(name = "shell32")]
+        unsafe extern "system" {
+            fn CommandLineToArgvW(lpCmdLine: *const u16, pNumArgs: *mut i32) -> *mut *mut u16;
+        }
         unsafe extern "system" {
             fn GetCommandLineW() -> *const u16;
+            fn LocalFree(hMem: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
         }
-        // SAFETY: GetCommandLineW returns a valid null-terminated wide string.
+        
         let cmdline_ptr = unsafe { GetCommandLineW() };
-        let mut len = 0usize;
-        while unsafe { *cmdline_ptr.add(len) } != 0 {
-            len += 1;
+        let mut argc = 0;
+        let argv_ptr = unsafe { CommandLineToArgvW(cmdline_ptr, &mut argc) };
+        
+        if argv_ptr.is_null() {
+            return Vec::new();
         }
-        // SAFETY: we just computed the length above.
-        let wchars: &[u16] = unsafe { core::slice::from_raw_parts(cmdline_ptr, len) };
-        // Decode the UTF-16 command line into arguments split by spaces.
-        // Simple splitting â€” does not handle quoted paths with spaces.
-        let cmdline = String::from_utf16_lossy(wchars);
-        cmdline.split_whitespace().map(|s| s.into()).collect()
+        
+        let mut args = Vec::with_capacity(argc as usize);
+        for i in 0..argc {
+            unsafe {
+                let mut ptr = *argv_ptr.add(i as usize);
+                let mut len = 0;
+                while *ptr != 0 {
+                    ptr = ptr.add(1);
+                    len += 1;
+                }
+                let ptr_start = *argv_ptr.add(i as usize);
+                let wchars = core::slice::from_raw_parts(ptr_start, len);
+                args.push(String::from_utf16_lossy(wchars));
+            }
+        }
+        
+        unsafe { LocalFree(argv_ptr as *mut core::ffi::c_void) };
+        args
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
@@ -218,8 +237,8 @@ pub fn get_env() -> Vec<(String, String)> {
     vars.into_iter()
         .filter_map(|s| {
             let mut parts = s.splitn(2, '=');
-            let k = parts.next()?.to_owned();
-            let v = parts.next()?.to_owned();
+            let k = String::from(parts.next()?);
+            let v = String::from(parts.next()?);
             Some((k, v))
         })
         .collect()

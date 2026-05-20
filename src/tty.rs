@@ -144,6 +144,7 @@ mod windows_tty {
 
     unsafe extern "system" {
         fn GetStdHandle(n_std_handle: u32) -> usize;
+        fn GetFileType(hFile: usize) -> u32;
         fn ReadFile(
             file: usize,
             buffer: *mut u8,
@@ -158,26 +159,23 @@ mod windows_tty {
             number_of_bytes_written: *mut u32,
             overlapped: *mut Overlapped,
         ) -> i32;
-        fn RegisterWaitForSingleObject(
-            new_wait_object: *mut usize,
-            object: usize,
-            callback: Option<unsafe extern "system" fn(*mut core::ffi::c_void, u8)>,
-            context: *mut core::ffi::c_void,
-            milliseconds: u32,
-            flags: u32,
-        ) -> i32;
-        fn UnregisterWaitEx(wait_handle: usize, completion_event: usize) -> i32;
-        fn PostQueuedCompletionStatus(
-            comp_port: usize,
-            number_of_bytes: u32,
-            comp_key: usize,
-            overlapped: *mut Overlapped,
-        ) -> i32;
+        fn CreateThread(
+            lpThreadAttributes: *mut core::ffi::c_void,
+            dwStackSize: usize,
+            lpStartAddress: Option<unsafe extern "system" fn(*mut core::ffi::c_void) -> u32>,
+            lpParameter: *mut core::ffi::c_void,
+            dwCreationFlags: u32,
+            lpThreadId: *mut u32,
+        ) -> usize;
+        fn CancelSynchronousIo(hThread: usize) -> i32;
+        fn WaitForSingleObject(hHandle: usize, dwMilliseconds: u32) -> u32;
+        fn CloseHandle(hObject: usize) -> i32;
     }
 
     const STD_INPUT_HANDLE: u32 = 0xFFFF_FFF6;
     const STD_OUTPUT_HANDLE: u32 = 0xFFFF_FFF5;
-    const WT_EXECUTEONLYONCE: u32 = 0x0000_0008;
+    const FILE_TYPE_CHAR: u32 = 0x0002;
+    #[allow(dead_code)]
     const INFINITE: u32 = 0xFFFF_FFFF;
 
     // ── Tty ─────────────────────────────────────────────────────────────────
@@ -223,18 +221,16 @@ mod windows_tty {
     /// Pinned state for one in-flight console `ReadFile` operation.
     ///
     /// Ownership invariant: while the read wait is registered, only the
-    /// callback accesses `buffer` and `bytes_read`.  The callback runs on a
-    /// system thread-pool thread but executes exactly once; after it posts to
-    /// IOCP and returns, the future safely reclaims sole ownership.
+    /// thread accesses `buffer` and `bytes_read`. The thread runs and executes
+    /// exactly once; after it posts to IOCP and returns, the future safely
+    /// reclaims sole ownership.
     struct ConsoleReadState {
         /// Buffer owned exclusively by this struct while the read is in-flight.
         buffer: core::cell::UnsafeCell<Vec<u8>>,
-        /// Number of bytes written by `ReadFile` in the callback.
+        /// Number of bytes written by `ReadFile` in the thread.
         bytes_read: AtomicU32,
-        /// Win32 wait handle returned by `RegisterWaitForSingleObject`.
-        wait_handle: AtomicUsize,
-        /// IOCP port used to post completion notification.
-        iocp: usize,
+        /// Win32 thread handle returned by `CreateThread`.
+        thread_handle: AtomicUsize,
         /// Unique token: address of this struct cast to `u64`.
         token: u64,
         /// The console handle being read.
@@ -242,26 +238,23 @@ mod windows_tty {
     }
 
     // SAFETY: `ConsoleReadState` is pinned for its lifetime and the buffer is
-    // only accessed from one context at a time (callback XOR future).
+    // only accessed from one context at a time (thread XOR future).
     unsafe impl Send for ConsoleReadState {}
     unsafe impl Sync for ConsoleReadState {}
 
-    /// Callback invoked by the Windows thread pool when the console handle
-    /// becomes readable.  Performs the `ReadFile` directly into the owned
-    /// buffer, then signals the IOCP so the executor can wake the future.
-    unsafe extern "system" fn console_read_callback(
-        context: *mut core::ffi::c_void,
-        _timer_fired: u8,
-    ) {
+    /// Thread invoked by `CreateThread` when the console handle
+    /// needs reading. Performs the `ReadFile` directly into the owned
+    /// buffer, then signals the APC bridge so the executor can wake the future.
+    unsafe extern "system" fn console_read_thread(context: *mut core::ffi::c_void) -> u32 {
         // SAFETY: `context` was set to a pinned `ConsoleReadState` by
-        // `ConsoleReadFuture::poll`.  The state is kept alive by the future
-        // (or its Drop impl) until `UnregisterWaitEx` returns, which happens
-        // after this callback completes thanks to the blocking wait flag.
+        // `ConsoleReadFuture::poll`. The state is kept alive by the future
+        // (or its Drop impl) until `WaitForSingleObject` returns, which happens
+        // after this thread completes.
         let state = unsafe { &*(context as *const ConsoleReadState) };
         let buf: &mut Vec<u8> = unsafe { &mut *state.buffer.get() };
         let mut n: u32 = 0;
         // SAFETY: `buf` is valid for `capacity()` bytes; `ReadFile` writes up
-        // to that many bytes.  No OVERLAPPED needed for console handles.
+        // to that many bytes. No OVERLAPPED needed for console handles.
         unsafe {
             ReadFile(
                 state.console,
@@ -273,9 +266,10 @@ mod windows_tty {
         };
         // Store byte count with Release so the future's Acquire load sees it.
         state.bytes_read.store(n, Ordering::Release);
-        // SAFETY: `state.iocp` is a valid IOCP handle; `state.token` is the
-        // unique address of the pinned state.
-        unsafe { PostQueuedCompletionStatus(state.iocp, 0, state.token as usize, ptr::null_mut()) };
+        
+        // Signal the main thread via APC bridge
+        crate::rt::windows::queue_wake(state.token);
+        0
     }
 
     /// Future that reads from a Windows console handle.
@@ -286,14 +280,12 @@ mod windows_tty {
 
     impl ConsoleReadFuture {
         fn new(console: usize, buf: Vec<u8>) -> Self {
-            let iocp = with_driver(|d| d.iocp).unwrap_or(0);
             // Box+pin the state first so we have a stable heap address, then
             // derive the token from that address.
             let boxed = Box::new(ConsoleReadState {
                 buffer: core::cell::UnsafeCell::new(buf),
                 bytes_read: AtomicU32::new(0),
-                wait_handle: AtomicUsize::new(0),
-                iocp,
+                thread_handle: AtomicUsize::new(0),
                 token: 0,
                 console,
             });
@@ -320,12 +312,21 @@ mod windows_tty {
 
             if consume_ready(token) {
                 if let Some(mut state) = self.state.take() {
+                    // Reclaim I/O count
+                    crate::rt::windows::OUTSTANDING_IO.with(|c| c.set(c.get() - 1));
+
                     let n = state.bytes_read.load(Ordering::Acquire) as usize;
-                    // SAFETY: the callback has finished (UnregisterWaitEx in
+                    // SAFETY: the thread has finished (WaitForSingleObject in
                     // Drop blocks until it does); we regain sole ownership.
                     let buf_ref: &mut Vec<u8> =
                         unsafe { &mut *state.as_mut().get_unchecked_mut().buffer.get() };
                     let mut buf = core::mem::replace(buf_ref, Vec::new());
+                    
+                    let th = state.thread_handle.load(Ordering::Relaxed);
+                    if th != 0 {
+                        unsafe { CloseHandle(th) };
+                    }
+
                     // SAFETY: `ReadFile` wrote `n` valid bytes.
                     unsafe { buf.set_len(n) };
                     return Poll::Ready((Ok(n), buf));
@@ -336,19 +337,16 @@ mod windows_tty {
                 ));
             }
 
-            // Store waker so the executor can wake us on IOCP completion.
+            // Store waker so the executor can wake us on APC bridge completion.
             let _ = with_driver(|d| d.register_waker(token, cx.waker().clone()));
 
             if !self.registered {
                 // SAFETY: `state` is pinned for the lifetime of the future.
-                // The callback will fire exactly once and then stop
-                // referencing `state`; Drop unregisters before dropping state.
-                let (self_ptr, console) = if let Some(ref state) = self.state {
-                    (
-                        state.as_ref().get_ref() as *const ConsoleReadState
-                            as *mut core::ffi::c_void,
-                        state.console,
-                    )
+                // The thread will fire exactly once and then stop
+                // referencing `state`; Drop waits before dropping state.
+                let self_ptr = if let Some(ref state) = self.state {
+                    state.as_ref().get_ref() as *const ConsoleReadState
+                        as *mut core::ffi::c_void
                 } else {
                     return Poll::Ready((
                         Err(io::Error::other("ConsoleReadFuture: state missing")),
@@ -356,21 +354,21 @@ mod windows_tty {
                     ));
                 };
 
-                let mut wait_handle: usize = 0;
-                let res = unsafe {
-                    RegisterWaitForSingleObject(
-                        &mut wait_handle,
-                        console,
-                        Some(console_read_callback),
+                let mut thread_id: u32 = 0;
+                let thread_handle = unsafe {
+                    CreateThread(
+                        ptr::null_mut(),
+                        0,
+                        Some(console_read_thread),
                         self_ptr,
-                        INFINITE,
-                        WT_EXECUTEONLYONCE,
+                        0,
+                        &mut thread_id,
                     )
                 };
-                if res == 0 {
+                if thread_handle == 0 {
                     let err = io::Error::last_os_error();
                     let buf = if let Some(mut state) = self.state.take() {
-                        // SAFETY: no callback registered, sole owner.
+                        // SAFETY: no thread registered, sole owner.
                         let buf_ref: &mut Vec<u8> =
                             unsafe { &mut *state.as_mut().get_unchecked_mut().buffer.get() };
                         core::mem::replace(buf_ref, Vec::new())
@@ -381,8 +379,11 @@ mod windows_tty {
                 }
 
                 if let Some(ref state) = self.state {
-                    state.wait_handle.store(wait_handle, Ordering::Relaxed);
+                    state.thread_handle.store(thread_handle, Ordering::Relaxed);
                 }
+                
+                // Track live I/O
+                crate::rt::windows::OUTSTANDING_IO.with(|c| c.set(c.get() + 1));
                 self.registered = true;
             }
 
@@ -393,12 +394,21 @@ mod windows_tty {
     impl Drop for ConsoleReadFuture {
         fn drop(&mut self) {
             if self.registered {
-                if let Some(ref state) = self.state {
-                    let wh = state.wait_handle.load(Ordering::Relaxed);
-                    if wh != 0 {
-                        // !0 = INVALID_HANDLE_VALUE — blocks until callback completes.
-                        unsafe { UnregisterWaitEx(wh, !0) };
-                    }
+                let th = self.state.as_ref().map_or(0, |s| s.thread_handle.load(Ordering::Relaxed));
+                if th != 0 {
+                    // Cancel the thread's blocked ReadFile.
+                    // This unblocks the thread so it can exit on its own.
+                    unsafe { CancelSynchronousIo(th) };
+                    
+                    // Windows CRT attempts to lock `stdin` streams during standard shutdown.
+                    // Since CancelSynchronousIo guarantees the blocking call will abort,
+                    // we can safely wait for the thread to exit cleanly.
+                    // We use a 0 timeout here because CancelSynchronousIo is unreliable 
+                    // for console handles, and we must not hang the process.
+                    unsafe { WaitForSingleObject(th, 0) };
+
+                    unsafe { CloseHandle(th) };
+                    crate::rt::windows::OUTSTANDING_IO.with(|c| c.set(c.get() - 1));
                 }
             }
         }
@@ -408,7 +418,12 @@ mod windows_tty {
 
     impl crate::io::AsyncRead for Tty {
         async fn read(&mut self, buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
-            ConsoleReadFuture::new(self.handle, buf).await
+            // Check if it is a character file (console/tty).
+            if unsafe { GetFileType(self.handle) } == FILE_TYPE_CHAR {
+                ConsoleReadFuture::new(self.handle, buf).await
+            } else {
+                crate::rt::windows::OverlappedRead::new(self.handle as u64, buf).await
+            }
         }
     }
 
@@ -441,7 +456,6 @@ mod windows_tty {
         use super::*;
         use crate::io::AsyncWrite;
         use crate::vec::Vec;
-        use std::os::windows::io::AsRawHandle;
 
         // Drive the single-threaded executor to completion, sleeping when idle.
         // Identical in structure to the helper in `fs.rs` tests.
@@ -452,11 +466,7 @@ mod windows_tty {
                     crate::rt::executor::PollStatus::Done => break,
                     crate::rt::executor::PollStatus::Ready => continue,
                     crate::rt::executor::PollStatus::Idle { next_deadline } => {
-                        if let Some(d) = next_deadline {
-                            std::thread::sleep(d);
-                        } else {
-                            std::thread::sleep(std::time::Duration::from_millis(5));
-                        }
+                        crate::rt::executor::poll_step_idle(next_deadline).unwrap();
                     }
                 }
             }
@@ -538,15 +548,15 @@ mod windows_tty {
         #[test]
         fn write_to_real_file_handle() {
             block_on(async {
-                let path = std::env::temp_dir().join("rusticated_tty_write_test.bin");
-                // Open with std so we get a proper Windows HANDLE via AsRawHandle.
-                let file = std::fs::OpenOptions::new()
+                let path = "rusticated_tty_write_test.bin";
+                let file = crate::fs::OpenOptions::new()
                     .write(true)
                     .create(true)
                     .truncate(true)
-                    .open(&path)
-                    .expect("create temp file");
-                let raw: usize = file.as_raw_handle() as usize;
+                    .open(path)
+                    .await
+                    .expect("create test file");
+                let raw: usize = file.handle as usize;
                 // Wrap the raw handle in our Tty (private field, accessible here).
                 let mut tty = Tty { handle: raw };
 
@@ -558,12 +568,23 @@ mod windows_tty {
                     expected_len,
                     "WriteFile should report all bytes written"
                 );
-                // Flush by closing the std::fs::File before reading back.
+                // Flush by closing the file before reading back.
                 drop(file);
 
-                let on_disk = std::fs::read(&path).expect("read back temp file");
-                assert_eq!(on_disk, b"rusticated tty write test");
-                let _ = std::fs::remove_file(&path);
+                let mut read_file = crate::fs::OpenOptions::new().read(true).open(path).await.expect("open read file");
+                let mut buf = Vec::new();
+                for _ in 0..128 { buf.push(0); }
+                let (res, on_disk) = read_file.read(buf).await;
+                let n = res.unwrap();
+                assert_eq!(&on_disk[..n], b"rusticated tty write test");
+                drop(read_file);
+
+                extern "system" {
+                    fn DeleteFileW(lpFileName: *const u16) -> i32;
+                }
+                let mut path_u16: Vec<u16> = path.encode_utf16().collect();
+                path_u16.push(0);
+                unsafe { DeleteFileW(path_u16.as_ptr()) };
             });
         }
 
@@ -592,14 +613,14 @@ mod windows_tty {
         #[test]
         fn console_read_future_null_handle_returns_err() {
             block_on(async {
-                // NULL (0) is rejected by RegisterWaitForSingleObject before
-                // any callback is ever registered — tests the res==0 error branch
+                // NULL (0) is rejected by ReadFile inside the dedicated thread,
+                // or fails thread creation entirely. Tests the res==0 error branch
                 // inside ConsoleReadFuture::poll and verifies the buffer is returned.
                 let buf = Vec::with_capacity(8);
                 let (res, returned_buf) = ConsoleReadFuture::new(0, buf).await;
                 assert!(
                     res.is_err(),
-                    "NULL handle must cause RegisterWaitForSingleObject to fail"
+                    "NULL handle must cause ConsoleReadFuture to fail"
                 );
                 assert_eq!(
                     returned_buf.capacity(),

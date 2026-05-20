@@ -1,0 +1,14 @@
+[package]
+name = "rusticated-wasmtime"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+wasmtime = { version = "26", features = ["cranelift"] }
+anyhow = "1"
+libc = "0.2"
+polling = "3.11.0"
+
+[lints.rust]
+warnings = "warn"

@@ -82,6 +82,26 @@ pub mod imports {
         pub fn stat_is_dir(stat_handle: u64) -> u32;
         /// Check if a stat handle represents a regular file.
         pub fn stat_is_file(stat_handle: u64) -> u32;
+        /// Get modification time (nanoseconds since UNIX epoch) from a stat handle.
+        pub fn stat_mtime(stat_handle: u64) -> u64;
+        /// Get last access time (nanoseconds since UNIX epoch) from a stat handle.
+        pub fn stat_atime(stat_handle: u64) -> u64;
+        /// Get creation/birth time (nanoseconds since UNIX epoch) from a stat handle, or 0 if unavailable.
+        pub fn stat_ctime(stat_handle: u64) -> u64;
+        /// Returns 1 if the path is a symbolic link (stat was done without following links).
+        pub fn stat_is_symlink(stat_handle: u64) -> u32;
+        /// Returns 1 if the file is read-only.
+        pub fn stat_readonly(stat_handle: u64) -> u32;
+        /// Unix permission bits (rwxrwxrwx); on non-Unix hosts, synthesised from readonly.
+        pub fn stat_mode(stat_handle: u64) -> u32;
+        /// Number of hard links; 0 on platforms that do not expose it.
+        pub fn stat_nlink(stat_handle: u64) -> u64;
+        /// Owner user ID (Unix); 0 on non-Unix hosts.
+        pub fn stat_uid(stat_handle: u64) -> u32;
+        /// Owner group ID (Unix); 0 on non-Unix hosts.
+        pub fn stat_gid(stat_handle: u64) -> u32;
+        /// Inode / file-index number; 0 on platforms that do not expose it.
+        pub fn stat_inode(stat_handle: u64) -> u64;
 
         /// Create listener or connection. Result_ext = Socket Handle.
         pub fn net_open(

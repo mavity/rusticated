@@ -1,0 +1,13 @@
+{
+  "name": "rusticated-harness",
+  "version": "0.1.0",
+  "description": "Terminal capture harness for rusticated variants (native / wasmtime / node-host)",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "test": "node index.js"
+  },
+  "dependencies": {
+    "node-pty": "^1.1.0"
+  }
+}

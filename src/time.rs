@@ -20,7 +20,46 @@
 /// Re-export `core::time::Duration` as the canonical duration type.
 pub use core::time::Duration;
 
-// â”€â”€â”€ Native Instant
+/// Returns the current wall-clock time as nanoseconds since the UNIX epoch.
+///
+/// On WASM delegates to the host via `get_time()`. On native reads the system
+/// clock via `std::time::SystemTime`.
+pub fn now_ns() -> u64 {
+    #[cfg(unix)]
+    {
+        #[repr(C)]
+        struct Timespec {
+            tv_sec: i64,
+            tv_nsec: i64,
+        }
+        unsafe extern "C" {
+            fn clock_gettime(clk_id: i32, tp: *mut Timespec) -> i32;
+        }
+        let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        unsafe { clock_gettime(0, &mut ts) }; // CLOCK_REALTIME is 0
+        (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64)
+    }
+    #[cfg(windows)]
+    {
+        unsafe extern "system" {
+            fn GetSystemTimeAsFileTime(lpSystemTimeAsFileTime: *mut u64);
+        }
+        let mut ft = 0u64;
+        unsafe { GetSystemTimeAsFileTime(&mut ft) };
+        let unix_epoch = 116444736000000000u64;
+        if ft >= unix_epoch {
+            (ft - unix_epoch) * 100
+        } else {
+            0
+        }
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        unsafe { crate::abi::imports::get_time() }
+    }
+}
+
+// ——— Native Instant
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[cfg(not(target_family = "wasm"))]
@@ -192,7 +231,7 @@ mod native_time {
     impl Future for Sleep {
         type Output = ();
 
-        fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
             if Instant::now() >= self.deadline {
                 if let Some(id) = self.timer_id.take() {
                     crate::rt::timers::cancel_timer(id);
@@ -200,8 +239,11 @@ mod native_time {
                 return Poll::Ready(());
             }
             if self.timer_id.is_none() {
-                self.timer_id = Some(crate::rt::timers::register_timer(self.deadline));
+                self.timer_id = Some(crate::rt::timers::register_timer(self.deadline, cx.waker().clone()));
             }
+            // Overwrite waker if already registered
+            crate::rt::timers::cancel_timer(self.timer_id.unwrap());
+            self.timer_id = Some(crate::rt::timers::register_timer(self.deadline, cx.waker().clone()));
             Poll::Pending
         }
     }
