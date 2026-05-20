@@ -1,5 +1,5 @@
 [workspace]
-members = ["demo", "wasmhost"]
+members = ["demo", "washmhost"]
 
 [workspace.package]
 edition = "2024"

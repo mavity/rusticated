@@ -73,7 +73,7 @@ All executor and scheduling logic is self-contained in `rt/`. Logic derived from
   npm install --prefix node-host
   npm install --prefix harness
   ```
-- **wasmtime** variant only: the `wasmhost` crate bundles its own copy of the Wasmtime engine as a Cargo dependency; no separate install is needed.
+- **wasmtime** variant only: the `washmhost` crate bundles its own copy of the Wasmtime engine as a Cargo dependency; no separate install is needed.
 
 ## Building rusticated itself
 
@@ -91,7 +91,7 @@ The executable reads from the terminal, waits up to 5 seconds for a line, then w
 
 ## Demo variant 2 — WASM + wasmtime host
 
-This variant compiles the demo to `wasm32-unknown-unknown` and runs it through the `wasmhost` Rust binary, which implements the rusticated ABI via Wasmtime's embedding API.
+This variant compiles the demo to `wasm32-unknown-unknown` and runs it through the `washmhost` Rust binary, which implements the rusticated ABI via Wasmtime's embedding API.
 
 **Step 1 — Build the WASM module** (run once, or after changing `demo/src/`):
 
