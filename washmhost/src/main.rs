@@ -5,12 +5,20 @@ use handles::HostState;
 use wasmtime::{Engine, Linker, Module, Store};
 
 fn main() -> anyhow::Result<()> {
-    let wasm_path = std::env::args()
-        .nth(1)
-        .ok_or_else(|| anyhow::anyhow!("Usage: rusticated-wasmtime <path.wasm>"))?;
+    let wasm_path = std::env::args().nth(1).unwrap_or_else(|| "-".to_string());
 
     let engine = Engine::default();
-    let module = Module::from_file(&engine, &wasm_path)?;
+
+    let wasm_bytes = if wasm_path == "-" {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        std::io::stdin().read_to_end(&mut buf)?;
+        buf
+    } else {
+        std::fs::read(&wasm_path)?
+    };
+
+    let module = Module::new(&engine, &wasm_bytes)?;
 
     let host_state = HostState::new()?;
     let mut store = Store::new(&engine, host_state);

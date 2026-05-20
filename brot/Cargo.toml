@@ -1,0 +1,9 @@
+[package]
+name = "brot"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+alloc-no-stdlib = "2.0.4"
+brotli-decompressor = { version = "5.0.0", default-features = false, features = ["unsafe"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_Environment", "Win32_System_Memory", "Win32_Security", "Win32_System_Console", "Win32_System_LibraryLoader"] }

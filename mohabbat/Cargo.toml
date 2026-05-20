@@ -1,0 +1,8 @@
+[package]
+name = "mohabbat"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.102"
+brotli = "8.0.2"

@@ -1,5 +1,5 @@
 [workspace]
-members = ["demo", "washmhost"]
+members = ["demo", "washmhost", "brot", "mohabbat"]
 
 [workspace.package]
 edition = "2024"
@@ -30,6 +30,10 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
+lto = "fat"
+codegen-units = 1
+opt-level = "z"
+strip = "symbols"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
