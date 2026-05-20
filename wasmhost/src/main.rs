@@ -34,17 +34,27 @@ fn main() -> anyhow::Result<()> {
             break;
         }
 
-        if is_done.call(&mut store, ()).unwrap_or_else(|e| { eprintln!("Error calling is_done: {:?}", e); 0 }) == 1 {
+        if is_done.call(&mut store, ()).unwrap_or_else(|e| {
+            eprintln!("Error calling is_done: {:?}", e);
+            0
+        }) == 1
+        {
             break;
         }
 
         // Non-blocking pass first to pick up any immediately-ready events.
-        let had_event = env_impl::poll_completions(&mut store, &memory, 0).unwrap_or_else(|e| { eprintln!("Error calling poll_completions 0: {:?}", e); false });
+        let had_event = env_impl::poll_completions(&mut store, &memory, 0).unwrap_or_else(|e| {
+            eprintln!("Error calling poll_completions 0: {:?}", e);
+            false
+        });
 
         if !had_event && !store.data().epoll.pending.is_empty() {
             // No immediate events but async ops are in flight — block briefly
             // so we do not busy-spin while waiting for stdin / pipe I/O.
-            env_impl::poll_completions(&mut store, &memory, 50).unwrap_or_else(|e| { eprintln!("Error calling poll_completions 50: {:?}", e); false });
+            env_impl::poll_completions(&mut store, &memory, 50).unwrap_or_else(|e| {
+                eprintln!("Error calling poll_completions 50: {:?}", e);
+                false
+            });
         }
     }
 

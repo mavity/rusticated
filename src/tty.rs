@@ -266,7 +266,7 @@ mod windows_tty {
         };
         // Store byte count with Release so the future's Acquire load sees it.
         state.bytes_read.store(n, Ordering::Release);
-        
+
         // Signal the main thread via APC bridge
         crate::rt::windows::queue_wake(state.token);
         0
@@ -321,7 +321,7 @@ mod windows_tty {
                     let buf_ref: &mut Vec<u8> =
                         unsafe { &mut *state.as_mut().get_unchecked_mut().buffer.get() };
                     let mut buf = core::mem::replace(buf_ref, Vec::new());
-                    
+
                     let th = state.thread_handle.load(Ordering::Relaxed);
                     if th != 0 {
                         unsafe { CloseHandle(th) };
@@ -345,8 +345,7 @@ mod windows_tty {
                 // The thread will fire exactly once and then stop
                 // referencing `state`; Drop waits before dropping state.
                 let self_ptr = if let Some(ref state) = self.state {
-                    state.as_ref().get_ref() as *const ConsoleReadState
-                        as *mut core::ffi::c_void
+                    state.as_ref().get_ref() as *const ConsoleReadState as *mut core::ffi::c_void
                 } else {
                     return Poll::Ready((
                         Err(io::Error::other("ConsoleReadFuture: state missing")),
@@ -381,7 +380,7 @@ mod windows_tty {
                 if let Some(ref state) = self.state {
                     state.thread_handle.store(thread_handle, Ordering::Relaxed);
                 }
-                
+
                 // Track live I/O
                 crate::rt::windows::OUTSTANDING_IO.with(|c| c.set(c.get() + 1));
                 self.registered = true;
@@ -394,16 +393,19 @@ mod windows_tty {
     impl Drop for ConsoleReadFuture {
         fn drop(&mut self) {
             if self.registered {
-                let th = self.state.as_ref().map_or(0, |s| s.thread_handle.load(Ordering::Relaxed));
+                let th = self
+                    .state
+                    .as_ref()
+                    .map_or(0, |s| s.thread_handle.load(Ordering::Relaxed));
                 if th != 0 {
                     // Cancel the thread's blocked ReadFile.
                     // This unblocks the thread so it can exit on its own.
                     unsafe { CancelSynchronousIo(th) };
-                    
+
                     // Windows CRT attempts to lock `stdin` streams during standard shutdown.
                     // Since CancelSynchronousIo guarantees the blocking call will abort,
                     // we can safely wait for the thread to exit cleanly.
-                    // We use a 0 timeout here because CancelSynchronousIo is unreliable 
+                    // We use a 0 timeout here because CancelSynchronousIo is unreliable
                     // for console handles, and we must not hang the process.
                     unsafe { WaitForSingleObject(th, 0) };
 
@@ -571,9 +573,15 @@ mod windows_tty {
                 // Flush by closing the file before reading back.
                 drop(file);
 
-                let mut read_file = crate::fs::OpenOptions::new().read(true).open(path).await.expect("open read file");
+                let mut read_file = crate::fs::OpenOptions::new()
+                    .read(true)
+                    .open(path)
+                    .await
+                    .expect("open read file");
                 let mut buf = Vec::new();
-                for _ in 0..128 { buf.push(0); }
+                for _ in 0..128 {
+                    buf.push(0);
+                }
                 let (res, on_disk) = read_file.read(buf).await;
                 let n = res.unwrap();
                 assert_eq!(&on_disk[..n], b"rusticated tty write test");

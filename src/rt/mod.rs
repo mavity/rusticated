@@ -112,13 +112,19 @@ macro_rules! spawn {
                     Ok(PollStatus::Idle { next_deadline }) => {
                         if let Err(e) = $crate::rt::executor::poll_step_idle(next_deadline) {
                             #[cfg(windows)]
-                            $crate::rt::windows::CRASH_REASON.store(e.raw_os_error().unwrap_or(999999) as i32, core::sync::atomic::Ordering::SeqCst);
+                            $crate::rt::windows::CRASH_REASON.store(
+                                e.raw_os_error().unwrap_or(999999) as i32,
+                                core::sync::atomic::Ordering::SeqCst,
+                            );
                             panic!("idle_err");
                         }
                     }
                     Err(e) => {
                         #[cfg(windows)]
-                        $crate::rt::windows::CRASH_REASON.store(e.raw_os_error().unwrap_or(999999) as i32, core::sync::atomic::Ordering::SeqCst);
+                        $crate::rt::windows::CRASH_REASON.store(
+                            e.raw_os_error().unwrap_or(999999) as i32,
+                            core::sync::atomic::Ordering::SeqCst,
+                        );
                         panic!("err");
                     }
                 }

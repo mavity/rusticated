@@ -83,15 +83,15 @@ mod native_env {
             fn GetCommandLineW() -> *const u16;
             fn LocalFree(hMem: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
         }
-        
+
         let cmdline_ptr = unsafe { GetCommandLineW() };
         let mut argc = 0;
         let argv_ptr = unsafe { CommandLineToArgvW(cmdline_ptr, &mut argc) };
-        
+
         if argv_ptr.is_null() {
             return Vec::new();
         }
-        
+
         let mut args = Vec::with_capacity(argc as usize);
         for i in 0..argc {
             unsafe {
@@ -106,7 +106,7 @@ mod native_env {
                 args.push(String::from_utf16_lossy(wchars));
             }
         }
-        
+
         unsafe { LocalFree(argv_ptr as *mut core::ffi::c_void) };
         args
     }
