@@ -20,6 +20,16 @@ pub enum ErrorKind {
     AlreadyExists,
     /// Operation interrupted by a signal.
     Interrupted,
+    /// The pipe being written to was closed.
+    BrokenPipe,
+    /// Invalid data (e.g. non-UTF8 when expected).
+    InvalidData,
+    /// A writer could not accept any more data.
+    WriteZero,
+    /// Is a directory.
+    IsADirectory,
+    /// Operation would block.
+    WouldBlock,
     /// Other, unclassified error.
     Other,
 }
@@ -35,6 +45,168 @@ pub struct Error {
 
 /// `core::result::Result<T, crate::io::Error>`.
 pub type Result<T> = core::result::Result<T, Error>;
+
+pub use crate::traits::{AsyncRead, AsyncWrite, BufRead, Read, Write};
+
+/// Standard input stream.
+pub struct Stdin;
+/// Standard output stream.
+pub struct Stdout;
+/// Standard error stream.
+pub struct Stderr;
+
+/// Handle to the standard input of the process.
+pub fn stdin() -> Stdin {
+    Stdin
+}
+/// Handle to the standard output of the process.
+pub fn stdout() -> Stdout {
+    Stdout
+}
+/// Handle to the standard error of the process.
+pub fn stderr() -> Stderr {
+    Stderr
+}
+
+impl AsyncRead for Stdin {
+    async fn read(&mut self, _buf: Vec<u8>) -> (Result<usize>, Vec<u8>) {
+        (Err(Error::other("stdin read not implemented")), _buf)
+    }
+}
+
+impl Read for Stdin {
+    fn read(&mut self, _buf: &mut [u8]) -> Result<usize> {
+        Err(Error::other("stdin read not implemented"))
+    }
+}
+
+impl AsyncWrite for Stdout {
+    async fn write(&mut self, _buf: Vec<u8>) -> (Result<usize>, Vec<u8>) {
+        (Err(Error::other("stdout write not implemented")), _buf)
+    }
+    async fn flush(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl Write for Stdout {
+    fn write(&mut self, _buf: &[u8]) -> Result<usize> {
+        Err(Error::other("stdout write not implemented"))
+    }
+    fn flush(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl AsyncWrite for Stderr {
+    async fn write(&mut self, _buf: Vec<u8>) -> (Result<usize>, Vec<u8>) {
+        (Err(Error::other("stderr write not implemented")), _buf)
+    }
+    async fn flush(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl Write for Stderr {
+    fn write(&mut self, _buf: &[u8]) -> Result<usize> {
+        Err(Error::other("stderr write not implemented"))
+    }
+    fn flush(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl IsTerminal for Stdin {
+    fn is_terminal(&self) -> bool {
+        false
+    }
+}
+impl IsTerminal for Stdout {
+    fn is_terminal(&self) -> bool {
+        false
+    }
+}
+impl IsTerminal for Stderr {
+    fn is_terminal(&self) -> bool {
+        false
+    }
+}
+
+/// Reader end of a redirectable pipe.
+pub struct PipeReader;
+
+impl PipeReader {
+    /// Clones the pipe reader.
+    pub fn try_clone(&self) -> Result<Self> {
+        Ok(Self)
+    }
+}
+
+/// Writer end of a redirectable pipe.
+pub struct PipeWriter;
+
+impl PipeWriter {
+    /// Clones the pipe writer.
+    pub fn try_clone(&self) -> Result<Self> {
+        Ok(Self)
+    }
+}
+
+/// Creates a new anonymous pipe.
+pub fn pipe() -> Result<(PipeReader, PipeWriter)> {
+    Ok((PipeReader, PipeWriter))
+}
+
+/// Copies the entire contents of a reader into a writer.
+pub fn copy<R: crate::traits::Read + ?Sized, W: crate::traits::Write + ?Sized>(
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<u64> {
+    let mut buf = [0u8; 8192];
+    let mut total = 0;
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                writer.write_all(&buf[..n])?;
+                total += n as u64;
+            }
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(total)
+}
+
+impl AsyncRead for PipeReader {
+    async fn read(&mut self, _buf: Vec<u8>) -> (Result<usize>, Vec<u8>) {
+        (Err(Error::other("pipereader read not implemented")), _buf)
+    }
+}
+
+impl Read for PipeReader {
+    fn read(&mut self, _buf: &mut [u8]) -> Result<usize> {
+        Err(Error::other("pipereader read not implemented"))
+    }
+}
+
+impl AsyncWrite for PipeWriter {
+    async fn write(&mut self, _buf: Vec<u8>) -> (Result<usize>, Vec<u8>) {
+        (Err(Error::other("pipewriter write not implemented")), _buf)
+    }
+    async fn flush(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl Write for PipeWriter {
+    fn write(&mut self, _buf: &[u8]) -> Result<usize> {
+        Err(Error::other("pipewriter write not implemented"))
+    }
+    fn flush(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
 
 impl Error {
     /// Returns the last OS-level error (reads `errno` on Unix, `GetLastError` on Windows).
@@ -57,14 +229,21 @@ impl Error {
         }
     }
 
-    /// Constructs a synthesised error with a static message and `Other` kind.
-    #[inline]
-    pub fn other(msg: &'static str) -> Self {
+    /// Constructs a synthesised error from any displayable object.
+    pub fn error<T: core::fmt::Display>(_msg: T) -> Self {
+        // Since we are no_std and limited in what we can store in the Error struct
+        // (which currently uses a &'static str for the message),
+        // we'll use a static placeholder for now.
         Self {
             kind: ErrorKind::Other,
             code: 0,
-            msg,
+            msg: "dynamic error",
         }
+    }
+
+    /// Alias for error (consistent with std::io::Error::other)
+    pub fn other<T: core::fmt::Display>(msg: T) -> Self {
+        Self::error(msg)
     }
 
     /// Constructs a synthesised error with the specified kind and message.
@@ -101,6 +280,16 @@ impl core::fmt::Display for Error {
 }
 
 impl core::error::Error for Error {}
+
+impl From<ErrorKind> for Error {
+    fn from(kind: ErrorKind) -> Self {
+        Self {
+            kind,
+            code: 0,
+            msg: "",
+        }
+    }
+}
 
 // ─── Platform errno / GetLastError ───────────────────────────────────────────
 
@@ -144,36 +333,93 @@ fn last_error_code() -> i32 {
     0
 }
 
-// ─── Async traits ────────────────────────────────────────────────────────────
+// ─── BufReader ───────────────────────────────────────────────────────────────
 
-/// Async reader that passes buffer ownership to the implementor.
-///
-/// Unlike `std::io::Read`, the buffer is passed by value and returned with
-/// the result. This matches the proactor completion model, where the OS holds
-/// the buffer during the operation.
-///
-/// # Buffer contract
-///
-/// Callers should pass a [`Vec<u8>`] with `len == 0` and sufficient
-/// `capacity`. The implementation writes bytes starting at position `0` and
-/// returns the Vec with `len` set to the number of bytes read.
-pub trait AsyncRead {
-    /// Read bytes into the spare capacity of `buf`.
-    ///
-    /// Returns `(result, buf)` where `result` holds the number of bytes read
-    /// on success.
-    async fn read(&mut self, buf: Vec<u8>) -> (Result<usize>, Vec<u8>);
+/// A reader that buffers its input.
+pub struct BufReader<R> {
+    inner: R,
+    buf: Vec<u8>,
+    pos: usize,
+    cap: usize,
 }
 
-/// Async writer that passes buffer ownership to the implementor.
-///
-/// Unlike `std::io::Write`, the buffer is passed by value and returned with
-/// the result. This matches the proactor completion model, where the OS holds
-/// the buffer during the operation.
-pub trait AsyncWrite {
-    /// Write bytes from `buf`.
-    ///
-    /// Returns `(result, buf)` where `result` holds the number of bytes
-    /// written on success.
-    async fn write(&mut self, buf: Vec<u8>) -> (Result<usize>, Vec<u8>);
+impl<R: crate::traits::Read> BufReader<R> {
+    /// Creates a new `BufReader` with default buffer size.
+    pub fn new(inner: R) -> Self {
+        Self {
+            inner,
+            buf: alloc::vec![0u8; 8192],
+            pos: 0,
+            cap: 0,
+        }
+    }
+
+    /// Fill the buffer if empty.
+    pub fn fill_buf(&mut self) -> Result<&[u8]> {
+        if self.pos >= self.cap {
+            self.cap = self.inner.read(&mut self.buf)?;
+            self.pos = 0;
+        }
+        Ok(&self.buf[self.pos..self.cap])
+    }
+
+    /// Consume bytes.
+    pub fn consume(&mut self, amt: usize) {
+        self.pos = core::cmp::min(self.pos + amt, self.cap);
+    }
+
+    /// Read a line.
+    pub fn read_line(&mut self, buf: &mut crate::string::String) -> Result<usize> {
+        let mut total = 0;
+        loop {
+            let available = self.fill_buf()?;
+            if available.is_empty() {
+                break;
+            }
+            if let Some(i) = available.iter().position(|&b| b == b'\n') {
+                let bytes = &available[..=i];
+                buf.push_str(core::str::from_utf8(bytes).map_err(|_| Error::from(ErrorKind::Other))?);
+                self.pos += i + 1;
+                total += i + 1;
+                break;
+            } else {
+                let n = available.len();
+                buf.push_str(core::str::from_utf8(available).map_err(|_| Error::from(ErrorKind::Other))?);
+                self.pos += n;
+                total += n;
+            }
+        }
+        Ok(total)
+    }
+}
+
+impl<R: Read> Read for BufReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        let n = {
+            let rem = self.fill_buf()?;
+            let n = core::cmp::min(buf.len(), rem.len());
+            buf[..n].copy_from_slice(&rem[..n]);
+            n
+        };
+        self.consume(n);
+        Ok(n)
+    }
+}
+
+impl<R: Read> BufRead for BufReader<R> {
+    fn fill_buf(&mut self) -> Result<&[u8]> {
+        self.fill_buf()
+    }
+
+    fn consume(&mut self, amt: usize) {
+        self.consume(amt);
+    }
+}
+
+// ─── Async traits ────────────────────────────────────────────────────────────
+
+/// Types that can report whether they are connected to a terminal.
+pub trait IsTerminal {
+    /// Returns `true` if this instance is connected to a terminal (TTY).
+    fn is_terminal(&self) -> bool;
 }

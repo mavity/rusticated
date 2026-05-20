@@ -5,7 +5,192 @@
 //! - **Windows**: `SetConsoleCtrlHandler` routes console events through a future-based interface.
 //! - **WASM**: host import [`crate::abi::imports::signal_wait`] drives the completion.
 
-#![cfg_attr(
+/// Sends a signal to a process.
+pub fn kill_process(_pid: crate::process::ProcessId, _signal: u32) -> crate::io::Result<()> {
+    Err(crate::io::Error::other("kill_process not implemented"))
+}
+
+/// Standard POSIX signals.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(i32)]
+#[expect(clippy::upper_case_acronyms)]
+pub enum Signal {
+    /// Hangup detected on controlling terminal or death of controlling process.
+    SIGHUP = 1,
+    /// Interrupt from keyboard.
+    SIGINT = 2,
+    /// Quit from keyboard.
+    SIGQUIT = 3,
+    /// Illegal Instruction.
+    SIGILL = 4,
+    /// Trace/breakpoint trap.
+    SIGTRAP = 5,
+    /// Abort signal from abort(3).
+    SIGABRT = 6,
+    /// Bus error (bad memory access).
+    SIGBUS = 7,
+    /// Floating-point exception.
+    SIGFPE = 8,
+    /// Kill signal.
+    SIGKILL = 9,
+    /// User-defined signal 1.
+    SIGUSR1 = 10,
+    /// Invalid memory reference.
+    SIGSEGV = 11,
+    /// User-defined signal 2.
+    SIGUSR2 = 12,
+    /// Broken pipe: write to pipe with no readers.
+    SIGPIPE = 13,
+    /// Timer signal from alarm(2).
+    SIGALRM = 14,
+    /// Termination signal.
+    SIGTERM = 15,
+    /// Child stopped or terminated.
+    SIGCHLD = 17,
+    /// Continue if stopped.
+    SIGCONT = 18,
+    /// Stop process.
+    SIGSTOP = 19,
+    /// Stop typed at terminal.
+    SIGTSTP = 20,
+    /// Terminal input for background process.
+    SIGTTIN = 21,
+    /// Terminal output for background process.
+    SIGTTOU = 22,
+    /// Urgent condition on socket.
+    SIGURG = 23,
+    /// CPU time limit exceeded.
+    SIGXCPU = 24,
+    /// File size limit exceeded.
+    SIGXFSZ = 25,
+    /// Virtual alarm clock.
+    SIGVTALRM = 26,
+    /// Profiling timer expired.
+    SIGPROF = 27,
+    /// Windows resize signal.
+    SIGWINCH = 28,
+    /// I/O now possible.
+    SIGIO = 29,
+    /// Power failure (System V).
+    SIGPWR = 30,
+    /// Bad system call.
+    SIGSYS = 31,
+}
+
+impl Signal {
+    /// Returns an iterator over all standard signals.
+    pub fn iterator() -> impl Iterator<Item = Self> {
+        [
+            Self::SIGHUP,
+            Self::SIGINT,
+            Self::SIGQUIT,
+            Self::SIGILL,
+            Self::SIGTRAP,
+            Self::SIGABRT,
+            Self::SIGBUS,
+            Self::SIGFPE,
+            Self::SIGKILL,
+            Self::SIGUSR1,
+            Self::SIGSEGV,
+            Self::SIGUSR2,
+            Self::SIGPIPE,
+            Self::SIGALRM,
+            Self::SIGTERM,
+            Self::SIGCHLD,
+            Self::SIGCONT,
+            Self::SIGSTOP,
+            Self::SIGTSTP,
+            Self::SIGTTIN,
+            Self::SIGTTOU,
+            Self::SIGURG,
+            Self::SIGXCPU,
+            Self::SIGXFSZ,
+            Self::SIGVTALRM,
+            Self::SIGPROF,
+            Self::SIGWINCH,
+            Self::SIGIO,
+            Self::SIGPWR,
+            Self::SIGSYS,
+        ]
+        .into_iter()
+    }
+
+    /// Returns the name of the signal.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::SIGHUP => "SIGHUP",
+            Self::SIGINT => "SIGINT",
+            Self::SIGQUIT => "SIGQUIT",
+            Self::SIGILL => "SIGILL",
+            Self::SIGTRAP => "SIGTRAP",
+            Self::SIGABRT => "SIGABRT",
+            Self::SIGBUS => "SIGBUS",
+            Self::SIGFPE => "SIGFPE",
+            Self::SIGKILL => "SIGKILL",
+            Self::SIGUSR1 => "SIGUSR1",
+            Self::SIGSEGV => "SIGSEGV",
+            Self::SIGUSR2 => "SIGUSR2",
+            Self::SIGPIPE => "SIGPIPE",
+            Self::SIGALRM => "SIGALRM",
+            Self::SIGTERM => "SIGTERM",
+            Self::SIGCHLD => "SIGCHLD",
+            Self::SIGCONT => "SIGCONT",
+            Self::SIGSTOP => "SIGSTOP",
+            Self::SIGTSTP => "SIGTSTP",
+            Self::SIGTTIN => "SIGTTIN",
+            Self::SIGTTOU => "SIGTTOU",
+            Self::SIGURG => "SIGURG",
+            Self::SIGXCPU => "SIGXCPU",
+            Self::SIGXFSZ => "SIGXFSZ",
+            Self::SIGVTALRM => "SIGVTALRM",
+            Self::SIGPROF => "SIGPROF",
+            Self::SIGWINCH => "SIGWINCH",
+            Self::SIGIO => "SIGIO",
+            Self::SIGPWR => "SIGPWR",
+            Self::SIGSYS => "SIGSYS",
+        }
+    }
+}
+
+impl core::str::FromStr for Signal {
+    type Err = crate::error::SystemError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        for sig in Self::iterator() {
+            if sig.as_str() == s {
+                return Ok(sig);
+            }
+        }
+        Err(crate::error::SystemError::Other(alloc::format!(
+            "invalid signal: {s}"
+        )))
+    }
+}
+
+impl TryFrom<i32> for Signal {
+    type Error = crate::error::SystemError;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        for sig in Self::iterator() {
+            if sig as i32 == value {
+                return Ok(sig);
+            }
+        }
+        Err(crate::error::SystemError::Other(alloc::format!(
+            "invalid signal number: {value}"
+        )))
+    }
+}
+
+impl TryFrom<u32> for Signal {
+    type Error = crate::error::SystemError;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        Self::try_from(value as i32)
+    }
+}
+
+#[cfg_attr(
     target_family = "wasm",
     allow(
         clippy::cast_possible_truncation,

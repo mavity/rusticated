@@ -4,7 +4,7 @@
 #![no_std]
 #![feature(thread_local)]
 
-extern crate alloc;
+pub extern crate alloc;
 // The test harness is std-based; bring std in for test builds only.
 // On native targets the final binary always links std; expose it here so that
 // platform-specific modules (fs, time, …) can use std::fs, std::time, etc.
@@ -51,12 +51,64 @@ macro_rules! thread_local {
         $crate::thread_local!($($rest)*);
     };
 }
+/// Prints to the standard output, with a newline.
+#[macro_export]
+macro_rules! println {
+    () => {
+        $crate::print!("\n")
+    };
+    ($($arg:tt)*) => {
+        $crate::print!("{}\n", $crate::format!($($arg)*))
+    };
+}
 
+/// Prints to the standard output.
+#[macro_export]
+macro_rules! print {
+    ($($arg:tt)*) => {
+        {
+            use $crate::io::Write;
+            let mut out = $crate::io::stdout();
+            let _ = out.write_all($crate::format!($($arg)*).as_bytes());
+        }
+    };
+}
+
+/// Prints to the standard error, with a newline.
+#[macro_export]
+macro_rules! eprintln {
+    () => {
+        $crate::eprint!("\n")
+    };
+    ($($arg:tt)*) => {
+        $crate::eprint!("{}\n", $crate::format!($($arg)*))
+    };
+}
+
+/// Prints to the standard error.
+#[macro_export]
+macro_rules! eprint {
+    ($($arg:tt)*) => {
+        {
+            use $crate::io::Write;
+            let mut out = $crate::io::stderr();
+            let _ = out.write_all($crate::format!($($arg)*).as_bytes());
+        }
+    };
+}
+
+/// Creates a String using interpolation of runtime expressions.
+#[macro_export]
+macro_rules! format {
+    ($($arg:tt)*) => {
+        $crate::alloc::format!($($arg)*)
+    };
+}
 /// Shared ABI definitions
 pub mod abi;
 
-#[cfg(not(test))]
 #[panic_handler]
+#[cfg(feature = "panic-handler")]
 #[allow(unused_variables, unused_assignments, clashing_extern_declarations)]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     #[cfg(windows)]
@@ -171,10 +223,16 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     loop {}
 }
 
-#[cfg(not(any(test, target_family = "wasm")))]
+#[cfg(all(
+    not(any(test, target_family = "wasm", feature = "std")),
+    target_os = "none"
+))]
 struct SystemAllocator;
 
-#[cfg(not(any(test, target_family = "wasm")))]
+#[cfg(all(
+    not(any(test, target_family = "wasm", feature = "std")),
+    target_os = "none"
+))]
 unsafe impl core::alloc::GlobalAlloc for SystemAllocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
         #[cfg(unix)]
@@ -219,7 +277,10 @@ unsafe impl core::alloc::GlobalAlloc for SystemAllocator {
     }
 }
 
-#[cfg(not(any(test, target_family = "wasm")))]
+#[cfg(all(
+    not(any(test, target_family = "wasm", feature = "std")),
+    target_os = "none"
+))]
 #[global_allocator]
 static ALLOCATOR: SystemAllocator = SystemAllocator;
 
@@ -259,12 +320,16 @@ pub mod ffi;
 pub mod fs;
 /// I/O operations
 pub mod io;
+/// OS-specific extensions
+pub mod os;
 /// Path extensions
 pub mod path;
 /// Process execution and management
 pub mod process;
 /// Runtime engine abstraction
 pub mod rt;
+/// Executor
+pub use rt::executor;
 /// OS signal abstractions
 pub mod signal;
 /// Synchronisation primitives
@@ -273,6 +338,8 @@ pub mod sync;
 pub mod thread;
 /// Time and async sleep utilities
 pub mod time;
+/// Core traits
+pub mod traits;
 /// Terminal interface types
 pub mod tty;
 
@@ -289,17 +356,61 @@ pub mod boxed {
 pub mod cell {
     pub use core::cell::*;
 }
+/// Character utilities.
+pub mod char {
+    pub use core::char::*;
+}
+/// Option types (`Option`, `Some`, `None`).
+pub mod option {
+    pub use core::option::*;
+}
+/// Type comparison and ordering.
+pub mod cmp {
+    pub use core::cmp::*;
+}
+/// Conversion traits (`From`, `Into`, `TryFrom`, `TryInto`).
+pub mod convert {
+    pub use core::convert::*;
+}
+/// Formatting utilities (`Display`, `Debug`, `Formatter`, `Write`, …).
+pub mod fmt {
+    pub use core::fmt::*;
+}
+/// Result types (`Result`, `Ok`, `Err`).
+pub mod result {
+    pub use core::result::*;
+}
 /// Async/future abstractions (`Future`, `poll_fn`).
 pub mod future {
     pub use core::future::*;
+}
+/// Hashing traits.
+pub mod hash {
+    pub use core::hash::*;
 }
 /// CPU hints (`spin_loop`).
 pub mod hint {
     pub use core::hint::*;
 }
+/// Iterator adaptors and traits.
+pub mod iter {
+    pub use core::iter::*;
+}
+/// Marker traits (`Send`, `Sync`, `Copy`, `PhantomData`, …).
+pub mod marker {
+    pub use core::marker::*;
+}
+/// Memory utilities (`size_of`, `align_of`, `take`, `swap`, …).
+pub mod mem {
+    pub use core::mem::*;
+}
 /// Operator traits (`Deref`, `DerefMut`, `Index`, `Add`, …).
 pub mod ops {
     pub use core::ops::*;
+}
+/// Numeric traits and types.
+pub mod num {
+    pub use core::num::*;
 }
 /// Pinned-memory utilities.
 pub mod pin {
@@ -313,17 +424,72 @@ pub mod ptr {
 pub mod rc {
     pub use alloc::rc::*;
 }
+/// Slice utilities and iterators.
+pub mod slice {
+    pub use core::slice::*;
+}
+/// String utilities and iterators.
+pub mod str {
+    pub use core::str::*;
+}
 /// Growable UTF-8 string type.
 pub mod string {
     pub use alloc::string::*;
 }
+
 /// Async task types (`Context`, `Poll`, `Waker`).
 pub mod task {
+    #[cfg(not(target_family = "wasm"))]
+    pub use crate::rt::executor::{JoinError, JoinHandle};
     pub use core::task::*;
 }
 /// Growable array type.
+#[macro_use]
 pub mod vec {
+    pub use alloc::vec;
     pub use alloc::vec::*;
 }
 
-pub use error::{Error, Result};
+/// Re-exports from the runtime engine.
+#[cfg(not(target_family = "wasm"))]
+pub use crate::rt::executor::{JoinHandle, block_on, spawn, spawn_blocking};
+
+pub use crate::error::{Result, SystemError as Error};
+
+// Re-export commonly used macros so `std::format!`, `std::vec!` etc. work.
+// Use our local format!/println!/etc macros instead.
+// pub use alloc::format;
+// Note: `vec!` macro is re-exported via `pub mod vec { pub use alloc::vec::*; }` below.
+// We cannot also do `pub use alloc::vec;` here because it would conflict with the module.
+
+/// Standard prelude — re-exports the most commonly used items so that
+/// `use std::prelude::v1::*;` works in crates that declare
+/// `std = { package = "rusticated" }`.
+pub mod prelude {
+    /// Rust edition-independent prelude v1.
+    pub mod v1 {
+        // alloc types that are normally injected by the std prelude
+        pub use alloc::borrow::ToOwned;
+        pub use alloc::boxed::Box;
+        pub use alloc::string::{String, ToString};
+        pub use alloc::vec::Vec;
+        // The vec! and format! macros from alloc
+        // pub use crate::format;
+        pub use alloc::vec;
+        // Core traits already in scope via core::prelude, but re-export
+        // them here for completeness so a wildcard import is sufficient.
+        pub use core::clone::Clone;
+        pub use core::cmp::{Eq, Ord, PartialEq, PartialOrd};
+        pub use core::convert::{From, Into, TryFrom, TryInto};
+        pub use core::default::Default;
+        pub use core::fmt::{Debug, Display};
+        pub use core::iter::{
+            DoubleEndedIterator, ExactSizeIterator, Extend, FromIterator, IntoIterator, Iterator,
+        };
+        pub use core::marker::{Copy, Send, Sized, Sync};
+        pub use core::mem::drop;
+        pub use core::ops::{Drop, Fn, FnMut, FnOnce};
+        pub use core::option::Option::{self, None, Some};
+        pub use core::result::Result::{self, Err, Ok};
+    }
+}

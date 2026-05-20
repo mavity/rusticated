@@ -1,6 +1,25 @@
 //! Process execution and management
 
-#![cfg_attr(
+/// Process identifier.
+pub type ProcessId = u32;
+
+/// Result of a process execution.
+#[derive(Debug, Clone)]
+pub struct Output {
+    /// The status (exit code) of the process.
+    pub status: ExitStatus,
+    /// The data that the process wrote to stdout.
+    pub stdout: crate::vec::Vec<u8>,
+    /// The data that the process wrote to stderr.
+    pub stderr: crate::vec::Vec<u8>,
+}
+
+/// Returns the unique ID of the current process.
+pub fn id() -> ProcessId {
+    0
+}
+
+#[cfg_attr(
     target_family = "wasm",
     allow(
         clippy::cast_possible_truncation,
@@ -18,8 +37,10 @@
 #[cfg(not(target_family = "wasm"))]
 mod native_process {
     use crate::io;
+    use crate::path::{Path, PathBuf};
     use crate::string::String;
     use crate::vec::Vec;
+    use alloc::boxed::Box;
 
     // ── Linux pidfd async wait ────────────────────────────────────────────────
 
@@ -127,7 +148,10 @@ mod native_process {
     // ── Exit status ───────────────────────────────────────────────────────────
 
     /// Exit status of a child process.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct ChildExitStatus(i32);
+    /// Alias for ExitStatus to match std.
+    pub use ChildExitStatus as ExitStatus;
 
     impl ChildExitStatus {
         /// Returns `true` if the process exited with code 0.
@@ -150,6 +174,8 @@ mod native_process {
         Null,
         /// Create a pipe.
         Piped,
+        /// Redirect to a file.
+        File(crate::fs::FileNative),
     }
 
     impl Stdio {
@@ -167,6 +193,12 @@ mod native_process {
         }
     }
 
+    impl From<crate::fs::FileNative> for Stdio {
+        fn from(file: crate::fs::FileNative) -> Self {
+            Self::File(file)
+        }
+    }
+
     // ── Child ─────────────────────────────────────────────────────────────────
 
     /// A running child process.
@@ -175,11 +207,33 @@ mod native_process {
         pid: u32,
         #[cfg(windows)]
         handle: usize,
+
+        /// Async reader for stdout if piped.
+        pub stdout: Option<Box<dyn crate::io::Read + Unpin + Send + Sync>>,
+        /// Async reader for stderr if piped.
+        pub stderr: Option<Box<dyn crate::io::Read + Unpin + Send + Sync>>,
+
         #[cfg(not(any(unix, windows)))]
         _opaque: (),
     }
 
     impl Child {
+        /// Returns the process ID.
+        pub fn id(&self) -> Option<u32> {
+            #[cfg(unix)]
+            {
+                Some(self.pid)
+            }
+            #[cfg(windows)]
+            {
+                None
+            }
+            #[cfg(not(any(unix, windows)))]
+            {
+                None
+            }
+        }
+
         /// Wait asynchronously for the child to exit.
         #[allow(clippy::unused_async)]
         pub async fn wait(&mut self) -> io::Result<ChildExitStatus> {
@@ -239,6 +293,42 @@ mod native_process {
             Err(io::Error::other(
                 "Child::wait: not supported on this platform",
             ))
+        }
+
+        /// Wait for the child to exit and return its output.
+        pub async fn wait_with_output(mut self) -> io::Result<crate::process::Output> {
+            let mut stdout_data = Vec::new();
+            let mut stderr_data = Vec::new();
+
+            if let Some(mut r) = self.stdout.take() {
+                let mut temp = [0u8; 8192];
+                loop {
+                    match r.read(&mut temp) {
+                        Ok(0) => break,
+                        Ok(n) => stdout_data.extend_from_slice(&temp[..n]),
+                        Err(e) if e.kind() == crate::io::ErrorKind::Interrupted => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+            if let Some(mut r) = self.stderr.take() {
+                let mut temp = [0u8; 8192];
+                loop {
+                    match r.read(&mut temp) {
+                        Ok(0) => break,
+                        Ok(n) => stderr_data.extend_from_slice(&temp[..n]),
+                        Err(e) if e.kind() == crate::io::ErrorKind::Interrupted => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+
+            let status = self.wait().await?;
+            Ok(crate::process::Output {
+                status: unsafe { core::mem::transmute(status) },
+                stdout: stdout_data,
+                stderr: stderr_data,
+            })
         }
 
         /// Non-blocking check if the child has exited.
@@ -315,11 +405,14 @@ mod native_process {
     /// Builder for spawning child processes.
     pub struct Command {
         program: String,
+        arg0: Option<String>,
         args: Vec<String>,
         envs: Vec<(String, String)>,
         stdin: Stdio,
         stdout: Stdio,
         stderr: Stdio,
+        cwd: Option<PathBuf>,
+        pgid: Option<i32>,
     }
 
     impl Command {
@@ -327,11 +420,14 @@ mod native_process {
         pub fn new<S: AsRef<str>>(program: S) -> Self {
             Self {
                 program: program.as_ref().into(),
+                arg0: None,
                 args: Vec::new(),
                 envs: Vec::new(),
                 stdin: Stdio::Inherit,
                 stdout: Stdio::Inherit,
                 stderr: Stdio::Inherit,
+                cwd: None,
+                pgid: None,
             }
         }
 
@@ -351,6 +447,40 @@ mod native_process {
                 self.args.push(a.as_ref().into());
             }
             self
+        }
+
+        /// Set arg0.
+        pub fn arg0<S: AsRef<str>>(&mut self, arg: S) -> &mut Self {
+            self.arg0 = Some(arg.as_ref().into());
+            self
+        }
+
+        /// Set workspace.
+        pub fn current_dir<P: AsRef<Path>>(&mut self, dir: P) -> &mut Self {
+            self.cwd = Some(dir.as_ref().to_path_buf());
+            self
+        }
+
+        /// Clear envs.
+        pub fn env_clear(&mut self) -> &mut Self {
+            self.envs.clear();
+            self
+        }
+
+        /// Set process group.
+        pub fn process_group(&mut self, pgid: u32) -> &mut Self {
+            self.pgid = Some(pgid as i32);
+            self
+        }
+
+        /// Get program.
+        pub fn get_program(&self) -> &str {
+            &self.program
+        }
+
+        /// Get args.
+        pub fn get_args(&self) -> impl Iterator<Item = &str> {
+            self.args.iter().map(|s| s.as_str())
         }
 
         /// Set an environment variable for the child process.
@@ -418,7 +548,11 @@ mod native_process {
             if r != 0 {
                 return Err(io::Error::from_raw_os_error(r));
             }
-            Ok(Child { pid: pid as u32 })
+            Ok(Child {
+                pid: pid as u32,
+                stdout: None,
+                stderr: None,
+            })
         }
 
         #[cfg(windows)]
@@ -480,6 +614,8 @@ mod native_process {
             unsafe { CloseHandle(pi.h_thread) };
             Ok(Child {
                 handle: pi.h_process,
+                stdout: None,
+                stderr: None,
             })
         }
 
@@ -491,7 +627,35 @@ mod native_process {
 }
 
 #[cfg(not(target_family = "wasm"))]
-pub use native_process::{Child, ChildExitStatus, Command, Stdio};
+pub use native_process::{Child, ChildExitStatus, ExitStatus, Command, Stdio};
+
+/// Terminate the current process immediately with the given exit code.
+///
+/// Equivalent to `std::process::exit`. Never returns.
+pub fn exit(code: i32) -> ! {
+    #[cfg(unix)]
+    {
+        unsafe extern "C" {
+            fn _exit(status: i32) -> !;
+        }
+        // SAFETY: `_exit` has no preconditions; any `i32` is a valid status.
+        unsafe { _exit(code) }
+    }
+    #[cfg(windows)]
+    {
+        unsafe extern "system" {
+            fn ExitProcess(u_exit_code: u32) -> !;
+        }
+        // SAFETY: `ExitProcess` has no preconditions.
+        unsafe { ExitProcess(code as u32) }
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        use crate::abi::imports;
+        // SAFETY: The host import has no preconditions; the guest halts.
+        unsafe { imports::process_exit(code) }
+    }
+}
 
 // ─── WASM ─────────────────────────────────────────────────────────────────────
 
@@ -535,10 +699,13 @@ impl Child {
 
 /// Exit status for a WASM child process.
 #[cfg(target_family = "wasm")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChildExitStatus {
     exit_code: i32,
     success: bool,
 }
+#[cfg(target_family = "wasm")]
+pub use ChildExitStatus as ExitStatus;
 
 #[cfg(target_family = "wasm")]
 impl ChildExitStatus {

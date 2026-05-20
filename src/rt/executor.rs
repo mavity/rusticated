@@ -101,6 +101,19 @@ impl<T: 'static> Future for JoinFuture<T> {
     }
 }
 
+/// Error returned when a task join fails.
+#[derive(Debug)]
+pub struct JoinError;
+
+impl core::fmt::Display for JoinError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "task join failed")
+    }
+}
+
+pub use core::error::Error;
+impl Error for JoinError {}
+
 /// A handle to a spawned task that can be awaited for its return value.
 ///
 /// Dropping the handle does not cancel the task — it continues to run; its
@@ -110,16 +123,38 @@ pub struct JoinHandle<T> {
 }
 
 impl<T> Future for JoinHandle<T> {
-    type Output = T;
+    type Output = Result<T, JoinError>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut state = self.state.borrow_mut();
-        if let Some(val) = state.result.take() {
-            Poll::Ready(val)
+        if let Some(res) = state.result.take() {
+            Poll::Ready(Ok(res))
         } else {
             state.waker = Some(cx.waker().clone());
             Poll::Pending
         }
+    }
+}
+
+/// Drive the runtime until `future` resolves, returning its output.
+pub fn block_on<F, T>(future: F) -> T
+where
+    F: Future<Output = T> + 'static,
+    T: 'static,
+{
+    let handle = spawn(future);
+    loop {
+        if let Some(res) = handle.try_join() {
+            return res.expect("task failed");
+        }
+        let _ = poll_step_idle(next_deadline()).unwrap();
+    }
+}
+
+impl<T> JoinHandle<T> {
+    /// Polls the join handle once, returning the result if complete.
+    pub fn try_join(&self) -> Option<Result<T, JoinError>> {
+        self.state.borrow_mut().result.take().map(Ok)
     }
 }
 
@@ -161,6 +196,45 @@ where
         })
     });
     handle
+}
+
+/// Spawns a blocking task.
+///
+/// If `threads` feature is enabled, it spawns a real thread.
+/// Otherwise, it runs it immediately and blocks.
+pub fn spawn_blocking<F, T>(f: F) -> JoinHandle<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    #[cfg(feature = "threads")]
+    {
+        let state = Arc::new(RefCell::new(JoinState {
+            result: None,
+            waker: None,
+        }));
+        let state_clone = Arc::clone(&state);
+        // We need a way to tell the executor to wake up.
+        // For now, we'll just use a thread and hope the executor is polling.
+        let _ = ::std::thread::spawn(move || {
+            let res = f();
+            let mut s = state_clone.borrow_mut();
+            s.result = Some(res);
+            if let Some(w) = s.waker.take() {
+                w.wake();
+            }
+        });
+        JoinHandle { state }
+    }
+    #[cfg(not(feature = "threads"))]
+    {
+        let res = f();
+        let state = Arc::new(RefCell::new(JoinState {
+            result: Some(res),
+            waker: None,
+        }));
+        JoinHandle { state }
+    }
 }
 
 /// Internal helper: spawn a `Future<Output = ()>` and discard the handle.

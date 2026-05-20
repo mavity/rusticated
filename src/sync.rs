@@ -1,74 +1,41 @@
 //! Synchronisation primitives for `#![no_std]` environments.
 
-use crate::cell::UnsafeCell;
-use crate::hint;
-use crate::ops::{Deref, DerefMut};
-use crate::sync::atomic::{AtomicBool, Ordering};
+pub use core::sync::*;
+pub use alloc::sync::Arc;
+pub use spin::lazy::Lazy as LazyLock;
+pub use spin::mutex::SpinMutex;
+pub use spin::{Mutex, RwLock};
 
-/// A mutual-exclusion lock implemented as a busy-waiting spinlock.
-///
-/// Unlike `std::sync::Mutex`, this never calls into the OS scheduler and
-/// never parks the calling thread.  It is intended for short-held critical
-/// sections such as storing a [`core::task::Waker`].
-pub struct SpinMutex<T> {
-    locked: AtomicBool,
-    data: UnsafeCell<T>,
+/// A synchronization primitive which can be written to only once.
+pub struct OnceLock<T> {
+    inner: spin::Once<T>,
 }
 
-// SAFETY: `SpinMutex<T>` is `Send + Sync` when `T: Send` because the
-// `AtomicBool` gate ensures exclusive access to the inner `T`.
-unsafe impl<T: Send> Send for SpinMutex<T> {}
-unsafe impl<T: Send> Sync for SpinMutex<T> {}
-
-impl<T> SpinMutex<T> {
-    /// Creates a new `SpinMutex` wrapping `value`.
-    pub const fn new(value: T) -> Self {
+impl<T> OnceLock<T> {
+    /// Creates a new empty cell.
+    pub const fn new() -> Self {
         Self {
-            locked: AtomicBool::new(false),
-            data: UnsafeCell::new(value),
+            inner: spin::Once::new(),
         }
     }
 
-    /// Acquires the lock, spinning until it is available.
-    ///
-    /// Returns a [`SpinGuard`] that releases the lock when dropped.
-    pub fn lock(&self) -> SpinGuard<'_, T> {
-        while self
-            .locked
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            hint::spin_loop();
-        }
-        SpinGuard { mutex: self }
+    /// Gets the contents of the cell, initializing it with `f` if the cell was empty.
+    pub fn get_or_init<F>(&self, f: F) -> &T
+    where
+        F: FnOnce() -> T,
+    {
+        self.inner.call_once(f)
+    }
+
+    /// Gets the contents of the cell, returning `None` if the cell is empty.
+    pub fn get(&self) -> Option<&T> {
+        self.inner.get()
     }
 }
 
-/// RAII guard that releases the spinlock on drop.
-pub struct SpinGuard<'a, T> {
-    mutex: &'a SpinMutex<T>,
-}
-
-impl<T> Deref for SpinGuard<'_, T> {
-    type Target = T;
-    fn deref(&self) -> &T {
-        // SAFETY: We hold the lock exclusively.
-        unsafe { &*self.mutex.data.get() }
-    }
-}
-
-impl<T> DerefMut for SpinGuard<'_, T> {
-    fn deref_mut(&mut self) -> &mut T {
-        // SAFETY: We hold the lock exclusively.
-        unsafe { &mut *self.mutex.data.get() }
-    }
-}
-
-impl<T> Drop for SpinGuard<'_, T> {
-    fn drop(&mut self) {
-        self.mutex.locked.store(false, Ordering::Release);
-    }
-}
+// Safety: spin::Once is Send/Sync if T is.
+unsafe impl<T: Sync + Send> Sync for OnceLock<T> {}
+unsafe impl<T: Send> Send for OnceLock<T> {}
 
 /// Atomic types and memory orderings.
 pub mod atomic {

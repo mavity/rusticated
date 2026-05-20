@@ -118,6 +118,8 @@ pub mod imports {
         pub fn process_spawn(overlapped: *mut Overlapped, cfg_ptr: *const u8, cfg_len: u32);
         /// Await process exit. Result_ext = Exit Code (high 32) | Status (low 32).
         pub fn process_wait(overlapped: *mut Overlapped, process_handle: u64);
+        /// Terminate the current WASM guest immediately with the given exit code.
+        pub fn process_exit(code: i32) -> !;
         /// Send signal (Sync).
         pub fn process_signal(process_handle: u64, signum: u32);
 

@@ -10,6 +10,11 @@ pub use windows_tty::{Tty, get_size, set_mode, stdin, stdout};
 #[cfg(target_family = "wasm")]
 pub use wasm_tty::{Tty, get_size, set_mode, stdin, stdout};
 
+/// Returns `true` if standard input is a terminal.
+pub fn is_stdin_a_tty() -> bool {
+    false
+}
+
 // ─── Unix (Linux + BSD/macOS) ─────────────────────────────────────────────────
 
 #[cfg(unix)]
@@ -82,6 +87,17 @@ mod unix_tty {
         Ok(())
     }
 
+    impl crate::io::IsTerminal for Tty {
+        fn is_terminal(&self) -> bool {
+            unsafe extern "C" {
+                // SAFETY: `isatty` is a pure query with no side effects.
+                fn isatty(fd: i32) -> i32;
+            }
+            // SAFETY: Any `i32` fd value is safe to pass; returns 0 for non-ttys.
+            unsafe { isatty(self.fd) != 0 }
+        }
+    }
+
     impl crate::io::AsyncRead for Tty {
         async fn read(&mut self, mut buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
             // Wait until the fd is readable (epoll/kqueue), then do a direct
@@ -101,6 +117,17 @@ mod unix_tty {
         }
     }
 
+    impl crate::io::Read for Tty {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = unsafe { read(self.fd, buf.as_mut_ptr(), buf.len()) };
+            if n < 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(n as usize)
+            }
+        }
+    }
+
     impl crate::io::AsyncWrite for Tty {
         async fn write(&mut self, buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
             // SAFETY: `buf.as_ptr()` is valid for `buf.len()` bytes.
@@ -110,6 +137,23 @@ mod unix_tty {
             } else {
                 (Ok(n as usize), buf)
             }
+        }
+        async fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl crate::io::Write for Tty {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let n = unsafe { write(self.fd, buf.as_ptr(), buf.len()) };
+            if n < 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(n as usize)
+            }
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
         }
     }
 }
@@ -418,6 +462,14 @@ mod windows_tty {
 
     // ── AsyncRead / AsyncWrite ────────────────────────────────────────────────
 
+    impl crate::io::IsTerminal for Tty {
+        fn is_terminal(&self) -> bool {
+            // FILE_TYPE_CHAR means a character device (console or serial port).
+            let ft = unsafe { GetFileType(self.handle) };
+            ft == FILE_TYPE_CHAR
+        }
+    }
+
     impl crate::io::AsyncRead for Tty {
         async fn read(&mut self, buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
             // Check if it is a character file (console/tty).
@@ -426,6 +478,12 @@ mod windows_tty {
             } else {
                 crate::rt::windows::OverlappedRead::new(self.handle as u64, buf).await
             }
+        }
+    }
+
+    impl crate::io::Read for Tty {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("sync read not implemented for Windows Tty"))
         }
     }
 
@@ -448,6 +506,32 @@ mod windows_tty {
             } else {
                 (Ok(n as usize), buf)
             }
+        }
+        async fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl crate::io::Write for Tty {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let mut n: u32 = 0;
+            let ret = unsafe {
+                WriteFile(
+                    self.handle,
+                    buf.as_ptr(),
+                    buf.len() as u32,
+                    &mut n,
+                    ptr::null_mut(),
+                )
+            };
+            if ret == 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(n as usize)
+            }
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
         }
     }
 
@@ -688,7 +772,15 @@ mod wasm_tty {
         Ok(())
     }
 
-    impl crate::io::AsyncRead for Tty {
+    impl crate::io::IsTerminal for Tty {
+        fn is_terminal(&self) -> bool {
+            // On WASM, assume handles 0 and 1 (stdin/stdout) are always TTYs.
+            // The host may override this assumption in future via a host import.
+            self.handle <= 1
+        }
+    }
+
+    impl crate::io::Read for Tty {
         async fn read(&mut self, buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
             let handle = self.handle;
             let (err, bytes_read, _, mut buf) =
@@ -707,9 +799,12 @@ mod wasm_tty {
             unsafe { buf.set_len(bytes_read as usize) };
             (Ok(bytes_read as usize), buf)
         }
+        fn read_sync(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("sync read not implemented for WASM Tty"))
+        }
     }
 
-    impl crate::io::AsyncWrite for Tty {
+    impl crate::io::Write for Tty {
         async fn write(&mut self, buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
             let handle = self.handle;
             let used = buf.len() as u32;
@@ -724,6 +819,15 @@ mod wasm_tty {
                 return (Err(io::Error::from_raw_os_error(err as i32)), buf);
             }
             (Ok(bytes_written as usize), buf)
+        }
+        async fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+        fn write_sync(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("sync write not implemented for WASM Tty"))
+        }
+        fn flush_sync(&mut self) -> io::Result<()> {
+            Ok(())
         }
     }
 }

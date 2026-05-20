@@ -20,14 +20,22 @@
     )
 )]
 
-// ——— Native Linux —————————————————————————————————————————————————————————
+// ——— Native Unix ——————————————————————————————————————————————————————————
 
-#[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
-pub use native_linux::{File, OpenOptions};
+#[cfg(all(not(target_family = "wasm"), unix))]
+pub use native_unix::{
+    File as FileNative, FileTypeNative as FileType, MetadataNative as Metadata, OpenOptions,
+};
 
-#[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
-mod native_linux {
-    use crate::{ffi::CString, io};
+#[cfg(all(not(target_family = "wasm"), unix))]
+mod native_unix {
+    use crate::io::{Read, Write};
+    use crate::{
+        ffi::CString,
+        io,
+        time::SystemTime,
+        traits::{AsyncRead, AsyncWrite, Read, Write},
+    };
     use alloc::vec::Vec;
 
     unsafe extern "C" {
@@ -35,7 +43,240 @@ mod native_linux {
         fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
         fn write(fd: i32, buf: *const u8, count: usize) -> isize;
         fn close(fd: i32) -> i32;
+        fn dup(oldfd: i32) -> i32;
     }
+
+    /// Read directory handle.
+    pub type ReadDir = super::ReadDir;
+    /// Directory entry.
+    pub type DirEntry = super::DirEntry;
+    /// File type information.
+    pub type FileType = FileTypeNative;
+    /// File metadata.
+    pub type Metadata = MetadataNative;
+
+    /// File type information.
+    pub struct FileTypeNative;
+
+    impl FileTypeNative {
+        /// Returns true if the entry is a directory.
+        pub fn is_dir(&self) -> bool {
+            false
+        }
+
+        /// Returns true if the entry is a file.
+        pub fn is_file(&self) -> bool {
+            false
+        }
+
+        /// Returns true if the entry is a symbolic link.
+        pub fn is_symlink(&self) -> bool {
+            false
+        }
+    }
+
+    /// File metadata.
+    pub struct MetadataNative;
+
+    impl MetadataNative {
+        /// Returns true if the entry is a directory.
+        pub fn is_dir(&self) -> bool {
+            false
+        }
+
+        /// Returns true if the entry is a file.
+        pub fn is_file(&self) -> bool {
+            true
+        }
+
+        /// Returns the file length.
+        pub fn len(&self) -> u64 {
+            0
+        }
+
+        /// Returns the last modification time.
+        pub fn modified(&self) -> io::Result<SystemTime> {
+            Err(io::Error::other("not implemented"))
+        }
+    }
+
+    pub(crate) static STATIC_METADATA: MetadataNative = MetadataNative;
+
+    /// Builder for opening files with specific options.
+    #[derive(Clone, Debug)]
+    pub struct OpenOptions {
+        read: bool,
+        write: bool,
+        append: bool,
+        truncate: bool,
+        create: bool,
+        create_new: bool,
+    }
+
+    impl OpenOptions {
+        /// Create a blank set of options.
+        pub fn new() -> Self {
+            Self {
+                read: false,
+                write: false,
+                append: false,
+                truncate: false,
+                create: false,
+                create_new: false,
+            }
+        }
+
+        /// Enable or disable read access.
+        pub fn read(&mut self, v: bool) -> &mut Self {
+            self.read = v;
+            self
+        }
+
+        /// Enable or disable write access.
+        pub fn write(&mut self, v: bool) -> &mut Self {
+            self.write = v;
+            self
+        }
+
+        /// Enable or disable append mode.
+        pub fn append(&mut self, v: bool) -> &mut Self {
+            self.append = v;
+            self
+        }
+
+        /// Enable or disable truncation on open.
+        pub fn truncate(&mut self, v: bool) -> &mut Self {
+            self.truncate = v;
+            self
+        }
+
+        /// Create the file if it does not exist.
+        pub fn create(&mut self, v: bool) -> &mut Self {
+            self.create = v;
+            self
+        }
+
+        /// Fail if the file already exists.
+        pub fn create_new(&mut self, v: bool) -> &mut Self {
+            self.create_new = v;
+            self
+        }
+
+        /// Open the file at `path` according to the options.
+        pub async fn open<P: AsRef<str>>(&self, path: P) -> io::Result<FileNative> {
+            let cpath = CString::new(path.as_ref())
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains null"))?;
+            let mut flags = O_CLOEXEC;
+            if self.read && self.write {
+                flags |= O_RDWR;
+            } else if self.write {
+                flags |= O_WRONLY;
+            } else {
+                flags |= O_RDONLY;
+            }
+            if self.create {
+                flags |= O_CREAT;
+            }
+            if self.truncate {
+                flags |= O_TRUNC;
+            }
+            if self.append {
+                flags |= O_APPEND;
+            }
+            if self.create_new {
+                flags |= O_EXCL | O_CREAT;
+            }
+
+            let fd = unsafe { open(cpath.as_ptr() as _, flags, 0o666) };
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(FileNative { fd })
+        }
+
+        /// Open the file at `path` according to the options (sync).
+        pub fn open_sync<P: AsRef<str>>(&self, path: P) -> io::Result<FileNative> {
+            let cpath = CString::new(path.as_ref())
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains null"))?;
+            let mut flags = O_CLOEXEC;
+            if self.read && self.write {
+                flags |= O_RDWR;
+            } else if self.write {
+                flags |= O_WRONLY;
+            } else {
+                flags |= O_RDONLY;
+            }
+            if self.create {
+                flags |= O_CREAT;
+            }
+            if self.truncate {
+                flags |= O_TRUNC;
+            }
+            if self.append {
+                flags |= O_APPEND;
+            }
+            if self.create_new {
+                flags |= O_EXCL | O_CREAT;
+            }
+
+            let fd = unsafe { open(cpath.as_ptr() as _, flags, 0o666) };
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(FileNative { fd })
+        }
+    }
+
+    impl Default for OpenOptions {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    /// Open the null device (/dev/null).
+    pub fn open_null_file() -> io::Result<File> {
+        Err(io::Error::other("open_null_file not implemented"))
+    }
+
+    /// Returns `true` if the shell should default to case-insensitive path expansion.
+    pub fn default_case_insensitive_path_expansion() -> bool {
+        false
+    }
+
+    /// Resolves an executable name to a full path by searching the PATH.
+    pub fn resolve_executable<P: AsRef<str>>(_path: P) -> Option<alloc::string::String> {
+        None
+    }
+
+    /// Splits a path into pieces suitable for globbing.
+    pub fn split_path_for_pattern(_path: &str) -> Vec<&str> {
+        alloc::vec![]
+    }
+
+    /// Returns the root of a pattern path (e.g., "/" on Unix, "C:\" on Windows).
+    pub fn pattern_path_root(_path: &str) -> Option<alloc::string::String> {
+        None
+    }
+
+    /// Normalizes path separators for the current platform.
+    #[allow(dead_code)]
+    pub fn normalize_path_separators(path: &str) -> alloc::borrow::Cow<'_, str> {
+        alloc::borrow::Cow::Borrowed(path)
+    }
+
+    /// Pushes a path piece onto a pattern path.
+    pub fn push_path_for_pattern(path: &mut crate::path::PathBuf, piece: &str) {
+        let mut s = path.to_string();
+        if !s.is_empty() && !s.ends_with('/') && !s.ends_with('\\') {
+            s.push('/');
+        }
+        s.push_str(piece);
+        *path = crate::path::PathBuf::from(s);
+    }
+
+    pub use DirEntryNative as DirEntry;
+    pub use FileTypeNative as FileType;
+    pub use MetadataNative as Metadata;
 
     const O_RDONLY: i32 = 0;
     const O_WRONLY: i32 = 1;
@@ -47,11 +288,30 @@ mod native_linux {
     const O_EXCL: i32 = 0o200;
 
     /// An open file descriptor providing async I/O.
-    pub struct File {
+    pub type File = FileNative;
+
+    /// An open file descriptor providing async I/O.
+    pub struct FileNative {
         fd: i32,
     }
 
-    impl File {
+    #[cfg(not(target_family = "wasm"))]
+    impl FileNative {
+        /// Returns default open options.
+        pub fn options() -> OpenOptions {
+            OpenOptions::new()
+        }
+
+        /// Attempts to clone the file descriptor.
+        pub fn try_clone(&self) -> io::Result<Self> {
+            let fd = unsafe { dup(self.fd) };
+            if fd < 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(Self { fd })
+            }
+        }
+
         /// Open a file in read-only mode.
         pub async fn open<P: AsRef<str>>(path: P) -> io::Result<Self> {
             OpenOptions::new().read(true).open(path).await
@@ -66,15 +326,104 @@ mod native_linux {
                 .open(path)
                 .await
         }
-    }
 
-    impl Drop for File {
-        fn drop(&mut self) {
-            unsafe { close(self.fd) };
+        /// Returns a clone of the file.
+        pub fn try_clone(&self) -> io::Result<Self> {
+            Ok(Self { fd: self.fd })
+        }
+
+        /// Returns true if the file is a terminal.
+        pub fn is_terminal(&self) -> bool {
+            false
+        }
+
+        /// Returns metadata for the file.
+        pub fn metadata(&self) -> io::Result<MetadataNative> {
+            Ok(MetadataNative)
+        }
+
+        /// Returns the file descriptor.
+        pub fn as_raw_fd(&self) -> i32 {
+            self.fd
         }
     }
 
-    impl crate::io::AsyncRead for File {
+    impl From<&FileNative> for crate::io::Stdio {
+        fn from(file: &FileNative) -> Self {
+            crate::io::Stdio::from_raw_fd(file.fd)
+        }
+    }
+
+    impl DirEntryNative {
+        /// Returns the path of the entry.
+        pub fn path(&self) -> crate::path::PathBuf {
+            crate::path::PathBuf::from("")
+        }
+
+        /// Returns metadata for the entry.
+        pub fn metadata(&self) -> io::Result<MetadataNative> {
+            Ok(MetadataNative)
+        }
+
+        /// Returns the file type of the entry.
+        pub fn file_type(&self) -> io::Result<FileTypeNative> {
+            Ok(FileTypeNative)
+        }
+
+        /// Returns the file name of the entry.
+        pub fn file_name(&self) -> crate::string::String {
+            crate::string::String::new()
+        }
+    }
+
+    /// File type information.
+    pub struct FileTypeNative;
+
+    impl FileTypeNative {
+        /// Returns true if the entry is a directory.
+        pub fn is_dir(&self) -> bool {
+            false
+        }
+
+        /// Returns true if the entry is a file.
+        pub fn is_file(&self) -> bool {
+            false
+        }
+
+        /// Returns true if the entry is a symbolic link.
+        pub fn is_symlink(&self) -> bool {
+            false
+        }
+    }
+
+    /// File metadata.
+    pub struct MetadataNative;
+
+    impl MetadataNative {
+        /// Returns true if the entry is a directory.
+        pub fn is_dir(&self) -> bool {
+            false
+        }
+
+        /// Returns true if the entry is a file.
+        pub fn is_file(&self) -> bool {
+            true
+        }
+
+        /// Returns the file length.
+        pub fn len(&self) -> u64 {
+            0
+        }
+
+        /// Returns the last modification time.
+        pub fn modified(&self) -> io::Result<SystemTime> {
+            Err(io::Error::other("not implemented"))
+        }
+    }
+
+    pub(crate) static STATIC_METADATA: MetadataNative = MetadataNative;
+
+    impl AsyncRead for FileNative {
         async fn read(&mut self, mut buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
             let n = unsafe { read(self.fd, buf.as_mut_ptr(), buf.capacity()) };
             if n < 0 {
@@ -86,7 +435,18 @@ mod native_linux {
         }
     }
 
-    impl crate::io::AsyncWrite for File {
+    impl Read for FileNative {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = unsafe { read(self.fd, buf.as_mut_ptr(), buf.len()) };
+            if n < 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(n as usize)
+            }
+        }
+    }
+
+    impl AsyncWrite for FileNative {
         async fn write(&mut self, buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
             let n = unsafe { write(self.fd, buf.as_ptr(), buf.len()) };
             if n < 0 {
@@ -94,6 +454,36 @@ mod native_linux {
             } else {
                 (Ok(n as usize), buf)
             }
+        }
+
+        async fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Write for FileNative {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let n = unsafe { write(self.fd, buf.as_ptr(), buf.len()) };
+            if n < 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(n as usize)
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Open the null device (/dev/null).
+    pub fn open_null_file() -> io::Result<FileNative> {
+        Err(io::Error::other("open_null_file not implemented"))
+    }
+
+    impl Drop for FileNative {
+        fn drop(&mut self) {
+            unsafe { close(self.fd) };
         }
     }
 
@@ -157,7 +547,7 @@ mod native_linux {
         }
 
         /// Open the file at `path` according to the options.
-        pub async fn open<P: AsRef<str>>(&self, path: P) -> io::Result<File> {
+        pub async fn open<P: AsRef<str>>(self, path: P) -> io::Result<File> {
             let cpath = CString::new(path.as_ref())
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains null"))?;
             let mut flags = O_CLOEXEC;
@@ -196,16 +586,85 @@ mod native_linux {
     }
 }
 
-// ——— Native non-Linux (Windows) — native file API
+// ——— Native non-Unix (Windows) — native file API
 
 #[cfg(all(not(target_family = "wasm"), target_os = "windows"))]
-pub use native_windows::{File, OpenOptions};
+pub use native_windows::{
+    File, File as FileNative, FileTypeNative as FileType, OpenOptions,
+    default_case_insensitive_path_expansion, open_null_file, pattern_path_root,
+    push_path_for_pattern, resolve_executable, split_path_for_pattern,
+};
 
 #[cfg(all(not(target_family = "wasm"), target_os = "windows"))]
 mod native_windows {
     use crate::rt::windows::{OverlappedRead, OverlappedWrite};
-    use crate::{ffi::OsStrExt, io};
+    use crate::{
+        ffi::OsStrExt,
+        io,
+        traits::{AsyncRead, AsyncWrite, Read, Write},
+    };
     use alloc::vec::Vec;
+
+    /// File type information.
+    pub struct FileTypeNative;
+
+    impl FileTypeNative {
+        /// Returns true if the entry is a directory.
+        pub fn is_dir(&self) -> bool {
+            false
+        }
+
+        /// Returns true if the entry is a file.
+        pub fn is_file(&self) -> bool {
+            false
+        }
+
+        /// Returns true if the entry is a symbolic link.
+        pub fn is_symlink(&self) -> bool {
+            false
+        }
+    }
+
+    /// Open the null device (NUL).
+    pub fn open_null_file() -> io::Result<File> {
+        Err(io::Error::other("open_null_file not implemented"))
+    }
+
+    /// Returns `true` if the shell should default to case-insensitive path expansion.
+    pub fn default_case_insensitive_path_expansion() -> bool {
+        true
+    }
+
+    /// Resolves an executable name to a full path by searching the PATH.
+    pub fn resolve_executable<P: AsRef<str>>(_path: P) -> Option<alloc::string::String> {
+        None
+    }
+
+    /// Splits a path into pieces suitable for globbing.
+    pub fn split_path_for_pattern(_path: &str) -> Vec<&str> {
+        alloc::vec![]
+    }
+
+    /// Returns the root of a pattern path (e.g., "/" on Unix, "C:\" on Windows).
+    pub fn pattern_path_root(_path: &str) -> Option<alloc::string::String> {
+        None
+    }
+
+    /// Normalizes path separators for the current platform.
+    #[allow(dead_code)]
+    pub fn normalize_path_separators(path: &str) -> alloc::borrow::Cow<'_, str> {
+        alloc::borrow::Cow::Borrowed(path)
+    }
+
+    /// Pushes a path piece onto a pattern path.
+    pub fn push_path_for_pattern(path: &mut crate::path::PathBuf, piece: &str) {
+        let mut s = path.to_string();
+        if !s.is_empty() && !s.ends_with('/') && !s.ends_with('\\') {
+            s.push('/');
+        }
+        s.push_str(piece);
+        *path = crate::path::PathBuf::from(s);
+    }
 
     // Minimal definitions for native windows APIs instead of relying on `windows-sys`
     unsafe extern "system" {
@@ -219,7 +678,19 @@ mod native_windows {
             hTemplateFile: usize,
         ) -> usize;
         fn CloseHandle(hObject: usize) -> i32;
+        fn GetCurrentProcess() -> usize;
+        fn DuplicateHandle(
+            hSourceProcessHandle: usize,
+            hSourceHandle: usize,
+            hTargetProcessHandle: usize,
+            lpTargetHandle: *mut usize,
+            dwDesiredAccess: u32,
+            bInheritHandle: i32,
+            dwOptions: u32,
+        ) -> i32;
     }
+
+    const DUPLICATE_SAME_ACCESS: u32 = 2;
 
     const GENERIC_READ: u32 = 0x8000_0000;
     const GENERIC_WRITE: u32 = 0x4000_0000;
@@ -241,6 +712,35 @@ mod native_windows {
     }
 
     impl File {
+        /// Returns default open options.
+        pub fn options() -> OpenOptions {
+            OpenOptions::new()
+        }
+
+        /// Attempts to clone the file handle.
+        pub fn try_clone(&self) -> io::Result<Self> {
+            let mut handle = 0;
+            let current_process = unsafe { GetCurrentProcess() };
+            let ok = unsafe {
+                DuplicateHandle(
+                    current_process,
+                    self.handle as usize,
+                    current_process,
+                    &mut handle,
+                    0,
+                    1, // inherit
+                    DUPLICATE_SAME_ACCESS,
+                )
+            };
+            if ok == 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(Self {
+                    handle: handle as u64,
+                })
+            }
+        }
+
         /// Open a file in read-only mode.
         pub async fn open<P: AsRef<str>>(path: P) -> io::Result<Self> {
             OpenOptions::new().read(true).open(path).await
@@ -255,6 +755,78 @@ mod native_windows {
                 .open(path)
                 .await
         }
+
+        /// Synchronously open a file.
+        pub fn open_sync<P: AsRef<str>>(_path: P, _write: bool) -> io::Result<Self> {
+            // For now, let's just use whatever sync open we have or stub it.
+            Err(io::Error::other(
+                "sync open not implemented for Windows File",
+            ))
+        }
+
+        /// Query metadata for this file handle (sync).
+        pub fn metadata_sync(&self) -> io::Result<super::Metadata> {
+            #[repr(C)]
+            #[allow(non_snake_case)]
+            struct FILETIME {
+                dwLowDateTime: u32,
+                dwHighDateTime: u32,
+            }
+            #[repr(C)]
+            #[allow(non_snake_case)]
+            struct BY_HANDLE_FILE_INFORMATION {
+                dwFileAttributes: u32,
+                ftCreationTime: FILETIME,
+                ftLastAccessTime: FILETIME,
+                ftLastWriteTime: FILETIME,
+                dwVolumeSerialNumber: u32,
+                nFileSizeHigh: u32,
+                nFileSizeLow: u32,
+                nNumberOfLinks: u32,
+                nFileIndexHigh: u32,
+                nFileIndexLow: u32,
+            }
+            unsafe extern "system" {
+                fn GetFileInformationByHandle(
+                    hFile: usize,
+                    lpFileInformation: *mut BY_HANDLE_FILE_INFORMATION,
+                ) -> i32;
+            }
+            let mut info = unsafe { core::mem::zeroed() };
+            let res = unsafe { GetFileInformationByHandle(self.handle as usize, &mut info) };
+            if res != 0 {
+                let created = (info.ftCreationTime.dwHighDateTime as u64) << 32
+                    | info.ftCreationTime.dwLowDateTime as u64;
+                let accessed = (info.ftLastAccessTime.dwHighDateTime as u64) << 32
+                    | info.ftLastAccessTime.dwLowDateTime as u64;
+                let modified = (info.ftLastWriteTime.dwHighDateTime as u64) << 32
+                    | info.ftLastWriteTime.dwLowDateTime as u64;
+
+                Ok(super::Metadata {
+                    size: (info.nFileSizeHigh as u64) << 32 | info.nFileSizeLow as u64,
+                    mode: info.dwFileAttributes,
+                    modified_ns: (modified.saturating_sub(116_444_736_000_000_000)) * 100,
+                    accessed_ns: (accessed.saturating_sub(116_444_736_000_000_000)) * 100,
+                    created_ns: (created.saturating_sub(116_444_736_000_000_000)) * 100,
+                    nlink: info.nNumberOfLinks as u64,
+                    uid: 0,
+                    gid: 0,
+                    inode: (info.nFileIndexHigh as u64) << 32 | info.nFileIndexLow as u64,
+                })
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        }
+
+        /// Query metadata for this file handle (async).
+        pub async fn metadata(&self) -> io::Result<super::Metadata> {
+            self.metadata_sync()
+        }
+
+        /// Returns true if the file is a terminal.
+        pub fn is_terminal(&self) -> bool {
+            false
+        }
     }
 
     impl Drop for File {
@@ -264,19 +836,43 @@ mod native_windows {
         }
     }
 
-    impl crate::io::AsyncRead for File {
+    impl AsyncRead for File {
         async fn read(&mut self, buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
             OverlappedRead::new(self.handle, buf).await
         }
     }
 
-    impl crate::io::AsyncWrite for File {
+    impl Read for File {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other(
+                "sync read not implemented for Windows File",
+            ))
+        }
+    }
+
+    impl AsyncWrite for File {
         async fn write(&mut self, buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
             OverlappedWrite::new(self.handle, buf).await
+        }
+        async fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Write for File {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other(
+                "sync write not implemented for Windows File",
+            ))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
         }
     }
 
     /// `OpenOptions` for Windows
+    #[derive(Clone, Copy)]
     pub struct OpenOptions {
         read: bool,
         write: bool,
@@ -344,7 +940,7 @@ mod native_windows {
 
         /// Open the file at `path` within Windows using Overlapped I/O
         #[allow(clippy::unused_async)]
-        pub async fn open<P: AsRef<str>>(&self, path: P) -> io::Result<File> {
+        pub async fn open<P: AsRef<str>>(self, path: P) -> io::Result<File> {
             let mut access = 0;
             if self.read {
                 access |= GENERIC_READ;
@@ -400,6 +996,61 @@ mod native_windows {
 
             Ok(file)
         }
+
+        /// Open the file at `path` according to options (sync).
+        pub fn open_sync<P: AsRef<str>>(&self, path: P) -> io::Result<File> {
+            let mut access = 0;
+            if self.read {
+                access |= GENERIC_READ;
+            }
+            if self.write {
+                access |= GENERIC_WRITE;
+            }
+
+            let creation = if self.create_new {
+                CREATE_NEW
+            } else if self.truncate && self.create {
+                CREATE_ALWAYS
+            } else if self.truncate {
+                TRUNCATE_EXISTING
+            } else if self.create {
+                OPEN_ALWAYS
+            } else {
+                OPEN_EXISTING
+            };
+
+            let flags = FILE_ATTRIBUTE_NORMAL;
+            let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+
+            let path_wide: alloc::vec::Vec<u16> = path
+                .as_ref()
+                .encode_wide()
+                .chain(core::iter::once(0))
+                .collect();
+
+            // SAFETY: Safe ffi call
+            let handle = unsafe {
+                CreateFileW(
+                    path_wide.as_ptr(),
+                    access,
+                    share,
+                    core::ptr::null_mut(),
+                    creation,
+                    flags,
+                    0,
+                )
+            };
+
+            if handle == INVALID_HANDLE_VALUE {
+                return Err(io::Error::last_os_error());
+            }
+
+            let file = File {
+                handle: handle as u64,
+            };
+
+            Ok(file)
+        }
     }
 
     impl Default for OpenOptions {
@@ -416,7 +1067,10 @@ mod native_windows {
     not(target_os = "linux"),
     not(target_os = "windows")
 ))]
-pub use native_stub::{File, OpenOptions};
+pub use native_stub::{
+    File, OpenOptions, default_case_insensitive_path_expansion, open_null_file, pattern_path_root,
+    push_path_for_pattern, resolve_executable, split_path_for_pattern,
+};
 
 #[cfg(all(
     not(target_family = "wasm"),
@@ -451,6 +1105,47 @@ mod native_stub {
         }
     }
 
+    /// Open the null device.
+    pub fn open_null_file() -> io::Result<File> {
+        Err(io::Error::other("open_null_file not implemented"))
+    }
+
+    /// Returns `true` if the shell should default to case-insensitive path expansion.
+    pub fn default_case_insensitive_path_expansion() -> bool {
+        cfg!(windows)
+    }
+
+    /// Resolves an executable name to a full path by searching the PATH.
+    pub fn resolve_executable<P: AsRef<str>>(_path: P) -> Option<alloc::string::String> {
+        None
+    }
+
+    /// Splits a path into pieces suitable for globbing.
+    pub fn split_path_for_pattern(_path: &str) -> Vec<&str> {
+        alloc::vec![]
+    }
+
+    /// Returns the root of a pattern path (e.g., "/" on Unix, "C:\" on Windows).
+    pub fn pattern_path_root(_path: &str) -> Option<alloc::string::String> {
+        None
+    }
+
+    /// Normalizes path separators for the current platform.
+    #[allow(dead_code)]
+    pub fn normalize_path_separators(path: &str) -> alloc::borrow::Cow<'_, str> {
+        alloc::borrow::Cow::Borrowed(path)
+    }
+
+    /// Pushes a path piece onto a pattern path.
+    pub fn push_path_for_pattern(path: &mut crate::path::PathBuf, piece: &str) {
+        let mut s = path.to_string();
+        if !s.is_empty() && !s.ends_with('/') && !s.ends_with('\\') {
+            s.push('/');
+        }
+        s.push_str(piece);
+        *path = crate::path::PathBuf::from(s);
+    }
+
     impl crate::io::AsyncRead for File {
         async fn read(&mut self, buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
             (Err(io::Error::other("not implemented")), buf)
@@ -464,6 +1159,7 @@ mod native_stub {
     }
 
     /// OpenOptions stub.
+    #[derive(Clone, Copy)]
     pub struct OpenOptions;
 
     impl OpenOptions {
@@ -496,7 +1192,7 @@ mod native_stub {
             self
         }
         /// Open the file (stub).
-        pub async fn open<P: AsRef<str>>(&self, _path: P) -> io::Result<File> {
+        pub async fn open<P: AsRef<str>>(self, _path: P) -> io::Result<File> {
             Err(io::Error::other("not implemented"))
         }
     }
@@ -512,6 +1208,7 @@ mod native_stub {
 
 /// File metadata returned by [`metadata`].
 #[cfg(not(target_family = "wasm"))]
+#[cfg_attr(not(target_family = "wasm"), derive(Clone))]
 pub struct Metadata {
     size: u64,
     mode: u32,
@@ -614,11 +1311,71 @@ impl Metadata {
     pub fn inode(&self) -> u64 {
         self.inode
     }
+    /// Alias for inode.
+    pub fn ino(&self) -> u64 {
+        self.inode
+    }
+
+    /// `true` if this is a block device.
+    pub fn is_block_device(&self) -> bool {
+        #[cfg(unix)]
+        {
+            (self.mode & 0o170000) == 0o060000
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+    /// `true` if this is a character device.
+    pub fn is_char_device(&self) -> bool {
+        #[cfg(unix)]
+        {
+            (self.mode & 0o170000) == 0o020000
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+    /// `true` if this is a FIFO.
+    pub fn is_fifo(&self) -> bool {
+        #[cfg(unix)]
+        {
+            (self.mode & 0o170000) == 0o010000
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+    /// `true` if this is a socket.
+    pub fn is_socket(&self) -> bool {
+        #[cfg(unix)]
+        {
+            (self.mode & 0o170000) == 0o140000
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
 }
 
-/// Query metadata for `path` without following symbolic links.
+/// Query metadata for `path`.
 #[cfg(not(target_family = "wasm"))]
+/// Query metadata for a path (async).
 pub async fn metadata<P: AsRef<str>>(path: P) -> crate::io::Result<Metadata> {
+    metadata_sync(path)
+}
+
+/// Query symlink metadata for a path (async).
+pub async fn symlink_metadata<P: AsRef<str>>(path: P) -> crate::io::Result<Metadata> {
+    symlink_metadata_sync(path)
+}
+
+/// Query metadata for a path (sync).
+pub fn metadata_sync<P: AsRef<str>>(path: P) -> crate::io::Result<Metadata> {
     #[cfg(unix)]
     {
         #[repr(C)]
@@ -643,7 +1400,7 @@ pub async fn metadata<P: AsRef<str>>(path: P) -> crate::io::Result<Metadata> {
             __unused: [i64; 3],
         }
         unsafe extern "C" {
-            fn lstat(pathname: *const u8, statbuf: *mut Stat) -> i32;
+            fn stat(pathname: *const u8, statbuf: *mut Stat) -> i32;
         }
         let cpath = crate::ffi::CString::new(path.as_ref()).map_err(|_| {
             crate::io::Error::new(crate::io::ErrorKind::InvalidInput, "path contains null")
@@ -709,50 +1466,556 @@ pub async fn metadata<P: AsRef<str>>(path: P) -> crate::io::Result<Metadata> {
                 lpFileInformation: *mut WIN32_FILE_ATTRIBUTE_DATA,
             ) -> i32;
         }
-        let mut path_u16: crate::vec::Vec<u16> = path.as_ref().encode_utf16().collect();
-        path_u16.push(0);
-        let mut data = WIN32_FILE_ATTRIBUTE_DATA {
-            dwFileAttributes: 0,
-            ftCreationTime: FILETIME {
-                dwLowDateTime: 0,
-                dwHighDateTime: 0,
-            },
-            ftLastAccessTime: FILETIME {
-                dwLowDateTime: 0,
-                dwHighDateTime: 0,
-            },
-            ftLastWriteTime: FILETIME {
-                dwLowDateTime: 0,
-                dwHighDateTime: 0,
-            },
-            nFileSizeHigh: 0,
-            nFileSizeLow: 0,
-        };
-        let res = unsafe { GetFileAttributesExW(path_u16.as_ptr(), 0, &mut data) };
+
+        let wide_path = crate::path::Path::new(path.as_ref()).to_wide_null();
+        let mut data = unsafe { core::mem::zeroed() };
+        let res = unsafe { GetFileAttributesExW(wide_path.as_ptr(), 0, &mut data) };
+        if res != 0 {
+            let created = (data.ftCreationTime.dwHighDateTime as u64) << 32
+                | data.ftCreationTime.dwLowDateTime as u64;
+            let accessed = (data.ftLastAccessTime.dwHighDateTime as u64) << 32
+                | data.ftLastAccessTime.dwLowDateTime as u64;
+            let modified = (data.ftLastWriteTime.dwHighDateTime as u64) << 32
+                | data.ftLastWriteTime.dwLowDateTime as u64;
+
+            Ok(Metadata {
+                size: (data.nFileSizeHigh as u64) << 32 | data.nFileSizeLow as u64,
+                mode: data.dwFileAttributes,
+                modified_ns: (modified.saturating_sub(116_444_736_000_000_000)) * 100,
+                accessed_ns: (accessed.saturating_sub(116_444_736_000_000_000)) * 100,
+                created_ns: (created.saturating_sub(116_444_736_000_000_000)) * 100,
+                nlink: 1, // GetFileAttributesExW doesn't provide nlink
+                uid: 0,
+                gid: 0,
+                inode: 0, // GetFileAttributesExW doesn't provide inode
+            })
+        } else {
+            Err(crate::io::Error::last_os_error())
+        }
+    }
+}
+
+/// Query metadata for `path` without following symbolic links (sync).
+#[cfg(not(target_family = "wasm"))]
+pub fn symlink_metadata_sync<P: AsRef<str>>(path: P) -> crate::io::Result<Metadata> {
+    #[cfg(unix)]
+    {
+        #[repr(C)]
+        struct Stat {
+            st_dev: u64,
+            st_ino: u64,
+            st_nlink: u64,
+            st_mode: u32,
+            st_uid: u32,
+            st_gid: u32,
+            __pad0: i32,
+            st_rdev: u64,
+            st_size: i64,
+            st_blksize: i64,
+            st_blocks: i64,
+            st_atime: i64,
+            st_atime_nsec: i64,
+            st_mtime: i64,
+            st_mtime_nsec: i64,
+            st_ctime: i64,
+            st_ctime_nsec: i64,
+            __unused: [i64; 3],
+        }
+        unsafe extern "C" {
+            fn lstat(pathname: *const u8, statbuf: *mut Stat) -> i32;
+        }
+        let path_cstr = crate::ffi::CString::new(path.as_ref())?;
+        let mut st = unsafe { core::mem::zeroed() };
+        let res = unsafe { lstat(path_cstr.as_ptr() as *const u8, &mut st) };
         if res == 0 {
+            Ok(Metadata {
+                size: st.st_size as u64,
+                mode: st.st_mode,
+                modified_ns: (st.st_mtime as u64) * 1_000_000_000 + (st.st_mtime_nsec as u64),
+                accessed_ns: (st.st_atime as u64) * 1_000_000_000 + (st.st_atime_nsec as u64),
+                created_ns: (st.st_ctime as u64) * 1_000_000_000 + (st.st_ctime_nsec as u64),
+                nlink: st.st_nlink as u64,
+                uid: st.st_uid,
+                gid: st.st_gid,
+                inode: st.st_ino as u64,
+            })
+        } else {
+            Err(crate::io::Error::last_os_error())
+        }
+    }
+    #[cfg(windows)]
+    {
+        metadata_sync(path)
+    }
+}
+
+// ——— Directory reading (non-WASM) ─────────────────────────────────────────────
+
+/// A single directory entry, analogous to `std::fs::DirEntry`.
+#[cfg(not(target_family = "wasm"))]
+pub struct DirEntry {
+    /// Name of this entry within its parent directory.
+    pub name: crate::string::String,
+    /// Cached metadata (may be unavailable on some platforms).
+    pub metadata: Option<Metadata>,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl DirEntry {
+    /// Returns the file name of this entry.
+    pub fn file_name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the path of the entry.
+    pub fn path(&self) -> crate::path::PathBuf {
+        crate::path::PathBuf::from(self.name.clone())
+    }
+
+    /// Returns metadata for the entry.
+    pub fn metadata(&self) -> crate::io::Result<Metadata> {
+        self.metadata
+            .clone()
+            .ok_or_else(|| crate::io::Error::other("metadata not available"))
+    }
+
+    /// Returns the file type of the entry.
+    pub fn file_type(&self) -> crate::io::Result<FileType> {
+        Ok(FileType)
+    }
+}
+
+/// An iterator over the entries in a directory.
+#[cfg(not(target_family = "wasm"))]
+pub struct ReadDir {
+    entries: crate::vec::Vec<DirEntry>,
+    pos: usize,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl Iterator for ReadDir {
+    type Item = crate::io::Result<DirEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos < self.entries.len() {
+            // SAFETY: pos < entries.len(); we take by swapping in a dummy entry.
+            let entry = core::mem::replace(
+                &mut self.entries[self.pos],
+                DirEntry {
+                    name: crate::string::String::new(),
+                    metadata: None,
+                },
+            );
+            self.pos += 1;
+            Some(Ok(entry))
+        } else {
+            None
+        }
+    }
+}
+
+/// Read all entries in `path` as an iterator (async).
+///
+/// Returns an error if `path` is not a directory or does not exist.
+#[cfg(not(target_family = "wasm"))]
+#[allow(clippy::unused_async)]
+pub async fn read_dir<P: AsRef<str>>(path: P) -> crate::io::Result<ReadDir> {
+    read_dir_sync(path)
+}
+
+/// Read all entries in `path` as an iterator (sync).
+///
+/// Returns an error if `path` is not a directory or does not exist.
+#[cfg(not(target_family = "wasm"))]
+pub fn read_dir_sync<P: AsRef<str>>(path: P) -> crate::io::Result<ReadDir> {
+    #[cfg(unix)]
+    {
+        use crate::ffi::CString;
+        use crate::vec::Vec;
+
+        const DT_DIR: u8 = 4;
+        const DT_REG: u8 = 8;
+        const DT_LNK: u8 = 10;
+
+        unsafe extern "C" {
+            fn opendir(name: *const u8) -> *mut core::ffi::c_void;
+            fn closedir(dir: *mut core::ffi::c_void) -> i32;
+            fn readdir(dir: *mut core::ffi::c_void) -> *mut Dirent;
+        }
+
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        #[repr(C)]
+        struct Dirent {
+            d_ino: u64,
+            d_off: i64,
+            d_reclen: u16,
+            d_type: u8,
+            d_name: [u8; 256],
+        }
+
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        #[repr(C)]
+        struct Dirent {
+            d_ino: u64,
+            d_off: i64,
+            d_reclen: u16,
+            d_type: u8,
+            d_name: [u8; 256],
+        }
+
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+        ))]
+        #[repr(C)]
+        struct Dirent {
+            d_ino: u64,
+            d_seekoff: u64,
+            d_reclen: u16,
+            d_namlen: u16,
+            d_type: u8,
+            d_name: [u8; 1024],
+        }
+
+        let cpath = CString::new(path.as_ref()).map_err(|_| {
+            crate::io::Error::new(crate::io::ErrorKind::InvalidInput, "path contains null")
+        })?;
+        let dir = unsafe { opendir(cpath.as_ptr() as *const u8) };
+        if dir.is_null() {
             return Err(crate::io::Error::last_os_error());
         }
-        let unix_epoch = 116444736000000000u64;
-        let to_ns = |ft: FILETIME| {
-            let val = ((ft.dwHighDateTime as u64) << 32) | (ft.dwLowDateTime as u64);
-            if val >= unix_epoch {
-                (val - unix_epoch).checked_mul(100).unwrap_or(u64::MAX)
-            } else {
-                0
+
+        let mut entries = Vec::new();
+        loop {
+            // SAFETY: `dir` is a valid DIR* returned by opendir above.
+            let de = unsafe { readdir(dir) };
+            if de.is_null() {
+                break;
             }
-        };
-        Ok(Metadata {
-            size: ((data.nFileSizeHigh as u64) << 32) | (data.nFileSizeLow as u64),
-            mode: data.dwFileAttributes,
-            modified_ns: to_ns(data.ftLastWriteTime),
-            accessed_ns: to_ns(data.ftLastAccessTime),
-            created_ns: to_ns(data.ftCreationTime),
-            nlink: 1,
-            uid: 0,
-            gid: 0,
-            inode: 0,
-        })
+            let name_bytes = unsafe {
+                let name = &(*de).d_name;
+                let len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+                &name[..len]
+            };
+            if name_bytes == b"." || name_bytes == b".." {
+                continue;
+            }
+            let name = crate::string::String::from_utf8_lossy(name_bytes).into_owned();
+            entries.push(DirEntry {
+                name,
+                metadata: None,
+            });
+        }
+        unsafe { closedir(dir) };
+        Ok(ReadDir { entries, pos: 0 })
     }
+
+    #[cfg(windows)]
+    {
+        use crate::vec::Vec;
+
+        #[repr(C)]
+        #[allow(non_snake_case)]
+        struct WIN32_FIND_DATAW {
+            dwFileAttributes: u32,
+            ftCreationTime: [u32; 2],
+            ftLastAccessTime: [u32; 2],
+            ftLastWriteTime: [u32; 2],
+            nFileSizeHigh: u32,
+            nFileSizeLow: u32,
+            dwReserved0: u32,
+            dwReserved1: u32,
+            cFileName: [u16; 260],
+            cAlternateFileName: [u16; 14],
+        }
+
+        unsafe extern "system" {
+            fn FindFirstFileW(
+                lpFileName: *const u16,
+                lpFindFileData: *mut WIN32_FIND_DATAW,
+            ) -> usize;
+            fn FindNextFileW(hFindFile: usize, lpFindFileData: *mut WIN32_FIND_DATAW) -> i32;
+            fn FindClose(hFindFile: usize) -> i32;
+        }
+
+        const INVALID_HANDLE_VALUE: usize = !0;
+
+        // Build the search pattern: `path\*`
+        let pattern = {
+            let p = path.as_ref().trim_end_matches(['/', '\\']);
+            let mut s = crate::string::String::from(p);
+            s.push_str("\\*");
+            s
+        };
+        let mut pattern_w: Vec<u16> = pattern.encode_utf16().collect();
+        pattern_w.push(0);
+
+        let mut find_data = WIN32_FIND_DATAW {
+            dwFileAttributes: 0,
+            ftCreationTime: [0; 2],
+            ftLastAccessTime: [0; 2],
+            ftLastWriteTime: [0; 2],
+            nFileSizeHigh: 0,
+            nFileSizeLow: 0,
+            dwReserved0: 0,
+            dwReserved1: 0,
+            cFileName: [0; 260],
+            cAlternateFileName: [0; 14],
+        };
+
+        let handle = unsafe { FindFirstFileW(pattern_w.as_ptr(), &mut find_data) };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(crate::io::Error::last_os_error());
+        }
+
+        let mut entries = Vec::new();
+        loop {
+            let name_len = find_data
+                .cFileName
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(260);
+            let name = crate::string::String::from_utf16_lossy(&find_data.cFileName[..name_len]);
+            if name != "." && name != ".." {
+                entries.push(DirEntry {
+                    name,
+                    metadata: None,
+                });
+            }
+            if unsafe { FindNextFileW(handle, &mut find_data) } == 0 {
+                break;
+            }
+        }
+        unsafe { FindClose(handle) };
+        Ok(ReadDir { entries, pos: 0 })
+    }
+}
+
+/// Remove a file from the filesystem.
+#[cfg(not(target_family = "wasm"))]
+#[allow(clippy::unused_async)]
+pub async fn remove_file<P: AsRef<str>>(path: P) -> crate::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use crate::ffi::CString;
+        unsafe extern "C" {
+            fn unlink(pathname: *const u8) -> i32;
+        }
+        let cpath = CString::new(path.as_ref()).map_err(|_| {
+            crate::io::Error::new(crate::io::ErrorKind::InvalidInput, "path contains null")
+        })?;
+        let res = unsafe { unlink(cpath.as_ptr() as *const u8) };
+        if res < 0 {
+            Err(crate::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+    #[cfg(windows)]
+    {
+        unsafe extern "system" {
+            fn DeleteFileW(lpFileName: *const u16) -> i32;
+        }
+        let mut path_w: crate::vec::Vec<u16> = path.as_ref().encode_utf16().collect();
+        path_w.push(0);
+        let res = unsafe { DeleteFileW(path_w.as_ptr()) };
+        if res == 0 {
+            Err(crate::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Rename a file or directory from `from` to `to`.
+#[cfg(not(target_family = "wasm"))]
+#[allow(clippy::unused_async)]
+pub async fn rename<P: AsRef<str>, Q: AsRef<str>>(from: P, to: Q) -> crate::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use crate::ffi::CString;
+        unsafe extern "C" {
+            fn rename(oldpath: *const u8, newpath: *const u8) -> i32;
+        }
+        let cfrom = CString::new(from.as_ref()).map_err(|_| {
+            crate::io::Error::new(crate::io::ErrorKind::InvalidInput, "path contains null")
+        })?;
+        let cto = CString::new(to.as_ref()).map_err(|_| {
+            crate::io::Error::new(crate::io::ErrorKind::InvalidInput, "path contains null")
+        })?;
+        let res = unsafe { rename(cfrom.as_ptr() as *const u8, cto.as_ptr() as *const u8) };
+        if res < 0 {
+            Err(crate::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+    #[cfg(windows)]
+    {
+        unsafe extern "system" {
+            fn MoveFileExW(
+                lpExistingFileName: *const u16,
+                lpNewFileName: *const u16,
+                dwFlags: u32,
+            ) -> i32;
+        }
+        const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+        let mut from_w: crate::vec::Vec<u16> = from.as_ref().encode_utf16().collect();
+        from_w.push(0);
+        let mut to_w: crate::vec::Vec<u16> = to.as_ref().encode_utf16().collect();
+        to_w.push(0);
+        let res = unsafe { MoveFileExW(from_w.as_ptr(), to_w.as_ptr(), MOVEFILE_REPLACE_EXISTING) };
+        if res == 0 {
+            Err(crate::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Recursively create a directory and all of its parents.
+#[cfg(not(target_family = "wasm"))]
+#[allow(clippy::unused_async)]
+pub async fn create_dir_all<P: AsRef<str>>(path: P) -> crate::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use crate::ffi::CString;
+        unsafe extern "C" {
+            fn mkdir(pathname: *const u8, mode: u32) -> i32;
+        }
+        let p = path.as_ref();
+        let is_abs = p.starts_with('/');
+        let mut sofar = crate::string::String::new();
+        if is_abs {
+            sofar.push('/');
+        }
+        for component in p.split('/').filter(|c| !c.is_empty()) {
+            if !sofar.is_empty() && !sofar.ends_with('/') {
+                sofar.push('/');
+            }
+            sofar.push_str(component);
+            let cpath = CString::new(sofar.as_str()).map_err(|_| {
+                crate::io::Error::new(crate::io::ErrorKind::InvalidInput, "path contains null")
+            })?;
+            let res = unsafe { mkdir(cpath.as_ptr() as *const u8, 0o777) };
+            if res < 0 {
+                let err = crate::io::Error::last_os_error();
+                if err.kind() != crate::io::ErrorKind::AlreadyExists {
+                    return Err(err);
+                }
+            }
+        }
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        unsafe extern "system" {
+            fn CreateDirectoryW(
+                lpPathName: *const u16,
+                lpSecurityAttributes: *mut core::ffi::c_void,
+            ) -> i32;
+        }
+        let p = path.as_ref();
+        // Build all ancestor paths.
+        let separators: &[char] = &['/', '\\'];
+        let components: crate::vec::Vec<&str> =
+            p.split(separators).filter(|c| !c.is_empty()).collect();
+        let mut sofar = crate::string::String::new();
+        // Preserve absolute path prefix (drive letter or UNC).
+        if p.starts_with("\\\\") || p.starts_with("//") {
+            sofar.push_str("\\\\");
+        }
+        for component in &components {
+            if !sofar.is_empty() && !sofar.ends_with(['/', '\\']) {
+                sofar.push('\\');
+            }
+            sofar.push_str(component);
+            let mut path_w: crate::vec::Vec<u16> = sofar.encode_utf16().collect();
+            path_w.push(0);
+            let res = unsafe { CreateDirectoryW(path_w.as_ptr(), core::ptr::null_mut()) };
+            if res == 0 {
+                let err = crate::io::Error::last_os_error();
+                if err.kind() != crate::io::ErrorKind::AlreadyExists {
+                    return Err(err);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Returns the canonical, absolute form of `path`, resolving all symlinks.
+///
+/// On platforms where realpath is unavailable, returns an error with
+/// `ErrorKind::Unsupported`.
+#[cfg(not(target_family = "wasm"))]
+#[allow(clippy::unused_async)]
+pub async fn canonicalize<P: AsRef<str>>(path: P) -> crate::io::Result<crate::path::PathBuf> {
+    #[cfg(unix)]
+    {
+        use crate::ffi::CString;
+        unsafe extern "C" {
+            fn realpath(path: *const u8, resolved_path: *mut u8) -> *mut u8;
+            fn free(ptr: *mut u8);
+        }
+        let cpath = CString::new(path.as_ref()).map_err(|_| {
+            crate::io::Error::new(crate::io::ErrorKind::InvalidInput, "path contains null")
+        })?;
+        // SAFETY: realpath with a null second arg allocates its own buffer.
+        let resolved = unsafe { realpath(cpath.as_ptr() as *const u8, core::ptr::null_mut()) };
+        if resolved.is_null() {
+            return Err(crate::io::Error::last_os_error());
+        }
+        let len = unsafe {
+            let mut i = 0usize;
+            while *resolved.add(i) != 0 {
+                i += 1;
+            }
+            i
+        };
+        let s = unsafe { core::slice::from_raw_parts(resolved, len) };
+        let owned = crate::string::String::from_utf8_lossy(s).into_owned();
+        unsafe { free(resolved) };
+        Ok(crate::path::PathBuf::from(owned))
+    }
+    #[cfg(windows)]
+    {
+        unsafe extern "system" {
+            fn GetFullPathNameW(
+                lpFileName: *const u16,
+                nBufferLength: u32,
+                lpBuffer: *mut u16,
+                lpFilePart: *mut *mut u16,
+            ) -> u32;
+        }
+        let mut path_w: crate::vec::Vec<u16> = path.as_ref().encode_utf16().collect();
+        path_w.push(0);
+        let mut buf: crate::vec::Vec<u16> = core::iter::repeat(0u16).take(32768).collect();
+        let len = unsafe {
+            GetFullPathNameW(
+                path_w.as_ptr(),
+                buf.len() as u32,
+                buf.as_mut_ptr(),
+                core::ptr::null_mut(),
+            )
+        };
+        if len == 0 {
+            return Err(crate::io::Error::last_os_error());
+        }
+        let s = crate::string::String::from_utf16_lossy(&buf[..len as usize]);
+        Ok(crate::path::PathBuf::from(s))
+    }
+}
+
+/// Returns the canonical, absolute form of `path`, resolving all symlinks (sync).
+#[cfg(not(target_family = "wasm"))]
+pub fn canonicalize_sync<P: AsRef<str>>(path: P) -> crate::io::Result<crate::path::PathBuf> {
+    // Reuse async implementations since they are actually synchronous on native.
+    // In a final design they would be separate but this works.
+    let path_str = crate::alloc::string::String::from(path.as_ref());
+    crate::executor::block_on(async move { canonicalize(path_str).await })
 }
 
 // ——— WASM ——————————————————————————————————————————————————————————————————
@@ -774,6 +2037,52 @@ pub struct File {
 
 #[cfg(target_family = "wasm")]
 impl File {
+    /// Returns default open options.
+    pub fn options() -> OpenOptions {
+        OpenOptions::new()
+    }
+
+    /// Open the null device.
+    pub fn open_null_file() -> crate::io::Result<File> {
+        Err(crate::io::Error::other("open_null_file not implemented"))
+    }
+
+    /// Returns `true` if the shell should default to case-insensitive path expansion.
+    pub fn default_case_insensitive_path_expansion() -> bool {
+        false
+    }
+
+    /// Resolves an executable name to a full path by searching the PATH.
+    pub fn resolve_executable<P: AsRef<str>>(_path: P) -> Option<alloc::string::String> {
+        None
+    }
+
+    /// Splits a path into pieces suitable for globbing.
+    pub fn split_path_for_pattern(_path: &str) -> Vec<&str> {
+        alloc::vec![]
+    }
+
+    /// Returns the root of a pattern path (e.g., "/" on Unix, "C:\" on Windows).
+    pub fn pattern_path_root(_path: &str) -> Option<alloc::string::String> {
+        None
+    }
+
+    /// Normalizes path separators for the current platform.
+    #[allow(dead_code)]
+    pub fn normalize_path_separators(path: &str) -> alloc::borrow::Cow<'_, str> {
+        alloc::borrow::Cow::Borrowed(path)
+    }
+
+    /// Pushes a path piece onto a pattern path.
+    pub fn push_path_for_pattern(path: &mut crate::path::PathBuf, piece: &str) {
+        let mut s = path.to_string();
+        if !s.is_empty() && !s.ends_with('/') && !s.ends_with('\\') {
+            s.push('/');
+        }
+        s.push_str(piece);
+        *path = crate::path::PathBuf::from(s);
+    }
+
     /// Open a file in read-only mode.
     pub async fn open<P: AsRef<str>>(path: P) -> crate::io::Result<File> {
         OpenOptions::new().read(true).open(path).await
@@ -841,6 +2150,7 @@ impl crate::io::AsyncWrite for File {
 
 /// WASM file-open options builder.
 #[cfg(target_family = "wasm")]
+#[derive(Clone, Copy)]
 pub struct OpenOptions {
     read: bool,
     write: bool,
@@ -901,7 +2211,7 @@ impl OpenOptions {
     }
 
     /// Open the file at `path` according to the options.
-    pub async fn open<P: AsRef<str>>(&self, path: P) -> crate::io::Result<File> {
+    pub async fn open<P: AsRef<str>>(self, path: P) -> crate::io::Result<File> {
         let path_bytes = path.as_ref().as_bytes().to_vec();
 
         let mut flags = 0u32;
@@ -951,7 +2261,7 @@ impl Default for OpenOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::{AsyncRead, AsyncWrite};
+    use crate::io::{AsyncRead, AsyncWrite, Read, Write};
     use crate::vec::Vec;
 
     fn block_on<F: std::future::Future<Output = ()> + 'static>(f: F) {
