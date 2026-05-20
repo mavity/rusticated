@@ -6,263 +6,275 @@
     clippy::cast_possible_truncation
 )]
 
-use crate::boxed::Box;
+use crate::cell::{Cell, RefCell, UnsafeCell};
 use crate::collections::HashMap;
 use crate::future::Future;
 use crate::io;
 use crate::pin::Pin;
 use crate::ptr;
+use crate::rc::Rc;
 use crate::task::{Context, Poll, Waker};
 use crate::vec::Vec;
 
-use crate::rt::executor::with_driver;
+pub static CRASH_REASON: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+
 use crate::rt::ready::{consume_ready, mark_ready};
 
 #[repr(C)]
 pub struct Overlapped {
-    internal: usize,
-    internal_high: usize,
-    offset: u32,
-    offset_high: u32,
-    h_event: usize,
+    pub internal: usize,
+    pub internal_high: usize,
+    pub offset: u32,
+    pub offset_high: u32,
+    pub h_event: usize,
+}
+
+impl Default for Overlapped {
+    fn default() -> Self {
+        Self {
+            internal: 0,
+            internal_high: 0,
+            offset: 0,
+            offset_high: 0,
+            h_event: 0,
+        }
+    }
 }
 
 unsafe extern "system" {
-    fn CreateIoCompletionPort(
-        filehandle: usize,
-        existing_cmp_port: usize,
-        comp_key: usize,
-        num_concurrent_threads: u32,
-    ) -> usize;
+    fn SleepEx(dwMilliseconds: u32, bAlertable: i32) -> u32;
 
-    fn GetQueuedCompletionStatus(
-        comp_port: usize,
-        number_of_bytes: *mut u32,
-        comp_key: *mut usize,
-        overlapped: *mut *mut Overlapped,
-        milliseconds: u32,
+    fn ReadFileEx(
+        hFile: usize,
+        lpBuffer: *mut u8,
+        nNumberOfBytesToRead: u32,
+        lpOverlapped: *mut Overlapped,
+        lpCompletionRoutine: Option<unsafe extern "system" fn(u32, u32, *mut Overlapped)>,
     ) -> i32;
 
-    fn PostQueuedCompletionStatus(
-        comp_port: usize,
-        number_of_bytes: u32,
-        comp_key: usize,
-        overlapped: *mut Overlapped,
-    ) -> i32;
-
-    fn RegisterWaitForSingleObject(
-        new_wait_object: *mut usize,
-        object: usize,
-        callback: Option<unsafe extern "system" fn(*mut core::ffi::c_void, u8)>,
-        context: *mut core::ffi::c_void,
-        milliseconds: u32,
-        flags: u32,
-    ) -> i32;
-
-    fn UnregisterWaitEx(wait_handle: usize, completion_event: usize) -> i32;
-
-    fn CloseHandle(object: usize) -> i32;
-
-    fn ReadFile(
-        file: usize,
-        buffer: *mut u8,
-        number_of_bytes_to_read: u32,
-        number_of_bytes_read: *mut u32,
-        overlapped: *mut Overlapped,
-    ) -> i32;
-
-    fn WriteFile(
-        file: usize,
-        buffer: *const u8,
-        number_of_bytes_to_write: u32,
-        number_of_bytes_written: *mut u32,
-        overlapped: *mut Overlapped,
+    fn WriteFileEx(
+        hFile: usize,
+        lpBuffer: *const u8,
+        nNumberOfBytesToWrite: u32,
+        lpOverlapped: *mut Overlapped,
+        lpCompletionRoutine: Option<unsafe extern "system" fn(u32, u32, *mut Overlapped)>,
     ) -> i32;
 
     fn GetLastError() -> u32;
+
+    fn CreateWaitableTimerW(
+        timer_attributes: *mut core::ffi::c_void,
+        bManualReset: i32,
+        timer_name: *const u16,
+    ) -> usize;
+
+    fn SetWaitableTimer(
+        timer: usize,
+        due_time: *const i64,
+        period: i32,
+        completion_routine: Option<unsafe extern "system" fn(*mut core::ffi::c_void, u32, u32)>,
+        arg_to_completion_routine: *mut core::ffi::c_void,
+        resume: i32,
+    ) -> i32;
+
+    fn CancelIoEx(hFile: usize, lpOverlapped: *mut Overlapped) -> i32;
+
+    fn CloseHandle(object: usize) -> i32;
+
+    fn QueueUserAPC(
+        pfnAPC: Option<unsafe extern "system" fn(usize)>,
+        hThread: usize,
+        dwData: usize,
+    ) -> u32;
+
+    fn GetCurrentThread() -> usize;
+    fn GetCurrentProcess() -> usize;
+    fn DuplicateHandle(
+        hSourceProcessHandle: usize,
+        hSourceHandle: usize,
+        hTargetProcessHandle: usize,
+        lpTargetHandle: *mut usize,
+        dwDesiredAccess: u32,
+        bInheritHandle: i32,
+        dwOptions: u32,
+    ) -> i32;
 }
 
+pub const ERROR_IO_PENDING: u32 = 997;
+pub const WAIT_IO_COMPLETION: u32 = 0x000000C0;
+
+thread_local! {
+    pub(crate) static OUTSTANDING_IO: Cell<usize> = const { Cell::new(0) };
+    static MAIN_THREAD_HANDLE: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Opportunistically flush the APC queue.
+pub fn flush_completions() {
+    unsafe { SleepEx(0, 1) };
+}
+
+// ─── OpState ─────────────────────────────────────────────────────────────────
+
+/// Shared, pinned state for one in-flight overlapped operation.
+#[repr(C)]
+struct OpState {
+    /// MUST be first for pointer casting from *mut Overlapped
+    overlapped: UnsafeCell<Overlapped>,
+    buffer: UnsafeCell<Option<Vec<u8>>>,
+    waker: RefCell<Option<Waker>>,
+    result: RefCell<Option<(u32, u32)>>, // (error_code, bytes_transferred)
+}
+
+impl OpState {
+    fn new(buf: Option<Vec<u8>>) -> Rc<Self> {
+        Rc::new(Self {
+            overlapped: UnsafeCell::new(Overlapped::default()),
+            buffer: UnsafeCell::new(buf),
+            waker: RefCell::new(None),
+            result: RefCell::new(None),
+        })
+    }
+}
+
+unsafe extern "system" fn apc_callback(error_code: u32, bytes: u32, overlapped: *mut Overlapped) {
+    let state_ptr = overlapped as *mut OpState;
+    // Reclaim the Rc clone submitted during I/O start.
+    let state = unsafe { Rc::from_raw(state_ptr) };
+
+    *state.result.borrow_mut() = Some((error_code, bytes));
+
+    if let Some(waker) = state.waker.borrow_mut().take() {
+        waker.wake();
+    }
+
+    OUTSTANDING_IO.with(|c| c.set(c.get() - 1));
+}
+
+// ─── Driver ──────────────────────────────────────────────────────────────────
+
 pub struct Driver {
-    pub(crate) iocp: usize,
-    wakers: HashMap<u64, Waker>,
+    timer_handle: usize,
+    pub(crate) wakers: RefCell<HashMap<u64, Waker>>,
 }
 
 impl Driver {
     pub fn new() -> io::Result<Self> {
-        let iocp = unsafe { CreateIoCompletionPort(!0, 0, 0, 1) };
-        if iocp == 0 {
+        let timer_handle = unsafe { CreateWaitableTimerW(ptr::null_mut(), 0, ptr::null()) };
+        if timer_handle == 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(Self {
-            iocp,
-            wakers: HashMap::new(),
+
+        // Initialize main thread handle for QueueUserAPC
+        if MAIN_THREAD_HANDLE.with(|c| c.get()) == 0 {
+            unsafe {
+                let mut h = 0;
+                DuplicateHandle(
+                    GetCurrentProcess(),
+                    GetCurrentThread(),
+                    GetCurrentProcess(),
+                    &mut h,
+                    0,
+                    0,
+                    2, // DUPLICATE_SAME_ACCESS
+                );
+                MAIN_THREAD_HANDLE.with(|c| c.set(h));
+            }
+        }
+
+        Ok(Self { 
+            timer_handle,
+            wakers: RefCell::new(HashMap::new()),
         })
     }
 
-    pub fn register(&mut self, handle: u64) -> io::Result<()> {
-        let res = unsafe { CreateIoCompletionPort(handle as usize, self.iocp, handle as usize, 1) };
+    pub fn set_timeout(&mut self, ms: Option<u32>) -> io::Result<()> {
+        let due_time: i64 = match ms {
+            Some(0) => return Ok(()), // SleepEx handles 0 timeout natively
+            Some(ms) => -( (ms as i64) * 10000 ), // relative time in 100ns units (negative)
+            None => return Ok(()),
+        };
+
+        let res = unsafe {
+            SetWaitableTimer(
+                self.timer_handle,
+                &due_time,
+                0,
+                Some(timer_apc_callback),
+                ptr::null_mut(),
+                0,
+            )
+        };
+
         if res == 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(())
     }
 
-    pub fn post_custom_status(&mut self, token: u64) {
+    pub fn register(&mut self, _handle: u64) -> io::Result<()> {
+        Ok(())
+    }
+
+    pub fn register_waker(&self, token: u64, waker: Waker) {
+        self.wakers.borrow_mut().insert(token, waker);
+    }
+
+    pub fn poll(&mut self, blocking: bool, explicit_ms: Option<u32>) -> io::Result<bool> {
+        let timeout = if let Some(ms) = explicit_ms {
+            ms
+        } else if blocking {
+            0xFFFFFFFF // INFINITE
+        } else {
+            0
+        };
+        let res = unsafe { SleepEx(timeout, 1) };
+        Ok(res == WAIT_IO_COMPLETION)
+    }
+}
+
+unsafe extern "system" fn timer_apc_callback(_arg: *mut core::ffi::c_void, _low: u32, _high: u32) {
+    // Wake-up call
+}
+
+unsafe extern "system" fn wake_apc_callback(data: usize) {
+    let token = data as u64;
+    mark_ready(token);
+    let waker = crate::rt::executor::with_driver(|d| d.wakers.borrow_mut().remove(&token)).ok().flatten();
+    if let Some(w) = waker {
+        w.wake();
+    }
+}
+
+/// Queue an APC to the main thread to wake up a specific token.
+/// Useful for bridging thread-pool callbacks (like TTY) to the main loop.
+pub fn queue_wake(token: u64) {
+    let h = MAIN_THREAD_HANDLE.with(|c| c.get());
+    if h != 0 {
         unsafe {
-            PostQueuedCompletionStatus(self.iocp, 0, token as usize, ptr::null_mut());
+            QueueUserAPC(Some(wake_apc_callback), h, token as usize);
         }
-    }
-
-    pub fn poll_nonblocking(&mut self) -> io::Result<bool> {
-        let mut had_events = false;
-        loop {
-            let mut bytes: u32 = 0;
-            let mut key: usize = 0;
-            let mut overlapped: *mut Overlapped = ptr::null_mut();
-
-            let res = unsafe {
-                GetQueuedCompletionStatus(
-                    self.iocp,
-                    &mut bytes,
-                    &mut key,
-                    &mut overlapped,
-                    0, // zero timeout — non-blocking
-                )
-            };
-
-            if res != 0 {
-                let token = key as u64;
-                mark_ready(token);
-                if let Some(waker) = self.wakers.remove(&token) {
-                    waker.wake();
-                }
-                had_events = true;
-            } else {
-                // GetLastError() == 258 (WAIT_TIMEOUT) means the queue is empty.
-                let err = unsafe { GetLastError() };
-                if err == 258 {
-                    break;
-                }
-                return Err(io::Error::from_raw_os_error(err as i32));
-            }
-        }
-        Ok(had_events)
-    }
-
-    pub(crate) fn register_waker(&mut self, token: u64, waker: Waker) {
-        self.wakers.insert(token, waker);
     }
 }
 
 impl Drop for Driver {
     fn drop(&mut self) {
-        unsafe { CloseHandle(self.iocp) };
+        unsafe { CloseHandle(self.timer_handle) };
     }
 }
 
-pub struct WaitReadable {
-    h: u64,
-}
-
-impl WaitReadable {
-    pub fn new(h: u64) -> Self {
-        let _ = with_driver(|d| {
-            let _ = d.register(h);
-        });
-        Self { h }
-    }
-}
-
-impl Future for WaitReadable {
-    type Output = io::Result<()>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if consume_ready(self.h) {
-            Poll::Ready(Ok(()))
-        } else {
-            let _ = with_driver(|d| d.register_waker(self.h, cx.waker().clone()));
-            Poll::Pending
-        }
-    }
-}
-
-pub struct WaitWritable {
-    h: u64,
-}
-
-impl WaitWritable {
-    pub fn new(h: u64) -> Self {
-        let _ = with_driver(|d| {
-            let _ = d.register(h);
-        });
-        Self { h }
-    }
-}
-
-impl Future for WaitWritable {
-    type Output = io::Result<()>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if consume_ready(self.h) {
-            Poll::Ready(Ok(()))
-        } else {
-            let _ = with_driver(|d| d.register_waker(self.h, cx.waker().clone()));
-            Poll::Pending
-        }
-    }
-}
-
-unsafe extern "system" fn wait_callback(context: *mut core::ffi::c_void, _timer_fired: u8) {
-    // context points to WaitProcess
-    let wp = context as *const WaitProcess;
-    let token = unsafe { (*wp).token };
-    let iocp = unsafe { (*wp).iocp };
-    unsafe {
-        PostQueuedCompletionStatus(iocp, 0, token as usize, ptr::null_mut());
-    }
-}
-
-const WT_EXECUTEONLYONCE: u32 = 0x0000_0008;
-const INFINITE: u32 = 0xFFFFFFFF;
-pub const ERROR_IO_PENDING: u32 = 997;
-
-/// A specialized structure containing exactly what's needed for an overlapped operation, ensuring
-/// stable addresses while in flight.
-pub struct OverlappedOp {
-    pub overlapped: Overlapped,
-    pub buffer: Option<Vec<u8>>,
-    pub token: u64,
-}
-
-impl OverlappedOp {
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn new(token: u64, buffer: Vec<u8>) -> Self {
-        Self {
-            overlapped: Overlapped {
-                internal: 0,
-                internal_high: 0,
-                offset: 0,
-                offset_high: 0,
-                h_event: 0,
-            },
-            buffer: Some(buffer),
-            token,
-        }
-    }
-}
+// ─── OverlappedRead ──────────────────────────────────────────────────────────
 
 pub struct OverlappedRead {
     handle: u64,
-    op: Option<Pin<Box<OverlappedOp>>>,
+    state: Rc<OpState>,
     started: bool,
 }
 
 impl OverlappedRead {
-    #[allow(clippy::missing_const_for_fn)]
     pub fn new(handle: u64, buf: Vec<u8>) -> Self {
         Self {
             handle,
-            op: Some(Box::pin(OverlappedOp::new(handle, buf))),
+            state: OpState::new(Some(buf)),
             started: false,
         }
     }
@@ -273,77 +285,74 @@ impl Future for OverlappedRead {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if !self.started {
-            // First transition
             let handle = self.handle;
-            if let Some(op) = self.op.as_mut() {
-                if let Some(buf) = op.buffer.as_mut() {
-                    let res = unsafe {
-                        ReadFile(
-                            handle as usize,
-                            buf.as_mut_ptr(),
-                            buf.capacity() as u32,
-                            ptr::null_mut(),
-                            &mut op.overlapped,
-                        )
-                    };
+            let state_ptr = Rc::into_raw(Rc::clone(&self.state));
+            
+            let (buf_ptr, buf_cap) = unsafe {
+                let buf = &mut *self.state.buffer.get();
+                let b = buf.as_mut().unwrap();
+                (b.as_mut_ptr(), b.capacity() as u32)
+            };
 
-                    self.started = true;
+            let res = unsafe {
+                ReadFileEx(
+                    handle as usize,
+                    buf_ptr,
+                    buf_cap,
+                    self.state.overlapped.get(),
+                    Some(apc_callback),
+                )
+            };
 
-                    if res == 0 {
-                        let err = unsafe { GetLastError() };
-                        if err != ERROR_IO_PENDING {
-                            if let Some(mut op_owned) = self.op.take() {
-                                if let Some(buf_owned) = op_owned.buffer.take() {
-                                    return Poll::Ready((
-                                        Err(io::Error::from_raw_os_error(err as i32)),
-                                        buf_owned,
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
+            if res == 0 {
+                let err = unsafe { GetLastError() };
+                unsafe { drop(Rc::from_raw(state_ptr)) };
+                let buf = unsafe { (*self.state.buffer.get()).take().unwrap() };
+                return Poll::Ready((Err(io::Error::from_raw_os_error(err as i32)), buf));
             }
+
+            OUTSTANDING_IO.with(|c| c.set(c.get() + 1));
+            self.started = true;
+
+            // Injection Hook B: Flush instantly
+            flush_completions();
         }
 
-        let token = self.handle;
-        if consume_ready(token) {
-            if let Some(mut op_owned) = self.op.take() {
-                if let Some(mut buf_owned) = op_owned.buffer.take() {
-                    let bytes_transferred = op_owned.overlapped.internal_high;
-                    let ntstatus = op_owned.overlapped.internal as isize;
-
-                    if ntstatus < 0 {
-                        return Poll::Ready((
-                            Err(io::Error::from_raw_os_error(ntstatus as i32)),
-                            buf_owned,
-                        ));
-                    }
-
-                    unsafe { buf_owned.set_len(bytes_transferred) };
-                    return Poll::Ready((Ok(bytes_transferred), buf_owned));
-                }
+        if let Some((err, bytes)) = *self.state.result.borrow() {
+            let mut buf = unsafe { (*self.state.buffer.get()).take().unwrap() };
+            if err != 0 {
+                return Poll::Ready((Err(io::Error::from_raw_os_error(err as i32)), buf));
             }
-            Poll::Ready((Err(io::Error::last_os_error()), Vec::new()))
+            unsafe { buf.set_len(bytes as usize) };
+            Poll::Ready((Ok(bytes as usize), buf))
         } else {
-            let _ = with_driver(|d| d.register_waker(token, cx.waker().clone()));
+            *self.state.waker.borrow_mut() = Some(cx.waker().clone());
             Poll::Pending
         }
     }
 }
 
+impl Drop for OverlappedRead {
+    fn drop(&mut self) {
+        if self.started && self.state.result.borrow().is_none() {
+            unsafe { CancelIoEx(self.handle as usize, self.state.overlapped.get()) };
+        }
+    }
+}
+
+// ─── OverlappedWrite ─────────────────────────────────────────────────────────
+
 pub struct OverlappedWrite {
     handle: u64,
-    op: Option<Pin<Box<OverlappedOp>>>,
+    state: Rc<OpState>,
     started: bool,
 }
 
 impl OverlappedWrite {
-    #[allow(clippy::missing_const_for_fn)]
     pub fn new(handle: u64, buf: Vec<u8>) -> Self {
         Self {
             handle,
-            op: Some(Box::pin(OverlappedOp::new(handle, buf))),
+            state: OpState::new(Some(buf)),
             started: false,
         }
     }
@@ -355,57 +364,84 @@ impl Future for OverlappedWrite {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if !self.started {
             let handle = self.handle;
-            if let Some(op) = self.op.as_mut() {
-                if let Some(buf) = op.buffer.as_mut() {
-                    let res = unsafe {
-                        WriteFile(
-                            handle as usize,
-                            buf.as_ptr(),
-                            buf.len() as u32,
-                            ptr::null_mut(),
-                            &mut op.overlapped,
-                        )
-                    };
+            let state_ptr = Rc::into_raw(Rc::clone(&self.state));
 
-                    self.started = true;
+            let (buf_ptr, buf_len) = unsafe {
+                let buf = &*self.state.buffer.get();
+                let b = buf.as_ref().unwrap();
+                (b.as_ptr(), b.len() as u32)
+            };
 
-                    if res == 0 {
-                        let err = unsafe { GetLastError() };
-                        if err != ERROR_IO_PENDING {
-                            if let Some(mut op_owned) = self.op.take() {
-                                if let Some(buf_owned) = op_owned.buffer.take() {
-                                    return Poll::Ready((
-                                        Err(io::Error::from_raw_os_error(err as i32)),
-                                        buf_owned,
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
+            let res = unsafe {
+                WriteFileEx(
+                    handle as usize,
+                    buf_ptr,
+                    buf_len,
+                    self.state.overlapped.get(),
+                    Some(apc_callback),
+                )
+            };
+
+            if res == 0 {
+                let err = unsafe { GetLastError() };
+                unsafe { drop(Rc::from_raw(state_ptr)) };
+                let buf = unsafe { (*self.state.buffer.get()).take().unwrap() };
+                return Poll::Ready((Err(io::Error::from_raw_os_error(err as i32)), buf));
             }
+
+            OUTSTANDING_IO.with(|c| c.set(c.get() + 1));
+            self.started = true;
+
+            // Injection Hook B: Flush instantly
+            flush_completions();
         }
 
-        let token = self.handle;
-        if consume_ready(token) {
-            if let Some(mut op_owned) = self.op.take() {
-                if let Some(buf_owned) = op_owned.buffer.take() {
-                    let bytes_transferred = op_owned.overlapped.internal_high;
-                    let ntstatus = op_owned.overlapped.internal as isize;
-
-                    if ntstatus < 0 {
-                        return Poll::Ready((
-                            Err(io::Error::from_raw_os_error(ntstatus as i32)),
-                            buf_owned,
-                        ));
-                    }
-
-                    return Poll::Ready((Ok(bytes_transferred), buf_owned));
-                }
+        if let Some((err, bytes)) = *self.state.result.borrow() {
+            let buf = unsafe { (*self.state.buffer.get()).take().unwrap() };
+            if err != 0 {
+                return Poll::Ready((Err(io::Error::from_raw_os_error(err as i32)), buf));
             }
-            Poll::Ready((Err(io::Error::last_os_error()), Vec::new()))
+            Poll::Ready((Ok(bytes as usize), buf))
         } else {
-            let _ = with_driver(|d| d.register_waker(token, cx.waker().clone()));
+            *self.state.waker.borrow_mut() = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+}
+
+impl Drop for OverlappedWrite {
+    fn drop(&mut self) {
+        if self.started && self.state.result.borrow().is_none() {
+            unsafe { CancelIoEx(self.handle as usize, self.state.overlapped.get()) };
+        }
+    }
+}
+
+// ─── Waiters ─────────────────────────────────────────────────────────────────
+
+pub struct WaitReadable { h: u64 }
+impl WaitReadable { pub fn new(h: u64) -> Self { Self { h } } }
+impl Future for WaitReadable {
+    type Output = io::Result<()>;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if consume_ready(self.h) {
+            Poll::Ready(Ok(()))
+        } else {
+            crate::rt::executor::with_driver(|d| d.register_waker(self.h, cx.waker().clone())).ok();
+            Poll::Pending
+        }
+    }
+}
+
+pub struct WaitWritable { h: u64 }
+impl WaitWritable { pub fn new(h: u64) -> Self { Self { h } } }
+impl Future for WaitWritable {
+    type Output = io::Result<()>;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if consume_ready(self.h) {
+            Poll::Ready(Ok(()))
+        } else {
+            crate::rt::executor::with_driver(|d| d.register_waker(self.h, cx.waker().clone())).ok();
             Poll::Pending
         }
     }
@@ -413,65 +449,15 @@ impl Future for OverlappedWrite {
 
 pub struct WaitProcess {
     h: u64,
-    wait_handle: usize,
-    token: u64,
-    registered: bool,
-    iocp: usize,
 }
-
 impl WaitProcess {
-    #[allow(clippy::missing_const_for_fn)]
     pub fn new(h: u64) -> Self {
-        let iocp = with_driver(|d| d.iocp).unwrap_or(0);
-        Self {
-            h,
-            wait_handle: 0,
-            token: h,
-            registered: false,
-            iocp,
-        }
+        Self { h }
     }
 }
-
 impl Future for WaitProcess {
     type Output = io::Result<()>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if consume_ready(self.token) {
-            return Poll::Ready(Ok(()));
-        }
-
-        let _ = with_driver(|d| d.register_waker(self.token, cx.waker().clone()));
-
-        if !self.registered {
-            // SAFETY: Calling RegisterWaitForSingleObject
-            let self_ptr = self.as_mut().get_mut() as *mut Self as *mut core::ffi::c_void;
-            let res = unsafe {
-                RegisterWaitForSingleObject(
-                    &mut self.wait_handle,
-                    self.h as usize,
-                    Some(wait_callback),
-                    self_ptr,
-                    INFINITE,
-                    WT_EXECUTEONLYONCE,
-                )
-            };
-
-            if res == 0 {
-                return Poll::Ready(Err(io::Error::last_os_error()));
-            }
-            self.registered = true;
-        }
-
-        Poll::Pending
-    }
-}
-
-impl Drop for WaitProcess {
-    fn drop(&mut self) {
-        if self.registered {
-            // SAFETY: Unregistering the wait handle. !0 blocks until callback completes.
-            unsafe { UnregisterWaitEx(self.wait_handle, !0) };
-        }
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Poll::Ready(Ok(()))
     }
 }

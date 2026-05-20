@@ -123,13 +123,17 @@ impl Driver {
         self.wakers.insert(token, waker);
     }
 
-    /// Poll for already-ready events without blocking.
-    ///
-    /// Returns `true` if at least one event was processed.
-    pub fn poll_nonblocking(&mut self) -> io::Result<bool> {
-        let zero_timeout = Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
+    pub fn poll_with_timeout(&mut self, timeout_ms: Option<u32>) -> io::Result<bool> {
+        let ts;
+        let ts_ptr = match timeout_ms {
+            Some(ms) => {
+                ts = Timespec {
+                    tv_sec: (ms / 1000) as i64,
+                    tv_nsec: ((ms % 1000) * 1_000_000) as i64,
+                };
+                &ts as *const Timespec
+            }
+            None => core::ptr::null(),
         };
         let mut evbuf = [Kevent {
             ident: 0,
@@ -139,8 +143,6 @@ impl Driver {
             data: 0,
             udata: 0,
         }; 64];
-        // SAFETY: `evbuf` is valid local storage; `kevent` with nchanges=0
-        // and a zero timeout is a non-blocking drain.
         let n = unsafe {
             kevent(
                 self.kq_fd,
@@ -148,7 +150,7 @@ impl Driver {
                 0,
                 evbuf.as_mut_ptr(),
                 evbuf.len() as i32,
-                &zero_timeout,
+                ts_ptr,
             )
         };
         if n < 0 {
@@ -158,14 +160,22 @@ impl Driver {
             }
             return Err(e);
         }
-        for ev in &evbuf[..n as usize] {
-            let token = ev.udata;
+        for i in 0..n {
+            let ev = &evbuf[i as usize];
+            let token = ev.udata as usize;
             mark_ready(token as u64);
             if let Some(waker) = self.wakers.remove(&token) {
                 waker.wake();
             }
         }
         Ok(n > 0)
+    }
+
+    /// Poll for already-ready events without blocking.
+    ///
+    /// Returns `true` if at least one event was processed.
+    pub fn poll_nonblocking(&mut self) -> io::Result<bool> {
+        self.poll_with_timeout(Some(0))
     }
 }
 

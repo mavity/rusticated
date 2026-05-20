@@ -59,6 +59,87 @@ No external async or I/O dependencies. All OS bindings are `extern "C"` / `exter
 All executor and scheduling logic is self-contained in `rt/`. Logic derived from `compio-driver` source is ported directly, not imported as a crate dependency.
 
 
+# Building and running
+
+## Prerequisites
+
+- Rust **nightly** toolchain (the repo's `rust-toolchain.toml` selects it automatically).
+- `wasm32-unknown-unknown` target component — required to build the WASM demo binary:
+  ```
+  rustup target add wasm32-unknown-unknown
+  ```
+- **Node.js ≥ 18** and its dependencies installed — required for the node-host and harness variants:
+  ```
+  npm install --prefix node-host
+  npm install --prefix harness
+  ```
+- **wasmtime** variant only: the `wasmtime-host` crate bundles its own copy of the Wasmtime engine as a Cargo dependency; no separate install is needed.
+
+## Building rusticated itself
+
+`rusticated` is a library crate (`src/lib.rs`). It is built implicitly as part of each demo variant below — there is no standalone build step.
+
+## Demo variant 1 — Native binary
+
+The demo compiles directly to the host platform using `rusticated` as its `std` substitute.
+
+```
+cargo run -p rusticated-demo
+```
+
+The executable reads from the terminal, waits up to 5 seconds for a line, then writes a small file and reads it back.
+
+## Demo variant 2 — WASM + wasmtime host
+
+This variant compiles the demo to `wasm32-unknown-unknown` and runs it through the `wasmtime-host` Rust binary, which implements the rusticated ABI via Wasmtime's embedding API.
+
+**Step 1 — Build the WASM module** (run once, or after changing `demo/src/`):
+
+```
+cd demo
+cargo run -Zjson-target-spec
+cd ..
+```
+
+The `.wasm` output lands at `target/wasm32-unknown-unknown/debug/rusticated-demo.wasm`.
+
+**Step 2 — Run with the wasmtime host:**
+
+```
+cargo run -p rusticated-wasmtime -- target/wasm32-unknown-unknown/debug/rusticated-demo.wasm
+```
+
+## Demo variant 3 — WASM + Node.js host
+
+Same WASM module, different host: a Node.js script (`node-host/index.js`) that implements the rusticated ABI over the WebAssembly JS API.
+
+Build the WASM module as in Step 1 above (if not already done), then:
+
+```
+node node-host/index.js target/wasm32-unknown-unknown/debug/rusticated-demo.wasm
+```
+
+## Running the harness
+
+The harness spawns all three variants inside a ConPTY (via `node-pty`), types a few characters without pressing Enter, and lets the demo's built-in 5-second timer expire. It verifies that each variant exits cleanly (exit code 0) within 25 seconds.
+
+```
+node harness/index.js
+```
+
+To run a subset of variants:
+
+```
+node harness/index.js native
+node harness/index.js wasmtime node
+```
+
+Results are written to `harness-capture.md` (overwritten each run). The terminal also prints a one-line summary:
+
+```
+Summary: native OK 6172ms  wasmtime OK 6374ms  node OK 6372ms
+```
+
 # Gaps
 
 

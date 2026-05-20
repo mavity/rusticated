@@ -117,6 +117,7 @@ thread_local! {
     static MAIN_FUTURE: RefCell<Option<Pin<Box<dyn Future<Output = ()>>>>> =
         const { RefCell::new(None) };
     static INITIALIZED: OnceCell<()> = const { OnceCell::new() };
+    static MAIN_DONE: OnceCell<()> = const { OnceCell::new() };
 }
 
 fn register(state: Rc<OpState>, waker: Waker) {
@@ -158,10 +159,19 @@ fn tick() {
     });
 
     MAIN_FUTURE.with(|main_fut| {
-        if let Some(fut) = main_fut.borrow_mut().as_mut() {
+        let mut borrow = main_fut.borrow_mut();
+        let done = if let Some(fut) = borrow.as_mut() {
             let waker = noop_waker();
             let mut cx = Context::from_waker(&waker);
-            let _ = fut.as_mut().poll(&mut cx);
+            fut.as_mut().poll(&mut cx).is_ready()
+        } else {
+            false
+        };
+        if done {
+            *borrow = None;
+            MAIN_DONE.with(|cell| {
+                let _ = cell.set(());
+            });
         }
     });
 }
@@ -336,3 +346,13 @@ pub extern "C" fn run() {
 pub fn poll_step() {
     tick();
 }
+
+/// Returns 1 if the main future has completed, 0 if it is still running.
+///
+/// The host event loop should test this after each [`run()`] call and stop
+/// driving the guest once it returns 1.
+#[unsafe(no_mangle)]
+pub extern "C" fn is_done() -> u32 {
+    MAIN_DONE.with(|done| if done.get().is_some() { 1 } else { 0 })
+}
+

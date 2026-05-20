@@ -138,6 +138,9 @@ where
     F: Future<Output = T> + 'static,
     T: 'static,
 {
+    #[cfg(windows)]
+    super::windows::flush_completions();
+
     let state = Arc::new(RefCell::new(JoinState {
         result: None,
         waker: None,
@@ -164,7 +167,8 @@ where
 ///
 /// Used by test `block_on` utilities and platform bootstrapping code within
 /// this crate. Not part of the public API.
-pub(crate) fn run<F>(future: F)
+#[doc(hidden)]
+pub fn run<F>(future: F)
 where
     F: Future<Output = ()> + 'static,
 {
@@ -172,59 +176,7 @@ where
 }
 
 // ─── select ──────────────────────────────────────────────────────────────────
-
-/// The output of [`select`]: whichever branch completed first.
-pub enum Either<A, B> {
-    /// The first (left) future completed first.
-    Left(A),
-    /// The second (right) future completed first.
-    Right(B),
-}
-
-/// Drives two futures concurrently, resolving with whichever completes first.
-///
-/// Both sides are pinned on the heap. The losing future is dropped.
-/// See [`select`] for construction.
-pub struct Select<FA, FB> {
-    a: Pin<Box<FA>>,
-    b: Pin<Box<FB>>,
-}
-
-impl<FA: Future, FB: Future> Future for Select<FA, FB> {
-    type Output = Either<FA::Output, FB::Output>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Poll left first; if it resolves, the right future is dropped.
-        if let Poll::Ready(a) = self.a.as_mut().poll(cx) {
-            return Poll::Ready(Either::Left(a));
-        }
-        // Poll right; if it resolves, the left future is dropped.
-        if let Poll::Ready(b) = self.b.as_mut().poll(cx) {
-            return Poll::Ready(Either::Right(b));
-        }
-        Poll::Pending
-    }
-}
-
-/// Race two futures: resolve with whichever one completes first.
-///
-/// When both are immediately ready, the left wins (it is polled first).
-/// The losing future is dropped when the [`Select`] future resolves.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// match std::rt::select(future_a, future_b).await {
-///     std::rt::Either::Left(a)  => { /* a completed first */ }
-///     std::rt::Either::Right(b) => { /* b completed first */ }
-/// }
-/// ```
-pub fn select<FA: Future, FB: Future>(a: FA, b: FB) -> Select<FA, FB> {
-    Select {
-        a: Box::pin(a),
-        b: Box::pin(b),
-    }
-}
+pub use crate::rt::select::{Either, Select, select};
 
 // ─── PollStatus / poll_step ──────────────────────────────────────────────────
 
@@ -254,8 +206,59 @@ pub enum PollStatus {
 ///
 /// Returns a [`PollStatus`] describing the outcome.
 pub fn poll_step() -> io::Result<PollStatus> {
-    // Drive the platform reactor with a zero timeout.
-    let had_events = with_driver(|d| d.poll_nonblocking())??;
+    poll_step_internal(None)
+}
+
+/// Drive the runtime, blocking until `deadline` if there are no immediately ready tasks.
+///
+/// If `deadline` is `None`, blocks indefinitely.
+pub fn poll_step_idle(deadline: Option<Duration>) -> io::Result<PollStatus> {
+    
+    // We compute the remaining timeout based on `deadline`.
+    // We already have `now_ns()` so we could do math, but it's simpler:
+    // Actually, `deadline` is already the duration from `now` since `next_deadline()` returns duration.
+    // Wait, the specification says: `deadline: Option<Duration>`.
+    
+    poll_step_internal(Some(deadline))
+}
+
+fn poll_step_internal(timeout: Option<Option<Duration>>) -> io::Result<PollStatus> {
+    // Check for expired timers first so they get polled this iteration
+    crate::rt::timers::wake_expired();
+
+    // Drive the platform reactor.
+    let _blocking = timeout.is_some();
+    let _timeout_ms = match timeout {
+        Some(Some(d)) => Some(d.as_millis() as u32),
+        _ => None,
+    };
+
+    let had_events = with_driver(|d| {
+        #[cfg(windows)]
+        if let Some(ms) = _timeout_ms {
+            d.set_timeout(Some(ms))?;
+        }
+        
+        #[cfg(windows)]
+        { 
+            // In Windows, waitable timers via SetWaitableTimer trigger APCs.
+            // On sleep, SleepEx waits until either the timeout elapses OR an APC executes.
+            // When an APC executes (such as our wakeup tick from the timer or I/O callback),
+            // SleepEx returns WAIT_IO_COMPLETION.
+            // So if `blocking` is true but there's a 0ms deadline (i.e. instant timeout),
+            // we should still drop right through.
+            d.poll(_blocking, _timeout_ms) 
+        }
+        #[cfg(not(windows))]
+        {
+            let ms = match timeout {
+                None => Some(0),
+                Some(None) => None,
+                Some(Some(d)) => Some(d.as_millis() as u32),
+            };
+            d.poll_with_timeout(ms)
+        }
+    })??;
 
     // Only poll tasks whose waker flag was set since the last step.
     // Tasks spawned during polling are picked up on the next step.
@@ -290,9 +293,16 @@ pub fn poll_step() -> io::Result<PollStatus> {
 
     TASK_DEPTH.with(|d| d.set(remaining));
 
-    Ok(if remaining == 0 && !had_events {
+    #[cfg(windows)]
+    let live_io = super::windows::OUTSTANDING_IO.with(|c| c.get());
+    #[cfg(not(windows))]
+    let live_io = 0;
+
+    let expired = crate::rt::timers::wake_expired();
+    
+    Ok(if remaining == 0 && live_io == 0 && !had_events && !expired {
         PollStatus::Done
-    } else if made_progress || had_events {
+    } else if made_progress || had_events || expired {
         PollStatus::Ready
     } else {
         PollStatus::Idle {

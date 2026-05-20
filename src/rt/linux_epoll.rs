@@ -118,11 +118,9 @@ impl Driver {
         self.wakers.insert(token, waker);
     }
 
-    /// Poll for already-ready events without blocking.
-    ///
-    /// Returns `true` if at least one event was processed.
-    pub fn poll_nonblocking(&mut self) -> io::Result<bool> {
+    pub fn poll_with_timeout(&mut self, timeout_ms: Option<u32>) -> io::Result<bool> {
         let mut evbuf = [EpollEvent { events: 0, data: 0 }; 64];
+        let timeout = timeout_ms.map(|t| t as i32).unwrap_or(-1);
         let n = loop {
             // SAFETY: pointer + length describe the local array.
             let n = unsafe {
@@ -130,7 +128,7 @@ impl Driver {
                     self.epfd,
                     evbuf.as_mut_ptr(),
                     evbuf.len() as i32,
-                    0, // non-blocking
+                    timeout,
                 )
             };
             if n >= 0 {
@@ -153,6 +151,13 @@ impl Driver {
             }
         }
         Ok(n > 0)
+    }
+
+    /// Poll for already-ready events without blocking.
+    ///
+    /// Returns `true` if at least one event was processed.
+    pub fn poll_nonblocking(&mut self) -> io::Result<bool> {
+        self.poll_with_timeout(Some(0))
     }
 }
 

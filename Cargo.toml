@@ -1,5 +1,5 @@
 [workspace]
-members = ["demo"]
+members = ["demo", "wasmtime-host"]
 
 [workspace.package]
 edition = "2024"
@@ -24,6 +24,12 @@ async_fn_in_trait = { level = "allow", priority = 1 }
 
 [workspace.lints.rustdoc]
 all = { level = "deny", priority = -1 }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
@@ -71,6 +77,7 @@ documentation = "https://docs.rs/rusticated"
 rust-version.workspace = true
 
 [lib]
+name = "std"
 bench = false
 
 [lints]
@@ -86,6 +93,7 @@ threads = []
 [dependencies]
 thiserror = { version = "2.0.18", default-features = false }
 hashbrown = "0.15"
+dlmalloc = { version = "0.2", features = ["global"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 getrandom = { version = "0.4.2" }

@@ -508,6 +508,192 @@ mod native_stub {
     }
 }
 
+// ——— Native Metadata (all non-WASM platforms) ——————————————————————————————
+
+/// File metadata returned by [`metadata`].
+#[cfg(not(target_family = "wasm"))]
+pub struct Metadata {
+    size: u64,
+    mode: u32,
+    modified_ns: u64,
+    accessed_ns: u64,
+    created_ns: u64,
+    nlink: u64,
+    uid: u32,
+    gid: u32,
+    inode: u64,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl Metadata {
+    /// File size in bytes.
+    pub fn len(&self) -> u64 { self.size }
+    /// `true` if this is a regular file.
+    pub fn is_file(&self) -> bool {
+        #[cfg(unix)]
+        { (self.mode & 0o170000) == 0o100000 }
+        #[cfg(windows)]
+        { (self.mode & 0x10) == 0 } // FILE_ATTRIBUTE_DIRECTORY is 0x10
+    }
+    /// `true` if this is a directory.
+    pub fn is_dir(&self) -> bool {
+        #[cfg(unix)]
+        { (self.mode & 0o170000) == 0o040000 }
+        #[cfg(windows)]
+        { (self.mode & 0x10) != 0 }
+    }
+    /// `true` if the path itself is a symbolic link (stat taken without following links).
+    pub fn is_symlink(&self) -> bool {
+        #[cfg(unix)]
+        { (self.mode & 0o170000) == 0o120000 }
+        #[cfg(windows)]
+        { (self.mode & 0x400) != 0 } // FILE_ATTRIBUTE_REPARSE_POINT is 0x400
+    }
+    /// `true` if the file is read-only.
+    pub fn readonly(&self) -> bool {
+        #[cfg(unix)]
+        { (self.mode & 0o222) == 0 }
+        #[cfg(windows)]
+        { (self.mode & 0x1) != 0 } // FILE_ATTRIBUTE_READONLY is 0x1
+    }
+    /// Modification time as nanoseconds since UNIX epoch, or 0.
+    pub fn modified_ns(&self) -> u64 { self.modified_ns }
+    /// Last access time as nanoseconds since UNIX epoch, or 0.
+    pub fn accessed_ns(&self) -> u64 { self.accessed_ns }
+    /// Creation/birth time as nanoseconds since UNIX epoch, or 0.
+    pub fn created_ns(&self) -> u64 { self.created_ns }
+
+    /// Unix permission bits; synthesised from readonly on non-Unix hosts.
+    pub fn mode(&self) -> u32 {
+        #[cfg(unix)]
+        { self.mode }
+        #[cfg(not(unix))]
+        { if self.readonly() { 0o444 } else { 0o666 } }
+    }
+    /// Number of hard links; 0 on platforms that do not expose it.
+    pub fn nlink(&self) -> u64 { self.nlink }
+    /// Owner user-ID (Unix); 0 on non-Unix.
+    pub fn uid(&self) -> u32 { self.uid }
+    /// Owner group-ID (Unix); 0 on non-Unix.
+    pub fn gid(&self) -> u32 { self.gid }
+    /// Inode / file-index; 0 on platforms that do not expose it.
+    pub fn inode(&self) -> u64 { self.inode }
+}
+
+/// Query metadata for `path` without following symbolic links.
+#[cfg(not(target_family = "wasm"))]
+pub async fn metadata<P: AsRef<str>>(path: P) -> crate::io::Result<Metadata> {
+    #[cfg(unix)]
+    {
+        #[repr(C)]
+        struct Stat {
+            st_dev: u64,
+            st_ino: u64,
+            st_nlink: u64,
+            st_mode: u32,
+            st_uid: u32,
+            st_gid: u32,
+            __pad0: i32,
+            st_rdev: u64,
+            st_size: i64,
+            st_blksize: i64,
+            st_blocks: i64,
+            st_atime: i64,
+            st_atime_nsec: i64,
+            st_mtime: i64,
+            st_mtime_nsec: i64,
+            st_ctime: i64,
+            st_ctime_nsec: i64,
+            __unused: [i64; 3],
+        }
+        unsafe extern "C" {
+            fn lstat(pathname: *const u8, statbuf: *mut Stat) -> i32;
+        }
+        let cpath = crate::ffi::CString::new(path.as_ref())
+            .map_err(|_| crate::io::Error::new(crate::io::ErrorKind::InvalidInput, "path contains null"))?;
+        let mut st = Stat {
+            st_dev: 0, st_ino: 0, st_nlink: 0, st_mode: 0, st_uid: 0, st_gid: 0, __pad0: 0,
+            st_rdev: 0, st_size: 0, st_blksize: 0, st_blocks: 0, st_atime: 0, st_atime_nsec: 0,
+            st_mtime: 0, st_mtime_nsec: 0, st_ctime: 0, st_ctime_nsec: 0, __unused: [0; 3],
+        };
+        let res = unsafe { lstat(cpath.as_ptr() as *const u8, &mut st) };
+        if res < 0 {
+            return Err(crate::io::Error::last_os_error());
+        }
+        Ok(Metadata {
+            size: st.st_size as u64,
+            mode: st.st_mode,
+            modified_ns: (st.st_mtime as u64) * 1_000_000_000 + (st.st_mtime_nsec as u64),
+            accessed_ns: (st.st_atime as u64) * 1_000_000_000 + (st.st_atime_nsec as u64),
+            created_ns: (st.st_ctime as u64) * 1_000_000_000 + (st.st_ctime_nsec as u64),
+            nlink: st.st_nlink as u64,
+            uid: st.st_uid,
+            gid: st.st_gid,
+            inode: st.st_ino,
+        })
+    }
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        #[allow(non_snake_case)]
+        struct FILETIME {
+            dwLowDateTime: u32,
+            dwHighDateTime: u32,
+        }
+        #[repr(C)]
+        #[allow(non_snake_case)]
+        struct WIN32_FILE_ATTRIBUTE_DATA {
+            dwFileAttributes: u32,
+            ftCreationTime: FILETIME,
+            ftLastAccessTime: FILETIME,
+            ftLastWriteTime: FILETIME,
+            nFileSizeHigh: u32,
+            nFileSizeLow: u32,
+        }
+        unsafe extern "system" {
+            fn GetFileAttributesExW(
+                lpFileName: *const u16,
+                fInfoLevelId: i32,
+                lpFileInformation: *mut WIN32_FILE_ATTRIBUTE_DATA,
+            ) -> i32;
+        }
+        let mut path_u16: crate::vec::Vec<u16> = path.as_ref().encode_utf16().collect();
+        path_u16.push(0);
+        let mut data = WIN32_FILE_ATTRIBUTE_DATA {
+            dwFileAttributes: 0,
+            ftCreationTime: FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 },
+            ftLastAccessTime: FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 },
+            ftLastWriteTime: FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 },
+            nFileSizeHigh: 0,
+            nFileSizeLow: 0,
+        };
+        let res = unsafe { GetFileAttributesExW(path_u16.as_ptr(), 0, &mut data) };
+        if res == 0 {
+            return Err(crate::io::Error::last_os_error());
+        }
+        let unix_epoch = 116444736000000000u64;
+        let to_ns = |ft: FILETIME| {
+            let val = ((ft.dwHighDateTime as u64) << 32) | (ft.dwLowDateTime as u64);
+            if val >= unix_epoch {
+                (val - unix_epoch).checked_mul(100).unwrap_or(u64::MAX)
+            } else {
+                0
+            }
+        };
+        Ok(Metadata {
+            size: ((data.nFileSizeHigh as u64) << 32) | (data.nFileSizeLow as u64),
+            mode: data.dwFileAttributes,
+            modified_ns: to_ns(data.ftLastWriteTime),
+            accessed_ns: to_ns(data.ftLastAccessTime),
+            created_ns: to_ns(data.ftCreationTime),
+            nlink: 1,
+            uid: 0,
+            gid: 0,
+            inode: 0,
+        })
+    }
+}
+
 // ——— WASM ——————————————————————————————————————————————————————————————————
 
 #[cfg(target_family = "wasm")]
@@ -714,13 +900,7 @@ mod tests {
                 crate::rt::executor::PollStatus::Done => break,
                 crate::rt::executor::PollStatus::Ready => continue,
                 crate::rt::executor::PollStatus::Idle { next_deadline } => {
-                    if let Some(d) = next_deadline {
-                        std::thread::sleep(d);
-                    } else {
-                        // Short sleep for tests to avoid spinning cpu fully when testing async
-                        // completions.
-                        std::thread::sleep(std::time::Duration::from_millis(5));
-                    }
+                    crate::rt::executor::poll_step_idle(next_deadline).unwrap();
                 }
             }
         }
@@ -826,6 +1006,56 @@ impl Metadata {
     pub fn len(&self) -> u64 {
         // SAFETY: The host implements `stat_len` via the ABI correctly.
         unsafe { crate::abi::imports::stat_len(self.handle) }
+    }
+
+    /// Returns the modification time as nanoseconds since the UNIX epoch, or 0 if unavailable.
+    pub fn modified_ns(&self) -> u64 {
+        unsafe { crate::abi::imports::stat_mtime(self.handle) }
+    }
+
+    /// Returns the last access time as nanoseconds since the UNIX epoch, or 0 if unavailable.
+    pub fn accessed_ns(&self) -> u64 {
+        unsafe { crate::abi::imports::stat_atime(self.handle) }
+    }
+
+    /// Returns the creation/birth time as nanoseconds since the UNIX epoch, or 0 if unavailable.
+    pub fn created_ns(&self) -> u64 {
+        unsafe { crate::abi::imports::stat_ctime(self.handle) }
+    }
+
+    /// Returns `true` if the path is a symbolic link (the stat was taken without following links).
+    pub fn is_symlink(&self) -> bool {
+        unsafe { crate::abi::imports::stat_is_symlink(self.handle) != 0 }
+    }
+
+    /// Returns `true` if the file is read-only.
+    pub fn readonly(&self) -> bool {
+        unsafe { crate::abi::imports::stat_readonly(self.handle) != 0 }
+    }
+
+    /// Unix permission bits (`rwxrwxrwx`); synthesised from readonly on non-Unix hosts.
+    pub fn mode(&self) -> u32 {
+        unsafe { crate::abi::imports::stat_mode(self.handle) }
+    }
+
+    /// Number of hard links; 0 on hosts that do not expose it.
+    pub fn nlink(&self) -> u64 {
+        unsafe { crate::abi::imports::stat_nlink(self.handle) }
+    }
+
+    /// Owner user-ID (Unix); 0 on non-Unix hosts.
+    pub fn uid(&self) -> u32 {
+        unsafe { crate::abi::imports::stat_uid(self.handle) }
+    }
+
+    /// Owner group-ID (Unix); 0 on non-Unix hosts.
+    pub fn gid(&self) -> u32 {
+        unsafe { crate::abi::imports::stat_gid(self.handle) }
+    }
+
+    /// Inode / file-index number; 0 on hosts that do not expose it.
+    pub fn inode(&self) -> u64 {
+        unsafe { crate::abi::imports::stat_inode(self.handle) }
     }
 }
 

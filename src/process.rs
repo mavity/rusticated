@@ -647,11 +647,7 @@ mod tests {
                 crate::rt::executor::PollStatus::Done => break,
                 crate::rt::executor::PollStatus::Ready => continue,
                 crate::rt::executor::PollStatus::Idle { next_deadline } => {
-                    if let Some(d) = next_deadline {
-                        std::thread::sleep(d);
-                    } else {
-                        std::thread::sleep(std::time::Duration::from_millis(5));
-                    }
+                    crate::rt::executor::poll_step_idle(next_deadline).unwrap();
                 }
             }
         }
