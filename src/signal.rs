@@ -198,7 +198,6 @@ impl TryFrom<u32> for Signal {
         clippy::cast_sign_loss,
     )
 )]
-
 #[cfg(not(target_family = "wasm"))]
 mod native_signal {
     use crate::io;

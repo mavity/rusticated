@@ -19,13 +19,13 @@
 
 use crate::io;
 use crate::traits::{AsyncRead, AsyncWrite};
-use alloc::vec::Vec;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 pub use File as FileNative;
 
-pub fn canonicalize_sync<P: AsRef<str>>(_path: P) -> io::Result<crate::path::PathBuf> { 
-    Err(io::Error::other("not implemented")) 
+pub fn canonicalize_sync<P: AsRef<str>>(_path: P) -> io::Result<crate::path::PathBuf> {
+    Err(io::Error::other("not implemented"))
 }
 
 // --- Metadata Struct ---
@@ -46,31 +46,73 @@ pub struct Metadata {
 
 #[cfg(not(target_family = "wasm"))]
 impl Metadata {
-    pub fn len(&self) -> u64 { self.size }
+    pub fn len(&self) -> u64 {
+        self.size
+    }
     pub fn is_file(&self) -> bool {
-        #[cfg(unix)] { (self.mode & 0o170000) == 0o100000 }
-        #[cfg(windows)] { (self.mode & 0x10) == 0 }
+        #[cfg(unix)]
+        {
+            (self.mode & 0o170000) == 0o100000
+        }
+        #[cfg(windows)]
+        {
+            (self.mode & 0x10) == 0
+        }
     }
     pub fn is_dir(&self) -> bool {
-        #[cfg(unix)] { (self.mode & 0o170000) == 0o040000 }
-        #[cfg(windows)] { (self.mode & 0x10) != 0 }
+        #[cfg(unix)]
+        {
+            (self.mode & 0o170000) == 0o040000
+        }
+        #[cfg(windows)]
+        {
+            (self.mode & 0x10) != 0
+        }
     }
     pub fn is_symlink(&self) -> bool {
-        #[cfg(unix)] { (self.mode & 0o170000) == 0o120000 }
-        #[cfg(windows)] { (self.mode & 0x400) != 0 }
+        #[cfg(unix)]
+        {
+            (self.mode & 0o170000) == 0o120000
+        }
+        #[cfg(windows)]
+        {
+            (self.mode & 0x400) != 0
+        }
     }
     pub fn readonly(&self) -> bool {
-        #[cfg(unix)] { (self.mode & 0o222) == 0 }
-        #[cfg(windows)] { (self.mode & 0x1) != 0 }
+        #[cfg(unix)]
+        {
+            (self.mode & 0o222) == 0
+        }
+        #[cfg(windows)]
+        {
+            (self.mode & 0x1) != 0
+        }
     }
-    pub fn modified_ns(&self) -> u64 { self.modified_time_ns }
-    pub fn accessed_ns(&self) -> u64 { self.accessed_time_ns }
-    pub fn created_ns(&self) -> u64 { self.created_time_ns }
-    pub fn mode(&self) -> u32 { self.mode }
-    pub fn nlink(&self) -> u64 { self.nlink }
-    pub fn uid(&self) -> u32 { self.uid }
-    pub fn gid(&self) -> u32 { self.gid }
-    pub fn inode(&self) -> u64 { self.inode }
+    pub fn modified_ns(&self) -> u64 {
+        self.modified_time_ns
+    }
+    pub fn accessed_ns(&self) -> u64 {
+        self.accessed_time_ns
+    }
+    pub fn created_ns(&self) -> u64 {
+        self.created_time_ns
+    }
+    pub fn mode(&self) -> u32 {
+        self.mode
+    }
+    pub fn nlink(&self) -> u64 {
+        self.nlink
+    }
+    pub fn uid(&self) -> u32 {
+        self.uid
+    }
+    pub fn gid(&self) -> u32 {
+        self.gid
+    }
+    pub fn inode(&self) -> u64 {
+        self.inode
+    }
 }
 
 // --- WASM Metadata ---
@@ -83,18 +125,42 @@ pub struct Metadata {
 
 #[cfg(target_family = "wasm")]
 impl Metadata {
-    pub fn len(&self) -> u64 { unsafe { crate::abi::imports::stat_len(self.handle) } }
-    pub fn is_file(&self) -> bool { unsafe { crate::abi::imports::stat_is_file(self.handle) != 0 } }
-    pub fn is_dir(&self) -> bool { unsafe { crate::abi::imports::stat_is_dir(self.handle) != 0 } }
-    pub fn is_symlink(&self) -> bool { unsafe { crate::abi::imports::stat_is_symlink(self.handle) != 0 } }
-    pub fn modified_ns(&self) -> u64 { unsafe { crate::abi::imports::stat_mtime(self.handle) } }
-    pub fn accessed_ns(&self) -> u64 { unsafe { crate::abi::imports::stat_atime(self.handle) } }
-    pub fn created_ns(&self) -> u64 { unsafe { crate::abi::imports::stat_ctime(self.handle) } }
-    pub fn mode(&self) -> u32 { unsafe { crate::abi::imports::stat_mode(self.handle) } }
-    pub fn nlink(&self) -> u64 { unsafe { crate::abi::imports::stat_nlink(self.handle) } }
-    pub fn uid(&self) -> u32 { unsafe { crate::abi::imports::stat_uid(self.handle) } }
-    pub fn gid(&self) -> u32 { unsafe { crate::abi::imports::stat_gid(self.handle) } }
-    pub fn inode(&self) -> u64 { unsafe { crate::abi::imports::stat_inode(self.handle) } }
+    pub fn len(&self) -> u64 {
+        unsafe { crate::abi::imports::stat_len(self.handle) }
+    }
+    pub fn is_file(&self) -> bool {
+        unsafe { crate::abi::imports::stat_is_file(self.handle) != 0 }
+    }
+    pub fn is_dir(&self) -> bool {
+        unsafe { crate::abi::imports::stat_is_dir(self.handle) != 0 }
+    }
+    pub fn is_symlink(&self) -> bool {
+        unsafe { crate::abi::imports::stat_is_symlink(self.handle) != 0 }
+    }
+    pub fn modified_ns(&self) -> u64 {
+        unsafe { crate::abi::imports::stat_mtime(self.handle) }
+    }
+    pub fn accessed_ns(&self) -> u64 {
+        unsafe { crate::abi::imports::stat_atime(self.handle) }
+    }
+    pub fn created_ns(&self) -> u64 {
+        unsafe { crate::abi::imports::stat_ctime(self.handle) }
+    }
+    pub fn mode(&self) -> u32 {
+        unsafe { crate::abi::imports::stat_mode(self.handle) }
+    }
+    pub fn nlink(&self) -> u64 {
+        unsafe { crate::abi::imports::stat_nlink(self.handle) }
+    }
+    pub fn uid(&self) -> u32 {
+        unsafe { crate::abi::imports::stat_uid(self.handle) }
+    }
+    pub fn gid(&self) -> u32 {
+        unsafe { crate::abi::imports::stat_gid(self.handle) }
+    }
+    pub fn inode(&self) -> u64 {
+        unsafe { crate::abi::imports::stat_inode(self.handle) }
+    }
 }
 
 // --- File Type ---
@@ -103,9 +169,15 @@ impl Metadata {
 pub struct FileType;
 
 impl FileType {
-    pub fn is_dir(&self) -> bool { false }
-    pub fn is_file(&self) -> bool { true }
-    pub fn is_symlink(&self) -> bool { false }
+    pub fn is_dir(&self) -> bool {
+        false
+    }
+    pub fn is_file(&self) -> bool {
+        true
+    }
+    pub fn is_symlink(&self) -> bool {
+        false
+    }
 }
 
 // --- DirEntry ---
@@ -116,12 +188,20 @@ pub struct DirEntry {
 }
 
 impl DirEntry {
-    pub fn file_name(&self) -> &str { &self.name }
-    pub fn path(&self) -> crate::path::PathBuf { crate::path::PathBuf::from(self.name.clone()) }
-    pub fn metadata(&self) -> io::Result<Metadata> { 
-        self.metadata.clone().ok_or_else(|| io::Error::other("metadata unavailable")) 
+    pub fn file_name(&self) -> &str {
+        &self.name
     }
-    pub fn file_type(&self) -> io::Result<FileType> { Ok(FileType) }
+    pub fn path(&self) -> crate::path::PathBuf {
+        crate::path::PathBuf::from(self.name.clone())
+    }
+    pub fn metadata(&self) -> io::Result<Metadata> {
+        self.metadata
+            .clone()
+            .ok_or_else(|| io::Error::other("metadata unavailable"))
+    }
+    pub fn file_type(&self) -> io::Result<FileType> {
+        Ok(FileType)
+    }
 }
 
 // --- ReadDir ---
@@ -135,7 +215,13 @@ impl Iterator for ReadDir {
     type Item = io::Result<DirEntry>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.pos < self.entries.len() {
-            let entry = core::mem::replace(&mut self.entries[self.pos], DirEntry { name: String::new(), metadata: None });
+            let entry = core::mem::replace(
+                &mut self.entries[self.pos],
+                DirEntry {
+                    name: String::new(),
+                    metadata: None,
+                },
+            );
             self.pos += 1;
             Some(Ok(entry))
         } else {
@@ -157,31 +243,68 @@ pub struct OpenOptions {
 }
 
 impl OpenOptions {
-    pub fn new() -> Self { Self::default() }
-    pub fn read(&mut self, v: bool) -> &mut Self { self.read = v; self }
-    pub fn write(&mut self, v: bool) -> &mut Self { self.write = v; self }
-    pub fn append(&mut self, v: bool) -> &mut Self { self.append = v; self }
-    pub fn truncate(&mut self, v: bool) -> &mut Self { self.truncate = v; self }
-    pub fn create(&mut self, v: bool) -> &mut Self { self.create = v; self }
-    pub fn create_new(&mut self, v: bool) -> &mut Self { self.create_new = v; self }
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn read(&mut self, v: bool) -> &mut Self {
+        self.read = v;
+        self
+    }
+    pub fn write(&mut self, v: bool) -> &mut Self {
+        self.write = v;
+        self
+    }
+    pub fn append(&mut self, v: bool) -> &mut Self {
+        self.append = v;
+        self
+    }
+    pub fn truncate(&mut self, v: bool) -> &mut Self {
+        self.truncate = v;
+        self
+    }
+    pub fn create(&mut self, v: bool) -> &mut Self {
+        self.create = v;
+        self
+    }
+    pub fn create_new(&mut self, v: bool) -> &mut Self {
+        self.create_new = v;
+        self
+    }
 
+    #[allow(unused_variables)]
     pub async fn open<P: AsRef<str>>(&self, path: P) -> io::Result<File> {
         #[cfg(target_family = "wasm")]
         {
             let mut flags = 0u32;
-            if self.read { flags |= 1; }
-            if self.write { flags |= 2; }
-            if self.create { flags |= 4; }
-            if self.truncate { flags |= 8; }
-            if self.append { flags |= 16; }
-            if self.create_new { flags |= 32; }
-            
+            if self.read {
+                flags |= 1;
+            }
+            if self.write {
+                flags |= 2;
+            }
+            if self.create {
+                flags |= 4;
+            }
+            if self.truncate {
+                flags |= 8;
+            }
+            if self.append {
+                flags |= 16;
+            }
+            if self.create_new {
+                flags |= 32;
+            }
+
             let path_bytes = path.as_ref().as_bytes().to_vec();
-            let (err, handle, _, _) = crate::rt::wasm::OverlappedBufferFuture::new(path_bytes, move |ov, ptr, len| {
-                unsafe { crate::abi::imports::path_open(ov, ptr, len, flags) };
-            }).await;
-            
-            if err != 0 { return Err(io::Error::from_raw_os_error(err as i32)); }
+            let (err, handle, _, _) =
+                crate::rt::wasm::OverlappedBufferFuture::new(path_bytes, move |ov, ptr, len| {
+                    unsafe { crate::abi::imports::path_open(ov, ptr, len, flags) };
+                })
+                .await;
+
+            if err != 0 {
+                return Err(io::Error::from_raw_os_error(err as i32));
+            }
             Ok(File { handle })
         }
         #[cfg(windows)]
@@ -190,12 +313,18 @@ impl OpenOptions {
             wchars.push(0);
 
             let mut access = 0;
-            if self.read { access |= 0x80000000; } // GENERIC_READ
-            if self.write { access |= 0x40000000; } // GENERIC_WRITE
-            if self.append { access |= 0x00000004; } // FILE_APPEND_DATA
+            if self.read {
+                access |= 0x80000000;
+            } // GENERIC_READ
+            if self.write {
+                access |= 0x40000000;
+            } // GENERIC_WRITE
+            if self.append {
+                access |= 0x00000004;
+            } // FILE_APPEND_DATA
 
             let share = 0x00000001 | 0x00000002; // FILE_SHARE_READ | FILE_SHARE_WRITE
-            
+
             let creation = if self.create_new {
                 1 // CREATE_NEW
             } else if self.truncate && self.create {
@@ -238,7 +367,9 @@ impl OpenOptions {
                 return Err(io::Error::last_os_error());
             }
 
-            Ok(File { handle: handle as u64 })
+            Ok(File {
+                handle: handle as u64,
+            })
         }
         #[cfg(all(not(target_family = "wasm"), not(windows)))]
         {
@@ -251,13 +382,25 @@ impl OpenOptions {
             const O_EXCL: i32 = 128;
 
             let mut flags = 0;
-            if self.read && self.write { flags |= O_RDWR; }
-            else if self.write { flags |= O_WRONLY; }
-            else { flags |= O_RDONLY; }
-            if self.create { flags |= O_CREAT; }
-            if self.truncate { flags |= O_TRUNC; }
-            if self.append { flags |= O_APPEND; }
-            if self.create_new { flags |= O_CREAT | O_EXCL; }
+            if self.read && self.write {
+                flags |= O_RDWR;
+            } else if self.write {
+                flags |= O_WRONLY;
+            } else {
+                flags |= O_RDONLY;
+            }
+            if self.create {
+                flags |= O_CREAT;
+            }
+            if self.truncate {
+                flags |= O_TRUNC;
+            }
+            if self.append {
+                flags |= O_APPEND;
+            }
+            if self.create_new {
+                flags |= O_CREAT | O_EXCL;
+            }
 
             unsafe extern "C" {
                 fn open(pathname: *const u8, flags: i32, mode: u32) -> i32;
@@ -268,7 +411,9 @@ impl OpenOptions {
             if handle < 0 {
                 return Err(io::Error::last_os_error());
             }
-            Ok(File { handle: handle as u64 })
+            Ok(File {
+                handle: handle as u64,
+            })
         }
     }
 }
@@ -280,21 +425,30 @@ pub struct File {
 }
 
 impl File {
-    pub fn options() -> OpenOptions { OpenOptions::new() }
+    pub fn options() -> OpenOptions {
+        OpenOptions::new()
+    }
 
     pub async fn open<P: AsRef<str>>(path: P) -> io::Result<Self> {
         OpenOptions::new().read(true).open(path).await
     }
 
     pub async fn create<P: AsRef<str>>(path: P) -> io::Result<Self> {
-        OpenOptions::new().write(true).create(true).truncate(true).open(path).await
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+            .await
     }
 
     pub fn metadata(&self) -> io::Result<Metadata> {
         Err(io::Error::other("not implemented"))
     }
-    
-    pub fn as_raw_fd(&self) -> i32 { self.handle as i32 }
+
+    pub fn as_raw_fd(&self) -> i32 {
+        self.handle as i32
+    }
 }
 
 impl AsyncRead for File {
@@ -302,10 +456,14 @@ impl AsyncRead for File {
         #[cfg(target_family = "wasm")]
         {
             let handle = self.handle;
-            let (err, read, _, buf) = crate::rt::wasm::OverlappedBufferFuture::new(buf, move |ov, ptr, len| {
-                unsafe { crate::abi::imports::read(ov, handle, ptr, len) };
-            }).await;
-            if err != 0 { return (Err(io::Error::from_raw_os_error(err as i32)), buf); }
+            let (err, read, _, buf) =
+                crate::rt::wasm::OverlappedBufferFuture::new(buf, move |ov, ptr, len| {
+                    unsafe { crate::abi::imports::read(ov, handle, ptr, len) };
+                })
+                .await;
+            if err != 0 {
+                return (Err(io::Error::from_raw_os_error(err as i32)), buf);
+            }
             let mut buf = buf;
             unsafe { buf.set_len(read as usize) };
             (Ok(read as usize), buf)
@@ -340,18 +498,24 @@ impl AsyncRead for File {
                 let err = io::Error::last_os_error();
                 // EOF might be ERROR_HANDLE_EOF which is 38
                 if err.raw_os_error() == Some(38) {
-                    unsafe { buf.set_len(0); }
+                    unsafe {
+                        buf.set_len(0);
+                    }
                     (Ok(0), buf)
                 } else {
                     (Err(err), buf)
                 }
             } else {
-                unsafe { buf.set_len(bytes_read as usize); }
+                unsafe {
+                    buf.set_len(bytes_read as usize);
+                }
                 (Ok(bytes_read as usize), buf)
             }
         }
         #[cfg(all(not(target_family = "wasm"), not(windows)))]
-        { crate::rt::linux_op::LinuxOpFuture::read(self.handle as i32, buf).await }
+        {
+            crate::rt::linux_op::LinuxOpFuture::read(self.handle as i32, buf).await
+        }
     }
 }
 
@@ -361,10 +525,14 @@ impl AsyncWrite for File {
         {
             let handle = self.handle;
             let len = buf.len() as u32;
-            let (err, written, _, buf) = crate::rt::wasm::OverlappedBufferFuture::new(buf, move |ov, ptr, _| {
-                unsafe { crate::abi::imports::write(ov, handle, ptr, len) };
-            }).await;
-            if err != 0 { return (Err(io::Error::from_raw_os_error(err as i32)), buf); }
+            let (err, written, _, buf) =
+                crate::rt::wasm::OverlappedBufferFuture::new(buf, move |ov, ptr, _| {
+                    unsafe { crate::abi::imports::write(ov, handle, ptr, len) };
+                })
+                .await;
+            if err != 0 {
+                return (Err(io::Error::from_raw_os_error(err as i32)), buf);
+            }
             (Ok(written as usize), buf)
         }
         #[cfg(windows)]
@@ -399,20 +567,29 @@ impl AsyncWrite for File {
             }
         }
         #[cfg(all(not(target_family = "wasm"), not(windows)))]
-        { crate::rt::linux_op::LinuxOpFuture::write(self.handle as i32, buf).await }
+        {
+            crate::rt::linux_op::LinuxOpFuture::write(self.handle as i32, buf).await
+        }
     }
-    async fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    async fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 // --- Global Fns ---
 
 pub async fn metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
-    #[cfg(target_family = "wasm")] {
+    #[cfg(target_family = "wasm")]
+    {
         let path_bytes = path.as_ref().as_bytes().to_vec();
-        let (err, handle, _, _) = crate::rt::wasm::OverlappedBufferFuture::new(path_bytes, |ov, ptr, len| {
-            unsafe { crate::abi::imports::path_stat(ov, ptr, len) };
-        }).await;
-        if err != 0 { return Err(io::Error::from_raw_os_error(err as i32)); }
+        let (err, handle, _, _) =
+            crate::rt::wasm::OverlappedBufferFuture::new(path_bytes, |ov, ptr, len| {
+                unsafe { crate::abi::imports::path_stat(ov, ptr, len) };
+            })
+            .await;
+        if err != 0 {
+            return Err(io::Error::from_raw_os_error(err as i32));
+        }
         Ok(Metadata { handle })
     }
     #[cfg(windows)]
@@ -490,7 +667,8 @@ pub async fn metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
             inode: 0,
         })
     }
-    #[cfg(all(not(target_family = "wasm"), not(windows)))] {
+    #[cfg(all(not(target_family = "wasm"), not(windows)))]
+    {
         // struct stat layout on Linux aarch64 (kernel stat64 / __NR_newfstatat)
         #[repr(C)]
         struct LinuxStat {
@@ -526,7 +704,11 @@ pub async fn metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
         }
         let st = unsafe { st.assume_init() };
         let to_ns = |secs: i64, nsec: i64| -> u64 {
-            if secs < 0 { 0 } else { secs as u64 * 1_000_000_000 + nsec as u64 }
+            if secs < 0 {
+                0
+            } else {
+                secs as u64 * 1_000_000_000 + nsec as u64
+            }
         };
         Ok(Metadata {
             size: st.st_size as u64,
@@ -543,37 +725,73 @@ pub async fn metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
 }
 
 pub async fn symlink_metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
-    #[cfg(target_family = "wasm")] {
+    #[cfg(target_family = "wasm")]
+    {
         let path_bytes = path.as_ref().as_bytes().to_vec();
-        let (err, handle, _, _) = crate::rt::wasm::OverlappedBufferFuture::new(path_bytes, |ov, ptr, len| {
-            unsafe { crate::abi::imports::path_lstat(ov, ptr, len) };
-        }).await;
-        if err != 0 { return Err(io::Error::from_raw_os_error(err as i32)); }
+        let (err, handle, _, _) =
+            crate::rt::wasm::OverlappedBufferFuture::new(path_bytes, |ov, ptr, len| {
+                unsafe { crate::abi::imports::path_lstat(ov, ptr, len) };
+            })
+            .await;
+        if err != 0 {
+            return Err(io::Error::from_raw_os_error(err as i32));
+        }
         Ok(Metadata { handle })
     }
-    #[cfg(not(target_family = "wasm"))] {
+    #[cfg(not(target_family = "wasm"))]
+    {
         let _ = path;
         Err(io::Error::other("not implemented"))
     }
 }
 
-pub fn metadata_sync<P: AsRef<str>>(_path: P) -> io::Result<Metadata> { Err(io::Error::other("not supported")) }
-pub fn symlink_metadata_sync<P: AsRef<str>>(_path: P) -> io::Result<Metadata> { Err(io::Error::other("not supported")) }
-pub async fn read_dir<P: AsRef<str>>(_path: P) -> io::Result<ReadDir> { Err(io::Error::other("not implemented")) }
-pub fn read_dir_sync<P: AsRef<str>>(_path: P) -> io::Result<ReadDir> { Err(io::Error::other("not implemented")) }
-pub async fn remove_file<P: AsRef<str>>(_path: P) -> io::Result<()> { Err(io::Error::other("not implemented")) }
-pub async fn rename<P: AsRef<str>, Q: AsRef<str>>(_from: P, _to: Q) -> io::Result<()> { Err(io::Error::other("not implemented")) }
-pub async fn create_dir_all<P: AsRef<str>>(_path: P) -> io::Result<()> { Err(io::Error::other("not implemented")) }
-pub async fn canonicalize<P: AsRef<str>>(_path: P) -> io::Result<crate::path::PathBuf> { Err(io::Error::other("not implemented")) }
-pub fn open_null_file() -> io::Result<File> { Err(io::Error::other("not implemented")) }
-pub fn default_case_insensitive_path_expansion() -> bool { false }
-pub fn resolve_executable<P: AsRef<str>>(_path: P) -> Option<String> { None }
-pub fn split_path_for_pattern(_path: &str) -> Vec<&str> { Vec::new() }
-pub fn pattern_path_root(_path: &str) -> Option<String> { None }
-pub fn normalize_path_separators(path: &str) -> alloc::borrow::Cow<'_, str> { alloc::borrow::Cow::Borrowed(path) }
+pub fn metadata_sync<P: AsRef<str>>(_path: P) -> io::Result<Metadata> {
+    Err(io::Error::other("not supported"))
+}
+pub fn symlink_metadata_sync<P: AsRef<str>>(_path: P) -> io::Result<Metadata> {
+    Err(io::Error::other("not supported"))
+}
+pub async fn read_dir<P: AsRef<str>>(_path: P) -> io::Result<ReadDir> {
+    Err(io::Error::other("not implemented"))
+}
+pub fn read_dir_sync<P: AsRef<str>>(_path: P) -> io::Result<ReadDir> {
+    Err(io::Error::other("not implemented"))
+}
+pub async fn remove_file<P: AsRef<str>>(_path: P) -> io::Result<()> {
+    Err(io::Error::other("not implemented"))
+}
+pub async fn rename<P: AsRef<str>, Q: AsRef<str>>(_from: P, _to: Q) -> io::Result<()> {
+    Err(io::Error::other("not implemented"))
+}
+pub async fn create_dir_all<P: AsRef<str>>(_path: P) -> io::Result<()> {
+    Err(io::Error::other("not implemented"))
+}
+pub async fn canonicalize<P: AsRef<str>>(_path: P) -> io::Result<crate::path::PathBuf> {
+    Err(io::Error::other("not implemented"))
+}
+pub fn open_null_file() -> io::Result<File> {
+    Err(io::Error::other("not implemented"))
+}
+pub fn default_case_insensitive_path_expansion() -> bool {
+    false
+}
+pub fn resolve_executable<P: AsRef<str>>(_path: P) -> Option<String> {
+    None
+}
+pub fn split_path_for_pattern(_path: &str) -> Vec<&str> {
+    Vec::new()
+}
+pub fn pattern_path_root(_path: &str) -> Option<String> {
+    None
+}
+pub fn normalize_path_separators(path: &str) -> alloc::borrow::Cow<'_, str> {
+    alloc::borrow::Cow::Borrowed(path)
+}
 pub fn push_path_for_pattern(path: &mut crate::path::PathBuf, piece: &str) {
     let mut s = path.to_string();
-    if !s.is_empty() && !s.ends_with('/') && !s.ends_with('\\') { s.push('/'); }
+    if !s.is_empty() && !s.ends_with('/') && !s.ends_with('\\') {
+        s.push('/');
+    }
     s.push_str(piece);
     *path = crate::path::PathBuf::from(s);
 }

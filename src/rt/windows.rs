@@ -114,8 +114,10 @@ struct MainThreadHandleStorage(UnsafeCell<Cell<usize>>);
 
 unsafe impl Sync for MainThreadHandleStorage {}
 
-static OUTSTANDING_IO_STORAGE: OutstandingIoStorage = OutstandingIoStorage(UnsafeCell::new(Cell::new(0)));
-static MAIN_THREAD_HANDLE_STORAGE: MainThreadHandleStorage = MainThreadHandleStorage(UnsafeCell::new(Cell::new(0)));
+static OUTSTANDING_IO_STORAGE: OutstandingIoStorage =
+    OutstandingIoStorage(UnsafeCell::new(Cell::new(0)));
+static MAIN_THREAD_HANDLE_STORAGE: MainThreadHandleStorage =
+    MainThreadHandleStorage(UnsafeCell::new(Cell::new(0)));
 
 pub(crate) fn outstanding_io() -> &'static mut Cell<usize> {
     unsafe { &mut *OUTSTANDING_IO_STORAGE.0.get() }

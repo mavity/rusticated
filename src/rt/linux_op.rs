@@ -1,10 +1,12 @@
-use crate::io;
+#![cfg(target_os = "linux")]
+
+use super::linux_state::OpState;
 use crate::future::Future;
+use crate::io;
 use crate::pin::Pin;
 use crate::task::{Context, Poll};
 use alloc::rc::Rc;
 use alloc::vec::Vec;
-use super::linux_state::OpState;
 
 pub struct LinuxOpFuture {
     state: Rc<OpState>,
@@ -40,7 +42,7 @@ impl Future for LinuxOpFuture {
                 return Poll::Ready((Ok(bytes as usize), buffer));
             }
         }
-        
+
         *self.state.waker.borrow_mut() = Some(cx.waker().clone());
         Poll::Pending
     }

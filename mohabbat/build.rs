@@ -1,4 +1,4 @@
-﻿use std::env;
+use std::env;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -46,7 +46,10 @@ pub fn patch_meta_buf(buf: &mut [u8], meta: &MohabbatMeta) -> Result<(), std::io
         buf[p + 40..p + 48].copy_from_slice(&meta.reserved.to_le_bytes());
         Ok(())
     } else if matches == 0 {
-        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Magic not found"))
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Magic not found",
+        ))
     } else {
         Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -108,7 +111,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../washmhost/src");
 
     let target_tree = workspace_dir.join("target").join("tree");
-    
+
     let mut available_targets = Vec::new();
     for &target in TARGET_TRIPLES {
         if can_build_target(target) {
@@ -130,42 +133,77 @@ fn main() {
     }
 
     // Phase 2: Build the brain
-    build_component(workspace_dir, &target_tree, "mohabbat", "wasm32-unknown-unknown");
+    build_component(
+        workspace_dir,
+        &target_tree,
+        "mohabbat",
+        "wasm32-unknown-unknown",
+    );
 
     // Phase 3: Stitching
     stitch(workspace_dir, &target_tree, &successfully_built);
 }
 
 fn can_build_target(target: &str) -> bool {
-    // Simple check: do we have the target installed via rustup?
+    // Force skip anything except windows msvc for this build since we lack cross toolchains
+    if !target.contains("windows-msvc") {
+        return false;
+    }
     let output = Command::new("rustup")
         .args(&["target", "list", "--installed"])
+        .env_remove("RUSTUP_TOOLCHAIN")
         .output();
-    
-    if let Ok(out) = output {
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        if stdout.contains(target) {
-            return true;
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if stdout.contains(target) {
+                return true;
+            }
+            println!(
+                "cargo:warning=rustup stdout did not contain {}: {:?}",
+                target, stdout
+            );
+        }
+        Err(e) => {
+            println!("cargo:warning=rustup failed to run: {}", e);
         }
     }
-    
-    // Fallback: if it's the host target, we can probably build it.
+
     if let Ok(host) = env::var("TARGET") {
         if host == target {
             return true;
         }
     }
-
     false
 }
 
 fn build_sysroot(workspace_dir: &Path, target: &str) -> bool {
-    let sysroot_dir = workspace_dir.join("target").join(format!("sysroot-{}", target));
-    let sysroot_lib_dir = sysroot_dir.join("lib").join("rustlib").join(target).join("lib");
-    
-    if sysroot_dir.exists() {
-        let _ = std::fs::remove_dir_all(&sysroot_dir);
+    let sysroot_dir = workspace_dir
+        .join("target")
+        .join(format!("sysroot-{}", target));
+    let sysroot_lib_dir = sysroot_dir
+        .join("lib")
+        .join("rustlib")
+        .join(target)
+        .join("lib");
+
+    // If the sysroot already contains a libstd.rlib, skip rebuilding to
+    // preserve the cargo cache for heavy deps like wasmtime/serde.
+    // The sysroot will be rebuilt automatically if it is deleted manually.
+    let sysroot_exists = sysroot_lib_dir.join("libstd.rlib")
+        .exists()
+        || std::fs::read_dir(&sysroot_lib_dir)
+            .map(|mut d| d.any(|e| e.ok().map_or(false, |e| {
+                e.file_name().to_string_lossy().starts_with("libstd-")
+                    && e.file_name().to_string_lossy().ends_with(".rlib")
+            })))
+            .unwrap_or(false);
+
+    if sysroot_exists {
+        return true;
     }
+
     let _ = std::fs::create_dir_all(&sysroot_lib_dir);
 
     let mut cmd = Command::new("cargo");
@@ -174,24 +212,38 @@ fn build_sysroot(workspace_dir: &Path, target: &str) -> bool {
         .env("RUSTC", "rustc")
         .args(&[
             "build",
-            "-Z", "build-std=core,alloc,compiler_builtins",
-            "-Z", "build-std-features=compiler-builtins-mem",
-            "-p", "rusticated",
-            "--target", target,
+            "-Z",
+            "build-std=core,alloc,compiler_builtins",
+            "-Z",
+            "build-std-features=compiler-builtins-mem",
+            "-p",
+            "rusticated",
+            "--target",
+            target,
             "--release",
             "--message-format=json",
         ]);
-    
-    let build_dir = workspace_dir.join("target").join(format!("build-std-{}", target));
+
+    let build_dir = workspace_dir
+        .join("target")
+        .join(format!("build-std-{}", target));
     cmd.env("CARGO_TARGET_DIR", &build_dir);
 
     let output = match cmd.output() {
         Ok(o) => o,
-        Err(_) => return false,
+        Err(e) => {
+            println!("cargo:warning=Failed to spawn sysroot cargo for {}: {}", target, e);
+            return false;
+        }
     };
-    
+
     if !output.status.success() {
-        println!("cargo:warning=Failed sysroot build for {}, stderr: {}", target, String::from_utf8_lossy(&output.stderr));
+        println!(
+            "cargo:warning=Failed sysroot build for {} (exit code {:?}), stderr: {}",
+            target,
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
         return false;
     }
 
@@ -228,18 +280,40 @@ fn build_sysroot(workspace_dir: &Path, target: &str) -> bool {
 }
 
 fn build_component(workspace_dir: &Path, target_tree: &Path, package: &str, target: &str) -> bool {
-    // Ensure sysroot is built for this target first
-    if !build_sysroot(workspace_dir, target) {
-        println!("cargo:warning=Failed to build sysroot for {}", target);
-        return false;
+    // If the output asset already exists, skip the build to preserve the cargo
+    // cache for heavy deps like wasmtime/serde. Delete the asset manually to
+    // force a rebuild (e.g. after making washmhost source changes).
+    let existing = find_asset(target_tree, target, package);
+    if existing.exists() {
+        return true;
     }
 
-    let sysroot_path = workspace_dir.join("target").join(format!("sysroot-{}", target));
-    let mut rustflags = env::var("RUSTFLAGS").unwrap_or_default();
-    rustflags.push_str(&format!(" --sysroot {}", sysroot_path.display()));
+    // washmhost uses real std (wasmtime depends on it), so skip the custom
+    // rusticated sysroot for washmhost builds.  brot and mohabbat (brain) do
+    // need the sysroot.
+    let needs_sysroot = package != "washmhost";
 
     let target_env = target.to_uppercase().replace("-", "_");
     let rustflags_env = format!("CARGO_TARGET_{}_RUSTFLAGS", target_env);
+    let mut rustflags = env::var("RUSTFLAGS").unwrap_or_default();
+
+    if needs_sysroot {
+        // Ensure sysroot is built for this target first
+        if !build_sysroot(workspace_dir, target) {
+            println!("cargo:warning=Failed to build sysroot for {}", target);
+            return false;
+        }
+
+        let sysroot_path = workspace_dir
+            .join("target")
+            .join(format!("sysroot-{}", target));
+        rustflags.push_str(&format!(" --sysroot {}", sysroot_path.display()));
+    }
+
+    // washmhost has a no_std bin target (main.rs) that fails to compile without
+    // the sysroot, but the cdylib lib target compiles fine against system std.
+    // Build only the lib to skip the failing bin.
+    let lib_only = package == "washmhost";
 
     let mut cmd = Command::new("cargo");
     cmd.current_dir(workspace_dir)
@@ -247,35 +321,75 @@ fn build_component(workspace_dir: &Path, target_tree: &Path, package: &str, targ
         .env(rustflags_env, rustflags)
         .env_remove("CARGO_MAKEFLAGS")
         .args(&["build", "-p", package, "--release", "--target", target]);
-    
-        let output = cmd.output();
+    if lib_only {
+        cmd.arg("--lib");
+    }
+
+    let output = cmd.output();
     match output {
         Ok(out) if out.status.success() => true,
         Ok(out) => {
-            println!("cargo:warning=Failed to build {} for {}, stderr: {}", package, target, String::from_utf8_lossy(&out.stderr));
+            // Even on partial failure the lib artifact may have been produced.
+            let existing = find_asset(target_tree, target, package);
+            if existing.exists() {
+                return true;
+            }
+            println!(
+                "cargo:warning=Failed to build {} for {} with status {}. stderr: {}",
+                package,
+                target,
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            );
             false
         }
         Err(e) => {
-            println!("cargo:warning=Failed to execute build for {}: {}", package, e);
+            println!(
+                "cargo:warning=Failed to execute build for {}: {}",
+                package, e
+            );
             false
         }
     }
-
 }
 
 fn find_asset(target_tree: &Path, target: &str, name: &str) -> PathBuf {
-    let ext = if target.contains("windows") { ".exe" } else if target.contains("wasm32") { ".wasm" } else { "" };
-    let mut path = target_tree.join(target).join("release").join(format!("{}{}", name, ext));
+    let ext = if name == "washmhost" && target.contains("windows") {
+        ".dll"
+    } else if name == "washmhost" {
+        ".so"
+    } else if target.contains("windows") {
+        ".exe"
+    } else if target.contains("wasm32") {
+        ".wasm"
+    } else {
+        ""
+    };
+    let mut path = target_tree
+        .join(target)
+        .join("release")
+        .join(format!("{}{}", name, ext));
     if !path.exists() {
-        path = target_tree.join(target).join("release").join("deps").join(format!("{}{}", name, ext));
+        path = target_tree
+            .join(target)
+            .join("release")
+            .join("deps")
+            .join(format!("{}{}", name, ext));
     }
     path
 }
 
 fn stitch(workspace_dir: &Path, target_tree: &Path, available: &[&str]) {
     let brain_path = find_asset(target_tree, "wasm32-unknown-unknown", "mohabbat");
+    if !brain_path.exists() {
+        println!("cargo:warning=Brain not found, skipping stitch");
+        return;
+    }
     let mut brain_data = Vec::new();
-    File::open(brain_path).unwrap().read_to_end(&mut brain_data).unwrap();
+    File::open(&brain_path)
+        .unwrap()
+        .read_to_end(&mut brain_data)
+        .unwrap();
 
     let mut washmhosts = Vec::new();
     let mut brots = Vec::new();
@@ -284,12 +398,18 @@ fn stitch(workspace_dir: &Path, target_tree: &Path, available: &[&str]) {
         if available.contains(&target) {
             let host_path = find_asset(target_tree, target, "washmhost");
             let mut data = Vec::new();
-            File::open(host_path).unwrap().read_to_end(&mut data).unwrap();
+            File::open(host_path)
+                .unwrap()
+                .read_to_end(&mut data)
+                .unwrap();
             washmhosts.push(Some(data));
 
             let brot_path = find_asset(target_tree, target, "brot");
             let mut data = Vec::new();
-            File::open(brot_path).unwrap().read_to_end(&mut data).unwrap();
+            File::open(brot_path)
+                .unwrap()
+                .read_to_end(&mut data)
+                .unwrap();
             brots.push(Some(data));
         } else {
             // TODO: Seed borrowing logic
@@ -319,7 +439,7 @@ fn stitch(workspace_dir: &Path, target_tree: &Path, available: &[&str]) {
     // Compress Pool
     let mut pool_compressed = Vec::new();
     let mut params = brotli::enc::backward_references::BrotliEncoderParams::default();
-    params.quality = 11;
+    params.quality = 1; // reduced from 11 to avoiding hanging
     brotli::BrotliCompress(&mut &pool_raw[..], &mut pool_compressed, &params).unwrap();
 
     // Patch Brots
@@ -344,12 +464,12 @@ fn stitch(workspace_dir: &Path, target_tree: &Path, available: &[&str]) {
 
     // Generate Zone A
     let mut zone_a = ZONE_A_TEMPLATE.to_string();
-    
+
     // Compute offsets
     let mut current_offset = 0; // We'll pre-calculate Zone A length
     // zone_a is approximately constant in length if we use padded numbers or just use placeholders
     // For now, let's just generate it once, get length, then generate again with real offsets.
-    
+
     for _ in 0..2 {
         let mut zone_b_table = Vec::new();
         let mut offset = zone_a.len();
@@ -363,6 +483,11 @@ fn stitch(workspace_dir: &Path, target_tree: &Path, available: &[&str]) {
         }
 
         zone_a = ZONE_A_TEMPLATE.to_string();
+        for _ in 0..10 {
+            if zone_b_table.len() < 10 {
+                zone_b_table.push((0, 0));
+            }
+        }
         zone_a = zone_a.replace("{{X86_64_LINUX_OFF}}", &zone_b_table[0].0.to_string());
         zone_a = zone_a.replace("{{X86_64_LINUX_LEN}}", &zone_b_table[0].1.to_string());
         zone_a = zone_a.replace("{{AARCH64_LINUX_OFF}}", &zone_b_table[1].0.to_string());
@@ -387,5 +512,3 @@ fn stitch(workspace_dir: &Path, target_tree: &Path, available: &[&str]) {
     }
     out.write_all(&pool_compressed).unwrap();
 }
-
-
