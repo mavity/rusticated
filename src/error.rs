@@ -43,6 +43,16 @@ impl fmt::Display for SystemError {
     }
 }
 
+impl core::error::Error for SystemError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::PlainIo(source) => Some(source),
+            _ => None,
+        }
+    }
+}
+
 impl From<crate::io::Error> for SystemError {
     fn from(e: crate::io::Error) -> Self {
         Self::PlainIo(e)

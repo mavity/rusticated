@@ -79,6 +79,46 @@ impl Metadata {
             (self.mode & 0x400) != 0
         }
     }
+    pub fn is_block_device(&self) -> bool {
+        #[cfg(unix)]
+        {
+            (self.mode & 0o170000) == 0o060000
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+    pub fn is_char_device(&self) -> bool {
+        #[cfg(unix)]
+        {
+            (self.mode & 0o170000) == 0o020000
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+    pub fn is_fifo(&self) -> bool {
+        #[cfg(unix)]
+        {
+            (self.mode & 0o170000) == 0o010000
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+    pub fn is_socket(&self) -> bool {
+        #[cfg(unix)]
+        {
+            (self.mode & 0o170000) == 0o140000
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
     pub fn readonly(&self) -> bool {
         #[cfg(unix)]
         {
@@ -448,6 +488,95 @@ impl File {
 
     pub fn as_raw_fd(&self) -> i32 {
         self.handle as i32
+    }
+
+    pub fn try_clone(&self) -> io::Result<Self> {
+        #[cfg(unix)]
+        {
+            unsafe extern "C" {
+                fn dup(oldfd: i32) -> i32;
+            }
+            let new_fd = unsafe { dup(self.handle as i32) };
+            if new_fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(File {
+                handle: new_fd as u64,
+            })
+        }
+        #[cfg(windows)]
+        {
+            // Simplified: we'd need DuplicateHandle, but let's just use stubs for now if complicated.
+            // Actually let's just return unimplemented for windows if we don't want to bring in winapi.
+            Err(io::Error::other("try_clone not implemented on Windows yet"))
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            Err(io::Error::other("try_clone not implemented on WASM"))
+        }
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        #[cfg(unix)]
+        {
+            unsafe extern "C" {
+                fn isatty(fd: i32) -> i32;
+            }
+            unsafe { isatty(self.handle as i32) != 0 }
+        }
+        #[cfg(windows)]
+        {
+            // Stub for now.
+            false
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            false
+        }
+    }
+}
+
+impl io::Write for File {
+    fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+        #[cfg(unix)]
+        {
+            unsafe extern "C" {
+                fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+            }
+            let res = unsafe { write(self.handle as i32, _buf.as_ptr(), _buf.len()) };
+            if res < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(res as usize)
+        }
+        #[cfg(not(unix))]
+        {
+            Err(io::Error::other("sync write not implemented"))
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl io::Read for File {
+    fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+        #[cfg(unix)]
+        {
+            unsafe extern "C" {
+                fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
+            }
+            let res = unsafe { read(self.handle as i32, _buf.as_mut_ptr(), _buf.len()) };
+            if res < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(res as usize)
+        }
+        #[cfg(not(unix))]
+        {
+            Err(io::Error::other("sync read not implemented"))
+        }
     }
 }
 
