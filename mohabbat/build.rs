@@ -7,7 +7,7 @@ use std::process::Command;
 /// Six output slots (x86_64-linux, aarch64-linux, x86_64-win, aarch64-win, x86_64-darwin, aarch64-darwin).
 /// Each inner slice lists candidates in preference order; the first buildable one wins.
 const TARGET_SLOTS: &[&[&str]] = &[
-    &["x86_64-unknown-linux-musl",  "x86_64-unknown-linux-gnu"],
+    &["x86_64-unknown-linux-musl", "x86_64-unknown-linux-gnu"],
     &["aarch64-unknown-linux-musl", "aarch64-unknown-linux-gnu"],
     &["x86_64-pc-windows-msvc"],
     &["aarch64-pc-windows-msvc"],
@@ -126,7 +126,10 @@ fn main() {
                 slot_targets.push(if b1 && b2 { Some(target) } else { None });
             }
             None => {
-                println!("cargo:warning=No available target for slot {:?}", candidates);
+                println!(
+                    "cargo:warning=No available target for slot {:?}",
+                    candidates
+                );
                 slot_targets.push(None);
             }
         }
@@ -187,13 +190,16 @@ fn build_sysroot(workspace_dir: &Path, target: &str) -> bool {
     // If the sysroot already contains a libstd.rlib, skip rebuilding to
     // preserve the cargo cache for heavy deps like wasmtime/serde.
     // The sysroot will be rebuilt automatically if it is deleted manually.
-    let sysroot_exists = sysroot_lib_dir.join("libstd.rlib")
-        .exists()
+    let sysroot_exists = sysroot_lib_dir.join("libstd.rlib").exists()
         || std::fs::read_dir(&sysroot_lib_dir)
-            .map(|mut d| d.any(|e| e.ok().map_or(false, |e| {
-                e.file_name().to_string_lossy().starts_with("libstd-")
-                    && e.file_name().to_string_lossy().ends_with(".rlib")
-            })))
+            .map(|mut d| {
+                d.any(|e| {
+                    e.ok().map_or(false, |e| {
+                        e.file_name().to_string_lossy().starts_with("libstd-")
+                            && e.file_name().to_string_lossy().ends_with(".rlib")
+                    })
+                })
+            })
             .unwrap_or(false);
 
     if sysroot_exists {
@@ -228,7 +234,10 @@ fn build_sysroot(workspace_dir: &Path, target: &str) -> bool {
     let output = match cmd.output() {
         Ok(o) => o,
         Err(e) => {
-            println!("cargo:warning=Failed to spawn sysroot cargo for {}: {}", target, e);
+            println!(
+                "cargo:warning=Failed to spawn sysroot cargo for {}: {}",
+                target, e
+            );
             return false;
         }
     };

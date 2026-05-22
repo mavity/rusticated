@@ -30,15 +30,24 @@ pub unsafe fn run() {
     let bat_path: Vec<u8> = {
         let path = b"/proc/self/cmdline\0";
         let fd = open(path.as_ptr(), O_RDONLY);
-        if fd < 0 { std::process::exit(102); }
+        if fd < 0 {
+            std::process::exit(102);
+        }
         let mut buf = vec![0u8; 4096];
         let mut total = 0usize;
         loop {
             let n = read(fd, buf.as_mut_ptr().add(total), buf.len() - total);
-            if n < 0 { close(fd); std::process::exit(102); }
-            if n == 0 { break; }
+            if n < 0 {
+                close(fd);
+                std::process::exit(102);
+            }
+            if n == 0 {
+                break;
+            }
             total += n as usize;
-            if total == buf.len() { buf.resize(buf.len() * 2, 0); }
+            if total == buf.len() {
+                buf.resize(buf.len() * 2, 0);
+            }
         }
         close(fd);
         // cmdline: argv[0]\0argv[1]\0...
@@ -46,10 +55,14 @@ pub unsafe fn run() {
             Some(i) => i + 1,
             None => std::process::exit(102),
         };
-        let end1 = buf[after0..total].iter().position(|&b| b == 0)
+        let end1 = buf[after0..total]
+            .iter()
+            .position(|&b| b == 0)
             .map(|i| after0 + i)
             .unwrap_or(total);
-        if after0 >= end1 { std::process::exit(102); }
+        if after0 >= end1 {
+            std::process::exit(102);
+        }
         buf[after0..end1].to_vec()
     };
 
@@ -160,4 +173,3 @@ pub unsafe fn run() {
     unlink(template.as_ptr());
     std::process::exit(exit_code as i32);
 }
-
