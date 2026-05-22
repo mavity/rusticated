@@ -1,4 +1,4 @@
-﻿#![allow(clippy::missing_safety_doc)]
+#![allow(clippy::missing_safety_doc)]
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmod(x: f64, y: f64) -> f64 {
@@ -8,6 +8,12 @@ pub unsafe extern "C" fn fmod(x: f64, y: f64) -> f64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _CxxThrowException(_: *mut u8, _: *mut u8) -> ! {
     core::panic!("_CxxThrowException called (C++ EH not supported without std)");
+}
+
+#[cfg(target_arch = "x86_64")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __CxxFrameHandler3() -> i32 {
+    0
 }
 
 #[cfg(test)]
@@ -27,7 +33,11 @@ pub unsafe extern "C" fn memset(dest: *mut u8, c: i32, n: core::primitive::usize
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: core::primitive::usize) -> *mut u8 {
+pub unsafe extern "C" fn memcpy(
+    dest: *mut u8,
+    src: *const u8,
+    n: core::primitive::usize,
+) -> *mut u8 {
     unsafe {
         let mut i = 0;
         while i < n {
@@ -55,7 +65,11 @@ pub unsafe extern "C" fn memcmp(s1: *const u8, s2: *const u8, n: core::primitive
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: core::primitive::usize) -> *mut u8 {
+pub unsafe extern "C" fn memmove(
+    dest: *mut u8,
+    src: *const u8,
+    n: core::primitive::usize,
+) -> *mut u8 {
     unsafe {
         if src < dest as *const u8 {
             let mut i = n;
@@ -84,4 +98,3 @@ pub unsafe extern "C" fn strlen(s: *const u8) -> core::primitive::usize {
         n
     }
 }
-

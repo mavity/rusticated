@@ -1,2 +1,2 @@
 pub use alloc::collections::*;
-pub use hashbrown::{hash_map, HashMap, HashSet};
+pub use hashbrown::{HashMap, HashSet, hash_map};

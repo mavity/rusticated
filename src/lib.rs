@@ -1,4 +1,4 @@
-﻿#![warn(missing_docs)]
+#![warn(missing_docs)]
 //! Fast, standard-library-shaped async platform layer for brush-async
 
 #![no_std]
@@ -127,7 +127,7 @@ pub mod prelude {
         pub use alloc::string::{String, ToString};
         pub use alloc::vec::Vec;
         // Macros
-        pub use crate::{eprint, eprintln, format, print, println, thread_local, spawn};
+        pub use crate::{eprint, eprintln, format, print, println, spawn, thread_local};
         pub use alloc::vec;
         pub use core::{
             assert, assert_eq, assert_ne, debug_assert, debug_assert_eq, debug_assert_ne, matches,
@@ -161,7 +161,6 @@ pub mod prelude {
 
 /// Shared ABI definitions
 pub mod abi;
-
 
 #[cfg(all(feature = "panic-handler", not(test)))]
 #[panic_handler]
@@ -310,9 +309,7 @@ struct SystemAllocator;
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __rust_alloc(size: usize, align: usize) -> *mut u8 {
     use core::alloc::GlobalAlloc;
-    unsafe {
-        ALLOCATOR.alloc(core::alloc::Layout::from_size_align_unchecked(size, align))
-    }
+    unsafe { ALLOCATOR.alloc(core::alloc::Layout::from_size_align_unchecked(size, align)) }
 }
 
 #[cfg(all(
@@ -324,7 +321,10 @@ pub unsafe extern "C" fn __rust_alloc(size: usize, align: usize) -> *mut u8 {
 pub unsafe extern "C" fn __rust_dealloc(ptr: *mut u8, size: usize, align: usize) {
     use core::alloc::GlobalAlloc;
     unsafe {
-        ALLOCATOR.dealloc(ptr, core::alloc::Layout::from_size_align_unchecked(size, align))
+        ALLOCATOR.dealloc(
+            ptr,
+            core::alloc::Layout::from_size_align_unchecked(size, align),
+        )
     }
 }
 
@@ -334,10 +334,19 @@ pub unsafe extern "C" fn __rust_dealloc(ptr: *mut u8, size: usize, align: usize)
 ))]
 #[allow(missing_docs)]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __rust_realloc(ptr: *mut u8, old_size: usize, align: usize, new_size: usize) -> *mut u8 {
+pub unsafe extern "C" fn __rust_realloc(
+    ptr: *mut u8,
+    old_size: usize,
+    align: usize,
+    new_size: usize,
+) -> *mut u8 {
     use core::alloc::GlobalAlloc;
     unsafe {
-        ALLOCATOR.realloc(ptr, core::alloc::Layout::from_size_align_unchecked(old_size, align), new_size)
+        ALLOCATOR.realloc(
+            ptr,
+            core::alloc::Layout::from_size_align_unchecked(old_size, align),
+            new_size,
+        )
     }
 }
 
@@ -349,9 +358,7 @@ pub unsafe extern "C" fn __rust_realloc(ptr: *mut u8, old_size: usize, align: us
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __rust_alloc_zeroed(size: usize, align: usize) -> *mut u8 {
     use core::alloc::GlobalAlloc;
-    unsafe {
-        ALLOCATOR.alloc_zeroed(core::alloc::Layout::from_size_align_unchecked(size, align))
-    }
+    unsafe { ALLOCATOR.alloc_zeroed(core::alloc::Layout::from_size_align_unchecked(size, align)) }
 }
 
 #[cfg(all(
@@ -415,7 +422,7 @@ static ALLOCATOR: SystemAllocator = SystemAllocator;
 #[global_allocator]
 static ALLOCATOR: dlmalloc::GlobalDlmalloc = dlmalloc::GlobalDlmalloc;
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "std")))]
 #[alloc_error_handler]
 fn oom(_: core::alloc::Layout) -> ! {
     panic!("out of memory");
@@ -589,6 +596,3 @@ pub mod vec {
 pub use crate::rt::executor::{JoinHandle, spawn, spawn_blocking};
 
 pub use crate::error::{Result, SystemError as Error};
-
-
-

@@ -6,21 +6,30 @@ use ::std::fs;
 use ::std::path::PathBuf;
 
 fn main() {
-    let out_dir = env::var_os("OUT_DIR").map(PathBuf::from).expect("OUT_DIR not set");
+    let out_dir = env::var_os("OUT_DIR")
+        .map(PathBuf::from)
+        .expect("OUT_DIR not set");
     let target = env::var("TARGET").unwrap_or_else(|_| env::var("HOST").expect("HOST not set"));
     let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
 
-    let target_dir = env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| {
+    let target_dir = if let Some(dir) = env::var_os("CARGO_TARGET_DIR") {
+        PathBuf::from(dir)
+    } else {
         let mut dir = out_dir.clone();
         while dir.file_name().map(|n| n != "target").unwrap_or(true) {
-            if !dir.pop() { break; }
+            if !dir.pop() {
+                break;
+            }
+        }
+        if dir
+            .file_name()
+            .map(|n| n != "target")
+            .unwrap_or(true)
+        {
+            panic!("Could not locate Cargo target directory from OUT_DIR");
         }
         dir
-    });
-
-    if target_dir.file_name().map(|n| n != "target").unwrap_or(true) {
-        panic!("Could not locate Cargo target directory from OUT_DIR");
-    }
+    };
 
     let spec_dir = target_dir.join("rusticated-spec");
     fs::create_dir_all(&spec_dir).expect("Failed to create spec dir");
@@ -37,13 +46,18 @@ fn main() {
         .expect("Failed to invoke rustc to get target spec json");
 
     if !output.status.success() {
-        panic!("rustc target-spec-json failed: {}", String::from_utf8_lossy(&output.stderr));
+        panic!(
+            "rustc target-spec-json failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
-    let mut spec: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .expect("Failed to parse rustc target-spec-json");
+    let mut spec: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("Failed to parse rustc target-spec-json");
 
-    let obj = spec.as_object_mut().expect("Expected target spec to be a JSON object");
+    let obj = spec
+        .as_object_mut()
+        .expect("Expected target spec to be a JSON object");
 
     // Enforce our basic sysroot properties
     obj.insert("panic-strategy".to_string(), serde_json::json!("abort"));
@@ -74,9 +88,10 @@ fn main() {
             ] // Also catch msvc-lld which rustc sometimes outputs
         });
         obj.insert("pre-link-args".to_string(), pre_link_args);
-    } 
+    }
 
-    let spec_json = serde_json::to_string_pretty(&spec).expect("Failed to serialize modified target spec");
+    let spec_json =
+        serde_json::to_string_pretty(&spec).expect("Failed to serialize modified target spec");
 
     let arch = target.split('-').next().unwrap_or(&target);
     let custom_target_name = format!("{}-rusticated", arch);
@@ -86,14 +101,18 @@ fn main() {
     fs::write(&json_path, spec_json).expect("Failed to write target json");
 
     // Generate a config.toml that points to this target json
-    let config_toml = format!(r#"[build]
+    let config_toml = format!(
+        r#"[build]
 target = "{}"
 
 [unstable]
 build-std = ["core", "alloc", "compiler_builtins"]
 build-std-features = ["compiler-builtins-mem"]
 json-target-spec = true
-"#, json_path.display()).replace('\\', "/");
+"#,
+        json_path.display()
+    )
+    .replace('\\', "/");
 
     fs::write(spec_dir.join("config.toml"), config_toml).expect("Failed to write config.toml");
 

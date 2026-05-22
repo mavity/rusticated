@@ -1,7 +1,7 @@
 //! Synchronisation primitives for `#![no_std]` environments.
 
-pub use core::sync::*;
 pub use alloc::sync::Arc;
+pub use core::sync::*;
 pub use spin::lazy::Lazy as LazyLock;
 pub use spin::mutex::SpinMutex;
 pub use spin::{Mutex, RwLock};

@@ -3,13 +3,20 @@
 //! [`cursor_position`] across all platforms.
 
 #[cfg(unix)]
-pub use unix_tty::{Tty, cursor_position, disable_raw_mode, enable_raw_mode, get_size, set_mode, stdin, stdout};
+pub use unix_tty::{
+    Tty, cursor_position, disable_raw_mode, enable_raw_mode, get_size, set_mode, stdin, stdout,
+};
 
 #[cfg(windows)]
-pub use windows_tty::{Tty, cursor_position, disable_raw_mode, enable_raw_mode, get_size, set_mode, stdin, stdout};
+pub use windows_tty::{
+    Tty, cursor_position, disable_raw_mode, enable_raw_mode, get_size, set_mode, stdin, stdout,
+};
 
 #[cfg(target_family = "wasm")]
-pub use wasm_tty::{Tty, cursor_position, disable_raw_mode, enable_raw_mode, get_size, set_mode, stdin, stdout};
+pub use wasm_tty::{
+    Tty, cursor_position, disable_raw_mode, enable_raw_mode, get_size, set_mode, stderr, stdin,
+    stdout,
+};
 
 /// Returns `true` if standard input is a terminal.
 pub fn is_stdin_a_tty() -> bool {
@@ -117,6 +124,7 @@ mod unix_tty {
         /// c_cflag: parity enable.
         pub const PARENB: u32 = 0x0000_0100;
         /// c_cflag: mark parity errors.
+        #[allow(dead_code)]
         pub const PARMRK: u32 = 0x0000_0008;
         /// c_iflag: ignore break condition.
         pub const IGNBRK: u32 = 0x0000_0001;
@@ -125,6 +133,7 @@ mod unix_tty {
         /// c_iflag: mark parity and framing errors.
         pub const PARMRK_IFLAG: u32 = 0x0000_0008;
         /// c_iflag: enable input parity checking.
+        #[allow(dead_code)]
         pub const INPCK: u32 = 0x0000_0010;
         /// c_iflag: translate NL to CR on input.
         pub const INLCR: u32 = 0x0000_0080;
@@ -167,10 +176,12 @@ mod unix_tty {
         pub const CSIZE: u32 = 0x0000_0300;
         pub const CS8: u32 = 0x0000_0300;
         pub const PARENB: u32 = 0x0000_1000;
+        #[allow(dead_code)]
         pub const PARMRK: u32 = 0x0000_0008;
         pub const IGNBRK: u32 = 0x0000_0001;
         pub const BRKINT: u32 = 0x0000_0002;
         pub const PARMRK_IFLAG: u32 = 0x0000_0008;
+        #[allow(dead_code)]
         pub const INPCK: u32 = 0x0000_0010;
         pub const INLCR: u32 = 0x0000_0040;
         pub const IGNCR: u32 = 0x0000_0080;
@@ -557,8 +568,8 @@ mod windows_tty {
         SAVED_IN_MODE.store(in_mode, Ordering::Relaxed);
         SAVED_OUT_MODE.store(out_mode, Ordering::Relaxed);
 
-        let new_in = (in_mode & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT))
-            | ENABLE_VIRTUAL_TERMINAL_INPUT;
+        let new_in =
+            (in_mode & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT)) | ENABLE_VIRTUAL_TERMINAL_INPUT;
         let new_out = out_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
 
         if unsafe { SetConsoleMode(stdin_h, new_in) } == 0 {
@@ -698,7 +709,8 @@ mod windows_tty {
             if consume_ready(token) {
                 if let Some(mut state) = self.state.take() {
                     // Reclaim I/O count
-                    crate::rt::windows::outstanding_io().set(crate::rt::windows::outstanding_io().get() - 1);
+                    crate::rt::windows::outstanding_io()
+                        .set(crate::rt::windows::outstanding_io().get() - 1);
 
                     let n = state.bytes_read.load(Ordering::Acquire) as usize;
                     // SAFETY: the thread has finished (WaitForSingleObject in
@@ -767,7 +779,8 @@ mod windows_tty {
                 }
 
                 // Track live I/O
-                crate::rt::windows::outstanding_io().set(crate::rt::windows::outstanding_io().get() + 1);
+                crate::rt::windows::outstanding_io()
+                    .set(crate::rt::windows::outstanding_io().get() + 1);
                 self.registered = true;
             }
 
@@ -795,7 +808,8 @@ mod windows_tty {
                     unsafe { WaitForSingleObject(th, 0) };
 
                     unsafe { CloseHandle(th) };
-                    crate::rt::windows::outstanding_io().set(crate::rt::windows::outstanding_io().get() - 1);
+                    crate::rt::windows::outstanding_io()
+                        .set(crate::rt::windows::outstanding_io().get() - 1);
                 }
             }
         }
@@ -824,7 +838,9 @@ mod windows_tty {
 
     impl crate::io::Read for Tty {
         fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-            Err(io::Error::other("sync read not implemented for Windows Tty"))
+            Err(io::Error::other(
+                "sync read not implemented for Windows Tty",
+            ))
         }
     }
 
@@ -1085,6 +1101,11 @@ mod wasm_tty {
     /// Return an async handle to the host's standard output (handle `1`).
     pub fn stdout() -> Tty {
         Tty { handle: 1 }
+    }
+
+    /// Return an async handle to the host's standard error (handle `2`).
+    pub fn stderr() -> Tty {
+        Tty { handle: 2 }
     }
 
     /// Query the terminal size for `handle` via the WASM host.

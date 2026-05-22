@@ -380,10 +380,9 @@ fn poll_step_internal(timeout: Option<Option<Duration>>) -> io::Result<PollStatu
 
     #[cfg(windows)]
     let live_io = super::windows::outstanding_io().get();
-    #[cfg(not(windows))]
-    #[cfg(target_os = "linux")]
+    #[cfg(all(not(windows), target_os = "linux"))]
     let live_io = with_driver(|d| d.outstanding_io()).unwrap_or(0);
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     let live_io = 0;
 
     let expired = crate::rt::timers::wake_expired();
