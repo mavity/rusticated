@@ -69,7 +69,6 @@ pub fn id() -> ProcessId {
         clippy::undocumented_unsafe_blocks,
     )
 )]
-
 #[cfg(not(target_family = "wasm"))]
 mod native_process {
     use crate::io;
@@ -663,7 +662,7 @@ mod native_process {
 }
 
 #[cfg(not(target_family = "wasm"))]
-pub use native_process::{Child, ChildExitStatus, ExitStatus, Command, Stdio};
+pub use native_process::{Child, ChildExitStatus, Command, ExitStatus, Stdio};
 
 /// Terminate the current process immediately with the given exit code.
 ///
@@ -802,6 +801,12 @@ impl Command {
         for arg in args {
             self.args.push(arg.into());
         }
+        self
+    }
+
+    /// Set an environment variable for the child process.
+    pub fn env<K: Into<String>, V: Into<String>>(&mut self, key: K, val: V) -> &mut Self {
+        self.env.push((key.into(), val.into()));
         self
     }
 

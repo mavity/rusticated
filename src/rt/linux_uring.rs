@@ -1,6 +1,8 @@
+#![cfg(target_os = "linux")]
+
+use super::linux_state::OpState;
 use crate::io;
 use alloc::rc::Rc;
-use super::linux_state::OpState;
 
 const SYS_IO_URING_SETUP: usize = 425;
 const SYS_IO_URING_ENTER: usize = 426;
@@ -48,8 +50,7 @@ impl UringDriver {
     pub(crate) fn submit_write(&mut self, _fd: i32, _state: Rc<OpState>) -> io::Result<()> {
         Ok(())
     }
-    pub fn register_waker(&mut self, _token: u64, _waker: core::task::Waker) {
-    }
+    pub fn register_waker(&mut self, _token: u64, _waker: core::task::Waker) {}
     pub fn register_read(&mut self, _fd: i32) -> io::Result<u64> {
         Ok(0)
     }
@@ -59,5 +60,7 @@ impl UringDriver {
 }
 
 impl UringDriver {
-    pub fn outstanding_io(&self) -> usize { 0 }
+    pub fn outstanding_io(&self) -> usize {
+        0
+    }
 }

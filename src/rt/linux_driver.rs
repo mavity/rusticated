@@ -1,6 +1,8 @@
+#![cfg(target_os = "linux")]
+
 use super::linux_state::OpState;
-use alloc::rc::Rc;
 use crate::io;
+use alloc::rc::Rc;
 
 pub(crate) enum Driver {
     Uring(super::linux_uring::UringDriver),

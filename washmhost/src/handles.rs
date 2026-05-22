@@ -6,6 +6,7 @@ use std::sync::mpsc;
 pub enum HandleKind {
     Fd(i32),
     File(File),
+    Process(std::process::Child),
 }
 
 pub struct StatInfo {
@@ -88,6 +89,7 @@ pub struct HostState {
     pub stdin_rx: mpsc::Receiver<Vec<u8>>,
     pub stdin_buf: Vec<u8>,
     pub stdin_pending: Option<PendingOp>,
+    pub child_wait_pending: Vec<(u32, u64)>,
 }
 
 impl HostState {
@@ -124,6 +126,7 @@ impl HostState {
             stdin_rx,
             stdin_buf: Vec::new(),
             stdin_pending: None,
+            child_wait_pending: Vec::new(),
         })
     }
 
@@ -145,6 +148,7 @@ impl HostState {
         match self.handles.get(&handle)? {
             HandleKind::Fd(fd) => Some(*fd),
             HandleKind::File(_) => Some(-1),
+            HandleKind::Process(_) => None,
         }
     }
 

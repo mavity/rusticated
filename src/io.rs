@@ -454,13 +454,17 @@ impl<R: crate::traits::Read> BufReader<R> {
             }
             if let Some(i) = available.iter().position(|&b| b == b'\n') {
                 let bytes = &available[..=i];
-                buf.push_str(core::str::from_utf8(bytes).map_err(|_| Error::from(ErrorKind::Other))?);
+                buf.push_str(
+                    core::str::from_utf8(bytes).map_err(|_| Error::from(ErrorKind::Other))?,
+                );
                 self.pos += i + 1;
                 total += i + 1;
                 break;
             } else {
                 let n = available.len();
-                buf.push_str(core::str::from_utf8(available).map_err(|_| Error::from(ErrorKind::Other))?);
+                buf.push_str(
+                    core::str::from_utf8(available).map_err(|_| Error::from(ErrorKind::Other))?,
+                );
                 self.pos += n;
                 total += n;
             }

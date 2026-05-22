@@ -1,4 +1,3 @@
-
 #![windows_subsystem = "console"]
 
 mod decompress;
@@ -7,7 +6,9 @@ mod temp_check;
 #[cfg(windows)]
 fn print_err(msg: &str) {
     unsafe {
-        let h_err = windows_sys::Win32::System::Console::GetStdHandle(windows_sys::Win32::System::Console::STD_ERROR_HANDLE);
+        let h_err = windows_sys::Win32::System::Console::GetStdHandle(
+            windows_sys::Win32::System::Console::STD_ERROR_HANDLE,
+        );
         if h_err != core::ptr::null_mut() && h_err as isize != -1 {
             let mut written = 0;
             windows_sys::Win32::Storage::FileSystem::WriteFile(
@@ -48,7 +49,7 @@ pub struct MohabbatMeta {
     unsafe(link_section = ".mohabbat_meta")
 )]
 #[used]
-pub static META: MohabbatMeta = MohabbatMeta {
+pub static mut META: MohabbatMeta = MohabbatMeta {
     magic: *b"MOHABBAT",
     pool_len: 0,
     washmhost_offset: 0,
@@ -66,8 +67,12 @@ mod linux;
 
 fn main() {
     #[cfg(windows)]
-    unsafe { windows::run() }
-    
+    unsafe {
+        windows::run()
+    }
+
     #[cfg(target_os = "linux")]
-    unsafe { linux::run() }
+    unsafe {
+        linux::run()
+    }
 }

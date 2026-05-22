@@ -1,5 +1,7 @@
-use alloc::vec::Vec;
+#![cfg(target_os = "linux")]
+
 use alloc::rc::Rc;
+use alloc::vec::Vec;
 use core::cell::{RefCell, UnsafeCell};
 use core::task::Waker;
 

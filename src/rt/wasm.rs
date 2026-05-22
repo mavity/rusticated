@@ -133,9 +133,11 @@ struct MainDoneStorage(UnsafeCell<OnceCell<()>>);
 
 unsafe impl Sync for MainDoneStorage {}
 
-static COMPLETION_REGISTRY_STORAGE: CompletionRegistryStorage = CompletionRegistryStorage(UnsafeCell::new(None));
+static COMPLETION_REGISTRY_STORAGE: CompletionRegistryStorage =
+    CompletionRegistryStorage(UnsafeCell::new(None));
 static MAIN_FUTURE_STORAGE: MainFutureStorage = MainFutureStorage(UnsafeCell::new(None));
-static INITIALIZED_STORAGE: InitializedStorage = InitializedStorage(UnsafeCell::new(OnceCell::new()));
+static INITIALIZED_STORAGE: InitializedStorage =
+    InitializedStorage(UnsafeCell::new(OnceCell::new()));
 static MAIN_DONE_STORAGE: MainDoneStorage = MainDoneStorage(UnsafeCell::new(OnceCell::new()));
 
 fn completion_registry() -> &'static RefCell<Vec<(Rc<OpState>, Waker)>> {

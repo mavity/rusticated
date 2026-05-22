@@ -77,7 +77,9 @@ impl EpollDriver {
         })
     }
 
-    pub fn outstanding_io(&self) -> usize { self.pending_ops.len() }
+    pub fn outstanding_io(&self) -> usize {
+        self.pending_ops.len()
+    }
     fn do_register(&mut self, fd: i32, events: u32, token: u64) -> io::Result<()> {
         let mut ev = EpollEvent {
             events: events | EPOLLONESHOT,
@@ -132,7 +134,8 @@ impl EpollDriver {
         let mut evbuf = [EpollEvent { events: 0, data: 0 }; 64];
         let timeout = timeout_ms.map(|t| t as i32).unwrap_or(-1);
         let n = loop {
-            let n = unsafe { epoll_wait(self.epfd, evbuf.as_mut_ptr(), evbuf.len() as i32, timeout) };
+            let n =
+                unsafe { epoll_wait(self.epfd, evbuf.as_mut_ptr(), evbuf.len() as i32, timeout) };
             if n >= 0 {
                 break n;
             }
@@ -148,33 +151,53 @@ impl EpollDriver {
             if let Some(op) = self.pending_ops.remove(&token) {
                 match op {
                     PendingOp::Read(fd, state) => {
-                        unsafe extern "C" { fn read(fd: i32, buf: *mut u8, count: usize) -> isize; }
+                        unsafe extern "C" {
+                            fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
+                        }
                         let buf_opt = unsafe { &mut *state.buffer.get() }.take();
                         if let Some(mut buf) = buf_opt {
                             let res = unsafe { read(fd, buf.as_mut_ptr(), buf.capacity()) };
                             if res < 0 {
-                                *state.result.borrow_mut() = Some((crate::io::Error::last_os_error().raw_os_error().unwrap_or(-1), 0));
+                                *state.result.borrow_mut() = Some((
+                                    crate::io::Error::last_os_error()
+                                        .raw_os_error()
+                                        .unwrap_or(-1),
+                                    0,
+                                ));
                             } else {
-                                unsafe { buf.set_len(res as usize); }
+                                unsafe {
+                                    buf.set_len(res as usize);
+                                }
                                 *state.result.borrow_mut() = Some((0, res as u32));
                             }
                             unsafe { &mut *state.buffer.get() }.replace(buf);
                         }
-                        if let Some(w) = state.waker.borrow().as_ref() { w.wake_by_ref(); }
+                        if let Some(w) = state.waker.borrow().as_ref() {
+                            w.wake_by_ref();
+                        }
                     }
                     PendingOp::Write(fd, state) => {
-                        unsafe extern "C" { fn write(fd: i32, buf: *const u8, count: usize) -> isize; }
+                        unsafe extern "C" {
+                            fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+                        }
                         let buf_opt = unsafe { &mut *state.buffer.get() }.take();
                         if let Some(buf) = buf_opt {
                             let res = unsafe { write(fd, buf.as_ptr(), buf.len()) };
                             if res < 0 {
-                                *state.result.borrow_mut() = Some((crate::io::Error::last_os_error().raw_os_error().unwrap_or(-1), 0));
+                                *state.result.borrow_mut() = Some((
+                                    crate::io::Error::last_os_error()
+                                        .raw_os_error()
+                                        .unwrap_or(-1),
+                                    0,
+                                ));
                             } else {
                                 *state.result.borrow_mut() = Some((0, res as u32));
                             }
                             unsafe { &mut *state.buffer.get() }.replace(buf);
                         }
-                        if let Some(w) = state.waker.borrow().as_ref() { w.wake_by_ref(); }
+                        if let Some(w) = state.waker.borrow().as_ref() {
+                            w.wake_by_ref();
+                        }
                     }
                 }
             } else {
@@ -184,7 +207,7 @@ impl EpollDriver {
                 }
             }
         }
-        
+
         crate::rt::ready::consume_ready(0); // Dummy consume
 
         Ok(n > 0)
@@ -295,14 +318,23 @@ impl Future for WaitWritable {
 
 impl EpollDriver {
     pub(crate) fn submit_read(&mut self, fd: i32, state: Rc<OpState>) -> crate::io::Result<()> {
-        unsafe extern "C" { fn read(fd: i32, buf: *mut u8, count: usize) -> isize; }
+        unsafe extern "C" {
+            fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
+        }
         let buf_opt = unsafe { &mut *state.buffer.get() }.take();
         if let Some(mut buf) = buf_opt {
             let res = unsafe { read(fd, buf.as_mut_ptr(), buf.capacity()) };
             if res < 0 {
-                *state.result.borrow_mut() = Some((crate::io::Error::last_os_error().raw_os_error().unwrap_or(-1), 0));
+                *state.result.borrow_mut() = Some((
+                    crate::io::Error::last_os_error()
+                        .raw_os_error()
+                        .unwrap_or(-1),
+                    0,
+                ));
             } else {
-                unsafe { buf.set_len(res as usize); }
+                unsafe {
+                    buf.set_len(res as usize);
+                }
                 *state.result.borrow_mut() = Some((0, res as u32));
             }
             unsafe { &mut *state.buffer.get() }.replace(buf);
@@ -313,12 +345,19 @@ impl EpollDriver {
         Ok(())
     }
     pub(crate) fn submit_write(&mut self, fd: i32, state: Rc<OpState>) -> crate::io::Result<()> {
-        unsafe extern "C" { fn write(fd: i32, buf: *const u8, count: usize) -> isize; }
+        unsafe extern "C" {
+            fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+        }
         let buf_opt = unsafe { &mut *state.buffer.get() }.take();
         if let Some(buf) = buf_opt {
             let res = unsafe { write(fd, buf.as_ptr(), buf.len()) };
             if res < 0 {
-                *state.result.borrow_mut() = Some((crate::io::Error::last_os_error().raw_os_error().unwrap_or(-1), 0));
+                *state.result.borrow_mut() = Some((
+                    crate::io::Error::last_os_error()
+                        .raw_os_error()
+                        .unwrap_or(-1),
+                    0,
+                ));
             } else {
                 *state.result.borrow_mut() = Some((0, res as u32));
             }

@@ -193,8 +193,12 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                 if let Some(HandleKind::File(f)) = host.handles.get_mut(&handle) {
                     use std::io::Read;
                     match f.read(buf) {
-                        Ok(n) => read = n,
-                        Err(e) => error = e.raw_os_error().unwrap_or(5) as u32,
+                        Ok(n) => {
+                            read = n;
+                        },
+                        Err(e) => {
+                            error = e.raw_os_error().unwrap_or(5) as u32;
+                        },
                     }
                 } else {
                     anyhow::bail!("read: invalid handle {}", handle);
@@ -271,6 +275,9 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                             Err(e) => error = e.raw_os_error().unwrap_or(5) as u32, // EIO
                         }
                     }
+                    HandleKind::Process(_) => {
+                        error = 9; // EBADF — cannot write to a process handle
+                    }
                 }
             } else {
                 anyhow::bail!("write: invalid handle {}", handle);
@@ -316,6 +323,8 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             // Default to read if neither read nor write is set.
             let do_read = read_flag || (!write_flag && !create);
             let do_write = write_flag || create;
+            {
+            }
             let f = std::fs::OpenOptions::new()
                 .read(do_read)
                 .write(do_write)
@@ -587,32 +596,92 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         },
     )?;
 
-    // process_spawn(ov, cfg_ptr, cfg_len) — ENOSYS
+    // process_spawn(ov, cfg_ptr, cfg_len)
+    // Config format: program\0arg1\0arg2\0\0KEY=val\0KEY2=val2\0\0
     linker.func_wrap(
         "env",
         "process_spawn",
         |mut caller: Caller<'_, HostState>,
          ov_ptr: u32,
-         _cfg_ptr: u32,
-         _cfg_len: u32|
+         cfg_ptr: u32,
+         cfg_len: u32|
          -> anyhow::Result<()> {
             let mem = get_memory(&mut caller)?;
-            let data = mem.data_mut(&mut caller);
-            write_overlapped(data, ov_ptr, libc::ENOSYS as u32, 0, 0)
-        },
-    )?;
+            let (data, host) = mem.data_and_store_mut(&mut caller);
+            let cfg = guest_slice(data, cfg_ptr, cfg_len)?.to_vec();
 
-    // process_wait(ov, process_handle) — ENOSYS
+            // Parse: program\0arg1\0arg2\0\0KEY=val\0\0
+            let mut iter = cfg.split(|&b| b == 0);
+            let program = match iter.next() {
+                Some(p) if !p.is_empty() => {
+                    match std::str::from_utf8(p) {
+                        Ok(s) => s.to_string(),
+                        Err(_) => {
+                            return write_overlapped(data, ov_ptr, libc::EINVAL as u32, 0, 0);
+                        }
+                    }
+                }
+                _ => {
+                    return write_overlapped(data, ov_ptr, libc::EINVAL as u32, 0, 0);
+                }
+            };
+
+            let mut args: Vec<String> = Vec::new();
+            let mut env_vars: Vec<(String, String)> = Vec::new();
+            let mut in_env = false;
+            for part in iter {
+                if part.is_empty() {
+                    if !in_env {
+                        in_env = true;
+                    } else {
+                        break;
+                    }
+                    continue;
+                }
+                if in_env {
+                    if let Ok(kv) = std::str::from_utf8(part) {
+                        if let Some(eq) = kv.find('=') {
+                            env_vars.push((kv[..eq].to_string(), kv[eq + 1..].to_string()));
+                        }
+                    }
+                } else if let Ok(arg) = std::str::from_utf8(part) {
+                    args.push(arg.to_string());
+                }
+            }
+
+            let mut cmd = std::process::Command::new(&program);
+            cmd.args(&args);
+            for (k, v) in env_vars {
+                cmd.env(k, v);
+            }
+
+            match cmd.spawn() {
+                Ok(child) => {
+                    let handle = host.alloc_handle(HandleKind::Process(child));
+                    write_overlapped(data, ov_ptr, 0, 0, handle)
+                }
+                Err(e) => {
+                    let err = e.raw_os_error().unwrap_or(libc::ENOSYS as i32) as u32;
+                    write_overlapped(data, ov_ptr, err, 0, 0)
+                }
+            }
+        },
+    )?;;
+
+    // process_wait(ov, process_handle)
+    // Registers a pending wait; completion is handled in poll_completions.
     linker.func_wrap(
         "env",
         "process_wait",
         |mut caller: Caller<'_, HostState>,
          ov_ptr: u32,
-         _process_handle: u64|
+         process_handle: u64|
          -> anyhow::Result<()> {
-            let mem = get_memory(&mut caller)?;
-            let data = mem.data_mut(&mut caller);
-            write_overlapped(data, ov_ptr, libc::ENOSYS as u32, 0, 0)
+            caller
+                .data_mut()
+                .child_wait_pending
+                .push((ov_ptr, process_handle));
+            Ok(())
         },
     )?;
 
@@ -745,6 +814,40 @@ pub fn poll_completions(
                 continue;
             };
             let _ = write_overlapped(mem, op.ov_ptr, 0, 0, 0); // EOF stub
+            progress = true;
+        }
+    }
+
+    // 4. Check pending child process waits.
+    if !store.data().child_wait_pending.is_empty() {
+        let pending: Vec<(u32, u64)> = store.data().child_wait_pending.clone();
+        let mut completed_handles: Vec<u64> = Vec::new();
+        let mut results: Vec<(u32, i32)> = Vec::new();
+
+        let (mem, host) = memory.data_and_store_mut(&mut *store);
+        for (ov_ptr, handle) in &pending {
+            if let Some(HandleKind::Process(child)) = host.handles.get_mut(handle) {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        let code = status.code().unwrap_or(1);
+                        results.push((*ov_ptr, code));
+                        completed_handles.push(*handle);
+                    }
+                    Ok(None) => {} // still running
+                    Err(_) => {
+                        results.push((*ov_ptr, 1));
+                        completed_handles.push(*handle);
+                    }
+                }
+            }
+        }
+        for handle in &completed_handles {
+            host.handles.remove(handle);
+        }
+        host.child_wait_pending
+            .retain(|(_, h)| !completed_handles.contains(h));
+        for (ov_ptr, code) in results {
+            write_overlapped(mem, ov_ptr, 0, 0, (code as u64) << 32)?;
             progress = true;
         }
     }

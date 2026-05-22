@@ -738,8 +738,10 @@ dependencies = [
 name = "mohabbat"
 version = "0.1.0"
 dependencies = [
+ "alloc-no-stdlib",
  "anyhow",
  "brotli",
+ "brotli-decompressor",
  "rusticated",
 ]
 
