@@ -1,4 +1,6 @@
 #![cfg(target_os = "linux")]
+use super::linux_state::OpState;
+use alloc::rc::Rc;
 
 use crate::collections::HashMap;
 use crate::future::Future;
@@ -50,6 +52,12 @@ pub struct EpollDriver {
     /// Wakers indexed by completion token; fired when epoll reports readiness.
     wakers: HashMap<u64, crate::task::Waker>,
     next_token: u64,
+    pending_ops: HashMap<u64, PendingOp>,
+}
+
+enum PendingOp {
+    Read(i32, alloc::rc::Rc<super::linux_state::OpState>),
+    Write(i32, alloc::rc::Rc<super::linux_state::OpState>),
 }
 
 impl EpollDriver {
@@ -65,9 +73,11 @@ impl EpollDriver {
             registered_fds: HashMap::new(),
             wakers: HashMap::new(),
             next_token: 1,
+            pending_ops: HashMap::new(),
         })
     }
 
+    pub fn outstanding_io(&self) -> usize { self.pending_ops.len() }
     fn do_register(&mut self, fd: i32, events: u32, token: u64) -> io::Result<()> {
         let mut ev = EpollEvent {
             events: events | EPOLLONESHOT,
@@ -122,9 +132,7 @@ impl EpollDriver {
         let mut evbuf = [EpollEvent { events: 0, data: 0 }; 64];
         let timeout = timeout_ms.map(|t| t as i32).unwrap_or(-1);
         let n = loop {
-            // SAFETY: pointer + length describe the local array.
-            let n =
-                unsafe { epoll_wait(self.epfd, evbuf.as_mut_ptr(), evbuf.len() as i32, timeout) };
+            let n = unsafe { epoll_wait(self.epfd, evbuf.as_mut_ptr(), evbuf.len() as i32, timeout) };
             if n >= 0 {
                 break n;
             }
@@ -134,16 +142,51 @@ impl EpollDriver {
             }
             return Err(e);
         };
+        // Process readiness events.
         for ev in &evbuf[..n as usize] {
-            // SAFETY: `data` is a field of a `#[repr(C, packed)]` struct;
-            // we copy it via `read_unaligned` to avoid a misaligned reference.
             let token = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(ev.data)) };
-            // ONESHOT fired: the fd is now disabled (not removed).
-            mark_ready(token);
-            if let Some(waker) = self.wakers.remove(&token) {
-                waker.wake();
+            if let Some(op) = self.pending_ops.remove(&token) {
+                match op {
+                    PendingOp::Read(fd, state) => {
+                        unsafe extern "C" { fn read(fd: i32, buf: *mut u8, count: usize) -> isize; }
+                        let buf_opt = unsafe { &mut *state.buffer.get() }.take();
+                        if let Some(mut buf) = buf_opt {
+                            let res = unsafe { read(fd, buf.as_mut_ptr(), buf.capacity()) };
+                            if res < 0 {
+                                *state.result.borrow_mut() = Some((crate::io::Error::last_os_error().raw_os_error().unwrap_or(-1), 0));
+                            } else {
+                                unsafe { buf.set_len(res as usize); }
+                                *state.result.borrow_mut() = Some((0, res as u32));
+                            }
+                            unsafe { &mut *state.buffer.get() }.replace(buf);
+                        }
+                        if let Some(w) = state.waker.borrow().as_ref() { w.wake_by_ref(); }
+                    }
+                    PendingOp::Write(fd, state) => {
+                        unsafe extern "C" { fn write(fd: i32, buf: *const u8, count: usize) -> isize; }
+                        let buf_opt = unsafe { &mut *state.buffer.get() }.take();
+                        if let Some(buf) = buf_opt {
+                            let res = unsafe { write(fd, buf.as_ptr(), buf.len()) };
+                            if res < 0 {
+                                *state.result.borrow_mut() = Some((crate::io::Error::last_os_error().raw_os_error().unwrap_or(-1), 0));
+                            } else {
+                                *state.result.borrow_mut() = Some((0, res as u32));
+                            }
+                            unsafe { &mut *state.buffer.get() }.replace(buf);
+                        }
+                        if let Some(w) = state.waker.borrow().as_ref() { w.wake_by_ref(); }
+                    }
+                }
+            } else {
+                mark_ready(token);
+                if let Some(waker) = self.wakers.remove(&token) {
+                    waker.wake();
+                }
             }
         }
+        
+        crate::rt::ready::consume_ready(0); // Dummy consume
+
         Ok(n > 0)
     }
 
@@ -250,13 +293,40 @@ impl Future for WaitWritable {
     }
 }
 
-use super::linux_state::OpState;
-use alloc::rc::Rc;
 impl EpollDriver {
-    pub(crate) fn submit_read(&mut self, _fd: i32, _state: Rc<OpState>) -> crate::io::Result<()> {
+    pub(crate) fn submit_read(&mut self, fd: i32, state: Rc<OpState>) -> crate::io::Result<()> {
+        unsafe extern "C" { fn read(fd: i32, buf: *mut u8, count: usize) -> isize; }
+        let buf_opt = unsafe { &mut *state.buffer.get() }.take();
+        if let Some(mut buf) = buf_opt {
+            let res = unsafe { read(fd, buf.as_mut_ptr(), buf.capacity()) };
+            if res < 0 {
+                *state.result.borrow_mut() = Some((crate::io::Error::last_os_error().raw_os_error().unwrap_or(-1), 0));
+            } else {
+                unsafe { buf.set_len(res as usize); }
+                *state.result.borrow_mut() = Some((0, res as u32));
+            }
+            unsafe { &mut *state.buffer.get() }.replace(buf);
+        }
+        if let Some(w) = state.waker.borrow().as_ref() {
+            w.wake_by_ref();
+        }
         Ok(())
     }
-    pub(crate) fn submit_write(&mut self, _fd: i32, _state: Rc<OpState>) -> crate::io::Result<()> {
+    pub(crate) fn submit_write(&mut self, fd: i32, state: Rc<OpState>) -> crate::io::Result<()> {
+        unsafe extern "C" { fn write(fd: i32, buf: *const u8, count: usize) -> isize; }
+        let buf_opt = unsafe { &mut *state.buffer.get() }.take();
+        if let Some(buf) = buf_opt {
+            let res = unsafe { write(fd, buf.as_ptr(), buf.len()) };
+            if res < 0 {
+                *state.result.borrow_mut() = Some((crate::io::Error::last_os_error().raw_os_error().unwrap_or(-1), 0));
+            } else {
+                *state.result.borrow_mut() = Some((0, res as u32));
+            }
+            unsafe { &mut *state.buffer.get() }.replace(buf);
+        }
+        if let Some(w) = state.waker.borrow().as_ref() {
+            w.wake_by_ref();
+        }
         Ok(())
     }
 }

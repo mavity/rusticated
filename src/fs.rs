@@ -242,8 +242,33 @@ impl OpenOptions {
         }
         #[cfg(all(not(target_family = "wasm"), not(windows)))]
         {
-            let _ = path.as_ref();
-            Err(io::Error::other("native open not implemented"))
+            const O_RDONLY: i32 = 0;
+            const O_WRONLY: i32 = 1;
+            const O_RDWR: i32 = 2;
+            const O_CREAT: i32 = 64;
+            const O_TRUNC: i32 = 512;
+            const O_APPEND: i32 = 1024;
+            const O_EXCL: i32 = 128;
+
+            let mut flags = 0;
+            if self.read && self.write { flags |= O_RDWR; }
+            else if self.write { flags |= O_WRONLY; }
+            else { flags |= O_RDONLY; }
+            if self.create { flags |= O_CREAT; }
+            if self.truncate { flags |= O_TRUNC; }
+            if self.append { flags |= O_APPEND; }
+            if self.create_new { flags |= O_CREAT | O_EXCL; }
+
+            unsafe extern "C" {
+                fn open(pathname: *const u8, flags: i32, mode: u32) -> i32;
+            }
+            let mut path_bytes = alloc::vec::Vec::from(path.as_ref().as_bytes());
+            path_bytes.push(0);
+            let handle = unsafe { open(path_bytes.as_ptr(), flags, 0o666) };
+            if handle < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(File { handle: handle as u64 })
         }
     }
 }
@@ -326,7 +351,7 @@ impl AsyncRead for File {
             }
         }
         #[cfg(all(not(target_family = "wasm"), not(windows)))]
-        { (Err(io::Error::other("not implemented")), buf) }
+        { crate::rt::linux_op::LinuxOpFuture::read(self.handle as i32, buf).await }
     }
 }
 
@@ -374,7 +399,7 @@ impl AsyncWrite for File {
             }
         }
         #[cfg(all(not(target_family = "wasm"), not(windows)))]
-        { (Err(io::Error::other("not implemented")), buf) }
+        { crate::rt::linux_op::LinuxOpFuture::write(self.handle as i32, buf).await }
     }
     async fn flush(&mut self) -> io::Result<()> { Ok(()) }
 }
@@ -466,8 +491,54 @@ pub async fn metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
         })
     }
     #[cfg(all(not(target_family = "wasm"), not(windows)))] {
-        let _ = path;
-        Err(io::Error::other("not implemented"))
+        // struct stat layout on Linux aarch64 (kernel stat64 / __NR_newfstatat)
+        #[repr(C)]
+        struct LinuxStat {
+            st_dev: u64,
+            st_ino: u64,
+            st_mode: u32,
+            st_nlink: u32,
+            st_uid: u32,
+            st_gid: u32,
+            st_rdev: u64,
+            _pad1: u64,
+            st_size: i64,
+            st_blksize: i32,
+            _pad2: i32,
+            st_blocks: i64,
+            st_atime: i64,
+            st_atime_nsec: i64,
+            st_mtime: i64,
+            st_mtime_nsec: i64,
+            st_ctime: i64,
+            st_ctime_nsec: i64,
+            _unused: [i32; 2],
+        }
+        unsafe extern "C" {
+            fn stat(pathname: *const u8, statbuf: *mut LinuxStat) -> i32;
+        }
+        let mut path_bytes = alloc::vec::Vec::from(path.as_ref().as_bytes());
+        path_bytes.push(0);
+        let mut st = core::mem::MaybeUninit::<LinuxStat>::uninit();
+        let ret = unsafe { stat(path_bytes.as_ptr(), st.as_mut_ptr()) };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let st = unsafe { st.assume_init() };
+        let to_ns = |secs: i64, nsec: i64| -> u64 {
+            if secs < 0 { 0 } else { secs as u64 * 1_000_000_000 + nsec as u64 }
+        };
+        Ok(Metadata {
+            size: st.st_size as u64,
+            mode: st.st_mode,
+            modified_time_ns: to_ns(st.st_mtime, st.st_mtime_nsec),
+            accessed_time_ns: to_ns(st.st_atime, st.st_atime_nsec),
+            created_time_ns: to_ns(st.st_ctime, st.st_ctime_nsec),
+            nlink: st.st_nlink as u64,
+            uid: st.st_uid,
+            gid: st.st_gid,
+            inode: st.st_ino,
+        })
     }
 }
 

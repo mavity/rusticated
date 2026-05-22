@@ -46,7 +46,9 @@ fn main() {
 
     // Enforce our basic sysroot properties
     obj.insert("panic-strategy".to_string(), serde_json::json!("abort"));
-    obj.insert("crt-static-default".to_string(), serde_json::json!(true));
+    if host.contains("-windows") {
+        obj.insert("crt-static-default".to_string(), serde_json::json!(true));
+    }
     obj.insert("crt-static-respected".to_string(), serde_json::json!(true));
     obj.insert("no-default-libraries".to_string(), serde_json::json!(true));
 

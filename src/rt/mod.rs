@@ -193,9 +193,7 @@ macro_rules! main {
 macro_rules! spawn {
     ($future:expr) => {
         #[cfg(not(target_family = "wasm"))]
-        fn _rustigated_spawn_runner() {
-            $crate::rt::executor::run($future);
-        }
+        { $crate::rt::executor::run($future); }
 
         #[cfg(target_family = "wasm")]
         #[unsafe(no_mangle)]
@@ -205,3 +203,4 @@ macro_rules! spawn {
     };
 }
 
+pub mod linux_op;
