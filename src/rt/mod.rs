@@ -206,5 +206,3 @@ macro_rules! spawn {
         }
     };
 }
-
-pub mod linux_op;

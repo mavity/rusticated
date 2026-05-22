@@ -28,6 +28,7 @@ pub extern "C" fn __CxxFrameHandler3() -> i32 {
     0
 }
 
+#[cfg(windows)]
 #[link(name = "kernel32")]
 unsafe extern "system" {}
 

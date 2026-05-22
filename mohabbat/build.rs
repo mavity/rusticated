@@ -4,13 +4,15 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const TARGET_TRIPLES: &[&str] = &[
-    "x86_64-unknown-linux-musl",
-    "aarch64-unknown-linux-musl",
-    "x86_64-pc-windows-msvc",
-    "aarch64-pc-windows-msvc",
-    "x86_64-apple-darwin",
-    "aarch64-apple-darwin",
+/// Six output slots (x86_64-linux, aarch64-linux, x86_64-win, aarch64-win, x86_64-darwin, aarch64-darwin).
+/// Each inner slice lists candidates in preference order; the first buildable one wins.
+const TARGET_SLOTS: &[&[&str]] = &[
+    &["x86_64-unknown-linux-musl",  "x86_64-unknown-linux-gnu"],
+    &["aarch64-unknown-linux-musl", "aarch64-unknown-linux-gnu"],
+    &["x86_64-pc-windows-msvc"],
+    &["aarch64-pc-windows-msvc"],
+    &["x86_64-apple-darwin"],
+    &["aarch64-apple-darwin"],
 ];
 
 #[repr(C, packed)]
@@ -112,23 +114,21 @@ fn main() {
 
     let target_tree = workspace_dir.join("target").join("tree");
 
-    let mut available_targets = Vec::new();
-    for &target in TARGET_TRIPLES {
-        if can_build_target(target) {
-            println!("cargo:warning=Target {} is available", target);
-            available_targets.push(target);
-        } else {
-            println!("cargo:warning=Target {} is NOT available", target);
-        }
-    }
-
-    // Phase 1: Build components for available targets
-    let mut successfully_built = Vec::new();
-    for &target in &available_targets {
-        let b1 = build_component(workspace_dir, &target_tree, "brot", target);
-        let b2 = build_component(workspace_dir, &target_tree, "washmhost", target);
-        if b1 && b2 {
-            successfully_built.push(target);
+    // Phase 1: For each slot pick the first available target and build brot + washmhost.
+    let mut slot_targets: Vec<Option<&str>> = Vec::new();
+    for candidates in TARGET_SLOTS {
+        let resolved = candidates.iter().copied().find(|t| can_build_target(t));
+        match resolved {
+            Some(target) => {
+                println!("cargo:warning=Slot resolved to target {}", target);
+                let b1 = build_component(workspace_dir, &target_tree, "brot", target);
+                let b2 = build_component(workspace_dir, &target_tree, "washmhost", target);
+                slot_targets.push(if b1 && b2 { Some(target) } else { None });
+            }
+            None => {
+                println!("cargo:warning=No available target for slot {:?}", candidates);
+                slot_targets.push(None);
+            }
         }
     }
 
@@ -141,14 +141,10 @@ fn main() {
     );
 
     // Phase 3: Stitching
-    stitch(workspace_dir, &target_tree, &successfully_built);
+    stitch(workspace_dir, &target_tree, &slot_targets);
 }
 
 fn can_build_target(target: &str) -> bool {
-    // Force skip anything except windows msvc for this build since we lack cross toolchains
-    if !target.contains("windows-msvc") {
-        return false;
-    }
     let output = Command::new("rustup")
         .args(&["target", "list", "--installed"])
         .env_remove("RUSTUP_TOOLCHAIN")
@@ -290,8 +286,11 @@ fn build_component(workspace_dir: &Path, target_tree: &Path, package: &str, targ
 
     // washmhost uses real std (wasmtime depends on it), so skip the custom
     // rusticated sysroot for washmhost builds.  brot and mohabbat (brain) do
-    // need the sysroot.
-    let needs_sysroot = package != "washmhost";
+    // need the sysroot when cross-compiling, but when building for the host
+    // gnu target the sysroot rename trick doesn't work (the rlib crate-name
+    // stays "rusticated", not "std"), so just build natively against normal std.
+    let host = env::var("HOST").unwrap_or_default();
+    let needs_sysroot = package != "washmhost" && target != host;
 
     let target_env = target.to_uppercase().replace("-", "_");
     let rustflags_env = format!("CARGO_TARGET_{}_RUSTFLAGS", target_env);
@@ -354,32 +353,34 @@ fn build_component(workspace_dir: &Path, target_tree: &Path, package: &str, targ
 }
 
 fn find_asset(target_tree: &Path, target: &str, name: &str) -> PathBuf {
-    let ext = if name == "washmhost" && target.contains("windows") {
-        ".dll"
+    let (prefix, ext) = if name == "washmhost" && target.contains("windows") {
+        ("", ".dll")
+    } else if name == "washmhost" && target.contains("darwin") {
+        ("lib", ".dylib")
     } else if name == "washmhost" {
-        ".so"
+        ("lib", ".so")
     } else if target.contains("windows") {
-        ".exe"
+        ("", ".exe")
     } else if target.contains("wasm32") {
-        ".wasm"
+        ("", ".wasm")
     } else {
-        ""
+        ("", "")
     };
     let mut path = target_tree
         .join(target)
         .join("release")
-        .join(format!("{}{}", name, ext));
+        .join(format!("{}{}{}", prefix, name, ext));
     if !path.exists() {
         path = target_tree
             .join(target)
             .join("release")
             .join("deps")
-            .join(format!("{}{}", name, ext));
+            .join(format!("{}{}{}", prefix, name, ext));
     }
     path
 }
 
-fn stitch(workspace_dir: &Path, target_tree: &Path, available: &[&str]) {
+fn stitch(workspace_dir: &Path, target_tree: &Path, slot_targets: &[Option<&str>]) {
     let brain_path = find_asset(target_tree, "wasm32-unknown-unknown", "mohabbat");
     if !brain_path.exists() {
         println!("cargo:warning=Brain not found, skipping stitch");
@@ -394,8 +395,8 @@ fn stitch(workspace_dir: &Path, target_tree: &Path, available: &[&str]) {
     let mut washmhosts = Vec::new();
     let mut brots = Vec::new();
 
-    for &target in TARGET_TRIPLES {
-        if available.contains(&target) {
+    for opt_target in slot_targets {
+        if let Some(target) = opt_target {
             let host_path = find_asset(target_tree, target, "washmhost");
             let mut data = Vec::new();
             File::open(host_path)
@@ -412,7 +413,6 @@ fn stitch(workspace_dir: &Path, target_tree: &Path, available: &[&str]) {
                 .unwrap();
             brots.push(Some(data));
         } else {
-            // TODO: Seed borrowing logic
             washmhosts.push(None);
             brots.push(None);
         }
