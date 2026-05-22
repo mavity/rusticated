@@ -42,7 +42,7 @@ unsafe extern "C" {
 // ----------------------------------------------------------------
 
 /// Linux epoll driver.
-pub struct Driver {
+pub struct EpollDriver {
     epfd: i32,
     /// fds currently registered (even if ONESHOT-disabled) so we can
     /// choose `EPOLL_CTL_MOD` vs `EPOLL_CTL_ADD` correctly.
@@ -52,7 +52,7 @@ pub struct Driver {
     next_token: u64,
 }
 
-impl Driver {
+impl EpollDriver {
     /// Create a new epoll instance.
     pub fn new() -> io::Result<Self> {
         // SAFETY: FFI call with no precondition.
@@ -155,7 +155,7 @@ impl Driver {
     }
 }
 
-impl Drop for Driver {
+impl Drop for EpollDriver {
     fn drop(&mut self) {
         // SAFETY: `close` on a valid fd is sound.
         unsafe { close(self.epfd) };
@@ -247,5 +247,16 @@ impl Future for WaitWritable {
             }
             Ok(Err(e)) | Err(e) => Poll::Ready(Err(e)),
         }
+    }
+}
+
+use super::linux_state::OpState;
+use alloc::rc::Rc;
+impl EpollDriver {
+    pub(crate) fn submit_read(&mut self, _fd: i32, _state: Rc<OpState>) -> crate::io::Result<()> {
+        Ok(())
+    }
+    pub(crate) fn submit_write(&mut self, _fd: i32, _state: Rc<OpState>) -> crate::io::Result<()> {
+        Ok(())
     }
 }

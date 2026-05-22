@@ -242,6 +242,7 @@ impl OpenOptions {
         }
         #[cfg(all(not(target_family = "wasm"), not(windows)))]
         {
+            let _ = path.as_ref();
             Err(io::Error::other("native open not implemented"))
         }
     }
