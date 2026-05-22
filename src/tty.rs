@@ -92,6 +92,7 @@ mod unix_tty {
 
     /// Per-platform termios layout and flag constants.
     #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
     mod tc {
         /// c_lflag: disable canonical (line-buffered) input.
         pub const ICANON: u32 = 0x0000_0002;

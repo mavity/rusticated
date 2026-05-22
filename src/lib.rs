@@ -2,6 +2,7 @@
 //! Fast, standard-library-shaped async platform layer for brush-async
 
 #![no_std]
+#![allow(unused_features)]
 #![feature(thread_local)]
 #![allow(stable_features)]
 #![feature(async_fn_in_trait)]

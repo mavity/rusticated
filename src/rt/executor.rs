@@ -13,7 +13,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use super::{timers::next_deadline, waker::task_waker};
 
 #[cfg(target_os = "linux")]
-use super::linux_epoll::Driver;
+use super::linux_driver::Driver;
 
 #[cfg(windows)]
 use super::windows::Driver;
