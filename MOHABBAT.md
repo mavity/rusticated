@@ -1,6 +1,6 @@
 # MOHABBAT
 
-A plan for building `mohabbat.bat` — a single polyglot file that bundles a
+A plan for building `mohab.bat` — a single polyglot file that bundles a
 WASM payload with native Wasmtime hosts for all major 64-bit desktop
 platforms, so the same file can be executed on Linux, Windows, and macOS.
 
@@ -17,7 +17,7 @@ These names are fixed. Do not rename in code or docs.
   is `.bat` (so Windows can execute it by double-click and CMD recognizes
   the header).
 - **mohabbat** — the self-hosting vegetable that is also a builder. Its
-  filename is `mohabbat.bat`.
+  filename is `mohab.bat`.
 - **brot** — a small `#![no_std]` native loader stub. One brot per target
   triple. Decompresses the payload in memory and hands control to a host.
 - **washmhost** — the native Rust binary that embeds Wasmtime, exposes the
@@ -58,12 +58,12 @@ correctly. Responsibilities:
 1. Detect OS and CPU architecture using only built-in shell features.
 2. Look up the absolute byte offset and length of the correct brot in
    Zone B.
-3. Extract that brot to a temp file (Windows: `%TEMP%`, POSIX: `$TMPDIR`
-   or `/tmp`).
+3. Extract the range from the chosen brot's start offset to the end of the
+   vegetable file (the concatenated brot + pool) to a single temp file.
+   This produced file is the self-extracting runner.
 4. `chmod +x` it on POSIX.
-5. Execute it, forwarding the path of the original vegetable file and all
-   the user's CLI arguments.
-6. Exit with the brot's exit code.
+5. Execute it, forwarding all the user's CLI arguments.
+6. Exit with the runner's exit code.
 
 Complications to handle:
 
@@ -115,48 +115,31 @@ One `#![no_std]` Rust crate, six target builds. Located at `brot/`.
 
 Responsibilities, in order:
 
-1. Read its own enclosing vegetable file. Path is `argv[0]` only as a
-   last resort; preferred mechanism is:
-   - POSIX: `/proc/self/exe` (Linux), `_NSGetExecutablePath` (macOS).
-   - Windows: `GetModuleFileNameW(NULL, ...)`.
-   But brot is not the vegetable — it is the extracted temp file. So the
-   actual source path must be passed as the first argument by the Zone A
-   header. Brot reads argv[1] as the vegetable path.
-2. Open the vegetable file, seek to its tail, read the brotli pool. The
+1. Read its own executable image file (using `/proc/self/exe` on Linux,
+   `_NSGetExecutablePath` on macOS, or `GetModuleFileNameW` on Windows).
+   Because the Zone A header extracted the brot and the pool together,
+   the temporary executable *is* the file containing the pool at its tail.
+   There is no need to locate the original vegetable file.
+2. Open its own executable file, seek to its tail, read the brotli pool. The
    pool's byte length is a compile-time constant patched in at assembly
    time. The pool starts at `file_size - POOL_LEN`.
 3. Decompress the pool into a single owned buffer.
 4. Slice out its own washmhost using compile-time constants
    `WASHMHOST_OFFSET` and `WASHMHOST_LEN`, then slice the payload using
    `PAYLOAD_OFFSET` and `PAYLOAD_LEN`.
-5. Write the washmhost to a fresh temp file, chmod +x on POSIX, spawn it
-   with the payload either passed via:
-   - stdin pipe (chosen approach — simplest, no extra files), or
-   - a second temp file (fallback if stdin path fails on Windows).
-6. Forward remaining argv (argv[2..]) to washmhost.
-7. Wait for washmhost exit, propagate its exit code.
-8. Best-effort cleanup of the temp files.
+5. Execute the decompressed washmhost entirely from memory as an in-process library without writing
+   it to disk. (Linux: in-memory ELF loader; Windows: Reflective PE Loading).
+6. Invoke the exported entry point of washmhost, passing a pointer and length to the sliced payload.
+7. Forward argv to the washmhost entry point.
+8. Wait for washmhost exit, propagate its exit code.
 
 Constraints:
 
 - `#![no_std]`, `#![no_main]`. Must define `_start` (Linux), `mainCRTStartup`
   (Windows), `start` (macOS).
-- No `std::process::Command` (that needs std). Brot uses raw syscalls:
-  - Linux: direct `syscall` for `read`, `write`, `openat`, `mmap`,
-    `clone`/`execve`, `waitid`, `exit_group`. Static musl is allowed but
-    we can also skip libc entirely — already the rusticated style.
-  - Windows: link only `kernel32.dll` for `CreateFile`, `ReadFile`,
-    `WriteFile`, `CreateProcessW`, `WaitForSingleObject`, `GetExitCode`,
-    `ExitProcess`, `VirtualAlloc`. PE imports table is hand-rolled.
-  - macOS: `libSystem.dylib` for the same set of POSIX calls (kept this
-    way because Apple does not provide a stable syscall ABI).
-- Allocator: a tiny bump allocator backed by a single large `mmap` /
-  `VirtualAlloc`. The decompressed pool is the largest allocation; size
-  is known at compile time from the patched constants, so the bump arena
-  can be sized exactly.
-- Brotli decoder: the `brotli-decompressor` crate has a `no_std` mode.
-  Use it. No alloc-crate dependency beyond what it requires; provide a
-  small global allocator hooking the bump arena.
+- No `std::process::Command` (that needs std). `brot` uses `rusticated::fs::File` and `rusticated::io::Read` for opening its own executable and reading the pool tail. Raw OS calls are used only for the two tasks that have no `rusticated` equivalent: self-path discovery (`/proc/self/exe`, `_NSGetExecutablePath`, `GetModuleFileNameW`), and in-memory execution (Reflective PE/ELF loading). Both brot and washmhost run in the same `#![no_std]` process.
+- Allocator: Use the `alloc` crate backed by `rusticated`'s `GlobalAllocator` (already wired in `rusticated/src/lib.rs`). No custom allocator is needed in `brot`.
+- Brotli decoder: the `brotli-decompressor` crate has a `no_std` mode. Use it. `rusticated`'s `GlobalAllocator` satisfies the `alloc` requirement; no extra wiring needed in `brot`.
 - Binary size target: under 200 KB per brot, ideally under 100 KB.
   `panic = "abort"`, `lto = "fat"`, `codegen-units = 1`, `opt-level =
   "z"`, `strip = "symbols"`.
@@ -187,22 +170,13 @@ place. No relocations involved — these are plain data.
 
 ## 4. Washmhost — the Wasmtime embedding
 
-Existing crate, currently named `washmhost/` in the workspace (was
-`wasmtime-host/`). One Rust binary, six target builds.
-
 Changes required:
 
-- Read the guest WASM from stdin instead of a file path. Brot pipes the
-  payload in.
-- Static linking required:
-  - Linux: target `x86_64-unknown-linux-musl` and
-    `aarch64-unknown-linux-musl`. Wasmtime + cranelift compile under
-    musl; verify by building once before committing.
-  - Windows: `+crt-static` in target features. Wasmtime works.
-  - macOS: dynamic link against `libSystem` is unavoidable and fine —
-    libSystem is always present.
+- Must be `#![no_std]` using `wasmtime` with `default-features = false` and the `pulley` interpreter.
+- Must rely on `rusticated` for the global allocator and standard library functions instead of the official Rust `std`.
+- Exposed as a library (or a binary with a C-ABI entry point) which accepts the guest WASM payload via a memory pointer and length instead of reading `stdin`.
 - Keep the existing rusticated ABI (`abi.rs` host imports).
-- The washmhost binary is large (Wasmtime + Cranelift = several MB).
+- The washmhost binary is large (Wasmtime = several MB).
   This is the dominant size cost. Acceptable: a 60–80 MB pre-brotli pool
   compresses to ~10–15 MB.
 
@@ -219,7 +193,7 @@ Two operating modes, selected by CLI:
 ### Mode A — wrap an existing WASM
 
 ```
-mohabbat.bat path/to/payload.wasm -o out.bat
+mohab.bat path/to/payload.wasm -o out.bat
 ```
 
 Steps:
@@ -239,7 +213,7 @@ Steps:
 ### Mode B — build a Rust project
 
 ```
-mohabbat.bat path/to/cargo-project -o out.bat
+mohab.bat path/to/cargo-project -o out.bat
 ```
 
 Steps:
@@ -265,20 +239,18 @@ Complications:
 
 ## 6. Bootstrapping problem and the build pipeline
 
-To produce mohabbat.bat we need brots, washmhosts, and brain. To run
-mohabbat.bat we need mohabbat.bat. The first one must come from a
+To produce mohab.bat we need brots, washmhosts, and brain. To run
+mohab.bat we need mohab.bat. The first one must come from a
 non-mohabbat build path.
 
 ### The solution: `mohabbat/build.rs` does the first build.
 
 The `mohabbat/` crate has an extremely flat layout and is composed of two active parts:
 
-- **The Native Builder** (`build.rs`): orchestrates the first build of `mohabbat.bat`. It is executed by Cargo during a normal build of the crate. It is pure Rust, uses std, and shells out to cargo to build components.
+- **The Native Builder** (`build.rs`): orchestrates the first build of `mohab.bat`. It is executed by Cargo during a normal build of the crate. It is pure Rust, uses std, and shells out to cargo to build components.
 - **The WASM Brain** (`src/main.rs`): the builder logic compiled to `wasm32-unknown-unknown` that lives inside every vegetable.
 
-Rather than having a separate native binary target, the simple act of compiling the crate (`cargo build -p mohabbat`) triggers `build.rs` which performs the entire assembly as a side-effect, creating `mohabbat.bat` in the repository root.
-
-Shared logic between `build.rs` and the brain (such as format constants, Brotli compression/decompression, and stitching) lives in `src/logic.rs` (or similar, imported by `build.rs` with `#[path]`).
+Rather than having a separate native binary target, the simple act of compiling the crate (`cargo build -p mohabbat`) triggers `build.rs` which performs the entire assembly as a side-effect, creating `mohab.bat` in the repository root.
 
 ### The first build, step by step
 
@@ -305,7 +277,7 @@ This single command does everything via `mohabbat/build.rs`. The `build.rs` prep
      Linux/Windows host with the macOS SDK and a cross linker (osxcross
      or similar). Without that, skip.
    - For each target, mark Available or Skipped with a reason.
-3. Try to find a seed `mohabbat.bat` in the crate root or repo root.
+3. Try to find a seed `mohab.bat` in the crate root or repo root.
    If present, prepare to borrow brots and washmhosts from it for any
    target marked Skipped. See §8.
 
@@ -350,7 +322,7 @@ For each target slot (six slots, fixed order):
 
 - If Available: use the freshly built brot and washmhost.
 - If Skipped and seed is present: extract brot and washmhost from seed.
-- If Skipped and no seed: the slot is empty. The final mohabbat.bat
+- If Skipped and no seed: the slot is empty. The final mohab.bat
   will refuse to run on that platform, with a clear error message
   emitted by the Zone A header.
 
@@ -381,18 +353,18 @@ For each present brot:
    - The `POOL_LEN` for self-introspection (not strictly needed by Zone
      A, but useful for mohabbat-as-brain to discover its own pool tail).
 2. Concatenate: Zone A text + Zone B brots + Zone C brotli stream.
-3. Write `mohabbat.bat` at the repo root.
+3. Write `mohab.bat` at the repo root.
 4. On POSIX, `chmod +x`.
 
-Done. `cargo build -p mohabbat` has produced `mohabbat.bat`.
+Done. `cargo build -p mohabbat` has produced `mohab.bat`.
 
-Note: Cargo will still follow through and compile `mohabbat/src/main.rs` into a native binary after `build.rs` finishes. We handle this by making `src/main.rs` conditionally compiled: when built natively, it's just a tiny stub CLI that prints `"mohabbat.bat generated at workspace root"`. The "real" main output is the side-effect `mohabbat.bat`. 
+Note: Cargo will still follow through and compile `mohabbat/src/main.rs` into a native binary after `build.rs` finishes. We handle this by making `src/main.rs` conditionally compiled: when built natively, it's just a tiny stub CLI that prints `"mohab.bat generated at workspace root"`. The "real" main output is the side-effect `mohab.bat`. 
 
 ### Subsequent uses
 
-Once `mohabbat.bat` exists, the developer can use it to make any other
-vegetable — including a new `mohabbat.bat` — without invoking cargo on
-the workspace at all. The brain inside `mohabbat.bat` does Mode A or
+Once `mohab.bat` exists, the developer can use it to make any other
+vegetable — including a new `mohab.bat` — without invoking cargo on
+the workspace at all. The brain inside `mohab.bat` does Mode A or
 Mode B from §5.
 
 The native `cargo build -p mohabbat` path is still useful for clean
@@ -417,19 +389,16 @@ rusticated/
 │   ├── build.rs                THE BUILDER: probes, cross-builds, patches,
 │   │                           and performs the first stitch natively.
 │   └── src/
-│       ├── main.rs             THE BRAIN + NATIVE STUB.
-│       │                       #[cfg(wasm32)]: The builder logic running in washmhost.
-│       │                       #[cfg(not(wasm32))]: A tiny dummy CLI that prints success.
-│       └── logic.rs            SHARED LOGIC: format constants, pool layout,
-│                               patching, and stitch routines shared by 
-│                               build.rs and main.rs (via #[path]).
-├── mohabbat.bat                produced artifact, checked in for crates.io
+│       └── main.rs             THE BRAIN + NATIVE STUB.
+│                               #[cfg(wasm32)]: The builder logic running in washmhost.
+│                               #[cfg(not(wasm32))]: A tiny dummy CLI that prints success.
+├── mohab.bat                produced artifact, NOT checked in!!
 ├── target/
 │   └── tree/                   sandbox for sub-cargo builds
 └── ... (existing files)
 ```
 
-`brot` and `mohabbat` are workspace members. `mohabbat.bat` is committed
+`brot` and `mohabbat` are workspace members. `mohab.bat` is committed
 to git (it is the seed; see §8).
 
 ---
@@ -442,17 +411,17 @@ when that user has no cross-compilation toolchains.
 
 Strategy:
 
-1. The repository checks in a `mohabbat.bat` that supports all six
+1. The repository checks in a `mohab.bat` that supports all six
    targets, produced on a CI machine that has every toolchain.
-2. When packaged for crates.io, `mohabbat.bat` is included in the
-   crate sources (`include = ["mohabbat.bat", ...]` in Cargo.toml).
+2. When packaged for crates.io, `mohab.bat` is included in the
+   crate sources (`include = ["mohab.bat", ...]` in Cargo.toml).
 3. On `cargo build -p mohabbat` (or download/install where a build runs):
    - `build.rs` tries to build brots and washmhosts locally for every target.
    - For targets where local build fails, borrows the corresponding
-     brot and washmhost from the bundled `mohabbat.bat` seed.
+     brot and washmhost from the bundled `mohab.bat` seed.
    - Always rebuilds the brain locally so the user gets the current
      version of the builder logic.
-4. `build.rs` writes the final stitched `mohabbat.bat` (placed in the repo root
+4. `build.rs` writes the final stitched `mohab.bat` (placed in the repo root
    or crate extraction directory) which carries: current brain + mix of fresh 
    and borrowed native components.
 
@@ -522,43 +491,31 @@ A consolidated list. Most are mentioned above; this is the index.
 
 ### Brotli decompressor in no_std
 
-- `brotli-decompressor` works in `no_std + alloc`. Provide a global
-  allocator. A bump allocator on top of one `mmap`/`VirtualAlloc` is
-  enough — no frees are needed before exit.
-- Sizing the arena: total = decompressed pool size + decoder workspace
-  (a few MB). Both numbers can be patched in at assembly time and stored
-  next to the other u64 constants if needed.
+- `brotli-decompressor` works in `no_std + alloc`. `rusticated` supplies the global allocator. `brotli-decompressor` in `no_std + alloc` mode uses it directly.
 
-### Spawning washmhost from brot
+### Spawning washmhost from brot (In-Memory Execution)
 
-- POSIX: `fork` then `execve`. Create an anonymous pipe with `pipe2`,
-  dup2 the read end to washmhost's stdin, write the payload to the
-  write end after fork. Brot's main thread blocks on `waitpid`.
-- Windows: `CreatePipe`, `SetHandleInformation` to make the read end
-  inheritable, `CreateProcessW` with `STARTUPINFOEX` redirecting stdin
-  to the pipe. Write the payload from a background thread to avoid
-  deadlock if the payload is large and the pipe buffer fills.
-- Payload may be tens of MB. Pipe buffer is small (~64KB on Linux,
-  ~4KB on Windows by default). Always write from a separate thread or
-  use non-blocking writes.
+Because both `brot` and `washmhost` are `#![no_std]` and share the same `rusticated` base, we no longer need to spawn a separate process for the host. The host is loaded reflectively into the current `brot` process.
+
+- Linux: Use a manual in-memory ELF loader or `dlopen` on a `memfd_create` backed file descriptor to map `washmhost` into memory and resolve its entry point.
+- Windows: Implement a minimal Reflective PE Loader. Manually map the PE sections into memory, resolve imports (Kernel32, etc.), apply base relocations, and invoke the entry point. Do NOT write an .exe to disk.
+- macOS: Use `NSCreateObjectFileImageFromMemory` and `NSLinkModule` to load the Mach-O binary from the memory buffer.
+- Payload passing: Since the invocation is purely an in-process library call, the payload is simply passed by pointer and length as arguments to the `washmhost` entry point.
 
 ### Temp file lifecycle
 
-- Brot path: write to `<tmp>/mohabbat-<pid>-<rand>.exe` (Windows) or
-  `<tmp>/mohabbat-<pid>-<rand>` (POSIX). On POSIX the directory is
-  `$TMPDIR` if set else `/tmp`.
-- Cleanup: best-effort `unlink` after `waitpid`. If the process is
-  killed, the temp file stays — accept that.
-- Antivirus on Windows may scan the new .exe and add latency. Document
-  but do not work around.
+- Runner path (Brot + Pool): write to `<tmp>/mohabbat-<pid>-<rand>.exe`
+  (Windows) or `<tmp>/mohabbat-<pid>-<rand>` (POSIX).
+- Cleanup: best-effort `unlink` (POSIX) or `DeleteFile` (Windows) after
+  the runner naturally exits.
+- Antivirus: Since washmhost runs reflectively from memory and never hits
+  the disk as a new file (and no `fork` or `exec` happens), we bypass severe AV penalties that trigger when one temp file drops and executes another.
 
 ### Cargo lock during build
 
 - `mohabbat/build.rs` shells out to `cargo` itself. The outer cargo
   holds a workspace lock on `target/`. Use `CARGO_TARGET_DIR=target/tree`
   to point inner cargos at a different directory and avoid the lock.
-- Use `--target-dir target/tree` as an extra belt-and-braces. Both
-  should point to the same place.
 - Inner cargos must not call out to outer cargos; the build graph is
   one-way.
 
@@ -582,13 +539,13 @@ A consolidated list. Most are mentioned above; this is the index.
 - The brain calls rusticated host imports. The rusticated ABI is the
   contract between brain and washmhost. When it changes, brain and
   washmhost must be rebuilt together.
-- Mohabbat's `mohabbat.bat` always pairs the brain and washmhosts that
+- Mohabbat's `mohab.bat` always pairs the brain and washmhosts that
   were assembled in the same build. There is no risk of mismatch within
   one vegetable. The risk is only when borrowing from a seed — see §8.
 
 ### Self-modification (mohabbat builds new mohabbat)
 
-- Mode A on a `mohabbat.wasm` input produces a new mohabbat.bat. This
+- Mode A on a `mohabbat.wasm` input produces a new mohab.bat. This
   is how the brain is updated without invoking cargo.
 - The brain needs to read washmhosts out of the running vegetable. The
   brain knows it is running inside one because the Zone A header passes
@@ -629,7 +586,7 @@ A consolidated list. Most are mentioned above; this is the index.
 - One washmhost: ~5–8 MB (release, stripped). Six washmhosts: ~30–50
   MB raw. Brotli quality 11 on similar binaries: ~25–35% of raw =
   ~10–15 MB. Plus six brots at ~100 KB each = ~600 KB. Plus the brain
-  at ~2–5 MB inside the pool. Total mohabbat.bat: ~12–20 MB.
+  at ~2–5 MB inside the pool. Total mohab.bat: ~12–20 MB.
 - Acceptable. Document it.
 
 ### Encoding pitfalls
@@ -651,7 +608,7 @@ A consolidated list. Most are mentioned above; this is the index.
   vegetable, runs it. macOS and Windows runners cover those branches;
   Linux runners cover the musl branches.
 - Seed update: a release job builds on all three host OSes, then
-  combines the three partial mohabbat.bats into one complete seed by
+  combines the three partial mohab.bats into one complete seed by
   using mohabbat itself in Mode A (since each partial mohabbat can read
   the other partials' brots and washmhosts from their files). Final
   seed is committed by release tooling.
@@ -663,8 +620,7 @@ A consolidated list. Most are mentioned above; this is the index.
 A suggested implementation order. Each step is independently
 verifiable.
 
-1. Rename `wasmtime-host` → `washmhost` everywhere (done; verify
-   workspace builds).
+1. DONE.
 2. Create empty `brot/` crate. Add a `_start` for one platform (Linux
    x64). Make it print "brot" and exit. Confirm size < 100 KB.
 3. Add the `.mohabbat_meta` section with the magic and six zero u64s.
@@ -685,9 +641,8 @@ verifiable.
 8. Build the `build.rs` side of `mohabbat/` (no brain yet). Drive
    end-to-end: produce a vegetable that wraps the existing demo WASM.
    Run it on each host platform.
-9. Write the brain. Reuse the patcher and stitcher code by sharing it
-   between `build.rs` and the brain via the `logic.rs` module.
-10. Build mohabbat.bat from itself: `build.rs` produces the first one,
+9. Write the brain. The brain or the stitcher is extremely simple: WASM content must be replaced inside the brotlified payload, but everything else stays *so much the same*. It's a matter of slicing, decompression, swapping and swift and decisive re-compression with the highest **ever** brotli level. Devastating.
+10. Build mohab.bat from itself: `build.rs` produces the first one,
     then use it to wrap a fresh `mohabbat.wasm` and produce a second
     one. Diff the two to make sure self-replication is stable.
 11. Wire the seed-borrow path. Verify partial builds work.
@@ -712,6 +667,6 @@ are not forgotten.
 - Q4. Should Zone A also support a `--extract` flag to dump the inner
   WASM out of a vegetable for inspection? Useful for debugging. Cheap
   to add. Default: yes.
-- Q5. Do we want `mohabbat.bat --self-test` that runs the embedded
+- Q5. Do we want `mohab.bat --self-test` that runs the embedded
   brain against a tiny test payload to verify the vegetable is intact?
   Nice but not required for v1.

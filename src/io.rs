@@ -40,13 +40,24 @@ pub struct Error {
     kind: ErrorKind,
     /// Raw OS error code; 0 means this is a synthesised error.
     code: i32,
-    msg: &'static str,
+    msg: alloc::borrow::Cow<'static, str>,
 }
 
 /// `core::result::Result<T, crate::io::Error>`.
 pub type Result<T> = core::result::Result<T, Error>;
 
-pub use crate::traits::{AsyncRead, AsyncWrite, BufRead, Read, Write};
+pub use crate::traits::{AsyncRead, AsyncWrite, BufRead, Read, Seek, Write};
+
+/// Enumeration of possible methods to seek within an I/O object.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SeekFrom {
+    /// Seek to an absolute byte offset.
+    Start(u64),
+    /// Seek to an offset relative to the end of the object.
+    End(i64),
+    /// Seek to an offset relative to the current position.
+    Current(i64),
+}
 
 /// Standard input stream.
 pub struct Stdin;
@@ -91,6 +102,38 @@ impl AsyncWrite for Stdout {
 
 impl Write for Stdout {
     fn write(&mut self, _buf: &[u8]) -> Result<usize> {
+        #[cfg(windows)]
+        {
+            #[allow(clashing_extern_declarations)]
+            #[link(name = "kernel32", kind = "raw-dylib")]
+            unsafe extern "system" {
+                fn GetStdHandle(n_std_handle: u32) -> usize;
+                fn WriteFile(
+                    h_file: usize,
+                    lp_buffer: *const u8,
+                    n_number_of_bytes_to_write: u32,
+                    lp_number_of_bytes_written: *mut u32,
+                    lp_overlapped: *mut core::ffi::c_void,
+                ) -> i32;
+            }
+            let handle = unsafe { GetStdHandle(0xFFFFFFF5) }; // STD_OUTPUT_HANDLE
+            let mut written = 0;
+            let res = unsafe {
+                WriteFile(
+                    handle,
+                    _buf.as_ptr(),
+                    _buf.len() as u32,
+                    &mut written,
+                    core::ptr::null_mut(),
+                )
+            };
+            if res == 0 {
+                Err(Error::from(ErrorKind::Other))
+            } else {
+                Ok(written as usize)
+            }
+        }
+        #[cfg(not(windows))]
         Err(Error::other("stdout write not implemented"))
     }
     fn flush(&mut self) -> Result<()> {
@@ -109,6 +152,38 @@ impl AsyncWrite for Stderr {
 
 impl Write for Stderr {
     fn write(&mut self, _buf: &[u8]) -> Result<usize> {
+        #[cfg(windows)]
+        {
+            #[allow(clashing_extern_declarations)]
+            #[link(name = "kernel32", kind = "raw-dylib")]
+            unsafe extern "system" {
+                fn GetStdHandle(n_std_handle: u32) -> usize;
+                fn WriteFile(
+                    h_file: usize,
+                    lp_buffer: *const u8,
+                    n_number_of_bytes_to_write: u32,
+                    lp_number_of_bytes_written: *mut u32,
+                    lp_overlapped: *mut core::ffi::c_void,
+                ) -> i32;
+            }
+            let handle = unsafe { GetStdHandle(0xFFFFFFF4) }; // STD_ERROR_HANDLE
+            let mut written = 0;
+            let res = unsafe {
+                WriteFile(
+                    handle,
+                    _buf.as_ptr(),
+                    _buf.len() as u32,
+                    &mut written,
+                    core::ptr::null_mut(),
+                )
+            };
+            if res == 0 {
+                Err(Error::from(ErrorKind::Other))
+            } else {
+                Ok(written as usize)
+            }
+        }
+        #[cfg(not(windows))]
         Err(Error::other("stderr write not implemented"))
     }
     fn flush(&mut self) -> Result<()> {
@@ -215,7 +290,7 @@ impl Error {
         Self {
             kind: ErrorKind::Other,
             code: last_error_code(),
-            msg: "",
+            msg: alloc::borrow::Cow::Borrowed(""),
         }
     }
 
@@ -225,19 +300,16 @@ impl Error {
         Self {
             kind: ErrorKind::Other,
             code,
-            msg: "",
+            msg: alloc::borrow::Cow::Borrowed(""),
         }
     }
 
     /// Constructs a synthesised error from any displayable object.
-    pub fn error<T: core::fmt::Display>(_msg: T) -> Self {
-        // Since we are no_std and limited in what we can store in the Error struct
-        // (which currently uses a &'static str for the message),
-        // we'll use a static placeholder for now.
+    pub fn error<T: core::fmt::Display>(msg: T) -> Self {
         Self {
             kind: ErrorKind::Other,
             code: 0,
-            msg: "dynamic error",
+            msg: alloc::borrow::Cow::Owned(alloc::format!("{}", msg)),
         }
     }
 
@@ -249,7 +321,11 @@ impl Error {
     /// Constructs a synthesised error with the specified kind and message.
     #[inline]
     pub fn new(kind: ErrorKind, msg: &'static str) -> Self {
-        Self { kind, code: 0, msg }
+        Self {
+            kind,
+            code: 0,
+            msg: alloc::borrow::Cow::Borrowed(msg),
+        }
     }
 
     /// Returns the raw OS error code if this is an OS-level error.
@@ -274,7 +350,7 @@ impl core::fmt::Display for Error {
         if self.code != 0 {
             write!(f, "os error {}", self.code)
         } else {
-            f.write_str(self.msg)
+            f.write_str(&self.msg)
         }
     }
 }
@@ -286,7 +362,7 @@ impl From<ErrorKind> for Error {
         Self {
             kind,
             code: 0,
-            msg: "",
+            msg: alloc::borrow::Cow::Borrowed(""),
         }
     }
 }
@@ -422,4 +498,82 @@ impl<R: Read> BufRead for BufReader<R> {
 pub trait IsTerminal {
     /// Returns `true` if this instance is connected to a terminal (TTY).
     fn is_terminal(&self) -> bool;
+}
+
+// ─── BufWriter ───────────────────────────────────────────────────────────────
+
+/// A writer that buffers its output.
+pub struct BufWriter<W: Write> {
+    inner: W,
+    buf: Vec<u8>,
+}
+
+impl<W: Write> BufWriter<W> {
+    /// Creates a new `BufWriter` with default buffer size.
+    pub fn new(inner: W) -> Self {
+        Self {
+            inner,
+            buf: Vec::with_capacity(8192),
+        }
+    }
+
+    /// Gets a reference to the underlying writer.
+    pub fn get_ref(&self) -> &W {
+        &self.inner
+    }
+
+    /// Gets a mutable reference to the underlying writer.
+    pub fn get_mut(&mut self) -> &mut W {
+        &mut self.inner
+    }
+
+    /// Flushes the buffer to the underlying writer.
+    pub fn flush_buf(&mut self) -> Result<()> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        self.inner.write_all(&self.buf)?;
+        self.buf.clear();
+        Ok(())
+    }
+}
+
+impl<W: Write> Write for BufWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> Result<usize> {
+        self.buf.extend_from_slice(buf);
+        if self.buf.len() >= 8192 {
+            self.flush_buf()?;
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        self.flush_buf()?;
+        self.inner.flush()
+    }
+}
+
+impl<W: Write> Drop for BufWriter<W> {
+    fn drop(&mut self) {
+        let _ = self.flush_buf();
+    }
+}
+
+// ─── Sink ──────────────────────────────────────────────────────────────────
+
+/// A writer that discards all output.
+pub struct Sink;
+
+/// Creates a writer that discards all output.
+pub fn sink() -> Sink {
+    Sink
+}
+
+impl Write for Sink {
+    fn write(&mut self, buf: &[u8]) -> Result<usize> {
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> Result<()> {
+        Ok(())
+    }
 }

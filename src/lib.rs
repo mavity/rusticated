@@ -1,14 +1,25 @@
-#![warn(missing_docs)]
+﻿#![warn(missing_docs)]
 //! Fast, standard-library-shaped async platform layer for brush-async
 
 #![no_std]
 #![feature(thread_local)]
+#![allow(stable_features)]
+#![feature(async_fn_in_trait)]
+#![feature(lang_items)]
+#![allow(internal_features)]
+#![allow(missing_docs)]
+#![feature(alloc_error_handler)]
+
+// No prelude_import here, as this IS the std library providing the prelude.
 
 pub extern crate alloc;
 // The test harness is std-based; bring std in for test builds only.
 // On native targets the final binary always links std; expose it here so that
-// platform-specific modules (fs, time, …) can use std::fs, std::time, etc.
+// platform-specific modules (fs, time, â€¦) can use std::fs, std::time, etc.
 // without duplicating raw-syscall struct definitions for every architecture.
+
+#[cfg(windows)]
+mod msvc_stubs;
 
 /// Declares one or more thread-local values, initialised lazily on first access.
 ///
@@ -104,22 +115,68 @@ macro_rules! format {
         $crate::alloc::format!($($arg)*)
     };
 }
+/// Prelude for the standard library.
+pub mod prelude {
+    /// Rust edition-independent prelude v1.
+    #[allow(unused_imports)]
+    pub mod v1 {
+        // alloc types that are normally injected by the std prelude
+        pub use alloc::borrow::ToOwned;
+        pub use alloc::boxed::Box;
+        pub use alloc::string::{String, ToString};
+        pub use alloc::vec::Vec;
+        // Macros
+        pub use crate::{eprint, eprintln, format, print, println, thread_local, spawn};
+        pub use alloc::vec;
+        pub use core::{
+            assert, assert_eq, assert_ne, debug_assert, debug_assert_eq, debug_assert_ne, matches,
+            panic, todo, unimplemented, unreachable, write, writeln,
+        };
+        // Core traits already in scope via core::prelude, but re-export
+        // them here for completeness so a wildcard import is sufficient.
+        pub use core::clone::Clone;
+        pub use core::cmp::{Eq, Ord, PartialEq, PartialOrd};
+        pub use core::convert::{AsMut, AsRef, From, Into, TryFrom, TryInto};
+        pub use core::default::Default;
+        pub use core::fmt::{Debug, Display};
+        pub use core::iter::{
+            DoubleEndedIterator, ExactSizeIterator, Extend, FromIterator, IntoIterator, Iterator,
+        };
+        pub use core::marker::{Copy, Send, Sized, Sync};
+        pub use core::mem::drop;
+        pub use core::ops::{Drop, Fn, FnMut, FnOnce};
+        pub use core::option::Option::{self, None, Some};
+        pub use core::result::Result::{self, Err, Ok};
+    }
+
+    /// Prelude for Edition 2024.
+    pub mod rust_2024 {
+        pub use super::v1::*;
+        pub use core::prelude::rust_2024::*;
+    }
+}
+
+// NO prelude_import here! We want libstd to use the default core prelude.
+
 /// Shared ABI definitions
 pub mod abi;
 
+
+#[cfg(all(feature = "panic-handler", not(test)))]
 #[panic_handler]
-#[cfg(feature = "panic-handler")]
 #[allow(unused_variables, unused_assignments, clashing_extern_declarations)]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     #[cfg(windows)]
     unsafe {
         let mut handle: core::primitive::usize = 0;
+        #[link(name = "kernel32", kind = "raw-dylib")]
         unsafe extern "system" {
             fn GetStdHandle(nStdHandle: u32) -> core::primitive::usize;
         }
         handle = GetStdHandle(0xFFFFFFF5); // STD_ERROR_HANDLE is -11
 
         let msg = b"RUSTICATED PANIC! ";
+        #[link(name = "kernel32", kind = "raw-dylib")]
         unsafe extern "system" {
             #[link_name = "WriteFile"]
             fn WriteFileLibRs(
@@ -127,7 +184,7 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
                 lpBuffer: *const u8,
                 nNumberOfBytesToWrite: u32,
                 lpNumberOfBytesWritten: *mut u32,
-                lpOverlapped: *mut crate::rt::windows::Overlapped,
+                lpOverlapped: *mut core::ffi::c_void,
             ) -> i32;
             fn ExitProcess(uExitCode: u32) -> !;
         }
@@ -176,6 +233,21 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
             core::ptr::null_mut(),
         );
 
+        let text = format!("{}", info);
+        WriteFileLibRs(
+            handle,
+            text.as_ptr(),
+            text.len() as u32,
+            &mut written,
+            core::ptr::null_mut(),
+        );
+        WriteFileLibRs(
+            handle,
+            b"\n".as_ptr(),
+            1,
+            &mut written,
+            core::ptr::null_mut(),
+        );
         if let Some(loc) = info.location() {
             let file = loc.file();
             WriteFileLibRs(
@@ -225,13 +297,65 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 
 #[cfg(all(
     not(any(test, target_family = "wasm", feature = "std")),
-    target_os = "none"
+    any(target_os = "none", windows, target_os = "linux")
 ))]
 struct SystemAllocator;
 
 #[cfg(all(
     not(any(test, target_family = "wasm", feature = "std")),
-    target_os = "none"
+    any(target_os = "none", windows, target_os = "linux")
+))]
+#[allow(missing_docs)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __rust_alloc(size: usize, align: usize) -> *mut u8 {
+    use core::alloc::GlobalAlloc;
+    unsafe {
+        ALLOCATOR.alloc(core::alloc::Layout::from_size_align_unchecked(size, align))
+    }
+}
+
+#[cfg(all(
+    not(any(test, target_family = "wasm", feature = "std")),
+    any(target_os = "none", windows, target_os = "linux")
+))]
+#[allow(missing_docs)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __rust_dealloc(ptr: *mut u8, size: usize, align: usize) {
+    use core::alloc::GlobalAlloc;
+    unsafe {
+        ALLOCATOR.dealloc(ptr, core::alloc::Layout::from_size_align_unchecked(size, align))
+    }
+}
+
+#[cfg(all(
+    not(any(test, target_family = "wasm", feature = "std")),
+    any(target_os = "none", windows, target_os = "linux")
+))]
+#[allow(missing_docs)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __rust_realloc(ptr: *mut u8, old_size: usize, align: usize, new_size: usize) -> *mut u8 {
+    use core::alloc::GlobalAlloc;
+    unsafe {
+        ALLOCATOR.realloc(ptr, core::alloc::Layout::from_size_align_unchecked(old_size, align), new_size)
+    }
+}
+
+#[cfg(all(
+    not(any(test, target_family = "wasm", feature = "std")),
+    any(target_os = "none", windows, target_os = "linux")
+))]
+#[allow(missing_docs)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __rust_alloc_zeroed(size: usize, align: usize) -> *mut u8 {
+    use core::alloc::GlobalAlloc;
+    unsafe {
+        ALLOCATOR.alloc_zeroed(core::alloc::Layout::from_size_align_unchecked(size, align))
+    }
+}
+
+#[cfg(all(
+    not(any(test, target_family = "wasm", feature = "std")),
+    any(target_os = "none", windows, target_os = "linux")
 ))]
 unsafe impl core::alloc::GlobalAlloc for SystemAllocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
@@ -244,6 +368,7 @@ unsafe impl core::alloc::GlobalAlloc for SystemAllocator {
         }
         #[cfg(windows)]
         {
+            #[link(name = "kernel32", kind = "raw-dylib")]
             unsafe extern "system" {
                 fn GetProcessHeap() -> core::primitive::usize;
                 fn HeapAlloc(
@@ -266,6 +391,7 @@ unsafe impl core::alloc::GlobalAlloc for SystemAllocator {
         }
         #[cfg(windows)]
         {
+            #[link(name = "kernel32", kind = "raw-dylib")]
             unsafe extern "system" {
                 fn GetProcessHeap() -> core::primitive::usize;
                 fn HeapFree(hHeap: core::primitive::usize, dwFlags: u32, lpMem: *mut u8) -> i32;
@@ -279,7 +405,7 @@ unsafe impl core::alloc::GlobalAlloc for SystemAllocator {
 
 #[cfg(all(
     not(any(test, target_family = "wasm", feature = "std")),
-    target_os = "none"
+    any(target_os = "none", windows, target_os = "linux")
 ))]
 #[global_allocator]
 static ALLOCATOR: SystemAllocator = SystemAllocator;
@@ -287,6 +413,12 @@ static ALLOCATOR: SystemAllocator = SystemAllocator;
 #[cfg(all(not(test), target_family = "wasm"))]
 #[global_allocator]
 static ALLOCATOR: dlmalloc::GlobalDlmalloc = dlmalloc::GlobalDlmalloc;
+
+#[cfg(not(test))]
+#[alloc_error_handler]
+fn oom(_: core::alloc::Layout) -> ! {
+    panic!("out of memory");
+}
 
 // On Unix without std, the linker does not automatically pull in libc.
 // We declare it explicitly so that all extern "C" syscall stubs resolve.
@@ -329,6 +461,7 @@ pub mod process;
 /// Runtime engine abstraction
 pub mod rt;
 /// Executor
+#[cfg(not(target_family = "wasm"))]
 pub use rt::executor;
 /// OS signal abstractions
 pub mod signal;
@@ -343,7 +476,7 @@ pub mod traits;
 /// Terminal interface types
 pub mod tty;
 
-// ── std-shaped re-exports from core / alloc ─────────────────────────────────
+// â”€â”€ std-shaped re-exports from core / alloc â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 /// Borrow utilities (`ToOwned`, `Cow`).
 pub mod borrow {
     pub use alloc::borrow::*;
@@ -372,7 +505,7 @@ pub mod cmp {
 pub mod convert {
     pub use core::convert::*;
 }
-/// Formatting utilities (`Display`, `Debug`, `Formatter`, `Write`, …).
+/// Formatting utilities (`Display`, `Debug`, `Formatter`, `Write`, â€¦).
 pub mod fmt {
     pub use core::fmt::*;
 }
@@ -396,15 +529,15 @@ pub mod hint {
 pub mod iter {
     pub use core::iter::*;
 }
-/// Marker traits (`Send`, `Sync`, `Copy`, `PhantomData`, …).
+/// Marker traits (`Send`, `Sync`, `Copy`, `PhantomData`, â€¦).
 pub mod marker {
     pub use core::marker::*;
 }
-/// Memory utilities (`size_of`, `align_of`, `take`, `swap`, …).
+/// Memory utilities (`size_of`, `align_of`, `take`, `swap`, â€¦).
 pub mod mem {
     pub use core::mem::*;
 }
-/// Operator traits (`Deref`, `DerefMut`, `Index`, `Add`, …).
+/// Operator traits (`Deref`, `DerefMut`, `Index`, `Add`, â€¦).
 pub mod ops {
     pub use core::ops::*;
 }
@@ -452,44 +585,35 @@ pub mod vec {
 
 /// Re-exports from the runtime engine.
 #[cfg(not(target_family = "wasm"))]
-pub use crate::rt::executor::{JoinHandle, block_on, spawn, spawn_blocking};
+pub use crate::rt::executor::{JoinHandle, spawn, spawn_blocking};
 
 pub use crate::error::{Result, SystemError as Error};
-
-// Re-export commonly used macros so `std::format!`, `std::vec!` etc. work.
-// Use our local format!/println!/etc macros instead.
-// pub use alloc::format;
-// Note: `vec!` macro is re-exported via `pub mod vec { pub use alloc::vec::*; }` below.
-// We cannot also do `pub use alloc::vec;` here because it would conflict with the module.
-
-/// Standard prelude — re-exports the most commonly used items so that
-/// `use std::prelude::v1::*;` works in crates that declare
-/// `std = { package = "rusticated" }`.
-pub mod prelude {
-    /// Rust edition-independent prelude v1.
-    pub mod v1 {
-        // alloc types that are normally injected by the std prelude
-        pub use alloc::borrow::ToOwned;
-        pub use alloc::boxed::Box;
-        pub use alloc::string::{String, ToString};
-        pub use alloc::vec::Vec;
-        // The vec! and format! macros from alloc
-        // pub use crate::format;
-        pub use alloc::vec;
-        // Core traits already in scope via core::prelude, but re-export
-        // them here for completeness so a wildcard import is sufficient.
-        pub use core::clone::Clone;
-        pub use core::cmp::{Eq, Ord, PartialEq, PartialOrd};
-        pub use core::convert::{From, Into, TryFrom, TryInto};
-        pub use core::default::Default;
-        pub use core::fmt::{Debug, Display};
-        pub use core::iter::{
-            DoubleEndedIterator, ExactSizeIterator, Extend, FromIterator, IntoIterator, Iterator,
-        };
-        pub use core::marker::{Copy, Send, Sized, Sync};
-        pub use core::mem::drop;
-        pub use core::ops::{Drop, Fn, FnMut, FnOnce};
-        pub use core::option::Option::{self, None, Some};
-        pub use core::result::Result::{self, Err, Ok};
-    }
+#[cfg(all(windows, not(test)))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    unsafe { core::ptr::copy_nonoverlapping(src, dest, n); }
+    dest
 }
+
+#[cfg(all(windows, not(test)))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memset(s: *mut u8, c: i32, n: usize) -> *mut u8 {
+    unsafe { core::ptr::write_bytes(s, c as u8, n); }
+    s
+}
+
+#[cfg(all(windows, not(test)))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
+    let mut i = 0;
+    while i < n {
+        let a = unsafe { *s1.add(i) };
+        let b = unsafe { *s2.add(i) };
+        if a != b {
+            return a as i32 - b as i32;
+        }
+        i += 1;
+    }
+    0
+}
+

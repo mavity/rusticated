@@ -7,6 +7,7 @@ use crate::pin::Pin;
 use crate::task::{Context, Poll, Waker};
 use crate::time::Duration;
 use alloc::sync::Arc;
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use super::{timers::next_deadline, waker::task_waker};
@@ -35,31 +36,57 @@ struct Task {
     woken: Arc<AtomicBool>,
 }
 
-// ── Thread-local executor state ───────────────────────────────────────────────
-// TASKS: per-thread run queue. DRIVER: per-thread I/O reactor.
+// ── Global executor state ───────────────────────────────────────────────────
+// TASKS: run queue. DRIVER: I/O reactor.
 // TASK_DEPTH: approximate queue depth (available for work-stealing hints).
 
-thread_local! {
-    static TASKS: RefCell<VecDeque<Task>> = RefCell::new(VecDeque::new());
-    static DRIVER: RefCell<Option<Driver>> = RefCell::new(None);
-    static TASK_DEPTH: Cell<usize> = Cell::new(0);
-}
+#[repr(align(8))]
+struct TasksStorage(UnsafeCell<Option<VecDeque<Task>>>);
+
+unsafe impl Sync for TasksStorage {}
+
+#[repr(align(8))]
+struct DriverStorage(UnsafeCell<Option<Driver>>);
+
+unsafe impl Sync for DriverStorage {}
+
+#[repr(align(8))]
+struct TaskDepthStorage(UnsafeCell<Cell<usize>>);
+
+unsafe impl Sync for TaskDepthStorage {}
+
+static TASKS_STORAGE: TasksStorage = TasksStorage(UnsafeCell::new(None));
+static DRIVER_STORAGE: DriverStorage = DriverStorage(UnsafeCell::new(None));
+static TASK_DEPTH_STORAGE: TaskDepthStorage = TaskDepthStorage(UnsafeCell::new(Cell::new(0)));
 
 fn tasks_mut<R>(f: impl FnOnce(&mut VecDeque<Task>) -> R) -> R {
-    TASKS.with(|q| f(&mut *q.borrow_mut()))
+    unsafe {
+        let storage = core::ptr::addr_of!(TASKS_STORAGE).cast::<TasksStorage>();
+        let q = (*storage).0.get();
+        if (*q).is_none() {
+            *q = Some(VecDeque::new());
+        }
+        let queue = (*q).as_mut().unwrap_unchecked();
+        f(queue)
+    }
+}
+
+fn task_depth() -> &'static mut Cell<usize> {
+    unsafe { &mut *TASK_DEPTH_STORAGE.0.get() }
 }
 
 pub(crate) fn with_driver<R>(f: impl FnOnce(&mut Driver) -> R) -> io::Result<R> {
-    DRIVER.with(|cell| -> io::Result<R> {
-        let mut borrow = cell.borrow_mut();
-        if borrow.is_none() {
-            *borrow = Some(Driver::new()?);
+    unsafe {
+        let storage = core::ptr::addr_of!(DRIVER_STORAGE).cast::<DriverStorage>();
+        let cell = (*storage).0.get();
+        if (*cell).is_none() {
+            *cell = Some(Driver::new()?);
         }
-        match borrow.as_mut() {
+        match (*cell).as_mut() {
             Some(d) => Ok(f(d)),
             None => Err(io::Error::other("driver init failed")),
         }
-    })
+    }
 }
 
 // ─── JoinHandle ──────────────────────────────────────────────────────────────
@@ -133,21 +160,6 @@ impl<T> Future for JoinHandle<T> {
             state.waker = Some(cx.waker().clone());
             Poll::Pending
         }
-    }
-}
-
-/// Drive the runtime until `future` resolves, returning its output.
-pub fn block_on<F, T>(future: F) -> T
-where
-    F: Future<Output = T> + 'static,
-    T: 'static,
-{
-    let handle = spawn(future);
-    loop {
-        if let Some(res) = handle.try_join() {
-            return res.expect("task failed");
-        }
-        let _ = poll_step_idle(next_deadline()).unwrap();
     }
 }
 
@@ -364,10 +376,10 @@ fn poll_step_internal(timeout: Option<Option<Duration>>) -> io::Result<PollStatu
         }
     }
 
-    TASK_DEPTH.with(|d| d.set(remaining));
+    task_depth().set(remaining);
 
     #[cfg(windows)]
-    let live_io = super::windows::OUTSTANDING_IO.with(|c| c.get());
+    let live_io = super::windows::outstanding_io().get();
     #[cfg(not(windows))]
     let live_io = 0;
 
@@ -414,7 +426,7 @@ mod tests {
 
         let handle = spawn(async { 42u32 });
         let _ = spawn(async move {
-            result2.set(handle.await);
+            result2.set(handle.await.expect("join failed"));
         });
 
         drive_until_done();
@@ -431,7 +443,7 @@ mod tests {
         // then be correctly woken when the producer completes.
         let handle = spawn(async { 99u32 });
         let _ = spawn(async move {
-            result2.set(handle.await);
+            result2.set(handle.await.expect("join failed"));
         });
 
         drive_until_done();
@@ -461,7 +473,7 @@ mod tests {
 
         let _ = spawn(async move {
             let handle = spawn(async { true });
-            result2.set(handle.await);
+            result2.set(handle.await.expect("join failed"));
         });
 
         drive_until_done();
@@ -551,7 +563,7 @@ mod tests {
             let fast = spawn(async { 7u32 });
             let r = select(fast, core::future::pending::<u32>()).await;
             match r {
-                Either::Left(v) => r2.set(v),
+                Either::Left(v) => r2.set(v.expect("join failed")),
                 Either::Right(v) => r2.set(v),
             }
         });

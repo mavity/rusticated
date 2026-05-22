@@ -1,16 +1,10 @@
-#![no_std]
-#![no_main]
-
-extern crate alloc;
-
-use alloc::format;
-use alloc::string::String;
-use alloc::vec::Vec;
 use std::fs::File;
 use std::io::{AsyncRead, AsyncWrite};
 use std::tty::{stdin, stdout};
 
-std::spawn!(async_main());
+fn main() {
+    std::spawn!(async_main());
+}
 
 async fn async_main() {
     let mut out = stdout();
@@ -18,7 +12,7 @@ async fn async_main() {
 
     write_all(
         &mut out,
-        b"rusticated demo: type a line and press Enter (5s timeout)\n",
+        b"crusticated demo: type a line and press Enter (5s timeout)\n",
     )
     .await;
     write_all(&mut out, b"> ").await;

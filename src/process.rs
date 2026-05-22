@@ -14,6 +14,42 @@ pub struct Output {
     pub stderr: crate::vec::Vec<u8>,
 }
 
+/// A trait for types that can be returned from `main`.
+pub trait Termination {
+    /// Is called to get the exit code of the process.
+    fn report(self) -> i32;
+}
+
+impl Termination for () {
+    fn report(self) -> i32 {
+        0
+    }
+}
+
+impl Termination for i32 {
+    fn report(self) -> i32 {
+        self
+    }
+}
+
+impl Termination for ExitStatus {
+    fn report(self) -> i32 {
+        self.code().unwrap_or(1)
+    }
+}
+
+impl<T: Termination, E: core::fmt::Debug> Termination for core::result::Result<T, E> {
+    fn report(self) -> i32 {
+        match self {
+            Ok(val) => val.report(),
+            Err(err) => {
+                crate::eprintln!("Error: {:?}", err);
+                1
+            }
+        }
+    }
+}
+
 /// Returns the unique ID of the current process.
 pub fn id() -> ProcessId {
     0
@@ -643,6 +679,7 @@ pub fn exit(code: i32) -> ! {
     }
     #[cfg(windows)]
     {
+        #[link(name = "kernel32", kind = "raw-dylib")]
         unsafe extern "system" {
             fn ExitProcess(u_exit_code: u32) -> !;
         }
@@ -807,22 +844,9 @@ mod tests {
     use super::*;
     use alloc::string::ToString;
 
-    fn block_on<F: core::future::Future<Output = ()> + 'static>(f: F) {
-        crate::rt::executor::run(f);
-        loop {
-            match crate::rt::executor::poll_step().unwrap() {
-                crate::rt::executor::PollStatus::Done => break,
-                crate::rt::executor::PollStatus::Ready => continue,
-                crate::rt::executor::PollStatus::Idle { next_deadline } => {
-                    crate::rt::executor::poll_step_idle(next_deadline).unwrap();
-                }
-            }
-        }
-    }
-
     #[test]
     fn test_process_wait() {
-        block_on(async {
+        crate::rt::run(async {
             #[cfg(target_os = "windows")]
             let cmd_name = "cmd";
             #[cfg(not(target_os = "windows"))]

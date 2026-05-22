@@ -40,6 +40,8 @@ use crate::rc::Rc;
 use crate::task::{Context, Poll, Waker};
 use crate::vec::Vec;
 
+type MainFuture = Pin<Box<dyn Future<Output = ()>>>;
+
 #[unsafe(no_mangle)]
 extern "Rust" fn __getrandom_v03_custom(dest: *mut u8, len: usize) -> Result<(), getrandom::Error> {
     // SAFETY: `dest`/`len` come from getrandom which validates the slice is
@@ -111,19 +113,61 @@ impl OpState {
 
 // ─── Registry & runtime state ────────────────────────────────────────────────
 
-thread_local! {
-    static COMPLETION_REGISTRY: RefCell<Vec<(Rc<OpState>, Waker)>> =
-        const { RefCell::new(Vec::new()) };
-    static MAIN_FUTURE: RefCell<Option<Pin<Box<dyn Future<Output = ()>>>>> =
-        const { RefCell::new(None) };
-    static INITIALIZED: OnceCell<()> = const { OnceCell::new() };
-    static MAIN_DONE: OnceCell<()> = const { OnceCell::new() };
+#[repr(align(8))]
+struct CompletionRegistryStorage(UnsafeCell<Option<RefCell<Vec<(Rc<OpState>, Waker)>>>>);
+
+unsafe impl Sync for CompletionRegistryStorage {}
+
+#[repr(align(8))]
+struct MainFutureStorage(UnsafeCell<Option<RefCell<Option<MainFuture>>>>);
+
+unsafe impl Sync for MainFutureStorage {}
+
+#[repr(align(8))]
+struct InitializedStorage(UnsafeCell<OnceCell<()>>);
+
+unsafe impl Sync for InitializedStorage {}
+
+#[repr(align(8))]
+struct MainDoneStorage(UnsafeCell<OnceCell<()>>);
+
+unsafe impl Sync for MainDoneStorage {}
+
+static COMPLETION_REGISTRY_STORAGE: CompletionRegistryStorage = CompletionRegistryStorage(UnsafeCell::new(None));
+static MAIN_FUTURE_STORAGE: MainFutureStorage = MainFutureStorage(UnsafeCell::new(None));
+static INITIALIZED_STORAGE: InitializedStorage = InitializedStorage(UnsafeCell::new(OnceCell::new()));
+static MAIN_DONE_STORAGE: MainDoneStorage = MainDoneStorage(UnsafeCell::new(OnceCell::new()));
+
+fn completion_registry() -> &'static RefCell<Vec<(Rc<OpState>, Waker)>> {
+    unsafe {
+        let storage = &mut *COMPLETION_REGISTRY_STORAGE.0.get();
+        if storage.is_none() {
+            *storage = Some(RefCell::new(Vec::new()));
+        }
+        storage.as_ref().unwrap_unchecked()
+    }
+}
+
+fn main_future() -> &'static RefCell<Option<Pin<Box<dyn Future<Output = ()>>>>> {
+    unsafe {
+        let storage = &mut *MAIN_FUTURE_STORAGE.0.get();
+        if storage.is_none() {
+            *storage = Some(RefCell::new(None));
+        }
+        storage.as_ref().unwrap_unchecked()
+    }
+}
+
+fn initialized() -> &'static OnceCell<()> {
+    unsafe { &*INITIALIZED_STORAGE.0.get() }
+}
+
+fn main_done() -> &'static OnceCell<()> {
+    unsafe { &*MAIN_DONE_STORAGE.0.get() }
 }
 
 fn register(state: Rc<OpState>, waker: Waker) {
-    COMPLETION_REGISTRY.with(|registry| {
-        registry.borrow_mut().push((state, waker));
-    });
+    completion_registry().borrow_mut().push((state, waker));
 }
 
 /// Submit the main future to the runtime.
@@ -134,9 +178,7 @@ pub fn submit_main<F>(future: F)
 where
     F: Future<Output = ()> + 'static,
 {
-    MAIN_FUTURE.with(|main| {
-        *main.borrow_mut() = Some(Box::pin(future));
-    });
+    *main_future().borrow_mut() = Some(Box::pin(future));
 }
 
 /// One iteration of the reactive loop:
@@ -145,8 +187,8 @@ where
 ///    own [`Rc`] clone for that entry.
 /// 2. Poll the main future once so any newly-ready work can make progress.
 fn tick() {
-    COMPLETION_REGISTRY.with(|registry| {
-        let mut reg = registry.borrow_mut();
+    {
+        let mut reg = completion_registry().borrow_mut();
         let mut i = 0;
         while i < reg.len() {
             if reg[i].0.is_complete() {
@@ -156,24 +198,20 @@ fn tick() {
                 i += 1;
             }
         }
-    });
+    }
 
-    MAIN_FUTURE.with(|main_fut| {
-        let mut borrow = main_fut.borrow_mut();
-        let done = if let Some(fut) = borrow.as_mut() {
-            let waker = noop_waker();
-            let mut cx = Context::from_waker(&waker);
-            fut.as_mut().poll(&mut cx).is_ready()
-        } else {
-            false
-        };
-        if done {
-            *borrow = None;
-            MAIN_DONE.with(|cell| {
-                let _ = cell.set(());
-            });
-        }
-    });
+    let mut borrow = main_future().borrow_mut();
+    let done = if let Some(fut) = borrow.as_mut() {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        fut.as_mut().poll(&mut cx).is_ready()
+    } else {
+        false
+    };
+    if done {
+        *borrow = None;
+        let _ = main_done().set(());
+    }
 }
 
 fn noop_waker() -> Waker {
@@ -325,15 +363,13 @@ unsafe extern "Rust" {
 /// signalled into shared memory, or on a host timer).
 #[unsafe(no_mangle)]
 pub extern "C" fn run() {
-    INITIALIZED.with(|init| {
-        if init.get().is_none() {
-            // SAFETY: the guest is required to define `guest_init`; if it
-            // does not, the program would have failed to link. Calling once
-            // per process is enforced by the `OnceCell`.
-            unsafe { guest_init() };
-            let _ = init.set(());
-        }
-    });
+    if initialized().get().is_none() {
+        // SAFETY: the guest is required to define `guest_init`; if it
+        // does not, the program would have failed to link. Calling once
+        // per process is enforced by the `OnceCell`.
+        unsafe { guest_init() };
+        let _ = initialized().set(());
+    }
 
     tick();
 }
@@ -353,5 +389,5 @@ pub fn poll_step() {
 /// driving the guest once it returns 1.
 #[unsafe(no_mangle)]
 pub extern "C" fn is_done() -> u32 {
-    MAIN_DONE.with(|done| if done.get().is_some() { 1 } else { 0 })
+    if main_done().get().is_some() { 1 } else { 0 }
 }
