@@ -57,3 +57,7 @@ impl UringDriver {
         Ok(0)
     }
 }
+
+impl UringDriver {
+    pub fn outstanding_io(&self) -> usize { 0 }
+}

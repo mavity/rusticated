@@ -58,3 +58,12 @@ impl Driver {
         }
     }
 }
+
+impl Driver {
+    pub fn outstanding_io(&self) -> usize {
+        match self {
+            Self::Uring(d) => d.outstanding_io(),
+            Self::Epoll(d) => d.outstanding_io(),
+        }
+    }
+}
