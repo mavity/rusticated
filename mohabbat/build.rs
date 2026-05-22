@@ -175,6 +175,7 @@ fn build_sysroot(workspace_dir: &Path, target: &str) -> bool {
         .args(&[
             "build",
             "-Z", "build-std=core,alloc,compiler_builtins",
+            "-Z", "build-std-features=compiler-builtins-mem",
             "-p", "rusticated",
             "--target", target,
             "--release",
@@ -205,7 +206,7 @@ fn build_sysroot(workspace_dir: &Path, target: &str) -> bool {
                 let files: Vec<&str> = file_part.split(',').collect();
                 for f in files {
                     let cleaned = f.trim_matches('"');
-                    if cleaned.ends_with(".rlib") {
+                    if cleaned.ends_with(".rlib") || cleaned.ends_with(".rmeta") {
                         let src_path = Path::new(cleaned);
                         if let Some(file_name_os) = src_path.file_name() {
                             let file_name = file_name_os.to_string_lossy();
@@ -237,10 +238,13 @@ fn build_component(workspace_dir: &Path, target_tree: &Path, package: &str, targ
     let mut rustflags = env::var("RUSTFLAGS").unwrap_or_default();
     rustflags.push_str(&format!(" --sysroot {}", sysroot_path.display()));
 
+    let target_env = target.to_uppercase().replace("-", "_");
+    let rustflags_env = format!("CARGO_TARGET_{}_RUSTFLAGS", target_env);
+
     let mut cmd = Command::new("cargo");
     cmd.current_dir(workspace_dir)
         .env("CARGO_TARGET_DIR", target_tree)
-        .env("RUSTFLAGS", rustflags)
+        .env(rustflags_env, rustflags)
         .env_remove("CARGO_MAKEFLAGS")
         .args(&["build", "-p", package, "--release", "--target", target]);
     

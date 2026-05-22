@@ -1,40 +1,61 @@
-#![allow(clippy::missing_safety_doc)]
+﻿#![allow(clippy::missing_safety_doc)]
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __CxxFrameHandler3() -> i32 {
-    0
+pub unsafe extern "C" fn fmod(x: f64, y: f64) -> f64 {
+    x % y
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
-    let mut i = 0;
+pub unsafe extern "C" fn _CxxThrowException(_: *mut u8, _: *mut u8) -> ! {
+    core::panic!("_CxxThrowException called (C++ EH not supported without std)");
+}
+
+#[cfg(test)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn free(_: *mut u8) {}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memset(dest: *mut u8, c: i32, n: core::primitive::usize) -> *mut u8 {
     unsafe {
+        let mut i = 0;
         while i < n {
-            let a = *s1.add(i);
-            let b = *s2.add(i);
-            if a != b {
-                return (a as i32) - (b as i32);
-            }
+            *dest.add(i) = c as u8;
             i += 1;
         }
+        dest
     }
-    0
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
-    let mut i = 0;
+pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: core::primitive::usize) -> *mut u8 {
     unsafe {
+        let mut i = 0;
         while i < n {
             *dest.add(i) = *src.add(i);
             i += 1;
         }
+        dest
     }
-    dest
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+pub unsafe extern "C" fn memcmp(s1: *const u8, s2: *const u8, n: core::primitive::usize) -> i32 {
+    unsafe {
+        let mut i = 0;
+        while i < n {
+            let a = *s1.add(i);
+            let b = *s2.add(i);
+            if a != b {
+                return a as i32 - b as i32;
+            }
+            i += 1;
+        }
+        0
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: core::primitive::usize) -> *mut u8 {
     unsafe {
         if src < dest as *const u8 {
             let mut i = n;
@@ -49,45 +70,18 @@ pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mu
                 i += 1;
             }
         }
+        dest
     }
-    dest
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn memset(s: *mut u8, c: i32, n: usize) -> *mut u8 {
-    let mut i = 0;
-    let b = c as u8;
+pub unsafe extern "C" fn strlen(s: *const u8) -> core::primitive::usize {
     unsafe {
-        while i < n {
-            *s.add(i) = b;
-            i += 1;
+        let mut n = 0;
+        while *s.add(n) != 0 {
+            n += 1;
         }
+        n
     }
-    s
 }
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn strlen(mut s: *const u8) -> usize {
-    let mut len = 0;
-    unsafe {
-        while *s != 0 {
-            len += 1;
-            s = s.add(1);
-        }
-    }
-    len
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn fmod(x: f64, y: f64) -> f64 {
-    x % y
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn _CxxThrowException(_: *mut u8, _: *mut u8) -> ! {
-    loop {}
-}
-
-#[cfg(test)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn free(_: *mut u8) {}
