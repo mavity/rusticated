@@ -3,8 +3,8 @@
 
 extern crate alloc;
 
-use wasmtime::{Config, Engine, Linker, Module, Store};
 use alloc::format;
+use wasmtime::{Config, Engine, Linker, Module, Store};
 
 mod env_impl;
 mod handles;
@@ -67,4 +67,3 @@ fn run(wasm_bytes: &[u8]) -> anyhow::Result<()> {
 
     Ok(())
 }
-

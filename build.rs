@@ -21,11 +21,7 @@ fn main() {
                 break;
             }
         }
-        if dir
-            .file_name()
-            .map(|n| n != "target")
-            .unwrap_or(true)
-        {
+        if dir.file_name().map(|n| n != "target").unwrap_or(true) {
             panic!("Could not locate Cargo target directory from OUT_DIR");
         }
         dir

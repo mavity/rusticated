@@ -195,10 +195,10 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                     match f.read(buf) {
                         Ok(n) => {
                             read = n;
-                        },
+                        }
                         Err(e) => {
                             error = e.raw_os_error().unwrap_or(5) as u32;
-                        },
+                        }
                     }
                 } else {
                     anyhow::bail!("read: invalid handle {}", handle);
@@ -323,8 +323,7 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             // Default to read if neither read nor write is set.
             let do_read = read_flag || (!write_flag && !create);
             let do_write = write_flag || create;
-            {
-            }
+            {}
             let f = std::fs::OpenOptions::new()
                 .read(do_read)
                 .write(do_write)
@@ -613,14 +612,12 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             // Parse: program\0arg1\0arg2\0\0KEY=val\0\0
             let mut iter = cfg.split(|&b| b == 0);
             let program = match iter.next() {
-                Some(p) if !p.is_empty() => {
-                    match std::str::from_utf8(p) {
-                        Ok(s) => s.to_string(),
-                        Err(_) => {
-                            return write_overlapped(data, ov_ptr, libc::EINVAL as u32, 0, 0);
-                        }
+                Some(p) if !p.is_empty() => match std::str::from_utf8(p) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => {
+                        return write_overlapped(data, ov_ptr, libc::EINVAL as u32, 0, 0);
                     }
-                }
+                },
                 _ => {
                     return write_overlapped(data, ov_ptr, libc::EINVAL as u32, 0, 0);
                 }
@@ -666,7 +663,7 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                 }
             }
         },
-    )?;;
+    )?;
 
     // process_wait(ov, process_handle)
     // Registers a pending wait; completion is handled in poll_completions.
