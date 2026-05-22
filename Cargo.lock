@@ -930,9 +930,6 @@ dependencies = [
 [[package]]
 name = "rusticated-demo"
 version = "0.1.0"
-dependencies = [
- "rusticated",
-]
 
 [[package]]
 name = "rustix"
