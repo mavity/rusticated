@@ -1,14 +1,15 @@
 //! TTY management — provides [`Tty`], [`stdin`], [`stdout`], [`get_size`],
-//! and [`set_mode`] across all platforms.
+//! [`set_mode`], [`enable_raw_mode`], [`disable_raw_mode`], and
+//! [`cursor_position`] across all platforms.
 
 #[cfg(unix)]
-pub use unix_tty::{Tty, get_size, set_mode, stdin, stdout};
+pub use unix_tty::{Tty, cursor_position, disable_raw_mode, enable_raw_mode, get_size, set_mode, stdin, stdout};
 
 #[cfg(windows)]
-pub use windows_tty::{Tty, get_size, set_mode, stdin, stdout};
+pub use windows_tty::{Tty, cursor_position, disable_raw_mode, enable_raw_mode, get_size, set_mode, stdin, stdout};
 
 #[cfg(target_family = "wasm")]
-pub use wasm_tty::{Tty, get_size, set_mode, stdin, stdout};
+pub use wasm_tty::{Tty, cursor_position, disable_raw_mode, enable_raw_mode, get_size, set_mode, stdin, stdout};
 
 /// Returns `true` if standard input is a terminal.
 pub fn is_stdin_a_tty() -> bool {
@@ -85,6 +86,236 @@ mod unix_tty {
     /// Currently a stub — returns `Ok(())`.  Wire up `tcsetattr` as needed.
     pub const fn set_mode(_handle: u64, _mode: u32) -> io::Result<()> {
         Ok(())
+    }
+
+    // ── Raw mode ──────────────────────────────────────────────────────────────
+
+    /// Per-platform termios layout and flag constants.
+    #[cfg(target_os = "linux")]
+    mod tc {
+        /// c_lflag: disable canonical (line-buffered) input.
+        pub const ICANON: u32 = 0x0000_0002;
+        /// c_lflag: disable input echo.
+        pub const ECHO: u32 = 0x0000_0008;
+        /// c_lflag: disable signal generation for special characters.
+        pub const ISIG: u32 = 0x0000_0001;
+        /// c_lflag: disable extended processing.
+        pub const IEXTEN: u32 = 0x0000_8000;
+        /// c_iflag: disable XON/XOFF flow control.
+        pub const IXON: u32 = 0x0000_0400;
+        /// c_iflag: disable stripping of 8th bit.
+        pub const ISTRIP: u32 = 0x0000_0020;
+        /// c_iflag: disable CR to NL translation.
+        pub const ICRNL: u32 = 0x0000_0100;
+        /// c_oflag: disable output post-processing.
+        pub const OPOST: u32 = 0x0000_0001;
+        /// c_cflag: character-size mask.
+        pub const CSIZE: u32 = 0x0000_0030;
+        /// c_cflag: 8-bit characters.
+        pub const CS8: u32 = 0x0000_0030;
+        /// c_cflag: parity enable.
+        pub const PARENB: u32 = 0x0000_0100;
+        /// c_cflag: mark parity errors.
+        pub const PARMRK: u32 = 0x0000_0008;
+        /// c_iflag: ignore break condition.
+        pub const IGNBRK: u32 = 0x0000_0001;
+        /// c_iflag: send SIGINT on break.
+        pub const BRKINT: u32 = 0x0000_0002;
+        /// c_iflag: mark parity and framing errors.
+        pub const PARMRK_IFLAG: u32 = 0x0000_0008;
+        /// c_iflag: enable input parity checking.
+        pub const INPCK: u32 = 0x0000_0010;
+        /// c_iflag: translate NL to CR on input.
+        pub const INLCR: u32 = 0x0000_0080;
+        /// c_iflag: ignore CR.
+        pub const IGNCR: u32 = 0x0000_0100;
+        /// Index into c_cc for minimum characters.
+        pub const VMIN: usize = 6;
+        /// Index into c_cc for timeout.
+        pub const VTIME: usize = 5;
+        pub const TCSANOW: i32 = 0;
+
+        #[repr(C)]
+        pub struct Termios {
+            pub c_iflag: u32,
+            pub c_oflag: u32,
+            pub c_cflag: u32,
+            pub c_lflag: u32,
+            pub c_line: u8,
+            pub c_cc: [u8; 19],
+            pub c_ispeed: u32,
+            pub c_ospeed: u32,
+        }
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+    ))]
+    mod tc {
+        pub const ICANON: u32 = 0x0000_0100;
+        pub const ECHO: u32 = 0x0000_0008;
+        pub const ISIG: u32 = 0x0000_0080;
+        pub const IEXTEN: u32 = 0x0000_0400;
+        pub const IXON: u32 = 0x0000_0200;
+        pub const ISTRIP: u32 = 0x0000_0020;
+        pub const ICRNL: u32 = 0x0000_0100;
+        pub const OPOST: u32 = 0x0000_0001;
+        pub const CSIZE: u32 = 0x0000_0300;
+        pub const CS8: u32 = 0x0000_0300;
+        pub const PARENB: u32 = 0x0000_1000;
+        pub const PARMRK: u32 = 0x0000_0008;
+        pub const IGNBRK: u32 = 0x0000_0001;
+        pub const BRKINT: u32 = 0x0000_0002;
+        pub const PARMRK_IFLAG: u32 = 0x0000_0008;
+        pub const INPCK: u32 = 0x0000_0010;
+        pub const INLCR: u32 = 0x0000_0040;
+        pub const IGNCR: u32 = 0x0000_0080;
+        pub const VMIN: usize = 16;
+        pub const VTIME: usize = 17;
+        pub const TCSANOW: i32 = 0;
+
+        /// Termios struct layout for macOS/BSD (64-bit targets).
+        #[repr(C)]
+        pub struct Termios {
+            pub c_iflag: u32,
+            pub c_oflag: u32,
+            pub c_cflag: u32,
+            pub c_lflag: u32,
+            pub c_cc: [u8; 20],
+            pub _pad: [u8; 4],
+            pub c_ispeed: u64,
+            pub c_ospeed: u64,
+        }
+    }
+
+    unsafe extern "C" {
+        fn tcgetattr(fd: i32, termios: *mut tc::Termios) -> i32;
+        fn tcsetattr(fd: i32, optional_actions: i32, termios: *const tc::Termios) -> i32;
+    }
+
+    use crate::sync::Mutex;
+
+    static SAVED_TERMIOS: Mutex<Option<tc::Termios>> = Mutex::new(None);
+
+    // SAFETY: `tc::Termios` contains only POD integer/byte fields — safe to
+    // send across thread boundaries.
+    unsafe impl Send for tc::Termios {}
+
+    /// Switch stdin into raw mode (no echo, no line buffering).
+    ///
+    /// Saves the original termios so [`disable_raw_mode`] can restore it.
+    pub fn enable_raw_mode() -> io::Result<()> {
+        let mut orig = core::mem::MaybeUninit::<tc::Termios>::uninit();
+        // SAFETY: fd 0 is stdin; `orig` is valid memory for the call.
+        let ret = unsafe { tcgetattr(0, orig.as_mut_ptr()) };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: tcgetattr initialised the struct.
+        let orig = unsafe { orig.assume_init() };
+
+        // Build raw-mode termios from the original.
+        let mut raw = tc::Termios {
+            c_iflag: orig.c_iflag
+                & !(tc::IGNBRK
+                    | tc::BRKINT
+                    | tc::PARMRK_IFLAG
+                    | tc::ISTRIP
+                    | tc::INLCR
+                    | tc::IGNCR
+                    | tc::ICRNL
+                    | tc::IXON),
+            c_oflag: orig.c_oflag & !tc::OPOST,
+            c_cflag: (orig.c_cflag & !tc::CSIZE & !tc::PARENB) | tc::CS8,
+            c_lflag: orig.c_lflag & !(tc::ECHO | tc::ISIG | tc::ICANON | tc::IEXTEN),
+            ..orig
+        };
+        raw.c_cc[tc::VMIN] = 1;
+        raw.c_cc[tc::VTIME] = 0;
+
+        // SAFETY: fd 0 is stdin; `raw` is a valid termios.
+        let ret = unsafe { tcsetattr(0, tc::TCSANOW, &raw) };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        *SAVED_TERMIOS.lock() = Some(orig);
+        Ok(())
+    }
+
+    /// Restore the terminal to the state saved by the last [`enable_raw_mode`] call.
+    pub fn disable_raw_mode() -> io::Result<()> {
+        let guard = SAVED_TERMIOS.lock();
+        if let Some(ref orig) = *guard {
+            // SAFETY: fd 0 is stdin; `orig` is a valid termios saved earlier.
+            let ret = unsafe { tcsetattr(0, tc::TCSANOW, orig) };
+            if ret < 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    /// Query the current cursor position by sending a DSR escape to stdout
+    /// and reading the `ESC [ row ; col R` response from stdin.
+    ///
+    /// Returns `(col, row)` both 0-indexed.  Falls back to `(0, 0)` on error.
+    pub fn cursor_position() -> io::Result<(u16, u16)> {
+        // Send Device Status Report (DSR) to stdout.
+        let dsr = b"\x1b[6n";
+        let n = unsafe { write(1, dsr.as_ptr(), dsr.len()) };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        // Read the response `ESC [ row ; col R` from stdin byte-by-byte.
+        let mut buf = [0u8; 32];
+        let mut len = 0usize;
+        loop {
+            let n = unsafe { read(0, buf.as_mut_ptr().add(len), 1) };
+            if n <= 0 {
+                return Err(io::Error::last_os_error());
+            }
+            len += 1;
+            if buf[len - 1] == b'R' {
+                break;
+            }
+            if len >= buf.len() {
+                break;
+            }
+        }
+
+        // Parse `ESC [ row ; col R`.
+        parse_cursor_response(&buf[..len]).ok_or(io::Error::other("bad DSR response"))
+    }
+
+    fn parse_cursor_response(buf: &[u8]) -> Option<(u16, u16)> {
+        // Expect: 0x1b '[' digits ';' digits 'R'
+        if buf.len() < 6 || buf[0] != 0x1b || buf[1] != b'[' || buf[buf.len() - 1] != b'R' {
+            return None;
+        }
+        let inner = &buf[2..buf.len() - 1];
+        let sep = inner.iter().position(|&b| b == b';')?;
+        let row = parse_ascii_u16(&inner[..sep])?;
+        let col = parse_ascii_u16(&inner[sep + 1..])?;
+        Some((col.saturating_sub(1), row.saturating_sub(1)))
+    }
+
+    fn parse_ascii_u16(bytes: &[u8]) -> Option<u16> {
+        if bytes.is_empty() {
+            return None;
+        }
+        let mut n: u16 = 0;
+        for &b in bytes {
+            if b < b'0' || b > b'9' {
+                return None;
+            }
+            n = n.checked_mul(10)?.checked_add((b - b'0') as u16)?;
+        }
+        Some(n)
     }
 
     impl crate::io::IsTerminal for Tty {
@@ -186,6 +417,7 @@ mod windows_tty {
 
     // ── Windows API ─────────────────────────────────────────────────────────
 
+    #[link(name = "kernel32", kind = "raw-dylib")]
     unsafe extern "system" {
         fn GetStdHandle(n_std_handle: u32) -> usize;
         fn GetFileType(hFile: usize) -> u32;
@@ -201,7 +433,7 @@ mod windows_tty {
             buffer: *const u8,
             number_of_bytes_to_write: u32,
             number_of_bytes_written: *mut u32,
-            overlapped: *mut Overlapped,
+            overlapped: *mut core::ffi::c_void,
         ) -> i32;
         fn CreateThread(
             lpThreadAttributes: *mut core::ffi::c_void,
@@ -260,7 +492,115 @@ mod windows_tty {
         Ok(())
     }
 
-    // ── ConsoleReadState ─────────────────────────────────────────────────────
+    // ── Console mode constants ────────────────────────────────────────────────
+
+    const ENABLE_LINE_INPUT: u32 = 0x0002;
+    const ENABLE_ECHO_INPUT: u32 = 0x0004;
+    const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
+    const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
+
+    #[link(name = "kernel32", kind = "raw-dylib")]
+    unsafe extern "system" {
+        fn GetConsoleMode(hConsoleHandle: usize, lpMode: *mut u32) -> i32;
+        fn SetConsoleMode(hConsoleHandle: usize, dwMode: u32) -> i32;
+    }
+
+    #[repr(C)]
+    struct COORD {
+        x: i16,
+        y: i16,
+    }
+    #[repr(C)]
+    struct SMALL_RECT {
+        left: i16,
+        top: i16,
+        right: i16,
+        bottom: i16,
+    }
+    #[repr(C)]
+    struct CONSOLE_SCREEN_BUFFER_INFO {
+        dw_size: COORD,
+        dw_cursor_position: COORD,
+        w_attributes: u16,
+        sr_window: SMALL_RECT,
+        dw_maximum_window_size: COORD,
+    }
+
+    #[link(name = "kernel32", kind = "raw-dylib")]
+    unsafe extern "system" {
+        fn GetConsoleScreenBufferInfo(
+            hConsoleOutput: usize,
+            lpConsoleScreenBufferInfo: *mut CONSOLE_SCREEN_BUFFER_INFO,
+        ) -> i32;
+    }
+
+    /// Saved original console input mode.
+    static SAVED_IN_MODE: AtomicU32 = AtomicU32::new(0);
+    /// Saved original console output mode.
+    static SAVED_OUT_MODE: AtomicU32 = AtomicU32::new(0);
+
+    /// Enable raw (character-at-a-time) console input and VT output processing.
+    pub fn enable_raw_mode() -> io::Result<()> {
+        let stdin_h = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+        let stdout_h = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+
+        let mut in_mode: u32 = 0;
+        let mut out_mode: u32 = 0;
+        if unsafe { GetConsoleMode(stdin_h, &mut in_mode) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { GetConsoleMode(stdout_h, &mut out_mode) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        SAVED_IN_MODE.store(in_mode, Ordering::Relaxed);
+        SAVED_OUT_MODE.store(out_mode, Ordering::Relaxed);
+
+        let new_in = (in_mode & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT))
+            | ENABLE_VIRTUAL_TERMINAL_INPUT;
+        let new_out = out_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+
+        if unsafe { SetConsoleMode(stdin_h, new_in) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { SetConsoleMode(stdout_h, new_out) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Restore console modes saved by the last [`enable_raw_mode`] call.
+    pub fn disable_raw_mode() -> io::Result<()> {
+        let stdin_h = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+        let stdout_h = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+
+        let in_mode = SAVED_IN_MODE.load(Ordering::Relaxed);
+        let out_mode = SAVED_OUT_MODE.load(Ordering::Relaxed);
+
+        if in_mode != 0 && unsafe { SetConsoleMode(stdin_h, in_mode) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if out_mode != 0 && unsafe { SetConsoleMode(stdout_h, out_mode) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Query the current cursor position via `GetConsoleScreenBufferInfo`.
+    ///
+    /// Returns `(col, row)` both 0-indexed.
+    pub fn cursor_position() -> io::Result<(u16, u16)> {
+        let h = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+        let mut info = core::mem::MaybeUninit::<CONSOLE_SCREEN_BUFFER_INFO>::uninit();
+        if unsafe { GetConsoleScreenBufferInfo(h, info.as_mut_ptr()) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let info = unsafe { info.assume_init() };
+        Ok((
+            info.dw_cursor_position.x as u16,
+            info.dw_cursor_position.y as u16,
+        ))
+    }
 
     /// Pinned state for one in-flight console `ReadFile` operation.
     ///
@@ -357,7 +697,7 @@ mod windows_tty {
             if consume_ready(token) {
                 if let Some(mut state) = self.state.take() {
                     // Reclaim I/O count
-                    crate::rt::windows::OUTSTANDING_IO.with(|c| c.set(c.get() - 1));
+                    crate::rt::windows::outstanding_io().set(crate::rt::windows::outstanding_io().get() - 1);
 
                     let n = state.bytes_read.load(Ordering::Acquire) as usize;
                     // SAFETY: the thread has finished (WaitForSingleObject in
@@ -426,7 +766,7 @@ mod windows_tty {
                 }
 
                 // Track live I/O
-                crate::rt::windows::OUTSTANDING_IO.with(|c| c.set(c.get() + 1));
+                crate::rt::windows::outstanding_io().set(crate::rt::windows::outstanding_io().get() + 1);
                 self.registered = true;
             }
 
@@ -454,7 +794,7 @@ mod windows_tty {
                     unsafe { WaitForSingleObject(th, 0) };
 
                     unsafe { CloseHandle(th) };
-                    crate::rt::windows::OUTSTANDING_IO.with(|c| c.set(c.get() - 1));
+                    crate::rt::windows::outstanding_io().set(crate::rt::windows::outstanding_io().get() - 1);
                 }
             }
         }
@@ -539,24 +879,12 @@ mod windows_tty {
 
     #[cfg(test)]
     mod tests {
+        extern crate std;
+
         use super::*;
         use crate::io::AsyncWrite;
+        use crate::traits::AsyncRead;
         use crate::vec::Vec;
-
-        // Drive the single-threaded executor to completion, sleeping when idle.
-        // Identical in structure to the helper in `fs.rs` tests.
-        fn block_on<F: std::future::Future<Output = ()> + 'static>(f: F) {
-            crate::rt::executor::run(f);
-            loop {
-                match crate::rt::executor::poll_step().unwrap() {
-                    crate::rt::executor::PollStatus::Done => break,
-                    crate::rt::executor::PollStatus::Ready => continue,
-                    crate::rt::executor::PollStatus::Idle { next_deadline } => {
-                        crate::rt::executor::poll_step_idle(next_deadline).unwrap();
-                    }
-                }
-            }
-        }
 
         // ── Stubs ────────────────────────────────────────────────────────────
 
@@ -633,7 +961,7 @@ mod windows_tty {
 
         #[test]
         fn write_to_real_file_handle() {
-            block_on(async {
+            crate::rt::run(async {
                 let path = "rusticated_tty_write_test.bin";
                 let file = crate::fs::OpenOptions::new()
                     .write(true)
@@ -642,7 +970,7 @@ mod windows_tty {
                     .open(path)
                     .await
                     .expect("create test file");
-                let raw: usize = file.handle as usize;
+                let raw: usize = file.as_raw_fd() as usize;
                 // Wrap the raw handle in our Tty (private field, accessible here).
                 let mut tty = Tty { handle: raw };
 
@@ -666,17 +994,19 @@ mod windows_tty {
                 for _ in 0..128 {
                     buf.push(0);
                 }
-                let (res, on_disk) = read_file.read(buf).await;
+                let (res, on_disk) = AsyncRead::read(&mut read_file, buf).await;
                 let n = res.unwrap();
                 assert_eq!(&on_disk[..n], b"rusticated tty write test");
                 drop(read_file);
 
-                extern "system" {
-                    fn DeleteFileW(lpFileName: *const u16) -> i32;
+                unsafe {
+                    unsafe extern "system" {
+                        fn DeleteFileW(lpFileName: *const u16) -> i32;
+                    }
+                    let mut path_u16: Vec<u16> = path.encode_utf16().collect();
+                    path_u16.push(0);
+                    DeleteFileW(path_u16.as_ptr());
                 }
-                let mut path_u16: Vec<u16> = path.encode_utf16().collect();
-                path_u16.push(0);
-                unsafe { DeleteFileW(path_u16.as_ptr()) };
             });
         }
 
@@ -684,7 +1014,7 @@ mod windows_tty {
 
         #[test]
         fn write_to_invalid_handle_returns_err() {
-            block_on(async {
+            crate::rt::run(async {
                 // usize::MAX == INVALID_HANDLE_VALUE on Windows — WriteFile always
                 // rejects it with ERROR_INVALID_HANDLE.  Using this sentinel avoids
                 // the manual-close + handle-recycling race that occurs when tests
@@ -704,7 +1034,7 @@ mod windows_tty {
 
         #[test]
         fn console_read_future_null_handle_returns_err() {
-            block_on(async {
+            crate::rt::run(async {
                 // NULL (0) is rejected by ReadFile inside the dedicated thread,
                 // or fails thread creation entirely. Tests the res==0 error branch
                 // inside ConsoleReadFuture::poll and verifies the buffer is returned.
@@ -772,6 +1102,21 @@ mod wasm_tty {
         Ok(())
     }
 
+    /// Enable raw mode via the WASM host (mode flag 1).
+    pub fn enable_raw_mode() -> io::Result<()> {
+        set_mode(0, 1)
+    }
+
+    /// Disable raw mode via the WASM host (mode flag 0 = restore).
+    pub fn disable_raw_mode() -> io::Result<()> {
+        set_mode(0, 0)
+    }
+
+    /// Cursor position is tracked by the WASM host; returns `(0, 0)` here.
+    pub fn cursor_position() -> io::Result<(u16, u16)> {
+        Ok((0, 0))
+    }
+
     impl crate::io::IsTerminal for Tty {
         fn is_terminal(&self) -> bool {
             // On WASM, assume handles 0 and 1 (stdin/stdout) are always TTYs.
@@ -780,7 +1125,7 @@ mod wasm_tty {
         }
     }
 
-    impl crate::io::Read for Tty {
+    impl crate::io::AsyncRead for Tty {
         async fn read(&mut self, buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
             let handle = self.handle;
             let (err, bytes_read, _, mut buf) =
@@ -799,12 +1144,15 @@ mod wasm_tty {
             unsafe { buf.set_len(bytes_read as usize) };
             (Ok(bytes_read as usize), buf)
         }
-        fn read_sync(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+    }
+
+    impl crate::io::Read for Tty {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
             Err(io::Error::other("sync read not implemented for WASM Tty"))
         }
     }
 
-    impl crate::io::Write for Tty {
+    impl crate::io::AsyncWrite for Tty {
         async fn write(&mut self, buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
             let handle = self.handle;
             let used = buf.len() as u32;
@@ -823,10 +1171,13 @@ mod wasm_tty {
         async fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
-        fn write_sync(&mut self, _buf: &[u8]) -> io::Result<usize> {
+    }
+
+    impl crate::io::Write for Tty {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
             Err(io::Error::other("sync write not implemented for WASM Tty"))
         }
-        fn flush_sync(&mut self) -> io::Result<()> {
+        fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
     }

@@ -75,6 +75,8 @@ pub mod imports {
         );
         /// Query metadata for a path. Result_ext = handle to a stat-info struct.
         pub fn path_stat(overlapped: *mut Overlapped, path_ptr: *const u8, path_len: u32);
+        /// Query metadata for a path without following symbolic links. Result_ext = handle to a stat-info struct.
+        pub fn path_lstat(overlapped: *mut Overlapped, path_ptr: *const u8, path_len: u32);
 
         /// Get file size from a stat handle.
         pub fn stat_len(stat_handle: u64) -> u64;

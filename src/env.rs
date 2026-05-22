@@ -64,7 +64,7 @@ pub mod consts {
 
 #[cfg(not(target_family = "wasm"))]
 mod native_env {
-    use crate::borrow::ToOwned;
+    use crate::alloc::borrow::ToOwned;
     use crate::io;
     use crate::path::PathBuf;
     use crate::string::String;
@@ -136,10 +136,11 @@ mod native_env {
 
     #[cfg(windows)]
     fn read_args() -> Vec<String> {
-        #[link(name = "shell32")]
+        #[link(name = "shell32", kind = "raw-dylib")]
         unsafe extern "system" {
             fn CommandLineToArgvW(lpCmdLine: *const u16, pNumArgs: *mut i32) -> *mut *mut u16;
         }
+        #[link(name = "kernel32", kind = "raw-dylib")]
         unsafe extern "system" {
             fn GetCommandLineW() -> *const u16;
             fn LocalFree(hMem: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
@@ -210,6 +211,7 @@ mod native_env {
 
     #[cfg(windows)]
     fn read_env() -> Vec<(String, String)> {
+        #[link(name = "kernel32", kind = "raw-dylib")]
         unsafe extern "system" {
             fn GetEnvironmentStringsW() -> *const u16;
             fn FreeEnvironmentStringsW(env: *const u16) -> i32;
@@ -271,6 +273,27 @@ mod native_env {
 
 #[cfg(not(target_family = "wasm"))]
 pub use native_env::{current_dir, get_args, get_env, get_host_env_vars, join_paths};
+
+/// Error returned when an environment variable is not found or invalid.
+#[derive(Debug, Clone)]
+pub struct VarError;
+
+impl core::fmt::Display for VarError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("environment variable not found")
+    }
+}
+
+/// Looks up an environment variable by key.
+///
+/// Returns `Ok(String)` if the variable is set, or `Err(VarError)` otherwise.
+pub fn var(key: &str) -> Result<crate::string::String, VarError> {
+    get_env()
+        .into_iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v)
+        .ok_or(VarError)
+}
 
 #[cfg(target_family = "wasm")]
 use crate::abi::imports;

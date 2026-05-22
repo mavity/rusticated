@@ -1,40 +1,52 @@
 //! Error types.
 
 use crate::string::String;
-use thiserror::Error;
+use core::fmt;
 
 /// Result alias.
 pub type Result<T> = core::result::Result<T, SystemError>;
 
 /// Errors from I/O and system calls.
-#[derive(Debug, Error)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum SystemError {
     /// The requested operation is not supported on this target.
-    #[error("operation not supported: {0}")]
     Unsupported(&'static str),
 
     /// A path-bound operation failed.
-    #[error("i/o error on {path}: {source}")]
     Io {
         /// Path that the failing operation referred to.
         path: String,
         /// Underlying I/O error.
-        #[source]
         source: crate::io::Error,
     },
 
     /// A path-free I/O failure.
-    #[error("i/o error: {0}")]
-    PlainIo(#[from] crate::io::Error),
+    PlainIo(crate::io::Error),
 
     /// A name could not be resolved.
-    #[error("not found: {0}")]
     NotFound(String),
 
     /// Implementation-specific failure.
-    #[error("error: {0}")]
     Other(String),
+}
+
+impl fmt::Display for SystemError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unsupported(s) => write!(f, "operation not supported: {}", s),
+            Self::Io { path, source } => write!(f, "i/o error on {}: {}", path, source),
+            Self::PlainIo(e) => write!(f, "i/o error: {}", e),
+            Self::NotFound(s) => write!(f, "not found: {}", s),
+            Self::Other(s) => write!(f, "error: {}", s),
+        }
+    }
+}
+
+impl From<crate::io::Error> for SystemError {
+    fn from(e: crate::io::Error) -> Self {
+        Self::PlainIo(e)
+    }
 }
 
 impl SystemError {

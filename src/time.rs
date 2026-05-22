@@ -44,6 +44,7 @@ pub fn now_ns() -> u64 {
     }
     #[cfg(windows)]
     {
+        #[link(name = "kernel32", kind = "raw-dylib")]
         unsafe extern "system" {
             fn GetSystemTimeAsFileTime(lpSystemTimeAsFileTime: *mut u64);
         }
@@ -150,6 +151,7 @@ mod native_instant {
     // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[cfg(windows)]
+    #[link(name = "kernel32", kind = "raw-dylib")]
     unsafe extern "system" {
         fn QueryPerformanceCounter(lp_performance_count: *mut i64) -> i32;
         fn QueryPerformanceFrequency(lp_frequency: *mut i64) -> i32;

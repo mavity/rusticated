@@ -41,6 +41,7 @@ impl Default for Overlapped {
     }
 }
 
+#[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn SleepEx(dwMilliseconds: u32, bAlertable: i32) -> u32;
 
@@ -103,9 +104,25 @@ unsafe extern "system" {
 pub const ERROR_IO_PENDING: u32 = 997;
 pub const WAIT_IO_COMPLETION: u32 = 0x000000C0;
 
-thread_local! {
-    pub(crate) static OUTSTANDING_IO: Cell<usize> = const { Cell::new(0) };
-    static MAIN_THREAD_HANDLE: Cell<usize> = const { Cell::new(0) };
+#[repr(align(8))]
+struct OutstandingIoStorage(UnsafeCell<Cell<usize>>);
+
+unsafe impl Sync for OutstandingIoStorage {}
+
+#[repr(align(8))]
+struct MainThreadHandleStorage(UnsafeCell<Cell<usize>>);
+
+unsafe impl Sync for MainThreadHandleStorage {}
+
+static OUTSTANDING_IO_STORAGE: OutstandingIoStorage = OutstandingIoStorage(UnsafeCell::new(Cell::new(0)));
+static MAIN_THREAD_HANDLE_STORAGE: MainThreadHandleStorage = MainThreadHandleStorage(UnsafeCell::new(Cell::new(0)));
+
+pub(crate) fn outstanding_io() -> &'static mut Cell<usize> {
+    unsafe { &mut *OUTSTANDING_IO_STORAGE.0.get() }
+}
+
+fn main_thread_handle() -> &'static mut Cell<usize> {
+    unsafe { &mut *MAIN_THREAD_HANDLE_STORAGE.0.get() }
 }
 
 /// Opportunistically flush the APC queue.
@@ -147,7 +164,7 @@ unsafe extern "system" fn apc_callback(error_code: u32, bytes: u32, overlapped: 
         waker.wake();
     }
 
-    OUTSTANDING_IO.with(|c| c.set(c.get() - 1));
+    outstanding_io().set(outstanding_io().get() - 1);
 }
 
 // ─── Driver ──────────────────────────────────────────────────────────────────
@@ -165,7 +182,7 @@ impl Driver {
         }
 
         // Initialize main thread handle for QueueUserAPC
-        if MAIN_THREAD_HANDLE.with(|c| c.get()) == 0 {
+        if main_thread_handle().get() == 0 {
             unsafe {
                 let mut h = 0;
                 DuplicateHandle(
@@ -177,7 +194,7 @@ impl Driver {
                     0,
                     2, // DUPLICATE_SAME_ACCESS
                 );
-                MAIN_THREAD_HANDLE.with(|c| c.set(h));
+                main_thread_handle().set(h);
             }
         }
 
@@ -250,7 +267,7 @@ unsafe extern "system" fn wake_apc_callback(data: usize) {
 /// Queue an APC to the main thread to wake up a specific token.
 /// Useful for bridging thread-pool callbacks (like TTY) to the main loop.
 pub fn queue_wake(token: u64) {
-    let h = MAIN_THREAD_HANDLE.with(|c| c.get());
+    let h = main_thread_handle().get();
     if h != 0 {
         unsafe {
             QueueUserAPC(Some(wake_apc_callback), h, token as usize);
@@ -313,7 +330,7 @@ impl Future for OverlappedRead {
                 return Poll::Ready((Err(io::Error::from_raw_os_error(err as i32)), buf));
             }
 
-            OUTSTANDING_IO.with(|c| c.set(c.get() + 1));
+            outstanding_io().set(outstanding_io().get() + 1);
             self.started = true;
 
             // Injection Hook B: Flush instantly
@@ -391,7 +408,7 @@ impl Future for OverlappedWrite {
                 return Poll::Ready((Err(io::Error::from_raw_os_error(err as i32)), buf));
             }
 
-            OUTSTANDING_IO.with(|c| c.set(c.get() + 1));
+            outstanding_io().set(outstanding_io().get() + 1);
             self.started = true;
 
             // Injection Hook B: Flush instantly
@@ -474,4 +491,22 @@ impl Future for WaitProcess {
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
         Poll::Ready(Ok(()))
     }
+}
+
+#[unsafe(no_mangle)]
+static mut _tls_index: u32 = 0;
+
+/// Stack probe for AArch64 Windows.
+#[cfg(target_arch = "aarch64")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __chkstk() {}
+
+/// Entry point for MSVC-linked binaries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mainCRTStartup() -> ! {
+    unsafe extern "Rust" {
+        fn main();
+    }
+    unsafe { main() };
+    crate::process::exit(0);
 }

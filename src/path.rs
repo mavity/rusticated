@@ -1,4 +1,4 @@
-﻿//! Pure compile-target path-convention utilities.
+//! Pure compile-target path-convention utilities.
 //!
 //! These functions answer "what counts as a path separator on the host this
 //! shell was compiled for?" They are *not* on the [`crate::Platform`] trait
@@ -16,9 +16,9 @@ use crate::borrow::Cow;
 use crate::ops::Deref;
 use crate::string::{String, ToString};
 
-// ─── Path (borrowed DST) ─────────────────────────────────────────────────────
+// --- Path (borrowed DST) -----------------------------------------------------
 
-/// A borrowed, immutable path slice — analogous to `std::path::Path`.
+/// A borrowed, immutable path slice - analogous to `std::path::Path`.
 ///
 /// `Path` is a DST (`repr(transparent)` over `str`). Obtain a reference via
 /// [`Path::new`] or by dereferencing a [`PathBuf`].
@@ -139,11 +139,9 @@ impl Path {
     /// Returns the stem of the final component (filename without extension).
     #[must_use]
     pub fn file_stem(&self) -> Option<&str> {
-        self.file_name().map(|name| {
-            match name.rfind('.') {
-                None | Some(0) => name,
-                Some(i) => &name[..i],
-            }
+        self.file_name().map(|name| match name.rfind('.') {
+            None | Some(0) => name,
+            Some(i) => &name[..i],
         })
     }
 
@@ -231,71 +229,90 @@ impl Path {
     }
 
     /// Returns the metadata for the file at this path (async).
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn metadata(&self) -> crate::io::Result<crate::fs::Metadata> {
         crate::fs::metadata(self.as_str()).await
     }
 
     /// Query metadata for this path (sync).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn metadata_sync(&self) -> crate::io::Result<crate::fs::Metadata> {
         crate::fs::metadata_sync(self.as_str())
     }
 
     /// Returns `true` if the path exists on disk (async).
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn exists(&self) -> bool {
         self.metadata().await.is_ok()
     }
 
     /// Returns `true` if the path exists on disk (sync).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn exists_sync(&self) -> bool {
         self.metadata_sync().is_ok()
     }
 
     /// Returns `true` if the path exists and is a regular file (async).
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn is_file(&self) -> bool {
         self.metadata().await.map(|m| m.is_file()).unwrap_or(false)
     }
 
     /// Returns `true` if the path exists and is a regular file (sync).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn is_file_sync(&self) -> bool {
         self.metadata_sync().map(|m| m.is_file()).unwrap_or(false)
     }
 
     /// Returns `true` if the path exists and is a directory (async).
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn is_dir(&self) -> bool {
         self.metadata().await.map(|m| m.is_dir()).unwrap_or(false)
     }
 
     /// Returns `true` if the path exists and is a directory (sync).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn is_dir_sync(&self) -> bool {
         self.metadata_sync().map(|m| m.is_dir()).unwrap_or(false)
     }
 
     /// Returns `true` if the path exists and is a symbolic link (async).
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn is_symlink(&self) -> bool {
-        crate::fs::symlink_metadata(self.as_str()).await.map(|m| m.is_symlink()).unwrap_or(false)
+        crate::fs::symlink_metadata(self.as_str())
+            .await
+            .map(|m| m.is_symlink())
+            .unwrap_or(false)
     }
 
     /// Returns `true` if the path exists and is a symbolic link (sync).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn is_symlink_sync(&self) -> bool {
-        crate::fs::symlink_metadata_sync(self.as_str()).map(|m| m.is_symlink()).unwrap_or(false)
+        crate::fs::symlink_metadata_sync(self.as_str())
+            .map(|m| m.is_symlink())
+            .unwrap_or(false)
     }
 
     /// Read the directory entries at this path (async).
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn read_dir(&self) -> crate::io::Result<crate::fs::ReadDir> {
         crate::fs::read_dir(self.as_str()).await
     }
 
     /// Read the directory entries at this path (sync).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn read_dir_sync(&self) -> crate::io::Result<crate::fs::ReadDir> {
         crate::fs::read_dir_sync(self.as_str())
     }
 
     /// Returns the canonical form of the path (async).
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn canonicalize(&self) -> crate::io::Result<PathBuf> {
         crate::fs::canonicalize(self.as_str()).await
     }
 
     /// Returns the canonical form of the path (sync).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn canonicalize_sync(&self) -> crate::io::Result<PathBuf> {
         crate::fs::canonicalize_sync(self.as_str())
     }
@@ -350,7 +367,7 @@ impl core::fmt::Display for PathDisplay<'_> {
     }
 }
 
-// ─── PartialEq / PartialOrd implementations for Path / PathBuf ──────────────
+// --- PartialEq / PartialOrd implementations for Path / PathBuf --------------
 
 impl PartialEq<PathBuf> for Path {
     fn eq(&self, other: &PathBuf) -> bool {
@@ -472,7 +489,7 @@ impl PartialOrd<PathBuf> for str {
     }
 }
 
-// ─── Path components ─────────────────────────────────────────────────────────
+// --- Path components ---------------------------------------------------------
 
 /// A single component of a path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -519,7 +536,9 @@ impl<'a> Iterator for Components<'a> {
     type Item = Component<'a>;
 
     fn next(&mut self) -> Option<Component<'a>> {
-        if !self.prefix_done && (self.remaining.starts_with('/') || self.remaining.starts_with('\\')) {
+        if !self.prefix_done
+            && (self.remaining.starts_with('/') || self.remaining.starts_with('\\'))
+        {
             self.prefix_done = true;
             self.remaining = self.remaining.trim_start_matches(['/', '\\']);
             return Some(Component::RootDir);
@@ -544,7 +563,7 @@ impl<'a> Iterator for Components<'a> {
     }
 }
 
-// ─── Internal helpers ─────────────────────────────────────────────────────────
+// --- Internal helpers ---------------------------------------------------------
 
 /// Strip trailing `/` or `\` characters (keeping a bare root `/`).
 fn strip_trailing_separators(s: &str) -> &str {
@@ -561,7 +580,7 @@ fn rfind_sep(s: &str) -> Option<usize> {
     s.rfind(['/', '\\'])
 }
 
-// ─── PathBuf ─────────────────────────────────────────────────────────────────
+// --- PathBuf -----------------------------------------------------------------
 
 /// An owned, mutable platform path string.
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -618,6 +637,7 @@ impl PathBuf {
     }
 
     /// Returns the metadata for the file at this path (async).
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn metadata(&self) -> crate::io::Result<crate::fs::Metadata> {
         self.as_path().metadata().await
     }

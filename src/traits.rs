@@ -5,6 +5,28 @@ pub trait Read {
     /// Read some bytes from this source into the specified buffer.
     fn read(&mut self, buf: &mut [u8]) -> crate::io::Result<usize>;
 
+    /// Read the exact number of bytes required to fill `buf`.
+    fn read_exact(&mut self, mut buf: &mut [u8]) -> crate::io::Result<()> {
+        while !buf.is_empty() {
+            match self.read(buf) {
+                Ok(0) => break,
+                Ok(n) => buf = &mut buf[n..],
+                Err(ref e) if e.kind() == crate::io::ErrorKind::Interrupted => {
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        if !buf.is_empty() {
+            Err(crate::io::Error::new(
+                crate::io::ErrorKind::UnexpectedEof,
+                "failed to fill whole buffer",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     /// Read all bytes from this source and append them to `buf`.
     fn read_to_end(&mut self, buf: &mut crate::vec::Vec<u8>) -> crate::io::Result<usize>
     where
@@ -100,6 +122,21 @@ impl Write for &mut crate::vec::Vec<u8> {
     }
 }
 
+impl<W: Write + ?Sized> Write for alloc::boxed::Box<W> {
+    fn write(&mut self, buf: &[u8]) -> crate::io::Result<usize> {
+        (**self).write(buf)
+    }
+    fn flush(&mut self) -> crate::io::Result<()> {
+        (**self).flush()
+    }
+    fn write_all(&mut self, buf: &[u8]) -> crate::io::Result<()> {
+        (**self).write_all(buf)
+    }
+    fn write_fmt(&mut self, fmt: core::fmt::Arguments<'_>) -> crate::io::Result<()> {
+        (**self).write_fmt(fmt)
+    }
+}
+
 /// Trait for writing (asynchronous).
 pub trait AsyncWrite {
     /// Write bytes from `buf`.
@@ -115,4 +152,10 @@ pub trait BufRead: Read {
     fn fill_buf(&mut self) -> crate::io::Result<&[u8]>;
     /// Consume bytes.
     fn consume(&mut self, amt: usize);
+}
+
+/// Trait for seeking.
+pub trait Seek {
+    /// Seek to an offset, in bytes, in a stream.
+    fn seek(&mut self, pos: crate::io::SeekFrom) -> crate::io::Result<u64>;
 }

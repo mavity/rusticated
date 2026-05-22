@@ -1,3 +1,6 @@
+<!--
+function __README__() { /*
+-->
 # Rusticated
 
 This is a custom target crate meant to handle extremely efficiency-consciouis and resource-frugal implementation of Rust std for embedded and performance-sensitive environments.
@@ -182,4 +185,8 @@ Themandate (non-negotiable) is to have an executable that depends visibly only o
 NOTES:
 
 1. `rusticated` is a custom target, not a create to import. Its exports therefore are not imported from crates, but as the target std.
+
+<!--
+*/ }
+-->
 
