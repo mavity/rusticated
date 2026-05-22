@@ -91,35 +91,47 @@ fn decompress(input: &[u8]) -> Result<Vec<u8>, &'static str> {
     }
     impl<T> Default for Rebox<T> {
         fn default() -> Self {
-            Rebox { b: Vec::new().into_boxed_slice() }
+            Rebox {
+                b: Vec::new().into_boxed_slice(),
+            }
         }
     }
     impl<T> SliceWrapper<T> for Rebox<T> {
-        fn slice(&self) -> &[T] { &self.b }
+        fn slice(&self) -> &[T] {
+            &self.b
+        }
     }
     impl<T> SliceWrapperMut<T> for Rebox<T> {
-        fn slice_mut(&mut self) -> &mut [T] { &mut self.b }
+        fn slice_mut(&mut self) -> &mut [T] {
+            &mut self.b
+        }
     }
     #[derive(Default, Clone, Copy)]
     struct HeapAllocator;
     impl Allocator<u8> for HeapAllocator {
         type AllocatedMemory = Rebox<u8>;
         fn alloc_cell(&mut self, size: usize) -> Rebox<u8> {
-            Rebox { b: vec![0u8; size].into_boxed_slice() }
+            Rebox {
+                b: vec![0u8; size].into_boxed_slice(),
+            }
         }
         fn free_cell(&mut self, _: Rebox<u8>) {}
     }
     impl Allocator<u32> for HeapAllocator {
         type AllocatedMemory = Rebox<u32>;
         fn alloc_cell(&mut self, size: usize) -> Rebox<u32> {
-            Rebox { b: vec![0u32; size].into_boxed_slice() }
+            Rebox {
+                b: vec![0u32; size].into_boxed_slice(),
+            }
         }
         fn free_cell(&mut self, _: Rebox<u32>) {}
     }
     impl Allocator<HuffmanCode> for HeapAllocator {
         type AllocatedMemory = Rebox<HuffmanCode>;
         fn alloc_cell(&mut self, size: usize) -> Rebox<HuffmanCode> {
-            Rebox { b: vec![HuffmanCode::default(); size].into_boxed_slice() }
+            Rebox {
+                b: vec![HuffmanCode::default(); size].into_boxed_slice(),
+            }
         }
         fn free_cell(&mut self, _: Rebox<HuffmanCode>) {}
     }
@@ -166,22 +178,32 @@ fn decompress(input: &[u8]) -> Result<Vec<u8>, &'static str> {
 // Brotli compression (quality=1 for speed, no-std via BrotliCompressCustomIo)
 #[cfg(target_arch = "wasm32")]
 fn compress(data: &[u8]) -> anyhow::Result<Vec<u8>> {
-    use brotli::{Allocator, BrotliCompressCustomIo, CustomRead, CustomWrite, SliceWrapper, SliceWrapperMut};
-    use brotli::enc::backward_references::BrotliEncoderParams;
     use brotli::enc::BrotliAlloc;
+    use brotli::enc::backward_references::BrotliEncoderParams;
+    use brotli::{
+        Allocator, BrotliCompressCustomIo, CustomRead, CustomWrite, SliceWrapper, SliceWrapperMut,
+    };
 
     // Box-backed memory cell (satisfies AllocatedSlice<T> via blanket impl)
     struct CBox<T> {
         b: alloc::boxed::Box<[T]>,
     }
     impl<T> Default for CBox<T> {
-        fn default() -> Self { CBox { b: Vec::new().into_boxed_slice() } }
+        fn default() -> Self {
+            CBox {
+                b: Vec::new().into_boxed_slice(),
+            }
+        }
     }
     impl<T> SliceWrapper<T> for CBox<T> {
-        fn slice(&self) -> &[T] { &self.b }
+        fn slice(&self) -> &[T] {
+            &self.b
+        }
     }
     impl<T> SliceWrapperMut<T> for CBox<T> {
-        fn slice_mut(&mut self) -> &mut [T] { &mut self.b }
+        fn slice_mut(&mut self) -> &mut [T] {
+            &mut self.b
+        }
     }
 
     // Blanket allocator: works for every T: Default + Clone (covers all BrotliAlloc bounds)
@@ -189,13 +211,18 @@ fn compress(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     impl<T: Default + Clone> Allocator<T> for CAlloc {
         type AllocatedMemory = CBox<T>;
         fn alloc_cell(&mut self, len: usize) -> CBox<T> {
-            CBox { b: vec![T::default(); len].into_boxed_slice() }
+            CBox {
+                b: vec![T::default(); len].into_boxed_slice(),
+            }
         }
         fn free_cell(&mut self, _: CBox<T>) {}
     }
     impl BrotliAlloc for CAlloc {}
 
-    struct SliceReader<'a> { data: &'a [u8], pos: usize }
+    struct SliceReader<'a> {
+        data: &'a [u8],
+        pos: usize,
+    }
     impl<'a> CustomRead<&'static str> for SliceReader<'a> {
         fn read(&mut self, buf: &mut [u8]) -> Result<usize, &'static str> {
             let n = (self.data.len() - self.pos).min(buf.len());
@@ -205,13 +232,17 @@ fn compress(data: &[u8]) -> anyhow::Result<Vec<u8>> {
         }
     }
 
-    struct VecWriter { vec: Vec<u8> }
+    struct VecWriter {
+        vec: Vec<u8>,
+    }
     impl CustomWrite<&'static str> for VecWriter {
         fn write(&mut self, buf: &[u8]) -> Result<usize, &'static str> {
             self.vec.extend_from_slice(buf);
             Ok(buf.len())
         }
-        fn flush(&mut self) -> Result<(), &'static str> { Ok(()) }
+        fn flush(&mut self) -> Result<(), &'static str> {
+            Ok(())
+        }
     }
 
     let mut input_buf = vec![0u8; 4096];
@@ -231,7 +262,8 @@ fn compress(data: &[u8]) -> anyhow::Result<Vec<u8>> {
         CAlloc,
         &mut |_, _, _, _| {},
         "unexpected eof",
-    ).map_err(|e| anyhow::anyhow!("brotli compress failed: {}", e))?;
+    )
+    .map_err(|e| anyhow::anyhow!("brotli compress failed: {}", e))?;
 
     Ok(writer.vec)
 }
@@ -260,7 +292,13 @@ fn find_meta(buf: &[u8]) -> Option<(u64, u64, u64, u64, u64)> {
             // Note: payload_offset is a decompressed offset, pool_len is the compressed
             // pool size, so they cannot be directly compared.
             if pool_len > 0 {
-                return Some((pool_len, washmhost_offset, washmhost_len, payload_offset, payload_len));
+                return Some((
+                    pool_len,
+                    washmhost_offset,
+                    washmhost_len,
+                    payload_offset,
+                    payload_len,
+                ));
             }
         }
     }
@@ -305,7 +343,10 @@ fn extract_package_name(toml: &str) -> Option<String> {
         }
         if in_package && trimmed.starts_with("name") {
             if let Some(eq) = trimmed.find('=') {
-                let val = trimmed[eq + 1..].trim().trim_matches('"').trim_matches('\'');
+                let val = trimmed[eq + 1..]
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'');
                 if !val.is_empty() {
                     return Some(val.into());
                 }
@@ -331,10 +372,14 @@ async fn build_project(project_dir: &str, self_path: &str) -> anyhow::Result<Str
     let cargo_toml_path = if project_dir.ends_with("Cargo.toml") {
         project_dir.into()
     } else {
-        format!("{}/Cargo.toml", project_dir.trim_end_matches('/').trim_end_matches('\\'))
+        format!(
+            "{}/Cargo.toml",
+            project_dir.trim_end_matches('/').trim_end_matches('\\')
+        )
     };
 
-    let toml_data = read_all(&cargo_toml_path).await
+    let toml_data = read_all(&cargo_toml_path)
+        .await
         .map_err(|e| anyhow::anyhow!("Cannot read {}: {}", cargo_toml_path, e))?;
     let toml_str = core::str::from_utf8(&toml_data)
         .map_err(|_| anyhow::anyhow!("Cargo.toml is not valid UTF-8"))?;
@@ -357,19 +402,27 @@ async fn build_project(project_dir: &str, self_path: &str) -> anyhow::Result<Str
         .env("CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS", &rustflags)
         .env("CARGO_TARGET_DIR", &cargo_target_dir);
 
-    let mut child = cmd.spawn().await
+    let mut child = cmd
+        .spawn()
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to spawn cargo: {}", e))?;
-    let status = child.wait().await
+    let status = child
+        .wait()
+        .await
         .map_err(|e| anyhow::anyhow!("cargo wait failed: {}", e))?;
 
     if !status.success() {
         return Err(anyhow::anyhow!(
-            "cargo build failed (exit code {:?})", status.code()
+            "cargo build failed (exit code {:?})",
+            status.code()
         ));
     }
 
     // Locate the compiled wasm: binary name preserves hyphens (cargo output for [[bin]] targets)
-    Ok(format!("{}/wasm32-unknown-unknown/release/{}.wasm", cargo_target_dir, package_name))
+    Ok(format!(
+        "{}/wasm32-unknown-unknown/release/{}.wasm",
+        cargo_target_dir, package_name
+    ))
 }
 
 // The "juice bottle refill": read self (mohab.bat), swap payload WASM, write new vegetable.
@@ -380,11 +433,13 @@ async fn juice_bottle_refill(
     output_path: &str,
 ) -> anyhow::Result<()> {
     out_print("[mohabbat] Reading self...\n").await;
-    let self_data = read_all(self_path).await
+    let self_data = read_all(self_path)
+        .await
         .map_err(|e| anyhow::anyhow!("Cannot read self {}: {}", self_path, e))?;
 
     out_print("[mohabbat] Reading new payload...\n").await;
-    let new_payload = read_all(new_wasm_path).await
+    let new_payload = read_all(new_wasm_path)
+        .await
         .map_err(|e| anyhow::anyhow!("Cannot read wasm {}: {}", new_wasm_path, e))?;
 
     // Locate Zone A end: search for the sentinel that terminates the script header
@@ -405,7 +460,8 @@ async fn juice_bottle_refill(
     if pool_start < zone_a_end {
         return Err(anyhow::anyhow!(
             "pool_start {} < zone_a_end {}: corrupted layout",
-            pool_start, zone_a_end
+            pool_start,
+            zone_a_end
         ));
     }
 
@@ -415,11 +471,13 @@ async fn juice_bottle_refill(
         .map_err(|e| anyhow::anyhow!("Decompression failed: {}", e))?;
 
     // Extract washmhosts section (pool_raw[0..payload_offset])
-    let washmhosts_raw = pool_raw.get(..payload_offset as usize)
-        .ok_or_else(|| anyhow::anyhow!(
+    let washmhosts_raw = pool_raw.get(..payload_offset as usize).ok_or_else(|| {
+        anyhow::anyhow!(
             "payload_offset {} > pool_raw.len() {}",
-            payload_offset, pool_raw.len()
-        ))?;
+            payload_offset,
+            pool_raw.len()
+        )
+    })?;
 
     // Build new pool: washmhosts unchanged + new payload
     let mut new_pool_raw = washmhosts_raw.to_vec();
@@ -427,8 +485,8 @@ async fn juice_bottle_refill(
 
     // Compress new pool
     out_print("[mohabbat] Compressing new pool...\n").await;
-    let new_pool_compressed = compress(&new_pool_raw)
-        .map_err(|e| anyhow::anyhow!("Compression failed: {}", e))?;
+    let new_pool_compressed =
+        compress(&new_pool_raw).map_err(|e| anyhow::anyhow!("Compression failed: {}", e))?;
 
     // Clone Zone B (brots) and patch all MOHABBAT metas
     let mut new_zone_b = self_data[zone_a_end..pool_start].to_vec();
@@ -440,7 +498,8 @@ async fn juice_bottle_refill(
 
     // Write output vegetable: Zone A (unchanged) + Zone B (patched) + Zone C (new)
     out_print("[mohabbat] Writing output...\n").await;
-    let mut out_file = File::create(output_path).await
+    let mut out_file = File::create(output_path)
+        .await
         .map_err(|e| anyhow::anyhow!("Cannot create {}: {}", output_path, e))?;
 
     write_file_all(&mut out_file, &self_data[..zone_a_end]).await?;
@@ -493,7 +552,11 @@ async fn async_main() {
         }
     };
 
-    out_print(&format!("[mohabbat] Packaging {} -> {}\n", wasm_path, output)).await;
+    out_print(&format!(
+        "[mohabbat] Packaging {} -> {}\n",
+        wasm_path, output
+    ))
+    .await;
 
     match juice_bottle_refill(self_path, &wasm_path, &output).await {
         Ok(()) => out_print(&format!("[mohabbat] Done: {}\n", output)).await,
@@ -505,4 +568,3 @@ async fn async_main() {
 fn main() {
     println!("[mohabbat] Success: mohab.bat generated via build script.");
 }
-

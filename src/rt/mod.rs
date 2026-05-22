@@ -12,11 +12,11 @@ pub mod linux_driver;
 #[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
 pub mod linux_epoll;
 #[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
+pub mod linux_op;
+#[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
 pub mod linux_state;
 #[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
 pub mod linux_uring;
-#[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
-pub mod linux_op;
 #[cfg(not(target_family = "wasm"))]
 pub mod ready;
 #[cfg(not(target_family = "wasm"))]
