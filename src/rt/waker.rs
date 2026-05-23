@@ -16,6 +16,8 @@ static TASK_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
         // SAFETY: consuming the Arc that was stored in the RawWaker.
         let arc = unsafe { Arc::from_raw(ptr as *const AtomicBool) };
         arc.store(true, Ordering::Release);
+        #[cfg(windows)]
+        crate::rt::windows::queue_wake(u64::MAX);
         // arc drops here → refcount decremented
     },
     // wake_by_ref: set flag, borrow without consuming
@@ -24,6 +26,8 @@ static TASK_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
         let arc = unsafe { Arc::from_raw(ptr as *const AtomicBool) };
         arc.store(true, Ordering::Release);
         core::mem::forget(arc);
+        #[cfg(windows)]
+        crate::rt::windows::queue_wake(u64::MAX);
     },
     // drop: decrement refcount
     |ptr| {
