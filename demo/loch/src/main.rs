@@ -10,22 +10,21 @@ use ui::draw_ui;
 use events::handle_input;
 
 use ratatui::Terminal;
-use rusticated::io::{AsyncRead, AsyncWrite};
-use rusticated::tty::{stdin, stdout, Tty};
-use rusticated::io;
+use std::io::{AsyncRead, AsyncWrite};
+use std::tty::{stdin, stdout, Tty};
 
 struct RawModeGuard;
 
 impl RawModeGuard {
     fn new() -> Self {
-        let _ = rusticated::tty::enable_raw_mode();
+        let _ = std::tty::enable_raw_mode();
         Self
     }
 }
 
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
-        let _ = rusticated::tty::disable_raw_mode();
+        let _ = std::tty::disable_raw_mode();
     }
 }
 
@@ -47,7 +46,7 @@ async fn async_main() {
     let mut out = stdout();
     let mut input = stdin();
     
-    let (w, h) = rusticated::tty::get_size(1).unwrap_or((80, 24));
+    let (w, h) = std::tty::get_size(1).unwrap_or((80, 24));
     let backend = TruantBackend::new(w, h);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.clear().unwrap();
@@ -56,7 +55,7 @@ async fn async_main() {
 
     while !app.should_quit {
         // Handle resizing dynamically
-        let (cur_w, cur_h) = rusticated::tty::get_size(1).unwrap_or((80, 24));
+        let (cur_w, cur_h) = std::tty::get_size(1).unwrap_or((80, 24));
         if cur_w != getattr_width(&terminal) || cur_h != getattr_height(&terminal) {
             terminal.backend_mut().resize(cur_w, cur_h);
             terminal.clear().unwrap();
@@ -80,7 +79,7 @@ async fn async_main() {
         }
     }
 
-    let mut clear_str = rusticated::vec::Vec::new();
+    let mut clear_str = std::vec::Vec::new();
     clear_str.extend_from_slice(b"\x1b[2J\x1b[1;1H\x1b[?25h\x1b[0m"); // make sure to restore cursor and colors
     write_all(&mut out, &clear_str).await;
 }
@@ -93,4 +92,6 @@ fn getattr_height(terminal: &Terminal<TruantBackend>) -> u16 {
     terminal.backend().size().unwrap_or(ratatui::layout::Size { width: 0, height: 0 }).height
 }
 
-rusticated::main!(async_main());
+fn main() {
+    std::spawn!(async_main());
+}

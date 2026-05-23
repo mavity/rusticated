@@ -1,4 +1,4 @@
-use rusticated::fs::read_dir;
+use std::fs::read_dir;
 
 pub struct App {
     pub left_files: Vec<String>,
