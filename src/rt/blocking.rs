@@ -81,7 +81,7 @@ impl ThreadPool {
         let mut cv = CONDITION_VARIABLE(0);
         #[cfg(windows)]
         let mut srw = SRWLOCK(0);
-        
+
         #[cfg(windows)]
         unsafe {
             InitializeConditionVariable(&mut cv);
@@ -119,26 +119,37 @@ impl ThreadPool {
             #[cfg(windows)]
             {
                 let now = unsafe { GetTickCount64() };
-                if state.last_spawn_attempt_ms == 0 || now >= state.last_spawn_attempt_ms + state.next_spawn_delay_ms {
+                if state.last_spawn_attempt_ms == 0
+                    || now >= state.last_spawn_attempt_ms + state.next_spawn_delay_ms
+                {
                     state.last_spawn_attempt_ms = now;
                     state.next_spawn_delay_ms = (state.next_spawn_delay_ms * 2).min(5000);
                     self.spawn_thread(&mut state);
                 }
             }
         }
-        
+
         #[cfg(windows)]
-        unsafe { WakeConditionVariable(&self.inner.cv as *const _ as *mut _) };
+        unsafe {
+            WakeConditionVariable(&self.inner.cv as *const _ as *mut _)
+        };
     }
 
     fn spawn_thread(&self, state: &mut PoolState) {
         state.total_threads += 1;
         let inner = Arc::clone(&self.inner);
-        
+
         #[cfg(windows)]
         unsafe {
             let param = Arc::into_raw(inner) as *mut core::ffi::c_void;
-            let h = CreateThread(core::ptr::null_mut(), 0, Some(worker_bridge), param, 0, core::ptr::null_mut());
+            let h = CreateThread(
+                core::ptr::null_mut(),
+                0,
+                Some(worker_bridge),
+                param,
+                0,
+                core::ptr::null_mut(),
+            );
             if h != 0 {
                 CloseHandle(h);
             }
@@ -165,12 +176,12 @@ unsafe extern "system" fn worker_bridge(param: *mut core::ffi::c_void) -> u32 {
                 unsafe {
                     let cv_ptr = &inner.cv as *const _ as *mut CONDITION_VARIABLE;
                     let srw_ptr = &inner.srw as *const _ as *mut SRWLOCK;
-                    
+
                     AcquireSRWLockExclusive(srw_ptr);
                     SleepConditionVariableSRW(cv_ptr, srw_ptr, 10000, 0);
                     ReleaseSRWLockExclusive(srw_ptr);
                 }
-                
+
                 // After waking, check if we should liquidate due to timeout
                 let mut state = inner.state.lock();
                 if state.tasks.is_empty() {
@@ -217,17 +228,17 @@ impl<T: Send + 'static> BlockingOpFuture<T> {
             waker: Mutex::new(None),
         });
         let state_clone = Arc::clone(&state);
-        
+
         pool().spawn(move || {
             let res = f();
             let mut s = state_clone.result.lock();
             *s = Some(res);
-            
+
             if let Some(w) = state_clone.waker.lock().take() {
                 w.wake();
             }
         });
-        
+
         Self { state }
     }
 }

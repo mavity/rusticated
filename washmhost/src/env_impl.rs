@@ -324,9 +324,10 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let do_read = read_flag || (!write_flag && !create);
             let do_write = write_flag || create;
             {}
-                        let is_dir = std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false);
+            let is_dir = std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false);
             let new_handle = if is_dir && do_read && !do_write {
-                let rd = std::fs::read_dir(path).with_context(|| format!("path_open dir: {path:?}"))?;
+                let rd =
+                    std::fs::read_dir(path).with_context(|| format!("path_open dir: {path:?}"))?;
                 host.alloc_handle(HandleKind::Dir(rd, Vec::new()))
             } else {
                 let f = std::fs::OpenOptions::new()
@@ -566,13 +567,13 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
          -> anyhow::Result<()> {
             let mem = get_memory(&mut caller)?;
             let (data, host) = mem.data_and_store_mut(&mut caller);
-            
+
             let mut read_bytes = 0;
             let mut error = 0;
 
             if let Some(HandleKind::Dir(rd, leftovers)) = host.handles.get_mut(&handle) {
                 let max_len = len as usize;
-                
+
                 while leftovers.len() < max_len {
                     if let Some(entry_res) = rd.next() {
                         match entry_res {
@@ -898,7 +899,3 @@ pub fn poll_completions(
 
     Ok(progress)
 }
-
-
-
-

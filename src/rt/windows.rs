@@ -397,7 +397,7 @@ impl Future for OverlappedWrite {
             }
 
             self.as_mut().get_mut().started = true;
-            
+
             // Injection Hook B: Flush instantly
             flush_completions();
         }
