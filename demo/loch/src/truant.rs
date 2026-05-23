@@ -23,7 +23,9 @@ impl TruantBackend {
     fn apply_color(&mut self, color: Color, is_bg: bool) {
         let base = if is_bg { 40 } else { 30 };
         match color {
-            Color::Reset => self.buffer.push_str(if is_bg { "\x1b[49m" } else { "\x1b[39m" }),
+            Color::Reset => self
+                .buffer
+                .push_str(if is_bg { "\x1b[49m" } else { "\x1b[39m" }),
             Color::Black => self.buffer.push_str(&format!("\x1b[{}m", base)),
             Color::Red => self.buffer.push_str(&format!("\x1b[{}m", base + 1)),
             Color::Green => self.buffer.push_str(&format!("\x1b[{}m", base + 2)),
@@ -62,11 +64,21 @@ impl Backend for TruantBackend {
 
     fn clear_region(&mut self, clear_type: ratatui::backend::ClearType) -> Result<(), Self::Error> {
         match clear_type {
-            ratatui::backend::ClearType::All => { self.buffer.push_str("\x1b[2J"); }
-            ratatui::backend::ClearType::AfterCursor => { self.buffer.push_str("\x1b[J"); }
-            ratatui::backend::ClearType::BeforeCursor => { self.buffer.push_str("\x1b[1J"); }
-            ratatui::backend::ClearType::CurrentLine => { self.buffer.push_str("\x1b[2K"); }
-            ratatui::backend::ClearType::UntilNewLine => { self.buffer.push_str("\x1b[K"); }
+            ratatui::backend::ClearType::All => {
+                self.buffer.push_str("\x1b[2J");
+            }
+            ratatui::backend::ClearType::AfterCursor => {
+                self.buffer.push_str("\x1b[J");
+            }
+            ratatui::backend::ClearType::BeforeCursor => {
+                self.buffer.push_str("\x1b[1J");
+            }
+            ratatui::backend::ClearType::CurrentLine => {
+                self.buffer.push_str("\x1b[2K");
+            }
+            ratatui::backend::ClearType::UntilNewLine => {
+                self.buffer.push_str("\x1b[K");
+            }
         }
         Ok(())
     }
@@ -76,7 +88,7 @@ impl Backend for TruantBackend {
     {
         let mut last_y = u16::MAX;
         let mut last_x = u16::MAX;
-        
+
         let mut prev_fg = Color::Reset;
         let mut prev_bg = Color::Reset;
         let mut prev_modifier = Modifier::empty();
@@ -89,8 +101,8 @@ impl Backend for TruantBackend {
             last_y = y;
 
             if cell.modifier != prev_modifier {
-                // If modifiers changed, reset everything because there's no reliable 
-                // way to "turn off" specific modifiers dynamically everywhere 
+                // If modifiers changed, reset everything because there's no reliable
+                // way to "turn off" specific modifiers dynamically everywhere
                 // (e.g. \x1b[22m is dim off, bold off, etc.)
                 self.buffer.push_str("\x1b[0m");
                 prev_fg = Color::Reset;
@@ -138,7 +150,7 @@ impl Backend for TruantBackend {
 
             self.buffer.push_str(cell.symbol());
         }
-        
+
         self.buffer.push_str("\x1b[0m");
         Ok(())
     }
@@ -166,12 +178,13 @@ impl Backend for TruantBackend {
         Ok(ratatui::layout::Position { x: 0, y: 0 })
     }
 
-    fn set_cursor_position<P>(&mut self, position: P) -> io::Result<()> 
-    where 
-        P: Into<ratatui::layout::Position>
+    fn set_cursor_position<P>(&mut self, position: P) -> io::Result<()>
+    where
+        P: Into<ratatui::layout::Position>,
     {
         let pos = position.into();
-        self.buffer.push_str(&format!("\x1b[{};{}H", pos.y + 1, pos.x + 1));
+        self.buffer
+            .push_str(&format!("\x1b[{};{}H", pos.y + 1, pos.x + 1));
         Ok(())
     }
 
@@ -181,7 +194,10 @@ impl Backend for TruantBackend {
     }
 
     fn size(&self) -> io::Result<Size> {
-        Ok(Size { width: self.width, height: self.height })
+        Ok(Size {
+            width: self.width,
+            height: self.height,
+        })
     }
 
     fn window_size(&mut self) -> io::Result<WindowSize> {
