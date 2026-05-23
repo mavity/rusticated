@@ -25,6 +25,11 @@ pub fn is_stdin_a_tty() -> bool {
     false
 }
 
+/// Called when `epoll_wait` returns `EINTR`; dispatches any pending SIGWINCH.
+/// Currently a no-op; terminal-size polling is handled by `SizeStream`.
+#[cfg(unix)]
+pub(crate) fn check_sigwinch() {}
+
 // ─── Unix (Linux + BSD/macOS) ─────────────────────────────────────────────────
 
 #[cfg(unix)]
