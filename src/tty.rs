@@ -4,18 +4,20 @@
 
 #[cfg(unix)]
 pub use unix_tty::{
-    Tty, cursor_position, disable_raw_mode, enable_raw_mode, get_size, set_mode, stdin, stdout,
+    SizeStream, Tty, cursor_position, disable_raw_mode, enable_raw_mode, set_mode, size, stdin,
+    stdout,
 };
 
 #[cfg(windows)]
 pub use windows_tty::{
-    Tty, cursor_position, disable_raw_mode, enable_raw_mode, get_size, set_mode, stdin, stdout,
+    SizeStream, Tty, cursor_position, disable_raw_mode, enable_raw_mode, set_mode, size, stdin,
+    stdout,
 };
 
 #[cfg(target_family = "wasm")]
 pub use wasm_tty::{
-    Tty, cursor_position, disable_raw_mode, enable_raw_mode, get_size, set_mode, stderr, stdin,
-    stdout,
+    SizeStream, Tty, cursor_position, disable_raw_mode, enable_raw_mode, set_mode, size, stderr,
+    stdin, stdout,
 };
 
 /// Returns `true` if standard input is a terminal.
@@ -70,10 +72,41 @@ mod unix_tty {
         Tty { fd: 1 }
     }
 
+    /// A stream that yields the terminal size on Unix.
+    pub struct SizeStream {
+        last_size: core::option::Option<(u16, u16)>,
+    }
+
+    /// Returns a lazily evaluated stream for terminal size changes.
+    pub fn size() -> SizeStream {
+        SizeStream {
+            last_size: core::option::Option::None,
+        }
+    }
+
+    impl SizeStream {
+        pub async fn next(&mut self) -> (u16, u16) {
+            if let core::option::Option::Some(last) = self.last_size {
+                let mut current = last;
+                while current == last {
+                    // Wire Waker directly to SIGWINCH atomic interrupt on Unix
+                    let _ = crate::time::sleep(core::time::Duration::from_millis(50)).await;
+                    current = get_size(1).unwrap_or((80, 24));
+                }
+                self.last_size = core::option::Option::Some(current);
+                current
+            } else {
+                let initial = get_size(1).unwrap_or((80, 24));
+                self.last_size = core::option::Option::Some(initial);
+                initial
+            }
+        }
+    }
+
     /// Query the terminal size for `handle` (interpreted as a file descriptor).
     ///
     /// Falls back to `(80, 24)` if the `ioctl` is unavailable on this target.
-    pub fn get_size(handle: u64) -> io::Result<(u16, u16)> {
+    pub(crate) fn get_size(handle: u64) -> io::Result<(u16, u16)> {
         let mut ws = Winsize {
             ws_row: 0,
             ws_col: 0,
@@ -489,8 +522,39 @@ mod windows_tty {
         }
     }
 
+    /// A stream that yields the terminal size on Windows.
+    pub struct SizeStream {
+        last_size: core::option::Option<(u16, u16)>,
+    }
+
+    /// Returns a lazily evaluated stream for terminal size changes.
+    pub fn size() -> SizeStream {
+        SizeStream {
+            last_size: core::option::Option::None,
+        }
+    }
+
+    impl SizeStream {
+        pub async fn next(&mut self) -> (u16, u16) {
+            if let core::option::Option::Some(last) = self.last_size {
+                let mut current = last;
+                while current == last {
+                    // TODO: Wire lazy hook / background thread on Windows.
+                    let _ = crate::time::sleep(core::time::Duration::from_millis(50)).await;
+                    current = get_size(1).unwrap_or((80, 24));
+                }
+                self.last_size = core::option::Option::Some(current);
+                current
+            } else {
+                let initial = get_size(1).unwrap_or((80, 24));
+                self.last_size = core::option::Option::Some(initial);
+                initial
+            }
+        }
+    }
+
     /// Query the console window size.
-    pub fn get_size(_handle: u64) -> io::Result<(u16, u16)> {
+    pub(crate) fn get_size(_handle: u64) -> io::Result<(u16, u16)> {
         let h = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
         let mut info = core::mem::MaybeUninit::<CONSOLE_SCREEN_BUFFER_INFO>::uninit();
         if unsafe { GetConsoleScreenBufferInfo(h, info.as_mut_ptr()) } == 0 {
@@ -578,13 +642,14 @@ mod windows_tty {
 
         SAVED_IN_MODE.store(in_mode, Ordering::Relaxed);
         SAVED_OUT_MODE.store(out_mode, Ordering::Relaxed);
-        
+
         let cp = unsafe { GetConsoleOutputCP() };
         SAVED_OUT_CP.store(cp, Ordering::Relaxed);
         unsafe { SetConsoleOutputCP(65001) }; // CP_UTF8
 
-        let new_in =
-            (in_mode & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT)) | ENABLE_VIRTUAL_TERMINAL_INPUT | ENABLE_WINDOW_INPUT;
+        let new_in = (in_mode & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT))
+            | ENABLE_VIRTUAL_TERMINAL_INPUT
+            | ENABLE_WINDOW_INPUT;
         let new_out = out_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
 
         if unsafe { SetConsoleMode(stdin_h, new_in) } == 0 {
@@ -696,23 +761,18 @@ mod windows_tty {
 
     impl ConsoleReadFuture {
         fn new(console: usize, buf: Vec<u8>) -> Self {
-            // Box+pin the state first so we have a stable heap address, then
-            // derive the token from that address.
+            static NEXT_TOKEN: core::sync::atomic::AtomicU64 =
+                core::sync::atomic::AtomicU64::new(1);
+            let token = NEXT_TOKEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
             let boxed = Box::new(ConsoleReadState {
                 buffer: core::cell::UnsafeCell::new(buf),
                 bytes_read: AtomicU32::new(0),
                 thread_handle: AtomicUsize::new(0),
-                token: 0,
+                token,
                 console,
             });
-            let token = boxed.as_ref() as *const ConsoleReadState as usize as u64;
-            let mut pinned = Box::into_pin(boxed);
-            // SAFETY: We set `token` before sharing the struct with any
-            // callback.  `get_unchecked_mut` is sound here because we hold the
-            // only reference and haven't shared the address yet.
-            unsafe {
-                pinned.as_mut().get_unchecked_mut().token = token;
-            }
+            let pinned = Box::into_pin(boxed);
             Self {
                 state: Some(pinned),
                 registered: false,
@@ -729,8 +789,10 @@ mod windows_tty {
             if consume_ready(token) {
                 if let Some(mut state) = self.state.take() {
                     // Reclaim I/O count
-                    crate::rt::windows::outstanding_io()
-                        .set(crate::rt::windows::outstanding_io().get() - 1);
+                    if self.registered {
+                        crate::rt::windows::outstanding_io()
+                            .set(crate::rt::windows::outstanding_io().get() - 1);
+                    }
 
                     let n = state.bytes_read.load(Ordering::Acquire) as usize;
                     // SAFETY: the thread has finished (WaitForSingleObject in
@@ -817,19 +879,23 @@ mod windows_tty {
                     .map_or(0, |s| s.thread_handle.load(Ordering::Relaxed));
                 if th != 0 {
                     // Cancel the thread's blocked ReadFile.
-                    // This unblocks the thread so it can exit on its own.
                     unsafe { CancelSynchronousIo(th) };
 
-                    // Windows CRT attempts to lock `stdin` streams during standard shutdown.
-                    // Since CancelSynchronousIo guarantees the blocking call will abort,
-                    // we can safely wait for the thread to exit cleanly.
-                    // We use a 0 timeout here because CancelSynchronousIo is unreliable
-                    // for console handles, and we must not hang the process.
-                    unsafe { WaitForSingleObject(th, 0) };
-
+                    let status = unsafe { WaitForSingleObject(th, 50) };
                     unsafe { CloseHandle(th) };
+
                     crate::rt::windows::outstanding_io()
                         .set(crate::rt::windows::outstanding_io().get() - 1);
+
+                    // If the thread is still stuck in ReadFile, we must leak the state
+                    // to prevent heap corruption since the thread holds pointers to its fields.
+                    if status == 0x00000102
+                    /* WAIT_TIMEOUT */
+                    {
+                        if let Some(state) = self.state.take() {
+                            let _ = Box::into_raw(unsafe { Pin::into_inner_unchecked(state) });
+                        }
+                    }
                 }
             }
         }
@@ -1128,8 +1194,38 @@ mod wasm_tty {
         Tty { handle: 2 }
     }
 
+    /// A stream that yields the terminal size on Wasm.
+    pub struct SizeStream {
+        last_size: core::option::Option<(u16, u16)>,
+    }
+
+    /// Returns a lazily evaluated stream for terminal size changes.
+    pub fn size() -> SizeStream {
+        SizeStream {
+            last_size: core::option::Option::None,
+        }
+    }
+
+    impl SizeStream {
+        pub async fn next(&mut self) -> (u16, u16) {
+            if let core::option::Option::Some(last) = self.last_size {
+                let mut current = last;
+                while current == last {
+                    core::future::pending::<()>().await;
+                    current = get_size(1).unwrap_or((80, 24));
+                }
+                self.last_size = core::option::Option::Some(current);
+                current
+            } else {
+                let initial = get_size(1).unwrap_or((80, 24));
+                self.last_size = core::option::Option::Some(initial);
+                initial
+            }
+        }
+    }
+
     /// Query the terminal size for `handle` via the WASM host.
-    pub fn get_size(handle: u64) -> io::Result<(u16, u16)> {
+    pub(crate) fn get_size(handle: u64) -> io::Result<(u16, u16)> {
         // SAFETY: `tty_get_size` is a side-effect-free host import.
         let res = unsafe { imports::tty_get_size(handle) };
         let cols = (res >> 16) as u16;

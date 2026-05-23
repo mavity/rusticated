@@ -931,8 +931,14 @@ pub fn read_dir_sync<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
 
         #[link(name = "kernel32", kind = "raw-dylib")]
         unsafe extern "system" {
-            fn FindFirstFileW(lpFileName: *const u16, lpFindFileData: *mut WIN32_FIND_DATAW) -> *mut core::ffi::c_void;
-            fn FindNextFileW(hFindFile: *mut core::ffi::c_void, lpFindFileData: *mut WIN32_FIND_DATAW) -> i32;
+            fn FindFirstFileW(
+                lpFileName: *const u16,
+                lpFindFileData: *mut WIN32_FIND_DATAW,
+            ) -> *mut core::ffi::c_void;
+            fn FindNextFileW(
+                hFindFile: *mut core::ffi::c_void,
+                lpFindFileData: *mut WIN32_FIND_DATAW,
+            ) -> i32;
             fn FindClose(hFindFile: *mut core::ffi::c_void) -> i32;
             fn GetLastError() -> u32;
         }
@@ -943,7 +949,8 @@ pub fn read_dir_sync<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
         let handle = unsafe { FindFirstFileW(wchars.as_ptr(), &mut ffd) };
         if handle as isize == -1 {
             let err = unsafe { GetLastError() };
-            if err == 2 { // ERROR_FILE_NOT_FOUND
+            if err == 2 {
+                // ERROR_FILE_NOT_FOUND
                 return Ok(ReadDir { entries, pos: 0 });
             }
             return Err(io::Error::from_raw_os_error(err as i32));
@@ -959,8 +966,13 @@ pub fn read_dir_sync<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
                     metadata: Some(Metadata {
                         size: ((ffd.nFileSizeHigh as u64) << 32) | (ffd.nFileSizeLow as u64),
                         mode: ffd.dwFileAttributes,
-                        modified_time_ns: 0, accessed_time_ns: 0, created_time_ns: 0,
-                        nlink: 1, uid: 0, gid: 0, inode: 0,
+                        modified_time_ns: 0,
+                        accessed_time_ns: 0,
+                        created_time_ns: 0,
+                        nlink: 1,
+                        uid: 0,
+                        gid: 0,
+                        inode: 0,
                     }),
                 });
             }
@@ -970,7 +982,9 @@ pub fn read_dir_sync<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
                 break;
             }
         }
-        unsafe { FindClose(handle); }
+        unsafe {
+            FindClose(handle);
+        }
 
         Ok(ReadDir { entries, pos: 0 })
     }
@@ -1018,14 +1032,21 @@ pub fn read_dir_sync<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
                         metadata: Some(Metadata {
                             size: 0,
                             mode: if is_dir { 0x4000 } else { 0 }, // Fake generic DIR mode mark
-                            modified_time_ns: 0, accessed_time_ns: 0, created_time_ns: 0,
-                            nlink: 1, uid: 0, gid: 0, inode: 0,
+                            modified_time_ns: 0,
+                            accessed_time_ns: 0,
+                            created_time_ns: 0,
+                            nlink: 1,
+                            uid: 0,
+                            gid: 0,
+                            inode: 0,
                         }),
                     });
                 }
             }
         }
-        unsafe { closedir(dirp); }
+        unsafe {
+            closedir(dirp);
+        }
 
         Ok(ReadDir { entries, pos: 0 })
     }
