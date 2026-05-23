@@ -53,7 +53,7 @@ async fn async_main() {
 
     let args = std::env::get_args();
     let exe = args.first().map(|s| s.as_str()).unwrap_or("<unknown>");
-    match std::fs::metadata(exe).await.map_err(|e| { std::println!("meta_err: {}, code={:?}, msg={}", e, e.raw_os_error(), e.to_string()); e }) {
+    match std::fs::metadata(exe).map_err(|e| { std::println!("meta_err: {}, code={:?}, msg={}", e, e.raw_os_error(), e.to_string()); e }) {
         Ok(meta) => {
             let mtime_ns = meta.modified_ns();
             let now_ns = std::time::now_ns();

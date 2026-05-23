@@ -137,6 +137,8 @@ impl ThreadPool {
 
     fn spawn_thread(&self, state: &mut PoolState) {
         state.total_threads += 1;
+
+        #[cfg(windows)]
         let inner = Arc::clone(&self.inner);
 
         #[cfg(windows)]
