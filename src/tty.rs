@@ -490,11 +490,16 @@ mod windows_tty {
     }
 
     /// Query the console window size.
-    ///
-    /// Currently returns `(80, 24)` as a stub — wire up
-    /// `GetConsoleScreenBufferInfo` as needed.
-    pub const fn get_size(_handle: u64) -> io::Result<(u16, u16)> {
-        Ok((80, 24))
+    pub fn get_size(_handle: u64) -> io::Result<(u16, u16)> {
+        let h = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+        let mut info = core::mem::MaybeUninit::<CONSOLE_SCREEN_BUFFER_INFO>::uninit();
+        if unsafe { GetConsoleScreenBufferInfo(h, info.as_mut_ptr()) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let info = unsafe { info.assume_init() };
+        let cols = (info.sr_window.right - info.sr_window.left + 1) as u16;
+        let rows = (info.sr_window.bottom - info.sr_window.top + 1) as u16;
+        Ok((cols, rows))
     }
 
     /// Set the console mode for `handle`.
@@ -506,8 +511,10 @@ mod windows_tty {
 
     // ── Console mode constants ────────────────────────────────────────────────
 
+    const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
     const ENABLE_LINE_INPUT: u32 = 0x0002;
     const ENABLE_ECHO_INPUT: u32 = 0x0004;
+    const ENABLE_WINDOW_INPUT: u32 = 0x0008;
     const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
     const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
 
@@ -515,6 +522,8 @@ mod windows_tty {
     unsafe extern "system" {
         fn GetConsoleMode(hConsoleHandle: usize, lpMode: *mut u32) -> i32;
         fn SetConsoleMode(hConsoleHandle: usize, dwMode: u32) -> i32;
+        fn GetConsoleOutputCP() -> u32;
+        fn SetConsoleOutputCP(wCodePageID: u32) -> i32;
     }
 
     #[repr(C)]
@@ -550,6 +559,8 @@ mod windows_tty {
     static SAVED_IN_MODE: AtomicU32 = AtomicU32::new(0);
     /// Saved original console output mode.
     static SAVED_OUT_MODE: AtomicU32 = AtomicU32::new(0);
+    /// Saved original console output codepage.
+    static SAVED_OUT_CP: AtomicU32 = AtomicU32::new(0);
 
     /// Enable raw (character-at-a-time) console input and VT output processing.
     pub fn enable_raw_mode() -> io::Result<()> {
@@ -567,9 +578,13 @@ mod windows_tty {
 
         SAVED_IN_MODE.store(in_mode, Ordering::Relaxed);
         SAVED_OUT_MODE.store(out_mode, Ordering::Relaxed);
+        
+        let cp = unsafe { GetConsoleOutputCP() };
+        SAVED_OUT_CP.store(cp, Ordering::Relaxed);
+        unsafe { SetConsoleOutputCP(65001) }; // CP_UTF8
 
         let new_in =
-            (in_mode & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT)) | ENABLE_VIRTUAL_TERMINAL_INPUT;
+            (in_mode & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT)) | ENABLE_VIRTUAL_TERMINAL_INPUT | ENABLE_WINDOW_INPUT;
         let new_out = out_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
 
         if unsafe { SetConsoleMode(stdin_h, new_in) } == 0 {
@@ -588,6 +603,11 @@ mod windows_tty {
 
         let in_mode = SAVED_IN_MODE.load(Ordering::Relaxed);
         let out_mode = SAVED_OUT_MODE.load(Ordering::Relaxed);
+        let out_cp = SAVED_OUT_CP.load(Ordering::Relaxed);
+
+        if out_cp != 0 {
+            unsafe { SetConsoleOutputCP(out_cp) };
+        }
 
         if in_mode != 0 && unsafe { SetConsoleMode(stdin_h, in_mode) } == 0 {
             return Err(io::Error::last_os_error());
