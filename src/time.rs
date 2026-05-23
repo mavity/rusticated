@@ -91,6 +91,11 @@ impl SystemTime {
         Self(Duration::from_nanos(now_ns()))
     }
 
+    /// Constructs a `SystemTime` from nanoseconds since the Unix epoch.
+    pub(crate) fn from_nanos(ns: u64) -> Self {
+        Self(Duration::from_nanos(ns))
+    }
+
     /// Returns the amount of time elapsed since this system time was created.
     pub fn duration_since(&self, earlier: SystemTime) -> Result<Duration, Error> {
         if self.0 >= earlier.0 {

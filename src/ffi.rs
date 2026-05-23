@@ -94,3 +94,18 @@ impl Iterator for EncodeWide<'_> {
         self.inner.next()
     }
 }
+
+// ─── OsStringExt ────────────────────────────────────────────────────────────
+
+/// Extension methods on owned [`OsString`] (`String`).
+pub trait OsStringExt {
+    /// Convert into the raw byte representation of the string.
+    fn into_encoded_bytes(self) -> Vec<u8>;
+}
+
+impl OsStringExt for String {
+    #[inline]
+    fn into_encoded_bytes(self) -> Vec<u8> {
+        self.into_bytes()
+    }
+}

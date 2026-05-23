@@ -86,8 +86,41 @@ impl AsyncRead for Stdin {
 }
 
 impl Read for Stdin {
-    fn read(&mut self, _buf: &mut [u8]) -> Result<usize> {
-        Err(Error::other("stdin read not implemented"))
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        #[cfg(windows)]
+        {
+            #[allow(clashing_extern_declarations)]
+            #[link(name = "kernel32", kind = "raw-dylib")]
+            unsafe extern "system" {
+                fn GetStdHandle(n_std_handle: u32) -> usize;
+                fn ReadFile(
+                    h_file: usize,
+                    lp_buffer: *mut u8,
+                    n_number_of_bytes_to_read: u32,
+                    lp_number_of_bytes_read: *mut u32,
+                    lp_overlapped: *mut core::ffi::c_void,
+                ) -> i32;
+            }
+            let handle = unsafe { GetStdHandle(0xFFFFFFF6u32) }; // STD_INPUT_HANDLE = -10
+            let mut n = 0u32;
+            let res = unsafe {
+                ReadFile(handle, buf.as_mut_ptr(), buf.len() as u32, &mut n, core::ptr::null_mut())
+            };
+            if res == 0 { Err(Error::last_os_error()) } else { Ok(n as usize) }
+        }
+        #[cfg(all(not(windows), not(target_family = "wasm")))]
+        {
+            unsafe extern "C" {
+                fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
+            }
+            let n = unsafe { read(0, buf.as_mut_ptr(), buf.len()) };
+            if n < 0 { Err(Error::last_os_error()) } else { Ok(n as usize) }
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = buf;
+            Ok(0)
+        }
     }
 }
 

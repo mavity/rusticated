@@ -43,6 +43,26 @@ pub mod unix {
             fn into_raw_fd(self) -> RawFd;
         }
     }
+
+    /// Unix file system extensions.
+    pub mod fs {
+        /// Metadata extensions for Unix file systems.
+        pub trait MetadataExt {
+            fn mode(&self) -> u32;
+            fn nlink(&self) -> u64;
+            fn uid(&self) -> u32;
+            fn gid(&self) -> u32;
+            fn ino(&self) -> u64;
+        }
+
+        impl MetadataExt for crate::fs::Metadata {
+            fn mode(&self) -> u32 { crate::fs::Metadata::mode(self) }
+            fn nlink(&self) -> u64 { crate::fs::Metadata::nlink(self) }
+            fn uid(&self) -> u32 { crate::fs::Metadata::uid(self) }
+            fn gid(&self) -> u32 { crate::fs::Metadata::gid(self) }
+            fn ino(&self) -> u64 { crate::fs::Metadata::inode(self) }
+        }
+    }
 }
 
 /// Windows-specific extensions.
@@ -74,6 +94,19 @@ pub mod windows {
         pub trait IntoRawHandle {
             /// Consumes `self` and returns the underlying raw handle.
             fn into_raw_handle(self) -> RawHandle;
+        }
+    }
+
+    /// Windows file system extensions.
+    pub mod fs {
+        /// Metadata extensions for Windows file systems.
+        pub trait MetadataExt {
+            /// Returns the raw Win32 file attribute DWORD.
+            fn file_attributes(&self) -> u32;
+        }
+
+        impl MetadataExt for crate::fs::Metadata {
+            fn file_attributes(&self) -> u32 { crate::fs::Metadata::mode(self) }
         }
     }
 }

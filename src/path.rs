@@ -231,7 +231,7 @@ impl Path {
     /// Returns the metadata for the file at this path (async).
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn metadata(&self) -> crate::io::Result<crate::fs::Metadata> {
-        crate::fs::metadata(self.as_str()).await
+        crate::fs::metadata(self.as_str())
     }
 
     /// Returns `true` if the path exists on disk (async).
@@ -256,7 +256,6 @@ impl Path {
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn is_symlink(&self) -> bool {
         crate::fs::symlink_metadata(self.as_str())
-            .await
             .map(|m| m.is_symlink())
             .unwrap_or(false)
     }
