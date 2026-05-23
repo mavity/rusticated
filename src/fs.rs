@@ -961,9 +961,10 @@ pub async fn read_dir<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
     #[cfg(target_family = "wasm")]
     {
         let path_bytes = path.as_ref().as_bytes().to_vec();
-        let (err, _, _, entries_buf) =
+        // 1. Open the directory
+        let (err, handle, _, _) =
             crate::rt::wasm::OverlappedBufferFuture::new(path_bytes, |ov, ptr, len| {
-                unsafe { crate::abi::imports::dir_read(ov, ptr, len) };
+                unsafe { crate::abi::imports::path_open(ov, ptr, len, 0) }; // 0 flags
             })
             .await;
 
@@ -971,17 +972,47 @@ pub async fn read_dir<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
             return Err(io::Error::from_raw_os_error(err as i32));
         }
 
-        // Format is: [len:u32] [name:utf8...] [len:u32] [name:utf8...]
-        let mut entries = Vec::new();
-        let mut pos = 0;
-        while pos + 4 <= entries_buf.len() {
-            let len = u32::from_le_bytes(entries_buf[pos..pos + 4].try_into().unwrap()) as usize;
-            pos += 4;
-            if pos + len > entries_buf.len() {
+        // 2. Read entries into a buffer until empty
+        let mut all_bytes = alloc::vec::Vec::new();
+        loop {
+            let buf = alloc::vec![0u8; 4096];
+            let (err, _, read_len, buf) =
+                crate::rt::wasm::OverlappedBufferFuture::new(buf, move |ov, ptr, len| {
+                    unsafe { crate::abi::imports::dir_read(ov, handle, ptr, len) };
+                })
+                .await;
+
+            if err != 0 {
+                // close handle and return error
+                unsafe { crate::abi::imports::handle_close(handle) };
+                return Err(io::Error::from_raw_os_error(err as i32));
+            }
+
+            if read_len == 0 {
                 break;
             }
-            let name = String::from_utf8_lossy(&entries_buf[pos..pos + len]).into_owned();
-            pos += len;
+            all_bytes.extend_from_slice(&buf[..read_len as usize]);
+        }
+        
+        unsafe { crate::abi::imports::handle_close(handle) };
+
+        // Format is null-separated UTF-8 strings
+        let mut entries = Vec::new();
+        let mut start = 0;
+        for (i, &b) in all_bytes.iter().enumerate() {
+            if b == 0 {
+                if start < i {
+                    let name = String::from_utf8_lossy(&all_bytes[start..i]).into_owned();
+                    entries.push(DirEntry {
+                        name,
+                        metadata: None,
+                    });
+                }
+                start = i + 1;
+            }
+        }
+        if start < all_bytes.len() {
+            let name = String::from_utf8_lossy(&all_bytes[start..]).into_owned();
             entries.push(DirEntry {
                 name,
                 metadata: None,
