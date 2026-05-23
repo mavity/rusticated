@@ -47,7 +47,7 @@ impl App {
                     if pos == 2 && dir.chars().nth(1) == Some(':') {
                         dir.truncate(pos + 1);
                     } else if pos == 0 {
-                        dir.truncate(1); 
+                        dir.truncate(1);
                     } else {
                         dir.truncate(pos);
                     }
@@ -93,7 +93,9 @@ impl App {
             if b.name == ".." {
                 return std::cmp::Ordering::Greater;
             }
-            b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            b.is_dir
+                .cmp(&a.is_dir)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
         files
     }

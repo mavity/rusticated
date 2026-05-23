@@ -76,6 +76,24 @@ mod native_env {
     }
 
     /// Returns the current working directory.
+    #[cfg(windows)]
+    pub fn current_dir() -> io::Result<PathBuf> {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentDirectoryW(nBufferLength: u32, lpBuffer: *mut u16) -> u32;
+        }
+
+        let mut buf = alloc::vec![0u16; 512];
+        let len = unsafe { GetCurrentDirectoryW(buf.len() as u32, buf.as_mut_ptr()) };
+        if len == 0 {
+            return Err(io::Error::from_raw_os_error(0)); // Or some default
+        }
+
+        let path_str = crate::string::String::from_utf16_lossy(&buf[..len as usize]);
+        Ok(PathBuf::from(path_str))
+    }
+
+    #[cfg(not(windows))]
     pub fn current_dir() -> io::Result<PathBuf> {
         Ok(PathBuf::from("/"))
     }

@@ -42,8 +42,6 @@ fn draw_panel(
     } else {
         &app.current_right_dir
     };
-    let cur_dir = path.split('/').last().unwrap_or(".");
-    let dir_name = if cur_dir.is_empty() { "." } else { cur_dir };
 
     let title_style = if is_active {
         highlight_style
@@ -51,7 +49,8 @@ fn draw_panel(
         Style::default().fg(Color::Cyan)
     };
 
-    let title_line = ratatui::text::Line::from(format!(" {} ", dir_name)).style(title_style);
+    // To debug what `path` is, show the full path instead of just the last component.
+    let title_line = ratatui::text::Line::from(format!(" {} ", path)).style(title_style);
 
     // Draw the outer block with double borders
     let block = Block::default()
