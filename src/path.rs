@@ -299,12 +299,6 @@ impl Path {
         crate::fs::read_dir(self.as_str()).await
     }
 
-    /// Read the directory entries at this path (sync).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn read_dir_sync(&self) -> crate::io::Result<crate::fs::ReadDir> {
-        crate::fs::read_dir_sync(self.as_str())
-    }
-
     /// Returns the canonical form of the path (async).
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn canonicalize(&self) -> crate::io::Result<PathBuf> {

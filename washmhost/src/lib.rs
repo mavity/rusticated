@@ -10,7 +10,7 @@ fn write_diag(msg: &[u8]) {
         libc::write(
             2,
             msg.as_ptr() as *const libc::c_void,
-            msg.len() as libc::size_t,
+            msg.len() as libc::c_uint,
         )
     };
 }

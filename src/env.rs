@@ -292,6 +292,20 @@ mod native_env {
 #[cfg(not(target_family = "wasm"))]
 pub use native_env::{current_dir, get_args, get_env, get_host_env_vars, join_paths};
 
+#[cfg(target_family = "wasm")]
+pub fn current_dir() -> crate::io::Result<crate::path::PathBuf> {
+    Ok(crate::path::PathBuf::from("."))
+}
+
+#[cfg(target_family = "wasm")]
+pub fn join_paths<I, T>(_paths: I) -> Result<crate::ffi::OsString, ()>
+where
+    I: IntoIterator<Item = T>,
+    T: AsRef<crate::ffi::OsStr>,
+{
+    Err(())
+}
+
 /// Error returned when an environment variable is not found or invalid.
 #[derive(Debug, Clone)]
 pub struct VarError;
