@@ -24,10 +24,6 @@ use alloc::vec::Vec;
 
 pub use File as FileNative;
 
-pub fn canonicalize_sync<P: AsRef<str>>(_path: P) -> io::Result<crate::path::PathBuf> {
-    Err(io::Error::other("not implemented"))
-}
-
 // --- Metadata Struct ---
 
 #[cfg(not(target_family = "wasm"))]
