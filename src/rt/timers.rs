@@ -75,6 +75,10 @@ pub(crate) fn wake_expired() -> bool {
     woken
 }
 
+pub(crate) fn has_timers() -> bool {
+    timers_mut(|t| !t.is_empty())
+}
+
 pub(crate) fn next_deadline() -> Option<Duration> {
     timers_mut(|t| {
         t.first().map(|(d, _, _)| {
