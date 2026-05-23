@@ -495,17 +495,17 @@ impl Future for WaitProcess {
     }
 }
 
-#[cfg(target_env = "msvc")]
+#[cfg(not(feature = "std"))]
 #[unsafe(no_mangle)]
 static mut _tls_index: u32 = 0;
 
 /// Stack probe for AArch64 Windows.
-#[cfg(all(target_arch = "aarch64", target_env = "msvc"))]
+#[cfg(all(target_arch = "aarch64", not(feature = "std")))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __chkstk() {}
 
 /// Entry point for MSVC-linked binaries.
-#[cfg(target_env = "msvc")]
+#[cfg(not(feature = "std"))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mainCRTStartup() -> ! {
     unsafe extern "Rust" {
