@@ -33,6 +33,7 @@ fn run_internal(wasm_bytes: &[u8]) -> anyhow::Result<()> {
     config.signals_based_traps(false);
     config.static_memory_maximum_size(0);
     config.dynamic_memory_guard_size(0);
+    config.wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Enable);
     let engine = Engine::new(&config)?;
     let module = Module::new(&engine, &wasm_bytes)?;
 
