@@ -24,7 +24,6 @@ use alloc::vec::Vec;
 
 pub use File as FileNative;
 
-
 // --- Metadata Struct ---
 
 #[cfg(not(target_family = "wasm"))]
@@ -1023,7 +1022,10 @@ pub async fn read_dir<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
 
             #[link(name = "kernel32", kind = "raw-dylib")]
             unsafe extern "system" {
-                fn FindFirstFileW(lpFileName: *const u16, lpFindFileData: *mut WIN32_FIND_DATAW) -> usize;
+                fn FindFirstFileW(
+                    lpFileName: *const u16,
+                    lpFindFileData: *mut WIN32_FIND_DATAW,
+                ) -> usize;
                 fn FindNextFileW(hFindFile: usize, lpFindFileData: *mut WIN32_FIND_DATAW) -> i32;
                 fn FindClose(hFindFile: usize) -> i32;
             }
@@ -1061,10 +1063,7 @@ pub async fn read_dir<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
                                 d.ftLastAccessTimeLow,
                                 d.ftLastAccessTimeHigh,
                             ),
-                            created_time_ns: to_unix_ns(
-                                d.ftCreationTimeLow,
-                                d.ftCreationTimeHigh,
-                            ),
+                            created_time_ns: to_unix_ns(d.ftCreationTimeLow, d.ftCreationTimeHigh),
                             nlink: 1,
                             uid: 0,
                             gid: 0,
@@ -1183,4 +1182,3 @@ pub fn push_path_for_pattern(path: &mut crate::path::PathBuf, piece: &str) {
     s.push_str(piece);
     *path = crate::path::PathBuf::from(s);
 }
-
