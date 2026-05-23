@@ -58,29 +58,48 @@ fn set_sel(app: &mut App, sel: usize) {
 }
 
 async fn handle_enter(app: &mut App) {
-    if app.active_pane == 0 {
-        if app.left_selected < app.left_files.len() {
-            let target = &app.left_files[app.left_selected];
-            if target == ".." {
-                app.current_left_dir.push_str("/..");
-            } else {
-                app.current_left_dir.push_str("/");
-                app.current_left_dir.push_str(target);
-            }
-            app.left_files = App::load_dir(&app.current_left_dir).await;
-            app.left_selected = 0;
-        }
+    let (active_dir, active_sel, files) = if app.active_pane == 0 {
+        (
+            &mut app.current_left_dir,
+            &mut app.left_selected,
+            &app.left_files,
+        )
     } else {
-        if app.right_selected < app.right_files.len() {
-            let target = &app.right_files[app.right_selected];
-            if target == ".." {
-                app.current_right_dir.push_str("/..");
-            } else {
-                app.current_right_dir.push_str("/");
-                app.current_right_dir.push_str(target);
-            }
-            app.right_files = App::load_dir(&app.current_right_dir).await;
-            app.right_selected = 0;
-        }
+        (
+            &mut app.current_right_dir,
+            &mut app.right_selected,
+            &app.right_files,
+        )
+    };
+
+    let selected = *active_sel;
+    if selected >= files.len() {
+        return;
+    }
+
+    let target = files[selected].clone();
+    if !target.is_dir {
+        return;
+    }
+
+    // Save history for current directory
+    app.history.insert(active_dir.clone(), selected);
+
+    // Navigate to target directory
+    App::push_path(active_dir, &target.name);
+
+    let new_path = active_dir.clone();
+    let new_files = App::load_dir(&new_path).await;
+
+    // Restore selected index from history, default to 0
+    let restored_sel = app.history.get(&new_path).copied().unwrap_or(0);
+    let final_sel = restored_sel.min(new_files.len().saturating_sub(1));
+
+    if app.active_pane == 0 {
+        app.left_files = new_files;
+        app.left_selected = final_sel;
+    } else {
+        app.right_files = new_files;
+        app.right_selected = final_sel;
     }
 }
