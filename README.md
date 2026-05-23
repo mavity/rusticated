@@ -284,6 +284,87 @@ NOTES:
 
 1. `rusticated` is a custom target, not a create to import. Its exports therefore are not imported from crates, but as the target std.
 
+# Using Rusticated as a sysroot (experimental and fun!)
+
+The platform does not expect consumers to manage static target architectures manually. When a workspace is compiled, `rusticated` leverages its own `build.rs` to dynamically engineer the target ecosystem:
+
+1. It executes localized compiler introspection (`rustc -Z unstable-options --print target-spec-json`) to capture a copy of the host's native environment specification.
+2. It mutates that specification in memory—stripping default system libraries (`"no-default-libraries": true`), setting custom memory align structures, and injecting specialized link parameters (such as entrypoint overrides like `/ENTRY:mainCRTStartup` on MSVC).
+3. It saves the resulting `.json` target file and an accompanying Cargo `config.toml` directly to a centralized workspace path (`target/rusticated-spec/`).
+
+---
+
+### Step-by-Step Blueprint for a New Consumer to Succeed
+
+Because the target spec and link settings are built entirely on the fly by the platform engine, a standalone consumer's project hooks into this automated output cleanly. Here are the exact implementation steps:
+
+#### Step 1: Establish the Project Layout and Workspace
+
+Your new application must be declared part of the same Cargo workspace or live alongside the `rusticated` root structure so that your build directories map to a shared target tree.
+
+#### Step 2: Override the Standard Namespace in `Cargo.toml`
+
+Rather than opting for common `#![no_std]` definitions, you explicitly substitute `rusticated` into the native standard library namespace:
+
+```toml
+[package]
+name = "my-new-tool"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# This tricks the compiler into serving your platform layer whenever 'std' is called
+std = { path = "../path/to/rusticated", package = "rusticated" }
+
+```
+
+#### Step 3: Mirror the Automatic Workspace Inclusion Strategy
+
+To inherit the linker modifications, toolchain flags, and target configurations handled by the automated build script, your local project must include the generated configuration file.
+
+Create a `.cargo/config.toml` file inside your new consumer project folder and point it directly back to the `rusticated-spec` output via relative path inclusion:
+
+```toml
+# Import the platform profile dynamically maintained by rusticated's build.rs
+include = ["../../target/rusticated-spec/config.toml"]
+
+```
+
+*(Adjust the parent directory steps `../../` depending on exactly how deep your crate is nested inside the workspace hierarchy).*
+
+#### Step 4: Write the Async Application Lifecycle
+
+Inside your `src/main.rs`, write standard asynchronous code using the core platform executor hooks. No boilerplate, no standard runtimes, and absolutely no blocking loops:
+
+```rust
+use std::io::write_all;
+use std::tty::stdout;
+
+fn main() {
+    // Schedule your root future immediately onto the engine's LocalRunQueue
+    std::spawn!(async_entry());
+}
+
+async fn async_entry() {
+    let mut out = stdout();
+    
+    // Executes zero-overhead I/O driven directly by underlying kernel system calls
+    write_all(&mut out, b"Standalone tool successfully executing via rusticated!\n").await;
+}
+
+```
+
+#### Step 5: Execute the Build
+
+When you compile the code, you explicitly pass the path to the architecture specification dynamically dumped into your target directory by the engine:
+
+```bash
+cargo build --target ./target/rusticated-spec/your-architecture-target.json
+
+```
+
+By hooking your local `.cargo/config.toml` straight into the engine's build output cache, your new consumer app automatically stays perfectly synced with target specs generated dynamically on your machine.
+
 <!--
 */ }
 -->
