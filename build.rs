@@ -31,15 +31,12 @@ fn main() {
     fs::create_dir_all(&spec_dir).expect("Failed to create spec dir");
 
     // Invoke rustc to get the default target spec for the compilation target.
+    let base_target = if target.ends_with("-rusticated") {
+        target.split("-rusticated").next().unwrap().to_string() + "-unknown-linux-gnu"
+    } else { target.clone() };
     let output = std::process::Command::new(&rustc)
-        .arg("-Z")
-        .arg("unstable-options")
-        .arg("--print")
-        .arg("target-spec-json")
-        .arg("--target")
-        .arg(&target)
-        .output()
-        .expect("Failed to invoke rustc to get target spec json");
+        .arg("-Z").arg("unstable-options").arg("--print").arg("target-spec-json").arg("--target").arg(&base_target)
+        .output().expect("Failed to invoke rustc to get target spec json");
 
     if !output.status.success() {
         panic!(
@@ -62,6 +59,13 @@ fn main() {
     }
     obj.insert("crt-static-respected".to_string(), serde_json::json!(true));
     obj.insert("no-default-libraries".to_string(), serde_json::json!(true));
+    if let Some(metadata) = obj.get_mut("metadata") {
+        if let Some(meta_obj) = metadata.as_object_mut() {
+            meta_obj.insert("std".to_string(), serde_json::json!(false));
+        }
+    } else {
+        obj.insert("metadata".to_string(), serde_json::json!({ "std": false }));
+    }
 
     // For Windows, ensure entry point and console subsystem
     if target.contains("-windows-msvc") || target.contains("-windows-gnu") {

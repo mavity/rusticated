@@ -9,8 +9,8 @@ use std::process::Command;
 const TARGET_SLOTS: &[&[&str]] = &[
     &["x86_64-unknown-linux-musl", "x86_64-unknown-linux-gnu"],
     &["aarch64-unknown-linux-musl", "aarch64-unknown-linux-gnu"],
-    &["x86_64-pc-windows-gnu", "x86_64-pc-windows-msvc"],
-    &["aarch64-pc-windows-gnu", "aarch64-pc-windows-msvc"],
+    &["x86_64-pc-windows-msvc", "x86_64-pc-windows-gnullvm", "x86_64-pc-windows-gnu"],
+    &["aarch64-pc-windows-msvc", "aarch64-pc-windows-gnullvm", "aarch64-pc-windows-gnu"],
     &["x86_64-apple-darwin"],
     &["aarch64-apple-darwin"],
 ];
@@ -114,6 +114,11 @@ fn main() {
 
     let target_tree = workspace_dir.join("target").join("tree");
 
+    // Read any existing mohab.bat BEFORE building so we can retain embedded
+    // binaries for slots we cannot build this session.
+    let bat_path = workspace_dir.join("mohab.bat");
+    let old_slot_data = parse_existing_mohab(&bat_path);
+
     // Phase 1: For each slot pick the first available target and build brot + washmhost.
     let mut slot_targets: Vec<Option<&str>> = Vec::new();
     for candidates in TARGET_SLOTS {
@@ -144,35 +149,23 @@ fn main() {
     );
 
     // Phase 3: Stitching
-    stitch(workspace_dir, &target_tree, &slot_targets);
+    stitch(workspace_dir, &target_tree, &slot_targets, &old_slot_data);
 }
 
 fn can_build_target(target: &str) -> bool {
-    let output = Command::new("rustup")
+    // Only use rustup-installed targets — no auto-installing.
+    let installed = Command::new("rustup")
         .args(&["target", "list", "--installed"])
         .env_remove("RUSTUP_TOOLCHAIN")
-        .output();
-
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            if stdout.contains(target) {
-                return true;
-            }
-            println!(
-                "cargo:warning=rustup stdout did not contain {}: {:?}",
-                target, stdout
-            );
-        }
-        Err(e) => {
-            println!("cargo:warning=rustup failed to run: {}", e);
-        }
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains(target))
+        .unwrap_or(false);
+    if installed {
+        return true;
     }
-
-    if let Ok(host) = env::var("TARGET") {
-        if host == target {
-            return true;
-        }
+    // Also accept the Cargo HOST triple directly (for environments without rustup).
+    if env::var("HOST").as_deref() == Ok(target) {
+        return true;
     }
     false
 }
@@ -285,25 +278,24 @@ fn build_sysroot(workspace_dir: &Path, target: &str) -> bool {
 }
 
 fn build_component(workspace_dir: &Path, target_tree: &Path, package: &str, target: &str) -> bool {
-    // If the output asset already exists, skip the build to preserve the cargo
-    // cache for heavy deps like wasmtime/serde. Delete the asset manually to
-    // force a rebuild (e.g. after making washmhost source changes).
-    let existing = find_asset(target_tree, target, package);
-    if existing.exists() {
-        return true;
-    }
-
-    // washmhost uses real std (wasmtime depends on it), so skip the custom
-    // rusticated sysroot for washmhost builds.  brot and mohabbat (brain) do
-    // need the sysroot when cross-compiling, but when building for the host
-    // gnu target the sysroot rename trick doesn't work (the rlib crate-name
-    // stays "rusticated", not "std"), so just build natively against normal std.
+    // Cargo passes --extern std=librusticated.rlib automatically (because brot's
+    // Cargo.toml declares `std = { path = "../", package = "rusticated" }`), which
+    // overrides the sysroot's std on every target — same as the host build.
+    // No custom sysroot needed.
     let host = env::var("HOST").unwrap_or_default();
-    let needs_sysroot = package != "washmhost" && target != host;
+    let needs_sysroot = false;
 
     let target_env = target.to_uppercase().replace("-", "_");
     let rustflags_env = format!("CARGO_TARGET_{}_RUSTFLAGS", target_env);
     let mut rustflags = env::var("RUSTFLAGS").unwrap_or_default();
+
+    // brot defines its own Windows entry point (mainCRTStartup) via rusticated's
+    // runtime.  Without -nostartfiles, mingw's crt2.o also defines mainCRTStartup
+    // causing a duplicate-symbol link error.  -C panic=abort drops the unwinding
+    // machinery so rust_eh_personality doesn't need to be resolved.
+    if package == "brot" && target.contains("windows") {
+        rustflags.push_str(" -C panic=abort -C link-arg=-nostartfiles");
+    }
 
     if needs_sysroot {
         // Ensure sysroot is built for this target first
@@ -389,7 +381,12 @@ fn find_asset(target_tree: &Path, target: &str, name: &str) -> PathBuf {
     path
 }
 
-fn stitch(workspace_dir: &Path, target_tree: &Path, slot_targets: &[Option<&str>]) {
+fn stitch(
+    workspace_dir: &Path,
+    target_tree: &Path,
+    slot_targets: &[Option<&str>],
+    old_slot_data: &[Option<(Vec<u8>, Vec<u8>)>],
+) {
     let brain_path = find_asset(target_tree, "wasm32-unknown-unknown", "mohabbat");
     if !brain_path.exists() {
         println!("cargo:warning=Brain not found, skipping stitch");
@@ -404,8 +401,9 @@ fn stitch(workspace_dir: &Path, target_tree: &Path, slot_targets: &[Option<&str>
     let mut washmhosts = Vec::new();
     let mut brots = Vec::new();
 
-    for opt_target in slot_targets {
+    for (i, opt_target) in slot_targets.iter().enumerate() {
         if let Some(target) = opt_target {
+            // Freshly built this session — read from target/tree.
             let host_path = find_asset(target_tree, target, "washmhost");
             let mut data = Vec::new();
             File::open(host_path)
@@ -421,6 +419,16 @@ fn stitch(workspace_dir: &Path, target_tree: &Path, slot_targets: &[Option<&str>
                 .read_to_end(&mut data)
                 .unwrap();
             brots.push(Some(data));
+        } else if let Some((old_brot, old_washmhost)) =
+            old_slot_data.get(i).and_then(|x| x.as_ref())
+        {
+            // Not built this session — retain the pair from the existing mohab.bat.
+            println!(
+                "cargo:warning=Slot {} retaining binary pair from existing mohab.bat",
+                i
+            );
+            washmhosts.push(Some(old_washmhost.clone()));
+            brots.push(Some(old_brot.clone()));
         } else {
             washmhosts.push(None);
             brots.push(None);
@@ -512,7 +520,7 @@ fn stitch(workspace_dir: &Path, target_tree: &Path, slot_targets: &[Option<&str>
     }
 
     let bat_path = workspace_dir.join("mohab.bat");
-    let mut out = File::create(bat_path).unwrap();
+    let mut out = File::create(&bat_path).unwrap();
     out.write_all(zone_a.as_bytes()).unwrap();
     for brot in patched_brots {
         if let Some(data) = brot {
@@ -520,4 +528,140 @@ fn stitch(workspace_dir: &Path, target_tree: &Path, slot_targets: &[Option<&str>
         }
     }
     out.write_all(&pool_compressed).unwrap();
+}
+
+/// Parses an existing mohab.bat and extracts (raw_brot, raw_washmhost) for each
+/// TARGET_SLOTS slot. Slots not embedded in the file get None.
+fn parse_existing_mohab(mohab_path: &Path) -> Vec<Option<(Vec<u8>, Vec<u8>)>> {
+    let n = TARGET_SLOTS.len();
+    let empty = vec![None; n];
+
+    let mut file_data = Vec::new();
+    match File::open(mohab_path).and_then(|mut f| f.read_to_end(&mut file_data)) {
+        Ok(_) => {}
+        Err(e) => {
+            println!("cargo:warning=No existing mohab.bat to read: {}", e);
+            return empty;
+        }
+    }
+
+    // Zone A is the text header — search in the first 8 KiB.
+    let search_limit = file_data.len().min(8192);
+    let zone_a = String::from_utf8_lossy(&file_data[..search_limit]);
+
+    // Slot order matches TARGET_SLOTS:
+    // 0=x86_64-linux  1=aarch64-linux  2=x86_64-win  3=aarch64-win
+    // 4=x86_64-darwin 5=aarch64-darwin
+    let slot_offsets: [(usize, usize); 6] = [
+        parse_shell_slot(&zone_a, "x86_64-Linux"),
+        parse_shell_slot(&zone_a, "aarch64-Linux"),
+        parse_win_slot(&zone_a, "AMD64"),
+        parse_win_slot(&zone_a, "ARM64"),
+        parse_shell_slot(&zone_a, "x86_64-Darwin"),
+        parse_shell_slot(&zone_a, "aarch64-Darwin"),
+    ];
+
+    // Decompress the shared pool using the MOHABBAT meta from any non-empty brot.
+    let mut decompressed_pool: Option<Vec<u8>> = None;
+    for &(off, len) in &slot_offsets {
+        if len == 0 || off + len > file_data.len() {
+            continue;
+        }
+        if let Some((pool_len, _, _, _, _)) = read_mohabbat_meta(&file_data[off..off + len]) {
+            let pool_start = file_data.len().saturating_sub(pool_len as usize);
+            let mut pool_out = Vec::new();
+            if brotli::BrotliDecompress(&mut &file_data[pool_start..], &mut pool_out).is_ok() {
+                decompressed_pool = Some(pool_out);
+            }
+            break;
+        }
+    }
+
+    let pool = match decompressed_pool {
+        Some(p) => p,
+        None => {
+            if slot_offsets.iter().any(|&(_, len)| len > 0) {
+                println!(
+                    "cargo:warning=Could not decompress pool from existing mohab.bat"
+                );
+            }
+            return empty;
+        }
+    };
+
+    let mut result = vec![None; n];
+    for (i, &(off, len)) in slot_offsets.iter().enumerate() {
+        if len == 0 || off + len > file_data.len() {
+            continue;
+        }
+        let brot = file_data[off..off + len].to_vec();
+        if let Some((_, woff, wlen, _, _)) = read_mohabbat_meta(&brot) {
+            let (woff, wlen) = (woff as usize, wlen as usize);
+            if wlen > 0 && woff + wlen <= pool.len() {
+                result[i] = Some((brot, pool[woff..woff + wlen].to_vec()));
+            }
+        }
+    }
+    result
+}
+
+fn parse_shell_slot(zone_a: &str, name: &str) -> (usize, usize) {
+    let marker = format!("{}) ", name);
+    let start = match zone_a.find(&marker) {
+        Some(p) => p,
+        None => return (0, 0),
+    };
+    let end = zone_a[start..]
+        .find(";;")
+        .map(|p| p + start)
+        .unwrap_or(zone_a.len());
+    let branch = &zone_a[start..end];
+    (
+        parse_num_after(branch, "S_OFF="),
+        parse_num_after(branch, "S_LEN="),
+    )
+}
+
+fn parse_win_slot(zone_a: &str, arch: &str) -> (usize, usize) {
+    // Match e.g. `"AMD64" (` then grab the first S_OFF= and S_LEN= inside that block.
+    let marker = format!("\"{arch}\" (");
+    let start = match zone_a.find(&marker) {
+        Some(p) => p + marker.len(),
+        None => return (0, 0),
+    };
+    let section = &zone_a[start..];
+    (
+        parse_num_after(section, "S_OFF="),
+        parse_num_after(section, "S_LEN="),
+    )
+}
+
+fn parse_num_after(text: &str, prefix: &str) -> usize {
+    match text.find(prefix) {
+        Some(p) => text[p + prefix.len()..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .unwrap_or(0),
+        None => 0,
+    }
+}
+
+/// Locate the MOHABBAT magic in a brot binary and return its metadata fields:
+/// (pool_len, washmhost_offset, washmhost_len, payload_offset, payload_len).
+fn read_mohabbat_meta(data: &[u8]) -> Option<(u64, u64, u64, u64, u64)> {
+    let magic = b"MOHABBAT";
+    for i in 0..data.len().saturating_sub(magic.len() + 40) {
+        if &data[i..i + magic.len()] == magic {
+            let p = i + magic.len();
+            let r = |s: usize| -> Option<u64> {
+                data.get(p + s..p + s + 8)
+                    .and_then(|b| b.try_into().ok())
+                    .map(u64::from_le_bytes)
+            };
+            return Some((r(0)?, r(8)?, r(16)?, r(24)?, r(32)?));
+        }
+    }
+    None
 }

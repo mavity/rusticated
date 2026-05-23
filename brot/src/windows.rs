@@ -1,3 +1,4 @@
+#![allow(unsafe_op_in_unsafe_fn)]
 use crate::META;
 use core::ffi::c_void;
 use std::ptr::{null, null_mut};
@@ -10,6 +11,11 @@ type RunPayloadFunc = unsafe extern "C" fn(*const u8, usize) -> u32;
 
 use windows_sys::Win32::System::Environment::GetCommandLineW;
 use windows_sys::Win32::UI::Shell::CommandLineToArgvW;
+
+// Windows unwind tables reference rust_eh_personality even with panic=abort.
+// Provide a no-op stub — brot never unwinds, it aborts on panic.
+#[unsafe(no_mangle)]
+extern "C" fn rust_eh_personality() {}
 
 pub unsafe fn get_module_file_name() -> Vec<u16> {
     let mut num_args = 0;

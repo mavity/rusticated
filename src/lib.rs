@@ -7,6 +7,7 @@
 #![allow(stable_features)]
 #![feature(async_fn_in_trait)]
 #![feature(lang_items)]
+#![feature(linkage)]
 #![allow(internal_features)]
 #![allow(missing_docs)]
 #![feature(alloc_error_handler)]
@@ -128,6 +129,8 @@ pub mod prelude {
         pub use alloc::vec::Vec;
         // Macros
         pub use crate::{eprint, eprintln, format, print, println, spawn, thread_local};
+        // OsStringExt for into_encoded_bytes()
+        pub use crate::ffi::OsStringExt;
         pub use alloc::vec;
         pub use core::{
             assert, assert_eq, assert_ne, debug_assert, debug_assert_eq, debug_assert_ne, matches,
@@ -443,8 +446,14 @@ unsafe extern "C" {}
 // The sysroot alloc (compiled without panic=abort) emits a DW.ref reference to
 // it.  With panic=abort the function is never invoked; we define a harmless stub
 // so the linker is satisfied.
-#[cfg(all(not(test), not(target_family = "wasm")))]
+// Using weak linkage so that when rusticated is linked alongside the real sysroot
+// std (e.g. in washmhost's cdylib which also depends on wasmtime/real-std), the
+// strong definition from the sysroot std wins and no duplicate-definition error
+// occurs.  On standalone native targets (brot, etc.) where only rusticated is
+// present, this weak stub is used normally.
+#[cfg(all(target_os = "linux", not(test), not(target_family = "wasm")))]
 #[unsafe(no_mangle)]
+#[linkage = "weak"]
 #[allow(missing_docs)]
 pub unsafe extern "C" fn rust_eh_personality() {}
 
