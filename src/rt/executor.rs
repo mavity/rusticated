@@ -341,16 +341,9 @@ fn poll_step_internal(timeout: Option<Option<Duration>>) -> io::Result<PollStatu
 
     let expired = crate::rt::timers::wake_expired();
 
-    #[cfg(windows)]
-    let live_io = super::windows::outstanding_io().get();
-    #[cfg(all(not(windows), target_os = "linux"))]
-    let live_io = with_driver(|d| d.outstanding_io()).unwrap_or(0);
-    #[cfg(not(any(windows, target_os = "linux")))]
-    let live_io = 0;
-
     let has_timers = crate::rt::timers::has_timers();
 
-    Ok(if remaining == 0 && live_io == 0 && !has_timers {
+    Ok(if remaining == 0 && !has_timers {
         PollStatus::Done
     } else if made_progress || had_events || expired {
         PollStatus::Ready
