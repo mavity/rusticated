@@ -335,7 +335,7 @@ impl OpenOptions {
 
     #[allow(unused_variables)]
     #[cfg(not(target_family = "wasm"))]
-    pub fn open<P: AsRef<str>>(&self, path: P) -> io::Result<File> {
+    pub async fn open<P: AsRef<str>>(&self, path: P) -> io::Result<File> {
         #[cfg(windows)]
         {
             let path = crate::string::String::from(path.as_ref());
@@ -505,8 +505,8 @@ impl File {
     }
 
     #[cfg(not(target_family = "wasm"))]
-    pub fn open<P: AsRef<str>>(path: P) -> io::Result<Self> {
-        OpenOptions::new().read(true).open(path)
+    pub async fn open<P: AsRef<str>>(path: P) -> io::Result<Self> {
+        OpenOptions::new().read(true).open(path).await
     }
 
     #[cfg(target_family = "wasm")]
@@ -515,12 +515,13 @@ impl File {
     }
 
     #[cfg(not(target_family = "wasm"))]
-    pub fn create<P: AsRef<str>>(path: P) -> io::Result<Self> {
+    pub async fn create<P: AsRef<str>>(path: P) -> io::Result<Self> {
         OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .open(path)
+            .await
     }
 
     #[cfg(target_family = "wasm")]
@@ -690,15 +691,152 @@ impl AsyncWrite for File {
 
 // --- Global Fns ---
 
+#[cfg(windows)]
+fn path_stat_win(path: &str, _follow_symlinks: bool) -> io::Result<Metadata> {
+    // GetFileAttributesExW follows symlinks by default.
+    let mut wchars: alloc::vec::Vec<u16> = path.encode_utf16().collect();
+    wchars.push(0);
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct WIN32_FILE_ATTRIBUTE_DATA {
+        dwFileAttributes: u32,
+        ftCreationTimeLow: u32,
+        ftCreationTimeHigh: u32,
+        ftLastAccessTimeLow: u32,
+        ftLastAccessTimeHigh: u32,
+        ftLastWriteTimeLow: u32,
+        ftLastWriteTimeHigh: u32,
+        nFileSizeHigh: u32,
+        nFileSizeLow: u32,
+    }
+
+    #[link(name = "kernel32", kind = "raw-dylib")]
+    unsafe extern "system" {
+        fn GetFileAttributesExW(
+            lpFileName: *const u16,
+            fInfoLevelId: u32,
+            lpFileInformation: *mut core::ffi::c_void,
+        ) -> i32;
+    }
+
+    let mut info = WIN32_FILE_ATTRIBUTE_DATA {
+        dwFileAttributes: 0,
+        ftCreationTimeLow: 0,
+        ftCreationTimeHigh: 0,
+        ftLastAccessTimeLow: 0,
+        ftLastAccessTimeHigh: 0,
+        ftLastWriteTimeLow: 0,
+        ftLastWriteTimeHigh: 0,
+        nFileSizeHigh: 0,
+        nFileSizeLow: 0,
+    };
+
+    let res = unsafe {
+        GetFileAttributesExW(
+            wchars.as_ptr(),
+            0, // GetFileExInfoStandard
+            &mut info as *mut _ as *mut core::ffi::c_void,
+        )
+    };
+
+    if res == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let to_unix_ns = |low: u32, high: u32| -> u64 {
+        let filetime = ((high as u64) << 32) | (low as u64);
+        // FILETIME is 100-nanosecond intervals since Jan 1, 1601
+        // Jan 1, 1970 is 116444736000000000 intervals after Jan 1, 1601
+        if filetime > 116444736000000000 {
+            (filetime - 116444736000000000) * 100
+        } else {
+            0
+        }
+    };
+
+    Ok(Metadata {
+        size: ((info.nFileSizeHigh as u64) << 32) | (info.nFileSizeLow as u64),
+        mode: info.dwFileAttributes,
+        modified_time_ns: to_unix_ns(info.ftLastWriteTimeLow, info.ftLastWriteTimeHigh),
+        accessed_time_ns: to_unix_ns(info.ftLastAccessTimeLow, info.ftLastAccessTimeHigh),
+        created_time_ns: to_unix_ns(info.ftCreationTimeLow, info.ftCreationTimeHigh),
+        nlink: 1,
+        uid: 0,
+        gid: 0,
+        inode: 0,
+    })
+}
+
+#[cfg(all(not(target_family = "wasm"), not(windows)))]
+fn path_stat_unix(path: &str, follow_symlinks: bool) -> io::Result<Metadata> {
+    #[repr(C)]
+    struct LinuxStat {
+        st_dev: u64,
+        st_ino: u64,
+        st_mode: u32,
+        st_nlink: u32,
+        st_uid: u32,
+        st_gid: u32,
+        st_rdev: u64,
+        _pad1: u64,
+        st_size: i64,
+        st_blksize: i32,
+        _pad2: i32,
+        st_blocks: i64,
+        st_atime: i64,
+        st_atime_nsec: i64,
+        st_mtime: i64,
+        st_mtime_nsec: i64,
+        st_ctime: i64,
+        st_ctime_nsec: i64,
+        _unused: [i32; 2],
+    }
+    unsafe extern "C" {
+        fn stat(pathname: *const u8, statbuf: *mut LinuxStat) -> i32;
+        fn lstat(pathname: *const u8, statbuf: *mut LinuxStat) -> i32;
+    }
+    let mut path_bytes = alloc::vec::Vec::from(path.as_bytes());
+    path_bytes.push(0);
+    let mut st = core::mem::MaybeUninit::<LinuxStat>::uninit();
+    let ret = if follow_symlinks {
+        unsafe { stat(path_bytes.as_ptr(), st.as_mut_ptr()) }
+    } else {
+        unsafe { lstat(path_bytes.as_ptr(), st.as_mut_ptr()) }
+    };
+    if ret < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let st = unsafe { st.assume_init() };
+    let to_ns = |secs: i64, nsec: i64| -> u64 {
+        if secs < 0 {
+            0
+        } else {
+            secs as u64 * 1_000_000_000 + nsec as u64
+        }
+    };
+    Ok(Metadata {
+        size: st.st_size as u64,
+        mode: st.st_mode,
+        modified_time_ns: to_ns(st.st_mtime, st.st_mtime_nsec),
+        accessed_time_ns: to_ns(st.st_atime, st.st_atime_nsec),
+        created_time_ns: to_ns(st.st_ctime, st.st_ctime_nsec),
+        nlink: st.st_nlink as u64,
+        uid: st.st_uid,
+        gid: st.st_gid,
+        inode: st.st_ino,
+    })
+}
+
 #[cfg(not(target_family = "wasm"))]
 pub fn metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
     #[cfg(windows)]
     {
-        path_stat_win(path.as_ref(), false)
+        path_stat_win(path.as_ref(), true)
     }
     #[cfg(not(windows))]
     {
-        path_stat_unix(path.as_ref(), false)
+        path_stat_unix(path.as_ref(), true)
     }
 }
 
@@ -720,154 +858,18 @@ pub async fn metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
 pub fn symlink_metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
     #[cfg(windows)]
     {
-        let mut wchars: alloc::vec::Vec<u16> = path.as_ref().encode_utf16().collect();
-        wchars.push(0);
-
-        #[repr(C)]
-        #[allow(non_snake_case)]
-        struct WIN32_FILE_ATTRIBUTE_DATA {
-            dwFileAttributes: u32,
-            ftCreationTimeLow: u32,
-            ftCreationTimeHigh: u32,
-            ftLastAccessTimeLow: u32,
-            ftLastAccessTimeHigh: u32,
-            ftLastWriteTimeLow: u32,
-            ftLastWriteTimeHigh: u32,
-            nFileSizeHigh: u32,
-            nFileSizeLow: u32,
-        }
-
-        #[link(name = "kernel32", kind = "raw-dylib")]
-        unsafe extern "system" {
-            fn GetFileAttributesExW(
-                lpFileName: *const u16,
-                fInfoLevelId: u32,
-                lpFileInformation: *mut core::ffi::c_void,
-            ) -> i32;
-        }
-
-        let mut info = WIN32_FILE_ATTRIBUTE_DATA {
-            dwFileAttributes: 0,
-            ftCreationTimeLow: 0,
-            ftCreationTimeHigh: 0,
-            ftLastAccessTimeLow: 0,
-            ftLastAccessTimeHigh: 0,
-            ftLastWriteTimeLow: 0,
-            ftLastWriteTimeHigh: 0,
-            nFileSizeHigh: 0,
-            nFileSizeLow: 0,
-        };
-
-        let res = unsafe {
-            GetFileAttributesExW(
-                wchars.as_ptr(),
-                0, // GetFileExInfoStandard
-                &mut info as *mut _ as *mut core::ffi::c_void,
-            )
-        };
-
-        if res == 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        let to_unix_ns = |low: u32, high: u32| -> u64 {
-            let filetime = ((high as u64) << 32) | (low as u64);
-            // FILETIME is 100-nanosecond intervals since Jan 1, 1601
-            // Jan 1, 1970 is 116444736000000000 intervals after Jan 1, 1601
-            if filetime > 116444736000000000 {
-                (filetime - 116444736000000000) * 100
-            } else {
-                0
-            }
-        };
-
-        Ok(Metadata {
-            size: ((info.nFileSizeHigh as u64) << 32) | (info.nFileSizeLow as u64),
-            mode: info.dwFileAttributes,
-            modified_time_ns: to_unix_ns(info.ftLastWriteTimeLow, info.ftLastWriteTimeHigh),
-            accessed_time_ns: to_unix_ns(info.ftLastAccessTimeLow, info.ftLastAccessTimeHigh),
-            created_time_ns: to_unix_ns(info.ftCreationTimeLow, info.ftCreationTimeHigh),
-            nlink: 1,
-            uid: 0,
-            gid: 0,
-            inode: 0,
-        })
+        path_stat_win(path.as_ref(), false)
     }
     #[cfg(all(not(target_family = "wasm"), not(windows)))]
     {
-        // struct stat layout on Linux aarch64 (kernel stat64 / __NR_newfstatat)
-        #[repr(C)]
-        struct LinuxStat {
-            st_dev: u64,
-            st_ino: u64,
-            st_mode: u32,
-            st_nlink: u32,
-            st_uid: u32,
-            st_gid: u32,
-            st_rdev: u64,
-            _pad1: u64,
-            st_size: i64,
-            st_blksize: i32,
-            _pad2: i32,
-            st_blocks: i64,
-            st_atime: i64,
-            st_atime_nsec: i64,
-            st_mtime: i64,
-            st_mtime_nsec: i64,
-            st_ctime: i64,
-            st_ctime_nsec: i64,
-            _unused: [i32; 2],
-        }
-        unsafe extern "C" {
-            fn stat(pathname: *const u8, statbuf: *mut LinuxStat) -> i32;
-        }
-        let mut path_bytes = alloc::vec::Vec::from(path.as_ref().as_bytes());
-        path_bytes.push(0);
-        let mut st = core::mem::MaybeUninit::<LinuxStat>::uninit();
-        let ret = unsafe { stat(path_bytes.as_ptr(), st.as_mut_ptr()) };
-        if ret < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let st = unsafe { st.assume_init() };
-        let to_ns = |secs: i64, nsec: i64| -> u64 {
-            if secs < 0 {
-                0
-            } else {
-                secs as u64 * 1_000_000_000 + nsec as u64
-            }
-        };
-        Ok(Metadata {
-            size: st.st_size as u64,
-            mode: st.st_mode,
-            modified_time_ns: to_ns(st.st_mtime, st.st_mtime_nsec),
-            accessed_time_ns: to_ns(st.st_atime, st.st_atime_nsec),
-            created_time_ns: to_ns(st.st_ctime, st.st_ctime_nsec),
-            nlink: st.st_nlink as u64,
-            uid: st.st_uid,
-            gid: st.st_gid,
-            inode: st.st_ino,
-        })
+        path_stat_unix(path.as_ref(), false)
     }
 }
 
-pub async fn symlink_metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
+pub async fn canonicalize<P: AsRef<str>>(path: P) -> io::Result<crate::path::PathBuf> {
     #[cfg(target_family = "wasm")]
     {
-        let path_bytes = path.as_ref().as_bytes().to_vec();
-        let (err, handle, _, _) =
-            crate::rt::wasm::OverlappedBufferFuture::new(path_bytes, |ov, ptr, len| {
-                unsafe { crate::abi::imports::path_lstat(ov, ptr, len) };
-            })
-            .await;
-        if err != 0 {
-            return Err(io::Error::from_raw_os_error(err as i32));
-        }
-        Ok(Metadata { handle })
-    }
-    #[cfg(not(target_family = "wasm"))]
-    {
-        let _ = path;
-        Err(io::Error::other("not implemented"))
+        Ok(crate::path::PathBuf::from(path.as_ref()))
     }
     #[cfg(windows)]
     {
