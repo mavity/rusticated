@@ -58,6 +58,18 @@ impl TruantBackend {
 }
 
 impl Backend for TruantBackend {
+    type Error = io::Error;
+
+    fn clear_region(&mut self, clear_type: ratatui::backend::ClearType) -> Result<(), Self::Error> {
+        match clear_type {
+            ratatui::backend::ClearType::All => { self.buffer.push_str("\x1b[2J"); }
+            ratatui::backend::ClearType::AfterCursor => { self.buffer.push_str("\x1b[J"); }
+            ratatui::backend::ClearType::BeforeCursor => { self.buffer.push_str("\x1b[1J"); }
+            ratatui::backend::ClearType::CurrentLine => { self.buffer.push_str("\x1b[2K"); }
+            ratatui::backend::ClearType::UntilNewLine => { self.buffer.push_str("\x1b[K"); }
+        }
+        Ok(())
+    }
     fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
     where
         I: Iterator<Item = (u16, u16, &'a Cell)>,
