@@ -443,7 +443,7 @@ unsafe extern "C" {}
 // The sysroot alloc (compiled without panic=abort) emits a DW.ref reference to
 // it.  With panic=abort the function is never invoked; we define a harmless stub
 // so the linker is satisfied.
-#[cfg(all(target_os = "linux", not(test), not(target_family = "wasm")))]
+#[cfg(all(not(test), not(target_family = "wasm")))]
 #[unsafe(no_mangle)]
 #[allow(missing_docs)]
 pub unsafe extern "C" fn rust_eh_personality() {}

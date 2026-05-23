@@ -115,8 +115,8 @@ These names are fixed. Do not rename in code or docs.
 - **Modern Four** — the target matrix. Six triples, no 32-bit:
   - `x86_64-unknown-linux-musl`
   - `aarch64-unknown-linux-musl`
-  - `x86_64-pc-windows-msvc`
-  - `aarch64-pc-windows-msvc`
+  - `x86_64-pc-windows-gnu`
+  - `aarch64-pc-windows-gnu`
   - `x86_64-apple-darwin`
   - `aarch64-apple-darwin`
 
