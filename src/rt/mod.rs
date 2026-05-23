@@ -4,6 +4,8 @@ pub mod select;
 pub use select::{Either, Select, select};
 
 #[cfg(not(target_family = "wasm"))]
+pub mod blocking;
+#[cfg(not(target_family = "wasm"))]
 pub mod bsd;
 #[cfg(not(target_family = "wasm"))]
 pub mod executor;

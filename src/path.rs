@@ -267,12 +267,6 @@ impl Path {
         crate::fs::read_dir(self.as_str()).await
     }
 
-    /// Returns the canonical form of the path (async).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub async fn canonicalize(&self) -> crate::io::Result<PathBuf> {
-        crate::fs::canonicalize(self.as_str()).await
-    }
-
     /// Returns a displayable object for this path.
     #[must_use]
     pub fn display(&self) -> PathDisplay<'_> {
