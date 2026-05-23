@@ -6,6 +6,16 @@ pub unsafe extern "C" fn fmod(x: f64, y: f64) -> f64 {
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn cos(_x: f64) -> f64 {
+    0.0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sin(_x: f64) -> f64 {
+    0.0
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn _CxxThrowException(_: *mut u8, _: *mut u8) -> ! {
     core::panic!("_CxxThrowException called (C++ EH not supported without std)");
 }
@@ -16,7 +26,6 @@ pub unsafe extern "C" fn __CxxFrameHandler3() -> i32 {
     0
 }
 
-#[cfg(test)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn free(_: *mut u8) {}
 

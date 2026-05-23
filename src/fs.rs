@@ -880,11 +880,160 @@ pub fn metadata_sync<P: AsRef<str>>(_path: P) -> io::Result<Metadata> {
 pub fn symlink_metadata_sync<P: AsRef<str>>(_path: P) -> io::Result<Metadata> {
     Err(io::Error::other("not supported"))
 }
-pub async fn read_dir<P: AsRef<str>>(_path: P) -> io::Result<ReadDir> {
-    Err(io::Error::other("not implemented"))
+pub async fn read_dir<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
+    let path = alloc::string::String::from(path.as_ref());
+    match crate::rt::spawn_blocking(move || read_dir_sync(path)).await {
+        Ok(res) => res,
+        Err(_) => Err(io::Error::other("spawn_blocking failed")),
+    }
 }
-pub fn read_dir_sync<P: AsRef<str>>(_path: P) -> io::Result<ReadDir> {
-    Err(io::Error::other("not implemented"))
+pub fn read_dir_sync<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
+    #[cfg(windows)]
+    {
+        let mut path_str = alloc::string::String::from(path.as_ref());
+        if !path_str.ends_with('\\') && !path_str.ends_with('/') {
+            path_str.push('\\');
+        }
+        path_str.push_str("*");
+
+        let mut wchars = alloc::vec::Vec::with_capacity(path_str.len() + 1);
+        for c in path_str.encode_utf16() {
+            wchars.push(c);
+        }
+        wchars.push(0);
+
+        #[repr(C)]
+        #[derive(Copy, Clone)]
+        #[allow(non_snake_case)]
+        struct FILETIME {
+            dwLowDateTime: u32,
+            dwHighDateTime: u32,
+        }
+
+        #[repr(C)]
+        #[derive(Copy, Clone)]
+        #[allow(non_snake_case)]
+        struct WIN32_FIND_DATAW {
+            dwFileAttributes: u32,
+            ftCreationTime: FILETIME,
+            ftLastAccessTime: FILETIME,
+            ftLastWriteTime: FILETIME,
+            nFileSizeHigh: u32,
+            nFileSizeLow: u32,
+            dwReserved0: u32,
+            dwReserved1: u32,
+            cFileName: [u16; 260],
+            cAlternateFileName: [u16; 14],
+            dwFileType: u32,
+            dwCreatorType: u32,
+            wFinderFlags: u16,
+        }
+
+        #[link(name = "kernel32", kind = "raw-dylib")]
+        unsafe extern "system" {
+            fn FindFirstFileW(lpFileName: *const u16, lpFindFileData: *mut WIN32_FIND_DATAW) -> *mut core::ffi::c_void;
+            fn FindNextFileW(hFindFile: *mut core::ffi::c_void, lpFindFileData: *mut WIN32_FIND_DATAW) -> i32;
+            fn FindClose(hFindFile: *mut core::ffi::c_void) -> i32;
+            fn GetLastError() -> u32;
+        }
+
+        let mut entries = alloc::vec::Vec::new();
+        let mut ffd: WIN32_FIND_DATAW = unsafe { core::mem::zeroed() };
+
+        let handle = unsafe { FindFirstFileW(wchars.as_ptr(), &mut ffd) };
+        if handle as isize == -1 {
+            let err = unsafe { GetLastError() };
+            if err == 2 { // ERROR_FILE_NOT_FOUND
+                return Ok(ReadDir { entries, pos: 0 });
+            }
+            return Err(io::Error::from_raw_os_error(err as i32));
+        }
+
+        loop {
+            let len = ffd.cFileName.iter().take_while(|&&c| c != 0).count();
+            let file_name = alloc::string::String::from_utf16_lossy(&ffd.cFileName[..len]);
+
+            if file_name != "." && file_name != ".." {
+                entries.push(DirEntry {
+                    name: file_name,
+                    metadata: Some(Metadata {
+                        size: ((ffd.nFileSizeHigh as u64) << 32) | (ffd.nFileSizeLow as u64),
+                        mode: ffd.dwFileAttributes,
+                        modified_time_ns: 0, accessed_time_ns: 0, created_time_ns: 0,
+                        nlink: 1, uid: 0, gid: 0, inode: 0,
+                    }),
+                });
+            }
+
+            let next = unsafe { FindNextFileW(handle, &mut ffd) };
+            if next == 0 {
+                break;
+            }
+        }
+        unsafe { FindClose(handle); }
+
+        Ok(ReadDir { entries, pos: 0 })
+    }
+
+    #[cfg(all(not(target_family = "wasm"), not(windows)))]
+    {
+        // Unix (Linux / generic libc)
+        #[repr(C)]
+        pub struct dirent {
+            pub d_ino: u64,
+            pub d_off: i64,
+            pub d_reclen: u16,
+            pub d_type: u8,
+            pub d_name: [u8; 256],
+        }
+
+        unsafe extern "C" {
+            fn opendir(name: *const u8) -> *mut core::ffi::c_void;
+            fn readdir(dirp: *mut core::ffi::c_void) -> *mut dirent;
+            fn closedir(dirp: *mut core::ffi::c_void) -> i32;
+        }
+
+        let mut path_bytes = alloc::vec::Vec::from(path.as_ref().as_bytes());
+        path_bytes.push(0);
+
+        let mut entries = alloc::vec::Vec::new();
+        let dirp = unsafe { opendir(path_bytes.as_ptr()) };
+        if dirp.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+
+        loop {
+            let entry = unsafe { readdir(dirp) };
+            if entry.is_null() {
+                break;
+            }
+
+            let name_bytes = unsafe { (*entry).d_name };
+            let len = name_bytes.iter().take_while(|&&c| c != 0).count();
+            if let Ok(file_name) = core::str::from_utf8(&name_bytes[..len]) {
+                if file_name != "." && file_name != ".." {
+                    let is_dir = unsafe { (*entry).d_type } == 4; // DT_DIR
+                    entries.push(DirEntry {
+                        name: alloc::string::String::from(file_name),
+                        metadata: Some(Metadata {
+                            size: 0,
+                            mode: if is_dir { 0x4000 } else { 0 }, // Fake generic DIR mode mark
+                            modified_time_ns: 0, accessed_time_ns: 0, created_time_ns: 0,
+                            nlink: 1, uid: 0, gid: 0, inode: 0,
+                        }),
+                    });
+                }
+            }
+        }
+        unsafe { closedir(dirp); }
+
+        Ok(ReadDir { entries, pos: 0 })
+    }
+
+    #[cfg(target_family = "wasm")]
+    {
+        Err(io::Error::other("not implemented on wasm"))
+    }
 }
 pub async fn remove_file<P: AsRef<str>>(_path: P) -> io::Result<()> {
     Err(io::Error::other("not implemented"))
