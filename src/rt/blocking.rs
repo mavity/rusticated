@@ -218,17 +218,11 @@ impl<T: Send + 'static> BlockingOpFuture<T> {
         });
         let state_clone = Arc::clone(&state);
         
-        #[cfg(windows)]
-        super::windows::outstanding_io().set(super::windows::outstanding_io().get() + 1);
-
         pool().spawn(move || {
             let res = f();
             let mut s = state_clone.result.lock();
             *s = Some(res);
             
-            #[cfg(windows)]
-            super::windows::outstanding_io().set(super::windows::outstanding_io().get() - 1);
-
             if let Some(w) = state_clone.waker.lock().take() {
                 w.wake();
             }
