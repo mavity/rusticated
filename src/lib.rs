@@ -593,6 +593,6 @@ pub mod vec {
 
 /// Re-exports from the runtime engine.
 #[cfg(not(target_family = "wasm"))]
-pub use crate::rt::executor::{JoinHandle, spawn, spawn_blocking};
+pub use crate::rt::executor::{JoinHandle, spawn};
 
 pub use crate::error::{Result, SystemError as Error};

@@ -210,45 +210,6 @@ where
     handle
 }
 
-/// Spawns a blocking task.
-///
-/// If `threads` feature is enabled, it spawns a real thread.
-/// Otherwise, it runs it immediately and blocks.
-pub fn spawn_blocking<F, T>(f: F) -> JoinHandle<T>
-where
-    F: FnOnce() -> T + Send + 'static,
-    T: Send + 'static,
-{
-    #[cfg(feature = "threads")]
-    {
-        let state = Arc::new(RefCell::new(JoinState {
-            result: None,
-            waker: None,
-        }));
-        let state_clone = Arc::clone(&state);
-        // We need a way to tell the executor to wake up.
-        // For now, we'll just use a thread and hope the executor is polling.
-        let _ = ::std::thread::spawn(move || {
-            let res = f();
-            let mut s = state_clone.borrow_mut();
-            s.result = Some(res);
-            if let Some(w) = s.waker.take() {
-                w.wake();
-            }
-        });
-        JoinHandle { state }
-    }
-    #[cfg(not(feature = "threads"))]
-    {
-        let res = f();
-        let state = Arc::new(RefCell::new(JoinState {
-            result: Some(res),
-            waker: None,
-        }));
-        JoinHandle { state }
-    }
-}
-
 /// Internal helper: spawn a `Future<Output = ()>` and discard the handle.
 ///
 /// Used by test `block_on` utilities and platform bootstrapping code within
