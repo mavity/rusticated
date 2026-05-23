@@ -1,7 +1,7 @@
-use ratatui::layout::{Constraint, Direction, Layout, Rect, Margin};
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState};
-use ratatui::Frame;
 
 use crate::app::App;
 
@@ -17,8 +17,24 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
         .split(f.area());
 
-    draw_panel(f, chunks[0], app, 0, &app.left_files, app.left_selected, "Left");
-    draw_panel(f, chunks[1], app, 1, &app.right_files, app.right_selected, "Right");
+    draw_panel(
+        f,
+        chunks[0],
+        app,
+        0,
+        &app.left_files,
+        app.left_selected,
+        "Left",
+    );
+    draw_panel(
+        f,
+        chunks[1],
+        app,
+        1,
+        &app.right_files,
+        app.right_selected,
+        "Right",
+    );
 }
 
 fn draw_panel(
@@ -49,7 +65,7 @@ fn draw_panel(
         .title(title)
         .border_style(Style::default().fg(border_color))
         .style(list_style);
-    
+
     let inner_area = block.inner(area);
     f.render_widget(block, area);
 
@@ -60,56 +76,43 @@ fn draw_panel(
 
     // Determine how many items fit in a single column
     let items_per_col = inner_area.height as usize;
-    
+
+    let num_cols = (inner_area.width / 12).max(1) as usize;
+    let col_width_constraints =
+        std::vec::from_elem(Constraint::Ratio(1, num_cols as u32), num_cols);
+
     let col_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
+        .constraints(col_width_constraints)
         .split(inner_area);
 
-    let mut col1_items = Vec::new();
-    let mut col2_items = Vec::new();
+    let items_per_page = items_per_col * num_cols;
+    let page = selected / items_per_page.max(1);
+    let start_idx = page * items_per_page;
 
-    // Determine current scroll offset
-    let page = selected / (items_per_col * 2).max(1);
-    let start_idx = page * (items_per_col * 2);
+    let mut cols_items = std::vec::from_elem(Vec::new(), num_cols);
+    let mut cols_states = std::vec::from_elem(ListState::default(), num_cols);
 
-    for i in 0..items_per_col {
-        let idx1 = start_idx + i;
-        if idx1 < files.len() {
-            col1_items.push(ListItem::new(files[idx1].as_str()));
-        }
-
-        let idx2 = start_idx + items_per_col + i;
-        if idx2 < files.len() {
-            col2_items.push(ListItem::new(files[idx2].as_str()));
+    for c in 0..num_cols {
+        for r in 0..items_per_col {
+            let idx = start_idx + c * items_per_col + r;
+            if idx < files.len() {
+                cols_items[c].push(ListItem::new(files[idx].as_str()));
+            }
         }
     }
 
-    let mut col1_state = ListState::default();
-    let mut col2_state = ListState::default();
-
-    if app.active_pane == pane_index {
-        let local_sel = selected.saturating_sub(start_idx);
-        if local_sel < items_per_col {
-            col1_state.select(Some(local_sel));
-        } else {
-            col2_state.select(Some(local_sel - items_per_col));
-        }
-    } else {
-        // optionally highlight in inactive panel, just with a different color,
-        // or omit selection. We can highlight it.
-        let local_sel = selected.saturating_sub(start_idx);
-        if local_sel < items_per_col {
-            col1_state.select(Some(local_sel));
-        } else {
-            col2_state.select(Some(local_sel - items_per_col));
-        }
+    let local_sel = selected.saturating_sub(start_idx);
+    let sel_col = local_sel / items_per_col;
+    let sel_row = local_sel % items_per_col;
+    if sel_col < num_cols {
+        cols_states[sel_col].select(Some(sel_row));
     }
 
-    // Use regular list style but allow selection
-    let list1 = List::new(col1_items).style(list_style).highlight_style(highlight_style);
-    let list2 = List::new(col2_items).style(list_style).highlight_style(highlight_style);
-
-    f.render_stateful_widget(list1, col_chunks[0], &mut col1_state);
-    f.render_stateful_widget(list2, col_chunks[1], &mut col2_state);
+    for c in 0..num_cols {
+        let list = List::new(cols_items[c].clone())
+            .style(list_style)
+            .highlight_style(highlight_style);
+        f.render_stateful_widget(list, col_chunks[c], &mut cols_states[c]);
+    }
 }

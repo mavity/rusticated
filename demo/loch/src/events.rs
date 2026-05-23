@@ -27,19 +27,24 @@ pub async fn handle_input(app: &mut App, bytes: &[u8], inner_height: usize) {
         app.right_selected
     };
 
-    if bytes == b"\x1b[A" { // Up
+    if bytes == b"\x1b[A" {
+        // Up
         let new_sel = selected.saturating_sub(1);
         set_sel(app, new_sel);
-    } else if bytes == b"\x1b[B" { // Down
+    } else if bytes == b"\x1b[B" {
+        // Down
         let new_sel = (selected + 1).min(files_len.saturating_sub(1));
         set_sel(app, new_sel);
-    } else if bytes == b"\x1b[D" { // Left - Jump column left
+    } else if bytes == b"\x1b[D" {
+        // Left - Jump column left
         let new_sel = selected.saturating_sub(inner_height);
         set_sel(app, new_sel);
-    } else if bytes == b"\x1b[C" { // Right - Jump column right
+    } else if bytes == b"\x1b[C" {
+        // Right - Jump column right
         let new_sel = (selected + inner_height).min(files_len.saturating_sub(1));
         set_sel(app, new_sel);
-    } else if bytes == b"\r" || bytes == b"\n" { // Enter
+    } else if bytes == b"\r" || bytes == b"\n" {
+        // Enter
         handle_enter(app).await;
     }
 }
