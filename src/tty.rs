@@ -788,12 +788,6 @@ mod windows_tty {
 
             if consume_ready(token) {
                 if let Some(mut state) = self.state.take() {
-                    // Reclaim I/O count
-                    if self.registered {
-                        crate::rt::windows::outstanding_io()
-                            .set(crate::rt::windows::outstanding_io().get() - 1);
-                    }
-
                     let n = state.bytes_read.load(Ordering::Acquire) as usize;
                     // SAFETY: the thread has finished (WaitForSingleObject in
                     // Drop blocks until it does); we regain sole ownership.
@@ -860,9 +854,6 @@ mod windows_tty {
                     state.thread_handle.store(thread_handle, Ordering::Relaxed);
                 }
 
-                // Track live I/O
-                crate::rt::windows::outstanding_io()
-                    .set(crate::rt::windows::outstanding_io().get() + 1);
                 self.registered = true;
             }
 
@@ -883,9 +874,6 @@ mod windows_tty {
 
                     let status = unsafe { WaitForSingleObject(th, 50) };
                     unsafe { CloseHandle(th) };
-
-                    crate::rt::windows::outstanding_io()
-                        .set(crate::rt::windows::outstanding_io().get() - 1);
 
                     // If the thread is still stuck in ReadFile, we must leak the state
                     // to prevent heap corruption since the thread holds pointers to its fields.
