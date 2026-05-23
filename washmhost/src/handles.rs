@@ -7,6 +7,7 @@ pub enum HandleKind {
     Fd(i32),
     File(File),
     Process(std::process::Child),
+    Dir(std::fs::ReadDir, Vec<u8>),
 }
 
 pub struct StatInfo {
@@ -149,6 +150,7 @@ impl HostState {
             HandleKind::Fd(fd) => Some(*fd),
             HandleKind::File(_) => Some(-1),
             HandleKind::Process(_) => None,
+            HandleKind::Dir(_, _) => None,
         }
     }
 

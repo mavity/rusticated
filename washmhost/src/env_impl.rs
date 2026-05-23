@@ -275,7 +275,7 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                             Err(e) => error = e.raw_os_error().unwrap_or(5) as u32, // EIO
                         }
                     }
-                    HandleKind::Process(_) => {
+                    HandleKind::Process(_) | HandleKind::Dir(_, _) => {
                         error = 9; // EBADF — cannot write to a process handle
                     }
                 }
@@ -324,16 +324,22 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let do_read = read_flag || (!write_flag && !create);
             let do_write = write_flag || create;
             {}
-            let f = std::fs::OpenOptions::new()
-                .read(do_read)
-                .write(do_write)
-                .create(create && !create_new)
-                .create_new(create_new)
-                .truncate(truncate)
-                .append(append)
-                .open(path)
-                .with_context(|| format!("path_open: {path:?}"))?;
-            let new_handle = host.alloc_handle(HandleKind::File(f));
+                        let is_dir = std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false);
+            let new_handle = if is_dir && do_read && !do_write {
+                let rd = std::fs::read_dir(path).with_context(|| format!("path_open dir: {path:?}"))?;
+                host.alloc_handle(HandleKind::Dir(rd, Vec::new()))
+            } else {
+                let f = std::fs::OpenOptions::new()
+                    .read(do_read)
+                    .write(do_write)
+                    .create(create && !create_new)
+                    .create_new(create_new)
+                    .truncate(truncate)
+                    .append(append)
+                    .open(path)
+                    .with_context(|| format!("path_open: {path:?}"))?;
+                host.alloc_handle(HandleKind::File(f))
+            };
             write_overlapped(data, ov_ptr, 0, 0, new_handle)
         },
     )?;
@@ -554,13 +560,54 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         "dir_read",
         |mut caller: Caller<'_, HostState>,
          ov_ptr: u32,
-         _handle: u64,
-         _ptr: u32,
-         _len: u32|
+         handle: u64,
+         ptr: u32,
+         len: u32|
          -> anyhow::Result<()> {
             let mem = get_memory(&mut caller)?;
-            let data = mem.data_mut(&mut caller);
-            write_overlapped(data, ov_ptr, 0, 0, 0)
+            let (data, host) = mem.data_and_store_mut(&mut caller);
+            
+            let mut read_bytes = 0;
+            let mut error = 0;
+
+            if let Some(HandleKind::Dir(rd, leftovers)) = host.handles.get_mut(&handle) {
+                let max_len = len as usize;
+                
+                while leftovers.len() < max_len {
+                    if let Some(entry_res) = rd.next() {
+                        match entry_res {
+                            Ok(entry) => {
+                                let name = entry.file_name();
+                                let bytes = name.to_string_lossy().into_owned().into_bytes();
+                                leftovers.extend_from_slice(&bytes);
+                                leftovers.push(0); // null terminator
+                            }
+                            Err(e) => {
+                                if leftovers.is_empty() {
+                                    error = e.raw_os_error().unwrap_or(5) as u32; // EIO
+                                }
+                                break;
+                            }
+                        }
+                    } else {
+                        break;
+                    }
+                }
+
+                if error == 0 {
+                    let take_len = std::cmp::min(max_len, leftovers.len());
+                    if take_len > 0 {
+                        let chunk: std::vec::Vec<u8> = leftovers.drain(..take_len).collect();
+                        let guest_slice = &mut guest_slice(data, ptr, len)?[..take_len];
+                        guest_slice.copy_from_slice(&chunk);
+                        read_bytes = take_len as u64;
+                    }
+                }
+            } else {
+                error = 9; // EBADF
+            }
+
+            write_overlapped(data, ov_ptr, error, read_bytes, 0)
         },
     )?;
 
@@ -851,3 +898,7 @@ pub fn poll_completions(
 
     Ok(progress)
 }
+
+
+
+
