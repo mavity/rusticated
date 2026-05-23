@@ -234,22 +234,10 @@ impl Path {
         crate::fs::metadata(self.as_str()).await
     }
 
-    /// Query metadata for this path (sync).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn metadata_sync(&self) -> crate::io::Result<crate::fs::Metadata> {
-        crate::fs::metadata_sync(self.as_str())
-    }
-
     /// Returns `true` if the path exists on disk (async).
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn exists(&self) -> bool {
         self.metadata().await.is_ok()
-    }
-
-    /// Returns `true` if the path exists on disk (sync).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn exists_sync(&self) -> bool {
-        self.metadata_sync().is_ok()
     }
 
     /// Returns `true` if the path exists and is a regular file (async).
@@ -258,22 +246,10 @@ impl Path {
         self.metadata().await.map(|m| m.is_file()).unwrap_or(false)
     }
 
-    /// Returns `true` if the path exists and is a regular file (sync).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn is_file_sync(&self) -> bool {
-        self.metadata_sync().map(|m| m.is_file()).unwrap_or(false)
-    }
-
     /// Returns `true` if the path exists and is a directory (async).
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn is_dir(&self) -> bool {
         self.metadata().await.map(|m| m.is_dir()).unwrap_or(false)
-    }
-
-    /// Returns `true` if the path exists and is a directory (sync).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn is_dir_sync(&self) -> bool {
-        self.metadata_sync().map(|m| m.is_dir()).unwrap_or(false)
     }
 
     /// Returns `true` if the path exists and is a symbolic link (async).
@@ -281,14 +257,6 @@ impl Path {
     pub async fn is_symlink(&self) -> bool {
         crate::fs::symlink_metadata(self.as_str())
             .await
-            .map(|m| m.is_symlink())
-            .unwrap_or(false)
-    }
-
-    /// Returns `true` if the path exists and is a symbolic link (sync).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn is_symlink_sync(&self) -> bool {
-        crate::fs::symlink_metadata_sync(self.as_str())
             .map(|m| m.is_symlink())
             .unwrap_or(false)
     }
@@ -303,12 +271,6 @@ impl Path {
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn canonicalize(&self) -> crate::io::Result<PathBuf> {
         crate::fs::canonicalize(self.as_str()).await
-    }
-
-    /// Returns the canonical form of the path (sync).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn canonicalize_sync(&self) -> crate::io::Result<PathBuf> {
-        crate::fs::canonicalize_sync(self.as_str())
     }
 
     /// Returns a displayable object for this path.
