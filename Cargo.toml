@@ -84,7 +84,7 @@ documentation = "https://docs.rs/rusticated"
 rust-version.workspace = true
 
 [lib]
-name = "rusticated"
+name = "std"
 bench = false
 
 [lints]

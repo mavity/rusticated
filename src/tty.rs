@@ -970,7 +970,7 @@ mod windows_tty {
 
     #[cfg(test)]
     mod tests {
-        extern crate std;
+        
 
         use super::*;
         use crate::io::AsyncWrite;

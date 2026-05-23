@@ -327,6 +327,16 @@ pub fn var(key: &str) -> Result<crate::string::String, VarError> {
         .ok_or(VarError)
 }
 
+/// Returns an iterator over command-line arguments as `String` values.
+pub fn args_os() -> impl Iterator<Item = crate::string::String> {
+    get_args().into_iter()
+}
+
+/// Returns an iterator over environment variables as `(key, value)` string pairs.
+pub fn vars_os() -> impl Iterator<Item = (crate::string::String, crate::string::String)> {
+    get_env().into_iter()
+}
+
 #[cfg(target_family = "wasm")]
 use crate::abi::imports;
 #[cfg(target_family = "wasm")]
