@@ -155,6 +155,12 @@ All executor and scheduling logic is self-contained in `rt/`. Logic derived from
   ```
   rustup target add wasm32-unknown-unknown
   ```
+- On Windows, the default host target may be `x86_64-pc-windows-msvc`, which requires the MSVC linker (`link.exe`). If you do not have MSVC installed, build explicitly with GNU instead:
+  ```
+  rustup toolchain install nightly-x86_64-pc-windows-gnu
+  rustup target add x86_64-pc-windows-gnu
+  cargo +nightly-x86_64-pc-windows-gnu run -p rusticated-demo --target x86_64-pc-windows-gnu
+  ```
 - **Node.js ≥ 18** and its dependencies installed — required for the node-host and harness variants:
   ```
   npm install --prefix node-host
@@ -172,6 +178,14 @@ The demo compiles directly to the host platform using `rusticated` as its `std` 
 
 ```
 cargo run -p rusticated-demo
+```
+
+On Windows, if you do not have the MSVC linker installed, build explicitly with GNU/LLVM instead:
+
+```powershell
+rustup toolchain install nightly-x86_64-pc-windows-gnu
+rustup target add x86_64-pc-windows-gnu --toolchain nightly-x86_64-pc-windows-gnu
+cargo +nightly-x86_64-pc-windows-gnu run -p rusticated-demo --target x86_64-pc-windows-gnu
 ```
 
 The executable reads from the terminal, waits up to 5 seconds for a line, then writes a small file and reads it back.
