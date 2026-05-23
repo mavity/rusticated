@@ -20,7 +20,7 @@ pub unsafe extern "C" fn _CxxThrowException(_: *mut u8, _: *mut u8) -> ! {
     core::panic!("_CxxThrowException called (C++ EH not supported without std)");
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __CxxFrameHandler3() -> i32 {
     0

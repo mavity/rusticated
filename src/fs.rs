@@ -346,111 +346,121 @@ impl OpenOptions {
         }
         #[cfg(windows)]
         {
-            let mut wchars: alloc::vec::Vec<u16> = path.as_ref().encode_utf16().collect();
-            wchars.push(0);
+            let path = crate::string::String::from(path.as_ref());
+            let options = self.clone();
+            crate::rt::blocking::BlockingOpFuture::new(move || {
+                let mut wchars: alloc::vec::Vec<u16> = path.encode_utf16().collect();
+                wchars.push(0);
 
-            let mut access = 0;
-            if self.read {
-                access |= 0x80000000;
-            } // GENERIC_READ
-            if self.write {
-                access |= 0x40000000;
-            } // GENERIC_WRITE
-            if self.append {
-                access |= 0x00000004;
-            } // FILE_APPEND_DATA
+                let mut access = 0;
+                if options.read {
+                    access |= 0x80000000;
+                } // GENERIC_READ
+                if options.write {
+                    access |= 0x40000000;
+                } // GENERIC_WRITE
+                if options.append {
+                    access |= 0x00000004;
+                } // FILE_APPEND_DATA
 
-            let share = 0x00000001 | 0x00000002; // FILE_SHARE_READ | FILE_SHARE_WRITE
+                let share = 0x00000001 | 0x00000002; // FILE_SHARE_READ | FILE_SHARE_WRITE
 
-            let creation = if self.create_new {
-                1 // CREATE_NEW
-            } else if self.truncate && self.create {
-                2 // CREATE_ALWAYS
-            } else if self.truncate {
-                5 // TRUNCATE_EXISTING
-            } else if self.create {
-                4 // OPEN_ALWAYS
-            } else {
-                3 // OPEN_EXISTING
-            };
+                let creation = if options.create_new {
+                    1 // CREATE_NEW
+                } else if options.truncate && options.create {
+                    2 // CREATE_ALWAYS
+                } else if options.truncate {
+                    5 // TRUNCATE_EXISTING
+                } else if options.create {
+                    4 // OPEN_ALWAYS
+                } else {
+                    3 // OPEN_EXISTING
+                };
 
-            #[link(name = "kernel32", kind = "raw-dylib")]
-            unsafe extern "system" {
-                fn CreateFileW(
-                    lpFileName: *const u16,
-                    dwDesiredAccess: u32,
-                    dwShareMode: u32,
-                    lpSecurityAttributes: *mut core::ffi::c_void,
-                    dwCreationDisposition: u32,
-                    dwFlagsAndAttributes: u32,
-                    hTemplateFile: *mut core::ffi::c_void,
-                ) -> usize;
-            }
+                #[link(name = "kernel32", kind = "raw-dylib")]
+                unsafe extern "system" {
+                    fn CreateFileW(
+                        lpFileName: *const u16,
+                        dwDesiredAccess: u32,
+                        dwShareMode: u32,
+                        lpSecurityAttributes: *mut core::ffi::c_void,
+                        dwCreationDisposition: u32,
+                        dwFlagsAndAttributes: u32,
+                        hTemplateFile: *mut core::ffi::c_void,
+                    ) -> usize;
+                }
 
-            let handle = unsafe {
-                CreateFileW(
-                    wchars.as_ptr(),
-                    access,
-                    share,
-                    core::ptr::null_mut(),
-                    creation,
-                    0x80, // FILE_ATTRIBUTE_NORMAL
-                    core::ptr::null_mut(),
-                )
-            };
+                let handle = unsafe {
+                    CreateFileW(
+                        wchars.as_ptr(),
+                        access,
+                        share,
+                        core::ptr::null_mut(),
+                        creation,
+                        0x40000000 | 0x80, // FILE_FLAG_OVERLAPPED | FILE_ATTRIBUTE_NORMAL
+                        core::ptr::null_mut(),
+                    )
+                };
 
-            let invalid_handle = !0usize;
-            if handle == invalid_handle {
-                return Err(io::Error::last_os_error());
-            }
+                let invalid_handle = !0usize;
+                if handle == invalid_handle {
+                    return Err(io::Error::last_os_error());
+                }
 
-            Ok(File {
-                handle: handle as u64,
+                Ok(File {
+                    handle: handle as u64,
+                })
             })
+            .await
         }
         #[cfg(all(not(target_family = "wasm"), not(windows)))]
         {
-            const O_RDONLY: i32 = 0;
-            const O_WRONLY: i32 = 1;
-            const O_RDWR: i32 = 2;
-            const O_CREAT: i32 = 64;
-            const O_TRUNC: i32 = 512;
-            const O_APPEND: i32 = 1024;
-            const O_EXCL: i32 = 128;
+            let path = crate::string::String::from(path.as_ref());
+            let options = self.clone();
+            crate::rt::blocking::BlockingOpFuture::new(move || {
+                const O_RDONLY: i32 = 0;
+                const O_WRONLY: i32 = 1;
+                const O_RDWR: i32 = 2;
+                const O_CREAT: i32 = 64;
+                const O_TRUNC: i32 = 512;
+                const O_APPEND: i32 = 1024;
+                const O_EXCL: i32 = 128;
 
-            let mut flags = 0;
-            if self.read && self.write {
-                flags |= O_RDWR;
-            } else if self.write {
-                flags |= O_WRONLY;
-            } else {
-                flags |= O_RDONLY;
-            }
-            if self.create {
-                flags |= O_CREAT;
-            }
-            if self.truncate {
-                flags |= O_TRUNC;
-            }
-            if self.append {
-                flags |= O_APPEND;
-            }
-            if self.create_new {
-                flags |= O_CREAT | O_EXCL;
-            }
+                let mut flags = 0;
+                if options.read && options.write {
+                    flags |= O_RDWR;
+                } else if options.write {
+                    flags |= O_WRONLY;
+                } else {
+                    flags |= O_RDONLY;
+                }
+                if options.create {
+                    flags |= O_CREAT;
+                }
+                if options.truncate {
+                    flags |= O_TRUNC;
+                }
+                if options.append {
+                    flags |= O_APPEND;
+                }
+                if options.create_new {
+                    flags |= O_CREAT | O_EXCL;
+                }
 
-            unsafe extern "C" {
-                fn open(pathname: *const u8, flags: i32, mode: u32) -> i32;
-            }
-            let mut path_bytes = alloc::vec::Vec::from(path.as_ref().as_bytes());
-            path_bytes.push(0);
-            let handle = unsafe { open(path_bytes.as_ptr(), flags, 0o666) };
-            if handle < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(File {
-                handle: handle as u64,
+                unsafe extern "C" {
+                    fn open(pathname: *const u8, flags: i32, mode: u32) -> i32;
+                }
+                let mut path_bytes = alloc::vec::Vec::from(path.as_bytes());
+                path_bytes.push(0);
+                let handle = unsafe { open(path_bytes.as_ptr(), flags, 0o666) };
+                if handle < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(File {
+                    handle: handle as u64,
+                })
             })
+            .await
         }
     }
 }
@@ -596,47 +606,7 @@ impl AsyncRead for File {
         }
         #[cfg(windows)]
         {
-            #[allow(clashing_extern_declarations)]
-            #[link(name = "kernel32", kind = "raw-dylib")]
-            unsafe extern "system" {
-                fn ReadFile(
-                    hFile: usize,
-                    lpBuffer: *mut u8,
-                    nNumberOfBytesToRead: u32,
-                    lpNumberOfBytesRead: *mut u32,
-                    lpOverlapped: *mut crate::rt::windows::Overlapped,
-                ) -> i32;
-            }
-
-            let mut buf = buf;
-            let mut bytes_read = 0u32;
-            let res = unsafe {
-                ReadFile(
-                    self.handle as usize,
-                    buf.as_mut_ptr(),
-                    buf.capacity() as u32,
-                    &mut bytes_read,
-                    core::ptr::null_mut(),
-                )
-            };
-
-            if res == 0 {
-                let err = io::Error::last_os_error();
-                // EOF might be ERROR_HANDLE_EOF which is 38
-                if err.raw_os_error() == Some(38) {
-                    unsafe {
-                        buf.set_len(0);
-                    }
-                    (Ok(0), buf)
-                } else {
-                    (Err(err), buf)
-                }
-            } else {
-                unsafe {
-                    buf.set_len(bytes_read as usize);
-                }
-                (Ok(bytes_read as usize), buf)
-            }
+            crate::rt::windows::OverlappedRead::new(self.handle, buf).await
         }
         #[cfg(all(not(target_family = "wasm"), not(windows)))]
         {
@@ -650,9 +620,8 @@ impl AsyncWrite for File {
         #[cfg(target_family = "wasm")]
         {
             let handle = self.handle;
-            let len = buf.len() as u32;
             let (err, written, _, buf) =
-                crate::rt::wasm::OverlappedBufferFuture::new(buf, move |ov, ptr, _| {
+                crate::rt::wasm::OverlappedBufferFuture::new(buf, move |ov, ptr, len| {
                     unsafe { crate::abi::imports::write(ov, handle, ptr, len) };
                 })
                 .await;
@@ -663,34 +632,7 @@ impl AsyncWrite for File {
         }
         #[cfg(windows)]
         {
-            #[allow(clashing_extern_declarations)]
-            #[link(name = "kernel32", kind = "raw-dylib")]
-            unsafe extern "system" {
-                fn WriteFile(
-                    hFile: usize,
-                    lpBuffer: *const u8,
-                    nNumberOfBytesToWrite: u32,
-                    lpNumberOfBytesWritten: *mut u32,
-                    lpOverlapped: *mut core::ffi::c_void,
-                ) -> i32;
-            }
-
-            let mut bytes_written = 0u32;
-            let res = unsafe {
-                WriteFile(
-                    self.handle as usize,
-                    buf.as_ptr(),
-                    buf.len() as u32,
-                    &mut bytes_written,
-                    core::ptr::null_mut(),
-                )
-            };
-
-            if res == 0 {
-                (Err(io::Error::last_os_error()), buf)
-            } else {
-                (Ok(bytes_written as usize), buf)
-            }
+            crate::rt::windows::OverlappedWrite::new(self.handle, buf).await
         }
         #[cfg(all(not(target_family = "wasm"), not(windows)))]
         {
@@ -701,7 +643,6 @@ impl AsyncWrite for File {
         Ok(())
     }
 }
-
 // --- Global Fns ---
 
 pub async fn metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
@@ -720,133 +661,138 @@ pub async fn metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
     }
     #[cfg(windows)]
     {
-        let mut wchars: alloc::vec::Vec<u16> = path.as_ref().encode_utf16().collect();
-        wchars.push(0);
+        let path = crate::string::String::from(path.as_ref());
+        crate::rt::blocking::BlockingOpFuture::new(move || {
+            let mut wchars: alloc::vec::Vec<u16> = path.encode_utf16().collect();
+            wchars.push(0);
 
-        #[repr(C)]
-        #[allow(non_snake_case)]
-        struct WIN32_FILE_ATTRIBUTE_DATA {
-            dwFileAttributes: u32,
-            ftCreationTimeLow: u32,
-            ftCreationTimeHigh: u32,
-            ftLastAccessTimeLow: u32,
-            ftLastAccessTimeHigh: u32,
-            ftLastWriteTimeLow: u32,
-            ftLastWriteTimeHigh: u32,
-            nFileSizeHigh: u32,
-            nFileSizeLow: u32,
-        }
-
-        #[link(name = "kernel32", kind = "raw-dylib")]
-        unsafe extern "system" {
-            fn GetFileAttributesExW(
-                lpFileName: *const u16,
-                fInfoLevelId: u32,
-                lpFileInformation: *mut core::ffi::c_void,
-            ) -> i32;
-        }
-
-        let mut info = WIN32_FILE_ATTRIBUTE_DATA {
-            dwFileAttributes: 0,
-            ftCreationTimeLow: 0,
-            ftCreationTimeHigh: 0,
-            ftLastAccessTimeLow: 0,
-            ftLastAccessTimeHigh: 0,
-            ftLastWriteTimeLow: 0,
-            ftLastWriteTimeHigh: 0,
-            nFileSizeHigh: 0,
-            nFileSizeLow: 0,
-        };
-
-        let res = unsafe {
-            GetFileAttributesExW(
-                wchars.as_ptr(),
-                0, // GetFileExInfoStandard
-                &mut info as *mut _ as *mut core::ffi::c_void,
-            )
-        };
-
-        if res == 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        let to_unix_ns = |low: u32, high: u32| -> u64 {
-            let filetime = ((high as u64) << 32) | (low as u64);
-            // FILETIME is 100-nanosecond intervals since Jan 1, 1601
-            // Jan 1, 1970 is 116444736000000000 intervals after Jan 1, 1601
-            if filetime > 116444736000000000 {
-                (filetime - 116444736000000000) * 100
-            } else {
-                0
+            #[repr(C)]
+            #[allow(non_snake_case)]
+            struct WIN32_FILE_ATTRIBUTE_DATA {
+                dwFileAttributes: u32,
+                ftCreationTimeLow: u32,
+                ftCreationTimeHigh: u32,
+                ftLastAccessTimeLow: u32,
+                ftLastAccessTimeHigh: u32,
+                ftLastWriteTimeLow: u32,
+                ftLastWriteTimeHigh: u32,
+                nFileSizeHigh: u32,
+                nFileSizeLow: u32,
             }
-        };
 
-        Ok(Metadata {
-            size: ((info.nFileSizeHigh as u64) << 32) | (info.nFileSizeLow as u64),
-            mode: info.dwFileAttributes,
-            modified_time_ns: to_unix_ns(info.ftLastWriteTimeLow, info.ftLastWriteTimeHigh),
-            accessed_time_ns: to_unix_ns(info.ftLastAccessTimeLow, info.ftLastAccessTimeHigh),
-            created_time_ns: to_unix_ns(info.ftCreationTimeLow, info.ftCreationTimeHigh),
-            nlink: 1,
-            uid: 0,
-            gid: 0,
-            inode: 0,
+            #[link(name = "kernel32", kind = "raw-dylib")]
+            unsafe extern "system" {
+                fn GetFileAttributesExW(
+                    lpFileName: *const u16,
+                    fInfoLevelId: u32,
+                    lpFileInformation: *mut core::ffi::c_void,
+                ) -> i32;
+            }
+
+            let mut info = WIN32_FILE_ATTRIBUTE_DATA {
+                dwFileAttributes: 0,
+                ftCreationTimeLow: 0,
+                ftCreationTimeHigh: 0,
+                ftLastAccessTimeLow: 0,
+                ftLastAccessTimeHigh: 0,
+                ftLastWriteTimeLow: 0,
+                ftLastWriteTimeHigh: 0,
+                nFileSizeHigh: 0,
+                nFileSizeLow: 0,
+            };
+
+            let res = unsafe {
+                GetFileAttributesExW(
+                    wchars.as_ptr(),
+                    0, // GetFileExInfoStandard
+                    &mut info as *mut _ as *mut core::ffi::c_void,
+                )
+            };
+
+            if res == 0 {
+                return Err(io::Error::last_os_error());
+            }
+
+            let to_unix_ns = |low: u32, high: u32| -> u64 {
+                let filetime = ((high as u64) << 32) | (low as u64);
+                if filetime > 116444736000000000 {
+                    (filetime - 116444736000000000) * 100
+                } else {
+                    0
+                }
+            };
+
+            Ok(Metadata {
+                size: ((info.nFileSizeHigh as u64) << 32) | (info.nFileSizeLow as u64),
+                mode: info.dwFileAttributes,
+                modified_time_ns: to_unix_ns(info.ftLastWriteTimeLow, info.ftLastWriteTimeHigh),
+                accessed_time_ns: to_unix_ns(info.ftLastAccessTimeLow, info.ftLastAccessTimeHigh),
+                created_time_ns: to_unix_ns(info.ftCreationTimeLow, info.ftCreationTimeHigh),
+                nlink: 1,
+                uid: 0,
+                gid: 0,
+                inode: 0,
+            })
         })
+        .await
     }
     #[cfg(all(not(target_family = "wasm"), not(windows)))]
     {
-        // struct stat layout on Linux aarch64 (kernel stat64 / __NR_newfstatat)
-        #[repr(C)]
-        struct LinuxStat {
-            st_dev: u64,
-            st_ino: u64,
-            st_mode: u32,
-            st_nlink: u32,
-            st_uid: u32,
-            st_gid: u32,
-            st_rdev: u64,
-            _pad1: u64,
-            st_size: i64,
-            st_blksize: i32,
-            _pad2: i32,
-            st_blocks: i64,
-            st_atime: i64,
-            st_atime_nsec: i64,
-            st_mtime: i64,
-            st_mtime_nsec: i64,
-            st_ctime: i64,
-            st_ctime_nsec: i64,
-            _unused: [i32; 2],
-        }
-        unsafe extern "C" {
-            fn stat(pathname: *const u8, statbuf: *mut LinuxStat) -> i32;
-        }
-        let mut path_bytes = alloc::vec::Vec::from(path.as_ref().as_bytes());
-        path_bytes.push(0);
-        let mut st = core::mem::MaybeUninit::<LinuxStat>::uninit();
-        let ret = unsafe { stat(path_bytes.as_ptr(), st.as_mut_ptr()) };
-        if ret < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let st = unsafe { st.assume_init() };
-        let to_ns = |secs: i64, nsec: i64| -> u64 {
-            if secs < 0 {
-                0
-            } else {
-                secs as u64 * 1_000_000_000 + nsec as u64
+        let path = crate::string::String::from(path.as_ref());
+        crate::rt::blocking::BlockingOpFuture::new(move || {
+            #[repr(C)]
+            struct LinuxStat {
+                st_dev: u64,
+                st_ino: u64,
+                st_mode: u32,
+                st_nlink: u32,
+                st_uid: u32,
+                st_gid: u32,
+                st_rdev: u64,
+                _pad1: u64,
+                st_size: i64,
+                st_blksize: i32,
+                _pad2: i32,
+                st_blocks: i64,
+                st_atime: i64,
+                st_atime_nsec: i64,
+                st_mtime: i64,
+                st_mtime_nsec: i64,
+                st_ctime: i64,
+                st_ctime_nsec: i64,
+                _unused: [i32; 2],
             }
-        };
-        Ok(Metadata {
-            size: st.st_size as u64,
-            mode: st.st_mode,
-            modified_time_ns: to_ns(st.st_mtime, st.st_mtime_nsec),
-            accessed_time_ns: to_ns(st.st_atime, st.st_atime_nsec),
-            created_time_ns: to_ns(st.st_ctime, st.st_ctime_nsec),
-            nlink: st.st_nlink as u64,
-            uid: st.st_uid,
-            gid: st.st_gid,
-            inode: st.st_ino,
+            unsafe extern "C" {
+                fn stat(pathname: *const u8, statbuf: *mut LinuxStat) -> i32;
+            }
+            let mut path_bytes = alloc::vec::Vec::from(path.as_bytes());
+            path_bytes.push(0);
+            let mut st = core::mem::MaybeUninit::<LinuxStat>::uninit();
+            let ret = unsafe { stat(path_bytes.as_ptr(), st.as_mut_ptr()) };
+            if ret < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let st = unsafe { st.assume_init() };
+            let to_ns = |secs: i64, nsec: i64| -> u64 {
+                if secs < 0 {
+                    0
+                } else {
+                    secs as u64 * 1_000_000_000 + nsec as u64
+                }
+            };
+            Ok(Metadata {
+                size: st.st_size as u64,
+                mode: st.st_mode,
+                modified_time_ns: to_ns(st.st_mtime, st.st_mtime_nsec),
+                accessed_time_ns: to_ns(st.st_atime, st.st_atime_nsec),
+                created_time_ns: to_ns(st.st_ctime, st.st_ctime_nsec),
+                nlink: st.st_nlink as u64,
+                uid: st.st_uid,
+                gid: st.st_gid,
+                inode: st.st_ino,
+            })
         })
+        .await
     }
 }
 
@@ -864,18 +810,351 @@ pub async fn symlink_metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
         }
         Ok(Metadata { handle })
     }
-    #[cfg(not(target_family = "wasm"))]
+    #[cfg(windows)]
+    {
+        metadata(path).await
+    }
+    #[cfg(all(not(target_family = "wasm"), not(windows)))]
+    {
+        let path = crate::string::String::from(path.as_ref());
+        crate::rt::blocking::BlockingOpFuture::new(move || {
+            #[repr(C)]
+            struct LinuxStat {
+                st_dev: u64,
+                st_ino: u64,
+                st_mode: u32,
+                st_nlink: u32,
+                st_uid: u32,
+                st_gid: u32,
+                st_rdev: u64,
+                _pad1: u64,
+                st_size: i64,
+                st_blksize: i32,
+                _pad2: i32,
+                st_blocks: i64,
+                st_atime: i64,
+                st_atime_nsec: i64,
+                st_mtime: i64,
+                st_mtime_nsec: i64,
+                st_ctime: i64,
+                st_ctime_nsec: i64,
+                _unused: [i32; 2],
+            }
+            unsafe extern "C" {
+                fn lstat(pathname: *const u8, statbuf: *mut LinuxStat) -> i32;
+            }
+            let mut path_bytes = alloc::vec::Vec::from(path.as_bytes());
+            path_bytes.push(0);
+            let mut st = core::mem::MaybeUninit::<LinuxStat>::uninit();
+            let ret = unsafe { lstat(path_bytes.as_ptr(), st.as_mut_ptr()) };
+            if ret < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let st = unsafe { st.assume_init() };
+            let to_ns = |secs: i64, nsec: i64| -> u64 {
+                if secs < 0 {
+                    0
+                } else {
+                    secs as u64 * 1_000_000_000 + nsec as u64
+                }
+            };
+            Ok(Metadata {
+                size: st.st_size as u64,
+                mode: st.st_mode,
+                modified_time_ns: to_ns(st.st_mtime, st.st_mtime_nsec),
+                accessed_time_ns: to_ns(st.st_atime, st.st_atime_nsec),
+                created_time_ns: to_ns(st.st_ctime, st.st_ctime_nsec),
+                nlink: st.st_nlink as u64,
+                uid: st.st_uid,
+                gid: st.st_gid,
+                inode: st.st_ino,
+            })
+        })
+        .await
+    }
+}
+
+pub async fn canonicalize<P: AsRef<str>>(path: P) -> io::Result<crate::path::PathBuf> {
+    #[cfg(target_family = "wasm")]
     {
         let _ = path;
         Err(io::Error::other("not implemented"))
+    }
+    #[cfg(windows)]
+    {
+        let path = crate::string::String::from(path.as_ref());
+        crate::rt::blocking::BlockingOpFuture::new(move || {
+            let mut wchars: alloc::vec::Vec<u16> = path.encode_utf16().collect();
+            wchars.push(0);
+
+            #[link(name = "kernel32", kind = "raw-dylib")]
+            unsafe extern "system" {
+                fn GetFullPathNameW(
+                    lpFileName: *const u16,
+                    nBufferLength: u32,
+                    lpBuffer: *mut u16,
+                    lpFilePart: *mut *mut u16,
+                ) -> u32;
+            }
+
+            let mut out_buf = [0u16; 260];
+            let res = unsafe {
+                GetFullPathNameW(
+                    wchars.as_ptr(),
+                    260,
+                    out_buf.as_mut_ptr(),
+                    core::ptr::null_mut(),
+                )
+            };
+            if res == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if res > 260 {
+                let mut v = alloc::vec![0u16; res as usize];
+                let res2 = unsafe {
+                    GetFullPathNameW(wchars.as_ptr(), res, v.as_mut_ptr(), core::ptr::null_mut())
+                };
+                if res2 == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(crate::path::PathBuf::from(
+                    alloc::string::String::from_utf16_lossy(&v[..res2 as usize]),
+                ))
+            } else {
+                Ok(crate::path::PathBuf::from(
+                    alloc::string::String::from_utf16_lossy(&out_buf[..res as usize]),
+                ))
+            }
+        })
+        .await
+    }
+    #[cfg(all(not(target_family = "wasm"), not(windows)))]
+    {
+        let path = crate::string::String::from(path.as_ref());
+        crate::rt::blocking::BlockingOpFuture::new(move || {
+            let mut path_bytes = alloc::vec::Vec::from(path.as_bytes());
+            path_bytes.push(0);
+
+            unsafe extern "C" {
+                fn realpath(path: *const u8, resolved: *mut u8) -> *mut u8;
+                fn free(ptr: *mut u8);
+            }
+
+            let res = unsafe { realpath(path_bytes.as_ptr(), core::ptr::null_mut()) };
+            if res.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+
+            let mut len = 0;
+            while unsafe { *res.add(len) } != 0 {
+                len += 1;
+            }
+            let s = unsafe { core::slice::from_raw_parts(res, len) };
+            let s = alloc::string::String::from_utf8_lossy(s).into_owned();
+            unsafe { free(res) };
+            Ok(crate::path::PathBuf::from(s))
+        })
+        .await
     }
 }
 
 pub async fn read_dir<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
     #[cfg(target_family = "wasm")]
     {
-        let _ = path;
-        Err(io::Error::other("read_dir not supported on wasm"))
+        let path_bytes = path.as_ref().as_bytes().to_vec();
+        let (err, _, _, entries_buf) =
+            crate::rt::wasm::OverlappedBufferFuture::new(path_bytes, |ov, ptr, len| {
+                unsafe { crate::abi::imports::dir_read(ov, ptr, len) };
+            })
+            .await;
+
+        if err != 0 {
+            return Err(io::Error::from_raw_os_error(err as i32));
+        }
+
+        // Format is: [len:u32] [name:utf8...] [len:u32] [name:utf8...]
+        let mut entries = Vec::new();
+        let mut pos = 0;
+        while pos + 4 <= entries_buf.len() {
+            let len = u32::from_le_bytes(entries_buf[pos..pos + 4].try_into().unwrap()) as usize;
+            pos += 4;
+            if pos + len > entries_buf.len() {
+                break;
+            }
+            let name = String::from_utf8_lossy(&entries_buf[pos..pos + len]).into_owned();
+            pos += len;
+            entries.push(DirEntry {
+                name,
+                metadata: None,
+            });
+        }
+        Ok(ReadDir { entries, pos: 0 })
+    }
+    #[cfg(windows)]
+    {
+        let path = crate::string::String::from(path.as_ref());
+        crate::rt::blocking::BlockingOpFuture::new(move || {
+            let mut search_path = path.clone();
+            if !search_path.ends_with('\\') && !search_path.ends_with('/') {
+                search_path.push_str("\\*");
+            } else {
+                search_path.push('*');
+            }
+            let mut wchars: alloc::vec::Vec<u16> = search_path.encode_utf16().collect();
+            wchars.push(0);
+
+            #[repr(C)]
+            #[allow(non_snake_case)]
+            struct WIN32_FIND_DATAW {
+                dwFileAttributes: u32,
+                ftCreationTimeLow: u32,
+                ftCreationTimeHigh: u32,
+                ftLastAccessTimeLow: u32,
+                ftLastAccessTimeHigh: u32,
+                ftLastWriteTimeLow: u32,
+                ftLastWriteTimeHigh: u32,
+                nFileSizeHigh: u32,
+                nFileSizeLow: u32,
+                dwReserved0: u32,
+                dwReserved1: u32,
+                cFileName: [u16; 260],
+                cAlternateFileName: [u16; 14],
+            }
+
+            #[link(name = "kernel32", kind = "raw-dylib")]
+            unsafe extern "system" {
+                fn FindFirstFileW(lpFileName: *const u16, lpFindFileData: *mut WIN32_FIND_DATAW) -> usize;
+                fn FindNextFileW(hFindFile: usize, lpFindFileData: *mut WIN32_FIND_DATAW) -> i32;
+                fn FindClose(hFindFile: usize) -> i32;
+            }
+
+            let mut data = core::mem::MaybeUninit::<WIN32_FIND_DATAW>::uninit();
+            let handle = unsafe { FindFirstFileW(wchars.as_ptr(), data.as_mut_ptr()) };
+            if handle == !0usize {
+                return Err(io::Error::last_os_error());
+            }
+
+            let mut entries = alloc::vec::Vec::new();
+            unsafe {
+                let to_unix_ns = |low: u32, high: u32| -> u64 {
+                    let filetime = ((high as u64) << 32) | (low as u64);
+                    if filetime > 116444736000000000 {
+                        (filetime - 116444736000000000) * 100
+                    } else {
+                        0
+                    }
+                };
+
+                loop {
+                    let d = data.assume_init_ref();
+                    let len = d.cFileName.iter().position(|&x| x == 0).unwrap_or(260);
+                    let name = alloc::string::String::from_utf16_lossy(&d.cFileName[..len]);
+                    if name != "." && name != ".." {
+                        let metadata = Metadata {
+                            size: ((d.nFileSizeHigh as u64) << 32) | (d.nFileSizeLow as u64),
+                            mode: d.dwFileAttributes,
+                            modified_time_ns: to_unix_ns(
+                                d.ftLastWriteTimeLow,
+                                d.ftLastWriteTimeHigh,
+                            ),
+                            accessed_time_ns: to_unix_ns(
+                                d.ftLastAccessTimeLow,
+                                d.ftLastAccessTimeHigh,
+                            ),
+                            created_time_ns: to_unix_ns(
+                                d.ftCreationTimeLow,
+                                d.ftCreationTimeHigh,
+                            ),
+                            nlink: 1,
+                            uid: 0,
+                            gid: 0,
+                            inode: 0,
+                        };
+
+                        entries.push(DirEntry {
+                            name,
+                            metadata: Some(metadata),
+                        });
+                    }
+                    if FindNextFileW(handle, data.as_mut_ptr()) == 0 {
+                        break;
+                    }
+                }
+                FindClose(handle);
+            }
+            Ok(ReadDir { entries, pos: 0 })
+        })
+        .await
+    }
+    #[cfg(all(not(target_family = "wasm"), not(windows)))]
+    {
+        let path = crate::string::String::from(path.as_ref());
+        crate::rt::blocking::BlockingOpFuture::new(move || {
+            let mut path_bytes = alloc::vec::Vec::from(path.as_bytes());
+            path_bytes.push(0);
+
+            unsafe extern "C" {
+                fn opendir(name: *const u8) -> *mut core::ffi::c_void;
+                fn readdir(dirp: *mut core::ffi::c_void) -> *mut Dirent;
+                fn closedir(dirp: *mut core::ffi::c_void) -> i32;
+            }
+
+            #[repr(C)]
+            struct Dirent {
+                d_ino: u64,
+                d_off: i64,
+                d_reclen: u16,
+                d_type: u8,
+                d_name: [u8; 256],
+            }
+
+            let dir = unsafe { opendir(path_bytes.as_ptr()) };
+            if dir.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+
+            let mut entries = alloc::vec::Vec::new();
+            loop {
+                let ent = unsafe { readdir(dir) };
+                if ent.is_null() {
+                    break;
+                }
+                let ent = unsafe { &*ent };
+                let mut len = 0;
+                while ent.d_name[len] != 0 && len < 256 {
+                    len += 1;
+                }
+                let name = alloc::string::String::from_utf8_lossy(&ent.d_name[..len]).into_owned();
+                if name != "." && name != ".." {
+                    let mut mode = 0;
+                    if ent.d_type == 4 {
+                        // DT_DIR
+                        mode = 0o040000;
+                    } else if ent.d_type == 8 {
+                        // DT_REG
+                        mode = 0o100000;
+                    }
+                    let metadata = Metadata {
+                        size: 0,
+                        mode,
+                        modified_time_ns: 0,
+                        accessed_time_ns: 0,
+                        created_time_ns: 0,
+                        nlink: 1,
+                        uid: 0,
+                        gid: 0,
+                        inode: ent.d_ino,
+                    };
+                    entries.push(DirEntry {
+                        name,
+                        metadata: Some(metadata),
+                    });
+                }
+            }
+            unsafe { closedir(dir) };
+            Ok(ReadDir { entries, pos: 0 })
+        })
+        .await
     }
 }
 pub fn open_null_file() -> io::Result<File> {
@@ -904,3 +1183,4 @@ pub fn push_path_for_pattern(path: &mut crate::path::PathBuf, piece: &str) {
     s.push_str(piece);
     *path = crate::path::PathBuf::from(s);
 }
+

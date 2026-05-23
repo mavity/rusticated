@@ -339,6 +339,8 @@ fn poll_step_internal(timeout: Option<Option<Duration>>) -> io::Result<PollStatu
 
     task_depth().set(remaining);
 
+    let expired = crate::rt::timers::wake_expired();
+
     #[cfg(windows)]
     let live_io = super::windows::outstanding_io().get();
     #[cfg(all(not(windows), target_os = "linux"))]
@@ -346,19 +348,17 @@ fn poll_step_internal(timeout: Option<Option<Duration>>) -> io::Result<PollStatu
     #[cfg(not(any(windows, target_os = "linux")))]
     let live_io = 0;
 
-    let expired = crate::rt::timers::wake_expired();
+    let has_timers = crate::rt::timers::has_timers();
 
-    Ok(
-        if remaining == 0 && live_io == 0 && !had_events && !expired {
-            PollStatus::Done
-        } else if made_progress || had_events || expired {
-            PollStatus::Ready
-        } else {
-            PollStatus::Idle {
-                next_deadline: next_deadline(),
-            }
-        },
-    )
+    Ok(if remaining == 0 && live_io == 0 && !has_timers {
+        PollStatus::Done
+    } else if made_progress || had_events || expired {
+        PollStatus::Ready
+    } else {
+        PollStatus::Idle {
+            next_deadline: next_deadline(),
+        }
+    })
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

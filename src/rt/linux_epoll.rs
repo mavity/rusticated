@@ -141,7 +141,8 @@ impl EpollDriver {
             }
             let e = io::Error::last_os_error();
             if e.kind() == crate::io::ErrorKind::Interrupted {
-                continue;
+                crate::tty::check_sigwinch();
+                break 0;
             }
             return Err(e);
         };

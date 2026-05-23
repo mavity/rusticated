@@ -105,23 +105,12 @@ pub const ERROR_IO_PENDING: u32 = 997;
 pub const WAIT_IO_COMPLETION: u32 = 0x000000C0;
 
 #[repr(align(8))]
-struct OutstandingIoStorage(UnsafeCell<Cell<usize>>);
-
-unsafe impl Sync for OutstandingIoStorage {}
-
-#[repr(align(8))]
 struct MainThreadHandleStorage(UnsafeCell<Cell<usize>>);
 
 unsafe impl Sync for MainThreadHandleStorage {}
 
-static OUTSTANDING_IO_STORAGE: OutstandingIoStorage =
-    OutstandingIoStorage(UnsafeCell::new(Cell::new(0)));
 static MAIN_THREAD_HANDLE_STORAGE: MainThreadHandleStorage =
     MainThreadHandleStorage(UnsafeCell::new(Cell::new(0)));
-
-pub(crate) fn outstanding_io() -> &'static mut Cell<usize> {
-    unsafe { &mut *OUTSTANDING_IO_STORAGE.0.get() }
-}
 
 fn main_thread_handle() -> &'static mut Cell<usize> {
     unsafe { &mut *MAIN_THREAD_HANDLE_STORAGE.0.get() }
@@ -165,8 +154,6 @@ unsafe extern "system" fn apc_callback(error_code: u32, bytes: u32, overlapped: 
     if let Some(waker) = state.waker.borrow_mut().take() {
         waker.wake();
     }
-
-    outstanding_io().set(outstanding_io().get() - 1);
 }
 
 // ─── Driver ──────────────────────────────────────────────────────────────────
@@ -332,8 +319,7 @@ impl Future for OverlappedRead {
                 return Poll::Ready((Err(io::Error::from_raw_os_error(err as i32)), buf));
             }
 
-            outstanding_io().set(outstanding_io().get() + 1);
-            self.started = true;
+            unsafe { self.as_mut().get_unchecked_mut().started = true };
 
             // Injection Hook B: Flush instantly
             flush_completions();
@@ -410,9 +396,8 @@ impl Future for OverlappedWrite {
                 return Poll::Ready((Err(io::Error::from_raw_os_error(err as i32)), buf));
             }
 
-            outstanding_io().set(outstanding_io().get() + 1);
-            self.started = true;
-
+            self.as_mut().get_mut().started = true;
+            
             // Injection Hook B: Flush instantly
             flush_completions();
         }
