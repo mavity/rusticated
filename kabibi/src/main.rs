@@ -11,7 +11,7 @@ use std::tty::{disable_raw_mode, enable_raw_mode, size, stdin, stdout, Tty};
 mod app;
 mod truant;
 
-use app::{App, ChatState};
+use app::{App, ChatState, FileItem};
 
 const PLUME_MAX: usize = 10;
 
@@ -189,88 +189,22 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
         .split(files_area);
 
-    let list_style = Style::default().bg(Color::Blue).fg(Color::Cyan);
-    let highlight_style = Style::default().bg(Color::Cyan).fg(Color::Black);
-    let border_style = Style::default().fg(Color::Cyan);
-
-    let left_title_style = if app.active_pane == 0 {
-        highlight_style
-    } else {
-        Style::default().fg(Color::Cyan)
-    };
-    let right_title_style = if app.active_pane == 1 {
-        highlight_style
-    } else {
-        Style::default().fg(Color::Cyan)
-    };
-
-    f.render_widget(Block::default().style(list_style), panel_chunks[0]);
-
-    let left_row_width = panel_chunks[0].width.saturating_sub(2).max(1) as usize;
-    let left_items: Vec<ListItem> = app
-        .left_files
-        .iter()
-        .enumerate()
-        .map(|(_index, file)| {
-            let style = if file.is_dir {
-                Style::default().bg(Color::Blue).fg(Color::White)
-            } else {
-                Style::default().bg(Color::Blue).fg(Color::Cyan)
-            };
-            ListItem::new(pad_or_trim(&file.name, left_row_width)).style(style)
-        })
-        .collect();
-    let left_list = List::new(left_items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(
-                    ratatui::text::Line::from(format!(" {} ", dir_title_name(&app.current_left_dir)))
-                        .style(left_title_style),
-                )
-                .title_alignment(Alignment::Center)
-                .border_style(border_style)
-                .style(list_style),
-        )
-        .style(list_style)
-        .highlight_style(highlight_style);
-    let mut left_state = ListState::default();
-    left_state.select((app.active_pane == 0).then_some(app.left_selected));
-    f.render_stateful_widget(left_list, panel_chunks[0], &mut left_state);
-
-    f.render_widget(Block::default().style(list_style), panel_chunks[1]);
-
-    let right_row_width = panel_chunks[1].width.saturating_sub(2).max(1) as usize;
-    let right_items: Vec<ListItem> = app
-        .right_files
-        .iter()
-        .enumerate()
-        .map(|(_index, file)| {
-            let style = if file.is_dir {
-                Style::default().bg(Color::Blue).fg(Color::White)
-            } else {
-                Style::default().bg(Color::Blue).fg(Color::Cyan)
-            };
-            ListItem::new(pad_or_trim(&file.name, right_row_width)).style(style)
-        })
-        .collect();
-    let right_list = List::new(right_items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(
-                    ratatui::text::Line::from(format!(" {} ", dir_title_name(&app.current_right_dir)))
-                        .style(right_title_style),
-                )
-                .title_alignment(Alignment::Center)
-                .border_style(border_style)
-                .style(list_style),
-        )
-        .style(list_style)
-        .highlight_style(highlight_style);
-    let mut right_state = ListState::default();
-    right_state.select((app.active_pane == 1).then_some(app.right_selected));
-    f.render_stateful_widget(right_list, panel_chunks[1], &mut right_state);
+    draw_file_panel(
+        f,
+        panel_chunks[0],
+        &app.left_files,
+        app.left_selected,
+        app.active_pane == 0,
+        &dir_title_name(&app.current_left_dir),
+    );
+    draw_file_panel(
+        f,
+        panel_chunks[1],
+        &app.right_files,
+        app.right_selected,
+        app.active_pane == 1,
+        &dir_title_name(&app.current_right_dir),
+    );
 
     let chat_inner = chat_inner_area(chat_rect, app.chat_state == ChatState::Open);
     let chat_text_width = chat_inner.width.saturating_sub(1).max(1);
@@ -360,6 +294,88 @@ fn dir_title_name(path: &str) -> String {
         }
     } else {
         trimmed.to_string()
+    }
+}
+
+fn draw_file_panel(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    files: &[FileItem],
+    selected: usize,
+    is_active: bool,
+    title: &str,
+) {
+    let list_style = Style::default().bg(Color::Blue).fg(Color::Cyan);
+    let highlight_style = Style::default().bg(Color::Cyan).fg(Color::Black);
+    let border_style = Style::default().fg(Color::Cyan);
+    let title_style = if is_active {
+        highlight_style
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
+
+    f.render_widget(Block::default().style(list_style), area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(ratatui::text::Line::from(format!(" {} ", title)).style(title_style))
+        .title_alignment(Alignment::Center)
+        .border_style(border_style)
+        .style(list_style);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let items_per_col = inner.height as usize;
+    let num_cols = (inner.width / 18).max(1) as usize;
+    let constraints = std::vec::from_elem(Constraint::Ratio(1, num_cols as u32), num_cols);
+    let col_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(constraints)
+        .split(inner);
+
+    let items_per_page = items_per_col * num_cols;
+    let page = selected / items_per_page.max(1);
+    let start_idx = page * items_per_page;
+
+    let mut cols_items = std::vec::from_elem(Vec::new(), num_cols);
+    let mut cols_states = std::vec::from_elem(ListState::default(), num_cols);
+
+    for c in 0..num_cols {
+        let row_width = col_chunks[c].width.max(1) as usize;
+        for r in 0..items_per_col {
+            let idx = start_idx + c * items_per_col + r;
+            if idx < files.len() {
+                let item = &files[idx];
+                let style = if item.is_dir {
+                    Style::default().bg(Color::Blue).fg(Color::White)
+                } else {
+                    Style::default().bg(Color::Blue).fg(Color::Cyan)
+                };
+                cols_items[c].push(
+                    ListItem::new(pad_or_trim(&item.name, row_width)).style(style),
+                );
+            }
+        }
+    }
+
+    if is_active {
+        let local_sel = selected.saturating_sub(start_idx);
+        let sel_col = local_sel / items_per_col;
+        let sel_row = local_sel % items_per_col;
+        if sel_col < num_cols {
+            cols_states[sel_col].select(Some(sel_row));
+        }
+    }
+
+    for c in 0..num_cols {
+        f.render_widget(Block::default().style(list_style), col_chunks[c]);
+        let list = List::new(cols_items[c].clone())
+            .style(list_style)
+            .highlight_style(highlight_style);
+        f.render_stateful_widget(list, col_chunks[c], &mut cols_states[c]);
     }
 }
 
