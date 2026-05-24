@@ -225,7 +225,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(
-                    ratatui::text::Line::from(format!(" {} ", app.current_left_dir))
+                    ratatui::text::Line::from(format!(" {} ", dir_title_name(&app.current_left_dir)))
                         .style(left_title_style),
                 )
                 .title_alignment(Alignment::Center)
@@ -259,7 +259,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(
-                    ratatui::text::Line::from(format!(" {} ", app.current_right_dir))
+                    ratatui::text::Line::from(format!(" {} ", dir_title_name(&app.current_right_dir)))
                         .style(right_title_style),
                 )
                 .title_alignment(Alignment::Center)
@@ -335,9 +335,32 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
     );
 
     let prompt_paragraph = Paragraph::new(prompt_content)
-        .style(Style::default().bg(Color::Black).fg(Color::Gray))
+        .style(Style::default().bg(Color::Black).fg(Color::White))
         .wrap(Wrap { trim: false });
     f.render_widget(prompt_paragraph, prompt_area);
+}
+
+fn dir_title_name(path: &str) -> String {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        return "/".to_string();
+    }
+    if trimmed == "." || trimmed == ".." {
+        return trimmed.to_string();
+    }
+    if trimmed.len() == 2 && trimmed.chars().nth(1) == Some(':') {
+        return trimmed.to_string();
+    }
+
+    if let Some((_, tail)) = trimmed.rsplit_once(['/', '\\']) {
+        if tail.is_empty() {
+            trimmed.to_string()
+        } else {
+            tail.to_string()
+        }
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn sidebar_chat_width(total_width: u16) -> u16 {
