@@ -156,6 +156,35 @@ impl ThreadPool {
                 CloseHandle(h);
             }
         }
+
+        #[cfg(not(windows))]
+        {
+            let inner = Arc::clone(&self.inner);
+            crate::thread::spawn(move || worker_unix(inner));
+        }
+    }
+}
+
+/// Linux/Unix worker thread: drains the task queue, then exits.
+#[cfg(not(windows))]
+fn worker_unix(inner: Arc<PoolInner>) {
+    loop {
+        let task = {
+            let mut state = inner.state.lock();
+            if let Some(t) = state.tasks.pop_front() {
+                state.busy_threads += 1;
+                t
+            } else {
+                state.total_threads -= 1;
+                if state.total_threads == 0 {
+                    state.next_spawn_delay_ms = 10;
+                    state.last_spawn_attempt_ms = 0;
+                }
+                return;
+            }
+        };
+        task();
+        inner.state.lock().busy_threads -= 1;
     }
 }
 

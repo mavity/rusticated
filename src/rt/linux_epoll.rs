@@ -1,6 +1,7 @@
 #![cfg(target_os = "linux")]
 use super::linux_state::OpState;
 use alloc::rc::Rc;
+use core::sync::atomic::{AtomicI32, Ordering};
 
 use crate::collections::HashMap;
 use crate::future::Future;
@@ -22,6 +23,16 @@ const EPOLL_CTL_MOD: i32 = 3;
 /// POSIX errno 17: file exists (returned by EPOLL_CTL_ADD on a known fd).
 const EEXIST: i32 = 17;
 
+/// `eventfd` flags.
+const EFD_NONBLOCK: i32 = 0x800;
+const EFD_CLOEXEC: i32 = 0x80000;
+
+/// Sentinel token used to identify eventfd wake-up events in the epoll loop.
+const WAKE_TOKEN: u64 = u64::MAX;
+
+/// Global eventfd used by worker threads to interrupt `epoll_wait`.
+pub(crate) static GLOBAL_WAKE_FD: AtomicI32 = AtomicI32::new(-1);
+
 /// `epoll_event` layout: the kernel uses `__attribute__((packed))` only on
 /// x86/x86_64. On aarch64/riscv64/etc. the struct has natural alignment —
 /// `data: u64` sits at offset 8 (4 bytes padding after `events: u32`).
@@ -38,6 +49,19 @@ unsafe extern "C" {
     fn epoll_ctl(epfd: i32, op: i32, fd: i32, event: *mut EpollEvent) -> i32;
     fn epoll_wait(epfd: i32, events: *mut EpollEvent, maxevents: i32, timeout: i32) -> i32;
     pub(crate) fn close(fd: i32) -> i32;
+    fn eventfd(initval: u32, flags: i32) -> i32;
+    fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
+    fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+}
+
+/// Write to the global `eventfd` to interrupt a sleeping `epoll_wait`.
+pub(crate) fn queue_wake() {
+    let fd = GLOBAL_WAKE_FD.load(Ordering::Relaxed);
+    if fd >= 0 {
+        let val: u64 = 1;
+        // SAFETY: `fd` is a valid eventfd; writing 8 bytes is the required protocol.
+        unsafe { write(fd, &val as *const u64 as *const u8, 8) };
+    }
 }
 
 // - Driver
@@ -68,6 +92,26 @@ impl EpollDriver {
         if epfd < 0 {
             return Err(io::Error::last_os_error());
         }
+
+        // Create the eventfd that worker threads use to wake epoll_wait.
+        // SAFETY: FFI call with valid constant flags.
+        let evfd = unsafe { eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC) };
+        if evfd < 0 {
+            unsafe { close(epfd) };
+            return Err(io::Error::last_os_error());
+        }
+        GLOBAL_WAKE_FD.store(evfd, Ordering::SeqCst);
+
+        // Register the eventfd with epoll using WAKE_TOKEN (no EPOLLONESHOT —
+        // we want it to stay armed so every write wakes us up).
+        let mut ev = EpollEvent { events: EPOLLIN, data: WAKE_TOKEN };
+        // SAFETY: `epfd` and `evfd` are valid; `ev` outlives the call.
+        if unsafe { epoll_ctl(epfd, EPOLL_CTL_ADD, evfd, &mut ev) } < 0 {
+            unsafe { close(evfd) };
+            unsafe { close(epfd) };
+            return Err(io::Error::last_os_error());
+        }
+
         Ok(Self {
             epfd,
             registered_fds: HashMap::new(),
@@ -149,6 +193,15 @@ impl EpollDriver {
         // Process readiness events.
         for ev in &evbuf[..n as usize] {
             let token = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(ev.data)) };
+            if token == WAKE_TOKEN {
+                // A worker thread fired the eventfd to interrupt epoll_wait.
+                // Drain the 8-byte counter so the fd is no longer readable.
+                let evfd = GLOBAL_WAKE_FD.load(Ordering::Relaxed);
+                let mut buf = [0u8; 8];
+                // SAFETY: `evfd` is a valid eventfd; buf has exactly 8 bytes.
+                unsafe { read(evfd, buf.as_mut_ptr(), 8) };
+                continue;
+            }
             if let Some(op) = self.pending_ops.remove(&token) {
                 match op {
                     PendingOp::Read(fd, state) => {
