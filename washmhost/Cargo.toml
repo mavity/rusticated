@@ -8,7 +8,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-rusticated = { path = "../", default-features = false, features = ["std"] }
+std = { path = "../", package = "rusticated" }
 wasmtime = { version = "26", features = ["cranelift"] }
 anyhow = "1"
 libc = "0.2"

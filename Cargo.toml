@@ -92,10 +92,6 @@ bench = false
 workspace = true
 
 [features]
-default = ["panic-handler"]
-std = []
-# Provide a panic handler implementation.
-panic-handler = []
 # Opt-in: allow the host to spawn OS threads explicitly. rusticated itself never
 # spawns threads — this flag merely promises that doing so is acceptable on
 # the target platform. Never available on WASM.

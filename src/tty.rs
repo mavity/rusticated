@@ -473,7 +473,7 @@ mod windows_tty {
             buffer: *mut u8,
             number_of_bytes_to_read: u32,
             number_of_bytes_read: *mut u32,
-            overlapped: *mut core::ffi::c_void,
+            overlapped: *mut Overlapped,
         ) -> i32;
         fn WriteFile(
             file: usize,
