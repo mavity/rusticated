@@ -69,3 +69,9 @@ impl Driver {
         }
     }
 }
+
+/// Interrupt a sleeping `epoll_wait` from any thread (e.g. a blocking-op worker).
+/// On uring this is a no-op because uring submissions already produce completions.
+pub(crate) fn queue_wake() {
+    super::linux_epoll::queue_wake();
+}
