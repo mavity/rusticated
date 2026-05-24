@@ -323,9 +323,9 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             // Default to read if neither read nor write is set.
             let do_read = read_flag || (!write_flag && !create);
             let do_write = write_flag || create;
-            {}
+            println!("path_open: path={:?}, is_dir={}, do_read={}, do_write={}, flags={}", path, std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false), do_read, do_write, flags);
             let is_dir = std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false);
-            let new_handle = if is_dir && do_read && !do_write {
+            let new_handle = if is_dir {
                 let rd =
                     std::fs::read_dir(path).with_context(|| format!("path_open dir: {path:?}"))?;
                 host.alloc_handle(HandleKind::Dir(rd, Vec::new()))
