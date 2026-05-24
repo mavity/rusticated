@@ -22,11 +22,7 @@ fn print_err(msg: &str) {
     }
 }
 
-#[cfg(target_arch = "aarch64")]
-#[unsafe(no_mangle)]
-pub extern "C" fn __CxxFrameHandler3() -> i32 {
-    0
-}
+
 
 #[cfg(windows)]
 #[link(name = "kernel32")]

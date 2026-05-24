@@ -1,26 +1,16 @@
-#![no_main]
-
 use wasmtime::{Config, Engine, Linker, Module, Store};
-
 mod env_impl;
 mod handles;
 use handles::HostState;
 
-#[cfg(target_arch = "x86_64")]
-#[no_mangle]
-pub unsafe extern "C" fn _start(payload_ptr: *const u8, payload_len: usize) -> u32 {
-    let payload = core::slice::from_raw_parts(payload_ptr, payload_len);
-    match run(payload) {
-        Ok(_) => 0,
-        Err(_) => 1, // Add proper error handling
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() < 2 {
+        eprintln!("Usage: {} <wasm_file>", args[0]);
+        std::process::exit(1);
     }
-}
-
-// Windows entry point
-#[cfg(target_arch = "x86_64")]
-#[no_mangle]
-pub unsafe extern "C" fn mainCRTStartup(payload_ptr: *const u8, payload_len: usize) -> u32 {
-    _start(payload_ptr, payload_len)
+    let wasm_bytes = std::fs::read(&args[1]).unwrap();
+    run(&wasm_bytes).unwrap();
 }
 
 fn run(wasm_bytes: &[u8]) -> anyhow::Result<()> {
