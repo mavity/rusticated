@@ -20,7 +20,7 @@ pub extern crate alloc;
 // platform-specific modules (fs, time, â€¦) can use std::fs, std::time, etc.
 // without duplicating raw-syscall struct definitions for every architecture.
 
-#[cfg(windows)]
+#[cfg(all(windows, not(test)))]
 mod msvc_stubs;
 
 /// Declares one or more thread-local values, initialised lazily on first access.
@@ -165,9 +165,8 @@ pub mod prelude {
 /// Shared ABI definitions
 pub mod abi;
 
-#[cfg(all(feature = "panic-handler", not(test)))]
-#[panic_handler]
 #[allow(unused_variables, unused_assignments, clashing_extern_declarations)]
+#[panic_handler]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     #[cfg(windows)]
     unsafe {
@@ -299,13 +298,13 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 }
 
 #[cfg(all(
-    not(any(test, target_family = "wasm", feature = "std")),
+    not(any(test, target_family = "wasm")),
     any(target_os = "none", windows, target_os = "linux")
 ))]
 struct SystemAllocator;
 
 #[cfg(all(
-    not(any(test, target_family = "wasm", feature = "std")),
+    not(any(test, target_family = "wasm")),
     any(target_os = "none", windows, target_os = "linux")
 ))]
 #[allow(missing_docs)]
@@ -316,7 +315,7 @@ pub unsafe extern "C" fn __rust_alloc(size: usize, align: usize) -> *mut u8 {
 }
 
 #[cfg(all(
-    not(any(test, target_family = "wasm", feature = "std")),
+    not(any(test, target_family = "wasm")),
     any(target_os = "none", windows, target_os = "linux")
 ))]
 #[allow(missing_docs)]
@@ -332,7 +331,7 @@ pub unsafe extern "C" fn __rust_dealloc(ptr: *mut u8, size: usize, align: usize)
 }
 
 #[cfg(all(
-    not(any(test, target_family = "wasm", feature = "std")),
+    not(any(test, target_family = "wasm")),
     any(target_os = "none", windows, target_os = "linux")
 ))]
 #[allow(missing_docs)]
@@ -354,7 +353,7 @@ pub unsafe extern "C" fn __rust_realloc(
 }
 
 #[cfg(all(
-    not(any(test, target_family = "wasm", feature = "std")),
+    not(any(test, target_family = "wasm")),
     any(target_os = "none", windows, target_os = "linux")
 ))]
 #[allow(missing_docs)]
@@ -365,7 +364,7 @@ pub unsafe extern "C" fn __rust_alloc_zeroed(size: usize, align: usize) -> *mut 
 }
 
 #[cfg(all(
-    not(any(test, target_family = "wasm", feature = "std")),
+    not(any(test, target_family = "wasm")),
     any(target_os = "none", windows, target_os = "linux")
 ))]
 unsafe impl core::alloc::GlobalAlloc for SystemAllocator {
@@ -415,7 +414,7 @@ unsafe impl core::alloc::GlobalAlloc for SystemAllocator {
 }
 
 #[cfg(all(
-    not(any(test, target_family = "wasm", feature = "std")),
+    not(any(test, target_family = "wasm")),
     any(target_os = "none", windows, target_os = "linux")
 ))]
 #[global_allocator]
@@ -425,7 +424,7 @@ static ALLOCATOR: SystemAllocator = SystemAllocator;
 #[global_allocator]
 static ALLOCATOR: dlmalloc::GlobalDlmalloc = dlmalloc::GlobalDlmalloc;
 
-#[cfg(not(any(test, feature = "std")))]
+#[cfg(not(test))]
 #[alloc_error_handler]
 fn oom(_: core::alloc::Layout) -> ! {
     panic!("out of memory");

@@ -292,7 +292,6 @@ fn build_component(workspace_dir: &Path, target_tree: &Path, package: &str, targ
     // Cargo.toml declares `std = { path = "../", package = "rusticated" }`), which
     // overrides the sysroot's std on every target — same as the host build.
     // No custom sysroot needed.
-    let host = env::var("HOST").unwrap_or_default();
     let needs_sysroot = false;
 
     let target_env = target.to_uppercase().replace("-", "_");
@@ -307,9 +306,14 @@ fn build_component(workspace_dir: &Path, target_tree: &Path, package: &str, targ
         rustflags.push_str(" -C panic=abort -C link-arg=-nostartfiles");
     }
 
-    if package == "washmhost" && target.contains("windows") {
-        rustflags.push_str(" -C link-arg=/FORCE:MULTIPLE");
+    if package == "washmhost" && target.contains("linux-musl") {
+        rustflags.push_str(" -C target-feature=-crt-static");
     }
+
+    println!(
+        "cargo:warning=Building {} for {} with rustflags: {}",
+        package, target, rustflags
+    );
 
     if needs_sysroot {
         // Ensure sysroot is built for this target first
@@ -330,8 +334,42 @@ fn build_component(workspace_dir: &Path, target_tree: &Path, package: &str, targ
     let lib_only = package == "washmhost";
 
     let mut cmd = Command::new("cargo");
+    if env::var("HOST")
+        .map(|h| h.contains("windows"))
+        .unwrap_or(false)
+        && target.contains("unknown-linux-")
+    {
+        let tools = workspace_dir.join("tools");
+        let cc = if target.starts_with("x86_64") {
+            if target.contains("musl") {
+                tools.join("zigcc-x86_64-unknown-linux-musl.cmd")
+            } else {
+                tools.join("zigcc-x86_64-unknown-linux-gnu.cmd")
+            }
+        } else if target.contains("musl") {
+            tools.join("zigcc-aarch64-unknown-linux-musl.cmd")
+        } else {
+            tools.join("zigcc-aarch64-unknown-linux-gnu.cmd")
+        };
+        let ar = tools.join("ar.cmd");
+        let cc_s = cc.display().to_string();
+        let ar_s = ar.display().to_string();
+        let linker = "rust-lld";
+
+        cmd.env("CC", &cc_s)
+            .env("CXX", &cc_s)
+            .env("AR", &ar_s)
+            .env("RANLIB", &ar_s)
+            .env(format!("CC_{}", target.replace('-', "_")), &cc_s)
+            .env(format!("CXX_{}", target.replace('-', "_")), &cc_s)
+            .env(format!("AR_{}", target.replace('-', "_")), &ar_s)
+            .env(format!("CARGO_TARGET_{}_LINKER", target_env), linker)
+            .env(format!("CARGO_TARGET_{}_AR", target_env), &ar_s);
+    }
+
     cmd.current_dir(workspace_dir)
         .env("CARGO_TARGET_DIR", target_tree)
+        .env("RUSTFLAGS", &rustflags)
         .env(rustflags_env, rustflags)
         .env_remove("CARGO_MAKEFLAGS")
         .args(&["build", "-p", package, "--release", "--target", target]);
@@ -492,7 +530,6 @@ fn stitch(
     let mut zone_a = ZONE_A_TEMPLATE.to_string();
 
     // Compute offsets
-    let mut current_offset = 0; // We'll pre-calculate Zone A length
     // zone_a is approximately constant in length if we use padded numbers or just use placeholders
     // For now, let's just generate it once, get length, then generate again with real offsets.
 
