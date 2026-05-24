@@ -1,7 +1,8 @@
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::backend::Backend;
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Style};
+use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::Terminal;
 use std::io::{AsyncRead, AsyncWrite};
 use std::mem;
@@ -96,89 +97,148 @@ async fn write_all(out: &mut Tty, bytes: &[u8]) {
 }
 
 fn draw_ui(f: &mut ratatui::Frame, app: &App) {
-    let vertical_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)].as_ref())
-        .split(f.area());
-    let top = vertical_chunks[0];
-    let bottom = vertical_chunks[1];
+    let area = f.area();
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+
+    let prompt_prefix = if app.chat_state == ChatState::Open {
+        "AI> "
+    } else {
+        "$ "
+    };
+    let prompt_body = if app.chat_state == ChatState::Open {
+        app.chat_input.as_str()
+    } else {
+        app.prompt.as_str()
+    };
+    let prompt_content = format!("{}{}", prompt_prefix, prompt_body);
+    let prompt_height = prompt_line_count(area.width, prompt_content.len());
+
+    let panel_top_margin = 1u16;
+    let panel_reserved_bottom = prompt_height;
+    let panel_height = area
+        .height
+        .saturating_sub(panel_top_margin)
+        .saturating_sub(panel_reserved_bottom)
+        .max(1);
+    let panel_area = Rect {
+        x: area.x,
+        y: area.y.saturating_add(panel_top_margin),
+        width: area.width,
+        height: panel_height,
+    };
+    let prompt_area = Rect {
+        x: area.x,
+        y: area.y + area.height.saturating_sub(prompt_height),
+        width: area.width,
+        height: prompt_height,
+    };
+
+    let plume_canvas = Paragraph::new(app.plume.join("\n"))
+        .style(Style::default().bg(Color::Black).fg(Color::DarkGray))
+        .wrap(Wrap { trim: false });
+    f.render_widget(plume_canvas, area);
 
     let panel_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
-        .split(top);
+        .split(panel_area);
+
+    let list_style = Style::default().bg(Color::Blue).fg(Color::Cyan);
+    let highlight_style = Style::default().bg(Color::Cyan).fg(Color::Black);
+    let border_style = Style::default().fg(Color::Cyan);
+
+    let left_title_style = if app.active_pane == 0 {
+        highlight_style
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
+    let right_title_style = if app.active_pane == 1 {
+        highlight_style
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
 
     let left_items: Vec<ListItem> = app
         .left_files
         .iter()
         .enumerate()
-        .map(|(index, file)| {
-            let mut style = Style::default();
-            if index == app.left_selected && app.active_pane == 0 {
-                style = style.fg(Color::Yellow).add_modifier(Modifier::BOLD);
-            }
-            if file.is_dir {
-                style = style.fg(Color::Cyan);
-            }
+        .map(|(_index, file)| {
+            let style = if file.is_dir {
+                Style::default().fg(Color::White)
+            } else {
+                Style::default().fg(Color::Cyan)
+            };
             ListItem::new(file.name.clone()).style(style)
         })
         .collect();
     let left_list = List::new(left_items)
-        .block(Block::default().borders(Borders::ALL).title("Left"))
-        .highlight_style(Style::default().bg(Color::Blue));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Double)
+                .title(ratatui::text::Line::from(" Left ").style(left_title_style))
+                .border_style(border_style)
+                .style(list_style),
+        )
+        .style(list_style)
+        .highlight_style(highlight_style);
     f.render_widget(left_list, panel_chunks[0]);
 
     if app.chat_state == ChatState::Open {
         let chat_items: Vec<ListItem> = app
             .chat_messages
             .iter()
-            .map(|message| ListItem::new(message.clone()))
+            .map(|message| ListItem::new(message.clone()).style(Style::default().fg(Color::White)))
             .collect();
         let chat_list = List::new(chat_items)
-            .block(Block::default().borders(Borders::ALL).title("AI Chat"));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("AI Chat")
+                    .border_style(Style::default().fg(Color::Indexed(242)))
+                    .style(Style::default().bg(Color::Indexed(234)).fg(Color::White)),
+            )
+            .style(Style::default().bg(Color::Indexed(234)).fg(Color::White));
         f.render_widget(chat_list, panel_chunks[1]);
     } else {
         let right_items: Vec<ListItem> = app
             .right_files
             .iter()
             .enumerate()
-            .map(|(index, file)| {
-                let mut style = Style::default();
-                if index == app.right_selected && app.active_pane == 1 {
-                    style = style.fg(Color::Yellow).add_modifier(Modifier::BOLD);
-                }
-                if file.is_dir {
-                    style = style.fg(Color::Cyan);
-                }
+            .map(|(_index, file)| {
+                let style = if file.is_dir {
+                    Style::default().fg(Color::White)
+                } else {
+                    Style::default().fg(Color::Cyan)
+                };
                 ListItem::new(file.name.clone()).style(style)
             })
             .collect();
         let right_list = List::new(right_items)
-            .block(Block::default().borders(Borders::ALL).title("Right"))
-            .highlight_style(Style::default().bg(Color::Blue));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Double)
+                    .title(ratatui::text::Line::from(" Right ").style(right_title_style))
+                    .border_style(border_style)
+                    .style(list_style),
+            )
+            .style(list_style)
+            .highlight_style(highlight_style);
         f.render_widget(right_list, panel_chunks[1]);
     }
-
-    let bottom_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(3)].as_ref())
-        .split(bottom);
-
-    let plume_paragraph = Paragraph::new(app.plume.join("\n"))
-        .block(Block::default().borders(Borders::ALL).title("Plume"))
-        .style(Style::default().fg(Color::White));
-    f.render_widget(plume_paragraph, bottom_chunks[0]);
-
-    let prompt_prefix = if app.chat_state == ChatState::Open { "AI> " } else { "$ " };
-    let prompt_content = if app.chat_state == ChatState::Open {
-        format!("{}{}", prompt_prefix, app.chat_input)
-    } else {
-        format!("{}{}", prompt_prefix, app.prompt)
-    };
     let prompt_paragraph = Paragraph::new(prompt_content)
-        .block(Block::default().borders(Borders::ALL).title("Input"))
-        .style(Style::default().fg(Color::Green));
-    f.render_widget(prompt_paragraph, bottom_chunks[1]);
+        .style(Style::default().bg(Color::Black).fg(Color::Gray))
+        .wrap(Wrap { trim: false });
+    f.render_widget(prompt_paragraph, prompt_area);
+}
+
+fn prompt_line_count(width: u16, text_len: usize) -> u16 {
+    let cols = width.max(1) as usize;
+    let lines = text_len.max(1).div_ceil(cols);
+    lines.min(u16::MAX as usize) as u16
 }
 
 fn getattr_width(terminal: &Terminal<truant::TruantBackend>) -> u16 {
@@ -280,17 +340,18 @@ async fn handle_input(app: &mut App, bytes: &[u8], _inner_height: usize) {
                 return;
             }
 
-            if app.active_pane == 0 || app.active_pane == 1 {
-                if open_selected_directory(app).await {
-                    return;
-                }
-            }
-
-            let cmd = mem::take(&mut app.prompt);
-            if !cmd.is_empty() {
+            if !app.prompt.is_empty() {
+                let cmd = mem::take(&mut app.prompt);
                 app.plume.push(format!("Executed: {}", cmd));
                 if app.plume.len() > PLUME_MAX {
                     app.plume.drain(0..1);
+                }
+                return;
+            }
+
+            if app.chat_state == ChatState::Closed && (app.active_pane == 0 || app.active_pane == 1) {
+                if open_selected_directory(app).await {
+                    return;
                 }
             }
             return;
