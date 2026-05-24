@@ -461,6 +461,7 @@ mod windows_tty {
     use crate::future::Future;
     use crate::rt::executor::with_driver;
     use crate::rt::ready::consume_ready;
+    use crate::rt::windows::Overlapped;
     // ── Windows API ─────────────────────────────────────────────────────────
 
     #[link(name = "kernel32", kind = "raw-dylib")]

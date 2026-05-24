@@ -1,7 +1,7 @@
 use anyhow::Context as _;
 use wasmtime::{Caller, Linker, Memory, Store};
 
-use crate::handles::{HandleKind, HostState, PendingOp, StatInfo};
+use crate::handles::{FileOpResult, HandleKind, HostState, PendingOp, StatInfo};
 
 // ── Overlapped layout (matches src/abi.rs) ───────────────────────────────────
 //   offset  0: flags: u32      (1 = FLAG_COMPLETED)
@@ -74,9 +74,58 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let mem = get_memory(&mut caller)?;
             let data = mem.data_mut(&mut caller);
             let buf = guest_slice(data, ptr, len)?;
-            // Read cryptographic random bytes from /dev/urandom.
-            let mut f = std::fs::File::open("/dev/urandom").context("open /dev/urandom")?;
-            std::io::Read::read_exact(&mut f, buf).context("read /dev/urandom")?;
+            #[cfg(windows)]
+            {
+                #[link(name = "bcrypt", kind = "raw-dylib")]
+                unsafe extern "system" {
+                    fn BCryptGenRandom(
+                        h_algorithm: usize,
+                        buffer: *mut u8,
+                        size: u32,
+                        flags: u32,
+                    ) -> i32;
+                }
+                const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x0000_0002;
+
+                let status = unsafe {
+                    BCryptGenRandom(
+                        0,
+                        buf.as_mut_ptr(),
+                        buf.len() as u32,
+                        BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+                    )
+                };
+                if status != 0 {
+                    return Err(anyhow::anyhow!("BCryptGenRandom failed with status {}", status));
+                }
+            }
+
+            #[cfg(unix)]
+            {
+                let mut filled = 0usize;
+                while filled < buf.len() {
+                    let n = unsafe {
+                        libc::getrandom(
+                            buf[filled..].as_mut_ptr() as *mut libc::c_void,
+                            buf.len() - filled,
+                            0,
+                        )
+                    };
+                    if n < 0 {
+                        return Err(anyhow::Error::from(std::io::Error::last_os_error()));
+                    }
+                    if n == 0 {
+                        continue;
+                    }
+                    filled += n as usize;
+                }
+            }
+
+            #[cfg(not(any(windows, unix)))]
+            {
+                return Err(anyhow::anyhow!("get_random is unsupported on this host"));
+            }
+
             Ok(())
         },
     )?;
@@ -314,6 +363,7 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let (data, host) = mem.data_and_store_mut(&mut caller);
             let path_bytes = guest_slice(data, path_ptr, path_len)?.to_vec();
             let path = std::str::from_utf8(&path_bytes).context("path_open: non-UTF-8 path")?;
+            let path_owned = path.to_owned();
             let read_flag = (flags & 1) != 0;
             let write_flag = (flags & 2) != 0;
             let create = (flags & 4) != 0;
@@ -325,23 +375,32 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let do_write = write_flag || create;
             println!("path_open: path={:?}, is_dir={}, do_read={}, do_write={}, flags={}", path, std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false), do_read, do_write, flags);
             let is_dir = std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false);
-            let new_handle = if is_dir {
-                let rd =
-                    std::fs::read_dir(path).with_context(|| format!("path_open dir: {path:?}"))?;
-                host.alloc_handle(HandleKind::Dir(rd, Vec::new()))
-            } else {
-                let f = std::fs::OpenOptions::new()
-                    .read(do_read)
-                    .write(do_write)
-                    .create(create && !create_new)
-                    .create_new(create_new)
-                    .truncate(truncate)
-                    .append(append)
-                    .open(path)
-                    .with_context(|| format!("path_open: {path:?}"))?;
-                host.alloc_handle(HandleKind::File(f))
-            };
-            write_overlapped(data, ov_ptr, 0, 0, new_handle)
+            let tx = host.file_op_tx.clone();
+
+            std::rt::executor::spawn(async move {
+                let result = if is_dir {
+                    match std::fs::read_dir(&path_owned).await {
+                        Ok(rd) => Ok(HandleKind::Dir(rd, Vec::new())),
+                        Err(e) => Err(e.raw_os_error().unwrap_or(5) as u32),
+                    }
+                } else {
+                    let mut opts = std::fs::OpenOptions::new();
+                    opts.read(do_read)
+                        .write(do_write)
+                        .create(create && !create_new)
+                        .create_new(create_new)
+                        .truncate(truncate)
+                        .append(append);
+                    match opts.open(&path_owned).await {
+                        Ok(f) => Ok(HandleKind::File(f)),
+                        Err(e) => Err(e.raw_os_error().unwrap_or(5) as u32),
+                    }
+                };
+
+                let _ = tx.send(FileOpResult::PathOpen { ov_ptr, result });
+            });
+
+            Ok(())
         },
     )?;
 
@@ -578,8 +637,7 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                     if let Some(entry_res) = rd.next() {
                         match entry_res {
                             Ok(entry) => {
-                                let name = entry.file_name();
-                                let bytes = name.to_string_lossy().into_owned().into_bytes();
+                                let bytes = entry.file_name().as_bytes().to_vec();
                                 leftovers.extend_from_slice(&bytes);
                                 leftovers.push(0); // null terminator
                             }
@@ -779,6 +837,34 @@ pub fn poll_completions(
 ) -> anyhow::Result<bool> {
     let mut progress = false;
     let now = std::time::Instant::now();
+
+    // Drive futures spawned by host imports (e.g. async path_open).
+    let _ = std::rt::executor::poll_step();
+
+    // 0. Complete async file operations.
+    loop {
+        let op = match store.data_mut().file_op_rx.try_recv() {
+            Ok(op) => op,
+            Err(std::sync::mpsc::TryRecvError::Empty) => break,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+        };
+
+        let (mem, host) = memory.data_and_store_mut(&mut *store);
+        match op {
+            FileOpResult::PathOpen { ov_ptr, result } => {
+                match result {
+                    Ok(kind) => {
+                        let handle = host.alloc_handle(kind);
+                        write_overlapped(mem, ov_ptr, 0, 0, handle)?;
+                    }
+                    Err(error) => {
+                        write_overlapped(mem, ov_ptr, error, 0, 0)?;
+                    }
+                }
+                progress = true;
+            }
+        }
+    }
 
     // 1. Check timers
     let expired: Vec<u32> = store
