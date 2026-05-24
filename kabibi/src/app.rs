@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use ::std::time::{Instant, Duration};
 use std::fs::read_dir;
 
@@ -106,6 +107,7 @@ impl App {
             }
         }
     }
+    pub fn push_path(dir: &mut String, entry: &str) {
         if entry == ".." {
             if dir == "." || dir == ".." || dir.ends_with("/..") || dir.ends_with("\\..") {
                 dir.push_str("/..");
@@ -117,12 +119,21 @@ impl App {
                 } else {
                     dir.truncate(pos);
                 }
-                if dir.is_empty() { *dir = ".".to_string(); }
-            } else { *dir = ".".to_string(); }
+                if dir.is_empty() {
+                    *dir = ".".to_string();
+                }
+            } else {
+                *dir = ".".to_string();
+            }
         } else {
-            if dir == "." { *dir = entry.to_string(); }
-            else if dir.ends_with('/') || dir.ends_with('\\') { dir.push_str(entry); }
-            else { dir.push('/'); dir.push_str(entry); }
+            if dir == "." {
+                *dir = entry.to_string();
+            } else if dir.ends_with('/') || dir.ends_with('\\') {
+                dir.push_str(entry);
+            } else {
+                dir.push('/');
+                dir.push_str(entry);
+            }
         }
     }
 
