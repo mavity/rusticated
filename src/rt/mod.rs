@@ -98,7 +98,7 @@ pub mod wasm;
 pub use wasm::{OverlappedBufferFuture, OverlappedFuture, poll_step, submit_main};
 
 /// Lang item for program start.
-#[cfg(not(any(test, feature = "std")))]
+#[cfg(not(test))]
 #[lang = "start"]
 fn lang_start<T: crate::process::Termination + 'static>(
     main: fn() -> T,
