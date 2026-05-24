@@ -2,7 +2,7 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::backend::Backend;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
-use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Terminal;
 use std::io::{AsyncRead, AsyncWrite};
 use std::mem;
@@ -135,10 +135,16 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
         width: area.width,
         height: prompt_height,
     };
+    let plume_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: area.height.saturating_sub(prompt_height),
+    };
 
-    let plume_canvas = Paragraph::new(bottom_aligned_plume_text(app, area.height))
+    let plume_canvas = Paragraph::new(bottom_aligned_plume_text(app, plume_area.height))
         .style(Style::default().bg(Color::Black).fg(Color::DarkGray));
-    f.render_widget(plume_canvas, area);
+    f.render_widget(plume_canvas, plume_area);
 
     let chat_full_width = sidebar_chat_width(area.width);
     let peek_width = 8u16.min(area.width.saturating_sub(2)).max(1);
@@ -200,17 +206,18 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
 
     f.render_widget(Block::default().style(list_style), panel_chunks[0]);
 
+    let left_row_width = panel_chunks[0].width.saturating_sub(2).max(1) as usize;
     let left_items: Vec<ListItem> = app
         .left_files
         .iter()
         .enumerate()
         .map(|(_index, file)| {
             let style = if file.is_dir {
-                Style::default().fg(Color::White)
+                Style::default().bg(Color::Blue).fg(Color::White)
             } else {
-                Style::default().fg(Color::Cyan)
+                Style::default().bg(Color::Blue).fg(Color::Cyan)
             };
-            ListItem::new(file.name.clone()).style(style)
+            ListItem::new(pad_or_trim(&file.name, left_row_width)).style(style)
         })
         .collect();
     let left_list = List::new(left_items)
@@ -224,21 +231,24 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
         )
         .style(list_style)
         .highlight_style(highlight_style);
-    f.render_widget(left_list, panel_chunks[0]);
+    let mut left_state = ListState::default();
+    left_state.select((app.active_pane == 0).then_some(app.left_selected));
+    f.render_stateful_widget(left_list, panel_chunks[0], &mut left_state);
 
     f.render_widget(Block::default().style(list_style), panel_chunks[1]);
 
+    let right_row_width = panel_chunks[1].width.saturating_sub(2).max(1) as usize;
     let right_items: Vec<ListItem> = app
         .right_files
         .iter()
         .enumerate()
         .map(|(_index, file)| {
             let style = if file.is_dir {
-                Style::default().fg(Color::White)
+                Style::default().bg(Color::Blue).fg(Color::White)
             } else {
-                Style::default().fg(Color::Cyan)
+                Style::default().bg(Color::Blue).fg(Color::Cyan)
             };
-            ListItem::new(file.name.clone()).style(style)
+            ListItem::new(pad_or_trim(&file.name, right_row_width)).style(style)
         })
         .collect();
     let right_list = List::new(right_items)
@@ -252,28 +262,66 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
         )
         .style(list_style)
         .highlight_style(highlight_style);
-    f.render_widget(right_list, panel_chunks[1]);
+    let mut right_state = ListState::default();
+    right_state.select((app.active_pane == 1).then_some(app.right_selected));
+    f.render_stateful_widget(right_list, panel_chunks[1], &mut right_state);
 
-    let chat_items: Vec<ListItem> = app
-        .chat_messages
-        .iter()
-        .map(|message| ListItem::new(message.clone()).style(Style::default().fg(Color::White)))
-        .collect();
+    let chat_inner = chat_inner_area(chat_rect);
+    let chat_text_width = chat_inner.width.saturating_sub(1).max(1);
+    let wrapped_chat_lines = wrap_lines(chat_messages_with_input(app), chat_text_width as usize);
+    let visible_chat_lines = chat_inner.height.max(1) as usize;
+    let start = chat_view_start(
+        wrapped_chat_lines.len(),
+        visible_chat_lines,
+        app.chat_scroll,
+    );
+    let end = (start + visible_chat_lines).min(wrapped_chat_lines.len());
+    let mut visible = wrapped_chat_lines[start..end].join("\n");
+    if !visible.is_empty() {
+        visible.push('\n');
+    }
+
+    f.render_widget(
+        Block::default().style(Style::default().bg(Color::Indexed(234))),
+        chat_rect,
+    );
     let chat_title = if app.chat_state == ChatState::Open {
         " AI Chat "
     } else {
         " AI> "
     };
-    let chat_list = List::new(chat_items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(chat_title)
-                .border_style(Style::default().fg(Color::Indexed(242)))
-                .style(Style::default().bg(Color::Indexed(234)).fg(Color::White)),
-        )
-        .style(Style::default().bg(Color::Indexed(234)).fg(Color::White));
-    f.render_widget(chat_list, chat_rect);
+    f.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(chat_title)
+            .border_style(Style::default().fg(Color::Indexed(242)))
+            .style(Style::default().bg(Color::Indexed(234)).fg(Color::White)),
+        chat_rect,
+    );
+
+    let chat_text_area = Rect {
+        x: chat_inner.x,
+        y: chat_inner.y,
+        width: chat_inner.width.saturating_sub(1).max(1),
+        height: chat_inner.height,
+    };
+    let chat_paragraph = Paragraph::new(visible)
+        .style(Style::default().bg(Color::Indexed(234)).fg(Color::White))
+        .wrap(Wrap { trim: false });
+    f.render_widget(chat_paragraph, chat_text_area);
+
+    render_scrollbar(
+        f,
+        wrapped_chat_lines.len(),
+        visible_chat_lines,
+        start,
+        Rect {
+            x: chat_inner.x + chat_inner.width.saturating_sub(1),
+            y: chat_inner.y,
+            width: 1,
+            height: chat_inner.height,
+        },
+    );
 
     let prompt_paragraph = Paragraph::new(prompt_content)
         .style(Style::default().bg(Color::Black).fg(Color::Gray))
@@ -284,6 +332,91 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
 fn sidebar_chat_width(total_width: u16) -> u16 {
     let preferred = ((total_width as u32 * 35) / 100) as u16;
     preferred.clamp(30, total_width.saturating_sub(1).max(1))
+}
+
+fn chat_inner_area(chat_rect: Rect) -> Rect {
+    Rect {
+        x: chat_rect.x.saturating_add(1),
+        y: chat_rect.y.saturating_add(1),
+        width: chat_rect.width.saturating_sub(2),
+        height: chat_rect.height.saturating_sub(2),
+    }
+}
+
+fn chat_messages_with_input(app: &App) -> Vec<String> {
+    let mut lines = app.chat_messages.clone();
+    if app.chat_state == ChatState::Open {
+        lines.push(format!("AI> {}", app.chat_input));
+    }
+    lines
+}
+
+fn wrap_lines(lines: Vec<String>, width: usize) -> Vec<String> {
+    let mut wrapped = Vec::new();
+    let safe_width = width.max(1);
+    for line in lines {
+        if line.is_empty() {
+            wrapped.push(String::new());
+            continue;
+        }
+
+        let mut current = String::new();
+        let mut count = 0usize;
+        for ch in line.chars() {
+            current.push(ch);
+            count += 1;
+            if count >= safe_width {
+                wrapped.push(current.clone());
+                current.clear();
+                count = 0;
+            }
+        }
+        if !current.is_empty() {
+            wrapped.push(current);
+        }
+    }
+    wrapped
+}
+
+fn chat_view_start(total_lines: usize, visible_lines: usize, scroll: usize) -> usize {
+    if total_lines <= visible_lines {
+        return 0;
+    }
+    let max_start = total_lines - visible_lines;
+    max_start.saturating_sub(scroll.min(max_start))
+}
+
+fn render_scrollbar(
+    f: &mut ratatui::Frame,
+    total_lines: usize,
+    visible_lines: usize,
+    start: usize,
+    area: Rect,
+) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+
+    let mut track = vec![" ".to_string(); area.height as usize];
+    if total_lines > 0 && visible_lines > 0 {
+        let thumb_height = ((visible_lines as u64 * area.height as u64) / total_lines as u64)
+            .max(1)
+            .min(area.height as u64) as usize;
+        let max_top = area.height as usize - thumb_height;
+        let thumb_top = if total_lines <= visible_lines {
+            0
+        } else {
+            ((start as u64 * max_top as u64) / (total_lines - visible_lines) as u64) as usize
+        };
+
+        for i in 0..thumb_height {
+            track[thumb_top + i] = "█".to_string();
+        }
+    }
+
+    let track_widget = Paragraph::new(track.join("\n"))
+        .style(Style::default().bg(Color::Indexed(234)).fg(Color::Indexed(242)));
+    f.render_widget(track_widget, area);
 }
 
 fn bottom_aligned_plume_text(app: &App, height: u16) -> String {
@@ -305,6 +438,18 @@ fn prompt_line_count(width: u16, text_len: usize) -> u16 {
     let cols = width.max(1) as usize;
     let lines = text_len.max(1).div_ceil(cols);
     lines.min(u16::MAX as usize) as u16
+}
+
+fn pad_or_trim(value: &str, width: usize) -> String {
+    let mut out = String::new();
+    for ch in value.chars().take(width) {
+        out.push(ch);
+    }
+    let len = out.chars().count();
+    if len < width {
+        out.push_str(&" ".repeat(width - len));
+    }
+    out
 }
 
 fn getattr_width(terminal: &Terminal<truant::TruantBackend>) -> u16 {
@@ -344,6 +489,10 @@ async fn handle_input(app: &mut App, bytes: &[u8], _inner_height: usize) {
             return;
         }
         b"\x1b[A" => {
+            if app.chat_state == ChatState::Open {
+                app.chat_scroll = app.chat_scroll.saturating_add(1);
+                return;
+            }
             let selected = if app.active_pane == 0 {
                 app.left_selected
             } else {
@@ -358,6 +507,10 @@ async fn handle_input(app: &mut App, bytes: &[u8], _inner_height: usize) {
             return;
         }
         b"\x1b[B" => {
+            if app.chat_state == ChatState::Open {
+                app.chat_scroll = app.chat_scroll.saturating_sub(1);
+                return;
+            }
             let files_len = if app.active_pane == 0 {
                 app.left_files.len()
             } else {
@@ -379,12 +532,16 @@ async fn handle_input(app: &mut App, bytes: &[u8], _inner_height: usize) {
         b"\x1b[D" => {
             if app.chat_state == ChatState::Closed {
                 app.active_pane = 0;
+            } else {
+                app.chat_scroll = app.chat_scroll.saturating_add(3);
             }
             return;
         }
         b"\x1b[C" => {
             if app.chat_state == ChatState::Closed {
                 app.active_pane = 1;
+            } else {
+                app.chat_scroll = app.chat_scroll.saturating_sub(3);
             }
             return;
         }
@@ -401,7 +558,10 @@ async fn handle_input(app: &mut App, bytes: &[u8], _inner_height: usize) {
                 let user_msg = mem::take(&mut app.chat_input);
                 if !user_msg.is_empty() {
                     app.chat_messages.push(format!("You: {}", user_msg));
-                    app.chat_messages.push(format!("AI: {}", user_msg));
+                    for line in mock_ai_reply(&user_msg) {
+                        app.chat_messages.push(format!("AI: {}", line));
+                    }
+                    app.chat_scroll = 0;
                 }
                 return;
             }
@@ -429,11 +589,38 @@ async fn handle_input(app: &mut App, bytes: &[u8], _inner_height: usize) {
         if byte.is_ascii_graphic() || byte == b' ' {
             if app.chat_state == ChatState::Open {
                 app.chat_input.push(byte as char);
+                app.chat_scroll = 0;
             } else {
                 app.prompt.push(byte as char);
             }
         }
     }
+}
+
+fn mock_ai_reply(input: &str) -> Vec<String> {
+    let lowered = input.to_lowercase();
+    let mut lines = Vec::new();
+
+    if lowered.contains("help") {
+        lines.push("I can summarize files, suggest commands, and draft snippets.".to_string());
+        lines.push("Try: 'summarize README.md' or 'explain src/app.rs'.".to_string());
+        return lines;
+    }
+    if lowered.contains("list") || lowered.contains("ls") {
+        lines.push("Mock planner: inspect current directory and rank likely targets.".to_string());
+        lines.push("Suggestion: open left panel and hit Enter on a directory.".to_string());
+        return lines;
+    }
+    if lowered.contains("build") {
+        lines.push("Mock execution: cargo build -p kabibi".to_string());
+        lines.push("Result: success (simulated).".to_string());
+        return lines;
+    }
+
+    lines.push("Received. I will treat this as a planning request.".to_string());
+    lines.push(format!("Echo: {}", input));
+    lines.push("No external model call is made in this mock mode.".to_string());
+    lines
 }
 
 async fn open_selected_directory(app: &mut App) -> bool {
