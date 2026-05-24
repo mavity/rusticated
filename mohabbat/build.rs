@@ -120,6 +120,7 @@ fn main() {
     let old_slot_data = parse_existing_mohab(&bat_path);
 
     // Phase 1: For each slot pick the first available target and build brot + washmhost.
+    // Any build failure is a hard stop.
     let mut slot_targets: Vec<Option<&str>> = Vec::new();
     for candidates in TARGET_SLOTS {
         let resolved = candidates.iter().copied().find(|t| can_build_target(t));
@@ -128,7 +129,13 @@ fn main() {
                 println!("cargo:warning=Slot resolved to target {}", target);
                 let b1 = build_component(workspace_dir, &target_tree, "brot", target);
                 let b2 = build_component(workspace_dir, &target_tree, "washmhost", target);
-                slot_targets.push(if b1 && b2 { Some(target) } else { None });
+                if !(b1 && b2) {
+                    panic!(
+                        "Build failed for slot target {} (brot: {}, washmhost: {})",
+                        target, b1, b2
+                    );
+                }
+                slot_targets.push(Some(target));
             }
             None => {
                 println!(
@@ -141,12 +148,15 @@ fn main() {
     }
 
     // Phase 2: Build the brain
-    build_component(
+    let brain_ok = build_component(
         workspace_dir,
         &target_tree,
         "mohabbat",
         "wasm32-unknown-unknown",
     );
+    if !brain_ok {
+        panic!("Build failed for mohabbat wasm32-unknown-unknown");
+    }
 
     // Phase 3: Stitching
     stitch(workspace_dir, &target_tree, &slot_targets, &old_slot_data);
@@ -297,6 +307,10 @@ fn build_component(workspace_dir: &Path, target_tree: &Path, package: &str, targ
         rustflags.push_str(" -C panic=abort -C link-arg=-nostartfiles");
     }
 
+    if package == "washmhost" && target.contains("windows") {
+        rustflags.push_str(" -C link-arg=/FORCE:MULTIPLE");
+    }
+
     if needs_sysroot {
         // Ensure sysroot is built for this target first
         if !build_sysroot(workspace_dir, target) {
@@ -329,11 +343,6 @@ fn build_component(workspace_dir: &Path, target_tree: &Path, package: &str, targ
     match output {
         Ok(out) if out.status.success() => true,
         Ok(out) => {
-            // Even on partial failure the lib artifact may have been produced.
-            let existing = find_asset(target_tree, target, package);
-            if existing.exists() {
-                return true;
-            }
             println!(
                 "cargo:warning=Failed to build {} for {} with status {}. stderr: {}",
                 package,

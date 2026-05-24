@@ -10,6 +10,13 @@ pub enum HandleKind {
     Dir(std::fs::ReadDir, Vec<u8>),
 }
 
+pub enum FileOpResult {
+    PathOpen {
+        ov_ptr: u32,
+        result: Result<HandleKind, u32>,
+    },
+}
+
 pub struct StatInfo {
     pub len: u64,
     pub is_dir: bool,
@@ -90,6 +97,8 @@ pub struct HostState {
     pub stdin_rx: mpsc::Receiver<Vec<u8>>,
     pub stdin_buf: Vec<u8>,
     pub stdin_pending: Option<PendingOp>,
+    pub file_op_tx: mpsc::Sender<FileOpResult>,
+    pub file_op_rx: mpsc::Receiver<FileOpResult>,
     pub child_wait_pending: Vec<(u32, u64)>,
 }
 
@@ -101,6 +110,7 @@ impl HostState {
         handles.insert(2, HandleKind::Fd(2));
 
         let (stdin_tx, stdin_rx) = mpsc::channel();
+        let (file_op_tx, file_op_rx) = mpsc::channel();
         std::thread::spawn(move || {
             use std::io::Read;
             let mut buf = [0u8; 256];
@@ -127,6 +137,8 @@ impl HostState {
             stdin_rx,
             stdin_buf: Vec::new(),
             stdin_pending: None,
+            file_op_tx,
+            file_op_rx,
             child_wait_pending: Vec::new(),
         })
     }

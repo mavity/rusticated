@@ -90,6 +90,7 @@ impl Read for Stdin {
         #[cfg(windows)]
         {
             #[allow(clashing_extern_declarations)]
+            use crate::rt::windows::Overlapped;
             #[link(name = "kernel32", kind = "raw-dylib")]
             unsafe extern "system" {
                 fn GetStdHandle(n_std_handle: u32) -> usize;
@@ -98,7 +99,7 @@ impl Read for Stdin {
                     lp_buffer: *mut u8,
                     n_number_of_bytes_to_read: u32,
                     lp_number_of_bytes_read: *mut u32,
-                    lp_overlapped: *mut core::ffi::c_void,
+                    lp_overlapped: *mut Overlapped,
                 ) -> i32;
             }
             let handle = unsafe { GetStdHandle(0xFFFFFFF6u32) }; // STD_INPUT_HANDLE = -10
