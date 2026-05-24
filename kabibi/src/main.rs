@@ -116,13 +116,14 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
     let prompt_height = prompt_line_count(area.width, prompt_content.len());
 
     let panel_top_margin = 1u16;
-    let panel_reserved_bottom = prompt_height;
+    let plume_footer_lines = 4u16;
+    let panel_reserved_bottom = prompt_height.saturating_add(plume_footer_lines);
     let panel_height = area
         .height
         .saturating_sub(panel_top_margin)
         .saturating_sub(panel_reserved_bottom)
         .max(1);
-    let panel_area = Rect {
+    let overlay_area = Rect {
         x: area.x,
         y: area.y.saturating_add(panel_top_margin),
         width: area.width,
@@ -135,15 +136,52 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
         height: prompt_height,
     };
 
-    let plume_canvas = Paragraph::new(app.plume.join("\n"))
-        .style(Style::default().bg(Color::Black).fg(Color::DarkGray))
-        .wrap(Wrap { trim: false });
+    let plume_canvas = Paragraph::new(bottom_aligned_plume_text(app, area.height))
+        .style(Style::default().bg(Color::Black).fg(Color::DarkGray));
     f.render_widget(plume_canvas, area);
+
+    let chat_full_width = sidebar_chat_width(area.width);
+    let peek_width = 8u16.min(area.width.saturating_sub(2)).max(1);
+    let (files_area, chat_rect) = if app.chat_state == ChatState::Open {
+        let files_width = overlay_area.width.saturating_sub(chat_full_width).max(2);
+        (
+            Rect {
+                x: overlay_area.x,
+                y: overlay_area.y,
+                width: files_width,
+                height: overlay_area.height,
+            },
+            Rect {
+                x: overlay_area.x.saturating_add(files_width),
+                y: overlay_area.y,
+                width: chat_full_width,
+                height: overlay_area.height,
+            },
+        )
+    } else {
+        let files_width = overlay_area.width.saturating_sub(peek_width).max(2);
+        (
+            Rect {
+                x: overlay_area.x,
+                y: overlay_area.y,
+                width: files_width,
+                height: overlay_area.height,
+            },
+            Rect {
+                // Intentionally render part of a full-width panel outside the viewport so
+                // the visible sliver is the left-most part of a normal-width chat panel.
+                x: overlay_area.x.saturating_add(files_width),
+                y: overlay_area.y,
+                width: chat_full_width,
+                height: overlay_area.height,
+            },
+        )
+    };
 
     let panel_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
-        .split(panel_area);
+        .split(files_area);
 
     let list_style = Style::default().bg(Color::Blue).fg(Color::Cyan);
     let highlight_style = Style::default().bg(Color::Cyan).fg(Color::Black);
@@ -159,6 +197,8 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
     } else {
         Style::default().fg(Color::Cyan)
     };
+
+    f.render_widget(Block::default().style(list_style), panel_chunks[0]);
 
     let left_items: Vec<ListItem> = app
         .left_files
@@ -186,53 +226,79 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
         .highlight_style(highlight_style);
     f.render_widget(left_list, panel_chunks[0]);
 
-    if app.chat_state == ChatState::Open {
-        let chat_items: Vec<ListItem> = app
-            .chat_messages
-            .iter()
-            .map(|message| ListItem::new(message.clone()).style(Style::default().fg(Color::White)))
-            .collect();
-        let chat_list = List::new(chat_items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("AI Chat")
-                    .border_style(Style::default().fg(Color::Indexed(242)))
-                    .style(Style::default().bg(Color::Indexed(234)).fg(Color::White)),
-            )
-            .style(Style::default().bg(Color::Indexed(234)).fg(Color::White));
-        f.render_widget(chat_list, panel_chunks[1]);
+    f.render_widget(Block::default().style(list_style), panel_chunks[1]);
+
+    let right_items: Vec<ListItem> = app
+        .right_files
+        .iter()
+        .enumerate()
+        .map(|(_index, file)| {
+            let style = if file.is_dir {
+                Style::default().fg(Color::White)
+            } else {
+                Style::default().fg(Color::Cyan)
+            };
+            ListItem::new(file.name.clone()).style(style)
+        })
+        .collect();
+    let right_list = List::new(right_items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Double)
+                .title(ratatui::text::Line::from(" Right ").style(right_title_style))
+                .border_style(border_style)
+                .style(list_style),
+        )
+        .style(list_style)
+        .highlight_style(highlight_style);
+    f.render_widget(right_list, panel_chunks[1]);
+
+    let chat_items: Vec<ListItem> = app
+        .chat_messages
+        .iter()
+        .map(|message| ListItem::new(message.clone()).style(Style::default().fg(Color::White)))
+        .collect();
+    let chat_title = if app.chat_state == ChatState::Open {
+        " AI Chat "
     } else {
-        let right_items: Vec<ListItem> = app
-            .right_files
-            .iter()
-            .enumerate()
-            .map(|(_index, file)| {
-                let style = if file.is_dir {
-                    Style::default().fg(Color::White)
-                } else {
-                    Style::default().fg(Color::Cyan)
-                };
-                ListItem::new(file.name.clone()).style(style)
-            })
-            .collect();
-        let right_list = List::new(right_items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Double)
-                    .title(ratatui::text::Line::from(" Right ").style(right_title_style))
-                    .border_style(border_style)
-                    .style(list_style),
-            )
-            .style(list_style)
-            .highlight_style(highlight_style);
-        f.render_widget(right_list, panel_chunks[1]);
-    }
+        " AI> "
+    };
+    let chat_list = List::new(chat_items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(chat_title)
+                .border_style(Style::default().fg(Color::Indexed(242)))
+                .style(Style::default().bg(Color::Indexed(234)).fg(Color::White)),
+        )
+        .style(Style::default().bg(Color::Indexed(234)).fg(Color::White));
+    f.render_widget(chat_list, chat_rect);
+
     let prompt_paragraph = Paragraph::new(prompt_content)
         .style(Style::default().bg(Color::Black).fg(Color::Gray))
         .wrap(Wrap { trim: false });
     f.render_widget(prompt_paragraph, prompt_area);
+}
+
+fn sidebar_chat_width(total_width: u16) -> u16 {
+    let preferred = ((total_width as u32 * 35) / 100) as u16;
+    preferred.clamp(30, total_width.saturating_sub(1).max(1))
+}
+
+fn bottom_aligned_plume_text(app: &App, height: u16) -> String {
+    let max_lines = height.max(1) as usize;
+    let total = app.plume.len();
+    let start = total.saturating_sub(max_lines);
+    let visible = &app.plume[start..];
+    let pad_count = max_lines.saturating_sub(visible.len());
+
+    let mut out = String::new();
+    for _ in 0..pad_count {
+        out.push('\n');
+    }
+    out.push_str(&visible.join("\n"));
+    out
 }
 
 fn prompt_line_count(width: u16, text_len: usize) -> u16 {
