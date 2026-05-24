@@ -29,6 +29,7 @@ pub struct App {
     pub chat_state: ChatState,
     pub chat_input: String,
     pub chat_messages: Vec<String>,
+    pub chat_scroll: usize, // 0 means pinned to latest message
     // focus / misc
     pub should_quit: bool,
     pub active_pane: u8, // 0 = left, 1 = right, 2 = chat when open
@@ -55,6 +56,7 @@ impl App {
             chat_state: ChatState::Closed,
             chat_input: String::new(),
             chat_messages: Vec::new(),
+            chat_scroll: 0,
             should_quit: false,
             active_pane: 0,
             // initialize tab handling
