@@ -1,8 +1,8 @@
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout};
 use ratatui::backend::Backend;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
-use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Terminal;
 use std::io::{AsyncRead, AsyncWrite};
 use std::mem;
@@ -224,8 +224,11 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_type(BorderType::Double)
-                .title(ratatui::text::Line::from(" Left ").style(left_title_style))
+                .title(
+                    ratatui::text::Line::from(format!(" {} ", app.current_left_dir))
+                        .style(left_title_style),
+                )
+                .title_alignment(Alignment::Center)
                 .border_style(border_style)
                 .style(list_style),
         )
@@ -255,8 +258,11 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_type(BorderType::Double)
-                .title(ratatui::text::Line::from(" Right ").style(right_title_style))
+                .title(
+                    ratatui::text::Line::from(format!(" {} ", app.current_right_dir))
+                        .style(right_title_style),
+                )
+                .title_alignment(Alignment::Center)
                 .border_style(border_style)
                 .style(list_style),
         )
@@ -266,7 +272,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
     right_state.select((app.active_pane == 1).then_some(app.right_selected));
     f.render_stateful_widget(right_list, panel_chunks[1], &mut right_state);
 
-    let chat_inner = chat_inner_area(chat_rect);
+    let chat_inner = chat_inner_area(chat_rect, app.chat_state == ChatState::Open);
     let chat_text_width = chat_inner.width.saturating_sub(1).max(1);
     let wrapped_chat_lines = wrap_lines(chat_messages_with_input(app), chat_text_width as usize);
     let visible_chat_lines = chat_inner.height.max(1) as usize;
@@ -282,7 +288,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
     }
 
     f.render_widget(
-        Block::default().style(Style::default().bg(Color::Indexed(234))),
+        Block::default().style(Style::default().bg(Color::DarkGray).fg(Color::White)),
         chat_rect,
     );
     let chat_title = if app.chat_state == ChatState::Open {
@@ -290,12 +296,17 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
     } else {
         " AI> "
     };
+    let chat_borders = if app.chat_state == ChatState::Open {
+        Borders::ALL
+    } else {
+        Borders::LEFT | Borders::TOP | Borders::BOTTOM
+    };
     f.render_widget(
         Block::default()
-            .borders(Borders::ALL)
+            .borders(chat_borders)
             .title(chat_title)
             .border_style(Style::default().fg(Color::Indexed(242)))
-            .style(Style::default().bg(Color::Indexed(234)).fg(Color::White)),
+            .style(Style::default().bg(Color::DarkGray).fg(Color::White)),
         chat_rect,
     );
 
@@ -306,7 +317,7 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
         height: chat_inner.height,
     };
     let chat_paragraph = Paragraph::new(visible)
-        .style(Style::default().bg(Color::Indexed(234)).fg(Color::White))
+        .style(Style::default().bg(Color::DarkGray).fg(Color::White))
         .wrap(Wrap { trim: false });
     f.render_widget(chat_paragraph, chat_text_area);
 
@@ -334,11 +345,12 @@ fn sidebar_chat_width(total_width: u16) -> u16 {
     preferred.clamp(30, total_width.saturating_sub(1).max(1))
 }
 
-fn chat_inner_area(chat_rect: Rect) -> Rect {
+fn chat_inner_area(chat_rect: Rect, has_right_border: bool) -> Rect {
+    let border_width = if has_right_border { 2 } else { 1 };
     Rect {
         x: chat_rect.x.saturating_add(1),
         y: chat_rect.y.saturating_add(1),
-        width: chat_rect.width.saturating_sub(2),
+        width: chat_rect.width.saturating_sub(border_width),
         height: chat_rect.height.saturating_sub(2),
     }
 }
