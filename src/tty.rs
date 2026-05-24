@@ -461,10 +461,6 @@ mod windows_tty {
     use crate::future::Future;
     use crate::rt::executor::with_driver;
     use crate::rt::ready::consume_ready;
-    // Use the Overlapped type declared in the windows driver to avoid clashing
-    // extern declarations.
-    use crate::rt::windows::Overlapped;
-
     // ── Windows API ─────────────────────────────────────────────────────────
 
     #[link(name = "kernel32", kind = "raw-dylib")]
@@ -476,7 +472,7 @@ mod windows_tty {
             buffer: *mut u8,
             number_of_bytes_to_read: u32,
             number_of_bytes_read: *mut u32,
-            overlapped: *mut Overlapped,
+            overlapped: *mut core::ffi::c_void,
         ) -> i32;
         fn WriteFile(
             file: usize,
