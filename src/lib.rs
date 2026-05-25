@@ -134,6 +134,8 @@ pub mod prelude {
     /// Rust edition-independent prelude v1.
     #[allow(unused_imports)]
     pub mod v1 {
+        pub use core::prelude::v1::*;
+
         // alloc types that are normally injected by the std prelude
         pub use alloc::borrow::ToOwned;
         pub use alloc::boxed::Box;

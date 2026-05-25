@@ -104,6 +104,12 @@ fn main() {
     let config_toml = format!(
         r#"[build]
 target = "{}"
+rustflags = [
+    # 1. Maps any ambient 'extern crate std;' lookups directly to your custom library
+    "--extern", "std=../target/debug/librusticated.rlib",
+    # 2. Instructs the compiler to enforce standard prelude lookup rules
+    "-Z", "prelude"
+]
 
 [unstable]
 build-std = ["core", "alloc", "compiler_builtins"]
@@ -112,6 +118,11 @@ json-target-spec = true
 
 [dependencies]
 std = {{ path = "../../../", package = "rusticated" }}
+core = {{ path = "../../../" }}
+alloc = {{ path = "../../../" }}
+compiler_builtins = {{ version = "0.1.106", features = ["mem"] }}
+
+
 "#,
         json_path.display()
     )
