@@ -1,3 +1,7 @@
+#![no_std]
+
+use std::prelude::rust_2024::*;
+
 use wasmtime::{Config, Engine, Linker, Module, Store};
 mod env_impl;
 mod handles;

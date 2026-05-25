@@ -588,50 +588,6 @@ impl File {
     }
 }
 
-impl io::Write for File {
-    fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-        #[cfg(unix)]
-        {
-            unsafe extern "C" {
-                fn write(fd: i32, buf: *const u8, count: usize) -> isize;
-            }
-            let res = unsafe { write(self.handle as i32, _buf.as_ptr(), _buf.len()) };
-            if res < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(res as usize)
-        }
-        #[cfg(not(unix))]
-        {
-            Err(io::Error::other("sync write not implemented"))
-        }
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl io::Read for File {
-    fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-        #[cfg(unix)]
-        {
-            unsafe extern "C" {
-                fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
-            }
-            let res = unsafe { read(self.handle as i32, _buf.as_mut_ptr(), _buf.len()) };
-            if res < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(res as usize)
-        }
-        #[cfg(not(unix))]
-        {
-            Err(io::Error::other("sync read not implemented"))
-        }
-    }
-}
-
 impl AsyncRead for File {
     async fn read(&mut self, buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
         #[cfg(target_family = "wasm")]
@@ -690,264 +646,6 @@ impl AsyncWrite for File {
 }
 
 // --- Global Fns ---
-
-#[cfg(windows)]
-fn path_stat_win(path: &str, _follow_symlinks: bool) -> io::Result<Metadata> {
-    // GetFileAttributesExW follows symlinks by default.
-    let mut wchars: alloc::vec::Vec<u16> = path.encode_utf16().collect();
-    wchars.push(0);
-
-    #[repr(C)]
-    #[allow(non_snake_case)]
-    struct WIN32_FILE_ATTRIBUTE_DATA {
-        dwFileAttributes: u32,
-        ftCreationTimeLow: u32,
-        ftCreationTimeHigh: u32,
-        ftLastAccessTimeLow: u32,
-        ftLastAccessTimeHigh: u32,
-        ftLastWriteTimeLow: u32,
-        ftLastWriteTimeHigh: u32,
-        nFileSizeHigh: u32,
-        nFileSizeLow: u32,
-    }
-
-    #[link(name = "kernel32", kind = "raw-dylib")]
-    unsafe extern "system" {
-        fn GetFileAttributesExW(
-            lpFileName: *const u16,
-            fInfoLevelId: u32,
-            lpFileInformation: *mut core::ffi::c_void,
-        ) -> i32;
-    }
-
-    let mut info = WIN32_FILE_ATTRIBUTE_DATA {
-        dwFileAttributes: 0,
-        ftCreationTimeLow: 0,
-        ftCreationTimeHigh: 0,
-        ftLastAccessTimeLow: 0,
-        ftLastAccessTimeHigh: 0,
-        ftLastWriteTimeLow: 0,
-        ftLastWriteTimeHigh: 0,
-        nFileSizeHigh: 0,
-        nFileSizeLow: 0,
-    };
-
-    let res = unsafe {
-        GetFileAttributesExW(
-            wchars.as_ptr(),
-            0, // GetFileExInfoStandard
-            &mut info as *mut _ as *mut core::ffi::c_void,
-        )
-    };
-
-    if res == 0 {
-        return Err(io::Error::last_os_error());
-    }
-
-    let to_unix_ns = |low: u32, high: u32| -> u64 {
-        let filetime = ((high as u64) << 32) | (low as u64);
-        // FILETIME is 100-nanosecond intervals since Jan 1, 1601
-        // Jan 1, 1970 is 116444736000000000 intervals after Jan 1, 1601
-        if filetime > 116444736000000000 {
-            (filetime - 116444736000000000) * 100
-        } else {
-            0
-        }
-    };
-
-    Ok(Metadata {
-        size: ((info.nFileSizeHigh as u64) << 32) | (info.nFileSizeLow as u64),
-        mode: info.dwFileAttributes,
-        modified_time_ns: to_unix_ns(info.ftLastWriteTimeLow, info.ftLastWriteTimeHigh),
-        accessed_time_ns: to_unix_ns(info.ftLastAccessTimeLow, info.ftLastAccessTimeHigh),
-        created_time_ns: to_unix_ns(info.ftCreationTimeLow, info.ftCreationTimeHigh),
-        nlink: 1,
-        uid: 0,
-        gid: 0,
-        inode: 0,
-    })
-}
-
-#[cfg(all(not(target_family = "wasm"), not(windows)))]
-fn path_stat_unix(path: &str, follow_symlinks: bool) -> io::Result<Metadata> {
-    #[repr(C)]
-    struct LinuxStat {
-        st_dev: u64,
-        st_ino: u64,
-        st_mode: u32,
-        st_nlink: u32,
-        st_uid: u32,
-        st_gid: u32,
-        st_rdev: u64,
-        _pad1: u64,
-        st_size: i64,
-        st_blksize: i32,
-        _pad2: i32,
-        st_blocks: i64,
-        st_atime: i64,
-        st_atime_nsec: i64,
-        st_mtime: i64,
-        st_mtime_nsec: i64,
-        st_ctime: i64,
-        st_ctime_nsec: i64,
-        _unused: [i32; 2],
-    }
-    unsafe extern "C" {
-        fn stat(pathname: *const u8, statbuf: *mut LinuxStat) -> i32;
-        fn lstat(pathname: *const u8, statbuf: *mut LinuxStat) -> i32;
-    }
-    let mut path_bytes = alloc::vec::Vec::from(path.as_bytes());
-    path_bytes.push(0);
-    let mut st = core::mem::MaybeUninit::<LinuxStat>::uninit();
-    let ret = if follow_symlinks {
-        unsafe { stat(path_bytes.as_ptr(), st.as_mut_ptr()) }
-    } else {
-        unsafe { lstat(path_bytes.as_ptr(), st.as_mut_ptr()) }
-    };
-    if ret < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let st = unsafe { st.assume_init() };
-    let to_ns = |secs: i64, nsec: i64| -> u64 {
-        if secs < 0 {
-            0
-        } else {
-            secs as u64 * 1_000_000_000 + nsec as u64
-        }
-    };
-    Ok(Metadata {
-        size: st.st_size as u64,
-        mode: st.st_mode,
-        modified_time_ns: to_ns(st.st_mtime, st.st_mtime_nsec),
-        accessed_time_ns: to_ns(st.st_atime, st.st_atime_nsec),
-        created_time_ns: to_ns(st.st_ctime, st.st_ctime_nsec),
-        nlink: st.st_nlink as u64,
-        uid: st.st_uid,
-        gid: st.st_gid,
-        inode: st.st_ino,
-    })
-}
-
-#[cfg(not(target_family = "wasm"))]
-pub fn metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
-    #[cfg(windows)]
-    {
-        path_stat_win(path.as_ref(), true)
-    }
-    #[cfg(not(windows))]
-    {
-        path_stat_unix(path.as_ref(), true)
-    }
-}
-
-#[cfg(target_family = "wasm")]
-pub async fn metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
-    let path_bytes = path.as_ref().as_bytes().to_vec();
-    let (err, handle, _, _) =
-        crate::rt::wasm::OverlappedBufferFuture::new(path_bytes, |ov, ptr, len| {
-            unsafe { crate::abi::imports::path_stat(ov, ptr, len) };
-        })
-        .await;
-    if err != 0 {
-        return Err(io::Error::from_raw_os_error(err as i32));
-    }
-    Ok(Metadata { handle })
-}
-
-#[cfg(not(target_family = "wasm"))]
-pub fn symlink_metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
-    #[cfg(windows)]
-    {
-        path_stat_win(path.as_ref(), false)
-    }
-    #[cfg(all(not(target_family = "wasm"), not(windows)))]
-    {
-        path_stat_unix(path.as_ref(), false)
-    }
-}
-
-pub async fn canonicalize<P: AsRef<str>>(path: P) -> io::Result<crate::path::PathBuf> {
-    #[cfg(target_family = "wasm")]
-    {
-        Ok(crate::path::PathBuf::from(path.as_ref()))
-    }
-    #[cfg(windows)]
-    {
-        let path = crate::string::String::from(path.as_ref());
-        crate::rt::blocking::BlockingOpFuture::new(move || {
-            let mut wchars: alloc::vec::Vec<u16> = path.encode_utf16().collect();
-            wchars.push(0);
-
-            #[link(name = "kernel32", kind = "raw-dylib")]
-            unsafe extern "system" {
-                fn GetFullPathNameW(
-                    lpFileName: *const u16,
-                    nBufferLength: u32,
-                    lpBuffer: *mut u16,
-                    lpFilePart: *mut *mut u16,
-                ) -> u32;
-            }
-
-            let mut out_buf = [0u16; 260];
-            let res = unsafe {
-                GetFullPathNameW(
-                    wchars.as_ptr(),
-                    260,
-                    out_buf.as_mut_ptr(),
-                    core::ptr::null_mut(),
-                )
-            };
-            if res == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            if res > 260 {
-                let mut v = alloc::vec![0u16; res as usize];
-                let res2 = unsafe {
-                    GetFullPathNameW(wchars.as_ptr(), res, v.as_mut_ptr(), core::ptr::null_mut())
-                };
-                if res2 == 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(crate::path::PathBuf::from(
-                    alloc::string::String::from_utf16_lossy(&v[..res2 as usize]),
-                ))
-            } else {
-                Ok(crate::path::PathBuf::from(
-                    alloc::string::String::from_utf16_lossy(&out_buf[..res as usize]),
-                ))
-            }
-        })
-        .await
-    }
-    #[cfg(all(not(target_family = "wasm"), not(windows)))]
-    {
-        let path = crate::string::String::from(path.as_ref());
-        crate::rt::blocking::BlockingOpFuture::new(move || {
-            let mut path_bytes = alloc::vec::Vec::from(path.as_bytes());
-            path_bytes.push(0);
-
-            unsafe extern "C" {
-                fn realpath(path: *const u8, resolved: *mut u8) -> *mut u8;
-                fn free(ptr: *mut u8);
-            }
-
-            let res = unsafe { realpath(path_bytes.as_ptr(), core::ptr::null_mut()) };
-            if res.is_null() {
-                return Err(io::Error::last_os_error());
-            }
-
-            let mut len = 0;
-            while unsafe { *res.add(len) } != 0 {
-                len += 1;
-            }
-            let s = unsafe { core::slice::from_raw_parts(res, len) };
-            let s = alloc::string::String::from_utf8_lossy(s).into_owned();
-            unsafe { free(res) };
-            Ok(crate::path::PathBuf::from(s))
-        })
-        .await
-    }
-}
 
 pub async fn read_dir<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
     #[cfg(target_family = "wasm")]
@@ -1179,6 +877,297 @@ pub async fn read_dir<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
         .await
     }
 }
+
+pub async fn metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
+    #[cfg(target_family = "wasm")]
+    {
+        let path_bytes = path.as_ref().as_bytes().to_vec();
+        let (err, handle, _, _) = crate::rt::wasm::OverlappedBufferFuture::new(path_bytes, |ov, ptr, len| {
+            unsafe { crate::abi::imports::path_stat(ov, ptr, len) };
+        })
+        .await;
+
+        if err != 0 {
+            return Err(io::Error::from_raw_os_error(err as i32));
+        }
+
+        Ok(Metadata { handle })
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let path = crate::string::String::from(path.as_ref());
+        crate::rt::blocking::BlockingOpFuture::new(move || {
+            #[cfg(unix)]
+            {
+                let mut path_bytes = alloc::vec::Vec::from(path.as_bytes());
+                path_bytes.push(0);
+
+                unsafe extern "C" {
+                    fn stat(pathname: *const u8, buf: *mut libc::stat) -> i32;
+                }
+
+                let mut meta = core::mem::MaybeUninit::<libc::stat>::uninit();
+                let result = unsafe { stat(path_bytes.as_ptr(), meta.as_mut_ptr()) };
+                if result != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let meta = unsafe { meta.assume_init() };
+
+                return Ok(Metadata {
+                    size: meta.st_size as u64,
+                    mode: meta.st_mode as u32,
+                    modified_time_ns: 0,
+                    accessed_time_ns: 0,
+                    created_time_ns: 0,
+                    nlink: meta.st_nlink as u64,
+                    uid: meta.st_uid,
+                    gid: meta.st_gid,
+                    inode: meta.st_ino as u64,
+                });
+            }
+
+            #[cfg(windows)]
+            {
+                #[repr(C)]
+                struct FILETIME {
+                    low: u32,
+                    high: u32,
+                }
+
+                #[repr(C)]
+                #[allow(non_snake_case)]
+                struct BY_HANDLE_FILE_INFORMATION {
+                    dwFileAttributes: u32,
+                    ftCreationTime: FILETIME,
+                    ftLastAccessTime: FILETIME,
+                    ftLastWriteTime: FILETIME,
+                    dwVolumeSerialNumber: u32,
+                    nFileSizeHigh: u32,
+                    nFileSizeLow: u32,
+                    nNumberOfLinks: u32,
+                    nFileIndexHigh: u32,
+                    nFileIndexLow: u32,
+                }
+
+                #[link(name = "kernel32", kind = "raw-dylib")]
+                unsafe extern "system" {
+                    fn CreateFileW(
+                        lpFileName: *const u16,
+                        dwDesiredAccess: u32,
+                        dwShareMode: u32,
+                        lpSecurityAttributes: *mut core::ffi::c_void,
+                        dwCreationDisposition: u32,
+                        dwFlagsAndAttributes: u32,
+                        hTemplateFile: *mut core::ffi::c_void,
+                    ) -> usize;
+                    fn GetFileInformationByHandle(
+                        hFile: usize,
+                        lpFileInformation: *mut BY_HANDLE_FILE_INFORMATION,
+                    ) -> i32;
+                    fn CloseHandle(hObject: usize) -> i32;
+                }
+
+                let mut wchars: alloc::vec::Vec<u16> = path.encode_utf16().collect();
+                wchars.push(0);
+                let handle = unsafe {
+                    CreateFileW(
+                        wchars.as_ptr(),
+                        0x8000_0000,
+                        0x0000_0001 | 0x0000_0002 | 0x0000_0004,
+                        core::ptr::null_mut(),
+                        3,
+                        0x0200_0000,
+                        core::ptr::null_mut(),
+                    )
+                };
+                if handle == !0usize {
+                    return Err(io::Error::last_os_error());
+                }
+
+                let mut info = core::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+                let ok = unsafe { GetFileInformationByHandle(handle, info.as_mut_ptr()) };
+                let _ = unsafe { CloseHandle(handle) };
+                if ok == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let info = unsafe { info.assume_init() };
+
+                let to_ns = |ft: FILETIME| -> u64 {
+                    let filetime = ((ft.high as u64) << 32) | ft.low as u64;
+                    if filetime > 116444736000000000 {
+                        (filetime - 116444736000000000) * 100
+                    } else {
+                        0
+                    }
+                };
+
+                return Ok(Metadata {
+                    size: ((info.nFileSizeHigh as u64) << 32) | info.nFileSizeLow as u64,
+                    mode: info.dwFileAttributes,
+                    modified_time_ns: to_ns(info.ftLastWriteTime),
+                    accessed_time_ns: to_ns(info.ftLastAccessTime),
+                    created_time_ns: to_ns(info.ftCreationTime),
+                    nlink: info.nNumberOfLinks as u64,
+                    uid: 0,
+                    gid: 0,
+                    inode: ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
+                });
+            }
+
+            #[cfg(not(any(unix, windows)))]
+            {
+                Err(io::Error::other("metadata not implemented on this host"))
+            }
+        })
+        .await
+    }
+}
+
+pub async fn symlink_metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
+    #[cfg(target_family = "wasm")]
+    {
+        let path_bytes = path.as_ref().as_bytes().to_vec();
+        let (err, handle, _, _) = crate::rt::wasm::OverlappedBufferFuture::new(path_bytes, |ov, ptr, len| {
+            unsafe { crate::abi::imports::path_lstat(ov, ptr, len) };
+        })
+        .await;
+
+        if err != 0 {
+            return Err(io::Error::from_raw_os_error(err as i32));
+        }
+
+        Ok(Metadata { handle })
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let path = crate::string::String::from(path.as_ref());
+        crate::rt::blocking::BlockingOpFuture::new(move || {
+            #[cfg(unix)]
+            {
+                let mut path_bytes = alloc::vec::Vec::from(path.as_bytes());
+                path_bytes.push(0);
+
+                unsafe extern "C" {
+                    fn lstat(pathname: *const u8, buf: *mut libc::stat) -> i32;
+                }
+
+                let mut meta = core::mem::MaybeUninit::<libc::stat>::uninit();
+                let result = unsafe { lstat(path_bytes.as_ptr(), meta.as_mut_ptr()) };
+                if result != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let meta = unsafe { meta.assume_init() };
+
+                return Ok(Metadata {
+                    size: meta.st_size as u64,
+                    mode: meta.st_mode as u32,
+                    modified_time_ns: 0,
+                    accessed_time_ns: 0,
+                    created_time_ns: 0,
+                    nlink: meta.st_nlink as u64,
+                    uid: meta.st_uid,
+                    gid: meta.st_gid,
+                    inode: meta.st_ino as u64,
+                });
+            }
+
+            #[cfg(windows)]
+            {
+                #[repr(C)]
+                struct FILETIME {
+                    low: u32,
+                    high: u32,
+                }
+
+                #[repr(C)]
+                #[allow(non_snake_case)]
+                struct BY_HANDLE_FILE_INFORMATION {
+                    dwFileAttributes: u32,
+                    ftCreationTime: FILETIME,
+                    ftLastAccessTime: FILETIME,
+                    ftLastWriteTime: FILETIME,
+                    dwVolumeSerialNumber: u32,
+                    nFileSizeHigh: u32,
+                    nFileSizeLow: u32,
+                    nNumberOfLinks: u32,
+                    nFileIndexHigh: u32,
+                    nFileIndexLow: u32,
+                }
+
+                #[link(name = "kernel32", kind = "raw-dylib")]
+                unsafe extern "system" {
+                    fn CreateFileW(
+                        lpFileName: *const u16,
+                        dwDesiredAccess: u32,
+                        dwShareMode: u32,
+                        lpSecurityAttributes: *mut core::ffi::c_void,
+                        dwCreationDisposition: u32,
+                        dwFlagsAndAttributes: u32,
+                        hTemplateFile: *mut core::ffi::c_void,
+                    ) -> usize;
+                    fn GetFileInformationByHandle(
+                        hFile: usize,
+                        lpFileInformation: *mut BY_HANDLE_FILE_INFORMATION,
+                    ) -> i32;
+                    fn CloseHandle(hObject: usize) -> i32;
+                }
+
+                let mut wchars: alloc::vec::Vec<u16> = path.encode_utf16().collect();
+                wchars.push(0);
+                let handle = unsafe {
+                    CreateFileW(
+                        wchars.as_ptr(),
+                        0x8000_0000,
+                        0x0000_0001 | 0x0000_0002 | 0x0000_0004,
+                        core::ptr::null_mut(),
+                        3,
+                        0x0200_0000 | 0x0020_0000,
+                        core::ptr::null_mut(),
+                    )
+                };
+                if handle == !0usize {
+                    return Err(io::Error::last_os_error());
+                }
+
+                let mut info = core::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+                let ok = unsafe { GetFileInformationByHandle(handle, info.as_mut_ptr()) };
+                let _ = unsafe { CloseHandle(handle) };
+                if ok == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let info = unsafe { info.assume_init() };
+
+                let to_ns = |ft: FILETIME| -> u64 {
+                    let filetime = ((ft.high as u64) << 32) | ft.low as u64;
+                    if filetime > 116444736000000000 {
+                        (filetime - 116444736000000000) * 100
+                    } else {
+                        0
+                    }
+                };
+
+                return Ok(Metadata {
+                    size: ((info.nFileSizeHigh as u64) << 32) | info.nFileSizeLow as u64,
+                    mode: info.dwFileAttributes,
+                    modified_time_ns: to_ns(info.ftLastWriteTime),
+                    accessed_time_ns: to_ns(info.ftLastAccessTime),
+                    created_time_ns: to_ns(info.ftCreationTime),
+                    nlink: info.nNumberOfLinks as u64,
+                    uid: 0,
+                    gid: 0,
+                    inode: ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
+                });
+            }
+
+            #[cfg(not(any(unix, windows)))]
+            {
+                Err(io::Error::other("symlink metadata not implemented on this host"))
+            }
+        })
+        .await
+    }
+}
+
 pub fn open_null_file() -> io::Result<File> {
     Err(io::Error::other("not implemented"))
 }

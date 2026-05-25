@@ -75,8 +75,6 @@ mod native_process {
     use crate::path::{Path, PathBuf};
     use crate::string::String;
     use crate::vec::Vec;
-    use alloc::boxed::Box;
-
     // ── Linux pidfd async wait ────────────────────────────────────────────────
 
     #[cfg(all(
@@ -244,9 +242,9 @@ mod native_process {
         handle: usize,
 
         /// Async reader for stdout if piped.
-        pub stdout: Option<Box<dyn crate::io::Read + Unpin + Send + Sync>>,
+        pub stdout: Option<crate::fs::FileNative>,
         /// Async reader for stderr if piped.
-        pub stderr: Option<Box<dyn crate::io::Read + Unpin + Send + Sync>>,
+        pub stderr: Option<crate::fs::FileNative>,
 
         #[cfg(not(any(unix, windows)))]
         _opaque: (),
@@ -336,23 +334,45 @@ mod native_process {
             let mut stderr_data = Vec::new();
 
             if let Some(mut r) = self.stdout.take() {
-                let mut temp = [0u8; 8192];
+                use crate::io::AsyncRead;
+                let mut temp = alloc::vec![0u8; 8192];
                 loop {
-                    match r.read(&mut temp) {
+                    let (res, mut out) = r.read(temp).await;
+                    match res {
                         Ok(0) => break,
-                        Ok(n) => stdout_data.extend_from_slice(&temp[..n]),
-                        Err(e) if e.kind() == crate::io::ErrorKind::Interrupted => {}
+                        Ok(n) => {
+                            stdout_data.extend_from_slice(&out[..n]);
+                            out.clear();
+                            out.resize(8192, 0);
+                            temp = out;
+                        }
+                        Err(e) if e.kind() == crate::io::ErrorKind::Interrupted => {
+                            out.clear();
+                            out.resize(8192, 0);
+                            temp = out;
+                        }
                         Err(e) => return Err(e),
                     }
                 }
             }
             if let Some(mut r) = self.stderr.take() {
-                let mut temp = [0u8; 8192];
+                use crate::io::AsyncRead;
+                let mut temp = alloc::vec![0u8; 8192];
                 loop {
-                    match r.read(&mut temp) {
+                    let (res, mut out) = r.read(temp).await;
+                    match res {
                         Ok(0) => break,
-                        Ok(n) => stderr_data.extend_from_slice(&temp[..n]),
-                        Err(e) if e.kind() == crate::io::ErrorKind::Interrupted => {}
+                        Ok(n) => {
+                            stderr_data.extend_from_slice(&out[..n]);
+                            out.clear();
+                            out.resize(8192, 0);
+                            temp = out;
+                        }
+                        Err(e) if e.kind() == crate::io::ErrorKind::Interrupted => {
+                            out.clear();
+                            out.resize(8192, 0);
+                            temp = out;
+                        }
                         Err(e) => return Err(e),
                     }
                 }

@@ -398,17 +398,6 @@ mod unix_tty {
         }
     }
 
-    impl crate::io::Read for Tty {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            let n = unsafe { read(self.fd, buf.as_mut_ptr(), buf.len()) };
-            if n < 0 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(n as usize)
-            }
-        }
-    }
-
     impl crate::io::AsyncWrite for Tty {
         async fn write(&mut self, buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
             // SAFETY: `buf.as_ptr()` is valid for `buf.len()` bytes.
@@ -424,19 +413,6 @@ mod unix_tty {
         }
     }
 
-    impl crate::io::Write for Tty {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            let n = unsafe { write(self.fd, buf.as_ptr(), buf.len()) };
-            if n < 0 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(n as usize)
-            }
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
 }
 
 // ─── Windows ──────────────────────────────────────────────────────────────────
@@ -912,14 +888,6 @@ mod windows_tty {
         }
     }
 
-    impl crate::io::Read for Tty {
-        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-            Err(io::Error::other(
-                "sync read not implemented for Windows Tty",
-            ))
-        }
-    }
-
     impl crate::io::AsyncWrite for Tty {
         async fn write(&mut self, buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
             let mut n: u32 = 0;
@@ -945,28 +913,6 @@ mod windows_tty {
         }
     }
 
-    impl crate::io::Write for Tty {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            let mut n: u32 = 0;
-            let ret = unsafe {
-                WriteFile(
-                    self.handle,
-                    buf.as_ptr(),
-                    buf.len() as u32,
-                    &mut n,
-                    ptr::null_mut(),
-                )
-            };
-            if ret == 0 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(n as usize)
-            }
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
 
     // ─── Tests ───────────────────────────────────────────────────────────────
 
@@ -1274,12 +1220,6 @@ mod wasm_tty {
         }
     }
 
-    impl crate::io::Read for Tty {
-        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-            Err(io::Error::other("sync read not implemented for WASM Tty"))
-        }
-    }
-
     impl crate::io::AsyncWrite for Tty {
         async fn write(&mut self, buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
             let handle = self.handle;
@@ -1301,14 +1241,6 @@ mod wasm_tty {
         }
     }
 
-    impl crate::io::Write for Tty {
-        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-            Err(io::Error::other("sync write not implemented for WASM Tty"))
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
 }
 
 // ─── Shared tests ─────────────────────────────────────────────────────────────

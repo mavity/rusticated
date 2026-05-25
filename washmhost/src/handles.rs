@@ -1,3 +1,5 @@
+use std::prelude::rust_2024::*;
+
 use std::collections::HashMap;
 use std::fs::File;
 use std::sync::mpsc;
@@ -14,6 +16,26 @@ pub enum FileOpResult {
     PathOpen {
         ov_ptr: u32,
         result: Result<HandleKind, u32>,
+    },
+    PathStat {
+        ov_ptr: u32,
+        result: Result<StatInfo, u32>,
+    },
+    Read {
+        ov_ptr: u32,
+        handle: u64,
+        guest_ptr: u32,
+        guest_len: u32,
+        data: Vec<u8>,
+        error: u32,
+        file: File,
+    },
+    Write {
+        ov_ptr: u32,
+        handle: u64,
+        written: u64,
+        error: u32,
+        file: File,
     },
 }
 
@@ -111,21 +133,7 @@ impl HostState {
 
         let (stdin_tx, stdin_rx) = mpsc::channel();
         let (file_op_tx, file_op_rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            use std::io::Read;
-            let mut buf = [0u8; 256];
-            loop {
-                match std::io::stdin().read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if stdin_tx.send(buf[..n].to_vec()).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
+        let _ = stdin_tx;
 
         Ok(Self {
             handles,
