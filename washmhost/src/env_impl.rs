@@ -1,3 +1,5 @@
+use std::prelude::rust_2024::*;
+
 use anyhow::Context as _;
 use wasmtime::{Caller, Linker, Memory, Store};
 
@@ -53,7 +55,6 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         "host_panic",
         |_: Caller<'_, HostState>| -> anyhow::Result<()> {
             println!("*** WASM INVOKED HOST PANIC ***");
-            let _ = std::io::Write::flush(&mut std::io::stdout());
             Err(anyhow::anyhow!("WASM Panicked!"))
         },
     )?;
@@ -216,7 +217,7 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     )?;
 
     // read(ov, handle, ptr, len)
-    // Regular files: synchronous read inside the import.
+    // Regular files: queued async read; completed in poll_completions.
     // Streams (stdin, pipes, sockets): register with epoll; complete later.
     linker.func_wrap(
         "env",
@@ -233,39 +234,42 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let is_file = host.is_regular_file(handle);
 
             if is_file {
-                // Files are always ready — read synchronously.
-                let buf = guest_slice(data, guest_ptr, guest_len)?;
+                let mut file = match host.handles.remove(&handle) {
+                    Some(HandleKind::File(file)) => file,
+                    _ => anyhow::bail!("read: invalid handle {}", handle),
+                };
+                let tx = host.file_op_tx.clone();
 
-                let mut error = 0;
-                let mut read = 0;
+                std::rt::executor::spawn(async move {
+                    use std::traits::AsyncRead;
 
-                if let Some(HandleKind::File(f)) = host.handles.get_mut(&handle) {
-                    use std::io::Read;
-                    match f.read(buf) {
-                        Ok(n) => {
-                            read = n;
-                        }
-                        Err(e) => {
-                            error = e.raw_os_error().unwrap_or(5) as u32;
-                        }
+                    let (result, mut buf) = file.read(vec![0u8; guest_len as usize]).await;
+                    let (error, read_len) = match result {
+                        Ok(n) => (0, n),
+                        Err(e) => (e.raw_os_error().unwrap_or(libc::EIO as i32) as u32, 0),
+                    };
+                    if buf.len() > read_len {
+                        buf.truncate(read_len);
                     }
-                } else {
-                    anyhow::bail!("read: invalid handle {}", handle);
-                }
+                    let _ = tx.send(FileOpResult::Read {
+                        ov_ptr,
+                        handle,
+                        guest_ptr,
+                        guest_len,
+                        data: buf,
+                        error,
+                        file,
+                    });
+                });
 
-                write_overlapped(data, ov_ptr, error, 0, read as u64)?;
+                return Ok(());
             } else {
                 let fd = host
                     .fd_for(handle)
                     .with_context(|| format!("read: invalid handle {}", handle))?;
                 if fd == 0 {
-                    // stdin: fulfilled by the reader thread in poll_completions.
-                    host.stdin_pending = Some(PendingOp {
-                        ov_ptr,
-                        guest_ptr,
-                        guest_len,
-                        _fd: fd,
-                    });
+                    // Blocking stdin reads are forbidden in strict async mode.
+                    write_overlapped(data, ov_ptr, libc::EWOULDBLOCK as u32, 0, 0)?;
                 } else {
                     // Other stream fds: register with epoll; completion happens in poll_completions().
                     let token = host.epoll.register_read(fd)?;
@@ -297,7 +301,33 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let mem = get_memory(&mut caller)?;
             let (data, host) = mem.data_and_store_mut(&mut caller);
             let src = guest_slice(data, buf_ptr, buf_len)?.to_vec();
-            use std::io::Write;
+
+            if host.is_regular_file(handle) {
+                let mut file = match host.handles.remove(&handle) {
+                    Some(HandleKind::File(file)) => file,
+                    _ => anyhow::bail!("write: invalid handle {}", handle),
+                };
+                let tx = host.file_op_tx.clone();
+
+                std::rt::executor::spawn(async move {
+                    use std::traits::AsyncWrite;
+
+                    let (result, _buf) = file.write(src).await;
+                    let (error, written) = match result {
+                        Ok(n) => (0, n as u64),
+                        Err(e) => (e.raw_os_error().unwrap_or(libc::EIO as i32) as u32, 0),
+                    };
+                    let _ = tx.send(FileOpResult::Write {
+                        ov_ptr,
+                        handle,
+                        written,
+                        error,
+                        file,
+                    });
+                });
+
+                return Ok(());
+            }
 
             let mut error = 0;
             let mut written = 0;
@@ -307,22 +337,17 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                     HandleKind::Fd(fd) => {
                         let fd = *fd;
                         if fd == 1 {
-                            let _ = std::io::stdout().write_all(&src);
-                            let _ = std::io::stdout().flush();
-                            written = src.len();
+                            let _ = src;
+                            error = libc::EWOULDBLOCK as u32;
                         } else if fd == 2 {
-                            let _ = std::io::stderr().write_all(&src);
-                            let _ = std::io::stderr().flush();
-                            written = src.len();
+                            let _ = src;
+                            error = libc::EWOULDBLOCK as u32;
                         } else {
                             error = 9; // EBADF
                         }
                     }
-                    HandleKind::File(f) => {
-                        match f.write(&src) {
-                            Ok(n) => written = n,
-                            Err(e) => error = e.raw_os_error().unwrap_or(5) as u32, // EIO
-                        }
+                    HandleKind::File(_) => {
+                        error = 9; // EBADF - async file path should have been taken above.
                     }
                     HandleKind::Process(_) | HandleKind::Dir(_, _) => {
                         error = 9; // EBADF — cannot write to a process handle
@@ -373,11 +398,13 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             // Default to read if neither read nor write is set.
             let do_read = read_flag || (!write_flag && !create);
             let do_write = write_flag || create;
-            println!("path_open: path={:?}, is_dir={}, do_read={}, do_write={}, flags={}", path, std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false), do_read, do_write, flags);
-            let is_dir = std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false);
             let tx = host.file_op_tx.clone();
 
             std::rt::executor::spawn(async move {
+                let is_dir = std::fs::metadata(&path_owned)
+                    .await
+                    .map(|m| m.is_dir())
+                    .unwrap_or(false);
                 let result = if is_dir {
                     match std::fs::read_dir(&path_owned).await {
                         Ok(rd) => Ok(HandleKind::Dir(rd, Vec::new())),
@@ -417,63 +444,72 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let (data, host) = mem.data_and_store_mut(&mut caller);
             let path_bytes = guest_slice(data, path_ptr, path_len)?.to_vec();
             let path = std::str::from_utf8(&path_bytes).context("path_stat: non-UTF-8 path")?;
-            // symlink_metadata (lstat semantics) so is_symlink is meaningful.
-            let meta =
-                std::fs::symlink_metadata(path).with_context(|| format!("path_stat: {path:?}"))?;
-            let to_ns = |t: std::io::Result<std::time::SystemTime>| {
-                t.ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_nanos() as u64)
-                    .unwrap_or(0)
-            };
-            let mtime_ns = to_ns(meta.modified());
-            let atime_ns = to_ns(meta.accessed());
-            let ctime_ns = to_ns(meta.created());
-            let readonly = meta.permissions().readonly();
-            let is_symlink = meta.is_symlink();
-            #[cfg(unix)]
-            let (mode, nlink, uid, gid, inode) = {
-                use std::os::unix::fs::MetadataExt;
-                (
-                    meta.mode(),
-                    meta.nlink(),
-                    meta.uid(),
-                    meta.gid(),
-                    meta.ino(),
-                )
-            };
-            #[cfg(windows)]
-            let (mode, nlink, uid, gid, inode) = {
-                use std::os::windows::fs::MetadataExt;
-                let attrs = meta.file_attributes();
-                // Synthesise mode from attributes: FILE_ATTRIBUTE_READONLY = 0x1
-                let ro = (attrs & 1) != 0;
-                let base: u32 = if meta.is_dir() { 0o040_000 } else { 0o100_000 };
-                let perms: u32 = if ro { 0o444 } else { 0o666 };
-                let idx = 0; // MOCK for Windows
-                (base | perms, 0u64, 0u32, 0u32, idx)
-            };
-            #[cfg(not(any(unix, windows)))]
-            let (mode, nlink, uid, gid, inode) = {
-                let perms: u32 = if readonly { 0o444 } else { 0o666 };
-                (perms, 0u64, 0u32, 0u32, 0u64)
-            };
-            let stat = StatInfo {
-                len: meta.len(),
-                is_dir: meta.is_dir(),
-                is_symlink,
-                readonly,
-                mode,
-                nlink,
-                uid,
-                gid,
-                inode,
-                mtime_ns,
-                atime_ns,
-                ctime_ns,
-            };
-            let stat_handle = host.alloc_stat(stat);
-            write_overlapped(data, ov_ptr, 0, 0, stat_handle)
+            let path_owned = path.to_owned();
+            let tx = host.file_op_tx.clone();
+
+            std::rt::executor::spawn(async move {
+                let result = match std::fs::symlink_metadata(&path_owned).await {
+                    Ok(meta) => {
+                        let to_ns = |t: std::io::Result<std::time::SystemTime>| {
+                            t.ok()
+                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                .map(|d| d.as_nanos() as u64)
+                                .unwrap_or(0)
+                        };
+                        let mtime_ns = to_ns(meta.modified());
+                        let atime_ns = to_ns(meta.accessed());
+                        let ctime_ns = to_ns(meta.created());
+                        let readonly = meta.permissions().readonly();
+                        let is_symlink = meta.is_symlink();
+                        #[cfg(unix)]
+                        let (mode, nlink, uid, gid, inode) = {
+                            use std::os::unix::fs::MetadataExt;
+                            (
+                                meta.mode(),
+                                meta.nlink(),
+                                meta.uid(),
+                                meta.gid(),
+                                meta.ino(),
+                            )
+                        };
+                        #[cfg(windows)]
+                        let (mode, nlink, uid, gid, inode) = {
+                            use std::os::windows::fs::MetadataExt;
+                            let attrs = meta.file_attributes();
+                            let ro = (attrs & 1) != 0;
+                            let base: u32 = if meta.is_dir() { 0o040_000 } else { 0o100_000 };
+                            let perms: u32 = if ro { 0o444 } else { 0o666 };
+                            let idx = 0;
+                            (base | perms, 0u64, 0u32, 0u32, idx)
+                        };
+                        #[cfg(not(any(unix, windows)))]
+                        let (mode, nlink, uid, gid, inode) = {
+                            let perms: u32 = if readonly { 0o444 } else { 0o666 };
+                            (perms, 0u64, 0u32, 0u32, 0u64)
+                        };
+
+                        Ok(StatInfo {
+                            len: meta.len(),
+                            is_dir: meta.is_dir(),
+                            is_symlink,
+                            readonly,
+                            mode,
+                            nlink,
+                            uid,
+                            gid,
+                            inode,
+                            mtime_ns,
+                            atime_ns,
+                            ctime_ns,
+                        })
+                    }
+                    Err(e) => Err(e.raw_os_error().unwrap_or(libc::EIO as i32) as u32),
+                };
+
+                let _ = tx.send(FileOpResult::PathStat { ov_ptr, result });
+            });
+
+            Ok(())
         },
     )?;
 
@@ -861,6 +897,53 @@ pub fn poll_completions(
                         write_overlapped(mem, ov_ptr, error, 0, 0)?;
                     }
                 }
+                progress = true;
+            }
+            FileOpResult::PathStat { ov_ptr, result } => {
+                match result {
+                    Ok(stat) => {
+                        let stat_handle = host.alloc_stat(stat);
+                        write_overlapped(mem, ov_ptr, 0, 0, stat_handle)?;
+                    }
+                    Err(error) => {
+                        write_overlapped(mem, ov_ptr, error, 0, 0)?;
+                    }
+                }
+                progress = true;
+            }
+            FileOpResult::Read {
+                ov_ptr,
+                handle,
+                guest_ptr,
+                guest_len,
+                data,
+                error,
+                file,
+            } => {
+                host.handles.insert(handle, HandleKind::File(file));
+
+                let mut read_len = 0usize;
+                if error == 0 {
+                    let to_copy = core::cmp::min(data.len(), guest_len as usize);
+                    if to_copy > 0 {
+                        let dest = guest_slice(mem, guest_ptr, guest_len)?;
+                        dest[..to_copy].copy_from_slice(&data[..to_copy]);
+                    }
+                    read_len = to_copy;
+                }
+
+                write_overlapped(mem, ov_ptr, error, 0, read_len as u64)?;
+                progress = true;
+            }
+            FileOpResult::Write {
+                ov_ptr,
+                handle,
+                written,
+                error,
+                file,
+            } => {
+                host.handles.insert(handle, HandleKind::File(file));
+                write_overlapped(mem, ov_ptr, error, 0, written)?;
                 progress = true;
             }
         }

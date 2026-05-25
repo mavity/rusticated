@@ -163,6 +163,35 @@ fn main() {
 }
 
 fn can_build_target(target: &str) -> bool {
+    // This slot model requires both `brot` and `washmhost` on the same target.
+    // `washmhost` is built as cdylib, and rustc currently rejects cdylib for
+    // x86_64-unknown-linux-musl in this pipeline.
+    // Therefore musl linux targets are not buildable here.
+    if target.contains("unknown-linux-musl") {
+        return false;
+    }
+
+    // On Windows host, Linux cross targets require an explicitly configured
+    // approved toolchain via environment variables. We do not auto-wire any
+    // in-repo wrappers/toolchains.
+    if env::var("HOST")
+        .map(|h| h.contains("windows"))
+        .unwrap_or(false)
+        && target.contains("unknown-linux-")
+    {
+        let target_env = target.to_uppercase().replace("-", "_");
+        let target_key = target.replace('-', "_");
+        let has_cc = env::var(format!("CC_{}", target_key)).is_ok();
+        let has_linker = env::var(format!("CARGO_TARGET_{}_LINKER", target_env)).is_ok();
+        if !(has_cc && has_linker) {
+            println!(
+                "cargo:warning=Skipping {}: missing approved Linux cross-toolchain env (CC_{} and CARGO_TARGET_{}_LINKER)",
+                target, target_key, target_env
+            );
+            return false;
+        }
+    }
+
     // Only use rustup-installed targets — no auto-installing.
     let installed = Command::new("rustup")
         .args(&["target", "list", "--installed"])
@@ -288,11 +317,10 @@ fn build_sysroot(workspace_dir: &Path, target: &str) -> bool {
 }
 
 fn build_component(workspace_dir: &Path, target_tree: &Path, package: &str, target: &str) -> bool {
-    // Cargo passes --extern std=librusticated.rlib automatically (because brot's
-    // Cargo.toml declares `std = { path = "../", package = "rusticated" }`), which
-    // overrides the sysroot's std on every target — same as the host build.
-    // No custom sysroot needed.
+    // Pure rusticated builds need the generated target/config path rather than
+    // relying on the ambient host sysroot.
     let needs_sysroot = false;
+    let rusticated_spec_dir = workspace_dir.join("target").join("rusticated-spec");
 
     let target_env = target.to_uppercase().replace("-", "_");
     let rustflags_env = format!("CARGO_TARGET_{}_RUSTFLAGS", target_env);
@@ -328,51 +356,35 @@ fn build_component(workspace_dir: &Path, target_tree: &Path, package: &str, targ
         rustflags.push_str(&format!(" --sysroot {}", sysroot_path.display()));
     }
 
-    // washmhost has a no_std bin target (main.rs) that fails to compile without
-    // the sysroot, but the cdylib lib target compiles fine against system std.
+    // washmhost's cdylib is the artifact embedded by mohabbat; keep the build
+    // scoped to the library target here.
     // Build only the lib to skip the failing bin.
     let lib_only = package == "washmhost";
 
     let mut cmd = Command::new("cargo");
-    if env::var("HOST")
-        .map(|h| h.contains("windows"))
-        .unwrap_or(false)
-        && target.contains("unknown-linux-")
-    {
-        let tools = workspace_dir.join("tools");
-        let cc = if target.starts_with("x86_64") {
-            if target.contains("musl") {
-                tools.join("zigcc-x86_64-unknown-linux-musl.cmd")
-            } else {
-                tools.join("zigcc-x86_64-unknown-linux-gnu.cmd")
-            }
-        } else if target.contains("musl") {
-            tools.join("zigcc-aarch64-unknown-linux-musl.cmd")
-        } else {
-            tools.join("zigcc-aarch64-unknown-linux-gnu.cmd")
-        };
-        let ar = tools.join("ar.cmd");
-        let cc_s = cc.display().to_string();
-        let ar_s = ar.display().to_string();
-        let linker = "rust-lld";
-
-        cmd.env("CC", &cc_s)
-            .env("CXX", &cc_s)
-            .env("AR", &ar_s)
-            .env("RANLIB", &ar_s)
-            .env(format!("CC_{}", target.replace('-', "_")), &cc_s)
-            .env(format!("CXX_{}", target.replace('-', "_")), &cc_s)
-            .env(format!("AR_{}", target.replace('-', "_")), &ar_s)
-            .env(format!("CARGO_TARGET_{}_LINKER", target_env), linker)
-            .env(format!("CARGO_TARGET_{}_AR", target_env), &ar_s);
-    }
 
     cmd.current_dir(workspace_dir)
         .env("CARGO_TARGET_DIR", target_tree)
         .env("RUSTFLAGS", &rustflags)
         .env(rustflags_env, rustflags)
         .env_remove("CARGO_MAKEFLAGS")
-        .args(&["build", "-p", package, "--release", "--target", target]);
+        .args(&["build", "-p", package, "--release"]);
+
+    if package == "washmhost" {
+        let config_path = rusticated_spec_dir.join("config.toml");
+        let custom_target = if target.starts_with("x86_64-") {
+            rusticated_spec_dir.join("x86_64-rusticated.json")
+        } else if target.starts_with("aarch64-") {
+            rusticated_spec_dir.join("aarch64-rusticated.json")
+        } else {
+            PathBuf::from(target)
+        };
+        cmd.arg("--config").arg(config_path);
+        cmd.arg("--target").arg(custom_target);
+    } else {
+        cmd.arg("--target").arg(target);
+    }
+
     if lib_only {
         cmd.arg("--lib");
     }

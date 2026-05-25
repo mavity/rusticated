@@ -80,9 +80,15 @@ macro_rules! println {
 macro_rules! print {
     ($($arg:tt)*) => {
         {
-            use $crate::io::Write;
-            let mut out = $crate::io::stdout();
-            let _ = out.write_all($crate::format!($($arg)*).as_bytes());
+            #[cfg(not(target_family = "wasm"))]
+            {
+                let msg = $crate::format!($($arg)*).into_bytes();
+                $crate::rt::executor::run(async move {
+                    use $crate::io::AsyncWrite;
+                    let mut out = $crate::io::stdout();
+                    let _ = out.write(msg).await;
+                });
+            }
         }
     };
 }
@@ -103,9 +109,15 @@ macro_rules! eprintln {
 macro_rules! eprint {
     ($($arg:tt)*) => {
         {
-            use $crate::io::Write;
-            let mut out = $crate::io::stderr();
-            let _ = out.write_all($crate::format!($($arg)*).as_bytes());
+            #[cfg(not(target_family = "wasm"))]
+            {
+                let msg = $crate::format!($($arg)*).into_bytes();
+                $crate::rt::executor::run(async move {
+                    use $crate::io::AsyncWrite;
+                    let mut out = $crate::io::stderr();
+                    let _ = out.write(msg).await;
+                });
+            }
         }
     };
 }

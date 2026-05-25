@@ -46,7 +46,7 @@ pub struct Error {
 /// `core::result::Result<T, crate::io::Error>`.
 pub type Result<T> = core::result::Result<T, Error>;
 
-pub use crate::traits::{AsyncRead, AsyncWrite, BufRead, Read, Seek, Write};
+pub use crate::traits::{AsyncRead, AsyncWrite};
 
 /// Enumeration of possible methods to seek within an I/O object.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -85,46 +85,6 @@ impl AsyncRead for Stdin {
     }
 }
 
-impl Read for Stdin {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        #[cfg(windows)]
-        {
-            #[allow(clashing_extern_declarations)]
-            use crate::rt::windows::Overlapped;
-            #[link(name = "kernel32", kind = "raw-dylib")]
-            unsafe extern "system" {
-                fn GetStdHandle(n_std_handle: u32) -> usize;
-                fn ReadFile(
-                    h_file: usize,
-                    lp_buffer: *mut u8,
-                    n_number_of_bytes_to_read: u32,
-                    lp_number_of_bytes_read: *mut u32,
-                    lp_overlapped: *mut Overlapped,
-                ) -> i32;
-            }
-            let handle = unsafe { GetStdHandle(0xFFFFFFF6u32) }; // STD_INPUT_HANDLE = -10
-            let mut n = 0u32;
-            let res = unsafe {
-                ReadFile(handle, buf.as_mut_ptr(), buf.len() as u32, &mut n, core::ptr::null_mut())
-            };
-            if res == 0 { Err(Error::last_os_error()) } else { Ok(n as usize) }
-        }
-        #[cfg(all(not(windows), not(target_family = "wasm")))]
-        {
-            unsafe extern "C" {
-                fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
-            }
-            let n = unsafe { read(0, buf.as_mut_ptr(), buf.len()) };
-            if n < 0 { Err(Error::last_os_error()) } else { Ok(n as usize) }
-        }
-        #[cfg(target_family = "wasm")]
-        {
-            let _ = buf;
-            Ok(0)
-        }
-    }
-}
-
 impl AsyncWrite for Stdout {
     async fn write(&mut self, _buf: Vec<u8>) -> (Result<usize>, Vec<u8>) {
         (Err(Error::other("stdout write not implemented")), _buf)
@@ -134,93 +94,11 @@ impl AsyncWrite for Stdout {
     }
 }
 
-impl Write for Stdout {
-    fn write(&mut self, _buf: &[u8]) -> Result<usize> {
-        #[cfg(windows)]
-        {
-            #[allow(clashing_extern_declarations)]
-            #[link(name = "kernel32", kind = "raw-dylib")]
-            unsafe extern "system" {
-                fn GetStdHandle(n_std_handle: u32) -> usize;
-                fn WriteFile(
-                    h_file: usize,
-                    lp_buffer: *const u8,
-                    n_number_of_bytes_to_write: u32,
-                    lp_number_of_bytes_written: *mut u32,
-                    lp_overlapped: *mut core::ffi::c_void,
-                ) -> i32;
-            }
-            let handle = unsafe { GetStdHandle(0xFFFFFFF5) }; // STD_OUTPUT_HANDLE
-            let mut written = 0;
-            let res = unsafe {
-                WriteFile(
-                    handle,
-                    _buf.as_ptr(),
-                    _buf.len() as u32,
-                    &mut written,
-                    core::ptr::null_mut(),
-                )
-            };
-            if res == 0 {
-                Err(Error::from(ErrorKind::Other))
-            } else {
-                Ok(written as usize)
-            }
-        }
-        #[cfg(not(windows))]
-        Err(Error::other("stdout write not implemented"))
-    }
-    fn flush(&mut self) -> Result<()> {
-        Ok(())
-    }
-}
-
 impl AsyncWrite for Stderr {
     async fn write(&mut self, _buf: Vec<u8>) -> (Result<usize>, Vec<u8>) {
         (Err(Error::other("stderr write not implemented")), _buf)
     }
     async fn flush(&mut self) -> Result<()> {
-        Ok(())
-    }
-}
-
-impl Write for Stderr {
-    fn write(&mut self, _buf: &[u8]) -> Result<usize> {
-        #[cfg(windows)]
-        {
-            #[allow(clashing_extern_declarations)]
-            #[link(name = "kernel32", kind = "raw-dylib")]
-            unsafe extern "system" {
-                fn GetStdHandle(n_std_handle: u32) -> usize;
-                fn WriteFile(
-                    h_file: usize,
-                    lp_buffer: *const u8,
-                    n_number_of_bytes_to_write: u32,
-                    lp_number_of_bytes_written: *mut u32,
-                    lp_overlapped: *mut core::ffi::c_void,
-                ) -> i32;
-            }
-            let handle = unsafe { GetStdHandle(0xFFFFFFF4) }; // STD_ERROR_HANDLE
-            let mut written = 0;
-            let res = unsafe {
-                WriteFile(
-                    handle,
-                    _buf.as_ptr(),
-                    _buf.len() as u32,
-                    &mut written,
-                    core::ptr::null_mut(),
-                )
-            };
-            if res == 0 {
-                Err(Error::from(ErrorKind::Other))
-            } else {
-                Ok(written as usize)
-            }
-        }
-        #[cfg(not(windows))]
-        Err(Error::other("stderr write not implemented"))
-    }
-    fn flush(&mut self) -> Result<()> {
         Ok(())
     }
 }
@@ -266,36 +144,10 @@ pub fn pipe() -> Result<(PipeReader, PipeWriter)> {
     Ok((PipeReader, PipeWriter))
 }
 
-/// Copies the entire contents of a reader into a writer.
-pub fn copy<R: crate::traits::Read + ?Sized, W: crate::traits::Write + ?Sized>(
-    reader: &mut R,
-    writer: &mut W,
-) -> Result<u64> {
-    let mut buf = [0u8; 8192];
-    let mut total = 0;
-    loop {
-        match reader.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                writer.write_all(&buf[..n])?;
-                total += n as u64;
-            }
-            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(total)
-}
 
 impl AsyncRead for PipeReader {
     async fn read(&mut self, _buf: Vec<u8>) -> (Result<usize>, Vec<u8>) {
         (Err(Error::other("pipereader read not implemented")), _buf)
-    }
-}
-
-impl Read for PipeReader {
-    fn read(&mut self, _buf: &mut [u8]) -> Result<usize> {
-        Err(Error::other("pipereader read not implemented"))
     }
 }
 
@@ -304,15 +156,6 @@ impl AsyncWrite for PipeWriter {
         (Err(Error::other("pipewriter write not implemented")), _buf)
     }
     async fn flush(&mut self) -> Result<()> {
-        Ok(())
-    }
-}
-
-impl Write for PipeWriter {
-    fn write(&mut self, _buf: &[u8]) -> Result<usize> {
-        Err(Error::other("pipewriter write not implemented"))
-    }
-    fn flush(&mut self) -> Result<()> {
         Ok(())
     }
 }
@@ -443,93 +286,6 @@ fn last_error_code() -> i32 {
     0
 }
 
-// ─── BufReader ───────────────────────────────────────────────────────────────
-
-/// A reader that buffers its input.
-pub struct BufReader<R> {
-    inner: R,
-    buf: Vec<u8>,
-    pos: usize,
-    cap: usize,
-}
-
-impl<R: crate::traits::Read> BufReader<R> {
-    /// Creates a new `BufReader` with default buffer size.
-    pub fn new(inner: R) -> Self {
-        Self {
-            inner,
-            buf: alloc::vec![0u8; 8192],
-            pos: 0,
-            cap: 0,
-        }
-    }
-
-    /// Fill the buffer if empty.
-    pub fn fill_buf(&mut self) -> Result<&[u8]> {
-        if self.pos >= self.cap {
-            self.cap = self.inner.read(&mut self.buf)?;
-            self.pos = 0;
-        }
-        Ok(&self.buf[self.pos..self.cap])
-    }
-
-    /// Consume bytes.
-    pub fn consume(&mut self, amt: usize) {
-        self.pos = core::cmp::min(self.pos + amt, self.cap);
-    }
-
-    /// Read a line.
-    pub fn read_line(&mut self, buf: &mut crate::string::String) -> Result<usize> {
-        let mut total = 0;
-        loop {
-            let available = self.fill_buf()?;
-            if available.is_empty() {
-                break;
-            }
-            if let Some(i) = available.iter().position(|&b| b == b'\n') {
-                let bytes = &available[..=i];
-                buf.push_str(
-                    core::str::from_utf8(bytes).map_err(|_| Error::from(ErrorKind::Other))?,
-                );
-                self.pos += i + 1;
-                total += i + 1;
-                break;
-            } else {
-                let n = available.len();
-                buf.push_str(
-                    core::str::from_utf8(available).map_err(|_| Error::from(ErrorKind::Other))?,
-                );
-                self.pos += n;
-                total += n;
-            }
-        }
-        Ok(total)
-    }
-}
-
-impl<R: Read> Read for BufReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        let n = {
-            let rem = self.fill_buf()?;
-            let n = core::cmp::min(buf.len(), rem.len());
-            buf[..n].copy_from_slice(&rem[..n]);
-            n
-        };
-        self.consume(n);
-        Ok(n)
-    }
-}
-
-impl<R: Read> BufRead for BufReader<R> {
-    fn fill_buf(&mut self) -> Result<&[u8]> {
-        self.fill_buf()
-    }
-
-    fn consume(&mut self, amt: usize) {
-        self.consume(amt);
-    }
-}
-
 // ─── Async traits ────────────────────────────────────────────────────────────
 
 /// Types that can report whether they are connected to a terminal.
@@ -538,80 +294,3 @@ pub trait IsTerminal {
     fn is_terminal(&self) -> bool;
 }
 
-// ─── BufWriter ───────────────────────────────────────────────────────────────
-
-/// A writer that buffers its output.
-pub struct BufWriter<W: Write> {
-    inner: W,
-    buf: Vec<u8>,
-}
-
-impl<W: Write> BufWriter<W> {
-    /// Creates a new `BufWriter` with default buffer size.
-    pub fn new(inner: W) -> Self {
-        Self {
-            inner,
-            buf: Vec::with_capacity(8192),
-        }
-    }
-
-    /// Gets a reference to the underlying writer.
-    pub fn get_ref(&self) -> &W {
-        &self.inner
-    }
-
-    /// Gets a mutable reference to the underlying writer.
-    pub fn get_mut(&mut self) -> &mut W {
-        &mut self.inner
-    }
-
-    /// Flushes the buffer to the underlying writer.
-    pub fn flush_buf(&mut self) -> Result<()> {
-        if self.buf.is_empty() {
-            return Ok(());
-        }
-        self.inner.write_all(&self.buf)?;
-        self.buf.clear();
-        Ok(())
-    }
-}
-
-impl<W: Write> Write for BufWriter<W> {
-    fn write(&mut self, buf: &[u8]) -> Result<usize> {
-        self.buf.extend_from_slice(buf);
-        if self.buf.len() >= 8192 {
-            self.flush_buf()?;
-        }
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> Result<()> {
-        self.flush_buf()?;
-        self.inner.flush()
-    }
-}
-
-impl<W: Write> Drop for BufWriter<W> {
-    fn drop(&mut self) {
-        let _ = self.flush_buf();
-    }
-}
-
-// ─── Sink ──────────────────────────────────────────────────────────────────
-
-/// A writer that discards all output.
-pub struct Sink;
-
-/// Creates a writer that discards all output.
-pub fn sink() -> Sink {
-    Sink
-}
-
-impl Write for Sink {
-    fn write(&mut self, buf: &[u8]) -> Result<usize> {
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> Result<()> {
-        Ok(())
-    }
-}
