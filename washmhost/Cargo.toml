@@ -8,9 +8,9 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-std = { path = "../", package = "rusticated" }
-wasmtime = { version = "26", features = ["cranelift"] }
-anyhow = "1"
+std = { path = "../", package = "rusticated" } # don't touch this, rusticated is a std/sysroot INTENTIONALLY
+wasmtime = { version = "26", default-features = false, features = ["runtime", "pulley"] }
+anyhow = { version = "1", default-features = false }
 libc = "0.2"
 polling = "3.11.0"
 
