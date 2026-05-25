@@ -109,6 +109,9 @@ target = "{}"
 build-std = ["core", "alloc", "compiler_builtins"]
 build-std-features = ["compiler-builtins-mem"]
 json-target-spec = true
+
+[dependencies]
+std = {{ path = "../../", package = "rusticated" }}
 "#,
         json_path.display()
     )
