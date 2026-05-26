@@ -138,9 +138,7 @@ fn main() {
 target = "{json_path_str}"
 rustflags = [
     # 1. Maps any ambient 'extern crate std;' lookups directly to the sysroot implementation
-    "--extern", "std={sysroot_rlib_str}",
-    # 2. Instructs the compiler to enforce standard prelude lookup rules
-    "-Z", "prelude"
+    "--extern", "std={sysroot_rlib_str}"
 ]
 
 [unstable]
