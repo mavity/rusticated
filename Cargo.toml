@@ -26,9 +26,6 @@ async_fn_in_trait = { level = "allow", priority = 1 }
 [workspace.lints.rustdoc]
 all = { level = "deny", priority = -1 }
 
-[patch.crates-io]
-rustc-std-workspace-alloc = { path = "empty" }
-
 [profile.dev]
 panic = "abort"
 

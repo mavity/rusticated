@@ -171,28 +171,21 @@ fn can_build_target(target: &str) -> bool {
         return false;
     }
 
-    // On Windows host, Linux cross targets require an explicitly configured
-    // approved toolchain via environment variables. We do not auto-wire any
-    // in-repo wrappers/toolchains.
-    if env::var("HOST")
-        .map(|h| h.contains("windows"))
-        .unwrap_or(false)
-        && target.contains("unknown-linux-")
-    {
-        let target_env = target.to_uppercase().replace("-", "_");
-        let target_key = target.replace('-', "_");
-        let has_cc = env::var(format!("CC_{}", target_key)).is_ok();
-        let has_linker = env::var(format!("CARGO_TARGET_{}_LINKER", target_env)).is_ok();
-        if !(has_cc && has_linker) {
+    // Temporarily disable cross-compilation in mohabbat. We only want to build
+    // the actual host target in this pipeline and accumulate engines across
+    // separate runs on different real targets later.
+    if let Ok(host) = env::var("HOST") {
+        if host != target {
             println!(
-                "cargo:warning=Skipping {}: missing approved Linux cross-toolchain env (CC_{} and CARGO_TARGET_{}_LINKER)",
-                target, target_key, target_env
+                "cargo:warning=Skipping {}: cross-compilation disabled for mohabbat (host is {})",
+                target, host
             );
             return false;
         }
+        return true;
     }
 
-    // Only use rustup-installed targets — no auto-installing.
+    // Fallback: if HOST is unavailable, only accept targets explicitly installed.
     let installed = Command::new("rustup")
         .args(&["target", "list", "--installed"])
         .env_remove("RUSTUP_TOOLCHAIN")
@@ -200,10 +193,6 @@ fn can_build_target(target: &str) -> bool {
         .map(|o| String::from_utf8_lossy(&o.stdout).contains(target))
         .unwrap_or(false);
     if installed {
-        return true;
-    }
-    // Also accept the Cargo HOST triple directly (for environments without rustup).
-    if env::var("HOST").as_deref() == Ok(target) {
         return true;
     }
     false
