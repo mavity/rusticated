@@ -829,13 +829,8 @@ checksum = "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe"
 name = "rusticated"
 version = "0.1.2"
 dependencies = [
- "ahash",
- "concurrent-queue",
- "dlmalloc",
- "getrandom",
- "hashbrown 0.14.5",
  "serde_json",
- "spin",
+ "sysroot",
 ]
 
 [[package]]
@@ -1013,6 +1008,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "sysroot"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "concurrent-queue",
+ "dlmalloc",
+ "getrandom",
+ "hashbrown 0.14.5",
+ "spin",
 ]
 
 [[package]]
