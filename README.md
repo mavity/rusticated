@@ -220,6 +220,10 @@ Build the WASM module as in Step 1 above (if not already done), then:
 node node-host/index.js target/wasm32-unknown-unknown/debug/rusticated-demo.wasm
 ```
 
+cargo run --manifest-path demo/Cargo.toml --config demo/.cargo/config.toml
+cargo run --manifest-path demo/loch/Cargo.toml --config demo/loch/.cargo/config.toml
+cargo run --manifest-path kabibi/Cargo.toml --config kabibi/.cargo/config.toml
+
 ## Running the harness
 
 The harness spawns all three variants inside a ConPTY (via `node-pty`), types a few characters without pressing Enter, and lets the demo's built-in 5-second timer expire. It verifies that each variant exits cleanly (exit code 0) within 25 seconds.
