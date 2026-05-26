@@ -511,7 +511,7 @@ async fn juice_bottle_refill(
 
 #[cfg(target_arch = "wasm32")]
 async fn async_main() {
-    let args = std::env::get_args();
+    let args = std::env::args();
     if args.len() <= 1 || args[1] == "-h" || args[1] == "--help" {
         out_print("Usage: mohab.bat <input.wasm|project_dir> -o <output.bat>\n").await;
         return;

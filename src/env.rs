@@ -290,7 +290,12 @@ mod native_env {
 }
 
 #[cfg(not(target_family = "wasm"))]
-pub use native_env::{current_dir, get_args, get_env, get_host_env_vars, join_paths};
+pub use native_env::{current_dir, get_env, get_host_env_vars, join_paths};
+
+#[cfg(not(target_family = "wasm"))]
+fn get_args() -> alloc::vec::Vec<crate::string::String> {
+    native_env::get_args()
+}
 
 #[cfg(target_family = "wasm")]
 pub fn current_dir() -> crate::io::Result<crate::path::PathBuf> {
@@ -332,6 +337,13 @@ pub fn args_os() -> impl Iterator<Item = crate::string::String> {
     get_args().into_iter()
 }
 
+/// Returns an iterator over command-line arguments as `String` values.
+///
+/// This mirrors the conventional Rust `std::env::args` API on upstream std.
+pub fn args() -> impl Iterator<Item = crate::string::String> {
+    args_os()
+}
+
 /// Returns an iterator over environment variables as `(key, value)` string pairs.
 pub fn vars_os() -> impl Iterator<Item = (crate::string::String, crate::string::String)> {
     get_env().into_iter()
@@ -346,7 +358,7 @@ use crate::vec::Vec;
 
 /// Get args for WASM.
 #[cfg(target_family = "wasm")]
-pub fn get_args() -> Vec<String> {
+fn get_args() -> Vec<String> {
     let res = unsafe { imports::get_args(core::ptr::null_mut(), 0) };
     let _count = (res >> 32) as u32;
     let bytes_needed = (res & 0xFFFF_FFFF) as u32;
