@@ -2,6 +2,8 @@
 
 use std::prelude::rust_2024::*;
 
+use anyhow::Context as _;
+use core::future::Future;
 use wasmtime::{Config, Engine, Linker, Module, Store};
 mod env_impl;
 mod handles;
@@ -13,8 +15,43 @@ fn main() {
         eprintln!("Usage: {} <wasm_file>", args[0]);
         std::process::exit(1);
     }
-    let wasm_bytes = std::fs::read(&args[1]).unwrap();
+
+    let wasm_bytes = block_on(async { read_wasm_file(&args[1]).await })
+        .expect("failed to read wasm file");
     run(&wasm_bytes).unwrap();
+}
+
+fn block_on<F, T>(future: F) -> T
+where
+    F: Future<Output = T> + 'static,
+{
+    let handle = std::rt::executor::spawn(future);
+    loop {
+        if let Some(result) = handle.try_join() {
+            return result.expect("task join failed");
+        }
+        let _ = std::rt::executor::poll_step();
+    }
+}
+
+async fn read_wasm_file(path: &str) -> anyhow::Result<Vec<u8>> {
+    let mut file = std::fs::File::open(path)
+        .await
+        .with_context(|| format!("open wasm file: {}", path))?;
+
+    let mut bytes = Vec::new();
+    let mut buf = vec![0u8; 8192];
+    loop {
+        let (res, new_buf) = file.read(buf).await;
+        buf = new_buf;
+        let n = res.with_context(|| format!("read wasm file: {}", path))?;
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buf[..n]);
+        buf.resize(8192, 0);
+    }
+    Ok(bytes)
 }
 
 fn run(wasm_bytes: &[u8]) -> anyhow::Result<()> {
