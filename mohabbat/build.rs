@@ -209,14 +209,14 @@ fn can_build_target(target: &str) -> bool {
     false
 }
 
-fn build_sysroot(workspace_dir: &Path, target: &str) -> bool {
+fn build_sysroot(workspace_dir: &Path, target: &str, target_name: &str) -> bool {
     let sysroot_dir = workspace_dir
         .join("target")
-        .join(format!("sysroot-{}", target));
+        .join(format!("sysroot-{}", target_name));
     let sysroot_lib_dir = sysroot_dir
         .join("lib")
         .join("rustlib")
-        .join(target)
+        .join(target_name)
         .join("lib");
 
     // If the sysroot already contains a libstd.rlib, skip rebuilding to
@@ -250,6 +250,8 @@ fn build_sysroot(workspace_dir: &Path, target: &str) -> bool {
             "build-std=core,alloc,compiler_builtins",
             "-Z",
             "build-std-features=compiler-builtins-mem",
+            "-Z",
+            "json-target-spec",
             "-p",
             "rusticated",
             "--target",
@@ -260,7 +262,7 @@ fn build_sysroot(workspace_dir: &Path, target: &str) -> bool {
 
     let build_dir = workspace_dir
         .join("target")
-        .join(format!("build-std-{}", target));
+        .join(format!("build-std-{}", target_name));
     cmd.env("CARGO_TARGET_DIR", &build_dir);
 
     let output = match cmd.output() {
@@ -299,11 +301,7 @@ fn build_sysroot(workspace_dir: &Path, target: &str) -> bool {
                         let src_path = Path::new(cleaned);
                         if let Some(file_name_os) = src_path.file_name() {
                             let file_name = file_name_os.to_string_lossy();
-                            let dest_path = if file_name.starts_with("librusticated") {
-                                sysroot_lib_dir.join(file_name.replace("librusticated", "libstd"))
-                            } else {
-                                sysroot_lib_dir.join(&*file_name)
-                            };
+                            let dest_path = sysroot_lib_dir.join(&*file_name);
                             if std::fs::copy(src_path, dest_path).is_ok() {
                                 success = true;
                             }
@@ -317,10 +315,18 @@ fn build_sysroot(workspace_dir: &Path, target: &str) -> bool {
 }
 
 fn build_component(workspace_dir: &Path, target_tree: &Path, package: &str, target: &str) -> bool {
-    // Pure rusticated builds need the generated target/config path rather than
-    // relying on the ambient host sysroot.
-    let needs_sysroot = false;
+    let needs_sysroot = true;
     let rusticated_spec_dir = workspace_dir.join("target").join("rusticated-spec");
+
+    let custom_target = if target.starts_with("x86_64-") {
+        rusticated_spec_dir.join("x86_64-rusticated.json")
+    } else if target.starts_with("aarch64-") {
+        rusticated_spec_dir.join("aarch64-rusticated.json")
+    } else {
+        PathBuf::from(target)
+    };
+    
+    let target_name = custom_target.file_stem().unwrap().to_string_lossy();
 
     let target_env = target.to_uppercase().replace("-", "_");
     let rustflags_env = format!("CARGO_TARGET_{}_RUSTFLAGS", target_env);
@@ -345,14 +351,15 @@ fn build_component(workspace_dir: &Path, target_tree: &Path, package: &str, targ
 
     if needs_sysroot {
         // Ensure sysroot is built for this target first
-        if !build_sysroot(workspace_dir, target) {
+        let sysroot_target_str = custom_target.to_string_lossy();
+        if !build_sysroot(workspace_dir, &sysroot_target_str, &target_name) {
             println!("cargo:warning=Failed to build sysroot for {}", target);
             return false;
         }
 
         let sysroot_path = workspace_dir
             .join("target")
-            .join(format!("sysroot-{}", target));
+            .join(format!("sysroot-{}", target_name));
         rustflags.push_str(&format!(" --sysroot {}", sysroot_path.display()));
     }
 
