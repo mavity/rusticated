@@ -51,9 +51,9 @@ async fn async_main() {
         write_all(&mut out, b"Unable to read last byte from demo file\n").await;
     }
 
-    let args = std::env::args();
-    let exe = args.first().map(|s| s.as_str()).unwrap_or("<unknown>");
-    match std::fs::metadata(exe).await.map_err(|e| { std::println!("meta_err: {}, code={:?}, msg={}", e, e.raw_os_error(), e.to_string()); e }) {
+    let mut args = std::env::args();
+    let exe = args.next().unwrap_or_else(|| "<unknown>".to_string());
+    match std::fs::metadata(&exe).await.map_err(|e| { std::println!("meta_err: {}, code={:?}, msg={}", e, e.raw_os_error(), e.to_string()); e }) {
         Ok(meta) => {
             let mtime_ns = meta.modified_ns();
             let now_ns = std::time::now_ns();
