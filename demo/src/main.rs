@@ -51,7 +51,7 @@ async fn async_main() {
         write_all(&mut out, b"Unable to read last byte from demo file\n").await;
     }
 
-    let args = std::env::get_args();
+    let args = std::env::args();
     let exe = args.first().map(|s| s.as_str()).unwrap_or("<unknown>");
     match std::fs::metadata(exe).await.map_err(|e| { std::println!("meta_err: {}, code={:?}, msg={}", e, e.raw_os_error(), e.to_string()); e }) {
         Ok(meta) => {
