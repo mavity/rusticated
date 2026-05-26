@@ -9,6 +9,11 @@ fn main() {
     let out_dir = env::var_os("OUT_DIR")
         .map(PathBuf::from)
         .expect("OUT_DIR not set");
+    let target_env = env::var("TARGET").unwrap_or_else(|_| "<unset>".into());
+    let host_env = env::var("HOST").unwrap_or_else(|_| "<unset>".into());
+    println!("cargo:warning=build-script env TARGET={:?} HOST={:?}", target_env, host_env);
+    fs::write(out_dir.join("rusticated-build-env.txt"), format!("TARGET={}\nHOST={}\n", target_env, host_env))
+        .expect("Failed to write build env debug file");
     let target = env::var("TARGET").unwrap_or_else(|_| env::var("HOST").expect("HOST not set"));
     let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
 
@@ -16,12 +21,15 @@ fn main() {
         PathBuf::from(dir)
     } else {
         let mut dir = out_dir.clone();
-        while dir.file_name().map(|n| n != "target").unwrap_or(true) {
+        while let Some(name) = dir.file_name().and_then(|n| n.to_str()) {
+            if name.starts_with("target") {
+                break;
+            }
             if !dir.pop() {
                 break;
             }
         }
-        if dir.file_name().map(|n| n != "target").unwrap_or(true) {
+        if !dir.file_name().and_then(|n| n.to_str()).map(|name| name.starts_with("target")).unwrap_or(false) {
             panic!("Could not locate Cargo target directory from OUT_DIR");
         }
         dir
@@ -112,12 +120,43 @@ fn main() {
         write_if_changed(&json_path, spec_json.as_bytes());
     }
 
-    // Discover the compiled sysroot rlib so we can pass it as --extern std=...
-    // sysroot is a [build-dependencies] of this package so it is compiled
-    // before this build script runs.
     let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".into());
-    let deps_dir = target_dir.join(&profile).join("deps");
-    let sysroot_rlib = fs::read_dir(&deps_dir)
+    let host_deps_dir = target_dir.join(&profile).join("deps");
+    let target_spec_name = current_json_path
+        .file_stem()
+        .expect("Failed to get target spec stem")
+        .to_string_lossy()
+        .to_string();
+    let target_deps_dir = if let Ok(target) = env::var("TARGET") {
+        if target == target_spec_name {
+            target_dir.join(&target).join(&profile).join("deps")
+        } else {
+            let sysroot_manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("src").join("Cargo.toml");
+            let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+            let sysroot_target = current_json_path.to_string_lossy();
+            println!("cargo:warning=build.rs target={} target_spec={} sysroot_target={} target_dir={}", target, target_spec_name, sysroot_target, target_dir.display());
+            let status = std::process::Command::new(cargo)
+                .env("CARGO_TARGET_DIR", &target_dir)
+                .arg("build")
+                .arg("--manifest-path")
+                .arg(sysroot_manifest)
+                .arg("--target")
+                .arg(&*sysroot_target)
+                .arg("--config")
+                .arg("unstable.json-target-spec=true")
+                .arg("--quiet")
+                .status()
+                .expect("Failed to invoke cargo to compile target sysroot");
+            if !status.success() {
+                panic!("Failed to build sysroot for target {}", target_spec_name);
+            }
+            target_dir.join(&target_spec_name).join(&profile).join("deps")
+        }
+    } else {
+        host_deps_dir.clone()
+    };
+
+    let sysroot_rlib = fs::read_dir(&target_deps_dir)
         .expect("Failed to read deps dir")
         .filter_map(|e| e.ok())
         .filter(|e| {
