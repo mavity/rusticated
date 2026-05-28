@@ -1,8 +1,0 @@
-# Use the generated configuration from the workspace target directory
-include = ["../target/rusticated-spec/config.toml"]
-
-
-[target.wasm32-unknown-unknown]
-# Use getrandom's custom backend so the host can supply entropy via
-# the __getrandom_v03_custom extern defined in rt/wasm.rs.
-rustflags = ['--cfg', 'getrandom_backend="custom"']
