@@ -1,6 +1,5 @@
-use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
@@ -8,7 +7,7 @@ fn main() {
     let rustc_out = String::from_utf8_lossy(&output.stdout);
     let host = rustc_out
         .lines()
-        .find(|L| L.starts_with("host: "))
+        .find(|l| l.starts_with("host: "))
         .expect("No host line in rustc -vV")
         .trim_start_matches("host: ")
         .trim();
@@ -102,7 +101,7 @@ fn main() {
             // find the output rlib
             // target/<custom_name>/debug/deps/librusticated-*.rlib
             let deps_dir = target_dir.join(custom_name).join("debug").join("deps");
-            if let Ok(entries) = fs::read_dir(&deps_dir) {
+            if fs::read_dir(&deps_dir).is_ok() {
                 let mut rustflags = format!("[target.{}]\nrustflags = [\n", custom_name);
 
                 let mut find_rlib = |prefix: &str, crate_name: &str| {
