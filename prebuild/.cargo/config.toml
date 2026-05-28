@@ -1,0 +1,10 @@
+# Config for prebuild to override the workspace rusticated consumer config.
+# This file is passed explicitly to Cargo when building prebuild.
+include = []
+
+[build]
+# Avoid inheriting the workspace rusticated target spec for prebuild itself.
+# No build target should be applied here.
+
+[unstable]
+json-target-spec = false

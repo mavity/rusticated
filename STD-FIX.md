@@ -58,7 +58,7 @@ ordinary `#[cfg(target_os = "...")]` / `#[cfg(target_arch = "...")]` attributes;
 those cfg values from the `"os"` and `"arch"` fields in the JSON spec.
 
 ### 3. The Sysroot Generation Command
-Create a Rust `xtask` binary (just a binary that can be invoked by cargo) that handles generating the sysroot. This replaces the problematic `build.rs` hacks:
+Create a Rust `prebuild` binary (just a binary that can be invoked by cargo) that handles generating the sysroot. This replaces the problematic `build.rs` hacks:
 
 - Determines the host triple via `rustc -vV` and derives the default rusticated target
   (e.g., `x86_64-pc-windows-msvc` → `x86_64-windows-rusticated`).
@@ -103,6 +103,6 @@ on consumer crates.
 
 1. **Un-split the Crates:** Remove `sysroot` as a crate. The actual files are already inside `src` so they fall back into `rusticated` on their own. Remove the proxy dependencies and ensure project is properly configured as a single crate again.
 2. **Remove the Graph Hacks:** Remove `std = { package = "rusticated" }` and `build.rs` dependencies that were attempting to trick Cargo.
-3. **Write the Build Script:** Make an `xtask` binary that generates the included `.cargo/config.toml` inside `target/` and builds `rusticated` as a standalone binary step.
-4. **Test Clean Builds:** Delete `target/` and ensure that running cargo xtask followed by `cargo build -p demo` successfully completes without hangs or missing file errors.
+3. **Write the Build Script:** Make an `prebuild` binary that generates the included `.cargo/config.toml` inside `target/` and builds `rusticated` as a standalone binary step.
+4. **Test Clean Builds:** Delete `target/` and ensure that running cargo prebuild followed by `cargo build -p demo` successfully completes without hangs or missing file errors.
 5. **Prelude Injection:** Ensure `#[prelude_import]` is attached to the module in `rusticated` where the standard prelude items are defined. Test it by compiling `demo` using bare `String`, `Vec`, and macros without `#![no_std]` or explicit `use` paths. Then strip out `#![no_std]` from things like `washmhost` entirely.
