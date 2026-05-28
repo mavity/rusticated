@@ -14,6 +14,7 @@
 
 // No prelude_import here, as this IS the std library providing the prelude.
 
+#[allow(unused_extern_crates)]
 pub extern crate alloc;
 // The test harness is std-based; bring std in for test builds only.
 // On native targets the final binary always links std; expose it here so that
@@ -167,9 +168,32 @@ pub mod prelude {
         pub use core::result::Result::{self, Err, Ok};
     }
 
+    pub mod rust_2015 {
+        #[allow(unused_imports)]
+        pub use super::v1::*;
+        #[allow(unused_imports)]
+        pub use core::prelude::rust_2015::*;
+    }
+
+    pub mod rust_2018 {
+        #[allow(unused_imports)]
+        pub use super::v1::*;
+        #[allow(unused_imports)]
+        pub use core::prelude::rust_2018::*;
+    }
+
+    pub mod rust_2021 {
+        #[allow(unused_imports)]
+        pub use super::v1::*;
+        #[allow(unused_imports)]
+        pub use core::prelude::rust_2021::*;
+    }
+
     /// Prelude for Edition 2024.
     pub mod rust_2024 {
+        #[allow(unused_imports)]
         pub use super::v1::*;
+        #[allow(unused_imports)]
         pub use core::prelude::rust_2024::*;
     }
 }

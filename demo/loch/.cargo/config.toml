@@ -1,2 +1,0 @@
-# Use the generated configuration from the workspace target directory
-include = ["../../../target/rusticated-spec/config.toml"]
