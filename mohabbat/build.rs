@@ -308,9 +308,23 @@ fn build_component(workspace_dir: &Path, target_tree: &Path, package: &str, targ
     let rusticated_spec_dir = workspace_dir.join("target").join("rusticated-spec");
 
     let custom_target = if target.starts_with("x86_64-") {
-        rusticated_spec_dir.join("x86_64-rusticated.json")
+        if target.contains("windows") {
+            rusticated_spec_dir.join("x86_64-windows-rusticated.json")
+        } else if target.contains("linux") {
+            rusticated_spec_dir.join("x86_64-linux-rusticated.json")
+        } else {
+            rusticated_spec_dir.join("x86_64-rusticated.json")
+        }
     } else if target.starts_with("aarch64-") {
-        rusticated_spec_dir.join("aarch64-rusticated.json")
+        if target.contains("windows") {
+            rusticated_spec_dir.join("aarch64-windows-rusticated.json")
+        } else if target.contains("linux") {
+            rusticated_spec_dir.join("aarch64-linux-rusticated.json")
+        } else {
+            rusticated_spec_dir.join("aarch64-rusticated.json")
+        }
+    } else if target.starts_with("wasm32-") {
+        rusticated_spec_dir.join("wasm32-rusticated.json")
     } else {
         PathBuf::from(target)
     };
@@ -369,9 +383,23 @@ fn build_component(workspace_dir: &Path, target_tree: &Path, package: &str, targ
     if package == "washmhost" {
         let config_path = rusticated_spec_dir.join("config.toml");
         let custom_target = if target.starts_with("x86_64-") {
-            rusticated_spec_dir.join("x86_64-rusticated.json")
+            if target.contains("windows") {
+                rusticated_spec_dir.join("x86_64-windows-rusticated.json")
+            } else if target.contains("linux") {
+                rusticated_spec_dir.join("x86_64-linux-rusticated.json")
+            } else {
+                rusticated_spec_dir.join("x86_64-rusticated.json")
+            }
         } else if target.starts_with("aarch64-") {
-            rusticated_spec_dir.join("aarch64-rusticated.json")
+            if target.contains("windows") {
+                rusticated_spec_dir.join("aarch64-windows-rusticated.json")
+            } else if target.contains("linux") {
+                rusticated_spec_dir.join("aarch64-linux-rusticated.json")
+            } else {
+                rusticated_spec_dir.join("aarch64-rusticated.json")
+            }
+        } else if target.starts_with("wasm32-") {
+            rusticated_spec_dir.join("wasm32-rusticated.json")
         } else {
             PathBuf::from(target)
         };
