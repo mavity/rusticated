@@ -94,7 +94,7 @@ fn main() {
             // .arg("--manifest-path").arg("Cargo.toml") // implicitly in root
             .arg("-p").arg("rusticated")
             .arg("-Z").arg("build-std=core,alloc,compiler_builtins")
-            .arg("-Z").arg("json-target-spec")
+            .arg("--config").arg("unstable.json-target-spec=true")
             .arg("--target").arg(json_path.to_string_lossy().to_string())
             .status().expect("cargo build failed");
         
