@@ -312,6 +312,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "demo"
+version = "0.1.0"
+
+[[package]]
 name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -834,10 +838,6 @@ dependencies = [
  "windows-link 0.1.3",
  "windows-sys 0.52.0",
 ]
-
-[[package]]
-name = "rusticated-demo"
-version = "0.1.0"
 
 [[package]]
 name = "rustix"
