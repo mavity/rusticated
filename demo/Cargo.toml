@@ -7,4 +7,4 @@ rust-version = "1.88.0"
 
 [dependencies]
 
-std = { path = "..", package = "rusticated" }
+

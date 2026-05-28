@@ -148,6 +148,15 @@ All executor and scheduling logic is self-contained in `rt/`. Logic derived from
 
 # Building and running
 
+Bootstrap step: before using the shared root config, generate the workspace target/sysroot output once with:
+
+```bash
+cargo build -p rusticated
+```
+
+This creates `target/rusticated-spec/config.toml`, which is then included by the root `./.cargo/config.toml` and shared by the rusticated consumer crates.
+
+
 ## Prerequisites
 
 - Rust **nightly** toolchain (the repo's `rust-toolchain.toml` selects it automatically).

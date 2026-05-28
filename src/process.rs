@@ -43,6 +43,8 @@ impl<T: Termination, E: core::fmt::Debug> Termination for core::result::Result<T
         match self {
             Ok(val) => val.report(),
             Err(err) => {
+                let _ = err;
+                #[cfg(not(target_arch = "wasm32"))]
                 crate::eprintln!("Error: {:?}", err);
                 1
             }

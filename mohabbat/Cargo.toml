@@ -9,7 +9,7 @@ brotli = { version = "8.0.2", default-features = false }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 anyhow = { version = "1.0.102", default-features = false }
-std = { package = "rusticated", path = ".." }
+
 brotli-decompressor = { version = "5.0.0", default-features = false }
 alloc-no-stdlib = "2.0.4"
 brotli = { version = "8.0.2", default-features = false }
