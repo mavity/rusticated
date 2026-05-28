@@ -148,45 +148,57 @@ All executor and scheduling logic is self-contained in `rt/`. Logic derived from
 
 # Building and running
 
-Bootstrap step: before using the shared root config, generate the workspace target/sysroot output once with:
+Bootstrap step: generate the workspace sysroot output once with:
 
 ```bash
-cargo build -p rusticated
+cargo run -p prebuild
 ```
 
-This creates `target/rusticated-spec/config.toml`, which is then included by the root `./.cargo/config.toml` and shared by the rusticated consumer crates.
+This creates `target/rusticated-spec/config.toml` and the `*-rusticated.json` target specs under `target/rusticated-spec/`.
+The workspace root also provides `sysroot.toml`, which includes the generated config and is the recommended wrapper for downstream builds.
 
+Once `prebuild` has run, build consumer crates with:
+
+```bash
+cargo build -p <proj> --config sysroot.toml
+```
+
+or run them with:
+
+```bash
+cargo run -p <proj> --config sysroot.toml
+```
 
 ## Prerequisites
 
 - Rust **nightly** toolchain (the repo's `rust-toolchain.toml` selects it automatically).
 - `wasm32-unknown-unknown` target component — required to build the WASM demo binary:
-  ```
-  rustup target add wasm32-unknown-unknown
-  ```
-- On Windows, the default host target may be `x86_64-pc-windows-msvc`, which requires the MSVC linker (`link.exe`). If you do not have MSVC installed, build explicitly with GNU instead:
-  ```
-  rustup toolchain install nightly-x86_64-pc-windows-gnu
-  rustup target add x86_64-pc-windows-gnu
-  cargo +nightly-x86_64-pc-windows-gnu run -p rusticated-demo --target x86_64-pc-windows-gnu
-  ```
+  ```bash
+rustup target add wasm32-unknown-unknown
+```
+- On Windows, if you do not have the MSVC linker installed, build explicitly with GNU instead:
+  ```powershell
+rustup toolchain install nightly-x86_64-pc-windows-gnu
+rustup target add x86_64-pc-windows-gnu --toolchain nightly-x86_64-pc-windows-gnu
+cargo +nightly-x86_64-pc-windows-gnu run -p demo --target x86_64-pc-windows-gnu --config sysroot.toml
+```
 - **Node.js ≥ 18** and its dependencies installed — required for the node-host and harness variants:
-  ```
-  npm install --prefix node-host
-  npm install --prefix harness
-  ```
+  ```bash
+npm install --prefix node-host
+npm install --prefix harness
+```
 - **wasmtime** variant only: the `washmhost` crate bundles its own copy of the Wasmtime engine as a Cargo dependency; no separate install is needed.
 
 ## Building rusticated itself
 
-`rusticated` is a library crate (`src/lib.rs`). It is built implicitly as part of each demo variant below — there is no standalone build step.
+`rusticated` is a library crate (`src/lib.rs`). It is built implicitly by `prebuild` as the custom sysroot implementation, and by consumer builds that depend on the generated target spec.
 
 ## Demo variant 1 — Native binary
 
 The demo compiles directly to the host platform using `rusticated` as its `std` substitute.
 
-```
-cargo run -p rusticated-demo
+```bash
+cargo run -p demo --config sysroot.toml
 ```
 
 On Windows, if you do not have the MSVC linker installed, build explicitly with GNU/LLVM instead:
@@ -194,29 +206,27 @@ On Windows, if you do not have the MSVC linker installed, build explicitly with 
 ```powershell
 rustup toolchain install nightly-x86_64-pc-windows-gnu
 rustup target add x86_64-pc-windows-gnu --toolchain nightly-x86_64-pc-windows-gnu
-cargo +nightly-x86_64-pc-windows-gnu run -p rusticated-demo --target x86_64-pc-windows-gnu
+cargo +nightly-x86_64-pc-windows-gnu run -p demo --target x86_64-pc-windows-gnu --config sysroot.toml
 ```
 
 The executable reads from the terminal, waits up to 5 seconds for a line, then writes a small file and reads it back.
 
 ## Demo variant 2 — WASM + wasmtime host
 
-This variant compiles the demo to `wasm32-unknown-unknown` and runs it through the `washmhost` Rust binary, which implements the rusticated ABI via Wasmtime's embedding API.
+This variant compiles the demo to `wasm32-rusticated` and runs it through the `washmhost` Rust binary, which implements the rusticated ABI via Wasmtime's embedding API.
 
 **Step 1 — Build the WASM module** (run once, or after changing `demo/src/`):
 
-```
-cd demo
-cargo run -Zjson-target-spec
-cd ..
+```bash
+cargo build -p demo --target wasm32-rusticated --config sysroot.toml
 ```
 
-The `.wasm` output lands at `target/wasm32-unknown-unknown/debug/rusticated-demo.wasm`.
+The `.wasm` output lands under `target/wasm32-rusticated/debug/`.
 
 **Step 2 — Run with the wasmtime host:**
 
-```
-cargo run -p rusticated-wasmtime -- target/wasm32-unknown-unknown/debug/rusticated-demo.wasm
+```bash
+cargo run -p washmhost -- target/wasm32-rusticated/debug/demo.wasm
 ```
 
 ## Demo variant 3 — WASM + Node.js host
@@ -225,15 +235,9 @@ Same WASM module, different host: a Node.js script (`node-host/index.js`) that i
 
 Build the WASM module as in Step 1 above (if not already done), then:
 
+```bash
+node node-host/index.js target/wasm32-rusticated/debug/demo.wasm
 ```
-node node-host/index.js target/wasm32-unknown-unknown/debug/rusticated-demo.wasm
-```
-
-cargo run --manifest-path demo/Cargo.toml --config demo/.cargo/config.toml
-cargo run --manifest-path demo/loch/Cargo.toml --config demo/loch/.cargo/config.toml
-cargo run --manifest-path kabibi/Cargo.toml --config kabibi/.cargo/config.toml
-
-## Running the harness
 
 The harness spawns all three variants inside a ConPTY (via `node-pty`), types a few characters without pressing Enter, and lets the demo's built-in 5-second timer expire. It verifies that each variant exits cleanly (exit code 0) within 25 seconds.
 
@@ -297,88 +301,36 @@ NOTES:
 
 1. `rusticated` is a custom target, not a create to import. Its exports therefore are not imported from crates, but as the target std.
 
-# Using Rusticated as a sysroot (experimental and fun!)
+# Using Rusticated as a sysroot
 
-The platform does not expect consumers to manage static target architectures manually. When a workspace is compiled, `rusticated` leverages its own `build.rs` to dynamically engineer the target ecosystem:
+The repository now uses a generated workspace sysroot model.
 
-1. It executes localized compiler introspection (`rustc -Z unstable-options --print target-spec-json`) to capture a copy of the host's native environment specification.
-2. It mutates that specification in memory—stripping default system libraries (`"no-default-libraries": true`), setting custom memory align structures, and injecting specialized link parameters (such as entrypoint overrides like `/ENTRY:mainCRTStartup` on MSVC).
-3. It saves the resulting `.json` target file and an accompanying Cargo `config.toml` directly to a centralized workspace path (`target/rusticated-spec/`).
-
----
-
-### Step-by-Step Blueprint for a New Consumer to Succeed
-
-Because the target spec and link settings are built entirely on the fly by the platform engine, a standalone consumer's project hooks into this automated output cleanly. Here are the exact implementation steps:
-
-#### Step 1: Establish the Project Layout and Workspace
-
-Your new application must be declared part of the same Cargo workspace or live alongside the `rusticated` root structure so that your build directories map to a shared target tree.
-
-#### Step 2: Override the Standard Namespace in `Cargo.toml`
-
-Rather than opting for common `#![no_std]` definitions, you explicitly substitute `rusticated` into the native standard library namespace:
-
-```toml
-[package]
-name = "my-new-tool"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-# This tricks the compiler into serving your platform layer whenever 'std' is called
-std = { path = "../path/to/rusticated", package = "rusticated" }
-
-```
-
-#### Step 3: Mirror the Automatic Workspace Inclusion Strategy
-
-To inherit the linker modifications, toolchain flags, and target configurations handled by the automated build script, your local project must include the generated configuration file.
-
-Create a `.cargo/config.toml` file inside your new consumer project folder and point it directly back to the `rusticated-spec` output via relative path inclusion:
-
-```toml
-# Import the platform profile dynamically maintained by rusticated's build.rs
-include = ["../../target/rusticated-spec/config.toml"]
-
-```
-
-*(Adjust the parent directory steps `../../` depending on exactly how deep your crate is nested inside the workspace hierarchy).*
-
-#### Step 4: Write the Async Application Lifecycle
-
-Inside your `src/main.rs`, write standard asynchronous code using the core platform executor hooks. No boilerplate, no standard runtimes, and absolutely no blocking loops:
-
-```rust
-use std::io::write_all;
-use std::tty::stdout;
-
-fn main() {
-    // Schedule your root future immediately onto the engine's LocalRunQueue
-    std::spawn!(async_entry());
-}
-
-async fn async_entry() {
-    let mut out = stdout();
-    
-    // Executes zero-overhead I/O driven directly by underlying kernel system calls
-    write_all(&mut out, b"Standalone tool successfully executing via rusticated!\n").await;
-}
-
-```
-
-#### Step 5: Execute the Build
-
-When you compile the code, you explicitly pass the path to the architecture specification dynamically dumped into your target directory by the engine:
+Run the bootstrap step once:
 
 ```bash
-cargo build --target ./target/rusticated-spec/your-architecture-target.json
-
+cargo run -p prebuild
 ```
 
-By hooking your local `.cargo/config.toml` straight into the engine's build output cache, your new consumer app automatically stays perfectly synced with target specs generated dynamically on your machine.
+That produces:
 
-<!--
-*/ }
--->
+- `target/rusticated-spec/config.toml`
+- `target/rusticated-spec/<arch>-rusticated.json`
+
+The root `sysroot.toml` file includes the generated workspace config and is the supported wrapper for downstream consumer builds.
+
+After `prebuild`, consumer crates are built with:
+
+```bash
+cargo build -p <proj> --config sysroot.toml
+```
+
+or run with:
+
+```bash
+cargo run -p <proj> --config sysroot.toml
+```
+
+For the WASM host crate, `washmhost/.cargo/config.toml` already includes the generated `target/rusticated-spec/config.toml`.
+
+The current workflow avoids manual `std` source substitution and uses the generated custom target specs and rustflags from `target/rusticated-spec/`.
 
