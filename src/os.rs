@@ -68,15 +68,69 @@ pub mod unix {
 /// Windows-specific extensions.
 #[cfg(windows)]
 pub mod windows {
+    /// Prelude for Windows.
+    pub mod prelude {
+        pub use super::io::*;
+    }
+
     /// Windows HANDLE I/O extensions.
     pub mod io {
         /// Raw Windows HANDLE value.
         pub type RawHandle = *mut core::ffi::c_void;
 
+        /// Raw Windows SOCKET value.
+        pub type RawSocket = u64;
+
+        /// A borrowed Windows HANDLE.
+        #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+        #[repr(transparent)]
+        pub struct BorrowedHandle<'handle> {
+            handle: RawHandle,
+            _marker: core::marker::PhantomData<&'handle ()>,
+        }
+
+        impl<'handle> BorrowedHandle<'handle> {
+            /// Return the raw handle.
+            pub fn as_raw_handle(&self) -> RawHandle {
+                self.handle
+            }
+        }
+
+        /// A borrowed Windows SOCKET.
+        #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+        #[repr(transparent)]
+        pub struct BorrowedSocket<'socket> {
+            socket: RawSocket,
+            _marker: core::marker::PhantomData<&'socket ()>,
+        }
+
+        impl<'socket> BorrowedSocket<'socket> {
+            /// Return the raw socket.
+            pub fn as_raw_socket(&self) -> RawSocket {
+                self.socket
+            }
+        }
+
+        /// Extract a borrowed handle.
+        pub trait AsHandle {
+            fn as_handle(&self) -> BorrowedHandle<'_>;
+        }
+
+        /// Extract a borrowed socket.
+        pub trait AsSocket {
+            fn as_socket(&self) -> BorrowedSocket<'_>;
+        }
+
         /// Objects that expose a raw Windows HANDLE.
         pub trait AsRawHandle {
             /// Returns the raw handle.
             fn as_raw_handle(&self) -> RawHandle;
+        }
+
+        /// Objects that expose a raw Windows SOCKET.
+        pub trait AsRawSocket {
+            /// Returns the raw socket.
+            fn as_raw_socket(&self) -> RawSocket;
         }
 
         /// Construct from a raw Windows HANDLE.
