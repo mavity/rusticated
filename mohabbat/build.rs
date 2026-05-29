@@ -1,4 +1,4 @@
-use std::env;
+﻿use std::env;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -160,7 +160,7 @@ fn main() {
         workspace_dir,
         &target_tree,
         "mohabbat",
-        "wasm32-unknown-unknown",
+        "wasm32-rusticated-unknown-unknown",
     );
     if !brain_ok {
         panic!("Build failed for mohabbat wasm32-unknown-unknown");
@@ -316,6 +316,19 @@ fn build_sysroot(workspace_dir: &Path, target: &str, target_name: &str) -> bool 
             }
         }
     }
+
+    if let Ok(entries) = std::fs::read_dir(&sysroot_lib_dir) {
+        let mut hash = None;
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("libstd-") && name.ends_with(".rmeta") {
+                hash = Some(name.replace("libstd-", "").replace(".rmeta", ""));
+            }
+        }
+        if let Some(h) = hash {
+            let _ = std::fs::copy(sysroot_lib_dir.join("libstd.rlib"), sysroot_lib_dir.join(format!("libstd-{}.rlib", h)));
+        }
+    }
     success
 }
 
@@ -329,27 +342,27 @@ fn build_component(workspace_dir: &Path, target_tree: &Path, package: &str, targ
     // brot is compiled for the standard host triple and uses the system std;
     // no custom sysroot is required (the custom sysroot dir uses a different
     // target-triple name and rustc would not find std there anyway).
-    let needs_sysroot = package == "washmhost";
+    let needs_sysroot = package == "washmhost" || target.starts_with("wasm32");
     let rusticated_spec_dir = workspace_dir.join("target").join("rusticated-spec");
 
     let custom_target = if target.starts_with("x86_64-") {
         if target.contains("windows") {
-            rusticated_spec_dir.join("x86_64-windows-rusticated.json")
+            rusticated_spec_dir.join("x86_64-rusticated-windows-msvc.json")
         } else if target.contains("linux") {
-            rusticated_spec_dir.join("x86_64-linux-rusticated.json")
+            rusticated_spec_dir.join("x86_64-rusticated-linux-gnu.json")
         } else {
             rusticated_spec_dir.join("x86_64-rusticated.json")
         }
     } else if target.starts_with("aarch64-") {
         if target.contains("windows") {
-            rusticated_spec_dir.join("aarch64-windows-rusticated.json")
+            rusticated_spec_dir.join("aarch64-rusticated-windows-msvc.json")
         } else if target.contains("linux") {
-            rusticated_spec_dir.join("aarch64-linux-rusticated.json")
+            rusticated_spec_dir.join("aarch64-rusticated-linux-gnu.json")
         } else {
             rusticated_spec_dir.join("aarch64-rusticated.json")
         }
     } else if target.starts_with("wasm32-") {
-        rusticated_spec_dir.join("wasm32-rusticated.json")
+        rusticated_spec_dir.join("wasm32-rusticated-unknown-unknown.json")
     } else {
         PathBuf::from(target)
     };
@@ -419,7 +432,7 @@ fn build_component(workspace_dir: &Path, target_tree: &Path, package: &str, targ
         .env_remove("CARGO_MAKEFLAGS")
         .args(&["build", "-p", package, "--release"]);
 
-    if package == "washmhost" {
+    if needs_sysroot {
         // Do NOT pass --config config.toml explicitly.  When --config is
         // passed as a CLI flag it has HIGHER priority than the RUSTFLAGS
         // environment variable, which would prevent the --sysroot flag we set
@@ -502,7 +515,7 @@ fn stitch(
     slot_targets: &[Option<&str>],
     old_slot_data: &[Option<(Vec<u8>, Vec<u8>)>],
 ) {
-    let brain_path = find_asset(target_tree, "wasm32-unknown-unknown", "mohabbat");
+    let brain_path = find_asset(target_tree, "wasm32-rusticated-unknown-unknown", "mohabbat");
     if !brain_path.exists() {
         println!("cargo:warning=Brain not found, skipping stitch");
         return;
@@ -519,7 +532,17 @@ fn stitch(
     for (i, opt_target) in slot_targets.iter().enumerate() {
         if let Some(target) = opt_target {
             // Freshly built this session — read from target/tree.
-            let host_path = find_asset(target_tree, target, "washmhost");
+            
+            let custom_target_name = if target.starts_with("x86_64-") {
+                if target.contains("windows") { "x86_64-rusticated-windows-msvc" }
+                else if target.contains("linux") { "x86_64-rusticated-linux-gnu" }
+                else { "x86_64-rusticated" }
+            } else if target.starts_with("aarch64-") {
+                if target.contains("windows") { "aarch64-rusticated-windows-msvc" }
+                else if target.contains("linux") { "aarch64-rusticated-linux-gnu" }
+                else { "aarch64-rusticated" }
+            } else { target };
+            let host_path = find_asset(target_tree, custom_target_name, "washmhost");
             let mut data = Vec::new();
             File::open(host_path)
                 .unwrap()
@@ -777,3 +800,15 @@ fn read_mohabbat_meta(data: &[u8]) -> Option<(u64, u64, u64, u64, u64)> {
     }
     None
 }
+
+
+
+
+
+
+
+
+
+
+
+

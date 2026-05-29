@@ -8,8 +8,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-
 wasmtime = { version = "45", default-features = false, features = ["runtime", "pulley"] }
-anyhow = { version = "1", default-features = false }
+anyhow = "1"
 
 

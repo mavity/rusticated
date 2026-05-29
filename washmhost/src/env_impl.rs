@@ -1,6 +1,6 @@
 use std::prelude::rust_2024::*;
 
-use anyhow::Context as _;
+
 use wasmtime::{Caller, Linker, Memory, Store};
 
 use crate::handles::{FileOpResult, HandleKind, HostState, PendingOp, StatInfo};
@@ -12,18 +12,23 @@ use crate::handles::{FileOpResult, HandleKind, HostState, PendingOp, StatInfo};
 //   offset 16: result_ext: u64
 //   total: 24 bytes, little-endian
 
+const EIO: i32 = 5;
+const EWOULDBLOCK: u32 = 11;
+const EINVAL: u32 = 22;
+const ENOSYS: u32 = 38;
+
 fn write_overlapped(
     mem: &mut [u8],
     ov_ptr: u32,
     error: u32,
     continued: u64,
     result_ext: u64,
-) -> anyhow::Result<()> {
+) -> wasmtime::Result<()> {
     let base = ov_ptr as usize;
-    let end = base.checked_add(24).context("ov_ptr overflow")?;
+    let end = base.checked_add(24).ok_or_else(|| wasmtime::format_err!("ov_ptr overflow"))?;
     let slice = mem
         .get_mut(base..end)
-        .context("ov_ptr out of WASM memory bounds")?;
+        .ok_or_else(|| wasmtime::format_err!("ov_ptr out of WASM memory bounds"))?;
     slice[0..4].copy_from_slice(&1u32.to_le_bytes()); // flags = FLAG_COMPLETED
     slice[4..8].copy_from_slice(&error.to_le_bytes());
     slice[8..16].copy_from_slice(&continued.to_le_bytes());
@@ -31,31 +36,31 @@ fn write_overlapped(
     Ok(())
 }
 
-fn guest_slice<'a>(mem: &'a mut [u8], ptr: u32, len: u32) -> anyhow::Result<&'a mut [u8]> {
+fn guest_slice<'a>(mem: &'a mut [u8], ptr: u32, len: u32) -> wasmtime::Result<&'a mut [u8]> {
     let start = ptr as usize;
     let end = start
         .checked_add(len as usize)
-        .context("ptr+len overflow")?;
+        .ok_or_else(|| wasmtime::format_err!("ptr+len overflow"))?;
     mem.get_mut(start..end)
-        .with_context(|| format!("guest ptr={ptr} len={len} out of WASM memory bounds"))
+        .ok_or_else(|| wasmtime::format_err!("guest ptr={} len={} out of WASM bounds", ptr, len))
 }
 
-fn get_memory(caller: &mut Caller<'_, HostState>) -> anyhow::Result<Memory> {
+fn get_memory(caller: &mut Caller<'_, HostState>) -> wasmtime::Result<Memory> {
     caller
         .get_export("memory")
         .and_then(|e| e.into_memory())
-        .context("WASM module has no 'memory' export")
+        .ok_or_else(|| wasmtime::format_err!("WASM module has no 'memory' export"))
 }
 
 // ── Register all env imports with the Linker ─────────────────────────────────
 
-pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
+pub fn register(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
     linker.func_wrap(
         "env",
         "host_panic",
-        |_: Caller<'_, HostState>| -> anyhow::Result<()> {
+        |_: Caller<'_, HostState>| -> wasmtime::Result<()> {
             println!("*** WASM INVOKED HOST PANIC ***");
-            Err(anyhow::anyhow!("WASM Panicked!"))
+            Err(wasmtime::format_err!("WASM Panicked!"))
         },
     )?;
 
@@ -71,7 +76,7 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     linker.func_wrap(
         "env",
         "get_random",
-        |mut caller: Caller<'_, HostState>, ptr: u32, len: u32| -> anyhow::Result<()> {
+        |mut caller: Caller<'_, HostState>, ptr: u32, len: u32| -> wasmtime::Result<()> {
             let mem = get_memory(&mut caller)?;
             let data = mem.data_mut(&mut caller);
             let buf = guest_slice(data, ptr, len)?;
@@ -97,7 +102,7 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                     )
                 };
                 if status != 0 {
-                    return Err(anyhow::anyhow!(
+                    return Err(wasmtime::format_err!(
                         "BCryptGenRandom failed with status {}",
                         status
                     ));
@@ -116,7 +121,7 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                         )
                     };
                     if n < 0 {
-                        return Err(anyhow::Error::from(std::io::Error::last_os_error()));
+                        return Err(wasmtime::format_err!("os error: {:?}", std::io::Error::last_os_error()));
                     }
                     if n == 0 {
                         continue;
@@ -127,7 +132,7 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
 
             #[cfg(not(any(windows, unix)))]
             {
-                return Err(anyhow::anyhow!("get_random is unsupported on this host"));
+                return Err(wasmtime::format_err!("get_random is unsupported on this host"));
             }
 
             Ok(())
@@ -140,7 +145,7 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     linker.func_wrap(
         "env",
         "get_args",
-        |mut caller: Caller<'_, HostState>, ptr: u32, len: u32| -> anyhow::Result<u64> {
+        |mut caller: Caller<'_, HostState>, ptr: u32, len: u32| -> wasmtime::Result<u64> {
             // Skip argv[0] (the wasmtime host exe itself); the WASM path becomes the
             // guest's argv[0], matching how the native binary sees its own path.
             let args: Vec<Vec<u8>> = std::env::args_os()
@@ -169,7 +174,7 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     linker.func_wrap(
         "env",
         "get_env",
-        |mut caller: Caller<'_, HostState>, ptr: u32, len: u32| -> anyhow::Result<u64> {
+        |mut caller: Caller<'_, HostState>, ptr: u32, len: u32| -> wasmtime::Result<u64> {
             let vars: Vec<(Vec<u8>, Vec<u8>)> = std::env::vars_os()
                 .map(|(k, v)| (k.into_encoded_bytes(), v.into_encoded_bytes()))
                 .collect();
@@ -202,7 +207,7 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     linker.func_wrap(
         "env",
         "timer_set",
-        |mut caller: Caller<'_, HostState>, ov_ptr: u32, delay_ms: u32| -> anyhow::Result<()> {
+        |mut caller: Caller<'_, HostState>, ov_ptr: u32, delay_ms: u32| -> wasmtime::Result<()> {
             let deadline =
                 std::time::Instant::now() + std::time::Duration::from_millis(delay_ms as u64);
             caller.data_mut().timers.insert(ov_ptr, deadline);
@@ -230,7 +235,7 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
          handle: u64,
          guest_ptr: u32,
          guest_len: u32|
-         -> anyhow::Result<()> {
+         -> wasmtime::Result<()> {
             let mem_ok = get_memory(&mut caller)?;
             let (data, host) = mem_ok.data_and_store_mut(&mut caller);
 
@@ -239,7 +244,7 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             if is_file {
                 let mut file = match host.handles.remove(&handle) {
                     Some(HandleKind::File(file)) => file,
-                    _ => anyhow::bail!("read: invalid handle {}", handle),
+                    _ => wasmtime::bail!("read: invalid handle {}", handle),
                 };
                 let tx = host.file_op_tx.clone();
 
@@ -249,7 +254,7 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                     let (result, mut buf) = file.read(vec![0u8; guest_len as usize]).await;
                     let (error, read_len) = match result {
                         Ok(n) => (0, n),
-                        Err(e) => (e.raw_os_error().unwrap_or(libc::EIO as i32) as u32, 0),
+                        Err(e) => (e.raw_os_error().unwrap_or(EIO) as u32, 0),
                     };
                     if buf.len() > read_len {
                         buf.truncate(read_len);
@@ -269,13 +274,13 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             } else {
                 let fd = host
                     .fd_for(handle)
-                    .with_context(|| format!("read: invalid handle {}", handle))?;
+                    .ok_or_else(|| wasmtime::format_err!("read: invalid handle {}", handle))?;
                 if fd == 0 {
                     // Blocking stdin reads are forbidden in strict async mode.
-                    write_overlapped(data, ov_ptr, libc::EWOULDBLOCK as u32, 0, 0)?;
+                    write_overlapped(data, ov_ptr, EWOULDBLOCK, 0, 0)?;
                 } else {
                     // Other stream fds: register with epoll; completion happens in poll_completions().
-                    let token = host.epoll.register_read(fd)?;
+                    let token = host.epoll.register_read(fd);
                     host.epoll.pending.insert(
                         token,
                         PendingOp {
@@ -300,7 +305,7 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
          handle: u64,
          buf_ptr: u32,
          buf_len: u32|
-         -> anyhow::Result<()> {
+         -> wasmtime::Result<()> {
             let mem = get_memory(&mut caller)?;
             let (data, host) = mem.data_and_store_mut(&mut caller);
             let src = guest_slice(data, buf_ptr, buf_len)?.to_vec();
@@ -308,7 +313,7 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             if host.is_regular_file(handle) {
                 let mut file = match host.handles.remove(&handle) {
                     Some(HandleKind::File(file)) => file,
-                    _ => anyhow::bail!("write: invalid handle {}", handle),
+                    _ => wasmtime::bail!("write: invalid handle {}", handle),
                 };
                 let tx = host.file_op_tx.clone();
 
@@ -318,7 +323,7 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                     let (result, _buf) = file.write(src).await;
                     let (error, written) = match result {
                         Ok(n) => (0, n as u64),
-                        Err(e) => (e.raw_os_error().unwrap_or(libc::EIO as i32) as u32, 0),
+                        Err(e) => (e.raw_os_error().unwrap_or(EIO) as u32, 0),
                     };
                     let _ = tx.send(FileOpResult::Write {
                         ov_ptr,
@@ -341,10 +346,10 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                         let fd = *fd;
                         if fd == 1 {
                             let _ = src;
-                            error = libc::EWOULDBLOCK as u32;
+                            error = EWOULDBLOCK;
                         } else if fd == 2 {
                             let _ = src;
-                            error = libc::EWOULDBLOCK as u32;
+                            error = EWOULDBLOCK;
                         } else {
                             error = 9; // EBADF
                         }
@@ -357,7 +362,7 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                     }
                 }
             } else {
-                anyhow::bail!("write: invalid handle {}", handle);
+                wasmtime::bail!("write: invalid handle {}", handle);
             }
             write_overlapped(data, ov_ptr, error, 0, written as u64)
         },
@@ -386,11 +391,11 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
          path_ptr: u32,
          path_len: u32,
          flags: u32|
-         -> anyhow::Result<()> {
+         -> wasmtime::Result<()> {
             let mem = get_memory(&mut caller)?;
             let (data, host) = mem.data_and_store_mut(&mut caller);
             let path_bytes = guest_slice(data, path_ptr, path_len)?.to_vec();
-            let path = std::str::from_utf8(&path_bytes).context("path_open: non-UTF-8 path")?;
+            let path = std::str::from_utf8(&path_bytes).map_err(|_| wasmtime::format_err!("path_open: non-UTF-8 path"))?;
             let path_owned = path.to_owned();
             let read_flag = (flags & 1) != 0;
             let write_flag = (flags & 2) != 0;
@@ -442,11 +447,11 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
          ov_ptr: u32,
          path_ptr: u32,
          path_len: u32|
-         -> anyhow::Result<()> {
+         -> wasmtime::Result<()> {
             let mem = get_memory(&mut caller)?;
             let (data, host) = mem.data_and_store_mut(&mut caller);
             let path_bytes = guest_slice(data, path_ptr, path_len)?.to_vec();
-            let path = std::str::from_utf8(&path_bytes).context("path_stat: non-UTF-8 path")?;
+            let path = std::str::from_utf8(&path_bytes).map_err(|_| wasmtime::format_err!("path_stat: non-UTF-8 path"))?;
             let path_owned = path.to_owned();
             let tx = host.file_op_tx.clone();
 
@@ -506,7 +511,7 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                             ctime_ns,
                         })
                     }
-                    Err(e) => Err(e.raw_os_error().unwrap_or(libc::EIO as i32) as u32),
+                    Err(e) => Err(e.raw_os_error().unwrap_or(EIO) as u32),
                 };
 
                 let _ = tx.send(FileOpResult::PathStat { ov_ptr, result });
@@ -662,7 +667,7 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
          handle: u64,
          ptr: u32,
          len: u32|
-         -> anyhow::Result<()> {
+         -> wasmtime::Result<()> {
             let mem = get_memory(&mut caller)?;
             let (data, host) = mem.data_and_store_mut(&mut caller);
 
@@ -719,10 +724,10 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
          _addr_len: u32,
          _port: u32,
          _flags: u32|
-         -> anyhow::Result<()> {
+         -> wasmtime::Result<()> {
             let mem = get_memory(&mut caller)?;
             let data = mem.data_mut(&mut caller);
-            write_overlapped(data, ov_ptr, libc::ENOSYS as u32, 0, 0)
+            write_overlapped(data, ov_ptr, ENOSYS, 0, 0)
         },
     )?;
 
@@ -733,10 +738,10 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         |mut caller: Caller<'_, HostState>,
          ov_ptr: u32,
          _listen_handle: u64|
-         -> anyhow::Result<()> {
+         -> wasmtime::Result<()> {
             let mem = get_memory(&mut caller)?;
             let data = mem.data_mut(&mut caller);
-            write_overlapped(data, ov_ptr, libc::ENOSYS as u32, 0, 0)
+            write_overlapped(data, ov_ptr, ENOSYS, 0, 0)
         },
     )?;
 
@@ -749,7 +754,7 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
          ov_ptr: u32,
          cfg_ptr: u32,
          cfg_len: u32|
-         -> anyhow::Result<()> {
+         -> wasmtime::Result<()> {
             let mem = get_memory(&mut caller)?;
             let (data, host) = mem.data_and_store_mut(&mut caller);
             let cfg = guest_slice(data, cfg_ptr, cfg_len)?.to_vec();
@@ -760,11 +765,11 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                 Some(p) if !p.is_empty() => match std::str::from_utf8(p) {
                     Ok(s) => s.to_string(),
                     Err(_) => {
-                        return write_overlapped(data, ov_ptr, libc::EINVAL as u32, 0, 0);
+                        return write_overlapped(data, ov_ptr, EINVAL, 0, 0);
                     }
                 },
                 _ => {
-                    return write_overlapped(data, ov_ptr, libc::EINVAL as u32, 0, 0);
+                    return write_overlapped(data, ov_ptr, EINVAL, 0, 0);
                 }
             };
 
@@ -803,7 +808,7 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                     write_overlapped(data, ov_ptr, 0, 0, handle)
                 }
                 Err(e) => {
-                    let err = e.raw_os_error().unwrap_or(libc::ENOSYS as i32) as u32;
+                    let err = e.raw_os_error().unwrap_or(ENOSYS as i32) as u32;
                     write_overlapped(data, ov_ptr, err, 0, 0)
                 }
             }
@@ -818,7 +823,7 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         |mut caller: Caller<'_, HostState>,
          ov_ptr: u32,
          process_handle: u64|
-         -> anyhow::Result<()> {
+         -> wasmtime::Result<()> {
             caller
                 .data_mut()
                 .child_wait_pending
@@ -838,10 +843,10 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     linker.func_wrap(
         "env",
         "signal_wait",
-        |mut caller: Caller<'_, HostState>, ov_ptr: u32, _signum: u32| -> anyhow::Result<()> {
+        |mut caller: Caller<'_, HostState>, ov_ptr: u32, _signum: u32| -> wasmtime::Result<()> {
             let mem = get_memory(&mut caller)?;
             let data = mem.data_mut(&mut caller);
-            write_overlapped(data, ov_ptr, libc::ENOSYS as u32, 0, 0)
+            write_overlapped(data, ov_ptr, ENOSYS, 0, 0)
         },
     )?;
 
@@ -873,7 +878,7 @@ pub fn poll_completions(
     store: &mut Store<HostState>,
     memory: &Memory,
     timeout_ms: i32,
-) -> anyhow::Result<bool> {
+) -> wasmtime::Result<bool> {
     let mut progress = false;
     let now = std::time::Instant::now();
 
@@ -1023,7 +1028,7 @@ pub fn poll_completions(
     }
 
     // 3. Check other I/O (non-stdin epoll)
-    let fired = store.data_mut().epoll.poll(0)?;
+    let fired = store.data_mut().epoll.poll(0);
     if !fired.is_empty() {
         let (mem, host) = memory.data_and_store_mut(&mut *store);
         for token in fired {

@@ -64,42 +64,29 @@ pub struct PendingOp {
 // -- EpollState: used for non-stdin stream fds --------------------------------
 
 pub struct EpollState {
-    pub poller: polling::Poller,
     pub pending: HashMap<u64, PendingOp>,
     pub next_token: u64,
 }
 
 impl EpollState {
-    pub fn new() -> anyhow::Result<Self> {
-        Ok(Self {
-            poller: polling::Poller::new()?,
+    pub fn new() -> Self {
+        Self {
             pending: HashMap::new(),
             next_token: 1,
-        })
+        }
     }
 
     /// Register fd for readable events. Returns a token identifying this registration.
     /// Not used for stdin (fd=0) -- that is handled via the stdin reader thread.
     #[allow(dead_code)]
-    pub fn register_read(&mut self, _fd: i32) -> anyhow::Result<u64> {
+    pub fn register_read(&mut self, _fd: i32) -> u64 {
         let token = self.next_token;
         self.next_token += 1;
-        Ok(token)
+        token
     }
 
-    pub fn poll(&mut self, timeout_ms: i32) -> anyhow::Result<Vec<u64>> {
-        let mut events = polling::Events::with_capacity(std::num::NonZero::new(32).unwrap());
-        let timeout = if timeout_ms >= 0 {
-            Some(std::time::Duration::from_millis(timeout_ms as u64))
-        } else {
-            None
-        };
-        self.poller.wait(&mut events, timeout)?;
-        let mut fired = Vec::new();
-        for ev in events.iter() {
-            fired.push(ev.key as u64);
-        }
-        Ok(fired)
+    pub fn poll(&mut self, _timeout_ms: i32) -> Vec<u64> {
+        Vec::new()
     }
 }
 
@@ -125,7 +112,7 @@ pub struct HostState {
 }
 
 impl HostState {
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new() -> Self {
         let mut handles: HashMap<u64, HandleKind> = HashMap::new();
         handles.insert(0, HandleKind::Fd(0));
         handles.insert(1, HandleKind::Fd(1));
@@ -135,10 +122,10 @@ impl HostState {
         let (file_op_tx, file_op_rx) = mpsc::channel();
         let _ = stdin_tx;
 
-        Ok(Self {
+        Self {
             handles,
             stats: HashMap::new(),
-            epoll: EpollState::new()?,
+            epoll: EpollState::new(),
             timers: HashMap::new(),
             next_handle: 3,
             next_stat: 1,
@@ -148,7 +135,7 @@ impl HostState {
             file_op_tx,
             file_op_rx,
             child_wait_pending: Vec::new(),
-        })
+        }
     }
 
     pub fn alloc_handle(&mut self, kind: HandleKind) -> u64 {
