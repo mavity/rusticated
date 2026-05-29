@@ -9,9 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 
-wasmtime = { version = "26", default-features = false, features = ["runtime", "pulley"] }
+wasmtime = { version = "45", default-features = false, features = ["runtime", "pulley"] }
 anyhow = { version = "1", default-features = false }
-libc = "0.2"
-polling = "3.11.0"
 
 
