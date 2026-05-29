@@ -56,11 +56,21 @@ pub mod unix {
         }
 
         impl MetadataExt for crate::fs::Metadata {
-            fn mode(&self) -> u32 { crate::fs::Metadata::mode(self) }
-            fn nlink(&self) -> u64 { crate::fs::Metadata::nlink(self) }
-            fn uid(&self) -> u32 { crate::fs::Metadata::uid(self) }
-            fn gid(&self) -> u32 { crate::fs::Metadata::gid(self) }
-            fn ino(&self) -> u64 { crate::fs::Metadata::inode(self) }
+            fn mode(&self) -> u32 {
+                crate::fs::Metadata::mode(self)
+            }
+            fn nlink(&self) -> u64 {
+                crate::fs::Metadata::nlink(self)
+            }
+            fn uid(&self) -> u32 {
+                crate::fs::Metadata::uid(self)
+            }
+            fn gid(&self) -> u32 {
+                crate::fs::Metadata::gid(self)
+            }
+            fn ino(&self) -> u64 {
+                crate::fs::Metadata::inode(self)
+            }
         }
     }
 }
@@ -160,7 +170,9 @@ pub mod windows {
         }
 
         impl MetadataExt for crate::fs::Metadata {
-            fn file_attributes(&self) -> u32 { crate::fs::Metadata::mode(self) }
+            fn file_attributes(&self) -> u32 {
+                crate::fs::Metadata::mode(self)
+            }
         }
     }
 }

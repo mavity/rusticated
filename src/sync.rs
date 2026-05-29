@@ -4,7 +4,7 @@ pub use alloc::sync::{Arc, Weak};
 pub use core::sync::*;
 pub use spin::lazy::Lazy as LazyLock;
 pub use spin::mutex::SpinMutex;
-pub use spin::{Mutex, RwLock, MutexGuard, RwLockReadGuard, RwLockWriteGuard};
+pub use spin::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// A synchronization primitive which can be written to only once.
 pub struct OnceLock<T> {
@@ -91,7 +91,12 @@ pub mod mpsc {
             queue: Mutex::new(VecDeque::new()),
             sender_alive: AtomicBool::new(true),
         });
-        (Sender { inner: inner.clone() }, Receiver { inner })
+        (
+            Sender {
+                inner: inner.clone(),
+            },
+            Receiver { inner },
+        )
     }
 
     impl<T> Sender<T> {
@@ -107,7 +112,9 @@ pub mod mpsc {
 
     impl<T> Clone for Sender<T> {
         fn clone(&self) -> Self {
-            Self { inner: self.inner.clone() }
+            Self {
+                inner: self.inner.clone(),
+            }
         }
     }
 
@@ -135,10 +142,7 @@ pub mod mpsc {
 
         /// Block until a value is available or the timeout expires.
         #[cfg(not(target_family = "wasm"))]
-        pub fn recv_timeout(
-            &self,
-            timeout: crate::time::Duration,
-        ) -> Result<T, RecvTimeoutError> {
+        pub fn recv_timeout(&self, timeout: crate::time::Duration) -> Result<T, RecvTimeoutError> {
             let deadline = crate::time::Instant::now() + timeout;
             loop {
                 match self.try_recv() {

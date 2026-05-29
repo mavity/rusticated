@@ -9,8 +9,16 @@ use std::process::Command;
 const TARGET_SLOTS: &[&[&str]] = &[
     &["x86_64-unknown-linux-musl", "x86_64-unknown-linux-gnu"],
     &["aarch64-unknown-linux-musl", "aarch64-unknown-linux-gnu"],
-    &["x86_64-pc-windows-msvc", "x86_64-pc-windows-gnullvm", "x86_64-pc-windows-gnu"],
-    &["aarch64-pc-windows-msvc", "aarch64-pc-windows-gnullvm", "aarch64-pc-windows-gnu"],
+    &[
+        "x86_64-pc-windows-msvc",
+        "x86_64-pc-windows-gnullvm",
+        "x86_64-pc-windows-gnu",
+    ],
+    &[
+        "aarch64-pc-windows-msvc",
+        "aarch64-pc-windows-gnullvm",
+        "aarch64-pc-windows-gnu",
+    ],
     &["x86_64-apple-darwin"],
     &["aarch64-apple-darwin"],
 ];
@@ -345,7 +353,7 @@ fn build_component(workspace_dir: &Path, target_tree: &Path, package: &str, targ
     } else {
         PathBuf::from(target)
     };
-    
+
     let target_name = custom_target.file_stem().unwrap().to_string_lossy();
 
     let target_env = target.to_uppercase().replace("-", "_");
@@ -687,9 +695,7 @@ fn parse_existing_mohab(mohab_path: &Path) -> Vec<Option<(Vec<u8>, Vec<u8>)>> {
         Some(p) => p,
         None => {
             if slot_offsets.iter().any(|&(_, len)| len > 0) {
-                println!(
-                    "cargo:warning=Could not decompress pool from existing mohab.bat"
-                );
+                println!("cargo:warning=Could not decompress pool from existing mohab.bat");
             }
             return empty;
         }
