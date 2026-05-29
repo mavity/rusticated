@@ -48,9 +48,7 @@ pub struct Backtrace {
 
 impl Backtrace {
     fn capture_enabled() -> bool {
-        match crate::env::var("RUST_LIB_BACKTRACE")
-            .or_else(|_| crate::env::var("RUST_BACKTRACE"))
-        {
+        match crate::env::var("RUST_LIB_BACKTRACE").or_else(|_| crate::env::var("RUST_BACKTRACE")) {
             Ok(s) => s == "1" || s == "full",
             Err(_) => false,
         }
@@ -62,7 +60,9 @@ impl Backtrace {
     /// `RUST_BACKTRACE` or `RUST_LIB_BACKTRACE` is not set to `1` or `full`.
     pub fn capture() -> Backtrace {
         if !Self::capture_enabled() {
-            return Backtrace { inner: Inner::Disabled };
+            return Backtrace {
+                inner: Inner::Disabled,
+            };
         }
         Self::force_capture()
     }
@@ -87,7 +87,9 @@ impl Backtrace {
 
     /// Return a disabled, empty [`Backtrace`].
     pub const fn disabled() -> Backtrace {
-        Backtrace { inner: Inner::Disabled }
+        Backtrace {
+            inner: Inner::Disabled,
+        }
     }
 
     /// Returns the status of this backtrace.
@@ -130,7 +132,8 @@ impl fmt::Display for Backtrace {
                                         match path {
                                             backtrace_sys::BytesOrWideString::Bytes(b) => {
                                                 if let Ok(s) = core::str::from_utf8(b) {
-                                                    let _ = write!(f, "\n             at {s}:{lineno}");
+                                                    let _ =
+                                                        write!(f, "\n             at {s}:{lineno}");
                                                 }
                                             }
                                             backtrace_sys::BytesOrWideString::Wide(_) => {}

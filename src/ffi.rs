@@ -2,20 +2,20 @@
 
 use crate::string::String;
 use crate::vec::Vec;
-pub use core::ffi::c_void;
 pub use core::ffi::c_char;
+pub use core::ffi::c_double;
+pub use core::ffi::c_float;
 pub use core::ffi::c_int;
 pub use core::ffi::c_long;
-pub use core::ffi::c_ulong;
 pub use core::ffi::c_longlong;
-pub use core::ffi::c_ulonglong;
 pub use core::ffi::c_schar;
-pub use core::ffi::c_uchar;
 pub use core::ffi::c_short;
-pub use core::ffi::c_ushort;
+pub use core::ffi::c_uchar;
 pub use core::ffi::c_uint;
-pub use core::ffi::c_float;
-pub use core::ffi::c_double;
+pub use core::ffi::c_ulong;
+pub use core::ffi::c_ulonglong;
+pub use core::ffi::c_ushort;
+pub use core::ffi::c_void;
 // ─── OsStr / OsString ────────────────────────────────────────────────────────
 
 /// OS string slice — an alias for [`str`].

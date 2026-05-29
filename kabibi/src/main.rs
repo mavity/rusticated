@@ -1,12 +1,12 @@
-use ratatui::layout::{Alignment, Constraint, Direction, Layout};
+use ratatui::Terminal;
 use ratatui::backend::Backend;
 use ratatui::layout::Rect;
+use ratatui::layout::{Alignment, Constraint, Direction, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
-use ratatui::Terminal;
 use std::io::{AsyncRead, AsyncWrite};
 use std::mem;
-use std::tty::{disable_raw_mode, enable_raw_mode, size, stdin, stdout, Tty};
+use std::tty::{Tty, disable_raw_mode, enable_raw_mode, size, stdin, stdout};
 
 mod app;
 mod truant;
@@ -354,9 +354,7 @@ fn draw_file_panel(
                 } else {
                     Style::default().bg(Color::Blue).fg(Color::Cyan)
                 };
-                cols_items[c].push(
-                    ListItem::new(pad_or_trim(&item.name, row_width)).style(style),
-                );
+                cols_items[c].push(ListItem::new(pad_or_trim(&item.name, row_width)).style(style));
             }
         }
     }
@@ -465,8 +463,11 @@ fn render_scrollbar(
         }
     }
 
-    let track_widget = Paragraph::new(track.join("\n"))
-        .style(Style::default().bg(Color::Indexed(234)).fg(Color::Indexed(242)));
+    let track_widget = Paragraph::new(track.join("\n")).style(
+        Style::default()
+            .bg(Color::Indexed(234))
+            .fg(Color::Indexed(242)),
+    );
     f.render_widget(track_widget, area);
 }
 
@@ -626,7 +627,8 @@ async fn handle_input(app: &mut App, bytes: &[u8], _inner_height: usize) {
                 return;
             }
 
-            if app.chat_state == ChatState::Closed && (app.active_pane == 0 || app.active_pane == 1) {
+            if app.chat_state == ChatState::Closed && (app.active_pane == 0 || app.active_pane == 1)
+            {
                 if open_selected_directory(app).await {
                     return;
                 }

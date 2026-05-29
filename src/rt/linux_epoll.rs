@@ -104,7 +104,10 @@ impl EpollDriver {
 
         // Register the eventfd with epoll using WAKE_TOKEN (no EPOLLONESHOT —
         // we want it to stay armed so every write wakes us up).
-        let mut ev = EpollEvent { events: EPOLLIN, data: WAKE_TOKEN };
+        let mut ev = EpollEvent {
+            events: EPOLLIN,
+            data: WAKE_TOKEN,
+        };
         // SAFETY: `epfd` and `evfd` are valid; `ev` outlives the call.
         if unsafe { epoll_ctl(epfd, EPOLL_CTL_ADD, evfd, &mut ev) } < 0 {
             unsafe { close(evfd) };

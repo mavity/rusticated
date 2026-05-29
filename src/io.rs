@@ -144,7 +144,6 @@ pub fn pipe() -> Result<(PipeReader, PipeWriter)> {
     Ok((PipeReader, PipeWriter))
 }
 
-
 impl AsyncRead for PipeReader {
     async fn read(&mut self, _buf: Vec<u8>) -> (Result<usize>, Vec<u8>) {
         (Err(Error::other("pipereader read not implemented")), _buf)
@@ -293,4 +292,3 @@ pub trait IsTerminal {
     /// Returns `true` if this instance is connected to a terminal (TTY).
     fn is_terminal(&self) -> bool;
 }
-

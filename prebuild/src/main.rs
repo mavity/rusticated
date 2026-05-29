@@ -3,7 +3,10 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
-    let output = Command::new("rustc").arg("-vV").output().expect("Failed to run rustc");
+    let output = Command::new("rustc")
+        .arg("-vV")
+        .output()
+        .expect("Failed to run rustc");
     let rustc_out = String::from_utf8_lossy(&output.stdout);
     let host = rustc_out
         .lines()
@@ -11,7 +14,7 @@ fn main() {
         .expect("No host line in rustc -vV")
         .trim_start_matches("host: ")
         .trim();
-    
+
     let base_targets = [
         ("x86_64-pc-windows-msvc", "x86_64-windows-rusticated"),
         ("x86_64-unknown-linux-gnu", "x86_64-linux-rusticated"),
@@ -35,28 +38,41 @@ fn main() {
     let _ = fs::write(spec_dir.join("config.toml"), "");
 
     let mut config_toml = String::new();
-    
+
     // Set RUST_TARGET_PATH so all workspace crates can find target specs by name without .json
     let rust_target_path = spec_dir.display().to_string().replace('\\', "/");
-    config_toml.push_str(&format!("[env]\nRUST_TARGET_PATH = \"{}\"\n\n", rust_target_path));
-    
-    let abs_json = spec_dir.join(format!("{}.json", host_rusticated_target))
-        .canonicalize().unwrap_or_else(|_| spec_dir.join(format!("{}.json", host_rusticated_target)))
-        .to_string_lossy().replace("\\\\?\\", "").replace('\\', "/");
-    config_toml.push_str(&format!("[build]\ntarget = \"{}\"\n\n", abs_json));
-    
-    config_toml.push_str("[unstable]\njson-target-spec = true\n\n");
+    config_toml.push_str(&format!(
+        "[env]\nRUST_TARGET_PATH = \"{}\"\n\n",
+        rust_target_path
+    ));
 
+    let abs_json = spec_dir
+        .join(format!("{}.json", host_rusticated_target))
+        .canonicalize()
+        .unwrap_or_else(|_| spec_dir.join(format!("{}.json", host_rusticated_target)))
+        .to_string_lossy()
+        .replace("\\\\?\\", "")
+        .replace('\\', "/");
+    config_toml.push_str(&format!("[build]\ntarget = \"{}\"\n\n", abs_json));
+
+    config_toml.push_str("[unstable]\njson-target-spec = true\n\n");
 
     for (base_target, custom_name) in base_targets {
         let output = Command::new("rustc")
-            .arg("-Z").arg("unstable-options")
-            .arg("--print").arg("target-spec-json")
-            .arg("--target").arg(base_target)
-            .output().expect("Failed to invoke rustc");
+            .arg("-Z")
+            .arg("unstable-options")
+            .arg("--print")
+            .arg("target-spec-json")
+            .arg("--target")
+            .arg(base_target)
+            .output()
+            .expect("Failed to invoke rustc");
 
         if !output.status.success() {
-            println!("Skipping {} (rustc error or missing component)", base_target);
+            println!(
+                "Skipping {} (rustc error or missing component)",
+                base_target
+            );
             continue;
         }
 
@@ -104,13 +120,18 @@ fn main() {
         let build_output = Command::new("cargo")
             .env("RUSTFLAGS", &rustflags)
             .arg("build")
-            .arg("-p").arg("rusticated")
-            .arg("-Z").arg("build-std=core,alloc,compiler_builtins")
-            .arg("--config").arg("unstable.json-target-spec=true")
-            .arg("--target").arg(json_path.to_string_lossy().to_string())
+            .arg("-p")
+            .arg("rusticated")
+            .arg("-Z")
+            .arg("build-std=core,alloc,compiler_builtins")
+            .arg("--config")
+            .arg("unstable.json-target-spec=true")
+            .arg("--target")
+            .arg(json_path.to_string_lossy().to_string())
             .arg("--release")
             .arg("--message-format=json")
-            .output().expect("cargo build failed");
+            .output()
+            .expect("cargo build failed");
 
         if build_output.status.success() {
             // Build sysroot directory structure:
@@ -157,7 +178,10 @@ fn main() {
 
             // Emit --sysroot flag pointing at the sysroot we just built.
             let abs_sysroot = match fs::canonicalize(&sysroot_dir) {
-                Ok(p) => p.to_string_lossy().replace("\\\\?\\", "").replace('\\', "/"),
+                Ok(p) => p
+                    .to_string_lossy()
+                    .replace("\\\\?\\", "")
+                    .replace('\\', "/"),
                 Err(_) => sysroot_dir.to_string_lossy().replace('\\', "/"),
             };
             let target_rustflags = format!(

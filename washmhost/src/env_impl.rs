@@ -97,7 +97,10 @@ pub fn register(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                     )
                 };
                 if status != 0 {
-                    return Err(anyhow::anyhow!("BCryptGenRandom failed with status {}", status));
+                    return Err(anyhow::anyhow!(
+                        "BCryptGenRandom failed with status {}",
+                        status
+                    ));
                 }
             }
 
