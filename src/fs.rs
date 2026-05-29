@@ -527,6 +527,29 @@ pub struct File {
     pub(crate) handle: u64,
 }
 
+impl Drop for File {
+    fn drop(&mut self) {
+        #[cfg(target_family = "wasm")]
+        unsafe {
+            crate::abi::imports::handle_close(self.handle);
+        }
+        #[cfg(windows)]
+        unsafe {
+            unsafe extern "system" {
+                fn CloseHandle(hObject: usize) -> i32;
+            }
+            CloseHandle(self.handle as usize);
+        }
+        #[cfg(unix)]
+        unsafe {
+            unsafe extern "C" {
+                fn close(fd: i32) -> i32;
+            }
+            close(self.handle as i32);
+        }
+    }
+}
+
 impl File {
     pub fn options() -> OpenOptions {
         OpenOptions::new()
@@ -669,7 +692,40 @@ impl AsyncWrite for File {
         }
     }
     async fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+        #[cfg(target_family = "wasm")]
+        {
+            Ok(())
+        }
+        #[cfg(unix)]
+        {
+            let fd = self.handle as i32;
+            crate::rt::blocking::BlockingOpFuture::new(move || {
+                unsafe extern "C" {
+                    fn fsync(fd: i32) -> i32;
+                }
+                let res = unsafe { fsync(fd) };
+                if res < 0 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            }).await
+        }
+        #[cfg(windows)]
+        {
+            let handle = self.handle as usize;
+            crate::rt::blocking::BlockingOpFuture::new(move || {
+                unsafe extern "system" {
+                    fn FlushFileBuffers(hObject: usize) -> i32;
+                }
+                let res = unsafe { FlushFileBuffers(handle) };
+                if res == 0 { // 0 means failure in WinAPI for this function
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            }).await
+        }
     }
 }
 
