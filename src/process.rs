@@ -32,6 +32,11 @@ impl Termination for i32 {
     }
 }
 
+/// Terminates the process in an abnormal fashion.
+pub fn abort() -> ! {
+    core::intrinsics::abort()
+}
+
 impl Termination for ExitStatus {
     fn report(self) -> i32 {
         self.code().unwrap_or(1)

@@ -40,6 +40,33 @@ mod msvc_stubs;
 #[macro_export]
 macro_rules! thread_local {
     () => {};
+
+    // Support for Rust 2024 `const { ... }` block init
+    ($(#[$attr:meta])* $vis:vis static $name:ident: $t:ty = const { $init:expr }; $($rest:tt)*) => {
+        $(#[$attr])*
+        $vis static $name: $crate::thread::LocalKey<$t> = {
+            #[thread_local]
+            static STORAGE: $crate::cell::UnsafeCell<::core::option::Option<$t>> =
+                $crate::cell::UnsafeCell::new(::core::option::Option::None);
+
+            fn __get() -> *const $t {
+                // SAFETY: `#[thread_local]` guarantees exclusive single-thread
+                // access; this function must not be called re-entrantly.
+                unsafe {
+                    let ptr = STORAGE.get();
+                    if (*ptr).is_none() {
+                        *ptr = ::core::option::Option::Some($init);
+                    }
+                    // SAFETY: initialised just above.
+                    (*ptr).as_ref().unwrap_unchecked() as *const _
+                }
+            }
+
+            $crate::thread::LocalKey::new(__get)
+        };
+        $crate::thread_local!($($rest)*);
+    };
+
     ($(#[$attr:meta])* $vis:vis static $name:ident: $t:ty = $init:expr; $($rest:tt)*) => {
         $(#[$attr])*
         $vis static $name: $crate::thread::LocalKey<$t> = {

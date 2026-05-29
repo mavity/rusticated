@@ -1,10 +1,10 @@
 //! Synchronisation primitives for `#![no_std]` environments.
 
-pub use alloc::sync::Arc;
+pub use alloc::sync::{Arc, Weak};
 pub use core::sync::*;
 pub use spin::lazy::Lazy as LazyLock;
 pub use spin::mutex::SpinMutex;
-pub use spin::{Mutex, RwLock};
+pub use spin::{Mutex, RwLock, MutexGuard, RwLockReadGuard, RwLockWriteGuard};
 
 /// A synchronization primitive which can be written to only once.
 pub struct OnceLock<T> {
