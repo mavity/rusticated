@@ -143,7 +143,7 @@ pub(crate) fn sleep_ms(ms: u64) {
 
 /// Yield the current thread's time slice.
 #[cfg(not(target_family = "wasm"))]
-pub(crate) fn yield_now() {
+pub fn yield_now() {
     #[cfg(windows)]
     {
         #[link(name = "kernel32", kind = "raw-dylib")]
