@@ -1,13 +1,6 @@
 [workspace]
 members = ["demo", "washmhost", "brot", "mohabbat", "demo/loch", "kabibi", "prebuild"]
 
-[patch.crates-io]
-# Shim that translates custom `*-rusticated` target names to their standard
-# equivalents before target-lexicon's build script tries to parse them.
-# Without this, target-lexicon (used by wasmtime) panics when TARGET is set
-# to e.g. `aarch64-windows-rusticated`.
-target-lexicon = { path = "washmhost/vendor/target-lexicon" }
-
 
 [workspace.package]
 edition = "2024"
