@@ -494,6 +494,8 @@ unsafe extern "C" {}
 #[allow(missing_docs)]
 pub unsafe extern "C" fn rust_eh_personality() {}
 
+/// Stack backtraces
+pub mod backtrace;
 /// Collections
 pub mod collections;
 /// Environment evaluation

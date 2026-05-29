@@ -95,6 +95,7 @@ workspace = true
 threads = []
 
 [dependencies]
+backtrace = { version = "0.3", default-features = false }
 dlmalloc = { version = "0.2", features = ["global"] }
 spin = { version = "0.9.8", default-features = false, features = ["mutex", "spin_mutex", "rwlock", "once", "lazy"] }
 hashbrown = { version = "0.14", default-features = false, features = ["ahash", "allocator-api2"] }

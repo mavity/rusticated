@@ -253,6 +253,14 @@ fn build_sysroot(workspace_dir: &Path, target: &str, target_name: &str) -> bool 
         .join("target")
         .join(format!("build-std-{}", target_name));
     cmd.env("CARGO_TARGET_DIR", &build_dir);
+    let existing_rustflags = env::var("RUSTFLAGS").unwrap_or_default();
+    let sysroot_rustflags = if existing_rustflags.is_empty() {
+        "--cfg backtrace_in_libstd".to_string()
+    } else {
+        format!("{} --cfg backtrace_in_libstd", existing_rustflags)
+    };
+    cmd.env("RUSTFLAGS", sysroot_rustflags);
+    cmd.env("CARGO_CFG_BACKTRACE_IN_LIBSTD", "");
 
     let output = match cmd.output() {
         Ok(o) => o,
@@ -304,7 +312,16 @@ fn build_sysroot(workspace_dir: &Path, target: &str, target_name: &str) -> bool 
 }
 
 fn build_component(workspace_dir: &Path, target_tree: &Path, package: &str, target: &str) -> bool {
-    let needs_sysroot = true;
+    // washmhost is compiled for the custom rusticated target and needs our
+    // custom std.  We build a proper sysroot (rlibs stored under the custom
+    // target triple name) and pass --sysroot; no explicit --extern std/core/…
+    // flags are needed, which avoids the duplicate-CrateNum ICE that occurs
+    // when both --sysroot and --extern point at the same crates.
+    //
+    // brot is compiled for the standard host triple and uses the system std;
+    // no custom sysroot is required (the custom sysroot dir uses a different
+    // target-triple name and rustc would not find std there anyway).
+    let needs_sysroot = package == "washmhost";
     let rusticated_spec_dir = workspace_dir.join("target").join("rusticated-spec");
 
     let custom_target = if target.starts_with("x86_64-") {
@@ -333,7 +350,14 @@ fn build_component(workspace_dir: &Path, target_tree: &Path, package: &str, targ
 
     let target_env = target.to_uppercase().replace("-", "_");
     let rustflags_env = format!("CARGO_TARGET_{}_RUSTFLAGS", target_env);
-    let mut rustflags = env::var("RUSTFLAGS").unwrap_or_default();
+    // Start from a clean slate — do NOT inherit RUSTFLAGS from the parent
+    // cargo invocation.  The parent is building mohabbat for the host target
+    // (via sysroot.toml which injects --sysroot <rusticated-sysroot>), and
+    // inheriting those flags into sub-builds for the STANDARD host triple
+    // (brot) or for different custom targets (washmhost) causes rustc to look
+    // for core/alloc in the wrong sysroot and fail with "can't find crate for
+    // `core`".
+    let mut rustflags = String::new();
 
     // brot defines its own Windows entry point (mainCRTStartup) via rusticated's
     // runtime.  Without -nostartfiles, mingw's crt2.o also defines mainCRTStartup
@@ -377,34 +401,34 @@ fn build_component(workspace_dir: &Path, target_tree: &Path, package: &str, targ
         .env("CARGO_TARGET_DIR", target_tree)
         .env("RUSTFLAGS", &rustflags)
         .env(rustflags_env, rustflags)
+        // CARGO_ENCODED_RUSTFLAGS is an internal cargo env var set in the
+        // parent build-script environment.  It encodes the rustflags that the
+        // parent cargo is using (including --sysroot for the rusticated target).
+        // If it leaks into sub-cargo invocations it overrides our explicit
+        // RUSTFLAGS, causing "can't find crate for `core`" when brot or
+        // washmhost is compiled for a different target than the parent.
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("CARGO_MAKEFLAGS")
         .args(&["build", "-p", package, "--release"]);
 
     if package == "washmhost" {
-        let config_path = rusticated_spec_dir.join("config.toml");
-        let custom_target = if target.starts_with("x86_64-") {
-            if target.contains("windows") {
-                rusticated_spec_dir.join("x86_64-windows-rusticated.json")
-            } else if target.contains("linux") {
-                rusticated_spec_dir.join("x86_64-linux-rusticated.json")
-            } else {
-                rusticated_spec_dir.join("x86_64-rusticated.json")
-            }
-        } else if target.starts_with("aarch64-") {
-            if target.contains("windows") {
-                rusticated_spec_dir.join("aarch64-windows-rusticated.json")
-            } else if target.contains("linux") {
-                rusticated_spec_dir.join("aarch64-linux-rusticated.json")
-            } else {
-                rusticated_spec_dir.join("aarch64-rusticated.json")
-            }
-        } else if target.starts_with("wasm32-") {
-            rusticated_spec_dir.join("wasm32-rusticated.json")
-        } else {
-            PathBuf::from(target)
-        };
-        cmd.arg("--config").arg(config_path);
-        cmd.arg("--target").arg(custom_target);
+        // Do NOT pass --config config.toml explicitly.  When --config is
+        // passed as a CLI flag it has HIGHER priority than the RUSTFLAGS
+        // environment variable, which would prevent the --sysroot flag we set
+        // via RUSTFLAGS from overriding the explicit --extern std/core/… flags
+        // that used to live in config.toml.  Now that config.toml uses
+        // --sysroot instead of explicit externs this is less of a concern, but
+        // keeping the approach clean avoids future surprises.
+        //
+        // washmhost/.cargo/config.toml is NOT loaded by cargo when the current
+        // working directory is the workspace root (cargo only searches parent
+        // dirs, not subdirs), so we must provide the required settings here:
+        //   • json-target-spec → inline --config flag (doesn't affect rustflags)
+        //   • RUST_TARGET_PATH → explicit env var
+        //   • custom std sysroot → RUSTFLAGS (set above by needs_sysroot path)
+        cmd.env("RUST_TARGET_PATH", &rusticated_spec_dir);
+        cmd.arg("--config").arg("unstable.json-target-spec=true");
+        cmd.arg("--target").arg(&custom_target);
     } else {
         cmd.arg("--target").arg(target);
     }
