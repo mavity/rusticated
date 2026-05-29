@@ -1,11 +1,13 @@
+﻿#![cfg_attr(target_arch = "wasm32", no_main)]
 #![cfg_attr(target_arch = "wasm32", no_std)]
-#![cfg_attr(target_arch = "wasm32", no_main)]
+#[cfg(target_arch = "wasm32")]
+extern crate std;
+
+
+
 
 #[cfg(target_arch = "wasm32")]
-extern crate alloc;
-
-#[cfg(target_arch = "wasm32")]
-use alloc::{format, string::String, vec, vec::Vec};
+use std::{format, string::String, vec::vec, vec::Vec};
 #[cfg(target_arch = "wasm32")]
 use std::fs::File;
 #[cfg(target_arch = "wasm32")]
@@ -87,7 +89,7 @@ fn decompress(input: &[u8]) -> Result<Vec<u8>, &'static str> {
     use brotli_decompressor::{BrotliDecompressStream, BrotliResult, HuffmanCode};
 
     struct Rebox<T> {
-        b: alloc::boxed::Box<[T]>,
+        b: std::boxed::Box<[T]>,
     }
     impl<T> Default for Rebox<T> {
         fn default() -> Self {
@@ -136,7 +138,7 @@ fn decompress(input: &[u8]) -> Result<Vec<u8>, &'static str> {
         fn free_cell(&mut self, _: Rebox<HuffmanCode>) {}
     }
 
-    let mut state = alloc::boxed::Box::new(brotli_decompressor::BrotliState::new(
+    let mut state = std::boxed::Box::new(brotli_decompressor::BrotliState::new(
         HeapAllocator,
         HeapAllocator,
         HeapAllocator,
@@ -186,7 +188,7 @@ fn compress(data: &[u8]) -> anyhow::Result<Vec<u8>> {
 
     // Box-backed memory cell (satisfies AllocatedSlice<T> via blanket impl)
     struct CBox<T> {
-        b: alloc::boxed::Box<[T]>,
+        b: std::boxed::Box<[T]>,
     }
     impl<T> Default for CBox<T> {
         fn default() -> Self {
@@ -511,7 +513,7 @@ async fn juice_bottle_refill(
 
 #[cfg(target_arch = "wasm32")]
 async fn async_main() {
-    let args = std::env::args();
+    let args: std::vec::Vec<std::string::String> = std::env::args().collect();
     if args.len() <= 1 || args[1] == "-h" || args[1] == "--help" {
         out_print("Usage: mohab.bat <input.wasm|project_dir> -o <output.bat>\n").await;
         return;
@@ -568,3 +570,16 @@ async fn async_main() {
 fn main() {
     println!("[mohabbat] Success: mohab.bat generated via build script.");
 }
+
+
+
+
+
+
+
+
+
+
+
+
+

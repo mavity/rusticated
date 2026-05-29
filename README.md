@@ -213,20 +213,20 @@ The executable reads from the terminal, waits up to 5 seconds for a line, then w
 
 ## Demo variant 2 — WASM + wasmtime host
 
-This variant compiles the demo to `wasm32-rusticated` and runs it through the `washmhost` Rust binary, which implements the rusticated ABI via Wasmtime's embedding API.
+This variant compiles the demo to `wasm32-rusticated-unknown-unknown` and runs it through the `washmhost` Rust binary, which implements the rusticated ABI via Wasmtime's embedding API.
 
 **Step 1 — Build the WASM module** (run once, or after changing `demo/src/`):
 
 ```bash
-cargo build -p demo --target wasm32-rusticated --config sysroot.toml
+cargo build -p demo --target wasm32-rusticated-unknown-unknown --config sysroot.toml
 ```
 
-The `.wasm` output lands under `target/wasm32-rusticated/debug/`.
+The `.wasm` output lands under `target/wasm32-rusticated-unknown-unknown/debug/`.
 
 **Step 2 — Run with the wasmtime host:**
 
 ```bash
-cargo run -p washmhost -- target/wasm32-rusticated/debug/demo.wasm
+cargo run -p washmhost -- target/wasm32-rusticated-unknown-unknown/debug/demo.wasm
 ```
 
 ## Demo variant 3 — WASM + Node.js host
@@ -236,7 +236,7 @@ Same WASM module, different host: a Node.js script (`node-host/index.js`) that i
 Build the WASM module as in Step 1 above (if not already done), then:
 
 ```bash
-node node-host/index.js target/wasm32-rusticated/debug/demo.wasm
+node node-host/index.js target/wasm32-rusticated-unknown-unknown/debug/demo.wasm
 ```
 
 The harness spawns all three variants inside a ConPTY (via `node-pty`), types a few characters without pressing Enter, and lets the demo's built-in 5-second timer expire. It verifies that each variant exits cleanly (exit code 0) within 25 seconds.
