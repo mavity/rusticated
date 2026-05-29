@@ -100,7 +100,9 @@ pub fn spawn<F: FnOnce() + Send + 'static>(f: F) -> JoinHandle<()> {
             fn pthread_create(
                 thread: *mut usize,
                 attr: *const core::ffi::c_void,
-                start_routine: unsafe extern "C" fn(*mut core::ffi::c_void) -> *mut core::ffi::c_void,
+                start_routine: unsafe extern "C" fn(
+                    *mut core::ffi::c_void,
+                ) -> *mut core::ffi::c_void,
                 arg: *mut core::ffi::c_void,
             ) -> i32;
         }
@@ -115,7 +117,9 @@ pub fn spawn<F: FnOnce() + Send + 'static>(f: F) -> JoinHandle<()> {
         }
     }
 
-    JoinHandle { _phantom: PhantomData }
+    JoinHandle {
+        _phantom: PhantomData,
+    }
 }
 
 /// Sleep the current thread for approximately `ms` milliseconds.
@@ -132,12 +136,20 @@ pub(crate) fn sleep_ms(ms: u64) {
     #[cfg(not(windows))]
     {
         #[repr(C)]
-        struct Timespec { tv_sec: i64, tv_nsec: i64 }
+        struct Timespec {
+            tv_sec: i64,
+            tv_nsec: i64,
+        }
         unsafe extern "C" {
             fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> i32;
         }
-        let ts = Timespec { tv_sec: (ms / 1000) as i64, tv_nsec: ((ms % 1000) * 1_000_000) as i64 };
-        unsafe { nanosleep(&ts, core::ptr::null_mut()); }
+        let ts = Timespec {
+            tv_sec: (ms / 1000) as i64,
+            tv_nsec: ((ms % 1000) * 1_000_000) as i64,
+        };
+        unsafe {
+            nanosleep(&ts, core::ptr::null_mut());
+        }
     }
 }
 
@@ -147,12 +159,20 @@ pub fn yield_now() {
     #[cfg(windows)]
     {
         #[link(name = "kernel32", kind = "raw-dylib")]
-        unsafe extern "system" { fn SwitchToThread() -> i32; }
-        unsafe { SwitchToThread(); }
+        unsafe extern "system" {
+            fn SwitchToThread() -> i32;
+        }
+        unsafe {
+            SwitchToThread();
+        }
     }
     #[cfg(not(windows))]
     {
-        unsafe extern "C" { fn sched_yield() -> i32; }
-        unsafe { sched_yield(); }
+        unsafe extern "C" {
+            fn sched_yield() -> i32;
+        }
+        unsafe {
+            sched_yield();
+        }
     }
 }

@@ -185,7 +185,9 @@ impl Metadata {
         Ok(crate::time::SystemTime::from_nanos(self.created_time_ns))
     }
     pub fn permissions(&self) -> Permissions {
-        Permissions { readonly: self.readonly() }
+        Permissions {
+            readonly: self.readonly(),
+        }
     }
 }
 
@@ -485,37 +487,37 @@ impl OpenOptions {
     #[allow(unused_variables)]
     #[cfg(target_family = "wasm")]
     pub async fn open<P: AsRef<str>>(&self, path: P) -> io::Result<File> {
-            let mut flags = 0u32;
-            if self.read {
-                flags |= 1;
-            }
-            if self.write {
-                flags |= 2;
-            }
-            if self.create {
-                flags |= 4;
-            }
-            if self.truncate {
-                flags |= 8;
-            }
-            if self.append {
-                flags |= 16;
-            }
-            if self.create_new {
-                flags |= 32;
-            }
+        let mut flags = 0u32;
+        if self.read {
+            flags |= 1;
+        }
+        if self.write {
+            flags |= 2;
+        }
+        if self.create {
+            flags |= 4;
+        }
+        if self.truncate {
+            flags |= 8;
+        }
+        if self.append {
+            flags |= 16;
+        }
+        if self.create_new {
+            flags |= 32;
+        }
 
-            let path_bytes = path.as_ref().as_bytes().to_vec();
-            let (err, handle, _, _) =
-                crate::rt::wasm::OverlappedBufferFuture::new(path_bytes, move |ov, ptr, len| {
-                    unsafe { crate::abi::imports::path_open(ov, ptr, len, flags) };
-                })
-                .await;
+        let path_bytes = path.as_ref().as_bytes().to_vec();
+        let (err, handle, _, _) =
+            crate::rt::wasm::OverlappedBufferFuture::new(path_bytes, move |ov, ptr, len| {
+                unsafe { crate::abi::imports::path_open(ov, ptr, len, flags) };
+            })
+            .await;
 
-            if err != 0 {
-                return Err(io::Error::from_raw_os_error(err as i32));
-            }
-            Ok(File { handle })
+        if err != 0 {
+            return Err(io::Error::from_raw_os_error(err as i32));
+        }
+        Ok(File { handle })
     }
 }
 
@@ -709,7 +711,7 @@ pub async fn read_dir<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
             }
             all_bytes.extend_from_slice(&buf[..read_len as usize]);
         }
-        
+
         unsafe { crate::abi::imports::handle_close(handle) };
 
         // Format is null-separated UTF-8 strings
@@ -908,10 +910,11 @@ pub async fn metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
     #[cfg(target_family = "wasm")]
     {
         let path_bytes = path.as_ref().as_bytes().to_vec();
-        let (err, handle, _, _) = crate::rt::wasm::OverlappedBufferFuture::new(path_bytes, |ov, ptr, len| {
-            unsafe { crate::abi::imports::path_stat(ov, ptr, len) };
-        })
-        .await;
+        let (err, handle, _, _) =
+            crate::rt::wasm::OverlappedBufferFuture::new(path_bytes, |ov, ptr, len| {
+                unsafe { crate::abi::imports::path_stat(ov, ptr, len) };
+            })
+            .await;
 
         if err != 0 {
             return Err(io::Error::from_raw_os_error(err as i32));
@@ -1053,10 +1056,11 @@ pub async fn symlink_metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
     #[cfg(target_family = "wasm")]
     {
         let path_bytes = path.as_ref().as_bytes().to_vec();
-        let (err, handle, _, _) = crate::rt::wasm::OverlappedBufferFuture::new(path_bytes, |ov, ptr, len| {
-            unsafe { crate::abi::imports::path_lstat(ov, ptr, len) };
-        })
-        .await;
+        let (err, handle, _, _) =
+            crate::rt::wasm::OverlappedBufferFuture::new(path_bytes, |ov, ptr, len| {
+                unsafe { crate::abi::imports::path_lstat(ov, ptr, len) };
+            })
+            .await;
 
         if err != 0 {
             return Err(io::Error::from_raw_os_error(err as i32));
@@ -1187,7 +1191,9 @@ pub async fn symlink_metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
 
             #[cfg(not(any(unix, windows)))]
             {
-                Err(io::Error::other("symlink metadata not implemented on this host"))
+                Err(io::Error::other(
+                    "symlink metadata not implemented on this host",
+                ))
             }
         })
         .await

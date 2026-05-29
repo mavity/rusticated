@@ -16,8 +16,8 @@ fn main() {
         std::process::exit(1);
     }
 
-    let wasm_bytes = block_on(async { read_wasm_file(&args[1]).await })
-        .expect("failed to read wasm file");
+    let wasm_bytes =
+        block_on(async { read_wasm_file(&args[1]).await }).expect("failed to read wasm file");
     run(&wasm_bytes).unwrap();
 }
 

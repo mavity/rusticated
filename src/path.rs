@@ -60,8 +60,6 @@ impl AsRef<Path> for str {
     }
 }
 
-
-
 impl crate::borrow::Borrow<Path> for PathBuf {
     fn borrow(&self) -> &Path {
         self.as_path()

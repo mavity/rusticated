@@ -1,5 +1,5 @@
+use ::std::time::{Duration, Instant};
 use std::collections::HashMap;
-use ::std::time::{Instant, Duration};
 use std::fs::read_dir;
 
 #[derive(Clone)]
@@ -140,19 +140,31 @@ impl App {
     }
 
     pub async fn load_dir(path: &str) -> Vec<FileItem> {
-        let mut files = vec![FileItem { name: String::from(".."), is_dir: true }];
+        let mut files = vec![FileItem {
+            name: String::from(".."),
+            is_dir: true,
+        }];
         if let Ok(dir) = read_dir(path).await {
             for entry in dir {
                 if let Ok(entry) = entry {
                     let is_dir = entry.metadata().map(|m| m.is_dir()).unwrap_or(false);
-                    files.push(FileItem { name: entry.file_name().to_string(), is_dir });
+                    files.push(FileItem {
+                        name: entry.file_name().to_string(),
+                        is_dir,
+                    });
                 }
             }
         }
         files.sort_by(|a, b| {
-            if a.name == ".." { return std::cmp::Ordering::Less; }
-            if b.name == ".." { return std::cmp::Ordering::Greater; }
-            b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            if a.name == ".." {
+                return std::cmp::Ordering::Less;
+            }
+            if b.name == ".." {
+                return std::cmp::Ordering::Greater;
+            }
+            b.is_dir
+                .cmp(&a.is_dir)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
         files
     }

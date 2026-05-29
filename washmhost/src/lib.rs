@@ -23,13 +23,7 @@ extern "system" fn WinMain(
 
 fn write_diag(msg: &[u8]) {
     // Use libc::write directly (fd=2 = stderr) to bypass Rust I/O initialization
-    unsafe {
-        libc::write(
-            2,
-            msg.as_ptr() as *const libc::c_void,
-            msg.len() as _,
-        )
-    };
+    unsafe { libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len() as _) };
 }
 
 #[unsafe(no_mangle)]
