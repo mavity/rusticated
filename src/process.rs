@@ -34,7 +34,7 @@ impl Termination for i32 {
 
 /// Terminates the process in an abnormal fashion.
 pub fn abort() -> ! {
-    core::intrinsics::abort()
+    exit(1)
 }
 
 impl Termination for ExitStatus {
