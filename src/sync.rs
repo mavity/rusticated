@@ -2,7 +2,7 @@
 
 pub use alloc::sync::{Arc, Weak};
 pub use core::sync::*;
-pub use spin::lazy::Lazy as LazyLock;
+pub use spin::LazyLock;
 pub use spin::mutex::SpinMutex;
 pub use spin::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 

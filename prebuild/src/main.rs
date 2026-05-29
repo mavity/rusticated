@@ -136,6 +136,16 @@ fn main() {
                 "cargo build failed for target {}:\n{}",
                 custom_name, stderr
             );
+            let json_stdout = String::from_utf8_lossy(&build_output.stdout);
+            for line in json_stdout.lines() {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+                    if value["reason"] == "compiler-message" {
+                        if let Some(msg) = value["message"]["rendered"].as_str() {
+                            eprintln!("{}", msg);
+                        }
+                    }
+                }
+            }
             std::process::exit(build_output.status.code().unwrap_or(1));
         }
 
