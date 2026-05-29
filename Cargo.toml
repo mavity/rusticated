@@ -104,7 +104,7 @@ threads = []
 [dependencies]
 backtrace = { version = "0.3", default-features = false }
 dlmalloc = { version = "0.2", features = ["global"] }
-spin = { version = "0.9.8", default-features = false, features = ["mutex", "spin_mutex", "rwlock", "once", "lazy"] }
+spin = { version = "0.12", default-features = false, features = ["mutex", "spin_mutex", "rwlock", "once", "lazylock"] }
 hashbrown = { version = "0.14", default-features = false, features = ["ahash", "allocator-api2"] }
 ahash = { version = "0.8", default-features = false }
 concurrent-queue = { version = "2.5", default-features = false }
@@ -113,5 +113,5 @@ concurrent-queue = { version = "2.5", default-features = false }
 getrandom = { version = "0.2.10", default-features = false, features = ["custom"] }
 
 [target."cfg(windows)".dependencies]
-windows-sys = { version = "0.52.0", features = ["Win32_Networking_WinSock", "Win32_System_IO", "Win32_Foundation", "Win32_System_Threading", "Win32_Security", "Win32_System_SystemServices", "Win32_System_WindowsProgramming", "Win32_Storage_FileSystem", "Win32_System_Environment", "Win32_System_Console"] }
-windows-link = "0.1.0"
+windows-sys = { version = "0.61.2", features = ["Win32_Networking_WinSock", "Win32_System_IO", "Win32_Foundation", "Win32_System_Threading", "Win32_Security", "Win32_System_SystemServices", "Win32_System_WindowsProgramming", "Win32_Storage_FileSystem", "Win32_System_Environment", "Win32_System_Console"] }
+windows-link = "0.2.1"

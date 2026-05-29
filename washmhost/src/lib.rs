@@ -1,5 +1,3 @@
-#![no_std]
-
 mod env_impl;
 mod handles;
 
@@ -21,19 +19,13 @@ extern "system" fn WinMain(
     0
 }
 
-fn write_diag(msg: &[u8]) {
-    // Use libc::write directly (fd=2 = stderr) to bypass Rust I/O initialization
-    unsafe { libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len() as _) };
-}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn run_payload(ptr: *const u8, len: usize) -> u32 {
     let wasm_bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     match run_internal(wasm_bytes) {
         Ok(_) => 0,
         Err(e) => {
-            let msg = format!("Error in washmhost: {:?}\n", e);
-            write_diag(msg.as_bytes());
+            eprintln!("Error in washmhost: {:?}", e);
             1
         }
     }
@@ -46,7 +38,7 @@ fn run_internal(wasm_bytes: &[u8]) -> anyhow::Result<()> {
     config.dynamic_memory_guard_size(0);
     config.wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Enable);
     let engine = Engine::new(&config)?;
-    let module = Module::new(&engine, &wasm_bytes)?;
+    let module = unsafe { Module::deserialize(&engine, &wasm_bytes)? };
 
     let host_state = HostState::new()?;
     let mut store = Store::new(&engine, host_state);
@@ -64,8 +56,7 @@ fn run_internal(wasm_bytes: &[u8]) -> anyhow::Result<()> {
 
     loop {
         if let Err(e) = run.call(&mut store, ()) {
-            let msg = format!("[washmhost] run error: {:?}\n", e);
-            write_diag(msg.as_bytes());
+            eprintln!("[washmhost] run error: {:?}", e);
             break;
         }
 
