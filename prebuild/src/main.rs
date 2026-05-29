@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -103,7 +104,8 @@ fn main() {
         let json_path = spec_dir.join(format!("{}.json", custom_name));
         fs::write(&json_path, spec_json).unwrap();
 
-        // Now build rusticated for this target!
+        // Now build rusticated for this target in debug mode so the target and
+        // consumer builds both use the same artifact flavor.
         let existing_rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
         let rustflags = if existing_rustflags.is_empty() {
             "--cfg backtrace_in_libstd".to_string()
@@ -111,12 +113,6 @@ fn main() {
             format!("{} --cfg backtrace_in_libstd", existing_rustflags)
         };
 
-        // Single build with --message-format=json captures both success/failure
-        // and the artifact paths in one pass (cargo's incremental cache means
-        // a repeated build without --message-format is almost free, but one
-        // call is cleaner).
-        //
-        // --release so the sysroot rlibs match washmhost's release build.
         let build_output = Command::new("cargo")
             .env("RUSTFLAGS", &rustflags)
             .arg("build")
@@ -124,72 +120,85 @@ fn main() {
             .arg("rusticated")
             .arg("-Z")
             .arg("build-std=core,alloc,compiler_builtins")
+            .arg("-Z")
+            .arg("build-std-features=compiler-builtins-mem")
             .arg("--config")
             .arg("unstable.json-target-spec=true")
             .arg("--target")
             .arg(json_path.to_string_lossy().to_string())
-            .arg("--release")
             .arg("--message-format=json")
             .output()
             .expect("cargo build failed");
 
-        if build_output.status.success() {
-            // Build sysroot directory structure:
-            //   target/sysroot-<custom_name>/lib/rustlib/<custom_name>/lib/*.rlib
-            //
-            // Using --sysroot <path> in config.toml instead of explicit --extern
-            // flags avoids two problems:
-            //   1. Explicit externs for the custom target leak into HOST
-            //      compilations (build deps), causing target-triple mismatches.
-            //   2. Explicit externs can cause the same crate (core, alloc) to be
-            //      registered twice under different CrateNum indices, triggering an
-            //      ICE in the metadata encoder when zerocopy/simd is compiled.
-            let sysroot_dir = target_dir.join(format!("sysroot-{}", custom_name));
-            let sysroot_lib_dir = sysroot_dir
-                .join("lib")
-                .join("rustlib")
-                .join(custom_name)
-                .join("lib");
-            // Clear the lib dir so stale rlibs from earlier debug/release builds
-            // don't coexist with the fresh ones — rustc would be confused by
-            // multiple libstd-*.rlib files in the sysroot.
-            let _ = fs::remove_dir_all(&sysroot_lib_dir);
-            let _ = fs::create_dir_all(&sysroot_lib_dir);
+        if !build_output.status.success() {
+            let stderr = String::from_utf8_lossy(&build_output.stderr);
+            eprintln!(
+                "cargo build failed for target {}:\n{}",
+                custom_name, stderr
+            );
+            std::process::exit(build_output.status.code().unwrap_or(1));
+        }
 
-            let json_stdout = String::from_utf8_lossy(&build_output.stdout);
-            for line in json_stdout.lines() {
-                if line.contains("\"reason\":\"compiler-artifact\"") && line.contains(".rlib") {
-                    let parts: Vec<&str> = line.split("\"filenames\":[").collect();
-                    if parts.len() > 1 {
-                        let file_part = parts[1].split(']').next().unwrap_or("");
-                        for f in file_part.split(',') {
-                            let cleaned = f.trim_matches('"');
-                            if cleaned.ends_with(".rlib") || cleaned.ends_with(".rmeta") {
-                                let src = std::path::Path::new(cleaned);
-                                if let Some(fname) = src.file_name() {
-                                    let dest = sysroot_lib_dir.join(fname);
-                                    let _ = fs::copy(src, &dest);
-                                }
-                            }
+        let deps_dir = target_dir.join(custom_name).join("debug").join("deps");
+        let mut paths: HashMap<String, String> = HashMap::new();
+
+        let json_stdout = String::from_utf8_lossy(&build_output.stdout);
+        for line in json_stdout.lines() {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+                if value["reason"] != "compiler-artifact" {
+                    continue;
+                }
+                if let Some(files) = value["filenames"].as_array() {
+                    for filename in files.iter().filter_map(|f| f.as_str()) {
+                        if !filename.ends_with(".rlib") {
+                            continue;
                         }
+                        let path = std::path::Path::new(filename);
+                        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        let abs_path = match fs::canonicalize(path) {
+                            Ok(p) => p.to_string_lossy().replace("\\\\?\\", "").replace('\\', "/"),
+                            Err(_) => path.to_string_lossy().replace('\\', "/"),
+                        };
+
+                        let crate_name = if filename == "libstd.rlib" {
+                            "std".to_string()
+                        } else if let Some(stripped) = filename.strip_prefix("lib") {
+                            if let Some(idx) = stripped.rfind('-') {
+                                stripped[..idx].to_string()
+                            } else {
+                                stripped.trim_end_matches(".rlib").to_string()
+                            }
+                        } else {
+                            continue;
+                        };
+                        paths.insert(crate_name, abs_path);
                     }
                 }
             }
-
-            // Emit --sysroot flag pointing at the sysroot we just built.
-            let abs_sysroot = match fs::canonicalize(&sysroot_dir) {
-                Ok(p) => p
-                    .to_string_lossy()
-                    .replace("\\\\?\\", "")
-                    .replace('\\', "/"),
-                Err(_) => sysroot_dir.to_string_lossy().replace('\\', "/"),
-            };
-            let target_rustflags = format!(
-                "[target.{}]\nrustflags = [\n    \"--sysroot\", \"{}\",\n]\n\n",
-                custom_name, abs_sysroot
-            );
-            config_toml.push_str(&target_rustflags);
         }
+
+        if !paths.contains_key("std") {
+            panic!("Missing built artifact for std when generating sysroot config");
+        }
+
+        let mut target_rustflags = format!("[target.{}]\nrustflags = [\n", custom_name);
+        target_rustflags.push_str("    \"--cfg\", \"backtrace_in_libstd\",\n");
+        for (crate_name, abs_path) in paths.iter() {
+            target_rustflags.push_str(&format!(
+                "    \"--extern\", \"{}={}\",\n",
+                crate_name, abs_path
+            ));
+        }
+        let abs_deps_dir = match fs::canonicalize(&deps_dir) {
+            Ok(p) => p.to_string_lossy().replace("\\\\?\\", "").replace('\\', "/"),
+            Err(_) => deps_dir.to_string_lossy().replace('\\', "/"),
+        };
+        target_rustflags.push_str(&format!(
+            "    \"-L\", \"dependency={}\",\n",
+            abs_deps_dir
+        ));
+        target_rustflags.push_str("]\n\n");
+        config_toml.push_str(&target_rustflags);
     }
 
     fs::write(spec_dir.join("config.toml"), config_toml).expect("wrote config.toml");
