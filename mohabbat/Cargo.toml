@@ -4,16 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-anyhow = "1.0.102"
-brotli = { version = "8.0.2", default-features = false }
+anyhow = "1.0"
+brotli = { version = "8.0.3", default-features = false }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-anyhow = { version = "1.0.102", default-features = false }
+anyhow = { version = "1.0", default-features = false }
 
-brotli-decompressor = { version = "5.0.0", default-features = false }
+brotli-decompressor = { version = "5.0.1", default-features = false }
 alloc-no-stdlib = "2.0.4"
-brotli = { version = "8.0.2", default-features = false }
+brotli = { version = "8.0.3", default-features = false }
 
 [build-dependencies]
-anyhow = "1.0.102"
-brotli = { version = "8.0.2", default-features = false, features = ["std"] }
+anyhow = "1.0"
+brotli = { version = "8.0.3", default-features = false, features = ["std"] }

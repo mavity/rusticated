@@ -1,5 +1,3 @@
-#![no_std]
-
 use std::prelude::rust_2024::*;
 
 use anyhow::Context as _;
@@ -61,7 +59,7 @@ fn run(wasm_bytes: &[u8]) -> anyhow::Result<()> {
     config.dynamic_memory_guard_size(0);
 
     let engine = Engine::new(&config)?;
-    let module = Module::new(&engine, &wasm_bytes)?;
+    let module = unsafe { Module::deserialize(&engine, &wasm_bytes)? };
 
     let host_state = HostState::new()?;
     let mut store = Store::new(&engine, host_state);
