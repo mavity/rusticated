@@ -14,5 +14,12 @@ anyhow = { version = "1", default-features = false }
 libc = "0.2"
 polling = "3.11.0"
 
+[patch.crates-io]
+# Shim that translates custom `*-rusticated` target names to their standard
+# equivalents before target-lexicon's build script tries to parse them.
+# Without this, target-lexicon (used by wasmtime) panics when TARGET is set
+# to e.g. `aarch64-windows-rusticated`.
+target-lexicon = { path = "vendor/target-lexicon" }
+
 [lints.rust]
 warnings = "warn"

@@ -88,47 +88,83 @@ fn main() {
         fs::write(&json_path, spec_json).unwrap();
 
         // Now build rusticated for this target!
-        let status = Command::new("cargo")
+        let existing_rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
+        let rustflags = if existing_rustflags.is_empty() {
+            "--cfg backtrace_in_libstd".to_string()
+        } else {
+            format!("{} --cfg backtrace_in_libstd", existing_rustflags)
+        };
+
+        // Single build with --message-format=json captures both success/failure
+        // and the artifact paths in one pass (cargo's incremental cache means
+        // a repeated build without --message-format is almost free, but one
+        // call is cleaner).
+        //
+        // --release so the sysroot rlibs match washmhost's release build.
+        let build_output = Command::new("cargo")
+            .env("RUSTFLAGS", &rustflags)
             .arg("build")
-            // .arg("--manifest-path").arg("Cargo.toml") // implicitly in root
             .arg("-p").arg("rusticated")
             .arg("-Z").arg("build-std=core,alloc,compiler_builtins")
             .arg("--config").arg("unstable.json-target-spec=true")
             .arg("--target").arg(json_path.to_string_lossy().to_string())
-            .status().expect("cargo build failed");
-        
-        if status.success() {
-            // find the output rlib
-            // target/<custom_name>/debug/deps/librusticated-*.rlib
-            let deps_dir = target_dir.join(custom_name).join("debug").join("deps");
-            if fs::read_dir(&deps_dir).is_ok() {
-                let mut rustflags = format!("[target.{}]\nrustflags = [\n", custom_name);
+            .arg("--release")
+            .arg("--message-format=json")
+            .output().expect("cargo build failed");
 
-                let mut find_rlib = |prefix: &str, crate_name: &str| {
-                    if let Some(rlib) = fs::read_dir(&deps_dir).unwrap().filter_map(|e| e.ok())
-                        .filter(|e| {
-                            let name = e.file_name().to_string_lossy().to_string();
-                            name.starts_with(prefix) && name.ends_with(".rlib")
-                        })
-                        .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok()) 
-                    {
-                        // Use absolute paths so rustflags work from crate subdirectories (e.g. brot)
-                        if let Ok(abs_path) = std::fs::canonicalize(rlib.path()) {
-                            // On Windows, canonicalize prepends \\?\. Strip it so rustc doesn't complain.
-                            let rl_path = abs_path.to_string_lossy().replace("\\\\?\\", "").replace('\\', "/");
-                            rustflags.push_str(&format!("    \"--extern\", \"{}={}\",\n", crate_name, rl_path));
+        if build_output.status.success() {
+            // Build sysroot directory structure:
+            //   target/sysroot-<custom_name>/lib/rustlib/<custom_name>/lib/*.rlib
+            //
+            // Using --sysroot <path> in config.toml instead of explicit --extern
+            // flags avoids two problems:
+            //   1. Explicit externs for the custom target leak into HOST
+            //      compilations (build deps), causing target-triple mismatches.
+            //   2. Explicit externs can cause the same crate (core, alloc) to be
+            //      registered twice under different CrateNum indices, triggering an
+            //      ICE in the metadata encoder when zerocopy/simd is compiled.
+            let sysroot_dir = target_dir.join(format!("sysroot-{}", custom_name));
+            let sysroot_lib_dir = sysroot_dir
+                .join("lib")
+                .join("rustlib")
+                .join(custom_name)
+                .join("lib");
+            // Clear the lib dir so stale rlibs from earlier debug/release builds
+            // don't coexist with the fresh ones — rustc would be confused by
+            // multiple libstd-*.rlib files in the sysroot.
+            let _ = fs::remove_dir_all(&sysroot_lib_dir);
+            let _ = fs::create_dir_all(&sysroot_lib_dir);
+
+            let json_stdout = String::from_utf8_lossy(&build_output.stdout);
+            for line in json_stdout.lines() {
+                if line.contains("\"reason\":\"compiler-artifact\"") && line.contains(".rlib") {
+                    let parts: Vec<&str> = line.split("\"filenames\":[").collect();
+                    if parts.len() > 1 {
+                        let file_part = parts[1].split(']').next().unwrap_or("");
+                        for f in file_part.split(',') {
+                            let cleaned = f.trim_matches('"');
+                            if cleaned.ends_with(".rlib") || cleaned.ends_with(".rmeta") {
+                                let src = std::path::Path::new(cleaned);
+                                if let Some(fname) = src.file_name() {
+                                    let dest = sysroot_lib_dir.join(fname);
+                                    let _ = fs::copy(src, &dest);
+                                }
+                            }
                         }
                     }
-                };
-
-                find_rlib("libstd-", "std");
-                find_rlib("libcore-", "core");
-                find_rlib("liballoc-", "alloc");
-                find_rlib("libcompiler_builtins-", "compiler_builtins");
-
-                rustflags.push_str("]\n\n");
-                config_toml.push_str(&rustflags);
+                }
             }
+
+            // Emit --sysroot flag pointing at the sysroot we just built.
+            let abs_sysroot = match fs::canonicalize(&sysroot_dir) {
+                Ok(p) => p.to_string_lossy().replace("\\\\?\\", "").replace('\\', "/"),
+                Err(_) => sysroot_dir.to_string_lossy().replace('\\', "/"),
+            };
+            let target_rustflags = format!(
+                "[target.{}]\nrustflags = [\n    \"--sysroot\", \"{}\",\n]\n\n",
+                custom_name, abs_sysroot
+            );
+            config_toml.push_str(&target_rustflags);
         }
     }
 
