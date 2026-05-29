@@ -12,6 +12,16 @@ use crate::task::{Context, Poll};
 use super::executor::with_driver;
 use super::ready::{consume_ready, mark_ready};
 
+struct Completion {
+    token: u64,
+    buf: alloc::vec::Vec<u8>,
+    error_code: i32,
+    bytes: u32,
+}
+
+static COMPLETION_QUEUE: crate::sync::SpinMutex<alloc::vec::Vec<Completion>> =
+    crate::sync::SpinMutex::new(alloc::vec::Vec::new());
+
 // -- epoll constants
 // -------------------------------------------------------
 
@@ -203,6 +213,26 @@ impl EpollDriver {
                 let mut buf = [0u8; 8];
                 // SAFETY: `evfd` is a valid eventfd; buf has exactly 8 bytes.
                 unsafe { read(evfd, buf.as_mut_ptr(), 8) };
+                
+                let completions = {
+                    let mut q = COMPLETION_QUEUE.lock();
+                    core::mem::take(&mut *q)
+                };
+                
+                for comp in completions {
+                    if let Some(op) = self.pending_ops.remove(&comp.token) {
+                        let state = match op {
+                            PendingOp::Read(_, state) => state,
+                            PendingOp::Write(_, state) => state,
+                        };
+                        *state.result.borrow_mut() = Some((comp.error_code, comp.bytes));
+                        unsafe { &mut *state.buffer.get() }.replace(comp.buf);
+                        if let Some(w) = state.waker.borrow().as_ref() {
+                            w.wake_by_ref();
+                        }
+                    }
+                }
+                
                 continue;
             }
             if let Some(op) = self.pending_ops.remove(&token) {
@@ -375,53 +405,64 @@ impl Future for WaitWritable {
 
 impl EpollDriver {
     pub(crate) fn submit_read(&mut self, fd: i32, state: Rc<OpState>) -> crate::io::Result<()> {
-        unsafe extern "C" {
-            fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
-        }
         let buf_opt = unsafe { &mut *state.buffer.get() }.take();
         if let Some(mut buf) = buf_opt {
-            let res = unsafe { read(fd, buf.as_mut_ptr(), buf.capacity()) };
-            if res < 0 {
-                *state.result.borrow_mut() = Some((
-                    crate::io::Error::last_os_error()
-                        .raw_os_error()
-                        .unwrap_or(-1),
-                    0,
-                ));
-            } else {
-                unsafe {
-                    buf.set_len(res as usize);
+            let token = self.next_token;
+            self.next_token += 1;
+            self.pending_ops.insert(token, PendingOp::Read(fd, state));
+            
+            let cap = buf.capacity();
+            crate::rt::blocking::pool().spawn(move || {
+                unsafe extern "C" {
+                    fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
                 }
-                *state.result.borrow_mut() = Some((0, res as u32));
-            }
-            unsafe { &mut *state.buffer.get() }.replace(buf);
-        }
-        if let Some(w) = state.waker.borrow().as_ref() {
-            w.wake_by_ref();
+                let res = unsafe { read(fd, buf.as_mut_ptr(), cap) };
+                let (error_code, bytes) = if res < 0 {
+                    (crate::io::Error::last_os_error().raw_os_error().unwrap_or(-1), 0)
+                } else {
+                    unsafe { buf.set_len(res as usize); }
+                    (0, res as u32)
+                };
+                
+                COMPLETION_QUEUE.lock().push(Completion {
+                    token,
+                    buf,
+                    error_code,
+                    bytes,
+                });
+                queue_wake();
+            });
         }
         Ok(())
     }
+    
     pub(crate) fn submit_write(&mut self, fd: i32, state: Rc<OpState>) -> crate::io::Result<()> {
-        unsafe extern "C" {
-            fn write(fd: i32, buf: *const u8, count: usize) -> isize;
-        }
         let buf_opt = unsafe { &mut *state.buffer.get() }.take();
         if let Some(buf) = buf_opt {
-            let res = unsafe { write(fd, buf.as_ptr(), buf.len()) };
-            if res < 0 {
-                *state.result.borrow_mut() = Some((
-                    crate::io::Error::last_os_error()
-                        .raw_os_error()
-                        .unwrap_or(-1),
-                    0,
-                ));
-            } else {
-                *state.result.borrow_mut() = Some((0, res as u32));
-            }
-            unsafe { &mut *state.buffer.get() }.replace(buf);
-        }
-        if let Some(w) = state.waker.borrow().as_ref() {
-            w.wake_by_ref();
+            let token = self.next_token;
+            self.next_token += 1;
+            self.pending_ops.insert(token, PendingOp::Write(fd, state));
+            
+            crate::rt::blocking::pool().spawn(move || {
+                unsafe extern "C" {
+                    fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+                }
+                let len = buf.len();
+                let res = unsafe { write(fd, buf.as_ptr(), len) };
+                let (error_code, bytes) = if res < 0 {
+                    (crate::io::Error::last_os_error().raw_os_error().unwrap_or(-1), 0)
+                } else {
+                    (0, res as u32)
+                };
+                
+                COMPLETION_QUEUE.lock().push(Completion {
+                    token,
+                    buf,
+                    error_code,
+                    bytes,
+                });
+                queue_wake();
+            });
         }
         Ok(())
     }
