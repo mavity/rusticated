@@ -1,4 +1,4 @@
-mod env_impl;
+﻿mod env_impl;
 mod handles;
 
 use std::prelude::rust_2024::*;
@@ -34,25 +34,23 @@ pub extern "C" fn run_payload(ptr: *const u8, len: usize) -> u32 {
 fn run_internal(wasm_bytes: &[u8]) -> anyhow::Result<()> {
     let mut config = Config::new();
     config.signals_based_traps(false);
-    config.static_memory_maximum_size(0);
-    config.dynamic_memory_guard_size(0);
     config.wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Enable);
-    let engine = Engine::new(&config)?;
-    let module = unsafe { Module::deserialize(&engine, &wasm_bytes)? };
+    let engine = Engine::new(&config).map_err(|e| anyhow::anyhow!("{:?}", e))?;
+    let module = unsafe { Module::deserialize(&engine, &wasm_bytes).map_err(|e| anyhow::anyhow!("{:?}", e))? };
 
-    let host_state = HostState::new()?;
+    let host_state = HostState::new();
     let mut store = Store::new(&engine, host_state);
 
     let mut linker: Linker<HostState> = Linker::new(&engine);
-    env_impl::register(&mut linker)?;
-    let instance = linker.instantiate(&mut store, &module)?;
+    env_impl::register(&mut linker).map_err(|e| anyhow::anyhow!("{:?}", e))?;
+    let instance = linker.instantiate(&mut store, &module).map_err(|e| anyhow::anyhow!("{:?}", e))?;
 
     let memory = instance
         .get_memory(&mut store, "memory")
         .ok_or_else(|| anyhow::anyhow!("WASM module exports no 'memory'"))?;
 
-    let run = instance.get_typed_func::<(), ()>(&mut store, "run")?;
-    let is_done = instance.get_typed_func::<(), u32>(&mut store, "is_done")?;
+    let run = instance.get_typed_func::<(), ()>(&mut store, "run").map_err(|e| anyhow::anyhow!("{:?}", e))?;
+    let is_done = instance.get_typed_func::<(), u32>(&mut store, "is_done").map_err(|e| anyhow::anyhow!("{:?}", e))?;
 
     loop {
         if let Err(e) = run.call(&mut store, ()) {
@@ -73,3 +71,11 @@ fn run_internal(wasm_bytes: &[u8]) -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[unsafe(no_mangle)]
+pub extern "C" fn wasmtime_tls_get() -> *mut u8 { std::ptr::null_mut() }
+#[unsafe(no_mangle)]
+pub extern "C" fn wasmtime_tls_set(_ptr: *mut u8) {}
+#[unsafe(no_mangle)]
+pub extern "C" fn main() -> i32 { 0 }
+

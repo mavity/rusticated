@@ -17,18 +17,18 @@ fn main() {
         .trim();
 
     let base_targets = [
-        ("x86_64-pc-windows-msvc", "x86_64-windows-rusticated"),
-        ("x86_64-unknown-linux-gnu", "x86_64-linux-rusticated"),
-        ("aarch64-pc-windows-msvc", "aarch64-windows-rusticated"),
-        ("aarch64-unknown-linux-gnu", "aarch64-linux-rusticated"),
-        ("wasm32-unknown-unknown", "wasm32-rusticated"),
+        ("x86_64-pc-windows-msvc", "x86_64-rusticated-windows-msvc"),
+        ("x86_64-unknown-linux-gnu", "x86_64-rusticated-linux-gnu"),
+        ("aarch64-pc-windows-msvc", "aarch64-rusticated-windows-msvc"),
+        ("aarch64-unknown-linux-gnu", "aarch64-rusticated-linux-gnu"),
+        ("wasm32-unknown-unknown", "wasm32-rusticated-unknown-unknown"),
     ];
 
     let host_rusticated_target = base_targets
         .iter()
         .find(|(t, _)| *t == host)
         .map(|(_, r)| *r)
-        .unwrap_or("x86_64-windows-rusticated"); // fallback
+        .unwrap_or("x86_64-rusticated-windows-msvc"); // fallback
 
     let target_dir = PathBuf::from("target");
     let spec_dir = target_dir.join("rusticated-spec");
