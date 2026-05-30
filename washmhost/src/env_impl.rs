@@ -1,6 +1,5 @@
 use std::prelude::rust_2024::*;
 
-
 use wasmtime::{Caller, Linker, Memory, Store};
 
 use crate::handles::{FileOpResult, HandleKind, HostState, PendingOp, StatInfo};
@@ -25,7 +24,9 @@ fn write_overlapped(
     result_ext: u64,
 ) -> wasmtime::Result<()> {
     let base = ov_ptr as usize;
-    let end = base.checked_add(24).ok_or_else(|| wasmtime::format_err!("ov_ptr overflow"))?;
+    let end = base
+        .checked_add(24)
+        .ok_or_else(|| wasmtime::format_err!("ov_ptr overflow"))?;
     let slice = mem
         .get_mut(base..end)
         .ok_or_else(|| wasmtime::format_err!("ov_ptr out of WASM memory bounds"))?;
@@ -121,7 +122,10 @@ pub fn register(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
                         )
                     };
                     if n < 0 {
-                        return Err(wasmtime::format_err!("os error: {:?}", std::io::Error::last_os_error()));
+                        return Err(wasmtime::format_err!(
+                            "os error: {:?}",
+                            std::io::Error::last_os_error()
+                        ));
                     }
                     if n == 0 {
                         continue;
@@ -132,7 +136,9 @@ pub fn register(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
 
             #[cfg(not(any(windows, unix)))]
             {
-                return Err(wasmtime::format_err!("get_random is unsupported on this host"));
+                return Err(wasmtime::format_err!(
+                    "get_random is unsupported on this host"
+                ));
             }
 
             Ok(())
@@ -395,7 +401,8 @@ pub fn register(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
             let mem = get_memory(&mut caller)?;
             let (data, host) = mem.data_and_store_mut(&mut caller);
             let path_bytes = guest_slice(data, path_ptr, path_len)?.to_vec();
-            let path = std::str::from_utf8(&path_bytes).map_err(|_| wasmtime::format_err!("path_open: non-UTF-8 path"))?;
+            let path = std::str::from_utf8(&path_bytes)
+                .map_err(|_| wasmtime::format_err!("path_open: non-UTF-8 path"))?;
             let path_owned = path.to_owned();
             let read_flag = (flags & 1) != 0;
             let write_flag = (flags & 2) != 0;
@@ -451,7 +458,8 @@ pub fn register(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
             let mem = get_memory(&mut caller)?;
             let (data, host) = mem.data_and_store_mut(&mut caller);
             let path_bytes = guest_slice(data, path_ptr, path_len)?.to_vec();
-            let path = std::str::from_utf8(&path_bytes).map_err(|_| wasmtime::format_err!("path_stat: non-UTF-8 path"))?;
+            let path = std::str::from_utf8(&path_bytes)
+                .map_err(|_| wasmtime::format_err!("path_stat: non-UTF-8 path"))?;
             let path_owned = path.to_owned();
             let tx = host.file_op_tx.clone();
 

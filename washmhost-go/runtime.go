@@ -58,7 +58,8 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 		WithArgs(args...).
 		WithStdout(os.Stdout).
 		WithStderr(os.Stderr).
-		WithStdin(os.Stdin)
+		WithStdin(os.Stdin).
+		WithFSConfig(wazero.NewFSConfig().WithDirMount(".", "/").WithDirMount("C:\\", "C:\\"))
 
 	// Since we provide rusticated ABI bindings via `hEnv.Register`, Wazero will resolve imports
 	mod, err := r.InstantiateModule(ctx, decoded, cfg)

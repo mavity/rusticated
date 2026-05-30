@@ -177,7 +177,6 @@ pub mod mpsc {
     unsafe impl<T: Send> Sync for Sender<T> {}
 }
 
-
 pub struct Once {
     inner: spin::Once<()>,
 }
