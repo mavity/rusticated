@@ -269,6 +269,9 @@ func buildMohabbatBrain(ws string) error {
 
 func goBuild(ws, pkgDir string, s slot, buildDir string) error {
 	outPath := filepath.Join(buildDir, fmt.Sprintf("%s-%s.exe", pkgDir, s.name))
+	if err := os.Remove(outPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove stale output %s: %w", outPath, err)
+	}
 	cmd := exec.Command("go", "build", "-trimpath", "-ldflags=-s -w", "-o", outPath, ".")
 	cmd.Dir = filepath.Join(ws, pkgDir)
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0",
