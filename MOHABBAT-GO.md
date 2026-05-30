@@ -14,10 +14,10 @@ Read this document as authoritative. Where it disagrees with
 The Rust implementation works and the architecture is sound. We pivot the
 native layer for three concrete reasons:
 
-1. **Cross-compilation.** Go produces six target binaries with
+1. **Cross-compilation.** Go produces five target binaries with
    `GOOS=X GOARCH=Y go build`. No sysroot, no toolchain matrix, no cargo
-   target installation. We need this because mohab.bat ships six brot
-   binaries and six washmhost binaries on every build.
+   target installation. We need this because mohab.bat ships five brot
+   binaries and five washmhost binaries on every build.
 
 2. **Async is the default.** Goroutines and the Go scheduler give us the
    completion-driven I/O model that washmhost needs (drive WASM, fulfil
@@ -47,7 +47,7 @@ tool inside WASM. It is overkill outside.
 | Washmhost's responsibilities (run WASM, expose ABI) | yes | reimplemented in Go on wazero |
 | WASM brain (the builder) | yes | stays Rust against rusticated ABI |
 | Kabibi (the TUI app) | yes | stays Rust against rusticated ABI |
-| Six target matrix | yes | no |
+| Five target matrix (Intel Mac dropped) | yes | updated |
 | Wasmtime | — | replaced by wazero |
 | Custom rusticated sysroot for native layer | — | removed; native layer is Go |
 | `.cwasm` AOT pipeline | — | removed; wazero takes `.wasm` directly |
@@ -69,13 +69,14 @@ tool inside WASM. It is overkill outside.
   the brain; for other vegetables it is the user's WASM.
 - **pool** — the brotli-compressed concatenation of all washmhosts plus
   the payload.
-- **Modern Six** — the target matrix:
+- **Modern Five** — the target matrix:
   - `linux/amd64`
   - `linux/arm64`
   - `windows/amd64`
   - `windows/arm64`
-  - `darwin/amd64`
   - `darwin/arm64`
+
+  Intel Mac (`darwin/amd64`) is not supported, and 32-bit x86/ARM CPUs either.
 
 We use Go's `GOOS/GOARCH` notation in the Go pivot. Mapping to Rust
 triples (for cross-referencing the brain build) is straightforward.
@@ -86,37 +87,55 @@ triples (for cross-referencing the brain build) is straightforward.
 
 ```
 [Zone A: polyglot script header   ]   text, executable by sh + cmd
-[Zone B: brot table               ]   six native binaries, back to back
+[Zone B: brot table               ]   five native binaries, back to back
 [Zone C: brotli pool              ]   one brotli stream: hosts + payload
 EOF
 ```
 
-Zone A and Zone B behave exactly as documented in [MOHABBAT.md §2](MOHABBAT.md).
-The polyglot header detects OS and CPU, slices out the right brot, writes
-it to a temp file, executes it, propagates exit code. Nothing here changes
-in the Go pivot.
+Zone A detects OS and CPU, then extracts **exclusively the byte-perfect
+slice of the target `brot` from Zone B** using strict offset and
+fixed-length extraction boundaries — no tail-carving or slicing to EOF.
+The extraction command is of the form `dd skip=<OFFSET> count=<LEN>` (or
+equivalent), so the dropped file contains exactly the compiled brot bytes
+and nothing trailing it. This keeps the pre-baked `rcodesign` signature
+valid on macOS: the file Gatekeeper sees matches the hash baked in at
+build time.
+
+Because the extracted brot no longer carries the pool in its own tail,
+Zone A passes the path of the parent vegetable to brot by setting the
+environment variable `MOHABBAT_VEGETABLE_PATH` before executing the
+extracted stub. Brot reads this variable to locate and open the pool.
+This is a structural contract between Zone A and brot, not an optional
+convenience.
 
 Zone C is one brotli stream containing, in fixed order: washmhost-1,
-washmhost-2, …, washmhost-6, payload. Skipped slots have zero length and
+washmhost-2, …, washmhost-5, payload. Skipped slots have zero length and
 are absent from the stream.
 
 ---
 
 ## 5. Brot (Go reimplementation)
 
-Source lives in `brot-go/`. One Go module. Six builds via
+Source lives in `brot-go/`. One Go module. Five builds via
 `GOOS/GOARCH`.
 
 ### Responsibilities
 
 In order:
 
-1. Discover its own path. Brot was extracted to a temp file by the Zone A
-   header; its own image contains the brotli pool at its tail. Use
-   `os.Executable()` — works correctly on all three OSes.
-2. Open self, seek to `file_size - POOL_LEN`, read the brotli pool.
+1. **Discover parent vegetable.** Brot was extracted as a clean,
+   bounded slice by Zone A. Its own image does not carry the pool —
+   appended data would corrupt its code signature. Instead, brot reads
+   the `MOHABBAT_VEGETABLE_PATH` environment variable that Zone A set
+   before `exec`-ing the stub. This is the path to the `.bat` container
+   the user originally invoked. Do not fall back to `os.Executable()`;
+   that path leads only to the isolated temp stub.
+2. **Open the parent vegetable.** Open the file at `MOHABBAT_VEGETABLE_PATH`,
+   seek to `file_size - POOL_LEN`, and read the brotli pool from there.
    `POOL_LEN` and all other offsets come from the `MohabbatMeta` struct
-   embedded at a known section/offset in the binary.
+   embedded in brot's own binary (the patcher wrote them there at build
+   time). The pool lives in the parent vegetable; brot's own bytes are
+   clean.
 3. Decompress the pool with a pure-Go brotli decoder
    (`github.com/andybalholm/brotli`). One allocation, one decode.
 4. Slice out the washmhost for this exact target (offset+length from
@@ -130,11 +149,8 @@ In order:
 
 ### Constraints
 
-- **CGO_ENABLED=0 on Linux and macOS.** No C toolchain required to build
-  brot for those platforms. Cross-compilation is pure Go.
-- **CGO_ENABLED=1 on Windows only**, and only for the reflective PE
-  loader. See §7. The Windows brot build needs a mingw cross-compiler in
-  CI. This is the one place we accept the CGO cost.
+- **CGO_ENABLED=0 everywhere, no exceptions.** All five brot builds are
+  pure Go. No C toolchain required on the build host.
 - **Binary size target: under 4 MB per brot.** Strip with
   `-ldflags="-s -w"`, compress with `upx` only if it stays compatible
   with our polyglot tail-reading. Brotli decoder is the dominant cost;
@@ -178,16 +194,21 @@ check in the patcher: if scan finds more than one occurrence, fail.
 
 ## 6. Washmhost (Go reimplementation on wazero)
 
-Source lives in `washmhost-go/`. One Go module. Six builds via
+Source lives in `washmhost-go/`. One Go module. Five builds via
 `GOOS/GOARCH`. Built as a `-buildmode=c-shared` library (DLL on Windows,
 `.so` on Linux, `.dylib` on macOS) for brot to load.
 
 ### Responsibilities
 
 1. Receive payload pointer + length + argv from brot.
-2. Set up a wazero runtime. Use the interpreter mode (no JIT compilation
-   on the fly; this is a CLI tool, not a long-running server, and
-   interpreter startup is faster).
+2. Set up a wazero runtime. Use **compiler mode**
+   (`wazero.NewRuntimeConfigCompiler()`). wazero's single-pass JIT reads
+   WASM bytecode and emits machine code directly — no IR, no loop
+   unrolling, sub-second compilation. The result runs 10–20× faster than
+   the interpreter during the intensive TUI, file-manager, and shell
+   processing cycles that kabibi performs. The extra 50–100 ms at startup
+   is imperceptible to a human running a terminal command and is already
+   buried inside the brotli decompression time.
 3. Detect the WASM module's import flavour. Two recognised flavours:
    - **rusticated** — imports from module name `"env"`. The native side
      registers the rusticated ABI: file I/O, process spawn, TTY, time,
@@ -252,7 +273,7 @@ goroutine writes the completion when ready.
 
 A Go c-shared library with wazero is roughly 12–18 MB unstripped. With
 `-ldflags="-s -w"`, around 8–12 MB. Brotli at quality 11 compresses
-this to roughly 3–5 MB per host, ~25 MB for all six in the pool
+this to roughly 3–5 MB per host, ~20 MB for all five in the pool
 post-compression. Acceptable.
 
 ---
@@ -309,46 +330,41 @@ is the right ceiling.
 
 Pure Go via `syscall.Dlopen` / `syscall.Dlsym`. No CGO.
 
-### Windows — reflective PE loader
+### Windows — pure-Go reflective PE loader
 
 Windows offers no equivalent to `memfd_create`. The kernel requires
 `NtCreateSection` with `SEC_IMAGE` to operate on a real file handle
-backed by a filesystem volume.
+backed by a filesystem volume. We accept that constraint and load
+washmhost entirely in memory using a pure-Go reflective PE loader.
 
-We have two choices:
+**CGO_ENABLED=0 here too.** All Win32 calls needed for reflective
+loading (`VirtualAlloc`, `VirtualProtect`, `GetProcAddress`,
+`LoadLibraryA`) are available as pure-Go bindings via
+`golang.org/x/sys/windows`. We base the loader on the pure-Go port of
+MemoryModule at `github.com/Binject/universal` or reimplement directly.
+No mingw, no C compiler, no CGO.
 
-1. **Temp file with `FILE_FLAG_DELETE_ON_CLOSE | FILE_SHARE_DELETE`.**
-   Acceptable. The file exists on disk for the lifetime of the loaded
-   DLL but is invisible to other processes (delete-pending) and the
-   kernel guarantees deletion on the last handle close, even on crash.
-   Pure Go via `golang.org/x/sys/windows`.
+The loader steps:
+1. Parse the PE headers in the washmhost bytes.
+2. `VirtualAlloc` a contiguous block large enough for the image.
+3. Copy sections to their preferred relative virtual addresses.
+4. Walk the base relocation table; patch pointers by the load delta.
+5. Walk the import directory; resolve each import via `LoadLibraryA` +
+   `GetProcAddress`.
+6. `VirtualProtect` each section: `.text` → RX, `.data` → RW,
+   `.rdata` → R.
+7. Call `DllMain(hModule, DLL_PROCESS_ATTACH, nil)`. This initialises
+   the Go runtime inside the c-shared library.
+8. Locate and call `run_payload`.
 
-2. **Reflective PE loading.** The MemoryModule pattern. Parse PE
-   headers, allocate with `VirtualAlloc`, copy sections, apply base
-   relocations, resolve imports via `GetProcAddress` against system
-   DLLs, flip page protections, call `DllMain(DLL_PROCESS_ATTACH)`,
-   call the export. Truly in-memory. No file on disk ever.
+Modern Go (1.21+) uses fiber-local storage for goroutine tracking, not
+the Windows TLS API (`_tls_index`). This is exactly what made reflective
+loading fragile with Rust+wasmtime and is not a problem here.
 
-**We choose reflective loading on Windows.** The reasoning:
-
-- The Go runtime in a c-shared DLL initialises itself in `DllMain`. A
-  correct reflective loader that calls `DllMain(DLL_PROCESS_ATTACH)`
-  initialises the Go runtime correctly. Modern Go (1.21+) does not
-  rely on Windows TLS for goroutine tracking, which sidesteps the
-  exact problem that made reflective loading painful with Rust+wasmtime.
-- It is the only option that achieves true fileless execution on
-  Windows. Mohabbat is a tool that runs untrusted user WASM; not
-  dropping native files to disk is a meaningful posture.
-- Battle-tested code exists. **MemoryModule** by Joachim Bauch is the
-  reference C implementation. Go ports exist; we will base ours on the
-  pure-Go port at `github.com/Binject/universal/blob/master/memorymodule_windows.go`
-  or reimplement directly using `golang.org/x/sys/windows`. Pure Go is
-  preferred; CGO with MemoryModule.c is an acceptable fallback only if
-  the pure-Go approach hits a wall.
-
-The Windows brot becomes the most complex piece of native code in the
-whole project. That is acceptable. The Linux and macOS brots are
-trivial wrappers around system loaders.
+The Windows brot is the most complex piece of native code in the
+project. The Linux and macOS brots are trivial wrappers around system
+loaders. That asymmetry is fine — complexity lives in one place and does
+not leak.
 
 ### Entry point signature
 
@@ -422,8 +438,17 @@ for the `MOHABBAT` magic — same approach as the patcher). Then:
 4. Compute new `MohabbatMeta` values.
 5. Read mohabbat's own Zone A + Zone B (everything before the pool).
 6. Patch each brot in Zone B with the new `MohabbatMeta`.
-7. Write Zone A + patched Zone B + new pool to the output path.
-8. `chmod +x` on POSIX.
+7. **Rewrite the Zone A template with fixed-length brot extraction
+   bounds.** Each platform's extraction command in the script must
+   specify both the byte offset *and* the exact byte count of that
+   platform's brot slice — never `offset to EOF`. The brain computes
+   exact `(offset, length)` pairs from the Zone B layout and substitutes
+   them into the script template (e.g., replacing `{{LINUX_AMD64_OFF}}`
+   and `{{LINUX_AMD64_LEN}}` placeholders). This ensures the output
+   vegetable repeats the clean-slice process on every execution, keeping
+   code-signing intact down the chain.
+8. Write Zone A + patched Zone B + new pool to the output path.
+9. `chmod +x` on POSIX.
 
 The brain uses the rusticated ABI for all of this: file I/O (async), the
 brotli encoder (Rust crate compiled into the brain WASM), child process
@@ -449,38 +474,53 @@ mohabbat-go/
 
 ### Pipeline
 
-1. **Probe targets.** For each of the Modern Six, decide whether we can
-   build it on this host. Pure Go targets: always yes. Windows target
-   needs mingw cross-compiler in PATH (only for the reflective loader's
-   minimal C glue, if we go that route). macOS targets: cross-compile
-   from any host — Go does not need an SDK for pure Go binaries.
-2. **Build brot-go × 6.** For each Available target:
+1. **Probe targets.** All five targets are always available. Go
+   cross-compiles to any `GOOS/GOARCH` with CGO_ENABLED=0. No C
+   compiler, no SDK, no special toolchain required on the build host.
+2. **Build brot-go × 5.** For each target:
    ```
    GOOS=<os> GOARCH=<arch> CGO_ENABLED=0 \
-   go build -ldflags="-s -w" -o build/brot-<os>-<arch> ./brot-go
+   go build -ldflags="-s -w" -o build/brot-<os>-<arch>[.exe] ./brot-go
    ```
-   Windows is the exception: `CGO_ENABLED=1` with the cross C compiler.
-3. **Build washmhost-go × 6.** For each Available target:
+3. **Build washmhost-go × 5.** For each target:
    ```
    GOOS=<os> GOARCH=<arch> CGO_ENABLED=0 \
    go build -buildmode=c-shared -ldflags="-s -w" \
      -o build/washmhost-<os>-<arch>.<ext> ./washmhost-go
    ```
-4. **Build the brain.** Invoke cargo:
+4. **Sign the macOS binaries.** Gatekeeper rejects any unsigned Mach-O
+   the moment it is executed or loaded. Two binaries need signing:
+   - `brot-darwin-arm64` — the native loader stub. The Zone A polyglot
+     script extracts it to a temp file and executes it as a process.
+     Gatekeeper checks signatures on `execve`; an unsigned brot is
+     killed before it can run.
+   - `washmhost-darwin-arm64.dylib` — the WASM host shared library.
+     Gatekeeper checks dylib signatures at `dlopen` time.
+
+   Sign both with `rcodesign` (pure-Rust, runs on Linux/Windows, no
+   Xcode required) using an ad-hoc signature:
+   ```
+   rcodesign sign --ad-hoc build/brot-darwin-arm64
+   rcodesign sign --ad-hoc build/washmhost-darwin-arm64.dylib
+   ```
+   Both signatures are baked in before Zone B and Zone C are assembled.
+   No runtime signing, no entitlements, no developer identity required
+   from the end user.
+5. **Build the brain.** Invoke cargo:
    ```
    cargo build --release \
      --target wasm32-rusticated-unknown-unknown \
      -p mohabbat
    ```
    Pick up `target/.../release/mohabbat.wasm`.
-5. **Pool.** Concatenate the six washmhosts in fixed order, then the
+6. **Pool.** Concatenate the five washmhosts in fixed order, then the
    brain. Brotli quality 11. Record offsets and lengths.
-6. **Patch brots.** For each brot binary, scan for `MOHABBAT` magic
+7. **Patch brots.** For each brot binary, scan for `MOHABBAT` magic
    (must occur exactly once), write the six u64 fields after it.
-7. **Stitch.** Emit Zone A from the frozen template with the six
+8. **Stitch.** Emit Zone A from the frozen template with the five
    (offset, length) pairs filled in. Concatenate Zone A + Zone B
    (patched brots) + Zone C (compressed pool).
-8. **Write** `mohab.bat` at the repo root. `chmod +x` on POSIX.
+9. **Write** `mohab.bat` at the repo root. `chmod +x` on POSIX.
 
 ### Bootstrapping
 
@@ -587,10 +627,10 @@ and let wazero's WASI implementation handle the rest.
    the TUI runs.
 3. Wire brot-go to washmhost-go. End-to-end on Linux.
 4. Stand up `mohabbat-go/`. Produce a working `mohab.bat` on Linux only,
-   five slots empty.
+   four slots empty.
 5. Port the loader to macOS (temp + unlink). Add the macOS slot.
 6. Reflective PE loader for Windows. Add the Windows slots.
-7. Cross-compile from one host to all six. Validate by running each
+7. Cross-compile from one host to all five. Validate by running each
    target binary under emulation (QEMU for arm64 Linux; actual hardware
    or VMs for Windows and macOS slots in CI).
 8. Delete `brot/` and `washmhost/`. Update `mohab.bat` from the new
@@ -606,12 +646,33 @@ Each step lands as its own commit. No big-bang switch.
   (no goroutines on WASM, limited reflection, partial stdlib). The
   WASM brain stays Rust; if we ever ship a Go-based builder WASM in
   the future, it goes through standard `GOOS=wasip1 GOARCH=wasm`.
-- **CGO on Linux or macOS.** Pure Go only. The whole point of the
-  pivot is escaping toolchain matrices. The Windows reflective loader
-  is the one exception, and we will try pure Go first.
+- **CGO anywhere.** CGO_ENABLED=0 is absolute across all five targets
+  including Windows. The pure-Go MemoryModule port handles reflective
+  PE loading entirely within Go's allocation and binding model. The
+  moment we accept CGO on any target we break cross-compilation from a
+  single host, which is the core operational promise of the Go pivot.
 - **Wasmtime in Go.** wasmtime-go uses CGO and a pre-built native
   library. That brings back exactly the cross-compilation pain we are
   escaping. wazero is the right call.
+- **The wazero interpreter.** `wazero.NewRuntimeConfigInterpreter()` is
+  not appropriate for kabibi or any sustained-computation payload. The
+  TUI, file manager, and shell parser need throughput. wazero's
+  single-pass compiler (`NewRuntimeConfigCompiler()`) translates WASM
+  bytecode directly to machine code in well under a second with no
+  heavy IR or loop-unrolling passes. The startup cost is absorbed into
+  the brotli decompression time. Use the compiler.
+- **Intel Mac (`darwin/amd64`).** Apple completed the Intel-to-Silicon
+  transition and subsequent macOS releases dropped Intel support. There
+  is no Intel Mac CLI demographic left to serve. Dropping the slot
+  removes 16 % from the binary table and simplifies the matrix to five.
+- **Runtime code-signing on macOS.** Signatures go on during the
+  `mohabbat-go` build step, using `rcodesign`, before either the brot
+  stub or the washmhost dylib is stitched into the output. Both Mach-O
+  binaries must be signed: `brot-darwin-arm64` (Gatekeeper checks it on
+  `execve`) and `washmhost-darwin-arm64.dylib` (Gatekeeper checks it on
+  `dlopen`). Attempting to sign at runtime requires entitlements,
+  notarisation, or a developer identity — none of which we can or should
+  impose on the end user.
 - **Bundling Rust or Go toolchains.** mohab.bat does not ship a
   compiler. If the user passes a Rust project, they need cargo. If
   they pass a Go project, they need go. We document this.
