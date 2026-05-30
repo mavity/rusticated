@@ -213,12 +213,12 @@ impl EpollDriver {
                 let mut buf = [0u8; 8];
                 // SAFETY: `evfd` is a valid eventfd; buf has exactly 8 bytes.
                 unsafe { read(evfd, buf.as_mut_ptr(), 8) };
-                
+
                 let completions = {
                     let mut q = COMPLETION_QUEUE.lock();
                     core::mem::take(&mut *q)
                 };
-                
+
                 for comp in completions {
                     if let Some(op) = self.pending_ops.remove(&comp.token) {
                         let state = match op {
@@ -232,7 +232,7 @@ impl EpollDriver {
                         }
                     }
                 }
-                
+
                 continue;
             }
             if let Some(op) = self.pending_ops.remove(&token) {
@@ -410,7 +410,7 @@ impl EpollDriver {
             let token = self.next_token;
             self.next_token += 1;
             self.pending_ops.insert(token, PendingOp::Read(fd, state));
-            
+
             let cap = buf.capacity();
             crate::rt::blocking::pool().spawn(move || {
                 unsafe extern "C" {
@@ -418,12 +418,19 @@ impl EpollDriver {
                 }
                 let res = unsafe { read(fd, buf.as_mut_ptr(), cap) };
                 let (error_code, bytes) = if res < 0 {
-                    (crate::io::Error::last_os_error().raw_os_error().unwrap_or(-1), 0)
+                    (
+                        crate::io::Error::last_os_error()
+                            .raw_os_error()
+                            .unwrap_or(-1),
+                        0,
+                    )
                 } else {
-                    unsafe { buf.set_len(res as usize); }
+                    unsafe {
+                        buf.set_len(res as usize);
+                    }
                     (0, res as u32)
                 };
-                
+
                 COMPLETION_QUEUE.lock().push(Completion {
                     token,
                     buf,
@@ -435,14 +442,14 @@ impl EpollDriver {
         }
         Ok(())
     }
-    
+
     pub(crate) fn submit_write(&mut self, fd: i32, state: Rc<OpState>) -> crate::io::Result<()> {
         let buf_opt = unsafe { &mut *state.buffer.get() }.take();
         if let Some(buf) = buf_opt {
             let token = self.next_token;
             self.next_token += 1;
             self.pending_ops.insert(token, PendingOp::Write(fd, state));
-            
+
             crate::rt::blocking::pool().spawn(move || {
                 unsafe extern "C" {
                     fn write(fd: i32, buf: *const u8, count: usize) -> isize;
@@ -450,11 +457,16 @@ impl EpollDriver {
                 let len = buf.len();
                 let res = unsafe { write(fd, buf.as_ptr(), len) };
                 let (error_code, bytes) = if res < 0 {
-                    (crate::io::Error::last_os_error().raw_os_error().unwrap_or(-1), 0)
+                    (
+                        crate::io::Error::last_os_error()
+                            .raw_os_error()
+                            .unwrap_or(-1),
+                        0,
+                    )
                 } else {
                     (0, res as u32)
                 };
-                
+
                 COMPLETION_QUEUE.lock().push(Completion {
                     token,
                     buf,

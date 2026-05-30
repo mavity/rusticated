@@ -709,7 +709,8 @@ impl AsyncWrite for File {
                 } else {
                     Ok(())
                 }
-            }).await
+            })
+            .await
         }
         #[cfg(windows)]
         {
@@ -719,12 +720,14 @@ impl AsyncWrite for File {
                     fn FlushFileBuffers(hObject: usize) -> i32;
                 }
                 let res = unsafe { FlushFileBuffers(handle) };
-                if res == 0 { // 0 means failure in WinAPI for this function
+                if res == 0 {
+                    // 0 means failure in WinAPI for this function
                     Err(io::Error::last_os_error())
                 } else {
                     Ok(())
                 }
-            }).await
+            })
+            .await
         }
     }
 }

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -138,7 +139,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			ptr := uint32(stack[0])
 			lenBytes := uint32(stack[1])
 
-			args := os.Args[1:]
+			args := os.Args
 			var bytesNeeded uint32
 			for _, arg := range args {
 				bytesNeeded += uint32(len(arg)) + 1
@@ -264,7 +265,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			go func() {
 				n, err := f.Read(buf)
 				retCode := uint32(0)
-				if err != nil {
+				if err != nil && err != io.EOF {
 					retCode = 5 // EIO
 				}
 				h.fileOpsQueue <- func() {
@@ -384,6 +385,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 				retCode := uint32(0)
 				extResult := uint64(0)
 				if err != nil {
+					fmt.Fprintf(os.Stderr, "file_open err: %s %v\n", pathStr, err)
 					retCode = 5 // EIO
 				} else {
 					h.mu.Lock()
@@ -693,7 +695,29 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 				}
 
 				cmd := exec.Command(program, args...)
-				cmd.Env = envVars
+				// Match std::process::Command semantics: inherit parent env,
+				// then apply explicit key=value overrides from the guest.
+				mergedEnv := append([]string{}, os.Environ()...)
+				if len(envVars) > 0 {
+					indexByKey := map[string]int{}
+					for i, kv := range mergedEnv {
+						if eq := strings.IndexByte(kv, '='); eq > 0 {
+							indexByKey[kv[:eq]] = i
+						}
+					}
+					for _, kv := range envVars {
+						if eq := strings.IndexByte(kv, '='); eq > 0 {
+							k := kv[:eq]
+							if idx, ok := indexByKey[k]; ok {
+								mergedEnv[idx] = kv
+							} else {
+								mergedEnv = append(mergedEnv, kv)
+								indexByKey[k] = len(mergedEnv) - 1
+							}
+						}
+					}
+				}
+				cmd.Env = mergedEnv
 				cmd.Stdin = os.Stdin
 				cmd.Stdout = os.Stdout
 				cmd.Stderr = os.Stderr

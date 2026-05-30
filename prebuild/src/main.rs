@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
@@ -21,7 +20,10 @@ fn main() {
         ("x86_64-unknown-linux-gnu", "x86_64-rusticated-linux-gnu"),
         ("aarch64-pc-windows-msvc", "aarch64-rusticated-windows-msvc"),
         ("aarch64-unknown-linux-gnu", "aarch64-rusticated-linux-gnu"),
-        ("wasm32-unknown-unknown", "wasm32-rusticated-unknown-unknown"),
+        (
+            "wasm32-unknown-unknown",
+            "wasm32-rusticated-unknown-unknown",
+        ),
     ];
 
     let host_rusticated_target = base_targets
@@ -48,10 +50,10 @@ fn main() {
     let mut config_toml = String::new();
 
     // Set RUST_TARGET_PATH so all workspace crates can find target specs by name without .json
-    /* config_toml.push_str(&format!(
+    config_toml.push_str(&format!(
         "[env]\nRUST_TARGET_PATH = \"{}\"\n\n",
         rust_target_path
-    )); */
+    ));
 
     let abs_json = spec_dir
         .join(format!("{}.json", host_rusticated_target))
@@ -60,7 +62,10 @@ fn main() {
         .to_string_lossy()
         .replace("\\\\?\\", "")
         .replace('\\', "/");
-    config_toml.push_str(&format!("[build]\ntarget = \"{}\"\nrustflags = [\"-Zunstable-options\"]\n\n", abs_json));
+    config_toml.push_str(&format!(
+        "[build]\ntarget = \"{}\"\nrustflags = [\"-Zunstable-options\"]\n\n",
+        abs_json
+    ));
 
     config_toml.push_str("[unstable]\njson-target-spec = true\n\n");
 
@@ -114,12 +119,16 @@ fn main() {
         // consumer builds both use the same artifact flavor.
         let existing_rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
         let rustflags = if existing_rustflags.is_empty() {
-            "--cfg backtrace_in_libstd".to_string()
+            "-Zunstable-options --cfg backtrace_in_libstd".to_string()
         } else {
-            format!("{} --cfg backtrace_in_libstd", existing_rustflags)
+            format!(
+                "-Zunstable-options --cfg backtrace_in_libstd {}",
+                existing_rustflags
+            )
         };
 
         let build_output = Command::new("cargo")
+            .env("RUST_TARGET_PATH", &rust_target_path)
             .env("RUSTFLAGS", &rustflags)
             .arg("build")
             .arg("-p")
@@ -132,17 +141,14 @@ fn main() {
             .arg("--config")
             .arg("unstable.json-target-spec=true")
             .arg("--target")
-            .arg(json_path.to_string_lossy().to_string())
+            .arg(custom_name)
             .arg("--message-format=json")
             .output()
             .expect("cargo build failed");
 
         if !build_output.status.success() {
             let stderr = String::from_utf8_lossy(&build_output.stderr);
-            eprintln!(
-                "cargo build failed for target {}:\n{}",
-                custom_name, stderr
-            );
+            eprintln!("cargo build failed for target {}:\n{}", custom_name, stderr);
             let json_stdout = String::from_utf8_lossy(&build_output.stdout);
             for line in json_stdout.lines() {
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
@@ -173,7 +179,10 @@ fn main() {
                         let path = std::path::Path::new(filename);
                         let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                         let abs_path = match fs::canonicalize(path) {
-                            Ok(p) => p.to_string_lossy().replace("\\\\?\\", "").replace('\\', "/"),
+                            Ok(p) => p
+                                .to_string_lossy()
+                                .replace("\\\\?\\", "")
+                                .replace('\\', "/"),
                             Err(_) => path.to_string_lossy().replace('\\', "/"),
                         };
 
@@ -199,7 +208,8 @@ fn main() {
         }
 
         let mut target_rustflags = format!("[target.{}]\nrustflags = [\n", custom_name);
-        target_rustflags.push_str("    \"-Zunstable-options\",\n    \"--cfg\", \"backtrace_in_libstd\",\n");
+        target_rustflags
+            .push_str("    \"-Zunstable-options\",\n    \"--cfg\", \"backtrace_in_libstd\",\n");
         for (crate_name, abs_path) in paths.iter() {
             target_rustflags.push_str(&format!(
                 "    \"--extern\", \"{}={}\",\n",
@@ -207,16 +217,16 @@ fn main() {
             ));
         }
         let abs_deps_dir = match fs::canonicalize(&deps_dir) {
-            Ok(p) => p.to_string_lossy().replace("\\\\?\\", "").replace('\\', "/"),
+            Ok(p) => p
+                .to_string_lossy()
+                .replace("\\\\?\\", "")
+                .replace('\\', "/"),
             Err(_) => deps_dir.to_string_lossy().replace('\\', "/"),
         };
-        target_rustflags.push_str(&format!(
-            "    \"-L\", \"dependency={}\",\n",
-            abs_deps_dir
-        ));
+        target_rustflags.push_str(&format!("    \"-L\", \"dependency={}\",\n", abs_deps_dir));
         target_rustflags.push_str("]\n\n");
         config_toml.push_str(&target_rustflags);
-        
+
         let mut encoded = vec![
             "-Zunstable-options".to_string(),
             "--cfg".to_string(),
@@ -228,7 +238,11 @@ fn main() {
         }
         encoded.push("-L".to_string());
         encoded.push(format!("dependency={}", abs_deps_dir));
-        fs::write(spec_dir.join(format!("encoded_rustflags_{}.txt", custom_name)), encoded.join("\x1f")).expect("wrote encoded_rustflags.txt");
+        fs::write(
+            spec_dir.join(format!("encoded_rustflags_{}.txt", custom_name)),
+            encoded.join("\x1f"),
+        )
+        .expect("wrote encoded_rustflags.txt");
     }
 
     fs::write(spec_dir.join("config.toml"), config_toml).expect("wrote config.toml");

@@ -1,4 +1,4 @@
-﻿use std::env;
+use std::env;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -326,7 +326,10 @@ fn build_sysroot(workspace_dir: &Path, target: &str, target_name: &str) -> bool 
             }
         }
         if let Some(h) = hash {
-            let _ = std::fs::copy(sysroot_lib_dir.join("libstd.rlib"), sysroot_lib_dir.join(format!("libstd-{}.rlib", h)));
+            let _ = std::fs::copy(
+                sysroot_lib_dir.join("libstd.rlib"),
+                sysroot_lib_dir.join(format!("libstd-{}.rlib", h)),
+            );
         }
     }
     success
@@ -532,16 +535,26 @@ fn stitch(
     for (i, opt_target) in slot_targets.iter().enumerate() {
         if let Some(target) = opt_target {
             // Freshly built this session — read from target/tree.
-            
+
             let custom_target_name = if target.starts_with("x86_64-") {
-                if target.contains("windows") { "x86_64-rusticated-windows-msvc" }
-                else if target.contains("linux") { "x86_64-rusticated-linux-gnu" }
-                else { "x86_64-rusticated" }
+                if target.contains("windows") {
+                    "x86_64-rusticated-windows-msvc"
+                } else if target.contains("linux") {
+                    "x86_64-rusticated-linux-gnu"
+                } else {
+                    "x86_64-rusticated"
+                }
             } else if target.starts_with("aarch64-") {
-                if target.contains("windows") { "aarch64-rusticated-windows-msvc" }
-                else if target.contains("linux") { "aarch64-rusticated-linux-gnu" }
-                else { "aarch64-rusticated" }
-            } else { target };
+                if target.contains("windows") {
+                    "aarch64-rusticated-windows-msvc"
+                } else if target.contains("linux") {
+                    "aarch64-rusticated-linux-gnu"
+                } else {
+                    "aarch64-rusticated"
+                }
+            } else {
+                target
+            };
             let host_path = find_asset(target_tree, custom_target_name, "washmhost");
             let mut data = Vec::new();
             File::open(host_path)
@@ -800,15 +813,3 @@ fn read_mohabbat_meta(data: &[u8]) -> Option<(u64, u64, u64, u64, u64)> {
     }
     None
 }
-
-
-
-
-
-
-
-
-
-
-
-

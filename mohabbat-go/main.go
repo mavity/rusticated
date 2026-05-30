@@ -42,7 +42,7 @@ type mohabbatMeta struct {
 func main() {
 	var (
 		workspace = flag.String("workspace", "", "workspace root (default: parent of mohabbat-go)")
-		payload   = flag.String("payload", "", "path to payload .wasm (default: target/tree/wasm32-rusticated-unknown-unknown/release/mohabbat.wasm)")
+		payload   = flag.String("payload", "", "path to payload .wasm (default: target/wasm32-rusticated-unknown-unknown/release/mohabbat.wasm)")
 		output    = flag.String("output", "", "output mohab.bat path (default: <workspace>/mohab.bat)")
 		skipBuild = flag.Bool("skip-build", false, "skip building brot-go and washmhost-go (use existing artifacts)")
 	)
@@ -50,9 +50,10 @@ func main() {
 
 	ws, err := resolveWorkspace(*workspace)
 	must(err)
+	defaultPayload := *payload == ""
 
 	if *payload == "" {
-		*payload = filepath.Join(ws, "target", "tree", "wasm32-rusticated-unknown-unknown", "release", "mohabbat.wasm")
+		*payload = filepath.Join(ws, "target", "wasm32-rusticated-unknown-unknown", "release", "mohabbat.wasm")
 	}
 	if *output == "" {
 		*output = filepath.Join(ws, "mohab.bat")
@@ -66,6 +67,10 @@ func main() {
 		for _, s := range slots {
 			must(cargoBuild(ws, "brot", s, buildDir))
 			must(goBuild(ws, "washmhost-go", s, buildDir))
+		}
+		if defaultPayload {
+			fmt.Println("[mohabbat-go] Building default brain payload (mohabbat wasm)...")
+			must(buildMohabbatBrain(ws))
 		}
 	}
 
@@ -209,16 +214,17 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string) error {
 		return fmt.Errorf("unsupported arch %s in cargoBuild", s.goarch)
 	}
 
-	absJson := filepath.Join(ws, "target", "rusticated-spec", target+".json")
-	cmd := exec.Command("cargo", "build", "-vv", "--release", "--config", filepath.Join(ws, "sysroot.toml"), "--target", absJson)
-	
+	cmd := exec.Command("cargo", "build", "-vv", "--release", "--config", filepath.Join(ws, "target", "rusticated-spec", "config.toml"), "--target", target)
+	env := append(os.Environ(), "RUST_TARGET_PATH="+filepath.Join(ws, "target", "rusticated-spec"))
+
 	flagsPath := filepath.Join(ws, "target", "rusticated-spec", fmt.Sprintf("encoded_rustflags_%s.txt", target))
 	encodedFlags, err := os.ReadFile(flagsPath)
 	if err == nil {
-		cmd.Env = append(os.Environ(), "CARGO_ENCODED_RUSTFLAGS=" + string(encodedFlags))
+		env = append(env, "CARGO_ENCODED_RUSTFLAGS="+string(encodedFlags))
 	} else {
 		return fmt.Errorf("could not read encoded_rustflags: %v", err)
 	}
+	cmd.Env = env
 
 	cmd.Dir = filepath.Join(ws, pkgDir)
 	cmd.Stdout = os.Stdout
@@ -238,11 +244,34 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string) error {
 	return os.WriteFile(outPath, bytes, 0755)
 }
 
+func buildMohabbatBrain(ws string) error {
+	target := "wasm32-rusticated-unknown-unknown"
+	cmd := exec.Command("cargo", "build", "-vv", "-p", "mohabbat", "--release", "--config", filepath.Join(ws, "target", "rusticated-spec", "config.toml"), "--target", target)
+	env := append(os.Environ(), "RUST_TARGET_PATH="+filepath.Join(ws, "target", "rusticated-spec"))
+
+	flagsPath := filepath.Join(ws, "target", "rusticated-spec", fmt.Sprintf("encoded_rustflags_%s.txt", target))
+	encodedFlags, err := os.ReadFile(flagsPath)
+	if err == nil {
+		env = append(env, "CARGO_ENCODED_RUSTFLAGS="+string(encodedFlags))
+	} else {
+		return fmt.Errorf("could not read encoded_rustflags for %s: %v", target, err)
+	}
+
+	cmd.Env = env
+	cmd.Dir = ws
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("mohabbat wasm build failed: %w", err)
+	}
+	return nil
+}
+
 func goBuild(ws, pkgDir string, s slot, buildDir string) error {
 	outPath := filepath.Join(buildDir, fmt.Sprintf("%s-%s.exe", pkgDir, s.name))
 	cmd := exec.Command("go", "build", "-trimpath", "-ldflags=-s -w", "-o", outPath, ".")
 	cmd.Dir = filepath.Join(ws, pkgDir)
-		cmd.Env = append(os.Environ(), "CGO_ENABLED=0",
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0",
 		"GOOS="+s.goos,
 		"GOARCH="+s.goarch,
 	)
@@ -342,4 +371,3 @@ func die(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, "[mohabbat-go] error: "+format+"\n", a...)
 	os.Exit(1)
 }
-
