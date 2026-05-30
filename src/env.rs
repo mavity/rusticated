@@ -66,6 +66,7 @@ pub mod consts {
 mod native_env {
     use crate::alloc::borrow::ToOwned;
     use crate::io;
+    use crate::path::Path;
     use crate::path::PathBuf;
     use crate::string::String;
     use crate::vec::Vec;
@@ -96,6 +97,40 @@ mod native_env {
     #[cfg(not(windows))]
     pub fn current_dir() -> io::Result<PathBuf> {
         Ok(PathBuf::from("/"))
+    }
+
+    /// Sets the current working directory.
+    #[cfg(windows)]
+    pub fn set_current_dir(path: &Path) -> io::Result<()> {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn SetCurrentDirectoryW(lpPathName: *const u16) -> i32;
+        }
+
+        let wide = path.to_wide_null();
+        let ok = unsafe { SetCurrentDirectoryW(wide.as_ptr()) };
+        if ok == 0 {
+            Err(io::Error::from_raw_os_error(1))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Sets the current working directory.
+    #[cfg(not(windows))]
+    pub fn set_current_dir(path: &Path) -> io::Result<()> {
+        unsafe extern "C" {
+            fn chdir(path: *const u8) -> i32;
+        }
+
+        let mut p = path.as_str().as_bytes().to_vec();
+        p.push(0);
+        let ret = unsafe { chdir(p.as_ptr()) };
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(1))
+        }
     }
 
     // â”€â”€ args
@@ -293,13 +328,48 @@ mod native_env {
 pub use native_env::{current_dir, get_env, get_host_env_vars, join_paths};
 
 #[cfg(not(target_family = "wasm"))]
+pub fn set_current_dir<P: AsRef<crate::path::Path>>(path: P) -> crate::io::Result<()> {
+    native_env::set_current_dir(path.as_ref())
+}
+
+#[cfg(not(target_family = "wasm"))]
 fn get_args() -> alloc::vec::Vec<crate::string::String> {
     native_env::get_args()
 }
 
 #[cfg(target_family = "wasm")]
 pub fn current_dir() -> crate::io::Result<crate::path::PathBuf> {
-    Ok(crate::path::PathBuf::from("."))
+    let probe = unsafe { imports::get_cwd(core::ptr::null_mut(), 0) };
+    let err = (probe >> 32) as u32;
+    let bytes_needed = (probe & 0xFFFF_FFFF) as u32;
+    if err != 0 {
+        return Err(crate::io::Error::from_raw_os_error(err as i32));
+    }
+
+    let mut buf = alloc::vec![0u8; bytes_needed as usize];
+    let res = unsafe { imports::get_cwd(buf.as_mut_ptr(), bytes_needed) };
+    let err = (res >> 32) as u32;
+    let written = (res & 0xFFFF_FFFF) as u32;
+    if err != 0 {
+        return Err(crate::io::Error::from_raw_os_error(err as i32));
+    }
+
+    if written as usize > buf.len() {
+        return Err(crate::io::Error::from_raw_os_error(22));
+    }
+    let path = crate::string::String::from_utf8_lossy(&buf[..written as usize]).into_owned();
+    Ok(crate::path::PathBuf::from(path))
+}
+
+#[cfg(target_family = "wasm")]
+pub fn set_current_dir<P: AsRef<crate::path::Path>>(path: P) -> crate::io::Result<()> {
+    let p = path.as_ref().as_str();
+    let err = unsafe { imports::set_cwd(p.as_ptr(), p.len() as u32) };
+    if err == 0 {
+        Ok(())
+    } else {
+        Err(crate::io::Error::from_raw_os_error(err as i32))
+    }
 }
 
 #[cfg(target_family = "wasm")]
