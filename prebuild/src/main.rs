@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
@@ -32,15 +33,8 @@ fn main() {
         .map(|(_, r)| *r)
         .unwrap_or("x86_64-rusticated-windows-msvc"); // fallback
 
-    let current_dir = std::env::current_dir().unwrap();
-    let abs_spec_dir = current_dir.join("target").join("rusticated-spec");
-    let mut rust_target_path = abs_spec_dir.to_string_lossy().to_string();
-    if rust_target_path.starts_with("\\\\?\\") {
-        rust_target_path = rust_target_path[4..].to_string();
-    }
-    let rust_target_path = rust_target_path.replace("\\", "/");
-    let target_dir = current_dir.join("target");
-    let spec_dir = abs_spec_dir.clone();
+    let target_dir = PathBuf::from("target");
+    let spec_dir = target_dir.join("rusticated-spec");
     fs::create_dir_all(&spec_dir).expect("Failed to create spec dir");
 
     // Important: Clear out the config in case it taints the build-std below
@@ -50,6 +44,7 @@ fn main() {
     let mut config_toml = String::new();
 
     // Set RUST_TARGET_PATH so all workspace crates can find target specs by name without .json
+    let rust_target_path = spec_dir.display().to_string().replace('\\', "/");
     config_toml.push_str(&format!(
         "[env]\nRUST_TARGET_PATH = \"{}\"\n\n",
         rust_target_path
@@ -62,10 +57,7 @@ fn main() {
         .to_string_lossy()
         .replace("\\\\?\\", "")
         .replace('\\', "/");
-    config_toml.push_str(&format!(
-        "[build]\ntarget = \"{}\"\nrustflags = [\"-Zunstable-options\"]\n\n",
-        abs_json
-    ));
+    config_toml.push_str(&format!("[build]\ntarget = \"{}\"\n\n", abs_json));
 
     config_toml.push_str("[unstable]\njson-target-spec = true\n\n");
 
@@ -119,16 +111,12 @@ fn main() {
         // consumer builds both use the same artifact flavor.
         let existing_rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
         let rustflags = if existing_rustflags.is_empty() {
-            "-Zunstable-options --cfg backtrace_in_libstd".to_string()
+            "--cfg backtrace_in_libstd".to_string()
         } else {
-            format!(
-                "-Zunstable-options --cfg backtrace_in_libstd {}",
-                existing_rustflags
-            )
+            format!("{} --cfg backtrace_in_libstd", existing_rustflags)
         };
 
         let build_output = Command::new("cargo")
-            .env("RUST_TARGET_PATH", &rust_target_path)
             .env("RUSTFLAGS", &rustflags)
             .arg("build")
             .arg("-p")
@@ -137,11 +125,10 @@ fn main() {
             .arg("build-std=core,alloc,compiler_builtins")
             .arg("-Z")
             .arg("build-std-features=compiler-builtins-mem")
-            .arg("--release")
             .arg("--config")
             .arg("unstable.json-target-spec=true")
             .arg("--target")
-            .arg(custom_name)
+            .arg(json_path.to_string_lossy().to_string())
             .arg("--message-format=json")
             .output()
             .expect("cargo build failed");
@@ -162,7 +149,7 @@ fn main() {
             std::process::exit(build_output.status.code().unwrap_or(1));
         }
 
-        let deps_dir = target_dir.join(custom_name).join("release").join("deps");
+        let deps_dir = target_dir.join(custom_name).join("debug").join("deps");
         let mut paths: HashMap<String, String> = HashMap::new();
 
         let json_stdout = String::from_utf8_lossy(&build_output.stdout);
@@ -208,8 +195,7 @@ fn main() {
         }
 
         let mut target_rustflags = format!("[target.{}]\nrustflags = [\n", custom_name);
-        target_rustflags
-            .push_str("    \"-Zunstable-options\",\n    \"--cfg\", \"backtrace_in_libstd\",\n");
+        target_rustflags.push_str("    \"--cfg\", \"backtrace_in_libstd\",\n");
         for (crate_name, abs_path) in paths.iter() {
             target_rustflags.push_str(&format!(
                 "    \"--extern\", \"{}={}\",\n",
@@ -226,23 +212,6 @@ fn main() {
         target_rustflags.push_str(&format!("    \"-L\", \"dependency={}\",\n", abs_deps_dir));
         target_rustflags.push_str("]\n\n");
         config_toml.push_str(&target_rustflags);
-
-        let mut encoded = vec![
-            "-Zunstable-options".to_string(),
-            "--cfg".to_string(),
-            "backtrace_in_libstd".to_string(),
-        ];
-        for (crate_name, abs_path) in paths.iter() {
-            encoded.push("--extern".to_string());
-            encoded.push(format!("{}={}", crate_name, abs_path));
-        }
-        encoded.push("-L".to_string());
-        encoded.push(format!("dependency={}", abs_deps_dir));
-        fs::write(
-            spec_dir.join(format!("encoded_rustflags_{}.txt", custom_name)),
-            encoded.join("\x1f"),
-        )
-        .expect("wrote encoded_rustflags.txt");
     }
 
     fs::write(spec_dir.join("config.toml"), config_toml).expect("wrote config.toml");
