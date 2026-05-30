@@ -39,6 +39,19 @@ type mohabbatMeta struct {
 	Reserved        uint64
 }
 
+func upsertEnv(env []string, key, value string) []string {
+	updated := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		parts := strings.SplitN(kv, "=", 2)
+		if len(parts) == 2 && strings.EqualFold(parts[0], key) {
+			continue
+		}
+		updated = append(updated, kv)
+	}
+	updated = append(updated, key+"="+value)
+	return updated
+}
+
 func main() {
 	var (
 		workspace = flag.String("workspace", "", "workspace root (default: parent of mohabbat-go)")
@@ -216,15 +229,8 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string) error {
 
 	cmd := exec.Command("cargo", "build", "-vv", "--release", "--config", filepath.Join(ws, "target", "rusticated-spec", "config.toml"), "--target", target)
 	env := append(os.Environ(), "RUST_TARGET_PATH="+filepath.Join(ws, "target", "rusticated-spec"))
-
-	flagsPath := filepath.Join(ws, "target", "rusticated-spec", fmt.Sprintf("encoded_rustflags_%s.txt", target))
-	encodedFlags, err := os.ReadFile(flagsPath)
-	if err == nil {
-		env = append(env, "CARGO_ENCODED_RUSTFLAGS="+string(encodedFlags))
-	} else {
-		return fmt.Errorf("could not read encoded_rustflags: %v", err)
-	}
 	cmd.Env = env
+	cmd.Args = append(cmd.Args, "-Z", "unstable-options")
 
 	cmd.Dir = filepath.Join(ws, pkgDir)
 	cmd.Stdout = os.Stdout
@@ -249,15 +255,8 @@ func buildMohabbatBrain(ws string) error {
 	cmd := exec.Command("cargo", "build", "-vv", "-p", "mohabbat", "--release", "--config", filepath.Join(ws, "target", "rusticated-spec", "config.toml"), "--target", target)
 	env := append(os.Environ(), "RUST_TARGET_PATH="+filepath.Join(ws, "target", "rusticated-spec"))
 
-	flagsPath := filepath.Join(ws, "target", "rusticated-spec", fmt.Sprintf("encoded_rustflags_%s.txt", target))
-	encodedFlags, err := os.ReadFile(flagsPath)
-	if err == nil {
-		env = append(env, "CARGO_ENCODED_RUSTFLAGS="+string(encodedFlags))
-	} else {
-		return fmt.Errorf("could not read encoded_rustflags for %s: %v", target, err)
-	}
-
 	cmd.Env = env
+	cmd.Args = append(cmd.Args, "-Z", "unstable-options")
 	cmd.Dir = ws
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

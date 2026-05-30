@@ -44,7 +44,11 @@ fn main() {
     let mut config_toml = String::new();
 
     // Set RUST_TARGET_PATH so all workspace crates can find target specs by name without .json
-    let rust_target_path = spec_dir.display().to_string().replace('\\', "/");
+    let rust_target_path = fs::canonicalize(&spec_dir)
+        .unwrap_or_else(|_| spec_dir.clone())
+        .to_string_lossy()
+        .replace("\\\\?\\", "")
+        .replace('\\', "/");
     config_toml.push_str(&format!(
         "[env]\nRUST_TARGET_PATH = \"{}\"\n\n",
         rust_target_path
@@ -111,16 +115,24 @@ fn main() {
         // consumer builds both use the same artifact flavor.
         let existing_rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
         let rustflags = if existing_rustflags.is_empty() {
-            "--cfg backtrace_in_libstd".to_string()
+            "-Zunstable-options --cfg backtrace_in_libstd".to_string()
         } else {
-            format!("{} --cfg backtrace_in_libstd", existing_rustflags)
+            format!(
+                "{} -Zunstable-options --cfg backtrace_in_libstd",
+                existing_rustflags
+            )
         };
 
-        let build_output = Command::new("cargo")
-            .env("RUSTFLAGS", &rustflags)
+        let mut build_cmd = Command::new("cargo");
+        build_cmd.env("RUSTFLAGS", &rustflags);
+        build_cmd.env("RUST_TARGET_PATH", &rust_target_path);
+        let target_arg = custom_name.to_string();
+
+        let build_output = build_cmd
             .arg("build")
             .arg("-p")
             .arg("rusticated")
+            .arg("--release")
             .arg("-Z")
             .arg("build-std=core,alloc,compiler_builtins")
             .arg("-Z")
@@ -128,7 +140,7 @@ fn main() {
             .arg("--config")
             .arg("unstable.json-target-spec=true")
             .arg("--target")
-            .arg(json_path.to_string_lossy().to_string())
+            .arg(&target_arg)
             .arg("--message-format=json")
             .output()
             .expect("cargo build failed");
@@ -149,7 +161,7 @@ fn main() {
             std::process::exit(build_output.status.code().unwrap_or(1));
         }
 
-        let deps_dir = target_dir.join(custom_name).join("debug").join("deps");
+        let deps_dir = target_dir.join(custom_name).join("release").join("deps");
         let mut paths: HashMap<String, String> = HashMap::new();
 
         let json_stdout = String::from_utf8_lossy(&build_output.stdout);
@@ -195,6 +207,7 @@ fn main() {
         }
 
         let mut target_rustflags = format!("[target.{}]\nrustflags = [\n", custom_name);
+        target_rustflags.push_str("    \"-Zunstable-options\",\n");
         target_rustflags.push_str("    \"--cfg\", \"backtrace_in_libstd\",\n");
         for (crate_name, abs_path) in paths.iter() {
             target_rustflags.push_str(&format!(

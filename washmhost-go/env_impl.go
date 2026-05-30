@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -93,6 +94,43 @@ func mapErrno(err error) uint32 {
 		return 13 // EACCES
 	}
 	return 5 // EIO
+}
+
+func resolveUsableCwd() (string, error) {
+	if cwd, err := os.Getwd(); err == nil {
+		return cwd, nil
+	}
+
+	if veg := os.Getenv("MOHABBAT_VEGETABLE_PATH"); veg != "" {
+		dir := filepath.Dir(veg)
+		if err := os.Chdir(dir); err == nil {
+			if cwd, err := os.Getwd(); err == nil {
+				return cwd, nil
+			}
+		}
+	}
+
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		if err := os.Chdir(dir); err == nil {
+			if cwd, err := os.Getwd(); err == nil {
+				return cwd, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("unable to resolve cwd")
+}
+
+func debugLog(format string, args ...interface{}) {
+	f, err := os.OpenFile(filepath.Join(os.TempDir(), "washmhost-debug.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = fmt.Fprintf(f, "%s ", time.Now().Format("15:04:05.000"))
+	_, _ = fmt.Fprintf(f, format, args...)
+	_, _ = f.Write([]byte("\n"))
 }
 
 func (h *HostEnv) getStat(handle uint64) *StatInfo {
@@ -197,7 +235,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 				}
 			}
 			if !hasPWD {
-				if cwd, err := os.Getwd(); err == nil {
+				if cwd, err := resolveUsableCwd(); err == nil {
 					vars = append(vars, "PWD="+cwd)
 				}
 			}
@@ -248,8 +286,9 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			ptr := uint32(stack[0])
 			lenBytes := uint32(stack[1])
 
-			cwd, err := os.Getwd()
+			cwd, err := resolveUsableCwd()
 			if err != nil {
+				debugLog("get_cwd fail: ptr=%d len=%d err=%v", ptr, lenBytes, err)
 				res := uint64(mapErrno(err)) << 32
 				stack[0] = api.EncodeI64(int64(res))
 				return
@@ -266,6 +305,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			}
 
 			res := (uint64(0) << 32) | uint64(bytesNeeded)
+			debugLog("get_cwd ok: ptr=%d len=%d cwd=%q bytes=%d", ptr, lenBytes, cwd, bytesNeeded)
 			stack[0] = api.EncodeI64(int64(res))
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI64}).
 		Export("get_cwd")
@@ -284,12 +324,14 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 
 			err := os.Chdir(string(buf))
 			if err != nil {
+				debugLog("set_cwd fail: path=%q err=%v", string(buf), err)
 				stack[0] = uint64(mapErrno(err))
 				return
 			}
 
 			if cwd, err := os.Getwd(); err == nil {
 				_ = os.Setenv("PWD", cwd)
+				debugLog("set_cwd ok: path=%q cwd=%q", string(buf), cwd)
 			}
 			stack[0] = 0
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).
@@ -464,12 +506,14 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			go func() {
 				f, err := os.OpenFile(pathStr, osFlags, 0666)
 				// Windows directory handles often require directory-specific open semantics.
-				if err != nil && readFlag && !writeFlag && !createFlag && !truncateFlag && !appendFlag && !createNewFlag {
+				// Treat zero-flags as read-only intent (used by wasm read_dir).
+				if err != nil && !writeFlag && !createFlag && !truncateFlag && !appendFlag && !createNewFlag {
 					f, err = os.Open(pathStr)
 				}
 				retCode := uint32(0)
 				extResult := uint64(0)
 				if err != nil {
+					debugLog("path_open fail: path=%q flags=%d osFlags=%d err=%v", pathStr, flags, osFlags, err)
 					fmt.Fprintf(os.Stderr, "file_open err: %s %v\n", pathStr, err)
 					retCode = 5 // EIO
 				} else {
@@ -479,6 +523,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 					h.handles[handle] = f
 					h.mu.Unlock()
 					extResult = handle
+					debugLog("path_open ok: path=%q flags=%d osFlags=%d handle=%d", pathStr, flags, osFlags, handle)
 				}
 				h.fileOpsQueue <- func() {
 					writeOverlapped(m, ovPtr, retCode, 0, extResult)
@@ -544,6 +589,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 					copied = toCopy
 				}
 				h.fileOpsQueue <- func() {
+					debugLog("dir_read: handle=%d copied=%d remaining=%d", handle, copied, len(scan.Names))
 					writeOverlapped(m, ovPtr, 0, 0, uint64(copied))
 				}
 			}()

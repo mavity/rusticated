@@ -10,6 +10,8 @@ async fn async_main() {
     let mut out = stdout();
     let mut input = stdin();
 
+    print_env_and_dir_diagnostics(&mut out).await;
+
     write_all(
         &mut out,
         b"crusticated demo: type a line and press Enter (5s timeout)\n",
@@ -78,6 +80,99 @@ async fn async_main() {
             write_all(&mut out, msg.as_bytes()).await;
         }
     }
+}
+
+async fn print_env_and_dir_diagnostics(out: &mut impl AsyncWrite) {
+    let mut pwd_value: Option<String> = None;
+
+    match std::env::current_dir() {
+        Ok(cwd) => {
+            let msg = format!("cwd: {}\n", cwd.to_string_lossy());
+            write_all(out, msg.as_bytes()).await;
+        }
+        Err(err) => {
+            let msg = format!("cwd error: {}\n", err);
+            write_all(out, msg.as_bytes()).await;
+        }
+    }
+
+    match std::env::var("PWD") {
+        Ok(pwd) => {
+            let msg = format!("PWD: {}\n", pwd);
+            write_all(out, msg.as_bytes()).await;
+            pwd_value = Some(pwd);
+        }
+        Err(_) => {
+            write_all(out, b"PWD: <missing>\n").await;
+        }
+    }
+
+    write_all(out, b"dir entries for '.':\n").await;
+    match std::fs::read_dir(".").await {
+        Ok(dir) => {
+            let mut count = 0usize;
+            for entry in dir {
+                match entry {
+                    Ok(entry) => {
+                        count += 1;
+                        let mut name = entry.file_name().to_string();
+                        let is_dir = entry.metadata().map(|m| m.is_dir()).unwrap_or(false);
+                        if is_dir {
+                            name.push('/');
+                        }
+                        let msg = format!(" - {}\n", name);
+                        write_all(out, msg.as_bytes()).await;
+                    }
+                    Err(err) => {
+                        let msg = format!(" - <entry error: {}>\n", err);
+                        write_all(out, msg.as_bytes()).await;
+                    }
+                }
+            }
+            let msg = format!("entries total: {}\n", count);
+            write_all(out, msg.as_bytes()).await;
+        }
+        Err(err) => {
+            let msg = format!("read_dir error: {}\n", err);
+            write_all(out, msg.as_bytes()).await;
+        }
+    }
+
+    if let Some(pwd) = pwd_value {
+        let msg = format!("dir entries for PWD ({})\n", pwd);
+        write_all(out, msg.as_bytes()).await;
+        match std::fs::read_dir(&pwd).await {
+            Ok(dir) => {
+                let mut count = 0usize;
+                for entry in dir {
+                    match entry {
+                        Ok(entry) => {
+                            count += 1;
+                            let mut name = entry.file_name().to_string();
+                            let is_dir = entry.metadata().map(|m| m.is_dir()).unwrap_or(false);
+                            if is_dir {
+                                name.push('/');
+                            }
+                            let msg = format!(" - {}\n", name);
+                            write_all(out, msg.as_bytes()).await;
+                        }
+                        Err(err) => {
+                            let msg = format!(" - <entry error: {}>\n", err);
+                            write_all(out, msg.as_bytes()).await;
+                        }
+                    }
+                }
+                let msg = format!("entries total: {}\n", count);
+                write_all(out, msg.as_bytes()).await;
+            }
+            Err(err) => {
+                let msg = format!("read_dir(PWD) error: {}\n", err);
+                write_all(out, msg.as_bytes()).await;
+            }
+        }
+    }
+
+    write_all(out, b"\n").await;
 }
 
 fn format_age_ns(mtime_ns: u64, now_ns: u64) -> String {
