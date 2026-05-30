@@ -1,19 +1,16 @@
-﻿#![cfg_attr(target_arch = "wasm32", no_main)]
+#![cfg_attr(target_arch = "wasm32", no_main)]
 #![cfg_attr(target_arch = "wasm32", no_std)]
 #[cfg(target_arch = "wasm32")]
 extern crate std;
 
-
-
-
-#[cfg(target_arch = "wasm32")]
-use std::{format, string::String, vec::vec, vec::Vec};
 #[cfg(target_arch = "wasm32")]
 use std::fs::File;
 #[cfg(target_arch = "wasm32")]
 use std::io::{AsyncRead, AsyncWrite};
 #[cfg(target_arch = "wasm32")]
 use std::tty::stdout;
+#[cfg(target_arch = "wasm32")]
+use std::{format, string::String, vec::Vec, vec::vec};
 
 #[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
@@ -282,7 +279,7 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 #[cfg(target_arch = "wasm32")]
 fn find_meta(buf: &[u8]) -> Option<(u64, u64, u64, u64, u64)> {
     let magic = b"MOHABBAT";
-    for i in 0..buf.len().saturating_sub(magic.len() + 40) {
+    for i in 0..buf.len().saturating_sub(magic.len() + 48) {
         if &buf[i..i + magic.len()] == magic {
             let p = i + magic.len();
             let pool_len = u64::from_le_bytes(buf[p..p + 8].try_into().ok()?);
@@ -290,10 +287,9 @@ fn find_meta(buf: &[u8]) -> Option<(u64, u64, u64, u64, u64)> {
             let washmhost_len = u64::from_le_bytes(buf[p + 16..p + 24].try_into().ok()?);
             let payload_offset = u64::from_le_bytes(buf[p + 24..p + 32].try_into().ok()?);
             let payload_len = u64::from_le_bytes(buf[p + 32..p + 40].try_into().ok()?);
-            // Sanity check: pool_len must be non-zero.
-            // Note: payload_offset is a decompressed offset, pool_len is the compressed
-            // pool size, so they cannot be directly compared.
-            if pool_len > 0 {
+            let reserved = u64::from_le_bytes(buf[p + 40..p + 48].try_into().ok()?);
+            // Sanity check: pool_len must be non-zero and reasonable, reserved must be 0
+            if pool_len > 0 && pool_len < 1024 * 1024 * 1024 && reserved == 0 {
                 return Some((
                     pool_len,
                     washmhost_offset,
@@ -316,11 +312,14 @@ fn patch_metas(buf: &mut [u8], new_pool_len: u64, new_payload_len: u64) {
     while i + magic.len() + 48 <= buf.len() {
         if &buf[i..i + magic.len()] == magic {
             let p = i + magic.len();
-            buf[p..p + 8].copy_from_slice(&new_pool_len.to_le_bytes());
-            // washmhost_offset at p+8..p+16 — unchanged
-            // washmhost_len   at p+16..p+24 — unchanged
-            // payload_offset  at p+24..p+32 — unchanged
-            buf[p + 32..p + 40].copy_from_slice(&new_payload_len.to_le_bytes());
+            let reserved = u64::from_le_bytes(buf[p + 40..p + 48].try_into().unwrap());
+            if reserved == 0 {
+                buf[p..p + 8].copy_from_slice(&new_pool_len.to_le_bytes());
+                // washmhost_offset at p+8..p+16 — unchanged
+                // washmhost_len   at p+16..p+24 — unchanged
+                // payload_offset  at p+24..p+32 — unchanged
+                buf[p + 32..p + 40].copy_from_slice(&new_payload_len.to_le_bytes());
+            }
             i += magic.len() + 48;
         } else {
             i += 1;
@@ -358,6 +357,58 @@ fn extract_package_name(toml: &str) -> Option<String> {
     None
 }
 
+#[cfg(target_arch = "wasm32")]
+fn extract_target_rustflags(config_toml: &str, target: &str) -> Option<String> {
+    let section = format!("[target.{}]", target);
+    let mut in_section = false;
+    let mut in_rustflags = false;
+    let mut tokens: Vec<String> = Vec::new();
+
+    for raw_line in config_toml.lines() {
+        let line = raw_line.trim();
+        if line.starts_with("[target.") {
+            in_section = line == section;
+            in_rustflags = false;
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+
+        if !in_rustflags {
+            if line.starts_with("rustflags") {
+                in_rustflags = true;
+            }
+            continue;
+        }
+
+        if line.starts_with(']') {
+            break;
+        }
+
+        let mut start = 0usize;
+        while let Some(open_rel) = line[start..].find('"') {
+            let open = start + open_rel + 1;
+            if let Some(close_rel) = line[open..].find('"') {
+                let close = open + close_rel;
+                let token = &line[open..close];
+                if !token.is_empty() {
+                    tokens.push(token.into());
+                }
+                start = close + 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens.join(" "))
+    }
+}
+
 // Build a cargo project and return the path to the compiled .wasm file.
 // Uses the workspace root derived from self_path (parent dir of mohab.bat).
 #[cfg(target_arch = "wasm32")]
@@ -390,18 +441,35 @@ async fn build_project(project_dir: &str, self_path: &str) -> anyhow::Result<Str
 
     out_print(&format!("[mohabbat] Building package: {}\n", package_name)).await;
 
-    let sysroot = format!("{}/target/sysroot-wasm32-unknown-unknown", workspace_root);
+    let workspace_spec = format!("{}/target/rusticated-spec", workspace_root);
+    let wasm_target = "wasm32-rusticated-unknown-unknown";
     let cargo_target_dir = format!("{}/target/tree", workspace_root);
-    let rustflags = format!("--sysroot {}", sysroot);
+    let sysroot_config = format!("{}/sysroot.toml", workspace_root);
+    let config_toml_path = format!("{}/target/rusticated-spec/config.toml", workspace_root);
+
+    let config_toml_bytes = read_all(&config_toml_path)
+        .await
+        .map_err(|e| anyhow::anyhow!("Cannot read {}: {}", config_toml_path, e))?;
+    let config_toml = core::str::from_utf8(&config_toml_bytes)
+        .map_err(|_| anyhow::anyhow!("Config is not valid UTF-8: {}", config_toml_path))?;
+    let rustflags = extract_target_rustflags(config_toml, wasm_target)
+        .ok_or_else(|| anyhow::anyhow!("Cannot find rustflags section for {}", wasm_target))?;
 
     let mut cmd = std::process::Command::new("cargo");
     cmd.arg("build")
         .arg("--manifest-path")
         .arg(&cargo_toml_path)
         .arg("--release")
+        .arg("--config")
+        .arg(&sysroot_config)
         .arg("--target")
-        .arg("wasm32-unknown-unknown")
-        .env("CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS", &rustflags)
+        .arg(wasm_target)
+        .env("RUST_TARGET_PATH", &workspace_spec)
+        .env("RUSTFLAGS", &rustflags)
+        .env(
+            "CARGO_TARGET_WASM32_RUSTICATED_UNKNOWN_UNKNOWN_RUSTFLAGS",
+            &rustflags,
+        )
         .env("CARGO_TARGET_DIR", &cargo_target_dir);
 
     let mut child = cmd
@@ -422,7 +490,7 @@ async fn build_project(project_dir: &str, self_path: &str) -> anyhow::Result<Str
 
     // Locate the compiled wasm: binary name preserves hyphens (cargo output for [[bin]] targets)
     Ok(format!(
-        "{}/wasm32-unknown-unknown/release/{}.wasm",
+        "{}/wasm32-rusticated-unknown-unknown/release/{}.wasm",
         cargo_target_dir, package_name
     ))
 }
@@ -570,16 +638,3 @@ async fn async_main() {
 fn main() {
     println!("[mohabbat] Success: mohab.bat generated via build script.");
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
