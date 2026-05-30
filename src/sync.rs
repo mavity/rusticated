@@ -176,3 +176,25 @@ pub mod mpsc {
     unsafe impl<T: Send> Send for Receiver<T> {}
     unsafe impl<T: Send> Sync for Sender<T> {}
 }
+
+
+pub struct Once {
+    inner: spin::Once<()>,
+}
+
+pub const ONCE_INIT: Once = Once::new();
+
+impl Once {
+    pub const fn new() -> Once {
+        Once {
+            inner: spin::Once::new(),
+        }
+    }
+
+    pub fn call_once<F>(&self, f: F)
+    where
+        F: FnOnce(),
+    {
+        self.inner.call_once(f);
+    }
+}
