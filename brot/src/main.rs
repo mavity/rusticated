@@ -55,6 +55,9 @@ pub static mut META: MohabbatMeta = MohabbatMeta {
 };
 
 #[cfg(windows)]
+mod load_win;
+
+#[cfg(windows)]
 mod windows;
 
 #[cfg(target_os = "linux")]
@@ -71,3 +74,4 @@ fn main() {
         linux::run()
     }
 }
+pub mod test_symbols;
