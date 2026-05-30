@@ -107,3 +107,15 @@ pub unsafe extern "C" fn strlen(s: *const u8) -> core::primitive::usize {
         n
     }
 }
+
+#[unsafe(no_mangle)]
+#[used]
+pub static _fltused: i32 = 0x9875;
+
+#[cfg(target_arch = "x86_64")]
+core::arch::global_asm!(
+    ".global __chkstk",
+    "__chkstk:",
+    "ret"
+);
+

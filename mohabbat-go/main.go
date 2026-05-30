@@ -14,7 +14,7 @@ import (
 )
 
 // Modern Two scope: windows/amd64 and windows/arm64 only.
-// Slot order is contractual — Zone A and patcher both depend on it.
+// Slot order is contractual Ã¢â‚¬â€ Zone A and patcher both depend on it.
 var slots = []slot{
 	{name: "win-amd64", goos: "windows", goarch: "amd64", winArch: "AMD64"},
 	{name: "win-arm64", goos: "windows", goarch: "arm64", winArch: "ARM64"},
@@ -62,9 +62,9 @@ func main() {
 	must(os.MkdirAll(buildDir, 0o755))
 
 	if !*skipBuild {
-		fmt.Println("[mohabbat-go] Building brot-go and washmhost-go for Modern Two...")
+		fmt.Println("[mohabbat-go] Building brot (cargo) and washmhost-go for Modern Two...")
 		for _, s := range slots {
-			must(goBuild(ws, "brot-go", s, buildDir))
+			must(cargoBuild(ws, "brot", s, buildDir))
 			must(goBuild(ws, "washmhost-go", s, buildDir))
 		}
 	}
@@ -129,7 +129,7 @@ func main() {
 		per[i].brot = patched
 	}
 
-	// Generate Zone A — done twice; offsets depend on Zone A length itself.
+	// Generate Zone A Ã¢â‚¬â€ done twice; offsets depend on Zone A length itself.
 	zoneA := buildZoneA(per[0].brot, per[1].brot, 0, 0, 0, 0)
 	off0 := len(zoneA)
 	len0 := len(per[0].brot)
@@ -199,12 +199,50 @@ func resolveWorkspace(ws string) (string, error) {
 	return "", fmt.Errorf("could not locate workspace root (sysroot.toml not found)")
 }
 
+func cargoBuild(ws, pkgDir string, s slot, buildDir string) error {
+	target := ""
+	if s.goarch == "amd64" {
+		target = "x86_64-rusticated-windows-msvc"
+	} else if s.goarch == "arm64" {
+		target = "aarch64-rusticated-windows-msvc"
+	} else {
+		return fmt.Errorf("unsupported arch %s in cargoBuild", s.goarch)
+	}
+
+	absJson := filepath.Join(ws, "target", "rusticated-spec", target+".json")
+	cmd := exec.Command("cargo", "build", "-vv", "--release", "--config", filepath.Join(ws, "sysroot.toml"), "--target", absJson)
+	
+	flagsPath := filepath.Join(ws, "target", "rusticated-spec", fmt.Sprintf("encoded_rustflags_%s.txt", target))
+	encodedFlags, err := os.ReadFile(flagsPath)
+	if err == nil {
+		cmd.Env = append(os.Environ(), "CARGO_ENCODED_RUSTFLAGS=" + string(encodedFlags))
+	} else {
+		return fmt.Errorf("could not read encoded_rustflags: %v", err)
+	}
+
+	cmd.Dir = filepath.Join(ws, pkgDir)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	fmt.Printf("[mohabbat-go]   cargo build %s for %s\n", pkgDir, s.name)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s cargo build failed for %s: %w", pkgDir, s.name, err)
+	}
+
+	// Copy the artifact to buildDir
+	srcExe := filepath.Join(ws, "target", target, "release", "brot.exe")
+	outPath := filepath.Join(buildDir, fmt.Sprintf("brot-%s.exe", s.name))
+	bytes, err := os.ReadFile(srcExe)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(outPath, bytes, 0755)
+}
+
 func goBuild(ws, pkgDir string, s slot, buildDir string) error {
 	outPath := filepath.Join(buildDir, fmt.Sprintf("%s-%s.exe", pkgDir, s.name))
 	cmd := exec.Command("go", "build", "-trimpath", "-ldflags=-s -w", "-o", outPath, ".")
 	cmd.Dir = filepath.Join(ws, pkgDir)
-	cmd.Env = append(os.Environ(),
-		"CGO_ENABLED=0",
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=0",
 		"GOOS="+s.goos,
 		"GOARCH="+s.goarch,
 	)
@@ -218,7 +256,7 @@ func goBuild(ws, pkgDir string, s slot, buildDir string) error {
 }
 
 func brotPath(buildDir string, s slot) string {
-	return filepath.Join(buildDir, fmt.Sprintf("brot-go-%s.exe", s.name))
+	return filepath.Join(buildDir, fmt.Sprintf("brot-%s.exe", s.name))
 }
 
 func washmhostPath(buildDir string, s slot) string {
@@ -304,3 +342,4 @@ func die(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, "[mohabbat-go] error: "+format+"\n", a...)
 	os.Exit(1)
 }
+
