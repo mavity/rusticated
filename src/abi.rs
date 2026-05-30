@@ -42,6 +42,13 @@ pub mod imports {
         /// One-shot retrieval for argv/env.
         pub fn get_env(strings_ptr: *mut u8, strings_len: u32) -> u64;
 
+        /// One-shot retrieval for current working directory.
+        /// Returns: (Error code in high 32 bits | Required bytes in low 32 bits).
+        pub fn get_cwd(path_ptr: *mut u8, path_len: u32) -> u64;
+        /// Set current working directory.
+        /// Returns: host OS-style error code, 0 on success.
+        pub fn set_cwd(path_ptr: *const u8, path_len: u32) -> u32;
+
         /// Request a wakeup after `delay_ms`.
         pub fn timer_set(overlapped: *mut Overlapped, delay_ms: u32);
         /// Cancel a pending timer (Sync).

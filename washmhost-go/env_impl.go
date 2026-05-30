@@ -15,6 +15,7 @@ import (
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
+	"golang.org/x/term"
 )
 
 type HostEnv struct {
@@ -25,6 +26,8 @@ type HostEnv struct {
 	nextHandle   uint64
 	nextStat     uint64
 	fileOpsQueue chan func()
+	ttyRawState  *term.State
+	ttyRawFd     int
 }
 
 type StatInfo struct {
@@ -77,6 +80,19 @@ func createStatInfo(fi os.FileInfo) *StatInfo {
 		AtimeNs:   uint64(fi.ModTime().UnixNano()),
 		CtimeNs:   uint64(fi.ModTime().UnixNano()),
 	}
+}
+
+func mapErrno(err error) uint32 {
+	if err == nil {
+		return 0
+	}
+	if os.IsNotExist(err) {
+		return 2 // ENOENT
+	}
+	if os.IsPermission(err) {
+		return 13 // EACCES
+	}
+	return 5 // EIO
 }
 
 func (h *HostEnv) getStat(handle uint64) *StatInfo {
@@ -173,6 +189,19 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			lenBytes := uint32(stack[1])
 
 			vars := os.Environ()
+			hasPWD := false
+			for _, envVar := range vars {
+				if strings.HasPrefix(envVar, "PWD=") {
+					hasPWD = true
+					break
+				}
+			}
+			if !hasPWD {
+				if cwd, err := os.Getwd(); err == nil {
+					vars = append(vars, "PWD="+cwd)
+				}
+			}
+
 			var bytesNeeded uint32
 			for _, envVar := range vars {
 				parts := strings.SplitN(envVar, "=", 2)
@@ -213,6 +242,58 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			stack[0] = api.EncodeI64(int64(res))
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI64}).
 		Export("get_env")
+
+	builder.NewFunctionBuilder().
+		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+			ptr := uint32(stack[0])
+			lenBytes := uint32(stack[1])
+
+			cwd, err := os.Getwd()
+			if err != nil {
+				res := uint64(mapErrno(err)) << 32
+				stack[0] = api.EncodeI64(int64(res))
+				return
+			}
+
+			bytesNeeded := uint32(len(cwd))
+			if ptr != 0 && lenBytes >= bytesNeeded && bytesNeeded > 0 {
+				mem := m.Memory()
+				buf, ok := mem.Read(ptr, bytesNeeded)
+				if !ok {
+					panic("get_cwd: out of bounds")
+				}
+				copy(buf, cwd)
+			}
+
+			res := (uint64(0) << 32) | uint64(bytesNeeded)
+			stack[0] = api.EncodeI64(int64(res))
+		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI64}).
+		Export("get_cwd")
+
+	builder.NewFunctionBuilder().
+		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+			pathPtr := uint32(stack[0])
+			pathLen := uint32(stack[1])
+
+			mem := m.Memory()
+			buf, ok := mem.Read(pathPtr, pathLen)
+			if !ok {
+				stack[0] = uint64(22) // EINVAL
+				return
+			}
+
+			err := os.Chdir(string(buf))
+			if err != nil {
+				stack[0] = uint64(mapErrno(err))
+				return
+			}
+
+			if cwd, err := os.Getwd(); err == nil {
+				_ = os.Setenv("PWD", cwd)
+			}
+			stack[0] = 0
+		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).
+		Export("set_cwd")
 
 	builder.NewFunctionBuilder().
 		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
@@ -382,6 +463,10 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 
 			go func() {
 				f, err := os.OpenFile(pathStr, osFlags, 0666)
+				// Windows directory handles often require directory-specific open semantics.
+				if err != nil && readFlag && !writeFlag && !createFlag && !truncateFlag && !appendFlag && !createNewFlag {
+					f, err = os.Open(pathStr)
+				}
 				retCode := uint32(0)
 				extResult := uint64(0)
 				if err != nil {
@@ -790,13 +875,45 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 
 	builder.NewFunctionBuilder().
 		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-			// dummy - no op
+			mode := uint32(stack[1])
+
+			h.mu.Lock()
+			defer h.mu.Unlock()
+
+			fd := int(os.Stdin.Fd())
+			if mode == 1 {
+				if h.ttyRawState == nil {
+					state, err := term.MakeRaw(fd)
+					if err == nil {
+						h.ttyRawState = state
+						h.ttyRawFd = fd
+					}
+				}
+			} else {
+				if h.ttyRawState != nil {
+					_ = term.Restore(h.ttyRawFd, h.ttyRawState)
+					h.ttyRawState = nil
+					h.ttyRawFd = 0
+				}
+			}
 		}), []api.ValueType{api.ValueTypeI64, api.ValueTypeI32}, []api.ValueType{}).
 		Export("tty_set_mode")
 
 	builder.NewFunctionBuilder().
 		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-			stack[0] = uint64((80 << 16) | 24)
+			handle := stack[0]
+			fd := int(os.Stdout.Fd())
+			if handle == 0 {
+				fd = int(os.Stdin.Fd())
+			} else if handle == 2 {
+				fd = int(os.Stderr.Fd())
+			}
+
+			cols, rows, err := term.GetSize(fd)
+			if err != nil || cols <= 0 || rows <= 0 {
+				cols, rows = 80, 24
+			}
+			stack[0] = uint64((uint32(cols) << 16) | uint32(rows))
 		}), []api.ValueType{api.ValueTypeI64}, []api.ValueType{api.ValueTypeI32}).
 		Export("tty_get_size")
 
