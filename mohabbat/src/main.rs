@@ -357,58 +357,6 @@ fn extract_package_name(toml: &str) -> Option<String> {
     None
 }
 
-#[cfg(target_arch = "wasm32")]
-fn extract_target_rustflags(config_toml: &str, target: &str) -> Option<String> {
-    let section = format!("[target.{}]", target);
-    let mut in_section = false;
-    let mut in_rustflags = false;
-    let mut tokens: Vec<String> = Vec::new();
-
-    for raw_line in config_toml.lines() {
-        let line = raw_line.trim();
-        if line.starts_with("[target.") {
-            in_section = line == section;
-            in_rustflags = false;
-            continue;
-        }
-        if !in_section {
-            continue;
-        }
-
-        if !in_rustflags {
-            if line.starts_with("rustflags") {
-                in_rustflags = true;
-            }
-            continue;
-        }
-
-        if line.starts_with(']') {
-            break;
-        }
-
-        let mut start = 0usize;
-        while let Some(open_rel) = line[start..].find('"') {
-            let open = start + open_rel + 1;
-            if let Some(close_rel) = line[open..].find('"') {
-                let close = open + close_rel;
-                let token = &line[open..close];
-                if !token.is_empty() {
-                    tokens.push(token.into());
-                }
-                start = close + 1;
-            } else {
-                break;
-            }
-        }
-    }
-
-    if tokens.is_empty() {
-        None
-    } else {
-        Some(tokens.join(" "))
-    }
-}
-
 // Build a cargo project and return the path to the compiled .wasm file.
 // Uses the workspace root derived from self_path (parent dir of mohab.bat).
 #[cfg(target_arch = "wasm32")]
@@ -444,19 +392,16 @@ async fn build_project(project_dir: &str, self_path: &str) -> anyhow::Result<Str
     let workspace_spec = format!("{}/target/rusticated-spec", workspace_root);
     let wasm_target = "wasm32-rusticated-unknown-unknown";
     let cargo_target_dir = format!("{}/target/tree", workspace_root);
+    let expected_wasm_path = format!(
+        "{}/wasm32-rusticated-unknown-unknown/release/{}.wasm",
+        cargo_target_dir, package_name
+    );
     let sysroot_config = format!("{}/sysroot.toml", workspace_root);
-    let config_toml_path = format!("{}/target/rusticated-spec/config.toml", workspace_root);
-
-    let config_toml_bytes = read_all(&config_toml_path)
-        .await
-        .map_err(|e| anyhow::anyhow!("Cannot read {}: {}", config_toml_path, e))?;
-    let config_toml = core::str::from_utf8(&config_toml_bytes)
-        .map_err(|_| anyhow::anyhow!("Config is not valid UTF-8: {}", config_toml_path))?;
-    let rustflags = extract_target_rustflags(config_toml, wasm_target)
-        .ok_or_else(|| anyhow::anyhow!("Cannot find rustflags section for {}", wasm_target))?;
 
     let mut cmd = std::process::Command::new("cargo");
     cmd.arg("build")
+        .arg("-Z")
+        .arg("unstable-options")
         .arg("--manifest-path")
         .arg(&cargo_toml_path)
         .arg("--release")
@@ -465,11 +410,6 @@ async fn build_project(project_dir: &str, self_path: &str) -> anyhow::Result<Str
         .arg("--target")
         .arg(wasm_target)
         .env("RUST_TARGET_PATH", &workspace_spec)
-        .env("RUSTFLAGS", &rustflags)
-        .env(
-            "CARGO_TARGET_WASM32_RUSTICATED_UNKNOWN_UNKNOWN_RUSTFLAGS",
-            &rustflags,
-        )
         .env("CARGO_TARGET_DIR", &cargo_target_dir);
 
     let mut child = cmd
@@ -489,10 +429,7 @@ async fn build_project(project_dir: &str, self_path: &str) -> anyhow::Result<Str
     }
 
     // Locate the compiled wasm: binary name preserves hyphens (cargo output for [[bin]] targets)
-    Ok(format!(
-        "{}/wasm32-rusticated-unknown-unknown/release/{}.wasm",
-        cargo_target_dir, package_name
-    ))
+    Ok(expected_wasm_path)
 }
 
 // The "juice bottle refill": read self (mohab.bat), swap payload WASM, write new vegetable.
@@ -584,7 +521,7 @@ async fn async_main() {
     let args: std::vec::Vec<std::string::String> = std::env::args().collect();
     if args.len() <= 1 || args[1] == "-h" || args[1] == "--help" {
         out_print("Usage: mohab.bat <input.wasm|project_dir> -o <output.bat>\n").await;
-        return;
+        std::process::exit(0);
     }
 
     let self_path = &args[0];
@@ -605,7 +542,7 @@ async fn async_main() {
         Some(p) => p,
         None => {
             err_print("Error: no output path specified (use -o <output.bat>)\n").await;
-            return;
+            std::process::exit(1);
         }
     };
 
@@ -617,7 +554,7 @@ async fn async_main() {
             Ok(p) => p,
             Err(e) => {
                 err_print(&format!("[mohabbat] Build error: {}\n", e)).await;
-                return;
+                std::process::exit(1);
             }
         }
     };
@@ -629,8 +566,14 @@ async fn async_main() {
     .await;
 
     match juice_bottle_refill(self_path, &wasm_path, &output).await {
-        Ok(()) => out_print(&format!("[mohabbat] Done: {}\n", output)).await,
-        Err(e) => err_print(&format!("[mohabbat] Error: {}\n", e)).await,
+        Ok(()) => {
+            out_print(&format!("[mohabbat] Done: {}\n", output)).await;
+            std::process::exit(0);
+        }
+        Err(e) => {
+            err_print(&format!("[mohabbat] Error: {}\n", e)).await;
+            std::process::exit(1);
+        }
     }
 }
 
