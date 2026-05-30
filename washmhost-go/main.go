@@ -3,36 +3,35 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
-	"unsafe"
 )
 
 func main() {
-	ptrStr := os.Getenv("WASHMHOST_PAYLOAD_PTR")
-	lenStr := os.Getenv("WASHMHOST_PAYLOAD_LEN")
-
-	if ptrStr == "" || lenStr == "" {
-		fmt.Fprintf(os.Stderr, "WASHMHOST_PAYLOAD_PTR or WASHMHOST_PAYLOAD_LEN not set\n")
+	ref := os.Getenv("MOHABBAT_WASM_FD")
+	if ref == "" {
+		fmt.Fprintf(os.Stderr, "washmhost: MOHABBAT_WASM_FD not set\n")
 		os.Exit(1)
 	}
 
-	ptrVal, err := strconv.ParseUint(ptrStr, 10, 64)
+	var r io.Reader
+	if n, err := strconv.ParseUint(ref, 10, 64); err == nil {
+		r = os.NewFile(uintptr(n), "wasm")
+	} else {
+		f, err := os.Open(ref)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "washmhost: failed to open payload: %v\n", err)
+			os.Exit(1)
+		}
+		defer f.Close()
+		r = f
+	}
+
+	payloadBytes, err := io.ReadAll(r)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Invalid WASHMHOST_PAYLOAD_PTR: %v\n", err)
+		fmt.Fprintf(os.Stderr, "washmhost: failed to read payload: %v\n", err)
 		os.Exit(1)
-	}
-
-	lenVal, err := strconv.ParseUint(lenStr, 10, 64)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Invalid WASHMHOST_PAYLOAD_LEN: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Reconstruct the Go slice from the passed pointer
-	var payloadBytes []byte
-	if ptrVal != 0 && lenVal > 0 {
-		payloadBytes = unsafe.Slice((*byte)(unsafe.Pointer(uintptr(ptrVal))), lenVal)
 	}
 
 	argSlice := os.Args

@@ -82,11 +82,6 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 			return 1, fmt.Errorf("rusticated module missing 'is_done' export")
 		}
 
-		pollCompletionsFunc := mod.ExportedFunction("poll_completions")
-		if pollCompletionsFunc == nil {
-			return 1, fmt.Errorf("rusticated module missing 'poll_completions' export")
-		}
-
 		// Initial start
 		_, err := runFunc.Call(ctx)
 		if err != nil {
@@ -109,9 +104,10 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 			// Drive the host ops polling here
 			hEnv.Poll(ctx, mod)
 
-			_, err = pollCompletionsFunc.Call(ctx)
+			// Re-enter the guest
+			_, err = runFunc.Call(ctx)
 			if err != nil {
-				return 1, fmt.Errorf("poll_completions failed: %w", err)
+				return 1, fmt.Errorf("run failed: %w", err)
 			}
 		}
 
