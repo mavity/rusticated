@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/tetratelabs/wazero"
@@ -23,41 +25,44 @@ type HostEnv struct {
 	mu           sync.Mutex
 	timers       map[uint32]time.Time
 	handles      map[uint64]interface{}
-	stats        map[uint64]*StatInfo
 	nextHandle   uint64
-	nextStat     uint64
 	fileOpsQueue chan func()
 	ttyRawState  *term.State
 	ttyRawFd     int
 }
 
-type StatInfo struct {
-	Len       uint64
-	IsDir     bool
-	IsSymlink bool
-	Readonly  bool
-	Mode      uint32
-	Nlink     uint64
-	Uid       uint32
-	Gid       uint32
-	Inode     uint64
-	MtimeNs   uint64
-	AtimeNs   uint64
-	CtimeNs   uint64
+type AbiStat struct {
+	Kind       uint32
+	Mode       uint32
+	Uid        uint32
+	Gid        uint32
+	Size       uint64
+	ModifiedNs uint64
+	AccessedNs uint64
+	CreatedNs  uint64
+	Nlink      uint64
+	Inode      uint64
 }
+
+const (
+	statFlagNoFollow = 1
+	statKindUnknown  = 0
+	statKindFile     = 1
+	statKindDir      = 2
+	statKindSymlink  = 3
+)
 
 type DirScan struct {
 	Leftovers []byte
 	Names     []string
+	File      *os.File
 }
 
 func NewHostEnv() *HostEnv {
 	env := &HostEnv{
 		timers:       make(map[uint32]time.Time),
 		handles:      make(map[uint64]interface{}),
-		stats:        make(map[uint64]*StatInfo),
 		nextHandle:   3, // 0,1,2 reserved
-		nextStat:     1,
 		fileOpsQueue: make(chan func(), 100),
 	}
 	env.handles[0] = os.Stdin
@@ -66,21 +71,53 @@ func NewHostEnv() *HostEnv {
 	return env
 }
 
-func createStatInfo(fi os.FileInfo) *StatInfo {
-	return &StatInfo{
-		Len:       uint64(fi.Size()),
-		IsDir:     fi.IsDir(),
-		IsSymlink: fi.Mode()&os.ModeSymlink != 0,
-		Readonly:  fi.Mode().Perm()&0222 == 0,
-		Mode:      uint32(fi.Mode().Perm()),
-		Nlink:     1,
-		Uid:       0,
-		Gid:       0,
-		Inode:     0,
-		MtimeNs:   uint64(fi.ModTime().UnixNano()),
-		AtimeNs:   uint64(fi.ModTime().UnixNano()),
-		CtimeNs:   uint64(fi.ModTime().UnixNano()),
+func createAbiStat(fi os.FileInfo) AbiStat {
+	kind := uint32(statKindUnknown)
+	if fi.IsDir() {
+		kind = statKindDir
+	} else if fi.Mode()&os.ModeSymlink != 0 {
+		kind = statKindSymlink
+	} else {
+		kind = statKindFile
 	}
+
+	mode := uint32(fi.Mode().Perm())
+	if fi.IsDir() {
+		mode |= 0o040000
+	} else if fi.Mode()&os.ModeSymlink != 0 {
+		mode |= 0o120000
+	} else {
+		mode |= 0o100000
+	}
+
+	ns := uint64(fi.ModTime().UnixNano())
+	return AbiStat{
+		Kind:       kind,
+		Mode:       mode,
+		Uid:        0,
+		Gid:        0,
+		Size:       uint64(fi.Size()),
+		ModifiedNs: ns,
+		AccessedNs: ns,
+		CreatedNs:  ns,
+		Nlink:      1,
+		Inode:      0,
+	}
+}
+
+func marshalAbiStat(stat AbiStat) []byte {
+	payload := make([]byte, 64)
+	binary.LittleEndian.PutUint32(payload[0:4], stat.Kind)
+	binary.LittleEndian.PutUint32(payload[4:8], stat.Mode)
+	binary.LittleEndian.PutUint32(payload[8:12], stat.Uid)
+	binary.LittleEndian.PutUint32(payload[12:16], stat.Gid)
+	binary.LittleEndian.PutUint64(payload[16:24], stat.Size)
+	binary.LittleEndian.PutUint64(payload[24:32], stat.ModifiedNs)
+	binary.LittleEndian.PutUint64(payload[32:40], stat.AccessedNs)
+	binary.LittleEndian.PutUint64(payload[40:48], stat.CreatedNs)
+	binary.LittleEndian.PutUint64(payload[48:56], stat.Nlink)
+	binary.LittleEndian.PutUint64(payload[56:64], stat.Inode)
+	return payload
 }
 
 func mapErrno(err error) uint32 {
@@ -92,6 +129,10 @@ func mapErrno(err error) uint32 {
 	}
 	if os.IsPermission(err) {
 		return 13 // EACCES
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return uint32(errno)
 	}
 	return 5 // EIO
 }
@@ -131,12 +172,6 @@ func debugLog(format string, args ...interface{}) {
 	_, _ = fmt.Fprintf(f, "%s ", time.Now().Format("15:04:05.000"))
 	_, _ = fmt.Fprintf(f, format, args...)
 	_, _ = f.Write([]byte("\n"))
-}
-
-func (h *HostEnv) getStat(handle uint64) *StatInfo {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.stats[handle]
 }
 
 func writeOverlapped(mod api.Module, ovPtr uint32, errorCode uint32, continued uint64, resultExt uint64) error {
@@ -379,19 +414,27 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 				return
 			}
 			mem := m.Memory()
-			buf, memOk := mem.Read(ptr, lenBytes)
+			_, memOk := mem.Read(ptr, lenBytes)
 			if !memOk {
 				writeOverlapped(m, ovPtr, 22, 0, 0) // EINVAL
 				return
 			}
 
 			go func() {
-				n, err := f.Read(buf)
+				tmp := make([]byte, lenBytes)
+				n, err := f.Read(tmp)
 				retCode := uint32(0)
 				if err != nil && err != io.EOF {
-					retCode = 5 // EIO
+					retCode = mapErrno(err)
 				}
+				payload := tmp[:n]
 				h.fileOpsQueue <- func() {
+					if retCode == 0 {
+						if ok := mem.Write(ptr, payload); !ok {
+							writeOverlapped(m, ovPtr, 22, 0, 0)
+							return
+						}
+					}
 					writeOverlapped(m, ovPtr, retCode, 0, uint64(n))
 				}
 			}()
@@ -451,6 +494,9 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			h.mu.Lock()
 			defer h.mu.Unlock()
 			if fAny, ok := h.handles[handle]; ok {
+				if scan, isScan := fAny.(*DirScan); isScan && scan.File != nil {
+					_ = scan.File.Close()
+				}
 				if f, isCloser := fAny.(interface{ Close() error }); isCloser {
 					if handle >= 3 {
 						f.Close()
@@ -515,7 +561,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 				if err != nil {
 					debugLog("path_open fail: path=%q flags=%d osFlags=%d err=%v", pathStr, flags, osFlags, err)
 					fmt.Fprintf(os.Stderr, "file_open err: %s %v\n", pathStr, err)
-					retCode = 5 // EIO
+					retCode = mapErrno(err)
 				} else {
 					h.mu.Lock()
 					handle := h.nextHandle
@@ -558,14 +604,14 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			} else {
 				// Convert to DirScan
 				entries, _ := f.Readdirnames(-1)
-				scan = &DirScan{Names: entries}
+				scan = &DirScan{Names: entries, File: f}
 				h.mu.Lock()
 				h.handles[handle] = scan // Cache it
 				h.mu.Unlock()
 			}
 
 			mem := m.Memory()
-			buf, memOk := mem.Read(ptr, lenBytes)
+			_, memOk := mem.Read(ptr, lenBytes)
 			if !memOk {
 				writeOverlapped(m, ovPtr, 22, 0, 0) // EINVAL
 				return
@@ -573,6 +619,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 
 			go func() {
 				copied := 0
+				var payload []byte
 				for len(scan.Leftovers) < int(lenBytes) && len(scan.Names) > 0 {
 					name := scan.Names[0]
 					scan.Names = scan.Names[1:]
@@ -584,11 +631,18 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 					if toCopy > int(lenBytes) {
 						toCopy = int(lenBytes)
 					}
-					copy(buf, scan.Leftovers[:toCopy])
+					payload = make([]byte, toCopy)
+					copy(payload, scan.Leftovers[:toCopy])
 					scan.Leftovers = scan.Leftovers[toCopy:]
 					copied = toCopy
 				}
 				h.fileOpsQueue <- func() {
+					if copied > 0 {
+						if ok := mem.Write(ptr, payload); !ok {
+							writeOverlapped(m, ovPtr, 22, 0, 0)
+							return
+						}
+					}
 					debugLog("dir_read: handle=%d copied=%d remaining=%d", handle, copied, len(scan.Names))
 					writeOverlapped(m, ovPtr, 0, 0, uint64(copied))
 				}
@@ -601,6 +655,9 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			ovPtr := uint32(stack[0])
 			pathPtr := uint32(stack[1])
 			pathLen := uint32(stack[2])
+			flags := uint32(stack[3])
+			outPtr := uint32(stack[4])
+			outLen := uint32(stack[5])
 
 			mem := m.Memory()
 			buf, ok := mem.Read(pathPtr, pathLen)
@@ -611,164 +668,36 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			pathStr := string(buf)
 
 			go func() {
-				fi, err := os.Stat(pathStr)
-				retCode := uint32(0)
-				extResult := uint64(0)
-				if err != nil {
-					retCode = 5 // EIO
+				var fi os.FileInfo
+				var err error
+				if (flags & statFlagNoFollow) != 0 {
+					fi, err = os.Lstat(pathStr)
 				} else {
-					h.mu.Lock()
-					h.nextStat++
-					statHandle := h.nextStat
-					h.stats[statHandle] = createStatInfo(fi)
-					h.mu.Unlock()
-					extResult = statHandle
+					fi, err = os.Stat(pathStr)
+				}
+				retCode := uint32(0)
+				extResult := uint64(64)
+				var payload []byte
+				if err != nil {
+					retCode = mapErrno(err)
+				} else if outLen < 64 {
+					retCode = 34 // ERANGE
+				} else {
+					payload = marshalAbiStat(createAbiStat(fi))
 				}
 				h.fileOpsQueue <- func() {
+					if retCode == 0 {
+						if ok := mem.Write(outPtr, payload); !ok {
+							writeOverlapped(m, ovPtr, 22, 0, 0)
+							return
+						}
+					}
 					writeOverlapped(m, ovPtr, retCode, 0, extResult)
 				}
 			}()
-		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
+		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
 		Export("path_stat")
 
-	builder.NewFunctionBuilder().
-		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-			ovPtr := uint32(stack[0])
-			pathPtr := uint32(stack[1])
-			pathLen := uint32(stack[2])
-
-			mem := m.Memory()
-			buf, ok := mem.Read(pathPtr, pathLen)
-			if !ok {
-				writeOverlapped(m, ovPtr, 22, 0, 0)
-				return
-			}
-			pathStr := string(buf)
-
-			go func() {
-				fi, err := os.Lstat(pathStr)
-				retCode := uint32(0)
-				extResult := uint64(0)
-				if err != nil {
-					retCode = 5 // EIO
-				} else {
-					h.mu.Lock()
-					h.nextStat++
-					statHandle := h.nextStat
-					h.stats[statHandle] = createStatInfo(fi)
-					h.mu.Unlock()
-					extResult = statHandle
-				}
-				h.fileOpsQueue <- func() {
-					writeOverlapped(m, ovPtr, retCode, 0, extResult)
-				}
-			}()
-		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
-		Export("path_lstat")
-
-	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-		if s := h.getStat(stack[0]); s != nil {
-			stack[0] = s.Len
-		} else {
-			stack[0] = 0
-		}
-	}), []api.ValueType{api.ValueTypeI64}, []api.ValueType{api.ValueTypeI64}).Export("stat_len")
-
-	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-		if s := h.getStat(stack[0]); s != nil && s.IsDir {
-			stack[0] = 1
-		} else {
-			stack[0] = 0
-		}
-	}), []api.ValueType{api.ValueTypeI64}, []api.ValueType{api.ValueTypeI32}).Export("stat_is_dir")
-
-	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-		if s := h.getStat(stack[0]); s != nil && !s.IsDir && !s.IsSymlink {
-			stack[0] = 1
-		} else {
-			stack[0] = 0
-		}
-	}), []api.ValueType{api.ValueTypeI64}, []api.ValueType{api.ValueTypeI32}).Export("stat_is_file")
-
-	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-		if s := h.getStat(stack[0]); s != nil {
-			stack[0] = s.MtimeNs
-		} else {
-			stack[0] = 0
-		}
-	}), []api.ValueType{api.ValueTypeI64}, []api.ValueType{api.ValueTypeI64}).Export("stat_mtime")
-
-	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-		if s := h.getStat(stack[0]); s != nil {
-			stack[0] = s.AtimeNs
-		} else {
-			stack[0] = 0
-		}
-	}), []api.ValueType{api.ValueTypeI64}, []api.ValueType{api.ValueTypeI64}).Export("stat_atime")
-
-	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-		if s := h.getStat(stack[0]); s != nil {
-			stack[0] = s.CtimeNs
-		} else {
-			stack[0] = 0
-		}
-	}), []api.ValueType{api.ValueTypeI64}, []api.ValueType{api.ValueTypeI64}).Export("stat_ctime")
-
-	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-		if s := h.getStat(stack[0]); s != nil && s.IsSymlink {
-			stack[0] = 1
-		} else {
-			stack[0] = 0
-		}
-	}), []api.ValueType{api.ValueTypeI64}, []api.ValueType{api.ValueTypeI32}).Export("stat_is_symlink")
-
-	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-		if s := h.getStat(stack[0]); s != nil && s.Readonly {
-			stack[0] = 1
-		} else {
-			stack[0] = 0
-		}
-	}), []api.ValueType{api.ValueTypeI64}, []api.ValueType{api.ValueTypeI32}).Export("stat_readonly")
-
-	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-		if s := h.getStat(stack[0]); s != nil {
-			stack[0] = uint64(s.Mode)
-		} else {
-			stack[0] = 0
-		}
-	}), []api.ValueType{api.ValueTypeI64}, []api.ValueType{api.ValueTypeI32}).Export("stat_mode")
-
-	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-		if s := h.getStat(stack[0]); s != nil {
-			stack[0] = s.Nlink
-		} else {
-			stack[0] = 0
-		}
-	}), []api.ValueType{api.ValueTypeI64}, []api.ValueType{api.ValueTypeI64}).Export("stat_nlink")
-
-	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-		if s := h.getStat(stack[0]); s != nil {
-			stack[0] = uint64(s.Uid)
-		} else {
-			stack[0] = 0
-		}
-	}), []api.ValueType{api.ValueTypeI64}, []api.ValueType{api.ValueTypeI32}).Export("stat_uid")
-
-	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-		if s := h.getStat(stack[0]); s != nil {
-			stack[0] = uint64(s.Gid)
-		} else {
-			stack[0] = 0
-		}
-	}), []api.ValueType{api.ValueTypeI64}, []api.ValueType{api.ValueTypeI32}).Export("stat_gid")
-
-	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-		if s := h.getStat(stack[0]); s != nil {
-			stack[0] = s.Inode
-		} else {
-			stack[0] = 0
-		}
-	}), []api.ValueType{api.ValueTypeI64}, []api.ValueType{api.ValueTypeI64}).Export("stat_inode")
 
 	builder.NewFunctionBuilder().
 		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
@@ -857,7 +786,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 				retCode := uint32(0)
 				extResult := uint64(0)
 				if err != nil {
-					retCode = 38 // ENOSYS (or equivalent)
+					retCode = mapErrno(err)
 				} else {
 					h.mu.Lock()
 					h.nextHandle++
@@ -894,14 +823,15 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 
 			go func() {
 				err := cmd.Wait()
-				status := uint64(0)
+				exitCode := uint64(0)
 				if cmd.ProcessState != nil {
-					status = uint64(cmd.ProcessState.ExitCode() & 0xFF)
+					exitCode = uint64(uint32(cmd.ProcessState.ExitCode()))
 				} else if err != nil {
-					status = 1
+					exitCode = 1
 				}
+				packed := (exitCode << 32) | (exitCode & 0xFFFF_FFFF)
 				h.fileOpsQueue <- func() {
-					writeOverlapped(m, ovPtr, 0, 0, status)
+					writeOverlapped(m, ovPtr, 0, 0, packed)
 				}
 			}()
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64}, []api.ValueType{}).

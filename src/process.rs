@@ -754,9 +754,25 @@ impl Child {
             return Err(crate::io::Error::from_raw_os_error(err as i32));
         }
 
-        let exit_code = (result >> 32) as i32;
+        let high = (result >> 32) as i32;
+        let low = (result & 0xFFFF_FFFF) as i32;
+        let exit_code = if high != 0 || low == 0 { high } else { low };
+        if self.handle != 0 {
+            unsafe { imports::handle_close(self.handle) };
+            self.handle = 0;
+        }
         let success = exit_code == 0;
         Ok(ChildExitStatus { exit_code, success })
+    }
+}
+
+#[cfg(target_family = "wasm")]
+impl Drop for Child {
+    fn drop(&mut self) {
+        if self.handle != 0 {
+            unsafe { imports::handle_close(self.handle) };
+            self.handle = 0;
+        }
     }
 }
 
