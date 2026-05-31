@@ -793,7 +793,7 @@ rusticated-treego/
 
 Note the `-go` suffix on `washmhost-go/` and `mohabbat-go/`: it marks
 the Go-language components and lets a future second-language port live
-beside them without collision (`washmhost-zig`, etc.). `brot/` keeps
+beside them without collision (`washmhost-alt`, etc.). `brot/` keeps
 its unsuffixed name because the Rust implementation is the canonical
 one going forward — no language pivot is planned there.
 

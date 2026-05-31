@@ -13,9 +13,11 @@ import (
 	"github.com/andybalholm/brotli"
 )
 
-// Modern Two scope: windows/amd64 and windows/arm64 only.
-// Slot order is contractual Ã¢â‚¬â€ Zone A and patcher both depend on it.
+// Modern Four scope: linux/amd64, linux/arm64, windows/amd64, windows/arm64.
+// Slot order is contractual - Zone A and patcher both depend on it.
 var slots = []slot{
+	{name: "linux-amd64", goos: "linux", goarch: "amd64", shCase: "x86_64-Linux"},
+	{name: "linux-arm64", goos: "linux", goarch: "arm64", shCase: "aarch64-Linux"},
 	{name: "win-amd64", goos: "windows", goarch: "amd64", winArch: "AMD64"},
 	{name: "win-arm64", goos: "windows", goarch: "arm64", winArch: "ARM64"},
 }
@@ -24,6 +26,7 @@ type slot struct {
 	name    string
 	goos    string
 	goarch  string
+	shCase  string // matches "$(uname -m)-$(uname -s)"
 	winArch string // matches %PROCESSOR_ARCHITECTURE%
 }
 
@@ -76,7 +79,7 @@ func main() {
 	must(os.MkdirAll(buildDir, 0o755))
 
 	if !*skipBuild {
-		fmt.Println("मोहब्बत  Building brot (cargo) and washmhost-go for Modern Two...")
+		fmt.Println("मोहब्बत  Building brot (cargo) and washmhost-go for Modern Four...")
 		for _, s := range slots {
 			must(cargoBuild(ws, "brot", s, buildDir))
 			must(goBuild(ws, "washmhost-go", s, buildDir))
@@ -147,36 +150,53 @@ func main() {
 		per[i].brot = patched
 	}
 
-	// Generate Zone A Ã¢â‚¬â€ done twice; offsets depend on Zone A length itself.
-	zoneA := buildZoneA(per[0].brot, per[1].brot, 0, 0, 0, 0)
-	off0 := len(zoneA)
-	len0 := len(per[0].brot)
-	off1 := off0 + len0
-	len1 := len(per[1].brot)
-	zoneA = buildZoneA(per[0].brot, per[1].brot, off0, len0, off1, len1)
+	// Compute Zone A/Zone B offsets as a fixed-point because Zone A length
+	// depends on numeric offsets embedded in it.
+	lengths := make([]int, len(slots))
+	offsets := make([]int, len(slots))
+	for i := range slots {
+		lengths[i] = len(per[i].brot)
+	}
 
-	// Verify zone A length stable; if template produces variable-length numbers
-	// the offsets may shift. Regenerate until stable.
-	for retries := 0; retries < 4; retries++ {
-		newOff0 := len(zoneA)
-		if newOff0 == off0 {
+	zoneA := ""
+	for retries := 0; retries < 8; retries++ {
+		zoneA = buildZoneA(offsets, lengths)
+		next := len(zoneA)
+		newOffsets := make([]int, len(slots))
+		for i := range slots {
+			newOffsets[i] = next
+			next += lengths[i]
+		}
+
+		stable := true
+		for i := range slots {
+			if newOffsets[i] != offsets[i] {
+				stable = false
+				break
+			}
+		}
+		offsets = newOffsets
+		if stable {
+			zoneA = buildZoneA(offsets, lengths)
 			break
 		}
-		off0 = newOff0
-		off1 = off0 + len0
-		zoneA = buildZoneA(per[0].brot, per[1].brot, off0, len0, off1, len1)
 	}
 
 	out, err := os.Create(*output)
 	must(err)
 	defer out.Close()
 	_, _ = out.WriteString(zoneA)
-	_, _ = out.Write(per[0].brot)
-	_, _ = out.Write(per[1].brot)
+	for i := range slots {
+		_, _ = out.Write(per[i].brot)
+	}
 	_, _ = out.Write(compressed.Bytes())
 
-	fmt.Printf("मोहब्बत  zone_a=%d (S_OFF.amd=%d) per0=%d per1=%d pool=%d\n", len(zoneA), off0, len0, len1, int(poolLen))
-	fmt.Printf("मोहब्बत  Wrote %s (%d bytes)\n", *output, len(zoneA)+len0+len1+int(poolLen))
+	totalZoneB := 0
+	for _, n := range lengths {
+		totalZoneB += n
+	}
+	fmt.Printf("मोहब्बत  zone_a=%d zone_b=%d pool=%d\n", len(zoneA), totalZoneB, int(poolLen))
+	fmt.Printf("मोहब्बत  Wrote %s (%d bytes)\n", *output, len(zoneA)+totalZoneB+int(poolLen))
 }
 
 func resolveWorkspace(ws string) (string, error) {
@@ -218,20 +238,31 @@ func resolveWorkspace(ws string) (string, error) {
 }
 
 func cargoBuild(ws, pkgDir string, s slot, buildDir string) error {
-	targetName := ""
-	if s.goarch == "amd64" {
-		targetName = "x86_64-rusticated-windows-msvc"
-	} else if s.goarch == "arm64" {
-		targetName = "aarch64-rusticated-windows-msvc"
-	} else {
-		return fmt.Errorf("unsupported arch %s in cargoBuild", s.goarch)
+	targetName, err := cargoTargetName(s)
+	if err != nil {
+		return err
 	}
-	targetArg := filepath.Join(ws, "target", "rusticated-spec", targetName+".json")
 
-	cmd := exec.Command("cargo", "build", "-vv", "--release", "--config", filepath.Join(ws, "target", "rusticated-spec", "config.toml"), "--target", targetArg)
-	env := append(os.Environ(), "RUST_TARGET_PATH="+filepath.Join(ws, "target", "rusticated-spec"))
+	targetArg := targetName
+	args := []string{"build", "-vv", "--release"}
+	if s.goos == "windows" {
+		targetArg = filepath.Join(ws, "target", "rusticated-spec", targetName+".json")
+		args = append(args, "--config", filepath.Join(ws, "target", "rusticated-spec", "config.toml"))
+	}
+	args = append(args, "--target", targetArg)
+	cmd := exec.Command("cargo", args...)
+	env := os.Environ()
+	if s.goos == "windows" {
+		env = append(env, "RUST_TARGET_PATH="+filepath.Join(ws, "target", "rusticated-spec"))
+	}
+	if s.goos == "linux" {
+		linkerVar := "CARGO_TARGET_" + strings.ToUpper(strings.ReplaceAll(targetName, "-", "_")) + "_LINKER"
+		env = append(env, linkerVar+"=rust-lld")
+	}
 	cmd.Env = env
-	cmd.Args = append(cmd.Args, "-Z", "unstable-options")
+	if s.goos == "windows" {
+		cmd.Args = append(cmd.Args, "-Z", "unstable-options", "-Z", "json-target-spec")
+	}
 
 	cmd.Dir = filepath.Join(ws, pkgDir)
 	cmd.Stdout = os.Stdout
@@ -242,9 +273,9 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string) error {
 	}
 
 	// Copy the artifact to buildDir
-	srcExe := filepath.Join(ws, "target", targetName, "release", "brot.exe")
-	outPath := filepath.Join(buildDir, fmt.Sprintf("brot-%s.exe", s.name))
-	bytes, err := os.ReadFile(srcExe)
+	srcPath := filepath.Join(ws, "target", targetName, "release", "brot"+artifactExt(s.goos))
+	outPath := brotPath(buildDir, s)
+	bytes, err := os.ReadFile(srcPath)
 	if err != nil {
 		return err
 	}
@@ -268,7 +299,7 @@ func buildMohabbatBrain(ws string) error {
 }
 
 func goBuild(ws, pkgDir string, s slot, buildDir string) error {
-	outPath := filepath.Join(buildDir, fmt.Sprintf("%s-%s.exe", pkgDir, s.name))
+	outPath := washmhostPath(buildDir, s)
 	if err := os.Remove(outPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove stale output %s: %w", outPath, err)
 	}
@@ -301,11 +332,32 @@ func goBuild(ws, pkgDir string, s slot, buildDir string) error {
 }
 
 func brotPath(buildDir string, s slot) string {
-	return filepath.Join(buildDir, fmt.Sprintf("brot-%s.exe", s.name))
+	return filepath.Join(buildDir, fmt.Sprintf("brot-%s%s", s.name, artifactExt(s.goos)))
 }
 
 func washmhostPath(buildDir string, s slot) string {
-	return filepath.Join(buildDir, fmt.Sprintf("washmhost-go-%s.exe", s.name))
+	return filepath.Join(buildDir, fmt.Sprintf("washmhost-go-%s%s", s.name, artifactExt(s.goos)))
+}
+
+func artifactExt(goos string) string {
+	if goos == "windows" {
+		return ".exe"
+	}
+	return ""
+}
+func cargoTargetName(s slot) (string, error) {
+	switch {
+	case s.goos == "windows" && s.goarch == "amd64":
+		return "x86_64-rusticated-windows-msvc", nil
+	case s.goos == "windows" && s.goarch == "arm64":
+		return "aarch64-rusticated-windows-msvc", nil
+	case s.goos == "linux" && s.goarch == "amd64":
+		return "x86_64-unknown-linux-musl", nil
+	case s.goos == "linux" && s.goarch == "arm64":
+		return "aarch64-unknown-linux-musl", nil
+	default:
+		return "", fmt.Errorf("unsupported slot target %s/%s", s.goos, s.goarch)
+	}
 }
 
 func patchMeta(brot []byte, meta mohabbatMeta) ([]byte, error) {
@@ -335,11 +387,9 @@ func patchMeta(brot []byte, meta mohabbatMeta) ([]byte, error) {
 	return out, nil
 }
 
-// buildZoneA produces the polyglot script header for Modern Two (Windows-only).
-// The sh prelude rejects POSIX; the cmd portion does arch detection and
-// PowerShell-based byte-perfect extraction of the matching brot.
-func buildZoneA(_, _ []byte, amdOff, amdLen, armOff, armLen int) string {
-	const tmpl = `::; echo "[mohabbat] Modern Two preview: only Windows AMD64 and ARM64 are supported." >&2; exit 1
+// buildZoneA produces the polyglot script header for Modern Four.
+func buildZoneA(offsets, lengths []int) string {
+	const tmpl = `:; S_OFF=0; S_LEN=0; case "$(uname -m)-$(uname -s)" in x86_64-Linux) S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}} ;; aarch64-Linux) S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}} ;; esac; [ "$S_LEN" = "0" ] && { echo "[mohabbat] Unsupported arch/os"; exit 1; }; TMP_EXE="/tmp/moh-$$-$(date +%s)"; dd if="$0" bs=1 skip="$S_OFF" count="$S_LEN" of="$TMP_EXE" 2>/dev/null; chmod +x "$TMP_EXE"; "$TMP_EXE" "$0" "$@"; RET=$?; rm "$TMP_EXE"; exit $RET
 @echo off
 setlocal enabledelayedexpansion
 set "ME=%~f0"
@@ -349,11 +399,11 @@ if "!PROCESSOR_ARCHITEW6432!" neq "" set "ARCH=!PROCESSOR_ARCHITEW6432!"
 set "S_OFF=0"
 set "S_LEN=0"
 if "!ARCH!"=="AMD64" (
-    set "S_OFF={{AMD_OFF}}"
-    set "S_LEN={{AMD_LEN}}"
+	set "S_OFF={{WIN_AMD_OFF}}"
+	set "S_LEN={{WIN_AMD_LEN}}"
 ) else if "!ARCH!"=="ARM64" (
-    set "S_OFF={{ARM_OFF}}"
-    set "S_LEN={{ARM_LEN}}"
+	set "S_OFF={{WIN_ARM_OFF}}"
+	set "S_LEN={{WIN_ARM_LEN}}"
 )
 if "!S_LEN!"=="0" (
     echo [mohabbat] This vegetable does not support !ARCH! on Windows.
@@ -366,14 +416,24 @@ set "RET=!ERRORLEVEL!"
 del "!TMP_EXE!"
 exit /b !RET!
 `
-	// Force CRLF on cmd portion. The first line is the sh prelude with LF only
-	// (sh tolerates CRLF too on most setups, but we keep it LF for portability).
-	// Simplest: convert all to CRLF, then fix the first line if needed.
+	idx := map[string]int{}
+	for i, s := range slots {
+		idx[s.name] = i
+	}
+	linuxAMD := idx["linux-amd64"]
+	linuxARM := idx["linux-arm64"]
+	winAMD := idx["win-amd64"]
+	winARM := idx["win-arm64"]
+
 	s := strings.ReplaceAll(tmpl, "\n", "\r\n")
-	s = strings.ReplaceAll(s, "{{AMD_OFF}}", fmt.Sprintf("%d", amdOff))
-	s = strings.ReplaceAll(s, "{{AMD_LEN}}", fmt.Sprintf("%d", amdLen))
-	s = strings.ReplaceAll(s, "{{ARM_OFF}}", fmt.Sprintf("%d", armOff))
-	s = strings.ReplaceAll(s, "{{ARM_LEN}}", fmt.Sprintf("%d", armLen))
+	s = strings.ReplaceAll(s, "{{LINUX_AMD_OFF}}", fmt.Sprintf("%d", offsets[linuxAMD]))
+	s = strings.ReplaceAll(s, "{{LINUX_AMD_LEN}}", fmt.Sprintf("%d", lengths[linuxAMD]))
+	s = strings.ReplaceAll(s, "{{LINUX_ARM_OFF}}", fmt.Sprintf("%d", offsets[linuxARM]))
+	s = strings.ReplaceAll(s, "{{LINUX_ARM_LEN}}", fmt.Sprintf("%d", lengths[linuxARM]))
+	s = strings.ReplaceAll(s, "{{WIN_AMD_OFF}}", fmt.Sprintf("%d", offsets[winAMD]))
+	s = strings.ReplaceAll(s, "{{WIN_AMD_LEN}}", fmt.Sprintf("%d", lengths[winAMD]))
+	s = strings.ReplaceAll(s, "{{WIN_ARM_OFF}}", fmt.Sprintf("%d", offsets[winARM]))
+	s = strings.ReplaceAll(s, "{{WIN_ARM_LEN}}", fmt.Sprintf("%d", lengths[winARM]))
 	return s
 }
 
