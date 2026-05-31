@@ -210,63 +210,67 @@ impl Permissions {
 #[cfg(target_family = "wasm")]
 #[derive(Clone)]
 pub struct Metadata {
-    pub(crate) handle: u64,
+    pub(crate) stat: crate::abi::AbiStat,
 }
 
 #[cfg(target_family = "wasm")]
 impl Metadata {
     pub fn len(&self) -> u64 {
-        unsafe { crate::abi::imports::stat_len(self.handle) }
+        self.stat.size
     }
     pub fn is_file(&self) -> bool {
-        unsafe { crate::abi::imports::stat_is_file(self.handle) != 0 }
+        self.stat.kind == crate::abi::STAT_KIND_FILE
     }
     pub fn is_dir(&self) -> bool {
-        unsafe { crate::abi::imports::stat_is_dir(self.handle) != 0 }
+        self.stat.kind == crate::abi::STAT_KIND_DIR
     }
     pub fn is_symlink(&self) -> bool {
-        unsafe { crate::abi::imports::stat_is_symlink(self.handle) != 0 }
+        self.stat.kind == crate::abi::STAT_KIND_SYMLINK
     }
     pub fn modified_ns(&self) -> u64 {
-        unsafe { crate::abi::imports::stat_mtime(self.handle) }
+        self.stat.modified_ns
     }
     pub fn accessed_ns(&self) -> u64 {
-        unsafe { crate::abi::imports::stat_atime(self.handle) }
+        self.stat.accessed_ns
     }
     pub fn created_ns(&self) -> u64 {
-        unsafe { crate::abi::imports::stat_ctime(self.handle) }
+        self.stat.created_ns
     }
     pub fn mode(&self) -> u32 {
-        unsafe { crate::abi::imports::stat_mode(self.handle) }
+        self.stat.mode
     }
     pub fn nlink(&self) -> u64 {
-        unsafe { crate::abi::imports::stat_nlink(self.handle) }
+        self.stat.nlink
     }
     pub fn uid(&self) -> u32 {
-        unsafe { crate::abi::imports::stat_uid(self.handle) }
+        self.stat.uid
     }
     pub fn gid(&self) -> u32 {
-        unsafe { crate::abi::imports::stat_gid(self.handle) }
+        self.stat.gid
     }
     pub fn inode(&self) -> u64 {
-        unsafe { crate::abi::imports::stat_inode(self.handle) }
+        self.stat.inode
     }
 }
 
 // --- File Type ---
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FileType;
+pub struct FileType {
+    is_dir: bool,
+    is_file: bool,
+    is_symlink: bool,
+}
 
 impl FileType {
     pub fn is_dir(&self) -> bool {
-        false
+        self.is_dir
     }
     pub fn is_file(&self) -> bool {
-        true
+        self.is_file
     }
     pub fn is_symlink(&self) -> bool {
-        false
+        self.is_symlink
     }
 }
 
@@ -290,7 +294,12 @@ impl DirEntry {
             .ok_or_else(|| io::Error::other("metadata unavailable"))
     }
     pub fn file_type(&self) -> io::Result<FileType> {
-        Ok(FileType)
+        let md = self.metadata()?;
+        Ok(FileType {
+            is_dir: md.is_dir(),
+            is_file: md.is_file(),
+            is_symlink: md.is_symlink(),
+        })
     }
 }
 
@@ -985,18 +994,7 @@ pub async fn read_dir<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
 pub async fn metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
     #[cfg(target_family = "wasm")]
     {
-        let path_bytes = path.as_ref().as_bytes().to_vec();
-        let (err, handle, _, _) =
-            crate::rt::wasm::OverlappedBufferFuture::new(path_bytes, |ov, ptr, len| {
-                unsafe { crate::abi::imports::path_stat(ov, ptr, len) };
-            })
-            .await;
-
-        if err != 0 {
-            return Err(io::Error::from_raw_os_error(err as i32));
-        }
-
-        Ok(Metadata { handle })
+        metadata_wasm(path.as_ref(), 0).await
     }
     #[cfg(not(target_family = "wasm"))]
     {
@@ -1131,18 +1129,7 @@ pub async fn metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
 pub async fn symlink_metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
     #[cfg(target_family = "wasm")]
     {
-        let path_bytes = path.as_ref().as_bytes().to_vec();
-        let (err, handle, _, _) =
-            crate::rt::wasm::OverlappedBufferFuture::new(path_bytes, |ov, ptr, len| {
-                unsafe { crate::abi::imports::path_lstat(ov, ptr, len) };
-            })
-            .await;
-
-        if err != 0 {
-            return Err(io::Error::from_raw_os_error(err as i32));
-        }
-
-        Ok(Metadata { handle })
+        metadata_wasm(path.as_ref(), crate::abi::STAT_FLAG_NOFOLLOW).await
     }
     #[cfg(not(target_family = "wasm"))]
     {
@@ -1274,6 +1261,78 @@ pub async fn symlink_metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
         })
         .await
     }
+}
+
+#[cfg(target_family = "wasm")]
+const ABI_STAT_WIRE_SIZE: usize = core::mem::size_of::<crate::abi::AbiStat>();
+
+#[cfg(target_family = "wasm")]
+fn read_u32_le(buf: &[u8], off: usize) -> u32 {
+    let mut tmp = [0u8; 4];
+    tmp.copy_from_slice(&buf[off..off + 4]);
+    u32::from_le_bytes(tmp)
+}
+
+#[cfg(target_family = "wasm")]
+fn read_u64_le(buf: &[u8], off: usize) -> u64 {
+    let mut tmp = [0u8; 8];
+    tmp.copy_from_slice(&buf[off..off + 8]);
+    u64::from_le_bytes(tmp)
+}
+
+#[cfg(target_family = "wasm")]
+fn decode_abi_stat(buf: &[u8]) -> io::Result<crate::abi::AbiStat> {
+    if buf.len() < ABI_STAT_WIRE_SIZE {
+        return Err(io::Error::other("short stat payload"));
+    }
+    Ok(crate::abi::AbiStat {
+        kind: read_u32_le(buf, 0),
+        mode: read_u32_le(buf, 4),
+        uid: read_u32_le(buf, 8),
+        gid: read_u32_le(buf, 12),
+        size: read_u64_le(buf, 16),
+        modified_ns: read_u64_le(buf, 24),
+        accessed_ns: read_u64_le(buf, 32),
+        created_ns: read_u64_le(buf, 40),
+        nlink: read_u64_le(buf, 48),
+        inode: read_u64_le(buf, 56),
+    })
+}
+
+#[cfg(target_family = "wasm")]
+async fn metadata_wasm(path: &str, flags: u32) -> io::Result<Metadata> {
+    let path_bytes = path.as_bytes();
+    let path_len = path_bytes.len();
+    let mut io_buf = alloc::vec![0u8; path_len + ABI_STAT_WIRE_SIZE];
+    io_buf[..path_len].copy_from_slice(path_bytes);
+    let path_len_u32 = path_len as u32;
+    let out_len_u32 = ABI_STAT_WIRE_SIZE as u32;
+
+    let (err, result_ext, _, io_buf) =
+        crate::rt::wasm::OverlappedBufferFuture::new(io_buf, move |ov, ptr, _| {
+            let out_ptr = unsafe { ptr.add(path_len) };
+            unsafe {
+                crate::abi::imports::path_stat(
+                    ov,
+                    ptr as *const u8,
+                    path_len_u32,
+                    flags,
+                    out_ptr,
+                    out_len_u32,
+                )
+            };
+        })
+        .await;
+
+    if err != 0 {
+        return Err(io::Error::from_raw_os_error(err as i32));
+    }
+    if result_ext < ABI_STAT_WIRE_SIZE as u64 {
+        return Err(io::Error::other("incomplete stat payload"));
+    }
+
+    let stat = decode_abi_stat(&io_buf[path_len..path_len + ABI_STAT_WIRE_SIZE])?;
+    Ok(Metadata { stat })
 }
 
 pub fn open_null_file() -> io::Result<File> {

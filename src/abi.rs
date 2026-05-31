@@ -26,6 +26,29 @@ impl Overlapped {
     }
 }
 
+/// Stable stat payload written by host `path_stat` into guest memory.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AbiStat {
+    pub kind: u32,
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub size: u64,
+    pub modified_ns: u64,
+    pub accessed_ns: u64,
+    pub created_ns: u64,
+    pub nlink: u64,
+    pub inode: u64,
+}
+
+pub const STAT_FLAG_NOFOLLOW: u32 = 1;
+
+pub const STAT_KIND_UNKNOWN: u32 = 0;
+pub const STAT_KIND_FILE: u32 = 1;
+pub const STAT_KIND_DIR: u32 = 2;
+pub const STAT_KIND_SYMLINK: u32 = 3;
+
 /// WASM Host Imports
 #[cfg(target_family = "wasm")]
 pub mod imports {
@@ -80,37 +103,18 @@ pub mod imports {
             buffer_ptr: *mut u8,
             buffer_len: u32,
         );
-        /// Query metadata for a path. Result_ext = handle to a stat-info struct.
-        pub fn path_stat(overlapped: *mut Overlapped, path_ptr: *const u8, path_len: u32);
-        /// Query metadata for a path without following symbolic links. Result_ext = handle to a stat-info struct.
-        pub fn path_lstat(overlapped: *mut Overlapped, path_ptr: *const u8, path_len: u32);
-
-        /// Get file size from a stat handle.
-        pub fn stat_len(stat_handle: u64) -> u64;
-        /// Check if a stat handle represents a directory.
-        pub fn stat_is_dir(stat_handle: u64) -> u32;
-        /// Check if a stat handle represents a regular file.
-        pub fn stat_is_file(stat_handle: u64) -> u32;
-        /// Get modification time (nanoseconds since UNIX epoch) from a stat handle.
-        pub fn stat_mtime(stat_handle: u64) -> u64;
-        /// Get last access time (nanoseconds since UNIX epoch) from a stat handle.
-        pub fn stat_atime(stat_handle: u64) -> u64;
-        /// Get creation/birth time (nanoseconds since UNIX epoch) from a stat handle, or 0 if unavailable.
-        pub fn stat_ctime(stat_handle: u64) -> u64;
-        /// Returns 1 if the path is a symbolic link (stat was done without following links).
-        pub fn stat_is_symlink(stat_handle: u64) -> u32;
-        /// Returns 1 if the file is read-only.
-        pub fn stat_readonly(stat_handle: u64) -> u32;
-        /// Unix permission bits (rwxrwxrwx); on non-Unix hosts, synthesised from readonly.
-        pub fn stat_mode(stat_handle: u64) -> u32;
-        /// Number of hard links; 0 on platforms that do not expose it.
-        pub fn stat_nlink(stat_handle: u64) -> u64;
-        /// Owner user ID (Unix); 0 on non-Unix hosts.
-        pub fn stat_uid(stat_handle: u64) -> u32;
-        /// Owner group ID (Unix); 0 on non-Unix hosts.
-        pub fn stat_gid(stat_handle: u64) -> u32;
-        /// Inode / file-index number; 0 on platforms that do not expose it.
-        pub fn stat_inode(stat_handle: u64) -> u64;
+        /// Query metadata for a path and write a full `AbiStat` payload into guest memory.
+        ///
+        /// `flags`: use `STAT_FLAG_NOFOLLOW` to request symlink metadata.
+        /// `result_ext`: bytes written (or required bytes if `out_len` is too small).
+        pub fn path_stat(
+            overlapped: *mut Overlapped,
+            path_ptr: *const u8,
+            path_len: u32,
+            flags: u32,
+            out_ptr: *mut u8,
+            out_len: u32,
+        );
 
         /// Create listener or connection. Result_ext = Socket Handle.
         pub fn net_open(
