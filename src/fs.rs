@@ -753,7 +753,7 @@ pub async fn read_dir<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
         let mut all_bytes = alloc::vec::Vec::new();
         loop {
             let buf = alloc::vec![0u8; 4096];
-            let (err, _, read_len, buf) =
+            let (err, read_len, _, buf) =
                 crate::rt::wasm::OverlappedBufferFuture::new(buf, move |ov, ptr, len| {
                     unsafe { crate::abi::imports::dir_read(ov, handle, ptr, len) };
                 })
