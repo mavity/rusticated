@@ -63,6 +63,9 @@ mod windows;
 #[cfg(target_os = "linux")]
 mod linux;
 
+#[cfg(target_os = "macos")]
+mod darwin;
+
 fn main() {
     #[cfg(windows)]
     unsafe {
@@ -72,6 +75,11 @@ fn main() {
     #[cfg(target_os = "linux")]
     unsafe {
         linux::run()
+    }
+
+    #[cfg(target_os = "macos")]
+    unsafe {
+        darwin::run()
     }
 }
 pub mod test_symbols;
