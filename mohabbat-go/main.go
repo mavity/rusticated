@@ -76,18 +76,18 @@ func main() {
 	must(os.MkdirAll(buildDir, 0o755))
 
 	if !*skipBuild {
-		fmt.Println("[mohabbat-go] Building brot (cargo) and washmhost-go for Modern Two...")
+		fmt.Println("मोहब्बत  Building brot (cargo) and washmhost-go for Modern Two...")
 		for _, s := range slots {
 			must(cargoBuild(ws, "brot", s, buildDir))
 			must(goBuild(ws, "washmhost-go", s, buildDir))
 		}
 		if defaultPayload {
-			fmt.Println("[mohabbat-go] Building default brain payload (mohabbat wasm)...")
+			fmt.Println("मोहब्बत  Building default brain payload (mohabbat wasm)...")
 			must(buildMohabbatBrain(ws))
 		}
 	}
 
-	fmt.Printf("[mohabbat-go] Reading payload: %s\n", *payload)
+	fmt.Printf("मोहब्बत  Reading payload: %s\n", *payload)
 	brainBytes, err := os.ReadFile(*payload)
 	if err != nil {
 		die("cannot read payload %s: %v", *payload, err)
@@ -104,7 +104,7 @@ func main() {
 		wh, err := os.ReadFile(washmhostPath(buildDir, s))
 		must(err)
 		per[i] = artifacts{brot: brot, washmhost: wh}
-		fmt.Printf("[mohabbat-go]   %s: brot=%d washmhost=%d\n", s.name, len(brot), len(wh))
+		fmt.Printf("मोहब्बत    %s: brot=%d washmhost=%d\n", s.name, len(brot), len(wh))
 	}
 
 	// Assemble pool: washmhost_0 + washmhost_1 + ... + payload
@@ -128,7 +128,7 @@ func main() {
 	}
 	must(w.Close())
 	poolLen := uint64(compressed.Len())
-	fmt.Printf("[mohabbat-go] Pool: raw=%d compressed=%d\n", pool.Len(), poolLen)
+	fmt.Printf("मोहब्बत  Pool: raw=%d compressed=%d\n", pool.Len(), poolLen)
 
 	// Patch MohabbatMeta inside each brot
 	for i := range slots {
@@ -175,8 +175,8 @@ func main() {
 	_, _ = out.Write(per[1].brot)
 	_, _ = out.Write(compressed.Bytes())
 
-	fmt.Printf("[mohabbat-go] zone_a=%d (S_OFF.amd=%d) per0=%d per1=%d pool=%d\n", len(zoneA), off0, len0, len1, int(poolLen))
-	fmt.Printf("[mohabbat-go] Wrote %s (%d bytes)\n", *output, len(zoneA)+len0+len1+int(poolLen))
+	fmt.Printf("मोहब्बत  zone_a=%d (S_OFF.amd=%d) per0=%d per1=%d pool=%d\n", len(zoneA), off0, len0, len1, int(poolLen))
+	fmt.Printf("मोहब्बत  Wrote %s (%d bytes)\n", *output, len(zoneA)+len0+len1+int(poolLen))
 }
 
 func resolveWorkspace(ws string) (string, error) {
@@ -236,7 +236,7 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string) error {
 	cmd.Dir = filepath.Join(ws, pkgDir)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	fmt.Printf("[mohabbat-go]   cargo build %s for %s\n", pkgDir, s.name)
+	fmt.Printf("मोहब्बत    cargo build %s for %s\n", pkgDir, s.name)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("%s cargo build failed for %s: %w", pkgDir, s.name, err)
 	}
@@ -272,15 +272,28 @@ func goBuild(ws, pkgDir string, s slot, buildDir string) error {
 	if err := os.Remove(outPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove stale output %s: %w", outPath, err)
 	}
-	cmd := exec.Command("go", "build", "-trimpath", "-ldflags=-s -w", "-o", outPath, ".")
+	goTmpDir := filepath.Join(buildDir, pkgDir, "gotmp", s.name)
+	goCacheDir := filepath.Join(buildDir, pkgDir, "gocache", s.name)
+	if err := os.MkdirAll(goTmpDir, 0o755); err != nil {
+		return fmt.Errorf("create GOTMPDIR %s: %w", goTmpDir, err)
+	}
+	if err := os.MkdirAll(goCacheDir, 0o755); err != nil {
+		return fmt.Errorf("create GOCACHE %s: %w", goCacheDir, err)
+	}
+	cmd := exec.Command("go", "build", "-trimpath", "-o", outPath, ".")
 	cmd.Dir = filepath.Join(ws, pkgDir)
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=0",
-		"GOOS="+s.goos,
-		"GOARCH="+s.goarch,
-	)
+	env := os.Environ()
+	env = upsertEnv(env, "CGO_ENABLED", "0")
+	env = upsertEnv(env, "GOOS", s.goos)
+	env = upsertEnv(env, "GOARCH", s.goarch)
+	env = upsertEnv(env, "GOTMPDIR", goTmpDir)
+	env = upsertEnv(env, "GOCACHE", goCacheDir)
+	env = upsertEnv(env, "TMP", goTmpDir)
+	env = upsertEnv(env, "TEMP", goTmpDir)
+	cmd.Env = env
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	fmt.Printf("[mohabbat-go]   go build %s for %s -> %s\n", pkgDir, s.name, filepath.Base(outPath))
+	fmt.Printf("मोहब्बत    go build %s for %s -> %s\n", pkgDir, s.name, filepath.Base(outPath))
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("%s build failed for %s: %w", pkgDir, s.name, err)
 	}
@@ -371,6 +384,6 @@ func must(err error) {
 }
 
 func die(format string, a ...any) {
-	fmt.Fprintf(os.Stderr, "[mohabbat-go] error: "+format+"\n", a...)
+	fmt.Fprintf(os.Stderr, "मोहब्बत  error: "+format+"\n", a...)
 	os.Exit(1)
 }
