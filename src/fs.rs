@@ -798,10 +798,7 @@ pub async fn read_dir<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
                         format!("{}/{}", base_path, name)
                     };
                     let md = metadata(&full_path).await.ok();
-                    entries.push(DirEntry {
-                        name,
-                        metadata: md,
-                    });
+                    entries.push(DirEntry { name, metadata: md });
                 }
                 start = i + 1;
             }
@@ -816,10 +813,7 @@ pub async fn read_dir<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
                 format!("{}/{}", base_path, name)
             };
             let md = metadata(&full_path).await.ok();
-            entries.push(DirEntry {
-                name,
-                metadata: md,
-            });
+            entries.push(DirEntry { name, metadata: md });
         }
         Ok(ReadDir { entries, pos: 0 })
     }
