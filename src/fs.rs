@@ -775,14 +775,23 @@ pub async fn read_dir<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
 
         // Format is null-separated UTF-8 strings
         let mut entries = Vec::new();
+        let base_path = path.as_ref();
         let mut start = 0;
         for (i, &b) in all_bytes.iter().enumerate() {
             if b == 0 {
                 if start < i {
                     let name = String::from_utf8_lossy(&all_bytes[start..i]).into_owned();
+                    let full_path = if base_path.is_empty() || base_path == "." {
+                        name.clone()
+                    } else if base_path.ends_with('/') || base_path.ends_with('\\') {
+                        format!("{}{}", base_path, name)
+                    } else {
+                        format!("{}/{}", base_path, name)
+                    };
+                    let md = metadata(&full_path).await.ok();
                     entries.push(DirEntry {
                         name,
-                        metadata: None,
+                        metadata: md,
                     });
                 }
                 start = i + 1;
@@ -790,9 +799,17 @@ pub async fn read_dir<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
         }
         if start < all_bytes.len() {
             let name = String::from_utf8_lossy(&all_bytes[start..]).into_owned();
+            let full_path = if base_path.is_empty() || base_path == "." {
+                name.clone()
+            } else if base_path.ends_with('/') || base_path.ends_with('\\') {
+                format!("{}{}", base_path, name)
+            } else {
+                format!("{}/{}", base_path, name)
+            };
+            let md = metadata(&full_path).await.ok();
             entries.push(DirEntry {
                 name,
-                metadata: None,
+                metadata: md,
             });
         }
         Ok(ReadDir { entries, pos: 0 })
