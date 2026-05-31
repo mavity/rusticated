@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/andybalholm/brotli"
@@ -81,6 +82,10 @@ func main() {
 	if !*skipBuild {
 		fmt.Println("मोहब्बत  Building brot (cargo) and washmhost-go for Modern Four...")
 		for _, s := range slots {
+			if !shouldBuildSlot(s) {
+				fmt.Printf("मोहब्बत    skip %s on host %s\n", s.name, runtime.GOOS)
+				continue
+			}
 			must(cargoBuild(ws, "brot", s, buildDir))
 			must(goBuild(ws, "washmhost-go", s, buildDir))
 		}
@@ -102,6 +107,10 @@ func main() {
 	}
 	per := make([]artifacts, len(slots))
 	for i, s := range slots {
+		if !shouldBuildSlot(s) {
+			fmt.Printf("मोहब्बत    %s: disabled for this host\n", s.name)
+			continue
+		}
 		brot, err := os.ReadFile(brotPath(buildDir, s))
 		must(err)
 		wh, err := os.ReadFile(washmhostPath(buildDir, s))
@@ -135,6 +144,9 @@ func main() {
 
 	// Patch MohabbatMeta inside each brot
 	for i := range slots {
+		if len(per[i].brot) == 0 {
+			continue
+		}
 		meta := mohabbatMeta{
 			PoolLen:         poolLen,
 			WashmhostOffset: whOffsets[i],
@@ -190,6 +202,11 @@ func main() {
 		_, _ = out.Write(per[i].brot)
 	}
 	_, _ = out.Write(compressed.Bytes())
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(*output, 0o755); err != nil {
+			die("chmod output %s: %v", *output, err)
+		}
+	}
 
 	totalZoneB := 0
 	for _, n := range lengths {
@@ -197,6 +214,12 @@ func main() {
 	}
 	fmt.Printf("मोहब्बत  zone_a=%d zone_b=%d pool=%d\n", len(zoneA), totalZoneB, int(poolLen))
 	fmt.Printf("मोहब्बत  Wrote %s (%d bytes)\n", *output, len(zoneA)+totalZoneB+int(poolLen))
+	if err := ensureBatOnPath("mohab.bat", *output); err != nil {
+		fmt.Printf("मोहब्बत  warn: %v\n", err)
+	}
+	if err := ensureBatOnPath("demo.bat", filepath.Join(ws, "demo.bat")); err != nil {
+		fmt.Printf("मोहब्बत  warn: %v\n", err)
+	}
 }
 
 func resolveWorkspace(ws string) (string, error) {
@@ -242,17 +265,21 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string) error {
 	if err != nil {
 		return err
 	}
+	if err := ensureRustTargetInstalled(targetName); err != nil {
+		return err
+	}
 
+	isRusticatedTarget := strings.Contains(targetName, "rusticated")
 	targetArg := targetName
 	args := []string{"build", "-vv", "--release"}
-	if s.goos == "windows" {
+	if isRusticatedTarget {
 		targetArg = filepath.Join(ws, "target", "rusticated-spec", targetName+".json")
 		args = append(args, "--config", filepath.Join(ws, "target", "rusticated-spec", "config.toml"))
 	}
 	args = append(args, "--target", targetArg)
 	cmd := exec.Command("cargo", args...)
 	env := os.Environ()
-	if s.goos == "windows" {
+	if isRusticatedTarget {
 		env = append(env, "RUST_TARGET_PATH="+filepath.Join(ws, "target", "rusticated-spec"))
 	}
 	if s.goos == "linux" {
@@ -260,7 +287,7 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string) error {
 		env = append(env, linkerVar+"=rust-lld")
 	}
 	cmd.Env = env
-	if s.goos == "windows" {
+	if isRusticatedTarget {
 		cmd.Args = append(cmd.Args, "-Z", "unstable-options", "-Z", "json-target-spec")
 	}
 
@@ -345,6 +372,46 @@ func artifactExt(goos string) string {
 	}
 	return ""
 }
+
+func shouldBuildSlot(s slot) bool {
+	if s.goos == "windows" && runtime.GOOS != "windows" {
+		return false
+	}
+	return true
+}
+
+func ensureBatOnPath(commandName, targetPath string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	absoluteTarget, err := filepath.Abs(targetPath)
+	if err != nil {
+		return fmt.Errorf("resolve path for %s: %w", commandName, err)
+	}
+	pathDirs := filepath.SplitList(os.Getenv("PATH"))
+	if len(pathDirs) == 0 {
+		return nil
+	}
+
+	for _, dir := range pathDirs {
+		if strings.TrimSpace(dir) == "" {
+			continue
+		}
+		if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+			continue
+		}
+		linkPath := filepath.Join(dir, commandName)
+		_ = os.Remove(linkPath)
+		wrapper := "#!/usr/bin/env bash\n" +
+			"exec bash \"" + absoluteTarget + "\" \"$@\"\n"
+		if err := os.WriteFile(linkPath, []byte(wrapper), 0o755); err == nil {
+			fmt.Printf("मोहब्बत  PATH shim: %s -> %s\n", linkPath, absoluteTarget)
+			return nil
+		}
+	}
+	return fmt.Errorf("could not place %s in any PATH directory; use ./%s", commandName, commandName)
+}
+
 func cargoTargetName(s slot) (string, error) {
 	switch {
 	case s.goos == "windows" && s.goarch == "amd64":
@@ -358,6 +425,37 @@ func cargoTargetName(s slot) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported slot target %s/%s", s.goos, s.goarch)
 	}
+}
+
+func ensureRustTargetInstalled(targetName string) error {
+	if strings.Contains(targetName, "rusticated") {
+		return nil
+	}
+
+	check := exec.Command("rustup", "target", "list", "--installed")
+	var out bytes.Buffer
+	check.Stdout = &out
+	check.Stderr = os.Stderr
+	if err := check.Run(); err != nil {
+		return fmt.Errorf("failed checking installed rust targets: %w", err)
+	}
+	installed := out.String()
+	if strings.Contains(installed, targetName+"\n") || strings.HasSuffix(installed, targetName) {
+		return nil
+	}
+
+	fmt.Printf("मोहब्बत    rustup target add %s\n", targetName)
+	addArgs := []string{"target", "add", targetName}
+	if tc := strings.TrimSpace(os.Getenv("RUSTUP_TOOLCHAIN")); tc != "" {
+		addArgs = append(addArgs, "--toolchain", tc)
+	}
+	add := exec.Command("rustup", addArgs...)
+	add.Stdout = os.Stdout
+	add.Stderr = os.Stderr
+	if err := add.Run(); err != nil {
+		return fmt.Errorf("failed to install rust target %s: %w", targetName, err)
+	}
+	return nil
 }
 
 func patchMeta(brot []byte, meta mohabbatMeta) ([]byte, error) {
@@ -389,7 +487,7 @@ func patchMeta(brot []byte, meta mohabbatMeta) ([]byte, error) {
 
 // buildZoneA produces the polyglot script header for Modern Four.
 func buildZoneA(offsets, lengths []int) string {
-	const tmpl = `:; S_OFF=0; S_LEN=0; case "$(uname -m)-$(uname -s)" in x86_64-Linux) S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}} ;; aarch64-Linux) S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}} ;; esac; [ "$S_LEN" = "0" ] && { echo "[mohabbat] Unsupported arch/os"; exit 1; }; TMP_EXE="/tmp/moh-$$-$(date +%s)"; dd if="$0" bs=1 skip="$S_OFF" count="$S_LEN" of="$TMP_EXE" 2>/dev/null; chmod +x "$TMP_EXE"; "$TMP_EXE" "$0" "$@"; RET=$?; rm "$TMP_EXE"; exit $RET
+	const tmpl = `:; ME="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || printf "%s" "$0")"; S_OFF=0; S_LEN=0; case "$(uname -m)-$(uname -s)" in x86_64-Linux) S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}} ;; aarch64-Linux) S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}} ;; esac; [ "$S_LEN" = "0" ] && { echo "[mohabbat] Unsupported arch/os"; exit 1; }; TMP_EXE="/tmp/moh-$$-$(date +%s)"; dd if="$ME" bs=1 skip="$S_OFF" count="$S_LEN" of="$TMP_EXE" 2>/dev/null; chmod +x "$TMP_EXE"; "$TMP_EXE" "$ME" "$@"; RET=$?; rm "$TMP_EXE"; exit $RET
 @echo off
 setlocal enabledelayedexpansion
 set "ME=%~f0"
@@ -425,7 +523,7 @@ exit /b !RET!
 	winAMD := idx["win-amd64"]
 	winARM := idx["win-arm64"]
 
-	s := strings.ReplaceAll(tmpl, "\n", "\r\n")
+	s := tmpl
 	s = strings.ReplaceAll(s, "{{LINUX_AMD_OFF}}", fmt.Sprintf("%d", offsets[linuxAMD]))
 	s = strings.ReplaceAll(s, "{{LINUX_AMD_LEN}}", fmt.Sprintf("%d", lengths[linuxAMD]))
 	s = strings.ReplaceAll(s, "{{LINUX_ARM_OFF}}", fmt.Sprintf("%d", offsets[linuxARM]))

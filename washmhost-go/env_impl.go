@@ -701,6 +701,25 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 	builder.NewFunctionBuilder().
 		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
 			ovPtr := uint32(stack[0])
+			pathPtr := uint32(stack[1])
+			pathLen := uint32(stack[2])
+			mode := uint32(stack[3])
+
+			mem := m.Memory()
+			buf, ok := mem.Read(pathPtr, pathLen)
+			if !ok {
+				writeOverlapped(m, ovPtr, 22, 0, 0)
+				return
+			}
+
+			err := os.Chmod(string(buf), os.FileMode(mode))
+			writeOverlapped(m, ovPtr, mapErrno(err), 0, 0)
+		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
+		Export("path_chmod")
+
+	builder.NewFunctionBuilder().
+		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+			ovPtr := uint32(stack[0])
 			writeOverlapped(m, ovPtr, 38, 0, 0) // ENOSYS
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
 		Export("net_open")

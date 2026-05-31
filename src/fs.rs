@@ -185,23 +185,53 @@ impl Metadata {
         Ok(crate::time::SystemTime::from_nanos(self.created_time_ns))
     }
     pub fn permissions(&self) -> Permissions {
-        Permissions {
-            readonly: self.readonly(),
-        }
+        Permissions { mode: self.mode }
     }
 }
 
 /// File permissions.
-#[cfg(not(target_family = "wasm"))]
 #[derive(Clone, Debug)]
 pub struct Permissions {
-    pub(crate) readonly: bool,
+    pub(crate) mode: u32,
 }
 
-#[cfg(not(target_family = "wasm"))]
 impl Permissions {
     pub fn readonly(&self) -> bool {
-        self.readonly
+        #[cfg(any(unix, target_family = "wasm"))]
+        {
+            (self.mode & 0o222) == 0
+        }
+        #[cfg(windows)]
+        {
+            (self.mode & 0x1) != 0
+        }
+    }
+
+    pub fn mode(&self) -> u32 {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: u32) {
+        self.mode = mode;
+    }
+
+    pub fn set_readonly(&mut self, readonly: bool) {
+        #[cfg(any(unix, target_family = "wasm"))]
+        {
+            if readonly {
+                self.mode &= !0o222;
+            } else {
+                self.mode |= 0o200;
+            }
+        }
+        #[cfg(windows)]
+        {
+            if readonly {
+                self.mode |= 0x1;
+            } else {
+                self.mode &= !0x1;
+            }
+        }
     }
 }
 
@@ -250,6 +280,9 @@ impl Metadata {
     }
     pub fn inode(&self) -> u64 {
         self.stat.inode
+    }
+    pub fn permissions(&self) -> Permissions {
+        Permissions { mode: self.stat.mode }
     }
 }
 
@@ -1251,6 +1284,83 @@ pub async fn symlink_metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
                 Err(io::Error::other(
                     "symlink metadata not implemented on this host",
                 ))
+            }
+        })
+        .await
+    }
+}
+
+pub async fn set_permissions<P: AsRef<str>>(path: P, permissions: Permissions) -> io::Result<()> {
+    #[cfg(target_family = "wasm")]
+    {
+        let path_bytes = path.as_ref().as_bytes().to_vec();
+        let mode = permissions.mode();
+        let (err, _, _) = crate::rt::wasm::OverlappedFuture::new(move |ov| {
+            unsafe {
+                crate::abi::imports::path_chmod(
+                    ov,
+                    path_bytes.as_ptr(),
+                    path_bytes.len() as u32,
+                    mode,
+                )
+            };
+        })
+        .await;
+
+        if err != 0 {
+            return Err(io::Error::from_raw_os_error(err as i32));
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let path = crate::string::String::from(path.as_ref());
+        crate::rt::blocking::BlockingOpFuture::new(move || {
+            #[cfg(unix)]
+            {
+                unsafe extern "C" {
+                    fn chmod(pathname: *const u8, mode: u32) -> i32;
+                }
+                let mut path_bytes = alloc::vec::Vec::from(path.as_bytes());
+                path_bytes.push(0);
+                let rc = unsafe { chmod(path_bytes.as_ptr(), permissions.mode()) };
+                if rc != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            }
+            #[cfg(windows)]
+            {
+                #[link(name = "kernel32", kind = "raw-dylib")]
+                unsafe extern "system" {
+                    fn GetFileAttributesW(lpFileName: *const u16) -> u32;
+                    fn SetFileAttributesW(lpFileName: *const u16, dwFileAttributes: u32) -> i32;
+                }
+
+                let mut wchars: alloc::vec::Vec<u16> = path.encode_utf16().collect();
+                wchars.push(0);
+                let mut attrs = unsafe { GetFileAttributesW(wchars.as_ptr()) };
+                if attrs == u32::MAX {
+                    return Err(io::Error::last_os_error());
+                }
+
+                if permissions.readonly() {
+                    attrs |= 0x1;
+                } else {
+                    attrs &= !0x1;
+                }
+
+                if unsafe { SetFileAttributesW(wchars.as_ptr(), attrs) } == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            }
+            #[cfg(not(any(unix, windows)))]
+            {
+                let _ = path;
+                let _ = permissions;
+                Ok(())
             }
         })
         .await

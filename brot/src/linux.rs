@@ -1,11 +1,7 @@
 use crate::META;
-
-type RunPayloadFunc = unsafe extern "C" fn(*const u8, usize) -> u32;
-
-// Link to libdl for dlopen/dlsym
-#[cfg(not(target_env = "musl"))]
-#[link(name = "dl")]
-unsafe extern "C" {}
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
+use std::process::Command;
 
 unsafe extern "C" {
     fn open(path: *const u8, flags: i32) -> i32;
@@ -15,15 +11,11 @@ unsafe extern "C" {
     fn write(fd: i32, buf: *const u8, count: usize) -> isize;
     fn mkstemp(template: *mut u8) -> i32;
     fn unlink(path: *const u8) -> i32;
-    fn dlopen(filename: *const u8, flags: i32) -> *mut core::ffi::c_void;
-    fn dlsym(handle: *mut core::ffi::c_void, symbol: *const u8) -> *mut core::ffi::c_void;
 }
 
 const O_RDONLY: i32 = 0;
 const SEEK_SET: i32 = 0;
 const SEEK_END: i32 = 2;
-const RTLD_LAZY: i32 = 1;
-const RTLD_GLOBAL: i32 = 0x100;
 
 pub unsafe fn run() {
     // argv[1] is the path to mohab.bat, passed by the shell one-liner.
@@ -69,6 +61,7 @@ pub unsafe fn run() {
 
     let mut path_cstr = bat_path;
     path_cstr.push(0);
+    let vegetable_path = std::string::String::from_utf8_lossy(&path_cstr[..path_cstr.len() - 1]).into_owned();
 
     let fd = open(path_cstr.as_ptr(), O_RDONLY);
     if fd < 0 {
@@ -153,24 +146,55 @@ pub unsafe fn run() {
     }
     close(tmp_fd);
 
-    // dlopen the washmhost shared library
-    let handle = dlopen(template.as_ptr(), RTLD_LAZY | RTLD_GLOBAL);
-    if handle.is_null() {
+    let washmhost_path_end = template.iter().position(|&b| b == 0).unwrap_or(template.len());
+    let washmhost_path = std::string::String::from_utf8_lossy(&template[..washmhost_path_end]).into_owned();
+    if std::fs::set_permissions(&washmhost_path, std::fs::Permissions::from_mode(0o755)).is_err() {
         unlink(template.as_ptr());
         std::process::exit(12);
     }
 
-    // Resolve the run_payload export
-    let run_payload_name = b"run_payload\0";
-    let run_payload_ptr = dlsym(handle, run_payload_name.as_ptr());
-    if run_payload_ptr.is_null() {
+    // Write payload to a temp file and pass its path through MOHABBAT_WASM_FD.
+    let mut payload_template = *b"/tmp/mohp-XXXXXX\0";
+    let payload_fd = mkstemp(payload_template.as_mut_ptr());
+    if payload_fd < 0 {
         unlink(template.as_ptr());
-        std::process::exit(13);
+        std::process::exit(14);
     }
 
-    let run_payload: RunPayloadFunc = core::mem::transmute(run_payload_ptr);
-    let exit_code = run_payload(payload_data.as_ptr(), payload_data.len());
+    let mut payload_off = 0usize;
+    while payload_off < payload_data.len() {
+        let n = write(
+            payload_fd,
+            payload_data.as_ptr().add(payload_off),
+            payload_data.len() - payload_off,
+        );
+        if n <= 0 {
+            close(payload_fd);
+            unlink(payload_template.as_ptr());
+            unlink(template.as_ptr());
+            std::process::exit(15);
+        }
+        payload_off += n as usize;
+    }
+    close(payload_fd);
 
+    let payload_path_end = payload_template
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(payload_template.len());
+    let payload_path = std::string::String::from_utf8_lossy(&payload_template[..payload_path_end]).into_owned();
+
+    let status = Command::new(&washmhost_path)
+        .arg0(&vegetable_path)
+        .args(std::env::args().skip(2))
+        .env("MOHABBAT_WASM_FD", &payload_path)
+        .status();
+
+    unlink(payload_template.as_ptr());
     unlink(template.as_ptr());
-    std::process::exit(exit_code as i32);
+
+    match status {
+        Ok(s) => std::process::exit(s.code().unwrap_or(1)),
+        Err(_) => std::process::exit(16),
+    }
 }
