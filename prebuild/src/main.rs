@@ -221,7 +221,10 @@ fn main() {
         target_rustflags.push_str("    \"-Zunstable-options\",\n");
         target_rustflags.push_str("    \"--cfg\", \"backtrace_in_libstd\",\n");
         for (crate_name, abs_path) in paths.iter() {
-            if matches!(crate_name.as_str(), "std" | "core" | "alloc" | "compiler_builtins") {
+            if matches!(
+                crate_name.as_str(),
+                "std" | "core" | "alloc" | "compiler_builtins"
+            ) {
                 target_rustflags.push_str(&format!(
                     "    \"--extern\", \"{}={}\",\n",
                     crate_name, abs_path
