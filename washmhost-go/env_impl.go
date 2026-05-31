@@ -698,7 +698,6 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
 		Export("path_stat")
 
-
 	builder.NewFunctionBuilder().
 		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
 			ovPtr := uint32(stack[0])
