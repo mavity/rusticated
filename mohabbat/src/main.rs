@@ -79,6 +79,14 @@ async fn write_file_all(file: &mut File, data: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(target_arch = "wasm32")]
+async fn mark_output_runnable(output_path: &str) -> anyhow::Result<()> {
+    let mut permissions = std::fs::metadata(output_path).await?.permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(output_path, permissions).await?;
+    Ok(())
+}
+
 // Brotli decompression (no_std compatible via brotli-decompressor)
 #[cfg(target_arch = "wasm32")]
 fn decompress(input: &[u8]) -> Result<Vec<u8>, &'static str> {
@@ -450,10 +458,15 @@ async fn juice_bottle_refill(
         .map_err(|e| anyhow::anyhow!("Cannot read wasm {}: {}", new_wasm_path, e))?;
 
     // Locate Zone A end: search for the sentinel that terminates the script header
-    let sentinel = b"exit /b !RET!\r\n";
-    let zone_a_end = find_subsequence(&self_data, sentinel)
-        .map(|pos| pos + sentinel.len())
-        .ok_or_else(|| anyhow::anyhow!("Cannot find Zone A end marker in self"))?;
+    let sentinel_crlf = b"exit /b !RET!\r\n";
+    let sentinel_lf = b"exit /b !RET!\n";
+    let zone_a_end = if let Some(pos) = find_subsequence(&self_data, sentinel_crlf) {
+        pos + sentinel_crlf.len()
+    } else if let Some(pos) = find_subsequence(&self_data, sentinel_lf) {
+        pos + sentinel_lf.len()
+    } else {
+        return Err(anyhow::anyhow!("Cannot find Zone A end marker in self"));
+    };
 
     // Read pool_len and payload metadata from any brot in Zone B
     let (pool_len, _, _, payload_offset, _) = find_meta(&self_data[zone_a_end..])
@@ -512,6 +525,7 @@ async fn juice_bottle_refill(
     write_file_all(&mut out_file, &self_data[..zone_a_end]).await?;
     write_file_all(&mut out_file, &new_zone_b).await?;
     write_file_all(&mut out_file, &new_pool_compressed).await?;
+    mark_output_runnable(output_path).await?;
 
     Ok(())
 }

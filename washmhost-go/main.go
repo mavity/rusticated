@@ -5,8 +5,28 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strconv"
 )
+
+func ensurePosixOutputRunnable(args []string) {
+	if runtime.GOOS == "windows" {
+		return
+	}
+
+	for i := 1; i+1 < len(args); i++ {
+		if args[i] != "-o" {
+			continue
+		}
+		output := args[i+1]
+		f, err := os.OpenFile(output, os.O_CREATE, 0o755)
+		if err == nil {
+			_ = f.Close()
+			_ = os.Chmod(output, 0o755)
+		}
+		return
+	}
+}
 
 func main() {
 	ref := os.Getenv("MOHABBAT_WASM_FD")
@@ -35,6 +55,7 @@ func main() {
 	}
 
 	argSlice := os.Args
+	ensurePosixOutputRunnable(argSlice)
 
 	exitCode, err := RunWasm(context.Background(), payloadBytes, argSlice)
 	if err != nil {
