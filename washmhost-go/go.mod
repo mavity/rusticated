@@ -1,6 +1,6 @@
 module washmhost-go
 
-go 1.25.1
+go 1.26
 
 require (
 	github.com/tetratelabs/wazero v1.12.0 // indirect

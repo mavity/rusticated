@@ -3,6 +3,7 @@ use crate::META;
 type RunPayloadFunc = unsafe extern "C" fn(*const u8, usize) -> u32;
 
 // Link to libdl for dlopen/dlsym
+#[cfg(not(target_env = "musl"))]
 #[link(name = "dl")]
 unsafe extern "C" {}
 
