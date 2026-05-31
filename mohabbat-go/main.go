@@ -218,16 +218,17 @@ func resolveWorkspace(ws string) (string, error) {
 }
 
 func cargoBuild(ws, pkgDir string, s slot, buildDir string) error {
-	target := ""
+	targetName := ""
 	if s.goarch == "amd64" {
-		target = "x86_64-rusticated-windows-msvc"
+		targetName = "x86_64-rusticated-windows-msvc"
 	} else if s.goarch == "arm64" {
-		target = "aarch64-rusticated-windows-msvc"
+		targetName = "aarch64-rusticated-windows-msvc"
 	} else {
 		return fmt.Errorf("unsupported arch %s in cargoBuild", s.goarch)
 	}
+	targetArg := filepath.Join(ws, "target", "rusticated-spec", targetName+".json")
 
-	cmd := exec.Command("cargo", "build", "-vv", "--release", "--config", filepath.Join(ws, "target", "rusticated-spec", "config.toml"), "--target", target)
+	cmd := exec.Command("cargo", "build", "-vv", "--release", "--config", filepath.Join(ws, "target", "rusticated-spec", "config.toml"), "--target", targetArg)
 	env := append(os.Environ(), "RUST_TARGET_PATH="+filepath.Join(ws, "target", "rusticated-spec"))
 	cmd.Env = env
 	cmd.Args = append(cmd.Args, "-Z", "unstable-options")
@@ -241,7 +242,7 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string) error {
 	}
 
 	// Copy the artifact to buildDir
-	srcExe := filepath.Join(ws, "target", target, "release", "brot.exe")
+	srcExe := filepath.Join(ws, "target", targetName, "release", "brot.exe")
 	outPath := filepath.Join(buildDir, fmt.Sprintf("brot-%s.exe", s.name))
 	bytes, err := os.ReadFile(srcExe)
 	if err != nil {
