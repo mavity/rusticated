@@ -54,10 +54,13 @@ fn main() {
         rust_target_path
     ));
 
-    let abs_json = spec_dir
+    let abs_spec_dir = fs::canonicalize(&spec_dir).unwrap_or_else(|_| {
+        std::env::current_dir()
+            .expect("Failed to get current directory")
+            .join(&spec_dir)
+    });
+    let abs_json = abs_spec_dir
         .join(format!("{}.json", host_rusticated_target))
-        .canonicalize()
-        .unwrap_or_else(|_| spec_dir.join(format!("{}.json", host_rusticated_target)))
         .to_string_lossy()
         .replace("\\\\?\\", "")
         .replace('\\', "/");
@@ -111,8 +114,8 @@ fn main() {
         let json_path = spec_dir.join(format!("{}.json", custom_name));
         fs::write(&json_path, spec_json).unwrap();
 
-        // Now build rusticated for this target in debug mode so the target and
-        // consumer builds both use the same artifact flavor.
+        // Build rusticated in release mode for this target; consumer crates may
+        // still be built in debug using the generated config.
         let existing_rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
         let rustflags = if existing_rustflags.is_empty() {
             "-Zunstable-options --cfg backtrace_in_libstd".to_string()
@@ -126,7 +129,15 @@ fn main() {
         let mut build_cmd = Command::new("cargo");
         build_cmd.env("RUSTFLAGS", &rustflags);
         build_cmd.env("RUST_TARGET_PATH", &rust_target_path);
-        let target_arg = custom_name.to_string();
+        let target_arg = if custom_name.contains("wasm32") {
+            custom_name.to_string()
+        } else {
+            fs::canonicalize(&json_path)
+                .unwrap_or_else(|_| json_path.clone())
+                .to_string_lossy()
+                .replace("\\\\?\\", "")
+                .replace('\\', "/")
+        };
 
         let build_output = build_cmd
             .arg("build")
@@ -210,10 +221,12 @@ fn main() {
         target_rustflags.push_str("    \"-Zunstable-options\",\n");
         target_rustflags.push_str("    \"--cfg\", \"backtrace_in_libstd\",\n");
         for (crate_name, abs_path) in paths.iter() {
-            target_rustflags.push_str(&format!(
-                "    \"--extern\", \"{}={}\",\n",
-                crate_name, abs_path
-            ));
+            if matches!(crate_name.as_str(), "std" | "core" | "alloc" | "compiler_builtins") {
+                target_rustflags.push_str(&format!(
+                    "    \"--extern\", \"{}={}\",\n",
+                    crate_name, abs_path
+                ));
+            }
         }
         let abs_deps_dir = match fs::canonicalize(&deps_dir) {
             Ok(p) => p

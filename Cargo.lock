@@ -103,6 +103,7 @@ version = "0.1.0"
 dependencies = [
  "alloc-no-stdlib",
  "brotli-decompressor",
+ "windows-sys",
 ]
 
 [[package]]
