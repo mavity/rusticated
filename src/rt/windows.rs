@@ -99,6 +99,8 @@ unsafe extern "system" {
         bInheritHandle: i32,
         dwOptions: u32,
     ) -> i32;
+
+    fn GetCommandLineW() -> *const u16;
 }
 
 pub const ERROR_IO_PENDING: u32 = 997;
@@ -482,7 +484,11 @@ impl Future for WaitProcess {
 
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-static mut _tls_index: u32 = 0;
+pub static mut _tls_index: u32 = 0;
+
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub static mut _fltused: i32 = 0x9875;
 
 /// Stack probe for AArch64 Windows.
 #[cfg(all(target_arch = "aarch64", not(test)))]
@@ -493,6 +499,10 @@ pub unsafe extern "C" fn __chkstk() {}
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mainCRTStartup() -> ! {
+    unsafe {
+        let _cmd = GetCommandLineW();
+        // TODO: parse command line if we ever want to support argc/argv properly
+    }
     unsafe extern "Rust" {
         fn main();
     }
