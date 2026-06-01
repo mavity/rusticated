@@ -175,6 +175,12 @@ cargo run -p <proj> --config sysroot.toml
 go -C mohabbat-go run . && mohab.bat demo -o demo.bat && echo . | demo.bat
 ```
 
+Or for full one liner end to end:
+
+```
+cargo run -p prebuild && go -C mohabbat-go run . && mohab.bat demo -o demo.bat && echo . | demo.bat
+```
+
 ## Prerequisites
 
 - Rust **nightly** toolchain (the repo's `rust-toolchain.toml` selects it automatically).

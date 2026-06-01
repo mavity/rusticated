@@ -95,8 +95,24 @@ fn main() {
         if base_target.contains("-windows") {
             obj.insert("crt-static-default".to_string(), serde_json::json!(true));
             let pre_link_args = serde_json::json!({
-                "msvc": ["/NOLOGO", "/NXCOMPAT", "/DYNAMICBASE", "/ENTRY:mainCRTStartup", "/SUBSYSTEM:CONSOLE", "/FORCE:MULTIPLE"],
-                "lld-link": ["/NOLOGO", "/NXCOMPAT", "/DYNAMICBASE", "/ENTRY:mainCRTStartup", "/SUBSYSTEM:CONSOLE", "/FORCE:MULTIPLE"]
+                "msvc": [
+                    "/NOLOGO",
+                    "/NXCOMPAT",
+                    "/DYNAMICBASE",
+                    "/ENTRY:mainCRTStartup",
+                    "/SUBSYSTEM:CONSOLE",
+                    "/FORCE:MULTIPLE",
+                    "/NODEFAULTLIB"
+                ],
+                "lld-link": [
+                    "/NOLOGO",
+                    "/NXCOMPAT",
+                    "/DYNAMICBASE",
+                    "/ENTRY:mainCRTStartup",
+                    "/SUBSYSTEM:CONSOLE",
+                    "/FORCE:MULTIPLE",
+                    "/NODEFAULTLIB"
+                ]
             });
             obj.insert("pre-link-args".to_string(), pre_link_args);
         }
