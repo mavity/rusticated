@@ -61,7 +61,8 @@ pub unsafe fn run() {
 
     let mut path_cstr = bat_path;
     path_cstr.push(0);
-    let vegetable_path = std::string::String::from_utf8_lossy(&path_cstr[..path_cstr.len() - 1]).into_owned();
+    let vegetable_path =
+        std::string::String::from_utf8_lossy(&path_cstr[..path_cstr.len() - 1]).into_owned();
 
     let fd = open(path_cstr.as_ptr(), O_RDONLY);
     if fd < 0 {
@@ -146,8 +147,12 @@ pub unsafe fn run() {
     }
     close(tmp_fd);
 
-    let washmhost_path_end = template.iter().position(|&b| b == 0).unwrap_or(template.len());
-    let washmhost_path = std::string::String::from_utf8_lossy(&template[..washmhost_path_end]).into_owned();
+    let washmhost_path_end = template
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(template.len());
+    let washmhost_path =
+        std::string::String::from_utf8_lossy(&template[..washmhost_path_end]).into_owned();
     if std::fs::set_permissions(&washmhost_path, std::fs::Permissions::from_mode(0o755)).is_err() {
         unlink(template.as_ptr());
         std::process::exit(12);
@@ -182,7 +187,8 @@ pub unsafe fn run() {
         .iter()
         .position(|&b| b == 0)
         .unwrap_or(payload_template.len());
-    let payload_path = std::string::String::from_utf8_lossy(&payload_template[..payload_path_end]).into_owned();
+    let payload_path =
+        std::string::String::from_utf8_lossy(&payload_template[..payload_path_end]).into_owned();
 
     let status = Command::new(&washmhost_path)
         .arg0(&vegetable_path)
