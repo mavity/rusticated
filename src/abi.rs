@@ -116,7 +116,12 @@ pub mod imports {
             out_len: u32,
         );
         /// Update path permissions / mode bits.
-        pub fn path_chmod(overlapped: *mut Overlapped, path_ptr: *const u8, path_len: u32, mode: u32);
+        pub fn path_chmod(
+            overlapped: *mut Overlapped,
+            path_ptr: *const u8,
+            path_len: u32,
+            mode: u32,
+        );
 
         /// Create listener or connection. Result_ext = Socket Handle.
         pub fn net_open(

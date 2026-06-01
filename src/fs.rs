@@ -282,7 +282,9 @@ impl Metadata {
         self.stat.inode
     }
     pub fn permissions(&self) -> Permissions {
-        Permissions { mode: self.stat.mode }
+        Permissions {
+            mode: self.stat.mode,
+        }
     }
 }
 
