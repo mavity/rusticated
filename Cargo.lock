@@ -506,8 +506,6 @@ dependencies = [
  "getrandom",
  "hashbrown 0.14.5",
  "spin",
- "windows-link",
- "windows-sys",
 ]
 
 [[package]]

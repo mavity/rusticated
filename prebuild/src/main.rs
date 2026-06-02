@@ -3,6 +3,24 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+fn extend_pre_link_args(spec: &mut serde_json::Value, flavor: &str, args: &[&str]) {
+    let pre_link_args = spec
+        .as_object_mut()
+        .unwrap()
+        .entry("pre-link-args")
+        .or_insert_with(|| serde_json::json!({}));
+    let args_obj = pre_link_args.as_object_mut().unwrap();
+    let entry = args_obj
+        .entry(flavor)
+        .or_insert_with(|| serde_json::json!([]));
+    let arr = entry.as_array_mut().unwrap();
+    for arg in args {
+        if !arr.iter().any(|v| v == arg) {
+            arr.push(serde_json::json!(arg));
+        }
+    }
+}
+
 fn main() {
     let output = Command::new("rustc")
         .arg("-vV")
@@ -17,8 +35,18 @@ fn main() {
         .trim();
 
     let base_targets = [
+        (
+            "x86_64-pc-windows-gnullvm",
+            "x86_64-rusticated-windows-gnullvm",
+        ),
+        // ("x86_64-pc-windows-gnu", "x86_64-rusticated-windows-gnu"),
         ("x86_64-pc-windows-msvc", "x86_64-rusticated-windows-msvc"),
         ("x86_64-unknown-linux-gnu", "x86_64-rusticated-linux-gnu"),
+        (
+            "aarch64-pc-windows-gnullvm",
+            "aarch64-rusticated-windows-gnullvm",
+        ),
+        // ("aarch64-pc-windows-gnu", "aarch64-rusticated-windows-gnu"),
         ("aarch64-pc-windows-msvc", "aarch64-rusticated-windows-msvc"),
         ("aarch64-unknown-linux-gnu", "aarch64-rusticated-linux-gnu"),
         (
@@ -26,12 +54,6 @@ fn main() {
             "wasm32-rusticated-unknown-unknown",
         ),
     ];
-
-    let host_rusticated_target = base_targets
-        .iter()
-        .find(|(t, _)| *t == host)
-        .map(|(_, r)| *r)
-        .unwrap_or("x86_64-rusticated-windows-msvc"); // fallback
 
     let target_dir = PathBuf::from("target");
     let spec_dir = target_dir.join("rusticated-spec");
@@ -41,32 +63,14 @@ fn main() {
     // Write an empty string so Cargo doesn't fail on a missing include file.
     let _ = fs::write(spec_dir.join("config.toml"), "");
 
-    let mut config_toml = String::new();
-
-    // Set RUST_TARGET_PATH so all workspace crates can find target specs by name without .json
     let rust_target_path = fs::canonicalize(&spec_dir)
         .unwrap_or_else(|_| spec_dir.clone())
         .to_string_lossy()
         .replace("\\\\?\\", "")
         .replace('\\', "/");
-    config_toml.push_str(&format!(
-        "[env]\nRUST_TARGET_PATH = \"{}\"\n\n",
-        rust_target_path
-    ));
 
-    let abs_spec_dir = fs::canonicalize(&spec_dir).unwrap_or_else(|_| {
-        std::env::current_dir()
-            .expect("Failed to get current directory")
-            .join(&spec_dir)
-    });
-    let abs_json = abs_spec_dir
-        .join(format!("{}.json", host_rusticated_target))
-        .to_string_lossy()
-        .replace("\\\\?\\", "")
-        .replace('\\', "/");
-    config_toml.push_str(&format!("[build]\ntarget = \"{}\"\n\n", abs_json));
-
-    config_toml.push_str("[unstable]\njson-target-spec = true\n\n");
+    let mut config_toml = String::new();
+    let mut built_targets: Vec<String> = Vec::new();
 
     for (base_target, custom_name) in base_targets {
         let output = Command::new("rustc")
@@ -90,34 +94,106 @@ fn main() {
         let mut spec: serde_json::Value =
             serde_json::from_slice(&output.stdout).expect("Failed to parse JSON");
 
-        let obj = spec.as_object_mut().unwrap();
-        obj.insert("panic-strategy".to_string(), serde_json::json!("abort"));
-        if base_target.contains("-windows") {
-            obj.insert("crt-static-default".to_string(), serde_json::json!(true));
-            let pre_link_args = serde_json::json!({
-                "msvc": [
+        let is_windows_msvc = base_target.contains("-windows-msvc");
+        let is_windows_gnu =
+            base_target.contains("-windows-gnu") || base_target.contains("-windows-gnullvm");
+
+        spec.as_object_mut()
+            .unwrap()
+            .insert("panic-strategy".to_string(), serde_json::json!("abort"));
+
+        if is_windows_msvc {
+            extend_pre_link_args(
+                &mut spec,
+                "msvc",
+                &[
                     "/NOLOGO",
                     "/NXCOMPAT",
                     "/DYNAMICBASE",
                     "/ENTRY:mainCRTStartup",
                     "/SUBSYSTEM:CONSOLE",
                     "/FORCE:MULTIPLE",
-                    "/NODEFAULTLIB"
+                    "/NODEFAULTLIB",
                 ],
-                "lld-link": [
+            );
+            extend_pre_link_args(
+                &mut spec,
+                "lld-link",
+                &[
                     "/NOLOGO",
                     "/NXCOMPAT",
                     "/DYNAMICBASE",
                     "/ENTRY:mainCRTStartup",
                     "/SUBSYSTEM:CONSOLE",
                     "/FORCE:MULTIPLE",
-                    "/NODEFAULTLIB"
-                ]
-            });
-            obj.insert("pre-link-args".to_string(), pre_link_args);
+                    "/NODEFAULTLIB",
+                ],
+            );
         }
+        if is_windows_gnu {
+            // Remove default MinGW import libraries for custom no-std gnullvm/gnu targets.
+            spec.as_object_mut()
+                .unwrap()
+                .insert("late-link-args".to_string(), serde_json::json!({}));
+
+            let arch_arg = if base_target.starts_with("x86_64") {
+                "i386pep"
+            } else {
+                "arm64pe"
+            };
+
+            extend_pre_link_args(
+                &mut spec,
+                "gnu",
+                &[
+                    "-m",
+                    arch_arg,
+                    "--entry=mainCRTStartup",
+                    "--subsystem=console",
+                ],
+            );
+            extend_pre_link_args(
+                &mut spec,
+                "gnu-cc",
+                &[
+                    "-nolibc",
+                    "--unwindlib=none",
+                    "-Wl,--entry=mainCRTStartup",
+                    "-Wl,--subsystem=console",
+                ],
+            );
+            extend_pre_link_args(
+                &mut spec,
+                "gnu-lld",
+                &[
+                    "-m",
+                    arch_arg,
+                    "--entry=mainCRTStartup",
+                    "--subsystem=console",
+                ],
+            );
+            extend_pre_link_args(
+                &mut spec,
+                "gnu-lld-cc",
+                &[
+                    "-nolibc",
+                    "--unwindlib=none",
+                    "-Wl,--entry=mainCRTStartup",
+                    "-Wl,--subsystem=console",
+                ],
+            );
+        }
+
+        let obj = spec.as_object_mut().unwrap();
         obj.insert("crt-static-respected".to_string(), serde_json::json!(true));
         obj.insert("no-default-libraries".to_string(), serde_json::json!(true));
+        if is_windows_msvc || is_windows_gnu {
+            obj.insert("crt-static-default".to_string(), serde_json::json!(true));
+        }
+        if base_target.contains("-windows-gnullvm") {
+            obj.insert("linker".to_string(), serde_json::json!("rust-lld"));
+            obj.insert("linker-flavor".to_string(), serde_json::json!("gnu-lld"));
+        }
         if let Some(metadata) = obj.get_mut("metadata") {
             if let Some(meta_obj) = metadata.as_object_mut() {
                 meta_obj.insert("std".to_string(), serde_json::json!(false));
@@ -155,7 +231,7 @@ fn main() {
                 .replace('\\', "/")
         };
 
-        let build_output = build_cmd
+        build_cmd
             .arg("build")
             .arg("-p")
             .arg("rusticated")
@@ -168,13 +244,23 @@ fn main() {
             .arg("unstable.json-target-spec=true")
             .arg("--target")
             .arg(&target_arg)
-            .arg("--message-format=json")
-            .output()
-            .expect("cargo build failed");
+            .arg("--message-format=json");
+
+        let cmd_line = std::iter::once(build_cmd.get_program().to_string_lossy().into_owned())
+            .chain(
+                build_cmd
+                    .get_args()
+                    .map(|a| a.to_string_lossy().into_owned()),
+            )
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!("     > {}", cmd_line);
+
+        let build_output = build_cmd.output().expect("cargo build failed");
 
         if !build_output.status.success() {
             let stderr = String::from_utf8_lossy(&build_output.stderr);
-            eprintln!("cargo build failed for target {}:\n{}", custom_name, stderr);
+            eprintln!("     < failed {}:\n{}", custom_name, stderr);
             let json_stdout = String::from_utf8_lossy(&build_output.stdout);
             for line in json_stdout.lines() {
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
@@ -185,8 +271,10 @@ fn main() {
                     }
                 }
             }
-            std::process::exit(build_output.status.code().unwrap_or(1));
+            panic!("rusticated build failed for target {}", custom_name);
         }
+
+        println!("     < succeeded {}", custom_name);
 
         let deps_dir = target_dir.join(custom_name).join("release").join("deps");
         let mut paths: HashMap<String, String> = HashMap::new();
@@ -209,7 +297,10 @@ fn main() {
                                 .to_string_lossy()
                                 .replace("\\\\?\\", "")
                                 .replace('\\', "/"),
-                            Err(_) => path.to_string_lossy().replace('\\', "/"),
+                            Err(_) => path
+                                .to_string_lossy()
+                                .replace("\\\\?\\", "")
+                                .replace('\\', "/"),
                         };
 
                         let crate_name = if filename == "libstd.rlib" {
@@ -233,6 +324,8 @@ fn main() {
             panic!("Missing built artifact for std when generating sysroot config");
         }
 
+        built_targets.push(custom_name.to_string());
+
         let mut target_rustflags = format!("[target.{}]\nrustflags = [\n", custom_name);
         target_rustflags.push_str("    \"-Zunstable-options\",\n");
         target_rustflags.push_str("    \"--cfg\", \"backtrace_in_libstd\",\n");
@@ -252,13 +345,75 @@ fn main() {
                 .to_string_lossy()
                 .replace("\\\\?\\", "")
                 .replace('\\', "/"),
-            Err(_) => deps_dir.to_string_lossy().replace('\\', "/"),
+            Err(_) => deps_dir
+                .to_string_lossy()
+                .replace("\\\\?\\", "")
+                .replace('\\', "/"),
         };
         target_rustflags.push_str(&format!("    \"-L\", \"dependency={}\",\n", abs_deps_dir));
         target_rustflags.push_str("]\n\n");
         config_toml.push_str(&target_rustflags);
     }
 
-    fs::write(spec_dir.join("config.toml"), config_toml).expect("wrote config.toml");
+    if built_targets.is_empty() {
+        panic!("No rusticated targets were successfully built")
+    }
+
+    let host_rusticated_target = if host.ends_with("-windows-msvc") {
+        let arch = host.split('-').next().unwrap_or("x86_64");
+        let candidates = [
+            format!("{}-rusticated-windows-gnullvm", arch),
+            format!("{}-rusticated-windows-gnu", arch),
+            format!("{}-rusticated-windows-msvc", arch),
+        ];
+        candidates
+            .iter()
+            .find(|t| built_targets.contains(&t.to_string()))
+            .cloned()
+            .unwrap_or_else(|| built_targets[0].clone())
+    } else if host.contains("windows-gnullvm") {
+        let target = host.replace("-pc-", "-rusticated-");
+        if built_targets.contains(&target) {
+            target
+        } else {
+            built_targets[0].clone()
+        }
+    } else if host.contains("windows-gnu") {
+        let target = host.replace("-pc-", "-rusticated-");
+        if built_targets.contains(&target) {
+            target
+        } else {
+            built_targets[0].clone()
+        }
+    } else {
+        let target = host.replace("-pc-", "-rusticated-");
+        if built_targets.contains(&target) {
+            target
+        } else {
+            built_targets[0].clone()
+        }
+    };
+
+    let abs_spec_dir = fs::canonicalize(&spec_dir).unwrap_or_else(|_| {
+        std::env::current_dir()
+            .expect("Failed to get current directory")
+            .join(&spec_dir)
+    });
+    let abs_json = abs_spec_dir
+        .join(format!("{}.json", host_rusticated_target))
+        .to_string_lossy()
+        .replace("\\\\?\\", "")
+        .replace('\\', "/");
+
+    let mut final_config = String::new();
+    final_config.push_str(&format!(
+        "[env]\nRUST_TARGET_PATH = \"{}\"\n\n",
+        rust_target_path
+    ));
+    final_config.push_str(&format!("[build]\ntarget = \"{}\"\n\n", abs_json));
+    final_config.push_str("[unstable]\njson-target-spec = true\n\n");
+    final_config.push_str(&config_toml);
+
+    fs::write(spec_dir.join("config.toml"), final_config).expect("wrote config.toml");
     println!("Done. Run `cargo build -p demo`.");
 }
