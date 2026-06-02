@@ -573,11 +573,7 @@ async fn async_main() {
         }
     };
 
-    out_print(&format!(
-        "🍆 Packaging {} -> {}\n",
-        wasm_path, output
-    ))
-    .await;
+    out_print(&format!("🍆 Packaging {} -> {}\n", wasm_path, output)).await;
 
     match juice_bottle_refill(self_path, &wasm_path, &output).await {
         Ok(()) => {

