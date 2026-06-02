@@ -21,7 +21,7 @@ pub extern crate alloc;
 // platform-specific modules (fs, time, ...) can use std::fs, std::time, etc.
 // without duplicating raw-syscall struct definitions for every architecture.
 
-#[cfg(all(windows, target_env = "msvc", not(test)))]
+#[cfg(all(windows, not(test)))]
 mod msvc_stubs;
 
 /// Declares one or more thread-local values, initialised lazily on first access.
