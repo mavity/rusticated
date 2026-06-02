@@ -14,6 +14,13 @@ pub unsafe extern "C" fn memset(s: *mut u8, c: i32, n: usize) -> *mut u8 {
 
 #[cfg(all(windows, not(test)))]
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    unsafe { core::ptr::copy(src, dest, n); }
+    dest
+}
+
+#[cfg(all(windows, not(test)))]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
     let mut i = 0;
     while i < n {

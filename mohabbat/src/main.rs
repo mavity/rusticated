@@ -395,7 +395,7 @@ async fn build_project(project_dir: &str, self_path: &str) -> anyhow::Result<Str
     let package_name = extract_package_name(toml_str)
         .ok_or_else(|| anyhow::anyhow!("Cannot find package name in Cargo.toml"))?;
 
-    out_print(&format!("[mohabbat] Building package: {}\n", package_name)).await;
+    out_print(&format!("🍆 Building package: {}\n", package_name)).await;
 
     let workspace_spec = format!("{}/target/rusticated-spec", workspace_root);
     let wasm_target = "wasm32-rusticated-unknown-unknown";
@@ -447,12 +447,12 @@ async fn juice_bottle_refill(
     new_wasm_path: &str,
     output_path: &str,
 ) -> anyhow::Result<()> {
-    out_print("[mohabbat] Reading self...\n").await;
+    out_print("🍆 Reading self...\n").await;
     let self_data = read_all(self_path)
         .await
         .map_err(|e| anyhow::anyhow!("Cannot read self {}: {}", self_path, e))?;
 
-    out_print("[mohabbat] Reading new payload...\n").await;
+    out_print("🍆 Reading new payload...\n").await;
     let new_payload = read_all(new_wasm_path)
         .await
         .map_err(|e| anyhow::anyhow!("Cannot read wasm {}: {}", new_wasm_path, e))?;
@@ -486,7 +486,7 @@ async fn juice_bottle_refill(
     }
 
     // Decompress Zone C → pool_raw
-    out_print("[mohabbat] Decompressing pool...\n").await;
+    out_print("🍆 Decompressing pool...\n").await;
     let pool_raw = decompress(&self_data[pool_start..])
         .map_err(|e| anyhow::anyhow!("Decompression failed: {}", e))?;
 
@@ -504,7 +504,7 @@ async fn juice_bottle_refill(
     new_pool_raw.extend_from_slice(&new_payload);
 
     // Compress new pool
-    out_print("[mohabbat] Compressing new pool...\n").await;
+    out_print("🍆 Compressing new pool...\n").await;
     let new_pool_compressed =
         compress(&new_pool_raw).map_err(|e| anyhow::anyhow!("Compression failed: {}", e))?;
 
@@ -517,7 +517,7 @@ async fn juice_bottle_refill(
     );
 
     // Write output vegetable: Zone A (unchanged) + Zone B (patched) + Zone C (new)
-    out_print("[mohabbat] Writing output...\n").await;
+    out_print("🍆 Writing output...\n").await;
     let mut out_file = File::create(output_path)
         .await
         .map_err(|e| anyhow::anyhow!("Cannot create {}: {}", output_path, e))?;
@@ -567,25 +567,25 @@ async fn async_main() {
         match build_project(input, self_path).await {
             Ok(p) => p,
             Err(e) => {
-                err_print(&format!("[mohabbat] Build error: {}\n", e)).await;
+                err_print(&format!("🍆 Build error: {}\n", e)).await;
                 std::process::exit(1);
             }
         }
     };
 
     out_print(&format!(
-        "[mohabbat] Packaging {} -> {}\n",
+        "🍆 Packaging {} -> {}\n",
         wasm_path, output
     ))
     .await;
 
     match juice_bottle_refill(self_path, &wasm_path, &output).await {
         Ok(()) => {
-            out_print(&format!("[mohabbat] Done: {}\n", output)).await;
+            out_print(&format!("🍆 Done: {}\n", output)).await;
             std::process::exit(0);
         }
         Err(e) => {
-            err_print(&format!("[mohabbat] Error: {}\n", e)).await;
+            err_print(&format!("🍆 Error: {}\n", e)).await;
             std::process::exit(1);
         }
     }
@@ -593,5 +593,5 @@ async fn async_main() {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
-    println!("[mohabbat] Success: mohab.bat generated via build script.");
+    println!("🍆 Success: mohab.bat generated via build script.");
 }
