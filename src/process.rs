@@ -167,6 +167,7 @@ mod native_process {
     }
 
     #[cfg(windows)]
+    #[link(name = "kernel32", kind = "raw-dylib")]
     unsafe extern "system" {
         fn CreateProcessW(
             lp_application_name: *const u16,
