@@ -490,6 +490,12 @@ pub static mut _tls_index: u32 = 0;
 #[unsafe(no_mangle)]
 pub static mut _fltused: i32 = 0x9875;
 
+// GNU Windows targets may emit a call to `__main` from the compiler-generated
+// `main` wrapper. Provide a no-op shim for CRT-free builds.
+#[cfg(all(not(test), target_env = "gnu"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn __main() {}
+
 /// Entry point for MSVC-linked binaries.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
