@@ -32,6 +32,7 @@ pub mod Win32 {
         #[link(name = "kernel32", kind = "raw-dylib")]
         unsafe extern "system" {
             pub fn CloseHandle(hObject: HANDLE) -> BOOL;
+            pub fn GetLastError() -> DWORD;
         }
     }
 

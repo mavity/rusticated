@@ -78,6 +78,7 @@ pub unsafe fn run() {
 
     let pool_len = META.pool_len as usize;
     if pool_len == 0 {
+        crate::print_err("brot: META.pool_len is 0, nothing to do. exiting.\n");
         std::process::exit(4);
     }
 
@@ -188,11 +189,6 @@ pub unsafe fn run() {
     let env_name: Vec<u16> = "MOHABBAT_WASM_FD\0".encode_utf16().collect();
     SetEnvironmentVariableW(env_name.as_ptr(), payload_wasm_w.as_ptr());
 
-    // Create process using CreateProcessW
-    let mut startup_info: STARTUPINFOW = unsafe { core::mem::zeroed() };
-    startup_info.cb = core::mem::size_of::<STARTUPINFOW>() as u32;
-    let mut process_info: PROCESS_INFORMATION = unsafe { core::mem::zeroed() };
-
     let vegetable_str = String::from_utf16_lossy(&wide_path);
     let mut cmd_str = format!("\"{}\"", vegetable_str.trim_end_matches('\0'));
 
@@ -218,9 +214,16 @@ pub unsafe fn run() {
             }
         }
     }
-    cmd_str.push('\0');
+
+    crate::print_err("brot: spawning washmhost...\n");
+
+    // Create process using CreateProcessW
+    let mut startup_info: STARTUPINFOW = unsafe { core::mem::zeroed() };
+    startup_info.cb = core::mem::size_of::<STARTUPINFOW>() as u32;
+    let mut process_info: PROCESS_INFORMATION = unsafe { core::mem::zeroed() };
 
     let mut cmdline: Vec<u16> = cmd_str.encode_utf16().collect();
+    cmdline.push(0);
 
     let res = CreateProcessW(
         washmhost_exe_w.as_ptr(),
@@ -235,12 +238,20 @@ pub unsafe fn run() {
         &mut process_info,
     );
 
+    use crate::win32::Win32::Foundation::GetLastError;
     let mut exit_code = 1;
     if res != 0 {
+        crate::print_err("brot: washmhost spawned, waiting...\n");
         WaitForSingleObject(process_info.hProcess, INFINITE);
         GetExitCodeProcess(process_info.hProcess, &mut exit_code);
+        crate::print_err(&format!("brot: washmhost finished with exit code {}\n", exit_code));
         CloseHandle(process_info.hProcess);
         CloseHandle(process_info.hThread);
+    } else {
+        let err = GetLastError();
+        crate::print_err(&format!("brot: failed to spawn washmhost (error {})\n", err));
+        crate::print_err(&format!("brot: washmhost path: {}\n", washmhost_exe));
+        crate::print_err(&format!("brot: command line: {}\n", cmd_str));
     }
 
     DeleteFileW(washmhost_exe_w.as_ptr());

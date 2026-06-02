@@ -68,6 +68,7 @@ mod darwin;
 fn main() {
     #[cfg(windows)]
     unsafe {
+        print_err("brot: starting (windows)\n");
         windows::run()
     }
 
