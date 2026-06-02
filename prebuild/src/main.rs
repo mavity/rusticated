@@ -188,6 +188,29 @@ fn main() {
             );
         }
 
+        if base_target.contains("-linux-gnu") {
+            extend_pre_link_args(
+                &mut spec,
+                "gnu",
+                &["-nostdlib", "-nodefaultlibs", "-nostartfiles"],
+            );
+            extend_pre_link_args(
+                &mut spec,
+                "gnu-cc",
+                &["-nostdlib", "-nodefaultlibs", "-nostartfiles"],
+            );
+            extend_pre_link_args(
+                &mut spec,
+                "gnu-lld",
+                &["-nostdlib", "-nodefaultlibs", "-nostartfiles"],
+            );
+            extend_pre_link_args(
+                &mut spec,
+                "gnu-lld-cc",
+                &["-nostdlib", "-nodefaultlibs", "-nostartfiles"],
+            );
+        }
+
         let obj = spec.as_object_mut().unwrap();
         obj.insert("crt-static-respected".to_string(), serde_json::json!(true));
         obj.insert("no-default-libraries".to_string(), serde_json::json!(true));
