@@ -18,10 +18,10 @@
 pub extern crate alloc;
 // The test harness is std-based; bring std in for test builds only.
 // On native targets the final binary always links std; expose it here so that
-// platform-specific modules (fs, time, â€¦) can use std::fs, std::time, etc.
+// platform-specific modules (fs, time, ...) can use std::fs, std::time, etc.
 // without duplicating raw-syscall struct definitions for every architecture.
 
-#[cfg(all(windows, not(test)))]
+#[cfg(all(windows, target_env = "msvc", not(test)))]
 mod msvc_stubs;
 
 /// Declares one or more thread-local values, initialised lazily on first access.
@@ -588,7 +588,7 @@ pub mod cmp {
 pub mod convert {
     pub use core::convert::*;
 }
-/// Formatting utilities (`Display`, `Debug`, `Formatter`, `Write`, â€¦).
+/// Formatting utilities (`Display`, `Debug`, `Formatter`, `Write`, ...).
 pub mod fmt {
     pub use core::fmt::*;
 }
@@ -612,15 +612,15 @@ pub mod hint {
 pub mod iter {
     pub use core::iter::*;
 }
-/// Marker traits (`Send`, `Sync`, `Copy`, `PhantomData`, â€¦).
+/// Marker traits (`Send`, `Sync`, `Copy`, `PhantomData`, ...).
 pub mod marker {
     pub use core::marker::*;
 }
-/// Memory utilities (`size_of`, `align_of`, `take`, `swap`, â€¦).
+/// Memory utilities (`size_of`, `align_of`, `take`, `swap`, ...).
 pub mod mem {
     pub use core::mem::*;
 }
-/// Operator traits (`Deref`, `DerefMut`, `Index`, `Add`, â€¦).
+/// Operator traits (`Deref`, `DerefMut`, `Index`, `Add`, ...).
 pub mod ops {
     pub use core::ops::*;
 }
