@@ -131,12 +131,16 @@ pub mod Win32 {
 
         pub mod Diagnostics {
             pub mod Debug {
-                use super::super::super::Foundation::*;
                 use super::super::super::super::c_void;
+                use super::super::super::Foundation::*;
 
                 #[link(name = "kernel32", kind = "raw-dylib")]
                 unsafe extern "system" {
-                    pub fn FlushInstructionCache(hProcess: HANDLE, lpBaseAddress: LPVOID, dwSize: usize) -> BOOL;
+                    pub fn FlushInstructionCache(
+                        hProcess: HANDLE,
+                        lpBaseAddress: LPVOID,
+                        dwSize: usize,
+                    ) -> BOOL;
                 }
 
                 #[link(name = "ntdll", kind = "raw-dylib")]

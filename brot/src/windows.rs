@@ -5,17 +5,14 @@ use std::ptr::null_mut;
 use crate::win32::Win32::Foundation::*;
 use crate::win32::Win32::Storage::FileSystem::*;
 
-use crate::win32::Win32::System::Environment::{GetCommandLineW, GetEnvironmentVariableW, SetEnvironmentVariableW};
-use crate::win32::Win32::UI::Shell::CommandLineToArgvW;
-use crate::win32::Win32::System::Threading::{
-    CreateProcessW,
-    GetCurrentProcessId,
-    GetExitCodeProcess,
-    INFINITE,
-    PROCESS_INFORMATION,
-    STARTUPINFOW,
-    WaitForSingleObject,
+use crate::win32::Win32::System::Environment::{
+    GetCommandLineW, GetEnvironmentVariableW, SetEnvironmentVariableW,
 };
+use crate::win32::Win32::System::Threading::{
+    CreateProcessW, GetCurrentProcessId, GetExitCodeProcess, INFINITE, PROCESS_INFORMATION,
+    STARTUPINFOW, WaitForSingleObject,
+};
+use crate::win32::Win32::UI::Shell::CommandLineToArgvW;
 
 // Using the rust_eh_personality already provided by rusticated's lib.rs
 
@@ -244,12 +241,18 @@ pub unsafe fn run() {
         crate::print_err("brot: washmhost spawned, waiting...\n");
         WaitForSingleObject(process_info.hProcess, INFINITE);
         GetExitCodeProcess(process_info.hProcess, &mut exit_code);
-        crate::print_err(&format!("brot: washmhost finished with exit code {}\n", exit_code));
+        crate::print_err(&format!(
+            "brot: washmhost finished with exit code {}\n",
+            exit_code
+        ));
         CloseHandle(process_info.hProcess);
         CloseHandle(process_info.hThread);
     } else {
         let err = GetLastError();
-        crate::print_err(&format!("brot: failed to spawn washmhost (error {})\n", err));
+        crate::print_err(&format!(
+            "brot: failed to spawn washmhost (error {})\n",
+            err
+        ));
         crate::print_err(&format!("brot: washmhost path: {}\n", washmhost_exe));
         crate::print_err(&format!("brot: command line: {}\n", cmd_str));
     }
