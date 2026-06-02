@@ -273,6 +273,7 @@ fn last_error_code() -> i32 {
 
 #[cfg(all(windows, not(target_family = "wasm")))]
 fn last_error_code() -> i32 {
+    #[link(name = "kernel32", kind = "raw-dylib")]
     unsafe extern "system" {
         fn GetLastError() -> u32;
     }
