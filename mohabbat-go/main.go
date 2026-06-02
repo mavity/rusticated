@@ -614,6 +614,9 @@ func buildZoneA(offsets, lengths []int) string {
 	s = strings.ReplaceAll(s, "{{WIN_AMD_LEN}}", fmt.Sprintf("%d", lengths[winAMD]))
 	s = strings.ReplaceAll(s, "{{WIN_ARM_OFF}}", fmt.Sprintf("%d", offsets[winARM]))
 	s = strings.ReplaceAll(s, "{{WIN_ARM_LEN}}", fmt.Sprintf("%d", lengths[winARM]))
+	// Use CRLF for the generated zone A header so Windows batch parsing works
+	// correctly for generated .bat vegetables.
+	s = strings.ReplaceAll(s, "\n", "\r\n")
 	return s
 }
 
