@@ -1,6 +1,6 @@
 #[cfg(windows)]
 pub fn test() {
-    let _ = windows_sys::Win32::Foundation::CloseHandle;
+    let _ = crate::win32::Win32::Foundation::CloseHandle;
 }
 
 #[cfg(not(windows))]
