@@ -29,4 +29,8 @@ pub unsafe extern "C" fn __CxxFrameHandler3() -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn free(_: *mut u8) {}
 
+#[cfg(target_arch = "x86_64")]
+core::arch::global_asm!(".global __chkstk", "__chkstk:", "ret");
+
+
 
