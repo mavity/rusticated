@@ -4,14 +4,17 @@ mod decompress;
 mod temp_check;
 
 #[cfg(windows)]
+mod win32;
+
+#[cfg(windows)]
 fn print_err(msg: &str) {
     unsafe {
-        let h_err = windows_sys::Win32::System::Console::GetStdHandle(
-            windows_sys::Win32::System::Console::STD_ERROR_HANDLE,
+        let h_err = crate::win32::Win32::System::Console::GetStdHandle(
+            crate::win32::Win32::System::Console::STD_ERROR_HANDLE,
         );
         if h_err != core::ptr::null_mut() && h_err as isize != -1 {
             let mut written = 0;
-            windows_sys::Win32::Storage::FileSystem::WriteFile(
+            crate::win32::Win32::Storage::FileSystem::WriteFile(
                 h_err,
                 msg.as_ptr() as *const _,
                 msg.len() as u32,
@@ -21,10 +24,6 @@ fn print_err(msg: &str) {
         }
     }
 }
-
-#[cfg(windows)]
-#[link(name = "kernel32")]
-unsafe extern "system" {}
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
