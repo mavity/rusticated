@@ -31,11 +31,11 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
-lto = false
+lto = "fat"
 codegen-units = 1
 opt-level = "z"
 debug = 0
-strip = false
+strip = "symbols"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
