@@ -52,6 +52,10 @@ pub(crate) fn task_waker(flag: Arc<AtomicBool>) -> Waker {
 }
 
 /// A no-op waker for contexts where notification is handled out-of-band.
+///
+/// This helper is reserved for internal runtime paths that do not require
+/// a real wake notification mechanism.
+#[allow(dead_code)]
 pub(crate) fn noop_waker() -> Waker {
     static VTABLE: RawWakerVTable = RawWakerVTable::new(
         |_| RawWaker::new(core::ptr::null(), &VTABLE),

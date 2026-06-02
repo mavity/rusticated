@@ -95,6 +95,7 @@ mod native_env {
     }
 
     #[cfg(not(windows))]
+    /// Returns the current working directory on non-Windows native hosts.
     pub fn current_dir() -> io::Result<PathBuf> {
         Ok(PathBuf::from("/"))
     }
@@ -328,6 +329,7 @@ mod native_env {
 pub use native_env::{current_dir, get_env, get_host_env_vars, join_paths};
 
 #[cfg(not(target_family = "wasm"))]
+/// Set the current working directory on native hosts.
 pub fn set_current_dir<P: AsRef<crate::path::Path>>(path: P) -> crate::io::Result<()> {
     native_env::set_current_dir(path.as_ref())
 }
@@ -338,6 +340,7 @@ fn get_args() -> alloc::vec::Vec<crate::string::String> {
 }
 
 #[cfg(target_family = "wasm")]
+/// Returns the current working directory from the WASM host environment.
 pub fn current_dir() -> crate::io::Result<crate::path::PathBuf> {
     let probe = unsafe { imports::get_cwd(core::ptr::null_mut(), 0) };
     let err = (probe >> 32) as u32;
@@ -362,6 +365,7 @@ pub fn current_dir() -> crate::io::Result<crate::path::PathBuf> {
 }
 
 #[cfg(target_family = "wasm")]
+/// Requests the WASM host to change the current working directory.
 pub fn set_current_dir<P: AsRef<crate::path::Path>>(path: P) -> crate::io::Result<()> {
     let p = path.as_ref().as_str();
     let err = unsafe { imports::set_cwd(p.as_ptr(), p.len() as u32) };
@@ -373,6 +377,7 @@ pub fn set_current_dir<P: AsRef<crate::path::Path>>(path: P) -> crate::io::Resul
 }
 
 #[cfg(target_family = "wasm")]
+/// Joins a sequence of path components using the WASM host path conventions.
 pub fn join_paths<I, T>(_paths: I) -> Result<crate::ffi::OsString, ()>
 where
     I: IntoIterator<Item = T>,

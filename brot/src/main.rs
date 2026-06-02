@@ -1,7 +1,6 @@
 #![windows_subsystem = "console"]
 
 mod decompress;
-mod temp_check;
 
 #[cfg(windows)]
 mod win32;

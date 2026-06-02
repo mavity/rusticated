@@ -198,6 +198,10 @@ fn main() {
             obj.insert("linker".to_string(), serde_json::json!("rust-lld"));
             obj.insert("linker-flavor".to_string(), serde_json::json!("gnu-lld"));
         }
+        if base_target.contains("-linux-gnu") {
+            obj.insert("linker".to_string(), serde_json::json!("rust-lld"));
+            obj.insert("linker-flavor".to_string(), serde_json::json!("gnu-lld"));
+        }
         if let Some(metadata) = obj.get_mut("metadata") {
             if let Some(meta_obj) = metadata.as_object_mut() {
                 meta_obj.insert("std".to_string(), serde_json::json!(false));
@@ -241,7 +245,7 @@ fn main() {
             .arg("rusticated")
             .arg("--release")
             .arg("-Z")
-            .arg("build-std=std")
+            .arg("build-std=core,alloc,compiler_builtins")
             .arg("-Z")
             .arg("build-std-features=compiler-builtins-mem")
             .arg("--config")
@@ -384,6 +388,22 @@ fn main() {
         }
     } else if host.contains("windows-gnu") {
         let target = host.replace("-pc-", "-rusticated-");
+        if built_targets.contains(&target) {
+            target
+        } else {
+            built_targets[0].clone()
+        }
+    } else if host.contains("-linux-gnu") {
+        let arch = host.split('-').next().unwrap_or("x86_64");
+        let target = format!("{}-rusticated-linux-gnu", arch);
+        if built_targets.contains(&target) {
+            target
+        } else {
+            built_targets[0].clone()
+        }
+    } else if host.contains("-unknown-unknown") {
+        let arch = host.split('-').next().unwrap_or("wasm32");
+        let target = format!("{}-rusticated-unknown-unknown", arch);
         if built_targets.contains(&target) {
             target
         } else {

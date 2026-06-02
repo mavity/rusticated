@@ -134,9 +134,11 @@ impl EpollDriver {
         })
     }
 
+    /// Returns the current number of pending operations.
     pub fn outstanding_io(&self) -> usize {
         self.pending_ops.len()
     }
+
     fn do_register(&mut self, fd: i32, events: u32, token: u64) -> io::Result<()> {
         let mut ev = EpollEvent {
             events: events | EPOLLONESHOT,
@@ -167,6 +169,7 @@ impl EpollDriver {
     }
 
     /// Register `fd` for readability; returns the unique token.
+    /// Registers the given file descriptor for read readiness notifications.
     pub fn register_read(&mut self, fd: i32) -> io::Result<u64> {
         let token = self.next_token;
         self.next_token += 1;
@@ -175,6 +178,7 @@ impl EpollDriver {
     }
 
     /// Register `fd` for writability; returns the unique token.
+    /// Registers the given file descriptor for write readiness notifications.
     pub fn register_write(&mut self, fd: i32) -> io::Result<u64> {
         let token = self.next_token;
         self.next_token += 1;
@@ -187,6 +191,7 @@ impl EpollDriver {
         self.wakers.insert(token, waker);
     }
 
+    /// Polls the epoll instance for events, returning `true` if any were delivered.
     pub fn poll_with_timeout(&mut self, timeout_ms: Option<u32>) -> io::Result<bool> {
         let mut evbuf = [EpollEvent { events: 0, data: 0 }; 64];
         let timeout = timeout_ms.map(|t| t as i32).unwrap_or(-1);

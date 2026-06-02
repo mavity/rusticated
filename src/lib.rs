@@ -2,19 +2,13 @@
 //! Fast, standard-library-shaped async platform layer for brush-async
 
 #![no_std]
-#![allow(unused_features)]
-#![feature(thread_local)]
-#![allow(stable_features)]
-#![feature(async_fn_in_trait)]
-#![feature(lang_items)]
-#![feature(linkage)]
 #![allow(internal_features)]
-#![allow(missing_docs)]
+#![feature(lang_items)]
+#![cfg_attr(target_os = "linux", feature(linkage))]
 #![feature(alloc_error_handler)]
 
 // No prelude_import here, as this IS the std library providing the prelude.
 
-#[allow(unused_extern_crates)]
 pub extern crate alloc;
 // The test harness is std-based; bring std in for test builds only.
 // On native targets the final binary always links std; expose it here so that
@@ -157,7 +151,9 @@ macro_rules! format {
 /// Prelude for the standard library.
 pub mod prelude {
     /// Rust edition-independent prelude v1.
-    #[allow(unused_imports)]
+    ///
+    /// This module re-exports the core prelude plus allocation-related types
+    /// and utility macros used by `rusticated`.
     pub mod v1 {
         pub use core::prelude::v1::*;
 
@@ -192,47 +188,50 @@ pub mod prelude {
         pub use core::result::Result::{self, Err, Ok};
     }
 
+    /// Prelude compatibility layer for Rust 2015 edition.
+    #[allow(unused_imports)]
     pub mod rust_2015 {
-        #[allow(unused_imports)]
         pub use super::v1::*;
-        #[allow(unused_imports)]
         pub use core::prelude::rust_2015::*;
     }
 
+    /// Prelude compatibility layer for Rust 2018 edition.
+    #[allow(unused_imports)]
     pub mod rust_2018 {
-        #[allow(unused_imports)]
         pub use super::v1::*;
-        #[allow(unused_imports)]
         pub use core::prelude::rust_2018::*;
     }
 
+    /// Prelude compatibility layer for Rust 2021 edition.
+    #[allow(unused_imports)]
     pub mod rust_2021 {
-        #[allow(unused_imports)]
         pub use super::v1::*;
-        #[allow(unused_imports)]
         pub use core::prelude::rust_2021::*;
     }
 
     /// Prelude for Edition 2024.
     pub mod rust_2024 {
-        #[allow(unused_imports)]
+        /// Prelude compatibility layer for Rust 2024 edition.
         pub use super::v1::*;
-        #[allow(unused_imports)]
         pub use core::prelude::rust_2024::*;
     }
 }
 
 // NO prelude_import here! We want libstd to use the default core prelude.
 
-/// Shared ABI definitions
+/// Shared ABI definitions.
 pub mod abi;
 
-#[allow(unused_variables, unused_assignments, clashing_extern_declarations)]
+/// Panic handler for the rusticated standard library.
+///
+/// This implementation is used by the custom sysroot to report panic
+/// information and abort the process.
 #[panic_handler]
+#[allow(unused_variables)]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     #[cfg(windows)]
     unsafe {
-        let mut handle: core::primitive::usize = 0;
+        let handle: core::primitive::usize;
         #[link(name = "kernel32", kind = "raw-dylib")]
         unsafe extern "system" {
             fn GetStdHandle(nStdHandle: u32) -> core::primitive::usize;
@@ -369,8 +368,8 @@ struct SystemAllocator;
     not(any(test, target_family = "wasm")),
     any(target_os = "none", windows, target_os = "linux")
 ))]
-#[allow(missing_docs)]
 #[unsafe(no_mangle)]
+/// Global allocation entry point used by the Rust runtime.
 pub unsafe extern "C" fn __rust_alloc(size: usize, align: usize) -> *mut u8 {
     use core::alloc::GlobalAlloc;
     unsafe { ALLOCATOR.alloc(core::alloc::Layout::from_size_align_unchecked(size, align)) }
@@ -380,8 +379,8 @@ pub unsafe extern "C" fn __rust_alloc(size: usize, align: usize) -> *mut u8 {
     not(any(test, target_family = "wasm")),
     any(target_os = "none", windows, target_os = "linux")
 ))]
-#[allow(missing_docs)]
 #[unsafe(no_mangle)]
+/// Global deallocation entry point used by the Rust runtime.
 pub unsafe extern "C" fn __rust_dealloc(ptr: *mut u8, size: usize, align: usize) {
     use core::alloc::GlobalAlloc;
     unsafe {
@@ -396,8 +395,8 @@ pub unsafe extern "C" fn __rust_dealloc(ptr: *mut u8, size: usize, align: usize)
     not(any(test, target_family = "wasm")),
     any(target_os = "none", windows, target_os = "linux")
 ))]
-#[allow(missing_docs)]
 #[unsafe(no_mangle)]
+/// Global reallocation entry point used by the Rust runtime.
 pub unsafe extern "C" fn __rust_realloc(
     ptr: *mut u8,
     old_size: usize,
@@ -418,8 +417,8 @@ pub unsafe extern "C" fn __rust_realloc(
     not(any(test, target_family = "wasm")),
     any(target_os = "none", windows, target_os = "linux")
 ))]
-#[allow(missing_docs)]
 #[unsafe(no_mangle)]
+/// Global zeroed allocation entry point used by the Rust runtime.
 pub unsafe extern "C" fn __rust_alloc_zeroed(size: usize, align: usize) -> *mut u8 {
     use core::alloc::GlobalAlloc;
     unsafe { ALLOCATOR.alloc_zeroed(core::alloc::Layout::from_size_align_unchecked(size, align)) }
@@ -515,10 +514,13 @@ unsafe extern "C" {}
 #[cfg(all(target_os = "linux", not(test), not(target_family = "wasm")))]
 #[unsafe(no_mangle)]
 #[linkage = "weak"]
-#[allow(missing_docs)]
+/// Weak fallback personality function used by the system unwind library.
 pub unsafe extern "C" fn rust_eh_personality() {}
 
-/// Stack backtraces
+/// Stack backtraces.
+///
+/// This module is enabled when `backtrace_in_libstd` is active in the custom
+/// libstd build, providing runtime stack trace capture support.
 pub mod backtrace;
 /// Collections
 pub mod collections;

@@ -51,6 +51,7 @@ unsafe impl Send for SRWLOCK {}
 #[cfg(windows)]
 unsafe impl Sync for SRWLOCK {}
 
+/// Thread pool for offloading blocking work from the async executor.
 pub struct ThreadPool {
     inner: Arc<PoolInner>,
 }
@@ -76,6 +77,7 @@ struct PoolState {
 }
 
 impl ThreadPool {
+    /// Creates a new blocking thread pool with a default thread cap.
     pub fn new() -> Self {
         #[cfg(windows)]
         let mut cv = CONDITION_VARIABLE(0);
@@ -106,6 +108,7 @@ impl ThreadPool {
         }
     }
 
+    /// Schedules a closure to run on the blocking thread pool.
     pub fn spawn<F>(&self, f: F)
     where
         F: FnOnce() + Send + 'static,
@@ -236,20 +239,26 @@ unsafe extern "system" fn worker_bridge(param: *mut core::ffi::c_void) -> u32 {
 
 static GLOBAL_POOL: crate::sync::OnceLock<ThreadPool> = crate::sync::OnceLock::new();
 
+/// Returns the global blocking thread pool singleton.
 pub fn pool() -> &'static ThreadPool {
     GLOBAL_POOL.get_or_init(|| ThreadPool::new())
 }
 
+/// Internal state for a blocking operation future.
 pub struct BlockingOpState<T> {
+    /// The completed result produced by the blocking operation.
     pub result: Mutex<Option<io::Result<T>>>,
+    /// The task waker to notify when the operation finishes.
     pub waker: Mutex<Option<Waker>>,
 }
 
+/// Future representing an operation running on the blocking thread pool.
 pub struct BlockingOpFuture<T> {
     state: Arc<BlockingOpState<T>>,
 }
 
 impl<T: Send + 'static> BlockingOpFuture<T> {
+    /// Spawns a blocking operation and returns a future that resolves with its result.
     pub fn new<F>(f: F) -> Self
     where
         F: FnOnce() -> io::Result<T> + Send + 'static,

@@ -123,6 +123,7 @@ impl Driver {
         self.wakers.insert(token, waker);
     }
 
+    /// Polls the BSD event queue for readiness with an optional timeout.
     pub fn poll_with_timeout(&mut self, timeout_ms: Option<u32>) -> io::Result<bool> {
         let ts;
         let ts_ptr = match timeout_ms {

@@ -1,10 +1,4 @@
 #![cfg(windows)]
-#![allow(
-    clippy::pedantic,
-    clippy::undocumented_unsafe_blocks,
-    clippy::borrow_as_ptr,
-    clippy::cast_possible_truncation
-)]
 
 use crate::cell::{Cell, RefCell, UnsafeCell};
 use crate::collections::HashMap;
@@ -16,16 +10,23 @@ use crate::rc::Rc;
 use crate::task::{Context, Poll, Waker};
 use crate::vec::Vec;
 
+/// Stores the last crash reason code when a Windows runtime error occurs.
 pub static CRASH_REASON: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
 
 use crate::rt::ready::{consume_ready, mark_ready};
 
+/// Windows overlapped I/O descriptor used for asynchronous file operations.
 #[repr(C)]
 pub struct Overlapped {
+    /// Used internally by the Windows API to store low-order result state.
     pub internal: usize,
+    /// Used internally by the Windows API to store high-order result state.
     pub internal_high: usize,
+    /// Low 32 bits of the asynchronous file offset.
     pub offset: u32,
+    /// High 32 bits of the asynchronous file offset.
     pub offset_high: u32,
+    /// Event handle used to signal completion.
     pub h_event: usize,
 }
 
@@ -103,7 +104,10 @@ unsafe extern "system" {
     fn GetCommandLineW() -> *const u16;
 }
 
+/// Windows error code meaning the operation is still pending.
 pub const ERROR_IO_PENDING: u32 = 997;
+
+/// Wait flag that allows I/O completion callbacks to run.
 pub const WAIT_IO_COMPLETION: u32 = 0x000000C0;
 
 #[repr(align(8))]
@@ -160,12 +164,14 @@ unsafe extern "system" fn apc_callback(error_code: u32, bytes: u32, overlapped: 
 
 // ─── Driver ──────────────────────────────────────────────────────────────────
 
+/// Windows async I/O driver used by the runtime.
 pub struct Driver {
     timer_handle: usize,
     pub(crate) wakers: RefCell<HashMap<u64, Waker>>,
 }
 
 impl Driver {
+    /// Creates a new Windows runtime driver instance.
     pub fn new() -> io::Result<Self> {
         let timer_handle = unsafe { CreateWaitableTimerW(ptr::null_mut(), 0, ptr::null()) };
         if timer_handle == 0 {
@@ -195,6 +201,7 @@ impl Driver {
         })
     }
 
+    /// Sets the driver timeout for the next wait cycle.
     pub fn set_timeout(&mut self, ms: Option<u32>) -> io::Result<()> {
         let due_time: i64 = match ms {
             Some(0) => return Ok(()),           // SleepEx handles 0 timeout natively
@@ -219,14 +226,17 @@ impl Driver {
         Ok(())
     }
 
+    /// Registers a Windows handle for asynchronous notification.
     pub fn register(&mut self, _handle: u64) -> io::Result<()> {
         Ok(())
     }
 
+    /// Stores a waker to be invoked when the registered handle is ready.
     pub fn register_waker(&self, token: u64, waker: Waker) {
         self.wakers.borrow_mut().insert(token, waker);
     }
 
+    /// Polls the Windows runtime for I/O completion or timeouts.
     pub fn poll(&mut self, blocking: bool, explicit_ms: Option<u32>) -> io::Result<bool> {
         let timeout = if let Some(ms) = explicit_ms {
             ms
@@ -274,6 +284,7 @@ impl Drop for Driver {
 
 // ─── OverlappedRead ──────────────────────────────────────────────────────────
 
+/// Future representing a Windows overlapped read operation.
 pub struct OverlappedRead {
     handle: u64,
     state: Rc<OpState>,
@@ -281,6 +292,7 @@ pub struct OverlappedRead {
 }
 
 impl OverlappedRead {
+    /// Creates a new overlapped read operation for the given handle.
     pub fn new(handle: u64, buf: Vec<u8>) -> Self {
         Self {
             handle,
@@ -351,6 +363,7 @@ impl Drop for OverlappedRead {
 
 // ─── OverlappedWrite ─────────────────────────────────────────────────────────
 
+/// Future representing a Windows overlapped write operation.
 pub struct OverlappedWrite {
     handle: u64,
     state: Rc<OpState>,
@@ -358,6 +371,7 @@ pub struct OverlappedWrite {
 }
 
 impl OverlappedWrite {
+    /// Creates a new overlapped write operation for the given handle.
     pub fn new(handle: u64, buf: Vec<u8>) -> Self {
         Self {
             handle,
@@ -427,10 +441,12 @@ impl Drop for OverlappedWrite {
 
 // ─── Waiters ─────────────────────────────────────────────────────────────────
 
+/// Future that waits for a Windows handle to become readable.
 pub struct WaitReadable {
     h: u64,
 }
 impl WaitReadable {
+    /// Creates a new readable wait future for the given handle.
     pub fn new(h: u64) -> Self {
         Self { h }
     }
@@ -447,10 +463,12 @@ impl Future for WaitReadable {
     }
 }
 
+/// Future that waits for a Windows handle to become writable.
 pub struct WaitWritable {
     h: u64,
 }
 impl WaitWritable {
+    /// Creates a new writable wait future for the given handle.
     pub fn new(h: u64) -> Self {
         Self { h }
     }
@@ -467,10 +485,13 @@ impl Future for WaitWritable {
     }
 }
 
+/// Future that waits for a process handle to exit.
 pub struct WaitProcess {
+    #[allow(dead_code)]
     h: u64,
 }
 impl WaitProcess {
+    /// Creates a new process wait future for the given handle.
     pub fn new(h: u64) -> Self {
         Self { h }
     }
@@ -484,16 +505,19 @@ impl Future for WaitProcess {
 
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
+/// TLS index placeholder required by the Windows CRT linkage.
 pub static mut _tls_index: u32 = 0;
 
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
+/// Stub symbol used by the Windows C runtime to indicate floating-point usage.
 pub static mut _fltused: i32 = 0x9875;
 
 // GNU Windows targets may emit a call to `__main` from the compiler-generated
 // `main` wrapper. Provide a no-op shim for CRT-free builds.
 #[cfg(all(not(test), target_env = "gnu"))]
 #[unsafe(no_mangle)]
+/// No-op entry point shim for GNU Windows CRT-free builds.
 pub extern "C" fn __main() {}
 
 /// Entry point for MSVC-linked binaries.
