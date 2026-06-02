@@ -2,13 +2,20 @@
 use crate::META;
 use std::ptr::null_mut;
 
-use windows_sys::Win32::Foundation::*;
-use windows_sys::Win32::Storage::FileSystem::*;
+use crate::win32::Win32::Foundation::*;
+use crate::win32::Win32::Storage::FileSystem::*;
 
-type RunPayloadFunc = unsafe extern "C" fn(*const u8, usize) -> u32;
-
-use windows_sys::Win32::System::Environment::{GetCommandLineW, GetEnvironmentVariableW};
-use windows_sys::Win32::UI::Shell::CommandLineToArgvW;
+use crate::win32::Win32::System::Environment::{GetCommandLineW, GetEnvironmentVariableW, SetEnvironmentVariableW};
+use crate::win32::Win32::UI::Shell::CommandLineToArgvW;
+use crate::win32::Win32::System::Threading::{
+    CreateProcessW,
+    GetCurrentProcessId,
+    GetExitCodeProcess,
+    INFINITE,
+    PROCESS_INFORMATION,
+    STARTUPINFOW,
+    WaitForSingleObject,
+};
 
 // Using the rust_eh_personality already provided by rusticated's lib.rs
 
@@ -54,7 +61,7 @@ pub unsafe fn run() {
         wide_path.as_ptr(),
         FILE_READ_ATTRIBUTES | FILE_READ_DATA,
         FILE_SHARE_READ,
-        core::ptr::null(),
+        core::ptr::null_mut(),
         OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL,
         core::ptr::null_mut(),
@@ -141,7 +148,7 @@ pub unsafe fn run() {
 
     // convert temp_path to String
     let temp_str = String::from_utf16_lossy(&temp_path);
-    let pid = windows_sys::Win32::System::Threading::GetCurrentProcessId();
+    let pid = GetCurrentProcessId();
 
     let washmhost_exe = format!("{}washm_tmp_{}.exe", temp_str, pid);
     let payload_wasm = format!("{}payload_tmp_{}.wasm", temp_str, pid);
@@ -157,9 +164,9 @@ pub unsafe fn run() {
     ] {
         let handle = CreateFileW(
             path_w.as_ptr(),
-            windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_WRITE,
+            FILE_GENERIC_WRITE,
             0,
-            core::ptr::null(),
+            core::ptr::null_mut(),
             CREATE_ALWAYS,
             FILE_ATTRIBUTE_NORMAL,
             core::ptr::null_mut(),
@@ -179,18 +186,12 @@ pub unsafe fn run() {
 
     // Set Environment Variable MOHABBAT_WASM_FD
     let env_name: Vec<u16> = "MOHABBAT_WASM_FD\0".encode_utf16().collect();
-    windows_sys::Win32::System::Environment::SetEnvironmentVariableW(
-        env_name.as_ptr(),
-        payload_wasm_w.as_ptr(),
-    );
+    SetEnvironmentVariableW(env_name.as_ptr(), payload_wasm_w.as_ptr());
 
     // Create process using CreateProcessW
-    let mut startup_info: windows_sys::Win32::System::Threading::STARTUPINFOW =
-        unsafe { core::mem::zeroed() };
-    startup_info.cb =
-        core::mem::size_of::<windows_sys::Win32::System::Threading::STARTUPINFOW>() as u32;
-    let mut process_info: windows_sys::Win32::System::Threading::PROCESS_INFORMATION =
-        unsafe { core::mem::zeroed() };
+    let mut startup_info: STARTUPINFOW = unsafe { core::mem::zeroed() };
+    startup_info.cb = core::mem::size_of::<STARTUPINFOW>() as u32;
+    let mut process_info: PROCESS_INFORMATION = unsafe { core::mem::zeroed() };
 
     let vegetable_str = String::from_utf16_lossy(&wide_path);
     let mut cmd_str = format!("\"{}\"", vegetable_str.trim_end_matches('\0'));
@@ -221,29 +222,23 @@ pub unsafe fn run() {
 
     let mut cmdline: Vec<u16> = cmd_str.encode_utf16().collect();
 
-    let res = windows_sys::Win32::System::Threading::CreateProcessW(
+    let res = CreateProcessW(
         washmhost_exe_w.as_ptr(),
         cmdline.as_mut_ptr(),
-        core::ptr::null(),
-        core::ptr::null(),
+        core::ptr::null_mut(),
+        core::ptr::null_mut(),
         0,
         0,
-        core::ptr::null(),
-        core::ptr::null(),
-        &startup_info,
+        core::ptr::null_mut(),
+        core::ptr::null_mut(),
+        &mut startup_info,
         &mut process_info,
     );
 
     let mut exit_code = 1;
     if res != 0 {
-        windows_sys::Win32::System::Threading::WaitForSingleObject(
-            process_info.hProcess,
-            windows_sys::Win32::System::Threading::INFINITE,
-        );
-        windows_sys::Win32::System::Threading::GetExitCodeProcess(
-            process_info.hProcess,
-            &mut exit_code,
-        );
+        WaitForSingleObject(process_info.hProcess, INFINITE);
+        GetExitCodeProcess(process_info.hProcess, &mut exit_code);
         CloseHandle(process_info.hProcess);
         CloseHandle(process_info.hThread);
     }
