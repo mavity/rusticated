@@ -22,16 +22,16 @@ pub unsafe fn run() {
     // Read from /proc/self/cmdline (NUL-separated args) to avoid std::env::args dependency.
     let bat_path: Vec<u8> = {
         let path = b"/proc/self/cmdline\0";
-        let fd = open(path.as_ptr(), O_RDONLY);
+        let fd = unsafe { open(path.as_ptr(), O_RDONLY) };
         if fd < 0 {
             std::process::exit(102);
         }
         let mut buf = vec![0u8; 4096];
         let mut total = 0usize;
         loop {
-            let n = read(fd, buf.as_mut_ptr().add(total), buf.len() - total);
+            let n = unsafe { read(fd, buf.as_mut_ptr().add(total), buf.len() - total) };
             if n < 0 {
-                close(fd);
+                unsafe { close(fd) };
                 std::process::exit(102);
             }
             if n == 0 {
@@ -42,7 +42,7 @@ pub unsafe fn run() {
                 buf.resize(buf.len() * 2, 0);
             }
         }
-        close(fd);
+        unsafe { close(fd) };
         // cmdline: argv[0]\0argv[1]\0...
         let after0 = match buf[..total].iter().position(|&b| b == 0) {
             Some(i) => i + 1,
@@ -64,18 +64,18 @@ pub unsafe fn run() {
     let vegetable_path =
         std::string::String::from_utf8_lossy(&path_cstr[..path_cstr.len() - 1]).into_owned();
 
-    let fd = open(path_cstr.as_ptr(), O_RDONLY);
+    let fd = unsafe { open(path_cstr.as_ptr(), O_RDONLY) };
     if fd < 0 {
         std::process::exit(2);
     }
 
     // Get file size via seek-to-end
-    let file_size = lseek(fd, 0, SEEK_END);
+    let file_size = unsafe { lseek(fd, 0, SEEK_END) };
     if file_size < 0 {
         std::process::exit(3);
     }
 
-    let pool_len = META.pool_len as usize;
+    let pool_len = unsafe { META.pool_len as usize };
     if pool_len == 0 {
         std::process::exit(4);
     }
@@ -85,7 +85,7 @@ pub unsafe fn run() {
         std::process::exit(5);
     }
 
-    if lseek(fd, pool_start, SEEK_SET) < 0 {
+    if unsafe { lseek(fd, pool_start, SEEK_SET) } < 0 {
         std::process::exit(6);
     }
 
@@ -93,20 +93,22 @@ pub unsafe fn run() {
     let mut compressed_data = vec![0u8; pool_len];
     let mut total_read = 0;
     while total_read < pool_len {
-        let n = read(
-            fd,
-            compressed_data.as_mut_ptr().add(total_read),
-            pool_len - total_read,
-        );
+        let n = unsafe {
+            read(
+                fd,
+                compressed_data.as_mut_ptr().add(total_read),
+                pool_len - total_read,
+            )
+        };
         if n <= 0 {
             std::process::exit(7);
         }
         total_read += n as usize;
     }
-    close(fd);
+    unsafe { close(fd) };
 
     // Decompress pool
-    let total_pool = (META.payload_offset + META.payload_len) as usize;
+    let total_pool = unsafe { (META.payload_offset + META.payload_len) as usize };
     let mut decompressed_pool = vec![0u8; total_pool];
 
     let mut out_offset = 0;
@@ -118,34 +120,36 @@ pub unsafe fn run() {
         }
     });
 
-    let washmhost_start = META.washmhost_offset as usize;
-    let washmhost_end = (META.washmhost_offset + META.washmhost_len) as usize;
+    let washmhost_start = unsafe { META.washmhost_offset as usize };
+    let washmhost_end = unsafe { (META.washmhost_offset + META.washmhost_len) as usize };
     let washmhost_data = &decompressed_pool[washmhost_start..washmhost_end];
 
-    let payload_start = META.payload_offset as usize;
-    let payload_end = (META.payload_offset + META.payload_len) as usize;
+    let payload_start = unsafe { META.payload_offset as usize };
+    let payload_end = unsafe { (META.payload_offset + META.payload_len) as usize };
     let payload_data = &decompressed_pool[payload_start..payload_end];
 
     // Write washmhost to a temp file
     let mut template = *b"/tmp/moh-XXXXXX\0";
-    let tmp_fd = mkstemp(template.as_mut_ptr());
+    let tmp_fd = unsafe { mkstemp(template.as_mut_ptr()) };
     if tmp_fd < 0 {
         std::process::exit(10);
     }
 
     let mut offset = 0;
     while offset < washmhost_data.len() {
-        let n = write(
-            tmp_fd,
-            washmhost_data.as_ptr().add(offset),
-            washmhost_data.len() - offset,
-        );
+        let n = unsafe {
+            write(
+                tmp_fd,
+                washmhost_data.as_ptr().add(offset),
+                washmhost_data.len() - offset,
+            )
+        };
         if n <= 0 {
             std::process::exit(11);
         }
         offset += n as usize;
     }
-    close(tmp_fd);
+    unsafe { close(tmp_fd) };
 
     let washmhost_path_end = template
         .iter()
@@ -154,34 +158,36 @@ pub unsafe fn run() {
     let washmhost_path =
         std::string::String::from_utf8_lossy(&template[..washmhost_path_end]).into_owned();
     if std::fs::set_permissions(&washmhost_path, std::fs::Permissions::from_mode(0o755)).is_err() {
-        unlink(template.as_ptr());
+        unsafe { unlink(template.as_ptr()) };
         std::process::exit(12);
     }
 
     // Write payload to a temp file and pass its path through MOHABBAT_WASM_FD.
     let mut payload_template = *b"/tmp/mohp-XXXXXX\0";
-    let payload_fd = mkstemp(payload_template.as_mut_ptr());
+    let payload_fd = unsafe { mkstemp(payload_template.as_mut_ptr()) };
     if payload_fd < 0 {
-        unlink(template.as_ptr());
+        unsafe { unlink(template.as_ptr()) };
         std::process::exit(14);
     }
 
     let mut payload_off = 0usize;
     while payload_off < payload_data.len() {
-        let n = write(
-            payload_fd,
-            payload_data.as_ptr().add(payload_off),
-            payload_data.len() - payload_off,
-        );
+        let n = unsafe {
+            write(
+                payload_fd,
+                payload_data.as_ptr().add(payload_off),
+                payload_data.len() - payload_off,
+            )
+        };
         if n <= 0 {
-            close(payload_fd);
-            unlink(payload_template.as_ptr());
-            unlink(template.as_ptr());
+            unsafe { close(payload_fd) };
+            unsafe { unlink(payload_template.as_ptr()) };
+            unsafe { unlink(template.as_ptr()) };
             std::process::exit(15);
         }
         payload_off += n as usize;
     }
-    close(payload_fd);
+    unsafe { close(payload_fd) };
 
     let payload_path_end = payload_template
         .iter()
@@ -196,8 +202,8 @@ pub unsafe fn run() {
         .env("MOHABBAT_WASM_FD", &payload_path)
         .status();
 
-    unlink(payload_template.as_ptr());
-    unlink(template.as_ptr());
+    unsafe { unlink(payload_template.as_ptr()) };
+    unsafe { unlink(template.as_ptr()) };
 
     match status {
         Ok(s) => std::process::exit(s.code().unwrap_or(1)),

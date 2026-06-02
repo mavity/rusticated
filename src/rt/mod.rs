@@ -1,31 +1,53 @@
-#![allow(missing_docs, dead_code)]
-
+/// Combinators for selecting between futures.
 pub mod select;
 pub use select::{Either, Select, select};
 
 #[cfg(not(target_family = "wasm"))]
+/// Blocking support for offloading work to threads.
 pub mod blocking;
+
 #[cfg(not(target_family = "wasm"))]
+/// BSD-compatible event polling implementation.
 pub mod bsd;
+
 #[cfg(not(target_family = "wasm"))]
+/// Executor and task scheduling primitives.
 pub mod executor;
+
 #[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
+/// Linux-specific driver integration.
 pub mod linux_driver;
+
 #[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
+/// Epoll-based readiness polling for Linux.
 pub mod linux_epoll;
+
 #[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
+/// Linux asynchronous operation wrappers.
 pub mod linux_op;
+
 #[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
+/// Linux-specific runtime state handling.
 pub mod linux_state;
+
 #[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
+/// io_uring integration for Linux.
 pub mod linux_uring;
+
 #[cfg(not(target_family = "wasm"))]
+/// Ready queue management for futures.
 pub mod ready;
+
 #[cfg(not(target_family = "wasm"))]
+/// Timer and deadline support.
 pub mod timers;
+
 #[cfg(not(target_family = "wasm"))]
+/// Task wake-up primitives.
 pub mod waker;
+
 #[cfg(not(target_family = "wasm"))]
+/// Windows-specific runtime support.
 pub mod windows;
 
 #[cfg(not(target_family = "wasm"))]
@@ -33,22 +55,30 @@ pub use executor::{JoinHandle, PollStatus, poll_step, spawn};
 
 #[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
 pub use linux_epoll::{WaitReadable, WaitWritable};
+
 #[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
+/// Returns a future that waits for the file descriptor to become readable.
 pub fn wait_readable(fd: i32) -> WaitReadable {
     WaitReadable::new(fd)
 }
+
 #[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
+/// Returns a future that waits for the file descriptor to become writable.
 pub fn wait_writable(fd: i32) -> WaitWritable {
     WaitWritable::new(fd)
 }
 
 #[cfg(all(not(target_family = "wasm"), windows))]
 pub use windows::{WaitReadable, WaitWritable};
+
 #[cfg(all(not(target_family = "wasm"), windows))]
+/// Returns a future that waits for the Windows handle to become readable.
 pub fn wait_readable(h: u64) -> WaitReadable {
     WaitReadable::new(h)
 }
+
 #[cfg(all(not(target_family = "wasm"), windows))]
+/// Returns a future that waits for the Windows handle to become writable.
 pub fn wait_writable(h: u64) -> WaitWritable {
     WaitWritable::new(h)
 }
@@ -72,9 +102,11 @@ pub use bsd::{WaitReadable, WaitWritable};
         target_os = "netbsd"
     )
 ))]
+/// Returns a future that waits for the BSD-style file descriptor to become readable.
 pub fn wait_readable(fd: i32) -> WaitReadable {
     WaitReadable::new(fd)
 }
+
 #[cfg(all(
     not(target_family = "wasm"),
     any(
@@ -84,11 +116,13 @@ pub fn wait_readable(fd: i32) -> WaitReadable {
         target_os = "netbsd"
     )
 ))]
+/// Returns a future that waits for the BSD-style file descriptor to become writable.
 pub fn wait_writable(fd: i32) -> WaitWritable {
     WaitWritable::new(fd)
 }
 
 #[cfg(target_family = "wasm")]
+/// WASM runtime helpers and host ABI integration.
 pub mod wasm;
 
 // Export the WASM Rust consumer API explicitly, deliberately excluding the
@@ -193,6 +227,10 @@ macro_rules! main {
     };
 }
 
+/// Spawn a future on the rusticated runtime.
+///
+/// On native targets this runs the future immediately on the runtime executor.
+/// On WASM it exports `guest_init` for the host to invoke.
 #[macro_export]
 macro_rules! spawn {
     ($future:expr) => {

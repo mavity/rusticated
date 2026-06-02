@@ -8,11 +8,13 @@ use crate::task::{Context, Poll};
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 
+/// Future representing a Linux asynchronous file operation.
 pub struct LinuxOpFuture {
     state: Rc<OpState>,
 }
 
 impl LinuxOpFuture {
+    /// Initiates an asynchronous read operation.
     pub fn read(fd: i32, buf: Vec<u8>) -> Self {
         let state = OpState::new(fd, true, Some(buf));
         let state_clone = Rc::clone(&state);
@@ -20,6 +22,7 @@ impl LinuxOpFuture {
         Self { state }
     }
 
+    /// Initiates an asynchronous write operation.
     pub fn write(fd: i32, buf: Vec<u8>) -> Self {
         let state = OpState::new(fd, false, Some(buf));
         let state_clone = Rc::clone(&state);

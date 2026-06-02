@@ -1,4 +1,3 @@
-#![allow(unsafe_op_in_unsafe_fn)]
 use crate::META;
 use std::ptr::null_mut;
 

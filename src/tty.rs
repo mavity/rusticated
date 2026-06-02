@@ -90,6 +90,7 @@ mod unix_tty {
     }
 
     impl SizeStream {
+        /// Waits for a terminal-size update and returns the most recent dimensions.
         pub async fn next(&mut self) -> (u16, u16) {
             if let core::option::Option::Some(last) = self.last_size {
                 let mut current = last;
@@ -136,9 +137,12 @@ mod unix_tty {
     // ── Raw mode ──────────────────────────────────────────────────────────────
 
     /// Per-platform termios layout and flag constants.
+    ///
+    /// The Linux termios constant set is retained for future raw tty mode
+    /// support. Only the currently unused constants are individually allowed.
     #[cfg(target_os = "linux")]
-    #[allow(dead_code)]
     mod tc {
+        #![allow(missing_docs)]
         /// c_lflag: disable canonical (line-buffered) input.
         pub const ICANON: u32 = 0x0000_0002;
         /// c_lflag: disable input echo.
@@ -162,6 +166,8 @@ mod unix_tty {
         /// c_cflag: parity enable.
         pub const PARENB: u32 = 0x0000_0100;
         /// c_cflag: mark parity errors.
+        ///
+        /// Included for completeness of the BSD `termios` flag set.
         #[allow(dead_code)]
         pub const PARMRK: u32 = 0x0000_0008;
         /// c_iflag: ignore break condition.
@@ -171,6 +177,8 @@ mod unix_tty {
         /// c_iflag: mark parity and framing errors.
         pub const PARMRK_IFLAG: u32 = 0x0000_0008;
         /// c_iflag: enable input parity checking.
+        ///
+        /// Included for completeness of the Linux `termios` flag set.
         #[allow(dead_code)]
         pub const INPCK: u32 = 0x0000_0010;
         /// c_iflag: translate NL to CR on input.
@@ -181,8 +189,10 @@ mod unix_tty {
         pub const VMIN: usize = 6;
         /// Index into c_cc for timeout.
         pub const VTIME: usize = 5;
+        /// Action constant: change attributes immediately.
         pub const TCSANOW: i32 = 0;
 
+        /// `termios` layout used on Linux.
         #[repr(C)]
         pub struct Termios {
             pub c_iflag: u32,
@@ -203,6 +213,7 @@ mod unix_tty {
         target_os = "netbsd",
     ))]
     mod tc {
+        #![allow(missing_docs)]
         pub const ICANON: u32 = 0x0000_0100;
         pub const ECHO: u32 = 0x0000_0008;
         pub const ISIG: u32 = 0x0000_0080;
@@ -214,20 +225,23 @@ mod unix_tty {
         pub const CSIZE: u32 = 0x0000_0300;
         pub const CS8: u32 = 0x0000_0300;
         pub const PARENB: u32 = 0x0000_1000;
+        /// Included for completeness of the BSD `termios` flag set.
         #[allow(dead_code)]
         pub const PARMRK: u32 = 0x0000_0008;
         pub const IGNBRK: u32 = 0x0000_0001;
         pub const BRKINT: u32 = 0x0000_0002;
         pub const PARMRK_IFLAG: u32 = 0x0000_0008;
+        /// Included for completeness of the BSD `termios` flag set.
         #[allow(dead_code)]
         pub const INPCK: u32 = 0x0000_0010;
         pub const INLCR: u32 = 0x0000_0040;
         pub const IGNCR: u32 = 0x0000_0080;
         pub const VMIN: usize = 16;
         pub const VTIME: usize = 17;
+        /// Action constant: change attributes immediately.
         pub const TCSANOW: i32 = 0;
 
-        /// Termios struct layout for macOS/BSD (64-bit targets).
+        /// `termios` layout used on macOS and BSD platforms.
         #[repr(C)]
         pub struct Termios {
             pub c_iflag: u32,
@@ -473,6 +487,8 @@ mod windows_tty {
     const STD_INPUT_HANDLE: u32 = 0xFFFF_FFF6;
     const STD_OUTPUT_HANDLE: u32 = 0xFFFF_FFF5;
     const FILE_TYPE_CHAR: u32 = 0x0002;
+    /// Used only by optional Windows API paths when present; otherwise the
+    /// constant is retained for future TTY driver support.
     #[allow(dead_code)]
     const INFINITE: u32 = 0xFFFF_FFFF;
 
@@ -512,6 +528,7 @@ mod windows_tty {
     }
 
     impl SizeStream {
+        /// Waits for a terminal-size update and returns the most recent dimensions.
         pub async fn next(&mut self) -> (u16, u16) {
             if let core::option::Option::Some(last) = self.last_size {
                 let mut current = last;
@@ -1140,6 +1157,7 @@ mod wasm_tty {
     }
 
     impl SizeStream {
+        /// Waits for a terminal-size update and returns the most recent dimensions.
         pub async fn next(&mut self) -> (u16, u16) {
             if let core::option::Option::Some(last) = self.last_size {
                 let mut current = last;
