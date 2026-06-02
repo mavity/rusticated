@@ -335,6 +335,7 @@ mod native_signal {
     #[cfg(windows)]
     #[allow(clippy::unnecessary_wraps, clippy::missing_const_for_fn)]
     fn install_handler() -> io::Result<()> {
+        #[link(name = "kernel32", kind = "raw-dylib")]
         unsafe extern "system" {
             fn SetConsoleCtrlHandler(
                 handler: Option<extern "system" fn(u32) -> i32>,
