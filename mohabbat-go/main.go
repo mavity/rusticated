@@ -568,33 +568,32 @@ func patchMeta(brot []byte, meta mohabbatMeta) ([]byte, error) {
 
 // buildZoneA produces the polyglot script header for Modern Four.
 func buildZoneA(offsets, lengths []int) string {
-	const tmpl = `:; ME="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || printf "%s" "$0")"; S_OFF=0; S_LEN=0; case "$(uname -m)-$(uname -s)" in x86_64-Linux) S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}} ;; aarch64-Linux) S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}} ;; esac; [ "$S_LEN" = "0" ] && { echo "[mohabbat] Unsupported arch/os"; exit 1; }; TMP_EXE="/tmp/moh-$$-$(date +%s)"; dd if="$ME" bs=1 skip="$S_OFF" count="$S_LEN" of="$TMP_EXE" 2>/dev/null; chmod +x "$TMP_EXE"; "$TMP_EXE" "$ME" "$@"; RET=$?; rm "$TMP_EXE"; exit $RET
-@echo off
-setlocal enabledelayedexpansion
-set "ME=%~f0"
-set "TMP_EXE=%TEMP%\moh-!RANDOM!.exe"
-set "ARCH=%PROCESSOR_ARCHITECTURE%"
-if "!PROCESSOR_ARCHITEW6432!" neq "" set "ARCH=!PROCESSOR_ARCHITEW6432!"
-set "S_OFF=0"
-set "S_LEN=0"
-if "!ARCH!"=="AMD64" (
-	set "S_OFF={{WIN_AMD_OFF}}"
-	set "S_LEN={{WIN_AMD_LEN}}"
-) else if "!ARCH!"=="ARM64" (
-	set "S_OFF={{WIN_ARM_OFF}}"
-	set "S_LEN={{WIN_ARM_LEN}}"
-)
-if "!S_LEN!"=="0" (
-    echo [mohabbat] This vegetable does not support !ARCH! on Windows.
-    exit /b 1
-)
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$a=[IO.File]::ReadAllBytes($env:ME); $b=New-Object byte[] !S_LEN!; [Array]::Copy($a, [int64]!S_OFF!, $b, 0, [int]!S_LEN!); [IO.File]::WriteAllBytes($env:TMP_EXE, $b)"
-set "MOHABBAT_VEGETABLE_PATH=!ME!"
-"!TMP_EXE!" %*
-set "RET=!ERRORLEVEL!"
-del "!TMP_EXE!"
-exit /b !RET!
-`
+	const tmpl = ":; ME=\"$(readlink -f \"$0\" 2>/dev/null || realpath \"$0\" 2>/dev/null || printf \"%s\" \"$0\")\"; S_OFF=0; S_LEN=0; case \"$(uname -m)-$(uname -s)\" in x86_64-Linux) S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}} ;; aarch64-Linux) S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}} ;; esac; [ \"$S_LEN\" = \"0\" ] && { echo \"[mohabbat] Unsupported arch/os\"; exit 1; }; TMP_EXE=\"/tmp/moh-$$-$(date +%s)\"; dd if=\"$ME\" bs=1 skip=\"$S_OFF\" count=\"$S_LEN\" of=\"$TMP_EXE\" 2>/dev/null; chmod +x \"$TMP_EXE\"; \"$TMP_EXE\" \"$ME\" \"$@\"; RET=$?; rm \"$TMP_EXE\"; exit $RET\n" +
+		"@echo off\r\n" +
+		"setlocal enabledelayedexpansion\r\n" +
+		"set \"ME=%~f0\"\r\n" +
+		"set \"TMP_EXE=%TEMP%\\moh-!RANDOM!.exe\"\r\n" +
+		"set \"ARCH=%PROCESSOR_ARCHITECTURE%\"\r\n" +
+		"if \"!PROCESSOR_ARCHITEW6432!\" neq \"\" set \"ARCH=!PROCESSOR_ARCHITEW6432!\"\r\n" +
+		"set \"S_OFF=0\"\r\n" +
+		"set \"S_LEN=0\"\r\n" +
+		"if \"!ARCH!\"==\"AMD64\" (\r\n" +
+		"	set \"S_OFF={{WIN_AMD_OFF}}\"\r\n" +
+		"	set \"S_LEN={{WIN_AMD_LEN}}\"\r\n" +
+		") else if \"!ARCH!\"==\"ARM64\" (\r\n" +
+		"	set \"S_OFF={{WIN_ARM_OFF}}\"\r\n" +
+		"	set \"S_LEN={{WIN_ARM_LEN}}\"\r\n" +
+		")\r\n" +
+		"if \"!S_LEN!\"==\"0\" (\r\n" +
+		"    echo [mohabbat] This vegetable does not support !ARCH! on Windows.\r\n" +
+		"    exit /b 1\r\n" +
+		")\r\n" +
+		"powershell -NoProfile -ExecutionPolicy Bypass -Command \"$a=[IO.File]::ReadAllBytes($env:ME); $b=New-Object byte[] !S_LEN!; [Array]::Copy($a, [int64]!S_OFF!, $b, 0, [int]!S_LEN!); [IO.File]::WriteAllBytes($env:TMP_EXE, $b)\"\r\n" +
+		"set \"MOHABBAT_VEGETABLE_PATH=!ME!\"\r\n" +
+		"\"!TMP_EXE!\" %*\r\n" +
+		"set \"RET=!ERRORLEVEL!\"\r\n" +
+		"del \"!TMP_EXE!\"\r\n" +
+		"exit /b !RET!\r\n"
 	idx := map[string]int{}
 	for i, s := range slots {
 		idx[s.name] = i
