@@ -9,6 +9,9 @@ pub mod raw {
     pub type c_char = i8;
 }
 
+#[cfg(target_os = "linux")]
+pub mod linux;
+
 /// Unix-specific extensions.
 #[cfg(unix)]
 pub mod unix {

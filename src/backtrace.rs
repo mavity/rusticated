@@ -8,9 +8,11 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+#[cfg(feature = "backtrace")]
 extern crate backtrace as backtrace_sys;
 
 use alloc::vec::Vec;
+#[cfg(feature = "backtrace")]
 use core::ffi::c_void;
 use core::fmt;
 
@@ -33,6 +35,7 @@ struct RawFrames {
     ips: Vec<usize>,
 }
 
+#[allow(dead_code)]
 enum Inner {
     Disabled,
     Captured(RawFrames),
@@ -70,18 +73,27 @@ impl Backtrace {
     /// Capture a full backtrace, regardless of environment variable
     /// configuration.
     pub fn force_capture() -> Backtrace {
-        let mut ips: Vec<usize> = Vec::new();
-        // SAFETY: The closure only appends `frame.ip()` (a plain integer cast)
-        // to a Vec and never calls back into the backtrace machinery, so there
-        // are no reentrancy hazards.
-        unsafe {
-            backtrace_sys::trace_unsynchronized(|frame| {
-                ips.push(frame.ip() as usize);
-                true
-            });
+        #[cfg(feature = "backtrace")]
+        {
+            let mut ips: Vec<usize> = Vec::new();
+            // SAFETY: The closure only appends `frame.ip()` (a plain integer cast)
+            // to a Vec and never calls back into the backtrace machinery, so there
+            // are no reentrancy hazards.
+            unsafe {
+                backtrace_sys::trace_unsynchronized(|frame| {
+                    ips.push(frame.ip() as usize);
+                    true
+                });
+            }
+            Backtrace {
+                inner: Inner::Captured(RawFrames { ips }),
+            }
         }
-        Backtrace {
-            inner: Inner::Captured(RawFrames { ips }),
+        #[cfg(not(feature = "backtrace"))]
+        {
+            Backtrace {
+                inner: Inner::Disabled,
+            }
         }
     }
 
@@ -112,42 +124,55 @@ impl fmt::Display for Backtrace {
         match &self.inner {
             Inner::Disabled => f.write_str("disabled backtrace"),
             Inner::Captured(raw) => {
-                for (idx, &ip_usize) in raw.ips.iter().enumerate() {
-                    let ip = ip_usize as *mut c_void;
-                    let mut found = false;
-                    // SAFETY: `ip` is a valid instruction pointer obtained from
-                    // `trace_unsynchronized`. The callback does not re-enter the
-                    // backtrace machinery, so reentrancy is not a concern.
-                    unsafe {
-                        backtrace_sys::resolve_unsynchronized(ip, |symbol| {
-                            if !found {
-                                found = true;
-                                if let Some(name) = symbol.name() {
-                                    let _ = write!(f, "\n{idx:>4}: {name}");
-                                } else {
-                                    let _ = write!(f, "\n{idx:>4}: <unknown>");
-                                }
-                                if let Some(lineno) = symbol.lineno() {
-                                    if let Some(path) = symbol.filename_raw() {
-                                        match path {
-                                            backtrace_sys::BytesOrWideString::Bytes(b) => {
-                                                if let Ok(s) = core::str::from_utf8(b) {
-                                                    let _ =
-                                                        write!(f, "\n             at {s}:{lineno}");
+                #[cfg(feature = "backtrace")]
+                {
+                    for (idx, &ip_usize) in raw.ips.iter().enumerate() {
+                        let ip = ip_usize as *mut c_void;
+                        let mut found = false;
+                        // SAFETY: `ip` is a valid instruction pointer obtained from
+                        // `trace_unsynchronized`. The callback does not re-enter the
+                        // backtrace machinery, so reentrancy is not a concern.
+                        unsafe {
+                            backtrace_sys::resolve_unsynchronized(ip, |symbol| {
+                                if !found {
+                                    found = true;
+                                    if let Some(name) = symbol.name() {
+                                        let _ = write!(f, "\n{idx:>4}: {name}");
+                                    } else {
+                                        let _ = write!(f, "\n{idx:>4}: <unknown>");
+                                    }
+                                    if let Some(lineno) = symbol.lineno() {
+                                        if let Some(path) = symbol.filename_raw() {
+                                            match path {
+                                                backtrace_sys::BytesOrWideString::Bytes(b) => {
+                                                    if let Ok(s) = core::str::from_utf8(b) {
+                                                        let _ = write!(
+                                                            f,
+                                                            "\n             at {s}:{lineno}"
+                                                        );
+                                                    }
                                                 }
+                                                backtrace_sys::BytesOrWideString::Wide(_) => {}
                                             }
-                                            backtrace_sys::BytesOrWideString::Wide(_) => {}
                                         }
                                     }
                                 }
-                            }
-                        });
+                            });
+                        }
+                        if !found {
+                            write!(f, "\n{idx:>4}: <unknown> ({ip:p})")?;
+                        }
                     }
-                    if !found {
-                        write!(f, "\n{idx:>4}: <unknown> ({ip:p})")?;
-                    }
+                    Ok(())
                 }
-                Ok(())
+                #[cfg(not(feature = "backtrace"))]
+                {
+                    f.write_str("captured backtrace (symbolication disabled)")?;
+                    for (idx, &ip_usize) in raw.ips.iter().enumerate() {
+                        write!(f, "\n{idx:>4}: {ip_usize:#x}")?;
+                    }
+                    Ok(())
+                }
             }
         }
     }

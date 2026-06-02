@@ -76,37 +76,49 @@ impl Metadata {
 
     /// Returns `true` if this metadata describes a regular file.
     pub fn is_file(&self) -> bool {
-        #[cfg(unix)]
+        #[cfg(target_family = "unix")]
         {
             (self.mode & 0o170000) == 0o100000
         }
-        #[cfg(windows)]
+        #[cfg(target_family = "windows")]
         {
             (self.mode & 0x10) == 0
+        }
+        #[cfg(not(any(target_family = "unix", target_family = "windows")))]
+        {
+            false
         }
     }
 
     /// Returns `true` if this metadata describes a directory.
     pub fn is_dir(&self) -> bool {
-        #[cfg(unix)]
+        #[cfg(target_family = "unix")]
         {
             (self.mode & 0o170000) == 0o040000
         }
-        #[cfg(windows)]
+        #[cfg(target_family = "windows")]
         {
             (self.mode & 0x10) != 0
+        }
+        #[cfg(not(any(target_family = "unix", target_family = "windows")))]
+        {
+            false
         }
     }
 
     /// Returns `true` if this metadata describes a symbolic link.
     pub fn is_symlink(&self) -> bool {
-        #[cfg(unix)]
+        #[cfg(target_family = "unix")]
         {
             (self.mode & 0o170000) == 0o120000
         }
-        #[cfg(windows)]
+        #[cfg(target_family = "windows")]
         {
             (self.mode & 0x400) != 0
+        }
+        #[cfg(not(any(target_family = "unix", target_family = "windows")))]
+        {
+            false
         }
     }
 
@@ -160,13 +172,17 @@ impl Metadata {
 
     /// Returns `true` if the entry is read-only.
     pub fn readonly(&self) -> bool {
-        #[cfg(unix)]
+        #[cfg(target_family = "unix")]
         {
             (self.mode & 0o222) == 0
         }
-        #[cfg(windows)]
+        #[cfg(target_family = "windows")]
         {
             (self.mode & 0x1) != 0
+        }
+        #[cfg(not(any(target_family = "unix", target_family = "windows")))]
+        {
+            false
         }
     }
 
@@ -240,13 +256,17 @@ pub struct Permissions {
 impl Permissions {
     /// Returns whether the file is read-only.
     pub fn readonly(&self) -> bool {
-        #[cfg(any(unix, target_family = "wasm"))]
+        #[cfg(target_family = "unix")]
         {
             (self.mode & 0o222) == 0
         }
-        #[cfg(windows)]
+        #[cfg(target_family = "windows")]
         {
             (self.mode & 0x1) != 0
+        }
+        #[cfg(not(any(target_family = "unix", target_family = "windows")))]
+        {
+            false
         }
     }
 
@@ -617,12 +637,34 @@ impl OpenOptions {
                     flags |= O_CREAT | O_EXCL;
                 }
 
-                unsafe extern "C" {
-                    fn open(pathname: *const u8, flags: i32, mode: u32) -> i32;
-                }
                 let mut path_bytes = alloc::vec::Vec::from(path.as_bytes());
                 path_bytes.push(0);
-                let handle = unsafe { open(path_bytes.as_ptr(), flags, 0o666) };
+
+                #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+                let handle = crate::syscall!(
+                    crate::os::linux::syscall::nr::OPEN,
+                    path_bytes.as_ptr() as usize,
+                    flags as usize,
+                    0o666usize
+                ) as i32;
+
+                #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+                let handle = crate::syscall!(
+                    crate::os::linux::syscall::nr::OPENAT,
+                    -100isize as usize, // AT_FDCWD
+                    path_bytes.as_ptr() as usize,
+                    flags as usize,
+                    0o666usize
+                ) as i32;
+
+                #[cfg(not(target_os = "linux"))]
+                let handle = {
+                    unsafe extern "C" {
+                        fn open(pathname: *const u8, flags: i32, mode: u32) -> i32;
+                    }
+                    unsafe { open(path_bytes.as_ptr(), flags, 0o666) }
+                };
+
                 if handle < 0 {
                     return Err(io::Error::last_os_error());
                 }
@@ -694,11 +736,16 @@ impl Drop for File {
             CloseHandle(self.handle as usize);
         }
         #[cfg(unix)]
-        unsafe {
-            unsafe extern "C" {
-                fn close(fd: i32) -> i32;
+        {
+            #[cfg(target_os = "linux")]
+            crate::syscall!(crate::os::linux::syscall::nr::CLOSE, self.handle as usize);
+            #[cfg(not(target_os = "linux"))]
+            unsafe {
+                unsafe extern "C" {
+                    fn close(fd: i32) -> i32;
+                }
+                close(self.handle as i32);
             }
-            close(self.handle as i32);
         }
     }
 }
@@ -755,12 +802,19 @@ impl File {
 
     /// Attempts to duplicate the file handle.
     pub fn try_clone(&self) -> io::Result<Self> {
-        #[cfg(unix)]
+        #[cfg(target_family = "unix")]
         {
-            unsafe extern "C" {
-                fn dup(oldfd: i32) -> i32;
-            }
-            let new_fd = unsafe { dup(self.handle as i32) };
+            #[cfg(target_os = "linux")]
+            let new_fd =
+                crate::syscall!(crate::os::linux::syscall::nr::DUP, self.handle as usize) as i32;
+            #[cfg(not(target_os = "linux"))]
+            let new_fd = unsafe {
+                unsafe extern "C" {
+                    fn dup(oldfd: i32) -> i32;
+                }
+                dup(self.handle as i32)
+            };
+
             if new_fd < 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -768,33 +822,50 @@ impl File {
                 handle: new_fd as u64,
             })
         }
-        #[cfg(windows)]
+        #[cfg(target_family = "windows")]
         {
             // Simplified: we'd need DuplicateHandle, but let's just use stubs for now if complicated.
             // Actually let's just return unimplemented for windows if we don't want to bring in winapi.
             Err(io::Error::other("try_clone not implemented on Windows yet"))
         }
-        #[cfg(target_family = "wasm")]
+        #[cfg(not(any(target_family = "unix", target_family = "windows")))]
         {
-            Err(io::Error::other("try_clone not implemented on WASM"))
+            Err(io::Error::other(
+                "try_clone not implemented on this platform",
+            ))
         }
     }
 
     /// Returns `true` when the file points at a terminal device.
     pub fn is_terminal(&self) -> bool {
-        #[cfg(unix)]
+        #[cfg(target_family = "unix")]
         {
-            unsafe extern "C" {
-                fn isatty(fd: i32) -> i32;
+            #[cfg(target_os = "linux")]
+            {
+                let mut termios = [0u8; 1024]; // Large enough for any termios
+                let res = crate::syscall!(
+                    crate::os::linux::syscall::nr::IOCTL,
+                    self.handle as usize,
+                    0x5401usize, // TCGETS
+                    termios.as_mut_ptr() as usize
+                ) as isize;
+                res >= 0
             }
-            unsafe { isatty(self.handle as i32) != 0 }
+            #[cfg(not(target_os = "linux"))]
+            {
+                unsafe {
+                    unsafe extern "C" {
+                        fn isatty(fd: i32) -> i32;
+                    }
+                    isatty(self.handle as i32) != 0
+                }
+            }
         }
-        #[cfg(windows)]
+        #[cfg(target_family = "windows")]
         {
-            // Stub for now.
-            false
+            false // TODO
         }
-        #[cfg(target_family = "wasm")]
+        #[cfg(not(any(target_family = "unix", target_family = "windows")))]
         {
             false
         }
@@ -862,10 +933,15 @@ impl AsyncWrite for File {
         {
             let fd = self.handle as i32;
             crate::rt::blocking::BlockingOpFuture::new(move || {
-                unsafe extern "C" {
-                    fn fsync(fd: i32) -> i32;
-                }
-                let res = unsafe { fsync(fd) };
+                #[cfg(target_os = "linux")]
+                let res = crate::syscall!(crate::os::linux::syscall::nr::FSYNC, fd as usize) as i32;
+                #[cfg(not(target_os = "linux"))]
+                let res = unsafe {
+                    unsafe extern "C" {
+                        fn fsync(fd: i32) -> i32;
+                    }
+                    fsync(fd)
+                };
                 if res < 0 {
                     Err(io::Error::last_os_error())
                 } else {
@@ -1075,12 +1151,7 @@ pub async fn read_dir<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
             let mut path_bytes = alloc::vec::Vec::from(path.as_bytes());
             path_bytes.push(0);
 
-            unsafe extern "C" {
-                fn opendir(name: *const u8) -> *mut core::ffi::c_void;
-                fn readdir(dirp: *mut core::ffi::c_void) -> *mut Dirent;
-                fn closedir(dirp: *mut core::ffi::c_void) -> i32;
-            }
-
+            #[cfg(not(target_os = "linux"))]
             #[repr(C)]
             struct Dirent {
                 d_ino: u64,
@@ -1090,51 +1161,157 @@ pub async fn read_dir<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
                 d_name: [u8; 256],
             }
 
-            let dir = unsafe { opendir(path_bytes.as_ptr()) };
-            if dir.is_null() {
-                return Err(io::Error::last_os_error());
-            }
+            #[cfg(target_os = "linux")]
+            {
+                // On Linux we'll use open + getdents64
+                #[cfg(target_arch = "x86_64")]
+                let fd = crate::syscall!(
+                    crate::os::linux::syscall::nr::OPEN,
+                    path_bytes.as_ptr() as usize,
+                    0x10000usize | 0usize, // O_DIRECTORY | O_RDONLY
+                    0usize
+                ) as i32;
+                #[cfg(target_arch = "aarch64")]
+                let fd = crate::syscall!(
+                    crate::os::linux::syscall::nr::OPENAT,
+                    -100isize as usize, // AT_FDCWD
+                    path_bytes.as_ptr() as usize,
+                    0x10000usize | 0usize, // O_DIRECTORY | O_RDONLY
+                    0usize
+                ) as i32;
 
-            let mut entries = alloc::vec::Vec::new();
-            loop {
-                let ent = unsafe { readdir(dir) };
-                if ent.is_null() {
-                    break;
+                if fd < 0 {
+                    return Err(io::Error::last_os_error());
                 }
-                let ent = unsafe { &*ent };
-                let mut len = 0;
-                while ent.d_name[len] != 0 && len < 256 {
-                    len += 1;
-                }
-                let name = alloc::string::String::from_utf8_lossy(&ent.d_name[..len]).into_owned();
-                if name != "." && name != ".." {
-                    let mut mode = 0;
-                    if ent.d_type == 4 {
-                        // DT_DIR
-                        mode = 0o040000;
-                    } else if ent.d_type == 8 {
-                        // DT_REG
-                        mode = 0o100000;
+
+                let mut entries = alloc::vec::Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    let nread = crate::syscall!(
+                        crate::os::linux::syscall::nr::GETDENTS64,
+                        fd as usize,
+                        buf.as_mut_ptr() as usize,
+                        buf.len()
+                    ) as isize;
+                    if nread < 0 {
+                        crate::syscall!(crate::os::linux::syscall::nr::CLOSE, fd as usize);
+                        return Err(io::Error::last_os_error());
                     }
-                    let metadata = Metadata {
-                        size: 0,
-                        mode,
-                        modified_time_ns: 0,
-                        accessed_time_ns: 0,
-                        created_time_ns: 0,
-                        nlink: 1,
-                        uid: 0,
-                        gid: 0,
-                        inode: ent.d_ino,
-                    };
-                    entries.push(DirEntry {
-                        name,
-                        metadata: Some(metadata),
-                    });
+                    if nread == 0 {
+                        break;
+                    }
+
+                    let mut bpos = 0usize;
+                    while bpos < nread as usize {
+                        #[repr(C)]
+                        struct LinuxDirent64 {
+                            d_ino: u64,
+                            d_off: i64,
+                            d_reclen: u16,
+                            d_type: u8,
+                            d_name: [u8; 0],
+                        }
+                        let d = unsafe { &*(buf.as_ptr().add(bpos) as *const LinuxDirent64) };
+                        let name_ptr = unsafe {
+                            buf.as_ptr()
+                                .add(bpos + core::mem::offset_of!(LinuxDirent64, d_name))
+                        };
+                        let name_len = (d.d_reclen as usize)
+                            - core::mem::offset_of!(LinuxDirent64, d_name)
+                            - 1;
+                        let name_slice = unsafe { core::slice::from_raw_parts(name_ptr, name_len) };
+                        // Find actual null terminator in case of padding
+                        let actual_len =
+                            name_slice.iter().position(|&b| b == 0).unwrap_or(name_len);
+                        let name =
+                            alloc::string::String::from_utf8_lossy(&name_slice[..actual_len])
+                                .into_owned();
+
+                        if name != "." && name != ".." {
+                            let mut mode = 0;
+                            if d.d_type == 4 {
+                                // DT_DIR
+                                mode = 0o040000;
+                            } else if d.d_type == 8 {
+                                // DT_REG
+                                mode = 0o100000;
+                            }
+                            entries.push(DirEntry {
+                                name,
+                                metadata: Some(Metadata {
+                                    size: 0,
+                                    mode,
+                                    modified_time_ns: 0,
+                                    accessed_time_ns: 0,
+                                    created_time_ns: 0,
+                                    nlink: 1,
+                                    uid: 0,
+                                    gid: 0,
+                                    inode: d.d_ino,
+                                }),
+                            });
+                        }
+                        bpos += d.d_reclen as usize;
+                    }
                 }
+                crate::syscall!(crate::os::linux::syscall::nr::CLOSE, fd as usize);
+                Ok(ReadDir { entries, pos: 0 })
             }
-            unsafe { closedir(dir) };
-            Ok(ReadDir { entries, pos: 0 })
+            #[cfg(not(target_os = "linux"))]
+            {
+                unsafe extern "C" {
+                    fn opendir(name: *const u8) -> *mut core::ffi::c_void;
+                    fn readdir(dirp: *mut core::ffi::c_void) -> *mut Dirent;
+                    fn closedir(dirp: *mut core::ffi::c_void) -> i32;
+                }
+
+                let dir = unsafe { opendir(path_bytes.as_ptr()) };
+                if dir.is_null() {
+                    return Err(io::Error::last_os_error());
+                }
+
+                let mut entries = alloc::vec::Vec::new();
+                loop {
+                    let ent = unsafe { readdir(dir) };
+                    if ent.is_null() {
+                        break;
+                    }
+                    let ent = unsafe { &*ent };
+                    let mut len = 0;
+                    while ent.d_name[len] != 0 && len < 256 {
+                        len += 1;
+                    }
+                    let name =
+                        alloc::string::String::from_utf8_lossy(&ent.d_name[..len]).into_owned();
+                    if name != "." && name != ".." {
+                        let mut mode = 0;
+                        if ent.d_type == 4 {
+                            // DT_DIR
+                            mode = 0o040000;
+                        } else if ent.d_type == 8 {
+                            // DT_REG
+                            mode = 0o100000;
+                        }
+                        let metadata = Metadata {
+                            size: 0,
+                            mode,
+                            modified_time_ns: 0,
+                            accessed_time_ns: 0,
+                            created_time_ns: 0,
+                            nlink: 1,
+                            uid: 0,
+                            gid: 0,
+                            inode: ent.d_ino,
+                        };
+                        entries.push(DirEntry {
+                            name,
+                            metadata: Some(metadata),
+                        });
+                    }
+                }
+                unsafe { closedir(dir) };
+                Ok(ReadDir { entries, pos: 0 })
+            }
         })
         .await
     }
@@ -1155,12 +1332,34 @@ pub async fn metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
                 let mut path_bytes = alloc::vec::Vec::from(path.as_bytes());
                 path_bytes.push(0);
 
-                unsafe extern "C" {
-                    fn stat(pathname: *const u8, buf: *mut Stat) -> i32;
-                }
-
                 let mut meta = core::mem::MaybeUninit::<Stat>::uninit();
-                let result = unsafe { stat(path_bytes.as_ptr(), meta.as_mut_ptr()) };
+
+                #[cfg(target_os = "linux")]
+                let result = {
+                    #[cfg(target_arch = "x86_64")]
+                    let r = crate::syscall!(
+                        crate::os::linux::syscall::nr::STAT,
+                        path_bytes.as_ptr() as usize,
+                        meta.as_mut_ptr() as usize
+                    ) as i32;
+                    #[cfg(target_arch = "aarch64")]
+                    let r = crate::syscall!(
+                        79usize,            // FSTATAT
+                        -100isize as usize, // AT_FDCWD
+                        path_bytes.as_ptr() as usize,
+                        meta.as_mut_ptr() as usize,
+                        0usize
+                    ) as i32;
+                    r
+                };
+                #[cfg(not(target_os = "linux"))]
+                let result = {
+                    unsafe extern "C" {
+                        fn stat(pathname: *const u8, buf: *mut Stat) -> i32;
+                    }
+                    unsafe { stat(path_bytes.as_ptr(), meta.as_mut_ptr()) }
+                };
+
                 if result != 0 {
                     return Err(io::Error::last_os_error());
                 }
@@ -1291,12 +1490,34 @@ pub async fn symlink_metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
                 let mut path_bytes = alloc::vec::Vec::from(path.as_bytes());
                 path_bytes.push(0);
 
-                unsafe extern "C" {
-                    fn lstat(pathname: *const u8, buf: *mut Stat) -> i32;
-                }
-
                 let mut meta = core::mem::MaybeUninit::<Stat>::uninit();
-                let result = unsafe { lstat(path_bytes.as_ptr(), meta.as_mut_ptr()) };
+
+                #[cfg(target_os = "linux")]
+                let result = {
+                    #[cfg(target_arch = "x86_64")]
+                    let r = crate::syscall!(
+                        crate::os::linux::syscall::nr::LSTAT,
+                        path_bytes.as_ptr() as usize,
+                        meta.as_mut_ptr() as usize
+                    ) as i32;
+                    #[cfg(target_arch = "aarch64")]
+                    let r = crate::syscall!(
+                        79usize,            // FSTATAT
+                        -100isize as usize, // AT_FDCWD
+                        path_bytes.as_ptr() as usize,
+                        meta.as_mut_ptr() as usize,
+                        0x100usize // AT_SYMLINK_NOFOLLOW
+                    ) as i32;
+                    r
+                };
+                #[cfg(not(target_os = "linux"))]
+                let result = {
+                    unsafe extern "C" {
+                        fn lstat(pathname: *const u8, buf: *mut Stat) -> i32;
+                    }
+                    unsafe { lstat(path_bytes.as_ptr(), meta.as_mut_ptr()) }
+                };
+
                 if result != 0 {
                     return Err(io::Error::last_os_error());
                 }
@@ -1445,12 +1666,35 @@ pub async fn set_permissions<P: AsRef<str>>(path: P, permissions: Permissions) -
         crate::rt::blocking::BlockingOpFuture::new(move || {
             #[cfg(unix)]
             {
-                unsafe extern "C" {
-                    fn chmod(pathname: *const u8, mode: u32) -> i32;
-                }
                 let mut path_bytes = alloc::vec::Vec::from(path.as_bytes());
                 path_bytes.push(0);
-                let rc = unsafe { chmod(path_bytes.as_ptr(), permissions.mode()) };
+
+                #[cfg(target_os = "linux")]
+                let rc = {
+                    #[cfg(target_arch = "x86_64")]
+                    let r = crate::syscall!(
+                        crate::os::linux::syscall::nr::CHMOD,
+                        path_bytes.as_ptr() as usize,
+                        permissions.mode() as usize
+                    ) as i32;
+                    #[cfg(target_arch = "aarch64")]
+                    let r = crate::syscall!(
+                        53usize,            // FCHMODAT
+                        -100isize as usize, // AT_FDCWD
+                        path_bytes.as_ptr() as usize,
+                        permissions.mode() as usize,
+                        0usize
+                    ) as i32;
+                    r
+                };
+                #[cfg(not(target_os = "linux"))]
+                let rc = unsafe {
+                    unsafe extern "C" {
+                        fn chmod(pathname: *const u8, mode: u32) -> i32;
+                    }
+                    chmod(path_bytes.as_ptr(), permissions.mode())
+                };
+
                 if rc != 0 {
                     return Err(io::Error::last_os_error());
                 }
