@@ -4,12 +4,87 @@
 #![no_std]
 #![allow(internal_features)]
 #![feature(lang_items)]
-#![cfg_attr(target_os = "linux", feature(linkage))]
+#![feature(prelude_import)]
 #![feature(alloc_error_handler)]
+#![cfg_attr(target_os = "linux", feature(linkage))]
 
 // No prelude_import here, as this IS the std library providing the prelude.
 
 pub extern crate alloc;
+
+/// Prelude for the standard library.
+pub mod prelude {
+    /// Rust edition-independent prelude v1.
+    ///
+    /// This module re-exports the core prelude plus allocation-related types
+    /// and utility macros used by `rusticated`.
+    pub mod v1 {
+        pub use core::prelude::v1::*;
+
+        // alloc types that are normally injected by the std prelude
+        pub use alloc::borrow::ToOwned;
+        pub use alloc::boxed::Box;
+        pub use alloc::string::{String, ToString};
+        pub use alloc::vec::Vec;
+        // Macros
+        pub use crate::{eprint, eprintln, format, print, println, spawn, thread_local};
+        // OsStringExt for into_encoded_bytes()
+        pub use crate::ffi::OsStringExt;
+        pub use alloc::vec;
+        pub use core::{
+            assert, assert_eq, assert_ne, debug_assert, debug_assert_eq, debug_assert_ne, matches,
+            panic, todo, unimplemented, unreachable, write, writeln,
+        };
+        // Core traits already in scope via core::prelude, but re-export
+        // them here for completeness so a wildcard import is sufficient.
+        pub use core::clone::Clone;
+        pub use core::cmp::{Eq, Ord, PartialEq, PartialOrd};
+        pub use core::convert::{AsMut, AsRef, From, Into, TryFrom, TryInto};
+        pub use core::default::Default;
+        pub use core::fmt::{Debug, Display};
+        pub use core::iter::{
+            DoubleEndedIterator, ExactSizeIterator, Extend, FromIterator, IntoIterator, Iterator,
+        };
+        pub use core::marker::{Copy, Send, Sized, Sync};
+        pub use core::mem::drop;
+        pub use core::ops::{Drop, Fn, FnMut, FnOnce};
+        pub use core::option::Option::{self, None, Some};
+        pub use core::result::Result::{self, Err, Ok};
+    }
+
+    /// Prelude compatibility layer for Rust 2015 edition.
+    #[allow(unused_imports)]
+    pub mod rust_2015 {
+        pub use super::v1::*;
+        pub use core::prelude::rust_2015::*;
+    }
+
+    /// Prelude compatibility layer for Rust 2018 edition.
+    #[allow(unused_imports)]
+    pub mod rust_2018 {
+        pub use super::v1::*;
+        pub use core::prelude::rust_2018::*;
+    }
+
+    /// Prelude compatibility layer for Rust 2021 edition.
+    #[allow(unused_imports)]
+    pub mod rust_2021 {
+        pub use super::v1::*;
+        pub use core::prelude::rust_2021::*;
+    }
+
+    /// Prelude for Edition 2024.
+    pub mod rust_2024 {
+        /// Prelude compatibility layer for Rust 2024 edition.
+        pub use super::v1::*;
+        pub use core::prelude::rust_2024::*;
+    }
+}
+
+#[prelude_import]
+#[allow(unused_imports)]
+use prelude::v1::*;
+
 // The test harness is std-based; bring std in for test builds only.
 // On native targets the final binary always links std; expose it here so that
 // platform-specific modules (fs, time, ...) can use std::fs, std::time, etc.
@@ -149,76 +224,6 @@ macro_rules! format {
     };
 }
 /// Prelude for the standard library.
-pub mod prelude {
-    /// Rust edition-independent prelude v1.
-    ///
-    /// This module re-exports the core prelude plus allocation-related types
-    /// and utility macros used by `rusticated`.
-    pub mod v1 {
-        pub use core::prelude::v1::*;
-
-        // alloc types that are normally injected by the std prelude
-        pub use alloc::borrow::ToOwned;
-        pub use alloc::boxed::Box;
-        pub use alloc::string::{String, ToString};
-        pub use alloc::vec::Vec;
-        // Macros
-        pub use crate::{eprint, eprintln, format, print, println, spawn, thread_local};
-        // OsStringExt for into_encoded_bytes()
-        pub use crate::ffi::OsStringExt;
-        pub use alloc::vec;
-        pub use core::{
-            assert, assert_eq, assert_ne, debug_assert, debug_assert_eq, debug_assert_ne, matches,
-            panic, todo, unimplemented, unreachable, write, writeln,
-        };
-        // Core traits already in scope via core::prelude, but re-export
-        // them here for completeness so a wildcard import is sufficient.
-        pub use core::clone::Clone;
-        pub use core::cmp::{Eq, Ord, PartialEq, PartialOrd};
-        pub use core::convert::{AsMut, AsRef, From, Into, TryFrom, TryInto};
-        pub use core::default::Default;
-        pub use core::fmt::{Debug, Display};
-        pub use core::iter::{
-            DoubleEndedIterator, ExactSizeIterator, Extend, FromIterator, IntoIterator, Iterator,
-        };
-        pub use core::marker::{Copy, Send, Sized, Sync};
-        pub use core::mem::drop;
-        pub use core::ops::{Drop, Fn, FnMut, FnOnce};
-        pub use core::option::Option::{self, None, Some};
-        pub use core::result::Result::{self, Err, Ok};
-    }
-
-    /// Prelude compatibility layer for Rust 2015 edition.
-    #[allow(unused_imports)]
-    pub mod rust_2015 {
-        pub use super::v1::*;
-        pub use core::prelude::rust_2015::*;
-    }
-
-    /// Prelude compatibility layer for Rust 2018 edition.
-    #[allow(unused_imports)]
-    pub mod rust_2018 {
-        pub use super::v1::*;
-        pub use core::prelude::rust_2018::*;
-    }
-
-    /// Prelude compatibility layer for Rust 2021 edition.
-    #[allow(unused_imports)]
-    pub mod rust_2021 {
-        pub use super::v1::*;
-        pub use core::prelude::rust_2021::*;
-    }
-
-    /// Prelude for Edition 2024.
-    pub mod rust_2024 {
-        /// Prelude compatibility layer for Rust 2024 edition.
-        pub use super::v1::*;
-        pub use core::prelude::rust_2024::*;
-    }
-}
-
-// NO prelude_import here! We want libstd to use the default core prelude.
-
 /// Shared ABI definitions.
 pub mod abi;
 
@@ -358,7 +363,10 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     loop {}
 }
 
-#[cfg(all(not(any(test, target_family = "wasm")), any(target_os = "none", windows)))]
+#[cfg(all(
+    not(any(test, target_family = "wasm")),
+    any(target_os = "none", windows)
+))]
 struct SystemAllocator;
 
 #[cfg(not(any(test, target_family = "wasm")))]
@@ -409,7 +417,10 @@ pub unsafe extern "C" fn __rust_alloc_zeroed(size: usize, align: usize) -> *mut 
     unsafe { ALLOCATOR.alloc_zeroed(core::alloc::Layout::from_size_align_unchecked(size, align)) }
 }
 
-#[cfg(all(not(any(test, target_family = "wasm")), any(target_os = "none", windows)))]
+#[cfg(all(
+    not(any(test, target_family = "wasm")),
+    any(target_os = "none", windows)
+))]
 unsafe impl core::alloc::GlobalAlloc for SystemAllocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
         #[cfg(windows)]
@@ -442,13 +453,24 @@ unsafe impl core::alloc::GlobalAlloc for SystemAllocator {
     }
 }
 
-#[cfg(all(not(any(test, target_family = "wasm")), any(target_os = "none", windows)))]
+#[cfg(all(
+    not(any(test, target_family = "wasm")),
+    any(target_os = "none", windows)
+))]
 #[global_allocator]
 static ALLOCATOR: SystemAllocator = SystemAllocator;
 
-#[cfg(all(not(test), any(target_os = "linux", target_family = "wasm")))]
+#[cfg(all(
+    not(test),
+    any(target_os = "linux", target_family = "wasm", target_os = "none")
+))]
 #[global_allocator]
 static ALLOCATOR: dlmalloc::GlobalDlmalloc = dlmalloc::GlobalDlmalloc;
+
+#[cfg(feature = "backtrace")]
+pub mod backtrace_impl {
+    pub use backtrace::*;
+}
 
 #[cfg(not(test))]
 #[alloc_error_handler]
@@ -460,7 +482,6 @@ fn oom(_: core::alloc::Layout) -> ! {
 // When building Linux no-CRT targets, we avoid explicit libc and libgcc_s linkage.
 // Raw syscall wrappers and custom allocator paths should provide the low-level
 // runtime support needed for the target.
-
 
 // rust_eh_personality is the DWARF exception-handling personality function.
 // The sysroot alloc (compiled without panic=abort) emits a DW.ref reference to

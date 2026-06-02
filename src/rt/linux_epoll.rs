@@ -54,15 +54,7 @@ struct EpollEvent {
     data: u64,
 }
 
-unsafe extern "C" {
-    fn epoll_create1(flags: i32) -> i32;
-    fn epoll_ctl(epfd: i32, op: i32, fd: i32, event: *mut EpollEvent) -> i32;
-    fn epoll_wait(epfd: i32, events: *mut EpollEvent, maxevents: i32, timeout: i32) -> i32;
-    pub(crate) fn close(fd: i32) -> i32;
-    fn eventfd(initval: u32, flags: i32) -> i32;
-    fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
-    fn write(fd: i32, buf: *const u8, count: usize) -> isize;
-}
+// Low-level syscalls are now performed via the `syscall!` macro.
 
 /// Write to the global `eventfd` to interrupt a sleeping `epoll_wait`.
 pub(crate) fn queue_wake() {
@@ -70,7 +62,12 @@ pub(crate) fn queue_wake() {
     if fd >= 0 {
         let val: u64 = 1;
         // SAFETY: `fd` is a valid eventfd; writing 8 bytes is the required protocol.
-        unsafe { write(fd, &val as *const u64 as *const u8, 8) };
+        crate::syscall!(
+            crate::os::linux::syscall::nr::WRITE,
+            fd as usize,
+            &val as *const u64 as usize,
+            8
+        );
     }
 }
 
@@ -98,16 +95,20 @@ impl EpollDriver {
     /// Create a new epoll instance.
     pub fn new() -> io::Result<Self> {
         // SAFETY: FFI call with no precondition.
-        let epfd = unsafe { epoll_create1(0) };
+        let epfd = crate::syscall!(crate::os::linux::syscall::nr::EPOLL_CREATE1, 0usize) as i32;
         if epfd < 0 {
             return Err(io::Error::last_os_error());
         }
 
         // Create the eventfd that worker threads use to wake epoll_wait.
         // SAFETY: FFI call with valid constant flags.
-        let evfd = unsafe { eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC) };
+        let evfd = crate::syscall!(
+            crate::os::linux::syscall::nr::EVENTFD2,
+            0usize,
+            (EFD_NONBLOCK | EFD_CLOEXEC) as usize
+        ) as i32;
         if evfd < 0 {
-            unsafe { close(epfd) };
+            crate::syscall!(crate::os::linux::syscall::nr::CLOSE, epfd as usize);
             return Err(io::Error::last_os_error());
         }
         GLOBAL_WAKE_FD.store(evfd, Ordering::SeqCst);
@@ -119,9 +120,17 @@ impl EpollDriver {
             data: WAKE_TOKEN,
         };
         // SAFETY: `epfd` and `evfd` are valid; `ev` outlives the call.
-        if unsafe { epoll_ctl(epfd, EPOLL_CTL_ADD, evfd, &mut ev) } < 0 {
-            unsafe { close(evfd) };
-            unsafe { close(epfd) };
+        if (crate::syscall!(
+            crate::os::linux::syscall::nr::EPOLL_CTL,
+            epfd as usize,
+            EPOLL_CTL_ADD as usize,
+            evfd as usize,
+            &mut ev as *mut _ as usize
+        ) as i32)
+            < 0
+        {
+            crate::syscall!(crate::os::linux::syscall::nr::CLOSE, evfd as usize);
+            crate::syscall!(crate::os::linux::syscall::nr::CLOSE, epfd as usize);
             return Err(io::Error::last_os_error());
         }
 
@@ -150,13 +159,25 @@ impl EpollDriver {
             EPOLL_CTL_ADD
         };
         // SAFETY: `&mut ev` is a valid pointer for the call duration.
-        let r = unsafe { epoll_ctl(self.epfd, op, fd, &mut ev) };
+        let r = crate::syscall!(
+            crate::os::linux::syscall::nr::EPOLL_CTL,
+            self.epfd as usize,
+            op as usize,
+            fd as usize,
+            &mut ev as *mut _ as usize
+        ) as i32;
         if r < 0 {
             let e = io::Error::last_os_error();
-            if e.raw_os_error() == Some(EEXIST) {
+            if r == -EEXIST {
                 // Race: try MOD instead.
                 // SAFETY: same as above.
-                let r2 = unsafe { epoll_ctl(self.epfd, EPOLL_CTL_MOD, fd, &mut ev) };
+                let r2 = crate::syscall!(
+                    crate::os::linux::syscall::nr::EPOLL_CTL,
+                    self.epfd as usize,
+                    EPOLL_CTL_MOD as usize,
+                    fd as usize,
+                    &mut ev as *mut _ as usize
+                ) as i32;
                 if r2 < 0 {
                     return Err(io::Error::last_os_error());
                 }
@@ -196,10 +217,32 @@ impl EpollDriver {
         let mut evbuf = [EpollEvent { events: 0, data: 0 }; 64];
         let timeout = timeout_ms.map(|t| t as i32).unwrap_or(-1);
         let n = loop {
-            let n =
-                unsafe { epoll_wait(self.epfd, evbuf.as_mut_ptr(), evbuf.len() as i32, timeout) };
+            #[cfg(target_arch = "x86_64")]
+            let n = crate::syscall!(
+                crate::os::linux::syscall::nr::EPOLL_WAIT,
+                self.epfd as usize,
+                evbuf.as_mut_ptr() as usize,
+                evbuf.len() as usize,
+                timeout as usize
+            ) as i32;
+
+            #[cfg(target_arch = "aarch64")]
+            let n = crate::syscall!(
+                crate::os::linux::syscall::nr::EPOLL_PWAIT,
+                self.epfd as usize,
+                evbuf.as_mut_ptr() as usize,
+                evbuf.len() as usize,
+                timeout as usize,
+                0usize, // sigmask = NULL
+                8usize  // sigsetsize
+            ) as i32;
+
             if n >= 0 {
                 break n;
+            }
+            let err = (-n) as i32;
+            unsafe {
+                crate::io::ERRNO = err;
             }
             let e = io::Error::last_os_error();
             if e.kind() == crate::io::ErrorKind::Interrupted {
@@ -217,7 +260,12 @@ impl EpollDriver {
                 let evfd = GLOBAL_WAKE_FD.load(Ordering::Relaxed);
                 let mut buf = [0u8; 8];
                 // SAFETY: `evfd` is a valid eventfd; buf has exactly 8 bytes.
-                unsafe { read(evfd, buf.as_mut_ptr(), 8) };
+                crate::syscall!(
+                    crate::os::linux::syscall::nr::READ,
+                    evfd as usize,
+                    buf.as_mut_ptr() as usize,
+                    8
+                );
 
                 let completions = {
                     let mut q = COMPLETION_QUEUE.lock();
@@ -243,19 +291,17 @@ impl EpollDriver {
             if let Some(op) = self.pending_ops.remove(&token) {
                 match op {
                     PendingOp::Read(fd, state) => {
-                        unsafe extern "C" {
-                            fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
-                        }
                         let buf_opt = unsafe { &mut *state.buffer.get() }.take();
                         if let Some(mut buf) = buf_opt {
-                            let res = unsafe { read(fd, buf.as_mut_ptr(), buf.capacity()) };
+                            let cap = buf.capacity();
+                            let res = crate::syscall!(
+                                crate::os::linux::syscall::nr::READ,
+                                fd as usize,
+                                buf.as_mut_ptr() as usize,
+                                cap
+                            ) as isize;
                             if res < 0 {
-                                *state.result.borrow_mut() = Some((
-                                    crate::io::Error::last_os_error()
-                                        .raw_os_error()
-                                        .unwrap_or(-1),
-                                    0,
-                                ));
+                                *state.result.borrow_mut() = Some(((-res) as i32, 0));
                             } else {
                                 unsafe {
                                     buf.set_len(res as usize);
@@ -269,19 +315,17 @@ impl EpollDriver {
                         }
                     }
                     PendingOp::Write(fd, state) => {
-                        unsafe extern "C" {
-                            fn write(fd: i32, buf: *const u8, count: usize) -> isize;
-                        }
                         let buf_opt = unsafe { &mut *state.buffer.get() }.take();
                         if let Some(buf) = buf_opt {
-                            let res = unsafe { write(fd, buf.as_ptr(), buf.len()) };
+                            let len = buf.len();
+                            let res = crate::syscall!(
+                                crate::os::linux::syscall::nr::WRITE,
+                                fd as usize,
+                                buf.as_ptr() as usize,
+                                len
+                            ) as isize;
                             if res < 0 {
-                                *state.result.borrow_mut() = Some((
-                                    crate::io::Error::last_os_error()
-                                        .raw_os_error()
-                                        .unwrap_or(-1),
-                                    0,
-                                ));
+                                *state.result.borrow_mut() = Some(((-res) as i32, 0));
                             } else {
                                 *state.result.borrow_mut() = Some((0, res as u32));
                             }
@@ -316,7 +360,7 @@ impl EpollDriver {
 impl Drop for EpollDriver {
     fn drop(&mut self) {
         // SAFETY: `close` on a valid fd is sound.
-        unsafe { close(self.epfd) };
+        crate::syscall!(crate::os::linux::syscall::nr::CLOSE, self.epfd as usize);
     }
 }
 
@@ -418,17 +462,19 @@ impl EpollDriver {
 
             let cap = buf.capacity();
             crate::rt::blocking::pool().spawn(move || {
-                unsafe extern "C" {
-                    fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
-                }
-                let res = unsafe { read(fd, buf.as_mut_ptr(), cap) };
+                let res = crate::syscall!(
+                    crate::os::linux::syscall::nr::READ,
+                    fd as usize,
+                    buf.as_mut_ptr() as usize,
+                    cap as usize
+                ) as isize;
+
                 let (error_code, bytes) = if res < 0 {
-                    (
-                        crate::io::Error::last_os_error()
-                            .raw_os_error()
-                            .unwrap_or(-1),
-                        0,
-                    )
+                    let err = (-res) as i32;
+                    unsafe {
+                        crate::io::ERRNO = err;
+                    }
+                    (err, 0)
                 } else {
                     unsafe {
                         buf.set_len(res as usize);
@@ -456,18 +502,19 @@ impl EpollDriver {
             self.pending_ops.insert(token, PendingOp::Write(fd, state));
 
             crate::rt::blocking::pool().spawn(move || {
-                unsafe extern "C" {
-                    fn write(fd: i32, buf: *const u8, count: usize) -> isize;
-                }
                 let len = buf.len();
-                let res = unsafe { write(fd, buf.as_ptr(), len) };
+                let res = crate::syscall!(
+                    crate::os::linux::syscall::nr::WRITE,
+                    fd as usize,
+                    buf.as_ptr() as usize,
+                    len
+                ) as isize;
                 let (error_code, bytes) = if res < 0 {
-                    (
-                        crate::io::Error::last_os_error()
-                            .raw_os_error()
-                            .unwrap_or(-1),
-                        0,
-                    )
+                    let err = (-res) as i32;
+                    unsafe {
+                        crate::io::ERRNO = err;
+                    }
+                    (err, 0)
                 } else {
                     (0, res as u32)
                 };

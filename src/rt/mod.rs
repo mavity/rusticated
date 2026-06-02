@@ -174,6 +174,57 @@ fn lang_start<T: crate::process::Termination + 'static>(
     res
 }
 
+#[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
+#[unsafe(no_mangle)]
+/// Global environment pointer used by the Unix environment variable lookup.
+pub static mut environ: *const *const u8 = core::ptr::null();
+
+/// Entrypoint for Linux targets.
+#[cfg(all(not(test), not(target_family = "wasm"), target_os = "linux"))]
+#[unsafe(no_mangle)]
+#[unsafe(naked)]
+pub unsafe extern "C" fn _start() -> ! {
+    #[cfg(target_arch = "x86_64")]
+    core::arch::naked_asm!(
+        "xor rbp, rbp",       // Clear RBP per ABI
+        "mov rdi, [rsp]",     // argc
+        "lea rsi, [rsp + 8]", // argv
+        "call __rust_start"
+    );
+    #[cfg(target_arch = "aarch64")]
+    core::arch::naked_asm!(
+        "mov x29, #0",    // Clear X29 (frame pointer)
+        "mov x30, #0",    // Clear X30 (link register)
+        "ldr x0, [sp]",   // argc
+        "add x1, sp, #8", // argv
+        "bl __rust_start"
+    );
+}
+
+#[cfg(all(not(test), not(target_family = "wasm"), target_os = "linux"))]
+#[unsafe(no_mangle)]
+unsafe extern "C" fn __rust_start(argc: isize, argv: *const *const u8) -> ! {
+    // envp is argv + argc + 1
+    unsafe {
+        environ = argv.add(argc as usize + 1);
+    }
+
+    unsafe extern "Rust" {
+        fn main() -> i32;
+    }
+
+    fn safe_main() -> i32 {
+        unsafe { main() }
+    }
+
+    let res = lang_start(safe_main, argc, argv, 0);
+
+    crate::syscall!(crate::os::linux::syscall::nr::EXIT, res as usize);
+    unsafe {
+        core::hint::unreachable_unchecked();
+    }
+}
+
 #[cfg(test)]
 #[cfg(not(target_family = "wasm"))]
 pub(crate) fn run<F: core::future::Future<Output = ()> + 'static>(future: F) {

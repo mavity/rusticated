@@ -32,14 +32,26 @@ pub fn now_ns() -> u64 {
             tv_sec: i64,
             tv_nsec: i64,
         }
-        unsafe extern "C" {
-            fn clock_gettime(clk_id: i32, tp: *mut Timespec) -> i32;
-        }
+
         let mut ts = Timespec {
             tv_sec: 0,
             tv_nsec: 0,
         };
-        unsafe { clock_gettime(0, &mut ts) }; // CLOCK_REALTIME is 0
+
+        #[cfg(target_os = "linux")]
+        crate::syscall!(
+            crate::os::linux::syscall::nr::CLOCK_GETTIME,
+            0usize, // CLOCK_REALTIME
+            &mut ts as *mut _ as usize
+        );
+        #[cfg(not(target_os = "linux"))]
+        unsafe {
+            unsafe extern "C" {
+                fn clock_gettime(clk_id: i32, tp: *mut Timespec) -> i32;
+            }
+            clock_gettime(0, &mut ts); // CLOCK_REALTIME is 0
+        }
+
         (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64)
     }
     #[cfg(windows)]
