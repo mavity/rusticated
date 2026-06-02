@@ -41,14 +41,14 @@ fn main() {
         ),
         // ("x86_64-pc-windows-gnu", "x86_64-rusticated-windows-gnu"),
         // ("x86_64-pc-windows-msvc", "x86_64-rusticated-windows-msvc"),
-        ("x86_64-unknown-linux-gnu", "x86_64-rusticated-linux-gnu"),
+        ("x86_64-unknown-linux-gnu", "x86_64-rusticated-linux"),
         (
             "aarch64-pc-windows-gnullvm",
             "aarch64-rusticated-windows-gnullvm",
         ),
         // ("aarch64-pc-windows-gnu", "aarch64-rusticated-windows-gnu"),
         // ("aarch64-pc-windows-msvc", "aarch64-rusticated-windows-msvc"),
-        ("aarch64-unknown-linux-gnu", "aarch64-rusticated-linux-gnu"),
+        ("aarch64-unknown-linux-gnu", "aarch64-rusticated-linux"),
         (
             "wasm32-unknown-unknown",
             "wasm32-rusticated-unknown-unknown",
@@ -101,6 +101,41 @@ fn main() {
         spec.as_object_mut()
             .unwrap()
             .insert("panic-strategy".to_string(), serde_json::json!("abort"));
+
+        if base_target.contains("-linux-gnu") {
+            // Restore 'os' to prevent 'libc' crate from failing to compile.
+            // But we keep no-default-libraries and linker-flavor settings to try to exclude it from the final link.
+            spec.as_object_mut()
+                .unwrap()
+                .insert("os".to_string(), serde_json::json!("linux"));
+
+            // Disable PIE for custom linux target to avoid relocation issues without a CRT.
+            spec.as_object_mut().unwrap().insert(
+                "position-independent-executables".to_string(),
+                serde_json::json!(false),
+            );
+            spec.as_object_mut()
+                .unwrap()
+                .insert("relocation-model".to_string(), serde_json::json!("static"));
+        }
+
+        // Set target-family correctly based on base_target
+        let families = if base_target.contains("-linux-")
+            || base_target.contains("-darwin")
+            || base_target.contains("-freebsd")
+        {
+            vec!["unix", "rusticated"]
+        } else if base_target.contains("-windows-") {
+            vec!["windows", "rusticated"]
+        } else if base_target.contains("wasm32-") {
+            vec!["wasm", "rusticated"]
+        } else {
+            vec!["rusticated"]
+        };
+
+        spec.as_object_mut()
+            .unwrap()
+            .insert("target-family".to_string(), serde_json::json!(families));
 
         if is_windows_msvc {
             extend_pre_link_args(
@@ -189,11 +224,31 @@ fn main() {
         }
 
         if base_target.contains("-linux-gnu") {
+            // Stop rustc from trying to link default libraries like libc and libgcc_s
+            spec.as_object_mut().unwrap().insert(
+                "late-link-args".to_string(),
+                serde_json::json!({
+                    "gnu": ["-nostdlib"],
+                    "gcc": ["-nostdlib"],
+                    "gnu-cc": ["-nostdlib"],
+                    "gnu-lld": ["-nostdlib"],
+                    "gnu-lld-cc": ["-nostdlib"]
+                }),
+            );
+
+            // Force no-default-libraries to true
+            spec.as_object_mut()
+                .unwrap()
+                .insert("no-default-libraries".to_string(), serde_json::json!(true));
+
+            // Force lld to not look for default libraries
+            extend_pre_link_args(&mut spec, "gnu-lld", &["-nostdlib", "--no-dynamic-linker"]);
             extend_pre_link_args(
                 &mut spec,
-                "gnu",
+                "gnu-lld-cc",
                 &["-nostdlib", "-nodefaultlibs", "-nostartfiles"],
             );
+            extend_pre_link_args(&mut spec, "gnu", &["-nostdlib"]);
             extend_pre_link_args(
                 &mut spec,
                 "gnu-cc",
@@ -201,14 +256,14 @@ fn main() {
             );
             extend_pre_link_args(
                 &mut spec,
-                "gnu-lld",
+                "gcc",
                 &["-nostdlib", "-nodefaultlibs", "-nostartfiles"],
             );
-            extend_pre_link_args(
-                &mut spec,
-                "gnu-lld-cc",
-                &["-nostdlib", "-nodefaultlibs", "-nostartfiles"],
-            );
+
+            // Change linker flavor to gnu-lld to avoid the wrapper's default libs
+            spec.as_object_mut()
+                .unwrap()
+                .insert("linker-flavor".to_string(), serde_json::json!("gnu-lld"));
         }
 
         let obj = spec.as_object_mut().unwrap();
@@ -224,6 +279,9 @@ fn main() {
         if base_target.contains("-linux-gnu") {
             obj.insert("linker".to_string(), serde_json::json!("rust-lld"));
             obj.insert("linker-flavor".to_string(), serde_json::json!("gnu-lld"));
+            // Strip 'env' to prevent automatic linkage of libc/libm in consumer crates.
+            // We'll use --cfg target_env="gnu" during rlib build to satisfy 'libc' crate.
+            obj.insert("env".to_string(), serde_json::json!(""));
         }
         if let Some(metadata) = obj.get_mut("metadata") {
             if let Some(meta_obj) = metadata.as_object_mut() {
@@ -240,7 +298,7 @@ fn main() {
         // Build rusticated in release mode for this target; consumer crates may
         // still be built in debug using the generated config.
         let existing_rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
-        let rustflags = if existing_rustflags.is_empty() {
+        let mut rustflags = if existing_rustflags.is_empty() {
             "-Zunstable-options --cfg backtrace_in_libstd".to_string()
         } else {
             format!(
@@ -248,6 +306,14 @@ fn main() {
                 existing_rustflags
             )
         };
+
+        if base_target.contains("-linux-gnu") {
+            rustflags.push_str(" -A explicit-builtin-cfgs-in-flags --cfg target_env=\"gnu\"");
+        }
+
+        if base_target.contains("-linux-") {
+            rustflags.insert_str(0, "-L native=./dummy_libs ");
+        }
 
         let mut build_cmd = Command::new("cargo");
         build_cmd.env("RUSTFLAGS", &rustflags);
@@ -382,6 +448,15 @@ fn main() {
                 .replace('\\', "/"),
         };
         target_rustflags.push_str(&format!("    \"-L\", \"dependency={}\",\n", abs_deps_dir));
+        if custom_name.contains("-linux") {
+            target_rustflags.push_str(&format!(
+                "    \"-L\", \"native={}/dummy_libs\",\n",
+                std::env::current_dir()
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            ));
+        }
         target_rustflags.push_str("]\n\n");
         config_toml.push_str(&target_rustflags);
     }

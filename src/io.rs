@@ -246,12 +246,11 @@ impl From<ErrorKind> for Error {
 // ─── Platform errno / GetLastError ───────────────────────────────────────────
 
 #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
+pub(crate) static mut ERRNO: i32 = 0;
+
+#[cfg(all(target_os = "linux", not(target_family = "wasm")))]
 fn last_error_code() -> i32 {
-    unsafe extern "C" {
-        fn __errno_location() -> *mut i32;
-    }
-    // SAFETY: `__errno_location` returns a valid thread-local pointer.
-    unsafe { *__errno_location() }
+    unsafe { ERRNO }
 }
 
 #[cfg(all(

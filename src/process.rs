@@ -84,15 +84,8 @@ mod native_process {
     use crate::vec::Vec;
     // ── Linux pidfd async wait ────────────────────────────────────────────────
 
-    #[cfg(all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    ))]
-    const SYS_PIDFD_OPEN: i64 = 434;
-
     #[cfg(target_os = "linux")]
     unsafe extern "C" {
-        fn syscall(num: i64, ...) -> i64;
         fn close(fd: i32) -> i32;
     }
 
@@ -101,8 +94,11 @@ mod native_process {
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     fn pidfd_open(pid: u32) -> io::Result<i32> {
-        // SAFETY: variadic syscall with two ABI-correct arguments.
-        let r = unsafe { syscall(SYS_PIDFD_OPEN, pid as i64, 0i64) };
+        let r = crate::syscall!(
+            crate::os::linux::syscall::nr::PIDFD_OPEN,
+            pid as usize,
+            0usize
+        ) as isize;
         if r < 0 {
             Err(io::Error::last_os_error())
         } else {

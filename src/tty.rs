@@ -37,6 +37,7 @@ mod unix_tty {
     use crate::io;
     use crate::vec::Vec;
 
+    #[cfg(not(target_os = "linux"))]
     unsafe extern "C" {
         fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
         fn write(fd: i32, buf: *const u8, count: usize) -> isize;
@@ -120,7 +121,16 @@ mod unix_tty {
             ws_ypixel: 0,
         };
         // SAFETY: fd is caller-supplied; `ws` is a valid local struct.
+        #[cfg(target_os = "linux")]
+        let ret = crate::syscall!(
+            crate::os::linux::syscall::nr::IOCTL,
+            handle as usize,
+            TIOCGWINSZ,
+            &mut ws as *mut Winsize as usize
+        ) as i32;
+        #[cfg(not(target_os = "linux"))]
         let ret = unsafe { ioctl(handle as i32, TIOCGWINSZ, &mut ws as *mut Winsize) };
+
         if ret < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -190,6 +200,7 @@ mod unix_tty {
         /// Index into c_cc for timeout.
         pub const VTIME: usize = 5;
         /// Action constant: change attributes immediately.
+        #[allow(dead_code)]
         pub const TCSANOW: i32 = 0;
 
         /// `termios` layout used on Linux.
@@ -255,6 +266,7 @@ mod unix_tty {
         }
     }
 
+    #[cfg(not(target_os = "linux"))]
     unsafe extern "C" {
         fn tcgetattr(fd: i32, termios: *mut tc::Termios) -> i32;
         fn tcsetattr(fd: i32, optional_actions: i32, termios: *const tc::Termios) -> i32;
@@ -274,7 +286,16 @@ mod unix_tty {
     pub fn enable_raw_mode() -> io::Result<()> {
         let mut orig = core::mem::MaybeUninit::<tc::Termios>::uninit();
         // SAFETY: fd 0 is stdin; `orig` is valid memory for the call.
+        #[cfg(target_os = "linux")]
+        let ret = crate::syscall!(
+            crate::os::linux::syscall::nr::IOCTL,
+            0usize,
+            0x5401usize, // TCGETS
+            orig.as_mut_ptr() as usize
+        ) as i32;
+        #[cfg(not(target_os = "linux"))]
         let ret = unsafe { tcgetattr(0, orig.as_mut_ptr()) };
+
         if ret < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -301,7 +322,16 @@ mod unix_tty {
         raw.c_cc[tc::VTIME] = 0;
 
         // SAFETY: fd 0 is stdin; `raw` is a valid termios.
+        #[cfg(target_os = "linux")]
+        let ret = crate::syscall!(
+            crate::os::linux::syscall::nr::IOCTL,
+            0usize,
+            0x5402usize, // TCSETS
+            &raw as *const _ as usize
+        ) as i32;
+        #[cfg(not(target_os = "linux"))]
         let ret = unsafe { tcsetattr(0, tc::TCSANOW, &raw) };
+
         if ret < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -315,7 +345,16 @@ mod unix_tty {
         let guard = SAVED_TERMIOS.lock();
         if let Some(ref orig) = *guard {
             // SAFETY: fd 0 is stdin; `orig` is a valid termios saved earlier.
+            #[cfg(target_os = "linux")]
+            let ret = crate::syscall!(
+                crate::os::linux::syscall::nr::IOCTL,
+                0usize,
+                0x5402usize, // TCSETS
+                orig as *const _ as usize
+            ) as i32;
+            #[cfg(not(target_os = "linux"))]
             let ret = unsafe { tcsetattr(0, tc::TCSANOW, orig) };
+
             if ret < 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -330,7 +369,16 @@ mod unix_tty {
     pub fn cursor_position() -> io::Result<(u16, u16)> {
         // Send Device Status Report (DSR) to stdout.
         let dsr = b"\x1b[6n";
+        #[cfg(target_os = "linux")]
+        let n = crate::syscall!(
+            crate::os::linux::syscall::nr::WRITE,
+            1usize,
+            dsr.as_ptr() as usize,
+            dsr.len()
+        ) as isize;
+        #[cfg(not(target_os = "linux"))]
         let n = unsafe { write(1, dsr.as_ptr(), dsr.len()) };
+
         if n < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -339,7 +387,16 @@ mod unix_tty {
         let mut buf = [0u8; 32];
         let mut len = 0usize;
         loop {
+            #[cfg(target_os = "linux")]
+            let n = crate::syscall!(
+                crate::os::linux::syscall::nr::READ,
+                0usize,
+                buf.as_mut_ptr().add(len) as usize,
+                1usize
+            ) as isize;
+            #[cfg(not(target_os = "linux"))]
             let n = unsafe { read(0, buf.as_mut_ptr().add(len), 1) };
+
             if n <= 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -384,12 +441,24 @@ mod unix_tty {
 
     impl crate::io::IsTerminal for Tty {
         fn is_terminal(&self) -> bool {
-            unsafe extern "C" {
-                // SAFETY: `isatty` is a pure query with no side effects.
-                fn isatty(fd: i32) -> i32;
+            #[cfg(target_os = "linux")]
+            {
+                let mut termios = [0u8; 1024]; // Large enough for any termios
+                let res = crate::syscall!(
+                    crate::os::linux::syscall::nr::IOCTL,
+                    self.fd as usize,
+                    0x5401usize, // TCGETS
+                    termios.as_mut_ptr() as usize
+                ) as isize;
+                res == 0
             }
-            // SAFETY: Any `i32` fd value is safe to pass; returns 0 for non-ttys.
-            unsafe { isatty(self.fd) != 0 }
+            #[cfg(not(target_os = "linux"))]
+            unsafe {
+                unsafe extern "C" {
+                    fn isatty(fd: i32) -> i32;
+                }
+                isatty(self.fd) != 0
+            }
         }
     }
 
@@ -401,7 +470,21 @@ mod unix_tty {
                 return (Err(e), buf);
             }
             // SAFETY: `buf.as_mut_ptr()` is valid for `buf.capacity()` bytes.
-            let n = unsafe { read(self.fd, buf.as_mut_ptr(), buf.capacity()) };
+            #[cfg(target_os = "linux")]
+            let n = crate::syscall!(
+                crate::os::linux::syscall::nr::READ,
+                self.fd as usize,
+                buf.as_mut_ptr() as usize,
+                buf.capacity()
+            ) as isize;
+            #[cfg(not(target_os = "linux"))]
+            let n = unsafe {
+                unsafe extern "C" {
+                    fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
+                }
+                read(self.fd, buf.as_mut_ptr(), buf.capacity())
+            };
+
             if n < 0 {
                 (Err(io::Error::last_os_error()), buf)
             } else {
@@ -415,7 +498,21 @@ mod unix_tty {
     impl crate::io::AsyncWrite for Tty {
         async fn write(&mut self, buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
             // SAFETY: `buf.as_ptr()` is valid for `buf.len()` bytes.
-            let n = unsafe { write(self.fd, buf.as_ptr(), buf.len()) };
+            #[cfg(target_os = "linux")]
+            let n = crate::syscall!(
+                crate::os::linux::syscall::nr::WRITE,
+                self.fd as usize,
+                buf.as_ptr() as usize,
+                buf.len()
+            ) as isize;
+            #[cfg(not(target_os = "linux"))]
+            let n = unsafe {
+                unsafe extern "C" {
+                    fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+                }
+                write(self.fd, buf.as_ptr(), buf.len())
+            };
+
             if n < 0 {
                 (Err(io::Error::last_os_error()), buf)
             } else {

@@ -94,8 +94,25 @@ mod native_env {
         Ok(PathBuf::from(path_str))
     }
 
-    #[cfg(not(windows))]
-    /// Returns the current working directory on non-Windows native hosts.
+    #[cfg(target_os = "linux")]
+    /// Returns the current working directory on Linux.
+    pub fn current_dir() -> io::Result<PathBuf> {
+        let mut buf = alloc::vec![0u8; 4096];
+        let n = crate::syscall!(
+            crate::os::linux::syscall::nr::GETCWD,
+            buf.as_mut_ptr() as usize,
+            buf.len()
+        ) as isize;
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let len = (0..buf.len()).find(|&i| buf[i] == 0).unwrap_or(0);
+        let s = String::from_utf8_lossy(&buf[..len]).into_owned();
+        Ok(PathBuf::from(s))
+    }
+
+    #[cfg(all(not(windows), not(target_os = "linux")))]
+    /// Returns the current working directory on other platforms.
     pub fn current_dir() -> io::Result<PathBuf> {
         Ok(PathBuf::from("/"))
     }
@@ -120,17 +137,23 @@ mod native_env {
     /// Sets the current working directory.
     #[cfg(not(windows))]
     pub fn set_current_dir(path: &Path) -> io::Result<()> {
-        unsafe extern "C" {
-            fn chdir(path: *const u8) -> i32;
-        }
-
         let mut p = path.as_str().as_bytes().to_vec();
         p.push(0);
-        let ret = unsafe { chdir(p.as_ptr()) };
+
+        #[cfg(target_os = "linux")]
+        let ret = crate::syscall!(crate::os::linux::syscall::nr::CHDIR, p.as_ptr() as usize) as i32;
+        #[cfg(not(target_os = "linux"))]
+        let ret = {
+            unsafe extern "C" {
+                fn chdir(path: *const u8) -> i32;
+            }
+            unsafe { chdir(p.as_ptr()) }
+        };
+
         if ret == 0 {
             Ok(())
         } else {
-            Err(io::Error::from_raw_os_error(1))
+            Err(io::Error::last_os_error())
         }
     }
 
@@ -139,23 +162,37 @@ mod native_env {
 
     #[cfg(target_os = "linux")]
     fn read_args() -> Vec<String> {
-        unsafe extern "C" {
-            fn open(pathname: *const u8, flags: i32, mode: u32) -> i32;
-            fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
-            fn close(fd: i32) -> i32;
-        }
-        const O_RDONLY: i32 = 0;
         let path = b"/proc/self/cmdline\0";
         // SAFETY: path is a valid C string; mode is ignored for O_RDONLY.
-        let fd = unsafe { open(path.as_ptr(), O_RDONLY, 0) };
+        #[cfg(target_arch = "x86_64")]
+        let fd = crate::syscall!(
+            crate::os::linux::syscall::nr::OPEN,
+            path.as_ptr() as usize,
+            0usize, // O_RDONLY
+            0usize
+        ) as i32;
+        #[cfg(target_arch = "aarch64")]
+        let fd = crate::syscall!(
+            crate::os::linux::syscall::nr::OPENAT,
+            -100isize as usize, // AT_FDCWD
+            path.as_ptr() as usize,
+            0usize, // O_RDONLY
+            0usize
+        ) as i32;
+
         if fd < 0 {
             return Vec::new();
         }
         let mut buf = alloc::vec![0u8; 65536];
         // SAFETY: fd is valid; buf is writable for buf.capacity() bytes.
-        let n = unsafe { read(fd, buf.as_mut_ptr(), buf.capacity()) };
+        let n = crate::syscall!(
+            crate::os::linux::syscall::nr::READ,
+            fd as usize,
+            buf.as_mut_ptr() as usize,
+            buf.capacity()
+        ) as isize;
         // SAFETY: fd is valid.
-        unsafe { close(fd) };
+        crate::syscall!(crate::os::linux::syscall::nr::CLOSE, fd as usize);
         if n <= 0 {
             return Vec::new();
         }
