@@ -79,6 +79,7 @@ func main() {
 	buildDir := filepath.Join(ws, "target", "mohabbat-go-build")
 	must(os.MkdirAll(buildDir, 0o755))
 
+	selectedTargets := map[string]string{}
 	if !*skipBuild {
 		fmt.Println("मोहब्बत  Building brot (cargo) and washmhost-go for Modern Four...")
 		for _, s := range slots {
@@ -86,7 +87,9 @@ func main() {
 				fmt.Printf("मोहब्बत    skip %s on host %s\n", s.name, runtime.GOOS)
 				continue
 			}
-			must(cargoBuild(ws, "brot", s, buildDir))
+			targetName, err := cargoBuild(ws, "brot", s, buildDir)
+			must(err)
+			selectedTargets[s.name] = targetName
 			must(goBuild(ws, "washmhost-go", s, buildDir))
 		}
 		if defaultPayload {
@@ -116,7 +119,11 @@ func main() {
 		wh, err := os.ReadFile(washmhostPath(buildDir, s))
 		must(err)
 		per[i] = artifacts{brot: brot, washmhost: wh}
-		fmt.Printf("मोहब्बत    %s: brot=%d washmhost=%d\n", s.name, len(brot), len(wh))
+		displayName := s.name
+		if targetName, ok := selectedTargets[s.name]; ok {
+			displayName = targetName
+		}
+		fmt.Printf("मोहब्बत    %s: brot=%d washmhost=%d\n", displayName, len(brot), len(wh))
 	}
 
 	// Assemble pool: washmhost_0 + washmhost_1 + ... + payload
@@ -260,43 +267,63 @@ func resolveWorkspace(ws string) (string, error) {
 	return "", fmt.Errorf("could not locate workspace root (sysroot.toml not found)")
 }
 
-func cargoBuild(ws, pkgDir string, s slot, buildDir string) error {
+func cargoBuild(ws, pkgDir string, s slot, buildDir string) (string, error) {
 	targetName, err := cargoTargetName(s)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := ensureRustTargetInstalled(targetName); err != nil {
-		return err
+		return "", err
 	}
 
 	isRusticatedTarget := strings.Contains(targetName, "rusticated")
-	targetArg := targetName
-	args := []string{"build", "-vv", "--release"}
-	if isRusticatedTarget {
-		targetArg = filepath.Join(ws, "target", "rusticated-spec", targetName+".json")
-		args = append(args, "--config", filepath.Join(ws, "target", "rusticated-spec", "config.toml"))
-	}
-	args = append(args, "--target", targetArg)
-	cmd := exec.Command("cargo", args...)
-	env := os.Environ()
-	if isRusticatedTarget {
-		env = append(env, "RUST_TARGET_PATH="+filepath.Join(ws, "target", "rusticated-spec"))
-	}
-	if s.goos == "linux" {
-		linkerVar := "CARGO_TARGET_" + strings.ToUpper(strings.ReplaceAll(targetName, "-", "_")) + "_LINKER"
-		env = append(env, linkerVar+"=rust-lld")
-	}
-	cmd.Env = env
-	if isRusticatedTarget {
-		cmd.Args = append(cmd.Args, "-Z", "unstable-options", "-Z", "json-target-spec")
+
+	buildTarget := func(name string) error {
+		targetArg := name
+		args := []string{"build", "-vv", "--release"}
+		if isRusticatedTarget {
+			targetArg = filepath.Join(ws, "target", "rusticated-spec", name+".json")
+			args = append(args, "--config", filepath.Join(ws, "target", "rusticated-spec", "config.toml"))
+		}
+		args = append(args, "--target", targetArg)
+		cmd := exec.Command("cargo", args...)
+		env := os.Environ()
+		if isRusticatedTarget {
+			env = append(env, "RUST_TARGET_PATH="+filepath.Join(ws, "target", "rusticated-spec"))
+		}
+		if s.goos == "linux" || (s.goos == "windows" && (strings.Contains(name, "windows-gnu") || strings.Contains(name, "windows-gnullvm"))) {
+			linkerVar := "CARGO_TARGET_" + strings.ToUpper(strings.ReplaceAll(name, "-", "_")) + "_LINKER"
+			env = append(env, linkerVar+"=rust-lld")
+		}
+		cmd.Env = env
+		if isRusticatedTarget {
+			cmd.Args = append(cmd.Args, "-Z", "unstable-options", "-Z", "json-target-spec")
+		}
+
+		cmd.Dir = filepath.Join(ws, pkgDir)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		fmt.Printf("मोहब्बत    cargo build %s for %s\n", pkgDir, s.name)
+		return cmd.Run()
 	}
 
-	cmd.Dir = filepath.Join(ws, pkgDir)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	fmt.Printf("मोहब्बत    cargo build %s for %s\n", pkgDir, s.name)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s cargo build failed for %s: %w", pkgDir, s.name, err)
+	err = buildTarget(targetName)
+	if err != nil && isRusticatedTarget && (strings.Contains(targetName, "windows-gnullvm") || strings.Contains(targetName, "windows-gnu")) {
+		fallbackTarget := strings.Replace(targetName, "windows-gnullvm", "windows-msvc", 1)
+		if fallbackTarget == targetName {
+			fallbackTarget = strings.Replace(targetName, "windows-gnu", "windows-msvc", 1)
+		}
+		if fallbackTarget != targetName {
+			fmt.Printf("मोहब्बत    fallback build target from %s to %s\n", targetName, fallbackTarget)
+			if err := ensureRustTargetInstalled(fallbackTarget); err != nil {
+				return "", err
+			}
+			err = buildTarget(fallbackTarget)
+			targetName = fallbackTarget
+		}
+	}
+	if err != nil {
+		return "", fmt.Errorf("%s cargo build failed for %s: %w", pkgDir, s.name, err)
 	}
 
 	// Copy the artifact to buildDir
@@ -304,9 +331,12 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string) error {
 	outPath := brotPath(buildDir, s)
 	bytes, err := os.ReadFile(srcPath)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return os.WriteFile(outPath, bytes, 0755)
+	if err := os.WriteFile(outPath, bytes, 0755); err != nil {
+		return "", err
+	}
+	return targetName, nil
 }
 
 func buildMohabbatBrain(ws string) error {
@@ -412,7 +442,58 @@ func ensureBatOnPath(commandName, targetPath string) error {
 	return fmt.Errorf("could not place %s in any PATH directory; use ./%s", commandName, commandName)
 }
 
+func rustcHostTriple() (string, error) {
+	cmd := exec.Command("rustc", "-vV")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("failed running rustc -vV: %w", err)
+	}
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.HasPrefix(line, "host: ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "host: ")), nil
+		}
+	}
+	return "", fmt.Errorf("rustc -vV did not report host triple")
+}
+
+func rustcTargetSpecAvailable(target string) bool {
+	cmd := exec.Command("rustc", "-Z", "unstable-options", "--print", "target-spec-json", "--target", target)
+	return cmd.Run() == nil
+}
+
 func cargoTargetName(s slot) (string, error) {
+	hostTriple, err := rustcHostTriple()
+	if err != nil {
+		return "", err
+	}
+
+	useGnu := strings.Contains(hostTriple, "windows-gnu") || strings.Contains(hostTriple, "windows-gnullvm")
+	useGnullvm := strings.Contains(hostTriple, "windows-gnullvm")
+	useMsvc := strings.Contains(hostTriple, "windows-msvc")
+
+	targetArch := "x86_64"
+	if s.goarch == "arm64" {
+		targetArch = "aarch64"
+	}
+
+	if useGnullvm && s.goos == "windows" {
+		return fmt.Sprintf("%s-rusticated-windows-gnullvm", targetArch), nil
+	}
+	if useGnu && s.goos == "windows" {
+		return fmt.Sprintf("%s-rusticated-windows-gnu", targetArch), nil
+	}
+	if useMsvc && s.goos == "windows" {
+		if rustcTargetSpecAvailable(fmt.Sprintf("%s-pc-windows-gnullvm", targetArch)) {
+			return fmt.Sprintf("%s-rusticated-windows-gnullvm", targetArch), nil
+		}
+		if rustcTargetSpecAvailable(fmt.Sprintf("%s-pc-windows-gnu", targetArch)) {
+			return fmt.Sprintf("%s-rusticated-windows-gnu", targetArch), nil
+		}
+		return fmt.Sprintf("%s-rusticated-windows-msvc", targetArch), nil
+	}
+
 	switch {
 	case s.goos == "windows" && s.goarch == "amd64":
 		return "x86_64-rusticated-windows-msvc", nil
