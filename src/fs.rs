@@ -579,6 +579,7 @@ impl Drop for File {
         }
         #[cfg(windows)]
         unsafe {
+            #[link(name = "kernel32", kind = "raw-dylib")]
             unsafe extern "system" {
                 fn CloseHandle(hObject: usize) -> i32;
             }
@@ -760,6 +761,7 @@ impl AsyncWrite for File {
         {
             let handle = self.handle as usize;
             crate::rt::blocking::BlockingOpFuture::new(move || {
+                #[link(name = "kernel32", kind = "raw-dylib")]
                 unsafe extern "system" {
                     fn FlushFileBuffers(hObject: usize) -> i32;
                 }
