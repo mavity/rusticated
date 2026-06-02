@@ -5,6 +5,12 @@ use alloc::vec::Vec;
 use core::cell::{RefCell, UnsafeCell};
 use core::task::Waker;
 
+/// Internal Linux io_uring operation state.
+///
+/// This type is currently a placeholder for the stubbed io_uring driver.
+/// Several fields exist for future completion and wake-up logic, but are not
+/// yet read in the current implementation.
+#[allow(dead_code)]
 pub(crate) struct OpState {
     pub(crate) buffer: UnsafeCell<Option<Vec<u8>>>,
     pub(crate) waker: RefCell<Option<Waker>>,

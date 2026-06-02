@@ -1,4 +1,3 @@
-#![allow(unsafe_op_in_unsafe_fn)]
 use crate::win32::Win32::Foundation::*;
 use crate::win32::Win32::Storage::FileSystem::*;
 use crate::win32::Win32::System::Diagnostics::Debug::*;

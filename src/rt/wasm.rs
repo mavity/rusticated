@@ -13,23 +13,6 @@
 //! the completion flag, the registry drops its clone; if the future is also
 //! gone, the allocation is freed cleanly with no use-after-free.
 
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::missing_const_for_fn,
-    clippy::missing_safety_doc,
-    clippy::doc_markdown,
-    clippy::type_complexity,
-    clippy::undocumented_unsafe_blocks,
-    clippy::no_effect_underscore_binding,
-    clippy::needless_pass_by_value,
-    clippy::unused_self,
-    clippy::needless_pass_by_ref_mut,
-    clippy::module_name_repetitions,
-    clippy::unnecessary_wraps
-)]
-
 use crate::abi::Overlapped;
 use crate::abi::imports;
 use crate::boxed::Box;

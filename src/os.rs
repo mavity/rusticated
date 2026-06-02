@@ -48,10 +48,15 @@ pub mod unix {
     pub mod fs {
         /// Metadata extensions for Unix file systems.
         pub trait MetadataExt {
+            /// Returns the raw permission bits for this file metadata.
             fn mode(&self) -> u32;
+            /// Returns the number of hard links to this file.
             fn nlink(&self) -> u64;
+            /// Returns the owning user ID.
             fn uid(&self) -> u32;
+            /// Returns the owning group ID.
             fn gid(&self) -> u32;
+            /// Returns the inode number.
             fn ino(&self) -> u64;
         }
 
@@ -123,11 +128,13 @@ pub mod windows {
 
         /// Extract a borrowed handle.
         pub trait AsHandle {
+            /// Returns a borrowed Windows `HANDLE` wrapper.
             fn as_handle(&self) -> BorrowedHandle<'_>;
         }
 
         /// Extract a borrowed socket.
         pub trait AsSocket {
+            /// Returns a borrowed Windows `SOCKET` wrapper.
             fn as_socket(&self) -> BorrowedSocket<'_>;
         }
 

@@ -54,6 +54,7 @@ pub use File as FileNative;
 
 #[cfg(not(target_family = "wasm"))]
 #[derive(Clone, Debug)]
+/// Metadata for a filesystem entry.
 pub struct Metadata {
     pub(crate) size: u64,
     pub(crate) mode: u32,
@@ -68,9 +69,12 @@ pub struct Metadata {
 
 #[cfg(not(target_family = "wasm"))]
 impl Metadata {
+    /// Returns the size of the entry, in bytes.
     pub fn len(&self) -> u64 {
         self.size
     }
+
+    /// Returns `true` if this metadata describes a regular file.
     pub fn is_file(&self) -> bool {
         #[cfg(unix)]
         {
@@ -81,6 +85,8 @@ impl Metadata {
             (self.mode & 0x10) == 0
         }
     }
+
+    /// Returns `true` if this metadata describes a directory.
     pub fn is_dir(&self) -> bool {
         #[cfg(unix)]
         {
@@ -91,6 +97,8 @@ impl Metadata {
             (self.mode & 0x10) != 0
         }
     }
+
+    /// Returns `true` if this metadata describes a symbolic link.
     pub fn is_symlink(&self) -> bool {
         #[cfg(unix)]
         {
@@ -101,6 +109,8 @@ impl Metadata {
             (self.mode & 0x400) != 0
         }
     }
+
+    /// Returns `true` if this metadata describes a block device.
     pub fn is_block_device(&self) -> bool {
         #[cfg(unix)]
         {
@@ -111,6 +121,8 @@ impl Metadata {
             false
         }
     }
+
+    /// Returns `true` if this metadata describes a character device.
     pub fn is_char_device(&self) -> bool {
         #[cfg(unix)]
         {
@@ -121,6 +133,8 @@ impl Metadata {
             false
         }
     }
+
+    /// Returns `true` if this metadata describes a FIFO.
     pub fn is_fifo(&self) -> bool {
         #[cfg(unix)]
         {
@@ -131,6 +145,8 @@ impl Metadata {
             false
         }
     }
+
+    /// Returns `true` if this metadata describes a socket.
     pub fn is_socket(&self) -> bool {
         #[cfg(unix)]
         {
@@ -141,6 +157,8 @@ impl Metadata {
             false
         }
     }
+
+    /// Returns `true` if the entry is read-only.
     pub fn readonly(&self) -> bool {
         #[cfg(unix)]
         {
@@ -151,39 +169,63 @@ impl Metadata {
             (self.mode & 0x1) != 0
         }
     }
+
+    /// Returns the last modified time in nanoseconds.
     pub fn modified_ns(&self) -> u64 {
         self.modified_time_ns
     }
+
+    /// Returns the last accessed time in nanoseconds.
     pub fn accessed_ns(&self) -> u64 {
         self.accessed_time_ns
     }
+
+    /// Returns the creation time in nanoseconds.
     pub fn created_ns(&self) -> u64 {
         self.created_time_ns
     }
+
+    /// Returns the raw file mode bits.
     pub fn mode(&self) -> u32 {
         self.mode
     }
+
+    /// Returns the number of hard links to the file.
     pub fn nlink(&self) -> u64 {
         self.nlink
     }
+
+    /// Returns the owning user ID.
     pub fn uid(&self) -> u32 {
         self.uid
     }
+
+    /// Returns the owning group ID.
     pub fn gid(&self) -> u32 {
         self.gid
     }
+
+    /// Returns the inode number.
     pub fn inode(&self) -> u64 {
         self.inode
     }
+
+    /// Converts the modification timestamp into a `SystemTime`.
     pub fn modified(&self) -> io::Result<crate::time::SystemTime> {
         Ok(crate::time::SystemTime::from_nanos(self.modified_time_ns))
     }
+
+    /// Returns the last access timestamp as a `SystemTime`.
     pub fn accessed(&self) -> io::Result<crate::time::SystemTime> {
         Ok(crate::time::SystemTime::from_nanos(self.accessed_time_ns))
     }
+
+    /// Returns the creation timestamp as a `SystemTime`.
     pub fn created(&self) -> io::Result<crate::time::SystemTime> {
         Ok(crate::time::SystemTime::from_nanos(self.created_time_ns))
     }
+
+    /// Converts the raw mode bits into a `Permissions` object.
     pub fn permissions(&self) -> Permissions {
         Permissions { mode: self.mode }
     }
@@ -196,6 +238,7 @@ pub struct Permissions {
 }
 
 impl Permissions {
+    /// Returns whether the file is read-only.
     pub fn readonly(&self) -> bool {
         #[cfg(any(unix, target_family = "wasm"))]
         {
@@ -207,14 +250,17 @@ impl Permissions {
         }
     }
 
+    /// Returns the raw platform-specific mode bits.
     pub fn mode(&self) -> u32 {
         self.mode
     }
 
+    /// Replaces the current mode bits.
     pub fn set_mode(&mut self, mode: u32) {
         self.mode = mode;
     }
 
+    /// Sets or clears the read-only flag.
     pub fn set_readonly(&mut self, readonly: bool) {
         #[cfg(any(unix, target_family = "wasm"))]
         {
@@ -239,48 +285,74 @@ impl Permissions {
 
 #[cfg(target_family = "wasm")]
 #[derive(Clone)]
+/// Metadata payload returned by the WASM host for a path stat request.
 pub struct Metadata {
     pub(crate) stat: crate::abi::AbiStat,
 }
 
 #[cfg(target_family = "wasm")]
 impl Metadata {
+    /// Returns the size of the file in bytes.
     pub fn len(&self) -> u64 {
         self.stat.size
     }
+
+    /// Returns `true` if the metadata represents a regular file.
     pub fn is_file(&self) -> bool {
         self.stat.kind == crate::abi::STAT_KIND_FILE
     }
+
+    /// Returns `true` if the metadata represents a directory.
     pub fn is_dir(&self) -> bool {
         self.stat.kind == crate::abi::STAT_KIND_DIR
     }
+
+    /// Returns `true` if the metadata represents a symbolic link.
     pub fn is_symlink(&self) -> bool {
         self.stat.kind == crate::abi::STAT_KIND_SYMLINK
     }
+
+    /// Last modification time from the host, in nanoseconds.
     pub fn modified_ns(&self) -> u64 {
         self.stat.modified_ns
     }
+
+    /// Last access time from the host, in nanoseconds.
     pub fn accessed_ns(&self) -> u64 {
         self.stat.accessed_ns
     }
+
+    /// Creation time from the host, in nanoseconds.
     pub fn created_ns(&self) -> u64 {
         self.stat.created_ns
     }
+
+    /// Returns the raw mode bits from the host ABI.
     pub fn mode(&self) -> u32 {
         self.stat.mode
     }
+
+    /// Number of hard links reported by the host.
     pub fn nlink(&self) -> u64 {
         self.stat.nlink
     }
+
+    /// Owning user ID reported by the host.
     pub fn uid(&self) -> u32 {
         self.stat.uid
     }
+
+    /// Owning group ID reported by the host.
     pub fn gid(&self) -> u32 {
         self.stat.gid
     }
+
+    /// Host-provided filesystem object identifier.
     pub fn inode(&self) -> u64 {
         self.stat.inode
     }
+
+    /// Returns the file permissions derived from the host metadata.
     pub fn permissions(&self) -> Permissions {
         Permissions {
             mode: self.stat.mode,
@@ -291,6 +363,7 @@ impl Metadata {
 // --- File Type ---
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Describes the kind of filesystem entry for a path.
 pub struct FileType {
     is_dir: bool,
     is_file: bool,
@@ -298,12 +371,17 @@ pub struct FileType {
 }
 
 impl FileType {
+    /// Returns `true` if the type is a directory.
     pub fn is_dir(&self) -> bool {
         self.is_dir
     }
+
+    /// Returns `true` if the type is a regular file.
     pub fn is_file(&self) -> bool {
         self.is_file
     }
+
+    /// Returns `true` if the type is a symbolic link.
     pub fn is_symlink(&self) -> bool {
         self.is_symlink
     }
@@ -311,23 +389,33 @@ impl FileType {
 
 // --- DirEntry ---
 
+/// Directory entry returned by `ReadDir` iteration.
 pub struct DirEntry {
+    /// The directory entry name.
     pub name: String,
+    /// Optional metadata for the directory entry.
     pub metadata: Option<Metadata>,
 }
 
 impl DirEntry {
+    /// Returns the file or directory name for this entry.
     pub fn file_name(&self) -> &str {
         &self.name
     }
+
+    /// Returns the path of the entry relative to the directory iterator.
     pub fn path(&self) -> crate::path::PathBuf {
         crate::path::PathBuf::from(self.name.clone())
     }
+
+    /// Returns metadata for the directory entry.
     pub fn metadata(&self) -> io::Result<Metadata> {
         self.metadata
             .clone()
             .ok_or_else(|| io::Error::other("metadata unavailable"))
     }
+
+    /// Returns the file type for this directory entry.
     pub fn file_type(&self) -> io::Result<FileType> {
         let md = self.metadata()?;
         Ok(FileType {
@@ -340,8 +428,11 @@ impl DirEntry {
 
 // --- ReadDir ---
 
+/// Iterator over directory entries.
 pub struct ReadDir {
+    /// Directory entries produced by the iterator.
     pub entries: Vec<DirEntry>,
+    /// The current iterator position inside `entries`.
     pub pos: usize,
 }
 
@@ -367,6 +458,7 @@ impl Iterator for ReadDir {
 // --- OpenOptions ---
 
 #[derive(Clone, Debug, Default)]
+/// Builder for file open/create options.
 pub struct OpenOptions {
     read: bool,
     write: bool,
@@ -377,34 +469,48 @@ pub struct OpenOptions {
 }
 
 impl OpenOptions {
+    /// Creates a new set of file open options.
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Enable or disable read access.
     pub fn read(&mut self, v: bool) -> &mut Self {
         self.read = v;
         self
     }
+
+    /// Enable or disable write access.
     pub fn write(&mut self, v: bool) -> &mut Self {
         self.write = v;
         self
     }
+
+    /// Enable or disable append mode.
     pub fn append(&mut self, v: bool) -> &mut Self {
         self.append = v;
         self
     }
+
+    /// Enable or disable truncation of an existing file.
     pub fn truncate(&mut self, v: bool) -> &mut Self {
         self.truncate = v;
         self
     }
+
+    /// Enable or disable file creation if the target does not exist.
     pub fn create(&mut self, v: bool) -> &mut Self {
         self.create = v;
         self
     }
+
+    /// Enable or disable exclusive create semantics.
     pub fn create_new(&mut self, v: bool) -> &mut Self {
         self.create_new = v;
         self
     }
 
+    /// Opens a file with the configured options.
     #[allow(unused_variables)]
     #[cfg(not(target_family = "wasm"))]
     pub async fn open<P: AsRef<str>>(&self, path: P) -> io::Result<File> {
@@ -530,6 +636,7 @@ impl OpenOptions {
 
     #[allow(unused_variables)]
     #[cfg(target_family = "wasm")]
+    /// Opens a file using the configured `OpenOptions` on wasm.
     pub async fn open<P: AsRef<str>>(&self, path: P) -> io::Result<File> {
         let mut flags = 0u32;
         if self.read {
@@ -567,6 +674,7 @@ impl OpenOptions {
 
 // --- File ---
 
+/// Represents an open filesystem handle.
 pub struct File {
     pub(crate) handle: u64,
 }
@@ -596,20 +704,24 @@ impl Drop for File {
 }
 
 impl File {
+    /// Returns a fresh builder for opening files.
     pub fn options() -> OpenOptions {
         OpenOptions::new()
     }
 
+    /// Opens an existing file for reading.
     #[cfg(not(target_family = "wasm"))]
     pub async fn open<P: AsRef<str>>(path: P) -> io::Result<Self> {
         OpenOptions::new().read(true).open(path).await
     }
 
+    /// Opens an existing file for reading.
     #[cfg(target_family = "wasm")]
     pub async fn open<P: AsRef<str>>(path: P) -> io::Result<Self> {
         OpenOptions::new().read(true).open(path).await
     }
 
+    /// Creates or truncates a file for writing.
     #[cfg(not(target_family = "wasm"))]
     pub async fn create<P: AsRef<str>>(path: P) -> io::Result<Self> {
         OpenOptions::new()
@@ -621,6 +733,7 @@ impl File {
     }
 
     #[cfg(target_family = "wasm")]
+    /// Creates or truncates a file for writing on wasm.
     pub async fn create<P: AsRef<str>>(path: P) -> io::Result<Self> {
         OpenOptions::new()
             .write(true)
@@ -630,14 +743,17 @@ impl File {
             .await
     }
 
+    /// Returns metadata for the open file handle.
     pub fn metadata(&self) -> io::Result<Metadata> {
         Err(io::Error::other("not implemented"))
     }
 
+    /// Returns the raw file descriptor or handle value.
     pub fn as_raw_fd(&self) -> i32 {
         self.handle as i32
     }
 
+    /// Attempts to duplicate the file handle.
     pub fn try_clone(&self) -> io::Result<Self> {
         #[cfg(unix)]
         {
@@ -664,6 +780,7 @@ impl File {
         }
     }
 
+    /// Returns `true` when the file points at a terminal device.
     pub fn is_terminal(&self) -> bool {
         #[cfg(unix)]
         {
@@ -780,6 +897,7 @@ impl AsyncWrite for File {
 
 // --- Global Fns ---
 
+/// Reads a directory and returns an iterator over its entries.
 pub async fn read_dir<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
     #[cfg(target_family = "wasm")]
     {
@@ -1022,6 +1140,7 @@ pub async fn read_dir<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
     }
 }
 
+/// Returns metadata for the given path.
 pub async fn metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
     #[cfg(target_family = "wasm")]
     {
@@ -1157,6 +1276,7 @@ pub async fn metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
     }
 }
 
+/// Returns metadata for the given path without following symbolic links.
 pub async fn symlink_metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
     #[cfg(target_family = "wasm")]
     {
@@ -1294,6 +1414,8 @@ pub async fn symlink_metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
     }
 }
 
+/// Changes permissions for the given path.
+/// Changes the permissions of a filesystem object.
 pub async fn set_permissions<P: AsRef<str>>(path: P, permissions: Permissions) -> io::Result<()> {
     #[cfg(target_family = "wasm")]
     {
@@ -1443,24 +1565,31 @@ async fn metadata_wasm(path: &str, flags: u32) -> io::Result<Metadata> {
     Ok(Metadata { stat })
 }
 
+/// Opens the platform's null device as a file.
 pub fn open_null_file() -> io::Result<File> {
     Err(io::Error::other("not implemented"))
 }
+/// Returns whether path expansion should be case-insensitive on this platform.
 pub fn default_case_insensitive_path_expansion() -> bool {
     false
 }
+/// Resolves the executable path for a child process, if known.
 pub fn resolve_executable<P: AsRef<str>>(_path: P) -> Option<String> {
     None
 }
+/// Splits a path for matching against wildcard patterns.
 pub fn split_path_for_pattern(_path: &str) -> Vec<&str> {
     Vec::new()
 }
+/// Returns the root component of a pattern path when present.
 pub fn pattern_path_root(_path: &str) -> Option<String> {
     None
 }
+/// Normalizes path separators for the current platform.
 pub fn normalize_path_separators(path: &str) -> alloc::borrow::Cow<'_, str> {
     alloc::borrow::Cow::Borrowed(path)
 }
+/// Appends a path component to the pattern path builder.
 pub fn push_path_for_pattern(path: &mut crate::path::PathBuf, piece: &str) {
     let mut s = path.to_string();
     if !s.is_empty() && !s.ends_with('/') && !s.ends_with('\\') {

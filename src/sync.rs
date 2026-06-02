@@ -177,19 +177,23 @@ pub mod mpsc {
     unsafe impl<T: Send> Sync for Sender<T> {}
 }
 
+/// A simple one-time initialization primitive.
 pub struct Once {
     inner: spin::Once<()>,
 }
 
+/// Static initializer for `Once`.
 pub const ONCE_INIT: Once = Once::new();
 
 impl Once {
+    /// Creates a new `Once` instance.
     pub const fn new() -> Once {
         Once {
             inner: spin::Once::new(),
         }
     }
 
+    /// Runs the provided closure exactly once.
     pub fn call_once<F>(&self, f: F)
     where
         F: FnOnce(),
