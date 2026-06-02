@@ -358,16 +358,10 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     loop {}
 }
 
-#[cfg(all(
-    not(any(test, target_family = "wasm")),
-    any(target_os = "none", windows, target_os = "linux")
-))]
+#[cfg(all(not(any(test, target_family = "wasm")), any(target_os = "none", windows)))]
 struct SystemAllocator;
 
-#[cfg(all(
-    not(any(test, target_family = "wasm")),
-    any(target_os = "none", windows, target_os = "linux")
-))]
+#[cfg(not(any(test, target_family = "wasm")))]
 #[unsafe(no_mangle)]
 /// Global allocation entry point used by the Rust runtime.
 pub unsafe extern "C" fn __rust_alloc(size: usize, align: usize) -> *mut u8 {
@@ -375,10 +369,7 @@ pub unsafe extern "C" fn __rust_alloc(size: usize, align: usize) -> *mut u8 {
     unsafe { ALLOCATOR.alloc(core::alloc::Layout::from_size_align_unchecked(size, align)) }
 }
 
-#[cfg(all(
-    not(any(test, target_family = "wasm")),
-    any(target_os = "none", windows, target_os = "linux")
-))]
+#[cfg(not(any(test, target_family = "wasm")))]
 #[unsafe(no_mangle)]
 /// Global deallocation entry point used by the Rust runtime.
 pub unsafe extern "C" fn __rust_dealloc(ptr: *mut u8, size: usize, align: usize) {
@@ -391,10 +382,7 @@ pub unsafe extern "C" fn __rust_dealloc(ptr: *mut u8, size: usize, align: usize)
     }
 }
 
-#[cfg(all(
-    not(any(test, target_family = "wasm")),
-    any(target_os = "none", windows, target_os = "linux")
-))]
+#[cfg(not(any(test, target_family = "wasm")))]
 #[unsafe(no_mangle)]
 /// Global reallocation entry point used by the Rust runtime.
 pub unsafe extern "C" fn __rust_realloc(
@@ -413,10 +401,7 @@ pub unsafe extern "C" fn __rust_realloc(
     }
 }
 
-#[cfg(all(
-    not(any(test, target_family = "wasm")),
-    any(target_os = "none", windows, target_os = "linux")
-))]
+#[cfg(not(any(test, target_family = "wasm")))]
 #[unsafe(no_mangle)]
 /// Global zeroed allocation entry point used by the Rust runtime.
 pub unsafe extern "C" fn __rust_alloc_zeroed(size: usize, align: usize) -> *mut u8 {
@@ -424,19 +409,9 @@ pub unsafe extern "C" fn __rust_alloc_zeroed(size: usize, align: usize) -> *mut 
     unsafe { ALLOCATOR.alloc_zeroed(core::alloc::Layout::from_size_align_unchecked(size, align)) }
 }
 
-#[cfg(all(
-    not(any(test, target_family = "wasm")),
-    any(target_os = "none", windows, target_os = "linux")
-))]
+#[cfg(all(not(any(test, target_family = "wasm")), any(target_os = "none", windows)))]
 unsafe impl core::alloc::GlobalAlloc for SystemAllocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        #[cfg(unix)]
-        {
-            unsafe extern "C" {
-                fn malloc(size: core::primitive::usize) -> *mut u8;
-            }
-            unsafe { malloc(layout.size()) }
-        }
         #[cfg(windows)]
         {
             #[link(name = "kernel32", kind = "raw-dylib")]
@@ -453,13 +428,6 @@ unsafe impl core::alloc::GlobalAlloc for SystemAllocator {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: core::alloc::Layout) {
-        #[cfg(unix)]
-        {
-            unsafe extern "C" {
-                fn free(p: *mut u8);
-            }
-            unsafe { free(ptr) }
-        }
         #[cfg(windows)]
         {
             #[link(name = "kernel32", kind = "raw-dylib")]
@@ -474,14 +442,11 @@ unsafe impl core::alloc::GlobalAlloc for SystemAllocator {
     }
 }
 
-#[cfg(all(
-    not(any(test, target_family = "wasm")),
-    any(target_os = "none", windows, target_os = "linux")
-))]
+#[cfg(all(not(any(test, target_family = "wasm")), any(target_os = "none", windows)))]
 #[global_allocator]
 static ALLOCATOR: SystemAllocator = SystemAllocator;
 
-#[cfg(all(not(test), target_family = "wasm"))]
+#[cfg(all(not(test), any(target_os = "linux", target_family = "wasm")))]
 #[global_allocator]
 static ALLOCATOR: dlmalloc::GlobalDlmalloc = dlmalloc::GlobalDlmalloc;
 
@@ -492,15 +457,10 @@ fn oom(_: core::alloc::Layout) -> ! {
 }
 
 // On Unix without std, the linker does not automatically pull in libc.
-// We declare it explicitly so that all extern "C" syscall stubs resolve.
-#[cfg(all(unix, not(test), not(target_family = "wasm")))]
-#[link(name = "c")]
-unsafe extern "C" {}
+// When building Linux no-CRT targets, we avoid explicit libc and libgcc_s linkage.
+// Raw syscall wrappers and custom allocator paths should provide the low-level
+// runtime support needed for the target.
 
-// libgcc_s provides _Unwind_Resume on Linux, referenced by sysroot alloc.
-#[cfg(all(target_os = "linux", not(test)))]
-#[link(name = "gcc_s")]
-unsafe extern "C" {}
 
 // rust_eh_personality is the DWARF exception-handling personality function.
 // The sysroot alloc (compiled without panic=abort) emits a DW.ref reference to
