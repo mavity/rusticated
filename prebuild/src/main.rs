@@ -40,14 +40,14 @@ fn main() {
             "x86_64-rusticated-windows-gnullvm",
         ),
         // ("x86_64-pc-windows-gnu", "x86_64-rusticated-windows-gnu"),
-        ("x86_64-pc-windows-msvc", "x86_64-rusticated-windows-msvc"),
+        // ("x86_64-pc-windows-msvc", "x86_64-rusticated-windows-msvc"),
         ("x86_64-unknown-linux-gnu", "x86_64-rusticated-linux-gnu"),
         (
             "aarch64-pc-windows-gnullvm",
             "aarch64-rusticated-windows-gnullvm",
         ),
         // ("aarch64-pc-windows-gnu", "aarch64-rusticated-windows-gnu"),
-        ("aarch64-pc-windows-msvc", "aarch64-rusticated-windows-msvc"),
+        // ("aarch64-pc-windows-msvc", "aarch64-rusticated-windows-msvc"),
         ("aarch64-unknown-linux-gnu", "aarch64-rusticated-linux-gnu"),
         (
             "wasm32-unknown-unknown",
@@ -158,6 +158,8 @@ fn main() {
                 &[
                     "-nolibc",
                     "--unwindlib=none",
+                    "-m",
+                    arch_arg,
                     "-Wl,--entry=mainCRTStartup",
                     "-Wl,--subsystem=console",
                 ],
@@ -178,6 +180,8 @@ fn main() {
                 &[
                     "-nolibc",
                     "--unwindlib=none",
+                    "-m",
+                    arch_arg,
                     "-Wl,--entry=mainCRTStartup",
                     "-Wl,--subsystem=console",
                 ],
@@ -237,7 +241,7 @@ fn main() {
             .arg("rusticated")
             .arg("--release")
             .arg("-Z")
-            .arg("build-std=core,alloc,compiler_builtins")
+            .arg("build-std=std")
             .arg("-Z")
             .arg("build-std-features=compiler-builtins-mem")
             .arg("--config")
@@ -364,7 +368,7 @@ fn main() {
         let candidates = [
             format!("{}-rusticated-windows-gnullvm", arch),
             format!("{}-rusticated-windows-gnu", arch),
-            format!("{}-rusticated-windows-msvc", arch),
+            // format!("{}-rusticated-windows-msvc", arch),
         ];
         candidates
             .iter()

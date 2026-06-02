@@ -81,10 +81,10 @@ func main() {
 
 	selectedTargets := map[string]string{}
 	if !*skipBuild {
-		fmt.Println("मोहब्बत  Building brot (cargo) and washmhost-go for Modern Four...")
+		fmt.Println("🍆  Building brot (cargo) and washmhost-go for Modern Four...")
 		for _, s := range slots {
 			if !shouldBuildSlot(s) {
-				fmt.Printf("मोहब्बत    skip %s on host %s\n", s.name, runtime.GOOS)
+				fmt.Printf("🍆    skip %s on host %s\n", s.name, runtime.GOOS)
 				continue
 			}
 			targetName, err := cargoBuild(ws, "brot", s, buildDir)
@@ -93,12 +93,12 @@ func main() {
 			must(goBuild(ws, "washmhost-go", s, buildDir))
 		}
 		if defaultPayload {
-			fmt.Println("मोहब्बत  Building default brain payload (mohabbat wasm)...")
+			fmt.Println("🍆  Building default brain payload (mohabbat wasm)...")
 			must(buildMohabbatBrain(ws))
 		}
 	}
 
-	fmt.Printf("मोहब्बत  Reading payload: %s\n", *payload)
+	fmt.Printf("🍆  Reading payload: %s\n", *payload)
 	brainBytes, err := os.ReadFile(*payload)
 	if err != nil {
 		die("cannot read payload %s: %v", *payload, err)
@@ -111,7 +111,7 @@ func main() {
 	per := make([]artifacts, len(slots))
 	for i, s := range slots {
 		if !shouldBuildSlot(s) {
-			fmt.Printf("मोहब्बत    %s: disabled for this host\n", s.name)
+			fmt.Printf("🍆    %s: disabled for this host\n", s.name)
 			continue
 		}
 		brot, err := os.ReadFile(brotPath(buildDir, s))
@@ -123,7 +123,7 @@ func main() {
 		if targetName, ok := selectedTargets[s.name]; ok {
 			displayName = targetName
 		}
-		fmt.Printf("मोहब्बत    %s: brot=%d washmhost=%d\n", displayName, len(brot), len(wh))
+		fmt.Printf("🍆    %s: brot=%d washmhost=%d\n", displayName, len(brot), len(wh))
 	}
 
 	// Assemble pool: washmhost_0 + washmhost_1 + ... + payload
@@ -147,7 +147,7 @@ func main() {
 	}
 	must(w.Close())
 	poolLen := uint64(compressed.Len())
-	fmt.Printf("मोहब्बत  Pool: raw=%d compressed=%d\n", pool.Len(), poolLen)
+	fmt.Printf("🍆  Pool: raw=%d compressed=%d\n", pool.Len(), poolLen)
 
 	// Patch MohabbatMeta inside each brot
 	for i := range slots {
@@ -219,13 +219,13 @@ func main() {
 	for _, n := range lengths {
 		totalZoneB += n
 	}
-	fmt.Printf("मोहब्बत  zone_a=%d zone_b=%d pool=%d\n", len(zoneA), totalZoneB, int(poolLen))
-	fmt.Printf("मोहब्बत  Wrote %s (%d bytes)\n", *output, len(zoneA)+totalZoneB+int(poolLen))
+	fmt.Printf("🍆  zone_a=%d zone_b=%d pool=%d\n", len(zoneA), totalZoneB, int(poolLen))
+	fmt.Printf("🍆  Wrote %s (%d bytes)\n", *output, len(zoneA)+totalZoneB+int(poolLen))
 	if err := ensureBatOnPath("mohab.bat", *output); err != nil {
-		fmt.Printf("मोहब्बत  warn: %v\n", err)
+		fmt.Printf("🍆  warn: %v\n", err)
 	}
 	if err := ensureBatOnPath("demo.bat", filepath.Join(ws, "demo.bat")); err != nil {
-		fmt.Printf("मोहब्बत  warn: %v\n", err)
+		fmt.Printf("🍆  warn: %v\n", err)
 	}
 }
 
@@ -303,25 +303,27 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string) (string, error) {
 		cmd.Dir = filepath.Join(ws, pkgDir)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		fmt.Printf("मोहब्बत    cargo build %s for %s\n", pkgDir, s.name)
+		fmt.Printf("🍆    cargo build %s for %s\n", pkgDir, s.name)
 		return cmd.Run()
 	}
 
 	err = buildTarget(targetName)
-	if err != nil && isRusticatedTarget && (strings.Contains(targetName, "windows-gnullvm") || strings.Contains(targetName, "windows-gnu")) {
-		fallbackTarget := strings.Replace(targetName, "windows-gnullvm", "windows-msvc", 1)
-		if fallbackTarget == targetName {
-			fallbackTarget = strings.Replace(targetName, "windows-gnu", "windows-msvc", 1)
-		}
-		if fallbackTarget != targetName {
-			fmt.Printf("मोहब्बत    fallback build target from %s to %s\n", targetName, fallbackTarget)
-			if err := ensureRustTargetInstalled(fallbackTarget); err != nil {
-				return "", err
+	/*
+		if err != nil && isRusticatedTarget && (strings.Contains(targetName, "windows-gnullvm") || strings.Contains(targetName, "windows-gnu")) {
+			fallbackTarget := strings.Replace(targetName, "windows-gnullvm", "windows-msvc", 1)
+			if fallbackTarget == targetName {
+				fallbackTarget = strings.Replace(targetName, "windows-gnu", "windows-msvc", 1)
 			}
-			err = buildTarget(fallbackTarget)
-			targetName = fallbackTarget
+			if fallbackTarget != targetName {
+				fmt.Printf("🍆    fallback build target from %s to %s\n", targetName, fallbackTarget)
+				if err := ensureRustTargetInstalled(fallbackTarget); err != nil {
+					return "", err
+				}
+				err = buildTarget(fallbackTarget)
+				targetName = fallbackTarget
+			}
 		}
-	}
+	*/
 	if err != nil {
 		return "", fmt.Errorf("%s cargo build failed for %s: %w", pkgDir, s.name, err)
 	}
@@ -368,7 +370,7 @@ func goBuild(ws, pkgDir string, s slot, buildDir string) error {
 	if err := os.MkdirAll(goCacheDir, 0o755); err != nil {
 		return fmt.Errorf("create GOCACHE %s: %w", goCacheDir, err)
 	}
-	cmd := exec.Command("go", "build", "-trimpath", "-o", outPath, ".")
+	cmd := exec.Command("go", "build", "-trimpath", "-ldflags=-s -w", "-o", outPath, ".")
 	cmd.Dir = filepath.Join(ws, pkgDir)
 	env := os.Environ()
 	env = upsertEnv(env, "CGO_ENABLED", "0")
@@ -381,7 +383,7 @@ func goBuild(ws, pkgDir string, s slot, buildDir string) error {
 	cmd.Env = env
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	fmt.Printf("मोहब्बत    go build %s for %s -> %s\n", pkgDir, s.name, filepath.Base(outPath))
+	fmt.Printf("🍆    go build %s for %s -> %s\n", pkgDir, s.name, filepath.Base(outPath))
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("%s build failed for %s: %w", pkgDir, s.name, err)
 	}
@@ -435,7 +437,7 @@ func ensureBatOnPath(commandName, targetPath string) error {
 		wrapper := "#!/usr/bin/env bash\n" +
 			"exec bash \"" + absoluteTarget + "\" \"$@\"\n"
 		if err := os.WriteFile(linkPath, []byte(wrapper), 0o755); err == nil {
-			fmt.Printf("मोहब्बत  PATH shim: %s -> %s\n", linkPath, absoluteTarget)
+			fmt.Printf("🍆  PATH shim: %s -> %s\n", linkPath, absoluteTarget)
 			return nil
 		}
 	}
@@ -491,14 +493,14 @@ func cargoTargetName(s slot) (string, error) {
 		if rustcTargetSpecAvailable(fmt.Sprintf("%s-pc-windows-gnu", targetArch)) {
 			return fmt.Sprintf("%s-rusticated-windows-gnu", targetArch), nil
 		}
-		return fmt.Sprintf("%s-rusticated-windows-msvc", targetArch), nil
+		return fmt.Sprintf("%s-rusticated-windows-gnullvm", targetArch), nil
 	}
 
 	switch {
 	case s.goos == "windows" && s.goarch == "amd64":
-		return "x86_64-rusticated-windows-msvc", nil
+		return "x86_64-rusticated-windows-gnullvm", nil
 	case s.goos == "windows" && s.goarch == "arm64":
-		return "aarch64-rusticated-windows-msvc", nil
+		return "aarch64-rusticated-windows-gnullvm", nil
 	case s.goos == "linux" && s.goarch == "amd64":
 		return "x86_64-unknown-linux-musl", nil
 	case s.goos == "linux" && s.goarch == "arm64":
@@ -525,7 +527,7 @@ func ensureRustTargetInstalled(targetName string) error {
 		return nil
 	}
 
-	fmt.Printf("मोहब्बत    rustup target add %s\n", targetName)
+	fmt.Printf("🍆    rustup target add %s\n", targetName)
 	addArgs := []string{"target", "add", targetName}
 	if tc := strings.TrimSpace(os.Getenv("RUSTUP_TOOLCHAIN")); tc != "" {
 		addArgs = append(addArgs, "--toolchain", tc)
@@ -585,7 +587,7 @@ func buildZoneA(offsets, lengths []int) string {
 		"	set \"S_LEN={{WIN_ARM_LEN}}\"\r\n" +
 		")\r\n" +
 		"if \"!S_LEN!\"==\"0\" (\r\n" +
-		"    echo [mohabbat] This vegetable does not support !ARCH! on Windows.\r\n" +
+		"    echo 🍆 This vegetable does not support !ARCH! on Windows.\r\n" +
 		"    exit /b 1\r\n" +
 		")\r\n" +
 		"powershell -NoProfile -ExecutionPolicy Bypass -Command \"$a=[IO.File]::ReadAllBytes($env:ME); $b=New-Object byte[] !S_LEN!; [Array]::Copy($a, [int64]!S_OFF!, $b, 0, [int]!S_LEN!); [IO.File]::WriteAllBytes($env:TMP_EXE, $b)\"\r\n" +
@@ -622,6 +624,6 @@ func must(err error) {
 }
 
 func die(format string, a ...any) {
-	fmt.Fprintf(os.Stderr, "मोहब्बत  error: "+format+"\n", a...)
+	fmt.Fprintf(os.Stderr, "🍆  error: "+format+"\n", a...)
 	os.Exit(1)
 }
