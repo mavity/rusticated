@@ -108,5 +108,3 @@ pub unsafe extern "C" fn strlen(s: *const u8) -> core::primitive::usize {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
-core::arch::global_asm!(".global __chkstk", "__chkstk:", "ret");

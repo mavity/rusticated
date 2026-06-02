@@ -79,7 +79,7 @@ mod native_env {
     /// Returns the current working directory.
     #[cfg(windows)]
     pub fn current_dir() -> io::Result<PathBuf> {
-        #[link(name = "kernel32")]
+        #[link(name = "kernel32", kind = "raw-dylib")]
         unsafe extern "system" {
             fn GetCurrentDirectoryW(nBufferLength: u32, lpBuffer: *mut u16) -> u32;
         }
@@ -102,7 +102,7 @@ mod native_env {
     /// Sets the current working directory.
     #[cfg(windows)]
     pub fn set_current_dir(path: &Path) -> io::Result<()> {
-        #[link(name = "kernel32")]
+        #[link(name = "kernel32", kind = "raw-dylib")]
         unsafe extern "system" {
             fn SetCurrentDirectoryW(lpPathName: *const u16) -> i32;
         }
