@@ -490,11 +490,6 @@ pub static mut _tls_index: u32 = 0;
 #[unsafe(no_mangle)]
 pub static mut _fltused: i32 = 0x9875;
 
-/// Stack probe for AArch64 Windows.
-#[cfg(all(target_arch = "aarch64", not(test)))]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __chkstk() {}
-
 /// Entry point for MSVC-linked binaries.
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
