@@ -20,6 +20,7 @@ nonstandard_style = { level = "deny" }
 rust_2018_idioms = { level = "deny", priority = -1 }
 unsafe_op_in_unsafe_fn = "deny"
 unknown_lints = { level = "allow", priority = -100 }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(rusticated_linux)"] }
 # rusticated intentionally uses native `async fn` in traits (no async-trait crate).
 async_fn_in_trait = { level = "allow", priority = 1 }
 
@@ -97,7 +98,6 @@ threads = []
 
 [dependencies]
 backtrace = { version = "0.3", default-features = false, optional = true }
-dlmalloc = { version = "0.2", features = ["global"] }
 spin = { version = "0.12", default-features = false, features = ["mutex", "spin_mutex", "rwlock", "once", "lazylock"] }
 hashbrown = { version = "0.14", default-features = false, features = ["ahash", "allocator-api2"] }
 ahash = { version = "0.8", default-features = false }

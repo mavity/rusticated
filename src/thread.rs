@@ -45,15 +45,6 @@ impl<T> JoinHandle<T> {
 #[cfg(not(target_family = "wasm"))]
 type ThreadBox = alloc::boxed::Box<dyn FnOnce() + Send + 'static>;
 
-/// Trampoline for OS thread entry on Linux/Unix (pthread_create).
-#[cfg(all(not(target_family = "wasm"), not(windows)))]
-unsafe extern "C" fn thread_trampoline_unix(arg: *mut core::ffi::c_void) -> *mut core::ffi::c_void {
-    let boxed: alloc::boxed::Box<ThreadBox> =
-        unsafe { alloc::boxed::Box::from_raw(arg as *mut ThreadBox) };
-    (*boxed)();
-    core::ptr::null_mut()
-}
-
 /// Trampoline for OS thread entry on Windows (CreateThread).
 #[cfg(windows)]
 unsafe extern "system" fn thread_trampoline_win(arg: *mut core::ffi::c_void) -> u32 {
@@ -94,32 +85,87 @@ pub fn spawn<F: FnOnce() + Send + 'static>(f: F) -> JoinHandle<()> {
             );
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(target_family = "wasm")))]
     {
-        unsafe extern "C" {
-            fn pthread_create(
-                thread: *mut usize,
-                attr: *const core::ffi::c_void,
-                start_routine: unsafe extern "C" fn(
-                    *mut core::ffi::c_void,
-                ) -> *mut core::ffi::c_void,
-                arg: *mut core::ffi::c_void,
-            ) -> i32;
+        const CLONE_VM: usize = 0x00000100;
+        const CLONE_FS: usize = 0x00000200;
+        const CLONE_FILES: usize = 0x00000400;
+        const CLONE_SIGHAND: usize = 0x00000800;
+        const CLONE_THREAD: usize = 0x00010000;
+        const CLONE_SYSVSEM: usize = 0x00040000;
+        const CLONE_IO: usize = 0x80000000;
+        const STACK_SIZE: usize = 256 * 1024;
+
+        let mut stack: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(STACK_SIZE);
+        unsafe { stack.set_len(STACK_SIZE) };
+        let stack_top = unsafe { stack.as_mut_ptr().add(STACK_SIZE) };
+        let _stack_leak = alloc::boxed::Box::leak(stack.into_boxed_slice());
+
+        let flags = CLONE_VM
+            | CLONE_FS
+            | CLONE_FILES
+            | CLONE_SIGHAND
+            | CLONE_THREAD
+            | CLONE_SYSVSEM
+            | CLONE_IO;
+
+        let result = crate::syscall!(
+            crate::os::linux::syscall::nr::CLONE,
+            flags,
+            stack_top as usize,
+            0usize,
+            0usize,
+            0usize
+        ) as isize;
+
+        if result < 0 {
+            let err = -result as i32;
+            report_clone_error(err);
         }
-        let mut thread_id: usize = 0;
-        unsafe {
-            pthread_create(
-                &mut thread_id,
-                core::ptr::null(),
-                thread_trampoline_unix,
-                arg,
-            );
+
+        if result == 0 {
+            let boxed: alloc::boxed::Box<ThreadBox> = unsafe { alloc::boxed::Box::from_raw(arg as *mut ThreadBox) };
+            (*boxed)();
+            crate::syscall!(crate::os::linux::syscall::nr::EXIT, 0usize);
         }
     }
 
     JoinHandle {
         _phantom: PhantomData,
     }
+}
+
+#[cfg(all(not(windows), not(target_family = "wasm")))]
+fn report_clone_error(code: i32) {
+    let mut buffer = [0u8; 128];
+    let mut len = 0;
+    let prefix = b"clone failed: ";
+    buffer[..prefix.len()].copy_from_slice(prefix);
+    len += prefix.len();
+
+    let mut num = code;
+    if num == 0 {
+        buffer[len] = b'0';
+        len += 1;
+    } else {
+        if num < 0 {
+            buffer[len] = b'-';
+            len += 1;
+            num = -num;
+        }
+        let start = len;
+        while num > 0 {
+            buffer[len] = b'0' + (num % 10) as u8;
+            num /= 10;
+            len += 1;
+        }
+        buffer[start..len].reverse();
+    }
+    buffer[len] = b'\n';
+    len += 1;
+
+    crate::syscall!(crate::os::linux::syscall::nr::WRITE, 2usize, buffer.as_ptr() as usize, len);
+    crate::syscall!(crate::os::linux::syscall::nr::EXIT, 1usize);
 }
 
 /// Sleep the current thread for approximately `ms` milliseconds.

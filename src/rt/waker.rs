@@ -18,7 +18,7 @@ static TASK_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
         arc.store(true, Ordering::Release);
         #[cfg(windows)]
         crate::rt::windows::queue_wake(u64::MAX);
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", rusticated_linux))]
         crate::rt::linux_driver::queue_wake();
         // arc drops here → refcount decremented
     },
@@ -30,7 +30,7 @@ static TASK_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
         core::mem::forget(arc);
         #[cfg(windows)]
         crate::rt::windows::queue_wake(u64::MAX);
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", rusticated_linux))]
         crate::rt::linux_driver::queue_wake();
     },
     // drop: decrement refcount

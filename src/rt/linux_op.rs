@@ -1,4 +1,4 @@
-#![cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", rusticated_linux))]
 
 use super::linux_state::OpState;
 use crate::future::Future;

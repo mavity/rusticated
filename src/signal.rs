@@ -201,21 +201,21 @@ impl TryFrom<u32> for Signal {
 #[cfg(not(target_family = "wasm"))]
 mod native_signal {
     use crate::io;
-    #[cfg(unix)]
+    #[cfg(any(unix, rusticated_linux))]
     use core::sync::atomic::AtomicI32;
     use core::sync::atomic::{AtomicBool, Ordering};
 
     // ── Unix: pipe-based async signal ─────────────────────────────────────────
 
     /// Read end of the async Ctrl-C notification pipe (-1 = uninitialised).
-    #[cfg(unix)]
+    #[cfg(any(unix, rusticated_linux))]
     static SIGNAL_PIPE_READ: AtomicI32 = AtomicI32::new(-1);
     /// Write end of the async Ctrl-C notification pipe (-1 = uninitialised).
-    #[cfg(unix)]
+    #[cfg(any(unix, rusticated_linux))]
     static SIGNAL_PIPE_WRITE: AtomicI32 = AtomicI32::new(-1);
 
     // O_CLOEXEC differs between Linux and BSD/macOS.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", rusticated_linux))]
     const O_CLOEXEC: i32 = 0o2_000_000;
     #[cfg(any(
         target_os = "macos",
@@ -226,7 +226,7 @@ mod native_signal {
     const O_CLOEXEC: i32 = 0x0100_0000;
 
     // O_NONBLOCK differs between Linux and BSD/macOS.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", rusticated_linux))]
     const O_NONBLOCK: i32 = 0o0_004_000;
     #[cfg(any(
         target_os = "macos",
@@ -237,14 +237,14 @@ mod native_signal {
     const O_NONBLOCK: i32 = 0x0000_0004;
 
     /// POSIX `SIGINT`.
-    #[cfg(unix)]
+    #[cfg(any(unix, rusticated_linux))]
     const SIGINT: i32 = 2;
 
     /// Signal handler function pointer type, matching `libc::sighandler_t`.
-    #[cfg(unix)]
+    #[cfg(any(unix, rusticated_linux))]
     type SigHandlerFn = extern "C" fn(i32);
 
-    #[cfg(unix)]
+    #[cfg(any(unix, rusticated_linux))]
     unsafe extern "C" {
         fn pipe2(pipefd: *mut i32, flags: i32) -> i32;
         fn write(fd: i32, buf: *const u8, count: usize) -> isize;
@@ -252,7 +252,7 @@ mod native_signal {
         fn signal(signum: i32, handler: SigHandlerFn) -> usize;
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, rusticated_linux))]
     fn get_signal_pipe() -> io::Result<[i32; 2]> {
         let r = SIGNAL_PIPE_READ.load(Ordering::Acquire);
         if r != -1 {
@@ -272,7 +272,7 @@ mod native_signal {
     }
 
     /// Async-signal-safe handler: writes one byte to the signal pipe.
-    #[cfg(unix)]
+    #[cfg(any(unix, rusticated_linux))]
     extern "C" fn sigint_handler(_sig: i32) {
         let tx = SIGNAL_PIPE_WRITE.load(Ordering::Acquire);
         if tx != -1 {
@@ -296,7 +296,7 @@ mod native_signal {
         install_handler()
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, rusticated_linux))]
     fn install_handler() -> io::Result<()> {
         // Initialise the pipe before the handler so it's available immediately.
         get_signal_pipe()?;
@@ -359,7 +359,7 @@ mod native_signal {
 
     // ── Platform-specific ctrl_c body ─────────────────────────────────────────
 
-    #[cfg(unix)]
+    #[cfg(any(unix, rusticated_linux))]
     async fn ctrl_c_impl() -> io::Result<()> {
         let [rx, _] = get_signal_pipe()?;
         crate::rt::wait_readable(rx).await?;
