@@ -14,6 +14,8 @@ Rusticated platform is strictly asynchronous and forbids any form of blocking io
 - Busy polling where an infinite synchronous loop polls a future until it completes.
 - Methods like block_on are explicitly prohibited.
 - Synchronous thread sleep is prohibited.
+- Tokio is prohibited.
+- DO NOT retain reedline backend.
 
 Any methods where prohibited blocking currently is enacted in upstream brush logic, these need to be converted to async methods and convert to use corresponding async primitives.
 
@@ -36,13 +38,47 @@ What to do:
 - Replace `tokio::runtime::Builder`, `runtime.block_on(...)`, and `std::process::exit` control flow.
 - Make `brush-core` use rusticated async primitives instead of `tokio::process`, `tokio::net`, and tokio signal helpers.
 - Replace the terminal and stdin backend assumptions in `brush-interactive` with a simple basic backend that can run with rusticated I/O.
+- Default `brush-shell` to the minimal stdin backend on rusticated builds.
 - Keep the shell output as plain text on a terminal screen.
 - Do not attempt ratatui rendering or kabibi widget integration yet.
+- Do not attempt to make rusticated adopt blocking or synchronous APIs: adjust brush to be async instead.
 
 Success criteria for stage 1:
 - brush can build and run using the rusticated async runtime: `cargo run -p brush-shell --config sysroot.toml`
 - brush can accept input and print output on a black terminal.
 - the shell works with a simple basic backend and no advanced terminal features.
+
+### Planned steps
+- Audit `brush-shell/src/entry.rs`, `brush-interactive/src/*`, and `brush-core/src/sys/*` to locate Tokio dependencies and blocking I/O patterns.
+  - `brush-shell/Cargo.toml` depends on `tokio` for native builds, and `src/entry.rs` uses `tokio::runtime::Builder`, `runtime.block_on(...)`, and `tokio::sync::Mutex`.
+  - `brush-core/Cargo.toml` depends on `tokio` for unix/windows and exposes `tokio_process`, `tokio::signal`, `tokio::task::spawn`, `tokio::select!`, and `tokio::task::spawn_blocking` across `commands.rs`, `processes.rs`, `jobs.rs`, `shell.rs`, `interp.rs`, `sys/tokio_process.rs`, `sys/unix/async_pipe.rs`, and `sys/unix/signal.rs`.
+  - `brush-interactive/Cargo.toml` depends on `tokio`; `basic/input_backend.rs` uses `tokio::task::block_in_place` and `Handle::current().block_on(...)`; `completion.rs` uses `tokio::select!` and `tokio::signal::ctrl_c`; the `reedline` backend has extensive `tokio::task::block_in_place` and `tokio::sync::Mutex` usage.
+- Add a rusticated-only feature set or target profile for `brush-shell` / `brush-core` that excludes Tokio and Tokio-based backends.
+- Replace `brush-shell` entrypoint runtime with rusticated `std::main!` / `std::spawn!`, removing `tokio::runtime::Builder`, `runtime.block_on(...)`, and Tokio task management.
+- Replace `brush-core` platform adapters from `tokio_process` / `tokio::signal` to rusticated `std::process` / `std::signal` equivalents.
+- Implement a minimal rusticated stdin/tty input backend in `brush-interactive` that uses `std::tty` + `std::io::AsyncRead` and avoids `block_in_place`.
+- Configure the plain basic backend as the default for rusticated builds and disable advanced/async-Tokio backends like `reedline`.
+- Build `brush-shell` with `--config sysroot.toml` and verify a plain terminal session starts, accepts a line, and prints output.
+- Iterate on any shell command execution or process handling failures until the shell is usable on native rusticated runtime.
+
+## Followup aspects
+
+1. Ensure rusticated has `std::any` support.
+  - Simple re-export: `pub mod any { pub use core::any::*; }`
+2. Eliminate `OsString` / `OsStr` from rusticated shell internals completely.
+  - Convert any exposed APIs to plain `String`.
+  - Do not retain `OsString` as a rusticated compatibility shim.
+3. Audit `clap_lex` and decide whether to replace it or isolate its use of `OsStr` behind a dedicated shim instead of exposing `OsStr` globally.
+4. Keep rusticated shell runtime single-threaded for now. Any code depending on threading needs to be converted to async.
+5. Fix the rusticated `brush-shell` entrypoint to use the normal rusticated async entry pattern:
+  - `std::main!` / `std::spawn!`
+  - avoid explicit `std::process::exit(...)` inside the spawned async task.
+6. Build and verify stage 1 before moving on:
+  - `cargo run -p brush-shell --config sysroot.toml`
+  - shell starts on a plain terminal, accepts input, and prints output.
+
+
+
 
 ## Stage 2: Add raw tty support using rusticated terminal APIs
 

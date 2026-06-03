@@ -616,7 +616,7 @@ mod native_process {
 
         #[cfg(windows)]
         fn spawn_impl(&mut self) -> io::Result<Child> {
-            use crate::ffi::OsStrExt as _;
+            use crate::ffi::EncodeWideExt as _;
             // Build a wide command line.
             let mut cmdline: Vec<u16> = self.program.encode_wide().collect();
             for arg in &self.args {

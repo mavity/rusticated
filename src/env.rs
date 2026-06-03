@@ -415,12 +415,28 @@ pub fn set_current_dir<P: AsRef<crate::path::Path>>(path: P) -> crate::io::Resul
 
 #[cfg(target_family = "wasm")]
 /// Joins a sequence of path components using the WASM host path conventions.
-pub fn join_paths<I, T>(_paths: I) -> Result<crate::ffi::OsString, ()>
+pub fn join_paths<I, T>(_paths: I) -> Result<crate::string::String, ()>
 where
     I: IntoIterator<Item = T>,
-    T: AsRef<crate::ffi::OsStr>,
+    T: AsRef<crate::path::Path>,
 {
-    Err(())
+    let mut result = crate::string::String::new();
+    let mut first = true;
+
+    #[cfg(windows)]
+    let separator = ";";
+    #[cfg(not(windows))]
+    let separator = ":";
+
+    for path in _paths {
+        if !first {
+            result.push_str(separator);
+        }
+        first = false;
+        result.push_str(path.as_ref().as_str());
+    }
+
+    Ok(result)
 }
 
 /// Error returned when an environment variable is not found or invalid.
