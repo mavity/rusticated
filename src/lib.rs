@@ -29,8 +29,7 @@ pub mod prelude {
         pub use alloc::vec::Vec;
         // Macros
         pub use crate::{eprint, eprintln, format, print, println, spawn, thread_local};
-        // OsStringExt for into_encoded_bytes()
-        pub use crate::ffi::OsStringExt;
+        pub use crate::ffi::EncodeWideExt;
         pub use alloc::vec;
         pub use core::{
             assert, assert_eq, assert_ne, debug_assert, debug_assert_eq, debug_assert_ne, matches,

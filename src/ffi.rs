@@ -1,6 +1,5 @@
 //! OS string types and null-terminated C strings for `#![no_std]` use.
 
-use crate::string::String;
 use crate::vec::Vec;
 pub use core::ffi::c_char;
 pub use core::ffi::c_double;
@@ -16,19 +15,12 @@ pub use core::ffi::c_ulong;
 pub use core::ffi::c_ulonglong;
 pub use core::ffi::c_ushort;
 pub use core::ffi::c_void;
-// ─── OsStr / OsString ────────────────────────────────────────────────────────
 
-/// OS string slice — an alias for [`str`].
-///
-/// All supported targets work with UTF-8 exclusively; this alias makes
-/// call sites that import `crate::ffi::OsStr` compatible with code originally
-/// written against `std::ffi::OsStr`.
-pub type OsStr = str;
+/// Re-export of `core::any` so `std::any` works in the rusticated compatibility layer.
+pub mod any {
+    pub use core::any::*;
+}
 
-/// Owned OS string — an alias for [`String`].
-pub type OsString = String;
-
-// ─── CString ─────────────────────────────────────────────────────────────────
 
 /// Error returned when a string contains an interior null byte.
 #[derive(Debug)]
@@ -66,33 +58,6 @@ impl CString {
     }
 }
 
-// ─── OsStrExt ────────────────────────────────────────────────────────────────
-
-/// Extension methods on [`OsStr`] (`str`) providing byte-level access
-/// and Windows UTF-16 encoding.
-pub trait OsStrExt {
-    /// Returns the underlying byte representation.
-    fn as_bytes(&self) -> &[u8];
-
-    /// Encodes the string as UTF-16 code units.
-    ///
-    /// Used on Windows to build `LPCWSTR` arguments for Win32 APIs.
-    fn encode_wide(&self) -> EncodeWide<'_>;
-}
-
-impl OsStrExt for str {
-    #[inline]
-    fn as_bytes(&self) -> &[u8] {
-        str::as_bytes(self)
-    }
-
-    #[inline]
-    fn encode_wide(&self) -> EncodeWide<'_> {
-        EncodeWide {
-            inner: self.encode_utf16(),
-        }
-    }
-}
 
 /// Iterator that yields UTF-16 code units for a `str`.
 pub struct EncodeWide<'a> {
@@ -108,17 +73,22 @@ impl Iterator for EncodeWide<'_> {
     }
 }
 
-// ─── OsStringExt ────────────────────────────────────────────────────────────
-
-/// Extension methods on owned [`OsString`] (`String`).
-pub trait OsStringExt {
-    /// Convert into the raw byte representation of the string.
-    fn into_encoded_bytes(self) -> Vec<u8>;
+/// UTF-16 encoder for UTF-8 path strings.
+pub trait EncodeWideExt {
+    /// Returns an iterator over the UTF-16 code units of this string.
+    fn encode_wide(&self) -> EncodeWide<'_>;
 }
 
-impl OsStringExt for String {
-    #[inline]
-    fn into_encoded_bytes(self) -> Vec<u8> {
-        self.into_bytes()
+impl EncodeWideExt for str {
+    fn encode_wide(&self) -> EncodeWide<'_> {
+        EncodeWide {
+            inner: self.encode_utf16(),
+        }
+    }
+}
+
+impl EncodeWideExt for alloc::string::String {
+    fn encode_wide(&self) -> EncodeWide<'_> {
+        self.as_str().encode_wide()
     }
 }
