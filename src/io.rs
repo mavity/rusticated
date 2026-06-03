@@ -1,4 +1,9 @@
 //! I/O abstractions — owned-buffer async traits, and error types.
+//!
+//! WARNING: rusticated is strictly async.
+//! Do NOT introduce blocking std I/O traits or methods here.
+//! ESPECIALLY NOT `Read` / `Write` / `BufRead` / `Seek`
+//! These are forbidden in the rusticated at all times, for ANY reasons.
 
 use crate::vec::Vec;
 
