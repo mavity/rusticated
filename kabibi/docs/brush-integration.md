@@ -5,7 +5,24 @@ We will use `rusticated` as the async runtime and build the integration in three
 The eventual structure is:
 
 - `/kabibi`
-- `/suklay`  ← a brush submodule inside kabibi
+  - `/suklay`  ← a brush submodule inside kabibi
+
+## STRICT MANDATE
+
+Rusticated platform is strictly asynchronous and forbids any form of blocking io or blocking threading:
+- Synchronous Read/Write traits, or synchronous read/write methods.
+- Busy polling where an infinite synchronous loop polls a future until it completes.
+- Methods like block_on are explicitly prohibited.
+- Synchronous thread sleep is prohibited.
+
+Any methods where prohibited blocking currently is enacted in upstream brush logic, these need to be converted to async methods and convert to use corresponding async primitives.
+
+- Synchronous Read/Write should be converted to AsyncRead/AsyncWrite.
+- Synchronous busy polling converted to await on the corresponding future.
+- Synchronous thread sleep converted to await on asynchronous sleep.
+- Any async may necessarily require proliferation through traits converted to async, callers made async and so on.
+
+An apt approach to handling top-level async bubbling all the way to the initial entry point can be observed in `demo` and `demo/loch`.
 
 ## Stage 1: Migrate brush onto rusticated with a simple backend
 
