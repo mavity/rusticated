@@ -9,11 +9,11 @@ pub mod raw {
     pub type c_char = i8;
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", rusticated_linux))]
 pub mod linux;
 
 /// Unix-specific extensions.
-#[cfg(unix)]
+#[cfg(any(unix, rusticated_linux))]
 pub mod unix {
     /// Unix file-descriptor I/O extensions.
     pub mod io {

@@ -1,16 +1,17 @@
 #![warn(missing_docs)]
 //! Fast, standard-library-shaped async platform layer for brush-async
 
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 #![allow(internal_features)]
-#![feature(lang_items)]
+#![cfg_attr(not(test), feature(lang_items))]
 #![feature(prelude_import)]
-#![feature(alloc_error_handler)]
-#![cfg_attr(target_os = "linux", feature(linkage))]
+#![cfg_attr(not(test), feature(alloc_error_handler))]
+#![cfg_attr(all(not(test), any(target_os = "linux", rusticated_linux)), feature(linkage))]
 
 // No prelude_import here, as this IS the std library providing the prelude.
 
 pub extern crate alloc;
+mod allocator;
 
 /// Prelude for the standard library.
 pub mod prelude {
@@ -231,6 +232,7 @@ pub mod abi;
 ///
 /// This implementation is used by the custom sysroot to report panic
 /// information and abort the process.
+#[cfg(not(test))]
 #[panic_handler]
 #[allow(unused_variables)]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
@@ -363,13 +365,7 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     loop {}
 }
 
-#[cfg(all(
-    not(any(test, target_family = "wasm")),
-    any(target_os = "none", windows)
-))]
-struct SystemAllocator;
-
-#[cfg(not(any(test, target_family = "wasm")))]
+#[cfg(not(test))]
 #[unsafe(no_mangle)]
 /// Global allocation entry point used by the Rust runtime.
 pub unsafe extern "C" fn __rust_alloc(size: usize, align: usize) -> *mut u8 {
@@ -377,7 +373,7 @@ pub unsafe extern "C" fn __rust_alloc(size: usize, align: usize) -> *mut u8 {
     unsafe { ALLOCATOR.alloc(core::alloc::Layout::from_size_align_unchecked(size, align)) }
 }
 
-#[cfg(not(any(test, target_family = "wasm")))]
+#[cfg(not(test))]
 #[unsafe(no_mangle)]
 /// Global deallocation entry point used by the Rust runtime.
 pub unsafe extern "C" fn __rust_dealloc(ptr: *mut u8, size: usize, align: usize) {
@@ -390,7 +386,7 @@ pub unsafe extern "C" fn __rust_dealloc(ptr: *mut u8, size: usize, align: usize)
     }
 }
 
-#[cfg(not(any(test, target_family = "wasm")))]
+#[cfg(not(test))]
 #[unsafe(no_mangle)]
 /// Global reallocation entry point used by the Rust runtime.
 pub unsafe extern "C" fn __rust_realloc(
@@ -409,7 +405,7 @@ pub unsafe extern "C" fn __rust_realloc(
     }
 }
 
-#[cfg(not(any(test, target_family = "wasm")))]
+#[cfg(not(test))]
 #[unsafe(no_mangle)]
 /// Global zeroed allocation entry point used by the Rust runtime.
 pub unsafe extern "C" fn __rust_alloc_zeroed(size: usize, align: usize) -> *mut u8 {
@@ -417,55 +413,9 @@ pub unsafe extern "C" fn __rust_alloc_zeroed(size: usize, align: usize) -> *mut 
     unsafe { ALLOCATOR.alloc_zeroed(core::alloc::Layout::from_size_align_unchecked(size, align)) }
 }
 
-#[cfg(all(
-    not(any(test, target_family = "wasm")),
-    any(target_os = "none", windows)
-))]
-unsafe impl core::alloc::GlobalAlloc for SystemAllocator {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        #[cfg(windows)]
-        {
-            #[link(name = "kernel32", kind = "raw-dylib")]
-            unsafe extern "system" {
-                fn GetProcessHeap() -> core::primitive::usize;
-                fn HeapAlloc(
-                    hHeap: core::primitive::usize,
-                    dwFlags: u32,
-                    dwBytes: core::primitive::usize,
-                ) -> *mut u8;
-            }
-            unsafe { HeapAlloc(GetProcessHeap(), 0, layout.size()) }
-        }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, _layout: core::alloc::Layout) {
-        #[cfg(windows)]
-        {
-            #[link(name = "kernel32", kind = "raw-dylib")]
-            unsafe extern "system" {
-                fn GetProcessHeap() -> core::primitive::usize;
-                fn HeapFree(hHeap: core::primitive::usize, dwFlags: u32, lpMem: *mut u8) -> i32;
-            }
-            unsafe {
-                HeapFree(GetProcessHeap(), 0, ptr);
-            }
-        }
-    }
-}
-
-#[cfg(all(
-    not(any(test, target_family = "wasm")),
-    any(target_os = "none", windows)
-))]
+#[cfg(not(test))]
 #[global_allocator]
-static ALLOCATOR: SystemAllocator = SystemAllocator;
-
-#[cfg(all(
-    not(test),
-    any(target_os = "linux", target_family = "wasm", target_os = "none")
-))]
-#[global_allocator]
-static ALLOCATOR: dlmalloc::GlobalDlmalloc = dlmalloc::GlobalDlmalloc;
+static ALLOCATOR: allocator::RusticatedAllocator = allocator::RusticatedAllocator;
 
 #[cfg(feature = "backtrace")]
 pub mod backtrace_impl {
@@ -492,7 +442,7 @@ fn oom(_: core::alloc::Layout) -> ! {
 // strong definition from the sysroot std wins and no duplicate-definition error
 // occurs.  On standalone native targets (brot, etc.) where only rusticated is
 // present, this weak stub is used normally.
-#[cfg(all(target_os = "linux", not(test), not(target_family = "wasm")))]
+#[cfg(all(any(target_os = "linux", rusticated_linux), not(test), not(target_family = "wasm")))]
 #[unsafe(no_mangle)]
 #[linkage = "weak"]
 /// Weak fallback personality function used by the system unwind library.

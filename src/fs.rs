@@ -22,7 +22,7 @@ use crate::traits::{AsyncRead, AsyncWrite};
 use alloc::string::String;
 use alloc::vec::Vec;
 
-#[cfg(all(unix, target_pointer_width = "64"))]
+#[cfg(all(any(unix, rusticated_linux), target_pointer_width = "64"))]
 #[repr(C)]
 struct Stat {
     st_dev: u64,
@@ -45,7 +45,7 @@ struct Stat {
     __unused: [i64; 3],
 }
 
-#[cfg(all(unix, not(target_pointer_width = "64")))]
+#[cfg(all(any(unix, rusticated_linux), not(target_pointer_width = "64")))]
 compile_error!("rusticated unix metadata support currently requires a 64-bit target");
 
 pub use File as FileNative;
@@ -76,7 +76,7 @@ impl Metadata {
 
     /// Returns `true` if this metadata describes a regular file.
     pub fn is_file(&self) -> bool {
-        #[cfg(target_family = "unix")]
+        #[cfg(any(target_family = "unix", rusticated_linux))]
         {
             (self.mode & 0o170000) == 0o100000
         }
@@ -92,7 +92,7 @@ impl Metadata {
 
     /// Returns `true` if this metadata describes a directory.
     pub fn is_dir(&self) -> bool {
-        #[cfg(target_family = "unix")]
+        #[cfg(any(target_family = "unix", rusticated_linux))]
         {
             (self.mode & 0o170000) == 0o040000
         }
@@ -108,7 +108,7 @@ impl Metadata {
 
     /// Returns `true` if this metadata describes a symbolic link.
     pub fn is_symlink(&self) -> bool {
-        #[cfg(target_family = "unix")]
+        #[cfg(any(target_family = "unix", rusticated_linux))]
         {
             (self.mode & 0o170000) == 0o120000
         }
@@ -124,11 +124,11 @@ impl Metadata {
 
     /// Returns `true` if this metadata describes a block device.
     pub fn is_block_device(&self) -> bool {
-        #[cfg(unix)]
+        #[cfg(any(unix, rusticated_linux))]
         {
             (self.mode & 0o170000) == 0o060000
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, rusticated_linux)))]
         {
             false
         }
@@ -136,11 +136,11 @@ impl Metadata {
 
     /// Returns `true` if this metadata describes a character device.
     pub fn is_char_device(&self) -> bool {
-        #[cfg(unix)]
+        #[cfg(any(unix, rusticated_linux))]
         {
             (self.mode & 0o170000) == 0o020000
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, rusticated_linux)))]
         {
             false
         }
@@ -148,11 +148,11 @@ impl Metadata {
 
     /// Returns `true` if this metadata describes a FIFO.
     pub fn is_fifo(&self) -> bool {
-        #[cfg(unix)]
+        #[cfg(any(unix, rusticated_linux))]
         {
             (self.mode & 0o170000) == 0o010000
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, rusticated_linux)))]
         {
             false
         }
@@ -160,11 +160,11 @@ impl Metadata {
 
     /// Returns `true` if this metadata describes a socket.
     pub fn is_socket(&self) -> bool {
-        #[cfg(unix)]
+        #[cfg(any(unix, rusticated_linux))]
         {
             (self.mode & 0o170000) == 0o140000
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, rusticated_linux)))]
         {
             false
         }
@@ -172,7 +172,7 @@ impl Metadata {
 
     /// Returns `true` if the entry is read-only.
     pub fn readonly(&self) -> bool {
-        #[cfg(target_family = "unix")]
+        #[cfg(any(target_family = "unix", rusticated_linux))]
         {
             (self.mode & 0o222) == 0
         }
@@ -256,7 +256,7 @@ pub struct Permissions {
 impl Permissions {
     /// Returns whether the file is read-only.
     pub fn readonly(&self) -> bool {
-        #[cfg(target_family = "unix")]
+        #[cfg(any(target_family = "unix", rusticated_linux))]
         {
             (self.mode & 0o222) == 0
         }
@@ -282,7 +282,7 @@ impl Permissions {
 
     /// Sets or clears the read-only flag.
     pub fn set_readonly(&mut self, readonly: bool) {
-        #[cfg(any(unix, target_family = "wasm"))]
+        #[cfg(any(unix, rusticated_linux, target_family = "wasm"))]
         {
             if readonly {
                 self.mode &= !0o222;
@@ -640,7 +640,7 @@ impl OpenOptions {
                 let mut path_bytes = alloc::vec::Vec::from(path.as_bytes());
                 path_bytes.push(0);
 
-                #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+                #[cfg(all(any(target_os = "linux", rusticated_linux), target_arch = "x86_64"))]
                 let handle = crate::syscall!(
                     crate::os::linux::syscall::nr::OPEN,
                     path_bytes.as_ptr() as usize,
@@ -648,7 +648,7 @@ impl OpenOptions {
                     0o666usize
                 ) as i32;
 
-                #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+                #[cfg(all(any(target_os = "linux", rusticated_linux), target_arch = "aarch64"))]
                 let handle = crate::syscall!(
                     crate::os::linux::syscall::nr::OPENAT,
                     -100isize as usize, // AT_FDCWD
@@ -657,7 +657,7 @@ impl OpenOptions {
                     0o666usize
                 ) as i32;
 
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(not(any(target_os = "linux", rusticated_linux)))]
                 let handle = {
                     unsafe extern "C" {
                         fn open(pathname: *const u8, flags: i32, mode: u32) -> i32;
@@ -735,11 +735,11 @@ impl Drop for File {
             }
             CloseHandle(self.handle as usize);
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, rusticated_linux))]
         {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", rusticated_linux))]
             crate::syscall!(crate::os::linux::syscall::nr::CLOSE, self.handle as usize);
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", rusticated_linux)))]
             unsafe {
                 unsafe extern "C" {
                     fn close(fd: i32) -> i32;
@@ -802,12 +802,12 @@ impl File {
 
     /// Attempts to duplicate the file handle.
     pub fn try_clone(&self) -> io::Result<Self> {
-        #[cfg(target_family = "unix")]
+        #[cfg(any(target_family = "unix", rusticated_linux))]
         {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", rusticated_linux))]
             let new_fd =
                 crate::syscall!(crate::os::linux::syscall::nr::DUP, self.handle as usize) as i32;
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", rusticated_linux)))]
             let new_fd = unsafe {
                 unsafe extern "C" {
                     fn dup(oldfd: i32) -> i32;
@@ -838,9 +838,9 @@ impl File {
 
     /// Returns `true` when the file points at a terminal device.
     pub fn is_terminal(&self) -> bool {
-        #[cfg(target_family = "unix")]
+        #[cfg(any(target_family = "unix", rusticated_linux))]
         {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", rusticated_linux))]
             {
                 let mut termios = [0u8; 1024]; // Large enough for any termios
                 let res = crate::syscall!(
@@ -851,7 +851,7 @@ impl File {
                 ) as isize;
                 res >= 0
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", rusticated_linux)))]
             {
                 unsafe {
                     unsafe extern "C" {
@@ -929,13 +929,13 @@ impl AsyncWrite for File {
         {
             Ok(())
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, rusticated_linux))]
         {
             let fd = self.handle as i32;
             crate::rt::blocking::BlockingOpFuture::new(move || {
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", rusticated_linux))]
                 let res = crate::syscall!(crate::os::linux::syscall::nr::FSYNC, fd as usize) as i32;
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(not(any(target_os = "linux", rusticated_linux)))]
                 let res = unsafe {
                     unsafe extern "C" {
                         fn fsync(fd: i32) -> i32;
@@ -1151,7 +1151,7 @@ pub async fn read_dir<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
             let mut path_bytes = alloc::vec::Vec::from(path.as_bytes());
             path_bytes.push(0);
 
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", rusticated_linux)))]
             #[repr(C)]
             struct Dirent {
                 d_ino: u64,
@@ -1161,7 +1161,7 @@ pub async fn read_dir<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
                 d_name: [u8; 256],
             }
 
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", rusticated_linux))]
             {
                 // On Linux we'll use open + getdents64
                 #[cfg(target_arch = "x86_64")]
@@ -1257,7 +1257,7 @@ pub async fn read_dir<P: AsRef<str>>(path: P) -> io::Result<ReadDir> {
                 crate::syscall!(crate::os::linux::syscall::nr::CLOSE, fd as usize);
                 Ok(ReadDir { entries, pos: 0 })
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", rusticated_linux)))]
             {
                 unsafe extern "C" {
                     fn opendir(name: *const u8) -> *mut core::ffi::c_void;
@@ -1327,14 +1327,14 @@ pub async fn metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
     {
         let path = crate::string::String::from(path.as_ref());
         crate::rt::blocking::BlockingOpFuture::new(move || {
-            #[cfg(unix)]
+            #[cfg(any(unix, rusticated_linux))]
             {
                 let mut path_bytes = alloc::vec::Vec::from(path.as_bytes());
                 path_bytes.push(0);
 
                 let mut meta = core::mem::MaybeUninit::<Stat>::uninit();
 
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", rusticated_linux))]
                 let result = {
                     #[cfg(target_arch = "x86_64")]
                     let r = crate::syscall!(
@@ -1352,7 +1352,7 @@ pub async fn metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
                     ) as i32;
                     r
                 };
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(not(any(target_os = "linux", rusticated_linux)))]
                 let result = {
                     unsafe extern "C" {
                         fn stat(pathname: *const u8, buf: *mut Stat) -> i32;
@@ -1485,14 +1485,14 @@ pub async fn symlink_metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
     {
         let path = crate::string::String::from(path.as_ref());
         crate::rt::blocking::BlockingOpFuture::new(move || {
-            #[cfg(unix)]
+            #[cfg(any(unix, rusticated_linux))]
             {
                 let mut path_bytes = alloc::vec::Vec::from(path.as_bytes());
                 path_bytes.push(0);
 
                 let mut meta = core::mem::MaybeUninit::<Stat>::uninit();
 
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", rusticated_linux))]
                 let result = {
                     #[cfg(target_arch = "x86_64")]
                     let r = crate::syscall!(
@@ -1510,7 +1510,7 @@ pub async fn symlink_metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
                     ) as i32;
                     r
                 };
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(not(any(target_os = "linux", rusticated_linux)))]
                 let result = {
                     unsafe extern "C" {
                         fn lstat(pathname: *const u8, buf: *mut Stat) -> i32;
@@ -1664,12 +1664,12 @@ pub async fn set_permissions<P: AsRef<str>>(path: P, permissions: Permissions) -
     {
         let path = crate::string::String::from(path.as_ref());
         crate::rt::blocking::BlockingOpFuture::new(move || {
-            #[cfg(unix)]
+            #[cfg(any(unix, rusticated_linux))]
             {
                 let mut path_bytes = alloc::vec::Vec::from(path.as_bytes());
                 path_bytes.push(0);
 
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", rusticated_linux))]
                 let rc = {
                     #[cfg(target_arch = "x86_64")]
                     let r = crate::syscall!(
@@ -1687,7 +1687,7 @@ pub async fn set_permissions<P: AsRef<str>>(path: P, permissions: Permissions) -
                     ) as i32;
                     r
                 };
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(not(any(target_os = "linux", rusticated_linux)))]
                 let rc = unsafe {
                     unsafe extern "C" {
                         fn chmod(pathname: *const u8, mode: u32) -> i32;

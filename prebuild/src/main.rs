@@ -103,8 +103,9 @@ fn main() {
             .insert("panic-strategy".to_string(), serde_json::json!("abort"));
 
         if base_target.contains("-linux-gnu") {
-            // Restore 'os' to prevent 'libc' crate from failing to compile.
-            // But we keep no-default-libraries and linker-flavor settings to try to exclude it from the final link.
+            // Keep the real Linux OS target while still enforcing no-default libraries
+            // for the rusticated sysroot. This preserves unix cfg branches and avoids
+            // fake no-OS target semantics.
             spec.as_object_mut()
                 .unwrap()
                 .insert("os".to_string(), serde_json::json!("linux"));
@@ -119,9 +120,10 @@ fn main() {
                 .insert("relocation-model".to_string(), serde_json::json!("static"));
         }
 
-        // Set target-family correctly based on base_target
-        let families = if base_target.contains("-linux-")
-            || base_target.contains("-darwin")
+        // Set target-family correctly based on base_target.
+        let families = if base_target.contains("-linux-") {
+            vec!["unix", "rusticated"]
+        } else if base_target.contains("-darwin")
             || base_target.contains("-freebsd")
         {
             vec!["unix", "rusticated"]
@@ -279,8 +281,8 @@ fn main() {
         if base_target.contains("-linux-gnu") {
             obj.insert("linker".to_string(), serde_json::json!("rust-lld"));
             obj.insert("linker-flavor".to_string(), serde_json::json!("gnu-lld"));
-            // Strip 'env' to prevent automatic linkage of libc/libm in consumer crates.
-            // We'll use --cfg target_env="gnu" during rlib build to satisfy 'libc' crate.
+            // Use an empty environment so this rusticated Linux target does not
+            // automatically pull in GNU CRT libraries.
             obj.insert("env".to_string(), serde_json::json!(""));
         }
         if let Some(metadata) = obj.get_mut("metadata") {
@@ -308,11 +310,10 @@ fn main() {
         };
 
         if base_target.contains("-linux-gnu") {
-            rustflags.push_str(" -A explicit-builtin-cfgs-in-flags --cfg target_env=\"gnu\"");
+            rustflags.push_str(" -A explicit-builtin-cfgs-in-flags --cfg rusticated_linux");
         }
 
         if base_target.contains("-linux-") {
-            rustflags.insert_str(0, "-L native=./dummy_libs ");
         }
 
         let mut build_cmd = Command::new("cargo");
@@ -449,13 +450,7 @@ fn main() {
         };
         target_rustflags.push_str(&format!("    \"-L\", \"dependency={}\",\n", abs_deps_dir));
         if custom_name.contains("-linux") {
-            target_rustflags.push_str(&format!(
-                "    \"-L\", \"native={}/dummy_libs\",\n",
-                std::env::current_dir()
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/")
-            ));
+            target_rustflags.push_str("    \"--cfg\", \"rusticated_linux\",\n");
         }
         target_rustflags.push_str("]\n\n");
         config_toml.push_str(&target_rustflags);
@@ -493,7 +488,7 @@ fn main() {
         }
     } else if host.contains("-linux-gnu") {
         let arch = host.split('-').next().unwrap_or("x86_64");
-        let target = format!("{}-rusticated-linux-gnu", arch);
+        let target = format!("{}-rusticated-linux", arch);
         if built_targets.contains(&target) {
             target
         } else {

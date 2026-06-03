@@ -2,7 +2,7 @@
 //! [`set_mode`], [`enable_raw_mode`], [`disable_raw_mode`], and
 //! [`cursor_position`] across all platforms.
 
-#[cfg(unix)]
+#[cfg(any(unix, rusticated_linux))]
 pub use unix_tty::{
     SizeStream, Tty, cursor_position, disable_raw_mode, enable_raw_mode, set_mode, size, stdin,
     stdout,
@@ -27,17 +27,17 @@ pub fn is_stdin_a_tty() -> bool {
 
 /// Called when `epoll_wait` returns `EINTR`; dispatches any pending SIGWINCH.
 /// Currently a no-op; terminal-size polling is handled by `SizeStream`.
-#[cfg(unix)]
+#[cfg(any(unix, rusticated_linux))]
 pub(crate) fn check_sigwinch() {}
 
 // ─── Unix (Linux + BSD/macOS) ─────────────────────────────────────────────────
 
-#[cfg(unix)]
+#[cfg(any(unix, rusticated_linux))]
 mod unix_tty {
     use crate::io;
     use crate::vec::Vec;
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", rusticated_linux)))]
     unsafe extern "C" {
         fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
         fn write(fd: i32, buf: *const u8, count: usize) -> isize;
@@ -45,7 +45,7 @@ mod unix_tty {
     }
 
     // TIOCGWINSZ value per platform (ioctl to query terminal size).
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", rusticated_linux))]
     const TIOCGWINSZ: usize = 0x5413;
     #[cfg(any(
         target_os = "macos",
@@ -121,14 +121,14 @@ mod unix_tty {
             ws_ypixel: 0,
         };
         // SAFETY: fd is caller-supplied; `ws` is a valid local struct.
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", rusticated_linux))]
         let ret = crate::syscall!(
             crate::os::linux::syscall::nr::IOCTL,
             handle as usize,
             TIOCGWINSZ,
             &mut ws as *mut Winsize as usize
         ) as i32;
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", rusticated_linux)))]
         let ret = unsafe { ioctl(handle as i32, TIOCGWINSZ, &mut ws as *mut Winsize) };
 
         if ret < 0 {
@@ -150,7 +150,7 @@ mod unix_tty {
     ///
     /// The Linux termios constant set is retained for future raw tty mode
     /// support. Only the currently unused constants are individually allowed.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", rusticated_linux))]
     mod tc {
         #![allow(missing_docs)]
         /// c_lflag: disable canonical (line-buffered) input.
@@ -266,7 +266,7 @@ mod unix_tty {
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", rusticated_linux)))]
     unsafe extern "C" {
         fn tcgetattr(fd: i32, termios: *mut tc::Termios) -> i32;
         fn tcsetattr(fd: i32, optional_actions: i32, termios: *const tc::Termios) -> i32;
@@ -286,14 +286,14 @@ mod unix_tty {
     pub fn enable_raw_mode() -> io::Result<()> {
         let mut orig = core::mem::MaybeUninit::<tc::Termios>::uninit();
         // SAFETY: fd 0 is stdin; `orig` is valid memory for the call.
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", rusticated_linux))]
         let ret = crate::syscall!(
             crate::os::linux::syscall::nr::IOCTL,
             0usize,
             0x5401usize, // TCGETS
             orig.as_mut_ptr() as usize
         ) as i32;
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", rusticated_linux)))]
         let ret = unsafe { tcgetattr(0, orig.as_mut_ptr()) };
 
         if ret < 0 {
@@ -322,14 +322,14 @@ mod unix_tty {
         raw.c_cc[tc::VTIME] = 0;
 
         // SAFETY: fd 0 is stdin; `raw` is a valid termios.
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", rusticated_linux))]
         let ret = crate::syscall!(
             crate::os::linux::syscall::nr::IOCTL,
             0usize,
             0x5402usize, // TCSETS
             &raw as *const _ as usize
         ) as i32;
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", rusticated_linux)))]
         let ret = unsafe { tcsetattr(0, tc::TCSANOW, &raw) };
 
         if ret < 0 {
@@ -345,14 +345,14 @@ mod unix_tty {
         let guard = SAVED_TERMIOS.lock();
         if let Some(ref orig) = *guard {
             // SAFETY: fd 0 is stdin; `orig` is a valid termios saved earlier.
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", rusticated_linux))]
             let ret = crate::syscall!(
                 crate::os::linux::syscall::nr::IOCTL,
                 0usize,
                 0x5402usize, // TCSETS
                 orig as *const _ as usize
             ) as i32;
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", rusticated_linux)))]
             let ret = unsafe { tcsetattr(0, tc::TCSANOW, orig) };
 
             if ret < 0 {
@@ -369,14 +369,14 @@ mod unix_tty {
     pub fn cursor_position() -> io::Result<(u16, u16)> {
         // Send Device Status Report (DSR) to stdout.
         let dsr = b"\x1b[6n";
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", rusticated_linux))]
         let n = crate::syscall!(
             crate::os::linux::syscall::nr::WRITE,
             1usize,
             dsr.as_ptr() as usize,
             dsr.len()
         ) as isize;
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", rusticated_linux)))]
         let n = unsafe { write(1, dsr.as_ptr(), dsr.len()) };
 
         if n < 0 {
@@ -387,14 +387,14 @@ mod unix_tty {
         let mut buf = [0u8; 32];
         let mut len = 0usize;
         loop {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", rusticated_linux))]
             let n = crate::syscall!(
                 crate::os::linux::syscall::nr::READ,
                 0usize,
                 buf.as_mut_ptr().add(len) as usize,
                 1usize
             ) as isize;
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", rusticated_linux)))]
             let n = unsafe { read(0, buf.as_mut_ptr().add(len), 1) };
 
             if n <= 0 {
@@ -441,7 +441,7 @@ mod unix_tty {
 
     impl crate::io::IsTerminal for Tty {
         fn is_terminal(&self) -> bool {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", rusticated_linux))]
             {
                 let mut termios = [0u8; 1024]; // Large enough for any termios
                 let res = crate::syscall!(
@@ -452,7 +452,7 @@ mod unix_tty {
                 ) as isize;
                 res == 0
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", rusticated_linux)))]
             unsafe {
                 unsafe extern "C" {
                     fn isatty(fd: i32) -> i32;
@@ -470,14 +470,14 @@ mod unix_tty {
                 return (Err(e), buf);
             }
             // SAFETY: `buf.as_mut_ptr()` is valid for `buf.capacity()` bytes.
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", rusticated_linux))]
             let n = crate::syscall!(
                 crate::os::linux::syscall::nr::READ,
                 self.fd as usize,
                 buf.as_mut_ptr() as usize,
                 buf.capacity()
             ) as isize;
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", rusticated_linux)))]
             let n = unsafe {
                 unsafe extern "C" {
                     fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
@@ -498,14 +498,14 @@ mod unix_tty {
     impl crate::io::AsyncWrite for Tty {
         async fn write(&mut self, buf: Vec<u8>) -> (io::Result<usize>, Vec<u8>) {
             // SAFETY: `buf.as_ptr()` is valid for `buf.len()` bytes.
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", rusticated_linux))]
             let n = crate::syscall!(
                 crate::os::linux::syscall::nr::WRITE,
                 self.fd as usize,
                 buf.as_ptr() as usize,
                 buf.len()
             ) as isize;
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", rusticated_linux)))]
             let n = unsafe {
                 unsafe extern "C" {
                     fn write(fd: i32, buf: *const u8, count: usize) -> isize;

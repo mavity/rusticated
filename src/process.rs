@@ -84,7 +84,7 @@ mod native_process {
     use crate::vec::Vec;
     // ── Linux pidfd async wait ────────────────────────────────────────────────
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", rusticated_linux))]
     unsafe extern "C" {
         fn close(fd: i32) -> i32;
     }
@@ -108,7 +108,7 @@ mod native_process {
 
     // ── Unix: posix_spawnp, waitpid, kill ────────────────────────────────────
 
-    #[cfg(unix)]
+    #[cfg(any(unix, rusticated_linux))]
     unsafe extern "C" {
         fn posix_spawnp(
             pid: *mut i32,
@@ -123,9 +123,9 @@ mod native_process {
         static environ: *const *const u8;
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, rusticated_linux))]
     const SIGKILL: i32 = 9;
-    #[cfg(unix)]
+    #[cfg(any(unix, rusticated_linux))]
     const WNOHANG: i32 = 1;
 
     // ── Windows ───────────────────────────────────────────────────────────────
@@ -240,7 +240,7 @@ mod native_process {
 
     /// A running child process.
     pub struct Child {
-        #[cfg(unix)]
+        #[cfg(any(unix, rusticated_linux))]
         pid: u32,
         #[cfg(windows)]
         handle: usize,
@@ -257,7 +257,7 @@ mod native_process {
     impl Child {
         /// Returns the process ID.
         pub fn id(&self) -> Option<u32> {
-            #[cfg(unix)]
+            #[cfg(any(unix, rusticated_linux))]
             {
                 Some(self.pid)
             }
@@ -392,7 +392,7 @@ mod native_process {
 
         /// Non-blocking check if the child has exited.
         pub fn try_wait(&mut self) -> io::Result<Option<ChildExitStatus>> {
-            #[cfg(unix)]
+            #[cfg(any(unix, rusticated_linux))]
             {
                 let mut status = 0i32;
                 // SAFETY: self.pid is valid.
@@ -428,7 +428,7 @@ mod native_process {
 
         /// Send SIGKILL (Unix) or TerminateProcess (Windows) to the child.
         pub fn kill(&mut self) -> io::Result<()> {
-            #[cfg(unix)]
+            #[cfg(any(unix, rusticated_linux))]
             {
                 // SAFETY: self.pid is valid.
                 let r = unsafe { kill(self.pid as i32, SIGKILL) };
@@ -571,7 +571,7 @@ mod native_process {
             self.spawn_impl()
         }
 
-        #[cfg(unix)]
+        #[cfg(any(unix, rusticated_linux))]
         fn spawn_impl(&mut self) -> io::Result<Child> {
             // Build null-terminated byte strings for argv.
             let mut argv_storage: Vec<Vec<u8>> = Vec::new();
@@ -692,7 +692,7 @@ pub use native_process::{Child, ChildExitStatus, Command, ExitStatus, Stdio};
 ///
 /// Equivalent to `std::process::exit`. Never returns.
 pub fn exit(code: i32) -> ! {
-    #[cfg(unix)]
+    #[cfg(any(unix, rusticated_linux))]
     {
         unsafe extern "C" {
             fn _exit(status: i32) -> !;

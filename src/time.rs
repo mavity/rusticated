@@ -25,7 +25,7 @@ pub use core::time::Duration;
 /// On WASM delegates to the host via `get_time()`. On native reads the system
 /// clock via `std::time::SystemTime`.
 pub fn now_ns() -> u64 {
-    #[cfg(unix)]
+    #[cfg(any(unix, rusticated_linux))]
     {
         #[repr(C)]
         struct Timespec {
@@ -38,13 +38,13 @@ pub fn now_ns() -> u64 {
             tv_nsec: 0,
         };
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", rusticated_linux))]
         crate::syscall!(
             crate::os::linux::syscall::nr::CLOCK_GETTIME,
             0usize, // CLOCK_REALTIME
             &mut ts as *mut _ as usize
         );
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", rusticated_linux)))]
         unsafe {
             unsafe extern "C" {
                 fn clock_gettime(clk_id: i32, tp: *mut Timespec) -> i32;
@@ -149,19 +149,19 @@ mod native_instant {
     // â”€â”€ Unix: clock_gettime(CLOCK_MONOTONIC)
     // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-    #[cfg(unix)]
+    #[cfg(any(unix, rusticated_linux))]
     #[repr(C)]
     struct Timespec {
         tv_sec: i64,
         tv_nsec: i64,
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, rusticated_linux))]
     unsafe extern "C" {
         fn clock_gettime(clk_id: i32, tp: *mut Timespec) -> i32;
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, rusticated_linux))]
     const CLOCK_MONOTONIC: i32 = 1;
 
     // â”€â”€ Windows: QueryPerformanceCounter
@@ -199,7 +199,7 @@ mod native_instant {
     impl Instant {
         /// Returns the current instant.
         pub fn now() -> Self {
-            #[cfg(unix)]
+            #[cfg(any(unix, rusticated_linux))]
             {
                 let mut ts = Timespec {
                     tv_sec: 0,
