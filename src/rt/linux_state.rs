@@ -1,4 +1,4 @@
-#![cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", rusticated_linux))]
 
 use alloc::rc::Rc;
 use alloc::vec::Vec;

@@ -14,23 +14,23 @@ pub mod bsd;
 /// Executor and task scheduling primitives.
 pub mod executor;
 
-#[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
+#[cfg(all(not(target_family = "wasm"), any(target_os = "linux", rusticated_linux)))]
 /// Linux-specific driver integration.
 pub mod linux_driver;
 
-#[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
+#[cfg(all(not(target_family = "wasm"), any(target_os = "linux", rusticated_linux)))]
 /// Epoll-based readiness polling for Linux.
 pub mod linux_epoll;
 
-#[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
+#[cfg(all(not(target_family = "wasm"), any(target_os = "linux", rusticated_linux)))]
 /// Linux asynchronous operation wrappers.
 pub mod linux_op;
 
-#[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
+#[cfg(all(not(target_family = "wasm"), any(target_os = "linux", rusticated_linux)))]
 /// Linux-specific runtime state handling.
 pub mod linux_state;
 
-#[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
+#[cfg(all(not(target_family = "wasm"), any(target_os = "linux", rusticated_linux)))]
 /// io_uring integration for Linux.
 pub mod linux_uring;
 
@@ -53,16 +53,16 @@ pub mod windows;
 #[cfg(not(target_family = "wasm"))]
 pub use executor::{JoinHandle, PollStatus, poll_step, spawn};
 
-#[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
+#[cfg(all(not(target_family = "wasm"), any(target_os = "linux", rusticated_linux)))]
 pub use linux_epoll::{WaitReadable, WaitWritable};
 
-#[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
+#[cfg(all(not(target_family = "wasm"), any(target_os = "linux", rusticated_linux)))]
 /// Returns a future that waits for the file descriptor to become readable.
 pub fn wait_readable(fd: i32) -> WaitReadable {
     WaitReadable::new(fd)
 }
 
-#[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
+#[cfg(all(not(target_family = "wasm"), any(target_os = "linux", rusticated_linux)))]
 /// Returns a future that waits for the file descriptor to become writable.
 pub fn wait_writable(fd: i32) -> WaitWritable {
     WaitWritable::new(fd)
@@ -174,13 +174,13 @@ fn lang_start<T: crate::process::Termination + 'static>(
     res
 }
 
-#[cfg(all(not(target_family = "wasm"), target_os = "linux"))]
+#[cfg(all(not(test), not(target_family = "wasm"), any(target_os = "linux", rusticated_linux)))]
 #[unsafe(no_mangle)]
 /// Global environment pointer used by the Unix environment variable lookup.
 pub static mut environ: *const *const u8 = core::ptr::null();
 
 /// Entrypoint for Linux targets.
-#[cfg(all(not(test), not(target_family = "wasm"), target_os = "linux"))]
+#[cfg(all(not(test), not(target_family = "wasm"), any(target_os = "linux", rusticated_linux)))]
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 pub unsafe extern "C" fn _start() -> ! {
@@ -201,7 +201,7 @@ pub unsafe extern "C" fn _start() -> ! {
     );
 }
 
-#[cfg(all(not(test), not(target_family = "wasm"), target_os = "linux"))]
+#[cfg(all(not(test), not(target_family = "wasm"), any(target_os = "linux", rusticated_linux)))]
 #[unsafe(no_mangle)]
 unsafe extern "C" fn __rust_start(argc: isize, argv: *const *const u8) -> ! {
     // envp is argv + argc + 1

@@ -1,6 +1,6 @@
-#![cfg(target_os = "linux")]
-//! Internal Linux io_uring stubs are present for future implementation.
+#![cfg(any(target_os = "linux", rusticated_linux))]
 #![allow(dead_code)]
+//! Internal Linux io_uring stubs are present for future implementation.
 
 use super::linux_state::OpState;
 use crate::io;

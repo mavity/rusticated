@@ -27,7 +27,7 @@ pub mod consts {
     };
 
     /// The target operating system.
-    pub const OS: &str = if cfg!(target_os = "linux") {
+    pub const OS: &str = if cfg!(any(target_os = "linux", rusticated_linux)) {
         "linux"
     } else if cfg!(target_os = "macos") {
         "macos"
@@ -50,7 +50,7 @@ pub mod consts {
     };
 
     /// The target family.
-    pub const FAMILY: &str = if cfg!(unix) {
+    pub const FAMILY: &str = if cfg!(any(unix, rusticated_linux)) {
         "unix"
     } else if cfg!(windows) {
         "windows"
@@ -94,7 +94,7 @@ mod native_env {
         Ok(PathBuf::from(path_str))
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", rusticated_linux))]
     /// Returns the current working directory on Linux.
     pub fn current_dir() -> io::Result<PathBuf> {
         let mut buf = alloc::vec![0u8; 4096];
@@ -140,9 +140,9 @@ mod native_env {
         let mut p = path.as_str().as_bytes().to_vec();
         p.push(0);
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", rusticated_linux))]
         let ret = crate::syscall!(crate::os::linux::syscall::nr::CHDIR, p.as_ptr() as usize) as i32;
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", rusticated_linux)))]
         let ret = {
             unsafe extern "C" {
                 fn chdir(path: *const u8) -> i32;
@@ -160,7 +160,7 @@ mod native_env {
     // â”€â”€ args
     // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", rusticated_linux))]
     fn read_args() -> Vec<String> {
         let path = b"/proc/self/cmdline\0";
         // SAFETY: path is a valid C string; mode is ignored for O_RDONLY.

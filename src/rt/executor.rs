@@ -12,7 +12,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use super::{timers::next_deadline, waker::task_waker};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", rusticated_linux))]
 use super::linux_driver::Driver;
 
 #[cfg(windows)]
