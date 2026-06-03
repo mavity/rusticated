@@ -23,7 +23,7 @@ What to do:
 - Do not attempt ratatui rendering or kabibi widget integration yet.
 
 Success criteria for stage 1:
-- brush can build and run using the rusticated async runtime.
+- brush can build and run using the rusticated async runtime: `cargo run -p brush-shell --config sysroot.toml`
 - brush can accept input and print output on a black terminal.
 - the shell works with a simple basic backend and no advanced terminal features.
 
