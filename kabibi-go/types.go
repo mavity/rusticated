@@ -77,4 +77,5 @@ type model struct {
 	chatLines         []string
 	lastExhaustHeight int
 	isInitialized     bool
+	quitting          bool
 }
