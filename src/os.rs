@@ -15,6 +15,47 @@ pub mod linux;
 /// Unix-specific extensions.
 #[cfg(any(unix, rusticated_linux))]
 pub mod unix {
+    /// Unix-specific OS string extension traits and helpers.
+    pub mod ffi {
+        pub use crate::ffi::{OsStr, OsString};
+
+        /// Extension methods for borrowed Unix OS strings.
+        pub trait OsStrExt {
+            /// Returns the underlying OS string bytes.
+            fn as_bytes(&self) -> &[u8];
+            /// Converts to an owned `OsString`.
+            fn to_os_string(&self) -> OsString;
+        }
+
+        /// Extension methods for owned Unix OS strings.
+        pub trait OsStringExt {
+            /// Constructs an owned `OsString` from raw bytes.
+            fn from_vec(vec: alloc::vec::Vec<u8>) -> OsString;
+            /// Consumes this value and returns the raw bytes.
+            fn into_vec(self) -> alloc::vec::Vec<u8>;
+        }
+
+        impl OsStrExt for OsStr {
+            fn as_bytes(&self) -> &[u8] {
+                self.as_bytes()
+            }
+
+            fn to_os_string(&self) -> OsString {
+                self.to_owned()
+            }
+        }
+
+        impl OsStringExt for OsString {
+            fn from_vec(vec: alloc::vec::Vec<u8>) -> OsString {
+                OsString::from_vec(vec)
+            }
+
+            fn into_vec(self) -> alloc::vec::Vec<u8> {
+                self.into_vec()
+            }
+        }
+    }
+
     /// Unix file-descriptor I/O extensions.
     pub mod io {
         /// Raw Unix file descriptor number.
@@ -90,6 +131,42 @@ pub mod windows {
     pub mod prelude {
         pub use super::io::*;
     }
+
+    /// Windows-specific OS string extension traits and helpers.
+    pub mod ffi {
+        pub use crate::ffi::{OsStr, OsString};
+
+        /// Extension methods for borrowed Windows OS strings.
+        pub trait OsStrExt {
+            /// Returns the WTF-8-encoded bytes of this string.
+            fn as_encoded_bytes(&self) -> &[u8];
+            /// Converts to an owned `OsString`.
+            fn to_os_string(&self) -> OsString;
+        }
+
+        /// Extension methods for owned Windows OS strings.
+        pub trait OsStringExt {
+            /// Constructs an owned `OsString` from raw UTF-16 code units.
+            fn from_wide(vec: alloc::vec::Vec<u16>) -> OsString;
+        }
+
+        impl OsStrExt for OsStr {
+            fn as_encoded_bytes(&self) -> &[u8] {
+                self.as_encoded_bytes()
+            }
+
+            fn to_os_string(&self) -> OsString {
+                self.to_owned()
+            }
+        }
+
+        impl OsStringExt for OsString {
+            fn from_wide(vec: alloc::vec::Vec<u16>) -> OsString {
+                OsString::from_wide(vec)
+            }
+        }
+    }
+
 
     /// Windows HANDLE I/O extensions.
     pub mod io {
