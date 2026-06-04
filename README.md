@@ -188,7 +188,7 @@ cargo run -p prebuild && go -C mohabbat-go run . && mohab.bat demo -o demo.bat &
   ```bash
 rustup target add wasm32-unknown-unknown
 ```
-- On Windows, if you do not have the MSVC linker installed, build explicitly with GNU instead:
+- On Windows, if you do not need the MSVC linker installed, build explicitly with GNU instead:
   ```powershell
 rustup toolchain install nightly-x86_64-pc-windows-gnu
 rustup target add x86_64-pc-windows-gnu --toolchain nightly-x86_64-pc-windows-gnu
