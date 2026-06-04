@@ -213,7 +213,7 @@ unsafe fn allocate_small(class_index: usize) -> *mut u8 {
     let mut current = start;
     let mut free_list: *mut BlockHeader = ptr::null_mut();
 
-    while current + class_size <= base + PAGE_SIZE {
+    while current + BLOCK_HEADER_SIZE + class_size <= base + PAGE_SIZE {
         let block = current as *mut BlockHeader;
         unsafe {
             ptr::write(
