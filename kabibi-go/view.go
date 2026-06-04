@@ -123,25 +123,17 @@ func renderPanelWithTitle(m *model, p pane, title string, titleStyle lipgloss.St
 }
 
 func (m model) View() string {
-	if m.width == 0 {
+	if m.width == 0 || m.height == 0 {
 		return "Searching for screen..."
 	}
 
 	// 1. Plume (Background) - Clean and normalize lines to prevent "zebra" splitting
-	plumeHeight := m.height - 1
 	var cleanPlumeLines []string
 	for _, pLine := range m.plume {
 		// Remove any existing newlines or carriage returns that would double-space
 		line := strings.ReplaceAll(pLine, "\n", "")
 		line = strings.ReplaceAll(line, "\r", "")
 		cleanPlumeLines = append(cleanPlumeLines, line)
-	}
-
-	if len(cleanPlumeLines) > plumeHeight {
-		cleanPlumeLines = cleanPlumeLines[len(cleanPlumeLines)-plumeHeight:]
-	}
-	for len(cleanPlumeLines) < plumeHeight {
-		cleanPlumeLines = append([]string{""}, cleanPlumeLines...)
 	}
 
 	// 2. Prepare Panels
@@ -165,7 +157,10 @@ func (m model) View() string {
 		rightBColor = colorCyan
 	}
 
-	panelHeight := m.height - 6
+	panelHeight := m.height - 8
+	if panelHeight < 5 {
+		panelHeight = 5
+	}
 	left := renderPanelWithTitle(&m, leftPane, dirTitleName(m.leftDir), leftTStyle, leftStyle, leftBColor, panelHeight)
 	right := renderPanelWithTitle(&m, rightPane, dirTitleName(m.rightDir), rightTStyle, rightStyle, rightBColor, panelHeight)
 
@@ -241,53 +236,61 @@ func (m model) View() string {
 	}
 
 	// Row of panels
-	middleRow := lipgloss.NewStyle().
-		Background(colorBlack).
-		Width(m.width).
-		Render(lipgloss.JoinHorizontal(lipgloss.Top, left, right, chat))
+	middleRow := lipgloss.JoinHorizontal(lipgloss.Top, left, right, chat)
 
-	// Stack view
-	topOffset := 1
-	topPlume := plumeStyle.Copy().
-		Width(m.width).
-		Height(topOffset).
-		Background(colorBlack).
-		Render(cleanPlumeLines[0])
+	// Plume Partitioning
+	// Available height below panels:
+	footerHeight := 5
 
-	middleLines := strings.Split(middleRow, "\n")
-	middleLinesCount := len(middleLines)
+	totalPlumeCount := len(cleanPlumeLines)
+	var exhaustLines []string
+	var footerLines []string
 
-	bottomPlumeCount := m.height - topOffset - middleLinesCount - 1
-	if bottomPlumeCount < 0 {
-		bottomPlumeCount = 0
+	if totalPlumeCount <= footerHeight {
+		footerLines = cleanPlumeLines
+	} else {
+		footerLines = cleanPlumeLines[totalPlumeCount-footerHeight:]
+		exhaustLines = cleanPlumeLines[:totalPlumeCount-footerHeight]
 	}
 
-	bottomLines := cleanPlumeLines[len(cleanPlumeLines)-bottomPlumeCount:]
-	// We must ensure every line in the plume is padded to full width with colorBlack bg
-	var paddedBottom []string
-	pStyle := plumeStyle.Copy().Width(m.width).Background(colorBlack)
-	for _, bl := range bottomLines {
-		paddedBottom = append(paddedBottom, pStyle.Render(bl))
+	pStyle := plumeStyle.Copy().Width(m.width)
+
+	// We want at least 2 lines above panels (Exhaust peeking)
+	for len(exhaustLines) < 2 {
+		exhaustLines = append([]string{""}, exhaustLines...)
 	}
-	bottomPlume := strings.Join(paddedBottom, "\n")
+
+	// Render Exhaust (above panels)
+	var paddedExhaust []string
+	for _, l := range exhaustLines {
+		paddedExhaust = append(paddedExhaust, pStyle.Render(l))
+	}
+	exhaustView := strings.Join(paddedExhaust, "\n")
+
+	// Render Footer (below panels)
+	var paddedFooter []string
+	for _, l := range footerLines {
+		paddedFooter = append(paddedFooter, pStyle.Render(l))
+	}
+	// Pad footer to maintain fixed height below panels
+	if len(paddedFooter) < footerHeight {
+		padding := footerHeight - len(paddedFooter)
+		for i := 0; i < padding; i++ {
+			paddedFooter = append([]string{pStyle.Render("")}, paddedFooter...)
+		}
+	}
+	footerView := strings.Join(paddedFooter, "\n")
 
 	// Prompt at bottom
 	promptPrefix := "$ "
 	if m.activePane == chatPane {
 		promptPrefix = "AI> "
 	}
-	prompt := promptStyle.Copy().Width(m.width).Height(1).Background(colorBlack).Render(promptPrefix + m.shellInput.View())
+	prompt := promptStyle.Copy().Width(m.width).Render(promptPrefix + m.shellInput.View())
 
-	// Use JoinVertical to assemble everything cleanly
-	// Wrap the whole thing in a style that ensures black background for any gaps
-	baseStyle := lipgloss.NewStyle().Background(colorBlack).Width(m.width)
-	
-	finalContent := lipgloss.JoinVertical(lipgloss.Left,
-		topPlume,
-		middleRow,
-		bottomPlume,
-		prompt,
-	)
+	var components []string
+	components = append(components, exhaustView)
+	components = append(components, middleRow, footerView, prompt)
 
-	return baseStyle.Render(finalContent)
+	return lipgloss.JoinVertical(lipgloss.Left, components...)
 }

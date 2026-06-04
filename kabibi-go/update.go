@@ -75,10 +75,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				input := m.shellInput.Value()
 				if input != "" {
-					m.plume = append(m.plume, "$ "+input)
-					m.plume = append(m.plume, "Command executed (mock).")
 					m.shellInput.Reset()
-					return m, nil
+					return m, m.AddPlume("$ "+input, "Command executed (mock).")
 				}
 
 				var curList *list.Model
@@ -98,10 +96,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if item.isDir {
 						newPath := filepath.Join(*curDir, item.name)
 						m.loadDir(p, newPath)
+						return m, nil
 					} else {
 						// Mock shell execution for files
-						m.plume = append(m.plume, fmt.Sprintf("$ run %s", item.name))
-						m.plume = append(m.plume, fmt.Sprintf("Executed %s successfully.", item.name))
+						return m, m.AddPlume(fmt.Sprintf("$ run %s", item.name), fmt.Sprintf("Executed %s successfully.", item.name))
 					}
 				}
 			}
