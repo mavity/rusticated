@@ -193,3 +193,16 @@ func (m *model) recalculateLayout() {
 	m.chatInput.Width = chatFullWidth - 3
 	m.shellInput.Width = m.width - 3
 }
+
+func (m *model) AddPlume(lines ...string) tea.Cmd {
+	var cmds []tea.Cmd
+	for _, line := range lines {
+		m.plume = append(m.plume, line)
+		if len(m.plume) > 100 {
+			released := m.plume[0]
+			m.plume = m.plume[1:]
+			cmds = append(cmds, tea.Println(released))
+		}
+	}
+	return tea.Batch(cmds...)
+}
