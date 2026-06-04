@@ -6,7 +6,26 @@ import (
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 )
+
+func expandTabs(s string, tabWidth int) string {
+	var b strings.Builder
+	column := 0
+	for _, r := range s {
+		if r == '\t' {
+			spaces := tabWidth - (column % tabWidth)
+			for i := 0; i < spaces; i++ {
+				b.WriteByte(' ')
+				column++
+			}
+		} else {
+			b.WriteRune(r)
+			column += runewidth.RuneWidth(r)
+		}
+	}
+	return b.String()
+}
 
 func dirTitleName(path string) string {
 	trimmed := strings.TrimRight(path, "/\\")
@@ -124,7 +143,20 @@ func renderPanelWithTitle(m *model, p pane, title string, titleStyle lipgloss.St
 
 func (m model) View() string {
 	if m.quitting {
-		return strings.Join(m.plume, "\n")
+		var output []string
+		for _, line := range m.plume {
+			// Expand tabs correctly based on tab stops (typically 8 in terminals)
+			expanded := expandTabs(line, 8)
+			
+			// Pad to m.width to ensure any panel backgrounds are "wiped".
+			// Use runewidth to handle multi-byte/wide characters correctly.
+			w := runewidth.StringWidth(expanded)
+			if w < m.width {
+				expanded += strings.Repeat(" ", m.width-w)
+			}
+			output = append(output, expanded)
+		}
+		return strings.Join(output, "\n")
 	}
 
 	if m.width == 0 || m.height == 0 {
