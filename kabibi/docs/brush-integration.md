@@ -65,9 +65,8 @@ Success criteria for stage 1:
 
 1. Ensure rusticated has `std::any` support.
   - Simple re-export: `pub mod any { pub use core::any::*; }`
-2. Eliminate `OsString` / `OsStr` from rusticated shell internals completely.
-  - Convert any exposed APIs to plain `String`.
-  - Do not retain `OsString` as a rusticated compatibility shim.
+2. Re-adopt `OsString` / `OsStr` into rusticated shell internals completely.
+  - Expose it for this custom std in conventional manner.
 3. Audit `clap_lex` and decide whether to replace it or isolate its use of `OsStr` behind a dedicated shim instead of exposing `OsStr` globally.
 4. Keep rusticated shell runtime single-threaded for now. Any code depending on threading needs to be converted to async.
 5. Fix the rusticated `brush-shell` entrypoint to use the normal rusticated async entry pattern:

@@ -1,6 +1,8 @@
 //! OS string types and null-terminated C strings for `#![no_std]` use.
 
 use crate::vec::Vec;
+use crate::string::String;
+use alloc::borrow::Cow;
 pub use core::ffi::c_char;
 pub use core::ffi::c_double;
 pub use core::ffi::c_float;
@@ -19,6 +21,108 @@ pub use core::ffi::c_void;
 /// Re-export of `core::any` so `std::any` works in the rusticated compatibility layer.
 pub mod any {
     pub use core::any::*;
+}
+
+/// Owned OS string type.
+#[repr(transparent)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OsString {
+    inner: Vec<u8>,
+}
+
+/// Borrowed OS string slice.
+#[repr(transparent)]
+pub struct OsStr {
+    inner: [u8],
+}
+
+impl OsString {
+    /// Creates an empty OS string.
+    pub fn new() -> Self {
+        Self { inner: Vec::new() }
+    }
+
+    /// Creates an OS string from raw bytes.
+    pub fn from_vec(vec: Vec<u8>) -> Self {
+        Self { inner: vec }
+    }
+
+    /// Converts this owned OS string into its raw bytes.
+    pub fn into_vec(self) -> Vec<u8> {
+        self.inner
+    }
+
+    /// Attempts to convert this OS string into a UTF-8 string.
+    pub fn into_string(self) -> Result<String, Self> {
+        match String::from_utf8(self.inner) {
+            Ok(s) => Ok(s),
+            Err(err) => Err(Self { inner: err.into_bytes() }),
+        }
+    }
+
+    /// Borrows this value as an [`OsStr`].
+    pub fn as_os_str(&self) -> &OsStr {
+        unsafe { &*(self.inner.as_slice() as *const [u8] as *const OsStr) }
+    }
+
+    /// Returns a reference to the raw bytes of this string.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.inner.as_slice()
+    }
+
+    /// Converts a wide UTF-16 vector into a platform `OsString` on Windows.
+    #[cfg(windows)]
+    pub fn from_wide(vec: Vec<u16>) -> Self {
+        Self {
+            inner: String::from_utf16_lossy(&vec).into_bytes(),
+        }
+    }
+}
+
+impl Default for OsString {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AsRef<OsStr> for OsString {
+    fn as_ref(&self) -> &OsStr {
+        self.as_os_str()
+    }
+}
+
+impl OsStr {
+    /// Returns the underlying bytes of this OS string.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.inner
+    }
+
+    /// Returns `true` if this OS string is empty.
+    pub fn is_empty(&self) -> bool {
+        self.as_bytes().is_empty()
+    }
+
+    /// Returns a borrowed owned copy of this OS string.
+    pub fn to_owned(&self) -> OsString {
+        OsString::from_vec(self.as_bytes().to_vec())
+    }
+
+    /// Converts this OS string to a UTF-8 string, replacing invalid bytes.
+    pub fn to_string_lossy(&self) -> Cow<'_, str> {
+        String::from_utf8_lossy(self.as_bytes())
+    }
+
+    /// Returns the underlying WTF-8 bytes for Windows interop.
+    #[cfg(windows)]
+    pub fn as_encoded_bytes(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+impl core::fmt::Debug for OsStr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:?}", self.to_string_lossy())
+    }
 }
 
 
