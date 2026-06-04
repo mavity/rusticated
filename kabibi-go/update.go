@@ -10,10 +10,15 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.recalculateLayout()
+
 	case tea.KeyMsg:
 		key := msg.String()
 		switch key {
@@ -76,7 +81,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				input := m.shellInput.Value()
 				if input != "" {
 					m.shellInput.Reset()
-					return m, m.AddPlume("$ "+input, "Command executed (mock).")
+					// Simply output one line per command as requested
+					return m, m.AddPlume("$ " + input)
 				}
 
 				var curList *list.Model
@@ -99,7 +105,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, nil
 					} else {
 						// Mock shell execution for files
-						return m, m.AddPlume(fmt.Sprintf("$ run %s", item.name), fmt.Sprintf("Executed %s successfully.", item.name))
+						return m, m.AddPlume(fmt.Sprintf("$ run %s", item.name))
 					}
 				}
 			}
@@ -145,11 +151,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, cmd
 		}
-
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		m.recalculateLayout()
 	}
 
 	return m, nil

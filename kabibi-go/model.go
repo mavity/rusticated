@@ -61,6 +61,8 @@ func initialModel() model {
 		chatLines: []string{
 			"System: AI slider initialized.",
 		},
+		lastExhaustHeight: 0,
+		isInitialized:     false,
 	}
 	m.loadDir(leftPane, cwd)
 	m.loadDir(rightPane, cwd)
@@ -100,7 +102,9 @@ func (m *model) loadDir(p pane, path string) {
 }
 
 func (m model) Init() tea.Cmd {
-	return nil
+	return tea.Batch(
+		textinput.Blink,
+	)
 }
 
 func (m *model) updateDelegates() {
@@ -172,9 +176,13 @@ func (m *model) recalculateLayout() {
 		filesWidth = 2
 	}
 
-	panelHeight := m.height - 6
-	if panelHeight < 1 {
-		panelHeight = 1
+	// Dynamic panel height that leaves room for history
+	panelHeight := m.height - 10
+	if panelHeight < 5 {
+		panelHeight = 5
+	}
+	if panelHeight > 15 {
+		panelHeight = 15
 	}
 
 	safeFilesWidth := filesWidth - 1
@@ -197,12 +205,51 @@ func (m *model) recalculateLayout() {
 func (m *model) AddPlume(lines ...string) tea.Cmd {
 	var cmds []tea.Cmd
 	for _, line := range lines {
+		// Calculate how many lines of history are visible ABOVE panels BEFORE adding
+		oldEH := m.calculateExhaustHeight()
+
 		m.plume = append(m.plume, line)
-		if len(m.plume) > 100 {
+
+		if len(m.plume) > 120 {
 			released := m.plume[0]
 			m.plume = m.plume[1:]
+			// Print the actual line to the permanent scrollback.
+			// This also pushes the TUI up.
 			cmds = append(cmds, tea.Println(released))
+		} else {
+			// Check if history just bubbled up to the top area (Exhaust)
+			newEH := m.calculateExhaustHeight()
+			if newEH > oldEH {
+				needed := newEH - oldEH
+				for i := 0; i < needed; i++ {
+					cmds = append(cmds, tea.Println(""))
+				}
+			}
 		}
 	}
+
 	return tea.Batch(cmds...)
+}
+
+func (m *model) calculateExhaustHeight() int {
+	// Simple calculation mirroring view.go logic
+	footerHeight := 5
+	panelHeight := m.height - 10
+	if panelHeight < 5 {
+		panelHeight = 5
+	}
+	if panelHeight > 15 {
+		panelHeight = 15
+	}
+
+	total := len(m.plume)
+	footerStart := total - footerHeight
+	if footerStart < 0 {
+		footerStart = 0
+	}
+	occludedStart := footerStart - panelHeight
+	if occludedStart < 0 {
+		occludedStart = 0
+	}
+	return occludedStart
 }
