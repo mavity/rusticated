@@ -26,6 +26,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "esc":
 			if !m.chatOpen {
+				m.quitting = true
 				return m, tea.Quit
 			}
 			m.chatOpen = false
