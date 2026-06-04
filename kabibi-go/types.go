@@ -72,7 +72,9 @@ type model struct {
 	leftDir  string
 	rightDir string
 
-	plume     []string
-	lastTab   time.Time
-	chatLines []string
+	plume             []string
+	lastTab           time.Time
+	chatLines         []string
+	lastExhaustHeight int
+	isInitialized     bool
 }
