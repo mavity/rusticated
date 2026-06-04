@@ -13,6 +13,7 @@
 #![allow(clippy::missing_const_for_fn)]
 
 use crate::borrow::Cow;
+use crate::ffi::OsStr;
 use crate::ops::Deref;
 use crate::string::{String, ToString};
 
@@ -273,6 +274,12 @@ impl Path {
         Components::new(self.as_str())
     }
 
+    /// Iterates over the path segments as `OsStr` values.
+    #[must_use]
+    pub fn iter(&self) -> Iter<'_> {
+        Iter::new(self.as_str())
+    }
+
     /// Returns the path as a string.
     pub fn to_str(&self) -> Option<&str> {
         Some(self.as_str())
@@ -434,6 +441,47 @@ impl PartialOrd<PathBuf> for str {
 }
 
 // --- Path components ---------------------------------------------------------
+
+/// Iterator over the path segments of a `Path`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Iter<'a> {
+    remaining: &'a str,
+    prefix_done: bool,
+}
+
+impl<'a> Iter<'a> {
+    fn new(s: &'a str) -> Self {
+        Self {
+            remaining: s,
+            prefix_done: false,
+        }
+    }
+}
+
+impl<'a> Iterator for Iter<'a> {
+    type Item = &'a OsStr;
+
+    fn next(&mut self) -> Option<&'a OsStr> {
+        if !self.prefix_done {
+            self.prefix_done = true;
+            if self.remaining.starts_with('/') || self.remaining.starts_with('\\') {
+                self.remaining = self.remaining.trim_start_matches(['/', '\\']);
+                return Some(unsafe { &*("/" as *const str as *const OsStr) });
+            }
+        }
+        self.remaining = self.remaining.trim_start_matches(['/', '\\']);
+        if self.remaining.is_empty() {
+            return None;
+        }
+        let end = self
+            .remaining
+            .find(['/', '\\'])
+            .unwrap_or(self.remaining.len());
+        let segment = &self.remaining[..end];
+        self.remaining = &self.remaining[end..];
+        Some(unsafe { &*(segment as *const str as *const OsStr) })
+    }
+}
 
 /// A single component of a path.
 #[derive(Debug, Clone, PartialEq, Eq)]
