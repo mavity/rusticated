@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"mvdan.cc/sh/v3/interp"
 )
 
 type pane int
@@ -78,4 +79,6 @@ type model struct {
 	lastExhaustHeight int
 	isInitialized     bool
 	quitting          bool
+	runner            *interp.Runner
+	shellOut          *SwitchableWriter
 }

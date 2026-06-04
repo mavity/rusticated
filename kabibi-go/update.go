@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"path/filepath"
 	"strings"
 	"time"
@@ -14,6 +13,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
 	switch msg := msg.(type) {
+	case shellResultMsg:
+		var plumeLines []string
+		plumeLines = append(plumeLines, "$ "+msg.input)
+		if len(msg.output) > 0 {
+			plumeLines = append(plumeLines, msg.output...)
+		}
+		if msg.err != nil {
+			plumeLines = append(plumeLines, "Error: "+msg.err.Error())
+		}
+		return m, m.AddPlume(plumeLines...)
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -82,8 +92,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				input := m.shellInput.Value()
 				if input != "" {
 					m.shellInput.Reset()
-					// Simply output one line per command as requested
-					return m, m.AddPlume("$ " + input)
+					return m, m.runShellCommand(input)
 				}
 
 				var curList *list.Model
@@ -105,8 +114,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.loadDir(p, newPath)
 						return m, nil
 					} else {
-						// Mock shell execution for files
-						return m, m.AddPlume(fmt.Sprintf("$ run %s", item.name))
+						// Execute the file through the shell
+						filePath := filepath.Join(*curDir, item.name)
+						// For now, let's just try to echo the path or something safe
+						// but actually, we should try to execute it.
+						return m, m.runShellCommand(filePath)
 					}
 				}
 			}
