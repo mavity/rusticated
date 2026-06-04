@@ -90,8 +90,7 @@ async fn mark_output_runnable(output_path: &str) -> anyhow::Result<()> {
 // Brotli decompression (no_std compatible via brotli-decompressor)
 #[cfg(target_arch = "wasm32")]
 fn decompress(input: &[u8]) -> Result<Vec<u8>, &'static str> {
-    use alloc_no_stdlib::{Allocator, SliceWrapper, SliceWrapperMut};
-    use brotli_decompressor::{BrotliDecompressStream, BrotliResult, HuffmanCode};
+    use brotli_decompressor::{Allocator, SliceWrapper, SliceWrapperMut, BrotliDecompressStream, BrotliResult, HuffmanCode};
 
     struct Rebox<T> {
         b: std::boxed::Box<[T]>,

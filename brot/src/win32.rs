@@ -9,6 +9,7 @@ pub mod Win32 {
         pub type WORD = u16;
         pub type DWORD = u32;
         pub type ULONG = u32;
+        #[allow(non_camel_case_types)]
         pub type ULONG_PTR = usize;
         pub type HANDLE = *mut c_void;
         pub type HMODULE = HANDLE;
