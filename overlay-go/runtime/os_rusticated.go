@@ -1,0 +1,129 @@
+//go:build wasip1
+
+package runtime
+
+import (
+	"structs"
+	"unsafe"
+)
+
+type uintptr32 = uint32
+type size = uint32
+
+type errno = uint32
+
+type filesize = uint64
+
+type timestamp = uint64
+
+type clockid = uint32
+
+const (
+	clockRealtime  clockid = 0
+	clockMonotonic clockid = 1
+)
+
+type iovec struct {
+	buf    uintptr32
+	bufLen size
+}
+
+type overlapped struct {
+	_         structs.HostLayout
+	flags     uint32
+	hostError uint32
+	continued uint64
+	resultExt uint64
+}
+
+//go:wasmimport env process_exit
+func exit(code int32)
+
+//go:wasmimport env get_time
+func rusticated_get_time() uint64
+
+//go:wasmimport env get_args
+func rusticated_get_args(stringsPtr *byte, stringsLen size) uint64
+
+//go:wasmimport env get_env
+func rusticated_get_env(stringsPtr *byte, stringsLen size) uint64
+
+//go:wasmimport env random_get
+func rusticated_random_get(buf *byte, bufLen size)
+
+//go:wasmimport env write
+func rusticated_write(overlappedPtr uintptr, handle uint64, bufPtr *byte, bufLen size)
+
+func write1(fd uintptr, p unsafe.Pointer, n int32) int32 {
+	if n == 0 {
+		return 0
+	}
+	var ov overlapped
+	rusticated_write(uintptr(unsafe.Pointer(&ov)), uint64(fd), (*byte)(p), size(n))
+	flagsPtr := (*uint32)(unsafe.Pointer(&ov.flags))
+	for *flagsPtr&1 == 0 {
+	}
+	return int32(ov.resultExt)
+}
+
+func nanotime1() int64 {
+	return int64(rusticated_get_time())
+}
+
+func walltime() (sec int64, nsec int32) { return walltime1() }
+
+func walltime1() (sec int64, nsec int32) {
+	t := rusticated_get_time()
+	return int64(t / 1_000_000_000), int32(t % 1_000_000_000)
+}
+
+func readRandom(r []byte) int {
+	if len(r) == 0 {
+		return 0
+	}
+	rusticated_random_get(&r[0], size(len(r)))
+	return len(r)
+}
+
+func splitNL(buf []byte, dst []string) {
+	count := 0
+	start := 0
+	for i, b := range buf {
+		if b == '\n' {
+			if count < len(dst) {
+				dst[count] = string(buf[start:i])
+			}
+			count++
+			start = i + 1
+		}
+	}
+	if start <= len(buf) && count < len(dst) {
+		dst[count] = string(buf[start:])
+		count++
+	}
+}
+
+func goenvs() {
+	packed := rusticated_get_args(nil, 0)
+	count := int(packed >> 32)
+	bufLen := size(packed & 0xffffffff)
+
+	argslice = make([]string, count)
+	if count > 0 {
+		buf := make([]byte, bufLen)
+		rusticated_get_args(&buf[0], bufLen)
+		splitNL(buf, argslice)
+	}
+
+	packed = rusticated_get_env(nil, 0)
+	count = int(packed >> 32)
+	bufLen = size(packed & 0xffffffff)
+	envs = make([]string, count)
+	if count > 0 {
+		buf := make([]byte, bufLen)
+		rusticated_get_env(&buf[0], bufLen)
+		splitNL(buf, envs)
+	}
+}
+
+func usleep(usec uint32) {}
