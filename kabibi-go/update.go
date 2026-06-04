@@ -17,8 +17,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		key := msg.String()
 		switch key {
-		case "ctrl+c", "esc":
+		case "ctrl+c":
 			return m, tea.Quit
+		case "esc":
+			if !m.chatOpen {
+				return m, tea.Quit
+			}
+			m.chatOpen = false
+			m.activePane = leftPane
+			m.chatInput.Blur()
+			m.shellInput.Focus()
+			m.recalculateLayout()
+			m.updateDelegates()
+			return m, nil
 		case "tab":
 			if m.chatOpen {
 				m.chatOpen = false

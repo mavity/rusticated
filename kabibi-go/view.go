@@ -39,7 +39,7 @@ func renderPanelWithTitle(m *model, p pane, title string, titleStyle lipgloss.St
 
 	width := l.Width() + 2 // inner width + borders
 	innerW := width - 2    // content area
-	innerH := height - 1   // content area (one line for top border)
+	innerH := height - 2   // content area (one for top border, one for bottom border)
 
 	// Create top border manually
 	border := lipgloss.NormalBorder()
@@ -202,7 +202,7 @@ func (m model) View() string {
 		)
 		width := chatFullWidth
 		innerW := width - 2
-		innerH := panelHeight - 1
+		innerH := panelHeight - 2
 		bg := colorDarkGray
 
 		border := lipgloss.NormalBorder()
@@ -229,19 +229,30 @@ func (m model) View() string {
 			BorderBackground(bg).
 			Background(bg)
 
-		chat = lipgloss.JoinVertical(lipgloss.Left, topBorder, contentStyle.Render(chatContent))
+		chat = topBorder + "\n" + contentStyle.Render(chatContent)
 	} else {
 		chatContent := "\n AI>"
-		chat = cStyle.Border(lipgloss.NormalBorder(), true, false, true, true).
-			Width(actualChatWidth).Height(panelHeight).Render(chatContent)
+		chat = chatStyle.Copy().
+			Border(lipgloss.NormalBorder(), true, false, true, true).
+			BorderForeground(cBorderColor).
+			Width(actualChatWidth).
+			Height(panelHeight - 2). // height includes content, borders add 2
+			Render(chatContent)
 	}
 
 	// Row of panels
-	middleRow := lipgloss.JoinHorizontal(lipgloss.Top, left, right, chat)
+	middleRow := lipgloss.NewStyle().
+		Background(colorBlack).
+		Width(m.width).
+		Render(lipgloss.JoinHorizontal(lipgloss.Top, left, right, chat))
 
 	// Stack view
 	topOffset := 1
-	topPlume := plumeStyle.Width(m.width).Height(topOffset).Render(cleanPlumeLines[0])
+	topPlume := plumeStyle.Copy().
+		Width(m.width).
+		Height(topOffset).
+		Background(colorBlack).
+		Render(cleanPlumeLines[0])
 
 	middleLines := strings.Split(middleRow, "\n")
 	middleLinesCount := len(middleLines)
@@ -252,21 +263,31 @@ func (m model) View() string {
 	}
 
 	bottomLines := cleanPlumeLines[len(cleanPlumeLines)-bottomPlumeCount:]
-	bottomPlume := plumeStyle.Width(m.width).Height(bottomPlumeCount).Render(strings.Join(bottomLines, "\n"))
+	// We must ensure every line in the plume is padded to full width with colorBlack bg
+	var paddedBottom []string
+	pStyle := plumeStyle.Copy().Width(m.width).Background(colorBlack)
+	for _, bl := range bottomLines {
+		paddedBottom = append(paddedBottom, pStyle.Render(bl))
+	}
+	bottomPlume := strings.Join(paddedBottom, "\n")
 
 	// Prompt at bottom
 	promptPrefix := "$ "
 	if m.activePane == chatPane {
 		promptPrefix = "AI> "
 	}
-	prompt := promptStyle.Width(m.width).Height(1).Render(promptPrefix + m.shellInput.View())
+	prompt := promptStyle.Copy().Width(m.width).Height(1).Background(colorBlack).Render(promptPrefix + m.shellInput.View())
 
-	// Use a single strings.Join to avoid any nested JoinVertical logic that might interleave
-	finalContent := topPlume + "\n" + middleRow + "\n" + bottomPlume + "\n" + prompt
+	// Use JoinVertical to assemble everything cleanly
+	// Wrap the whole thing in a style that ensures black background for any gaps
+	baseStyle := lipgloss.NewStyle().Background(colorBlack).Width(m.width)
+	
+	finalContent := lipgloss.JoinVertical(lipgloss.Left,
+		topPlume,
+		middleRow,
+		bottomPlume,
+		prompt,
+	)
 
-	return lipgloss.NewStyle().
-		Width(m.width).
-		Height(m.height).
-		Background(colorBlack).
-		Render(finalContent)
+	return baseStyle.Render(finalContent)
 }
