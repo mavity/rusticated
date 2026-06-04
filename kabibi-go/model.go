@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"mvdan.cc/sh/moreinterp/coreutils"
 	"mvdan.cc/sh/v3/interp"
 )
 
@@ -46,6 +47,7 @@ func initialModel() model {
 	r, _ := interp.New(
 		interp.Dir(cwd),
 		interp.StdIO(nil, sw, sw),
+		interp.ExecHandler(coreutils.ExecHandler(interp.DefaultExecHandler(0))),
 	)
 
 	m := model{
