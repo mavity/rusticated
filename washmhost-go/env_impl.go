@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -22,13 +23,14 @@ import (
 )
 
 type HostEnv struct {
-	mu           sync.Mutex
-	timers       map[uint32]time.Time
-	handles      map[uint64]interface{}
-	nextHandle   uint64
-	fileOpsQueue chan func()
-	ttyRawState  *term.State
-	ttyRawFd     int
+	mu             sync.Mutex
+	timers         map[uint32]time.Time
+	handles        map[uint64]interface{}
+	nextHandle     uint64
+	outstandingOps int32
+	fileOpsQueue   chan func()
+	ttyRawState    *term.State
+	ttyRawFd       int
 }
 
 type AbiStat struct {
@@ -60,15 +62,36 @@ type DirScan struct {
 
 func NewHostEnv() *HostEnv {
 	env := &HostEnv{
-		timers:       make(map[uint32]time.Time),
-		handles:      make(map[uint64]interface{}),
-		nextHandle:   3, // 0,1,2 reserved
-		fileOpsQueue: make(chan func(), 100),
+		timers:         make(map[uint32]time.Time),
+		handles:        make(map[uint64]interface{}),
+		nextHandle:     3, // 0,1,2 reserved
+		outstandingOps: 0,
+		fileOpsQueue:   make(chan func(), 100),
 	}
 	env.handles[0] = os.Stdin
 	env.handles[1] = os.Stdout
 	env.handles[2] = os.Stderr
 	return env
+}
+
+func (h *HostEnv) IncOps() {
+	atomic.AddInt32(&h.outstandingOps, 1)
+}
+
+func (h *HostEnv) DecOps() {
+	for {
+		old := atomic.LoadInt32(&h.outstandingOps)
+		if old <= 0 {
+			return
+		}
+		if atomic.CompareAndSwapInt32(&h.outstandingOps, old, old-1) {
+			return
+		}
+	}
+}
+
+func (h *HostEnv) HasOutstandingOps() bool {
+	return atomic.LoadInt32(&h.outstandingOps) > 0
 }
 
 func createAbiStat(fi os.FileInfo) AbiStat {
@@ -378,8 +401,9 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			delayMs := uint32(stack[1])
 
 			h.mu.Lock()
-			defer h.mu.Unlock()
 			h.timers[ovPtr] = time.Now().Add(time.Duration(delayMs) * time.Millisecond)
+			h.mu.Unlock()
+			h.IncOps()
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
 		Export("timer_set")
 
@@ -388,8 +412,14 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			ovPtr := uint32(stack[0])
 
 			h.mu.Lock()
-			defer h.mu.Unlock()
-			delete(h.timers, ovPtr)
+			_, ok := h.timers[ovPtr]
+			if ok {
+				delete(h.timers, ovPtr)
+			}
+			h.mu.Unlock()
+			if ok {
+				h.DecOps()
+			}
 		}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).
 		Export("timer_cancel")
 
@@ -420,6 +450,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 				return
 			}
 
+			h.IncOps()
 			go func() {
 				tmp := make([]byte, lenBytes)
 				n, err := f.Read(tmp)
@@ -436,6 +467,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 						}
 					}
 					writeOverlapped(m, ovPtr, retCode, 0, uint64(n))
+					h.DecOps()
 				}
 			}()
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
@@ -474,6 +506,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			dataCopy := make([]byte, lenBytes)
 			copy(dataCopy, buf)
 
+			h.IncOps()
 			go func() {
 				n, err := f.Write(dataCopy)
 				retCode := uint32(0)
@@ -482,6 +515,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 				}
 				h.fileOpsQueue <- func() {
 					writeOverlapped(m, ovPtr, retCode, 0, uint64(n))
+					h.DecOps()
 				}
 			}()
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
@@ -549,6 +583,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 				osFlags |= os.O_EXCL | os.O_CREATE
 			}
 
+			h.IncOps()
 			go func() {
 				f, err := os.OpenFile(pathStr, osFlags, 0666)
 				// Windows directory handles often require directory-specific open semantics.
@@ -573,6 +608,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 				}
 				h.fileOpsQueue <- func() {
 					writeOverlapped(m, ovPtr, retCode, 0, extResult)
+					h.DecOps()
 				}
 			}()
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
@@ -617,6 +653,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 				return
 			}
 
+			h.IncOps()
 			go func() {
 				copied := 0
 				var payload []byte
@@ -645,6 +682,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 					}
 					debugLog("dir_read: handle=%d copied=%d remaining=%d", handle, copied, len(scan.Names))
 					writeOverlapped(m, ovPtr, 0, 0, uint64(copied))
+					h.DecOps()
 				}
 			}()
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
@@ -667,6 +705,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			}
 			pathStr := string(buf)
 
+			h.IncOps()
 			go func() {
 				var fi os.FileInfo
 				var err error
@@ -693,6 +732,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 						}
 					}
 					writeOverlapped(m, ovPtr, retCode, 0, extResult)
+					h.DecOps()
 				}
 			}()
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
@@ -746,10 +786,14 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			cfg := make([]byte, cfgLen)
 			copy(cfg, buf)
 
+			h.IncOps()
 			go func() {
 				parts := bytes.Split(cfg, []byte{0})
 				if len(parts) == 0 || len(parts[0]) == 0 {
-					h.fileOpsQueue <- func() { writeOverlapped(m, ovPtr, 22, 0, 0) }
+					h.fileOpsQueue <- func() {
+						writeOverlapped(m, ovPtr, 22, 0, 0)
+						h.DecOps()
+					}
 					return
 				}
 				program := string(parts[0])
@@ -815,6 +859,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 				}
 				h.fileOpsQueue <- func() {
 					writeOverlapped(m, ovPtr, retCode, 0, extResult)
+					h.DecOps()
 				}
 			}()
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
@@ -839,6 +884,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 				return
 			}
 
+			h.IncOps()
 			go func() {
 				err := cmd.Wait()
 				exitCode := uint64(0)
@@ -850,6 +896,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 				packed := (exitCode << 32) | (exitCode & 0xFFFF_FFFF)
 				h.fileOpsQueue <- func() {
 					writeOverlapped(m, ovPtr, 0, 0, packed)
+					h.DecOps()
 				}
 			}()
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64}, []api.ValueType{}).
@@ -942,6 +989,7 @@ timers:
 		if now.After(deadline) {
 			delete(h.timers, ovPtr)
 			writeOverlapped(mod, ovPtr, 0, 0, 0)
+			h.DecOps()
 		}
 	}
 }
