@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"mvdan.cc/sh/v3/interp"
 )
 
 func initialModel() model {
@@ -41,6 +42,12 @@ func initialModel() model {
 
 	vp := viewport.New(0, 0)
 
+	sw := &SwitchableWriter{}
+	r, _ := interp.New(
+		interp.Dir(cwd),
+		interp.StdIO(nil, sw, sw),
+	)
+
 	m := model{
 		leftList:   li,
 		rightList:  ri,
@@ -63,6 +70,8 @@ func initialModel() model {
 		},
 		lastExhaustHeight: 0,
 		isInitialized:     false,
+		runner:            r,
+		shellOut:          sw,
 	}
 	m.loadDir(leftPane, cwd)
 	m.loadDir(rightPane, cwd)
