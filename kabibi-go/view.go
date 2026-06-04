@@ -157,10 +157,15 @@ func (m model) View() string {
 		rightBColor = colorCyan
 	}
 
-	panelHeight := m.height - 8
+	// Managed height constraints
+	panelHeight := m.height - 10
 	if panelHeight < 5 {
 		panelHeight = 5
 	}
+	if panelHeight > 15 {
+		panelHeight = 15
+	}
+
 	left := renderPanelWithTitle(&m, leftPane, dirTitleName(m.leftDir), leftTStyle, leftStyle, leftBColor, panelHeight)
 	right := renderPanelWithTitle(&m, rightPane, dirTitleName(m.rightDir), rightTStyle, rightStyle, rightBColor, panelHeight)
 
@@ -246,19 +251,27 @@ func (m model) View() string {
 	var exhaustLines []string
 	var footerLines []string
 
-	if totalPlumeCount <= footerHeight {
-		footerLines = cleanPlumeLines
-	} else {
-		footerLines = cleanPlumeLines[totalPlumeCount-footerHeight:]
-		exhaustLines = cleanPlumeLines[:totalPlumeCount-footerHeight]
+	// Split the plume into three parts:
+	// 1. Footer: Visible immediately below panels
+	// 2. Occluded: Hidden "behind" the panels (equal to panelHeight)
+	// 3. Exhaust: Visible above panels
+
+	// Calculate indices
+	footerStart := totalPlumeCount - footerHeight
+	if footerStart < 0 {
+		footerStart = 0
 	}
+
+	occludedStart := footerStart - panelHeight
+	if occludedStart < 0 {
+		occludedStart = 0
+	}
+
+	footerLines = cleanPlumeLines[footerStart:]
+	// occludedLines := cleanPlumeLines[occludedStart:footerStart] // These are not rendered
+	exhaustLines = cleanPlumeLines[:occludedStart]
 
 	pStyle := plumeStyle.Copy().Width(m.width)
-
-	// We want at least 2 lines above panels (Exhaust peeking)
-	for len(exhaustLines) < 2 {
-		exhaustLines = append([]string{""}, exhaustLines...)
-	}
 
 	// Render Exhaust (above panels)
 	var paddedExhaust []string
@@ -272,7 +285,8 @@ func (m model) View() string {
 	for _, l := range footerLines {
 		paddedFooter = append(paddedFooter, pStyle.Render(l))
 	}
-	// Pad footer to maintain fixed height below panels
+	// Pad footer to maintain fixed height below panels so panels stay in
+	// a consistent vertical relationship with the prompt.
 	if len(paddedFooter) < footerHeight {
 		padding := footerHeight - len(paddedFooter)
 		for i := 0; i < padding; i++ {
