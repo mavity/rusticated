@@ -123,6 +123,10 @@ func renderPanelWithTitle(m *model, p pane, title string, titleStyle lipgloss.St
 }
 
 func (m model) View() string {
+	if m.quitting {
+		return strings.Join(m.plume, "\n")
+	}
+
 	if m.width == 0 || m.height == 0 {
 		return "Searching for screen..."
 	}
