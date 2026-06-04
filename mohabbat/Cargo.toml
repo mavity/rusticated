@@ -11,7 +11,6 @@ brotli = { version = "8.0.3", default-features = false }
 anyhow = { version = "1.0", default-features = false }
 
 brotli-decompressor = { version = "5.0.1", default-features = false }
-alloc-no-stdlib = "2.0.4"
 brotli = { version = "8.0.3", default-features = false }
 
 [build-dependencies]

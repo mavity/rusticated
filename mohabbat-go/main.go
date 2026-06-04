@@ -139,9 +139,12 @@ func main() {
 	payloadLen := uint64(len(brainBytes))
 	pool.Write(brainBytes)
 
-	// Brotli compress (quality 1 matches existing Rust pipeline to avoid hangs).
+	// Brotli compress with maximum compression settings.
 	compressed := &bytes.Buffer{}
-	w := brotli.NewWriterLevel(compressed, 1)
+	w := brotli.NewWriterOptions(compressed, brotli.WriterOptions{
+		Quality: 11,
+		LGWin:   24,
+	})
 	if _, err := w.Write(pool.Bytes()); err != nil {
 		die("brotli write: %v", err)
 	}

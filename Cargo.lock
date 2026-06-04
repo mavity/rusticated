@@ -81,7 +81,6 @@ checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
 name = "brot"
 version = "0.1.0"
 dependencies = [
- "alloc-no-stdlib",
  "brotli-decompressor",
 ]
 
@@ -369,7 +368,6 @@ dependencies = [
 name = "mohabbat"
 version = "0.1.0"
 dependencies = [
- "alloc-no-stdlib",
  "anyhow",
  "brotli",
  "brotli-decompressor",
