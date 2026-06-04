@@ -50,11 +50,7 @@ var (
 			BorderForeground(colorGray).
 			BorderBackground(colorDarkGray)
 
-	plumeStyle = lipgloss.NewStyle().
-			Foreground(colorDarkGray).
-			Background(colorBlack)
+	plumeStyle = lipgloss.NewStyle()
 
-	promptStyle = lipgloss.NewStyle().
-			Foreground(colorWhite).
-			Background(colorBlack)
+	promptStyle = lipgloss.NewStyle()
 )
