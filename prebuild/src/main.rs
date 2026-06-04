@@ -123,9 +123,7 @@ fn main() {
         // Set target-family correctly based on base_target.
         let families = if base_target.contains("-linux-") {
             vec!["unix", "rusticated"]
-        } else if base_target.contains("-darwin")
-            || base_target.contains("-freebsd")
-        {
+        } else if base_target.contains("-darwin") || base_target.contains("-freebsd") {
             vec!["unix", "rusticated"]
         } else if base_target.contains("-windows-") {
             vec!["windows", "rusticated"]
@@ -244,11 +242,20 @@ fn main() {
                 .insert("no-default-libraries".to_string(), serde_json::json!(true));
 
             // Force lld to not look for default libraries
-            extend_pre_link_args(&mut spec, "gnu-lld", &["-nostdlib", "--no-dynamic-linker"]);
+            extend_pre_link_args(
+                &mut spec,
+                "gnu-lld",
+                &["-nostdlib", "--no-dynamic-linker", "-Wl,--build-id=none"],
+            );
             extend_pre_link_args(
                 &mut spec,
                 "gnu-lld-cc",
-                &["-nostdlib", "-nodefaultlibs", "-nostartfiles"],
+                &[
+                    "-nostdlib",
+                    "-nodefaultlibs",
+                    "-nostartfiles",
+                    "-Wl,--build-id=none",
+                ],
             );
             extend_pre_link_args(&mut spec, "gnu", &["-nostdlib"]);
             extend_pre_link_args(
@@ -313,8 +320,7 @@ fn main() {
             rustflags.push_str(" -A explicit-builtin-cfgs-in-flags --cfg rusticated_linux");
         }
 
-        if base_target.contains("-linux-") {
-        }
+        if base_target.contains("-linux-") {}
 
         let mut build_cmd = Command::new("cargo");
         build_cmd.env("RUSTFLAGS", &rustflags);
