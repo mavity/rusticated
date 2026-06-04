@@ -152,7 +152,8 @@ pub struct IMAGE_RUNTIME_FUNCTION_ENTRY {
 }
 
 pub unsafe fn reflective_load_and_run(washmhost: &[u8], payload: &[u8]) -> ! {
-    let dos_header = &*(washmhost.as_ptr() as *const IMAGE_DOS_HEADER);
+    unsafe {
+        let dos_header = &*(washmhost.as_ptr() as *const IMAGE_DOS_HEADER);
     let lfanew = dos_header.e_lfanew as usize;
     let nt_headers = &*(washmhost.as_ptr().add(lfanew) as *const IMAGE_NT_HEADERS64);
     let opt_hdr = &nt_headers.OptionalHeader;
@@ -468,59 +469,62 @@ pub unsafe fn reflective_load_and_run(washmhost: &[u8], payload: &[u8]) -> ! {
     }
 
     // VirtualProtect
-    for s in sections {
-        if s.Misc.VirtualSize == 0 {
-            continue;
-        }
-        let executable = (s.Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0;
-        let readable = (s.Characteristics & IMAGE_SCN_MEM_READ) != 0;
-        let writable = (s.Characteristics & IMAGE_SCN_MEM_WRITE) != 0;
+    {
+        for s in sections {
+            if s.Misc.VirtualSize == 0 {
+                continue;
+            }
+            let executable = (s.Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0;
+            let readable = (s.Characteristics & IMAGE_SCN_MEM_READ) != 0;
+            let writable = (s.Characteristics & IMAGE_SCN_MEM_WRITE) != 0;
 
-        let mut protect = PAGE_NOACCESS;
-        if executable {
-            if readable && writable {
-                protect = PAGE_EXECUTE_READWRITE;
-            } else if readable {
-                protect = PAGE_EXECUTE_READ;
-            } else if writable {
-                protect = PAGE_EXECUTE_WRITECOPY;
+            let mut protect = PAGE_NOACCESS;
+            if executable {
+                if readable && writable {
+                    protect = PAGE_EXECUTE_READWRITE;
+                } else if readable {
+                    protect = PAGE_EXECUTE_READ;
+                } else if writable {
+                    protect = PAGE_EXECUTE_WRITECOPY;
+                } else {
+                    protect = PAGE_EXECUTE;
+                }
             } else {
-                protect = PAGE_EXECUTE;
+                if readable && writable {
+                    protect = PAGE_READWRITE;
+                } else if readable {
+                    protect = PAGE_READONLY;
+                } else if writable {
+                    protect = PAGE_WRITECOPY;
+                }
             }
-        } else {
-            if readable && writable {
-                protect = PAGE_READWRITE;
-            } else if readable {
-                protect = PAGE_READONLY;
-            } else if writable {
-                protect = PAGE_WRITECOPY;
-            }
+
+            let mut old = 0;
+            VirtualProtect(
+                image_base
+                    .cast::<u8>()
+                    .add(s.VirtualAddress as usize)
+                    .cast(),
+                s.Misc.VirtualSize as usize,
+                protect,
+                &mut old,
+            );
         }
 
         let mut old = 0;
-        VirtualProtect(
-            image_base
-                .cast::<u8>()
-                .add(s.VirtualAddress as usize)
-                .cast(),
-            s.Misc.VirtualSize as usize,
-            protect,
-            &mut old,
-        );
+        // Unprotect the whole image (header) as READONLY? Not doing it, just leaving it.
+        VirtualProtect(image_base, 0x1000, PAGE_READONLY, &mut old);
+
+        FlushInstructionCache(GetCurrentProcess(), image_base, size_of_image);
+
+        // Jump
+        let entry_point = image_base
+            .cast::<u8>()
+            .add(opt_hdr.AddressOfEntryPoint as usize);
+        let jump: extern "C" fn() = core::mem::transmute(entry_point);
+        jump();
     }
 
-    let mut old = 0;
-    // Unprotect the whole image (header) as READONLY? Not doing it, just leaving it.
-    VirtualProtect(image_base, 0x1000, PAGE_READONLY, &mut old);
-
-    FlushInstructionCache(GetCurrentProcess(), image_base, size_of_image);
-
-    // Jump
-    let entry_point = image_base
-        .cast::<u8>()
-        .add(opt_hdr.AddressOfEntryPoint as usize);
-    let jump: extern "C" fn() = core::mem::transmute(entry_point);
-    jump();
-
-    std::process::exit(0);
+        std::process::exit(0);
+    }
 }
