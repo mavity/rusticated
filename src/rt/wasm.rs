@@ -111,17 +111,11 @@ struct InitializedStorage(UnsafeCell<OnceCell<()>>);
 
 unsafe impl Sync for InitializedStorage {}
 
-#[repr(align(8))]
-struct MainDoneStorage(UnsafeCell<OnceCell<()>>);
-
-unsafe impl Sync for MainDoneStorage {}
-
 static COMPLETION_REGISTRY_STORAGE: CompletionRegistryStorage =
     CompletionRegistryStorage(UnsafeCell::new(None));
 static MAIN_FUTURE_STORAGE: MainFutureStorage = MainFutureStorage(UnsafeCell::new(None));
 static INITIALIZED_STORAGE: InitializedStorage =
     InitializedStorage(UnsafeCell::new(OnceCell::new()));
-static MAIN_DONE_STORAGE: MainDoneStorage = MainDoneStorage(UnsafeCell::new(OnceCell::new()));
 
 fn completion_registry() -> &'static RefCell<Vec<(Rc<OpState>, Waker)>> {
     unsafe {
@@ -145,10 +139,6 @@ fn main_future() -> &'static RefCell<Option<Pin<Box<dyn Future<Output = ()>>>>> 
 
 fn initialized() -> &'static OnceCell<()> {
     unsafe { &*INITIALIZED_STORAGE.0.get() }
-}
-
-fn main_done() -> &'static OnceCell<()> {
-    unsafe { &*MAIN_DONE_STORAGE.0.get() }
 }
 
 fn register(state: Rc<OpState>, waker: Waker) {
@@ -195,7 +185,6 @@ fn tick() {
     };
     if done {
         *borrow = None;
-        let _ = main_done().set(());
     }
 }
 
@@ -368,11 +357,3 @@ pub fn poll_step() {
     tick();
 }
 
-/// Returns 1 if the main future has completed, 0 if it is still running.
-///
-/// The host event loop should test this after each [`run()`] call and stop
-/// driving the guest once it returns 1.
-#[unsafe(no_mangle)]
-pub extern "C" fn is_done() -> u32 {
-    if main_done().get().is_some() { 1 } else { 0 }
-}
