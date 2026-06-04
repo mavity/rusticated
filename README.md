@@ -346,3 +346,7 @@ For the WASM host crate, `washmhost/.cargo/config.toml` already includes the gen
 
 The current workflow avoids manual `std` source substitution and uses the generated custom target specs and rustflags from `target/rusticated-spec/`.
 
+<!--
+*/ }
+-->
+
