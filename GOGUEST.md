@@ -18,8 +18,7 @@ substitutes files at compile time, never touching the installed toolchain.
 Go's WASM backend uses a shadow-stack dispatch loop called `wasm_pc_f_loop`
 (defined in `runtime/asm_wasm.s`). The loop runs until the internal `PAUSE`
 global is set to 1, at which point it executes a `RETUNWIND` instruction and
-returns control to whoever called the exported WASM entry point (`_start` /
-`_rt0_wasm_wasip1`). This is documented in `runtime/stubs_wasm.go`:
+returns control to whoever called the exported WASM entry point (`run`). This is documented in `runtime/stubs_wasm.go`:
 
 ```
 // pause sets SP to newsp and pauses the execution of Go's WebAssembly
@@ -96,8 +95,8 @@ host calls run()  →  guest polls futures  →  run() returns
 For Go guests the protocol becomes:
 
 ```
-host calls _start  →  Go boots → runs main → eventually hits pause()
-                     ↗  _start returns (RETUNWIND)
+host calls run  →  Go boots → runs main → eventually hits pause()
+                     ↗  run returns (RETUNWIND)
 host runs tick()   ←
                      ↘  I/O completes, Overlapped.flags set
 host calls run  →  wasm_pc_f_loop re-enters
@@ -106,8 +105,8 @@ host calls run  →  wasm_pc_f_loop re-enters
 ```
 
 `washmhost` must:
-1. Instantiate the module and call `_start` once (Go init + main goroutine).
-2. After `_start` returns (due to `pause`), enter the usual `tick()` loop.
+1. Instantiate the module and call `run` once (Go init + main goroutine).
+2. After `run` returns (due to `pause`), enter the usual `tick()` loop.
 3. When the I/O completion signals, call the module export `run`.
 4. Repeat until the module calls `process_exit`.
 
@@ -801,7 +800,7 @@ The `washmhost` crate must be extended to:
 
 2. **Drive the Go guest**:
    ```
-   instance.call("_start")      // Go boot + main; returns when pause() fires
+   instance.call("run")      // Go boot + main; returns when pause() fires
    loop {
        tick()                   // process pending I/O completions
        if guest_exited { break }
@@ -854,7 +853,7 @@ cargo run -p prebuild && go build -overlay target/overlay.json -o target/mohabba
   called `SetNonblock(0,1,2)` to enable the WASI net poller. Our overlay
   no-ops `init`. Confirm the net poller replacement (`netpoll_rusticated.go`)
   does not need any initialisation.
-- [ ] **`washmhost`**: add Go guest detection and the `_start` + resume loop.
+- [ ] **`washmhost`**: add Go guest detection and the `run` + resume loop.
 - [ ] **`washmhost`**: expose `process_exit` so Go exit works cleanly.
 - [ ] **Handle table thread-safety**: the `fdTable` array in
   `fs_rusticated.go` is fine for single-goroutine use; if multiple goroutines
