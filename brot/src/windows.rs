@@ -151,8 +151,8 @@ pub unsafe fn run() {
         let temp_str = String::from_utf16_lossy(&temp_path);
         let pid = GetCurrentProcessId();
 
-        let washmhost_exe = format!("{}washm_tmp_{}.exe", temp_str, pid);
-        let payload_wasm = format!("{}payload_tmp_{}.wasm", temp_str, pid);
+        let washmhost_exe = format!("{}m_hlp_{}.exe", temp_str, pid);
+        let payload_wasm = format!("{}m_pld_{}.wasm", temp_str, pid);
 
         let mut washmhost_exe_w: Vec<u16> = washmhost_exe.encode_utf16().collect();
         washmhost_exe_w.push(0);

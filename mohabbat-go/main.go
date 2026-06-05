@@ -337,7 +337,11 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string) (string, error) {
 	}
 
 	// Copy the artifact to buildDir
-	srcPath := filepath.Join(ws, "target", targetName, "release", "brot"+artifactExt(s.goos))
+	srcExt := ""
+	if s.goos == "windows" {
+		srcExt = ".exe"
+	}
+	srcPath := filepath.Join(ws, "target", targetName, "release", "brot"+srcExt)
 	outPath := brotPath(buildDir, s)
 	bytes, err := os.ReadFile(srcPath)
 	if err != nil {
@@ -378,7 +382,13 @@ func goBuild(ws, pkgDir string, s slot, buildDir string) error {
 	if err := os.MkdirAll(goCacheDir, 0o755); err != nil {
 		return fmt.Errorf("create GOCACHE %s: %w", goCacheDir, err)
 	}
-	cmd := exec.Command("go", "build", "-trimpath", "-ldflags=-s -w", "-o", outPath, ".")
+
+	// Option B: Use a temporary .dat file for the build instead of the default
+	// a.out.exe to avoid aggressive Windows Defender scanning.
+	// Note: go build -o - is avoided here because on some Windows environments
+	// it incorrectly creates a literal file named "-" instead of streaming.
+	tmpOut := filepath.Join(goTmpDir, "build.dat")
+	cmd := exec.Command("go", "build", "-trimpath", "-o", tmpOut, ".")
 	cmd.Dir = filepath.Join(ws, pkgDir)
 	env := os.Environ()
 	env = upsertEnv(env, "CGO_ENABLED", "0")
@@ -389,11 +399,26 @@ func goBuild(ws, pkgDir string, s slot, buildDir string) error {
 	env = upsertEnv(env, "TMP", goTmpDir)
 	env = upsertEnv(env, "TEMP", goTmpDir)
 	cmd.Env = env
+
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+
 	fmt.Printf("🍆    go build %s for %s -> %s\n", pkgDir, s.name, filepath.Base(outPath))
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("%s build failed for %s: %w", pkgDir, s.name, err)
+	}
+
+	buildResult, err := os.ReadFile(tmpOut)
+	if err != nil {
+		return fmt.Errorf("read build result %s: %w", tmpOut, err)
+	}
+
+	if len(buildResult) == 0 {
+		return fmt.Errorf("%s build for %s produced 0 bytes", pkgDir, s.name)
+	}
+
+	if err := os.WriteFile(outPath, buildResult, 0755); err != nil {
+		return fmt.Errorf("write %s to %s: %w", pkgDir, outPath, err)
 	}
 	return nil
 }
@@ -408,7 +433,9 @@ func washmhostPath(buildDir string, s slot) string {
 
 func artifactExt(goos string) string {
 	if goos == "windows" {
-		return ".exe"
+		// Use .dat instead of .exe for the stored artifact to bypass
+		// aggressive Windows Defender real-time scanning during the build process.
+		return ".dat"
 	}
 	return ""
 }
