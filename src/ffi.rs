@@ -1,7 +1,7 @@
 //! OS string types and null-terminated C strings for `#![no_std]` use.
 
-use crate::vec::Vec;
 use crate::string::String;
+use crate::vec::Vec;
 use alloc::borrow::Cow;
 pub use core::ffi::c_char;
 pub use core::ffi::c_double;
@@ -56,7 +56,9 @@ impl OsString {
     pub fn into_string(self) -> Result<String, Self> {
         match String::from_utf8(self.inner) {
             Ok(s) => Ok(s),
-            Err(err) => Err(Self { inner: err.into_bytes() }),
+            Err(err) => Err(Self {
+                inner: err.into_bytes(),
+            }),
         }
     }
 
@@ -125,7 +127,6 @@ impl core::fmt::Debug for OsStr {
     }
 }
 
-
 /// Error returned when a string contains an interior null byte.
 #[derive(Debug)]
 pub struct NulError;
@@ -161,7 +162,6 @@ impl CString {
         self.0.as_ptr()
     }
 }
-
 
 /// Iterator that yields UTF-16 code units for a `str`.
 pub struct EncodeWide<'a> {

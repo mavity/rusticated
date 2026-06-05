@@ -79,10 +79,10 @@ mod backend_wasm {
 
 #[cfg(any(target_os = "linux", rusticated_linux))]
 use backend_linux as backend;
-#[cfg(windows)]
-use backend_windows as backend;
 #[cfg(target_family = "wasm")]
 use backend_wasm as backend;
+#[cfg(windows)]
+use backend_windows as backend;
 
 const PAGE_SIZE: usize = 4096;
 const BLOCK_HEADER_SIZE: usize = 32;
@@ -153,7 +153,9 @@ unsafe impl GlobalAlloc for RusticatedAllocator {
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         if ptr.is_null() {
-            return unsafe { self.alloc(Layout::from_size_align_unchecked(new_size, layout.align())) };
+            return unsafe {
+                self.alloc(Layout::from_size_align_unchecked(new_size, layout.align()))
+            };
         }
 
         if new_size == 0 {
@@ -254,7 +256,12 @@ unsafe fn dealloc_small(ptr: *mut u8, header: *mut BlockHeader) {
     let mut state = STATE.lock();
     let payload_next = ptr as *mut FreePayload;
     unsafe {
-        ptr::write(payload_next, FreePayload { next: state.free_lists[class_index] });
+        ptr::write(
+            payload_next,
+            FreePayload {
+                next: state.free_lists[class_index],
+            },
+        );
     }
     state.free_lists[class_index] = header;
 }

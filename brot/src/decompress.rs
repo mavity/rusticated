@@ -1,4 +1,6 @@
-use brotli_decompressor::{Allocator, SliceWrapper, SliceWrapperMut, BrotliDecompressStream, BrotliResult, HuffmanCode};
+use brotli_decompressor::{
+    Allocator, BrotliDecompressStream, BrotliResult, HuffmanCode, SliceWrapper, SliceWrapperMut,
+};
 
 /// Box<[T]>-backed allocated memory region.
 /// Uses heap allocation with proper initialization and alignment.
