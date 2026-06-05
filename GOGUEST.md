@@ -3,13 +3,21 @@
 ## Goal
 
 Compile Go programs with `GOOS=wasip1` and run them inside the `rusticated`
-WASM host without patching the Go installation. The host is a strictly
-single-threaded, async-only, completion-based proactor; the standard
-`wasi_snapshot_preview1` ABI is blocking and incompatible with it.
+WASM host without patching the Go installation.
 
-The mechanism is **`go build -overlay target/overlay.json`**: Go's build system
-reads a JSON map of `GOROOT` source paths → local replacement paths and
-substitutes files at compile time, never touching the installed toolchain.
+**Mandatory Constraint: Total WASI Elimination.**
+The rusticated host is a strictly single-threaded, async-only,
+completion-based proactor. It does **not** implement the
+`wasi_snapshot_preview1` ABI. Any Go binary containing imports from the
+`wasi_snapshot_preview1` module will fail to load or crash at runtime.
+The standard WASI ABI is blocking and fundamentally incompatible with the
+rusticated concurrency model.
+
+The mechanism for achieving this is **`go build -overlay target/overlay.json`**:
+Go's build system reads a JSON map of `GOROOT` source paths → local
+replacement paths and substitutes files at compile time, never touching the
+installed toolchain. The overlay MUST replace every single file in the
+runtime and syscall layers that imports from WASI.
 
 ---
 
@@ -173,6 +181,9 @@ rustic/
 │       └── os_rusticated.go         # replaces syscall/os_wasip1.go
 │   ├── main.go
 │   └── resume.go                    # exports run via //go:wasmexport
+├── demo-go/
+│   ├── main.go                      # Go implementation of `demo`
+│   └── go.mod
 ├── prebuild/
 │   └── src/main.rs                  # generates target/overlay.json
 └── target/
@@ -859,10 +870,11 @@ cargo run -p prebuild && go build -overlay target/overlay.json -o target/mohabba
   `fs_rusticated.go` is fine for single-goroutine use; if multiple goroutines
   call `Open` concurrently, a mutex is required.
 
-### Internal package overlays (needed for `os` and `net` packages)
+### Internal package overlays (Mandatory for complete WASI removal)
 
 The following files use `wasi_snapshot_preview1` at the `internal/` level.
-They must be overlaid if the application imports `os` or `net`:
+They must be overlaid if the application imports `os` or `net` (as these
+internal packages are dependencies of the standard `os` and `net` libraries):
 
 - `internal/syscall/unix/at_wasip1.go`
 - `internal/syscall/unix/utimes_wasip1.go`
@@ -880,3 +892,41 @@ requires mapping `env.net_open`, `env.net_accept`, `env.read`, `env.write` to
 `net.Conn` semantics. The handle-based model maps cleanly; the main work is
 correctly translating Go's `Sockaddr` types to rusticated's `addr_ptr/addr_len`
 format.
+
+---
+
+## Mohabbat Builder: First-Class Go Support
+
+The `mohabbat` builder (the "brain") must gain first-class support for Go projects. Just as it handles Rust projects (by invoking `cargo build` with the custom sysroot), it must now:
+
+1.  **Identify Go Projects**: Recognize a Go project directory (e.g., by the presence of `go.mod`).
+2.  **Generate Overlay**: Ensure `target/overlay.json` is fresh (via `prebuild` or internal logic).
+3.  **Cross-Compile**: Execute `go build -overlay target/overlay.json` with the appropriate `GOOS=wasip1` and `GOARCH=wasm` flags.
+4.  **Vegetable Packaging**: Wrap the resulting WASM binary into a polyglot `.bat` (vegetable) using the standard `brot` + `washmhost` native stubs.
+
+**Crucial**: The WASM payload inside a vegetable MUST be free of any `wasi_snapshot_preview1` imports. The `washmhost` included in the vegetable provides the `env` namespace (rusticated ABI) and will refuse to link any module that attempts to use standard WASI.
+
+---
+
+## Demo Project: `demo-go`
+
+The `demo-go` project mimics the Rust `demo` project to provide a parity baseline. It performs the following sequence:
+
+1.  **Environment Diagnostics**: Prints `cwd`, `PWD`, and line-delimited directory entries for `.` and `PWD`.
+2.  **Timed Input**: Requests line input from `os.Stdin` with a 5-second timeout (using `context.WithTimeout` and `os.Stdin.Read`).
+3.  **File I/O**: Writes "rusticated demo file contents\n" to `rusticated_demo.txt`, then reads the last byte back to verify.
+4.  **Metadata**: Retrieves and prints the modification time of its own executable.
+
+This exercise verifies that the overlay's `runtime`, `syscall`, and `os` layers correctly translate Go's high-level idioms into rusticated async operations.
+
+---
+
+## Validation and The Ultimate Success Metric
+
+The transition to a Go-enabled rusticated stack is binary: there is no partial success. The project is considered successful **ONLY** if the following validation script runs to completion and produces the full expected output (diagnostics, successfully handled input/timeout, and file verification):
+
+```
+cargo run -p prebuild && go -C mohabbat-go run . && mohab.bat demo-go -o demo-go.bat && echo . | demo-go.bat
+```
+
+**If this script fails to run at any step, or if `demo-go.bat` deadlocks, crashes, or fails to produce the verified output, the implementation has fully failed.** This script is the single and final source of truth for the Go Guest integration.
