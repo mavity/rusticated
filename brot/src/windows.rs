@@ -43,7 +43,9 @@ pub unsafe fn get_vegetable_file_name() -> Vec<u16> {
     let env_var = "MOHABBAT_VEGETABLE_PATH\0"
         .encode_utf16()
         .collect::<Vec<u16>>();
-    let len = unsafe { GetEnvironmentVariableW(env_var.as_ptr(), buffer.as_mut_ptr(), buffer.len() as u32) };
+    let len = unsafe {
+        GetEnvironmentVariableW(env_var.as_ptr(), buffer.as_mut_ptr(), buffer.len() as u32)
+    };
     if len > 0 && (len as usize) < buffer.len() {
         buffer.truncate(len as usize + 1);
         buffer[len as usize] = 0; // null terminator

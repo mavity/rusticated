@@ -124,7 +124,8 @@ pub fn spawn<F: FnOnce() + Send + 'static>(f: F) -> JoinHandle<()> {
         }
 
         if result == 0 {
-            let boxed: alloc::boxed::Box<ThreadBox> = unsafe { alloc::boxed::Box::from_raw(arg as *mut ThreadBox) };
+            let boxed: alloc::boxed::Box<ThreadBox> =
+                unsafe { alloc::boxed::Box::from_raw(arg as *mut ThreadBox) };
             (*boxed)();
             crate::syscall!(crate::os::linux::syscall::nr::EXIT, 0usize);
         }
@@ -164,7 +165,12 @@ fn report_clone_error(code: i32) {
     buffer[len] = b'\n';
     len += 1;
 
-    crate::syscall!(crate::os::linux::syscall::nr::WRITE, 2usize, buffer.as_ptr() as usize, len);
+    crate::syscall!(
+        crate::os::linux::syscall::nr::WRITE,
+        2usize,
+        buffer.as_ptr() as usize,
+        len
+    );
     crate::syscall!(crate::os::linux::syscall::nr::EXIT, 1usize);
 }
 
