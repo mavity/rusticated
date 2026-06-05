@@ -356,4 +356,3 @@ pub extern "C" fn run() {
 pub fn poll_step() {
     tick();
 }
-

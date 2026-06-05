@@ -1,5 +1,4 @@
 #[cfg(any(target_os = "linux", rusticated_linux))]
-
 use super::linux_state::OpState;
 use crate::io;
 use alloc::rc::Rc;

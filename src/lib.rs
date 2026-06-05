@@ -6,7 +6,10 @@
 #![cfg_attr(not(test), feature(lang_items))]
 #![feature(prelude_import)]
 #![cfg_attr(not(test), feature(alloc_error_handler))]
-#![cfg_attr(all(not(test), any(target_os = "linux", rusticated_linux)), feature(linkage))]
+#![cfg_attr(
+    all(not(test), any(target_os = "linux", rusticated_linux)),
+    feature(linkage)
+)]
 
 // No prelude_import here, as this IS the std library providing the prelude.
 
@@ -28,8 +31,8 @@ pub mod prelude {
         pub use alloc::string::{String, ToString};
         pub use alloc::vec::Vec;
         // Macros
-        pub use crate::{eprint, eprintln, format, print, println, spawn, thread_local};
         pub use crate::ffi::EncodeWideExt;
+        pub use crate::{eprint, eprintln, format, print, println, spawn, thread_local};
         pub use alloc::vec;
         pub use core::{
             assert, assert_eq, assert_ne, debug_assert, debug_assert_eq, debug_assert_ne, matches,
@@ -441,7 +444,11 @@ fn oom(_: core::alloc::Layout) -> ! {
 // strong definition from the sysroot std wins and no duplicate-definition error
 // occurs.  On standalone native targets (brot, etc.) where only rusticated is
 // present, this weak stub is used normally.
-#[cfg(all(any(target_os = "linux", rusticated_linux), not(test), not(target_family = "wasm")))]
+#[cfg(all(
+    any(target_os = "linux", rusticated_linux),
+    not(test),
+    not(target_family = "wasm")
+))]
 #[unsafe(no_mangle)]
 #[linkage = "weak"]
 /// Weak fallback personality function used by the system unwind library.

@@ -167,7 +167,6 @@ pub mod windows {
         }
     }
 
-
     /// Windows HANDLE I/O extensions.
     pub mod io {
         /// Raw Windows HANDLE value.
