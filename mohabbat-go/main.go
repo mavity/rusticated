@@ -285,7 +285,12 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string) (string, error) {
 		targetArg := name
 		args := []string{"build", "-vv", "--release"}
 		if isRusticatedTarget {
-			targetArg = filepath.Join(ws, "target", "rusticated-spec", name+".json")
+			targetPath := filepath.Join(ws, "target", "rusticated-spec", name+".json")
+			evalPath, err := filepath.EvalSymlinks(targetPath)
+			if err == nil {
+				targetPath = evalPath
+			}
+			targetArg = strings.ReplaceAll(strings.TrimPrefix(targetPath, `\\?\`), `\`, `/`)
 			args = append(args, "--config", filepath.Join(ws, "target", "rusticated-spec", "config.toml"))
 		}
 		args = append(args, "--target", targetArg)
