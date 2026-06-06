@@ -4,7 +4,8 @@ package runtime
 
 import "internal/runtime/sys"
 
-func pause(newsp uintptr)
+// pause is declared in runtime/stubs_wasm.go - do not redeclare here.
+// It sets PAUSE=1 and executes RETUNWIND to yield control back to the host.
 
 const (
 	mutex_unlocked = 0
@@ -55,7 +56,6 @@ func noteclear(n *note) { n.key = 0 }
 
 func notewakeup(n *note) {
 	if n.key != 0 {
-		print("notewakeup - double wakeup (", n.key, ")\n")
 		throw("notewakeup - double wakeup")
 	}
 	n.key = 1

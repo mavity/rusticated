@@ -1,4 +1,4 @@
-package main
+﻿package main
 
 import (
 	"bytes"
@@ -613,7 +613,6 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			}()
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
 		Export("path_open")
-
 	builder.NewFunctionBuilder().
 		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
 			ovPtr := uint32(stack[0])
@@ -629,26 +628,24 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 				writeOverlapped(m, ovPtr, 9, 0, 0) // EBADF
 				return
 			}
-			f, isFile := fAny.(*os.File)
+
 			var scan *DirScan
-			if !isFile {
-				scan, ok = fAny.(*DirScan)
-				if !ok {
-					writeOverlapped(m, ovPtr, 9, 0, 0)
-					return
-				}
-			} else {
-				// Convert to DirScan
-				entries, _ := f.Readdirnames(-1)
-				scan = &DirScan{Names: entries, File: f}
+			switch v := fAny.(type) {
+			case *os.File:
+				names, _ := v.Readdirnames(-1)
+				scan = &DirScan{Names: names, File: v}
 				h.mu.Lock()
-				h.handles[handle] = scan // Cache it
+				h.handles[handle] = scan
 				h.mu.Unlock()
+			case *DirScan:
+				scan = v
+			default:
+				writeOverlapped(m, ovPtr, 9, 0, 0)
+				return
 			}
 
 			mem := m.Memory()
-			_, memOk := mem.Read(ptr, lenBytes)
-			if !memOk {
+			if _, memOk := mem.Read(ptr, lenBytes); !memOk {
 				writeOverlapped(m, ovPtr, 22, 0, 0) // EINVAL
 				return
 			}
@@ -677,6 +674,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 					if copied > 0 {
 						if ok := mem.Write(ptr, payload); !ok {
 							writeOverlapped(m, ovPtr, 22, 0, 0)
+							h.DecOps()
 							return
 						}
 					}

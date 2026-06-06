@@ -48,18 +48,20 @@ func rusticated_get_args(stringsPtr *byte, stringsLen size) uint64
 //go:wasmimport env get_env
 func rusticated_get_env(stringsPtr *byte, stringsLen size) uint64
 
-//go:wasmimport env random_get
+//go:wasmimport env get_random
 func rusticated_random_get(buf *byte, bufLen size)
 
 //go:wasmimport env write
-func rusticated_write(overlappedPtr uintptr, handle uint64, bufPtr *byte, bufLen size)
+//go:noescape
+func rusticated_write(overlappedPtr unsafe.Pointer, handle uint64, bufPtr *byte, bufLen size)
 
+//go:nosplit
 func write1(fd uintptr, p unsafe.Pointer, n int32) int32 {
 	if n == 0 {
 		return 0
 	}
 	var ov overlapped
-	rusticated_write(uintptr(unsafe.Pointer(&ov)), uint64(fd), (*byte)(p), size(n))
+	rusticated_write(unsafe.Pointer(&ov), uint64(fd), (*byte)(p), size(n))
 	flagsPtr := (*uint32)(unsafe.Pointer(&ov.flags))
 	for *flagsPtr&1 == 0 {
 	}
@@ -89,17 +91,13 @@ func splitNL(buf []byte, dst []string) {
 	count := 0
 	start := 0
 	for i, b := range buf {
-		if b == '\n' {
+		if b == 0 { // host writes NUL-terminated strings
 			if count < len(dst) {
 				dst[count] = string(buf[start:i])
 			}
 			count++
 			start = i + 1
 		}
-	}
-	if start <= len(buf) && count < len(dst) {
-		dst[count] = string(buf[start:])
-		count++
 	}
 }
 

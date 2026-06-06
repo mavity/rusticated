@@ -538,5 +538,86 @@ fn main() {
     final_config.push_str(&config_toml);
 
     fs::write(spec_dir.join("config.toml"), final_config).expect("wrote config.toml");
+
+    // Generate the Go build overlay that maps WASI source files to our
+    // rusticated replacements, enabling `go build -overlay target/overlay.json`.
+    generate_go_overlay(&target_dir).expect("Failed to generate Go overlay");
+
     println!("Done. Run `cargo build -p demo`.");
+}
+
+fn generate_go_overlay(target_dir: &PathBuf) -> std::io::Result<()> {
+    // Resolve GOROOT dynamically.
+    let out = Command::new("go")
+        .args(["env", "GOROOT"])
+        .output();
+
+    let goroot = match out {
+        Ok(o) if o.status.success() => {
+            PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string())
+        }
+        _ => {
+            eprintln!("warning: `go env GOROOT` failed; skipping overlay.json generation");
+            return Ok(());
+        }
+    };
+
+    // Resolve repo root as the current working directory when prebuild runs.
+    let repo_root = std::env::current_dir()?;
+    let overlay_dir = repo_root.join("overlay-go");
+
+    // Helper to canonicalize a path, stripping Windows \\?\ prefix.
+    let canon = |p: PathBuf| -> String {
+        let s = fs::canonicalize(&p)
+            .unwrap_or(p)
+            .to_string_lossy()
+            .replace("\\\\?\\", "")
+            .replace('\\', "/");
+        s
+    };
+
+    let replacements: &[(&str, &str)] = &[
+        // Runtime
+        ("src/runtime/lock_wasip1.go",    "runtime/lock_rusticated.go"),
+        ("src/runtime/os_wasip1.go",      "runtime/os_rusticated.go"),
+        ("src/runtime/netpoll_wasip1.go", "runtime/netpoll_rusticated.go"),
+        // Syscall
+        ("src/syscall/fs_wasip1.go",      "syscall/fs_rusticated.go"),
+        ("src/syscall/syscall_wasip1.go", "syscall/syscall_rusticated.go"),
+        ("src/syscall/net_wasip1.go",     "syscall/net_rusticated.go"),
+        ("src/syscall/os_wasip1.go",      "syscall/os_rusticated.go"),
+        // Internal (complete WASI elimination)
+        ("src/internal/syscall/unix/at_wasip1.go",           "internal/syscall/unix/at_rusticated.go"),
+        ("src/internal/syscall/unix/utimes_wasip1.go",       "internal/syscall/unix/utimes_rusticated.go"),
+        ("src/internal/syscall/unix/nonblocking_wasip1.go",  "internal/syscall/unix/nonblocking_rusticated.go"),
+        ("src/internal/syscall/unix/fcntl_wasip1.go",        "internal/syscall/unix/fcntl_rusticated.go"),
+    ];
+
+    let mut entries = String::new();
+    let mut first = true;
+    for (goroot_rel, overlay_rel) in replacements {
+        let src = goroot.join(goroot_rel);
+        if !src.exists() {
+            eprintln!("warning: overlay source not found: {}", src.display());
+            continue;
+        }
+        let dst = overlay_dir.join(overlay_rel);
+        if !dst.exists() {
+            eprintln!("warning: overlay destination not found: {}", dst.display());
+            continue;
+        }
+        let src_str = canon(src);
+        let dst_str = canon(dst);
+        if !first {
+            entries.push_str(",\n");
+        }
+        first = false;
+        entries.push_str(&format!("    \"{}\": \"{}\"", src_str, dst_str));
+    }
+
+    let json = format!("{{\n  \"Replace\": {{\n{entries}\n  }}\n}}\n");
+    let overlay_path = target_dir.join("overlay.json");
+    fs::write(&overlay_path, &json)?;
+    println!("wrote {}", overlay_path.display());
+    Ok(())
 }
