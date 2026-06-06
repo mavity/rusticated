@@ -509,6 +509,9 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			h.IncOps()
 			go func() {
 				n, err := f.Write(dataCopy)
+				if handle == 1 || handle == 2 {
+					debugLog("HOST WRITE handle=%d data=%q", handle, string(dataCopy[:n]))
+				}
 				retCode := uint32(0)
 				if err != nil {
 					retCode = 5 // EIO
@@ -968,26 +971,66 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 }
 
 func (h *HostEnv) Poll(ctx context.Context, mod api.Module) {
-	// Process queued completions
+	// 1. Process already-queued completions.
+	processed := false
 	for {
 		select {
 		case op := <-h.fileOpsQueue:
 			op()
+			processed = true
 		default:
 			goto timers
 		}
 	}
 
 timers:
+	// 2. Process expired timers.
 	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	now := time.Now()
+	var earliest *time.Time
 	for ovPtr, deadline := range h.timers {
 		if now.After(deadline) {
 			delete(h.timers, ovPtr)
 			writeOverlapped(mod, ovPtr, 0, 0, 0)
 			h.DecOps()
+			processed = true
+		} else {
+			if earliest == nil || deadline.Before(*earliest) {
+				earliest = &deadline
+			}
 		}
+	}
+	h.mu.Unlock()
+
+	if processed {
+		return
+	}
+
+	// 3. If nothing happened, block until an event or timer.
+	timeout := 10 * time.Millisecond
+	if earliest != nil {
+		timeout = time.Until(*earliest)
+		if timeout < 0 {
+			timeout = 0
+		}
+	}
+
+	select {
+	case op := <-h.fileOpsQueue:
+		op()
+		// Drain leftovers
+		for {
+			select {
+			case op := <-h.fileOpsQueue:
+				op()
+			default:
+				return
+			}
+		}
+	case <-time.After(timeout):
+		// Timer possibly expired, will be handled in next call or just returning
+		return
+	case <-ctx.Done():
+		return
 	}
 }
