@@ -17,7 +17,7 @@ const (
 
 type mWaitList struct{}
 
-func lockVerifyMSize() {}
+func lockVerifyMSize()             {}
 func mutexContended(l *mutex) bool { return false }
 
 func lock(l *mutex) {

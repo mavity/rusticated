@@ -417,21 +417,26 @@ async fn build_go_project(project_dir: &str, workspace_root: &str) -> anyhow::Re
 
     let output_wasm = format!("{}/target/{}.wasm", workspace_root, project_name);
 
+    let old_cwd = std::env::current_dir().map_err(|e| anyhow::anyhow!("Failed to get current dir: {}", e))?;
+    std::env::set_current_dir(project_dir).map_err(|e| anyhow::anyhow!("Failed to set current dir to {}: {}", project_dir, e))?;
+
     let mut cmd = std::process::Command::new("go");
     cmd.arg("build")
         .arg("-overlay")
-        .arg(&overlay_path)
+        .arg(overlay_path.as_str())
         .arg("-o")
-        .arg(&output_wasm)
+        .arg(output_wasm.as_str())
         .arg(".")
         .env("GOOS", "wasip1")
-        .env("GOARCH", "wasm")
-        .current_dir(project_dir);
+        .env("GOARCH", "wasm");
 
-    let mut child = cmd
-        .spawn()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to spawn go build: {}", e))?;
+    let spawn_res = cmd.spawn().await;
+
+    let restore_res = std::env::set_current_dir(old_cwd);
+
+    let mut child = spawn_res.map_err(|e| anyhow::anyhow!("Failed to spawn go build: {}", e))?;
+    restore_res.map_err(|e| anyhow::anyhow!("Failed to restore current dir: {}", e))?;
+
     let status = child
         .wait()
         .await
@@ -475,14 +480,14 @@ async fn build_cargo_project(cargo_toml_path: &str, workspace_root: &str) -> any
         .arg("-Z")
         .arg("unstable-options")
         .arg("--manifest-path")
-        .arg(&cargo_toml_path)
+        .arg(cargo_toml_path)
         .arg("--release")
         .arg("--config")
-        .arg(&sysroot_config)
+        .arg(sysroot_config.as_str())
         .arg("--target")
         .arg(wasm_target)
-        .env("RUST_TARGET_PATH", &workspace_spec)
-        .env("CARGO_TARGET_DIR", &cargo_target_dir);
+        .env("RUST_TARGET_PATH", workspace_spec.as_str())
+        .env("CARGO_TARGET_DIR", cargo_target_dir.as_str());
 
     let mut child = cmd
         .spawn()
