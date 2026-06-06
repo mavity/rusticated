@@ -28,7 +28,7 @@ func (o *Overlapped) isComplete() bool { return o.flags&1 != 0 }
 func pause(newsp uintptr)
 
 func awaitOverlapped(o *Overlapped) {
-	for !o.isComplete() {
+	for *(*uint32)(unsafe.Pointer(uintptr(unsafe.Pointer(&o.flags))))&1 == 0 {
 		pause(sys.GetCallerSP() - 16)
 	}
 }
@@ -328,7 +328,7 @@ func ReadDir(fd int, buf []byte, _ uint64) (int, error) {
 		return 0, errnoErr(err)
 	}
 	var ov Overlapped
-	hostBuf := make([]byte, len(buf))
+	hostBuf := make([]byte, 2048)
 	rusticated_dir_read(unsafe.Pointer(&ov), handle, &hostBuf[0], uint32(len(hostBuf)))
 	runtime.KeepAlive(hostBuf)
 	awaitOverlapped(&ov)
@@ -354,10 +354,7 @@ func ReadDir(fd int, buf []byte, _ uint64) (int, error) {
 			break
 		}
 
-		next := uint64(0)
-		if len(pending) > idx+1 {
-			next = uint64(required)
-		}
+		next := uint64(written + required)
 		n := writeDirentEntry(buf[written:], next, name)
 		if n == 0 {
 			break
@@ -433,9 +430,7 @@ func Stat(path string, st *Stat_t) error {
 	)
 	runtime.KeepAlive(path)
 	runtime.KeepAlive(buf)
-	awaitOverlapped(&ov)
-	if ov.hostError != 0 {
-		return errnoErr(Errno(ov.hostError))
+	awaitOverlapped(&ov)return errnoErr(Errno(ov.hostError))
 	}
 	parseAbiStat(buf, st)
 	return nil
