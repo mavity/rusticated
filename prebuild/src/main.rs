@@ -548,9 +548,7 @@ fn main() {
 
 fn generate_go_overlay(target_dir: &PathBuf) -> std::io::Result<()> {
     // Resolve GOROOT dynamically.
-    let out = Command::new("go")
-        .args(["env", "GOROOT"])
-        .output();
+    let out = Command::new("go").args(["env", "GOROOT"]).output();
 
     let goroot = match out {
         Ok(o) if o.status.success() => {
@@ -578,19 +576,37 @@ fn generate_go_overlay(target_dir: &PathBuf) -> std::io::Result<()> {
 
     let replacements: &[(&str, &str)] = &[
         // Runtime
-        ("src/runtime/lock_wasip1.go",    "runtime/lock_rusticated.go"),
-        ("src/runtime/os_wasip1.go",      "runtime/os_rusticated.go"),
-        ("src/runtime/netpoll_wasip1.go", "runtime/netpoll_rusticated.go"),
+        ("src/runtime/lock_wasip1.go", "runtime/lock_rusticated.go"),
+        ("src/runtime/os_wasip1.go", "runtime/os_rusticated.go"),
+        (
+            "src/runtime/netpoll_wasip1.go",
+            "runtime/netpoll_rusticated.go",
+        ),
         // Syscall
-        ("src/syscall/fs_wasip1.go",      "syscall/fs_rusticated.go"),
-        ("src/syscall/syscall_wasip1.go", "syscall/syscall_rusticated.go"),
-        ("src/syscall/net_wasip1.go",     "syscall/net_rusticated.go"),
-        ("src/syscall/os_wasip1.go",      "syscall/os_rusticated.go"),
+        ("src/syscall/fs_wasip1.go", "syscall/fs_rusticated.go"),
+        (
+            "src/syscall/syscall_wasip1.go",
+            "syscall/syscall_rusticated.go",
+        ),
+        ("src/syscall/net_wasip1.go", "syscall/net_rusticated.go"),
+        ("src/syscall/os_wasip1.go", "syscall/os_rusticated.go"),
         // Internal (complete WASI elimination)
-        ("src/internal/syscall/unix/at_wasip1.go",           "internal/syscall/unix/at_rusticated.go"),
-        ("src/internal/syscall/unix/utimes_wasip1.go",       "internal/syscall/unix/utimes_rusticated.go"),
-        ("src/internal/syscall/unix/nonblocking_wasip1.go",  "internal/syscall/unix/nonblocking_rusticated.go"),
-        ("src/internal/syscall/unix/fcntl_wasip1.go",        "internal/syscall/unix/fcntl_rusticated.go"),
+        (
+            "src/internal/syscall/unix/at_wasip1.go",
+            "internal/syscall/unix/at_rusticated.go",
+        ),
+        (
+            "src/internal/syscall/unix/utimes_wasip1.go",
+            "internal/syscall/unix/utimes_rusticated.go",
+        ),
+        (
+            "src/internal/syscall/unix/nonblocking_wasip1.go",
+            "internal/syscall/unix/nonblocking_rusticated.go",
+        ),
+        (
+            "src/internal/syscall/unix/fcntl_wasip1.go",
+            "internal/syscall/unix/fcntl_rusticated.go",
+        ),
     ];
 
     let mut entries = String::new();

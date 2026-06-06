@@ -174,9 +174,9 @@ func rusticated_set_cwd(strPtr *byte, strLen uint32) uint32
 // ── fd <-> handle mapping ────────────────────────────────────────────────
 
 var (
-	fdTable [1024]uint64
-	fdInUse [1024]bool
-	fdPaths [1024]string // absolute path used to open this fd (for Fstat)
+	fdTable        [1024]uint64
+	fdInUse        [1024]bool
+	fdPaths        [1024]string // absolute path used to open this fd (for Fstat)
 	dirReadPending [1024][]byte
 )
 
