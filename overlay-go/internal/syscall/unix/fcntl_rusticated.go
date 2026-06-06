@@ -3,8 +3,8 @@
 package unix
 
 import (
-	_ "unsafe" // for go:linkname
 	"syscall"
+	_ "unsafe" // for go:linkname
 )
 
 // Replaces internal/syscall/unix/fcntl_wasip1.go.
