@@ -3,6 +3,8 @@
 package syscall
 
 import (
+	"bytes"
+	"encoding/binary"
 	"internal/runtime/sys"
 	"runtime"
 	"structs"
@@ -175,6 +177,7 @@ var (
 	fdTable [1024]uint64
 	fdInUse [1024]bool
 	fdPaths [1024]string // absolute path used to open this fd (for Fstat)
+	dirReadPending [1024][]byte
 )
 
 func init() {
@@ -184,6 +187,36 @@ func init() {
 	fdInUse[0] = true
 	fdInUse[1] = true
 	fdInUse[2] = true
+}
+
+func writeDirentEntry(dst []byte, next uint64, name []byte) int {
+	entryLen := 24 + len(name)
+	if len(dst) < entryLen {
+		return 0
+	}
+	binary.LittleEndian.PutUint64(dst[0:8], next)
+	binary.LittleEndian.PutUint64(dst[8:16], 0) // inode unknown
+	binary.LittleEndian.PutUint32(dst[16:20], uint32(len(name)))
+	dst[20] = 0
+	dst[21] = 0
+	dst[22] = 0
+	dst[23] = 0
+	copy(dst[24:], name)
+	return entryLen
+}
+
+func splitNullNames(data []byte) (names [][]byte, remainder []byte) {
+	start := 0
+	for i, b := range data {
+		if b == 0 {
+			names = append(names, append([]byte(nil), data[start:i]...))
+			start = i + 1
+		}
+	}
+	if start < len(data) {
+		remainder = append([]byte(nil), data[start:]...)
+	}
+	return
 }
 
 func allocFD(handle uint64, path string) (int32, Errno) {
@@ -242,6 +275,7 @@ func Close(fd int) error {
 	rusticated_handle_close(handle)
 	fdInUse[fd] = false
 	fdPaths[fd] = ""
+	dirReadPending[fd] = nil
 	return nil
 }
 
@@ -294,15 +328,46 @@ func ReadDir(fd int, buf []byte, _ uint64) (int, error) {
 		return 0, errnoErr(err)
 	}
 	var ov Overlapped
-	// The host reads it to resume pagination from the correct index.
-	// Host returns WASI-format dirent entries (24-byte header + name bytes each).
-	rusticated_dir_read(unsafe.Pointer(&ov), handle, &buf[0], uint32(len(buf)))
-	runtime.KeepAlive(buf)
+	hostBuf := make([]byte, len(buf))
+	rusticated_dir_read(unsafe.Pointer(&ov), handle, &hostBuf[0], uint32(len(hostBuf)))
+	runtime.KeepAlive(hostBuf)
 	awaitOverlapped(&ov)
 	if ov.hostError != 0 {
 		return 0, errnoErr(Errno(ov.hostError))
 	}
-	return int(ov.resultExt), nil
+
+	pending := append(dirReadPending[fd], hostBuf[:int(ov.resultExt)]...)
+	written := 0
+
+	for {
+		if len(pending) == 0 {
+			break
+		}
+		idx := bytes.IndexByte(pending, 0)
+		if idx < 0 {
+			break
+		}
+
+		name := pending[:idx]
+		required := 24 + len(name)
+		if len(buf)-written < required {
+			break
+		}
+
+		next := uint64(0)
+		if len(pending) > idx+1 {
+			next = uint64(required)
+		}
+		n := writeDirentEntry(buf[written:], next, name)
+		if n == 0 {
+			break
+		}
+		written += n
+		pending = pending[idx+1:]
+	}
+
+	dirReadPending[fd] = pending
+	return written, nil
 }
 
 // ── Stat / Lstat / Fstat ──────────────────────────────────────────────────
