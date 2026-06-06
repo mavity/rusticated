@@ -488,5 +488,3 @@ const (
 func Getrlimit(which int, lim *Rlimit) error {
 	return ENOSYS
 }
-
-
