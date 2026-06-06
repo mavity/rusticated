@@ -417,8 +417,10 @@ async fn build_go_project(project_dir: &str, workspace_root: &str) -> anyhow::Re
 
     let output_wasm = format!("{}/target/{}.wasm", workspace_root, project_name);
 
-    let old_cwd = std::env::current_dir().map_err(|e| anyhow::anyhow!("Failed to get current dir: {}", e))?;
-    std::env::set_current_dir(project_dir).map_err(|e| anyhow::anyhow!("Failed to set current dir to {}: {}", project_dir, e))?;
+    let old_cwd =
+        std::env::current_dir().map_err(|e| anyhow::anyhow!("Failed to get current dir: {}", e))?;
+    std::env::set_current_dir(project_dir)
+        .map_err(|e| anyhow::anyhow!("Failed to set current dir to {}: {}", project_dir, e))?;
 
     let mut cmd = std::process::Command::new("go");
     cmd.arg("build")
@@ -454,8 +456,10 @@ async fn build_go_project(project_dir: &str, workspace_root: &str) -> anyhow::Re
 
 // Build a Cargo/Rust project and return the path to the compiled .wasm file.
 #[cfg(target_arch = "wasm32")]
-async fn build_cargo_project(cargo_toml_path: &str, workspace_root: &str) -> anyhow::Result<String> {
-
+async fn build_cargo_project(
+    cargo_toml_path: &str,
+    workspace_root: &str,
+) -> anyhow::Result<String> {
     let toml_data = read_all(&cargo_toml_path)
         .await
         .map_err(|e| anyhow::anyhow!("Cannot read {}: {}", cargo_toml_path, e))?;
