@@ -61,9 +61,9 @@ func write1(fd uintptr, p unsafe.Pointer, n int32) int32 {
 		return 0
 	}
 	var ov overlapped
+	ov.flags = 0
 	rusticated_write(unsafe.Pointer(&ov), uint64(fd), (*byte)(p), size(n))
-	flagsPtr := (*uint32)(unsafe.Pointer(&ov.flags))
-	for *flagsPtr&1 == 0 {
+	for *(*uint32)(unsafe.Pointer(uintptr(unsafe.Pointer(&ov.flags))))&1 == 0 {
 	}
 	return int32(ov.resultExt)
 }
@@ -122,6 +122,8 @@ func goenvs() {
 		rusticated_get_env(&buf[0], bufLen)
 		splitNL(buf, envs)
 	}
+
+	// wasm doesn't have a traditional GRP or UID/GID, but we can set defaults.
 }
 
 func usleep(usec uint32) {}

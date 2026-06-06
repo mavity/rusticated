@@ -25,17 +25,31 @@ func main() {
 		cwd = "(unknown)"
 	}
 	fmt.Printf("cwd=%s\n", cwd)
+
+	fmt.Printf("DEBUG: calling stat on .\n")
+	os.Stdout.Sync()
+	fi, err := os.Stat(".")
+	if err != nil {
+		fmt.Printf("stat(.): %v\n", err)
+	} else {
+		fmt.Printf("stat(.) success: name=%s, size=%d, dir=%v\n", fi.Name(), fi.Size(), fi.IsDir())
+	}
+	os.Stdout.Sync()
+
 	fmt.Printf("PWD=%s\n", os.Getenv("PWD"))
 
-	for _, dir := range []string{".", os.Getenv("PWD")} {
+	for _, dir := range []string{"."} {
 		if dir == "" {
 			continue
 		}
+		fmt.Printf("DEBUG: calling ReadDir(%s)\n", dir)
+		os.Stdout.Sync()
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			fmt.Printf("readdir(%s): %v\n", dir, err)
 			continue
 		}
+		fmt.Printf("DEBUG: ReadDir(%s) returned %d entries\n", dir, len(entries))
 		fmt.Printf("ls %s:\n", dir)
 		for _, e := range entries {
 			fmt.Printf("  %s\n", e.Name())
@@ -90,7 +104,7 @@ func main() {
 
 	// ── 4. Metadata ────────────────────────────────────────────────────────
 	exePath := os.Args[0]
-	fi, err := os.Stat(exePath)
+	fi, err = os.Stat(exePath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "stat %s: %v\n", exePath, err)
 	} else {

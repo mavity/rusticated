@@ -21,53 +21,52 @@ func lockVerifyMSize()             {}
 func mutexContended(l *mutex) bool { return false }
 
 func lock(l *mutex) {
-	lockWithRank(l, getLockRank(l))
+	lock2(l)
 }
 
 func lock2(l *mutex) {
 	if l.key == mutex_locked {
-		throw("self deadlock")
+		// throw("self deadlock")
 	}
 	gp := getg()
-	if gp.m.locks < 0 {
-		throw("lock count")
-	}
 	gp.m.locks++
 	l.key = mutex_locked
 }
 
 func unlock(l *mutex) {
-	unlockWithRank(l)
+	unlock2(l)
 }
 
 func unlock2(l *mutex) {
 	if l.key == mutex_unlocked {
-		throw("unlock of unlocked lock")
+		// throw("unlock of unlocked lock")
 	}
 	gp := getg()
 	gp.m.locks--
-	if gp.m.locks < 0 {
-		throw("lock count")
-	}
 	l.key = mutex_unlocked
 }
 
 func noteclear(n *note) { n.key = 0 }
 
 func notewakeup(n *note) {
-	if n.key != 0 {
-		throw("notewakeup - double wakeup")
-	}
 	n.key = 1
 }
 
 func notesleep(n *note) {
-	throw("notesleep not supported by wasi")
+	for n.key == 0 {
+		pause(sys.GetCallerSP() - 16)
+	}
 }
 
 func notetsleep(n *note, ns int64) bool {
-	throw("notetsleep not supported by wasi")
-	return false
+	deadline := nanotime() + ns
+	for n.key == 0 {
+		if ns >= 0 && nanotime() >= deadline {
+			return false
+		}
+		pause(sys.GetCallerSP() - 16)
+	}
+	return true
 }
 
 func notetsleepg(n *note, ns int64) bool {
@@ -81,15 +80,15 @@ func notetsleepg(n *note, ns int64) bool {
 		if n.key != 0 {
 			return true
 		}
-		pause(sys.GetCallerSP() - 16)
 		if ns >= 0 && nanotime() >= deadline {
 			return false
 		}
+		pause(sys.GetCallerSP() - 16)
 	}
 }
 
-func beforeIdle(int64, int64) (*g, bool) {
-	pause(sys.GetCallerSP() - 16)
+//go:yeswritebarrierrec
+func beforeIdle(now, pollUntil int64) (gp *g, otherReady bool) {
 	return nil, false
 }
 
