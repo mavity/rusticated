@@ -552,6 +552,10 @@ fn main() {
 
     // Generate the Go build overlay that maps WASI source files to our
     // rusticated replacements, enabling `go build -overlay target/overlay.json`.
+    //
+    // Note: The linker (asm.go) is manufactured on the fly to stay compatible 
+    // with different Go versions. We modify the official source to suppress 
+    // the _start export and add custom entry points.
     generate_go_overlay(&goroot, &target_dir).expect("Failed to generate Go overlay");
 
     println!("Done. Run `cargo build -p demo`.");
@@ -563,16 +567,20 @@ fn generate_go_overlay(goroot: &PathBuf, target_dir: &PathBuf) -> std::io::Resul
     let overlay_dir = repo_root.join("overlay-go");
 
     // Manufacture a modified asm.go for the custom linker on the fly.
+    // This approach is preferred over a full overlay to avoid fragility 
+    // across Go toolchain updates.
     let asm_go_src = goroot.join("src/cmd/link/internal/wasm/asm.go");
     let mut asm_go_content = fs::read_to_string(&asm_go_src)?;
 
-    // 1. Add rusticated entry types to wasmFuncTypes
-    asm_go_content = asm_go_content.replace(
-        "\"_rt0_wasm_wasip1_lib\":    {Params: []byte{}},",
-        "\"_rt0_wasm_wasip1_lib\":    {Params: []byte{}},\n\t\"_rt0_wasm_rusticated\":     {Params: []byte{}},\n\t\"_rt0_wasm_rusticated_lib\": {Params: []byte{}},",
-    );
+    // 1. Add rusticated entry types to wasmFuncTypes map if not already present.
+    if !asm_go_content.contains("\"_rt0_wasm_rusticated\"") {
+        asm_go_content = asm_go_content.replace(
+            "\"_rt0_wasm_wasip1_lib\":    {Params: []byte{}},",
+            "\"_rt0_wasm_wasip1_lib\":    {Params: []byte{}},\n\t\"_rt0_wasm_rusticated\":     {Params: []byte{}},\n\t\"_rt0_wasm_rusticated_lib\": {Params: []byte{}},",
+        );
+    }
 
-    // 2. Suppress _start export in writeExportSec for wasip1
+    // 2. Suppress _start export in writeExportSec for wasip1.
     // We change 2+len to 1+len (memory only) and comment out the _start/entry logic.
     asm_go_content = asm_go_content.replace(
         "writeUleb128(ctxt.Out, uint64(2+len(ldr.WasmExports))) // number of exports",
@@ -588,8 +596,11 @@ fn generate_go_overlay(goroot: &PathBuf, target_dir: &PathBuf) -> std::io::Resul
         if let Some(end_idx_inner) = asm_go_content[start_idx..].find(entry_end) {
             let actual_end = start_idx + end_idx_inner + entry_end.len();
             let block = &asm_go_content[start_idx..actual_end];
-            let commented_block = format!("/*\n{}\n\t\t\t*/", block);
-            asm_go_content.replace_range(start_idx..actual_end, &commented_block);
+            // Only comment out if it's not already commented out (avoid double run issues)
+            if !block.contains("/*") {
+                let commented_block = format!("/*\n{}\n\t\t\t*/", block);
+                asm_go_content.replace_range(start_idx..actual_end, &commented_block);
+            }
         }
     }
 
