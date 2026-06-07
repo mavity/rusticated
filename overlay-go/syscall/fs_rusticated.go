@@ -5,7 +5,6 @@ package syscall
 import (
 	"bytes"
 	"encoding/binary"
-	"internal/runtime/sys"
 	"runtime"
 	"structs"
 	"unsafe"
@@ -23,16 +22,14 @@ type Overlapped struct {
 	resultExt uint64
 }
 
+type overlappedContext struct {
+	gp uintptr
+	o  Overlapped
+}
+
 func (o *Overlapped) isComplete() bool { return o.flags&1 != 0 }
 
-//go:linkname pause runtime.pause
-func pause(newsp uintptr)
-
-func awaitOverlapped(o *Overlapped) {
-	for *(*uint32)(unsafe.Pointer(uintptr(unsafe.Pointer(&o.flags))))&1 == 0 {
-		pause(sys.GetCallerSP() - 16)
-	}
-}
+func awaitOverlapped(ctx *overlappedContext)
 
 // ── Type definitions (from original syscall/fs_wasip1.go) ──────────────────
 
@@ -245,16 +242,16 @@ func Open(path string, mode int, perm uint32) (int, error) {
 	if path == "" {
 		return -1, EINVAL
 	}
-	var ov Overlapped
-	rusticated_path_open(unsafe.Pointer(&ov), (*byte)(unsafe.StringData(path)), uint32(len(path)), uint32(mode))
+	var ctx overlappedContext
+	rusticated_path_open(unsafe.Pointer(&ctx.o), (*byte)(unsafe.StringData(path)), uint32(len(path)), uint32(mode))
 	runtime.KeepAlive(path)
-	awaitOverlapped(&ov)
-	if ov.hostError != 0 {
-		return -1, errnoErr(Errno(ov.hostError))
+	awaitOverlapped(&ctx)
+	if ctx.o.hostError != 0 {
+		return -1, errnoErr(Errno(ctx.o.hostError))
 	}
-	fd, err := allocFD(ov.resultExt, path)
+	fd, err := allocFD(ctx.o.resultExt, path)
 	if err != 0 {
-		rusticated_handle_close(ov.resultExt)
+		rusticated_handle_close(ctx.o.resultExt)
 		return -1, errnoErr(err)
 	}
 	return int(fd), nil
@@ -290,14 +287,14 @@ func Read(fd int, p []byte) (int, error) {
 	if err != 0 {
 		return 0, errnoErr(err)
 	}
-	var ov Overlapped
-	rusticated_read(unsafe.Pointer(&ov), handle, &p[0], uint32(len(p)))
+	var ctx overlappedContext
+	rusticated_read(unsafe.Pointer(&ctx.o), handle, &p[0], uint32(len(p)))
 	runtime.KeepAlive(p)
-	awaitOverlapped(&ov)
-	if ov.hostError != 0 {
-		return 0, errnoErr(Errno(ov.hostError))
+	awaitOverlapped(&ctx)
+	if ctx.o.hostError != 0 {
+		return 0, errnoErr(Errno(ctx.o.hostError))
 	}
-	return int(ov.resultExt), nil
+	return int(ctx.o.resultExt), nil
 }
 
 func Write(fd int, p []byte) (int, error) {
@@ -308,14 +305,14 @@ func Write(fd int, p []byte) (int, error) {
 	if err != 0 {
 		return 0, errnoErr(err)
 	}
-	var ov Overlapped
-	rusticated_write(unsafe.Pointer(&ov), handle, &p[0], uint32(len(p)))
+	var ctx overlappedContext
+	rusticated_write(unsafe.Pointer(&ctx.o), handle, &p[0], uint32(len(p)))
 	runtime.KeepAlive(p)
-	awaitOverlapped(&ov)
-	if ov.hostError != 0 {
-		return 0, errnoErr(Errno(ov.hostError))
+	awaitOverlapped(&ctx)
+	if ctx.o.hostError != 0 {
+		return 0, errnoErr(Errno(ctx.o.hostError))
 	}
-	return int(ov.resultExt), nil
+	return int(ctx.o.resultExt), nil
 }
 
 // ── ReadDir ───────────────────────────────────────────────────────────────
@@ -328,16 +325,16 @@ func ReadDir(fd int, buf []byte, _ uint64) (int, error) {
 	if err != 0 {
 		return 0, errnoErr(err)
 	}
-	var ov Overlapped
+	var ctx overlappedContext
 	hostBuf := make([]byte, 2048)
-	rusticated_dir_read(unsafe.Pointer(&ov), handle, &hostBuf[0], uint32(len(hostBuf)))
+	rusticated_dir_read(unsafe.Pointer(&ctx.o), handle, &hostBuf[0], uint32(len(hostBuf)))
 	runtime.KeepAlive(hostBuf)
-	awaitOverlapped(&ov)
-	if ov.hostError != 0 {
-		return 0, errnoErr(Errno(ov.hostError))
+	awaitOverlapped(&ctx)
+	if ctx.o.hostError != 0 {
+		return 0, errnoErr(Errno(ctx.o.hostError))
 	}
 
-	pending := append(dirReadPending[fd], hostBuf[:int(ov.resultExt)]...)
+	pending := append(dirReadPending[fd], hostBuf[:int(ctx.o.resultExt)]...)
 	written := 0
 
 	for {
@@ -424,18 +421,18 @@ func Stat(path string, st *Stat_t) error {
 	if path == "" {
 		return EINVAL
 	}
-	var ov Overlapped
+	var ctx overlappedContext
 	buf := make([]byte, abiStatSize)
 	rusticated_path_stat(
-		unsafe.Pointer(&ov),
+		unsafe.Pointer(&ctx.o),
 		(*byte)(unsafe.StringData(path)), uint32(len(path)),
 		0, &buf[0], uint32(len(buf)),
 	)
 	runtime.KeepAlive(path)
 	runtime.KeepAlive(buf)
-	awaitOverlapped(&ov)
-	if ov.hostError != 0 {
-		return errnoErr(Errno(ov.hostError))
+	awaitOverlapped(&ctx)
+	if ctx.o.hostError != 0 {
+		return errnoErr(Errno(ctx.o.hostError))
 	}
 	parseAbiStat(buf, st)
 	return nil
@@ -446,19 +443,19 @@ func Lstat(path string, st *Stat_t) error {
 	if path == "" {
 		return EINVAL
 	}
-	var ov Overlapped
+	var ctx overlappedContext
 	buf := make([]byte, abiStatSize)
 	rusticated_path_stat(
-		unsafe.Pointer(&ov),
+		unsafe.Pointer(&ctx.o),
 		(*byte)(unsafe.StringData(path)), uint32(len(path)),
 		1, // no-follow (statFlagNoFollow)
 		&buf[0], uint32(len(buf)),
 	)
 	runtime.KeepAlive(path)
 	runtime.KeepAlive(buf)
-	awaitOverlapped(&ov)
-	if ov.hostError != 0 {
-		return errnoErr(Errno(ov.hostError))
+	awaitOverlapped(&ctx)
+	if ctx.o.hostError != 0 {
+		return errnoErr(Errno(ctx.o.hostError))
 	}
 	parseAbiStat(buf, st)
 	return nil

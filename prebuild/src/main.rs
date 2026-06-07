@@ -539,30 +539,63 @@ fn main() {
 
     fs::write(spec_dir.join("config.toml"), final_config).expect("wrote config.toml");
 
-    // Generate the Go build overlay that maps WASI source files to our
-    // rusticated replacements, enabling `go build -overlay target/overlay.json`.
-    generate_go_overlay(&target_dir).expect("Failed to generate Go overlay");
-
-    println!("Done. Run `cargo build -p demo`.");
-}
-
-fn generate_go_overlay(target_dir: &PathBuf) -> std::io::Result<()> {
     // Resolve GOROOT dynamically.
     let out = Command::new("go").args(["env", "GOROOT"]).output();
-
     let goroot = match out {
         Ok(o) if o.status.success() => {
             PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string())
         }
         _ => {
-            eprintln!("warning: `go env GOROOT` failed; skipping overlay.json generation");
-            return Ok(());
+            panic!("failed to find GOROOT");
         }
     };
 
+    // Generate the Go build overlay that maps WASI source files to our
+    // rusticated replacements, enabling `go build -overlay target/overlay.json`.
+    generate_go_overlay(&goroot, &target_dir).expect("Failed to generate Go overlay");
+
+    println!("Done. Run `cargo build -p demo`.");
+}
+
+fn generate_go_overlay(goroot: &PathBuf, target_dir: &PathBuf) -> std::io::Result<()> {
     // Resolve repo root as the current working directory when prebuild runs.
     let repo_root = std::env::current_dir()?;
     let overlay_dir = repo_root.join("overlay-go");
+
+    // Manufacture a modified asm.go for the custom linker on the fly.
+    let asm_go_src = goroot.join("src/cmd/link/internal/wasm/asm.go");
+    let mut asm_go_content = fs::read_to_string(&asm_go_src)?;
+
+    // 1. Add rusticated entry types to wasmFuncTypes
+    asm_go_content = asm_go_content.replace(
+        "\"_rt0_wasm_wasip1_lib\":    {Params: []byte{}},",
+        "\"_rt0_wasm_wasip1_lib\":    {Params: []byte{}},\n\t\"_rt0_wasm_rusticated\":     {Params: []byte{}},\n\t\"_rt0_wasm_rusticated_lib\": {Params: []byte{}},",
+    );
+
+    // 2. Suppress _start export in writeExportSec for wasip1
+    // We change 2+len to 1+len (memory only) and comment out the _start/entry logic.
+    asm_go_content = asm_go_content.replace(
+        "writeUleb128(ctxt.Out, uint64(2+len(ldr.WasmExports))) // number of exports",
+        "writeUleb128(ctxt.Out, uint64(1+len(ldr.WasmExports))) // number of exports (rusticated)",
+    );
+
+    // Comment out the entire entry point block in writeExportSec for wasip1.
+    // We look for the start of the 'var entry' and the end of 'writeUleb128(ctxt.Out, uint64(idx)) // funcidx'.
+    let entry_start = "var entry, entryExpName string";
+    let entry_end = "writeUleb128(ctxt.Out, uint64(idx)) // funcidx";
+    
+    if let Some(start_idx) = asm_go_content.find(entry_start) {
+        if let Some(end_idx_inner) = asm_go_content[start_idx..].find(entry_end) {
+            let actual_end = start_idx + end_idx_inner + entry_end.len();
+            let block = &asm_go_content[start_idx..actual_end];
+            let commented_block = format!("/*\n{}\n\t\t\t*/", block);
+            asm_go_content.replace_range(start_idx..actual_end, &commented_block);
+        }
+    }
+
+    let asm_go_dst = target_dir.join("asm_rusticated.go");
+    fs::write(&asm_go_dst, asm_go_content)?;
+    println!("generated {}", asm_go_dst.display());
 
     // Helper to canonicalize a path, stripping Windows \\?\ prefix.
     let canon = |p: PathBuf| -> String {
@@ -574,63 +607,38 @@ fn generate_go_overlay(target_dir: &PathBuf) -> std::io::Result<()> {
         s
     };
 
-    let replacements: &[(&str, &str)] = &[
+    let mut replacements: Vec<(&str, String)> = vec![
         // Runtime
-        ("src/runtime/lock_wasip1.go", "runtime/lock_rusticated.go"),
-        ("src/runtime/os_wasip1.go", "runtime/os_rusticated.go"),
-        (
-            "src/runtime/netpoll_wasip1.go",
-            "runtime/netpoll_rusticated.go",
-        ),
-        ("src/runtime/stubs_wasm.go", "runtime/stubs_rusticated.go"),
-        ("src/runtime/asm_wasm.s", "runtime/asm_rusticated.s"),
-        ("src/runtime/rt0_wasip1_wasm.s", "runtime/rt0_wasip1_wasm.s"),
+        ("src/runtime/lock_wasip1.go", canon(overlay_dir.join("runtime/lock_rusticated.go"))),
+        ("src/runtime/os_wasip1.go", canon(overlay_dir.join("runtime/os_rusticated.go"))),
+        ("src/runtime/netpoll_wasip1.go", canon(overlay_dir.join("runtime/netpoll_rusticated.go"))),
+        ("src/runtime/stubs_wasm.go", canon(overlay_dir.join("runtime/stubs_rusticated.go"))),
+        ("src/runtime/asm_wasm.s", canon(overlay_dir.join("runtime/asm_rusticated.s"))),
+        ("src/runtime/rt0_wasip1_wasm.s", canon(overlay_dir.join("runtime/rt0_wasip1_wasm.s"))),
+        // Linker (generated on the fly)
+        ("src/cmd/link/internal/wasm/asm.go", canon(asm_go_dst)),
         // Syscall
-        ("src/syscall/fs_wasip1.go", "syscall/fs_rusticated.go"),
-        (
-            "src/syscall/syscall_wasip1.go",
-            "syscall/syscall_rusticated.go",
-        ),
-        ("src/syscall/net_wasip1.go", "syscall/net_rusticated.go"),
-        ("src/syscall/os_wasip1.go", "syscall/os_rusticated.go"),
-        // Internal (complete WASI elimination)
-        (
-            "src/internal/syscall/unix/at_wasip1.go",
-            "internal/syscall/unix/at_rusticated.go",
-        ),
-        (
-            "src/internal/syscall/unix/utimes_wasip1.go",
-            "internal/syscall/unix/utimes_rusticated.go",
-        ),
-        (
-            "src/internal/syscall/unix/nonblocking_wasip1.go",
-            "internal/syscall/unix/nonblocking_rusticated.go",
-        ),
-        (
-            "src/internal/syscall/unix/fcntl_wasip1.go",
-            "internal/syscall/unix/fcntl_rusticated.go",
-        ),
-        (
-            "src/internal/syscall/unix/net_wasip1.go",
-            "internal/syscall/unix/net_rusticated.go",
-        ),
+        ("src/syscall/fs_wasip1.go", canon(overlay_dir.join("syscall/fs_rusticated.go"))),
+        ("src/syscall/syscall_wasip1.go", canon(overlay_dir.join("syscall/syscall_rusticated.go"))),
+        ("src/syscall/net_wasip1.go", canon(overlay_dir.join("syscall/net_rusticated.go"))),
+        ("src/syscall/os_wasip1.go", canon(overlay_dir.join("syscall/os_rusticated.go"))),
+        // Internal
+        ("src/internal/syscall/unix/at_wasip1.go", canon(overlay_dir.join("internal/syscall/unix/at_rusticated.go"))),
+        ("src/internal/syscall/unix/utimes_wasip1.go", canon(overlay_dir.join("internal/syscall/unix/utimes_rusticated.go"))),
+        ("src/internal/syscall/unix/nonblocking_wasip1.go", canon(overlay_dir.join("internal/syscall/unix/nonblocking_rusticated.go"))),
+        ("src/internal/syscall/unix/fcntl_wasip1.go", canon(overlay_dir.join("internal/syscall/unix/fcntl_rusticated.go"))),
+        ("src/internal/syscall/unix/net_wasip1.go", canon(overlay_dir.join("internal/syscall/unix/net_rusticated.go"))),
     ];
 
     let mut entries = String::new();
     let mut first = true;
-    for (goroot_rel, overlay_rel) in replacements {
+    for (goroot_rel, dst_str) in replacements {
         let src = goroot.join(goroot_rel);
         if !src.exists() {
             eprintln!("warning: overlay source not found: {}", src.display());
             continue;
         }
-        let dst = overlay_dir.join(overlay_rel);
-        if !dst.exists() {
-            eprintln!("warning: overlay destination not found: {}", dst.display());
-            continue;
-        }
         let src_str = canon(src);
-        let dst_str = canon(dst);
         if !first {
             entries.push_str(",\n");
         }
