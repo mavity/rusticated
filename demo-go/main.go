@@ -10,13 +10,6 @@ import (
 	"time"
 )
 
-// run is called by the rusticated host (washmhost) after one or more I/O
-// completions have been written into guest Overlapped memory. It re-enters
-// wasm_pc_f_loop, resuming any goroutines that were waiting on pause().
-//
-//go:wasmexport run
-func run() {}
-
 func main() {
 	// ── 1. Environment Diagnostics ─────────────────────────────────────────
 	cwd, err := os.Getwd()
