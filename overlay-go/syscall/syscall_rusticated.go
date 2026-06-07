@@ -31,6 +31,12 @@ const (
 	FILETYPE_SYMBOLIC_LINK
 )
 
+const (
+	SHUT_RD   = 0
+	SHUT_WR   = 1
+	SHUT_RDWR = 2
+)
+
 type Dirent struct {
 	// The offset of the next directory entry stored in this directory.
 	Next Dircookie
