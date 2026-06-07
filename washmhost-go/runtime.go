@@ -16,6 +16,7 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 
 	// 1. Setup Wazero using Compiler.
 	rConfig := wazero.NewRuntimeConfigCompiler()
+	// rConfig = rConfig.WithHostLogging(logging.LogScopeAll)
 	r := wazero.NewRuntimeWithConfig(ctx, rConfig)
 	defer r.Close(ctx)
 
@@ -35,6 +36,12 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 			break
 		}
 	}
+
+	for i := 0; i < 10; i++ {
+		// Just a hack to see if we can get info
+	}
+	// Note: wazero.CompiledModule doesn't expose table info easily here.
+	// But we can check after instantiation.
 
 	var hEnv *HostEnv
 

@@ -11,3 +11,6 @@ func pause(newsp uintptr)
 //
 //go:linkname wasm_pc_f_loop_rusticated wasm_pc_f_loop_rusticated
 func wasm_pc_f_loop_rusticated() int32
+
+//go:wasmimport env rusticated_debug
+func rusticated_debug(val int32)
