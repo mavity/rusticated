@@ -959,6 +959,13 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 		}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).
 		Export("process_exit")
 
+	builder.NewFunctionBuilder().
+		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+			val := int32(stack[0])
+			fmt.Printf("GUEST DEBUG: %d (0x%x)\n", val, val)
+		}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).
+		Export("rusticated_debug")
+
 	_, err := builder.Instantiate(ctx)
 	return err
 }

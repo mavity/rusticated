@@ -128,12 +128,22 @@ func goenvs() {
 	// wasm doesn't have a traditional GRP or UID/GID, but we can set defaults.
 }
 
+//go:linkname rt0_init runtime._rt0_wasm_wasip1
+func rt0_init()
+
+var initialized uint32
+
 // run is called by the rusticated host (washmhost) after one or more I/O
 // completions have been written into guest Overlapped memory. It re-enters
 // wasm_pc_f_loop, resuming any goroutines that were waiting on pause().
 //
 //go:wasmexport run
 func run() {
+	if initialized == 0 {
+		initialized = 1
+		rt0_init()
+		return
+	}
 	wasm_pc_f_loop_rusticated()
 }
 
