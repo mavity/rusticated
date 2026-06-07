@@ -283,7 +283,7 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string) (string, error) {
 
 	buildTarget := func(name string) error {
 		targetArg := name
-		args := []string{"build", "-vv", "--release"}
+		args := []string{"build", "--release"}
 		if isRusticatedTarget {
 			targetPath := filepath.Join(ws, "target", "rusticated-spec", name+".json")
 			evalPath, err := filepath.EvalSymlinks(targetPath)
@@ -296,16 +296,13 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string) (string, error) {
 		args = append(args, "--target", targetArg)
 		cmd := exec.Command("cargo", args...)
 		env := os.Environ()
-		if isRusticatedTarget {
-			env = append(env, "RUST_TARGET_PATH="+filepath.Join(ws, "target", "rusticated-spec"))
-		}
 		if s.goos == "linux" || (s.goos == "windows" && (strings.Contains(name, "windows-gnu") || strings.Contains(name, "windows-gnullvm"))) {
 			linkerVar := "CARGO_TARGET_" + strings.ToUpper(strings.ReplaceAll(name, "-", "_")) + "_LINKER"
 			env = append(env, linkerVar+"=rust-lld")
 		}
 		cmd.Env = env
 		if isRusticatedTarget {
-			cmd.Args = append(cmd.Args, "-Z", "unstable-options", "-Z", "json-target-spec")
+			cmd.Args = append(cmd.Args, "-Z", "unstable-options")
 		}
 
 		cmd.Dir = filepath.Join(ws, pkgDir)
@@ -355,10 +352,9 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string) (string, error) {
 
 func buildMohabbatBrain(ws string) error {
 	target := "wasm32-rusticated-unknown-unknown"
-	cmd := exec.Command("cargo", "build", "-vv", "-p", "mohabbat", "--release", "--config", filepath.Join(ws, "target", "rusticated-spec", "config.toml"), "--target", target)
-	env := append(os.Environ(), "RUST_TARGET_PATH="+filepath.Join(ws, "target", "rusticated-spec"))
+	cmd := exec.Command("cargo", "build", "-p", "mohabbat", "--release", "--config", filepath.Join(ws, "target", "rusticated-spec", "config.toml"), "--target", target)
 
-	cmd.Env = env
+	cmd.Env = os.Environ()
 	cmd.Args = append(cmd.Args, "-Z", "unstable-options")
 	cmd.Dir = ws
 	cmd.Stdout = os.Stdout
@@ -388,7 +384,7 @@ func goBuild(ws, pkgDir string, s slot, buildDir string) error {
 	// Note: go build -o - is avoided here because on some Windows environments
 	// it incorrectly creates a literal file named "-" instead of streaming.
 	tmpOut := filepath.Join(goTmpDir, "build.dat")
-	cmd := exec.Command("go", "build", "-trimpath", "-o", tmpOut, ".")
+	cmd := exec.Command("go", "build", "-trimpath", "-ldflags=-s -w", "-o", tmpOut, ".")
 	cmd.Dir = filepath.Join(ws, pkgDir)
 	env := os.Environ()
 	env = upsertEnv(env, "CGO_ENABLED", "0")
