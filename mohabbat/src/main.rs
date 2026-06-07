@@ -256,7 +256,8 @@ fn compress(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     let mut input_buf = vec![0u8; 4096];
     let mut output_buf = vec![0u8; 4096];
     let mut params = BrotliEncoderParams::default();
-    params.quality = 1;
+    params.quality = 11;
+    params.lgwin = 24;
 
     let mut reader = SliceReader { data, pos: 0 };
     let mut writer = VecWriter { vec: Vec::new() };
