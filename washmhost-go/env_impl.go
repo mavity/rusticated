@@ -203,16 +203,15 @@ func writeOverlapped(mod api.Module, ovPtr uint32, errorCode uint32, continued u
 		return fmt.Errorf("no memory export")
 	}
 
-	buf, ok := mem.Read(ovPtr, 24)
-	if !ok {
-		return fmt.Errorf("ovPtr %d out of bounds", ovPtr)
-	}
-
+	buf := make([]byte, 24)
 	binary.LittleEndian.PutUint32(buf[0:4], 1)
 	binary.LittleEndian.PutUint32(buf[4:8], errorCode)
 	binary.LittleEndian.PutUint64(buf[8:16], continued)
 	binary.LittleEndian.PutUint64(buf[16:24], resultExt)
 
+	if ok := mem.Write(ovPtr, buf); !ok {
+		return fmt.Errorf("ovPtr %d out of bounds", ovPtr)
+	}
 	return nil
 }
 
@@ -237,12 +236,11 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			ptr := uint32(stack[0])
 			lenBytes := uint32(stack[1])
 
-			mem := m.Memory()
-			buf, ok := mem.Read(ptr, lenBytes)
-			if !ok {
+			buf := make([]byte, lenBytes)
+			rand.Read(buf)
+			if ok := m.Memory().Write(ptr, buf); !ok {
 				panic("get_random: out of bounds")
 			}
-			rand.Read(buf)
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
 		Export("get_random")
 
@@ -260,17 +258,16 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			count := uint64(len(args))
 
 			if ptr != 0 && lenBytes >= bytesNeeded {
-				mem := m.Memory()
-				buf, ok := mem.Read(ptr, bytesNeeded)
-				if !ok {
-					panic("get_args: out of bounds")
-				}
+				buf := make([]byte, bytesNeeded)
 				offset := 0
 				for _, arg := range args {
 					copy(buf[offset:], arg)
 					offset += len(arg)
 					buf[offset] = 0
 					offset++
+				}
+				if ok := m.Memory().Write(ptr, buf); !ok {
+					panic("get_args: out of bounds")
 				}
 			}
 
@@ -311,11 +308,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			count := uint64(len(vars))
 
 			if ptr != 0 && lenBytes >= bytesNeeded {
-				mem := m.Memory()
-				buf, ok := mem.Read(ptr, bytesNeeded)
-				if !ok {
-					panic("get_env: out of bounds")
-				}
+				buf := make([]byte, bytesNeeded)
 				offset := 0
 				for _, envVar := range vars {
 					parts := strings.SplitN(envVar, "=", 2)
@@ -331,6 +324,9 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 					offset += len(v)
 					buf[offset] = 0
 					offset++
+				}
+				if ok := m.Memory().Write(ptr, buf); !ok {
+					panic("get_env: out of bounds")
 				}
 			}
 
@@ -354,12 +350,9 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 
 			bytesNeeded := uint32(len(cwd))
 			if ptr != 0 && lenBytes >= bytesNeeded && bytesNeeded > 0 {
-				mem := m.Memory()
-				buf, ok := mem.Read(ptr, bytesNeeded)
-				if !ok {
+				if ok := m.Memory().Write(ptr, []byte(cwd)); !ok {
 					panic("get_cwd: out of bounds")
 				}
-				copy(buf, cwd)
 			}
 
 			res := (uint64(0) << 32) | uint64(bytesNeeded)
@@ -970,7 +963,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 	return err
 }
 
-func (h *HostEnv) Poll(ctx context.Context, mod api.Module) {
+func (h *HostEnv) Poll(ctx context.Context, mod api.Module) bool {
 	// 1. Process already-queued completions.
 	processed := false
 	for {
@@ -984,7 +977,7 @@ func (h *HostEnv) Poll(ctx context.Context, mod api.Module) {
 	}
 
 timers:
-	// 2. Process expired timers.
+	// 2. Process expired timers (from timer_set).
 	h.mu.Lock()
 	now := time.Now()
 	var earliest *time.Time
@@ -995,42 +988,60 @@ timers:
 			h.DecOps()
 			processed = true
 		} else {
-			if earliest == nil || deadline.Before(*earliest) {
-				earliest = &deadline
+			d := deadline
+			if earliest == nil || d.Before(*earliest) {
+				earliest = &d
 			}
 		}
 	}
 	h.mu.Unlock()
 
 	if processed {
-		return
+		return true
 	}
 
-	// 3. If nothing happened, block until an event or timer.
-	timeout := 10 * time.Millisecond
+	// 3. Block until the next event or the next host-side timer deadline.
+	//    sched_pause completions arrive via fileOpsQueue, so no artificial
+	//    timeout is needed to service Go's internal timers.
 	if earliest != nil {
-		timeout = time.Until(*earliest)
+		timeout := time.Until(*earliest)
 		if timeout < 0 {
 			timeout = 0
 		}
+		select {
+		case op := <-h.fileOpsQueue:
+			op()
+			// Drain any additional queued items
+			for {
+				select {
+				case op := <-h.fileOpsQueue:
+					op()
+				default:
+					return true
+				}
+			}
+		case <-time.After(timeout):
+			// Timer deadline reached; let the loop retry timer processing.
+			return false
+		case <-ctx.Done():
+			return false
+		}
 	}
 
+	// No pending timers: block until an I/O completion or sched_pause fires.
 	select {
 	case op := <-h.fileOpsQueue:
 		op()
-		// Drain leftovers
+		// Drain any additional queued items
 		for {
 			select {
 			case op := <-h.fileOpsQueue:
 				op()
 			default:
-				return
+				return true
 			}
 		}
-	case <-time.After(timeout):
-		// Timer possibly expired, will be handled in next call or just returning
-		return
 	case <-ctx.Done():
-		return
+		return false
 	}
 }

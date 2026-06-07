@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"structs"
 	"unsafe"
+	_ "unsafe" // for go:linkname
 )
 
 // ── Overlapped ────────────────────────────────────────────────────────────────
@@ -414,10 +415,12 @@ func parseAbiStat(buf []byte, st *Stat_t) {
 	st.Ctime = leU64fs(buf[40:48])
 	st.Nlink = leU64fs(buf[48:56])
 	st.Ino = leU64fs(buf[56:64])
-	setDefaultMode(st)
+	st.Mode = int(leU32fs(buf[4:8]))
+	st.Dev = 1
 }
 
 func Stat(path string, st *Stat_t) error {
+	println("DEBUG: guest Stat", path)
 	if path == "" {
 		return EINVAL
 	}
@@ -430,13 +433,16 @@ func Stat(path string, st *Stat_t) error {
 	)
 	runtime.KeepAlive(path)
 	runtime.KeepAlive(buf)
-	awaitOverlapped(&ov)return errnoErr(Errno(ov.hostError))
+	awaitOverlapped(&ov)
+	if ov.hostError != 0 {
+		return errnoErr(Errno(ov.hostError))
 	}
 	parseAbiStat(buf, st)
 	return nil
 }
 
 func Lstat(path string, st *Stat_t) error {
+	println("DEBUG: guest Lstat", path)
 	if path == "" {
 		return EINVAL
 	}
