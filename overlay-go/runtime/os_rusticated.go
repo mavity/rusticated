@@ -37,6 +37,40 @@ type overlapped struct {
 	resultExt uint64
 }
 
+type overlappedContext struct {
+	gp uintptr
+	o  overlapped
+}
+
+var pendingov [1024]*overlappedContext
+
+//go:linkname awaitOverlapped_syscall syscall.awaitOverlapped
+func awaitOverlapped_syscall(ctx *overlappedContext) {
+	ctx.gp = uintptr(unsafe.Pointer(getg()))
+
+	// Add to pending list
+	added := false
+	for i := range pendingov {
+		if pendingov[i] == nil {
+			pendingov[i] = ctx
+			added = true
+			break
+		}
+	}
+	if !added {
+		throw("too many pending async operations")
+	}
+
+	gopark(parkunlock_rusticated, nil, waitReasonIOWait, traceBlockGeneric, 1)
+}
+
+func parkunlock_rusticated(gp *g, _ unsafe.Pointer) bool {
+	// After the G is parked, we must trigger the pause to return to host.
+	// We use the stack pointer of the g0 which is currently running the scheduler.
+	pause(sys.GetCallerSP() - 16)
+	return true
+}
+
 //go:wasmimport env process_exit
 func exit(code int32)
 
@@ -128,7 +162,7 @@ func goenvs() {
 	// wasm doesn't have a traditional GRP or UID/GID, but we can set defaults.
 }
 
-//go:linkname rt0_init runtime._rt0_wasm_wasip1
+//go:linkname rt0_init _rt0_wasm_wasip1
 func rt0_init()
 
 var initialized uint32
@@ -144,7 +178,31 @@ func run() {
 		rt0_init()
 		return
 	}
-	wasm_pc_f_loop_rusticated()
+
+	// Process any completions
+	for i := range pendingov {
+		if pendingov[i] != nil && (pendingov[i].o.flags&1) != 0 {
+			ctx := pendingov[i]
+			pendingov[i] = nil
+			goready((*g)(unsafe.Pointer(ctx.gp)), 0)
+		}
+	}
+
+	wasm_pc_f_loop()
 }
+
+//go:wasmexport resume
+func resume() {
+	resume_asm()
+}
+
+func resume_asm()
+
+//go:wasmexport getsp
+func getsp() uint32 {
+	return getsp_asm()
+}
+
+func getsp_asm() uint32
 
 func usleep(usec uint32) {}
