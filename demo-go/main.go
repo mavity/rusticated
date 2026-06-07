@@ -21,18 +21,17 @@ func main() {
 	// ── 1. Environment Diagnostics ─────────────────────────────────────────
 	cwd, err := os.Getwd()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "getwd: %v\n", err)
+		println("getwd error:", err.Error())
 		cwd = "(unknown)"
 	}
-	fmt.Printf("cwd=%s\n", cwd)
+	println("cwd=", cwd)
 
-	fmt.Printf("DEBUG: calling stat on .\n")
-	os.Stdout.Sync()
+	println("DEBUG: calling stat on .")
 	fi, err := os.Stat(".")
 	if err != nil {
-		fmt.Printf("stat(.): %v\n", err)
+		println("stat(.) error:", err.Error())
 	} else {
-		fmt.Printf("stat(.) success: name=%s, size=%d, dir=%v\n", fi.Name(), fi.Size(), fi.IsDir())
+		println("stat(.) success: name=", fi.Name(), " size=", fi.Size())
 	}
 	os.Stdout.Sync()
 

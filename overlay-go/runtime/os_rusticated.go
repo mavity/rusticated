@@ -3,6 +3,7 @@
 package runtime
 
 import (
+	"internal/runtime/sys"
 	"structs"
 	"unsafe"
 )
@@ -64,6 +65,7 @@ func write1(fd uintptr, p unsafe.Pointer, n int32) int32 {
 	ov.flags = 0
 	rusticated_write(unsafe.Pointer(&ov), uint64(fd), (*byte)(p), size(n))
 	for *(*uint32)(unsafe.Pointer(uintptr(unsafe.Pointer(&ov.flags))))&1 == 0 {
+		pause(sys.GetCallerSP() - 16)
 	}
 	return int32(ov.resultExt)
 }
@@ -124,6 +126,15 @@ func goenvs() {
 	}
 
 	// wasm doesn't have a traditional GRP or UID/GID, but we can set defaults.
+}
+
+// run is called by the rusticated host (washmhost) after one or more I/O
+// completions have been written into guest Overlapped memory. It re-enters
+// wasm_pc_f_loop, resuming any goroutines that were waiting on pause().
+//
+//go:wasmexport run
+func run() {
+	wasm_pc_f_loop_rusticated()
 }
 
 func usleep(usec uint32) {}

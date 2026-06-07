@@ -582,6 +582,9 @@ fn generate_go_overlay(target_dir: &PathBuf) -> std::io::Result<()> {
             "src/runtime/netpoll_wasip1.go",
             "runtime/netpoll_rusticated.go",
         ),
+        ("src/runtime/stubs_wasm.go", "runtime/stubs_rusticated.go"),
+        ("src/runtime/asm_wasm.s", "runtime/asm_rusticated.s"),
+        ("src/runtime/rt0_wasip1_wasm.s", "runtime/rt0_wasip1_wasm.s"),
         // Syscall
         ("src/syscall/fs_wasip1.go", "syscall/fs_rusticated.go"),
         (
@@ -606,6 +609,10 @@ fn generate_go_overlay(target_dir: &PathBuf) -> std::io::Result<()> {
         (
             "src/internal/syscall/unix/fcntl_wasip1.go",
             "internal/syscall/unix/fcntl_rusticated.go",
+        ),
+        (
+            "src/internal/syscall/unix/net_wasip1.go",
+            "internal/syscall/unix/net_rusticated.go",
         ),
     ];
 
