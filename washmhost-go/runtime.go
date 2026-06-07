@@ -6,7 +6,6 @@ import (
 	"os"
 
 	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 	"github.com/tetratelabs/wazero/sys"
 )
 
@@ -28,14 +27,12 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 
 	// 2. Detect Import flavor
 	isRusticated := false
-	isWasi := false
 
 	for _, imp := range decoded.ImportedFunctions() {
 		modName, _, _ := imp.Import()
 		if modName == "env" {
 			isRusticated = true
-		} else if modName == "wasi_snapshot_preview1" {
-			isWasi = true
+			break
 		}
 	}
 
@@ -46,10 +43,6 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 		if err := hEnv.Register(ctx, r); err != nil {
 			return 1, fmt.Errorf("failed to register rusticated host env: %w", err)
 		}
-	}
-
-	if isWasi {
-		wasi_snapshot_preview1.MustInstantiate(ctx, r)
 	}
 
 	// 3. Instantiate
@@ -78,59 +71,41 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 			return 1, fmt.Errorf("rusticated module missing 'run' export")
 		}
 
-		// Initial start if not done by instantiation
-		_start := mod.ExportedFunction("_start")
-		if _start != nil && !isWasi {
-			_, err := _start.Call(ctx)
-			if err != nil {
-				return 1, fmt.Errorf("_start failed: %w", err)
+		// Boot the guest. For Go guests compiled with //go:wasmexport,
+		// calling "run" initialises the Go runtime, starts main, and returns
+		// when beforeIdle fires pause(). For Rust guests, "run" is the normal
+		// entry point. Never call _start: it would run the whole program
+		// synchronously and deadlock the host's event loop.
+		_, err = runFunc.Call(ctx)
+		if err != nil {
+			if exitErr, ok := err.(*sys.ExitError); ok {
+				return int(exitErr.ExitCode()), nil
 			}
-		} else if _start == nil {
-			// Rust guest entry
-			_, err = runFunc.Call(ctx)
-			if err != nil {
-				return 1, fmt.Errorf("initial run failed: %w", err)
-			}
+			return 1, fmt.Errorf("initial run failed: %w", err)
 		}
 
-		// Event loop: continue as long as there is outstanding work.
+		// Event loop: poll for completions, then re-enter the guest.
+		// Terminates when there are no more outstanding ops (all I/O done
+		// and all sched_pause wakeups consumed) or when the guest calls
+		// process_exit (which calls os.Exit directly).
 		for {
-			// If no more outstanding ops, we are finished.
 			if !hEnv.HasOutstandingOps() {
 				break
 			}
 
-			// Drive the host ops polling here - this fills the queue
 			hEnv.Poll(ctx, mod)
 
-			// Re-enter the guest to process any completions
 			_, err = runFunc.Call(ctx)
 			if err != nil {
+				if exitErr, ok := err.(*sys.ExitError); ok {
+					return int(exitErr.ExitCode()), nil
+				}
 				return 1, fmt.Errorf("run failed: %w", err)
 			}
 		}
 
 		return 0, nil
-	} else if isWasi {
-		// WASI runs to completion at `InstantiateModule` implicitly invoking _start if configured
-		// But just in case _start wasn't invoked implicitly:
-		_start := mod.ExportedFunction("_start")
-		if _start != nil {
-			_, err := _start.Call(ctx)
-			if err != nil {
-				if exitErr, ok := err.(*sys.ExitError); ok {
-					return int(exitErr.ExitCode()), nil
-				}
-				return 1, fmt.Errorf("_start failed: %w", err)
-			}
-		}
-		return 0, nil
-	} else {
-		// Try a basic run just in case
-		runFunc := mod.ExportedFunction("run")
-		if runFunc != nil {
-			runFunc.Call(ctx)
-		}
-		return 0, nil
 	}
+
+	return 1, fmt.Errorf("module is not rusticated (missing 'env' imports)")
 }
