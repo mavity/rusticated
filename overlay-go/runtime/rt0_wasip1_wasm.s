@@ -11,12 +11,10 @@ TEXT _rt0_wasm_wasip1(SB),NOSPLIT,$0
 	I32Const $0 // entry PC_B
 	Call runtime·rt0_go(SB)
 	Drop
-	I32Const $0 // Dummy param for Go calling convention
-	Call wasm_pc_f_loop_rusticated(SB)
-	Drop
+	Call wasm_pc_f_loop(SB)
 
 	Return
 
-TEXT _rt0_wasm_wasip1_lib(SB),NOSPLIT,$0
-	Call _rt0_wasm_wasip1(SB)
+TEXT _rt0_wasm_rusticated_lib(SB),NOSPLIT,$0
+	Call _rt0_wasm_rusticated(SB)
 	Return
