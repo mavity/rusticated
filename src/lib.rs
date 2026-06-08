@@ -471,6 +471,8 @@ pub mod ffi;
 pub mod fs;
 /// I/O operations
 pub mod io;
+/// Networking primitives
+pub mod net;
 /// OS-specific extensions
 #[macro_use]
 pub mod os;
