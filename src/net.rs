@@ -18,7 +18,9 @@ pub struct Ipv4Addr {
 impl Ipv4Addr {
     /// Creates a new IPv4 address from four octets.
     pub const fn new(a: u8, b: u8, c: u8, d: u8) -> Ipv4Addr {
-        Ipv4Addr { octets: [a, b, c, d] }
+        Ipv4Addr {
+            octets: [a, b, c, d],
+        }
     }
 
     /// Returns the four eight-bit integers that make up this address.
@@ -458,7 +460,9 @@ impl ToSocketAddrs for (&str, u16) {
     fn to_socket_addrs(&self) -> io::Result<Self::Iter> {
         // Simple IP parser for now
         if let Some(v4) = parse_ipv4(self.0) {
-            return Ok(crate::alloc::vec![SocketAddr::V4(SocketAddrV4::new(v4, self.1))].into_iter());
+            return Ok(
+                crate::alloc::vec![SocketAddr::V4(SocketAddrV4::new(v4, self.1))].into_iter(),
+            );
         }
         // TODO: DNS resolution or more complex parsers
         Err(io::Error::other("unsupported address format"))
