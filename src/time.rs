@@ -156,12 +156,12 @@ mod native_instant {
         tv_nsec: i64,
     }
 
-    #[cfg(any(unix, rusticated_linux))]
+    #[cfg(all(any(unix), not(any(target_os = "linux", rusticated_linux))))]
     unsafe extern "C" {
         fn clock_gettime(clk_id: i32, tp: *mut Timespec) -> i32;
     }
 
-    #[cfg(any(unix, rusticated_linux))]
+    #[cfg(all(any(unix), not(any(target_os = "linux", rusticated_linux))))]
     const CLOCK_MONOTONIC: i32 = 1;
 
     // â”€â”€ Windows: QueryPerformanceCounter
@@ -199,7 +199,23 @@ mod native_instant {
     impl Instant {
         /// Returns the current instant.
         pub fn now() -> Self {
-            #[cfg(any(unix, rusticated_linux))]
+            #[cfg(any(target_os = "linux", rusticated_linux))]
+            {
+                let mut ts = Timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                };
+                crate::syscall!(
+                    crate::os::linux::syscall::nr::CLOCK_GETTIME,
+                    1usize, // CLOCK_MONOTONIC
+                    &mut ts as *mut _ as usize
+                );
+                let nanos = (ts.tv_sec as u64)
+                    .wrapping_mul(1_000_000_000)
+                    .wrapping_add(ts.tv_nsec as u64);
+                Self(nanos)
+            }
+            #[cfg(all(any(unix), not(any(target_os = "linux", rusticated_linux))))]
             {
                 let mut ts = Timespec {
                     tv_sec: 0,

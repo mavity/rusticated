@@ -472,6 +472,7 @@ pub mod fs;
 /// I/O operations
 pub mod io;
 /// OS-specific extensions
+#[macro_use]
 pub mod os;
 /// Path extensions
 pub mod path;

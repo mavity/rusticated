@@ -602,7 +602,17 @@ pub mod nr {
     pub const FACCESSAT: usize = 48;
     pub const CHDIR: usize = 49;
     pub const FCHDIR: usize = 50;
+    pub const CHROOT: usize = 51;
+    pub const FCHMOD: usize = 52;
+    pub const FCHMODAT: usize = 53;
+    pub const FCHOWN: usize = 54;
+    pub const FCHOWNAT: usize = 55;
+    pub const OPENAT: usize = 56;
     pub const CLOSE: usize = 57;
+    pub const VFORK: usize = 58; // Actually not in aarch64
+    pub const PIPE2: usize = 59;
+    pub const QUOTACTL: usize = 60;
+    pub const GETIDENTS64: usize = 61;
     pub const LSEEK: usize = 62;
     pub const READ: usize = 63;
     pub const WRITE: usize = 64;
@@ -817,5 +827,4 @@ pub mod nr {
     pub const IO_URING_ENTER: usize = 426;
     pub const IO_URING_REGISTER: usize = 427;
     pub const PIDFD_OPEN: usize = 434;
-    pub const OPENAT: usize = 56;
 }

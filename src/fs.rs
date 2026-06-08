@@ -1344,7 +1344,7 @@ pub async fn metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
                     ) as i32;
                     #[cfg(target_arch = "aarch64")]
                     let r = crate::syscall!(
-                        79usize,            // FSTATAT
+                        crate::os::linux::syscall::nr::NEWFSTATAT,
                         -100isize as usize, // AT_FDCWD
                         path_bytes.as_ptr() as usize,
                         meta.as_mut_ptr() as usize,
@@ -1502,7 +1502,7 @@ pub async fn symlink_metadata<P: AsRef<str>>(path: P) -> io::Result<Metadata> {
                     ) as i32;
                     #[cfg(target_arch = "aarch64")]
                     let r = crate::syscall!(
-                        79usize,            // FSTATAT
+                        crate::os::linux::syscall::nr::NEWFSTATAT,
                         -100isize as usize, // AT_FDCWD
                         path_bytes.as_ptr() as usize,
                         meta.as_mut_ptr() as usize,
@@ -1679,7 +1679,7 @@ pub async fn set_permissions<P: AsRef<str>>(path: P, permissions: Permissions) -
                     ) as i32;
                     #[cfg(target_arch = "aarch64")]
                     let r = crate::syscall!(
-                        53usize,            // FCHMODAT
+                        crate::os::linux::syscall::nr::FCHMODAT,
                         -100isize as usize, // AT_FDCWD
                         path_bytes.as_ptr() as usize,
                         permissions.mode() as usize,

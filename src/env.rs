@@ -73,7 +73,7 @@ mod native_env {
 
     /// Returns all host environment variables.
     pub fn get_host_env_vars() -> Vec<(String, String)> {
-        alloc::vec![]
+        read_env()
     }
 
     /// Returns the current working directory.
@@ -272,7 +272,55 @@ mod native_env {
     // â”€â”€ env
     // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-    #[cfg(any(unix))]
+    #[cfg(any(target_os = "linux", rusticated_linux))]
+    fn read_env() -> Vec<(String, String)> {
+        let path = b"/proc/self/environ\0";
+        // SAFETY: path is a valid C string; mode is ignored for O_RDONLY.
+        #[cfg(target_arch = "x86_64")]
+        let fd = crate::syscall!(
+            crate::os::linux::syscall::nr::OPEN,
+            path.as_ptr() as usize,
+            0usize | 0usize, // O_RDONLY
+            0usize
+        ) as i32;
+        #[cfg(target_arch = "aarch64")]
+        let fd = crate::syscall!(
+            crate::os::linux::syscall::nr::OPENAT,
+            -100isize as usize, // AT_FDCWD
+            path.as_ptr() as usize,
+            0usize, // O_RDONLY
+            0usize
+        ) as i32;
+
+        if fd < 0 {
+            return Vec::new();
+        }
+        let mut buf = alloc::vec![0u8; 65536];
+        let n = crate::syscall!(
+            crate::os::linux::syscall::nr::READ,
+            fd as usize,
+            buf.as_mut_ptr() as usize,
+            buf.capacity()
+        ) as isize;
+        crate::syscall!(crate::os::linux::syscall::nr::CLOSE, fd as usize);
+        if n <= 0 {
+            return Vec::new();
+        }
+        unsafe { buf.set_len(n as usize) };
+        buf.split(|&b| b == 0)
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| {
+                let s_str = String::from_utf8_lossy(s);
+                s_str.find('=').map(|eq| {
+                    let k = s_str[..eq].to_owned();
+                    let v = s_str[eq + 1..].to_owned();
+                    (k, v)
+                })
+            })
+            .collect()
+    }
+
+    #[cfg(all(unix, not(any(target_os = "linux", rusticated_linux))))]
     fn read_env() -> Vec<(String, String)> {
         unsafe extern "C" {
             static environ: *const *const u8;
@@ -280,6 +328,9 @@ mod native_env {
         let mut result = Vec::new();
         // SAFETY: `environ` is a valid null-terminated array of null-terminated strings.
         unsafe {
+            if environ.is_null() {
+                return result;
+            }
             let mut ptr = environ;
             while !(*ptr).is_null() {
                 let entry = *ptr;
