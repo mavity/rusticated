@@ -354,7 +354,7 @@ mod native_signal {
         }
     }
 
-    // â”€â”€ Handler installation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // -- Handler installation ------------------------------------------------
 
     /// Guard against installing the handler more than once.
     static HANDLER_INSTALLED: AtomicBool = AtomicBool::new(false);
