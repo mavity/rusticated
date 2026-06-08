@@ -367,6 +367,20 @@ fn extract_package_name(toml: &str) -> Option<String> {
     None
 }
 
+#[cfg(target_arch = "wasm32")]
+fn format_size(n: usize) -> String {
+    let s = format!("{}", n);
+    let mut out = String::new();
+    let l = s.len();
+    for (i, c) in s.chars().enumerate() {
+        out.push(c);
+        if (l - i - 1) % 3 == 0 && i != l - 1 {
+            out.push(',');
+        }
+    }
+    out
+}
+
 // Build a cargo project and return the path to the compiled .wasm file.
 // Uses the workspace root derived from self_path (parent dir of mohab.bat).
 #[cfg(target_arch = "wasm32")]
@@ -591,7 +605,12 @@ async fn juice_bottle_refill(
     );
 
     // Write output vegetable: Zone A (unchanged) + Zone B (patched) + Zone C (new)
-    out_print("🍆 Writing output...\n").await;
+    let total_size = zone_a_end + new_zone_b.len() + new_pool_compressed.len();
+    out_print(&format!(
+        "🍆 Writing output... ({} bytes)\n",
+        format_size(total_size)
+    ))
+    .await;
     let mut out_file = File::create(output_path)
         .await
         .map_err(|e| anyhow::anyhow!("Cannot create {}: {}", output_path, e))?;
