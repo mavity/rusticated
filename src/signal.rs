@@ -254,7 +254,11 @@ mod native_signal {
 
     #[cfg(any(target_os = "linux", rusticated_linux))]
     fn linux_pipe2(fds: *mut i32, flags: i32) -> i32 {
-        crate::syscall!(crate::os::linux::syscall::nr::PIPE2, fds as usize, flags as usize) as i32
+        crate::syscall!(
+            crate::os::linux::syscall::nr::PIPE2,
+            fds as usize,
+            flags as usize
+        ) as i32
     }
 
     #[cfg(any(target_os = "linux", rusticated_linux))]

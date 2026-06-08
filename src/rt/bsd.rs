@@ -56,7 +56,13 @@ unsafe extern "C" {
     fn listen(fd: i32, backlog: i32) -> i32;
     fn accept(fd: i32, addr: *mut u8, len: *mut u32) -> i32;
     fn connect(fd: i32, addr: *const u8, len: u32) -> i32;
-    fn getsockopt(fd: i32, level: i32, name: i32, val: *mut core::ffi::c_void, len: *mut u32) -> i32;
+    fn getsockopt(
+        fd: i32,
+        level: i32,
+        name: i32,
+        val: *mut core::ffi::c_void,
+        len: *mut u32,
+    ) -> i32;
     fn setsockopt(fd: i32, level: i32, name: i32, val: *const core::ffi::c_void, len: u32) -> i32;
 }
 
@@ -180,7 +186,7 @@ impl Future for TcpConnect {
             }
 
             let res = unsafe { connect(s, addr_buf, addr_len) };
-            
+
             unsafe {
                 if af == AF_INET {
                     drop(alloc::boxed::Box::from_raw(addr_buf as *mut sockaddr_in));
@@ -194,7 +200,9 @@ impl Future for TcpConnect {
             }
 
             let err = io::Error::last_os_error();
-            if err.raw_os_error() != Some(36) /* EINPROGRESS */ {
+            if err.raw_os_error() != Some(36)
+            /* EINPROGRESS */
+            {
                 unsafe { close(s) };
                 return Poll::Ready(Err(err));
             }
@@ -209,7 +217,15 @@ impl Future for TcpConnect {
             Poll::Ready(Ok(())) => {
                 let mut err = 0i32;
                 let mut len = core::mem::size_of::<i32>() as u32;
-                let res = unsafe { getsockopt(fd, SOL_SOCKET, SO_ERROR, &mut err as *mut _ as *mut core::ffi::c_void, &mut len) };
+                let res = unsafe {
+                    getsockopt(
+                        fd,
+                        SOL_SOCKET,
+                        SO_ERROR,
+                        &mut err as *mut _ as *mut core::ffi::c_void,
+                        &mut len,
+                    )
+                };
                 if res == 0 && err == 0 {
                     Poll::Ready(Ok(crate::net::TcpStream { handle: fd as u64 }))
                 } else {
@@ -297,7 +313,13 @@ impl Future for TcpListenerBind {
 
         let on = 1i32;
         unsafe {
-            setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &on as *const _ as *const core::ffi::c_void, core::mem::size_of::<i32>() as u32);
+            setsockopt(
+                s,
+                SOL_SOCKET,
+                SO_REUSEADDR,
+                &on as *const _ as *const core::ffi::c_void,
+                core::mem::size_of::<i32>() as u32,
+            );
         }
 
         let res = unsafe { bind(s, addr_buf, addr_len) };
@@ -352,12 +374,17 @@ impl Future for TcpAccept {
 
         let res = unsafe { accept(self.fd, addr_buf.as_mut_ptr(), &mut addr_len) };
         if res >= 0 {
-            let addr = crate::net::SocketAddr::V4(crate::net::SocketAddrV4::new(crate::net::Ipv4Addr::new(0,0,0,0), 0));
+            let addr = crate::net::SocketAddr::V4(crate::net::SocketAddrV4::new(
+                crate::net::Ipv4Addr::new(0, 0, 0, 0),
+                0,
+            ));
             return Poll::Ready(Ok((crate::net::TcpStream { handle: res as u64 }, addr)));
         }
 
         let err = io::Error::last_os_error();
-        if err.raw_os_error() != Some(35) /* EAGAIN */ {
+        if err.raw_os_error() != Some(35)
+        /* EAGAIN */
+        {
             return Poll::Ready(Err(err));
         }
 
@@ -395,11 +422,15 @@ impl Future for OverlappedRecv {
             }
             let res = read(self.fd, self.buf.as_mut_ptr(), self.buf.capacity());
             if res >= 0 {
-                unsafe { self.buf.set_len(res as usize); }
+                unsafe {
+                    self.buf.set_len(res as usize);
+                }
                 return Poll::Ready((Ok(res as usize), core::mem::take(&mut self.buf)));
             }
             let err = io::Error::last_os_error();
-            if err.raw_os_error() != Some(35) /* EAGAIN */ {
+            if err.raw_os_error() != Some(35)
+            /* EAGAIN */
+            {
                 return Poll::Ready((Err(err), core::mem::take(&mut self.buf)));
             }
         }
@@ -442,7 +473,9 @@ impl Future for OverlappedSend {
                 return Poll::Ready((Ok(res as usize), core::mem::take(&mut this.buf)));
             }
             let err = io::Error::last_os_error();
-            if err.raw_os_error() != Some(35) /* EAGAIN */ {
+            if err.raw_os_error() != Some(35)
+            /* EAGAIN */
+            {
                 return Poll::Ready((Err(err), core::mem::take(&mut this.buf)));
             }
         }
@@ -458,8 +491,6 @@ impl Future for OverlappedSend {
         }
     }
 }
-
-
 
 // ── Driver ───────────────────────────────────────────────────────────────────
 
