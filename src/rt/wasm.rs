@@ -49,6 +49,16 @@ struct OpState {
     buffer: UnsafeCell<Option<Vec<u8>>>,
 }
 
+impl Drop for OpState {
+    fn drop(&mut self) {
+        // If the operation is not complete, we must tell the host to stop
+        // using this pointer before we free it.
+        if !self.is_complete() {
+            unsafe { imports::cancel(self.overlapped.get()) };
+        }
+    }
+}
+
 impl OpState {
     fn new() -> Rc<Self> {
         Rc::new(Self {
@@ -257,6 +267,16 @@ impl Future for OverlappedFuture {
     }
 }
 
+impl Drop for OverlappedFuture {
+    fn drop(&mut self) {
+        if self.started && !self.state.is_complete() {
+            unsafe {
+                imports::cancel(self.state.overlapped_ptr());
+            }
+        }
+    }
+}
+
 // ─── OverlappedBufferFuture ──────────────────────────────────────────────────
 
 /// Future awaiting a host-driven overlapped operation that owns a buffer for
@@ -315,6 +335,16 @@ impl Future for OverlappedBufferFuture {
             Poll::Ready((e, r, c, buf))
         } else {
             Poll::Pending
+        }
+    }
+}
+
+impl Drop for OverlappedBufferFuture {
+    fn drop(&mut self) {
+        if self.started && !self.state.is_complete() {
+            unsafe {
+                imports::cancel(self.state.overlapped_ptr());
+            }
         }
     }
 }
