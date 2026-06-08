@@ -1,0 +1,9 @@
+cargo-features = ["panic-immediate-abort"]
+
+[package]
+name = "litert-lm-sidecar"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+

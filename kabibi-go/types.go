@@ -81,4 +81,20 @@ type model struct {
 	quitting          bool
 	runner            *interp.Runner
 	shellOut          *SwitchableWriter
+	isThinking        bool
+
+	litertReady           bool
+	gemmaReady            bool
+	assetsReady           bool
+	isDownloading         bool
+	litertDownloadPercent int
+	litertDownloadDetails string
+	gemmaDownloadPercent  int
+	gemmaDownloadDetails  string
+	assetError            string
+
+	pendingPrompts []string
+	assetProgress  <-chan assetProgressMsg
+	assetDone      <-chan tea.Msg
+	aiMsgChan      <-chan tea.Msg
 }

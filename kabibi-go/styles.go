@@ -10,6 +10,7 @@ var (
 	colorBlack    = lipgloss.Color("#000000") // True Black
 	colorDarkGray = lipgloss.Color("8")       // Dark Gray (Bright Black)
 	colorGray     = lipgloss.Color("242")     // Gray
+	colorDimGray  = lipgloss.Color("#4a4a4a") // Very Dark Gray
 )
 
 var (
