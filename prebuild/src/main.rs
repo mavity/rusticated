@@ -618,7 +618,7 @@ fn generate_go_overlay(goroot: &PathBuf, target_dir: &PathBuf) -> std::io::Resul
         s
     };
 
-    let mut replacements: Vec<(&str, String)> = vec![
+    let replacements: Vec<(&str, String)> = vec![
         // Runtime
         ("src/runtime/lock_wasip1.go", canon(overlay_dir.join("runtime/lock_rusticated.go"))),
         ("src/runtime/os_wasip1.go", canon(overlay_dir.join("runtime/os_rusticated.go"))),
