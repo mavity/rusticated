@@ -171,18 +171,23 @@ where
 /// 1. Walk the registry; wake any operation whose completion flag is set, then drop the registry's
 ///    own [`Rc`] clone for that entry.
 /// 2. Poll the main future once so any newly-ready work can make progress.
-fn tick() {
+fn tick() -> bool {
     {
         let mut reg = completion_registry().borrow_mut();
         let mut i = 0;
+        // let mut completed = 0;
         while i < reg.len() {
             if reg[i].0.is_complete() {
                 let (_state, waker) = reg.remove(i);
                 waker.wake();
+                // completed += 1;
             } else {
                 i += 1;
             }
         }
+        // if completed > 0 {
+        //     unsafe { imports::rusticated_debug(completed as i32); }
+        // }
     }
 
     let mut borrow = main_future().borrow_mut();
@@ -191,11 +196,12 @@ fn tick() {
         let mut cx = Context::from_waker(&waker);
         fut.as_mut().poll(&mut cx).is_ready()
     } else {
-        false
+        true
     };
     if done {
         *borrow = None;
     }
+    done
 }
 
 fn noop_waker() -> Waker {
@@ -366,7 +372,7 @@ unsafe extern "Rust" {
 /// scheduling subsequent ticks (typically: after any host-side completion is
 /// signalled into shared memory, or on a host timer).
 #[unsafe(no_mangle)]
-pub extern "C" fn run() {
+pub extern "C" fn run() -> i32 {
     if initialized().get().is_none() {
         // SAFETY: the guest is required to define `guest_init`; if it
         // does not, the program would have failed to link. Calling once
@@ -375,7 +381,11 @@ pub extern "C" fn run() {
         let _ = initialized().set(());
     }
 
-    tick();
+    if tick() {
+        1
+    } else {
+        0
+    }
 }
 
 /// Drive one iteration of the runtime without re-running `guest_init`.

@@ -26,7 +26,8 @@ import (
 
 type HostEnv struct {
 	mu             sync.Mutex
-	timers         map[uint32]time.Time
+	activeOps      map[uint32]*OpState
+	nextOpID       uint64
 	handles        map[uint64]interface{}
 	nextHandle     uint64
 	outstandingOps int32
@@ -34,8 +35,19 @@ type HostEnv struct {
 	ttyRawState    *term.State
 	ttyRawFd       int
 	signals        chan os.Signal
-	signalWaiters  map[uint32]uint32 // signum -> ovPtr
-	pendingSignals chan [2]uint32    // signum, ovPtr
+	signalWaiters  map[uint32]*OpState // signum -> state
+	pendingSignals chan *OpState       // state to complete
+	timers         map[uint32]*OpState // ovPtr -> state
+	lastLog        time.Time
+}
+
+type OpState struct {
+	ovPtr       uint32
+	opID        uint64
+	handle      interface{} // *os.File, net.Conn, *exec.Cmd, or special types
+	deadline    time.Time   // for timers
+	signum      uint32      // for signal waiters
+	isCancelled bool
 }
 
 type AbiStat struct {
@@ -67,14 +79,15 @@ type DirScan struct {
 
 func NewHostEnv() *HostEnv {
 	env := &HostEnv{
-		timers:         make(map[uint32]time.Time),
+		timers:         make(map[uint32]*OpState),
+		activeOps:      make(map[uint32]*OpState),
 		handles:        make(map[uint64]interface{}),
 		nextHandle:     3, // 0,1,2 reserved
 		outstandingOps: 0,
 		fileOpsQueue:   make(chan func(), 100),
 		signals:        make(chan os.Signal, 10),
-		signalWaiters:  make(map[uint32]uint32),
-		pendingSignals: make(chan [2]uint32, 10),
+		signalWaiters:  make(map[uint32]*OpState),
+		pendingSignals: make(chan *OpState, 10),
 	}
 	env.handles[0] = os.Stdin
 	env.handles[1] = os.Stdout
@@ -92,13 +105,11 @@ func NewHostEnv() *HostEnv {
 			}
 			if signum != 0 {
 				env.mu.Lock()
-				ovPtr, ok := env.signalWaiters[signum]
+				state, ok := env.signalWaiters[signum]
 				if ok {
 					delete(env.signalWaiters, signum)
 					env.mu.Unlock()
-					// Notify the Poll loop to complete this OV
-					env.pendingSignals <- [2]uint32{signum, ovPtr}
-					// Trigger a break from blocking in Poll
+					env.pendingSignals <- state
 					env.fileOpsQueue <- func() {}
 				} else {
 					env.mu.Unlock()
@@ -112,6 +123,35 @@ func NewHostEnv() *HostEnv {
 
 func (h *HostEnv) IncOps() {
 	atomic.AddInt32(&h.outstandingOps, 1)
+}
+
+func (h *HostEnv) RegisterOp(ovPtr uint32, handle interface{}) *OpState {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.registerOpLocked(ovPtr, handle)
+}
+
+func (h *HostEnv) registerOpLocked(ovPtr uint32, handle interface{}) *OpState {
+	h.nextOpID++
+	state := &OpState{
+		ovPtr:  ovPtr,
+		opID:   h.nextOpID,
+		handle: handle,
+	}
+	h.activeOps[ovPtr] = state
+	h.IncOps()
+	return state
+}
+
+func (h *HostEnv) IsOpActive(ovPtr uint32, id uint64) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.isOpActiveLocked(ovPtr, id)
+}
+
+func (h *HostEnv) isOpActiveLocked(ovPtr uint32, id uint64) bool {
+	current, ok := h.activeOps[ovPtr]
+	return ok && current.opID == id
 }
 
 func (h *HostEnv) DecOps() {
@@ -128,6 +168,21 @@ func (h *HostEnv) DecOps() {
 
 func (h *HostEnv) HasOutstandingOps() bool {
 	return atomic.LoadInt32(&h.outstandingOps) > 0
+}
+
+func (h *HostEnv) HasLiveOps() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, state := range h.activeOps {
+		if !state.isCancelled {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *HostEnv) HasOutstandingOpsCount() int32 {
+	return atomic.LoadInt32(&h.outstandingOps)
 }
 
 func createAbiStat(fi os.FileInfo) AbiStat {
@@ -428,29 +483,18 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
 			ovPtr := uint32(stack[0])
 			delayMs := uint32(stack[1])
+			fmt.Printf("HOST: timer_set ovPtr=0x%x delay=%dms\n", ovPtr, delayMs)
 
 			h.mu.Lock()
-			h.timers[ovPtr] = time.Now().Add(time.Duration(delayMs) * time.Millisecond)
-			h.mu.Unlock()
-			h.IncOps()
-		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
-		Export("timer_set")
-
-	builder.NewFunctionBuilder().
-		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-			ovPtr := uint32(stack[0])
-
-			h.mu.Lock()
-			_, ok := h.timers[ovPtr]
-			if ok {
-				delete(h.timers, ovPtr)
-			}
-			h.mu.Unlock()
-			if ok {
+			if _, exists := h.timers[ovPtr]; exists {
 				h.DecOps()
 			}
-		}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).
-		Export("timer_cancel")
+			state := h.registerOpLocked(ovPtr, nil)
+			h.timers[ovPtr] = state
+			state.deadline = time.Now().Add(time.Duration(delayMs) * time.Millisecond)
+			h.mu.Unlock()
+		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
+		Export("timer_set")
 
 	builder.NewFunctionBuilder().
 		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
@@ -479,7 +523,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 				return
 			}
 
-			h.IncOps()
+			state := h.RegisterOp(ovPtr, fAny)
 			go func() {
 				tmp := make([]byte, lenBytes)
 				n, err := f.Read(tmp)
@@ -489,6 +533,18 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 				}
 				payload := tmp[:n]
 				h.fileOpsQueue <- func() {
+					defer h.DecOps()
+					if !h.IsOpActive(ovPtr, state.opID) {
+						return
+					}
+					h.mu.Lock()
+					delete(h.activeOps, ovPtr)
+					h.mu.Unlock()
+
+					if c, ok := fAny.(interface{ SetDeadline(time.Time) error }); ok {
+						_ = c.SetDeadline(time.Time{})
+					}
+
 					if retCode == 0 {
 						if ok := mem.Write(ptr, payload); !ok {
 							writeOverlapped(m, ovPtr, 22, 0, 0)
@@ -496,7 +552,6 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 						}
 					}
 					writeOverlapped(m, ovPtr, retCode, 0, uint64(n))
-					h.DecOps()
 				}
 			}()
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
@@ -535,7 +590,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			dataCopy := make([]byte, lenBytes)
 			copy(dataCopy, buf)
 
-			h.IncOps()
+			state := h.RegisterOp(ovPtr, fAny)
 			go func() {
 				n, err := f.Write(dataCopy)
 				if handle == 1 || handle == 2 {
@@ -543,11 +598,22 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 				}
 				retCode := uint32(0)
 				if err != nil {
-					retCode = 5 // EIO
+					retCode = mapErrno(err)
 				}
 				h.fileOpsQueue <- func() {
+					defer h.DecOps()
+					if !h.IsOpActive(ovPtr, state.opID) {
+						return
+					}
+					h.mu.Lock()
+					delete(h.activeOps, ovPtr)
+					h.mu.Unlock()
+
+					if c, ok := fAny.(interface{ SetDeadline(time.Time) error }); ok {
+						_ = c.SetDeadline(time.Time{})
+					}
+
 					writeOverlapped(m, ovPtr, retCode, 0, uint64(n))
-					h.DecOps()
 				}
 			}()
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
@@ -615,7 +681,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 				osFlags |= os.O_EXCL | os.O_CREATE
 			}
 
-			h.IncOps()
+			state := h.RegisterOp(ovPtr, nil)
 			go func() {
 				f, err := os.OpenFile(pathStr, osFlags, 0666)
 				// Windows directory handles often require directory-specific open semantics.
@@ -639,8 +705,17 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 					debugLog("path_open ok: path=%q flags=%d osFlags=%d handle=%d", pathStr, flags, osFlags, handle)
 				}
 				h.fileOpsQueue <- func() {
+					defer h.DecOps()
+					if !h.IsOpActive(ovPtr, state.opID) {
+						if err == nil {
+							f.Close()
+						}
+						return
+					}
+					h.mu.Lock()
+					delete(h.activeOps, ovPtr)
+					h.mu.Unlock()
 					writeOverlapped(m, ovPtr, retCode, 0, extResult)
-					h.DecOps()
 				}
 			}()
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
@@ -682,7 +757,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 				return
 			}
 
-			h.IncOps()
+			state := h.RegisterOp(ovPtr, nil)
 			go func() {
 				copied := 0
 				var payload []byte
@@ -703,16 +778,22 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 					copied = toCopy
 				}
 				h.fileOpsQueue <- func() {
+					defer h.DecOps()
+					if !h.IsOpActive(ovPtr, state.opID) {
+						return
+					}
+					h.mu.Lock()
+					delete(h.activeOps, ovPtr)
+					h.mu.Unlock()
+
 					if copied > 0 {
 						if ok := mem.Write(ptr, payload); !ok {
 							writeOverlapped(m, ovPtr, 22, 0, 0)
-							h.DecOps()
 							return
 						}
 					}
 					debugLog("dir_read: handle=%d copied=%d remaining=%d", handle, copied, len(scan.Names))
 					writeOverlapped(m, ovPtr, 0, 0, uint64(copied))
-					h.DecOps()
 				}
 			}()
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
@@ -735,7 +816,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			}
 			pathStr := string(buf)
 
-			h.IncOps()
+			state := h.RegisterOp(ovPtr, nil)
 			go func() {
 				var fi os.FileInfo
 				var err error
@@ -755,6 +836,14 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 					payload = marshalAbiStat(createAbiStat(fi))
 				}
 				h.fileOpsQueue <- func() {
+					defer h.DecOps()
+					if !h.IsOpActive(ovPtr, state.opID) {
+						return
+					}
+					h.mu.Lock()
+					delete(h.activeOps, ovPtr)
+					h.mu.Unlock()
+
 					if retCode == 0 {
 						if ok := mem.Write(outPtr, payload); !ok {
 							writeOverlapped(m, ovPtr, 22, 0, 0)
@@ -762,7 +851,6 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 						}
 					}
 					writeOverlapped(m, ovPtr, retCode, 0, extResult)
-					h.DecOps()
 				}
 			}()
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
@@ -804,7 +892,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			addr := string(buf)
 			isConnect := (flags & 1) != 0
 
-			h.IncOps()
+			state := h.RegisterOp(ovPtr, nil)
 			go func() {
 				var handle uint64
 				var err error
@@ -835,8 +923,23 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 					retCode = mapErrno(err)
 				}
 				h.fileOpsQueue <- func() {
+					defer h.DecOps()
+					if !h.IsOpActive(ovPtr, state.opID) {
+						if err == nil {
+							h.mu.Lock()
+							hAny := h.handles[handle]
+							delete(h.handles, handle)
+							h.mu.Unlock()
+							if c, ok := hAny.(io.Closer); ok {
+								c.Close()
+							}
+						}
+						return
+					}
+					h.mu.Lock()
+					delete(h.activeOps, ovPtr)
+					h.mu.Unlock()
 					writeOverlapped(m, ovPtr, retCode, 0, handle)
-					h.DecOps()
 				}
 			}()
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
@@ -861,7 +964,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 				return
 			}
 
-			h.IncOps()
+			state := h.RegisterOp(ovPtr, lnAny)
 			go func() {
 				conn, err := ln.Accept()
 				var handle uint64
@@ -876,8 +979,17 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 					h.mu.Unlock()
 				}
 				h.fileOpsQueue <- func() {
+					defer h.DecOps()
+					if !h.IsOpActive(ovPtr, state.opID) {
+						if err == nil {
+							conn.Close()
+						}
+						return
+					}
+					h.mu.Lock()
+					delete(h.activeOps, ovPtr)
+					h.mu.Unlock()
 					writeOverlapped(m, ovPtr, retCode, 0, handle)
-					h.DecOps()
 				}
 			}()
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64}, []api.ValueType{}).
@@ -898,13 +1010,19 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			cfg := make([]byte, cfgLen)
 			copy(cfg, buf)
 
-			h.IncOps()
+			state := h.RegisterOp(ovPtr, nil)
 			go func() {
 				parts := bytes.Split(cfg, []byte{0})
 				if len(parts) == 0 || len(parts[0]) == 0 {
 					h.fileOpsQueue <- func() {
+						defer h.DecOps()
+						if !h.IsOpActive(ovPtr, state.opID) {
+							return
+						}
+						h.mu.Lock()
+						delete(h.activeOps, ovPtr)
+						h.mu.Unlock()
 						writeOverlapped(m, ovPtr, 22, 0, 0)
-						h.DecOps()
 					}
 					return
 				}
@@ -969,9 +1087,16 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 					h.mu.Unlock()
 					extResult = handle
 				}
+				state := h.RegisterOp(ovPtr, nil)
 				h.fileOpsQueue <- func() {
+					defer h.DecOps()
+					if !h.IsOpActive(ovPtr, state.opID) {
+						return
+					}
+					h.mu.Lock()
+					delete(h.activeOps, ovPtr)
+					h.mu.Unlock()
 					writeOverlapped(m, ovPtr, retCode, 0, extResult)
-					h.DecOps()
 				}
 			}()
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
@@ -996,7 +1121,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 				return
 			}
 
-			h.IncOps()
+			state := h.RegisterOp(ovPtr, nil)
 			go func() {
 				err := cmd.Wait()
 				exitCode := uint64(0)
@@ -1007,8 +1132,14 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 				}
 				packed := (exitCode << 32) | (exitCode & 0xFFFF_FFFF)
 				h.fileOpsQueue <- func() {
+					defer h.DecOps()
+					if !h.IsOpActive(ovPtr, state.opID) {
+						return
+					}
+					h.mu.Lock()
+					delete(h.activeOps, ovPtr)
+					h.mu.Unlock()
 					writeOverlapped(m, ovPtr, 0, 0, packed)
-					h.DecOps()
 				}
 			}()
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64}, []api.ValueType{}).
@@ -1052,11 +1183,50 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			signum := uint32(stack[1])
 
 			h.mu.Lock()
-			h.signalWaiters[signum] = ovPtr
+			if _, exists := h.signalWaiters[signum]; exists {
+				h.DecOps()
+			}
+			state := h.registerOpLocked(ovPtr, nil)
+			state.signum = signum
+			h.signalWaiters[signum] = state
 			h.mu.Unlock()
-			h.IncOps()
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
 		Export("signal_wait")
+
+	pastTime := time.Unix(1, 0)
+
+	builder.NewFunctionBuilder().
+		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
+			ovPtr := uint32(stack[0])
+			h.mu.Lock()
+
+			// Check if it's a timer first for immediate cancellation
+			if tState, ok := h.timers[ovPtr]; ok {
+				delete(h.timers, ovPtr)
+				if h.isOpActiveLocked(ovPtr, tState.opID) {
+					delete(h.activeOps, ovPtr)
+					h.mu.Unlock()
+					writeOverlapped(m, ovPtr, 125, 0, 0) // ECANCELED
+					h.DecOps()
+					return
+				}
+			}
+
+			state, ok := h.activeOps[ovPtr]
+			if ok && !state.isCancelled {
+				state.isCancelled = true
+				h.mu.Unlock()
+				fmt.Printf("HOST: cancel(0x%x) id=%d handle=%T\n", ovPtr, state.opID, state.handle)
+				if state.handle != nil {
+					if c, ok := state.handle.(interface{ SetDeadline(time.Time) error }); ok {
+						_ = c.SetDeadline(pastTime)
+					}
+				}
+			} else {
+				h.mu.Unlock()
+			}
+		}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).
+		Export("cancel")
 
 	builder.NewFunctionBuilder().
 		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
@@ -1105,6 +1275,26 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 	builder.NewFunctionBuilder().
 		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
 			code := int32(stack[0])
+			h.mu.Lock()
+			handlesCount := len(h.handles)
+			timersCount := len(h.timers)
+			waitersCount := len(h.signalWaiters)
+			
+			live := 0
+			ghost := 0
+			for _, op := range h.activeOps {
+				if op.isCancelled {
+					ghost++
+				} else {
+					live++
+				}
+			}
+			h.mu.Unlock()
+			fmt.Printf("HOST: process_exit(%d) called.\n", code)
+			fmt.Printf("  Live Ops:  %d\n", live)
+			fmt.Printf("  Ghost Ops: %d\n", ghost)
+			fmt.Printf("  Handles:   %d, Timers: %d, SignalWaiters: %d\n", 
+				handlesCount, timersCount, waitersCount)
 			os.Exit(int(code))
 		}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).
 		Export("process_exit")
@@ -1121,8 +1311,32 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 }
 
 func (h *HostEnv) Poll(ctx context.Context, mod api.Module) bool {
-	// 1. Process already-queued completions.
+	// 1. Process expired timers (from timer_set) first.
 	processed := false
+	h.mu.Lock()
+	now := time.Now()
+	var earliest *time.Time
+	numTimers := len(h.timers)
+	for ovPtr, state := range h.timers {
+		if now.After(state.deadline) {
+			fmt.Printf("HOST: timer expired ovPtr=0x%x\n", ovPtr)
+			delete(h.timers, ovPtr)
+			if h.isOpActiveLocked(ovPtr, state.opID) {
+				delete(h.activeOps, ovPtr)
+				writeOverlapped(mod, ovPtr, 0, 0, 0)
+			}
+			h.DecOps()
+			processed = true
+		} else {
+			d := state.deadline
+			if earliest == nil || d.Before(*earliest) {
+				earliest = &d
+			}
+		}
+	}
+	h.mu.Unlock()
+
+	// 2. Process already-queued completions.
 	for {
 		select {
 		case op := <-h.fileOpsQueue:
@@ -1137,42 +1351,33 @@ signals:
 	// 2. Process system signals that have waiters.
 	for {
 		select {
-		case pair := <-h.pendingSignals:
-			writeOverlapped(mod, pair[1], 0, 0, 0)
+		case state := <-h.pendingSignals:
+			if h.IsOpActive(state.ovPtr, state.opID) {
+				h.mu.Lock()
+				delete(h.activeOps, state.ovPtr)
+				h.mu.Unlock()
+				writeOverlapped(mod, state.ovPtr, 0, 0, uint64(state.signum))
+			}
 			h.DecOps()
 			processed = true
 		default:
-			goto timers
+			goto block
 		}
 	}
 
-timers:
-	// 3. Process expired timers (from timer_set).
-	h.mu.Lock()
-	now := time.Now()
-	var earliest *time.Time
-	for ovPtr, deadline := range h.timers {
-		if now.After(deadline) {
-			delete(h.timers, ovPtr)
-			writeOverlapped(mod, ovPtr, 0, 0, 0)
-			h.DecOps()
-			processed = true
-		} else {
-			d := deadline
-			if earliest == nil || d.Before(*earliest) {
-				earliest = &d
-			}
-		}
-	}
-	h.mu.Unlock()
-
+block:
 	if processed {
 		return true
 	}
 
+	if numTimers > 0 && time.Since(h.lastLog) > 1*time.Second {
+		h.mu.Lock()
+		h.lastLog = time.Now()
+		h.mu.Unlock()
+		fmt.Printf("HOST: waiting for %d timers, earliest in %v\n", numTimers, time.Until(*earliest))
+	}
+
 	// 3. Block until the next event or the next host-side timer deadline.
-	//    sched_pause completions arrive via fileOpsQueue, so no artificial
-	//    timeout is needed to service Go's internal timers.
 	if earliest != nil {
 		timeout := time.Until(*earliest)
 		if timeout < 0 {
@@ -1192,6 +1397,8 @@ timers:
 			}
 		case <-time.After(timeout):
 			// Timer deadline reached; let the loop retry timer processing.
+			// Falling through to return false is fine because the next call 
+			// to Poll will process the expired timers at the top.
 			return false
 		case <-ctx.Done():
 			return false
