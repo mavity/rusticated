@@ -56,6 +56,19 @@ func upsertEnv(env []string, key, value string) []string {
 	return updated
 }
 
+func formatSize(n int64) string {
+	s := fmt.Sprintf("%d", n)
+	var out []byte
+	l := len(s)
+	for i, c := range s {
+		out = append(out, byte(c))
+		if (l-i-1)%3 == 0 && i != l-1 {
+			out = append(out, ',')
+		}
+	}
+	return string(out)
+}
+
 func main() {
 	var (
 		workspace = flag.String("workspace", "", "workspace root (default: parent of mohabbat-go)")
@@ -123,7 +136,7 @@ func main() {
 		if targetName, ok := selectedTargets[s.name]; ok {
 			displayName = targetName
 		}
-		fmt.Printf("🍆    %s: brot=%d washmhost=%d\n", displayName, len(brot), len(wh))
+		fmt.Printf("🍆    %s: brot=%s washmhost=%s\n", displayName, formatSize(int64(len(brot))), formatSize(int64(len(wh))))
 	}
 
 	// Assemble pool: washmhost_0 + washmhost_1 + ... + payload
@@ -150,7 +163,7 @@ func main() {
 	}
 	must(w.Close())
 	poolLen := uint64(compressed.Len())
-	fmt.Printf("🍆  Pool: raw=%d compressed=%d\n", pool.Len(), poolLen)
+	fmt.Printf("🍆  Pool: raw=%s compressed=%s\n", formatSize(int64(pool.Len())), formatSize(int64(poolLen)))
 
 	// Patch MohabbatMeta inside each brot
 	for i := range slots {
@@ -222,8 +235,8 @@ func main() {
 	for _, n := range lengths {
 		totalZoneB += n
 	}
-	fmt.Printf("🍆  zone_a=%d zone_b=%d pool=%d\n", len(zoneA), totalZoneB, int(poolLen))
-	fmt.Printf("🍆  Wrote %s (%d bytes)\n", *output, len(zoneA)+totalZoneB+int(poolLen))
+	fmt.Printf("🍆  zone_a=%s zone_b=%s pool=%s\n", formatSize(int64(len(zoneA))), formatSize(int64(totalZoneB)), formatSize(int64(poolLen)))
+	fmt.Printf("🍆  Wrote %s (%s bytes)\n", *output, formatSize(int64(len(zoneA)+totalZoneB+int(poolLen))))
 	if err := ensureBatOnPath("mohab.bat", *output); err != nil {
 		fmt.Printf("🍆  warn: %v\n", err)
 	}
