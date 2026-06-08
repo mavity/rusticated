@@ -140,14 +140,14 @@ pub const UNIX_EPOCH: SystemTime = SystemTime(Duration::ZERO);
 pub type SystemTimeError = Error;
 
 // ——— Native Instant
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// -----------------------------------------------------------
 
 #[cfg(not(target_family = "wasm"))]
 mod native_instant {
     use core::time::Duration;
 
-    // â”€â”€ Unix: clock_gettime(CLOCK_MONOTONIC)
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // -- Unix: clock_gettime(CLOCK_MONOTONIC)
+    // ---------------------------------
 
     #[cfg(any(unix, rusticated_linux))]
     #[repr(C)]
@@ -164,8 +164,8 @@ mod native_instant {
     #[cfg(all(any(unix), not(any(target_os = "linux", rusticated_linux))))]
     const CLOCK_MONOTONIC: i32 = 1;
 
-    // â”€â”€ Windows: QueryPerformanceCounter
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // -- Windows: QueryPerformanceCounter
+    // ------------------------------------
 
     #[cfg(windows)]
     #[link(name = "kernel32", kind = "raw-dylib")]
@@ -348,8 +348,8 @@ mod native_time {
 #[cfg(not(target_family = "wasm"))]
 pub use native_time::{Sleep, sleep};
 
-// â”€â”€â”€ WASM
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- WASM
+// ---------------------------------------------------------------------
 
 #[cfg(target_family = "wasm")]
 use crate::abi::imports;

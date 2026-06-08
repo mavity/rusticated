@@ -235,10 +235,15 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
     } else {
         Borders::LEFT | Borders::TOP | Borders::BOTTOM
     };
+    let chat_title_style = if app.active_pane == 2 {
+        Style::default().bg(Color::Yellow).fg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::White)
+    };
     f.render_widget(
         Block::default()
             .borders(chat_borders)
-            .title(chat_title)
+            .title(ratatui::text::Line::from(chat_title).style(chat_title_style))
             .border_style(Style::default().fg(Color::Indexed(242)))
             .style(Style::default().bg(Color::DarkGray).fg(Color::White)),
         chat_rect,
@@ -305,13 +310,16 @@ fn draw_file_panel(
     is_active: bool,
     title: &str,
 ) {
-    let list_style = Style::default().bg(Color::Blue).fg(Color::Cyan);
-    let highlight_style = Style::default().bg(Color::Cyan).fg(Color::Black);
-    let border_style = Style::default().fg(Color::Cyan);
+    let list_style = Style::default().bg(Color::Blue).fg(Color::White);
+    let selection_bg = Color::Yellow;
+    let file_selection_fg = Color::Rgb(0, 0, 128); // Navy
+    let dir_selection_fg = Color::DarkGray;
+
+    let border_style = Style::default().fg(Color::Indexed(242));
     let title_style = if is_active {
-        highlight_style
+        Style::default().bg(selection_bg).fg(dir_selection_fg)
     } else {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(Color::White)
     };
 
     f.render_widget(Block::default().style(list_style), area);
@@ -330,7 +338,9 @@ fn draw_file_panel(
 
     let items_per_col = inner.height as usize;
     let num_cols = (inner.width / 18).max(1) as usize;
-    let constraints = std::vec::from_elem(Constraint::Ratio(1, num_cols as u32), num_cols);
+    let constraints = (0..num_cols)
+        .map(|_| Constraint::Percentage(100 / num_cols as u16))
+        .collect::<Vec<_>>();
     let col_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints(constraints)
@@ -340,8 +350,10 @@ fn draw_file_panel(
     let page = selected / items_per_page.max(1);
     let start_idx = page * items_per_page;
 
-    let mut cols_items = std::vec::from_elem(Vec::new(), num_cols);
-    let mut cols_states = std::vec::from_elem(ListState::default(), num_cols);
+    let mut cols_items = (0..num_cols).map(|_| Vec::new()).collect::<Vec<_>>();
+    let mut cols_states = (0..num_cols)
+        .map(|_| ListState::default())
+        .collect::<Vec<_>>();
 
     for c in 0..num_cols {
         let row_width = col_chunks[c].width.max(1) as usize;
@@ -349,11 +361,23 @@ fn draw_file_panel(
             let idx = start_idx + c * items_per_col + r;
             if idx < files.len() {
                 let item = &files[idx];
-                let style = if item.is_dir {
-                    Style::default().bg(Color::Blue).fg(Color::White)
+                let is_selected = is_active && idx == selected;
+
+                let (fg, bg) = if is_selected {
+                    if item.is_dir {
+                        (dir_selection_fg, selection_bg)
+                    } else {
+                        (file_selection_fg, selection_bg)
+                    }
                 } else {
-                    Style::default().bg(Color::Blue).fg(Color::Cyan)
+                    if item.is_dir {
+                        (Color::White, Color::Blue)
+                    } else {
+                        (Color::Cyan, Color::Blue)
+                    }
                 };
+
+                let style = Style::default().fg(fg).bg(bg);
                 cols_items[c].push(ListItem::new(pad_or_trim(&item.name, row_width)).style(style));
             }
         }
@@ -370,9 +394,8 @@ fn draw_file_panel(
 
     for c in 0..num_cols {
         f.render_widget(Block::default().style(list_style), col_chunks[c]);
-        let list = List::new(cols_items[c].clone())
-            .style(list_style)
-            .highlight_style(highlight_style);
+        let list = List::new(cols_items[c].clone()).style(list_style);
+        // We don't use list.highlight_style here because we applied it manually to ListItem to handle dir/file distinction
         f.render_stateful_widget(list, col_chunks[c], &mut cols_states[c]);
     }
 }

@@ -498,7 +498,9 @@ pub mod traits;
 /// Terminal interface types
 pub mod tty;
 
-// â”€â”€ std-shaped re-exports from core / alloc â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+mod lib_intrinsics;
+
+// -- std-shaped re-exports from core / alloc ---------------------------------
 /// Borrow utilities (`ToOwned`, `Cow`).
 pub mod borrow {
     pub use alloc::borrow::*;
