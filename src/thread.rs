@@ -192,15 +192,26 @@ pub(crate) fn sleep_ms(ms: u64) {
             tv_sec: i64,
             tv_nsec: i64,
         }
-        unsafe extern "C" {
-            fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> i32;
-        }
         let ts = Timespec {
             tv_sec: (ms / 1000) as i64,
             tv_nsec: ((ms % 1000) * 1_000_000) as i64,
         };
-        unsafe {
-            nanosleep(&ts, core::ptr::null_mut());
+
+        #[cfg(any(target_os = "linux", rusticated_linux))]
+        crate::syscall!(
+            crate::os::linux::syscall::nr::NANOSLEEP,
+            &ts as *const _,
+            0usize
+        );
+
+        #[cfg(not(any(target_os = "linux", rusticated_linux)))]
+        {
+            unsafe extern "C" {
+                fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> i32;
+            }
+            unsafe {
+                nanosleep(&ts, core::ptr::null_mut());
+            }
         }
     }
 }
@@ -220,11 +231,17 @@ pub fn yield_now() {
     }
     #[cfg(not(windows))]
     {
-        unsafe extern "C" {
-            fn sched_yield() -> i32;
-        }
-        unsafe {
-            sched_yield();
+        #[cfg(any(target_os = "linux", rusticated_linux))]
+        crate::syscall!(crate::os::linux::syscall::nr::SCHED_YIELD);
+
+        #[cfg(not(any(target_os = "linux", rusticated_linux)))]
+        {
+            unsafe extern "C" {
+                fn sched_yield() -> i32;
+            }
+            unsafe {
+                sched_yield();
+            }
         }
     }
 }

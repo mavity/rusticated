@@ -240,16 +240,67 @@ mod native_signal {
     #[cfg(any(unix, rusticated_linux))]
     const SIGINT: i32 = 2;
 
-    /// Signal handler function pointer type, matching `libc::sighandler_t`.
+    /// Signal handler function pointer type.
     #[cfg(any(unix, rusticated_linux))]
     type SigHandlerFn = extern "C" fn(i32);
 
-    #[cfg(any(unix, rusticated_linux))]
+    #[cfg(all(unix, not(any(target_os = "linux", rusticated_linux))))]
     unsafe extern "C" {
         fn pipe2(pipefd: *mut i32, flags: i32) -> i32;
         fn write(fd: i32, buf: *const u8, count: usize) -> isize;
         fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
         fn signal(signum: i32, handler: SigHandlerFn) -> usize;
+    }
+
+    #[cfg(any(target_os = "linux", rusticated_linux))]
+    fn linux_pipe2(fds: *mut i32, flags: i32) -> i32 {
+        crate::syscall!(crate::os::linux::syscall::nr::PIPE2, fds as usize, flags as usize) as i32
+    }
+
+    #[cfg(any(target_os = "linux", rusticated_linux))]
+    fn linux_write(fd: i32, buf: *const u8, count: usize) -> isize {
+        crate::syscall!(
+            crate::os::linux::syscall::nr::WRITE,
+            fd as usize,
+            buf as usize,
+            count
+        ) as isize
+    }
+
+    #[cfg(any(target_os = "linux", rusticated_linux))]
+    fn linux_read(fd: i32, buf: *mut u8, count: usize) -> isize {
+        crate::syscall!(
+            crate::os::linux::syscall::nr::READ,
+            fd as usize,
+            buf as usize,
+            count
+        ) as isize
+    }
+
+    #[cfg(any(target_os = "linux", rusticated_linux))]
+    fn linux_signal(signum: i32, handler: SigHandlerFn) -> usize {
+        #[repr(C)]
+        struct Sigaction {
+            sa_handler: SigHandlerFn,
+            sa_flags: usize,
+            sa_restorer: usize,
+            sa_mask: [u64; 1],
+        }
+        let sa = Sigaction {
+            sa_handler: handler,
+            sa_flags: 0x04000000, // SA_RESTORER (mostly ignored on modern architectures but good to set if we had one) or 0
+            sa_restorer: 0,
+            sa_mask: [0; 1],
+        };
+        // On Linux we should use rt_sigaction
+        crate::syscall!(
+            crate::os::linux::syscall::nr::RT_SIGACTION,
+            signum as usize,
+            &sa as *const _ as usize,
+            0usize,
+            8usize // size of sigset_t
+        );
+        0
     }
 
     #[cfg(any(unix, rusticated_linux))]
@@ -260,8 +311,19 @@ mod native_signal {
             return Ok([r, w]);
         }
         let mut fds = [0i32; 2];
-        // SAFETY: `fds` is a valid 2-element array.
-        if unsafe { pipe2(fds.as_mut_ptr(), O_CLOEXEC | O_NONBLOCK) } < 0 {
+
+        let res = {
+            #[cfg(any(target_os = "linux", rusticated_linux))]
+            {
+                linux_pipe2(fds.as_mut_ptr(), O_CLOEXEC | O_NONBLOCK)
+            }
+            #[cfg(all(unix, not(any(target_os = "linux", rusticated_linux))))]
+            {
+                unsafe { pipe2(fds.as_mut_ptr(), O_CLOEXEC | O_NONBLOCK) }
+            }
+        };
+
+        if res < 0 {
             return Err(io::Error::last_os_error());
         }
         // Store write end before read end so sigint_handler never observes a
@@ -276,12 +338,19 @@ mod native_signal {
     extern "C" fn sigint_handler(_sig: i32) {
         let tx = SIGNAL_PIPE_WRITE.load(Ordering::Acquire);
         if tx != -1 {
-            // SAFETY: `write(2)` is async-signal-safe.
-            unsafe { write(tx, b"\x00".as_ptr(), 1) };
+            #[cfg(any(target_os = "linux", rusticated_linux))]
+            {
+                linux_write(tx, b"\x00".as_ptr(), 1);
+            }
+            #[cfg(all(unix, not(any(target_os = "linux", rusticated_linux))))]
+            {
+                // SAFETY: `write(2)` is async-signal-safe.
+                unsafe { write(tx, b"\x00".as_ptr(), 1) };
+            }
         }
     }
 
-    // ── Handler installation ──────────────────────────────────────────────────
+    // â”€â”€ Handler installation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Guard against installing the handler more than once.
     static HANDLER_INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -302,6 +371,11 @@ mod native_signal {
         get_signal_pipe()?;
         // SAFETY: `sigint_handler` only calls `write(2)`, which is
         // async-signal-safe.
+        #[cfg(any(target_os = "linux", rusticated_linux))]
+        {
+            linux_signal(SIGINT, sigint_handler);
+        }
+        #[cfg(all(unix, not(any(target_os = "linux", rusticated_linux))))]
         unsafe {
             signal(SIGINT, sigint_handler);
         }
@@ -366,8 +440,17 @@ mod native_signal {
         // Drain ALL bytes so accumulated signals don't re-fire ctrl_c immediately.
         let mut b = 0u8;
         loop {
-            // SAFETY: `rx` is O_NONBLOCK; read returns -1/EAGAIN when empty.
-            let n = unsafe { read(rx, &mut b, 1) };
+            let n = {
+                #[cfg(any(target_os = "linux", rusticated_linux))]
+                {
+                    linux_read(rx, &mut b, 1)
+                }
+                #[cfg(all(unix, not(any(target_os = "linux", rusticated_linux))))]
+                {
+                    // SAFETY: `rx` is O_NONBLOCK; read returns -1/EAGAIN when empty.
+                    unsafe { read(rx, &mut b, 1) }
+                }
+            };
             if n <= 0 {
                 break;
             }

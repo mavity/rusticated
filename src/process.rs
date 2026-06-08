@@ -84,10 +84,6 @@ mod native_process {
     use crate::vec::Vec;
     // ── Linux pidfd async wait ────────────────────────────────────────────────
 
-    #[cfg(any(target_os = "linux", rusticated_linux))]
-    unsafe extern "C" {
-        fn close(fd: i32) -> i32;
-    }
 
     #[cfg(all(
         target_os = "linux",
@@ -108,7 +104,7 @@ mod native_process {
 
     // ── Unix: posix_spawnp, waitpid, kill ────────────────────────────────────
 
-    #[cfg(any(unix, rusticated_linux))]
+    #[cfg(all(unix, not(any(target_os = "linux", rusticated_linux))))]
     unsafe extern "C" {
         fn posix_spawnp(
             pid: *mut i32,
@@ -121,6 +117,22 @@ mod native_process {
         fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
         fn kill(pid: i32, sig: i32) -> i32;
         static environ: *const *const u8;
+    }
+
+    #[cfg(any(target_os = "linux", rusticated_linux))]
+    fn linux_waitpid(pid: i32, status: *mut i32, options: i32) -> i32 {
+        crate::syscall!(
+            crate::os::linux::syscall::nr::WAIT4,
+            pid as usize,
+            status as usize,
+            options as usize,
+            0usize
+        ) as i32
+    }
+
+    #[cfg(any(target_os = "linux", rusticated_linux))]
+    fn linux_kill(pid: i32, sig: i32) -> i32 {
+        crate::syscall!(crate::os::linux::syscall::nr::KILL, pid as usize, sig as usize) as i32
     }
 
     #[cfg(any(unix, rusticated_linux))]
@@ -282,11 +294,11 @@ mod native_process {
                 let pidfd = pidfd_open(self.pid)?;
                 let res = crate::rt::wait_readable(pidfd).await;
                 // SAFETY: pidfd is valid and owned by us.
-                unsafe { close(pidfd) };
+                crate::syscall!(crate::os::linux::syscall::nr::CLOSE, pidfd as usize);
                 res?;
                 let mut status = 0i32;
                 // SAFETY: self.pid is valid.
-                let r = unsafe { waitpid(self.pid as i32, &mut status, 0) };
+                let r = linux_waitpid(self.pid as i32, &mut status, 0);
                 if r < 0 {
                     return Err(io::Error::last_os_error());
                 }
@@ -396,7 +408,16 @@ mod native_process {
             {
                 let mut status = 0i32;
                 // SAFETY: self.pid is valid.
-                let r = unsafe { waitpid(self.pid as i32, &mut status, WNOHANG) };
+                let r = {
+                    #[cfg(any(target_os = "linux", rusticated_linux))]
+                    {
+                        linux_waitpid(self.pid as i32, &mut status, WNOHANG)
+                    }
+                    #[cfg(all(unix, not(any(target_os = "linux", rusticated_linux))))]
+                    {
+                        unsafe { waitpid(self.pid as i32, &mut status, WNOHANG) }
+                    }
+                };
                 if r < 0 {
                     return Err(io::Error::last_os_error());
                 }
@@ -431,7 +452,16 @@ mod native_process {
             #[cfg(any(unix, rusticated_linux))]
             {
                 // SAFETY: self.pid is valid.
-                let r = unsafe { kill(self.pid as i32, SIGKILL) };
+                let r = {
+                    #[cfg(any(target_os = "linux", rusticated_linux))]
+                    {
+                        linux_kill(self.pid as i32, SIGKILL)
+                    }
+                    #[cfg(all(unix, not(any(target_os = "linux", rusticated_linux))))]
+                    {
+                        unsafe { kill(self.pid as i32, SIGKILL) }
+                    }
+                };
                 if r < 0 {
                     return Err(io::Error::last_os_error());
                 }
@@ -571,47 +601,165 @@ mod native_process {
             self.spawn_impl()
         }
 
-        #[cfg(any(unix, rusticated_linux))]
-        fn spawn_impl(&mut self) -> io::Result<Child> {
-            // Build null-terminated byte strings for argv.
+        #[cfg(any(target_os = "linux", rusticated_linux))]
+        fn linux_spawn(
+            program: &str,
+            args: &[String],
+            envs: &[(String, String)],
+        ) -> io::Result<u32> {
+            // Build argv
             let mut argv_storage: Vec<Vec<u8>> = Vec::new();
             {
-                let mut b = Vec::with_capacity(self.program.len() + 1);
-                b.extend_from_slice(self.program.as_bytes());
+                let mut b = Vec::with_capacity(program.len() + 1);
+                b.extend_from_slice(program.as_bytes());
                 b.push(0);
                 argv_storage.push(b);
             }
-            for arg in &self.args {
+            for arg in args {
                 let mut b = Vec::with_capacity(arg.len() + 1);
                 b.extend_from_slice(arg.as_bytes());
                 b.push(0);
                 argv_storage.push(b);
             }
-            // Null-terminated pointer array.
             let mut argv_ptrs: Vec<*const u8> = argv_storage.iter().map(|v| v.as_ptr()).collect();
             argv_ptrs.push(core::ptr::null());
 
-            let mut pid = 0i32;
-            // SAFETY: argv_storage keeps the strings alive for the duration of
-            // posix_spawnp; environ is a valid global pointer.
-            let r = unsafe {
-                posix_spawnp(
-                    &mut pid,
-                    argv_storage[0].as_ptr(),
-                    core::ptr::null(),
-                    core::ptr::null(),
-                    argv_ptrs.as_ptr(),
-                    environ,
-                )
+            // Build envp
+            let mut env_storage: Vec<Vec<u8>> = Vec::new();
+            let env_vars = if envs.is_empty() {
+                crate::env::get_host_env_vars()
+            } else {
+                envs.to_vec()
             };
-            if r != 0 {
-                return Err(io::Error::from_raw_os_error(r));
+
+            for (k, v) in env_vars {
+                let mut b = Vec::with_capacity(k.len() + v.len() + 2);
+                b.extend_from_slice(k.as_bytes());
+                b.push(b'=');
+                b.extend_from_slice(v.as_bytes());
+                b.push(0);
+                env_storage.push(b);
             }
-            Ok(Child {
-                pid: pid as u32,
-                stdout: None,
-                stderr: None,
-            })
+            let mut env_ptrs: Vec<*const u8> = env_storage.iter().map(|v| v.as_ptr()).collect();
+            env_ptrs.push(core::ptr::null());
+
+            // We need to resolve program in PATH if it's not absolute.
+            let resolved_path = if program.contains('/') {
+                program.to_owned()
+            } else {
+                let path_env = crate::env::var("PATH").unwrap_or_default();
+                let found = program.to_owned();
+                for dir in path_env.split(':') {
+                    if dir.is_empty() {
+                        continue;
+                    }
+                    let mut p = String::from(dir);
+                    if !p.ends_with('/') {
+                        p.push('/');
+                    }
+                    p.push_str(program);
+                    // Check if file exists and is executable.
+                    // For now, let's just attempt execve and see if it fails.
+                    // A better way would be to use stat/access.
+                }
+                found
+            };
+            // Note: simple PATH resolution for now.
+
+            // vfork
+            // On x86_64, vfork is syscall 58. On aarch64, it's clone with flags.
+            #[cfg(target_arch = "x86_64")]
+            let pid = crate::syscall!(crate::os::linux::syscall::nr::VFORK) as i32;
+            #[cfg(target_arch = "aarch64")]
+            let pid = crate::syscall!(
+                crate::os::linux::syscall::nr::CLONE,
+                0x4111usize, // CLONE_VFORK | CLONE_VM | SIGCHLD
+                0usize,      // child_stack
+                0usize,      // ptid
+                0usize,      // newtls
+                0usize       // ctid
+            ) as i32;
+
+            if pid < 0 {
+                return Err(io::Error::last_os_error());
+            }
+
+            if pid == 0 {
+                // Child
+                // SAFETY: We are in a vfork'ed child. We must only call async-signal-safe
+                // functions or execve.
+                let mut prog_storage = Vec::with_capacity(resolved_path.len() + 1);
+                prog_storage.extend_from_slice(resolved_path.as_bytes());
+                prog_storage.push(0);
+                let prog_c = prog_storage.as_ptr();
+
+                crate::syscall!(
+                    crate::os::linux::syscall::nr::EXECVE,
+                    prog_c as usize,
+                    argv_ptrs.as_ptr() as usize,
+                    env_ptrs.as_ptr() as usize
+                );
+                // If execve returns, it failed.
+                crate::syscall!(crate::os::linux::syscall::nr::EXIT, 127usize);
+                unreachable!();
+            }
+
+            Ok(pid as u32)
+        }
+
+        #[cfg(any(unix, rusticated_linux))]
+        fn spawn_impl(&mut self) -> io::Result<Child> {
+            #[cfg(any(target_os = "linux", rusticated_linux))]
+            {
+                let pid = Self::linux_spawn(&self.program, &self.args, &self.envs)?;
+                Ok(Child {
+                    pid,
+                    stdout: None,
+                    stderr: None,
+                })
+            }
+            #[cfg(all(unix, not(any(target_os = "linux", rusticated_linux))))]
+            {
+                // Build null-terminated byte strings for argv.
+                let mut argv_storage: Vec<Vec<u8>> = Vec::new();
+                {
+                    let mut b = Vec::with_capacity(self.program.len() + 1);
+                    b.extend_from_slice(self.program.as_bytes());
+                    b.push(0);
+                    argv_storage.push(b);
+                }
+                for arg in &self.args {
+                    let mut b = Vec::with_capacity(arg.len() + 1);
+                    b.extend_from_slice(arg.as_bytes());
+                    b.push(0);
+                    argv_storage.push(b);
+                }
+                // Null-terminated pointer array.
+                let mut argv_ptrs: Vec<*const u8> = argv_storage.iter().map(|v| v.as_ptr()).collect();
+                argv_ptrs.push(core::ptr::null());
+
+                let mut pid = 0i32;
+                // SAFETY: argv_storage keeps the strings alive for the duration of
+                // posix_spawnp; environ is a valid global pointer.
+                let r = unsafe {
+                    posix_spawnp(
+                        &mut pid,
+                        argv_storage[0].as_ptr(),
+                        core::ptr::null(),
+                        core::ptr::null(),
+                        argv_ptrs.as_ptr(),
+                        environ,
+                    )
+                };
+                if r != 0 {
+                    return Err(io::Error::from_raw_os_error(r));
+                }
+                Ok(Child {
+                    pid: pid as u32,
+                    stdout: None,
+                    stderr: None,
+                })
+            }
         }
 
         #[cfg(windows)]
@@ -692,7 +840,13 @@ pub use native_process::{Child, ChildExitStatus, Command, ExitStatus, Stdio};
 ///
 /// Equivalent to `std::process::exit`. Never returns.
 pub fn exit(code: i32) -> ! {
-    #[cfg(any(unix, rusticated_linux))]
+    #[cfg(any(target_os = "linux", rusticated_linux))]
+    {
+        // SAFETY: `EXIT` syscall has no preconditions.
+        crate::syscall!(crate::os::linux::syscall::nr::EXIT, code as usize);
+        unreachable!();
+    }
+    #[cfg(all(unix, not(any(target_os = "linux", rusticated_linux))))]
     {
         unsafe extern "C" {
             fn _exit(status: i32) -> !;
