@@ -64,6 +64,13 @@ impl Driver {
             Self::Epoll(d) => d.submit_write(fd, state),
         }
     }
+
+    pub(crate) fn submit_cancel(&mut self, state: Rc<OpState>) -> io::Result<()> {
+        match self {
+            Self::Uring(d) => d.submit_cancel(state),
+            Self::Epoll(d) => d.submit_cancel(state),
+        }
+    }
 }
 
 impl Driver {

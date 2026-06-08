@@ -356,15 +356,77 @@ use crate::abi::imports;
 #[cfg(target_family = "wasm")]
 use crate::rt::wasm::OverlappedFuture;
 
+/// A future that resolves after a specified duration.
+#[cfg(target_family = "wasm")]
+pub struct Sleep {
+    inner: OverlappedFuture,
+}
+
+#[cfg(target_family = "wasm")]
+impl core::future::Future for Sleep {
+    type Output = ();
+
+    fn poll(
+        mut self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        match core::pin::Pin::new(&mut self.inner).poll(cx) {
+            core::task::Poll::Ready(_) => core::task::Poll::Ready(()),
+            core::task::Poll::Pending => core::task::Poll::Pending,
+        }
+    }
+}
+
 /// Sleep asynchronously for `duration` (WASM host-scheduled timer).
 #[cfg(target_family = "wasm")]
-pub async fn sleep(duration: Duration) {
+pub fn sleep(duration: Duration) -> Sleep {
     let delay_ms = duration.as_millis() as u32;
-    let _ = OverlappedFuture::new(move |ov| {
-        // SAFETY: `ov` is a valid overlapped pointer supplied by the runtime.
-        unsafe { imports::timer_set(ov, delay_ms) };
-    })
-    .await;
+    Sleep {
+        inner: OverlappedFuture::new(move |ov| {
+            // SAFETY: `ov` is a valid overlapped pointer supplied by the runtime.
+            unsafe { imports::timer_set(ov, delay_ms) };
+        }),
+    }
+}
+
+/// A future that times out after a certain duration.
+#[must_use = "futures do nothing unless you `.await` them"]
+pub struct Timeout<F> {
+    future: F,
+    delay: Sleep,
+}
+
+impl<F: core::future::Future> core::future::Future for Timeout<F> {
+    type Output = Result<F::Output, ()>;
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        // SAFETY: We are implementing a standard adapter and ensuring we don't
+        // move the inner futures.
+        let this = unsafe { self.get_unchecked_mut() };
+        let future = unsafe { core::pin::Pin::new_unchecked(&mut this.future) };
+        let delay = unsafe { core::pin::Pin::new_unchecked(&mut this.delay) };
+
+        if let core::task::Poll::Ready(output) = future.poll(cx) {
+            return core::task::Poll::Ready(Ok(output));
+        }
+
+        if let core::task::Poll::Ready(()) = delay.poll(cx) {
+            return core::task::Poll::Ready(Err(()));
+        }
+
+        core::task::Poll::Pending
+    }
+}
+
+/// Await `future` for at most `duration`.
+pub fn timeout<F: core::future::Future>(duration: Duration, future: F) -> Timeout<F> {
+    Timeout {
+        future,
+        delay: sleep(duration),
+    }
 }
 
 /// A measurement of the host's monotonic clock (milliseconds since an epoch).

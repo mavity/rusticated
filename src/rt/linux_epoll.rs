@@ -212,6 +212,10 @@ impl EpollDriver {
         self.wakers.insert(token, waker);
     }
 
+    pub(crate) fn submit_cancel(&mut self, _state: Rc<OpState>) -> io::Result<()> {
+        Ok(())
+    }
+
     /// Polls the epoll instance for events, returning `true` if any were delivered.
     pub fn poll_with_timeout(&mut self, timeout_ms: Option<u32>) -> io::Result<bool> {
         let mut evbuf = [EpollEvent { events: 0, data: 0 }; 64];

@@ -66,6 +66,11 @@ impl UringDriver {
     pub fn register_write(&mut self, _fd: i32) -> io::Result<u64> {
         Ok(0)
     }
+
+    /// Submits a cancellation request for the given operation state.
+    pub(crate) fn submit_cancel(&mut self, _state: Rc<OpState>) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 impl UringDriver {
