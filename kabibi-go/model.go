@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"mvdan.cc/sh/moreinterp/coreutils"
 	"mvdan.cc/sh/v3/interp"
 )
@@ -112,10 +113,41 @@ func (m *model) loadDir(p pane, path string) {
 	}
 }
 
-func (m model) Init() tea.Cmd {
+func (m *model) Init() tea.Cmd {
 	return tea.Batch(
 		textinput.Blink,
+		m.checkAssetsCmd(),
 	)
+}
+
+func (m *model) syncChatView() {
+	if m.chatView.Width <= 0 {
+		return
+	}
+	style := lipgloss.NewStyle().Width(m.chatView.Width)
+	var wrapped []string
+	for _, line := range m.chatLines {
+		wrapped = append(wrapped, style.Render(line))
+	}
+	m.chatView.SetContent(strings.Join(wrapped, "\n"))
+	m.chatView.GotoBottom()
+}
+
+func (m *model) watchAssetProgressCmd() tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case msg := <-m.assetDone:
+			return msg
+		case msg := <-m.assetProgress:
+			return msg
+		}
+	}
+}
+
+func (m *model) watchAIChanCmd() tea.Cmd {
+	return func() tea.Msg {
+		return <-m.aiMsgChan
+	}
 }
 
 func (m *model) updateDelegates() {
@@ -211,6 +243,7 @@ func (m *model) recalculateLayout() {
 	m.chatView.Height = panelHeight - 3
 	m.chatInput.Width = chatFullWidth - 3
 	m.shellInput.Width = m.width - 3
+	m.syncChatView()
 }
 
 func (m *model) AddPlume(lines ...string) tea.Cmd {

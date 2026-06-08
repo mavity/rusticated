@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -34,6 +35,109 @@ func dirTitleName(path string) string {
 	}
 	base := filepath.Base(trimmed)
 	return " " + base + " "
+}
+
+func renderProgressBar(percentage, width int, bg lipgloss.Color, finished bool) string {
+	if width <= 0 {
+		return ""
+	}
+	if percentage < 0 {
+		percentage = 0
+	}
+	if percentage > 100 {
+		percentage = 100
+	}
+
+	if finished {
+		return lipgloss.NewStyle().Background(bg).Foreground(colorDimGray).Render(strings.Repeat("█", width))
+	}
+
+	// Octa-fractional characters
+	octal := []string{"▏", "▎", "▍", "▌", "▋", "▊", "▉"}
+
+	totalUnits := width * 8
+	filledUnits := (percentage * totalUnits) / 100
+	fullBlocks := filledUnits / 8
+	remainder := filledUnits % 8
+
+	// The user wants a specific gradient width algorithm:
+	// gradientWidth = min(numFilled, max(4, numFilled/2))
+	numFilled := float64(filledUnits) / 8.0
+
+	gradientWidth := numFilled / 2.0
+	if gradientWidth < 4.0 {
+		gradientWidth = 4.0
+	}
+	if gradientWidth > numFilled {
+		gradientWidth = numFilled
+	}
+
+	gradientStart := numFilled - gradientWidth
+
+	getGradientColor := func(i int) string {
+		startGrey := 0x55 // Medium-Dark Grey
+
+		fi := float64(i)
+		if fi < gradientStart {
+			return fmt.Sprintf("#%02x%02x%02x", startGrey, startGrey, startGrey)
+		}
+
+		// Interpolate from gradientStart to numFilled
+		div := numFilled - gradientStart
+		if div <= 0 {
+			return "#000000"
+		}
+
+		ratio := (fi - gradientStart) / div
+		if ratio > 1 {
+			ratio = 1
+		}
+
+		val := int(float64(startGrey) * (1.0 - ratio))
+		return fmt.Sprintf("#%02x%02x%02x", val, val, val)
+	}
+
+	var b strings.Builder
+	for i := 0; i < width; i++ {
+		if i < fullBlocks {
+			color := getGradientColor(i)
+			// Explicitly force black for the last block if it's the tip
+			if i == fullBlocks-1 && remainder == 0 {
+				color = "#000000"
+			}
+			b.WriteString(lipgloss.NewStyle().Background(bg).Foreground(lipgloss.Color(color)).Render("█"))
+		} else if i == fullBlocks && remainder > 0 {
+			// fractional part is the tip
+			color := getGradientColor(i)
+			b.WriteString(lipgloss.NewStyle().Background(bg).Foreground(lipgloss.Color(color)).Render(octal[remainder-1]))
+		} else {
+			b.WriteString(lipgloss.NewStyle().Background(bg).Render(" "))
+		}
+	}
+	return b.String()
+}
+
+func truncateStringToWidth(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if runewidth.StringWidth(s) <= width {
+		return s
+	}
+	var b strings.Builder
+	current := 0
+	for _, r := range s {
+		rw := runewidth.RuneWidth(r)
+		if current+rw > width-1 {
+			break
+		}
+		b.WriteRune(r)
+		current += rw
+	}
+	if current < width {
+		return b.String()
+	}
+	return b.String() + "…"
 }
 
 func renderPanelWithTitle(m *model, p pane, title string, titleStyle lipgloss.Style, panelStyle lipgloss.Style, borderColor lipgloss.TerminalColor, height int) string {
@@ -147,7 +251,7 @@ func (m model) View() string {
 		for _, line := range m.plume {
 			// Expand tabs correctly based on tab stops (typically 8 in terminals)
 			expanded := expandTabs(line, 8)
-			
+
 			// Pad to m.width to ensure any panel backgrounds are "wiped".
 			// Use runewidth to handle multi-byte/wide characters correctly.
 			w := runewidth.StringWidth(expanded)
@@ -193,13 +297,17 @@ func (m model) View() string {
 		rightBColor = colorCyan
 	}
 
-	// Managed height constraints
-	panelHeight := m.height - 10
+	// Managed height constraints: filling screen minus top/bottom margins
+	topReserved := 2
+	promptReserved := 1
+	footerHeight := m.height / 5 // Proportion of rows below
+	if footerHeight < 3 {
+		footerHeight = 3
+	}
+
+	panelHeight := m.height - (topReserved + promptReserved + footerHeight)
 	if panelHeight < 5 {
 		panelHeight = 5
-	}
-	if panelHeight > 15 {
-		panelHeight = 15
 	}
 
 	left := renderPanelWithTitle(&m, leftPane, dirTitleName(m.leftDir), leftTStyle, leftStyle, leftBColor, panelHeight)
@@ -232,8 +340,65 @@ func (m model) View() string {
 	}
 
 	if m.chatOpen {
+		var progressLines []string
+		if m.isDownloading || !m.assetsReady || len(m.pendingPrompts) > 0 {
+			detailsWidth := m.chatView.Width - 19
+			if detailsWidth < 10 {
+				detailsWidth = 10
+			}
+			barWidth := detailsWidth - 16
+			if barWidth < 10 {
+				barWidth = 10
+			}
+
+			litertDetails := m.litertDownloadDetails
+			if litertDetails == "" {
+				litertDetails = "pending"
+			}
+			litertDetails = truncateStringToWidth(litertDetails, detailsWidth-barWidth)
+
+			gemmaDetails := m.gemmaDownloadDetails
+			if gemmaDetails == "" {
+				gemmaDetails = "pending"
+			}
+			gemmaDetails = truncateStringToWidth(gemmaDetails, detailsWidth-barWidth)
+
+			lineStyle := lipgloss.NewStyle().Background(colorDarkGray).Foreground(colorWhite)
+			spacer := lineStyle.Render("  ")
+
+			labelStyle := lipgloss.NewStyle().Background(colorDarkGray).Foreground(lipgloss.Color("7"))
+			litertLabel := labelStyle.Render(fmt.Sprintf("%9s", "litertlm"))
+			gemmaLabel := labelStyle.Render(fmt.Sprintf("%9s", "gemma"))
+
+			litertPct := lineStyle.Render(fmt.Sprintf("%3d%%", m.litertDownloadPercent))
+			gemmaPct := lineStyle.Render(fmt.Sprintf("%3d%%", m.gemmaDownloadPercent))
+
+			litertDet := lineStyle.Render(litertDetails)
+			gemmaDet := lineStyle.Render(gemmaDetails)
+
+			litertLine := fmt.Sprintf("%s%s%s%s%s %s", litertLabel, spacer, renderProgressBar(m.litertDownloadPercent, barWidth, colorDarkGray, m.litertReady), spacer, litertPct, litertDet)
+			gemmaLine := fmt.Sprintf("%s%s%s%s%s %s", gemmaLabel, spacer, renderProgressBar(m.gemmaDownloadPercent, barWidth, colorDarkGray, m.gemmaReady), spacer, gemmaPct, gemmaDet)
+
+			progressLines = append(progressLines, forceBackground(litertLine, colorDarkGray))
+			progressLines = append(progressLines, forceBackground(gemmaLine, colorDarkGray))
+			if !m.isDownloading && !m.assetsReady {
+				progressLines = append(progressLines, forceBackground("waiting for runtime assets...", colorDarkGray))
+			}
+			if len(m.pendingPrompts) > 0 {
+				progressLines = append(progressLines, forceBackground(fmt.Sprintf("Queued prompts: %d", len(m.pendingPrompts)), colorDarkGray))
+			}
+		}
+		progressView := strings.Join(progressLines, "\n")
+		progressView = forceBackground(progressView, colorDarkGray)
+		chatViewHeight := panelHeight - 3 - len(progressLines)
+		if chatViewHeight < 1 {
+			chatViewHeight = 1
+		}
+		m.chatView.Height = chatViewHeight
+
 		chatContent := lipgloss.JoinVertical(lipgloss.Left,
 			m.chatView.View(),
+			progressView,
 			m.chatInput.View(),
 		)
 		width := chatFullWidth
@@ -281,18 +446,11 @@ func (m model) View() string {
 
 	// Plume Partitioning
 	// Available height below panels:
-	footerHeight := 5
-
 	totalPlumeCount := len(cleanPlumeLines)
 	var exhaustLines []string
 	var footerLines []string
 
-	// Split the plume into three parts:
-	// 1. Footer: Visible immediately below panels
-	// 2. Occluded: Hidden "behind" the panels (equal to panelHeight)
-	// 3. Exhaust: Visible above panels
-
-	// Calculate indices
+	// Calculate indices to fit screen exactly
 	footerStart := totalPlumeCount - footerHeight
 	if footerStart < 0 {
 		footerStart = 0
@@ -303,9 +461,14 @@ func (m model) View() string {
 		occludedStart = 0
 	}
 
+	// We only want to show exhaust lines that fit in the topReserved space
+	exhaustStart := occludedStart - topReserved
+	if exhaustStart < 0 {
+		exhaustStart = 0
+	}
+
 	footerLines = cleanPlumeLines[footerStart:]
-	// occludedLines := cleanPlumeLines[occludedStart:footerStart] // These are not rendered
-	exhaustLines = cleanPlumeLines[:occludedStart]
+	exhaustLines = cleanPlumeLines[exhaustStart:occludedStart]
 
 	pStyle := plumeStyle.Copy().Width(m.width)
 
@@ -343,4 +506,30 @@ func (m model) View() string {
 	components = append(components, middleRow, footerView, prompt)
 
 	return lipgloss.JoinVertical(lipgloss.Left, components...)
+}
+
+func forceBackground(s string, bg lipgloss.Color) string {
+	if s == "" {
+		return ""
+	}
+	// background color escape code for terminal
+	// lipgloss.Color can be a string like "#333333" or "8"
+	// We'll use a dummy render to see what lipgloss produces
+	dummy := lipgloss.NewStyle().Background(bg).Render(" ")
+	// Result is ESC[48;2;R;G;Bm   ESC[0m or ESC[48;5;Nm   ESC[0m
+	// We want everything before the space.
+	idx := strings.Index(dummy, " ")
+	if idx == -1 {
+		return s
+	}
+	bgCode := dummy[:idx]
+
+	// We want to append this code after any reset \x1b[0m
+	// Also ensure it starts with the background code.
+	res := bgCode + strings.ReplaceAll(s, "\x1b[0m", "\x1b[0m"+bgCode)
+	// Avoid leaking the background code if it was appended at the very end
+	if strings.HasSuffix(res, bgCode) {
+		res = strings.TrimSuffix(res, bgCode)
+	}
+	return res
 }
