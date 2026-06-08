@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -31,6 +33,9 @@ type HostEnv struct {
 	fileOpsQueue   chan func()
 	ttyRawState    *term.State
 	ttyRawFd       int
+	signals        chan os.Signal
+	signalWaiters  map[uint32]uint32 // signum -> ovPtr
+	pendingSignals chan [2]uint32    // signum, ovPtr
 }
 
 type AbiStat struct {
@@ -67,10 +72,41 @@ func NewHostEnv() *HostEnv {
 		nextHandle:     3, // 0,1,2 reserved
 		outstandingOps: 0,
 		fileOpsQueue:   make(chan func(), 100),
+		signals:        make(chan os.Signal, 10),
+		signalWaiters:  make(map[uint32]uint32),
+		pendingSignals: make(chan [2]uint32, 10),
 	}
 	env.handles[0] = os.Stdin
 	env.handles[1] = os.Stdout
 	env.handles[2] = os.Stderr
+
+	signal.Notify(env.signals, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		for sig := range env.signals {
+			var signum uint32
+			switch sig {
+			case syscall.SIGINT:
+				signum = 2
+			case syscall.SIGTERM:
+				signum = 15
+			}
+			if signum != 0 {
+				env.mu.Lock()
+				ovPtr, ok := env.signalWaiters[signum]
+				if ok {
+					delete(env.signalWaiters, signum)
+					env.mu.Unlock()
+					// Notify the Poll loop to complete this OV
+					env.pendingSignals <- [2]uint32{signum, ovPtr}
+					// Trigger a break from blocking in Poll
+					env.fileOpsQueue <- func() {}
+				} else {
+					env.mu.Unlock()
+				}
+			}
+		}
+	}()
+
 	return env
 }
 
@@ -754,14 +790,96 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 	builder.NewFunctionBuilder().
 		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
 			ovPtr := uint32(stack[0])
-			writeOverlapped(m, ovPtr, 38, 0, 0) // ENOSYS
+			addrPtr := uint32(stack[1])
+			addrLen := uint32(stack[2])
+			port := uint16(stack[3])
+			flags := uint32(stack[4])
+
+			mem := m.Memory()
+			buf, ok := mem.Read(addrPtr, addrLen)
+			if !ok {
+				writeOverlapped(m, ovPtr, 22, 0, 0)
+				return
+			}
+			addr := string(buf)
+			isConnect := (flags & 1) != 0
+
+			h.IncOps()
+			go func() {
+				var handle uint64
+				var err error
+				if isConnect {
+					var conn net.Conn
+					conn, err = net.Dial("tcp", fmt.Sprintf("%s:%d", addr, port))
+					if err == nil {
+						h.mu.Lock()
+						handle = h.nextHandle
+						h.nextHandle++
+						h.handles[handle] = conn
+						h.mu.Unlock()
+					}
+				} else {
+					var ln net.Listener
+					ln, err = net.Listen("tcp", fmt.Sprintf("%s:%d", addr, port))
+					if err == nil {
+						h.mu.Lock()
+						handle = h.nextHandle
+						h.nextHandle++
+						h.handles[handle] = ln
+						h.mu.Unlock()
+					}
+				}
+
+				retCode := uint32(0)
+				if err != nil {
+					retCode = mapErrno(err)
+				}
+				h.fileOpsQueue <- func() {
+					writeOverlapped(m, ovPtr, retCode, 0, handle)
+					h.DecOps()
+				}
+			}()
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
 		Export("net_open")
 
 	builder.NewFunctionBuilder().
 		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
 			ovPtr := uint32(stack[0])
-			writeOverlapped(m, ovPtr, 38, 0, 0) // ENOSYS
+			listenHandle := stack[1]
+
+			h.mu.Lock()
+			lnAny, ok := h.handles[listenHandle]
+			h.mu.Unlock()
+
+			if !ok {
+				writeOverlapped(m, ovPtr, 9, 0, 0) // EBADF
+				return
+			}
+			ln, ok := lnAny.(net.Listener)
+			if !ok {
+				writeOverlapped(m, ovPtr, 22, 0, 0) // EINVAL
+				return
+			}
+
+			h.IncOps()
+			go func() {
+				conn, err := ln.Accept()
+				var handle uint64
+				retCode := uint32(0)
+				if err != nil {
+					retCode = mapErrno(err)
+				} else {
+					h.mu.Lock()
+					handle = h.nextHandle
+					h.nextHandle++
+					h.handles[handle] = conn
+					h.mu.Unlock()
+				}
+				h.fileOpsQueue <- func() {
+					writeOverlapped(m, ovPtr, retCode, 0, handle)
+					h.DecOps()
+				}
+			}()
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64}, []api.ValueType{}).
 		Export("net_accept")
 
@@ -898,13 +1016,45 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 
 	builder.NewFunctionBuilder().
 		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-			// dummy - no op
+			processHandle := stack[0]
+			signum := uint32(stack[1])
+
+			h.mu.Lock()
+			fAny, ok := h.handles[processHandle]
+			h.mu.Unlock()
+
+			if !ok {
+				return
+			}
+			cmd, isCmd := fAny.(*exec.Cmd)
+			if !isCmd || cmd == nil || cmd.Process == nil {
+				return
+			}
+
+			var sig os.Signal
+			switch signum {
+			case 2:
+				sig = syscall.SIGINT
+			case 9:
+				sig = syscall.SIGKILL
+			case 15:
+				sig = syscall.SIGTERM
+			default:
+				return
+			}
+			_ = cmd.Process.Signal(sig)
 		}), []api.ValueType{api.ValueTypeI64, api.ValueTypeI32}, []api.ValueType{}).
 		Export("process_signal")
 
 	builder.NewFunctionBuilder().
 		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
-			// dummy - no op
+			ovPtr := uint32(stack[0])
+			signum := uint32(stack[1])
+
+			h.mu.Lock()
+			h.signalWaiters[signum] = ovPtr
+			h.mu.Unlock()
+			h.IncOps()
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).
 		Export("signal_wait")
 
@@ -979,12 +1129,25 @@ func (h *HostEnv) Poll(ctx context.Context, mod api.Module) bool {
 			op()
 			processed = true
 		default:
+			goto signals
+		}
+	}
+
+signals:
+	// 2. Process system signals that have waiters.
+	for {
+		select {
+		case pair := <-h.pendingSignals:
+			writeOverlapped(mod, pair[1], 0, 0, 0)
+			h.DecOps()
+			processed = true
+		default:
 			goto timers
 		}
 	}
 
 timers:
-	// 2. Process expired timers (from timer_set).
+	// 3. Process expired timers (from timer_set).
 	h.mu.Lock()
 	now := time.Now()
 	var earliest *time.Time
