@@ -216,7 +216,11 @@ func renderPanelWithTitle(m *model, p pane, title string, titleStyle lipgloss.St
 					style = folderStyle
 				}
 				if active && idx == selectedIdx {
-					style = selectedStyle
+					if item.isDir {
+						style = selectedFolderStyle
+					} else {
+						style = selectedFileStyle
+					}
 				}
 				name := item.name
 				if len(name) > colWidth-2 {
@@ -277,7 +281,6 @@ func (m model) View() string {
 	}
 
 	// 2. Prepare Panels
-	activeTitleStyle := lipgloss.NewStyle().Foreground(colorWhite).Background(colorCyan).Bold(true)
 	inactiveTitleStyle := lipgloss.NewStyle().Foreground(colorWhite).Background(colorBlue)
 
 	leftStyle := filePanelStyle
@@ -290,11 +293,11 @@ func (m model) View() string {
 	if m.activePane == leftPane {
 		leftStyle = filePanelActiveStyle
 		leftTStyle = activeTitleStyle
-		leftBColor = colorCyan
+		leftBColor = colorGray
 	} else if m.activePane == rightPane {
 		rightStyle = filePanelActiveStyle
 		rightTStyle = activeTitleStyle
-		rightBColor = colorCyan
+		rightBColor = colorGray
 	}
 
 	// Managed height constraints: filling screen minus top/bottom margins

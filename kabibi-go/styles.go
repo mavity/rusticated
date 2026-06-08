@@ -6,6 +6,8 @@ import "github.com/charmbracelet/lipgloss"
 var (
 	colorBlue     = lipgloss.Color("4")       // Blue
 	colorCyan     = lipgloss.Color("6")       // Cyan
+	colorYellow   = lipgloss.Color("#FFd700") // Bright Yellow highlight
+	colorNavy     = lipgloss.Color("#000080") // Navy for selection
 	colorWhite    = lipgloss.Color("7")       // White
 	colorBlack    = lipgloss.Color("#000000") // True Black
 	colorDarkGray = lipgloss.Color("8")       // Dark Gray (Bright Black)
@@ -23,9 +25,9 @@ var (
 
 	filePanelActiveStyle = lipgloss.NewStyle().
 				Background(colorBlue).
-				Foreground(colorCyan).
+				Foreground(colorYellow).
 				Border(lipgloss.NormalBorder()).
-				BorderForeground(colorCyan).
+				BorderForeground(colorGray).
 				BorderBackground(colorBlue)
 
 	folderStyle = lipgloss.NewStyle().
@@ -36,9 +38,20 @@ var (
 			Foreground(colorCyan).
 			Background(colorBlue)
 
-	selectedStyle = lipgloss.NewStyle().
-			Foreground(colorBlack).
-			Background(colorCyan)
+	selectedFileStyle = lipgloss.NewStyle().
+				Foreground(colorNavy).
+				Background(colorYellow)
+
+	selectedFolderStyle = lipgloss.NewStyle().
+				Foreground(colorDarkGray).
+				Background(colorYellow)
+
+	selectedStyle = selectedFileStyle // fallback
+
+	activeTitleStyle = lipgloss.NewStyle().
+				Foreground(colorDarkGray).
+				Background(colorYellow).
+				Bold(true)
 
 	inactiveSelectedStyle = lipgloss.NewStyle().
 				Foreground(colorWhite).
