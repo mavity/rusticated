@@ -716,7 +716,13 @@ impl Future for TcpConnect {
                         sin_zero: [0; 8],
                     };
                     addr_len = core::mem::size_of::<sockaddr_in>() as i32;
-                    unsafe { core::ptr::copy_nonoverlapping(&sin as *const _ as *const u8, addr_buf.as_mut_ptr(), addr_len as usize) };
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            &sin as *const _ as *const u8,
+                            addr_buf.as_mut_ptr(),
+                            addr_len as usize,
+                        )
+                    };
                 }
                 SocketAddr::V6(ref a) => {
                     af = 23; // AF_INET6
@@ -734,7 +740,13 @@ impl Future for TcpConnect {
                         sin6_scope_id: 0,
                     };
                     addr_len = core::mem::size_of::<sockaddr_in6>() as i32;
-                    unsafe { core::ptr::copy_nonoverlapping(&sin6 as *const _ as *const u8, addr_buf.as_mut_ptr(), addr_len as usize) };
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            &sin6 as *const _ as *const u8,
+                            addr_buf.as_mut_ptr(),
+                            addr_len as usize,
+                        )
+                    };
                 }
             }
 
@@ -745,7 +757,9 @@ impl Future for TcpConnect {
 
             // Set non-blocking
             let mut mode = 1u32;
-            unsafe { ioctlsocket(s, -2147195266 /* FIONBIO */, &mut mode) };
+            unsafe {
+                ioctlsocket(s, -2147195266 /* FIONBIO */, &mut mode)
+            };
 
             let res = unsafe { connect(s, addr_buf.as_ptr(), addr_len) };
 
@@ -754,7 +768,9 @@ impl Future for TcpConnect {
             }
 
             let err = unsafe { WSAGetLastError() };
-            if err != 10035 /* WSAEWOULDBLOCK */ {
+            if err != 10035
+            /* WSAEWOULDBLOCK */
+            {
                 unsafe { closesocket(s) };
                 return Poll::Ready(Err(io::Error::from_raw_os_error(err)));
             }
@@ -805,7 +821,13 @@ impl Future for TcpListenerBind {
                     sin_zero: [0; 8],
                 };
                 addr_len = core::mem::size_of::<sockaddr_in>() as i32;
-                unsafe { core::ptr::copy_nonoverlapping(&sin as *const _ as *const u8, addr_buf.as_mut_ptr(), addr_len as usize) };
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        &sin as *const _ as *const u8,
+                        addr_buf.as_mut_ptr(),
+                        addr_len as usize,
+                    )
+                };
             }
             SocketAddr::V6(ref a) => {
                 af = 23; // AF_INET6
@@ -823,7 +845,13 @@ impl Future for TcpListenerBind {
                     sin6_scope_id: 0,
                 };
                 addr_len = core::mem::size_of::<sockaddr_in6>() as i32;
-                unsafe { core::ptr::copy_nonoverlapping(&sin6 as *const _ as *const u8, addr_buf.as_mut_ptr(), addr_len as usize) };
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        &sin6 as *const _ as *const u8,
+                        addr_buf.as_mut_ptr(),
+                        addr_len as usize,
+                    )
+                };
             }
         }
 
@@ -848,7 +876,9 @@ impl Future for TcpListenerBind {
 
         // Set non-blocking for accept
         let mut mode = 1u32;
-        unsafe { ioctlsocket(s, -2147195266 /* FIONBIO */, &mut mode) };
+        unsafe {
+            ioctlsocket(s, -2147195266 /* FIONBIO */, &mut mode)
+        };
 
         Poll::Ready(Ok(crate::net::TcpListener { handle: s as u64 }))
     }
@@ -879,16 +909,22 @@ impl Future for TcpAccept {
         if s != !0usize {
             // Success
             // TODO: Parse addr_buf to SocketAddr
-            let addr = crate::net::SocketAddr::V4(crate::net::SocketAddrV4::new(crate::net::Ipv4Addr::new(0,0,0,0), 0));
+            let addr = crate::net::SocketAddr::V4(crate::net::SocketAddrV4::new(
+                crate::net::Ipv4Addr::new(0, 0, 0, 0),
+                0,
+            ));
             return Poll::Ready(Ok((crate::net::TcpStream { handle: s as u64 }, addr)));
         }
 
         let err = unsafe { WSAGetLastError() };
-        if err != 10035 /* WSAEWOULDBLOCK */ {
+        if err != 10035
+        /* WSAEWOULDBLOCK */
+        {
             return Poll::Ready(Err(io::Error::from_raw_os_error(err)));
         }
 
-        crate::rt::executor::with_driver(|d| d.register_waker(self.handle, cx.waker().clone())).ok();
+        crate::rt::executor::with_driver(|d| d.register_waker(self.handle, cx.waker().clone()))
+            .ok();
         Poll::Pending
     }
 }

@@ -84,7 +84,6 @@ mod native_process {
     use crate::vec::Vec;
     // ── Linux pidfd async wait ────────────────────────────────────────────────
 
-
     #[cfg(all(
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
@@ -132,7 +131,11 @@ mod native_process {
 
     #[cfg(any(target_os = "linux", rusticated_linux))]
     fn linux_kill(pid: i32, sig: i32) -> i32 {
-        crate::syscall!(crate::os::linux::syscall::nr::KILL, pid as usize, sig as usize) as i32
+        crate::syscall!(
+            crate::os::linux::syscall::nr::KILL,
+            pid as usize,
+            sig as usize
+        ) as i32
     }
 
     #[cfg(any(unix, rusticated_linux))]
@@ -735,7 +738,8 @@ mod native_process {
                     argv_storage.push(b);
                 }
                 // Null-terminated pointer array.
-                let mut argv_ptrs: Vec<*const u8> = argv_storage.iter().map(|v| v.as_ptr()).collect();
+                let mut argv_ptrs: Vec<*const u8> =
+                    argv_storage.iter().map(|v| v.as_ptr()).collect();
                 argv_ptrs.push(core::ptr::null());
 
                 let mut pid = 0i32;
