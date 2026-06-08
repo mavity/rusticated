@@ -126,6 +126,8 @@ pub mod imports {
         pub fn timer_set(overlapped: *mut Overlapped, delay_ms: u32);
         /// Cancel a pending timer (Sync).
         pub fn timer_cancel(target_overlapped: *const Overlapped);
+        /// Cancel any pending overlapped operation (Sync).
+        pub fn cancel(target_overlapped: *mut Overlapped);
 
         /// Unified read. Result_ext = bytes transferred.
         pub fn read(overlapped: *mut Overlapped, handle: u64, buffer_ptr: *mut u8, buffer_len: u32);
