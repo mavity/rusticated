@@ -245,7 +245,7 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
         unsafe extern "system" {
             fn GetStdHandle(nStdHandle: u32) -> core::primitive::usize;
         }
-        handle = GetStdHandle(0xFFFFFFF5); // STD_ERROR_HANDLE is -11
+        handle = GetStdHandle(0xFFFFFFF4); // STD_ERROR_HANDLE is -12
 
         let msg = b"RUSTICATED PANIC! ";
         #[link(name = "kernel32", kind = "raw-dylib")]
