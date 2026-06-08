@@ -86,41 +86,41 @@ pub fn stderr() -> Stderr {
 
 impl AsyncRead for Stdin {
     async fn read(&mut self, _buf: Vec<u8>) -> (Result<usize>, Vec<u8>) {
-        (Err(Error::other("stdin read not implemented")), _buf)
+        crate::tty::stdin().read(_buf).await
     }
 }
 
 impl AsyncWrite for Stdout {
     async fn write(&mut self, _buf: Vec<u8>) -> (Result<usize>, Vec<u8>) {
-        (Err(Error::other("stdout write not implemented")), _buf)
+        crate::tty::stdout().write(_buf).await
     }
     async fn flush(&mut self) -> Result<()> {
-        Ok(())
+        crate::tty::stdout().flush().await
     }
 }
 
 impl AsyncWrite for Stderr {
     async fn write(&mut self, _buf: Vec<u8>) -> (Result<usize>, Vec<u8>) {
-        (Err(Error::other("stderr write not implemented")), _buf)
+        crate::tty::stderr().write(_buf).await
     }
     async fn flush(&mut self) -> Result<()> {
-        Ok(())
+        crate::tty::stderr().flush().await
     }
 }
 
 impl IsTerminal for Stdin {
     fn is_terminal(&self) -> bool {
-        false
+        crate::tty::stdin().is_terminal()
     }
 }
 impl IsTerminal for Stdout {
     fn is_terminal(&self) -> bool {
-        false
+        crate::tty::stdout().is_terminal()
     }
 }
 impl IsTerminal for Stderr {
     fn is_terminal(&self) -> bool {
-        false
+        crate::tty::stderr().is_terminal()
     }
 }
 

@@ -4,14 +4,14 @@
 
 #[cfg(any(unix, rusticated_linux))]
 pub use unix_tty::{
-    SizeStream, Tty, cursor_position, disable_raw_mode, enable_raw_mode, set_mode, size, stdin,
-    stdout,
+    SizeStream, Tty, cursor_position, disable_raw_mode, enable_raw_mode, set_mode, size, stderr,
+    stdin, stdout,
 };
 
 #[cfg(windows)]
 pub use windows_tty::{
-    SizeStream, Tty, cursor_position, disable_raw_mode, enable_raw_mode, set_mode, size, stdin,
-    stdout,
+    SizeStream, Tty, cursor_position, disable_raw_mode, enable_raw_mode, set_mode, size, stderr,
+    stdin, stdout,
 };
 
 #[cfg(target_family = "wasm")]
@@ -22,7 +22,8 @@ pub use wasm_tty::{
 
 /// Returns `true` if standard input is a terminal.
 pub fn is_stdin_a_tty() -> bool {
-    false
+    use crate::io::IsTerminal;
+    stdin().is_terminal()
 }
 
 /// Called when `epoll_wait` returns `EINTR`; dispatches any pending SIGWINCH.
@@ -76,6 +77,11 @@ mod unix_tty {
     /// Return an async handle to the process's standard output (`fd 1`).
     pub fn stdout() -> Tty {
         Tty { fd: 1 }
+    }
+
+    /// Return an async handle to the process's standard error (`fd 2`).
+    pub fn stderr() -> Tty {
+        Tty { fd: 2 }
     }
 
     /// A stream that yields the terminal size on Unix.
@@ -581,8 +587,9 @@ mod windows_tty {
         fn CloseHandle(hObject: usize) -> i32;
     }
 
-    const STD_INPUT_HANDLE: u32 = 0xFFFF_FFF6;
-    const STD_OUTPUT_HANDLE: u32 = 0xFFFF_FFF5;
+    const STD_INPUT_HANDLE: u32 = 0xFFFF_FFF6; // -10
+    const STD_OUTPUT_HANDLE: u32 = 0xFFFF_FFF5; // -11
+    const STD_ERROR_HANDLE: u32 = 0xFFFF_FFF4; // -12
     const FILE_TYPE_CHAR: u32 = 0x0002;
     /// Used only by optional Windows API paths when present; otherwise the
     /// constant is retained for future TTY driver support.
@@ -609,6 +616,14 @@ mod windows_tty {
         // SAFETY: GetStdHandle with a valid constant is always safe to call.
         Tty {
             handle: unsafe { GetStdHandle(STD_OUTPUT_HANDLE) },
+        }
+    }
+
+    /// Return an async handle to `STDERR` (console error).
+    pub fn stderr() -> Tty {
+        // SAFETY: GetStdHandle with a valid constant is always safe to call.
+        Tty {
+            handle: unsafe { GetStdHandle(STD_ERROR_HANDLE) },
         }
     }
 
