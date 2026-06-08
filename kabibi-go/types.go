@@ -53,7 +53,11 @@ func (d customDelegate) Render(w io.Writer, m list.Model, index int, listItem li
 	}
 
 	if d.active && index == m.Index() {
-		fmt.Fprint(w, selectedStyle.Render(str))
+		if i.isDir {
+			fmt.Fprint(w, selectedFolderStyle.Render(str))
+		} else {
+			fmt.Fprint(w, selectedFileStyle.Render(str))
+		}
 	} else {
 		fmt.Fprint(w, style.Render(str))
 	}
