@@ -305,6 +305,7 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string) (string, error) {
 			}
 			targetArg = strings.ReplaceAll(strings.TrimPrefix(targetPath, `\\?\`), `\`, `/`)
 			args = append(args, "--config", filepath.Join(ws, "target", "rusticated-spec", "config.toml"))
+			args = append(args, "--config", "unstable.json-target-spec=true")
 		}
 		args = append(args, "--target", targetArg)
 		cmd := exec.Command("cargo", args...)
@@ -365,9 +366,10 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string) (string, error) {
 
 func buildMohabbatBrain(ws string) error {
 	target := "wasm32-rusticated-unknown-unknown"
-	cmd := exec.Command("cargo", "build", "-p", "mohabbat", "--release", "--config", filepath.Join(ws, "target", "rusticated-spec", "config.toml"), "--target", target)
+	cmd := exec.Command("cargo", "build", "-p", "mohabbat", "--release", "--config", filepath.Join(ws, "target", "rusticated-spec", "config.toml"), "--config", "unstable.json-target-spec=true", "--target", target)
 
 	cmd.Env = os.Environ()
+	cmd.Env = upsertEnv(cmd.Env, "RUST_TARGET_PATH", filepath.Join(ws, "target", "rusticated-spec"))
 	cmd.Args = append(cmd.Args, "-Z", "unstable-options")
 	cmd.Dir = ws
 	cmd.Stdout = os.Stdout
