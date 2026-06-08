@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/sys"
@@ -78,12 +79,8 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 			return 1, fmt.Errorf("rusticated module missing 'run' export")
 		}
 
-		// Boot the guest. For Go guests compiled with //go:wasmexport,
-		// calling "run" initialises the Go runtime, starts main, and returns
-		// when beforeIdle fires pause(). For Rust guests, "run" is the normal
-		// entry point. Never call _start: it would run the whole program
-		// synchronously and deadlock the host's event loop.
-		_, err = runFunc.Call(ctx)
+		// 1. Initial run to boot the guest and start the main future.
+		res, err := runFunc.Call(ctx)
 		if err != nil {
 			if exitErr, ok := err.(*sys.ExitError); ok {
 				return int(exitErr.ExitCode()), nil
@@ -91,18 +88,29 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 			return 1, fmt.Errorf("initial run failed: %w", err)
 		}
 
-		// Event loop: poll for completions, then re-enter the guest.
-		// Terminates when there are no more outstanding ops (all I/O done
-		// and all sched_pause wakeups consumed) or when the guest calls
-		// process_exit (which calls os.Exit directly).
+		// 2. Event loop: poll for completions, then re-enter the guest.
+		fmt.Printf("HOST: entering event loop\n")
 		for {
-			if !hEnv.HasOutstandingOps() {
+			// If the guest indicated it's done (main future finished), we exit.
+			if len(res) > 0 && res[0] != 0 {
+				fmt.Printf("HOST: guest done\n")
 				break
 			}
 
-			hEnv.Poll(ctx, mod)
+			// If we have active host operations, we must wait for them.
+			if hEnv.HasLiveOps() {
+				hEnv.Poll(ctx, mod)
+			} else if len(res) > 0 && res[0] == 0 {
+				// No host ops, but guest is not done? This typically means
+				// the guest is stuck or we have a race.
+				// For now, let's keep running but maybe add a small yield to avoid 100% CPU
+				// if both sides are waiting for each other.
+				runtime.Gosched()
+			} else {
+				// We don't block in Poll here; we just re-run the guest.
+			}
 
-			_, err = runFunc.Call(ctx)
+			res, err = runFunc.Call(ctx)
 			if err != nil {
 				if exitErr, ok := err.(*sys.ExitError); ok {
 					return int(exitErr.ExitCode()), nil

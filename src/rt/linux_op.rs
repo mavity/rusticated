@@ -50,6 +50,14 @@ impl Future for LinuxOpFuture {
     }
 }
 
+impl Drop for LinuxOpFuture {
+    fn drop(&mut self) {
+        if self.state.result.borrow().is_none() {
+            let _ = super::executor::with_driver(|d| d.submit_cancel(Rc::clone(&self.state)));
+        }
+    }
+}
+
 // ─── Networking ─────────────────────────────────────────────────────────────
 
 use crate::net::SocketAddr;
