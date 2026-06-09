@@ -47,7 +47,12 @@ When a goroutine executes an I/O operation (e.g., file or socket read), the over
 3. It invokes the non-blocking host ABI import function (e.g., `rusticated_read`), passing the pointer to the `Overlapped` structure.
 4. The host ABI function initiates the background worker tracking and immediately returns a status code.
 5. If the status is pending, the wrapper calls the internal runtime primitive `runtime.gopark()`. This moves the calling goroutine into a waiting state, leaving its call stack intact inside Go memory.
-6. The Go scheduler, seeing no other runnable goroutines on this single-threaded instance, winds down execution and returns cleanly from the exported `run` function back to the host thread.
+6. **The Idle Yield Transition:**
+    * The Go scheduler, running on the `g0` stack, enters `runtime.findRunnable` ([src/runtime/proc.go:3389](C:\Users\mihai\sdk\go1.26.4\src\runtime\proc.go#L3389)). 
+    * Finding no runnable goroutines, it executes the target-specific `runtime.beforeIdle` hook ([src/runtime/proc.go:3565](C:\Users\mihai\sdk\go1.26.4\src\runtime\proc.go#L3565)).
+    * Our overlay implementation in [overlay-go/runtime/lock_rusticated.go](overlay-go/runtime/lock_rusticated.go) invokes `runtime.pause()`.
+    * The assembly routine `runtime.pause` ([overlay-go/runtime/asm_rusticated.s:628](overlay-go/runtime/asm_rusticated.s#L628)) sets a global `PAUSE` flag to `1` and executes the `RETUNWIND` instruction.
+    * This rips the WebAssembly stack back to the central `wasm_pc_f_loop` trampoline ([overlay-go/runtime/asm_rusticated.s:515](overlay-go/runtime/asm_rusticated.s#L515)), which detects the `PAUSE` signal, breaks its loop, and returns naturally to the host thread.
 
 ### 2. The Host Resume Path (Waking)
 
@@ -131,14 +136,23 @@ The host binary orchestrates the execution lifecycle using a basic non-blocking 
 3. **The Polling Loop:**
 ```
 loop {
-    tick()                   // run host OS events & update Overlapped flags
+    tick()                   // process host I/O & guest-initiated timer expirations
     if guest_exited { break }
-    if completions_ready {
+    if completions_ready || timer_expired {
         instance.call("run") // re-enters continuation block
     }
 }
-
 ```
+
+### 3. Timer Coordination (Guest to Host)
+
+To ensure Go `time.Sleep` and timer-based goroutines wake up correctly, the guest communicates its next required execution deadline to the host:
+
+1. **Deadline Discovery**: During the `beforeIdle` hook, the scheduler provides a `pollUntil` timestamp ([src/runtime/proc.go:3389](C:\Users\mihai\sdk\go1.26.4\src\runtime\proc.go#L3389)).
+2. **Host Notification**: Our `lock_rusticated.go` implementation invokes a custom `wasmimport` (e.g., `env.sched_pause(ns)`) passing the nanosecond deadline before calling `runtime.pause()`.
+3. **Host Blocking**: The `washmhost` proactor registers this deadline in its internal timer heap. The host's `Poll()` function will then include this deadline in its own blocking wait logic.
+4. **Re-entry**: When the deadline is reached, the host considers a "timer completion" to be ready and invokes `run` again, allowing Go to process its internal timer heap.
+
 
 
 4. **Process Teardown:** When the guest hits `env.process_exit(code)`, the host immediately tears down the instance and bubbles the error code to the parent process.
