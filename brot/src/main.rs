@@ -82,9 +82,7 @@ pub unsafe extern "C" fn memset(s: *mut u8, c: i32, n: usize) -> *mut u8 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     if dest < src as *mut u8 {
-        unsafe {
-            memcpy(dest, src, n)
-        }
+        unsafe { memcpy(dest, src, n) }
     } else {
         let mut i = n;
         while i > 0 {
@@ -158,11 +156,7 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
 
 #[cfg(windows)]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn main(
-    _argc: i32,
-    _argv: *const *const u8,
-    _envp: *const *const u8,
-) -> i32 {
+pub unsafe extern "C" fn main(_argc: i32, _argv: *const *const u8, _envp: *const *const u8) -> i32 {
     unsafe { windows::run() }
 }
 

@@ -1,7 +1,7 @@
+use crate::META;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::META;
 use core::ptr::null_mut;
 
 use crate::win32::Win32::Foundation::*;
@@ -137,14 +137,10 @@ pub unsafe fn run() -> ! {
             }
         });
 
-        let washmhost_data = &decompressed_pool[
-            META.washmhost_offset as usize
-                ..(META.washmhost_offset + META.washmhost_len) as usize
-        ];
-        let payload_data = &decompressed_pool[
-            META.payload_offset as usize
-                ..(META.payload_offset + META.payload_len) as usize
-        ];
+        let washmhost_data = &decompressed_pool
+            [META.washmhost_offset as usize..(META.washmhost_offset + META.washmhost_len) as usize];
+        let payload_data = &decompressed_pool
+            [META.payload_offset as usize..(META.payload_offset + META.payload_len) as usize];
 
         let mut temp_path = alloc::vec![0u16; MAX_PATH as usize + 1];
         let len = GetTempPathW(temp_path.len() as u32, temp_path.as_mut_ptr());
@@ -154,7 +150,7 @@ pub unsafe fn run() -> ! {
         let pid = GetCurrentProcessId();
 
         let washmhost_exe = format!("{}m_hlp_{}.exe", temp_str, pid);
-        let payload_wasm  = format!("{}m_pld_{}.wasm", temp_str, pid);
+        let payload_wasm = format!("{}m_pld_{}.wasm", temp_str, pid);
 
         let mut washmhost_exe_w: Vec<u16> = washmhost_exe.encode_utf16().collect();
         washmhost_exe_w.push(0);
@@ -248,7 +244,10 @@ pub unsafe fn run() -> ! {
         } else {
             use crate::win32::Win32::Foundation::GetLastError;
             let err = GetLastError();
-            crate::print_err(&format!("brot: failed to spawn washmhost (error {})\n", err));
+            crate::print_err(&format!(
+                "brot: failed to spawn washmhost (error {})\n",
+                err
+            ));
         }
 
         DeleteFileW(washmhost_exe_w.as_ptr());

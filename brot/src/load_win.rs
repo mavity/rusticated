@@ -1,6 +1,3 @@
-use alloc::format;
-use alloc::string::String;
-use alloc::vec::Vec;
 use crate::win32::Win32::Foundation::*;
 use crate::win32::Win32::Storage::FileSystem::*;
 use crate::win32::Win32::System::Diagnostics::Debug::*;
@@ -9,6 +6,9 @@ use crate::win32::Win32::System::LibraryLoader::*;
 use crate::win32::Win32::System::Memory::{MEM_COMMIT, MEM_RESERVE, VirtualAlloc, VirtualProtect};
 use crate::win32::Win32::System::Pipes::*;
 use crate::win32::Win32::System::Threading::*;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
 use core::ptr::null_mut;
 
 #[repr(C)]
@@ -353,7 +353,8 @@ pub unsafe fn reflective_load_and_run(washmhost: &[u8], payload: &[u8]) -> ! {
             len: payload.len(),
         }));
         CreateThread(
-            null_mut(), 0,
+            null_mut(),
+            0,
             Some(pipe_writer),
             args as *mut _,
             0,
