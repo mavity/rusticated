@@ -315,14 +315,12 @@ mod native_time {
                 }
                 return Poll::Ready(());
             }
-            if self.timer_id.is_none() {
-                self.timer_id = Some(crate::rt::timers::register_timer(
-                    self.deadline,
-                    cx.waker().clone(),
-                ));
+            // Cancel the previous timer (if any) and register a fresh one with
+            // the current waker. This keeps the waker up-to-date across re-polls
+            // (e.g. when the Select re-polls both arms).
+            if let Some(old_id) = self.timer_id.take() {
+                crate::rt::timers::cancel_timer(old_id);
             }
-            // Overwrite waker if already registered
-            crate::rt::timers::cancel_timer(self.timer_id.unwrap());
             self.timer_id = Some(crate::rt::timers::register_timer(
                 self.deadline,
                 cx.waker().clone(),
