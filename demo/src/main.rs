@@ -12,6 +12,10 @@ async fn async_main() {
 
     print_env_and_dir_diagnostics(&mut out).await;
 
+    println!("Let's read dir again!\n\n\n");
+
+    print_env_and_dir_diagnostics(&mut out).await;
+
     write_all(
         &mut out,
         b"crusticated demo: type a line and press Enter (5s timeout)\n",
