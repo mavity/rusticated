@@ -60,18 +60,24 @@ pub(crate) fn cancel_timer(id: u64) {
 
 pub(crate) fn wake_expired() -> bool {
     let now = Instant::now();
-    let mut woken = false;
+    // Collect expired wakers without holding the timers borrow, so that
+    // waker.wake() (which may re-enter the timer system via QueueUserAPC)
+    // does not cause re-entrancy into timers_mut.
+    let mut expired: alloc::vec::Vec<crate::task::Waker> = alloc::vec::Vec::new();
     timers_mut(|t| {
         while let Some(&(d, _, _)) = t.first() {
             if d <= now {
                 let (_, _, waker) = t.remove(0);
-                waker.wake();
-                woken = true;
+                expired.push(waker);
             } else {
                 break;
             }
         }
     });
+    let woken = !expired.is_empty();
+    for waker in expired {
+        waker.wake();
+    }
     woken
 }
 

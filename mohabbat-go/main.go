@@ -311,12 +311,17 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string) (string, error) {
 		if s.goos == "linux" && !isRusticatedTarget {
 			args = append(args, "--config", fmt.Sprintf("target.%s.rustflags=['-C', 'link-self-contained=no', '-C', 'linker=rust-lld', '-C', 'linker-flavor=ld.lld']", name))
 		}
+		if s.goos == "windows" && strings.Contains(name, "gnullvm") && !isRusticatedTarget {
+			args = append(args, "--config", fmt.Sprintf("target.%s.rustflags=['-C', 'link-args=-nodefaultlibs -nostdlib']", name))
+		}
+		if s.goos == "windows" && (strings.Contains(name, "windows-gnu") || strings.Contains(name, "windows-gnullvm")) {
+			// brot is no_std/no_main and uses raw-dylib exclusively; suppress the
+			// default linker libraries (-lmingw32 -lmingwex -lmsvcrt etc.) which
+			// the target spec appends by default for these flavors.
+			args = append(args, "--config", fmt.Sprintf("target.%s.rustflags=['-C', 'default-linker-libraries=no']", name))
+		}
 		cmd := exec.Command("cargo", args...)
 		env := os.Environ()
-		if s.goos == "windows" && (strings.Contains(name, "windows-gnu") || strings.Contains(name, "windows-gnullvm")) {
-			linkerVar := "CARGO_TARGET_" + strings.ToUpper(strings.ReplaceAll(name, "-", "_")) + "_LINKER"
-			env = append(env, linkerVar+"=rust-lld")
-		}
 		cmd.Env = env
 		if isRusticatedTarget {
 			cmd.Args = append(cmd.Args, "-Z", "unstable-options")
@@ -523,7 +528,7 @@ func cargoTargetName(s slot) (string, error) {
 	case s.goos == "linux":
 		return fmt.Sprintf("%s-unknown-linux-musl", targetArch), nil
 	case s.goos == "windows":
-		return fmt.Sprintf("%s-pc-windows-gnullvm", targetArch), nil
+		return fmt.Sprintf("%s-pc-windows-msvc", targetArch), nil
 	case s.goos == "darwin":
 		return fmt.Sprintf("%s-apple-darwin", targetArch), nil
 	default:
