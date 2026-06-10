@@ -1,5 +1,5 @@
-use alloc::vec::Vec;
 use crate::META;
+use alloc::vec::Vec;
 
 // ─── Syscall wrappers ─────────────────────────────────────────────────────────
 
@@ -294,11 +294,7 @@ unsafe fn sys_fork() -> i32 {
     ret as i32
 }
 
-unsafe fn sys_execve(
-    path: *const u8,
-    argv: *const *const u8,
-    envp: *const *const u8,
-) -> i32 {
+unsafe fn sys_execve(path: *const u8, argv: *const *const u8, envp: *const *const u8) -> i32 {
     let ret: isize;
     #[cfg(target_arch = "x86_64")]
     unsafe {
@@ -443,8 +439,7 @@ pub unsafe fn run() -> ! {
 
     // ── Read /proc/self/cmdline to obtain argv entries ────────────────────
     let cmdline_path = b"/proc/self/cmdline\0";
-    let cmdline_fd =
-        unsafe { sys_open(cmdline_path.as_ptr(), O_RDONLY, 0) };
+    let cmdline_fd = unsafe { sys_open(cmdline_path.as_ptr(), O_RDONLY, 0) };
     if cmdline_fd < 0 {
         unsafe { sys_exit_group(102) };
     }
@@ -452,7 +447,8 @@ pub unsafe fn run() -> ! {
     unsafe { sys_close(cmdline_fd) };
 
     // Split cmdline on NUL bytes to recover argv entries.
-    let args: Vec<&[u8]> = cmdline.split(|&b| b == 0)
+    let args: Vec<&[u8]> = cmdline
+        .split(|&b| b == 0)
         .filter(|s| !s.is_empty())
         .collect();
 
@@ -510,7 +506,11 @@ pub unsafe fn run() -> ! {
     let mut total_read = 0;
     while total_read < pool_len {
         let n = unsafe {
-            sys_read(fd, compressed_data.as_mut_ptr().add(total_read), pool_len - total_read)
+            sys_read(
+                fd,
+                compressed_data.as_mut_ptr().add(total_read),
+                pool_len - total_read,
+            )
         };
         if n <= 0 {
             unsafe { sys_close(fd) };
@@ -534,22 +534,20 @@ pub unsafe fn run() -> ! {
     drop(compressed_data);
 
     let washmhost_data = unsafe {
-        &decompressed[META.washmhost_offset as usize
-            ..(META.washmhost_offset + META.washmhost_len) as usize]
+        &decompressed
+            [META.washmhost_offset as usize..(META.washmhost_offset + META.washmhost_len) as usize]
     };
     let payload_data = unsafe {
-        &decompressed[META.payload_offset as usize
-            ..(META.payload_offset + META.payload_len) as usize]
+        &decompressed
+            [META.payload_offset as usize..(META.payload_offset + META.payload_len) as usize]
     };
 
     // ── Write washmhost to a temp file ────────────────────────────────────
     let pid = unsafe { sys_getpid() } as u32;
     let washmhost_path = make_tmp_path(b"/tmp/moh-", pid, 0);
-    let payload_path   = make_tmp_path(b"/tmp/mohp-", pid, 0);
+    let payload_path = make_tmp_path(b"/tmp/mohp-", pid, 0);
 
-    let tmp_fd = unsafe {
-        sys_open(washmhost_path.as_ptr(), O_RDWR | O_CREAT | O_EXCL, 0o600)
-    };
+    let tmp_fd = unsafe { sys_open(washmhost_path.as_ptr(), O_RDWR | O_CREAT | O_EXCL, 0o600) };
     if tmp_fd < 0 {
         unsafe { sys_exit_group(10) };
     }
@@ -564,9 +562,7 @@ pub unsafe fn run() -> ! {
     unsafe { sys_close(tmp_fd) };
 
     // ── Write payload to a temp file ──────────────────────────────────────
-    let payload_fd = unsafe {
-        sys_open(payload_path.as_ptr(), O_RDWR | O_CREAT | O_EXCL, 0o600)
-    };
+    let payload_fd = unsafe { sys_open(payload_path.as_ptr(), O_RDWR | O_CREAT | O_EXCL, 0o600) };
     if payload_fd < 0 {
         unsafe { sys_unlink(washmhost_path.as_ptr()) };
         unsafe { sys_exit_group(14) };
