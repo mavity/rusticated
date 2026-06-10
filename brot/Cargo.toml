@@ -11,6 +11,7 @@ brotli-decompressor = { version = "5.0.1", default-features = false, features = 
 opt-level = "z"      # Optimize for size
 lto = true           # Link Time Optimization
 codegen-units = 1    # Further optimization
+panic = "abort"      # Use abort on panic to minimize size and symbols
 
 
 

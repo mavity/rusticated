@@ -86,7 +86,7 @@ impl App {
                 }
             }
         }
-        files.sort_by(|a, b| {
+        files.sort_unstable_by(|a, b| {
             if a.name == ".." {
                 return std::cmp::Ordering::Less;
             }

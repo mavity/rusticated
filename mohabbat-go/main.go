@@ -311,14 +311,12 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string) (string, error) {
 		if s.goos == "linux" && !isRusticatedTarget {
 			args = append(args, "--config", fmt.Sprintf("target.%s.rustflags=['-C', 'link-self-contained=no', '-C', 'linker=rust-lld', '-C', 'linker-flavor=ld.lld']", name))
 		}
-		if s.goos == "windows" && strings.Contains(name, "gnullvm") && !isRusticatedTarget {
-			args = append(args, "--config", fmt.Sprintf("target.%s.rustflags=['-C', 'link-args=-nodefaultlibs -nostdlib']", name))
-		}
 		if s.goos == "windows" && (strings.Contains(name, "windows-gnu") || strings.Contains(name, "windows-gnullvm")) {
-			// brot is no_std/no_main and uses raw-dylib exclusively; suppress the
-			// default linker libraries (-lmingw32 -lmingwex -lmsvcrt etc.) which
-			// the target spec appends by default for these flavors.
-			args = append(args, "--config", fmt.Sprintf("target.%s.rustflags=['-C', 'default-linker-libraries=no']", name))
+			// brot is no_std/no_main and uses raw-dylib exclusively; we block
+			// the default libraries (MinGW runtime) that rustc injects by default,
+			// as they are often missing on ARM64 hosts. We provide a standalone
+			// entry point in the source to avoid any dependency on crt2.o.
+			args = append(args, "--config", fmt.Sprintf("target.%s.rustflags=['-C', 'link-arg=-nostdlib', '-C', 'link-arg=-nodefaultlibs']", name))
 		}
 		cmd := exec.Command("cargo", args...)
 		env := os.Environ()
