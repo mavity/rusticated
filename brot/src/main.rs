@@ -152,7 +152,13 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
     loop {}
 }
 
-// ─── Windows: called by MinGW crt2.o mainCRTStartup ─────────────────────────
+// ─── Windows: Standalone Entry Points ──────────────────────────────────────────
+
+#[cfg(windows)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mainCRTStartup() -> ! {
+    unsafe { windows::run() }
+}
 
 #[cfg(windows)]
 #[unsafe(no_mangle)]
@@ -160,14 +166,21 @@ pub unsafe extern "C" fn main(_argc: i32, _argv: *const *const u8, _envp: *const
     unsafe { windows::run() }
 }
 
-/// Global-constructor stub expected by MinGW crt2.o.
+#[cfg(windows)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn _Unwind_Resume() {}
+
+#[cfg(windows)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_eh_personality() {}
+
+/// Stub for code that expects a main() call but we are standalone.
 #[cfg(windows)]
 #[unsafe(no_mangle)]
 pub extern "C" fn __main() {}
 
-/// exit() stub: crt2.o calls this after main() returns.
-/// Never reached in practice because windows::run() calls ExitProcess,
-/// but the linker requires the symbol to be defined.
+/// exit() stub used only if something transitively calls it.
+/// Our windows::run() calls ExitProcess directly.
 #[cfg(windows)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exit(code: i32) -> ! {
