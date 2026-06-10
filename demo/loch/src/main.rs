@@ -45,19 +45,31 @@ async fn async_main() {
     let _raw_guard = RawModeGuard::new();
     let mut out = stdout();
     let mut input = stdin();
+    print!("size_stream");
     let mut size_stream = std::tty::size();
 
     let (w, h) = size_stream.next().await;
+    println!("{}x{}", w, h);
+
+    print!("truant backend/terminal...");
     let backend = TruantBackend::new(w, h);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.clear().unwrap();
+    println!(" OK");
 
+    print!("App:new()...");
     let mut app = App::new().await;
+    println!(" OK");
 
+
+    print!("Initial draw...");
     // Initial draw
     terminal.draw(|f| draw_ui(f, &mut app)).unwrap();
+    print!(" write_all...");
     write_all(&mut out, terminal.backend().buffer.as_bytes()).await;
+    print!(" backend_mut().buffer.clear()...");
     terminal.backend_mut().buffer.clear();
+    println!(" OK");
 
     while !app.should_quit {
         // Calculate approximate inner height roughly matching the layout
