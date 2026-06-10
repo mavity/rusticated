@@ -245,7 +245,7 @@ fn main() {
             extend_pre_link_args(
                 &mut spec,
                 "gnu-lld",
-                &["-nostdlib", "--no-dynamic-linker", "-Wl,--build-id=none"],
+                &["-nostdlib", "--no-dynamic-linker", "--build-id=none"],
             );
             extend_pre_link_args(
                 &mut spec,

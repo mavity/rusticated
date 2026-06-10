@@ -308,9 +308,12 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string) (string, error) {
 			args = append(args, "--config", "unstable.json-target-spec=true")
 		}
 		args = append(args, "--target", targetArg)
+		if s.goos == "linux" && !isRusticatedTarget {
+			args = append(args, "--config", fmt.Sprintf("target.%s.rustflags=['-C', 'link-self-contained=no', '-C', 'linker=rust-lld', '-C', 'linker-flavor=ld.lld']", name))
+		}
 		cmd := exec.Command("cargo", args...)
 		env := os.Environ()
-		if s.goos == "linux" || (s.goos == "windows" && (strings.Contains(name, "windows-gnu") || strings.Contains(name, "windows-gnullvm"))) {
+		if s.goos == "windows" && (strings.Contains(name, "windows-gnu") || strings.Contains(name, "windows-gnullvm")) {
 			linkerVar := "CARGO_TARGET_" + strings.ToUpper(strings.ReplaceAll(name, "-", "_")) + "_LINKER"
 			env = append(env, linkerVar+"=rust-lld")
 		}
@@ -511,45 +514,18 @@ func rustcTargetSpecAvailable(target string) bool {
 }
 
 func cargoTargetName(s slot) (string, error) {
-	hostTriple, err := rustcHostTriple()
-	if err != nil {
-		return "", err
-	}
-
-	useGnu := strings.Contains(hostTriple, "windows-gnu") || strings.Contains(hostTriple, "windows-gnullvm")
-	useGnullvm := strings.Contains(hostTriple, "windows-gnullvm")
-	useMsvc := strings.Contains(hostTriple, "windows-msvc")
-
 	targetArch := "x86_64"
 	if s.goarch == "arm64" {
 		targetArch = "aarch64"
 	}
 
-	if useGnullvm && s.goos == "windows" {
-		return fmt.Sprintf("%s-rusticated-windows-gnullvm", targetArch), nil
-	}
-	if useGnu && s.goos == "windows" {
-		return fmt.Sprintf("%s-rusticated-windows-gnu", targetArch), nil
-	}
-	if useMsvc && s.goos == "windows" {
-		if rustcTargetSpecAvailable(fmt.Sprintf("%s-pc-windows-gnullvm", targetArch)) {
-			return fmt.Sprintf("%s-rusticated-windows-gnullvm", targetArch), nil
-		}
-		if rustcTargetSpecAvailable(fmt.Sprintf("%s-pc-windows-gnu", targetArch)) {
-			return fmt.Sprintf("%s-rusticated-windows-gnu", targetArch), nil
-		}
-		return fmt.Sprintf("%s-rusticated-windows-gnullvm", targetArch), nil
-	}
-
 	switch {
-	case s.goos == "windows" && s.goarch == "amd64":
-		return "x86_64-rusticated-windows-gnullvm", nil
-	case s.goos == "windows" && s.goarch == "arm64":
-		return "aarch64-rusticated-windows-gnullvm", nil
-	case s.goos == "linux" && s.goarch == "amd64":
-		return "x86_64-unknown-linux-musl", nil
-	case s.goos == "linux" && s.goarch == "arm64":
-		return "aarch64-unknown-linux-musl", nil
+	case s.goos == "linux":
+		return fmt.Sprintf("%s-unknown-linux-musl", targetArch), nil
+	case s.goos == "windows":
+		return fmt.Sprintf("%s-pc-windows-msvc", targetArch), nil
+	case s.goos == "darwin":
+		return fmt.Sprintf("%s-apple-darwin", targetArch), nil
 	default:
 		return "", fmt.Errorf("unsupported slot target %s/%s", s.goos, s.goarch)
 	}

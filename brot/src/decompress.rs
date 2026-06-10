@@ -1,3 +1,6 @@
+use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
 use brotli_decompressor::{
     Allocator, BrotliDecompressStream, BrotliResult, HuffmanCode, SliceWrapper, SliceWrapperMut,
 };
