@@ -1,6 +1,6 @@
+use crate::META;
 use alloc::vec;
 use alloc::vec::Vec;
-use crate::META;
 
 type RunPayloadFunc = unsafe extern "C" fn(*const u8, usize) -> u32;
 

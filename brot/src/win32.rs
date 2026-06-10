@@ -103,7 +103,9 @@ pub mod Win32 {
                 pub fn CreateThread(
                     lpThreadAttributes: LPVOID,
                     dwStackSize: usize,
-                    lpStartAddress: Option<unsafe extern "system" fn(*mut core::ffi::c_void) -> u32>,
+                    lpStartAddress: Option<
+                        unsafe extern "system" fn(*mut core::ffi::c_void) -> u32,
+                    >,
                     lpParameter: LPVOID,
                     dwCreationFlags: DWORD,
                     lpThreadId: *mut DWORD,

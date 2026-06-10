@@ -58,9 +58,7 @@ unsafe impl GlobalAlloc for OsAllocator {
         if heap.is_null() {
             return core::ptr::null_mut();
         }
-        unsafe {
-            HeapReAlloc(heap, 0, ptr as *mut core::ffi::c_void, new_size.max(1)) as *mut u8
-        }
+        unsafe { HeapReAlloc(heap, 0, ptr as *mut core::ffi::c_void, new_size.max(1)) as *mut u8 }
     }
 }
 
