@@ -1,5 +1,8 @@
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
 use crate::META;
-use std::ptr::null_mut;
+use core::ptr::null_mut;
 
 use crate::win32::Win32::Foundation::*;
 use crate::win32::Win32::Storage::FileSystem::*;
@@ -8,8 +11,8 @@ use crate::win32::Win32::System::Environment::{
     GetCommandLineW, GetEnvironmentVariableW, SetEnvironmentVariableW,
 };
 use crate::win32::Win32::System::Threading::{
-    CreateProcessW, GetCurrentProcessId, GetExitCodeProcess, INFINITE, PROCESS_INFORMATION,
-    STARTUPINFOW, WaitForSingleObject,
+    CreateProcessW, ExitProcess, GetCurrentProcessId, GetExitCodeProcess, INFINITE,
+    PROCESS_INFORMATION, STARTUPINFOW, WaitForSingleObject,
 };
 use crate::win32::Win32::UI::Shell::CommandLineToArgvW;
 
@@ -19,8 +22,8 @@ pub unsafe fn get_module_file_name() -> Vec<u16> {
     let wide_path = unsafe {
         let mut num_args = 0;
         let argv = CommandLineToArgvW(GetCommandLineW(), &mut num_args);
-        if argv == core::ptr::null_mut() || num_args < 1 {
-            std::process::exit(101);
+        if argv.is_null() || num_args < 1 {
+            ExitProcess(101);
         }
 
         let arg0_ptr = *argv.offset(0);
@@ -29,7 +32,7 @@ pub unsafe fn get_module_file_name() -> Vec<u16> {
             len += 1;
         }
 
-        let mut wide_path = vec![0u16; (len + 1) as usize];
+        let mut wide_path = alloc::vec![0u16; (len + 1) as usize];
         core::ptr::copy_nonoverlapping(arg0_ptr, wide_path.as_mut_ptr(), len as usize);
         wide_path[len as usize] = 0;
         wide_path
@@ -39,7 +42,7 @@ pub unsafe fn get_module_file_name() -> Vec<u16> {
 }
 
 pub unsafe fn get_vegetable_file_name() -> Vec<u16> {
-    let mut buffer = vec![0u16; 32768];
+    let mut buffer = alloc::vec![0u16; 32768];
     let env_var = "MOHABBAT_VEGETABLE_PATH\0"
         .encode_utf16()
         .collect::<Vec<u16>>();
@@ -48,14 +51,14 @@ pub unsafe fn get_vegetable_file_name() -> Vec<u16> {
     };
     if len > 0 && (len as usize) < buffer.len() {
         buffer.truncate(len as usize + 1);
-        buffer[len as usize] = 0; // null terminator
+        buffer[len as usize] = 0;
         return buffer;
     }
 
     unsafe { get_module_file_name() }
 }
 
-pub unsafe fn run() {
+pub unsafe fn run() -> ! {
     let wide_path = unsafe { get_vegetable_file_name() };
 
     unsafe {
@@ -70,22 +73,22 @@ pub unsafe fn run() {
         );
 
         if handle == INVALID_HANDLE_VALUE {
-            std::process::exit(2);
+            ExitProcess(2);
         }
 
         let mut file_size: i64 = 0;
         if GetFileSizeEx(handle, &mut file_size) == 0 {
-            std::process::exit(3);
+            ExitProcess(3);
         }
 
         let pool_len = META.pool_len as usize;
         if pool_len == 0 {
             crate::print_err("brot: META.pool_len is 0, nothing to do. exiting.\n");
-            std::process::exit(4);
+            ExitProcess(4);
         }
 
         if file_size < pool_len as i64 {
-            std::process::exit(5);
+            ExitProcess(5);
         }
 
         let mut distance: i64 = 0;
@@ -96,17 +99,15 @@ pub unsafe fn run() {
             FILE_BEGIN,
         ) == 0
         {
-            std::process::exit(6);
+            ExitProcess(6);
         }
 
-        let mut compressed_data = vec![0u8; pool_len];
-        let _read_bytes: u32 = 0;
+        let mut compressed_data = alloc::vec![0u8; pool_len];
 
-        // Read the pool entirely
         let mut total_read = 0;
         while total_read < pool_len {
             let mut n: u32 = 0;
-            let to_read = core::cmp::min(pool_len - total_read, 0xFFFFFFFF) as u32;
+            let to_read = core::cmp::min(pool_len - total_read, 0xFFFF_FFFF) as u32;
             if ReadFile(
                 handle,
                 compressed_data.as_mut_ptr().add(total_read) as *mut _,
@@ -115,17 +116,17 @@ pub unsafe fn run() {
                 null_mut(),
             ) == 0
             {
-                std::process::exit(7);
+                ExitProcess(7);
             }
             if n == 0 {
-                std::process::exit(8);
+                ExitProcess(8);
             }
             total_read += n as usize;
         }
         CloseHandle(handle);
 
         let total_pool = META.payload_offset + META.payload_len;
-        let mut decompressed_pool = vec![0u8; total_pool as usize];
+        let mut decompressed_pool = alloc::vec![0u8; total_pool as usize];
 
         let mut out_offset = 0;
         let _ = crate::decompress::decompress_to_writer(&compressed_data, |chunk| {
@@ -136,25 +137,24 @@ pub unsafe fn run() {
             }
         });
 
-        let washmhost_data = &decompressed_pool
-            [META.washmhost_offset as usize..(META.washmhost_offset + META.washmhost_len) as usize];
-        let payload_data = &decompressed_pool
-            [META.payload_offset as usize..(META.payload_offset + META.payload_len) as usize];
+        let washmhost_data = &decompressed_pool[
+            META.washmhost_offset as usize
+                ..(META.washmhost_offset + META.washmhost_len) as usize
+        ];
+        let payload_data = &decompressed_pool[
+            META.payload_offset as usize
+                ..(META.payload_offset + META.payload_len) as usize
+        ];
 
-        extern crate alloc;
-        use alloc::format;
-        use alloc::string::String;
-
-        let mut temp_path = vec![0u16; MAX_PATH as usize + 1];
+        let mut temp_path = alloc::vec![0u16; MAX_PATH as usize + 1];
         let len = GetTempPathW(temp_path.len() as u32, temp_path.as_mut_ptr());
         temp_path.truncate(len as usize);
 
-        // convert temp_path to String
         let temp_str = String::from_utf16_lossy(&temp_path);
         let pid = GetCurrentProcessId();
 
         let washmhost_exe = format!("{}m_hlp_{}.exe", temp_str, pid);
-        let payload_wasm = format!("{}m_pld_{}.wasm", temp_str, pid);
+        let payload_wasm  = format!("{}m_pld_{}.wasm", temp_str, pid);
 
         let mut washmhost_exe_w: Vec<u16> = washmhost_exe.encode_utf16().collect();
         washmhost_exe_w.push(0);
@@ -162,10 +162,10 @@ pub unsafe fn run() {
         payload_wasm_w.push(0);
 
         for (path_w, data) in [
-            (&washmhost_exe_w, washmhost_data),
-            (&payload_wasm_w, payload_data),
+            (washmhost_exe_w.as_slice(), washmhost_data),
+            (payload_wasm_w.as_slice(), payload_data),
         ] {
-            let handle = CreateFileW(
+            let h = CreateFileW(
                 path_w.as_ptr(),
                 FILE_GENERIC_WRITE,
                 0,
@@ -174,20 +174,19 @@ pub unsafe fn run() {
                 FILE_ATTRIBUTE_NORMAL,
                 core::ptr::null_mut(),
             );
-            if handle != INVALID_HANDLE_VALUE {
-                let mut written = 0;
+            if h != INVALID_HANDLE_VALUE {
+                let mut written = 0u32;
                 WriteFile(
-                    handle,
+                    h,
                     data.as_ptr() as *const _,
                     data.len() as u32,
                     &mut written,
                     core::ptr::null_mut(),
                 );
-                CloseHandle(handle);
+                CloseHandle(h);
             }
         }
 
-        // Set Environment Variable MOHABBAT_WASM_FD
         let env_name: Vec<u16> = "MOHABBAT_WASM_FD\0".encode_utf16().collect();
         SetEnvironmentVariableW(env_name.as_ptr(), payload_wasm_w.as_ptr());
 
@@ -196,17 +195,17 @@ pub unsafe fn run() {
 
         let mut num_args = 0;
         let argv = CommandLineToArgvW(GetCommandLineW(), &mut num_args);
-        if argv != core::ptr::null_mut() && num_args > 1 {
+        if !argv.is_null() && num_args > 1 {
             for i in 1..num_args {
                 let arg_ptr = *argv.offset(i as isize);
                 let mut len = 0;
                 while *arg_ptr.offset(len) != 0 {
                     len += 1;
                 }
-                let mut arg_wide = vec![0u16; len as usize];
+                let mut arg_wide = alloc::vec![0u16; len as usize];
                 core::ptr::copy_nonoverlapping(arg_ptr, arg_wide.as_mut_ptr(), len as usize);
                 let arg_str = String::from_utf16_lossy(&arg_wide);
-                cmd_str.push_str(" ");
+                cmd_str.push(' ');
                 if arg_str.contains(' ') {
                     cmd_str.push('"');
                     cmd_str.push_str(&arg_str);
@@ -219,7 +218,6 @@ pub unsafe fn run() {
 
         crate::print_err("brot: spawning washmhost...\n");
 
-        // Create process using CreateProcessW
         let mut startup_info: STARTUPINFOW = core::mem::zeroed();
         startup_info.cb = core::mem::size_of::<STARTUPINFOW>() as u32;
         let mut process_info: PROCESS_INFORMATION = core::mem::zeroed();
@@ -240,31 +238,22 @@ pub unsafe fn run() {
             &mut process_info,
         );
 
-        use crate::win32::Win32::Foundation::GetLastError;
-        let mut exit_code = 1;
+        let mut exit_code: u32 = 1;
         if res != 0 {
             crate::print_err("brot: washmhost spawned, waiting...\n");
             WaitForSingleObject(process_info.hProcess, INFINITE);
             GetExitCodeProcess(process_info.hProcess, &mut exit_code);
-            crate::print_err(&format!(
-                "brot: washmhost finished with exit code {}\n",
-                exit_code
-            ));
             CloseHandle(process_info.hProcess);
             CloseHandle(process_info.hThread);
         } else {
+            use crate::win32::Win32::Foundation::GetLastError;
             let err = GetLastError();
-            crate::print_err(&format!(
-                "brot: failed to spawn washmhost (error {})\n",
-                err
-            ));
-            crate::print_err(&format!("brot: washmhost path: {}\n", washmhost_exe));
-            crate::print_err(&format!("brot: command line: {}\n", cmd_str));
+            crate::print_err(&format!("brot: failed to spawn washmhost (error {})\n", err));
         }
 
         DeleteFileW(washmhost_exe_w.as_ptr());
         DeleteFileW(payload_wasm_w.as_ptr());
 
-        std::process::exit(exit_code as i32);
+        ExitProcess(exit_code);
     }
 }
