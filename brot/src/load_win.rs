@@ -1,3 +1,6 @@
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
 use crate::win32::Win32::Foundation::*;
 use crate::win32::Win32::Storage::FileSystem::*;
 use crate::win32::Win32::System::Diagnostics::Debug::*;
@@ -6,7 +9,7 @@ use crate::win32::Win32::System::LibraryLoader::*;
 use crate::win32::Win32::System::Memory::{MEM_COMMIT, MEM_RESERVE, VirtualAlloc, VirtualProtect};
 use crate::win32::Win32::System::Pipes::*;
 use crate::win32::Win32::System::Threading::*;
-use std::ptr::null_mut;
+use core::ptr::null_mut;
 
 #[repr(C)]
 pub struct FakePeb {
@@ -168,7 +171,7 @@ pub unsafe fn reflective_load_and_run(washmhost: &[u8], payload: &[u8]) -> ! {
             PAGE_READWRITE,
         );
         if image_base.is_null() {
-            std::process::exit(50);
+            ExitProcess(50);
         }
 
         // Copy Headers
@@ -252,7 +255,7 @@ pub unsafe fn reflective_load_and_run(washmhost: &[u8], payload: &[u8]) -> ! {
                 let dll_name_zero = format!("{}\0", dll_name);
                 let h_lib = LoadLibraryA(dll_name_zero.as_ptr());
                 if h_lib.is_null() {
-                    std::process::exit(51);
+                    ExitProcess(51);
                 }
 
                 let mut thunk = if (*curr).OriginalFirstThunk != 0 {
@@ -283,7 +286,7 @@ pub unsafe fn reflective_load_and_run(washmhost: &[u8], payload: &[u8]) -> ! {
                     };
 
                     if proc_addr.is_null() {
-                        std::process::exit(52);
+                        ExitProcess(52);
                     }
 
                     *func = proc_addr as u64;
@@ -311,29 +314,51 @@ pub unsafe fn reflective_load_and_run(washmhost: &[u8], payload: &[u8]) -> ! {
             null_mut(),
         );
         if h_pipe == INVALID_HANDLE_VALUE {
-            std::process::exit(53);
+            ExitProcess(53);
         }
 
         // Set environment variable (updates the process' actual PEB params)
         let h = "MOHABBAT_WASM_FD\0".encode_utf16().collect::<Vec<_>>();
         SetEnvironmentVariableW(h.as_ptr(), pipe_name_w.as_ptr());
 
-        // Send payload on background thread
-        let pl = payload.to_vec();
-        let pipe_handle = h_pipe as usize;
-        std::thread::spawn(move || {
-            let h = pipe_handle as HANDLE;
-            ConnectNamedPipe(h, null_mut());
-            let mut written = 0;
-            WriteFile(
-                h,
-                pl.as_ptr() as *const _,
-                pl.len() as u32,
-                &mut written,
-                null_mut(),
-            );
-            CloseHandle(h);
-        });
+        // Send payload on a kernel thread via CreateThread so that we avoid
+        // linking std::thread (no-CRT build).
+        #[repr(C)]
+        struct PipeWriteArgs {
+            pipe: HANDLE,
+            data: *const u8,
+            len: usize,
+        }
+        unsafe extern "system" fn pipe_writer(param: *mut core::ffi::c_void) -> u32 {
+            let args = unsafe { &*(param as *const PipeWriteArgs) };
+            unsafe { ConnectNamedPipe(args.pipe, null_mut()) };
+            let mut written = 0u32;
+            unsafe {
+                WriteFile(
+                    args.pipe,
+                    args.data as *const _,
+                    args.len as u32,
+                    &mut written,
+                    null_mut(),
+                )
+            };
+            unsafe { CloseHandle(args.pipe) };
+            0
+        }
+        // Heap-allocate the args struct; the thread owns it (we leak on purpose
+        // since the process exits soon after).
+        let args = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(PipeWriteArgs {
+            pipe: h_pipe,
+            data: payload.as_ptr(),
+            len: payload.len(),
+        }));
+        CreateThread(
+            null_mut(), 0,
+            Some(pipe_writer),
+            args as *mut _,
+            0,
+            null_mut(),
+        );
 
         // Code cave for FakePeb and patching
         // Get PEB
@@ -527,6 +552,6 @@ pub unsafe fn reflective_load_and_run(washmhost: &[u8], payload: &[u8]) -> ! {
             jump();
         }
 
-        std::process::exit(0);
+        ExitProcess(0);
     }
 }

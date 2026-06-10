@@ -99,6 +99,15 @@ pub mod Win32 {
             unsafe extern "system" {
                 pub fn GetCurrentProcessId() -> DWORD;
                 pub fn GetCurrentProcess() -> HANDLE;
+                pub fn ExitProcess(uExitCode: DWORD) -> !;
+                pub fn CreateThread(
+                    lpThreadAttributes: LPVOID,
+                    dwStackSize: usize,
+                    lpStartAddress: Option<unsafe extern "system" fn(*mut core::ffi::c_void) -> u32>,
+                    lpParameter: LPVOID,
+                    dwCreationFlags: DWORD,
+                    lpThreadId: *mut DWORD,
+                ) -> HANDLE;
                 pub fn CreateProcessW(
                     lpApplicationName: LPCWSTR,
                     lpCommandLine: LPWSTR,
