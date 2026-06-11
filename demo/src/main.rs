@@ -58,6 +58,16 @@ async fn async_main() {
     }
 
     let mut args = std::env::args();
+    write_all(&mut out, b"Arguments:\n").await;
+    let mut i = 0;
+    while let Some(arg) = args.next() {
+        let msg = format!(" - arg[{}]: {}\n", i, arg);
+        write_all(&mut out, msg.as_bytes()).await;
+        i += 1;
+    }
+    write_all(&mut out, b"\n").await;
+
+    let mut args = std::env::args();
     let exe = args.next().unwrap_or_else(|| "<unknown>".to_string());
     match std::fs::metadata(&exe).await.map_err(|e| {
         std::println!(
