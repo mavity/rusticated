@@ -54,7 +54,7 @@ func notewakeup(n *note) {
 
 func notesleep(n *note) {
 	for n.key == 0 {
-		rusticated_pause(sys.GetCallerSP() - 16)
+		pause(sys.GetCallerSP() - 16)
 	}
 }
 
@@ -64,7 +64,7 @@ func notetsleep(n *note, ns int64) bool {
 		if ns >= 0 && nanotime() >= deadline {
 			return false
 		}
-		rusticated_pause(sys.GetCallerSP() - 16)
+		pause(sys.GetCallerSP() - 16)
 	}
 	return true
 }
@@ -83,7 +83,7 @@ func notetsleepg(n *note, ns int64) bool {
 		if ns >= 0 && nanotime() >= deadline {
 			return false
 		}
-		rusticated_pause(sys.GetCallerSP() - 16)
+		pause(sys.GetCallerSP() - 16)
 	}
 }
 
