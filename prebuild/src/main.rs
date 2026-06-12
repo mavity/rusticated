@@ -567,46 +567,28 @@ fn generate_go_overlay(goroot: &PathBuf, target_dir: &PathBuf) -> std::io::Resul
     let overlay_dir = repo_root.join("overlay-go");
 
     // Manufacture a modified asm.go for the custom linker on the fly.
-    // This approach is preferred over a full overlay to avoid fragility
-    // across Go toolchain updates.
     let asm_go_src = goroot.join("src/cmd/link/internal/wasm/asm.go");
     let mut asm_go_content = fs::read_to_string(&asm_go_src)?;
 
-    // 1. Add rusticated entry types to wasmFuncTypes map if not already present.
-    if !asm_go_content.contains("\"_rt0_wasm_rusticated\"") {
-        asm_go_content = asm_go_content.replace(
-            "\"_rt0_wasm_wasip1_lib\":    {Params: []byte{}},",
-            "\"_rt0_wasm_wasip1_lib\":    {Params: []byte{}},\n\t\"_rt0_wasm_rusticated\":     {Params: []byte{}},\n\t\"_rt0_wasm_rusticated_lib\": {Params: []byte{}},",
-        );
-    }
+    // 1. Strictly replace _start with run for the wasip1 entry point.
+    asm_go_content = asm_go_content.replace("entryExpName = \"_start\"", "entryExpName = \"run\"");
 
-    // 2. Suppress _start export in writeExportSec for wasip1.
-    // We change 2+len to 1+len (memory only) and comment out the _start/entry logic.
-    asm_go_content = asm_go_content.replace(
-        "writeUleb128(ctxt.Out, uint64(2+len(ldr.WasmExports))) // number of exports",
-        "writeUleb128(ctxt.Out, uint64(1+len(ldr.WasmExports))) // number of exports (rusticated)",
-    );
-
-    // Comment out the entire entry point block in writeExportSec for wasip1.
-    // We look for the start of the 'var entry' and the end of 'writeUleb128(ctxt.Out, uint64(idx)) // funcidx'.
-    let entry_start = "var entry, entryExpName string";
-    let entry_end = "writeUleb128(ctxt.Out, uint64(idx)) // funcidx";
-
-    if let Some(start_idx) = asm_go_content.find(entry_start) {
-        if let Some(end_idx_inner) = asm_go_content[start_idx..].find(entry_end) {
-            let actual_end = start_idx + end_idx_inner + entry_end.len();
-            let block = &asm_go_content[start_idx..actual_end];
-            // Only comment out if it's not already commented out (avoid double run issues)
-            if !block.contains("/*") {
-                let commented_block = format!("/*\n{}\n\t\t\t*/", block);
-                asm_go_content.replace_range(start_idx..actual_end, &commented_block);
-            }
+    let asm_go_dst = target_dir.join("asm_rusticated.go");
+    
+    // Robustness check: compare exact byte-to-byte content before updating.
+    let mut update_needed = true;
+    if let Ok(existing) = fs::read(&asm_go_dst) {
+        if existing == asm_go_content.as_bytes() {
+            update_needed = false;
         }
     }
 
-    let asm_go_dst = target_dir.join("asm_rusticated.go");
-    fs::write(&asm_go_dst, asm_go_content)?;
-    println!("generated {}", asm_go_dst.display());
+    if update_needed {
+        fs::write(&asm_go_dst, &asm_go_content)?;
+        println!("generated {} (updated)", asm_go_dst.display());
+    } else {
+        println!("{} is up to date, skipping write", asm_go_dst.display());
+    }
 
     // Helper to canonicalize a path, stripping Windows \\?\ prefix.
     let canon = |p: PathBuf| -> String {
@@ -635,14 +617,6 @@ fn generate_go_overlay(goroot: &PathBuf, target_dir: &PathBuf) -> std::io::Resul
         (
             "src/runtime/stubs_wasm.go",
             canon(overlay_dir.join("runtime/stubs_rusticated.go")),
-        ),
-        (
-            "src/runtime/asm_wasm.s",
-            canon(overlay_dir.join("runtime/asm_rusticated.s")),
-        ),
-        (
-            "src/runtime/rt0_wasip1_wasm.s",
-            canon(overlay_dir.join("runtime/rt0_wasip1_wasm.s")),
         ),
         // Linker (generated on the fly)
         ("src/cmd/link/internal/wasm/asm.go", canon(asm_go_dst)),
