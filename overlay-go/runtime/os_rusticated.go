@@ -193,7 +193,6 @@ func run() {
 func resume() {
 }
 
-
 //go:wasmexport getsp
 func getsp() uint32 {
 	return getsp_asm()
