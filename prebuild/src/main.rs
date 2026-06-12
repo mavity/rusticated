@@ -539,14 +539,64 @@ fn main() {
 
     fs::write(spec_dir.join("config.toml"), final_config).expect("wrote config.toml");
 
-    // Resolve GOROOT dynamically.
-    let out = Command::new("go").args(["env", "GOROOT"]).output();
-    let goroot = match out {
-        Ok(o) if o.status.success() => {
-            PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string())
+    // Resolve GOROOT dynamically, preferring the version specified in mohabbat-go/go.mod
+    let go_mod_path = PathBuf::from("mohabbat-go/go.mod");
+    let mut goroot = None;
+
+    if let Ok(content) = fs::read_to_string(&go_mod_path) {
+        if let Some(ver) = content
+            .lines()
+            .find(|l| l.trim().starts_with("go "))
+            .map(|l| l.trim().trim_start_matches("go ").trim())
+        {
+            let go_cmd = format!("go{}", ver);
+            println!("     > attempting to resolve GOROOT for {}", go_cmd);
+            
+            // Try running the specific go version command (e.g. go1.26.4)
+            if let Ok(out) = Command::new(&go_cmd).args(["env", "GOROOT"]).output() {
+                if out.status.success() {
+                    let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
+                    if path.exists() {
+                        println!("     > using GOROOT from {}: {}", go_cmd, path.display());
+                        goroot = Some(path);
+                    }
+                }
+            }
+
+            // If that didn't work, try running 'go env GOROOT' FROM INSIDE mohabbat-go/
+            // Go 1.21+ toolchain management might pick up the version from go.mod correctly.
+            if goroot.is_none() {
+                println!("     > attempting to resolve GOROOT by running 'go env GOROOT' inside mohabbat-go/");
+                if let Ok(out) = Command::new("go")
+                    .args(["env", "GOROOT"])
+                    .current_dir("mohabbat-go")
+                    .output()
+                {
+                    if out.status.success() {
+                        let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
+                        if path.exists() {
+                            println!("     > using GOROOT from 'go' inside mohabbat-go/: {}", path.display());
+                            goroot = Some(path);
+                        }
+                    }
+                }
+            }
         }
-        _ => {
-            panic!("failed to find GOROOT");
+    }
+
+    let goroot = match goroot {
+        Some(p) => p,
+        None => {
+            println!("     > falling back to default go for GOROOT");
+            let out = Command::new("go").args(["env", "GOROOT"]).output();
+            match out {
+                Ok(o) if o.status.success() => {
+                    PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                }
+                _ => {
+                    panic!("failed to find GOROOT");
+                }
+            }
         }
     };
 
