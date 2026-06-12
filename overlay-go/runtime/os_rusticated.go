@@ -187,16 +187,12 @@ func run() {
 			goready((*g)(unsafe.Pointer(ctx.gp)), 0)
 		}
 	}
-
-	wasm_pc_f_loop()
 }
 
 //go:wasmexport resume
 func resume() {
-	resume_asm()
 }
 
-func resume_asm()
 
 //go:wasmexport getsp
 func getsp() uint32 {
