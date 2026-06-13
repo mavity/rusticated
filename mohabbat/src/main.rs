@@ -1,24 +1,19 @@
-#![cfg_attr(target_arch = "wasm32", no_main)]
-#![cfg_attr(target_arch = "wasm32", no_std)]
-#[cfg(target_arch = "wasm32")]
-extern crate std;
-
-#[cfg(target_arch = "wasm32")]
 use std::fs::File;
-#[cfg(target_arch = "wasm32")]
 use std::io::{AsyncRead, AsyncWrite};
-#[cfg(target_arch = "wasm32")]
 use std::tty::stdout;
-#[cfg(target_arch = "wasm32")]
 use std::{format, string::String, vec::Vec, vec::vec};
 
-#[cfg(target_arch = "wasm32")]
-#[unsafe(no_mangle)]
-pub unsafe extern "Rust" fn guest_init() {
-    std::rt::submit_main(async_main());
+use anyhow;
+
+#[cfg(not(target_arch = "wasm32"))]
+use wasm_encoder;
+#[cfg(not(target_arch = "wasm32"))]
+use wasmparser;
+
+fn main() {
+    std::spawn!(async_main());
 }
 
-#[cfg(target_arch = "wasm32")]
 async fn write_all(writer: &mut impl AsyncWrite, bytes: &[u8]) {
     let mut buf = bytes.to_vec();
     while !buf.is_empty() {
@@ -35,18 +30,15 @@ async fn write_all(writer: &mut impl AsyncWrite, bytes: &[u8]) {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
 async fn out_print(s: &str) {
     write_all(&mut stdout(), s.as_bytes()).await;
 }
 
-#[cfg(target_arch = "wasm32")]
 async fn err_print(s: &str) {
     use std::tty::stderr;
     write_all(&mut stderr(), s.as_bytes()).await;
 }
 
-#[cfg(target_arch = "wasm32")]
 async fn read_all(path: &str) -> std::io::Result<Vec<u8>> {
     let mut file = File::open(path).await?;
     let mut buf = Vec::new();
@@ -63,7 +55,6 @@ async fn read_all(path: &str) -> std::io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-#[cfg(target_arch = "wasm32")]
 async fn write_file_all(file: &mut File, data: &[u8]) -> anyhow::Result<()> {
     let mut offset = 0;
     while offset < data.len() {
@@ -79,7 +70,6 @@ async fn write_file_all(file: &mut File, data: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(target_arch = "wasm32")]
 async fn mark_output_runnable(output_path: &str) -> anyhow::Result<()> {
     let mut permissions = std::fs::metadata(output_path).await?.permissions();
     permissions.set_mode(0o755);
@@ -88,7 +78,6 @@ async fn mark_output_runnable(output_path: &str) -> anyhow::Result<()> {
 }
 
 // Brotli decompression (no_std compatible via brotli-decompressor)
-#[cfg(target_arch = "wasm32")]
 fn decompress(input: &[u8]) -> Result<Vec<u8>, &'static str> {
     use brotli_decompressor::{
         Allocator, BrotliDecompressStream, BrotliResult, HuffmanCode, SliceWrapper, SliceWrapperMut,
@@ -184,7 +173,6 @@ fn decompress(input: &[u8]) -> Result<Vec<u8>, &'static str> {
 }
 
 // Brotli compression (quality=1 for speed, no-std via BrotliCompressCustomIo)
-#[cfg(target_arch = "wasm32")]
 fn compress(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     use brotli::enc::BrotliAlloc;
     use brotli::enc::backward_references::BrotliEncoderParams;
@@ -278,7 +266,6 @@ fn compress(data: &[u8]) -> anyhow::Result<Vec<u8>> {
 }
 
 // Find the first occurrence of needle in haystack
-#[cfg(target_arch = "wasm32")]
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
@@ -286,7 +273,6 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 // Parse the first MohabbatMeta found in buf.
 // After "MOHABBAT" magic: pool_len(8), washmhost_offset(8), washmhost_len(8),
 //                         payload_offset(8), payload_len(8), reserved(8)
-#[cfg(target_arch = "wasm32")]
 fn find_meta(buf: &[u8]) -> Option<(u64, u64, u64, u64, u64)> {
     let magic = b"MOHABBAT";
     for i in 0..buf.len().saturating_sub(magic.len() + 48) {
@@ -315,7 +301,6 @@ fn find_meta(buf: &[u8]) -> Option<(u64, u64, u64, u64, u64)> {
 
 // Patch all MOHABBAT metas in buf with new pool_len and payload_len.
 // washmhost_offset, washmhost_len and payload_offset are left unchanged.
-#[cfg(target_arch = "wasm32")]
 fn patch_metas(buf: &mut [u8], new_pool_len: u64, new_payload_len: u64) {
     let magic = b"MOHABBAT";
     let mut i = 0;
@@ -338,7 +323,6 @@ fn patch_metas(buf: &mut [u8], new_pool_len: u64, new_payload_len: u64) {
 }
 
 // Extract package name from raw Cargo.toml text
-#[cfg(target_arch = "wasm32")]
 fn extract_package_name(toml: &str) -> Option<String> {
     // Strip UTF-8 BOM if present (some editors write it)
     let toml = toml.trim_start_matches('\u{FEFF}');
@@ -367,7 +351,6 @@ fn extract_package_name(toml: &str) -> Option<String> {
     None
 }
 
-#[cfg(target_arch = "wasm32")]
 fn format_size(n: usize) -> String {
     let s = format!("{}", n);
     let mut out = String::new();
@@ -383,7 +366,6 @@ fn format_size(n: usize) -> String {
 
 // Build a cargo project and return the path to the compiled .wasm file.
 // Uses the workspace root derived from self_path (parent dir of mohab.bat).
-#[cfg(target_arch = "wasm32")]
 async fn build_project(project_dir: &str, self_path: &str) -> anyhow::Result<String> {
     // Derive workspace root from mohab.bat path
     let workspace_root: String = {
@@ -416,7 +398,6 @@ async fn build_project(project_dir: &str, self_path: &str) -> anyhow::Result<Str
 }
 
 // Build a Go project targeting wasip1/wasm and return path to the .wasm file.
-#[cfg(target_arch = "wasm32")]
 async fn build_go_project(project_dir: &str, workspace_root: &str) -> anyhow::Result<String> {
     let project_name = project_dir
         .trim_end_matches('/')
@@ -494,13 +475,13 @@ async fn build_go_project(project_dir: &str, workspace_root: &str) -> anyhow::Re
         ));
     }
 
-    out_print(&format!(
-        "🍆 Post-processing {} (rename _initialize -> run)\n",
-        output_wasm
-    ))
-    .await;
     #[cfg(not(target_arch = "wasm32"))]
     {
+        out_print(&format!(
+            "🍆 Post-processing {} (rename _initialize -> run)\n",
+            output_wasm
+        ))
+        .await;
         let data = std::fs::read(&output_wasm)?;
         let mut module = wasm_encoder::Module::new();
         for section in wasmparser::Parser::new(0).parse_all(&data) {
@@ -549,7 +530,6 @@ async fn build_go_project(project_dir: &str, workspace_root: &str) -> anyhow::Re
 }
 
 // Build a Cargo/Rust project and return the path to the compiled .wasm file.
-#[cfg(target_arch = "wasm32")]
 async fn build_cargo_project(
     cargo_toml_path: &str,
     workspace_root: &str,
@@ -608,7 +588,6 @@ async fn build_cargo_project(
 }
 
 // The "juice bottle refill": read self (mohab.bat), swap payload WASM, write new vegetable.
-#[cfg(target_arch = "wasm32")]
 async fn juice_bottle_refill(
     self_path: &str,
     new_wasm_path: &str,
@@ -702,7 +681,6 @@ async fn juice_bottle_refill(
     Ok(())
 }
 
-#[cfg(target_arch = "wasm32")]
 async fn async_main() {
     let args: std::vec::Vec<std::string::String> = std::env::args().collect();
     if args.len() <= 1 || args[1] == "-h" || args[1] == "--help" {
@@ -757,9 +735,4 @@ async fn async_main() {
             std::process::exit(1);
         }
     }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn main() {
-    println!("🍆 Success: mohab.bat generated via build script.");
 }
