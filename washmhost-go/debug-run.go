@@ -136,10 +136,10 @@ func renameInitializeToRun(wasmPath string) error {
 			if err != nil {
 				return err
 			}
-			
+
 			var newExportSec []byte
 			newExportSec = append(newExportSec, encodeVarUint32(count)...)
-			
+
 			p := n2
 			found := false
 			for i := uint32(0); i < count; i++ {
@@ -150,7 +150,7 @@ func renameInitializeToRun(wasmPath string) error {
 				p += n3
 				name := string(exportData[p : p+int(nameLen)])
 				p += int(nameLen)
-				
+
 				kind := exportData[p]
 				p++
 				idx, n4, err := readVarUint32(exportData[p:])
@@ -163,7 +163,7 @@ func renameInitializeToRun(wasmPath string) error {
 					name = "run"
 					found = true
 				}
-				
+
 				newExportSec = append(newExportSec, encodeVarUint32(uint32(len(name)))...)
 				newExportSec = append(newExportSec, name...)
 				newExportSec = append(newExportSec, kind)
