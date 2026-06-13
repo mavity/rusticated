@@ -184,15 +184,4 @@ func handleContinuation() {
 	}
 }
 
-//go:wasmexport resume
-func resume() {
-}
-
-//go:wasmexport getsp
-func getsp() uint32 {
-	return getsp_asm()
-}
-
-func getsp_asm() uint32
-
 func usleep(usec uint32) {}
