@@ -663,6 +663,10 @@ fn generate_go_overlay(goroot: &PathBuf, target_dir: &PathBuf) -> std::io::Resul
             "src/runtime/stubs_wasm.go",
             canon(overlay_dir.join("runtime/stubs_rusticated.go")),
         ),
+        (
+            "src/runtime/rt0_wasip1_wasm.s",
+            canon(overlay_dir.join("runtime/rt0_wasip1_wasm.s")),
+        ),
         // Syscall
         (
             "src/syscall/fs_wasip1.go",
