@@ -181,10 +181,6 @@ func (h *HostEnv) HasLiveOps() bool {
 	return false
 }
 
-func (h *HostEnv) HasOutstandingOpsCount() int32 {
-	return atomic.LoadInt32(&h.outstandingOps)
-}
-
 func createAbiStat(fi os.FileInfo) AbiStat {
 	kind := uint32(statKindUnknown)
 	if fi.IsDir() {
@@ -1279,7 +1275,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			handlesCount := len(h.handles)
 			timersCount := len(h.timers)
 			waitersCount := len(h.signalWaiters)
-			
+
 			live := 0
 			ghost := 0
 			for _, op := range h.activeOps {
@@ -1293,7 +1289,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			fmt.Printf("HOST: process_exit(%d) called.\n", code)
 			fmt.Printf("  Live Ops:  %d\n", live)
 			fmt.Printf("  Ghost Ops: %d\n", ghost)
-			fmt.Printf("  Handles:   %d, Timers: %d, SignalWaiters: %d\n", 
+			fmt.Printf("  Handles:   %d, Timers: %d, SignalWaiters: %d\n",
 				handlesCount, timersCount, waitersCount)
 			os.Exit(int(code))
 		}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).
@@ -1397,7 +1393,7 @@ block:
 			}
 		case <-time.After(timeout):
 			// Timer deadline reached; let the loop retry timer processing.
-			// Falling through to return false is fine because the next call 
+			// Falling through to return false is fine because the next call
 			// to Poll will process the expired timers at the top.
 			return false
 		case <-ctx.Done():

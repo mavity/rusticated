@@ -22,7 +22,6 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 
 	// 1. Setup Wazero using Compiler.
 	rConfig := wazero.NewRuntimeConfigCompiler()
-	// rConfig = rConfig.WithHostLogging(logging.LogScopeAll)
 	r := wazero.NewRuntimeWithConfig(ctx, rConfig)
 	defer r.Close(ctx)
 
@@ -33,30 +32,10 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 		return 1, fmt.Errorf("failed to compile module: %w", recoveredErr)
 	}
 
-	// 2. Detect Import flavor
-	isRusticated := false
-
-	for _, imp := range decoded.ImportedFunctions() {
-		modName, _, _ := imp.Import()
-		if modName == "env" {
-			isRusticated = true
-			break
-		}
-	}
-
-	for i := 0; i < 10; i++ {
-		// Just a hack to see if we can get info
-	}
-	// Note: wazero.CompiledModule doesn't expose table info easily here.
-	// But we can check after instantiation.
-
-	var hEnv *HostEnv
-
-	if isRusticated {
-		hEnv = NewHostEnv()
-		if err := hEnv.Register(ctx, r); err != nil {
-			return 1, fmt.Errorf("failed to register rusticated host env: %w", err)
-		}
+	// 2. Register Host Environment
+	hEnv := NewHostEnv()
+	if err := hEnv.Register(ctx, r); err != nil {
+		return 1, fmt.Errorf("failed to register rusticated host env: %w", err)
 	}
 
 	// 3. Instantiate
@@ -79,56 +58,46 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 	}
 
 	// 4. Drive completion
-	if isRusticated {
-		runFunc := mod.ExportedFunction("run")
-		if runFunc == nil {
-			return 1, fmt.Errorf("rusticated module missing 'run' export")
-		}
+	runFunc := mod.ExportedFunction("run")
+	if runFunc == nil {
+		return 1, fmt.Errorf("rusticated module missing 'run' export")
+	}
 
-		// 1. Initial run to boot the guest and start the main future.
-		res, err := runFunc.Call(ctx)
+	// 2. Event loop: poll for completions, then re-enter the guest.
+	fmt.Printf("HOST: entering event loop\n")
+	var res []uint64
+	for {
+		res, err = runFunc.Call(ctx)
 		if err != nil {
 			if exitErr, ok := err.(*sys.ExitError); ok {
 				return int(exitErr.ExitCode()), nil
 			}
-			return 1, fmt.Errorf("initial run failed: %w", err)
+			return 1, fmt.Errorf("run failed: %w", err)
 		}
 
-		// 2. Event loop: poll for completions, then re-enter the guest.
-		fmt.Printf("HOST: entering event loop\n")
-		for {
-			// If the guest indicated it's done (main future finished), we exit.
-			if len(res) > 0 && res[0] != 0 {
-				fmt.Printf("HOST: guest done\n")
-				break
-			}
-
-			// If we have active host operations, we must wait for them.
-			if hEnv.HasLiveOps() {
-				hEnv.Poll(ctx, mod)
-			} else if len(res) > 0 && res[0] == 0 {
-				// No host ops, but guest is not done? This typically means
-				// the guest is stuck or we have a race.
-				// For now, let's keep running but maybe add a small yield to avoid 100% CPU
-				// if both sides are waiting for each other.
-				runtime.Gosched()
-			} else {
-				// We don't block in Poll here; we just re-run the guest.
-			}
-
-			res, err = runFunc.Call(ctx)
-			if err != nil {
-				if exitErr, ok := err.(*sys.ExitError); ok {
-					return int(exitErr.ExitCode()), nil
-				}
-				return 1, fmt.Errorf("run failed: %w", err)
-			}
+		// The only indicator should be outstanding continuation count.
+		if !hEnv.HasOutstandingOps() {
+			fmt.Printf("HOST: guest done (no outstanding ops)\n")
+			break
 		}
 
-		return 0, nil
+		// If we have active host operations, we must wait for them.
+		if hEnv.HasLiveOps() {
+			hEnv.Poll(ctx, mod)
+		} else {
+			// No host ops, but guest is not done? This typically means
+			// the guest is stuck or we have a race.
+			// For now, let's keep running but maybe add a small yield to avoid 100% CPU
+			// if both sides are waiting for each other.
+			runtime.Gosched()
+		}
 	}
 
-	return 1, fmt.Errorf("module is not rusticated (missing 'env' imports)")
+	exitCode := 0
+	if len(res) > 0 {
+		exitCode = int(res[0])
+	}
+	return exitCode, nil
 }
 
 func tryRecoverFunctionName(err error, payload []byte) error {
