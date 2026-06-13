@@ -10,11 +10,11 @@ TEXT _rt0_wasm_wasip1(SB),NOSPLIT,$0
 	Return
 
 TEXT _rt0_wasm_wasip1_lib(SB),NOSPLIT,$0
-	I32Const $runtime-initialized(SB)
+	I32Const $runtime·initialized(SB)
 	I32Load $0
 	I32Eqz
 	If
-		I32Const $runtime-initialized(SB)
+		I32Const $runtime·initialized(SB)
 		I32Const $1
 		I32Store $0
 
@@ -25,9 +25,9 @@ TEXT _rt0_wasm_wasip1_lib(SB),NOSPLIT,$0
 		Drop
 		Call wasm_pc_f_loop(SB)
 	Else
-		Call runtime-handleContinuation(SB)
 		I32Const $0
-		Set PAUSE
+		Call runtime·handleContinuation(SB)
+		Drop
 		Call wasm_pc_f_loop(SB)
 	End
 
