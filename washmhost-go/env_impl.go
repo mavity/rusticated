@@ -586,12 +586,20 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 			dataCopy := make([]byte, lenBytes)
 			copy(dataCopy, buf)
 
+			// for stdout/stderr complete synchronously, better fit for TTY responsiveness
+			if handle == 1 || handle == 2 {
+				n, err := f.Write(dataCopy)
+				retCode := uint32(0)
+				if err != nil {
+					retCode = mapErrno(err)
+				}
+				writeOverlapped(m, ovPtr, retCode, 0, uint64(n))
+				return
+			}
+
 			state := h.RegisterOp(ovPtr, fAny)
 			go func() {
 				n, err := f.Write(dataCopy)
-				if handle == 1 || handle == 2 {
-					debugLog("HOST WRITE handle=%d data=%q", handle, string(dataCopy[:n]))
-				}
 				retCode := uint32(0)
 				if err != nil {
 					retCode = mapErrno(err)
