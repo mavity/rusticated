@@ -212,7 +212,7 @@ func renameInitializeToRun(wasmPath string) error {
 		pos = sectionEnd
 	}
 
-	return os.WriteFile(wasmPath, newData, 0644)
+	return os.WriteFile(wasmPath, newData, 0o644)
 }
 
 func readVarUint32(data []byte) (uint32, int, error) {
@@ -237,10 +237,9 @@ func encodeVarUint32(v uint32) []byte {
 		b := byte(v & 0x7F)
 		v >>= 7
 		if v != 0 {
-			b |= 0x80
-		}
-		res = append(res, b)
-		if v == 0 {
+			res = append(res, b|0x80)
+		} else {
+			res = append(res, b)
 			break
 		}
 	}
