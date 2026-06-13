@@ -549,17 +549,31 @@ fn main() {
             .find(|l| l.trim().starts_with("go "))
             .map(|l| l.trim().trim_start_matches("go ").trim())
         {
-            let go_cmd = format!("go{}", ver);
-            println!("     > attempting to resolve GOROOT for {}", go_cmd);
+            println!("     > attempting to resolve GOROOT for go{}", ver);
 
-            // Try running the specific go version command (e.g. go1.26.4)
-            if let Ok(out) = Command::new(&go_cmd).args(["env", "GOROOT"]).output() {
-                if out.status.success() {
-                    let path =
-                        PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
-                    if path.exists() {
-                        println!("     > using GOROOT from {}: {}", go_cmd, path.display());
-                        goroot = Some(path);
+            // First priority: check %HOME%/sdk/go{ver}
+            let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
+            if !home.is_empty() {
+                let sdk_path = PathBuf::from(&home).join("sdk").join(format!("go{}", ver));
+                if sdk_path.exists() {
+                    println!("     > found SDK in %HOME%/sdk: {}", sdk_path.display());
+                    goroot = Some(sdk_path);
+                }
+            }
+
+            if goroot.is_none() {
+                let go_cmd = format!("go{}", ver);
+                println!("     > attempting to resolve GOROOT for {}", go_cmd);
+
+                // Try running the specific go version command (e.g. go1.26.4)
+                if let Ok(out) = Command::new(&go_cmd).args(["env", "GOROOT"]).output() {
+                    if out.status.success() {
+                        let path =
+                            PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
+                        if path.exists() {
+                            println!("     > using GOROOT from {}: {}", go_cmd, path.display());
+                            goroot = Some(path);
+                        }
                     }
                 }
             }

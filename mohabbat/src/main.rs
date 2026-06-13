@@ -432,6 +432,29 @@ async fn build_go_project(project_dir: &str, workspace_root: &str) -> anyhow::Re
 
     let output_wasm = format!("{}/target/{}.wasm", workspace_root, project_name);
 
+    // Resolve GOROOT for the required Go version
+    let mut goroot = None;
+    let go_mod_path = format!("{}/mohabbat-go/go.mod", workspace_root);
+    if let Ok(content_bytes) = read_all(&go_mod_path).await {
+        if let Ok(content) = String::from_utf8(content_bytes) {
+            if let Some(ver) = content
+                .lines()
+                .find(|l| l.trim().starts_with("go "))
+                .map(|l| l.trim().trim_start_matches("go ").trim())
+            {
+                // check %HOME%/sdk/go{ver}
+                // (Note: std::env::var works in our custom wasm guest)
+                let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
+                if !home.is_empty() {
+                    let sdk_path = std::path::PathBuf::from(&home).join("sdk").join(format!("go{}", ver));
+                    // We don't have a good way to check existence of absolute path outside guest fs easily if it's restricted,
+                    // but we'll try to use it if we can.
+                    goroot = Some(sdk_path.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+    }
+
     let old_cwd =
         std::env::current_dir().map_err(|e| anyhow::anyhow!("Failed to get current dir: {}", e))?;
     std::env::set_current_dir(project_dir)
@@ -447,6 +470,10 @@ async fn build_go_project(project_dir: &str, workspace_root: &str) -> anyhow::Re
         .arg(".")
         .env("GOOS", "wasip1")
         .env("GOARCH", "wasm");
+
+    if let Some(gr) = goroot {
+        cmd.env("GOROOT", gr);
+    }
 
     let spawn_res = cmd.spawn().await;
 
