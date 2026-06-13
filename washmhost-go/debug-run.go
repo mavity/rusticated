@@ -57,7 +57,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	cmd := exec.Command("go", "build", "-overlay", overlayPath, "-o", outputWasm, ".")
+	cmd := exec.Command("go", "build", "-buildmode=c-shared", "-overlay", overlayPath, "-o", outputWasm, ".")
 	cmd.Dir = absProjectDir
 	cmd.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm")
 	cmd.Stdout = os.Stdout
@@ -65,6 +65,12 @@ func main() {
 
 	if err := cmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "\n!!! GO BUILD FAILED !!!\n%v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("🍆 Post-processing %s (rename _initialize -> run)\n", outputWasm)
+	if err := renameInitializeToRun(outputWasm); err != nil {
+		fmt.Fprintf(os.Stderr, "!!! WASM POST-PROCESS FAILED !!!\n%v\n", err)
 		os.Exit(1)
 	}
 
@@ -98,4 +104,116 @@ func main() {
 		fmt.Fprintf(os.Stderr, "washmhost-go execution failed: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func renameInitializeToRun(wasmPath string) error {
+	data, err := os.ReadFile(wasmPath)
+	if err != nil {
+		return err
+	}
+
+	if len(data) < 8 {
+		return fmt.Errorf("invalid wasm file")
+	}
+
+	pos := 8
+	var newData []byte
+	newData = append(newData, data[:8]...)
+
+	for pos < len(data) {
+		sectionID := data[pos]
+		pos++
+		size, n, err := readVarUint32(data[pos:])
+		if err != nil {
+			return err
+		}
+		pos += n
+		sectionEnd := pos + int(size)
+
+		if sectionID == 7 { // Export section
+			exportData := data[pos:sectionEnd]
+			count, n2, err := readVarUint32(exportData)
+			if err != nil {
+				return err
+			}
+			
+			var newExportSec []byte
+			newExportSec = append(newExportSec, encodeVarUint32(count)...)
+			
+			p := n2
+			found := false
+			for i := uint32(0); i < count; i++ {
+				nameLen, n3, err := readVarUint32(exportData[p:])
+				if err != nil {
+					return err
+				}
+				p += n3
+				name := string(exportData[p : p+int(nameLen)])
+				p += int(nameLen)
+				
+				kind := exportData[p]
+				p++
+				idx, n4, err := readVarUint32(exportData[p:])
+				if err != nil {
+					return err
+				}
+				p += n4
+
+				if name == "_initialize" {
+					name = "run"
+					found = true
+				}
+				
+				newExportSec = append(newExportSec, encodeVarUint32(uint32(len(name)))...)
+				newExportSec = append(newExportSec, name...)
+				newExportSec = append(newExportSec, kind)
+				newExportSec = append(newExportSec, encodeVarUint32(idx)...)
+			}
+
+			if found {
+				newData = append(newData, sectionID)
+				newData = append(newData, encodeVarUint32(uint32(len(newExportSec)))...)
+				newData = append(newData, newExportSec...)
+			} else {
+				newData = append(newData, data[pos-n-1:sectionEnd]...)
+			}
+		} else {
+			newData = append(newData, data[pos-n-1:sectionEnd]...)
+		}
+		pos = sectionEnd
+	}
+
+	return os.WriteFile(wasmPath, newData, 0644)
+}
+
+func readVarUint32(data []byte) (uint32, int, error) {
+	var res uint32
+	var shift uint
+	for i, b := range data {
+		res |= uint32(b&0x7F) << shift
+		if b&0x80 == 0 {
+			return res, i + 1, nil
+		}
+		shift += 7
+		if shift >= 32 {
+			break
+		}
+	}
+	return 0, 0, fmt.Errorf("invalid leb128")
+}
+
+func encodeVarUint32(v uint32) []byte {
+	var res []byte
+	for {
+		b := byte(v & 0x7F)
+		v >>= 7
+		if v != 0 {
+			b |= 0x80
+		}
+		res = append(res, b)
+		if v == 0 {
+			break
+		}
+	}
+	return res
 }
