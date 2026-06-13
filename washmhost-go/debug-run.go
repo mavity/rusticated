@@ -3,11 +3,13 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 func main() {
@@ -50,6 +52,30 @@ func main() {
 
 	fmt.Printf("🍆 Building Go package: %s -> %s\n", projectDir, outputWasm)
 
+	// Resolve GOROOT for the required Go version from mohabbat-go/go.mod
+	var goroot string
+	goModPath := filepath.Join(workspaceRoot, "mohabbat-go", "go.mod")
+	if f, err := os.Open(goModPath); err == nil {
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if strings.HasPrefix(line, "go ") {
+				ver := strings.TrimSpace(strings.TrimPrefix(line, "go "))
+				// check %HOME%/sdk/go{ver}
+				home, _ := os.UserHomeDir()
+				if home != "" {
+					sdkPath := filepath.Join(home, "sdk", "go"+ver)
+					if _, err := os.Stat(sdkPath); err == nil {
+						fmt.Printf("     > found SDK in %%HOME%%/sdk: %s\n", sdkPath)
+						goroot = sdkPath
+						break
+					}
+				}
+			}
+		}
+		f.Close()
+	}
+
 	// Normalize projectDir to absolute path to avoid confusion when changing CWD
 	absProjectDir, err := filepath.Abs(projectDir)
 	if err != nil {
@@ -60,6 +86,9 @@ func main() {
 	cmd := exec.Command("go", "build", "-buildmode=c-shared", "-overlay", overlayPath, "-o", outputWasm, ".")
 	cmd.Dir = absProjectDir
 	cmd.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm")
+	if goroot != "" {
+		cmd.Env = append(cmd.Env, "GOROOT="+goroot)
+	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
