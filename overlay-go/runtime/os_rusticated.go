@@ -170,8 +170,6 @@ var initialized uint32
 // handleContinuation is called by the assembly entry point on re-entry (continuation)
 // after one or moree I/O completions have been written into guest Overlapped memory.
 // It processes completions and marks waiting goroutines as ready.
-//
-//go:nosplit
 func handleContinuation() {
 
 	// Process any completions
@@ -182,6 +180,9 @@ func handleContinuation() {
 			goready((*g)(unsafe.Pointer(ctx.gp)), 0)
 		}
 	}
+
+	// yield back to host
+	pause(sys.GetCallerPC() - 16)
 }
 
 func usleep(usec uint32) {}
