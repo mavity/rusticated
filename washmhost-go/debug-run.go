@@ -52,8 +52,8 @@ func main() {
 
 	fmt.Printf("🍆 Building Go package: %s -> %s\n", projectDir, outputWasm)
 
-	// Resolve GOROOT for the required Go version from mohabbat-go/go.mod
-	var goroot string
+	// Resolve specific Go binary for the required version from mohabbat-go/go.mod
+	goBin := "go"
 	goModPath := filepath.Join(workspaceRoot, "mohabbat-go", "go.mod")
 	if f, err := os.Open(goModPath); err == nil {
 		scanner := bufio.NewScanner(f)
@@ -61,13 +61,16 @@ func main() {
 			line := strings.TrimSpace(scanner.Text())
 			if strings.HasPrefix(line, "go ") {
 				ver := strings.TrimSpace(strings.TrimPrefix(line, "go "))
-				// check %HOME%/sdk/go{ver}
+				// check %HOME%/sdk/go{ver}/bin/go
 				home, _ := os.UserHomeDir()
 				if home != "" {
-					sdkPath := filepath.Join(home, "sdk", "go"+ver)
-					if _, err := os.Stat(sdkPath); err == nil {
-						fmt.Printf("     > found SDK in %%HOME%%/sdk: %s\n", sdkPath)
-						goroot = sdkPath
+					sdkBin := filepath.Join(home, "sdk", "go"+ver, "bin", "go")
+					if runtime.GOOS == "windows" {
+						sdkBin += ".exe"
+					}
+					if _, err := os.Stat(sdkBin); err == nil {
+						fmt.Printf("     > using Go binary from %%HOME%%/sdk: %s\n", sdkBin)
+						goBin = sdkBin
 						break
 					}
 				}
@@ -83,12 +86,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	cmd := exec.Command("go", "build", "-buildmode=c-shared", "-overlay", overlayPath, "-o", outputWasm, ".")
+	cmd := exec.Command(goBin, "build", "-buildmode=c-shared", "-overlay", overlayPath, "-o", outputWasm, ".")
 	cmd.Dir = absProjectDir
 	cmd.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm")
-	if goroot != "" {
-		cmd.Env = append(cmd.Env, "GOROOT="+goroot)
-	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 

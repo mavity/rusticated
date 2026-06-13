@@ -432,8 +432,8 @@ async fn build_go_project(project_dir: &str, workspace_root: &str) -> anyhow::Re
 
     let output_wasm = format!("{}/target/{}.wasm", workspace_root, project_name);
 
-    // Resolve GOROOT for the required Go version
-    let mut goroot = None;
+    // Resolve specific Go binary for the required version
+    let mut go_bin = "go".to_string();
     let go_mod_path = format!("{}/mohabbat-go/go.mod", workspace_root);
     if let Ok(content_bytes) = read_all(&go_mod_path).await {
         if let Ok(content) = String::from_utf8(content_bytes) {
@@ -442,14 +442,12 @@ async fn build_go_project(project_dir: &str, workspace_root: &str) -> anyhow::Re
                 .find(|l| l.trim().starts_with("go "))
                 .map(|l| l.trim().trim_start_matches("go ").trim())
             {
-                // check %HOME%/sdk/go{ver}
-                // (Note: std::env::var works in our custom wasm guest)
+                // check %HOME%/sdk/go{ver}/bin/go
                 let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
                 if !home.is_empty() {
-                    let sdk_path = std::path::PathBuf::from(&home).join("sdk").join(format!("go{}", ver));
-                    // We don't have a good way to check existence of absolute path outside guest fs easily if it's restricted,
-                    // but we'll try to use it if we can.
-                    goroot = Some(sdk_path.to_string_lossy().replace('\\', "/"));
+                    let sdk_bin = std::path::PathBuf::from(&home).join("sdk").join(format!("go{}", ver)).join("bin").join("go");
+                    // We'll use this path if it's set; the guest will try to execute it.
+                    go_bin = sdk_bin.to_string_lossy().replace('\\', "/");
                 }
             }
         }
@@ -460,7 +458,7 @@ async fn build_go_project(project_dir: &str, workspace_root: &str) -> anyhow::Re
     std::env::set_current_dir(project_dir)
         .map_err(|e| anyhow::anyhow!("Failed to set current dir to {}: {}", project_dir, e))?;
 
-    let mut cmd = std::process::Command::new("go");
+    let mut cmd = std::process::Command::new(go_bin);
     cmd.arg("build")
         .arg("-buildmode=c-shared")
         .arg("-overlay")
@@ -470,10 +468,6 @@ async fn build_go_project(project_dir: &str, workspace_root: &str) -> anyhow::Re
         .arg(".")
         .env("GOOS", "wasip1")
         .env("GOARCH", "wasm");
-
-    if let Some(gr) = goroot {
-        cmd.env("GOROOT", gr);
-    }
 
     let spawn_res = cmd.spawn().await;
 
