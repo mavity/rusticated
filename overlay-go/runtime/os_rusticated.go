@@ -167,17 +167,12 @@ func rt0_init()
 
 var initialized uint32
 
-// run is called by the rusticated host (washmhost) after one or more I/O
-// completions have been written into guest Overlapped memory. It re-enters
-// wasm_pc_f_loop, resuming any goroutines that were waiting on pause().
+// handleContinuation is called by the assembly entry point on re-entry (continuation)
+// after one or moree I/O completions have been written into guest Overlapped memory.
+// It processes completions and marks waiting goroutines as ready.
 //
-//go:wasmexport run
-func run() {
-	if initialized == 0 {
-		initialized = 1
-		rt0_init()
-		return
-	}
+//go:nosplit
+func handleContinuation() {
 
 	// Process any completions
 	for i := range pendingov {
