@@ -439,6 +439,7 @@ async fn build_go_project(project_dir: &str, workspace_root: &str) -> anyhow::Re
 
     let mut cmd = std::process::Command::new("go");
     cmd.arg("build")
+        .arg("-buildmode=c-shared")
         .arg("-overlay")
         .arg(overlay_path.as_str())
         .arg("-o")
@@ -464,6 +465,57 @@ async fn build_go_project(project_dir: &str, workspace_root: &str) -> anyhow::Re
             "go build failed (exit code {:?})",
             status.code()
         ));
+    }
+
+    out_print(&format!(
+        "🍆 Post-processing {} (rename _initialize -> run)\n",
+        output_wasm
+    ))
+    .await;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let data = std::fs::read(&output_wasm)?;
+        let mut module = wasm_encoder::Module::new();
+        for section in wasmparser::Parser::new(0).parse_all(&data) {
+            let section = section?;
+            match section {
+                wasmparser::Payload::ExportSection(reader) => {
+                    let mut exports = wasm_encoder::ExportSection::new();
+                    for export in reader {
+                        let export = export?;
+                        let name = if export.name == "_initialize" {
+                            "run"
+                        } else {
+                            export.name
+                        };
+                        let kind = match export.kind {
+                            wasmparser::ExternalKind::Func => wasm_encoder::ExportKind::Func,
+                            wasmparser::ExternalKind::Table => wasm_encoder::ExportKind::Table,
+                            wasmparser::ExternalKind::Memory => wasm_encoder::ExportKind::Memory,
+                            wasmparser::ExternalKind::Global => wasm_encoder::ExportKind::Global,
+                            wasmparser::ExternalKind::Tag => wasm_encoder::ExportKind::Tag,
+                        };
+                        exports.export(name, kind, export.index);
+                    }
+                    module.section(&exports);
+                }
+                wasmparser::Payload::CustomSection(c) => {
+                    module.section(&wasm_encoder::CustomSection {
+                        name: c.name().into(),
+                        data: c.data().into(),
+                    });
+                }
+                _ => {
+                    if let Some((id, range)) = section.as_section() {
+                        module.section(&wasm_encoder::RawSection {
+                            id,
+                            data: &data[range],
+                        });
+                    }
+                }
+            }
+        }
+        std::fs::write(&output_wasm, module.finish())?;
     }
 
     Ok(output_wasm)

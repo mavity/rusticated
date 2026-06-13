@@ -551,11 +551,12 @@ fn main() {
         {
             let go_cmd = format!("go{}", ver);
             println!("     > attempting to resolve GOROOT for {}", go_cmd);
-            
+
             // Try running the specific go version command (e.g. go1.26.4)
             if let Ok(out) = Command::new(&go_cmd).args(["env", "GOROOT"]).output() {
                 if out.status.success() {
-                    let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
+                    let path =
+                        PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
                     if path.exists() {
                         println!("     > using GOROOT from {}: {}", go_cmd, path.display());
                         goroot = Some(path);
@@ -566,16 +567,22 @@ fn main() {
             // If that didn't work, try running 'go env GOROOT' FROM INSIDE mohabbat-go/
             // Go 1.21+ toolchain management might pick up the version from go.mod correctly.
             if goroot.is_none() {
-                println!("     > attempting to resolve GOROOT by running 'go env GOROOT' inside mohabbat-go/");
+                println!(
+                    "     > attempting to resolve GOROOT by running 'go env GOROOT' inside mohabbat-go/"
+                );
                 if let Ok(out) = Command::new("go")
                     .args(["env", "GOROOT"])
                     .current_dir("mohabbat-go")
                     .output()
                 {
                     if out.status.success() {
-                        let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
+                        let path =
+                            PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
                         if path.exists() {
-                            println!("     > using GOROOT from 'go' inside mohabbat-go/: {}", path.display());
+                            println!(
+                                "     > using GOROOT from 'go' inside mohabbat-go/: {}",
+                                path.display()
+                            );
                             goroot = Some(path);
                         }
                     }
@@ -602,10 +609,6 @@ fn main() {
 
     // Generate the Go build overlay that maps WASI source files to our
     // rusticated replacements, enabling `go build -overlay target/overlay.json`.
-    //
-    // Note: The linker (asm.go) is manufactured on the fly to stay compatible
-    // with different Go versions. We modify the official source to suppress
-    // the _start export and add custom entry points.
     generate_go_overlay(&goroot, &target_dir).expect("Failed to generate Go overlay");
 
     println!("Done. Run `cargo build -p demo`.");
@@ -615,30 +618,6 @@ fn generate_go_overlay(goroot: &PathBuf, target_dir: &PathBuf) -> std::io::Resul
     // Resolve repo root as the current working directory when prebuild runs.
     let repo_root = std::env::current_dir()?;
     let overlay_dir = repo_root.join("overlay-go");
-
-    // Manufacture a modified asm.go for the custom linker on the fly.
-    let asm_go_src = goroot.join("src/cmd/link/internal/wasm/asm.go");
-    let mut asm_go_content = fs::read_to_string(&asm_go_src)?;
-
-    // 1. Strictly replace _start with run for the wasip1 entry point.
-    asm_go_content = asm_go_content.replace("entryExpName = \"_start\"", "entryExpName = \"run\"");
-
-    let asm_go_dst = target_dir.join("asm_rusticated.go");
-    
-    // Robustness check: compare exact byte-to-byte content before updating.
-    let mut update_needed = true;
-    if let Ok(existing) = fs::read(&asm_go_dst) {
-        if existing == asm_go_content.as_bytes() {
-            update_needed = false;
-        }
-    }
-
-    if update_needed {
-        fs::write(&asm_go_dst, &asm_go_content)?;
-        println!("generated {} (updated)", asm_go_dst.display());
-    } else {
-        println!("{} is up to date, skipping write", asm_go_dst.display());
-    }
 
     // Helper to canonicalize a path, stripping Windows \\?\ prefix.
     let canon = |p: PathBuf| -> String {
@@ -668,8 +647,6 @@ fn generate_go_overlay(goroot: &PathBuf, target_dir: &PathBuf) -> std::io::Resul
             "src/runtime/stubs_wasm.go",
             canon(overlay_dir.join("runtime/stubs_rusticated.go")),
         ),
-        // Linker (generated on the fly)
-        ("src/cmd/link/internal/wasm/asm.go", canon(asm_go_dst)),
         // Syscall
         (
             "src/syscall/fs_wasip1.go",

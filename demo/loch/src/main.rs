@@ -61,7 +61,6 @@ async fn async_main() {
     let mut app = App::new().await;
     println!(" OK");
 
-
     print!("Initial draw...");
     // Initial draw
     terminal.draw(|f| draw_ui(f, &mut app)).unwrap();
