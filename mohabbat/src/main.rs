@@ -443,9 +443,15 @@ async fn build_go_project(project_dir: &str, workspace_root: &str) -> anyhow::Re
                 .map(|l| l.trim().trim_start_matches("go ").trim())
             {
                 // check %HOME%/sdk/go{ver}/bin/go
-                let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
+                let home = std::env::var("USERPROFILE")
+                    .or_else(|_| std::env::var("HOME"))
+                    .unwrap_or_default();
                 if !home.is_empty() {
-                    let sdk_bin = std::path::PathBuf::from(&home).join("sdk").join(format!("go{}", ver)).join("bin").join("go");
+                    let sdk_bin = std::path::PathBuf::from(&home)
+                        .join("sdk")
+                        .join(format!("go{}", ver))
+                        .join("bin")
+                        .join("go");
                     // We'll use this path if it's set; the guest will try to execute it.
                     go_bin = sdk_bin.to_string_lossy().replace('\\', "/");
                 }
