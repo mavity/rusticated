@@ -542,7 +542,6 @@ fn main() {
     // Resolve GOROOT dynamically, preferring the version specified in mohabbat-go/go.mod
     let go_mod_path = PathBuf::from("mohabbat-go/go.mod");
     let mut goroot = None;
-    let mut go_bin = "go".to_string();
 
     if let Ok(content) = fs::read_to_string(&go_mod_path) {
         if let Some(ver) = content
@@ -553,15 +552,13 @@ fn main() {
             println!("     > attempting to resolve GOROOT for go{}", ver);
 
             // First priority: check %HOME%/sdk/go{ver}
-            let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
+            let home = std::env::var("USERPROFILE")
+                .or_else(|_| std::env::var("HOME"))
+                .unwrap_or_default();
             if !home.is_empty() {
                 let sdk_path = PathBuf::from(&home).join("sdk").join(format!("go{}", ver));
                 if sdk_path.exists() {
                     println!("     > found SDK in %HOME%/sdk: {}", sdk_path.display());
-                    let bin_path = sdk_path.join("bin").join(if cfg!(windows) { "go.exe" } else { "go" });
-                    if bin_path.exists() {
-                        go_bin = bin_path.to_string_lossy().to_string();
-                    }
                     goroot = Some(sdk_path);
                 }
             }
@@ -577,7 +574,6 @@ fn main() {
                             PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
                         if path.exists() {
                             println!("     > using GOROOT from {}: {}", go_cmd, path.display());
-                            go_bin = go_cmd;
                             goroot = Some(path);
                         }
                     }
