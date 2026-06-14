@@ -61,21 +61,6 @@ func (h *HostEnv) sys_timer_set(ctx context.Context, m api.Module, stack []uint6
 	h.mu.Unlock()
 }
 
-func (h *HostEnv) sys_timer_cancel(ctx context.Context, m api.Module, stack []uint64) {
-	ovPtr := uint32(stack[0])
-
-	h.mu.Lock()
-	timer, ok := h.timers[ovPtr]
-	if ok {
-		timer.Stop()
-		delete(h.timers, ovPtr)
-		h.mu.Unlock()
-		h.CancelOp(ovPtr)
-		return
-	}
-	h.mu.Unlock()
-}
-
 func (h *HostEnv) sys_cancel(ctx context.Context, m api.Module, stack []uint64) {
 	ovPtr := uint32(stack[0])
 	h.CancelOp(ovPtr)
