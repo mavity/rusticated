@@ -108,7 +108,7 @@ async function run() {
         hostState.timers.set(ovPtr, id);
       },
 
-      timer_cancel: (ovPtr) => {
+      cancel: (ovPtr) => {
         const id = hostState.timers.get(ovPtr);
         if (id !== undefined) {
           clearTimeout(id);

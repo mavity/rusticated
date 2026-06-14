@@ -49,7 +49,6 @@ Each of the ABI functions should have at least 2-5 unit tests, and the internal 
 | `sys_get_time` | `(ctx context.Context, apiMod api.Module, stack []uint64)` | Wall-clock time retrieval. | env_os.go | **Yes** | **Yes (2-5 tests)** |
 | `sys_get_random` | `(ctx context.Context, m api.Module, stack []uint64)` | Secure random hydration. | env_os.go | **Yes** | **Yes (2-5 tests)** |
 | `sys_timer_set` | `(ctx context.Context, m api.Module, stack []uint64)` | Async timer setup. | env_os.go | **Yes** | **Yes (2-5 tests)** |
-| `sys_timer_cancel` | `(ctx context.Context, m api.Module, stack []uint64)` | Timer abortion. | env_os.go | **Yes** | **Yes (2-5 tests)** |
 | `sys_panic` | `(ctx context.Context, m api.Module, stack []uint64)` | Immediate guest abort. | env_os.go | **Yes** | **Yes (2-5 tests)** |
 | `sys_process_spawn` | `(ctx context.Context, m api.Module, stack []uint64)` | Child process execution. | env_proc.go | **Yes** | **Yes (2-5 tests)** |
 | `sys_process_wait` | `(ctx context.Context, m api.Module, stack []uint64)` | Waiting for process exit. | env_proc.go | **Yes** | **Yes (2-5 tests)** |
