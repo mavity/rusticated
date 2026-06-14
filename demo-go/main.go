@@ -11,11 +11,7 @@ import (
 	_ "unsafe"
 )
 
-//go:linkname rusticated_entry runtime.rusticated_entry
-func rusticated_entry()
-
 func main() {
-	rusticated_entry()
 	// ── 1. Environment Diagnostics ─────────────────────────────────────────
 	cwd, err := os.Getwd()
 	if err != nil {
