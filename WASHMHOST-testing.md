@@ -17,9 +17,82 @@ Make sure unit tests are fully isolated. The standard Go unit tests conventions 
 
 ### Unit tests expected (approximate list)
 
-- list
-- goes
-- here
+Read [](file:///c%3A/Users/mihai/rustic/WASHMHOST-testing.md#1-1), lines 1 to 100
+
+Read [](file:///c%3A/Users/mihai/rustic/washmhost-go/env_fs.go#100-100), lines 100 to 300
+
+Read [](file:///c%3A/Users/mihai/rustic/washmhost-go/env_fs.go#301-301), lines 301 to 500
+
+Read [](file:///c%3A/Users/mihai/rustic/washmhost-go/env_impl.go#101-101), lines 101 to 274
+
+Read [](file:///c%3A/Users/mihai/rustic/washmhost-go/env_os.go#101-101), lines 101 to 143
+
+Read [](file:///c%3A/Users/mihai/rustic/washmhost-go/env_proc.go#101-101), lines 101 to 300
+
+Read [](file:///c%3A/Users/mihai/rustic/washmhost-go/env_proc.go#291-291), lines 291 to 300
+
+Read [](file:///c%3A/Users/mihai/rustic/washmhost-go/env_proc.go#301-301), lines 301 to 313
+
+Read [](file:///c%3A/Users/mihai/rustic/washmhost-go/env_os.go#1-1), lines 1 to 100
+
+Read [](file:///c%3A/Users/mihai/rustic/washmhost-go/env_os.go#13-13), lines 13 to 20
+
+Read [](file:///c%3A/Users/mihai/rustic/washmhost-go/env_os.go#1-1), lines 1 to 30
+
+Read [](file:///c%3A/Users/mihai/rustic/washmhost-go/env_proc.go#1-1), lines 1 to 100
+
+| Function Name | Signature | Description | Defined In | ABI | Unit Test Target |
+| :--- | :--- | :--- | :--- | :---: | :---: |
+| `createAbiStat` | `(fi os.FileInfo) AbiStat` | Converts OS file info to guest `AbiStat`. | env_fs.go | No | **Yes (1-7 tests)** |
+| `marshalAbiStat` | `(stat AbiStat) []byte` | Serializes `AbiStat` to little-endian bytes. | env_fs.go | No | **Yes (1-7 tests)** |
+| `sys_read` | `(ctx context.Context, m api.Module, stack []uint64)` | Asynchronous file/handle read. | env_fs.go | **Yes** | **Yes (2-5 tests)** |
+| `sys_write` | `(ctx context.Context, m api.Module, stack []uint64)` | Asynchronous file/handle write. | env_fs.go | **Yes** | **Yes (2-5 tests)** |
+| `sys_handle_close` | `(ctx context.Context, m api.Module, stack []uint64)` | Closes a registered handle. | env_fs.go | **Yes** | **Yes (2-5 tests)** |
+| `sys_path_open` | `(ctx context.Context, m api.Module, stack []uint64)` | Asynchronous file/directory open. | env_fs.go | **Yes** | **Yes (2-5 tests)** |
+| `sys_dir_read` | `(ctx context.Context, m api.Module, stack []uint64)` | Asynchronous directory enumeration. | env_fs.go | **Yes** | **Yes (2-5 tests)** |
+| `sys_path_stat` | `(ctx context.Context, m api.Module, stack []uint64)` | Asynchronous metadata retrieval. | env_fs.go | **Yes** | **Yes (2-5 tests)** |
+| `sys_path_chmod` | `(ctx context.Context, m api.Module, stack []uint64)` | Synchronous permission update. | env_fs.go | **Yes** | **Yes (2-5 tests)** |
+| `sys_get_cwd` | `(ctx context.Context, m api.Module, stack []uint64)` | Retrieves working directory. | env_fs.go | **Yes** | **Yes (2-5 tests)** |
+| `sys_set_cwd` | `(ctx context.Context, m api.Module, stack []uint64)` | Updates working directory. | env_fs.go | **Yes** | **Yes (2-5 tests)** |
+| `NewHostEnv` | `() *HostEnv` | Constructor and signal multiplexer. | env_impl.go | No | **Yes (1-7 tests)** |
+| `IncOps` | `()` | Increment operation counter. | env_impl.go | No | No |
+| `RegisterOp` | `(ovPtr uint32, handle interface{}) *OpState` | Register async operation. | env_impl.go | No | **Yes (1-7 tests)** |
+| `registerOpLocked` | `(ovPtr uint32, handle interface{}) *OpState` | Mutex-locked internal registration. | env_impl.go | No | No |
+| `IsOpActive` | `(ovPtr uint32, id uint64) bool` | Thread-safe operation validity check. | env_impl.go | No | **Yes (1-7 tests)** |
+| `isOpActiveLocked` | `(ovPtr uint32, id uint64) bool` | Internal mutex-locked check. | env_impl.go | No | No |
+| `DecOps` | `()` | Decrement counter using CAS loop. | env_impl.go | No | **Yes (1-7 tests)** |
+| `PendingOps` | `() int32` | Returns active job count. | env_impl.go | No | No |
+| `HasOutstandingOps` | `() bool` | Boolean check for outstanding jobs. | env_impl.go | No | No |
+| `HasLiveOps` | `() bool` | Verification of uncancelled jobs. | env_impl.go | No | No |
+| `CancelOp` | `(ovPtr uint32)` | Abortion of pending operations. | env_impl.go | No | **Yes (1-7 tests)** |
+| `Register` | `(ctx context.Context, r wazero.Runtime) error` | Wazero host function registration. | env_impl.go | No | No |
+| `Poll` | `(ctx context.Context, mod api.Module) bool` | The proactor drive loop. | env_impl.go | No | **Yes (1-7 tests)** |
+| `sys_time_now` | `(ctx context.Context, m api.Module, stack []uint64)` | Timestamp retrieval. | env_os.go | **Yes** | **Yes (2-5 tests)** |
+| `sys_get_time` | `(ctx context.Context, apiMod api.Module, stack []uint64)` | Wall-clock time retrieval. | env_os.go | **Yes** | **Yes (2-5 tests)** |
+| `sys_get_random` | `(ctx context.Context, m api.Module, stack []uint64)` | Secure random hydration. | env_os.go | **Yes** | **Yes (2-5 tests)** |
+| `sys_yield` | `(ctx context.Context, m api.Module, stack []uint64)` | Voluntary preemption. | env_os.go | **Yes** | **Yes (2-5 tests)** |
+| `sys_pause` | `(ctx context.Context, m api.Module, stack []uint64)` | Parking logic. | env_os.go | **Yes** | **Yes (2-5 tests)** |
+| `sys_timer_set` | `(ctx context.Context, m api.Module, stack []uint64)` | Async timer setup. | env_os.go | **Yes** | **Yes (2-5 tests)** |
+| `sys_timer_cancel` | `(ctx context.Context, m api.Module, stack []uint64)` | Timer abortion. | env_os.go | **Yes** | **Yes (2-5 tests)** |
+| `sys_panic` | `(ctx context.Context, m api.Module, stack []uint64)` | Immediate guest abort. | env_os.go | **Yes** | **Yes (2-5 tests)** |
+| `sys_process_spawn` | `(ctx context.Context, m api.Module, stack []uint64)` | Child process execution. | env_proc.go | **Yes** | **Yes (2-5 tests)** |
+| `sys_process_wait` | `(ctx context.Context, m api.Module, stack []uint64)` | Waiting for process exit. | env_proc.go | **Yes** | **Yes (2-5 tests)** |
+| `sys_process_signal` | `(ctx context.Context, m api.Module, stack []uint64)` | Signals child processes. | env_proc.go | **Yes** | **Yes (2-5 tests)** |
+| `sys_signal_wait` | `(ctx context.Context, m api.Module, stack []uint64)` | Parking until host signal. | env_proc.go | **Yes** | **Yes (2-5 tests)** |
+| `sys_cancel` | `(ctx context.Context, m api.Module, stack []uint64)` | Entry for `CancelOp`. | env_os.go | **Yes** | **Yes (2-5 tests)** |
+| `sys_process_exit` | `(ctx context.Context, m api.Module, stack []uint64)` | Instance termination. | env_proc.go | **Yes** | **Yes (2-5 tests)** |
+| `sys_net_open` | `(ctx context.Context, m api.Module, stack []uint64)` | Async TCP dial/listen. | env_net.go | **Yes** | **Yes (2-5 tests)** |
+| `sys_net_accept` | `(ctx context.Context, m api.Module, stack []uint64)` | Async TCP accept. | env_net.go | **Yes** | **Yes (2-5 tests)** |
+| `mapErrno` | `(err error) uint32` | Translation table. | env_utils.go | No | **Yes (1-7 tests)** |
+| `resolveUsableCwd` | `() (string, error)` | Fallback project root logic. | env_utils.go | No | **Yes (1-7 tests)** |
+| `debugLog` | `(format string, args ...interface{})` | Atomic debug logger. | env_utils.go | No | No |
+| `writeOverlapped` | `(mod api.Module, ovP uint32, err uint32, c uint64, r uint64)` | Completion signaling utility. | env_utils.go | No | **Yes (1-7 tests)** |
+| `ensurePosixOutputRunnable` | `(args []string)` | Set `+x` flags utility. | main.go | No | No |
+| `main` | `()` | Binary entry point. | main.go | No | No |
+| `RunWasm` | `(ctx context.Context, payload []byte, args []string) (int, error)` | Runtime lifecycle drive. | runtime.go | No | **Yes (1-7 tests)** |
+| `tryRecoverFunctionName` | `(err error, payload []byte) error` | Error enhancer logic. | runtime.go | No | **Yes (1-7 tests)** |
+| `findFunctionNameInWasm` | `(payload []byte, targetIdx uint32) (string, bool)` | Hand-written section parser. | runtime.go | No | **Yes (1-7 tests)** |
+| `readVarUint32` | `(r io.Reader) (uint32, int, error)` | LEB128 decoder utility. | runtime.go | No | **Yes (1-7 tests)** |
 
 ## Tier 2: Behavioral Contract Testing
 
