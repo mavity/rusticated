@@ -46,6 +46,11 @@ var pendingov [1024]*overlappedContext
 
 //go:linkname awaitOverlapped_syscall syscall.awaitOverlapped
 func awaitOverlapped_syscall(ctx *overlappedContext) {
+	if ctx.o.flags&1 != 0 {
+		// Already completed, no need to wait.
+		return
+	}
+
 	ctx.gp = uintptr(unsafe.Pointer(getg()))
 
 	// Add to pending list
@@ -64,15 +69,27 @@ func awaitOverlapped_syscall(ctx *overlappedContext) {
 	gopark(parkunlock_rusticated, nil, waitReasonIOWait, traceBlockGeneric, 1)
 }
 
+// go:linkname cancelOverlapped_syscall syscall.cancelOverlapped
+func cancelOverlapped_syscall(ctx *overlappedContext) {
+	// Remove from pending list
+	rusticated_cancel(unsafe.Pointer(&ctx.o))
+}
+
 func parkunlock_rusticated(gp *g, _ unsafe.Pointer) bool {
-	// After the G is parked, we must trigger the pause to return to host.
-	// We use the stack pointer of the g0 which is currently running the scheduler.
-	pause(sys.GetCallerSP() - 16)
+	// Confirm the part. Do NOT call pause here - let the scheduler fall through
+	// to findRunnable->beforeIdle, which starts a goroutine that pauses with
+	// the M's P held, ensuring handleContinuation->goready works
 	return true
 }
 
 //go:wasmimport env process_exit
 func exit(code int32)
+
+//go:wasmimport env cancel
+func rusticated_cancel(overlappedPtr unsafe.Pointer)
+
+//go:wasmimport env timer_set
+func rusticated_timer_set(overlappedPtr unsafe.Pointer, delayMs uint32)
 
 //go:wasmimport env get_time
 func rusticated_get_time() uint64
@@ -183,8 +200,29 @@ func handleContinuation() {
 		}
 	}
 
-	// yield back to host
-	pause(sys.GetCallerPC() - 16)
+	// Return normally so the assembly entry point falls through
+	// to wasm_pc_f_loop, which runs the scheduler and lets unparked
+	// goroutines run.
 }
 
 func usleep(usec uint32) {}
+
+// This is a goroutine that yields to the hjost by calling pause.
+// Started by beforeIdle when the scheduler has no runnable goroutines.
+func handleAsyncEvent() {
+	pause(sys.GetCallerSP() - 16)
+}
+
+func setNetpollTimer(delayMs uint32) {
+	if netpollTimerActive {
+		if netpollTimerOv.flags&1 == 0 {
+			netpollTimerOv.flags = 0
+		} else {
+			rusticated_cancel(unsafe.Pointer(&netpollTimerOv))
+		}
+	}
+
+	netpollTimerOv.flags = 0
+	rusticated_timer_set(unsafe.Pointer(&netpollTimerOv), delayMs)
+	netpollTimerActive = true
+}

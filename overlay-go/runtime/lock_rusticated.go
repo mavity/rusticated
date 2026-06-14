@@ -89,6 +89,20 @@ func notetsleepg(n *note, ns int64) bool {
 
 //go:yeswritebarrierrec
 func beforeIdle(now, pollUntil int64) (gp *g, otherReady bool) {
+	if pollUntil != 0 {
+		delay := pollUntil - now - 1
+		if delay < 1 {
+			delay = 1
+		}
+		if delay > 1e9 {
+			delay = 1e9
+		}
+
+		setNetpollTimer(uint32(delay))
+
+		go handleAsyncEvent()
+		return nil, true
+	}
 	return nil, false
 }
 
