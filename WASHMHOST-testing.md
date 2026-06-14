@@ -57,6 +57,8 @@ Each of the ABI functions should have at least 2-5 unit tests, and the internal 
 | `sys_process_wait` | `(ctx context.Context, m api.Module, stack []uint64)` | Waiting for process exit. | env_proc.go | **Yes** | **Yes (2-5 tests)** |
 | `sys_process_signal` | `(ctx context.Context, m api.Module, stack []uint64)` | Signals child processes. | env_proc.go | **Yes** | **Yes (2-5 tests)** |
 | `sys_signal_wait` | `(ctx context.Context, m api.Module, stack []uint64)` | Parking until host signal. | env_proc.go | **Yes** | **Yes (2-5 tests)** |
+| `sys_get_args` | `(ctx context.Context, m api.Module, stack []uint64)` | Retrieves command line arguments. | env_proc.go | **Yes** | **Yes (2-5 tests)** |
+| `sys_get_env` | `(ctx context.Context, m api.Module, stack []uint64)` | Retrieves environment variables. | env_proc.go | **Yes** | **Yes (2-5 tests)** |
 | `sys_cancel` | `(ctx context.Context, m api.Module, stack []uint64)` | Entry for `CancelOp`. | env_os.go | **Yes** | **Yes (2-5 tests)** |
 | `sys_process_exit` | `(ctx context.Context, m api.Module, stack []uint64)` | Instance termination. | env_proc.go | **Yes** | **Yes (2-5 tests)** |
 | `sys_net_open` | `(ctx context.Context, m api.Module, stack []uint64)` | Async TCP dial/listen. | env_net.go | **Yes** | **Yes (2-5 tests)** |
