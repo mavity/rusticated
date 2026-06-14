@@ -155,6 +155,7 @@ func TestSysDirReadExtended(t *testing.T) {
 
 	t.Run("7. EBADF - invalid handle", func(t *testing.T) {
 		env.sys_dir_read(context.Background(), mod, []uint64{200, 99999, 400, 100})
+		runOp()
 		buf, _ := mem.Read(200, 8)
 		if binary.LittleEndian.Uint32(buf[4:8]) != 9 {
 			t.Error("EBADF error mismatch")
@@ -184,6 +185,7 @@ func TestSysDirReadExtended(t *testing.T) {
 	t.Run("9. EINVAL - invalid pointer", func(t *testing.T) {
 		h, _ := setupDir(t, []string{"a"})
 		env.sys_dir_read(context.Background(), mod, []uint64{200, h, 2000000, 100})
+		runOp()
 		buf, _ := mem.Read(200, 8)
 		if binary.LittleEndian.Uint32(buf[4:8]) != 22 {
 			t.Error("EINVAL expected for bad pointer")
@@ -193,6 +195,7 @@ func TestSysDirReadExtended(t *testing.T) {
 	t.Run("10. EINVAL - invalid length", func(t *testing.T) {
 		h, _ := setupDir(t, []string{"a"})
 		env.sys_dir_read(context.Background(), mod, []uint64{200, h, 400, 2000000})
+		runOp()
 		buf, _ := mem.Read(200, 8)
 		if binary.LittleEndian.Uint32(buf[4:8]) != 22 {
 			t.Error("EINVAL expected for bad length")
@@ -231,6 +234,7 @@ func TestSysDirReadExtended(t *testing.T) {
 		env.mu.Unlock()
 
 		env.sys_dir_read(context.Background(), mod, []uint64{300, h, 500, 2})
+		runOp()
 		buf, _ := mem.Read(300, 8)
 		if binary.LittleEndian.Uint32(buf[4:8]) != 9 {
 			t.Error("expected EBADF for hijacked handle")
@@ -354,6 +358,7 @@ func TestSysDirReadExtended(t *testing.T) {
 		h, _ := setupDir(t, []string{"a"})
 		stack := []uint64{200, h, 400, 0xFFFFFFFF}
 		env.sys_dir_read(context.Background(), mod, stack)
+		runOp()
 		buf, _ := mem.Read(200, 8)
 		if binary.LittleEndian.Uint32(buf[4:8]) != 22 {
 			t.Error("should return EINVAL for huge length")
@@ -408,6 +413,7 @@ func TestSysDirReadExtended(t *testing.T) {
 		env.mu.Unlock()
 		f.Close()
 		env.sys_dir_read(context.Background(), mod, []uint64{200, h, 400, 10})
+		runOp()
 		buf, _ := mem.Read(200, 8)
 		if binary.LittleEndian.Uint32(buf[4:8]) != 9 {
 			t.Error("should return EBADF")

@@ -39,9 +39,12 @@ func (h *HostEnv) sys_timer_set(ctx context.Context, m api.Module, stack []uint6
 	if old, exists := h.timers[ovPtr]; exists {
 		old.Stop()
 		delete(h.timers, ovPtr)
-		h.mu.Unlock()
-		h.DecOps()
-		h.mu.Lock()
+		if state, ok := h.activeOps[ovPtr]; ok && !state.isCancelled {
+			state.isCancelled = true
+			h.mu.Unlock()
+			h.DecOps()
+			h.mu.Lock()
+		}
 	}
 	state := h.registerOpLocked(ovPtr, nil)
 	timer := time.AfterFunc(time.Duration(nanos), func() {

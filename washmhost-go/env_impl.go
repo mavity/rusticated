@@ -156,7 +156,8 @@ func (h *HostEnv) CancelOp(ovPtr uint32) {
 	if t, ok := h.timers[ovPtr]; ok {
 		t.Stop()
 		delete(h.timers, ovPtr)
-		if _, exists := h.activeOps[ovPtr]; exists {
+		if state, exists := h.activeOps[ovPtr]; exists {
+			state.isCancelled = true
 			delete(h.activeOps, ovPtr)
 			h.mu.Unlock()
 			h.DecOps()
@@ -167,12 +168,20 @@ func (h *HostEnv) CancelOp(ovPtr uint32) {
 	state, ok := h.activeOps[ovPtr]
 	if ok && !state.isCancelled {
 		state.isCancelled = true
+		wasSignal := false
+		if state.signum != 0 {
+			delete(h.signalWaiters, state.signum)
+			wasSignal = true
+		}
 		h.mu.Unlock()
 		fmt.Printf("HOST: cancel(0x%x) id=%d handle=%T\n", ovPtr, state.opID, state.handle)
 		if state.handle != nil {
 			if c, ok := state.handle.(interface{ SetDeadline(time.Time) error }); ok {
 				_ = c.SetDeadline(pastTime)
 			}
+		}
+		if wasSignal {
+			h.DecOps()
 		}
 	} else {
 		h.mu.Unlock()
@@ -256,6 +265,10 @@ block:
 		return true
 	}
 
+	if h.PendingOps() == 0 {
+		return false
+	}
+
 	select {
 	case op := <-h.fileOpsQueue:
 		op()
@@ -267,6 +280,15 @@ block:
 				return true
 			}
 		}
+	case state := <-h.pendingSignals:
+		if h.IsOpActive(state.ovPtr, state.opID) {
+			h.mu.Lock()
+			delete(h.activeOps, state.ovPtr)
+			h.mu.Unlock()
+			writeOverlapped(mod, state.ovPtr, 0, 0, uint64(state.signum))
+		}
+		h.DecOps()
+		return true
 	case <-ctx.Done():
 		return false
 	}
