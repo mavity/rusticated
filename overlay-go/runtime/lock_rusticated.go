@@ -99,11 +99,10 @@ func beforeIdle(now, pollUntil int64) (gp *g, otherReady bool) {
 		}
 
 		setNetpollTimer(uint32(delay))
-
-		go handleAsyncEvent()
-		return nil, true
 	}
-	return nil, false
+
+	go handleAsyncEvent()
+	return nil, true
 }
 
 func checkTimeouts() {}
