@@ -191,7 +191,6 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_set_cwd), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("set_cwd")
 
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_timer_set), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("timer_set")
-	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_timer_cancel), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).Export("timer_cancel")
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_read), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("read")
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_write), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("write")
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_handle_close), []api.ValueType{api.ValueTypeI64}, []api.ValueType{}).Export("handle_close")
