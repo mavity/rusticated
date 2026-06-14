@@ -45,20 +45,25 @@ func (h *HostEnv) sys_process_spawn(ctx context.Context, m api.Module, stack []u
 		program := string(parts[0])
 		args := []string{}
 		envVars := []string{}
-		inEnv := false
+		cwd := ""
+		section := 0 // 0=args, 1=env, 2=cwd
 		for i := 1; i < len(parts); i++ {
 			if len(parts[i]) == 0 {
-				if !inEnv {
-					inEnv = true
-					continue
-				} else {
+				section++
+				if section > 2 {
 					break
 				}
+				continue
 			}
-			if inEnv {
-				envVars = append(envVars, string(parts[i]))
-			} else {
+			switch section {
+			case 0:
 				args = append(args, string(parts[i]))
+			case 1:
+				envVars = append(envVars, string(parts[i]))
+			case 2:
+				if cwd == "" {
+					cwd = string(parts[i])
+				}
 			}
 		}
 
@@ -84,6 +89,9 @@ func (h *HostEnv) sys_process_spawn(ctx context.Context, m api.Module, stack []u
 			}
 		}
 		cmd.Env = mergedEnv
+		if cwd != "" {
+			cmd.Dir = cwd
+		}
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
