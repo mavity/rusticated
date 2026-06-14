@@ -148,13 +148,14 @@ All executor and scheduling logic is self-contained in `rt/`. Logic derived from
 
 # Building and running
 
-Bootstrap step: generate the workspace sysroot output once with:
+Bootstrap step: build and assemble the full toolchain with:
 
 ```bash
-cargo run -p prebuild
+go -C mohabbat-go run .
 ```
 
-This creates `target/rusticated-spec/config.toml` and the `*-rusticated.json` target specs under `target/rusticated-spec/`.
+This generates target specs, builds the rusticated sysroot, writes the Go overlay,
+compiles cross-platform native launchers, compiles the WASM brain, and assembles `mohab.bat`.
 The workspace root also provides `sysroot.toml`, which includes the generated config and is the recommended wrapper for downstream builds.
 
 Once `prebuild` has run, build consumer crates with:
@@ -173,12 +174,6 @@ cargo run -p <proj> --config sysroot.toml
 
 ```
 go -C mohabbat-go run . && mohab.bat demo -o demo.bat && echo . | demo.bat
-```
-
-Or for full one liner end to end:
-
-```
-cargo run -p prebuild && go -C mohabbat-go run . && mohab.bat demo -o demo.bat && echo . | demo.bat
 ```
 
 And for Kabibi-Go use:

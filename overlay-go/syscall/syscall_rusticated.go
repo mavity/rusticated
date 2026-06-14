@@ -306,8 +306,8 @@ const (
 
 type WaitStatus uint32
 
-func (w WaitStatus) Exited() bool       { return false }
-func (w WaitStatus) ExitStatus() int    { return 0 }
+func (w WaitStatus) Exited() bool       { return true }
+func (w WaitStatus) ExitStatus() int    { return int(w) }
 func (w WaitStatus) Signaled() bool     { return false }
 func (w WaitStatus) Signal() Signal     { return 0 }
 func (w WaitStatus) CoreDump() bool     { return false }
@@ -416,11 +416,55 @@ func Sendfile(outfd int, infd int, offset *int64, count int) (written int, err e
 }
 
 func StartProcess(argv0 string, argv []string, attr *ProcAttr) (pid int, handle uintptr, err error) {
-	return 0, 0, ENOSYS
+	// Build the null-separated config for process_spawn:
+	// program\0arg1\0arg2\0\0env1=val\0env2=val\0\0cwd\0\0
+	var cfg []byte
+	appendStr := func(s string) {
+		cfg = append(cfg, s...)
+		cfg = append(cfg, 0)
+	}
+	appendStr(argv0)
+	// argv[0] is the program name by convention — skip it, pass argv[1:] as real args.
+	for _, a := range argv[1:] {
+		appendStr(a)
+	}
+	cfg = append(cfg, 0) // end of args section
+
+	if attr != nil && len(attr.Env) > 0 {
+		for _, e := range attr.Env {
+			appendStr(e)
+		}
+	}
+	cfg = append(cfg, 0) // end of env section
+
+	if attr != nil && attr.Dir != "" {
+		appendStr(attr.Dir)
+	}
+	cfg = append(cfg, 0) // end of cwd section
+
+	var ctx overlappedContext
+	rusticated_process_spawn(unsafe.Pointer(&ctx.o), &cfg[0], uint32(len(cfg)))
+	awaitOverlapped(&ctx)
+	if ctx.o.hostError != 0 {
+		return 0, 0, errnoErr(Errno(ctx.o.hostError))
+	}
+	h := int(ctx.o.resultExt)
+	return h, uintptr(h), nil
 }
 
 func Wait4(pid int, wstatus *WaitStatus, options int, rusage *Rusage) (wpid int, err error) {
-	return 0, ENOSYS
+	var ctx overlappedContext
+	rusticated_process_wait(unsafe.Pointer(&ctx.o), uint64(pid))
+	awaitOverlapped(&ctx)
+	if ctx.o.hostError != 0 {
+		return 0, errnoErr(Errno(ctx.o.hostError))
+	}
+	// resultExt packs: (exitCode << 32) | exitCode
+	exitCode := int(uint32(ctx.o.resultExt))
+	if wstatus != nil {
+		*wstatus = WaitStatus(exitCode)
+	}
+	return pid, nil
 }
 
 func Umask(mask int) int {

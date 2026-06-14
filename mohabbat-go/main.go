@@ -1,9 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
-	"flag"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -43,6 +44,10 @@ type mohabbatMeta struct {
 	Reserved        uint64
 }
 
+// prebuildFn is set by prebuild.go on native (!wasip1) builds via init().
+// On WASM builds it remains nil; modeBuild falls back to subprocess invocation.
+var prebuildFn func(ws string) error
+
 func upsertEnv(env []string, key, value string) []string {
 	updated := make([]string, 0, len(env)+1)
 	for _, kv := range env {
@@ -70,54 +75,164 @@ func formatSize(n int64) string {
 }
 
 func main() {
-	var (
-		workspace = flag.String("workspace", "", "workspace root (default: parent of mohabbat-go)")
-		payload   = flag.String("payload", "", "path to payload .wasm (default: target/wasm32-rusticated-unknown-unknown/release/mohabbat.wasm)")
-		output    = flag.String("output", "", "output mohab.bat path (default: <workspace>/mohab.bat)")
-		skipBuild = flag.Bool("skip-build", false, "skip building brot-go and washmhost-go (use existing artifacts)")
-	)
-	flag.Parse()
+	vegPath := os.Getenv("MOHABBAT_VEGETABLE_PATH")
+	inVeg := vegPath != ""
 
-	ws, err := resolveWorkspace(*workspace)
-	must(err)
-	defaultPayload := *payload == ""
+	// Parse args manually: [project] [-o out] [-r [args...]]
+	rawArgs := os.Args[1:]
+	projectDir := ""
+	outputPath := ""
+	runMode := false
+	var runArgs []string
 
-	if *payload == "" {
-		*payload = filepath.Join(ws, "target", "wasm32-rusticated-unknown-unknown", "release", "mohabbat.wasm")
-	}
-	if *output == "" {
-		*output = filepath.Join(ws, "mohab.bat")
-	}
-
-	buildDir := filepath.Join(ws, "target", "mohabbat-go-build")
-	must(os.MkdirAll(buildDir, 0o755))
-
-	selectedTargets := map[string]string{}
-	if !*skipBuild {
-		fmt.Println("🍆  Building brot (cargo) and washmhost-go for Modern Four...")
-		for _, s := range slots {
-			if !shouldBuildSlot(s) {
-				fmt.Printf("🍆    skip %s on host %s\n", s.name, runtime.GOOS)
-				continue
+	for i := 0; i < len(rawArgs); {
+		switch rawArgs[i] {
+		case "-r":
+			runMode = true
+			runArgs = rawArgs[i+1:]
+			i = len(rawArgs)
+		case "-o":
+			if i+1 < len(rawArgs) {
+				outputPath = rawArgs[i+1]
+				i += 2
+			} else {
+				die("missing argument after -o")
 			}
-			targetName, err := cargoBuild(ws, "brot", s, buildDir)
-			must(err)
-			selectedTargets[s.name] = targetName
-			must(goBuild(ws, "washmhost-go", s, buildDir))
-		}
-		if defaultPayload {
-			fmt.Println("🍆  Building default brain payload (mohabbat wasm)...")
-			must(buildMohabbatBrain(ws))
+		default:
+			if projectDir == "" && !strings.HasPrefix(rawArgs[i], "-") {
+				projectDir = rawArgs[i]
+			}
+			i++
 		}
 	}
 
-	fmt.Printf("🍆  Reading payload: %s\n", *payload)
-	brainBytes, err := os.ReadFile(*payload)
+	ws, err := resolveWorkspace("")
+	must(err)
+
+	switch {
+	case projectDir != "" && runMode:
+		// Mode 4: build project to WASM + run immediately under washmhost-go
+		must(modeDevRun(ws, projectDir, runArgs))
+	case projectDir != "" && outputPath != "" && inVeg:
+		// Mode 2: juice bottle refill (running as WASM brain inside a vegetable)
+		must(doRefill(ws, projectDir, vegPath, outputPath))
+	case projectDir != "" && outputPath != "":
+		// Mode 3: native fresh assembly with arbitrary payload
+		must(modePackage(ws, projectDir, outputPath))
+	default:
+		// Mode 1: full build pipeline
+		must(modeBuild(ws))
+	}
+}
+
+// modeBuild is Mode 1: full build pipeline.
+// On native, runs prebuild (target specs + sysroot + overlay) via prebuildFn.
+// Inside a WASM vegetable, falls back to subprocess if artifacts are missing.
+func modeBuild(ws string) error {
+	buildDir := filepath.Join(ws, "target", "mohabbat-go-build")
+	if err := os.MkdirAll(buildDir, 0o755); err != nil {
+		return err
+	}
+
+	if prebuildFn != nil {
+		fmt.Println("🍆  Running prebuild (target specs + sysroot + overlay)...")
+		if err := prebuildFn(ws); err != nil {
+			return fmt.Errorf("prebuild: %w", err)
+		}
+	} else {
+		// Running as WASM brain: ensure prebuild artifacts exist.
+		configPath := filepath.Join(ws, "target", "rusticated-spec", "config.toml")
+		overlayPath := filepath.Join(ws, "target", "overlay.json")
+		if !fileExists(configPath) || !fileExists(overlayPath) {
+			fmt.Println("🍆  Prebuild artifacts missing, running cargo run -p prebuild...")
+			cmd := exec.Command("cargo", "run", "-p", "prebuild")
+			cmd.Dir = ws
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				return fmt.Errorf("cargo run -p prebuild: %w", err)
+			}
+		} else {
+			fmt.Println("🍆  Prebuild artifacts present, skipping target spec regeneration.")
+		}
+	}
+
+	fmt.Println("🍆  Building brot (cargo) and washmhost-go for Modern Four...")
+	if err := buildAllSlots(ws, buildDir); err != nil {
+		return err
+	}
+
+	brainPath := filepath.Join(buildDir, "brain.wasm")
+	fmt.Println("🍆  Building brain WASM (mohabbat-go)...")
+	if err := buildBrainWasm(ws, brainPath); err != nil {
+		return fmt.Errorf("brain wasm build: %w", err)
+	}
+
+	outputPath := filepath.Join(ws, "mohab.bat")
+	if err := assembleVegetable(ws, brainPath, buildDir, outputPath); err != nil {
+		return err
+	}
+
+	if err := ensureBatOnPath("mohab.bat", outputPath); err != nil {
+		fmt.Printf("🍆  warn: %v\n", err)
+	}
+	return nil
+}
+
+// modePackage is Mode 3: build a project's payload and assemble a fresh vegetable.
+func modePackage(ws, projectDir, outputPath string) error {
+	buildDir := filepath.Join(ws, "target", "mohabbat-go-build")
+	if err := os.MkdirAll(buildDir, 0o755); err != nil {
+		return err
+	}
+	projectName := filepath.Base(projectDir)
+	wasmPath := filepath.Join(ws, "target", projectName+".wasm")
+	fmt.Printf("🍆  Packaging %s -> %s\n", projectDir, outputPath)
+	if err := buildProjectToWasm(ws, projectDir, wasmPath); err != nil {
+		return err
+	}
+	fmt.Println("🍆  Building brot (cargo) and washmhost-go for Modern Four...")
+	if err := buildAllSlots(ws, buildDir); err != nil {
+		return err
+	}
+	return assembleVegetable(ws, wasmPath, buildDir, outputPath)
+}
+
+// modeDevRun is Mode 4: build a project to WASM and run it under washmhost-go.
+func modeDevRun(ws, projectDir string, extraArgs []string) error {
+	projectName := filepath.Base(projectDir)
+	wasmPath := filepath.Join(ws, "target", projectName+".wasm")
+	fmt.Printf("🍆  Dev-run: building %s\n", projectDir)
+	if err := buildProjectToWasm(ws, projectDir, wasmPath); err != nil {
+		return err
+	}
+	return runUnderWashmhost(ws, wasmPath, extraArgs)
+}
+
+// buildAllSlots builds brot (cargo) and washmhost-go for all Modern Four slots.
+func buildAllSlots(ws, buildDir string) error {
+	for _, s := range slots {
+		if !shouldBuildSlot(s) {
+			fmt.Printf("🍆    skip %s\n", s.name)
+			continue
+		}
+		if _, err := cargoBuild(ws, "brot", s, buildDir); err != nil {
+			return err
+		}
+		if err := goBuild(ws, "washmhost-go", s, buildDir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// assembleVegetable reads built artifacts and packages them into a vegetable .bat file.
+func assembleVegetable(ws, brainPath, buildDir, outputPath string) error {
+	fmt.Printf("🍆  Reading brain payload: %s\n", brainPath)
+	brainBytes, err := os.ReadFile(brainPath)
 	if err != nil {
-		die("cannot read payload %s: %v", *payload, err)
+		return fmt.Errorf("cannot read brain %s: %w", brainPath, err)
 	}
-
-	// Read built artifacts
 	type artifacts struct {
 		brot, washmhost []byte
 	}
@@ -127,16 +242,16 @@ func main() {
 			fmt.Printf("🍆    %s: disabled for this host\n", s.name)
 			continue
 		}
-		brot, err := os.ReadFile(brotPath(buildDir, s))
-		must(err)
-		wh, err := os.ReadFile(washmhostPath(buildDir, s))
-		must(err)
-		per[i] = artifacts{brot: brot, washmhost: wh}
-		displayName := s.name
-		if targetName, ok := selectedTargets[s.name]; ok {
-			displayName = targetName
+		brotData, err := os.ReadFile(brotPath(buildDir, s))
+		if err != nil {
+			return fmt.Errorf("read brot for %s: %w", s.name, err)
 		}
-		fmt.Printf("🍆    %s: brot=%s washmhost=%s\n", displayName, formatSize(int64(len(brot))), formatSize(int64(len(wh))))
+		wh, err := os.ReadFile(washmhostPath(buildDir, s))
+		if err != nil {
+			return fmt.Errorf("read washmhost for %s: %w", s.name, err)
+		}
+		per[i] = artifacts{brot: brotData, washmhost: wh}
+		fmt.Printf("🍆    %s: brot=%s washmhost=%s\n", s.name, formatSize(int64(len(brotData))), formatSize(int64(len(wh))))
 	}
 
 	// Assemble pool: washmhost_0 + washmhost_1 + ... + payload
@@ -154,14 +269,16 @@ func main() {
 
 	// Brotli compress with maximum compression settings.
 	compressed := &bytes.Buffer{}
-	w := brotli.NewWriterOptions(compressed, brotli.WriterOptions{
+	bw := brotli.NewWriterOptions(compressed, brotli.WriterOptions{
 		Quality: 11,
 		LGWin:   24,
 	})
-	if _, err := w.Write(pool.Bytes()); err != nil {
-		die("brotli write: %v", err)
+	if _, err := bw.Write(pool.Bytes()); err != nil {
+		return fmt.Errorf("brotli write: %w", err)
 	}
-	must(w.Close())
+	if err := bw.Close(); err != nil {
+		return fmt.Errorf("brotli close: %w", err)
+	}
 	poolLen := uint64(compressed.Len())
 	fmt.Printf("🍆  Pool: raw=%s compressed=%s\n", formatSize(int64(pool.Len())), formatSize(int64(poolLen)))
 
@@ -180,7 +297,7 @@ func main() {
 		}
 		patched, err := patchMeta(per[i].brot, meta)
 		if err != nil {
-			die("patching brot for %s: %v", slots[i].name, err)
+			return fmt.Errorf("patching brot for %s: %w", slots[i].name, err)
 		}
 		per[i].brot = patched
 	}
@@ -192,7 +309,6 @@ func main() {
 	for i := range slots {
 		lengths[i] = len(per[i].brot)
 	}
-
 	zoneA := ""
 	for retries := 0; retries < 8; retries++ {
 		zoneA = buildZoneA(offsets, lengths)
@@ -202,7 +318,6 @@ func main() {
 			newOffsets[i] = next
 			next += lengths[i]
 		}
-
 		stable := true
 		for i := range slots {
 			if newOffsets[i] != offsets[i] {
@@ -217,37 +332,602 @@ func main() {
 		}
 	}
 
-	out, err := os.Create(*output)
-	must(err)
-	defer out.Close()
-	_, _ = out.WriteString(zoneA)
-	for i := range slots {
-		_, _ = out.Write(per[i].brot)
+	outFile, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("create output %s: %w", outputPath, err)
 	}
-	_, _ = out.Write(compressed.Bytes())
+	defer outFile.Close()
+	_, _ = outFile.WriteString(zoneA)
+	for i := range slots {
+		_, _ = outFile.Write(per[i].brot)
+	}
+	_, _ = outFile.Write(compressed.Bytes())
 	if runtime.GOOS != "windows" {
-		if err := os.Chmod(*output, 0o755); err != nil {
-			die("chmod output %s: %v", *output, err)
+		if err := os.Chmod(outputPath, 0o755); err != nil {
+			return fmt.Errorf("chmod %s: %w", outputPath, err)
 		}
 	}
-
 	totalZoneB := 0
 	for _, n := range lengths {
 		totalZoneB += n
 	}
 	fmt.Printf("🍆  zone_a=%s zone_b=%s pool=%s\n", formatSize(int64(len(zoneA))), formatSize(int64(totalZoneB)), formatSize(int64(poolLen)))
-	fmt.Printf("🍆  Wrote %s (%s bytes)\n", *output, formatSize(int64(len(zoneA)+totalZoneB+int(poolLen))))
-	if err := ensureBatOnPath("mohab.bat", *output); err != nil {
-		fmt.Printf("🍆  warn: %v\n", err)
+	fmt.Printf("🍆  Wrote %s (%s bytes)\n", outputPath, formatSize(int64(len(zoneA)+totalZoneB+int(poolLen))))
+	return nil
+}
+
+// buildProjectToWasm auto-detects Go vs Rust project and builds to WASM.
+func buildProjectToWasm(ws, projectDir, outputWasm string) error {
+	// Resolve projectDir: first relative to CWD, then relative to workspace root.
+	absProject, err := filepath.Abs(projectDir)
+	if err != nil || !fileExists(absProject) {
+		absProject = filepath.Join(ws, projectDir)
 	}
-	if err := ensureBatOnPath("demo.bat", filepath.Join(ws, "demo.bat")); err != nil {
-		fmt.Printf("🍆  warn: %v\n", err)
+	if !fileExists(absProject) {
+		return fmt.Errorf("project directory not found: %s", projectDir)
 	}
+	// Auto-detect: Go project has go.mod, Rust project has Cargo.toml.
+	if fileExists(filepath.Join(absProject, "go.mod")) {
+		return buildGoProjectWasm(ws, absProject, outputWasm)
+	}
+	return buildRustProjectWasm(ws, absProject, outputWasm)
+}
+
+// buildGoProjectWasm compiles a Go project to rusticated WASM.
+func buildGoProjectWasm(ws, absProjectDir, outputWasm string) error {
+	overlayPath := filepath.Join(ws, "target", "overlay.json")
+	if !fileExists(overlayPath) {
+		return fmt.Errorf("overlay.json not found at %s — run Mode 1 (no args) first", overlayPath)
+	}
+	goroot, err := resolveGoroot(ws)
+	if err != nil {
+		return fmt.Errorf("cannot resolve GOROOT: %w", err)
+	}
+	buildDir := filepath.Join(ws, "target", "mohabbat-go-build")
+	projectName := filepath.Base(absProjectDir)
+	goTmpDir := filepath.Join(buildDir, projectName, "gotmp")
+	goCacheDir := filepath.Join(buildDir, projectName, "gocache")
+	for _, d := range []string{goTmpDir, goCacheDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("🍆  Building Go project %s -> %s\n", absProjectDir, outputWasm)
+	goBin := goBinFromRoot(goroot)
+	cmd := exec.Command(goBin, "build", "-buildmode=c-shared",
+		"-overlay", overlayPath,
+		"-trimpath", "-ldflags=-s -w",
+		"-o", outputWasm, ".")
+	cmd.Dir = absProjectDir
+	env := os.Environ()
+	env = upsertEnv(env, "GOOS", "wasip1")
+	env = upsertEnv(env, "GOARCH", "wasm")
+	env = upsertEnv(env, "GOROOT", goroot)
+	env = upsertEnv(env, "CGO_ENABLED", "0")
+	env = upsertEnv(env, "GOTMPDIR", goTmpDir)
+	env = upsertEnv(env, "GOCACHE", goCacheDir)
+	cmd.Env = env
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("go build failed for %s: %w", absProjectDir, err)
+	}
+	fmt.Printf("🍆  Post-processing %s (rename _initialize -> run)\n", outputWasm)
+	return postProcessWasm(outputWasm)
+}
+
+// buildRustProjectWasm compiles a Rust project to rusticated WASM.
+func buildRustProjectWasm(ws, absProjectDir, outputWasm string) error {
+	target := "wasm32-rusticated-unknown-unknown"
+	projectName := filepath.Base(absProjectDir)
+	fmt.Printf("🍆  Building Rust project %s -> WASM\n", absProjectDir)
+	cmd := exec.Command("cargo", "build", "-p", projectName, "--release",
+		"--config", filepath.Join(ws, "target", "rusticated-spec", "config.toml"),
+		"--config", "unstable.json-target-spec=true",
+		"--target", target,
+		"-Z", "unstable-options")
+	cmd.Env = upsertEnv(os.Environ(), "RUST_TARGET_PATH", filepath.Join(ws, "target", "rusticated-spec"))
+	cmd.Dir = ws
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("cargo build failed for %s: %w", projectName, err)
+	}
+	srcWasm := filepath.Join(ws, "target", target, "release", projectName+".wasm")
+	data, err := os.ReadFile(srcWasm)
+	if err != nil {
+		return fmt.Errorf("read built wasm %s: %w", srcWasm, err)
+	}
+	if err := os.WriteFile(outputWasm, data, 0o644); err != nil {
+		return fmt.Errorf("write wasm %s: %w", outputWasm, err)
+	}
+	return nil
+}
+
+// buildBrainWasm compiles mohabbat-go itself as the WASM brain.
+func buildBrainWasm(ws, outputWasm string) error {
+	overlayPath := filepath.Join(ws, "target", "overlay.json")
+	if !fileExists(overlayPath) {
+		return fmt.Errorf("overlay.json not found at %s — run prebuild first", overlayPath)
+	}
+	goroot, err := resolveGoroot(ws)
+	if err != nil {
+		return fmt.Errorf("cannot resolve GOROOT for brain build: %w", err)
+	}
+	buildDir := filepath.Dir(outputWasm)
+	goTmpDir := filepath.Join(buildDir, "brain-gotmp")
+	goCacheDir := filepath.Join(buildDir, "brain-gocache")
+	for _, d := range []string{goTmpDir, goCacheDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("🍆  Building brain WASM -> %s\n", outputWasm)
+	goBin := goBinFromRoot(goroot)
+	cmd := exec.Command(goBin, "build", "-buildmode=c-shared",
+		"-overlay", overlayPath,
+		"-trimpath", "-ldflags=-s -w",
+		"-o", outputWasm, ".")
+	cmd.Dir = filepath.Join(ws, "mohabbat-go")
+	env := os.Environ()
+	env = upsertEnv(env, "GOOS", "wasip1")
+	env = upsertEnv(env, "GOARCH", "wasm")
+	env = upsertEnv(env, "GOROOT", goroot)
+	env = upsertEnv(env, "CGO_ENABLED", "0")
+	env = upsertEnv(env, "GOTMPDIR", goTmpDir)
+	env = upsertEnv(env, "GOCACHE", goCacheDir)
+	cmd.Env = env
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("brain WASM build failed: %w", err)
+	}
+	return postProcessWasm(outputWasm)
+}
+
+// runUnderWashmhost runs a WASM file under washmhost-go.
+// When running inside a vegetable (MOHABBAT_VEGETABLE_PATH is set), it extracts
+// the appropriate pre-built washmhost binary from the vegetable's pool rather
+// than re-compiling from source via `go run .`.
+// Natively, it compiles washmhost-go via `go run .`.
+func runUnderWashmhost(ws, wasmPath string, extraArgs []string) error {
+	fmt.Printf("🍆  Running %s under washmhost-go\n", filepath.Base(wasmPath))
+
+	vegPath := os.Getenv("MOHABBAT_VEGETABLE_PATH")
+	if vegPath != "" {
+		return runUnderWashmhostFromVeg(vegPath, wasmPath, extraArgs)
+	}
+	return runUnderWashmhostNative(ws, wasmPath, extraArgs)
+}
+
+// runUnderWashmhostNative compiles washmhost-go from source and runs the payload.
+func runUnderWashmhostNative(ws, wasmPath string, extraArgs []string) error {
+	goroot, _ := resolveGoroot(ws)
+	runArgs := []string{"run", "."}
+	runArgs = append(runArgs, extraArgs...)
+	cmd := exec.Command("go", runArgs...)
+	cmd.Dir = filepath.Join(ws, "washmhost-go")
+	env := os.Environ()
+	env = upsertEnv(env, "MOHABBAT_WASM_FD", wasmPath)
+	// Prevent GOOS/GOARCH leakage from prior WASM build steps.
+	env = upsertEnv(env, "GOOS", runtime.GOOS)
+	env = upsertEnv(env, "GOARCH", runtime.GOARCH)
+	if goroot != "" {
+		env = upsertEnv(env, "GOROOT", goroot)
+	}
+	cmd.Env = env
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		}
+		return fmt.Errorf("washmhost execution failed: %w", err)
+	}
+	return nil
+}
+
+// runUnderWashmhostFromVeg extracts the platform washmhost binary from the
+// vegetable's compressed pool and runs it directly, bypassing source compilation.
+func runUnderWashmhostFromVeg(vegPath, wasmPath string, extraArgs []string) error {
+	vegData, err := os.ReadFile(vegPath)
+	if err != nil {
+		return fmt.Errorf("read vegetable for washmhost extraction: %w", err)
+	}
+	fileLen := len(vegData)
+
+	// Find first valid meta — gives us pool location + washmhost offsets.
+	magic := []byte(mohabbatMagic)
+	const metaBodySize = 48
+	var meta *mohabbatMeta
+	for i := 0; i+len(magic)+metaBodySize <= fileLen; i++ {
+		if !bytes.Equal(vegData[i:i+len(magic)], magic) {
+			continue
+		}
+		p := i + len(magic)
+		poolLen := binary.LittleEndian.Uint64(vegData[p : p+8])
+		if poolLen == 0 || uint64(fileLen) < poolLen {
+			continue
+		}
+		reserved := binary.LittleEndian.Uint64(vegData[p+40 : p+48])
+		if reserved != 0 {
+			continue
+		}
+		m := mohabbatMeta{
+			PoolLen:         poolLen,
+			WashmhostOffset: binary.LittleEndian.Uint64(vegData[p+8 : p+16]),
+			WashmhostLen:    binary.LittleEndian.Uint64(vegData[p+16 : p+24]),
+			PayloadOffset:   binary.LittleEndian.Uint64(vegData[p+24 : p+32]),
+			PayloadLen:      binary.LittleEndian.Uint64(vegData[p+32 : p+40]),
+		}
+		meta = &m
+		break
+	}
+	if meta == nil {
+		return fmt.Errorf("no valid MOHABBAT meta found in vegetable %s — cannot extract washmhost", vegPath)
+	}
+
+	poolStart := fileLen - int(meta.PoolLen)
+	if poolStart < 0 {
+		return fmt.Errorf("invalid PoolLen in vegetable")
+	}
+
+	poolReader := brotli.NewReader(bytes.NewReader(vegData[poolStart:]))
+	var poolBuf bytes.Buffer
+	if _, err := poolBuf.ReadFrom(poolReader); err != nil {
+		return fmt.Errorf("decompress pool for washmhost: %w", err)
+	}
+	pool := poolBuf.Bytes()
+
+	// Find the washmhost entry for the current platform.
+	// Slot order is contractual: linux-amd64, linux-arm64, win-amd64, win-arm64.
+	var targetSlotIdx int = -1
+	for i, s := range slots {
+		if s.goos == runtime.GOOS && s.goarch == runtime.GOARCH {
+			targetSlotIdx = i
+			break
+		}
+	}
+	if targetSlotIdx < 0 {
+		return fmt.Errorf("no washmhost slot for %s/%s in vegetable", runtime.GOOS, runtime.GOARCH)
+	}
+
+	// Re-read the per-slot washmhost offset+length from the matching brot in Zone B.
+	// Each brot has its own meta with its slot's WashmhostOffset+Len.
+	// We already have meta from the first occurrence, which belongs to slot 0.
+	// We need to find the meta for targetSlotIdx. Walk all meta occurrences.
+	type slotMeta struct {
+		whOffset, whLen uint64
+	}
+	slotMetas := make([]slotMeta, len(slots))
+	occIdx := 0
+	for i := 0; i+len(magic)+metaBodySize <= fileLen && occIdx < len(slots); i++ {
+		if !bytes.Equal(vegData[i:i+len(magic)], magic) {
+			continue
+		}
+		p := i + len(magic)
+		poolLen := binary.LittleEndian.Uint64(vegData[p : p+8])
+		if poolLen == 0 || uint64(fileLen) < poolLen {
+			continue
+		}
+		reserved := binary.LittleEndian.Uint64(vegData[p+40 : p+48])
+		if reserved != 0 {
+			continue
+		}
+		if occIdx < len(slots) {
+			slotMetas[occIdx] = slotMeta{
+				whOffset: binary.LittleEndian.Uint64(vegData[p+8 : p+16]),
+				whLen:    binary.LittleEndian.Uint64(vegData[p+16 : p+24]),
+			}
+			occIdx++
+		}
+	}
+
+	sm := slotMetas[targetSlotIdx]
+	if sm.whLen == 0 || uint64(len(pool)) < sm.whOffset+sm.whLen {
+		return fmt.Errorf("washmhost bytes out of range in pool (offset=%d len=%d pool=%d)",
+			sm.whOffset, sm.whLen, len(pool))
+	}
+	washmhostBytes := pool[sm.whOffset : sm.whOffset+sm.whLen]
+
+	// Write washmhost to a temp file and run it.
+	ext := ""
+	if runtime.GOOS == "windows" {
+		ext = ".exe"
+	}
+	tmpFile, err := os.CreateTemp("", "mohabbat-wh-*"+ext)
+	if err != nil {
+		return fmt.Errorf("create temp washmhost: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmpFile.Write(washmhostBytes); err != nil {
+		tmpFile.Close()
+		return fmt.Errorf("write temp washmhost: %w", err)
+	}
+	tmpFile.Close()
+	if runtime.GOOS != "windows" {
+		_ = os.Chmod(tmpPath, 0o755)
+	}
+
+	runCmd := exec.Command(tmpPath, extraArgs...)
+	runCmd.Env = upsertEnv(os.Environ(), "MOHABBAT_WASM_FD", wasmPath)
+	runCmd.Stdout = os.Stdout
+	runCmd.Stderr = os.Stderr
+	runCmd.Stdin = os.Stdin
+	if err := runCmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		}
+		return fmt.Errorf("washmhost (from veg) execution failed: %w", err)
+	}
+	return nil
+}
+
+// resolveGoroot finds the correct GOROOT using a priority chain that does not
+// require the `go` binary to be in PATH — critical for vegetable (WASM brain) mode.
+func resolveGoroot(ws string) (string, error) {
+	// Priority 0: extract from overlay.json if it already exists.
+	// overlay.json keys are absolute paths of the form {GOROOT}/src/...,
+	// so the GOROOT can be inferred without running any subprocess.
+	if goroot := gorootFromOverlay(ws); goroot != "" {
+		return goroot, nil
+	}
+
+	// Priority 1: GOROOT env var already set (parent process may have it).
+	if goroot := os.Getenv("GOROOT"); goroot != "" {
+		if _, err := os.Stat(goroot); err == nil {
+			return goroot, nil
+		}
+	}
+
+	// Determine go version from go.mod.
+	ver := ""
+	goModPath := filepath.Join(ws, "mohabbat-go", "go.mod")
+	if f, err := os.Open(goModPath); err == nil {
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if strings.HasPrefix(line, "go ") {
+				ver = strings.TrimSpace(strings.TrimPrefix(line, "go "))
+				break
+			}
+		}
+		f.Close()
+	}
+
+	if ver != "" {
+		// Priority 2: $HOME/sdk/go{ver} — check multiple home sources because
+		// os.UserHomeDir() may fail inside the WASM sandbox.
+		homes := uniqueStrings([]string{
+			func() string { h, _ := os.UserHomeDir(); return h }(),
+			os.Getenv("USERPROFILE"),
+			os.Getenv("HOME"),
+		})
+		for _, home := range homes {
+			if home == "" {
+				continue
+			}
+			sdkPath := filepath.Join(home, "sdk", "go"+ver)
+			if _, err := os.Stat(sdkPath); err == nil {
+				return sdkPath, nil
+			}
+		}
+		// Priority 3: run `go{ver} env GOROOT`
+		if out, err := exec.Command("go"+ver, "env", "GOROOT").Output(); err == nil {
+			p := strings.TrimSpace(string(out))
+			if _, err := os.Stat(p); err == nil {
+				return p, nil
+			}
+		}
+		// Priority 4: `go env GOROOT`
+		if out, err := exec.Command("go", "env", "GOROOT").Output(); err == nil {
+			p := strings.TrimSpace(string(out))
+			if _, err := os.Stat(p); err == nil {
+				return p, nil
+			}
+		}
+	}
+	// Last resort: plain `go env GOROOT`
+	out, err := exec.Command("go", "env", "GOROOT").Output()
+	if err != nil {
+		return "", fmt.Errorf("go env GOROOT failed: %w", err)
+	}
+	p := strings.TrimSpace(string(out))
+	if _, err := os.Stat(p); err != nil {
+		return "", fmt.Errorf("GOROOT %q does not exist", p)
+	}
+	return p, nil
+}
+
+// gorootFromOverlay reads target/overlay.json and extracts GOROOT from the
+// source paths embedded in it. The keys are absolute paths of the form
+// {GOROOT}/src/runtime/os_wasip1.go — so GOROOT is everything before /src/.
+// This requires no subprocess and works inside the WASM vegetable sandbox.
+func gorootFromOverlay(ws string) string {
+	overlayPath := filepath.Join(ws, "target", "overlay.json")
+	data, err := os.ReadFile(overlayPath)
+	if err != nil {
+		return ""
+	}
+	var v struct {
+		Replace map[string]string `json:"Replace"`
+	}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return ""
+	}
+	for src := range v.Replace {
+		// Normalize to forward slashes for consistent searching.
+		srcFwd := filepath.ToSlash(src)
+		if idx := strings.Index(srcFwd, "/src/runtime/"); idx >= 0 {
+			candidate := filepath.FromSlash(srcFwd[:idx])
+			if _, err := os.Stat(candidate); err == nil {
+				return candidate
+			}
+		}
+	}
+	return ""
+}
+
+// goBinFromRoot returns the absolute path to the `go` binary inside goroot.
+// Falls back to "go" (PATH lookup) if the binary doesn't exist there.
+// Probes both "go.exe" and "go" because runtime.GOOS is "wasip1" when
+// this code runs as the WASM brain, not the actual host OS.
+func goBinFromRoot(goroot string) string {
+	if goroot == "" {
+		return "go"
+	}
+	// Try .exe first (Windows host), then no extension (Linux/macOS host).
+	for _, ext := range []string{".exe", ""} {
+		bin := filepath.Join(goroot, "bin", "go"+ext)
+		if _, err := os.Stat(bin); err == nil {
+			return bin
+		}
+	}
+	return "go"
+}
+
+// uniqueStrings returns a slice with duplicates removed, preserving order.
+func uniqueStrings(ss []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range ss {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// postProcessWasm renames the _initialize export to run in a WASM binary.
+func postProcessWasm(wasmPath string) error {
+	data, err := os.ReadFile(wasmPath)
+	if err != nil {
+		return err
+	}
+	if len(data) < 8 {
+		return fmt.Errorf("invalid wasm file: too small")
+	}
+	pos := 8
+	var newData []byte
+	newData = append(newData, data[:8]...)
+	for pos < len(data) {
+		sectionID := data[pos]
+		pos++
+		size, n, err := readVarUint32(data[pos:])
+		if err != nil {
+			return fmt.Errorf("wasm section size: %w", err)
+		}
+		pos += n
+		sectionEnd := pos + int(size)
+		if sectionEnd > len(data) {
+			return fmt.Errorf("wasm section overflows file")
+		}
+		if sectionID == 7 { // Export section
+			exportData := data[pos:sectionEnd]
+			count, n2, err := readVarUint32(exportData)
+			if err != nil {
+				return fmt.Errorf("export count: %w", err)
+			}
+			var newExportSec []byte
+			newExportSec = append(newExportSec, encodeVarUint32(count)...)
+			p := n2
+			found := false
+			for i := uint32(0); i < count; i++ {
+				nameLen, n3, err := readVarUint32(exportData[p:])
+				if err != nil {
+					return fmt.Errorf("export name len: %w", err)
+				}
+				p += n3
+				name := string(exportData[p : p+int(nameLen)])
+				p += int(nameLen)
+				kind := exportData[p]
+				p++
+				idx, n4, err := readVarUint32(exportData[p:])
+				if err != nil {
+					return fmt.Errorf("export idx: %w", err)
+				}
+				p += n4
+				if name == "_initialize" {
+					name = "run"
+					found = true
+				}
+				newExportSec = append(newExportSec, encodeVarUint32(uint32(len(name)))...)
+				newExportSec = append(newExportSec, name...)
+				newExportSec = append(newExportSec, kind)
+				newExportSec = append(newExportSec, encodeVarUint32(idx)...)
+			}
+			if found {
+				newData = append(newData, sectionID)
+				newData = append(newData, encodeVarUint32(uint32(len(newExportSec)))...)
+				newData = append(newData, newExportSec...)
+			} else {
+				newData = append(newData, data[pos-n-1:sectionEnd]...)
+			}
+		} else {
+			newData = append(newData, data[pos-n-1:sectionEnd]...)
+		}
+		pos = sectionEnd
+	}
+	return os.WriteFile(wasmPath, newData, 0o644)
+}
+
+func readVarUint32(data []byte) (uint32, int, error) {
+	var res uint32
+	var shift uint
+	for i, b := range data {
+		res |= uint32(b&0x7F) << shift
+		if b&0x80 == 0 {
+			return res, i + 1, nil
+		}
+		shift += 7
+		if shift >= 32 {
+			break
+		}
+	}
+	return 0, 0, fmt.Errorf("invalid leb128")
+}
+
+func encodeVarUint32(v uint32) []byte {
+	var res []byte
+	for {
+		b := byte(v & 0x7F)
+		v >>= 7
+		if v != 0 {
+			res = append(res, b|0x80)
+		} else {
+			res = append(res, b)
+			break
+		}
+	}
+	return res
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func resolveWorkspace(ws string) (string, error) {
 	if ws != "" {
 		return filepath.Abs(ws)
+	}
+	// Highest priority: when running inside a vegetable, MOHABBAT_VEGETABLE_PATH
+	// points to the .bat file itself. Its directory is (or contains) the workspace root.
+	if vegPath := os.Getenv("MOHABBAT_VEGETABLE_PATH"); vegPath != "" {
+		dir := filepath.Dir(vegPath)
+		for i := 0; i < 6; i++ {
+			if _, err := os.Stat(filepath.Join(dir, "sysroot.toml")); err == nil {
+				return dir, nil
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
 	}
 	exe, err := os.Executable()
 	if err == nil {
@@ -368,22 +1048,6 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string) (string, error) {
 		return "", err
 	}
 	return targetName, nil
-}
-
-func buildMohabbatBrain(ws string) error {
-	target := "wasm32-rusticated-unknown-unknown"
-	cmd := exec.Command("cargo", "build", "-p", "mohabbat", "--release", "--config", filepath.Join(ws, "target", "rusticated-spec", "config.toml"), "--config", "unstable.json-target-spec=true", "--target", target)
-
-	cmd.Env = os.Environ()
-	cmd.Env = upsertEnv(cmd.Env, "RUST_TARGET_PATH", filepath.Join(ws, "target", "rusticated-spec"))
-	cmd.Args = append(cmd.Args, "-Z", "unstable-options")
-	cmd.Dir = ws
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("mohabbat wasm build failed: %w", err)
-	}
-	return nil
 }
 
 func goBuild(ws, pkgDir string, s slot, buildDir string) error {
