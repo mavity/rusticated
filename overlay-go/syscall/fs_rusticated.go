@@ -30,6 +30,7 @@ type overlappedContext struct {
 func (o *Overlapped) isComplete() bool { return o.flags&1 != 0 }
 
 func awaitOverlapped(ctx *overlappedContext)
+func cancelOverlapped(ctx *overlappedContext)
 
 // ── Type definitions (from original syscall/fs_wasip1.go) ──────────────────
 
