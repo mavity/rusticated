@@ -17,29 +17,7 @@ Make sure unit tests are fully isolated. The standard Go unit tests conventions 
 
 ### Unit tests expected (approximate list)
 
-Read [](file:///c%3A/Users/mihai/rustic/WASHMHOST-testing.md#1-1), lines 1 to 100
-
-Read [](file:///c%3A/Users/mihai/rustic/washmhost-go/env_fs.go#100-100), lines 100 to 300
-
-Read [](file:///c%3A/Users/mihai/rustic/washmhost-go/env_fs.go#301-301), lines 301 to 500
-
-Read [](file:///c%3A/Users/mihai/rustic/washmhost-go/env_impl.go#101-101), lines 101 to 274
-
-Read [](file:///c%3A/Users/mihai/rustic/washmhost-go/env_os.go#101-101), lines 101 to 143
-
-Read [](file:///c%3A/Users/mihai/rustic/washmhost-go/env_proc.go#101-101), lines 101 to 300
-
-Read [](file:///c%3A/Users/mihai/rustic/washmhost-go/env_proc.go#291-291), lines 291 to 300
-
-Read [](file:///c%3A/Users/mihai/rustic/washmhost-go/env_proc.go#301-301), lines 301 to 313
-
-Read [](file:///c%3A/Users/mihai/rustic/washmhost-go/env_os.go#1-1), lines 1 to 100
-
-Read [](file:///c%3A/Users/mihai/rustic/washmhost-go/env_os.go#13-13), lines 13 to 20
-
-Read [](file:///c%3A/Users/mihai/rustic/washmhost-go/env_os.go#1-1), lines 1 to 30
-
-Read [](file:///c%3A/Users/mihai/rustic/washmhost-go/env_proc.go#1-1), lines 1 to 100
+Each of the ABI functions should have at least 2-5 unit tests, and the internal helper functions should have at least 1-7 unit tests. The following table lists the expected functions and their corresponding unit test targets.
 
 | Function Name | Signature | Description | Defined In | ABI | Unit Test Target |
 | :--- | :--- | :--- | :--- | :---: | :---: |
