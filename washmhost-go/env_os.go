@@ -4,9 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
-	"math"
 	"os"
-	"runtime"
 	"time"
 
 	"github.com/tetratelabs/wazero/api"
@@ -31,41 +29,6 @@ func (h *HostEnv) sys_get_random(ctx context.Context, m api.Module, stack []uint
 	if ok := m.Memory().Write(ptr, buf); !ok {
 		panic("get_random: out of bounds")
 	}
-}
-
-func (h *HostEnv) sys_yield(ctx context.Context, m api.Module, stack []uint64) {
-	runtime.Gosched()
-}
-
-func (h *HostEnv) sys_pause(ctx context.Context, m api.Module, stack []uint64) {
-	timeoutNs := int64(stack[0])
-	debugLog("HOST pauze start: timeoutNs=%d, PendingOps=%d", timeoutNs, h.PendingOps())
-
-	if timeoutNs == 0 {
-		timeoutNs = math.MaxInt64
-	}
-
-	started := time.Now()
-
-	select {
-	case op := <-h.fileOpsQueue:
-		op()
-		for {
-			select {
-			case nextOp := <-h.fileOpsQueue:
-				nextOp()
-			default:
-				goto done
-			}
-		}
-	case <-time.After(time.Duration(timeoutNs)):
-		debugLog("HOST pauze end: timeout")
-	}
-
-done:
-	elapsed := time.Since(started).Nanoseconds()
-	debugLog("HOST pauze end: elapsed=%d, PendingOps=%d", elapsed, h.PendingOps())
-	stack[0] = uint64(elapsed)
 }
 
 func (h *HostEnv) sys_timer_set(ctx context.Context, m api.Module, stack []uint64) {
