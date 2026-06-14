@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/tetratelabs/wazero/api"
@@ -33,6 +34,7 @@ const (
 )
 
 type DirScan struct {
+	mu        sync.Mutex
 	Leftovers []byte
 	Names     []string
 	File      *os.File
@@ -343,6 +345,7 @@ func (h *HostEnv) sys_dir_read(ctx context.Context, m api.Module, stack []uint64
 
 	state := h.RegisterOp(ovPtr, nil)
 	go func() {
+		scan.mu.Lock()
 		copied := 0
 		var payload []byte
 		for len(scan.Leftovers) < int(lenBytes) && len(scan.Names) > 0 {
@@ -361,6 +364,8 @@ func (h *HostEnv) sys_dir_read(ctx context.Context, m api.Module, stack []uint64
 			scan.Leftovers = scan.Leftovers[toCopy:]
 			copied = toCopy
 		}
+		scan.mu.Unlock()
+
 		h.fileOpsQueue <- func() {
 			defer h.DecOps()
 			if !h.IsOpActive(ovPtr, state.opID) {
