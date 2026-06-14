@@ -138,6 +138,8 @@ func splitNL(buf []byte, dst []string) {
 }
 
 func goenvs() {
+	islibrary = false
+
 	packed := rusticated_get_args(nil, 0)
 	count := int(packed >> 32)
 	bufLen := size(packed & 0xffffffff)
