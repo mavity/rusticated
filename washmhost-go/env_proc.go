@@ -198,8 +198,14 @@ func (h *HostEnv) sys_signal_wait(ctx context.Context, m api.Module, stack []uin
 	signum := uint32(stack[1])
 
 	h.mu.Lock()
-	if _, exists := h.signalWaiters[signum]; exists {
-		h.DecOps()
+	if old, exists := h.signalWaiters[signum]; exists {
+		if !old.isCancelled {
+			old.isCancelled = true
+			delete(h.activeOps, old.ovPtr)
+			h.mu.Unlock()
+			h.DecOps()
+			h.mu.Lock()
+		}
 	}
 	state := h.registerOpLocked(ovPtr, nil)
 	state.signum = signum

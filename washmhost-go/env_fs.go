@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/binary"
-	"fmt"
 	"io"
 	"os"
 	"sync"
@@ -273,14 +272,10 @@ func (h *HostEnv) sys_path_open(ctx context.Context, m api.Module, stack []uint6
 	state := h.RegisterOp(ovPtr, nil)
 	go func() {
 		f, err := os.OpenFile(pathStr, osFlags, 0666)
-		if err != nil && !writeFlag && !createFlag && !truncateFlag && !appendFlag && !createNewFlag {
-			f, err = os.Open(pathStr)
-		}
 		retCode := uint32(0)
 		extResult := uint64(0)
 		if err != nil {
 			debugLog("path_open fail: path=%q flags=%d osFlags=%d err=%v", pathStr, flags, osFlags, err)
-			fmt.Fprintf(os.Stderr, "file_open err: %s %v\n", pathStr, err)
 			retCode = mapErrno(err)
 		} else {
 			h.mu.Lock()
@@ -313,58 +308,82 @@ func (h *HostEnv) sys_dir_read(ctx context.Context, m api.Module, stack []uint64
 	ptr := uint32(stack[2])
 	lenBytes := uint32(stack[3])
 
-	h.mu.Lock()
-	fAny, ok := h.handles[handle]
-	h.mu.Unlock()
-
-	if !ok {
-		writeOverlapped(m, ovPtr, 9, 0, 0) // EBADF
-		return
-	}
-
-	var scan *DirScan
-	switch v := fAny.(type) {
-	case *os.File:
-		names, _ := v.Readdirnames(-1)
-		scan = &DirScan{Names: names, File: v}
-		h.mu.Lock()
-		h.handles[handle] = scan
-		h.mu.Unlock()
-	case *DirScan:
-		scan = v
-	default:
-		writeOverlapped(m, ovPtr, 9, 0, 0)
-		return
-	}
-
-	mem := m.Memory()
-	if _, memOk := mem.Read(ptr, lenBytes); !memOk {
-		writeOverlapped(m, ovPtr, 22, 0, 0) // EINVAL
-		return
-	}
-
 	state := h.RegisterOp(ovPtr, nil)
 	go func() {
-		scan.mu.Lock()
-		copied := 0
+		var scan *DirScan
+		var retCode uint32
+		var copied int
 		var payload []byte
-		for len(scan.Leftovers) < int(lenBytes) && len(scan.Names) > 0 {
-			name := scan.Names[0]
-			scan.Names = scan.Names[1:]
-			scan.Leftovers = append(scan.Leftovers, []byte(name)...)
-			scan.Leftovers = append(scan.Leftovers, 0)
-		}
-		if len(scan.Leftovers) > 0 {
-			toCopy := len(scan.Leftovers)
-			if toCopy > int(lenBytes) {
-				toCopy = int(lenBytes)
+
+		mem := m.Memory()
+		if _, memOk := mem.Read(ptr, lenBytes); !memOk {
+			retCode = 22 // EINVAL
+		} else {
+			h.mu.Lock()
+			fAny, ok := h.handles[handle]
+			if !ok {
+				retCode = 9 // EBADF
+			} else {
+				switch v := fAny.(type) {
+				case *os.File:
+					fi, err := v.Stat()
+					if err != nil {
+						retCode = mapErrno(err)
+					} else if !fi.IsDir() {
+						retCode = 20 // ENOTDIR
+					} else {
+						// Don't read all names yet
+						scan = &DirScan{File: v}
+						h.handles[handle] = scan
+					}
+				case *DirScan:
+					scan = v
+				default:
+					retCode = 9 // EBADF
+				}
 			}
-			payload = make([]byte, toCopy)
-			copy(payload, scan.Leftovers[:toCopy])
-			scan.Leftovers = scan.Leftovers[toCopy:]
-			copied = toCopy
+			h.mu.Unlock()
 		}
-		scan.mu.Unlock()
+
+		if retCode == 0 && scan != nil {
+			scan.mu.Lock()
+			// Refill if necessary
+			for len(scan.Leftovers) < int(lenBytes) {
+				if len(scan.Names) == 0 {
+					names, err := scan.File.Readdirnames(32)
+					if err != nil {
+						if err != io.EOF {
+							retCode = mapErrno(err)
+						}
+						break
+					}
+					scan.Names = names
+				}
+				if len(scan.Names) > 0 {
+					name := scan.Names[0]
+					scan.Names = scan.Names[1:]
+					if name == "." || name == ".." {
+						continue
+					}
+					entry := append([]byte(name), 0)
+					scan.Leftovers = append(scan.Leftovers, entry...)
+				} else {
+					break
+				}
+			}
+
+			if len(scan.Leftovers) > 0 {
+				toCopy := len(scan.Leftovers)
+				if toCopy > int(lenBytes) {
+					toCopy = int(lenBytes)
+				}
+				payload = make([]byte, toCopy)
+				copy(payload, scan.Leftovers[:toCopy])
+				scan.Leftovers = scan.Leftovers[toCopy:]
+				copied = toCopy
+			}
+			scan.mu.Unlock()
+		}
 
 		h.fileOpsQueue <- func() {
 			defer h.DecOps()
@@ -375,14 +394,13 @@ func (h *HostEnv) sys_dir_read(ctx context.Context, m api.Module, stack []uint64
 			delete(h.activeOps, ovPtr)
 			h.mu.Unlock()
 
-			if copied > 0 {
+			if retCode == 0 && copied > 0 {
 				if ok := mem.Write(ptr, payload); !ok {
-					writeOverlapped(m, ovPtr, 22, 0, 0)
-					return
+					retCode = 22 // EINVAL
 				}
 			}
-			debugLog("dir_read: handle=%d copied=%d remaining=%d", handle, copied, len(scan.Names))
-			writeOverlapped(m, ovPtr, 0, 0, uint64(copied))
+			debugLog("dir_read: handle=%d copied=%d retCode=%d", handle, copied, retCode)
+			writeOverlapped(m, ovPtr, retCode, 0, uint64(copied))
 		}
 	}()
 }
