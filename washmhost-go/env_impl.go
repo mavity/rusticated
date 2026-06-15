@@ -207,6 +207,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_process_signal), []api.ValueType{api.ValueTypeI64, api.ValueTypeI32}, []api.ValueType{}).Export("process_signal")
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_signal_wait), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("signal_wait")
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_cancel), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).Export("cancel")
+	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_get_platform_info), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("get_platform_info")
 
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_process_exit), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).Export("process_exit")
 
