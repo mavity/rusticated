@@ -479,6 +479,10 @@ func Getwd() (string, error) {
 	}
 	n := uint32(packed & 0xFFFFFFFF)
 	if n == 0 {
+		pi := GetPlatformInfo()
+		if pi.PathSeparator == '\\' {
+			return "C:\\", nil
+		}
 		return "/", nil
 	}
 	buf := make([]byte, n)
