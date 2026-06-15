@@ -1,5 +1,5 @@
 [workspace]
-members = ["demo", "brot", "mohabbat", "demo/loch", "kabibi", "prebuild"]
+members = ["demo", "brot", "demo/loch", "kabibi"]
 
 
 [workspace.package]

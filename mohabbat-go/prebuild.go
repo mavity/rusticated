@@ -1,9 +1,6 @@
-//go:build !wasip1
-
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -227,70 +224,46 @@ func buildTargetSpecs(ws string) error {
 			"-Z", "build-std=core,alloc,compiler_builtins",
 			"-Z", "build-std-features=compiler-builtins-mem",
 			"--config", "unstable.json-target-spec=true",
-			"--target", targetArg,
-			"--message-format=json")
+			"--target", targetArg)
 		buildCmd.Env = upsertEnv(os.Environ(), "RUSTFLAGS", rustflags)
 		buildCmd.Env = upsertEnv(buildCmd.Env, "RUST_TARGET_PATH", rustTargetPath)
 		buildCmd.Dir = ws
+		buildCmd.Stdout = os.Stdout
 		buildCmd.Stderr = os.Stderr
-		var buildOut bytes.Buffer
-		buildCmd.Stdout = &buildOut
 
 		fmt.Printf("🍆    Building sysroot for %s\n", customName)
 		if err := buildCmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "🍆    sysroot build failed for %s\n", customName)
-			for _, line := range strings.Split(buildOut.String(), "\n") {
-				var v map[string]interface{}
-				if json.Unmarshal([]byte(line), &v) == nil {
-					if v["reason"] == "compiler-message" {
-						if msg, ok := v["message"].(map[string]interface{}); ok {
-							if rendered, ok := msg["rendered"].(string); ok {
-								fmt.Fprint(os.Stderr, rendered)
-							}
-						}
-					}
-				}
-			}
-			return fmt.Errorf("sysroot build failed for %s", customName)
+			return fmt.Errorf("sysroot build failed for %s: %w", customName, err)
 		}
 
-		// Parse JSON output to collect rlib paths.
+		// Collect rlib paths by searching the deps directory.
 		paths := map[string]string{}
 		depsDir := filepath.Join(ws, "target", customName, "release", "deps")
-		for _, line := range strings.Split(buildOut.String(), "\n") {
-			var v map[string]interface{}
-			if json.Unmarshal([]byte(line), &v) != nil {
+		entries, err := os.ReadDir(depsDir)
+		if err != nil {
+			return fmt.Errorf("read deps dir %s: %w", depsDir, err)
+		}
+
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".rlib") {
 				continue
 			}
-			if v["reason"] != "compiler-artifact" {
-				continue
-			}
-			filenames, _ := v["filenames"].([]interface{})
-			for _, f := range filenames {
-				filename, _ := f.(string)
-				if !strings.HasSuffix(filename, ".rlib") {
-					continue
-				}
-				basefile := filepath.Base(filename)
-				var crateName string
-				if basefile == "libstd.rlib" {
-					crateName = "std"
-				} else if strings.HasPrefix(basefile, "lib") {
-					stripped := basefile[3:]
-					if idx := strings.LastIndex(stripped, "-"); idx >= 0 {
-						crateName = stripped[:idx]
-					} else {
-						crateName = strings.TrimSuffix(stripped, ".rlib")
-					}
+			filename := entry.Name()
+			var crateName string
+			if filename == "libstd.rlib" {
+				crateName = "std"
+			} else if strings.HasPrefix(filename, "lib") {
+				stripped := filename[3:]
+				if idx := strings.LastIndex(stripped, "-"); idx >= 0 {
+					crateName = stripped[:idx]
 				} else {
-					continue
+					crateName = strings.TrimSuffix(stripped, ".rlib")
 				}
-				absPath, err := filepath.EvalSymlinks(filename)
-				if err != nil {
-					absPath = filename
-				}
-				paths[crateName] = filepath.ToSlash(cleanWindowsPath(absPath))
+			} else {
+				continue
 			}
+			absPath, _ := filepath.Abs(filepath.Join(depsDir, filename))
+			paths[crateName] = filepath.ToSlash(cleanWindowsPath(absPath))
 		}
 
 		if _, ok := paths["std"]; !ok {
@@ -428,12 +401,62 @@ func cleanWindowsPath(p string) string {
 // to their rusticated counterparts in overlay-go/.
 func generateGoOverlay(ws, goroot string) error {
 	overlayDir := filepath.Join(ws, "overlay-go")
+	genDir := filepath.Join(ws, "target", "overlay-gen")
+
 	canon := func(p string) string {
 		abs, err := filepath.EvalSymlinks(p)
 		if err != nil {
 			abs = p
 		}
 		return filepath.ToSlash(cleanWindowsPath(abs))
+	}
+
+	// Algorithmic patch for src/path/filepath/path.go
+	if err := os.MkdirAll(filepath.Join(genDir, "path/filepath"), 0755); err != nil {
+		return fmt.Errorf("failed to create gen dir: %w", err)
+	}
+	pathGoSrc := filepath.Join(goroot, "src/path/filepath/path.go")
+	pathGoContent, err := os.ReadFile(pathGoSrc)
+	if err != nil {
+		return fmt.Errorf("failed to read src/path/filepath/path.go: %w", err)
+	}
+	pathGoStr := string(pathGoContent)
+	targetConst := "const (\n\tSeparator     = os.PathSeparator\n\tListSeparator = os.PathListSeparator\n)"
+	if !strings.Contains(pathGoStr, targetConst) {
+		targetConst = strings.ReplaceAll(targetConst, "\n", "\r\n")
+	}
+	if !strings.Contains(pathGoStr, targetConst) {
+		return fmt.Errorf("could not find Separator const block in path.go")
+	}
+	modifiedPathGo := strings.Replace(pathGoStr, targetConst,
+		strings.Replace(targetConst, "const (", "var (", 1), 1)
+	genPathGo := filepath.Join(genDir, "path/filepath/path.go")
+	if err := os.WriteFile(genPathGo, []byte(modifiedPathGo), 0644); err != nil {
+		return fmt.Errorf("failed to write patched path.go: %w", err)
+	}
+
+	// Algorithmic patch for src/net/http/fs.go
+	if err := os.MkdirAll(filepath.Join(genDir, "net/http"), 0755); err != nil {
+		return fmt.Errorf("failed to create gen dir: %w", err)
+	}
+	fsGoSrc := filepath.Join(goroot, "src/net/http/fs.go")
+	fsGoContent, err := os.ReadFile(fsGoSrc)
+	if err != nil {
+		return fmt.Errorf("failed to read src/net/http/fs.go: %w", err)
+	}
+	fsGoStr := string(fsGoContent)
+	targetFunc := "func mapOpenError(originalErr error, name string, sep rune, stat func(string) (fs.FileInfo, error)) error {"
+	if !strings.Contains(fsGoStr, targetFunc) {
+		targetFunc = strings.ReplaceAll(targetFunc, "\n", "\r\n")
+	}
+	if !strings.Contains(fsGoStr, targetFunc) {
+		return fmt.Errorf("could not find mapOpenError signature in fs.go")
+	}
+	modifiedFsGo := strings.Replace(fsGoStr, targetFunc,
+		strings.Replace(targetFunc, "sep rune,", "sep byte,", 1), 1)
+	genFsGo := filepath.Join(genDir, "net/http/fs.go")
+	if err := os.WriteFile(genFsGo, []byte(modifiedFsGo), 0644); err != nil {
+		return fmt.Errorf("failed to write patched fs.go: %w", err)
 	}
 
 	replacements := [][2]string{
@@ -454,6 +477,12 @@ func generateGoOverlay(ws, goroot string) error {
 		{"src/internal/syscall/unix/nonblocking_wasip1.go", canon(filepath.Join(overlayDir, "internal/syscall/unix/nonblocking_rusticated.go"))},
 		{"src/internal/syscall/unix/fcntl_wasip1.go", canon(filepath.Join(overlayDir, "internal/syscall/unix/fcntl_rusticated.go"))},
 		{"src/internal/syscall/unix/net_wasip1.go", canon(filepath.Join(overlayDir, "internal/syscall/unix/net_rusticated.go"))},
+		// path
+		{"src/os/path_unix.go", canon(filepath.Join(overlayDir, "os/path_unix.go"))},
+		// filepath (generated patch)
+		{"src/path/filepath/path.go", canon(genPathGo)},
+		// net/http (generated patch)
+		{"src/net/http/fs.go", canon(genFsGo)},
 	}
 
 	var entries strings.Builder

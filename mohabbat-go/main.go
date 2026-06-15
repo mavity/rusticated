@@ -134,27 +134,9 @@ func modeBuild(ws string) error {
 		return err
 	}
 
-	if prebuildFn != nil {
-		fmt.Println("🍆  Running prebuild (target specs + sysroot + overlay)...")
-		if err := prebuildFn(ws); err != nil {
-			return fmt.Errorf("prebuild: %w", err)
-		}
-	} else {
-		// Running as WASM brain: ensure prebuild artifacts exist.
-		configPath := filepath.Join(ws, "target", "rusticated-spec", "config.toml")
-		overlayPath := filepath.Join(ws, "target", "overlay.json")
-		if !fileExists(configPath) || !fileExists(overlayPath) {
-			fmt.Println("🍆  Prebuild artifacts missing, running cargo run -p prebuild...")
-			cmd := exec.Command("cargo", "run", "-p", "prebuild")
-			cmd.Dir = ws
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			if err := cmd.Run(); err != nil {
-				return fmt.Errorf("cargo run -p prebuild: %w", err)
-			}
-		} else {
-			fmt.Println("🍆  Prebuild artifacts present, skipping target spec regeneration.")
-		}
+	fmt.Println("🍆  Running prebuild (target specs + sysroot + overlay)...")
+	if err := runPrebuild(ws); err != nil {
+		return fmt.Errorf("prebuild: %w", err)
 	}
 
 	fmt.Println("🍆  Building brot (cargo) and washmhost-go for Modern Four...")
@@ -358,6 +340,11 @@ func assembleVegetable(ws, brainPath, buildDir, outputPath string) error {
 
 // buildProjectToWasm auto-detects Go vs Rust project and builds to WASM.
 func buildProjectToWasm(ws, projectDir, outputWasm string) error {
+	// Unconditionally run prebuild to ensure target specs and overlay.json are up to date.
+	if err := runPrebuild(ws); err != nil {
+		return fmt.Errorf("prebuild: %w", err)
+	}
+
 	// Resolve projectDir: first relative to CWD, then relative to workspace root.
 	absProject, err := filepath.Abs(projectDir)
 	if err != nil || !fileExists(absProject) {
@@ -376,9 +363,6 @@ func buildProjectToWasm(ws, projectDir, outputWasm string) error {
 // buildGoProjectWasm compiles a Go project to rusticated WASM.
 func buildGoProjectWasm(ws, absProjectDir, outputWasm string) error {
 	overlayPath := filepath.Join(ws, "target", "overlay.json")
-	if !fileExists(overlayPath) {
-		return fmt.Errorf("overlay.json not found at %s — run Mode 1 (no args) first", overlayPath)
-	}
 	goroot, err := resolveGoroot(ws)
 	if err != nil {
 		return fmt.Errorf("cannot resolve GOROOT: %w", err)
@@ -447,9 +431,6 @@ func buildRustProjectWasm(ws, absProjectDir, outputWasm string) error {
 // buildBrainWasm compiles mohabbat-go itself as the WASM brain.
 func buildBrainWasm(ws, outputWasm string) error {
 	overlayPath := filepath.Join(ws, "target", "overlay.json")
-	if !fileExists(overlayPath) {
-		return fmt.Errorf("overlay.json not found at %s — run prebuild first", overlayPath)
-	}
 	goroot, err := resolveGoroot(ws)
 	if err != nil {
 		return fmt.Errorf("cannot resolve GOROOT for brain build: %w", err)
