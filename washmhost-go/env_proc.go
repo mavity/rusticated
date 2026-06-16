@@ -63,13 +63,14 @@ func (h *HostEnv) sys_process_spawn(ctx context.Context, m api.Module, stack []u
 				envVars = append(envVars, string(parts[i]))
 			case 2:
 				if cwd == "" {
-					cwd = string(parts[i])
+					cwd = h.translatePath(string(parts[i]))
 				}
 			case 3:
 				stdio = append(stdio, string(parts[i]))
 			}
 		}
 
+		program = h.translatePath(program)
 		cmd := exec.Command(program, args...)
 		mergedEnv := append([]string{}, os.Environ()...)
 		if len(envVars) > 0 {

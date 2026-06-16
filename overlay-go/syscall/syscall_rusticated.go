@@ -465,7 +465,14 @@ func StartProcess(argv0 string, argv []string, attr *ProcAttr) (pid int, handle 
 			} else if h == ^uintptr(0) {
 				appendStr("null")
 			} else {
-				appendStr("fd:" + strconv.Itoa(int(h)))
+				// Translate guest FD number to host handle number.
+				// attr.Files contains guest FDs, but the host process_spawn
+				// "fd:X" spec expects host handle IDs, which are a separate namespace.
+				hostH, errno := fdToHandle(int32(h))
+				if errno != 0 {
+					return 0, 0, errnoErr(errno)
+				}
+				appendStr("fd:" + strconv.Itoa(int(hostH)))
 			}
 		}
 	} else {
