@@ -100,11 +100,11 @@ func stringFromBuf(b []byte) string {
 	return string(b[:n])
 }
 
-//go:linkname atomicLoad runtime/internal/atomic.Load
+//go:linkname atomicLoad internal/runtime/atomic.Load
 func atomicLoad(ptr *uint32) uint32
 
-//go:linkname atomicStore runtime/internal/atomic.Store
+//go:linkname atomicStore internal/runtime/atomic.Store
 func atomicStore(ptr *uint32, val uint32)
 
-//go:linkname atomicCompareAndSwap runtime/internal/atomic.Cas
+//go:linkname atomicCompareAndSwap internal/runtime/atomic.Cas
 func atomicCompareAndSwap(ptr *uint32, old, new uint32) bool
