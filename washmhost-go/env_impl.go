@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -14,6 +15,8 @@ import (
 	"github.com/tetratelabs/wazero/api"
 	"golang.org/x/term"
 )
+
+const sigwinch = syscall.Signal(0x1c) // SIGWINCH (28)
 
 type HostEnv struct {
 	mu             sync.Mutex
@@ -57,7 +60,12 @@ func NewHostEnv() *HostEnv {
 	env.handles[1] = os.Stdout
 	env.handles[2] = os.Stderr
 
-	signal.Notify(env.signals, syscall.SIGINT, syscall.SIGTERM)
+	var notifySigs = []os.Signal{syscall.SIGINT, syscall.SIGTERM}
+	if runtime.GOOS != "windows" {
+		notifySigs = append(notifySigs, sigwinch)
+	}
+	signal.Notify(env.signals, notifySigs...)
+
 	go func() {
 		for sig := range env.signals {
 			var signum uint32
@@ -66,23 +74,52 @@ func NewHostEnv() *HostEnv {
 				signum = 2
 			case syscall.SIGTERM:
 				signum = 15
+			case sigwinch:
+				signum = 27
 			}
 			if signum != 0 {
-				env.mu.Lock()
-				state, ok := env.signalWaiters[signum]
-				if ok {
-					delete(env.signalWaiters, signum)
-					env.mu.Unlock()
-					env.pendingSignals <- state
-					env.fileOpsQueue <- func() {}
-				} else {
-					env.mu.Unlock()
-				}
+				env.notifySignal(signum)
 			}
 		}
 	}()
 
+	if runtime.GOOS == "windows" {
+		go func() {
+			lastW, lastH, _ := term.GetSize(int(os.Stdin.Fd()))
+			for {
+				time.Sleep(500 * time.Millisecond)
+				w, h2, err := term.GetSize(int(os.Stdin.Fd()))
+				if err == nil && (w != lastW || h2 != lastH) {
+					lastW, lastH = w, h2
+					env.notifySignal(27)
+				}
+			}
+		}()
+	}
+
 	return env
+}
+
+func (h *HostEnv) Close() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.ttyRawState != nil {
+		_ = term.Restore(h.ttyRawFd, h.ttyRawState)
+		h.ttyRawState = nil
+	}
+}
+
+func (h *HostEnv) notifySignal(signum uint32) {
+	h.mu.Lock()
+	state, ok := h.signalWaiters[signum]
+	if ok {
+		delete(h.signalWaiters, signum)
+		h.mu.Unlock()
+		h.pendingSignals <- state
+		h.fileOpsQueue <- func() {}
+	} else {
+		h.mu.Unlock()
+	}
 }
 
 func (h *HostEnv) IncOps() {
@@ -217,6 +254,9 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_signal_wait), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("signal_wait")
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_cancel), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).Export("cancel")
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_get_platform_info), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("get_platform_info")
+
+	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_tty_set_mode), []api.ValueType{api.ValueTypeI64, api.ValueTypeI32}, []api.ValueType{}).Export("tty_set_mode")
+	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_tty_get_size), []api.ValueType{api.ValueTypeI64}, []api.ValueType{api.ValueTypeI32}).Export("tty_get_size")
 
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_process_exit), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).Export("process_exit")
 
