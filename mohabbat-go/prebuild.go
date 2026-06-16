@@ -104,8 +104,10 @@ func buildTargetSpecs(ws string) error {
 
 		if strings.Contains(baseName, "-linux-gnu") {
 			spec["os"] = "linux"
-			spec["position-independent-executables"] = false
-			spec["relocation-model"] = "static"
+			spec["position-independent-executables"] = true
+			spec["relocation-model"] = "pic"
+			extendPreLinkArgs(spec, "gnu-lld", []string{"-pie"})
+			extendPreLinkArgs(spec, "gnu-lld-cc", []string{"-pie"})
 		}
 
 		// Set target-family based on base_target.
