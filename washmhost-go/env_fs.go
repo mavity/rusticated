@@ -32,9 +32,15 @@ const (
 	statKindSymlink  = 3
 )
 
+type dirEntryInfo struct {
+	Name string
+	Kind uint32
+}
+
 type DirScan struct {
 	mu        sync.Mutex
 	Leftovers []byte
+	Entries   []dirEntryInfo
 	Names     []string
 	File      *os.File
 }
@@ -191,6 +197,7 @@ func (h *HostEnv) sys_write(ctx context.Context, m api.Module, stack []uint64) {
 		n, err := f.Write(dataCopy)
 		retCode := uint32(0)
 		if err != nil {
+			debugLog("sys_write fail: handle=%d err=%v", handle, err)
 			retCode = mapErrno(err)
 		}
 		h.fileOpsQueue <- func() {
@@ -242,19 +249,32 @@ func (h *HostEnv) sys_path_open(ctx context.Context, m api.Module, stack []uint6
 		return
 	}
 	pathStr := string(buf)
-	writeFlag := (flags & 2) != 0
-	createFlag := (flags & 4) != 0
-	truncateFlag := (flags & 8) != 0
-	appendFlag := (flags & 16) != 0
-	createNewFlag := (flags & 32) != 0
+
+	// WASM flag mapping (standard for Go's wasip1/js):
+	// O_RDONLY = 0
+	// O_WRONLY = 1
+	// O_RDWR   = 2
+	// O_CREATE = 0x200 (512)
+	// O_TRUNC  = 0x40  (64) - note: this matches 577 = 512+64+1
+	// O_APPEND = 0x400 (1024)
+	// O_EXCL   = 0x800 (2048)
+
+	rdwr := (flags & 3) == 2
+	writeOnly := (flags & 3) == 1
+	createFlag := (flags & 0x200) != 0
+	truncateFlag := (flags & 0x40) != 0
+	appendFlag := (flags & 0x400) != 0
+	exclFlag := (flags & 0x800) != 0
+
+	debugLog("DEBUG HOST path_open: path=%s flags=%d RDWR=%v WRONLY=%v CREATE=%v TRUNC=%v", pathStr, flags, rdwr, writeOnly, createFlag, truncateFlag)
 
 	osFlags := 0
-	if (flags&1) != 0 && writeFlag {
+	if rdwr {
 		osFlags |= os.O_RDWR
-	} else if writeFlag {
+	} else if writeOnly {
 		osFlags |= os.O_WRONLY
 	} else {
-		osFlags |= os.O_RDONLY
+		// O_RDONLY is default 0
 	}
 	if createFlag {
 		osFlags |= os.O_CREATE
@@ -265,13 +285,18 @@ func (h *HostEnv) sys_path_open(ctx context.Context, m api.Module, stack []uint6
 	if appendFlag {
 		osFlags |= os.O_APPEND
 	}
-	if createNewFlag {
-		osFlags |= os.O_EXCL | os.O_CREATE
+	if exclFlag {
+		osFlags |= os.O_EXCL
 	}
+
+	debugLog("DEBUG HOST path_open: osFlags=%d", osFlags)
 
 	state := h.RegisterOp(ovPtr, nil)
 	go func() {
 		f, err := os.OpenFile(pathStr, osFlags, 0666)
+		if err != nil && !rdwr && !writeOnly && !createFlag && !truncateFlag && !appendFlag && !exclFlag {
+			f, err = os.Open(pathStr)
+		}
 		retCode := uint32(0)
 		extResult := uint64(0)
 		if err != nil {
@@ -308,6 +333,13 @@ func (h *HostEnv) sys_dir_read(ctx context.Context, m api.Module, stack []uint64
 	ptr := uint32(stack[2])
 	lenBytes := uint32(stack[3])
 
+	mem := m.Memory()
+	if _, memOk := mem.Read(ptr, lenBytes); !memOk {
+		writeOverlapped(m, ovPtr, 22, 0, 0) // EINVAL
+		return
+	}
+	debugLog("dir_read: handle=%d ptr=%d len=%d", handle, ptr, lenBytes)
+
 	state := h.RegisterOp(ovPtr, nil)
 	go func() {
 		var scan *DirScan
@@ -315,57 +347,65 @@ func (h *HostEnv) sys_dir_read(ctx context.Context, m api.Module, stack []uint64
 		var copied int
 		var payload []byte
 
-		mem := m.Memory()
-		if _, memOk := mem.Read(ptr, lenBytes); !memOk {
-			retCode = 22 // EINVAL
+		h.mu.Lock()
+		fAny, ok := h.handles[handle]
+		if !ok {
+			retCode = 9 // EBADF
 		} else {
-			h.mu.Lock()
-			fAny, ok := h.handles[handle]
-			if !ok {
-				retCode = 9 // EBADF
-			} else {
-				switch v := fAny.(type) {
-				case *os.File:
-					fi, err := v.Stat()
-					if err != nil {
-						retCode = mapErrno(err)
-					} else if !fi.IsDir() {
-						retCode = 20 // ENOTDIR
-					} else {
-						// Don't read all names yet
-						scan = &DirScan{File: v}
-						h.handles[handle] = scan
-					}
-				case *DirScan:
-					scan = v
-				default:
-					retCode = 9 // EBADF
+			switch v := fAny.(type) {
+			case *os.File:
+				fi, err := v.Stat()
+				if err != nil {
+					retCode = mapErrno(err)
+				} else if !fi.IsDir() {
+					retCode = 20 // ENOTDIR
+				} else {
+					// Don't read all names yet
+					scan = &DirScan{File: v}
+					h.handles[handle] = scan
 				}
+			case *DirScan:
+				scan = v
+			default:
+				retCode = 9 // EBADF
 			}
-			h.mu.Unlock()
 		}
+		h.mu.Unlock()
 
 		if retCode == 0 && scan != nil {
 			scan.mu.Lock()
 			// Refill if necessary
 			for len(scan.Leftovers) < int(lenBytes) {
-				if len(scan.Names) == 0 {
-					names, err := scan.File.Readdirnames(32)
+				if len(scan.Entries) == 0 {
+					// Use ReadDir to get kind information without individual stats
+					des, err := scan.File.ReadDir(32)
 					if err != nil {
 						if err != io.EOF {
 							retCode = mapErrno(err)
 						}
 						break
 					}
-					scan.Names = names
+					for _, de := range des {
+						kind := uint32(statKindUnknown)
+						if de.IsDir() {
+							kind = statKindDir
+						} else if de.Type()&os.ModeSymlink != 0 {
+							kind = statKindSymlink
+						} else {
+							kind = statKindFile
+						}
+						scan.Entries = append(scan.Entries, dirEntryInfo{Name: de.Name(), Kind: kind})
+					}
 				}
-				if len(scan.Names) > 0 {
-					name := scan.Names[0]
-					scan.Names = scan.Names[1:]
-					if name == "." || name == ".." {
+				if len(scan.Entries) > 0 {
+					ent := scan.Entries[0]
+					scan.Entries = scan.Entries[1:]
+					if ent.Name == "." || ent.Name == ".." {
 						continue
 					}
-					entry := append([]byte(name), 0)
+					// Encoding: [1 byte kind][N bytes name][0 byte terminator]
+					entry := append([]byte{byte(ent.Kind)}, []byte(ent.Name)...)
+					entry = append(entry, 0)
 					scan.Leftovers = append(scan.Leftovers, entry...)
 				} else {
 					break
@@ -420,6 +460,7 @@ func (h *HostEnv) sys_path_stat(ctx context.Context, m api.Module, stack []uint6
 		return
 	}
 	pathStr := string(buf)
+	debugLog("path_stat: path=%q flags=%d", pathStr, flags)
 
 	state := h.RegisterOp(ovPtr, nil)
 	go func() {
@@ -434,11 +475,13 @@ func (h *HostEnv) sys_path_stat(ctx context.Context, m api.Module, stack []uint6
 		extResult := uint64(64)
 		var payload []byte
 		if err != nil {
+			debugLog("path_stat fail: path=%q err=%v", pathStr, err)
 			retCode = mapErrno(err)
 		} else if outLen < 64 {
 			retCode = 34 // ERANGE
 		} else {
 			payload = marshalAbiStat(createAbiStat(fi))
+			debugLog("path_stat ok: path=%q kind=%d mode=%o", pathStr, createAbiStat(fi).Kind, createAbiStat(fi).Mode)
 		}
 		h.fileOpsQueue <- func() {
 			defer h.DecOpsFor(state)

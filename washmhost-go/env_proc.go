@@ -46,11 +46,12 @@ func (h *HostEnv) sys_process_spawn(ctx context.Context, m api.Module, stack []u
 		args := []string{}
 		envVars := []string{}
 		cwd := ""
-		section := 0 // 0=args, 1=env, 2=cwd
+		stdio := []string{}
+		section := 0 // 0=args, 1=env, 2=cwd, 3=stdio
 		for i := 1; i < len(parts); i++ {
 			if len(parts[i]) == 0 {
 				section++
-				if section > 2 {
+				if section > 3 {
 					break
 				}
 				continue
@@ -64,6 +65,8 @@ func (h *HostEnv) sys_process_spawn(ctx context.Context, m api.Module, stack []u
 				if cwd == "" {
 					cwd = string(parts[i])
 				}
+			case 3:
+				stdio = append(stdio, string(parts[i]))
 			}
 		}
 
@@ -92,23 +95,101 @@ func (h *HostEnv) sys_process_spawn(ctx context.Context, m api.Module, stack []u
 		if cwd != "" {
 			cmd.Dir = cwd
 		}
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+
+		if len(stdio) > 0 {
+			var pipeHandles []uint64
+			for i, spec := range stdio {
+				var f *os.File
+				if spec == "inherit" {
+					switch i {
+					case 0:
+						f = os.Stdin
+					case 1:
+						f = os.Stdout
+					case 2:
+						f = os.Stderr
+					}
+				} else if spec == "pipe" {
+					pr, pw, _ := os.Pipe()
+					h.mu.Lock()
+					ph := h.nextHandle
+					h.nextHandle++
+					if i == 0 {
+						h.handles[ph] = pw // Parent writes to pw, child reads from pr
+						f = pr
+					} else {
+						h.handles[ph] = pr // Parent reads from pr, child writes to pw
+						f = pw
+					}
+					h.mu.Unlock()
+					pipeHandles = append(pipeHandles, ph)
+				} else if spec == "null" {
+					f, _ = os.OpenFile(os.DevNull, os.O_RDWR, 0)
+				} else if strings.HasPrefix(spec, "fd:") {
+					handleStr := spec[3:]
+					var handle uint64
+					fmt.Sscanf(handleStr, "%d", &handle)
+					h.mu.Lock()
+					fAny, ok := h.handles[handle]
+					h.mu.Unlock()
+					if ok {
+						if ff, ok := fAny.(*os.File); ok {
+							f = ff
+						}
+					}
+				}
+				if f != nil {
+					switch i {
+					case 0:
+						cmd.Stdin = f
+					case 1:
+						cmd.Stdout = f
+					case 2:
+						cmd.Stderr = f
+					default:
+						cmd.ExtraFiles = append(cmd.ExtraFiles, f)
+					}
+				}
+			}
+			// Pack pipe handles into resultExt (up to 3 handles, 16-bits each)
+			// resultExt = (h3 << 32) | (h2 << 16) | h1
+			var resExt uint64
+			for j, ph := range pipeHandles {
+				if j < 4 {
+					resExt |= (ph & 0xFFFF) << (j * 16)
+				}
+			}
+			state.reserved = resExt
+		} else {
+			cmd.Stdin = os.Stdin
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+		}
 
 		err := cmd.Start()
-		retCode := uint32(0)
-		extResult := uint64(0)
 		if err != nil {
-			retCode = mapErrno(err)
-		} else {
-			h.mu.Lock()
-			h.nextHandle++
-			handle := h.nextHandle
-			h.handles[handle] = cmd
-			h.mu.Unlock()
-			extResult = handle
+			h.fileOpsQueue <- func() {
+				defer h.DecOps()
+				if !h.IsOpActive(ovPtr, state.opID) {
+					return
+				}
+				h.mu.Lock()
+				delete(h.activeOps, ovPtr)
+				h.mu.Unlock()
+				writeOverlapped(m, ovPtr, mapErrno(err), 0, 0)
+			}
+			return
 		}
+
+		h.mu.Lock()
+		ph := h.nextHandle
+		h.nextHandle++
+		h.handles[ph] = cmd
+		h.mu.Unlock()
+
+		// resultExt = (pipeHandles << 32) | childHandle
+		extResult := ph | (state.reserved << 32)
+
 		h.fileOpsQueue <- func() {
 			defer h.DecOpsFor(state)
 			if !h.IsOpActive(ovPtr, state.opID) {
@@ -117,7 +198,7 @@ func (h *HostEnv) sys_process_spawn(ctx context.Context, m api.Module, stack []u
 			h.mu.Lock()
 			delete(h.activeOps, ovPtr)
 			h.mu.Unlock()
-			writeOverlapped(m, ovPtr, retCode, 0, extResult)
+			writeOverlapped(m, ovPtr, 0, 0, extResult)
 		}
 	}()
 }
@@ -325,4 +406,27 @@ func (h *HostEnv) sys_get_env(ctx context.Context, m api.Module, stack []uint64)
 
 	res := (count << 32) | uint64(bytesNeeded)
 	stack[0] = api.EncodeI64(int64(res))
+}
+
+func (h *HostEnv) sys_process_pipe(ctx context.Context, m api.Module, stack []uint64) {
+	ovPtr := uint32(stack[0])
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		writeOverlapped(m, ovPtr, mapErrno(err), 0, 0)
+		return
+	}
+
+	h.mu.Lock()
+	rh := h.nextHandle
+	h.nextHandle++
+	h.handles[rh] = r
+
+	wh := h.nextHandle
+	h.nextHandle++
+	h.handles[wh] = w
+	h.mu.Unlock()
+
+	res := (uint64(wh) << 32) | uint64(rh)
+	writeOverlapped(m, ovPtr, 0, 0, res)
 }
