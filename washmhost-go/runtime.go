@@ -9,6 +9,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/sys"
@@ -44,8 +45,20 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 		WithArgs(args...).
 		WithStdout(os.Stdout).
 		WithStderr(os.Stderr).
-		WithStdin(os.Stdin).
-		WithFSConfig(wazero.NewFSConfig().WithDirMount(".", "/").WithDirMount("C:\\", "C:\\"))
+		WithStdin(os.Stdin)
+
+	// Pass all host environment variables to the guest.
+	for _, env := range os.Environ() {
+		parts := strings.SplitN(env, "=", 2)
+		if len(parts) == 2 && parts[0] != "" {
+			cfg = cfg.WithEnv(parts[0], parts[1])
+		}
+	}
+
+	cfg = cfg.WithFSConfig(wazero.NewFSConfig().
+		WithDirMount(".", "/").
+		WithDirMount("C:\\", "C:\\").
+		WithDirMount(os.TempDir(), "/tmp"))
 
 	// Since we provide rusticated ABI bindings via `hEnv.Register`, Wazero will resolve imports
 	mod, err := r.InstantiateModule(ctx, decoded, cfg)

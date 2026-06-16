@@ -30,8 +30,9 @@ func main() {
 	os.Stdout.Sync()
 
 	fmt.Printf("PWD=%s\n", os.Getenv("PWD"))
+	fmt.Printf("TempDir=%s\n", os.TempDir())
 
-	for _, dir := range []string{"."} {
+	for _, dir := range []string{".", os.TempDir()} {
 		if dir == "" {
 			continue
 		}

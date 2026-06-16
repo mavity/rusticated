@@ -170,23 +170,34 @@ func rusticated_get_cwd(strPtr *byte, strLen uint32) uint64
 //go:wasmimport env set_cwd
 func rusticated_set_cwd(strPtr *byte, strLen uint32) uint32
 
+//go:wasmimport env path_remove
+//go:noescape
+func rusticated_path_remove(overlapped unsafe.Pointer, pathPtr *byte, pathLen uint32)
+
+//go:wasmimport env path_mkdir
+//go:noescape
+func rusticated_path_mkdir(overlapped unsafe.Pointer, pathPtr *byte, pathLen uint32, mode uint32)
+
+//go:wasmimport env path_rename
+//go:noescape
+func rusticated_path_rename(overlapped unsafe.Pointer, oldPtr *byte, oldLen uint32, newPtr *byte, newLen uint32)
+
 // ── fd <-> handle mapping ────────────────────────────────────────────────
 
-var (
-	fdTable        [1024]uint64
-	fdInUse        [1024]bool
-	fdPaths        [1024]string // absolute path used to open this fd (for Fstat)
-	dirReadPending [1024][]byte
-)
-
-func init() {
-	fdTable[0] = 0
-	fdTable[1] = 1
-	fdTable[2] = 2
-	fdInUse[0] = true
-	fdInUse[1] = true
-	fdInUse[2] = true
+type fdEntry struct {
+	handle  uint64
+	path    string
+	pending []byte // buffered partial dirRead data
 }
+
+var (
+	fdMap = map[int32]fdEntry{
+		0: {handle: 0},
+		1: {handle: 1},
+		2: {handle: 2},
+	}
+	fdNext int32 = 3
+)
 
 func writeDirentEntry(dst []byte, next uint64, name []byte, kind byte) int {
 	entryLen := 24 + len(name)
@@ -233,25 +244,26 @@ func splitNullNames(data []byte) (names [][]byte, remainder []byte) {
 }
 
 func allocFD(handle uint64, path string) (int32, Errno) {
-	for i := 3; i < len(fdTable); i++ {
-		if !fdInUse[i] {
-			fdTable[i] = handle
-			fdInUse[i] = true
-			fdPaths[i] = path
-			// println("DEBUG: allocFD fd", i, "handle", handle, "path", path)
-			return int32(i), 0
+	fd := fdNext
+	for {
+		if fd > 1<<20 { // guard: over a million open FDs is a leak
+			return -1, EMFILE
 		}
+		if _, exists := fdMap[fd]; !exists {
+			break
+		}
+		fd++
 	}
-	return -1, EMFILE
+	fdNext = fd + 1
+	fdMap[fd] = fdEntry{handle: handle, path: path}
+	return fd, 0
 }
 
 func fdToHandle(fd int32) (uint64, Errno) {
-	if fd < 0 || int(fd) >= len(fdTable) || !fdInUse[fd] {
-		// println("DEBUG: fdToHandle FAILED fd", fd)
-		return 0, EBADF
+	if entry, ok := fdMap[fd]; ok {
+		return entry.handle, 0
 	}
-	// println("DEBUG: fdToHandle fd", fd, "-> handle", fdTable[fd])
-	return fdTable[fd], 0
+	return 0, EBADF
 }
 
 // ── Open / Close ────────────────────────────────────────────────────────
@@ -346,8 +358,8 @@ func Openat(dirFd int, path string, openmode int, perm uint32) (int, error) {
 	if isAbs(path) || dirFd == -100 { // -100 is AT_FDCWD
 		return Open(path, openmode, perm)
 	}
-	if dirFd >= 0 && dirFd < len(fdPaths) && fdPaths[dirFd] != "" {
-		full := joinPaths(fdPaths[dirFd], path)
+	if entry, ok := fdMap[int32(dirFd)]; ok && entry.path != "" {
+		full := joinPaths(entry.path, path)
 		// println("DEBUG: Openat joined", full)
 		return Open(full, openmode, perm)
 	}
@@ -358,14 +370,12 @@ func Close(fd int) error {
 	if fd < 3 {
 		return nil // Never close stdin/stdout/stderr handles
 	}
-	handle, err := fdToHandle(int32(fd))
-	if err != 0 {
-		return errnoErr(err)
+	entry, ok := fdMap[int32(fd)]
+	if !ok {
+		return errnoErr(EBADF)
 	}
-	rusticated_handle_close(handle)
-	fdInUse[fd] = false
-	fdPaths[fd] = ""
-	dirReadPending[fd] = nil
+	rusticated_handle_close(entry.handle)
+	delete(fdMap, int32(fd))
 	return nil
 }
 
@@ -413,20 +423,20 @@ func ReadDir(fd int, buf []byte, _ uint64) (int, error) {
 	if len(buf) == 0 {
 		return 0, nil
 	}
-	handle, err := fdToHandle(int32(fd))
-	if err != 0 {
-		return 0, errnoErr(err)
+	entry, ok := fdMap[int32(fd)]
+	if !ok {
+		return 0, errnoErr(EBADF)
 	}
 	var ctx overlappedContext
 	hostBuf := make([]byte, 2048)
-	rusticated_dir_read(unsafe.Pointer(&ctx.o), handle, &hostBuf[0], uint32(len(hostBuf)))
+	rusticated_dir_read(unsafe.Pointer(&ctx.o), entry.handle, &hostBuf[0], uint32(len(hostBuf)))
 	runtime.KeepAlive(hostBuf)
 	awaitOverlapped(&ctx)
 	if ctx.o.hostError != 0 {
 		return 0, errnoErr(Errno(ctx.o.hostError))
 	}
 
-	pending := append(dirReadPending[fd], hostBuf[:int(ctx.o.resultExt)]...)
+	pending := append(entry.pending, hostBuf[:int(ctx.o.resultExt)]...)
 	written := 0
 
 	for {
@@ -454,7 +464,8 @@ func ReadDir(fd int, buf []byte, _ uint64) (int, error) {
 		pending = pending[idx+1:]
 	}
 
-	dirReadPending[fd] = pending
+	entry.pending = pending
+	fdMap[int32(fd)] = entry
 	return written, nil
 }
 
@@ -513,8 +524,8 @@ func statat_ext(dirFd int, path string, st *Stat_t, flags uint32) error {
 	path = fixJoinedPath(path)
 	full := path
 	if !isAbs(path) && dirFd != -100 {
-		if dirFd >= 0 && dirFd < len(fdPaths) && fdPaths[dirFd] != "" {
-			full = joinPaths(fdPaths[dirFd], path)
+		if entry, ok := fdMap[int32(dirFd)]; ok && entry.path != "" {
+			full = joinPaths(entry.path, path)
 		}
 	}
 	if full == "" {
@@ -539,17 +550,14 @@ func statat_ext(dirFd int, path string, st *Stat_t, flags uint32) error {
 }
 
 func Stat(path string, st *Stat_t) error {
-	println("DEBUG: guest Stat", path)
 	return statat_ext(-100, path, st, 0)
 }
 
 func Lstat(path string, st *Stat_t) error {
-	println("DEBUG: guest Lstat", path)
 	return statat_ext(-100, path, st, 1) // 1 = statFlagNoFollow
 }
 
 func Fstatat(dirFd int, path string, st *Stat_t, flags int) error {
-	println("DEBUG: guest Fstatat", dirFd, path)
 	// Map flags to our ABI: AT_SYMLINK_NOFOLLOW = 0x100 in Go
 	abiFlags := uint32(0)
 	if (flags & 0x100) != 0 {
@@ -559,8 +567,8 @@ func Fstatat(dirFd int, path string, st *Stat_t, flags int) error {
 }
 
 func Fstat(fd int, st *Stat_t) error {
-	if fd >= 0 && fd < len(fdPaths) && fdPaths[fd] != "" {
-		return Stat(fdPaths[fd], st)
+	if entry, ok := fdMap[int32(fd)]; ok && entry.path != "" {
+		return Stat(entry.path, st)
 	}
 	return ENOSYS
 }
@@ -601,10 +609,44 @@ func Chdir(path string) error {
 
 // ── Directory / File operations ───────────────────────────────────────────
 
-func Mkdir(path string, perm uint32) error          { return ENOSYS }
-func Unlink(path string) error                      { return ENOSYS }
-func Rmdir(path string) error                       { return ENOSYS }
-func Rename(from, to string) error                  { return ENOSYS }
+func Mkdir(path string, perm uint32) error {
+	var ctx overlappedContext
+	rusticated_path_mkdir(unsafe.Pointer(&ctx.o), (*byte)(unsafe.StringData(path)), uint32(len(path)), perm)
+	runtime.KeepAlive(path)
+	awaitOverlapped(&ctx)
+	if ctx.o.hostError != 0 {
+		return errnoErr(Errno(ctx.o.hostError))
+	}
+	return nil
+}
+
+func Unlink(path string) error {
+	var ctx overlappedContext
+	rusticated_path_remove(unsafe.Pointer(&ctx.o), (*byte)(unsafe.StringData(path)), uint32(len(path)))
+	runtime.KeepAlive(path)
+	awaitOverlapped(&ctx)
+	if ctx.o.hostError != 0 {
+		return errnoErr(Errno(ctx.o.hostError))
+	}
+	return nil
+}
+
+func Rmdir(path string) error {
+	// host os.Remove handles both files and empty directories
+	return Unlink(path)
+}
+
+func Rename(from, to string) error {
+	var ctx overlappedContext
+	rusticated_path_rename(unsafe.Pointer(&ctx.o), (*byte)(unsafe.StringData(from)), uint32(len(from)), (*byte)(unsafe.StringData(to)), uint32(len(to)))
+	runtime.KeepAlive(from)
+	runtime.KeepAlive(to)
+	awaitOverlapped(&ctx)
+	if ctx.o.hostError != 0 {
+		return errnoErr(Errno(ctx.o.hostError))
+	}
+	return nil
+}
 func Readlink(path string, buf []byte) (int, error) { return 0, ENOSYS }
 func Link(path, link string) error                  { return ENOSYS }
 func Symlink(path, link string) error               { return ENOSYS }
@@ -625,11 +667,11 @@ func Pread(fd int, b []byte, offset int64) (int, error)    { return 0, ENOSYS }
 func Pwrite(fd int, b []byte, offset int64) (int, error)   { return 0, ENOSYS }
 
 func Dup(oldfd int) (int, error) {
-	h, err := fdToHandle(int32(oldfd))
-	if err != 0 {
-		return -1, errnoErr(err)
+	entry, ok := fdMap[int32(oldfd)]
+	if !ok {
+		return -1, errnoErr(EBADF)
 	}
-	fd, errAlloc := allocFD(h, fdPaths[oldfd])
+	fd, errAlloc := allocFD(entry.handle, entry.path)
 	if errAlloc != 0 {
 		return -1, errnoErr(errAlloc)
 	}
@@ -637,17 +679,15 @@ func Dup(oldfd int) (int, error) {
 }
 
 func Dup2(oldfd int, newfd int) error {
-	h, err := fdToHandle(int32(oldfd))
-	if err != 0 {
-		return errnoErr(err)
+	entry, ok := fdMap[int32(oldfd)]
+	if !ok {
+		return errnoErr(EBADF)
 	}
-	if newfd < 0 || newfd >= len(fdTable) {
+	if newfd < 0 {
 		return EINVAL
 	}
-	// Note: standard Dup2 closes newfd if open.
-	fdTable[newfd] = h
-	fdInUse[newfd] = true
-	fdPaths[newfd] = fdPaths[oldfd]
+	// Note: standard Dup2 closes newfd if open (we just overwrite).
+	fdMap[int32(newfd)] = fdEntry{handle: entry.handle, path: entry.path}
 	return nil
 }
 
@@ -705,7 +745,7 @@ func fd_fdstat_get_flags(fd int) (uint32, error) {
 //
 //go:linkname fd_fdstat_get_type
 func fd_fdstat_get_type(fd int) (uint8, error) {
-	if fd >= 0 && fd < len(fdTable) && fdInUse[fd] {
+	if _, ok := fdMap[int32(fd)]; ok {
 		return 4, nil // FILETYPE_REGULAR_FILE
 	}
 	return 0, EBADF
