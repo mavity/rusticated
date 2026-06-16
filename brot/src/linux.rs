@@ -427,9 +427,20 @@ fn make_tmp_path(prefix: &[u8], pid: u32, idx: u8) -> Vec<u8> {
     path
 }
 
+unsafe fn from_cstr<'a>(p: *const u8) -> &'a [u8] {
+    if p.is_null() {
+        return &[];
+    }
+    let mut len = 0;
+    while unsafe { *p.add(len) } != 0 {
+        len += 1;
+    }
+    unsafe { core::slice::from_raw_parts(p, len) }
+}
+
 // ─── Main logic ──────────────────────────────────────────────────────────────
 
-pub unsafe fn run() -> ! {
+pub unsafe fn run(sp: *const usize) -> ! {
     const O_RDONLY: i32 = 0;
     const O_RDWR: i32 = 2;
     const O_CREAT: i32 = 64;
@@ -437,44 +448,39 @@ pub unsafe fn run() -> ! {
     const SEEK_SET: i32 = 0;
     const SEEK_END: i32 = 2;
 
-    // ── Read /proc/self/cmdline to obtain argv entries ────────────────────
-    let cmdline_path = b"/proc/self/cmdline\0";
-    let cmdline_fd = unsafe { sys_open(cmdline_path.as_ptr(), O_RDONLY, 0) };
-    if cmdline_fd < 0 {
+    // ── Parse stack for argc, argv, and envp ──────────────────────────────
+    // Linux stack layout at _start:
+    // [sp] = argc
+    // [sp+8] = argv[0]
+    // ...
+    // [sp+8+8*argc] = NULL
+    // [sp+8+8*argc+8] = envp[0]
+    let argc = unsafe { *sp };
+    if argc < 2 {
         unsafe { sys_exit_group(102) };
     }
-    let cmdline = unsafe { read_fd_to_vec(cmdline_fd) };
-    unsafe { sys_close(cmdline_fd) };
 
-    // Split cmdline on NUL bytes to recover argv entries.
-    let args: Vec<&[u8]> = cmdline
-        .split(|&b| b == 0)
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    if args.len() < 2 {
-        unsafe { sys_exit_group(102) };
-    }
+    let argv = sp.add(1) as *const *const u8;
+    let envp = sp.add(1 + argc + 1) as *const *const u8;
 
     // argv[1] is the bat file path (the "vegetable").
-    let bat_path_bytes = args[1];
-    let mut bat_path_cstr: Vec<u8> = Vec::with_capacity(bat_path_bytes.len() + 1);
-    bat_path_cstr.extend_from_slice(bat_path_bytes);
-    bat_path_cstr.push(0);
+    let bat_path_ptr = unsafe { *argv.add(1) };
+    let bat_path_bytes = from_cstr(bat_path_ptr);
 
-    // Extra args (argv[2..]) forwarded to washmhost.
-    let extra_args: Vec<Vec<u8>> = args[2..]
-        .iter()
-        .map(|s| {
-            let mut v = Vec::with_capacity(s.len() + 1);
-            v.extend_from_slice(s);
-            v.push(0);
-            v
-        })
-        .collect();
+    // Filter out TMPDIR from environment.
+    let mut tmp_prefix: &[u8] = b"/tmp";
+    let mut ptr = envp;
+    while !unsafe { (*ptr).is_null() } {
+        let entry = from_cstr(unsafe { *ptr });
+        if entry.starts_with(b"TMPDIR=") {
+            tmp_prefix = &entry[7..];
+            break;
+        }
+        ptr = unsafe { ptr.add(1) };
+    }
 
     // ── Open the vegetable file and read the compressed pool ──────────────
-    let fd = unsafe { sys_open(bat_path_cstr.as_ptr(), O_RDONLY, 0) };
+    let fd = unsafe { sys_open(bat_path_ptr, O_RDONLY, 0) };
     if fd < 0 {
         unsafe { sys_exit_group(2) };
     }
@@ -533,19 +539,32 @@ pub unsafe fn run() -> ! {
     });
     drop(compressed_data);
 
-    let washmhost_data = unsafe {
-        &decompressed
-            [META.washmhost_offset as usize..(META.washmhost_offset + META.washmhost_len) as usize]
-    };
     let payload_data = unsafe {
         &decompressed
             [META.payload_offset as usize..(META.payload_offset + META.payload_len) as usize]
     };
 
+    let washmhost_data = unsafe {
+        &decompressed
+            [META.washmhost_offset as usize..(META.washmhost_offset + META.washmhost_len) as usize]
+    };
+
     // ── Write washmhost to a temp file ────────────────────────────────────
     let pid = unsafe { sys_getpid() } as u32;
-    let washmhost_path = make_tmp_path(b"/tmp/moh-", pid, 0);
-    let payload_path = make_tmp_path(b"/tmp/mohp-", pid, 0);
+    let mut washmhost_prefix = Vec::from(tmp_prefix);
+    if !washmhost_prefix.ends_with(b"/") {
+        washmhost_prefix.push(b'/');
+    }
+    washmhost_prefix.extend_from_slice(b"moh-");
+
+    let mut payload_prefix = Vec::from(tmp_prefix);
+    if !payload_prefix.ends_with(b"/") {
+        payload_prefix.push(b'/');
+    }
+    payload_prefix.extend_from_slice(b"mohp-");
+
+    let washmhost_path = make_tmp_path(&washmhost_prefix, pid, 0);
+    let payload_path = make_tmp_path(&payload_prefix, pid, 0);
 
     let tmp_fd = unsafe { sys_open(washmhost_path.as_ptr(), O_RDWR | O_CREAT | O_EXCL, 0o600) };
     if tmp_fd < 0 {
@@ -577,46 +596,28 @@ pub unsafe fn run() -> ! {
     unsafe { sys_close(payload_fd) };
 
     // ── Build environment for the child ──────────────────────────────────
-    // Read /proc/self/environ (NUL-separated KEY=VALUE strings).
-    let environ_path = b"/proc/self/environ\0";
-    let env_fd = unsafe { sys_open(environ_path.as_ptr(), O_RDONLY, 0) };
-    let env_data: Vec<u8> = if env_fd >= 0 {
-        let d = unsafe { read_fd_to_vec(env_fd) };
-        unsafe { sys_close(env_fd) };
-        d
-    } else {
-        Vec::new()
-    };
-
     // Build "MOHABBAT_WASM_FD=<path>\0"
     let mut wasm_fd_var: Vec<u8> = b"MOHABBAT_WASM_FD=".to_vec();
     wasm_fd_var.extend_from_slice(&payload_path[..payload_path.len() - 1]); // skip NUL
     wasm_fd_var.push(0);
 
-    // Collect pointers to each env var entry from env_data (split on NUL).
     let mut envp_ptrs: Vec<*const u8> = Vec::new();
-    {
-        let mut start = 0usize;
-        while start < env_data.len() {
-            let entry_start = start;
-            while start < env_data.len() && env_data[start] != 0 {
-                start += 1;
-            }
-            if start > entry_start {
-                unsafe { envp_ptrs.push(env_data.as_ptr().add(entry_start)) };
-            }
-            start += 1; // skip NUL
-        }
+    let mut e_ptr = envp;
+    while !unsafe { (*e_ptr).is_null() } {
+        envp_ptrs.push(unsafe { *e_ptr });
+        e_ptr = unsafe { e_ptr.add(1) };
     }
     envp_ptrs.push(wasm_fd_var.as_ptr());
     envp_ptrs.push(core::ptr::null());
 
     // ── Build argv for the child ──────────────────────────────────────────
-    // argv[0] = vegetable_path (bat file), argv[1..] = extra args forwarded.
+    // argv[0] = vegetable_path, argv[1..] = extra args.
+    // We can just use the tail of our own argv (starting from index 1).
     let mut argv_ptrs: Vec<*const u8> = Vec::new();
-    argv_ptrs.push(bat_path_cstr.as_ptr());
-    for a in &extra_args {
-        argv_ptrs.push(a.as_ptr());
+    let mut a_ptr = unsafe { argv.add(1) };
+    while !unsafe { (*a_ptr).is_null() } {
+        argv_ptrs.push(unsafe { *a_ptr });
+        a_ptr = unsafe { a_ptr.add(1) };
     }
     argv_ptrs.push(core::ptr::null());
 

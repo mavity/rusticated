@@ -124,7 +124,7 @@ func (h *HostEnv) sys_read(ctx context.Context, m api.Module, stack []uint64) {
 		}
 		payload := tmp[:n]
 		h.fileOpsQueue <- func() {
-			defer h.DecOps()
+			defer h.DecOpsFor(state)
 			if !h.IsOpActive(ovPtr, state.opID) {
 				return
 			}
@@ -194,7 +194,7 @@ func (h *HostEnv) sys_write(ctx context.Context, m api.Module, stack []uint64) {
 			retCode = mapErrno(err)
 		}
 		h.fileOpsQueue <- func() {
-			defer h.DecOps()
+			defer h.DecOpsFor(state)
 			if !h.IsOpActive(ovPtr, state.opID) {
 				return
 			}
@@ -287,7 +287,7 @@ func (h *HostEnv) sys_path_open(ctx context.Context, m api.Module, stack []uint6
 			debugLog("path_open ok: path=%q flags=%d osFlags=%d handle=%d", pathStr, flags, osFlags, handle)
 		}
 		h.fileOpsQueue <- func() {
-			defer h.DecOps()
+			defer h.DecOpsFor(state)
 			if !h.IsOpActive(ovPtr, state.opID) {
 				if err == nil {
 					f.Close()
@@ -386,7 +386,7 @@ func (h *HostEnv) sys_dir_read(ctx context.Context, m api.Module, stack []uint64
 		}
 
 		h.fileOpsQueue <- func() {
-			defer h.DecOps()
+			defer h.DecOpsFor(state)
 			if !h.IsOpActive(ovPtr, state.opID) {
 				return
 			}
@@ -441,7 +441,7 @@ func (h *HostEnv) sys_path_stat(ctx context.Context, m api.Module, stack []uint6
 			payload = marshalAbiStat(createAbiStat(fi))
 		}
 		h.fileOpsQueue <- func() {
-			defer h.DecOps()
+			defer h.DecOpsFor(state)
 			if !h.IsOpActive(ovPtr, state.opID) {
 				return
 			}

@@ -56,7 +56,7 @@ func (h *HostEnv) sys_net_open(ctx context.Context, m api.Module, stack []uint64
 			retCode = mapErrno(err)
 		}
 		h.fileOpsQueue <- func() {
-			defer h.DecOps()
+			defer h.DecOpsFor(state)
 			if !h.IsOpActive(ovPtr, state.opID) {
 				if err == nil {
 					h.mu.Lock()
@@ -110,7 +110,7 @@ func (h *HostEnv) sys_net_accept(ctx context.Context, m api.Module, stack []uint
 			h.mu.Unlock()
 		}
 		h.fileOpsQueue <- func() {
-			defer h.DecOps()
+			defer h.DecOpsFor(state)
 			if !h.IsOpActive(ovPtr, state.opID) {
 				if err == nil {
 					conn.Close()
