@@ -431,7 +431,7 @@ func Sendfile(outfd int, infd int, offset *int64, count int) (written int, err e
 
 func StartProcess(argv0 string, argv []string, attr *ProcAttr) (pid int, handle uintptr, err error) {
 	// Build the null-separated config for process_spawn:
-	// program\0arg1\0arg2\0\0env1=val\0env2=val\0\0cwd\0\0
+	// program\0arg1\0arg2\0\0env1=val\0env2=val\0\0cwd\0\0stdio0\0stdio1\0stdio2\0...stdioN\0\0
 	var cfg []byte
 	appendStr := func(s string) {
 		cfg = append(cfg, s...)
@@ -456,24 +456,18 @@ func StartProcess(argv0 string, argv []string, attr *ProcAttr) (pid int, handle 
 	}
 	cfg = append(cfg, 0) // end of cwd section
 
-	if attr != nil {
-		appendMode := func(idx int) {
-			if idx >= len(attr.Files) {
-				appendStr("inherit")
-				return
-			}
-			h := attr.Files[idx]
+	if attr != nil && len(attr.Files) > 0 {
+		for i, h := range attr.Files {
 			// In standard Go, passing 0/1/2 to StartProcess implies inheritance
 			// if they represent the existing standard streams.
-			if h == uintptr(idx) {
+			if h == uintptr(i) && i < 3 {
 				appendStr("inherit")
+			} else if h == ^uintptr(0) {
+				appendStr("null")
 			} else {
-				appendStr("handle:" + strconv.Itoa(int(h)))
+				appendStr("fd:" + strconv.Itoa(int(h)))
 			}
 		}
-		appendMode(0) // stdin
-		appendMode(1) // stdout
-		appendMode(2) // stderr
 	} else {
 		// Default to inherit for 0,1,2
 		appendStr("inherit") // stdin
