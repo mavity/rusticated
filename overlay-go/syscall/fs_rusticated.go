@@ -188,7 +188,7 @@ func init() {
 	fdInUse[2] = true
 }
 
-func writeDirentEntry(dst []byte, next uint64, name []byte) int {
+func writeDirentEntry(dst []byte, next uint64, name []byte, kind byte) int {
 	entryLen := 24 + len(name)
 	if len(dst) < entryLen {
 		return 0
@@ -196,7 +196,21 @@ func writeDirentEntry(dst []byte, next uint64, name []byte) int {
 	binary.LittleEndian.PutUint64(dst[0:8], next)
 	binary.LittleEndian.PutUint64(dst[8:16], 0) // inode unknown
 	binary.LittleEndian.PutUint32(dst[16:20], uint32(len(name)))
-	dst[20] = 0
+
+	// Map our internal statKind to WASIP1 d_type
+	var dType byte
+	switch kind {
+	case 1: // File
+		dType = 4 // REG
+	case 2: // Dir
+		dType = 3 // DIR
+	case 3: // Symlink
+		dType = 7 // LNK
+	default:
+		dType = 0 // UNKNOWN
+	}
+
+	dst[20] = dType
 	dst[21] = 0
 	dst[22] = 0
 	dst[23] = 0
@@ -224,6 +238,7 @@ func allocFD(handle uint64, path string) (int32, Errno) {
 			fdTable[i] = handle
 			fdInUse[i] = true
 			fdPaths[i] = path
+			// println("DEBUG: allocFD fd", i, "handle", handle, "path", path)
 			return int32(i), 0
 		}
 	}
@@ -232,35 +247,111 @@ func allocFD(handle uint64, path string) (int32, Errno) {
 
 func fdToHandle(fd int32) (uint64, Errno) {
 	if fd < 0 || int(fd) >= len(fdTable) || !fdInUse[fd] {
+		// println("DEBUG: fdToHandle FAILED fd", fd)
 		return 0, EBADF
 	}
+	// println("DEBUG: fdToHandle fd", fd, "-> handle", fdTable[fd])
 	return fdTable[fd], 0
 }
 
 // ── Open / Close ────────────────────────────────────────────────────────
 
-func Open(path string, mode int, perm uint32) (int, error) {
-	if path == "" {
-		return -1, EINVAL
+func isAbs(path string) bool {
+	if len(path) > 0 && (path[0] == '/' || path[0] == '\\') {
+		return true
 	}
+	if len(path) > 2 && path[1] == ':' && (path[2] == '/' || path[2] == '\\') {
+		return true
+	}
+	return false
+}
+
+func fixJoinedPath(path string) string {
+	// Detect "doubled" paths like C:\cwd\C:/sdk/...
+	// This happens because the Go wasip1 runtime doesn't recognize
+	// Windows-style absolute paths and joins them with the current directory.
+	for i := 1; i < len(path)-1; i++ {
+		if path[i] == ':' && (path[i+1] == '/' || path[i+1] == '\\') {
+			if i > 1 {
+				// Found a drive letter (e.g., C:/) in the middle of a path.
+				// Ensure it's preceded by a letter to avoid false positives.
+				c := path[i-1]
+				if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+					return path[i-1:]
+				}
+			}
+		}
+	}
+	return path
+}
+
+func joinPaths(base, rel string) string {
+	if rel == "" {
+		return base
+	}
+	if isAbs(rel) {
+		return rel
+	}
+
+	if base == "" || base == "." {
+		return rel
+	}
+	b := base
+	if b[len(b)-1] != '/' && b[len(b)-1] != '\\' {
+		b += "/"
+	}
+	return b + rel
+}
+
+func path_open_ext(path string, mode int, perm uint32) (uint64, error) {
+	path = fixJoinedPath(path)
+	// Final absolute path check before calling host
+	if isAbs(path) {
+		// No-op, use as is
+	} else {
+		// Add relative prefix if needed
+	}
+
 	var ctx overlappedContext
 	rusticated_path_open(unsafe.Pointer(&ctx.o), (*byte)(unsafe.StringData(path)), uint32(len(path)), uint32(mode))
 	runtime.KeepAlive(path)
 	awaitOverlapped(&ctx)
 	if ctx.o.hostError != 0 {
-		return -1, errnoErr(Errno(ctx.o.hostError))
+		return 0, errnoErr(Errno(ctx.o.hostError))
 	}
-	fd, err := allocFD(ctx.o.resultExt, path)
-	if err != 0 {
-		rusticated_handle_close(ctx.o.resultExt)
-		return -1, errnoErr(err)
+	return ctx.o.resultExt, nil
+}
+
+func Open(path string, mode int, perm uint32) (int, error) {
+	if path == "" {
+		return -1, EINVAL
+	}
+
+	// println("DEBUG: Open path", path)
+	h, err := path_open_ext(path, mode, perm)
+	if err != nil {
+		return -1, err
+	}
+	fd, errFD := allocFD(h, path)
+	if errFD != 0 {
+		rusticated_handle_close(h)
+		return -1, errnoErr(errFD)
 	}
 	return int(fd), nil
 }
 
-// Openat resolves path relative to dirFd (ignored; we pass absolute paths to the host).
+// Openat resolves path relative to dirFd.
 func Openat(dirFd int, path string, openmode int, perm uint32) (int, error) {
-	return Open(path, openmode, perm)
+	// println("DEBUG: Openat dirFd", dirFd, "path", path)
+	if isAbs(path) || dirFd == -100 { // -100 is AT_FDCWD
+		return Open(path, openmode, perm)
+	}
+	if dirFd >= 0 && dirFd < len(fdPaths) && fdPaths[dirFd] != "" {
+		full := joinPaths(fdPaths[dirFd], path)
+		// println("DEBUG: Openat joined", full)
+		return Open(full, openmode, perm)
+	}
+	return -1, ENOSYS
 }
 
 func Close(fd int) error {
@@ -347,14 +438,15 @@ func ReadDir(fd int, buf []byte, _ uint64) (int, error) {
 			break
 		}
 
-		name := pending[:idx]
+		kind := pending[0]
+		name := pending[1:idx]
 		required := 24 + len(name)
 		if len(buf)-written < required {
 			break
 		}
 
 		next := uint64(written + required)
-		n := writeDirentEntry(buf[written:], next, name)
+		n := writeDirentEntry(buf[written:], next, name, kind)
 		if n == 0 {
 			break
 		}
@@ -417,19 +509,26 @@ func parseAbiStat(buf []byte, st *Stat_t) {
 	st.Dev = 1
 }
 
-func Stat(path string, st *Stat_t) error {
-	println("DEBUG: guest Stat", path)
-	if path == "" {
+func statat_ext(dirFd int, path string, st *Stat_t, flags uint32) error {
+	path = fixJoinedPath(path)
+	full := path
+	if !isAbs(path) && dirFd != -100 {
+		if dirFd >= 0 && dirFd < len(fdPaths) && fdPaths[dirFd] != "" {
+			full = joinPaths(fdPaths[dirFd], path)
+		}
+	}
+	if full == "" {
 		return EINVAL
 	}
+
 	var ctx overlappedContext
 	buf := make([]byte, abiStatSize)
 	rusticated_path_stat(
 		unsafe.Pointer(&ctx.o),
-		(*byte)(unsafe.StringData(path)), uint32(len(path)),
-		0, &buf[0], uint32(len(buf)),
+		(*byte)(unsafe.StringData(full)), uint32(len(full)),
+		flags, &buf[0], uint32(len(buf)),
 	)
-	runtime.KeepAlive(path)
+	runtime.KeepAlive(full)
 	runtime.KeepAlive(buf)
 	awaitOverlapped(&ctx)
 	if ctx.o.hostError != 0 {
@@ -439,27 +538,24 @@ func Stat(path string, st *Stat_t) error {
 	return nil
 }
 
+func Stat(path string, st *Stat_t) error {
+	println("DEBUG: guest Stat", path)
+	return statat_ext(-100, path, st, 0)
+}
+
 func Lstat(path string, st *Stat_t) error {
 	println("DEBUG: guest Lstat", path)
-	if path == "" {
-		return EINVAL
+	return statat_ext(-100, path, st, 1) // 1 = statFlagNoFollow
+}
+
+func Fstatat(dirFd int, path string, st *Stat_t, flags int) error {
+	println("DEBUG: guest Fstatat", dirFd, path)
+	// Map flags to our ABI: AT_SYMLINK_NOFOLLOW = 0x100 in Go
+	abiFlags := uint32(0)
+	if (flags & 0x100) != 0 {
+		abiFlags |= 1
 	}
-	var ctx overlappedContext
-	buf := make([]byte, abiStatSize)
-	rusticated_path_stat(
-		unsafe.Pointer(&ctx.o),
-		(*byte)(unsafe.StringData(path)), uint32(len(path)),
-		1, // no-follow (statFlagNoFollow)
-		&buf[0], uint32(len(buf)),
-	)
-	runtime.KeepAlive(path)
-	runtime.KeepAlive(buf)
-	awaitOverlapped(&ctx)
-	if ctx.o.hostError != 0 {
-		return errnoErr(Errno(ctx.o.hostError))
-	}
-	parseAbiStat(buf, st)
-	return nil
+	return statat_ext(dirFd, path, st, abiFlags)
 }
 
 func Fstat(fd int, st *Stat_t) error {
@@ -527,10 +623,64 @@ func UtimesNano(path string, ts []Timespec) error   { return ENOSYS }
 func Seek(fd int, offset int64, whence int) (int64, error) { return 0, ENOSYS }
 func Pread(fd int, b []byte, offset int64) (int, error)    { return 0, ENOSYS }
 func Pwrite(fd int, b []byte, offset int64) (int, error)   { return 0, ENOSYS }
-func Dup(fd int) (int, error)                              { return 0, ENOSYS }
-func Dup2(fd int, newfd int) error                         { return ENOSYS }
-func Pipe(fd []int) error                                  { return ENOSYS }
-func SetNonblock(fd int, nonblocking bool) error           { return nil }
+
+func Dup(oldfd int) (int, error) {
+	h, err := fdToHandle(int32(oldfd))
+	if err != 0 {
+		return -1, errnoErr(err)
+	}
+	fd, errAlloc := allocFD(h, fdPaths[oldfd])
+	if errAlloc != 0 {
+		return -1, errnoErr(errAlloc)
+	}
+	return int(fd), nil
+}
+
+func Dup2(oldfd int, newfd int) error {
+	h, err := fdToHandle(int32(oldfd))
+	if err != 0 {
+		return errnoErr(err)
+	}
+	if newfd < 0 || newfd >= len(fdTable) {
+		return EINVAL
+	}
+	// Note: standard Dup2 closes newfd if open.
+	fdTable[newfd] = h
+	fdInUse[newfd] = true
+	fdPaths[newfd] = fdPaths[oldfd]
+	return nil
+}
+
+func Pipe(fd []int) error {
+	var ctx overlappedContext
+	rusticated_process_pipe(unsafe.Pointer(&ctx.o))
+	awaitOverlapped(&ctx)
+	if ctx.o.hostError != 0 {
+		return errnoErr(Errno(ctx.o.hostError))
+	}
+	// resultExt packs: (writeHandle << 32) | readHandle
+	rh := uint64(uint32(ctx.o.resultExt))
+	wh := uint64(uint32(ctx.o.resultExt >> 32))
+
+	if len(fd) < 2 {
+		return EINVAL
+	}
+
+	fd_r, err_r := allocFD(rh, "|0")
+	if err_r != 0 {
+		return errnoErr(err_r)
+	}
+	fd_w, err_w := allocFD(wh, "|1")
+	if err_w != 0 {
+		// Cleanup rh if wh fails? For now just return error.
+		return errnoErr(err_w)
+	}
+
+	fd[0] = int(fd_r)
+	fd[1] = int(fd_w)
+	return nil
+}
+func SetNonblock(fd int, nonblocking bool) error { return nil }
 
 // ── Randomness ────────────────────────────────────────────────────────────
 

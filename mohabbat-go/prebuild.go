@@ -481,6 +481,10 @@ func generateGoOverlay(ws, goroot string) error {
 		{"src/internal/syscall/unix/net_wasip1.go", canon(filepath.Join(overlayDir, "internal/syscall/unix/net_rusticated.go"))},
 		// path
 		{"src/os/path_unix.go", canon(filepath.Join(overlayDir, "os/path_unix.go"))},
+		// pipe
+		{"src/os/pipe_wasm.go", canon(filepath.Join(overlayDir, "os/pipe_rusticated.go"))},
+		// exec
+		{"src/os/exec/lp_wasm.go", canon(filepath.Join(overlayDir, "os/exec_rusticated.go"))},
 		// filepath (generated patch)
 		{"src/path/filepath/path.go", canon(genPathGo)},
 		// net/http (generated patch)
