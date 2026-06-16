@@ -7,62 +7,65 @@
 package os
 
 import (
-	"syscall"
+	"internal/filepathlite"
 )
 
 var (
-	PathSeparator     byte = '¿' // OS-specific path separator, defaults to visibly incorrect character
-	PathListSeparator byte = '¡' // OS-specific path list separator, defaults to visibly incorrect character
+	PathSeparator     byte = '/'
+	PathListSeparator byte = ':'
 )
 
 func init() {
-	pi := syscall.GetPlatformInfo()
-	PathSeparator = pi.PathSeparator
-	PathListSeparator = pi.PathListSeparator
+	// Sync from the core source
+	PathSeparator = filepathlite.Separator
+	PathListSeparator = filepathlite.ListSeparator
 }
 
 // IsPathSeparator reports whether c is a directory separator character.
 func IsPathSeparator(c uint8) bool {
-	// On Windows, both / and \ are separators.
-	// Since we defined PathSeparator as rune, we compare.
-	if PathSeparator == '\\' {
-		return c == '/' || c == '\\'
-	}
-	return c == uint8(PathSeparator)
+	return filepathlite.CoreIsPathSeparator(c)
+}
+
+// IsAbs reports whether the path is absolute.
+func IsAbs(path string) bool {
+	return filepathlite.CoreIsAbs(path)
+}
+
+// Join is a Windows/Unix aware path joiner, used by algorithmic patches.
+func Join(elem []string) string {
+	return filepathlite.CoreJoin(elem)
+}
+
+// VolumeNameLen returns the length of the leading volume name on Windows (e.g. "C:").
+func VolumeNameLen(path string) int {
+	return filepathlite.CoreVolumeNameLen(path)
 }
 
 // splitPath returns the base name and parent directory.
 func splitPath(path string) (string, string) {
-	// if no better parent is found, the path is relative from "here"
-	dirname := "."
-
-	// Remove all but one leading slash.
-	for len(path) > 1 && IsPathSeparator(path[0]) && IsPathSeparator(path[1]) {
-		path = path[1:]
+	if path == "" {
+		return ".", ""
 	}
 
 	i := len(path) - 1
 
 	// Remove trailing slashes.
-	for ; i > 0 && IsPathSeparator(path[i]); i-- {
-		path = path[:i]
+	for i > 0 && IsPathSeparator(path[i]) {
+		i--
+	}
+	path = path[:i+1]
+
+	// Find the last separator.
+	i = len(path) - 1
+	for i >= 0 && !IsPathSeparator(path[i]) {
+		i--
 	}
 
-	// if no slashes in path, base is path
-	basename := path
-
-	// Remove leading directory path
-	for i--; i >= 0; i-- {
-		if IsPathSeparator(path[i]) {
-			if i == 0 {
-				dirname = path[:1]
-			} else {
-				dirname = path[:i]
-			}
-			basename = path[i+1:]
-			break
-		}
+	if i < 0 {
+		return ".", path
 	}
-
-	return dirname, basename
+	if i == 0 {
+		return path[:1], path[1:]
+	}
+	return path[:i], path[i+1:]
 }

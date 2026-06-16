@@ -78,6 +78,11 @@ func main() {
 	vegPath := os.Getenv("MOHABBAT_VEGETABLE_PATH")
 	inVeg := vegPath != ""
 
+	if inVeg {
+		// We used to override shell temp vars here, but that caused permission issues in 'target'.
+		// Now we rely on the host-provided /tmp mapping.
+	}
+
 	// Parse args manually: [project] [-o out] [-r [args...]]
 	rawArgs := os.Args[1:]
 	projectDir := ""
@@ -86,7 +91,14 @@ func main() {
 	var runArgs []string
 
 	for i := 0; i < len(rawArgs); {
-		switch rawArgs[i] {
+		// If in a vegetable, skip the vegetable path itself if it appears in args.
+		arg := rawArgs[i]
+		if inVeg && (arg == vegPath || (runtime.GOOS == "windows" && strings.EqualFold(arg, vegPath))) {
+			i++
+			continue
+		}
+
+		switch arg {
 		case "-r":
 			runMode = true
 			runArgs = rawArgs[i+1:]
@@ -99,8 +111,8 @@ func main() {
 				die("missing argument after -o")
 			}
 		default:
-			if projectDir == "" && !strings.HasPrefix(rawArgs[i], "-") {
-				projectDir = rawArgs[i]
+			if projectDir == "" && !strings.HasPrefix(arg, "-") {
+				projectDir = arg
 			}
 			i++
 		}
@@ -109,9 +121,21 @@ func main() {
 	ws, err := resolveWorkspace("")
 	must(err)
 
+	// Heuristic: if -r was used and projectDir remains empty, check if first runArg is a project.
+	if projectDir == "" && runMode && len(runArgs) > 0 {
+		if isProject(ws, runArgs[0]) {
+			projectDir = runArgs[0]
+			runArgs = runArgs[1:]
+		}
+	}
+
 	switch {
-	case projectDir != "" && runMode:
-		// Mode 4: build project to WASM + run immediately under washmhost-go
+	case runMode:
+		// Mode 4: build project to WASM + run immediately under washmhost-go.
+		// Defaults to current directory if no projectDir was specified.
+		if projectDir == "" {
+			projectDir = "."
+		}
 		must(modeDevRun(ws, projectDir, runArgs))
 	case projectDir != "" && outputPath != "" && inVeg:
 		// Mode 2: juice bottle refill (running as WASM brain inside a vegetable)
@@ -340,6 +364,9 @@ func assembleVegetable(ws, brainPath, buildDir, outputPath string) error {
 
 // buildProjectToWasm auto-detects Go vs Rust project and builds to WASM.
 func buildProjectToWasm(ws, projectDir, outputWasm string) error {
+	vegPath := os.Getenv("MOHABBAT_VEGETABLE_PATH")
+	inVeg := vegPath != ""
+
 	// Unconditionally run prebuild to ensure target specs and overlay.json are up to date.
 	if err := runPrebuild(ws); err != nil {
 		return fmt.Errorf("prebuild: %w", err)
@@ -350,7 +377,18 @@ func buildProjectToWasm(ws, projectDir, outputWasm string) error {
 	if err != nil || !fileExists(absProject) {
 		absProject = filepath.Join(ws, projectDir)
 	}
-	if !fileExists(absProject) {
+
+	// Double-check if we are in a vegetable and the "projectDir" is actually the CWD-absolute path of the vegetable.
+	if inVeg {
+		vAbs, _ := filepath.Abs(vegPath)
+		pAbs, _ := filepath.Abs(absProject)
+		if strings.EqualFold(vAbs, pAbs) {
+			// This was the vegetable path, ignore it if we are looking for a project.
+			absProject = ""
+		}
+	}
+
+	if absProject == "" || !fileExists(absProject) {
 		return fmt.Errorf("project directory not found: %s", projectDir)
 	}
 	// Auto-detect: Go project has go.mod, Rust project has Cargo.toml.
@@ -561,17 +599,26 @@ func runUnderWashmhostFromVeg(vegPath, wasmPath string, extraArgs []string) erro
 	}
 	pool := poolBuf.Bytes()
 
+	hostOS := os.Getenv("MOHABBAT_HOST_OS")
+	if hostOS == "" {
+		hostOS = runtime.GOOS
+	}
+	hostArch := os.Getenv("MOHABBAT_HOST_ARCH")
+	if hostArch == "" {
+		hostArch = runtime.GOARCH
+	}
+
 	// Find the washmhost entry for the current platform.
 	// Slot order is contractual: linux-amd64, linux-arm64, win-amd64, win-arm64.
 	var targetSlotIdx int = -1
 	for i, s := range slots {
-		if s.goos == runtime.GOOS && s.goarch == runtime.GOARCH {
+		if s.goos == hostOS && s.goarch == hostArch {
 			targetSlotIdx = i
 			break
 		}
 	}
 	if targetSlotIdx < 0 {
-		return fmt.Errorf("no washmhost slot for %s/%s in vegetable", runtime.GOOS, runtime.GOARCH)
+		return fmt.Errorf("no washmhost slot for %s/%s in vegetable", hostOS, hostArch)
 	}
 
 	// Re-read the per-slot washmhost offset+length from the matching brot in Zone B.
@@ -613,13 +660,20 @@ func runUnderWashmhostFromVeg(vegPath, wasmPath string, extraArgs []string) erro
 	washmhostBytes := pool[sm.whOffset : sm.whOffset+sm.whLen]
 
 	// Write washmhost to a temp file and run it.
+	tempDir := os.TempDir()
+	if tempDir == "" || tempDir == "." {
+		tempDir = "target"
+	}
+	_ = os.MkdirAll(tempDir, 0755)
+	// We might be running inside washmhost (as a vegetable), so tempDir might be /tmp.
+	// washmhost maps /tmp to host's actual temp dir.
 	ext := ""
-	if runtime.GOOS == "windows" {
+	if hostOS == "windows" {
 		ext = ".exe"
 	}
-	tmpFile, err := os.CreateTemp("", "mohabbat-wh-*"+ext)
+	tmpFile, err := os.CreateTemp(tempDir, "mohabbat-wh-*"+ext)
 	if err != nil {
-		return fmt.Errorf("create temp washmhost: %w", err)
+		return fmt.Errorf("create temp washmhost in %s: %w", tempDir, err)
 	}
 	tmpPath := tmpFile.Name()
 	defer os.Remove(tmpPath)
@@ -628,7 +682,7 @@ func runUnderWashmhostFromVeg(vegPath, wasmPath string, extraArgs []string) erro
 		return fmt.Errorf("write temp washmhost: %w", err)
 	}
 	tmpFile.Close()
-	if runtime.GOOS != "windows" {
+	if hostOS != "windows" {
 		_ = os.Chmod(tmpPath, 0o755)
 	}
 
@@ -889,6 +943,17 @@ func encodeVarUint32(v uint32) []byte {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func isProject(ws, dir string) bool {
+	abs := dir
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(ws, dir)
+	}
+	if !fileExists(abs) {
+		return false
+	}
+	return fileExists(filepath.Join(abs, "go.mod")) || fileExists(filepath.Join(abs, "Cargo.toml"))
 }
 
 func resolveWorkspace(ws string) (string, error) {
@@ -1239,11 +1304,13 @@ func patchMeta(brot []byte, meta mohabbatMeta) ([]byte, error) {
 
 // buildZoneA produces the polyglot script header for Modern Four.
 func buildZoneA(offsets, lengths []int) string {
-	const tmpl = ":; ME=\"$(readlink -f \"$0\" 2>/dev/null || realpath \"$0\" 2>/dev/null || printf \"%s\" \"$0\")\"; S_OFF=0; S_LEN=0; case \"$(uname -m)-$(uname -s)\" in x86_64-Linux) S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}} ;; aarch64-Linux) S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}} ;; esac; [ \"$S_LEN\" = \"0\" ] && { echo \"[mohabbat] Unsupported arch/os\"; exit 1; }; TMP_EXE=\"${TMPDIR:-/tmp}/moh-$$\"; dd if=\"$ME\" bs=1 skip=\"$S_OFF\" count=\"$S_LEN\" of=\"$TMP_EXE\" 2>/dev/null; chmod +x \"$TMP_EXE\"; \"$TMP_EXE\" \"$ME\" \"$@\"; RET=$?; rm \"$TMP_EXE\"; exit $RET\n" +
+	const tmpl = ":; ME=\"$(readlink -f \"$0\" 2>/dev/null || realpath \"$0\" 2>/dev/null || printf \"%s\" \"$0\")\"; S_OFF=0; S_LEN=0; case \"$(uname -m)-$(uname -s)\" in x86_64-Linux) S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}} ;; aarch64-Linux) S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}} ;; esac; [ \"$S_LEN\" = \"0\" ] && { echo \"[mohabbat] Unsupported arch/os \"; exit 1; }; TMP_DIR=\"${TMPDIR:-/tmp}\"; [ -d \"./target\" ] && TMP_DIR=\"./target\"; TMP_EXE=\"$TMP_DIR/moh-$$\"; dd if=\"$ME\" bs=1 skip=\"$S_OFF\" count=\"$S_LEN\" of=\"$TMP_EXE\" 2>/dev/null; chmod +x \"$TMP_EXE\"; \"$TMP_EXE\" \"$ME\" \"$@\"; RET=$?; rm \"$TMP_EXE\"; exit $RET\n" +
 		"@echo off\r\n" +
 		"setlocal enabledelayedexpansion\r\n" +
 		"set \"ME=%~f0\"\r\n" +
-		"set \"TMP_EXE=%TEMP%\\moh-!RANDOM!.exe\"\r\n" +
+		"set \"TMP_DIR=!TEMP!\"\r\n" +
+		"if exist \".\\target\" set \"TMP_DIR=.\\target\"\r\n" +
+		"set \"TMP_EXE=!TMP_DIR!\\moh-!RANDOM!.exe\"\r\n" +
 		"set \"ARCH=%PROCESSOR_ARCHITECTURE%\"\r\n" +
 		"if \"!PROCESSOR_ARCHITEW6432!\" neq \"\" set \"ARCH=!PROCESSOR_ARCHITEW6432!\"\r\n" +
 		"set \"S_OFF=0\"\r\n" +

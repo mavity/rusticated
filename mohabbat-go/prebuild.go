@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -17,6 +18,15 @@ func init() {
 // It generates rusticated target specs, builds the sysroot for each target,
 // writes config.toml, and generates target/overlay.json for Go projects.
 func runPrebuild(ws string) error {
+	inVeg := os.Getenv("MOHABBAT_VEGETABLE_PATH") != ""
+	if inVeg {
+		// When running inside a vegetable (WASM guest), we assume prebuild
+		// artifacts already exist in the 'target' directory, as we cannot
+		// run rustc/cargo/go compilers in the restricted WASM environment.
+		fmt.Println("🍆  Vegetable context: skipping prebuild steps")
+		return nil
+	}
+
 	if err := buildTargetSpecs(ws); err != nil {
 		return fmt.Errorf("target spec generation: %w", err)
 	}
@@ -423,15 +433,21 @@ func generateGoOverlay(ws, goroot string) error {
 		return fmt.Errorf("failed to read src/path/filepath/path.go: %w", err)
 	}
 	pathGoStr := string(pathGoContent)
-	targetConst := "const (\n\tSeparator     = os.PathSeparator\n\tListSeparator = os.PathListSeparator\n)"
-	if !strings.Contains(pathGoStr, targetConst) {
-		targetConst = strings.ReplaceAll(targetConst, "\n", "\r\n")
+	// Add internal/filepathlite import if missing
+	if !strings.Contains(pathGoStr, "\"internal/filepathlite\"") {
+		pathGoStr = strings.Replace(pathGoStr, "import (", "import (\n\t\"internal/filepathlite\"", 1)
 	}
-	if !strings.Contains(pathGoStr, targetConst) {
+	// Robustly find the const block containing Separator by name, not by exact body or whitespace.
+	reSepConst := regexp.MustCompile(`(?m)^const \([^)]*\bSeparator\b[^)]*\)`)
+	if !reSepConst.MatchString(pathGoStr) {
 		return fmt.Errorf("could not find Separator const block in path.go")
 	}
-	modifiedPathGo := strings.Replace(pathGoStr, targetConst,
-		strings.Replace(targetConst, "const (", "var (", 1), 1)
+	modifiedPathGo := reSepConst.ReplaceAllStringFunc(pathGoStr, func(m string) string {
+		m = strings.Replace(m, "const (", "var (", 1)
+		m = strings.Replace(m, "os.PathSeparator", "filepathlite.Separator", 1)
+		m = strings.Replace(m, "os.PathListSeparator", "filepathlite.ListSeparator", 1)
+		return m
+	})
 	genPathGo := filepath.Join(genDir, "path/filepath/path.go")
 	if err := os.WriteFile(genPathGo, []byte(modifiedPathGo), 0644); err != nil {
 		return fmt.Errorf("failed to write patched path.go: %w", err)
@@ -461,6 +477,63 @@ func generateGoOverlay(ws, goroot string) error {
 		return fmt.Errorf("failed to write patched fs.go: %w", err)
 	}
 
+	// Algorithmic patch for src/internal/filepathlite/path_unix.go
+	if err := os.MkdirAll(filepath.Join(genDir, "internal/filepathlite"), 0755); err != nil {
+		return fmt.Errorf("failed to create gen dir: %w", err)
+	}
+	liteUnixSrc := filepath.Join(goroot, "src/internal/filepathlite/path_unix.go")
+	liteUnixContent, err := os.ReadFile(liteUnixSrc)
+	if err != nil {
+		return fmt.Errorf("failed to read src/internal/filepathlite/path_unix.go: %w", err)
+	}
+	liteUnixStr := string(liteUnixContent)
+
+	// 0. Remove unused imports
+	liteUnixStr = regexp.MustCompile(`(?m)^import \([\s\S]*?^\)`).ReplaceAllString(liteUnixStr, "import (\n\t/* imports moved to path_nonwindows.go */\n)")
+
+	// 1. Remove constant block (Separator and ListSeparator are now variables in path_nonwindows.go)
+	liteUnixStr = regexp.MustCompile(`(?ms)^const \([^)]*\)`).ReplaceAllString(liteUnixStr, "/* constants moved to path_nonwindows.go */")
+
+	// 2. Redirect functions to redirect into the Golden Source
+	liteUnixStr = regexp.MustCompile(`(?m)^func IsPathSeparator\(c uint8\) bool \{[\s\S]*?^\}`).ReplaceAllString(liteUnixStr, "func IsPathSeparator(c uint8) bool {\n\treturn CoreIsPathSeparator(c)\n}")
+	liteUnixStr = regexp.MustCompile(`(?m)^func IsAbs\(path string\) bool \{[\s\S]*?^\}`).ReplaceAllString(liteUnixStr, "func IsAbs(path string) bool {\n\treturn CoreIsAbs(path)\n}")
+	// Join is not in the original SDK path_unix.go for Go 1.26.4, so we append it if replace fails or just append it.
+	liteUnixStr += "\nfunc Join(elem []string) string {\n\treturn CoreJoin(elem)\n}\n"
+	liteUnixStr = regexp.MustCompile(`(?m)^func volumeNameLen\(path string\) int \{[\s\S]*?^\}`).ReplaceAllString(liteUnixStr, "func volumeNameLen(path string) int {\n\treturn CoreVolumeNameLen(path)\n}")
+	liteUnixStr = regexp.MustCompile(`(?m)^func isLocal\(path string\) bool \{[\s\S]*?^\}`).ReplaceAllString(liteUnixStr, "func isLocal(path string) bool {\n\treturn CoreIsLocal(path)\n}")
+	liteUnixStr = regexp.MustCompile(`(?m)^func localize\(path string\) \(string, error\) \{[\s\S]*?^\}`).ReplaceAllString(liteUnixStr, "func localize(path string) (string, error) {\n\treturn CoreLocalize(path)\n}")
+
+	genLiteGo := filepath.Join(genDir, "internal/filepathlite/path_unix.go")
+	if err := os.WriteFile(genLiteGo, []byte(liteUnixStr), 0644); err != nil {
+		return fmt.Errorf("failed to write patched filepathlite/path_unix.go: %w", err)
+	}
+
+	// Algorithmic patch for src/path/filepath/path_unix.go
+	if err := os.MkdirAll(filepath.Join(genDir, "path/filepath"), 0755); err != nil {
+		return fmt.Errorf("failed to create gen dir: %w", err)
+	}
+	pathUnixSrc := filepath.Join(goroot, "src/path/filepath/path_unix.go")
+	pathUnixContent, err := os.ReadFile(pathUnixSrc)
+	if err != nil {
+		return fmt.Errorf("failed to read src/path/filepath/path_unix.go: %w", err)
+	}
+	// Patch join/Join to delegate to os.Join
+	reJoin := regexp.MustCompile(`(?ms)^func [jJ]oin\(elem \[\]string\) string \{[\s\S]*?^\}`)
+	pathUnixStr := string(pathUnixContent)
+	// Add internal/filepathlite import if missing
+	if !strings.Contains(pathUnixStr, "\"internal/filepathlite\"") {
+		pathUnixStr = strings.Replace(pathUnixStr, "import (", "import (\n\t\"internal/filepathlite\"", 1)
+	}
+	// Patch path-logic functions to delegate to filepathlite
+	pathUnixStr = reJoin.ReplaceAllString(pathUnixStr, "func join(elem []string) string {\n\treturn filepathlite.Join(elem)\n}")
+	pathUnixStr = regexp.MustCompile(`(?m)^func IsAbs\(path string\) bool \{[\s\S]*?^\}`).ReplaceAllString(pathUnixStr, "func IsAbs(path string) bool {\n\treturn filepathlite.IsAbs(path)\n}")
+	pathUnixStr = regexp.MustCompile(`(?m)^func VolumeNameLen\(path string\) int \{[\s\S]*?^\}`).ReplaceAllString(pathUnixStr, "func VolumeNameLen(path string) int {\n\treturn filepathlite.VolumeNameLen(path)\n}")
+	pathUnixStr = regexp.MustCompile(`(?m)^func IsPathSeparator\(c uint8\) bool \{[\s\S]*?^\}`).ReplaceAllString(pathUnixStr, "func IsPathSeparator(c uint8) bool {\n\treturn filepathlite.IsPathSeparator(c)\n}")
+	genPathUnix := filepath.Join(genDir, "path/filepath/path_unix.go")
+	if err := os.WriteFile(genPathUnix, []byte(pathUnixStr), 0644); err != nil {
+		return fmt.Errorf("failed to write patched filepath/path_unix.go: %w", err)
+	}
+
 	replacements := [][2]string{
 		// runtime
 		{"src/runtime/lock_wasip1.go", canon(filepath.Join(overlayDir, "runtime/lock_rusticated.go"))},
@@ -487,8 +560,12 @@ func generateGoOverlay(ws, goroot string) error {
 		{"src/os/exec/lp_wasm.go", canon(filepath.Join(overlayDir, "os/exec_rusticated.go"))},
 		// filepath (generated patch)
 		{"src/path/filepath/path.go", canon(genPathGo)},
+		{"src/path/filepath/path_unix.go", canon(genPathUnix)},
 		// net/http (generated patch)
 		{"src/net/http/fs.go", canon(genFsGo)},
+		// internal/filepathlite (generated patches)
+		{"src/internal/filepathlite/path_nonwindows.go", canon(filepath.Join(overlayDir, "internal/filepathlite/path_nonwindows.go"))},
+		{"src/internal/filepathlite/path_unix.go", canon(genLiteGo)},
 	}
 
 	var entries strings.Builder

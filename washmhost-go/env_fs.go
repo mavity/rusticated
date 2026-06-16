@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -236,6 +238,21 @@ func (h *HostEnv) sys_handle_close(ctx context.Context, m api.Module, stack []ui
 	}
 }
 
+func (h *HostEnv) translatePath(p string) string {
+	// Normalize all slashes to / first to simplify prefix matching
+	p = strings.ReplaceAll(p, "\\", "/")
+	if strings.HasPrefix(p, "/tmp/") {
+		return filepath.Join(os.TempDir(), p[5:])
+	}
+	if p == "/tmp" {
+		return os.TempDir()
+	}
+	// Also handle cases where it might be relative or workspace-absolute.
+	// In this simple host, we treat "/" as same as "" (relative to project root).
+	// But let's keep it simple for now as most paths are either /tmp or relative.
+	return filepath.FromSlash(p)
+}
+
 func (h *HostEnv) sys_path_open(ctx context.Context, m api.Module, stack []uint64) {
 	ovPtr := uint32(stack[0])
 	pathPtr := uint32(stack[1])
@@ -248,25 +265,26 @@ func (h *HostEnv) sys_path_open(ctx context.Context, m api.Module, stack []uint6
 		writeOverlapped(m, ovPtr, 22, 0, 0) // EINVAL
 		return
 	}
-	pathStr := string(buf)
+	pathStr := h.translatePath(string(buf))
 
 	// WASM flag mapping (standard for Go's wasip1/js):
+	// Based on Go's internal/syscall/unix and syscall packages for wasm
 	// O_RDONLY = 0
 	// O_WRONLY = 1
 	// O_RDWR   = 2
-	// O_CREATE = 0x200 (512)
-	// O_TRUNC  = 0x40  (64) - note: this matches 577 = 512+64+1
+	// O_CREATE = 0x40  (64)
+	// O_EXCL   = 0x80  (128)
+	// O_TRUNC  = 0x200 (512)
 	// O_APPEND = 0x400 (1024)
-	// O_EXCL   = 0x800 (2048)
 
 	rdwr := (flags & 3) == 2
 	writeOnly := (flags & 3) == 1
-	createFlag := (flags & 0x200) != 0
-	truncateFlag := (flags & 0x40) != 0
+	createFlag := (flags & 0x40) != 0
+	exclFlag := (flags & 0x80) != 0
+	truncateFlag := (flags & 0x200) != 0
 	appendFlag := (flags & 0x400) != 0
-	exclFlag := (flags & 0x800) != 0
 
-	debugLog("DEBUG HOST path_open: path=%s flags=%d RDWR=%v WRONLY=%v CREATE=%v TRUNC=%v", pathStr, flags, rdwr, writeOnly, createFlag, truncateFlag)
+	debugLog("DEBUG HOST path_open: path=%s flags=%d RDWR=%v WRONLY=%v CREATE=%v EXCL=%v TRUNC=%v", pathStr, flags, rdwr, writeOnly, createFlag, exclFlag, truncateFlag)
 
 	osFlags := 0
 	if rdwr {
@@ -459,7 +477,7 @@ func (h *HostEnv) sys_path_stat(ctx context.Context, m api.Module, stack []uint6
 		writeOverlapped(m, ovPtr, 22, 0, 0)
 		return
 	}
-	pathStr := string(buf)
+	pathStr := h.translatePath(string(buf))
 	debugLog("path_stat: path=%q flags=%d", pathStr, flags)
 
 	state := h.RegisterOp(ovPtr, nil)
@@ -516,7 +534,54 @@ func (h *HostEnv) sys_path_chmod(ctx context.Context, m api.Module, stack []uint
 		return
 	}
 
-	err := os.Chmod(string(buf), os.FileMode(mode))
+	err := os.Chmod(h.translatePath(string(buf)), os.FileMode(mode))
+	writeOverlapped(m, ovPtr, mapErrno(err), 0, 0)
+}
+
+func (h *HostEnv) sys_path_remove(ctx context.Context, m api.Module, stack []uint64) {
+	ovPtr := uint32(stack[0])
+	pathPtr := uint32(stack[1])
+	pathLen := uint32(stack[2])
+
+	buf, ok := m.Memory().Read(pathPtr, pathLen)
+	if !ok {
+		writeOverlapped(m, ovPtr, 22, 0, 0) // EINVAL
+		return
+	}
+	err := os.Remove(h.translatePath(string(buf)))
+	writeOverlapped(m, ovPtr, mapErrno(err), 0, 0)
+}
+
+func (h *HostEnv) sys_path_mkdir(ctx context.Context, m api.Module, stack []uint64) {
+	ovPtr := uint32(stack[0])
+	pathPtr := uint32(stack[1])
+	pathLen := uint32(stack[2])
+	mode := uint32(stack[3])
+
+	buf, ok := m.Memory().Read(pathPtr, pathLen)
+	if !ok {
+		writeOverlapped(m, ovPtr, 22, 0, 0) // EINVAL
+		return
+	}
+	err := os.Mkdir(h.translatePath(string(buf)), os.FileMode(mode))
+	writeOverlapped(m, ovPtr, mapErrno(err), 0, 0)
+}
+
+func (h *HostEnv) sys_path_rename(ctx context.Context, m api.Module, stack []uint64) {
+	ovPtr := uint32(stack[0])
+	oldPtr := uint32(stack[1])
+	oldLen := uint32(stack[2])
+	newPtr := uint32(stack[3])
+	newLen := uint32(stack[4])
+
+	mem := m.Memory()
+	oldBuf, ok1 := mem.Read(oldPtr, oldLen)
+	newBuf, ok2 := mem.Read(newPtr, newLen)
+	if !ok1 || !ok2 {
+		writeOverlapped(m, ovPtr, 22, 0, 0) // EINVAL
+		return
+	}
+	err := os.Rename(h.translatePath(string(oldBuf)), h.translatePath(string(newBuf)))
 	writeOverlapped(m, ovPtr, mapErrno(err), 0, 0)
 }
 

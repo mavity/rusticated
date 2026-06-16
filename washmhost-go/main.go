@@ -29,6 +29,11 @@ func ensurePosixOutputRunnable(args []string) {
 }
 
 func main() {
+	// Set an environment variable for the guest to know the host's temp directory if not already set.
+	if os.Getenv("MOHABBAT_HOST_TEMPDIR") == "" {
+		os.Setenv("MOHABBAT_HOST_TEMPDIR", os.TempDir())
+	}
+
 	ref := os.Getenv("MOHABBAT_WASM_FD")
 	if ref == "" {
 		fmt.Fprintf(os.Stderr, "washmhost: MOHABBAT_WASM_FD not set\n")
@@ -56,6 +61,10 @@ func main() {
 
 	argSlice := os.Args
 	ensurePosixOutputRunnable(argSlice)
+
+	// Inject host OS/ARCH for the guest.
+	os.Setenv("MOHABBAT_HOST_OS", runtime.GOOS)
+	os.Setenv("MOHABBAT_HOST_ARCH", runtime.GOARCH)
 
 	exitCode, err := RunWasm(context.Background(), payloadBytes, argSlice)
 	if err != nil {
