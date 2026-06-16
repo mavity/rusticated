@@ -198,6 +198,7 @@ fn tick() -> bool {
     } else {
         true
     };
+
     if done {
         *borrow = None;
     }
@@ -381,7 +382,7 @@ pub extern "C" fn run() -> i32 {
         let _ = initialized().set(());
     }
 
-    if tick() { 1 } else { 0 }
+    if tick() { 0 } else { -1 }
 }
 
 /// Drive one iteration of the runtime without re-running `guest_init`.

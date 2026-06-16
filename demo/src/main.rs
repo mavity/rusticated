@@ -1,10 +1,9 @@
+#![no_main]
 use std::fs::File;
 use std::io::{AsyncRead, AsyncWrite};
 use std::tty::{stdin, stdout};
 
-fn main() {
-    std::spawn!(async_main());
-}
+std::main!(async_main());
 
 async fn async_main() {
     let mut out = stdout();

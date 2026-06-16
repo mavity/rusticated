@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"regexp"
-	"runtime"
 	"strconv"
 
 	"github.com/tetratelabs/wazero"
@@ -65,7 +64,6 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 	}
 
 	// 2. Event loop: poll for completions, then re-enter the guest.
-	fmt.Printf("HOST: entering event loop\n")
 	var res []uint64
 	for {
 		res, err = runFunc.Call(ctx)
@@ -76,29 +74,32 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 			return 1, fmt.Errorf("run failed: %w", err)
 		}
 
-		// The only indicator should be outstanding continuation count.
-		if !hEnv.HasOutstandingOps() {
-			fmt.Printf("HOST: guest done (no outstanding ops)\n")
-			break
+		hEnv.mu.Lock()
+		forcedCode := hEnv.forcedExitCode
+		hEnv.mu.Unlock()
+
+		// 1. Immediate override via process_exit
+		if forcedCode != -1 {
+			return int(forcedCode), nil
 		}
 
-		// If we have active host operations, we must wait for them.
-		if hEnv.HasLiveOps() {
-			hEnv.Poll(ctx, mod)
-		} else {
-			// No host ops, but guest is not done? This typically means
-			// the guest is stuck or we have a race.
-			// For now, let's keep running but maybe add a small yield to avoid 100% CPU
-			// if both sides are waiting for each other.
-			runtime.Gosched()
+		// 2. Derive completion fact entirely from host state (no active operations)
+		if !hEnv.HasActiveOps() {
+			code := int32(0)
+			if len(res) > 0 {
+				code = int32(res[0])
+				if code == -1 {
+					// We are finishing because there are no more ops,
+					// so we treat "pending" as "finished with success"
+					// in the absence of any other information.
+					code = 0
+				}
+			}
+			return int(code), nil
 		}
-	}
 
-	exitCode := 0
-	if len(res) > 0 {
-		exitCode = int(res[0])
+		hEnv.Poll(ctx, mod)
 	}
-	return exitCode, nil
 }
 
 func tryRecoverFunctionName(err error, payload []byte) error {

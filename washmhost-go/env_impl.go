@@ -33,6 +33,7 @@ type HostEnv struct {
 	pendingSignals chan *OpState       // state to complete
 	timers         map[uint32]*time.Timer
 	lastLog        time.Time
+	forcedExitCode int32
 }
 
 type OpState struct {
@@ -42,6 +43,7 @@ type OpState struct {
 	deadline    time.Time
 	signum      uint32
 	isCancelled bool
+	decDone     int32
 }
 
 func NewHostEnv() *HostEnv {
@@ -55,6 +57,7 @@ func NewHostEnv() *HostEnv {
 		signals:        make(chan os.Signal, 10),
 		signalWaiters:  make(map[uint32]*OpState),
 		pendingSignals: make(chan *OpState, 100),
+		forcedExitCode: -1,
 	}
 	env.handles[0] = os.Stdin
 	env.handles[1] = os.Stdout
@@ -152,7 +155,14 @@ func (h *HostEnv) IsOpActive(ovPtr uint32, id uint64) bool {
 
 func (h *HostEnv) isOpActiveLocked(ovPtr uint32, id uint64) bool {
 	current, ok := h.activeOps[ovPtr]
-	return ok && current.opID == id
+	if !ok || current.opID != id {
+		return false
+	}
+	if current.isCancelled {
+		delete(h.activeOps, ovPtr)
+		return false
+	}
+	return true
 }
 
 func (h *HostEnv) DecOps() {
@@ -162,8 +172,21 @@ func (h *HostEnv) DecOps() {
 			return
 		}
 		if atomic.CompareAndSwapInt32(&h.outstandingOps, old, old-1) {
+			newVal := old - 1
+			if newVal == 0 {
+				h.fileOpsQueue <- func() {} // Wake up Poll
+			}
 			return
 		}
+	}
+}
+
+func (h *HostEnv) DecOpsFor(state *OpState) {
+	if state == nil {
+		return
+	}
+	if atomic.CompareAndSwapInt32(&state.decDone, 0, 1) {
+		h.DecOps()
 	}
 }
 
@@ -172,7 +195,25 @@ func (h *HostEnv) PendingOps() int32 {
 }
 
 func (h *HostEnv) HasOutstandingOps() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	return atomic.LoadInt32(&h.outstandingOps) > 0
+}
+
+func (h *HostEnv) HasActiveOps() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, op := range h.activeOps {
+		if !op.isCancelled {
+			return true
+		}
+	}
+	for _, op := range h.signalWaiters {
+		if !op.isCancelled {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *HostEnv) HasLiveOps() bool {
@@ -197,7 +238,7 @@ func (h *HostEnv) CancelOp(ovPtr uint32) {
 			state.isCancelled = true
 			delete(h.activeOps, ovPtr)
 			h.mu.Unlock()
-			h.DecOps()
+			h.DecOpsFor(state)
 			return
 		}
 	}
@@ -205,21 +246,18 @@ func (h *HostEnv) CancelOp(ovPtr uint32) {
 	state, ok := h.activeOps[ovPtr]
 	if ok && !state.isCancelled {
 		state.isCancelled = true
-		wasSignal := false
 		if state.signum != 0 {
 			delete(h.signalWaiters, state.signum)
-			wasSignal = true
 		}
+		delete(h.activeOps, ovPtr)
 		h.mu.Unlock()
-		fmt.Printf("HOST: cancel(0x%x) id=%d handle=%T\n", ovPtr, state.opID, state.handle)
+
 		if state.handle != nil {
 			if c, ok := state.handle.(interface{ SetDeadline(time.Time) error }); ok {
 				_ = c.SetDeadline(pastTime)
 			}
 		}
-		if wasSignal {
-			h.DecOps()
-		}
+		h.DecOpsFor(state)
 	} else {
 		h.mu.Unlock()
 	}
@@ -271,65 +309,61 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 	return err
 }
 
-func (h *HostEnv) Poll(ctx context.Context, mod api.Module) bool {
-	processed := false
+func (h *HostEnv) Poll(ctx context.Context, mod api.Module) {
+	// 1. Process anything already pending to ensure we don't block if work is ready.
 	for {
 		select {
 		case op := <-h.fileOpsQueue:
 			op()
-			processed = true
-		default:
-			goto signals
-		}
-	}
-
-signals:
-	for {
-		select {
 		case state := <-h.pendingSignals:
-			if h.IsOpActive(state.ovPtr, state.opID) {
-				h.mu.Lock()
-				delete(h.activeOps, state.ovPtr)
-				h.mu.Unlock()
-				writeOverlapped(mod, state.ovPtr, 0, 0, uint64(state.signum))
-			}
-			h.DecOps()
-			processed = true
+			h.handleSignal(mod, state)
 		default:
 			goto block
 		}
 	}
 
 block:
-	if processed {
-		return true
-	}
-
-	if h.PendingOps() == 0 {
-		return false
-	}
-
-	select {
-	case op := <-h.fileOpsQueue:
-		op()
-		for {
-			select {
-			case op := <-h.fileOpsQueue:
-				op()
-			default:
-				return true
-			}
-		}
-	case state := <-h.pendingSignals:
-		if h.IsOpActive(state.ovPtr, state.opID) {
+	// 2. If no work was found, block until at least one event arrives.
+	if h.HasOutstandingOps() {
+		// Periodically log status if we are stuck.
+		if time.Since(h.lastLog) > 5*time.Second {
 			h.mu.Lock()
-			delete(h.activeOps, state.ovPtr)
+			activeCount := len(h.activeOps)
 			h.mu.Unlock()
-			writeOverlapped(mod, state.ovPtr, 0, 0, uint64(state.signum))
+			fmt.Printf("HOST: Poll waiting (pending=%d, active=%d, signals=%d, queue=%d)\n",
+				h.PendingOps(), activeCount, len(h.pendingSignals), len(h.fileOpsQueue))
+			h.lastLog = time.Now()
 		}
-		h.DecOps()
-		return true
-	case <-ctx.Done():
-		return false
+
+		select {
+		case op := <-h.fileOpsQueue:
+			op()
+		case state := <-h.pendingSignals:
+			h.handleSignal(mod, state)
+		case <-ctx.Done():
+			return
+		}
 	}
+
+	// 3. Drain any other immediate completions that arrived while processing.
+	for {
+		select {
+		case op := <-h.fileOpsQueue:
+			op()
+		case state := <-h.pendingSignals:
+			h.handleSignal(mod, state)
+		default:
+			return
+		}
+	}
+}
+
+func (h *HostEnv) handleSignal(mod api.Module, state *OpState) {
+	if h.IsOpActive(state.ovPtr, state.opID) {
+		h.mu.Lock()
+		delete(h.activeOps, state.ovPtr)
+		h.mu.Unlock()
+		writeOverlapped(mod, state.ovPtr, 0, 0, uint64(state.signum))
+	}
+	h.DecOpsFor(state)
 }

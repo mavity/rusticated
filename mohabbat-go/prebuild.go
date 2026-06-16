@@ -102,7 +102,7 @@ func buildTargetSpecs(ws string) error {
 
 		spec["panic-strategy"] = "abort"
 
-		if strings.Contains(baseName, "-linux-gnu") {
+		if strings.Contains(baseName, "-linux-") {
 			spec["os"] = "linux"
 			spec["position-independent-executables"] = true
 			spec["relocation-model"] = "pic"
