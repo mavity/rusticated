@@ -34,6 +34,7 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 
 	// 2. Register Host Environment
 	hEnv := NewHostEnv()
+	defer hEnv.Close()
 	if err := hEnv.Register(ctx, r); err != nil {
 		return 1, fmt.Errorf("failed to register rusticated host env: %w", err)
 	}
