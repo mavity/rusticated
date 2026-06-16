@@ -44,6 +44,7 @@ type OpState struct {
 	signum      uint32
 	isCancelled bool
 	decDone     int32
+	reserved    uint64
 }
 
 func NewHostEnv() *HostEnv {
@@ -287,6 +288,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_net_accept), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64}, []api.ValueType{}).Export("net_accept")
 
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_process_spawn), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("process_spawn")
+	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_process_pipe), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).Export("process_pipe")
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_process_wait), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64}, []api.ValueType{}).Export("process_wait")
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_process_signal), []api.ValueType{api.ValueTypeI64, api.ValueTypeI32}, []api.ValueType{}).Export("process_signal")
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_signal_wait), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("signal_wait")

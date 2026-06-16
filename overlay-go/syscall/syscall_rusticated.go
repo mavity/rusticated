@@ -325,10 +325,8 @@ type Rusage struct {
 	Stime Timeval
 }
 
-// ProcAttr is a placeholder to allow compilation of the [os/exec] package
-// because we need Go programs to be portable across platforms. WASI does
-// not have a mechanism to spawn processes so there is no reason for an
-// application to take a dependency on this type.
+// ProcAttr holds attributes that will be applied to a new process started
+// by StartProcess.
 type ProcAttr struct {
 	Dir   string
 	Env   []string
@@ -337,6 +335,22 @@ type ProcAttr struct {
 }
 
 type SysProcAttr struct {
+	Chroot     string
+	Credential *Credential
+	Ptrace     bool
+	Setsid     bool
+	Setpgid    bool
+	Foreground bool
+	Pgid       int
+}
+
+// Credential holds user and group identities to be assumed
+// by a child process started by StartProcess.
+type Credential struct {
+	Uid         uint32   // User ID.
+	Gid         uint32   // Group ID.
+	Groups      []uint32 // Supplementary group IDs.
+	NoSetGroups bool     // If true, don't set supplementary groups
 }
 
 func Syscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err Errno) {
@@ -442,14 +456,42 @@ func StartProcess(argv0 string, argv []string, attr *ProcAttr) (pid int, handle 
 	}
 	cfg = append(cfg, 0) // end of cwd section
 
+	if attr != nil {
+		appendMode := func(idx int) {
+			if idx >= len(attr.Files) {
+				appendStr("inherit")
+				return
+			}
+			h := attr.Files[idx]
+			// In standard Go, passing 0/1/2 to StartProcess implies inheritance
+			// if they represent the existing standard streams.
+			if h == uintptr(idx) {
+				appendStr("inherit")
+			} else {
+				appendStr("handle:" + strconv.Itoa(int(h)))
+			}
+		}
+		appendMode(0) // stdin
+		appendMode(1) // stdout
+		appendMode(2) // stderr
+	} else {
+		// Default to inherit for 0,1,2
+		appendStr("inherit") // stdin
+		appendStr("inherit") // stdout
+		appendStr("inherit") // stderr
+	}
+	cfg = append(cfg, 0) // end of stdio section
+
 	var ctx overlappedContext
 	rusticated_process_spawn(unsafe.Pointer(&ctx.o), &cfg[0], uint32(len(cfg)))
 	awaitOverlapped(&ctx)
 	if ctx.o.hostError != 0 {
 		return 0, 0, errnoErr(Errno(ctx.o.hostError))
 	}
-	h := int(ctx.o.resultExt)
-	return h, uintptr(h), nil
+	// resultExt is the process handle in the low 32 bits.
+	h_child := ctx.o.resultExt & 0xFFFFFFFF
+
+	return int(h_child), uintptr(h_child), nil
 }
 
 func Wait4(pid int, wstatus *WaitStatus, options int, rusage *Rusage) (wpid int, err error) {
