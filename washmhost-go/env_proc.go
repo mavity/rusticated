@@ -31,7 +31,7 @@ func (h *HostEnv) sys_process_spawn(ctx context.Context, m api.Module, stack []u
 		parts := bytes.Split(cfg, []byte{0})
 		if len(parts) == 0 || len(parts[0]) == 0 {
 			h.fileOpsQueue <- func() {
-				defer h.DecOps()
+				defer h.DecOpsFor(state)
 				if !h.IsOpActive(ovPtr, state.opID) {
 					return
 				}
@@ -110,7 +110,7 @@ func (h *HostEnv) sys_process_spawn(ctx context.Context, m api.Module, stack []u
 			extResult = handle
 		}
 		h.fileOpsQueue <- func() {
-			defer h.DecOps()
+			defer h.DecOpsFor(state)
 			if !h.IsOpActive(ovPtr, state.opID) {
 				return
 			}
@@ -151,7 +151,7 @@ func (h *HostEnv) sys_process_wait(ctx context.Context, m api.Module, stack []ui
 		}
 		packed := (exitCode << 32) | (exitCode & 0xFFFF_FFFF)
 		h.fileOpsQueue <- func() {
-			defer h.DecOps()
+			defer h.DecOpsFor(state)
 			if !h.IsOpActive(ovPtr, state.opID) {
 				return
 			}
@@ -203,7 +203,7 @@ func (h *HostEnv) sys_signal_wait(ctx context.Context, m api.Module, stack []uin
 			old.isCancelled = true
 			delete(h.activeOps, old.ovPtr)
 			h.mu.Unlock()
-			h.DecOps()
+			h.DecOpsFor(old)
 			h.mu.Lock()
 		}
 	}
@@ -235,6 +235,8 @@ func (h *HostEnv) sys_process_exit(ctx context.Context, m api.Module, stack []ui
 	fmt.Printf("  Ghost Ops: %d\n", ghost)
 	fmt.Printf("  Handles:   %d, Timers: %d, SignalWaiters: %d\n",
 		handlesCount, timersCount, waitersCount)
+
+	h.Close()
 	os.Exit(int(code))
 }
 

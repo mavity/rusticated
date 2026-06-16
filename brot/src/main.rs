@@ -99,16 +99,28 @@ pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mu
 pub unsafe extern "C" fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
     let mut i = 0;
     while i < n {
-        unsafe {
-            let a = *s1.add(i);
-            let b = *s2.add(i);
-            if a != b {
-                return a as i32 - b as i32;
-            }
+        let v1 = unsafe { *s1.add(i) };
+        let v2 = unsafe { *s2.add(i) };
+        if v1 != v2 {
+            return v1 as i32 - v2 as i32;
         }
         i += 1;
     }
     0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
+    unsafe { memcmp(s1, s2, n) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strlen(s: *const u8) -> usize {
+    let mut n = 0;
+    while unsafe { *s.add(n) } != 0 {
+        n += 1;
+    }
+    n
 }
 
 // ─── Panic handler ────────────────────────────────────────────────────────────
@@ -224,6 +236,7 @@ pub fn print_err(msg: &str) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
     core::arch::naked_asm!(
+        "mov rdi, rsp", // Pass original stack pointer to linux::run
         "xor rbp, rbp",
         "and rsp, -16",
         "call {f}",
@@ -236,6 +249,7 @@ pub unsafe extern "C" fn _start() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
     core::arch::naked_asm!(
+        "mov x0, sp", // Pass original stack pointer to linux::run
         "mov x29, xzr",
         "mov x30, xzr",
         "b {f}",

@@ -43,14 +43,14 @@ func (h *HostEnv) sys_timer_set(ctx context.Context, m api.Module, stack []uint6
 		if state, ok := h.activeOps[ovPtr]; ok && !state.isCancelled {
 			state.isCancelled = true
 			h.mu.Unlock()
-			h.DecOps()
+			h.DecOpsFor(state)
 			h.mu.Lock()
 		}
 	}
 	state := h.registerOpLocked(ovPtr, nil)
 	timer := time.AfterFunc(time.Duration(millis)*time.Millisecond, func() {
 		h.fileOpsQueue <- func() {
-			defer h.DecOps()
+			defer h.DecOpsFor(state)
 			if !h.IsOpActive(ovPtr, state.opID) {
 				return
 			}
