@@ -12,7 +12,7 @@ We call such binaries **🍆vegetables** and Mohabbat comes with Rust and Go int
 <sup>* macOS is not yet supported, but it will be in the future.</sup>
 <sup>** Android support is experimental.</sup>
 
-<pre style="font-size: 0.65vw; white-space: pre; text-align: center; background: transparent; border: none; padding: 0; margin: 0; filter: contrast(1.5);">
+<pre class=splash>
   __  __
 ---
 
