@@ -192,12 +192,6 @@ mohab.bat demo-go/trivial -r
 ```
 
 
-<!--
-*/ }
--->
-
-
-
 # 🍆Vegetable file layout
 
 A 🍆vegetable is a single file with three zones concatenated end to end.
@@ -313,4 +307,8 @@ That means many third-party libraries will fail to build. But the project contai
 [lock](demo/loch) — a simple prototype of a two-panel file manager UI on ratatui, with file operations and navigation.
 
 [kabibi](kabibi) — a bit more complex prototype for the same, including mock shell and mock side panel with typing and interaction.
+
+<!--
+*/ }
+-->
 
