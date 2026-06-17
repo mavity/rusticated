@@ -414,7 +414,7 @@ func buildGoProjectWasm(ws, absProjectDir, outputWasm string) error {
 			return err
 		}
 	}
-	fmt.Println("🍆 SDK " + rootSource + " at " + goroot + "\n")
+	fmt.Println("🍆 SDK " + rootSource + " at " + goroot)
 	fmt.Printf("🍆  Building Go project %s -> %s\n", absProjectDir, outputWasm)
 	goBin := goBinFromRoot(goroot)
 	cmd := exec.Command(goBin, "build", "-buildmode=c-shared",
@@ -552,18 +552,12 @@ func runUnderWashmhost(ws, wasmPath string, extraArgs []string) error {
 
 // resolveGoroot finds the correct GOROOT using a priority chain that does not
 // require the `go` binary to be in PATH — critical for vegetable (WASM brain) mode.
+// Go 1.21+ toolchain forwarding sets GOROOT to a path inside GOMODCACHE when
+// the parent `go` binary delegates to a newer toolchain. Overlay replacements
+// beneath GOMODCACHE are forbidden since Go 1.26, so any candidate pointing
+// there must be rejected.
+// Build GOMODCACHE prefix for rejecting toolchain-forwarded roots.
 func resolveGoroot(ws string) (string, string, error) {
-	// Priority 0: extract from overlay.json if it already exists.
-	// overlay.json keys are absolute paths of the form {GOROOT}/src/...,
-	// so the GOROOT can be inferred without running any subprocess.
-	if goroot := gorootFromOverlay(ws); goroot != "" {
-		return goroot, "overlay", nil
-	}
-
-	// Go 1.21+ toolchain forwarding sets GOROOT to a path inside GOMODCACHE when
-	// the parent `go` binary delegates to a newer toolchain. Overlay replacements
-	// beneath GOMODCACHE are forbidden since Go 1.26, so any candidate pointing
-	// there must be rejected.
 	// Build GOMODCACHE prefix for rejecting toolchain-forwarded roots.
 	gomodcache := os.Getenv("GOMODCACHE")
 	if gomodcache == "" {
@@ -593,8 +587,8 @@ func resolveGoroot(ws string) (string, string, error) {
 		f.Close()
 	}
 
+	// Priority 1: $HOME/sdk/go{ver} — the cleanest source, not inside GOMODCACHE.
 	if ver != "" {
-		// Priority 1: $HOME/sdk/go{ver} — the cleanest source, not inside GOMODCACHE.
 		homes := uniqueStrings([]string{
 			func() string { h, _ := os.UserHomeDir(); return h }(),
 			os.Getenv("USERPROFILE"),
@@ -916,13 +910,14 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string) (string, error) {
 		if s.goos == "linux" && !isRusticatedTarget {
 			args = append(args, "--config", fmt.Sprintf("target.%s.rustflags=['-C', 'link-self-contained=no', '-C', 'linker=rust-lld', '-C', 'linker-flavor=ld.lld']", name))
 		}
-		if s.goos == "windows" && runtime.GOOS != "windows" && (strings.Contains(name, "windows-gnu") || strings.Contains(name, "windows-gnullvm")) {
-			// Cross-compiling brot for Windows from a non-Windows host.
-			// gnullvm targets inject late-link-args for MinGW libraries
-			// (-lmingw32 etc.) which don't exist on macOS/Linux. brot is
-			// no_std/no_main and uses raw-dylib for all Win32 APIs, needing
-			// none of them. We use rust-lld directly and provide a stub
-			// directory with empty COFF archives to satisfy the linker.
+		if s.goos == "windows" && (strings.Contains(name, "windows-gnu") || strings.Contains(name, "windows-gnullvm")) {
+			// Brot is no_std/no_main and uses raw-dylib for all Win32 APIs.
+			// Windows GNU/GNULLVM targets normally inject late-link-args for
+			// MinGW libraries (-lmingw32, -lmsvcrt, etc.) and startup objects.
+			// These don't exist on non-Windows hosts, and on Windows hosts
+			// they might cause "double entry point" conflicts with brot.
+			// We use rust-lld with a stub directory to satisfy the linker
+			// without requiring a real MinGW environment.
 			stubDir := filepath.Join(ws, "target", "brot-stubs")
 			if err := ensureBrotStubs(stubDir); err != nil {
 				return err
