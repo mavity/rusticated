@@ -40,10 +40,8 @@ pub struct MohabbatMeta {
 }
 
 #[cfg_attr(windows, unsafe(link_section = ".mohmeta"))]
-#[cfg_attr(
-    any(target_os = "linux", target_vendor = "apple"),
-    unsafe(link_section = ".mohabbat_meta")
-)]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".mohmeta"))]
+#[cfg_attr(target_vendor = "apple", unsafe(link_section = "__DATA,.mohmeta"))]
 #[used]
 pub static mut META: MohabbatMeta = MohabbatMeta {
     magic: *b"MOHABBAT",

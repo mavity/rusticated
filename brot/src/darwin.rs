@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 
 type RunPayloadFunc = unsafe extern "C" fn(*const u8, usize) -> u32;
 
+#[link(name = "System")]
 unsafe extern "C" {
     fn open(path: *const u8, flags: i32) -> i32;
     fn lseek(fd: i32, offset: i64, whence: i32) -> i64;
