@@ -186,6 +186,9 @@ pub unsafe fn run() -> ! {
         let env_name: Vec<u16> = "MOHABBAT_WASM_FD\0".encode_utf16().collect();
         SetEnvironmentVariableW(env_name.as_ptr(), payload_wasm_w.as_ptr());
 
+        let veg_env_name: Vec<u16> = "MOHABBAT_VEGETABLE_PATH\0".encode_utf16().collect();
+        SetEnvironmentVariableW(veg_env_name.as_ptr(), wide_path.as_ptr());
+
         let vegetable_str = String::from_utf16_lossy(&wide_path);
         let mut cmd_str = format!("\"{}\"", vegetable_str.trim_end_matches('\0'));
 

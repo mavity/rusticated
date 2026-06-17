@@ -62,9 +62,22 @@ func main() {
 	argSlice := os.Args
 	ensurePosixOutputRunnable(argSlice)
 
-	// Inject host OS/ARCH for the guest.
-	os.Setenv("MOHABBAT_HOST_OS", runtime.GOOS)
-	os.Setenv("MOHABBAT_HOST_ARCH", runtime.GOARCH)
+	// If a vegetable path is available, use it as the guest's executable path.
+	// Otherwise, if the WASM reference is a path, use that.
+	if veg := os.Getenv("MOHABBAT_VEGETABLE_PATH"); veg != "" {
+		argSlice[0] = veg
+	} else if _, err := strconv.ParseUint(ref, 10, 64); err != nil {
+		// ref is not a numeric FD, assume it is a path to the WASM file.
+		argSlice[0] = ref
+	}
+
+	// Propagate host OS/ARCH to the guest.
+	if os.Getenv("MOHABBAT_HOST_OS") == "" {
+		os.Setenv("MOHABBAT_HOST_OS", runtime.GOOS)
+	}
+	if os.Getenv("MOHABBAT_HOST_ARCH") == "" {
+		os.Setenv("MOHABBAT_HOST_ARCH", runtime.GOARCH)
+	}
 
 	exitCode, err := RunWasm(context.Background(), payloadBytes, argSlice)
 	if err != nil {
