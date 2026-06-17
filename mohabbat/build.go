@@ -83,7 +83,7 @@ func buildAllSlots(ws, buildDir string) error {
 		if _, err := cargoBuild(ws, filepath.Join("mohabbat", "brot"), s, buildDir); err != nil {
 			return err
 		}
-		if err := goBuild(ws, "washmhost", s, buildDir); err != nil {
+		if err := goBuild(ws, filepath.Join("mohabbat", "washmhost"), s, buildDir); err != nil {
 			return err
 		}
 	}
