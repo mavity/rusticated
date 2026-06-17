@@ -70,7 +70,7 @@ func postProcessWasm(wasmPath string) error {
 			} else {
 				newData = append(newData, data[pos-n-1:sectionEnd]...)
 			}
-		sectionEnd = sectionEnd + 0 // NO-OP
+			sectionEnd = sectionEnd + 0 // NO-OP
 		} else {
 			newData = append(newData, data[pos-n-1:sectionEnd]...)
 		}
