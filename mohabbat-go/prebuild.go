@@ -30,13 +30,14 @@ func runPrebuild(ws string) error {
 	if err := buildTargetSpecs(ws); err != nil {
 		return fmt.Errorf("target spec generation: %w", err)
 	}
-	goroot, err := resolveGoroot(ws)
+	goroot, rootSource, err := resolveGoroot(ws)
 	if err != nil {
 		return fmt.Errorf("resolving GOROOT: %w", err)
 	}
 	if err := generateGoOverlay(ws, goroot); err != nil {
 		return fmt.Errorf("overlay generation: %w", err)
 	}
+	fmt.Println("🍆  SDK " + rootSource + " at " + goroot)
 	fmt.Println("🍆  Prebuild complete.")
 	return nil
 }
