@@ -1,5 +1,6 @@
 [workspace]
-members = ["demo", "mohabbat/brot", "demo/loch", "kabibi"]
+members = ["rusticated-rust", "demo", "mohabbat/brot", "demo/loch", "kabibi"]
+resolver = "3"
 
 
 [workspace.package]
@@ -69,40 +70,4 @@ redundant_pub_crate = "allow"
 result_large_err = "allow"
 similar_names = "allow"
 struct_excessive_bools = "allow"
-
-[package]
-name = "rusticated"
-description = "Fast, standard-library-shaped async platform layer for brush-async"
-version = "0.1.2"
-categories = ["asynchronous", "development-tools", "embedded"]
-edition.workspace = true
-keywords = ["async", "io", "embedded", "runtime", "wasm"]
-license.workspace = true
-readme.workspace = true
-repository.workspace = true
-documentation = "https://docs.rs/rusticated"
-rust-version.workspace = true
-
-[lib]
-name = "std"
-bench = false
-
-[lints]
-workspace = true
-
-[features]
-# Opt-in: allow the host to spawn OS threads explicitly. rusticated itself never
-# spawns threads — this flag merely promises that doing so is acceptable on
-# the target platform. Never available on WASM.
-threads = []
-
-[dependencies]
-backtrace = { version = "0.3", default-features = false, optional = true }
-spin = { version = "0.12", default-features = false, features = ["mutex", "spin_mutex", "rwlock", "once", "lazylock"] }
-hashbrown = { version = "0.14", default-features = false, features = ["ahash", "allocator-api2"] }
-ahash = { version = "0.8", default-features = false }
-concurrent-queue = { version = "2.5", default-features = false }
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom = { version = "0.2.10", default-features = false, features = ["custom"] }
 
