@@ -1,4 +1,4 @@
-module washmhost-go
+module washmhost
 
 go 1.26.4
 

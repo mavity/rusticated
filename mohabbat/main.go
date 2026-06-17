@@ -63,7 +63,7 @@ func main() {
 
 	switch {
 	case runMode:
-		// Mode 4: build project to WASM + run immediately under washmhost-go.
+		// Mode 4: build project to WASM + run immediately under washmhost.
 		// Defaults to current directory if no projectDir was specified.
 		if projectDir == "" {
 			projectDir = "."
