@@ -326,7 +326,7 @@ func (h *HostEnv) sys_get_args(ctx context.Context, m api.Module, stack []uint64
 	ptr := uint32(stack[0])
 	lenBytes := uint32(stack[1])
 
-	args := os.Args
+	args := h.args
 	var bytesNeeded uint32
 	for _, arg := range args {
 		bytesNeeded += uint32(len(arg)) + 1

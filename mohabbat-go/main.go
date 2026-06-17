@@ -522,7 +522,7 @@ func runUnderWashmhost(ws, wasmPath string, extraArgs []string) error {
 // runUnderWashmhostNative compiles washmhost-go from source and runs the payload.
 func runUnderWashmhostNative(ws, wasmPath string, extraArgs []string) error {
 	goroot, _ := resolveGoroot(ws)
-	runArgs := []string{"run", "."}
+	runArgs := []string{"run", ".", "--"}
 	runArgs = append(runArgs, extraArgs...)
 	cmd := exec.Command("go", runArgs...)
 	cmd.Dir = filepath.Join(ws, "washmhost-go")
@@ -686,7 +686,7 @@ func runUnderWashmhostFromVeg(vegPath, wasmPath string, extraArgs []string) erro
 		_ = os.Chmod(tmpPath, 0o755)
 	}
 
-	runCmd := exec.Command(tmpPath, extraArgs...)
+	runCmd := exec.Command(tmpPath, append([]string{vegPath}, extraArgs...)...)
 	runCmd.Env = upsertEnv(os.Environ(), "MOHABBAT_WASM_FD", wasmPath)
 	runCmd.Stdout = os.Stdout
 	runCmd.Stderr = os.Stderr

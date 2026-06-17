@@ -460,18 +460,17 @@ pub unsafe fn run(sp: *const usize) -> ! {
         unsafe { sys_exit_group(102) };
     }
 
-    let argv = sp.add(1) as *const *const u8;
-    let envp = sp.add(1 + argc + 1) as *const *const u8;
+    let argv = unsafe { sp.add(1) } as *const *const u8;
+    let envp = unsafe { sp.add(1 + argc + 1) } as *const *const u8;
 
     // argv[1] is the bat file path (the "vegetable").
     let bat_path_ptr = unsafe { *argv.add(1) };
-    let bat_path_bytes = from_cstr(bat_path_ptr);
 
     // Filter out TMPDIR from environment.
     let mut tmp_prefix: &[u8] = b"/tmp";
     let mut ptr = envp;
     while !unsafe { (*ptr).is_null() } {
-        let entry = from_cstr(unsafe { *ptr });
+        let entry = unsafe { from_cstr(*ptr) };
         if entry.starts_with(b"TMPDIR=") {
             tmp_prefix = &entry[7..];
             break;
@@ -601,6 +600,12 @@ pub unsafe fn run(sp: *const usize) -> ! {
     wasm_fd_var.extend_from_slice(&payload_path[..payload_path.len() - 1]); // skip NUL
     wasm_fd_var.push(0);
 
+    // Build "MOHABBAT_VEGETABLE_PATH=<path>\0"
+    let mut veg_path_var: Vec<u8> = b"MOHABBAT_VEGETABLE_PATH=".to_vec();
+    let veg_path = unsafe { from_cstr(bat_path_ptr) };
+    veg_path_var.extend_from_slice(veg_path);
+    veg_path_var.push(0);
+
     let mut envp_ptrs: Vec<*const u8> = Vec::new();
     let mut e_ptr = envp;
     while !unsafe { (*e_ptr).is_null() } {
@@ -608,12 +613,13 @@ pub unsafe fn run(sp: *const usize) -> ! {
         e_ptr = unsafe { e_ptr.add(1) };
     }
     envp_ptrs.push(wasm_fd_var.as_ptr());
+    envp_ptrs.push(veg_path_var.as_ptr());
     envp_ptrs.push(core::ptr::null());
 
     // ── Build argv for the child ──────────────────────────────────────────
     // argv[0] = vegetable_path, argv[1..] = extra args.
-    // We can just use the tail of our own argv (starting from index 1).
     let mut argv_ptrs: Vec<*const u8> = Vec::new();
+    argv_ptrs.push(bat_path_ptr);
     let mut a_ptr = unsafe { argv.add(1) };
     while !unsafe { (*a_ptr).is_null() } {
         argv_ptrs.push(unsafe { *a_ptr });

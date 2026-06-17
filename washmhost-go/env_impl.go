@@ -34,6 +34,7 @@ type HostEnv struct {
 	timers         map[uint32]*time.Timer
 	lastLog        time.Time
 	forcedExitCode int32
+	args           []string
 }
 
 type OpState struct {
@@ -63,6 +64,8 @@ func NewHostEnv() *HostEnv {
 	env.handles[0] = os.Stdin
 	env.handles[1] = os.Stdout
 	env.handles[2] = os.Stderr
+
+	env.args = os.Args
 
 	var notifySigs = []os.Signal{syscall.SIGINT, syscall.SIGTERM}
 	if runtime.GOOS != "windows" {
