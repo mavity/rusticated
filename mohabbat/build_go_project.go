@@ -14,7 +14,7 @@ func buildGoProjectWasm(ws, absProjectDir, outputWasm string) error {
 	if err != nil {
 		return fmt.Errorf("cannot resolve GOROOT: %w", err)
 	}
-	buildDir := filepath.Join(ws, "target", "mohabbat-go-build")
+	buildDir := filepath.Join(ws, "target", "mohabbat-build")
 	projectName := filepath.Base(absProjectDir)
 	goTmpDir := filepath.Join(buildDir, projectName, "gotmp")
 	goCacheDir := filepath.Join(buildDir, projectName, "gocache")
@@ -48,7 +48,7 @@ func buildGoProjectWasm(ws, absProjectDir, outputWasm string) error {
 	return postProcessWasm(outputWasm)
 }
 
-// buildBrainWasm compiles mohabbat-go itself as the WASM brain.
+// buildBrainWasm compiles mohabbat itself as the WASM brain.
 func buildBrainWasm(ws, outputWasm string) error {
 	overlayPath := filepath.Join(ws, "target", "overlay.json")
 	goroot, rootSource, err := resolveGoroot(ws)
@@ -70,7 +70,7 @@ func buildBrainWasm(ws, outputWasm string) error {
 		"-overlay", overlayPath,
 		"-trimpath", "-ldflags=-s -w",
 		"-o", outputWasm, ".")
-	cmd.Dir = filepath.Join(ws, "mohabbat-go")
+	cmd.Dir = filepath.Join(ws, "mohabbat")
 	env := os.Environ()
 	env = upsertEnv(env, "GOOS", "wasip1")
 	env = upsertEnv(env, "GOARCH", "wasm")

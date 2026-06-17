@@ -1,5 +1,5 @@
 # brot is a #![no_std] + #![no_main] binary that provides its own _start.
 # Linux builds use x86_64-rusticated-linux / aarch64-rusticated-linux targets
-# (via mohabbat-go) which have no pre_link_objects_exe in their target spec,
+# (via mohabbat) which have no pre_link_objects_exe in their target spec,
 # so no rcrt1.o startup object is linked and our naked _start is the sole
 # entry point. No extra linker flags are required here.

@@ -11,7 +11,7 @@ import (
 // On native, runs prebuild (target specs + sysroot + overlay) via prebuildFn.
 // Inside a WASM vegetable, falls back to subprocess if artifacts are missing.
 func modeBuild(ws string) error {
-	buildDir := filepath.Join(ws, "target", "mohabbat-go-build")
+	buildDir := filepath.Join(ws, "target", "mohabbat-build")
 	if err := os.MkdirAll(buildDir, 0o755); err != nil {
 		return err
 	}
@@ -27,7 +27,7 @@ func modeBuild(ws string) error {
 	}
 
 	brainPath := filepath.Join(buildDir, "brain.wasm")
-	fmt.Println("🍆  Building brain WASM (mohabbat-go)...")
+	fmt.Println("🍆  Building brain WASM (mohabbat)...")
 	if err := buildBrainWasm(ws, brainPath); err != nil {
 		return fmt.Errorf("brain wasm build: %w", err)
 	}
@@ -45,7 +45,7 @@ func modeBuild(ws string) error {
 
 // modePackage is Mode 3: build a project's payload and assemble a fresh vegetable.
 func modePackage(ws, projectDir, outputPath string) error {
-	buildDir := filepath.Join(ws, "target", "mohabbat-go-build")
+	buildDir := filepath.Join(ws, "target", "mohabbat-build")
 	if err := os.MkdirAll(buildDir, 0o755); err != nil {
 		return err
 	}

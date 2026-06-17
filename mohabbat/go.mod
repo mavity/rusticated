@@ -1,4 +1,4 @@
-module mohabbat-go
+module mohabbat
 
 go 1.26.4
 
