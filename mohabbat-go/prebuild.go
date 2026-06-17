@@ -411,9 +411,9 @@ func cleanWindowsPath(p string) string {
 }
 
 // generateGoOverlay writes target/overlay.json mapping wasip1 runtime/syscall sources
-// to their rusticated counterparts in overlay-go/.
+// to their rusticated counterparts in rusticated-go/.
 func generateGoOverlay(ws, goroot string) error {
-	overlayDir := filepath.Join(ws, "overlay-go")
+	overlayDir := filepath.Join(ws, "rusticated-go")
 	genDir := filepath.Join(ws, "target", "overlay-gen")
 
 	canon := func(p string) string {

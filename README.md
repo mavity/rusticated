@@ -274,11 +274,11 @@ The WASM host runtime uses Wazero, a pure-Go WASM runtime. There are no clever t
 
 The host is compiled for all supported targets, and is embedded in the brotli pool. The brot decompresses the pool and launches the host.
 
-# Rusticated Overlay-go
+# Rusticated Go
 
 In order for Go code to run on rusticated WASM ABI, the way Go reads and writes files, accessess network or environment must be re-implemented on top of that rusticated WASM ABI.
 
-This is what overlay-go does. Go allows 'overlaying' or swapping system libraries with custom implementations. Our **overlay-go** was carefully designed to fit with **Go 1.26.4** and makes normal unmodified Go code to run inside that WASM without any changes or limitations.
+This is what rusticated-go does. Go allows 'overlaying' or swapping system libraries with custom implementations. Our **rusticated-go** was carefully designed to fit with **Go 1.26.4** and makes normal unmodified Go code to run inside that WASM without any changes or limitations.
 
 The beauty of Go on rusticated is that its *green threads* (goroutines) are perfectly fit to rusticated WASM async model. That means while one goroutine is waiting for a file or network read, another goroutine can run and do something else. This is a very important feature of Go that makes WASM hosting very efficient and viable.
 
