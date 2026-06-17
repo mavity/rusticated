@@ -178,7 +178,7 @@ func (h *HostEnv) sys_get_platform_info(ctx context.Context, m api.Module, stack
 	copySafe(84, "wazero") // category
 	// WASM platform version string (could be injected from host build)
 	copySafe(156, "1.26.4")
-	copySafe(220, "washmhost-go")
+	copySafe(220, "washmhost")
 	copySafe(292, "0.1.0")
 
 	if ok := mem.Write(ptr, buf); !ok {
