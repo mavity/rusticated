@@ -253,7 +253,7 @@ func brotPath(buildDir string, s slot) string {
 }
 
 func washmhostPath(buildDir string, s slot) string {
-	return filepath.Join(buildDir, fmt.Sprintf("washmhost-go-%s%s", s.name, artifactExt(s.goos)))
+	return filepath.Join(buildDir, fmt.Sprintf("washmhost-%s%s", s.name, artifactExt(s.goos)))
 }
 
 func artifactExt(goos string) string {

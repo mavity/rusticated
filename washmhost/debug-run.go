@@ -14,7 +14,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: go run washmhost-go/debug-run.go <package-dir> [args...]")
+		fmt.Println("Usage: go run washmhost/debug-run.go <package-dir> [args...]")
 		os.Exit(1)
 	}
 
@@ -30,12 +30,12 @@ func main() {
 
 	workspaceRoot := wd
 	// Minimal check to see if we are likely in the right place.
-	if _, err := os.Stat(filepath.Join(workspaceRoot, "washmhost-go")); err != nil {
-		// Try parent if we are inside washmhost-go
-		if filepath.Base(workspaceRoot) == "washmhost-go" {
+	if _, err := os.Stat(filepath.Join(workspaceRoot, "washmhost")); err != nil {
+		// Try parent if we are inside washmhost
+		if filepath.Base(workspaceRoot) == "washmhost" {
 			workspaceRoot = filepath.Dir(workspaceRoot)
 		} else {
-			fmt.Fprintf(os.Stderr, "Error: Could not find washmhost-go in current directory (%s). Please run from the workspace root.\n", wd)
+			fmt.Fprintf(os.Stderr, "Error: Could not find washmhost in current directory (%s). Please run from the workspace root.\n", wd)
 			os.Exit(1)
 		}
 	}
@@ -108,9 +108,9 @@ func main() {
 		_ = os.Chmod(outputWasm, 0o755)
 	}
 
-	fmt.Printf("🍆 Running %s under washmhost-go\n", outputWasm)
+	fmt.Printf("🍆 Running %s under washmhost\n", outputWasm)
 
-	// Run washmhost-go
+	// Run washmhost
 	// Pass any additional arguments
 	runArgs := []string{"run", ".", "payload.wasm"}
 	if len(os.Args) > 2 {
@@ -118,7 +118,7 @@ func main() {
 	}
 
 	runCmd := exec.Command("go", runArgs...)
-	runCmd.Dir = filepath.Join(workspaceRoot, "washmhost-go")
+	runCmd.Dir = filepath.Join(workspaceRoot, "washmhost")
 	runCmd.Env = append(os.Environ(), "MOHABBAT_WASM_FD="+outputWasm)
 	runCmd.Stdout = os.Stdout
 	runCmd.Stderr = os.Stderr
@@ -130,7 +130,7 @@ func main() {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			os.Exit(exitErr.ExitCode())
 		}
-		fmt.Fprintf(os.Stderr, "washmhost-go execution failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "washmhost execution failed: %v\n", err)
 		os.Exit(1)
 	}
 }

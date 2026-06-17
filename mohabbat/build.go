@@ -21,7 +21,7 @@ func modeBuild(ws string) error {
 		return fmt.Errorf("prebuild: %w", err)
 	}
 
-	fmt.Println("🍆  Building brot (cargo) and washmhost-go for Modern Four...")
+	fmt.Println("🍆  Building brot (cargo) and washmhost for Modern Four...")
 	if err := buildAllSlots(ws, buildDir); err != nil {
 		return err
 	}
@@ -55,14 +55,14 @@ func modePackage(ws, projectDir, outputPath string) error {
 	if err := buildProjectToWasm(ws, projectDir, wasmPath); err != nil {
 		return err
 	}
-	fmt.Println("🍆  Building brot (cargo) and washmhost-go for Modern Four...")
+	fmt.Println("🍆  Building brot (cargo) and washmhost for Modern Four...")
 	if err := buildAllSlots(ws, buildDir); err != nil {
 		return err
 	}
 	return assembleVegetable(ws, wasmPath, buildDir, outputPath)
 }
 
-// modeDevRun is Mode 4: build a project to WASM and run it under washmhost-go.
+// modeDevRun is Mode 4: build a project to WASM and run it under washmhost.
 func modeDevRun(ws, projectDir string, extraArgs []string) error {
 	projectName := filepath.Base(projectDir)
 	wasmPath := filepath.Join(ws, "target", projectName+".wasm")
@@ -73,7 +73,7 @@ func modeDevRun(ws, projectDir string, extraArgs []string) error {
 	return runUnderWashmhost(ws, wasmPath, extraArgs)
 }
 
-// buildAllSlots builds brot (cargo) and washmhost-go for all Modern Four slots.
+// buildAllSlots builds brot (cargo) and washmhost for all Modern Four slots.
 func buildAllSlots(ws, buildDir string) error {
 	for _, s := range slots {
 		if !shouldBuildSlot(s) {
@@ -83,7 +83,7 @@ func buildAllSlots(ws, buildDir string) error {
 		if _, err := cargoBuild(ws, "brot", s, buildDir); err != nil {
 			return err
 		}
-		if err := goBuild(ws, "washmhost-go", s, buildDir); err != nil {
+		if err := goBuild(ws, "washmhost", s, buildDir); err != nil {
 			return err
 		}
 	}
