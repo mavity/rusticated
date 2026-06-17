@@ -171,6 +171,7 @@ unsafe impl GlobalAlloc for OsAllocator {
 // ─── macOS: mmap / munmap via libSystem (always present in the shared cache) ─
 
 #[cfg(target_os = "macos")]
+#[link(name= "System" )]
 unsafe extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut u8;
     fn munmap(addr: *mut u8, len: usize) -> i32;
