@@ -1,353 +1,316 @@
 <!--
 function __README__() { /*
 -->
-# Rusticated
+# Mohabbat
 
-This is a custom target crate meant to handle extremely efficiency-consciouis and resource-frugal implementation of Rust std for embedded and performance-sensitive environments.
+मोहब्बत &mdash; love.
 
-The build is for Linux, Windows, MacOS and WASM using strictly-async public APIs and enabling fully async implementations such as IOPC, io_uring and custom WASM host functions (as opposed to things like wasip1 for example).
+Mohabbat is a tool for building a single binary capable of running anywhere: Windows, Linux, macOS*, even on Android**.
 
-The project is architected to be highly frugal and not targeting wide compatibility with existing crates as is as its goal.
+We call such binaries **🍆vegetables** and Mohabbat comes with Rust and Go integration.
 
-The crate is meant to be used for projects that achieve cross-platform ultimate performance.
+<sup>* macOS is not yet supported, but it will be in the future.</sup>
+<sup>** Android support is experimental.</sup>
 
-So that is what it is: a frugal, completion-based async platform layer for Linux, macOS, Windows, and WASM.
+<pre style="font-size: 0.65vw; white-space: pre; text-align: center; background: transparent; border: none; padding: 0; margin: 0; filter: contrast(1.5);">
+  __  __
+---
 
-<pre style="font-size: 90%; white-space: pre; text-align: center;">
-🩵🩵🩵🩵🟦🩵🟦🟦🩵🟦🟦🩵🟦🟦🟦🟦🟦🟦🟦🟦🩵🟦🩵🟦🩵🟦🩵🩵🩵🩵🩵🩵🩵⬜⬜⬜
-🩵🩶🩵🩶🩵🩵🩵🩶🟦🩵🟦🩵🟦🩵🩵🟦🩵🟦🩵🟦🩵🩵🟦🩵🩵🩵🩵🩵🩵🩵🩵⬜🩵🩵⬜⬜
-🩵🩵🩵🩵🩶🩵🩶🩵🩵🩵🩶🩵🩵🩶🩵🩵🟦🩶🟦🩵🟦🩵🩵🩶🩵🟦🩵🩶🩵🩶🩵🩵🩵⬜🩵⬜
-🩵⬜🩵⬜🩵⬜🩵🩵🩶🩵🩵🩶🩵🩵🩶🩵🩵🩵🟦🩵🩵🩵🩵🩵🩵🩵🩵🩵🩵🩵🩵🩵⬜🩵🩵⬜
-🩵🩵🩶🩵⬜🩵⬜🩵⬜🩵🩵🩵🩶🩵🩵🩶🩵🩶🩵🩶🩵🩶🩵🩶🩵🩶🩵🩵⬜🩵🩵🩵🩵🩵🩵🩶
-🩵🩶🩵🩵🩵⬜🩵⬜🩵⬜🩵🩶🩵🩶🩵🩵🩵🩵🩵🩵🩵⬜🩵🩵⬜🩵⬜🩵🩵🩵⬜🩵🩵🩶🩶🟩
-🩵🩵⬜🩵🩵🩵⬜🩵⬜🩵⬜🩵🩵⬜🩵⬜🩵⬜🩵⬜🩵⬜🩵⬜🩵🩵⬜🩵⬜🩵🩵🩵🩶🩶🟩🟫
-⬜🩵🩵⬜🩵⬜🩵🩵⬜🩵⬜⬜🩵⬜🩵⬜🩵⬜🩵⬜🩵⬜🩵⬜🩵⬜🩵⬜🩵⬜🩵⬜🩶🌊👖🟩
-🩵⬜🩵⬜🩵🩵⬜🩵⬜🩵⬜🩵⬜⬜🩵⬜⬜🩵⬜⬜🩵⬜⬜🩵⬜⬜🩵⬜🩵⬜🩵🩵🩶🟩🟫🟩
-⬜🩵⬜🩵⬜🩵⬜🩵⬜🩵⬜⬜🩵⬜⬜⬜⬜⬜⬜🩵⬜⬜🩵⬜⬜🩵⬜🩵⬜🩵⬜🩵🩶🟫🟩🟫
-🩵⬜⬜⬜⬜⬜🩵⬜🩵⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜🩵🩶🟩🩶🟩
-⬜🩵🩵⬜🩵⬜⬜⬜⬜🩵⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜🩶🩶🟫🩶🩶
-🩵⬜🩵⬜🩵⬜🩵⬜⬜⬜🩵⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜🩵⬜⬜🩵🩶🟩🟩🟫🟩
-⬜⬜⬜🩵⬜⬜⬜🩵⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜🩶🩷🩷🩶🩶🟥🩷🟡⬜🩶🩶🩶🟩🩶🟩
-🟩🩶🟩🟡🩶🩶🩵⬜⬜🩵⬜🩵🩶⬜⬜⬜⬜⬜⬜🟡🩶🩶🟡🩶🩶🩶🟡🟡🩶🌊🩷🟨🟡🩶🟫🟩
-🟨🟩🟨🟩🩶🟡🩶🩶🩵⬜🩶🟩🩶🟩⬜⬜⬜⬜🩶🩶👖🟥🟨🩶🟫🟧🟨🟡🌊🟨🩶🩶🟥🩶🟩🟫
-🟩🟧🟩🟨🟩🟡🟩🟨🟩🟩🩶🩶🟡🩶🟡🩶🟡🩶🩶👖🩶🟨🩶🟧🩶🟡🟡🟡👖🩷🟨🩶🟡🟨🩷🟩
-🟩🟨🩶🩶🟡🟩🟡🩶🟫🟫🟩🟡🟩🩶🟩🟡🟩🟨🩶🟥🟨🟥🩶🟥🟧🟥🟡🟥🩷🩶🩶🟥🟡🟦🟡🩶
-🩶🟩🟨🟩🟡🩶🟩🟨🟩🟡🩶🟩🟨🟩🟨🩶🟡🟪🟫🟨🟡🟨👖🟨🟡🟨🟡🟫🟧🟧🟧🩷🟡🟧🩶🩶
-🟡🟩🟫🩶🟡🩶🟫🟩🟡🩶🟡🟡🟩🟨🩶🟡👖🟫🩶🟨🟩👖🟨🟩🟨🟡🟡🌊🩶🟧🩶🟥🟡🟨🟡🩶
-🩶🟩🟨🟩🟡🟩🟨🟩🟫🟩🟩🟨🩶🟩🟨🟩🌊🟨🟨🟫🟧🟫🟥🟫🩶🟨🩶🟩🟨🟩🟫🟫🟡🟥🟧🟡
-🟫🟩🟡🩶🟩🟨🩶🟡🟩🟨🟩🟩🟨🟩🟩🩶🟩🟧🟨🩶🟨👖🟨🟨🟨🟨🟫🟥🟫🟧🟩🩶🟡🟨🟥🟥
-🟡🩶🟩🟨🟡🟡🟡🟩🟡🟡🟡🩶🟡🩶🟫🟩🟧🟫🟨🟫🟫🟨🟫🟨🟨🟧👖🟫🟡👖👖🟨🟡🟡🌊🟥
-🟩🟫🩶🟡🟩🩶🟡🟡🩶🟩🟡🟩🟩🟨⚫🩶🟫🟩🟫🩶🩶🩶🟫🩶🟫🩶🟧🟨🟧🟧🩶🟨🟡🟡🟩🌊
-🩶🟩🟡🟩🟡🟡🩶🟩🟡🟩🟨🩶🟩🟫🟩🟫🩶🩶🩶🩶🟡🩶🩶🩶🩶🟡🩶⬜🩶🩶🟧🟨🟨🟡🩶🟩
-🟡🟡⚫⚫🟩🩶🟡⚫🟩🟨🟩🟫🟫🟩🟫🟫🩶🩶🩶🩶🩷⬜🟡🩷🟡⬜⬜⬜⬜⬜🟡🩶🟨🟡🩶🟡
-🟡🟩🟩🟩🟩🟫🟡🟩🟨🩶🟩🟡🟩👖🟩👖🩶⚫🟫⚫🟫🩶🩶🩶🩷🩶🟡⬜⬜⬜⬜⬜🟡🟧🟨🟡
-⬜🟫🟫⚫🟩⚫🟡🟩🟡🩶🟡🟩🟫⬛⚫🟫🟫⚫⚫⚫⚫🟫🟧🩶🟫👖🟫👖🩶🩶🩶⬜⬜⬜🟫🟨
-🟡🟩⬛⚫🟩🟡🟡⬜🟡🟡🟩🩶⚫⬛⚫🩶🟫👖⚫⚫⚫⚫🟫🟫🟫🫐🟫🟫🟫🟫🟫⚫🟫🟫🫐🟫
-🟩🟩⚫🟫🟩🟡🟡⬜🟡🟡🟡🟩⬛⬛🟫🩶🟩🟫🟫⚫⚫⬛⚫🟫👖🟫👖🟫🌊🩶🩶🟫🟫🩶🩶🟫
-🟡⬛⚫⚫🟩🩶🟡🟡🩶🟡🩶⚫⚫⬛🩶🩶🟫🩶🟫👖🟫🟫🩶🟫🩶🟫🟫🟫🟫🟫🩶🟫👖⬜🩶🟫
-🩶⚫⚫🟩🟫🟩🟡🟩🟡⬜🟡⚫⬛⬛🟫🩶🩶🟫🩶🟫👖🩶⬜🟥🩶🩶🟫🩶🩶🩶🩶🟫🩶⬜🩶🟫
-🟩🟫🟩🟩🟨🟡🩶🟡🟡🟡🟩🟩⚫⬛🟫🩶🟫🩶🟫🩶🟫⬜⬜⬜🟧⬜🩶🟧🩶🟡⬜🟫⬜🟡🩷🩶
-🟡⚫🟩🟫🟩🟡🟡🟩🩶🟡🟡🟡🟩⬛⬛🟫⚫⚫⚫⚫🩶⬜⬜⬜🟫🩶⬜🩶🩷⬜🩶🩶⬜⬜🟡🩷
-🟡🟡🟡🟡🟩🟫🩶🟡🟡🩶🟡🟩🟫⚫⚫🟩🩶🟧🟫🩶⬜⬜⬜⬜⬜🟫🟥🟫🟫🟧🩶🟡⬜⬜⬜⬜
-🟩🟡🟡🟡🟡🟩🟫🟩🟡🟡🟡🟡🟡🟡🟩🟡🩶🟫👖🟫🩶🟡⬜🩷🟡🩶🩶🩶⬜⬜⬜🩷⬜⬜⬜🟡
-🟡🟡🟡⬜🟡🟡🟡🟡⬜🟡⬜⬜🟡⬜🟡🩶🩶🟫🩶🟫🟫🟫🩶🟫🩶🩷🟧🩶🟡⬜🟡⬜⬜⬜⬜🟡
-⬜🟡⬜🟡⬜🟡⬜🟡⬜🟡🟡⬜🟡⬜⬜🟡🩶🟫🩶⚫👖🟫🟫🩶🩷🟡🩶⬜⬜🩷⬜⬜⬜⬜⬜⬜
-🟡⬜🟡🟡⬜🟡⬜🟡⬜🟡⬜🟡⬜🟡🟡⬜🟫🟩🟫🟫🟫👖🟫🟫🩶⬜🟡⬜⬜🟡⬜⬜⬜⬜🟡⬜
-🟡🟡⬜🟡🟡⬜🟡🟡⬜🟡⬜🟡⬜🟡⬜🟡👖🟫👖🟫🫐🟫👖🟫🩶🟧🩶🩷⬜⬜⬜⬜⬜⬜⬜🟡
-⬜🟡🟡⬜🟡🟡⬜🟡🟡⬜🟡🟡⬜🟡⬜🟡🟫⚫⚫🟫🟫🟫🟫🩶🟧🩶🩶🟨⬜⬜⬜⬜⬜🟡⬜⬜
-🟡⬜🟡🟡⬜🟡🟡⬜🟡🟡⬜🟡⬜🟡⬜🟡👖⚫🟫👖🟫👖🟫🩶🩶🟧🟫🩶⬜⬜⬜⬜⬜⬜🟡⬜
-🟡🟡⬜🟡🟡⬜🟡🟡⬜🟡🟡⬜🟡⬜🟡⬜🟡🟫🟩🟫🩶🟡⬜⬜🟡⬜🟫🩶⬜🟡⬜⬜⬜⬜🟡⬜
-🟡⬜🟡🟡⬜🟡🟡⬜🟡⬜🟡🟡⬜🟡🟡⬜🟡⬜🟫🩶🟧🩶🟡⬜⬜⬜🩶🟧⬜⬜⬜⬜🩵🩶⬜🟡
-🟡🟡⬜🟡🟡⬜🟡🟡🟡🟡⬜🟡🟡🩶🟡🟩🟡⬜🩶👖🩶🩶🩷⬜⬜🟡🩶🩶⬜⬜⬜⬜⬜🟦⬜⬜
-🟡🟡🟡⬜🟡🟡⬜🟡⬜🟡🟡🩶🟡🟩🟡🟩🩶🩵🩶🩶🟫🩶🩶🩶🩶🩶🩶🟡⬜⬜⬜⬜🩵🩶⬜⬜
-🟡⬜🟡🟡🟡🟡🟡🟡🟡🟡🩶🟡🟩🟡🩶🩶⬜🩵🩶🩶🟩🟫🟫🩶🟫🩶🟡⬜⬜⬜⬜🩵🩵🩵⬜⬜
-🟡🟡⬜🟡⬜🟡⬜🟡⬜🟡🟡🟡🟩🩶🩵⬜🩵⬜🟦🩶🩶🩶🩶🩶🟡🩶⬜⬜🩵⬜🩵⬜⬜⬜⬜⬜
-🟡🟡🟡🟡🟡🟡🟡🟡🟡⬜🟡🟩🩶⬜🩵⬜🩵🩵🌊🩶🩶🟫🩶🩶🩶🩶🩶🩶🟦⬜⬜⬜⬜⬜⬜⬜
-⬜🟡⬜🟡⬜🟡⬜🟡🟩🟡🩶🟡⬜⬜🩵⬜🩶🩶🩶🩶🩶🩶⬜🩶🌊🩶🟦🩶🟦🩶⬜⬜⬜⬜⬜⬜
-🟡🟡🟡🟡🟡⬜🟡🟡⬜🟡🟩⬜🩵⬜🩵⬜🩵🩶⬜⬜🩶⬜🩶🌊🟦🩶🟦🩶🩵⬜⬜⬜⬜⬜⬜⬜
-🟡⬜🟡⬜🟡🟡🟡⬜🟡🟡⬜⬜🩵⬜🩵🩵🟦🩶⬜🌊⬜🩶🟦🩶🟦🩶🟦🩶🩶🩵⬜⬜⬜⬜⬜⬜
-🟡🟡🟡🟡⬜🟡⬜🟡🟡⬜⬜🩵⬜🩵⬜🩶🌊⬜🩶⬜🩵🟦🩶🩵🩶🟦🩶🟦🩵⬜⬜⬜⬜⬜⬜⬜
-🟡⬜🟡⬜🟡🟡🟡⬜🟡🟡⬜🩵⬜⬜🩵🟦🌊⬜🩶🟦🩵🩶🟦🟦🩵🩶🟦⬜⬜⬜⬜⬜⬜⬜⬜⬜
-🟡🟡🟡🟡🟡⬜🟡🟡⬜🟡⬜⬜🩵⬜⬜🌊🟦🩶⬜🟦🩶🟦🌊🌊🟦🟦🩶🩵⬜⬜⬜⬜⬜⬜🩶🩶
-🟡⬜🟡⬜🟡🟡⬜🟡🟡🟡🩵⬜⬜🩵🟦🌊🩶🩵⬜🟦🩶🌊🟦🌊🩶🌊🩵⬜⬜⬜⬜⬜⬜🩶🩶🩶
-🟡🟡🟡🟡🟡⬜🟡🟡⬜🟡⬜🩵⬜⬜🟦🟦🩵⬜🩵🩶🩵🟦🌊🟦🟦🟦⬜⬜⬜⬜⬜⬜🩶🩶🩶🩶
-🟡⬜🟡⬜🟡🟡🟡🟡⬜🟡⬜⬜🩵🟦🌊⬜⬜⬜🩶🩵🟦🟦🩶🟦🩵🟦⬜⬜⬜⬜⬜🩶🩶🩶🩶🩶
-🟡🟩🟡🟡🟡⬜🟡🟡🟡⬜⬜🩵⬜🟦⬜🩵⬜🩵🟦🩶🟦🩶🟦🌊🩶⬜⬜⬜⬜⬜🩶🩶🩶🩶🩶🩶
-🟡🟡🟡⬜🟡🟡🟡⬜🟡🟡⬜⬜🩵⬜⬜⬜🩵🩶🟦🩵🟦🌊🩶🩵🩵⬜⬜⬜⬜🩶🩶🩶🩶🩶🌊🌊
-🟡🟡🟡🟡🟡🩶🟡🟡⬜🟡🩵⬜🩵⬜🩵🩶🟦🩶🩵🩶🩶🟦🩵🩶🩵⬜⬜⬜🩶🩶🩶🩶🩶🩶🌊⬜
-🟡🩶🟡🩶🟡🟡🟡🟡🟡⬜⬜🩵⬜⬜⬜🩶🩶🟦🟦🩶🟦🩵🩶🩵⬜⬜⬜⬜🩶🩶🩶🩶🩶🩶🩶⬜
-🟡🟡🟡🟡🟡🟡⬜🟡⬜⬜🩵🩵⬜⬜⬜🟦🌊🩵🩵🩵🩶🩵🩶⬜⬜🩶🩶🩶🩶🩶🩶🩶🩶🩶⬜⬜
-🟡🟡🟡⬜🟡🟡🟡🟡🟡⬜⬜🩵⬜⬜⬜🩶🌊🌊🟦🩵🩶⬜🩵⬜🩶🩶⬜🩶🩶🩶🩶🩶🩶⬜⬜⬜
-🟡🟡🟩🟡🟡⬜🟡⬜🟡🩵🩵⬜⬜⬜⬜🩵🌊🌊🌊🩶🩵⬜🩵🩶🌊🩶🩶🩶🩶🩶🩶🩶⬜⬜⬜⬜
-🟡🟡🟡⬜🟡🟡🟡🟡🟡⬜⬜⬜⬜⬜⬜🩵🩶🌊🌊🌊🩵⬜🩶🌊🩶⚫🌊🩶🩶🩶🌊⬜⬜⬜⬜⬜
-🟡🟡🟡🟡🟡⬜🟡⬜🟡🩵🩵⬜⬜🩵⬜⬜🟦🌊🟦🌊👖🩶🩶🌊🫐🩶🫐🩶🩶👖🩵⬜⬜⬜⬜⬜
-🟡🟡⬜🟡🟡🟡🟡🟡⬜⬜🩵🩶🩵🩶⬜⬜🩶🌊🩶🟦🌊🌊🩶🌊🟩👖👖👖🌊🌊⬜⬜⬜⬜⬜⬜
-🟡🟡🟡🟡⬜🟡⬜🟡⬜🩵🟦🌊🟦🟦⬜⬜🟦🌊🌊🩶🌊🩶👖🩶🩶👖👖👖🟩🩶🩵⬜⬜⬜⬜⬜
-🟡🟡⬜🟡🟡🟡🟡🟡🟡🟦🌊🌊🟦🌊⬜⬜⬜🌊🌊🌊🟩👖🩶🟫🩶⚫🫐🌊🩶🩵🩶🩵⬜⬜⬜⬜
-🟡⬜🟡🟡⬜🟡🟡⬜🩶🩵🌊🟦🟦🟦⬜🩵🟦🟦🌊🩶🩶👖🩶🟩🌊👖🟩🩶🩵⬜🩶🩵🩶⬜⬜⬜
-🟡🟡🟡🟡🟡⬜🟡🟡⬜🟩🌊🌊🌊⬜⬜🩵🩶🌊🟩👖🩶🩶👖🩶🩶🌊🩶⬜🩵⬜🩵🩶🩵⬜🩵⬜
-🟡⬜🟡⬜🟡🟡🩶🟡🩵🩶🌊🌊🩶🩵⬜🩵🟦🩶👖🩶👖🟩🩶🩶🩶⬜🩵🩵⬜🩵⬜🩵🩶🩶⬜⬜
-🟡🟡🟡🟡⬜🟡🟡⬜⬜🩶🌊🌊🌊⬜⬜🩶🌊👖🩶👖🩶🟫🩶🩶⬜⬜⬜🩵⬜🩵⬜🩵🩵🩶🩵⬜
-🟡🩵🟡🟡🟡🟡⬜🟡🩵🩶🌊🌊🌊⬜⬜🌊🩶👖🟩🟫🌊🩶🩶🩵⬜⬜🩵🩶🩵🩶🩵⬜🩵⬜🩶🩵
-🟡🟡🟩🟡⬜🟡🟡🟡🩵🩶🌊🌊🌊🩵🩶🌊👖🟩👖🌊🩶🌊⬜⬜⬜⬜🩵🩵🩶🩵⬜🩵⬜🩵🩵🩶
-🟡🟡🟡🟡🟡🟡⬜🟩⬜🟦🌊🌊🩶🩶👖🟩🟫👖👖🟩🩶🩵🩵⬜⬜🩵⬜🩵🩶🩶🩶🩵🩶⬜🩵🩶
-🟡🟩🟡🟩🟡⬜🟡🟡🩵🩶👮👖👮🫐👖👖🌊👖🩶👖🩶⬜⬜⬜⬜🩵🩶🩵🩵🩶🟦🩶🩵🩵⬜🩵
-🟡🟩🟨🟩🟡🟡🟡🩶🩵🩶🌊🫐👖👖⚫🟩🟫🌊👖🌊🩶🩵⬜⬜⬜🩵⬜🩶🩵🩶🩵🩶🩶🩵⬜🩵
-🟩🟫🟩🟨🟩🟡🩶🟡🩵🩶🌊👖⚫👖🫐👖👖🟩👮🌊🩵🩵⬜⬜🩵🩶🩵🩵🩶🩵🩶🟦🩶🩶🩵🩶
+🧿👖🧿👖🧿🧿👖🧿🧿👖🌊🧿🌊🌊🌊🧿🌊🌊🌊🌊🌊🟦🌊🟦🟦🟦🟦🟦🟦🟦🟦🟦🟦🟦🟦🟦🩵🟦🟦🩵🟦🩵🟦🟦🟦🟦🟦🟦🟦🟦🟦🟦🟦🟦🟦🟦🟦🟦🟦🟦🟦🟦🌊🟦🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊
+🧿👖🧿👖👖🌊👮🧿🌊🧿🌊🌊🧿🌊🌊🌊🌊🧿🌊🌊🟦🌊🟦🌊🟦🌊🟦🟦🟦🟦🩵🟦🩵🟦🩵🟦🩵🟦🟦🩵🟦🟦🩵🟦🩵🟦🩵🟦🩵🩵🟦🩵🟦🩵🟦🩵🟦🟦🟦🟦🟦🌊🟦🌊🟦🌊🟦🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊
+🧿👖🌊🧿🌊🧿🧿👖🧿🌊🌊🌊🌊🌊🟦🌊🟦🌊🟦🧿🌊🟦🌊🟦🟦🟦🟦🟦🟦🟦🟦🟦🟦🩵🟦🩵🟦🩵🟦🟦🩵🟦🟦🩵🟦🟦🩵🟦🟦🟦🩵🟦🟦🩵🟦🟦🩵🟦🟦🟦🟦🟦🟦🌊🟦🌊🌊🟦🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊
+🌊🌊👖🌊🧿🌊🌊🌊🌊🧿🌊🌊🌊🌊🌊🟦🌊🌊🌊🟦🧿🟦🌊🟦🟦🟦🟦🟦🟦🟦🌊🟦🩵🟦🟦🩵🟦🟦🩵🟦🟦🩵🟦🟦🟦🌊🟦🟦🩵🟦🟦🩵🌊🌊🟦🟦🟦🟦🟦🟦🟩🟦🌊🟦🌊🟦🌊🌊🟦🌊🟦🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊
+🌊🧿🌊🌊🧿🌊🧿🌊🌊🌊🌊🟦🌊🟦🌊🟦🌊🟦🌊🟦🌊🟦🟦🟦🌊🟦🟦🟦🟩🟫🟡🟩🟦🩵🟦🟦🩵🟦🩵🟦🩵🟦🟦🟩🟡🟡⚫🟦🟦🩵🌊🟫🟡🟡🟩🟦🩵🟦🟦🟦🟦🟦🟦🌊🟦🌊🟦🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊
+🌊🌊🌊🧿🌊🧿🌊🌊🌊🌊🌊🌊🌊🟦🌊🌊🟦🌊🟦🌊🟦🟦🌊🟦🟦🟦🟦🟩🟡🟡🟡🟩🟦🟦🩵🟦🟦🩵🟦🩵🟦🩵🌊🟫🟡🟡⚫🩵🟦🟦👖🟨🟡🟡🟦🟦🟦🟦🟦🟦🟦🌊🟦🟦🌊🟦👮⚫🟦🌊🌊🟦🌊🌊🌊🌊🌊🌊🌊🌊🌊
+🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🟦🌊🟦🌊🌊🌊🟦🟦🌊🟦🟦🟦🟦🟦⚫⚫🟡🟡🟩🟦🩵🟦🩵🟦🟦🟦🟦🩵🟦🟦⚫🟡🟡⬛🟦🩵🟦🟦⬛🟡🟡🌊🩵🟦🟦🩵🟦🟦🟦🟦🌊🟦🌊🌊🟡⚫🌊🌊🌊🌊🌊🌊🟦🌊🌊🌊🌊🌊
+🌊🌊🌊🌊🌊🌊🌊🧿🌊👖🟨🟩👖🟫🟩⚫🌊🟨🟩👖🟦🟦🟦🟦🟦🟦🟦🟦👖🟡🟡🟩🟦🟦🟦🟦🩵🟦🩵🟦🟦🟦🩵🟦🟡🟡⚫🟦🟦🩵🟦⚫🟡🟡🟦🟦🟦🟦🟦🟦🟩🌊🌊🌊🌊🟦👖🟡🟡🟩🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊🌊
+🌊🌊🟦🌊🌊🌊⚫🟡🟡🟡🟡🟨🟡🟡🟡🟡🟡🟡🟡🟡🌊🟦🟦🌊🌊🌊🟩🟦🟦🟡🟡🟩🟦🟦🟩🟦🟦🌊🟩🟡🟡🌊🟦🟦🟡🟡⬛⚫🟩⚫🩵🌌🟡🟡⚫🟫🟩🌊🩵🟦🟫🟡🟡🟡🟫🟩🟨🟡🟡🟡🟡🟩🌊🌊🌊🌊🌊🌊🌊🌊🌊
+🌊🌊🌊🟦🌊🌊🌊⬛⬛🟡🟡🟡🟫🟡🟡🟡🟫🟡🟡🟡🌊🟦🫐🟡🟡🟡🟡🟩🟦🟡🟡🟨🟡🟡🟡🟩⚫🟡🟨🟫🟡🟡🌊🩵🟡🟡🟫🟡🟡🟡⚫⬛🟡🟡🟡🟡🟡🟡🟦🟩🟡⚫⬛🟡🟡⚫⚫🟡🟡🟫⬛⚫🌊🌊🟦🌊🌊🌊🌊🌊🌊
+🌊🟦🌊🌊🌊🟦👮🌊🌊🟡🟡🟡⬛🟩🟡🟡⚫🟩🟡🟡🟩🌊🟡🟡🟡🟡🟡🟨🌊🟡🟡🟡🟫🟡🟡🟨⬛🟫⚫⚫🟡🟡🫐🟦🟡🟡🟡⚫🟡🟡🟨⬛🟡🟡⚫🟫🟡🟡🟩🟨⬛👖⚫🟡🟡⚫🌊🟡🟡🟫🌊🌊🌊🌊🌊🌊🟦🌊🌊🌊🌊
+🌊🌊🟦🌊🌊🌊🟦🌊🌊🟡🟡🟡🌊🟨🟡🟡🟩🟨🟡🟡🟩🌊🟡🟡🟡⬛⬛🟡⚫🟡🟡🟩⬛⬛🟡🟨⬛⚫🟩🟨🟡🟡🟩🟦🟡🟡⬛🫐🟨🟡🟡⚫🟡🟡🫐🫐🟡🟡🌊⚫👖👖🟡🟡🟡⚫🟩🟨🟡🟩🌊🟦🟩🌊🟦🌊🌊🌊🌊🌊🌊
+🌊🌊🌊🟦🟦🌊🌊🟦🌊🟡🟡🟡🌊🟩🟡🟡🌊🟩🟡🟡🟩🟫🟡🟡⬛🌊🌊🟡⬛🟡🟡🟨🟦🟡🟡🟩🟦⚫🟡🟨🟡🟡⚫🩵🟡🟡⚫🟦🟩🟡🟡⚫🟡🟡🟦🟦🟡🟡⚫⚫🟡🟡⚫🟡🟡⚫🟦🟡🟡🟨🌊🌊🟦🌊🌊🟨🌊🌊🌊🌊🌊
+🌊🟦🌊🌊🌊🟦🟦🌊🟦🟩🟡🟡🟩🟫🟡🟡🟩🟩🟡🟡🟫🟩🟡⚫🟦🟦⚫🟡⬛🟡🟡🟩🌊🟡🟡🟫🟩🟡🟨⚫🟡🟡🟩🟦🟡🟡⚫🩵🟡🟡🟡🟩🟡🟡🟦🟩🟡🟡⚫🟩🟡🟨👖🟡🟡🟫🟩🟨🟡🟡🌊🌊🌊🌊🌊⚫🌊🟩🌊🌊🌊
+🌊🌊🟦🌊🟦🌊🟦🟦🌊🟡🟡🟡🟦🟩🟡🟡🌊👖🟡🟡🟫🟨🟡🟩🟦🟦🟡🟡⬛🟡🟡🟨🟩🟡🟡⬛🟡🟡🟫🟩🟡🟡🟩🟦🟡🟡⬛🟦🟩🟡🟨🟩🟡🟡🟦🌊🟡🟡🟩🟡🟡⚫🟦🟡🟡🟫🟦🟨🟡🟡🟩🌊🟦🟩👖⚫🌊🌊🌊🟦🌊
+🌊🌊🌊🟦🌊🟦🌊🟦🌊🟡🟡🟡🌊🟩🟡🟡🟩🌊🟡🟡🟡🟩🟡🌊🟦🟫🟡🟡🫐🟡🟡🟫🟩🟡🟡⚫🟡🟡🟨🟩🟡🟡🟡🟩🟡🟡🟩⚫🟡🟡⬛🟡🟡🟡🌊🟩🟡🟡🌊🟡🟡🟡🟫🟡🟡🟡🌊🟩🟡🟡🟨🌊🌊🌊🟨🌊🌊🟦🌊🌊🌊
+🌊🟦🌊🟦🌊🟦🟦🌊🌊🟡🟡🟡🟦🟩🟡🟡🟩🌊🟡🟡🟡⬛🟡🟡🟡🟡🟡🟫🟩🟡🟡🟩🟫🟡🟡⬛🟡🟡🟡🟡🟡🟡🟨🌊🟡🟡🟡🟡🟡🟡🌊🟡🟡🟡🟡🟡🟡🟨🟦🟩🟡🟡🟡🟡🟡🟡🫐⚫🟡🟡🟡🟡🟡🟡⚫🟩🌊🌊🌊🟩🌊
+🌊🌊🟦🌊🟦🌊🌊🟩🟡🟡🟡🟡🟩🟨🟡🟡⚫🌊🟡🟡🟡🟨⬛🟡🟡🟡🟫🌊👖🟫🟫🟫🟩🟡🟡🟨⬛🟫🟫⬛🟫🟩🟫⚫🟫🟫⚫🟫🟨⚫🫐🟫🟫⚫🟫🟨🟫⚫🟦🫐⚫🟫⬛⚫⚫⚫🟩🌊⚫🟡🟡🟡🟡🟫🫐🌊🟦🌊🟦🌊🌊
+🌊🟦🌊🟦🟦🟦⚫⬛⬛⬛⬛⬛🟦🫐⬛⬛🟦🟦🟩🟡🟡🟡🫐⬛⬛⬛⚫🟦🟩⬛⬛🌊🟦🟡🟡🟡🟡⚫⚫🌊⚫⬛👮🟦⚫⬛🟦⚫⬛🌊🩵🫐⚫🌊⚫⬛⚫🟦🩵🟦👖⚫🌊🌊⚫🫐🌊🟦⚫⬛⬛⬛⬛⚫🌊🟦🌊🌊🟩🌊🟦
+🟦🌊🟦🌊🟦🌊🌊🌊🟦🌊🟦🟦🟦🟦🟦🟦🩵🟦⚫🟡🟡🟡🟡🌊🟦🟦🩵🟦🟫🌊🩵🟦🩵⬛🟨🟡⬛🟦🩵🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🟦🟦🩵🟦🩵🟦🩵🟦🩵🟦🟦🩵🟦🟦🟦🟦🟦🟦🟦🟩🟦👖👮🌊🟦🌊🟩🌊🟦🌊🟦🌊
+🌊🟦🟦🟦🌊🟦🟦🟦🟦🟦🟦🟦🟦🩵🟦🟦🟦🩵🟦🟡🟡🟡🟡🟡🟩🫐🟩🟨🟩🟦🩵🟦🩵🟦⬛⬛🌊🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🟦🩵🟦🟦🟦🩵🟦🟦🟦🟩🟦🟦🌊🟦🌊🟦🟩🌊🟦🌊🌊🌊🟩🌊
+🟦🟦🌊🟦🟦🟦🟦🟦🟦🟦🟦🟦🩵🟦🩵🟦🩵🟦🟦⬛🟡🟡🟡🟡🟡🟡🟡🟫👖🟦🩵🟦🩵🟦🟦🩵🟦🩵🟦🩵🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🟦🩵🟦🟦🟦🟦🟦🟦🟩🟦🌊🟦🌊🟦🟩🟦🌊🟦🌊
+🟦🟩🟦🟦🟦🟩🟦🟦🟦🟦🟦🟦🟦🟦🩵🟦🟦🩵🩵🟦⬛🟡🟡🟡🟡🟡⬛⚫🩵🟦🩵🟦🩵🩵🩵🟦🩵🩵🩵🟦🩵🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🟦🟦🩵🟦🟦🩵🟦🟦🟩🟦🟦🌊🟦🌊🌊🟦🌊🌊🌊🟦🌊🌊
+🟦🟦🟦🟦🟦🟦🩵🟦🩵🟦🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦⬛⬛⬛⬛⬛🌊🟦🩵🟦🩵🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🩵🟦🩵🩵🟦🩵🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🩵🟦🟦🩵🟦🟦🟦🟦🟦🟦🟩🟦🌊🟦🟩🌊🟦🟩🌊🌊🟩🌊
+🟦🟦🟩🟦🟦🟦🟦🟦🟦🩵🟦🟦🟦🩵🟦🟦🩵🟦🩵🟦🩵🟦🌊🌊🌊🩵🩵🟦🩵🩵🟦🩵🟦🩵🩵🩵🟦🩵🩵🟦🩵🟦🩵🩵🟦🩵🟦🩵🟦🩵🟦🩵🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🟦🩵🟦🩵🟦🟩🟦🟦🟦🌊🟦🌊🟦🌊🟦🌊🟦🌊🌊
+🟦🟦🟦🟦🟩🟦🟦🩵🟦🟦🟦🩵🟦🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🟩🌊🩵🩵🟦🩵🩵🩵🩵🟦🩵🟦🩵🩵🟦🩵🩵🩵🟦🩵🟦🩵🩵🟦🩵🟦🟦🩵🟦🩵🩵🩵🟦🩵🟦🩵🟦🩵🟦🟦🟦🟦🟦🟦🟦🌊🟩🟦🌊🟦🌊🌊🌊🟩🌊🟦🌊
+🟦🟩🟦🟦🟦🟦🟦🟦🟩🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🩵👮⬛⬛⬛⬛👖🟫⚫⬛🌊🩵🩵🩵🩵🩵🩵🩵🩵🟦🩵🩵🩵🩵🟦🩵🟦🌊🟩👖🌊🩶👖🩶🟦🌊🩵🟦🩵🟦🩵🟦🩵🟦🟩🟦🟦🟩🟦🌊🟦🌊🌊🟩🟦🌊🌊🌊🌊🌊
+🟦🟦🟦🟩🟦🟩🟦🟦🟦🩵🟦🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦⬛⬛⬛⬛⬛⚫⬛⬛⚫🟫⬜⬜🩵🩵🩵🩵🩵🩵🩵🩵🩵🩵🩵🩵🟦⚫⚫⬛⬛⬛⬛⬛🟫🩶🟩👮🩵🟦🩵🟦🩵🟦🟦🟦🟦🟦🟦🌊🟦🌊🟦🌊🟦🌊🌊🟦🌊🟦🌊
+🟦🟩🟦🟦🟦🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🩵🟦🩵🟦🫐⬛⬛⬛⬛⬛⬛⬛⬛⚫🩶🩶🩶⬜⬜🩶🩶🩵🩵🩵🩵🩵🩵🩵🟦⬛⬛⬛⬛⬛⬛⬛⬛⚫🫐🌊🌊🩶🩵🟦🩵🟦🟦🩵🟦🟩🟦🟦🌊🟦🟩🌊🟦🌊🟩🟦🌊🌊🟩🌊
+🟦🟦🩵🟦🟩🟦🟦🩵🟦🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🩵🟦⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛🟫🩶⬜🩶👖🟫⬜⬜🩵⬜🩵🩵⬜🩵⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⚫🟩👖🩵🟦🩵🟦🩵🟦🟦🟦🟦🟩🟦🌊🟦🌊🟩🟦🌊🌊🌊🟦🌊🌊
+🟦🟩🟦🟦🩵🟦🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵👮⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⚫⬛🟫🟫🟥🟫🟫🩷⬜🩵⬜🩵⬜🌊⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛🌊🌊🩵🟦🩵🟦🟦🟩🟦🟦🟦🌊🟦🌊🟦🌊🌊🟦🌊🟩🌊🌊🟦
+🟦🟦🩵🟦🟦🩵🟦🟩🟦🩵🟦🩵🩵🟦🩵🩵🩵🩵🩵🟦⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛🟫⚫🟫🟫⬛🟫🟫🩷⬜⬜⬜⬜⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛🩶👖🩵🟦🟦🩵🟦🟦🟦🟩🟦🟦🟩🟦🌊🟦🌊🌊🟦🌊🟦🌊🌊
+🟦🟩🟦🟩🟦🩵🟦🩵🩵🟦🩵🟦🩵🩵🟦🩵🟦🟦🩵⬛⬛⬛⬛⬛⬛⬛⚫⬛⬛⬛⬛⬛🟫⬛🟫⬛🟫⚫🟫🟥🟧⬜🩶⚫⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⚫🌊🩵🟦🩵🟦🟦🟦🟦🟦🟦🌊🟦🌊🟦🟩🟦🌊🟩🌊🟦🌊🟦
+🟦🩵🟦🩵🟦🩵🟦🩵🟦🩵🩵🩵🟦🩵🩵🟦🩵🩵🌊⬛⬛⬛⬛⬛⬛🌊🩵⬛⬛⬛⬛🟫⬛🟫⬛🟫🟫🟫⬛🟫🟫🩷🟫⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛🌊🩵🟦🩵🟦🟦🟩🟦🟩🟦🟦🟩🟦🌊🌊🟦🌊🟦🌊🟩🌊🌊
+🟦🩵🟦🩵🩵🟦🩵🩵🩵🟦🩵🩵🩵🟦🩵🩵🟦🟦⬛⬛⬛⬛⬛⬛⬛🩵🩵🩶⬛⬛⬛🟫⬛⬛🟫⬛⬛🟫⬛⬛⚫⚫⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛👖🩵🟦🟦🩵🟦🟦🟦🟦🟦🟩🟦🌊🟦🟩🌊🟦🌊🟦🌊🟦🌊
+🩵🟦🩵🟦🩵🩵🟦🩵🟦🩵🩵🟦🩵🩵🟦🩵🩵🫐⬛⬛⬛⬛⬛⬛🌊🩵🩵🩵🩵🩶⬛🟫🟫⬛🟫⬛🟫⬛🟫🟫⬛⬛⬛⬛⬛🟫🟫⬛⬛⬛⬛⬛🟫🟫⬛⬛⬛⬛⬛👖🩵🟦🩵🟦🩵🟦🟩🟦🟦🟦🟦🟦🌊🟦🌊🟦🟩🌊🟦🌊🌊
+🟦🟩🩵🩵🟦🩵🩵🟦🩵🩵🟦🩵🟦🩵🩵🟦🌊⚫⬛⬛⬛⬛⬛⬛🩵🩵🩶🩵🩵🩶⚫🟫⬛⬛⬛⬛⬛⬛⬛⬛🟫⬛⬛⬛⬛🟥🟫⬛⬛🟫🟥🟥🟫🟥🟫⬛⬛⬛⬛🌊🩵🩵🟦🟦🟦🟦🟦🟦🟩🟦🌊🟩🟦🌊🟦🌊🌊🌊🌊🟩🟦
+🩵🟦🩵🟦🩵🟦🩵🩵🟦🩵🩵🩵🩵🩵🟦🩵🟩⬛⬛⬛⬛⬛⬛🌊🩵🩵🩵🩵🩶⬛⬛🟫🟫🟫🟫🟫🟫🟫🟫🟫🟫🟫⬛⬛🟫🟥🟫⬛🟫🟥🟥🟫🟫⬛🟫🟫🟫🟦🟩🩵🟦🩵🟦🩵🟦🟩🟦🟦🟦🟦🟦🟦🌊🟦🟩🟦🌊🟦🌊🌊🌊
+🟦🩵🟦🩵🩵🩵🟦🩵🩵🟦🩵🟦🩵🩵🩵🩵🟦⚫⬛⬛⬛⬛🫐🩵🩵🩵🩵🩶⬛⬛⬛⬛🟫🟫🟫🟫🟫🟫🟫🟫🟫🟫⬛🟥🟥🟫🟫🟫🟥🟥🟥🟥🟫🟫🟥🟫🟦🩵🟦🩵🟦🩵🟦🩵🟦🟦🟦🟩🟦🟩🟦🟩🟦🌊🟦🌊🟦🌊🟦🌊🟦
+🩵🟦🩵🟦🩵🩵🩵🟦🩵🩵🩵🩵🟦🩵🟦🩵🩵🟦⬛⬛⬛⬛🩵🩵🩵🩶🩵🌊⬛⬛⬛⬛⬛🟫🟫🟫🟫🟫🟫🟫🟫⬛⬛🟥🟫🟥🟫🟫🟥🟥🟧🟥🟫🟥🟫🩶🩶🩵🩵🩵🩵🟦🩵🟦🟦🩵🟦🟦🟦🟦🟦🌊🟦🟩🌊🟦🌊🟩🌊🌊🌊
+🟦🩵🩵🩵🟦🩵🟦🩵🩵🟦🩵🩵🩵🟦🩵🩵🩵🩵⬛⬛⬛🌌🩵🟦🩵🩵🩵⬛⬛⬛⬛⬛⬛🟫🟫🟫🟫🟫🟫🟫⬛⬛🟫🟥🟥🟫🟫🟥🟫🟥🟫⬛🟥🟥🟥🩶🩵🩵🟦🩵🟦🩵🟦🩵🟦🟦🟩🟦🟦🟩🟦🟦🌊🟦🌊🟦🌊🟦🌊🟦🌊
+🩵🟦🟩🩵🩵🩵🩵🩵🟦🩵🩵🟦🩵🩵🟦🩵🟦🩶⬛⬛⬛🌊🩵🩵🩵🩵🩶⬛⬛⬛⬛⬛⬛⬛🟫🟫🟫🟫🟫🟫⬛⬛🟫🟫🟫🟥🟫🟫🟫🟥🟫🟫⬛🟫🩶⬜🩵🩵🩵🟦🩵🟦🟦🟦🟩🟦🟦🟦🟦🟦🌊🟦🟩🟦🌊🟩🟦🌊🌊🟦🌊
+🟦🩵🩵🟦🩵🟦🩵🩵🩵🩵🩵🩵🟦🩵🩵🩵🩵🌊🟫⬛⬛🩶🩵🩵🩵🩵👖⚫🟫⬛⬛⬛⬛🟫🟫🟫🟫🟫🟫🟫🟫⬛🟫⬛⬛⬛⬛🟫🟫🟫🟥🟥🟫⬜🩵🩵🩶🩵🟦🩵🟦🩵🩵🟦🟦🩵🟦🟩🟦🟦🟩🟦🟦🟦🟦🌊🟦🟩🌊🌊🟦
+🟦🩵🟦🩵🩵🩵🟦🩵🟦🩵🟦🩵🩵🩵🟦🩵🩵🟥🟫🟫⬛🩵🩵🩶🩵🩶⬛⬛⬛⬛⬛⬛⬛🟫⬛🟫🟫🟫🟫🟫⬛⬛⚫🟫⬛⬛⬛⬛⬛🟫🟫🟥🟥🩷⬜🩵🩵🩵🩵🟦🩵🟦🟦🩵🟦🟦🟦🟦🟦🟦🟦🟦🟩🟦🟩🟦🌊🟦🌊🟦🌊
+🩵🟦🩵🟦🩵🩵🩵🩵🩵🩵🩵🩵🟦🩵🩵🩵🩵🟫🟫🟫🟥⬜🩵⬜🌊⬛⬛⬛⬛⬛⬛⬛🟫🟫🟫🟫🟫🟫⬛⬛⬛⬛⬛🟫⬛⬛⬛⬛⬛⬛🟫⬛🟫🟡🩵⬜🩶🩵🟦🩵🟦🩵🟦🟦🩵🟦🟩🟦🟩🟦🟩🟦🟦🟦🟦🟩🟦🌊🟦🌊🟩
+🟦🟩🩵🩵🟦🩵🟦🩵🟦🩵🟦🩵🩵🩵🟦🩵🩶🟫🟥🟫🩷⬜🩷🩶⬛⬛⬛⬛⬛⬛⬛🟫⬛🟫🟫🟫⬛🟫🟫⬛🟫🟫⬛⬛⬛⬛🟫⬛⬛⬛⬛⬛⬛🟥⬜🩵🩵🩶🩵🩵🩵🟦🩵🟦🩵🟦🟦🩵🟦🟦🟦🟩🟦🟩🟦🌊🟦🟩🌊🟦🌊
+🟦🩵🟦🩵🟦🩵🟦🩵🩵🩵🩵🩵🟦🩵🩵🩵🩵🟥🟫🟥🟧🟡⚫⬛⬛⬛⬛⬛⬛⬛🟫🟫🟫🟫🟫⬛⬛⬛🟫🟫🟫⬛🟫⬛⬛🟫⬛⬛⬛⬛⬛🟫⬛🟫🟧⬜🩵🩵🟦🩵🩶🩵🩵🩵🟦🟩🟦🩵🟦🩵🟦🟦🟦🟦🟩🟦🟦🌊🟦🌊🟦
+🟦🟩🟦🩵🩵🟦🩵🟦🩵🟦🩵🩵🩵🩵🩵🩵🩵🟫🟥🟫🟥🩶⬛⬛⬛⬛⬛⬛⬛🟫🟫🟫🟫⬛⬛⬛⬛⬛🟫🟧🟫🟫⬛🟫⬛⬛🟫⬛🟫⚫🟫⬛🟫⬛🟫🩶🩶🩵🟥🟥🩶🩶🩶🩶🩶🩵🩶🟩🩵🟦🟩🩵🟦🟩🟦🟦🟩🟦🌊🟩🌊
+🟦🩵🟦🩵🟦🩵🩵🩵🟦🩵🩵🟦🩵🩵🩵⬜🩵🟥🟫🟥🟫🟥⬛⬛⬛⬛⬛⬛🟫⬛🟫⬛⬛⬛⬛🟫🟫🟫🟫🟫🩷🟫⬛🟫⬛🟫⬛⬛⬛🟫⬛⬛⬛🟫🟫🩶🩶🩶🟫🩷🟫🟥🟫🟥👖⚫🌃👖🌊🩶🟦🟦🩵🟦🟦🟩🟦🌊🟦🟦🌊
+🟦🟦🟩🟦🩵🟦🩵🟦🩵🩵🩵🩵🩵🩵🩵🩵⬜🟫🟥🟫⬛🟫⬛⬛⬛⬛⬛⬛🟫⬛⬛⬛⬛⬛⬛🟫🟫🟫⬛🟫⚫🟧🟫⬛⬛⬛⬛🟫⬛⬛🟫⬛⬛⬛⬛🟥🩷🟥🟧🩶🟫🟫🟫🌃⬛⬛🌌🌃🌊🌊🟩🟦🟩🟦🟩🟦🟦🌊🟩🌊🟦
+🟦🩵🟦🩵🟦🩵🩵🩵🟦🩵🩵🩵🩵🩵⬜🩵🩵🩶🟥🟫⬛🟫⬛⬛⬛⬛⬛🟫⬛⬛⬛⬛⬛🟫⬛⚫🟫🟫🟫🟫⬛🟫⬛⬛⬛⬛⬛⬛⬛🟫⬛⬛🟫⬛⬛🟥🟫🟧🟥🟧🟥🟫🌃⬛⬛⬛🌌⚫⚫👮🌊🟦🟦🟦🟦🌊🟦🟦🌊🟦🌊
+🟦🟩🟦🩵🟦🩵🟦🩵🩵🩵🩵🩵🩵⬜🩵⬜🩵⬜🟫🟫⬛⬛⬛⬛⬛⬛🟫⬛⬛⬛⬛⬛⬛🟫🟫⬛🟫🟫🟫🟫⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛🟥🟥🟫🟧🟫🟥🟫⬛⬛⬛⬛⬛🌃🌃🫐🫐🟩🟦🟩🟦🟩🟦🌊🟦🌊🌊
+🟦🩵🟦🩵🟦🩵🩵🟦🩵🟦🩵🩵🩵🩵⬜🩵⬜🩶🟥🟫⬛⬛⬛⬛⬛⬛🟫⬛⬛⬛⬛⬛⬛⬛🟫🟫⬛⬛🟫🟫⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛🟫🟥🟧🟫🟫⚫⬛⬛⬛⬛⬛⬛🌃🫐🫐👮🌊🟦🟦🟦🟦🌊🟦🌊🟦🌊
+🟦🟩🟦🩵🩵🟦🩵🩵🩵🩵🩵🩵⬜🩵⬜🩵⬜🩶🟫🟫⬛⬛⬛⬛⬛🟫⬛⬛⬛⬛⬛⬛⬛⬛⬛🟫🟫⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛🟧🟫🟫🟫⬛⬛⬛⬛⬛⬛⬛⬛🌃🌃🫐🫐👖🟩🟦🌊🟩🟦🌊🟩🌊🟦
+🟦🟦🩵🟦🩵🟦🩵🟦🩵🩵🩵🩵⬜🩵⬜🩵⬜🩶⬛⬛⬛⬛⬛⬛🟫⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛🟫⬛⬛⬛⬛⬛⬛⬛👖🌊⚫⚫👖🟧⬛🟫🟫⬜🟥🟫🟫🟫🟫⬛⬛⬛⬛⬛⬛⬛🌌🌃🫐🫐🌊🟦🌊🟦🟦🌊🟦🟦🌊🌊
+🟦🟩🟦🩵🟦🩵🩵🩵🩵🩵🩵🩵⬜🩵⬜⬜⬜🟨⚫⬛⬛🟫⬛🟫⬛⬛⬛⬛⬛🟫⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⚫🩶🌊🩶🩶⬜⬜⬜⬜⬜🟡🩶🟫🟫🟥⚫⬛⬛⬛⬛⬛⬛⬛🌌🌃🫐🫐👖🟦🟩🟦🌊🟦🌊🌊🟦🌊
+🟦🟦🟩🟦🩵🟦🩵🟦🩵🩵🩵⬜🩵⬜⬜🌊🟫🩶🟫🟫🟫🟫🟫⬛⬛⬛⬛⬛⬛⬛🟫⚫⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛🩶🌊🩵🟦🩶🟨🟧🟡⬜⬜⬜⬜🟥🟫🟫🩶⬛⚫🟫⬛⬛⬛⬛⬛🌃🌃🫐👮🌊🟦🟦🟦🟩🟦🌊🟦🌊🟦
+🟩🟦🟦🩵🟦🩵🟦🩵🩵🩵⬜🩵⬜🩵⬜🟫⚫🟫🟫⬛🟫🟫🟫🟫🟫⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛🩶🩶🩵🩶🟨🟥🩶⬜⬜⬜⬜⬜🟫🟥🟫🩶🟫⚫⬛⬛⬛⬛⬛⬛🌌🌃🫐🫐🟩🟦🌊🟦🌊🟦🌊🟦🌊🌊
+🟦🟦🟩🟦🩵🩵🩵🩵🩵🩵⬜🩵⬜⬜⬜⚫⚫🟫🟫🟫🟫🟫🟥🟫🟧🟧🟫🟫🟫⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛🩵🩶🟦🌊🟦⬜⬜⬜⬜⬜🟡⬜🟫🟫🟫🩶⬛⬛⬛⬛⬛⬛⬛⬛🌌🌃🫐🌊🟦🟦🟩🟦🌊🟦🌊🟩🟦🌊
+🟦🟩🟦🩵🟦🟦🩵🩵🩵⬜🩵⬜🩵⬜🩶⬛🩶🩶🟫🟫🟫🟫⚫⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛👖👖🩶🌊🌊🩶🟩🌊🩶⬜⬜⬜🟧🩶🩶🟫🟫🩶🫐⬛⬛⬛⬛⬛🌃🫐🫐🌊🌊🌊🟩🟦🟦🌊🟦🟩🟦🌊🌊🟦
+🟦🟦🩵🟦🩵🩵🩵🩵🩵⬜⬜🩵⬜🩶⬛🟫⬜🟡🟫⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛🩶🟧🩶🩶🌊🟩🌊🌊🩵🌊🟦🟦⬜⬜🩷🟧🟫🟫🟫⬜⚫⬛⬛⬛⬛🌊🌊🌊🌊🌊🟩🟦🌊🟦🟩🟦🌊🟦🌊🟦🌊🌊
+🟦🟩🟦🟩🩵🟦🩵🩵🩵⬜⬜⬜🩵🟫🩶⬜⬜⬜🩶⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛🟫🟧🟧⬜🩶🩶🌊🟦🌊🌊🩶🟦👖🌊🩶⬜⬜⬜🩶🩶🩶🟫⚫⬛⬛⬛⬛🌊🌊🟩🌊🌊🌊🌊🟦🟦🟦🌊🟦🌊🟦🌊🟦🌊
+🟦🟦🩵🟦🩵🩵🩵🩶🩵🩵⬜⬜👖🩶⬜⬜⬜⬜🟨⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛🟫🟧🩷🟨🩶⬜🌊🌊🟩🌊🌊🌊🩵🌊🌊🟩🩷🟧🟧🟧🟫🟫🟫⚫⬛🌊🩶🌊⚫🫐🌊🌊🌊🟦🟩🟦🟩🟦🌊🟦🌊🌊🟦🌊🟦
+🟩🟦🟩🟦🩵🟦🩵🩵🩵🩵⬜🩶🟫⬜⬜⬜⬜🟡👖⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛🟧🟧🟧🟨🩷🟡🩶🌊🌊🌊🟦🌊🌊🩶🌊🌊🩶🟨🟧🟧🟥🟧🟧🟫🟫🟫🩶🌊⬛⬛🌊🌊🌊🟩🟦🟦🟦🟦🟩🟦🌊🟦🌊🌊🌊🌊
+🟦🟩🟦🩵🟦🩵🩶🩵🩶⬜🩵🟥⬜⬜⬜⬜⬜⬜⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛🟧🟥🟧🟧🟨🩷🟨🩷🩶🟩🌊🌊🟩🌊🌊🩵🌊🌊🩶🟨🟧🟧🟧🟧🟧🟧🟧🟫⬛⬛⬛⬛⬛⚫🌊🟩🟦🟩🟦🟦🌊🟦🌊🟦🌊🟦🟦🌊
+🟦🟦🩵🟩🩶🩵🩵⬜⬜⬜🩶🩶⬜⬜⬜⬜⬜🟧⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛🌊🩶🟫🟧🟧🟧🟧🟧🟨🩷🟡🟧🩶🩶🌊🌊🟦🌊👖🩶🌊🌊🟫🟧🟧🟧🟧🟥🟧🟧🟥🟫⬛⬛⬛⬛⬛⬛🫐🩶🟦🟦🟩🟦🟦🌊🟦🌊🟩🌊🌊🟦
+🟩🟦🟩🩵🩵🩶🩵⬜🩵⬜🩶⬜⬜⬜⬜⬜⬜🟫⬛⬛⬛⬛⬛⬛🟫🩶🩶🩶🟩🩶🩶🟧🟧🟧🟧🟧🟨🟧🟨🩷🟨⬜⬜🌊🌊🟩🌊👖🟩🟩🌊🩶🟧🟫🟧🟧🟧🟧🩶🟧🟧⬛⬛⬛⬛⬛🌌👖🩵🟦🩵🟦🟩🟦🌊🟩🟦🌊🟦🌊🌊
+🟦🟩🟦🩶🟦🩵🩶🩵🩶🩶⬜⬜⬜⬜⬜⬜🟡🌌⬛⬛⬛⬛⬛🩶⬜⬜🩵🩶🟦🩵🩶🩶🟧🟧🟧🟧🟧🟧🟨🟧⬜🟧🩵🩶🌊🌊🩶🫐🩶🟦👖👖🟧🟧🟫🟧🟫🟧🟧🟧🟥🟫👖⬛⬛⬛⬛🌊🩵🩶🟦🟦🌊🟦🌊🟦🌊🌊🌊🟦🌊
+🩵🟦🩵🟦🩶🟦🩵🩶🩵⬜⬜⬜⬜⬜⬜⬜🩶⬛⬛⬛⬛⬛⬜⬜🩵🩶🩵🩶🟦🩶🟦🩶🟧🟧🟨🟧🟧🟧🟧🟧⬜🟧🩶⬜🌊👖🟩👖🫐🩶🫐🩶🟫🟧🟥🟫🟧🟧🟧🩶🟧🟫⬛⬛⬛⬛🌃🩵🩶🩵🟦🟩🟦🌊🟦🌊🟦🌊🟦🌊🌊
+🟩🟦🟩🩵🩶🩵🩶🩵🟫👖🩶⬜⬜⬜⬜🟡⚫⬛⬛⬛⚫⬜⬜⬜🩵🩶🟦🌊🩵🌊🟩🟦🌊🟨🩷🟨🟧🟧🟧🟧🟥🟧🟧🩶🩵🌊🌊🌊🌊🟩🫐🌊🟫🟧🟫🟥🟧🟧🟧🟧🟥🟫⚫⬛⬛⬛🌊🩵🩶🩵🟦🟦🟦🟩🟦🌊🌊🟦🌊🌊🟦
+🟦🩶🟦🟩🟦🩶🩵🩶⚫⚫🟫⬜⬜⬜⬜⬜⬛⬛⬛🫐🩵🩶🟦🩶🟦🩶🌊🟦🟩🟦🟦🩶🩵🩶🟧🟧🟧🟧🟧🟧🟧🟥🟧🩶🩶🩶🌊🌊🌊👖🟩🫐🟫🟫🟫🟫🟧🟧🩶🟧🟧👖⬛⬛⬛⬛🩶🩵🟦🩶🟦🟩🟦🌊🟦🌊🟦🌊🌊🌊🌊
+🟩🟦🟩🟦🩶🟦🩶🌊⚫⚫👖⬜🩶⬜⬜🩶⬛⬛⚫🩶🩵🩶🩵🌊🟩🟦🩵🟦🩶🩶🩶🩵🩶🩶🟧🟨🟧🟥🟧🟫🟧🟧🟧🩶🌊⚫🟩👖🟩⚫👖⚫⚫⚫🟫🟧🟧🟧🟧🩶🟧⚫⬛⬛⬛🌊🟦🩶🟦🟦🟩🟦🌊🟦🌊🌊🌊🟦🌊🟦🌊
+🟦🟩🟦🩶🟩🟦🟩⚫⚫⚫🟫🩶⬜⬜🩶🟫⬛⚫🩶🟦🩶🩵🩶🩵🩶🩶🩶🌊🩶🌊🌊🟩🟦🟦🩶🟨🟧🟧🟫🟧🟫🟧🟫⚫⬛⚫⬛⚫⚫⬛⬛⬛⚫🩶🩶🟨🩶🩶🩶🩷🟫⬛⬛⬛⬛🩶🟦🟩🟦🟦🌊🟦🌊🟦🌊🟦🌊🌊🌊🌊🌊
+🟩🟦🟩🟦🟦🩶🌊⚫⚫⚫⚫⚫⚫⚫🩶⬛👖🩶🩶🩵🌊🩵🌊🟦🟦🟩🌊🌊🩵🌊🟦🌊🟦🟩🌊🩶🟧🟧🟥🟫🟫🟥⬛🟫⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛👖🩶🩷🟨🩶🩶🩶⬛⬛⬛🟦🟩🟦🟦🟩🟦🟦🟩🟦🌊🟦🌊🟩🟦🌊🟦🌊
+🟦🟩🟦🟩🟦🟩🫐⚫⚫⚫⚫⬛⬛⚫🫐🌊🟩🟦🌊🌊🩵🟦🌊🌊🩵🌊🟦🌊🟦🩵🌊🌊🟩🟦🌊🩶🟫🟫🟧🟫🟥🟫⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⚫⚫🟫🟧🟧🟧🟧🟧🩶⬛⬛🌊🩶🟦🟦🟦🟦🟩🟦🟦🌊🟦🌊🌊🌊🌊🌊🌊🌊
+🌊🟦🟩🟦🩶🫐🫐⚫🫐⚫⚫🟩🩶🟦🟩🌊🟦🟩🌊🌊🟦🟩🟦🌊🟦🟦🌊🌊🌊🩵🌊🌊🌊🌊🟩🩶🟫🟫🟫🟫🟥🟫🟫⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛🟫🩶🟧🩶🟥👖⬛🌊🩶🟦🩶🟩🩶🟦🟦🟦🟩🟦🌊🟦🌊🟦🌊🟦🌊🌊
+🟩🟦🟩🩵🌊🫐🫐⚫⚫🩶🩶🩶🩵🌊🌊🌊🟦🌊🟦🌊🟦🩵🌊🌊🟩🟦🌊🟩🌊🌊🩵🌊🌊🌊🌊🌊🩶🟧🟫🟥🟧🟧🟫⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛🟫🟧🟧🟥🟧⚫🟩🟦🟦🟩🟦🟦🩵🟦🟩🟦🌊🟦🟩🌊🌊🌊🌊🌊🌊🌊
+🌊🟦🩵🌊👖⚫🟩👖🩶🩶🟩🟦🩶🟦🟩🌊🟦🟩🌊🟩🌊🩵🌊🌊🌊🟦🟩🌊🌊🌊🟩🩶👖🫐👖🟩👖🟫🫐⬜🩵🩶🩵🟫⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛🟫🟧🩶🟧🩶🟫🩶🟦🩶🟦🟦🩶🟦🟩🟦🟦🟩🟦🌊🟦🌊🟦🌊🌊🟦🌊
+🟩🟦🟩🌊👖🟩🟫🩶🟨🩶🩶🩶🟩🌊🟦🌊🟦🟦🌊🟦🌊🟦🟩🌊🟦🌊🟦🌊👖🌊👖🌊🩵⚫⚫⚫⚫⬛🩶🩵🩶⬜🩶🩵⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛⬛🟫🩷🟧🟥🟧🟦🩶🟦🩵🩶🩵🩶🟦🟦🩶🟦🟦🌊🟦🌊🌊🌊🌊🟩🌊🌊
+🟦🟩🌊🟩👖🩶🩶🟧🩶🩶🌊🟩🟦🟦🌊🟩🌊🟩🌊🌊🌊🟩🟦🌊🌊👖🟩🌊🌊🫐👖⚫👖🩶🟩🌊🟩👖🩶🩶🩵⬜⬜⬜🌊⬛⬛⬛⬛⬛⬛⬛⬛👖🩶🟫🟨🩶🟧🩶🩶🩶🩵🩶🩵🩶🟦🟩🟦🌊🟩🌊🟦🌊🌊🟦🌊🌊🌊🌊🌊
+🌊🟩🌊🩶🟫🩶🟫🩶🟫🩶🩶🌊🟩🩶🌊🌊🌊🟦🌊🟩🌊🌊🩶🌊🫐👖👖🌊🟩🫐⚫🫐⚫🫐👖⚫👖🩶🩵🩶⬜🩶🩵🩶🩶⬛⬛⬛⬛⬛⬛⬛⬛🟫🌊🩶🟥🟧🩶🟫🩶🩶🩶🟦🟦🟦🌊🟦🌊🟦🟦🟦🟩🌊🟦🌊🌊🟦🌊🌊🌊
+
 </pre>
 
+## Terminology
 
-## What it is
+- **🍆vegetable** — a polyglot file produced by Mohabbat, typicall with extension `*.bat`.
+- **Mohabbat** — the self-hosting vegetable that is also a builder. Its
+  filename is `mohab.bat`.
+- **rusticated** — a set of APIs and libraries exposing those to create rich modern platform in WASM.
+- **brot** — a small Rust loader that unpacks the payload and launches it.
+- **washmhost** — a wrapper around Wazero, exposing the
+  rusticated ABI to a guest WASM module, and runs it.
+- **brain** — WASM module compressed and embedded in a 🍆vegetable.
+- **pool** — the Brotli-compressed concatenation of all washmhosts plus
+  the brain.
+- **Modern Five** — the target matrix that Mohabbat addresses: Linux x64/ARM, Windows x64/ARM, macOS ARM.
 
-A minimal replacement for the async I/O portions of `std`, shaped like `std` but built on native completion APIs:
+## What it is and how it works
 
-- **Linux**: io_uring (kernel 5.1+) with automatic epoll fallback for older kernels — selected at runtime, not at build time
-- **Windows**: IOCP
-- **macOS**: kqueue
-- **WASM**: custom host function imports (not WASIP1)
+This project includes Rust and Go code orchestrating the development of Mohabbat vegetables.
 
-## What it provides
+At launch time a vegetable extracts from its own file a binary runtime capable of running WASM, the WASM brain that is the actual app code, and runs it.
 
-| Module | Content |
-|--------|---------|
-| `io` | `AsyncRead` / `AsyncWrite` — one method each, `Vec<u8>` ownership transfer, no extension traits |
-| `fs` | `File`, `OpenOptions`, `DirReader`, `metadata` |
-| `process` | `Command`, `Child`, `Stdio` |
-| `signal` | `ctrl_c()`, `signal_wait()` |
-| `tty` | Terminal size/mode (sync); `Tty` implementing `AsyncRead`/`AsyncWrite` |
-| `time` | `sleep()` (async), `Instant::now()` (sync) |
-| `env` | `get_args()`, `get_env()` (sync) |
-| `path` | Sync path utilities |
-| `rt` | Completion registry and proactor driver; minimal single-threaded executor on native |
-| `abi` | `Overlapped` struct and WASM host import declarations |
-
-## Design constraints
-
-- **No `tokio`**. No `async-trait`. No vtable-based platform abstraction.
-- **No `flush` / `shutdown`** on base I/O traits — those belong on concrete types.
-- **No extension traits** in this crate — callers write their own loops.
-- `AsyncRead::read` and `AsyncWrite::write` take and return `Vec<u8>` by value. The caller owns the buffer; the kernel borrows it for the duration of the operation.
-- Sync for: env, path, time (Instant), terminal control. Async for: all I/O.
-- `rt` on WASM is a self-contained proactor (`OverlappedFuture` + completion registry + `tick()`). On native it is a minimal single-threaded executor with its own proactor — no thread pinning, no cross-thread wakers.
-
-## What it is not
-
-Not a general async runtime. Not compatible with `tokio` traits. Not targeting broad ecosystem compatibility. Does not include networking, TLS, or any protocol-level code.
-
-## Dependency strategy
-
-No external async or I/O dependencies. All OS bindings are `extern "C"` / `extern "system"` declarations against libraries the OS always provides:
-
-- **Linux**: `syscall(2)` for io_uring (syscall numbers 425/426/427 are stable kernel ABI, identical on glibc and musl); standard libc for epoll, signalfd, timerfd, fork, execve. `#[repr(C)]` struct definitions for `io_uring_sqe`/`io_uring_cqe`/`epoll_event` inline — these are stable kernel ABI.
-- **Windows**: `extern "system" #[link(name = "kernel32")]` for IOCP, file, and process APIs — always present, no install step.
-- **macOS**: `extern "C"` against `libSystem.dylib` for kqueue, kevent, and POSIX calls — always linked.
-- **WASM**: `extern "C" #[link(wasm_import_module)]` host imports already in `abi.rs`.
-
-All executor and scheduling logic is self-contained in `rt/`. Logic derived from `compio-driver` source is ported directly, not imported as a crate dependency.
-
+The custom set of low-level APIs (rusticated platform) can be loosely considered analogoous to WASI but asynchronous and richer. Unlike WASI, for rusticated secure sandboxing is explicitly **not** a goal.
 
 # Building and running
 
-Bootstrap step: build and assemble the full toolchain with:
+**Mohabbat-go** is the main orchestrator for building the rusticated support libraries, and 🍆vegetables themselves.
+
+It can be run both as a native binary, and as a 🍆vegetable too! Naturally, the name of the 🍆vegetable is `mohab.bat`.
+
+Every example below can be run as `go -C mohabbat-go run . <...>` or as `mohab.bat <...>`. Of course to achieve the latter you need to get that mohab.bat vegetable built first, hence the native build is the first step.
+
+## Build the core libraries and mohab.bat
 
 ```bash
 go -C mohabbat-go run .
 ```
 
-This generates target specs, builds the rusticated sysroot, writes the Go overlay,
-compiles cross-platform native launchers, compiles the WASM brain, and assembles `mohab.bat`.
-The workspace root also provides `sysroot.toml`, which includes the generated config and is the recommended wrapper for downstream builds.
+or
 
-Once `prebuild` has run, build consumer crates with:
+```
+mohab.bat
+```
+
+This rebuilds the core libraries (Rust and Go) and the mohab.bat vegetable itself.
+
+## Building 🍆🍆vegetables
 
 ```bash
-cargo build -p <proj> --config sysroot.toml
+go -C mohabbat-go run . demo -o demo.bat
+go -C mohabbat-go run . demo/loch -o loch.bat
+go -C mohabbat-go run . kabibi -o kabibi.bat
+go -C mohabbat-go run . kabibi -o kabibi-go.bat
+go -C mohabbat-go run . demo-go -o demo-go.bat
+go -C mohabbat-go run . demo-go/trivial -o trivial.bat
 ```
 
-or run them with:
+or
 
 ```bash
-cargo run -p <proj> --config sysroot.toml
+mohab.bat demo -o demo.bat
+mohab.bat demo/loch -o loch.bat
+mohab.bat kabibi -o kabibi.bat
+mohab.bat demo-go -o demo-go.bat
+mohab.bat demo-go/trivial -o trivial.bat
 ```
 
-**Note** that for Mohabbat smoke test build this is the right command:
+You can run a 🍆vegetable directly on any machine from the currently supported targets.
 
-```
-go -C mohabbat-go run . && mohab.bat demo -o demo.bat && echo . | demo.bat
-```
+Note that building of a vegetable takes a few minutes due to extreme brotli compression. Makes them small though: 5-6Mb.
 
-And for Kabibi-Go use:
+## Run projects on rusticated
 
-```
-go -C kabibi-go run .
-```
-
-## Prerequisites
-
-- Rust **nightly** toolchain (the repo's `rust-toolchain.toml` selects it automatically).
-- `wasm32-unknown-unknown` target component — required to build the WASM demo binary:
-  ```bash
-rustup target add wasm32-unknown-unknown
-```
-- On Windows, if you do not need the MSVC linker installed, build explicitly with GNU instead:
-  ```powershell
-rustup toolchain install nightly-x86_64-pc-windows-gnu
-rustup target add x86_64-pc-windows-gnu --toolchain nightly-x86_64-pc-windows-gnu
-cargo +nightly-x86_64-pc-windows-gnu run -p demo --target x86_64-pc-windows-gnu --config sysroot.toml
-```
-- **Node.js ≥ 18** and its dependencies installed — required for the node-host and harness variants:
-  ```bash
-npm install --prefix node-host
-npm install --prefix harness
-```
-- **wasmtime** variant only: the `washmhost` crate bundles its own copy of the Wasmtime engine as a Cargo dependency; no separate install is needed.
-
-## Building rusticated itself
-
-`rusticated` is a library crate (`src/lib.rs`). It is built implicitly by `prebuild` as the custom sysroot implementation, and by consumer builds that depend on the generated target spec.
-
-## Demo variant 1 — Native binary
-
-The demo compiles directly to the host platform using `rusticated` as its `std` substitute.
+For development spending few minutes to compress a vegetable only to see a bug is not ideal. There is a way to skip the vegetable build and run the project directly on rusticated WASM host.
 
 ```bash
-cargo run -p demo --config sysroot.toml
+go -C mohabbat-go run . demo -r
+go -C mohabbat-go run . demo/loch -r
+go -C mohabbat-go run . kabibi -r
+go -C mohabbat-go run . demo-go -r
+go -C mohabbat-go run . demo-go/trivial -r
 ```
 
-On Windows, if you do not have the MSVC linker installed, build explicitly with GNU/LLVM instead:
-
-```powershell
-rustup toolchain install nightly-x86_64-pc-windows-gnu
-rustup target add x86_64-pc-windows-gnu --toolchain nightly-x86_64-pc-windows-gnu
-cargo +nightly-x86_64-pc-windows-gnu run -p demo --target x86_64-pc-windows-gnu --config sysroot.toml
-```
-
-The executable reads from the terminal, waits up to 5 seconds for a line, then writes a small file and reads it back.
-
-## Demo variant 2 — WASM + wasmtime host
-
-This variant compiles the demo to `wasm32-rusticated-unknown-unknown` and runs it through the `washmhost` Rust binary, which implements the rusticated ABI via Wasmtime's embedding API.
-
-**Step 1 — Build the WASM module** (run once, or after changing `demo/src/`):
-
-```bash
-cargo build -p demo --target wasm32-rusticated-unknown-unknown --config sysroot.toml
-```
-
-The `.wasm` output lands under `target/wasm32-rusticated-unknown-unknown/debug/`.
-
-**Step 2 — Run with the wasmtime host:**
-
-```bash
-cargo run -p washmhost -- target/wasm32-rusticated-unknown-unknown/debug/demo.wasm
-```
-
-## Demo variant 3 — WASM + Node.js host
-
-Same WASM module, different host: a Node.js script (`node-host/index.js`) that implements the rusticated ABI over the WebAssembly JS API.
-
-Build the WASM module as in Step 1 above (if not already done), then:
-
-```bash
-node node-host/index.js target/wasm32-rusticated-unknown-unknown/debug/demo.wasm
-```
-
-The harness spawns all three variants inside a ConPTY (via `node-pty`), types a few characters without pressing Enter, and lets the demo's built-in 5-second timer expire. It verifies that each variant exits cleanly (exit code 0) within 25 seconds.
+or
 
 ```
-node harness/index.js
+mohab.bat demo -r
+mohab.bat demo/loch -r
+mohab.bat kabibi -r
+mohab.bat demo-go -r
+mohab.bat demo-go/trivial -r
 ```
 
-To run a subset of variants:
-
-```
-node harness/index.js native
-node harness/index.js wasmtime node
-```
-
-Results are written to `harness-capture.md` (overwritten each run). The terminal also prints a one-line summary:
-
-```
-Summary: native OK 6172ms  wasmtime OK 6374ms  node OK 6372ms
-```
-
-# Gaps
-
-
-Based on a thorough review of the rusticated codebase, there are significant gaps. While the foundational loop and token registry are correctly modeled as a proactor (completion-based) system matching the WASM host logic, many actual OS-level I/O integrations are either completely stubbed out or relying on non-compliant fallbacks.
-
-Here is an in-depth breakdown of the outstanding features and I/O implementations required to achieve parity across all platforms:
-
-### 1. Underlying Runtime Backends (`src/rt/`)
-The event loop drivers are the bridges between Rust's `Future` model and the OS.
-* **`linux_uring.rs` (Missing)**: As discussed, the `io_uring` backend is entirely absent. `epoll` acts via readiness (telling you *when* to read), but io.rs expressly declares `AsyncRead`/`AsyncWrite` as an owned-buffer model (proactor). You need `io_uring` to natively pass buffer ownership to the kernel via `SQE` and reap them via `CQE`.
-* **bsd.rs (Stubbed)**: macOS and FreeBSD currently use dead stubs. Requires `kqueue`/`kevent` integration mapping `EVFILT_READ` and `EVFILT_WRITE` to the token registry.
-* **windows.rs (Overlapped OPs Missing)**: We just implemented the IOCP loop and handle registration, but we have not implemented the actual I/O operations (like `OverlappedBufferFuture` found in `wasm.rs`). You cannot do pure non-blocking file I/O on Windows via "readiness" polling; you *must* use `ReadFile`/`WriteFile` populated with an `OVERLAPPED` structure, which currently does not exist for Windows in this tree.
-
-### 2. File System I/O (`src/fs.rs`)
-The file system abstraction is exceptionally incomplete.
-* **Windows, macOS, BSD**: **Completely missing.** `fs::File` uses a `native_stub` module that immediately returns `io::Error::other("fs::File not yet implemented on this platform")`. 
-* **Linux**: **Fundamentally flawed (Blocking).** The Unix file abstraction currently drops down to raw `unsafe { read(self.fd, buf.as_mut_ptr(), ...) }` bypassing the async loop entirely. File I/O on Linux is notoriously unsuited for `epoll` (local disks always report "ready"). You must either bridge this to the missing `linux_uring.rs` or spawn a blocking threadpool.
-* **General Missing Features**: Missing directories (`DirBuilder`, `read_dir`, `remove_dir_all`), metadata reading (`metadata`, `symlink_metadata`), and permission manipulations. 
-
-### 3. Networking (`src/net.rs`)
-* **Completely Missing**: There is no `src/net.rs` present in the library. A functioning standard library replacement fundamentally requires `TcpListener`, `TcpStream`, and `UdpSocket`. To support the `AsyncRead`/`AsyncWrite` ownership model, these need `WSARecv`/`WSASend` with IOCP on Windows, and `io_uring` or `epoll` + non-blocking socket loops on Linux/macOS.
-
-### 4. Process Management (`src/process.rs`)
-Child process tracking relies on blocking `wait()` methods unless special OS facilities are tapped.
-* **Linux**: Functional. Seamlessly maps child PIDs to `pidfd_open` and yields back to `WaitReadable` on the `epoll` runtime.
-* **Windows & macOS / BSD**: **Stubbed**. Awaiting a process will immediately return `"Child::wait: async backend pending on this platform"`.
-  * *Windows Resolution*: You need to call `RegisterWaitForSingleObject` to push the Process Handle onto the system thread pool and signal your IOCP Queue when it terminates.
-  * *macOS Resolution*: Must be bridged to `kqueue` using the `EVFILT_PROC` filter.
-
-### 5. Signal Handling (`src/signal.rs`)
-* **Windows**: **Stubbed.** Calling `ctrl_c()` returns an error: `"ctrl_c: Windows console-event backend pending"`. Resolution requires invoking `SetConsoleCtrlHandler` natively and notifying the IOCP driver.
-
-
-# Demo executable
-
-With all the above in mind we want to produce an executable that would be like a demo or a hello world inside rusticated for the demonstration of the rusticated facilities.
-
-Themandate (non-negotiable) is to have an executable that depends visibly only on std, no overt sign of rusticated references anywhere. However it must be built on top of our custom rusticated as target. It should write to console (1), read single line input from console (2) check if that input resolves into a file and if so, read the last byte of that file and print it out (3).
-
-NOTES:
-
-1. `rusticated` is a custom target, not a create to import. Its exports therefore are not imported from crates, but as the target std.
-
-# Using Rusticated as a sysroot
-
-The repository now uses a generated workspace sysroot model.
-
-Run the bootstrap step once:
-
-```bash
-cargo run -p prebuild
-```
-
-That produces:
-
-- `target/rusticated-spec/config.toml`
-- `target/rusticated-spec/<arch>-rusticated.json`
-
-The root `sysroot.toml` file includes the generated workspace config and is the supported wrapper for downstream consumer builds.
-
-After `prebuild`, consumer crates are built with:
-
-```bash
-cargo build -p <proj> --config sysroot.toml
-```
-
-or run with:
-
-```bash
-cargo run -p <proj> --config sysroot.toml
-```
-
-For the WASM host crate, `washmhost/.cargo/config.toml` already includes the generated `target/rusticated-spec/config.toml`.
-
-The current workflow avoids manual `std` source substitution and uses the generated custom target specs and rustflags from `target/rusticated-spec/`.
 
 <!--
 */ }
 -->
+
+
+
+# 🍆Vegetable file layout
+
+A 🍆vegetable is a single file with three zones concatenated end to end.
+
+```
+[Zone A: polyglot script header   ]  text, small, executable by sh + cmd
+[Zone B: brot table               ]  N native loader binaries, back to back
+[Zone C: brotli pool              ]  one brotli stream, all hosts + payload
+EOF
+```
+
+## Zone A — polyglot script header
+
+A short hybrid script that both `cmd.exe` and POSIX `sh` interpret
+correctly. Responsibilities:
+
+1. Detect OS and CPU architecture using only built-in shell features.
+2. Look up the absolute byte offset and length of the correct brot in
+   Zone B.
+3. Extract the range from the chosen brot's start offset to the end of the
+   vegetable file (the concatenated brot + pool) to a single temp file.
+   This produced file is the self-extracting runner.
+4. `chmod +x` it on POSIX.
+5. Execute it, forwarding all the user's CLI arguments.
+6. Exit with the runner's exit code.
+
+Complications to handle:
+
+- Polyglot syntax: the header must be valid for both shells. Standard
+  trick: open with a CMD label/goto that jumps over the sh portion, with
+  the sh portion arranged so CMD never executes it. Several known
+  templates exist; pick one and freeze it.
+- Some sh extraction utilities differ across distros. Restrict to POSIX
+  `dd`, `head`, `tail`. Avoid `tail -c +N` ambiguity by using `dd
+  if=... bs=1 skip=... count=...` or `dd bs=1M` with computed counts.
+- macOS `dd` and GNU `dd` differ in progress output; use `2>/dev/null`.
+- Windows lacks built-in binary slicing. The header must invoke
+  PowerShell to do the slice: `powershell -nop -c "..."` using
+  `[IO.File]::OpenRead` + `Seek` + `Read`. PowerShell is present on every
+  supported Windows (5.1+ on Win10/Win11). Do not depend on `pwsh`.
+- The `.bat` extension is mandatory because:
+  - CMD will refuse to run a file without a recognized extension.
+  - POSIX shells do not care about extension when invoked with
+    `sh file.bat` or when the file has the executable bit and the
+    shebang-like first line is in the polyglot header.
+- The header must NOT contain a UTF-8 BOM (CMD chokes on it).
+- The header must end its CMD section with `goto :eof` and an explicit
+  exit code propagation. The sh section must `exit $?`.
+- The temp file path must be unique per run (PID + random) so concurrent
+  invocations do not collide.
+
+## Zone B — brot
+
+- Each brot is a complete native executable (ELF / PE / Mach-O).
+- Brots are concatenated with no padding.
+- Their offsets and lengths are baked into Zone A at assembly time.
+- The Zone A header does not parse anything — it only slices by known
+  numbers.
+
+Brot is built in Rust with precautions making it tiny and slim. That means no-std (no Rust standard library, relying strictly on direct OS syscalls), no-main (no Rust preamble, relying on target OS entry point conventions) and no CRT (C runtime sometimes is linked in by Rust apps, which is completely unnecessary in this case). The brot is a single binary that decompresses the pool and launches the washmhost.
+
+Brot is carefully coded to avoid some common traps that pull in unnecessary general Rust boilerplate. For example, brot implements a rudimentary simplistic memory allocator, which is enough for its narrow goal.
+
+The Rust project for brot is designed to be cross-compiled for all supported targets with parameters passed to remove fluff and achieve highest size optimisation. The brot compilation options are a part of mohabbat-go builder.
+
+## Zone C — brotli pool
+
+- Single brotli stream. Decoder is in the brot.
+- Decompressed content is a fixed sequence: washmhost #1, washmhost #2,
+  ..., washmhost #N, payload. Lengths and order are baked into each brot
+  as constants (see §6 on patching).
+- One stream rather than N streams: cross-binary redundancy between
+  washmhosts is significant; joint compression matters.
+
+# Washmhost
+
+The WASM host runtime uses Wazero, a pure-Go WASM runtime. There are no clever tricks in the host: it simply runs Wazero in the way it's intended, and implements **host functions** that constitute rusticated WASM ABI*.
+
+<sup>*ABI = Application Binary Interface, a fancy way to say very rigid and low-level API.</sup>
+
+The host is compiled for all supported targets, and is embedded in the brotli pool. The brot decompresses the pool and launches the host.
+
+# Rusticated Overlay-go
+
+In order for Go code to run on rusticated WASM ABI, the way Go reads and writes files, accessess network or environment must be re-implemented on top of that rusticated WASM ABI.
+
+This is what overlay-go does. Go allows 'overlaying' or swapping system libraries with custom implementations. Our **overlay-go** was carefully designed to fit with **Go 1.26.4** and makes normal unmodified Go code to run inside that WASM without any changes or limitations.
+
+The beauty of Go on rusticated is that its *green threads* (goroutines) are perfectly fit to rusticated WASM async model. That means while one goroutine is waiting for a file or network read, another goroutine can run and do something else. This is a very important feature of Go that makes WASM hosting very efficient and viable.
+
+# Example projects
+
+[demo-go](demo-go) — a simple Go project that runs on rusticated, demonstrating file I/O, network and timeouts showing cancelling io tasks.
+
+[demo-go/trivial](demo-go/trivial) — a very trivial Go project that's barely hello world.
+
+[kabibi-go](kabibi-go) — a flagship project that fuses shell (mvdan.cc/sh) file manager and AI chat bot. It's a work in progress and best works in native, making it fully fit onto Mohabbat rusticated platform is our current goal.
+
+# Rusticated sysroot
+
+For Rust to have the same freedom as Go on rusticated, sacrifices have to be made.
+
+Unlike Go, many Rust's system APIs are synchoronous and blocking. The language supports async/await, but it's still not a default for I/O APIs. In that sense it's worth mentioning [Compio](https://crates.io/crates/compio) library that's the current industry answer to the problem.
+
+The Rust team are moving Rust to async model too but that may take years. Our rusticated sysroot jumps the gun now, rewriting system libraries in a way that completely removes blocking APIs and replaces them with asynchronous. It's much more drastic than what Compio does: normal file I/O and stdio is completely absent on rusticated and replaced with async.
+
+## Expample projects
+
+That means many third-party libraries will fail to build. But the project contains a set of demos for at least few basic examples:
+
+[demo](demo) — reading and writing files, reading/writing from terminal, using timeouts and concurrency to cancel io.
+
+[lock](demo/loch) — a simple prototype of a two-panel file manager UI on ratatui, with file operations and navigation.
+
+[kabibi](kabibi) — a bit more complex prototype for the same, including mock shell and mock side panel with typing and interaction.
 
