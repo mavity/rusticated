@@ -30,7 +30,7 @@ func runUnderWashmhost(ws, wasmPath string, extraArgs []string) error {
 	runArgs := []string{"run", ".", "--"}
 	runArgs = append(runArgs, extraArgs...)
 	cmd := exec.Command("go", runArgs...)
-	cmd.Dir = filepath.Join(ws, "washmhost")
+	cmd.Dir = filepath.Join(ws, "mohabbat", "washmhost")
 	env := os.Environ()
 	env = upsertEnv(env, "MOHABBAT_WASM_FD", wasmPath)
 	// Prevent GOOS/GOARCH leakage from prior WASM build steps.
