@@ -52,9 +52,9 @@ func main() {
 
 	fmt.Printf("🍆 Building Go package: %s -> %s\n", projectDir, outputWasm)
 
-	// Resolve specific Go binary for the required version from mohabbat-go/go.mod
+	// Resolve specific Go binary for the required version from mohabbat/go.mod
 	goBin := "go"
-	goModPath := filepath.Join(workspaceRoot, "mohabbat-go", "go.mod")
+	goModPath := filepath.Join(workspaceRoot, "mohabbat", "go.mod")
 	if f, err := os.Open(goModPath); err == nil {
 		scanner := bufio.NewScanner(f)
 		for scanner.Scan() {

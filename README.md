@@ -124,16 +124,16 @@ The custom set of low-level APIs (rusticated platform) can be loosely considered
 
 # Building and running
 
-**Mohabbat-go** is the main orchestrator for building the rusticated support libraries, and 🍆vegetables themselves.
+**Mohabbat** is the main orchestrator for building the rusticated support libraries, and 🍆vegetables themselves.
 
 It can be run both as a native binary, and as a 🍆vegetable too! Naturally, the name of the 🍆vegetable is `mohab.bat`.
 
-Every example below can be run as `go -C mohabbat-go run . <...>` or as `mohab.bat <...>`. Of course to achieve the latter you need to get that mohab.bat vegetable built first, hence the native build is the first step.
+Every example below can be run as `go -C mohabbat run . <...>` or as `mohab.bat <...>`. Of course to achieve the latter you need to get that mohab.bat vegetable built first, hence the native build is the first step.
 
 ## Build the core libraries and mohab.bat
 
 ```bash
-go -C mohabbat-go run .
+go -C mohabbat run .
 ```
 
 or
@@ -147,12 +147,12 @@ This rebuilds the core libraries (Rust and Go) and the mohab.bat vegetable itsel
 ## Building 🍆🍆vegetables
 
 ```bash
-go -C mohabbat-go run . demo -o demo.bat
-go -C mohabbat-go run . demo/loch -o loch.bat
-go -C mohabbat-go run . kabibi -o kabibi.bat
-go -C mohabbat-go run . kabibi -o kabibi-go.bat
-go -C mohabbat-go run . demo-go -o demo-go.bat
-go -C mohabbat-go run . demo-go/trivial -o trivial.bat
+go -C mohabbat run . demo -o demo.bat
+go -C mohabbat run . demo/loch -o loch.bat
+go -C mohabbat run . kabibi -o kabibi.bat
+go -C mohabbat run . kabibi -o kabibi-go.bat
+go -C mohabbat run . demo-go -o demo-go.bat
+go -C mohabbat run . demo-go/trivial -o trivial.bat
 ```
 
 or
@@ -174,11 +174,11 @@ Note that building of a vegetable takes a few minutes due to extreme brotli comp
 For development spending few minutes to compress a vegetable only to see a bug is not ideal. There is a way to skip the vegetable build and run the project directly on rusticated WASM host.
 
 ```bash
-go -C mohabbat-go run . demo -r
-go -C mohabbat-go run . demo/loch -r
-go -C mohabbat-go run . kabibi -r
-go -C mohabbat-go run . demo-go -r
-go -C mohabbat-go run . demo-go/trivial -r
+go -C mohabbat run . demo -r
+go -C mohabbat run . demo/loch -r
+go -C mohabbat run . kabibi -r
+go -C mohabbat run . demo-go -r
+go -C mohabbat run . demo-go/trivial -r
 ```
 
 or
@@ -255,7 +255,7 @@ Brot is built in Rust with precautions making it tiny and slim. That means no-st
 
 Brot is carefully coded to avoid some common traps that pull in unnecessary general Rust boilerplate. For example, brot implements a rudimentary simplistic memory allocator, which is enough for its narrow goal.
 
-The Rust project for brot is designed to be cross-compiled for all supported targets with parameters passed to remove fluff and achieve highest size optimisation. The brot compilation options are a part of mohabbat-go builder.
+The Rust project for brot is designed to be cross-compiled for all supported targets with parameters passed to remove fluff and achieve highest size optimisation. The brot compilation options are a part of mohabbat builder.
 
 ## Zone C — brotli pool
 
