@@ -80,7 +80,7 @@ func buildAllSlots(ws, buildDir string) error {
 			fmt.Printf("🍆    skip %s\n", s.name)
 			continue
 		}
-		if _, err := cargoBuild(ws, "brot", s, buildDir); err != nil {
+		if _, err := cargoBuild(ws, filepath.Join("mohabbat", "brot"), s, buildDir); err != nil {
 			return err
 		}
 		if err := goBuild(ws, "washmhost", s, buildDir); err != nil {
