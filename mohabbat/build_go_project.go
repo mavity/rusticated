@@ -1,4 +1,4 @@
-package main
+package mohabbat
 
 import (
 	"fmt"
@@ -70,7 +70,7 @@ func buildBrainWasm(ws, outputWasm string) error {
 		"-overlay", overlayPath,
 		"-trimpath", "-ldflags=-s -w",
 		"-o", outputWasm, ".")
-	cmd.Dir = filepath.Join(ws, "mohabbat")
+	cmd.Dir = ws
 	env := os.Environ()
 	env = upsertEnv(env, "GOOS", "wasip1")
 	env = upsertEnv(env, "GOARCH", "wasm")

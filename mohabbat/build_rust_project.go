@@ -1,4 +1,4 @@
-package main
+package mohabbat
 
 import (
 	"bytes"
@@ -184,3 +184,4 @@ func rustcTargetSpecAvailable(target string) bool {
 	cmd := exec.Command("rustc", "-Z", "unstable-options", "--print", "target-spec-json", "--target", target)
 	return cmd.Run() == nil
 }
+

@@ -1,4 +1,4 @@
-package main
+package mohabbat
 
 import (
 	"encoding/json"
@@ -593,3 +593,4 @@ func generateGoOverlay(ws, goroot string) error {
 	fmt.Printf("🍆  Wrote %s\n", overlayPath)
 	return nil
 }
+

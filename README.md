@@ -128,12 +128,12 @@ The custom set of low-level APIs (rusticated platform) can be loosely considered
 
 It can be run both as a native binary, and as a 🍆vegetable too! Naturally, the name of the 🍆vegetable is `mohab.bat`.
 
-Every example below can be run as `go -C mohabbat run . <...>` or as `mohab.bat <...>`. Of course to achieve the latter you need to get that mohab.bat vegetable built first, hence the native build is the first step.
+Every example below can be run as `go run . <...>` or as `mohab.bat <...>`. Of course to achieve the latter you need to get that mohab.bat vegetable built first, hence the native build is the first step.
 
 ## Build the core libraries and mohab.bat
 
 ```bash
-go -C mohabbat run .
+go run .
 ```
 
 or
@@ -147,12 +147,12 @@ This rebuilds the core libraries (Rust and Go) and the mohab.bat vegetable itsel
 ## Building 🍆🍆vegetables
 
 ```bash
-go -C mohabbat run . demo -o demo.bat
-go -C mohabbat run . demo/loch -o loch.bat
-go -C mohabbat run . kabibi -o kabibi.bat
-go -C mohabbat run . kabibi -o kabibi-go.bat
-go -C mohabbat run . demo-go -o demo-go.bat
-go -C mohabbat run . demo-go/trivial -o trivial.bat
+go run . demo -o demo.bat
+go run . demo/loch -o loch.bat
+go run . kabibi -o kabibi.bat
+go run . kabibi -o kabibi-go.bat
+go run . demo-go -o demo-go.bat
+go run . demo-go/trivial -o trivial.bat
 ```
 
 or
@@ -174,11 +174,11 @@ Note that building of a vegetable takes a few minutes due to extreme brotli comp
 For development spending few minutes to compress a vegetable only to see a bug is not ideal. There is a way to skip the vegetable build and run the project directly on rusticated WASM host.
 
 ```bash
-go -C mohabbat run . demo -r
-go -C mohabbat run . demo/loch -r
-go -C mohabbat run . kabibi -r
-go -C mohabbat run . demo-go -r
-go -C mohabbat run . demo-go/trivial -r
+go run . demo -r
+go run . demo/loch -r
+go run . kabibi -r
+go run . demo-go -r
+go run . demo-go/trivial -r
 ```
 
 or

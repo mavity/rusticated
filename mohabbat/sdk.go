@@ -1,4 +1,4 @@
-package main
+package mohabbat
 
 import (
 	"bufio"
@@ -15,7 +15,7 @@ import (
 // Go 1.21+ toolchain forwarding sets GOROOT to a path inside GOMODCACHE when
 // the parent `go` binary delegates to a newer toolchain. Overlay replacements
 // beneath GOMODCACHE are forbidden since Go 1.26, so any candidate pointing
-// there must be rejected.
+// there Must be rejected.
 // Build GOMODCACHE prefix for rejecting toolchain-forwarded roots.
 func resolveGoroot(ws string) (string, string, error) {
 	// Build GOMODCACHE prefix for rejecting toolchain-forwarded roots.
@@ -155,3 +155,4 @@ func goBinFromRoot(goroot string) string {
 	}
 	return "go"
 }
+

@@ -4,6 +4,8 @@ import (
 	"os"
 	"runtime"
 	"strings"
+
+	"mohabbat/mohabbat"
 )
 
 func main() {
@@ -40,7 +42,7 @@ func main() {
 				outputPath = rawArgs[i+1]
 				i += 2
 			} else {
-				die("missing argument after -o")
+				mohabbat.Die("missing argument after -o")
 			}
 		default:
 			if projectDir == "" && !strings.HasPrefix(arg, "-") {
@@ -50,12 +52,12 @@ func main() {
 		}
 	}
 
-	ws, err := resolveWorkspace("")
-	must(err)
+	ws, err := mohabbat.ResolveWorkspace("")
+	mohabbat.Must(err)
 
 	// Heuristic: if -r was used and projectDir remains empty, check if first runArg is a project.
 	if projectDir == "" && runMode && len(runArgs) > 0 {
-		if isProject(ws, runArgs[0]) {
+		if mohabbat.IsProject(ws, runArgs[0]) {
 			projectDir = runArgs[0]
 			runArgs = runArgs[1:]
 		}
@@ -68,15 +70,15 @@ func main() {
 		if projectDir == "" {
 			projectDir = "."
 		}
-		must(modeDevRun(ws, projectDir, runArgs))
+		mohabbat.Must(mohabbat.ModeDevRun(ws, projectDir, runArgs))
 	case projectDir != "" && outputPath != "" && inVeg:
 		// Mode 2: juice bottle refill (running as WASM brain inside a vegetable)
-		must(doRefill(ws, projectDir, vegPath, outputPath))
+		mohabbat.Must(mohabbat.DoRefill(ws, projectDir, vegPath, outputPath))
 	case projectDir != "" && outputPath != "":
 		// Mode 3: native fresh assembly with arbitrary payload
-		must(modePackage(ws, projectDir, outputPath))
+		mohabbat.Must(mohabbat.ModePackage(ws, projectDir, outputPath))
 	default:
 		// Mode 1: full build pipeline
-		must(modeBuild(ws))
+		mohabbat.Must(mohabbat.ModeBuild(ws))
 	}
 }
