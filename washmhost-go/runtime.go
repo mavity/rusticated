@@ -64,6 +64,7 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 	}
 
 	cfg = cfg.WithFSConfig(wazero.NewFSConfig().
+		// TODO: WASI mounting is redundant, remove it.
 		WithDirMount(".", "/").
 		WithDirMount("C:\\", "C:\\").
 		WithDirMount(os.TempDir(), "/tmp"))
