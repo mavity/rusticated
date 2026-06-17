@@ -20,8 +20,8 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 		return 1, fmt.Errorf("payload is empty")
 	}
 
-	// 1. Setup Wazero using Compiler.
-	rConfig := wazero.NewRuntimeConfigCompiler()
+	// 1. Setup Wazero using default config (picks best engine).
+	rConfig := wazero.NewRuntimeConfig()
 	r := wazero.NewRuntimeWithConfig(ctx, rConfig)
 	defer r.Close(ctx)
 
@@ -35,17 +35,25 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 	// 2. Register Host Environment
 	hEnv := NewHostEnv()
 	defer hEnv.Close()
+	hEnv.args = args
 	if err := hEnv.Register(ctx, r); err != nil {
 		return 1, fmt.Errorf("failed to register rusticated host env: %w", err)
 	}
 
 	// 3. Instantiate
-	// Apply args directly to Wazero Config
+	// Apply args and environment directly to Wazero Config
 	cfg := wazero.NewModuleConfig().
 		WithArgs(args...).
 		WithStdout(os.Stdout).
 		WithStderr(os.Stderr).
 		WithStdin(os.Stdin)
+
+	for _, e := range os.Environ() {
+		parts := strings.SplitN(e, "=", 2)
+		if len(parts) == 2 && parts[0] != "" {
+			cfg = cfg.WithEnv(parts[0], parts[1])
+		}
+	}
 
 	// Pass all host environment variables to the guest.
 	for _, env := range os.Environ() {
