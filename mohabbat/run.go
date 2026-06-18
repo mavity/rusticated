@@ -1,4 +1,4 @@
-package main
+package mohabbat
 
 import (
 	"fmt"
@@ -51,3 +51,4 @@ func runUnderWashmhost(ws, wasmPath string, extraArgs []string) error {
 	}
 	return nil
 }
+

@@ -1,4 +1,4 @@
-package main
+package mohabbat
 
 import (
 	"fmt"
@@ -50,7 +50,7 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-func isProject(ws, dir string) bool {
+func IsProject(ws, dir string) bool {
 	abs := dir
 	if !filepath.IsAbs(abs) {
 		abs = filepath.Join(ws, dir)
@@ -61,7 +61,7 @@ func isProject(ws, dir string) bool {
 	return fileExists(filepath.Join(abs, "go.mod")) || fileExists(filepath.Join(abs, "Cargo.toml"))
 }
 
-func resolveWorkspace(ws string) (string, error) {
+func ResolveWorkspace(ws string) (string, error) {
 	if ws != "" {
 		return filepath.Abs(ws)
 	}
@@ -114,13 +114,14 @@ func resolveWorkspace(ws string) (string, error) {
 	return "", fmt.Errorf("could not locate workspace root (sysroot.toml not found)")
 }
 
-func must(err error) {
+func Must(err error) {
 	if err != nil {
-		die("%v", err)
+		Die("%v", err)
 	}
 }
 
-func die(format string, a ...any) {
+func Die(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, "🍆  error: "+format+"\n", a...)
 	os.Exit(1)
 }
+

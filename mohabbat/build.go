@@ -1,4 +1,4 @@
-package main
+package mohabbat
 
 import (
 	"fmt"
@@ -7,10 +7,10 @@ import (
 	"strings"
 )
 
-// modeBuild is Mode 1: full build pipeline.
+// ModeBuild is Mode 1: full build pipeline.
 // On native, runs prebuild (target specs + sysroot + overlay) via prebuildFn.
 // Inside a WASM vegetable, falls back to subprocess if artifacts are missing.
-func modeBuild(ws string) error {
+func ModeBuild(ws string) error {
 	buildDir := filepath.Join(ws, "target", "mohabbat-build")
 	if err := os.MkdirAll(buildDir, 0o755); err != nil {
 		return err
@@ -43,8 +43,8 @@ func modeBuild(ws string) error {
 	return nil
 }
 
-// modePackage is Mode 3: build a project's payload and assemble a fresh vegetable.
-func modePackage(ws, projectDir, outputPath string) error {
+// ModePackage is Mode 3: build a project's payload and assemble a fresh vegetable.
+func ModePackage(ws, projectDir, outputPath string) error {
 	buildDir := filepath.Join(ws, "target", "mohabbat-build")
 	if err := os.MkdirAll(buildDir, 0o755); err != nil {
 		return err
@@ -62,8 +62,8 @@ func modePackage(ws, projectDir, outputPath string) error {
 	return assembleVegetable(ws, wasmPath, buildDir, outputPath)
 }
 
-// modeDevRun is Mode 4: build a project to WASM and run it under washmhost.
-func modeDevRun(ws, projectDir string, extraArgs []string) error {
+// ModeDevRun is Mode 4: build a project to WASM and run it under washmhost.
+func ModeDevRun(ws, projectDir string, extraArgs []string) error {
 	projectName := filepath.Base(projectDir)
 	wasmPath := filepath.Join(ws, "target", projectName+".wasm")
 	fmt.Printf("🍆  Dev-run: building %s\n", projectDir)
@@ -131,3 +131,4 @@ func shouldBuildSlot(s slot) bool {
 	// from non-Windows hosts using rusticated target specs and Go cross-build.
 	return true
 }
+
