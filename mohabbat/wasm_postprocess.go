@@ -1,4 +1,4 @@
-package main
+package mohabbat
 
 import (
 	"fmt"
@@ -109,3 +109,4 @@ func encodeVarUint32(v uint32) []byte {
 	}
 	return res
 }
+

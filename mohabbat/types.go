@@ -1,4 +1,4 @@
-package main
+package mohabbat
 
 // Modern Four scope: linux/amd64, linux/arm64, windows/amd64, windows/arm64.
 // Slot order is contractual - Zone A and patcher both depend on it.
@@ -30,5 +30,6 @@ type mohabbatMeta struct {
 }
 
 // prebuildFn is set by prebuild.go on native (!wasip1) builds via init().
-// On WASM builds it remains nil; modeBuild falls back to subprocess invocation.
+// On WASM builds it remains nil; ModeBuild falls back to subprocess invocation.
 var prebuildFn func(ws string) error
+

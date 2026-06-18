@@ -1,4 +1,4 @@
-package main
+package mohabbat
 
 import (
 	"bytes"
@@ -296,3 +296,4 @@ func ensureBatOnPath(commandName, targetPath string) error {
 	}
 	return fmt.Errorf("could not place %s in any PATH directory; use ./%s", commandName, commandName)
 }
+

@@ -1,4 +1,4 @@
-package main
+package mohabbat
 
 import (
 	"bytes"
@@ -11,12 +11,12 @@ import (
 	"github.com/andybalholm/brotli"
 )
 
-// doRefill is Mode 2: juice bottle refill.
+// DoRefill is Mode 2: juice bottle refill.
 // When running inside a vegetable (MOHABBAT_VEGETABLE_PATH is set), it reads
 // the current vegetable, decompresses the pool, builds a new payload for
 // projectDir, splices it in, recompresses, patches all meta structs, and
 // writes the result to outputPath without rebuilding the native launchers.
-func doRefill(ws, projectDir, vegPath, outputPath string) error {
+func DoRefill(ws, projectDir, vegPath, outputPath string) error {
 	fmt.Printf("🍆  Refill: %s -> %s\n", projectDir, outputPath)
 
 	// 1. Read the vegetable file.
@@ -50,7 +50,7 @@ func doRefill(ws, projectDir, vegPath, outputPath string) error {
 		if poolLen == 0 || uint64(fileLen) < poolLen {
 			continue
 		}
-		// The reserved field must be zero for a well-formed meta.
+		// The reserved field Must be zero for a well-formed meta.
 		reserved := binary.LittleEndian.Uint64(vegData[p+40 : p+48])
 		if reserved != 0 {
 			continue
@@ -158,3 +158,4 @@ func doRefill(ws, projectDir, vegPath, outputPath string) error {
 		outputPath, formatSize(int64(len(outData))))
 	return nil
 }
+
