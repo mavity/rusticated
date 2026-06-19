@@ -44,3 +44,14 @@ require (
 	golang.org/x/term v0.41.0 // indirect
 	golang.org/x/text v0.31.0 // indirect
 )
+
+replace (
+	golang.org/x/sys => ../mohabbat/rusticated-jit/golang.org/x/sys
+        golang.org/x/term => ../mohabbat/rusticated-jit/golang.org/x/term
+        github.com/atotto/clipboard => ../mohabbat/rusticated-jit/github.com/atotto/clipboard
+        github.com/charmbracelet/bubbletea => ../mohabbat/rusticated-jit/github.com/charmbracelet/bubbletea
+        github.com/charmbracelet/x/term => ../mohabbat/rusticated-jit/github.com/charmbracelet/x/term
+        github.com/mattn/go-isatty => ../mohabbat/rusticated-jit/github.com/mattn/go-isatty
+        github.com/muesli/termenv => ../mohabbat/rusticated-jit/github.com/muesli/termenv
+        github.com/u-root/u-root => ../mohabbat/rusticated-jit/github.com/u-root/u-root
+)

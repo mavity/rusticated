@@ -83,7 +83,11 @@ func notetsleepg(n *note, ns int64) bool {
 		if ns >= 0 && nanotime() >= deadline {
 			return false
 		}
-		pause(sys.GetCallerSP() - 16)
+		// Yield through the Go scheduler so other goroutines can run.
+		// pause() must NOT be used here: it bypasses the scheduler and
+		// causes wasm_pc_f_loop to directly resume this goroutine on
+		// re-entry, starving all _Grunnable goroutines indefinitely.
+		Gosched()
 	}
 }
 

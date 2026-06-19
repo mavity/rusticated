@@ -65,6 +65,14 @@ type Stat_t struct {
 	Mode     int
 	Uid      uint32
 	Gid      uint32
+
+	// Compatibility fields for unix-ish code
+	Rdev          uint64
+	Atimespec     Timespec
+	Mtimespec     Timespec
+	Ctimespec     Timespec
+	Birthtimespec Timespec
+	Blksize       int32
 }
 
 // ── Constants (from original syscall/fs_wasip1.go) ────────────────────────
@@ -163,6 +171,21 @@ func rusticated_path_stat(overlapped unsafe.Pointer, pathPtr *byte, pathLen uint
 
 //go:wasmimport env get_random
 func rusticated_random_get(buf *byte, bufLen uint32)
+
+//go:wasmimport env fd_isatty
+func rusticated_fd_isatty(fd int32) int32
+
+//go:wasmimport env tty_get_size
+func rusticated_tty_get_size(handle uint64) uint32
+
+//go:wasmimport env tty_set_mode
+func rusticated_tty_set_mode(handle uint64, mode int32)
+
+// Isatty reports whether the file descriptor fd refers to a terminal.
+// The host returns 1 for a TTY, 0 otherwise.
+func Isatty(fd uintptr) bool {
+	return rusticated_fd_isatty(int32(fd)) != 0
+}
 
 //go:wasmimport env get_cwd
 func rusticated_get_cwd(strPtr *byte, strLen uint32) uint64
