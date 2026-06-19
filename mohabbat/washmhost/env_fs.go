@@ -268,33 +268,6 @@ func (h *HostEnv) sys_path_open(ctx context.Context, m api.Module, stack []uint6
 	rawPath := string(buf)
 	pathStr := h.translatePath(rawPath)
 
-	// Special-case /dev/tty BEFORE translation: on Windows filepath.FromSlash
-	// would convert it to \dev\tty which would never match after translation.
-	// Map it to stdin (the controlling terminal) so that bubbletea's
-	// openInputTTY() succeeds.
-	if rawPath == "/dev/tty" {
-		h.mu.Lock()
-		handle := h.nextHandle
-		h.nextHandle++
-		h.handles[handle] = os.Stdin
-		h.mu.Unlock()
-		state := h.RegisterOp(ovPtr, nil)
-		h.fileOpsQueue <- func() {
-			defer h.DecOpsFor(state)
-			if !h.IsOpActive(ovPtr, state.opID) {
-				h.mu.Lock()
-				delete(h.handles, handle)
-				h.mu.Unlock()
-				return
-			}
-			h.mu.Lock()
-			delete(h.activeOps, ovPtr)
-			h.mu.Unlock()
-			writeOverlapped(m, ovPtr, 0, 0, handle)
-		}
-		return
-	}
-
 	// WASM flag mapping (standard for Go's wasip1/js):
 	// Based on Go's internal/syscall/unix and syscall packages for wasm
 	// O_RDONLY = 0
