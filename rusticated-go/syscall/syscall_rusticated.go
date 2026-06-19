@@ -398,9 +398,14 @@ func Syscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err Errno) {
 			ws.Col = uint16(size >> 16)
 			return 0, 0, 0
 		case TCSETS, TCSETSW, TCSETSF:
-			// For now, assume any termios set on a TTY is moving towards raw mode.
-			// The host's tty_set_mode(1) matches what bubbletea wants.
-			rusticated_tty_set_mode(handle, 1)
+			// Inspect the requested termios to decide on raw mode.
+			// Bubbletea/x/term turns off ICANON and ECHO for raw mode.
+			t := (*Termios)(unsafe.Pointer(a3))
+			mode := int32(0)
+			if (t.Lflag & (0x02 | 0x08)) == 0 { // ICANON=0x02, ECHO=0x08
+				mode = 1
+			}
+			rusticated_tty_set_mode(handle, mode)
 			return 0, 0, 0
 		case TCGETS:
 			t := (*Termios)(unsafe.Pointer(a3))
