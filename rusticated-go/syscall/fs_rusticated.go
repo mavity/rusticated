@@ -339,6 +339,19 @@ func joinPaths(base, rel string) string {
 }
 
 func path_open_ext(path string, mode int, perm uint32) (uint64, error) {
+	// Virtual device translation for cross-platform compatibility
+	if path == "/dev/tty" {
+		pi := GetPlatformInfo()
+		if pi.OSKind == 1 { // Windows
+			path = "CONIN$"
+		}
+	} else if path == "/dev/null" {
+		pi := GetPlatformInfo()
+		if pi.OSKind == 1 { // Windows
+			path = "NUL"
+		}
+	}
+
 	path = fixJoinedPath(path)
 	// Final absolute path check before calling host
 	if isAbs(path) {
