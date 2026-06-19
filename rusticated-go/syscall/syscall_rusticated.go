@@ -415,6 +415,7 @@ func Syscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err Errno) {
 				Cflag: 0x30 | 0x80,
 				Lflag: 0x01 | 0x02 | 0x08 | 0x10 | 0x20 | 0x40 | 0x80 | 0x100 | 0x8000,
 			}
+			t.Cc[6] = 1 // VMIN = 1 (block for at least one char)
 			return 0, 0, 0
 		}
 	}
