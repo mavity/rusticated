@@ -10,8 +10,10 @@ statement, a block, ...). The pattern inside the node-group is matched against
 that node's text, but:
 
 - comments and the exact amount/form of whitespace are ignored,
-- but a space in the pattern requires a gap in the source at that point, and no
-  space forbids one (an exact correspondence, not loose tolerance).
+- whitespace only matters where it would change the tokens (the AST): a space
+  between two identifier characters means "two separate tokens", and the lack
+  of one means "the same token". Around operators and punctuation, where
+  spacing never changes the AST, it is freely ignorable.
 
 This lets us write transforms that are structurally safe but do not force the
 author to think about exact spacing or comments. It replaces the brittle
@@ -37,13 +39,11 @@ standard library (`go/scanner`, `go/parser`, `go/ast`, `go/token`).
 
 Before any matching, we scan the source once and produce two small tables.
 
-1. **Token spans.** Run `go/scanner` in comment-emitting mode over the raw
-   bytes. Record the byte range `[start, end)` of every real token (comments
-   excluded). Comments and whitespace are *not* counted, so any byte not inside
-   a token span is "insignificant".
+1. **Comment spans.** Run `go/scanner` in comment-emitting mode over the raw
+   bytes and record the byte range `[start, end)` of every comment. A byte is
+   then **significant** when it is neither whitespace nor inside a comment:
 
-   From this we answer one cheap question:
-   - `significant(i)` — is byte `i` inside a real (non-comment) token?
+   - `significant(i)` — is byte `i` part of real program text?
 
 2. **Node spans.** Run `go/parser` (with `ParseComments` and `AllErrors`) and
    walk the AST with `ast.Inspect`. For every node record its byte range
@@ -90,76 +90,107 @@ practical concern; we still add a step cap as a guard.
 Everything outside node-groups is ordinary regex over the raw source bytes.
 
 A node-group is written with a distinct bracket pair so it never collides with
-normal regex groups or character classes:
+normal regex syntax:
 
 ```
-({  ...inner pattern...  })
+⦃  ...inner pattern...  ⦄
 ```
 
-(`(` immediately followed by `{` is not legal in normal regex — `{` as the
-first character of a group is meaningless — so `({` is safe to special-case.
-A Unicode pair such as `⟬ ⟭` can be added later as an alias.)
+(`⦃` is U+2983 LEFT WHITE CURLY BRACKET and `⦄` is U+2984 RIGHT WHITE CURLY
+BRACKET. The ASCII pair `({ })` from the original sketch was **rejected during
+implementation**: its closer `})` is indistinguishable from a normal `}`
+(repetition close) followed by `)` (group close), e.g. inside `⦃(a{2})b⦄` —
+so ASCII delimiters cannot be split without fully re-parsing the regex. The
+Unicode brackets never appear in regex syntax and are trivially unambiguous.)
 
 Inside a node-group the inner pattern is lexed in a "spacing-aware" mode:
 
-- A run of whitespace in the pattern is **not** a literal space. It becomes a
-  **gap assertion** (see below).
-- Matching literal whitespace inside a node-group is out of scope for the MVP —
-  whitespace exists only to assert gaps.
+- A run of whitespace in the pattern is **not** a literal space. It marks a
+  **token boundary** that is enforced only between identifier characters (see
+  below).
+- Matching literal whitespace inside a node-group is out of scope for the MVP.
 - Everything else is normal regex.
 
 ### Whitespace rules inside a node-group
 
-Whitespace in the pattern is an **exact gap marker**. Its *form and amount*
-don't matter (one space, many spaces, a newline, or a comment are all equal),
-but its *presence or absence* must match the source exactly. The rule is a
-strict correspondence:
+Whitespace is ignored *where it does not change the AST*. Whitespace changes the
+AST only when it sits between two **word characters** (identifier/number
+characters) — there it decides whether they are one token or two. Everywhere
+else (around operators, dots, parentheses, commas, …) spacing never changes the
+tokens, so it is freely ignorable on both the pattern and the source side.
 
-- **Space in the pattern ⟺ a gap in the source.** Where the pattern has
-  whitespace, the source must have at least one insignificant byte (whitespace
-  or comment) at that point.
-- **No space in the pattern ⟺ no gap in the source.** Where the pattern has no
-  whitespace, the two significant bytes must be directly contiguous in the
-  source.
+The rule, applied at each point where the matcher moves from one matched
+character to the next:
 
-This holds in *both* directions — there is no "skip whitespace by default".
+- **Both sides are word characters:** the pattern's spacing must agree with the
+  source's. A space in the pattern requires the source tokens to be separated;
+  no space requires them to be the same token. (This is what keeps `a b` ≠ `ab`
+  and `ab` ≠ `a b`.)
+- **Otherwise:** no constraint. Any amount of whitespace or comments — or none —
+  is accepted, in the pattern and in the source independently.
 
 Worked examples:
 
-| pattern | source `ab` | source `a b` | source `a/* x */b` |
-|---------|-------------|--------------|--------------------|
-| `ab`    | match       | no match     | no match           |
-| `a b`   | no match    | match        | match              |
+| pattern   | matches `a.b` | matches `a . b` | matches `a/*x*/.b` |
+|-----------|---------------|-----------------|--------------------|
+| `a\.b`    | yes           | yes             | yes                |
+| `a \. b`  | yes           | yes             | yes                |
 
-`a b` never matches `ab` (the pattern demands a gap the source lacks). `ab`
-never matches `a b` (the source has a gap the pattern forbids). A comment counts
-as a gap exactly like whitespace.
+Spacing around the `.` is irrelevant because `.` is not a word character, so all
+four combinations match (they are the same AST). By contrast:
 
-How it works mechanically: consuming instructions only ever match **significant**
-bytes and never step over insignificant ones, so adjacency is enforced for free.
-The executor crosses insignificant bytes **only** at an explicit gap marker
-(`InstGap`), which also requires that at least one insignificant byte was
-actually there.
+| pattern | matches `xy` (one ident) | matches `x y` (two idents) |
+|---------|--------------------------|----------------------------|
+| `xy`    | yes                      | no                         |
+| `x y`   | no                       | yes                        |
+
+Here both sides are word characters, so the pattern's spacing must match the
+source's. `a + b` matches both `a+b` and `a + b`, because the junctions around
+`+` are not word–word.
+
+How it works mechanically: while matching inside a node-group the executor skips
+insignificant bytes (whitespace/comments) freely, and at each junction between
+two consumed characters it applies the rule above using the actual characters on
+each side. A whitespace run in the pattern is compiled to a zero-width GAP
+marker that records "the pattern had a space here" for the next junction check.
 
 ---
 
-## Changes to the vendored front end
+## How node-groups are realized
 
-Small, surgical additions:
+The original plan proposed forking the vendored `regexp/syntax` parser to add an
+`OpNodeGroup` operator and new `InstNodeGroup` / `InstGap` instructions. During
+implementation this was replaced by a simpler, less invasive approach that keeps
+the vendored `regexp/syntax` package **completely pristine** — which means the
+upstream test mandate is satisfied automatically.
 
-- **AST (`syntax/regexp.go`):** add one operator, `OpNodeGroup`, holding the
-  compiled-or-to-be-compiled inner pattern as a sub-expression.
-- **Parser (`syntax/parse.go`):** recognise `({` and `})`; parse the inner
-  pattern in spacing-aware mode; emit an `OpNodeGroup` node. Whitespace runs in
-  that mode become a new zero-width marker instead of literal spaces.
-- **Program (`syntax/prog.go`):** add `InstNodeGroup` (carries a reference to
-  the inner sub-program) and a zero-width `InstGap` for the gap assertion.
-- **Compiler (`syntax/compile.go`):** compile `OpNodeGroup` into an
-  `InstNodeGroup` that points at the separately compiled inner sub-program;
-  compile pattern whitespace into `InstGap`.
+Instead of forking the parser, `regast` *lowers* a node-aware pattern into an
+ordinary regex string before handing it to the stock parser/compiler:
 
-The inner pattern is compiled into its **own** program so the executor can run
-it under different rules (bounded region, node-group whitespace rules).
+- Each node-group `⦃ X ⦄` becomes a capturing group wrapping three private-use
+  marker runes around the lowered inner pattern:
+  `( \x{E010} lower(X) \x{E011} )` — `E010` = ENTER, `E011` = EXIT.
+- Inside a node-group, each run of whitespace becomes a single GAP marker rune
+  `\x{E012}` (leading/trailing whitespace trimmed).
+- Outside node-groups the pattern is passed through unchanged, so plain patterns
+  behave like ordinary regex.
+
+The lowered string is parsed and compiled by the **unmodified** vendored
+`syntax` package. The markers survive compilation as single-rune instructions.
+The custom executor (below) intercepts those marker runes and applies the
+node-group, gap, and significance rules. Because everything lives in one
+compiled program, capture-group numbering is global: explicit groups and
+node-groups are numbered left-to-right together, so `$1`, `$2`, … work across
+both.
+
+Files:
+- [lower.go](lower.go) — pattern lowering and node-group bracket scanning.
+- [exec.go](exec.go) — the executor and marker interception.
+- [preprocess.go](preprocess.go) — significance and node tables.
+- [regast.go](regast.go) — `Compile`, `Find`, `FindAll`, `Replace`.
+
+The inner pattern is matched under different rules (bounded region, gap and
+significance handling) purely through executor state, not separate compilation.
 
 ---
 
@@ -170,42 +201,43 @@ and one into the program. Standard regex ops (literal, char class,
 alternation, repetition, capture groups, anchors) behave normally over raw
 bytes.
 
-Three new behaviours:
+Three new behaviours, triggered when the executor reaches one of the marker
+runes:
 
-### 1. `InstNodeGroup` at source position `pos`
+### 1. ENTER marker at source position `pos`
 
 1. Binary-search the node table for every node whose `start == pos`.
-2. For each candidate node `[pos, end)`, try matching the inner program over
-   the slice `[pos, end)` under the node-group whitespace rules (below). The match
-   must **land exactly at `end`**: after the inner program finishes, skipping
-   any trailing insignificant bytes must reach `end` and no further.
+2. For each candidate node `[pos, end)` (largest first), run the following
+   inner instructions bounded to `end`, under the node-group whitespace rules
+   (below). The match must **land exactly at `end`**: when the EXIT marker is
+   reached, skipping any trailing insignificant bytes must arrive at `end` and
+   no further.
 3. Several candidates (nested or same-start nodes) are just alternatives — try
    each; the first that lets the rest of the outer pattern succeed wins. This
    is the same ambiguity regex already handles with alternation/backtracking.
 4. On success the outer cursor jumps to `end` and matching continues.
 
-The node-group also records the matched span `[pos, end)` as a capture, so a
-replacement can refer back to the node's **raw** text (comments and all).
+Each node-group is wrapped in a capturing group, so its span `[pos, end)` is
+recorded and a replacement can refer back to the node's **raw** text (comments
+and all).
 
-### 2. Consuming instructions match significant bytes only
+### 2. Consuming instructions inside a node-group
 
-A consuming instruction (literal, `.`, character class) matches the byte at the
-current position **only if it is significant**. It never steps over whitespace
-or comments. This makes "no space in the pattern = no gap in the source"
-automatic: a literal simply fails if it lands on an insignificant byte.
+A consuming instruction (literal, `.`, character class) first skips any
+insignificant bytes (whitespace/comments) from the current position, then
+matches the next significant byte. Before matching it applies the
+**word-character junction rule**: if the previously consumed character and this
+one are both identifier characters, the pattern's spacing (whether a GAP marker
+was crossed) must agree with whether the source actually separated them;
+otherwise there is no constraint. Capture-group boundaries recorded inside a
+node-group are snapped to significant bytes, so a group never includes
+surrounding whitespace or comments.
 
-### 3. `InstGap` (zero-width)
+### 3. GAP marker (zero-width)
 
-Advance `pos` over insignificant bytes:
-
-```
-start := pos
-while pos < end and not significant(pos): pos++
-```
-
-then require that at least one byte was skipped (`pos > start`), else this path
-fails. This is the "a gap must exist here" assertion. It is the *only* place the
-executor crosses insignificant bytes.
+A run of whitespace in the pattern compiles to a GAP marker. It consumes nothing;
+it just records that the pattern had a space, which the next consuming
+instruction uses for the word-character junction rule above.
 
 A step counter caps total work to keep a pathological pattern from running away.
 
@@ -216,7 +248,7 @@ A step counter caps total work to keep a pathological pattern from running away.
 ```go
 package regast
 
-// Source is a preprocessed file: raw bytes + token table + node table.
+// Source is a preprocessed file: raw bytes + comment table + node table.
 type Source struct { /* ... */ }
 
 func Preprocess(filename string, src []byte) (*Source, error)
@@ -238,21 +270,24 @@ func (p *Pattern) Replace(s *Source, repl string) ([]byte, error)
 
 ---
 
-## Build order
+## Build order (status: MVP implemented)
 
-1. Vendor `regexp/syntax` under `mohabbat/regast/syntax` **together with every
-   unit test from the upstream package**; keep those tests passing unchanged.
-   Write the recursive executor; confirm plain regex (no node-groups) matches
-   stdlib behaviour.
-2. Build the preprocessor: token table via `go/scanner`, node table via
-   `go/parser` + `ast.Inspect`. Unit-test `significant`, `tokenStart`, and
-   node-start lookups against small fixtures.
-3. Add `({ })` parsing, `OpNodeGroup`, `InstNodeGroup`, `InstDelimiter`.
-4. Add the three executor behaviours; test the `a b` / `ab` / `a/* */b` cases
-   and nested / same-start nodes.
-5. Add `Replace` with `$1` node references.
-6. Port one real transform from `patch_go_deps.go` to `regast` as proof, keep
-   the old code until the new path is trusted.
+1. **Done.** Vendored a pristine `regexp/syntax` under
+   `mohabbat/regast/syntax` together with every upstream test; all pass
+   unchanged. Wrote the recursive executor; plain regex (no node-groups) is
+   checked against stdlib behaviour in tests.
+2. **Done.** Preprocessor: comment table via `go/scanner`, node table via
+   `go/parser` + `ast.Inspect`. `significant` and node-start lookups are
+   unit-tested. (A token table / `tokenStart` proved unnecessary — significance
+   is computed directly as "not whitespace and not in a comment".)
+3. **Done (as lowering).** Node-group `⦃ ⦄` parsing and the ENTER / EXIT / GAP
+   markers, realized by lowering over the pristine `syntax` package rather than
+   forking the parser (see "How node-groups are realized").
+4. **Done.** The three executor behaviours; the `ab` / `a b` / `a/* */b` gap
+   cases and nested / same-start nodes are tested.
+5. **Done.** `Replace` with `$1` node references.
+6. **Pending.** Port one real transform from `patch_go_deps.go` to `regast` as
+   proof, keeping the old code until the new path is trusted.
 
 ---
 
@@ -263,15 +298,20 @@ func (p *Pattern) Replace(s *Source, repl string) ([]byte, error)
   proving our edits did not break standard regex behaviour. A failing or deleted
   upstream test blocks the change.
 - **Full coverage of the new behaviour.** Every use case and edge case of
-  node-groups, the gap rule, and the executor must have explicit tests. No
-  behaviour ships untested. This includes at minimum:
-  - the gap correspondence table above (`ab`/`a b` × `ab`/`a b`/`a/* */b`);
-  - comments standing in for whitespace, including multi-line and trailing;
+  node-groups, the whitespace rule, and the executor must have explicit tests.
+  The primary evidence is a **golden table** of `{input, pattern, replacement,
+  expected output}` cases that double as usage documentation
+  ([regast_test.go](regast_test.go), `TestGolden`). No behaviour ships untested.
+  This includes at minimum:
+  - the word-character rule both ways (`x y` ≠ `xy`, `ab` ≠ `a b`) and the
+    free-spacing cases around operators (`a + b` = `a+b`);
+  - comments and arbitrary spacing standing in for each other;
   - nested node-groups and several nodes sharing one start offset;
-  - the "land exactly at `end`" rule, including trailing comments/whitespace
-    inside a node and greedy patterns that must not spill past `end`;
-  - byte offsets returned by `Find`/`FindAll` and round-trip fidelity of
-    `Replace` (raw text preserved, `$1` node references expand to raw source);
+  - the "land exactly at `end`" rule, including greedy patterns that must not
+    spill past `end`, and same-start nodes (identifier vs selector);
+  - round-trip fidelity of `Replace` (raw text preserved, `$1` node references
+    expand to raw source) and capture boundaries that exclude whitespace;
+  - plain-regex parity with the standard library;
   - unparseable / partially-parseable input handling;
   - CRLF input on Windows.
 - **Coverage is enforced, not aspirational.** Treat anything less than complete
