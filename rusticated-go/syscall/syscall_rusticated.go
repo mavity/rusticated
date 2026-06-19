@@ -353,7 +353,66 @@ type Credential struct {
 	NoSetGroups bool     // If true, don't set supplementary groups
 }
 
+const (
+	SYS_IOCTL = 16
+)
+
+const (
+	TCGETS     = 0x5401
+	TCSETS     = 0x5402
+	TCSETSW    = 0x5403
+	TCSETSF    = 0x5404
+	TIOCGWINSZ = 0x5413
+	TIOCSWINSZ = 0x5414
+)
+
+type Winsize struct {
+	Row    uint16
+	Col    uint16
+	Xpixel uint16
+	Ypixel uint16
+}
+
+type Termios struct {
+	Iflag  uint32
+	Oflag  uint32
+	Cflag  uint32
+	Lflag  uint32
+	Line   uint8
+	Cc     [32]uint8
+	Ispeed uint32
+	Ospeed uint32
+}
+
 func Syscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err Errno) {
+	if trap == SYS_IOCTL {
+		handle, errno := fdToHandle(int32(a1))
+		if errno != 0 {
+			return 0, 0, errno
+		}
+		switch a2 {
+		case TIOCGWINSZ:
+			size := rusticated_tty_get_size(handle)
+			ws := (*Winsize)(unsafe.Pointer(a3))
+			ws.Row = uint16(size & 0xFFFF)
+			ws.Col = uint16(size >> 16)
+			return 0, 0, 0
+		case TCSETS, TCSETSW, TCSETSF:
+			// For now, assume any termios set on a TTY is moving towards raw mode.
+			// The host's tty_set_mode(1) matches what bubbletea wants.
+			rusticated_tty_set_mode(handle, 1)
+			return 0, 0, 0
+		case TCGETS:
+			t := (*Termios)(unsafe.Pointer(a3))
+			*t = Termios{
+				Iflag: 0x01 | 0x02 | 0x04 | 0x08 | 0x10 | 0x20 | 0x40 | 0x80 | 0x100 | 0x400, // various unix defaults
+				Oflag: 0x01 | 0x04,
+				Cflag: 0x30 | 0x80,
+				Lflag: 0x01 | 0x02 | 0x08 | 0x10 | 0x20 | 0x40 | 0x80 | 0x100 | 0x8000,
+			}
+			return 0, 0, 0
+		}
+	}
 	return 0, 0, ENOSYS
 }
 
@@ -362,11 +421,11 @@ func Syscall6(trap, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2 uintptr, err Errno) 
 }
 
 func RawSyscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err Errno) {
-	return 0, 0, ENOSYS
+	return Syscall(trap, a1, a2, a3)
 }
 
 func RawSyscall6(trap, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2 uintptr, err Errno) {
-	return 0, 0, ENOSYS
+	return Syscall6(trap, a1, a2, a3, a4, a5, a6)
 }
 
 func Sysctl(key string) (string, error) {
@@ -521,6 +580,14 @@ type Timespec struct {
 
 func (ts *Timespec) timestamp() timestamp {
 	return timestamp(ts.Sec*1e9) + timestamp(ts.Nsec)
+}
+
+func Major(dev uint64) uint32 {
+	return uint32((dev>>8)&0xfff) | uint32((dev>>32)&0xfffff000)
+}
+
+func Minor(dev uint64) uint32 {
+	return uint32(dev&0xff) | uint32((dev>>12)&0xffffff00)
 }
 
 func (ts *Timespec) setTimestamp(t timestamp) {

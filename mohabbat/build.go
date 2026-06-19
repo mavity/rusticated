@@ -37,6 +37,15 @@ func ModeBuild(ws string) error {
 		return err
 	}
 
+	kabibiGoDir := filepath.Join(ws, "kabibi-go")
+	if _, err := os.Stat(filepath.Join(kabibiGoDir, "go.mod")); err == nil {
+		fmt.Println("🍆  Building kabibi-go (rusticated guest binary)...")
+		kabibiWasmPath := filepath.Join(ws, "target", "kabibi-go.wasm")
+		if err := buildGoProjectWasm(ws, kabibiGoDir, kabibiWasmPath); err != nil {
+			fmt.Printf("🍆  warn: kabibi-go build failed: %v\n", err)
+		}
+	}
+
 	if err := ensureBatOnPath("mohab.bat", outputPath); err != nil {
 		fmt.Printf("🍆  warn: %v\n", err)
 	}
@@ -131,4 +140,3 @@ func shouldBuildSlot(s slot) bool {
 	// from non-Windows hosts using rusticated target specs and Go cross-build.
 	return true
 }
-
