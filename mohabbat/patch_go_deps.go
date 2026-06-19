@@ -111,7 +111,7 @@ func applyWasip1DepPatches(ws, projectDir, goroot string) (*depPatchResult, erro
 			patches := append([]regastPatch{
 				{pat: `⦃"golang.org/x/sys/unix"⦄`, repl: `"syscall"`},
 			}, commonPatches...)
-			
+
 			_ = filepath.WalkDir(target.jitDir, func(path string, d fs.DirEntry, err error) error {
 				if err == nil && !d.IsDir() && strings.HasSuffix(path, ".go") {
 					_ = applyRegastPatches(path, patches)
@@ -407,9 +407,17 @@ func parseJitTargets(gomodContent, jitBase string) []jitTarget {
 	inReplace := false
 	for _, raw := range strings.Split(gomodContent, "\n") {
 		line := strings.TrimSpace(raw)
-		if line == "" { continue }
-		if line == "replace (" { inReplace = true; continue }
-		if inReplace && line == ")" { inReplace = false; continue }
+		if line == "" {
+			continue
+		}
+		if line == "replace (" {
+			inReplace = true
+			continue
+		}
+		if inReplace && line == ")" {
+			inReplace = false
+			continue
+		}
 
 		if inReplace {
 			parts := strings.SplitN(line, " => ", 2)
@@ -463,12 +471,18 @@ func writeFileIfChanged(path string, content []byte) error {
 
 func syncDirToJit(srcDir, dstDir string) error {
 	return filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil { return err }
+		if err != nil {
+			return err
+		}
 		rel, _ := filepath.Rel(srcDir, path)
 		dst := filepath.Join(dstDir, rel)
-		if d.IsDir() { return os.MkdirAll(dst, 0o755) }
+		if d.IsDir() {
+			return os.MkdirAll(dst, 0o755)
+		}
 		data, err := os.ReadFile(path)
-		if err != nil { return err }
+		if err != nil {
+			return err
+		}
 		return writeFileIfChanged(dst, data)
 	})
 }
@@ -481,7 +495,9 @@ func applyGateFlips(jitDir string) ([][2]string, error) {
 		}
 		if virtual := suffixFlipTarget(path); virtual != "" {
 			srcData, err := os.ReadFile(path)
-			if err != nil { return err }
+			if err != nil {
+				return err
+			}
 			if err := writeFileIfChanged(virtual, srcData); err != nil {
 				return err
 			}
@@ -504,10 +520,14 @@ func suffixFlipTarget(filePath string) string {
 			virtual := filepath.Join(dir, stem+"_wasip1.go")
 			otherFiles := []string{stem + "_other.go", stem + "_stub.go", stem + "_stubs.go"}
 			for _, of := range otherFiles {
-				if _, err := os.Stat(filepath.Join(dir, of)); err == nil { return "" }
+				if _, err := os.Stat(filepath.Join(dir, of)); err == nil {
+					return ""
+				}
 			}
 			unixSibling := filepath.Join(dir, stem+"_unix.go")
-			if _, err := os.Stat(unixSibling); err == nil { return "" }
+			if _, err := os.Stat(unixSibling); err == nil {
+				return ""
+			}
 			return virtual
 		}
 	}
@@ -592,15 +612,19 @@ func flipGoFileTags(filePath string) error {
 
 func actuallyFlipTags(filePath string) error {
 	data, err := os.ReadFile(filePath)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	content := string(data)
 	lines := strings.Split(content, "\n")
 	changed := false
 	maxLines := len(lines)
-	if maxLines > 30 { maxLines = 30 }
+	if maxLines > 30 {
+		maxLines = 30
+	}
 	for i := 0; i < maxLines; i++ {
 		line := lines[i]
-		if (strings.HasPrefix(line, "//go:build ") || strings.HasPrefix(line, "// +build ")) {
+		if strings.HasPrefix(line, "//go:build ") || strings.HasPrefix(line, "// +build ") {
 			// Only flip if it contains a positive match for a unix keyword
 			matches := unixKeywordRe.FindAllStringIndex(line, -1)
 			hasPositive := false
@@ -651,7 +675,9 @@ func addWasip1ExclusionToTag(content string) string {
 	lines := strings.Split(content, "\n")
 	found := false
 	for i, line := range lines {
-		if i > 30 { break }
+		if i > 30 {
+			break
+		}
 		if strings.HasPrefix(line, "//go:build ") {
 			if !strings.Contains(line, "wasip1") {
 				lines[i] = strings.TrimSpace(line) + " && !wasip1"
@@ -664,17 +690,29 @@ func addWasip1ExclusionToTag(content string) string {
 			found = true
 		}
 	}
-	if !found { return "//go:build !wasip1\n\n" + content }
+	if !found {
+		return "//go:build !wasip1\n\n" + content
+	}
 	return strings.Join(lines, "\n")
 }
 
 func mergeOverlay(srcOverlay string, extra map[string]string, dstPath string) (string, error) {
 	data, err := os.ReadFile(srcOverlay)
-	if err != nil { return "", err }
-	var overlay struct { Replace map[string]string `json:"Replace"` }
-	if err := json.Unmarshal(data, &overlay); err != nil { return "", err }
-	if overlay.Replace == nil { overlay.Replace = map[string]string{} }
-	for k, v := range extra { overlay.Replace[k] = v }
+	if err != nil {
+		return "", err
+	}
+	var overlay struct {
+		Replace map[string]string `json:"Replace"`
+	}
+	if err := json.Unmarshal(data, &overlay); err != nil {
+		return "", err
+	}
+	if overlay.Replace == nil {
+		overlay.Replace = map[string]string{}
+	}
+	for k, v := range extra {
+		overlay.Replace[k] = v
+	}
 	merged, _ := json.MarshalIndent(overlay, "", "  ")
 	_ = os.WriteFile(dstPath, merged, 0644)
 	return dstPath, nil
@@ -708,7 +746,8 @@ func encodeModPath(mod string) string {
 
 func canonPath(p string) string {
 	abs, err := filepath.EvalSymlinks(p)
-	if err != nil { abs = p }
+	if err != nil {
+		abs = p
+	}
 	return filepath.ToSlash(cleanWindowsPath(abs))
 }
-
