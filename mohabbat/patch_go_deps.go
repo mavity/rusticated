@@ -100,15 +100,24 @@ func applyWasip1DepPatches(ws, projectDir, goroot string) (*depPatchResult, erro
 			return nil, fmt.Errorf("sync %s: %w", target.module, err)
 		}
 
-		// SPECIAL CASE: u-root/pkg/ls/filestring_unix.go
-		if strings.HasSuffix(filepath.ToSlash(target.jitDir), "github.com/u-root/u-root") {
-			fsPath := filepath.Join(target.jitDir, "pkg", "ls", "filestring_unix.go")
-			if data, err := os.ReadFile(fsPath); err == nil {
-				content := strings.ReplaceAll(string(data), `"golang.org/x/sys/unix"`, `"syscall"`)
-				content = strings.ReplaceAll(content, "unix.Major(", "syscall.Major(")
-				content = strings.ReplaceAll(content, "unix.Minor(", "syscall.Minor(")
-				_ = writeFileIfChanged(fsPath, []byte(content))
-			}
+		// Phase 1: Structural API translations using regast.
+		// These replace brittle strings.ReplaceAll with ast-aware transforms.
+		commonPatches := []regastPatch{
+			{pat: `⦃unix \. Major⦄`, repl: `syscall.Major`},
+			{pat: `⦃unix \. Minor⦄`, repl: `syscall.Minor`},
+		}
+		if target.module == "github.com/u-root/u-root" {
+			// For u-root we also flip the import to syscall.
+			patches := append([]regastPatch{
+				{pat: `⦃"golang.org/x/sys/unix"⦄`, repl: `"syscall"`},
+			}, commonPatches...)
+			
+			_ = filepath.WalkDir(target.jitDir, func(path string, d fs.DirEntry, err error) error {
+				if err == nil && !d.IsDir() && strings.HasSuffix(path, ".go") {
+					_ = applyRegastPatches(path, patches)
+				}
+				return nil
+			})
 		}
 
 		// SPECIAL CASE: go-isatty
