@@ -35,12 +35,12 @@ func applyRegastPatches(path string, patches []regastPatch) error {
 		if err != nil {
 			return fmt.Errorf("regast compile %q: %w", p.pat, err)
 		}
-		
+
 		updated, err := pattern.Replace(src, p.repl)
 		if err != nil {
 			return fmt.Errorf("regast replace %s with %q: %w", path, p.pat, err)
 		}
-		
+
 		if string(updated) != string(content) {
 			content = updated
 			// Re-preprocess if content changed to keep node spans in sync for subsequent patches.
