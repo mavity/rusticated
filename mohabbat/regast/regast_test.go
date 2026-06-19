@@ -127,126 +127,232 @@ func TestGolden(t *testing.T) {
 		// --- Plain regex (no node-groups): behaves like ordinary regexp. ---
 		{
 			name: "plain literal replace",
-			in:   "package p\n\nvar x = 1\n",
+			in: `package p
+
+var x = 1
+`,
 			pat:  `x = 1`,
 			repl: `y = 2`,
-			want: "package p\n\nvar y = 2\n",
+			want: `package p
+
+var y = 2
+`,
 		},
 		{
 			name: "plain regex replaces every match",
-			in:   "package p\n\nvar a = 12\nvar b = 345\n",
+			in: `package p
+
+var a = 12
+var b = 345
+`,
 			pat:  `\d+`,
 			repl: `N`,
-			want: "package p\n\nvar a = N\nvar b = N\n",
+			want: `package p
+
+var a = N
+var b = N
+`,
 		},
 		{
 			name: "plain regex group swap",
-			in:   "package p\n\nvar _ = \"a-b\"\n",
+			in: `package p
+
+var _ = "a-b"
+`,
 			pat:  `(\w)-(\w)`,
 			repl: `$2-$1`,
-			want: "package p\n\nvar _ = \"b-a\"\n",
+			want: `package p
+
+var _ = "b-a"
+`,
 		},
 
 		// --- Node-groups: match a whole AST node, spacing-insensitive. ---
 		{
 			name: "rename qualified identifier",
-			in:   "package p\n\nvar _ = unix.Major\n",
+			in: `package p
+
+var _ = unix.Major
+`,
 			pat:  `⦃unix\.Major⦄`,
 			repl: `syscall.Major`,
-			want: "package p\n\nvar _ = syscall.Major\n",
+			want: `package p
+
+var _ = syscall.Major
+`,
 		},
 		{
 			name: "rename ignores spacing around dot",
-			in:   "package p\n\nvar _ = unix . Major\n",
+			in: `package p
+
+var _ = unix . Major
+`,
 			pat:  `⦃unix\.Major⦄`,
 			repl: `syscall.Major`,
-			want: "package p\n\nvar _ = syscall.Major\n",
+			want: `package p
+
+var _ = syscall.Major
+`,
 		},
 		{
 			name: "rename ignores a comment in the selector",
-			in:   "package p\n\nvar _ = unix /*c*/ . Major\n",
+			in: `package p
+
+var _ = unix /*c*/ . Major
+`,
 			pat:  `⦃unix\.Major⦄`,
 			repl: `syscall.Major`,
-			want: "package p\n\nvar _ = syscall.Major\n",
+			want: `package p
+
+var _ = syscall.Major
+`,
 		},
 		{
 			name: "wrap a node, $1 is its raw text",
-			in:   "package p\n\nvar _ = foo.bar\n",
+			in: `package p
+
+var _ = foo.bar
+`,
 			pat:  `⦃\w+\.\w+⦄`,
 			repl: `wrap($1)`,
-			want: "package p\n\nvar _ = wrap(foo.bar)\n",
+			want: `package p
+
+var _ = wrap(foo.bar)
+`,
 		},
 		{
 			name: "node capture preserves original spacing",
-			in:   "package p\n\nvar _ = foo . bar\n",
+			in: `package p
+
+var _ = foo . bar
+`,
 			pat:  `⦃\w+\.\w+⦄`,
 			repl: `wrap($1)`,
-			want: "package p\n\nvar _ = wrap(foo . bar)\n",
+			want: `package p
+
+var _ = wrap(foo . bar)
+`,
 		},
 		{
 			name: "swap binary operands",
-			in:   "package p\n\nvar _ = a + b\n",
+			in: `package p
+
+var _ = a + b
+`,
 			pat:  `⦃(\w+) \+ (\w+)⦄`,
 			repl: `$3 + $2`,
-			want: "package p\n\nvar _ = b + a\n",
+			want: `package p
+
+var _ = b + a
+`,
 		},
 		{
 			name: "swap operands matches tight source too",
-			in:   "package p\n\nvar _ = a+b\n",
+			in: `package p
+
+var _ = a+b
+`,
 			pat:  `⦃(\w+) \+ (\w+)⦄`,
 			repl: `$3 + $2`,
-			want: "package p\n\nvar _ = b + a\n",
+			want: `package p
+
+var _ = b + a
+`,
 		},
 		{
 			name: "nested node-group capture",
-			in:   "package p\n\nvar _ = foo.bar\n",
+			in: `package p
+
+var _ = foo.bar
+`,
 			pat:  `⦃⦃\w+⦄\.\w+⦄`,
 			repl: `$2`,
-			want: "package p\n\nvar _ = foo\n",
+			want: `package p
+
+var _ = foo
+`,
 		},
 		{
 			name: "same-start picks the identifier, not the selector",
-			in:   "package p\n\nvar _ = foo.bar\n",
+			in: `package p
+
+var _ = foo.bar
+`,
 			pat:  `⦃foo⦄`,
 			repl: `X`,
-			want: "package p\n\nvar _ = X.bar\n",
+			want: `package p
+
+var _ = X.bar
+`,
 		},
 		{
 			name: "replace all selectors",
-			in:   "package p\n\nvar _ = a.b\nvar _ = c.d\n",
+			in: `package p
+
+var _ = a.b
+var _ = c.d
+`,
 			pat:  `⦃\w+\.\w+⦄`,
 			repl: `X`,
-			want: "package p\n\nvar _ = X\nvar _ = X\n",
+			want: `package p
+
+var _ = X
+var _ = X
+`,
 		},
 		{
 			name: "rename a typed field, word spacing required",
-			in:   "package p\n\nfunc f(x int) {}\n",
+			in: `package p
+
+func f(x int) {}
+`,
 			pat:  `⦃x int⦄`,
 			repl: `y int64`,
-			want: "package p\n\nfunc f(y int64) {}\n",
+			want: `package p
+
+func f(y int64) {}
+`,
 		},
 
 		// --- No match leaves the input untouched. ---
 		{
 			name: "no match is a no-op",
-			in:   "package p\n\nvar _ = a.b\n",
+			in: `package p
+
+var _ = a.b
+`,
 			pat:  `⦃x\.y⦄`,
 			repl: `Z`,
-			want: "package p\n\nvar _ = a.b\n",
+			want: `package p
+
+var _ = a.b
+`,
 		},
 		{
 			name: "word pattern does not merge two identifiers",
-			in:   "package p\n\nvar xy = 0\n",
+			in: `package p
+
+var xy = 0
+`,
 			pat:  `⦃x y⦄`,
 			repl: `Z`,
-			want: "package p\n\nvar xy = 0\n",
+			want: `package p
+
+var xy = 0
+`,
 		},
 		{
 			name: "word pattern does not split a single identifier",
-			in:   "package p\n\nfunc f(a b) {}\n",
+			in: `package p
+
+func f(a b) {}
+`,
 			pat:  `⦃ab⦄`,
 			repl: `Z`,
-			want: "package p\n\nfunc f(a b) {}\n",
+			want: `package p
+
+func f(a b) {}
+`,
 		},
 	}
 	for _, c := range cases {
