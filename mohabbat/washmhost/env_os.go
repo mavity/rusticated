@@ -145,3 +145,24 @@ func (h *HostEnv) sys_tty_get_size(ctx context.Context, apiMod api.Module, stack
 
 	stack[0] = uint64(uint32(width)<<16 | uint32(height))
 }
+
+// sys_fd_isatty implements the "env" import fd_isatty(fd int32) int32.
+// The guest fd is treated as a handle (fds 0/1/2 alias the standard-stream handles).
+// Returns 1 if the underlying OS file is a terminal, 0 otherwise.
+func (h *HostEnv) sys_fd_isatty(ctx context.Context, apiMod api.Module, stack []uint64) {
+	fd := int64(stack[0]) // fd is passed as i32 but wazero sign-extends into uint64
+
+	h.mu.Lock()
+	f, ok := h.handles[uint64(fd)].(*os.File)
+	h.mu.Unlock()
+
+	if !ok {
+		stack[0] = 0
+		return
+	}
+	if term.IsTerminal(int(f.Fd())) {
+		stack[0] = 1
+	} else {
+		stack[0] = 0
+	}
+}

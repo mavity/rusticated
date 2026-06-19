@@ -23,11 +23,31 @@ func buildGoProjectWasm(ws, absProjectDir, outputWasm string) error {
 			return err
 		}
 	}
+
+	// Apply wasip1 dependency patches: copy affected modules to a mutable
+	// rusticated cache, flip their build-tag gates, and generate a temp go.mod
+	// with replace directives plus overlay entries for suffix-flip aliases.
+	patchResult, err := applyWasip1DepPatches(ws, absProjectDir, goroot)
+	if err != nil {
+		return fmt.Errorf("wasip1 dep patches: %w", err)
+	}
+
+	// Determination of effective overlay: merge suffix-flip extras if any.
+	effectiveOverlay := overlayPath
+	if len(patchResult.overlayExtra) > 0 {
+		mergedPath := filepath.Join(buildDir, projectName+"-overlay.json")
+		effectiveOverlay, err = mergeOverlay(overlayPath, patchResult.overlayExtra, mergedPath)
+		if err != nil {
+			return fmt.Errorf("merge overlay: %w", err)
+		}
+	}
+
 	fmt.Println("🍆 SDK " + rootSource + " at " + goroot)
 	fmt.Printf("🍆  Building Go project %s -> %s\n", absProjectDir, outputWasm)
 	goBin := goBinFromRoot(goroot)
+
 	cmd := exec.Command(goBin, "build", "-buildmode=c-shared",
-		"-overlay", overlayPath,
+		"-overlay", effectiveOverlay,
 		"-trimpath", "-ldflags=-s -w",
 		"-o", outputWasm, ".")
 	cmd.Dir = absProjectDir
