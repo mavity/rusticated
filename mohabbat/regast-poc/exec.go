@@ -1,10 +1,10 @@
-package regast-poc
+package regast_poc
 
 import (
 	"unicode"
 	"unicode/utf8"
 
-	"mohabbat/mohabbat/regast-poc/syntax"
+	"mohabbat/mohabbat/regast_poc/syntax"
 )
 
 // stepLimit bounds the total work of a single match attempt, guarding against

@@ -1,4 +1,4 @@
-package regast-poc
+package regast_poc
 
 import (
 	"fmt"
@@ -63,7 +63,7 @@ func lowerSeq(runes []rune, i *int, inNode bool, b *strings.Builder) error {
 			if inNode {
 				return nil // caller consumes the bracket
 			}
-			return fmt.Errorf("regast-poc: unmatched %c at offset %d", closeBracket, *i)
+			return fmt.Errorf("regast_poc: unmatched %c at offset %d", closeBracket, *i)
 
 		case r == openBracket:
 			flushGap()
@@ -74,7 +74,7 @@ func lowerSeq(runes []rune, i *int, inNode bool, b *strings.Builder) error {
 				return err
 			}
 			if *i >= len(runes) || runes[*i] != closeBracket {
-				return fmt.Errorf("regast-poc: missing %c for %c", closeBracket, openBracket)
+				return fmt.Errorf("regast_poc: missing %c for %c", closeBracket, openBracket)
 			}
 			*i++ // consume ⦄
 			b.WriteString(exitLit)
@@ -115,7 +115,7 @@ func lowerSeq(runes []rune, i *int, inNode bool, b *strings.Builder) error {
 	}
 
 	if inNode {
-		return fmt.Errorf("regast-poc: missing %c at end of pattern", closeBracket)
+		return fmt.Errorf("regast_poc: missing %c at end of pattern", closeBracket)
 	}
 	return nil
 }
@@ -150,7 +150,7 @@ func copyClass(runes []rune, i *int, b *strings.Builder) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("regast-poc: unterminated [ in pattern")
+	return fmt.Errorf("regast_poc: unterminated [ in pattern")
 }
 
 func isPatternSpace(r rune) bool {
