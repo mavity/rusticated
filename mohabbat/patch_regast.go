@@ -3,6 +3,8 @@ package mohabbat
 import (
 	"fmt"
 	"os"
+
+	regast "mohabbat/mohabbat/regast"
 )
 
 // regastPatch defines a search pattern and its replacement.
@@ -11,7 +13,10 @@ type regastPatch struct {
 	repl string
 }
 
-// applyRegastPatches applies a sequence of regast-poc transformations to a file.
+// applyRegastPatches applies a sequence of regast (node-aware regexp)
+// transformations to a file. The engine owns the whole lifecycle of the source
+// string — parsing the AST, building the structural map, and matching — so the
+// caller just supplies patterns and replacements.
 func applyRegastPatches(path string, patches []regastPatch) error {
 	if len(patches) == 0 {
 		return nil
@@ -22,33 +27,14 @@ func applyRegastPatches(path string, patches []regastPatch) error {
 		return err
 	}
 
-	src, err := regast - poc.Preprocess(path, data)
-	if err != nil {
-		return fmt.Errorf("regast-poc preprocess %s: %w", path, err)
-	}
-
-	content := data
+	content := string(data)
 	for _, p := range patches {
-		pattern, err := regast - poc.Compile(p.pat)
+		re, err := regast.Compile(p.pat)
 		if err != nil {
-			return fmt.Errorf("regast-poc compile %q: %w", p.pat, err)
+			return fmt.Errorf("regast compile %q: %w", p.pat, err)
 		}
-
-		updated, err := pattern.Replace(src, p.repl)
-		if err != nil {
-			return fmt.Errorf("regast-poc replace %s with %q: %w", path, p.pat, err)
-		}
-
-		if string(updated) != string(content) {
-			content = updated
-			// Re-preprocess if content changed to keep node spans in sync for subsequent patches.
-			// This is slightly inefficient but ensures correctness for overlapping/sequential patches.
-			src, err = regast - poc.Preprocess(path, content)
-			if err != nil {
-				return fmt.Errorf("regast-poc re-preprocess %s: %w", path, err)
-			}
-		}
+		content = re.ReplaceAllString(content, p.repl)
 	}
 
-	return writeFileIfChanged(path, content)
+	return writeFileIfChanged(path, []byte(content))
 }
