@@ -100,7 +100,7 @@ func applyWasip1DepPatches(ws, projectDir, goroot string) (*depPatchResult, erro
 			return nil, fmt.Errorf("sync %s: %w", target.module, err)
 		}
 
-		// Phase 1: Structural API translations using regast.
+		// Phase 1: Structural API translations using regast-poc.
 		// These replace brittle strings.ReplaceAll with ast-aware transforms.
 		commonPatches := []regastPatch{
 			{pat: `⦃unix \. Major⦄`, repl: `syscall.Major`},

@@ -1,11 +1,11 @@
-// Package regast implements node-aware regular expressions over Go source.
+// Package regast-poc implements node-aware regular expressions over Go source.
 //
 // A pattern is an ordinary regular expression that may additionally contain
 // node-groups, written between the white curly brackets ⦃ and ⦄. A node-group
 // matches a whole Go AST node, ignoring the exact form of whitespace and
 // comments, while letting a space in the pattern demand a real gap in the
 // source. See README.md for the full design.
-package regast
+package regast-poc
 
 import (
 	"fmt"
@@ -67,7 +67,7 @@ func Preprocess(filename string, src []byte) (*Source, error) {
 	f, err := parser.ParseFile(pfset, filename, src,
 		parser.ParseComments|parser.AllErrors|parser.SkipObjectResolution)
 	if f == nil {
-		return nil, fmt.Errorf("regast: cannot parse %s: %w", filename, err)
+		return nil, fmt.Errorf("regast-poc: cannot parse %s: %w", filename, err)
 	}
 
 	type se struct{ s, e int }
