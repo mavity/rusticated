@@ -1,9 +1,9 @@
-package regast-poc
+package regast_poc
 
 import (
 	"fmt"
 
-	"mohabbat/mohabbat/regast-poc/syntax"
+	"mohabbat/mohabbat/regast_poc/syntax"
 )
 
 // Pattern is a compiled node-aware regular expression.
@@ -20,12 +20,12 @@ func Compile(pattern string) (*Pattern, error) {
 	}
 	re, err := syntax.Parse(lowered, syntax.Perl)
 	if err != nil {
-		return nil, fmt.Errorf("regast-poc: %w", err)
+		return nil, fmt.Errorf("regast_poc: %w", err)
 	}
 	re = re.Simplify()
 	prog, err := syntax.Compile(re)
 	if err != nil {
-		return nil, fmt.Errorf("regast-poc: %w", err)
+		return nil, fmt.Errorf("regast_poc: %w", err)
 	}
 	ncap := prog.NumCap
 	if ncap < 2 {

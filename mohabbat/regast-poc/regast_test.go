@@ -1,4 +1,4 @@
-package regast-poc
+package regast_poc
 
 import (
 	"regexp"
@@ -114,7 +114,7 @@ func TestGapWordRule(t *testing.T) {
 }
 
 // TestGolden is the primary source of evidence: each case is an input string, a
-// regast-poc pattern, a replacement template, and the exact expected output. The
+// regast_poc pattern, a replacement template, and the exact expected output. The
 // cases double as usage documentation.
 func TestGolden(t *testing.T) {
 	cases := []struct {

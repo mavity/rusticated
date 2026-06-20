@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+
+	regast "mohabbat/mohabbat/regast"
 )
 
 // jitDirName is the conventional subdirectory inside mohabbat that holds
@@ -100,25 +102,24 @@ func applyWasip1DepPatches(ws, projectDir, goroot string) (*depPatchResult, erro
 			return nil, fmt.Errorf("sync %s: %w", target.module, err)
 		}
 
-		// Phase 1: Structural API translations using regast-poc.
+		// Phase 1: Structural API translations using regast.
 		// These replace brittle strings.ReplaceAll with ast-aware transforms.
-		commonPatches := []regastPatch{
-			{pat: `⦃unix \. Major⦄`, repl: `syscall.Major`},
-			{pat: `⦃unix \. Minor⦄`, repl: `syscall.Minor`},
-		}
-		if target.module == "github.com/u-root/u-root" {
-			// For u-root we also flip the import to syscall.
-			patches := append([]regastPatch{
-				{pat: `⦃"golang.org/x/sys/unix"⦄`, repl: `"syscall"`},
-			}, commonPatches...)
+		var patches []regastPatch
+		patches = append(patches, regastPatch{pat: `⦃unix \. Major⦄`, repl: `syscall.Major`})
+		patches = append(patches, regastPatch{pat: `⦃unix \. Minor⦄`, repl: `syscall.Minor`})
 
-			_ = filepath.WalkDir(target.jitDir, func(path string, d fs.DirEntry, err error) error {
-				if err == nil && !d.IsDir() && strings.HasSuffix(path, ".go") {
-					_ = applyRegastPatches(path, patches)
-				}
-				return nil
-			})
+		// For modules that depend on x/sys/unix, we redirect to syscall where our shim lives.
+		// We do this structurally to avoid mangling strings or comments that shouldn't change.
+		if target.module == "github.com/u-root/u-root" {
+			patches = append(patches, regastPatch{pat: `⦃"golang.org/x/sys/unix"⦄`, repl: `"syscall"`})
 		}
+
+		_ = filepath.WalkDir(target.jitDir, func(path string, d fs.DirEntry, err error) error {
+			if err == nil && !d.IsDir() && strings.HasSuffix(path, ".go") {
+				_ = applyRegastPatches(path, patches)
+			}
+			return nil
+		})
 
 		// SPECIAL CASE: go-isatty
 		if strings.HasSuffix(filepath.ToSlash(target.jitDir), "github.com/mattn/go-isatty") {
@@ -616,43 +617,38 @@ func actuallyFlipTags(filePath string) error {
 		return err
 	}
 	content := string(data)
-	lines := strings.Split(content, "\n")
-	changed := false
-	maxLines := len(lines)
-	if maxLines > 30 {
-		maxLines = 30
-	}
-	for i := 0; i < maxLines; i++ {
-		line := lines[i]
-		if strings.HasPrefix(line, "//go:build ") || strings.HasPrefix(line, "// +build ") {
-			// Only flip if it contains a positive match for a unix keyword
-			matches := unixKeywordRe.FindAllStringIndex(line, -1)
-			hasPositive := false
-			for _, m := range matches {
-				start := m[0]
-				if start > 0 && line[start-1] == '!' {
-					continue
-				}
-				hasPositive = true
-				break
-			}
 
-			if hasPositive && !strings.Contains(line, "wasip1") {
-				if strings.HasPrefix(line, "//go:build ") {
-					lines[i] = strings.TrimSpace(line) + " || wasip1"
-				} else {
-					if strings.Contains(line, " ") {
-						lines[i] = strings.TrimSpace(line) + " wasip1"
-					} else {
-						lines[i] = strings.TrimSpace(line) + ",wasip1"
-					}
-				}
-				changed = true
+	// Identify build tag nodes (including comments, as enabled in source.go).
+	re, err := regast.Compile(`(?m)^//(?:go:|\s*\+)build.*[\r\n]+\s*`)
+
+	newContent := re.ReplaceAllStringFunc(content, func(m string) string {
+		// Only flip if it contains a positive match for a unix keyword and not wasip1
+		matches := unixKeywordRe.FindAllStringIndex(m, -1)
+		hasPositive := false
+		for _, match := range matches {
+			start := match[0]
+			if start > 0 && m[start-1] == '!' {
+				continue
 			}
+			hasPositive = true
+			break
 		}
-	}
-	if changed {
-		return os.WriteFile(filePath, []byte(strings.Join(lines, "\n")), 0644)
+
+		if hasPositive && !strings.Contains(m, "wasip1") {
+			if strings.HasPrefix(m, "//go:build ") {
+				return strings.TrimSpace(m) + " || wasip1\n\n"
+			}
+			// // +build style
+			if strings.Contains(m, " ") {
+				return strings.TrimSpace(m) + " wasip1\n\n"
+			}
+			return strings.TrimSpace(m) + ",wasip1\n\n"
+		}
+		return m
+	})
+
+	if newContent != content {
+		return os.WriteFile(filePath, []byte(newContent), 0644)
 	}
 	return nil
 }
@@ -663,37 +659,39 @@ func actuallyExcludeWasip1(filePath string) error {
 		return err
 	}
 	content := string(data)
-	content = strings.ReplaceAll(content, " || wasip1", "")
-	content = strings.ReplaceAll(content, "wasip1 || ", "")
-	content = strings.ReplaceAll(content, ",wasip1", "")
-	content = strings.ReplaceAll(content, "wasip1,", "")
 	content = addWasip1ExclusionToTag(content)
 	return os.WriteFile(filePath, []byte(content), 0644)
 }
 
 func addWasip1ExclusionToTag(content string) string {
-	lines := strings.Split(content, "\n")
-	found := false
-	for i, line := range lines {
-		if i > 30 {
-			break
-		}
-		if strings.HasPrefix(line, "//go:build ") {
-			if !strings.Contains(line, "wasip1") {
-				lines[i] = strings.TrimSpace(line) + " && !wasip1"
-			}
-			found = true
-		} else if strings.HasPrefix(line, "// +build ") {
-			if !strings.Contains(line, "wasip1") {
-				lines[i] = strings.TrimSpace(line) + ",!wasip1"
-			}
-			found = true
-		}
+	// Clean up any existing wasip1 additions first
+	reWasip1 := regexp.MustCompile(`\s*(\|\||,)\s*wasip1|wasip1\s*(\|\||,)\s*`)
+
+	re, err := regast.Compile(`(?m)^//(?:go:|\s*\+)build.*[\r\n]+\s*`)
+	if err != nil {
+		return content
 	}
+	found := false
+	newContent := re.ReplaceAllStringFunc(content, func(m string) string {
+		found = true
+		if strings.Contains(m, "wasip1") {
+			m = reWasip1.ReplaceAllString(m, "")
+		}
+		if !strings.Contains(m, "!wasip1") {
+			if strings.HasPrefix(m, "//go:build ") {
+				inner := strings.TrimSpace(strings.TrimPrefix(m, "//go:build "))
+				return fmt.Sprintf("//go:build (%s) && !wasip1\n\n", inner)
+			}
+			// // +build style
+			return strings.TrimSpace(m) + ",!wasip1\n\n"
+		}
+		return m
+	})
+
 	if !found {
 		return "//go:build !wasip1\n\n" + content
 	}
-	return strings.Join(lines, "\n")
+	return newContent
 }
 
 func mergeOverlay(srcOverlay string, extra map[string]string, dstPath string) (string, error) {
