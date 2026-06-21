@@ -1,7 +1,7 @@
 [package]
 name = "rusticated"
 description = "Fast, standard-library-shaped async platform layer for brush-async"
-version = "0.1.2"
+version.workspace = true
 categories = ["asynchronous", "development-tools", "embedded"]
 edition.workspace = true
 keywords = ["async", "io", "embedded", "runtime", "wasm"]
