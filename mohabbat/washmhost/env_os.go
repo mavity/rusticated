@@ -78,7 +78,7 @@ func (h *HostEnv) sys_debug_log(ctx context.Context, m api.Module, stack []uint6
 	if !ok {
 		return
 	}
-	fmt.Printf("GUEST: %s\n", string(buf))
+	debugLog("GUEST: %s\n", string(buf))
 }
 
 func (h *HostEnv) sys_panic(ctx context.Context, m api.Module, stack []uint64) {

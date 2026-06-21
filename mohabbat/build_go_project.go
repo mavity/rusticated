@@ -8,7 +8,7 @@ import (
 )
 
 // buildGoProjectWasm compiles a Go project to rusticated WASM.
-func buildGoProjectWasm(ws, absProjectDir, outputWasm string) error {
+func buildGoProjectWasm(ws, absProjectDir, outputWasm string, verbose bool) error {
 	overlayPath := filepath.Join(ws, "target", "overlay.json")
 	goroot, rootSource, err := resolveGoroot(ws)
 	if err != nil {
@@ -46,10 +46,14 @@ func buildGoProjectWasm(ws, absProjectDir, outputWasm string) error {
 	fmt.Printf("🍆  Building Go project %s -> %s\n", absProjectDir, outputWasm)
 	goBin := goBinFromRoot(goroot)
 
-	cmd := exec.Command(goBin, "build", "-buildmode=c-shared",
+	args := []string{"build", "-buildmode=c-shared",
 		"-overlay", effectiveOverlay,
 		"-trimpath", "-ldflags=-s -w",
-		"-o", outputWasm, ".")
+		"-o", outputWasm, "."}
+	if verbose {
+		args = append(args, "-tags=verbose")
+	}
+	cmd := exec.Command(goBin, args...)
 	cmd.Dir = absProjectDir
 	env := os.Environ()
 	env = upsertEnv(env, "GOOS", "wasip1")
@@ -69,7 +73,7 @@ func buildGoProjectWasm(ws, absProjectDir, outputWasm string) error {
 }
 
 // buildBrainWasm compiles mohabbat itself as the WASM brain.
-func buildBrainWasm(ws, outputWasm string) error {
+func buildBrainWasm(ws, outputWasm string, verbose bool) error {
 	overlayPath := filepath.Join(ws, "target", "overlay.json")
 	goroot, rootSource, err := resolveGoroot(ws)
 	if err != nil {
@@ -86,10 +90,14 @@ func buildBrainWasm(ws, outputWasm string) error {
 	fmt.Println("🍆 SDK " + rootSource + " at " + goroot)
 	fmt.Printf("🍆  Building brain WASM -> %s\n", outputWasm)
 	goBin := goBinFromRoot(goroot)
-	cmd := exec.Command(goBin, "build", "-buildmode=c-shared",
+	args := []string{"build", "-buildmode=c-shared",
 		"-overlay", overlayPath,
 		"-trimpath", "-ldflags=-s -w",
-		"-o", outputWasm, ".")
+		"-o", outputWasm, "."}
+	if verbose {
+		args = append(args, "-tags=verbose")
+	}
+	cmd := exec.Command(goBin, args...)
 	cmd.Dir = ws
 	env := os.Environ()
 	env = upsertEnv(env, "GOOS", "wasip1")
@@ -107,7 +115,7 @@ func buildBrainWasm(ws, outputWasm string) error {
 	return postProcessWasm(outputWasm)
 }
 
-func goBuild(ws, pkgDir string, s slot, buildDir string) error {
+func goBuild(ws, pkgDir string, s slot, buildDir string, verbose bool) error {
 	outPath := washmhostPath(buildDir, s)
 	if err := os.Remove(outPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove stale output %s: %w", outPath, err)
@@ -126,7 +134,11 @@ func goBuild(ws, pkgDir string, s slot, buildDir string) error {
 	// Note: go build -o - is avoided here because on some Windows environments
 	// it incorrectly creates a literal file named "-" instead of streaming.
 	tmpOut := filepath.Join(goTmpDir, "build.dat")
-	cmd := exec.Command("go", "build", "-trimpath", "-ldflags=-s -w", "-o", tmpOut, ".")
+	args := []string{"build", "-trimpath", "-ldflags=-s -w", "-o", tmpOut, "."}
+	if verbose {
+		args = append(args, "-tags=verbose")
+	}
+	cmd := exec.Command("go", args...)
 	cmd.Dir = filepath.Join(ws, pkgDir)
 	env := os.Environ()
 	env = upsertEnv(env, "CGO_ENABLED", "0")

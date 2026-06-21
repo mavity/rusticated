@@ -312,10 +312,10 @@ func (h *HostEnv) sys_process_exit(ctx context.Context, m api.Module, stack []ui
 		}
 	}
 	h.mu.Unlock()
-	fmt.Printf("HOST: process_exit(%d) called.\n", code)
-	fmt.Printf("  Live Ops:  %d\n", live)
-	fmt.Printf("  Ghost Ops: %d\n", ghost)
-	fmt.Printf("  Handles:   %d, Timers: %d, SignalWaiters: %d\n",
+	debugLog("HOST: process_exit(%d) called.\n", code)
+	debugLog("  Live Ops:  %d\n", live)
+	debugLog("  Ghost Ops: %d\n", ghost)
+	debugLog("  Handles:   %d, Timers: %d, SignalWaiters: %d\n",
 		handlesCount, timersCount, waitersCount)
 
 	h.Close()

@@ -10,15 +10,19 @@ import (
 )
 
 // buildRustProjectWasm compiles a Rust project to rusticated WASM.
-func buildRustProjectWasm(ws, absProjectDir, outputWasm string) error {
+func buildRustProjectWasm(ws, absProjectDir, outputWasm string, verbose bool) error {
 	target := "wasm32-rusticated-unknown-unknown"
 	projectName := filepath.Base(absProjectDir)
 	fmt.Printf("🍆  Building Rust project %s -> WASM\n", absProjectDir)
-	cmd := exec.Command("cargo", "build", "-p", projectName, "--release",
+	args := []string{"build", "-p", projectName, "--release",
 		"--config", filepath.Join(ws, "target", "rusticated-spec", "config.toml"),
 		"--config", "unstable.json-target-spec=true",
 		"--target", target,
-		"-Z", "unstable-options")
+		"-Z", "unstable-options"}
+	if verbose {
+		args = append(args, "--features", "verbose")
+	}
+	cmd := exec.Command("cargo", args...)
 	cmd.Env = upsertEnv(os.Environ(), "RUST_TARGET_PATH", filepath.Join(ws, "target", "rusticated-spec"))
 	cmd.Dir = ws
 	cmd.Stdout = os.Stdout
@@ -37,7 +41,7 @@ func buildRustProjectWasm(ws, absProjectDir, outputWasm string) error {
 	return nil
 }
 
-func cargoBuild(ws, pkgDir string, s slot, buildDir string) (string, error) {
+func cargoBuild(ws, pkgDir string, s slot, buildDir string, verbose bool) (string, error) {
 	targetName, err := cargoTargetName(s)
 	if err != nil {
 		return "", err
@@ -51,6 +55,9 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string) (string, error) {
 	buildTarget := func(name string) error {
 		targetArg := name
 		args := []string{"build", "--release"}
+		if verbose {
+			args = append(args, "--features", "verbose")
+		}
 		if isRusticatedTarget {
 			targetPath := filepath.Join(ws, "target", "rusticated-spec", name+".json")
 			evalPath, err := filepath.EvalSymlinks(targetPath)
@@ -184,4 +191,3 @@ func rustcTargetSpecAvailable(target string) bool {
 	cmd := exec.Command("rustc", "-Z", "unstable-options", "--print", "target-spec-json", "--target", target)
 	return cmd.Run() == nil
 }
-

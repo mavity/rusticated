@@ -10,7 +10,7 @@ import (
 // ModeBuild is Mode 1: full build pipeline.
 // On native, runs prebuild (target specs + sysroot + overlay) via prebuildFn.
 // Inside a WASM vegetable, falls back to subprocess if artifacts are missing.
-func ModeBuild(ws string) error {
+func ModeBuild(ws string, verbose bool) error {
 	buildDir := filepath.Join(ws, "target", "mohabbat-build")
 	if err := os.MkdirAll(buildDir, 0o755); err != nil {
 		return err
@@ -22,13 +22,13 @@ func ModeBuild(ws string) error {
 	}
 
 	fmt.Println("🍆  Building brot (cargo) and washmhost for Modern Four...")
-	if err := buildAllSlots(ws, buildDir); err != nil {
+	if err := buildAllSlots(ws, buildDir, verbose); err != nil {
 		return err
 	}
 
 	brainPath := filepath.Join(buildDir, "brain.wasm")
 	fmt.Println("🍆  Building brain WASM (mohabbat)...")
-	if err := buildBrainWasm(ws, brainPath); err != nil {
+	if err := buildBrainWasm(ws, brainPath, verbose); err != nil {
 		return fmt.Errorf("brain wasm build: %w", err)
 	}
 
@@ -41,7 +41,7 @@ func ModeBuild(ws string) error {
 	if _, err := os.Stat(filepath.Join(kabibiGoDir, "go.mod")); err == nil {
 		fmt.Println("🍆  Building kabibi-go (rusticated guest binary)...")
 		kabibiWasmPath := filepath.Join(ws, "target", "kabibi-go.wasm")
-		if err := buildGoProjectWasm(ws, kabibiGoDir, kabibiWasmPath); err != nil {
+		if err := buildGoProjectWasm(ws, kabibiGoDir, kabibiWasmPath, verbose); err != nil {
 			fmt.Printf("🍆  warn: kabibi-go build failed: %v\n", err)
 		}
 	}
@@ -53,7 +53,7 @@ func ModeBuild(ws string) error {
 }
 
 // ModePackage is Mode 3: build a project's payload and assemble a fresh vegetable.
-func ModePackage(ws, projectDir, outputPath string) error {
+func ModePackage(ws, projectDir, outputPath string, verbose bool) error {
 	buildDir := filepath.Join(ws, "target", "mohabbat-build")
 	if err := os.MkdirAll(buildDir, 0o755); err != nil {
 		return err
@@ -61,38 +61,38 @@ func ModePackage(ws, projectDir, outputPath string) error {
 	projectName := filepath.Base(projectDir)
 	wasmPath := filepath.Join(ws, "target", projectName+".wasm")
 	fmt.Printf("🍆  Packaging %s -> %s\n", projectDir, outputPath)
-	if err := buildProjectToWasm(ws, projectDir, wasmPath); err != nil {
+	if err := buildProjectToWasm(ws, projectDir, wasmPath, verbose); err != nil {
 		return err
 	}
 	fmt.Println("🍆  Building brot (cargo) and washmhost for Modern Four...")
-	if err := buildAllSlots(ws, buildDir); err != nil {
+	if err := buildAllSlots(ws, buildDir, verbose); err != nil {
 		return err
 	}
 	return assembleVegetable(ws, wasmPath, buildDir, outputPath)
 }
 
 // ModeDevRun is Mode 4: build a project to WASM and run it under washmhost.
-func ModeDevRun(ws, projectDir string, extraArgs []string) error {
+func ModeDevRun(ws, projectDir string, extraArgs []string, verbose bool) error {
 	projectName := filepath.Base(projectDir)
 	wasmPath := filepath.Join(ws, "target", projectName+".wasm")
 	fmt.Printf("🍆  Dev-run: building %s\n", projectDir)
-	if err := buildProjectToWasm(ws, projectDir, wasmPath); err != nil {
+	if err := buildProjectToWasm(ws, projectDir, wasmPath, verbose); err != nil {
 		return err
 	}
 	return runUnderWashmhost(ws, wasmPath, extraArgs)
 }
 
 // buildAllSlots builds brot (cargo) and washmhost for all Modern Four slots.
-func buildAllSlots(ws, buildDir string) error {
+func buildAllSlots(ws, buildDir string, verbose bool) error {
 	for _, s := range slots {
 		if !shouldBuildSlot(s) {
 			fmt.Printf("🍆    skip %s\n", s.name)
 			continue
 		}
-		if _, err := cargoBuild(ws, filepath.Join("mohabbat", "brot"), s, buildDir); err != nil {
+		if _, err := cargoBuild(ws, filepath.Join("mohabbat", "brot"), s, buildDir, verbose); err != nil {
 			return err
 		}
-		if err := goBuild(ws, filepath.Join("mohabbat", "washmhost"), s, buildDir); err != nil {
+		if err := goBuild(ws, filepath.Join("mohabbat", "washmhost"), s, buildDir, verbose); err != nil {
 			return err
 		}
 	}
@@ -100,7 +100,7 @@ func buildAllSlots(ws, buildDir string) error {
 }
 
 // buildProjectToWasm auto-detects Go vs Rust project and builds to WASM.
-func buildProjectToWasm(ws, projectDir, outputWasm string) error {
+func buildProjectToWasm(ws, projectDir, outputWasm string, verbose bool) error {
 	vegPath := os.Getenv("MOHABBAT_VEGETABLE_PATH")
 	inVeg := vegPath != ""
 
@@ -130,9 +130,9 @@ func buildProjectToWasm(ws, projectDir, outputWasm string) error {
 	}
 	// Auto-detect: Go project has go.mod, Rust project has Cargo.toml.
 	if fileExists(filepath.Join(absProject, "go.mod")) {
-		return buildGoProjectWasm(ws, absProject, outputWasm)
+		return buildGoProjectWasm(ws, absProject, outputWasm, verbose)
 	}
-	return buildRustProjectWasm(ws, absProject, outputWasm)
+	return buildRustProjectWasm(ws, absProject, outputWasm, verbose)
 }
 
 func shouldBuildSlot(s slot) bool {
