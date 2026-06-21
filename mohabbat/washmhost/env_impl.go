@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/signal"
 	"runtime"
@@ -310,7 +309,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 	builder.NewFunctionBuilder().
 		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
 			val := int32(stack[0])
-			fmt.Printf("GUEST DEBUG: %d (0x%x)\n", val, val)
+			debugLog("GUEST DEBUG: %d (0x%x)\n", val, val)
 		}), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).
 		Export("rusticated_debug")
 
@@ -339,7 +338,7 @@ block:
 			h.mu.Lock()
 			activeCount := len(h.activeOps)
 			h.mu.Unlock()
-			fmt.Printf("HOST: Poll waiting (pending=%d, active=%d, signals=%d, queue=%d)\n",
+			debugLog("HOST: Poll waiting (pending=%d, active=%d, signals=%d, queue=%d)\n",
 				h.PendingOps(), activeCount, len(h.pendingSignals), len(h.fileOpsQueue))
 			h.lastLog = time.Now()
 		}

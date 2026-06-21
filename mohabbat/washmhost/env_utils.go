@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"syscall"
-	"time"
 
 	"github.com/tetratelabs/wazero/api"
 )
@@ -55,17 +54,6 @@ func resolveUsableCwd() (string, error) {
 	}
 
 	return "", fmt.Errorf("unable to resolve cwd")
-}
-
-func debugLog(format string, args ...interface{}) {
-	f, err := os.OpenFile(filepath.Join(os.TempDir(), "washmhost-debug.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	_, _ = fmt.Fprintf(f, "%s ", time.Now().Format("15:04:05.000"))
-	_, _ = fmt.Fprintf(f, format, args...)
-	_, _ = f.Write([]byte("\n"))
 }
 
 func writeOverlapped(mod api.Module, ovPtr uint32, errorCode uint32, continued uint64, resultExt uint64) error {
