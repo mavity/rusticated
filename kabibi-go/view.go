@@ -509,11 +509,7 @@ func (m model) View() string {
 	footerView := strings.Join(paddedFooter, "\n")
 
 	// Prompt at bottom
-	promptPrefix := "$ "
-	if m.activePane == chatPane {
-		promptPrefix = "AI> "
-	}
-	prompt := promptStyle.Copy().Width(m.width).Render(promptPrefix + m.shellInput.View())
+	prompt := promptStyle.Copy().Width(m.width).Render(m.shellInput.View())
 
 	var components []string
 	components = append(components, exhaustView)
