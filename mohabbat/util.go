@@ -4,8 +4,34 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
+	"time"
 )
+
+type BuildMetadata struct {
+	Version  string
+	Time     string
+	Platform string
+}
+
+func GetBuildMetadata(ws string) BuildMetadata {
+	version := "0.0.0-dev"
+	cargoPath := filepath.Join(ws, "rusticated-rust", "Cargo.toml")
+	if data, err := os.ReadFile(cargoPath); err == nil {
+		re := regexp.MustCompile(`(?m)^version\s*=\s*"([^"]+)"`)
+		if m := re.FindStringSubmatch(string(data)); len(m) > 1 {
+			version = m[1]
+		}
+	}
+
+	return BuildMetadata{
+		Version:  version,
+		Time:     time.Now().UTC().Format(time.RFC3339),
+		Platform: fmt.Sprintf("%s-%s", runtime.GOOS, runtime.GOARCH),
+	}
+}
 
 func upsertEnv(env []string, key, value string) []string {
 	updated := make([]string, 0, len(env)+1)
@@ -124,4 +150,3 @@ func Die(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, "🍆  error: "+format+"\n", a...)
 	os.Exit(1)
 }
-

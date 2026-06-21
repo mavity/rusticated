@@ -27,7 +27,11 @@ func runUnderWashmhost(ws, wasmPath string, extraArgs []string) error {
 		hostArch = runtime.GOARCH
 	}
 
-	runArgs := []string{"run", ".", "--"}
+	metadata := GetBuildMetadata(ws)
+	ldflags := fmt.Sprintf("-X main.BuildVersion=%s -X main.BuildTime=%s -X main.BuildPlatform=%s",
+		metadata.Version, metadata.Time, metadata.Platform)
+
+	runArgs := []string{"run", fmt.Sprintf("-ldflags=%s", ldflags), ".", "--"}
 	runArgs = append(runArgs, extraArgs...)
 	cmd := exec.Command("go", runArgs...)
 	cmd.Dir = filepath.Join(ws, "mohabbat", "washmhost")
@@ -51,4 +55,3 @@ func runUnderWashmhost(ws, wasmPath string, extraArgs []string) error {
 	}
 	return nil
 }
-

@@ -99,9 +99,12 @@ func (h *HostEnv) sys_get_platform_info(ctx context.Context, m api.Module, stack
 	// Offset 220: Rusticated name string (64 bytes)
 	// Offset 284: Rusticated version (4x u16)
 	// Offset 292: Rusticated version string (64 bytes)
-	// Total roughly ~356 bytes. MaxLen should be checked.
+	// Offset 356: Build version string (64 bytes)
+	// Offset 420: Build time string (64 bytes)
+	// Offset 484: Build platform string (64 bytes)
+	// Total roughly ~548 bytes. MaxLen should be checked.
 
-	structSize := uint32(356)
+	structSize := uint32(548)
 	if maxLen < structSize {
 		stack[0] = 7 // E2BIG
 		return
@@ -167,7 +170,11 @@ func (h *HostEnv) sys_get_platform_info(ctx context.Context, m api.Module, stack
 	// WASM platform version string (could be injected from host build)
 	copySafe(156, "1.26.4")
 	copySafe(220, "washmhost")
-	copySafe(292, "0.1.0")
+	copySafe(292, BuildVersion)
+
+	copySafe(356, BuildVersion)
+	copySafe(420, BuildTime)
+	copySafe(484, BuildPlatform)
 
 	if ok := mem.Write(ptr, buf); !ok {
 		stack[0] = 14 // EFAULT

@@ -14,6 +14,13 @@ func buildRustProjectWasm(ws, absProjectDir, outputWasm string, verbose bool) er
 	target := "wasm32-rusticated-unknown-unknown"
 	projectName := filepath.Base(absProjectDir)
 	fmt.Printf("🍆  Building Rust project %s -> WASM\n", absProjectDir)
+
+	meta := GetBuildMetadata(ws)
+	env := upsertEnv(os.Environ(), "RUST_TARGET_PATH", filepath.Join(ws, "target", "rusticated-spec"))
+	env = upsertEnv(env, "BUILD_VERSION", meta.Version)
+	env = upsertEnv(env, "BUILD_TIME", meta.Time)
+	env = upsertEnv(env, "BUILD_PLATFORM", meta.Platform)
+
 	args := []string{"build", "-p", projectName, "--release",
 		"--config", filepath.Join(ws, "target", "rusticated-spec", "config.toml"),
 		"--config", "unstable.json-target-spec=true",
@@ -23,7 +30,7 @@ func buildRustProjectWasm(ws, absProjectDir, outputWasm string, verbose bool) er
 		args = append(args, "--features", "verbose")
 	}
 	cmd := exec.Command("cargo", args...)
-	cmd.Env = upsertEnv(os.Environ(), "RUST_TARGET_PATH", filepath.Join(ws, "target", "rusticated-spec"))
+	cmd.Env = env
 	cmd.Dir = ws
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -86,9 +93,15 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string, verbose bool) (strin
 			}
 			args = append(args, "--config", fmt.Sprintf("target.%s.rustflags=['-C', 'linker=rust-lld', '-C', 'linker-flavor=ld.lld', '-C', 'link-arg=-L%s']", name, stubDir))
 		}
+
+		meta := GetBuildMetadata(ws)
 		cmd := exec.Command("cargo", args...)
 		env := os.Environ()
+		env = upsertEnv(env, "BUILD_VERSION", meta.Version)
+		env = upsertEnv(env, "BUILD_TIME", meta.Time)
+		env = upsertEnv(env, "BUILD_PLATFORM", meta.Platform)
 		cmd.Env = env
+
 		if isRusticatedTarget {
 			cmd.Args = append(cmd.Args, "-Z", "unstable-options")
 		}
