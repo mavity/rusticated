@@ -131,7 +131,6 @@ func (m *model) refreshPrompt() {
 	m.shellInput.Prompt = res
 }
 
-
 func (m *model) loadDir(p pane, path string, focusName string) {
 	path = filepath.Clean(path)
 	entries, _ := os.ReadDir(path)
