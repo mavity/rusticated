@@ -71,12 +71,13 @@ func initialModel() model {
 		runner:            r,
 		shellOut:          sw,
 	}
-	m.loadDir(leftPane, cwd)
-	m.loadDir(rightPane, cwd)
+	m.loadDir(leftPane, cwd, "")
+	m.loadDir(rightPane, cwd, "")
 	return m
 }
 
-func (m *model) loadDir(p pane, path string) {
+func (m *model) loadDir(p pane, path string, focusName string) {
+	path = filepath.Clean(path)
 	entries, _ := os.ReadDir(path)
 	var items []list.Item
 	items = append(items, fileItem{name: "..", isDir: true})
@@ -97,14 +98,29 @@ func (m *model) loadDir(p pane, path string) {
 		return strings.ToLower(ii.name) < strings.ToLower(jj.name)
 	})
 
+	var l *list.Model
+	var d *string
 	if p == leftPane {
-		m.leftList.SetItems(items)
-		m.leftDir = path
-		m.leftList.Title = filepath.Base(path)
+		l = &m.leftList
+		d = &m.leftDir
 	} else {
-		m.rightList.SetItems(items)
-		m.rightDir = path
-		m.rightList.Title = filepath.Base(path)
+		l = &m.rightList
+		d = &m.rightDir
+	}
+
+	l.SetItems(items)
+	*d = path
+	l.Title = filepath.Base(path)
+
+	// Focus handling
+	l.Select(0) // Default to first item (usually "..")
+	if focusName != "" {
+		for i, item := range items {
+			if fi, ok := item.(fileItem); ok && fi.name == focusName {
+				l.Select(i)
+				break
+			}
+		}
 	}
 }
 
