@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"syscall"
 	"time"
 	_ "unsafe"
 )
@@ -50,7 +51,15 @@ func main() {
 		}
 	}
 
-	// ── 2. Timed Input ─────────────────────────────────────────────────────
+	// ── 2. Rusticated Platform Info ───────────────────────────────────────
+	pi := syscall.GetPlatformInfo()
+	fmt.Printf("Rusticated Version: %s\n", pi.RusticatedVersionStr)
+	fmt.Printf("Build Version:      %s\n", pi.BuildVersion)
+	fmt.Printf("Build Time:         %s\n", pi.BuildTime)
+	fmt.Printf("Build Platform:     %s\n", pi.BuildPlatform)
+	fmt.Printf("Runtime OS/Arch:    %s/%d\n\n", pi.OSName, pi.CPUBitness)
+
+	// ── 3. Timed Input ─────────────────────────────────────────────────────
 	fmt.Printf("input (5s timeout): ")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

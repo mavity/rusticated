@@ -9,6 +9,12 @@ import (
 	"strconv"
 )
 
+var (
+	BuildVersion  = "0.0.0-dev"
+	BuildTime     = "unknown"
+	BuildPlatform = "unknown"
+)
+
 func ensurePosixOutputRunnable(args []string) {
 	if runtime.GOOS == "windows" {
 		return
