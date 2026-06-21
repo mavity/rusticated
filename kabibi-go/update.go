@@ -226,8 +226,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				if item, ok := curList.SelectedItem().(fileItem); ok {
 					if item.isDir {
-						newPath := filepath.Join(*curDir, item.name)
-						m.loadDir(p, newPath)
+						if item.name == ".." {
+							oldDir := *curDir
+							newPath := filepath.Dir(oldDir)
+							m.loadDir(p, newPath, filepath.Base(oldDir))
+						} else {
+							newPath := filepath.Join(*curDir, item.name)
+							m.loadDir(p, newPath, "..")
+						}
 						return m, nil
 					} else {
 						// Execute the file through the shell
