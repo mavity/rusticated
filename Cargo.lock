@@ -73,7 +73,7 @@ checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
 
 [[package]]
 name = "brot"
-version = "0.1.2"
+version = "0.5.0"
 dependencies = [
  "brotli-decompressor",
 ]
@@ -168,7 +168,7 @@ dependencies = [
 
 [[package]]
 name = "demo"
-version = "0.1.2"
+version = "0.5.0"
 
 [[package]]
 name = "deranged"
@@ -286,7 +286,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "kabibi"
-version = "0.1.2"
+version = "0.5.0"
 dependencies = [
  "ratatui",
 ]
@@ -318,7 +318,7 @@ dependencies = [
 
 [[package]]
 name = "loch"
-version = "0.1.2"
+version = "0.5.0"
 dependencies = [
  "ratatui",
 ]
@@ -450,7 +450,7 @@ checksum = "b50b8869d9fc858ce7266cce0194bd74df58b9d0e3f6df3a9fc8eb470d95c09d"
 
 [[package]]
 name = "rusticated"
-version = "0.1.2"
+version = "0.5.0"
 dependencies = [
  "ahash",
  "backtrace",
