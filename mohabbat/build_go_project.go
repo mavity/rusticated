@@ -133,8 +133,12 @@ func goBuild(ws, pkgDir string, s slot, buildDir string, verbose bool) error {
 	// a.out.exe to avoid aggressive Windows Defender scanning.
 	// Note: go build -o - is avoided here because on some Windows environments
 	// it incorrectly creates a literal file named "-" instead of streaming.
+	meta := GetBuildMetadata(ws)
+	ldFlags := fmt.Sprintf("-s -w -X main.BuildVersion=%s -X main.BuildTime=%s -X main.BuildPlatform=%s",
+		meta.Version, meta.Time, meta.Platform)
+
 	tmpOut := filepath.Join(goTmpDir, "build.dat")
-	args := []string{"build", "-trimpath", "-ldflags=-s -w", "-o", tmpOut, "."}
+	args := []string{"build", "-trimpath", "-ldflags=" + ldFlags, "-o", tmpOut, "."}
 	if verbose {
 		args = append(args, "-tags=verbose")
 	}

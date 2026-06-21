@@ -37,6 +37,9 @@ type PlatformInfo struct {
 	RusticatedName       string
 	RusticatedVersion    [4]uint16
 	RusticatedVersionStr string
+	BuildVersion         string
+	BuildTime            string
+	BuildPlatform        string
 }
 
 var (
@@ -61,7 +64,7 @@ func GetPlatformInfo() *PlatformInfo {
 	}
 
 	// Fetch raw bytes
-	var buf [512]byte
+	var buf [1024]byte
 	res := rusticated_get_platform_info(unsafe.Pointer(&buf[0]), uint32(len(buf)))
 	if res != 0 {
 		panic("syscall: rusticated_get_platform_info failed")
@@ -83,6 +86,9 @@ func GetPlatformInfo() *PlatformInfo {
 	pi.RusticatedName = stringFromBuf(buf[220:284])
 	pi.RusticatedVersion = [4]uint16{readU16(buf[284:286]), readU16(buf[286:288]), readU16(buf[288:290]), readU16(buf[290:292])}
 	pi.RusticatedVersionStr = stringFromBuf(buf[292:356])
+	pi.BuildVersion = stringFromBuf(buf[356:420])
+	pi.BuildTime = stringFromBuf(buf[420:484])
+	pi.BuildPlatform = stringFromBuf(buf[484:548])
 	platformData = pi
 
 	atomicStore(&platformOnce, 2)

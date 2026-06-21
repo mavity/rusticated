@@ -5,15 +5,41 @@ use std::tty::{stdin, stdout};
 
 std::main!(async_main());
 
+fn string_from_buf(buf: &[u8]) -> &str {
+    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    core::str::from_utf8(&buf[..len]).unwrap_or("<invalid>")
+}
+
 async fn async_main() {
     let mut out = stdout();
     let mut input = stdin();
 
     print_env_and_dir_diagnostics(&mut out).await;
 
-    println!("Let's read dir again!\n\n\n");
+    println!("Let's read dir again!\n");
 
     print_env_and_dir_diagnostics(&mut out).await;
+
+    // ── 0. Rusticated Platform Info ───────────────────────────────────────
+    let mut pi = std::abi::AbiPlatformInfo::default();
+    unsafe {
+        std::abi::imports::get_platform_info(
+            core::ptr::from_mut(&mut pi) as *mut u8,
+            core::mem::size_of::<std::abi::AbiPlatformInfo>() as u32,
+        );
+    }
+
+    // On WASM, println! might be a no-op if the executor isn't initialized for it.
+    // Use explicit write_all to ensure it shows up in the guest output.
+    let pi_msg = format!(
+        "Rusticated Version: {}\nBuild Version:      {}\nBuild Time:         {}\nBuild Platform:     {}\nRuntime OS:         {}\n\n",
+        string_from_buf(&pi.rusticated_version_str),
+        string_from_buf(&pi.build_version),
+        string_from_buf(&pi.build_time),
+        string_from_buf(&pi.build_platform),
+        string_from_buf(&pi.os_name)
+    );
+    write_all(&mut out, pi_msg.as_bytes()).await;
 
     write_all(
         &mut out,

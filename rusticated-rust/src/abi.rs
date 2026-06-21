@@ -87,6 +87,54 @@ pub struct AbiStat {
 /// rather than the target it points to.
 pub const STAT_FLAG_NOFOLLOW: u32 = 1;
 
+/// Platform information structure populated by the host.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AbiPlatformInfo {
+    /// Flags (bit 0: case sensitive)
+    pub flags: u32,
+    /// Path separator character.
+    pub path_sep: u8,
+    /// Path list separator character.
+    pub list_sep: u8,
+    /// Operating system kind (1=Windows, 2=Linux, 3=Darwin, 4=Bsd).
+    pub os_kind: u16,
+    /// Operating system version (4x u16).
+    pub os_version: [u16; 4],
+    /// CPU Architecture type (1=x86_64, 2=arm64).
+    pub cpu_type: u16,
+    /// CPU Biteness (e.g. 64).
+    pub cpu_bitness: u8,
+    /// padding
+    pub _reserved: u8,
+    /// OS name string (64 bytes).
+    pub os_name: [u8; 64],
+    /// WASM runtime category/platform name (64 bytes).
+    pub wasm_platform: [u8; 64],
+    /// WASM platform version.
+    pub wasm_version: [u16; 4],
+    /// WASM platform version string (64 bytes).
+    pub wasm_version_str: [u8; 64],
+    /// Rusticated name string (64 bytes).
+    pub rusticated_name: [u8; 64],
+    /// Rusticated version.
+    pub rusticated_version: [u16; 4],
+    /// Rusticated version string (64 bytes).
+    pub rusticated_version_str: [u8; 64],
+    /// Build version string (64 bytes).
+    pub build_version: [u8; 64],
+    /// Build time string (64 bytes).
+    pub build_time: [u8; 64],
+    /// Build platform string (64 bytes).
+    pub build_platform: [u8; 64],
+}
+
+impl Default for AbiPlatformInfo {
+    fn default() -> Self {
+        unsafe { core::mem::zeroed() }
+    }
+}
+
 /// Unknown filesystem object kind returned by `path_stat`.
 pub const STAT_KIND_UNKNOWN: u32 = 0;
 
@@ -203,5 +251,8 @@ pub mod imports {
 
         /// Fill buffer with random bytes.
         pub fn get_random(buffer_ptr: *mut u8, buffer_len: u32);
+
+        /// Get detailed host platform and build information.
+        pub fn get_platform_info(out_ptr: *mut u8, out_len: u32) -> u32;
     }
 }
