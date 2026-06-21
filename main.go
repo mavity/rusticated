@@ -34,6 +34,12 @@ func main() {
 		}
 
 		switch arg {
+		case "--version":
+			ws, err := mohabbat.ResolveWorkspace("")
+			mohabbat.Must(err)
+			meta := mohabbat.GetBuildMetadata(ws)
+			os.Stdout.WriteString(meta.Version + "\n")
+			os.Exit(0)
 		case "-v", "--verbose":
 			verbose = true
 			i++
