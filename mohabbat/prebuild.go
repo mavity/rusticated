@@ -535,6 +535,35 @@ func generateGoOverlay(ws, goroot string) error {
 		return fmt.Errorf("failed to write patched filepath/path_unix.go: %w", err)
 	}
 
+	// Algorithmic patch for src/runtime/os_wasm.go.
+	// The stock wasm runtime hardcodes _NSIG = 0 and stubs out the signal
+	// backend, which makes os/signal a no-op. We surgically (a) size the signal
+	// queue and (b) redirect the backend hooks to rusticated_sig* in the
+	// checked-in runtime/os_rusticated.go. The actual monitor logic lives in
+	// that file, not in these string patches.
+	if err := os.MkdirAll(filepath.Join(genDir, "runtime"), 0755); err != nil {
+		return fmt.Errorf("failed to create gen dir: %w", err)
+	}
+	osWasmSrc := filepath.Join(goroot, "src/runtime/os_wasm.go")
+	osWasmContent, err := os.ReadFile(osWasmSrc)
+	if err != nil {
+		return fmt.Errorf("failed to read src/runtime/os_wasm.go: %w", err)
+	}
+	osWasmStr := string(osWasmContent)
+	if !strings.Contains(osWasmStr, "const _NSIG = 0") {
+		return fmt.Errorf("could not find `const _NSIG = 0` in os_wasm.go")
+	}
+	osWasmStr = strings.Replace(osWasmStr, "const _NSIG = 0", "const _NSIG = 33", 1)
+	reSigStub := regexp.MustCompile(`(?m)^func sig(enable|disable|ignore)\(uint32\)\s*\{\}`)
+	if len(reSigStub.FindAllString(osWasmStr, -1)) != 3 {
+		return fmt.Errorf("could not find the three signal backend stubs in os_wasm.go")
+	}
+	osWasmStr = reSigStub.ReplaceAllString(osWasmStr, "func sig${1}(s uint32) { rusticated_sig${1}(s) }")
+	genOsWasm := filepath.Join(genDir, "runtime/os_wasm.go")
+	if err := os.WriteFile(genOsWasm, []byte(osWasmStr), 0644); err != nil {
+		return fmt.Errorf("failed to write patched os_wasm.go: %w", err)
+	}
+
 	replacements := [][2]string{
 		// runtime
 		{"src/runtime/lock_wasip1.go", canon(filepath.Join(overlayDir, "runtime/lock_rusticated.go"))},
@@ -542,6 +571,8 @@ func generateGoOverlay(ws, goroot string) error {
 		{"src/runtime/netpoll_wasip1.go", canon(filepath.Join(overlayDir, "runtime/netpoll_rusticated.go"))},
 		{"src/runtime/stubs_wasm.go", canon(filepath.Join(overlayDir, "runtime/stubs_rusticated.go"))},
 		{"src/runtime/rt0_wasip1_wasm.s", canon(filepath.Join(overlayDir, "runtime/rt0_wasip1_wasm.s"))},
+		// runtime signal backend (generated patch)
+		{"src/runtime/os_wasm.go", canon(genOsWasm)},
 		// syscall
 		{"src/syscall/fs_wasip1.go", canon(filepath.Join(overlayDir, "syscall/fs_rusticated.go"))},
 		{"src/syscall/syscall_wasip1.go", canon(filepath.Join(overlayDir, "syscall/syscall_rusticated.go"))},
@@ -593,4 +624,3 @@ func generateGoOverlay(ws, goroot string) error {
 	fmt.Printf("🍆  Wrote %s\n", overlayPath)
 	return nil
 }
-

@@ -88,6 +88,9 @@ func exit(code int32)
 //go:wasmimport env cancel
 func rusticated_cancel(overlappedPtr unsafe.Pointer)
 
+//go:wasmimport env signal_wait
+func rusticated_signal_wait(overlappedPtr unsafe.Pointer, signum uint32)
+
 //go:wasmimport env timer_set
 func rusticated_timer_set(overlappedPtr unsafe.Pointer, delayMs uint32)
 
@@ -225,4 +228,71 @@ func setNetpollTimer(delayMs uint32) {
 	netpollTimerOv.flags = 0
 	rusticated_timer_set(unsafe.Pointer(&netpollTimerOv), delayMs)
 	netpollTimerActive = true
+}
+
+// ── Signal delivery bridge ─────────────────────────────────────────────────
+//
+// The Go runtime's signal machinery (runtime/sigqueue.go) and the os/signal
+// package are retained unchanged. The stock wasm backend (runtime/os_wasm.go)
+// hardcodes _NSIG = 0 and stubs out sigenable/sigdisable/sigignore, which makes
+// os/signal a no-op. We supply that backend here: each enabled signal gets a
+// monitor goroutine that waits on the host signal_wait ABI and feeds arriving
+// signals into sigsend, the standard producer side of the Go signal queue.
+//
+// Memory for the overlapped structs is held in this package-level array so the
+// pointers handed to the host stay stable (globals are not moved by the GC).
+var sigMonitorCtx [_NSIG]overlappedContext
+var sigMonitorRunning [_NSIG]bool
+var sigMonitorAlive [_NSIG]bool
+
+// rusticated_sigenable is the backend for runtime.sigenable (called from
+// os/signal via signal_enable). It ensures a single monitor goroutine is
+// running for the signal.
+func rusticated_sigenable(s uint32) {
+	if s >= _NSIG {
+		return
+	}
+	sigMonitorRunning[s] = true
+	if !sigMonitorAlive[s] {
+		sigMonitorAlive[s] = true
+		go sigMonitor(s)
+	}
+}
+
+// rusticated_sigdisable is the backend for runtime.sigdisable. It asks the host
+// to drop the pending wait and then wakes the parked monitor so it can observe
+// the disable and stop re-arming.
+func rusticated_sigdisable(s uint32) {
+	if s >= _NSIG || !sigMonitorRunning[s] {
+		return
+	}
+	sigMonitorRunning[s] = false
+	ctx := &sigMonitorCtx[s]
+	rusticated_cancel(unsafe.Pointer(&ctx.o))
+	// Complete the overlapped ourselves: the host has dropped the waiter and
+	// will not write it again, so the parked monitor must be released here.
+	// resultExt is cleared so a racing re-enable that observes the wake treats
+	// it as signal 0 (SIGNONE), which sigsend ignores.
+	ctx.o.resultExt = 0
+	ctx.o.flags = 1
+}
+
+// rusticated_sigignore is the backend for runtime.sigignore. With no default
+// handlers on wasm, ignoring a signal is equivalent to no longer monitoring it.
+func rusticated_sigignore(s uint32) {
+	rusticated_sigdisable(s)
+}
+
+func sigMonitor(s uint32) {
+	ctx := &sigMonitorCtx[s]
+	for {
+		ctx.o.flags = 0
+		rusticated_signal_wait(unsafe.Pointer(&ctx.o), s)
+		awaitOverlapped_syscall(ctx)
+		if !sigMonitorRunning[s] {
+			sigMonitorAlive[s] = false
+			return
+		}
+		sigsend(uint32(ctx.o.resultExt))
+	}
 }
