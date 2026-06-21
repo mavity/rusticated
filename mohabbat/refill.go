@@ -16,7 +16,7 @@ import (
 // the current vegetable, decompresses the pool, builds a new payload for
 // projectDir, splices it in, recompresses, patches all meta structs, and
 // writes the result to outputPath without rebuilding the native launchers.
-func DoRefill(ws, projectDir, vegPath, outputPath string) error {
+func DoRefill(ws, projectDir, vegPath, outputPath string, verbose bool) error {
 	fmt.Printf("🍆  Refill: %s -> %s\n", projectDir, outputPath)
 
 	// 1. Read the vegetable file.
@@ -98,7 +98,7 @@ func DoRefill(ws, projectDir, vegPath, outputPath string) error {
 	// 5. Build new payload WASM for projectDir.
 	projectName := filepath.Base(projectDir)
 	wasmPath := filepath.Join(ws, "target", projectName+".wasm")
-	if err := buildProjectToWasm(ws, projectDir, wasmPath); err != nil {
+	if err := buildProjectToWasm(ws, projectDir, wasmPath, verbose); err != nil {
 		return fmt.Errorf("build payload: %w", err)
 	}
 	newPayload, err := os.ReadFile(wasmPath)
@@ -158,4 +158,3 @@ func DoRefill(ws, projectDir, vegPath, outputPath string) error {
 		outputPath, formatSize(int64(len(outData))))
 	return nil
 }
-

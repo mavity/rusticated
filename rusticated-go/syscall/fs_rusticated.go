@@ -375,7 +375,7 @@ func Open(path string, mode int, perm uint32) (int, error) {
 		return -1, EINVAL
 	}
 
-	// println("DEBUG: Open path", path)
+	debugPrintln("DEBUG: Open path", path)
 	h, err := path_open_ext(path, mode, perm)
 	if err != nil {
 		return -1, err
@@ -390,13 +390,13 @@ func Open(path string, mode int, perm uint32) (int, error) {
 
 // Openat resolves path relative to dirFd.
 func Openat(dirFd int, path string, openmode int, perm uint32) (int, error) {
-	// println("DEBUG: Openat dirFd", dirFd, "path", path)
+	debugPrintln("DEBUG: Openat dirFd", dirFd, "path", path)
 	if isAbs(path) || dirFd == -100 { // -100 is AT_FDCWD
 		return Open(path, openmode, perm)
 	}
 	if entry, ok := fdMap[int32(dirFd)]; ok && entry.path != "" {
 		full := joinPaths(entry.path, path)
-		// println("DEBUG: Openat joined", full)
+		debugPrintln("DEBUG: Openat joined", full)
 		return Open(full, openmode, perm)
 	}
 	return -1, ENOSYS

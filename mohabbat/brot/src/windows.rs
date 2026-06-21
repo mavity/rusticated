@@ -215,6 +215,7 @@ pub unsafe fn run() -> ! {
             }
         }
 
+        #[cfg(feature = "verbose")]
         crate::print_err("brot: spawning washmhost...\n");
 
         let mut startup_info: STARTUPINFOW = core::mem::zeroed();

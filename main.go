@@ -22,6 +22,7 @@ func main() {
 	projectDir := ""
 	outputPath := ""
 	runMode := false
+	verbose := false
 	var runArgs []string
 
 	for i := 0; i < len(rawArgs); {
@@ -33,6 +34,9 @@ func main() {
 		}
 
 		switch arg {
+		case "-v", "--verbose":
+			verbose = true
+			i++
 		case "-r":
 			runMode = true
 			runArgs = rawArgs[i+1:]
@@ -70,15 +74,16 @@ func main() {
 		if projectDir == "" {
 			projectDir = "."
 		}
-		mohabbat.Must(mohabbat.ModeDevRun(ws, projectDir, runArgs))
+		mohabbat.Must(mohabbat.ModeDevRun(ws, projectDir, runArgs, verbose))
 	case projectDir != "" && outputPath != "" && inVeg:
 		// Mode 2: juice bottle refill (running as WASM brain inside a vegetable)
-		mohabbat.Must(mohabbat.DoRefill(ws, projectDir, vegPath, outputPath))
+		// Refill mode logic for verbose is TBD but we can pass it if needed.
+		mohabbat.Must(mohabbat.DoRefill(ws, projectDir, vegPath, outputPath, verbose))
 	case projectDir != "" && outputPath != "":
 		// Mode 3: native fresh assembly with arbitrary payload
-		mohabbat.Must(mohabbat.ModePackage(ws, projectDir, outputPath))
+		mohabbat.Must(mohabbat.ModePackage(ws, projectDir, outputPath, verbose))
 	default:
 		// Mode 1: full build pipeline
-		mohabbat.Must(mohabbat.ModeBuild(ws))
+		mohabbat.Must(mohabbat.ModeBuild(ws, verbose))
 	}
 }
