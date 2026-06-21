@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"os"
+	"os/user"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -38,7 +39,6 @@ func initialModel() model {
 	ti.Prompt = "AI> "
 
 	si := textinput.New()
-	si.Prompt = "$ "
 	si.Focus()
 
 	vp := viewport.New(0, 0)
@@ -73,8 +73,64 @@ func initialModel() model {
 	}
 	m.loadDir(leftPane, cwd, "")
 	m.loadDir(rightPane, cwd, "")
+	m.refreshPrompt()
 	return m
 }
+
+func (m *model) refreshPrompt() {
+	if m.runner == nil {
+		m.shellInput.Prompt = "$ "
+		return
+	}
+
+	dir := m.runner.Dir
+	if dir == "" {
+		dir, _ = os.Getwd()
+	}
+
+	var ps1 string
+	if v, ok := m.runner.Vars["PS1"]; ok {
+		ps1 = v.Str
+	} else if m.runner.Env != nil {
+		if ev := m.runner.Env.Get("PS1"); ev.IsSet() {
+			ps1 = ev.Str
+		}
+	}
+
+	if ps1 == "" {
+		ps1 = os.Getenv("PS1")
+	}
+
+	if ps1 == "" {
+		base := filepath.Base(dir)
+		if dir == "/" || dir == "\\" {
+			base = dir
+		}
+		m.shellInput.Prompt = base + " $ "
+		return
+	}
+
+	res := ps1
+	res = strings.ReplaceAll(res, "\\w", dir)
+	base := filepath.Base(dir)
+	if dir == "/" || dir == "\\" {
+		base = dir
+	}
+	res = strings.ReplaceAll(res, "\\W", base)
+
+	uName := "user"
+	if u, err := user.Current(); err == nil {
+		uName = u.Username
+		if idx := strings.LastIndex(uName, "\\"); idx >= 0 {
+			uName = uName[idx+1:]
+		}
+	}
+	res = strings.ReplaceAll(res, "\\u", uName)
+	res = strings.ReplaceAll(res, "\\$", "$")
+
+	m.shellInput.Prompt = res
+}
+
 
 func (m *model) loadDir(p pane, path string, focusName string) {
 	path = filepath.Clean(path)

@@ -122,13 +122,28 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case shellResultMsg:
 		var plumeLines []string
-		plumeLines = append(plumeLines, "$ "+msg.input)
+		plumeLines = append(plumeLines, m.shellInput.Prompt+msg.input)
 		if len(msg.output) > 0 {
 			plumeLines = append(plumeLines, msg.output...)
 		}
 		if msg.err != nil {
 			plumeLines = append(plumeLines, "Error: "+msg.err.Error())
 		}
+
+		// Keep active panel in sync with shell directory
+		if m.runner != nil && m.activePane != chatPane {
+			var curDir string
+			if m.activePane == leftPane {
+				curDir = m.leftDir
+			} else {
+				curDir = m.rightDir
+			}
+			if m.runner.Dir != curDir {
+				m.loadDir(m.activePane, m.runner.Dir, "")
+			}
+		}
+		m.refreshPrompt()
+
 		return m, m.AddPlume(plumeLines...)
 
 	case tea.WindowSizeMsg:
@@ -148,6 +163,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.chatOpen = false
 			m.activePane = leftPane
+			if m.runner != nil {
+				m.runner.Dir = m.leftDir
+			}
+			m.refreshPrompt()
 			m.chatInput.Blur()
 			m.shellInput.Focus()
 			m.recalculateLayout()
@@ -184,6 +203,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.activePane = leftPane
 			}
+			if m.runner != nil {
+				if m.activePane == leftPane {
+					m.runner.Dir = m.leftDir
+				} else {
+					m.runner.Dir = m.rightDir
+				}
+			}
+			m.refreshPrompt()
 			m.updateDelegates()
 		case "enter":
 			if m.chatOpen {
@@ -230,10 +257,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							oldDir := *curDir
 							newPath := filepath.Dir(oldDir)
 							m.loadDir(p, newPath, filepath.Base(oldDir))
+							if m.runner != nil {
+								m.runner.Dir = newPath
+							}
 						} else {
 							newPath := filepath.Join(*curDir, item.name)
 							m.loadDir(p, newPath, "..")
+							if m.runner != nil {
+								m.runner.Dir = newPath
+							}
 						}
+						m.refreshPrompt()
 						return m, nil
 					} else {
 						// Execute the file through the shell
