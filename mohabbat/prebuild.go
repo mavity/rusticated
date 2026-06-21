@@ -428,6 +428,12 @@ func generateGoOverlay(ws, goroot string) error {
 	if err := os.MkdirAll(filepath.Join(genDir, "path/filepath"), 0755); err != nil {
 		return fmt.Errorf("failed to create gen dir: %w", err)
 	}
+
+	// Create a dummy go.mod to prevent `go test ./...` from parsing patched overlay stdlib code
+	if err := os.WriteFile(filepath.Join(genDir, "go.mod"), []byte("module ignore_target\n"), 0644); err != nil {
+		return fmt.Errorf("failed to write dummy go.mod: %w", err)
+	}
+
 	pathGoSrc := filepath.Join(goroot, "src/path/filepath/path.go")
 	pathGoContent, err := os.ReadFile(pathGoSrc)
 	if err != nil {
