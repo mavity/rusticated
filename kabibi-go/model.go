@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"sort"
@@ -11,8 +12,6 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"mvdan.cc/sh/moreinterp/coreutils"
-	"mvdan.cc/sh/v3/interp"
 )
 
 func initialModel() model {
@@ -45,11 +44,7 @@ func initialModel() model {
 	vp := viewport.New(0, 0)
 
 	sw := &SwitchableWriter{}
-	r, _ := interp.New(
-		interp.Dir(cwd),
-		interp.StdIO(nil, sw, sw),
-		interp.ExecHandler(coreutils.ExecHandler(interp.DefaultExecHandler(0))),
-	)
+	r, _ := createRunner(context.Background(), nil, sw, sw, cwd, nil)
 
 	m := model{
 		leftList:   li,
