@@ -75,20 +75,20 @@ func notetsleepg(n *note, ns int64) bool {
 		throw("notetsleepg on g0")
 	}
 
+	// Calculate deadlines exactly as before...
 	deadline := nanotime() + ns
-	for {
-		if n.key != 0 {
-			return true
-		}
+
+	for n.key == 0 {
 		if ns >= 0 && nanotime() >= deadline {
 			return false
 		}
-		// Yield through the Go scheduler so other goroutines can run.
-		// pause() must NOT be used here: it bypasses the scheduler and
-		// causes wasm_pc_f_loop to directly resume this goroutine on
-		// re-entry, starving all _Grunnable goroutines indefinitely.
-		Gosched()
+
+		// Cleanly park the goroutine, setting its status to _Gwaiting.
+		// This completely empties it from the active run queues, allowing 
+		// beforeIdle to cleanly fire and pass execution control back to the host.
+		gopark(nil, nil, waitReasonSleep, traceBlockSleep, 1)
 	}
+	return true
 }
 
 //go:yeswritebarrierrec
