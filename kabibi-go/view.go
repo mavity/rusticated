@@ -29,11 +29,22 @@ func expandTabs(s string, tabWidth int) string {
 }
 
 func dirTitleName(path string) string {
+	path = filepath.Clean(path)
 	trimmed := strings.TrimRight(path, "/\\")
-	if trimmed == "" {
+	if trimmed == "" || trimmed == "." {
+		// Handle root or relative current
+		if path == "" || path == "." {
+			return " . "
+		}
 		return " / "
 	}
-	base := filepath.Base(trimmed)
+	// On Windows, filepath.Clean("C:\\") is "C:\\"
+	// filepath.Base("C:\\") is "\"
+	base := filepath.Base(path)
+	if base == "\\" || base == "/" {
+		// If it's a root, show the whole thing or just the drive
+		return " " + path + " "
+	}
 	return " " + base + " "
 }
 

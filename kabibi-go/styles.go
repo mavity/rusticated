@@ -8,7 +8,7 @@ var (
 	colorCyan     = lipgloss.Color("6")       // Cyan
 	colorYellow   = lipgloss.Color("#FFd700") // Bright Yellow highlight
 	colorNavy     = lipgloss.Color("#000080") // Navy for selection
-	colorWhite    = lipgloss.Color("7")       // White
+	colorWhite    = lipgloss.Color("15")      // Bright White
 	colorBlack    = lipgloss.Color("#000000") // True Black
 	colorDarkGray = lipgloss.Color("8")       // Dark Gray (Bright Black)
 	colorGray     = lipgloss.Color("242")     // Gray
