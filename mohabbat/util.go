@@ -18,7 +18,7 @@ type BuildMetadata struct {
 
 func GetBuildMetadata(ws string) BuildMetadata {
 	version := "0.0.0-dev"
-	cargoPath := filepath.Join(ws, "rusticated-rust", "Cargo.toml")
+	cargoPath := filepath.Join(ws, "Cargo.toml")
 	if data, err := os.ReadFile(cargoPath); err == nil {
 		re := regexp.MustCompile(`(?m)^version\s*=\s*"([^"]+)"`)
 		if m := re.FindStringSubmatch(string(data)); len(m) > 1 {
