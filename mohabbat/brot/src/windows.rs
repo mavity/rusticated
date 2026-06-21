@@ -240,6 +240,7 @@ pub unsafe fn run() -> ! {
 
         let mut exit_code: u32 = 1;
         if res != 0 {
+            #[cfg(feature = "verbose")]
             crate::print_err("brot: washmhost spawned, waiting...\n");
             WaitForSingleObject(process_info.hProcess, INFINITE);
             GetExitCodeProcess(process_info.hProcess, &mut exit_code);
