@@ -34,7 +34,7 @@ func resolveGoroot(ws string) (string, string, error) {
 
 	// Determine go version from go.mod — needed for SDK lookup.
 	ver := ""
-	goModPath := filepath.Join(ws, "mohabbat", "go.mod")
+	goModPath := filepath.Join(ws, "go.mod")
 	if f, err := os.Open(goModPath); err == nil {
 		scanner := bufio.NewScanner(f)
 		for scanner.Scan() {
