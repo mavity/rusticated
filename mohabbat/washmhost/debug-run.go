@@ -30,14 +30,17 @@ func main() {
 
 	workspaceRoot := wd
 	// Minimal check to see if we are likely in the right place.
-	if _, err := os.Stat(filepath.Join(workspaceRoot, "washmhost")); err != nil {
-		// Try parent if we are inside washmhost
-		if filepath.Base(workspaceRoot) == "washmhost" {
-			workspaceRoot = filepath.Dir(workspaceRoot)
-		} else {
-			fmt.Fprintf(os.Stderr, "Error: Could not find washmhost in current directory (%s). Please run from the workspace root.\n", wd)
+	// We look for sysroot.toml or Cargo.toml to identify the repository root.
+	for i := 0; i < 6; i++ {
+		if _, err := os.Stat(filepath.Join(workspaceRoot, "sysroot.toml")); err == nil {
+			break
+		}
+		parent := filepath.Dir(workspaceRoot)
+		if parent == workspaceRoot {
+			fmt.Fprintf(os.Stderr, "Error: Could not find workspace root (sysroot.toml not found) starting from %s\n", wd)
 			os.Exit(1)
 		}
+		workspaceRoot = parent
 	}
 
 	overlayPath := filepath.Join(workspaceRoot, "target", "overlay.json")
@@ -52,9 +55,9 @@ func main() {
 
 	fmt.Printf("🍆 Building Go package: %s -> %s\n", projectDir, outputWasm)
 
-	// Resolve specific Go binary for the required version from mohabbat/go.mod
+	// Resolve specific Go binary for the required version from go.mod
 	goBin := "go"
-	goModPath := filepath.Join(workspaceRoot, "mohabbat", "go.mod")
+	goModPath := filepath.Join(workspaceRoot, "go.mod")
 	if f, err := os.Open(goModPath); err == nil {
 		scanner := bufio.NewScanner(f)
 		for scanner.Scan() {
