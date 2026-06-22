@@ -6,6 +6,9 @@
     <title>Rusticated README</title>
     <!-- Load Marked.js to parse the Markdown -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
     <style>
         body {
             margin: 0;
@@ -13,25 +16,76 @@
             background-color: #fcfcfc;
             color: #333;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            /* Gentle emptiness at the start */
             opacity: 0;
             transition: opacity 1.2s ease-in-out;
             display: flex;
-            justify-content: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        .main-container {
+            display: flex;
+            width: 100%;
+            height: 100%;
+            flex-direction: row;
+        }
+
+        .pane {
+            flex: 1;
+            height: 100%;
+            box-sizing: border-box;
+            overflow: hidden;
+        }
+
+        .readme-pane {
+            padding: 40px;
+            background: #ffffff;
+            overflow-y: auto;
         }
 
         .container {
             max-width: 820px;
-            width: 100%;
-            margin: 40px 20px;
-            padding: 40px;
-            background: #ffffff;
-            box-shadow: 0 8px 24px rgba(0,0,0,0.04);
-            border-radius: 8px;
+            margin: 0 auto;
             line-height: 1.6;
-            box-sizing: border-box;
         }
 
+        .terminal-pane {
+            background: #000;
+            display: flex;
+            flex-direction: column;
+            border-left: 1px solid #dfe2e5;
+        }
+
+        #terminal-container {
+            flex: 1;
+            width: 100%;
+            height: 100%;
+        }
+
+        @media (max-width: 1024px) {
+            body {
+                overflow: auto;
+                height: auto;
+            }
+            .main-container {
+                flex-direction: column;
+            }
+            .pane {
+                height: auto;
+                flex: none;
+            }
+            .terminal-pane {
+                height: 50vh;
+                order: -1; /* Terminal on top in mobile */
+                position: sticky;
+                top: 0;
+                z-index: 100;
+            }
+            .readme-pane {
+                overflow-y: visible;
+            }
+        }
+        
         h1, h2, h3 { 
             border-bottom: 1px solid #eaecef; 
             padding-bottom: 0.3em;
@@ -101,8 +155,15 @@
     </style>
 </head>
 <body id="main-body">
-    <div id="content" class="container">
-        <!-- Rendered markdown goes here -->
+    <div class="main-container">
+        <div class="pane readme-pane">
+            <div id="content" class="container">
+                <!-- Rendered markdown goes here -->
+            </div>
+        </div>
+        <div class="pane terminal-pane">
+            <div id="terminal-container"></div>
+        </div>
     </div>
 
     <!-- 
@@ -112,23 +173,630 @@
     <script src="README.md"></script>
 
     <script>
+        const encoder = new TextEncoder();
+        const decoder = new TextDecoder();
+
+        // --- IndexedDB Mock Filesystem (Synchronous in-memory with background persistence) ---
+        class IndexedDBFS {
+            constructor(dbName = 'RusticatedFS') {
+                this.dbName = dbName;
+                this.db = null;
+                this.entries = new Map();
+            }
+
+            async init() {
+                this.db = await new Promise((resolve, reject) => {
+                    const request = indexedDB.open(this.dbName, 1);
+                    request.onupgradeneeded = (e) => {
+                        const db = e.target.result;
+                        if (!db.objectStoreNames.contains('files')) {
+                            db.createObjectStore('files', { keyPath: 'path' });
+                        }
+                    };
+                    request.onsuccess = (e) => resolve(e.target.result);
+                    request.onerror = (e) => reject(e.target.error);
+                });
+
+                // Load all entries into memory
+                const allEntries = await new Promise((resolve, reject) => {
+                    const tx = this.db.transaction('files', 'readonly');
+                    const store = tx.objectStore('files');
+                    const req = store.getAll();
+                    req.onsuccess = () => resolve(req.result);
+                    req.onerror = () => reject(req.target.error);
+                });
+
+                for (const e of allEntries) {
+                    this.entries.set(e.path, e);
+                }
+            }
+
+            seed() {
+                const now = Date.now();
+                const initialFiles = [
+                    { path: '/', type: 'dir', mtime: now },
+                    { path: '/bin', type: 'dir', mtime: now },
+                    { path: '/etc', type: 'dir', mtime: now },
+                    { path: '/etc/hosts', type: 'file', content: encoder.encode('127.0.0.1 localhost\n'), mtime: now },
+                    { path: '/etc/hostname', type: 'file', content: encoder.encode('rusticated-wasm\n'), mtime: now },
+                    { path: '/etc/passwd', type: 'file', content: encoder.encode('root:x:0:0:root:/root:/bin/sh\nuser:x:1000:1000:user:/home/user:/bin/sh\n'), mtime: now },
+                    { path: '/etc/group', type: 'file', content: encoder.encode('root:x:0:\nuser:x:1000:\n'), mtime: now },
+                    { path: '/etc/motd', type: 'file', content: encoder.encode('Welcome to the Rusticated WASM environment!\nToday is a good day for hacking.\nType \'ls\' to see files and \'cat /etc/motd\' to read them.\n'), mtime: now },
+                    { path: '/home', type: 'dir', mtime: now },
+                    { path: '/home/user', type: 'dir', mtime: now },
+                    { path: '/home/user/.bashrc', type: 'file', content: encoder.encode('alias ls="ls --color=auto"\nalias ll="ls -la"\n'), mtime: now },
+                    { path: '/home/user/test.txt', type: 'file', content: encoder.encode('This is a test file in IndexedDB.\nIt persists across reloads!\n'), mtime: now },
+                    { path: '/usr', type: 'dir', mtime: now },
+                    { path: '/usr/bin', type: 'dir', mtime: now },
+                    { path: '/usr/lib', type: 'dir', mtime: now },
+                    { path: '/usr/local', type: 'dir', mtime: now },
+                    { path: '/var', type: 'dir', mtime: now },
+                    { path: '/var/log', type: 'dir', mtime: now },
+                    { path: '/var/tmp', type: 'dir', mtime: now },
+                    { path: '/tmp', type: 'dir', mtime: now },
+                    { path: '/dev', type: 'dir', mtime: now },
+                    { path: '/README.md', type: 'file', content: encoder.encode('# Rusticated WASM Shell\n\nWelcome to kabibi-go running in the browser.\nThis environment features a virtualized file system backed by IndexedDB.\n\nEnjoy your stay!\n'), mtime: now }
+                ];
+
+                for (const f of initialFiles) {
+                    if (f.content) f.size = f.content.length;
+                    else f.size = 0;
+                    if (!this.entries.has(f.path)) {
+                        console.log(`Seeding: ${f.path}`);
+                        this.entries.set(f.path, f);
+                        this.persistEntry(f);
+                    }
+                }
+            }
+
+            getEntrySync(path) {
+                // Normalize path
+                if (path === "." || path === "" || path === "./") path = "/";
+                if (!path.startsWith("/")) path = "/" + path;
+                if (path.length > 1 && path.endsWith('/')) {
+                    path = path.substring(0, path.length - 1);
+                }
+                return this.entries.get(path);
+            }
+
+            putEntrySync(entry) {
+                entry.mtime = Date.now();
+                this.entries.set(entry.path, entry);
+                this.persistEntry(entry);
+            }
+
+            persistEntry(entry) {
+                const tx = this.db.transaction('files', 'readwrite');
+                const store = tx.objectStore('files');
+                store.put(entry);
+            }
+
+            readdirSync(dirPath) {
+                if (dirPath.length > 1 && dirPath.endsWith('/')) {
+                    dirPath = dirPath.substring(0, dirPath.length - 1);
+                }
+                const prefix = dirPath === '/' ? '/' : dirPath + '/';
+                const results = [];
+                
+                // Add virtual dot entries for compatibility
+                results.push({ path: dirPath + (dirPath === '/' ? '.' : '/.'), type: 'dir' });
+                results.push({ path: (dirPath === '/' ? '/..' : dirPath.substring(0, dirPath.lastIndexOf('/')) || '/'), type: 'dir', isVirtualDotDot: true });
+
+                for (const [path, entry] of this.entries.entries()) {
+                    if (path === dirPath) continue;
+                    if (path.startsWith(prefix)) {
+                        const relative = path.substring(prefix.length);
+                        if (relative.length > 0 && !relative.includes('/')) {
+                            results.push(entry);
+                        }
+                    }
+                }
+                
+                return results.sort((a, b) => {
+                    const na = a.isVirtualDotDot ? '..' : (a.path.split('/').pop() || '.');
+                    const nb = b.isVirtualDotDot ? '..' : (b.path.split('/').pop() || '.');
+                    if (na === '.') return -1;
+                    if (nb === '.') return 1;
+                    if (na === '..') return nb === '.' ? 1 : -1;
+                    if (nb === '..') return na === '.' ? -1 : 1;
+                    return na.localeCompare(nb);
+                });
+            }
+        }
+
+        // --- WASM Host Implementation ---
+        async function initTerminalAndWasm() {
+            console.log("initTerminalAndWasm START");
+            const term = new Terminal({
+                cursorBlink: true,
+                allowProposedApi: true
+            });
+            const fitAddon = new FitAddon.FitAddon();
+            term.loadAddon(fitAddon);
+            window.term = term;
+
+            term.open(document.getElementById('terminal-container'));
+            fitAddon.fit();
+            window.addEventListener('resize', () => {
+                fitAddon.fit();
+                if (typeof hostState !== 'undefined' && hostState.triggerSignal) {
+                    hostState.triggerSignal(28); // SIGWINCH
+                }
+            });
+
+            term.write('Connecting to kabibi-go WASM...\r\n');
+
+            // Refactored host state
+            const fs = new IndexedDBFS();
+            await fs.init();
+            await fs.seed();
+
+            const hostState = {
+                memory: null,
+                stdinBuffer: [],
+                pendingReads: [],
+                pendingSignals: [],
+                handles: new Map([
+                    [0n, { type: 'stdin' }],
+                    [1n, { type: 'stdout' }],
+                    [2n, { type: 'stderr' }]
+                ]),
+                nextHandle: 3n,
+                
+                write: function(ovPtr, handle, ptr, len) {
+                    const view = new DataView(this.memory.buffer);
+                    ptr = Number(ptr);
+                    len = Number(len);
+                    ovPtr = Number(ovPtr);
+                    handle = BigInt(handle);
+                    
+                    const h = this.handles.get(handle);
+                    if (h && (h.type === 'stdout' || h.type === 'stderr' || h.type === 'tty')) {
+                        if (len > 0) {
+                            const buf = new Uint8Array(this.memory.buffer, ptr, len);
+                            console.log("TERMINAL WRITE:", decoder.decode(buf));
+                            try {
+                                term.write(buf);
+                            } catch (e) {
+                                console.warn("xterm.write error:", e);
+                            }
+                        }
+                    } else if (h && h.type === 'file') {
+                        const buf = new Uint8Array(this.memory.buffer, ptr, len);
+                        const newContent = new Uint8Array(h.entry.content.length + len);
+                        newContent.set(h.entry.content);
+                        newContent.set(buf, h.entry.content.length);
+                        h.entry.content = newContent;
+                        fs.putEntrySync(h.entry);
+                    }
+                    
+                    // Write overlapped result
+                    view.setUint32(ovPtr, 1, true); // done
+                    view.setUint32(ovPtr + 4, 0, true); // errorCode = 0
+                    view.setBigUint64(ovPtr + 8, 0n, true); // continued
+                    view.setBigUint64(ovPtr + 16, BigInt(len), true); // resultExt = nwritten
+                    return 0;
+                },
+                read: function(ovPtr, handle, ptr, len) {
+                    ovPtr = Number(ovPtr);
+                    ptr = Number(ptr);
+                    len = Number(len);
+                    handle = BigInt(handle);
+                    
+                    const h = this.handles.get(handle);
+                    if (h && (h.type === 'stdin' || h.type === 'tty')) {
+                        if (this.stdinBuffer.length > 0) {
+                            const toRead = Math.min(len, this.stdinBuffer.length);
+                            const data = this.stdinBuffer.splice(0, toRead);
+                            const buf = new Uint8Array(this.memory.buffer, ptr, toRead);
+                            buf.set(data);
+
+                            const view = new DataView(this.memory.buffer);
+                            view.setUint32(ovPtr, 1, true); // done
+                            view.setUint32(ovPtr + 4, 0, true); // errorCode = 0
+                            view.setBigUint64(ovPtr + 8, 0n, true); // continued
+                            view.setBigUint64(ovPtr + 16, BigInt(toRead), true); // resultExt = nread
+                            return 0;
+                        }
+                        this.pendingReads.push({ ovPtr, ptr, len });
+                        return 0;
+                    } else if (h && h.type === 'file') {
+                        const available = h.entry.content.length - h.offset;
+                        const toRead = Math.min(len, available);
+                        if (toRead > 0) {
+                            const buf = new Uint8Array(this.memory.buffer, ptr, toRead);
+                            buf.set(h.entry.content.subarray(h.offset, h.offset + toRead));
+                            h.offset += toRead;
+                        }
+                        const view = new DataView(this.memory.buffer);
+                        view.setUint32(ovPtr, 1, true); // done
+                        view.setUint32(ovPtr + 4, 0, true); // errorCode = 0
+                        view.setBigUint64(ovPtr + 8, 0n, true); // continued
+                        view.setBigUint64(ovPtr + 16, BigInt(toRead), true); // resultExt = nread
+                        return 0;
+                    }
+                    return 0;
+                },
+                pushStdin: function(data) {
+                    if (typeof data === 'string') {
+                        const encoded = encoder.encode(data);
+                        this.stdinBuffer.push(...encoded);
+                    } else {
+                        this.stdinBuffer.push(...data);
+                    }
+                    this.processPendingReads();
+                },
+                processPendingReads: function() {
+                    if (!this.memory) return;
+                    const view = new DataView(this.memory.buffer);
+                    while (this.pendingReads.length > 0 && this.stdinBuffer.length > 0) {
+                        const { ovPtr, ptr, len } = this.pendingReads.shift();
+                        const toRead = Math.min(len, this.stdinBuffer.length);
+                        const data = this.stdinBuffer.splice(0, toRead);
+                        const buf = new Uint8Array(this.memory.buffer, ptr, toRead);
+                        buf.set(data);
+
+                        view.setUint32(ovPtr, 1, true); // done
+                        view.setUint32(ovPtr + 4, 0, true); // errorCode = 0
+                        view.setBigUint64(ovPtr + 8, 0n, true); // continued
+                        view.setBigUint64(ovPtr + 16, BigInt(toRead), true); // resultExt = nread
+                    }
+                },
+                triggerSignal: function(signum) {
+                    if (!this.memory) return;
+                    const view = new DataView(this.memory.buffer);
+                    const remaining = [];
+                    for (const s of this.pendingSignals) {
+                        if (s.signum === signum || s.signum === 0) {
+                            view.setUint32(s.ovPtr, 1, true);
+                            view.setUint32(s.ovPtr + 4, 0, true);
+                            view.setBigUint64(s.ovPtr + 8, 0n, true);
+                            view.setBigUint64(s.ovPtr + 16, BigInt(signum), true);
+                        } else {
+                            remaining.push(s);
+                        }
+                    }
+                    this.pendingSignals = remaining;
+                }
+            };
+            window.hostState = hostState;
+
+            term.onData(data => hostState.pushStdin(data));
+
+            // Define the "env" module expected by rusticated/washmhost guest binaries
+            const env = {
+                get_args: (ptr, len) => {
+                    const args = ["kabibi-go"];
+                    let totalLen = 0;
+                    const encoded = args.map(a => {
+                        const e = encoder.encode(a + "\0");
+                        totalLen += e.length;
+                        return e;
+                    });
+                    
+                    if (ptr !== 0 && len >= totalLen) {
+                        let offset = Number(ptr);
+                        for (const e of encoded) {
+                            const buf = new Uint8Array(hostState.memory.buffer, offset, e.length);
+                            buf.set(e);
+                            offset += e.length;
+                        }
+                    }
+                    return (BigInt(args.length) << 32n) | BigInt(totalLen);
+                },
+                get_env: (ptr, len) => {
+                    const envVars = ["TERM=xterm-256color", "COLORTERM=truecolor", "PATH=/bin", "HOME=/home/user"];
+                    let totalLen = 0;
+                    const encoded = envVars.map(v => {
+                        const e = encoder.encode(v + "\0");
+                        totalLen += e.length;
+                        return e;
+                    });
+                    
+                    if (ptr !== 0 && len >= totalLen) {
+                        let offset = Number(ptr);
+                        for (const e of encoded) {
+                            const buf = new Uint8Array(hostState.memory.buffer, offset, e.length);
+                            buf.set(e);
+                            offset += e.length;
+                        }
+                    }
+                    return (BigInt(envVars.length) << 32n) | BigInt(totalLen);
+                },
+                get_cwd: (buf_ptr, buf_len) => {
+                    const cwd = "/";
+                    const enc = encoder.encode(cwd + "\0");
+                    if (buf_ptr !== 0) {
+                        const buf = new Uint8Array(hostState.memory.buffer, buf_ptr, Math.min(enc.length, buf_len));
+                        buf.set(enc);
+                    }
+                    return BigInt(enc.length);
+                },
+                set_cwd: (ptr, len) => 0,
+                get_random: (ptr, len) => {
+                    const buf = new Uint8Array(hostState.memory.buffer, Number(ptr), Number(len));
+                    crypto.getRandomValues(buf);
+                },
+                get_time: () => BigInt(Date.now()) * 1000000n,
+                host_panic: (ptr, len) => {
+                    const buf = new Uint8Array(hostState.memory.buffer, Number(ptr), Number(len));
+                    const msg = decoder.decode(buf);
+                    console.error("HOST PANIC:", msg);
+                    term.write(`\r\n\x1b[31mHOST PANIC: ${msg}\x1b[0m\r\n`);
+                    throw new Error("WASM Panicked");
+                },
+                timer_set: (ovPtr, delayMs) => {
+                    const view = new DataView(hostState.memory.buffer);
+                    ovPtr = Number(ovPtr);
+                    setTimeout(() => {
+                        view.setUint32(ovPtr, 1, true); // done
+                        view.setUint32(ovPtr + 4, 0, true); // errorCode = 0
+                    }, Number(delayMs));
+                },
+                read: (ovPtr, handle, ptr, len) => hostState.read(ovPtr, handle, ptr, len),
+                write: (ovPtr, handle, ptr, len) => hostState.write(ovPtr, handle, ptr, len),
+                handle_close: (handle) => {
+                    hostState.handles.delete(BigInt(handle));
+                },
+                path_open: (ovPtr, pathPtr, pathLen, flags) => {
+                    const path = decoder.decode(new Uint8Array(hostState.memory.buffer, Number(pathPtr), Number(pathLen)));
+                    console.log("PATH_OPEN:", path, flags);
+                    const entry = fs.getEntrySync(path);
+                    ovPtr = Number(ovPtr);
+                    const view = new DataView(hostState.memory.buffer);
+                    const oflags = Number(flags);
+                    
+                    if (path === "/dev/tty" || path === "CONIN$" || path === "CONOUT$") {
+                        const handle = hostState.nextHandle++;
+                        hostState.handles.set(handle, { type: 'tty', entry: { path: '/dev/tty', type: 'file' }, offset: 0 });
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 0, true);
+                        view.setBigUint64(ovPtr + 16, handle, true);
+                        return 0;
+                    }
+
+                    if (!entry) {
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 44, true); // ENOENT
+                        return 0;
+                    }
+
+                    if ((oflags & 0x01) && entry) { // OFLAG_CREATE (simplified check)
+                        // In a real FS we'd handle create here, but for now we just open existing
+                    }
+                    if ((oflags & 0x02) && entry.type !== 'dir') { // OFLAG_DIRECTORY
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 54, true); // ENOTDIR
+                        return 0;
+                    }
+                    
+                    const handle = hostState.nextHandle++;
+                    hostState.handles.set(handle, { 
+                        type: entry.type === 'dir' ? 'dir' : 'file', 
+                        entry, 
+                        offset: 0,
+                        dirOffset: 0
+                    });
+                    
+                    view.setUint32(ovPtr, 1, true);
+                    view.setUint32(ovPtr + 4, 0, true);
+                    view.setBigUint64(ovPtr + 16, handle, true);
+                    return 0;
+                },
+                dir_read: (ovPtr, handle, bufPtr, bufLen) => {
+                    handle = BigInt(handle);
+                    ovPtr = Number(ovPtr);
+                    bufPtr = Number(bufPtr);
+                    bufLen = Number(bufLen);
+                    console.log("DIR_READ:", { handle, bufLen });
+                    const view = new DataView(hostState.memory.buffer);
+                    const h = hostState.handles.get(handle);
+
+                    if (!h || h.type !== 'dir') {
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 20, true); // ENOTDIR
+                        return 0;
+                    }
+
+                    const entries = fs.readdirSync(h.entry.path);
+                    let currentOffset = bufPtr;
+                    let bytesWritten = 0;
+                    
+                    while (h.dirOffset < entries.length) {
+                        const e = entries[h.dirOffset];
+                        const name = e.isVirtualDotDot ? '..' : (e.path.split('/').pop() || '.');
+                        const nameEnc = encoder.encode(name);
+                        const totalSize = 1 + nameEnc.length + 1; // [kind][name][0]
+                        
+                        if (bytesWritten + totalSize > bufLen) {
+                            break; // No more room in this buffer
+                        }
+                        
+                        const out = new Uint8Array(hostState.memory.buffer, currentOffset, totalSize);
+                        out[0] = e.type === 'dir' ? 2 : 1; // 1: File, 2: Dir
+                        out.set(nameEnc, 1); // name
+                        out[1 + nameEnc.length] = 0; // NUL
+                        
+                        currentOffset += totalSize;
+                        bytesWritten += totalSize;
+                        h.dirOffset++;
+                    }
+                    
+                    view.setUint32(ovPtr, 1, true);
+                    view.setUint32(ovPtr + 4, 0, true);
+                    view.setBigUint64(ovPtr + 16, BigInt(bytesWritten), true);
+                    return 0;
+                },
+                path_stat: (ovPtr, pathPtr, pathLen, flags, outPtr, outLen) => {
+                    const path = decoder.decode(new Uint8Array(hostState.memory.buffer, Number(pathPtr), Number(pathLen)));
+                    ovPtr = Number(ovPtr);
+                    outPtr = Number(outPtr);
+                    const view = new DataView(hostState.memory.buffer);
+
+                    const entry = fs.getEntrySync(path);
+                    if (!entry) {
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 44, true); // ENOENT
+                        return 0;
+                    }
+                    
+                    // AbiStat (64 bytes): kind (u32), mode (u32), uid (u32), gid (u32), size (u64), mtime (u64), atime (u64), ctime (u64), nlink (u64), inode (u64)
+                    const statView = new DataView(hostState.memory.buffer, outPtr, 64);
+                    statView.setUint32(0, entry.type === 'dir' ? 2 : 1, true); // 1: File, 2: Dir
+                    statView.setUint32(4, entry.type === 'dir' ? 0o40755 : 0o100644, true); 
+                    statView.setUint32(8, 1000, true); 
+                    statView.setUint32(12, 1000, true); 
+                    statView.setBigUint64(16, BigInt(entry.content ? entry.content.length : 0), true);
+                    statView.setBigUint64(24, BigInt(entry.mtime || Date.now()) * 1000000n, true); 
+                    statView.setBigUint64(32, BigInt(entry.mtime || Date.now()) * 1000000n, true); 
+                    statView.setBigUint64(40, BigInt(entry.mtime || Date.now()) * 1000000n, true); 
+                    statView.setBigUint64(48, 1n, true); 
+                    statView.setBigUint64(56, 1n, true); 
+
+                    view.setUint32(ovPtr, 1, true);
+                    view.setUint32(ovPtr + 4, 0, true);
+                    view.setBigUint64(ovPtr + 16, 64n, true);
+                    return 0;
+                },
+                path_chmod: (...args) => 0,
+                path_remove: (...args) => 0,
+                path_mkdir: (...args) => 0,
+                path_rename: (...args) => 0,
+                net_open: (...args) => 0,
+                net_accept: (...args) => 0,
+                process_spawn: (...args) => 0,
+                process_pipe: (...args) => 0,
+                process_wait: (...args) => 0,
+                process_signal: (...args) => 0,
+                signal_wait: (ovPtr, signum) => {
+                    ovPtr = Number(ovPtr);
+                    signum = Number(signum);
+                    const view = new DataView(hostState.memory.buffer);
+                    // Bubbletea uses this to wait for SIGWINCH (28) or others
+                    hostState.pendingSignals.push({ ovPtr, signum });
+                    return 0;
+                },
+                cancel: (...args) => {},
+                get_platform_info: (...args) => 0,
+                tty_set_mode: (handle, mode) => {
+                    console.log("TTY SET MODE:", { handle, mode, typeHandle: typeof handle, typeMode: typeof mode });
+                },
+                tty_get_size: (handle) => {
+                    const size = (term.cols << 16) | term.rows;
+                    console.log("TTY GET SIZE:", { handle, size, cols: term.cols, rows: term.rows });
+                    return size;
+                },
+                fd_isatty: (handle) => {
+                    console.log("FD_ISATTY:", handle);
+                    handle = BigInt(handle);
+                    if (handle >= 0n && handle <= 2n) return 1;
+                    const h = hostState.handles.get(handle);
+                    return (h && (h.type === 'tty' || h.type === 'stdin' || h.type === 'stdout' || h.type === 'stderr')) ? 1 : 0;
+                },
+                process_exit: (code) => {
+                    code = Number(code);
+                    console.log("Process exited with code", code);
+                    if (code !== 0) {
+                        term.write(`\r\n[Process exited with code ${code}]\r\n`);
+                    }
+                },
+                rusticated_debug: (val) => console.log("GUEST DEBUG:", val),
+            };
+
+            const importObject = {
+                env,
+                wasi_snapshot_preview1: {
+                    fd_write: (fd, iovs, iovs_len, nwritten) => {
+                        const view = new DataView(hostState.memory.buffer);
+                        let total = 0;
+                        for (let i = 0; i < iovs_len; i++) {
+                            const ptr = view.getUint32(iovs + Number(i) * 8, true);
+                            const len = view.getUint32(iovs + Number(i) * 8 + 4, true);
+                            const buf = new Uint8Array(hostState.memory.buffer, ptr, len);
+                            term.write(buf);
+                            total += len;
+                        }
+                        view.setUint32(nwritten, total, true);
+                        return 0;
+                    },
+                    fd_read: (fd, iovs, iovs_len, nread) => 0,
+                    path_open: (...args) => 0,
+                    proc_exit: (code) => env.process_exit(code),
+                    environ_sizes_get: (c, b) => {
+                        const view = new DataView(hostState.memory.buffer);
+                        view.setUint32(c, 0, true);
+                        view.setUint32(b, 0, true);
+                        return 0;
+                    },
+                    environ_get: (e, eb) => 0,
+                    args_sizes_get: (c, b) => {
+                        const view = new DataView(hostState.memory.buffer);
+                        view.setUint32(c, 0, true);
+                        view.setUint32(b, 0, true);
+                        return 0;
+                    },
+                    args_get: (a, ab) => 0,
+                    clock_time_get: (i, p, t) => 0,
+                    fd_close: () => 0,
+                    fd_fdstat_get: () => 0,
+                    fd_seek: () => 0,
+                }
+            };
+
+            try {
+                console.log("Fetching WASM from ./try/kabibi-go.wasm");
+                const response = await fetch('./try/kabibi-go.wasm');
+                console.log("Fetch response:", response.status);
+                if (!response.ok) throw new Error(`HTTP ${response.status} fetching WASM`);
+                const binary = await response.arrayBuffer();
+                console.log("Binary size:", binary.byteLength);
+                const { instance } = await WebAssembly.instantiate(binary, importObject);
+                console.log("WASM instantiated.");
+                window.lastInstance = instance;
+                hostState.memory = instance.exports.memory;
+                
+                console.log("WASM Exports:", Object.keys(instance.exports));
+                term.write('WASM loaded. Starting kabibi-go...\r\n\r\n');
+                
+                const runFunc = instance.exports.run || instance.exports._start;
+                if (runFunc) {
+                    const runLoop = () => {
+                        try {
+                            const res = runFunc();
+                            const r = Number(res);
+                            if (r === 0) {
+                                term.write('\r\n[Process Finished]\r\n');
+                                return;
+                            }
+                            // 1ms instead of 0ms for active yielding to prevent event loop starvation
+                            setTimeout(runLoop, (r === 2 || r === 4) ? 1 : 10);
+                        } catch (e) {
+                            console.error("Runtime error:", e);
+                            term.write(`\r\n\x1b[31mRuntime Error: ${e.message}\x1b[0m\r\n`);
+                        }
+                    };
+                    runLoop();
+                } else {
+                    term.write('Error: No entry point found in WASM.\r\n');
+                }
+            } catch (err) {
+                console.error(err);
+                term.write(`\r\nFailed to load kabibi-go: ${err.message}\r\n`);
+            }
+        }
+
         window.onload = () => {
             const contentDiv = document.getElementById('content');
             
             try {
                 if (typeof __README__ === 'function') {
-                    // Extract the string inside the multiline JS comment block
                     const funcStr = __README__.toString();
                     const startIdx = funcStr.indexOf('/*') + 2;
                     const endIdx = funcStr.lastIndexOf('*/');
                     
                     if (startIdx !== -1 && endIdx !== -1) {
                         let rawMarkdown = funcStr.substring(startIdx, endIdx);
-                        
-                        // Clean up the `-->` and `<!--` overhangs that were captured inside the JS comment
                         rawMarkdown = rawMarkdown.replace(/^\s*-->\s*/, '').replace(/\s*<!--\s*$/, '');
-                        
-                        // Parse using Marked and inject it seamlessly
                         contentDiv.innerHTML = marked.parse(rawMarkdown);
                     } else {
                         throw new Error("Could not find polyglot comment boundaries.");
@@ -141,8 +809,10 @@
                 contentDiv.innerHTML = `<p id="error-msg">Failed to load README.md.<br><small>${err.message}</small></p>`;
             }
 
-            // Beautifully fade the content in (Gentle emptiness)
             document.getElementById('main-body').style.opacity = 1;
+
+            // Initialize Terminal and WASM
+            initTerminalAndWasm();
         };
     </script>
 </body>
