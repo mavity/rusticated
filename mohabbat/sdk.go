@@ -155,4 +155,3 @@ func goBinFromRoot(goroot string) string {
 	}
 	return "go"
 }
-
