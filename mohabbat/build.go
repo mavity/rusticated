@@ -58,6 +58,11 @@ func ModePackage(ws, projectDir, outputPath string, verbose bool) error {
 	if err := os.MkdirAll(buildDir, 0o755); err != nil {
 		return err
 	}
+	if strings.HasSuffix(outputPath, ".wasm") {
+		fmt.Printf("🍆  Output is .wasm, skipping vegetable assembly: %s\n", outputPath)
+		absOutput, _ := filepath.Abs(outputPath)
+		return buildProjectToWasm(ws, projectDir, absOutput, verbose)
+	}
 	projectName := filepath.Base(projectDir)
 	wasmPath := filepath.Join(ws, "target", projectName+".wasm")
 	fmt.Printf("🍆  Packaging %s -> %s\n", projectDir, outputPath)
