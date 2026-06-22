@@ -150,7 +150,7 @@ This rebuilds the core libraries (Rust and Go) and the mohab.bat vegetable itsel
 go run . demo -o demo.bat
 go run . demo/loch -o loch.bat
 go run . kabibi -o kabibi.bat
-go run . kabibi -o kabibi-go.bat
+go run . kabibi-go -o kabibi-go.bat
 go run . demo-go -o demo-go.bat
 go run . demo-go/trivial -o trivial.bat
 ```
