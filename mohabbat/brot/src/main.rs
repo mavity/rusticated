@@ -228,9 +228,10 @@ pub unsafe extern "C" fn _start() -> ! {
 }
 
 // ─── macOS: main() called by dyld via LC_MAIN ────────────────────────────────
+// envp is the POSIX extension third argument; dyld/libSystem passes it on macOS.
 
 #[cfg(target_os = "macos")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
-    unsafe { darwin::run(argc, argv) }
+pub unsafe extern "C" fn main(argc: i32, argv: *const *const u8, envp: *const *const u8) -> i32 {
+    unsafe { darwin::run(argc, argv, envp) }
 }
