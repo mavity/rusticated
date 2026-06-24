@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 )
 
@@ -440,21 +439,29 @@ func generateGoOverlay(ws, goroot string) error {
 		return fmt.Errorf("failed to read src/path/filepath/path.go: %w", err)
 	}
 	pathGoStr := string(pathGoContent)
-	// Add internal/filepathlite import if missing
-	if !strings.Contains(pathGoStr, "\"internal/filepathlite\"") {
-		pathGoStr = strings.Replace(pathGoStr, "import (", "import (\n\t\"internal/filepathlite\"", 1)
+	// Inject internal/filepathlite only if the SDK version doesn't already import it.
+	if !strings.Contains(pathGoStr, `"internal/filepathlite"`) {
+		pathGoStr, err = patchGoStr(pathGoStr, []regastPatch{
+			{pat: `⦅import \( (.*) \)⦆`, repl: "import (\n\t\"internal/filepathlite\"\n$2)"},
+		})
+		if err != nil {
+			return fmt.Errorf("patch path.go import: %w", err)
+		}
 	}
-	// Robustly find the const block containing Separator by name, not by exact body or whitespace.
-	reSepConst := regexp.MustCompile(`(?m)^const \([^)]*\bSeparator\b[^)]*\)`)
-	if !reSepConst.MatchString(pathGoStr) {
-		return fmt.Errorf("could not find Separator const block in path.go")
-	}
-	modifiedPathGo := reSepConst.ReplaceAllStringFunc(pathGoStr, func(m string) string {
-		m = strings.Replace(m, "const (", "var (", 1)
-		m = strings.Replace(m, "os.PathSeparator", "filepathlite.Separator", 1)
-		m = strings.Replace(m, "os.PathListSeparator", "filepathlite.ListSeparator", 1)
-		return m
+	pathGoStr, err = patchGoStr(pathGoStr, []regastPatch{
+		// Redirect os.Path* selectors to filepathlite equivalents.
+		{pat: `⦅os \. PathSeparator⦆`, repl: `filepathlite.Separator`},
+		{pat: `⦅os \. PathListSeparator⦆`, repl: `filepathlite.ListSeparator`},
+		// Flip the Separator const block to var (filepathlite.Separator is not a constant).
+		{pat: `⦅const \( (.*Separator.*) \)⦆`, repl: "var ($2)"},
 	})
+	if err != nil {
+		return fmt.Errorf("patch path.go: %w", err)
+	}
+	if strings.Contains(pathGoStr, "os.PathSeparator") {
+		return fmt.Errorf("could not patch Separator const block in path.go")
+	}
+	modifiedPathGo := pathGoStr
 	genPathGo := filepath.Join(genDir, "path/filepath/path.go")
 	if err := os.WriteFile(genPathGo, []byte(modifiedPathGo), 0644); err != nil {
 		return fmt.Errorf("failed to write patched path.go: %w", err)
@@ -470,15 +477,18 @@ func generateGoOverlay(ws, goroot string) error {
 		return fmt.Errorf("failed to read src/net/http/fs.go: %w", err)
 	}
 	fsGoStr := string(fsGoContent)
-	targetFunc := "func mapOpenError(originalErr error, name string, sep rune, stat func(string) (fs.FileInfo, error)) error {"
-	if !strings.Contains(fsGoStr, targetFunc) {
-		targetFunc = strings.ReplaceAll(targetFunc, "\n", "\r\n")
+	fsGoStr, err = patchGoStr(fsGoStr, []regastPatch{
+		// Change sep parameter type from rune to byte in mapOpenError.
+		// The node group matches the Field node for the parameter, ignoring whitespace/CRLF.
+		{pat: `⦅sep rune⦆`, repl: `sep byte`},
+	})
+	if err != nil {
+		return fmt.Errorf("patch fs.go: %w", err)
 	}
-	if !strings.Contains(fsGoStr, targetFunc) {
-		return fmt.Errorf("could not find mapOpenError signature in fs.go")
+	if strings.Contains(fsGoStr, "sep rune,") {
+		return fmt.Errorf("could not find mapOpenError sep rune parameter in fs.go")
 	}
-	modifiedFsGo := strings.Replace(fsGoStr, targetFunc,
-		strings.Replace(targetFunc, "sep rune,", "sep byte,", 1), 1)
+	modifiedFsGo := fsGoStr
 	genFsGo := filepath.Join(genDir, "net/http/fs.go")
 	if err := os.WriteFile(genFsGo, []byte(modifiedFsGo), 0644); err != nil {
 		return fmt.Errorf("failed to write patched fs.go: %w", err)
@@ -495,20 +505,27 @@ func generateGoOverlay(ws, goroot string) error {
 	}
 	liteUnixStr := string(liteUnixContent)
 
-	// 0. Remove unused imports
-	liteUnixStr = regexp.MustCompile(`(?m)^import \([\s\S]*?^\)`).ReplaceAllString(liteUnixStr, "import (\n\t/* imports moved to path_nonwindows.go */\n)")
-
-	// 1. Remove constant block (Separator and ListSeparator are now variables in path_nonwindows.go)
-	liteUnixStr = regexp.MustCompile(`(?ms)^const \([^)]*\)`).ReplaceAllString(liteUnixStr, "/* constants moved to path_nonwindows.go */")
-
-	// 2. Redirect functions to redirect into the Golden Source
-	liteUnixStr = regexp.MustCompile(`(?m)^func IsPathSeparator\(c uint8\) bool \{[\s\S]*?^\}`).ReplaceAllString(liteUnixStr, "func IsPathSeparator(c uint8) bool {\n\treturn CoreIsPathSeparator(c)\n}")
-	liteUnixStr = regexp.MustCompile(`(?m)^func IsAbs\(path string\) bool \{[\s\S]*?^\}`).ReplaceAllString(liteUnixStr, "func IsAbs(path string) bool {\n\treturn CoreIsAbs(path)\n}")
-	// Join is not in the original SDK path_unix.go for Go 1.26.4, so we append it if replace fails or just append it.
-	liteUnixStr += "\nfunc Join(elem []string) string {\n\treturn CoreJoin(elem)\n}\n"
-	liteUnixStr = regexp.MustCompile(`(?m)^func volumeNameLen\(path string\) int \{[\s\S]*?^\}`).ReplaceAllString(liteUnixStr, "func volumeNameLen(path string) int {\n\treturn CoreVolumeNameLen(path)\n}")
-	liteUnixStr = regexp.MustCompile(`(?m)^func isLocal\(path string\) bool \{[\s\S]*?^\}`).ReplaceAllString(liteUnixStr, "func isLocal(path string) bool {\n\treturn CoreIsLocal(path)\n}")
-	liteUnixStr = regexp.MustCompile(`(?m)^func localize\(path string\) \(string, error\) \{[\s\S]*?^\}`).ReplaceAllString(liteUnixStr, "func localize(path string) (string, error) {\n\treturn CoreLocalize(path)\n}")
+	liteUnixStr, err = patchGoStr(liteUnixStr, []regastPatch{
+		// Replace the import block with a tombstone comment.
+		{pat: `⦅import \( .* \)⦆`, repl: "import (\n\t/* imports moved to path_nonwindows.go */\n)"},
+		// Remove the Separator/ListSeparator constants (moved to path_nonwindows.go as vars).
+		{pat: `⦅const \( .* \)⦆`, repl: "/* constants moved to path_nonwindows.go */"},
+		// Redirect functions to the Golden Source (core) implementations.
+		{pat: `⦅func IsPathSeparator\(c uint8\) bool \{ .* \}⦆`, repl: "func IsPathSeparator(c uint8) bool {\n\treturn CoreIsPathSeparator(c)\n}"},
+		{pat: `⦅func IsAbs\(path string\) bool \{ .* \}⦆`, repl: "func IsAbs(path string) bool {\n\treturn CoreIsAbs(path)\n}"},
+		// Join may exist in newer SDK versions; redirect if present.
+		{pat: `⦅func Join\(elem \[\]string\) string \{ .* \}⦆`, repl: "func Join(elem []string) string {\n\treturn CoreJoin(elem)\n}"},
+		{pat: `⦅func volumeNameLen\(path string\) int \{ .* \}⦆`, repl: "func volumeNameLen(path string) int {\n\treturn CoreVolumeNameLen(path)\n}"},
+		{pat: `⦅func isLocal\(path string\) bool \{ .* \}⦆`, repl: "func isLocal(path string) bool {\n\treturn CoreIsLocal(path)\n}"},
+		{pat: `⦅func localize\(path string\) \(string, error\) \{ .* \}⦆`, repl: "func localize(path string) (string, error) {\n\treturn CoreLocalize(path)\n}"},
+	})
+	if err != nil {
+		return fmt.Errorf("patch filepathlite/path_unix.go: %w", err)
+	}
+	// Join is not in the original SDK path_unix.go for Go 1.26.4; append if the pattern above had nothing to replace.
+	if !strings.Contains(liteUnixStr, "func Join(elem []string) string {") {
+		liteUnixStr += "\nfunc Join(elem []string) string {\n\treturn CoreJoin(elem)\n}\n"
+	}
 
 	genLiteGo := filepath.Join(genDir, "internal/filepathlite/path_unix.go")
 	if err := os.WriteFile(genLiteGo, []byte(liteUnixStr), 0644); err != nil {
@@ -524,18 +541,27 @@ func generateGoOverlay(ws, goroot string) error {
 	if err != nil {
 		return fmt.Errorf("failed to read src/path/filepath/path_unix.go: %w", err)
 	}
-	// Patch join/Join to delegate to os.Join
-	reJoin := regexp.MustCompile(`(?ms)^func [jJ]oin\(elem \[\]string\) string \{[\s\S]*?^\}`)
 	pathUnixStr := string(pathUnixContent)
-	// Add internal/filepathlite import if missing
-	if !strings.Contains(pathUnixStr, "\"internal/filepathlite\"") {
-		pathUnixStr = strings.Replace(pathUnixStr, "import (", "import (\n\t\"internal/filepathlite\"", 1)
+	// Inject internal/filepathlite only if the SDK version doesn't already import it.
+	if !strings.Contains(pathUnixStr, `"internal/filepathlite"`) {
+		pathUnixStr, err = patchGoStr(pathUnixStr, []regastPatch{
+			{pat: `⦅import \( (.*) \)⦆`, repl: "import (\n\t\"internal/filepathlite\"\n$2)"},
+		})
+		if err != nil {
+			return fmt.Errorf("patch filepath/path_unix.go import: %w", err)
+		}
 	}
-	// Patch path-logic functions to delegate to filepathlite
-	pathUnixStr = reJoin.ReplaceAllString(pathUnixStr, "func join(elem []string) string {\n\treturn filepathlite.Join(elem)\n}")
-	pathUnixStr = regexp.MustCompile(`(?m)^func IsAbs\(path string\) bool \{[\s\S]*?^\}`).ReplaceAllString(pathUnixStr, "func IsAbs(path string) bool {\n\treturn filepathlite.IsAbs(path)\n}")
-	pathUnixStr = regexp.MustCompile(`(?m)^func VolumeNameLen\(path string\) int \{[\s\S]*?^\}`).ReplaceAllString(pathUnixStr, "func VolumeNameLen(path string) int {\n\treturn filepathlite.VolumeNameLen(path)\n}")
-	pathUnixStr = regexp.MustCompile(`(?m)^func IsPathSeparator\(c uint8\) bool \{[\s\S]*?^\}`).ReplaceAllString(pathUnixStr, "func IsPathSeparator(c uint8) bool {\n\treturn filepathlite.IsPathSeparator(c)\n}")
+	pathUnixStr, err = patchGoStr(pathUnixStr, []regastPatch{
+		// Redirect join/Join to filepathlite (both capitalizations exist across SDK versions).
+		{pat: `⦅func [jJ]oin\(elem \[\]string\) string \{ .* \}⦆`, repl: "func join(elem []string) string {\n\treturn filepathlite.Join(elem)\n}"},
+		// Redirect other path-logic functions.
+		{pat: `⦅func IsAbs\(path string\) bool \{ .* \}⦆`, repl: "func IsAbs(path string) bool {\n\treturn filepathlite.IsAbs(path)\n}"},
+		{pat: `⦅func VolumeNameLen\(path string\) int \{ .* \}⦆`, repl: "func VolumeNameLen(path string) int {\n\treturn filepathlite.VolumeNameLen(path)\n}"},
+		{pat: `⦅func IsPathSeparator\(c uint8\) bool \{ .* \}⦆`, repl: "func IsPathSeparator(c uint8) bool {\n\treturn filepathlite.IsPathSeparator(c)\n}"},
+	})
+	if err != nil {
+		return fmt.Errorf("patch filepath/path_unix.go: %w", err)
+	}
 	genPathUnix := filepath.Join(genDir, "path/filepath/path_unix.go")
 	if err := os.WriteFile(genPathUnix, []byte(pathUnixStr), 0644); err != nil {
 		return fmt.Errorf("failed to write patched filepath/path_unix.go: %w", err)
@@ -559,12 +585,20 @@ func generateGoOverlay(ws, goroot string) error {
 	if !strings.Contains(osWasmStr, "const _NSIG = 0") {
 		return fmt.Errorf("could not find `const _NSIG = 0` in os_wasm.go")
 	}
-	osWasmStr = strings.Replace(osWasmStr, "const _NSIG = 0", "const _NSIG = 33", 1)
-	reSigStub := regexp.MustCompile(`(?m)^func sig(enable|disable|ignore)\(uint32\)\s*\{\}`)
-	if len(reSigStub.FindAllString(osWasmStr, -1)) != 3 {
-		return fmt.Errorf("could not find the three signal backend stubs in os_wasm.go")
+	osWasmStr, err = patchGoStr(osWasmStr, []regastPatch{
+		// Raise the signal table from 0 to 33.
+		{pat: `⦅_NSIG = 0⦆`, repl: `_NSIG = 33`},
+		// Wire the three signal backend stubs to rusticated implementations.
+		{pat: `⦅func sigenable\(uint32\) \{ \}⦆`, repl: "func sigenable(s uint32) { rusticated_sigenable(s) }"},
+		{pat: `⦅func sigdisable\(uint32\) \{ \}⦆`, repl: "func sigdisable(s uint32) { rusticated_sigdisable(s) }"},
+		{pat: `⦅func sigignore\(uint32\) \{ \}⦆`, repl: "func sigignore(s uint32) { rusticated_sigignore(s) }"},
+	})
+	if err != nil {
+		return fmt.Errorf("patch os_wasm.go: %w", err)
 	}
-	osWasmStr = reSigStub.ReplaceAllString(osWasmStr, "func sig${1}(s uint32) { rusticated_sig${1}(s) }")
+	if strings.Contains(osWasmStr, "const _NSIG = 0") {
+		return fmt.Errorf("failed to patch _NSIG in os_wasm.go")
+	}
 	genOsWasm := filepath.Join(genDir, "runtime/os_wasm.go")
 	if err := os.WriteFile(genOsWasm, []byte(osWasmStr), 0644); err != nil {
 		return fmt.Errorf("failed to write patched os_wasm.go: %w", err)

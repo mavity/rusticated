@@ -38,3 +38,18 @@ func applyRegastPatches(path string, patches []regastPatch) error {
 
 	return writeFileIfChanged(path, []byte(content))
 }
+
+// patchGoStr applies a sequence of regast transformations to Go source content
+// held entirely in a string and returns the result. It is the in-memory twin of
+// applyRegastPatches for callers that read source from GOROOT and write to a
+// different destination without touching the original file.
+func patchGoStr(content string, patches []regastPatch) (string, error) {
+	for _, p := range patches {
+		re, err := regast.Compile(p.pat)
+		if err != nil {
+			return content, fmt.Errorf("regast compile %q: %w", p.pat, err)
+		}
+		content = re.ReplaceAllString(content, p.repl)
+	}
+	return content, nil
+}
