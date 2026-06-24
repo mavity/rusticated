@@ -95,6 +95,21 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string, verbose bool) (strin
 			}
 			args = append(args, "--config", fmt.Sprintf("target.%s.rustflags=['-C', 'linker=rust-lld', '-C', 'linker-flavor=ld.lld', '-C', 'link-arg=-L%s']", name, stubDir))
 		}
+		if s.goos == "darwin" {
+			// Cross-compile darwin brot using lld in Mach-O mode (darwin-lld).
+			// A minimal libSystem.B.tbd stub is used to satisfy the linker without
+			// requiring a full macOS SDK; at runtime macOS provides the real dylib.
+			// lld (LLVM 14+) automatically embeds an ad-hoc code signature for
+			// arm64 Mach-O binaries, satisfying macOS's signing requirement.
+			stubDir := filepath.Join(ws, "target", "darwin-stubs")
+			if err := ensureDarwinStubs(stubDir); err != nil {
+				return err
+			}
+			stubDirSlash := filepath.ToSlash(strings.TrimPrefix(stubDir, `\\?\`))
+			args = append(args, "--config", fmt.Sprintf(
+				"target.%s.rustflags=['-C', 'linker=rust-lld', '-C', 'linker-flavor=darwin-lld', '-Z', 'unstable-options', '-C', 'link-arg=-L%s']",
+				name, stubDirSlash))
+		}
 
 		meta := GetBuildMetadata(ws)
 		cmd := exec.Command("cargo", args...)
