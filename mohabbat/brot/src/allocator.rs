@@ -2,6 +2,7 @@ use core::alloc::{GlobalAlloc, Layout};
 
 pub struct OsAllocator;
 
+#[cfg(any(target_os = "linux", target_os = "macos", target_family = "wasm"))]
 fn page_align(n: usize) -> usize {
     (n + 4095) & !4095
 }
@@ -227,9 +228,9 @@ unsafe impl GlobalAlloc for OsAllocator {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let new_ptr = self.alloc(Layout::from_size_align_unchecked(new_size, layout.align()));
+        let new_ptr = unsafe { self.alloc(Layout::from_size_align_unchecked(new_size, layout.align())) };
         if !new_ptr.is_null() {
-            core::ptr::copy_nonoverlapping(ptr, new_ptr, layout.size().min(new_size));
+            unsafe { core::ptr::copy_nonoverlapping(ptr, new_ptr, layout.size().min(new_size)) };
         }
         new_ptr
     }
