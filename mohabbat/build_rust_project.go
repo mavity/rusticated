@@ -61,7 +61,9 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string, verbose bool) (strin
 
 	buildTarget := func(name string) error {
 		targetArg := name
-		args := []string{"build", "--release"}
+		// --bin brot selects the binary target; the lib is built as rlib only
+		// since the Windows cdylib symbols are now provided by lib.rs.
+		args := []string{"build", "--release", "--bin", "brot"}
 		if verbose {
 			args = append(args, "--features", "verbose")
 		}
@@ -136,6 +138,10 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string, verbose bool) (strin
 }
 
 func cargoTargetName(s slot) (string, error) {
+	if s.goos == "js" {
+		return "", fmt.Errorf("cargoTargetName called on js slot")
+	}
+
 	targetArch := "x86_64"
 	if s.goarch == "arm64" {
 		targetArch = "aarch64"
