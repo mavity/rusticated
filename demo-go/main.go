@@ -21,7 +21,7 @@ func main() {
 	}
 	println("cwd=", cwd)
 
-	println("DEBUG: calling stat on .")
+	println("Calling stat on .")
 	fi, err := os.Stat(".")
 	if err != nil {
 		println("stat(.) error:", err.Error())
@@ -37,7 +37,7 @@ func main() {
 		if dir == "" {
 			continue
 		}
-		fmt.Printf("DEBUG: calling ReadDir(%s)\n", dir)
+		fmt.Printf("Calling ReadDir(%s)\n", dir)
 		os.Stdout.Sync()
 		entries, err := os.ReadDir(dir)
 		if err != nil {
