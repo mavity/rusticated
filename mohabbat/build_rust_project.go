@@ -117,6 +117,11 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string, verbose bool) (strin
 		env = upsertEnv(env, "BUILD_VERSION", meta.Version)
 		env = upsertEnv(env, "BUILD_TIME", meta.Time)
 		env = upsertEnv(env, "BUILD_PLATFORM", meta.Platform)
+		// Set SDKROOT to the stubs directory for darwin cross-compilation so lld
+		// doesn't call xcrun to locate the macOS SDK (unavailable on non-Mac hosts).
+		if s.goos == "darwin" {
+			env = upsertEnv(env, "SDKROOT", filepath.Join(ws, "target", "darwin-stubs"))
+		}
 		cmd.Env = env
 
 		if isRusticatedTarget {

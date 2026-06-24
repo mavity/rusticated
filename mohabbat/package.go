@@ -212,7 +212,6 @@ func buildZoneA(offsets, lengths []int, nodeJsLen int) string {
 :; case "$(uname -m)-$(uname -s)" in
 :; x86_64-Linux) S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}} ;;
 :; aarch64-Linux) S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}} ;;
-:; x86_64-Darwin) S_OFF={{DARWIN_AMD_OFF}}; S_LEN={{DARWIN_AMD_LEN}} ;;
 :; arm64-Darwin) S_OFF={{DARWIN_ARM_OFF}}; S_LEN={{DARWIN_ARM_LEN}} ;;
 :; esac
 :; USE_NODE=0
@@ -298,7 +297,6 @@ exit /b !RET!
 	node := -1
 	linuxAMD := -1
 	linuxARM := -1
-	darwinAMD := -1
 	darwinARM := -1
 	winAMD := -1
 	winARM := -1
@@ -310,9 +308,6 @@ exit /b !RET!
 	}
 	if i, ok := idx["linux-arm64"]; ok {
 		linuxARM = i
-	}
-	if i, ok := idx["darwin-amd64"]; ok {
-		darwinAMD = i
 	}
 	if i, ok := idx["darwin-arm64"]; ok {
 		darwinARM = i
@@ -343,8 +338,6 @@ exit /b !RET!
 	s = replace(s, "{{LINUX_AMD_LEN}}", linuxAMD, lengths)
 	s = replace(s, "{{LINUX_ARM_OFF}}", linuxARM, offsets)
 	s = replace(s, "{{LINUX_ARM_LEN}}", linuxARM, lengths)
-	s = replace(s, "{{DARWIN_AMD_OFF}}", darwinAMD, offsets)
-	s = replace(s, "{{DARWIN_AMD_LEN}}", darwinAMD, lengths)
 	s = replace(s, "{{DARWIN_ARM_OFF}}", darwinARM, offsets)
 	s = replace(s, "{{DARWIN_ARM_LEN}}", darwinARM, lengths)
 	s = replace(s, "{{WIN_AMD_OFF}}", winAMD, offsets)
