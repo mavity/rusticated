@@ -3,6 +3,14 @@ name = "brot"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "brot"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "brot"
+path = "src/main.rs"
+
 [dependencies]
 
 brotli-decompressor = { version = "5.0.1", default-features = false, features = ["unsafe"] }
