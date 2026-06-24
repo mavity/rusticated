@@ -105,13 +105,13 @@ func applyWasip1DepPatches(ws, projectDir, goroot string) (*depPatchResult, erro
 		// Phase 1: Structural API translations using regast.
 		// These replace brittle strings.ReplaceAll with ast-aware transforms.
 		var patches []regastPatch
-		patches = append(patches, regastPatch{pat: `⦃unix \. Major⦄`, repl: `syscall.Major`})
-		patches = append(patches, regastPatch{pat: `⦃unix \. Minor⦄`, repl: `syscall.Minor`})
+		patches = append(patches, regastPatch{pat: `⦅unix \. Major⦆`, repl: `syscall.Major`})
+		patches = append(patches, regastPatch{pat: `⦅unix \. Minor⦆`, repl: `syscall.Minor`})
 
 		// For modules that depend on x/sys/unix, we redirect to syscall where our shim lives.
 		// We do this structurally to avoid mangling strings or comments that shouldn't change.
 		if target.module == "github.com/u-root/u-root" {
-			patches = append(patches, regastPatch{pat: `⦃"golang.org/x/sys/unix"⦄`, repl: `"syscall"`})
+			patches = append(patches, regastPatch{pat: `⦅"golang.org/x/sys/unix"⦆`, repl: `"syscall"`})
 		}
 
 		_ = filepath.WalkDir(target.jitDir, func(path string, d fs.DirEntry, err error) error {
