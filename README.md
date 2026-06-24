@@ -113,6 +113,7 @@ We call such binaries **🍆vegetables** and Mohabbat comes with Rust and Go int
 - **pool** — the Brotli-compressed concatenation of all washmhosts plus
   the brain.
 - **Modern Five** — the target matrix that Mohabbat addresses: Linux x64/ARM, Windows x64/ARM, macOS ARM.
+- **Node.js fallback** — every 🍆vegetable also embeds a Node.js host. On platforms outside the native slots — currently **macOS** is the most common case, plus ARM Linux musl, FreeBSD, Android, etc. — if Node ≥ 18 is present it is used automatically.
 
 ## What it is and how it works
 
@@ -190,6 +191,32 @@ mohab.bat kabibi -r
 mohab.bat demo-go -r
 mohab.bat demo-go/trivial -r
 ```
+
+## Node.js fallback
+
+Every 🍆vegetable embeds a small JS host alongside the native binaries. On an
+unsupported platform — **macOS** is the primary current case, plus FreeBSD,
+Android, ARM Linux musl, and others — Node.js ≥ 18 is used as the WASM host
+instead of a native brot binary.
+
+The fallback activates **automatically** when no native brot matches the
+current OS/CPU. It can also be **forced** on any platform with the hidden
+environment variable:
+
+```bash
+MOHABBAT_USE_NODE=1 ./demo-go.bat
+```
+
+or on Windows:
+
+```bat
+set MOHABBAT_USE_NODE=1
+demo-go.bat
+```
+
+Node is located by searching `$PATH` then common installer locations (nvm,
+fnm, Volta, n, Chocolatey, Homebrew). A diagnostic message is printed if
+no usable Node is found and no native brot is available either.
 
 
 # 🍆Vegetable file layout
