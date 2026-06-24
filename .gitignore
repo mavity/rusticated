@@ -7,4 +7,5 @@
 /demo.bat
 /washmhost/target/
 /*.bat
+/*.wasm
 /mohabbat/rusticated-jit/

@@ -70,6 +70,9 @@ func assembleVegetable(ws, brainPath, buildDir, outputPath string) error {
 
 	// Patch MohabbatMeta inside each brot
 	for i := range slots {
+		if slots[i].goos == "js" {
+			continue // Handled via template string replacements below
+		}
 		if len(per[i].brot) == 0 {
 			continue
 		}
@@ -88,16 +91,55 @@ func assembleVegetable(ws, brainPath, buildDir, outputPath string) error {
 		per[i].brot = patched
 	}
 
-	// Compute Zone A/Zone B offsets as a fixed-point because Zone A length
-	// depends on numeric offsets embedded in it.
+	idx := map[string]int{}
+	for i, s := range slots {
+		idx[s.name] = i
+	}
+	nodeIdx := idx["node"]
+
+	var rawStarter string
+	var brotliWasmBytes []byte
+	if len(per[nodeIdx].brot) > 0 {
+		wasmMagic := []byte{0x00, 0x61, 0x73, 0x6d}
+		widx := bytes.Index(per[nodeIdx].brot, wasmMagic)
+		if widx != -1 {
+			rawStarter = string(per[nodeIdx].brot[:widx])
+			brotliWasmBytes = per[nodeIdx].brot[widx:]
+		}
+	}
+
 	lengths := make([]int, len(slots))
-	offsets := make([]int, len(slots))
 	for i := range slots {
 		lengths[i] = len(per[i].brot)
 	}
+	offsets := make([]int, len(slots))
+
 	zoneA := ""
 	for retries := 0; retries < 8; retries++ {
-		zoneA = buildZoneA(offsets, lengths)
+		if rawStarter != "" {
+			s := rawStarter
+			s = strings.ReplaceAll(s, "\"{{NODE_POOL_LEN}}\"", fmt.Sprintf("%-17d", poolLen))
+			s = strings.ReplaceAll(s, "\"{{NODE_WASHMHOST_OFF}}\"", fmt.Sprintf("%-23d", whOffsets[nodeIdx]))
+			s = strings.ReplaceAll(s, "\"{{NODE_WASHMHOST_LEN}}\"", fmt.Sprintf("%-23d", whLens[nodeIdx]))
+			s = strings.ReplaceAll(s, "\"{{NODE_PAYLOAD_OFF}}\"", fmt.Sprintf("%-21d", payloadOffset))
+			s = strings.ReplaceAll(s, "\"{{NODE_PAYLOAD_LEN}}\"", fmt.Sprintf("%-21d", payloadLen))
+
+			dummyS := s
+			dummyS = strings.ReplaceAll(dummyS, "\"{{NODE_WASM_OFF}}\"", "01234567890123456")
+			dummyS = strings.ReplaceAll(dummyS, "\"{{NODE_WASM_LEN}}\"", "01234567890123456")
+			jsLen := len(dummyS)
+
+			wasmOff := offsets[nodeIdx] + jsLen
+			wasmLen := len(brotliWasmBytes)
+			s = strings.ReplaceAll(s, "\"{{NODE_WASM_OFF}}\"", fmt.Sprintf("%-17d", wasmOff))
+			s = strings.ReplaceAll(s, "\"{{NODE_WASM_LEN}}\"", fmt.Sprintf("%-17d", wasmLen))
+
+			per[nodeIdx].brot = append([]byte(s), brotliWasmBytes...)
+			lengths[nodeIdx] = len(per[nodeIdx].brot)
+			slots[nodeIdx].jsTextLen = len(s)
+		}
+
+		zoneA = buildZoneA(offsets, lengths, slots[nodeIdx].jsTextLen)
 		next := len(zoneA)
 		newOffsets := make([]int, len(slots))
 		for i := range slots {
@@ -113,7 +155,29 @@ func assembleVegetable(ws, brainPath, buildDir, outputPath string) error {
 		}
 		offsets = newOffsets
 		if stable {
-			zoneA = buildZoneA(offsets, lengths)
+			// One final update of node payload to lock in correct absolute wasm offsets
+			if rawStarter != "" {
+				s := rawStarter
+				s = strings.ReplaceAll(s, "\"{{NODE_POOL_LEN}}\"", fmt.Sprintf("%-17d", poolLen))
+				s = strings.ReplaceAll(s, "\"{{NODE_WASHMHOST_OFF}}\"", fmt.Sprintf("%-23d", whOffsets[nodeIdx]))
+				s = strings.ReplaceAll(s, "\"{{NODE_WASHMHOST_LEN}}\"", fmt.Sprintf("%-23d", whLens[nodeIdx]))
+				s = strings.ReplaceAll(s, "\"{{NODE_PAYLOAD_OFF}}\"", fmt.Sprintf("%-21d", payloadOffset))
+				s = strings.ReplaceAll(s, "\"{{NODE_PAYLOAD_LEN}}\"", fmt.Sprintf("%-21d", payloadLen))
+
+				dummyS := s
+				dummyS = strings.ReplaceAll(dummyS, "\"{{NODE_WASM_OFF}}\"", "01234567890123456")
+				dummyS = strings.ReplaceAll(dummyS, "\"{{NODE_WASM_LEN}}\"", "01234567890123456")
+				jsLen := len(dummyS)
+
+				wasmOff := offsets[nodeIdx] + jsLen
+				wasmLen := len(brotliWasmBytes)
+				s = strings.ReplaceAll(s, "\"{{NODE_WASM_OFF}}\"", fmt.Sprintf("%-17d", wasmOff))
+				s = strings.ReplaceAll(s, "\"{{NODE_WASM_LEN}}\"", fmt.Sprintf("%-17d", wasmLen))
+
+				per[nodeIdx].brot = append([]byte(s), brotliWasmBytes...)
+				slots[nodeIdx].jsTextLen = len(s)
+			}
+			zoneA = buildZoneA(offsets, lengths, slots[nodeIdx].jsTextLen)
 			break
 		}
 	}
@@ -137,59 +201,141 @@ func assembleVegetable(ws, brainPath, buildDir, outputPath string) error {
 	for _, n := range lengths {
 		totalZoneB += n
 	}
-	fmt.Printf("🍆  zone_a=%s zone_b=%s pool=%s\n", formatSize(int64(len(zoneA))), formatSize(int64(totalZoneB)), formatSize(int64(poolLen)))
-	fmt.Printf("🍆  Wrote %s (%s bytes)\n", outputPath, formatSize(int64(len(zoneA)+totalZoneB+int(poolLen))))
+	fmt.Printf("[mohabbat]  zone_a=%s zone_b=%s pool=%s\n", formatSize(int64(len(zoneA))), formatSize(int64(totalZoneB)), formatSize(int64(poolLen)))
+	fmt.Printf("[mohabbat]  Wrote %s (%s bytes)\n", outputPath, formatSize(int64(len(zoneA)+totalZoneB+int(poolLen))))
 	return nil
 }
 
 // buildZoneA produces the polyglot script header for Modern Four.
-func buildZoneA(offsets, lengths []int) string {
-	const tmpl = ":; ME=\"$(readlink -f \"$0\" 2>/dev/null || realpath \"$0\" 2>/dev/null || printf \"%s\" \"$0\")\"; S_OFF=0; S_LEN=0; case \"$(uname -m)-$(uname -s)\" in x86_64-Linux) S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}} ;; aarch64-Linux) S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}} ;; esac; [ \"$S_LEN\" = \"0\" ] && { echo \"[mohabbat] Unsupported arch/os \"; exit 1; }; TMP_DIR=\"${TMPDIR:-/tmp}\"; [ -d \"./target\" ] && TMP_DIR=\"./target\"; TMP_EXE=\"$TMP_DIR/moh-$$\"; dd if=\"$ME\" bs=1 skip=\"$S_OFF\" count=\"$S_LEN\" of=\"$TMP_EXE\" 2>/dev/null; chmod +x \"$TMP_EXE\"; \"$TMP_EXE\" \"$ME\" \"$@\"; RET=$?; rm \"$TMP_EXE\"; exit $RET\n" +
-		"@echo off\r\n" +
-		"setlocal enabledelayedexpansion\r\n" +
-		"set \"ME=%~f0\"\r\n" +
-		"set \"TMP_DIR=!TEMP!\"\r\n" +
-		"if exist \".\\target\" set \"TMP_DIR=.\\target\"\r\n" +
-		"set \"TMP_EXE=!TMP_DIR!\\moh-!RANDOM!.exe\"\r\n" +
-		"set \"ARCH=%PROCESSOR_ARCHITECTURE%\"\r\n" +
-		"if \"!PROCESSOR_ARCHITEW6432!\" neq \"\" set \"ARCH=!PROCESSOR_ARCHITEW6432!\"\r\n" +
-		"set \"S_OFF=0\"\r\n" +
-		"set \"S_LEN=0\"\r\n" +
-		"if \"!ARCH!\"==\"AMD64\" (\r\n" +
-		"	set \"S_OFF={{WIN_AMD_OFF}}\"\r\n" +
-		"	set \"S_LEN={{WIN_AMD_LEN}}\"\r\n" +
-		") else if \"!ARCH!\"==\"ARM64\" (\r\n" +
-		"	set \"S_OFF={{WIN_ARM_OFF}}\"\r\n" +
-		"	set \"S_LEN={{WIN_ARM_LEN}}\"\r\n" +
-		")\r\n" +
-		"if \"!S_LEN!\"==\"0\" (\r\n" +
-		"    echo 🍆 This vegetable does not support !ARCH! on Windows.\r\n" +
-		"    exit /b 1\r\n" +
-		")\r\n" +
-		"powershell -NoProfile -ExecutionPolicy Bypass -Command \"$a=[IO.File]::ReadAllBytes($env:ME); $b=New-Object byte[] !S_LEN!; [Array]::Copy($a, [int64]!S_OFF!, $b, 0, [int]!S_LEN!); [IO.File]::WriteAllBytes($env:TMP_EXE, $b)\"\r\n" +
-		"set \"MOHABBAT_VEGETABLE_PATH=!ME!\"\r\n" +
-		"\"!TMP_EXE!\" %*\r\n" +
-		"set \"RET=!ERRORLEVEL!\"\r\n" +
-		"del \"!TMP_EXE!\"\r\n" +
-		"exit /b !RET!\r\n"
+func buildZoneA(offsets, lengths []int, nodeJsLen int) string {
+	const tmplPOSIX = `:; ME="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || printf "%s" "$0")"; S_OFF=0; S_LEN=0
+:; case "$(uname -m)-$(uname -s)" in
+:; x86_64-Linux) S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}} ;;
+:; aarch64-Linux) S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}} ;;
+:; esac
+:; USE_NODE=0
+:; [ -n "$MOHABBAT_USE_NODE" ] && USE_NODE=1
+:; [ "$S_LEN" = "0" ] && USE_NODE=1
+:; if [ "$USE_NODE" = "1" ]; then
+:;   find_node() {
+:;     command -v node >/dev/null 2>&1 && node -e "process.exit(parseInt(process.version.slice(1))<18)" 2>/dev/null && NODE_BIN="$(command -v node)" && return 0
+:;     for cand in /usr/local/bin/node /opt/homebrew/bin/node /usr/bin/node "$HOME"/.nvm/versions/node/v*/bin/node "$HOME"/.fnm/node-versions/*/installation/bin/node /usr/local/n/versions/node/*/bin/node "$HOME"/.volta/bin/node; do
+:;       [ -x "$cand" ] && "$cand" -e "process.exit(parseInt(process.version.slice(1))<18)" 2>/dev/null && NODE_BIN="$cand" && return 0
+:;     done
+:;     return 1
+:;   }
+:;   if find_node; then
+:;     export MOHABBAT_VEGETABLE_PATH="$ME"
+:;     dd if="$ME" bs=1 skip="{{NODE_OFF}}" count="{{NODE_JS_LEN}}" 2>/dev/null | "$NODE_BIN" - "$ME" "$@"
+:;     exit $?
+:;   fi
+:; fi
+:; [ "$S_LEN" = "0" ] && { echo "[mohabbat] Unsupported platform and node not available"; exit 1; }
+:; TMP_DIR="${TMPDIR:-/tmp}"; [ -d "./target" ] && TMP_DIR="./target"; TMP_EXE="$TMP_DIR/moh-$$"; dd if="$ME" bs=1 skip="$S_OFF" count="$S_LEN" of="$TMP_EXE" 2>/dev/null; chmod +x "$TMP_EXE"; "$TMP_EXE" "$ME" "$@"; RET=$?; rm "$TMP_EXE"; exit $RET
+`
+	const tmplWIN = `@echo off
+setlocal enabledelayedexpansion
+set "ME=%~f0"
+set "TMP_DIR=!TEMP!"
+if exist ".\target" set "TMP_DIR=.\target"
+set "TMP_EXE=!TMP_DIR!\moh-!RANDOM!.exe"
+set "ARCH=%PROCESSOR_ARCHITECTURE%"
+if "!PROCESSOR_ARCHITEW6432!" neq "" set "ARCH=!PROCESSOR_ARCHITEW6432!"
+set "S_OFF=0"
+set "S_LEN=0"
+if "!ARCH!"=="AMD64" (
+	set "S_OFF={{WIN_AMD_OFF}}"
+	set "S_LEN={{WIN_AMD_LEN}}"
+) else if "!ARCH!"=="ARM64" (
+	set "S_OFF={{WIN_ARM_OFF}}"
+	set "S_LEN={{WIN_ARM_LEN}}"
+)
+set "USE_NODE=0"
+if defined MOHABBAT_USE_NODE set "USE_NODE=1"
+if "!S_LEN!"=="0" set "USE_NODE=1"
+if "!USE_NODE!"=="1" (
+  set "NODE_BIN="
+  for %%c in ("node.exe") do (
+    if not "%%~$PATH:c"=="" set "NODE_BIN=%%~$PATH:c"
+  )
+  if "!NODE_BIN!"=="" (
+    for %%c in ("%ProgramFiles%\nodejs\node.exe" "%ProgramFiles(x86)%\nodejs\node.exe" "%ChocolateyInstall%\bin\node.exe" "%UserProfile%\.volta\bin\node.exe") do (
+      if exist "%%~c" set "NODE_BIN=%%~c"
+    )
+  )
+  if "!NODE_BIN!"=="" (
+    for /D %%d in ("%AppData%\nvm\v*") do if exist "%%d\node.exe" set "NODE_BIN=%%d\node.exe"
+  )
+  if "!NODE_BIN!"=="" (
+    for /D %%d in ("%UserProfile%\.fnm\node-versions\*") do if exist "%%d\installation\node.exe" set "NODE_BIN=%%d\installation\node.exe"
+  )
+  if not "!NODE_BIN!"=="" (
+    "!NODE_BIN!" -v >nul 2>&1
+    if !errorlevel! equ 0 (
+      set "MOHABBAT_VEGETABLE_PATH=!ME!"
+      powershell -NoProfile -ExecutionPolicy Bypass -Command "& { $a=[IO.File]::ReadAllBytes($env:ME); $b=[Text.Encoding]::UTF8.GetString($a, {{NODE_OFF}}, {{NODE_JS_LEN}}); $n=$env:NODE_BIN; $m=$env:ME; $b | & $n - $env:ME $args; exit $LASTEXITCODE }" -- %*
+      exit /b !errorlevel!
+    )
+  )
+)
+if "!S_LEN!"=="0" (
+    echo [mohabbat] This vegetable does not support !ARCH! on Windows and node is not available.
+    exit /b 1
+)
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$a=[IO.File]::ReadAllBytes($env:ME); $b=New-Object byte[] !S_LEN!; [Array]::Copy($a, [int64]!S_OFF!, $b, 0, [int]!S_LEN!); [IO.File]::WriteAllBytes($env:TMP_EXE, $b)"
+"!TMP_EXE!" "!ME!" %*
+set "RET=!ERRORLEVEL!"
+if exist "!TMP_EXE!" del "!TMP_EXE!"
+exit /b !RET!
+`
 	idx := map[string]int{}
 	for i, s := range slots {
 		idx[s.name] = i
 	}
-	linuxAMD := idx["linux-amd64"]
-	linuxARM := idx["linux-arm64"]
-	winAMD := idx["win-amd64"]
-	winARM := idx["win-arm64"]
+	node := -1
+	linuxAMD := -1
+	linuxARM := -1
+	winAMD := -1
+	winARM := -1
+	if i, ok := idx["node"]; ok {
+		node = i
+	}
+	if i, ok := idx["linux-amd64"]; ok {
+		linuxAMD = i
+	}
+	if i, ok := idx["linux-arm64"]; ok {
+		linuxARM = i
+	}
+	if i, ok := idx["win-amd64"]; ok {
+		winAMD = i
+	}
+	if i, ok := idx["win-arm64"]; ok {
+		winARM = i
+	}
 
-	s := tmpl
-	s = strings.ReplaceAll(s, "{{LINUX_AMD_OFF}}", fmt.Sprintf("%d", offsets[linuxAMD]))
-	s = strings.ReplaceAll(s, "{{LINUX_AMD_LEN}}", fmt.Sprintf("%d", lengths[linuxAMD]))
-	s = strings.ReplaceAll(s, "{{LINUX_ARM_OFF}}", fmt.Sprintf("%d", offsets[linuxARM]))
-	s = strings.ReplaceAll(s, "{{LINUX_ARM_LEN}}", fmt.Sprintf("%d", lengths[linuxARM]))
-	s = strings.ReplaceAll(s, "{{WIN_AMD_OFF}}", fmt.Sprintf("%d", offsets[winAMD]))
-	s = strings.ReplaceAll(s, "{{WIN_AMD_LEN}}", fmt.Sprintf("%d", lengths[winAMD]))
-	s = strings.ReplaceAll(s, "{{WIN_ARM_OFF}}", fmt.Sprintf("%d", offsets[winARM]))
-	s = strings.ReplaceAll(s, "{{WIN_ARM_LEN}}", fmt.Sprintf("%d", lengths[winARM]))
+	s := tmplPOSIX + tmplWIN
+	s = strings.ReplaceAll(s, "\n", "\r\n")
+
+	replace := func(s, key string, i int, vals []int) string {
+		val := 0
+		if i >= 0 && i < len(vals) {
+			val = vals[i]
+		}
+		return strings.ReplaceAll(s, key, fmt.Sprintf("%d", val))
+	}
+
+	s = replace(s, "{{NODE_OFF}}", node, offsets)
+	s = replace(s, "{{NODE_LEN}}", node, lengths)
+	s = replace(s, "{{NODE_JS_LEN}}", node, []int{nodeJsLen})
+
+	s = replace(s, "{{LINUX_AMD_OFF}}", linuxAMD, offsets)
+	s = replace(s, "{{LINUX_AMD_LEN}}", linuxAMD, lengths)
+	s = replace(s, "{{LINUX_ARM_OFF}}", linuxARM, offsets)
+	s = replace(s, "{{LINUX_ARM_LEN}}", linuxARM, lengths)
+	s = replace(s, "{{WIN_AMD_OFF}}", winAMD, offsets)
+	s = replace(s, "{{WIN_AMD_LEN}}", winAMD, lengths)
+	s = replace(s, "{{WIN_ARM_OFF}}", winARM, offsets)
+	s = replace(s, "{{WIN_ARM_LEN}}", winARM, lengths)
 	return s
 }
 
@@ -257,6 +403,9 @@ func washmhostPath(buildDir string, s slot) string {
 }
 
 func artifactExt(goos string) string {
+	if goos == "js" {
+		return ".js"
+	}
 	if goos == "windows" {
 		// Use .dat instead of .exe for the stored artifact to bypass
 		// aggressive Windows Defender real-time scanning during the build process.
@@ -296,4 +445,3 @@ func ensureBatOnPath(commandName, targetPath string) error {
 	}
 	return fmt.Errorf("could not place %s in any PATH directory; use ./%s", commandName, commandName)
 }
-

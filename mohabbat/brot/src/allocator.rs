@@ -207,5 +207,33 @@ unsafe impl GlobalAlloc for OsAllocator {
     }
 }
 
+// ─── WASM: memory_grow ──────────────────────────────────────────────────────
+
+#[cfg(target_family = "wasm")]
+unsafe impl GlobalAlloc for OsAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let size = page_align(layout.size().max(1));
+        let pages = size / 65536 + if size % 65536 != 0 { 1 } else { 0 };
+        let prev = core::arch::wasm32::memory_grow(0, pages);
+        if prev == usize::MAX {
+            core::ptr::null_mut()
+        } else {
+            (prev * 65536) as *mut u8
+        }
+    }
+
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
+        // Bump allocator: no-op dealloc.
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let new_ptr = self.alloc(Layout::from_size_align_unchecked(new_size, layout.align()));
+        if !new_ptr.is_null() {
+            core::ptr::copy_nonoverlapping(ptr, new_ptr, layout.size().min(new_size));
+        }
+        new_ptr
+    }
+}
+
 #[global_allocator]
 static ALLOCATOR: OsAllocator = OsAllocator;

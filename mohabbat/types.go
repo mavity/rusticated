@@ -3,6 +3,7 @@ package mohabbat
 // Modern Four scope: linux/amd64, linux/arm64, windows/amd64, windows/arm64.
 // Slot order is contractual - Zone A and patcher both depend on it.
 var slots = []slot{
+	{name: "node", goos: "js", goarch: "wasm"},
 	{name: "linux-amd64", goos: "linux", goarch: "amd64", shCase: "x86_64-Linux"},
 	{name: "linux-arm64", goos: "linux", goarch: "arm64", shCase: "aarch64-Linux"},
 	{name: "win-amd64", goos: "windows", goarch: "amd64", winArch: "AMD64"},
@@ -10,11 +11,12 @@ var slots = []slot{
 }
 
 type slot struct {
-	name    string
-	goos    string
-	goarch  string
-	shCase  string // matches "$(uname -m)-$(uname -s)"
-	winArch string // matches %PROCESSOR_ARCHITECTURE%
+	name      string
+	goos      string
+	goarch    string
+	shCase    string // matches "$(uname -m)-$(uname -s)"
+	winArch   string // matches %PROCESSOR_ARCHITECTURE%
+	jsTextLen int
 }
 
 const mohabbatMagic = "MOHABBAT"
@@ -32,4 +34,3 @@ type mohabbatMeta struct {
 // prebuildFn is set by prebuild.go on native (!wasip1) builds via init().
 // On WASM builds it remains nil; ModeBuild falls back to subprocess invocation.
 var prebuildFn func(ws string) error
-
