@@ -201,8 +201,8 @@ func assembleVegetable(ws, brainPath, buildDir, outputPath string) error {
 	for _, n := range lengths {
 		totalZoneB += n
 	}
-	fmt.Printf("[mohabbat]  zone_a=%s zone_b=%s pool=%s\n", formatSize(int64(len(zoneA))), formatSize(int64(totalZoneB)), formatSize(int64(poolLen)))
-	fmt.Printf("[mohabbat]  Wrote %s (%s bytes)\n", outputPath, formatSize(int64(len(zoneA)+totalZoneB+int(poolLen))))
+	fmt.Printf("🍆  zone_a=%s zone_b=%s pool=%s\n", formatSize(int64(len(zoneA))), formatSize(int64(totalZoneB)), formatSize(int64(poolLen)))
+	fmt.Printf("🍆  Wrote %s (%s bytes)\n", outputPath, formatSize(int64(len(zoneA)+totalZoneB+int(poolLen))))
 	return nil
 }
 
@@ -212,6 +212,8 @@ func buildZoneA(offsets, lengths []int, nodeJsLen int) string {
 :; case "$(uname -m)-$(uname -s)" in
 :; x86_64-Linux) S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}} ;;
 :; aarch64-Linux) S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}} ;;
+:; x86_64-Darwin) S_OFF={{DARWIN_AMD_OFF}}; S_LEN={{DARWIN_AMD_LEN}} ;;
+:; arm64-Darwin) S_OFF={{DARWIN_ARM_OFF}}; S_LEN={{DARWIN_ARM_LEN}} ;;
 :; esac
 :; USE_NODE=0
 :; [ -n "$MOHABBAT_USE_NODE" ] && USE_NODE=1
@@ -230,7 +232,7 @@ func buildZoneA(offsets, lengths []int, nodeJsLen int) string {
 :;     exit $?
 :;   fi
 :; fi
-:; [ "$S_LEN" = "0" ] && { echo "[mohabbat] Unsupported platform and node not available"; exit 1; }
+:; [ "$S_LEN" = "0" ] && { echo "🍆 Unsupported platform and node not available"; exit 1; }
 :; TMP_DIR="${TMPDIR:-/tmp}"; [ -d "./target" ] && TMP_DIR="./target"; TMP_EXE="$TMP_DIR/moh-$$"; dd if="$ME" bs=1 skip="$S_OFF" count="$S_LEN" of="$TMP_EXE" 2>/dev/null; chmod +x "$TMP_EXE"; "$TMP_EXE" "$ME" "$@"; RET=$?; rm "$TMP_EXE"; exit $RET
 `
 	const tmplWIN = `@echo off
@@ -282,6 +284,7 @@ if "!S_LEN!"=="0" (
     echo [mohabbat] This vegetable does not support !ARCH! on Windows and node is not available.
     exit /b 1
 )
+set "MOHABBAT_VEGETABLE_PATH=!ME!"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$a=[IO.File]::ReadAllBytes($env:ME); $b=New-Object byte[] !S_LEN!; [Array]::Copy($a, [int64]!S_OFF!, $b, 0, [int]!S_LEN!); [IO.File]::WriteAllBytes($env:TMP_EXE, $b)"
 "!TMP_EXE!" "!ME!" %*
 set "RET=!ERRORLEVEL!"
@@ -295,6 +298,8 @@ exit /b !RET!
 	node := -1
 	linuxAMD := -1
 	linuxARM := -1
+	darwinAMD := -1
+	darwinARM := -1
 	winAMD := -1
 	winARM := -1
 	if i, ok := idx["node"]; ok {
@@ -305,6 +310,12 @@ exit /b !RET!
 	}
 	if i, ok := idx["linux-arm64"]; ok {
 		linuxARM = i
+	}
+	if i, ok := idx["darwin-amd64"]; ok {
+		darwinAMD = i
+	}
+	if i, ok := idx["darwin-arm64"]; ok {
+		darwinARM = i
 	}
 	if i, ok := idx["win-amd64"]; ok {
 		winAMD = i
@@ -332,6 +343,10 @@ exit /b !RET!
 	s = replace(s, "{{LINUX_AMD_LEN}}", linuxAMD, lengths)
 	s = replace(s, "{{LINUX_ARM_OFF}}", linuxARM, offsets)
 	s = replace(s, "{{LINUX_ARM_LEN}}", linuxARM, lengths)
+	s = replace(s, "{{DARWIN_AMD_OFF}}", darwinAMD, offsets)
+	s = replace(s, "{{DARWIN_AMD_LEN}}", darwinAMD, lengths)
+	s = replace(s, "{{DARWIN_ARM_OFF}}", darwinARM, offsets)
+	s = replace(s, "{{DARWIN_ARM_LEN}}", darwinARM, lengths)
 	s = replace(s, "{{WIN_AMD_OFF}}", winAMD, offsets)
 	s = replace(s, "{{WIN_AMD_LEN}}", winAMD, lengths)
 	s = replace(s, "{{WIN_ARM_OFF}}", winARM, offsets)
@@ -390,6 +405,42 @@ func ensureBrotStubs(dir string) error {
 		if err := os.WriteFile(filepath.Join(dir, lib), emptyArchive, 0o644); err != nil {
 			return fmt.Errorf("write stub %s: %w", lib, err)
 		}
+	}
+	return nil
+}
+
+// ensureDarwinStubs creates a minimal libSystem.B.tbd stub in dir that lets
+// lld (darwin-lld flavour) satisfy the libSystem link dependency of the darwin
+// brot binary when cross-linking from a non-macOS host.  At runtime macOS
+// always provides the real /usr/lib/libSystem.B.dylib, so the stub is only
+// needed at link time.
+func ensureDarwinStubs(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("mkdir darwin-stubs: %w", err)
+	}
+	// TBD v4 stub listing every libSystem symbol used by brot (darwin.rs +
+	// allocator.rs + panic handler).  Both x86_64-macos and arm64-macos
+	// variants are declared so one stub covers both target architectures.
+	const tbdContent = `--- !tapi-tbd
+tbd-version:     4
+targets:         [ x86_64-macos, arm64-macos ]
+install-name:    '/usr/lib/libSystem.B.dylib'
+current-version: 1292.100.35
+compatibility-version: 1
+exports:
+  - targets:     [ x86_64-macos, arm64-macos ]
+    symbols:     [ _exit, _abort, _fork, _waitpid, _execve, _open, _read,
+                   _write, _close, _lseek, _unlink, _fchmod, _getpid,
+                   _mmap, _munmap, _bzero, ___bzero, dyld_stub_binder ]
+...
+`
+	stubPath := filepath.Join(dir, "libSystem.tbd")
+	existing, err := os.ReadFile(stubPath)
+	if err == nil && string(existing) == tbdContent {
+		return nil // already up to date
+	}
+	if err := os.WriteFile(stubPath, []byte(tbdContent), 0o644); err != nil {
+		return fmt.Errorf("write libSystem.B.tbd: %w", err)
 	}
 	return nil
 }

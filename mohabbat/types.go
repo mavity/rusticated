@@ -1,11 +1,13 @@
 package mohabbat
 
-// Modern Four scope: linux/amd64, linux/arm64, windows/amd64, windows/arm64.
+// Modern Five scope: linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64.
 // Slot order is contractual - Zone A and patcher both depend on it.
 var slots = []slot{
 	{name: "node", goos: "js", goarch: "wasm"},
 	{name: "linux-amd64", goos: "linux", goarch: "amd64", shCase: "x86_64-Linux"},
 	{name: "linux-arm64", goos: "linux", goarch: "arm64", shCase: "aarch64-Linux"},
+	{name: "darwin-amd64", goos: "darwin", goarch: "amd64", shCase: "x86_64-Darwin"},
+	{name: "darwin-arm64", goos: "darwin", goarch: "arm64", shCase: "arm64-Darwin"},
 	{name: "win-amd64", goos: "windows", goarch: "amd64", winArch: "AMD64"},
 	{name: "win-arm64", goos: "windows", goarch: "arm64", winArch: "ARM64"},
 }
