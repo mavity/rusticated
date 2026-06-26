@@ -72,6 +72,11 @@ func main() {
 	// Otherwise, if the WASM reference is a path, use that.
 	if veg := os.Getenv("MOHABBAT_VEGETABLE_PATH"); veg != "" {
 		argSlice[0] = veg
+		// Polyglot launchers pass their own path as argv[1] so the host binary
+		// can locate the payload. Strip it so the guest never sees it.
+		if len(argSlice) > 1 && argSlice[1] == veg {
+			argSlice = append(argSlice[:1], argSlice[2:]...)
+		}
 	} else if _, err := strconv.ParseUint(ref, 10, 64); err != nil {
 		// ref is not a numeric FD, assume it is a path to the WASM file.
 		argSlice[0] = ref
