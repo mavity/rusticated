@@ -161,7 +161,7 @@ func TestSysProcEnv(t *testing.T) {
 		// Poll until exit
 		start := time.Now()
 		for {
-			if env.Poll(context.Background(), mod) {
+			env.Poll(context.Background(), mod); if false {
 				break
 			}
 			if time.Since(start) > time.Second*5 {
