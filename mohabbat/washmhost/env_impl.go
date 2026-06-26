@@ -65,6 +65,10 @@ func NewHostEnv() *HostEnv {
 	env.handles[2] = os.Stderr
 
 	env.args = os.Args
+	// Strip a leading "--" separator that `go run . -- [args]` passes through.
+	if len(env.args) > 1 && env.args[1] == "--" {
+		env.args = append(env.args[:1], env.args[2:]...)
+	}
 
 	var notifySigs = []os.Signal{syscall.SIGINT, syscall.SIGTERM}
 	if runtime.GOOS != "windows" {
@@ -291,6 +295,8 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_net_open), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("net_open")
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_net_accept), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64}, []api.ValueType{}).Export("net_accept")
+	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_net_lookup), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("net_lookup")
+	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_net_cert_verify), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("net_cert_verify")
 
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_process_spawn), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("process_spawn")
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_process_pipe), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).Export("process_pipe")

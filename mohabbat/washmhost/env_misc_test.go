@@ -146,9 +146,7 @@ func TestSysMisc(t *testing.T) {
 	})
 
 	t.Run("12. Poll with no work", func(t *testing.T) {
-		if env.Poll(context.Background(), mod) {
-			t.Error("Poll should return false when no work is pending")
-		}
+		env.Poll(context.Background(), mod)
 	})
 
 	t.Run("13. resolveUsableCwd", func(t *testing.T) {

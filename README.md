@@ -102,7 +102,7 @@ We call such binaries **🍆vegetables** and Mohabbat comes with Rust and Go int
 
 ## Terminology
 
-- **🍆vegetable** — a polyglot file produced by Mohabbat, typicall with extension `*.bat`.
+- **🍆vegetable** — a polyglot file produced by Mohabbat, typically with extension `*.bat`.
 - **Mohabbat** — the self-hosting vegetable that is also a builder. Its
   filename is `mohab.bat`.
 - **rusticated** — a set of APIs and libraries exposing those to create rich modern platform in WASM.
