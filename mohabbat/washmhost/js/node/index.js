@@ -415,22 +415,39 @@ export function makeBrainImports(hostState, argv) {
       const bLenNum = Number(bufferLen);
 
       const deliver = () => {
-        const n = Math.min(h.leftovers.length, bLenNum);
-        const chunk = h.leftovers.slice(0, n);
-        h.leftovers = h.leftovers.length > n ? h.leftovers.slice(n) : null;
         h.onData = null;
-        hs.enqueue(() => {
-          if (!hs.isOpActive(ovPtr, opId)) return;
-          guestWrite(bPtrNum, chunk);
-          hs.completeOp(ovPtr, opId, 0, 0, n);
-        });
+        if (h.error) {
+          hs.enqueue(() => {
+            if (!hs.isOpActive(ovPtr, opId)) return;
+            hs.completeOp(ovPtr, opId, mapErrno(h.error), 0, 0n);
+          });
+          return;
+        }
+
+        if (h.leftovers && h.leftovers.length > 0) {
+          const n = Math.min(h.leftovers.length, bLenNum);
+          const chunk = h.leftovers.slice(0, n);
+          h.leftovers = h.leftovers.length > n ? h.leftovers.slice(n) : null;
+          hs.enqueue(() => {
+            if (!hs.isOpActive(ovPtr, opId)) return;
+            guestWrite(bPtrNum, chunk);
+            hs.completeOp(ovPtr, opId, 0, 0, BigInt(n));
+          });
+          return;
+        }
+
+        if (h.closed) {
+          hs.enqueue(() => {
+            if (!hs.isOpActive(ovPtr, opId)) return;
+            hs.completeOp(ovPtr, opId, 0, 0, 0n);
+          });
+          return;
+        }
+
+        h.onData = deliver;
       };
 
-      if (h.leftovers && h.leftovers.length > 0) {
-        deliver();
-      } else {
-        h.onData = deliver;
-      }
+      deliver();
       return;
     }
 
@@ -676,18 +693,28 @@ export function makeBrainImports(hostState, argv) {
 
     if (isConnect) {
       const socket = net.createConnection({ host: addr, port: iPort });
-      const hItem = { type: 'socket', socket, leftovers: null, onData: null };
+      const hItem = { type: 'socket', socket, leftovers: null, onData: null, closed: false, error: null };
       const h = hs.allocHandle(hItem);
+
       socket.on('data', (chunk) => {
         if (!hItem.leftovers) hItem.leftovers = chunk;
         else hItem.leftovers = Buffer.concat([hItem.leftovers, chunk]);
         if (hItem.onData) hItem.onData();
       });
+      socket.on('end', () => {
+        hItem.closed = true;
+        if (hItem.onData) hItem.onData();
+      });
+      socket.on('error', (err) => {
+        hItem.error = err;
+        if (hItem.onData) hItem.onData();
+      });
+
       socket.once('connect', () => {
         hs.enqueue(() => hs.completeOp(ovPtr, opId, 0, 0, h));
       });
       socket.once('error', (e) => {
-        hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(e), 0, 0));
+        hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(e), 0, 0n));
       });
     } else {
       const server = net.createServer();
@@ -708,12 +735,20 @@ export function makeBrainImports(hostState, argv) {
     if (!h || h.type !== 'server') { writeOverlapped(hs.view, ovPtr, 22, 0, 0); return; }
     const opId = hs.registerOp(ovPtr);
     h.server.once('connection', (socket) => {
+      const shItem = { type: 'socket', socket, leftovers: null, onData: null, closed: false, error: null };
       socket.on('data', (chunk) => {
         if (!shItem.leftovers) shItem.leftovers = chunk;
         else shItem.leftovers = Buffer.concat([shItem.leftovers, chunk]);
         if (shItem.onData) shItem.onData();
       });
-      const shItem = { type: 'socket', socket, leftovers: null, onData: null };
+      socket.on('end', () => {
+        shItem.closed = true;
+        if (shItem.onData) shItem.onData();
+      });
+      socket.on('error', (err) => {
+        shItem.error = err;
+        if (shItem.onData) shItem.onData();
+      });
       const sh = hs.allocHandle(shItem);
       hs.enqueue(() => hs.completeOp(ovPtr, opId, 0, 0, sh));
     });
