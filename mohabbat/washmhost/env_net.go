@@ -293,10 +293,14 @@ func (h *HostEnv) sys_net_cert_verify(ctx context.Context, m api.Module, stack [
 			for _, c := range certs[1:] {
 				intermediates.AddCert(c)
 			}
+			roots, err := x509.SystemCertPool()
+			if err != nil {
+				roots = x509.NewCertPool()
+			}
 			opts := x509.VerifyOptions{
 				DNSName:       serverName,
 				Intermediates: intermediates,
-				// Roots = nil → OS trust store
+				Roots:         roots,
 			}
 			if _, err := certs[0].Verify(opts); err != nil {
 				return 0, 0
