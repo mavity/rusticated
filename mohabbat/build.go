@@ -115,7 +115,7 @@ func ModeDevRun(ws, projectDir string, extraArgs []string, verbose bool) error {
 	if err := buildProjectToWasm(ws, absProject, wasmPath, verbose); err != nil {
 		return err
 	}
-	return runUnderWashmhost(ws, wasmPath, extraArgs)
+	return runUnderWashmhost(ws, wasmPath, extraArgs, verbose)
 }
 
 // buildAllSlots builds brot (cargo) and washmhost for all Modern Four slots.
