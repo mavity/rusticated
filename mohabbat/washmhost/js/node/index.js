@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import net from 'node:net';
+import dns from 'node:dns';
 import child_process from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { PassThrough } from 'node:stream';
@@ -154,9 +155,15 @@ class HostState {
     if (bh >= 3n) {
       try {
         if (item.type === 'file')        fs.close(item.fd, () => {});
-        else if (item.type === 'socket') item.socket.destroy();
+        else if (item.type === 'socket') {
+          item.socket.destroy();
+          if (item.leftovers) item.leftovers = null;
+        }
         else if (item.type === 'server') item.server.close();
-        else if (item.type === 'pipe_r') item.stream.destroy();
+        else if (item.type === 'pipe_r') {
+          item.stream.destroy();
+          if (item.leftovers) item.leftovers = null;
+        }
         else if (item.type === 'pipe_w') item.stream.destroy();
         else if (item.type === 'dirscan' && item._dir) item._dir.close().catch(() => {});
       } catch (_) { /* best effort */ }
@@ -393,33 +400,26 @@ export function makeBrainImports(hostState, argv) {
     }
 
     if (h.type === 'socket' || h.type === 'pipe_r') {
-      const stream = h.socket || h.stream;
-      const onData = (chunk) => {
-        cleanup();
-        const n = Math.min(chunk.length, bLen);
-        const slice = chunk.slice(0, n);
+      const bPtrNum = Number(bufferPtr);
+      const bLenNum = Number(bufferLen);
+
+      const deliver = () => {
+        const n = Math.min(h.leftovers.length, bLenNum);
+        const chunk = h.leftovers.slice(0, n);
+        h.leftovers = h.leftovers.length > n ? h.leftovers.slice(n) : null;
+        h.onData = null;
         hs.enqueue(() => {
           if (!hs.isOpActive(ovPtr, opId)) return;
-          guestWrite(bPtr, slice);
+          guestWrite(bPtrNum, chunk);
           hs.completeOp(ovPtr, opId, 0, 0, n);
         });
       };
-      const onEnd = () => {
-        cleanup();
-        hs.enqueue(() => hs.completeOp(ovPtr, opId, 0, 0, 0));
-      };
-      const onError = (e) => {
-        cleanup();
-        hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(e), 0, 0));
-      };
-      const cleanup = () => {
-        stream.removeListener('data', onData);
-        stream.removeListener('end', onEnd);
-        stream.removeListener('error', onError);
-      };
-      stream.once('data', onData);
-      stream.once('end', onEnd);
-      stream.once('error', onError);
+
+      if (h.leftovers && h.leftovers.length > 0) {
+        deliver();
+      } else {
+        h.onData = deliver;
+      }
       return;
     }
 
@@ -665,8 +665,14 @@ export function makeBrainImports(hostState, argv) {
 
     if (isConnect) {
       const socket = net.createConnection({ host: addr, port: iPort });
+      const hItem = { type: 'socket', socket, leftovers: null, onData: null };
+      const h = hs.allocHandle(hItem);
+      socket.on('data', (chunk) => {
+        if (!hItem.leftovers) hItem.leftovers = chunk;
+        else hItem.leftovers = Buffer.concat([hItem.leftovers, chunk]);
+        if (hItem.onData) hItem.onData();
+      });
       socket.once('connect', () => {
-        const h = hs.allocHandle({ type: 'socket', socket });
         hs.enqueue(() => hs.completeOp(ovPtr, opId, 0, 0, h));
       });
       socket.once('error', (e) => {
@@ -691,11 +697,127 @@ export function makeBrainImports(hostState, argv) {
     if (!h || h.type !== 'server') { writeOverlapped(hs.view, ovPtr, 22, 0, 0); return; }
     const opId = hs.registerOp(ovPtr);
     h.server.once('connection', (socket) => {
-      const sh = hs.allocHandle({ type: 'socket', socket });
+      socket.on('data', (chunk) => {
+        if (!shItem.leftovers) shItem.leftovers = chunk;
+        else shItem.leftovers = Buffer.concat([shItem.leftovers, chunk]);
+        if (shItem.onData) shItem.onData();
+      });
+      const shItem = { type: 'socket', socket, leftovers: null, onData: null };
+      const sh = hs.allocHandle(shItem);
       hs.enqueue(() => hs.completeOp(ovPtr, opId, 0, 0, sh));
     });
     h.server.once('error', (e) => {
       hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(e), 0, 0));
+    });
+  }
+
+  // ── net_lookup ───────────────────────────────────────────────────────────────
+  // Signature: (ovPtr i32, namePtr i32, nameLen i32, bufPtr i32, bufLen i32)
+  function net_lookup(ovPtr, namePtr, nameLen, bufPtr, bufLen) {
+    const name = Buffer.from(hs.getGuestSlice(Number(namePtr), Number(nameLen))).toString();
+    const opId = hs.registerOp(ovPtr);
+    dns.lookup(name, { all: true }, (err, addresses) => {
+      hs.enqueue(() => {
+        if (!hs.isOpActive(ovPtr, opId)) return;
+        if (err) { hs.completeOp(ovPtr, opId, mapErrno(err), 0, 0); return; }
+
+        const entries = [];
+        for (const a of addresses) {
+          if (a.family === 4) {
+            const parts = a.address.split('.').map(Number);
+            entries.push({ af: 4, data: Buffer.from(parts) });
+          } else if (a.family === 6) {
+            try {
+              // Simple IPv6 parser
+              let ip = a.address;
+              if (ip.includes('::')) {
+                const [pre, post] = ip.split('::').map(s => s ? s.split(':') : []);
+                const mid = new Array(8 - (pre.length + post.length)).fill('0');
+                ip = [...pre, ...mid, ...post].join(':');
+              }
+              const parts = ip.split(':');
+              const buf = Buffer.alloc(16);
+              for (let i = 0; i < 8; i++) buf.writeUInt16BE(parseInt(parts[i] || '0', 16), i * 2);
+              entries.push({ af: 6, data: buf });
+            } catch (_) {}
+          }
+        }
+
+        const N = entries.length;
+        let dataBytes = 0;
+        for (const e of entries) dataBytes += e.data.length;
+        const totalSize = 4 + 4 + N + dataBytes;
+        const payload = Buffer.alloc(totalSize);
+        payload.writeUInt32LE(totalSize, 0);
+        payload.writeUInt32LE(N, 4);
+        let off = 8;
+        for (const e of entries) payload[off++] = e.af;
+        for (const e of entries) {
+          e.data.copy(payload, off);
+          off += e.data.length;
+        }
+
+        const toWrite = Math.min(Number(bufLen), payload.length);
+        if (toWrite > 0) guestWrite(Number(bufPtr), payload.slice(0, toWrite));
+        hs.completeOp(ovPtr, opId, 0, 0, BigInt(totalSize));
+      });
+    });
+  }
+
+  // ── net_cert_verify ──────────────────────────────────────────────────────────
+  // Signature: (ovPtr i32, namePtr i32, nameLen i32, chainPtr i32, chainLen i32)
+  function net_cert_verify(ovPtr, namePtr, nameLen, chainPtr, chainLen) {
+    const name = Buffer.from(hs.getGuestSlice(Number(namePtr), Number(nameLen))).toString();
+    const chainBuf = Buffer.from(hs.getGuestSlice(Number(chainPtr), Number(chainLen)));
+    const opId = hs.registerOp(ovPtr);
+
+    // Run in a promise to ensure it's deferred
+    Promise.resolve().then(() => {
+      try {
+        if (chainBuf.length < 4) throw { code: 'EINVAL' };
+        const count = chainBuf.readUInt32LE(0);
+        if (count === 0) throw { code: 'EINVAL' };
+
+        const headerSize = 4 + 4 * count;
+        if (chainBuf.length < headerSize) throw { code: 'EINVAL' };
+
+        const certs = [];
+        let off = headerSize;
+        for (let i = 0; i < count; i++) {
+          const dlen = chainBuf.readUInt32LE(4 + 4 * i);
+          if (off + dlen > chainBuf.length) throw { code: 'EINVAL' };
+          const der = chainBuf.slice(off, off + dlen);
+          certs.push(new crypto.X509Certificate(der));
+          off += dlen;
+        }
+
+        const leaf = certs[0];
+        // 1. Check identity (SANs / CN)
+        if (!leaf.checkHost(name)) {
+          throw { code: 'EACCES', message: 'Hostname mismatch' };
+        }
+
+        // 2. Check validity dates
+        const now = new Date();
+        if (now < new Date(leaf.validFrom) || now > new Date(leaf.validTo)) {
+           throw { code: 'EACCES', message: 'Certificate expired or not yet valid' };
+        }
+
+        // 3. Best-effort intermediate check
+        for (const cert of certs.slice(1)) {
+          if (now < new Date(cert.validFrom) || now > new Date(cert.validTo)) {
+            throw { verifyFailed: true };
+          }
+        }
+
+        hs.enqueue(() => hs.completeOp(ovPtr, opId, 0, 0, 1n));
+      } catch (e) {
+        if (e.verifyFailed || e.code === 'EACCES') {
+           hs.enqueue(() => hs.completeOp(ovPtr, opId, 0, 0, 0));
+        } else {
+           hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(e), 0, 0));
+        }
+      }
     });
   }
 
@@ -969,6 +1091,8 @@ export function makeBrainImports(hostState, argv) {
     path_rename,
     net_open,
     net_accept,
+    net_lookup,
+    net_cert_verify,
     process_spawn,
     process_pipe,
     process_wait,
