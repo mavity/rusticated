@@ -115,7 +115,7 @@ func main() {
 
 	// Run washmhost
 	// Pass any additional arguments
-	runArgs := []string{"run", ".", "payload.wasm"}
+	runArgs := []string{"run", ".", outputWasm}
 	if len(os.Args) > 2 {
 		runArgs = append(runArgs, os.Args[2:]...)
 	}
