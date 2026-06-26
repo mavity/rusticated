@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import net from 'node:net';
 import dns from 'node:dns';
+import tls from 'node:tls';
 import child_process from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { PassThrough } from 'node:stream';
@@ -13,6 +14,16 @@ const VERBOSE = false; // {{VERBOSE}}
 const L = (...args) => (VERBOSE || process.env.MOHABBAT_VERBOSE) && console.error(...args);
 
 const FLAG_COMPLETED = 1;
+
+let cachedRootCerts = null;
+function getRootCerts() {
+  if (cachedRootCerts) return cachedRootCerts;
+  cachedRootCerts = tls.rootCertificates.map(pem => {
+    try { return new crypto.X509Certificate(pem); }
+    catch (e) { return null; }
+  }).filter(c => c !== null);
+  return cachedRootCerts;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // errno constants (mirrors Go's mapErrno)
@@ -771,7 +782,6 @@ export function makeBrainImports(hostState, argv) {
     const chainBuf = Buffer.from(hs.getGuestSlice(Number(chainPtr), Number(chainLen)));
     const opId = hs.registerOp(ovPtr);
 
-    // Run in a promise to ensure it's deferred
     Promise.resolve().then(() => {
       try {
         if (chainBuf.length < 4) throw { code: 'EINVAL' };
@@ -791,32 +801,59 @@ export function makeBrainImports(hostState, argv) {
           off += dlen;
         }
 
-        const leaf = certs[0];
-        // 1. Check identity (SANs / CN)
-        if (!leaf.checkHost(name)) {
-          throw { code: 'EACCES', message: 'Hostname mismatch' };
-        }
-
-        // 2. Check validity dates
         const now = new Date();
-        if (now < new Date(leaf.validFrom) || now > new Date(leaf.validTo)) {
-           throw { code: 'EACCES', message: 'Certificate expired or not yet valid' };
+        const leaf = certs[0];
+
+        // 1. Check hostname
+        if (!leaf.checkHost(name)) {
+          hs.enqueue(() => hs.completeOp(ovPtr, opId, 0, 0, 0n));
+          return;
         }
 
-        // 3. Best-effort intermediate check
-        for (const cert of certs.slice(1)) {
+        // 2. Verify all certs in provided chain are currently valid
+        for (const cert of certs) {
           if (now < new Date(cert.validFrom) || now > new Date(cert.validTo)) {
-            throw { verifyFailed: true };
+            hs.enqueue(() => hs.completeOp(ovPtr, opId, 0, 0, 0n));
+            return;
           }
         }
 
-        hs.enqueue(() => hs.completeOp(ovPtr, opId, 0, 0, 1n));
-      } catch (e) {
-        if (e.verifyFailed || e.code === 'EACCES') {
-           hs.enqueue(() => hs.completeOp(ovPtr, opId, 0, 0, 0));
-        } else {
-           hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(e), 0, 0));
+        // 3. Verify the chain links (each cert signed by the next)
+        for (let i = 0; i < certs.length - 1; i++) {
+          if (!certs[i].verify(certs[i + 1].publicKey)) {
+            hs.enqueue(() => hs.completeOp(ovPtr, opId, 0, 0, 0n));
+            return;
+          }
         }
+
+        // 4. Verify the anchor (last cert in chain signed by a trusted root)
+        const last = certs[certs.length - 1];
+        const roots = getRootCerts();
+        let verified = false;
+
+        // Check if last is signed by a root
+        for (const root of roots) {
+          if (last.issuer === root.subject) {
+            if (last.verify(root.publicKey)) {
+              verified = true;
+              break;
+            }
+          }
+        }
+
+        // Or if last IS a root we trust (self-signed)
+        if (!verified && last.subject === last.issuer) {
+          for (const root of roots) {
+            if (last.fingerprint === root.fingerprint) {
+              verified = true;
+              break;
+            }
+          }
+        }
+
+        hs.enqueue(() => hs.completeOp(ovPtr, opId, 0, 0, verified ? 1n : 0n));
+      } catch (e) {
+        hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(e), 0, 0n));
       }
     });
   }
