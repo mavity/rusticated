@@ -458,6 +458,24 @@ func generateGoOverlay(ws, goroot string) error {
 	if err != nil {
 		return fmt.Errorf("patch path.go: %w", err)
 	}
+
+	// PATCH: crypto/x509/cert_pool.go to allow access to certs for net_cert_verify.
+	certPoolSrc := filepath.Join(goroot, "src/crypto/x509/cert_pool.go")
+	if certPoolContent, err := os.ReadFile(certPoolSrc); err == nil {
+		certPoolStr := string(certPoolContent)
+		certPoolStr, err = patchGoStr(certPoolStr, []regastPatch{
+			{pat: `⦅type CertPool struct \{ (.*) \}⦆`,
+				repl: "type CertPool struct {\n\t$2\n\t// Rusticated extension\n\tCerts []*Certificate\n}"},
+			{pat: `⦅func \(s \*CertPool\) AddCert\(cert \*Certificate\) \{ (.*) \}⦆`,
+				repl: "func (s *CertPool) AddCert(cert *Certificate) {\n\ts.Certs = append(s.Certs, cert)\n\t$2\n}"},
+		})
+		if err == nil {
+			if err := os.WriteFile(filepath.Join(genDir, "crypto/x509/cert_pool.go"), []byte(certPoolStr), 0644); err != nil {
+				return fmt.Errorf("failed to write patched crypto/x509/cert_pool.go: %w", err)
+			}
+		}
+	}
+
 	if strings.Contains(pathGoStr, "os.PathSeparator") {
 		return fmt.Errorf("could not patch Separator const block in path.go")
 	}
@@ -604,6 +622,99 @@ func generateGoOverlay(ws, goroot string) error {
 		return fmt.Errorf("failed to write patched os_wasm.go: %w", err)
 	}
 
+	// Algorithmic patch for src/net/net_fake.go.
+	// Replace the socket() function body with a redirect to rusticatedSocket()
+	// defined in our new overlay file rusticated-go/net/net_rusticated.go.
+	// With socket() redirected, fd_fake.go routes all I/O through poll.FD which
+	// calls syscall.Read/Write — the real host ABI.
+	if err := os.MkdirAll(filepath.Join(genDir, "net"), 0755); err != nil {
+		return fmt.Errorf("failed to create gen net dir: %w", err)
+	}
+	netFakeSrc := filepath.Join(goroot, "src/net/net_fake.go")
+	netFakeContent, err := os.ReadFile(netFakeSrc)
+	if err != nil {
+		return fmt.Errorf("failed to read src/net/net_fake.go: %w", err)
+	}
+	netFakeStr := string(netFakeContent)
+	netFakeStr, err = patchGoStr(netFakeStr, []regastPatch{
+		// Replace the entire socket() function body with a call to rusticatedSocket.
+		// rusticatedSocket is defined in the new overlay file net_rusticated.go.
+		{pat: `⦅func socket\((.*)\) \((.*)\) \{[\s\S]*?\}⦆`,
+			repl: "func socket($2) ($3) {\n\treturn rusticatedSocket(ctx, net, family, sotype, proto, ipv6only, laddr, raddr, ctrlCtxFn)\n}"},
+	})
+	if err != nil {
+		return fmt.Errorf("patch net_fake.go: %w", err)
+	}
+	// Verify the patch landed (socket() now calls rusticatedSocket, not newFakeNetFD).
+	if !strings.Contains(netFakeStr, "rusticatedSocket(") {
+		return fmt.Errorf("could not patch socket() in net_fake.go: rusticatedSocket call not inserted")
+	}
+
+	// PATCH: net/lookup_unix.go to preserve Context across DNS lookups for http.Get stability.
+	lookupUnixSrc := filepath.Join(goroot, "src/net/lookup_unix.go")
+	if lookupUnixContent, err := os.ReadFile(lookupUnixSrc); err == nil {
+		lookupUnixStr := string(lookupUnixContent)
+		lookupUnixStr, err = patchGoStr(lookupUnixStr, []regastPatch{
+			{pat: `⦅func \(r \*Resolver\) lookupHost\(ctx context\.Context, host string\) \(addrs \[\]string, err error\) \{ (.*) \}⦆`,
+				repl: "func (r *Resolver) lookupHost(ctx context.Context, host string) (addrs []string, err error) {\n\treturn rusticatedLookupHost(ctx, host)\n}"},
+			{pat: `⦅func \(r \*Resolver\) lookupIP\(ctx context\.Context, network, host string\) \(ips \[\]IPAddr, err error\) \{ (.*) \}⦆`,
+				repl: "func (r *Resolver) lookupIP(ctx context.Context, network, host string) (ips []IPAddr, err error) {\n\treturn rusticatedLookupIP(ctx, network, host)\n}"},
+			{pat: `⦅func \(r \*Resolver\) lookupPort\(ctx context\.Context, network, service string\) \(port int, err error\) \{ (.*) \}⦆`,
+				repl: "func (r *Resolver) lookupPort(ctx context.Context, network, service string) (port int, err error) {\n\treturn rusticatedLookupPort(ctx, network, service)\n}"},
+		})
+		if err == nil {
+			if err := os.WriteFile(filepath.Join(genDir, "net/lookup_unix.go"), []byte(lookupUnixStr), 0644); err != nil {
+				return fmt.Errorf("failed to write patched net/lookup_unix.go: %w", err)
+			}
+		}
+	}
+
+	genNetFakeGo := filepath.Join(genDir, "net/net_fake.go")
+	if err := os.WriteFile(genNetFakeGo, []byte(netFakeStr), 0644); err != nil {
+		return fmt.Errorf("failed to write patched net_fake.go: %w", err)
+	}
+
+	// Algorithmic patch for src/crypto/x509/root_unix.go.
+	// Remove wasip1 from the build constraint so it no longer provides
+	// loadSystemRoots for wasip1 — our root_rusticated.go overlay takes over.
+	if err := os.MkdirAll(filepath.Join(genDir, "crypto/x509"), 0755); err != nil {
+		return fmt.Errorf("failed to create gen crypto/x509 dir: %w", err)
+	}
+	rootUnixSrc := filepath.Join(goroot, "src/crypto/x509/root_unix.go")
+	rootUnixContent, err := os.ReadFile(rootUnixSrc)
+	if err != nil {
+		return fmt.Errorf("failed to read src/crypto/x509/root_unix.go: %w", err)
+	}
+	rootUnixStr := strings.ReplaceAll(string(rootUnixContent), " || wasip1", "")
+	genRootUnixGo := filepath.Join(genDir, "crypto/x509/root_unix.go")
+	if err := os.WriteFile(genRootUnixGo, []byte(rootUnixStr), 0644); err != nil {
+		return fmt.Errorf("failed to write patched root_unix.go: %w", err)
+	}
+
+	// Algorithmic patch for src/crypto/x509/verify.go.
+	// Add "wasip1" to the GOOS platform check so that c.systemVerify() is called
+	// for wasip1 guests (the method is defined in root_rusticated.go).
+	verifySrc := filepath.Join(goroot, "src/crypto/x509/verify.go")
+	verifyContent, err := os.ReadFile(verifySrc)
+	if err != nil {
+		return fmt.Errorf("failed to read src/crypto/x509/verify.go: %w", err)
+	}
+	verifyStr := strings.ReplaceAll(
+		string(verifyContent),
+		`runtime.GOOS == "windows" || runtime.GOOS == "darwin" || runtime.GOOS == "ios"`,
+		`runtime.GOOS == "windows" || runtime.GOOS == "darwin" || runtime.GOOS == "ios" || runtime.GOOS == "wasip1"`,
+	)
+	genVerifyGo := filepath.Join(genDir, "crypto/x509/verify.go")
+	if err := os.WriteFile(genVerifyGo, []byte(verifyStr), 0644); err != nil {
+		return fmt.Errorf("failed to write patched verify.go: %w", err)
+	}
+
+	genCertPoolGo := filepath.Join(genDir, "crypto/x509/cert_pool.go")
+	if _, err := os.Stat(genCertPoolGo); err != nil {
+		// If not already written (e.g. patch failed or skipped), write original at least?
+		// No, we want to fail fast if the patch failed.
+	}
+
 	replacements := [][2]string{
 		// runtime
 		{"src/runtime/lock_wasip1.go", canon(filepath.Join(overlayDir, "runtime/lock_rusticated.go"))},
@@ -637,17 +748,29 @@ func generateGoOverlay(ws, goroot string) error {
 		{"src/path/filepath/path_unix.go", canon(genPathUnix)},
 		// net/http (generated patch)
 		{"src/net/http/fs.go", canon(genFsGo)},
+		// net (generated patch — socket() redirected to rusticatedSocket)
+		{"src/net/net_fake.go", canon(genNetFakeGo)},
+		{"src/net/lookup_unix.go", canon(filepath.Join(genDir, "net/lookup_unix.go"))},
+		// net (new overlay file — rusticatedSocket + DNS init)
+		{"src/net/net_rusticated.go", canon(filepath.Join(overlayDir, "net/net_rusticated.go"))},
 		// internal/filepathlite (generated patches)
 		{"src/internal/filepathlite/path_nonwindows.go", canon(filepath.Join(overlayDir, "internal/filepathlite/path_nonwindows.go"))},
 		{"src/internal/filepathlite/path_unix.go", canon(genLiteGo)},
+		// net/http transport: wasip1-specific default timeout override
+		// crypto/x509 root CA injection
+		{"src/crypto/x509/root_unix.go", canon(genRootUnixGo)},
+		{"src/crypto/x509/cert_pool.go", canon(genCertPoolGo)},
+		{"src/crypto/x509/verify.go", canon(genVerifyGo)},
+		{"src/crypto/x509/root_rusticated.go", canon(filepath.Join(overlayDir, "crypto/x509/root_rusticated.go"))},
 	}
 
 	var entries strings.Builder
 	first := true
 	for _, r := range replacements {
 		srcPath := filepath.Join(goroot, r[0])
-		// Allow adding new files to syscall/runtime via overlay even if they don't exist in SDK
-		if !strings.Contains(r[0], "log_rusticated") {
+		// Allow adding new files to syscall/runtime/net/crypto via overlay even if they don't exist in SDK
+		isNewFile := strings.Contains(r[0], "log_rusticated") || strings.Contains(r[0], "net_rusticated") || strings.Contains(r[0], "root_rusticated") || strings.Contains(r[0], "transport_rusticated")
+		if !isNewFile {
 			if _, err := os.Stat(srcPath); err != nil {
 				fmt.Fprintf(os.Stderr, "🍆  overlay: source not found: %s\n", srcPath)
 				continue
