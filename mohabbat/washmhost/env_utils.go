@@ -18,16 +18,16 @@ func mapErrno(err error) uint32 {
 		return 0
 	}
 	if os.IsNotExist(err) {
-		return 2 // ENOENT
+		return 44 // ENOENT (wasip1)
 	}
 	if os.IsPermission(err) {
-		return 13 // EACCES
+		return 2 // EACCES (wasip1)
 	}
 	var errno syscall.Errno
 	if errors.As(err, &errno) {
 		return uint32(errno)
 	}
-	return 5 // EIO
+	return 29 // EIO (wasip1)
 }
 
 func resolveUsableCwd() (string, error) {

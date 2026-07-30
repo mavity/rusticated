@@ -155,6 +155,48 @@ func (h *HostEnv) sys_read(ctx context.Context, m api.Module, stack []uint64) {
 	}()
 }
 
+func (h *HostEnv) sys_seek(ctx context.Context, m api.Module, stack []uint64) {
+	ovPtr := uint32(stack[0])
+	handle := stack[1]
+	offset := int64(stack[2])
+	whence := int(uint32(stack[3]))
+
+	h.mu.Lock()
+	fAny, ok := h.handles[handle]
+	h.mu.Unlock()
+
+	if !ok {
+		writeOverlapped(m, ovPtr, 9, 0, 0) // EBADF
+		return
+	}
+	seeker, isSeeker := fAny.(interface {
+		Seek(int64, int) (int64, error)
+	})
+	if !isSeeker {
+		writeOverlapped(m, ovPtr, 9, 0, 0) // EBADF: handle is not seekable
+		return
+	}
+
+	state := h.RegisterOp(ovPtr, fAny)
+	go func() {
+		newOff, err := seeker.Seek(offset, whence)
+		retCode := uint32(0)
+		if err != nil {
+			retCode = mapErrno(err)
+		}
+		h.fileOpsQueue <- func() {
+			defer h.DecOpsFor(state)
+			if !h.IsOpActive(ovPtr, state.opID) {
+				return
+			}
+			h.mu.Lock()
+			delete(h.activeOps, ovPtr)
+			h.mu.Unlock()
+			writeOverlapped(m, ovPtr, retCode, 0, uint64(newOff))
+		}
+	}()
+}
+
 func (h *HostEnv) sys_write(ctx context.Context, m api.Module, stack []uint64) {
 	ovPtr := uint32(stack[0])
 	handle := stack[1]
