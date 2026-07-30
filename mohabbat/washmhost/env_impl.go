@@ -280,6 +280,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_timer_set), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("timer_set")
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_read), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("read")
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_write), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("write")
+	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_seek), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI64, api.ValueTypeI32}, []api.ValueType{}).Export("seek")
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_handle_close), []api.ValueType{api.ValueTypeI64}, []api.ValueType{}).Export("handle_close")
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_path_open), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("path_open")
 	builder.NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(h.sys_dir_read), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("dir_read")
