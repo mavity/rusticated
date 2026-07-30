@@ -324,20 +324,35 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 }
 
 func (h *HostEnv) Poll(ctx context.Context, mod api.Module) {
-	// 1. Process anything already pending to ensure we don't block if work is ready.
+	// 1. Drain every completion that is already ready, writing them into guest
+	// memory. Track whether we delivered anything.
+	delivered := false
 	for {
 		select {
 		case op := <-h.fileOpsQueue:
 			op()
+			delivered = true
 		case state := <-h.pendingSignals:
 			h.handleSignal(mod, state)
+			delivered = true
 		default:
-			goto block
+			goto check
 		}
 	}
 
-block:
-	// 2. If no work was found, block until at least one event arrives.
+check:
+	// 2. If we delivered at least one completion, return immediately so the
+	// driver loop re-enters the guest to consume it. We must NOT block here just
+	// because other ops (e.g. the netpoll deadline timer) remain outstanding —
+	// doing so would starve the guest of the completion we just delivered until
+	// that unrelated timer fires. This mirrors the JS host's drain→run→await loop.
+	if delivered {
+		return
+	}
+
+	// 3. Nothing was ready. If the guest is genuinely waiting on outstanding
+	// ops, block until at least one event arrives, then return so the guest can
+	// consume it on re-entry.
 	if h.HasOutstandingOps() {
 		// Periodically log status if we are stuck.
 		if time.Since(h.lastLog) > 5*time.Second {
@@ -358,18 +373,6 @@ block:
 			return
 		}
 	}
-
-	// 3. Drain any other immediate completions that arrived while processing.
-	for {
-		select {
-		case op := <-h.fileOpsQueue:
-			op()
-		case state := <-h.pendingSignals:
-			h.handleSignal(mod, state)
-		default:
-			return
-		}
-	}
 }
 
 func (h *HostEnv) handleSignal(mod api.Module, state *OpState) {
@@ -380,4 +383,7 @@ func (h *HostEnv) handleSignal(mod api.Module, state *OpState) {
 		writeOverlapped(mod, state.ovPtr, 0, 0, uint64(state.signum))
 	}
 	h.DecOpsFor(state)
+}
+func (h *HostEnv) log(format string, a ...interface{}) {
+	debugLog(format+"\n", a...)
 }

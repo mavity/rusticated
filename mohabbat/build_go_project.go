@@ -48,11 +48,11 @@ func buildGoProjectWasm(ws, absProjectDir, outputWasm string, verbose bool) erro
 
 	args := []string{"build", "-buildmode=c-shared",
 		"-overlay", effectiveOverlay,
-		"-trimpath", "-ldflags=-s -w",
-		"-o", outputWasm, "."}
+		"-trimpath", "-ldflags=-s -w"}
 	if verbose {
 		args = append(args, "-tags=verbose")
 	}
+	args = append(args, "-o", outputWasm, ".")
 	cmd := exec.Command(goBin, args...)
 	cmd.Dir = absProjectDir
 	env := os.Environ()
@@ -92,11 +92,11 @@ func buildBrainWasm(ws, outputWasm string, verbose bool) error {
 	goBin := goBinFromRoot(goroot)
 	args := []string{"build", "-buildmode=c-shared",
 		"-overlay", overlayPath,
-		"-trimpath", "-ldflags=-s -w",
-		"-o", outputWasm, "."}
+		"-trimpath", "-ldflags=-s -w"}
 	if verbose {
 		args = append(args, "-tags=verbose")
 	}
+	args = append(args, "-o", outputWasm, ".")
 	cmd := exec.Command(goBin, args...)
 	cmd.Dir = ws
 	env := os.Environ()
@@ -138,10 +138,11 @@ func goBuild(ws, pkgDir string, s slot, buildDir string, verbose bool) error {
 		meta.Version, meta.Time, meta.Platform)
 
 	tmpOut := filepath.Join(goTmpDir, "build.dat")
-	args := []string{"build", "-trimpath", "-ldflags=" + ldFlags, "-o", tmpOut, "."}
+	args := []string{"build", "-trimpath", "-ldflags=" + ldFlags}
 	if verbose {
 		args = append(args, "-tags=verbose")
 	}
+	args = append(args, "-o", tmpOut, ".")
 	cmd := exec.Command("go", args...)
 	cmd.Dir = filepath.Join(ws, pkgDir)
 	env := os.Environ()
