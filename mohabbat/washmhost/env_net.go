@@ -26,7 +26,7 @@ func (h *HostEnv) sys_net_open(ctx context.Context, m api.Module, stack []uint64
 	mem := m.Memory()
 	buf, ok := mem.Read(addrPtr, addrLen)
 	if !ok {
-		writeOverlapped(m, ovPtr, 22, 0, 0)
+		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 		return
 	}
 	addr := string(buf)
@@ -96,12 +96,12 @@ func (h *HostEnv) sys_net_accept(ctx context.Context, m api.Module, stack []uint
 	h.mu.Unlock()
 
 	if !ok {
-		writeOverlapped(m, ovPtr, 9, 0, 0) // EBADF
+		writeOverlapped(m, ovPtr, wasiEBADF, 0, 0)
 		return
 	}
 	ln, ok := lnAny.(net.Listener)
 	if !ok {
-		writeOverlapped(m, ovPtr, 22, 0, 0) // EINVAL
+		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 		return
 	}
 
@@ -155,7 +155,7 @@ func (h *HostEnv) sys_net_lookup(ctx context.Context, m api.Module, stack []uint
 	mem := m.Memory()
 	nameBuf, ok := mem.Read(namePtr, nameLen)
 	if !ok {
-		writeOverlapped(m, ovPtr, 22, 0, 0) // EINVAL
+		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 		return
 	}
 	name := string(nameBuf)
@@ -249,14 +249,14 @@ func (h *HostEnv) sys_net_cert_verify(ctx context.Context, m api.Module, stack [
 	mem := m.Memory()
 	nameBuf, ok := mem.Read(namePtr, nameLen)
 	if !ok {
-		writeOverlapped(m, ovPtr, 22, 0, 0)
+		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 		return
 	}
 	serverName := string(nameBuf)
 
 	chainBuf, ok := mem.Read(chainPtr, chainLen)
 	if !ok {
-		writeOverlapped(m, ovPtr, 22, 0, 0)
+		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 		return
 	}
 
@@ -266,17 +266,17 @@ func (h *HostEnv) sys_net_cert_verify(ctx context.Context, m api.Module, stack [
 		errno, resultExt := func() (uint32, uint64) {
 			if len(chainBuf) < 4 {
 				h.log("[%s]   [!] chainBuf too short: %d", time.Now().Format("15:04:05.000"), len(chainBuf))
-				return 22, 0
+				return wasiEINVAL, 0
 			}
 			count := binary.LittleEndian.Uint32(chainBuf[0:4])
 			h.log("[%s]   cert count: %d", time.Now().Format("15:04:05.000"), count)
 			if count == 0 {
-				return 22, 0
+				return wasiEINVAL, 0
 			}
 			headerSize := 4 + 4*int(count)
 			if len(chainBuf) < headerSize {
 				h.log("[%s]   [!] chainBuf header underflow: %d < %d", time.Now().Format("15:04:05.000"), len(chainBuf), headerSize)
-				return 22, 0
+				return wasiEINVAL, 0
 			}
 
 			certs := make([]*x509.Certificate, 0, count)
@@ -285,7 +285,7 @@ func (h *HostEnv) sys_net_cert_verify(ctx context.Context, m api.Module, stack [
 				dlen := int(binary.LittleEndian.Uint32(chainBuf[4+4*i : 8+4*i]))
 				if off+dlen > len(chainBuf) {
 					h.log("[%s]   [!] cert %d length overflow: off=%d dlen=%d total=%d", time.Now().Format("15:04:05.000"), i, off, dlen, len(chainBuf))
-					return 22, 0
+					return wasiEINVAL, 0
 				}
 				certData := chainBuf[off : off+dlen]
 				snippet := certData
@@ -296,7 +296,7 @@ func (h *HostEnv) sys_net_cert_verify(ctx context.Context, m api.Module, stack [
 				cert, err := x509.ParseCertificate(certData)
 				if err != nil {
 					h.log("[%s]   [!] failed to parse cert %d: %v", time.Now().Format("15:04:05.000"), i, err)
-					return 22, 0
+					return wasiEINVAL, 0
 				}
 				certs = append(certs, cert)
 				off += dlen

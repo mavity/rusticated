@@ -107,18 +107,18 @@ func (h *HostEnv) sys_read(ctx context.Context, m api.Module, stack []uint64) {
 	h.mu.Unlock()
 
 	if !ok {
-		writeOverlapped(m, ovPtr, 9, 0, 0) // EBADF
+		writeOverlapped(m, ovPtr, wasiEBADF, 0, 0)
 		return
 	}
 	f, isReader := fAny.(interface{ Read([]byte) (int, error) })
 	if !isReader {
-		writeOverlapped(m, ovPtr, 9, 0, 0) // EBADF
+		writeOverlapped(m, ovPtr, wasiEBADF, 0, 0)
 		return
 	}
 	mem := m.Memory()
 	_, memOk := mem.Read(ptr, lenBytes)
 	if !memOk {
-		writeOverlapped(m, ovPtr, 22, 0, 0) // EINVAL
+		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 		return
 	}
 
@@ -146,7 +146,7 @@ func (h *HostEnv) sys_read(ctx context.Context, m api.Module, stack []uint64) {
 
 			if retCode == 0 {
 				if ok := mem.Write(ptr, payload); !ok {
-					writeOverlapped(m, ovPtr, 22, 0, 0)
+					writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 					return
 				}
 			}
@@ -166,14 +166,14 @@ func (h *HostEnv) sys_seek(ctx context.Context, m api.Module, stack []uint64) {
 	h.mu.Unlock()
 
 	if !ok {
-		writeOverlapped(m, ovPtr, 9, 0, 0) // EBADF
+		writeOverlapped(m, ovPtr, wasiEBADF, 0, 0)
 		return
 	}
 	seeker, isSeeker := fAny.(interface {
 		Seek(int64, int) (int64, error)
 	})
 	if !isSeeker {
-		writeOverlapped(m, ovPtr, 9, 0, 0) // EBADF: handle is not seekable
+		writeOverlapped(m, ovPtr, wasiEBADF, 0, 0)
 		return
 	}
 
@@ -208,18 +208,18 @@ func (h *HostEnv) sys_write(ctx context.Context, m api.Module, stack []uint64) {
 	h.mu.Unlock()
 
 	if !ok {
-		writeOverlapped(m, ovPtr, 9, 0, 0) // EBADF
+		writeOverlapped(m, ovPtr, wasiEBADF, 0, 0)
 		return
 	}
 	f, isWriter := fAny.(interface{ Write([]byte) (int, error) })
 	if !isWriter {
-		writeOverlapped(m, ovPtr, 9, 0, 0) // EBADF
+		writeOverlapped(m, ovPtr, wasiEBADF, 0, 0)
 		return
 	}
 	mem := m.Memory()
 	buf, memOk := mem.Read(ptr, lenBytes)
 	if !memOk {
-		writeOverlapped(m, ovPtr, 22, 0, 0) // EINVAL
+		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 		return
 	}
 
@@ -304,7 +304,7 @@ func (h *HostEnv) sys_path_open(ctx context.Context, m api.Module, stack []uint6
 	mem := m.Memory()
 	buf, ok := mem.Read(pathPtr, pathLen)
 	if !ok {
-		writeOverlapped(m, ovPtr, 22, 0, 0) // EINVAL
+		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 		return
 	}
 	rawPath := string(buf)
@@ -396,7 +396,7 @@ func (h *HostEnv) sys_dir_read(ctx context.Context, m api.Module, stack []uint64
 
 	mem := m.Memory()
 	if _, memOk := mem.Read(ptr, lenBytes); !memOk {
-		writeOverlapped(m, ovPtr, 22, 0, 0) // EINVAL
+		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 		return
 	}
 	debugLog("dir_read: handle=%d ptr=%d len=%d", handle, ptr, lenBytes)
@@ -411,7 +411,7 @@ func (h *HostEnv) sys_dir_read(ctx context.Context, m api.Module, stack []uint64
 		h.mu.Lock()
 		fAny, ok := h.handles[handle]
 		if !ok {
-			retCode = 9 // EBADF
+			retCode = wasiEBADF
 		} else {
 			switch v := fAny.(type) {
 			case *os.File:
@@ -419,7 +419,7 @@ func (h *HostEnv) sys_dir_read(ctx context.Context, m api.Module, stack []uint64
 				if err != nil {
 					retCode = mapErrno(err)
 				} else if !fi.IsDir() {
-					retCode = 20 // ENOTDIR
+					retCode = wasiENOTDIR
 				} else {
 					// Don't read all names yet
 					scan = &DirScan{File: v}
@@ -428,7 +428,7 @@ func (h *HostEnv) sys_dir_read(ctx context.Context, m api.Module, stack []uint64
 			case *DirScan:
 				scan = v
 			default:
-				retCode = 9 // EBADF
+				retCode = wasiEBADF
 			}
 		}
 		h.mu.Unlock()
@@ -497,7 +497,7 @@ func (h *HostEnv) sys_dir_read(ctx context.Context, m api.Module, stack []uint64
 
 			if retCode == 0 && copied > 0 {
 				if ok := mem.Write(ptr, payload); !ok {
-					retCode = 22 // EINVAL
+					retCode = wasiEINVAL
 				}
 			}
 			debugLog("dir_read: handle=%d copied=%d retCode=%d", handle, copied, retCode)
@@ -517,7 +517,7 @@ func (h *HostEnv) sys_path_stat(ctx context.Context, m api.Module, stack []uint6
 	mem := m.Memory()
 	buf, ok := mem.Read(pathPtr, pathLen)
 	if !ok {
-		writeOverlapped(m, ovPtr, 22, 0, 0)
+		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 		return
 	}
 	pathStr := h.translatePath(string(buf))
@@ -539,7 +539,7 @@ func (h *HostEnv) sys_path_stat(ctx context.Context, m api.Module, stack []uint6
 			debugLog("path_stat fail: path=%q err=%v", pathStr, err)
 			retCode = mapErrno(err)
 		} else if outLen < 64 {
-			retCode = 34 // ERANGE
+			retCode = wasiERANGE
 		} else {
 			payload = marshalAbiStat(createAbiStat(fi))
 			debugLog("path_stat ok: path=%q kind=%d mode=%o", pathStr, createAbiStat(fi).Kind, createAbiStat(fi).Mode)
@@ -555,7 +555,7 @@ func (h *HostEnv) sys_path_stat(ctx context.Context, m api.Module, stack []uint6
 
 			if retCode == 0 {
 				if ok := mem.Write(outPtr, payload); !ok {
-					writeOverlapped(m, ovPtr, 22, 0, 0)
+					writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 					return
 				}
 			}
@@ -573,7 +573,7 @@ func (h *HostEnv) sys_path_chmod(ctx context.Context, m api.Module, stack []uint
 	mem := m.Memory()
 	buf, ok := mem.Read(pathPtr, pathLen)
 	if !ok {
-		writeOverlapped(m, ovPtr, 22, 0, 0)
+		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 		return
 	}
 
@@ -588,7 +588,7 @@ func (h *HostEnv) sys_path_remove(ctx context.Context, m api.Module, stack []uin
 
 	buf, ok := m.Memory().Read(pathPtr, pathLen)
 	if !ok {
-		writeOverlapped(m, ovPtr, 22, 0, 0) // EINVAL
+		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0) // EINVAL
 		return
 	}
 	err := os.Remove(h.translatePath(string(buf)))
@@ -603,7 +603,7 @@ func (h *HostEnv) sys_path_mkdir(ctx context.Context, m api.Module, stack []uint
 
 	buf, ok := m.Memory().Read(pathPtr, pathLen)
 	if !ok {
-		writeOverlapped(m, ovPtr, 22, 0, 0) // EINVAL
+		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0) // EINVAL
 		return
 	}
 	err := os.Mkdir(h.translatePath(string(buf)), os.FileMode(mode))
@@ -621,7 +621,7 @@ func (h *HostEnv) sys_path_rename(ctx context.Context, m api.Module, stack []uin
 	oldBuf, ok1 := mem.Read(oldPtr, oldLen)
 	newBuf, ok2 := mem.Read(newPtr, newLen)
 	if !ok1 || !ok2 {
-		writeOverlapped(m, ovPtr, 22, 0, 0) // EINVAL
+		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0) // EINVAL
 		return
 	}
 	err := os.Rename(h.translatePath(string(oldBuf)), h.translatePath(string(newBuf)))
@@ -659,7 +659,7 @@ func (h *HostEnv) sys_set_cwd(ctx context.Context, m api.Module, stack []uint64)
 	mem := m.Memory()
 	buf, ok := mem.Read(pathPtr, pathLen)
 	if !ok {
-		stack[0] = uint64(22) // EINVAL
+		stack[0] = uint64(wasiEINVAL)
 		return
 	}
 
