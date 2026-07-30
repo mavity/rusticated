@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"time"
 
 	"github.com/tetratelabs/wazero/api"
 )
@@ -261,16 +262,20 @@ func (h *HostEnv) sys_net_cert_verify(ctx context.Context, m api.Module, stack [
 
 	state := h.RegisterOp(ovPtr, nil)
 	go func() {
+		h.log("[%s] sys_net_cert_verify(ovPtr=%d, name=%q, chainLen=%d) starting", time.Now().Format("15:04:05.000"), ovPtr, serverName, len(chainBuf))
 		errno, resultExt := func() (uint32, uint64) {
 			if len(chainBuf) < 4 {
+				h.log("[%s]   [!] chainBuf too short: %d", time.Now().Format("15:04:05.000"), len(chainBuf))
 				return 22, 0
 			}
 			count := binary.LittleEndian.Uint32(chainBuf[0:4])
+			h.log("[%s]   cert count: %d", time.Now().Format("15:04:05.000"), count)
 			if count == 0 {
 				return 22, 0
 			}
 			headerSize := 4 + 4*int(count)
 			if len(chainBuf) < headerSize {
+				h.log("[%s]   [!] chainBuf header underflow: %d < %d", time.Now().Format("15:04:05.000"), len(chainBuf), headerSize)
 				return 22, 0
 			}
 
@@ -279,10 +284,18 @@ func (h *HostEnv) sys_net_cert_verify(ctx context.Context, m api.Module, stack [
 			for i := 0; i < int(count); i++ {
 				dlen := int(binary.LittleEndian.Uint32(chainBuf[4+4*i : 8+4*i]))
 				if off+dlen > len(chainBuf) {
+					h.log("[%s]   [!] cert %d length overflow: off=%d dlen=%d total=%d", time.Now().Format("15:04:05.000"), i, off, dlen, len(chainBuf))
 					return 22, 0
 				}
-				cert, err := x509.ParseCertificate(chainBuf[off : off+dlen])
+				certData := chainBuf[off : off+dlen]
+				snippet := certData
+				if len(snippet) > 32 {
+					snippet = snippet[:32]
+				}
+				h.log("[%s]   parsing cert %d: len=%d, snippet=%x...", time.Now().Format("15:04:05.000"), i, dlen, snippet)
+				cert, err := x509.ParseCertificate(certData)
 				if err != nil {
+					h.log("[%s]   [!] failed to parse cert %d: %v", time.Now().Format("15:04:05.000"), i, err)
 					return 22, 0
 				}
 				certs = append(certs, cert)
@@ -290,32 +303,42 @@ func (h *HostEnv) sys_net_cert_verify(ctx context.Context, m api.Module, stack [
 			}
 
 			intermediates := x509.NewCertPool()
-			for _, c := range certs[1:] {
+			for i, c := range certs[1:] {
+				h.log("[%s]   adding intermediate %d: Subject=%q", time.Now().Format("15:04:05.000"), i+1, c.Subject)
 				intermediates.AddCert(c)
 			}
+			h.log("[%s]   fetching system cert pool...", time.Now().Format("15:04:05.000"))
 			roots, err := x509.SystemCertPool()
 			if err != nil {
+				h.log("[%s]   [!] system cert pool error: %v (falling back to empty)", time.Now().Format("15:04:05.000"), err)
 				roots = x509.NewCertPool()
+			} else {
+				h.log("[%s]   system cert pool loaded (count hint: %d)", time.Now().Format("15:04:05.000"), len(roots.Subjects()))
 			}
 			opts := x509.VerifyOptions{
 				DNSName:       serverName,
 				Intermediates: intermediates,
 				Roots:         roots,
 			}
+			h.log("[%s]   calling leaf.Verify(name=%q)...", time.Now().Format("15:04:05.000"), serverName)
 			if _, err := certs[0].Verify(opts); err != nil {
+				h.log("[%s]   [-] verification failed: %v", time.Now().Format("15:04:05.000"), err)
 				return 0, 0
 			}
+			h.log("[%s]   [+] verification success", time.Now().Format("15:04:05.000"))
 			return 0, 1
 		}()
 
 		h.fileOpsQueue <- func() {
 			defer h.DecOpsFor(state)
 			if !h.IsOpActive(ovPtr, state.opID) {
+				h.log("[%s]   op not active, discarding result", time.Now().Format("15:04:05.000"))
 				return
 			}
 			h.mu.Lock()
 			delete(h.activeOps, ovPtr)
 			h.mu.Unlock()
+			h.log("[%s] sys_net_cert_verify(ovPtr=%d) completing: errno=%d, resultExt=%d", time.Now().Format("15:04:05.000"), ovPtr, errno, resultExt)
 			writeOverlapped(m, ovPtr, errno, 0, resultExt)
 		}
 	}()
