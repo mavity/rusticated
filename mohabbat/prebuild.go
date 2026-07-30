@@ -639,8 +639,11 @@ func generateGoOverlay(ws, goroot string) error {
 	netFakeStr, err = patchGoStr(netFakeStr, []regastPatch{
 		// Replace the entire socket() function body with a call to rusticatedSocket.
 		// rusticatedSocket is defined in the new overlay file net_rusticated.go.
-		{pat: `⦅func socket\((.*)\) \((.*)\) \{[\s\S]*?\}⦆`,
-			repl: "func socket($2) ($3) {\n\treturn rusticatedSocket(ctx, net, family, sotype, proto, ipv6only, laddr, raddr, ctrlCtxFn)\n}"},
+		{pat: `(?s)func socket\(ctx context\.Context, net string, family, sotype, proto int, ipv6only bool, laddr, raddr sockaddr, ctrlCtxFn func\(context\.Context, string, string, syscall\.RawConn\) error\) \(\*netFD, error\) \{.*?return fd, nil\n\}`,
+			repl: "func socket(ctx context.Context, net string, family, sotype, proto int, ipv6only bool, laddr, raddr sockaddr, ctrlCtxFn func(context.Context, string, string, syscall.RawConn) error) (*netFD, error) {\n\treturn rusticatedSocket(ctx, net, family, sotype, proto, ipv6only, laddr, raddr, ctrlCtxFn)\n}"},
+		// Patch Close to immediately invoke syscall.Close to avoid poll.FD refcount deadlock
+		{pat: `(?s)func \(fd \*netFD\) Close\(\) error \{.*?return fd\.pfd\.Close\(\)\n\}`,
+			repl: "func (fd *netFD) Close() error {\n\tif fd.fakeNetFD != nil {\n\t\treturn fd.fakeNetFD.Close()\n\t}\n\truntime.SetFinalizer(fd, nil)\n\tsyscall.Close(fd.pfd.Sysfd)\n\treturn fd.pfd.Close()\n}"},
 	})
 	if err != nil {
 		return fmt.Errorf("patch net_fake.go: %w", err)
@@ -655,11 +658,11 @@ func generateGoOverlay(ws, goroot string) error {
 	if lookupUnixContent, err := os.ReadFile(lookupUnixSrc); err == nil {
 		lookupUnixStr := string(lookupUnixContent)
 		lookupUnixStr, err = patchGoStr(lookupUnixStr, []regastPatch{
-			{pat: `⦅func \(r \*Resolver\) lookupHost\(ctx context\.Context, host string\) \(addrs \[\]string, err error\) \{ (.*) \}⦆`,
+			{pat: `(?s)func \(r \*Resolver\) lookupHost\(ctx context\.Context, host string\) \(addrs \[\]string, err error\) \{.*?return.*?\n\}`,
 				repl: "func (r *Resolver) lookupHost(ctx context.Context, host string) (addrs []string, err error) {\n\treturn rusticatedLookupHost(ctx, host)\n}"},
-			{pat: `⦅func \(r \*Resolver\) lookupIP\(ctx context\.Context, network, host string\) \(ips \[\]IPAddr, err error\) \{ (.*) \}⦆`,
+			{pat: `(?s)func \(r \*Resolver\) lookupIP\(ctx context\.Context, network, host string\) \(addrs \[\]IPAddr, err error\) \{.*?return ips, err\n\}`,
 				repl: "func (r *Resolver) lookupIP(ctx context.Context, network, host string) (ips []IPAddr, err error) {\n\treturn rusticatedLookupIP(ctx, network, host)\n}"},
-			{pat: `⦅func \(r \*Resolver\) lookupPort\(ctx context\.Context, network, service string\) \(port int, err error\) \{ (.*) \}⦆`,
+			{pat: `(?s)func \(r \*Resolver\) lookupPort\(ctx context\.Context, network, service string\) \(port int, err error\) \{.*?return goLookupPort[^}]+\}`,
 				repl: "func (r *Resolver) lookupPort(ctx context.Context, network, service string) (port int, err error) {\n\treturn rusticatedLookupPort(ctx, network, service)\n}"},
 		})
 		if err == nil {

@@ -119,14 +119,36 @@ func rusticatedSocket(
 }
 
 func rusticatedLookupHost(ctx context.Context, host string) ([]string, error) {
-	return DefaultResolver.lookupHost(ctx, host)
+	ips, err := syscall.NetLookup(host)
+	if err != nil {
+		return nil, err
+	}
+	var addrs []string
+	for _, ip := range ips {
+		addrs = append(addrs, IP(ip).String())
+	}
+	return addrs, nil
 }
 
 func rusticatedLookupIP(ctx context.Context, network, host string) ([]IPAddr, error) {
-	return DefaultResolver.lookupIP(ctx, network, host)
+	ips, err := syscall.NetLookup(host)
+	if err != nil {
+		return nil, err
+	}
+	var addrs []IPAddr
+	for _, ip := range ips {
+		addrs = append(addrs, IPAddr{IP: IP(ip)})
+	}
+	return addrs, nil
 }
 
 func rusticatedLookupPort(ctx context.Context, network, service string) (int, error) {
+	if service == "http" {
+		return 80, nil
+	}
+	if service == "https" {
+		return 443, nil
+	}
 	return DefaultResolver.lookupPort(ctx, network, service)
 }
 

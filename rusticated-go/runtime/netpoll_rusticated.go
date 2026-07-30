@@ -2,6 +2,11 @@
 
 package runtime
 
+func init() {
+	netpollInited.Store(1)
+	netpollAdjustWaiters(1)
+}
+
 func netpollinit() {}
 
 func netpollIsPollDescriptor(fd uintptr) bool { return false }
