@@ -154,6 +154,7 @@ go run . kabibi -o kabibi.bat
 go run . kabibi-go -o kabibi-go.bat
 go run . demo-go -o demo-go.bat
 go run . demo-go/trivial -o trivial.bat
+go run . demo-go/curl -o curl.bat
 ```
 
 or
@@ -164,6 +165,7 @@ mohab.bat demo/loch -o loch.bat
 mohab.bat kabibi -o kabibi.bat
 mohab.bat demo-go -o demo-go.bat
 mohab.bat demo-go/trivial -o trivial.bat
+mohab.bat demo-go/curl -o curl.bat
 ```
 
 You can run a 🍆vegetable directly on any machine from the currently supported targets.
@@ -180,6 +182,7 @@ go run . demo/loch -r
 go run . kabibi -r
 go run . demo-go -r
 go run . demo-go/trivial -r
+go run . demo-go/curl -r https://example.com
 ```
 
 or
@@ -190,6 +193,7 @@ mohab.bat demo/loch -r
 mohab.bat kabibi -r
 mohab.bat demo-go -r
 mohab.bat demo-go/trivial -r
+mohab.bat demo-go/curl -r https://example.com
 ```
 
 ## Node.js fallback
