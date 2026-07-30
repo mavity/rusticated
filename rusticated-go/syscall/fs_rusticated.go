@@ -169,6 +169,10 @@ func rusticated_dir_read(overlapped unsafe.Pointer, handle uint64, bufPtr *byte,
 //go:noescape
 func rusticated_path_stat(overlapped unsafe.Pointer, pathPtr *byte, pathLen uint32, flags uint32, outPtr *byte, outLen uint32)
 
+//go:wasmimport env seek
+//go:noescape
+func rusticated_seek(overlapped unsafe.Pointer, handle uint64, offset int64, whence uint32)
+
 //go:wasmimport env get_random
 func rusticated_random_get(buf *byte, bufLen uint32)
 
@@ -698,9 +702,22 @@ func UtimesNano(path string, ts []Timespec) error   { return ENOSYS }
 
 // ── Seek / Pread / Pwrite / Dup / Pipe ───────────────────────────────────
 
-func Seek(fd int, offset int64, whence int) (int64, error) { return 0, ENOSYS }
-func Pread(fd int, b []byte, offset int64) (int, error)    { return 0, ENOSYS }
-func Pwrite(fd int, b []byte, offset int64) (int, error)   { return 0, ENOSYS }
+func Seek(fd int, offset int64, whence int) (int64, error) {
+	handle, err := fdToHandle(int32(fd))
+	if err != 0 {
+		return 0, errnoErr(err)
+	}
+	var ctx overlappedContext
+	rusticated_seek(unsafe.Pointer(&ctx.o), handle, offset, uint32(whence))
+	awaitOverlapped(&ctx)
+	if ctx.o.hostError != 0 {
+		return 0, errnoErr(Errno(ctx.o.hostError))
+	}
+	return int64(ctx.o.resultExt), nil
+}
+
+func Pread(fd int, b []byte, offset int64) (int, error)  { return 0, ENOSYS }
+func Pwrite(fd int, b []byte, offset int64) (int, error) { return 0, ENOSYS }
 
 func Dup(oldfd int) (int, error) {
 	entry, ok := fdMap[int32(oldfd)]
