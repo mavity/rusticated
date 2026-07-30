@@ -26,38 +26,118 @@ function getRootCerts() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// errno constants (mirrors Go's mapErrno)
+// WASI (wasip1) errno mapping.
+// Our ABI mandates that all system handlers return these values to the guest.
+// These differ significantly from Linux/Darwin host errnos.
 // ─────────────────────────────────────────────────────────────────────────────
+const wasiSuccess      = 0;
+const wasiE2BIG        = 1;
+const wasiEACCES       = 2;
+const wasiEADDRINUSE   = 3;
+const wasiEADDRNOTAVAIL = 4;
+const wasiEAFNOSUPPORT = 5;
+const wasiEAGAIN       = 6;
+const wasiEALREADY     = 7;
+const wasiEBADF        = 8;
+const wasiEBADMSG      = 9;
+const wasiEBUSY        = 10;
+const wasiECANCELED    = 11;
+const wasiECHILD       = 12;
+const wasiECONNABORTED = 13;
+const wasiECONNREFUSED = 14;
+const wasiECONNRESET   = 15;
+const wasiEDEADLK      = 16;
+const wasiEDESTADDRREQ = 17;
+const wasiEDOM         = 18;
+const wasiEDQUOT       = 19;
+const wasiEEXIST       = 20;
+const wasiEFAULT       = 21;
+const wasiEFBIG        = 22;
+const wasiEHOSTUNREACH = 23;
+const wasiEIDRM        = 24;
+const wasiEILSEQ       = 25;
+const wasiEINPROGRESS  = 26;
+const wasiEINTR        = 27;
+const wasiEINVAL       = 28;
+const wasiEIO          = 29;
+const wasiEISCONN      = 30;
+const wasiEISDIR       = 31;
+const wasiELOOP        = 32;
+const wasiEMFILE       = 33;
+const wasiEMLINK       = 34;
+const wasiEMSGSIZE     = 35;
+const wasiEMULTIHOP    = 36;
+const wasiENAMETOOLONG = 37;
+const wasiENETDOWN     = 38;
+const wasiENETRESET    = 39;
+const wasiENETUNREACH  = 40;
+const wasiENFILE       = 41;
+const wasiENOBUFS      = 42;
+const wasiENODEV       = 43;
+const wasiENOENT       = 44;
+const wasiENOEXEC      = 45;
+const wasiENOLCK       = 46;
+const wasiENOLINK      = 47;
+const wasiENOMEM       = 48;
+const wasiENOMSG       = 49;
+const wasiENOPROTOOPT  = 50;
+const wasiENOSPC       = 51;
+const wasiENOSYS       = 52;
+const wasiENOTCONN     = 53;
+const wasiENOTDIR      = 54;
+const wasiENOTEMPTY    = 55;
+const wasiENOTRECOVERABLE = 56;
+const wasiENOTSOCK     = 57;
+const wasiENOTSUP      = 58;
+const wasiENOTTY       = 59;
+const wasiENXIO        = 60;
+const wasiEOVERFLOW    = 61;
+const wasiEOWNERDEAD   = 62;
+const wasiEPERM        = 63;
+const wasiEPIPE        = 64;
+const wasiEPROTO       = 65;
+const wasiEPROTONOSUPPORT = 66;
+const wasiEPROTOTYPE   = 67;
+const wasiERANGE       = 68;
+const wasiEROFS        = 69;
+const wasiESPIPE       = 70;
+const wasiESRCH        = 71;
+const wasiESTALE       = 72;
+const wasiETIMEDOUT    = 73;
+const wasiETXTBSY      = 74;
+const wasiEXDEV        = 75;
+const wasiENOTCAPABLE  = 76;
+
 function mapErrno(e) {
-  if (!e) return 0;
+  if (!e) return wasiSuccess;
   switch (e.code) {
-    case 'ENOENT':    return 2;
-    case 'ESRCH':     return 3;
-    case 'EINTR':     return 4;
-    case 'EIO':       return 5;
-    case 'ENXIO':     return 6;
-    case 'EBADF':     return 9;
-    case 'ECHILD':    return 10;
-    case 'EAGAIN':    return 11;
-    case 'ENOMEM':    return 12;
-    case 'EACCES':    return 13;
-    case 'EFAULT':    return 14;
-    case 'EBUSY':     return 16;
-    case 'EEXIST':    return 17;
-    case 'EXDEV':     return 18;
-    case 'ENODEV':    return 19;
-    case 'ENOTDIR':   return 20;
-    case 'EISDIR':    return 21;
-    case 'EINVAL':    return 22;
-    case 'EMFILE':    return 24;
-    case 'ENOSPC':    return 28;
-    case 'EPIPE':     return 32;
-    case 'ERANGE':    return 34;
-    case 'ENOTEMPTY': return 39;
-    case 'ECONNREFUSED': return 111;
-    case 'EADDRINUSE': return 98;
+    case 'ENOENT':    return wasiENOENT;
+    case 'ESRCH':     return wasiESRCH;
+    case 'EINTR':     return wasiEINTR;
+    case 'EIO':       return wasiEIO;
+    case 'ENXIO':     return wasiENXIO;
+    case 'EBADF':     return wasiEBADF;
+    case 'ECHILD':    return wasiECHILD;
+    case 'EAGAIN':    return wasiEAGAIN;
+    case 'ENOMEM':    return wasiENOMEM;
+    case 'EACCES':    return wasiEACCES;
+    case 'EFAULT':    return wasiEFAULT;
+    case 'EBUSY':     return wasiEBUSY;
+    case 'EEXIST':    return wasiEEXIST;
+    case 'EXDEV':     return wasiEXDEV;
+    case 'ENODEV':    return wasiENODEV;
+    case 'ENOTDIR':   return wasiENOTDIR;
+    case 'EISDIR':    return wasiEISDIR;
+    case 'EINVAL':    return wasiEINVAL;
+    case 'EMFILE':    return wasiEMFILE;
+    case 'ENOSPC':    return wasiENOSPC;
+    case 'EPIPE':     return wasiEPIPE;
+    case 'ERANGE':    return wasiERANGE;
+    case 'ENOTEMPTY': return wasiENOTEMPTY;
+    case 'ECONNREFUSED': return wasiECONNREFUSED;
+    case 'EADDRINUSE': return wasiEADDRINUSE;
     default:
-      return (e.errno != null ? Math.abs(e.errno) : 0) || 5;
+      return wasiEIO;
   }
 }
 
@@ -359,7 +439,7 @@ export function makeBrainImports(hostState, argv) {
   // Signature: (ovPtr i32, handle i64, bufferPtr i32, bufferLen i32)
   function read(ovPtr, handle, bufferPtr, bufferLen) {
     const h = hs.getHandle(handle);
-    if (!h) { writeOverlapped(hs.view, ovPtr, 9, 0, 0); return; }
+    if (!h) { writeOverlapped(hs.view, ovPtr, wasiEBADF, 0, 0); return; }
 
     const bLen = Number(bufferLen);
     const bPtr = Number(bufferPtr);
@@ -453,7 +533,7 @@ export function makeBrainImports(hostState, argv) {
 
     // Unreadable handle type
     hs.activeOps.delete(ovPtr); hs.pendingCount--;
-    writeOverlapped(hs.view, ovPtr, 9, 0, 0);
+    writeOverlapped(hs.view, ovPtr, wasiEBADF, 0, 0);
   }
 
   // ── write ────────────────────────────────────────────────────────────────────
@@ -472,7 +552,7 @@ export function makeBrainImports(hostState, argv) {
     }
 
     const h = hs.getHandle(handle);
-    if (!h) { writeOverlapped(hs.view, ovPtr, 9, 0, 0); return; }
+    if (!h) { writeOverlapped(hs.view, ovPtr, wasiEBADF, 0, 0); return; }
 
     const opId = hs.registerOp(ovPtr);
 
@@ -498,7 +578,7 @@ export function makeBrainImports(hostState, argv) {
     }
 
     hs.activeOps.delete(ovPtr); hs.pendingCount--;
-    writeOverlapped(hs.view, ovPtr, 9, 0, 0);
+    writeOverlapped(hs.view, ovPtr, wasiEBADF, 0, 0);
   }
 
   // ── handle_close ─────────────────────────────────────────────────────────────
@@ -555,7 +635,7 @@ export function makeBrainImports(hostState, argv) {
     const bLen = Number(bufferLen);
     const bPtr = Number(bufferPtr);
     const h = hs.getHandle(handle);
-    if (!h) { writeOverlapped(hs.view, ovPtr, 9, 0, 0); return; }
+    if (!h) { writeOverlapped(hs.view, ovPtr, wasiEBADF, 0, 0); return; }
 
     const opId = hs.registerOp(ovPtr);
 
@@ -570,7 +650,7 @@ export function makeBrainImports(hostState, argv) {
       scan = h;
     } else {
       hs.activeOps.delete(ovPtr); hs.pendingCount--;
-      writeOverlapped(hs.view, ovPtr, 9, 0, 0); return;
+      writeOverlapped(hs.view, ovPtr, wasiEBADF, 0, 0); return;
     }
 
     const fillAndDeliver = async () => {
@@ -630,7 +710,7 @@ export function makeBrainImports(hostState, argv) {
     statFn(pathStr).then((st) => {
       hs.enqueue(() => {
         if (!hs.isOpActive(ovPtr, opId)) return;
-        if (Number(outLen) < 64) { hs.completeOp(ovPtr, opId, 34, 0, 64); return; }
+        if (Number(outLen) < 64) { hs.completeOp(ovPtr, opId, wasiERANGE, 0, 64); return; }
         guestWrite(Number(outPtr), marshalStat(st));
         hs.completeOp(ovPtr, opId, 0, 0, 64);
       });
@@ -732,7 +812,7 @@ export function makeBrainImports(hostState, argv) {
   // Signature: (ovPtr i32, listenHandle i64)
   function net_accept(ovPtr, listenHandle) {
     const h = hs.getHandle(listenHandle);
-    if (!h || h.type !== 'server') { writeOverlapped(hs.view, ovPtr, 22, 0, 0); return; }
+    if (!h || h.type !== 'server') { writeOverlapped(hs.view, ovPtr, wasiEINVAL, 0, 0); return; }
     const opId = hs.registerOp(ovPtr);
     h.server.once('connection', (socket) => {
       const shItem = { type: 'socket', socket, leftovers: null, onData: null, closed: false, error: null };
@@ -913,7 +993,7 @@ export function makeBrainImports(hostState, argv) {
     if (start < cfg.length) parts.push(cfg.slice(start));
 
     if (parts.length === 0 || parts[0].length === 0) {
-      hs.completeOp(ovPtr, opId, 22, 0, 0); return;
+      hs.completeOp(ovPtr, opId, wasiEINVAL, 0, 0); return;
     }
 
     const program = translatePath(parts[0].toString());
@@ -1018,7 +1098,7 @@ export function makeBrainImports(hostState, argv) {
   // Returns resultExt = (exitCode << 32) | exitCode
   function process_wait(ovPtr, handle) {
     const h = hs.getHandle(handle);
-    if (!h || h.type !== 'child') { writeOverlapped(hs.view, ovPtr, 9, 0, 0); return; }
+    if (!h || h.type !== 'child') { writeOverlapped(hs.view, ovPtr, wasiEBADF, 0, 0); return; }
     const opId = hs.registerOp(ovPtr);
     h.cp.once('exit', (code, signal) => {
       const exitCode = code != null ? code : (signal ? 1 : 0);
@@ -1094,7 +1174,7 @@ export function makeBrainImports(hostState, argv) {
   // 548-byte binary struct — mirrors env_utils.go layout
   function get_platform_info(ptr, maxLen) {
     const structSize = 548;
-    if (Number(maxLen) < structSize) return 7; // E2BIG
+    if (Number(maxLen) < structSize) return wasiE2BIG;
 
     const buf = Buffer.alloc(structSize);
 

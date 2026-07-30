@@ -13,21 +13,176 @@ import (
 	"github.com/tetratelabs/wazero/api"
 )
 
+const (
+	// WASI (wasip1) errno mapping.
+	// Our ABI mandates that all system handlers return these values to the guest.
+	// These differ significantly from Linux/Darwin host errnos.
+	// Documentation: https://github.com/WebAssembly/WASI/blob/main/legacy/preview1/docs.md#errno
+	wasiSuccess         uint32 = 0
+	wasiE2BIG           uint32 = 1
+	wasiEACCES          uint32 = 2
+	wasiEADDRINUSE      uint32 = 3
+	wasiEADDRNOTAVAIL   uint32 = 4
+	wasiEAFNOSUPPORT    uint32 = 5
+	wasiEAGAIN          uint32 = 6
+	wasiEALREADY        uint32 = 7
+	wasiEBADF           uint32 = 8
+	wasiEBADMSG         uint32 = 9
+	wasiEBUSY           uint32 = 10
+	wasiECANCELED       uint32 = 11
+	wasiECHILD          uint32 = 12
+	wasiECONNABORTED    uint32 = 13
+	wasiECONNREFUSED    uint32 = 14
+	wasiECONNRESET      uint32 = 15
+	wasiEDEADLK         uint32 = 16
+	wasiEDESTADDRREQ    uint32 = 17
+	wasiEDOM            uint32 = 18
+	wasiEDQUOT          uint32 = 19
+	wasiEEXIST          uint32 = 20
+	wasiEFAULT          uint32 = 21
+	wasiEFBIG           uint32 = 22
+	wasiEHOSTUNREACH    uint32 = 23
+	wasiEIDRM           uint32 = 24
+	wasiEILSEQ          uint32 = 25
+	wasiEINPROGRESS     uint32 = 26
+	wasiEINTR           uint32 = 27
+	wasiEINVAL          uint32 = 28
+	wasiEIO             uint32 = 29
+	wasiEISCONN         uint32 = 30
+	wasiEISDIR          uint32 = 31
+	wasiELOOP           uint32 = 32
+	wasiEMFILE          uint32 = 33
+	wasiEMLINK          uint32 = 34
+	wasiEMSGSIZE        uint32 = 35
+	wasiEMULTIHOP       uint32 = 36
+	wasiENAMETOOLONG    uint32 = 37
+	wasiENETDOWN        uint32 = 38
+	wasiENETRESET       uint32 = 39
+	wasiENETUNREACH     uint32 = 40
+	wasiENFILE          uint32 = 41
+	wasiENOBUFS         uint32 = 42
+	wasiENODEV          uint32 = 43
+	wasiENOENT          uint32 = 44
+	wasiENOEXEC         uint32 = 45
+	wasiENOLCK          uint32 = 46
+	wasiENOLINK         uint32 = 47
+	wasiENOMEM          uint32 = 48
+	wasiENOMSG          uint32 = 49
+	wasiENOPROTOOPT     uint32 = 50
+	wasiENOSPC          uint32 = 51
+	wasiENOSYS          uint32 = 52
+	wasiENOTCONN        uint32 = 53
+	wasiENOTDIR         uint32 = 54
+	wasiENOTEMPTY       uint32 = 55
+	wasiENOTRECOVERABLE uint32 = 56
+	wasiENOTSOCK        uint32 = 57
+	wasiENOTSUP         uint32 = 58
+	wasiENOTTY          uint32 = 59
+	wasiENXIO           uint32 = 60
+	wasiEOVERFLOW       uint32 = 61
+	wasiEOWNERDEAD      uint32 = 62
+	wasiEPERM           uint32 = 63
+	wasiEPIPE           uint32 = 64
+	wasiEPROTO          uint32 = 65
+	wasiEPROTONOSUPPORT uint32 = 66
+	wasiEPROTOTYPE      uint32 = 67
+	wasiERANGE          uint32 = 68
+	wasiEROFS           uint32 = 69
+	wasiESPIPE          uint32 = 70
+	wasiESRCH           uint32 = 71
+	wasiESTALE          uint32 = 72
+	wasiETIMEDOUT       uint32 = 73
+	wasiETXTBSY         uint32 = 74
+	wasiEXDEV           uint32 = 75
+	wasiENOTCAPABLE     uint32 = 76
+)
+
 func mapErrno(err error) uint32 {
 	if err == nil {
-		return 0
+		return wasiSuccess
 	}
 	if os.IsNotExist(err) {
-		return 44 // ENOENT (wasip1)
+		return wasiENOENT
 	}
 	if os.IsPermission(err) {
-		return 2 // EACCES (wasip1)
+		return wasiEACCES
 	}
 	var errno syscall.Errno
 	if errors.As(err, &errno) {
-		return uint32(errno)
+		// Native errnos must be translated to WASI errnos.
+		// Go's syscall package uses host values.
+		switch errno {
+		case syscall.EACCES:
+			return wasiEACCES
+		case syscall.EBADF:
+			return wasiEBADF
+		case syscall.EEXIST:
+			return wasiEEXIST
+		case syscall.EINVAL:
+			return wasiEINVAL
+		case syscall.EIO:
+			return wasiEIO
+		case syscall.EISDIR:
+			return wasiEISDIR
+		case syscall.ELOOP:
+			return wasiELOOP
+		case syscall.EMFILE:
+			return wasiEMFILE
+		case syscall.EMLINK:
+			return wasiEMLINK
+		case syscall.ENAMETOOLONG:
+			return wasiENAMETOOLONG
+		case syscall.ENFILE:
+			return wasiENFILE
+		case syscall.ENODEV:
+			return wasiENODEV
+		case syscall.ENOENT:
+			return wasiENOENT
+		case syscall.ENOSYS:
+			return wasiENOSYS
+		case syscall.ENOTDIR:
+			return wasiENOTDIR
+		case syscall.ENOTEMPTY:
+			return wasiENOTEMPTY
+		case syscall.ENOTTY:
+			return wasiENOTTY
+		case syscall.ENXIO:
+			return wasiENXIO
+		case syscall.EPERM:
+			return wasiEPERM
+		case syscall.EPIPE:
+			return wasiEPIPE
+		case syscall.EROFS:
+			return wasiEROFS
+		case syscall.ESPIPE:
+			return wasiESPIPE
+		case syscall.EXDEV:
+			return wasiEXDEV
+		case syscall.ETIMEDOUT:
+			return wasiETIMEDOUT
+		case syscall.ECONNREFUSED:
+			return wasiECONNREFUSED
+		case syscall.ECONNRESET:
+			return wasiECONNRESET
+		case syscall.ECONNABORTED:
+			return wasiECONNABORTED
+		case syscall.EADDRINUSE:
+			return wasiEADDRINUSE
+		case syscall.EADDRNOTAVAIL:
+			return wasiEADDRNOTAVAIL
+		case syscall.EAFNOSUPPORT:
+			return wasiEAFNOSUPPORT
+		case syscall.EAGAIN:
+			return wasiEAGAIN
+		case syscall.EALREADY:
+			return wasiEALREADY
+		case syscall.EFAULT:
+			return wasiEFAULT
+		case syscall.ERANGE:
+			return wasiERANGE
+		}
 	}
-	return 29 // EIO (wasip1)
+	return wasiEIO
 }
 
 func resolveUsableCwd() (string, error) {
@@ -177,8 +332,8 @@ func (h *HostEnv) sys_get_platform_info(ctx context.Context, m api.Module, stack
 	copySafe(484, BuildPlatform)
 
 	if ok := mem.Write(ptr, buf); !ok {
-		stack[0] = 14 // EFAULT
+		stack[0] = uint64(wasiEFAULT)
 		return
 	}
-	stack[0] = 0
+	stack[0] = uint64(wasiSuccess)
 }
