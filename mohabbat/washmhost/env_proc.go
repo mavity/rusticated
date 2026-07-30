@@ -20,7 +20,7 @@ func (h *HostEnv) sys_process_spawn(ctx context.Context, m api.Module, stack []u
 	mem := m.Memory()
 	buf, ok := mem.Read(cfgPtr, cfgLen)
 	if !ok {
-		writeOverlapped(m, ovPtr, 22, 0, 0) // EINVAL
+		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 		return
 	}
 	cfg := make([]byte, cfgLen)
@@ -38,7 +38,7 @@ func (h *HostEnv) sys_process_spawn(ctx context.Context, m api.Module, stack []u
 				h.mu.Lock()
 				delete(h.activeOps, ovPtr)
 				h.mu.Unlock()
-				writeOverlapped(m, ovPtr, 22, 0, 0)
+				writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 			}
 			return
 		}
@@ -213,12 +213,12 @@ func (h *HostEnv) sys_process_wait(ctx context.Context, m api.Module, stack []ui
 	h.mu.Unlock()
 
 	if !ok {
-		writeOverlapped(m, ovPtr, 9, 0, 0) // EBADF
+		writeOverlapped(m, ovPtr, wasiEBADF, 0, 0)
 		return
 	}
 	cmd, isCmd := fAny.(*exec.Cmd)
 	if !isCmd || cmd == nil {
-		writeOverlapped(m, ovPtr, 9, 0, 0) // EBADF
+		writeOverlapped(m, ovPtr, wasiEBADF, 0, 0)
 		return
 	}
 
