@@ -65,8 +65,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	argSlice := os.Args
+	argSlice := make([]string, len(os.Args))
+	copy(argSlice, os.Args)
 	ensurePosixOutputRunnable(argSlice)
+
+	// Strip a leading "--" separator that `go run . -- [args]` passes through.
+	if len(argSlice) > 1 && argSlice[1] == "--" {
+		argSlice = append(argSlice[:1], argSlice[2:]...)
+	}
 
 	// If a vegetable path is available, use it as the guest's executable path.
 	// Otherwise, if the WASM reference is a path, use that.
