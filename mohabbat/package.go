@@ -209,11 +209,7 @@ func assembleVegetable(ws, brainPath, buildDir, outputPath string) error {
 // buildZoneA produces the polyglot script header for Modern Four.
 func buildZoneA(offsets, lengths []int, nodeJsLen int) string {
 	const tmplPOSIX = `:; ME="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || printf "%s" "$0")"; S_OFF=0; S_LEN=0
-:; case "$(uname -m)-$(uname -s)" in
-:; x86_64-Linux) S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}} ;;
-:; aarch64-Linux) S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}} ;;
-:; arm64-Darwin) S_OFF={{DARWIN_ARM_OFF}}; S_LEN={{DARWIN_ARM_LEN}} ;;
-:; esac
+:; case "$(uname -m)-$(uname -s)" in x86_64-Linux) S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}} ;; aarch64-Linux) S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}} ;; arm64-Darwin) S_OFF={{DARWIN_ARM_OFF}}; S_LEN={{DARWIN_ARM_LEN}} ;; esac
 :; USE_NODE=0
 :; [ -n "$MOHABBAT_USE_NODE" ] && USE_NODE=1
 :; [ "$S_LEN" = "0" ] && USE_NODE=1
@@ -320,7 +316,6 @@ exit /b !RET!
 	}
 
 	s := tmplPOSIX + tmplWIN
-	s = strings.ReplaceAll(s, "\n", "\r\n")
 
 	replace := func(s, key string, i int, vals []int) string {
 		val := 0
