@@ -48,7 +48,7 @@ func buildRustProjectWasm(ws, absProjectDir, outputWasm string, verbose bool) er
 	return nil
 }
 
-func cargoBuild(ws, pkgDir string, s slot, buildDir string, verbose bool) (string, error) {
+func cargoBuild(ws, pkgDir string, s slot, buildDir string, verbose bool, washmhostMetadata map[string]uint64) (string, error) {
 	targetName, err := cargoTargetName(s)
 	if err != nil {
 		return "", err
@@ -117,6 +117,12 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string, verbose bool) (strin
 		env = upsertEnv(env, "BUILD_VERSION", meta.Version)
 		env = upsertEnv(env, "BUILD_TIME", meta.Time)
 		env = upsertEnv(env, "BUILD_PLATFORM", meta.Platform)
+		// Pass washmhost size metadata to brot so it can embed it at compile time
+		if len(washmhostMetadata) > 0 {
+			if whLen, ok := washmhostMetadata[s.name]; ok {
+				env = upsertEnv(env, "MOHABBAT_WASHMHOST_LEN", fmt.Sprintf("%d", whLen))
+			}
+		}
 		// Set SDKROOT to the stubs directory for darwin cross-compilation so lld
 		// doesn't call xcrun to locate the macOS SDK (unavailable on non-Mac hosts).
 		if s.goos == "darwin" {
