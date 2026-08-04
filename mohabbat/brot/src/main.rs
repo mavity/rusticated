@@ -25,6 +25,33 @@ mod darwin;
 
 pub mod test_symbols;
 
+// ─── Compile-time configuration ───────────────────────────────────────────────
+
+// Read washmhost size from compile-time environment (set by build.rs).
+// This value is known when building per-slot, so it's baked into the binary.
+const WASHMHOST_LEN_STR: &str = env!("MOHABBAT_WASHMHOST_LEN");
+
+// Parse const string to u64 at compile time.
+// This is a workaround since const fn for parsing isn't available in all contexts.
+// If WASHMHOST_LEN_STR is "0" or invalid, default to 0.
+const fn parse_washmhost_len() -> u64 {
+    let bytes = WASHMHOST_LEN_STR.as_bytes();
+    let mut result: u64 = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'0'..=b'9' => {
+                result = result * 10 + ((bytes[i] - b'0') as u64);
+            }
+            _ => break,
+        }
+        i += 1;
+    }
+    result
+}
+
+const WASHMHOST_LEN: u64 = parse_washmhost_len();
+
 // ─── Shared metadata section ──────────────────────────────────────────────────
 
 #[repr(C, packed)]
@@ -47,7 +74,7 @@ pub static mut META: MohabbatMeta = MohabbatMeta {
     magic: *b"MOHABBAT",
     pool_len: 0,
     washmhost_offset: 0,
-    washmhost_len: 0,
+    washmhost_len: WASHMHOST_LEN,  // Embedded at compile time per-slot
     payload_offset: 0,
     payload_len: 0,
     reserved: 0,
