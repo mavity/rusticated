@@ -117,8 +117,6 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.watchAssetProgressCmd()
-		m.syncChatView()
-		return m, nil
 
 	case shellResultMsg:
 		var plumeLines []string
@@ -146,12 +144,58 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		return m, m.AddPlume(plumeLines...)
 
+	case fileOpProgressMsg:
+		m.opCurrent = msg.current
+		m.opDone = msg.done
+		m.opTotal = msg.total
+		return m, m.watchFileOpCmd()
+
+	case fileOpDoneMsg:
+		m.opActive = false
+		if m.opCancel != nil {
+			m.opCancel()
+			m.opCancel = nil
+		}
+		m.opChan = nil
+		m.mode = modeBrowser
+		focusLeft, focusRight := m.leftList.Index(), m.rightList.Index()
+		m.loadDir(leftPane, m.leftDir, "")
+		m.loadDir(rightPane, m.rightDir, "")
+		m.leftList.Select(clampIndex(focusLeft, len(m.leftList.Items())))
+		m.rightList.Select(clampIndex(focusRight, len(m.rightList.Items())))
+		m.refreshPrompt()
+		var status string
+		if msg.err != nil {
+			status = msg.kind.verb() + " failed: " + msg.err.Error()
+		} else {
+			status = "Done."
+		}
+		return m, m.AddPlume(status)
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
 		m.recalculateLayout()
+		if m.editor != nil {
+			m.editor.width = m.width
+			m.editor.height = m.height
+		}
 
 	case tea.KeyMsg:
+		// A running file operation captures input: only Esc cancels it.
+		if m.opActive {
+			if msg.String() == "esc" && m.opCancel != nil {
+				m.opCancel()
+			}
+			return m, nil
+		}
+		switch m.mode {
+		case modeEditor:
+			return m.updateEditor(msg)
+		case modeDialog:
+			return m.updateDialog(msg)
+		}
+
 		key := msg.String()
 		switch key {
 		case "ctrl+c":
@@ -278,6 +322,27 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
+		case "f2":
+			m.fmRename()
+			return m, nil
+		case "f4":
+			return m, m.fmEdit()
+		case "f5":
+			m.fmTransfer(opCopy)
+			return m, nil
+		case "f6":
+			m.fmTransfer(opMove)
+			return m, nil
+		case "f7":
+			m.fmMkdir()
+			return m, nil
+		case "f8":
+			m.fmDelete()
+			return m, nil
+		case "insert":
+			m.fmToggleMark()
+			m.updateDelegates()
+			return m, nil
 		case "up", "down", "left", "right", "pgup", "pgdown", "home", "end":
 			// If chat is open, cursor keys go to chat
 			if m.chatOpen && m.activePane == chatPane {
@@ -323,4 +388,97 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// ---- browser file-manager actions ----
+
+func (m *model) fmRename() {
+	l, _, _ := m.activePaneState()
+	if l == nil {
+		return
+	}
+	fi, ok := l.SelectedItem().(fileItem)
+	if !ok || fi.name == ".." {
+		return
+	}
+	m.openInputDialog(actionRename, "Rename", "New name for "+fi.name+":", fi.name)
+}
+
+func (m *model) fmMkdir() {
+	if l, _, _ := m.activePaneState(); l == nil {
+		return
+	}
+	m.openInputDialog(actionMkdir, "Create Directory", "Directory name:", "")
+}
+
+func (m *model) fmEdit() tea.Cmd {
+	l, dir, _ := m.activePaneState()
+	if l == nil {
+		return nil
+	}
+	fi, ok := l.SelectedItem().(fileItem)
+	if !ok || fi.isDir {
+		return nil
+	}
+	return m.openEditor(filepath.Join(dir, fi.name))
+}
+
+func (m *model) fmTransfer(kind fileOpKind) {
+	sources := m.opSources()
+	if len(sources) == 0 {
+		return
+	}
+	dest := m.otherPaneDir()
+	verb := "Copy"
+	if kind == opMove {
+		verb = "Move"
+	}
+	action := actionCopy
+	if kind == opMove {
+		action = actionMove
+	}
+	prompt := fmt.Sprintf("%s %s to %s ?", verb, summarizeSources(sources), dest)
+	m.openConfirmDialog(action, verb, prompt, &fileOp{kind: kind, sources: sources, dest: dest})
+}
+
+func (m *model) fmDelete() {
+	sources := m.opSources()
+	if len(sources) == 0 {
+		return
+	}
+	prompt := fmt.Sprintf("Delete %s ? This cannot be undone.", summarizeSources(sources))
+	m.openConfirmDialog(actionDelete, "Delete", prompt, &fileOp{kind: opDelete, sources: sources})
+}
+
+func (m *model) fmToggleMark() {
+	l, _, _ := m.activePaneState()
+	if l == nil {
+		return
+	}
+	idx := l.Index()
+	items := l.Items()
+	if idx < 0 || idx >= len(items) {
+		return
+	}
+	if fi, ok := items[idx].(fileItem); ok && fi.name != ".." {
+		fi.selected = !fi.selected
+		items[idx] = fi
+		l.SetItems(items)
+	}
+	if idx < len(items)-1 {
+		l.Select(idx + 1)
+	}
+}
+
+func clampIndex(idx, n int) int {
+	if n <= 0 {
+		return 0
+	}
+	if idx < 0 {
+		return 0
+	}
+	if idx >= n {
+		return n - 1
+	}
+	return idx
 }

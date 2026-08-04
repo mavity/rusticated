@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -226,6 +227,9 @@ func renderPanelWithTitle(m *model, p pane, title string, titleStyle lipgloss.St
 				if item.isDir {
 					style = folderStyle
 				}
+				if item.selected {
+					style = markedStyle
+				}
 				if active && idx == selectedIdx {
 					if item.isDir {
 						style = selectedFolderStyle
@@ -234,6 +238,9 @@ func renderPanelWithTitle(m *model, p pane, title string, titleStyle lipgloss.St
 					}
 				}
 				name := item.name
+				if item.selected && name != ".." {
+					name = "•" + name
+				}
 				if len(name) > colWidth-2 {
 					name = name[:colWidth-3] + "…"
 				}
@@ -280,6 +287,10 @@ func (m model) View() string {
 
 	if m.width == 0 || m.height == 0 {
 		return "Searching for screen..."
+	}
+
+	if m.mode == modeEditor && m.editor != nil {
+		return m.editor.View()
 	}
 
 	// 1. Plume (Background) - Clean and normalize lines to prevent "zebra" splitting
@@ -515,7 +526,58 @@ func (m model) View() string {
 	components = append(components, exhaustView)
 	components = append(components, middleRow, footerView, prompt)
 
-	return lipgloss.JoinVertical(lipgloss.Left, components...)
+	base := lipgloss.JoinVertical(lipgloss.Left, components...)
+
+	if m.opActive {
+		return overlayBox(base, m.progressBox(), m.width, m.height)
+	}
+	if m.mode == modeDialog && m.dialog != nil {
+		return overlayBox(base, m.dialogBox(), m.width, m.height)
+	}
+	return base
+}
+
+// overlayBox composites a modal box on top of the base view, preserving the
+// base content on both sides of the box (ANSI-aware slicing) so panels remain
+// visible around the popup instead of being blanked out.
+func overlayBox(base, box string, w, h int) string {
+	baseLines := strings.Split(base, "\n")
+	for len(baseLines) < h {
+		baseLines = append(baseLines, "")
+	}
+	boxLines := strings.Split(box, "\n")
+	boxH := len(boxLines)
+	boxW := 0
+	for _, l := range boxLines {
+		if lw := ansi.StringWidth(l); lw > boxW {
+			boxW = lw
+		}
+	}
+	startRow := (h - boxH) / 2
+	if startRow < 0 {
+		startRow = 0
+	}
+	startCol := (w - boxW) / 2
+	if startCol < 0 {
+		startCol = 0
+	}
+	for i, bl := range boxLines {
+		row := startRow + i
+		if row < 0 || row >= len(baseLines) {
+			continue
+		}
+		line := baseLines[row]
+		if lw := ansi.StringWidth(line); lw < w {
+			line += strings.Repeat(" ", w-lw)
+		}
+		left := ansi.Truncate(line, startCol, "")
+		right := ansi.TruncateLeft(line, startCol+boxW, "")
+		if bw := ansi.StringWidth(bl); bw < boxW {
+			bl += strings.Repeat(" ", boxW-bw)
+		}
+		baseLines[row] = left + "\x1b[0m" + bl + "\x1b[0m" + right
+	}
+	return strings.Join(baseLines, "\n")
 }
 
 func forceBackground(s string, bg lipgloss.Color) string {
