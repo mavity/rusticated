@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"time"
@@ -21,8 +22,9 @@ const (
 )
 
 type fileItem struct {
-	name  string
-	isDir bool
+	name     string
+	isDir    bool
+	selected bool
 }
 
 func (i fileItem) Title() string       { return i.name }
@@ -101,4 +103,16 @@ type model struct {
 	assetProgress  <-chan assetProgressMsg
 	assetDone      <-chan tea.Msg
 	aiMsgChan      <-chan tea.Msg
+
+	// File-manager extensions
+	mode      uiMode
+	dialog    *dialogState
+	editor    *editorModel
+	opChan    <-chan tea.Msg
+	opCancel  context.CancelFunc
+	opActive  bool
+	opKind    fileOpKind
+	opCurrent string
+	opDone    int64
+	opTotal   int64
 }

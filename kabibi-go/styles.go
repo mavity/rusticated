@@ -48,6 +48,11 @@ var (
 
 	selectedStyle = selectedFileStyle // fallback
 
+	markedStyle = lipgloss.NewStyle().
+			Foreground(colorYellow).
+			Background(colorBlue).
+			Bold(true)
+
 	activeTitleStyle = lipgloss.NewStyle().
 				Foreground(colorDarkGray).
 				Background(colorYellow).
