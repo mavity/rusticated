@@ -120,6 +120,13 @@ func ModeDevRun(ws, projectDir string, extraArgs []string, verbose bool) error {
 
 // buildAllSlots builds brot (cargo) and washmhost for all Modern Four slots.
 func buildAllSlots(ws, buildDir string, verbose bool) error {
+	// Step 1: Build washmhost for all slots first (so brot can know their final sizes)
+	washmhostMetadata, err := buildAllWashmhost(ws, buildDir, verbose)
+	if err != nil {
+		return err
+	}
+
+	// Step 2: Build brot with knowledge of washmhost sizes (no post-build patching needed)
 	for _, s := range slots {
 		if !shouldBuildSlot(s) {
 			fmt.Printf("🍆    skip %s\n", s.name)
@@ -128,14 +135,36 @@ func buildAllSlots(ws, buildDir string, verbose bool) error {
 		if s.goos == "js" {
 			continue // Handled during buildNodeSlot when zone A is assembled
 		}
-		if _, err := cargoBuild(ws, filepath.Join("mohabbat", "brot"), s, buildDir, verbose); err != nil {
-			return err
-		}
-		if err := goBuild(ws, filepath.Join("mohabbat", "washmhost"), s, buildDir, verbose); err != nil {
+		if _, err := cargoBuild(ws, filepath.Join("mohabbat", "brot"), s, buildDir, verbose, washmhostMetadata); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// buildAllWashmhost builds washmhost for all slots and returns their sizes.
+func buildAllWashmhost(ws, buildDir string, verbose bool) (map[string]uint64, error) {
+	metadata := make(map[string]uint64)
+	for _, s := range slots {
+		if !shouldBuildSlot(s) {
+			fmt.Printf("🍆    skip %s washmhost\n", s.name)
+			continue
+		}
+		if s.goos == "js" {
+			continue // washmhost not needed for js
+		}
+		if err := goBuild(ws, filepath.Join("mohabbat", "washmhost"), s, buildDir, verbose); err != nil {
+			return nil, err
+		}
+		// Read the built washmhost to get its size
+		whPath := washmhostPath(buildDir, s)
+		whData, err := os.ReadFile(whPath)
+		if err != nil {
+			return nil, fmt.Errorf("read washmhost for %s: %w", s.name, err)
+		}
+		metadata[s.name] = uint64(len(whData))
+	}
+	return metadata, nil
 }
 
 // buildProjectToWasm auto-detects Go vs Rust project and builds to WASM.

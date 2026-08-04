@@ -362,7 +362,7 @@ func patchMeta(brot []byte, meta mohabbatMeta) ([]byte, error) {
 	p := idx + len(mohabbatMagic)
 	binary.LittleEndian.PutUint64(out[p+0:p+8], meta.PoolLen)
 	binary.LittleEndian.PutUint64(out[p+8:p+16], meta.WashmhostOffset)
-	binary.LittleEndian.PutUint64(out[p+16:p+24], meta.WashmhostLen)
+	// Skip washmhost_len (p+16:p+24) - it's now embedded at compile time, don't overwrite it
 	binary.LittleEndian.PutUint64(out[p+24:p+32], meta.PayloadOffset)
 	binary.LittleEndian.PutUint64(out[p+32:p+40], meta.PayloadLen)
 	binary.LittleEndian.PutUint64(out[p+40:p+48], meta.Reserved)
