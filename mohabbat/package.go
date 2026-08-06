@@ -315,7 +315,8 @@ exit /b !RET!
 		winARM = i
 	}
 
-	s := tmplPOSIX + tmplWIN
+	winCRLF := strings.ReplaceAll(tmplWIN, "\n", "\r\n")
+	s := tmplPOSIX + winCRLF
 
 	replace := func(s, key string, i int, vals []int) string {
 		val := 0
