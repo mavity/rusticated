@@ -14,6 +14,8 @@ var AppProgram *tea.Program
 func main() {
 	helpPtr := flag.Bool("help", false, "Show help")
 	commandPtr := flag.String("c", "", "Run a single command string")
+	promptPtr := flag.String("p", "", "Run an AI prompt to stdout")
+	flag.StringVar(promptPtr, "prompt", "", "Run an AI prompt to stdout (alias for -p)")
 
 	// Filter os.Args to remove elements that might be interpreted as flags but are actually metadata/setup
 	// Washmhost/Mohabbat dev-run usually passes [wasm_path -- [args...]]
@@ -45,7 +47,14 @@ func main() {
 		fmt.Printf("\nDescription:\n")
 		fmt.Printf("  kabibi-go is an AI-enhanced file manager and shell.\n")
 		fmt.Printf("  If a command string (-c) or script file is provided, it runs in batch mode.\n")
+		fmt.Printf("  If a prompt (-p) is provided, it directly streams AI inference to standard output.\n")
 		fmt.Printf("  Otherwise, it starts in interactive TUI mode.\n")
+		return
+	}
+
+	// Prompt mode: -p "prompt"
+	if *promptPtr != "" {
+		runPrompt(*promptPtr)
 		return
 	}
 
@@ -95,4 +104,30 @@ func runBatchFile(filePath string, args []string) {
 	defer f.Close()
 
 	r.Run(ctx, parseCommandReader(f, filePath))
+}
+
+func runPrompt(prompt string) {
+	ctx := context.Background()
+
+	// Ensure assets exist (blocking, printing to stdout if no TUI chan provided)
+	if err := ensureLiteRT(ctx, nil); err != nil {
+		fmt.Fprintf(os.Stderr, "Error initializing AI runtime: %v\n", err)
+		os.Exit(1)
+	}
+	if err := ensureGemma(ctx, nil); err != nil {
+		fmt.Fprintf(os.Stderr, "Error initializing AI weights: %v\n", err)
+		os.Exit(1)
+	}
+
+	err := runAIPrompt(prompt, func(token string) {
+		fmt.Print(token)
+	})
+
+	// Print a final newline when the stream finishes
+	fmt.Println()
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\nAI Error: %v\n", err)
+		os.Exit(1)
+	}
 }
