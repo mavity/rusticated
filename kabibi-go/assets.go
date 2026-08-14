@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -54,24 +54,24 @@ func cacheDirPath() (string, error) {
 		return filepath.Clean(v), nil
 	}
 
-	switch runtime.GOOS {
+	switch HostOS() {
 	case "windows":
 		if v := os.Getenv("LocalAppData"); v != "" {
 			return filepath.Join(v, "kabibi-go", "litert_cache"), nil
 		}
-		if home, err := os.UserHomeDir(); err == nil {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
 			return filepath.Join(home, "AppData", "Local", "kabibi-go", "litert_cache"), nil
 		}
 	default:
 		if v := os.Getenv("XDG_CACHE_HOME"); v != "" {
 			return filepath.Join(v, "kabibi-go", "litert_cache"), nil
 		}
-		if home, err := os.UserHomeDir(); err == nil {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
 			return filepath.Join(home, ".cache", "kabibi-go", "litert_cache"), nil
 		}
 	}
 
-	return "", errors.New("unable to resolve LiteRT-LM cache directory")
+	return "C:\\temp\\litert_cache", nil
 }
 
 func (m *model) checkAssetsCmd() tea.Cmd {
@@ -213,7 +213,7 @@ func selectWheelURL(ctx context.Context) (string, string, error) {
 
 	candidates := wheelCandidates(data)
 	if len(candidates) == 0 {
-		return "", "", fmt.Errorf("no compatible liteRT-LM wheel found for %s/%s", runtime.GOOS, runtime.GOARCH)
+		return "", "", fmt.Errorf("no compatible liteRT-LM wheel found for %s/%s", HostOS(), HostArch())
 	}
 
 	return candidates[0].URL, candidates[0].Filename, nil
@@ -267,7 +267,7 @@ func wheelCandidates(data *pypiResponse) []pypiArtifact {
 func wheelPreference(filename string) int {
 	filename = strings.ToLower(filename)
 
-	if runtime.GOOS == "windows" && runtime.GOARCH == "arm64" {
+	if HostOS() == "windows" && HostArch() == "arm64" {
 		if strings.Contains(filename, "win_arm64") {
 			return 0
 		}
@@ -282,9 +282,9 @@ func wheelPreference(filename string) int {
 func wheelMatchesPlatform(filename string) bool {
 	filename = strings.ToLower(filename)
 
-	switch runtime.GOOS {
+	switch HostOS() {
 	case "windows":
-		switch runtime.GOARCH {
+		switch HostArch() {
 		case "amd64":
 			return strings.Contains(filename, "win_amd64")
 		case "arm64":
@@ -292,17 +292,17 @@ func wheelMatchesPlatform(filename string) bool {
 			return strings.Contains(filename, "win_arm64") || strings.Contains(filename, "win_amd64")
 		}
 	case "darwin":
-		if runtime.GOARCH == "arm64" {
+		if HostArch() == "arm64" {
 			return strings.Contains(filename, "macosx") && strings.Contains(filename, "arm64")
 		}
-		if runtime.GOARCH == "amd64" {
+		if HostArch() == "amd64" {
 			return strings.Contains(filename, "macosx") && strings.Contains(filename, "x86_64")
 		}
 	case "linux", "freebsd":
-		if runtime.GOARCH == "amd64" {
+		if HostArch() == "amd64" {
 			return strings.Contains(filename, "manylinux") && strings.Contains(filename, "x86_64")
 		}
-		if runtime.GOARCH == "arm64" {
+		if HostArch() == "arm64" {
 			return strings.Contains(filename, "manylinux") && strings.Contains(filename, "aarch64")
 		}
 	}
@@ -437,11 +437,16 @@ func formatThousands(n int) string {
 
 func extractWheelNativeFiles(wheelPath, libDir string, progress chan<- assetProgressMsg) error {
 	sendProgress(progress, "extracting wheel", 0, filepath.Base(wheelPath))
-	zr, err := zip.OpenReader(wheelPath)
+
+	// Workaround for missing Pread in WASM: Read the whole file strictly via memory
+	data, err := os.ReadFile(wheelPath)
 	if err != nil {
 		return err
 	}
-	defer zr.Close()
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return err
+	}
 
 	extracted := 0
 	for _, file := range zr.File {
@@ -473,10 +478,10 @@ func extractWheelNativeFiles(wheelPath, libDir string, progress chan<- assetProg
 			outName = "libGemmaModelConstraintProvider" + nativeLibExts()[0]
 		}
 
-		if runtime.GOOS == "windows" && ext == ".pyd" && !strings.HasSuffix(outName, ".dll") {
+		if HostOS() == "windows" && ext == ".pyd" && !strings.HasSuffix(outName, ".dll") {
 			outName = strings.TrimSuffix(outName, ext) + ".dll"
 		}
-		if runtime.GOOS == "darwin" && ext == ".so" {
+		if HostOS() == "darwin" && ext == ".so" {
 			outName = strings.TrimSuffix(outName, ext) + ".dylib"
 		}
 
@@ -523,7 +528,7 @@ func isValidNativeExtension(ext string) bool {
 }
 
 func nativeLibExts() []string {
-	switch runtime.GOOS {
+	switch HostOS() {
 	case "windows":
 		return []string{".dll", ".pyd"}
 	case "darwin":
