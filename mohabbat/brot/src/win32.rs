@@ -94,9 +94,54 @@ pub mod Win32 {
             }
 
             pub const INFINITE: DWORD = 0xFFFFFFFF;
+            pub const CREATE_SUSPENDED: DWORD = 0x00000004;
+
+            #[repr(C)]
+            pub struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
+                pub LimitFlags: DWORD,
+                pub MinimumWorkingSetSize: usize,
+                pub MaximumWorkingSetSize: usize,
+                pub ActiveProcessLimit: DWORD,
+                pub Affinity: usize,
+                pub PriorityClass: DWORD,
+                pub SchedulingClass: DWORD,
+            }
+
+            #[repr(C)]
+            pub struct IO_COUNTERS {
+                pub ReadOperationCount: u64,
+                pub WriteOperationCount: u64,
+                pub OtherOperationCount: u64,
+                pub ReadTransferCount: u64,
+                pub WriteTransferCount: u64,
+                pub OtherTransferCount: u64,
+            }
+
+            #[repr(C)]
+            pub struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+                pub BasicLimitInformation: JOBOBJECT_BASIC_LIMIT_INFORMATION,
+                pub IoInfo: IO_COUNTERS,
+                pub ProcessMemoryLimit: usize,
+                pub JobMemoryLimit: usize,
+                pub PeakProcessMemoryUsed: usize,
+                pub PeakJobMemoryUsed: usize,
+            }
+
+            pub const JobObjectExtendedLimitInformation: u32 = 9;
+            pub const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: DWORD = 0x00002000;
 
             #[link(name = "kernel32", kind = "raw-dylib")]
             unsafe extern "system" {
+                pub fn CreateJobObjectW(lpJobAttributes: LPVOID, lpName: LPCWSTR) -> HANDLE;
+                pub fn SetInformationJobObject(
+                    hJob: HANDLE,
+                    JobObjectInformationClass: u32,
+                    lpJobObjectInformation: LPVOID,
+                    cbJobObjectInformationLength: DWORD,
+                ) -> BOOL;
+                pub fn AssignProcessToJobObject(hJob: HANDLE, hProcess: HANDLE) -> BOOL;
+                pub fn ResumeThread(hThread: HANDLE) -> DWORD;
+                pub fn TerminateProcess(hProcess: HANDLE, uExitCode: DWORD) -> BOOL;
                 pub fn GetCurrentProcessId() -> DWORD;
                 pub fn GetCurrentProcess() -> HANDLE;
                 pub fn ExitProcess(uExitCode: DWORD) -> !;
