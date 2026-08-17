@@ -222,6 +222,42 @@ Node is located by searching `$PATH` then common installer locations (nvm,
 fnm, Volta, n, Chocolatey, Homebrew). A diagnostic message is printed if
 no usable Node is found and no native brot is available either.
 
+## Platform Selection
+
+You can override the auto-detected platform by providing the `--platform` argument to any vegetable. This is useful for exploiting emulation environments (like running `x64` binaries on `ARM64` host or vice-versa):
+
+```bash
+# Extract and run the Linux AMD64 build explicitly
+./demo-go.bat --platform linux-amd64
+
+# Force Node.js fallback locally
+./demo-go.bat --platform node 
+```
+
+**Valid Platform Names (Canonical):**
+- `node`
+- `linux-amd64`
+- `linux-arm64`
+- `darwin-arm64`
+- `windows-amd64`
+- `windows-arm64`
+
+**Abbreviated Identifiers:**
+- `amd64` (Dynamically targets `{current_os}-amd64`)
+- `x64` (Synonym strictly mapping to `amd64`) 
+- `arm64` (Dynamically targets `{current_os}-arm64`)
+
+If the slot was disabled or unavailable during assembly, the vegetable will elegantly emit an error informing you: `❌ Platform 'X' is not included in this vegetable`. 
+
+## Architectural Note: Ghost Processes
+
+To guarantee system stability, native Mohabbat runners (`brot` loaders executing the `washmhost` runtime environment) construct a resilient **three lines of defence** network prohibiting left-over ghost processes on unexpected termination or crash:
+
+1. **Explicit Polling/Wait**: The `washmhost` runtime initializes an immediate native watchdog upon startup checking parent termination. In UNIX it polls `os.Getppid()`; on Windows it attaches a native lock (`OpenProcess(SYNCHRONIZE)` / `WaitForSingleObject`) tracking `brot`'s PID. Should `brot` ever disappear from the host index, `washmhost` executes an immediate `os.Exit(1)`.
+2. **OS-Enforced Cascading Shutdown**: When loaded, `brot` binds child boundaries natively mapping host guarantees:
+   - On Linux, `brot` executes `prctl(PR_SET_PDEATHSIG, SIGKILL)` in the strict span between `fork` and `execve`, demanding the kernel kill `washmhost` if the parent dies for *any* reason abruptly.
+   - On Windows, `brot` deploys `CreateJobObjectW` carrying limits (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`), nesting the `washmhost` process explicitly inside it. Ripping the parent forces teardown cascade instantly.
+3. **Explicit Cleanup Kill**: Traditional intentional host bounds execute specific teardowns targeting process exits correctly handling standard paths.
 
 # 🍆Vegetable file layout
 
