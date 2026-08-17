@@ -460,6 +460,9 @@ func generateGoOverlay(ws, goroot string) error {
 	}
 
 	// PATCH: crypto/x509/cert_pool.go to allow access to certs for net_cert_verify.
+	if err := os.MkdirAll(filepath.Join(genDir, "crypto/x509"), 0755); err != nil {
+		return fmt.Errorf("failed to create gen dir: %w", err)
+	}
 	certPoolSrc := filepath.Join(goroot, "src/crypto/x509/cert_pool.go")
 	if certPoolContent, err := os.ReadFile(certPoolSrc); err == nil {
 		certPoolStr := string(certPoolContent)

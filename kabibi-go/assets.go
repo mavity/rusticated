@@ -465,14 +465,14 @@ func extractWheelNativeFiles(wheelPath, libDir string, progress chan<- assetProg
 		outName := base
 
 		// Special handling for the main extension module name normalization
-		// We want to support both litert_lm_ext and litert-lm
+		// We want to support litert_lm_ext, litert-lm, and liblitert-lm
 		root := strings.TrimSuffix(base, ext)
 		// Strip Python version tags if present (e.g. .cp310-win_amd64)
 		if idx := strings.Index(root, ".cp"); idx != -1 {
 			root = root[:idx]
 		}
 
-		if root == "litert_lm_ext" || root == "litert-lm" {
+		if root == "litert_lm_ext" || root == "litert-lm" || root == "liblitert-lm" {
 			outName = "litert_lm_ext" + nativeLibExts()[0]
 		} else if strings.HasPrefix(root, "libGemma") {
 			outName = "libGemmaModelConstraintProvider" + nativeLibExts()[0]
