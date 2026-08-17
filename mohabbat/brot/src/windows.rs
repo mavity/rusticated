@@ -225,13 +225,32 @@ pub unsafe fn run() -> ! {
         let mut cmdline: Vec<u16> = cmd_str.encode_utf16().collect();
         cmdline.push(0);
 
+        use crate::win32::Win32::System::Threading::{
+            CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject, ResumeThread,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, CREATE_SUSPENDED
+        };
+
+        // Create job object to enforce shutdown of washmhost if brot dies
+        let h_job = CreateJobObjectW(core::ptr::null_mut(), core::ptr::null());
+        if !h_job.is_null() && h_job != crate::win32::Win32::Foundation::INVALID_HANDLE_VALUE {
+            let mut jeli: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = core::mem::zeroed();
+            jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(
+                h_job,
+                JobObjectExtendedLimitInformation,
+                &mut jeli as *mut _ as *mut core::ffi::c_void,
+                core::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+        }
+
         let res = CreateProcessW(
             washmhost_exe_w.as_ptr(),
             cmdline.as_mut_ptr(),
             core::ptr::null_mut(),
             core::ptr::null_mut(),
             0,
-            0,
+            CREATE_SUSPENDED,
             core::ptr::null_mut(),
             core::ptr::null_mut(),
             &mut startup_info,
@@ -240,6 +259,11 @@ pub unsafe fn run() -> ! {
 
         let mut exit_code: u32 = 1;
         if res != 0 {
+            if !h_job.is_null() && h_job != crate::win32::Win32::Foundation::INVALID_HANDLE_VALUE {
+                AssignProcessToJobObject(h_job, process_info.hProcess);
+            }
+            ResumeThread(process_info.hThread);
+
             #[cfg(feature = "verbose")]
             crate::print_err("brot: washmhost spawned, waiting...\n");
             WaitForSingleObject(process_info.hProcess, INFINITE);

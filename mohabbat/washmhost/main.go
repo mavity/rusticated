@@ -35,6 +35,7 @@ func ensurePosixOutputRunnable(args []string) {
 }
 
 func main() {
+	initWatchdog()
 	// Set an environment variable for the guest to know the host's temp directory if not already set.
 	if os.Getenv("MOHABBAT_HOST_TEMPDIR") == "" {
 		os.Setenv("MOHABBAT_HOST_TEMPDIR", os.TempDir())

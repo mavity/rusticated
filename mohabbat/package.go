@@ -209,7 +209,35 @@ func assembleVegetable(ws, brainPath, buildDir, outputPath string) error {
 // buildZoneA produces the polyglot script header for Modern Four.
 func buildZoneA(offsets, lengths []int, nodeJsLen int) string {
 	const tmplPOSIX = `:; ME="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || printf "%s" "$0")"; S_OFF=0; S_LEN=0
-:; case "$(uname -m)-$(uname -s)" in x86_64-Linux) S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}} ;; aarch64-Linux) S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}} ;; arm64-Darwin) S_OFF={{DARWIN_ARM_OFF}}; S_LEN={{DARWIN_ARM_LEN}} ;; esac
+:; PLATFORM_OVERRIDE=""
+:; ARG_COUNT=$#
+:; while [ $ARG_COUNT -gt 0 ]; do
+:;   if [ "$1" = "--platform" ] && [ $ARG_COUNT -ge 2 ]; then
+:;     shift; PLATFORM_OVERRIDE="$1"; shift; ARG_COUNT=$((ARG_COUNT - 2))
+:;   else
+:;     ARG="$1"; shift; set -- "$@" "$ARG"; ARG_COUNT=$((ARG_COUNT - 1))
+:;   fi
+:; done
+:; if [ -n "$PLATFORM_OVERRIDE" ]; then
+:;   case "$PLATFORM_OVERRIDE" in
+:;     node|linux-amd64|linux-arm64|darwin-arm64|windows-amd64|windows-arm64) RESOLVED_PLATFORM="$PLATFORM_OVERRIDE" ;;
+:;     amd64|x64) case "$(uname -m)-$(uname -s)" in x86_64-Linux|aarch64-Linux) RESOLVED_PLATFORM="linux-amd64" ;; arm64-Darwin) RESOLVED_PLATFORM="darwin-amd64" ;; *) RESOLVED_PLATFORM="$PLATFORM_OVERRIDE" ;; esac ;;
+:;     arm64) case "$(uname -m)-$(uname -s)" in x86_64-Linux|aarch64-Linux) RESOLVED_PLATFORM="linux-arm64" ;; arm64-Darwin) RESOLVED_PLATFORM="darwin-arm64" ;; *) RESOLVED_PLATFORM="$PLATFORM_OVERRIDE" ;; esac ;;
+:;     *) echo "❌ Invalid --platform: '$PLATFORM_OVERRIDE'" >&2; echo "Available: node, linux-amd64, linux-arm64, darwin-arm64, windows-amd64, windows-arm64, amd64, arm64" >&2; exit 1 ;;
+:;   esac
+:;   case "$RESOLVED_PLATFORM" in
+:;     node) USE_NODE=1; S_LEN=0 ;;
+:;     linux-amd64) S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}} ;;
+:;     linux-arm64) S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}} ;;
+:;     darwin-arm64) S_OFF={{DARWIN_ARM_OFF}}; S_LEN={{DARWIN_ARM_LEN}} ;;
+:;     windows-amd64) S_OFF={{WIN_AMD_OFF}}; S_LEN={{WIN_AMD_LEN}} ;;
+:;     windows-arm64) S_OFF={{WIN_ARM_OFF}}; S_LEN={{WIN_ARM_LEN}} ;;
+:;     *) echo "❌ Invalid --platform: '$PLATFORM_OVERRIDE'" >&2; echo "Available: node, linux-amd64, linux-arm64, darwin-arm64, windows-amd64, windows-arm64, amd64, arm64" >&2; exit 1 ;;
+:;   esac
+:;   [ "$S_LEN" = "0" ] && [ "$RESOLVED_PLATFORM" != "node" ] && { echo "❌ Platform '$RESOLVED_PLATFORM' is not included in this vegetable" >&2; exit 1; }
+:; else
+:;   case "$(uname -m)-$(uname -s)" in x86_64-Linux) S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}} ;; aarch64-Linux) S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}} ;; arm64-Darwin) S_OFF={{DARWIN_ARM_OFF}}; S_LEN={{DARWIN_ARM_LEN}} ;; esac
+:; fi
 :; USE_NODE=0
 :; [ -n "$MOHABBAT_USE_NODE" ] && USE_NODE=1
 :; [ "$S_LEN" = "0" ] && USE_NODE=1
@@ -236,17 +264,78 @@ set "ME=%~f0"
 set "TMP_DIR=!TEMP!"
 if exist ".\target" set "TMP_DIR=.\target"
 set "TMP_EXE=!TMP_DIR!\moh-!RANDOM!.exe"
+
+set "FWD_ARGS="
+set "PLATFORM_OVERRIDE="
+set "SKIP_NEXT="
+for %%A in (%*) do (
+  if defined SKIP_NEXT (
+    set "PLATFORM_OVERRIDE=%%~A"
+    set "SKIP_NEXT="
+  ) else if "%%~A"=="--platform" (
+    set "SKIP_NEXT=1"
+  ) else (
+    set "FWD_ARGS=!FWD_ARGS! %%A"
+  )
+)
+
 set "ARCH=%PROCESSOR_ARCHITECTURE%"
 if "!PROCESSOR_ARCHITEW6432!" neq "" set "ARCH=!PROCESSOR_ARCHITEW6432!"
 set "S_OFF=0"
 set "S_LEN=0"
-if "!ARCH!"=="AMD64" (
-	set "S_OFF={{WIN_AMD_OFF}}"
-	set "S_LEN={{WIN_AMD_LEN}}"
-) else if "!ARCH!"=="ARM64" (
-	set "S_OFF={{WIN_ARM_OFF}}"
-	set "S_LEN={{WIN_ARM_LEN}}"
+set "RESOLVED_PLATFORM="
+
+if defined PLATFORM_OVERRIDE (
+  if "!PLATFORM_OVERRIDE!"=="node" set "RESOLVED_PLATFORM=node"
+  if "!PLATFORM_OVERRIDE!"=="linux-amd64" set "RESOLVED_PLATFORM=linux-amd64"
+  if "!PLATFORM_OVERRIDE!"=="linux-arm64" set "RESOLVED_PLATFORM=linux-arm64"
+  if "!PLATFORM_OVERRIDE!"=="darwin-arm64" set "RESOLVED_PLATFORM=darwin-arm64"
+  if "!PLATFORM_OVERRIDE!"=="windows-amd64" set "RESOLVED_PLATFORM=windows-amd64"
+  if "!PLATFORM_OVERRIDE!"=="windows-arm64" set "RESOLVED_PLATFORM=windows-arm64"
+  
+  if "!PLATFORM_OVERRIDE!"=="amd64" set "RESOLVED_PLATFORM=windows-amd64"
+  if "!PLATFORM_OVERRIDE!"=="x64" set "RESOLVED_PLATFORM=windows-amd64"
+  if "!PLATFORM_OVERRIDE!"=="arm64" set "RESOLVED_PLATFORM=windows-arm64"
+  
+  if "!RESOLVED_PLATFORM!"=="" (
+    echo [mohabbat] Invalid --platform: !PLATFORM_OVERRIDE!
+    echo [mohabbat] Available: node, linux-amd64, linux-arm64, darwin-arm64, windows-amd64, windows-arm64, amd64, arm64
+    exit /b 1
+  )
+  if "!RESOLVED_PLATFORM!"=="node" (
+    set "USE_NODE=1"
+    set "S_LEN=0"
+  ) else if "!RESOLVED_PLATFORM!"=="windows-amd64" (
+    set "S_OFF={{WIN_AMD_OFF}}"
+    set "S_LEN={{WIN_AMD_LEN}}"
+  ) else if "!RESOLVED_PLATFORM!"=="windows-arm64" (
+    set "S_OFF={{WIN_ARM_OFF}}"
+    set "S_LEN={{WIN_ARM_LEN}}"
+  ) else if "!RESOLVED_PLATFORM!"=="linux-amd64" (
+    set "S_OFF={{LINUX_AMD_OFF}}"
+    set "S_LEN={{LINUX_AMD_LEN}}"
+  ) else if "!RESOLVED_PLATFORM!"=="linux-arm64" (
+    set "S_OFF={{LINUX_ARM_OFF}}"
+    set "S_LEN={{LINUX_ARM_LEN}}"
+  ) else if "!RESOLVED_PLATFORM!"=="darwin-arm64" (
+    set "S_OFF={{DARWIN_ARM_OFF}}"
+    set "S_LEN={{DARWIN_ARM_LEN}}"
+  )
+  
+  if "!S_LEN!"=="0" if not "!RESOLVED_PLATFORM!"=="node" (
+    echo [mohabbat] Platform '!RESOLVED_PLATFORM!' is not included in this vegetable
+    exit /b 1
+  )
+) else (
+  if "!ARCH!"=="AMD64" (
+  	set "S_OFF={{WIN_AMD_OFF}}"
+  	set "S_LEN={{WIN_AMD_LEN}}"
+  ) else if "!ARCH!"=="ARM64" (
+  	set "S_OFF={{WIN_ARM_OFF}}"
+  	set "S_LEN={{WIN_ARM_LEN}}"
+  )
 )
+
 set "USE_NODE=0"
 if defined MOHABBAT_USE_NODE set "USE_NODE=1"
 if "!S_LEN!"=="0" set "USE_NODE=1"
@@ -270,20 +359,20 @@ if "!USE_NODE!"=="1" (
     "!NODE_BIN!" -v >nul 2>&1
     if !errorlevel! equ 0 (
       set "MOHABBAT_VEGETABLE_PATH=!ME!"
-      powershell -NoProfile -ExecutionPolicy Bypass -Command "& { $a=[IO.File]::ReadAllBytes($env:ME); $b=[Text.Encoding]::UTF8.GetString($a, {{NODE_OFF}}, {{NODE_JS_LEN}}); $n=$env:NODE_BIN; $m=$env:ME; $b | & $n - $env:ME $args; exit $LASTEXITCODE }" -- %*
+      powershell -NoProfile -ExecutionPolicy Bypass -Command "& { $a=[IO.File]::ReadAllBytes($env:ME); $b=[Text.Encoding]::UTF8.GetString($a, {{NODE_OFF}}, {{NODE_JS_LEN}}); $n=$env:NODE_BIN; $m=$env:ME; $b | & $n - $env:ME $args; exit $LASTEXITCODE }" --!FWD_ARGS!
       exit /b !errorlevel!
     )
   )
 )
 if "!S_LEN!"=="0" (
-    echo [mohabbat] This vegetable does not support !ARCH! on Windows and node is not available.
+    echo [mohabbat] This vegetable does not support target platform on Windows and node is not available.
     exit /b 1
 )
 set "MOHABBAT_VEGETABLE_PATH=!ME!"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$a=[IO.File]::ReadAllBytes($env:ME); $b=New-Object byte[] !S_LEN!; [Array]::Copy($a, [int64]!S_OFF!, $b, 0, [int]!S_LEN!); [IO.File]::WriteAllBytes($env:TMP_EXE, $b)"
-"!TMP_EXE!" "!ME!" %*
+"!TMP_EXE!" "!ME!"!FWD_ARGS!
 set "RET=!ERRORLEVEL!"
-if exist "!TMP_EXE!" del "!TMP_EXE!"
+if exist "!TMP_EXE!" del /F /Q "!TMP_EXE!" >nul 2>&1
 exit /b !RET!
 `
 	idx := map[string]int{}
