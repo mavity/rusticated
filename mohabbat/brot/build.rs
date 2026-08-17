@@ -6,4 +6,8 @@ fn main() {
     
     // Emit as a compile-time env var so it can be accessed via env!()
     println!("cargo:rustc-env=MOHABBAT_WASHMHOST_LEN={}", washmhost_len);
+    
+    // Crucial: Tell cargo to rebuild if env var changes
+    // Without this, cargo caches old builds and never invalidates when the env var is updated
+    println!("cargo:rerun-if-env-changed=MOHABBAT_WASHMHOST_LEN");
 }
