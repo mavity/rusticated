@@ -57,6 +57,14 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string, verbose bool, washmh
 		return "", err
 	}
 
+	// Validate that washmhost metadata is available for non-js slots
+	// (it was already checked in build.rs with cargo:rerun-if-env-changed)
+	if s.goos != "js" {
+		if _, ok := washmhostMetadata[s.name]; !ok {
+			return "", fmt.Errorf("washmhost metadata missing for slot %s - was it built by buildAllWashmhost?", s.name)
+		}
+	}
+
 	isRusticatedTarget := strings.Contains(targetName, "rusticated")
 
 	buildTarget := func(name string) error {
@@ -117,11 +125,11 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string, verbose bool, washmh
 		env = upsertEnv(env, "BUILD_VERSION", meta.Version)
 		env = upsertEnv(env, "BUILD_TIME", meta.Time)
 		env = upsertEnv(env, "BUILD_PLATFORM", meta.Platform)
-		// Pass washmhost size metadata to brot so it can embed it at compile time
-		if len(washmhostMetadata) > 0 {
-			if whLen, ok := washmhostMetadata[s.name]; ok {
-				env = upsertEnv(env, "MOHABBAT_WASHMHOST_LEN", fmt.Sprintf("%d", whLen))
-			}
+		// Pass washmhost size metadata to brot so it can embed it at compile time.
+		// cargo:rerun-if-env-changed in build.rs ensures brot rebuilds when this changes.
+		if s.goos != "js" {
+			whLen := washmhostMetadata[s.name]
+			env = upsertEnv(env, "MOHABBAT_WASHMHOST_LEN", fmt.Sprintf("%d", whLen))
 		}
 		// Set SDKROOT to the stubs directory for darwin cross-compilation so lld
 		// doesn't call xcrun to locate the macOS SDK (unavailable on non-Mac hosts).
