@@ -294,6 +294,39 @@ unsafe fn sys_fork() -> i32 {
     ret as i32
 }
 
+unsafe fn sys_prctl(option: i32, arg2: usize, arg3: usize, arg4: usize, arg5: usize) -> i32 {
+    let ret: isize;
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") 157usize,  // SYS_prctl
+            in("rdi") option as usize,
+            in("rsi") arg2,
+            in("rdx") arg3,
+            in("r10") arg4,
+            in("r8") arg5,
+            lateout("rax") ret,
+            clobber_abi("system"),
+        );
+    }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x8") 167usize,   // SYS_prctl
+            in("x0") option as usize,
+            in("x1") arg2,
+            in("x2") arg3,
+            in("x3") arg4,
+            in("x4") arg5,
+            lateout("x0") ret,
+            clobber_abi("system"),
+        );
+    }
+    ret as i32
+}
+
 unsafe fn sys_execve(path: *const u8, argv: *const *const u8, envp: *const *const u8) -> i32 {
     let ret: isize;
     #[cfg(target_arch = "x86_64")]
@@ -638,6 +671,9 @@ pub unsafe fn run(sp: *const usize) -> ! {
     }
 
     if child_pid == 0 {
+        // Child: enable PR_SET_PDEATHSIG to trigger SIGKILL (9) when parent dies
+        unsafe { sys_prctl(1, 9, 0, 0, 0) };
+
         // Child: exec washmhost
         unsafe {
             sys_execve(
