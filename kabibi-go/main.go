@@ -120,10 +120,8 @@ func runPrompt(prompt string) {
 	}
 
 	err := runAIPrompt(prompt, func(token string) {
-		fmt.Print(token)
-	})
-
-	// Print a final newline when the stream finishes
+                fmt.Print(token)
+        })
 	fmt.Println()
 
 	if err != nil {
