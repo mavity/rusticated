@@ -445,6 +445,7 @@ func (h *HostEnv) sys_dylib_callback_create(ctx context.Context, m api.Module, s
 	}
 	guestFnName := string(nameBuf)
 
+
 	h.mu.Lock()
 	libAny, ok := h.handles[libHandle]
 	h.mu.Unlock()
@@ -606,8 +607,26 @@ func (h *HostEnv) invokeCallback(m api.Module, cbHandle uint64, sig CallbackSig,
 		ret = <-respChan
 	}
 
-	// If this is the final token in the stream, complete the dylib_call overlapped operation
-	if len(args) >= 3 && args[2] != 0 {
+	// Determine if this is the final callback in the stream
+	isFinal := false
+	if len(args) >= 2 && cbState != nil && len(cbState.Sig.ArgTypes) >= 2 {
+		if cbState.Sig.ArgTypes[1] == 0x0B {
+			structPtr := args[1]
+			if structPtr != 0 {
+				isFinalVal := *(*byte)(unsafe.Pointer(structPtr + 8))
+				if isFinalVal != 0 {
+					isFinal = true
+				}
+			}
+		} else if len(args) >= 3 && args[2] != 0 {
+			// Legacy hardcoded check for SysV
+			isFinal = true
+		}
+	} else if len(args) >= 3 && args[2] != 0 {
+		isFinal = true
+	}
+
+	if isFinal {
 		h.mu.Lock()
 		activeState := h.activeCallState
 		activeOvPtr := h.activeCallOvPtr
