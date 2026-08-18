@@ -262,7 +262,7 @@ func runAIPrompt(userInput string, onToken func(string)) error {
 	// The C API signature is: void callback(void* user_data, const LiteRtLmStreamChunk* chunk)
 	// 0x0B parses the LiteRtLmStreamChunk struct pointer explicitly in the host.
 	cbSig = []byte{2, syscall.DylibTagPtr, syscall.DylibTagPtr, 0x0B}
-	
+
 	cbHandle, err := syscall.DylibCallbackCreate(lib, cbSig, "wasmTokenCallback")
 	if err != nil {
 		return fmt.Errorf("callback_create: %w", err)
