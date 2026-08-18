@@ -512,9 +512,9 @@ func (h *HostEnv) marshalCallbackArgs(mod api.Module, cb *CallbackState, args []
 		if i >= len(cb.Sig.ArgTypes) {
 			break
 		}
-		
+
 		tag := cb.Sig.ArgTypes[i]
-		
+
 		if tag == 0x09 {
 			hostPtr := args[i]
 			if hostPtr == 0 {
@@ -535,7 +535,7 @@ func (h *HostEnv) marshalCallbackArgs(mod api.Module, cb *CallbackState, args []
 			needed := uint32(len(buf) + 1)
 			if scratchOffset+needed > scratchSize {
 				wargs = append(wargs, uint64(hostPtr))
-				continue 
+				continue
 			}
 
 			guestAddr := scratchBase + scratchOffset
@@ -546,7 +546,7 @@ func (h *HostEnv) marshalCallbackArgs(mod api.Module, cb *CallbackState, args []
 			mem.Write(guestAddr, data)
 			wargs = append(wargs, uint64(guestAddr))
 			scratchOffset += needed
-			
+
 		} else if tag == 0x0B {
 			// struct LiteRtLmStreamChunk { const char* text; bool is_final; const char* error_msg; }
 			structPtr := args[i]
@@ -590,8 +590,8 @@ func (h *HostEnv) marshalCallbackArgs(mod api.Module, cb *CallbackState, args []
 			wargs = append(wargs, isFinal)
 			scratchOffset += needed
 		} else {
-            wargs = append(wargs, uint64(args[i]))
-        }
+			wargs = append(wargs, uint64(args[i]))
+		}
 	}
 
 	return wargs

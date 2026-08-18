@@ -120,8 +120,8 @@ func runPrompt(prompt string) {
 	}
 
 	err := runAIPrompt(prompt, func(token string) {
-                fmt.Print(token)
-        })
+		fmt.Print(token)
+	})
 	fmt.Println()
 
 	if err != nil {
