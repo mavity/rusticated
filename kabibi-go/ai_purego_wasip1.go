@@ -24,7 +24,7 @@ func wasmCallbackScratchAddr() uint32 {
 }
 
 //go:wasmexport wasmTokenCallback
-func wasmTokenCallback(userData, chunk, isFinal, errMsg uint64) uint64 {
+func wasmTokenCallback(userData, chunk, isFinal uint64) uint64 {
 	if chunk != 0 {
 		token := wasmPtrToGoString(uintptr(chunk))
 		if fn, ok := wasmTokenCallbacks[uintptr(userData)]; ok {
@@ -258,7 +258,11 @@ func runAIPrompt(userInput string, onToken func(string)) error {
 	// Callback signature blob: [argCount, retType, argType0..argTypeN]
 	// Specify syscall.DylibTagCstr for string-type parameters to let the host
 	// perform scratch buffer marshalling safely without guessing or address probing.
-	cbSig := []byte{4, syscall.DylibTagPtr, syscall.DylibTagPtr, syscall.DylibTagCstr, syscall.DylibTagU32, syscall.DylibTagCstr}
+	var cbSig []byte
+	// The C API signature is: void callback(void* user_data, const LiteRtLmStreamChunk* chunk)
+	// 0x0B parses the LiteRtLmStreamChunk struct pointer explicitly in the host.
+	cbSig = []byte{2, syscall.DylibTagPtr, syscall.DylibTagPtr, 0x0B}
+	
 	cbHandle, err := syscall.DylibCallbackCreate(lib, cbSig, "wasmTokenCallback")
 	if err != nil {
 		return fmt.Errorf("callback_create: %w", err)

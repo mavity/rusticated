@@ -34,11 +34,14 @@ var tokenCallbackNextID uintptr
 
 // nativeTokenCallback is the C-callable trampoline passed to
 // litert_lm_conversation_send_message_stream.
-func nativeTokenCallback(userData uintptr, chunk *byte, isFinal byte, errMsg *byte) uintptr {
-	if chunk != nil {
-		token := ptrToGoString(uintptr(unsafe.Pointer(chunk)))
-		if fn, ok := tokenCallbackRegistry[userData]; ok {
-			fn(token)
+func nativeTokenCallback(userData uintptr, chunkPtr uintptr) uintptr {
+	if chunkPtr != 0 {
+		textPtr := *(*uintptr)(unsafe.Pointer(chunkPtr))
+		if textPtr != 0 {
+			token := ptrToGoString(textPtr)
+			if fn, ok := tokenCallbackRegistry[userData]; ok {
+				fn(token)
+			}
 		}
 	}
 	return 0

@@ -481,19 +481,24 @@ func (h *HostEnv) executeCrossThreadCallback(mod api.Module, ev *CallbackEvent) 
 }
 
 func (h *HostEnv) marshalCallbackArgs(mod api.Module, cb *CallbackState, args []uintptr) []uint64 {
-	wargs := make([]uint64, len(args))
-	for i, arg := range args {
-		wargs[i] = uint64(arg)
-	}
+	var wargs []uint64
 
 	// Look up the guest scratch buffer address (cached lazily).
 	scratchFn := mod.ExportedFunction("wasmCallbackScratchAddr")
 	if scratchFn == nil {
-		return wargs // Guest doesn't export scratch buffer; pass through as-is
+		wargs = make([]uint64, len(args))
+		for i, arg := range args {
+			wargs[i] = uint64(arg)
+		}
+		return wargs
 	}
 
 	scratchRes, err := scratchFn.Call(context.Background())
 	if err != nil || len(scratchRes) == 0 {
+		wargs = make([]uint64, len(args))
+		for i, arg := range args {
+			wargs[i] = uint64(arg)
+		}
 		return wargs
 	}
 
@@ -507,11 +512,13 @@ func (h *HostEnv) marshalCallbackArgs(mod api.Module, cb *CallbackState, args []
 		if i >= len(cb.Sig.ArgTypes) {
 			break
 		}
-		// Explicit type check from signature tag: TagCstr is 0x09
-		if cb.Sig.ArgTypes[i] == 0x09 {
+		
+		tag := cb.Sig.ArgTypes[i]
+		
+		if tag == 0x09 {
 			hostPtr := args[i]
 			if hostPtr == 0 {
-				wargs[i] = 0
+				wargs = append(wargs, 0)
 				continue
 			}
 
@@ -527,7 +534,8 @@ func (h *HostEnv) marshalCallbackArgs(mod api.Module, cb *CallbackState, args []
 
 			needed := uint32(len(buf) + 1)
 			if scratchOffset+needed > scratchSize {
-				continue // Scratch buffer full, pass raw value as-is
+				wargs = append(wargs, uint64(hostPtr))
+				continue 
 			}
 
 			guestAddr := scratchBase + scratchOffset
@@ -536,9 +544,54 @@ func (h *HostEnv) marshalCallbackArgs(mod api.Module, cb *CallbackState, args []
 			data[needed-1] = 0
 
 			mem.Write(guestAddr, data)
-			wargs[i] = uint64(guestAddr)
+			wargs = append(wargs, uint64(guestAddr))
 			scratchOffset += needed
-		}
+			
+		} else if tag == 0x0B {
+			// struct LiteRtLmStreamChunk { const char* text; bool is_final; const char* error_msg; }
+			structPtr := args[i]
+			var strPtr uintptr
+			var isFinal uint64
+
+			if structPtr != 0 {
+				strPtr = *(*uintptr)(unsafe.Pointer(structPtr))
+				isFinal = uint64(*(*byte)(unsafe.Pointer(structPtr + 8)))
+			}
+
+			if strPtr == 0 {
+				wargs = append(wargs, 0)       // chunk = null
+				wargs = append(wargs, isFinal) // isFinal = val
+				continue
+			}
+
+			var buf []byte
+			for offset := uintptr(0); offset < 1048576; offset++ {
+				b := *(*byte)(unsafe.Pointer(strPtr + offset))
+				if b == 0 {
+					break
+				}
+				buf = append(buf, b)
+			}
+
+			needed := uint32(len(buf) + 1)
+			if scratchOffset+needed > scratchSize {
+				wargs = append(wargs, uint64(strPtr))
+				wargs = append(wargs, isFinal)
+				continue
+			}
+
+			guestAddr := scratchBase + scratchOffset
+			data := make([]byte, needed)
+			copy(data, buf)
+			data[needed-1] = 0
+
+			mem.Write(guestAddr, data)
+			wargs = append(wargs, uint64(guestAddr))
+			wargs = append(wargs, isFinal)
+			scratchOffset += needed
+		} else {
+            wargs = append(wargs, uint64(args[i]))
+        }
 	}
 
 	return wargs
