@@ -445,7 +445,6 @@ func (h *HostEnv) sys_dylib_callback_create(ctx context.Context, m api.Module, s
 	}
 	guestFnName := string(nameBuf)
 
-
 	h.mu.Lock()
 	libAny, ok := h.handles[libHandle]
 	h.mu.Unlock()
