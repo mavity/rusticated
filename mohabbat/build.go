@@ -96,7 +96,7 @@ func ModePackage(ws, projectDir, outputPath string, verbose bool) error {
 }
 
 // ModeDevRun is Mode 4: build a project to WASM and run it under washmhost.
-func ModeDevRun(ws, projectDir string, extraArgs []string, verbose bool) error {
+func ModeDevRun(ws, projectDir string, extraArgs []string, platform string, verbose bool) error {
 	absProject, err := filepath.Abs(projectDir)
 	if err != nil || (!filepath.IsAbs(absProject) && !fileExists(absProject)) {
 		if !filepath.IsAbs(projectDir) {
@@ -115,7 +115,7 @@ func ModeDevRun(ws, projectDir string, extraArgs []string, verbose bool) error {
 	if err := buildProjectToWasm(ws, absProject, wasmPath, verbose); err != nil {
 		return err
 	}
-	return runUnderWashmhost(ws, wasmPath, extraArgs, verbose)
+	return runUnderWashmhost(ws, wasmPath, extraArgs, platform, verbose)
 }
 
 // buildAllSlots builds brot (cargo) and washmhost for all Modern Four slots.
