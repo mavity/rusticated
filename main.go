@@ -21,6 +21,7 @@ func main() {
 	rawArgs := os.Args[1:]
 	projectDir := ""
 	outputPath := ""
+	platformOverride := ""
 	runMode := false
 	verbose := false
 	var runArgs []string
@@ -40,6 +41,13 @@ func main() {
 			meta := mohabbat.GetBuildMetadata(ws)
 			os.Stdout.WriteString(meta.Version + "\n")
 			os.Exit(0)
+		case "--platform":
+			if i+1 < len(rawArgs) {
+				platformOverride = rawArgs[i+1]
+				i += 2
+			} else {
+				mohabbat.Die("missing argument after --platform")
+			}
 		case "-v", "--verbose":
 			verbose = true
 			i++
@@ -65,6 +73,18 @@ func main() {
 	ws, err := mohabbat.ResolveWorkspace("")
 	mohabbat.Must(err)
 
+	// Clean up runArgs if --platform was placed after -r
+	var cleanedRunArgs []string
+	for i := 0; i < len(runArgs); i++ {
+		if runArgs[i] == "--platform" && i+1 < len(runArgs) {
+			platformOverride = runArgs[i+1]
+			i++
+		} else {
+			cleanedRunArgs = append(cleanedRunArgs, runArgs[i])
+		}
+	}
+	runArgs = cleanedRunArgs
+
 	// Heuristic: if -r was used and projectDir remains empty, check if first runArg is a project.
 	if projectDir == "" && runMode && len(runArgs) > 0 {
 		if mohabbat.IsProject(ws, runArgs[0]) {
@@ -80,7 +100,7 @@ func main() {
 		if projectDir == "" {
 			projectDir = "."
 		}
-		mohabbat.Must(mohabbat.ModeDevRun(ws, projectDir, runArgs, verbose))
+		mohabbat.Must(mohabbat.ModeDevRun(ws, projectDir, runArgs, platformOverride, verbose))
 	case projectDir != "" && outputPath != "" && inVeg:
 		// Mode 2: juice bottle refill (running as WASM brain inside a vegetable)
 		// Refill mode logic for verbose is TBD but we can pass it if needed.
