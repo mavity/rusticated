@@ -577,7 +577,7 @@ func (h *HostEnv) invokeCallback(m api.Module, cbHandle uint64, sig CallbackSig,
 		// Marshal host pointers into guest memory.
 		var wargs []uint64
 		if cbState != nil {
-			wargs = h.marshalCallbackArgs(m, cbState, args)
+			wargs = h.marshalCallbackArgs(m, cbState, args, nil)
 		} else {
 			wargs = make([]uint64, len(args))
 			for i, arg := range args {
@@ -678,4 +678,40 @@ func (h *HostEnv) sys_dylib_read_cstr(ctx context.Context, m api.Module, stack [
 		mem.Write(guestBufPtr, buf)
 	}
 	stack[0] = uint64(len(buf))
+}
+
+func (h *HostEnv) invokeCallbackFromSatellite(cbHandle uint64, args []uint64, bufs [][]byte) uintptr {
+	h.mu.Lock()
+	cbAny, cbOk := h.handles[cbHandle]
+	h.mu.Unlock()
+
+	if !cbOk {
+		return 0
+	}
+
+	_, ok := cbAny.(*CallbackState)
+	if !ok {
+		return 0
+	}
+
+	var ret uintptr
+	respChan := make(chan uintptr, 1)
+	var uintptrArgs []uintptr
+	for _, a := range args {
+		uintptrArgs = append(uintptrArgs, uintptr(a))
+	}
+
+	ev := &CallbackEvent{
+		CallbackHandle: cbHandle,
+		Args:           uintptrArgs,
+		RespChan:       respChan,
+	}
+
+	h.callbackQueue <- ev
+	h.fileOpsQueue <- func() {}
+
+	ret = <-respChan
+
+	// We don't do isFinal checking here because satellite manages it, or maybe we do need it.
+	return ret
 }
