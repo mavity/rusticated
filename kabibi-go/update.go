@@ -30,8 +30,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case aiTokenMsg:
-		if len(m.chatLines) > 0 {
-			m.chatLines[len(m.chatLines)-1] += string(msg)
+		// Append token to the last assistant message in conversation
+		if m.conversation != nil && len(m.conversation.Messages) > 0 {
+			m.conversation.Messages[len(m.conversation.Messages)-1].Content += string(msg)
 			m.syncChatView()
 		}
 		return m, m.watchAIChanCmd()
@@ -40,14 +41,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.isThinking = false
 		m.aiMsgChan = nil
 		if msg.err != nil {
-			m.chatLines = append(m.chatLines, "System Error: "+msg.err.Error())
+			// Append error as a system message
+			m.conversation.Messages = append(m.conversation.Messages, Message{
+				Role:    "system",
+				Content: "Error: " + msg.err.Error(),
+			})
 			m.syncChatView()
-		}
-		if len(m.pendingPrompts) > 0 {
-			next := m.pendingPrompts[0]
-			m.pendingPrompts = m.pendingPrompts[1:]
-			m.isThinking = true
-			return m, m.runAIInference(next)
 		}
 		return m, nil
 
@@ -86,12 +85,6 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.assetProgress = nil
 				m.assetDone = nil
 				m.syncChatView()
-				if len(m.pendingPrompts) > 0 && !m.isThinking {
-					next := m.pendingPrompts[0]
-					m.pendingPrompts = m.pendingPrompts[1:]
-					m.isThinking = true
-					return m, m.runAIInference(next)
-				}
 			}
 			return m, nil
 		}
@@ -105,7 +98,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "gemma":
 			m.gemmaDownloadDetails = "Error: " + msg.err.Error()
 		}
-		m.chatLines = append(m.chatLines, fmt.Sprintf("AI runtime error (%s): %v", msg.Stage, msg.err))
+		m.conversation.Messages = append(m.conversation.Messages, Message{
+			Role:    "system",
+			Content: fmt.Sprintf("AI runtime error (%s): %v", msg.Stage, msg.err),
+		})
 		m.syncChatView()
 
 		// Still watch progress if the other one is not done yet.
@@ -259,21 +255,23 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if m.chatOpen {
 				input := m.chatInput.Value()
-				if input != "" {
-					m.chatLines = append(m.chatLines, "User: "+input)
-					m.chatLines = append(m.chatLines, "AI: ")
+				if input != "" && m.assetsReady && !m.isThinking {
+					// Add user message to conversation state
+					m.conversation.Messages = append(m.conversation.Messages, Message{
+						Role:    "user",
+						Content: input,
+					})
+					// Add placeholder for assistant response
+					m.conversation.Messages = append(m.conversation.Messages, Message{
+						Role:    "assistant",
+						Content: "",
+					})
 					m.syncChatView()
 					m.chatInput.Reset()
 					m.chatView.GotoBottom()
 
-					if !m.assetsReady || m.isThinking {
-						m.pendingPrompts = append(m.pendingPrompts, input)
-						m.syncChatView()
-						return m, nil
-					}
-
 					m.isThinking = true
-					return m, m.runAIInference(input)
+					return m, m.advanceChatCmd(input)
 				}
 			} else {
 				input := m.shellInput.Value()

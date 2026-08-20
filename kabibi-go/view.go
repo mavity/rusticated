@@ -366,7 +366,7 @@ func (m model) View() string {
 
 	if m.chatOpen {
 		var progressLines []string
-		if m.isDownloading || !m.assetsReady || len(m.pendingPrompts) > 0 {
+		if m.isDownloading || !m.assetsReady {
 			detailsWidth := m.chatView.Width - 19
 			if detailsWidth < 10 {
 				detailsWidth = 10
@@ -408,9 +408,6 @@ func (m model) View() string {
 			progressLines = append(progressLines, forceBackground(gemmaLine, colorDarkGray))
 			if !m.isDownloading && !m.assetsReady {
 				progressLines = append(progressLines, forceBackground("waiting for runtime assets...", colorDarkGray))
-			}
-			if len(m.pendingPrompts) > 0 {
-				progressLines = append(progressLines, forceBackground(fmt.Sprintf("Queued prompts: %d", len(m.pendingPrompts)), colorDarkGray))
 			}
 		}
 		progressView := strings.Join(progressLines, "\n")
