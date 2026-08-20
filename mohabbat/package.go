@@ -219,24 +219,56 @@ func buildZoneA(offsets, lengths []int, nodeJsLen int) string {
 :;   fi
 :; done
 :; if [ -n "$PLATFORM_OVERRIDE" ]; then
-:;   case "$PLATFORM_OVERRIDE" in
-:;     node|linux-amd64|linux-arm64|darwin-arm64|windows-amd64|windows-arm64) RESOLVED_PLATFORM="$PLATFORM_OVERRIDE" ;;
-:;     amd64|x64) case "$(uname -m)-$(uname -s)" in x86_64-Linux|aarch64-Linux) RESOLVED_PLATFORM="linux-amd64" ;; arm64-Darwin) RESOLVED_PLATFORM="darwin-amd64" ;; *) RESOLVED_PLATFORM="$PLATFORM_OVERRIDE" ;; esac ;;
-:;     arm64) case "$(uname -m)-$(uname -s)" in x86_64-Linux|aarch64-Linux) RESOLVED_PLATFORM="linux-arm64" ;; arm64-Darwin) RESOLVED_PLATFORM="darwin-arm64" ;; *) RESOLVED_PLATFORM="$PLATFORM_OVERRIDE" ;; esac ;;
-:;     *) echo "❌ Invalid --platform: '$PLATFORM_OVERRIDE'" >&2; echo "Available: node, linux-amd64, linux-arm64, darwin-arm64, windows-amd64, windows-arm64, amd64, arm64" >&2; exit 1 ;;
-:;   esac
-:;   case "$RESOLVED_PLATFORM" in
-:;     node) USE_NODE=1; S_LEN=0 ;;
-:;     linux-amd64) S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}} ;;
-:;     linux-arm64) S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}} ;;
-:;     darwin-arm64) S_OFF={{DARWIN_ARM_OFF}}; S_LEN={{DARWIN_ARM_LEN}} ;;
-:;     windows-amd64) S_OFF={{WIN_AMD_OFF}}; S_LEN={{WIN_AMD_LEN}} ;;
-:;     windows-arm64) S_OFF={{WIN_ARM_OFF}}; S_LEN={{WIN_ARM_LEN}} ;;
-:;     *) echo "❌ Invalid --platform: '$PLATFORM_OVERRIDE'" >&2; echo "Available: node, linux-amd64, linux-arm64, darwin-arm64, windows-amd64, windows-arm64, amd64, arm64" >&2; exit 1 ;;
-:;   esac
+:;   if [ "$PLATFORM_OVERRIDE" = "node" ] || [ "$PLATFORM_OVERRIDE" = "linux-amd64" ] || [ "$PLATFORM_OVERRIDE" = "linux-arm64" ] || [ "$PLATFORM_OVERRIDE" = "darwin-arm64" ] || [ "$PLATFORM_OVERRIDE" = "windows-amd64" ] || [ "$PLATFORM_OVERRIDE" = "windows-arm64" ]; then
+:;     RESOLVED_PLATFORM="$PLATFORM_OVERRIDE"
+:;   elif [ "$PLATFORM_OVERRIDE" = "amd64" ] || [ "$PLATFORM_OVERRIDE" = "x64" ]; then
+:;     if [ "$(uname -m)-$(uname -s)" = "x86_64-Linux" ] || [ "$(uname -m)-$(uname -s)" = "aarch64-Linux" ]; then
+:;       RESOLVED_PLATFORM="linux-amd64"
+:;     elif [ "$(uname -m)-$(uname -s)" = "arm64-Darwin" ]; then
+:;       RESOLVED_PLATFORM="darwin-amd64"
+:;     else
+:;       RESOLVED_PLATFORM="$PLATFORM_OVERRIDE"
+:;     fi
+:;   elif [ "$PLATFORM_OVERRIDE" = "arm64" ]; then
+:;     if [ "$(uname -m)-$(uname -s)" = "x86_64-Linux" ] || [ "$(uname -m)-$(uname -s)" = "aarch64-Linux" ]; then
+:;       RESOLVED_PLATFORM="linux-arm64"
+:;     elif [ "$(uname -m)-$(uname -s)" = "arm64-Darwin" ]; then
+:;       RESOLVED_PLATFORM="darwin-arm64"
+:;     else
+:;       RESOLVED_PLATFORM="$PLATFORM_OVERRIDE"
+:;     fi
+:;   else
+:;     echo "❌ Invalid --platform: '$PLATFORM_OVERRIDE'" >&2
+:;     echo "Available: node, linux-amd64, linux-arm64, darwin-arm64, windows-amd64, windows-arm64, amd64, arm64" >&2
+:;     exit 1
+:;   fi
+:;   if [ "$RESOLVED_PLATFORM" = "node" ]; then
+:;     USE_NODE=1
+:;     S_LEN=0
+:;   elif [ "$RESOLVED_PLATFORM" = "linux-amd64" ]; then
+:;     S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}}
+:;   elif [ "$RESOLVED_PLATFORM" = "linux-arm64" ]; then
+:;     S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}}
+:;   elif [ "$RESOLVED_PLATFORM" = "darwin-arm64" ]; then
+:;     S_OFF={{DARWIN_ARM_OFF}}; S_LEN={{DARWIN_ARM_LEN}}
+:;   elif [ "$RESOLVED_PLATFORM" = "windows-amd64" ]; then
+:;     S_OFF={{WIN_AMD_OFF}}; S_LEN={{WIN_AMD_LEN}}
+:;   elif [ "$RESOLVED_PLATFORM" = "windows-arm64" ]; then
+:;     S_OFF={{WIN_ARM_OFF}}; S_LEN={{WIN_ARM_LEN}}
+:;   else
+:;     echo "❌ Invalid --platform: '$PLATFORM_OVERRIDE'" >&2
+:;     echo "Available: node, linux-amd64, linux-arm64, darwin-arm64, windows-amd64, windows-arm64, amd64, arm64" >&2
+:;     exit 1
+:;   fi
 :;   [ "$S_LEN" = "0" ] && [ "$RESOLVED_PLATFORM" != "node" ] && { echo "❌ Platform '$RESOLVED_PLATFORM' is not included in this vegetable" >&2; exit 1; }
 :; else
-:;   case "$(uname -m)-$(uname -s)" in x86_64-Linux) S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}} ;; aarch64-Linux) S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}} ;; arm64-Darwin) S_OFF={{DARWIN_ARM_OFF}}; S_LEN={{DARWIN_ARM_LEN}} ;; esac
+:;   if [ "$(uname -m)-$(uname -s)" = "x86_64-Linux" ]; then
+:;     S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}}
+:;   elif [ "$(uname -m)-$(uname -s)" = "aarch64-Linux" ]; then
+:;     S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}}
+:;   elif [ "$(uname -m)-$(uname -s)" = "arm64-Darwin" ]; then
+:;     S_OFF={{DARWIN_ARM_OFF}}; S_LEN={{DARWIN_ARM_LEN}}
+:;   fi
 :; fi
 :; USE_NODE=0
 :; [ -n "$MOHABBAT_USE_NODE" ] && USE_NODE=1
