@@ -207,7 +207,8 @@ func TestSysTimerSetExtended(t *testing.T) {
 
 		// Busy wait for proactor work
 		for {
-			env.Poll(context.Background(), mod); if false {
+			env.Poll(context.Background(), mod)
+			if false {
 				break
 			}
 			if time.Since(start) > time.Second {

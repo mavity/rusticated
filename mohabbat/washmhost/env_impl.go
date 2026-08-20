@@ -60,6 +60,7 @@ type OpState struct {
 type CallbackEvent struct {
 	CallbackHandle uint64
 	Args           []uintptr
+	BufParams      [][]byte
 	RespChan       chan uintptr
 }
 
@@ -370,7 +371,7 @@ func (h *HostEnv) Poll(ctx context.Context, mod api.Module) {
 check:
 	// 2. If we delivered at least one completion, return immediately so the
 	// driver loop re-enters the guest to consume it. We must NOT block here just
-	// because other ops (e.g. the netpoll deadline timer) remain outstanding —
+	// because other ops (e.g. the netpoll deadline timer) remain outstanding ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â
 	// doing so would starve the guest of the completion we just delivered until
 	// that unrelated timer fires. This mirrors the JS host's drain->run->await loop.
 	// driver loop re-enters the guest to consume it.
@@ -465,7 +466,7 @@ func (h *HostEnv) executeCrossThreadCallback(mod api.Module, ev *CallbackEvent) 
 	}
 
 	// Marshal host pointers into guest memory so the guest can dereference them.
-	wargs := h.marshalCallbackArgs(mod, cbState, ev.Args)
+	wargs := h.marshalCallbackArgs(mod, cbState, ev.Args, ev.BufParams)
 
 	results, err := fn.Call(context.Background(), wargs...)
 	if err != nil {
@@ -480,7 +481,7 @@ func (h *HostEnv) executeCrossThreadCallback(mod api.Module, ev *CallbackEvent) 
 	ev.RespChan <- ret
 }
 
-func (h *HostEnv) marshalCallbackArgs(mod api.Module, cb *CallbackState, args []uintptr) []uint64 {
+func (h *HostEnv) marshalCallbackArgs(mod api.Module, cb *CallbackState, args []uintptr, bufs [][]byte) []uint64 {
 	var wargs []uint64
 
 	// Look up the guest scratch buffer address (cached lazily).
