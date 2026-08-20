@@ -203,3 +203,151 @@ func runAIPrompt(userInput string, onToken func(string)) error {
 
 	return nil
 }
+
+// runAIPromptStateful sends a message to an existing conversation session, reusing engine/conv handles.
+// This enables multi-turn stateful chat where the LLM backend maintains context.
+// On first call with engine=0, it initializes engine and conv, storing them in conv struct.
+func runAIPromptStateful(userInput string, conv *Conversation, onToken func(string)) error {
+	if conv == nil {
+		return fmt.Errorf("conversation is nil")
+	}
+
+	// Wrap the callback to parse LiterTLM JSON token chunks into plain text.
+	origOnToken := onToken
+	onToken = func(raw string) {
+		origOnToken(extractTokenText(raw))
+	}
+
+	// On first call, initialize the engine and conversation handles
+	if conv.engine == 0 || conv.conv == 0 {
+		cacheDir, err := cacheDirPath()
+		if err != nil {
+			return err
+		}
+
+		modelPath := filepath.Join(cacheDir, defaultModelName)
+		libDir := filepath.Join(cacheDir, "lib")
+
+		libExt := ".so"
+		switch HostOS() {
+		case "windows":
+			libExt = ".dll"
+		case "darwin":
+			libExt = ".dylib"
+		}
+
+		libPath := filepath.Join(libDir, "litert_lm_ext"+libExt)
+
+		lib, err := dlopen(libPath, RTLD_NOW|RTLD_GLOBAL)
+		if err != nil {
+			return fmt.Errorf("failed to load %s: %w", libPath, err)
+		}
+
+		// Resolve all symbols.
+		purego.RegisterLibFunc(&lmSettingsCreate, lib, "litert_lm_engine_settings_create")
+		purego.RegisterLibFunc(&lmSettingsDelete, lib, "litert_lm_engine_settings_delete")
+		purego.RegisterLibFunc(&lmEngineCreate, lib, "litert_lm_engine_create")
+		purego.RegisterLibFunc(&lmCfgCreate, lib, "litert_lm_conversation_config_create")
+		purego.RegisterLibFunc(&lmCfgDelete, lib, "litert_lm_conversation_config_delete")
+		purego.RegisterLibFunc(&lmConvCreate, lib, "litert_lm_conversation_create")
+		purego.RegisterLibFunc(&lmConvSendStream, lib, "litert_lm_conversation_send_message_stream")
+		purego.RegisterLibFunc(&lmSetLogLevel, lib, "litert_lm_set_min_log_level")
+		purego.RegisterLibFunc(&lmGetDefaultLogger, lib, "LiteRtGetDefaultLogger")
+		purego.RegisterLibFunc(&lmSetMinLoggerSeverity, lib, "LiteRtSetMinLoggerSeverity")
+		purego.RegisterLibFunc(&lmGetSinkLoggerSize, lib, "LiteRtGetSinkLoggerSize")
+		purego.RegisterLibFunc(&lmGetSinkLoggerMessage, lib, "LiteRtGetSinkLoggerMessage")
+		purego.RegisterLibFunc(&lmClearSinkLogger, lib, "LiteRtClearSinkLogger")
+
+		// Mute any underlying glog/Abseil logging globally in the loaded library's memory space
+		if sym, err := dlsym(lib, "FLAGS_minloglevel"); err == nil && sym != 0 {
+			*(*int32)(unsafe.Pointer(sym)) = 2 // 2 = ERROR
+		}
+		if sym, err := dlsym(lib, "FLAGS_logtostderr"); err == nil && sym != 0 {
+			*(*bool)(unsafe.Pointer(sym)) = false
+		}
+		if sym, err := dlsym(lib, "FLAGS_alsologtostderr"); err == nil && sym != 0 {
+			*(*bool)(unsafe.Pointer(sym)) = false
+		}
+
+		if lmSetLogLevel != nil {
+			lmSetLogLevel(10) // Set to highest silent threshold
+		}
+
+		if lmGetDefaultLogger != nil && lmSetMinLoggerSeverity != nil {
+			logger := lmGetDefaultLogger()
+			if logger != 0 {
+				lmSetMinLoggerSeverity(logger, 3) // 3 = FATAL severity
+			}
+		}
+
+		// Build C strings.
+		cModel, keepModel := goStringToCPtr(modelPath)
+		cBackend, keepBackend := goStringToCPtr("cpu")
+		_ = keepModel
+		_ = keepBackend
+
+		settings := lmSettingsCreate(cModel, cBackend, 0, 0)
+		if settings == 0 {
+			return fmt.Errorf("litert_lm_engine_settings_create returned NULL")
+		}
+		defer lmSettingsDelete(settings)
+
+		engine := lmEngineCreate(settings)
+		if engine == 0 {
+			return fmt.Errorf("litert_lm_engine_create returned NULL")
+		}
+		conv.engine = engine
+
+		config := lmCfgCreate(engine)
+		if config == 0 {
+			return fmt.Errorf("litert_lm_conversation_config_create returned NULL")
+		}
+		defer lmCfgDelete(config)
+
+		convHandle := lmConvCreate(engine, config)
+		if convHandle == 0 {
+			return fmt.Errorf("litert_lm_conversation_create returned NULL")
+		}
+		conv.conv = convHandle
+	}
+
+	// Reuse the conversation handle for this turn
+	tokenCallbackNextID++
+	cbID := tokenCallbackNextID
+	tokenCallbackRegistry[cbID] = onToken
+	defer delete(tokenCallbackRegistry, cbID)
+
+	trampoline := purego.NewCallback(nativeTokenCallback)
+
+	// Build the message payload securely using json.Marshal to eliminate injection vulnerability.
+	type Message struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+
+	msgPayload := Message{
+		Role:    "user",
+		Content: userInput,
+	}
+
+	payloadBytes, err := json.Marshal(msgPayload)
+	if err != nil {
+		return fmt.Errorf("failed to serialize message: %w", err)
+	}
+
+	cMsg, keepMsg := goStringToCPtr(string(payloadBytes))
+	_ = keepMsg
+
+	rc := lmConvSendStream(conv.conv, cMsg, 0, 0, trampoline, cbID)
+	if rc != 0 {
+		return fmt.Errorf("litert_lm_conversation_send_message_stream failed: %d", rc)
+	}
+
+	// Clean/clear the library's in-memory sink logger buffer to prevent RAM growth
+	if lmClearSinkLogger != nil {
+		lmClearSinkLogger()
+	}
+
+	return nil
+}
+

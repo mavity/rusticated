@@ -1,6 +1,7 @@
 ﻿package main
 
 import (
+	"context"
 	"encoding/json"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -32,14 +33,33 @@ func extractTokenText(raw string) string {
 	return raw
 }
 
-func (m *model) runAIInference(userInput string) tea.Cmd {
+// advanceConversation sends the user prompt to the LLM and appends the response to the conversation.
+// It reuses the conversation's existing engine and conv handles, enabling persistent multi-turn chat.
+// The conversation is modified in place as tokens arrive via onToken callback.
+func advanceConversation(ctx context.Context, conv *Conversation, userPrompt string, onToken func(string)) error {
+	if conv == nil {
+		return nil // Silently skip if conversation not initialized
+	}
+
+	// Note: In a stateful conversation, the LLM engine already has history in conv.conv handle.
+	// We just send the new user message and let the backend manage context.
+	err := runAIPromptStateful(userPrompt, conv, func(token string) {
+		if token != "" {
+			onToken(token)
+		}
+	})
+
+	return err
+}
+
+func (m *model) advanceChatCmd(userInput string) tea.Cmd {
 	msgCh := make(chan tea.Msg, 64)
 	m.aiMsgChan = msgCh
 
 	go func() {
 		defer close(msgCh)
 
-		err := runAIPrompt(userInput, func(token string) {
+		err := advanceConversation(context.Background(), m.conversation, userInput, func(token string) {
 			if token != "" {
 				msgCh <- aiTokenMsg(token)
 			}

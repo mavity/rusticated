@@ -21,6 +21,20 @@ const (
 	chatPane
 )
 
+// Message represents a single conversation message.
+type Message struct {
+	Role    string // "user" or "assistant"
+	Content string
+}
+
+// Conversation holds the state of an AI conversation session.
+// Engine and conv are opaque handles to the LiteRT backend.
+type Conversation struct {
+	engine   uintptr
+	conv     uintptr
+	Messages []Message
+}
+
 type fileItem struct {
 	name     string
 	isDir    bool
@@ -81,7 +95,7 @@ type model struct {
 
 	plume             []string
 	lastTab           time.Time
-	chatLines         []string
+	conversation      *Conversation
 	lastExhaustHeight int
 	isInitialized     bool
 	quitting          bool
@@ -98,8 +112,6 @@ type model struct {
 	gemmaDownloadPercent  int
 	gemmaDownloadDetails  string
 	assetError            string
-
-	pendingPrompts []string
 	assetProgress  <-chan assetProgressMsg
 	assetDone      <-chan tea.Msg
 	aiMsgChan      <-chan tea.Msg

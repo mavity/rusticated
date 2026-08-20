@@ -63,9 +63,7 @@ func initialModel() model {
 			"Welcome back, master.",
 			"Run 'help' for available commands.",
 		},
-		chatLines: []string{
-			"System: AI slider initialized.",
-		},
+		conversation:      &Conversation{Messages: []Message{}},
 		lastExhaustHeight: 0,
 		isInitialized:     false,
 		runner:            r,
@@ -192,8 +190,10 @@ func (m *model) syncChatView() {
 	}
 	style := lipgloss.NewStyle().Width(m.chatView.Width)
 	var wrapped []string
-	for _, line := range m.chatLines {
-		wrapped = append(wrapped, style.Render(line))
+	if m.conversation != nil {
+		for _, msg := range m.conversation.Messages {
+			wrapped = append(wrapped, style.Render(msg.Role+": "+msg.Content))
+		}
 	}
 	m.chatView.SetContent(strings.Join(wrapped, "\n"))
 	m.chatView.GotoBottom()
