@@ -112,9 +112,9 @@ type model struct {
 	gemmaDownloadPercent  int
 	gemmaDownloadDetails  string
 	assetError            string
-	assetProgress  <-chan assetProgressMsg
-	assetDone      <-chan tea.Msg
-	aiMsgChan      <-chan tea.Msg
+	assetProgress         <-chan assetProgressMsg
+	assetDone             <-chan tea.Msg
+	aiMsgChan             <-chan tea.Msg
 
 	// File-manager extensions
 	mode      uiMode
