@@ -547,4 +547,3 @@ func runAIPromptStateful(userInput string, conv *Conversation, onToken func(stri
 
 	return nil
 }
-
