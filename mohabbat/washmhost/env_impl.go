@@ -11,7 +11,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-	"unsafe"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
@@ -41,9 +40,8 @@ type HostEnv struct {
 	owningGID         uint64
 	activeInvocations map[uint32]chan uintptr
 	nextInvocationID  uint32
-	activeCallState   *OpState
-	activeCallOvPtr   uint32
-	activeCallRet     uintptr
+	satTargetGOOS     string
+	satTargetGOARCH   string
 }
 
 type OpState struct {
@@ -335,7 +333,8 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_callback_create), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("dylib_callback_create")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_callback_respond), []api.ValueType{api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI64}, []api.ValueType{}).Export("dylib_callback_respond")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_close), []api.ValueType{api.ValueTypeI64}, []api.ValueType{}).Export("dylib_close")
-	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_read_cstr), []api.ValueType{api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("dylib_read_cstr")
+	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_read_cstr), []api.ValueType{api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("dylib_read_cstr")
+	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_read_mem), []api.ValueType{api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("dylib_read_mem")
 
 	builder.NewFunctionBuilder().
 		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
@@ -517,25 +516,22 @@ func (h *HostEnv) marshalCallbackArgs(mod api.Module, cb *CallbackState, args []
 		tag := cb.Sig.ArgTypes[i]
 
 		if tag == 0x09 {
-			hostPtr := args[i]
-			if hostPtr == 0 {
+			// Generic C string: the satellite already extracted the bytes into bufs
+			// (the host cannot deref a satellite pointer). Copy into guest scratch.
+			if len(bufs) == 0 {
+				wargs = append(wargs, 0)
+				continue
+			}
+			buf := bufs[0]
+			bufs = bufs[1:]
+			if len(buf) == 0 {
 				wargs = append(wargs, 0)
 				continue
 			}
 
-			// Safely copy NUL-terminated string
-			var buf []byte
-			for offset := uintptr(0); offset < 1048576; offset++ {
-				b := *(*byte)(unsafe.Pointer(hostPtr + offset))
-				if b == 0 {
-					break
-				}
-				buf = append(buf, b)
-			}
-
 			needed := uint32(len(buf) + 1)
 			if scratchOffset+needed > scratchSize {
-				wargs = append(wargs, uint64(hostPtr))
+				wargs = append(wargs, 0)
 				continue
 			}
 
@@ -546,51 +542,10 @@ func (h *HostEnv) marshalCallbackArgs(mod api.Module, cb *CallbackState, args []
 
 			mem.Write(guestAddr, data)
 			wargs = append(wargs, uint64(guestAddr))
-			scratchOffset += needed
-
-		} else if tag == 0x0B {
-			// struct LiteRtLmStreamChunk { const char* text; bool is_final; const char* error_msg; }
-			structPtr := args[i]
-			var strPtr uintptr
-			var isFinal uint64
-
-			if structPtr != 0 {
-				strPtr = *(*uintptr)(unsafe.Pointer(structPtr))
-				isFinal = uint64(*(*byte)(unsafe.Pointer(structPtr + 8)))
-			}
-
-			if strPtr == 0 {
-				wargs = append(wargs, 0)       // chunk = null
-				wargs = append(wargs, isFinal) // isFinal = val
-				continue
-			}
-
-			var buf []byte
-			for offset := uintptr(0); offset < 1048576; offset++ {
-				b := *(*byte)(unsafe.Pointer(strPtr + offset))
-				if b == 0 {
-					break
-				}
-				buf = append(buf, b)
-			}
-
-			needed := uint32(len(buf) + 1)
-			if scratchOffset+needed > scratchSize {
-				wargs = append(wargs, uint64(strPtr))
-				wargs = append(wargs, isFinal)
-				continue
-			}
-
-			guestAddr := scratchBase + scratchOffset
-			data := make([]byte, needed)
-			copy(data, buf)
-			data[needed-1] = 0
-
-			mem.Write(guestAddr, data)
-			wargs = append(wargs, uint64(guestAddr))
-			wargs = append(wargs, isFinal)
 			scratchOffset += needed
 		} else {
+			// Pointers and scalars pass through untouched as opaque values; the
+			// guest interprets any pointed-to memory itself via dylib_read_*.
 			wargs = append(wargs, uint64(args[i]))
 		}
 	}

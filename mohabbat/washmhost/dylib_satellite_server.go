@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"sync"
 	"unsafe"
 
@@ -30,6 +31,10 @@ type SatCbState struct {
 func runSatellite() {
 	decoder := gob.NewDecoder(os.Stdin)
 	satSrvEncoder = gob.NewEncoder(os.Stdout)
+
+	// First framed message: report our arch so the host can assert compatibility
+	// before it issues any DLL operation.
+	satSrvEncoder.Encode(&DylibResponse{IsHandshake: true, HGOOS: runtime.GOOS, HGOARCH: runtime.GOARCH})
 
 	// Disable stdout/stderr so we don't corrupt the protocol
 	os.Stdout = os.Stderr
@@ -196,6 +201,18 @@ func handleSatelliteRequest(req DylibRequest) {
 		}
 		resp.BytesRes = buf
 
+	case "ReadMem":
+		hostPtr := req.Ptr
+		n := req.MaxLen
+		var buf []byte
+		if hostPtr != 0 && n > 0 {
+			buf = make([]byte, n)
+			for i := uint32(0); i < n; i++ {
+				buf[i] = *(*byte)(unsafe.Pointer(uintptr(hostPtr) + uintptr(i)))
+			}
+		}
+		resp.BytesRes = buf
+
 	case "CallbackCreate":
 closure := makeSatCallbackClosure(req.CbHandle, req.ArgCount, req.RetType, req.ArgTypes, req.GuestFnName)
 if closure != nil {
@@ -256,19 +273,6 @@ b := *(*byte)(unsafe.Pointer(a + offset))
 if b == 0 { break }
 buf = append(buf, b)
 }
-bufs = append(bufs, buf)
-} else if tag == 0x0B && a != 0 {
-strPtr := *(*uintptr)(unsafe.Pointer(a))
-isFinal := *(*byte)(unsafe.Pointer(a + 8))
-var buf []byte
-if strPtr != 0 {
-for offset := uintptr(0); offset < 1048576; offset++ {
-b := *(*byte)(unsafe.Pointer(strPtr + offset))
-if b == 0 { break }
-buf = append(buf, b)
-}
-}
-buf = append(buf, isFinal) // append isFinal explicitly as last byte
 bufs = append(bufs, buf)
 }
 }
