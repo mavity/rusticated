@@ -176,6 +176,10 @@ func cargoTargetName(s slot) (string, error) {
 		return "", fmt.Errorf("cargoTargetName called on js slot")
 	}
 
+	if s.goarch == "arm" && s.goos == "linux" {
+		return "armv7-unknown-linux-musleabihf", nil
+	}
+
 	targetArch := "x86_64"
 	if s.goarch == "arm64" {
 		targetArch = "aarch64"
