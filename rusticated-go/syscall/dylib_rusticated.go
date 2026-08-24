@@ -53,6 +53,10 @@ func rusticated_dylib_read_cstr(hostPtr uint64, guestBufPtr *byte, maxLen uint32
 //go:noescape
 func rusticated_dylib_read_mem(hostPtr uint64, guestBufPtr *byte, length uint32) uint32
 
+//go:wasmimport env dylib_pump
+//go:noescape
+func rusticated_dylib_pump(timeoutMs uint32) uint32
+
 func DylibOpen(path string, flags uint32) (uint64, error) {
 	pathBytes := []byte(path)
 	var pathPtr *byte
@@ -138,4 +142,12 @@ func DylibReadMem(hostPtr uint64, buf []byte) int {
 	}
 	n := rusticated_dylib_read_mem(hostPtr, &buf[0], uint32(len(buf)))
 	return int(n)
+}
+
+// DylibPump blocks until a native callback is queued by the host (or timeoutMs
+// elapses). Queued callbacks are delivered to the guest export nested inside
+// this host call. The guest drives streaming by pumping until it observes
+// whatever end condition the library defines; this primitive is content-blind.
+func DylibPump(timeoutMs uint32) {
+	rusticated_dylib_pump(timeoutMs)
 }

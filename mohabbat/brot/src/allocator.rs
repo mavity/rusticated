@@ -116,6 +116,31 @@ unsafe fn sys_mmap(size: usize) -> *mut u8 {
 }
 
 #[cfg(target_os = "linux")]
+#[cfg(target_arch = "arm")]
+unsafe fn sys_mmap(size: usize) -> *mut u8 {
+    let res: usize;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("r7") 192usize,          // SYS_mmap2 (offset in pages)
+            in("r0") 0usize,            // addr = NULL
+            in("r1") size,              // len
+            in("r2") 3usize,            // PROT_READ | PROT_WRITE
+            in("r3") 0x22usize,         // MAP_PRIVATE | MAP_ANONYMOUS
+            in("r4") (-1i32) as usize,  // fd = -1
+            in("r5") 0usize,            // pgoffset = 0
+            lateout("r0") res,
+            clobber_abi("system"),
+        );
+    }
+    if (res as isize) < 0 && (res as isize) >= -4096 {
+        core::ptr::null_mut()
+    } else {
+        res as *mut u8
+    }
+}
+
+#[cfg(target_os = "linux")]
 #[cfg(target_arch = "x86_64")]
 unsafe fn sys_munmap(ptr: *mut u8, size: usize) {
     unsafe {
@@ -142,6 +167,22 @@ unsafe fn sys_munmap(ptr: *mut u8, size: usize) {
             in("x0") ptr as usize,
             in("x1") size,
             lateout("x0") _,
+            clobber_abi("system"),
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[cfg(target_arch = "arm")]
+unsafe fn sys_munmap(ptr: *mut u8, size: usize) {
+    unsafe {
+        let _: usize;
+        core::arch::asm!(
+            "svc #0",
+            in("r7") 91usize,   // SYS_munmap
+            in("r0") ptr as usize,
+            in("r1") size,
+            lateout("r0") _,
             clobber_abi("system"),
         );
     }
