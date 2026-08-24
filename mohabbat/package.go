@@ -219,7 +219,7 @@ func buildZoneA(offsets, lengths []int, nodeJsLen int) string {
 :;   fi
 :; done
 :; if [ -n "$PLATFORM_OVERRIDE" ]; then
-:;   if [ "$PLATFORM_OVERRIDE" = "node" ] || [ "$PLATFORM_OVERRIDE" = "linux-amd64" ] || [ "$PLATFORM_OVERRIDE" = "linux-arm64" ] || [ "$PLATFORM_OVERRIDE" = "darwin-arm64" ] || [ "$PLATFORM_OVERRIDE" = "windows-amd64" ] || [ "$PLATFORM_OVERRIDE" = "windows-arm64" ]; then
+:;   if [ "$PLATFORM_OVERRIDE" = "node" ] || [ "$PLATFORM_OVERRIDE" = "linux-amd64" ] || [ "$PLATFORM_OVERRIDE" = "linux-arm64" ] || [ "$PLATFORM_OVERRIDE" = "linux-arm32" ] || [ "$PLATFORM_OVERRIDE" = "darwin-arm64" ] || [ "$PLATFORM_OVERRIDE" = "windows-amd64" ] || [ "$PLATFORM_OVERRIDE" = "windows-arm64" ]; then
 :;     RESOLVED_PLATFORM="$PLATFORM_OVERRIDE"
 :;   elif [ "$PLATFORM_OVERRIDE" = "amd64" ] || [ "$PLATFORM_OVERRIDE" = "x64" ]; then
 :;     if [ "$(uname -m)-$(uname -s)" = "x86_64-Linux" ] || [ "$(uname -m)-$(uname -s)" = "aarch64-Linux" ]; then
@@ -239,7 +239,7 @@ func buildZoneA(offsets, lengths []int, nodeJsLen int) string {
 :;     fi
 :;   else
 :;     echo "❌ Invalid --platform: '$PLATFORM_OVERRIDE'" >&2
-:;     echo "Available: node, linux-amd64, linux-arm64, darwin-arm64, windows-amd64, windows-arm64, amd64, arm64" >&2
+:;     echo "Available: node, linux-amd64, linux-arm64, linux-arm32, darwin-arm64, windows-amd64, windows-arm64, amd64, arm64" >&2
 :;     exit 1
 :;   fi
 :;   if [ "$RESOLVED_PLATFORM" = "node" ]; then
@@ -249,6 +249,8 @@ func buildZoneA(offsets, lengths []int, nodeJsLen int) string {
 :;     S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}}
 :;   elif [ "$RESOLVED_PLATFORM" = "linux-arm64" ]; then
 :;     S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}}
+:;   elif [ "$RESOLVED_PLATFORM" = "linux-arm32" ]; then
+:;     S_OFF={{LINUX_ARM32_OFF}}; S_LEN={{LINUX_ARM32_LEN}}
 :;   elif [ "$RESOLVED_PLATFORM" = "darwin-arm64" ]; then
 :;     S_OFF={{DARWIN_ARM_OFF}}; S_LEN={{DARWIN_ARM_LEN}}
 :;   elif [ "$RESOLVED_PLATFORM" = "windows-amd64" ]; then
@@ -257,18 +259,17 @@ func buildZoneA(offsets, lengths []int, nodeJsLen int) string {
 :;     S_OFF={{WIN_ARM_OFF}}; S_LEN={{WIN_ARM_LEN}}
 :;   else
 :;     echo "❌ Invalid --platform: '$PLATFORM_OVERRIDE'" >&2
-:;     echo "Available: node, linux-amd64, linux-arm64, darwin-arm64, windows-amd64, windows-arm64, amd64, arm64" >&2
+:;     echo "Available: node, linux-amd64, linux-arm64, linux-arm32, darwin-arm64, windows-amd64, windows-arm64, amd64, arm64" >&2
 :;     exit 1
 :;   fi
 :;   [ "$S_LEN" = "0" ] && [ "$RESOLVED_PLATFORM" != "node" ] && { echo "❌ Platform '$RESOLVED_PLATFORM' is not included in this vegetable" >&2; exit 1; }
 :; else
-:;   if [ "$(uname -m)-$(uname -s)" = "x86_64-Linux" ]; then
-:;     S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}}
-:;   elif [ "$(uname -m)-$(uname -s)" = "aarch64-Linux" ]; then
-:;     S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}}
-:;   elif [ "$(uname -m)-$(uname -s)" = "arm64-Darwin" ]; then
-:;     S_OFF={{DARWIN_ARM_OFF}}; S_LEN={{DARWIN_ARM_LEN}}
-:;   fi
+:;   case "$(uname -m)-$(uname -s)" in
+:;     x86_64-Linux) S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}} ;;
+:;     aarch64-Linux) S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}} ;;
+:;     armv*-Linux) S_OFF={{LINUX_ARM32_OFF}}; S_LEN={{LINUX_ARM32_LEN}} ;;
+:;     arm64-Darwin) S_OFF={{DARWIN_ARM_OFF}}; S_LEN={{DARWIN_ARM_LEN}} ;;
+:;   esac
 :; fi
 :; USE_NODE=0
 :; [ -n "$MOHABBAT_USE_NODE" ] && USE_NODE=1
@@ -321,6 +322,7 @@ if defined PLATFORM_OVERRIDE (
   if "!PLATFORM_OVERRIDE!"=="node" set "RESOLVED_PLATFORM=node"
   if "!PLATFORM_OVERRIDE!"=="linux-amd64" set "RESOLVED_PLATFORM=linux-amd64"
   if "!PLATFORM_OVERRIDE!"=="linux-arm64" set "RESOLVED_PLATFORM=linux-arm64"
+  if "!PLATFORM_OVERRIDE!"=="linux-arm32" set "RESOLVED_PLATFORM=linux-arm32"
   if "!PLATFORM_OVERRIDE!"=="darwin-arm64" set "RESOLVED_PLATFORM=darwin-arm64"
   if "!PLATFORM_OVERRIDE!"=="windows-amd64" set "RESOLVED_PLATFORM=windows-amd64"
   if "!PLATFORM_OVERRIDE!"=="windows-arm64" set "RESOLVED_PLATFORM=windows-arm64"
@@ -331,7 +333,7 @@ if defined PLATFORM_OVERRIDE (
   
   if "!RESOLVED_PLATFORM!"=="" (
     echo [mohabbat] Invalid --platform: !PLATFORM_OVERRIDE!
-    echo [mohabbat] Available: node, linux-amd64, linux-arm64, darwin-arm64, windows-amd64, windows-arm64, amd64, arm64
+    echo [mohabbat] Available: node, linux-amd64, linux-arm64, linux-arm32, darwin-arm64, windows-amd64, windows-arm64, amd64, arm64
     exit /b 1
   )
   if "!RESOLVED_PLATFORM!"=="node" (
@@ -349,6 +351,9 @@ if defined PLATFORM_OVERRIDE (
   ) else if "!RESOLVED_PLATFORM!"=="linux-arm64" (
     set "S_OFF={{LINUX_ARM_OFF}}"
     set "S_LEN={{LINUX_ARM_LEN}}"
+  ) else if "!RESOLVED_PLATFORM!"=="linux-arm32" (
+    set "S_OFF={{LINUX_ARM32_OFF}}"
+    set "S_LEN={{LINUX_ARM32_LEN}}"
   ) else if "!RESOLVED_PLATFORM!"=="darwin-arm64" (
     set "S_OFF={{DARWIN_ARM_OFF}}"
     set "S_LEN={{DARWIN_ARM_LEN}}"
@@ -414,6 +419,7 @@ exit /b !RET!
 	node := -1
 	linuxAMD := -1
 	linuxARM := -1
+	linuxARM32 := -1
 	darwinARM := -1
 	winAMD := -1
 	winARM := -1
@@ -425,6 +431,9 @@ exit /b !RET!
 	}
 	if i, ok := idx["linux-arm64"]; ok {
 		linuxARM = i
+	}
+	if i, ok := idx["linux-arm32"]; ok {
+		linuxARM32 = i
 	}
 	if i, ok := idx["darwin-arm64"]; ok {
 		darwinARM = i
@@ -455,6 +464,8 @@ exit /b !RET!
 	s = replace(s, "{{LINUX_AMD_LEN}}", linuxAMD, lengths)
 	s = replace(s, "{{LINUX_ARM_OFF}}", linuxARM, offsets)
 	s = replace(s, "{{LINUX_ARM_LEN}}", linuxARM, lengths)
+	s = replace(s, "{{LINUX_ARM32_OFF}}", linuxARM32, offsets)
+	s = replace(s, "{{LINUX_ARM32_LEN}}", linuxARM32, lengths)
 	s = replace(s, "{{DARWIN_ARM_OFF}}", darwinARM, offsets)
 	s = replace(s, "{{DARWIN_ARM_LEN}}", darwinARM, lengths)
 	s = replace(s, "{{WIN_AMD_OFF}}", winAMD, offsets)
