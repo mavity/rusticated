@@ -42,6 +42,16 @@ func main() {
 		}
 	}
 
+	for _, arg := range os.Args {
+		if arg == "--dylib-satellite" {
+			runSatellite()
+			return
+		}
+	}
+
+	// Host mode: capture workspace + toolchain location before the guest can chdir.
+	captureDevContext()
+
 	initWatchdog()
 	// Set an environment variable for the guest to know the host's temp directory if not already set.
 	if os.Getenv("MOHABBAT_HOST_TEMPDIR") == "" {
@@ -102,6 +112,13 @@ func main() {
 	}
 	if os.Getenv("MOHABBAT_HOST_ARCH") == "" {
 		os.Setenv("MOHABBAT_HOST_ARCH", runtime.GOARCH)
+	}
+
+	for _, arg := range os.Args {
+		if arg == "--dylib-satellite" {
+			runSatellite()
+			return
+		}
 	}
 
 	exitCode, err := RunWasm(context.Background(), payloadBytes, argSlice)

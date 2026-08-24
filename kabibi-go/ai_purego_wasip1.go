@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -24,30 +25,28 @@ func wasmCallbackScratchAddr() uint32 {
 }
 
 //go:wasmexport wasmTokenCallback
-func wasmTokenCallback(userData, chunk, isFinal uint64) uint64 {
-	if chunk != 0 {
-		token := wasmPtrToGoString(uintptr(chunk))
-		if fn, ok := wasmTokenCallbacks[uintptr(userData)]; ok {
-			fn(token)
-		}
+func wasmTokenCallback(userData, chunkPtr uint64) uint64 {
+	if chunkPtr == 0 {
+		return 0
+	}
+	// LiteRtLmStreamChunk { const char* text; bool is_final; ... }. The pointer
+	// lives in the DLL's address space, so read it back through the generic ABI
+	// instead of dereferencing guest memory.
+	var hdr [16]byte
+	if syscall.DylibReadMem(chunkPtr, hdr[:]) < 9 {
+		return 0
+	}
+	textPtr := binary.LittleEndian.Uint64(hdr[0:8])
+	if textPtr == 0 {
+		return 0
+	}
+	var strBuf [8192]byte
+	n := syscall.DylibReadCstr(textPtr, strBuf[:])
+	token := string(strBuf[:n])
+	if fn, ok := wasmTokenCallbacks[uintptr(userData)]; ok {
+		fn(token)
 	}
 	return 0
-}
-
-// wasmPtrToGoString reads a NUL-terminated C string from WASM linear memory.
-func wasmPtrToGoString(ptr uintptr) string {
-	if ptr == 0 {
-		return ""
-	}
-	var buf []byte
-	for i := uintptr(0); ; i++ {
-		b := *(*byte)(unsafe.Pointer(ptr + i))
-		if b == 0 {
-			break
-		}
-		buf = append(buf, b)
-	}
-	return string(buf)
 }
 
 type callDescBuilder struct {
@@ -150,9 +149,20 @@ func runAIPrompt(userInput string, onToken func(string)) error {
 	if err != nil {
 		return fmt.Errorf("sym litert_lm_conversation_create: %w", err)
 	}
-	symConvSend, err := syscall.DylibSym(lib, "litert_lm_conversation_send_message_stream")
+	// Prompt mode uses the synchronous send_message API: it blocks until the
+	// full response is ready and returns a JSON response handle, avoiding the
+	// async streaming callback (which delivers tokens on a background thread).
+	symConvSend, err := syscall.DylibSym(lib, "litert_lm_conversation_send_message")
 	if err != nil {
-		return fmt.Errorf("sym litert_lm_conversation_send_message_stream: %w", err)
+		return fmt.Errorf("sym litert_lm_conversation_send_message: %w", err)
+	}
+	symRespGetStr, err := syscall.DylibSym(lib, "litert_lm_json_response_get_string")
+	if err != nil {
+		return fmt.Errorf("sym litert_lm_json_response_get_string: %w", err)
+	}
+	symRespDelete, err := syscall.DylibSym(lib, "litert_lm_json_response_delete")
+	if err != nil {
+		return fmt.Errorf("sym litert_lm_json_response_delete: %w", err)
 	}
 
 	// Mute the library's internal glog and LiteRT logger outputs (warnings/errors/fatals only)
@@ -249,58 +259,55 @@ func runAIPrompt(userInput string, onToken func(string)) error {
 		return fmt.Errorf("litert_lm_conversation_create returned NULL")
 	}
 
-	// Register Go callback and create a native trampoline via the host.
-	wasmTokenNextID++
-	cbID := wasmTokenNextID
-	wasmTokenCallbacks[cbID] = onToken
-	defer delete(wasmTokenCallbacks, cbID)
-
-	// Callback signature blob: [argCount, retType, argType0..argTypeN]
-	// Specify syscall.DylibTagCstr for string-type parameters to let the host
-	// perform scratch buffer marshalling safely without guessing or address probing.
-	var cbSig []byte
-	// The C API signature is: void callback(void* user_data, const LiteRtLmStreamChunk* chunk)
-	// 0x0B parses the LiteRtLmStreamChunk struct pointer explicitly in the host.
-	cbSig = []byte{2, syscall.DylibTagPtr, syscall.DylibTagPtr, 0x0B}
-
-	cbHandle, err := syscall.DylibCallbackCreate(lib, cbSig, "wasmTokenCallback")
-	if err != nil {
-		return fmt.Errorf("callback_create: %w", err)
-	}
-
 	// Securely serialize message structure to JSON to eliminate JSON injection risks.
 	type Message struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
 	}
 
-	msgPayload := Message{
-		Role:    "user",
-		Content: userInput,
-	}
-
-	payloadBytes, err := json.Marshal(msgPayload)
+	payloadBytes, err := json.Marshal(Message{Role: "user", Content: userInput})
 	if err != nil {
 		return fmt.Errorf("failed to serialize message: %w", err)
 	}
 
-	desc = newCallDesc(syscall.DylibTagI32)
+	// Synchronous send: send_message(conv, msg_json, ctx_json, optional_args) -> resp_ptr.
+	// ctx_json is an empty JSON object (matching the reference binding); optional_args is NULL.
+	desc = newCallDesc(syscall.DylibTagPtr)
 	desc.pushPtr(conv)
-	iPtr, iLen := cstrArg(string(payloadBytes))
-	desc.pushCstr(iPtr, iLen)
-	desc.pushPtr(0)
-	desc.pushPtr(0)
-	desc.pushCb(cbHandle)
-	desc.pushPtr(uint64(cbID))
+	mjPtr, mjLen := cstrArg(string(payloadBytes))
+	desc.pushCstr(mjPtr, mjLen)
+	cjPtr, cjLen := cstrArg("{}")
+	desc.pushCstr(cjPtr, cjLen)
+	desc.pushPtr(0) // optional_args = NULL
 
-	rc, err := syscall.DylibCall(symConvSend, desc.bytes())
+	respPtr, err := syscall.DylibCall(symConvSend, desc.bytes())
 	if err != nil {
-		return fmt.Errorf("conv_send_message_stream: %w", err)
+		return fmt.Errorf("conv_send_message: %w", err)
+	}
+	if respPtr == 0 {
+		return fmt.Errorf("litert_lm_conversation_send_message returned NULL")
+	}
+	defer func() {
+		d := newCallDesc(syscall.DylibTagVoid)
+		d.pushPtr(respPtr)
+		syscall.DylibCall(symRespDelete, d.bytes())
+	}()
+
+	// Read the response JSON string: json_response_get_string(resp_ptr) -> char* (native ptr).
+	desc = newCallDesc(syscall.DylibTagPtr)
+	desc.pushPtr(respPtr)
+	strPtr, err := syscall.DylibCall(symRespGetStr, desc.bytes())
+	if err != nil {
+		return fmt.Errorf("json_response_get_string: %w", err)
+	}
+	if strPtr == 0 {
+		return fmt.Errorf("litert_lm_json_response_get_string returned NULL")
 	}
 
-	if int32(rc) != 0 {
-		return fmt.Errorf("litert_lm_conversation_send_message_stream failed: %d", int32(rc))
-	}
+	var respBuf [65536]byte
+	n := syscall.DylibReadCstr(strPtr, respBuf[:])
+	respJSON := string(respBuf[:n])
+	onToken(respJSON)
 
 	// Clean/clear the library's in-memory sink logger buffer to prevent RAM growth
 	if symClear, err := syscall.DylibSym(lib, "LiteRtClearSinkLogger"); err == nil && symClear != 0 {
@@ -488,12 +495,10 @@ func runAIPromptStateful(userInput string, conv *Conversation, onToken func(stri
 	defer delete(wasmTokenCallbacks, cbID)
 
 	// Callback signature blob: [argCount, retType, argType0..argTypeN]
-	// Specify syscall.DylibTagCstr for string-type parameters to let the host
-	// perform scratch buffer marshalling safely without guessing or address probing.
 	var cbSig []byte
-	// The C API signature is: void callback(void* user_data, const LiteRtLmStreamChunk* chunk)
-	// 0x0B parses the LiteRtLmStreamChunk struct pointer explicitly in the host.
-	cbSig = []byte{2, syscall.DylibTagPtr, syscall.DylibTagPtr, 0x0B}
+	// The C API signature is: void callback(void* user_data, const LiteRtLmStreamChunk* chunk).
+	// Both are opaque host pointers; the guest reads the chunk via dylib_read_*.
+	cbSig = []byte{2, syscall.DylibTagVoid, syscall.DylibTagPtr, syscall.DylibTagPtr}
 
 	cbHandle, err := syscall.DylibCallbackCreate(lib, cbSig, "wasmTokenCallback")
 	if err != nil {

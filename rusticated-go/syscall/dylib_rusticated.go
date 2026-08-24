@@ -49,6 +49,10 @@ func rusticated_dylib_close(libHandle uint64)
 //go:noescape
 func rusticated_dylib_read_cstr(hostPtr uint64, guestBufPtr *byte, maxLen uint32) uint32
 
+//go:wasmimport env dylib_read_mem
+//go:noescape
+func rusticated_dylib_read_mem(hostPtr uint64, guestBufPtr *byte, length uint32) uint32
+
 func DylibOpen(path string, flags uint32) (uint64, error) {
 	pathBytes := []byte(path)
 	var pathPtr *byte
@@ -125,5 +129,13 @@ func DylibReadCstr(hostPtr uint64, buf []byte) int {
 		return 0
 	}
 	n := rusticated_dylib_read_cstr(hostPtr, &buf[0], uint32(len(buf)))
+	return int(n)
+}
+
+func DylibReadMem(hostPtr uint64, buf []byte) int {
+	if len(buf) == 0 {
+		return 0
+	}
+	n := rusticated_dylib_read_mem(hostPtr, &buf[0], uint32(len(buf)))
 	return int(n)
 }
