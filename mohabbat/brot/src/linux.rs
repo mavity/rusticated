@@ -37,6 +37,23 @@ unsafe fn sys_read(fd: i32, buf: *mut u8, n: usize) -> isize {
     ret
 }
 
+#[cfg(target_arch = "arm")]
+unsafe fn sys_read(fd: i32, buf: *mut u8, n: usize) -> isize {
+    let ret: isize;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("r7") 3usize,    // SYS_read
+            in("r0") fd as usize,
+            in("r1") buf as usize,
+            in("r2") n,
+            lateout("r0") ret,
+            clobber_abi("system"),
+        );
+    }
+    ret
+}
+
 #[cfg(target_arch = "x86_64")]
 unsafe fn sys_write(fd: i32, buf: *const u8, n: usize) -> isize {
     let ret: isize;
@@ -65,6 +82,23 @@ unsafe fn sys_write(fd: i32, buf: *const u8, n: usize) -> isize {
             in("x1") buf as usize,
             in("x2") n,
             lateout("x0") ret,
+            clobber_abi("system"),
+        );
+    }
+    ret
+}
+
+#[cfg(target_arch = "arm")]
+unsafe fn sys_write(fd: i32, buf: *const u8, n: usize) -> isize {
+    let ret: isize;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("r7") 4usize,    // SYS_write
+            in("r0") fd as usize,
+            in("r1") buf as usize,
+            in("r2") n,
+            lateout("r0") ret,
             clobber_abi("system"),
         );
     }
@@ -107,6 +141,23 @@ unsafe fn sys_open(path: *const u8, flags: i32, mode: u32) -> i32 {
     ret as i32
 }
 
+#[cfg(target_arch = "arm")]
+unsafe fn sys_open(path: *const u8, flags: i32, mode: u32) -> i32 {
+    let ret: isize;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("r7") 5usize,    // SYS_open
+            in("r0") path as usize,
+            in("r1") flags as usize,
+            in("r2") mode as usize,
+            lateout("r0") ret,
+            clobber_abi("system"),
+        );
+    }
+    ret as i32
+}
+
 #[cfg(target_arch = "x86_64")]
 unsafe fn sys_close(fd: i32) {
     unsafe {
@@ -130,6 +181,20 @@ unsafe fn sys_close(fd: i32) {
             in("x8") 57usize,   // SYS_close
             in("x0") fd as usize,
             lateout("x0") _,
+            clobber_abi("system"),
+        );
+    }
+}
+
+#[cfg(target_arch = "arm")]
+unsafe fn sys_close(fd: i32) {
+    unsafe {
+        let _: isize;
+        core::arch::asm!(
+            "svc #0",
+            in("r7") 6usize,    // SYS_close
+            in("r0") fd as usize,
+            lateout("r0") _,
             clobber_abi("system"),
         );
     }
@@ -169,6 +234,28 @@ unsafe fn sys_lseek(fd: i32, offset: i64, whence: i32) -> i64 {
     ret
 }
 
+// ARM32 has no 64-bit lseek; use _llseek(140) which writes the result via pointer.
+#[cfg(target_arch = "arm")]
+unsafe fn sys_lseek(fd: i32, offset: i64, whence: i32) -> i64 {
+    let mut result: i64 = -1;
+    let result_ptr = core::ptr::addr_of_mut!(result) as usize;
+    let ret: isize;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("r7") 140usize,                          // SYS__llseek
+            in("r0") fd as usize,
+            in("r1") (offset as u64 >> 32) as usize,    // offset_high
+            in("r2") offset as u32 as usize,             // offset_low
+            in("r3") result_ptr,                         // *result (loff_t)
+            in("r4") whence as usize,
+            lateout("r0") ret,
+            clobber_abi("system"),
+        );
+    }
+    if ret < 0 { -1i64 } else { result }
+}
+
 #[cfg(target_arch = "x86_64")]
 unsafe fn sys_fchmod(fd: i32, mode: u32) -> i32 {
     let ret: isize;
@@ -195,6 +282,22 @@ unsafe fn sys_fchmod(fd: i32, mode: u32) -> i32 {
             in("x0") fd as usize,
             in("x1") mode as usize,
             lateout("x0") ret,
+            clobber_abi("system"),
+        );
+    }
+    ret as i32
+}
+
+#[cfg(target_arch = "arm")]
+unsafe fn sys_fchmod(fd: i32, mode: u32) -> i32 {
+    let ret: isize;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("r7") 94usize,   // SYS_fchmod
+            in("r0") fd as usize,
+            in("r1") mode as usize,
+            lateout("r0") ret,
             clobber_abi("system"),
         );
     }
@@ -232,6 +335,20 @@ unsafe fn sys_unlink(path: *const u8) {
     }
 }
 
+#[cfg(target_arch = "arm")]
+unsafe fn sys_unlink(path: *const u8) {
+    unsafe {
+        let _: isize;
+        core::arch::asm!(
+            "svc #0",
+            in("r7") 10usize,   // SYS_unlink
+            in("r0") path as usize,
+            lateout("r0") _,
+            clobber_abi("system"),
+        );
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 unsafe fn sys_getpid() -> i32 {
     let ret: isize;
@@ -254,6 +371,20 @@ unsafe fn sys_getpid() -> i32 {
             "svc #0",
             in("x8") 172usize,  // SYS_getpid
             lateout("x0") ret,
+            clobber_abi("system"),
+        );
+    }
+    ret as i32
+}
+
+#[cfg(target_arch = "arm")]
+unsafe fn sys_getpid() -> i32 {
+    let ret: isize;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("r7") 20usize,   // SYS_getpid
+            lateout("r0") ret,
             clobber_abi("system"),
         );
     }
@@ -294,6 +425,20 @@ unsafe fn sys_fork() -> i32 {
     ret as i32
 }
 
+#[cfg(target_arch = "arm")]
+unsafe fn sys_fork() -> i32 {
+    let ret: isize;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("r7") 2usize,    // SYS_fork
+            lateout("r0") ret,
+            clobber_abi("system"),
+        );
+    }
+    ret as i32
+}
+
 unsafe fn sys_prctl(option: i32, arg2: usize, arg3: usize, arg4: usize, arg5: usize) -> i32 {
     let ret: isize;
     #[cfg(target_arch = "x86_64")]
@@ -324,6 +469,20 @@ unsafe fn sys_prctl(option: i32, arg2: usize, arg3: usize, arg4: usize, arg5: us
             clobber_abi("system"),
         );
     }
+    #[cfg(target_arch = "arm")]
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("r7") 172usize,   // SYS_prctl
+            in("r0") option as usize,
+            in("r1") arg2,
+            in("r2") arg3,
+            in("r3") arg4,
+            in("r4") arg5,
+            lateout("r0") ret,
+            clobber_abi("system"),
+        );
+    }
     ret as i32
 }
 
@@ -350,6 +509,18 @@ unsafe fn sys_execve(path: *const u8, argv: *const *const u8, envp: *const *cons
             in("x1") argv as usize,
             in("x2") envp as usize,
             lateout("x0") ret,
+            clobber_abi("system"),
+        );
+    }
+    #[cfg(target_arch = "arm")]
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("r7") 11usize,   // SYS_execve
+            in("r0") path as usize,
+            in("r1") argv as usize,
+            in("r2") envp as usize,
+            lateout("r0") ret,
             clobber_abi("system"),
         );
     }
@@ -384,6 +555,19 @@ unsafe fn sys_wait4(pid: i32, status: *mut i32) -> i32 {
             clobber_abi("system"),
         );
     }
+    #[cfg(target_arch = "arm")]
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("r7") 114usize,  // SYS_wait4
+            in("r0") pid as usize,
+            in("r1") status as usize,
+            in("r2") 0usize,    // options
+            in("r3") 0usize,    // rusage = NULL
+            lateout("r0") ret,
+            clobber_abi("system"),
+        );
+    }
     ret as i32
 }
 
@@ -403,6 +587,15 @@ pub unsafe fn sys_exit_group(code: i32) -> ! {
             "svc #0",
             in("x8") 94usize,   // SYS_exit_group
             in("x0") code as usize,
+            options(noreturn),
+        );
+    }
+    #[cfg(target_arch = "arm")]
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("r7") 248usize,  // SYS_exit_group
+            in("r0") code as usize,
             options(noreturn),
         );
     }

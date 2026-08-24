@@ -149,6 +149,9 @@ func goBuild(ws, pkgDir string, s slot, buildDir string, verbose bool) error {
 	env = upsertEnv(env, "CGO_ENABLED", "0")
 	env = upsertEnv(env, "GOOS", s.goos)
 	env = upsertEnv(env, "GOARCH", s.goarch)
+	if s.goarm != "" {
+		env = upsertEnv(env, "GOARM", s.goarm)
+	}
 	env = upsertEnv(env, "GOTMPDIR", goTmpDir)
 	env = upsertEnv(env, "GOCACHE", goCacheDir)
 	env = upsertEnv(env, "TMP", goTmpDir)

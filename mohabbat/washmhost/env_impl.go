@@ -37,6 +37,7 @@ type HostEnv struct {
 	forcedExitCode    int32
 	args              []string
 	callbackQueue     chan *CallbackEvent
+	cbArrived         chan struct{}
 	owningGID         uint64
 	activeInvocations map[uint32]chan uintptr
 	nextInvocationID  uint32
@@ -76,6 +77,7 @@ func NewHostEnv() *HostEnv {
 		timers:            make(map[uint32]*time.Timer),
 		forcedExitCode:    -1,
 		callbackQueue:     make(chan *CallbackEvent, 100),
+		cbArrived:         make(chan struct{}, 256),
 		activeInvocations: make(map[uint32]chan uintptr),
 	}
 	env.handles[0] = os.Stdin
@@ -335,6 +337,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_close), []api.ValueType{api.ValueTypeI64}, []api.ValueType{}).Export("dylib_close")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_read_cstr), []api.ValueType{api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("dylib_read_cstr")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_read_mem), []api.ValueType{api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("dylib_read_mem")
+	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_pump), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("dylib_pump")
 
 	builder.NewFunctionBuilder().
 		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {

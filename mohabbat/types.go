@@ -9,12 +9,14 @@ var slots = []slot{
 	{name: "darwin-arm64", goos: "darwin", goarch: "arm64", shCase: "arm64-Darwin"},
 	{name: "win-amd64", goos: "windows", goarch: "amd64", winArch: "AMD64"},
 	{name: "win-arm64", goos: "windows", goarch: "arm64", winArch: "ARM64"},
+	{name: "linux-arm32", goos: "linux", goarch: "arm", goarm: "7"},
 }
 
 type slot struct {
 	name      string
 	goos      string
 	goarch    string
+	goarm     string // GOARM value ("7" for ARMv7 hard-float); empty if not applicable
 	shCase    string // matches "$(uname -m)-$(uname -s)"
 	winArch   string // matches %PROCESSOR_ARCHITECTURE%
 	jsTextLen int

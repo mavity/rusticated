@@ -149,6 +149,13 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
             in("x0") 200usize,
             options(noreturn),
         );
+        #[cfg(target_arch = "arm")]
+        core::arch::asm!(
+            "svc #0",
+            in("r7") 248usize,  // SYS_exit_group
+            in("r0") 200usize,
+            options(noreturn),
+        );
     }
     #[cfg(target_os = "macos")]
     unsafe {
@@ -250,6 +257,19 @@ pub unsafe extern "C" fn _start() -> ! {
         "mov x29, xzr",
         "mov x30, xzr",
         "b {f}",
+        f = sym linux::run,
+    );
+}
+
+#[cfg(all(target_os = "linux", target_arch = "arm"))]
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn _start() -> ! {
+    core::arch::naked_asm!(
+        "mov r0, sp", // Pass original stack pointer to linux::run
+        "mov r11, #0",
+        "mov lr, #0",
+        "bl {f}",
         f = sym linux::run,
     );
 }

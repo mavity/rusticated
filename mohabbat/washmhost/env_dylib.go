@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/tetratelabs/wazero/api"
 )
@@ -325,9 +326,9 @@ func (h *HostEnv) sys_dylib_call(ctx context.Context, m api.Module, stack []uint
 
 		r1 := uintptr(resp.Result)
 
-		// The native call has returned; that IS the completion. A streaming call
-		// fires its callbacks inline and only returns after the final one, so there
-		// is nothing library-specific for this layer to inspect.
+		// The native call returned; that is this operation's completion. This
+		// marshalling layer forwards the result verbatim and never inspects call
+		// semantics — any per-call orchestration belongs to the guest and the DLL.
 		h.fileOpsQueue <- func() {
 			defer h.DecOpsFor(state)
 			if !h.IsOpActive(ovPtr, state.opID) {
@@ -652,7 +653,30 @@ func (h *HostEnv) invokeCallbackFromSatellite(cbHandle uint64, args []uint64, bu
 
 	h.callbackQueue <- ev
 	h.fileOpsQueue <- func() {}
+	// Wake a guest that is blocked in dylib_pump so it can drain this callback on
+	// its own (nested) stack via the host-call wrapper.
+	select {
+	case h.cbArrived <- struct{}{}:
+	default:
+	}
 
 	ret = <-respChan
 	return ret
+}
+
+// sys_dylib_pump blocks until a satellite callback is queued (or the timeout
+// elapses), then returns. The queued callback is delivered by the host-call
+// wrapper's drain, i.e. nested on the guest's own stack — never re-entrantly
+// from Poll. This is a generic scheduling primitive: it carries no knowledge of
+// what the callbacks mean; the guest decides when a stream is complete.
+func (h *HostEnv) sys_dylib_pump(ctx context.Context, m api.Module, stack []uint64) {
+	timeoutMs := uint32(stack[0])
+	if timeoutMs == 0 {
+		timeoutMs = 50
+	}
+	select {
+	case <-h.cbArrived:
+	case <-time.After(time.Duration(timeoutMs) * time.Millisecond):
+	}
+	stack[0] = 0
 }
