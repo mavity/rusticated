@@ -30,7 +30,7 @@ const (
 )
 
 var (
-	editorBgColor = lipgloss.Color("#101418")
+	editorBgColor = lipgloss.Color("#000078") // exact same blue family as panels, just a bit darker
 	editorSelBg   = lipgloss.Color("#2d4f67")
 	editorGutterS = lipgloss.NewStyle().Foreground(lipgloss.Color("#4a5568")).Background(editorBgColor)
 	editorBarS    = lipgloss.NewStyle().Foreground(lipgloss.Color("#1a1f26")).Background(editorBgColor)
@@ -547,15 +547,36 @@ func (m *model) updateEditor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	key := msg.String()
 
+	// While a close-confirmation prompt is up, capture the answer keys.
+	if e.confirmQuit {
+		switch key {
+		case "f2", "y", "Y", "enter":
+			if err := e.save(); err != nil {
+				e.confirmQuit = false
+				e.status = "save failed: " + err.Error()
+				return m, nil
+			}
+			return m.closeEditor()
+		case "n", "N":
+			return m.closeEditor()
+		case "esc":
+			e.confirmQuit = false
+			e.status = ""
+			return m, nil
+		default:
+			return m, nil
+		}
+	}
+
 	switch key {
 	case "esc":
-		if e.dirty && !e.confirmQuit {
+		if e.dirty {
 			e.confirmQuit = true
-			e.status = "Unsaved changes — Esc again to discard, Ctrl+S to save"
+			e.status = "Save changes?  [Y] save   [N] discard   [Esc] cancel"
 			return m, nil
 		}
 		return m.closeEditor()
-	case "ctrl+s":
+	case "f2", "ctrl+s":
 		if err := e.save(); err != nil {
 			e.status = "save failed: " + err.Error()
 		} else {
@@ -855,7 +876,7 @@ func (e *editorModel) titleBar(w int) string {
 
 func (e *editorModel) statusBar(w int) string {
 	pos := fmt.Sprintf(" Ln %d, Col %d ", e.cy+1, e.cx+1)
-	hint := "Ctrl+S save  Ctrl+C/X/V clip  Esc quit "
+	hint := "F2 save  Ctrl+C/X/V clip  Esc quit "
 	msg := e.status
 	style := lipgloss.NewStyle().Background(colorDarkGray).Foreground(colorWhite).Width(w)
 	left := pos

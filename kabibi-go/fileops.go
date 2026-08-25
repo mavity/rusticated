@@ -38,9 +38,12 @@ type fileOp struct {
 }
 
 type fileOpProgressMsg struct {
-	current string
-	done    int64
-	total   int64
+	current     string
+	done        int64
+	total       int64
+	fileDone    int64
+	fileTotal   int64
+	bytesPerSec int64
 }
 
 type fileOpDoneMsg struct {
@@ -48,19 +51,129 @@ type fileOpDoneMsg struct {
 	err  error
 }
 
+// fileOpCollisionMsg is emitted when a destination already exists and the op
+// pauses for the user to decide how to proceed.
+type fileOpCollisionMsg struct {
+	path string
+}
+
+// collisionChoice is the user's answer to an overwrite prompt.
+type collisionChoice int
+
+const (
+	colOverwrite collisionChoice = iota
+	colSkip
+	colOverwriteAll
+	colSkipAll
+	colCancel
+)
+
+// opSink carries progress accounting and collision resolution through the
+// recursive copy/move/delete helpers.
+type opSink struct {
+	ctx    context.Context
+	ch     chan<- tea.Msg
+	resume <-chan collisionChoice
+
+	batchDone, batchTotal int64
+	fileDone, fileTotal   int64
+	curName               string
+	start                 time.Time
+	last                  time.Time
+
+	overwriteAll, skipAll bool
+}
+
+func (s *opSink) beginFile(name string, total int64) {
+	s.curName = name
+	s.fileDone = 0
+	s.fileTotal = total
+	s.emit(true)
+}
+
+func (s *opSink) add(n int64) {
+	s.batchDone += n
+	s.fileDone += n
+	s.emit(false)
+}
+
+func (s *opSink) emit(force bool) {
+	if !force && time.Since(s.last) < 40*time.Millisecond {
+		return
+	}
+	s.last = time.Now()
+	var rate int64
+	if el := time.Since(s.start).Seconds(); el > 0 {
+		rate = int64(float64(s.batchDone) / el)
+	}
+	select {
+	case s.ch <- fileOpProgressMsg{
+		current:     s.curName,
+		done:        s.batchDone,
+		total:       s.batchTotal,
+		fileDone:    s.fileDone,
+		fileTotal:   s.fileTotal,
+		bytesPerSec: rate,
+	}:
+	case <-s.ctx.Done():
+	}
+}
+
+// decide asks the UI how to handle an existing destination, honouring any
+// remembered "apply to all" answer. It returns whether to proceed and an error
+// when the whole operation should abort.
+func (s *opSink) decide(dst string) (bool, error) {
+	if s.overwriteAll {
+		return true, nil
+	}
+	if s.skipAll {
+		return false, nil
+	}
+	select {
+	case s.ch <- fileOpCollisionMsg{path: dst}:
+	case <-s.ctx.Done():
+		return false, s.ctx.Err()
+	}
+	select {
+	case c := <-s.resume:
+		switch c {
+		case colOverwrite:
+			return true, nil
+		case colSkip:
+			return false, nil
+		case colOverwriteAll:
+			s.overwriteAll = true
+			return true, nil
+		case colSkipAll:
+			s.skipAll = true
+			return false, nil
+		default:
+			return false, context.Canceled
+		}
+	case <-s.ctx.Done():
+		return false, s.ctx.Err()
+	}
+}
+
 // startFileOp launches an operation in a goroutine and returns a command that
 // waits for the first progress/done message on the op channel.
 func (m *model) startFileOp(op fileOp) tea.Cmd {
 	ch := make(chan tea.Msg, 128)
+	resume := make(chan collisionChoice, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	m.opChan = ch
 	m.opCancel = cancel
+	m.opResume = resume
 	m.opActive = true
+	m.opCollision = false
 	m.opKind = op.kind
 	m.opCurrent = ""
 	m.opDone = 0
 	m.opTotal = 0
-	go runFileOp(ctx, op, ch)
+	m.opFileDone = 0
+	m.opFileTotal = 0
+	m.opRate = 0
+	go runFileOp(ctx, op, ch, resume)
 	return m.watchFileOpCmd()
 }
 
@@ -77,7 +190,7 @@ func (m *model) watchFileOpCmd() tea.Cmd {
 
 // runFileOp performs the operation, emitting throttled progress and a final
 // done message, then closes the channel.
-func runFileOp(ctx context.Context, op fileOp, ch chan<- tea.Msg) {
+func runFileOp(ctx context.Context, op fileOp, ch chan<- tea.Msg, resume <-chan collisionChoice) {
 	defer close(ch)
 
 	total := int64(0)
@@ -85,23 +198,16 @@ func runFileOp(ctx context.Context, op fileOp, ch chan<- tea.Msg) {
 		total += pathSize(src)
 	}
 
-	var done int64
-	last := time.Now()
-	emit := func(current string, force bool) {
-		if force || time.Since(last) > 40*time.Millisecond {
-			last = time.Now()
-			select {
-			case ch <- fileOpProgressMsg{current: current, done: done, total: total}:
-			case <-ctx.Done():
-			}
-		}
+	now := time.Now()
+	s := &opSink{
+		ctx:        ctx,
+		ch:         ch,
+		resume:     resume,
+		batchTotal: total,
+		start:      now,
+		last:       now,
 	}
-	emit("", true)
-
-	report := func(current string, n int64) {
-		done += n
-		emit(current, false)
-	}
+	s.emit(true)
 
 	var err error
 	for _, src := range op.sources {
@@ -111,11 +217,11 @@ func runFileOp(ctx context.Context, op fileOp, ch chan<- tea.Msg) {
 		}
 		switch op.kind {
 		case opCopy:
-			err = copyPath(ctx, src, filepath.Join(op.dest, filepath.Base(src)), report)
+			err = copyPath(s, src, filepath.Join(op.dest, filepath.Base(src)))
 		case opMove:
-			err = movePath(ctx, src, filepath.Join(op.dest, filepath.Base(src)), report)
+			err = movePath(s, src, filepath.Join(op.dest, filepath.Base(src)))
 		case opDelete:
-			err = deletePath(ctx, src, report)
+			err = deletePath(s, src)
 		}
 		if err != nil {
 			break
@@ -123,8 +229,8 @@ func runFileOp(ctx context.Context, op fileOp, ch chan<- tea.Msg) {
 	}
 
 	if err == nil {
-		done = total
-		emit("", true)
+		s.batchDone = total
+		s.emit(true)
 	}
 	select {
 	case ch <- fileOpDoneMsg{kind: op.kind, err: err}:
@@ -150,7 +256,7 @@ func pathSize(path string) int64 {
 	return total
 }
 
-func copyPath(ctx context.Context, src, dst string, report func(string, int64)) error {
+func copyPath(s *opSink, src, dst string) error {
 	info, err := os.Lstat(src)
 	if err != nil {
 		return err
@@ -164,19 +270,30 @@ func copyPath(ctx context.Context, src, dst string, report func(string, int64)) 
 			return err
 		}
 		for _, e := range entries {
-			if ctx.Err() != nil {
-				return ctx.Err()
+			if s.ctx.Err() != nil {
+				return s.ctx.Err()
 			}
-			if err := copyPath(ctx, filepath.Join(src, e.Name()), filepath.Join(dst, e.Name()), report); err != nil {
+			if err := copyPath(s, filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	return copyFileContents(ctx, src, dst, info, report)
+	if pathExists(dst) {
+		proceed, err := s.decide(dst)
+		if err != nil {
+			return err
+		}
+		if !proceed {
+			s.add(info.Size()) // count skipped bytes so the batch bar still completes
+			return nil
+		}
+	}
+	return copyFileContents(s, src, dst, info)
 }
 
-func copyFileContents(ctx context.Context, src, dst string, info os.FileInfo, report func(string, int64)) error {
+func copyFileContents(s *opSink, src, dst string, info os.FileInfo) error {
+	s.beginFile(dst, info.Size())
 	in, err := os.Open(src)
 	if err != nil {
 		return err
@@ -190,9 +307,9 @@ func copyFileContents(ctx context.Context, src, dst string, info os.FileInfo, re
 
 	buf := make([]byte, 256*1024)
 	for {
-		if ctx.Err() != nil {
+		if s.ctx.Err() != nil {
 			out.Close()
-			return ctx.Err()
+			return s.ctx.Err()
 		}
 		n, rerr := in.Read(buf)
 		if n > 0 {
@@ -200,7 +317,7 @@ func copyFileContents(ctx context.Context, src, dst string, info os.FileInfo, re
 				out.Close()
 				return werr
 			}
-			report(src, int64(n))
+			s.add(int64(n))
 		}
 		if rerr == io.EOF {
 			break
@@ -213,21 +330,35 @@ func copyFileContents(ctx context.Context, src, dst string, info os.FileInfo, re
 	return out.Close()
 }
 
-func movePath(ctx context.Context, src, dst string, report func(string, int64)) error {
+func movePath(s *opSink, src, dst string) error {
+	if pathExists(dst) {
+		proceed, err := s.decide(dst)
+		if err != nil {
+			return err
+		}
+		if !proceed {
+			s.add(pathSize(src))
+			return nil
+		}
+		if err := os.RemoveAll(dst); err != nil {
+			return err
+		}
+	}
 	// Fast path: a plain rename works within the same volume.
 	if err := os.Rename(src, dst); err == nil {
-		report(src, pathSize(dst))
+		s.beginFile(dst, pathSize(dst))
+		s.add(pathSize(dst))
 		return nil
 	}
 	// Fallback for cross-device moves or when the fast path is refused:
 	// copy the tree, then remove the source only if the copy succeeded.
-	if err := copyPath(ctx, src, dst, report); err != nil {
+	if err := copyPath(s, src, dst); err != nil {
 		return err
 	}
 	return os.RemoveAll(src)
 }
 
-func deletePath(ctx context.Context, src string, report func(string, int64)) error {
+func deletePath(s *opSink, src string) error {
 	info, err := os.Lstat(src)
 	if err != nil {
 		return err
@@ -238,23 +369,24 @@ func deletePath(ctx context.Context, src string, report func(string, int64)) err
 			return err
 		}
 		for _, e := range entries {
-			if ctx.Err() != nil {
-				return ctx.Err()
+			if s.ctx.Err() != nil {
+				return s.ctx.Err()
 			}
-			if err := deletePath(ctx, filepath.Join(src, e.Name()), report); err != nil {
+			if err := deletePath(s, filepath.Join(src, e.Name())); err != nil {
 				return err
 			}
 		}
 		if err := os.Remove(src); err != nil {
 			return err
 		}
-		report(src, 0)
+		s.add(0)
 		return nil
 	}
 	if err := os.Remove(src); err != nil {
 		return err
 	}
-	report(src, info.Size())
+	s.beginFile(src, info.Size())
+	s.add(info.Size())
 	return nil
 }
 

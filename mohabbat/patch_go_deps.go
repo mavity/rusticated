@@ -149,6 +149,7 @@ func applyWasip1DepPatches(ws, projectDir, goroot string) (*depPatchResult, erro
 					_ = writeFileIfChanged(solPath, []byte("//go:build solaris\n\n"+content))
 				}
 			}
+			patchTermenvColorProfile(target.jitDir)
 		}
 
 		// SPECIAL CASE: golang.org/x/sys/unix — inject rusticated constants and types for wasip1.
@@ -661,6 +662,57 @@ func actuallyExcludeWasip1(filePath string) error {
 	content := string(data)
 	content = addWasip1ExclusionToTag(content)
 	return os.WriteFile(filePath, []byte(content), 0644)
+}
+
+// patchTermenvColorProfile rewrites termenv's TTY/colour detection so the guest
+// keeps ANSI colours under the rusticated runtime: isTTY relies solely on the
+// rusticated-backed isatty (no env-var gate) and ColorProfile never downgrades
+// to Ascii, defaulting to TrueColor when the terminal type is unknown.
+func patchTermenvColorProfile(jitDir string) {
+	replaceInFile := func(name string, repls [][2]string) {
+		p := filepath.Join(jitDir, name)
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return
+		}
+		content := string(data)
+		for _, r := range repls {
+			if strings.Contains(content, r[0]) {
+				content = strings.Replace(content, r[0], r[1], 1)
+			}
+		}
+		_ = writeFileIfChanged(p, []byte(content))
+	}
+
+	// termenv.go: drop the CI env-var short-circuit so isTTY defers to the
+	// rusticated-backed isatty.IsTerminal.
+	replaceInFile("termenv.go", [][2]string{
+		{
+			"\tif len(o.environ.Getenv(\"CI\")) > 0 {\n\t\treturn false\n\t}\n\tif f, ok := o.Writer().(*os.File); ok {",
+			"\tif f, ok := o.Writer().(*os.File); ok {",
+		},
+	})
+
+	// termenv_unix.go (compiled for the wasip1 guest): never strip colours on a
+	// non-TTY and default to TrueColor instead of Ascii.
+	replaceInFile("termenv_unix.go", [][2]string{
+		{
+			"\tif !o.isTTY() {\n\t\treturn Ascii\n\t}\n\n\tif o.environ.Getenv(\"GOOGLE_CLOUD_SHELL\") == \"true\" {",
+			"\tif o.environ.Getenv(\"GOOGLE_CLOUD_SHELL\") == \"true\" {",
+		},
+		{
+			"\tif strings.Contains(term, \"ansi\") {\n\t\treturn ANSI\n\t}\n\n\treturn Ascii\n}",
+			"\tif strings.Contains(term, \"ansi\") {\n\t\treturn ANSI\n\t}\n\n\treturn TrueColor\n}",
+		},
+	})
+
+	// termenv_windows.go (native builds): same non-TTY colour retention.
+	replaceInFile("termenv_windows.go", [][2]string{
+		{
+			"\tif !o.isTTY() {\n\t\treturn Ascii\n\t}\n\n\tif o.environ.Getenv(\"ConEmuANSI\") == \"ON\" {",
+			"\tif o.environ.Getenv(\"ConEmuANSI\") == \"ON\" {",
+		},
+	})
 }
 
 func addWasip1ExclusionToTag(content string) string {
