@@ -264,12 +264,16 @@ func buildZoneA(offsets, lengths []int, nodeJsLen int) string {
 :;   fi
 :;   [ "$S_LEN" = "0" ] && [ "$RESOLVED_PLATFORM" != "node" ] && { echo "❌ Platform '$RESOLVED_PLATFORM' is not included in this vegetable" >&2; exit 1; }
 :; else
-:;   case "$(uname -m)-$(uname -s)" in
-:;     x86_64-Linux) S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}} ;;
-:;     aarch64-Linux) S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}} ;;
-:;     armv*-Linux) S_OFF={{LINUX_ARM32_OFF}}; S_LEN={{LINUX_ARM32_LEN}} ;;
-:;     arm64-Darwin) S_OFF={{DARWIN_ARM_OFF}}; S_LEN={{DARWIN_ARM_LEN}} ;;
-:;   esac
+:;   UNAME_PAIR="$(uname -m)-$(uname -s)"
+:;   if [ "$UNAME_PAIR" = "x86_64-Linux" ]; then
+:;     S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}}
+:;   elif [ "$UNAME_PAIR" = "aarch64-Linux" ]; then
+:;     S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}}
+:;   elif [ "$UNAME_PAIR" = "arm64-Darwin" ]; then
+:;     S_OFF={{DARWIN_ARM_OFF}}; S_LEN={{DARWIN_ARM_LEN}}
+:;   elif [ "${UNAME_PAIR#armv}" != "$UNAME_PAIR" ] && [ "${UNAME_PAIR%-Linux}" != "$UNAME_PAIR" ]; then
+:;     S_OFF={{LINUX_ARM32_OFF}}; S_LEN={{LINUX_ARM32_LEN}}
+:;   fi
 :; fi
 :; USE_NODE=0
 :; [ -n "$MOHABBAT_USE_NODE" ] && USE_NODE=1
