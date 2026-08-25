@@ -676,6 +676,49 @@
                     hostState.pendingSignals.push({ ovPtr, signum });
                     return 0;
                 },
+                dylib_open: (ovPtr, pathPtr, pathLen, flags) => {
+                    const view = new DataView(hostState.memory.buffer);
+                    view.setUint32(ovPtr, 1, true); // done
+                    view.setUint32(ovPtr + 4, 38, true); // ENOSYS (predictable fail)
+                    return 0;
+                },
+                dylib_sym: (ovPtr, libHandle, namePtr, nameLen) => {
+                    const view = new DataView(hostState.memory.buffer);
+                    view.setUint32(ovPtr, 1, true);
+                    view.setUint32(ovPtr + 4, 38, true); // ENOSYS
+                    return 0;
+                },
+                dylib_call: (ovPtr, symHandle, descPtr, descLen) => {
+                    const view = new DataView(hostState.memory.buffer);
+                    view.setUint32(ovPtr, 1, true);
+                    view.setUint32(ovPtr + 4, 38, true); // ENOSYS
+                    return 0;
+                },
+                dylib_callback_create: (ovPtr, libHandle, sigPtr, sigLen, namePtr, nameLen) => {
+                    const view = new DataView(hostState.memory.buffer);
+                    view.setUint32(ovPtr, 1, true);
+                    view.setUint32(ovPtr + 4, 38, true); // ENOSYS
+                    return 0;
+                },
+                dylib_callback_respond: (cbHandle, invocationId, retValue) => {
+                },
+                dylib_callback_wait: (ovPtr, outPtr, outLen) => {
+                    // No native DLL in the browser host: report the wait as
+                    // cancelled so a guest pump (if ever entered) exits cleanly.
+                    const view = new DataView(hostState.memory.buffer);
+                    view.setUint32(ovPtr, 1, true);     // done
+                    view.setUint32(ovPtr + 4, 11, true); // ECANCELED -> ok=false
+                    return 0;
+                },
+                dylib_callback_stop: () => {},
+                dylib_close: (libHandle) => {
+                },
+                dylib_read_cstr: (hostPtr, guestBufPtr, maxLen) => {
+                    return 0;
+                },
+                dylib_read_mem: (hostPtr, guestBufPtr, maxLen) => {
+                    return 0;
+                },
                 cancel: (...args) => {},
                 get_platform_info: (...args) => 0,
                 tty_set_mode: (handle, mode) => {

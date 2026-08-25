@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"sync"
-	"time"
 
 	"github.com/tetratelabs/wazero/api"
 )
@@ -500,17 +499,25 @@ func (h *HostEnv) sys_dylib_callback_respond(ctx context.Context, m api.Module, 
 	cbHandle := stack[0]
 	invocationId := uint32(stack[1])
 	retValue := int64(stack[2])
+	_ = cbHandle
 
+	// The guest callback has finished running; leave reentrant mode so later
+	// dylib reads route to the worker thread again.
+	h.callbackDepth = 0
+	h.resolveInvocation(invocationId, uintptr(retValue))
+}
+
+// resolveInvocation unblocks the satellite goroutine waiting on a callback's
+// return value.
+func (h *HostEnv) resolveInvocation(invocID uint32, ret uintptr) {
 	h.mu.Lock()
-	ch, ok := h.activeInvocations[invocationId]
+	ch, ok := h.activeInvocations[invocID]
 	if ok {
-		delete(h.activeInvocations, invocationId)
+		delete(h.activeInvocations, invocID)
 	}
 	h.mu.Unlock()
-
-	_ = cbHandle
 	if ok {
-		ch <- uintptr(retValue)
+		ch <- ret
 	}
 }
 
@@ -689,51 +696,118 @@ func (h *HostEnv) invokeCallbackFromSatellite(cbHandle uint64, args []uint64, bu
 		return 0
 	}
 
-	_, ok := cbAny.(*CallbackState)
-	if !ok {
+	if _, ok := cbAny.(*CallbackState); !ok {
 		return 0
 	}
 
-	var ret uintptr
+	// Allocate an invocation id + response channel. The guest pump goroutine
+	// runs the callback on its own (growable) stack and replies via
+	// dylib_callback_respond, so the callback body never executes on the g0
+	// scheduler stack (which cannot grow) — the cause of morestack aborts.
 	respChan := make(chan uintptr, 1)
-	var uintptrArgs []uintptr
-	for _, a := range args {
-		uintptrArgs = append(uintptrArgs, uintptr(a))
+	h.mu.Lock()
+	h.nextInvocationID++
+	invocID := h.nextInvocationID
+	h.activeInvocations[invocID] = respChan
+	h.mu.Unlock()
+
+	pcb := &pendingCallback{invocID: invocID, cbHandle: cbHandle, args: args}
+
+	h.cbMu.Lock()
+	w := h.cbWaiter
+	if w != nil {
+		h.cbWaiter = nil
+	} else {
+		h.cbPending = pcb
+	}
+	h.cbMu.Unlock()
+
+	if w != nil {
+		// A guest pump is parked: complete its wait on the module thread.
+		h.fileOpsQueue <- func() { h.deliverToWaiter(w, pcb) }
+	} else {
+		// No parked pump yet: leave the callback queued and wake the driver
+		// loop so the guest is scheduled to call dylib_callback_wait.
+		h.fileOpsQueue <- func() {}
 	}
 
-	ev := &CallbackEvent{
-		CallbackHandle: cbHandle,
-		Args:           uintptrArgs,
-		BufParams:      bufs,
-		RespChan:       respChan,
-	}
-
-	h.callbackQueue <- ev
-	h.fileOpsQueue <- func() {}
-	// Wake a guest that is blocked in dylib_pump so it can drain this callback on
-	// its own (nested) stack via the host-call wrapper.
-	select {
-	case h.cbArrived <- struct{}{}:
-	default:
-	}
-
-	ret = <-respChan
-	return ret
+	return <-respChan
 }
 
-// sys_dylib_pump blocks until a satellite callback is queued (or the timeout
-// elapses), then returns. The queued callback is delivered by the host-call
-// wrapper's drain, i.e. nested on the guest's own stack — never re-entrantly
-// from Poll. This is a generic scheduling primitive: it carries no knowledge of
-// what the callbacks mean; the guest decides when a stream is complete.
-func (h *HostEnv) sys_dylib_pump(ctx context.Context, m api.Module, stack []uint64) {
-	timeoutMs := uint32(stack[0])
-	if timeoutMs == 0 {
-		timeoutMs = 50
+// deliverToWaiter completes a parked guest pump's wait with a queued callback.
+// Runs on the module thread (via fileOpsQueue).
+func (h *HostEnv) deliverToWaiter(w *callbackWaiter, pcb *pendingCallback) {
+	if !h.IsOpActive(w.ovPtr, w.state.opID) {
+		// The wait was cancelled (stream ended); unblock the satellite.
+		h.resolveInvocation(pcb.invocID, 0)
+		return
 	}
-	select {
-	case <-h.cbArrived:
-	case <-time.After(time.Duration(timeoutMs) * time.Millisecond):
+	h.mu.Lock()
+	delete(h.activeOps, w.ovPtr)
+	h.mu.Unlock()
+	h.writeCallbackDelivery(w.mod, w.ovPtr, w.outPtr, w.outLen, pcb)
+	h.DecOpsFor(w.state)
+}
+
+// writeCallbackDelivery hands a pending callback to the guest pump by writing
+// its scalar args into the guest buffer and completing the overlapped. It raises
+// callbackDepth so dylib reads issued by the callback route reentrant to the
+// satellite's parked callback thread; sys_dylib_callback_respond lowers it.
+func (h *HostEnv) writeCallbackDelivery(mod api.Module, ovPtr, outPtr, outLen uint32, pcb *pendingCallback) {
+	n := len(pcb.args)
+	if uint32(n*8) > outLen {
+		n = int(outLen / 8)
 	}
-	stack[0] = 0
+	if n > 0 {
+		buf := make([]byte, n*8)
+		for i := 0; i < n; i++ {
+			binary.LittleEndian.PutUint64(buf[i*8:], pcb.args[i])
+		}
+		mod.Memory().Write(outPtr, buf)
+	}
+	h.callbackDepth = 1
+	continued := uint64(pcb.invocID) | (uint64(n) << 32)
+	writeOverlapped(mod, ovPtr, 0, continued, pcb.cbHandle)
+}
+
+// sys_dylib_callback_wait blocks the calling guest goroutine until a native
+// callback is available, then returns its handle, invocation id and scalar args
+// (cbHandle in resultExt, invocId|argCount<<32 in continued, args in the buffer).
+func (h *HostEnv) sys_dylib_callback_wait(ctx context.Context, m api.Module, stack []uint64) {
+	ovPtr := uint32(stack[0])
+	outPtr := uint32(stack[1])
+	outLen := uint32(stack[2])
+
+	h.cbMu.Lock()
+	if pcb := h.cbPending; pcb != nil {
+		h.cbPending = nil
+		h.cbMu.Unlock()
+		h.writeCallbackDelivery(m, ovPtr, outPtr, outLen, pcb)
+		return
+	}
+	state := h.RegisterOp(ovPtr, nil)
+	h.cbWaiter = &callbackWaiter{ovPtr: ovPtr, outPtr: outPtr, outLen: outLen, mod: m, state: state}
+	h.cbMu.Unlock()
+	// Return without completing; the guest goparks until deliverToWaiter or
+	// sys_dylib_callback_stop completes this overlapped.
+}
+
+// sys_dylib_callback_stop cancels a parked pump wait so the guest pump loop can
+// exit once the stream is finished.
+func (h *HostEnv) sys_dylib_callback_stop(ctx context.Context, m api.Module, stack []uint64) {
+	h.callbackDepth = 0
+	h.cbMu.Lock()
+	w := h.cbWaiter
+	h.cbWaiter = nil
+	h.cbMu.Unlock()
+	if w == nil {
+		return
+	}
+	if h.IsOpActive(w.ovPtr, w.state.opID) {
+		h.mu.Lock()
+		delete(h.activeOps, w.ovPtr)
+		h.mu.Unlock()
+		writeOverlapped(w.mod, w.ovPtr, wasiECANCELED, 0, 0)
+		h.DecOpsFor(w.state)
+	}
 }
