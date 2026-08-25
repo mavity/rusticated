@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"syscall"
-	"time"
 	"unsafe"
 )
 
@@ -59,6 +58,30 @@ func wasmTokenCallback(userData, chunkPtr uint64) uint64 {
 		}
 	}
 	return 0
+}
+
+// pumpTokenCallbacks drains native token callbacks on the caller's own
+// (growable) goroutine stack until the DLL signals the final chunk (done) or
+// the host cancels the wait. Each callback is delivered by the host as an async
+// completion and dispatched by the Go scheduler, so it never runs on the g0
+// system stack (where allocation would trip "morestack on g0").
+func pumpTokenCallbacks(done chan struct{}) {
+	for {
+		select {
+		case <-done:
+			return
+		default:
+		}
+		cbHandle, invocID, args, ok := syscall.DylibCallbackWait()
+		if !ok {
+			return
+		}
+		var ret uint64
+		if len(args) >= 2 {
+			ret = wasmTokenCallback(args[0], args[1])
+		}
+		syscall.DylibCallbackRespond(cbHandle, invocID, int64(ret))
+	}
 }
 
 type callDescBuilder struct {
@@ -310,21 +333,11 @@ func runAIPrompt(userInput string, onToken func(string)) error {
 		return fmt.Errorf("litert_lm_conversation_send_message_stream failed: %d", int32(rc))
 	}
 
-	// Await stream completion. The DLL delivers tokens on a background thread;
-	// the host queues each one and hands it to the guest nested inside dylib_pump
-	// (a content-blind scheduling primitive), so tokens are processed on the
-	// guest's own stack. Completion (the final chunk) is decided in wasmTokenCallback,
-	// never in the marshalling layer.
-	deadline := time.Now().Add(5 * time.Minute)
-awaitStream:
-	for time.Now().Before(deadline) {
-		syscall.DylibPump(50)
-		select {
-		case <-done:
-			break awaitStream
-		default:
-		}
-	}
+	// Drain the token stream on this goroutine's own (growable) stack. The host
+	// delivers each callback as an async completion dispatched by the scheduler,
+	// so it never runs on the g0 stack. The loop ends at the final chunk.
+	pumpTokenCallbacks(done)
+	syscall.DylibCallbackStop()
 
 	// Clean/clear the library's in-memory sink logger buffer to prevent RAM growth
 	if symClear, err := syscall.DylibSym(lib, "LiteRtClearSinkLogger"); err == nil && symClear != 0 {
@@ -557,18 +570,10 @@ func runAIPromptStateful(userInput string, conv *Conversation, onToken func(stri
 		return fmt.Errorf("litert_lm_conversation_send_message_stream failed: %d", int32(rc))
 	}
 
-	// Await stream completion. Pump delivers each token nested on the guest stack;
-	// the final chunk sets done. Completion is decided in the guest, not the host.
-	deadline := time.Now().Add(5 * time.Minute)
-awaitStream:
-	for time.Now().Before(deadline) {
-		syscall.DylibPump(50)
-		select {
-		case <-done:
-			break awaitStream
-		default:
-		}
-	}
+	// Drain the token stream on this goroutine's own (growable) stack; the final
+	// chunk sets done. Delivery is dispatched by the scheduler, never on g0.
+	pumpTokenCallbacks(done)
+	syscall.DylibCallbackStop()
 
 	// Clean/clear the library's in-memory sink logger buffer to prevent RAM growth
 	if symClear, err := syscall.DylibSym(lib, "LiteRtClearSinkLogger"); err == nil && symClear != 0 {
