@@ -29,6 +29,11 @@ type DylibRequest struct {
 	Ptr       uint64
 	MaxLen    uint32
 
+	// Reentrant marks a request issued by the guest while it is servicing a
+	// native callback. The satellite routes it to the thread parked in that
+	// callback's C trampoline instead of the top-level worker thread.
+	Reentrant bool
+
 	// For callback initialization from Host to Satellite
 	GuestFnName string
 	ArgCount    uint8
@@ -313,10 +318,14 @@ func handleSatelliteCallback(resp DylibResponse) {
 	}
 }
 
-func callSatellite(h *HostEnv, req DylibRequest) (DylibResponse, error) {
+// sendSatellite assigns a correlation id, registers a response channel, and
+// writes the request. The caller decides how to wait on the returned channel:
+// a plain receive for ordinary calls, or an interruptible select (that also
+// services inbound callbacks) for reentrant calls.
+func sendSatellite(h *HostEnv, req DylibRequest) (chan DylibResponse, error) {
 	enc, err := getSatellite(h)
 	if err != nil {
-		return DylibResponse{}, err
+		return nil, err
 	}
 
 	req.ID = atomic.AddUint64(&satNextID, 1)
@@ -331,9 +340,15 @@ func callSatellite(h *HostEnv, req DylibRequest) (DylibResponse, error) {
 		satMu.Lock()
 		delete(satPending, req.ID)
 		satMu.Unlock()
+		return nil, err
+	}
+	return ch, nil
+}
+
+func callSatellite(h *HostEnv, req DylibRequest) (DylibResponse, error) {
+	ch, err := sendSatellite(h, req)
+	if err != nil {
 		return DylibResponse{}, err
 	}
-
-	resp := <-ch
-	return resp, nil
+	return <-ch, nil
 }
