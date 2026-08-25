@@ -127,4 +127,11 @@ type model struct {
 	opCurrent string
 	opDone    int64
 	opTotal   int64
+
+	// Copy/move collision resolution + richer progress.
+	opResume    chan collisionChoice
+	opCollision bool
+	opFileDone  int64
+	opFileTotal int64
+	opRate      int64
 }
