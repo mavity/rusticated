@@ -50,7 +50,12 @@ func (h *HostEnv) closeDylibLocked(libHandle uint64, libState *DylibState) {
 		}
 	}
 
-	_ = dlclose(libState.Handle)
+	req := DylibRequest{
+		Op:        "Close",
+		LibHandle: uint64(libState.Handle),
+	}
+	_, _ = callSatellite(h, req)
+
 	delete(h.handles, libHandle)
 }
 

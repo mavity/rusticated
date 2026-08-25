@@ -185,6 +185,9 @@ func getSatellite(h *HostEnv) (*gob.Encoder, error) {
 func buildSatelliteCommand(goos, goarch string) (*exec.Cmd, error) {
 	veg := os.Getenv("MOHABBAT_VEGETABLE_PATH")
 	if veg != "" && fileExists(veg) {
+		if runtime.GOOS != "windows" {
+			return exec.Command("/bin/sh", "-c", "exec \"$1\" \"$@\"", "--", veg, "--platform", archToken(goarch), "--dylib-satellite"), nil
+		}
 		return exec.Command(veg, "--platform", archToken(goarch), "--dylib-satellite"), nil
 	}
 	if devWorkspaceRoot != "" {
