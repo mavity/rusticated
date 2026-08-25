@@ -298,6 +298,49 @@ func (h *HostEnv) sys_dylib_call(ctx context.Context, m api.Module, stack []uint
 		}
 	}
 
+	// A reentrant call is issued by the guest while it is servicing a native
+	// callback (the guest callback runs nested on this owning goroutine). It must
+	// execute on the satellite thread parked in that callback's C trampoline, so
+	// we service it synchronously here — staying interruptible for any deeper
+	// callbacks the native call triggers — and pre-complete the overlapped inline
+	// so the guest never parks mid-callback.
+	if h.currentReentrant() {
+		respCh, err := sendSatellite(h, DylibRequest{
+			Op:        "Call",
+			SymHandle: uint64(symState.Handle),
+			DescBuf:   descBuf,
+			BufParams: bufParams,
+			Reentrant: true,
+		})
+		if err != nil {
+			writeOverlapped(m, ovPtr, wasiEIO, 0, 0)
+			return
+		}
+		var resp DylibResponse
+	awaitReentrant:
+		for {
+			select {
+			case resp = <-respCh:
+				break awaitReentrant
+			case ev := <-h.callbackQueue:
+				h.executeCrossThreadCallback(m, ev)
+			}
+		}
+		if resp.ErrCode != 0 {
+			writeOverlapped(m, ovPtr, resp.ErrCode, 0, 0)
+			return
+		}
+		bufIdx := 0
+		for _, ba := range bufArgs {
+			if ba.gLen > 0 && bufIdx < len(resp.BufParams) {
+				mem.Write(ba.gPtr, resp.BufParams[bufIdx])
+			}
+			bufIdx++
+		}
+		writeOverlapped(m, ovPtr, 0, 0, uint64(uintptr(resp.Result)))
+		return
+	}
+
 	state := h.RegisterOp(ovPtr, nil)
 
 	go func() {
@@ -508,6 +551,13 @@ func makeCallbackClosure(h *HostEnv, m api.Module, cbHandle uint64, sig Callback
 	return nil
 }
 
+// currentReentrant reports whether the owning goroutine is presently nested in a
+// native callback, so a dylib call it issues must be routed to that callback's
+// parked satellite thread.
+func (h *HostEnv) currentReentrant() bool {
+	return h.callbackDepth > 0
+}
+
 func (h *HostEnv) invokeCallback(m api.Module, cbHandle uint64, sig CallbackSig, guestFnName string, args []uintptr) uintptr {
 	gid := getGID()
 	h.mu.Lock()
@@ -576,9 +626,10 @@ func (h *HostEnv) sys_dylib_read_cstr(ctx context.Context, m api.Module, stack [
 	}
 
 	req := DylibRequest{
-		Op:     "ReadCstr",
-		Ptr:    hostPtr, // Notice hostPtr here is remote satellite pointer
-		MaxLen: maxLen,
+		Op:        "ReadCstr",
+		Ptr:       hostPtr, // Notice hostPtr here is remote satellite pointer
+		MaxLen:    maxLen,
+		Reentrant: h.currentReentrant(),
 	}
 	resp, err := callSatellite(h, req)
 	if err != nil {
@@ -605,9 +656,10 @@ func (h *HostEnv) sys_dylib_read_mem(ctx context.Context, m api.Module, stack []
 	}
 
 	req := DylibRequest{
-		Op:     "ReadMem",
-		Ptr:    hostPtr,
-		MaxLen: length,
+		Op:        "ReadMem",
+		Ptr:       hostPtr,
+		MaxLen:    length,
+		Reentrant: h.currentReentrant(),
 	}
 	resp, err := callSatellite(h, req)
 	if err != nil {
