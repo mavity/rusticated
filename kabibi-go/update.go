@@ -144,15 +144,42 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.opCurrent = msg.current
 		m.opDone = msg.done
 		m.opTotal = msg.total
+		m.opFileDone = msg.fileDone
+		m.opFileTotal = msg.fileTotal
+		m.opRate = msg.bytesPerSec
+		return m, m.watchFileOpCmd()
+
+	case fileOpCollisionMsg:
+		// The worker is paused waiting on m.opResume; ask the user how to
+		// proceed and keep watching the op channel for what follows.
+		m.opCollision = true
+		m.openChoiceDialog(
+			"File exists",
+			"Overwrite "+filepath.Base(msg.path)+" ?",
+			[]dlgChoice{
+				{label: "[O]verwrite", hotkey: "o"},
+				{label: "[S]kip", hotkey: "s"},
+				{label: "Overwrite [A]ll", hotkey: "a"},
+				{label: "S[k]ip All", hotkey: "k"},
+				{label: "[C]ancel", hotkey: "c"},
+			},
+			func(m *model, idx int) (tea.Model, tea.Cmd) {
+				return m.resolveCollision(idx)
+			},
+		)
+		m.mode = modeDialog
 		return m, m.watchFileOpCmd()
 
 	case fileOpDoneMsg:
 		m.opActive = false
+		m.opCollision = false
 		if m.opCancel != nil {
 			m.opCancel()
 			m.opCancel = nil
 		}
 		m.opChan = nil
+		m.opResume = nil
+		m.dialog = nil
 		m.mode = modeBrowser
 		focusLeft, focusRight := m.leftList.Index(), m.rightList.Index()
 		m.loadDir(leftPane, m.leftDir, "")
@@ -178,8 +205,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
-		// A running file operation captures input: only Esc cancels it.
+		// A running file operation captures input. While paused on a collision
+		// prompt, route keys to that dialog; otherwise only Esc cancels.
 		if m.opActive {
+			if m.opCollision && m.dialog != nil {
+				return m.updateDialog(msg)
+			}
 			if msg.String() == "esc" && m.opCancel != nil {
 				m.opCancel()
 			}
@@ -341,6 +372,19 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.fmToggleMark()
 			m.updateDelegates()
 			return m, nil
+		case "+", "-":
+			// Mask select/unselect, but only when the shell prompt is empty so
+			// normal command typing (e.g. "ls -l") is never intercepted.
+			if !m.chatOpen && m.shellInput.Value() == "" {
+				if key == "+" {
+					m.openInputDialog(actionSelectMask, "Select", "Select files matching mask:", "*")
+				} else {
+					m.openInputDialog(actionUnselectMask, "Unselect", "Unselect files matching mask:", "*")
+				}
+				return m, nil
+			}
+			m.shellInput, cmd = m.shellInput.Update(msg)
+			return m, cmd
 		case "up", "down", "left", "right", "pgup", "pgdown", "home", "end":
 			// If chat is open, cursor keys go to chat
 			if m.chatOpen && m.activePane == chatPane {
@@ -428,15 +472,46 @@ func (m *model) fmTransfer(kind fileOpKind) {
 	}
 	dest := m.otherPaneDir()
 	verb := "Copy"
-	if kind == opMove {
-		verb = "Move"
-	}
 	action := actionCopy
 	if kind == opMove {
+		verb = "Move"
 		action = actionMove
 	}
-	prompt := fmt.Sprintf("%s %s to %s ?", verb, summarizeSources(sources), dest)
-	m.openConfirmDialog(action, verb, prompt, &fileOp{kind: kind, sources: sources, dest: dest})
+	prompt := fmt.Sprintf("%s %s to:", verb, summarizeSources(sources))
+	m.openInputDialog(action, verb, prompt, dest)
+	m.dialog.pending = &fileOp{kind: kind, sources: sources}
+}
+
+// resolveCollision feeds the user's overwrite decision back to the paused
+// file-operation worker.
+func (m *model) resolveCollision(idx int) (tea.Model, tea.Cmd) {
+	m.opCollision = false
+	if m.mode == modeDialog {
+		m.mode = modeBrowser
+	}
+	choice := colCancel
+	switch idx {
+	case 0:
+		choice = colOverwrite
+	case 1:
+		choice = colSkip
+	case 2:
+		choice = colOverwriteAll
+	case 3:
+		choice = colSkipAll
+	default:
+		choice = colCancel
+	}
+	if choice == colCancel && m.opCancel != nil {
+		m.opCancel()
+	}
+	if m.opResume != nil {
+		select {
+		case m.opResume <- choice:
+		default:
+		}
+	}
+	return m, nil
 }
 
 func (m *model) fmDelete() {
