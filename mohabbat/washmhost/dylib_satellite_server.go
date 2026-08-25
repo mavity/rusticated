@@ -154,6 +154,19 @@ func processSatelliteRequest(req DylibRequest) *DylibResponse {
 			resp.Handle = id
 		}
 
+	case "Close":
+		satSrvMu.Lock()
+		libAny, ok := satSrvHandles[req.LibHandle]
+		if ok {
+			delete(satSrvHandles, req.LibHandle)
+		}
+		satSrvMu.Unlock()
+		if ok {
+			_ = dlclose(libAny.(uintptr))
+		} else {
+			resp.ErrCode = 9 // EBADF
+		}
+
 	case "Sym":
 		satSrvMu.Lock()
 		libAny, ok := satSrvHandles[req.LibHandle]
