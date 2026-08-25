@@ -3,6 +3,7 @@
 package syscall
 
 import (
+	"encoding/binary"
 	"unsafe"
 )
 
@@ -53,9 +54,12 @@ func rusticated_dylib_read_cstr(hostPtr uint64, guestBufPtr *byte, maxLen uint32
 //go:noescape
 func rusticated_dylib_read_mem(hostPtr uint64, guestBufPtr *byte, length uint32) uint32
 
-//go:wasmimport env dylib_pump
+//go:wasmimport env dylib_callback_wait
 //go:noescape
-func rusticated_dylib_pump(timeoutMs uint32) uint32
+func rusticated_dylib_callback_wait(overlapped unsafe.Pointer, outPtr *byte, outLen uint32)
+
+//go:wasmimport env dylib_callback_stop
+func rusticated_dylib_callback_stop()
 
 func DylibOpen(path string, flags uint32) (uint64, error) {
 	pathBytes := []byte(path)
@@ -124,6 +128,39 @@ func DylibCallbackRespond(cbHandle uint64, invocationId uint32, retValue int64) 
 	rusticated_dylib_callback_respond(cbHandle, invocationId, retValue)
 }
 
+// DylibCallbackWait blocks the calling goroutine until the host delivers a
+// native callback invocation, returning its handle, invocation id and scalar
+// arguments. ok is false when the wait is cancelled (DylibCallbackStop) or the
+// host aborts it. The callback runs on the caller's own growable goroutine
+// stack because the host delivers it as an ordinary async completion dispatched
+// by the scheduler — never on the g0 stack.
+func DylibCallbackWait() (cbHandle uint64, invocationId uint32, args []uint64, ok bool) {
+	var buf [256]byte
+	var ctx overlappedContext
+	rusticated_dylib_callback_wait(unsafe.Pointer(&ctx.o), &buf[0], uint32(len(buf)))
+	awaitOverlapped(&ctx)
+	if ctx.o.hostError != 0 {
+		return 0, 0, nil, false
+	}
+	cbHandle = ctx.o.resultExt
+	invocationId = uint32(ctx.o.continued & 0xffffffff)
+	argCount := int((ctx.o.continued >> 32) & 0xff)
+	if argCount > len(buf)/8 {
+		argCount = len(buf) / 8
+	}
+	args = make([]uint64, argCount)
+	for i := 0; i < argCount; i++ {
+		args[i] = binary.LittleEndian.Uint64(buf[i*8 : i*8+8])
+	}
+	return cbHandle, invocationId, args, true
+}
+
+// DylibCallbackStop cancels a pump goroutine parked in DylibCallbackWait so it
+// can exit once the stream is complete.
+func DylibCallbackStop() {
+	rusticated_dylib_callback_stop()
+}
+
 func DylibClose(libHandle uint64) {
 	rusticated_dylib_close(libHandle)
 }
@@ -142,12 +179,4 @@ func DylibReadMem(hostPtr uint64, buf []byte) int {
 	}
 	n := rusticated_dylib_read_mem(hostPtr, &buf[0], uint32(len(buf)))
 	return int(n)
-}
-
-// DylibPump blocks until a native callback is queued by the host (or timeoutMs
-// elapses). Queued callbacks are delivered to the guest export nested inside
-// this host call. The guest drives streaming by pumping until it observes
-// whatever end condition the library defines; this primitive is content-blind.
-func DylibPump(timeoutMs uint32) {
-	rusticated_dylib_pump(timeoutMs)
 }

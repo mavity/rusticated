@@ -37,11 +37,13 @@ type HostEnv struct {
 	forcedExitCode    int32
 	args              []string
 	callbackQueue     chan *CallbackEvent
-	cbArrived         chan struct{}
 	owningGID         uint64
 	callbackDepth     int // >0 while the owning goroutine is nested in a native callback
 	activeInvocations map[uint32]chan uintptr
 	nextInvocationID  uint32
+	cbMu              sync.Mutex // guards cbPending/cbWaiter
+	cbPending         *pendingCallback
+	cbWaiter          *callbackWaiter
 	satTargetGOOS     string
 	satTargetGOARCH   string
 }
@@ -64,6 +66,22 @@ type CallbackEvent struct {
 	RespChan       chan uintptr
 }
 
+// pendingCallback is a native callback awaiting delivery to the guest pump.
+type pendingCallback struct {
+	invocID  uint32
+	cbHandle uint64
+	args     []uint64
+}
+
+// callbackWaiter is a guest pump goroutine parked in dylib_callback_wait.
+type callbackWaiter struct {
+	ovPtr  uint32
+	outPtr uint32
+	outLen uint32
+	mod    api.Module
+	state  *OpState
+}
+
 func NewHostEnv() *HostEnv {
 	env := &HostEnv{
 
@@ -78,7 +96,6 @@ func NewHostEnv() *HostEnv {
 		timers:            make(map[uint32]*time.Timer),
 		forcedExitCode:    -1,
 		callbackQueue:     make(chan *CallbackEvent, 100),
-		cbArrived:         make(chan struct{}, 256),
 		activeInvocations: make(map[uint32]chan uintptr),
 	}
 	env.handles[0] = os.Stdin
@@ -335,10 +352,12 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_call), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("dylib_call")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_callback_create), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("dylib_callback_create")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_callback_respond), []api.ValueType{api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI64}, []api.ValueType{}).Export("dylib_callback_respond")
+	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_callback_wait), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("dylib_callback_wait")
+	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_callback_stop), []api.ValueType{}, []api.ValueType{}).Export("dylib_callback_stop")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_close), []api.ValueType{api.ValueTypeI64}, []api.ValueType{}).Export("dylib_close")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_read_cstr), []api.ValueType{api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("dylib_read_cstr")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_read_mem), []api.ValueType{api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("dylib_read_mem")
-	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_pump), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("dylib_pump")
+
 
 	builder.NewFunctionBuilder().
 		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
