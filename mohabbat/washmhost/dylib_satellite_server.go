@@ -22,6 +22,16 @@ var (
 	satSrvCbInvoc   uint32 = 1
 )
 
+var (
+	// satWorkerInbox feeds the single OS-thread-locked worker that runs all
+	// top-level (non-reentrant) requests, giving the library a stable thread.
+	satWorkerInbox chan DylibRequest
+	// satDispatchStack is the LIFO of parked callback trampolines; the innermost
+	// one runs reentrant guest requests on its own (callback) thread.
+	satDispatchStack []chan DylibRequest
+	satDispatchMu    sync.Mutex
+)
+
 type SatCbState struct {
 	Handle     uint64
 	Trampoline uintptr
@@ -39,6 +49,11 @@ func runSatellite() {
 	// Disable stdout/stderr so we don't corrupt the protocol
 	os.Stdout = os.Stderr
 
+	// One persistent OS-thread-locked worker runs every top-level call, so the
+	// native library sees a stable thread identity across calls.
+	satWorkerInbox = make(chan DylibRequest, 256)
+	go satelliteWorker()
+
 	for {
 		var req DylibRequest
 		err := decoder.Decode(&req)
@@ -49,11 +64,77 @@ func runSatellite() {
 			os.Exit(0)
 		}
 
-		go handleSatelliteRequest(req)
+		routeSatelliteRequest(req)
 	}
 }
 
-func handleSatelliteRequest(req DylibRequest) {
+// satelliteWorker runs top-level requests serially on a single locked OS thread.
+func satelliteWorker() {
+	runtime.LockOSThread()
+	for req := range satWorkerInbox {
+		if resp := processSatelliteRequest(req); resp != nil {
+			encodeResp(resp)
+		}
+	}
+}
+
+// routeSatelliteRequest delivers each request to the thread that must run it: a
+// callback response unblocks its parked trampoline; a reentrant request runs on
+// the innermost parked callback thread; everything else runs on the worker.
+func routeSatelliteRequest(req DylibRequest) {
+	if req.Op == "CallbackRespond" {
+		satSrvMu.Lock()
+		ch, ok := satSrvCallbacks[req.InvocId]
+		if ok {
+			delete(satSrvCallbacks, req.InvocId)
+		}
+		satSrvMu.Unlock()
+		if ok {
+			ch <- req.CbRet
+		}
+		return
+	}
+
+	if req.Reentrant {
+		satDispatchMu.Lock()
+		var inbox chan DylibRequest
+		if n := len(satDispatchStack); n > 0 {
+			inbox = satDispatchStack[n-1]
+		}
+		satDispatchMu.Unlock()
+		if inbox != nil {
+			inbox <- req
+			return
+		}
+		// No parked callback to host it; fall through to the worker.
+	}
+	satWorkerInbox <- req
+}
+
+func encodeResp(resp *DylibResponse) {
+	satSrvMu.Lock()
+	satSrvEncoder.Encode(resp)
+	satSrvMu.Unlock()
+}
+
+func pushDispatch(inbox chan DylibRequest) {
+	satDispatchMu.Lock()
+	satDispatchStack = append(satDispatchStack, inbox)
+	satDispatchMu.Unlock()
+}
+
+func popDispatch(inbox chan DylibRequest) {
+	satDispatchMu.Lock()
+	for i := len(satDispatchStack) - 1; i >= 0; i-- {
+		if satDispatchStack[i] == inbox {
+			satDispatchStack = append(satDispatchStack[:i], satDispatchStack[i+1:]...)
+			break
+		}
+	}
+	satDispatchMu.Unlock()
+}
+
+func processSatelliteRequest(req DylibRequest) *DylibResponse {
 	resp := DylibResponse{ID: req.ID}
 
 	switch req.Op {
@@ -234,21 +315,11 @@ resp.ErrCode = 1 // ENOSYS
 }
 
 case "CallbackRespond":
-		satSrvMu.Lock()
-		ch, ok := satSrvCallbacks[req.InvocId]
-		if ok {
-			delete(satSrvCallbacks, req.InvocId)
-		}
-		satSrvMu.Unlock()
-		if ok {
-			ch <- req.CbRet
-		}
-		return // We don't send a response for this
+		// Delivered by routeSatelliteRequest before reaching a worker/dispatch.
+		return nil
 	}
 
-	satSrvMu.Lock()
-	satSrvEncoder.Encode(&resp)
-	satSrvMu.Unlock()
+	return &resp
 }
 
 func makeSatCallbackClosure(cbHandle uint64, argCount uint8, retType uint8, argTypes []uint8, guestFnName string) interface{} {
@@ -256,8 +327,8 @@ dispatch := func(args []uintptr) uintptr {
 satSrvMu.Lock()
 invocId := satSrvCbInvoc
 satSrvCbInvoc++
-ch := make(chan int64, 1)
-satSrvCallbacks[invocId] = ch
+respCh := make(chan int64, 1)
+satSrvCallbacks[invocId] = respCh
 
 var uintArgs []uint64
 var bufs [][]byte
@@ -277,18 +348,33 @@ bufs = append(bufs, buf)
 }
 }
 
-req := DylibResponse{
+// This trampoline runs on the DLL's callback thread. Register it as the
+// innermost parked thread BEFORE emitting the callback, so reentrant guest
+// requests are routed here, then service them inline until the guest replies.
+myInbox := make(chan DylibRequest, 8)
+pushDispatch(myInbox)
+
+resp := DylibResponse{
 IsCallback: true,
 CbHandle:   cbHandle,
 CbArgs:     uintArgs,
 CbInvocId:  invocId,
 BufParams:  bufs,
 }
-satSrvEncoder.Encode(&req)
+satSrvEncoder.Encode(&resp)
 satSrvMu.Unlock()
 
-ret := <-ch
+for {
+select {
+case ret := <-respCh:
+popDispatch(myInbox)
 return uintptr(ret)
+case r := <-myInbox:
+if out := processSatelliteRequest(r); out != nil {
+encodeResp(out)
+}
+}
+}
 }
 
 switch argCount {

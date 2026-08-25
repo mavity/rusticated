@@ -39,6 +39,7 @@ type HostEnv struct {
 	callbackQueue     chan *CallbackEvent
 	cbArrived         chan struct{}
 	owningGID         uint64
+	callbackDepth     int // >0 while the owning goroutine is nested in a native callback
 	activeInvocations map[uint32]chan uintptr
 	nextInvocationID  uint32
 	satTargetGOOS     string
@@ -470,7 +471,11 @@ func (h *HostEnv) executeCrossThreadCallback(mod api.Module, ev *CallbackEvent) 
 	// Marshal host pointers into guest memory so the guest can dereference them.
 	wargs := h.marshalCallbackArgs(mod, cbState, ev.Args, ev.BufParams)
 
+	// While the guest callback runs, any dylib call it issues is reentrant and
+	// must be routed to this callback's parked satellite thread.
+	h.callbackDepth++
 	results, err := fn.Call(context.Background(), wargs...)
+	h.callbackDepth--
 	if err != nil {
 		ev.RespChan <- 0
 		return
