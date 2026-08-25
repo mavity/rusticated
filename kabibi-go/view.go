@@ -268,6 +268,10 @@ func renderPanelWithTitle(m *model, p pane, title string, titleStyle lipgloss.St
 }
 
 func (m model) View() string {
+	return ansiDualColor(m.viewFrame())
+}
+
+func (m model) viewFrame() string {
 	if m.quitting {
 		var output []string
 		for _, line := range m.plume {
@@ -525,6 +529,9 @@ func (m model) View() string {
 
 	base := lipgloss.JoinVertical(lipgloss.Left, components...)
 
+	if m.opActive && m.opCollision && m.dialog != nil {
+		return overlayBox(base, m.dialogBox(), m.width, m.height)
+	}
 	if m.opActive {
 		return overlayBox(base, m.progressBox(), m.width, m.height)
 	}
