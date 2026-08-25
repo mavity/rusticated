@@ -295,26 +295,26 @@ func processSatelliteRequest(req DylibRequest) *DylibResponse {
 		resp.BytesRes = buf
 
 	case "CallbackCreate":
-closure := makeSatCallbackClosure(req.CbHandle, req.ArgCount, req.RetType, req.ArgTypes, req.GuestFnName)
-if closure != nil {
-trampoline := purego.NewCallback(closure)
-satSrvMu.Lock()
-satSrvHandles[req.CbHandle] = &SatCbState{
-Handle: req.CbHandle,
-Trampoline: trampoline,
-Sig: CallbackSig{
-ArgCount: req.ArgCount,
-RetType:  req.RetType,
-ArgTypes: req.ArgTypes,
-},
-}
-satSrvMu.Unlock()
-resp.ErrCode = 0
-} else {
-resp.ErrCode = 1 // ENOSYS
-}
+		closure := makeSatCallbackClosure(req.CbHandle, req.ArgCount, req.RetType, req.ArgTypes, req.GuestFnName)
+		if closure != nil {
+			trampoline := purego.NewCallback(closure)
+			satSrvMu.Lock()
+			satSrvHandles[req.CbHandle] = &SatCbState{
+				Handle:     req.CbHandle,
+				Trampoline: trampoline,
+				Sig: CallbackSig{
+					ArgCount: req.ArgCount,
+					RetType:  req.RetType,
+					ArgTypes: req.ArgTypes,
+				},
+			}
+			satSrvMu.Unlock()
+			resp.ErrCode = 0
+		} else {
+			resp.ErrCode = 1 // ENOSYS
+		}
 
-case "CallbackRespond":
+	case "CallbackRespond":
 		// Delivered by routeSatelliteRequest before reaching a worker/dispatch.
 		return nil
 	}
@@ -323,70 +323,87 @@ case "CallbackRespond":
 }
 
 func makeSatCallbackClosure(cbHandle uint64, argCount uint8, retType uint8, argTypes []uint8, guestFnName string) interface{} {
-dispatch := func(args []uintptr) uintptr {
-satSrvMu.Lock()
-invocId := satSrvCbInvoc
-satSrvCbInvoc++
-respCh := make(chan int64, 1)
-satSrvCallbacks[invocId] = respCh
+	dispatch := func(args []uintptr) uintptr {
+		satSrvMu.Lock()
+		invocId := satSrvCbInvoc
+		satSrvCbInvoc++
+		respCh := make(chan int64, 1)
+		satSrvCallbacks[invocId] = respCh
 
-var uintArgs []uint64
-var bufs [][]byte
-for i, a := range args {
-uintArgs = append(uintArgs, uint64(a))
-tag := uint8(0)
-if i < len(argTypes) { tag = argTypes[i] }
+		var uintArgs []uint64
+		var bufs [][]byte
+		for i, a := range args {
+			uintArgs = append(uintArgs, uint64(a))
+			tag := uint8(0)
+			if i < len(argTypes) {
+				tag = argTypes[i]
+			}
 
-if tag == 0x09 && a != 0 {
-var buf []byte
-for offset := uintptr(0); offset < 1048576; offset++ {
-b := *(*byte)(unsafe.Pointer(a + offset))
-if b == 0 { break }
-buf = append(buf, b)
-}
-bufs = append(bufs, buf)
-}
-}
+			if tag == 0x09 && a != 0 {
+				var buf []byte
+				for offset := uintptr(0); offset < 1048576; offset++ {
+					b := *(*byte)(unsafe.Pointer(a + offset))
+					if b == 0 {
+						break
+					}
+					buf = append(buf, b)
+				}
+				bufs = append(bufs, buf)
+			}
+		}
 
-// This trampoline runs on the DLL's callback thread. Register it as the
-// innermost parked thread BEFORE emitting the callback, so reentrant guest
-// requests are routed here, then service them inline until the guest replies.
-myInbox := make(chan DylibRequest, 8)
-pushDispatch(myInbox)
+		// This trampoline runs on the DLL's callback thread. Register it as the
+		// innermost parked thread BEFORE emitting the callback, so reentrant guest
+		// requests are routed here, then service them inline until the guest replies.
+		myInbox := make(chan DylibRequest, 8)
+		pushDispatch(myInbox)
 
-resp := DylibResponse{
-IsCallback: true,
-CbHandle:   cbHandle,
-CbArgs:     uintArgs,
-CbInvocId:  invocId,
-BufParams:  bufs,
-}
-satSrvEncoder.Encode(&resp)
-satSrvMu.Unlock()
+		resp := DylibResponse{
+			IsCallback: true,
+			CbHandle:   cbHandle,
+			CbArgs:     uintArgs,
+			CbInvocId:  invocId,
+			BufParams:  bufs,
+		}
+		satSrvEncoder.Encode(&resp)
+		satSrvMu.Unlock()
 
-for {
-select {
-case ret := <-respCh:
-popDispatch(myInbox)
-return uintptr(ret)
-case r := <-myInbox:
-if out := processSatelliteRequest(r); out != nil {
-encodeResp(out)
-}
-}
-}
-}
+		for {
+			select {
+			case ret := <-respCh:
+				popDispatch(myInbox)
+				return uintptr(ret)
+			case r := <-myInbox:
+				if out := processSatelliteRequest(r); out != nil {
+					encodeResp(out)
+				}
+			}
+		}
+	}
 
-switch argCount {
-case 0: return func() uintptr { return dispatch([]uintptr{}) }
-case 1: return func(a1 uintptr) uintptr { return dispatch([]uintptr{a1}) }
-case 2: return func(a1, a2 uintptr) uintptr { return dispatch([]uintptr{a1, a2}) }
-case 3: return func(a1, a2, a3 uintptr) uintptr { return dispatch([]uintptr{a1, a2, a3}) }
-case 4: return func(a1, a2, a3, a4 uintptr) uintptr { return dispatch([]uintptr{a1, a2, a3, a4}) }
-case 5: return func(a1, a2, a3, a4, a5 uintptr) uintptr { return dispatch([]uintptr{a1, a2, a3, a4, a5}) }
-case 6: return func(a1, a2, a3, a4, a5, a6 uintptr) uintptr { return dispatch([]uintptr{a1, a2, a3, a4, a5, a6}) }
-case 7: return func(a1, a2, a3, a4, a5, a6, a7 uintptr) uintptr { return dispatch([]uintptr{a1, a2, a3, a4, a5, a6, a7}) }
-case 8: return func(a1, a2, a3, a4, a5, a6, a7, a8 uintptr) uintptr { return dispatch([]uintptr{a1, a2, a3, a4, a5, a6, a7, a8}) }
-}
-return nil
+	switch argCount {
+	case 0:
+		return func() uintptr { return dispatch([]uintptr{}) }
+	case 1:
+		return func(a1 uintptr) uintptr { return dispatch([]uintptr{a1}) }
+	case 2:
+		return func(a1, a2 uintptr) uintptr { return dispatch([]uintptr{a1, a2}) }
+	case 3:
+		return func(a1, a2, a3 uintptr) uintptr { return dispatch([]uintptr{a1, a2, a3}) }
+	case 4:
+		return func(a1, a2, a3, a4 uintptr) uintptr { return dispatch([]uintptr{a1, a2, a3, a4}) }
+	case 5:
+		return func(a1, a2, a3, a4, a5 uintptr) uintptr { return dispatch([]uintptr{a1, a2, a3, a4, a5}) }
+	case 6:
+		return func(a1, a2, a3, a4, a5, a6 uintptr) uintptr { return dispatch([]uintptr{a1, a2, a3, a4, a5, a6}) }
+	case 7:
+		return func(a1, a2, a3, a4, a5, a6, a7 uintptr) uintptr {
+			return dispatch([]uintptr{a1, a2, a3, a4, a5, a6, a7})
+		}
+	case 8:
+		return func(a1, a2, a3, a4, a5, a6, a7, a8 uintptr) uintptr {
+			return dispatch([]uintptr{a1, a2, a3, a4, a5, a6, a7, a8})
+		}
+	}
+	return nil
 }
