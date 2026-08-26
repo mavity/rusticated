@@ -149,7 +149,7 @@ This rebuilds the core libraries (Rust and Go) and the mohab.bat vegetable itsel
 ```bash
 go run . demo -o demo.bat
 go run . demo/loch -o loch.bat
-go run . kabibi -o kabibi.bat
+go run . kabibi-rust -o kabibi-rust.bat
 go run . kabibi-go -o kabibi-go.bat
 go run . demo-go -o demo-go.bat
 go run . demo-go/trivial -o trivial.bat
@@ -161,7 +161,7 @@ or
 ```bash
 mohab.bat demo -o demo.bat
 mohab.bat demo/loch -o loch.bat
-mohab.bat kabibi -o kabibi.bat
+mohab.bat kabibi-rust -o kabibi-rust.bat
 mohab.bat demo-go -o demo-go.bat
 mohab.bat demo-go/trivial -o trivial.bat
 mohab.bat demo-go/curl -o curl.bat
@@ -178,7 +178,7 @@ For development spending few minutes to compress a vegetable only to see a bug i
 ```bash
 go run . demo -r
 go run . demo/loch -r
-go run . kabibi -r
+go run . kabibi-rust -r
 go run . demo-go -r
 go run . demo-go/trivial -r
 go run . demo-go/curl -r https://example.com
@@ -189,7 +189,7 @@ or
 ```
 mohab.bat demo -r
 mohab.bat demo/loch -r
-mohab.bat kabibi -r
+mohab.bat kabibi-rust -r
 mohab.bat demo-go -r
 mohab.bat demo-go/trivial -r
 mohab.bat demo-go/curl -r https://example.com
@@ -372,7 +372,7 @@ That means many third-party libraries will fail to build. But the project contai
 
 [lock](demo/loch) — a simple prototype of a two-panel file manager UI on ratatui, with file operations and navigation.
 
-[kabibi](kabibi) — a bit more complex prototype for the same, including mock shell and mock side panel with typing and interaction.
+[kabibi-rust](kabibi-rust) — a bit more complex prototype for the same, including mock shell and mock side panel with typing and interaction.
 
 <!--
 */ }
