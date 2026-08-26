@@ -5,12 +5,11 @@ function __README__() { /*
 
 मोहब्बत &mdash; love.
 
-Mohabbat is a tool for building a single binary capable of running anywhere: Windows, Linux, macOS*, even on Android**.
+Mohabbat is a tool for building a single binary capable of running anywhere: Windows, Linux, macOS, even on Android*.
 
 We call such binaries **🍆vegetables** and Mohabbat comes with Rust and Go integration.
 
-<sup>* macOS is not yet supported, but it will be in the future.</sup>
-<sup>** Android support is experimental.</sup>
+<sup>* Android support is experimental.</sup>
 
 <pre class=splash>
   __  __
