@@ -175,6 +175,8 @@
     <script>
         const encoder = new TextEncoder();
         const decoder = new TextDecoder();
+        const isTransientMemoryError = (e) =>
+            e instanceof TypeError && /detached|out-of-bounds ArrayBuffer/i.test(String(e));
 
         // --- IndexedDB Mock Filesystem (Synchronous in-memory with background persistence) ---
         class IndexedDBFS {
@@ -342,6 +344,26 @@
                     [2n, { type: 'stderr' }]
                 ]),
                 nextHandle: 3n,
+
+                safeWriteOverlapped: function(ovPtr, errorCode, continued, resultExt) {
+                    if (!this.memory || !this.memory.buffer) return;
+                    ovPtr = Number(ovPtr);
+                    const buf = this.memory.buffer;
+                    if (!Number.isFinite(ovPtr) || ovPtr < 0 || ovPtr + 24 > buf.byteLength) {
+                        return;
+                    }
+                    try {
+                        const view = new DataView(buf);
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, Number(errorCode) || 0, true);
+                        view.setBigUint64(ovPtr + 8, BigInt(continued || 0n), true);
+                        view.setBigUint64(ovPtr + 16, BigInt(resultExt || 0n), true);
+                    } catch (e) {
+                        if (!isTransientMemoryError(e)) {
+                            throw e;
+                        }
+                    }
+                },
                 
                 write: function(ovPtr, handle, ptr, len) {
                     const view = new DataView(this.memory.buffer);
@@ -444,19 +466,21 @@
                 },
                 triggerSignal: function(signum) {
                     if (!this.memory) return;
-                    const view = new DataView(this.memory.buffer);
                     const remaining = [];
+                    let completed = 0;
                     for (const s of this.pendingSignals) {
                         if (s.signum === signum || s.signum === 0) {
-                            view.setUint32(s.ovPtr, 1, true);
-                            view.setUint32(s.ovPtr + 4, 0, true);
-                            view.setBigUint64(s.ovPtr + 8, 0n, true);
-                            view.setBigUint64(s.ovPtr + 16, BigInt(signum), true);
+                            this.safeWriteOverlapped(s.ovPtr, 0, 0n, BigInt(signum));
+                            completed++;
                         } else {
                             remaining.push(s);
                         }
                     }
                     this.pendingSignals = remaining;
+                    return completed;
+                },
+                completeSignalWait: function(ovPtr, signum) {
+                    this.safeWriteOverlapped(ovPtr, 0, 0n, BigInt(signum));
                 }
             };
             window.hostState = hostState;
@@ -526,60 +550,64 @@
                     throw new Error("WASM Panicked");
                 },
                 timer_set: (ovPtr, delayMs) => {
-                    const view = new DataView(hostState.memory.buffer);
                     ovPtr = Number(ovPtr);
                     setTimeout(() => {
-                        view.setUint32(ovPtr, 1, true); // done
-                        view.setUint32(ovPtr + 4, 0, true); // errorCode = 0
+                        hostState.safeWriteOverlapped(ovPtr, 0, 0n, 0n);
                     }, Number(delayMs));
                 },
                 read: (ovPtr, handle, ptr, len) => hostState.read(ovPtr, handle, ptr, len),
                 seek: (ovPtr, handle, offset, whence) => {
-                    const view = new DataView(hostState.memory.buffer);
-                    const h = hostState.handles.get(BigInt(handle));
                     ovPtr = Number(ovPtr);
                     offset = Number(offset);
                     whence = Number(whence);
+                    try {
+                        const view = new DataView(hostState.memory.buffer);
+                        const h = hostState.handles.get(BigInt(handle));
 
-                    if (!h) {
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 9, true); // EBADF
-                        return 0;
-                    }
+                        if (!h) {
+                            view.setUint32(ovPtr, 1, true);
+                            view.setUint32(ovPtr + 4, 9, true); // EBADF
+                            return 0;
+                        }
 
-                    let base = 0;
-                    if (h.type === 'file' && h.entry && typeof h.entry.content !== 'undefined') {
-                        base = h.entry.content.length;
-                    }
+                        let base = 0;
+                        if (h.type === 'file' && h.entry && typeof h.entry.content !== 'undefined') {
+                            base = h.entry.content.length;
+                        }
 
-                    let nextPos = 0;
-                    switch (whence) {
-                        case 0: // SEEK_SET
-                            nextPos = offset;
-                            break;
-                        case 1: // SEEK_CUR
-                            nextPos = (Number(h.offset || 0)) + offset;
-                            break;
-                        case 2: // SEEK_END
-                            nextPos = base + offset;
-                            break;
-                        default:
+                        let nextPos = 0;
+                        switch (whence) {
+                            case 0: // SEEK_SET
+                                nextPos = offset;
+                                break;
+                            case 1: // SEEK_CUR
+                                nextPos = (Number(h.offset || 0)) + offset;
+                                break;
+                            case 2: // SEEK_END
+                                nextPos = base + offset;
+                                break;
+                            default:
+                                view.setUint32(ovPtr, 1, true);
+                                view.setUint32(ovPtr + 4, 22, true); // EINVAL
+                                return 0;
+                        }
+
+                        if (nextPos < 0) {
                             view.setUint32(ovPtr, 1, true);
                             view.setUint32(ovPtr + 4, 22, true); // EINVAL
                             return 0;
-                    }
+                        }
 
-                    if (nextPos < 0) {
+                        h.offset = nextPos;
                         view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 22, true); // EINVAL
-                        return 0;
+                        view.setUint32(ovPtr + 4, 0, true);
+                        view.setBigUint64(ovPtr + 8, 0n, true);
+                        view.setBigUint64(ovPtr + 16, BigInt(nextPos), true);
+                    } catch (e) {
+                        if (!isTransientMemoryError(e)) {
+                            throw e;
+                        }
                     }
-
-                    h.offset = nextPos;
-                    view.setUint32(ovPtr, 1, true);
-                    view.setUint32(ovPtr + 4, 0, true);
-                    view.setBigUint64(ovPtr + 8, 0n, true);
-                    view.setBigUint64(ovPtr + 16, BigInt(nextPos), true);
                     return 0;
                 },
                 write: (ovPtr, handle, ptr, len) => hostState.write(ovPtr, handle, ptr, len),
@@ -706,22 +734,161 @@
                     view.setBigUint64(ovPtr + 16, 64n, true);
                     return 0;
                 },
-                path_chmod: (...args) => 0,
-                path_remove: (...args) => 0,
-                path_mkdir: (...args) => 0,
-                path_rename: (...args) => 0,
+                path_chmod: (ovPtr, pathPtr, pathLen, mode) => {
+                    const path = decoder.decode(new Uint8Array(hostState.memory.buffer, Number(pathPtr), Number(pathLen)));
+                    const entry = fs.getEntrySync(path);
+                    const view = new DataView(hostState.memory.buffer);
+                    ovPtr = Number(ovPtr);
+                    if (!entry) {
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 44, true); // ENOENT
+                        return 0;
+                    }
+                    entry.mode = Number(mode) || entry.mode || 0o100644;
+                    fs.putEntrySync(entry);
+                    view.setUint32(ovPtr, 1, true);
+                    view.setUint32(ovPtr + 4, 0, true);
+                    return 0;
+                },
+                path_remove: (ovPtr, pathPtr, pathLen) => {
+                    const path = decoder.decode(new Uint8Array(hostState.memory.buffer, Number(pathPtr), Number(pathLen)));
+                    const view = new DataView(hostState.memory.buffer);
+                    ovPtr = Number(ovPtr);
+                    const entry = fs.getEntrySync(path);
+                    if (!entry) {
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 44, true);
+                        return 0;
+                    }
+                    fs.entries.delete(path);
+                    try {
+                        const tx = fs.db.transaction('files', 'readwrite');
+                        tx.objectStore('files').delete(path);
+                    } catch (e) {
+                        console.warn('Failed deleting fs entry:', path, e);
+                    }
+                    view.setUint32(ovPtr, 1, true);
+                    view.setUint32(ovPtr + 4, 0, true);
+                    return 0;
+                },
+                path_mkdir: (ovPtr, pathPtr, pathLen, mode) => {
+                    const path = decoder.decode(new Uint8Array(hostState.memory.buffer, Number(pathPtr), Number(pathLen)));
+                    const view = new DataView(hostState.memory.buffer);
+                    ovPtr = Number(ovPtr);
+                    if (fs.getEntrySync(path)) {
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 17, true); // EEXIST
+                        return 0;
+                    }
+                    const entry = { path, type: 'dir', mtime: Date.now(), mode: Number(mode) || 0o40755 };
+                    fs.entries.set(path, entry);
+                    fs.putEntrySync(entry);
+                    view.setUint32(ovPtr, 1, true);
+                    view.setUint32(ovPtr + 4, 0, true);
+                    return 0;
+                },
+                path_rename: (ovPtr, oldPtr, oldLen, newPtr, newLen) => {
+                    const oldPath = decoder.decode(new Uint8Array(hostState.memory.buffer, Number(oldPtr), Number(oldLen)));
+                    const newPath = decoder.decode(new Uint8Array(hostState.memory.buffer, Number(newPtr), Number(newLen)));
+                    const view = new DataView(hostState.memory.buffer);
+                    ovPtr = Number(ovPtr);
+                    const entry = fs.getEntrySync(oldPath);
+                    if (!entry) {
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 44, true); // ENOENT
+                        return 0;
+                    }
+                    fs.entries.delete(oldPath);
+                    entry.path = newPath;
+                    fs.entries.set(newPath, entry);
+                    fs.putEntrySync(entry);
+                    view.setUint32(ovPtr, 1, true);
+                    view.setUint32(ovPtr + 4, 0, true);
+                    return 0;
+                },
                 net_open: (...args) => 0,
                 net_accept: (...args) => 0,
-                process_spawn: (...args) => 0,
-                process_pipe: (...args) => 0,
-                process_wait: (...args) => 0,
+                net_lookup: (ovPtr, namePtr, nameLen, bufPtr, bufLen) => {
+                    const view = new DataView(hostState.memory.buffer);
+                    ovPtr = Number(ovPtr);
+                    const totalSize = 8;
+                    if (Number(bufLen) >= totalSize) {
+                        view.setUint32(Number(bufPtr), totalSize, true);
+                        view.setUint32(Number(bufPtr) + 4, 0, true);
+                    }
+                    view.setUint32(ovPtr, 1, true);
+                    view.setUint32(ovPtr + 4, 0, true);
+                    view.setBigUint64(ovPtr + 16, BigInt(totalSize), true);
+                    return 0;
+                },
+                net_cert_verify: (ovPtr, namePtr, nameLen, chainPtr, chainLen) => {
+                    const view = new DataView(hostState.memory.buffer);
+                    ovPtr = Number(ovPtr);
+                    view.setUint32(ovPtr, 1, true);
+                    view.setUint32(ovPtr + 4, 0, true);
+                    view.setBigUint64(ovPtr + 16, 1n, true);
+                    return 0;
+                },
+                process_spawn: (ovPtr, cfgPtr, cfgLen) => {
+                    const view = new DataView(hostState.memory.buffer);
+                    ovPtr = Number(ovPtr);
+                    view.setUint32(ovPtr, 1, true);
+                    view.setUint32(ovPtr + 4, 38, true); // ENOSYS
+                    return 0;
+                },
+                process_pipe: (ovPtr) => {
+                    const view = new DataView(hostState.memory.buffer);
+                    ovPtr = Number(ovPtr);
+                    view.setUint32(ovPtr, 1, true);
+                    view.setUint32(ovPtr + 4, 0, true);
+                    view.setBigUint64(ovPtr + 16, 0n, true);
+                    return 0;
+                },
+                process_wait: (ovPtr, handle) => {
+                    const view = new DataView(hostState.memory.buffer);
+                    ovPtr = Number(ovPtr);
+                    const h = hostState.handles.get(BigInt(handle));
+                    if (!h) {
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 9, true); // EBADF
+                        return 0;
+                    }
+                    view.setUint32(ovPtr, 1, true);
+                    view.setUint32(ovPtr + 4, 0, true);
+                    view.setBigUint64(ovPtr + 16, 0n, true);
+                    return 0;
+                },
                 process_signal: (...args) => 0,
                 signal_wait: (ovPtr, signum) => {
                     ovPtr = Number(ovPtr);
                     signum = Number(signum);
-                    const view = new DataView(hostState.memory.buffer);
-                    // Bubbletea uses this to wait for SIGWINCH (28) or others
-                    hostState.pendingSignals.push({ ovPtr, signum });
+                    if (!Number.isFinite(ovPtr) || !Number.isFinite(signum)) {
+                        return 0;
+                    }
+                    if (!Array.isArray(hostState.pendingSignals)) {
+                        hostState.pendingSignals = [];
+                    }
+
+                    // Keep the queue bounded: if guests spam waits, evict oldest
+                    // entries and complete them with cancellation.
+                    if (hostState.pendingSignals.length > 2048) {
+                        const dropped = hostState.pendingSignals.shift();
+                        if (dropped) {
+                            hostState.safeWriteOverlapped(dropped.ovPtr, 11, 0n, 0n); // ECANCELED
+                        }
+                    }
+
+                    // Avoid duplicate waits for the same signal number.
+                    const alreadyQueued = hostState.pendingSignals.some(s => s.signum === signum);
+                    if (!alreadyQueued) {
+                        hostState.pendingSignals.push({ ovPtr, signum });
+                    }
+
+                    // Complete on the next macrotask so the browser gets a chance
+                    // to render/input between guest polling iterations.
+                    setTimeout(() => {
+                        hostState.triggerSignal(signum);
+                    }, 0);
                     return 0;
                 },
                 dylib_open: (ovPtr, pathPtr, pathLen, flags) => {
@@ -768,7 +935,38 @@
                     return 0;
                 },
                 cancel: (...args) => {},
-                get_platform_info: (...args) => 0,
+                get_platform_info: (outPtr, outLen) => {
+                    const view = new DataView(hostState.memory.buffer);
+                    outPtr = Number(outPtr);
+                    const structSize = 548;
+                    if (Number(outLen) < structSize) return 7; // E2BIG
+
+                    const buf = new ArrayBuffer(structSize);
+                    const dv = new DataView(buf);
+                    dv.setUint32(0, 1, true);
+                    dv.setUint8(4, 47);
+                    dv.setUint8(5, 58);
+                    dv.setUint16(6, 2, true);
+                    dv.setUint16(16, 1, true);
+                    dv.setUint8(18, 64);
+
+                    const copyAscii = (dstOff, str) => {
+                        const bytes = encoder.encode(str.slice(0, 63));
+                        new Uint8Array(buf, dstOff, bytes.length).set(bytes);
+                    };
+
+                    copyAscii(20, 'browser');
+                    copyAscii(84, 'rusticated-wasm');
+                    copyAscii(156, 'wasm32');
+                    copyAscii(220, 'rusticated');
+                    copyAscii(284, '0.0.0-dev');
+                    copyAscii(356, '0.0.0-dev');
+                    copyAscii(420, new Date().toISOString().slice(0, 19));
+                    copyAscii(484, 'browser-wasm32');
+
+                    new Uint8Array(hostState.memory.buffer, outPtr, structSize).set(new Uint8Array(buf));
+                    return 0;
+                },
                 tty_set_mode: (handle, mode) => {
                     console.log("TTY SET MODE:", { handle, mode, typeHandle: typeof handle, typeMode: typeof mode });
                 },
@@ -794,44 +992,46 @@
                 rusticated_debug: (val) => console.log("GUEST DEBUG:", val),
             };
 
+            const wasi = {
+                fd_write: (fd, iovs, iovs_len, nwritten) => {
+                    const view = new DataView(hostState.memory.buffer);
+                    let total = 0;
+                    for (let i = 0; i < iovs_len; i++) {
+                        const ptr = view.getUint32(iovs + Number(i) * 8, true);
+                        const len = view.getUint32(iovs + Number(i) * 8 + 4, true);
+                        const buf = new Uint8Array(hostState.memory.buffer, ptr, len);
+                        term.write(buf);
+                        total += len;
+                    }
+                    view.setUint32(nwritten, total, true);
+                    return 0;
+                },
+                fd_read: (fd, iovs, iovs_len, nread) => 0,
+                path_open: (...args) => 0,
+                proc_exit: (code) => env.process_exit(code),
+                environ_sizes_get: (c, b) => {
+                    const view = new DataView(hostState.memory.buffer);
+                    view.setUint32(c, 0, true);
+                    view.setUint32(b, 0, true);
+                    return 0;
+                },
+                environ_get: (e, eb) => 0,
+                args_sizes_get: (c, b) => {
+                    const view = new DataView(hostState.memory.buffer);
+                    view.setUint32(c, 0, true);
+                    view.setUint32(b, 0, true);
+                    return 0;
+                },
+                args_get: (a, ab) => 0,
+                clock_time_get: (i, p, t) => 0,
+                fd_close: () => 0,
+                fd_fdstat_get: () => 0,
+                fd_seek: () => 0,
+            };
+
             const importObject = {
                 env,
-                wasi_snapshot_preview1: {
-                    fd_write: (fd, iovs, iovs_len, nwritten) => {
-                        const view = new DataView(hostState.memory.buffer);
-                        let total = 0;
-                        for (let i = 0; i < iovs_len; i++) {
-                            const ptr = view.getUint32(iovs + Number(i) * 8, true);
-                            const len = view.getUint32(iovs + Number(i) * 8 + 4, true);
-                            const buf = new Uint8Array(hostState.memory.buffer, ptr, len);
-                            term.write(buf);
-                            total += len;
-                        }
-                        view.setUint32(nwritten, total, true);
-                        return 0;
-                    },
-                    fd_read: (fd, iovs, iovs_len, nread) => 0,
-                    path_open: (...args) => 0,
-                    proc_exit: (code) => env.process_exit(code),
-                    environ_sizes_get: (c, b) => {
-                        const view = new DataView(hostState.memory.buffer);
-                        view.setUint32(c, 0, true);
-                        view.setUint32(b, 0, true);
-                        return 0;
-                    },
-                    environ_get: (e, eb) => 0,
-                    args_sizes_get: (c, b) => {
-                        const view = new DataView(hostState.memory.buffer);
-                        view.setUint32(c, 0, true);
-                        view.setUint32(b, 0, true);
-                        return 0;
-                    },
-                    args_get: (a, ab) => 0,
-                    clock_time_get: (i, p, t) => 0,
-                    fd_close: () => 0,
-                    fd_fdstat_get: () => 0,
-                    fd_seek: () => 0,
-                }
+                wasi_snapshot_preview1: wasi
             };
 
             try {
@@ -845,6 +1045,10 @@
                 console.log("WASM instantiated.");
                 window.lastInstance = instance;
                 hostState.memory = instance.exports.memory;
+                // Bubble Tea and the rusticated runtime usually wait for the first
+                // SIGWINCH before drawing; without a synthetic initial resize the
+                // TUI can sit forever in the browser host.
+                hostState.triggerSignal(28);
                 
                 console.log("WASM Exports:", Object.keys(instance.exports));
                 term.write('WASM loaded. Starting kabibi-go...\r\n\r\n');
