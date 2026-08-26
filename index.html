@@ -176,8 +176,6 @@
         const encoder = new TextEncoder();
         const decoder = new TextDecoder();
         const termDecoder = new TextDecoder();
-        const isTransientMemoryError = (e) =>
-            e instanceof TypeError && /detached|out-of-bounds ArrayBuffer/i.test(String(e));
 
         // --- IndexedDB Mock Filesystem (Synchronous in-memory with background persistence) ---
         class IndexedDBFS {
@@ -256,6 +254,7 @@
                 // Normalize path
                 if (path === "." || path === "" || path === "./") path = "/";
                 if (!path.startsWith("/")) path = "/" + path;
+                path = path.replace(/\/+/g, '/');
                 if (path.length > 1 && path.endsWith('/')) {
                     path = path.substring(0, path.length - 1);
                 }
@@ -280,10 +279,6 @@
                 }
                 const prefix = dirPath === '/' ? '/' : dirPath + '/';
                 const results = [];
-                
-                // Add virtual dot entries for compatibility
-                results.push({ path: dirPath + (dirPath === '/' ? '.' : '/.'), type: 'dir' });
-                results.push({ path: (dirPath === '/' ? '/..' : dirPath.substring(0, dirPath.lastIndexOf('/')) || '/'), type: 'dir', isVirtualDotDot: true });
 
                 for (const [path, entry] of this.entries.entries()) {
                     if (path === dirPath) continue;
@@ -296,12 +291,8 @@
                 }
                 
                 return results.sort((a, b) => {
-                    const na = a.isVirtualDotDot ? '..' : (a.path.split('/').pop() || '.');
-                    const nb = b.isVirtualDotDot ? '..' : (b.path.split('/').pop() || '.');
-                    if (na === '.') return -1;
-                    if (nb === '.') return 1;
-                    if (na === '..') return nb === '.' ? 1 : -1;
-                    if (nb === '..') return na === '.' ? -1 : 1;
+                    const na = a.path.split('/').pop() || '';
+                    const nb = b.path.split('/').pop() || '';
                     return na.localeCompare(nb);
                 });
             }
@@ -323,8 +314,8 @@
             fitAddon.fit();
             window.addEventListener('resize', () => {
                 fitAddon.fit();
-                if (typeof hostState !== 'undefined' && hostState.triggerSignal) {
-                    hostState.triggerSignal(28); // SIGWINCH
+                if (window.hostState && window.hostState.triggerSignal) {
+                    window.hostState.triggerSignal(28); // SIGWINCH
                 }
             });
 
@@ -337,9 +328,11 @@
 
             const hostState = {
                 memory: null,
+                cwd: "/home/user",
                 stdinBuffer: [],
                 pendingReads: [],
                 pendingSignals: [],
+                pendingSignalCounts: new Map(),
                 handles: new Map([
                     [0n, { type: 'stdin' }],
                     [1n, { type: 'stdout' }],
@@ -354,17 +347,11 @@
                     if (!Number.isFinite(ovPtr) || ovPtr < 0 || ovPtr + 24 > buf.byteLength) {
                         return;
                     }
-                    try {
-                        const view = new DataView(buf);
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, Number(errorCode) || 0, true);
-                        view.setBigUint64(ovPtr + 8, BigInt(continued || 0n), true);
-                        view.setBigUint64(ovPtr + 16, BigInt(resultExt || 0n), true);
-                    } catch (e) {
-                        if (!isTransientMemoryError(e)) {
-                            throw e;
-                        }
-                    }
+                    const view = new DataView(buf);
+                    view.setUint32(ovPtr, 1, true);
+                    view.setUint32(ovPtr + 4, Number(errorCode) || 0, true);
+                    view.setBigUint64(ovPtr + 8, BigInt(continued || 0n), true);
+                    view.setBigUint64(ovPtr + 16, BigInt(resultExt || 0n), true);
                 },
                 
                 write: function(ovPtr, handle, ptr, len) {
@@ -442,14 +429,17 @@
                     if (typeof data === 'string') {
                         const encoded = encoder.encode(data);
                         this.stdinBuffer.push(...encoded);
+                        console.log(`pushStdin: string "${data}" (${encoded.length} bytes), pendingReads=${this.pendingReads.length}`);
                     } else {
                         this.stdinBuffer.push(...data);
+                        console.log(`pushStdin: ${data.length} bytes, pendingReads=${this.pendingReads.length}`);
                     }
                     this.processPendingReads();
                 },
                 processPendingReads: function() {
                     if (!this.memory) return;
                     const view = new DataView(this.memory.buffer);
+                    let completedCount = 0;
                     while (this.pendingReads.length > 0 && this.stdinBuffer.length > 0) {
                         const { ovPtr, ptr, len } = this.pendingReads.shift();
                         const toRead = Math.min(len, this.stdinBuffer.length);
@@ -461,6 +451,10 @@
                         view.setUint32(ovPtr + 4, 0, true); // errorCode = 0
                         view.setBigUint64(ovPtr + 8, 0n, true); // continued
                         view.setBigUint64(ovPtr + 16, BigInt(toRead), true); // resultExt = nread
+                        completedCount++;
+                    }
+                    if (completedCount > 0) {
+                        console.log(`processPendingReads: completed ${completedCount} reads`);
                     }
                 },
                 triggerSignal: function(signum) {
@@ -475,6 +469,12 @@
                             remaining.push(s);
                         }
                     }
+                    if (completed > 0) {
+                        console.log(`triggerSignal(${signum}): completed ${completed} waits`);
+                    } else {
+                        const current = this.pendingSignalCounts.get(signum) || 0;
+                        this.pendingSignalCounts.set(signum, current + 1);
+                    }
                     this.pendingSignals = remaining;
                     return completed;
                 },
@@ -483,6 +483,34 @@
                 }
             };
             window.hostState = hostState;
+
+            const resolvePath = (inputPath) => {
+                const raw = String(inputPath || '').replace(/\0.*/, '');
+                let path = raw;
+                if (!path) {
+                    path = hostState.cwd;
+                } else if (!path.startsWith('/')) {
+                    path = hostState.cwd === '/' ? `/${path}` : `${hostState.cwd}/${path}`;
+                }
+                path = path.replace(/\/+/g, '/');
+                const parts = [];
+                for (const seg of path.split('/')) {
+                    if (!seg || seg === '.') continue;
+                    if (seg === '..') {
+                        if (parts.length > 0) parts.pop();
+                        continue;
+                    }
+                    parts.push(seg);
+                }
+                return '/' + parts.join('/');
+            };
+
+            const parentDir = (path) => {
+                if (!path || path === '/') return '/';
+                const idx = path.lastIndexOf('/');
+                if (idx <= 0) return '/';
+                return path.slice(0, idx);
+            };
 
             term.onData(data => hostState.pushStdin(data));
 
@@ -527,15 +555,24 @@
                     return (BigInt(envVars.length) << 32n) | BigInt(totalLen);
                 },
                 get_cwd: (buf_ptr, buf_len) => {
-                    const cwd = "/";
+                    const cwd = hostState.cwd;
                     const enc = encoder.encode(cwd + "\0");
                     if (buf_ptr !== 0) {
                         const buf = new Uint8Array(hostState.memory.buffer, buf_ptr, Math.min(enc.length, buf_len));
-                        buf.set(enc);
+                        buf.set(enc.slice(0, Math.min(enc.length, buf_len)));
                     }
                     return BigInt(enc.length);
                 },
-                set_cwd: (ptr, len) => 0,
+                set_cwd: (ptr, len) => {
+                    const pathBytes = new Uint8Array(hostState.memory.buffer, Number(ptr), Number(len));
+                    const normalized = resolvePath(decoder.decode(pathBytes));
+                    const entry = fs.getEntrySync(normalized);
+                    if (entry && entry.type === 'dir') {
+                        hostState.cwd = normalized;
+                        return 0;
+                    }
+                    return 2; // ENOENT
+                },
                 get_random: (ptr, len) => {
                     const buf = new Uint8Array(hostState.memory.buffer, Number(ptr), Number(len));
                     crypto.getRandomValues(buf);
@@ -559,54 +596,48 @@
                     ovPtr = Number(ovPtr);
                     offset = Number(offset);
                     whence = Number(whence);
-                    try {
-                        const view = new DataView(hostState.memory.buffer);
-                        const h = hostState.handles.get(BigInt(handle));
+                    const view = new DataView(hostState.memory.buffer);
+                    const h = hostState.handles.get(BigInt(handle));
 
-                        if (!h) {
-                            view.setUint32(ovPtr, 1, true);
-                            view.setUint32(ovPtr + 4, 9, true); // EBADF
-                            return 0;
-                        }
+                    if (!h) {
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 9, true); // EBADF
+                        return 0;
+                    }
 
-                        let base = 0;
-                        if (h.type === 'file' && h.entry && typeof h.entry.content !== 'undefined') {
-                            base = h.entry.content.length;
-                        }
+                    let base = 0;
+                    if (h.type === 'file' && h.entry && typeof h.entry.content !== 'undefined') {
+                        base = h.entry.content.length;
+                    }
 
-                        let nextPos = 0;
-                        switch (whence) {
-                            case 0: // SEEK_SET
-                                nextPos = offset;
-                                break;
-                            case 1: // SEEK_CUR
-                                nextPos = (Number(h.offset || 0)) + offset;
-                                break;
-                            case 2: // SEEK_END
-                                nextPos = base + offset;
-                                break;
-                            default:
-                                view.setUint32(ovPtr, 1, true);
-                                view.setUint32(ovPtr + 4, 22, true); // EINVAL
-                                return 0;
-                        }
-
-                        if (nextPos < 0) {
+                    let nextPos = 0;
+                    switch (whence) {
+                        case 0: // SEEK_SET
+                            nextPos = offset;
+                            break;
+                        case 1: // SEEK_CUR
+                            nextPos = (Number(h.offset || 0)) + offset;
+                            break;
+                        case 2: // SEEK_END
+                            nextPos = base + offset;
+                            break;
+                        default:
                             view.setUint32(ovPtr, 1, true);
                             view.setUint32(ovPtr + 4, 22, true); // EINVAL
                             return 0;
-                        }
-
-                        h.offset = nextPos;
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 0, true);
-                        view.setBigUint64(ovPtr + 8, 0n, true);
-                        view.setBigUint64(ovPtr + 16, BigInt(nextPos), true);
-                    } catch (e) {
-                        if (!isTransientMemoryError(e)) {
-                            throw e;
-                        }
                     }
+
+                    if (nextPos < 0) {
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 22, true); // EINVAL
+                        return 0;
+                    }
+
+                    h.offset = nextPos;
+                    view.setUint32(ovPtr, 1, true);
+                    view.setUint32(ovPtr + 4, 0, true);
+                    view.setBigUint64(ovPtr + 8, 0n, true);
+                    view.setBigUint64(ovPtr + 16, BigInt(nextPos), true);
                     return 0;
                 },
                 write: (ovPtr, handle, ptr, len) => hostState.write(ovPtr, handle, ptr, len),
@@ -614,14 +645,49 @@
                     hostState.handles.delete(BigInt(handle));
                 },
                 path_open: (ovPtr, pathPtr, pathLen, flags) => {
-                    const path = decoder.decode(new Uint8Array(hostState.memory.buffer, Number(pathPtr), Number(pathLen)));
+                    const rawPath = decoder.decode(new Uint8Array(hostState.memory.buffer, Number(pathPtr), Number(pathLen))).replace(/\0.*/, '');
+                    let path = resolvePath(rawPath);
                     console.log("PATH_OPEN:", path, flags);
-                    const entry = fs.getEntrySync(path);
                     ovPtr = Number(ovPtr);
                     const view = new DataView(hostState.memory.buffer);
                     const oflags = Number(flags);
+
+                    // Two flag families are used by guests:
+                    // 1) rusticated-rust wasm fs::OpenOptions: read=1, write=2, create=4, trunc=8, append=16, create_new=32
+                    // 2) rusticated-go/wasip1 style: access mode in low 2 bits, create=0x40, excl=0x80, trunc=0x200, append=0x400
+                    const hasHighPosixBits = (oflags & (0x40 | 0x80 | 0x200 | 0x400)) !== 0;
+                    const hasOnlyRusticatedBits = (oflags & ~0x1003f) === 0;
+                    const useRusticatedFlags = !hasHighPosixBits && hasOnlyRusticatedBits;
+
+                    let readFlag = false;
+                    let writeFlag = false;
+                    let createFlag = false;
+                    let createNewFlag = false;
+                    let truncateFlag = false;
+                    let appendFlag = false;
+
+                    if (useRusticatedFlags) {
+                        readFlag = (oflags & 1) !== 0;
+                        writeFlag = (oflags & 2) !== 0;
+                        createFlag = (oflags & 4) !== 0;
+                        truncateFlag = (oflags & 8) !== 0;
+                        appendFlag = (oflags & 16) !== 0;
+                        createNewFlag = (oflags & 32) !== 0;
+                    } else {
+                        const accessMode = oflags & 3;
+                        readFlag = accessMode === 0 || accessMode === 2;
+                        writeFlag = accessMode === 1 || accessMode === 2;
+                        createFlag = (oflags & 0x40) !== 0;
+                        createNewFlag = (oflags & 0x80) !== 0;
+                        truncateFlag = (oflags & 0x200) !== 0;
+                        appendFlag = (oflags & 0x400) !== 0;
+                    }
+
+                    const wantDirectory = (oflags & 0x10000) !== 0;
+
+                    let entry = fs.getEntrySync(path);
                     
-                    if (path === "/dev/tty" || path === "CONIN$" || path === "CONOUT$") {
+                    if (rawPath === "/dev/tty" || rawPath === "CONIN$" || rawPath === "CONOUT$") {
                         const handle = hostState.nextHandle++;
                         hostState.handles.set(handle, { type: 'tty', entry: { path: '/dev/tty', type: 'file' }, offset: 0 });
                         view.setUint32(ovPtr, 1, true);
@@ -631,26 +697,56 @@
                     }
 
                     if (!entry) {
+                        if (createFlag || createNewFlag) {
+                            const parent = parentDir(path);
+                            const p = fs.getEntrySync(parent);
+                            if (!p || p.type !== 'dir') {
+                                view.setUint32(ovPtr, 1, true);
+                                view.setUint32(ovPtr + 4, 44, true); // ENOENT
+                                return 0;
+                            }
+                            entry = {
+                                path,
+                                type: 'file',
+                                content: new Uint8Array(0),
+                                size: 0,
+                                mtime: Date.now(),
+                                mode: 0o100644
+                            };
+                            fs.entries.set(path, entry);
+                            fs.putEntrySync(entry);
+                        } else {
+                            view.setUint32(ovPtr, 1, true);
+                            view.setUint32(ovPtr + 4, 44, true); // ENOENT
+                            return 0;
+                        }
+                    } else if (createNewFlag) {
                         view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 44, true); // ENOENT
+                        view.setUint32(ovPtr + 4, 17, true); // EEXIST
                         return 0;
                     }
 
-                    if ((oflags & 0x01) && entry) { // OFLAG_CREATE (simplified check)
-                        // In a real FS we'd handle create here, but for now we just open existing
-                    }
-                    if ((oflags & 0x02) && entry.type !== 'dir') { // OFLAG_DIRECTORY
+                    if (wantDirectory && entry.type !== 'dir') {
                         view.setUint32(ovPtr, 1, true);
                         view.setUint32(ovPtr + 4, 54, true); // ENOTDIR
                         return 0;
+                    }
+
+                    if (entry.type === 'file' && truncateFlag) {
+                        entry.content = new Uint8Array(0);
+                        entry.size = 0;
+                        entry.mtime = Date.now();
+                        fs.putEntrySync(entry);
                     }
                     
                     const handle = hostState.nextHandle++;
                     hostState.handles.set(handle, { 
                         type: entry.type === 'dir' ? 'dir' : 'file', 
                         entry, 
-                        offset: 0,
-                        dirOffset: 0
+                        offset: appendFlag && entry.type === 'file' ? (entry.content ? entry.content.length : 0) : 0,
+                        dirOffset: 0,
+                        dirEntries: null,
+                        dirLeftovers: []
                     });
                     
                     view.setUint32(ovPtr, 1, true);
@@ -663,7 +759,7 @@
                     ovPtr = Number(ovPtr);
                     bufPtr = Number(bufPtr);
                     bufLen = Number(bufLen);
-                    console.log("DIR_READ:", { handle, bufLen });
+                    console.log("DIR_READ:", { handle, bufLen, dirOffset: hostState.handles.get(handle)?.dirOffset });
                     const view = new DataView(hostState.memory.buffer);
                     const h = hostState.handles.get(handle);
 
@@ -673,37 +769,70 @@
                         return 0;
                     }
 
-                    const entries = fs.readdirSync(h.entry.path);
+                    if (!Array.isArray(h.dirEntries)) {
+                        h.dirEntries = fs.readdirSync(h.entry.path);
+                        h.dirOffset = 0;
+                        h.dirLeftovers = [];
+                    }
+
                     let currentOffset = bufPtr;
                     let bytesWritten = 0;
-                    
-                    while (h.dirOffset < entries.length) {
-                        const e = entries[h.dirOffset];
-                        const name = e.isVirtualDotDot ? '..' : (e.path.split('/').pop() || '.');
-                        const nameEnc = encoder.encode(name);
-                        const totalSize = 1 + nameEnc.length + 1; // [kind][name][0]
+                    let remaining = bufLen;
+                    let loopCount = 0;
+                    const maxLoops = 1000; // Prevent infinite loops
+
+                    while (remaining > 0 && loopCount < maxLoops) {
+                        loopCount++;
                         
-                        if (bytesWritten + totalSize > bufLen) {
-                            break; // No more room in this buffer
+                        if (h.dirLeftovers.length > 0) {
+                            const toCopy = Math.min(remaining, h.dirLeftovers.length);
+                            const out = new Uint8Array(hostState.memory.buffer, currentOffset, toCopy);
+                            out.set(h.dirLeftovers.slice(0, toCopy));
+                            h.dirLeftovers = h.dirLeftovers.slice(toCopy);
+                            currentOffset += toCopy;
+                            bytesWritten += toCopy;
+                            remaining -= toCopy;
+                            if (h.dirLeftovers.length > 0) {
+                                break;
+                            }
+                            continue;
                         }
-                        
-                        const out = new Uint8Array(hostState.memory.buffer, currentOffset, totalSize);
-                        out[0] = e.type === 'dir' ? 2 : 1; // 1: File, 2: Dir
-                        out.set(nameEnc, 1); // name
-                        out[1 + nameEnc.length] = 0; // NUL
-                        
-                        currentOffset += totalSize;
-                        bytesWritten += totalSize;
+
+                        if (h.dirOffset >= h.dirEntries.length) {
+                            break;
+                        }
+
+                        const e = h.dirEntries[h.dirOffset];
                         h.dirOffset++;
+                        const name = e.isVirtualDotDot ? '..' : (e.path.split('/').pop() || '.');
+                        if (name === '.' || name === '..') {
+                            continue;
+                        }
+                        const nameEnc = encoder.encode(name);
+                        const entryBytes = new Uint8Array(1 + nameEnc.length + 1);
+                        entryBytes[0] = e.type === 'dir' ? 2 : 1; // 1: File, 2: Dir
+                        entryBytes.set(nameEnc, 1);
+                        entryBytes[1 + nameEnc.length] = 0;
+
+                        if (entryBytes.length <= remaining) {
+                            const out = new Uint8Array(hostState.memory.buffer, currentOffset, entryBytes.length);
+                            out.set(entryBytes);
+                            currentOffset += entryBytes.length;
+                            bytesWritten += entryBytes.length;
+                            remaining -= entryBytes.length;
+                            continue;
+                        }
+
+                        h.dirLeftovers = Array.from(entryBytes);
                     }
-                    
+
                     view.setUint32(ovPtr, 1, true);
                     view.setUint32(ovPtr + 4, 0, true);
                     view.setBigUint64(ovPtr + 16, BigInt(bytesWritten), true);
                     return 0;
                 },
                 path_stat: (ovPtr, pathPtr, pathLen, flags, outPtr, outLen) => {
-                    const path = decoder.decode(new Uint8Array(hostState.memory.buffer, Number(pathPtr), Number(pathLen)));
+                    const path = resolvePath(decoder.decode(new Uint8Array(hostState.memory.buffer, Number(pathPtr), Number(pathLen))));
                     ovPtr = Number(ovPtr);
                     outPtr = Number(outPtr);
                     const view = new DataView(hostState.memory.buffer);
@@ -734,7 +863,7 @@
                     return 0;
                 },
                 path_chmod: (ovPtr, pathPtr, pathLen, mode) => {
-                    const path = decoder.decode(new Uint8Array(hostState.memory.buffer, Number(pathPtr), Number(pathLen)));
+                    const path = resolvePath(decoder.decode(new Uint8Array(hostState.memory.buffer, Number(pathPtr), Number(pathLen))));
                     const entry = fs.getEntrySync(path);
                     const view = new DataView(hostState.memory.buffer);
                     ovPtr = Number(ovPtr);
@@ -750,7 +879,7 @@
                     return 0;
                 },
                 path_remove: (ovPtr, pathPtr, pathLen) => {
-                    const path = decoder.decode(new Uint8Array(hostState.memory.buffer, Number(pathPtr), Number(pathLen)));
+                    const path = resolvePath(decoder.decode(new Uint8Array(hostState.memory.buffer, Number(pathPtr), Number(pathLen))));
                     const view = new DataView(hostState.memory.buffer);
                     ovPtr = Number(ovPtr);
                     const entry = fs.getEntrySync(path);
@@ -771,7 +900,7 @@
                     return 0;
                 },
                 path_mkdir: (ovPtr, pathPtr, pathLen, mode) => {
-                    const path = decoder.decode(new Uint8Array(hostState.memory.buffer, Number(pathPtr), Number(pathLen)));
+                    const path = resolvePath(decoder.decode(new Uint8Array(hostState.memory.buffer, Number(pathPtr), Number(pathLen))));
                     const view = new DataView(hostState.memory.buffer);
                     ovPtr = Number(ovPtr);
                     if (fs.getEntrySync(path)) {
@@ -787,8 +916,8 @@
                     return 0;
                 },
                 path_rename: (ovPtr, oldPtr, oldLen, newPtr, newLen) => {
-                    const oldPath = decoder.decode(new Uint8Array(hostState.memory.buffer, Number(oldPtr), Number(oldLen)));
-                    const newPath = decoder.decode(new Uint8Array(hostState.memory.buffer, Number(newPtr), Number(newLen)));
+                    const oldPath = resolvePath(decoder.decode(new Uint8Array(hostState.memory.buffer, Number(oldPtr), Number(oldLen))));
+                    const newPath = resolvePath(decoder.decode(new Uint8Array(hostState.memory.buffer, Number(newPtr), Number(newLen))));
                     const view = new DataView(hostState.memory.buffer);
                     ovPtr = Number(ovPtr);
                     const entry = fs.getEntrySync(oldPath);
@@ -877,11 +1006,14 @@
                         }
                     }
 
-                    // Avoid duplicate waits for the same signal number.
-                    const alreadyQueued = hostState.pendingSignals.some(s => s.signum === signum);
-                    if (!alreadyQueued) {
-                        hostState.pendingSignals.push({ ovPtr, signum });
+                    const queued = hostState.pendingSignalCounts.get(signum) || 0;
+                    if (queued > 0) {
+                        hostState.pendingSignalCounts.set(signum, queued - 1);
+                        hostState.safeWriteOverlapped(ovPtr, 0, 0n, BigInt(signum));
+                        return 0;
                     }
+
+                    hostState.pendingSignals.push({ ovPtr, signum });
 
                     // Complete on the next macrotask so the browser gets a chance
                     // to render/input between guest polling iterations.
