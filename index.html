@@ -175,6 +175,7 @@
     <script>
         const encoder = new TextEncoder();
         const decoder = new TextDecoder();
+        const termDecoder = new TextDecoder();
         const isTransientMemoryError = (e) =>
             e instanceof TypeError && /detached|out-of-bounds ArrayBuffer/i.test(String(e));
 
@@ -311,7 +312,8 @@
             console.log("initTerminalAndWasm START");
             const term = new Terminal({
                 cursorBlink: true,
-                allowProposedApi: true
+                allowProposedApi: true,
+                fontFamily: 'Consolas, "Cascadia Mono", "Fira Code", Menlo, monospace'
             });
             const fitAddon = new FitAddon.FitAddon();
             term.loadAddon(fitAddon);
@@ -375,12 +377,9 @@
                     const h = this.handles.get(handle);
                     if (h && (h.type === 'stdout' || h.type === 'stderr' || h.type === 'tty')) {
                         if (len > 0) {
-                            const buf = new Uint8Array(this.memory.buffer, ptr, len);
-                            console.log("TERMINAL WRITE:", decoder.decode(buf));
-                            try {
-                                term.write(buf);
-                            } catch (e) {
-                                console.warn("xterm.write error:", e);
+                            const bytes = new Uint8Array(this.memory.buffer, ptr, len).slice();
+                            if (bytes.length > 0) {
+                                term.write(bytes);
                             }
                         }
                     } else if (h && h.type === 'file') {
@@ -999,8 +998,11 @@
                     for (let i = 0; i < iovs_len; i++) {
                         const ptr = view.getUint32(iovs + Number(i) * 8, true);
                         const len = view.getUint32(iovs + Number(i) * 8 + 4, true);
-                        const buf = new Uint8Array(hostState.memory.buffer, ptr, len);
-                        term.write(buf);
+                        const bytes = new Uint8Array(hostState.memory.buffer, ptr, len).slice();
+                        const text = termDecoder.decode(bytes, { stream: true });
+                        if (text.length > 0) {
+                            term.write(text);
+                        }
                         total += len;
                     }
                     view.setUint32(nwritten, total, true);
