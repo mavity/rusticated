@@ -12,6 +12,14 @@ import (
 
 type aiTokenMsg string
 type aiDoneMsg struct{ err error }
+type animTickMsg time.Time
+
+func animTickCmd() tea.Cmd {
+	return tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
+		return animTickMsg(t)
+	})
+}
+
 type assetProgressMsg struct {
 	Stage   string
 	Percent int
@@ -29,7 +37,31 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
 	switch msg := msg.(type) {
+	case animTickMsg:
+		if m.quitting {
+			return m, nil
+		}
+		if m.flashActive {
+			elapsedMs := float64(time.Since(m.flashStart).Milliseconds())
+			if elapsedMs >= 550 {
+				m.flashActive = false
+				m.syncChatView()
+				return m, nil
+			}
+			m.syncChatView()
+			return m, animTickCmd()
+		}
+		if m.isThinking {
+			m.syncChatView()
+			return m, animTickCmd()
+		}
+		return m, nil
+
 	case aiTokenMsg:
+		if !m.firstTokenRecv {
+			m.firstTokenRecv = true
+			m.animStart = time.Now()
+		}
 		// Append token to the last assistant message in conversation
 		if m.conversation != nil && len(m.conversation.Messages) > 0 {
 			m.conversation.Messages[len(m.conversation.Messages)-1].Content += string(msg)
@@ -39,16 +71,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case aiDoneMsg:
 		m.isThinking = false
+		m.firstTokenRecv = false
 		m.aiMsgChan = nil
 		if msg.err != nil {
-			// Append error as a system message
 			m.conversation.Messages = append(m.conversation.Messages, Message{
 				Role:    "system",
 				Content: "Error: " + msg.err.Error(),
 			})
-			m.syncChatView()
 		}
-		return m, nil
+		m.flashActive = true
+		m.flashStart = time.Now()
+		m.syncChatView()
+		return m, animTickCmd()
 
 	case assetProgressMsg:
 		m.isDownloading = true
@@ -302,7 +336,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.chatView.GotoBottom()
 
 					m.isThinking = true
-					return m, m.advanceChatCmd(input)
+					m.firstTokenRecv = false
+					m.flashActive = false
+					m.animStart = time.Now()
+					return m, tea.Batch(m.advanceChatCmd(input), animTickCmd())
 				}
 			} else {
 				input := m.shellInput.Value()
