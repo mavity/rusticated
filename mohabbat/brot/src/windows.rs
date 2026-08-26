@@ -227,7 +227,7 @@ pub unsafe fn run() -> ! {
 
         use crate::win32::Win32::System::Threading::{
             CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject, ResumeThread,
-            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, CREATE_SUSPENDED
         };
 
@@ -238,7 +238,7 @@ pub unsafe fn run() -> ! {
             jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
             SetInformationJobObject(
                 h_job,
-                JobObjectExtendedLimitInformation,
+                JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
                 &mut jeli as *mut _ as *mut core::ffi::c_void,
                 core::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
             );

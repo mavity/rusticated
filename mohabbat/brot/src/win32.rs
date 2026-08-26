@@ -127,7 +127,7 @@ pub mod Win32 {
                 pub PeakJobMemoryUsed: usize,
             }
 
-            pub const JobObjectExtendedLimitInformation: u32 = 9;
+            pub const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: u32 = 9;
             pub const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: DWORD = 0x00002000;
 
             #[link(name = "kernel32", kind = "raw-dylib")]
