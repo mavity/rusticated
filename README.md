@@ -150,7 +150,7 @@ This rebuilds the core libraries (Rust and Go) and the mohab.bat vegetable itsel
 go run . demo -o demo.bat
 go run . demo/loch -o loch.bat
 go run . kabibi-rust -o kabibi-rust.bat
-go run . kabibi-go -o kabibi-go.bat
+go run . kabibi -o kabibi.bat
 go run . demo-go -o demo-go.bat
 go run . demo-go/trivial -o trivial.bat
 go run . demo-go/curl -o curl.bat
@@ -354,7 +354,7 @@ The beauty of Go on rusticated is that its *green threads* (goroutines) are perf
 
 [demo-go/trivial](demo-go/trivial) — a very trivial Go project that's barely hello world.
 
-[kabibi-go](kabibi-go) — a flagship project that fuses shell (mvdan.cc/sh) file manager and AI chat bot. It's a work in progress and best works in native, making it fully fit onto Mohabbat rusticated platform is our current goal.
+[kabibi](kabibi) — a flagship project that fuses shell (mvdan.cc/sh) file manager and AI chat bot. It's a work in progress and best works in native, making it fully fit onto Mohabbat rusticated platform is our current goal.
 
 # Rusticated sysroot
 
