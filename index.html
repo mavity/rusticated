@@ -236,7 +236,7 @@
                     { path: '/var/tmp', type: 'dir', mtime: now },
                     { path: '/tmp', type: 'dir', mtime: now },
                     { path: '/dev', type: 'dir', mtime: now },
-                    { path: '/README.md', type: 'file', content: encoder.encode('# Rusticated WASM Shell\n\nWelcome to kabibi-go running in the browser.\nThis environment features a virtualized file system backed by IndexedDB.\n\nEnjoy your stay!\n'), mtime: now }
+                    { path: '/README.md', type: 'file', content: encoder.encode('# Rusticated WASM Shell\n\nWelcome to kabibi running in the browser.\nThis environment features a virtualized file system backed by IndexedDB.\n\nEnjoy your stay!\n'), mtime: now }
                 ];
 
                 for (const f of initialFiles) {
@@ -319,7 +319,7 @@
                 }
             });
 
-            term.write('Connecting to kabibi-go WASM...\r\n');
+            term.write('Connecting to kabibi WASM...\r\n');
 
             // Refactored host state
             const fs = new IndexedDBFS();
@@ -517,7 +517,7 @@
             // Define the "env" module expected by rusticated/washmhost guest binaries
             const env = {
                 get_args: (ptr, len) => {
-                    const args = ["kabibi-go"];
+                    const args = ["kabibi"];
                     let totalLen = 0;
                     const encoded = args.map(a => {
                         const e = encoder.encode(a + "\0");
@@ -1169,8 +1169,8 @@
             };
 
             try {
-                console.log("Fetching WASM from ./try/kabibi-go.wasm");
-                const response = await fetch('./try/kabibi-go.wasm');
+                console.log("Fetching WASM from ./try/kabibi.wasm");
+                const response = await fetch('./try/kabibi.wasm');
                 console.log("Fetch response:", response.status);
                 if (!response.ok) throw new Error(`HTTP ${response.status} fetching WASM`);
                 const binary = await response.arrayBuffer();
@@ -1185,7 +1185,7 @@
                 hostState.triggerSignal(28);
                 
                 console.log("WASM Exports:", Object.keys(instance.exports));
-                term.write('WASM loaded. Starting kabibi-go...\r\n\r\n');
+                term.write('WASM loaded. Starting kabibi...\r\n\r\n');
                 
                 const runFunc = instance.exports.run || instance.exports._start;
                 if (runFunc) {
@@ -1210,7 +1210,7 @@
                 }
             } catch (err) {
                 console.error(err);
-                term.write(`\r\nFailed to load kabibi-go: ${err.message}\r\n`);
+                term.write(`\r\nFailed to load kabibi: ${err.message}\r\n`);
             }
         }
 
