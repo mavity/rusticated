@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/lipgloss"
@@ -359,9 +360,6 @@ func (m model) viewFrame() string {
 
 	var chat string
 	chatTitle := " AI Chat "
-	if !m.chatOpen {
-		chatTitle = " AI> "
-	}
 
 	cBorderColor := colorGray
 	if m.chatOpen && m.activePane == chatPane {
@@ -422,10 +420,12 @@ func (m model) viewFrame() string {
 		}
 		m.chatView.Height = chatViewHeight
 
+		viewportView := forceBackground(m.chatView.View(), colorDarkGray)
+		inputView := forceBackground(m.chatInput.View(), colorDarkGray)
 		chatContent := lipgloss.JoinVertical(lipgloss.Left,
-			m.chatView.View(),
+			viewportView,
 			progressView,
-			m.chatInput.View(),
+			inputView,
 		)
 		width := chatFullWidth
 		innerW := width - 2
@@ -458,12 +458,28 @@ func (m model) viewFrame() string {
 
 		chat = topBorder + "\n" + contentStyle.Render(chatContent)
 	} else {
-		chatContent := "\n AI>"
+		peekFg := colorDimGray
+		if m.isThinking && !m.firstTokenRecv {
+			elapsed := time.Since(m.animStart).Seconds()
+			phase := elapsed / 1.3
+			phase -= float64(int(phase))
+			peekFg = glowColor(phase)
+		} else if m.isThinking && m.firstTokenRecv {
+			elapsed := time.Since(m.animStart).Seconds()
+			phase := elapsed / 1.1
+			phase -= float64(int(phase))
+			peekFg = glowColor(phase)
+		} else if m.flashActive {
+			elapsedMs := float64(time.Since(m.flashStart).Milliseconds())
+			peekFg = flashColor(elapsedMs)
+		}
+		peekDot := lipgloss.NewStyle().Foreground(peekFg).Background(colorDarkGray).Render("●")
+		chatContent := "\n " + peekDot
 		chat = chatStyle.Copy().
 			Border(lipgloss.NormalBorder(), true, false, true, true).
 			BorderForeground(cBorderColor).
 			Width(actualChatWidth).
-			Height(panelHeight - 2). // height includes content, borders add 2
+			Height(panelHeight - 2).
 			Render(chatContent)
 	}
 
@@ -600,12 +616,7 @@ func forceBackground(s string, bg lipgloss.Color) string {
 	}
 	bgCode := dummy[:idx]
 
-	// We want to append this code after any reset \x1b[0m
-	// Also ensure it starts with the background code.
+	// Re-inject the background code after every reset so padding inherits it.
 	res := bgCode + strings.ReplaceAll(s, "\x1b[0m", "\x1b[0m"+bgCode)
-	// Avoid leaking the background code if it was appended at the very end
-	if strings.HasSuffix(res, bgCode) {
-		res = strings.TrimSuffix(res, bgCode)
-	}
 	return res
 }
