@@ -109,26 +109,34 @@ func ensureLiteRT(ctx context.Context, progress chan<- assetProgressMsg) error {
 	}
 
 	libDir := filepath.Join(cacheDir, "lib")
-	if hasValidLiteRTCache(libDir) {
-		sendProgress(progress, "litertlm", 100, "using cached runtime")
-		return nil
-	}
-
 	if err := os.MkdirAll(libDir, 0o755); err != nil {
 		return fmt.Errorf("failed to create cache directory: %w", err)
 	}
 
-	sendProgress(progress, "litertlm", 0, "discovering wheel...")
-	wheelURL, wheelFilename, err := selectWheelURL(ctx)
-	if err != nil {
-		return err
+	// Step 1: Find a wheel (cached on disk, or download from PyPI).
+	wheelPath := findCachedWheel(cacheDir)
+	if wheelPath == "" {
+		// No cached wheel — must discover and download from PyPI.
+		sendProgress(progress, "litertlm", 0, "discovering wheel...")
+		wheelURL, wheelFilename, err := selectWheelURL(ctx)
+		if err != nil {
+			return err
+		}
+		wheelPath = filepath.Join(cacheDir, wheelFilename)
+		if err := downloadFile(ctx, wheelURL, wheelPath, "litertlm", progress); err != nil {
+			return err
+		}
 	}
 
-	wheelPath := filepath.Join(cacheDir, wheelFilename)
-	if err := downloadFile(ctx, wheelURL, wheelPath, "litertlm", progress); err != nil {
-		return err
+	// Step 2: Check if the extracted lib is up-to-date w.r.t. the wheel.
+	if libUpToDate(libDir, wheelPath) {
+		sendProgress(progress, "litertlm", 100, "using cached runtime")
+		// Step 3: Background-check PyPI for a newer wheel (non-blocking).
+		go backgroundUpdateWheel(cacheDir)
+		return nil
 	}
 
+	// Step 3: Extract native libs from the wheel.
 	if err := extractWheelNativeFiles(wheelPath, libDir, progress); err != nil {
 		return err
 	}
@@ -137,7 +145,95 @@ func ensureLiteRT(ctx context.Context, progress chan<- assetProgressMsg) error {
 		return errors.New("downloaded runtime failed validation")
 	}
 
+	// Step 4: Background-check PyPI for a newer wheel (non-blocking).
+	go backgroundUpdateWheel(cacheDir)
 	return nil
+}
+
+// findCachedWheel scans cacheDir for a previously downloaded .whl matching
+// the current platform. Returns the path to the best (newest) match, or "".
+func findCachedWheel(cacheDir string) string {
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		return ""
+	}
+	var best string
+	var bestVer string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(name, ".whl") {
+			continue
+		}
+		if !wheelMatchesPlatform(name) {
+			continue
+		}
+		ver := wheelVersion(name)
+		if best == "" || versionLess(bestVer, ver) {
+			best = filepath.Join(cacheDir, name)
+			bestVer = ver
+		}
+	}
+	return best
+}
+
+// wheelVersion extracts the version from a wheel filename like
+// "litert_lm_api-0.13.1-py3-none-macosx_12_0_arm64.whl".
+func wheelVersion(filename string) string {
+	parts := strings.SplitN(filename, "-", 3)
+	if len(parts) >= 2 {
+		return parts[1]
+	}
+	return ""
+}
+
+// libUpToDate returns true when the extracted native lib exists and is newer
+// than the wheel it was extracted from.
+func libUpToDate(libDir, wheelPath string) bool {
+	if !hasValidLiteRTCache(libDir) {
+		return false
+	}
+	wheelFI := fileInfo(wheelPath)
+	if wheelFI == nil {
+		return false
+	}
+	wheelMod := wheelFI.ModTime()
+	// Check that at least one native lib is newer than the wheel.
+	for _, ext := range nativeLibExts() {
+		p := filepath.Join(libDir, "litert_lm_ext"+ext)
+		if fi := fileInfo(p); fi != nil && !fi.ModTime().Before(wheelMod) {
+			return true
+		}
+	}
+	return false
+}
+
+// backgroundUpdateWheel checks PyPI for a newer wheel and downloads it
+// silently. Errors are ignored — the new wheel will be used on the next run.
+func backgroundUpdateWheel(cacheDir string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	data, err := fetchPyPI(ctx)
+	if err != nil {
+		return
+	}
+	candidates := wheelCandidates(data)
+	if len(candidates) == 0 {
+		return
+	}
+	best := candidates[0]
+
+	// If the best candidate is already on disk, nothing to do.
+	dest := filepath.Join(cacheDir, best.Filename)
+	if fi := fileInfo(dest); fi != nil && fi.Size() > 0 {
+		return
+	}
+
+	// Download silently — downloadFile with nil progress doesn't block UI.
+	_ = downloadFile(ctx, best.URL, dest, "litertlm-bg", nil)
 }
 
 func ensureGemma(ctx context.Context, progress chan<- assetProgressMsg) error {

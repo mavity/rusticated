@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -35,13 +36,15 @@ func initialModel() model {
 	ri.SetShowTitle(false)
 
 	ti := textinput.New()
-	ti.Placeholder = "Ask AI..."
-	ti.Prompt = "AI> "
+	displayModel := strings.TrimSuffix(defaultModelName, ".litertlm")
+	ti.Placeholder = "ask " + displayModel
+	ti.Prompt = ""
 
 	si := textinput.New()
 	si.Focus()
 
 	vp := viewport.New(0, 0)
+	vp.Style = lipgloss.NewStyle().Background(colorDarkGray)
 
 	sw := &SwitchableWriter{}
 	r, _ := createRunner(context.Background(), nil, sw, sw, cwd, nil)
@@ -133,7 +136,9 @@ func (m *model) loadDir(p pane, path string, focusName string) {
 	path = filepath.Clean(path)
 	entries, _ := os.ReadDir(path)
 	var items []list.Item
-	items = append(items, fileItem{name: "..", isDir: true})
+	if filepath.Dir(path) != path {
+		items = append(items, fileItem{name: "..", isDir: true})
+	}
 	for _, entry := range entries {
 		items = append(items, fileItem{name: entry.Name(), isDir: entry.IsDir()})
 	}
@@ -188,11 +193,52 @@ func (m *model) syncChatView() {
 	if m.chatView.Width <= 0 {
 		return
 	}
-	style := lipgloss.NewStyle().Width(m.chatView.Width)
+	chatW := m.chatView.Width
 	var wrapped []string
 	if m.conversation != nil {
-		for _, msg := range m.conversation.Messages {
-			wrapped = append(wrapped, style.Render(msg.Role+": "+msg.Content))
+		nMsgs := len(m.conversation.Messages)
+		for i, msg := range m.conversation.Messages {
+			fg := colorWhite
+			isLastUser := msg.Role == "user" && i == nMsgs-2
+			isLastAssistant := (msg.Role == "assistant" || msg.Role == "system") && i == nMsgs-1
+
+			if isLastUser && m.isThinking && !m.firstTokenRecv {
+				elapsed := time.Since(m.animStart).Seconds()
+				phase := elapsed / 1.3
+				phase -= float64(int(phase))
+				fg = glowColor(phase)
+			}
+			if isLastAssistant && m.isThinking && m.firstTokenRecv {
+				elapsed := time.Since(m.animStart).Seconds()
+				phase := elapsed / 1.1
+				phase -= float64(int(phase))
+				fg = glowColor(phase)
+			}
+			if isLastAssistant && m.flashActive {
+				elapsedMs := float64(time.Since(m.flashStart).Milliseconds())
+				fg = flashColor(elapsedMs)
+			}
+
+			if msg.Role == "user" {
+				style := lipgloss.NewStyle().Width(chatW).Foreground(fg)
+				wrapped = append(wrapped, forceBackground(style.Render(msg.Content), colorDarkGray))
+			} else {
+				indent := chatW / 3
+				if indent > 4 {
+					indent = 4
+				}
+				if indent < 2 {
+					indent = 2
+				}
+				bullet := lipgloss.NewStyle().Foreground(colorYellow).Render("■")
+				pad := strings.Repeat(" ", indent-1)
+				contentW := chatW - indent
+				if contentW < 1 {
+					contentW = 1
+				}
+				style := lipgloss.NewStyle().Width(contentW).Foreground(fg)
+				wrapped = append(wrapped, forceBackground(pad+bullet+style.Render(msg.Content), colorDarkGray))
+			}
 		}
 	}
 	m.chatView.SetContent(strings.Join(wrapped, "\n"))

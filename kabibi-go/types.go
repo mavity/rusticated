@@ -102,6 +102,10 @@ type model struct {
 	runner            *interp.Runner
 	shellOut          *SwitchableWriter
 	isThinking        bool
+	firstTokenRecv    bool      // first AI token arrived (thinking → streaming)
+	animStart         time.Time // when current glow animation began
+	flashActive       bool      // completion flash in progress
+	flashStart        time.Time // when flash began
 
 	litertReady           bool
 	gemmaReady            bool
