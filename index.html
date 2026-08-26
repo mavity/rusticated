@@ -534,6 +534,54 @@
                     }, Number(delayMs));
                 },
                 read: (ovPtr, handle, ptr, len) => hostState.read(ovPtr, handle, ptr, len),
+                seek: (ovPtr, handle, offset, whence) => {
+                    const view = new DataView(hostState.memory.buffer);
+                    const h = hostState.handles.get(BigInt(handle));
+                    ovPtr = Number(ovPtr);
+                    offset = Number(offset);
+                    whence = Number(whence);
+
+                    if (!h) {
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 9, true); // EBADF
+                        return 0;
+                    }
+
+                    let base = 0;
+                    if (h.type === 'file' && h.entry && typeof h.entry.content !== 'undefined') {
+                        base = h.entry.content.length;
+                    }
+
+                    let nextPos = 0;
+                    switch (whence) {
+                        case 0: // SEEK_SET
+                            nextPos = offset;
+                            break;
+                        case 1: // SEEK_CUR
+                            nextPos = (Number(h.offset || 0)) + offset;
+                            break;
+                        case 2: // SEEK_END
+                            nextPos = base + offset;
+                            break;
+                        default:
+                            view.setUint32(ovPtr, 1, true);
+                            view.setUint32(ovPtr + 4, 22, true); // EINVAL
+                            return 0;
+                    }
+
+                    if (nextPos < 0) {
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 22, true); // EINVAL
+                        return 0;
+                    }
+
+                    h.offset = nextPos;
+                    view.setUint32(ovPtr, 1, true);
+                    view.setUint32(ovPtr + 4, 0, true);
+                    view.setBigUint64(ovPtr + 8, 0n, true);
+                    view.setBigUint64(ovPtr + 16, BigInt(nextPos), true);
+                    return 0;
+                },
                 write: (ovPtr, handle, ptr, len) => hostState.write(ovPtr, handle, ptr, len),
                 handle_close: (handle) => {
                     hostState.handles.delete(BigInt(handle));
