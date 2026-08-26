@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -11,15 +13,18 @@ import (
 // Explicit FAR-inspired palette. These values were selected by hand to match the
 // exact desired effect, not derived by nearest-colour tricks.
 var (
-	colorBlue     = lipgloss.Color("#0000A8") // panel blue
-	colorCyan     = lipgloss.Color("#00D9FF") // panel cyan accents
-	colorYellow   = lipgloss.Color("#FFD700") // selected / action highlight
-	colorNavy     = lipgloss.Color("#000080") // selection text
-	colorWhite    = lipgloss.Color("#E5E5E5") // calm off-white UI text
-	colorBlack    = lipgloss.Color("#000000") // strong black text + borders
-	colorDarkGray = lipgloss.Color("#3A3A3A") // darker neutral UI tone
-	colorGray     = lipgloss.Color("#7A7A7A") // mid neutral for dividers
-	colorDimGray  = lipgloss.Color("#4A4A4A") // dim gray for subtle markers
+	colorBlue      = lipgloss.Color("#0000A8") // panel blue
+	colorCyan      = lipgloss.Color("#00D9FF") // panel cyan accents
+	colorYellow    = lipgloss.Color("#FFD700") // selected / action highlight
+	colorNavy      = lipgloss.Color("#000080") // selection text
+	colorWhite     = lipgloss.Color("#E5E5E5") // calm off-white UI text
+	colorBlack     = lipgloss.Color("#000000") // strong black text + borders
+	colorDarkGray  = lipgloss.Color("#3A3A3A") // darker neutral UI tone
+	colorGray      = lipgloss.Color("#7A7A7A") // mid neutral for dividers
+	colorDimGray   = lipgloss.Color("#4A4A4A") // dim gray for subtle markers
+	colorWatermark = lipgloss.Color("#999999") // muted placeholder for chat input watermark
+	colorGlowDim   = lipgloss.Color("#B0B0B0") // darker shade for glow animation trough
+	colorFlashHi   = lipgloss.Color("#FFFFFF") // brighter shade for completion flash peak
 )
 
 // Dialog / popup palette — vivid but comfortable, FAR-inspired.
@@ -42,6 +47,9 @@ var ansi16Fallback = map[[3]int]string{
 	{229, 229, 229}: "47",
 	{255, 255, 85}:  "93",
 	{160, 160, 160}: "100",
+	{153, 153, 153}: "37", // colorWatermark → white (dim)
+	{176, 176, 176}: "37", // colorGlowDim → white (dim)
+	{255, 255, 255}: "97", // colorFlashHi → bright white
 }
 
 func ansiFlatCode(r, g, b int) string {
@@ -137,3 +145,31 @@ var (
 
 	promptStyle = lipgloss.NewStyle()
 )
+
+// glowColor returns an interpolated color for the breathing glow animation.
+// phase is 0..1 within one oscillation period; the color dips from colorWhite
+// down to colorGlowDim at phase 0.5 and back.
+func glowColor(phase float64) lipgloss.Color {
+	t := 0.5 * (1.0 - math.Cos(2*math.Pi*phase)) // 0..1..0
+	v := int(229.0 - t*53.0)                     // #E5E5E5 (229) → #B0B0B0 (176)
+	return lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", v, v, v))
+}
+
+// flashColor returns an interpolated color for the completion flash.
+// elapsedMs is time since flash started; jumps to colorFlashHi then fades back.
+func flashColor(elapsedMs float64) lipgloss.Color {
+	if elapsedMs < 150 {
+		t := elapsedMs / 150.0
+		v := int(229.0 + t*26.0) // #E5E5E5 → #FFFFFF
+		if v > 255 {
+			v = 255
+		}
+		return lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", v, v, v))
+	}
+	t := (elapsedMs - 150.0) / 400.0 // fade back over 400ms
+	if t > 1.0 {
+		t = 1.0
+	}
+	v := int(255.0 - t*26.0) // #FFFFFF → #E5E5E5
+	return lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", v, v, v))
+}
