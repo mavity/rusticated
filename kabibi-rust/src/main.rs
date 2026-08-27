@@ -688,7 +688,7 @@ fn mock_ai_reply(input: &str) -> Vec<String> {
         return lines;
     }
     if lowered.contains("build") {
-        lines.push("Mock execution: cargo build -p kabibi".to_string());
+        lines.push("Mock execution: cargo build -p kabibi-rust".to_string());
         lines.push("Result: success (simulated).".to_string());
         return lines;
     }
