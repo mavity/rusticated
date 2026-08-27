@@ -1,5 +1,5 @@
 [workspace]
-members = ["rusticated-rust", "demo", "mohabbat/brot", "demo/loch", "kabibi"]
+members = ["rusticated-rust", "demo", "mohabbat/brot", "demo/loch", "kabibi-rust"]
 resolver = "3"
 
 
