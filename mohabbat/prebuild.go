@@ -734,6 +734,7 @@ func generateGoOverlay(ws, goroot string) error {
 		{"src/syscall/os_wasip1.go", canon(filepath.Join(overlayDir, "syscall/os_rusticated.go"))},
 		{"src/syscall/log_rusticated.go", canon(filepath.Join(overlayDir, "syscall/log_rusticated.go"))},
 		{"src/syscall/log_rusticated_verbose.go", canon(filepath.Join(overlayDir, "syscall/log_rusticated_verbose.go"))},
+		{"src/syscall/dylib_rusticated.go", canon(filepath.Join(overlayDir, "syscall/dylib_rusticated.go"))},
 		// internal/syscall/unix
 		{"src/internal/syscall/unix/at_wasip1.go", canon(filepath.Join(overlayDir, "internal/syscall/unix/at_rusticated.go"))},
 		{"src/internal/syscall/unix/utimes_wasip1.go", canon(filepath.Join(overlayDir, "internal/syscall/unix/utimes_rusticated.go"))},
@@ -772,7 +773,7 @@ func generateGoOverlay(ws, goroot string) error {
 	for _, r := range replacements {
 		srcPath := filepath.Join(goroot, r[0])
 		// Allow adding new files to syscall/runtime/net/crypto via overlay even if they don't exist in SDK
-		isNewFile := strings.Contains(r[0], "log_rusticated") || strings.Contains(r[0], "net_rusticated") || strings.Contains(r[0], "root_rusticated") || strings.Contains(r[0], "transport_rusticated")
+		isNewFile := strings.Contains(r[0], "log_rusticated") || strings.Contains(r[0], "net_rusticated") || strings.Contains(r[0], "root_rusticated") || strings.Contains(r[0], "transport_rusticated") || strings.Contains(r[0], "dylib_rusticated")
 		if !isNewFile {
 			if _, err := os.Stat(srcPath); err != nil {
 				fmt.Fprintf(os.Stderr, "🍆  overlay: source not found: %s\n", srcPath)
