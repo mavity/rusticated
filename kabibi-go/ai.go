@@ -1,77 +1,35 @@
-package main
+﻿package main
 
 import (
-	"fmt"
-	"os"
-	"path/filepath"
+	"encoding/json"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+// LiteRtLogs buffers the latest in-memory logs captured from the dynamic FFI sink logger.
+// The kabibi-go application can inspect this slice at any time to display logs on-demand in the UI.
+var LiteRtLogs []string
 
 func IsAISupported() bool {
 	return true
 }
 
-func runAIPrompt(userInput string, onToken func(string)) error {
-	cacheDir, err := cacheDirPath()
-	if err != nil {
-		return err
+// extractTokenText parses a LiterTLM JSON token chunk and returns the text content.
+// LiterTLM returns chunks like: {"role":"assistant","content":[{"type":"text","text":"Hello"}]}
+// This extracts the "text" field from the first content item.
+func extractTokenText(raw string) string {
+	var msg struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
 	}
-
-	modelPath := filepath.Join(cacheDir, defaultModelName)
-	libDir := filepath.Join(cacheDir, "lib")
-
-	// Find the sidecar and library
-	libExt := ".so"
-	exeExt := ""
-	if HostOS() == "windows" {
-		libExt = ".dll"
-		exeExt = ".exe"
+	if err := json.Unmarshal([]byte(raw), &msg); err != nil {
+		return raw
 	}
-
-	libPath := filepath.Join(libDir, "litert_lm_ext"+libExt)
-	sidecarName := "litert-lm-sidecar" + exeExt
-
-	// If on Windows ARM64, we prefer the x64 sidecar to load the x64 DLLs via Prism
-	if HostArch() == "arm64" && HostOS() == "windows" {
-		sidecarName = "litert-lm-sidecar-x64.exe"
+	if len(msg.Content) > 0 {
+		return msg.Content[0].Text
 	}
-
-	// Usually the sidecar lives alongside the downloaded extension in the cache directory
-	sidecarPath := filepath.Join(libDir, sidecarName)
-	if fi, err := os.Stat(sidecarPath); err != nil || fi.IsDir() {
-		// Fallback to exactly where the command was run, or system PATH
-		sidecarPath = sidecarName
-
-		if exe, err := os.Executable(); err == nil {
-			localCand := filepath.Join(filepath.Dir(exe), sidecarName)
-			if fi, err := os.Stat(localCand); err == nil && !fi.IsDir() {
-				sidecarPath = localCand
-			}
-		}
-	}
-
-	if abs, err := filepath.Abs(sidecarPath); err == nil {
-		sidecarPath = abs
-	}
-
-	client, err := NewSidecarClient(sidecarPath, libPath)
-	if err != nil {
-		return fmt.Errorf("failed to start sidecar: %w", err)
-	}
-	defer client.Close()
-
-	engine, err := client.EngineCreate(modelPath, "cpu")
-	if err != nil {
-		return fmt.Errorf("failed to create engine: %w", err)
-	}
-
-	conv, err := client.ConversationCreate(engine)
-	if err != nil {
-		return fmt.Errorf("failed to create conversation: %w", err)
-	}
-
-	return client.ConversationSend(conv, userInput, onToken)
+	return raw
 }
 
 func (m *model) runAIInference(userInput string) tea.Cmd {
