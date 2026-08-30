@@ -7,4 +7,7 @@ require (
 	golang.org/x/term v0.29.0
 )
 
-require golang.org/x/sys v0.44.0 // indirect
+require (
+	github.com/ebitengine/purego v0.10.2 // indirect
+	golang.org/x/sys v0.44.0 // indirect
+)
