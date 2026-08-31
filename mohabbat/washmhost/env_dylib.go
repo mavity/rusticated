@@ -495,31 +495,6 @@ func (h *HostEnv) sys_dylib_callback_create(ctx context.Context, m api.Module, s
 	writeOverlapped(m, ovPtr, 0, 0, cbHandle)
 }
 
-func (h *HostEnv) sys_dylib_callback_respond(ctx context.Context, m api.Module, stack []uint64) {
-	cbHandle := stack[0]
-	invocationId := uint32(stack[1])
-	retValue := int64(stack[2])
-	_ = cbHandle
-
-	// The guest callback has finished running; leave reentrant mode so later
-	// dylib reads route to the worker thread again.
-	h.callbackDepth = 0
-	h.resolveInvocation(invocationId, uintptr(retValue))
-}
-
-// resolveInvocation unblocks the satellite goroutine waiting on a callback's
-// return value.
-func (h *HostEnv) resolveInvocation(invocID uint32, ret uintptr) {
-	h.mu.Lock()
-	ch, ok := h.activeInvocations[invocID]
-	if ok {
-		delete(h.activeInvocations, invocID)
-	}
-	h.mu.Unlock()
-	if ok {
-		ch <- ret
-	}
-}
 
 func makeCallbackClosure(h *HostEnv, m api.Module, cbHandle uint64, sig CallbackSig, guestFnName string) interface{} {
 	switch sig.ArgCount {
@@ -700,114 +675,23 @@ func (h *HostEnv) invokeCallbackFromSatellite(cbHandle uint64, args []uint64, bu
 		return 0
 	}
 
-	// Allocate an invocation id + response channel. The guest pump goroutine
-	// runs the callback on its own (growable) stack and replies via
-	// dylib_callback_respond, so the callback body never executes on the g0
-	// scheduler stack (which cannot grow) — the cause of morestack aborts.
+	// Route through callbackQueue so the callback is delivered by
+	// drainCallbacks (inside Poll) via executeCrossThreadCallback.
+	// Poll runs between module executions when the guest is paused on
+	// handleAsyncEvent's growable stack, so fn.Call() is safe.
+	uargs := make([]uintptr, len(args))
+	for i, a := range args {
+		uargs[i] = uintptr(a)
+	}
 	respChan := make(chan uintptr, 1)
-	h.mu.Lock()
-	h.nextInvocationID++
-	invocID := h.nextInvocationID
-	h.activeInvocations[invocID] = respChan
-	h.mu.Unlock()
-
-	pcb := &pendingCallback{invocID: invocID, cbHandle: cbHandle, args: args}
-
-	h.cbMu.Lock()
-	w := h.cbWaiter
-	if w != nil {
-		h.cbWaiter = nil
-	} else {
-		h.cbPending = pcb
+	ev := &CallbackEvent{
+		CallbackHandle: cbHandle,
+		Args:           uargs,
+		BufParams:      bufs,
+		RespChan:       respChan,
 	}
-	h.cbMu.Unlock()
-
-	if w != nil {
-		// A guest pump is parked: complete its wait on the module thread.
-		h.fileOpsQueue <- func() { h.deliverToWaiter(w, pcb) }
-	} else {
-		// No parked pump yet: leave the callback queued and wake the driver
-		// loop so the guest is scheduled to call dylib_callback_wait.
-		h.fileOpsQueue <- func() {}
-	}
+	h.callbackQueue <- ev
+	h.fileOpsQueue <- func() {} // wake Poll
 
 	return <-respChan
-}
-
-// deliverToWaiter completes a parked guest pump's wait with a queued callback.
-// Runs on the module thread (via fileOpsQueue).
-func (h *HostEnv) deliverToWaiter(w *callbackWaiter, pcb *pendingCallback) {
-	if !h.IsOpActive(w.ovPtr, w.state.opID) {
-		// The wait was cancelled (stream ended); unblock the satellite.
-		h.resolveInvocation(pcb.invocID, 0)
-		return
-	}
-	h.mu.Lock()
-	delete(h.activeOps, w.ovPtr)
-	h.mu.Unlock()
-	h.writeCallbackDelivery(w.mod, w.ovPtr, w.outPtr, w.outLen, pcb)
-	h.DecOpsFor(w.state)
-}
-
-// writeCallbackDelivery hands a pending callback to the guest pump by writing
-// its scalar args into the guest buffer and completing the overlapped. It raises
-// callbackDepth so dylib reads issued by the callback route reentrant to the
-// satellite's parked callback thread; sys_dylib_callback_respond lowers it.
-func (h *HostEnv) writeCallbackDelivery(mod api.Module, ovPtr, outPtr, outLen uint32, pcb *pendingCallback) {
-	n := len(pcb.args)
-	if uint32(n*8) > outLen {
-		n = int(outLen / 8)
-	}
-	if n > 0 {
-		buf := make([]byte, n*8)
-		for i := 0; i < n; i++ {
-			binary.LittleEndian.PutUint64(buf[i*8:], pcb.args[i])
-		}
-		mod.Memory().Write(outPtr, buf)
-	}
-	h.callbackDepth = 1
-	continued := uint64(pcb.invocID) | (uint64(n) << 32)
-	writeOverlapped(mod, ovPtr, 0, continued, pcb.cbHandle)
-}
-
-// sys_dylib_callback_wait blocks the calling guest goroutine until a native
-// callback is available, then returns its handle, invocation id and scalar args
-// (cbHandle in resultExt, invocId|argCount<<32 in continued, args in the buffer).
-func (h *HostEnv) sys_dylib_callback_wait(ctx context.Context, m api.Module, stack []uint64) {
-	ovPtr := uint32(stack[0])
-	outPtr := uint32(stack[1])
-	outLen := uint32(stack[2])
-
-	h.cbMu.Lock()
-	if pcb := h.cbPending; pcb != nil {
-		h.cbPending = nil
-		h.cbMu.Unlock()
-		h.writeCallbackDelivery(m, ovPtr, outPtr, outLen, pcb)
-		return
-	}
-	state := h.RegisterOp(ovPtr, nil)
-	h.cbWaiter = &callbackWaiter{ovPtr: ovPtr, outPtr: outPtr, outLen: outLen, mod: m, state: state}
-	h.cbMu.Unlock()
-	// Return without completing; the guest goparks until deliverToWaiter or
-	// sys_dylib_callback_stop completes this overlapped.
-}
-
-// sys_dylib_callback_stop cancels a parked pump wait so the guest pump loop can
-// exit once the stream is finished.
-func (h *HostEnv) sys_dylib_callback_stop(ctx context.Context, m api.Module, stack []uint64) {
-	h.callbackDepth = 0
-	h.cbMu.Lock()
-	w := h.cbWaiter
-	h.cbWaiter = nil
-	h.cbMu.Unlock()
-	if w == nil {
-		return
-	}
-	if h.IsOpActive(w.ovPtr, w.state.opID) {
-		h.mu.Lock()
-		delete(h.activeOps, w.ovPtr)
-		h.mu.Unlock()
-		writeOverlapped(w.mod, w.ovPtr, wasiECANCELED, 0, 0)
-		h.DecOpsFor(w.state)
-	}
 }

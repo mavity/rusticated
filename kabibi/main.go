@@ -16,6 +16,7 @@ func main() {
 	commandPtr := flag.String("c", "", "Run a single command string")
 	promptPtr := flag.String("p", "", "Run an AI prompt to stdout")
 	flag.StringVar(promptPtr, "prompt", "", "Run an AI prompt to stdout (alias for -p)")
+	aiModelPtr := flag.String("ai-model", "", "Model to use (e.g. gemma-4-E2B-it)")
 
 	// Filter os.Args to remove elements that might be interpreted as flags but are actually metadata/setup
 	// Washmhost/Mohabbat dev-run usually passes [wasm_path -- [args...]]
@@ -39,6 +40,10 @@ func main() {
 	os.Args = filteredArgs
 
 	flag.Parse()
+
+	if *aiModelPtr != "" {
+		SetActiveModel(*aiModelPtr)
+	}
 
 	if *helpPtr {
 		fmt.Printf("Usage: kabibi-go [options] [script_file [args...]]\n\n")
