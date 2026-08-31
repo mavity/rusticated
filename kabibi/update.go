@@ -10,7 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-type aiTokenMsg string
+type aiRepaintMsg struct{}
 type aiDoneMsg struct{ err error }
 type animTickMsg time.Time
 
@@ -57,22 +57,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case aiTokenMsg:
-		if !m.firstTokenRecv {
-			m.firstTokenRecv = true
-			m.animStart = time.Now()
-		}
-		// Append token to the last assistant message in conversation
-		if m.conversation != nil && len(m.conversation.Messages) > 0 {
-			m.conversation.Messages[len(m.conversation.Messages)-1].Content += string(msg)
-			m.syncChatView()
-		}
-		return m, m.watchAIChanCmd()
+	case aiRepaintMsg:
+		m.syncChatView()
+		return m, nil
 
 	case aiDoneMsg:
 		m.isThinking = false
 		m.firstTokenRecv = false
-		m.aiMsgChan = nil
 		if msg.err != nil {
 			m.conversation.Messages = append(m.conversation.Messages, Message{
 				Role:    "system",
@@ -320,17 +311,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if m.chatOpen {
 				input := m.chatInput.Value()
-				if input != "" && m.assetsReady && !m.isThinking {
-					// Add user message to conversation state
-					m.conversation.Messages = append(m.conversation.Messages, Message{
-						Role:    "user",
-						Content: input,
-					})
-					// Add placeholder for assistant response
-					m.conversation.Messages = append(m.conversation.Messages, Message{
-						Role:    "assistant",
-						Content: "",
-					})
+				if input != "" && m.assetsReady {
+					// Cancel any in-flight stream
+					m.streamMu.Lock()
+					m.streamGen++
+					m.conversation.Messages = append(m.conversation.Messages,
+						Message{Role: "user", Content: input},
+						Message{Role: "assistant", Content: ""},
+					)
+					m.streamMu.Unlock()
+
 					m.syncChatView()
 					m.chatInput.Reset()
 					m.chatView.GotoBottom()
@@ -339,7 +329,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.firstTokenRecv = false
 					m.flashActive = false
 					m.animStart = time.Now()
-					return m, tea.Batch(m.advanceChatCmd(input), animTickCmd())
+					m.startStream(input)
+					return m, animTickCmd()
 				}
 			} else {
 				input := m.shellInput.Value()
