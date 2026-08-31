@@ -36,7 +36,7 @@ func initialModel() model {
 	ri.SetShowTitle(false)
 
 	ti := textinput.New()
-	displayModel := strings.TrimSuffix(defaultModelName, ".litertlm")
+	displayModel := strings.TrimSuffix(ActiveModelName(), ".litertlm")
 	ti.Placeholder = "ask " + displayModel
 	ti.Prompt = ""
 
@@ -60,11 +60,7 @@ func initialModel() model {
 		leftDir:    cwd,
 		rightDir:   cwd,
 		plume: []string{
-			"kabibi-go v0.1.0 starting...",
-			"loading file managers...",
-			"AI interface ready.",
-			"Welcome back, master.",
-			"Run 'help' for available commands.",
+			"Kabibi shell:  'help' for available commands.",
 		},
 		conversation:      &Conversation{Messages: []Message{}},
 		lastExhaustHeight: 0,
@@ -193,6 +189,9 @@ func (m *model) syncChatView() {
 	if m.chatView.Width <= 0 {
 		return
 	}
+	m.streamMu.Lock()
+	defer m.streamMu.Unlock()
+
 	chatW := m.chatView.Width
 	var wrapped []string
 	if m.conversation != nil {
@@ -253,12 +252,6 @@ func (m *model) watchAssetProgressCmd() tea.Cmd {
 		case msg := <-m.assetProgress:
 			return msg
 		}
-	}
-}
-
-func (m *model) watchAIChanCmd() tea.Cmd {
-	return func() tea.Msg {
-		return <-m.aiMsgChan
 	}
 }
 

@@ -4,21 +4,39 @@ package main
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
-	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"unsafe"
 )
 
 // tokenCallbackRegistry maps opaque IDs to Go callbacks for streaming tokens.
-var wasmTokenCallbacks = make(map[uintptr]func(string))
+var wasmTokenCallbacks = make(map[uint64]func(string))
 
 // wasmTokenDone maps opaque IDs to a channel signalled when the DLL delivers the
 // final chunk of a stream. Completion is decided here in the guest (business
 // logic), never in the marshalling layer.
-var wasmTokenDone = make(map[uintptr]chan struct{})
-var wasmTokenNextID uintptr
+var wasmTokenDone = make(map[uint64]chan struct{})
+var wasmTokenNextID uint64
+
+var wasmErrorCount int32
+
+func reportFFIError(userData uint64, errMsg string) {
+	count := atomic.AddInt32(&wasmErrorCount, 1)
+	if count > 10 {
+		return
+	}
+	if fn, ok := wasmTokenCallbacks[userData]; ok {
+		if count == 10 {
+			fn(errMsg + " \x1b[31m[Too many FFI errors. Silencing further reports.]\x1b[0m ")
+		} else {
+			fn(errMsg)
+		}
+	} else {
+		println("FFI Error (no callback registered): " + errMsg)
+	}
+}
 
 // wasmCallbackScratchBuf is a guest-side buffer used by the host to copy
 // native C strings into guest linear memory before calling guest exports.
@@ -29,28 +47,37 @@ func wasmCallbackScratchAddr() uint32 {
 	return uint32(uintptr(unsafe.Pointer(&wasmCallbackScratchBuf[0])))
 }
 
+// wasmTokenCallback is invoked by the host for each streaming token.
+// The C signature is:
+//
+//	void callback(void* userData, const char* text, bool isDone, const char* statsJSON)
+//
+// CStr arguments are pre-marshalled into guest scratch memory by marshalCallbackArgs,
+// so `text` is a guest pointer to a NUL-terminated string — read it directly.
+//
 //go:wasmexport wasmTokenCallback
-func wasmTokenCallback(userData, chunkPtr uint64) uint64 {
-	if chunkPtr == 0 {
-		return 0
-	}
-	// Read the opaque chunk header from the DLL's address space via the generic
-	// ABI. Layout: { const char* text; bool is_final; ... }. The final chunk
-	// carries an empty text pointer and is_final set.
-	var hdr [16]byte
-	if syscall.DylibReadMem(chunkPtr, hdr[:]) < 9 {
-		return 0
-	}
-	textPtr := binary.LittleEndian.Uint64(hdr[0:8])
-	if textPtr != 0 {
-		var strBuf [8192]byte
-		n := syscall.DylibReadCstr(textPtr, strBuf[:])
-		if fn, ok := wasmTokenCallbacks[uintptr(userData)]; ok {
-			fn(string(strBuf[:n]))
+func wasmTokenCallback(userData, text, isDone, statsJSON uint64) uint64 {
+	if text != 0 {
+		// text is a guest pointer to a NUL-terminated string in scratch memory.
+		ptr := uintptr(text)
+		var buf [8192]byte
+		n := 0
+		for n < len(buf) {
+			b := *(*byte)(unsafe.Pointer(ptr + uintptr(n)))
+			if b == 0 {
+				break
+			}
+			buf[n] = b
+			n++
+		}
+		if n > 0 {
+			if fn, ok := wasmTokenCallbacks[userData]; ok {
+				fn(string(buf[:n]))
+			}
 		}
 	}
-	if hdr[8] != 0 { // is_final
-		if ch, ok := wasmTokenDone[uintptr(userData)]; ok {
+	if isDone != 0 {
+		if ch, ok := wasmTokenDone[userData]; ok {
 			select {
 			case ch <- struct{}{}:
 			default:
@@ -60,233 +87,242 @@ func wasmTokenCallback(userData, chunkPtr uint64) uint64 {
 	return 0
 }
 
-// pumpTokenCallbacks drains native token callbacks on the caller's own
-// (growable) goroutine stack until the DLL signals the final chunk (done) or
-// the host cancels the wait. Each callback is delivered by the host as an async
-// completion and dispatched by the Go scheduler, so it never runs on the g0
-// system stack (where allocation would trip "morestack on g0").
-func pumpTokenCallbacks(done chan struct{}) {
-	for {
-		select {
-		case <-done:
-			return
-		default:
-		}
-		cbHandle, invocID, args, ok := syscall.DylibCallbackWait()
-		if !ok {
-			return
-		}
-		var ret uint64
-		if len(args) >= 2 {
-			ret = wasmTokenCallback(args[0], args[1])
-		}
-		syscall.DylibCallbackRespond(cbHandle, invocID, int64(ret))
-	}
-}
-
 type callDescBuilder struct {
 	buf []byte
 }
 
 func newCallDesc(retType byte) *callDescBuilder {
-	// [cc=0, arg_count=0, ret_type, reserved=0]
-	return &callDescBuilder{buf: []byte{0, 0, retType, 0}}
+	return &callDescBuilder{
+		buf: []byte{0, 0, retType, 0},
+	}
 }
 
-func (d *callDescBuilder) pushPtr(v uint64) {
-	d.buf = append(d.buf, syscall.DylibTagPtr)
-	d.buf = appendLE64(d.buf, v)
-	d.buf[1]++
+func (c *callDescBuilder) pushPtr(val uint64) {
+	c.buf[1]++
+	c.buf = append(c.buf, syscall.DylibTagPtr)
+	var tmp [8]byte
+	binary.LittleEndian.PutUint64(tmp[:], val)
+	c.buf = append(c.buf, tmp[:]...)
 }
 
-func (d *callDescBuilder) pushCstr(guestPtr uint32, length uint32) {
-	d.buf = append(d.buf, syscall.DylibTagCstr)
-	d.buf = appendLE32(d.buf, guestPtr)
-	d.buf = appendLE32(d.buf, length)
-	d.buf[1]++
+func (c *callDescBuilder) pushCstr(ptr, len uint32) {
+	c.buf[1]++
+	c.buf = append(c.buf, syscall.DylibTagCstr)
+	var tmp [8]byte
+	binary.LittleEndian.PutUint64(tmp[:], (uint64(len)<<32)|uint64(ptr))
+	c.buf = append(c.buf, tmp[:]...)
 }
 
-func (d *callDescBuilder) pushCb(cbHandle uint64) {
-	d.buf = append(d.buf, syscall.DylibTagCb)
-	d.buf = appendLE64(d.buf, cbHandle)
-	d.buf[1]++
+func (c *callDescBuilder) pushCb(cbHandle uint64) {
+	c.buf[1]++
+	c.buf = append(c.buf, syscall.DylibTagCb)
+	var tmp [8]byte
+	binary.LittleEndian.PutUint64(tmp[:], cbHandle)
+	c.buf = append(c.buf, tmp[:]...)
 }
 
-func (d *callDescBuilder) bytes() []byte {
-	return d.buf
+func (c *callDescBuilder) bytes() []byte {
+	return c.buf
 }
 
-func appendLE32(buf []byte, v uint32) []byte {
-	return append(buf, byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
+func cstrArg(s string) (uint32, uint32) {
+	ptr := uintptr(unsafe.Pointer(unsafe.StringData(s)))
+	return uint32(ptr), uint32(len(s))
 }
 
-func appendLE64(buf []byte, v uint64) []byte {
-	return append(buf,
-		byte(v), byte(v>>8), byte(v>>16), byte(v>>24),
-		byte(v>>32), byte(v>>40), byte(v>>48), byte(v>>56),
-	)
+// Global FFI dynamic library state
+var (
+	libOnce sync.Once
+	libErr  error
+	lib     uint64
+
+	symSettingsCreate       uint64
+	symSettingsDelete       uint64
+	symEngineCreate         uint64
+	symCfgCreate            uint64
+	symCfgDelete            uint64
+	symConvCreate           uint64
+	symConvSend             uint64
+	symSetLogLevel          uint64
+	symGetDefaultLogger     uint64
+	symSetMinLoggerSeverity uint64
+	symUseSinkLogger        uint64
+	symClearSinkLogger      uint64
+)
+
+// ensureLibLoaded opens the dylib and resolves symbols once.
+func ensureLibLoaded(libPath string) error {
+	libOnce.Do(func() {
+		var err error
+		lib, err = syscall.DylibOpen(libPath, 0)
+		if err != nil {
+			libErr = fmt.Errorf("failed to open %s: %w", libPath, err)
+			return
+		}
+
+		resolve := func(name string) uint64 {
+			if libErr != nil {
+				return 0
+			}
+			sym, err := syscall.DylibSym(lib, name)
+			if err != nil {
+				libErr = fmt.Errorf("sym %s: %w", name, err)
+				return 0
+			}
+			return sym
+		}
+
+		symSettingsCreate = resolve("litert_lm_engine_settings_create")
+		symSettingsDelete = resolve("litert_lm_engine_settings_delete")
+		symEngineCreate = resolve("litert_lm_engine_create")
+		symCfgCreate = resolve("litert_lm_conversation_config_create")
+		symCfgDelete = resolve("litert_lm_conversation_config_delete")
+		symConvCreate = resolve("litert_lm_conversation_create")
+		symConvSend = resolve("litert_lm_conversation_send_message_stream")
+
+		// Optional logging symbols
+		if sym, err := syscall.DylibSym(lib, "litert_lm_set_min_log_level"); err == nil {
+			symSetLogLevel = sym
+		}
+		if sym, err := syscall.DylibSym(lib, "LiteRtGetDefaultLogger"); err == nil {
+			symGetDefaultLogger = sym
+		}
+		if sym, err := syscall.DylibSym(lib, "LiteRtSetMinLoggerSeverity"); err == nil {
+			symSetMinLoggerSeverity = sym
+		}
+		if sym, err := syscall.DylibSym(lib, "LiteRtUseSinkLogger"); err == nil {
+			symUseSinkLogger = sym
+		}
+		if sym, err := syscall.DylibSym(lib, "LiteRtClearSinkLogger"); err == nil {
+			symClearSinkLogger = sym
+		}
+	})
+	return libErr
 }
 
-func runAIPrompt(userInput string, onToken func(string)) error {
-	// Wrap the callback to parse LiterTLM JSON token chunks into plain text.
-	origOnToken := onToken
-	onToken = func(raw string) {
-		origOnToken(extractTokenText(raw))
-	}
-
-	cacheDir, err := cacheDirPath()
-	if err != nil {
-		return err
-	}
-
-	modelPath := filepath.Join(cacheDir, defaultModelName)
-	libDir := filepath.Join(cacheDir, "lib")
-
-	libExt := ".so"
-	switch HostOS() {
-	case "windows":
-		libExt = ".dll"
-	case "darwin":
-		libExt = ".dylib"
-	}
-
-	libPath := filepath.Join(libDir, "litert_lm_ext"+libExt)
-
-	// Open the native library via the host dylib ABI.
-	lib, err := syscall.DylibOpen(libPath, 0)
-	if err != nil {
-		return fmt.Errorf("failed to open %s: %w", libPath, err)
-	}
-	defer syscall.DylibClose(lib)
-
-	// Resolve all LiterTLM symbols.
-	symSettingsCreate, err := syscall.DylibSym(lib, "litert_lm_engine_settings_create")
-	if err != nil {
-		return fmt.Errorf("sym litert_lm_engine_settings_create: %w", err)
-	}
-	symSettingsDelete, err := syscall.DylibSym(lib, "litert_lm_engine_settings_delete")
-	if err != nil {
-		return fmt.Errorf("sym litert_lm_engine_settings_delete: %w", err)
-	}
-	symEngineCreate, err := syscall.DylibSym(lib, "litert_lm_engine_create")
-	if err != nil {
-		return fmt.Errorf("sym litert_lm_engine_create: %w", err)
-	}
-	symCfgCreate, err := syscall.DylibSym(lib, "litert_lm_conversation_config_create")
-	if err != nil {
-		return fmt.Errorf("sym litert_lm_conversation_config_create: %w", err)
-	}
-	symCfgDelete, err := syscall.DylibSym(lib, "litert_lm_conversation_config_delete")
-	if err != nil {
-		return fmt.Errorf("sym litert_lm_conversation_config_delete: %w", err)
-	}
-	symConvCreate, err := syscall.DylibSym(lib, "litert_lm_conversation_create")
-	if err != nil {
-		return fmt.Errorf("sym litert_lm_conversation_create: %w", err)
-	}
-	symConvSend, err := syscall.DylibSym(lib, "litert_lm_conversation_send_message_stream")
-	if err != nil {
-		return fmt.Errorf("sym litert_lm_conversation_send_message_stream: %w", err)
-	}
-
-	// Mute the library's internal glog and LiteRT logger outputs (warnings/errors/fatals only)
-	if symSetLogLevel, err := syscall.DylibSym(lib, "litert_lm_set_min_log_level"); err == nil && symSetLogLevel != 0 {
+func configureLogging() {
+	if symSetLogLevel != 0 {
 		d := newCallDesc(syscall.DylibTagVoid)
-		d.pushPtr(10) // Set to highest silent threshold
+		d.pushPtr(10) // Silent threshold
 		_, _ = syscall.DylibCall(symSetLogLevel, d.bytes())
 	}
-
-	// Configure the default LiteRT logger to only output FATAL level messages
-	symGetDefaultLogger, err1 := syscall.DylibSym(lib, "LiteRtGetDefaultLogger")
-	symSetMinLoggerSeverity, err2 := syscall.DylibSym(lib, "LiteRtSetMinLoggerSeverity")
-	if err1 == nil && err2 == nil && symGetDefaultLogger != 0 && symSetMinLoggerSeverity != 0 {
+	if symGetDefaultLogger != 0 && symSetMinLoggerSeverity != 0 {
 		d1 := newCallDesc(syscall.DylibTagPtr)
 		logger, err := syscall.DylibCall(symGetDefaultLogger, d1.bytes())
 		if err == nil && logger != 0 {
 			d2 := newCallDesc(syscall.DylibTagI32)
 			d2.pushPtr(logger)
-			d2.pushPtr(3) // 3 = FATAL severity
+			d2.pushPtr(3) // FATAL severity
 			_, _ = syscall.DylibCall(symSetMinLoggerSeverity, d2.bytes())
 		}
 	}
-
-	// Channel all LiteRT environment logs to the built-in, in-memory Sink Logger instead of stdout/stderr
-	if symUseSinkLogger, err := syscall.DylibSym(lib, "LiteRtUseSinkLogger"); err == nil && symUseSinkLogger != 0 {
+	if symUseSinkLogger != 0 {
 		d := newCallDesc(syscall.DylibTagVoid)
 		_, _ = syscall.DylibCall(symUseSinkLogger, d.bytes())
 	}
+}
 
-	cstrArg := func(s string) (uint32, uint32) {
-		ptr := uintptr(unsafe.Pointer(unsafe.StringData(s)))
-		return uint32(ptr), uint32(len(s))
+// LMEngine wraps the backend model engine
+type LMEngine struct {
+	ptr uint64
+}
+
+func (e *LMEngine) RawEngine() uint64 { return e.ptr }
+
+func NewLMEngine(libPath, modelPath, backend string) (*LMEngine, error) {
+	if err := ensureLibLoaded(libPath); err != nil {
+		return nil, err
 	}
 
+	configureLogging()
+
+	// Create settings
 	desc := newCallDesc(syscall.DylibTagPtr)
 	mPtr, mLen := cstrArg(modelPath)
 	desc.pushCstr(mPtr, mLen)
-	bPtr, bLen := cstrArg("cpu")
+	bPtr, bLen := cstrArg(backend)
 	desc.pushCstr(bPtr, bLen)
 	desc.pushPtr(0)
 	desc.pushPtr(0)
 	settings, err := syscall.DylibCall(symSettingsCreate, desc.bytes())
 	if err != nil {
-		return fmt.Errorf("settings_create: %w", err)
+		return nil, fmt.Errorf("settings_create: %w", err)
 	}
-
 	if settings == 0 {
-		return fmt.Errorf("litert_lm_engine_settings_create returned NULL")
+		return nil, fmt.Errorf("litert_lm_engine_settings_create returned NULL")
 	}
-
 	defer func() {
 		d := newCallDesc(syscall.DylibTagVoid)
 		d.pushPtr(settings)
-		syscall.DylibCall(symSettingsDelete, d.bytes())
+		_, _ = syscall.DylibCall(symSettingsDelete, d.bytes())
 	}()
 
+	// Create engine
 	desc = newCallDesc(syscall.DylibTagPtr)
 	desc.pushPtr(settings)
 	engine, err := syscall.DylibCall(symEngineCreate, desc.bytes())
 	if err != nil {
-		return fmt.Errorf("engine_create: %w", err)
+		return nil, fmt.Errorf("engine_create: %w", err)
 	}
-
 	if engine == 0 {
-		return fmt.Errorf("litert_lm_engine_create returned NULL")
+		return nil, fmt.Errorf("litert_lm_engine_create returned NULL")
 	}
 
-	desc = newCallDesc(syscall.DylibTagPtr)
-	desc.pushPtr(engine)
+	return &LMEngine{ptr: engine}, nil
+}
+
+func (e *LMEngine) Close() error {
+	return nil
+}
+
+// LMConversation wraps a session/conversation state
+type LMConversation struct {
+	ptr uint64
+}
+
+func (c *LMConversation) RawConv() uint64 { return c.ptr }
+
+func NewLMConversationFromHandles(engine, conv uint64) *LMConversation {
+	return &LMConversation{ptr: conv}
+}
+
+func (e *LMEngine) NewConversation() (*LMConversation, error) {
+	// Create conversation config
+	desc := newCallDesc(syscall.DylibTagPtr)
+	desc.pushPtr(e.ptr)
 	config, err := syscall.DylibCall(symCfgCreate, desc.bytes())
 	if err != nil {
-		return fmt.Errorf("conv_config_create: %w", err)
+		return nil, fmt.Errorf("conv_config_create: %w", err)
 	}
-
 	if config == 0 {
-		return fmt.Errorf("litert_lm_conversation_config_create returned NULL")
+		return nil, fmt.Errorf("litert_lm_conversation_config_create returned NULL")
 	}
-
 	defer func() {
 		d := newCallDesc(syscall.DylibTagVoid)
 		d.pushPtr(config)
-		syscall.DylibCall(symCfgDelete, d.bytes())
+		_, _ = syscall.DylibCall(symCfgDelete, d.bytes())
 	}()
 
+	// Create conversation
 	desc = newCallDesc(syscall.DylibTagPtr)
-	desc.pushPtr(engine)
+	desc.pushPtr(e.ptr)
 	desc.pushPtr(config)
 	conv, err := syscall.DylibCall(symConvCreate, desc.bytes())
 	if err != nil {
-		return fmt.Errorf("conv_create: %w", err)
+		return nil, fmt.Errorf("conv_create: %w", err)
 	}
-
 	if conv == 0 {
-		return fmt.Errorf("litert_lm_conversation_create returned NULL")
+		return nil, fmt.Errorf("litert_lm_conversation_create returned NULL")
 	}
 
-	// Register the streaming callback. The DLL drives generation by invoking it
-	// once per token; each invocation is a blocking round-trip back into the
-	// guest. send_message_stream returns immediately and tokens arrive
-	// afterwards, so the guest waits below until it observes the final chunk.
+	return &LMConversation{ptr: conv}, nil
+}
+
+func (c *LMConversation) Close() error {
+	return nil
+}
+
+func (c *LMConversation) SendMessageStream(payloadJSON string, onToken func(string)) error {
 	wasmTokenNextID++
 	cbID := wasmTokenNextID
 	wasmTokenCallbacks[cbID] = onToken
@@ -296,34 +332,23 @@ func runAIPrompt(userInput string, onToken func(string)) error {
 	wasmTokenDone[cbID] = done
 	defer delete(wasmTokenDone, cbID)
 
-	cbSig := []byte{2, syscall.DylibTagVoid, syscall.DylibTagPtr, syscall.DylibTagPtr}
+	// LiteRtLmStreamCallback: void(void* userData, const char* text, bool isDone, const char* statsJSON)
+	cbSig := []byte{4, syscall.DylibTagVoid,
+		syscall.DylibTagPtr, syscall.DylibTagCstr, syscall.DylibTagPtr, syscall.DylibTagCstr}
 	cbHandle, err := syscall.DylibCallbackCreate(lib, cbSig, "wasmTokenCallback")
 	if err != nil {
 		return fmt.Errorf("callback_create: %w", err)
 	}
 
-	// Securely serialize message structure to JSON to eliminate JSON injection risks.
-	type Message struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}
-
-	payloadBytes, err := json.Marshal(Message{Role: "user", Content: userInput})
-	if err != nil {
-		return fmt.Errorf("failed to serialize message: %w", err)
-	}
-
-	// send_message_stream(conv, msg_json, ctx_json, optional_args, callback, user_data).
-	// ctx_json is an empty JSON object (matching the reference binding); optional_args is NULL.
-	desc = newCallDesc(syscall.DylibTagI32)
-	desc.pushPtr(conv)
-	mjPtr, mjLen := cstrArg(string(payloadBytes))
+	desc := newCallDesc(syscall.DylibTagI32)
+	desc.pushPtr(c.ptr)
+	mjPtr, mjLen := cstrArg(payloadJSON)
 	desc.pushCstr(mjPtr, mjLen)
 	cjPtr, cjLen := cstrArg("{}")
 	desc.pushCstr(cjPtr, cjLen)
 	desc.pushPtr(0) // optional_args = NULL
 	desc.pushCb(cbHandle)
-	desc.pushPtr(uint64(cbID))
+	desc.pushPtr(cbID)
 
 	rc, err := syscall.DylibCall(symConvSend, desc.bytes())
 	if err != nil {
@@ -333,252 +358,15 @@ func runAIPrompt(userInput string, onToken func(string)) error {
 		return fmt.Errorf("litert_lm_conversation_send_message_stream failed: %d", int32(rc))
 	}
 
-	// Drain the token stream on this goroutine's own (growable) stack. The host
-	// delivers each callback as an async completion dispatched by the scheduler,
-	// so it never runs on the g0 stack. The loop ends at the final chunk.
-	pumpTokenCallbacks(done)
-	syscall.DylibCallbackStop()
+	// Wait for the native library to signal completion. The host delivers
+	// callbacks via Poll → drainCallbacks → fn.Call("wasmTokenCallback"),
+	// which runs on handleAsyncEvent's growable goroutine stack.
+	<-done
 
-	// Clean/clear the library's in-memory sink logger buffer to prevent RAM growth
-	if symClear, err := syscall.DylibSym(lib, "LiteRtClearSinkLogger"); err == nil && symClear != 0 {
+	// Clear sink logger
+	if symClearSinkLogger != 0 {
 		d := newCallDesc(syscall.DylibTagVoid)
-		_, _ = syscall.DylibCall(symClear, d.bytes())
-	}
-
-	return nil
-}
-
-// runAIPromptStateful sends a message to an existing conversation session, reusing engine/conv handles.
-// This enables multi-turn stateful chat where the LLM backend maintains context.
-// On first call with engine=0, it initializes engine and conv, storing them in conv struct.
-func runAIPromptStateful(userInput string, conv *Conversation, onToken func(string)) error {
-	if conv == nil {
-		return fmt.Errorf("conversation is nil")
-	}
-
-	// Wrap the callback to parse LiterTLM JSON token chunks into plain text.
-	origOnToken := onToken
-	onToken = func(raw string) {
-		origOnToken(extractTokenText(raw))
-	}
-
-	cacheDir, err := cacheDirPath()
-	if err != nil {
-		return err
-	}
-
-	modelPath := filepath.Join(cacheDir, defaultModelName)
-	libDir := filepath.Join(cacheDir, "lib")
-
-	libExt := ".so"
-	switch HostOS() {
-	case "windows":
-		libExt = ".dll"
-	case "darwin":
-		libExt = ".dylib"
-	}
-
-	libPath := filepath.Join(libDir, "litert_lm_ext"+libExt)
-
-	// Open the native library via the host dylib ABI.
-	lib, err := syscall.DylibOpen(libPath, 0)
-	if err != nil {
-		return fmt.Errorf("failed to open %s: %w", libPath, err)
-	}
-	defer syscall.DylibClose(lib)
-
-	// On first call, initialize the engine and conversation handles
-	if conv.engine == 0 || conv.conv == 0 {
-		// Resolve all LiterTLM symbols.
-		symSettingsCreate, err := syscall.DylibSym(lib, "litert_lm_engine_settings_create")
-		if err != nil {
-			return fmt.Errorf("sym litert_lm_engine_settings_create: %w", err)
-		}
-		symSettingsDelete, err := syscall.DylibSym(lib, "litert_lm_engine_settings_delete")
-		if err != nil {
-			return fmt.Errorf("sym litert_lm_engine_settings_delete: %w", err)
-		}
-		symEngineCreate, err := syscall.DylibSym(lib, "litert_lm_engine_create")
-		if err != nil {
-			return fmt.Errorf("sym litert_lm_engine_create: %w", err)
-		}
-		symCfgCreate, err := syscall.DylibSym(lib, "litert_lm_conversation_config_create")
-		if err != nil {
-			return fmt.Errorf("sym litert_lm_conversation_config_create: %w", err)
-		}
-		symCfgDelete, err := syscall.DylibSym(lib, "litert_lm_conversation_config_delete")
-		if err != nil {
-			return fmt.Errorf("sym litert_lm_conversation_config_delete: %w", err)
-		}
-		symConvCreate, err := syscall.DylibSym(lib, "litert_lm_conversation_create")
-		if err != nil {
-			return fmt.Errorf("sym litert_lm_conversation_create: %w", err)
-		}
-
-		// Mute the library's internal glog and LiteRT logger outputs (warnings/errors/fatals only)
-		if symSetLogLevel, err := syscall.DylibSym(lib, "litert_lm_set_min_log_level"); err == nil && symSetLogLevel != 0 {
-			d := newCallDesc(syscall.DylibTagVoid)
-			d.pushPtr(10) // Set to highest silent threshold
-			_, _ = syscall.DylibCall(symSetLogLevel, d.bytes())
-		}
-
-		// Configure the default LiteRT logger to only output FATAL level messages
-		symGetDefaultLogger, err1 := syscall.DylibSym(lib, "LiteRtGetDefaultLogger")
-		symSetMinLoggerSeverity, err2 := syscall.DylibSym(lib, "LiteRtSetMinLoggerSeverity")
-		if err1 == nil && err2 == nil && symGetDefaultLogger != 0 && symSetMinLoggerSeverity != 0 {
-			d1 := newCallDesc(syscall.DylibTagPtr)
-			logger, err := syscall.DylibCall(symGetDefaultLogger, d1.bytes())
-			if err == nil && logger != 0 {
-				d2 := newCallDesc(syscall.DylibTagI32)
-				d2.pushPtr(logger)
-				d2.pushPtr(3) // 3 = FATAL severity
-				_, _ = syscall.DylibCall(symSetMinLoggerSeverity, d2.bytes())
-			}
-		}
-
-		// Channel all LiteRT environment logs to the built-in, in-memory Sink Logger instead of stdout/stderr
-		if symUseSinkLogger, err := syscall.DylibSym(lib, "LiteRtUseSinkLogger"); err == nil && symUseSinkLogger != 0 {
-			d := newCallDesc(syscall.DylibTagVoid)
-			_, _ = syscall.DylibCall(symUseSinkLogger, d.bytes())
-		}
-
-		cstrArg := func(s string) (uint32, uint32) {
-			ptr := uintptr(unsafe.Pointer(unsafe.StringData(s)))
-			return uint32(ptr), uint32(len(s))
-		}
-
-		desc := newCallDesc(syscall.DylibTagPtr)
-		mPtr, mLen := cstrArg(modelPath)
-		desc.pushCstr(mPtr, mLen)
-		bPtr, bLen := cstrArg("cpu")
-		desc.pushCstr(bPtr, bLen)
-		desc.pushPtr(0)
-		desc.pushPtr(0)
-		settings, err := syscall.DylibCall(symSettingsCreate, desc.bytes())
-		if err != nil {
-			return fmt.Errorf("settings_create: %w", err)
-		}
-
-		if settings == 0 {
-			return fmt.Errorf("litert_lm_engine_settings_create returned NULL")
-		}
-
-		defer func() {
-			d := newCallDesc(syscall.DylibTagVoid)
-			d.pushPtr(settings)
-			syscall.DylibCall(symSettingsDelete, d.bytes())
-		}()
-
-		desc = newCallDesc(syscall.DylibTagPtr)
-		desc.pushPtr(settings)
-		engine, err := syscall.DylibCall(symEngineCreate, desc.bytes())
-		if err != nil {
-			return fmt.Errorf("engine_create: %w", err)
-		}
-
-		if engine == 0 {
-			return fmt.Errorf("litert_lm_engine_create returned NULL")
-		}
-		conv.engine = uintptr(engine)
-
-		desc = newCallDesc(syscall.DylibTagPtr)
-		desc.pushPtr(engine)
-		config, err := syscall.DylibCall(symCfgCreate, desc.bytes())
-		if err != nil {
-			return fmt.Errorf("conv_config_create: %w", err)
-		}
-
-		if config == 0 {
-			return fmt.Errorf("litert_lm_conversation_config_create returned NULL")
-		}
-
-		defer func() {
-			d := newCallDesc(syscall.DylibTagVoid)
-			d.pushPtr(config)
-			syscall.DylibCall(symCfgDelete, d.bytes())
-		}()
-
-		desc = newCallDesc(syscall.DylibTagPtr)
-		desc.pushPtr(engine)
-		desc.pushPtr(config)
-		convHandle, err := syscall.DylibCall(symConvCreate, desc.bytes())
-		if err != nil {
-			return fmt.Errorf("conv_create: %w", err)
-		}
-
-		if convHandle == 0 {
-			return fmt.Errorf("litert_lm_conversation_create returned NULL")
-		}
-		conv.conv = uintptr(convHandle)
-	}
-
-	// Resolve the message sending symbol
-	symConvSend, err := syscall.DylibSym(lib, "litert_lm_conversation_send_message_stream")
-	if err != nil {
-		return fmt.Errorf("sym litert_lm_conversation_send_message_stream: %w", err)
-	}
-
-	// Register the streaming callback and its completion channel (see runAIPrompt
-	// for the streaming model: async send, nested pump delivery, guest-decided end).
-	wasmTokenNextID++
-	cbID := wasmTokenNextID
-	wasmTokenCallbacks[cbID] = onToken
-	defer delete(wasmTokenCallbacks, cbID)
-
-	done := make(chan struct{}, 1)
-	wasmTokenDone[cbID] = done
-	defer delete(wasmTokenDone, cbID)
-
-	cbSig := []byte{2, syscall.DylibTagVoid, syscall.DylibTagPtr, syscall.DylibTagPtr}
-	cbHandle, err := syscall.DylibCallbackCreate(lib, cbSig, "wasmTokenCallback")
-	if err != nil {
-		return fmt.Errorf("callback_create: %w", err)
-	}
-
-	// Securely serialize message structure to JSON to eliminate JSON injection risks.
-	type Message struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}
-
-	payloadBytes, err := json.Marshal(Message{Role: "user", Content: userInput})
-	if err != nil {
-		return fmt.Errorf("failed to serialize message: %w", err)
-	}
-
-	cstrArg := func(s string) (uint32, uint32) {
-		ptr := uintptr(unsafe.Pointer(unsafe.StringData(s)))
-		return uint32(ptr), uint32(len(s))
-	}
-
-	desc := newCallDesc(syscall.DylibTagI32)
-	desc.pushPtr(uint64(conv.conv))
-	iPtr, iLen := cstrArg(string(payloadBytes))
-	desc.pushCstr(iPtr, iLen)
-	cjPtr, cjLen := cstrArg("{}")
-	desc.pushCstr(cjPtr, cjLen)
-	desc.pushPtr(0) // optional_args = NULL
-	desc.pushCb(cbHandle)
-	desc.pushPtr(uint64(cbID))
-
-	rc, err := syscall.DylibCall(symConvSend, desc.bytes())
-	if err != nil {
-		return fmt.Errorf("conv_send_message_stream: %w", err)
-	}
-
-	if int32(rc) != 0 {
-		return fmt.Errorf("litert_lm_conversation_send_message_stream failed: %d", int32(rc))
-	}
-
-	// Drain the token stream on this goroutine's own (growable) stack; the final
-	// chunk sets done. Delivery is dispatched by the scheduler, never on g0.
-	pumpTokenCallbacks(done)
-	syscall.DylibCallbackStop()
-
-	// Clean/clear the library's in-memory sink logger buffer to prevent RAM growth
-	if symClear, err := syscall.DylibSym(lib, "LiteRtClearSinkLogger"); err == nil && symClear != 0 {
-		d := newCallDesc(syscall.DylibTagVoid)
-		_, _ = syscall.DylibCall(symClear, d.bytes())
+		_, _ = syscall.DylibCall(symClearSinkLogger, d.bytes())
 	}
 
 	return nil

@@ -20,32 +20,27 @@ import (
 const sigwinch = syscall.Signal(0x1c) // SIGWINCH (28)
 
 type HostEnv struct {
-	mu                sync.Mutex
-	activeOps         map[uint32]*OpState
-	nextOpID          uint64
-	handles           map[uint64]interface{}
-	nextHandle        uint64
-	outstandingOps    int32
-	fileOpsQueue      chan func()
-	ttyRawState       *term.State
-	ttyRawFd          int
-	signals           chan os.Signal
-	signalWaiters     map[uint32]*OpState // signum -> state
-	pendingSignals    chan *OpState       // state to complete
-	timers            map[uint32]*time.Timer
-	lastLog           time.Time
-	forcedExitCode    int32
-	args              []string
-	callbackQueue     chan *CallbackEvent
-	owningGID         uint64
-	callbackDepth     int // >0 while the owning goroutine is nested in a native callback
-	activeInvocations map[uint32]chan uintptr
-	nextInvocationID  uint32
-	cbMu              sync.Mutex // guards cbPending/cbWaiter
-	cbPending         *pendingCallback
-	cbWaiter          *callbackWaiter
-	satTargetGOOS     string
-	satTargetGOARCH   string
+	mu              sync.Mutex
+	activeOps       map[uint32]*OpState
+	nextOpID        uint64
+	handles         map[uint64]interface{}
+	nextHandle      uint64
+	outstandingOps  int32
+	fileOpsQueue    chan func()
+	ttyRawState     *term.State
+	ttyRawFd        int
+	signals         chan os.Signal
+	signalWaiters   map[uint32]*OpState // signum -> state
+	pendingSignals  chan *OpState       // state to complete
+	timers          map[uint32]*time.Timer
+	lastLog         time.Time
+	forcedExitCode  int32
+	args            []string
+	callbackQueue   chan *CallbackEvent
+	owningGID       uint64
+	callbackDepth   int // >0 while the owning goroutine is nested in a native callback
+	satTargetGOOS   string
+	satTargetGOARCH string
 }
 
 type OpState struct {
@@ -66,37 +61,20 @@ type CallbackEvent struct {
 	RespChan       chan uintptr
 }
 
-// pendingCallback is a native callback awaiting delivery to the guest pump.
-type pendingCallback struct {
-	invocID  uint32
-	cbHandle uint64
-	args     []uint64
-}
-
-// callbackWaiter is a guest pump goroutine parked in dylib_callback_wait.
-type callbackWaiter struct {
-	ovPtr  uint32
-	outPtr uint32
-	outLen uint32
-	mod    api.Module
-	state  *OpState
-}
-
 func NewHostEnv() *HostEnv {
 	env := &HostEnv{
 
-		activeOps:         make(map[uint32]*OpState),
-		handles:           make(map[uint64]interface{}),
-		nextHandle:        3, // 0,1,2 reserved
-		outstandingOps:    0,
-		fileOpsQueue:      make(chan func(), 1000),
-		signals:           make(chan os.Signal, 10),
-		signalWaiters:     make(map[uint32]*OpState),
-		pendingSignals:    make(chan *OpState, 100),
-		timers:            make(map[uint32]*time.Timer),
-		forcedExitCode:    -1,
-		callbackQueue:     make(chan *CallbackEvent, 100),
-		activeInvocations: make(map[uint32]chan uintptr),
+		activeOps:      make(map[uint32]*OpState),
+		handles:        make(map[uint64]interface{}),
+		nextHandle:     3, // 0,1,2 reserved
+		outstandingOps: 0,
+		fileOpsQueue:   make(chan func(), 1000),
+		signals:        make(chan os.Signal, 10),
+		signalWaiters:  make(map[uint32]*OpState),
+		pendingSignals: make(chan *OpState, 100),
+		timers:         make(map[uint32]*time.Timer),
+		forcedExitCode: -1,
+		callbackQueue:  make(chan *CallbackEvent, 100),
 	}
 	env.handles[0] = os.Stdin
 	env.handles[1] = os.Stdout
@@ -351,13 +329,9 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_sym), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("dylib_sym")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_call), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("dylib_call")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_callback_create), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("dylib_callback_create")
-	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_callback_respond), []api.ValueType{api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI64}, []api.ValueType{}).Export("dylib_callback_respond")
-	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_callback_wait), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("dylib_callback_wait")
-	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_callback_stop), []api.ValueType{}, []api.ValueType{}).Export("dylib_callback_stop")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_close), []api.ValueType{api.ValueTypeI64}, []api.ValueType{}).Export("dylib_close")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_read_cstr), []api.ValueType{api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("dylib_read_cstr")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_read_mem), []api.ValueType{api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("dylib_read_mem")
-
 
 	builder.NewFunctionBuilder().
 		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
@@ -440,12 +414,18 @@ func (h *HostEnv) log(format string, a ...interface{}) {
 	debugLog(format+"\n", a...)
 }
 
+// wrapFunc wraps a host import handler. It must NOT call drainCallbacks here:
+// host imports may be invoked by the Go scheduler on g0 (e.g. nanotime1 from
+// findRunnable). Calling fn.Call() to deliver a callback would re-enter the
+// module on g0's fixed-size stack, crashing with "morestack on g0".
+//
+// Callbacks are instead drained in Poll, which runs between module executions
+// when the guest is paused on handleAsyncEvent — a user goroutine with a
+// growable stack — so fn.Call() re-enters the module safely.
 func (h *HostEnv) wrapFunc(f func(context.Context, api.Module, []uint64)) api.GoModuleFunction {
 	return api.GoModuleFunc(func(ctx context.Context, m api.Module, stack []uint64) {
 		h.setOwningGID()
-		h.drainCallbacks(m)
 		f(ctx, m, stack)
-		h.drainCallbacks(m)
 	})
 }
 

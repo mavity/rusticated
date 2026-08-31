@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -30,8 +31,8 @@ type Message struct {
 // Conversation holds the state of an AI conversation session.
 // Engine and conv are opaque handles to the LiteRT backend.
 type Conversation struct {
-	engine   uintptr
-	conv     uintptr
+	engine   uint64
+	conv     uint64
 	Messages []Message
 }
 
@@ -107,6 +108,9 @@ type model struct {
 	flashActive       bool      // completion flash in progress
 	flashStart        time.Time // when flash began
 
+	streamMu  sync.Mutex // protects conversation message writes from callback goroutine
+	streamGen uint64     // incremented on each new stream; stale callbacks compare and drop
+
 	litertReady           bool
 	gemmaReady            bool
 	assetsReady           bool
@@ -118,7 +122,6 @@ type model struct {
 	assetError            string
 	assetProgress         <-chan assetProgressMsg
 	assetDone             <-chan tea.Msg
-	aiMsgChan             <-chan tea.Msg
 
 	// File-manager extensions
 	mode      uiMode

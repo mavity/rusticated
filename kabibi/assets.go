@@ -23,8 +23,33 @@ const (
 	defaultModelName = "gemma-4-E2B-it.litertlm"
 	defaultWheelName = "litert_lm_api.whl"
 	defaultPyPIURL   = "https://pypi.org/pypi/litert-lm-api/json"
-	defaultModelURL  = "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm"
 )
+
+// activeModelName overrides defaultModelName when set via --ai-model.
+var activeModelName string
+
+// SetActiveModel sets the model name override (without .litertlm extension).
+func SetActiveModel(name string) {
+	name = strings.TrimSuffix(name, ".litertlm")
+	activeModelName = name + ".litertlm"
+}
+
+// ActiveModelName returns the model filename in use (with .litertlm extension).
+func ActiveModelName() string {
+	if activeModelName != "" {
+		return activeModelName
+	}
+	return defaultModelName
+}
+
+// activeModelURL returns the HuggingFace download URL for the active model.
+func activeModelURL() string {
+	if v := os.Getenv("LITERTLM_MODEL_URL"); v != "" {
+		return v
+	}
+	name := strings.TrimSuffix(ActiveModelName(), ".litertlm")
+	return "https://huggingface.co/litert-community/" + name + "-litert-lm/resolve/main/" + name + ".litertlm"
+}
 
 type pypiResponse struct {
 	Info struct {
@@ -242,13 +267,13 @@ func ensureGemma(ctx context.Context, progress chan<- assetProgressMsg) error {
 		return err
 	}
 
-	modelPath := filepath.Join(cacheDir, defaultModelName)
+	modelPath := resolveModelFile(cacheDir, ActiveModelName())
 	if hasValidGemmaCache(modelPath) {
 		sendProgress(progress, "gemma", 100, "using cached weights")
 		return nil
 	}
 
-	weightURL := modelURLFromEnv()
+	weightURL := activeModelURL()
 	if err := downloadFile(ctx, weightURL, modelPath, "gemma", progress); err != nil {
 		return err
 	}
@@ -277,6 +302,22 @@ func hasValidGemmaCache(modelPath string) bool {
 	return fileInfo(modelPath) != nil
 }
 
+// resolveModelFile looks for a file matching name (case-insensitive) inside dir.
+// If found, it returns the path using the on-disk casing. Otherwise it returns
+// filepath.Join(dir, name) unchanged so the caller can proceed to download.
+func resolveModelFile(dir, name string) string {
+	target := strings.ToLower(name)
+	entries, err := os.ReadDir(dir)
+	if err == nil {
+		for _, e := range entries {
+			if !e.IsDir() && strings.ToLower(e.Name()) == target {
+				return filepath.Join(dir, e.Name())
+			}
+		}
+	}
+	return filepath.Join(dir, name)
+}
+
 func fileExistsAny(dir, base string, exts ...string) bool {
 	for _, ext := range exts {
 		if fi := fileInfo(filepath.Join(dir, base+ext)); fi != nil {
@@ -292,13 +333,6 @@ func fileInfo(path string) os.FileInfo {
 		return nil
 	}
 	return fi
-}
-
-func modelURLFromEnv() string {
-	if v := os.Getenv("LITERTLM_MODEL_URL"); v != "" {
-		return v
-	}
-	return defaultModelURL
 }
 
 func selectWheelURL(ctx context.Context) (string, string, error) {
