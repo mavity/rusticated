@@ -483,16 +483,15 @@ func (m model) viewFrame() string {
 			Render(chatContent)
 	}
 
-	// Row of panels
+	// Row of panels. Geometry stays fixed regardless of visibility.
 	middleRow := lipgloss.JoinHorizontal(lipgloss.Top, left, right, chat)
 
-	// Plume Partitioning
-	// Available height below panels:
+	// We still compute the same plume slices so the middle slot has fixed height.
 	totalPlumeCount := len(cleanPlumeLines)
 	var exhaustLines []string
 	var footerLines []string
+	var middleLines []string
 
-	// Calculate indices to fit screen exactly
 	footerStart := totalPlumeCount - footerHeight
 	if footerStart < 0 {
 		footerStart = 0
@@ -503,14 +502,14 @@ func (m model) viewFrame() string {
 		occludedStart = 0
 	}
 
-	// We only want to show exhaust lines that fit in the topReserved space
 	exhaustStart := occludedStart - topReserved
 	if exhaustStart < 0 {
 		exhaustStart = 0
 	}
 
-	footerLines = cleanPlumeLines[footerStart:]
 	exhaustLines = cleanPlumeLines[exhaustStart:occludedStart]
+	middleLines = cleanPlumeLines[occludedStart:footerStart]
+	footerLines = cleanPlumeLines[footerStart:]
 
 	pStyle := plumeStyle.Copy().Width(m.width)
 
@@ -521,13 +520,35 @@ func (m model) viewFrame() string {
 	}
 	exhaustView := strings.Join(paddedExhaust, "\n")
 
+	// The middle area is fixed-height. Visibility only masks the panel content.
+	middleView := middleRow
+	if !m.panelsVisible {
+		// Blank the panel slot without changing geometry.
+		blankLines := strings.Split(middleRow, "\n")
+		for i := range blankLines {
+			blankLines[i] = pStyle.Render("")
+		}
+		for len(blankLines) < panelHeight {
+			blankLines = append(blankLines, pStyle.Render(""))
+		}
+		middleView = strings.Join(blankLines, "\n")
+		if len(middleLines) > 0 {
+			var plumeMiddle []string
+			for _, l := range middleLines {
+				plumeMiddle = append(plumeMiddle, pStyle.Render(l))
+			}
+			for len(plumeMiddle) < panelHeight {
+				plumeMiddle = append(plumeMiddle, pStyle.Render(""))
+			}
+			middleView = strings.Join(plumeMiddle, "\n")
+		}
+	}
+
 	// Render Footer (below panels)
 	var paddedFooter []string
 	for _, l := range footerLines {
 		paddedFooter = append(paddedFooter, pStyle.Render(l))
 	}
-	// Pad footer to maintain fixed height below panels so panels stay in
-	// a consistent vertical relationship with the prompt.
 	if len(paddedFooter) < footerHeight {
 		padding := footerHeight - len(paddedFooter)
 		for i := 0; i < padding; i++ {
@@ -541,7 +562,7 @@ func (m model) viewFrame() string {
 
 	var components []string
 	components = append(components, exhaustView)
-	components = append(components, middleRow, footerView, prompt)
+	components = append(components, middleView, footerView, prompt)
 
 	base := lipgloss.JoinVertical(lipgloss.Left, components...)
 

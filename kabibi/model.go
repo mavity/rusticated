@@ -50,15 +50,16 @@ func initialModel() model {
 	r, _ := createRunner(context.Background(), nil, sw, sw, cwd, nil)
 
 	m := model{
-		leftList:   li,
-		rightList:  ri,
-		chatInput:  ti,
-		shellInput: si,
-		chatView:   vp,
-		activePane: leftPane,
-		chatOpen:   false,
-		leftDir:    cwd,
-		rightDir:   cwd,
+		leftList:      li,
+		rightList:     ri,
+		chatInput:     ti,
+		shellInput:    si,
+		chatView:      vp,
+		activePane:    leftPane,
+		chatOpen:      false,
+		panelsVisible: true,
+		leftDir:       cwd,
+		rightDir:      cwd,
 		plume: []string{
 			"Kabibi shell:  'help' for available commands.",
 		},
