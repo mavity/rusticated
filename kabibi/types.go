@@ -81,15 +81,16 @@ func (d customDelegate) Render(w io.Writer, m list.Model, index int, listItem li
 }
 
 type model struct {
-	leftList   list.Model
-	rightList  list.Model
-	chatInput  textinput.Model
-	shellInput textinput.Model
-	chatView   viewport.Model
-	activePane pane
-	chatOpen   bool
-	width      int
-	height     int
+	leftList      list.Model
+	rightList     list.Model
+	chatInput     textinput.Model
+	shellInput    textinput.Model
+	chatView      viewport.Model
+	activePane    pane
+	chatOpen      bool
+	panelsVisible bool
+	width         int
+	height        int
 
 	leftDir  string
 	rightDir string
