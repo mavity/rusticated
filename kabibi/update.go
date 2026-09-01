@@ -253,20 +253,21 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c":
 			return m, tea.Quit
 		case "esc":
-			if !m.chatOpen {
-				m.quitting = true
-				return m, tea.Quit
+			if m.chatOpen {
+				m.chatOpen = false
+				m.activePane = leftPane
+				if m.runner != nil {
+					m.runner.Dir = m.leftDir
+				}
+				m.refreshPrompt()
+				m.chatInput.Blur()
+				m.shellInput.Focus()
+				m.recalculateLayout()
+				m.updateDelegates()
+				return m, nil
 			}
-			m.chatOpen = false
-			m.activePane = leftPane
-			if m.runner != nil {
-				m.runner.Dir = m.leftDir
-			}
-			m.refreshPrompt()
-			m.chatInput.Blur()
-			m.shellInput.Focus()
+			m.panelsVisible = !m.panelsVisible
 			m.recalculateLayout()
-			m.updateDelegates()
 			return m, nil
 		case "tab":
 			if m.chatOpen {
@@ -335,6 +336,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				input := m.shellInput.Value()
 				if input != "" {
+					trimmedInput := strings.TrimSpace(input)
+					if trimmedInput == "exit" || strings.HasPrefix(trimmedInput, "exit ") {
+						m.quitting = true
+						return m, tea.Quit
+					}
 					m.shellInput.Reset()
 					return m, m.runShellCommand(input)
 				}
