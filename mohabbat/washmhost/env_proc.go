@@ -356,7 +356,7 @@ func (h *HostEnv) sys_get_env(ctx context.Context, m api.Module, stack []uint64)
 	ptr := uint32(stack[0])
 	lenBytes := uint32(stack[1])
 
-	vars := os.Environ()
+	vars := guestEnvForWasm(os.Environ())
 	hasPWD := false
 	for _, envVar := range vars {
 		if strings.HasPrefix(envVar, "PWD=") {
