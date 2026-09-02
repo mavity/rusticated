@@ -4,10 +4,62 @@ import (
 	"context"
 	"encoding/binary"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestGuestEnvCanonicalizesWindowsPathAliases(t *testing.T) {
+	pairs := guestEnvForWasm([]string{
+		"Path=C:\\Windows;C:\\Tools",
+		"Pathext=.COM;.EXE;.BAT;.CMD",
+		"HOME=C:\\Users\\test",
+	})
+	got := map[string]string{}
+	for _, kv := range pairs {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			got[k] = v
+		}
+	}
+	if got["PATH"] != `C:\Windows;C:\Tools` {
+		t.Fatalf("PATH should be canonicalized to uppercase; got %q", got["PATH"])
+	}
+	if got["PATHEXT"] != ".COM;.EXE;.BAT;.CMD" {
+		t.Fatalf("PATHEXT should be canonicalized to uppercase; got %q", got["PATHEXT"])
+	}
+	if got["HOME"] != `C:\Users\test` {
+		t.Fatalf("non-Windows env keys should stay unchanged; got %q", got["HOME"])
+	}
+}
+
+func TestGuestEnvExpandsPercentVarInPath(t *testing.T) {
+	dir := t.TempDir()
+	toolDir := filepath.Join(dir, "tools")
+	if err := os.MkdirAll(toolDir, 0o755); err != nil {
+		t.Fatalf("mkdir tools: %v", err)
+	}
+	key := "TOOLS_DIR"
+	if err := os.Setenv(key, toolDir); err != nil {
+		t.Fatalf("set env: %v", err)
+	}
+	defer os.Unsetenv(key)
+
+	pairs := guestEnvForWasm([]string{
+		"PATH=%TOOLS_DIR%;C:\\Windows\\System32",
+		"TOOLS_DIR=" + toolDir,
+		"PATHEXT=.COM;.EXE;.BAT;.CMD",
+	})
+	got := map[string]string{}
+	for _, kv := range pairs {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			got[k] = v
+		}
+	}
+	if want := toolDir + ";C:\\Windows\\System32"; got["PATH"] != want {
+		t.Fatalf("PATH should expand %TOOLS_DIR% before lookup; got %q, want %q", got["PATH"], want)
+	}
+}
 
 func TestSysProcEnv(t *testing.T) {
 	env := NewHostEnv()
