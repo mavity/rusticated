@@ -1,8 +1,8 @@
-# kabibi-go: Dual-Pane File Manager & AI Chat
+# kabibi: Dual-Pane File Manager & AI Chat
 
 ## Current Architecture & Implementation
 
-kabibi-go is a terminal-based dual-pane file manager and AI chat application written in Go, powered by the ubbletea framework. 
+kabibi is a terminal-based dual-pane file manager and AI chat application written in Go, powered by the ubbletea framework. 
 
 ### 1. Dual-Pane File Manager
 *   **Panels**: Implements classic Left/Right directory viewing panels. 

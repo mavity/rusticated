@@ -9,7 +9,7 @@ import (
 )
 
 // LiteRtLogs buffers the latest in-memory logs captured from the dynamic FFI sink logger.
-// The kabibi-go application can inspect this slice at any time to display logs on-demand in the UI.
+// The kabibi application can inspect this slice at any time to display logs on-demand in the UI.
 var LiteRtLogs []string
 
 func IsAISupported() bool {

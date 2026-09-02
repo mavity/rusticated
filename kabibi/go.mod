@@ -1,4 +1,4 @@
-module github.com/oyin-bo/kabibi-go
+module github.com/oyin-bo/kabibi
 
 go 1.26.4
 
