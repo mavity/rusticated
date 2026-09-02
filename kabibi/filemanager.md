@@ -1,6 +1,6 @@
-# kabibi-go File Manager Plan
+# kabibi File Manager Plan
 
-Full-featured file manager for the kabibi-go dual-pane TUI (Bubble Tea).
+Full-featured file manager for the kabibi dual-pane TUI (Bubble Tea).
 
 ## Goals
 - File/directory operations: create, delete, copy, rename, move.

@@ -31,7 +31,7 @@ func main() {
 		}
 		if !foundSeparator {
 			// Skip metadata if we haven't found the separator yet
-			if arg == "kabibi-go" || arg == "-r" {
+			if arg == "kabibi" || arg == "-r" {
 				continue
 			}
 		}
@@ -46,11 +46,11 @@ func main() {
 	}
 
 	if *helpPtr {
-		fmt.Printf("Usage: kabibi-go [options] [script_file [args...]]\n\n")
+		fmt.Printf("Usage: kabibi [options] [script_file [args...]]\n\n")
 		fmt.Printf("Options:\n")
 		flag.PrintDefaults()
 		fmt.Printf("\nDescription:\n")
-		fmt.Printf("  kabibi-go is an AI-enhanced file manager and shell.\n")
+		fmt.Printf("  kabibi is an AI-enhanced file manager and shell.\n")
 		fmt.Printf("  If a command string (-c) or script file is provided, it runs in batch mode.\n")
 		fmt.Printf("  If a prompt (-p) is provided, it directly streams AI inference to standard output.\n")
 		fmt.Printf("  Otherwise, it starts in interactive TUI mode.\n")
