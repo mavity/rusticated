@@ -90,7 +90,10 @@ func runBatchCommand(cmdStr string, args []string) {
 		fmt.Fprintf(os.Stderr, "Error creating runner: %v\n", err)
 		os.Exit(1)
 	}
-	r.Run(ctx, parseCommand(cmdStr))
+	if err := r.Run(ctx, parseCommand(cmdStr)); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 func runBatchFile(filePath string, args []string) {
@@ -108,7 +111,18 @@ func runBatchFile(filePath string, args []string) {
 	}
 	defer f.Close()
 
-	r.Run(ctx, parseCommandReader(f, filePath))
+	if err := r.Run(ctx, parseCommandReader(f, filePath)); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runPromptWithSession executes an AI prompt using the provided session.
+// This is extracted for testing purposes - it accepts a mockable AISession interface.
+func runPromptWithSession(ctx context.Context, session AISession, prompt string) error {
+	return session.SendMessage(ctx, prompt, func(token string) {
+		fmt.Print(token)
+	})
 }
 
 func runPrompt(prompt string) {
@@ -124,9 +138,10 @@ func runPrompt(prompt string) {
 		os.Exit(1)
 	}
 
-	err := runAIPrompt(prompt, func(token string) {
-		fmt.Print(token)
-	})
+	// Create a session and run the prompt
+	session := NewLMSession(&Conversation{})
+	err := runPromptWithSession(ctx, session, prompt)
+	defer session.Close()
 	fmt.Println()
 
 	if err != nil {
