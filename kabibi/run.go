@@ -34,12 +34,12 @@ func main() {
 		log.Fatalf("Required C++ compiler (%s) not found in system PATH!", gxxName)
 	}
 
-	// 2. Establish persistent dependency directory strictly inside kabibi-go
+	// 2. Establish persistent dependency directory strictly inside kabibi
 	currentDir, _ := os.Getwd()
 	baseDir := currentDir
-	// Walk up to find the true workspace root (has Cargo.toml or kabibi-go)
+	// Walk up to find the true workspace root (has Cargo.toml or kabibi)
 	for {
-		if _, err := os.Stat(filepath.Join(baseDir, "kabibi-go")); err == nil {
+		if _, err := os.Stat(filepath.Join(baseDir, "kabibi")); err == nil {
 			break
 		}
 		parent := filepath.Dir(baseDir)
@@ -50,7 +50,7 @@ func main() {
 		baseDir = parent
 	}
 
-	kabibiDir := filepath.Join(baseDir, "kabibi-go")
+	kabibiDir := filepath.Join(baseDir, "kabibi")
 	depsDir := filepath.Join(kabibiDir, ".deps")
 	repoDir := filepath.Join(depsDir, "LiteRT-LM")
 
@@ -153,7 +153,7 @@ func main() {
 	// 4. STOP-GAP CARGO CEILING IN .DEPS (Only create if missing)
 	stopGapCargo := filepath.Join(depsDir, "Cargo.toml")
 	if _, err := os.Stat(stopGapCargo); os.IsNotExist(err) {
-		fmt.Println("Deploying workspace ceiling stop-gap to kabibi-go/.deps/Cargo.toml...")
+		fmt.Println("Deploying workspace ceiling stop-gap to kabibi/.deps/Cargo.toml...")
 		boundaryConfig := "[workspace]\nmembers = []\n"
 		if err := os.WriteFile(stopGapCargo, []byte(boundaryConfig), 0644); err != nil {
 			log.Fatalf("Failed to write isolation workspace stop-gap file: %v", err)
@@ -276,11 +276,11 @@ func main() {
 
 	// 11. Execute package binary wrapper context
 	cmd := exec.Command("go", "run", ".")
-	// If we're already in kabibi-go, don't try to chdir into it
+	// If we're already in kabibi, don't try to chdir into it
 	if _, err := os.Stat("main.go"); err == nil {
 		cmd.Dir = "."
 	} else {
-		cmd.Dir = "kabibi-go"
+		cmd.Dir = "kabibi"
 	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

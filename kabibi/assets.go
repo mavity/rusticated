@@ -82,17 +82,17 @@ func cacheDirPath() (string, error) {
 	switch HostOS() {
 	case "windows":
 		if v := os.Getenv("LocalAppData"); v != "" {
-			return filepath.Join(v, "kabibi-go", "litert_cache"), nil
+			return filepath.Join(v, "kabibi", "litert_cache"), nil
 		}
 		if home, err := os.UserHomeDir(); err == nil && home != "" {
-			return filepath.Join(home, "AppData", "Local", "kabibi-go", "litert_cache"), nil
+			return filepath.Join(home, "AppData", "Local", "kabibi", "litert_cache"), nil
 		}
 	default:
 		if v := os.Getenv("XDG_CACHE_HOME"); v != "" {
-			return filepath.Join(v, "kabibi-go", "litert_cache"), nil
+			return filepath.Join(v, "kabibi", "litert_cache"), nil
 		}
 		if home, err := os.UserHomeDir(); err == nil && home != "" {
-			return filepath.Join(home, ".cache", "kabibi-go", "litert_cache"), nil
+			return filepath.Join(home, ".cache", "kabibi", "litert_cache"), nil
 		}
 	}
 
