@@ -8,12 +8,115 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/sys"
 )
+
+func canonicalGuestEnvKey(key string) string {
+	if runtime.GOOS == "windows" {
+		switch strings.ToUpper(key) {
+		case "PATH":
+			return "PATH"
+		case "PATHEXT":
+			return "PATHEXT"
+		}
+	}
+	return key
+}
+
+func lookupGuestEnvValue(env map[string]string, key string) (string, bool) {
+	if env != nil {
+		if v, ok := env[key]; ok {
+			return v, true
+		}
+		for k, v := range env {
+			if strings.EqualFold(k, key) {
+				return v, true
+			}
+		}
+	}
+	return "", false
+}
+
+func expandWindowsGuestEnv(value string, env map[string]string) string {
+	if value == "" {
+		return value
+	}
+	for i := 0; i < 8; i++ {
+		changed := false
+		for start := 0; start < len(value); {
+			begin := strings.Index(value[start:], "%")
+			if begin < 0 {
+				break
+			}
+			begin += start
+			end := strings.Index(value[begin+1:], "%")
+			if end < 0 {
+				break
+			}
+			end += begin + 1
+			name := value[begin+1 : end]
+			if name == "" {
+				start = end + 1
+				continue
+			}
+			if replacement, ok := lookupGuestEnvValue(env, name); ok {
+				value = value[:begin] + replacement + value[end+1:]
+				changed = true
+				start = begin + len(replacement)
+				continue
+			}
+			start = end + 1
+		}
+		if !changed {
+			break
+		}
+	}
+	return value
+}
+
+func guestEnvForWasm(env []string) []string {
+	if env == nil {
+		env = os.Environ()
+	}
+	ordered := make([]string, 0, len(env))
+	values := map[string]string{}
+	seen := map[string]bool{}
+	for _, kv := range env {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		key := canonicalGuestEnvKey(k)
+		if !seen[key] {
+			seen[key] = true
+			ordered = append(ordered, key)
+		}
+		values[key] = v
+	}
+	for i := 0; i < 8; i++ {
+		changed := false
+		for _, key := range ordered {
+			expanded := expandWindowsGuestEnv(values[key], values)
+			if expanded != values[key] {
+				values[key] = expanded
+				changed = true
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+	out := make([]string, 0, len(ordered))
+	for _, key := range ordered {
+		out = append(out, key+"="+values[key])
+	}
+	return out
+}
 
 func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 	if len(payload) == 0 {
@@ -41,22 +144,20 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 	}
 
 	// 3. Instantiate
-	// Apply args and environment directly to Wazero Config
+	debugEnv := guestEnvForWasm(os.Environ())
+	fmt.Fprintf(os.Stderr, "DEBUG guestEnvForWasm: %v\n", debugEnv)
+
+	// Apply args and environment directly to Wazero Config.
+	// Windows often exposes PATH/PATHEXT as Path/Pathext, but the guest runtime
+	// expects canonical names and uses shell semantics that are case-insensitive
+	// there; normalize them so command lookup receives the expected values.
 	cfg := wazero.NewModuleConfig().
 		WithArgs(args...).
 		WithStdout(os.Stdout).
 		WithStderr(os.Stderr).
 		WithStdin(os.Stdin)
 
-	for _, e := range os.Environ() {
-		parts := strings.SplitN(e, "=", 2)
-		if len(parts) == 2 && parts[0] != "" {
-			cfg = cfg.WithEnv(parts[0], parts[1])
-		}
-	}
-
-	// Pass all host environment variables to the guest.
-	for _, env := range os.Environ() {
+	for _, env := range guestEnvForWasm(os.Environ()) {
 		parts := strings.SplitN(env, "=", 2)
 		if len(parts) == 2 && parts[0] != "" {
 			cfg = cfg.WithEnv(parts[0], parts[1])
