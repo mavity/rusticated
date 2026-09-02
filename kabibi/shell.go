@@ -24,6 +24,12 @@ type shellResultMsg struct {
 	err    error
 }
 
+// ShellRunner is an interface for executing shell commands.
+// *interp.Runner implements this interface.
+type ShellRunner interface {
+	Run(ctx context.Context, f *syntax.File) error
+}
+
 func parseCommand(input string) *syntax.File {
 	return parseCommandReader(strings.NewReader(input), "")
 }
