@@ -5,24 +5,15 @@ package exec
 import (
 	"errors"
 	"os"
-	"runtime"
 	"strings"
+	"syscall"
 )
 
 var ErrNotFound = errors.New("rusticated: executable not found in $PATH")
 
 func isWindowsLikeEnv() bool {
-	if runtime.GOOS == "windows" {
-		return true
-	}
-	for _, key := range []string{"GOOS", "GOHOSTOS", "OS"} {
-		if value, ok := lookupEnvAnyCase(key); ok {
-			if strings.EqualFold(value, "windows") || strings.EqualFold(value, "Windows_NT") {
-				return true
-			}
-		}
-	}
-	return false
+	pi := syscall.GetPlatformInfo()
+	return strings.EqualFold(pi.OSName, "windows")
 }
 
 func splitPathList(value string) []string {
