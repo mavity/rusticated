@@ -1,4 +1,4 @@
-module github.com/oyin-bo/kabibi
+module github.com/mavity/rusticated/kabibi
 
 go 1.26.4
 
