@@ -175,7 +175,13 @@ func renderPanelWithTitle(m *model, p pane, title string, titleStyle lipgloss.St
 
 	width := l.Width() + 2 // inner width + borders
 	innerW := width - 2    // content area
-	innerH := height - 2   // content area (one for top border, one for bottom border)
+	if innerW < 0 {
+		innerW = 0
+	}
+	innerH := height - 2 // content area (one for top border, one for bottom border)
+	if innerH < 0 {
+		innerH = 0
+	}
 
 	// Create top border manually
 	border := lipgloss.NormalBorder()
@@ -189,11 +195,13 @@ func renderPanelWithTitle(m *model, p pane, title string, titleStyle lipgloss.St
 		sideWidth = 0
 	}
 
-	leftSide := strings.Repeat(border.Top, sideWidth)
-	rightSide := strings.Repeat(border.Top, innerW-tWidth-sideWidth)
-	if innerW-tWidth-sideWidth < 0 {
-		rightSide = ""
+	rightWid := innerW - tWidth - sideWidth
+	if rightWid < 0 {
+		rightWid = 0
 	}
+
+	leftSide := strings.Repeat(border.Top, sideWidth)
+	rightSide := strings.Repeat(border.Top, rightWid)
 
 	topBorder := bStyle.Render(border.TopLeft+leftSide) +
 		titleStyle.Render(title) +
@@ -243,7 +251,11 @@ func renderPanelWithTitle(m *model, p pane, title string, titleStyle lipgloss.St
 					name = "•" + name
 				}
 				if len(name) > colWidth-2 {
-					name = name[:colWidth-3] + "…"
+					if colWidth >= 4 {
+						name = name[:colWidth-3] + "…"
+					} else if colWidth >= 1 {
+						name = name[:colWidth-1]
+					}
 				}
 				// Use explicit Width to pad so we don't rely on fmt.Sprintf as much
 				line = style.Copy().Width(colWidth).Render(" " + name)

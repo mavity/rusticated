@@ -8,6 +8,12 @@ import (
 	"time"
 )
 
+// AISession represents a reusable AI conversation session that can be mocked for testing.
+type AISession interface {
+	SendMessage(ctx context.Context, userInput string, onToken func(string)) error
+	Close() error
+}
+
 // LiteRtLogs buffers the latest in-memory logs captured from the dynamic FFI sink logger.
 // The kabibi application can inspect this slice at any time to display logs on-demand in the UI.
 var LiteRtLogs []string
@@ -44,6 +50,32 @@ func libExt() string {
 	default:
 		return ".so"
 	}
+}
+
+// LMSessionImpl is a concrete implementation of AISession that uses LiteRT for inference.
+type LMSessionImpl struct {
+	conv *Conversation
+}
+
+// NewLMSession creates a new AI session wrapper.
+func NewLMSession(conv *Conversation) *LMSessionImpl {
+	if conv == nil {
+		conv = &Conversation{}
+	}
+	return &LMSessionImpl{conv: conv}
+}
+
+// SendMessage sends a message to the AI and streams the response.
+// It implements the AISession interface.
+func (s *LMSessionImpl) SendMessage(ctx context.Context, userInput string, onToken func(string)) error {
+	return advanceConversation(ctx, s.conv, userInput, onToken)
+}
+
+// Close cleans up the session resources.
+func (s *LMSessionImpl) Close() error {
+	// Currently no-op as LMEngine/LMConversation don't need cleanup
+	// but this allows for future resource management
+	return nil
 }
 
 // runAIPrompt runs a stateless one-shot AI completion.
