@@ -1,4 +1,4 @@
-﻿package main
+package main
 
 import (
 	"context"
@@ -14,16 +14,6 @@ type AISession interface {
 	Close() error
 }
 
-// LiteRtLogs buffers the latest in-memory logs captured from the dynamic FFI sink logger.
-// The kabibi application can inspect this slice at any time to display logs on-demand in the UI.
-var LiteRtLogs []string
-
-func IsAISupported() bool {
-	return true
-}
-
-// extractTokenText parses a LiterTLM JSON token chunk and returns the text content.
-// LiterTLM returns chunks like: {"role":"assistant","content":[{"type":"text","text":"Hello"}]}
 // This extracts the "text" field from the first content item.
 func extractTokenText(raw string) string {
 	var msg struct {
