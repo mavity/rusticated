@@ -47,6 +47,59 @@ type HostCallbackReg struct {
 	pendingInvocations []*CallbackFrame
 }
 
+const callbackOverlappedHeaderSize = 48
+
+func minCallbackOverlappedSize(paramCount, resultCount int) uint32 {
+	return callbackOverlappedHeaderSize + uint32(paramCount+resultCount)*8
+}
+
+func writeCallbackInvocationCell(buf []byte, cbID, invID uint64, args []uint64, resultCount int) bool {
+	need := minCallbackOverlappedSize(len(args), resultCount)
+	if uint32(len(buf)) < need {
+		return false
+	}
+	binary.LittleEndian.PutUint32(buf[0:4], 1)
+	binary.LittleEndian.PutUint64(buf[24:32], cbID)
+	binary.LittleEndian.PutUint64(buf[32:40], invID)
+	binary.LittleEndian.PutUint32(buf[40:44], uint32(len(args)*8))
+	binary.LittleEndian.PutUint32(buf[44:48], uint32(resultCount*8))
+	for i, arg := range args {
+		off := callbackOverlappedHeaderSize + i*8
+		binary.LittleEndian.PutUint64(buf[off:off+8], arg)
+	}
+	return true
+}
+
+func readCallbackCompletionCell(buf []byte, expectedResultCount int) (uint64, []uint64, bool) {
+	if len(buf) < callbackOverlappedHeaderSize {
+		return 0, nil, false
+	}
+	invID := binary.LittleEndian.Uint64(buf[32:40])
+	argLen := int(binary.LittleEndian.Uint32(buf[40:44]))
+	resultLen := int(binary.LittleEndian.Uint32(buf[44:48]))
+	resultOff := callbackOverlappedHeaderSize + argLen
+	if argLen < 0 || resultLen < 0 || resultOff < callbackOverlappedHeaderSize || resultOff > len(buf) {
+		return 0, nil, false
+	}
+	availableResults := resultLen / 8
+	if expectedResultCount > availableResults {
+		expectedResultCount = availableResults
+	}
+	if expectedResultCount < 0 {
+		expectedResultCount = 0
+	}
+	end := resultOff + expectedResultCount*8
+	if end > len(buf) {
+		return 0, nil, false
+	}
+	results := make([]uint64, expectedResultCount)
+	for i := 0; i < expectedResultCount; i++ {
+		off := resultOff + i*8
+		results[i] = binary.LittleEndian.Uint64(buf[off : off+8])
+	}
+	return invID, results, true
+}
+
 type dylibPendingOp struct {
 	reqID      uint64
 	ovPtr      uint32
@@ -518,10 +571,16 @@ project:
 		frame := reg.pendingInvocations[0]
 		reg.pendingInvocations = reg.pendingInvocations[1:]
 
-		// Project into guest callback overlapped!
-		buf := make([]byte, CbOvTotalSize)
-		WriteCallbackOverlappedInvocation(buf, frame.cbID, frame.invID, frame.args, uint32(len(reg.results)*8))
-		mem.Write(reg.cbOvPtr, buf)
+		// Project into the registration-sized guest callback overlapped.
+		buf := make([]byte, reg.cbOvLen)
+		if !writeCallbackInvocationCell(buf, frame.cbID, frame.invID, frame.args, len(reg.results)) {
+			reg.pendingInvocations = append([]*CallbackFrame{frame}, reg.pendingInvocations...)
+			continue
+		}
+		if !mem.Write(reg.cbOvPtr, buf) {
+			reg.pendingInvocations = append([]*CallbackFrame{frame}, reg.pendingInvocations...)
+			continue
+		}
 		frame.state = FrameStateProjected
 		reg.activeInvID = frame.invID
 	}
@@ -553,18 +612,15 @@ func (m *DylibHostManager) AfterRun(ctx context.Context, mod api.Module) {
 				}
 			}
 		} else {
-			// flags & 1 != 0: Read return ordinals, reset flags to 0, and clear reg.activeInvID.
-			invID := reg.activeInvID
-			buf, ok := mem.Read(reg.cbOvPtr, CbOvTotalSize)
+			// flags & 1 != 0: always attribute completion by the invocation id written into the cell itself.
+			buf, ok := mem.Read(reg.cbOvPtr, reg.cbOvLen)
 			if ok {
-				if invID == 0 {
-					invID = binary.LittleEndian.Uint64(buf[32:40])
-				}
-				frame, exists := m.allFrames[invID]
-				if exists && frame.state != FrameStateCompleted && frame.state != FrameStateReturned {
-					results := ReadCallbackOverlappedResults(buf, len(reg.results))
-					frame.results = results
-					frame.state = FrameStateCompleted
+				invID, results, parsed := readCallbackCompletionCell(buf, len(reg.results))
+				if parsed {
+					if frame, exists := m.allFrames[invID]; exists && frame.state != FrameStateCompleted && frame.state != FrameStateReturned {
+						frame.results = results
+						frame.state = FrameStateCompleted
+					}
 				}
 			}
 			mem.Write(reg.cbOvPtr, []byte{0, 0, 0, 0})
@@ -954,6 +1010,11 @@ func (h *HostEnv) sys_dylib_callback_register(ctx context.Context, m api.Module,
 
 	params, results, err := DecodeFuncType(sigBytes)
 	if err != nil {
+		_ = writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+		return
+	}
+
+	if cbOvLen < minCallbackOverlappedSize(len(params), len(results)) {
 		_ = writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 		return
 	}
