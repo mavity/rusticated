@@ -2,7 +2,6 @@ package mohabbat
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -68,29 +67,6 @@ func assembleVegetable(ws, brainPath, buildDir, outputPath string) error {
 	poolLen := uint64(compressed.Len())
 	fmt.Printf("🍆  Pool: raw=%s compressed=%s\n", formatSize(int64(pool.Len())), formatSize(int64(poolLen)))
 
-	// Patch MohabbatMeta inside each brot
-	for i := range slots {
-		if slots[i].goos == "js" {
-			continue // Handled via template string replacements below
-		}
-		if len(per[i].brot) == 0 {
-			continue
-		}
-		meta := mohabbatMeta{
-			PoolLen:         poolLen,
-			WashmhostOffset: whOffsets[i],
-			WashmhostLen:    whLens[i],
-			PayloadOffset:   payloadOffset,
-			PayloadLen:      payloadLen,
-			Reserved:        0,
-		}
-		patched, err := patchMeta(per[i].brot, meta)
-		if err != nil {
-			return fmt.Errorf("patching brot for %s: %w", slots[i].name, err)
-		}
-		per[i].brot = patched
-	}
-
 	idx := map[string]int{}
 	for i, s := range slots {
 		idx[s.name] = i
@@ -139,7 +115,7 @@ func assembleVegetable(ws, brainPath, buildDir, outputPath string) error {
 			slots[nodeIdx].jsTextLen = len(s)
 		}
 
-		zoneA = buildZoneA(offsets, lengths, slots[nodeIdx].jsTextLen)
+		zoneA = buildZoneA(offsets, lengths, slots[nodeIdx].jsTextLen, poolLen, whOffsets, whLens, payloadOffset, payloadLen)
 		next := len(zoneA)
 		newOffsets := make([]int, len(slots))
 		for i := range slots {
@@ -177,7 +153,7 @@ func assembleVegetable(ws, brainPath, buildDir, outputPath string) error {
 				per[nodeIdx].brot = append([]byte(s), brotliWasmBytes...)
 				slots[nodeIdx].jsTextLen = len(s)
 			}
-			zoneA = buildZoneA(offsets, lengths, slots[nodeIdx].jsTextLen)
+			zoneA = buildZoneA(offsets, lengths, slots[nodeIdx].jsTextLen, poolLen, whOffsets, whLens, payloadOffset, payloadLen)
 			break
 		}
 	}
@@ -207,8 +183,9 @@ func assembleVegetable(ws, brainPath, buildDir, outputPath string) error {
 }
 
 // buildZoneA produces the polyglot script header for Modern Four.
-func buildZoneA(offsets, lengths []int, nodeJsLen int) string {
-	const tmplPOSIX = `:; ME="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || printf "%s" "$0")"; S_OFF=0; S_LEN=0
+func buildZoneA(offsets, lengths []int, nodeJsLen int, poolLen uint64, whOffsets, whLens []uint64, payloadOffset, payloadLen uint64) string {
+	const tmplPOSIX = `:; ME="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || printf "%s" "$0")"; S_OFF=0; S_LEN=0; W_OFF=0; W_LEN=0
+:; P_LEN="{{POOL_LEN}}"; PLD_OFF="{{PAYLOAD_OFF}}"; PLD_LEN="{{PAYLOAD_LEN}}"
 :; PLATFORM_OVERRIDE=""
 :; ARG_COUNT=$#
 :; while [ $ARG_COUNT -gt 0 ]; do
@@ -246,17 +223,17 @@ func buildZoneA(offsets, lengths []int, nodeJsLen int) string {
 :;     USE_NODE=1
 :;     S_LEN=0
 :;   elif [ "$RESOLVED_PLATFORM" = "linux-amd64" ]; then
-:;     S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}}
+:;     S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}}; W_OFF={{LINUX_AMD_W_OFF}}; W_LEN={{LINUX_AMD_W_LEN}}
 :;   elif [ "$RESOLVED_PLATFORM" = "linux-arm64" ]; then
-:;     S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}}
+:;     S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}}; W_OFF={{LINUX_ARM_W_OFF}}; W_LEN={{LINUX_ARM_W_LEN}}
 :;   elif [ "$RESOLVED_PLATFORM" = "linux-arm32" ]; then
-:;     S_OFF={{LINUX_ARM32_OFF}}; S_LEN={{LINUX_ARM32_LEN}}
+:;     S_OFF={{LINUX_ARM32_OFF}}; S_LEN={{LINUX_ARM32_LEN}}; W_OFF={{LINUX_ARM32_W_OFF}}; W_LEN={{LINUX_ARM32_W_LEN}}
 :;   elif [ "$RESOLVED_PLATFORM" = "darwin-arm64" ]; then
-:;     S_OFF={{DARWIN_ARM_OFF}}; S_LEN={{DARWIN_ARM_LEN}}
+:;     S_OFF={{DARWIN_ARM_OFF}}; S_LEN={{DARWIN_ARM_LEN}}; W_OFF={{DARWIN_ARM_W_OFF}}; W_LEN={{DARWIN_ARM_W_LEN}}
 :;   elif [ "$RESOLVED_PLATFORM" = "windows-amd64" ]; then
-:;     S_OFF={{WIN_AMD_OFF}}; S_LEN={{WIN_AMD_LEN}}
+:;     S_OFF={{WIN_AMD_OFF}}; S_LEN={{WIN_AMD_LEN}}; W_OFF={{WIN_AMD_W_OFF}}; W_LEN={{WIN_AMD_W_LEN}}
 :;   elif [ "$RESOLVED_PLATFORM" = "windows-arm64" ]; then
-:;     S_OFF={{WIN_ARM_OFF}}; S_LEN={{WIN_ARM_LEN}}
+:;     S_OFF={{WIN_ARM_OFF}}; S_LEN={{WIN_ARM_LEN}}; W_OFF={{WIN_ARM_W_OFF}}; W_LEN={{WIN_ARM_W_LEN}}
 :;   else
 :;     echo "❌ Invalid --platform: '$PLATFORM_OVERRIDE'" >&2
 :;     echo "Available: node, linux-amd64, linux-arm64, linux-arm32, darwin-arm64, windows-amd64, windows-arm64, amd64, arm64" >&2
@@ -266,13 +243,13 @@ func buildZoneA(offsets, lengths []int, nodeJsLen int) string {
 :; else
 :;   UNAME_PAIR="$(uname -m)-$(uname -s)"
 :;   if [ "$UNAME_PAIR" = "x86_64-Linux" ]; then
-:;     S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}}
+:;     S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}}; W_OFF={{LINUX_AMD_W_OFF}}; W_LEN={{LINUX_AMD_W_LEN}}
 :;   elif [ "$UNAME_PAIR" = "aarch64-Linux" ]; then
-:;     S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}}
+:;     S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}}; W_OFF={{LINUX_ARM_W_OFF}}; W_LEN={{LINUX_ARM_W_LEN}}
 :;   elif [ "$UNAME_PAIR" = "arm64-Darwin" ]; then
-:;     S_OFF={{DARWIN_ARM_OFF}}; S_LEN={{DARWIN_ARM_LEN}}
+:;     S_OFF={{DARWIN_ARM_OFF}}; S_LEN={{DARWIN_ARM_LEN}}; W_OFF={{DARWIN_ARM_W_OFF}}; W_LEN={{DARWIN_ARM_W_LEN}}
 :;   elif [ "${UNAME_PAIR#armv}" != "$UNAME_PAIR" ] && [ "${UNAME_PAIR%-Linux}" != "$UNAME_PAIR" ]; then
-:;     S_OFF={{LINUX_ARM32_OFF}}; S_LEN={{LINUX_ARM32_LEN}}
+:;     S_OFF={{LINUX_ARM32_OFF}}; S_LEN={{LINUX_ARM32_LEN}}; W_OFF={{LINUX_ARM32_W_OFF}}; W_LEN={{LINUX_ARM32_W_LEN}}
 :;   fi
 :; fi
 :; USE_NODE=0
@@ -287,13 +264,12 @@ func buildZoneA(offsets, lengths []int, nodeJsLen int) string {
 :;     return 1
 :;   }
 :;   if find_node; then
-:;     export MOHABBAT_VEGETABLE_PATH="$ME"
 :;     dd if="$ME" bs=1 skip="{{NODE_OFF}}" count="{{NODE_JS_LEN}}" 2>/dev/null | "$NODE_BIN" - "$ME" "$@"
 :;     exit $?
 :;   fi
 :; fi
 :; [ "$S_LEN" = "0" ] && { echo "🍆 Unsupported platform and node not available"; exit 1; }
-:; TMP_DIR="${TMPDIR:-/tmp}"; [ -d "./target" ] && TMP_DIR="./target"; TMP_EXE="$TMP_DIR/moh-$$"; dd if="$ME" bs=1 skip="$S_OFF" count="$S_LEN" of="$TMP_EXE" 2>/dev/null; chmod +x "$TMP_EXE"; "$TMP_EXE" "$ME" "$@"; RET=$?; rm "$TMP_EXE"; exit $RET
+:; TMP_DIR="${TMPDIR:-/tmp}"; [ -d "./target" ] && TMP_DIR="./target"; TMP_EXE="$TMP_DIR/moh-$$"; dd if="$ME" bs=1 skip="$S_OFF" count="$S_LEN" of="$TMP_EXE" 2>/dev/null; chmod +x "$TMP_EXE"; "$TMP_EXE" "$ME" "$P_LEN" "$W_OFF" "$W_LEN" "$PLD_OFF" "$PLD_LEN" "$@"; RET=$?; rm "$TMP_EXE"; exit $RET
 `
 	const tmplWIN = `@echo off
 setlocal enabledelayedexpansion
@@ -301,6 +277,10 @@ set "ME=%~f0"
 set "TMP_DIR=!TEMP!"
 if exist ".\target" set "TMP_DIR=.\target"
 set "TMP_EXE=!TMP_DIR!\moh-!RANDOM!.exe"
+
+set "P_LEN={{POOL_LEN}}"
+set "PLD_OFF={{PAYLOAD_OFF}}"
+set "PLD_LEN={{PAYLOAD_LEN}}"
 
 set "FWD_ARGS="
 set "PLATFORM_OVERRIDE="
@@ -320,6 +300,8 @@ set "ARCH=%PROCESSOR_ARCHITECTURE%"
 if "!PROCESSOR_ARCHITEW6432!" neq "" set "ARCH=!PROCESSOR_ARCHITEW6432!"
 set "S_OFF=0"
 set "S_LEN=0"
+set "W_OFF=0"
+set "W_LEN=0"
 set "RESOLVED_PLATFORM="
 
 if defined PLATFORM_OVERRIDE (
@@ -346,21 +328,33 @@ if defined PLATFORM_OVERRIDE (
   ) else if "!RESOLVED_PLATFORM!"=="windows-amd64" (
     set "S_OFF={{WIN_AMD_OFF}}"
     set "S_LEN={{WIN_AMD_LEN}}"
+    set "W_OFF={{WIN_AMD_W_OFF}}"
+    set "W_LEN={{WIN_AMD_W_LEN}}"
   ) else if "!RESOLVED_PLATFORM!"=="windows-arm64" (
     set "S_OFF={{WIN_ARM_OFF}}"
     set "S_LEN={{WIN_ARM_LEN}}"
+    set "W_OFF={{WIN_ARM_W_OFF}}"
+    set "W_LEN={{WIN_ARM_W_LEN}}"
   ) else if "!RESOLVED_PLATFORM!"=="linux-amd64" (
     set "S_OFF={{LINUX_AMD_OFF}}"
     set "S_LEN={{LINUX_AMD_LEN}}"
+    set "W_OFF={{LINUX_AMD_W_OFF}}"
+    set "W_LEN={{LINUX_AMD_W_LEN}}"
   ) else if "!RESOLVED_PLATFORM!"=="linux-arm64" (
     set "S_OFF={{LINUX_ARM_OFF}}"
     set "S_LEN={{LINUX_ARM_LEN}}"
+    set "W_OFF={{LINUX_ARM_W_OFF}}"
+    set "W_LEN={{LINUX_ARM_W_LEN}}"
   ) else if "!RESOLVED_PLATFORM!"=="linux-arm32" (
     set "S_OFF={{LINUX_ARM32_OFF}}"
     set "S_LEN={{LINUX_ARM32_LEN}}"
+    set "W_OFF={{LINUX_ARM32_W_OFF}}"
+    set "W_LEN={{LINUX_ARM32_W_LEN}}"
   ) else if "!RESOLVED_PLATFORM!"=="darwin-arm64" (
     set "S_OFF={{DARWIN_ARM_OFF}}"
     set "S_LEN={{DARWIN_ARM_LEN}}"
+    set "W_OFF={{DARWIN_ARM_W_OFF}}"
+    set "W_LEN={{DARWIN_ARM_W_LEN}}"
   )
   
   if "!S_LEN!"=="0" if not "!RESOLVED_PLATFORM!"=="node" (
@@ -371,9 +365,13 @@ if defined PLATFORM_OVERRIDE (
   if "!ARCH!"=="AMD64" (
   	set "S_OFF={{WIN_AMD_OFF}}"
   	set "S_LEN={{WIN_AMD_LEN}}"
+  	set "W_OFF={{WIN_AMD_W_OFF}}"
+  	set "W_LEN={{WIN_AMD_W_LEN}}"
   ) else if "!ARCH!"=="ARM64" (
   	set "S_OFF={{WIN_ARM_OFF}}"
   	set "S_LEN={{WIN_ARM_LEN}}"
+  	set "W_OFF={{WIN_ARM_W_OFF}}"
+  	set "W_LEN={{WIN_ARM_W_LEN}}"
   )
 )
 
@@ -399,7 +397,6 @@ if "!USE_NODE!"=="1" (
   if not "!NODE_BIN!"=="" (
     "!NODE_BIN!" -v >nul 2>&1
     if !errorlevel! equ 0 (
-      set "MOHABBAT_VEGETABLE_PATH=!ME!"
       powershell -NoProfile -ExecutionPolicy Bypass -Command "& { $a=[IO.File]::ReadAllBytes($env:ME); $b=[Text.Encoding]::UTF8.GetString($a, {{NODE_OFF}}, {{NODE_JS_LEN}}); $n=$env:NODE_BIN; $m=$env:ME; $b | & $n - $env:ME $args; exit $LASTEXITCODE }" --!FWD_ARGS!
       exit /b !errorlevel!
     )
@@ -409,9 +406,8 @@ if "!S_LEN!"=="0" (
     echo [mohabbat] This vegetable does not support target platform on Windows and node is not available.
     exit /b 1
 )
-set "MOHABBAT_VEGETABLE_PATH=!ME!"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$a=[IO.File]::ReadAllBytes($env:ME); $b=New-Object byte[] !S_LEN!; [Array]::Copy($a, [int64]!S_OFF!, $b, 0, [int]!S_LEN!); [IO.File]::WriteAllBytes($env:TMP_EXE, $b)"
-"!TMP_EXE!" "!ME!"!FWD_ARGS!
+"!TMP_EXE!" "!ME!" "!P_LEN!" "!W_OFF!" "!W_LEN!" "!PLD_OFF!" "!PLD_LEN!"!FWD_ARGS!
 set "RET=!ERRORLEVEL!"
 if exist "!TMP_EXE!" del /F /Q "!TMP_EXE!" >nul 2>&1
 exit /b !RET!
@@ -452,8 +448,20 @@ exit /b !RET!
 	winCRLF := strings.ReplaceAll(tmplWIN, "\n", "\r\n")
 	s := tmplPOSIX + winCRLF
 
+	s = strings.ReplaceAll(s, "{{POOL_LEN}}", fmt.Sprintf("%-20d", poolLen))
+	s = strings.ReplaceAll(s, "{{PAYLOAD_OFF}}", fmt.Sprintf("%-20d", payloadOffset))
+	s = strings.ReplaceAll(s, "{{PAYLOAD_LEN}}", fmt.Sprintf("%-20d", payloadLen))
+
 	replace := func(s, key string, i int, vals []int) string {
 		val := 0
+		if i >= 0 && i < len(vals) {
+			val = vals[i]
+		}
+		return strings.ReplaceAll(s, key, fmt.Sprintf("%d", val))
+	}
+
+	replaceU64 := func(s, key string, i int, vals []uint64) string {
+		val := uint64(0)
 		if i >= 0 && i < len(vals) {
 			val = vals[i]
 		}
@@ -466,44 +474,35 @@ exit /b !RET!
 
 	s = replace(s, "{{LINUX_AMD_OFF}}", linuxAMD, offsets)
 	s = replace(s, "{{LINUX_AMD_LEN}}", linuxAMD, lengths)
+	s = replaceU64(s, "{{LINUX_AMD_W_OFF}}", linuxAMD, whOffsets)
+	s = replaceU64(s, "{{LINUX_AMD_W_LEN}}", linuxAMD, whLens)
+
 	s = replace(s, "{{LINUX_ARM_OFF}}", linuxARM, offsets)
 	s = replace(s, "{{LINUX_ARM_LEN}}", linuxARM, lengths)
+	s = replaceU64(s, "{{LINUX_ARM_W_OFF}}", linuxARM, whOffsets)
+	s = replaceU64(s, "{{LINUX_ARM_W_LEN}}", linuxARM, whLens)
+
 	s = replace(s, "{{LINUX_ARM32_OFF}}", linuxARM32, offsets)
 	s = replace(s, "{{LINUX_ARM32_LEN}}", linuxARM32, lengths)
+	s = replaceU64(s, "{{LINUX_ARM32_W_OFF}}", linuxARM32, whOffsets)
+	s = replaceU64(s, "{{LINUX_ARM32_W_LEN}}", linuxARM32, whLens)
+
 	s = replace(s, "{{DARWIN_ARM_OFF}}", darwinARM, offsets)
 	s = replace(s, "{{DARWIN_ARM_LEN}}", darwinARM, lengths)
+	s = replaceU64(s, "{{DARWIN_ARM_W_OFF}}", darwinARM, whOffsets)
+	s = replaceU64(s, "{{DARWIN_ARM_W_LEN}}", darwinARM, whLens)
+
 	s = replace(s, "{{WIN_AMD_OFF}}", winAMD, offsets)
 	s = replace(s, "{{WIN_AMD_LEN}}", winAMD, lengths)
+	s = replaceU64(s, "{{WIN_AMD_W_OFF}}", winAMD, whOffsets)
+	s = replaceU64(s, "{{WIN_AMD_W_LEN}}", winAMD, whLens)
+
 	s = replace(s, "{{WIN_ARM_OFF}}", winARM, offsets)
 	s = replace(s, "{{WIN_ARM_LEN}}", winARM, lengths)
+	s = replaceU64(s, "{{WIN_ARM_W_OFF}}", winARM, whOffsets)
+	s = replaceU64(s, "{{WIN_ARM_W_LEN}}", winARM, whLens)
+
 	return s
-}
-
-func patchMeta(brot []byte, meta mohabbatMeta) ([]byte, error) {
-	// The unpatched MohabbatMeta has Magic = "MOHABBAT" followed by 8 zero
-	// bytes for PoolLen (the first u64 field). Searching for the 16-byte
-	// signature avoids collisions with the "MOHABBAT_VEGETABLE_PATH" string
-	// literal that brot embeds for reading the parent vegetable path.
-	signature := append([]byte(mohabbatMagic), make([]byte, 8)...)
-	count := bytes.Count(brot, signature)
-	if count == 0 {
-		return nil, fmt.Errorf("MOHABBAT signature (magic + NUL PoolLen) not found in brot")
-	}
-	if count > 1 {
-		return nil, fmt.Errorf("MOHABBAT signature found %d times (expected exactly 1)", count)
-	}
-
-	idx := bytes.Index(brot, signature)
-	out := make([]byte, len(brot))
-	copy(out, brot)
-	p := idx + len(mohabbatMagic)
-	binary.LittleEndian.PutUint64(out[p+0:p+8], meta.PoolLen)
-	binary.LittleEndian.PutUint64(out[p+8:p+16], meta.WashmhostOffset)
-	// Skip washmhost_len (p+16:p+24) - it's now embedded at compile time, don't overwrite it
-	binary.LittleEndian.PutUint64(out[p+24:p+32], meta.PayloadOffset)
-	binary.LittleEndian.PutUint64(out[p+32:p+40], meta.PayloadLen)
-	binary.LittleEndian.PutUint64(out[p+40:p+48], meta.Reserved)
-	return out, nil
 }
 
 // ensureBrotStubs creates empty import library stubs (.a files) for MinGW

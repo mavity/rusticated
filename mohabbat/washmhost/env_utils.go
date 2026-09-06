@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 
 	"github.com/tetratelabs/wazero/api"
@@ -190,12 +191,15 @@ func resolveUsableCwd() (string, error) {
 		return cwd, nil
 	}
 
-	if veg := os.Getenv("MOHABBAT_VEGETABLE_PATH"); veg != "" {
-		dir := filepath.Dir(veg)
-		if err := os.Chdir(dir); err == nil {
-			if cwd, err := os.Getwd(); err == nil {
-				return cwd, nil
+	for _, arg := range os.Args {
+		if strings.HasSuffix(strings.ToLower(arg), ".bat") {
+			dir := filepath.Dir(arg)
+			if err := os.Chdir(dir); err == nil {
+				if cwd, err := os.Getwd(); err == nil {
+					return cwd, nil
+				}
 			}
+			break
 		}
 	}
 

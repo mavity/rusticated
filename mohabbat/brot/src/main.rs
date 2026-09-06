@@ -25,60 +25,26 @@ mod darwin;
 
 pub mod test_symbols;
 
-// ─── Compile-time configuration ───────────────────────────────────────────────
-
-// Read washmhost size from compile-time environment (set by build.rs).
-// This value is known when building per-slot, so it's baked into the binary.
-const WASHMHOST_LEN_STR: &str = env!("MOHABBAT_WASHMHOST_LEN");
-
-// Parse const string to u64 at compile time.
-// This is a workaround since const fn for parsing isn't available in all contexts.
-// If WASHMHOST_LEN_STR is "0" or invalid, default to 0.
-const fn parse_washmhost_len() -> u64 {
-    let bytes = WASHMHOST_LEN_STR.as_bytes();
-    let mut result: u64 = 0;
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'0'..=b'9' => {
-                result = result * 10 + ((bytes[i] - b'0') as u64);
-            }
-            _ => break,
-        }
-        i += 1;
+pub fn parse_u64_bytes(bytes: &[u8]) -> Option<u64> {
+    let mut s = bytes;
+    while let Some((&b' ', rest)) = s.split_first() {
+        s = rest;
     }
-    result
+    while let Some((&b' ', rest)) = s.split_last() {
+        s = rest;
+    }
+    if s.is_empty() {
+        return None;
+    }
+    let mut res: u64 = 0;
+    for &b in s {
+        if b < b'0' || b > b'9' {
+            return None;
+        }
+        res = res.checked_mul(10)?.checked_add((b - b'0') as u64)?;
+    }
+    Some(res)
 }
-
-const WASHMHOST_LEN: u64 = parse_washmhost_len();
-
-// ─── Shared metadata section ──────────────────────────────────────────────────
-
-#[repr(C, packed)]
-#[derive(Clone, Copy)]
-pub struct MohabbatMeta {
-    pub magic: [u8; 8],
-    pub pool_len: u64,
-    pub washmhost_offset: u64,
-    pub washmhost_len: u64,
-    pub payload_offset: u64,
-    pub payload_len: u64,
-    pub reserved: u64,
-}
-
-#[cfg_attr(windows, unsafe(link_section = ".mohmeta"))]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".mohmeta"))]
-#[cfg_attr(target_vendor = "apple", unsafe(link_section = "__DATA,.mohmeta"))]
-#[used]
-pub static mut META: MohabbatMeta = MohabbatMeta {
-    magic: *b"MOHABBAT",
-    pool_len: 0,
-    washmhost_offset: 0,
-    washmhost_len: WASHMHOST_LEN,  // Embedded at compile time per-slot
-    payload_offset: 0,
-    payload_len: 0,
-    reserved: 0,
-};
 
 // ─── C stdlib intrinsics (binary link-unit, separate from lib.rs) ─────────────
 

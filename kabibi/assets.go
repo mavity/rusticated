@@ -74,21 +74,31 @@ func (e assetStageError) Error() string {
 	return e.err.Error()
 }
 
+func lookupEnvAnyCase(key string) (string, bool) {
+	for _, kv := range os.Environ() {
+		k, v, ok := strings.Cut(kv, "=")
+		if ok && strings.EqualFold(k, key) {
+			return v, true
+		}
+	}
+	return "", false
+}
+
 func cacheDirPath() (string, error) {
-	if v := os.Getenv("LITERTLM_CACHE_DIR"); v != "" {
+	if v, ok := lookupEnvAnyCase("LITERTLM_CACHE_DIR"); ok && v != "" {
 		return filepath.Clean(v), nil
 	}
 
 	switch HostOS() {
 	case "windows":
-		if v := os.Getenv("LocalAppData"); v != "" {
+		if v, ok := lookupEnvAnyCase("LocalAppData"); ok && v != "" {
 			return filepath.Join(v, "kabibi", "litert_cache"), nil
 		}
 		if home, err := os.UserHomeDir(); err == nil && home != "" {
 			return filepath.Join(home, "AppData", "Local", "kabibi", "litert_cache"), nil
 		}
 	default:
-		if v := os.Getenv("XDG_CACHE_HOME"); v != "" {
+		if v, ok := lookupEnvAnyCase("XDG_CACHE_HOME"); ok && v != "" {
 			return filepath.Join(v, "kabibi", "litert_cache"), nil
 		}
 		if home, err := os.UserHomeDir(); err == nil && home != "" {
@@ -156,8 +166,10 @@ func ensureLiteRT(ctx context.Context, progress chan<- assetProgressMsg) error {
 	// Step 2: Check if the extracted lib is up-to-date w.r.t. the wheel.
 	if libUpToDate(libDir, wheelPath) {
 		sendProgress(progress, "litertlm", 100, "using cached runtime")
-		// Step 3: Background-check PyPI for a newer wheel (non-blocking).
-		go backgroundUpdateWheel(cacheDir)
+		// Step 3: Background-check PyPI for a newer wheel (non-blocking, interactive only).
+		if progress != nil {
+			go backgroundUpdateWheel(cacheDir)
+		}
 		return nil
 	}
 
@@ -170,8 +182,10 @@ func ensureLiteRT(ctx context.Context, progress chan<- assetProgressMsg) error {
 		return errors.New("downloaded runtime failed validation")
 	}
 
-	// Step 4: Background-check PyPI for a newer wheel (non-blocking).
-	go backgroundUpdateWheel(cacheDir)
+	// Step 4: Background-check PyPI for a newer wheel (non-blocking, interactive only).
+	if progress != nil {
+		go backgroundUpdateWheel(cacheDir)
+	}
 	return nil
 }
 
@@ -410,29 +424,33 @@ func wheelPreference(filename string) int {
 }
 
 func wheelMatchesPlatform(filename string) bool {
+	return wheelMatchesPlatformFor(HostOS(), HostArch(), filename)
+}
+
+func wheelMatchesPlatformFor(goos, goarch, filename string) bool {
 	filename = strings.ToLower(filename)
 
-	switch HostOS() {
+	switch goos {
 	case "windows":
-		switch HostArch() {
+		switch goarch {
 		case "amd64":
 			return strings.Contains(filename, "win_amd64")
 		case "arm64":
-			// Fallback: allow amd64 wheels on Windows arm64 as they usually run via emulation/prism
+			// Fallback: allow amd64 wheels on Windows arm64 as they usually run via emulation/prism.
 			return strings.Contains(filename, "win_arm64") || strings.Contains(filename, "win_amd64")
 		}
 	case "darwin":
-		if HostArch() == "arm64" {
+		if goarch == "arm64" {
 			return strings.Contains(filename, "macosx") && strings.Contains(filename, "arm64")
 		}
-		if HostArch() == "amd64" {
+		if goarch == "amd64" {
 			return strings.Contains(filename, "macosx") && strings.Contains(filename, "x86_64")
 		}
 	case "linux", "freebsd":
-		if HostArch() == "amd64" {
+		if goarch == "amd64" {
 			return strings.Contains(filename, "manylinux") && strings.Contains(filename, "x86_64")
 		}
-		if HostArch() == "arm64" {
+		if goarch == "arm64" {
 			return strings.Contains(filename, "manylinux") && strings.Contains(filename, "aarch64")
 		}
 	}

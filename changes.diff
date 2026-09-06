@@ -1,0 +1,2655 @@
+diff --git a/CALLBACKS.md b/CALLBACKS.md
+index 562f8ff..b9ec3d0 100644
+--- a/CALLBACKS.md
++++ b/CALLBACKS.md
+@@ -23,6 +23,14 @@ The model is:
+ 
+ This document is intentionally DLL-first because DLL support is the immediate operational target, while the model is selected for its future WASM applicability.
+ 
++### Note On DLL.md Precedence
++
++[DLL.md](DLL.md) is a legacy document. This specification (`CALLBACKS.md`) supersedes it and takes precedence wherever contradictions arise, notably:
++
++1. **Callback Delivery**: [DLL.md](DLL.md) suggests calling guest exports directly for native callbacks. This specification strictly mandates delivery through guest-owned `Overlapped` transport cells discovered during normal event-loop polling, preventing WASM scheduler stack corruption (`morestack on g0`).
++2. **Structural Memory ABI vs. Bespoke Helpers**: [DLL.md](DLL.md) introduces specific host primitives like `sys_dylib_read_cstr`. This specification strictly restricts the host ABI to four primitive byte-level operations (`alloc`, `free`, `read_mem`, `write_mem`), keeping all string decoding and struct layout logic inside the guest runtime.
++3. **Architecture Baseline**: [DLL.md](DLL.md) frames satellite process isolation as a proposed future alternative to in-process execution. This specification establishes satellite process isolation, 64-bit flat ordinal pointers, and WASM-encoded functypes as the baseline architecture.
++
+ ## Design Axioms
+ 
+ ### 1. Use WASM Signature Format
+@@ -165,12 +173,26 @@ To invoke a DLL function the guest supplies:
+ 1. target library handle,
+ 2. target symbol name or symbol handle,
+ 3. WASM-format signature,
+-4. raw argument list matching that signature.
++4. raw argument list matching that signature,
++5. an optional parent invocation id (0 when absent).
+ 
+ The satellite resolves the symbol and performs the call according to native calling rules, but the call shape visible at the ABI boundary remains WASM-style.
+ 
+ Calling convention details required by native FFI remain an implementation concern of the DLL backend and not part of the general cross-island signature language.
+ 
++#### Reentrant Call Routing Via Parent Invocation Id
++
++A call made by the guest while it is servicing a callback invocation may need to run on the exact satellite thread that is currently blocked inside that callback's native trampoline (for example, to read data through a pointer that is only valid for the duration of that call). A call unrelated to any callback has no such requirement.
++
++Rather than binding "any call performed while handling a callback" to a thread by fiat, the guest makes this explicit per call:
++
++1. if the guest is not acting on behalf of any callback invocation, it passes parent invocation id `0`, and the host routes the call to its ordinary satellite dispatch worker,
++2. if the guest is acting inside the goroutine handling callback invocation `N`, it passes that same invocation id as the parent invocation id, and the host routes the call to the specific satellite thread currently parked in invocation `N`'s trampoline pump.
++
++The guest already possesses the invocation id for any callback it is actively handling, because it copied it out of the callback overlapped on discovery (see Callback Discovery And Dispatch). No new identity concept, and no notion of an OS thread, is introduced on the guest side: the guest only ever passes back an id it was already given.
++
++This replaces any requirement that calls be implicitly bound to "the active callback thread": binding is explicit, per call, and opt-in via the parent invocation id, so unrelated calls made while a callback happens to be in flight are never accidentally routed onto a callback's satellite thread.
++
+ ## Satellite Memory Management ABI
+ 
+ Because pointers are just ordinals and the guest is responsible for packing and unpacking pointee data, the guest needs explicit ability to allocate and release native memory inside the satellite universe.
+@@ -190,6 +212,14 @@ If alignment guarantees are caller-visible, the ABI must expose them explicitly.
+ 
+ This is required both for ordinary DLL arguments and for callback argument preparation when the guest needs to construct foreign-owned data structures.
+ 
++Allocation in the satellite must be served by the platform's native allocator rather than by the satellite's own Go heap, so that returned addresses carry the platform's standard alignment guarantee and are never subject to Go garbage collection or stack-copy relocation:
++
++1. Windows: `HeapAlloc` / `HeapFree` against `GetProcessHeap()`, from `kernel32.dll`,
++2. macOS: `malloc` / `free`, from `libSystem.B.dylib`,
++3. Linux: `malloc` / `free`, from the process's linked libc.
++
++All three guarantee at least 16-byte alignment for any allocation on 64-bit targets, which the ABI adopts as its minimum caller-visible alignment guarantee.
++
+ ## Callback Model
+ 
+ ### Callback Registration ABI
+@@ -345,7 +375,7 @@ That is valid because:
+ 2. durable invocation identity lives in host-side callback frame state,
+ 3. the overlapped is only the transport surface for the current projected invocation or return.
+ 
+-Any cross-island call performed while the guest is handling a callback must remain bound to the same satellite callback thread that owns the active callback stack for that execution.
++A cross-island call performed while the guest is handling a callback binds to that callback's satellite thread only when the guest explicitly supplies that callback invocation's id as the call's parent invocation id (see DLL Call Resolution). There is no implicit binding by mere timing or by the guest's current call stack.
+ 
+ ### Return Ordering And Parked Returns
+ 
+@@ -494,6 +524,78 @@ The architecture requires at least these ABI families.
+ 6. guest immediately extracts parameters, queues execution, and clears flag,
+ 7. guest yields on callback completion to allow result to be read before re-invocation.
+ 
++## Guest-Side Go API
++
++The guest-side Go package exposes this ABI directly through `syscall` with 64-bit flat ordinals (`uint64`), avoiding pointer truncation on `wasm32` (where `uintptr` is 32 bits) and eliminating fragile reflection-based wrappers. Everything that is a mechanical consequence of process isolation (memory helpers, allocation) operates directly on 64-bit flat ordinals.
++
++### Library And Symbol Handling
++
++```go
++func DylibOpen(path string, flags int) (uint64, error)
++func DylibSym(handle uint64, name string) (uint64, error)
++func DylibClose(handle uint64) error
++```
++
++Each of these issues the matching overlapped host call (`sys_dylib_open`, `sys_dylib_sym`, `sys_dylib_close`) and calls `awaitOverlapped` on it. To the caller the function is ordinary blocking Go code; underneath, the calling goroutine parks and the scheduler runs other goroutines until the satellite responds and the host completes the overlapped.
++
++### Typed Invocation
++
++```go
++func DylibCall(sym uint64, sig []byte, args []uint64, parentInvID uint64) ([]uint64, error)
++```
++
++Direct, unboxed FFI invocation using canonical WASM function type signatures and 64-bit flat ordinal arguments and results:
++
++1. `sym` is the 64-bit native symbol address in the satellite.
++2. `sig` is the canonical WASM functype encoding (`[0x60, param_count, params..., result_count, results...]`).
++3. `args` is the ordered list of 64-bit argument ordinals.
++4. `parentInvID` is optional (0 to infer from the calling goroutine's active callback context).
++5. returns all ordered result ordinals as `[]uint64` without truncation.
++
++### Callback Registration
++
++```go
++func DylibRegisterCallback(sig []byte, cbOvPtr unsafe.Pointer, cbOvLen uint32, fn func(args []uint64) []uint64) (uint64, error)
++func DylibUnregisterCallback(cbOvPtr unsafe.Pointer)
++```
++
++`fn` is a callback function receiving ordered 64-bit argument ordinals and returning result ordinals:
++
++1. `cbOvPtr` is a guest-owned callback overlapped cell registered with runtime continuation.
++2. `sys_dylib_callback_register(sigBytes, ovPtr, ovSize)` is issued; the value it returns (a 64-bit native callable trampoline address inside the satellite) is returned to the caller.
++3. When the host projects an invocation into the cell, runtime continuation extracts the arguments, clears the completion flag to accept the invocation, and runs `fn`.
++4. When `fn` returns, return values are written to the cell, completion is set to 1, and the guest immediately yields back to the host (`pauseToHost()`).
++
++### Implicit Parent Invocation Id
++
++The invocation id a callback goroutine is handling is stored on goroutine-local state maintained by the callback dispatch runtime, not threaded through any public function signature. `DylibCall` reads that state automatically when `parentInvID == 0`, and it is zero for any goroutine not currently inside callback dispatch. This keeps the Reentrant Call Routing rule (see DLL Call Resolution) fully transparent to application code: a callback handler calls into the DLL exactly the way any other Go code would, and the correct routing happens underneath.
++
++### Satellite Memory Management
++
++Under satellite isolation the guest and the satellite are disjoint address spaces, so pointee access always goes through explicit helpers operating on 64-bit flat ordinals:
++
++```go
++func DylibAlloc(size uint64) (uint64, error)
++func DylibFree(ptr uint64) error
++
++func DylibReadMem(ptr uint64, dst []byte) error
++func DylibWriteMem(ptr uint64, src []byte) error
++
++func Alloc(size uint64) (uint64, error)
++func Free(ptr uint64) error
++func ReadMem(ptr uint64, dst []byte) error
++func WriteMem(ptr uint64, src []byte) error
++
++func GoString(ptr uint64) (string, error)
++func GoStringN(ptr uint64, length int) (string, error)
++func GoBytes(ptr uint64, length int) ([]byte, error)
++func CString(s string) (ptr uint64, free func(), err error)
++```
++
++`DylibAlloc`/`DylibFree` call the satellite's native platform allocator (see Satellite Memory Management ABI) rather than the satellite's Go heap, so returned pointers carry the platform's standard alignment guarantee and are never subject to Go garbage collection or goroutine stack relocation. `CString` allocates in the satellite, writes the NUL-terminated bytes over via `DylibWriteMem`, and returns a `free` closure that calls `DylibFree`; callers use `defer free()`.
++
++For structured, offset-based traversal of satellite memory, `syscall.RemoteReader` and `syscall.RemoteWriter` provide `io.ReaderAt`/`io.WriterAt`-shaped views over 64-bit ordinal address ranges.
++
+ ## Future Satellite WASM Use
+ 
+ The same model should then be used for loading arbitrary satellite WASM modules.
+@@ -537,4 +639,112 @@ Once DLL and future satellite WASM calls both use:
+ 
+ then washmhost gains one consistent cross-island invocation substrate instead of separate ad hoc subsystems.
+ 
+-That consistency is the main purpose of this architecture.
+\ No newline at end of file
++That consistency is the main purpose of this architecture.
++
++# TEMPORARY FAILURES
++
++## Executive Assessment
++
++The implementation follows the core structural axioms of `CALLBACKS.md` at the host and IPC layers: satellite process isolation, canonical WASM functype encoding, 64-bit flat ordinal pointers, and thread-local stack unwinding are successfully in place. 
++
++However, it is not complete in guest-side runtime execution, memory boundary discipline, and FFI calling conventions:
++1. **Broken callback lifecycle**: The guest callback driver uses an unsynchronized in-guest polling loop that triggers a feedback loop on its own returns, rather than synchronizing across `run()` execution boundaries.
++2. **Defective Purego mimicry**: The purego wrapper zeros out returned native pointers, forcing downstream consumers ([kabibi/ai_purego_wasip1.go](kabibi/ai_purego_wasip1.go)) to bypass the package and hand-roll bespoke syscall wrappers.
++3. **Floating-point ABI corruption**: The satellite dispatcher routes all calls through integer registers via `purego.SyscallN`, corrupting floating-point arguments and returns.
++4. **Registration caps and return truncation**: Distinct callback registrations are capped at 16 in the runtime, and outbound cross-island calls truncate multiple return values.
++5. **Non-deterministic projection**: Host projection relies on randomized Go map iteration over thread stacks.
++
++---
++
++### 1. Boundary-Driven Overlapped Ownership & Callback Lifecycle
++- **Mandate**:
++  Callback delivery and return must use guest-owned `Overlapped` cells discovered during normal event-loop continuation. Ownership transitions must be completely deterministic, allowing asynchronous execution and yielding without memory corruption or polling races.
++- **Root Cause**:
++  1. [purego/purego_wasip1.go](purego/purego_wasip1.go#L77-L135) bypasses the Go runtime's continuation hook ([rusticated-go/runtime/os_rusticated.go](rusticated-go/runtime/os_rusticated.go#L230-L247)). It instead starts an internal background goroutine `monitorLoop()` polling with `runtime.Gosched()`.
++  2. When a callback goroutine finishes in [purego/purego_wasip1.go](purego/purego_wasip1.go#L162-L167), it writes its return values to the overlapped cell and sets `completed = 1`. `monitorLoop()` immediately awakes inside the guest, misinterprets the completion flag as a *new* invocation from the host, clears `completed = 0`, and re-executes the callback with stale data.
++  3. When `run()` exits, [mohabbat/washmhost/env_dylib.go](mohabbat/washmhost/env_dylib.go#L419-L424) sees `completed == 0`, categorizes the invocation as still in-flight (`FrameStateGuestAsync`), and fails to collect the return payload.
++- **Remediation Specification (Boundary-Driven Invariants)**:
++  - **Cell-Scoped Ownership**: Ownership of each registered callback overlapped is anchored strictly to `run()` boundaries:
++    - **Host Outside `run()`**: The host owns the callback cell during `BeforeRun` and `AfterRun`. It may project new invocations or drain completed returns.
++    - **Guest Inside `run()`**: The guest exclusively owns the callback cell during `run()`. The host may continue running background operations (satellite IPC, timers, network), but must never read or write active callback cells.
++    - **No Host Polling**: The host must never poll guest overlapped memory while `run()` is executing.
++  - **Inline vs. Asynchronous Yielding**:
++    - **Inline Completion**: If the guest executes the callback synchronously within the current slice, it leaves `completed = 1` set. At `run()` exit, `AfterRun` drains the result and resets the cell to `Idle`.
++    - **Asynchronous Yielding**: If the guest executes the callback asynchronously, `handleContinuation` atomically copies the arguments to the Go heap, clears `completed = 0`, and queues the goroutine. When the goroutine finishes in a subsequent slice, it writes the result, sets `completed = 1`, and calls `pauseToHost()` to yield immediately.
++  - **Single-Transaction Rule & Host Parking**: Because each callback registration has exactly one shuttle cell, at most one invocation may be projected into that cell at a time. If additional invocations arrive from other satellite threads while the cell is active (`Projected` or `GuestAsync`), the host must park them in a FIFO queue and only project the next invocation after the preceding transaction reaches `Idle`.
++
++---
++
++### 2. Elimination of Purego Mimicry & 64-Bit Flat Ordinal Enforcement
++- **Mandate**:
++  Guest-side FFI calls must use 64-bit flat ordinals (`uint64`) across all boundaries, preventing pointer truncation on `wasm32` (where `uintptr` is 32 bits), and interface directly via `syscall` instead of fragile purego wrappers.
++- **Root Cause**:
++  1. `dylib_rusticated.go` used `uintptr` for library handles, symbol handles, allocated memory pointers, and callback tokens. On `wasm32`, `uintptr` is 32-bit, truncating native 64-bit host/satellite addresses.
++  2. Emulating `github.com/ebitengine/purego` via an in-tree package created package resolution dependencies in `go.mod`, introduced pointer reflection zeroing bugs, and added unnecessary indirection.
++- **Remediation**:
++  - Enforced `uint64` for all library handles, symbols, pointers, and tokens across `rusticated-go/syscall/dylib_rusticated.go`.
++  - Moved memory helpers (`Alloc`, `Free`, `CString`, `GoString`, `GoStringN`, `GoBytes`, `RemoteReader`, `RemoteWriter`) directly into `syscall` operating on `uint64` ordinals.
++  - Removed in-tree `purego/` package and updated [kabibi/ai_purego_wasip1.go](kabibi/ai_purego_wasip1.go) to use `syscall` and `uint64` ordinals directly.
++
++---
++
++### 3. Distinct Callback Registration Capacity Limit
++- **Mandate**:
++  The callback runtime must support arbitrary callback shapes and registrations without small fixed limits.
++- **Root Cause**:
++  [rusticated-go/runtime/os_rusticated.go](rusticated-go/runtime/os_rusticated.go#L196) allocates a fixed array:
++  ```go
++  var registeredCallbacks [16]*callbackRegistration
++  ```
++  While the 512-byte buffer easily accommodates up to 58 parameters per call, this array limits the *total number of distinct `NewCallback` registrations* to 16 for the entire process lifetime. Attempting to register a 17th callback silently fails.
++- **Remediation Specification**:
++  - Replace the fixed-size array with a dynamically expanding slice or locked table in [rusticated-go/runtime/os_rusticated.go](rusticated-go/runtime/os_rusticated.go#L196-L208).
++  - Explicitly return an error if registration capacity or memory cannot be allocated.
++
++---
++
++### 4. Floating-Point Calling Convention Invalidation in the Satellite
++- **Mandate**:
++  WASM signatures support primitive types `f32` and `f64`. Floating-point arguments and returns must adhere to the target architecture's C ABI.
++- **Root Cause**:
++  In [mohabbat/washmhost/satellite.go](mohabbat/washmhost/satellite.go#L274-L297), `executeCall` casts all arguments to `uintptr`, passes them to `purego.SyscallN(sym, sysArgs...)`, and discards the signature parameter types (`_ = params`).
++- **Failure Mode**:
++  On x86_64 (System V and Windows x64) and AArch64 (AAPCS64), float and double parameters must be passed in floating-point/vector registers (`XMM0-XMM7` or `D0-D7`). `purego.SyscallN` populates only general-purpose integer registers (`RDI, RSI...` or `X0, X1...`), causing float parameters to be skipped or misaligned and producing corrupted results in floating-point C APIs.
++- **Remediation Specification**:
++  - Update [mohabbat/washmhost/satellite.go](mohabbat/washmhost/satellite.go#L274-L297) to inspect parameter and result types from `req.SigBytes`.
++  - Use architecture-appropriate FFI dispatch (such as dynamic assembly stubs or Cgo/libffi wrappers) that routes `f32` and `f64` ordinals into hardware floating-point registers.
++
++---
++
++### 5. Multiple Return Value Truncation on Outbound Calls
++- **Mandate**:
++  Cross-island invocations support arbitrary ordered result lists (`[r1, r2, ...]`).
++- **Root Cause**:
++  While the satellite collects multiple return values in [mohabbat/washmhost/satellite.go](mohabbat/washmhost/satellite.go#L286-L293), the host's `finishOp` in [mohabbat/washmhost/env_dylib.go](mohabbat/washmhost/env_dylib.go#L281) only writes a single 64-bit integer (`resultExt`) into the guest overlapped. [rusticated-go/syscall/dylib_rusticated.go](rusticated-go/syscall/dylib_rusticated.go#L141) returns only `(uint64, error)`, and [purego/purego_wasip1.go](purego/purego_wasip1.go#L46) hardcodes `[]uint64{res}`.
++- **Remediation Specification**:
++  - Extend the dylib call overlapped contract to support writing multiple result ordinals into a guest return buffer when `len(results) > 1`.
++  - Propagate all result ordinals through `syscall.DylibCall` into [purego/purego.go](purego/purego.go#L112-L119).
++
++---
++
++### 6. Non-Deterministic Callback Projection in Host `BeforeRun`
++- **Mandate**:
++  The host must project the top-most ready invocation into the guest overlapped deterministically.
++- **Root Cause**:
++  [mohabbat/washmhost/env_dylib.go](mohabbat/washmhost/env_dylib.go#L355-L370) iterates over `m.threadStacks` with a Go map range loop (`for _, stack := range m.threadStacks`), which has randomized order. Furthermore, the inner loop searches forward from index 0 (oldest/outermost frame) rather than inspecting the top frame of each thread stack.
++- **Remediation Specification**:
++  - Replace randomized map iteration with a deterministic FIFO queue of ready invocations per callback registration.
++  - When inspecting thread-local stacks, always project from the top of the stack (`stack[len(stack)-1]`) to preserve strict LIFO nesting.
++
++---
++
++### 7. Inefficient and Non-Transitive Goroutine ID Tracking
++- **Mandate**:
++  Calls made while servicing a callback must route back to the parked satellite thread using the callback's invocation ID as `parentInvocationID`.
++- **Root Cause**:
++  [purego/purego.go](purego/purego.go#L53-L67) parses stringified stack traces via `runtime.Stack()` on every outbound FFI call to discover the current goroutine ID.
++- **Failure Mode**:
++  Parsing stack traces on every FFI call causes severe runtime latency. Furthermore, child goroutines spawned within a callback handler do not inherit the parent invocation ID because the association is strictly keyed by goroutine ID.
++- **Remediation Specification**:
++  - Provide a fast runtime intrinsic or linkname accessor to read the goroutine ID directly from `g`.
++  - Add explicit context propagation (`context.Context` or task-local inheritance) so child goroutines spawned to service an FFI callback inherit the active `parentInvocationID`.
+diff --git a/kabibi/ai.go b/kabibi/ai.go
+index d4722f9..7e15312 100644
+--- a/kabibi/ai.go
++++ b/kabibi/ai.go
+@@ -86,7 +86,7 @@ func runAIPrompt(userInput string, onToken func(string)) error {
+ 	libPath := filepath.Join(libDir, "litert_lm_ext"+libExt())
+ 
+ 	// 1. Initialize the Engine
+-	engine, err := NewLMEngine(libPath, modelPath, "cpu")
++	engine, err := NewLMEngine(libPath, modelPath, "")
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -137,7 +137,7 @@ func runAIPromptStateful(userInput string, conv *Conversation, onToken func(stri
+ 		libDir := filepath.Join(cacheDir, "lib")
+ 		libPath := filepath.Join(libDir, "litert_lm_ext"+libExt())
+ 
+-		engine, err := NewLMEngine(libPath, modelPath, "cpu")
++		engine, err := NewLMEngine(libPath, modelPath, "")
+ 		if err != nil {
+ 			return err
+ 		}
+diff --git a/kabibi/ai_purego_native.go b/kabibi/ai_purego_native.go
+index a6f7f77..bc794cc 100644
+--- a/kabibi/ai_purego_native.go
++++ b/kabibi/ai_purego_native.go
+@@ -4,6 +4,8 @@ package main
+ 
+ import (
+ 	"fmt"
++	"os"
++	"runtime"
+ 	"sync"
+ 	"unsafe"
+ 
+@@ -25,21 +27,65 @@ var (
+ 	lmGetSinkLoggerSize    func() uintptr
+ 	lmGetSinkLoggerMessage func(index uintptr) uintptr
+ 	lmClearSinkLogger      func()
++	lmStreamChunkGetText   func(chunk uintptr) uintptr
++	lmStreamChunkIsFinal   func(chunk uintptr) bool
++	lmStreamChunkGetError  func(chunk uintptr) uintptr
++
++	lmSettingsSetEnableSpeculativeDecoding     func(settings uintptr, enable bool)
++	lmSettingsSetUseRingbuffersLocalAttention func(settings uintptr, enable bool)
++	lmSettingsSetGpuDecodeStepsPerSync         func(settings uintptr, steps int32)
++	lmSettingsSetNumThreads                    func(settings uintptr, threads int32)
++	lmLoadedFileCreate                         func(modelPath uintptr) uintptr
++	lmLoadedFileDelete                         func(file uintptr)
++	lmLoadedFileHasSpeculativeDecodingSupport  func(file uintptr) bool
+ )
+ 
+ // tokenCallbackRegistry maps opaque IDs to Go callbacks for streaming tokens.
+-var tokenCallbackRegistry = make(map[uintptr]func(string))
+-var tokenCallbackNextID uintptr
++var (
++	tokenCallbackMu       sync.Mutex
++	tokenCallbackRegistry = make(map[uintptr]func(string))
++	tokenDoneChannels     = make(map[uintptr]chan struct{})
++	tokenCallbackNextID   uintptr
++)
+ 
+ // nativeTokenCallback is the C-callable trampoline passed to
+ // litert_lm_conversation_send_message_stream.
+ //
+-// C signature: void callback(void* userData, const char* text, bool isDone, const char* statsJSON)
+-func nativeTokenCallback(userData, text uintptr, isDone bool, statsJSON uintptr) {
+-	if text != 0 {
+-		token := ptrToGoString(text)
+-		if fn, ok := tokenCallbackRegistry[userData]; ok {
+-			fn(token)
++// C signature: void callback(void* userData, void* chunkPtr)
++func nativeTokenCallback(userData, chunkPtr uintptr) {
++	if lmStreamChunkGetError != nil {
++		errPtr := lmStreamChunkGetError(chunkPtr)
++		if errPtr != 0 {
++			errStr := ptrToGoString(errPtr)
++			if errStr != "" {
++				fmt.Fprintf(os.Stderr, "LiteRT stream error: %s\n", errStr)
++			}
++		}
++	}
++	if lmStreamChunkGetText != nil {
++		textPtr := lmStreamChunkGetText(chunkPtr)
++		if textPtr != 0 {
++			token := ptrToGoString(textPtr)
++			tokenCallbackMu.Lock()
++			fn := tokenCallbackRegistry[userData]
++			tokenCallbackMu.Unlock()
++			if fn != nil {
++				fn(token)
++			}
++		}
++	}
++	if lmStreamChunkIsFinal != nil {
++		if isFinal := lmStreamChunkIsFinal(chunkPtr); isFinal {
++			tokenCallbackMu.Lock()
++			ch := tokenDoneChannels[userData]
++			tokenCallbackMu.Unlock()
++			if ch != nil {
++				select {
++				case <-ch:
++				default:
++					close(ch)
++				}
++			}
+ 		}
+ 	}
+ }
+@@ -94,10 +140,27 @@ func ensureLibLoaded(libPath string) error {
+ 		purego.RegisterLibFunc(&lmGetSinkLoggerSize, lib, "LiteRtGetSinkLoggerSize")
+ 		purego.RegisterLibFunc(&lmGetSinkLoggerMessage, lib, "LiteRtGetSinkLoggerMessage")
+ 		purego.RegisterLibFunc(&lmClearSinkLogger, lib, "LiteRtClearSinkLogger")
++		purego.RegisterLibFunc(&lmStreamChunkGetText, lib, "litert_lm_stream_chunk_get_text")
++		purego.RegisterLibFunc(&lmStreamChunkIsFinal, lib, "litert_lm_stream_chunk_is_final")
++		purego.RegisterLibFunc(&lmStreamChunkGetError, lib, "litert_lm_stream_chunk_get_error")
++
++		tryRegisterLibFunc(&lmSettingsSetEnableSpeculativeDecoding, lib, "litert_lm_engine_settings_set_enable_speculative_decoding")
++		tryRegisterLibFunc(&lmSettingsSetUseRingbuffersLocalAttention, lib, "litert_lm_engine_settings_set_use_ringbuffers_local_attention")
++		tryRegisterLibFunc(&lmSettingsSetGpuDecodeStepsPerSync, lib, "litert_lm_engine_settings_set_gpu_decode_steps_per_sync")
++		tryRegisterLibFunc(&lmSettingsSetNumThreads, lib, "litert_lm_engine_settings_set_num_threads")
++		tryRegisterLibFunc(&lmLoadedFileCreate, lib, "litert_lm_loaded_file_create")
++		tryRegisterLibFunc(&lmLoadedFileDelete, lib, "litert_lm_loaded_file_delete")
++		tryRegisterLibFunc(&lmLoadedFileHasSpeculativeDecodingSupport, lib, "litert_lm_loaded_file_has_speculative_decoding_support")
+ 	})
+ 	return libErr
+ }
+ 
++func tryRegisterLibFunc(target any, lib uintptr, name string) {
++	if sym, err := dlsym(lib, name); err == nil && sym != 0 {
++		purego.RegisterLibFunc(target, lib, name)
++	}
++}
++
+ func configureLogging() {
+ 	// Mute any underlying glog/Abseil logging globally in the loaded library's memory space
+ 	if sym, err := dlsym(lib, "FLAGS_minloglevel"); err == nil && sym != 0 {
+@@ -129,6 +192,37 @@ type LMEngine struct {
+ 
+ func (e *LMEngine) RawEngine() uint64 { return e.ptr }
+ 
++func checkSpeculativeDecodingSupport(modelPtr uintptr) bool {
++	if lmLoadedFileCreate == nil || lmLoadedFileHasSpeculativeDecodingSupport == nil {
++		return false
++	}
++	file := lmLoadedFileCreate(modelPtr)
++	if file == 0 {
++		return false
++	}
++	hasSupport := lmLoadedFileHasSpeculativeDecodingSupport(file)
++	if lmLoadedFileDelete != nil {
++		lmLoadedFileDelete(file)
++	}
++	return hasSupport
++}
++
++func resolveBackendCandidates(backend string) []string {
++	if backend != "" && backend != "auto" {
++		if backend == "cpu" {
++			return []string{"cpu"}
++		}
++		return []string{backend, "cpu"}
++	}
++	if env := os.Getenv("LITERTLM_BACKEND"); env != "" {
++		if env == "cpu" {
++			return []string{"cpu"}
++		}
++		return []string{env, "cpu"}
++	}
++	return []string{"gpu", "npu", "cpu"}
++}
++
+ func NewLMEngine(libPath, modelPath, backend string) (*LMEngine, error) {
+ 	if err := ensureLibLoaded(libPath); err != nil {
+ 		return nil, err
+@@ -136,24 +230,49 @@ func NewLMEngine(libPath, modelPath, backend string) (*LMEngine, error) {
+ 
+ 	configureLogging()
+ 
+-	// Build C strings.
+ 	cModel, keepModel := goStringToCPtr(modelPath)
+-	cBackend, keepBackend := goStringToCPtr(backend)
+ 	_ = keepModel
+-	_ = keepBackend
+ 
+-	settings := lmSettingsCreate(cModel, cBackend, 0, 0)
+-	if settings == 0 {
+-		return nil, fmt.Errorf("litert_lm_engine_settings_create returned NULL")
+-	}
+-	defer lmSettingsDelete(settings)
++	supportsSpec := checkSpeculativeDecodingSupport(cModel)
++
++	candidates := resolveBackendCandidates(backend)
++	var lastErr error
+ 
+-	engine := lmEngineCreate(settings)
+-	if engine == 0 {
+-		return nil, fmt.Errorf("litert_lm_engine_create returned NULL")
++	for _, cand := range candidates {
++		cBackend, keepBackend := goStringToCPtr(cand)
++		_ = keepBackend
++
++		settings := lmSettingsCreate(cModel, cBackend, 0, 0)
++		if settings == 0 {
++			lastErr = fmt.Errorf("litert_lm_engine_settings_create returned NULL for backend %s", cand)
++			continue
++		}
++
++		if supportsSpec && lmSettingsSetEnableSpeculativeDecoding != nil {
++			lmSettingsSetEnableSpeculativeDecoding(settings, true)
++		}
++		if lmSettingsSetUseRingbuffersLocalAttention != nil {
++			lmSettingsSetUseRingbuffersLocalAttention(settings, true)
++		}
++		if cand == "gpu" && lmSettingsSetGpuDecodeStepsPerSync != nil {
++			lmSettingsSetGpuDecodeStepsPerSync(settings, 8)
++		}
++		if cand == "cpu" && lmSettingsSetNumThreads != nil {
++			lmSettingsSetNumThreads(settings, int32(runtime.NumCPU()))
++		}
++
++		engine := lmEngineCreate(settings)
++		lmSettingsDelete(settings)
++		if engine != 0 {
++			return &LMEngine{ptr: uint64(engine)}, nil
++		}
++		lastErr = fmt.Errorf("litert_lm_engine_create returned NULL for backend %s", cand)
+ 	}
+ 
+-	return &LMEngine{ptr: uint64(engine)}, nil
++	if lastErr != nil {
++		return nil, lastErr
++	}
++	return nil, fmt.Errorf("failed to initialize LiteRT-LM engine on any backend")
+ }
+ 
+ func (e *LMEngine) Close() error {
+@@ -191,10 +310,20 @@ func (c *LMConversation) Close() error {
+ }
+ 
+ func (c *LMConversation) SendMessageStream(payloadJSON string, onToken func(string)) error {
++	tokenCallbackMu.Lock()
+ 	tokenCallbackNextID++
+ 	cbID := tokenCallbackNextID
++	doneCh := make(chan struct{})
+ 	tokenCallbackRegistry[cbID] = onToken
+-	defer delete(tokenCallbackRegistry, cbID)
++	tokenDoneChannels[cbID] = doneCh
++	tokenCallbackMu.Unlock()
++
++	defer func() {
++		tokenCallbackMu.Lock()
++		delete(tokenCallbackRegistry, cbID)
++		delete(tokenDoneChannels, cbID)
++		tokenCallbackMu.Unlock()
++	}()
+ 
+ 	trampoline := purego.NewCallback(nativeTokenCallback)
+ 
+@@ -206,6 +335,9 @@ func (c *LMConversation) SendMessageStream(payloadJSON string, onToken func(stri
+ 		return fmt.Errorf("litert_lm_conversation_send_message_stream failed: %d", rc)
+ 	}
+ 
++	// Wait for stream completion from the background inference thread
++	<-doneCh
++
+ 	// Clean/clear the library's in-memory sink logger buffer to prevent RAM growth
+ 	if lmClearSinkLogger != nil {
+ 		lmClearSinkLogger()
+diff --git a/kabibi/ai_purego_wasip1.go b/kabibi/ai_purego_wasip1.go
+index 1f5dff7..f0fa82c 100644
+--- a/kabibi/ai_purego_wasip1.go
++++ b/kabibi/ai_purego_wasip1.go
+@@ -2,25 +2,316 @@
+ 
+ package main
+ 
+-// Stub implementation for WASM - no DLL calls, no infrastructure
++import (
++	"encoding/binary"
++	"fmt"
++	"os"
++	"runtime"
++	"sync"
++	"syscall"
++	"unsafe"
++)
+ 
+-// LMEngine is a stub in WASM
++const (
++	i32 = 0x7F
++	i64 = 0x7E
++)
++
++var (
++	libOnce sync.Once
++	libErr  error
++	lib     uint64
++
++	symSettingsCreate       uint64
++	symSettingsDelete       uint64
++	symEngineCreate         uint64
++	symCfgCreate            uint64
++	symCfgDelete            uint64
++	symConvCreate           uint64
++	symConvSendStream       uint64
++	symSetLogLevel          uint64
++	symGetDefaultLogger     uint64
++	symSetMinLoggerSeverity uint64
++	symGetSinkLoggerSize    uint64
++	symGetSinkLoggerMessage uint64
++	symClearSinkLogger      uint64
++	symStreamChunkGetText   uint64
++	symStreamChunkIsFinal   uint64
++	symStreamChunkGetError  uint64
++
++	symSettingsSetEnableSpeculativeDecoding     uint64
++	symSettingsSetUseRingbuffersLocalAttention uint64
++	symSettingsSetGpuDecodeStepsPerSync         uint64
++	symSettingsSetNumThreads                    uint64
++	symLoadedFileCreate                         uint64
++	symLoadedFileDelete                         uint64
++	symLoadedFileHasSpeculativeDecodingSupport  uint64
++)
++
++var (
++	tokenCallbackMu       sync.Mutex
++	tokenCallbackRegistry = make(map[uint64]func(string))
++	tokenDoneChannels     = make(map[uint64]chan struct{})
++	tokenCallbackNextID   uint64
++	tokenCbOv             [512]byte
++	tokenTrampoline       uint64
++	tokenRegOnce          sync.Once
++	tokenRegErr           error
++)
++
++func callDylib(sym uint64, paramTypes, resultTypes []byte, args ...uint64) (uint64, error) {
++	sig := make([]byte, 0, 3+len(paramTypes)+len(resultTypes))
++	sig = append(sig, 0x60, byte(len(paramTypes)))
++	sig = append(sig, paramTypes...)
++	sig = append(sig, byte(len(resultTypes)))
++	sig = append(sig, resultTypes...)
++	res, err := syscall.DylibCall(sym, sig, args, 0)
++	if err != nil {
++		return 0, err
++	}
++	if len(res) > 0 {
++		return res[0], nil
++	}
++	return 0, nil
++}
++
++func goStringToCPtr(s string) (uint64, func()) {
++	ptr, free, err := syscall.CString(s)
++	if err != nil {
++		return 0, func() {}
++	}
++	return ptr, free
++}
++
++func ptrToGoString(ptr uint64) string {
++	if ptr == 0 {
++		return ""
++	}
++	s, _ := syscall.GoString(ptr)
++	return s
++}
++
++func ensureLibLoaded(libPath string) error {
++	libOnce.Do(func() {
++		var err error
++		lib, err = syscall.DylibOpen(libPath, syscall.RTLD_NOW|syscall.RTLD_GLOBAL)
++		if err != nil {
++			libErr = fmt.Errorf("failed to load %s: %w", libPath, err)
++			return
++		}
++
++		symSettingsCreate, _ = syscall.DylibSym(lib, "litert_lm_engine_settings_create")
++		symSettingsDelete, _ = syscall.DylibSym(lib, "litert_lm_engine_settings_delete")
++		symEngineCreate, _ = syscall.DylibSym(lib, "litert_lm_engine_create")
++		symCfgCreate, _ = syscall.DylibSym(lib, "litert_lm_conversation_config_create")
++		symCfgDelete, _ = syscall.DylibSym(lib, "litert_lm_conversation_config_delete")
++		symConvCreate, _ = syscall.DylibSym(lib, "litert_lm_conversation_create")
++		symConvSendStream, _ = syscall.DylibSym(lib, "litert_lm_conversation_send_message_stream")
++		symSetLogLevel, _ = syscall.DylibSym(lib, "litert_lm_set_min_log_level")
++		symGetDefaultLogger, _ = syscall.DylibSym(lib, "LiteRtGetDefaultLogger")
++		symSetMinLoggerSeverity, _ = syscall.DylibSym(lib, "LiteRtSetMinLoggerSeverity")
++		symGetSinkLoggerSize, _ = syscall.DylibSym(lib, "LiteRtGetSinkLoggerSize")
++		symGetSinkLoggerMessage, _ = syscall.DylibSym(lib, "LiteRtGetSinkLoggerMessage")
++		symClearSinkLogger, _ = syscall.DylibSym(lib, "LiteRtClearSinkLogger")
++		symStreamChunkGetText, _ = syscall.DylibSym(lib, "litert_lm_stream_chunk_get_text")
++		symStreamChunkIsFinal, _ = syscall.DylibSym(lib, "litert_lm_stream_chunk_is_final")
++		symStreamChunkGetError, _ = syscall.DylibSym(lib, "litert_lm_stream_chunk_get_error")
++
++		symSettingsSetEnableSpeculativeDecoding, _ = syscall.DylibSym(lib, "litert_lm_engine_settings_set_enable_speculative_decoding")
++		symSettingsSetUseRingbuffersLocalAttention, _ = syscall.DylibSym(lib, "litert_lm_engine_settings_set_use_ringbuffers_local_attention")
++		symSettingsSetGpuDecodeStepsPerSync, _ = syscall.DylibSym(lib, "litert_lm_engine_settings_set_gpu_decode_steps_per_sync")
++		symSettingsSetNumThreads, _ = syscall.DylibSym(lib, "litert_lm_engine_settings_set_num_threads")
++		symLoadedFileCreate, _ = syscall.DylibSym(lib, "litert_lm_loaded_file_create")
++		symLoadedFileDelete, _ = syscall.DylibSym(lib, "litert_lm_loaded_file_delete")
++		symLoadedFileHasSpeculativeDecodingSupport, _ = syscall.DylibSym(lib, "litert_lm_loaded_file_has_speculative_decoding_support")
++	})
++	return libErr
++}
++
++func configureLogging() {
++	if sym, err := syscall.DylibSym(lib, "FLAGS_minloglevel"); err == nil && sym != 0 {
++		var buf [4]byte
++		binary.LittleEndian.PutUint32(buf[:], 2) // 2 = ERROR
++		_ = syscall.DylibWriteMem(sym, buf[:])
++	}
++	if sym, err := syscall.DylibSym(lib, "FLAGS_logtostderr"); err == nil && sym != 0 {
++		_ = syscall.DylibWriteMem(sym, []byte{0})
++	}
++	if sym, err := syscall.DylibSym(lib, "FLAGS_alsologtostderr"); err == nil && sym != 0 {
++		_ = syscall.DylibWriteMem(sym, []byte{0})
++	}
++
++	if symSetLogLevel != 0 {
++		_, _ = callDylib(symSetLogLevel, []byte{i64}, nil, 10)
++	}
++
++	if symGetDefaultLogger != 0 && symSetMinLoggerSeverity != 0 {
++		logger, err := callDylib(symGetDefaultLogger, nil, []byte{i64})
++		if err == nil && logger != 0 {
++			_, _ = callDylib(symSetMinLoggerSeverity, []byte{i64, i32}, []byte{i32}, logger, 3)
++		}
++	}
++}
++
++func ensureCallbackRegistered() error {
++	tokenRegOnce.Do(func() {
++		// Callback signature: void callback(void* userData, void* chunkPtr)
++		// WASM functype: [i64, i64] -> []
++		cbSig := []byte{0x60, 2, i64, i64, 0}
++		var err error
++		tokenTrampoline, err = syscall.DylibRegisterCallback(cbSig, unsafe.Pointer(&tokenCbOv[0]), 512, func(args []uint64) []uint64 {
++			userData := args[0]
++			chunkPtr := args[1]
++
++			if chunkPtr != 0 {
++				if symStreamChunkGetError != 0 {
++					errPtr, _ := callDylib(symStreamChunkGetError, []byte{i64}, []byte{i64}, chunkPtr)
++					if errPtr != 0 {
++						errStr := ptrToGoString(errPtr)
++						if errStr != "" {
++							fmt.Fprintf(os.Stderr, "LiteRT stream error: %s\n", errStr)
++						}
++					}
++				}
++
++				if symStreamChunkGetText != 0 {
++					textPtr, _ := callDylib(symStreamChunkGetText, []byte{i64}, []byte{i64}, chunkPtr)
++					if textPtr != 0 {
++						token := ptrToGoString(textPtr)
++						if token != "" {
++							tokenCallbackMu.Lock()
++							fn := tokenCallbackRegistry[userData]
++							tokenCallbackMu.Unlock()
++							if fn != nil {
++								fn(token)
++							}
++						}
++					}
++				}
++
++				if symStreamChunkIsFinal != 0 {
++					isFinalVal, _ := callDylib(symStreamChunkIsFinal, []byte{i64}, []byte{i32}, chunkPtr)
++					if int32(isFinalVal) != 0 {
++						tokenCallbackMu.Lock()
++						ch := tokenDoneChannels[userData]
++						tokenCallbackMu.Unlock()
++						if ch != nil {
++							select {
++							case <-ch:
++							default:
++								close(ch)
++							}
++						}
++					}
++				}
++			}
++
++			return nil
++		})
++		if err != nil {
++			tokenRegErr = fmt.Errorf("failed to register callback: %w", err)
++		}
++	})
++	return tokenRegErr
++}
++
++// LMEngine wraps the backend model engine
+ type LMEngine struct {
+ 	ptr uint64
+ }
+ 
+ func (e *LMEngine) RawEngine() uint64 { return e.ptr }
+ 
++func checkSpeculativeDecodingSupport(modelPtr uint64) bool {
++	if symLoadedFileCreate == 0 || symLoadedFileHasSpeculativeDecodingSupport == 0 {
++		return false
++	}
++	file, err := callDylib(symLoadedFileCreate, []byte{i64}, []byte{i64}, modelPtr)
++	if err != nil || file == 0 {
++		return false
++	}
++	hasSupport, err := callDylib(symLoadedFileHasSpeculativeDecodingSupport, []byte{i64}, []byte{i32}, file)
++	if symLoadedFileDelete != 0 {
++		_, _ = callDylib(symLoadedFileDelete, []byte{i64}, nil, file)
++	}
++	return err == nil && int32(hasSupport) != 0
++}
++
++func resolveBackendCandidates(backend string) []string {
++	if backend != "" && backend != "auto" {
++		if backend == "cpu" {
++			return []string{"cpu"}
++		}
++		return []string{backend, "cpu"}
++	}
++	if env := os.Getenv("LITERTLM_BACKEND"); env != "" {
++		if env == "cpu" {
++			return []string{"cpu"}
++		}
++		return []string{env, "cpu"}
++	}
++	return []string{"gpu", "npu", "cpu"}
++}
++
+ func NewLMEngine(libPath, modelPath, backend string) (*LMEngine, error) {
+-	// WASM stub: pretend initialization succeeded
+-	return &LMEngine{ptr: 1}, nil
++	if err := ensureLibLoaded(libPath); err != nil {
++		return nil, err
++	}
++
++	configureLogging()
++
++	cModel, freeModel := goStringToCPtr(modelPath)
++	defer freeModel()
++
++	supportsSpec := checkSpeculativeDecodingSupport(cModel)
++
++	candidates := resolveBackendCandidates(backend)
++	var lastErr error
++
++	for _, cand := range candidates {
++		cBackend, freeBackend := goStringToCPtr(cand)
++
++		settings, err := callDylib(symSettingsCreate, []byte{i64, i64, i64, i64}, []byte{i64}, cModel, cBackend, 0, 0)
++		freeBackend()
++		if err != nil || settings == 0 {
++			lastErr = fmt.Errorf("litert_lm_engine_settings_create failed for backend %s: %v", cand, err)
++			continue
++		}
++
++		if supportsSpec && symSettingsSetEnableSpeculativeDecoding != 0 {
++			_, _ = callDylib(symSettingsSetEnableSpeculativeDecoding, []byte{i64, i32}, nil, settings, 1)
++		}
++		if symSettingsSetUseRingbuffersLocalAttention != 0 {
++			_, _ = callDylib(symSettingsSetUseRingbuffersLocalAttention, []byte{i64, i32}, nil, settings, 1)
++		}
++		if cand == "gpu" && symSettingsSetGpuDecodeStepsPerSync != 0 {
++			_, _ = callDylib(symSettingsSetGpuDecodeStepsPerSync, []byte{i64, i32}, nil, settings, 8)
++		}
++		if cand == "cpu" && symSettingsSetNumThreads != 0 {
++			_, _ = callDylib(symSettingsSetNumThreads, []byte{i64, i32}, nil, settings, uint64(runtime.NumCPU()))
++		}
++
++		engine, err := callDylib(symEngineCreate, []byte{i64}, []byte{i64}, settings)
++		if symSettingsDelete != 0 {
++			_, _ = callDylib(symSettingsDelete, []byte{i64}, nil, settings)
++		}
++		if err == nil && engine != 0 {
++			return &LMEngine{ptr: engine}, nil
++		}
++		lastErr = fmt.Errorf("litert_lm_engine_create failed for backend %s: %v", cand, err)
++	}
++
++	if lastErr != nil {
++		return nil, lastErr
++	}
++	return nil, fmt.Errorf("failed to initialize LiteRT-LM engine on any backend")
+ }
+ 
+ func (e *LMEngine) Close() error {
+ 	return nil
+ }
+ 
+-// LMConversation is a stub in WASM
++// LMConversation wraps a session/conversation state
+ type LMConversation struct {
+ 	ptr uint64
+ }
+@@ -32,8 +323,20 @@ func NewLMConversationFromHandles(engine, conv uint64) *LMConversation {
+ }
+ 
+ func (e *LMEngine) NewConversation() (*LMConversation, error) {
+-	// WASM stub: pretend conversation creation succeeded
+-	return &LMConversation{ptr: 1}, nil
++	config, err := callDylib(symCfgCreate, []byte{i64}, []byte{i64}, e.ptr)
++	if err != nil || config == 0 {
++		return nil, fmt.Errorf("litert_lm_conversation_config_create failed: %v", err)
++	}
++	defer func() {
++		_, _ = callDylib(symCfgDelete, []byte{i64}, nil, config)
++	}()
++
++	conv, err := callDylib(symConvCreate, []byte{i64, i64}, []byte{i64}, e.ptr, config)
++	if err != nil || conv == 0 {
++		return nil, fmt.Errorf("litert_lm_conversation_create failed: %v", err)
++	}
++
++	return &LMConversation{ptr: conv}, nil
+ }
+ 
+ func (c *LMConversation) Close() error {
+@@ -41,11 +344,43 @@ func (c *LMConversation) Close() error {
+ }
+ 
+ func (c *LMConversation) SendMessageStream(payloadJSON string, onToken func(string)) error {
+-	// WASM stub: deliver hardcoded response without any DLL infrastructure
+-	// Split response into tokens and deliver
+-	tokens := []string{"This", " ", "is", " ", "a", " ", "stub", " ", "response", " ", "from", " ", "WASM", "."}
+-	for _, token := range tokens {
+-		onToken(token)
++	if err := ensureCallbackRegistered(); err != nil {
++		return err
+ 	}
++
++	tokenCallbackMu.Lock()
++	tokenCallbackNextID++
++	cbID := tokenCallbackNextID
++	doneCh := make(chan struct{})
++	tokenCallbackRegistry[cbID] = onToken
++	tokenDoneChannels[cbID] = doneCh
++	tokenCallbackMu.Unlock()
++
++	defer func() {
++		tokenCallbackMu.Lock()
++		delete(tokenCallbackRegistry, cbID)
++		delete(tokenDoneChannels, cbID)
++		tokenCallbackMu.Unlock()
++	}()
++
++	cMsg, freeMsg := goStringToCPtr(payloadJSON)
++	defer freeMsg()
++
++	rc, err := callDylib(symConvSendStream, []byte{i64, i64, i64, i64, i64, i64}, []byte{i32},
++		c.ptr, cMsg, 0, 0, tokenTrampoline, cbID)
++	if err != nil {
++		return fmt.Errorf("litert_lm_conversation_send_message_stream failed: %w", err)
++	}
++	if int32(rc) != 0 {
++		return fmt.Errorf("litert_lm_conversation_send_message_stream returned error: %d", int32(rc))
++	}
++
++	// Wait for stream completion from the background inference thread
++	<-doneCh
++
++	if symClearSinkLogger != 0 {
++		_, _ = callDylib(symClearSinkLogger, nil, nil)
++	}
++
+ 	return nil
+ }
+diff --git a/kabibi/assets.go b/kabibi/assets.go
+index bfe3de8..8d96ba2 100644
+--- a/kabibi/assets.go
++++ b/kabibi/assets.go
+@@ -156,8 +156,10 @@ func ensureLiteRT(ctx context.Context, progress chan<- assetProgressMsg) error {
+ 	// Step 2: Check if the extracted lib is up-to-date w.r.t. the wheel.
+ 	if libUpToDate(libDir, wheelPath) {
+ 		sendProgress(progress, "litertlm", 100, "using cached runtime")
+-		// Step 3: Background-check PyPI for a newer wheel (non-blocking).
+-		go backgroundUpdateWheel(cacheDir)
++		// Step 3: Background-check PyPI for a newer wheel (non-blocking, interactive only).
++		if progress != nil {
++			go backgroundUpdateWheel(cacheDir)
++		}
+ 		return nil
+ 	}
+ 
+@@ -170,8 +172,10 @@ func ensureLiteRT(ctx context.Context, progress chan<- assetProgressMsg) error {
+ 		return errors.New("downloaded runtime failed validation")
+ 	}
+ 
+-	// Step 4: Background-check PyPI for a newer wheel (non-blocking).
+-	go backgroundUpdateWheel(cacheDir)
++	// Step 4: Background-check PyPI for a newer wheel (non-blocking, interactive only).
++	if progress != nil {
++		go backgroundUpdateWheel(cacheDir)
++	}
+ 	return nil
+ }
+ 
+diff --git a/kabibi/main.go b/kabibi/main.go
+index 556e9f8..166cd16 100644
+--- a/kabibi/main.go
++++ b/kabibi/main.go
+@@ -60,19 +60,19 @@ func main() {
+ 	// Prompt mode: -p "prompt"
+ 	if *promptPtr != "" {
+ 		runPrompt(*promptPtr)
+-		return
++		os.Exit(0)
+ 	}
+ 
+ 	// Batch mode: -c "command"
+ 	if *commandPtr != "" {
+ 		runBatchCommand(*commandPtr, nil)
+-		return
++		os.Exit(0)
+ 	}
+ 
+ 	// Batch mode: script_file
+ 	if flag.NArg() > 0 {
+ 		runBatchFile(flag.Arg(0), flag.Args()[1:])
+-		return
++		os.Exit(0)
+ 	}
+ 
+ 	m := initialModel()
+@@ -81,6 +81,7 @@ func main() {
+ 		fmt.Printf("Alas, there's been an error: %v", err)
+ 		os.Exit(1)
+ 	}
++	os.Exit(0)
+ }
+ 
+ func runBatchCommand(cmdStr string, args []string) {
+@@ -141,7 +142,7 @@ func runPrompt(prompt string) {
+ 	// Create a session and run the prompt
+ 	session := NewLMSession(&Conversation{})
+ 	err := runPromptWithSession(ctx, session, prompt)
+-	defer session.Close()
++	session.Close()
+ 	fmt.Println()
+ 
+ 	if err != nil {
+diff --git a/kabibi/shell.go b/kabibi/shell.go
+index cce18a5..5779172 100644
+--- a/kabibi/shell.go
++++ b/kabibi/shell.go
+@@ -118,6 +118,9 @@ func isWindowsLikeEnv(env map[string]string) bool {
+ 	if runtime.GOOS == "windows" {
+ 		return true
+ 	}
++	if _, ok := lookupEnvValue(env, "PATHEXT"); ok {
++		return true
++	}
+ 	for _, key := range []string{"GOOS", "GOHOSTOS", "OS"} {
+ 		if value, ok := lookupEnvValue(env, key); ok {
+ 			if strings.EqualFold(value, "windows") || strings.EqualFold(value, "Windows_NT") {
+diff --git a/main.go b/main.go
+index f1c2831..c60c6a9 100644
+--- a/main.go
++++ b/main.go
+@@ -9,8 +9,11 @@ import (
+ )
+ 
+ func main() {
+-	vegPath := os.Getenv("MOHABBAT_VEGETABLE_PATH")
+-	inVeg := vegPath != ""
++	inVeg := runtime.GOOS == "wasip1"
++	vegPath := ""
++	if inVeg && len(os.Args) > 0 {
++		vegPath = os.Args[0]
++	}
+ 
+ 	if inVeg {
+ 		// We used to override shell temp vars here, but that caused permission issues in 'target'.
+@@ -29,12 +32,15 @@ func main() {
+ 	for i := 0; i < len(rawArgs); {
+ 		// If in a vegetable, skip the vegetable path itself if it appears in args.
+ 		arg := rawArgs[i]
+-		if inVeg && (arg == vegPath || (runtime.GOOS == "windows" && strings.EqualFold(arg, vegPath))) {
++		if inVeg && vegPath != "" && (arg == vegPath || (runtime.GOOS == "windows" && strings.EqualFold(arg, vegPath))) {
+ 			i++
+ 			continue
+ 		}
+ 
+ 		switch arg {
++		case "-h", "--help":
++			os.Stdout.WriteString("Usage: mohab [project] [-o out] [-r [args...]] [--platform name] [-v|--verbose]\n")
++			os.Exit(0)
+ 		case "--version":
+ 			ws, err := mohabbat.ResolveWorkspace("")
+ 			mohabbat.Must(err)
+diff --git a/mohabbat/brot/build.rs b/mohabbat/brot/build.rs
+index 9d53a14..f328e4d 100644
+--- a/mohabbat/brot/build.rs
++++ b/mohabbat/brot/build.rs
+@@ -1,13 +1 @@
+-fn main() {
+-    // Read washmhost size from environment (set by build system)
+-    // If not set, default to 0 (will be zero-initialized in binary)
+-    let washmhost_len = std::env::var("MOHABBAT_WASHMHOST_LEN")
+-        .unwrap_or_else(|_| "0".to_string());
+-    
+-    // Emit as a compile-time env var so it can be accessed via env!()
+-    println!("cargo:rustc-env=MOHABBAT_WASHMHOST_LEN={}", washmhost_len);
+-    
+-    // Crucial: Tell cargo to rebuild if env var changes
+-    // Without this, cargo caches old builds and never invalidates when the env var is updated
+-    println!("cargo:rerun-if-env-changed=MOHABBAT_WASHMHOST_LEN");
+-}
++fn main() {}
+diff --git a/mohabbat/brot/src/darwin.rs b/mohabbat/brot/src/darwin.rs
+index 8d274d3..ba9826f 100644
+--- a/mohabbat/brot/src/darwin.rs
++++ b/mohabbat/brot/src/darwin.rs
+@@ -1,4 +1,3 @@
+-use crate::META;
+ use alloc::vec;
+ use alloc::vec::Vec;
+ 
+@@ -63,7 +62,7 @@ unsafe fn from_cstr<'a>(p: *const u8) -> &'a [u8] {
+ }
+ 
+ pub unsafe fn run(argc: i32, argv: *const *const u8, envp: *const *const u8) -> ! {
+-    if argc < 2 || argv.is_null() {
++    if argc < 7 || argv.is_null() {
+         unsafe { exit(102) };
+     }
+     let bat_path_ptr = unsafe { *argv.add(1) };
+@@ -71,6 +70,47 @@ pub unsafe fn run(argc: i32, argv: *const *const u8, envp: *const *const u8) ->
+         unsafe { exit(102) };
+     }
+ 
++    let pool_len = unsafe {
++        let p = *argv.add(2);
++        if p.is_null() { exit(102); }
++        match crate::parse_u64_bytes(from_cstr(p)) {
++            Some(v) => v as usize,
++            None => exit(103),
++        }
++    };
++    let washmhost_offset = unsafe {
++        let p = *argv.add(3);
++        if p.is_null() { exit(102); }
++        match crate::parse_u64_bytes(from_cstr(p)) {
++            Some(v) => v as usize,
++            None => exit(103),
++        }
++    };
++    let washmhost_len = unsafe {
++        let p = *argv.add(4);
++        if p.is_null() { exit(102); }
++        match crate::parse_u64_bytes(from_cstr(p)) {
++            Some(v) => v as usize,
++            None => exit(103),
++        }
++    };
++    let payload_offset = unsafe {
++        let p = *argv.add(5);
++        if p.is_null() { exit(102); }
++        match crate::parse_u64_bytes(from_cstr(p)) {
++            Some(v) => v as usize,
++            None => exit(103),
++        }
++    };
++    let payload_len = unsafe {
++        let p = *argv.add(6);
++        if p.is_null() { exit(102); }
++        match crate::parse_u64_bytes(from_cstr(p)) {
++            Some(v) => v as usize,
++            None => exit(103),
++        }
++    };
++
+     // ── Find TMPDIR from environment ──────────────────────────────────────
+     let mut tmp_prefix: &[u8] = b"/tmp";
+     if !envp.is_null() {
+@@ -100,7 +140,6 @@ pub unsafe fn run(argc: i32, argv: *const *const u8, envp: *const *const u8) ->
+         unsafe { exit(3) };
+     }
+ 
+-    let pool_len = unsafe { META.pool_len as usize };
+     if pool_len == 0 {
+         unsafe { close(fd) };
+         unsafe { exit(4) };
+@@ -136,7 +175,7 @@ pub unsafe fn run(argc: i32, argv: *const *const u8, envp: *const *const u8) ->
+     unsafe { close(fd) };
+ 
+     // ── Decompress pool ───────────────────────────────────────────────────
+-    let total_pool = unsafe { (META.payload_offset + META.payload_len) as usize };
++    let total_pool = payload_offset + payload_len;
+     let mut decompressed_pool = vec![0u8; total_pool];
+ 
+     let mut out_offset = 0usize;
+@@ -148,12 +187,12 @@ pub unsafe fn run(argc: i32, argv: *const *const u8, envp: *const *const u8) ->
+         }
+     });
+ 
+-    let washmhost_start = unsafe { META.washmhost_offset as usize };
+-    let washmhost_end = unsafe { (META.washmhost_offset + META.washmhost_len) as usize };
++    let washmhost_start = washmhost_offset;
++    let washmhost_end = washmhost_offset + washmhost_len;
+     let washmhost_data = &decompressed_pool[washmhost_start..washmhost_end];
+ 
+-    let payload_start = unsafe { META.payload_offset as usize };
+-    let payload_end = unsafe { (META.payload_offset + META.payload_len) as usize };
++    let payload_start = payload_offset;
++    let payload_end = payload_offset + payload_len;
+     let payload_data = &decompressed_pool[payload_start..payload_end];
+ 
+     // ── Write washmhost to a temp file ────────────────────────────────────
+@@ -187,6 +226,7 @@ pub unsafe fn run(argc: i32, argv: *const *const u8, envp: *const *const u8) ->
+         unsafe { unlink(washmhost_path.as_ptr()) };
+         unsafe { exit(14) };
+     }
++    unsafe { fchmod(payload_fd, 0o644) };
+ 
+     if !unsafe { write_all(payload_fd, payload_data) } {
+         unsafe { close(payload_fd) };
+@@ -201,30 +241,29 @@ pub unsafe fn run(argc: i32, argv: *const *const u8, envp: *const *const u8) ->
+     wasm_fd_var.extend_from_slice(&payload_path[..payload_path.len() - 1]); // skip NUL
+     wasm_fd_var.push(0);
+ 
+-    let mut veg_path_var: Vec<u8> = b"MOHABBAT_VEGETABLE_PATH=".to_vec();
+-    let veg_path = unsafe { from_cstr(bat_path_ptr) };
+-    veg_path_var.extend_from_slice(veg_path);
+-    veg_path_var.push(0);
+-
+     let mut envp_ptrs: Vec<*const u8> = Vec::new();
+     if !envp.is_null() {
+         let mut e_ptr = envp;
+         while !unsafe { (*e_ptr).is_null() } {
+-            envp_ptrs.push(unsafe { *e_ptr });
++            let entry = unsafe { from_cstr(*e_ptr) };
++            if !entry.starts_with(b"MOHABBAT_VEGETABLE_PATH=") {
++                envp_ptrs.push(unsafe { *e_ptr });
++            }
+             e_ptr = unsafe { e_ptr.add(1) };
+         }
+     }
+     envp_ptrs.push(wasm_fd_var.as_ptr());
+-    envp_ptrs.push(veg_path_var.as_ptr());
+     envp_ptrs.push(core::ptr::null());
+ 
+-    // argv[0] = vegetable path, remaining = extra args passed to brot.
++    // argv[0] = vegetable path, remaining = extra user args (argv[7..]).
+     let mut argv_ptrs: Vec<*const u8> = Vec::new();
+     argv_ptrs.push(bat_path_ptr);
+-    let mut a_ptr = unsafe { argv.add(1) };
+-    while !unsafe { (*a_ptr).is_null() } {
+-        argv_ptrs.push(unsafe { *a_ptr });
+-        a_ptr = unsafe { a_ptr.add(1) };
++    if argc > 7 {
++        let mut a_ptr = unsafe { argv.add(7) };
++        while !unsafe { (*a_ptr).is_null() } {
++            argv_ptrs.push(unsafe { *a_ptr });
++            a_ptr = unsafe { a_ptr.add(1) };
++        }
+     }
+     argv_ptrs.push(core::ptr::null());
+ 
+diff --git a/mohabbat/brot/src/linux.rs b/mohabbat/brot/src/linux.rs
+index 1a5a9ce..1fbdee1 100644
+--- a/mohabbat/brot/src/linux.rs
++++ b/mohabbat/brot/src/linux.rs
+@@ -1,4 +1,3 @@
+-use crate::META;
+ use alloc::vec::Vec;
+ 
+ // ─── Syscall wrappers ─────────────────────────────────────────────────────────
+@@ -682,7 +681,7 @@ pub unsafe fn run(sp: *const usize) -> ! {
+     // [sp+8+8*argc] = NULL
+     // [sp+8+8*argc+8] = envp[0]
+     let argc = unsafe { *sp };
+-    if argc < 2 {
++    if argc < 7 {
+         unsafe { sys_exit_group(102) };
+     }
+ 
+@@ -692,6 +691,47 @@ pub unsafe fn run(sp: *const usize) -> ! {
+     // argv[1] is the bat file path (the "vegetable").
+     let bat_path_ptr = unsafe { *argv.add(1) };
+ 
++    let pool_len = unsafe {
++        let p = *argv.add(2);
++        if p.is_null() { sys_exit_group(102); }
++        match crate::parse_u64_bytes(from_cstr(p)) {
++            Some(v) => v as usize,
++            None => sys_exit_group(103),
++        }
++    };
++    let washmhost_offset = unsafe {
++        let p = *argv.add(3);
++        if p.is_null() { sys_exit_group(102); }
++        match crate::parse_u64_bytes(from_cstr(p)) {
++            Some(v) => v as usize,
++            None => sys_exit_group(103),
++        }
++    };
++    let washmhost_len = unsafe {
++        let p = *argv.add(4);
++        if p.is_null() { sys_exit_group(102); }
++        match crate::parse_u64_bytes(from_cstr(p)) {
++            Some(v) => v as usize,
++            None => sys_exit_group(103),
++        }
++    };
++    let payload_offset = unsafe {
++        let p = *argv.add(5);
++        if p.is_null() { sys_exit_group(102); }
++        match crate::parse_u64_bytes(from_cstr(p)) {
++            Some(v) => v as usize,
++            None => sys_exit_group(103),
++        }
++    };
++    let payload_len = unsafe {
++        let p = *argv.add(6);
++        if p.is_null() { sys_exit_group(102); }
++        match crate::parse_u64_bytes(from_cstr(p)) {
++            Some(v) => v as usize,
++            None => sys_exit_group(103),
++        }
++    };
++
+     // Filter out TMPDIR from environment.
+     let mut tmp_prefix: &[u8] = b"/tmp";
+     let mut ptr = envp;
+@@ -716,7 +756,6 @@ pub unsafe fn run(sp: *const usize) -> ! {
+         unsafe { sys_exit_group(3) };
+     }
+ 
+-    let pool_len = unsafe { META.pool_len as usize };
+     if pool_len == 0 {
+         unsafe { sys_close(fd) };
+         unsafe { sys_exit_group(4) };
+@@ -752,7 +791,7 @@ pub unsafe fn run(sp: *const usize) -> ! {
+     unsafe { sys_close(fd) };
+ 
+     // ── Decompress pool ───────────────────────────────────────────────────
+-    let total_pool = unsafe { (META.payload_offset + META.payload_len) as usize };
++    let total_pool = payload_offset + payload_len;
+     let mut decompressed = alloc::vec![0u8; total_pool];
+     let mut out_off = 0usize;
+     let _ = crate::decompress::decompress_to_writer(&compressed_data, |chunk| {
+@@ -764,15 +803,8 @@ pub unsafe fn run(sp: *const usize) -> ! {
+     });
+     drop(compressed_data);
+ 
+-    let payload_data = unsafe {
+-        &decompressed
+-            [META.payload_offset as usize..(META.payload_offset + META.payload_len) as usize]
+-    };
+-
+-    let washmhost_data = unsafe {
+-        &decompressed
+-            [META.washmhost_offset as usize..(META.washmhost_offset + META.washmhost_len) as usize]
+-    };
++    let payload_data = &decompressed[payload_offset..payload_offset + payload_len];
++    let washmhost_data = &decompressed[washmhost_offset..washmhost_offset + washmhost_len];
+ 
+     // ── Write washmhost to a temp file ────────────────────────────────────
+     let pid = unsafe { sys_getpid() } as u32;
+@@ -826,30 +858,28 @@ pub unsafe fn run(sp: *const usize) -> ! {
+     wasm_fd_var.extend_from_slice(&payload_path[..payload_path.len() - 1]); // skip NUL
+     wasm_fd_var.push(0);
+ 
+-    // Build "MOHABBAT_VEGETABLE_PATH=<path>\0"
+-    let mut veg_path_var: Vec<u8> = b"MOHABBAT_VEGETABLE_PATH=".to_vec();
+-    let veg_path = unsafe { from_cstr(bat_path_ptr) };
+-    veg_path_var.extend_from_slice(veg_path);
+-    veg_path_var.push(0);
+-
+     let mut envp_ptrs: Vec<*const u8> = Vec::new();
+     let mut e_ptr = envp;
+     while !unsafe { (*e_ptr).is_null() } {
+-        envp_ptrs.push(unsafe { *e_ptr });
++        let entry = unsafe { from_cstr(*e_ptr) };
++        if !entry.starts_with(b"MOHABBAT_VEGETABLE_PATH=") {
++            envp_ptrs.push(unsafe { *e_ptr });
++        }
+         e_ptr = unsafe { e_ptr.add(1) };
+     }
+     envp_ptrs.push(wasm_fd_var.as_ptr());
+-    envp_ptrs.push(veg_path_var.as_ptr());
+     envp_ptrs.push(core::ptr::null());
+ 
+     // ── Build argv for the child ──────────────────────────────────────────
+-    // argv[0] = vegetable_path, argv[1..] = extra args.
++    // argv[0] = vegetable_path, argv[1..] = extra user args from argv[7..].
+     let mut argv_ptrs: Vec<*const u8> = Vec::new();
+     argv_ptrs.push(bat_path_ptr);
+-    let mut a_ptr = unsafe { argv.add(1) };
+-    while !unsafe { (*a_ptr).is_null() } {
+-        argv_ptrs.push(unsafe { *a_ptr });
+-        a_ptr = unsafe { a_ptr.add(1) };
++    if argc > 7 {
++        let mut a_ptr = unsafe { argv.add(7) };
++        while !unsafe { (*a_ptr).is_null() } {
++            argv_ptrs.push(unsafe { *a_ptr });
++            a_ptr = unsafe { a_ptr.add(1) };
++        }
+     }
+     argv_ptrs.push(core::ptr::null());
+ 
+diff --git a/mohabbat/brot/src/main.rs b/mohabbat/brot/src/main.rs
+index 77377c1..61908a7 100644
+--- a/mohabbat/brot/src/main.rs
++++ b/mohabbat/brot/src/main.rs
+@@ -25,61 +25,27 @@ mod darwin;
+ 
+ pub mod test_symbols;
+ 
+-// ─── Compile-time configuration ───────────────────────────────────────────────
+-
+-// Read washmhost size from compile-time environment (set by build.rs).
+-// This value is known when building per-slot, so it's baked into the binary.
+-const WASHMHOST_LEN_STR: &str = env!("MOHABBAT_WASHMHOST_LEN");
+-
+-// Parse const string to u64 at compile time.
+-// This is a workaround since const fn for parsing isn't available in all contexts.
+-// If WASHMHOST_LEN_STR is "0" or invalid, default to 0.
+-const fn parse_washmhost_len() -> u64 {
+-    let bytes = WASHMHOST_LEN_STR.as_bytes();
+-    let mut result: u64 = 0;
+-    let mut i = 0;
+-    while i < bytes.len() {
+-        match bytes[i] {
+-            b'0'..=b'9' => {
+-                result = result * 10 + ((bytes[i] - b'0') as u64);
+-            }
+-            _ => break,
++pub fn parse_u64_bytes(bytes: &[u8]) -> Option<u64> {
++    let mut s = bytes;
++    while let Some((&b' ', rest)) = s.split_first() {
++        s = rest;
++    }
++    while let Some((&b' ', rest)) = s.split_last() {
++        s = rest;
++    }
++    if s.is_empty() {
++        return None;
++    }
++    let mut res: u64 = 0;
++    for &b in s {
++        if b < b'0' || b > b'9' {
++            return None;
+         }
+-        i += 1;
++        res = res.checked_mul(10)?.checked_add((b - b'0') as u64)?;
+     }
+-    result
+-}
+-
+-const WASHMHOST_LEN: u64 = parse_washmhost_len();
+-
+-// ─── Shared metadata section ──────────────────────────────────────────────────
+-
+-#[repr(C, packed)]
+-#[derive(Clone, Copy)]
+-pub struct MohabbatMeta {
+-    pub magic: [u8; 8],
+-    pub pool_len: u64,
+-    pub washmhost_offset: u64,
+-    pub washmhost_len: u64,
+-    pub payload_offset: u64,
+-    pub payload_len: u64,
+-    pub reserved: u64,
++    Some(res)
+ }
+ 
+-#[cfg_attr(windows, unsafe(link_section = ".mohmeta"))]
+-#[cfg_attr(target_os = "linux", unsafe(link_section = ".mohmeta"))]
+-#[cfg_attr(target_vendor = "apple", unsafe(link_section = "__DATA,.mohmeta"))]
+-#[used]
+-pub static mut META: MohabbatMeta = MohabbatMeta {
+-    magic: *b"MOHABBAT",
+-    pool_len: 0,
+-    washmhost_offset: 0,
+-    washmhost_len: WASHMHOST_LEN,  // Embedded at compile time per-slot
+-    payload_offset: 0,
+-    payload_len: 0,
+-    reserved: 0,
+-};
+-
+ // ─── C stdlib intrinsics (binary link-unit, separate from lib.rs) ─────────────
+ 
+ #[unsafe(no_mangle)]
+diff --git a/mohabbat/brot/src/windows.rs b/mohabbat/brot/src/windows.rs
+index 8382b46..aff966a 100644
+--- a/mohabbat/brot/src/windows.rs
++++ b/mohabbat/brot/src/windows.rs
+@@ -1,4 +1,3 @@
+-use crate::META;
+ use alloc::format;
+ use alloc::string::String;
+ use alloc::vec::Vec;
+@@ -8,7 +7,7 @@ use crate::win32::Win32::Foundation::*;
+ use crate::win32::Win32::Storage::FileSystem::*;
+ 
+ use crate::win32::Win32::System::Environment::{
+-    GetCommandLineW, GetEnvironmentVariableW, SetEnvironmentVariableW,
++    GetCommandLineW, SetEnvironmentVariableW,
+ };
+ use crate::win32::Win32::System::Threading::{
+     CreateProcessW, ExitProcess, GetCurrentProcessId, GetExitCodeProcess, INFINITE,
+@@ -18,48 +17,56 @@ use crate::win32::Win32::UI::Shell::CommandLineToArgvW;
+ 
+ // Using the rust_eh_personality already provided by rusticated's lib.rs
+ 
+-pub unsafe fn get_module_file_name() -> Vec<u16> {
+-    let wide_path = unsafe {
+-        let mut num_args = 0;
+-        let argv = CommandLineToArgvW(GetCommandLineW(), &mut num_args);
+-        if argv.is_null() || num_args < 1 {
+-            ExitProcess(101);
+-        }
+-
+-        let arg0_ptr = *argv.offset(0);
+-        let mut len = 0;
+-        while *arg0_ptr.offset(len) != 0 {
+-            len += 1;
++fn parse_u16_u64(ptr: *const u16) -> Option<u64> {
++    if ptr.is_null() {
++        return None;
++    }
++    let mut start = 0;
++    while unsafe { *ptr.offset(start) } == b' ' as u16 {
++        start += 1;
++    }
++    let mut end = start;
++    while unsafe { *ptr.offset(end) } != 0 {
++        end += 1;
++    }
++    while end > start && unsafe { *ptr.offset(end - 1) } == b' ' as u16 {
++        end -= 1;
++    }
++    if start == end {
++        return None;
++    }
++    let mut res: u64 = 0;
++    for i in start..end {
++        let ch = unsafe { *ptr.offset(i) };
++        if ch < b'0' as u16 || ch > b'9' as u16 {
++            return None;
+         }
+-
+-        let mut wide_path = alloc::vec![0u16; (len + 1) as usize];
+-        core::ptr::copy_nonoverlapping(arg0_ptr, wide_path.as_mut_ptr(), len as usize);
+-        wide_path[len as usize] = 0;
+-        wide_path
+-    };
+-
+-    wide_path
++        res = res.checked_mul(10)?.checked_add((ch - b'0' as u16) as u64)?;
++    }
++    Some(res)
+ }
+ 
+-pub unsafe fn get_vegetable_file_name() -> Vec<u16> {
+-    let mut buffer = alloc::vec![0u16; 32768];
+-    let env_var = "MOHABBAT_VEGETABLE_PATH\0"
+-        .encode_utf16()
+-        .collect::<Vec<u16>>();
+-    let len = unsafe {
+-        GetEnvironmentVariableW(env_var.as_ptr(), buffer.as_mut_ptr(), buffer.len() as u32)
+-    };
+-    if len > 0 && (len as usize) < buffer.len() {
+-        buffer.truncate(len as usize + 1);
+-        buffer[len as usize] = 0;
+-        return buffer;
++pub unsafe fn run() -> ! {
++    let mut num_args = 0;
++    let argv = unsafe { CommandLineToArgvW(GetCommandLineW(), &mut num_args) };
++    if argv.is_null() || num_args < 7 {
++        unsafe { ExitProcess(101) };
+     }
+ 
+-    unsafe { get_module_file_name() }
+-}
++    let arg1_ptr = unsafe { *argv.offset(1) };
++    let mut len = 0;
++    while unsafe { *arg1_ptr.offset(len) } != 0 {
++        len += 1;
++    }
++    let mut wide_path = alloc::vec![0u16; (len + 1) as usize];
++    unsafe { core::ptr::copy_nonoverlapping(arg1_ptr, wide_path.as_mut_ptr(), len as usize) };
++    wide_path[len as usize] = 0;
+ 
+-pub unsafe fn run() -> ! {
+-    let wide_path = unsafe { get_vegetable_file_name() };
++    let pool_len = parse_u16_u64(unsafe { *argv.offset(2) }).unwrap_or_else(|| unsafe { ExitProcess(103) }) as usize;
++    let washmhost_offset = parse_u16_u64(unsafe { *argv.offset(3) }).unwrap_or_else(|| unsafe { ExitProcess(103) }) as usize;
++    let washmhost_len = parse_u16_u64(unsafe { *argv.offset(4) }).unwrap_or_else(|| unsafe { ExitProcess(103) }) as usize;
++    let payload_offset = parse_u16_u64(unsafe { *argv.offset(5) }).unwrap_or_else(|| unsafe { ExitProcess(103) }) as usize;
++    let payload_len = parse_u16_u64(unsafe { *argv.offset(6) }).unwrap_or_else(|| unsafe { ExitProcess(103) }) as usize;
+ 
+     unsafe {
+         let handle = CreateFileW(
+@@ -81,9 +88,8 @@ pub unsafe fn run() -> ! {
+             ExitProcess(3);
+         }
+ 
+-        let pool_len = META.pool_len as usize;
+         if pool_len == 0 {
+-            crate::print_err("brot: META.pool_len is 0, nothing to do. exiting.\n");
++            crate::print_err("brot: pool_len is 0, nothing to do. exiting.\n");
+             ExitProcess(4);
+         }
+ 
+@@ -125,8 +131,8 @@ pub unsafe fn run() -> ! {
+         }
+         CloseHandle(handle);
+ 
+-        let total_pool = META.payload_offset + META.payload_len;
+-        let mut decompressed_pool = alloc::vec![0u8; total_pool as usize];
++        let total_pool = payload_offset + payload_len;
++        let mut decompressed_pool = alloc::vec![0u8; total_pool];
+ 
+         let mut out_offset = 0;
+         let _ = crate::decompress::decompress_to_writer(&compressed_data, |chunk| {
+@@ -138,9 +144,9 @@ pub unsafe fn run() -> ! {
+         });
+ 
+         let washmhost_data = &decompressed_pool
+-            [META.washmhost_offset as usize..(META.washmhost_offset + META.washmhost_len) as usize];
++            [washmhost_offset..washmhost_offset + washmhost_len];
+         let payload_data = &decompressed_pool
+-            [META.payload_offset as usize..(META.payload_offset + META.payload_len) as usize];
++            [payload_offset..payload_offset + payload_len];
+ 
+         let mut temp_path = alloc::vec![0u16; MAX_PATH as usize + 1];
+         let len = GetTempPathW(temp_path.len() as u32, temp_path.as_mut_ptr());
+@@ -186,16 +192,11 @@ pub unsafe fn run() -> ! {
+         let env_name: Vec<u16> = "MOHABBAT_WASM_FD\0".encode_utf16().collect();
+         SetEnvironmentVariableW(env_name.as_ptr(), payload_wasm_w.as_ptr());
+ 
+-        let veg_env_name: Vec<u16> = "MOHABBAT_VEGETABLE_PATH\0".encode_utf16().collect();
+-        SetEnvironmentVariableW(veg_env_name.as_ptr(), wide_path.as_ptr());
+-
+         let vegetable_str = String::from_utf16_lossy(&wide_path);
+         let mut cmd_str = format!("\"{}\"", vegetable_str.trim_end_matches('\0'));
+ 
+-        let mut num_args = 0;
+-        let argv = CommandLineToArgvW(GetCommandLineW(), &mut num_args);
+-        if !argv.is_null() && num_args > 1 {
+-            for i in 1..num_args {
++        if num_args > 7 {
++            for i in 7..num_args {
+                 let arg_ptr = *argv.offset(i as isize);
+                 let mut len = 0;
+                 while *arg_ptr.offset(len) != 0 {
+diff --git a/mohabbat/build.go b/mohabbat/build.go
+index caac4a1..14b7acf 100644
+--- a/mohabbat/build.go
++++ b/mohabbat/build.go
+@@ -120,13 +120,12 @@ func ModeDevRun(ws, projectDir string, extraArgs []string, platform string, verb
+ 
+ // buildAllSlots builds brot (cargo) and washmhost for all Modern Four slots.
+ func buildAllSlots(ws, buildDir string, verbose bool) error {
+-	// Step 1: Build washmhost for all slots first (so brot can know their final sizes)
+-	washmhostMetadata, err := buildAllWashmhost(ws, buildDir, verbose)
+-	if err != nil {
++	// Step 1: Build washmhost for all slots
++	if _, err := buildAllWashmhost(ws, buildDir, verbose); err != nil {
+ 		return err
+ 	}
+ 
+-	// Step 2: Build brot with knowledge of washmhost sizes (no post-build patching needed)
++	// Step 2: Build brot
+ 	for _, s := range slots {
+ 		if !shouldBuildSlot(s) {
+ 			fmt.Printf("🍆    skip %s\n", s.name)
+@@ -135,7 +134,7 @@ func buildAllSlots(ws, buildDir string, verbose bool) error {
+ 		if s.goos == "js" {
+ 			continue // Handled during buildNodeSlot when zone A is assembled
+ 		}
+-		if _, err := cargoBuild(ws, filepath.Join("mohabbat", "brot"), s, buildDir, verbose, washmhostMetadata); err != nil {
++		if _, err := cargoBuild(ws, filepath.Join("mohabbat", "brot"), s, buildDir, verbose); err != nil {
+ 			return err
+ 		}
+ 	}
+diff --git a/mohabbat/build_rust_project.go b/mohabbat/build_rust_project.go
+index d6273ee..ca4b968 100644
+--- a/mohabbat/build_rust_project.go
++++ b/mohabbat/build_rust_project.go
+@@ -48,7 +48,7 @@ func buildRustProjectWasm(ws, absProjectDir, outputWasm string, verbose bool) er
+ 	return nil
+ }
+ 
+-func cargoBuild(ws, pkgDir string, s slot, buildDir string, verbose bool, washmhostMetadata map[string]uint64) (string, error) {
++func cargoBuild(ws, pkgDir string, s slot, buildDir string, verbose bool) (string, error) {
+ 	targetName, err := cargoTargetName(s)
+ 	if err != nil {
+ 		return "", err
+@@ -57,14 +57,6 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string, verbose bool, washmh
+ 		return "", err
+ 	}
+ 
+-	// Validate that washmhost metadata is available for non-js slots
+-	// (it was already checked in build.rs with cargo:rerun-if-env-changed)
+-	if s.goos != "js" {
+-		if _, ok := washmhostMetadata[s.name]; !ok {
+-			return "", fmt.Errorf("washmhost metadata missing for slot %s - was it built by buildAllWashmhost?", s.name)
+-		}
+-	}
+-
+ 	isRusticatedTarget := strings.Contains(targetName, "rusticated")
+ 
+ 	buildTarget := func(name string) error {
+@@ -125,12 +117,6 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string, verbose bool, washmh
+ 		env = upsertEnv(env, "BUILD_VERSION", meta.Version)
+ 		env = upsertEnv(env, "BUILD_TIME", meta.Time)
+ 		env = upsertEnv(env, "BUILD_PLATFORM", meta.Platform)
+-		// Pass washmhost size metadata to brot so it can embed it at compile time.
+-		// cargo:rerun-if-env-changed in build.rs ensures brot rebuilds when this changes.
+-		if s.goos != "js" {
+-			whLen := washmhostMetadata[s.name]
+-			env = upsertEnv(env, "MOHABBAT_WASHMHOST_LEN", fmt.Sprintf("%d", whLen))
+-		}
+ 		// Set SDKROOT to the stubs directory for darwin cross-compilation so lld
+ 		// doesn't call xcrun to locate the macOS SDK (unavailable on non-Mac hosts).
+ 		if s.goos == "darwin" {
+diff --git a/mohabbat/package.go b/mohabbat/package.go
+index 8dcef01..61f529d 100644
+--- a/mohabbat/package.go
++++ b/mohabbat/package.go
+@@ -2,7 +2,6 @@ package mohabbat
+ 
+ import (
+ 	"bytes"
+-	"encoding/binary"
+ 	"fmt"
+ 	"os"
+ 	"path/filepath"
+@@ -68,29 +67,6 @@ func assembleVegetable(ws, brainPath, buildDir, outputPath string) error {
+ 	poolLen := uint64(compressed.Len())
+ 	fmt.Printf("🍆  Pool: raw=%s compressed=%s\n", formatSize(int64(pool.Len())), formatSize(int64(poolLen)))
+ 
+-	// Patch MohabbatMeta inside each brot
+-	for i := range slots {
+-		if slots[i].goos == "js" {
+-			continue // Handled via template string replacements below
+-		}
+-		if len(per[i].brot) == 0 {
+-			continue
+-		}
+-		meta := mohabbatMeta{
+-			PoolLen:         poolLen,
+-			WashmhostOffset: whOffsets[i],
+-			WashmhostLen:    whLens[i],
+-			PayloadOffset:   payloadOffset,
+-			PayloadLen:      payloadLen,
+-			Reserved:        0,
+-		}
+-		patched, err := patchMeta(per[i].brot, meta)
+-		if err != nil {
+-			return fmt.Errorf("patching brot for %s: %w", slots[i].name, err)
+-		}
+-		per[i].brot = patched
+-	}
+-
+ 	idx := map[string]int{}
+ 	for i, s := range slots {
+ 		idx[s.name] = i
+@@ -139,7 +115,7 @@ func assembleVegetable(ws, brainPath, buildDir, outputPath string) error {
+ 			slots[nodeIdx].jsTextLen = len(s)
+ 		}
+ 
+-		zoneA = buildZoneA(offsets, lengths, slots[nodeIdx].jsTextLen)
++		zoneA = buildZoneA(offsets, lengths, slots[nodeIdx].jsTextLen, poolLen, whOffsets, whLens, payloadOffset, payloadLen)
+ 		next := len(zoneA)
+ 		newOffsets := make([]int, len(slots))
+ 		for i := range slots {
+@@ -177,7 +153,7 @@ func assembleVegetable(ws, brainPath, buildDir, outputPath string) error {
+ 				per[nodeIdx].brot = append([]byte(s), brotliWasmBytes...)
+ 				slots[nodeIdx].jsTextLen = len(s)
+ 			}
+-			zoneA = buildZoneA(offsets, lengths, slots[nodeIdx].jsTextLen)
++			zoneA = buildZoneA(offsets, lengths, slots[nodeIdx].jsTextLen, poolLen, whOffsets, whLens, payloadOffset, payloadLen)
+ 			break
+ 		}
+ 	}
+@@ -207,8 +183,9 @@ func assembleVegetable(ws, brainPath, buildDir, outputPath string) error {
+ }
+ 
+ // buildZoneA produces the polyglot script header for Modern Four.
+-func buildZoneA(offsets, lengths []int, nodeJsLen int) string {
+-	const tmplPOSIX = `:; ME="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || printf "%s" "$0")"; S_OFF=0; S_LEN=0
++func buildZoneA(offsets, lengths []int, nodeJsLen int, poolLen uint64, whOffsets, whLens []uint64, payloadOffset, payloadLen uint64) string {
++	const tmplPOSIX = `:; ME="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || printf "%s" "$0")"; S_OFF=0; S_LEN=0; W_OFF=0; W_LEN=0
++:; P_LEN="{{POOL_LEN}}"; PLD_OFF="{{PAYLOAD_OFF}}"; PLD_LEN="{{PAYLOAD_LEN}}"
+ :; PLATFORM_OVERRIDE=""
+ :; ARG_COUNT=$#
+ :; while [ $ARG_COUNT -gt 0 ]; do
+@@ -246,17 +223,17 @@ func buildZoneA(offsets, lengths []int, nodeJsLen int) string {
+ :;     USE_NODE=1
+ :;     S_LEN=0
+ :;   elif [ "$RESOLVED_PLATFORM" = "linux-amd64" ]; then
+-:;     S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}}
++:;     S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}}; W_OFF={{LINUX_AMD_W_OFF}}; W_LEN={{LINUX_AMD_W_LEN}}
+ :;   elif [ "$RESOLVED_PLATFORM" = "linux-arm64" ]; then
+-:;     S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}}
++:;     S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}}; W_OFF={{LINUX_ARM_W_OFF}}; W_LEN={{LINUX_ARM_W_LEN}}
+ :;   elif [ "$RESOLVED_PLATFORM" = "linux-arm32" ]; then
+-:;     S_OFF={{LINUX_ARM32_OFF}}; S_LEN={{LINUX_ARM32_LEN}}
++:;     S_OFF={{LINUX_ARM32_OFF}}; S_LEN={{LINUX_ARM32_LEN}}; W_OFF={{LINUX_ARM32_W_OFF}}; W_LEN={{LINUX_ARM32_W_LEN}}
+ :;   elif [ "$RESOLVED_PLATFORM" = "darwin-arm64" ]; then
+-:;     S_OFF={{DARWIN_ARM_OFF}}; S_LEN={{DARWIN_ARM_LEN}}
++:;     S_OFF={{DARWIN_ARM_OFF}}; S_LEN={{DARWIN_ARM_LEN}}; W_OFF={{DARWIN_ARM_W_OFF}}; W_LEN={{DARWIN_ARM_W_LEN}}
+ :;   elif [ "$RESOLVED_PLATFORM" = "windows-amd64" ]; then
+-:;     S_OFF={{WIN_AMD_OFF}}; S_LEN={{WIN_AMD_LEN}}
++:;     S_OFF={{WIN_AMD_OFF}}; S_LEN={{WIN_AMD_LEN}}; W_OFF={{WIN_AMD_W_OFF}}; W_LEN={{WIN_AMD_W_LEN}}
+ :;   elif [ "$RESOLVED_PLATFORM" = "windows-arm64" ]; then
+-:;     S_OFF={{WIN_ARM_OFF}}; S_LEN={{WIN_ARM_LEN}}
++:;     S_OFF={{WIN_ARM_OFF}}; S_LEN={{WIN_ARM_LEN}}; W_OFF={{WIN_ARM_W_OFF}}; W_LEN={{WIN_ARM_W_LEN}}
+ :;   else
+ :;     echo "❌ Invalid --platform: '$PLATFORM_OVERRIDE'" >&2
+ :;     echo "Available: node, linux-amd64, linux-arm64, linux-arm32, darwin-arm64, windows-amd64, windows-arm64, amd64, arm64" >&2
+@@ -266,13 +243,13 @@ func buildZoneA(offsets, lengths []int, nodeJsLen int) string {
+ :; else
+ :;   UNAME_PAIR="$(uname -m)-$(uname -s)"
+ :;   if [ "$UNAME_PAIR" = "x86_64-Linux" ]; then
+-:;     S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}}
++:;     S_OFF={{LINUX_AMD_OFF}}; S_LEN={{LINUX_AMD_LEN}}; W_OFF={{LINUX_AMD_W_OFF}}; W_LEN={{LINUX_AMD_W_LEN}}
+ :;   elif [ "$UNAME_PAIR" = "aarch64-Linux" ]; then
+-:;     S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}}
++:;     S_OFF={{LINUX_ARM_OFF}}; S_LEN={{LINUX_ARM_LEN}}; W_OFF={{LINUX_ARM_W_OFF}}; W_LEN={{LINUX_ARM_W_LEN}}
+ :;   elif [ "$UNAME_PAIR" = "arm64-Darwin" ]; then
+-:;     S_OFF={{DARWIN_ARM_OFF}}; S_LEN={{DARWIN_ARM_LEN}}
++:;     S_OFF={{DARWIN_ARM_OFF}}; S_LEN={{DARWIN_ARM_LEN}}; W_OFF={{DARWIN_ARM_W_OFF}}; W_LEN={{DARWIN_ARM_W_LEN}}
+ :;   elif [ "${UNAME_PAIR#armv}" != "$UNAME_PAIR" ] && [ "${UNAME_PAIR%-Linux}" != "$UNAME_PAIR" ]; then
+-:;     S_OFF={{LINUX_ARM32_OFF}}; S_LEN={{LINUX_ARM32_LEN}}
++:;     S_OFF={{LINUX_ARM32_OFF}}; S_LEN={{LINUX_ARM32_LEN}}; W_OFF={{LINUX_ARM32_W_OFF}}; W_LEN={{LINUX_ARM32_W_LEN}}
+ :;   fi
+ :; fi
+ :; USE_NODE=0
+@@ -287,13 +264,12 @@ func buildZoneA(offsets, lengths []int, nodeJsLen int) string {
+ :;     return 1
+ :;   }
+ :;   if find_node; then
+-:;     export MOHABBAT_VEGETABLE_PATH="$ME"
+ :;     dd if="$ME" bs=1 skip="{{NODE_OFF}}" count="{{NODE_JS_LEN}}" 2>/dev/null | "$NODE_BIN" - "$ME" "$@"
+ :;     exit $?
+ :;   fi
+ :; fi
+ :; [ "$S_LEN" = "0" ] && { echo "🍆 Unsupported platform and node not available"; exit 1; }
+-:; TMP_DIR="${TMPDIR:-/tmp}"; [ -d "./target" ] && TMP_DIR="./target"; TMP_EXE="$TMP_DIR/moh-$$"; dd if="$ME" bs=1 skip="$S_OFF" count="$S_LEN" of="$TMP_EXE" 2>/dev/null; chmod +x "$TMP_EXE"; "$TMP_EXE" "$ME" "$@"; RET=$?; rm "$TMP_EXE"; exit $RET
++:; TMP_DIR="${TMPDIR:-/tmp}"; [ -d "./target" ] && TMP_DIR="./target"; TMP_EXE="$TMP_DIR/moh-$$"; dd if="$ME" bs=1 skip="$S_OFF" count="$S_LEN" of="$TMP_EXE" 2>/dev/null; chmod +x "$TMP_EXE"; "$TMP_EXE" "$ME" "$P_LEN" "$W_OFF" "$W_LEN" "$PLD_OFF" "$PLD_LEN" "$@"; RET=$?; rm "$TMP_EXE"; exit $RET
+ `
+ 	const tmplWIN = `@echo off
+ setlocal enabledelayedexpansion
+@@ -302,6 +278,10 @@ set "TMP_DIR=!TEMP!"
+ if exist ".\target" set "TMP_DIR=.\target"
+ set "TMP_EXE=!TMP_DIR!\moh-!RANDOM!.exe"
+ 
++set "P_LEN={{POOL_LEN}}"
++set "PLD_OFF={{PAYLOAD_OFF}}"
++set "PLD_LEN={{PAYLOAD_LEN}}"
++
+ set "FWD_ARGS="
+ set "PLATFORM_OVERRIDE="
+ set "SKIP_NEXT="
+@@ -320,6 +300,8 @@ set "ARCH=%PROCESSOR_ARCHITECTURE%"
+ if "!PROCESSOR_ARCHITEW6432!" neq "" set "ARCH=!PROCESSOR_ARCHITEW6432!"
+ set "S_OFF=0"
+ set "S_LEN=0"
++set "W_OFF=0"
++set "W_LEN=0"
+ set "RESOLVED_PLATFORM="
+ 
+ if defined PLATFORM_OVERRIDE (
+@@ -346,21 +328,33 @@ if defined PLATFORM_OVERRIDE (
+   ) else if "!RESOLVED_PLATFORM!"=="windows-amd64" (
+     set "S_OFF={{WIN_AMD_OFF}}"
+     set "S_LEN={{WIN_AMD_LEN}}"
++    set "W_OFF={{WIN_AMD_W_OFF}}"
++    set "W_LEN={{WIN_AMD_W_LEN}}"
+   ) else if "!RESOLVED_PLATFORM!"=="windows-arm64" (
+     set "S_OFF={{WIN_ARM_OFF}}"
+     set "S_LEN={{WIN_ARM_LEN}}"
++    set "W_OFF={{WIN_ARM_W_OFF}}"
++    set "W_LEN={{WIN_ARM_W_LEN}}"
+   ) else if "!RESOLVED_PLATFORM!"=="linux-amd64" (
+     set "S_OFF={{LINUX_AMD_OFF}}"
+     set "S_LEN={{LINUX_AMD_LEN}}"
++    set "W_OFF={{LINUX_AMD_W_OFF}}"
++    set "W_LEN={{LINUX_AMD_W_LEN}}"
+   ) else if "!RESOLVED_PLATFORM!"=="linux-arm64" (
+     set "S_OFF={{LINUX_ARM_OFF}}"
+     set "S_LEN={{LINUX_ARM_LEN}}"
++    set "W_OFF={{LINUX_ARM_W_OFF}}"
++    set "W_LEN={{LINUX_ARM_W_LEN}}"
+   ) else if "!RESOLVED_PLATFORM!"=="linux-arm32" (
+     set "S_OFF={{LINUX_ARM32_OFF}}"
+     set "S_LEN={{LINUX_ARM32_LEN}}"
++    set "W_OFF={{LINUX_ARM32_W_OFF}}"
++    set "W_LEN={{LINUX_ARM32_W_LEN}}"
+   ) else if "!RESOLVED_PLATFORM!"=="darwin-arm64" (
+     set "S_OFF={{DARWIN_ARM_OFF}}"
+     set "S_LEN={{DARWIN_ARM_LEN}}"
++    set "W_OFF={{DARWIN_ARM_W_OFF}}"
++    set "W_LEN={{DARWIN_ARM_W_LEN}}"
+   )
+   
+   if "!S_LEN!"=="0" if not "!RESOLVED_PLATFORM!"=="node" (
+@@ -371,9 +365,13 @@ if defined PLATFORM_OVERRIDE (
+   if "!ARCH!"=="AMD64" (
+   	set "S_OFF={{WIN_AMD_OFF}}"
+   	set "S_LEN={{WIN_AMD_LEN}}"
++  	set "W_OFF={{WIN_AMD_W_OFF}}"
++  	set "W_LEN={{WIN_AMD_W_LEN}}"
+   ) else if "!ARCH!"=="ARM64" (
+   	set "S_OFF={{WIN_ARM_OFF}}"
+   	set "S_LEN={{WIN_ARM_LEN}}"
++  	set "W_OFF={{WIN_ARM_W_OFF}}"
++  	set "W_LEN={{WIN_ARM_W_LEN}}"
+   )
+ )
+ 
+@@ -399,7 +397,6 @@ if "!USE_NODE!"=="1" (
+   if not "!NODE_BIN!"=="" (
+     "!NODE_BIN!" -v >nul 2>&1
+     if !errorlevel! equ 0 (
+-      set "MOHABBAT_VEGETABLE_PATH=!ME!"
+       powershell -NoProfile -ExecutionPolicy Bypass -Command "& { $a=[IO.File]::ReadAllBytes($env:ME); $b=[Text.Encoding]::UTF8.GetString($a, {{NODE_OFF}}, {{NODE_JS_LEN}}); $n=$env:NODE_BIN; $m=$env:ME; $b | & $n - $env:ME $args; exit $LASTEXITCODE }" --!FWD_ARGS!
+       exit /b !errorlevel!
+     )
+@@ -409,9 +406,8 @@ if "!S_LEN!"=="0" (
+     echo [mohabbat] This vegetable does not support target platform on Windows and node is not available.
+     exit /b 1
+ )
+-set "MOHABBAT_VEGETABLE_PATH=!ME!"
+ powershell -NoProfile -ExecutionPolicy Bypass -Command "$a=[IO.File]::ReadAllBytes($env:ME); $b=New-Object byte[] !S_LEN!; [Array]::Copy($a, [int64]!S_OFF!, $b, 0, [int]!S_LEN!); [IO.File]::WriteAllBytes($env:TMP_EXE, $b)"
+-"!TMP_EXE!" "!ME!"!FWD_ARGS!
++"!TMP_EXE!" "!ME!" "!P_LEN!" "!W_OFF!" "!W_LEN!" "!PLD_OFF!" "!PLD_LEN!"!FWD_ARGS!
+ set "RET=!ERRORLEVEL!"
+ if exist "!TMP_EXE!" del /F /Q "!TMP_EXE!" >nul 2>&1
+ exit /b !RET!
+@@ -452,6 +448,10 @@ exit /b !RET!
+ 	winCRLF := strings.ReplaceAll(tmplWIN, "\n", "\r\n")
+ 	s := tmplPOSIX + winCRLF
+ 
++	s = strings.ReplaceAll(s, "{{POOL_LEN}}", fmt.Sprintf("%-20d", poolLen))
++	s = strings.ReplaceAll(s, "{{PAYLOAD_OFF}}", fmt.Sprintf("%-20d", payloadOffset))
++	s = strings.ReplaceAll(s, "{{PAYLOAD_LEN}}", fmt.Sprintf("%-20d", payloadLen))
++
+ 	replace := func(s, key string, i int, vals []int) string {
+ 		val := 0
+ 		if i >= 0 && i < len(vals) {
+@@ -460,50 +460,49 @@ exit /b !RET!
+ 		return strings.ReplaceAll(s, key, fmt.Sprintf("%d", val))
+ 	}
+ 
++	replaceU64 := func(s, key string, i int, vals []uint64) string {
++		val := uint64(0)
++		if i >= 0 && i < len(vals) {
++			val = vals[i]
++		}
++		return strings.ReplaceAll(s, key, fmt.Sprintf("%d", val))
++	}
++
+ 	s = replace(s, "{{NODE_OFF}}", node, offsets)
+ 	s = replace(s, "{{NODE_LEN}}", node, lengths)
+ 	s = replace(s, "{{NODE_JS_LEN}}", node, []int{nodeJsLen})
+ 
+ 	s = replace(s, "{{LINUX_AMD_OFF}}", linuxAMD, offsets)
+ 	s = replace(s, "{{LINUX_AMD_LEN}}", linuxAMD, lengths)
++	s = replaceU64(s, "{{LINUX_AMD_W_OFF}}", linuxAMD, whOffsets)
++	s = replaceU64(s, "{{LINUX_AMD_W_LEN}}", linuxAMD, whLens)
++
+ 	s = replace(s, "{{LINUX_ARM_OFF}}", linuxARM, offsets)
+ 	s = replace(s, "{{LINUX_ARM_LEN}}", linuxARM, lengths)
++	s = replaceU64(s, "{{LINUX_ARM_W_OFF}}", linuxARM, whOffsets)
++	s = replaceU64(s, "{{LINUX_ARM_W_LEN}}", linuxARM, whLens)
++
+ 	s = replace(s, "{{LINUX_ARM32_OFF}}", linuxARM32, offsets)
+ 	s = replace(s, "{{LINUX_ARM32_LEN}}", linuxARM32, lengths)
++	s = replaceU64(s, "{{LINUX_ARM32_W_OFF}}", linuxARM32, whOffsets)
++	s = replaceU64(s, "{{LINUX_ARM32_W_LEN}}", linuxARM32, whLens)
++
+ 	s = replace(s, "{{DARWIN_ARM_OFF}}", darwinARM, offsets)
+ 	s = replace(s, "{{DARWIN_ARM_LEN}}", darwinARM, lengths)
++	s = replaceU64(s, "{{DARWIN_ARM_W_OFF}}", darwinARM, whOffsets)
++	s = replaceU64(s, "{{DARWIN_ARM_W_LEN}}", darwinARM, whLens)
++
+ 	s = replace(s, "{{WIN_AMD_OFF}}", winAMD, offsets)
+ 	s = replace(s, "{{WIN_AMD_LEN}}", winAMD, lengths)
++	s = replaceU64(s, "{{WIN_AMD_W_OFF}}", winAMD, whOffsets)
++	s = replaceU64(s, "{{WIN_AMD_W_LEN}}", winAMD, whLens)
++
+ 	s = replace(s, "{{WIN_ARM_OFF}}", winARM, offsets)
+ 	s = replace(s, "{{WIN_ARM_LEN}}", winARM, lengths)
+-	return s
+-}
++	s = replaceU64(s, "{{WIN_ARM_W_OFF}}", winARM, whOffsets)
++	s = replaceU64(s, "{{WIN_ARM_W_LEN}}", winARM, whLens)
+ 
+-func patchMeta(brot []byte, meta mohabbatMeta) ([]byte, error) {
+-	// The unpatched MohabbatMeta has Magic = "MOHABBAT" followed by 8 zero
+-	// bytes for PoolLen (the first u64 field). Searching for the 16-byte
+-	// signature avoids collisions with the "MOHABBAT_VEGETABLE_PATH" string
+-	// literal that brot embeds for reading the parent vegetable path.
+-	signature := append([]byte(mohabbatMagic), make([]byte, 8)...)
+-	count := bytes.Count(brot, signature)
+-	if count == 0 {
+-		return nil, fmt.Errorf("MOHABBAT signature (magic + NUL PoolLen) not found in brot")
+-	}
+-	if count > 1 {
+-		return nil, fmt.Errorf("MOHABBAT signature found %d times (expected exactly 1)", count)
+-	}
+-
+-	idx := bytes.Index(brot, signature)
+-	out := make([]byte, len(brot))
+-	copy(out, brot)
+-	p := idx + len(mohabbatMagic)
+-	binary.LittleEndian.PutUint64(out[p+0:p+8], meta.PoolLen)
+-	binary.LittleEndian.PutUint64(out[p+8:p+16], meta.WashmhostOffset)
+-	// Skip washmhost_len (p+16:p+24) - it's now embedded at compile time, don't overwrite it
+-	binary.LittleEndian.PutUint64(out[p+24:p+32], meta.PayloadOffset)
+-	binary.LittleEndian.PutUint64(out[p+32:p+40], meta.PayloadLen)
+-	binary.LittleEndian.PutUint64(out[p+40:p+48], meta.Reserved)
+-	return out, nil
++	return s
+ }
+ 
+ // ensureBrotStubs creates empty import library stubs (.a files) for MinGW
+diff --git a/mohabbat/patch_go_deps.go b/mohabbat/patch_go_deps.go
+index 6880ab9..d8156df 100644
+--- a/mohabbat/patch_go_deps.go
++++ b/mohabbat/patch_go_deps.go
+@@ -373,9 +373,9 @@ func RawSyscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err Errno) {
+ 		}
+ 
+ 		// SPECIAL CASE: u-root pkg/ls platform files sometimes lack build guards.
+-		if strings.HasSuffix(filepath.ToSlash(target.jitDir), "github.com/u-root/u-root/pkg/ls") {
++		if strings.HasSuffix(filepath.ToSlash(target.jitDir), "github.com/u-root/u-root") {
+ 			for _, f := range []string{"fileinfo_linux.go", "fileinfo_openbsd.go", "fileinfo_unix.go"} {
+-				p := filepath.Join(target.jitDir, f)
++				p := filepath.Join(target.jitDir, "pkg", "ls", f)
+ 				if data, err := os.ReadFile(p); err == nil {
+ 					content := string(data)
+ 					if !strings.Contains(content, "//go:build") && !strings.Contains(content, "// +build") {
+@@ -389,6 +389,16 @@ func RawSyscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err Errno) {
+ 					}
+ 				}
+ 			}
++			fsPath := filepath.Join(target.jitDir, "pkg", "ls", "filestring_unix.go")
++			if data, err := os.ReadFile(fsPath); err == nil {
++				content := string(data)
++				if strings.Contains(content, "syscall.Major") {
++					content = strings.ReplaceAll(content, "syscall.Major(fi.Rdev)", "uint32((fi.Rdev>>24)&0xff)")
++					content = strings.ReplaceAll(content, "syscall.Minor(fi.Rdev)", "uint32(fi.Rdev&0xffffff)")
++					content = strings.ReplaceAll(content, "\t\"syscall\"\n", "")
++					_ = writeFileIfChanged(fsPath, []byte(content))
++				}
++			}
+ 		}
+ 
+ 		sfx, err := applyGateFlips(target.jitDir)
+diff --git a/mohabbat/prebuild.go b/mohabbat/prebuild.go
+index 8be1739..891d174 100644
+--- a/mohabbat/prebuild.go
++++ b/mohabbat/prebuild.go
+@@ -6,6 +6,7 @@ import (
+ 	"os"
+ 	"os/exec"
+ 	"path/filepath"
++	"runtime"
+ 	"strings"
+ )
+ 
+@@ -17,8 +18,7 @@ func init() {
+ // It generates rusticated target specs, builds the sysroot for each target,
+ // writes config.toml, and generates target/overlay.json for Go projects.
+ func runPrebuild(ws string) error {
+-	inVeg := os.Getenv("MOHABBAT_VEGETABLE_PATH") != ""
+-	if inVeg {
++	if runtime.GOOS == "wasip1" {
+ 		// When running inside a vegetable (WASM guest), we assume prebuild
+ 		// artifacts already exist in the 'target' directory, as we cannot
+ 		// run rustc/cargo/go compilers in the restricted WASM environment.
+diff --git a/mohabbat/refill.go b/mohabbat/refill.go
+index 76bd07e..f9db95b 100644
+--- a/mohabbat/refill.go
++++ b/mohabbat/refill.go
+@@ -2,20 +2,21 @@ package mohabbat
+ 
+ import (
+ 	"bytes"
+-	"encoding/binary"
+ 	"fmt"
+ 	"io"
+ 	"os"
+ 	"path/filepath"
++	"strconv"
++	"strings"
+ 
+ 	"github.com/andybalholm/brotli"
+ )
+ 
+ // DoRefill is Mode 2: juice bottle refill.
+-// When running inside a vegetable (MOHABBAT_VEGETABLE_PATH is set), it reads
+-// the current vegetable, decompresses the pool, builds a new payload for
+-// projectDir, splices it in, recompresses, patches all meta structs, and
+-// writes the result to outputPath without rebuilding the native launchers.
++// When running inside a vegetable, it reads the current vegetable,
++// decompresses the pool, builds a new payload for projectDir, splices it in,
++// recompresses, and updates Zone A header metadata without rebuilding or
++// modifying the native launchers.
+ func DoRefill(ws, projectDir, vegPath, outputPath string, verbose bool) error {
+ 	fmt.Printf("🍆  Refill: %s -> %s\n", projectDir, outputPath)
+ 
+@@ -26,64 +27,16 @@ func DoRefill(ws, projectDir, vegPath, outputPath string, verbose bool) error {
+ 	}
+ 	fileLen := len(vegData)
+ 
+-	// 2. Find all valid MOHABBAT meta occurrences.
+-	//    Each brot executable embeds one meta struct right after the "MOHABBAT"
+-	//    magic bytes.  False positives (e.g. the "MOHABBAT_VEGETABLE_PATH"
+-	//    string literal inside the brot binary) are filtered out because their
+-	//    PoolLen value would be astronomically large (bytes of the "_VEGETABLE…"
+-	//    string interpreted as a little-endian u64).
+-	type metaOcc struct {
+-		offset int
+-		meta   mohabbatMeta
+-	}
+-	var occs []metaOcc
+-	magic := []byte(mohabbatMagic)
+-	const metaBodySize = 48 // 6 × uint64
+-
+-	for i := 0; i+len(magic)+metaBodySize <= fileLen; i++ {
+-		if !bytes.Equal(vegData[i:i+len(magic)], magic) {
+-			continue
+-		}
+-		p := i + len(magic)
+-		poolLen := binary.LittleEndian.Uint64(vegData[p : p+8])
+-		// Reject: zero PoolLen (unpatched brot), and values larger than the file.
+-		if poolLen == 0 || uint64(fileLen) < poolLen {
+-			continue
+-		}
+-		// The reserved field Must be zero for a well-formed meta.
+-		reserved := binary.LittleEndian.Uint64(vegData[p+40 : p+48])
+-		if reserved != 0 {
+-			continue
+-		}
+-		m := mohabbatMeta{
+-			PoolLen:         poolLen,
+-			WashmhostOffset: binary.LittleEndian.Uint64(vegData[p+8 : p+16]),
+-			WashmhostLen:    binary.LittleEndian.Uint64(vegData[p+16 : p+24]),
+-			PayloadOffset:   binary.LittleEndian.Uint64(vegData[p+24 : p+32]),
+-			PayloadLen:      binary.LittleEndian.Uint64(vegData[p+32 : p+40]),
+-		}
+-		occs = append(occs, metaOcc{offset: i, meta: m})
+-	}
+-
+-	if len(occs) == 0 {
+-		return fmt.Errorf("no valid MOHABBAT meta found in vegetable %s", vegPath)
+-	}
+-
+-	// Warn on inconsistency (should never happen with well-formed vegetables).
+-	base := occs[0].meta
+-	for _, occ := range occs[1:] {
+-		if occ.meta.PoolLen != base.PoolLen ||
+-			occ.meta.PayloadOffset != base.PayloadOffset ||
+-			occ.meta.PayloadLen != base.PayloadLen {
+-			fmt.Printf("🍆  warn: inconsistent meta across brot slots; using first occurrence\n")
+-			break
+-		}
++	// 2. Parse layout metadata from Zone A script header.
++	poolLen, payloadOffset, payloadLen, err := parseVegetableMeta(vegData)
++	if err != nil {
++		return fmt.Errorf("parse vegetable metadata: %w", err)
+ 	}
+ 
+ 	// 3. Pool is at the tail of the file: vegData[poolStart:].
+-	poolStart := fileLen - int(base.PoolLen)
++	poolStart := fileLen - int(poolLen)
+ 	if poolStart < 0 {
+-		return fmt.Errorf("invalid PoolLen %d > fileLen %d", base.PoolLen, fileLen)
++		return fmt.Errorf("invalid PoolLen %d > fileLen %d", poolLen, fileLen)
+ 	}
+ 
+ 	// 4. Decompress pool.
+@@ -93,7 +46,7 @@ func DoRefill(ws, projectDir, vegPath, outputPath string, verbose bool) error {
+ 		return fmt.Errorf("decompress pool: %w", err)
+ 	}
+ 	fmt.Printf("🍆  Pool decompressed: %s -> %s\n",
+-		formatSize(int64(base.PoolLen)), formatSize(int64(len(poolBytes))))
++		formatSize(int64(poolLen)), formatSize(int64(len(poolBytes))))
+ 
+ 	// 5. Build new payload WASM for projectDir.
+ 	projectName := filepath.Base(projectDir)
+@@ -106,11 +59,10 @@ func DoRefill(ws, projectDir, vegPath, outputPath string, verbose bool) error {
+ 		return fmt.Errorf("read new payload: %w", err)
+ 	}
+ 	fmt.Printf("🍆  New payload: %s (old: %s)\n",
+-		formatSize(int64(len(newPayload))), formatSize(int64(base.PayloadLen)))
++		formatSize(int64(len(newPayload))), formatSize(int64(payloadLen)))
+ 
+ 	// 6. Build new pool: keep washmhost sections, replace payload.
+-	//    Pool layout: [washmhost_0][washmhost_1][washmhost_2][washmhost_3][payload]
+-	payloadOff := int(base.PayloadOffset)
++	payloadOff := int(payloadOffset)
+ 	if payloadOff > len(poolBytes) {
+ 		return fmt.Errorf("PayloadOffset %d exceeds decompressed pool size %d",
+ 			payloadOff, len(poolBytes))
+@@ -130,24 +82,23 @@ func DoRefill(ws, projectDir, vegPath, outputPath string, verbose bool) error {
+ 	}
+ 	newPoolLen := uint64(newCompressed.Len())
+ 	fmt.Printf("🍆  Refill pool: old=%s new=%s\n",
+-		formatSize(int64(base.PoolLen)), formatSize(int64(newPoolLen)))
++		formatSize(int64(poolLen)), formatSize(int64(newPoolLen)))
+ 
+-	// 8. Build output: Zone A+B (with patched metas) + new compressed pool.
++	// 8. Build output: Zone A+B (with updated Zone A header) + new compressed pool.
+ 	zoneAB := make([]byte, poolStart)
+ 	copy(zoneAB, vegData[:poolStart])
+ 
+-	// Patch each meta occurrence in place.
+-	for _, occ := range occs {
+-		p := occ.offset + len(magic)
+-		// PoolLen → new compressed pool length.
+-		binary.LittleEndian.PutUint64(zoneAB[p:p+8], newPoolLen)
+-		// WashmhostOffset and WashmhostLen are per-slot and unchanged.
+-		// PayloadOffset is unchanged (payload still starts at the same position).
+-		binary.LittleEndian.PutUint64(zoneAB[p+24:p+32], base.PayloadOffset)
+-		// PayloadLen → new payload size.
+-		binary.LittleEndian.PutUint64(zoneAB[p+32:p+40], uint64(len(newPayload)))
+-		// Reserved stays 0.
+-	}
++	// Update POSIX script variables (exact length preserved)
++	zoneAB = replaceExactPadded(zoneAB, `:; P_LEN="`, fmt.Sprintf("%-20d", newPoolLen))
++	zoneAB = replaceExactPadded(zoneAB, `:; PLD_LEN="`, fmt.Sprintf("%-20d", len(newPayload)))
++
++	// Update Windows batch variables (exact length preserved)
++	zoneAB = replaceExactPadded(zoneAB, `set "P_LEN=`, fmt.Sprintf("%-20d", newPoolLen))
++	zoneAB = replaceExactPadded(zoneAB, `set "PLD_LEN=`, fmt.Sprintf("%-20d", len(newPayload)))
++
++	// Update Node starter variables if present
++	zoneAB = replaceExactPadded(zoneAB, `const poolLen = "`, fmt.Sprintf("%-17d", newPoolLen))
++	zoneAB = replaceExactPadded(zoneAB, `const payloadLen = "`, fmt.Sprintf("%-21d", len(newPayload)))
+ 
+ 	// 9. Write output (0755 so it is executable on Unix).
+ 	outData := append(zoneAB, newCompressed.Bytes()...)
+@@ -158,3 +109,55 @@ func DoRefill(ws, projectDir, vegPath, outputPath string, verbose bool) error {
+ 		outputPath, formatSize(int64(len(outData))))
+ 	return nil
+ }
++
++func parseVegetableMeta(vegData []byte) (poolLen, payloadOffset, payloadLen uint64, err error) {
++	headerLimit := 10000
++	if len(vegData) < headerLimit {
++		headerLimit = len(vegData)
++	}
++	header := vegData[:headerLimit]
++
++	extract := func(prefix string) (uint64, error) {
++		idx := bytes.Index(header, []byte(prefix))
++		if idx == -1 {
++			return 0, fmt.Errorf("marker %q not found in header", prefix)
++		}
++		start := idx + len(prefix)
++		end := bytes.IndexAny(header[start:], "\"\r\n")
++		if end == -1 {
++			return 0, fmt.Errorf("unterminated value for %q", prefix)
++		}
++		valStr := strings.TrimSpace(string(header[start : start+end]))
++		val, parseErr := strconv.ParseUint(valStr, 10, 64)
++		if parseErr != nil {
++			return 0, fmt.Errorf("parsing %q value %q: %w", prefix, valStr, parseErr)
++		}
++		return val, nil
++	}
++
++	poolLen, err = extract(`P_LEN="`)
++	if err != nil {
++		return 0, 0, 0, err
++	}
++	payloadOffset, err = extract(`PLD_OFF="`)
++	if err != nil {
++		return 0, 0, 0, err
++	}
++	payloadLen, err = extract(`PLD_LEN="`)
++	if err != nil {
++		return 0, 0, 0, err
++	}
++	return poolLen, payloadOffset, payloadLen, nil
++}
++
++func replaceExactPadded(data []byte, prefix, newVal string) []byte {
++	idx := bytes.Index(data, []byte(prefix))
++	if idx == -1 {
++		return data
++	}
++	start := idx + len(prefix)
++	if start+len(newVal) <= len(data) {
++		copy(data[start:start+len(newVal)], []byte(newVal))
++	}
++	return data
++}
+diff --git a/mohabbat/run.go b/mohabbat/run.go
+index 7160dac..68397b6 100644
+--- a/mohabbat/run.go
++++ b/mohabbat/run.go
+@@ -70,7 +70,11 @@ func runUnderWashmhost(ws, wasmPath string, extraArgs []string, platform string,
+ 	}
+ 	runArgs = append(runArgs, fmt.Sprintf("-ldflags=%s", ldflags), ".", "--")
+ 	runArgs = append(runArgs, extraArgs...)
+-	cmd := exec.Command("go", runArgs...)
++	goBin := "go"
++	if goroot != "" {
++		goBin = goBinFromRoot(goroot)
++	}
++	cmd := exec.Command(goBin, runArgs...)
+ 	cmd.Dir = filepath.Join(ws, "mohabbat", "washmhost")
+ 	env := os.Environ()
+ 	env = upsertEnv(env, "MOHABBAT_WASM_FD", wasmPath)
+diff --git a/mohabbat/types.go b/mohabbat/types.go
+index 3e7a69b..e68e433 100644
+--- a/mohabbat/types.go
++++ b/mohabbat/types.go
+@@ -24,16 +24,6 @@ type slot struct {
+ 
+ const mohabbatMagic = "MOHABBAT"
+ 
+-// MohabbatMeta layout: 8-byte magic + 6*u64 = 56 bytes
+-type mohabbatMeta struct {
+-	PoolLen         uint64
+-	WashmhostOffset uint64
+-	WashmhostLen    uint64
+-	PayloadOffset   uint64
+-	PayloadLen      uint64
+-	Reserved        uint64
+-}
+-
+ // prebuildFn is set by prebuild.go on native (!wasip1) builds via init().
+ // On WASM builds it remains nil; ModeBuild falls back to subprocess invocation.
+ var prebuildFn func(ws string) error
+diff --git a/mohabbat/util.go b/mohabbat/util.go
+index a95193f..ce9195b 100644
+--- a/mohabbat/util.go
++++ b/mohabbat/util.go
+@@ -91,10 +91,10 @@ func ResolveWorkspace(ws string) (string, error) {
+ 	if ws != "" {
+ 		return filepath.Abs(ws)
+ 	}
+-	// Highest priority: when running inside a vegetable, MOHABBAT_VEGETABLE_PATH
+-	// points to the .bat file itself. Its directory is (or contains) the workspace root.
+-	if vegPath := os.Getenv("MOHABBAT_VEGETABLE_PATH"); vegPath != "" {
+-		dir := filepath.Dir(vegPath)
++	// Highest priority: when running inside a vegetable (WASM guest),
++	// os.Args[0] is the .bat file path itself. Its directory is (or contains) the workspace root.
++	if runtime.GOOS == "wasip1" && len(os.Args) > 0 && os.Args[0] != "" {
++		dir := filepath.Dir(os.Args[0])
+ 		for i := 0; i < 6; i++ {
+ 			if _, err := os.Stat(filepath.Join(dir, "sysroot.toml")); err == nil {
+ 				return dir, nil
+diff --git a/mohabbat/washmhost/env_impl.go b/mohabbat/washmhost/env_impl.go
+index ecb3225..2578338 100644
+--- a/mohabbat/washmhost/env_impl.go
++++ b/mohabbat/washmhost/env_impl.go
+@@ -36,6 +36,8 @@ type HostEnv struct {
+ 	forcedExitCode int32
+ 	args           []string
+ 	owningGID      uint64
++	mod            api.Module
++	dylibMgr       *DylibHostManager
+ }
+ 
+ type OpState struct {
+@@ -63,6 +65,7 @@ func NewHostEnv() *HostEnv {
+ 		timers:         make(map[uint32]*time.Timer),
+ 		forcedExitCode: -1,
+ 	}
++	env.dylibMgr = NewDylibHostManager(env)
+ 	env.handles[0] = os.Stdin
+ 	env.handles[1] = os.Stdout
+ 	env.handles[2] = os.Stderr
+@@ -116,6 +119,9 @@ func (h *HostEnv) Close() {
+ 		_ = term.Restore(h.ttyRawFd, h.ttyRawState)
+ 		h.ttyRawState = nil
+ 	}
++	if h.dylibMgr != nil {
++		h.dylibMgr.Close()
++	}
+ }
+ 
+ func (h *HostEnv) notifySignal(signum uint32) {
+@@ -203,12 +209,24 @@ func (h *HostEnv) PendingOps() int32 {
+ func (h *HostEnv) HasOutstandingOps() bool {
+ 	h.mu.Lock()
+ 	defer h.mu.Unlock()
+-	return atomic.LoadInt32(&h.outstandingOps) > 0
++	if atomic.LoadInt32(&h.outstandingOps) > 0 {
++		return true
++	}
++	if h.dylibMgr != nil && h.dylibMgr.HasActiveWork() {
++		return true
++	}
++	return false
+ }
+ 
+ func (h *HostEnv) HasActiveOps() bool {
+ 	h.mu.Lock()
+ 	defer h.mu.Unlock()
++	if atomic.LoadInt32(&h.outstandingOps) > 0 {
++		return true
++	}
++	if len(h.fileOpsQueue) > 0 {
++		return true
++	}
+ 	for _, op := range h.activeOps {
+ 		if !op.isCancelled {
+ 			return true
+@@ -219,6 +237,9 @@ func (h *HostEnv) HasActiveOps() bool {
+ 			return true
+ 		}
+ 	}
++	if h.dylibMgr != nil && h.dylibMgr.HasActiveWork() {
++		return true
++	}
+ 	return false
+ }
+ 
+@@ -310,6 +331,16 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
+ 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_tty_get_size), []api.ValueType{api.ValueTypeI64}, []api.ValueType{api.ValueTypeI32}).Export("tty_get_size")
+ 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_fd_isatty), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("fd_isatty")
+ 
++	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_open), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("dylib_open")
++	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_sym), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("dylib_sym")
++	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_close), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64}, []api.ValueType{}).Export("dylib_close")
++	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_call), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("dylib_call")
++	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_alloc), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32}, []api.ValueType{}).Export("dylib_alloc")
++	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_free), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64}, []api.ValueType{}).Export("dylib_free")
++	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_read_mem), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("dylib_read_mem")
++	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_write_mem), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("dylib_write_mem")
++	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_callback_register), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("dylib_callback_register")
++
+ 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_process_exit), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).Export("process_exit")
+ 
+ 	builder.NewFunctionBuilder().
+diff --git a/mohabbat/washmhost/env_proc.go b/mohabbat/washmhost/env_proc.go
+index 138e9f8..4f7c08d 100644
+--- a/mohabbat/washmhost/env_proc.go
++++ b/mohabbat/washmhost/env_proc.go
+@@ -298,6 +298,7 @@ func (h *HostEnv) sys_signal_wait(ctx context.Context, m api.Module, stack []uin
+ func (h *HostEnv) sys_process_exit(ctx context.Context, m api.Module, stack []uint64) {
+ 	code := int32(stack[0])
+ 	h.mu.Lock()
++	h.forcedExitCode = code
+ 	handlesCount := len(h.handles)
+ 	timersCount := len(h.timers)
+ 	waitersCount := len(h.signalWaiters)
+diff --git a/mohabbat/washmhost/env_proc_test.go b/mohabbat/washmhost/env_proc_test.go
+index 53a5b51..acbc867 100644
+--- a/mohabbat/washmhost/env_proc_test.go
++++ b/mohabbat/washmhost/env_proc_test.go
+@@ -57,7 +57,7 @@ func TestGuestEnvExpandsPercentVarInPath(t *testing.T) {
+ 		}
+ 	}
+ 	if want := toolDir + ";C:\\Windows\\System32"; got["PATH"] != want {
+-		t.Fatalf("PATH should expand %TOOLS_DIR% before lookup; got %q, want %q", got["PATH"], want)
++		t.Fatalf("PATH should expand %%TOOLS_DIR%% before lookup; got %q, want %q", got["PATH"], want)
+ 	}
+ }
+ 
+@@ -107,7 +107,8 @@ func TestSysProcEnv(t *testing.T) {
+ 	})
+ 
+ 	t.Run("3. sys_get_args small buffer", func(t *testing.T) {
+-		ptr := uint32(0x200)
++		ptr := uint32(0x5000)
++		mod.Memory().Write(ptr, []byte{0})
+ 		stack := []uint64{uint64(ptr), 1}
+ 		env.sys_get_args(context.Background(), mod, stack)
+ 
+@@ -214,7 +215,8 @@ func TestSysProcEnv(t *testing.T) {
+ 		start := time.Now()
+ 		for {
+ 			env.Poll(context.Background(), mod)
+-			if false {
++			val, ok := mod.Memory().Read(waitOv, 24)
++			if ok && val[0]&1 != 0 {
+ 				break
+ 			}
+ 			if time.Since(start) > time.Second*5 {
+diff --git a/mohabbat/washmhost/env_utils.go b/mohabbat/washmhost/env_utils.go
+index 268df3a..1595c27 100644
+--- a/mohabbat/washmhost/env_utils.go
++++ b/mohabbat/washmhost/env_utils.go
+@@ -8,6 +8,7 @@ import (
+ 	"os"
+ 	"path/filepath"
+ 	"runtime"
++	"strings"
+ 	"syscall"
+ 
+ 	"github.com/tetratelabs/wazero/api"
+@@ -190,12 +191,15 @@ func resolveUsableCwd() (string, error) {
+ 		return cwd, nil
+ 	}
+ 
+-	if veg := os.Getenv("MOHABBAT_VEGETABLE_PATH"); veg != "" {
+-		dir := filepath.Dir(veg)
+-		if err := os.Chdir(dir); err == nil {
+-			if cwd, err := os.Getwd(); err == nil {
+-				return cwd, nil
++	for _, arg := range os.Args {
++		if strings.HasSuffix(strings.ToLower(arg), ".bat") {
++			dir := filepath.Dir(arg)
++			if err := os.Chdir(dir); err == nil {
++				if cwd, err := os.Getwd(); err == nil {
++					return cwd, nil
++				}
+ 			}
++			break
+ 		}
+ 	}
+ 
+diff --git a/mohabbat/washmhost/main.go b/mohabbat/washmhost/main.go
+index 6907517..73fb928 100644
+--- a/mohabbat/washmhost/main.go
++++ b/mohabbat/washmhost/main.go
+@@ -7,6 +7,7 @@ import (
+ 	"os"
+ 	"runtime"
+ 	"strconv"
++	"strings"
+ )
+ 
+ var (
+@@ -35,6 +36,11 @@ func ensurePosixOutputRunnable(args []string) {
+ }
+ 
+ func main() {
++	if len(os.Args) > 1 && os.Args[1] == "--dylib-satellite" {
++		runSatelliteMain()
++		return
++	}
++
+ 	// Host mode: capture workspace + toolchain location before the guest can chdir.
+ 
+ 	initWatchdog()
+@@ -77,16 +83,11 @@ func main() {
+ 		argSlice = append(argSlice[:1], argSlice[2:]...)
+ 	}
+ 
+-	// If a vegetable path is available, use it as the guest's executable path.
+-	// Otherwise, if the WASM reference is a path, use that.
+-	if veg := os.Getenv("MOHABBAT_VEGETABLE_PATH"); veg != "" {
+-		argSlice[0] = veg
+-		// Polyglot launchers pass their own path as argv[1] so the host binary
+-		// can locate the payload. Strip it so the guest never sees it.
+-		if len(argSlice) > 1 && argSlice[1] == veg {
+-			argSlice = append(argSlice[:1], argSlice[2:]...)
+-		}
+-	} else if _, err := strconv.ParseUint(ref, 10, 64); err != nil {
++	// When launched from brot:
++	// - On Windows, if washmhost.exe is argSlice[0] and argSlice[1] is the vegetable, shift it.
++	if len(argSlice) > 1 && strings.HasSuffix(strings.ToLower(argSlice[1]), ".bat") {
++		argSlice = argSlice[1:]
++	} else if _, err := strconv.ParseUint(ref, 10, 64); err != nil && !strings.HasSuffix(strings.ToLower(argSlice[0]), ".bat") {
+ 		// ref is not a numeric FD, assume it is a path to the WASM file.
+ 		argSlice[0] = ref
+ 	}
+diff --git a/mohabbat/washmhost/runtime.go b/mohabbat/washmhost/runtime.go
+index bd408c5..199c480 100644
+--- a/mohabbat/washmhost/runtime.go
++++ b/mohabbat/washmhost/runtime.go
+@@ -176,6 +176,7 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
+ 		}
+ 		return 1, fmt.Errorf("failed to instantiate module: %w", err)
+ 	}
++	hEnv.mod = mod
+ 
+ 	// 4. Drive completion
+ 	runFunc := mod.ExportedFunction("run")
+@@ -186,6 +187,9 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
+ 	// 2. Event loop: poll for completions, then re-enter the guest.
+ 	var res []uint64
+ 	for {
++		if hEnv.dylibMgr != nil {
++			hEnv.dylibMgr.BeforeRun(ctx, mod)
++		}
+ 		res, err = runFunc.Call(ctx)
+ 		if err != nil {
+ 			if exitErr, ok := err.(*sys.ExitError); ok {
+@@ -193,6 +197,9 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
+ 			}
+ 			return 1, fmt.Errorf("run failed: %w", err)
+ 		}
++		if hEnv.dylibMgr != nil {
++			hEnv.dylibMgr.AfterRun(ctx, mod)
++		}
+ 
+ 		hEnv.mu.Lock()
+ 		forcedCode := hEnv.forcedExitCode
+diff --git a/rusticated-go/runtime/os_rusticated.go b/rusticated-go/runtime/os_rusticated.go
+index 48905ee..201b56d 100644
+--- a/rusticated-go/runtime/os_rusticated.go
++++ b/rusticated-go/runtime/os_rusticated.go
+@@ -189,12 +189,89 @@ func rt0_init()
+ 
+ var initialized uint32
+ 
++type callbackRegistration struct {
++	ovPtr unsafe.Pointer
++	fn    func(args []uint64, invID, cbID uint64)
++}
++
++var (
++	registeredCallbacksMu mutex
++	registeredCallbacks   []*callbackRegistration
++)
++
++//go:linkname registerCallbackRuntime_syscall syscall.registerCallbackRuntime
++func registerCallbackRuntime_syscall(ovPtr unsafe.Pointer, fn func(args []uint64, invID, cbID uint64)) bool {
++	lock(&registeredCallbacksMu)
++	defer unlock(&registeredCallbacksMu)
++	for i, cb := range registeredCallbacks {
++		if cb == nil {
++			registeredCallbacks[i] = &callbackRegistration{
++				ovPtr: ovPtr,
++				fn:    fn,
++			}
++			return true
++		}
++	}
++	registeredCallbacks = append(registeredCallbacks, &callbackRegistration{
++		ovPtr: ovPtr,
++		fn:    fn,
++	})
++	return true
++}
++
++//go:linkname unregisterCallbackRuntime_syscall syscall.unregisterCallbackRuntime
++func unregisterCallbackRuntime_syscall(ovPtr unsafe.Pointer) {
++	lock(&registeredCallbacksMu)
++	defer unlock(&registeredCallbacksMu)
++	for i, cb := range registeredCallbacks {
++		if cb != nil && cb.ovPtr == ovPtr {
++			registeredCallbacks[i] = nil
++			return
++		}
++	}
++}
++
++//go:linkname pauseToHost_syscall syscall.pauseToHost
++func pauseToHost_syscall() {
++	pause(sys.GetCallerSP() - 16)
++}
++
++//go:linkname currentG_syscall syscall.currentG
++func currentG_syscall() uintptr {
++	return uintptr(unsafe.Pointer(getg()))
++}
++
+ // handleContinuation is called by the assembly entry point on re-entry (continuation)
+ // after one or moree I/O completions have been written into guest Overlapped memory.
+ // It processes completions and marks waiting goroutines as ready.
+ func handleContinuation() {
++	// 1. Process any callback invocations projected by host into callback overlappeds
++	lock(&registeredCallbacksMu)
++	for i := range registeredCallbacks {
++		cb := registeredCallbacks[i]
++		if cb != nil {
++			flags := *(*uint32)(cb.ovPtr)
++			if flags&1 != 0 {
++				cbID := *(*uint64)(unsafe.Pointer(uintptr(cb.ovPtr) + 24))
++				invID := *(*uint64)(unsafe.Pointer(uintptr(cb.ovPtr) + 32))
++				argLen := *(*uint32)(unsafe.Pointer(uintptr(cb.ovPtr) + 40))
++				argCount := int(argLen / 8)
++				args := make([]uint64, argCount)
++				for a := 0; a < argCount; a++ {
++					args[a] = *(*uint64)(unsafe.Pointer(uintptr(cb.ovPtr) + 48 + uintptr(a*8)))
++				}
++
++				// Atomically clear completion flag so host knows invocation was accepted
++				*(*uint32)(cb.ovPtr) = 0
++
++				// Queue a new goroutine to execute callback function with copied arguments
++				go cb.fn(args, invID, cbID)
++			}
++		}
++	}
++	unlock(&registeredCallbacksMu)
+ 
+-	// Process any completions
++	// 2. Process any completions
+ 	for i := range pendingov {
+ 		if pendingov[i] != nil && (pendingov[i].o.flags&1) != 0 {
+ 			ctx := pendingov[i]

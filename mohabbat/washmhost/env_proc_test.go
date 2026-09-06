@@ -33,6 +33,33 @@ func TestGuestEnvCanonicalizesWindowsPathAliases(t *testing.T) {
 	}
 }
 
+func TestGuestEnvCanonicalizesWindowsUserDirs(t *testing.T) {
+	pairs := guestEnvForWasm([]string{
+		"LOCALAPPDATA=C:\\Users\\test\\AppData\\Local",
+		"USERPROFILE=C:\\Users\\test",
+		"APPDATA=C:\\Users\\test\\AppData\\Roaming",
+		"TEMP=C:\\Users\\test\\AppData\\Local\\Temp",
+	})
+	got := map[string]string{}
+	for _, kv := range pairs {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			got[k] = v
+		}
+	}
+	if got["LocalAppData"] != `C:\Users\test\AppData\Local` {
+		t.Fatalf("LOCALAPPDATA should be canonicalized to LocalAppData; got %q", got["LocalAppData"])
+	}
+	if got["UserProfile"] != `C:\Users\test` {
+		t.Fatalf("USERPROFILE should be canonicalized to UserProfile; got %q", got["UserProfile"])
+	}
+	if got["AppData"] != `C:\Users\test\AppData\Roaming` {
+		t.Fatalf("APPDATA should be canonicalized to AppData; got %q", got["AppData"])
+	}
+	if got["Temp"] != `C:\Users\test\AppData\Local\Temp` {
+		t.Fatalf("TEMP should be canonicalized to Temp; got %q", got["Temp"])
+	}
+}
+
 func TestGuestEnvExpandsPercentVarInPath(t *testing.T) {
 	dir := t.TempDir()
 	toolDir := filepath.Join(dir, "tools")
@@ -57,7 +84,7 @@ func TestGuestEnvExpandsPercentVarInPath(t *testing.T) {
 		}
 	}
 	if want := toolDir + ";C:\\Windows\\System32"; got["PATH"] != want {
-		t.Fatalf("PATH should expand %TOOLS_DIR% before lookup; got %q, want %q", got["PATH"], want)
+		t.Fatalf("PATH should expand %%TOOLS_DIR%% before lookup; got %q, want %q", got["PATH"], want)
 	}
 }
 
@@ -107,7 +134,8 @@ func TestSysProcEnv(t *testing.T) {
 	})
 
 	t.Run("3. sys_get_args small buffer", func(t *testing.T) {
-		ptr := uint32(0x200)
+		ptr := uint32(0x5000)
+		mod.Memory().Write(ptr, []byte{0})
 		stack := []uint64{uint64(ptr), 1}
 		env.sys_get_args(context.Background(), mod, stack)
 
@@ -214,7 +242,8 @@ func TestSysProcEnv(t *testing.T) {
 		start := time.Now()
 		for {
 			env.Poll(context.Background(), mod)
-			if false {
+			val, ok := mod.Memory().Read(waitOv, 24)
+			if ok && val[0]&1 != 0 {
 				break
 			}
 			if time.Since(start) > time.Second*5 {

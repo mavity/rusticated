@@ -24,16 +24,6 @@ type slot struct {
 
 const mohabbatMagic = "MOHABBAT"
 
-// MohabbatMeta layout: 8-byte magic + 6*u64 = 56 bytes
-type mohabbatMeta struct {
-	PoolLen         uint64
-	WashmhostOffset uint64
-	WashmhostLen    uint64
-	PayloadOffset   uint64
-	PayloadLen      uint64
-	Reserved        uint64
-}
-
 // prebuildFn is set by prebuild.go on native (!wasip1) builds via init().
 // On WASM builds it remains nil; ModeBuild falls back to subprocess invocation.
 var prebuildFn func(ws string) error

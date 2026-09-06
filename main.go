@@ -9,8 +9,11 @@ import (
 )
 
 func main() {
-	vegPath := os.Getenv("MOHABBAT_VEGETABLE_PATH")
-	inVeg := vegPath != ""
+	inVeg := runtime.GOOS == "wasip1"
+	vegPath := ""
+	if inVeg && len(os.Args) > 0 {
+		vegPath = os.Args[0]
+	}
 
 	if inVeg {
 		// We used to override shell temp vars here, but that caused permission issues in 'target'.
@@ -29,12 +32,15 @@ func main() {
 	for i := 0; i < len(rawArgs); {
 		// If in a vegetable, skip the vegetable path itself if it appears in args.
 		arg := rawArgs[i]
-		if inVeg && (arg == vegPath || (runtime.GOOS == "windows" && strings.EqualFold(arg, vegPath))) {
+		if inVeg && vegPath != "" && (arg == vegPath || (runtime.GOOS == "windows" && strings.EqualFold(arg, vegPath))) {
 			i++
 			continue
 		}
 
 		switch arg {
+		case "-h", "--help":
+			os.Stdout.WriteString("Usage: mohab [project] [-o out] [-r [args...]] [--platform name] [-v|--verbose]\n")
+			os.Exit(0)
 		case "--version":
 			ws, err := mohabbat.ResolveWorkspace("")
 			mohabbat.Must(err)

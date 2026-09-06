@@ -94,6 +94,15 @@ func TestWheelMatchesPlatform(t *testing.T) {
 	}
 }
 
+func TestWheelMatchesPlatformForWindowsArm64(t *testing.T) {
+	if got := wheelMatchesPlatformFor("windows", "arm64", "litert_lm_api-0.1.0-py3-none-win_arm64.whl"); !got {
+		t.Fatal("expected Windows ARM64 wheel to match")
+	}
+	if got := wheelMatchesPlatformFor("windows", "arm64", "litert_lm_api-0.1.0-py3-none-win_amd64.whl"); !got {
+		t.Fatal("expected Windows amd64 wheel to be accepted as an arm64 fallback")
+	}
+}
+
 func TestSetActiveModelAndActiveModelName(t *testing.T) {
 	originalName := activeModelName
 	defer func() { activeModelName = originalName }()
@@ -123,6 +132,21 @@ func TestSetActiveModelAndActiveModelName(t *testing.T) {
 			t.Errorf("ActiveModelName() = %q, want %q", got, "custom-model.litertlm")
 		}
 	})
+}
+
+func TestLookupEnvAnyCase(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", `C:\Users\test\AppData\Local`)
+	t.Setenv("USERPROFILE", `C:\Users\test`)
+
+	if got, ok := lookupEnvAnyCase("LocalAppData"); !ok || got != `C:\Users\test\AppData\Local` {
+		t.Fatalf("lookupEnvAnyCase(LocalAppData) = (%q, %v), want (%q, true)", got, ok, `C:\Users\test\AppData\Local`)
+	}
+	if got, ok := lookupEnvAnyCase("userprofile"); !ok || got != `C:\Users\test` {
+		t.Fatalf("lookupEnvAnyCase(userprofile) = (%q, %v), want (%q, true)", got, ok, `C:\Users\test`)
+	}
+	if _, ok := lookupEnvAnyCase("this-var-does-not-exist"); ok {
+		t.Fatal("lookupEnvAnyCase() unexpectedly found a missing env key")
+	}
 }
 
 func TestCacheDirPath(t *testing.T) {

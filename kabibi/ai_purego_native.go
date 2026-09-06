@@ -4,6 +4,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"runtime"
 	"sync"
 	"unsafe"
 
@@ -25,21 +27,65 @@ var (
 	lmGetSinkLoggerSize    func() uintptr
 	lmGetSinkLoggerMessage func(index uintptr) uintptr
 	lmClearSinkLogger      func()
+	lmStreamChunkGetText   func(chunk uintptr) uintptr
+	lmStreamChunkIsFinal   func(chunk uintptr) bool
+	lmStreamChunkGetError  func(chunk uintptr) uintptr
+
+	lmSettingsSetEnableSpeculativeDecoding     func(settings uintptr, enable bool)
+	lmSettingsSetUseRingbuffersLocalAttention func(settings uintptr, enable bool)
+	lmSettingsSetGpuDecodeStepsPerSync         func(settings uintptr, steps int32)
+	lmSettingsSetNumThreads                    func(settings uintptr, threads int32)
+	lmLoadedFileCreate                         func(modelPath uintptr) uintptr
+	lmLoadedFileDelete                         func(file uintptr)
+	lmLoadedFileHasSpeculativeDecodingSupport  func(file uintptr) bool
 )
 
 // tokenCallbackRegistry maps opaque IDs to Go callbacks for streaming tokens.
-var tokenCallbackRegistry = make(map[uintptr]func(string))
-var tokenCallbackNextID uintptr
+var (
+	tokenCallbackMu       sync.Mutex
+	tokenCallbackRegistry = make(map[uintptr]func(string))
+	tokenDoneChannels     = make(map[uintptr]chan struct{})
+	tokenCallbackNextID   uintptr
+)
 
 // nativeTokenCallback is the C-callable trampoline passed to
 // litert_lm_conversation_send_message_stream.
 //
-// C signature: void callback(void* userData, const char* text, bool isDone, const char* statsJSON)
-func nativeTokenCallback(userData, text uintptr, isDone bool, statsJSON uintptr) {
-	if text != 0 {
-		token := ptrToGoString(text)
-		if fn, ok := tokenCallbackRegistry[userData]; ok {
-			fn(token)
+// C signature: void callback(void* userData, void* chunkPtr)
+func nativeTokenCallback(userData, chunkPtr uintptr) {
+	if lmStreamChunkGetError != nil {
+		errPtr := lmStreamChunkGetError(chunkPtr)
+		if errPtr != 0 {
+			errStr := ptrToGoString(errPtr)
+			if errStr != "" {
+				fmt.Fprintf(os.Stderr, "LiteRT stream error: %s\n", errStr)
+			}
+		}
+	}
+	if lmStreamChunkGetText != nil {
+		textPtr := lmStreamChunkGetText(chunkPtr)
+		if textPtr != 0 {
+			token := ptrToGoString(textPtr)
+			tokenCallbackMu.Lock()
+			fn := tokenCallbackRegistry[userData]
+			tokenCallbackMu.Unlock()
+			if fn != nil {
+				fn(token)
+			}
+		}
+	}
+	if lmStreamChunkIsFinal != nil {
+		if isFinal := lmStreamChunkIsFinal(chunkPtr); isFinal {
+			tokenCallbackMu.Lock()
+			ch := tokenDoneChannels[userData]
+			tokenCallbackMu.Unlock()
+			if ch != nil {
+				select {
+				case <-ch:
+				default:
+					close(ch)
+				}
+			}
 		}
 	}
 }
@@ -94,8 +140,25 @@ func ensureLibLoaded(libPath string) error {
 		purego.RegisterLibFunc(&lmGetSinkLoggerSize, lib, "LiteRtGetSinkLoggerSize")
 		purego.RegisterLibFunc(&lmGetSinkLoggerMessage, lib, "LiteRtGetSinkLoggerMessage")
 		purego.RegisterLibFunc(&lmClearSinkLogger, lib, "LiteRtClearSinkLogger")
+		purego.RegisterLibFunc(&lmStreamChunkGetText, lib, "litert_lm_stream_chunk_get_text")
+		purego.RegisterLibFunc(&lmStreamChunkIsFinal, lib, "litert_lm_stream_chunk_is_final")
+		purego.RegisterLibFunc(&lmStreamChunkGetError, lib, "litert_lm_stream_chunk_get_error")
+
+		tryRegisterLibFunc(&lmSettingsSetEnableSpeculativeDecoding, lib, "litert_lm_engine_settings_set_enable_speculative_decoding")
+		tryRegisterLibFunc(&lmSettingsSetUseRingbuffersLocalAttention, lib, "litert_lm_engine_settings_set_use_ringbuffers_local_attention")
+		tryRegisterLibFunc(&lmSettingsSetGpuDecodeStepsPerSync, lib, "litert_lm_engine_settings_set_gpu_decode_steps_per_sync")
+		tryRegisterLibFunc(&lmSettingsSetNumThreads, lib, "litert_lm_engine_settings_set_num_threads")
+		tryRegisterLibFunc(&lmLoadedFileCreate, lib, "litert_lm_loaded_file_create")
+		tryRegisterLibFunc(&lmLoadedFileDelete, lib, "litert_lm_loaded_file_delete")
+		tryRegisterLibFunc(&lmLoadedFileHasSpeculativeDecodingSupport, lib, "litert_lm_loaded_file_has_speculative_decoding_support")
 	})
 	return libErr
+}
+
+func tryRegisterLibFunc(target any, lib uintptr, name string) {
+	if sym, err := dlsym(lib, name); err == nil && sym != 0 {
+		purego.RegisterLibFunc(target, lib, name)
+	}
 }
 
 func configureLogging() {
@@ -129,6 +192,37 @@ type LMEngine struct {
 
 func (e *LMEngine) RawEngine() uint64 { return e.ptr }
 
+func checkSpeculativeDecodingSupport(modelPtr uintptr) bool {
+	if lmLoadedFileCreate == nil || lmLoadedFileHasSpeculativeDecodingSupport == nil {
+		return false
+	}
+	file := lmLoadedFileCreate(modelPtr)
+	if file == 0 {
+		return false
+	}
+	hasSupport := lmLoadedFileHasSpeculativeDecodingSupport(file)
+	if lmLoadedFileDelete != nil {
+		lmLoadedFileDelete(file)
+	}
+	return hasSupport
+}
+
+func resolveBackendCandidates(backend string) []string {
+	if backend != "" && backend != "auto" {
+		if backend == "cpu" {
+			return []string{"cpu"}
+		}
+		return []string{backend, "cpu"}
+	}
+	if env := os.Getenv("LITERTLM_BACKEND"); env != "" {
+		if env == "cpu" {
+			return []string{"cpu"}
+		}
+		return []string{env, "cpu"}
+	}
+	return []string{"gpu", "npu", "cpu"}
+}
+
 func NewLMEngine(libPath, modelPath, backend string) (*LMEngine, error) {
 	if err := ensureLibLoaded(libPath); err != nil {
 		return nil, err
@@ -136,24 +230,49 @@ func NewLMEngine(libPath, modelPath, backend string) (*LMEngine, error) {
 
 	configureLogging()
 
-	// Build C strings.
 	cModel, keepModel := goStringToCPtr(modelPath)
-	cBackend, keepBackend := goStringToCPtr(backend)
 	_ = keepModel
-	_ = keepBackend
 
-	settings := lmSettingsCreate(cModel, cBackend, 0, 0)
-	if settings == 0 {
-		return nil, fmt.Errorf("litert_lm_engine_settings_create returned NULL")
+	supportsSpec := checkSpeculativeDecodingSupport(cModel)
+
+	candidates := resolveBackendCandidates(backend)
+	var lastErr error
+
+	for _, cand := range candidates {
+		cBackend, keepBackend := goStringToCPtr(cand)
+		_ = keepBackend
+
+		settings := lmSettingsCreate(cModel, cBackend, 0, 0)
+		if settings == 0 {
+			lastErr = fmt.Errorf("litert_lm_engine_settings_create returned NULL for backend %s", cand)
+			continue
+		}
+
+		if supportsSpec && lmSettingsSetEnableSpeculativeDecoding != nil {
+			lmSettingsSetEnableSpeculativeDecoding(settings, true)
+		}
+		if lmSettingsSetUseRingbuffersLocalAttention != nil {
+			lmSettingsSetUseRingbuffersLocalAttention(settings, true)
+		}
+		if cand == "gpu" && lmSettingsSetGpuDecodeStepsPerSync != nil {
+			lmSettingsSetGpuDecodeStepsPerSync(settings, 8)
+		}
+		if cand == "cpu" && lmSettingsSetNumThreads != nil {
+			lmSettingsSetNumThreads(settings, int32(runtime.NumCPU()))
+		}
+
+		engine := lmEngineCreate(settings)
+		lmSettingsDelete(settings)
+		if engine != 0 {
+			return &LMEngine{ptr: uint64(engine)}, nil
+		}
+		lastErr = fmt.Errorf("litert_lm_engine_create returned NULL for backend %s", cand)
 	}
-	defer lmSettingsDelete(settings)
 
-	engine := lmEngineCreate(settings)
-	if engine == 0 {
-		return nil, fmt.Errorf("litert_lm_engine_create returned NULL")
+	if lastErr != nil {
+		return nil, lastErr
 	}
-
-	return &LMEngine{ptr: uint64(engine)}, nil
+	return nil, fmt.Errorf("failed to initialize LiteRT-LM engine on any backend")
 }
 
 func (e *LMEngine) Close() error {
@@ -191,10 +310,20 @@ func (c *LMConversation) Close() error {
 }
 
 func (c *LMConversation) SendMessageStream(payloadJSON string, onToken func(string)) error {
+	tokenCallbackMu.Lock()
 	tokenCallbackNextID++
 	cbID := tokenCallbackNextID
+	doneCh := make(chan struct{})
 	tokenCallbackRegistry[cbID] = onToken
-	defer delete(tokenCallbackRegistry, cbID)
+	tokenDoneChannels[cbID] = doneCh
+	tokenCallbackMu.Unlock()
+
+	defer func() {
+		tokenCallbackMu.Lock()
+		delete(tokenCallbackRegistry, cbID)
+		delete(tokenDoneChannels, cbID)
+		tokenCallbackMu.Unlock()
+	}()
 
 	trampoline := purego.NewCallback(nativeTokenCallback)
 
@@ -205,6 +334,9 @@ func (c *LMConversation) SendMessageStream(payloadJSON string, onToken func(stri
 	if rc != 0 {
 		return fmt.Errorf("litert_lm_conversation_send_message_stream failed: %d", rc)
 	}
+
+	// Wait for stream completion from the background inference thread
+	<-doneCh
 
 	// Clean/clear the library's in-memory sink logger buffer to prevent RAM growth
 	if lmClearSinkLogger != nil {

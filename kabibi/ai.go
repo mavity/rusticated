@@ -86,7 +86,7 @@ func runAIPrompt(userInput string, onToken func(string)) error {
 	libPath := filepath.Join(libDir, "litert_lm_ext"+libExt())
 
 	// 1. Initialize the Engine
-	engine, err := NewLMEngine(libPath, modelPath, "cpu")
+	engine, err := NewLMEngine(libPath, modelPath, "")
 	if err != nil {
 		return err
 	}
@@ -137,7 +137,7 @@ func runAIPromptStateful(userInput string, conv *Conversation, onToken func(stri
 		libDir := filepath.Join(cacheDir, "lib")
 		libPath := filepath.Join(libDir, "litert_lm_ext"+libExt())
 
-		engine, err := NewLMEngine(libPath, modelPath, "cpu")
+		engine, err := NewLMEngine(libPath, modelPath, "")
 		if err != nil {
 			return err
 		}
