@@ -457,6 +457,14 @@ func TestSatelliteSubprocess(t *testing.T) {
 	hostEnc := gob.NewEncoder(inPipe)
 	hostDec := gob.NewDecoder(outPipe)
 
+	var handshakeEnv IPCEnvelope
+	if err := hostDec.Decode(&handshakeEnv); err != nil {
+		t.Fatalf("decode handshake failed: %v", err)
+	}
+	if handshakeEnv.Handshake == nil || !handshakeEnv.Handshake.IsHandshake {
+		t.Fatalf("expected handshake, got %+v", handshakeEnv.Handshake)
+	}
+
 	// Test Alloc over real subprocess pipes
 	allocReq := &DylibAllocReq{ReqID: 1, Size: 128, Align: 16}
 	if err := hostEnc.Encode(&IPCEnvelope{AllocReq: allocReq}); err != nil {
