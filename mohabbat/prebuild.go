@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -17,8 +18,7 @@ func init() {
 // It generates rusticated target specs, builds the sysroot for each target,
 // writes config.toml, and generates target/overlay.json for Go projects.
 func runPrebuild(ws string) error {
-	inVeg := os.Getenv("MOHABBAT_VEGETABLE_PATH") != ""
-	if inVeg {
+	if runtime.GOOS == "wasip1" {
 		// When running inside a vegetable (WASM guest), we assume prebuild
 		// artifacts already exist in the 'target' directory, as we cannot
 		// run rustc/cargo/go compilers in the restricted WASM environment.

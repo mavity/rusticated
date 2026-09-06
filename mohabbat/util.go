@@ -91,10 +91,10 @@ func ResolveWorkspace(ws string) (string, error) {
 	if ws != "" {
 		return filepath.Abs(ws)
 	}
-	// Highest priority: when running inside a vegetable, MOHABBAT_VEGETABLE_PATH
-	// points to the .bat file itself. Its directory is (or contains) the workspace root.
-	if vegPath := os.Getenv("MOHABBAT_VEGETABLE_PATH"); vegPath != "" {
-		dir := filepath.Dir(vegPath)
+	// Highest priority: when running inside a vegetable (WASM guest),
+	// os.Args[0] is the .bat file path itself. Its directory is (or contains) the workspace root.
+	if runtime.GOOS == "wasip1" && len(os.Args) > 0 && os.Args[0] != "" {
+		dir := filepath.Dir(os.Args[0])
 		for i := 0; i < 6; i++ {
 			if _, err := os.Stat(filepath.Join(dir, "sysroot.toml")); err == nil {
 				return dir, nil

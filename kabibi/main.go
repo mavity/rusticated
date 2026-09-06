@@ -60,19 +60,19 @@ func main() {
 	// Prompt mode: -p "prompt"
 	if *promptPtr != "" {
 		runPrompt(*promptPtr)
-		return
+		os.Exit(0)
 	}
 
 	// Batch mode: -c "command"
 	if *commandPtr != "" {
 		runBatchCommand(*commandPtr, nil)
-		return
+		os.Exit(0)
 	}
 
 	// Batch mode: script_file
 	if flag.NArg() > 0 {
 		runBatchFile(flag.Arg(0), flag.Args()[1:])
-		return
+		os.Exit(0)
 	}
 
 	m := initialModel()
@@ -81,6 +81,7 @@ func main() {
 		fmt.Printf("Alas, there's been an error: %v", err)
 		os.Exit(1)
 	}
+	os.Exit(0)
 }
 
 func runBatchCommand(cmdStr string, args []string) {
@@ -141,7 +142,7 @@ func runPrompt(prompt string) {
 	// Create a session and run the prompt
 	session := NewLMSession(&Conversation{})
 	err := runPromptWithSession(ctx, session, prompt)
-	defer session.Close()
+	session.Close()
 	fmt.Println()
 
 	if err != nil {
