@@ -23,6 +23,34 @@ func canonicalGuestEnvKey(key string) string {
 			return "PATH"
 		case "PATHEXT":
 			return "PATHEXT"
+		case "LOCALAPPDATA":
+			return "LocalAppData"
+		case "APPDATA":
+			return "AppData"
+		case "USERPROFILE":
+			return "UserProfile"
+		case "TEMP":
+			return "Temp"
+		case "TMP":
+			return "Tmp"
+		case "HOMEDRIVE":
+			return "HomeDrive"
+		case "HOMEPATH":
+			return "HomePath"
+		case "ALLUSERSPROFILE":
+			return "AllUsersProfile"
+		case "PROGRAMFILES":
+			return "ProgramFiles"
+		case "PROGRAMFILES(X86)":
+			return "ProgramFiles(x86)"
+		case "COMMONPROGRAMFILES":
+			return "CommonProgramFiles"
+		case "COMMONPROGRAMFILES(X86)":
+			return "CommonProgramFiles(x86)"
+		case "COMSPEC":
+			return "ComSpec"
+		case "SYSTEMROOT":
+			return "SystemRoot"
 		}
 	}
 	return key
@@ -144,9 +172,6 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 	}
 
 	// 3. Instantiate
-	debugEnv := guestEnvForWasm(os.Environ())
-	fmt.Fprintf(os.Stderr, "DEBUG guestEnvForWasm: %v\n", debugEnv)
-
 	// Apply args and environment directly to Wazero Config.
 	// Windows often exposes PATH/PATHEXT as Path/Pathext, but the guest runtime
 	// expects canonical names and uses shell semantics that are case-insensitive
@@ -179,6 +204,7 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 		}
 		return 1, fmt.Errorf("failed to instantiate module: %w", err)
 	}
+	hEnv.mod = mod
 
 	// 4. Drive completion
 	runFunc := mod.ExportedFunction("run")
@@ -189,12 +215,18 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 	// 2. Event loop: poll for completions, then re-enter the guest.
 	var res []uint64
 	for {
+		for _, mgr := range hEnv.DylibManagersForPolling() {
+			mgr.BeforeRun(ctx, mod)
+		}
 		res, err = runFunc.Call(ctx)
 		if err != nil {
 			if exitErr, ok := err.(*sys.ExitError); ok {
 				return int(exitErr.ExitCode()), nil
 			}
 			return 1, fmt.Errorf("run failed: %w", err)
+		}
+		for _, mgr := range hEnv.DylibManagersForPolling() {
+			mgr.AfterRun(ctx, mod)
 		}
 
 		hEnv.mu.Lock()

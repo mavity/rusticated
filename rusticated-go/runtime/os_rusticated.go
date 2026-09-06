@@ -189,12 +189,89 @@ func rt0_init()
 
 var initialized uint32
 
+type callbackRegistration struct {
+	ovPtr unsafe.Pointer
+	fn    func(args []uint64, invID, cbID uint64)
+}
+
+var (
+	registeredCallbacksMu mutex
+	registeredCallbacks   []*callbackRegistration
+)
+
+//go:linkname registerCallbackRuntime_syscall syscall.registerCallbackRuntime
+func registerCallbackRuntime_syscall(ovPtr unsafe.Pointer, fn func(args []uint64, invID, cbID uint64)) bool {
+	lock(&registeredCallbacksMu)
+	defer unlock(&registeredCallbacksMu)
+	for i, cb := range registeredCallbacks {
+		if cb == nil {
+			registeredCallbacks[i] = &callbackRegistration{
+				ovPtr: ovPtr,
+				fn:    fn,
+			}
+			return true
+		}
+	}
+	registeredCallbacks = append(registeredCallbacks, &callbackRegistration{
+		ovPtr: ovPtr,
+		fn:    fn,
+	})
+	return true
+}
+
+//go:linkname unregisterCallbackRuntime_syscall syscall.unregisterCallbackRuntime
+func unregisterCallbackRuntime_syscall(ovPtr unsafe.Pointer) {
+	lock(&registeredCallbacksMu)
+	defer unlock(&registeredCallbacksMu)
+	for i, cb := range registeredCallbacks {
+		if cb != nil && cb.ovPtr == ovPtr {
+			registeredCallbacks[i] = nil
+			return
+		}
+	}
+}
+
+//go:linkname pauseToHost_syscall syscall.pauseToHost
+func pauseToHost_syscall() {
+	pause(sys.GetCallerSP() - 16)
+}
+
+//go:linkname currentG_syscall syscall.currentG
+func currentG_syscall() uintptr {
+	return uintptr(unsafe.Pointer(getg()))
+}
+
 // handleContinuation is called by the assembly entry point on re-entry (continuation)
 // after one or moree I/O completions have been written into guest Overlapped memory.
 // It processes completions and marks waiting goroutines as ready.
 func handleContinuation() {
+	// 1. Process any callback invocations projected by host into callback overlappeds
+	lock(&registeredCallbacksMu)
+	for i := range registeredCallbacks {
+		cb := registeredCallbacks[i]
+		if cb != nil {
+			flags := *(*uint32)(cb.ovPtr)
+			if flags&1 != 0 {
+				cbID := *(*uint64)(unsafe.Pointer(uintptr(cb.ovPtr) + 24))
+				invID := *(*uint64)(unsafe.Pointer(uintptr(cb.ovPtr) + 32))
+				argLen := *(*uint32)(unsafe.Pointer(uintptr(cb.ovPtr) + 40))
+				argCount := int(argLen / 8)
+				args := make([]uint64, argCount)
+				for a := 0; a < argCount; a++ {
+					args[a] = *(*uint64)(unsafe.Pointer(uintptr(cb.ovPtr) + 48 + uintptr(a*8)))
+				}
 
-	// Process any completions
+				// Atomically clear completion flag so host knows invocation was accepted
+				*(*uint32)(cb.ovPtr) = 0
+
+				// Queue a new goroutine to execute callback function with copied arguments
+				go cb.fn(args, invID, cbID)
+			}
+		}
+	}
+	unlock(&registeredCallbacksMu)
+
+	// 2. Process any completions
 	for i := range pendingov {
 		if pendingov[i] != nil && (pendingov[i].o.flags&1) != 0 {
 			ctx := pendingov[i]

@@ -3,128 +3,653 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"encoding/gob"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
+	"runtime"
 	"sync"
+	"sync/atomic"
 
 	"github.com/tetratelabs/wazero/api"
 )
 
-type DylibState struct {
-	Handle   uintptr
-	Children []uint64
-	Mu       sync.Mutex
+type FrameState int
+
+const (
+	FrameStatePending FrameState = iota
+	FrameStateProjected
+	FrameStateGuestAsync
+	FrameStateCompleted
+	FrameStateReturned
+)
+
+type CallbackFrame struct {
+	cbID     uint64
+	invID    uint64
+	threadID uint64
+	state    FrameState
+	args     []uint64
+	results  []uint64
+	reg      *HostCallbackReg
 }
 
-type SymbolState struct {
-	Handle uintptr
-	Parent uint64
+type HostCallbackReg struct {
+	cbID               uint64
+	cbOvPtr            uint32
+	cbOvLen            uint32
+	sigBytes           []byte
+	params             []byte
+	results            []byte
+	trampoline         uint64
+	activeInvID        uint64
+	pendingInvocations []*CallbackFrame
 }
 
-type CallbackState struct {
-	Trampoline uintptr
-	Parent     uint64
-	Sig        CallbackSig
-	GuestFn    string
-	Closure    interface{} // Pins the closure from GC!
+type dylibPendingOp struct {
+	reqID      uint64
+	ovPtr      uint32
+	handle     uint64
+	kind       dylibPendingOpKind
+	manager    *DylibHostManager
+	target     dylibTargetKey
+	resultExt  uint64
+	bufPtr     uint32
+	bufLen     uint32
+	resultsPtr uint32
+	resultsCap uint32
 }
 
-type CallbackSig struct {
-	ArgCount uint8
-	RetType  uint8
-	ArgTypes []uint8
+type dylibPendingOpKind int
+
+const (
+	dylibPendingOpGeneric dylibPendingOpKind = iota
+	dylibPendingOpOpenLibrary
+	dylibPendingOpResolveSymbol
+)
+
+type DylibHostManager struct {
+	mu                  sync.Mutex
+	hEnv                *HostEnv
+	target              dylibTargetKey
+	cmd                 *exec.Cmd
+	satEnc              *gob.Encoder
+	satDec              *gob.Decoder
+	satCloser           io.Closer
+	started             bool
+	closed              bool
+	nextReqID           uint64
+	nextCbID            uint64
+	pendingOps          map[uint64]*dylibPendingOp
+	callbacks           map[uint64]*HostCallbackReg
+	callbacksByOv       map[uint32]*HostCallbackReg
+	callbackList        []*HostCallbackReg
+	threadStacks        map[uint64][]*CallbackFrame
+	allFrames           map[uint64]*CallbackFrame
+	incomingInvocations chan *DylibCbInvokeEvent
 }
 
-func (cb *CallbackState) Close() {
-	// Go purego/NewCallback doesn't support freeing, but we can do cleanups here
+func NewDylibHostManager(hEnv *HostEnv) *DylibHostManager {
+	return &DylibHostManager{
+		hEnv:                hEnv,
+		pendingOps:          make(map[uint64]*dylibPendingOp),
+		callbacks:           make(map[uint64]*HostCallbackReg),
+		callbacksByOv:       make(map[uint32]*HostCallbackReg),
+		threadStacks:        make(map[uint64][]*CallbackFrame),
+		allFrames:           make(map[uint64]*CallbackFrame),
+		incomingInvocations: make(chan *DylibCbInvokeEvent, 128),
+	}
 }
 
-func (h *HostEnv) closeDylibLocked(libHandle uint64, libState *DylibState) {
-	for _, child := range libState.Children {
-		if childAny, ok := h.handles[child]; ok {
-			if cbState, ok := childAny.(*CallbackState); ok {
-				cbState.Close()
+// SetSatelliteStream allows tests to provide an in-process satellite communication pipe.
+func (m *DylibHostManager) SetSatelliteStream(r io.Reader, w io.Writer, closer io.Closer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.satEnc = gob.NewEncoder(w)
+	m.satDec = gob.NewDecoder(r)
+	m.satCloser = closer
+	m.started = true
+	if m.hEnv != nil && m.hEnv.dylibRegistry != nil {
+		m.hEnv.dylibRegistry.SetReadyManager(dylibTargetKey{goos: runtime.GOOS, goarch: runtime.GOARCH}, m)
+	}
+	go m.readSatelliteLoop()
+}
+
+func (r *DylibSatelliteRegistry) managerForTarget(target dylibTargetKey) (*DylibHostManager, error) {
+	for {
+		r.mu.Lock()
+		entry, ok := r.entries[target]
+		if !ok {
+			entry = &satelliteEntry{
+				target:  target,
+				manager: NewDylibHostManager(r.hEnv),
+				state:   satelliteEntryStarting,
+				readyCh: make(chan struct{}),
 			}
-			delete(h.handles, child)
+			entry.manager.target = target
+			r.entries[target] = entry
+			go r.startEntry(entry)
+		}
+		if entry.state == satelliteEntryReady && entry.manager != nil {
+			manager := entry.manager
+			r.mu.Unlock()
+			return manager, nil
+		}
+		if entry.state == satelliteEntryFailed {
+			delete(r.entries, target)
+			r.mu.Unlock()
+			continue
+		}
+		readyCh := entry.readyCh
+		r.mu.Unlock()
+
+		<-readyCh
+
+		r.mu.Lock()
+		state := entry.state
+		manager := entry.manager
+		startErr := entry.startErr
+		if state == satelliteEntryFailed {
+			if current, ok := r.entries[target]; ok && current == entry {
+				delete(r.entries, target)
+			}
+			r.mu.Unlock()
+			if startErr == nil {
+				startErr = fmt.Errorf("satellite start failed for %s/%s", target.goos, target.goarch)
+			}
+			return nil, startErr
+		}
+		r.mu.Unlock()
+		if state == satelliteEntryReady && manager != nil {
+			return manager, nil
+		}
+	}
+}
+
+func (r *DylibSatelliteRegistry) startEntry(entry *satelliteEntry) {
+	err := entry.manager.startSatelliteForTarget(entry.target.goos, entry.target.goarch)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err != nil {
+		entry.startErr = err
+		entry.state = satelliteEntryFailed
+		close(entry.readyCh)
+		return
+	}
+	entry.state = satelliteEntryReady
+	close(entry.readyCh)
+	go entry.manager.readSatelliteLoop()
+}
+
+func (r *DylibSatelliteRegistry) EvictManager(manager *DylibHostManager) {
+	if manager == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry, ok := r.entries[manager.target]
+	if ok && entry != nil && entry.manager == manager {
+		delete(r.entries, manager.target)
+	}
+}
+
+func (h *HostEnv) resolveDylibTarget(path string) dylibTargetKey {
+	tgt, err := detectDylibTarget(path)
+	if err != nil {
+		return dylibTargetKey{goos: runtime.GOOS, goarch: runtime.GOARCH}
+	}
+	return dylibTargetKey{goos: tgt.goos, goarch: tgt.goarch}
+}
+
+func (m *DylibHostManager) EnsureSatellite() error {
+	m.mu.Lock()
+	if m.started {
+		m.mu.Unlock()
+		return nil
+	}
+	m.started = true
+	tgtGOOS, tgtGOARCH := m.target.goos, m.target.goarch
+	if tgtGOOS == "" {
+		tgtGOOS, tgtGOARCH = runtime.GOOS, runtime.GOARCH
+	}
+	if err := m.startSatelliteForTarget(tgtGOOS, tgtGOARCH); err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	m.mu.Unlock()
+	go m.readSatelliteLoop()
+	return nil
+}
+
+func formatPlatformTarget(goos, goarch string) string {
+	return goos + "-" + goarch
+}
+
+func (m *DylibHostManager) startSatelliteForTarget(goos, goarch string) error {
+	outPath, err := buildWashmhostForPlatform(goos, goarch)
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(outPath, "--dylib-satellite")
+	inPipe, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("satellite stdin pipe: %w", err)
+	}
+	outPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = inPipe.Close()
+		return fmt.Errorf("satellite stdout pipe: %w", err)
+	}
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		_ = inPipe.Close()
+		_ = outPipe.Close()
+		return fmt.Errorf("satellite process start: %w", err)
+	}
+
+	var hs IPCEnvelope
+	dec := gob.NewDecoder(outPipe)
+	if err := dec.Decode(&hs); err != nil {
+		_ = cmd.Process.Kill()
+		_ = inPipe.Close()
+		_ = outPipe.Close()
+		return fmt.Errorf("satellite handshake failed: %w", err)
+	}
+	if hs.Handshake == nil || !hs.Handshake.IsHandshake {
+		_ = cmd.Process.Kill()
+		_ = inPipe.Close()
+		_ = outPipe.Close()
+		return fmt.Errorf("satellite protocol error: expected handshake")
+	}
+	if hs.Handshake.HGOOS != goos || hs.Handshake.HGOARCH != goarch {
+		_ = cmd.Process.Kill()
+		_ = inPipe.Close()
+		_ = outPipe.Close()
+		return fmt.Errorf("satellite arch mismatch: need %s/%s, got %s/%s", goos, goarch, hs.Handshake.HGOOS, hs.Handshake.HGOARCH)
+	}
+
+	m.cmd = cmd
+	m.satEnc = gob.NewEncoder(inPipe)
+	m.satDec = dec
+	m.satCloser = inPipe
+	m.started = true
+	return nil
+}
+
+func (m *DylibHostManager) Close() {
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return
+	}
+	m.closed = true
+	if m.satCloser != nil {
+		_ = m.satCloser.Close()
+	}
+	if m.cmd != nil && m.cmd.Process != nil {
+		_ = m.cmd.Process.Kill()
+	}
+	m.mu.Unlock()
+}
+
+func (m *DylibHostManager) send(env *IPCEnvelope) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sendLocked(env)
+}
+
+func (m *DylibHostManager) sendLocked(env *IPCEnvelope) error {
+	if m.satEnc == nil {
+		return fmt.Errorf("satellite not connected")
+	}
+	return m.satEnc.Encode(env)
+}
+
+func (m *DylibHostManager) readSatelliteLoop() {
+	for {
+		var env IPCEnvelope
+		err := m.satDec.Decode(&env)
+		if err != nil {
+			// Satellite died or pipe closed: abort pending ops with EFAULT / EIO
+			fmt.Fprintf(os.Stderr, "washmhost satellite disconnect for %s/%s: %v\n", m.target.goos, m.target.goarch, err)
+			m.handleSatelliteDisconnect()
+			return
+		}
+
+		if env.OpenResp != nil {
+			m.finishOp(env.OpenResp.ReqID, env.OpenResp.Error, env.OpenResp.Handle, nil)
+		} else if env.SymResp != nil {
+			m.finishOp(env.SymResp.ReqID, env.SymResp.Error, env.SymResp.Symbol, nil)
+		} else if env.CloseResp != nil {
+			m.finishOp(env.CloseResp.ReqID, env.CloseResp.Error, 0, nil)
+		} else if env.CallResp != nil {
+			var ext uint64
+			if len(env.CallResp.Results) > 0 {
+				ext = env.CallResp.Results[0]
+			}
+			m.finishOp(env.CallResp.ReqID, env.CallResp.Error, ext, env.CallResp.Results)
+		} else if env.AllocResp != nil {
+			m.finishOp(env.AllocResp.ReqID, env.AllocResp.Error, env.AllocResp.Ptr, nil)
+		} else if env.FreeResp != nil {
+			m.finishOp(env.FreeResp.ReqID, env.FreeResp.Error, 0, nil)
+		} else if env.ReadMemResp != nil {
+			m.finishReadMemOp(env.ReadMemResp.ReqID, env.ReadMemResp.Error, env.ReadMemResp.Data)
+		} else if env.WriteMemResp != nil {
+			m.finishOp(env.WriteMemResp.ReqID, env.WriteMemResp.Error, 0, nil)
+		} else if env.CbRegisterResp != nil {
+			m.finishOp(env.CbRegisterResp.ReqID, env.CbRegisterResp.Error, env.CbRegisterResp.Trampoline, nil)
+		} else if env.CbInvokeEvent != nil {
+			m.incomingInvocations <- env.CbInvokeEvent
+			m.hEnv.fileOpsQueue <- func() {} // Wake up Poll()
+		}
+	}
+}
+
+func (m *DylibHostManager) handleSatelliteDisconnect() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for reqID, op := range m.pendingOps {
+		delete(m.pendingOps, reqID)
+		ovPtr := op.ovPtr
+		m.hEnv.fileOpsQueue <- func() {
+			if m.hEnv.mod != nil {
+				_ = writeOverlapped(m.hEnv.mod, ovPtr, wasiEFAULT, 0, 0)
+			}
+			m.hEnv.DecOps()
+		}
+	}
+	if m.hEnv != nil {
+		m.hEnv.deleteDylibResourcesForManager(m)
+		if m.hEnv.dylibRegistry != nil {
+			m.hEnv.dylibRegistry.EvictManager(m)
+		}
+	}
+}
+
+func (m *DylibHostManager) finishOp(reqID uint64, errMsg string, resultExt uint64, extraResults []uint64) {
+	m.mu.Lock()
+	op, ok := m.pendingOps[reqID]
+	if ok {
+		delete(m.pendingOps, reqID)
+	}
+	m.mu.Unlock()
+
+	if !ok {
+		return
+	}
+
+	m.hEnv.fileOpsQueue <- func() {
+		mod := m.hEnv.mod
+		if mod == nil {
+			m.hEnv.DecOps()
+			return
+		}
+		var errCode uint32 = 0
+		if errMsg != "" {
+			errCode = wasiEIO
+		} else {
+			switch op.kind {
+			case dylibPendingOpOpenLibrary:
+				resultExt = m.hEnv.registerDylibLibrary(op.manager, resultExt, op.target)
+			case dylibPendingOpResolveSymbol:
+				resultExt = m.hEnv.registerDylibSymbol(op.manager, op.handle, resultExt)
+			}
+			if op.resultsPtr != 0 && len(extraResults) > 0 {
+				toWrite := len(extraResults)
+				if int(op.resultsCap) < toWrite {
+					toWrite = int(op.resultsCap)
+				}
+				buf := make([]byte, toWrite*8)
+				for i := 0; i < toWrite; i++ {
+					binary.LittleEndian.PutUint64(buf[i*8:(i+1)*8], extraResults[i])
+				}
+				mod.Memory().Write(op.resultsPtr, buf)
+			}
+		}
+
+		_ = writeOverlapped(mod, op.ovPtr, errCode, 0, resultExt)
+		m.hEnv.DecOps()
+	}
+}
+
+func (m *DylibHostManager) finishReadMemOp(reqID uint64, errMsg string, data []byte) {
+	m.mu.Lock()
+	op, ok := m.pendingOps[reqID]
+	if ok {
+		delete(m.pendingOps, reqID)
+	}
+	m.mu.Unlock()
+
+	if !ok {
+		return
+	}
+
+	m.hEnv.fileOpsQueue <- func() {
+		mod := m.hEnv.mod
+		if mod == nil {
+			m.hEnv.DecOps()
+			return
+		}
+		var errCode uint32 = 0
+		if errMsg != "" {
+			errCode = wasiEIO
+		} else if len(data) > 0 && op.bufPtr != 0 {
+			mod.Memory().Write(op.bufPtr, data)
+		}
+
+		_ = writeOverlapped(mod, op.ovPtr, errCode, 0, uint64(len(data)))
+		m.hEnv.DecOps()
+	}
+}
+
+func (m *DylibHostManager) HasActiveWork() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.pendingOps) > 0 {
+		return true
+	}
+	if len(m.incomingInvocations) > 0 {
+		return true
+	}
+	if len(m.callbackList) > 0 {
+		return true
+	}
+	for _, stack := range m.threadStacks {
+		if len(stack) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// BeforeRun processes incoming callback invocations and projects ready ones into guest memory.
+func (m *DylibHostManager) BeforeRun(ctx context.Context, mod api.Module) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// 1. Drain incoming invocation events into thread stacks and deterministic FIFO per-callback queues
+	for {
+		select {
+		case ev := <-m.incomingInvocations:
+			reg := m.callbacks[ev.CbID]
+			frame := &CallbackFrame{
+				cbID:     ev.CbID,
+				invID:    ev.InvID,
+				threadID: ev.ThreadID,
+				state:    FrameStatePending,
+				args:     ev.Args,
+				reg:      reg,
+			}
+			m.threadStacks[ev.ThreadID] = append(m.threadStacks[ev.ThreadID], frame)
+			m.allFrames[ev.InvID] = frame
+			if reg != nil {
+				reg.pendingInvocations = append(reg.pendingInvocations, frame)
+			}
+		default:
+			goto project
 		}
 	}
 
-	req := DylibRequest{
-		Op:        "Close",
-		LibHandle: uint64(libState.Handle),
+project:
+	// 2. Project pending frames into free guest callback overlappeds gated strictly by cell availability (flags & 1 == 0)
+	mem := mod.Memory()
+	if mem == nil {
+		return
 	}
-	_, _ = callSatellite(h, req)
 
-	delete(h.handles, libHandle)
+	for _, reg := range m.callbackList {
+		if len(reg.pendingInvocations) == 0 {
+			continue
+		}
+		flagBuf, ok := mem.Read(reg.cbOvPtr, 4)
+		if !ok {
+			continue
+		}
+		flags := binary.LittleEndian.Uint32(flagBuf)
+		if flags&1 != 0 {
+			// Cell is currently completed or occupied
+			continue
+		}
+
+		// Pop the head of the deterministic FIFO queue for this callback
+		frame := reg.pendingInvocations[0]
+		reg.pendingInvocations = reg.pendingInvocations[1:]
+
+		// Project into guest callback overlapped!
+		buf := make([]byte, CbOvTotalSize)
+		WriteCallbackOverlappedInvocation(buf, frame.cbID, frame.invID, frame.args, uint32(len(reg.results)*8))
+		mem.Write(reg.cbOvPtr, buf)
+		frame.state = FrameStateProjected
+		reg.activeInvID = frame.invID
+	}
 }
 
-func (h *HostEnv) sys_dylib_open(ctx context.Context, m api.Module, stack []uint64) {
+// AfterRun inspects guest callback overlappeds at exit from run(), captures results,
+// marks states, and unwinds completed frames in LIFO order.
+func (m *DylibHostManager) AfterRun(ctx context.Context, mod api.Module) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
+	mem := mod.Memory()
+	if mem == nil {
+		return
+	}
+
+	for _, reg := range m.callbackList {
+		flagBuf, ok := mem.Read(reg.cbOvPtr, 4)
+		if !ok {
+			continue
+		}
+		flags := binary.LittleEndian.Uint32(flagBuf)
+
+		if flags&1 == 0 {
+			// flags & 1 == 0: Do not read any additional bytes. Update host-side state using reg.activeInvID stored in host memory.
+			if reg.activeInvID != 0 {
+				if frame, exists := m.allFrames[reg.activeInvID]; exists && frame.state == FrameStateProjected {
+					frame.state = FrameStateGuestAsync
+				}
+			}
+		} else {
+			// flags & 1 != 0: Read return ordinals, reset flags to 0, and clear reg.activeInvID.
+			invID := reg.activeInvID
+			buf, ok := mem.Read(reg.cbOvPtr, CbOvTotalSize)
+			if ok {
+				if invID == 0 {
+					invID = binary.LittleEndian.Uint64(buf[32:40])
+				}
+				frame, exists := m.allFrames[invID]
+				if exists && frame.state != FrameStateCompleted && frame.state != FrameStateReturned {
+					results := ReadCallbackOverlappedResults(buf, len(reg.results))
+					frame.results = results
+					frame.state = FrameStateCompleted
+				}
+			}
+			mem.Write(reg.cbOvPtr, []byte{0, 0, 0, 0})
+			reg.activeInvID = 0
+			select {
+			case m.hEnv.fileOpsQueue <- func() {}:
+			default:
+			}
+		}
+	}
+
+	// Unwind top completed frames per thread stack in strict LIFO order
+	for threadID, stack := range m.threadStacks {
+		for len(stack) > 0 {
+			top := stack[len(stack)-1]
+			if top.state == FrameStateCompleted {
+				// Send return message to satellite!
+				_ = m.sendLocked(&IPCEnvelope{
+					CbReturnReq: &DylibCbReturnReq{
+						InvID:   top.invID,
+						Results: top.results,
+					},
+				})
+				top.state = FrameStateReturned
+				delete(m.allFrames, top.invID)
+				stack = stack[:len(stack)-1]
+				m.threadStacks[threadID] = stack
+			} else {
+				// Top frame is not yet complete (still Pending, Projected, or GuestAsync).
+				// We must park any completed frames below it until top unwinds!
+				break
+			}
+		}
+	}
+}
+
+// ── Host ABI Functions ─────────────────────────────────────────────────────
+
+func (h *HostEnv) sys_dylib_open(ctx context.Context, m api.Module, stack []uint64) {
 	ovPtr := uint32(stack[0])
 	pathPtr := uint32(stack[1])
 	pathLen := uint32(stack[2])
-	_ = uint32(stack[3]) // flags reserved
+	flags := int(stack[3])
 
-	mem := m.Memory()
-	pathBuf, ok := mem.Read(pathPtr, pathLen)
+	pathBytes, ok := m.Memory().Read(pathPtr, pathLen)
 	if !ok {
-		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+		_ = writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 		return
 	}
-	path := string(pathBuf)
-
-	// The satellite arch is decided by the DLL being opened (first open wins).
-	if tgt, derr := detectDylibTarget(path); derr == nil {
-		h.mu.Lock()
-		if h.satTargetGOOS == "" {
-			h.satTargetGOOS, h.satTargetGOARCH = tgt.goos, tgt.goarch
-		}
-		mismatch := h.satTargetGOOS != tgt.goos || h.satTargetGOARCH != tgt.goarch
-		h.mu.Unlock()
-		if mismatch {
-			writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+	path := string(pathBytes)
+	target := h.resolveDylibTarget(path)
+	manager := h.dylibMgr
+	if h.dylibRegistry != nil {
+		var err error
+		manager, err = h.dylibRegistry.managerForTarget(target)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "washmhost satellite start error for %s/%s: %v\n", target.goos, target.goarch, err)
+			_ = writeOverlapped(m, ovPtr, wasiEIO, 0, 0)
 			return
 		}
+	} else if err := h.dylibMgr.EnsureSatellite(); err != nil {
+		fmt.Fprintf(os.Stderr, "washmhost satellite ensure error for %s/%s: %v\n", target.goos, target.goarch, err)
+		_ = writeOverlapped(m, ovPtr, wasiEIO, 0, 0)
+		return
 	}
 
-	state := h.RegisterOp(ovPtr, nil)
-	go func() {
-		req := DylibRequest{
-			Op:   "Open",
-			Path: path,
-		}
+	reqID := atomic.AddUint64(&manager.nextReqID, 1)
+	manager.mu.Lock()
+	manager.pendingOps[reqID] = &dylibPendingOp{
+		reqID:   reqID,
+		ovPtr:   ovPtr,
+		kind:    dylibPendingOpOpenLibrary,
+		manager: manager,
+		target:  target,
+	}
+	manager.mu.Unlock()
+	h.IncOps()
 
-		retCode := uint32(0)
-		var libHandle uint64
-
-		resp, err := callSatellite(h, req)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "satellite spawn error: %v\n", err)
-			retCode = wasiEIO
-		} else if resp.ErrCode != 0 {
-			retCode = resp.ErrCode
-		} else {
-			h.mu.Lock()
-			libHandle = h.nextHandle
-			h.nextHandle++
-			h.handles[libHandle] = &DylibState{
-				Handle:   uintptr(resp.Handle),
-				Children: []uint64{},
-			}
-			h.mu.Unlock()
-		}
-
-		h.fileOpsQueue <- func() {
-			defer h.DecOpsFor(state)
-			if !h.IsOpActive(ovPtr, state.opID) {
-				return
-			}
-			h.mu.Lock()
-			delete(h.activeOps, ovPtr)
-			h.mu.Unlock()
-			writeOverlapped(m, ovPtr, retCode, 0, libHandle)
-		}
-	}()
+	_ = manager.send(&IPCEnvelope{
+		OpenReq: &DylibOpenReq{
+			ReqID: reqID,
+			Path:  string(pathBytes),
+			Flags: flags,
+		},
+	})
 }
 
 func (h *HostEnv) sys_dylib_sym(ctx context.Context, m api.Module, stack []uint64) {
@@ -133,565 +658,333 @@ func (h *HostEnv) sys_dylib_sym(ctx context.Context, m api.Module, stack []uint6
 	namePtr := uint32(stack[2])
 	nameLen := uint32(stack[3])
 
-	mem := m.Memory()
-	nameBuf, ok := mem.Read(namePtr, nameLen)
+	libRef, ok := h.lookupDylibLibrary(libHandle)
 	if !ok {
-		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+		_ = writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 		return
 	}
-	name := string(nameBuf)
 
-	h.mu.Lock()
-	libAny, ok := h.handles[libHandle]
-	h.mu.Unlock()
+	if libRef.manager == nil {
+		_ = writeOverlapped(m, ovPtr, wasiEIO, 0, 0)
+		return
+	}
+	if err := libRef.manager.EnsureSatellite(); err != nil {
+		_ = writeOverlapped(m, ovPtr, wasiEIO, 0, 0)
+		return
+	}
+
+	nameBytes, ok := m.Memory().Read(namePtr, nameLen)
 	if !ok {
-		writeOverlapped(m, ovPtr, wasiEBADF, 0, 0)
-		return
-	}
-	libState, ok := libAny.(*DylibState)
-	if !ok {
-		writeOverlapped(m, ovPtr, wasiEBADF, 0, 0)
+		_ = writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 		return
 	}
 
-	req := DylibRequest{
-		Op:        "Sym",
-		LibHandle: uint64(libState.Handle),
-		Name:      name,
+	reqID := atomic.AddUint64(&libRef.manager.nextReqID, 1)
+	libRef.manager.mu.Lock()
+	libRef.manager.pendingOps[reqID] = &dylibPendingOp{
+		reqID:   reqID,
+		ovPtr:   ovPtr,
+		handle:  libHandle,
+		kind:    dylibPendingOpResolveSymbol,
+		manager: libRef.manager,
 	}
-	resp, err := callSatellite(h, req)
-	if err != nil || resp.ErrCode != 0 {
-		ret := wasiEIO
-		if resp.ErrCode != 0 {
-			ret = resp.ErrCode
-		}
-		writeOverlapped(m, ovPtr, ret, 0, 0)
-		return
-	}
-	sym := uintptr(resp.Handle)
+	libRef.manager.mu.Unlock()
+	h.IncOps()
 
-	h.mu.Lock()
-	symHandle := h.nextHandle
-	h.nextHandle++
-	h.handles[symHandle] = &SymbolState{
-		Handle: sym,
-		Parent: libHandle,
-	}
-	libState.Children = append(libState.Children, symHandle)
-	h.mu.Unlock()
-
-	writeOverlapped(m, ovPtr, 0, 0, symHandle)
+	_ = libRef.manager.send(&IPCEnvelope{
+		SymReq: &DylibSymReq{
+			ReqID:  reqID,
+			Handle: libRef.remote,
+			Name:   string(nameBytes),
+		},
+	})
 }
 
 func (h *HostEnv) sys_dylib_close(ctx context.Context, m api.Module, stack []uint64) {
-	libHandle := stack[0]
-
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if libAny, ok := h.handles[libHandle]; ok {
-		if libState, ok := libAny.(*DylibState); ok {
-			h.closeDylibLocked(libHandle, libState)
-		}
+	ovPtr := uint32(stack[0])
+	libHandle := stack[1]
+	libRef, ok := h.lookupDylibLibrary(libHandle)
+	if !ok || libRef.manager == nil {
+		_ = writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+		return
 	}
-}
 
-type BufArg struct {
-	gPtr    uint32
-	gLen    uint32
-	hostBuf []byte
+	reqID := atomic.AddUint64(&libRef.manager.nextReqID, 1)
+	libRef.manager.mu.Lock()
+	libRef.manager.pendingOps[reqID] = &dylibPendingOp{
+		reqID: reqID,
+		ovPtr: ovPtr,
+	}
+	libRef.manager.mu.Unlock()
+	h.IncOps()
+
+	h.deleteDylibLibrary(libHandle)
+	_ = libRef.manager.send(&IPCEnvelope{
+		CloseReq: &DylibCloseReq{
+			ReqID:  reqID,
+			Handle: libRef.remote,
+		},
+	})
 }
 
 func (h *HostEnv) sys_dylib_call(ctx context.Context, m api.Module, stack []uint64) {
 	ovPtr := uint32(stack[0])
 	symHandle := stack[1]
-	descPtr := uint32(stack[2])
-	descLen := uint32(stack[3])
+	sigPtr := uint32(stack[2])
+	sigLen := uint32(stack[3])
+	argsPtr := uint32(stack[4])
+	argsCount := uint32(stack[5])
+	parentInvID := stack[6]
+	var resultsPtr uint32
+	var resultsCap uint32
+	if len(stack) > 8 {
+		resultsPtr = uint32(stack[7])
+		resultsCap = uint32(stack[8])
+	}
 
-	mem := m.Memory()
-	descBuf, ok := mem.Read(descPtr, descLen)
+	symRef, ok := h.lookupDylibSymbol(symHandle)
+	if !ok || symRef.manager == nil || symRef.remote == 0 {
+		_ = writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+		return
+	}
+
+	sigBytes, ok := m.Memory().Read(sigPtr, sigLen)
 	if !ok {
-		writeOverlapped(m, ovPtr, wasiEFAULT, 0, 0)
+		_ = writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 		return
 	}
 
-	h.mu.Lock()
-	symAny, ok := h.handles[symHandle]
-	h.mu.Unlock()
-	if !ok {
-		writeOverlapped(m, ovPtr, wasiEBADF, 0, 0)
-		return
-	}
-	symState, ok := symAny.(*SymbolState)
-	if !ok {
-		writeOverlapped(m, ovPtr, wasiEBADF, 0, 0)
-		return
-	}
-
-	if len(descBuf) < 4 {
-		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
-		return
-	}
-	_ = descBuf[0] // cc (0 = cdecl, 1 = stdcall) - ignored as stdcall is cdecl on non-windows
-	argCount := descBuf[1]
-	_ = descBuf[2] // retType
-	_ = descBuf[3] // reserved
-
-	if argCount > 15 {
-		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
-		return
-	}
-
-	offset := 4
-	var bufArgs []BufArg
-	var bufParams [][]byte
-
-	for i := byte(0); i < argCount; i++ {
-		if offset >= len(descBuf) {
-			writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+	args := make([]uint64, argsCount)
+	if argsCount > 0 {
+		argsRaw, ok := m.Memory().Read(argsPtr, argsCount*8)
+		if !ok {
+			_ = writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 			return
 		}
-		tag := descBuf[offset]
-		offset++
-
-		switch tag {
-		case 0x01, 0x03, 0x05: // i32, u32, f32
-			offset += 4
-		case 0x02, 0x04, 0x06, 0x07, 0x0A: // i64, u64, f64, ptr, cb
-			offset += 8
-		case 0x08: // buf: (guest_ptr, len)
-			if offset+8 > len(descBuf) {
-				writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
-				return
-			}
-			gPtr := binary.LittleEndian.Uint32(descBuf[offset : offset+4])
-			gLen := binary.LittleEndian.Uint32(descBuf[offset+4 : offset+8])
-			offset += 8
-
-			gBuf, ok := mem.Read(gPtr, gLen)
-			if !ok {
-				writeOverlapped(m, ovPtr, wasiEFAULT, 0, 0)
-				return
-			}
-			hostBuf := make([]byte, gLen)
-			copy(hostBuf, gBuf)
-			bufParams = append(bufParams, hostBuf)
-			bufArgs = append(bufArgs, BufArg{gPtr: gPtr, gLen: gLen, hostBuf: hostBuf})
-
-		case 0x09: // cstr: (guest_ptr, len)
-			if offset+8 > len(descBuf) {
-				writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
-				return
-			}
-			gPtr := binary.LittleEndian.Uint32(descBuf[offset : offset+4])
-			gLen := binary.LittleEndian.Uint32(descBuf[offset+4 : offset+8])
-			offset += 8
-
-			gBuf, ok := mem.Read(gPtr, gLen)
-			if !ok {
-				writeOverlapped(m, ovPtr, wasiEFAULT, 0, 0)
-				return
-			}
-			hostBuf := make([]byte, gLen+1)
-			copy(hostBuf, gBuf)
-			hostBuf[gLen] = 0
-			bufParams = append(bufParams, hostBuf)
-
-		default:
-			writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
-			return
+		for i := uint32(0); i < argsCount; i++ {
+			args[i] = binary.LittleEndian.Uint64(argsRaw[i*8 : (i+1)*8])
 		}
 	}
 
-	// A reentrant call is issued by the guest while it is servicing a native
-	// callback (the guest callback runs nested on this owning goroutine). It must
-	// execute on the satellite thread parked in that callback's C trampoline, so
-	// we service it synchronously here — staying interruptible for any deeper
-	// callbacks the native call triggers — and pre-complete the overlapped inline
-	// so the guest never parks mid-callback.
-	if h.currentReentrant() {
-		respCh, err := sendSatellite(h, DylibRequest{
-			Op:        "Call",
-			SymHandle: uint64(symState.Handle),
-			DescBuf:   descBuf,
-			BufParams: bufParams,
-			Reentrant: true,
-		})
-		if err != nil {
-			writeOverlapped(m, ovPtr, wasiEIO, 0, 0)
-			return
-		}
-		var resp DylibResponse
-	awaitReentrant:
-		for {
-			select {
-			case resp = <-respCh:
-				break awaitReentrant
-			case ev := <-h.callbackQueue:
-				h.executeCrossThreadCallback(m, ev)
-			}
-		}
-		if resp.ErrCode != 0 {
-			writeOverlapped(m, ovPtr, resp.ErrCode, 0, 0)
-			return
-		}
-		bufIdx := 0
-		for _, ba := range bufArgs {
-			if ba.gLen > 0 && bufIdx < len(resp.BufParams) {
-				mem.Write(ba.gPtr, resp.BufParams[bufIdx])
-			}
-			bufIdx++
-		}
-		writeOverlapped(m, ovPtr, 0, 0, uint64(uintptr(resp.Result)))
-		return
+	reqID := atomic.AddUint64(&symRef.manager.nextReqID, 1)
+	symRef.manager.mu.Lock()
+	symRef.manager.pendingOps[reqID] = &dylibPendingOp{
+		reqID:      reqID,
+		ovPtr:      ovPtr,
+		handle:     symHandle,
+		resultsPtr: resultsPtr,
+		resultsCap: resultsCap,
 	}
+	symRef.manager.mu.Unlock()
+	h.IncOps()
 
-	state := h.RegisterOp(ovPtr, nil)
-
-	go func() {
-		req := DylibRequest{
-			Op:        "Call",
-			SymHandle: uint64(symState.Handle),
-			DescBuf:   descBuf,
-			BufParams: bufParams,
-		}
-
-		resp, err := callSatellite(h, req)
-
-		if err != nil {
-			h.fileOpsQueue <- func() {
-				defer h.DecOpsFor(state)
-				if !h.IsOpActive(ovPtr, state.opID) {
-					return
-				}
-				h.mu.Lock()
-				delete(h.activeOps, ovPtr)
-				h.mu.Unlock()
-				writeOverlapped(m, ovPtr, wasiEIO, 0, 0)
-			}
-			return
-		}
-
-		r1 := uintptr(resp.Result)
-
-		// The native call returned; that is this operation's completion. This
-		// marshalling layer forwards the result verbatim and never inspects call
-		// semantics — any per-call orchestration belongs to the guest and the DLL.
-		h.fileOpsQueue <- func() {
-			defer h.DecOpsFor(state)
-			if !h.IsOpActive(ovPtr, state.opID) {
-				return
-			}
-			h.mu.Lock()
-			delete(h.activeOps, ovPtr)
-			h.mu.Unlock()
-
-			if resp.ErrCode != 0 {
-				writeOverlapped(m, ovPtr, resp.ErrCode, 0, 0)
-				return
-			}
-
-			// Copy-out buffers
-			bufIdx := 0
-			for _, ba := range bufArgs {
-				if ba.gLen > 0 {
-					if bufIdx < len(resp.BufParams) {
-						mem.Write(ba.gPtr, resp.BufParams[bufIdx])
-					}
-				}
-				bufIdx++
-			}
-
-			writeOverlapped(m, ovPtr, 0, 0, uint64(r1))
-		}
-	}()
+	_ = symRef.manager.send(&IPCEnvelope{
+		CallReq: &DylibCallReq{
+			ReqID:              reqID,
+			Symbol:             symRef.remote,
+			SigBytes:           sigBytes,
+			Args:               args,
+			ParentInvocationID: parentInvID,
+		},
+	})
 }
 
-func (h *HostEnv) sys_dylib_callback_create(ctx context.Context, m api.Module, stack []uint64) {
+func (h *HostEnv) sys_dylib_alloc(ctx context.Context, m api.Module, stack []uint64) {
+	ovPtr := uint32(stack[0])
+	libHandle := stack[1]
+	size := stack[2]
+	align := uint32(stack[3])
+	libRef, ok := h.lookupDylibLibrary(libHandle)
+	if !ok || libRef.manager == nil {
+		_ = writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+		return
+	}
+	if err := libRef.manager.EnsureSatellite(); err != nil {
+		_ = writeOverlapped(m, ovPtr, wasiEIO, 0, 0)
+		return
+	}
+
+	reqID := atomic.AddUint64(&libRef.manager.nextReqID, 1)
+	libRef.manager.mu.Lock()
+	libRef.manager.pendingOps[reqID] = &dylibPendingOp{
+		reqID: reqID,
+		ovPtr: ovPtr,
+	}
+	libRef.manager.mu.Unlock()
+	h.IncOps()
+
+	_ = libRef.manager.send(&IPCEnvelope{
+		AllocReq: &DylibAllocReq{
+			ReqID: reqID,
+			Size:  size,
+			Align: align,
+		},
+	})
+}
+
+func (h *HostEnv) sys_dylib_free(ctx context.Context, m api.Module, stack []uint64) {
+	ovPtr := uint32(stack[0])
+	libHandle := stack[1]
+	ptr := stack[2]
+	libRef, ok := h.lookupDylibLibrary(libHandle)
+	if !ok || libRef.manager == nil {
+		_ = writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+		return
+	}
+	if err := libRef.manager.EnsureSatellite(); err != nil {
+		_ = writeOverlapped(m, ovPtr, wasiEIO, 0, 0)
+		return
+	}
+
+	reqID := atomic.AddUint64(&libRef.manager.nextReqID, 1)
+	libRef.manager.mu.Lock()
+	libRef.manager.pendingOps[reqID] = &dylibPendingOp{
+		reqID: reqID,
+		ovPtr: ovPtr,
+	}
+	libRef.manager.mu.Unlock()
+	h.IncOps()
+
+	_ = libRef.manager.send(&IPCEnvelope{
+		FreeReq: &DylibFreeReq{
+			ReqID: reqID,
+			Ptr:   ptr,
+		},
+	})
+}
+
+func (h *HostEnv) sys_dylib_read_mem(ctx context.Context, m api.Module, stack []uint64) {
+	ovPtr := uint32(stack[0])
+	libHandle := stack[1]
+	hostPtr := stack[2]
+	guestBufPtr := uint32(stack[3])
+	length := uint32(stack[4])
+	libRef, ok := h.lookupDylibLibrary(libHandle)
+	if !ok || libRef.manager == nil {
+		_ = writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+		return
+	}
+	if err := libRef.manager.EnsureSatellite(); err != nil {
+		_ = writeOverlapped(m, ovPtr, wasiEIO, 0, 0)
+		return
+	}
+
+	reqID := atomic.AddUint64(&libRef.manager.nextReqID, 1)
+	libRef.manager.mu.Lock()
+	libRef.manager.pendingOps[reqID] = &dylibPendingOp{
+		reqID:  reqID,
+		ovPtr:  ovPtr,
+		bufPtr: guestBufPtr,
+		bufLen: length,
+	}
+	libRef.manager.mu.Unlock()
+	h.IncOps()
+
+	_ = libRef.manager.send(&IPCEnvelope{
+		ReadMemReq: &DylibReadMemReq{
+			ReqID: reqID,
+			Ptr:   hostPtr,
+			Len:   length,
+		},
+	})
+}
+
+func (h *HostEnv) sys_dylib_write_mem(ctx context.Context, m api.Module, stack []uint64) {
+	ovPtr := uint32(stack[0])
+	libHandle := stack[1]
+	hostPtr := stack[2]
+	guestBufPtr := uint32(stack[3])
+	length := uint32(stack[4])
+	libRef, ok := h.lookupDylibLibrary(libHandle)
+	if !ok || libRef.manager == nil {
+		_ = writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+		return
+	}
+	if err := libRef.manager.EnsureSatellite(); err != nil {
+		_ = writeOverlapped(m, ovPtr, wasiEIO, 0, 0)
+		return
+	}
+
+	data, ok := m.Memory().Read(guestBufPtr, length)
+	if !ok {
+		_ = writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+		return
+	}
+
+	reqID := atomic.AddUint64(&libRef.manager.nextReqID, 1)
+	libRef.manager.mu.Lock()
+	libRef.manager.pendingOps[reqID] = &dylibPendingOp{
+		reqID: reqID,
+		ovPtr: ovPtr,
+	}
+	libRef.manager.mu.Unlock()
+	h.IncOps()
+
+	_ = libRef.manager.send(&IPCEnvelope{
+		WriteMemReq: &DylibWriteMemReq{
+			ReqID: reqID,
+			Ptr:   hostPtr,
+			Data:  data,
+		},
+	})
+}
+
+func (h *HostEnv) sys_dylib_callback_register(ctx context.Context, m api.Module, stack []uint64) {
 	ovPtr := uint32(stack[0])
 	libHandle := stack[1]
 	sigPtr := uint32(stack[2])
 	sigLen := uint32(stack[3])
-	guestFnNamePtr := uint32(stack[4])
-	guestFnNameLen := uint32(stack[5])
+	cbOvPtr := uint32(stack[4])
+	cbOvLen := uint32(stack[5])
+	libRef, ok := h.lookupDylibLibrary(libHandle)
+	if !ok || libRef.manager == nil {
+		_ = writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+		return
+	}
+	if err := libRef.manager.EnsureSatellite(); err != nil {
+		_ = writeOverlapped(m, ovPtr, wasiEIO, 0, 0)
+		return
+	}
 
-	mem := m.Memory()
-	sigBuf, ok := mem.Read(sigPtr, sigLen)
+	sigBytes, ok := m.Memory().Read(sigPtr, sigLen)
 	if !ok {
-		writeOverlapped(m, ovPtr, wasiEFAULT, 0, 0)
-		return
-	}
-	if len(sigBuf) < 2 {
-		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
-		return
-	}
-	argCount := sigBuf[0]
-	retType := sigBuf[1]
-	if len(sigBuf) < 2+int(argCount) {
-		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
-		return
-	}
-	argTypes := make([]byte, argCount)
-	copy(argTypes, sigBuf[2:2+argCount])
-
-	nameBuf, ok := mem.Read(guestFnNamePtr, guestFnNameLen)
-	if !ok {
-		writeOverlapped(m, ovPtr, wasiEFAULT, 0, 0)
-		return
-	}
-	guestFnName := string(nameBuf)
-
-	h.mu.Lock()
-	libAny, ok := h.handles[libHandle]
-	h.mu.Unlock()
-	if !ok {
-		writeOverlapped(m, ovPtr, wasiEBADF, 0, 0)
-		return
-	}
-	libState, ok := libAny.(*DylibState)
-	if !ok {
-		writeOverlapped(m, ovPtr, wasiEBADF, 0, 0)
+		_ = writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 		return
 	}
 
-	h.mu.Lock()
-	cbHandle := h.nextHandle
-	h.nextHandle++
-	h.mu.Unlock()
-
-	sig := CallbackSig{
-		ArgCount: argCount,
-		RetType:  retType,
-		ArgTypes: argTypes,
-	}
-
-	req := DylibRequest{
-		Op:          "CallbackCreate",
-		CbHandle:    cbHandle,
-		ArgCount:    argCount,
-		RetType:     retType,
-		ArgTypes:    argTypes,
-		GuestFnName: guestFnName,
-	}
-	resp, err := callSatellite(h, req)
-	if err != nil || resp.ErrCode != 0 {
-		h.mu.Lock()
-		delete(h.handles, cbHandle)
-		h.nextHandle-- // Optional
-		h.mu.Unlock()
-		writeOverlapped(m, ovPtr, wasiENOSYS, 0, 0)
-		return
-	}
-
-	h.mu.Lock()
-	cbState := &CallbackState{
-		Parent:  libHandle,
-		Sig:     sig,
-		GuestFn: guestFnName,
-	}
-	h.handles[cbHandle] = cbState
-	libState.Children = append(libState.Children, cbHandle)
-	h.mu.Unlock()
-
-	writeOverlapped(m, ovPtr, 0, 0, cbHandle)
-}
-
-
-func makeCallbackClosure(h *HostEnv, m api.Module, cbHandle uint64, sig CallbackSig, guestFnName string) interface{} {
-	switch sig.ArgCount {
-	case 0:
-		return func() uintptr {
-			return h.invokeCallback(m, cbHandle, sig, guestFnName, []uintptr{})
-		}
-	case 1:
-		return func(a1 uintptr) uintptr {
-			return h.invokeCallback(m, cbHandle, sig, guestFnName, []uintptr{a1})
-		}
-	case 2:
-		return func(a1, a2 uintptr) uintptr {
-			return h.invokeCallback(m, cbHandle, sig, guestFnName, []uintptr{a1, a2})
-		}
-	case 3:
-		return func(a1, a2, a3 uintptr) uintptr {
-			return h.invokeCallback(m, cbHandle, sig, guestFnName, []uintptr{a1, a2, a3})
-		}
-	case 4:
-		return func(a1, a2, a3, a4 uintptr) uintptr {
-			return h.invokeCallback(m, cbHandle, sig, guestFnName, []uintptr{a1, a2, a3, a4})
-		}
-	case 5:
-		return func(a1, a2, a3, a4, a5 uintptr) uintptr {
-			return h.invokeCallback(m, cbHandle, sig, guestFnName, []uintptr{a1, a2, a3, a4, a5})
-		}
-	case 6:
-		return func(a1, a2, a3, a4, a5, a6 uintptr) uintptr {
-			return h.invokeCallback(m, cbHandle, sig, guestFnName, []uintptr{a1, a2, a3, a4, a5, a6})
-		}
-	case 7:
-		return func(a1, a2, a3, a4, a5, a6, a7 uintptr) uintptr {
-			return h.invokeCallback(m, cbHandle, sig, guestFnName, []uintptr{a1, a2, a3, a4, a5, a6, a7})
-		}
-	case 8:
-		return func(a1, a2, a3, a4, a5, a6, a7, a8 uintptr) uintptr {
-			return h.invokeCallback(m, cbHandle, sig, guestFnName, []uintptr{a1, a2, a3, a4, a5, a6, a7, a8})
-		}
-	}
-	return nil
-}
-
-// currentReentrant reports whether the owning goroutine is presently nested in a
-// native callback, so a dylib call it issues must be routed to that callback's
-// parked satellite thread.
-func (h *HostEnv) currentReentrant() bool {
-	return h.callbackDepth > 0
-}
-
-func (h *HostEnv) invokeCallback(m api.Module, cbHandle uint64, sig CallbackSig, guestFnName string, args []uintptr) uintptr {
-	gid := getGID()
-	h.mu.Lock()
-	sameThread := (gid == h.owningGID)
-	h.mu.Unlock()
-
-	// Look up the CallbackState to get the signature for marshalling.
-	h.mu.Lock()
-	cbAny, cbOk := h.handles[cbHandle]
-	h.mu.Unlock()
-	var cbState *CallbackState
-	if cbOk {
-		cbState, _ = cbAny.(*CallbackState)
-	}
-
-	var ret uintptr
-	if sameThread {
-		fn := m.ExportedFunction(guestFnName)
-		if fn == nil {
-			return 0
-		}
-
-		// Marshal host pointers into guest memory.
-		var wargs []uint64
-		if cbState != nil {
-			wargs = h.marshalCallbackArgs(m, cbState, args, nil)
-		} else {
-			wargs = make([]uint64, len(args))
-			for i, arg := range args {
-				wargs[i] = uint64(arg)
-			}
-		}
-
-		results, err := fn.Call(context.Background(), wargs...)
-		if err != nil {
-			return 0
-		}
-
-		if len(results) > 0 {
-			ret = uintptr(results[0])
-		}
-	} else {
-		respChan := make(chan uintptr, 1)
-		ev := &CallbackEvent{
-			CallbackHandle: cbHandle,
-			Args:           args,
-			RespChan:       respChan,
-		}
-		h.callbackQueue <- ev
-		h.fileOpsQueue <- func() {}
-
-		ret = <-respChan
-	}
-
-	return ret
-}
-
-func (h *HostEnv) sys_dylib_read_cstr(ctx context.Context, m api.Module, stack []uint64) {
-	hostPtr := stack[0]
-	guestBufPtr := uint32(stack[1])
-	maxLen := uint32(stack[2])
-
-	if hostPtr == 0 {
-		stack[0] = 0
-		return
-	}
-
-	req := DylibRequest{
-		Op:        "ReadCstr",
-		Ptr:       hostPtr, // Notice hostPtr here is remote satellite pointer
-		MaxLen:    maxLen,
-		Reentrant: h.currentReentrant(),
-	}
-	resp, err := callSatellite(h, req)
+	params, results, err := DecodeFuncType(sigBytes)
 	if err != nil {
-		stack[0] = 0
+		_ = writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 		return
 	}
 
-	buf := resp.BytesRes
-	mem := m.Memory()
-	if len(buf) > 0 {
-		mem.Write(guestBufPtr, buf)
-	}
-	stack[0] = uint64(len(buf))
-}
-
-func (h *HostEnv) sys_dylib_read_mem(ctx context.Context, m api.Module, stack []uint64) {
-	hostPtr := stack[0]
-	guestBufPtr := uint32(stack[1])
-	length := uint32(stack[2])
-
-	if hostPtr == 0 || length == 0 {
-		stack[0] = 0
-		return
+	cbID := atomic.AddUint64(&libRef.manager.nextCbID, 1)
+	reg := &HostCallbackReg{
+		cbID:     cbID,
+		cbOvPtr:  cbOvPtr,
+		cbOvLen:  cbOvLen,
+		sigBytes: sigBytes,
+		params:   params,
+		results:  results,
 	}
 
-	req := DylibRequest{
-		Op:        "ReadMem",
-		Ptr:       hostPtr,
-		MaxLen:    length,
-		Reentrant: h.currentReentrant(),
+	libRef.manager.mu.Lock()
+	libRef.manager.callbacks[cbID] = reg
+	libRef.manager.callbacksByOv[cbOvPtr] = reg
+	libRef.manager.callbackList = append(libRef.manager.callbackList, reg)
+	reqID := atomic.AddUint64(&libRef.manager.nextReqID, 1)
+	libRef.manager.pendingOps[reqID] = &dylibPendingOp{
+		reqID: reqID,
+		ovPtr: ovPtr,
 	}
-	resp, err := callSatellite(h, req)
-	if err != nil {
-		stack[0] = 0
-		return
-	}
+	libRef.manager.mu.Unlock()
+	h.IncOps()
 
-	buf := resp.BytesRes
-	mem := m.Memory()
-	if len(buf) > 0 {
-		mem.Write(guestBufPtr, buf)
-	}
-	stack[0] = uint64(len(buf))
-}
-
-func (h *HostEnv) invokeCallbackFromSatellite(cbHandle uint64, args []uint64, bufs [][]byte) uintptr {
-	h.mu.Lock()
-	cbAny, cbOk := h.handles[cbHandle]
-	h.mu.Unlock()
-
-	if !cbOk {
-		return 0
-	}
-
-	if _, ok := cbAny.(*CallbackState); !ok {
-		return 0
-	}
-
-	// Route through callbackQueue so the callback is delivered by
-	// drainCallbacks (inside Poll) via executeCrossThreadCallback.
-	// Poll runs between module executions when the guest is paused on
-	// handleAsyncEvent's growable stack, so fn.Call() is safe.
-	uargs := make([]uintptr, len(args))
-	for i, a := range args {
-		uargs[i] = uintptr(a)
-	}
-	respChan := make(chan uintptr, 1)
-	ev := &CallbackEvent{
-		CallbackHandle: cbHandle,
-		Args:           uargs,
-		BufParams:      bufs,
-		RespChan:       respChan,
-	}
-	h.callbackQueue <- ev
-	h.fileOpsQueue <- func() {} // wake Poll
-
-	return <-respChan
+	_ = libRef.manager.send(&IPCEnvelope{
+		CbRegisterReq: &DylibCbRegisterReq{
+			ReqID:    reqID,
+			CbID:     cbID,
+			SigBytes: sigBytes,
+		},
+	})
 }

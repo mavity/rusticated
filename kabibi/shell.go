@@ -118,6 +118,9 @@ func isWindowsLikeEnv(env map[string]string) bool {
 	if runtime.GOOS == "windows" {
 		return true
 	}
+	if _, ok := lookupEnvValue(env, "PATHEXT"); ok {
+		return true
+	}
 	for _, key := range []string{"GOOS", "GOHOSTOS", "OS"} {
 		if value, ok := lookupEnvValue(env, key); ok {
 			if strings.EqualFold(value, "windows") || strings.EqualFold(value, "Windows_NT") {
