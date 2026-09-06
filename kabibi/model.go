@@ -223,21 +223,7 @@ func (m *model) syncChatView() {
 				style := lipgloss.NewStyle().Width(chatW).Foreground(fg)
 				wrapped = append(wrapped, forceBackground(style.Render(msg.Content), colorDarkGray))
 			} else {
-				indent := chatW / 3
-				if indent > 4 {
-					indent = 4
-				}
-				if indent < 2 {
-					indent = 2
-				}
-				bullet := lipgloss.NewStyle().Foreground(colorYellow).Render("■")
-				pad := strings.Repeat(" ", indent-1)
-				contentW := chatW - indent
-				if contentW < 1 {
-					contentW = 1
-				}
-				style := lipgloss.NewStyle().Width(contentW).Foreground(fg)
-				wrapped = append(wrapped, forceBackground(pad+bullet+style.Render(msg.Content), colorDarkGray))
+				wrapped = append(wrapped, renderAssistantChatBlock(msg.Content, chatW))
 			}
 		}
 	}
