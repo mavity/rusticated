@@ -254,42 +254,22 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "esc":
 			if m.chatOpen {
-				m.chatOpen = false
-				m.activePane = leftPane
-				if m.runner != nil {
-					m.runner.Dir = m.leftDir
-				}
-				m.refreshPrompt()
-				m.chatInput.Blur()
-				m.shellInput.Focus()
-				m.recalculateLayout()
-				m.updateDelegates()
+				m.leaveChatMode()
 				return m, nil
 			}
-			m.panelsVisible = !m.panelsVisible
-			m.recalculateLayout()
+			m.setFilesVisible(!m.panelsVisible)
 			return m, nil
 		case "tab":
 			if m.chatOpen {
-				m.chatOpen = false
-				m.activePane = leftPane
-				m.chatInput.Blur()
-				m.shellInput.Focus()
-				m.recalculateLayout()
-				m.updateDelegates()
+				m.leaveChatMode()
 				return m, nil
 			}
 
 			// Handle double-tab logic (300ms)
 			now := time.Now()
 			if now.Sub(m.lastTab) < 300*time.Millisecond {
-				m.chatOpen = true
-				m.activePane = chatPane
-				m.chatInput.Focus()
-				m.shellInput.Blur()
+				m.enterChatMode()
 				m.lastTab = time.Time{} // Reset
-				m.recalculateLayout()
-				m.updateDelegates()
 				return m, nil
 			}
 			m.lastTab = now
@@ -312,6 +292,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if m.chatOpen {
 				input := m.chatInput.Value()
+				if handled, cmd := m.handleChatSlashCommand(input); handled {
+					return m, cmd
+				}
 				if input != "" && m.assetsReady {
 					// Cancel any in-flight stream
 					m.streamMu.Lock()
@@ -340,6 +323,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if trimmedInput == "exit" || strings.HasPrefix(trimmedInput, "exit ") {
 						m.quitting = true
 						return m, tea.Quit
+					}
+					if handled, cmd := m.handleShellBuiltin(input); handled {
+						m.shellInput.Reset()
+						m.refreshPrompt()
+						return m, cmd
 					}
 					m.shellInput.Reset()
 					return m, m.runShellCommand(input)
