@@ -2,20 +2,21 @@ package mohabbat
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/andybalholm/brotli"
 )
 
 // DoRefill is Mode 2: juice bottle refill.
-// When running inside a vegetable (MOHABBAT_VEGETABLE_PATH is set), it reads
-// the current vegetable, decompresses the pool, builds a new payload for
-// projectDir, splices it in, recompresses, patches all meta structs, and
-// writes the result to outputPath without rebuilding the native launchers.
+// When running inside a vegetable, it reads the current vegetable,
+// decompresses the pool, builds a new payload for projectDir, splices it in,
+// recompresses, and updates Zone A header metadata without rebuilding or
+// modifying the native launchers.
 func DoRefill(ws, projectDir, vegPath, outputPath string, verbose bool) error {
 	fmt.Printf("🍆  Refill: %s -> %s\n", projectDir, outputPath)
 
@@ -26,64 +27,16 @@ func DoRefill(ws, projectDir, vegPath, outputPath string, verbose bool) error {
 	}
 	fileLen := len(vegData)
 
-	// 2. Find all valid MOHABBAT meta occurrences.
-	//    Each brot executable embeds one meta struct right after the "MOHABBAT"
-	//    magic bytes.  False positives (e.g. the "MOHABBAT_VEGETABLE_PATH"
-	//    string literal inside the brot binary) are filtered out because their
-	//    PoolLen value would be astronomically large (bytes of the "_VEGETABLE…"
-	//    string interpreted as a little-endian u64).
-	type metaOcc struct {
-		offset int
-		meta   mohabbatMeta
-	}
-	var occs []metaOcc
-	magic := []byte(mohabbatMagic)
-	const metaBodySize = 48 // 6 × uint64
-
-	for i := 0; i+len(magic)+metaBodySize <= fileLen; i++ {
-		if !bytes.Equal(vegData[i:i+len(magic)], magic) {
-			continue
-		}
-		p := i + len(magic)
-		poolLen := binary.LittleEndian.Uint64(vegData[p : p+8])
-		// Reject: zero PoolLen (unpatched brot), and values larger than the file.
-		if poolLen == 0 || uint64(fileLen) < poolLen {
-			continue
-		}
-		// The reserved field Must be zero for a well-formed meta.
-		reserved := binary.LittleEndian.Uint64(vegData[p+40 : p+48])
-		if reserved != 0 {
-			continue
-		}
-		m := mohabbatMeta{
-			PoolLen:         poolLen,
-			WashmhostOffset: binary.LittleEndian.Uint64(vegData[p+8 : p+16]),
-			WashmhostLen:    binary.LittleEndian.Uint64(vegData[p+16 : p+24]),
-			PayloadOffset:   binary.LittleEndian.Uint64(vegData[p+24 : p+32]),
-			PayloadLen:      binary.LittleEndian.Uint64(vegData[p+32 : p+40]),
-		}
-		occs = append(occs, metaOcc{offset: i, meta: m})
-	}
-
-	if len(occs) == 0 {
-		return fmt.Errorf("no valid MOHABBAT meta found in vegetable %s", vegPath)
-	}
-
-	// Warn on inconsistency (should never happen with well-formed vegetables).
-	base := occs[0].meta
-	for _, occ := range occs[1:] {
-		if occ.meta.PoolLen != base.PoolLen ||
-			occ.meta.PayloadOffset != base.PayloadOffset ||
-			occ.meta.PayloadLen != base.PayloadLen {
-			fmt.Printf("🍆  warn: inconsistent meta across brot slots; using first occurrence\n")
-			break
-		}
+	// 2. Parse layout metadata from Zone A script header.
+	poolLen, payloadOffset, payloadLen, err := parseVegetableMeta(vegData)
+	if err != nil {
+		return fmt.Errorf("parse vegetable metadata: %w", err)
 	}
 
 	// 3. Pool is at the tail of the file: vegData[poolStart:].
-	poolStart := fileLen - int(base.PoolLen)
+	poolStart := fileLen - int(poolLen)
 	if poolStart < 0 {
-		return fmt.Errorf("invalid PoolLen %d > fileLen %d", base.PoolLen, fileLen)
+		return fmt.Errorf("invalid PoolLen %d > fileLen %d", poolLen, fileLen)
 	}
 
 	// 4. Decompress pool.
@@ -93,7 +46,7 @@ func DoRefill(ws, projectDir, vegPath, outputPath string, verbose bool) error {
 		return fmt.Errorf("decompress pool: %w", err)
 	}
 	fmt.Printf("🍆  Pool decompressed: %s -> %s\n",
-		formatSize(int64(base.PoolLen)), formatSize(int64(len(poolBytes))))
+		formatSize(int64(poolLen)), formatSize(int64(len(poolBytes))))
 
 	// 5. Build new payload WASM for projectDir.
 	projectName := filepath.Base(projectDir)
@@ -106,11 +59,10 @@ func DoRefill(ws, projectDir, vegPath, outputPath string, verbose bool) error {
 		return fmt.Errorf("read new payload: %w", err)
 	}
 	fmt.Printf("🍆  New payload: %s (old: %s)\n",
-		formatSize(int64(len(newPayload))), formatSize(int64(base.PayloadLen)))
+		formatSize(int64(len(newPayload))), formatSize(int64(payloadLen)))
 
 	// 6. Build new pool: keep washmhost sections, replace payload.
-	//    Pool layout: [washmhost_0][washmhost_1][washmhost_2][washmhost_3][payload]
-	payloadOff := int(base.PayloadOffset)
+	payloadOff := int(payloadOffset)
 	if payloadOff > len(poolBytes) {
 		return fmt.Errorf("PayloadOffset %d exceeds decompressed pool size %d",
 			payloadOff, len(poolBytes))
@@ -130,24 +82,23 @@ func DoRefill(ws, projectDir, vegPath, outputPath string, verbose bool) error {
 	}
 	newPoolLen := uint64(newCompressed.Len())
 	fmt.Printf("🍆  Refill pool: old=%s new=%s\n",
-		formatSize(int64(base.PoolLen)), formatSize(int64(newPoolLen)))
+		formatSize(int64(poolLen)), formatSize(int64(newPoolLen)))
 
-	// 8. Build output: Zone A+B (with patched metas) + new compressed pool.
+	// 8. Build output: Zone A+B (with updated Zone A header) + new compressed pool.
 	zoneAB := make([]byte, poolStart)
 	copy(zoneAB, vegData[:poolStart])
 
-	// Patch each meta occurrence in place.
-	for _, occ := range occs {
-		p := occ.offset + len(magic)
-		// PoolLen → new compressed pool length.
-		binary.LittleEndian.PutUint64(zoneAB[p:p+8], newPoolLen)
-		// WashmhostOffset and WashmhostLen are per-slot and unchanged.
-		// PayloadOffset is unchanged (payload still starts at the same position).
-		binary.LittleEndian.PutUint64(zoneAB[p+24:p+32], base.PayloadOffset)
-		// PayloadLen → new payload size.
-		binary.LittleEndian.PutUint64(zoneAB[p+32:p+40], uint64(len(newPayload)))
-		// Reserved stays 0.
-	}
+	// Update POSIX script variables (exact length preserved)
+	zoneAB = replaceExactPadded(zoneAB, `:; P_LEN="`, fmt.Sprintf("%-20d", newPoolLen))
+	zoneAB = replaceExactPadded(zoneAB, `:; PLD_LEN="`, fmt.Sprintf("%-20d", len(newPayload)))
+
+	// Update Windows batch variables (exact length preserved)
+	zoneAB = replaceExactPadded(zoneAB, `set "P_LEN=`, fmt.Sprintf("%-20d", newPoolLen))
+	zoneAB = replaceExactPadded(zoneAB, `set "PLD_LEN=`, fmt.Sprintf("%-20d", len(newPayload)))
+
+	// Update Node starter variables if present
+	zoneAB = replaceExactPadded(zoneAB, `const poolLen = "`, fmt.Sprintf("%-17d", newPoolLen))
+	zoneAB = replaceExactPadded(zoneAB, `const payloadLen = "`, fmt.Sprintf("%-21d", len(newPayload)))
 
 	// 9. Write output (0755 so it is executable on Unix).
 	outData := append(zoneAB, newCompressed.Bytes()...)
@@ -157,4 +108,56 @@ func DoRefill(ws, projectDir, vegPath, outputPath string, verbose bool) error {
 	fmt.Printf("🍆  Wrote refilled vegetable: %s (%s bytes)\n",
 		outputPath, formatSize(int64(len(outData))))
 	return nil
+}
+
+func parseVegetableMeta(vegData []byte) (poolLen, payloadOffset, payloadLen uint64, err error) {
+	headerLimit := 10000
+	if len(vegData) < headerLimit {
+		headerLimit = len(vegData)
+	}
+	header := vegData[:headerLimit]
+
+	extract := func(prefix string) (uint64, error) {
+		idx := bytes.Index(header, []byte(prefix))
+		if idx == -1 {
+			return 0, fmt.Errorf("marker %q not found in header", prefix)
+		}
+		start := idx + len(prefix)
+		end := bytes.IndexAny(header[start:], "\"\r\n")
+		if end == -1 {
+			return 0, fmt.Errorf("unterminated value for %q", prefix)
+		}
+		valStr := strings.TrimSpace(string(header[start : start+end]))
+		val, parseErr := strconv.ParseUint(valStr, 10, 64)
+		if parseErr != nil {
+			return 0, fmt.Errorf("parsing %q value %q: %w", prefix, valStr, parseErr)
+		}
+		return val, nil
+	}
+
+	poolLen, err = extract(`P_LEN="`)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	payloadOffset, err = extract(`PLD_OFF="`)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	payloadLen, err = extract(`PLD_LEN="`)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return poolLen, payloadOffset, payloadLen, nil
+}
+
+func replaceExactPadded(data []byte, prefix, newVal string) []byte {
+	idx := bytes.Index(data, []byte(prefix))
+	if idx == -1 {
+		return data
+	}
+	start := idx + len(prefix)
+	if start+len(newVal) <= len(data) {
+		copy(data[start:start+len(newVal)], []byte(newVal))
+	}
+	return data
 }

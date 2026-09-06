@@ -1,4 +1,3 @@
-use crate::META;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -63,13 +62,54 @@ unsafe fn from_cstr<'a>(p: *const u8) -> &'a [u8] {
 }
 
 pub unsafe fn run(argc: i32, argv: *const *const u8, envp: *const *const u8) -> ! {
-    if argc < 2 || argv.is_null() {
+    if argc < 7 || argv.is_null() {
         unsafe { exit(102) };
     }
     let bat_path_ptr = unsafe { *argv.add(1) };
     if bat_path_ptr.is_null() {
         unsafe { exit(102) };
     }
+
+    let pool_len = unsafe {
+        let p = *argv.add(2);
+        if p.is_null() { exit(102); }
+        match crate::parse_u64_bytes(from_cstr(p)) {
+            Some(v) => v as usize,
+            None => exit(103),
+        }
+    };
+    let washmhost_offset = unsafe {
+        let p = *argv.add(3);
+        if p.is_null() { exit(102); }
+        match crate::parse_u64_bytes(from_cstr(p)) {
+            Some(v) => v as usize,
+            None => exit(103),
+        }
+    };
+    let washmhost_len = unsafe {
+        let p = *argv.add(4);
+        if p.is_null() { exit(102); }
+        match crate::parse_u64_bytes(from_cstr(p)) {
+            Some(v) => v as usize,
+            None => exit(103),
+        }
+    };
+    let payload_offset = unsafe {
+        let p = *argv.add(5);
+        if p.is_null() { exit(102); }
+        match crate::parse_u64_bytes(from_cstr(p)) {
+            Some(v) => v as usize,
+            None => exit(103),
+        }
+    };
+    let payload_len = unsafe {
+        let p = *argv.add(6);
+        if p.is_null() { exit(102); }
+        match crate::parse_u64_bytes(from_cstr(p)) {
+            Some(v) => v as usize,
+            None => exit(103),
+        }
+    };
 
     // ── Find TMPDIR from environment ──────────────────────────────────────
     let mut tmp_prefix: &[u8] = b"/tmp";
@@ -100,7 +140,6 @@ pub unsafe fn run(argc: i32, argv: *const *const u8, envp: *const *const u8) -> 
         unsafe { exit(3) };
     }
 
-    let pool_len = unsafe { META.pool_len as usize };
     if pool_len == 0 {
         unsafe { close(fd) };
         unsafe { exit(4) };
@@ -136,7 +175,7 @@ pub unsafe fn run(argc: i32, argv: *const *const u8, envp: *const *const u8) -> 
     unsafe { close(fd) };
 
     // ── Decompress pool ───────────────────────────────────────────────────
-    let total_pool = unsafe { (META.payload_offset + META.payload_len) as usize };
+    let total_pool = payload_offset + payload_len;
     let mut decompressed_pool = vec![0u8; total_pool];
 
     let mut out_offset = 0usize;
@@ -148,12 +187,12 @@ pub unsafe fn run(argc: i32, argv: *const *const u8, envp: *const *const u8) -> 
         }
     });
 
-    let washmhost_start = unsafe { META.washmhost_offset as usize };
-    let washmhost_end = unsafe { (META.washmhost_offset + META.washmhost_len) as usize };
+    let washmhost_start = washmhost_offset;
+    let washmhost_end = washmhost_offset + washmhost_len;
     let washmhost_data = &decompressed_pool[washmhost_start..washmhost_end];
 
-    let payload_start = unsafe { META.payload_offset as usize };
-    let payload_end = unsafe { (META.payload_offset + META.payload_len) as usize };
+    let payload_start = payload_offset;
+    let payload_end = payload_offset + payload_len;
     let payload_data = &decompressed_pool[payload_start..payload_end];
 
     // ── Write washmhost to a temp file ────────────────────────────────────
@@ -187,6 +226,7 @@ pub unsafe fn run(argc: i32, argv: *const *const u8, envp: *const *const u8) -> 
         unsafe { unlink(washmhost_path.as_ptr()) };
         unsafe { exit(14) };
     }
+    unsafe { fchmod(payload_fd, 0o644) };
 
     if !unsafe { write_all(payload_fd, payload_data) } {
         unsafe { close(payload_fd) };
@@ -201,30 +241,29 @@ pub unsafe fn run(argc: i32, argv: *const *const u8, envp: *const *const u8) -> 
     wasm_fd_var.extend_from_slice(&payload_path[..payload_path.len() - 1]); // skip NUL
     wasm_fd_var.push(0);
 
-    let mut veg_path_var: Vec<u8> = b"MOHABBAT_VEGETABLE_PATH=".to_vec();
-    let veg_path = unsafe { from_cstr(bat_path_ptr) };
-    veg_path_var.extend_from_slice(veg_path);
-    veg_path_var.push(0);
-
     let mut envp_ptrs: Vec<*const u8> = Vec::new();
     if !envp.is_null() {
         let mut e_ptr = envp;
         while !unsafe { (*e_ptr).is_null() } {
-            envp_ptrs.push(unsafe { *e_ptr });
+            let entry = unsafe { from_cstr(*e_ptr) };
+            if !entry.starts_with(b"MOHABBAT_VEGETABLE_PATH=") {
+                envp_ptrs.push(unsafe { *e_ptr });
+            }
             e_ptr = unsafe { e_ptr.add(1) };
         }
     }
     envp_ptrs.push(wasm_fd_var.as_ptr());
-    envp_ptrs.push(veg_path_var.as_ptr());
     envp_ptrs.push(core::ptr::null());
 
-    // argv[0] = vegetable path, remaining = extra args passed to brot.
+    // argv[0] = vegetable path, remaining = extra user args (argv[7..]).
     let mut argv_ptrs: Vec<*const u8> = Vec::new();
     argv_ptrs.push(bat_path_ptr);
-    let mut a_ptr = unsafe { argv.add(1) };
-    while !unsafe { (*a_ptr).is_null() } {
-        argv_ptrs.push(unsafe { *a_ptr });
-        a_ptr = unsafe { a_ptr.add(1) };
+    if argc > 7 {
+        let mut a_ptr = unsafe { argv.add(7) };
+        while !unsafe { (*a_ptr).is_null() } {
+            argv_ptrs.push(unsafe { *a_ptr });
+            a_ptr = unsafe { a_ptr.add(1) };
+        }
     }
     argv_ptrs.push(core::ptr::null());
 

@@ -298,6 +298,7 @@ func (h *HostEnv) sys_signal_wait(ctx context.Context, m api.Module, stack []uin
 func (h *HostEnv) sys_process_exit(ctx context.Context, m api.Module, stack []uint64) {
 	code := int32(stack[0])
 	h.mu.Lock()
+	h.forcedExitCode = code
 	handlesCount := len(h.handles)
 	timersCount := len(h.timers)
 	waitersCount := len(h.signalWaiters)

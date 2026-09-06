@@ -1,4 +1,3 @@
-use crate::META;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -8,7 +7,7 @@ use crate::win32::Win32::Foundation::*;
 use crate::win32::Win32::Storage::FileSystem::*;
 
 use crate::win32::Win32::System::Environment::{
-    GetCommandLineW, GetEnvironmentVariableW, SetEnvironmentVariableW,
+    GetCommandLineW, SetEnvironmentVariableW,
 };
 use crate::win32::Win32::System::Threading::{
     CreateProcessW, ExitProcess, GetCurrentProcessId, GetExitCodeProcess, INFINITE,
@@ -18,48 +17,56 @@ use crate::win32::Win32::UI::Shell::CommandLineToArgvW;
 
 // Using the rust_eh_personality already provided by rusticated's lib.rs
 
-pub unsafe fn get_module_file_name() -> Vec<u16> {
-    let wide_path = unsafe {
-        let mut num_args = 0;
-        let argv = CommandLineToArgvW(GetCommandLineW(), &mut num_args);
-        if argv.is_null() || num_args < 1 {
-            ExitProcess(101);
-        }
-
-        let arg0_ptr = *argv.offset(0);
-        let mut len = 0;
-        while *arg0_ptr.offset(len) != 0 {
-            len += 1;
-        }
-
-        let mut wide_path = alloc::vec![0u16; (len + 1) as usize];
-        core::ptr::copy_nonoverlapping(arg0_ptr, wide_path.as_mut_ptr(), len as usize);
-        wide_path[len as usize] = 0;
-        wide_path
-    };
-
-    wide_path
-}
-
-pub unsafe fn get_vegetable_file_name() -> Vec<u16> {
-    let mut buffer = alloc::vec![0u16; 32768];
-    let env_var = "MOHABBAT_VEGETABLE_PATH\0"
-        .encode_utf16()
-        .collect::<Vec<u16>>();
-    let len = unsafe {
-        GetEnvironmentVariableW(env_var.as_ptr(), buffer.as_mut_ptr(), buffer.len() as u32)
-    };
-    if len > 0 && (len as usize) < buffer.len() {
-        buffer.truncate(len as usize + 1);
-        buffer[len as usize] = 0;
-        return buffer;
+fn parse_u16_u64(ptr: *const u16) -> Option<u64> {
+    if ptr.is_null() {
+        return None;
     }
-
-    unsafe { get_module_file_name() }
+    let mut start = 0;
+    while unsafe { *ptr.offset(start) } == b' ' as u16 {
+        start += 1;
+    }
+    let mut end = start;
+    while unsafe { *ptr.offset(end) } != 0 {
+        end += 1;
+    }
+    while end > start && unsafe { *ptr.offset(end - 1) } == b' ' as u16 {
+        end -= 1;
+    }
+    if start == end {
+        return None;
+    }
+    let mut res: u64 = 0;
+    for i in start..end {
+        let ch = unsafe { *ptr.offset(i) };
+        if ch < b'0' as u16 || ch > b'9' as u16 {
+            return None;
+        }
+        res = res.checked_mul(10)?.checked_add((ch - b'0' as u16) as u64)?;
+    }
+    Some(res)
 }
 
 pub unsafe fn run() -> ! {
-    let wide_path = unsafe { get_vegetable_file_name() };
+    let mut num_args = 0;
+    let argv = unsafe { CommandLineToArgvW(GetCommandLineW(), &mut num_args) };
+    if argv.is_null() || num_args < 7 {
+        unsafe { ExitProcess(101) };
+    }
+
+    let arg1_ptr = unsafe { *argv.offset(1) };
+    let mut len = 0;
+    while unsafe { *arg1_ptr.offset(len) } != 0 {
+        len += 1;
+    }
+    let mut wide_path = alloc::vec![0u16; (len + 1) as usize];
+    unsafe { core::ptr::copy_nonoverlapping(arg1_ptr, wide_path.as_mut_ptr(), len as usize) };
+    wide_path[len as usize] = 0;
+
+    let pool_len = parse_u16_u64(unsafe { *argv.offset(2) }).unwrap_or_else(|| unsafe { ExitProcess(103) }) as usize;
+    let washmhost_offset = parse_u16_u64(unsafe { *argv.offset(3) }).unwrap_or_else(|| unsafe { ExitProcess(103) }) as usize;
+    let washmhost_len = parse_u16_u64(unsafe { *argv.offset(4) }).unwrap_or_else(|| unsafe { ExitProcess(103) }) as usize;
+    let payload_offset = parse_u16_u64(unsafe { *argv.offset(5) }).unwrap_or_else(|| unsafe { ExitProcess(103) }) as usize;
+    let payload_len = parse_u16_u64(unsafe { *argv.offset(6) }).unwrap_or_else(|| unsafe { ExitProcess(103) }) as usize;
 
     unsafe {
         let handle = CreateFileW(
@@ -81,9 +88,8 @@ pub unsafe fn run() -> ! {
             ExitProcess(3);
         }
 
-        let pool_len = META.pool_len as usize;
         if pool_len == 0 {
-            crate::print_err("brot: META.pool_len is 0, nothing to do. exiting.\n");
+            crate::print_err("brot: pool_len is 0, nothing to do. exiting.\n");
             ExitProcess(4);
         }
 
@@ -125,8 +131,8 @@ pub unsafe fn run() -> ! {
         }
         CloseHandle(handle);
 
-        let total_pool = META.payload_offset + META.payload_len;
-        let mut decompressed_pool = alloc::vec![0u8; total_pool as usize];
+        let total_pool = payload_offset + payload_len;
+        let mut decompressed_pool = alloc::vec![0u8; total_pool];
 
         let mut out_offset = 0;
         let _ = crate::decompress::decompress_to_writer(&compressed_data, |chunk| {
@@ -138,9 +144,9 @@ pub unsafe fn run() -> ! {
         });
 
         let washmhost_data = &decompressed_pool
-            [META.washmhost_offset as usize..(META.washmhost_offset + META.washmhost_len) as usize];
+            [washmhost_offset..washmhost_offset + washmhost_len];
         let payload_data = &decompressed_pool
-            [META.payload_offset as usize..(META.payload_offset + META.payload_len) as usize];
+            [payload_offset..payload_offset + payload_len];
 
         let mut temp_path = alloc::vec![0u16; MAX_PATH as usize + 1];
         let len = GetTempPathW(temp_path.len() as u32, temp_path.as_mut_ptr());
@@ -186,16 +192,11 @@ pub unsafe fn run() -> ! {
         let env_name: Vec<u16> = "MOHABBAT_WASM_FD\0".encode_utf16().collect();
         SetEnvironmentVariableW(env_name.as_ptr(), payload_wasm_w.as_ptr());
 
-        let veg_env_name: Vec<u16> = "MOHABBAT_VEGETABLE_PATH\0".encode_utf16().collect();
-        SetEnvironmentVariableW(veg_env_name.as_ptr(), wide_path.as_ptr());
-
         let vegetable_str = String::from_utf16_lossy(&wide_path);
         let mut cmd_str = format!("\"{}\"", vegetable_str.trim_end_matches('\0'));
 
-        let mut num_args = 0;
-        let argv = CommandLineToArgvW(GetCommandLineW(), &mut num_args);
-        if !argv.is_null() && num_args > 1 {
-            for i in 1..num_args {
+        if num_args > 7 {
+            for i in 7..num_args {
                 let arg_ptr = *argv.offset(i as isize);
                 let mut len = 0;
                 while *arg_ptr.offset(len) != 0 {

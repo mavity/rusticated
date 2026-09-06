@@ -120,13 +120,12 @@ func ModeDevRun(ws, projectDir string, extraArgs []string, platform string, verb
 
 // buildAllSlots builds brot (cargo) and washmhost for all Modern Four slots.
 func buildAllSlots(ws, buildDir string, verbose bool) error {
-	// Step 1: Build washmhost for all slots first (so brot can know their final sizes)
-	washmhostMetadata, err := buildAllWashmhost(ws, buildDir, verbose)
-	if err != nil {
+	// Step 1: Build washmhost for all slots
+	if _, err := buildAllWashmhost(ws, buildDir, verbose); err != nil {
 		return err
 	}
 
-	// Step 2: Build brot with knowledge of washmhost sizes (no post-build patching needed)
+	// Step 2: Build brot
 	for _, s := range slots {
 		if !shouldBuildSlot(s) {
 			fmt.Printf("🍆    skip %s\n", s.name)
@@ -135,7 +134,7 @@ func buildAllSlots(ws, buildDir string, verbose bool) error {
 		if s.goos == "js" {
 			continue // Handled during buildNodeSlot when zone A is assembled
 		}
-		if _, err := cargoBuild(ws, filepath.Join("mohabbat", "brot"), s, buildDir, verbose, washmhostMetadata); err != nil {
+		if _, err := cargoBuild(ws, filepath.Join("mohabbat", "brot"), s, buildDir, verbose); err != nil {
 			return err
 		}
 	}

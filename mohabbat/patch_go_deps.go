@@ -373,9 +373,9 @@ func RawSyscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err Errno) {
 		}
 
 		// SPECIAL CASE: u-root pkg/ls platform files sometimes lack build guards.
-		if strings.HasSuffix(filepath.ToSlash(target.jitDir), "github.com/u-root/u-root/pkg/ls") {
+		if strings.HasSuffix(filepath.ToSlash(target.jitDir), "github.com/u-root/u-root") {
 			for _, f := range []string{"fileinfo_linux.go", "fileinfo_openbsd.go", "fileinfo_unix.go"} {
-				p := filepath.Join(target.jitDir, f)
+				p := filepath.Join(target.jitDir, "pkg", "ls", f)
 				if data, err := os.ReadFile(p); err == nil {
 					content := string(data)
 					if !strings.Contains(content, "//go:build") && !strings.Contains(content, "// +build") {
@@ -387,6 +387,16 @@ func RawSyscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err Errno) {
 						}
 						_ = writeFileIfChanged(p, []byte("//go:build "+tag+"\n\n"+content))
 					}
+				}
+			}
+			fsPath := filepath.Join(target.jitDir, "pkg", "ls", "filestring_unix.go")
+			if data, err := os.ReadFile(fsPath); err == nil {
+				content := string(data)
+				if strings.Contains(content, "syscall.Major") {
+					content = strings.ReplaceAll(content, "syscall.Major(fi.Rdev)", "uint32((fi.Rdev>>24)&0xff)")
+					content = strings.ReplaceAll(content, "syscall.Minor(fi.Rdev)", "uint32(fi.Rdev&0xffffff)")
+					content = strings.ReplaceAll(content, "\t\"syscall\"\n", "")
+					_ = writeFileIfChanged(fsPath, []byte(content))
 				}
 			}
 		}

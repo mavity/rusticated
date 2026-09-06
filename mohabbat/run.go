@@ -5,8 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
-	"strings"
 )
 
 // runUnderWashmhost runs a WASM file under washmhost.
@@ -32,31 +30,15 @@ func runUnderWashmhost(ws, wasmPath string, extraArgs []string, platform string,
 	}
 
 	goroot, _, _ := resolveGoroot(ws)
-	// Determine host platform. Inside a vegetable runtime.GOOS is "wasip1",
-	// so use the env vars that wasmhost sets for the brain, falling back to runtime defaults.
-	nativeOS := os.Getenv("MOHABBAT_HOST_OS")
-	if nativeOS == "" {
-		nativeOS = runtime.GOOS
-	}
-	nativeArch := os.Getenv("MOHABBAT_HOST_ARCH")
-	if nativeArch == "" {
-		nativeArch = runtime.GOARCH
-	}
-
-	hostOS := nativeOS
-	hostArch := nativeArch
+	platformArg := ""
 
 	if platform != "" && platform != "node" {
 		if platform == "x64" || platform == "amd64" {
-			hostArch = "amd64"
+			platformArg = "amd64"
 		} else if platform == "arm64" {
-			hostArch = "arm64"
+			platformArg = "arm64"
 		} else {
-			parts := strings.Split(platform, "-")
-			if len(parts) == 2 {
-				hostOS = parts[0]
-				hostArch = parts[1]
-			}
+			platformArg = platform
 		}
 	}
 
@@ -68,17 +50,20 @@ func runUnderWashmhost(ws, wasmPath string, extraArgs []string, platform string,
 	if verbose {
 		runArgs = append(runArgs, "-tags=verbose")
 	}
-	runArgs = append(runArgs, fmt.Sprintf("-ldflags=%s", ldflags), ".", "--")
+	runArgs = append(runArgs, fmt.Sprintf("-ldflags=%s", ldflags), ".")
+	if platformArg != "" {
+		runArgs = append(runArgs, "--platform", platformArg)
+	}
+	runArgs = append(runArgs, "--")
 	runArgs = append(runArgs, extraArgs...)
-	cmd := exec.Command("go", runArgs...)
+	goBin := "go"
+	if goroot != "" {
+		goBin = goBinFromRoot(goroot)
+	}
+	cmd := exec.Command(goBin, runArgs...)
 	cmd.Dir = filepath.Join(ws, "mohabbat", "washmhost")
 	env := os.Environ()
 	env = upsertEnv(env, "MOHABBAT_WASM_FD", wasmPath)
-	env = upsertEnv(env, "MOHABBAT_HOST_OS", hostOS)
-	env = upsertEnv(env, "MOHABBAT_HOST_ARCH", hostArch)
-	// Prevent GOOS/GOARCH leakage from prior WASM build steps.
-	env = upsertEnv(env, "GOOS", nativeOS)
-	env = upsertEnv(env, "GOARCH", nativeArch)
 	if goroot != "" {
 		env = upsertEnv(env, "GOROOT", goroot)
 	}
