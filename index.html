@@ -877,7 +877,7 @@
                     statView.setUint32(4, entry.type === 'dir' ? 0o40755 : 0o100644, true); 
                     statView.setUint32(8, 1000, true); 
                     statView.setUint32(12, 1000, true); 
-                    statView.setBigUint64(16, BigInt(entry.content ? entry.content.length : 0), true);
+                    statView.setBigUint64(16, BigInt(entry.reportedSize !== undefined ? entry.reportedSize : (entry.content ? entry.content.length : 0)), true);
                     statView.setBigUint64(24, BigInt(entry.mtime || Date.now()) * 1000000n, true); 
                     statView.setBigUint64(32, BigInt(entry.mtime || Date.now()) * 1000000n, true); 
                     statView.setBigUint64(40, BigInt(entry.mtime || Date.now()) * 1000000n, true); 
@@ -944,6 +944,7 @@
 
                 async saveModel(url, bytes, metadata = {}) {
                     if (!this.db) await this.init();
+                    const hash = await this.computeHash(bytes);
                     return new Promise((resolve, reject) => {
                         const tx = this.db.transaction('models', 'readwrite');
                         const store = tx.objectStore('models');
@@ -952,7 +953,7 @@
                             bytes,
                             timestamp: Date.now(),
                             size: bytes.length,
-                            hash: await this.computeHash(bytes),
+                            hash,
                             ...metadata
                         };
                         const req = store.put(record);
@@ -1017,12 +1018,7 @@
                 async fetchWithRetry(url, options = {}) {
                     let lastError;
                     for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
-                        // === Phase 2 Pre-Initialization ===
-            // Initialize model store for persistent caching
-            modelStore.init().catch(err => console.warn('[Phase 2] ModelStore init warning:', err));
-            console.log('[Phase 2] Model persistence layer ready');
-
-            try {
+                        try {
                             console.log('[Fetcher] Attempt ' + attempt + '/' + this.maxRetries + ' for:', url);
                             const response = await fetch(url, options);
                             if (!response.ok) {
@@ -1216,7 +1212,7 @@
                     this.models.set('gemma-4', {
                         id: 'gemma-4',
                         name: 'Gemma 4',
-                        url: 'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.litertlm',
+                        url: 'https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it-web.litertlm',
                         size: 2500000000,
                         category: 'general',
                         version: '1.0'
@@ -1588,6 +1584,11 @@
             let engineManager = new LiteRTEngineManager();
             const callbackStreamer = new CallbackStreamer();
             
+            // Phase 2 Pre-Initialization
+            // Initialize model store for persistent caching
+            modelStore.init().catch(err => console.warn('[Phase 2] ModelStore init warning:', err));
+            console.log('[Phase 2] Model persistence layer ready');
+            
             // Phase 3 components (global)
             let multiModelManager = null;
             let advancedTokenStreamer = null;
@@ -1737,6 +1738,8 @@
                     const libPath = decoder.decode(pathBytes).replace(/\0.*/, '');
                     
                     console.log('[dylib_open] Loading:', libPath);
+                    console.log('[dylib_open] Bootstrap status - started:', browserAssetState.bootstrapStarted, 'complete:', browserAssetState.bootstrapComplete);
+                    console.log('[dylib_open] Engine status - initialized:', engineManager?.isInitialized);
                     
                     if (libPath.includes('litert') || libPath.includes('lm_ext')) {
                         const handle = hostState.nextHandle++;
@@ -1759,6 +1762,7 @@
                         return 0;
                     }
                     
+                    console.log('[dylib_open] Unknown library, returning ENOENT');
                     view.setUint32(ovPtr, 1, true);
                     view.setUint32(ovPtr + 4, 38, true);
                     return 0;
@@ -1838,9 +1842,32 @@
                         try {
                             switch (h.fnName) {
                                 case 'engineCreate':
-                                    console.log('[dylib_call] Initializing Engine with model bytes');
-                                    await libH.engine.initialize(httpProxyShim.webModelCache.values().next().value || new Uint8Array(0));
-                                    console.log('[dylib_call] Engine initialized');
+                                    console.log('[dylib_call] engineCreate: Checking initialization status');
+                                    console.log('[dylib_call] Engine already initialized:', libH.engine.isInitialized);
+                                    
+                                    if (!libH.engine.isInitialized) {
+                                        console.log('[dylib_call] Engine not yet initialized, attempting to initialize...');
+                                        // Wait for bootstrap to complete first
+                                        let bootTries = 0;
+                                        while (!browserAssetState.bootstrapComplete && bootTries < 300) {
+                                            await new Promise(r => setTimeout(r, 100));
+                                            bootTries++;
+                                        }
+                                        
+                                        if (!browserAssetState.bootstrapComplete) {
+                                            throw new Error('Bootstrap timed out after 30 seconds');
+                                        }
+                                        
+                                        console.log('[dylib_call] Bootstrap completed, initializing engine');
+                                        const modelBytes = httpProxyShim.webModelCache.values().next().value;
+                                        if (!modelBytes || modelBytes.length === 0) {
+                                            throw new Error('No model bytes available after bootstrap');
+                                        }
+                                        
+                                        console.log('[dylib_call] Initializing engine with', (modelBytes.length / 1024 / 1024).toFixed(1), 'MB model');
+                                        await libH.engine.initialize(modelBytes);
+                                    }
+                                    console.log('[dylib_call] Engine initialized successfully');
                                     break;
                                     
                                 case 'conversationCreate':
@@ -1924,7 +1951,141 @@
                 dylib_read_cstr: (hostPtr, guestBufPtr, maxLen) => {
                     return 0;
                 },
-                dylib_read_mem: (hostPtr, guestBufPtr, maxLen) => {
+                dylib_read_mem: (ovPtr, libHandle, hostPtr, guestBufPtr, length) => {
+                    // Read memory from dylib allocated region
+                    ovPtr = Number(ovPtr);
+                    hostPtr = BigInt(hostPtr);
+                    guestBufPtr = Number(guestBufPtr);
+                    length = Number(length);
+                    
+                    const view = new DataView(hostState.memory.buffer);
+                    
+                    if (hostState.dylibMem && hostState.dylibMem.has(hostPtr)) {
+                        const srcBuf = hostState.dylibMem.get(hostPtr);
+                        const dstBuf = new Uint8Array(hostState.memory.buffer, guestBufPtr, length);
+                        const toCopy = Math.min(srcBuf.length, length);
+                        dstBuf.set(srcBuf.slice(0, toCopy));
+                        
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 0, true);
+                        view.setBigUint64(ovPtr + 16, BigInt(toCopy), true);
+                    } else {
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 22, true); // EINVAL
+                    }
+                    return 0;
+                },
+                dylib_write_mem: (ovPtr, libHandle, hostPtr, guestBufPtr, length) => {
+                    // Write memory to dylib allocated region
+                    ovPtr = Number(ovPtr);
+                    hostPtr = BigInt(hostPtr);
+                    guestBufPtr = Number(guestBufPtr);
+                    length = Number(length);
+                    
+                    const view = new DataView(hostState.memory.buffer);
+                    
+                    if (hostState.dylibMem && hostState.dylibMem.has(hostPtr)) {
+                        const srcBuf = new Uint8Array(hostState.memory.buffer, guestBufPtr, length);
+                        const dstBuf = hostState.dylibMem.get(hostPtr);
+                        const toCopy = Math.min(srcBuf.length, dstBuf.length);
+                        dstBuf.set(srcBuf.slice(0, toCopy));
+                        
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 0, true);
+                        view.setBigUint64(ovPtr + 16, BigInt(toCopy), true);
+                    } else {
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 22, true); // EINVAL
+                    }
+                    return 0;
+                },
+                dylib_alloc: (ovPtr, libHandle, size, align) => {
+                    // Allocate memory for dylib calls
+                    // Parameters: (overlappedPtr, libHandle, size, align)
+                    ovPtr = Number(ovPtr);
+                    libHandle = BigInt(libHandle);
+                    size = BigInt(size);
+                    align = Number(align);
+                    
+                    if (!hostState.dylibMem) {
+                        hostState.dylibMem = new Map();
+                        hostState.dylibMemCounter = 1000000n;
+                    }
+                    
+                    const handle = hostState.dylibMemCounter++;
+                    const buf = new Uint8Array(Number(size));
+                    hostState.dylibMem.set(handle, buf);
+                    
+                    const view = new DataView(hostState.memory.buffer);
+                    view.setUint32(ovPtr, 1, true);
+                    view.setUint32(ovPtr + 4, 0, true);
+                    view.setBigUint64(ovPtr + 16, handle, true);
+                    
+                    console.log('[dylib_alloc] Allocated:', Number(size), 'bytes, handle:', handle);
+                    return 0;
+                },
+                dylib_free: (ovPtr, libHandle, ptr) => {
+                    // Free allocated dylib memory
+                    // Parameters: (overlappedPtr, libHandle, ptr)
+                    ovPtr = Number(ovPtr);
+                    libHandle = BigInt(libHandle);
+                    ptr = BigInt(ptr);
+                    
+                    const view = new DataView(hostState.memory.buffer);
+                    
+                    if (hostState.dylibMem && hostState.dylibMem.has(ptr)) {
+                        hostState.dylibMem.delete(ptr);
+                        console.log('[dylib_free] Freed handle:', ptr);
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 0, true);
+                    } else {
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 22, true); // EINVAL
+                    }
+                    return 0;
+                },
+                dylib_callback_register: (ovPtr, libHandle, sigPtr, sigLen, cbOvPtr, cbOvLen) => {
+                    // Register a callback for dylib notifications
+                    ovPtr = Number(ovPtr);
+                    libHandle = BigInt(libHandle);
+                    sigPtr = Number(sigPtr);
+                    sigLen = Number(sigLen);
+                    cbOvPtr = Number(cbOvPtr);
+                    cbOvLen = Number(cbOvLen);
+                    
+                    console.log('[dylib_callback_register] Registering callback, libHandle:', libHandle);
+                    
+                    const view = new DataView(hostState.memory.buffer);
+                    
+                    // Create a unique callback handle
+                    if (!hostState.callbackHandles) {
+                        hostState.callbackHandles = new Map();
+                        hostState.callbackCounter = 2000000n;
+                    }
+                    
+                    const cbHandle = hostState.callbackCounter++;
+                    hostState.callbackHandles.set(cbHandle, {
+                        libHandle,
+                        cbOvPtr,
+                        cbOvLen,
+                        sigPtr,
+                        sigLen
+                    });
+                    
+                    console.log('[dylib_callback_register] Registered callback handle:', cbHandle);
+                    
+                    // Return callback handle
+                    view.setUint32(ovPtr, 1, true);
+                    view.setUint32(ovPtr + 4, 0, true);
+                    view.setBigUint64(ovPtr + 16, cbHandle, true);
+                    return 0;
+                },
+                dylib_retain: (handle) => {
+                    // Reference counting stub
+                    return 0;
+                },
+                dylib_release: (handle) => {
+                    // Reference counting stub
                     return 0;
                 },
                 cancel: (...args) => {},
@@ -2049,7 +2210,7 @@
                     console.log('[HTTPProxyShim] Mapping URL:', desktopUrl);
                     
                     if (desktopUrl.includes('gemma') || desktopUrl.includes('gemma-4')) {
-                        const webUrl = 'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.litertlm';
+                        const webUrl = 'https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it-web.litertlm';
                         console.log('[HTTPProxyShim] Mapped to web model:', webUrl);
                         return webUrl;
                     }
@@ -2087,12 +2248,13 @@
                 }
             }
 
-            function ensureFileEntry(fs, path, contentOrBytes, mode = 0o644, mtime = Date.now()) {
+            function ensureFileEntry(fs, path, contentOrBytes, mode = 0o644, mtime = Date.now(), reportedSize = undefined) {
                 const content = contentOrBytes instanceof Uint8Array ? contentOrBytes : encoder.encode(contentOrBytes);
-                const entry = { path, type: 'file', content, size: content.length, mtime, mode };
+                const entry = { path, type: 'file', content, size: content.length, mtime, mode, reportedSize };
                 fs.entries.set(path, entry);
                 fs.putEntrySync(entry);
-                console.log(`[Bootstrap] Created file: ${path} (${content.length} bytes)`);
+                const displaySize = reportedSize !== undefined ? reportedSize : content.length;
+                console.log(`[Bootstrap] Created file: ${path} (reported: ${displaySize} bytes, actual content: ${content.length} bytes)`);
             }
 
             async function ensureGuestCacheStructure(fs) {
@@ -2108,16 +2270,17 @@
                 console.log(`[Bootstrap] Seeding desktop artifact metadata (model size: ${gemmaWebBytes.length} bytes)...`);
                 await ensureGuestCacheStructure(fs);
 
-                // Create fake wheel extraction directory entry pointing to web model
-                // Guest expects this file to exist at the wheel cache location
+                // Create fake wheel extraction directory entry
+                // Guest expects this file to exist and checks its size
+                // We store minimal placeholder content but report the actual model size
                 const wheelExtractPath = '/home/user/.cache/kabibi/wheels_extracted/pytorch_model.bin';
-                ensureFileEntry(fs, wheelExtractPath, gemmaWebBytes, 0o644, Date.now() - 1000);
+                ensureFileEntry(fs, wheelExtractPath, 'fake-wheel-content', 0o644, Date.now() - 1000, gemmaWebBytes.length);
 
-                // Create fake .so entry (same content, different path)
+                // Create fake .so entry (minimal content, reported model size)
                 const soPath = '/home/user/.cache/kabibi/litert_lm_ext.so';
-                ensureFileEntry(fs, soPath, gemmaWebBytes, 0o755, Date.now());
+                ensureFileEntry(fs, soPath, 'fake-so-content', 0o755, Date.now(), gemmaWebBytes.length);
 
-                console.log(`[Bootstrap] Desktop artifacts seeded (size: ${gemmaWebBytes.length} bytes)`);
+                console.log(`[Bootstrap] Desktop artifacts seeded with reported size: ${gemmaWebBytes.length} bytes`);
             }
 
             async function bootstrapBrowserAssets(wasmFS) {
@@ -2133,8 +2296,8 @@
                     // === STAGE 1: LiteRT Runtime ===
                     console.log('[Bootstrap] Stage 1: Initializing LiteRT runtime from CDN');
                     setBrowserAssetProgress(wasmFS, 'litertlm', 50, 'Loading Engine from CDN...');
-                    // For Phase 1: Engine loading is deferred until guest actually needs it
-                    // This is a placeholder; actual Engine import happens in dylib adapter
+                    // Note: Full Engine load deferred until we have model bytes in Stage 3
+                    // This stage ensures CDN import is available
                     setBrowserAssetProgress(wasmFS, 'litertlm', 100, 'Runtime ready');
 
                     // === STAGE 2: Gemma Model Cache ===
@@ -2142,7 +2305,7 @@
                     setBrowserAssetProgress(wasmFS, 'gemma', 0, 'Checking cache...');
 
                     // Check if model is in persistent cache first
-                    const modelUrl = 'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.litertlm';
+                    const modelUrl = 'https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it-web.litertlm';
                     let gemmaWebBytes = null;
 
                     const cachedModel = await modelStore.loadModel(modelUrl);
@@ -2161,13 +2324,19 @@
                             }
                         );
                         // Save to persistent cache
-                        await modelStore.saveModel(modelUrl, gemmaWebBytes, { name: 'gemma-4-E2B-it-web' });
+                        await modelStore.saveModel(modelUrl, gemmaWebBytes, { name: 'gemma-4-E4B-it-web' });
                         setBrowserAssetProgress(wasmFS, 'gemma', 100, 'Cached & Ready');
                     }
                     setBrowserAssetProgress(wasmFS, 'gemma', 100, 'Cached');
 
-                    // === STAGE 3: Seed Guest FS ===
-                    console.log('[Bootstrap] Stage 3: Seeding guest filesystem with metadata');
+                    // === STAGE 3: Initialize Engine with Model ===
+                    console.log('[Bootstrap] Stage 3: Initializing LiteRT Engine with Gemma model');
+                    setBrowserAssetProgress(wasmFS, 'engine', 50, 'Initializing engine...');
+                    await engineManager.initialize(gemmaWebBytes);
+                    setBrowserAssetProgress(wasmFS, 'engine', 100, 'Engine ready');
+
+                    // === STAGE 4: Seed Guest FS ===
+                    console.log('[Bootstrap] Stage 4: Seeding guest filesystem with metadata');
                     setBrowserAssetProgress(wasmFS, 'fs', 50, 'Seeding FS...');
                     await seedDesktopArtifactMetadata(wasmFS, gemmaWebBytes);
                     setBrowserAssetProgress(wasmFS, 'fs', 100, 'Complete');
