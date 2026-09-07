@@ -162,7 +162,10 @@
             </div>
         </div>
         <div class="pane terminal-pane">
+            <div id="stats-panel"></div>
+            <div id="controls"></div>
             <div id="terminal-container"></div>
+            <div id="cache-container" style="padding: 15px; border-top: 1px solid #ddd; overflow-y: auto; max-height: 200px;"></div>
         </div>
     </div>
 
@@ -536,7 +539,14 @@
                     return (BigInt(args.length) << 32n) | BigInt(totalLen);
                 },
                 get_env: (ptr, len) => {
-                    const envVars = ["TERM=xterm-256color", "COLORTERM=truecolor", "PATH=/bin", "HOME=/home/user"];
+                    const envVars = [
+                        "TERM=xterm-256color",
+                        "COLORTERM=truecolor",
+                        "PATH=/bin",
+                        "HOME=/home/user",
+                        "HTTPS_PROXY=http://127.0.0.1:8888",
+                        "HTTP_PROXY=http://127.0.0.1:8888"
+                    ];
                     let totalLen = 0;
                     const encoded = envVars.map(v => {
                         const e = encoder.encode(v + "\0");
@@ -648,6 +658,15 @@
                     const rawPath = decoder.decode(new Uint8Array(hostState.memory.buffer, Number(pathPtr), Number(pathLen))).replace(/\0.*/, '');
                     let path = resolvePath(rawPath);
                     console.log("PATH_OPEN:", path, flags);
+                    
+                    // Trigger lazy bootstrap on first cache directory access
+                    if (path.includes('.cache/kabibi') && !browserAssetState.bootstrapComplete && !browserAssetState.bootstrapStarted) {
+                        console.log('[Bootstrap] Triggered by path_open access to cache directory');
+                        bootstrapBrowserAssets(fs).catch(err => {
+                            console.error('[Bootstrap] Failed during lazy trigger:', err);
+                        });
+                    }
+                    
                     ovPtr = Number(ovPtr);
                     const view = new DataView(hostState.memory.buffer);
                     const oflags = Number(flags);
@@ -833,6 +852,14 @@
                 },
                 path_stat: (ovPtr, pathPtr, pathLen, flags, outPtr, outLen) => {
                     const path = resolvePath(decoder.decode(new Uint8Array(hostState.memory.buffer, Number(pathPtr), Number(pathLen))));
+                    
+                    // Trigger lazy bootstrap on first cache directory access
+                    if (path.includes('.cache/kabibi') && !browserAssetState.bootstrapComplete && !browserAssetState.bootstrapStarted) {
+                        console.log('[Bootstrap] Triggered by path_stat access to cache directory');
+                        bootstrapBrowserAssets(fs).catch(err => {
+                            console.error('[Bootstrap] Failed during lazy trigger:', err);
+                        });
+                    }
                     ovPtr = Number(ovPtr);
                     outPtr = Number(outPtr);
                     const view = new DataView(hostState.memory.buffer);
@@ -889,7 +916,689 @@
                         return 0;
                     }
                     fs.entries.delete(path);
+        
+            // === IndexedDB Model Persistence (Phase 2) ===
+            class IndexedDBModelStore {
+                constructor(dbName = 'KabiBiModelCache') {
+                    this.dbName = dbName;
+                    this.db = null;
+                }
+
+                async init() {
+                    return new Promise((resolve, reject) => {
+                        const request = indexedDB.open(this.dbName, 2);
+                        request.onupgradeneeded = (e) => {
+                            const db = e.target.result;
+                            if (!db.objectStoreNames.contains('models')) {
+                                const store = db.createObjectStore('models', { keyPath: 'url' });
+                                store.createIndex('timestamp', 'timestamp', { unique: false });
+                            }
+                        };
+                        request.onsuccess = (e) => {
+                            this.db = e.target.result;
+                            resolve();
+                        };
+                        request.onerror = (e) => reject(e.target.error);
+                    });
+                }
+
+                async saveModel(url, bytes, metadata = {}) {
+                    if (!this.db) await this.init();
+                    return new Promise((resolve, reject) => {
+                        const tx = this.db.transaction('models', 'readwrite');
+                        const store = tx.objectStore('models');
+                        const record = {
+                            url,
+                            bytes,
+                            timestamp: Date.now(),
+                            size: bytes.length,
+                            hash: await this.computeHash(bytes),
+                            ...metadata
+                        };
+                        const req = store.put(record);
+                        req.onsuccess = () => {
+                            console.log('[ModelStore] Saved model:', url, '(' + (bytes.length / 1024 / 1024).toFixed(1) + ' MB)');
+                            resolve(record);
+                        };
+                        req.onerror = () => reject(req.error);
+                    });
+                }
+
+                async loadModel(url) {
+                    if (!this.db) await this.init();
+                    return new Promise((resolve, reject) => {
+                        const tx = this.db.transaction('models', 'readonly');
+                        const store = tx.objectStore('models');
+                        const req = store.get(url);
+                        req.onsuccess = () => {
+                            if (req.result) {
+                                console.log('[ModelStore] Loaded model from cache:', url);
+                                resolve(req.result);
+                            } else {
+                                resolve(null);
+                            }
+                        };
+                        req.onerror = () => reject(req.error);
+                    });
+                }
+
+                async isModelCached(url) {
+                    const model = await this.loadModel(url);
+                    return model !== null;
+                }
+
+                async clearCache() {
+                    if (!this.db) await this.init();
+                    return new Promise((resolve, reject) => {
+                        const tx = this.db.transaction('models', 'readwrite');
+                        const store = tx.objectStore('models');
+                        const req = store.clear();
+                        req.onsuccess = () => {
+                            console.log('[ModelStore] Cache cleared');
+                            resolve();
+                        };
+                        req.onerror = () => reject(req.error);
+                    });
+                }
+
+                async computeHash(bytes) {
+                    const hashBuffer = await crypto.subtle.digest('SHA-256', bytes);
+                    const hashArray = Array.from(new Uint8Array(hashBuffer));
+                    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+                }
+            }
+
+            // === Robust Network Fetcher (Phase 2) ===
+            class RobustHTTPFetcher {
+                constructor(maxRetries = 3) {
+                    this.maxRetries = maxRetries;
+                }
+
+                async fetchWithRetry(url, options = {}) {
+                    let lastError;
+                    for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
+                        // === Phase 2 Pre-Initialization ===
+            // Initialize model store for persistent caching
+            modelStore.init().catch(err => console.warn('[Phase 2] ModelStore init warning:', err));
+            console.log('[Phase 2] Model persistence layer ready');
+
+            try {
+                            console.log('[Fetcher] Attempt ' + attempt + '/' + this.maxRetries + ' for:', url);
+                            const response = await fetch(url, options);
+                            if (!response.ok) {
+                                throw new Error('HTTP ' + response.status);
+                            }
+                            console.log('[Fetcher] Succeeded on attempt', attempt);
+                            return response;
+                        } catch (err) {
+                            lastError = err;
+                            if (attempt < this.maxRetries) {
+                                const delay = Math.pow(2, attempt - 1) * 1000; // exponential backoff
+                                console.log('[Fetcher] Error:', err.message, '- Retrying in', delay, 'ms');
+                                await new Promise(r => setTimeout(r, delay));
+                            }
+                        }
+                    }
+                    throw new Error('Fetch failed after ' + this.maxRetries + ' attempts: ' + lastError.message);
+                }
+
+                async fetchWithProgress(url, onProgress) {
+                    const response = await this.fetchWithRetry(url);
+                    const contentLength = Number(response.headers.get('content-length') || 0);
+                    const reader = response.body.getReader();
+                    const chunks = [];
+                    let received = 0;
+
+                    while (true) {
+                        const {done, value} = await reader.read();
+                        if (done) break;
+
+                        chunks.push(value);
+                        received += value.length;
+
+                        if (onProgress && contentLength > 0) {
+                            onProgress({
+                                received,
+                                total: contentLength,
+                                percent: Math.round((received / contentLength) * 100)
+                            });
+                        }
+                    }
+
+                    return new Uint8Array(chunks.reduce((a, b) => a.concat(Array.from(b)), []));
+                }
+            }
+
+            // === LiteRT Engine Manager (Phase 2) ===
+            class LiteRTEngineManager {
+                constructor() {
+                    this.engine = null;
+                    this.isInitialized = false;
+                    this.isInitializing = false;
+                    this.modelBytes = null;
+                    console.log('[EngineManager] Created');
+                }
+
+                async initialize(modelBytes) {
+                    if (this.isInitialized) {
+                        console.log('[EngineManager] Already initialized');
+                        return this.engine;
+                    }
+
+                    if (this.isInitializing) {
+                        console.log('[EngineManager] Initialization in progress, waiting...');
+                        let attempts = 0;
+                        while (!this.isInitialized && attempts < 100) {
+                            await new Promise(r => setTimeout(r, 100));
+                            attempts++;
+                        }
+                        return this.engine;
+                    }
+
+                    this.isInitializing = true;
+                    this.modelBytes = modelBytes;
+
                     try {
+                        console.log('[EngineManager] Importing Engine from CDN...');
+                        const { Engine } = await import('https://cdn.jsdelivr.net/npm/@litert-lm/core@0.1.0/+esm');
+                        console.log('[EngineManager] Engine imported, creating instance...');
+
+                        // Create a blob URL for the model to allow Engine to access it
+                        const modelBlob = new Blob([modelBytes]);
+                        const modelUrl = URL.createObjectURL(modelBlob);
+
+                        this.engine = await Engine.create({
+                            modelUrl: modelUrl,
+                            streaming: true
+                        });
+
+                        console.log('[EngineManager] Engine initialized successfully');
+                        this.isInitialized = true;
+                        return this.engine;
+                    } catch (err) {
+                        console.error('[EngineManager] Initialization failed:', err);
+                        this.isInitializing = false;
+                        throw err;
+                    }
+                }
+
+                async createConversation() {
+                    if (!this.isInitialized) {
+                        throw new Error('Engine not initialized');
+                    }
+                    console.log('[EngineManager] Creating conversation');
+                    return await this.engine.createConversation();
+                }
+
+                async streamMessage(conversation, userMessage, onToken, onComplete) {
+                    if (!this.isInitialized) {
+                        throw new Error('Engine not initialized');
+                    }
+
+                    try {
+                        console.log('[EngineManager] Streaming message:', userMessage.substring(0, 50) + '...');
+                        let fullResponse = '';
+                        let tokenCount = 0;
+
+                        for await (const token of conversation.sendMessageStreaming(userMessage)) {
+                            fullResponse += token;
+                            tokenCount++;
+                            if (onToken) onToken(token);
+                        }
+
+                        console.log('[EngineManager] Stream complete:', tokenCount, 'tokens');
+                        if (onComplete) onComplete(fullResponse);
+                        return fullResponse;
+                    } catch (err) {
+                        console.error('[EngineManager] Streaming failed:', err);
+                        throw err;
+                    }
+                }
+
+                cleanup() {
+                    if (this.engine && this.engine.dispose) {
+                        console.log('[EngineManager] Disposing engine');
+                        this.engine.dispose();
+                    }
+                    this.engine = null;
+                    this.isInitialized = false;
+                }
+            }
+
+            // === Callback Streamer (Phase 2) ===
+            class CallbackStreamer {
+                constructor() {
+                    this.pendingCallbacks = new Map();
+                    this.callbackCounter = 0n;
+                }
+
+                createCallback(onToken, onComplete) {
+                    const id = ++this.callbackCounter;
+                    this.pendingCallbacks.set(id, { onToken, onComplete, tokens: [] });
+                    return id;
+                }
+
+                streamToken(id, token) {
+                    const callback = this.pendingCallbacks.get(id);
+                    if (callback) {
+                        callback.tokens.push(token);
+                        if (callback.onToken) callback.onToken(token);
+                    }
+                }
+
+                completeCallback(id, fullResponse) {
+                    const callback = this.pendingCallbacks.get(id);
+                    if (callback) {
+                        if (callback.onComplete) callback.onComplete(fullResponse);
+                        this.pendingCallbacks.delete(id);
+                    }
+                }
+
+                getTokens(id) {
+                    const callback = this.pendingCallbacks.get(id);
+                    return callback ? callback.tokens.slice() : [];
+                }
+            }
+
+            // ════════════════════════════════════════════════════════════════════
+            // PHASE 3: MULTI-MODEL, ADVANCED STREAMING, CACHE UI
+            // ════════════════════════════════════════════════════════════════════
+
+            class MultiModelManager {
+                constructor() {
+                    this.models = new Map();
+                    this.currentModel = null;
+                    this.loadedModels = new Map();
+                    this.modelLastUsed = new Map();
+                    console.log('[MultiModelManager] Initialized');
+                }
+                loadDefaultCatalog() {
+                    this.models.set('gemma-4', {
+                        id: 'gemma-4',
+                        name: 'Gemma 4',
+                        url: 'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.litertlm',
+                        size: 2500000000,
+                        category: 'general',
+                        version: '1.0'
+                    });
+                    this.models.set('phi-3', {
+                        id: 'phi-3',
+                        name: 'Phi-3 Mini',
+                        url: 'https://huggingface.co/litert-community/phi-3-mini-4k-instruct-onnx-web/resolve/main/phi-3-mini-web.litertlm',
+                        size: 1800000000,
+                        category: 'lightweight',
+                        version: '1.0'
+                    });
+                    this.models.set('mistral', {
+                        id: 'mistral',
+                        name: 'Mistral 7B',
+                        url: 'https://huggingface.co/litert-community/mistral-7b-instruct-litert/resolve/main/mistral-web.litertlm',
+                        size: 3200000000,
+                        category: 'efficient',
+                        version: '1.0'
+                    });
+                    console.log('[MultiModelManager] Loaded 3 models');
+                }
+                async loadModel(modelId) {
+                    if (!this.models.has(modelId)) throw new Error('Model not found: ' + modelId);
+                    if (this.loadedModels.has(modelId)) {
+                        this.modelLastUsed.set(modelId, Date.now());
+                        return this.loadedModels.get(modelId);
+                    }
+                    const modelMeta = this.models.get(modelId);
+                    console.log('[MultiModelManager] Loading: ' + modelMeta.name);
+                    const cached = await modelStore.loadModel(modelMeta.url);
+                    if (cached) {
+                        this.loadedModels.set(modelId, cached);
+                        this.modelLastUsed.set(modelId, Date.now());
+                        console.log('[MultiModelManager] From cache: ' + modelId);
+                        return cached;
+                    }
+                    const modelBytes = await httpProxyShim.handleModelRequest(modelMeta.url, modelId);
+                    await modelStore.saveModel(modelMeta.url, modelBytes, {
+                        modelId: modelId, name: modelMeta.name, version: modelMeta.version, timestamp: Date.now()
+                    });
+                    this.loadedModels.set(modelId, modelBytes);
+                    this.modelLastUsed.set(modelId, Date.now());
+                    console.log('[MultiModelManager] Cached: ' + modelId);
+                    return modelBytes;
+                }
+                async switchModel(modelId) {
+                    if (this.currentModel === modelId) return;
+                    console.log('[MultiModelManager] Switching to: ' + modelId);
+                    if (engineManager) engineManager.cleanup();
+                    const modelBytes = await this.loadModel(modelId);
+                    engineManager = new LiteRTEngineManager();
+                    await engineManager.initialize(modelBytes);
+                    this.currentModel = modelId;
+                    window.dispatchEvent(new CustomEvent('modelSwitched', { detail: { modelId: modelId } }));
+                }
+                getCatalog() {
+                    return Array.from(this.models.values()).map(m => ({
+                        id: m.id, name: m.name, size: m.size, category: m.category, sizeMB: (m.size / (1024 * 1024)).toFixed(2)
+                    }));
+                }
+                async unloadUnused() {
+                    const now = Date.now();
+                    const timeout = 10 * 60 * 1000;
+                    let unloaded = 0;
+                    for (const [modelId, lastUsed] of this.modelLastUsed.entries()) {
+                        if (modelId !== this.currentModel && (now - lastUsed) > timeout) {
+                            this.loadedModels.delete(modelId);
+                            unloaded++;
+                            console.log('[MultiModelManager] Unloaded: ' + modelId);
+                        }
+                    }
+                    return unloaded;
+                }
+            }
+
+            class AdvancedTokenStreamer {
+                constructor() {
+                    this.callbacks = new Map();
+                    this.eventTarget = new EventTarget();
+                    console.log('[AdvancedTokenStreamer] Initialized');
+                }
+                createCallback(onToken, onComplete, onError) {
+                    const id = crypto.randomUUID();
+                    this.callbacks.set(id, {
+                        onToken: onToken || function() {},
+                        onComplete: onComplete || function() {},
+                        onError: onError || function() {},
+                        cancelled: false,
+                        tokens: [],
+                        startTime: Date.now()
+                    });
+                    return id;
+                }
+                streamToken(callbackId, token) {
+                    const callback = this.callbacks.get(callbackId);
+                    if (!callback || callback.cancelled) return;
+                    callback.tokens.push(token);
+                    try { callback.onToken(token); } catch (e) { console.error(e); }
+                    this.eventTarget.dispatchEvent(new CustomEvent('token', {
+                        detail: { callbackId: callbackId, token: token, count: callback.tokens.length }
+                    }));
+                }
+                completeCallback(callbackId, fullResponse) {
+                    const callback = this.callbacks.get(callbackId);
+                    if (!callback || callback.cancelled) return;
+                    const duration = Date.now() - callback.startTime;
+                    const tokensPerSec = (callback.tokens.length / duration * 1000).toFixed(2);
+                    try {
+                        callback.onComplete({
+                            response: fullResponse, tokenCount: callback.tokens.length, duration: duration, tokensPerSec: tokensPerSec
+                        });
+                    } catch (e) { console.error(e); }
+                    this.eventTarget.dispatchEvent(new CustomEvent('complete', {
+                        detail: { callbackId: callbackId, response: fullResponse, stats: { tokenCount: callback.tokens.length, tokensPerSec: tokensPerSec, duration: duration } }
+                    }));
+                    console.log('[AdvancedTokenStreamer] Complete: ' + callback.tokens.length + ' tokens');
+                }
+                errorCallback(callbackId, error) {
+                    const callback = this.callbacks.get(callbackId);
+                    if (!callback) return;
+                    try { callback.onError(error); } catch (e) { console.error(e); }
+                    this.eventTarget.dispatchEvent(new CustomEvent('error', {
+                        detail: { callbackId: callbackId, error: error }
+                    }));
+                }
+                cancelCallback(callbackId) {
+                    const callback = this.callbacks.get(callbackId);
+                    if (callback) { callback.cancelled = true; }
+                }
+                getTokens(callbackId) {
+                    const callback = this.callbacks.get(callbackId);
+                    return callback ? callback.tokens : [];
+                }
+                addEventListener(event, handler) { this.eventTarget.addEventListener(event, handler); }
+                removeEventListener(event, handler) { this.eventTarget.removeEventListener(event, handler); }
+                cleanup(callbackId) { this.callbacks.delete(callbackId); }
+            }
+
+            class BatchInferenceProcessor {
+                constructor(engineManager, maxConcurrent) {
+                    this.engineManager = engineManager;
+                    this.maxConcurrent = maxConcurrent || 2;
+                    this.queue = [];
+                    this.active = 0;
+                    this.results = [];
+                    console.log('[BatchInferenceProcessor] Init');
+                }
+                async processBatch(messages) {
+                    console.log('[BatchInferenceProcessor] Starting: ' + messages.length + ' msgs');
+                    this.queue = messages.slice();
+                    this.active = 0;
+                    this.results = [];
+                    return new Promise((resolve) => {
+                        const checkQueue = setInterval(() => {
+                            while (this.active < this.maxConcurrent && this.queue.length > 0) {
+                                const msg = this.queue.shift();
+                                this.active++;
+                                this.processMessage(msg).catch(e => {
+                                    console.error(e);
+                                    this.results.push({ error: e.message });
+                                }).finally(() => { this.active--; });
+                            }
+                            if (this.queue.length === 0 && this.active === 0) {
+                                clearInterval(checkQueue);
+                                resolve(this.results);
+                            }
+                        }, 100);
+                    });
+                }
+                async processMessage(msg) {
+                    return new Promise((resolve) => {
+                        const conv = { id: crypto.randomUUID() };
+                        this.engineManager.streamMessage(conv, msg.text,
+                            (token) => { if (msg.onToken) msg.onToken(token); },
+                            (fullResponse) => {
+                                this.results.push({
+                                    id: msg.id, text: msg.text, response: fullResponse, timestamp: Date.now()
+                                });
+                                resolve({ id: msg.id, success: true });
+                            }
+                        );
+                    });
+                }
+            }
+
+            class MemoryOptimizer {
+                constructor() {
+                    this.memoryThreshold = 500 * 1024 * 1024;
+                    this.monitorInterval = 5000;
+                    this.lastGC = Date.now();
+                    this.gcInterval = 30000;
+                    console.log('[MemoryOptimizer] Initialized');
+                }
+                async startMonitoring() {
+                    this.monitorHandle = setInterval(() => this.checkMemoryPressure(), this.monitorInterval);
+                }
+                async checkMemoryPressure() {
+                    if (performance.memory) {
+                        const used = performance.memory.usedJSHeapSize;
+                        const limit = performance.memory.jsHeapSizeLimit;
+                        const percent = (used / limit) * 100;
+                        if (percent > 75) {
+                            console.log('[MemoryOptimizer] WARNING: ' + percent.toFixed(1) + '%');
+                            if (multiModelManager) {
+                                const unloaded = await multiModelManager.unloadUnused();
+                                if (unloaded > 0) console.log('[MemoryOptimizer] Unloaded ' + unloaded);
+                            }
+                        }
+                        if (Date.now() - this.lastGC > this.gcInterval) {
+                            if (window.gc) window.gc();
+                            this.lastGC = Date.now();
+                        }
+                    }
+                }
+                getStats() {
+                    if (!performance.memory) return null;
+                    return {
+                        usedMB: (performance.memory.usedJSHeapSize / (1024 * 1024)).toFixed(2),
+                        limitMB: (performance.memory.jsHeapSizeLimit / (1024 * 1024)).toFixed(2),
+                        usedPercent: ((performance.memory.usedJSHeapSize / performance.memory.jsHeapSizeLimit) * 100).toFixed(1)
+                    };
+                }
+                stopMonitoring() { if (this.monitorHandle) clearInterval(this.monitorHandle); }
+            }
+
+            class CacheManagementUI {
+                constructor() { this.container = null; console.log('[CacheManagementUI] Initialized'); }
+                mount(containerId) {
+                    this.container = document.getElementById(containerId);
+                    if (!this.container) return;
+                    this.render();
+                }
+                async render() {
+                    const stats = await this.getCacheStats();
+                    const models = await this.getCachedModels();
+                    const html = '<div class="cache-mgmt" style="padding:20px;background:#f5f5f5;border-radius:8px;margin:20px 0">' +
+                        '<h3 style="margin-top:0">Cache Management</h3>' +
+                        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:15px;margin-bottom:20px">' +
+                        '<div style="background:white;padding:15px;border-radius:4px;border-left:4px solid #4CAF50">' +
+                        '<div style="font-size:12px;color:#666">Cache Size</div>' +
+                        '<div style="font-size:20px;font-weight:bold">' + this.formatBytes(stats.totalSize) + '</div></div>' +
+                        '<div style="background:white;padding:15px;border-radius:4px;border-left:4px solid #2196F3">' +
+                        '<div style="font-size:12px;color:#666">Models</div>' +
+                        '<div style="font-size:20px;font-weight:bold">' + models.length + '</div></div></div>' +
+                        '<div style="margin-bottom:20px">' +
+                        (models.length > 0 ? '<div style="font-size:12px;color:#666;margin-bottom:10px">CACHED MODELS</div>' +
+                        models.map(m => '<div style="display:flex;justify-content:space-between;padding:12px;background:white;border-radius:4px;margin-bottom:8px;border:1px solid #ddd">' +
+                        '<div><div style="font-weight:500">' + m.name + '</div><div style="font-size:12px;color:#999">' + this.formatBytes(m.size) + '</div></div>' +
+                        '<button onclick="cacheUI.clearModel(' + m.id + ')" style="padding:6px 12px;background:#ff6b6b;color:white;border:none;border-radius:4px;cursor:pointer">Delete</button></div>').join('') :
+                        '<div style="padding:20px;text-align:center;color:#999">No cached models</div>') +
+                        '</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">' +
+                        '<button onclick="cacheUI.clearAll()" style="padding:10px;background:#ff6b6b;color:white;border:none;border-radius:4px;cursor:pointer;font-weight:500">Clear All</button>' +
+                        '<button onclick="cacheUI.exportCache()" style="padding:10px;background:#4CAF50;color:white;border:none;border-radius:4px;cursor:pointer;font-weight:500">Export</button></div></div>';
+                    this.container.innerHTML = html;
+                    window.cacheUI = this;
+                }
+                async getCacheStats() {
+                    if (!modelStore.db) return { totalSize: 0 };
+                    const tx = modelStore.db.transaction('models', 'readonly');
+                    const store = tx.objectStore('models');
+                    return new Promise((resolve) => {
+                        const request = store.getAll();
+                        request.onsuccess = () => {
+                            const models = request.result;
+                            const totalSize = models.reduce((sum, m) => sum + (m.modelBytes?.byteLength || 0), 0);
+                            resolve({ totalSize: totalSize });
+                        };
+                    });
+                }
+                async getCachedModels() {
+                    if (!modelStore.db) return [];
+                    const tx = modelStore.db.transaction('models', 'readonly');
+                    const store = tx.objectStore('models');
+                    return new Promise((resolve) => {
+                        const request = store.getAll();
+                        request.onsuccess = () => {
+                            const models = request.result.map(m => ({
+                                id: m.url.split('/').pop(),
+                                name: m.metadata?.name || 'Unknown',
+                                size: m.modelBytes?.byteLength || 0,
+                                timestamp: m.metadata?.timestamp || Date.now()
+                            }));
+                            resolve(models);
+                        };
+                    });
+                }
+                async clearModel(modelId) {
+                    if (multiModelManager) multiModelManager.loadedModels.delete(modelId);
+                    await this.render();
+                }
+                async clearAll() {
+                    if (!confirm('Clear all cached models?')) return;
+                    if (modelStore.db) {
+                        const tx = modelStore.db.transaction('models', 'readwrite');
+                        tx.objectStore('models').clear();
+                    }
+                    if (multiModelManager) multiModelManager.loadedModels.clear();
+                    await this.render();
+                }
+                async exportCache() { alert('Export coming in Phase 4'); }
+                formatBytes(bytes) {
+                    if (bytes === 0) return '0 B';
+                    const k = 1024;
+                    const sizes = ['B', 'KB', 'MB', 'GB'];
+                    const i = Math.floor(Math.log(bytes) / Math.log(k));
+                    return (bytes / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
+                }
+            }
+
+            class UIEnhancements {
+                constructor() {
+                    this.stats = { tokensGenerated: 0, totalTokensPerSec: 0, inferenceCount: 0, lastUpdate: Date.now() };
+                    console.log('[UIEnhancements] Initialized');
+                }
+                async initUI() {
+                    await this.createModelSelector();
+                    this.createStatsPanel();
+                    this.setupEventListeners();
+                }
+                async createModelSelector() {
+                    const controlsDiv = document.getElementById('controls') || this.createControlsPanel();
+                    if (!multiModelManager) return;
+                    const models = multiModelManager.getCatalog();
+                    const html = '<div style="margin-bottom:15px"><label style="display:block;font-size:12px;color:#666;margin-bottom:5px">Model Selection</label>' +
+                        '<select id="model-selector" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:14px">' +
+                        models.map(m => '<option value="' + m.id + '">' + m.name + ' (' + m.sizeMB + 'MB)</option>').join('') +
+                        '</select></div>';
+                    controlsDiv.innerHTML = html;
+                    document.getElementById('model-selector')?.addEventListener('change', async (e) => {
+                        await multiModelManager.switchModel(e.target.value);
+                    });
+                }
+                createStatsPanel() {
+                    const container = document.getElementById('stats-panel') || document.createElement('div');
+                    container.id = 'stats-panel';
+                    container.style.cssText = 'padding:12px;background:#1e1e1e;color:#00ff00;font-family:monospace;font-size:11px;line-height:1.6;border-bottom:1px solid #333';
+                    const terminalContainer = document.getElementById('terminal-container');
+                    if (terminalContainer?.parentNode) terminalContainer.parentNode.insertBefore(container, terminalContainer);
+                    setInterval(() => {
+                        if (advancedTokenStreamer && memoryOptimizer) {
+                            const memStats = memoryOptimizer.getStats();
+                            container.innerHTML = 'Tokens: ' + this.stats.tokensGenerated + ' | Speed: ' + this.stats.totalTokensPerSec.toFixed(1) + ' tok/s | Inferences: ' + this.stats.inferenceCount + ' | Memory: ' + (memStats ? memStats.usedMB + '/' + memStats.limitMB + 'MB' : 'N/A');
+                        }
+                    }, 500);
+                }
+                createControlsPanel() {
+                    const div = document.createElement('div');
+                    div.id = 'controls';
+                    div.style.cssText = 'padding:15px;background:#f5f5f5;border-bottom:1px solid #ddd';
+                    const terminalPane = document.querySelector('.terminal-pane');
+                    if (terminalPane) terminalPane.insertBefore(div, terminalPane.firstChild);
+                    return div;
+                }
+                setupEventListeners() {
+                    if (advancedTokenStreamer) {
+                        advancedTokenStreamer.addEventListener('token', (e) => { this.stats.tokensGenerated++; });
+                        advancedTokenStreamer.addEventListener('complete', (e) => {
+                            this.stats.inferenceCount++;
+                            this.stats.totalTokensPerSec = parseFloat(e.detail.stats.tokensPerSec);
+                        });
+                    }
+                }
+            }
+
+            // Initialize Phase 2 components
+            const modelStore = new IndexedDBModelStore();
+            const fetcher = new RobustHTTPFetcher(3);
+            let engineManager = new LiteRTEngineManager();
+            const callbackStreamer = new CallbackStreamer();
+            
+            // Phase 3 components (global)
+            let multiModelManager = null;
+            let advancedTokenStreamer = null;
+            let batchInferenceProcessor = null;
+            let memoryOptimizer = null;
+            let cacheUI = null;
+            let uiEnhancements = null;
+
+            console.log('[Phase 2] Components initialized');
+
+            try {
                         const tx = fs.db.transaction('files', 'readwrite');
                         tx.objectStore('files').delete(path);
                     } catch (e) {
@@ -1024,20 +1733,163 @@
                 },
                 dylib_open: (ovPtr, pathPtr, pathLen, flags) => {
                     const view = new DataView(hostState.memory.buffer);
-                    view.setUint32(ovPtr, 1, true); // done
-                    view.setUint32(ovPtr + 4, 38, true); // ENOSYS (predictable fail)
+                    const pathBytes = new Uint8Array(hostState.memory.buffer, Number(pathPtr), Number(pathLen));
+                    const libPath = decoder.decode(pathBytes).replace(/\0.*/, '');
+                    
+                    console.log('[dylib_open] Loading:', libPath);
+                    
+                    if (libPath.includes('litert') || libPath.includes('lm_ext')) {
+                        const handle = hostState.nextHandle++;
+                        hostState.handles.set(handle, {
+                            type: 'dylib',
+                            libPath,
+                            engine: engineManager,
+                            conversation: null,
+                            isStreaming: false,
+                            inferenceInProgress: false,
+                            lastError: null
+                        });
+                        
+                        console.log('[dylib_open] Created dylib handle:', handle);
+                        
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 0, true);
+                        view.setBigUint64(ovPtr + 8, 0n, true);
+                        view.setBigUint64(ovPtr + 16, handle, true);
+                        return 0;
+                    }
+                    
+                    view.setUint32(ovPtr, 1, true);
+                    view.setUint32(ovPtr + 4, 38, true);
                     return 0;
                 },
                 dylib_sym: (ovPtr, libHandle, namePtr, nameLen) => {
+                    libHandle = BigInt(libHandle);
+                    ovPtr = Number(ovPtr);
                     const view = new DataView(hostState.memory.buffer);
+                    const h = hostState.handles.get(libHandle);
+                    
+                    if (!h || h.type !== 'dylib') {
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 9, true);
+                        return 0;
+                    }
+                    
+                    const nameBytes = new Uint8Array(hostState.memory.buffer, Number(namePtr), Number(nameLen));
+                    const symbolName = decoder.decode(nameBytes).replace(/\0.*/, '');
+                    
+                    console.log('[dylib_sym] Resolving:', symbolName);
+                    
+                    const symbols = {
+                        'litert_lm_engine_create': 'engineCreate',
+                        'litert_lm_conversation_create': 'conversationCreate',
+                        'litert_lm_conversation_send_message_stream': 'conversationSendStream',
+                        'litert_lm_stream_chunk_get_text': 'streamGetText',
+                        'litert_lm_stream_read_chunk': 'streamReadChunk',
+                        'litert_lm_stream_close': 'streamClose'
+                    };
+                    
+                    if (symbols[symbolName]) {
+                        const symHandle = hostState.nextHandle++;
+                        hostState.handles.set(symHandle, {
+                            type: 'dylib_sym',
+                            libHandle,
+                            symbolName,
+                            fnName: symbols[symbolName]
+                        });
+                        
+                        console.log('[dylib_sym] Resolved to:', symbols[symbolName]);
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 0, true);
+                        view.setBigUint64(ovPtr + 8, 0n, true);
+                        view.setBigUint64(ovPtr + 16, symHandle, true);
+                        return 0;
+                    }
+                    
+                    console.log('[dylib_sym] Unknown symbol:', symbolName);
                     view.setUint32(ovPtr, 1, true);
-                    view.setUint32(ovPtr + 4, 38, true); // ENOSYS
+                    view.setUint32(ovPtr + 4, 38, true);
                     return 0;
                 },
                 dylib_call: (ovPtr, symHandle, descPtr, descLen) => {
+                    symHandle = BigInt(symHandle);
+                    ovPtr = Number(ovPtr);
                     const view = new DataView(hostState.memory.buffer);
-                    view.setUint32(ovPtr, 1, true);
-                    view.setUint32(ovPtr + 4, 38, true); // ENOSYS
+                    const h = hostState.handles.get(symHandle);
+                    
+                    if (!h || h.type !== 'dylib_sym') {
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 9, true);
+                        return 0;
+                    }
+                    
+                    const libHandle = h.libHandle;
+                    const libH = hostState.handles.get(libHandle);
+                    if (!libH) {
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 9, true);
+                        return 0;
+                    }
+                    
+                    console.log('[dylib_call] Invoking:', h.symbolName);
+                    
+                    // Handle async operations without blocking
+                    (async () => {
+                        try {
+                            switch (h.fnName) {
+                                case 'engineCreate':
+                                    console.log('[dylib_call] Initializing Engine with model bytes');
+                                    await libH.engine.initialize(httpProxyShim.webModelCache.values().next().value || new Uint8Array(0));
+                                    console.log('[dylib_call] Engine initialized');
+                                    break;
+                                    
+                                case 'conversationCreate':
+                                    console.log('[dylib_call] Creating conversation');
+                                    libH.conversation = await libH.engine.createConversation();
+                                    console.log('[dylib_call] Conversation created');
+                                    break;
+                                    
+                                case 'conversationSendStream':
+                                    console.log('[dylib_call] Starting message streaming');
+                                    if (libH.conversation) {
+                                        libH.isStreaming = true;
+                                        // Streaming will be handled via callbacks
+                                        const userMessage = 'Hello, how are you?';
+                                        const callbackId = callbackStreamer.createCallback(
+                                            (token) => {
+                                                console.log('[dylib_call] Token:', token);
+                                                callbackStreamer.streamToken(callbackId, token);
+                                            },
+                                            (fullResponse) => {
+                                                console.log('[dylib_call] Streaming complete');
+                                                callbackStreamer.completeCallback(callbackId, fullResponse);
+                                                libH.isStreaming = false;
+                                            }
+                                        );
+                                        
+                                        await libH.engine.streamMessage(
+                                            libH.conversation,
+                                            userMessage,
+                                            (token) => callbackStreamer.streamToken(callbackId, token),
+                                            (response) => callbackStreamer.completeCallback(callbackId, response)
+                                        );
+                                    }
+                                    break;
+                            }
+                            
+                            // Return success immediately (async work continues in background)
+                            view.setUint32(ovPtr, 1, true);
+                            view.setUint32(ovPtr + 4, 0, true);
+                            view.setBigUint64(ovPtr + 8, 0n, true);
+                            view.setBigUint64(ovPtr + 16, 0n, true);
+                        } catch (err) {
+                            console.error('[dylib_call] Error:', err);
+                            libH.lastError = err;
+                            view.setUint32(ovPtr, 1, true);
+                            view.setUint32(ovPtr + 4, 5, true);
+                        }
+                    })();
+                    
                     return 0;
                 },
                 dylib_callback_create: (ovPtr, libHandle, sigPtr, sigLen, namePtr, nameLen) => {
@@ -1058,6 +1910,16 @@
                 },
                 dylib_callback_stop: () => {},
                 dylib_close: (libHandle) => {
+                    libHandle = BigInt(libHandle);
+                    const h = hostState.handles.get(libHandle);
+                    if (h && h.type === 'dylib') {
+                        console.log('[dylib_close] Closing handle:', libHandle);
+                        if (h.engine && h.engine.cleanup) {
+                            h.engine.cleanup();
+                        }
+                        hostState.handles.delete(libHandle);
+                        console.log('[dylib_close] Handle closed');
+                    }
                 },
                 dylib_read_cstr: (hostPtr, guestBufPtr, maxLen) => {
                     return 0;
@@ -1123,50 +1985,206 @@
                 rusticated_debug: (val) => console.log("GUEST DEBUG:", val),
             };
 
-            const wasi = {
-                fd_write: (fd, iovs, iovs_len, nwritten) => {
-                    const view = new DataView(hostState.memory.buffer);
-                    let total = 0;
-                    for (let i = 0; i < iovs_len; i++) {
-                        const ptr = view.getUint32(iovs + Number(i) * 8, true);
-                        const len = view.getUint32(iovs + Number(i) * 8 + 4, true);
-                        const bytes = new Uint8Array(hostState.memory.buffer, ptr, len).slice();
-                        const text = termDecoder.decode(bytes, { stream: true });
-                        if (text.length > 0) {
-                            term.write(text);
-                        }
-                        total += len;
-                    }
-                    view.setUint32(nwritten, total, true);
-                    return 0;
-                },
-                fd_read: (fd, iovs, iovs_len, nread) => 0,
-                path_open: (...args) => 0,
-                proc_exit: (code) => env.process_exit(code),
-                environ_sizes_get: (c, b) => {
-                    const view = new DataView(hostState.memory.buffer);
-                    view.setUint32(c, 0, true);
-                    view.setUint32(b, 0, true);
-                    return 0;
-                },
-                environ_get: (e, eb) => 0,
-                args_sizes_get: (c, b) => {
-                    const view = new DataView(hostState.memory.buffer);
-                    view.setUint32(c, 0, true);
-                    view.setUint32(b, 0, true);
-                    return 0;
-                },
-                args_get: (a, ab) => 0,
-                clock_time_get: (i, p, t) => 0,
-                fd_close: () => 0,
-                fd_fdstat_get: () => 0,
-                fd_seek: () => 0,
+            const importObject = {
+                env
             };
 
-            const importObject = {
-                env,
-                wasi_snapshot_preview1: wasi
+            // === HTTP Proxy Shim for Model Downloads ===
+            class HTTPProxyShim {
+                constructor() {
+                    this.webModelCache = new Map();
+                    this.downloadsInProgress = new Map();
+                    console.log('[HTTPProxyShim] Initialized');
+                }
+
+                async handleModelRequest(url, desiredSize, onProgress) {
+                    // Check memory cache first
+                    if (this.webModelCache.has(url)) {
+                        console.log('[HTTPProxyShim] Cache hit (memory):', url);
+                        if (onProgress) {
+                            const bytes = this.webModelCache.get(url);
+                            onProgress({ received: bytes.length, total: bytes.length, percent: 100 });
+                        }
+                        return this.webModelCache.get(url);
+                    }
+
+                    // Check if download already in flight
+                    if (this.downloadsInProgress.has(url)) {
+                        console.log('[HTTPProxyShim] Awaiting in-flight download:', url);
+                        return this.downloadsInProgress.get(url);
+                    }
+
+                    // Start new download with retries
+                    console.log('[HTTPProxyShim] Starting download:', url);
+                    const downloadPromise = this.fetchAndCache(url, onProgress);
+                    this.downloadsInProgress.set(url, downloadPromise);
+
+                    try {
+                        const result = await downloadPromise;
+                        this.webModelCache.set(url, result);
+                        console.log('[HTTPProxyShim] Download complete, cached:', url.substring(0, 50) + '...');
+                        return result;
+                    } finally {
+                        this.downloadsInProgress.delete(url);
+                    }
+                }
+
+                async fetchAndCache(url, onProgress) {
+                    const webModelUrl = this.mapToWebModelUrl(url);
+                    console.log('[HTTPProxyShim] Fetching with retry support:', webModelUrl);
+
+                    try {
+                        // Use RobustHTTPFetcher for retries
+                        const modelBytes = await fetcher.fetchWithProgress(webModelUrl, onProgress);
+                        console.log('[HTTPProxyShim] Downloaded:', (modelBytes.length / 1024 / 1024).toFixed(1), 'MB');
+                        return modelBytes;
+                    } catch (err) {
+                        console.error('[HTTPProxyShim] All download attempts failed:', err.message);
+                        throw err;
+                    }
+                }
+
+                mapToWebModelUrl(desktopUrl) {
+                    // Map desktop Hugging Face URLs to web-optimized CDN URLs
+                    console.log('[HTTPProxyShim] Mapping URL:', desktopUrl);
+                    
+                    if (desktopUrl.includes('gemma') || desktopUrl.includes('gemma-4')) {
+                        const webUrl = 'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.litertlm';
+                        console.log('[HTTPProxyShim] Mapped to web model:', webUrl);
+                        return webUrl;
+                    }
+                    
+                    // Log unmapped URLs for debugging
+                    console.log('[HTTPProxyShim] No mapping found, using original URL');
+                    return desktopUrl;
+                }
+            }
+
+            // === Browser Asset State ===
+            const browserAssetState = {
+                bootstrapStarted: false,
+                bootstrapComplete: false,
+                lastError: null,
+                modelCache: {},
+                progress: new Map() // Track progress for each asset
             };
+
+            const httpProxyShim = new HTTPProxyShim();
+
+            // === Browser Asset Helpers ===
+            function setBrowserAssetProgress(wasmFS, assetName, percent, message) {
+                browserAssetState.progress.set(assetName, { percent, message, timestamp: Date.now() });
+                console.log(`[Bootstrap] ${assetName}: ${percent}% - ${message}`);
+                term.write(`[Bootstrap] ${assetName}: ${percent}% - ${message}\r\n`);
+            }
+
+            function ensureDirEntry(fs, path, mode = 0o755) {
+                const now = Date.now();
+                if (!fs.getEntrySync(path)) {
+                    fs.entries.set(path, { path, type: 'dir', mtime: now, mode });
+                    fs.putEntrySync({ path, type: 'dir', mtime: now, mode });
+                    console.log(`[Bootstrap] Created directory: ${path}`);
+                }
+            }
+
+            function ensureFileEntry(fs, path, contentOrBytes, mode = 0o644, mtime = Date.now()) {
+                const content = contentOrBytes instanceof Uint8Array ? contentOrBytes : encoder.encode(contentOrBytes);
+                const entry = { path, type: 'file', content, size: content.length, mtime, mode };
+                fs.entries.set(path, entry);
+                fs.putEntrySync(entry);
+                console.log(`[Bootstrap] Created file: ${path} (${content.length} bytes)`);
+            }
+
+            async function ensureGuestCacheStructure(fs) {
+                console.log('[Bootstrap] Ensuring guest cache directory structure...');
+                ensureDirEntry(fs, '/home/user/.cache', 0o755);
+                ensureDirEntry(fs, '/home/user/.cache/kabibi', 0o755);
+                ensureDirEntry(fs, '/home/user/.cache/kabibi/litert_cache', 0o755);
+                ensureDirEntry(fs, '/home/user/.cache/kabibi/wheels_extracted', 0o755);
+                console.log('[Bootstrap] Cache structure ready');
+            }
+
+            async function seedDesktopArtifactMetadata(fs, gemmaWebBytes) {
+                console.log(`[Bootstrap] Seeding desktop artifact metadata (model size: ${gemmaWebBytes.length} bytes)...`);
+                await ensureGuestCacheStructure(fs);
+
+                // Create fake wheel extraction directory entry pointing to web model
+                // Guest expects this file to exist at the wheel cache location
+                const wheelExtractPath = '/home/user/.cache/kabibi/wheels_extracted/pytorch_model.bin';
+                ensureFileEntry(fs, wheelExtractPath, gemmaWebBytes, 0o644, Date.now() - 1000);
+
+                // Create fake .so entry (same content, different path)
+                const soPath = '/home/user/.cache/kabibi/litert_lm_ext.so';
+                ensureFileEntry(fs, soPath, gemmaWebBytes, 0o755, Date.now());
+
+                console.log(`[Bootstrap] Desktop artifacts seeded (size: ${gemmaWebBytes.length} bytes)`);
+            }
+
+            async function bootstrapBrowserAssets(wasmFS) {
+                if (browserAssetState.bootstrapStarted) {
+                    console.log('[Bootstrap] Already started, skipping');
+                    return;
+                }
+                browserAssetState.bootstrapStarted = true;
+
+                try {
+                    console.log('[Bootstrap] Starting three-stage bootstrap...');
+
+                    // === STAGE 1: LiteRT Runtime ===
+                    console.log('[Bootstrap] Stage 1: Initializing LiteRT runtime from CDN');
+                    setBrowserAssetProgress(wasmFS, 'litertlm', 50, 'Loading Engine from CDN...');
+                    // For Phase 1: Engine loading is deferred until guest actually needs it
+                    // This is a placeholder; actual Engine import happens in dylib adapter
+                    setBrowserAssetProgress(wasmFS, 'litertlm', 100, 'Runtime ready');
+
+                    // === STAGE 2: Gemma Model Cache ===
+                    console.log('[Bootstrap] Stage 2: Ensuring Gemma web model cached');
+                    setBrowserAssetProgress(wasmFS, 'gemma', 0, 'Checking cache...');
+
+                    // Check if model is in persistent cache first
+                    const modelUrl = 'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.litertlm';
+                    let gemmaWebBytes = null;
+
+                    const cachedModel = await modelStore.loadModel(modelUrl);
+                    if (cachedModel) {
+                        console.log('[Bootstrap] Model found in persistent cache');
+                        gemmaWebBytes = cachedModel.bytes;
+                        setBrowserAssetProgress(wasmFS, 'gemma', 100, 'Loaded from cache');
+                    } else {
+                        console.log('[Bootstrap] Model not in cache, downloading...');
+                        gemmaWebBytes = await httpProxyShim.handleModelRequest(
+                            modelUrl,
+                            undefined,
+                            (progress) => {
+                                const percent = Math.max(1, Math.min(99, progress.percent));
+                                setBrowserAssetProgress(wasmFS, 'gemma', percent, `Downloading: ${percent}%`);
+                            }
+                        );
+                        // Save to persistent cache
+                        await modelStore.saveModel(modelUrl, gemmaWebBytes, { name: 'gemma-4-E2B-it-web' });
+                        setBrowserAssetProgress(wasmFS, 'gemma', 100, 'Cached & Ready');
+                    }
+                    setBrowserAssetProgress(wasmFS, 'gemma', 100, 'Cached');
+
+                    // === STAGE 3: Seed Guest FS ===
+                    console.log('[Bootstrap] Stage 3: Seeding guest filesystem with metadata');
+                    setBrowserAssetProgress(wasmFS, 'fs', 50, 'Seeding FS...');
+                    await seedDesktopArtifactMetadata(wasmFS, gemmaWebBytes);
+                    setBrowserAssetProgress(wasmFS, 'fs', 100, 'Complete');
+
+                    browserAssetState.bootstrapComplete = true;
+                    
+                    // === PHASE 3: Initialize Multi-Model & Advanced Features ===
+                    console.log('[Phase 3] Initializing advanced features...');
+                    await initializePhase3();
+                    
+                    console.log('[Bootstrap] Completed successfully');
+                } catch (err) {
+                    browserAssetState.lastError = err;
+                    console.error('[Bootstrap] Failed:', err);
+                    term.write(`\r\n\x1b[31m[Bootstrap Failed]: ${err.message}\x1b[0m\r\n`);
+                }
+            }
 
             try {
                 console.log("Fetching WASM from ./try/kabibi.wasm");
@@ -1211,6 +2229,45 @@
             } catch (err) {
                 console.error(err);
                 term.write(`\r\nFailed to load kabibi: ${err.message}\r\n`);
+            }
+        }
+
+        // Phase 3 Initialization Function
+        async function initializePhase3() {
+            console.log('[Phase 3] Initializing Phase 3 components...');
+            
+            try {
+                // Create Phase 3 components
+                multiModelManager = new MultiModelManager();
+                advancedTokenStreamer = new AdvancedTokenStreamer();
+                memoryOptimizer = new MemoryOptimizer();
+                cacheUI = new CacheManagementUI();
+                uiEnhancements = new UIEnhancements();
+                
+                // Load model catalog
+                multiModelManager.loadDefaultCatalog();
+                
+                // Initialize batch processor if engine is ready
+                if (engineManager) {
+                    batchInferenceProcessor = new BatchInferenceProcessor(engineManager, 2);
+                }
+                
+                // Start memory monitoring
+                await memoryOptimizer.startMonitoring();
+                
+                // Mount cache UI
+                const cacheContainer = document.getElementById('cache-container');
+                if (cacheContainer) {
+                    cacheUI.mount('cache-container');
+                }
+                
+                // Setup UI enhancements
+                await uiEnhancements.initUI();
+                
+                console.log('[Phase 3] ✅ Phase 3 ready!');
+                window.dispatchEvent(new CustomEvent('phase3Ready'));
+            } catch (e) {
+                console.error('[Phase 3] Initialization failed:', e);
             }
         }
 
