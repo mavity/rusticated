@@ -303,6 +303,9 @@
 
         // --- WASM Host Implementation ---
         async function initTerminalAndWasm() {
+
+            let modelStore, fetcher, engineManager, callbackStreamer;
+
             console.log("initTerminalAndWasm START");
             const term = new Terminal({
                 cursorBlink: true,
@@ -323,11 +326,15 @@
             });
 
             term.write('Connecting to kabibi WASM...\r\n');
+            console.log('[TRACE] After terminal creation');
 
             // Refactored host state
             const fs = new IndexedDBFS();
+            console.log('[TRACE] IndexedDBFS created');
             await fs.init();
+            console.log('[TRACE] fs.init() completed');
             await fs.seed();
+            console.log('[TRACE] fs.seed() completed');
 
             const hostState = {
                 memory: null,
@@ -365,6 +372,55 @@
                     handle = BigInt(handle);
                     
                     const h = this.handles.get(handle);
+                    if (h && h.type === 'proxy') {
+                        console.log('[PROXY-WRITE] Received data, bytes:', len);
+                        const chunk = new Uint8Array(this.memory.buffer, ptr, len).slice();
+                        h.requestBytes.push(...chunk);
+                        h.requestText += decoder.decode(chunk);
+
+                        if (!h.requestComplete && h.requestText.includes('\r\n\r\n')) {
+                            h.requestComplete = true;
+                            const firstLine = h.requestText.split('\r\n', 1)[0] || '';
+                            const parts = firstLine.split(' ');
+                            h.requestUrl = parts.length >= 2 ? parts[1] : '';
+                            if (!h.preparing) {
+                                h.preparing = true;
+                                (async () => {
+                                    try {
+                                        const requestUrl = h.requestUrl || WEB_MODEL_URL;
+                                        const modelBytes = await httpProxyShim.handleModelRequest(requestUrl, 0, (progress) => {
+                                            console.log('[Proxy] Model progress:', progress);
+                                        });
+                                        // Create header with actual model size
+                                        const modelSize = modelBytes.length;
+                                        const header = encoder.encode(
+                                            'HTTP/1.1 200 OK\r\n' +
+                                            'Content-Type: application/octet-stream\r\n' +
+                                            'Content-Length: ' + modelSize + '\r\n' +
+                                            'Connection: close\r\n\r\n'
+                                        );
+                                        // Store header only, track body size separately (don't allocate huge array)
+                                        h.responseBytes = header;
+                                        h.responseBodySize = modelSize;  // Track remaining body bytes
+                                        h.responseOffset = 0;
+                                        this.flushProxyReads(handle);
+                                    } catch (err) {
+                                        const response = encoder.encode(
+                                            'HTTP/1.1 502 Bad Gateway\r\n' +
+                                            'Content-Length: 0\r\n' +
+                                            'Connection: close\r\n\r\n'
+                                        );
+                                        h.responseBytes = response;
+                                        h.responseBodySize = 0;
+                                        h.responseOffset = 0;
+                                        this.flushProxyReads(handle);
+                                        console.error('[Proxy] Failed preparing response:', err);
+                                    }
+                                })();
+                            }
+                        }
+                    }
+
                     if (h && (h.type === 'stdout' || h.type === 'stderr' || h.type === 'tty')) {
                         if (len > 0) {
                             const bytes = new Uint8Array(this.memory.buffer, ptr, len).slice();
@@ -395,6 +451,40 @@
                     handle = BigInt(handle);
                     
                     const h = this.handles.get(handle);
+                    if (h && h.type === 'proxy') {
+                        const view = new DataView(this.memory.buffer);
+                        const headerLen = h.responseBytes ? h.responseBytes.length : 0;
+                        const bodySize = h.responseBodySize || 0;
+                        const totalSize = headerLen + bodySize;
+                        
+                        if (h.responseBytes && h.responseOffset < totalSize) {
+                            let toRead = 0;
+                            let buf = new Uint8Array(this.memory.buffer, ptr, len);
+                            
+                            if (h.responseOffset < headerLen) {
+                                // Reading from header
+                                const headerRemaining = headerLen - h.responseOffset;
+                                toRead = Math.min(len, headerRemaining);
+                                buf.set(h.responseBytes.subarray(h.responseOffset, h.responseOffset + toRead));
+                                h.responseOffset += toRead;
+                            } else {
+                                // Reading from body (generate zeroes on-the-fly)
+                                const bodyRemaining = totalSize - h.responseOffset;
+                                toRead = Math.min(len, bodyRemaining);
+                                buf.set(new Uint8Array(toRead));  // Uint8Array with single size arg = zero-filled
+                                h.responseOffset += toRead;
+                            }
+                            
+                            view.setUint32(ovPtr, 1, true);
+                            view.setUint32(ovPtr + 4, 0, true);
+                            view.setBigUint64(ovPtr + 8, 0n, true);
+                            view.setBigUint64(ovPtr + 16, BigInt(toRead), true);
+                            return 0;
+                        }
+                        h.pendingReads.push({ ovPtr, ptr, len });
+                        return 0;
+                    }
+
                     if (h && (h.type === 'stdin' || h.type === 'tty')) {
                         if (this.stdinBuffer.length > 0) {
                             const toRead = Math.min(len, this.stdinBuffer.length);
@@ -428,6 +518,40 @@
                     }
                     return 0;
                 },
+                flushProxyReads: function(handle) {
+                    if (!this.memory) return;
+                    const h = this.handles.get(BigInt(handle));
+                    if (!h || h.type !== 'proxy' || !h.responseBytes) return;
+                    const view = new DataView(this.memory.buffer);
+                    const headerLen = h.responseBytes.length;
+                    const bodySize = h.responseBodySize || 0;
+                    const totalSize = headerLen + bodySize;
+                    
+                    while (h.pendingReads.length > 0 && h.responseOffset < totalSize) {
+                        const { ovPtr, ptr, len } = h.pendingReads.shift();
+                        let toRead = 0;
+                        const buf = new Uint8Array(this.memory.buffer, ptr, len);
+                        
+                        if (h.responseOffset < headerLen) {
+                            // Reading from header
+                            const headerRemaining = headerLen - h.responseOffset;
+                            toRead = Math.min(len, headerRemaining);
+                            buf.set(h.responseBytes.subarray(h.responseOffset, h.responseOffset + toRead));
+                            h.responseOffset += toRead;
+                        } else {
+                            // Reading from body (generate zeroes on-the-fly)
+                            const bodyRemaining = totalSize - h.responseOffset;
+                            toRead = Math.min(len, bodyRemaining);
+                            buf.set(new Uint8Array(toRead));  // Zero-filled array
+                            h.responseOffset += toRead;
+                        }
+                        
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 0, true);
+                        view.setBigUint64(ovPtr + 8, 0n, true);
+                        view.setBigUint64(ovPtr + 16, BigInt(toRead), true);
+                    }
+                },
                 pushStdin: function(data) {
                     if (typeof data === 'string') {
                         const encoded = encoder.encode(data);
@@ -460,6 +584,23 @@
                         console.log(`processPendingReads: completed ${completedCount} reads`);
                     }
                 },
+                flushProxyReads: function(handle) {
+                    if (!this.memory) return;
+                    const h = this.handles.get(BigInt(handle));
+                    if (!h || h.type !== 'proxy' || !h.responseBytes) return;
+                    const view = new DataView(this.memory.buffer);
+                    while (h.pendingReads.length > 0 && h.responseOffset < h.responseBytes.length) {
+                        const { ovPtr, ptr, len } = h.pendingReads.shift();
+                        const toRead = Math.min(len, h.responseBytes.length - h.responseOffset);
+                        const buf = new Uint8Array(this.memory.buffer, ptr, toRead);
+                        buf.set(h.responseBytes.subarray(h.responseOffset, h.responseOffset + toRead));
+                        h.responseOffset += toRead;
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 0, true);
+                        view.setBigUint64(ovPtr + 8, 0n, true);
+                        view.setBigUint64(ovPtr + 16, BigInt(toRead), true);
+                    }
+                },
                 triggerSignal: function(signum) {
                     if (!this.memory) return;
                     const remaining = [];
@@ -486,6 +627,8 @@
                 }
             };
             window.hostState = hostState;
+            console.log('[TRACE] hostState assigned to window');
+            console.log('[TRACE] About to define resolvePath function');
 
             const resolvePath = (inputPath) => {
                 const raw = String(inputPath || '').replace(/\0.*/, '');
@@ -515,7 +658,14 @@
                 return path.slice(0, idx);
             };
 
-            term.onData(data => hostState.pushStdin(data));
+            const armBootstrap = () => {
+                browserAssetState.bootstrapArmed = true;
+            };
+
+            term.onData(data => {
+                armBootstrap();
+                hostState.pushStdin(data);
+            });
 
             // Define the "env" module expected by rusticated/washmhost guest binaries
             const env = {
@@ -659,14 +809,6 @@
                     let path = resolvePath(rawPath);
                     console.log("PATH_OPEN:", path, flags);
                     
-                    // Trigger lazy bootstrap on first cache directory access
-                    if (path.includes('.cache/kabibi') && !browserAssetState.bootstrapComplete && !browserAssetState.bootstrapStarted) {
-                        console.log('[Bootstrap] Triggered by path_open access to cache directory');
-                        bootstrapBrowserAssets(fs).catch(err => {
-                            console.error('[Bootstrap] Failed during lazy trigger:', err);
-                        });
-                    }
-                    
                     ovPtr = Number(ovPtr);
                     const view = new DataView(hostState.memory.buffer);
                     const oflags = Number(flags);
@@ -714,6 +856,9 @@
                         view.setBigUint64(ovPtr + 16, handle, true);
                         return 0;
                     }
+
+                    // Special handling for model file writes (discard writes of downloaded zeroes)
+                    const isModelFile = path.includes('litert_cache') && path.endsWith('.litertlm');
 
                     if (!entry) {
                         if (createFlag || createNewFlag) {
@@ -781,6 +926,13 @@
                     console.log("DIR_READ:", { handle, bufLen, dirOffset: hostState.handles.get(handle)?.dirOffset });
                     const view = new DataView(hostState.memory.buffer);
                     const h = hostState.handles.get(handle);
+
+                    if (browserAssetState.bootstrapArmed && h && h.entry && h.entry.path.endsWith('/.cache/kabibi/litert_cache') && !browserAssetState.bootstrapComplete && !browserAssetState.bootstrapStarted) {
+                        console.log('[Bootstrap] Triggered by dir_read access to cache directory');
+                        bootstrapBrowserAssets(fs).catch(err => {
+                            console.error('[Bootstrap] Failed during lazy trigger:', err);
+                        });
+                    }
 
                     if (!h || h.type !== 'dir') {
                         view.setUint32(ovPtr, 1, true);
@@ -852,14 +1004,6 @@
                 },
                 path_stat: (ovPtr, pathPtr, pathLen, flags, outPtr, outLen) => {
                     const path = resolvePath(decoder.decode(new Uint8Array(hostState.memory.buffer, Number(pathPtr), Number(pathLen))));
-                    
-                    // Trigger lazy bootstrap on first cache directory access
-                    if (path.includes('.cache/kabibi') && !browserAssetState.bootstrapComplete && !browserAssetState.bootstrapStarted) {
-                        console.log('[Bootstrap] Triggered by path_stat access to cache directory');
-                        bootstrapBrowserAssets(fs).catch(err => {
-                            console.error('[Bootstrap] Failed during lazy trigger:', err);
-                        });
-                    }
                     ovPtr = Number(ovPtr);
                     outPtr = Number(outPtr);
                     const view = new DataView(hostState.memory.buffer);
@@ -918,94 +1062,89 @@
                     fs.entries.delete(path);
         
             // === IndexedDB Model Persistence (Phase 2) ===
-            class IndexedDBModelStore {
-                constructor(dbName = 'KabiBiModelCache') {
-                    this.dbName = dbName;
-                    this.db = null;
+            // === Cache API Model Store (Modern Persistent Storage) ===
+            class CacheAPIModelStore {
+                constructor(cacheName = 'kabibi-web-models-v1') {
+                    this.cacheName = cacheName;
+                    this.modelUrl = 'https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it-web.litertlm';
                 }
 
                 async init() {
-                    return new Promise((resolve, reject) => {
-                        const request = indexedDB.open(this.dbName, 2);
-                        request.onupgradeneeded = (e) => {
-                            const db = e.target.result;
-                            if (!db.objectStoreNames.contains('models')) {
-                                const store = db.createObjectStore('models', { keyPath: 'url' });
-                                store.createIndex('timestamp', 'timestamp', { unique: false });
-                            }
-                        };
-                        request.onsuccess = (e) => {
-                            this.db = e.target.result;
-                            resolve();
-                        };
-                        request.onerror = (e) => reject(e.target.error);
-                    });
+                    if (!window.caches) {
+                        console.warn('[ModelStore] Cache API not available');
+                        return false;
+                    }
+                    return true;
+                }
+
+                async checkCached() {
+                    if (!window.caches) return null;
+                    try {
+                        const cache = await caches.open(this.cacheName);
+                        const response = await cache.match(this.modelUrl);
+                        if (response) {
+                            console.log('[ModelStore] Model found in Cache API');
+                            return response;
+                        }
+                    } catch (e) {
+                        console.error('[ModelStore] Error checking cache:', e);
+                    }
+                    return null;
                 }
 
                 async saveModel(url, bytes, metadata = {}) {
-                    if (!this.db) await this.init();
-                    const hash = await this.computeHash(bytes);
-                    return new Promise((resolve, reject) => {
-                        const tx = this.db.transaction('models', 'readwrite');
-                        const store = tx.objectStore('models');
-                        const record = {
-                            url,
-                            bytes,
-                            timestamp: Date.now(),
-                            size: bytes.length,
-                            hash,
-                            ...metadata
-                        };
-                        const req = store.put(record);
-                        req.onsuccess = () => {
-                            console.log('[ModelStore] Saved model:', url, '(' + (bytes.length / 1024 / 1024).toFixed(1) + ' MB)');
-                            resolve(record);
-                        };
-                        req.onerror = () => reject(req.error);
-                    });
+                    if (!window.caches) {
+                        console.warn('[ModelStore] Cache API not available for save');
+                        return null;
+                    }
+                    try {
+                        const cache = await caches.open(this.cacheName);
+                        const blob = new Blob([bytes]);
+                        const response = new Response(blob, {
+                            status: 200,
+                            headers: {
+                                'Content-Length': bytes.length.toString(),
+                                'Content-Type': 'application/octet-stream'
+                            }
+                        });
+                        await cache.put(url, response);
+                        console.log('[ModelStore] Saved model to Cache API:', (bytes.length / 1024 / 1024).toFixed(1), 'MB');
+                        return { url, size: bytes.length, timestamp: Date.now(), ...metadata };
+                    } catch (e) {
+                        console.error('[ModelStore] Error saving model:', e);
+                        return null;
+                    }
                 }
 
                 async loadModel(url) {
-                    if (!this.db) await this.init();
-                    return new Promise((resolve, reject) => {
-                        const tx = this.db.transaction('models', 'readonly');
-                        const store = tx.objectStore('models');
-                        const req = store.get(url);
-                        req.onsuccess = () => {
-                            if (req.result) {
-                                console.log('[ModelStore] Loaded model from cache:', url);
-                                resolve(req.result);
-                            } else {
-                                resolve(null);
-                            }
-                        };
-                        req.onerror = () => reject(req.error);
-                    });
+                    if (!window.caches) return null;
+                    try {
+                        const cache = await caches.open(this.cacheName);
+                        const response = await cache.match(url);
+                        if (response) {
+                            const bytes = new Uint8Array(await response.arrayBuffer());
+                            console.log('[ModelStore] Loaded model from Cache API:', (bytes.length / 1024 / 1024).toFixed(1), 'MB');
+                            return { bytes, size: bytes.length, url, timestamp: Date.now() };
+                        }
+                    } catch (e) {
+                        console.error('[ModelStore] Error loading model:', e);
+                    }
+                    return null;
                 }
 
                 async isModelCached(url) {
-                    const model = await this.loadModel(url);
+                    const model = await this.checkCached();
                     return model !== null;
                 }
 
                 async clearCache() {
-                    if (!this.db) await this.init();
-                    return new Promise((resolve, reject) => {
-                        const tx = this.db.transaction('models', 'readwrite');
-                        const store = tx.objectStore('models');
-                        const req = store.clear();
-                        req.onsuccess = () => {
-                            console.log('[ModelStore] Cache cleared');
-                            resolve();
-                        };
-                        req.onerror = () => reject(req.error);
-                    });
-                }
-
-                async computeHash(bytes) {
-                    const hashBuffer = await crypto.subtle.digest('SHA-256', bytes);
-                    const hashArray = Array.from(new Uint8Array(hashBuffer));
-                    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+                    if (!window.caches) return;
+                    try {
+                        await caches.delete(this.cacheName);
+                        console.log('[ModelStore] Cache API cleared');
+                    } catch (e) {
+                        console.error('[ModelStore] Error clearing cache:', e);
+                    }
                 }
             }
 
@@ -1578,16 +1717,27 @@
                 }
             }
 
+            console.log('[TRACE] About to start Phase 2 initialization');
             // Initialize Phase 2 components
-            const modelStore = new IndexedDBModelStore();
-            const fetcher = new RobustHTTPFetcher(3);
-            let engineManager = new LiteRTEngineManager();
-            const callbackStreamer = new CallbackStreamer();
-            
-            // Phase 2 Pre-Initialization
-            // Initialize model store for persistent caching
-            modelStore.init().catch(err => console.warn('[Phase 2] ModelStore init warning:', err));
-            console.log('[Phase 2] Model persistence layer ready');
+            console.log('[TRACE] Before Phase 2 try block');
+            try {
+                modelStore = new CacheAPIModelStore();
+                console.log('[TRACE] CacheAPIModelStore created');
+                fetcher = new RobustHTTPFetcher(3);
+                console.log('[TRACE] RobustHTTPFetcher created, fetcher:', typeof fetcher);
+                engineManager = new LiteRTEngineManager();
+                console.log('[TRACE] LiteRTEngineManager created');
+                callbackStreamer = new CallbackStreamer();
+                console.log('[TRACE] CallbackStreamer created');
+                
+                // Phase 2 Pre-Initialization
+                // Initialize model store for persistent caching
+                modelStore.init().catch(err => console.warn('[Phase 2] ModelStore init warning:', err));
+                console.log('[Phase 2] Model persistence layer ready');
+            } catch (phaseErr) {
+                console.error('[Phase 2] Initialization failed:', phaseErr.message, phaseErr.stack);
+                throw phaseErr;
+            }
             
             // Phase 3 components (global)
             let multiModelManager = null;
@@ -1644,8 +1794,46 @@
                     view.setUint32(ovPtr + 4, 0, true);
                     return 0;
                 },
-                net_open: (...args) => 0,
-                net_accept: (...args) => 0,
+                net_open: (ovPtr, addrPtr, addrLen, port, flags) => {
+                    ovPtr = Number(ovPtr);
+                    addrPtr = Number(addrPtr);
+                    addrLen = Number(addrLen);
+                    port = Number(port);
+                    const view = new DataView(hostState.memory.buffer);
+                    const addr = decoder.decode(new Uint8Array(hostState.memory.buffer, addrPtr, addrLen)).replace(/\0.*/, '');
+
+                    if ((addr === '127.0.0.1' || addr === 'localhost') && port === 8888) {
+                        const handle = hostState.nextHandle++;
+                        hostState.handles.set(handle, {
+                            type: 'proxy',
+                            addr,
+                            port,
+                            requestBytes: [],
+                            requestText: '',
+                            requestComplete: false,
+                            responseBytes: null,
+                            responseOffset: 0,
+                            pendingReads: [],
+                            preparing: false,
+                            requestUrl: ''
+                        });
+                        view.setUint32(ovPtr, 1, true);
+                        view.setUint32(ovPtr + 4, 0, true);
+                        view.setBigUint64(ovPtr + 16, handle, true);
+                        return 0;
+                    }
+
+                    view.setUint32(ovPtr, 1, true);
+                    view.setUint32(ovPtr + 4, 111, true); // ECONNREFUSED
+                    return 0;
+                },
+                net_accept: (ovPtr) => {
+                    ovPtr = Number(ovPtr);
+                    const view = new DataView(hostState.memory.buffer);
+                    view.setUint32(ovPtr, 1, true);
+                    view.setUint32(ovPtr + 4, 38, true); // ENOSYS
+                    return 0;
+                },
                 net_lookup: (ovPtr, namePtr, nameLen, bufPtr, bufLen) => {
                     const view = new DataView(hostState.memory.buffer);
                     ovPtr = Number(ovPtr);
@@ -1723,13 +1911,9 @@
                         return 0;
                     }
 
+                    // Queue the wait - only trigger for real events (SIGWINCH, SIGCHLD)
+                    // Don't auto-trigger spurious signals (2, 15, 27) on poll
                     hostState.pendingSignals.push({ ovPtr, signum });
-
-                    // Complete on the next macrotask so the browser gets a chance
-                    // to render/input between guest polling iterations.
-                    setTimeout(() => {
-                        hostState.triggerSignal(signum);
-                    }, 0);
                     return 0;
                 },
                 dylib_open: (ovPtr, pathPtr, pathLen, flags) => {
@@ -2152,10 +2336,11 @@
 
             // === HTTP Proxy Shim for Model Downloads ===
             class HTTPProxyShim {
-                constructor() {
+                constructor(fetcher) {
+                    this.fetcher = fetcher;
                     this.webModelCache = new Map();
                     this.downloadsInProgress = new Map();
-                    console.log('[HTTPProxyShim] Initialized');
+                    console.log('[HTTPProxyShim] Initialized with fetcher');
                 }
 
                 async handleModelRequest(url, desiredSize, onProgress) {
@@ -2196,7 +2381,7 @@
 
                     try {
                         // Use RobustHTTPFetcher for retries
-                        const modelBytes = await fetcher.fetchWithProgress(webModelUrl, onProgress);
+                        const modelBytes = await this.fetcher.fetchWithProgress(webModelUrl, onProgress);
                         console.log('[HTTPProxyShim] Downloaded:', (modelBytes.length / 1024 / 1024).toFixed(1), 'MB');
                         return modelBytes;
                     } catch (err) {
@@ -2225,12 +2410,99 @@
             const browserAssetState = {
                 bootstrapStarted: false,
                 bootstrapComplete: false,
+                bootstrapArmed: false,
+                webModelFromCache: false,
+                webModelBytes: null,
                 lastError: null,
                 modelCache: {},
                 progress: new Map() // Track progress for each asset
             };
 
-            const httpProxyShim = new HTTPProxyShim();
+            console.log('[DEBUG] About to create HTTPProxyShim with fetcher:', typeof fetcher);
+            const httpProxyShim = new HTTPProxyShim(fetcher);
+            console.log('[DEBUG] HTTPProxyShim created successfully');
+
+            // === Browser Debug Helpers ===
+            window._debug_term = {
+                term,
+                hostState,
+                browserAssetState,
+                command: async (cmd) => {
+                    if (!term) return 'Terminal not ready';
+                    term.write(cmd + '\r\n');
+                    // Send input to WASM via stdin with proper line ending
+                    hostState.pushStdin(cmd + '\r\n');
+                    return `Sent: ${cmd}`;
+                },
+                send: (text) => {
+                    if (!term) return 'Terminal not ready';
+                    term.write(text + '\r\n');
+                    hostState.pushStdin(text + '\r\n');
+                    return `Sent: ${text}`;
+                },
+                type: (text) => {
+                    if (!term) return 'Terminal not ready';
+                    term.write(text);
+                    hostState.pushStdin(text);
+                    return `Typed: ${text}`;
+                },
+                pressEnter: () => {
+                    term.write('\r\n');
+                    hostState.pushStdin('\r\n');
+                    return 'Enter pressed';
+                },
+                getOutput: () => {
+                    if (!term) return 'Terminal not ready';
+                    try {
+                        const lines = [];
+                        const buffer = term.buffer.active;
+                        if (buffer && buffer.length) {
+                            for (let y = 0; y < Math.min(buffer.length, 100); y++) {
+                                let line = '';
+                                const lineData = buffer.getLine(y);
+                                if (lineData) {
+                                    for (let x = 0; x < lineData.length; x++) {
+                                        const cell = lineData.getCell(x);
+                                        if (cell) {
+                                            line += cell.getChars && cell.getChars() ? cell.getChars() : cell.char || ' ';
+                                        } else {
+                                            line += ' ';
+                                        }
+                                    }
+                                }
+                                lines.push(line.trimEnd());
+                            }
+                        }
+                        return lines.join('\n');
+                    } catch (e) {
+                        // Fallback: try to extract from DOM
+                        try {
+                            const rows = term.element?.querySelectorAll('.xterm-row');
+                            const output = [];
+                            if (rows) {
+                                for (const row of rows) {
+                                    output.push(row.textContent || '');
+                                }
+                            }
+                            return output.join('\n');
+                        } catch (e2) {
+                            return `Terminal output unavailable: ${e.message}`;
+                        }
+                    }
+                },
+                getBootstrapState: () => {
+                    return {
+                        bootstrapStarted: browserAssetState.bootstrapStarted,
+                        bootstrapComplete: browserAssetState.bootstrapComplete,
+                        webModelFromCache: browserAssetState.webModelFromCache,
+                        webModelBytesSize: browserAssetState.webModelBytes?.length || 0,
+                        lastError: browserAssetState.lastError?.message || null,
+                        timestamp: Date.now()
+                    };
+                },
+                getTerminal: () => term,
+                getHostState: () => hostState
+            };
 
             // === Browser Asset Helpers ===
             function setBrowserAssetProgress(wasmFS, assetName, percent, message) {
@@ -2266,22 +2538,72 @@
                 console.log('[Bootstrap] Cache structure ready');
             }
 
-            async function seedDesktopArtifactMetadata(fs, gemmaWebBytes) {
-                console.log(`[Bootstrap] Seeding desktop artifact metadata (model size: ${gemmaWebBytes.length} bytes)...`);
+            async function seedDesktopArtifactMetadata(fs, gemmaWebBytesSize, hasModelCached) {
+                console.log(`[Bootstrap] Seeding desktop artifact metadata...`);
                 await ensureGuestCacheStructure(fs);
 
-                // Create fake wheel extraction directory entry
-                // Guest expects this file to exist and checks its size
-                // We store minimal placeholder content but report the actual model size
+                // === UNCONDITIONAL SEEDING ===
+                // Always seed wheel file with fake content (small, reports actual content size)
                 const wheelExtractPath = '/home/user/.cache/kabibi/wheels_extracted/pytorch_model.bin';
-                ensureFileEntry(fs, wheelExtractPath, 'fake-wheel-content', 0o644, Date.now() - 1000, gemmaWebBytes.length);
+                ensureFileEntry(fs, wheelExtractPath, 'fake-wheel', 0o644, Date.now() - 1000);
+                // Note: reportedSize omitted - will report actual content size (small placeholder)
 
-                // Create fake .so entry (minimal content, reported model size)
+                // Always seed .so file with fake content (small, reports actual content size)
                 const soPath = '/home/user/.cache/kabibi/litert_lm_ext.so';
-                ensureFileEntry(fs, soPath, 'fake-so-content', 0o755, Date.now(), gemmaWebBytes.length);
+                ensureFileEntry(fs, soPath, 'fake-so', 0o755, Date.now());
+                // Note: reportedSize omitted - will report actual content size (small placeholder)
 
-                console.log(`[Bootstrap] Desktop artifacts seeded with reported size: ${gemmaWebBytes.length} bytes`);
+                // === CONDITIONAL SEEDING ===
+                // Only seed model file if web model is cached
+                if (hasModelCached) {
+                    const modelPath = '/home/user/.cache/kabibi/litert_cache/gemma-4-E4B-it-web.litertlm';
+                    ensureFileEntry(fs, modelPath, 'fake-model-zeros', 0o644, Date.now(), gemmaWebBytesSize);
+                    console.log(`[Bootstrap] Model file seeded (cached): ${modelPath}, reported size: ${gemmaWebBytesSize} bytes`);
+                } else {
+                    console.log(`[Bootstrap] Model file NOT seeded (cache miss - guest must download)`);
+                }
+
+                console.log(`[Bootstrap] Desktop artifacts seeded successfully`);
             }
+
+            // === Cache API Model Store for Bootstrap ===
+            const CACHE_NAME = 'kabibi-web-models-v1';
+            const WEB_MODEL_URL = 'https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it-web.litertlm';
+
+            modelStore = {
+                cacheName: CACHE_NAME,
+                modelUrl: WEB_MODEL_URL,
+
+                async checkCached() {
+                    if (!window.caches) return null;
+                    try {
+                        const cache = await caches.open(this.cacheName);
+                        const response = await cache.match(this.modelUrl);
+                        return response ? response.clone() : null;
+                    } catch (e) {
+                        if (DEBUG) console.error('[ModelStore] Error checking cache:', e);
+                        return null;
+                    }
+                },
+
+                async saveModel(bytes) {
+                    if (!window.caches) return false;
+                    try {
+                        const cache = await caches.open(this.cacheName);
+                        const blob = new Blob([bytes]);
+                        const response = new Response(blob, {
+                            status: 200,
+                            headers: { 'Content-Length': bytes.length.toString() }
+                        });
+                        await cache.put(this.modelUrl, response);
+                        if (DEBUG) console.log('[ModelStore] Saved', (bytes.length / 1024 / 1024).toFixed(1), 'MB to cache');
+                        return true;
+                    } catch (e) {
+                        if (DEBUG) console.error('[ModelStore] Error saving model:', e);
+                        return false;
+                    }
+                }
+            };
 
             async function bootstrapBrowserAssets(wasmFS) {
                 if (browserAssetState.bootstrapStarted) {
@@ -2291,63 +2613,41 @@
                 browserAssetState.bootstrapStarted = true;
 
                 try {
-                    console.log('[Bootstrap] Starting three-stage bootstrap...');
+                    console.log('[Bootstrap] Starting lazy bootstrap...');
 
-                    // === STAGE 1: LiteRT Runtime ===
-                    console.log('[Bootstrap] Stage 1: Initializing LiteRT runtime from CDN');
-                    setBrowserAssetProgress(wasmFS, 'litertlm', 50, 'Loading Engine from CDN...');
-                    // Note: Full Engine load deferred until we have model bytes in Stage 3
-                    // This stage ensures CDN import is available
-                    setBrowserAssetProgress(wasmFS, 'litertlm', 100, 'Runtime ready');
+                    // === STAGE 1: Initialize LiteRT Runtime (Async, no download) ===
+                    console.log('[Bootstrap] Stage 1: Initializing LiteRT web library');
+                    // Asynchronously load litertlm-web JS library (no wait)
+                    // This allows guest to continue while initialization happens
 
-                    // === STAGE 2: Gemma Model Cache ===
-                    console.log('[Bootstrap] Stage 2: Ensuring Gemma web model cached');
-                    setBrowserAssetProgress(wasmFS, 'gemma', 0, 'Checking cache...');
+                    // === STAGE 2: Check Cache (No Download on Cache Miss!) ===
+                    console.log('[Bootstrap] Stage 2: Checking Cache API for model');
+                    let hasModelCached = false;
+                    let modelBytesSize = 0;
 
-                    // Check if model is in persistent cache first
-                    const modelUrl = 'https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it-web.litertlm';
-                    let gemmaWebBytes = null;
-
-                    const cachedModel = await modelStore.loadModel(modelUrl);
-                    if (cachedModel) {
-                        console.log('[Bootstrap] Model found in persistent cache');
-                        gemmaWebBytes = cachedModel.bytes;
-                        setBrowserAssetProgress(wasmFS, 'gemma', 100, 'Loaded from cache');
+                    const cachedResponse = await modelStore.checkCached();
+                    if (cachedResponse) {
+                        console.log('[Bootstrap] Model found in Cache API');
+                        hasModelCached = true;
+                        try {
+                            const cachedBytes = new Uint8Array(await cachedResponse.arrayBuffer());
+                            modelBytesSize = cachedBytes.length;
+                            browserAssetState.webModelFromCache = true;
+                            browserAssetState.webModelBytes = cachedBytes;
+                            console.log('[Bootstrap] Model size:', (modelBytesSize / 1024 / 1024).toFixed(1), 'MB');
+                        } catch (e) {
+                            console.error('[Bootstrap] Error reading cached model:', e);
+                        }
                     } else {
-                        console.log('[Bootstrap] Model not in cache, downloading...');
-                        gemmaWebBytes = await httpProxyShim.handleModelRequest(
-                            modelUrl,
-                            undefined,
-                            (progress) => {
-                                const percent = Math.max(1, Math.min(99, progress.percent));
-                                setBrowserAssetProgress(wasmFS, 'gemma', percent, `Downloading: ${percent}%`);
-                            }
-                        );
-                        // Save to persistent cache
-                        await modelStore.saveModel(modelUrl, gemmaWebBytes, { name: 'gemma-4-E4B-it-web' });
-                        setBrowserAssetProgress(wasmFS, 'gemma', 100, 'Cached & Ready');
+                        console.log('[Bootstrap] Model NOT in Cache API (guest will download via HTTP interception)');
                     }
-                    setBrowserAssetProgress(wasmFS, 'gemma', 100, 'Cached');
 
-                    // === STAGE 3: Initialize Engine with Model ===
-                    console.log('[Bootstrap] Stage 3: Initializing LiteRT Engine with Gemma model');
-                    setBrowserAssetProgress(wasmFS, 'engine', 50, 'Initializing engine...');
-                    await engineManager.initialize(gemmaWebBytes);
-                    setBrowserAssetProgress(wasmFS, 'engine', 100, 'Engine ready');
-
-                    // === STAGE 4: Seed Guest FS ===
-                    console.log('[Bootstrap] Stage 4: Seeding guest filesystem with metadata');
-                    setBrowserAssetProgress(wasmFS, 'fs', 50, 'Seeding FS...');
-                    await seedDesktopArtifactMetadata(wasmFS, gemmaWebBytes);
-                    setBrowserAssetProgress(wasmFS, 'fs', 100, 'Complete');
+                    // === STAGE 3: Seed Guest Filesystem ===
+                    console.log('[Bootstrap] Stage 3: Seeding guest filesystem metadata');
+                    await seedDesktopArtifactMetadata(wasmFS, modelBytesSize, hasModelCached);
 
                     browserAssetState.bootstrapComplete = true;
-                    
-                    // === PHASE 3: Initialize Multi-Model & Advanced Features ===
-                    console.log('[Phase 3] Initializing advanced features...');
-                    await initializePhase3();
-                    
-                    console.log('[Bootstrap] Completed successfully');
+                    console.log('[Bootstrap] Completed - guest ready');
                 } catch (err) {
                     browserAssetState.lastError = err;
                     console.error('[Bootstrap] Failed:', err);
