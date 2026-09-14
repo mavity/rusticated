@@ -622,15 +622,12 @@ func Getwd() (string, error) {
 		return "", errnoErr(Errno(errno))
 	}
 	n := uint32(packed & 0xFFFFFFFF)
-	if n == 0 {
-		pi := GetPlatformInfo()
-		if pi.PathSeparator == '\\' {
-			return "C:\\", nil
-		}
-		return "/", nil
-	}
 	buf := make([]byte, n)
-	rusticated_get_cwd(&buf[0], n)
+	packed = rusticated_get_cwd(&buf[0], n)
+	errno = uint32(packed >> 32)
+	if errno != 0 {
+		return "", errnoErr(Errno(errno))
+	}
 	runtime.KeepAlive(buf)
 	return string(buf[:n]), nil
 }

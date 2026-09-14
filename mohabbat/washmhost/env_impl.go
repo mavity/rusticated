@@ -5,7 +5,9 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -143,6 +145,7 @@ type HostEnv struct {
 	args           []string
 	owningGID      uint64
 	mod            api.Module
+	cwd            string
 	dylibRegistry  *DylibSatelliteRegistry
 	dylibMgr       *DylibHostManager
 	nextDylibID    uint64
@@ -177,6 +180,11 @@ func NewHostEnv() *HostEnv {
 		nextDylibID:    1,
 		dylibLibraries: make(map[uint64]dylibLibraryRef),
 		dylibSymbols:   make(map[uint64]dylibSymbolRef),
+	}
+	if cwd, err := resolveUsableCwd(); err == nil {
+		env.cwd = cwd
+	} else {
+		env.cwd = "/"
 	}
 	env.dylibRegistry = NewDylibSatelliteRegistry(env)
 	env.dylibMgr = NewDylibHostManager(env)
@@ -239,6 +247,60 @@ func (h *HostEnv) Close() {
 	if h.dylibRegistry != nil {
 		h.dylibRegistry.Close()
 	}
+}
+
+func (h *HostEnv) currentCwd() string {
+	h.mu.Lock()
+	cwd := h.cwd
+	h.mu.Unlock()
+	if cwd != "" {
+		return cwd
+	}
+	if base, err := resolveUsableCwd(); err == nil && base != "" {
+		h.mu.Lock()
+		h.cwd = base
+		h.mu.Unlock()
+		return base
+	}
+	return "/"
+}
+
+func (h *HostEnv) resolveGuestPathForHost(p string) string {
+	trimmed := strings.TrimSpace(p)
+	if trimmed == "" {
+		return h.currentCwd()
+	}
+	converted := normaliseGuestPathForHost(trimmed)
+	if converted == "" {
+		return h.currentCwd()
+	}
+	if filepath.IsAbs(converted) {
+		return filepath.Clean(converted)
+	}
+	base := h.currentCwd()
+	if base == "" {
+		base = "/"
+	}
+	return filepath.Clean(filepath.Join(base, converted))
+}
+
+func (h *HostEnv) setCwd(p string) error {
+	trimmed := strings.TrimSpace(p)
+	if trimmed == "" {
+		return os.ErrInvalid
+	}
+	resolved := h.resolveGuestPathForHost(trimmed)
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return syscall.ENOTDIR
+	}
+	h.mu.Lock()
+	h.cwd = filepath.Clean(resolved)
+	h.mu.Unlock()
+	return nil
 }
 
 func (h *HostEnv) notifySignal(signum uint32) {

@@ -186,31 +186,16 @@ func mapErrno(err error) uint32 {
 	return wasiEIO
 }
 
-func guestCwdOverride() string {
-	if cwd := strings.TrimSpace(os.Getenv("MOHABBAT_GUEST_CWD")); cwd != "" {
-		return cwd
-	}
-	if cwd := strings.TrimSpace(os.Getenv("PWD")); cwd != "" && (filepath.IsAbs(cwd) || strings.HasPrefix(cwd, ".") || strings.HasPrefix(cwd, "..")) {
-		return cwd
-	}
-	return "/"
-}
-
 func resolveUsableCwd() (string, error) {
-	if cwd := guestCwdOverride(); cwd != "" {
-		return cwd, nil
-	}
-	if cwd, err := os.Getwd(); err == nil {
-		return cwd, nil
+	if cwd, err := os.Getwd(); err == nil && cwd != "" {
+		return filepath.Clean(cwd), nil
 	}
 
 	for _, arg := range os.Args {
 		if strings.HasSuffix(strings.ToLower(arg), ".bat") {
 			dir := filepath.Dir(arg)
-			if err := os.Chdir(dir); err == nil {
-				if cwd, err := os.Getwd(); err == nil {
-					return cwd, nil
-				}
+			if abs, err := filepath.Abs(dir); err == nil && abs != "" {
+				return filepath.Clean(abs), nil
 			}
 			break
 		}
@@ -218,10 +203,8 @@ func resolveUsableCwd() (string, error) {
 
 	if exe, err := os.Executable(); err == nil {
 		dir := filepath.Dir(exe)
-		if err := os.Chdir(dir); err == nil {
-			if cwd, err := os.Getwd(); err == nil {
-				return cwd, nil
-			}
+		if abs, err := filepath.Abs(dir); err == nil && abs != "" {
+			return filepath.Clean(abs), nil
 		}
 	}
 

@@ -92,9 +92,11 @@ func (h *HostEnv) sys_process_spawn(ctx context.Context, m api.Module, stack []u
 				}
 			}
 		}
-		cmd.Env = mergedEnv
+		cmd.Env = guestRuntimeEnvForWasm(mergedEnv)
 		if cwd != "" {
-			cmd.Dir = normaliseGuestPathForHost(cwd)
+			cmd.Dir = h.resolveGuestPathForHost(cwd)
+		} else if hcwd := h.currentCwd(); hcwd != "" {
+			cmd.Dir = hcwd
 		}
 
 		if len(stdio) > 0 {
@@ -358,18 +360,6 @@ func (h *HostEnv) sys_get_env(ctx context.Context, m api.Module, stack []uint64)
 	lenBytes := uint32(stack[1])
 
 	vars := guestEnvForWasm(os.Environ())
-	hasPWD := false
-	for _, envVar := range vars {
-		if strings.HasPrefix(envVar, "PWD=") {
-			hasPWD = true
-			break
-		}
-	}
-	if !hasPWD {
-		if cwd, err := resolveUsableCwd(); err == nil {
-			vars = append(vars, "PWD="+cwd)
-		}
-	}
 
 	var bytesNeeded uint32
 	for _, envVar := range vars {
