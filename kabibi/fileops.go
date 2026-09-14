@@ -157,7 +157,7 @@ func (s *opSink) decide(dst string) (bool, error) {
 
 // startFileOp launches an operation in a goroutine and returns a command that
 // waits for the first progress/done message on the op channel.
-func (m *model) startFileOp(op fileOp) tea.Cmd {
+func (m *AppWidget) startFileOp(op fileOp) tea.Cmd {
 	ch := make(chan tea.Msg, 128)
 	resume := make(chan collisionChoice, 1)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -177,7 +177,7 @@ func (m *model) startFileOp(op fileOp) tea.Cmd {
 	return m.watchFileOpCmd()
 }
 
-func (m *model) watchFileOpCmd() tea.Cmd {
+func (m *AppWidget) watchFileOpCmd() tea.Cmd {
 	ch := m.opChan
 	return func() tea.Msg {
 		msg, ok := <-ch

@@ -13,8 +13,7 @@ func TestInitialModel(t *testing.T) {
 		t.Skip("skipping TUI test in short mode")
 	}
 
-	modelVal := initialModel()
-	m := &modelVal
+	m := initialModel()
 
 	// Check initial state
 	if m.mode != modeBrowser {
@@ -37,12 +36,11 @@ func TestModelRender(t *testing.T) {
 		t.Skip("skipping TUI test in short mode")
 	}
 
-	modelVal := initialModel()
-	m := &modelVal
-	output := m.View()
+	m := initialModel()
+	output := m.viewFrame()
 
 	if output == "" {
-		t.Error("View() returned empty output")
+		t.Error("viewFrame() returned empty output")
 	}
 }
 
@@ -52,20 +50,14 @@ func TestModelWindowSize(t *testing.T) {
 		t.Skip("skipping TUI test in short mode")
 	}
 
-	modelVal := initialModel()
-	m := &modelVal
+	m := initialModel()
 
 	// Send window resize message
 	msg := tea.WindowSizeMsg{Width: 120, Height: 40}
-	newModel, _ := m.Update(msg)
+	m.dispatch(msg)
 
-	updated, ok := newModel.(*model)
-	if !ok {
-		t.Fatal("Update did not return a *model")
-	}
-
-	if updated.width != 120 || updated.height != 40 {
-		t.Errorf("window size not updated: got %dx%d, want 120x40", updated.width, updated.height)
+	if m.width != 120 || m.height != 40 {
+		t.Errorf("window size not updated: got %dx%d, want 120x40", m.width, m.height)
 	}
 }
 
@@ -75,20 +67,14 @@ func TestModelWindowSizeRecalculation(t *testing.T) {
 		t.Skip("skipping TUI test in short mode")
 	}
 
-	modelVal := initialModel()
-	m := &modelVal
+	m := initialModel()
 
 	// Resize to a different size
 	msg := tea.WindowSizeMsg{Width: 200, Height: 50}
-	newModel, _ := m.Update(msg)
-
-	updated, ok := newModel.(*model)
-	if !ok {
-		t.Fatal("Update did not return a *model")
-	}
+	m.dispatch(msg)
 
 	// The layout should have been recalculated
-	output := updated.View()
+	output := m.viewFrame()
 	if output == "" {
 		t.Error("View() returned empty after resize")
 	}
@@ -100,28 +86,22 @@ func TestModelSmallWindow(t *testing.T) {
 		t.Skip("skipping TUI test in short mode")
 	}
 
-	modelVal := initialModel()
-	m := &modelVal
+	m := initialModel()
 
 	// Try to render in a tiny window
 	msg := tea.WindowSizeMsg{Width: 10, Height: 5}
-	newModel, _ := m.Update(msg)
+	m.dispatch(msg)
 
-	updated, ok := newModel.(*model)
-	if !ok {
-		t.Fatal("Update did not return a *model")
-	}
-
-	output := updated.View()
+	output := m.viewFrame()
 	// Should not panic, even if output is limited
 	if output == "" {
 		t.Error("output is empty")
 	}
-	if updated.width != 10 {
-		t.Errorf("model width = %d, want 10", updated.width)
+	if m.width != 10 {
+		t.Errorf("model width = %d, want 10", m.width)
 	}
-	if updated.height != 5 {
-		t.Errorf("model height = %d, want 5", updated.height)
+	if m.height != 5 {
+		t.Errorf("model height = %d, want 5", m.height)
 	}
 }
 
@@ -131,20 +111,14 @@ func TestModelTinyWindow(t *testing.T) {
 		t.Skip("skipping TUI test in short mode")
 	}
 
-	modelVal := initialModel()
-	m := &modelVal
+	m := initialModel()
 
 	// Try to render in an extremely tiny window
 	msg := tea.WindowSizeMsg{Width: 5, Height: 3}
-	newModel, _ := m.Update(msg)
-
-	updated, ok := newModel.(*model)
-	if !ok {
-		t.Fatal("Update did not return a *model")
-	}
+	m.dispatch(msg)
 
 	// Should not panic at all, regardless of output
-	_ = updated.View()
+	_ = m.viewFrame()
 }
 
 // TestModelEdgeCaseWindow verifies the model handles edge case windows (1x1).
@@ -153,20 +127,14 @@ func TestModelEdgeCaseWindow(t *testing.T) {
 		t.Skip("skipping TUI test in short mode")
 	}
 
-	modelVal := initialModel()
-	m := &modelVal
+	m := initialModel()
 
 	// Try to render in a 1x1 window
 	msg := tea.WindowSizeMsg{Width: 1, Height: 1}
-	newModel, _ := m.Update(msg)
-
-	updated, ok := newModel.(*model)
-	if !ok {
-		t.Fatal("Update did not return a *model")
-	}
+	m.dispatch(msg)
 
 	// Should not panic
-	_ = updated.View()
+	_ = m.viewFrame()
 }
 
 // TestModelNormalWindow verifies the model handles standard windows (80x24).
@@ -175,23 +143,17 @@ func TestModelNormalWindow(t *testing.T) {
 		t.Skip("skipping TUI test in short mode")
 	}
 
-	modelVal := initialModel()
-	m := &modelVal
+	m := initialModel()
 
 	msg := tea.WindowSizeMsg{Width: 80, Height: 24}
-	newModel, _ := m.Update(msg)
+	m.dispatch(msg)
 
-	updated, ok := newModel.(*model)
-	if !ok {
-		t.Fatal("Update did not return a *model")
-	}
-
-	output := updated.View()
+	output := m.viewFrame()
 	if output == "" {
 		t.Error("output is empty for normal window")
 	}
-	if updated.width != 80 {
-		t.Errorf("model width = %d, want 80", updated.width)
+	if m.width != 80 {
+		t.Errorf("model width = %d, want 80", m.width)
 	}
 }
 
@@ -201,23 +163,17 @@ func TestModelLargeWindow(t *testing.T) {
 		t.Skip("skipping TUI test in short mode")
 	}
 
-	modelVal := initialModel()
-	m := &modelVal
+	m := initialModel()
 
 	msg := tea.WindowSizeMsg{Width: 200, Height: 50}
-	newModel, _ := m.Update(msg)
+	m.dispatch(msg)
 
-	updated, ok := newModel.(*model)
-	if !ok {
-		t.Fatal("Update did not return a *model")
-	}
-
-	output := updated.View()
+	output := m.viewFrame()
 	if output == "" {
 		t.Error("output is empty for large window")
 	}
-	if updated.width != 200 {
-		t.Errorf("model width = %d, want 200", updated.width)
+	if m.width != 200 {
+		t.Errorf("model width = %d, want 200", m.width)
 	}
 }
 
@@ -227,8 +183,7 @@ func TestModelWindowSequence(t *testing.T) {
 		t.Skip("skipping TUI test in short mode")
 	}
 
-	modelVal := initialModel()
-	m := &modelVal
+	m := initialModel()
 
 	sizes := []tea.WindowSizeMsg{
 		{Width: 5, Height: 3},
@@ -239,24 +194,17 @@ func TestModelWindowSequence(t *testing.T) {
 	}
 
 	for i, msg := range sizes {
-		newModel, _ := m.Update(msg)
-		updated, ok := newModel.(*model)
-		if !ok {
-			t.Fatalf("sequence[%d]: Update did not return a *model", i)
-		}
+		m.dispatch(msg)
 
 		// Should not panic rendering at any size
-		_ = updated.View()
+		_ = m.viewFrame()
 
-		if updated.width != msg.Width {
-			t.Errorf("sequence[%d]: width = %d, want %d", i, updated.width, msg.Width)
+		if m.width != msg.Width {
+			t.Errorf("sequence[%d]: width = %d, want %d", i, m.width, msg.Width)
 		}
-		if updated.height != msg.Height {
-			t.Errorf("sequence[%d]: height = %d, want %d", i, updated.height, msg.Height)
+		if m.height != msg.Height {
+			t.Errorf("sequence[%d]: height = %d, want %d", i, m.height, msg.Height)
 		}
-
-		// Update m for next iteration
-		m = updated
 	}
 }
 
@@ -266,19 +214,11 @@ func TestModelUpdateNoop(t *testing.T) {
 		t.Skip("skipping TUI test in short mode")
 	}
 
-	modelVal := initialModel()
-	m := &modelVal
+	m := initialModel()
 	customMsg := struct{}{}
 
 	// Should not panic
-	newModel, _ := m.Update(customMsg)
-
-	if newModel != nil {
-		_, ok := newModel.(*model)
-		if !ok {
-			t.Error("Update did not return a *model")
-		}
-	}
+	m.dispatch(customMsg)
 }
 
 // TestModelModeTransitions verifies mode changes work correctly.
@@ -287,8 +227,7 @@ func TestModelModeTransitions(t *testing.T) {
 		t.Skip("skipping TUI test in short mode")
 	}
 
-	modelVal := initialModel()
-	m := &modelVal
+	m := initialModel()
 
 	// Verify model state
 	if m.runner == nil {
@@ -299,9 +238,9 @@ func TestModelModeTransitions(t *testing.T) {
 	}
 
 	// Test rendering doesn't panic
-	output := m.View()
+	output := m.viewFrame()
 	if output == "" {
-		t.Error("View() returned empty")
+		t.Error("viewFrame() returned empty")
 	}
 }
 
@@ -311,8 +250,7 @@ func TestModelActivePaneSwitch(t *testing.T) {
 		t.Skip("skipping TUI test in short mode")
 	}
 
-	modelVal := initialModel()
-	m := &modelVal
+	m := initialModel()
 
 	// Start in left pane
 	if m.activePane != leftPane {
@@ -320,9 +258,9 @@ func TestModelActivePaneSwitch(t *testing.T) {
 	}
 
 	// Verify the model can render
-	output := m.View()
+	output := m.viewFrame()
 	if output == "" {
-		t.Error("View() returned empty")
+		t.Error("viewFrame() returned empty")
 	}
 }
 
@@ -332,25 +270,19 @@ func TestModelRenderAfterMessages(t *testing.T) {
 		t.Skip("skipping TUI test in short mode")
 	}
 
-	modelVal := initialModel()
-	m := &modelVal
+	m := initialModel()
 
 	// Render, send a message, render again
-	output1 := m.View()
+	output1 := m.viewFrame()
 	if output1 == "" {
 		t.Error("initial render empty")
 	}
 
 	// Send a no-op message
-	newModel, _ := m.Update(struct{}{})
-	if newModel != nil {
-		updated, ok := newModel.(*model)
-		if ok {
-			output2 := updated.View()
-			if output2 == "" {
-				t.Error("render after message empty")
-			}
-		}
+	m.dispatch(struct{}{})
+	output2 := m.viewFrame()
+	if output2 == "" {
+		t.Error("render after message empty")
 	}
 }
 
@@ -360,23 +292,16 @@ func TestModelQuickSequence(t *testing.T) {
 		t.Skip("skipping TUI test in short mode")
 	}
 
-	modelVal := initialModel()
-	m := &modelVal
+	m := initialModel()
 
 	// Quick sequence: render, resize, render
-	_ = m.View()
+	_ = m.viewFrame()
 
 	msg := tea.WindowSizeMsg{Width: 100, Height: 30}
-	newModel, _ := m.Update(msg)
-
-	if newModel != nil {
-		updated, ok := newModel.(*model)
-		if ok {
-			output := updated.View()
-			if output == "" {
-				t.Error("render after sequence empty")
-			}
-		}
+	m.dispatch(msg)
+	output := m.viewFrame()
+	if output == "" {
+		t.Error("render after sequence empty")
 	}
 }
 
@@ -386,8 +311,7 @@ func TestModelMultipleResize(t *testing.T) {
 		t.Skip("skipping TUI test in short mode")
 	}
 
-	modelVal := initialModel()
-	m := &modelVal
+	m := initialModel()
 
 	sizes := []tea.WindowSizeMsg{
 		{Width: 80, Height: 24},
@@ -396,20 +320,13 @@ func TestModelMultipleResize(t *testing.T) {
 	}
 
 	for _, size := range sizes {
-		newModel, _ := m.Update(size)
-
-		if newModel != nil {
-			updated, ok := newModel.(*model)
-			if ok && (updated.width != size.Width || updated.height != size.Height) {
-				t.Errorf("size not updated after message")
-			}
-
-			if ok {
-				output := updated.View()
-				if output == "" {
-					t.Error("render empty after resize")
-				}
-			}
+		m.dispatch(size)
+		if m.width != size.Width || m.height != size.Height {
+			t.Errorf("size not updated after message")
+		}
+		output := m.viewFrame()
+		if output == "" {
+			t.Error("render empty after resize")
 		}
 	}
 }
@@ -420,22 +337,16 @@ func TestModelAnimationTick(t *testing.T) {
 		t.Skip("skipping TUI test in short mode")
 	}
 
-	modelVal := initialModel()
-	m := &modelVal
+	m := initialModel()
 
 	// Send animation tick messages
 	tick := animTickMsg(time.Now())
-	newModel, _ := m.Update(tick)
+	m.dispatch(tick)
 
 	// Should render without issues
-	if newModel != nil {
-		updated, ok := newModel.(*model)
-		if ok {
-			output := updated.View()
-			if output == "" {
-				t.Error("render after tick empty")
-			}
-		}
+	output := m.viewFrame()
+	if output == "" {
+		t.Error("render after tick empty")
 	}
 }
 
@@ -445,22 +356,15 @@ func TestModelConsecutiveAnimationTicks(t *testing.T) {
 		t.Skip("skipping TUI test in short mode")
 	}
 
-	modelVal := initialModel()
-	m := &modelVal
+	m := initialModel()
 
 	startTime := time.Now()
 	for i := 0; i < 5; i++ {
 		tick := animTickMsg(startTime.Add(time.Duration(i*50) * time.Millisecond))
-		newModel, _ := m.Update(tick)
-
-		if newModel != nil {
-			updated, ok := newModel.(*model)
-			if ok {
-				output := updated.View()
-				if output == "" {
-					t.Error("render after tick empty")
-				}
-			}
+		m.dispatch(tick)
+		output := m.viewFrame()
+		if output == "" {
+			t.Error("render after tick empty")
 		}
 	}
 }
@@ -471,13 +375,12 @@ func TestModelStableOutput(t *testing.T) {
 		t.Skip("skipping TUI test in short mode")
 	}
 
-	modelVal := initialModel()
-	m := &modelVal
+	m := initialModel()
 	m.width = 80
 	m.height = 24
 
-	output1 := m.View()
-	output2 := m.View()
+	output1 := m.viewFrame()
+	output2 := m.viewFrame()
 
 	if output1 != output2 {
 		t.Error("output changed between renders without messages")

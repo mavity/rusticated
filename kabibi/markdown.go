@@ -88,3 +88,9 @@ func renderAssistantChatBlock(content string, width int) string {
 	prefixed := prefixChatBlock(rendered, pad+bullet, pad+" ")
 	return forceBackground(prefixed, colorDarkGray)
 }
+
+// forceBackground applies a background color to the rendered output.
+func forceBackground(s string, bg lipgloss.Color) string {
+	style := lipgloss.NewStyle().Background(bg)
+	return style.Render(s)
+}

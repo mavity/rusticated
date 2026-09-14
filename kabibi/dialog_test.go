@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -93,7 +94,7 @@ func TestUpdateChoiceHotkey(t *testing.T) {
 	}, nil)
 
 	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}}
-	_, _ = m.updateChoice(msg)
+	_ = m.updateChoice(msg)
 
 	if m.dialog != nil {
 		t.Errorf("updateChoice with matching hotkey did not close dialog")
@@ -114,14 +115,14 @@ func TestUpdateChoiceArrows(t *testing.T) {
 	}
 
 	msg := tea.KeyMsg{Type: tea.KeyDown}
-	_, _ = m.updateChoice(msg)
+	_ = m.updateChoice(msg)
 
 	if d.choiceIdx != 1 {
 		t.Errorf("updateChoice down: choiceIdx = %d, want 1", d.choiceIdx)
 	}
 
 	msg = tea.KeyMsg{Type: tea.KeyUp}
-	_, _ = m.updateChoice(msg)
+	_ = m.updateChoice(msg)
 
 	if d.choiceIdx != 0 {
 		t.Errorf("updateChoice up: choiceIdx = %d, want 0", d.choiceIdx)
@@ -133,16 +134,17 @@ func TestUpdateChoiceEsc(t *testing.T) {
 	m := initialModel()
 	m.openChoiceDialog("Test", "Pick", []dlgChoice{
 		{label: "OK", hotkey: "o"},
-	}, func(m *model, idx int) (tea.Model, tea.Cmd) {
+		{label: "Cancel", hotkey: "c"},
+	}, func(m *AppWidget, idx int) tea.Cmd {
 		handlerCalled = true
 		if idx != -1 {
 			t.Errorf("Esc should pass idx=-1, got %d", idx)
 		}
-		return m, nil
+		return nil
 	})
 
 	msg := tea.KeyMsg{Type: tea.KeyEsc}
-	_, _ = m.updateChoice(msg)
+	_ = m.updateChoice(msg)
 
 	if m.dialog != nil {
 		t.Errorf("Esc did not close dialog")
@@ -157,7 +159,7 @@ func TestAcceptInput(t *testing.T) {
 	m.openInputDialog(actionMkdir, "Create", "Name:", "test")
 	m.dialog.input.SetValue("myname")
 
-	_, _ = m.acceptInput()
+	_ = m.acceptInput()
 
 	if m.dialog != nil {
 		t.Errorf("acceptInput did not close dialog")
@@ -165,5 +167,45 @@ func TestAcceptInput(t *testing.T) {
 
 	if m.mode != modeBrowser {
 		t.Errorf("acceptInput did not reset mode")
+	}
+}
+
+func TestDialogWidgetRender(t *testing.T) {
+	m := initialModel()
+	m.width = 100
+	m.height = 30
+	m.openChoiceDialog("Collision", "File exists", []dlgChoice{
+		{label: "Overwrite", hotkey: "o"},
+		{label: "Skip", hotkey: "s"},
+	}, nil)
+
+	w := m.buildDialogWidget()
+	if w == nil {
+		t.Fatal("buildDialogWidget returned nil")
+	}
+
+	buf := w.Render()
+	if buf.Width <= 0 || buf.Height <= 0 {
+		t.Fatalf("DialogWidget rendered empty buffer: %#v", buf)
+	}
+
+	out := Serialize(buf)
+	if !strings.Contains(out, "Overwrite") || !strings.Contains(out, "Skip") {
+		t.Fatalf("DialogWidget output missing expected choices: %q", out)
+	}
+}
+
+func TestViewRendersDialogOverlay(t *testing.T) {
+	m := initialModel()
+	m.width = 100
+	m.height = 30
+	m.openChoiceDialog("Collision", "File exists", []dlgChoice{
+		{label: "Overwrite", hotkey: "o"},
+		{label: "Skip", hotkey: "s"},
+	}, nil)
+
+	out := m.viewFrame()
+	if !strings.Contains(out, "Overwrite") || !strings.Contains(out, "Skip") {
+		t.Fatalf("viewFrame() did not include dialog overlay content: %q", out)
 	}
 }

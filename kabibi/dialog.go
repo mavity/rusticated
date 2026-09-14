@@ -7,10 +7,10 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/bubbles/cursor"
-	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 )
 
 type dialogKind int
@@ -50,11 +50,11 @@ type dialogState struct {
 
 	choices   []dlgChoice
 	choiceIdx int
-	onPick    func(m *model, idx int) (tea.Model, tea.Cmd)
+	onPick    func(m *AppWidget, idx int) tea.Cmd
 }
 
 // openInputDialog builds a modal that collects a single line of text.
-func (m *model) openInputDialog(action dialogAction, title, prompt, initial string) {
+func (m *AppWidget) openInputDialog(action dialogAction, title, prompt, initial string) {
 	ti := textinput.New()
 	ti.Prompt = "› "
 	ti.PromptStyle = lipgloss.NewStyle().Foreground(colorYellow).Background(colorBlack)
@@ -76,7 +76,7 @@ func (m *model) openInputDialog(action dialogAction, title, prompt, initial stri
 }
 
 // openConfirmDialog builds a yes/no modal that runs pending when accepted.
-func (m *model) openConfirmDialog(action dialogAction, title, prompt string, pending *fileOp) {
+func (m *AppWidget) openConfirmDialog(action dialogAction, title, prompt string, pending *fileOp) {
 	m.dialog = &dialogState{
 		kind:    dialogConfirm,
 		action:  action,
@@ -89,7 +89,7 @@ func (m *model) openConfirmDialog(action dialogAction, title, prompt string, pen
 
 // openChoiceDialog builds a modal with FAR-style buttons resolved by hotkey,
 // arrows, or Enter. onPick is called with the chosen index (-1 on Esc).
-func (m *model) openChoiceDialog(title, prompt string, choices []dlgChoice, onPick func(m *model, idx int) (tea.Model, tea.Cmd)) {
+func (m *AppWidget) openChoiceDialog(title, prompt string, choices []dlgChoice, onPick func(m *AppWidget, idx int) tea.Cmd) {
 	m.dialog = &dialogState{
 		kind:    dialogChoice,
 		title:   title,
@@ -100,7 +100,7 @@ func (m *model) openChoiceDialog(title, prompt string, choices []dlgChoice, onPi
 	m.mode = modeDialog
 }
 
-func (m *model) closeDialog() {
+func (m *AppWidget) closeDialog() {
 	m.dialog = nil
 	if m.opActive {
 		return
@@ -109,11 +109,11 @@ func (m *model) closeDialog() {
 }
 
 // updateDialog handles keys while a modal is open.
-func (m *model) updateDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *AppWidget) updateDialog(msg tea.KeyMsg) tea.Cmd {
 	d := m.dialog
 	if d == nil {
 		m.mode = modeBrowser
-		return m, nil
+		return nil
 	}
 
 	if d.kind == dialogChoice {
@@ -123,7 +123,7 @@ func (m *model) updateDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		m.closeDialog()
-		return m, nil
+		return nil
 	case "enter":
 		if d.kind == dialogConfirm {
 			return m.acceptConfirm()
@@ -136,21 +136,21 @@ func (m *model) updateDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "n", "N":
 		if d.kind == dialogConfirm {
 			m.closeDialog()
-			return m, nil
+			return nil
 		}
 	}
 
 	if d.kind == dialogInput {
 		var cmd tea.Cmd
 		d.input, cmd = d.input.Update(msg)
-		return m, cmd
+		return cmd
 	}
-	return m, nil
+	return nil
 }
 
 // updateChoice handles keys for FAR-style button dialogs: hotkeys resolve
 // immediately, arrows/Tab move the highlight, Enter picks it, Esc cancels.
-func (m *model) updateChoice(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *AppWidget) updateChoice(msg tea.KeyMsg) tea.Cmd {
 	d := m.dialog
 	key := msg.String()
 	switch key {
@@ -162,12 +162,12 @@ func (m *model) updateChoice(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if d.choiceIdx > 0 {
 			d.choiceIdx--
 		}
-		return m, nil
+		return nil
 	case "right", "down", "tab":
 		if d.choiceIdx < len(d.choices)-1 {
 			d.choiceIdx++
 		}
-		return m, nil
+		return nil
 	}
 	lower := strings.ToLower(key)
 	for i, c := range d.choices {
@@ -175,14 +175,14 @@ func (m *model) updateChoice(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.pickChoice(i)
 		}
 	}
-	return m, nil
+	return nil
 }
 
 // pickChoice resolves a choice dialog and dispatches to its handler.
-func (m *model) pickChoice(idx int) (tea.Model, tea.Cmd) {
+func (m *AppWidget) pickChoice(idx int) tea.Cmd {
 	d := m.dialog
 	if d == nil {
-		return m, nil
+		return nil
 	}
 	onPick := d.onPick
 	m.dialog = nil
@@ -192,27 +192,27 @@ func (m *model) pickChoice(idx int) (tea.Model, tea.Cmd) {
 	if onPick != nil {
 		return onPick(m, idx)
 	}
-	return m, nil
+	return nil
 }
 
-func (m *model) acceptConfirm() (tea.Model, tea.Cmd) {
+func (m *AppWidget) acceptConfirm() tea.Cmd {
 	d := m.dialog
 	op := d.pending
 	m.dialog = nil
 	m.mode = modeBrowser
 	if op == nil {
-		return m, nil
+		return nil
 	}
-	return m, m.startFileOp(*op)
+	return m.startFileOp(*op)
 }
 
-func (m *model) acceptInput() (tea.Model, tea.Cmd) {
+func (m *AppWidget) acceptInput() tea.Cmd {
 	d := m.dialog
 	name := strings.TrimSpace(d.input.Value())
-	l, dir, p := m.activePaneState()
-	if l == nil || name == "" {
+	w, dir, p := m.activePaneState()
+	if w == nil || name == "" {
 		m.closeDialog()
-		return m, nil
+		return nil
 	}
 
 	// Copy/move with an editable destination path.
@@ -221,10 +221,10 @@ func (m *model) acceptInput() (tea.Model, tea.Cmd) {
 		m.dialog = nil
 		m.mode = modeBrowser
 		if op == nil {
-			return m, nil
+			return nil
 		}
 		op.dest = name
-		return m, m.startFileOp(*op)
+		return m.startFileOp(*op)
 	}
 
 	// Select / unselect files by wildcard mask.
@@ -233,12 +233,11 @@ func (m *model) acceptInput() (tea.Model, tea.Cmd) {
 		n := m.applyMask(p, name, want)
 		m.dialog = nil
 		m.mode = modeBrowser
-		m.updateDelegates()
 		verb := "Selected"
 		if !want {
 			verb = "Unselected"
 		}
-		return m, m.AddPlume(fmt.Sprintf("%s %d item(s) matching %s", verb, n, name))
+		return m.AddPlume(fmt.Sprintf("%s %d item(s) matching %s", verb, n, name))
 	}
 
 	var status string
@@ -260,7 +259,7 @@ func (m *model) acceptInput() (tea.Model, tea.Cmd) {
 			status = "Created " + name
 		}
 	case actionRename:
-		if fi, ok := l.SelectedItem().(fileItem); ok && fi.name != ".." {
+		if fi, ok := w.SelectedItem(); ok && fi.name != ".." {
 			oldPath := filepath.Join(dir, fi.name)
 			newPath := filepath.Join(dir, name)
 			if err := os.Rename(oldPath, newPath); err != nil {
@@ -275,37 +274,22 @@ func (m *model) acceptInput() (tea.Model, tea.Cmd) {
 	m.mode = modeBrowser
 	m.loadDir(p, dir, name)
 	m.refreshPrompt()
-	return m, m.AddPlume(status)
+	return m.AddPlume(status)
 }
 
 // applyMask sets the selected flag on items in pane p whose name matches the
 // glob mask, returning the number of items changed.
-func (m *model) applyMask(p pane, mask string, want bool) int {
-	var l *list.Model
+func (m *AppWidget) applyMask(p pane, mask string, want bool) int {
+	var w *FilePaneWidget
 	if p == leftPane {
-		l = &m.leftList
+		w = m.dualPane.Left
 	} else if p == rightPane {
-		l = &m.rightList
-	} else {
+		w = m.dualPane.Right
+	}
+	if w == nil {
 		return 0
 	}
-	count := 0
-	items := l.Items()
-	for i, it := range items {
-		fi, ok := it.(fileItem)
-		if !ok || fi.name == ".." {
-			continue
-		}
-		if ok, _ := filepath.Match(mask, fi.name); ok {
-			if fi.selected != want {
-				fi.selected = want
-				items[i] = fi
-				count++
-			}
-		}
-	}
-	l.SetItems(items)
-	return count
+	return w.ApplyMask(mask, want)
 }
 
 // dlgBtn is one rendered button in a FAR-style centered button row.
@@ -340,7 +324,7 @@ func renderButtonRow(width int, btns []dlgBtn) string {
 }
 
 // dialogBox renders the modal box (centering is done by the caller overlay).
-func (m *model) dialogBox() string {
+func (m *AppWidget) dialogBox() string {
 	d := m.dialog
 	if d == nil {
 		return ""
@@ -400,7 +384,7 @@ func (m *model) dialogBox() string {
 
 // progressBox renders the running file-operation modal with per-file and total
 // progress bars plus the transfer rate.
-func (m *model) progressBox() string {
+func (m *AppWidget) progressBox() string {
 	boxWidth := 58
 	if boxWidth > m.width-4 {
 		boxWidth = m.width - 4
@@ -452,6 +436,172 @@ func (m *model) progressBox() string {
 
 	return box
 }
+
+// DialogWidget renders modal dialog content into a CellBuf so it can be composed
+// directly into the root screen without any string overlay pass.
+type DialogWidget struct {
+	Kind       dialogKind
+	Title      string
+	Prompt     string
+	Choices    []dlgChoice
+	ChoiceIdx  int
+	InputValue string
+	InputWidth int
+	Width      int
+	Height     int
+	X          int
+	Y          int
+}
+
+func (m *AppWidget) buildDialogWidget() *DialogWidget {
+	if m == nil || m.dialog == nil {
+		return nil
+	}
+	d := m.dialog
+	w := &DialogWidget{
+		Kind:      d.kind,
+		Title:     d.title,
+		Prompt:    d.prompt,
+		Choices:   append([]dlgChoice(nil), d.choices...),
+		ChoiceIdx: d.choiceIdx,
+		Width:     54,
+		Height:    10,
+	}
+	if d.kind == dialogInput {
+		w.InputValue = d.input.Value()
+		w.InputWidth = 20
+		if w.Width > 12 {
+			w.InputWidth = w.Width - 12
+		}
+	}
+	return w
+}
+
+func (w *DialogWidget) Measure(c Constraints) Size {
+	if w == nil {
+		return Size{}
+	}
+	if c.MaxW > 0 && c.MaxW < 24 {
+		return Size{W: c.MaxW, H: 1}
+	}
+	wW := w.Width
+	if c.MaxW > 0 && wW > c.MaxW {
+		wW = c.MaxW
+	}
+	if wW < 24 {
+		wW = 24
+	}
+	return Size{W: wW, H: 10}
+}
+
+func (w *DialogWidget) Layout(r Rect) {
+	if w == nil {
+		return
+	}
+	w.X = r.X
+	w.Y = r.Y
+	w.Width = r.W
+	w.Height = r.H
+}
+
+func (w *DialogWidget) Render() CellBuf {
+	if w == nil {
+		return NewCellBuf(0, 0)
+	}
+	width := w.Width
+	if width <= 0 {
+		width = 54
+	}
+	height := w.Height
+	if height <= 0 {
+		height = 10
+	}
+	buf := NewCellBuf(width, height)
+	buf.Fill(Rect{X: 0, Y: 0, W: width, H: height}, Cell{FG: colorDlgText, BG: colorDlgBg})
+
+	for x := 0; x < width; x++ {
+		buf.Set(x, 0, Cell{FG: colorDlgBorder, BG: colorDlgBg})
+		buf.Set(x, height-1, Cell{FG: colorDlgBorder, BG: colorDlgBg})
+	}
+	for y := 0; y < height; y++ {
+		buf.Set(0, y, Cell{FG: colorDlgBorder, BG: colorDlgBg})
+		buf.Set(width-1, y, Cell{FG: colorDlgBorder, BG: colorDlgBg})
+	}
+
+	innerW := width - 2
+	if w.Title != "" {
+		titleText := truncateStringToWidth(w.Title, innerW)
+		for i, r := range titleText {
+			if i >= innerW {
+				break
+			}
+			buf.Set(1+i, 1, Cell{R: r, FG: colorBtnFg, BG: colorDlgBorder, Bold: true})
+		}
+	}
+	if w.Prompt != "" {
+		promptText := truncateStringToWidth(w.Prompt, innerW-2)
+		for i, r := range promptText {
+			if i >= innerW-2 {
+				break
+			}
+			buf.Set(3+i, 3, Cell{R: r, FG: colorDlgText, BG: colorDlgBg})
+		}
+	}
+	if w.Kind == dialogInput {
+		label := "Input"
+		for i, r := range label {
+			if i >= innerW-2 {
+				break
+			}
+			buf.Set(3+i, 5, Cell{R: r, FG: colorDlgMuted, BG: colorDlgBg})
+		}
+		inputValue := w.InputValue
+		if inputValue == "" {
+			inputValue = ""
+		}
+		if runewidth.StringWidth(inputValue) > innerW-6 {
+			inputValue = truncateStringToWidth(inputValue, innerW-6)
+		}
+		for i, r := range inputValue {
+			if 3+i >= width-2 {
+				break
+			}
+			buf.Set(3+i, 6, Cell{R: r, FG: colorDlgText, BG: colorBlack})
+		}
+		for x := 3; x < width-3; x++ {
+			buf.Set(x, 6, Cell{FG: colorDlgText, BG: colorBlack})
+		}
+	}
+	if len(w.Choices) > 0 {
+		btnY := height - 4
+		for i, choice := range w.Choices {
+			text := choice.label
+			start := 2 + i*14
+			if start >= width-2 {
+				continue
+			}
+			for j, r := range text {
+				if start+j >= width-1 {
+					break
+				}
+				fg := colorDlgText
+				bg := colorBtnAltBg
+				if i == w.ChoiceIdx {
+					fg = colorBtnFg
+					bg = colorBtnBg
+				}
+				buf.Set(start+j, btnY, Cell{R: r, FG: fg, BG: bg})
+			}
+		}
+	}
+	return buf
+}
+
+func (w *DialogWidget) HandleKey(msg tea.KeyMsg) tea.Cmd     { return nil }
+func (w *DialogWidget) HandleMouse(msg tea.MouseMsg) tea.Cmd { return nil }
+
+var _ Widget = (*DialogWidget)(nil)
+var _ InputWidget = (*DialogWidget)(nil)
 
 // progressBarLine renders a bar plus percentage, padded to the modal width.
 func progressBarLine(pct, barWidth, innerW int) string {
@@ -520,4 +670,33 @@ func summarizeSources(sources []string) string {
 		return filepath.Base(sources[0])
 	}
 	return fmt.Sprintf("%d items", len(sources))
+}
+
+// renderProgressBar renders a progress bar visualization.
+func renderProgressBar(percentage int, width int, bg lipgloss.Color, finished bool) string {
+	if percentage < 0 {
+		percentage = 0
+	}
+	if percentage > 100 {
+		percentage = 100
+	}
+
+	filled := (width * percentage) / 100
+	if filled < 0 {
+		filled = 0
+	}
+	if filled > width {
+		filled = width
+	}
+
+	var bar strings.Builder
+	for i := 0; i < filled; i++ {
+		bar.WriteRune('█')
+	}
+	for i := filled; i < width; i++ {
+		bar.WriteRune('░')
+	}
+
+	style := lipgloss.NewStyle().Background(bg)
+	return style.Render(bar.String())
 }

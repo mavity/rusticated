@@ -8,6 +8,12 @@ import (
 	"time"
 )
 
+// Message types for app-level events
+type aiRepaintMsg struct{}
+type aiDoneMsg struct {
+	err error
+}
+
 // AISession represents a reusable AI conversation session that can be mocked for testing.
 type AISession interface {
 	SendMessage(ctx context.Context, userInput string, onToken func(string)) error
@@ -76,7 +82,7 @@ func runAIPrompt(userInput string, onToken func(string)) error {
 		origOnToken(extractTokenText(raw))
 	}
 
-	cacheDir, err := cacheDirPath()
+	cacheDir, err := ensureCacheDirExists()
 	if err != nil {
 		return err
 	}
@@ -126,7 +132,7 @@ func runAIPromptStateful(userInput string, conv *Conversation, onToken func(stri
 		origOnToken(extractTokenText(raw))
 	}
 
-	cacheDir, err := cacheDirPath()
+	cacheDir, err := ensureCacheDirExists()
 	if err != nil {
 		return err
 	}
@@ -185,7 +191,7 @@ func advanceConversation(ctx context.Context, conv *Conversation, userPrompt str
 	return err
 }
 
-func (m *model) startStream(userInput string) {
+func (m *AppWidget) startStream(userInput string) {
 	gen := m.streamGen
 	msgIdx := len(m.conversation.Messages) - 1
 
