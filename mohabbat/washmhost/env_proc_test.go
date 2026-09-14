@@ -33,7 +33,7 @@ func TestGuestEnvCanonicalizesWindowsPathAliases(t *testing.T) {
 	}
 }
 
-func TestGuestEnvCanonicalizesWindowsUserDirs(t *testing.T) {
+func TestGuestEnvPreservesWindowsUserDirs(t *testing.T) {
 	pairs := guestEnvForWasm([]string{
 		"LOCALAPPDATA=C:\\Users\\test\\AppData\\Local",
 		"USERPROFILE=C:\\Users\\test",
@@ -46,17 +46,17 @@ func TestGuestEnvCanonicalizesWindowsUserDirs(t *testing.T) {
 			got[k] = v
 		}
 	}
-	if got["LocalAppData"] != `C:\Users\test\AppData\Local` {
-		t.Fatalf("LOCALAPPDATA should be canonicalized to LocalAppData; got %q", got["LocalAppData"])
+	if got["LOCALAPPDATA"] != `C:\Users\test\AppData\Local` {
+		t.Fatalf("LOCALAPPDATA should be preserved as-is; got %q", got["LOCALAPPDATA"])
 	}
-	if got["UserProfile"] != `C:\Users\test` {
-		t.Fatalf("USERPROFILE should be canonicalized to UserProfile; got %q", got["UserProfile"])
+	if got["USERPROFILE"] != `C:\Users\test` {
+		t.Fatalf("USERPROFILE should be preserved as-is; got %q", got["USERPROFILE"])
 	}
-	if got["AppData"] != `C:\Users\test\AppData\Roaming` {
-		t.Fatalf("APPDATA should be canonicalized to AppData; got %q", got["AppData"])
+	if got["APPDATA"] != `C:\Users\test\AppData\Roaming` {
+		t.Fatalf("APPDATA should be preserved as-is; got %q", got["APPDATA"])
 	}
-	if got["Temp"] != `C:\Users\test\AppData\Local\Temp` {
-		t.Fatalf("TEMP should be canonicalized to Temp; got %q", got["Temp"])
+	if got["TEMP"] != `C:\Users\test\AppData\Local\Temp` {
+		t.Fatalf("TEMP should be preserved as-is; got %q", got["TEMP"])
 	}
 }
 
@@ -85,6 +85,29 @@ func TestGuestEnvExpandsPercentVarInPath(t *testing.T) {
 	}
 	if want := toolDir + ";C:\\Windows\\System32"; got["PATH"] != want {
 		t.Fatalf("PATH should expand %%TOOLS_DIR%% before lookup; got %q, want %q", got["PATH"], want)
+	}
+}
+
+func TestGuestEnvDoesNotRewriteTempOrUserPaths(t *testing.T) {
+	pairs := guestEnvForWasm([]string{
+		"TMP=C:\\Users\\test\\AppData\\Local\\Temp",
+		"TEMP=C:\\Users\\test\\AppData\\Local\\Temp",
+		"USERPROFILE=C:\\Users\\test",
+	})
+	got := map[string]string{}
+	for _, kv := range pairs {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			got[k] = v
+		}
+	}
+	if got["TMP"] != `C:\Users\test\AppData\Local\Temp` {
+		t.Fatalf("TMP should be preserved as-is; got %q", got["TMP"])
+	}
+	if got["TEMP"] != `C:\Users\test\AppData\Local\Temp` {
+		t.Fatalf("TEMP should be preserved as-is; got %q", got["TEMP"])
+	}
+	if got["USERPROFILE"] != `C:\Users\test` {
+		t.Fatalf("USERPROFILE should be preserved as-is; got %q", got["USERPROFILE"])
 	}
 }
 

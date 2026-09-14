@@ -186,7 +186,20 @@ func mapErrno(err error) uint32 {
 	return wasiEIO
 }
 
+func guestCwdOverride() string {
+	if cwd := strings.TrimSpace(os.Getenv("MOHABBAT_GUEST_CWD")); cwd != "" {
+		return cwd
+	}
+	if cwd := strings.TrimSpace(os.Getenv("PWD")); cwd != "" && (filepath.IsAbs(cwd) || strings.HasPrefix(cwd, ".") || strings.HasPrefix(cwd, "..")) {
+		return cwd
+	}
+	return "/"
+}
+
 func resolveUsableCwd() (string, error) {
+	if cwd := guestCwdOverride(); cwd != "" {
+		return cwd, nil
+	}
 	if cwd, err := os.Getwd(); err == nil {
 		return cwd, nil
 	}
@@ -261,9 +274,11 @@ func (h *HostEnv) sys_get_platform_info(ctx context.Context, m api.Module, stack
 	// Offset 356: Build version string (64 bytes)
 	// Offset 420: Build time string (64 bytes)
 	// Offset 484: Build platform string (64 bytes)
-	// Total roughly ~548 bytes. MaxLen should be checked.
+	// Offset 548: User home directory string (64 bytes)
+	// Offset 612: Temp directory string (64 bytes)
+	// Total size is 676 bytes.
 
-	structSize := uint32(548)
+	structSize := uint32(676)
 	if maxLen < structSize {
 		stack[0] = 7 // E2BIG
 		return
@@ -334,6 +349,13 @@ func (h *HostEnv) sys_get_platform_info(ctx context.Context, m api.Module, stack
 	copySafe(356, BuildVersion)
 	copySafe(420, BuildTime)
 	copySafe(484, BuildPlatform)
+
+	hostHome, err := os.UserHomeDir()
+	if err == nil {
+		copySafe(548, hostHome)
+	}
+	hostTempDir := os.TempDir()
+	copySafe(612, hostTempDir)
 
 	if ok := mem.Write(ptr, buf); !ok {
 		stack[0] = uint64(wasiEFAULT)

@@ -187,9 +187,8 @@ func main() {
 	// Host mode: capture workspace + toolchain location before the guest can chdir.
 
 	initWatchdog()
-	// Set an environment variable for the guest to know the host's temp directory if not already set.
-	if os.Getenv("MOHABBAT_HOST_TEMPDIR") == "" {
-		os.Setenv("MOHABBAT_HOST_TEMPDIR", os.TempDir())
+	if os.Getenv("MOHABBAT_GUEST_CWD") == "" {
+		os.Setenv("MOHABBAT_GUEST_CWD", "/")
 	}
 
 	ref := os.Getenv("MOHABBAT_WASM_FD")

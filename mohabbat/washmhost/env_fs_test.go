@@ -6,9 +6,67 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
+
+func TestGuestWindowsRootPathNormalization(t *testing.T) {
+	canonical := "/C:/Users/test/AppData/Local/Temp"
+	windowsRoot := `C:\Users\test\AppData\Local/Temp`
+	if runtime.GOOS == "windows" {
+		if got := normaliseGuestPathForHost(canonical); got != "C:/Users/test/AppData/Local/Temp" {
+			t.Fatalf("normaliseGuestPathForHost(%q) = %q, want %q", canonical, got, "C:/Users/test/AppData/Local/Temp")
+		}
+		if got := normaliseGuestPathForHost(windowsRoot); got != "C:/Users/test/AppData/Local/Temp" {
+			t.Fatalf("normaliseGuestPathForHost(%q) = %q, want %q", windowsRoot, got, "C:/Users/test/AppData/Local/Temp")
+		}
+		if got := normaliseGuestPathForHost(`.\ tmp\washmhost-cwd-test`); got != "./ tmp/washmhost-cwd-test" {
+			t.Fatalf("normaliseGuestPathForHost backslash: got %q", got)
+		}
+		wantWD, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := normaliseGuestPathForHost("/"); got != wantWD {
+			t.Fatalf("normaliseGuestPathForHost(%q) = %q, want %q", "/", got, wantWD)
+		}
+	} else {
+		if got := normaliseGuestPathForHost(canonical); got != canonical {
+			t.Fatalf("normaliseGuestPathForHost(%q) = %q, want %q", canonical, got, canonical)
+		}
+		if got := normaliseGuestPathForHost(windowsRoot); got != windowsRoot {
+			t.Fatalf("normaliseGuestPathForHost(%q) = %q, want %q", windowsRoot, got, windowsRoot)
+		}
+	}
+	if got := normaliseGuestPathForHost("/tmp/washmhost-cwd-test"); got != "/tmp/washmhost-cwd-test" {
+		t.Fatalf("normaliseGuestPathForHost(%q) = %q, want unchanged", "/tmp/washmhost-cwd-test", got)
+	}
+}
+
+func TestNormaliseHostPathForGuest(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		tests := []struct{ in, want string }{
+			{`C:\Users\mihai`, "/C:/Users/mihai"},
+			{`C:/Users/mihai`, "/C:/Users/mihai"},
+			{`C:`, "/C:/"},
+			{"/tmp/something", "/tmp/something"},
+			{"", ""},
+		}
+		for _, tc := range tests {
+			if got := normaliseHostPathForGuest(tc.in); got != tc.want {
+				t.Errorf("normaliseHostPathForGuest(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		}
+	} else {
+		paths := []string{`C:\Users\mihai`, "/tmp/something", ""}
+		for _, p := range paths {
+			if got := normaliseHostPathForGuest(p); got != p {
+				t.Errorf("normaliseHostPathForGuest(%q) = %q, want unchanged", p, got)
+			}
+		}
+	}
+}
 
 func TestSysFs(t *testing.T) {
 	tmpDir, err := ioutil.TempDir("", "washmhost-fs-test")

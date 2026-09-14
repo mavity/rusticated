@@ -127,6 +127,10 @@ pub struct AbiPlatformInfo {
     pub build_time: [u8; 64],
     /// Build platform string (64 bytes).
     pub build_platform: [u8; 64],
+    /// Host user home directory string (64 bytes).
+    pub user_home_dir: [u8; 64],
+    /// Host temporary directory string (64 bytes).
+    pub temp_dir: [u8; 64],
 }
 
 impl Default for AbiPlatformInfo {
