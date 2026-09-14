@@ -25,8 +25,6 @@ func CoreIsAbs(path string) bool {
 	l := CoreVolumeNameLen(path)
 	if l > 0 {
 		path = path[l:]
-	} else if Separator == '\\' {
-		return false
 	}
 	return len(path) > 0 && CoreIsPathSeparator(path[0])
 }

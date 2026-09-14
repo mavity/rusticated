@@ -40,6 +40,8 @@ type PlatformInfo struct {
 	BuildVersion         string
 	BuildTime            string
 	BuildPlatform        string
+	UserHomeDir          string
+	TempDir              string
 }
 
 var (
@@ -89,6 +91,8 @@ func GetPlatformInfo() *PlatformInfo {
 	pi.BuildVersion = stringFromBuf(buf[356:420])
 	pi.BuildTime = stringFromBuf(buf[420:484])
 	pi.BuildPlatform = stringFromBuf(buf[484:548])
+	pi.UserHomeDir = stringFromBuf(buf[548:612])
+	pi.TempDir = stringFromBuf(buf[612:676])
 	platformData = pi
 
 	atomicStore(&platformOnce, 2)

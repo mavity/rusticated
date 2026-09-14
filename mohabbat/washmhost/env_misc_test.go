@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"os"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -163,4 +164,70 @@ func TestSysMisc(t *testing.T) {
 		ptr := uint32(0x800)
 		env.sys_debug_log(context.Background(), mod, []uint64{uint64(ptr), 0xFFFFFFFF})
 	})
+}
+
+func TestResolveUsableCwdPrefersGuestOverride(t *testing.T) {
+	oldPwd := os.Getenv("PWD")
+	oldGuestCwd := os.Getenv("MOHABBAT_GUEST_CWD")
+	defer func() {
+		if oldPwd == "" {
+			_ = os.Unsetenv("PWD")
+		} else {
+			_ = os.Setenv("PWD", oldPwd)
+		}
+		if oldGuestCwd == "" {
+			_ = os.Unsetenv("MOHABBAT_GUEST_CWD")
+		} else {
+			_ = os.Setenv("MOHABBAT_GUEST_CWD", oldGuestCwd)
+		}
+	}()
+
+	want := "/"
+	if err := os.Setenv("MOHABBAT_GUEST_CWD", want); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Setenv("PWD", want); err != nil {
+		t.Fatal(err)
+	}
+
+	cwd, err := resolveUsableCwd()
+	if err != nil {
+		t.Fatalf("resolveUsableCwd() error = %v", err)
+	}
+	if cwd != want {
+		t.Fatalf("resolveUsableCwd() = %q, want %q", cwd, want)
+	}
+
+	vars := guestEnvForWasm(os.Environ())
+	found := false
+	for _, v := range vars {
+		if strings.HasPrefix(v, "PWD=") {
+			found = true
+			if v != "PWD=/" {
+				t.Fatalf("guest env PWD = %q, want %q", v, "PWD=/")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("guest env missing PWD override")
+	}
+}
+
+func TestGuestRuntimeEnvDoesNotInjectHostHomeAndTemp(t *testing.T) {
+	got := guestRuntimeEnvForWasm([]string{"PATH=/bin"})
+	values := map[string]string{}
+	for _, kv := range got {
+		k, v, ok := strings.Cut(kv, "=")
+		if ok {
+			values[k] = v
+		}
+	}
+	if gotPath, ok := values["PATH"]; !ok || gotPath != "/bin" {
+		t.Fatalf("runtime env PATH = %q, want %q", gotPath, "/bin")
+	}
+	for _, key := range []string{"HOME", "USERPROFILE", "TMPDIR", "TMP", "TEMP"} {
+		if _, ok := values[key]; ok {
+			t.Fatalf("runtime env should not inject %s from host; got %v", key, values)
+		}
+	}
 }

@@ -64,6 +64,7 @@ func runUnderWashmhost(ws, wasmPath string, extraArgs []string, platform string,
 	cmd.Dir = filepath.Join(ws, "mohabbat", "washmhost")
 	env := os.Environ()
 	env = upsertEnv(env, "MOHABBAT_WASM_FD", wasmPath)
+	env = upsertEnv(env, "MOHABBAT_GUEST_CWD", "/")
 	if goroot != "" {
 		env = upsertEnv(env, "GOROOT", goroot)
 	}

@@ -5,7 +5,8 @@ import (
 	"encoding/binary"
 	"io"
 	"os"
-	"path/filepath"
+	"path"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -280,19 +281,47 @@ func (h *HostEnv) sys_handle_close(ctx context.Context, m api.Module, stack []ui
 	}
 }
 
-func (h *HostEnv) translatePath(p string) string {
-	// Normalize all slashes to / first to simplify prefix matching
-	p = strings.ReplaceAll(p, "\\", "/")
-	if strings.HasPrefix(p, "/tmp/") {
-		return filepath.Join(os.TempDir(), p[5:])
+// normaliseGuestPathForHost converts a guest-supplied path to a form the host OS can use.
+// On Windows: bare / → cwd; /C:/... → C:/...; backslashes → forward slashes.
+// On other hosts the path is returned unchanged.
+func normaliseGuestPathForHost(p string) string {
+	trimmed := strings.TrimSpace(p)
+	if trimmed == "" {
+		return ""
 	}
-	if p == "/tmp" {
-		return os.TempDir()
+	if runtime.GOOS != "windows" {
+		return trimmed
 	}
-	// Also handle cases where it might be relative or workspace-absolute.
-	// In this simple host, we treat "/" as same as "" (relative to project root).
-	// But let's keep it simple for now as most paths are either /tmp or relative.
-	return filepath.FromSlash(p)
+	// Normalise backslashes then apply lexical clean so that paths like
+	// "/.", "//", "/./foo" reduce to their canonical form before translation.
+	normalized := path.Clean(strings.ReplaceAll(trimmed, "\\", "/"))
+	if len(normalized) >= 4 && normalized[0] == '/' {
+		drive := normalized[1]
+		if (drive >= 'A' && drive <= 'Z' || drive >= 'a' && drive <= 'z') && normalized[2] == ':' && normalized[3] == '/' {
+			return normalized[1:] // /C:/foo → C:/foo
+		}
+	}
+	return normalized
+}
+
+// normaliseHostPathForGuest converts a host-native path to the canonical guest form.
+// On Windows: C:\... or C:/... → /C:/...
+// On other hosts the path is returned unchanged.
+func normaliseHostPathForGuest(p string) string {
+	if p == "" || runtime.GOOS != "windows" {
+		return p
+	}
+	normalized := strings.ReplaceAll(p, "\\", "/")
+	if len(normalized) >= 2 {
+		drive := normalized[0]
+		if (drive >= 'A' && drive <= 'Z' || drive >= 'a' && drive <= 'z') && normalized[1] == ':' {
+			if len(normalized) == 2 {
+				normalized += "/"
+			}
+			return "/" + normalized
+		}
+	}
+	return normalized
 }
 
 func (h *HostEnv) sys_path_open(ctx context.Context, m api.Module, stack []uint64) {
@@ -308,7 +337,7 @@ func (h *HostEnv) sys_path_open(ctx context.Context, m api.Module, stack []uint6
 		return
 	}
 	rawPath := string(buf)
-	pathStr := h.translatePath(rawPath)
+	hostPathStr := normaliseGuestPathForHost(rawPath)
 
 	// WASM flag mapping (standard for Go's wasip1/js):
 	// Based on Go's internal/syscall/unix and syscall packages for wasm
@@ -327,7 +356,7 @@ func (h *HostEnv) sys_path_open(ctx context.Context, m api.Module, stack []uint6
 	truncateFlag := (flags & 0x200) != 0
 	appendFlag := (flags & 0x400) != 0
 
-	debugLog("DEBUG HOST path_open: path=%s flags=%d RDWR=%v WRONLY=%v CREATE=%v EXCL=%v TRUNC=%v", pathStr, flags, rdwr, writeOnly, createFlag, exclFlag, truncateFlag)
+	debugLog("DEBUG HOST path_open: path=%s flags=%d RDWR=%v WRONLY=%v CREATE=%v EXCL=%v TRUNC=%v", hostPathStr, flags, rdwr, writeOnly, createFlag, exclFlag, truncateFlag)
 
 	osFlags := 0
 	if rdwr {
@@ -354,14 +383,14 @@ func (h *HostEnv) sys_path_open(ctx context.Context, m api.Module, stack []uint6
 
 	state := h.RegisterOp(ovPtr, nil)
 	go func() {
-		f, err := os.OpenFile(pathStr, osFlags, 0666)
+		f, err := os.OpenFile(hostPathStr, osFlags, 0666)
 		if err != nil && !rdwr && !writeOnly && !createFlag && !truncateFlag && !appendFlag && !exclFlag {
-			f, err = os.Open(pathStr)
+			f, err = os.Open(hostPathStr)
 		}
 		retCode := uint32(0)
 		extResult := uint64(0)
 		if err != nil {
-			debugLog("path_open fail: path=%q flags=%d osFlags=%d err=%v", pathStr, flags, osFlags, err)
+			debugLog("path_open fail: path=%q flags=%d osFlags=%d err=%v", hostPathStr, flags, osFlags, err)
 			retCode = mapErrno(err)
 		} else {
 			h.mu.Lock()
@@ -370,7 +399,7 @@ func (h *HostEnv) sys_path_open(ctx context.Context, m api.Module, stack []uint6
 			h.handles[handle] = f
 			h.mu.Unlock()
 			extResult = handle
-			debugLog("path_open ok: path=%q flags=%d osFlags=%d handle=%d", pathStr, flags, osFlags, handle)
+			debugLog("path_open ok: path=%q flags=%d osFlags=%d handle=%d", hostPathStr, flags, osFlags, handle)
 		}
 		h.fileOpsQueue <- func() {
 			defer h.DecOpsFor(state)
@@ -520,29 +549,29 @@ func (h *HostEnv) sys_path_stat(ctx context.Context, m api.Module, stack []uint6
 		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 		return
 	}
-	pathStr := h.translatePath(string(buf))
-	debugLog("path_stat: path=%q flags=%d", pathStr, flags)
+	hostPathStr := normaliseGuestPathForHost(string(buf))
+	debugLog("path_stat: path=%q flags=%d", hostPathStr, flags)
 
 	state := h.RegisterOp(ovPtr, nil)
 	go func() {
 		var fi os.FileInfo
 		var err error
 		if (flags & statFlagNoFollow) != 0 {
-			fi, err = os.Lstat(pathStr)
+			fi, err = os.Lstat(hostPathStr)
 		} else {
-			fi, err = os.Stat(pathStr)
+			fi, err = os.Stat(hostPathStr)
 		}
 		retCode := uint32(0)
 		extResult := uint64(64)
 		var payload []byte
 		if err != nil {
-			debugLog("path_stat fail: path=%q err=%v", pathStr, err)
+			debugLog("path_stat fail: path=%q err=%v", hostPathStr, err)
 			retCode = mapErrno(err)
 		} else if outLen < 64 {
 			retCode = wasiERANGE
 		} else {
 			payload = marshalAbiStat(createAbiStat(fi))
-			debugLog("path_stat ok: path=%q kind=%d mode=%o", pathStr, createAbiStat(fi).Kind, createAbiStat(fi).Mode)
+			debugLog("path_stat ok: path=%q kind=%d mode=%o", hostPathStr, createAbiStat(fi).Kind, createAbiStat(fi).Mode)
 		}
 		h.fileOpsQueue <- func() {
 			defer h.DecOpsFor(state)
@@ -577,7 +606,7 @@ func (h *HostEnv) sys_path_chmod(ctx context.Context, m api.Module, stack []uint
 		return
 	}
 
-	err := os.Chmod(h.translatePath(string(buf)), os.FileMode(mode))
+	err := os.Chmod(normaliseGuestPathForHost(string(buf)), os.FileMode(mode))
 	writeOverlapped(m, ovPtr, mapErrno(err), 0, 0)
 }
 
@@ -591,7 +620,7 @@ func (h *HostEnv) sys_path_remove(ctx context.Context, m api.Module, stack []uin
 		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0) // EINVAL
 		return
 	}
-	err := os.Remove(h.translatePath(string(buf)))
+	err := os.Remove(normaliseGuestPathForHost(string(buf)))
 	writeOverlapped(m, ovPtr, mapErrno(err), 0, 0)
 }
 
@@ -606,7 +635,7 @@ func (h *HostEnv) sys_path_mkdir(ctx context.Context, m api.Module, stack []uint
 		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0) // EINVAL
 		return
 	}
-	err := os.Mkdir(h.translatePath(string(buf)), os.FileMode(mode))
+	err := os.Mkdir(normaliseGuestPathForHost(string(buf)), os.FileMode(mode))
 	writeOverlapped(m, ovPtr, mapErrno(err), 0, 0)
 }
 
@@ -624,7 +653,7 @@ func (h *HostEnv) sys_path_rename(ctx context.Context, m api.Module, stack []uin
 		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0) // EINVAL
 		return
 	}
-	err := os.Rename(h.translatePath(string(oldBuf)), h.translatePath(string(newBuf)))
+	err := os.Rename(normaliseGuestPathForHost(string(oldBuf)), normaliseGuestPathForHost(string(newBuf)))
 	writeOverlapped(m, ovPtr, mapErrno(err), 0, 0)
 }
 
@@ -663,16 +692,22 @@ func (h *HostEnv) sys_set_cwd(ctx context.Context, m api.Module, stack []uint64)
 		return
 	}
 
-	err := os.Chdir(string(buf))
+	guestPath := string(buf)
+	hostPath := normaliseGuestPathForHost(guestPath)
+	if guestPath == "/" || guestPath == "\\" || guestPath == "//" {
+		stack[0] = 0
+		return
+	}
+	err := os.Chdir(hostPath)
 	if err != nil {
-		debugLog("set_cwd fail: path=%q err=%v", string(buf), err)
+		debugLog("set_cwd fail: guestPath=%q hostPath=%q err=%v", guestPath, hostPath, err)
 		stack[0] = uint64(mapErrno(err))
 		return
 	}
 
 	if cwd, err := os.Getwd(); err == nil {
 		_ = os.Setenv("PWD", cwd)
-		debugLog("set_cwd ok: path=%q cwd=%q", string(buf), cwd)
+		debugLog("set_cwd ok: guestPath=%q hostPath=%q cwd=%q", guestPath, hostPath, cwd)
 	}
 	stack[0] = 0
 }
