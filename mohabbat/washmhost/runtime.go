@@ -113,6 +113,9 @@ func guestEnvForWasm(env []string) []string {
 	}
 	out := make([]string, 0, len(ordered))
 	for _, key := range ordered {
+		if strings.EqualFold(key, "PWD") || strings.EqualFold(key, "OLDPWD") {
+			continue
+		}
 		out = append(out, key+"="+values[key])
 	}
 	return out
@@ -125,6 +128,9 @@ func guestRuntimeEnvForWasm(env []string) []string {
 	for _, kv := range vars {
 		k, v, ok := strings.Cut(kv, "=")
 		if !ok {
+			continue
+		}
+		if strings.EqualFold(k, "PWD") || strings.EqualFold(k, "OLDPWD") {
 			continue
 		}
 		if _, exists := values[k]; !exists {
@@ -180,9 +186,6 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 		if len(parts) == 2 && parts[0] != "" {
 			cfg = cfg.WithEnv(parts[0], parts[1])
 		}
-	}
-	if value := strings.TrimSpace(os.Getenv("MOHABBAT_GUEST_CWD")); value != "" {
-		cfg = cfg.WithEnv("PWD", value)
 	}
 
 	// The guest runtime receives host-owned ABI metadata and must not rely on

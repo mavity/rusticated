@@ -337,7 +337,7 @@ func (h *HostEnv) sys_path_open(ctx context.Context, m api.Module, stack []uint6
 		return
 	}
 	rawPath := string(buf)
-	hostPathStr := normaliseGuestPathForHost(rawPath)
+	hostPathStr := h.resolveGuestPathForHost(rawPath)
 
 	// WASM flag mapping (standard for Go's wasip1/js):
 	// Based on Go's internal/syscall/unix and syscall packages for wasm
@@ -549,7 +549,7 @@ func (h *HostEnv) sys_path_stat(ctx context.Context, m api.Module, stack []uint6
 		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 		return
 	}
-	hostPathStr := normaliseGuestPathForHost(string(buf))
+	hostPathStr := h.resolveGuestPathForHost(string(buf))
 	debugLog("path_stat: path=%q flags=%d", hostPathStr, flags)
 
 	state := h.RegisterOp(ovPtr, nil)
@@ -606,7 +606,7 @@ func (h *HostEnv) sys_path_chmod(ctx context.Context, m api.Module, stack []uint
 		return
 	}
 
-	err := os.Chmod(normaliseGuestPathForHost(string(buf)), os.FileMode(mode))
+	err := os.Chmod(h.resolveGuestPathForHost(string(buf)), os.FileMode(mode))
 	writeOverlapped(m, ovPtr, mapErrno(err), 0, 0)
 }
 
@@ -620,7 +620,7 @@ func (h *HostEnv) sys_path_remove(ctx context.Context, m api.Module, stack []uin
 		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0) // EINVAL
 		return
 	}
-	err := os.Remove(normaliseGuestPathForHost(string(buf)))
+	err := os.Remove(h.resolveGuestPathForHost(string(buf)))
 	writeOverlapped(m, ovPtr, mapErrno(err), 0, 0)
 }
 
@@ -635,7 +635,7 @@ func (h *HostEnv) sys_path_mkdir(ctx context.Context, m api.Module, stack []uint
 		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0) // EINVAL
 		return
 	}
-	err := os.Mkdir(normaliseGuestPathForHost(string(buf)), os.FileMode(mode))
+	err := os.Mkdir(h.resolveGuestPathForHost(string(buf)), os.FileMode(mode))
 	writeOverlapped(m, ovPtr, mapErrno(err), 0, 0)
 }
 
@@ -653,7 +653,7 @@ func (h *HostEnv) sys_path_rename(ctx context.Context, m api.Module, stack []uin
 		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0) // EINVAL
 		return
 	}
-	err := os.Rename(normaliseGuestPathForHost(string(oldBuf)), normaliseGuestPathForHost(string(newBuf)))
+	err := os.Rename(h.resolveGuestPathForHost(string(oldBuf)), h.resolveGuestPathForHost(string(newBuf)))
 	writeOverlapped(m, ovPtr, mapErrno(err), 0, 0)
 }
 
@@ -661,10 +661,10 @@ func (h *HostEnv) sys_get_cwd(ctx context.Context, m api.Module, stack []uint64)
 	ptr := uint32(stack[0])
 	lenBytes := uint32(stack[1])
 
-	cwd, err := resolveUsableCwd()
-	if err != nil {
-		debugLog("get_cwd fail: ptr=%d len=%d err=%v", ptr, lenBytes, err)
-		res := uint64(mapErrno(err)) << 32
+	cwd := h.currentCwd()
+	if cwd == "" {
+		debugLog("get_cwd fail: ptr=%d len=%d cwd empty", ptr, lenBytes)
+		res := uint64(wasiEINVAL) << 32
 		stack[0] = api.EncodeI64(int64(res))
 		return
 	}
@@ -693,21 +693,11 @@ func (h *HostEnv) sys_set_cwd(ctx context.Context, m api.Module, stack []uint64)
 	}
 
 	guestPath := string(buf)
-	hostPath := normaliseGuestPathForHost(guestPath)
-	if guestPath == "/" || guestPath == "\\" || guestPath == "//" {
-		stack[0] = 0
-		return
-	}
-	err := os.Chdir(hostPath)
-	if err != nil {
-		debugLog("set_cwd fail: guestPath=%q hostPath=%q err=%v", guestPath, hostPath, err)
+	if err := h.setCwd(guestPath); err != nil {
+		debugLog("set_cwd fail: guestPath=%q err=%v", guestPath, err)
 		stack[0] = uint64(mapErrno(err))
 		return
 	}
-
-	if cwd, err := os.Getwd(); err == nil {
-		_ = os.Setenv("PWD", cwd)
-		debugLog("set_cwd ok: guestPath=%q hostPath=%q cwd=%q", guestPath, hostPath, cwd)
-	}
+	debugLog("set_cwd ok: guestPath=%q cwd=%q", guestPath, h.currentCwd())
 	stack[0] = 0
 }

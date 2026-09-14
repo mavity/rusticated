@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -166,50 +167,32 @@ func TestSysMisc(t *testing.T) {
 	})
 }
 
-func TestResolveUsableCwdPrefersGuestOverride(t *testing.T) {
-	oldPwd := os.Getenv("PWD")
-	oldGuestCwd := os.Getenv("MOHABBAT_GUEST_CWD")
-	defer func() {
-		if oldPwd == "" {
-			_ = os.Unsetenv("PWD")
-		} else {
-			_ = os.Setenv("PWD", oldPwd)
-		}
-		if oldGuestCwd == "" {
-			_ = os.Unsetenv("MOHABBAT_GUEST_CWD")
-		} else {
-			_ = os.Setenv("MOHABBAT_GUEST_CWD", oldGuestCwd)
-		}
-	}()
-
-	want := "/"
-	if err := os.Setenv("MOHABBAT_GUEST_CWD", want); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Setenv("PWD", want); err != nil {
-		t.Fatal(err)
-	}
-
-	cwd, err := resolveUsableCwd()
-	if err != nil {
-		t.Fatalf("resolveUsableCwd() error = %v", err)
-	}
-	if cwd != want {
-		t.Fatalf("resolveUsableCwd() = %q, want %q", cwd, want)
-	}
-
-	vars := guestEnvForWasm(os.Environ())
-	found := false
-	for _, v := range vars {
-		if strings.HasPrefix(v, "PWD=") {
-			found = true
-			if v != "PWD=/" {
-				t.Fatalf("guest env PWD = %q, want %q", v, "PWD=/")
-			}
+func TestGuestRuntimeEnvOmitsCwdValues(t *testing.T) {
+	got := guestRuntimeEnvForWasm([]string{"PATH=/bin", "PWD=/tmp/host-cwd", "OLDPWD=/tmp/old"})
+	for _, kv := range got {
+		if strings.HasPrefix(kv, "PWD=") || strings.HasPrefix(kv, "OLDPWD=") {
+			t.Fatalf("runtime env unexpectedly contains cwd value: %q", kv)
 		}
 	}
-	if !found {
-		t.Fatal("guest env missing PWD override")
+}
+
+func TestHostEnvTracksModuleCwd(t *testing.T) {
+	env := NewHostEnv()
+	base := t.TempDir()
+	env.cwd = base
+
+	rel := filepath.Join("nested", "child")
+	got := env.resolveGuestPathForHost(rel)
+	want := filepath.Join(base, rel)
+	if got != want {
+		t.Fatalf("resolveGuestPathForHost(%q) = %q, want %q", rel, got, want)
+	}
+
+	if err := env.setCwd("nested"); err != nil {
+		t.Fatalf("setCwd(nested) error = %v", err)
+	}
+	if env.cwd != filepath.Join(base, "nested") {
+		t.Fatalf("env.cwd = %q, want %q", env.cwd, filepath.Join(base, "nested"))
 	}
 }
 
