@@ -23,34 +23,6 @@ func canonicalGuestEnvKey(key string) string {
 			return "PATH"
 		case "PATHEXT":
 			return "PATHEXT"
-		case "LOCALAPPDATA":
-			return "LocalAppData"
-		case "APPDATA":
-			return "AppData"
-		case "USERPROFILE":
-			return "UserProfile"
-		case "TEMP":
-			return "Temp"
-		case "TMP":
-			return "Tmp"
-		case "HOMEDRIVE":
-			return "HomeDrive"
-		case "HOMEPATH":
-			return "HomePath"
-		case "ALLUSERSPROFILE":
-			return "AllUsersProfile"
-		case "PROGRAMFILES":
-			return "ProgramFiles"
-		case "PROGRAMFILES(X86)":
-			return "ProgramFiles(x86)"
-		case "COMMONPROGRAMFILES":
-			return "CommonProgramFiles"
-		case "COMMONPROGRAMFILES(X86)":
-			return "CommonProgramFiles(x86)"
-		case "COMSPEC":
-			return "ComSpec"
-		case "SYSTEMROOT":
-			return "SystemRoot"
 		}
 	}
 	return key
@@ -146,6 +118,27 @@ func guestEnvForWasm(env []string) []string {
 	return out
 }
 
+func guestRuntimeEnvForWasm(env []string) []string {
+	vars := guestEnvForWasm(env)
+	values := map[string]string{}
+	ordered := make([]string, 0, len(vars))
+	for _, kv := range vars {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		if _, exists := values[k]; !exists {
+			ordered = append(ordered, k)
+		}
+		values[k] = v
+	}
+	out := make([]string, 0, len(ordered))
+	for _, key := range ordered {
+		out = append(out, key+"="+values[key])
+	}
+	return out
+}
+
 func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 	if len(payload) == 0 {
 		return 1, fmt.Errorf("payload is empty")
@@ -182,18 +175,18 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 		WithStderr(os.Stderr).
 		WithStdin(os.Stdin)
 
-	for _, env := range guestEnvForWasm(os.Environ()) {
+	for _, env := range guestRuntimeEnvForWasm(os.Environ()) {
 		parts := strings.SplitN(env, "=", 2)
 		if len(parts) == 2 && parts[0] != "" {
 			cfg = cfg.WithEnv(parts[0], parts[1])
 		}
 	}
+	if value := strings.TrimSpace(os.Getenv("MOHABBAT_GUEST_CWD")); value != "" {
+		cfg = cfg.WithEnv("PWD", value)
+	}
 
-	cfg = cfg.WithFSConfig(wazero.NewFSConfig().
-		// TODO: WASI mounting is redundant, remove it.
-		WithDirMount(".", "/").
-		WithDirMount("C:\\", "C:\\").
-		WithDirMount(os.TempDir(), "/tmp"))
+	// The guest runtime receives host-owned ABI metadata and must not rely on
+	// mount-based filesystem remapping or implicit /tmp aliases.
 
 	// Since we provide rusticated ABI bindings via `hEnv.Register`, Wazero will resolve imports
 	mod, err := r.InstantiateModule(ctx, decoded, cfg)

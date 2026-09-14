@@ -142,15 +142,15 @@ function mapErrno(e) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Path translation — /tmp -> os.tmpdir(), otherwise pass-through
-// (mirrors Go translatePath)
+// Path translation — only reverse the canonical guest-root encoding.
+// The guest uses /C:/... while the host OS expects C:/... . Native host paths
+// are left alone and temp/user/cwd paths are never rewritten.
 // ─────────────────────────────────────────────────────────────────────────────
 function translatePath(p) {
-  // Normalize backslashes
-  p = p.replace(/\\/g, '/');
-  if (p.startsWith('/tmp/')) return os.tmpdir() + '/' + p.slice(5);
-  if (p === '/tmp') return os.tmpdir();
-  return p;
+  if (typeof p !== 'string' || p.length === 0) return p;
+  const s = p.trim().replace(/\\/g, '/');
+  if (/^\/[A-Za-z]:\//.test(s)) return s.slice(1);
+  return s;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -410,8 +410,9 @@ export function makeBrainImports(hostState, argv) {
   // ── set_cwd ──────────────────────────────────────────────────────────────────
   // Returns: i32 errno
   function set_cwd(ptr, len) {
-    const path = Buffer.from(hs.getGuestSlice(ptr, len)).toString();
-    try { process.chdir(path); return 0; }
+    const guestPath = Buffer.from(hs.getGuestSlice(ptr, len)).toString();
+    const hostPath = translatePath(guestPath);
+    try { process.chdir(hostPath); return 0; }
     catch (e) { return mapErrno(e); }
   }
 
@@ -1171,9 +1172,9 @@ export function makeBrainImports(hostState, argv) {
 
   // ── get_platform_info ────────────────────────────────────────────────────────
   // Signature: (ptr i32, len i32) -> i32 errno
-  // 548-byte binary struct — mirrors env_utils.go layout
+  // 676-byte binary struct — mirrors env_utils.go layout
   function get_platform_info(ptr, maxLen) {
-    const structSize = 548;
+    const structSize = 676;
     if (Number(maxLen) < structSize) return wasiE2BIG;
 
     const buf = Buffer.alloc(structSize);
@@ -1211,6 +1212,8 @@ export function makeBrainImports(hostState, argv) {
     copySafe(356, '0.0.0-dev');
     copySafe(420, new Date().toISOString().slice(0, 19));
     copySafe(484, `${process.platform}-${arch}`);
+    copySafe(548, os.homedir());
+    copySafe(612, os.tmpdir());
 
     guestWrite(Number(ptr), buf);
     return 0;

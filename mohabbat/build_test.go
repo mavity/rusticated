@@ -3,6 +3,7 @@ package mohabbat
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -38,5 +39,38 @@ edition = "2021"
 
 	if !strings.Contains(dummyRustDir, "demo") {
 		t.Errorf("expected demo to exist")
+	}
+}
+
+func TestGenerateGoOverlayIncludesABIUserHomeTempOverride(t *testing.T) {
+	ws := t.TempDir()
+	goroot := runtime.GOROOT()
+
+	wantPath := filepath.ToSlash(filepath.Join(ws, "target", "overlay-gen", "os", "file.go"))
+	if err := generateGoOverlay(ws, goroot); err != nil {
+		t.Fatalf("generateGoOverlay() error = %v", err)
+	}
+
+	patchedFilePath := filepath.Join(ws, "target", "overlay-gen", "os", "file.go")
+	patchedData, err := os.ReadFile(patchedFilePath)
+	if err != nil {
+		t.Fatalf("read patched os/file.go: %v", err)
+	}
+	patchedText := string(patchedData)
+	if !strings.Contains(patchedText, "syscall.GetPlatformInfo()") || !strings.Contains(patchedText, "UserHomeDir()") {
+		t.Fatalf("patched os/file.go missing ABI-driven UserHomeDir override: %s", patchedText)
+	}
+
+	data, err := os.ReadFile(filepath.Join(ws, "target", "overlay.json"))
+	if err != nil {
+		t.Fatalf("read overlay: %v", err)
+	}
+	jsonText := string(data)
+	srcPath := filepath.ToSlash(filepath.Join(goroot, "src", "os", "file.go"))
+	if !strings.Contains(jsonText, srcPath) {
+		t.Fatalf("overlay missing SDK source path %q; got %s", srcPath, jsonText)
+	}
+	if !strings.Contains(jsonText, wantPath) {
+		t.Fatalf("overlay missing generated ABI override target %q; got %s", wantPath, jsonText)
 	}
 }

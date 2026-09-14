@@ -580,12 +580,12 @@ func statat_ext(dirFd int, path string, st *Stat_t, flags uint32) error {
 		flags, &buf[0], uint32(len(buf)),
 	)
 	runtime.KeepAlive(full)
-	runtime.KeepAlive(buf)
 	awaitOverlapped(&ctx)
 	if ctx.o.hostError != 0 {
 		return errnoErr(Errno(ctx.o.hostError))
 	}
 	parseAbiStat(buf, st)
+	runtime.KeepAlive(buf)
 	return nil
 }
 
