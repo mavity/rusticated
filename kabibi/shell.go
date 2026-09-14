@@ -364,7 +364,7 @@ func envMapFromHandler(hc interp.HandlerContext) map[string]string {
 	return env
 }
 
-func (m *model) runShellCommand(input string) tea.Cmd {
+func (m *AppWidget) runShellCommand(input string) tea.Cmd {
 	return func() tea.Msg {
 		parser := syntax.NewParser()
 		f, err := parser.Parse(strings.NewReader(input), "")

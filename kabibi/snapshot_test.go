@@ -7,8 +7,6 @@ import (
 	"testing"
 )
 
-const updateSnapshotsEnv = "UPDATE_SNAPSHOTS"
-
 func snapshotPath(name string) string {
 	return filepath.Join("snapshots", name+".snap")
 }
@@ -16,9 +14,9 @@ func snapshotPath(name string) string {
 func assertSnapshot(t *testing.T, name, got string) {
 	t.Helper()
 	path := snapshotPath(name)
-	if os.Getenv(updateSnapshotsEnv) == "1" {
+	if os.Getenv("UPDATE_SNAPSHOTS") == "1" {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatalf("mkdir snapshot dir: %v", err)
+			t.Fatalf("mkdir snapshots: %v", err)
 		}
 		if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
 			t.Fatalf("write snapshot %s: %v", path, err)
@@ -28,13 +26,21 @@ func assertSnapshot(t *testing.T, name, got string) {
 	want, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			t.Fatalf("snapshot %s is missing; rerun with UPDATE_SNAPSHOTS=1 to generate it", path)
+			t.Fatalf("snapshot %s missing — run with UPDATE_SNAPSHOTS=1 to create it", path)
 		}
 		t.Fatalf("read snapshot %s: %v", path, err)
 	}
 	if got != string(want) {
 		t.Fatalf("snapshot mismatch for %s\n--- WANT ---\n%s\n--- GOT ---\n%s", name, string(want), got)
 	}
+}
+
+// assertWidgetSnapshot lays out w into r, renders it to a CellBuf, serialises
+// to ANSI and compares against the named snapshot file.
+func assertWidgetSnapshot(t *testing.T, name string, w Widget, r Rect) {
+	t.Helper()
+	w.Layout(r)
+	assertSnapshot(t, name, Serialize(w.Render()))
 }
 
 func TestEditorViewSnapshot(t *testing.T) {
@@ -71,12 +77,10 @@ func TestEditorViewSnapshot(t *testing.T) {
 }
 
 func TestModelViewSnapshot(t *testing.T) {
-	modelVal := initialModel()
-	m := &modelVal
+	m := initialModel()
 	m.width = 100
 	m.height = 28
-	m.chatView.Width = 24
-	m.chatView.Height = 6
+	m.recalculateLayout()
 
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "alpha.txt"), []byte("alpha\n"), 0o644); err != nil {
@@ -89,14 +93,13 @@ func TestModelViewSnapshot(t *testing.T) {
 		t.Fatalf("mkdir nested: %v", err)
 	}
 
-	m.leftDir = dir
-	m.rightDir = dir
 	m.loadDir(leftPane, dir, "alpha.txt")
 	m.loadDir(rightPane, dir, "beta.go")
 	m.activePane = leftPane
 	m.plume = []string{"Kabibi shell:  'help' for available commands."}
+	m.plumeW.SetLines(m.plume)
 
-	assertSnapshot(t, "model_view", m.View())
+	assertSnapshot(t, "model_view", m.viewFrame())
 }
 
 func TestEditorSelectionSnapshot(t *testing.T) {

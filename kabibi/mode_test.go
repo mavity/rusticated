@@ -4,8 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/charmbracelet/bubbles/list"
 )
 
 func TestSelectedNames(t *testing.T) {
@@ -65,13 +63,7 @@ func TestSelectedNames(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			listItems := make([]list.Item, len(tt.items))
-			for i, item := range tt.items {
-				listItems[i] = item
-			}
-
-			l := list.New(listItems, list.NewDefaultDelegate(), 80, 10)
-			got := selectedNames(&l)
+			got := selectedNames(tt.items)
 
 			if len(got) != len(tt.want) {
 				t.Errorf("selectedNames returned %d items, want %d", len(got), len(tt.want))
@@ -91,14 +83,12 @@ func TestOpSources(t *testing.T) {
 	t.Run("marked items win over highlight", func(t *testing.T) {
 		m := initialModel()
 		m.activePane = leftPane
-
-		items := []list.Item{
-			fileItem{name: "marked1", selected: true},
-			fileItem{name: "marked2", selected: true},
-			fileItem{name: "highlight", selected: false},
-		}
-		m.leftList.SetItems(items)
-		m.leftDir = "/tmp"
+		m.dualPane.Left.SetItems([]fileItem{
+			{name: "marked1", selected: true},
+			{name: "marked2", selected: true},
+			{name: "highlight", selected: false},
+		})
+		m.dualPane.Left.SetDir("/tmp")
 
 		sources := m.opSources()
 		if len(sources) != 2 {
@@ -109,14 +99,12 @@ func TestOpSources(t *testing.T) {
 	t.Run("no marks falls back to highlight", func(t *testing.T) {
 		m := initialModel()
 		m.activePane = leftPane
-
-		items := []list.Item{
-			fileItem{name: "file1", selected: false},
-			fileItem{name: "highlight", selected: false},
-		}
-		m.leftList.SetItems(items)
-		m.leftList.Select(1)
-		m.leftDir = "/tmp"
+		m.dualPane.Left.SetItems([]fileItem{
+			{name: "file1", selected: false},
+			{name: "highlight", selected: false},
+		})
+		m.dualPane.Left.Select(1)
+		m.dualPane.Left.SetDir("/tmp")
 
 		sources := m.opSources()
 		if len(sources) != 1 {
@@ -127,13 +115,11 @@ func TestOpSources(t *testing.T) {
 	t.Run("skips parent directory", func(t *testing.T) {
 		m := initialModel()
 		m.activePane = leftPane
-
-		items := []list.Item{
-			fileItem{name: "..", isDir: true, selected: false},
-		}
-		m.leftList.SetItems(items)
-		m.leftList.Select(0)
-		m.leftDir = "/tmp"
+		m.dualPane.Left.SetItems([]fileItem{
+			{name: "..", isDir: true, selected: false},
+		})
+		m.dualPane.Left.Select(0)
+		m.dualPane.Left.SetDir("/tmp")
 
 		sources := m.opSources()
 		if len(sources) != 0 {
@@ -154,31 +140,31 @@ func TestOpSources(t *testing.T) {
 
 func TestActivePaneStateAndOtherPaneDir(t *testing.T) {
 	m := initialModel()
-	m.leftDir = "/tmp/left"
-	m.rightDir = "/tmp/right"
+	m.dualPane.Left.SetDir("/tmp/left")
+	m.dualPane.Right.SetDir("/tmp/right")
 
 	m.activePane = leftPane
-	l, dir, pane := m.activePaneState()
-	if l == nil || pane != leftPane || dir != "/tmp/left" {
-		t.Fatalf("activePaneState(left) = (%v, %q, %v), want (%p, %q, %v)", l, dir, pane, &m.leftList, "/tmp/left", leftPane)
+	w, dir, pane := m.activePaneState()
+	if w == nil || pane != leftPane || dir != "/tmp/left" {
+		t.Fatalf("activePaneState(left) = (%v, %q, %v), want non-nil, %q, leftPane", w, dir, pane, "/tmp/left")
 	}
 	if got := m.otherPaneDir(); got != "/tmp/right" {
 		t.Fatalf("otherPaneDir(left) = %q, want %q", got, "/tmp/right")
 	}
 
 	m.activePane = rightPane
-	l, dir, pane = m.activePaneState()
-	if l == nil || pane != rightPane || dir != "/tmp/right" {
-		t.Fatalf("activePaneState(right) = (%v, %q, %v), want (%p, %q, %v)", l, dir, pane, &m.rightList, "/tmp/right", rightPane)
+	w, dir, pane = m.activePaneState()
+	if w == nil || pane != rightPane || dir != "/tmp/right" {
+		t.Fatalf("activePaneState(right) = (%v, %q, %v), want non-nil, %q, rightPane", w, dir, pane, "/tmp/right")
 	}
 	if got := m.otherPaneDir(); got != "/tmp/left" {
 		t.Fatalf("otherPaneDir(right) = %q, want %q", got, "/tmp/left")
 	}
 
 	m.activePane = chatPane
-	l, dir, pane = m.activePaneState()
-	if l != nil || dir != "" || pane != chatPane {
-		t.Fatalf("activePaneState(chat) = (%v, %q, %v), want (nil, %q, %v)", l, dir, pane, "", chatPane)
+	w, dir, pane = m.activePaneState()
+	if w != nil || dir != "" || pane != chatPane {
+		t.Fatalf("activePaneState(chat) = (%v, %q, %v), want (nil, %q, %v)", w, dir, pane, "", chatPane)
 	}
 }
 
@@ -188,33 +174,33 @@ func TestMoveCursorHorizontalTracksPaneAndBounds(t *testing.T) {
 	m.height = 12
 	m.activePane = leftPane
 
-	items := make([]list.Item, 30)
+	items := make([]fileItem, 30)
 	for i := range items {
 		items[i] = fileItem{name: filepath.Join("file", string(rune('a'+(i%26))))}
 	}
-	m.leftList.SetItems(items)
-	m.leftList.Select(0)
+	m.dualPane.Left.SetItems(items)
+	m.dualPane.Left.Select(0)
 
 	m.moveCursorHorizontal(1)
-	if got := m.leftList.Index(); got != 5 {
+	if got := m.dualPane.Left.SelectedIndex(); got != 5 {
 		t.Fatalf("moveCursorHorizontal(+1) = %d, want 5 for height=12", got)
 	}
 
 	m.moveCursorHorizontal(-2)
-	if got := m.leftList.Index(); got != 0 {
+	if got := m.dualPane.Left.SelectedIndex(); got != 0 {
 		t.Fatalf("moveCursorHorizontal(-2) clamped to %d, want 0", got)
 	}
 
-	m.leftList.Select(len(m.leftList.Items()) - 1)
+	m.dualPane.Left.Select(len(items) - 1)
 	m.moveCursorHorizontal(1)
-	if got := m.leftList.Index(); got != len(m.leftList.Items())-1 {
-		t.Fatalf("moveCursorHorizontal(+1) at end should stay at end; got %d, want %d", got, len(m.leftList.Items())-1)
+	if got := m.dualPane.Left.SelectedIndex(); got != len(items)-1 {
+		t.Fatalf("moveCursorHorizontal(+1) at end should stay at end; got %d, want %d", got, len(items)-1)
 	}
 
 	m.activePane = chatPane
-	m.leftList.Select(3)
+	m.dualPane.Left.Select(3)
 	m.moveCursorHorizontal(1)
-	if got := m.leftList.Index(); got != 3 {
+	if got := m.dualPane.Left.SelectedIndex(); got != 3 {
 		t.Fatalf("moveCursorHorizontal while chat pane is active should not move index; got %d, want 3", got)
 	}
 }
@@ -222,31 +208,31 @@ func TestMoveCursorHorizontalTracksPaneAndBounds(t *testing.T) {
 func TestFmToggleMarkMovesSelectionAndSkipsParent(t *testing.T) {
 	m := initialModel()
 	m.activePane = leftPane
-	m.leftList.SetItems([]list.Item{
-		fileItem{name: "..", isDir: true},
-		fileItem{name: "alpha.txt"},
-		fileItem{name: "beta.txt"},
+	m.dualPane.Left.SetItems([]fileItem{
+		{name: "..", isDir: true},
+		{name: "alpha.txt"},
+		{name: "beta.txt"},
 	})
-	m.leftList.Select(1)
+	m.dualPane.Left.Select(1)
 
 	m.fmToggleMark()
-	if got := m.leftList.Index(); got != 2 {
+	if got := m.dualPane.Left.SelectedIndex(); got != 2 {
 		t.Fatalf("fmToggleMark moved selection to %d, want 2", got)
 	}
-	if fi, ok := m.leftList.Items()[1].(fileItem); !ok || !fi.selected {
-		t.Fatalf("alpha.txt should be marked after fmToggleMark; got %#v", m.leftList.Items()[1])
+	if fi := m.dualPane.Left.Items()[1]; !fi.selected {
+		t.Fatalf("alpha.txt should be marked after fmToggleMark; got %#v", fi)
 	}
-	if fi, ok := m.leftList.Items()[0].(fileItem); !ok || fi.name != ".." || fi.selected {
-		t.Fatalf(".. should remain unmarked; got %#v", m.leftList.Items()[0])
+	if fi := m.dualPane.Left.Items()[0]; fi.name != ".." || fi.selected {
+		t.Fatalf(".. should remain unmarked; got %#v", fi)
 	}
 
-	m.leftList.Select(0)
+	m.dualPane.Left.Select(0)
 	m.fmToggleMark()
-	if got := m.leftList.Index(); got != 1 {
+	if got := m.dualPane.Left.SelectedIndex(); got != 1 {
 		t.Fatalf("fmToggleMark on parent entry should advance selection to 1, got %d", got)
 	}
-	if fi, ok := m.leftList.Items()[0].(fileItem); !ok || fi.name != ".." || fi.selected {
-		t.Fatalf(".. should still remain unmarked after skipped toggle; got %#v", m.leftList.Items()[0])
+	if fi := m.dualPane.Left.Items()[0]; fi.name != ".." || fi.selected {
+		t.Fatalf(".. should still remain unmarked after skipped toggle; got %#v", fi)
 	}
 }
 

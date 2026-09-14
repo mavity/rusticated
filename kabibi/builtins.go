@@ -3,8 +3,8 @@ package main
 import (
 	"fmt"
 	"strings"
+	"time"
 
-	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -61,45 +61,65 @@ func parseBuiltinWords(input string) ([]string, bool) {
 	return strings.Fields(trimmed), true
 }
 
-func (m *model) echoBuiltin(input string, lines ...string) tea.Cmd {
-	plume := []string{m.shellInput.Prompt + strings.TrimSpace(input)}
+func (m *AppWidget) echoBuiltin(input string, lines ...string) tea.Cmd {
+	plume := []string{m.shellW.Prompt + strings.TrimSpace(input)}
 	plume = append(plume, lines...)
 	return m.AddPlume(plume...)
 }
 
-func (m *model) enterChatMode() {
+func (m *AppWidget) enterChatMode() {
 	m.panelsVisible = true
 	m.chatOpen = true
 	m.activePane = chatPane
-	m.chatInput.Focus()
-	m.shellInput.Blur()
+	m.lastTab = time.Time{}
+	m.chatW.Input.Focus()
+	m.shellW.Blur()
 	m.recalculateLayout()
-	m.updateDelegates()
 }
 
-func (m *model) leaveChatMode() {
+func (m *AppWidget) leaveChatMode() {
 	m.chatOpen = false
 	m.panelsVisible = true
 	m.activePane = leftPane
-	if m.runner != nil {
-		m.runner.Dir = m.leftDir
-	}
+	m.lastTab = time.Time{}
+	m.runner.Dir = m.dualPane.Left.Dir()
 	m.refreshPrompt()
-	m.chatInput.Blur()
-	m.shellInput.Focus()
+	m.chatW.Input.Blur()
+	m.shellW.Focus()
 	m.recalculateLayout()
-	m.updateDelegates()
+	m.dualPane.SetActivePaneBridge(0)
 }
 
-func (m *model) setFilesVisible(on bool) {
+func (m *AppWidget) setFilesVisible(on bool) {
 	m.panelsVisible = on
 	m.recalculateLayout()
 }
 
-func (m *model) handleChatSlashCommand(input string) (bool, tea.Cmd) {
+func (m *AppWidget) beginExit() {
+	m.quitting = true
+	m.chatOpen = false
+	m.panelsVisible = false
+	m.activePane = leftPane
+	m.mode = modeBrowser
+	m.lastTab = time.Time{}
+	if m.shellW != nil {
+		m.shellW.Blur()
+	}
+	if m.chatW != nil {
+		m.chatW.Input.Blur()
+	}
+	if m.dualPane != nil {
+		m.dualPane.SetActivePaneBridge(0)
+	}
+	if m.plumeW != nil && m.width > 0 && m.height > 0 {
+		m.plumeW.Layout(Rect{X: 0, Y: 0, W: m.width, H: m.height})
+	}
+}
+
+func (m *AppWidget) handleChatSlashCommand(input string) (bool, tea.Cmd) {
 	switch strings.ToLower(strings.TrimSpace(input)) {
 	case "/chat off", "/chat exit":
-		m.chatInput.Reset()
+		m.chatW.Input.Reset()
 		m.leaveChatMode()
 		return true, m.AddPlume("Left chat. Blue panels restored.")
 	default:
@@ -107,44 +127,33 @@ func (m *model) handleChatSlashCommand(input string) (bool, tea.Cmd) {
 	}
 }
 
-func (m *model) currentBrowserList() *list.Model {
-	switch m.activePane {
-	case leftPane:
-		return &m.leftList
-	case rightPane:
-		return &m.rightList
-	default:
-		return nil
-	}
+func (m *AppWidget) currentBrowserList() *FilePaneWidget {
+	return m.activePaneWidget()
 }
 
-func (m *model) selectedBrowserItem() (fileItem, bool) {
-	l := m.currentBrowserList()
-	if l == nil {
+func (m *AppWidget) selectedBrowserItem() (fileItem, bool) {
+	w := m.activePaneWidget()
+	if w == nil {
 		return fileItem{}, false
 	}
-	fi, ok := l.SelectedItem().(fileItem)
-	if !ok {
-		return fileItem{}, false
-	}
-	return fi, true
+	return w.SelectedItem()
 }
 
-func (m *model) hasTransferSelection() bool {
-	l := m.currentBrowserList()
-	if l == nil {
+func (m *AppWidget) hasTransferSelection() bool {
+	w := m.activePaneWidget()
+	if w == nil {
 		return false
 	}
-	for _, item := range l.Items() {
-		if fi, ok := item.(fileItem); ok && fi.selected && fi.name != ".." {
+	for _, fi := range w.Items() {
+		if fi.selected && fi.name != ".." {
 			return true
 		}
 	}
-	fi, ok := m.selectedBrowserItem()
+	fi, ok := w.SelectedItem()
 	return ok && fi.name != ".."
 }
 
-func (m *model) handleShellBuiltin(input string) (bool, tea.Cmd) {
+func (m *AppWidget) handleShellBuiltin(input string) (bool, tea.Cmd) {
 	words, ok := parseBuiltinWords(input)
 	if !ok || len(words) == 0 {
 		return false, nil
@@ -160,6 +169,9 @@ func (m *model) handleShellBuiltin(input string) (bool, tea.Cmd) {
 			return true, m.echoBuiltin(input, kabibiHelpLines()...)
 		}
 		return false, nil
+	case "exit", "quit":
+		m.beginExit()
+		return true, func() tea.Msg { return tea.Quit() }
 	case "kabibi":
 		return true, m.handleKabibiBuiltin(input, words[1:])
 	default:
@@ -167,7 +179,7 @@ func (m *model) handleShellBuiltin(input string) (bool, tea.Cmd) {
 	}
 }
 
-func (m *model) handleKabibiBuiltin(input string, args []string) tea.Cmd {
+func (m *AppWidget) handleKabibiBuiltin(input string, args []string) tea.Cmd {
 	if len(args) == 0 {
 		return m.echoBuiltin(input, kabibiHelpLines()...)
 	}
@@ -248,7 +260,6 @@ func (m *model) handleKabibiBuiltin(input string, args []string) tea.Cmd {
 			return m.echoBuiltin(input, "Select an item to mark.")
 		}
 		m.fmToggleMark()
-		m.updateDelegates()
 		return m.echoBuiltin(input, "Selection toggled.")
 	default:
 		return m.echoBuiltin(input,

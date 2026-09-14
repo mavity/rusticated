@@ -42,6 +42,9 @@ func ActiveModelName() string {
 	return defaultModelName
 }
 
+var ensureLiteRTFunc = ensureLiteRT
+var ensureGemmaFunc = ensureGemma
+
 // activeModelURL returns the HuggingFace download URL for the active model.
 func activeModelURL() string {
 	if v := os.Getenv("LITERTLM_MODEL_URL"); v != "" {
@@ -74,42 +77,33 @@ func (e assetStageError) Error() string {
 	return e.err.Error()
 }
 
-func lookupEnvAnyCase(key string) (string, bool) {
-	for _, kv := range os.Environ() {
-		k, v, ok := strings.Cut(kv, "=")
-		if ok && strings.EqualFold(k, key) {
-			return v, true
-		}
+func deriveCanonicalUserCacheDirPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("user home directory unavailable: %w", err)
 	}
-	return "", false
+	if home == "" {
+		return "", fmt.Errorf("user home directory is empty")
+	}
+
+	if HostOS() == "windows" {
+		return filepath.Join(home, "AppData", "Local", "kabibi", "litert_cache"), nil
+	}
+	return filepath.Join(home, ".cache", "kabibi", "litert_cache"), nil
 }
 
-func cacheDirPath() (string, error) {
-	if v, ok := lookupEnvAnyCase("LITERTLM_CACHE_DIR"); ok && v != "" {
-		return filepath.Clean(v), nil
+func ensureCacheDirExists() (string, error) {
+	cacheDir, err := deriveCanonicalUserCacheDirPath()
+	if err != nil {
+		return "", err
 	}
-
-	switch HostOS() {
-	case "windows":
-		if v, ok := lookupEnvAnyCase("LocalAppData"); ok && v != "" {
-			return filepath.Join(v, "kabibi", "litert_cache"), nil
-		}
-		if home, err := os.UserHomeDir(); err == nil && home != "" {
-			return filepath.Join(home, "AppData", "Local", "kabibi", "litert_cache"), nil
-		}
-	default:
-		if v, ok := lookupEnvAnyCase("XDG_CACHE_HOME"); ok && v != "" {
-			return filepath.Join(v, "kabibi", "litert_cache"), nil
-		}
-		if home, err := os.UserHomeDir(); err == nil && home != "" {
-			return filepath.Join(home, ".cache", "kabibi", "litert_cache"), nil
-		}
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return "", fmt.Errorf("create cache directory %q: %w", cacheDir, err)
 	}
-
-	return "C:\\temp\\litert_cache", nil
+	return cacheDir, nil
 }
 
-func (m *model) checkAssetsCmd() tea.Cmd {
+func (m *AppWidget) checkAssetsCmd() tea.Cmd {
 	progress := make(chan assetProgressMsg, 32)
 	done := make(chan tea.Msg, 4)
 
@@ -138,9 +132,13 @@ func (m *model) checkAssetsCmd() tea.Cmd {
 }
 
 func ensureLiteRT(ctx context.Context, progress chan<- assetProgressMsg) error {
-	cacheDir, err := cacheDirPath()
+	cacheDir, err := ensureCacheDirExists()
 	if err != nil {
 		return err
+	}
+
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create cache directory: %w", err)
 	}
 
 	libDir := filepath.Join(cacheDir, "lib")
@@ -276,7 +274,7 @@ func backgroundUpdateWheel(cacheDir string) {
 }
 
 func ensureGemma(ctx context.Context, progress chan<- assetProgressMsg) error {
-	cacheDir, err := cacheDirPath()
+	cacheDir, err := ensureCacheDirExists()
 	if err != nil {
 		return err
 	}
@@ -483,6 +481,10 @@ func downloadFile(ctx context.Context, url, path, phase string, progress chan<- 
 	if fi := fileInfo(path); fi != nil && fi.Size() > 0 {
 		sendProgress(progress, phase, 100, fmt.Sprintf("cached %s", filepath.Base(path)))
 		return nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("failed to create parent directory for %s: %w", path, err)
 	}
 
 	tmpPath := path + ".tmp"
