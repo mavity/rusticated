@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -134,66 +136,31 @@ func TestSetActiveModelAndActiveModelName(t *testing.T) {
 	})
 }
 
-func TestLookupEnvAnyCase(t *testing.T) {
-	t.Setenv("LOCALAPPDATA", `C:\Users\test\AppData\Local`)
-	t.Setenv("USERPROFILE", `C:\Users\test`)
+func TestCacheDirPathUsesCanonicalUserDir(t *testing.T) {
+	t.Setenv("LITERTLM_CACHE_DIR", filepath.Join(t.TempDir(), "should-be-ignored"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(t.TempDir(), "should-be-ignored-localappdata"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "should-be-ignored-xdg"))
 
-	if got, ok := lookupEnvAnyCase("LocalAppData"); !ok || got != `C:\Users\test\AppData\Local` {
-		t.Fatalf("lookupEnvAnyCase(LocalAppData) = (%q, %v), want (%q, true)", got, ok, `C:\Users\test\AppData\Local`)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("os.UserHomeDir() error = %v", err)
 	}
-	if got, ok := lookupEnvAnyCase("userprofile"); !ok || got != `C:\Users\test` {
-		t.Fatalf("lookupEnvAnyCase(userprofile) = (%q, %v), want (%q, true)", got, ok, `C:\Users\test`)
+
+	want := filepath.Join(home, ".cache", "kabibi", "litert_cache")
+	if HostOS() == "windows" {
+		want = filepath.Join(home, "AppData", "Local", "kabibi", "litert_cache")
 	}
-	if _, ok := lookupEnvAnyCase("this-var-does-not-exist"); ok {
-		t.Fatal("lookupEnvAnyCase() unexpectedly found a missing env key")
+
+	got, err := ensureCacheDirExists()
+	if err != nil {
+		t.Fatalf("cacheDirPath() error = %v", err)
 	}
-}
-
-func TestCacheDirPath(t *testing.T) {
-	t.Run("respects LITERTLM_CACHE_DIR env var", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		t.Setenv("LITERTLM_CACHE_DIR", tmpDir)
-
-		got, err := cacheDirPath()
-		if err != nil {
-			t.Fatalf("cacheDirPath() error = %v", err)
-		}
-		if got != tmpDir {
-			t.Errorf("cacheDirPath() = %q, want %q", got, tmpDir)
-		}
-	})
-
-	t.Run("returns non-empty path when env var not set", func(t *testing.T) {
-		t.Setenv("LITERTLM_CACHE_DIR", "")
-
-		got, err := cacheDirPath()
-		if err != nil {
-			t.Fatalf("cacheDirPath() error = %v", err)
-		}
-		if got == "" {
-			t.Errorf("cacheDirPath() returned empty string")
-		}
-	})
-
-	t.Run("cleans path with env var", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		messyPath := tmpDir + "/./subdir/../"
-		t.Setenv("LITERTLM_CACHE_DIR", messyPath)
-
-		got, err := cacheDirPath()
-		if err != nil {
-			t.Fatalf("cacheDirPath() error = %v", err)
-		}
-		// Should be cleaned (no ./ or ../)
-		if got != tmpDir+"/" {
-			// filepath.Clean may handle this differently on different OSes
-			if got == tmpDir || got == tmpDir+"/" {
-				// Acceptable
-			} else {
-				t.Errorf("cacheDirPath() = %q (messy?)", got)
-			}
-		}
-	})
+	if got != want {
+		t.Fatalf("cacheDirPath() = %q, want %q", got, want)
+	}
+	if info, err := os.Stat(got); err != nil || !info.IsDir() {
+		t.Fatalf("cacheDirPath() returned %q which is not an existing directory: %v", got, err)
+	}
 }
 
 func TestWheelVersion(t *testing.T) {

@@ -16,6 +16,24 @@ import (
 
 const editorTabWidth = 4
 
+func expandTabs(s string, tabWidth int) string {
+	var b strings.Builder
+	column := 0
+	for _, r := range s {
+		if r == '\t' {
+			spaces := tabWidth - (column % tabWidth)
+			for i := 0; i < spaces; i++ {
+				b.WriteByte(' ')
+				column++
+			}
+		} else {
+			b.WriteRune(r)
+			column += runewidth.RuneWidth(r)
+		}
+	}
+	return b.String()
+}
+
 // Style identifiers for highlighted spans. Kept as small ints so runs of the
 // same colour can be grouped when rendering a row.
 const (
@@ -75,6 +93,9 @@ type editorModel struct {
 	lexer   chroma.Lexer
 	hl      [][]styledSpan
 	hlValid bool
+
+	// OnClose is called by the parent when the editor should close.
+	OnClose func() tea.Cmd
 }
 
 func newEditor(path string) (*editorModel, error) {
@@ -102,13 +123,14 @@ func newEditor(path string) (*editorModel, error) {
 	return &editorModel{path: path, eol: eol, lines: lines, lexer: lx}, nil
 }
 
-func (m *model) openEditor(path string) tea.Cmd {
+func (m *AppWidget) openEditor(path string) tea.Cmd {
 	e, err := newEditor(path)
 	if err != nil {
 		return m.AddPlume("edit: " + err.Error())
 	}
 	e.width = m.width
 	e.height = m.height
+	e.OnClose = func() tea.Cmd { return m.closeEditor() }
 	m.editor = e
 	m.mode = modeEditor
 	return nil
@@ -537,34 +559,40 @@ func (e *editorModel) selectAll() {
 	e.cx = len([]rune(e.lines[e.cy]))
 }
 
-// ---- update ----
-
-func (m *model) updateEditor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	e := m.editor
+// HandleKey processes a key event for the editor, calling OnClose when the
+// editor should be dismissed.
+func (e *editorModel) HandleKey(msg tea.KeyMsg) tea.Cmd {
 	if e == nil {
-		m.mode = modeBrowser
-		return m, nil
+		if e != nil && e.OnClose != nil {
+			return e.OnClose()
+		}
+		return nil
 	}
 	key := msg.String()
 
-	// While a close-confirmation prompt is up, capture the answer keys.
 	if e.confirmQuit {
 		switch key {
 		case "f2", "y", "Y", "enter":
 			if err := e.save(); err != nil {
 				e.confirmQuit = false
 				e.status = "save failed: " + err.Error()
-				return m, nil
+				return nil
 			}
-			return m.closeEditor()
+			if e.OnClose != nil {
+				return e.OnClose()
+			}
+			return nil
 		case "n", "N":
-			return m.closeEditor()
+			if e.OnClose != nil {
+				return e.OnClose()
+			}
+			return nil
 		case "esc":
 			e.confirmQuit = false
 			e.status = ""
-			return m, nil
+			return nil
 		default:
-			return m, nil
+			return nil
 		}
 	}
 
@@ -573,23 +601,26 @@ func (m *model) updateEditor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if e.dirty {
 			e.confirmQuit = true
 			e.status = "Save changes?  [Y] save   [N] discard   [Esc] cancel"
-			return m, nil
+			return nil
 		}
-		return m.closeEditor()
+		if e.OnClose != nil {
+			return e.OnClose()
+		}
+		return nil
 	case "f2", "ctrl+s":
 		if err := e.save(); err != nil {
 			e.status = "save failed: " + err.Error()
 		} else {
 			e.status = "Saved " + filepath.Base(e.path)
 		}
-		return m, nil
+		return nil
 	case "ctrl+c":
 		if txt := e.selectionText(); txt != "" {
 			e.clip = txt
 			_ = clipboard.WriteAll(txt)
 			e.status = "Copied"
 		}
-		return m, nil
+		return nil
 	case "ctrl+x":
 		if txt := e.selectionText(); txt != "" {
 			e.clip = txt
@@ -597,7 +628,7 @@ func (m *model) updateEditor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			e.deleteSelection()
 			e.status = "Cut"
 		}
-		return m, nil
+		return nil
 	case "ctrl+v":
 		txt, err := clipboard.ReadAll()
 		if err != nil || txt == "" {
@@ -607,28 +638,28 @@ func (m *model) updateEditor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			e.deleteSelectionIfAny()
 			e.insertText(txt)
 		}
-		return m, nil
+		return nil
 	case "ctrl+a":
 		e.selectAll()
-		return m, nil
+		return nil
 	case "enter":
 		e.deleteSelectionIfAny()
 		e.newline()
-		return m, nil
+		return nil
 	case "backspace":
 		if !e.deleteSelectionIfAny() {
 			e.backspace()
 		}
-		return m, nil
+		return nil
 	case "delete":
 		if !e.deleteSelectionIfAny() {
 			e.deleteForward()
 		}
-		return m, nil
+		return nil
 	case "tab":
 		e.deleteSelectionIfAny()
 		e.insertRune('\t')
-		return m, nil
+		return nil
 	case "left":
 		e.moveLeft(false)
 	case "right":
@@ -682,21 +713,18 @@ func (m *model) updateEditor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	e.clampCursor()
-	return m, nil
+	return nil
 }
 
-func (m *model) closeEditor() (tea.Model, tea.Cmd) {
+func (m *AppWidget) closeEditor() tea.Cmd {
 	m.editor = nil
 	m.mode = modeBrowser
-	if l, dir, p := m.activePaneState(); l != nil {
-		var focus string
-		if fi, ok := l.SelectedItem().(fileItem); ok {
-			focus = fi.name
-		}
-		m.loadDir(p, dir, focus)
+	if w, dir, p := m.activePaneState(); w != nil {
+		focus, _ := w.SelectedItem()
+		m.loadDir(p, dir, focus.name)
 	}
 	m.refreshPrompt()
-	return m, nil
+	return nil
 }
 
 func (e *editorModel) pageRows() int {

@@ -76,7 +76,7 @@ func main() {
 	}
 
 	m := initialModel()
-	AppProgram = tea.NewProgram(&m)
+	AppProgram = tea.NewProgram(&AppHost{app: m})
 	if _, err := AppProgram.Run(); err != nil {
 		fmt.Printf("Alas, there's been an error: %v", err)
 		os.Exit(1)
