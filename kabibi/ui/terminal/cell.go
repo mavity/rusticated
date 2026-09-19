@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image/color"
 	"strings"
+	"unicode"
 
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/vt"
@@ -362,11 +363,8 @@ func calculateGridHeight(term *vt.Emulator) int {
 }
 
 // populateCellBufDirect constructs and populates a CellBuf by streaming cells directly
-// from the terminal emulator into a single flat allocation. It eliminates intermediate
-// uv.Line slice allocations by reading scrollback rows and viewport rows separately:
-// - For y < scrollbackCount: read from scrollback lines (provided by emulator).
-// - For y >= scrollbackCount: read directly from emulator.CellAt(x, viewportY).
-// Soft wrap detection is performed inline at the right edge of each row to set CharSoftWrap.
+// from the terminal emulator into a single flat allocation. Soft wrap classification
+// uses the exclusion/inclusion pipeline defined in isSoftWrap.
 func populateCellBufDirect(term *vt.Emulator, width, height int) CellBuf {
 	buf := NewCellBuf(width, height)
 
@@ -389,26 +387,153 @@ func populateCellBufDirect(term *vt.Emulator, width, height int) CellBuf {
 				}
 				buf.cells[base+x] = convertUVCellToCell(uvCell)
 			}
-			// Scrollback.Push trims trailing empty cells; a full-width line was
-			// auto-wrapped at the right margin, not terminated by an explicit newline.
-			if len(line) == width {
-				buf.cells[base+width-1].Style = buf.cells[base+width-1].Style.AddAttribute(CharSoftWrap)
-			}
 		} else {
 			viewportY := y - scrollbackCount
 			for x := 0; x < width; x++ {
 				buf.cells[base+x] = convertUVCellToCell(term.CellAt(x, viewportY))
 			}
-			// Heuristic: a viewport row whose last cell carries visible content was
-			// likely terminated by autowrap rather than an explicit newline.
-			if last := term.CellAt(width-1, viewportY); last != nil && !last.IsZero() &&
-				last.Content != "" && last.Content != " " {
+		}
+
+		if y+1 < height {
+			e0 := buf.cells[base+width-1].R
+			e1 := rune(' ')
+			if width >= 2 {
+				e1 = buf.cells[base+width-2].R
+			}
+			s0 := rowRuneAt(y+1, 0, scrollbackCount, scrolledLines, term)
+			s1 := rowRuneAt(y+1, 1, scrollbackCount, scrolledLines, term)
+			s2 := rowRuneAt(y+1, 2, scrollbackCount, scrolledLines, term)
+			if isSoftWrap(e1, e0, s0, s1, s2) {
 				buf.cells[base+width-1].Style = buf.cells[base+width-1].Style.AddAttribute(CharSoftWrap)
 			}
 		}
 	}
 
 	return buf
+}
+
+// rowRuneAt returns the rune at column x of output row y, reading from scrollback
+// or the active viewport as appropriate.
+func rowRuneAt(y, x, scrollbackCount int, scrolledLines []uv.Line, term *vt.Emulator) rune {
+	if y < scrollbackCount {
+		line := scrolledLines[y]
+		if x >= len(line) {
+			return ' '
+		}
+		cell := &line[x]
+		if cell.IsZero() || cell.Content == "" {
+			return ' '
+		}
+		if runes := []rune(cell.Content); len(runes) > 0 {
+			return runes[0]
+		}
+		return ' '
+	}
+	cell := term.CellAt(x, y-scrollbackCount)
+	if cell == nil || cell.IsZero() || cell.Content == "" {
+		return ' '
+	}
+	if runes := []rune(cell.Content); len(runes) > 0 {
+		return runes[0]
+	}
+	return ' '
+}
+
+// isSoftWrap applies the exclusion and inclusion pipelines to decide whether the
+// boundary between row N (ending e1, e0) and row N+1 (starting s0, s1, s2) should
+// suppress the \r\n separator. Returns true for soft wrap, false for hard break.
+func isSoftWrap(e1, e0, s0, s1, s2 rune) bool {
+	// Exclusion 1: box-drawing or block-element glyphs.
+	if isBoxDrawing(e0) || isBoxDrawing(e1) || isBoxDrawing(s0) || isBoxDrawing(s1) {
+		return false
+	}
+	// Exclusion 2: bullet-list prefix on the next row.
+	if isBulletPrefix(s0, s1, s2) {
+		return false
+	}
+	// Exclusion 3: line divider (≥3 identical divider symbols).
+	if isDividerChar(s0) && s0 == s1 && s1 == s2 {
+		return false
+	}
+	// Exclusion 4: multi-space indentation or empty next row.
+	if isInlineWhitespace(s0) && isInlineWhitespace(s1) {
+		return false
+	}
+	// Exclusion 5: sentence-ending full stop; exception for flanked decimals.
+	if e0 == '.' {
+		if unicode.IsDigit(e1) && unicode.IsDigit(s0) {
+			return true // e.g. "3." / "1415" is a split decimal, not a sentence end
+		}
+		return false
+	}
+
+	// Inclusion P1: direct text-to-text fusion.
+	if isTextFusion(e0) && isTextFusion(s0) {
+		return true
+	}
+	// Inclusion P2a: row ends in inline whitespace after text content.
+	if isTextFusion(e1) && isInlineWhitespace(e0) && isTextFusion(s0) {
+		return true
+	}
+	// Inclusion P2b: row text runs into leading inline whitespace on next row.
+	if isTextFusion(e0) && isInlineWhitespace(s0) && isTextFusion(s1) {
+		return true
+	}
+
+	return false
+}
+
+// isBoxDrawing reports whether r is a Box Drawing (U+2500–U+257F) or Block Elements (U+2580–U+259F) rune.
+func isBoxDrawing(r rune) bool {
+	return (r >= 0x2500 && r <= 0x257F) || (r >= 0x2580 && r <= 0x259F)
+}
+
+// isInlineWhitespace reports whether r is whitespace that is not a hard line break.
+func isInlineWhitespace(r rune) bool {
+	if r == 0 || r == ' ' {
+		return true
+	}
+	return unicode.IsSpace(r) && r != '\r' && r != '\n' && r != '\f' && r != '\v'
+}
+
+// isTextFusion reports whether r belongs to C_text: letters (\p{L}), numbers (\p{N}),
+// emoji symbols/modifiers (So/Sk), or intra-paragraph punctuation (P_para).
+func isTextFusion(r rune) bool {
+	if unicode.IsLetter(r) || unicode.IsNumber(r) {
+		return true
+	}
+	// Box drawing and block elements share the So category with emoji; exclude them explicitly.
+	if !isBoxDrawing(r) && (unicode.Is(unicode.So, r) || unicode.Is(unicode.Sk, r)) {
+		return true
+	}
+	switch r {
+	case ',', '-', '\u2013', '\u2014',
+		'"', '\u201C', '\u201D',
+		'\'', '\u2018', '\u2019',
+		'(', ')', '[', ']',
+		':', ';', '/', '\\':
+		return true
+	}
+	return false
+}
+
+// isBulletPrefix reports whether s0, s1, s2 form a bullet-list item start.
+func isBulletPrefix(s0, s1, s2 rune) bool {
+	switch s0 {
+	case '-', '*', '\u2022', '+', '\u2013', '\u2014':
+	default:
+		return false
+	}
+	return isInlineWhitespace(s1) && !isInlineWhitespace(s2)
+}
+
+// isDividerChar reports whether r can form a repeated-divider run.
+func isDividerChar(r rune) bool {
+	switch r {
+	case '-', '*', '=', '~', '_', '#':
+		return true
+	}
+	return false
 }
 
 func convertUVCellToCell(cell *uv.Cell) Cell {

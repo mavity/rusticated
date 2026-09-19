@@ -5,6 +5,17 @@ import (
 	"testing"
 )
 
+// assertGridRunes checks the flat string against the CellBuf using i = y*W + x layout.
+func assertGridRunes(t *testing.T, buf CellBuf, expected string) {
+	t.Helper()
+	for i, want := range []rune(expected) {
+		x, y := i%buf.Width, i/buf.Width
+		if got := buf.Get(x, y).R; got != want {
+			t.Errorf("grid[%d] (%d,%d): want %q got %q", i, x, y, want, got)
+		}
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Phase 1a – Style bit-packing
 // ─────────────────────────────────────────────────────────────────────────────
@@ -78,14 +89,12 @@ func TestStyleMultipleFlags(t *testing.T) {
 	if s.Attributes() != want {
 		t.Errorf("after RemoveAttribute(CharItalic): want 0x%04X got 0x%04X", want, s.Attributes())
 	}
-	// Colors must survive attribute mutation.
 	if s.Foreground() != 0xFF0000 || s.Background() != 0x00FF00 {
 		t.Error("attribute mutation changed color fields")
 	}
 }
 
 func TestStyleDefaultResetFlagsCoexistWithColors(t *testing.T) {
-	// Reset flags occupy the attributes field; they must not corrupt the color fields.
 	s := NewStyle(0x123456, 0xABCDEF, CharResetForegroundDefault|CharResetBackgroundDefault)
 	if !s.HasAttribute(CharResetForegroundDefault) {
 		t.Error("CharResetForegroundDefault not set")
@@ -122,7 +131,6 @@ func TestNewCellBufDimensions(t *testing.T) {
 }
 
 func TestCellBufOutOfBoundsSilent(t *testing.T) {
-	// OOB Get must return zero Cell; OOB Set must be a silent no-op.
 	buf := NewCellBuf(3, 2)
 	cell := Cell{R: 'X', Style: NewStyle(0xFF0000, 0, CharBold)}
 
@@ -132,9 +140,8 @@ func TestCellBufOutOfBoundsSilent(t *testing.T) {
 		if got := buf.Get(x, y); got != (Cell{}) {
 			t.Errorf("Get(%d,%d): want zero Cell, got non-zero", x, y)
 		}
-		buf.Set(x, y, cell) // must not panic; inner state must be unchanged
+		buf.Set(x, y, cell)
 	}
-	// All in-bounds cells must remain zero after the OOB Sets above.
 	for y := 0; y < buf.Height; y++ {
 		for x := 0; x < buf.Width; x++ {
 			if buf.Get(x, y) != (Cell{}) {
@@ -175,10 +182,9 @@ func TestCellBufFillInsideBounds(t *testing.T) {
 }
 
 func TestCellBufFillNegativeOffsetClipping(t *testing.T) {
-	// Rect starting before origin: only the in-bounds sub-region is filled.
 	buf := NewCellBuf(3, 3)
 	mark := Cell{R: '+'}
-	buf.Fill(Rect{X: -1, Y: -1, W: 3, H: 3}, mark) // effective area: x∈[0,1], y∈[0,1]
+	buf.Fill(Rect{X: -1, Y: -1, W: 3, H: 3}, mark)
 	if buf.Get(0, 0) != mark {
 		t.Error("(0,0) should be filled by clipped rect")
 	}
@@ -188,7 +194,6 @@ func TestCellBufFillNegativeOffsetClipping(t *testing.T) {
 }
 
 func TestCellBufFillOverflowClipping(t *testing.T) {
-	// Rect extending past the bottom-right edge: only (2,2) lands inside a 3x3 buf.
 	buf := NewCellBuf(3, 3)
 	mark := Cell{R: '+'}
 	buf.Fill(Rect{X: 2, Y: 2, W: 5, H: 5}, mark)
@@ -201,7 +206,6 @@ func TestCellBufFillOverflowClipping(t *testing.T) {
 }
 
 func TestCellBufBlitSkipsZeroCells(t *testing.T) {
-	// Zero cells in src must not overwrite active cells in dst.
 	dst := NewCellBuf(3, 1)
 	active := Cell{R: 'A', Style: NewStyle(0xFF0000, 0, 0)}
 	for x := 0; x < 3; x++ {
@@ -209,7 +213,7 @@ func TestCellBufBlitSkipsZeroCells(t *testing.T) {
 	}
 
 	src := NewCellBuf(3, 1)
-	src.Set(1, 0, Cell{R: 'B'}) // only column 1 is non-zero
+	src.Set(1, 0, Cell{R: 'B'})
 
 	dst.Blit(src, 0, 0)
 
@@ -225,7 +229,6 @@ func TestCellBufBlitSkipsZeroCells(t *testing.T) {
 }
 
 func TestCellBufBlitOutOfBoundsOffset(t *testing.T) {
-	// Blit with an offset that places src entirely outside dst must not panic or mutate dst.
 	dst := NewCellBuf(3, 3)
 	src := NewCellBuf(2, 2)
 	src.Set(0, 0, Cell{R: 'X'})
@@ -291,18 +294,6 @@ func TestRgbTo256ColorCubePrimaries(t *testing.T) {
 // Phase 2 – FromANSI structural & height-sizing correctness
 // ─────────────────────────────────────────────────────────────────────────────
 
-// assertGridRunes checks that the flat string expected maps onto the buf grid
-// using the layout i = y*W + x (left-to-right, top-to-bottom).
-func assertGridRunes(t *testing.T, buf CellBuf, expected string) {
-	t.Helper()
-	for i, want := range []rune(expected) {
-		x, y := i%buf.Width, i/buf.Width
-		if got := buf.Get(x, y).R; got != want {
-			t.Errorf("grid[%d] (%d,%d): want %q got %q", i, x, y, want, got)
-		}
-	}
-}
-
 func TestFromANSIEmptyInputs(t *testing.T) {
 	if buf := FromANSI(nil, 10); buf.Width != 10 || buf.Height != 0 {
 		t.Errorf("nil lines: want 10×0, got %d×%d", buf.Width, buf.Height)
@@ -310,7 +301,6 @@ func TestFromANSIEmptyInputs(t *testing.T) {
 	if buf := FromANSI([]string{}, 10); buf.Width != 10 || buf.Height != 0 {
 		t.Errorf("empty slice: want 10×0, got %d×%d", buf.Width, buf.Height)
 	}
-	// A single empty string produces no touched rows → height 0.
 	if buf := FromANSI([]string{""}, 10); buf.Height != 0 {
 		t.Errorf("single empty string: want height 0, got %d", buf.Height)
 	}
@@ -327,7 +317,7 @@ func TestFromANSISingleChar(t *testing.T) {
 }
 
 func TestFromANSIWrapsToMultipleRows(t *testing.T) {
-	// "Hello World" (11 chars) at width 5 → 3 rows: "Hello", " Worl", "d".
+	// "Hello World" (11 chars) at width 5 → 3 rows.
 	buf := FromANSI([]string{"Hello World"}, 5)
 	if buf.Height != 3 {
 		t.Fatalf("want height 3, got %d", buf.Height)
@@ -336,7 +326,6 @@ func TestFromANSIWrapsToMultipleRows(t *testing.T) {
 }
 
 func TestFromANSIExactWidthBoundary(t *testing.T) {
-	// A string whose length exactly equals width must produce exactly 1 row.
 	const w = 10
 	buf := FromANSI([]string{strings.Repeat("x", w)}, w)
 	if buf.Height != 1 {
@@ -345,7 +334,6 @@ func TestFromANSIExactWidthBoundary(t *testing.T) {
 }
 
 func TestFromANSIOneCharOverWidth(t *testing.T) {
-	// A string one char longer than width must produce exactly 2 rows.
 	const w = 10
 	buf := FromANSI([]string{strings.Repeat("x", w+1)}, w)
 	if buf.Height != 2 {
@@ -354,7 +342,6 @@ func TestFromANSIOneCharOverWidth(t *testing.T) {
 }
 
 func TestFromANSILeadingNewlinePreservesEmptyRow(t *testing.T) {
-	// The top empty row must be kept; trimTopEmptyLines must not apply.
 	buf := FromANSI([]string{"\r\nABC"}, 10)
 	if buf.Height != 2 {
 		t.Fatalf("leading newline: want height 2, got %d", buf.Height)
@@ -371,8 +358,7 @@ func TestFromANSILeadingNewlinePreservesEmptyRow(t *testing.T) {
 }
 
 func TestFromANSIScrollbackTotalHeight(t *testing.T) {
-	// 30 one-character lines exceed the 24-row viewport, pushing 6 into scrollback.
-	// Total height must equal the full line count.
+	// 30 one-character lines exceed the 24-row viewport by 6; total height must be 30.
 	const lineCount = 30
 	lines := make([]string, lineCount)
 	for i := range lines {
@@ -427,7 +413,7 @@ func TestFromANSI256ColorForeground(t *testing.T) {
 }
 
 func TestFromANSITruecolorBackground(t *testing.T) {
-	// \x1b[48;2;10;20;30m = direct 24-bit background (10, 20, 30) = 0x0A141E.
+	// \x1b[48;2;10;20;30m = direct 24-bit background 0x0A141E.
 	const wantBg = Color(0x0A141E)
 	buf := FromANSI([]string{"\x1b[48;2;10;20;30mX"}, 20)
 	if buf.Height == 0 {
@@ -443,17 +429,17 @@ func TestFromANSITruecolorBackground(t *testing.T) {
 }
 
 func TestFromANSISGRResetIsolation(t *testing.T) {
-	// Cells written under \x1b[31m carry explicit fg; cells after \x1b[0m carry reset-default.
+	// Cells inside \x1b[31m carry explicit fg; cells after \x1b[0m carry reset-default.
 	buf := FromANSI([]string{"\x1b[31mRed\x1b[0m Plain"}, 20)
 	if buf.Height == 0 {
 		t.Fatal("expected non-empty buffer")
 	}
-	for x := 0; x < 3; x++ { // 'R','e','d'
+	for x := 0; x < 3; x++ {
 		if buf.Get(x, 0).Style.HasAttribute(CharResetForegroundDefault) {
 			t.Errorf("col %d: should have explicit fg inside colored span", x)
 		}
 	}
-	for x := 3; x <= 8; x++ { // ' ','P','l','a','i','n'
+	for x := 3; x <= 8; x++ {
 		if !buf.Get(x, 0).Style.HasAttribute(CharResetForegroundDefault) {
 			t.Errorf("col %d: should have CharResetForegroundDefault after SGR reset", x)
 		}
@@ -472,7 +458,6 @@ func TestFromANSICursorAbsolutePositioning(t *testing.T) {
 			t.Errorf("(%d,1): want %q, got %q", x, want, got)
 		}
 	}
-	// Columns before the text on row 1 must be blank.
 	for x := 0; x < 2; x++ {
 		r := buf.Get(x, 1).R
 		if r != 0 && r != ' ' {
@@ -483,7 +468,7 @@ func TestFromANSICursorAbsolutePositioning(t *testing.T) {
 
 func TestFromANSICursorRelativeHorizontalMove(t *testing.T) {
 	// Move right 5, write 'A', move left 2, write 'B'.
-	// Expected: cols 0-3 blank, col 4 = 'B', col 5 = 'A'.
+	// Expected: cols 0–3 blank, col 4 = 'B', col 5 = 'A'.
 	buf := FromANSI([]string{"\x1b[5CA\x1b[2DB"}, 20)
 	if buf.Height == 0 {
 		t.Fatal("expected non-empty buffer")
@@ -504,7 +489,6 @@ func TestFromANSICursorRelativeHorizontalMove(t *testing.T) {
 
 func TestFromANSIEraseInLine(t *testing.T) {
 	// Write "Hello", move cursor left 1, erase to EOL.
-	// Cells 0-3 keep H,e,l,l; cell 4 (formerly 'o') and beyond are cleared.
 	buf := FromANSI([]string{"Hello\x1b[1D\x1b[K"}, 20)
 	if buf.Height == 0 {
 		t.Fatal("expected non-empty buffer")
@@ -521,8 +505,7 @@ func TestFromANSIEraseInLine(t *testing.T) {
 }
 
 func TestFromANSISoftWrapMarkedOnAutoWrappedRow(t *testing.T) {
-	// A string longer than width causes the first row to be auto-wrapped.
-	// The rightmost cell of that row must carry CharSoftWrap.
+	// A string longer than width causes the first row to auto-wrap.
 	const w = 10
 	buf := FromANSI([]string{strings.Repeat("x", w+5)}, w)
 	if buf.Height < 2 {
@@ -534,9 +517,9 @@ func TestFromANSISoftWrapMarkedOnAutoWrappedRow(t *testing.T) {
 }
 
 func TestFromANSIHardBreakNoSoftWrap(t *testing.T) {
-	// Explicitly newlined lines that don't fill the right margin must NOT carry CharSoftWrap.
+	// Short explicit lines that don't reach the right margin must not get CharSoftWrap.
 	const w = 10
-	buf := FromANSI([]string{"12345", "67890"}, w) // each line is 5 chars at width 10
+	buf := FromANSI([]string{"12345", "67890"}, w)
 	if buf.Height != 2 {
 		t.Fatalf("want height 2, got %d", buf.Height)
 	}
@@ -545,5 +528,430 @@ func TestFromANSIHardBreakNoSoftWrap(t *testing.T) {
 	}
 	if buf.Get(w-1, 1).Style.HasAttribute(CharSoftWrap) {
 		t.Error("row 1: should NOT have CharSoftWrap (line ends before right margin)")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 4a – Soft-wrap character classifiers
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestIsBoxDrawingRanges(t *testing.T) {
+	cases := []struct {
+		r    rune
+		want bool
+	}{
+		{0x24FF, false}, // just before box drawing
+		{0x2500, true},  // first box drawing
+		{0x2550, true},  // mid box drawing
+		{0x257F, true},  // last box drawing
+		{0x2580, true},  // first block element
+		{0x2590, true},  // mid block element
+		{0x259F, true},  // last block element
+		{0x25A0, false}, // just after block elements
+		{'A', false},
+		{'-', false},
+		{' ', false},
+	}
+	for _, tc := range cases {
+		if got := isBoxDrawing(tc.r); got != tc.want {
+			t.Errorf("isBoxDrawing(U+%04X): want %v got %v", tc.r, tc.want, got)
+		}
+	}
+}
+
+func TestIsInlineWhitespace(t *testing.T) {
+	cases := []struct {
+		r    rune
+		want bool
+	}{
+		{0, true},        // null / empty cell
+		{' ', true},      // standard space
+		{'\t', true},     // horizontal tab
+		{'\u00A0', true}, // non-breaking space
+		{'\r', false},
+		{'\n', false},
+		{'\f', false},
+		{'\v', false},
+		{'a', false},
+		{'.', false},
+		{'-', false},
+	}
+	for _, tc := range cases {
+		if got := isInlineWhitespace(tc.r); got != tc.want {
+			t.Errorf("isInlineWhitespace(%q): want %v got %v", tc.r, tc.want, got)
+		}
+	}
+}
+
+func TestIsTextFusion(t *testing.T) {
+	cases := []struct {
+		r    rune
+		want bool
+		desc string
+	}{
+		{'a', true, "ASCII letter"},
+		{'Z', true, "uppercase letter"},
+		{'é', true, "accented letter"},
+		{'中', true, "CJK ideograph"},
+		{'5', true, "digit"},
+		{'²', true, "superscript (No category)"},
+		{'\U0001F600', true, "emoji (So category)"},
+		{',', true, "comma"},
+		{'-', true, "hyphen"},
+		{'\u2013', true, "en-dash"},
+		{'\u2014', true, "em-dash"},
+		{'"', true, "double quote"},
+		{'\'', true, "apostrophe"},
+		{'\u201C', true, "left curly double quote"},
+		{'\u201D', true, "right curly double quote"},
+		{'\u2018', true, "left curly single quote"},
+		{'\u2019', true, "right curly single quote"},
+		{'(', true, "left paren"},
+		{')', true, "right paren"},
+		{'[', true, "left bracket"},
+		{']', true, "right bracket"},
+		{':', true, "colon"},
+		{';', true, "semicolon"},
+		{'/', true, "forward slash"},
+		{'\\', true, "backslash"},
+		{' ', false, "space"},
+		{'.', false, "period"},
+		{'!', false, "exclamation"},
+		{'?', false, "question mark"},
+		{'@', false, "at sign"},
+		{0x2500, false, "box drawing char"},
+	}
+	for _, tc := range cases {
+		if got := isTextFusion(tc.r); got != tc.want {
+			t.Errorf("isTextFusion(%q) [%s]: want %v got %v", tc.r, tc.desc, tc.want, got)
+		}
+	}
+}
+
+func TestIsBulletPrefixPatterns(t *testing.T) {
+	cases := []struct {
+		s0, s1, s2 rune
+		want       bool
+		desc       string
+	}{
+		{'-', ' ', 'x', true, "hyphen bullet"},
+		{'*', ' ', 'a', true, "asterisk bullet"},
+		{'\u2022', ' ', 'z', true, "• bullet"},
+		{'+', ' ', '1', true, "plus bullet"},
+		{'\u2013', ' ', 'b', true, "en-dash bullet"},
+		{'\u2014', ' ', 'c', true, "em-dash bullet"},
+		{'-', '\t', 'x', true, "tab as bullet spacer"},
+		{'-', 'x', 'y', false, "s1 not whitespace"},
+		{'-', ' ', ' ', false, "s2 is whitespace"},
+		{'a', ' ', 'x', false, "s0 not bullet char"},
+		{'.', ' ', 'x', false, "period not bullet"},
+	}
+	for _, tc := range cases {
+		if got := isBulletPrefix(tc.s0, tc.s1, tc.s2); got != tc.want {
+			t.Errorf("isBulletPrefix(%q,%q,%q) [%s]: want %v got %v",
+				tc.s0, tc.s1, tc.s2, tc.desc, tc.want, got)
+		}
+	}
+}
+
+func TestIsDividerCharSet(t *testing.T) {
+	for _, r := range []rune{'-', '*', '=', '~', '_', '#'} {
+		if !isDividerChar(r) {
+			t.Errorf("isDividerChar(%q): want true", r)
+		}
+	}
+	for _, r := range []rune{'a', '.', '|', '+', '!', '/', '\\', ' ', '\u2013'} {
+		if isDividerChar(r) {
+			t.Errorf("isDividerChar(%q): want false", r)
+		}
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 4b – isSoftWrap exclusion and inclusion pipeline
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestIsSoftWrapExclusionBoxDrawing(t *testing.T) {
+	const box = rune(0x2500)
+	const l = rune('a')
+	cases := []struct {
+		e1, e0, s0, s1, s2 rune
+		want               bool
+	}{
+		{box, l, l, l, l, false}, // e1 is box drawing
+		{l, box, l, l, l, false}, // e0 is box drawing
+		{l, l, box, l, l, false}, // s0 is box drawing
+		{l, l, l, box, l, false}, // s1 is box drawing
+		// s2 is NOT checked by exclusion 1; P1 fires on letter/letter
+		{l, l, l, l, box, true},
+	}
+	for i, tc := range cases {
+		if got := isSoftWrap(tc.e1, tc.e0, tc.s0, tc.s1, tc.s2); got != tc.want {
+			t.Errorf("case %d: want %v got %v", i, tc.want, got)
+		}
+	}
+}
+
+func TestIsSoftWrapExclusionBulletPrefix(t *testing.T) {
+	cases := []struct {
+		e1, e0, s0, s1, s2 rune
+		want               bool
+		desc               string
+	}{
+		{'x', 'a', '-', ' ', 'i', false, "hyphen bullet"},
+		{'x', 'a', '*', ' ', 'i', false, "asterisk bullet"},
+		{'x', 'a', '\u2022', ' ', 'i', false, "• bullet"},
+		// s1 not whitespace → bullet exclusion skipped → P1 fires on 'a'/'-'
+		{'x', 'a', '-', 'x', 'i', true, "s1 not whitespace"},
+		// s2 is whitespace → bullet exclusion skipped → P1 fires on 'a'/'-'
+		{'x', 'a', '-', ' ', ' ', true, "s2 is whitespace"},
+		// exclusion 2 fires before P2a; without it P2a would return true
+		{'a', ' ', '-', ' ', 'i', false, "bullet overrides P2a"},
+	}
+	for _, tc := range cases {
+		if got := isSoftWrap(tc.e1, tc.e0, tc.s0, tc.s1, tc.s2); got != tc.want {
+			t.Errorf("[%s] isSoftWrap(%q,%q,%q,%q,%q): want %v got %v",
+				tc.desc, tc.e1, tc.e0, tc.s0, tc.s1, tc.s2, tc.want, got)
+		}
+	}
+}
+
+func TestIsSoftWrapExclusionLineDivider(t *testing.T) {
+	cases := []struct {
+		e1, e0, s0, s1, s2 rune
+		want               bool
+		desc               string
+	}{
+		{'x', 'a', '-', '-', '-', false, "---"},
+		{'x', 'a', '=', '=', '=', false, "==="},
+		{'x', 'a', '*', '*', '*', false, "***"},
+		{'x', 'a', '~', '~', '~', false, "~~~"},
+		{'x', 'a', '_', '_', '_', false, "___"},
+		{'x', 'a', '#', '#', '#', false, "###"},
+		// Only 2 repeated chars: not a divider sequence
+		{'x', 'a', '-', '-', 'x', true, "-- then text"},
+		// Mixed: not a divider
+		{'x', 'a', '-', '=', '-', true, "mixed symbols"},
+	}
+	for _, tc := range cases {
+		if got := isSoftWrap(tc.e1, tc.e0, tc.s0, tc.s1, tc.s2); got != tc.want {
+			t.Errorf("[%s] want %v got %v", tc.desc, tc.want, got)
+		}
+	}
+}
+
+func TestIsSoftWrapExclusionIndentation(t *testing.T) {
+	cases := []struct {
+		e1, e0, s0, s1, s2 rune
+		want               bool
+		desc               string
+	}{
+		{'x', 'a', ' ', ' ', 'x', false, "double space indent"},
+		{'x', 'a', ' ', ' ', ' ', false, "all spaces (empty row)"},
+		{'x', 'a', '\t', '\t', 'x', false, "double tab indent"},
+		// Single leading space: s1 is non-whitespace → exclusion 4 does not fire → P2b fires
+		{'x', 'a', ' ', 'b', 'c', true, "single leading space → P2b"},
+	}
+	for _, tc := range cases {
+		if got := isSoftWrap(tc.e1, tc.e0, tc.s0, tc.s1, tc.s2); got != tc.want {
+			t.Errorf("[%s] want %v got %v", tc.desc, tc.want, got)
+		}
+	}
+}
+
+func TestIsSoftWrapExclusionFullStop(t *testing.T) {
+	cases := []struct {
+		e1, e0, s0, s1, s2 rune
+		want               bool
+		desc               string
+	}{
+		{'a', '.', 'N', 'e', 'x', false, "sentence end"},
+		{'d', '.', 'W', 'o', 'r', false, "word.Word"},
+		// Flanked decimal exception: both neighbouring chars are digits
+		{'3', '.', '1', '4', '1', true, "flanked decimal 3./1..."},
+		{'0', '.', '5', '0', '0', true, "flanked decimal 0./5..."},
+		// Not flanked: one side is a non-digit
+		{'a', '.', '5', '0', '0', false, "e1 not digit"},
+		{'3', '.', 'a', 'b', 'c', false, "s0 not digit"},
+	}
+	for _, tc := range cases {
+		if got := isSoftWrap(tc.e1, tc.e0, tc.s0, tc.s1, tc.s2); got != tc.want {
+			t.Errorf("[%s] isSoftWrap(%q,%q,%q,...): want %v got %v",
+				tc.desc, tc.e1, tc.e0, tc.s0, tc.want, got)
+		}
+	}
+}
+
+func TestIsSoftWrapInclusionP1(t *testing.T) {
+	cases := []struct {
+		e1, e0, s0, s1, s2 rune
+		want               bool
+		desc               string
+	}{
+		{'x', 'a', 'b', 'c', 'd', true, "letter–letter"},
+		{'x', 'a', '1', '2', '3', true, "letter–digit"},
+		{'x', '1', 'a', 'b', 'c', true, "digit–letter"},
+		{'x', ',', 'a', 'b', 'c', true, "para-punct–letter"},
+		{'x', 'a', ',', 'b', 'c', true, "letter–para-punct"},
+		// e0 not C_text: P1 and P2b fail; P2a also fails (e0 not S_inline)
+		{'x', '!', 'a', 'b', 'c', false, "e0='!' not C_text"},
+		// s0 not C_text and not S_inline: no inclusion rule fires
+		{'x', 'a', '!', 'b', 'c', false, "s0='!' not C_text"},
+	}
+	for _, tc := range cases {
+		if got := isSoftWrap(tc.e1, tc.e0, tc.s0, tc.s1, tc.s2); got != tc.want {
+			t.Errorf("[%s] isSoftWrap(%q,%q,%q,...): want %v got %v",
+				tc.desc, tc.e1, tc.e0, tc.s0, tc.want, got)
+		}
+	}
+}
+
+func TestIsSoftWrapInclusionP2a(t *testing.T) {
+	// P2a: e1∈C_text, e0∈S_inline, s0∈C_text
+	cases := []struct {
+		e1, e0, s0, s1, s2 rune
+		want               bool
+		desc               string
+	}{
+		{'a', ' ', 'b', 'c', 'd', true, "letter–space–letter"},
+		{'1', ' ', 'a', 'b', 'c', true, "digit–space–letter"},
+		{' ', ' ', 'b', 'c', 'd', false, "e1 space: not C_text"},
+		{'a', ' ', '!', 'b', 'c', false, "s0 '!': not C_text"},
+	}
+	for _, tc := range cases {
+		if got := isSoftWrap(tc.e1, tc.e0, tc.s0, tc.s1, tc.s2); got != tc.want {
+			t.Errorf("[%s] want %v got %v", tc.desc, tc.want, got)
+		}
+	}
+}
+
+func TestIsSoftWrapInclusionP2b(t *testing.T) {
+	// P2b: e0∈C_text, s0∈S_inline, s1∈C_text
+	cases := []struct {
+		e1, e0, s0, s1, s2 rune
+		want               bool
+		desc               string
+	}{
+		{'x', 'a', ' ', 'b', 'c', true, "letter–space–letter"},
+		{'x', 'a', '\u00A0', 'b', 'c', true, "letter–NBSP–letter"},
+		// e0 not C_text: P2b fails
+		{'x', '!', ' ', 'b', 'c', false, "e0 '!' not C_text"},
+		// double space triggers exclusion 4 before P2b is reached
+		{'x', 'a', ' ', ' ', 'b', false, "double space triggers exclusion 4"},
+	}
+	for _, tc := range cases {
+		if got := isSoftWrap(tc.e1, tc.e0, tc.s0, tc.s1, tc.s2); got != tc.want {
+			t.Errorf("[%s] want %v got %v", tc.desc, tc.want, got)
+		}
+	}
+}
+
+func TestIsSoftWrapFallsThrough(t *testing.T) {
+	// No exclusion fires and no inclusion rule matches → hard break.
+	cases := []struct {
+		e1, e0, s0, s1, s2 rune
+		desc               string
+	}{
+		{'x', '!', '?', 'a', 'b', "! and ? not in C_text"},
+		{'x', '@', 'a', 'b', 'c', "@ not in C_text"},
+		{' ', ' ', 'a', 'b', 'c', "both trailing spaces: no inclusion rule fires"},
+	}
+	for _, tc := range cases {
+		if got := isSoftWrap(tc.e1, tc.e0, tc.s0, tc.s1, tc.s2); got {
+			t.Errorf("[%s] isSoftWrap(%q,%q,...): want false got true", tc.desc, tc.e1, tc.e0)
+		}
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 4c – FromANSI soft-wrap content-detection integration
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestFromANSISoftWrapP1AtRightEdge(t *testing.T) {
+	// "Hello" fills width=5 exactly → e0='o', s0='w' → P1 fires.
+	buf := FromANSI([]string{"Hello", "world"}, 5)
+	if buf.Height != 2 {
+		t.Fatalf("want height 2, got %d", buf.Height)
+	}
+	if !buf.Get(4, 0).Style.HasAttribute(CharSoftWrap) {
+		t.Error("row 0 right edge: want CharSoftWrap (P1 text fusion)")
+	}
+}
+
+func TestFromANSISoftWrapP2aOneTrailingSpace(t *testing.T) {
+	// "Hello" at width=6 leaves one trailing space → e1='o', e0=' ', s0='w' → P2a fires.
+	buf := FromANSI([]string{"Hello", "world"}, 6)
+	if buf.Height != 2 {
+		t.Fatalf("want height 2, got %d", buf.Height)
+	}
+	if !buf.Get(5, 0).Style.HasAttribute(CharSoftWrap) {
+		t.Error("row 0 right edge: want CharSoftWrap (P2a trailing space)")
+	}
+}
+
+func TestFromANSIHardBreakBulletListNextRow(t *testing.T) {
+	// Row 0 ends flush with "text" (e0='t'); row 1 starts "- item" → exclusion 2 fires.
+	// Without the bullet guard, P1 would fire since isTextFusion('t') && isTextFusion('-').
+	buf := FromANSI([]string{"text", "- item"}, 4)
+	if buf.Height < 2 {
+		t.Fatalf("want height >= 2, got %d", buf.Height)
+	}
+	if buf.Get(3, 0).Style.HasAttribute(CharSoftWrap) {
+		t.Error("row 0: bullet prefix on next row must suppress CharSoftWrap")
+	}
+}
+
+func TestFromANSIHardBreakLineDividerNextRow(t *testing.T) {
+	// Row 1 starts "---" → exclusion 3 fires.
+	buf := FromANSI([]string{"text", "---"}, 4)
+	if buf.Height < 2 {
+		t.Fatalf("want height >= 2, got %d", buf.Height)
+	}
+	if buf.Get(3, 0).Style.HasAttribute(CharSoftWrap) {
+		t.Error("row 0: line divider on next row must suppress CharSoftWrap")
+	}
+}
+
+func TestFromANSIHardBreakDoubleIndentNextRow(t *testing.T) {
+	// Row 1 starts "  ok" (two leading spaces) → exclusion 4 fires.
+	buf := FromANSI([]string{"text", "  ok"}, 4)
+	if buf.Height < 2 {
+		t.Fatalf("want height >= 2, got %d", buf.Height)
+	}
+	if buf.Get(3, 0).Style.HasAttribute(CharSoftWrap) {
+		t.Error("row 0: double-space indent on next row must suppress CharSoftWrap")
+	}
+}
+
+func TestFromANSIHardBreakSentenceEndPeriod(t *testing.T) {
+	// "end." → e0='.', e1='d'; next row starts with a letter → exclusion 5 fires.
+	buf := FromANSI([]string{"end.", "Next"}, 4)
+	if buf.Height < 2 {
+		t.Fatalf("want height >= 2, got %d", buf.Height)
+	}
+	if buf.Get(3, 0).Style.HasAttribute(CharSoftWrap) {
+		t.Error("row 0: sentence-ending period must suppress CharSoftWrap")
+	}
+}
+
+func TestFromANSISoftWrapFlankDecimal(t *testing.T) {
+	// "3." / "14": e0='.', e1='3', s0='1' → flanked decimal exception → soft wrap.
+	buf := FromANSI([]string{"3.", "14"}, 2)
+	if buf.Height < 2 {
+		t.Fatalf("want height >= 2, got %d", buf.Height)
+	}
+	if !buf.Get(1, 0).Style.HasAttribute(CharSoftWrap) {
+		t.Error("row 0: flanked decimal must set CharSoftWrap")
+	}
+}
+
+func TestFromANSIHardBreakBoxDrawingAtEdge(t *testing.T) {
+	// Row 0 ends with U+2500 (─) → exclusion 1 fires.
+	buf := FromANSI([]string{"a\u2500", "text"}, 2)
+	if buf.Height < 2 {
+		t.Fatalf("want height >= 2, got %d", buf.Height)
+	}
+	if buf.Get(1, 0).Style.HasAttribute(CharSoftWrap) {
+		t.Error("row 0: box-drawing char at right edge must suppress CharSoftWrap")
 	}
 }
