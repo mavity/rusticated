@@ -92,13 +92,12 @@ type CellBuf struct {
 }
 
 func NewCellBuf(w, h int) CellBuf {
-	if w < 0 {
-		w = 0
+	// If either w or h is negative, let it panic
+	sz := w * h
+	if w < 0 && h < 0 {
+		sz = -sz
 	}
-	if h < 0 {
-		h = 0
-	}
-	return CellBuf{Width: w, Height: h, cells: make([]Cell, w*h)}
+	return CellBuf{Width: w, Height: h, cells: make([]Cell, sz)}
 }
 
 func (b *CellBuf) index(x, y int) int {
@@ -309,13 +308,6 @@ func rgbTo256(r, g, b byte) byte {
 // leading blank lines. Intermediate row slice allocations are eliminated by
 // direct streaming conversion into a single flat CellBuf allocation.
 func FromANSI(lines []string, width int) CellBuf {
-	if width <= 0 {
-		return NewCellBuf(0, 0)
-	}
-	if len(lines) == 0 {
-		return NewCellBuf(width, 0)
-	}
-
 	term := vt.NewEmulator(width, 24)
 
 	for i, line := range lines {
@@ -343,10 +335,6 @@ func FromANSI(lines []string, width int) CellBuf {
 //
 // Time complexity: O(24) or O(height of touched viewport), no intermediate allocations.
 func calculateGridHeight(term *vt.Emulator) int {
-	if term == nil {
-		return 0
-	}
-
 	// Check for scrollback: if present, total height is scrollback + active viewport.
 	if sb := term.Scrollback(); sb.Len() > 0 {
 		return sb.Len() + term.Height()
@@ -476,10 +464,6 @@ func convertUVStyleToStyle(style uv.Style) Style {
 }
 
 func parseUVColor(c color.Color) Color {
-	if c == nil {
-		return 0
-	}
-
 	r, g, b, _ := color.RGBAModel.Convert(c).RGBA()
 	return Color(uint32(r>>8)<<16 | uint32(g>>8)<<8 | uint32(b>>8))
 }
