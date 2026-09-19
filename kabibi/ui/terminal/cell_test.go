@@ -955,3 +955,120 @@ func TestFromANSIHardBreakBoxDrawingAtEdge(t *testing.T) {
 		t.Error("row 0: box-drawing char at right edge must suppress CharSoftWrap")
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 5 – ToANSI state machine & emission
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestToANSITrailingColoredSpacesRetained(t *testing.T) {
+	// Spaces whose style carries an explicit non-default background must survive trimming.
+	// 0x800000 = ansi16RGB[1] → tier 16, BG SGR 41.
+	buf := NewCellBuf(5, 1)
+	redBG := NewStyle(0, 0x800000, CharResetForegroundDefault)
+	for x := 0; x < 5; x++ {
+		buf.Set(x, 0, Cell{R: ' ', Style: redBG})
+	}
+	out := ToANSI(buf)
+	if !strings.Contains(out, "\x1b[41m") {
+		t.Errorf("expected tier-16 bg SGR 41 in output, got %q", out)
+	}
+	if strings.Count(out, " ") != 5 {
+		t.Errorf("want 5 spaces in output, got %d (output %q)", strings.Count(out, " "), out)
+	}
+}
+
+func TestToANSISoftWrapSuppressesNewline(t *testing.T) {
+	// CharSoftWrap on the last cell of row 0 must suppress the \r\n separator.
+	const w = 5
+	buf := NewCellBuf(w, 2)
+	base := NewStyle(0, 0, CharResetForegroundDefault|CharResetBackgroundDefault)
+	for i, ch := range "Hello" {
+		s := base
+		if i == w-1 {
+			s = s.AddAttribute(CharSoftWrap)
+		}
+		buf.Set(i, 0, Cell{R: ch, Style: s})
+	}
+	for i, ch := range "World" {
+		buf.Set(i, 1, Cell{R: ch, Style: base})
+	}
+	out := ToANSI(buf)
+	if strings.Contains(out, "Hello\r\n") {
+		t.Error("soft-wrapped row must not emit \\r\\n after its content")
+	}
+	if !strings.Contains(out, "Hello") || !strings.Contains(out, "World") {
+		t.Error("both row contents must appear in output")
+	}
+}
+
+func TestToANSITier16ColorEmission(t *testing.T) {
+	// ansi16RGB[0] = 0x000000 → FG SGR 30 (no 38;5 or 38;2).
+	buf := NewCellBuf(1, 1)
+	buf.Set(0, 0, Cell{R: 'X', Style: NewStyle(0x000000, 0, CharResetBackgroundDefault)})
+	out := ToANSI(buf)
+	if !strings.Contains(out, "\x1b[30m") {
+		t.Errorf("pure black fg: want \\x1b[30m, got %q", out)
+	}
+	if strings.Contains(out, "38;5") || strings.Contains(out, "38;2") {
+		t.Errorf("tier-16 color must not emit 256-color or truecolor prefix: %q", out)
+	}
+
+	// ansi16RGB[15] = 0xFFFFFF → FG SGR 97 (index 15 ≥ 8 → 90 + (15-8) = 97).
+	buf2 := NewCellBuf(1, 1)
+	buf2.Set(0, 0, Cell{R: 'Y', Style: NewStyle(0xFFFFFF, 0, CharResetBackgroundDefault)})
+	out2 := ToANSI(buf2)
+	if !strings.Contains(out2, "\x1b[97m") {
+		t.Errorf("pure white fg: want \\x1b[97m, got %q", out2)
+	}
+}
+
+func TestToANSIFGResetPreservesBGPlane(t *testing.T) {
+	// Resetting FG (\x1b[39m) must not emit a new BG code.
+	// 0xFF0000 = ansi16RGB[9]  → FG SGR 91; BG SGR 101
+	// 0x0000FF = ansi16RGB[12] → FG SGR 94; BG SGR 104
+	buf := NewCellBuf(3, 1)
+	both := NewStyle(0xFF0000, 0x0000FF, 0)
+	bgOnly := NewStyle(0, 0x0000FF, CharResetForegroundDefault)
+	buf.Set(0, 0, Cell{R: 'A', Style: both})
+	buf.Set(1, 0, Cell{R: 'B', Style: bgOnly})
+	buf.Set(2, 0, Cell{R: 'C', Style: bgOnly})
+	out := ToANSI(buf)
+	if strings.Count(out, "\x1b[39m") != 1 {
+		t.Errorf("expected exactly one FG-reset code: %q", out)
+	}
+	// BG blue is set once for A and must not be re-emitted for B or C.
+	if strings.Count(out, "\x1b[104m") != 1 {
+		t.Errorf("expected exactly one BG-blue code \\x1b[104m: %q", out)
+	}
+}
+
+func TestToANSIFromANSIRoundTrip(t *testing.T) {
+	// A styled buffer round-tripped through ToANSI → FromANSI must preserve runes and key attrs.
+	orig := FromANSI([]string{"\x1b[1;31mHi\x1b[0m"}, 10)
+	if orig.Height == 0 {
+		t.Fatal("expected non-empty original buffer")
+	}
+	s := strings.TrimSuffix(ToANSI(orig), "\r\n")
+	rt := FromANSI([]string{s}, orig.Width)
+	if rt.Height != orig.Height {
+		t.Fatalf("height mismatch: orig %d rt %d", orig.Height, rt.Height)
+	}
+	for y := 0; y < orig.Height; y++ {
+		for x := 0; x < orig.Width; x++ {
+			a, b := orig.Get(x, y), rt.Get(x, y)
+			if a.R != b.R {
+				t.Errorf("(%d,%d) rune: orig %q rt %q", x, y, a.R, b.R)
+			}
+		}
+	}
+	// Key styled cells: 'H' and 'i' must retain bold and explicit fg.
+	for _, x := range []int{0, 1} {
+		a, b := orig.Get(x, 0), rt.Get(x, 0)
+		if a.Style.HasAttribute(CharBold) != b.Style.HasAttribute(CharBold) {
+			t.Errorf("(%d,0) CharBold mismatch: orig %v rt %v", x, a.Style.HasAttribute(CharBold), b.Style.HasAttribute(CharBold))
+		}
+		if a.Style.HasAttribute(CharResetForegroundDefault) != b.Style.HasAttribute(CharResetForegroundDefault) {
+			t.Errorf("(%d,0) fg-default mismatch: orig %v rt %v", x, a.Style.HasAttribute(CharResetForegroundDefault), b.Style.HasAttribute(CharResetForegroundDefault))
+		}
+	}
+}
