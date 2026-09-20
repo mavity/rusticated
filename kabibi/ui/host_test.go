@@ -3,6 +3,7 @@ package ui
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -22,6 +23,10 @@ type recordingWidget struct {
 	handled   bool
 	lastEvent input.Event
 }
+
+type errReader struct{ err error }
+
+func (r *errReader) Read(p []byte) (int, error) { return 0, r.err }
 
 func (w *recordingWidget) Measure(c Constraints) Size {
 	w.measureW = c.MaxW
@@ -145,6 +150,48 @@ func TestRunScrollbackFrame_RendersANSIOutputAndPayload(t *testing.T) {
 	}
 }
 
+func TestRunFrame_AbortsOnDimensionQueryError(t *testing.T) {
+	var out bytes.Buffer
+	h := &Host{
+		root:    noopWidget{},
+		out:     bufio.NewWriter(&out),
+		currBuf: terminal.NewCellBuf(80, 24),
+		prevBuf: terminal.NewCellBuf(80, 24),
+	}
+
+	e := errors.New("term size failed")
+	beforeW, beforeH := h.currBuf.Width, h.currBuf.Height
+	h.runFrame(func(fd uintptr) (int, int, error) { return 0, 0, e })
+
+	if got, want := h.currBuf.Width, beforeW; got != want {
+		t.Fatalf("currBuf.Width = %d, want %d after size error", got, want)
+	}
+	if got, want := h.currBuf.Height, beforeH; got != want {
+		t.Fatalf("currBuf.Height = %d, want %d after size error", got, want)
+	}
+}
+
+func TestRunScrollbackFrame_AbortsOnDimensionQueryError(t *testing.T) {
+	var out bytes.Buffer
+	h := &Host{
+		root:            noopWidget{},
+		out:             bufio.NewWriter(&out),
+		currBuf:         terminal.NewCellBuf(80, 24),
+		prevBuf:         terminal.NewCellBuf(80, 24),
+		scrollbackQueue: []string{"queued"},
+	}
+
+	e := errors.New("term size failed")
+	h.runScrollbackFrame(func(fd uintptr) (int, int, error) { return 0, 0, e })
+
+	if got, want := len(h.scrollbackQueue), 1; got != want {
+		t.Fatalf("len(scrollbackQueue) = %d, want %d after size error", got, want)
+	}
+	if got := out.String(); got != "" {
+		t.Fatalf("scrollback output = %q, want empty buffer after size error", got)
+	}
+}
+
 func TestRunFrame_ResizesBuffersWhenDimensionsChange(t *testing.T) {
 	var out bytes.Buffer
 	h := &Host{root: noopWidget{}, out: bufio.NewWriter(&out)}
@@ -216,6 +263,40 @@ func TestRunCore_UsesInjectedRawModeBoundary(t *testing.T) {
 	}
 	if !restored {
 		t.Fatal("runCore() did not call the injected restoreFunc")
+	}
+}
+
+func TestRunCore_PropagatesMakeRawError(t *testing.T) {
+	h := &Host{root: noopWidget{}, out: bufio.NewWriter(io.Discard), stopCh: make(chan struct{})}
+	expected := errors.New("raw mode failed")
+
+	err := h.runCore(
+		func(uintptr) (*xterm.State, error) { return nil, expected },
+		func(uintptr, *xterm.State) error {
+			t.Fatal("restoreFunc should not run when makeRaw fails")
+			return nil
+		},
+	)
+	if !errors.Is(err, expected) {
+		t.Fatalf("runCore() error = %v, want %v", err, expected)
+	}
+	if h.prevTermState != nil {
+		t.Fatal("runCore() should leave prevTermState nil when makeRaw fails")
+	}
+}
+
+func TestReadInputLoop_ExitsOnReadError(t *testing.T) {
+	h := NewHost(noopWidget{})
+	done := make(chan struct{})
+	go func() {
+		h.readInputLoop(&errReader{err: errors.New("read failed")})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("readInputLoop() did not exit after a read error")
 	}
 }
 
