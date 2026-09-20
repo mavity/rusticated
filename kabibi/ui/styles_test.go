@@ -6,55 +6,43 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
 
 func TestGlowColor(t *testing.T) {
 	tests := []struct {
 		name  string
 		phase float64
-		check func(lipgloss.Color) bool
+		check func(terminal.Color) bool
 	}{
 		{
 			name:  "phase 0 is bright",
 			phase: 0.0,
-			check: func(c lipgloss.Color) bool {
-				s := string(c)
-				return strings.HasPrefix(s, "#") && len(s) == 7
-			},
+			check: func(c terminal.Color) bool { return c != 0 && c <= 0xFFFFFF },
 		},
 		{
 			name:  "phase 0.5 is dim",
 			phase: 0.5,
-			check: func(c lipgloss.Color) bool {
-				s := string(c)
-				return strings.HasPrefix(s, "#") && len(s) == 7
-			},
+			check: func(c terminal.Color) bool { return c != 0 && c <= 0xFFFFFF },
 		},
 		{
 			name:  "phase 1.0 is bright again",
 			phase: 1.0,
-			check: func(c lipgloss.Color) bool {
-				s := string(c)
-				return strings.HasPrefix(s, "#") && len(s) == 7
-			},
+			check: func(c terminal.Color) bool { return c != 0 && c <= 0xFFFFFF },
 		},
 		{
 			name:  "phase > 1 wraps around",
 			phase: 1.5,
-			check: func(c lipgloss.Color) bool {
-				s := string(c)
-				return strings.HasPrefix(s, "#") && len(s) == 7
-			},
+			check: func(c terminal.Color) bool { return c != 0 && c <= 0xFFFFFF },
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := glowColor(tt.phase)
+			got := GlowColor(tt.phase)
 			if !tt.check(got) {
-				t.Errorf("glowColor(%v) = %v, check failed", tt.phase, got)
+				t.Errorf("GlowColor(%v) = %v, check failed", tt.phase, got)
 			}
 		})
 	}
@@ -64,55 +52,40 @@ func TestFlashColor(t *testing.T) {
 	tests := []struct {
 		name      string
 		elapsedMs float64
-		check     func(lipgloss.Color) bool
+		check     func(terminal.Color) bool
 	}{
 		{
 			name:      "at start (0ms)",
 			elapsedMs: 0,
-			check: func(c lipgloss.Color) bool {
-				s := string(c)
-				return strings.HasPrefix(s, "#") && len(s) == 7
-			},
+			check:     func(c terminal.Color) bool { return c != 0 && c <= 0xFFFFFF },
 		},
 		{
 			name:      "at 75ms (during ramp)",
 			elapsedMs: 75,
-			check: func(c lipgloss.Color) bool {
-				s := string(c)
-				return strings.HasPrefix(s, "#") && len(s) == 7
-			},
+			check:     func(c terminal.Color) bool { return c != 0 && c <= 0xFFFFFF },
 		},
 		{
 			name:      "at 150ms (peak)",
 			elapsedMs: 150,
-			check: func(c lipgloss.Color) bool {
-				s := string(c)
-				return strings.HasPrefix(s, "#") && len(s) == 7
-			},
+			check:     func(c terminal.Color) bool { return c != 0 && c <= 0xFFFFFF },
 		},
 		{
 			name:      "at 275ms (fading back)",
 			elapsedMs: 275,
-			check: func(c lipgloss.Color) bool {
-				s := string(c)
-				return strings.HasPrefix(s, "#") && len(s) == 7
-			},
+			check:     func(c terminal.Color) bool { return c != 0 && c <= 0xFFFFFF },
 		},
 		{
 			name:      "after 550ms (complete)",
 			elapsedMs: 550,
-			check: func(c lipgloss.Color) bool {
-				s := string(c)
-				return strings.HasPrefix(s, "#") && len(s) == 7
-			},
+			check:     func(c terminal.Color) bool { return c != 0 && c <= 0xFFFFFF },
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := flashColor(tt.elapsedMs)
+			got := FlashColor(tt.elapsedMs)
 			if !tt.check(got) {
-				t.Errorf("flashColor(%v) = %v, check failed", tt.elapsedMs, got)
+				t.Errorf("FlashColor(%v) = %v, check failed", tt.elapsedMs, got)
 			}
 		})
 	}
