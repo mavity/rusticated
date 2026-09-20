@@ -1,6 +1,9 @@
 package ui
 
-import "github.com/mavity/rusticated/kabibi/ui/terminal"
+import (
+	"github.com/charmbracelet/x/input"
+	"github.com/mavity/rusticated/kabibi/ui/terminal"
+)
 
 // Re-export terminal geometry types so sub-packages and tests can reference
 // them without a terminal. qualifier.
@@ -24,40 +27,6 @@ type CursorPos struct {
 	Visible bool
 }
 
-// KeyModifier is a bitmask of modifier keys held during a key event.
-type KeyModifier uint8
-
-const (
-	ModShift KeyModifier = 1 << iota
-	ModAlt
-	ModCtrl
-)
-
-// KeyEvent carries a decoded keyboard event.
-type KeyEvent struct {
-	Rune      rune
-	Key       int
-	Modifiers KeyModifier
-}
-
-// MouseAction classifies the kind of pointer event.
-type MouseAction uint8
-
-const (
-	MousePress MouseAction = iota
-	MouseRelease
-	MouseMotion
-	MouseWheel
-)
-
-// MouseEvent carries a decoded pointer event with screen coordinates.
-type MouseEvent struct {
-	X, Y      int
-	Button    uint8
-	Action    MouseAction
-	Modifiers KeyModifier
-}
-
 // InvalidateFunc is called by a widget to request a host redraw.
 type InvalidateFunc func()
 
@@ -73,9 +42,13 @@ type RenderContext struct {
 // fresh CellBuf sized to the supplied Rect and returns a cursor position
 // relative to the widget's local origin. HandleKey and HandleMouse return true
 // when the event is consumed and should not bubble further.
+//
+// Event types are canonical x/input primitives, eliminating translation layers
+// and ensuring full protocol depth (Kitty keyboard, bracketed paste, focus events,
+// advanced pointer tracking) is available without boilerplate.
 type Widget interface {
 	Measure(c Constraints) Size
 	Render(r terminal.Rect, ctx RenderContext) (terminal.CellBuf, CursorPos)
-	HandleKey(e KeyEvent) bool
-	HandleMouse(e MouseEvent) bool
+	HandleKey(e input.KeyPressEvent) bool
+	HandleMouse(e input.MouseEvent) bool
 }
