@@ -9,15 +9,17 @@ import (
 	"time"
 
 	"github.com/charmbracelet/x/input"
+	xterm "github.com/charmbracelet/x/term"
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
 
 type recordingWidget struct {
-	measureW int
-	measureH int
-	cursor   CursorPos
-	buf      terminal.CellBuf
-	handled  bool
+	measureW  int
+	measureH  int
+	cursor    CursorPos
+	buf       terminal.CellBuf
+	handled   bool
+	lastEvent input.Event
 }
 
 func (w *recordingWidget) Measure(c Constraints) Size {
@@ -37,8 +39,9 @@ func (w *recordingWidget) Render(r terminal.Rect, ctx RenderContext) (terminal.C
 	return buf, w.cursor
 }
 
-func (w *recordingWidget) HandleEvent(input.Event) bool {
+func (w *recordingWidget) HandleEvent(ev input.Event) bool {
 	w.handled = true
+	w.lastEvent = ev
 	return true
 }
 
@@ -111,6 +114,87 @@ func TestReadInputLoop_ParsesAndDispatchesEvents(t *testing.T) {
 	if !widget.handled {
 		t.Fatal("readInputLoop() did not dispatch an event to the widget")
 	}
+	key, ok := widget.lastEvent.(input.KeyPressEvent)
+	if !ok {
+		t.Fatalf("readInputLoop() dispatched %T, want input.KeyPressEvent", widget.lastEvent)
+	}
+	if got, want := key.Keystroke(), "a"; got != want {
+		t.Fatalf("keystroke = %q, want %q", got, want)
+	}
+}
+
+func TestRunScrollbackFrame_RendersANSIOutputAndPayload(t *testing.T) {
+	var out bytes.Buffer
+	h := &Host{
+		root:            noopWidget{},
+		out:             bufio.NewWriter(&out),
+		currBuf:         terminal.NewCellBuf(80, 24),
+		prevBuf:         terminal.NewCellBuf(80, 24),
+		scrollbackQueue: []string{"some log line"},
+	}
+
+	h.runScrollbackFrame(func(fd uintptr) (int, int, error) { return 80, 24, nil })
+
+	got := out.String()
+	if !strings.Contains(got, "some log line") {
+		t.Fatalf("scrollback output = %q, want rendered payload to contain %q", got, "some log line")
+	}
+	if !strings.Contains(got, "\x1b[H") || !strings.Contains(got, "\x1b[24;1H") {
+		t.Fatalf("scrollback output = %q, want ansi cursor movement and viewport reset", got)
+	}
+}
+
+func TestRunFrame_ResizesBuffersWhenDimensionsChange(t *testing.T) {
+	var out bytes.Buffer
+	h := &Host{root: noopWidget{}, out: bufio.NewWriter(&out)}
+
+	sizes := []struct{ w, h int }{{80, 24}, {100, 30}}
+	for _, sz := range sizes {
+		h.runFrame(func(fd uintptr) (int, int, error) { return sz.w, sz.h, nil })
+	}
+
+	if got, want := h.currBuf.Width, 100; got != want {
+		t.Fatalf("currBuf.Width = %d, want %d", got, want)
+	}
+	if got, want := h.currBuf.Height, 30; got != want {
+		t.Fatalf("currBuf.Height = %d, want %d", got, want)
+	}
+	if got, want := h.prevBuf.Width, 100; got != want {
+		t.Fatalf("prevBuf.Width = %d, want %d", got, want)
+	}
+	if got, want := h.prevBuf.Height, 30; got != want {
+		t.Fatalf("prevBuf.Height = %d, want %d", got, want)
+	}
+}
+
+func TestRunCore_RestoresTerminalBeforeRePanicking(t *testing.T) {
+	var out bytes.Buffer
+	restored := false
+	h := &Host{root: noopWidget{}, out: bufio.NewWriter(&out), stopCh: make(chan struct{})}
+
+	func() {
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("runCore() did not re-panic after a setup failure")
+			}
+			if got := r; got != "widget explosion" {
+				t.Fatalf("panic = %v, want %q", got, "widget explosion")
+			}
+			if !restored {
+				t.Fatal("restoreFunc() was not called before the panic was re-raised")
+			}
+		}()
+		_ = h.runCore(
+			func(uintptr) (*xterm.State, error) {
+				panic("widget explosion")
+			},
+			func(uintptr, *xterm.State) error {
+				restored = true
+				return nil
+			},
+		)
+	}()
 }
 
 func TestSpanDetect_IdenticalBuffers_NoChange(t *testing.T) {
