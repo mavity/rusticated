@@ -3,15 +3,14 @@ package ui
 import (
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
 
 type widgetStub struct {
-	measure Size
-	layout  Rect
-	render  CellBuf
-	lastKey tea.KeyMsg
-	lastMsg tea.MouseMsg
+	measure   Size
+	render    terminal.CellBuf
+	lastKey   KeyEvent
+	lastMouse MouseEvent
 }
 
 func (w *widgetStub) Measure(c Constraints) Size {
@@ -24,46 +23,42 @@ func (w *widgetStub) Measure(c Constraints) Size {
 	return w.measure
 }
 
-func (w *widgetStub) Layout(r Rect) {
-	w.layout = r
+func (w *widgetStub) Render(r terminal.Rect, ctx RenderContext) (terminal.CellBuf, CursorPos) {
+	return w.render, CursorPos{}
 }
 
-func (w *widgetStub) Render() CellBuf {
-	return w.render
-}
-
-func (w *widgetStub) HandleKey(msg tea.KeyMsg) tea.Cmd {
-	w.lastKey = msg
-	return nil
-}
-
-func (w *widgetStub) HandleMouse(msg tea.MouseMsg) tea.Cmd {
-	w.lastMsg = msg
-	return nil
-}
+func (w *widgetStub) HandleKey(e KeyEvent) bool     { w.lastKey = e; return false }
+func (w *widgetStub) HandleMouse(e MouseEvent) bool { w.lastMouse = e; return false }
 
 func TestWidgetContract(t *testing.T) {
 	var _ Widget = (*widgetStub)(nil)
-	var _ InputWidget = (*widgetStub)(nil)
 
-	w := &widgetStub{measure: Size{W: 40, H: 10}, render: NewCellBuf(2, 2)}
-	if got := w.Measure(Constraints{MaxW: 40, MaxH: 10}); got.W != 40 || got.H != 10 {
+	w := &widgetStub{measure: Size{W: 40, H: 10}, render: terminal.NewCellBuf(2, 2)}
+
+	got := w.Measure(Constraints{MaxW: 40, MaxH: 10})
+	if got.W != 40 || got.H != 10 {
 		t.Fatalf("Measure returned unexpected size: %#v", got)
 	}
 
-	w.Layout(Rect{X: 1, Y: 2, W: 5, H: 6})
-	if w.layout != (Rect{X: 1, Y: 2, W: 5, H: 6}) {
-		t.Fatalf("Layout did not remember the supplied bounds: %#v", w.layout)
+	buf, cur := w.Render(terminal.Rect{X: 0, Y: 0, W: 40, H: 10}, RenderContext{})
+	if buf.Width != 2 || buf.Height != 2 {
+		t.Fatalf("Render returned unexpected CellBuf dimensions: %dx%d", buf.Width, buf.Height)
+	}
+	if cur.Visible {
+		t.Fatal("stub cursor should default to hidden")
 	}
 
-	if got := w.Render(); got.Width != 2 || got.Height != 2 {
-		t.Fatalf("Render returned unexpected CellBuf: %#v", got)
+	if w.HandleKey(KeyEvent{Rune: 'a'}) {
+		t.Fatal("HandleKey should return false for no-op stub")
+	}
+	if w.lastKey.Rune != 'a' {
+		t.Fatalf("HandleKey did not record event: got %v", w.lastKey)
 	}
 
-	if cmd := w.HandleKey(tea.KeyMsg{Type: tea.KeyEnter}); cmd != nil {
-		t.Fatal("HandleKey should return nil for a no-op key handler")
+	if w.HandleMouse(MouseEvent{X: 3, Y: 4, Action: MousePress}) {
+		t.Fatal("HandleMouse should return false for no-op stub")
 	}
-	if cmd := w.HandleMouse(tea.MouseMsg{X: 3, Y: 4}); cmd != nil {
-		t.Fatal("HandleMouse should return nil for a no-op mouse handler")
+	if w.lastMouse.X != 3 || w.lastMouse.Y != 4 {
+		t.Fatalf("HandleMouse did not record event: got %v", w.lastMouse)
 	}
 }
