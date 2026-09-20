@@ -3,14 +3,15 @@ package ui
 import (
 	"testing"
 
+	"github.com/charmbracelet/x/input"
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
 
 type widgetStub struct {
 	measure   Size
 	render    terminal.CellBuf
-	lastKey   KeyEvent
-	lastMouse MouseEvent
+	lastKey   input.KeyPressEvent
+	lastMouse input.MouseClickEvent
 }
 
 func (w *widgetStub) Measure(c Constraints) Size {
@@ -27,8 +28,14 @@ func (w *widgetStub) Render(r terminal.Rect, ctx RenderContext) (terminal.CellBu
 	return w.render, CursorPos{}
 }
 
-func (w *widgetStub) HandleKey(e KeyEvent) bool     { w.lastKey = e; return false }
-func (w *widgetStub) HandleMouse(e MouseEvent) bool { w.lastMouse = e; return false }
+func (w *widgetStub) HandleKey(e input.KeyPressEvent) bool     { w.lastKey = e; return false }
+func (w *widgetStub) HandleMouse(e input.MouseEvent) bool {
+	// Convert to concrete type for storage
+	if click, ok := e.(input.MouseClickEvent); ok {
+		w.lastMouse = click
+	}
+	return false
+}
 
 func TestWidgetContract(t *testing.T) {
 	var _ Widget = (*widgetStub)(nil)
@@ -48,14 +55,18 @@ func TestWidgetContract(t *testing.T) {
 		t.Fatal("stub cursor should default to hidden")
 	}
 
-	if w.HandleKey(KeyEvent{Rune: 'a'}) {
+	// Create a key press event with Code 'a'
+	keyEvent := input.KeyPressEvent(input.Key{Code: 'a', Text: "a"})
+	if w.HandleKey(keyEvent) {
 		t.Fatal("HandleKey should return false for no-op stub")
 	}
-	if w.lastKey.Rune != 'a' {
+	if w.lastKey.Code != 'a' {
 		t.Fatalf("HandleKey did not record event: got %v", w.lastKey)
 	}
 
-	if w.HandleMouse(MouseEvent{X: 3, Y: 4, Action: MousePress}) {
+	// Create a mouse click event at (3, 4)
+	mouseEvent := input.MouseClickEvent{X: 3, Y: 4, Button: input.MouseButton(1)}
+	if w.HandleMouse(mouseEvent) {
 		t.Fatal("HandleMouse should return false for no-op stub")
 	}
 	if w.lastMouse.X != 3 || w.lastMouse.Y != 4 {

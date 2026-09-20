@@ -1,5 +1,3 @@
-//go:build windows
-
 package ui
 
 import (
@@ -14,6 +12,8 @@ type platformState struct {
 }
 
 // enterRawMode puts stdin into raw mode and enables SGR mouse tracking.
+// Uses golang.org/x/term.MakeRaw for cross-platform compatibility across
+// Linux, macOS, BSD, and Windows.
 func (h *Host) enterRawMode() error {
 	state, err := xterm.MakeRaw(os.Stdin.Fd())
 	if err != nil {
@@ -26,6 +26,7 @@ func (h *Host) enterRawMode() error {
 }
 
 // exitRawMode disables mouse tracking and restores the terminal to cooked mode.
+// Works on all platforms by delegating to golang.org/x/term.Restore.
 func (h *Host) exitRawMode() {
 	h.out.WriteString("\x1b[?1006l\x1b[?1000l")
 	h.out.Flush()
@@ -36,12 +37,17 @@ func (h *Host) exitRawMode() {
 }
 
 // querySize returns the current terminal dimensions in columns and rows.
+// Uses golang.org/x/term.GetSize for cross-platform TIOCGWINSZ handling (Unix)
+// and Windows ConPTY query support.
 func (h *Host) querySize() (w, ht int) {
 	w, ht, _ = xterm.GetSize(os.Stdout.Fd())
 	return
 }
 
-// handleSignals is a no-op on Windows; the console host manages resize events.
+// handleSignals installs platform-specific signal handlers.
+// On Unix platforms, this sets up SIGWINCH (window resize) and SIGTERM (graceful stop).
+// On Windows, this is a no-op; the console host manages resize events.
+// Implementation is delegated to platform-specific files via initSignalHandlers.
 func (h *Host) handleSignals() (cleanup func()) {
-	return func() {}
+	return initSignalHandlers(h)
 }

@@ -36,6 +36,8 @@ github.com/charmbracelet/x/exp/ordered v0.1.0 h1:55/qLwjIh0gL0Vni+QAWk7T/qRVP6sB
 github.com/charmbracelet/x/exp/ordered v0.1.0/go.mod h1:5UHwmG+is5THxMyCJHNPCn2/ecI07aKNrW+LcResjJ8=
 github.com/charmbracelet/x/exp/slice v0.0.0-20260913004009-c615ff2f7805 h1:V2KXhqFYcfmdflcQumX3kU4241eJAjZIpQUUwHQ4QNM=
 github.com/charmbracelet/x/exp/slice v0.0.0-20260913004009-c615ff2f7805/go.mod h1:vqEfX6xzqW1pKKZUUiFOKg0OQ7bCh54Q2vR/tserrRA=
+github.com/charmbracelet/x/input v0.3.7 h1:UzVbkt1vgM9dBQ+K+uRolBlN6IF2oLchmPKKo/aucXo=
+github.com/charmbracelet/x/input v0.3.7/go.mod h1:ZSS9Cia6Cycf2T6ToKIOxeTBTDwl25AGwArJuGaOBH8=
 github.com/charmbracelet/x/termios v0.1.1 h1:o3Q2bT8eqzGnGPOYheoYS8eEleT5ZVNYNy8JawjaNZY=
 github.com/charmbracelet/x/termios v0.1.1/go.mod h1:rB7fnv1TgOPOyyKRJ9o+AsTU/vK5WHJ2ivHeut/Pcwo=
 github.com/charmbracelet/x/vt v0.0.0-20260913004009-c615ff2f7805 h1:ryw9EpSw916Z4u0TubujGvQbCaS4y++B56D5aYfV684=
