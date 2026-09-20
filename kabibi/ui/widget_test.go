@@ -10,8 +10,7 @@ import (
 type widgetStub struct {
 	measure   Size
 	render    terminal.CellBuf
-	lastKey   input.KeyPressEvent
-	lastMouse input.MouseClickEvent
+	lastEvent input.Event
 }
 
 func (w *widgetStub) Measure(c Constraints) Size {
@@ -28,14 +27,7 @@ func (w *widgetStub) Render(r terminal.Rect, ctx RenderContext) (terminal.CellBu
 	return w.render, CursorPos{}
 }
 
-func (w *widgetStub) HandleKey(e input.KeyPressEvent) bool     { w.lastKey = e; return false }
-func (w *widgetStub) HandleMouse(e input.MouseEvent) bool {
-	// Convert to concrete type for storage
-	if click, ok := e.(input.MouseClickEvent); ok {
-		w.lastMouse = click
-	}
-	return false
-}
+func (w *widgetStub) HandleEvent(e input.Event) bool { w.lastEvent = e; return false }
 
 func TestWidgetContract(t *testing.T) {
 	var _ Widget = (*widgetStub)(nil)
@@ -55,21 +47,21 @@ func TestWidgetContract(t *testing.T) {
 		t.Fatal("stub cursor should default to hidden")
 	}
 
-	// Create a key press event with Code 'a'
+	// Test HandleEvent with key press event
 	keyEvent := input.KeyPressEvent(input.Key{Code: 'a', Text: "a"})
-	if w.HandleKey(keyEvent) {
-		t.Fatal("HandleKey should return false for no-op stub")
+	if w.HandleEvent(keyEvent) {
+		t.Fatal("HandleEvent should return false for no-op stub")
 	}
-	if w.lastKey.Code != 'a' {
-		t.Fatalf("HandleKey did not record event: got %v", w.lastKey)
+	if ke, ok := w.lastEvent.(input.KeyPressEvent); !ok || ke.Code != 'a' {
+		t.Fatalf("HandleEvent did not record key event: got %v", w.lastEvent)
 	}
 
-	// Create a mouse click event at (3, 4)
+	// Test HandleEvent with mouse click event
 	mouseEvent := input.MouseClickEvent{X: 3, Y: 4, Button: input.MouseButton(1)}
-	if w.HandleMouse(mouseEvent) {
-		t.Fatal("HandleMouse should return false for no-op stub")
+	if w.HandleEvent(mouseEvent) {
+		t.Fatal("HandleEvent should return false for no-op stub")
 	}
-	if w.lastMouse.X != 3 || w.lastMouse.Y != 4 {
-		t.Fatalf("HandleMouse did not record event: got %v", w.lastMouse)
+	if me, ok := w.lastEvent.(input.MouseClickEvent); !ok || me.X != 3 || me.Y != 4 {
+		t.Fatalf("HandleEvent did not record mouse event: got %v", w.lastEvent)
 	}
 }
