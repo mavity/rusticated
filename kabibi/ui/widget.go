@@ -40,15 +40,15 @@ type RenderContext struct {
 //
 // Measure declares space requirements given constraints. Render paints into a
 // fresh CellBuf sized to the supplied Rect and returns a cursor position
-// relative to the widget's local origin. HandleKey and HandleMouse return true
+// relative to the widget's local origin. HandleEvent returns true
 // when the event is consumed and should not bubble further.
 //
-// Event types are canonical x/input primitives, eliminating translation layers
-// and ensuring full protocol depth (Kitty keyboard, bracketed paste, focus events,
-// advanced pointer tracking) is available without boilerplate.
+// HandleEvent receives canonical x/input.Event types (KeyPressEvent, MouseClickEvent,
+// PasteEvent, FocusEvent, WindowSizeEvent, and all other x/input protocols) without
+// adapter boilerplate. Widgets explicitly invoke ctx.Invalidate() only when internal
+// state actually mutates; the host does not auto-invalidate on event consumption.
 type Widget interface {
 	Measure(c Constraints) Size
 	Render(r terminal.Rect, ctx RenderContext) (terminal.CellBuf, CursorPos)
-	HandleKey(e input.KeyPressEvent) bool
-	HandleMouse(e input.MouseEvent) bool
+	HandleEvent(e input.Event) bool
 }
