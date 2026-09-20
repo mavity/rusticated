@@ -1,5 +1,10 @@
 package ui
 
+import (
+	"strconv"
+	"strings"
+)
+
 // Special key constants. Values start at 1000 to avoid clashing with Unicode
 // code points that could appear as KeyEvent.Rune.
 const (
@@ -220,6 +225,43 @@ func parseCsi(b []byte) (int, any) {
 		case "24":
 			return total, KeyEvent{Key: KeyF12}
 		}
+
+	case 'M', 'm':
+		// SGR 1006 extended mouse: \x1b[<btn;x;yM (press/wheel) or \x1b[<btn;x;ym (release)
+		if !strings.HasPrefix(param, "<") {
+			break
+		}
+		parts := strings.SplitN(param[1:], ";", 3)
+		if len(parts) != 3 {
+			break
+		}
+		cb, e1 := strconv.Atoi(parts[0])
+		cx, e2 := strconv.Atoi(parts[1])
+		cy, e3 := strconv.Atoi(parts[2])
+		if e1 != nil || e2 != nil || e3 != nil {
+			break
+		}
+		btn := uint8(cb & 3)
+		var action MouseAction
+		switch {
+		case cb&64 != 0:
+			action = MouseWheel
+		case final == 'm':
+			action = MouseRelease
+		default:
+			action = MousePress
+		}
+		var mods KeyModifier
+		if cb&4 != 0 {
+			mods |= ModShift
+		}
+		if cb&8 != 0 {
+			mods |= ModAlt
+		}
+		if cb&16 != 0 {
+			mods |= ModCtrl
+		}
+		return total, MouseEvent{X: cx - 1, Y: cy - 1, Button: btn, Action: action, Modifiers: mods}
 	}
 
 	return total, nil

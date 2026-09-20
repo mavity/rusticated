@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/signal"
 	"sync"
 	"sync/atomic"
 
@@ -63,6 +64,30 @@ func (h *Host) Run() error {
 		return err
 	}
 	defer h.exitRawMode()
+
+	// exitRawMode is already deferred; recover catches widget panics and re-panics
+	// after the terminal has been restored to cooked mode.
+	defer func() {
+		if r := recover(); r != nil {
+			panic(r)
+		}
+	}()
+
+	// Ctrl+C on all platforms → graceful stop.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
+	defer signal.Stop(sigCh)
+	go func() {
+		select {
+		case <-sigCh:
+			h.Stop()
+		case <-h.stopCh:
+		}
+	}()
+
+	// Platform-specific signals (SIGTERM on Unix, SIGWINCH resize).
+	cleanupSignals := h.handleSignals()
+	defer cleanupSignals()
 
 	h.Invalidate()
 	h.readInputLoop()
@@ -180,9 +205,12 @@ func (h *Host) emitDirtyRegion(lineMin, lineMax int) {
 	subBuf := terminal.NewSubBuf(h.currBuf, lineMin, lineMax-lineMin+1)
 	h.out.WriteString(terminal.ToANSI(subBuf))
 
-	// 3. Restore hardware cursor.
+	// 3. Show or hide hardware cursor depending on active focus state.
 	if h.cursorVisible {
+		h.out.WriteString("\x1b[?25h")
 		fmt.Fprintf(h.out, "\x1b[%d;%dH", h.cursorY+1, h.cursorX+1)
+	} else {
+		h.out.WriteString("\x1b[?25l")
 	}
 
 	h.out.Flush()
@@ -202,27 +230,51 @@ func (h *Host) runScrollbackFrame() {
 		return
 	}
 
-	_, ht := h.querySize()
+	w, ht := h.querySize()
+	if w <= 0 || ht <= 0 {
+		return
+	}
 
-	// 1. Move to bottom row of the viewport so subsequent newlines push existing
-	//    content up into the terminal's native scrollback history rather than
-	//    overwriting rows at the top.
+	// Re-allocate if dimensions changed (first use or resize between calls).
+	if h.currBuf.Width != w || h.currBuf.Height != ht {
+		h.currBuf = terminal.NewCellBuf(w, ht)
+		h.prevBuf = terminal.NewCellBuf(w, ht)
+	}
+
+	// Fresh render: paint current widget state before emitting the scrollback payload.
+	h.root.Measure(Constraints{MaxW: w, MaxH: ht})
+	rendered, cursor := h.root.Render(
+		terminal.Rect{X: 0, Y: 0, W: w, H: ht},
+		RenderContext{Focused: true, Invalidate: h.Invalidate},
+	)
+	h.cursorX = cursor.X
+	h.cursorY = cursor.Y
+	h.cursorVisible = cursor.Visible
+	copy(h.currBuf.Cells(), rendered.Cells())
+
+	// 1. Move to bottom row so newlines push existing UI into terminal scrollback history.
 	fmt.Fprintf(h.out, "\x1b[%d;1H", ht)
 
-	// 2. Each line feed advances the viewport, archiving one row of current UI
-	//    into scrollback. \x1b[K clears any residual UI glyphs on the new row.
+	// 2. Each \r\n at the bottom margin advances the viewport one line.
+	//    \x1b[K clears any residual UI glyph on the freshly scrolled row.
 	for _, line := range lines {
 		fmt.Fprintf(h.out, "\r\n%s\x1b[K", line)
 	}
 
-	// 3. Full UI redraw from the top of the viewport.
+	// 3. Full UI redraw over the now-advanced viewport.
 	h.out.WriteString("\x1b[H")
 	h.out.WriteString(terminal.ToANSI(h.currBuf))
 
-	// 4. Align hardware cursor.
+	// 4. Show or hide hardware cursor.
 	if h.cursorVisible {
+		h.out.WriteString("\x1b[?25h")
 		fmt.Fprintf(h.out, "\x1b[%d;%dH", h.cursorY+1, h.cursorX+1)
+	} else {
+		h.out.WriteString("\x1b[?25l")
 	}
+
+	// 5. Sync prevBuf so the next spanDetect() correctly compares against the new screen state.
+	copy(h.prevBuf.Cells(), h.currBuf.Cells())
 
 	h.out.Flush()
 }
