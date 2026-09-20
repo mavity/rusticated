@@ -226,14 +226,22 @@ func (h *Host) runScrollbackFrame() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	// Early validation: query window dimensions first to prevent data loss.
 	w, ht := h.querySize()
 	if w <= 0 || ht <= 0 {
 		return
 	}
 
+	// Drain the queue only after validation succeeds.
 	lines := h.scrollbackQueue
 	h.scrollbackQueue = nil
 	if len(lines) == 0 {
+		return
+	}
+
+	// Guard: Restore buffer allocation if dimensions changed since last frame.
+	if h.currBuf.Width != w || h.currBuf.Height != ht {
+		h.currBuf = terminal.NewCellBuf(w, ht)
 		h.prevBuf = terminal.NewCellBuf(w, ht)
 	}
 
@@ -248,14 +256,15 @@ func (h *Host) runScrollbackFrame() {
 	h.cursorVisible = cursor.Visible
 	copy(h.currBuf.Cells(), rendered.Cells())
 
+	// Width-constrained ANSI parsing: FromANSI renders scrollback lines
+	// with word-wrapping and ANSI style handling directly into cells.
+	scrollBuf := terminal.FromANSI(lines, w)
+
 	// 1. Move to bottom row so newlines push existing UI into terminal scrollback history.
 	fmt.Fprintf(h.out, "\x1b[%d;1H", ht)
 
-	// 2. Each \r\n at the bottom margin advances the viewport one line.
-	//    \x1b[K clears any residual UI glyph on the freshly scrolled row.
-	for _, line := range lines {
-		fmt.Fprintf(h.out, "\r\n%s\x1b[K", line)
-	}
+	// 2. Emit parsed scrollback buffer rows with viewport advancement.
+	h.out.WriteString(terminal.ToANSI(scrollBuf))
 
 	// 3. Full UI redraw over the now-advanced viewport.
 	h.out.WriteString("\x1b[H")
@@ -278,9 +287,9 @@ func (h *Host) runScrollbackFrame() {
 // ── Input loop ────────────────────────────────────────────────────────────────
 
 func (h *Host) readInputLoop() {
-	// Use x/input.Reader for robust, protocol-complete keyboard and mouse event decoding.
-	// The reader handles buffer chunking, Kitty keyboard protocol, bracketed paste,
-	// SGR mouse tracking, UTF-8 decoding, and focus events automatically.
+	// Use x/input.Reader for robust, protocol-complete event handling.
+	// The reader handles stream chunking, UTF-8 decoding, Kitty keyboard protocol,
+	// bracketed paste, SGR mouse tracking, focus events, and key releases.
 	r, err := input.NewReader(os.Stdin, "", 0)
 	if err != nil {
 		return
@@ -303,20 +312,11 @@ func (h *Host) readInputLoop() {
 			return
 		}
 
-		// Dispatch parsed events to the widget tree.
-		// All mouse event types (Click, Motion, Release, Wheel) satisfy input.MouseEvent;
-		// polymorphic dispatch handles them all without duplication.
+		// Dispatch canonical input.Event to widget tree.
+		// Widgets invoke ctx.Invalidate() explicitly when internal state mutates;
+		// the host does not auto-invalidate on event consumption.
 		for _, ev := range events {
-			switch e := ev.(type) {
-			case input.KeyPressEvent:
-				if h.root.HandleKey(e) {
-					h.Invalidate()
-				}
-			case input.MouseEvent:
-				if h.root.HandleMouse(e) {
-					h.Invalidate()
-				}
-			}
+			h.root.HandleEvent(ev)
 		}
 	}
 }
