@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 
 	"github.com/charmbracelet/x/input"
+	"github.com/charmbracelet/x/term"
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
 
@@ -37,8 +38,16 @@ type Host struct {
 
 	scrollbackQueue []string
 
-	stopCh   chan struct{}
-	platform platformState // platform-specific raw mode state
+	stopCh        chan struct{}
+	prevTermState *term.State // holds the saved terminal state needed to restore cooked mode on exit.
+}
+
+// handleSignals installs platform-specific signal handlers.
+// On Unix platforms, this sets up SIGWINCH (window resize) and SIGTERM (graceful stop).
+// On Windows, this is a no-op; the console host manages resize events.
+// Implementation is delegated to platform-specific files via initSignalHandlers.
+func (h *Host) handleSignals() (cleanup func()) {
+	return initSignalHandlers(h)
 }
 
 // NewHost creates a Host bound to the given root widget. Call Run to start the event loop.
@@ -53,19 +62,50 @@ func NewHost(root Widget) *Host {
 // Invalidate requests a redraw. Concurrent calls are coalesced: if a frame is
 // already pending, the call returns immediately without spawning additional work.
 func (h *Host) Invalidate() {
+	h.invalidateCore(term.GetSize)
+}
+
+func (h *Host) invalidateCore(
+	getSizeFunc func(fd uintptr) (w int, ht int, err error),
+) {
+
 	if h.dirty.Swap(true) {
 		return // already scheduled; coalesced
 	}
-	go h.runFrame()
+	go h.runFrame(getSizeFunc)
 }
 
 // Run enters terminal raw mode, delivers an initial frame, and blocks on the
 // input loop until Stop is called or stdin closes.
 func (h *Host) Run() error {
-	if err := h.enterRawMode(); err != nil {
+	return h.runCore(term.MakeRaw, term.Restore)
+}
+
+func (h *Host) runCore(
+	makeRawFunc func(uintptr) (*term.State, error),
+	restoreFunc func(uintptr, *term.State) error,
+) error {
+
+	// enterRawMode puts stdin into raw mode and enables SGR mouse tracking.
+	// Uses golang.org/x/term.MakeRaw for cross-platform compatibility across
+	// Linux, macOS, BSD, and Windows.
+
+	state, err := makeRawFunc(os.Stdin.Fd())
+	if err != nil {
 		return err
 	}
-	defer h.exitRawMode()
+	h.prevTermState = state
+	h.out.WriteString("\x1b[?1000h\x1b[?1006h")
+	h.out.Flush()
+
+	defer func() {
+		h.out.WriteString("\x1b[?1006l\x1b[?1000l")
+		h.out.Flush()
+		if h.prevTermState != nil {
+			_ = restoreFunc(os.Stdin.Fd(), h.prevTermState)
+			h.prevTermState = nil
+		}
+	}()
 
 	// exitRawMode is already deferred; recover catches widget panics and re-panics
 	// after the terminal has been restored to cooked mode.
@@ -92,7 +132,7 @@ func (h *Host) Run() error {
 	defer cleanupSignals()
 
 	h.Invalidate()
-	h.readInputLoop()
+	h.readInputLoop(os.Stdin)
 	return nil
 }
 
@@ -108,6 +148,13 @@ func (h *Host) Stop() {
 // WriteToScrollback queues a line for scrollback archival and schedules a
 // combined scroll-push + full-redraw cycle.
 func (h *Host) WriteToScrollback(text string) {
+	h.writeToScrollbackCore(text, term.GetSize)
+}
+
+func (h *Host) writeToScrollbackCore(
+	text string,
+	getSizeFunc func(fd uintptr) (w, ht int, err error),
+) {
 	h.mu.Lock()
 	h.scrollbackQueue = append(h.scrollbackQueue, text)
 	h.mu.Unlock()
@@ -115,18 +162,24 @@ func (h *Host) WriteToScrollback(text string) {
 	if h.dirty.Swap(true) {
 		return
 	}
-	go h.runScrollbackFrame()
+	go h.runScrollbackFrame(getSizeFunc)
 }
 
 // ── Frame engine ─────────────────────────────────────────────────────────────
 
-func (h *Host) runFrame() {
+func (h *Host) runFrame(
+	getSizeFunc func(fd uintptr) (w, ht int, err error),
+) {
 	h.dirty.Store(false)
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	w, ht := h.querySize()
+	w, ht, err := getSizeFunc(os.Stdout.Fd())
+	if err != nil {
+		// report error?
+		return
+	}
 	if w <= 0 || ht <= 0 {
 		return
 	}
@@ -220,15 +273,17 @@ func (h *Host) emitDirtyRegion(lineMin, lineMax int) {
 
 // ── Scrollback archival ───────────────────────────────────────────────────────
 
-func (h *Host) runScrollbackFrame() {
+func (h *Host) runScrollbackFrame(
+	getSizeFunc func(fd uintptr) (w int, ht int, err error),
+) {
 	h.dirty.Store(false)
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	// Early validation: query window dimensions first to prevent data loss.
-	w, ht := h.querySize()
-	if w <= 0 || ht <= 0 {
+	w, ht, err := getSizeFunc(os.Stdout.Fd())
+	if err != nil || w <= 0 || ht <= 0 {
 		return
 	}
 
@@ -286,11 +341,11 @@ func (h *Host) runScrollbackFrame() {
 
 // ── Input loop ────────────────────────────────────────────────────────────────
 
-func (h *Host) readInputLoop() {
+func (h *Host) readInputLoop(in io.Reader) {
 	// Use x/input.Reader for robust, protocol-complete event handling.
-	// The reader handles stream chunking, UTF-8 decoding, Kitty keyboard protocol,
-	// bracketed paste, SGR mouse tracking, focus events, and key releases.
-	r, err := input.NewReader(os.Stdin, "", 0)
+	// Production passes os.Stdin; tests use an io.Pipe so the terminal boundary
+	// stays real without injecting fake global terminal state.
+	r, err := input.NewReader(in, "", 0)
 	if err != nil {
 		return
 	}
