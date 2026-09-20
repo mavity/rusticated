@@ -151,6 +151,24 @@ func (b *CellBuf) Blit(src CellBuf, x, y int) {
 	}
 }
 
+// Cells returns the backing cell slice for direct comparison and copy operations.
+func (b CellBuf) Cells() []Cell { return b.cells }
+
+// NewSubBuf returns a CellBuf that shares the backing cells of src for rows
+// [startRow, startRow+rows). This is a zero-copy view; the caller must not
+// resize or swap the returned buffer.
+func NewSubBuf(src CellBuf, startRow, rows int) CellBuf {
+	return CellBuf{
+		Width:  src.Width,
+		Height: rows,
+		cells:  src.cells[startRow*src.Width : (startRow+rows)*src.Width],
+	}
+}
+
+// SwapBufCells exchanges the backing arrays of two CellBufs in O(1), avoiding
+// an O(W*H) copy when double-buffering frames.
+func SwapBufCells(a, b *CellBuf) { a.cells, b.cells = b.cells, a.cells }
+
 // ansi16RGB maps standard 16-color ANSI indices (0–15) to their canonical RGB values.
 var ansi16RGB = [16]Color{
 	0x000000, 0x800000, 0x008000, 0x808000, 0x000080, 0x800080, 0x008080, 0xc0c0c0,
