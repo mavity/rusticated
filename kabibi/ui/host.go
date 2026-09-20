@@ -84,28 +84,33 @@ func (h *Host) Run() error {
 func (h *Host) runCore(
 	makeRawFunc func(uintptr) (*term.State, error),
 	restoreFunc func(uintptr, *term.State) error,
-) error {
+) (err error) {
 
 	// enterRawMode puts stdin into raw mode and enables SGR mouse tracking.
 	// Uses golang.org/x/term.MakeRaw for cross-platform compatibility across
 	// Linux, macOS, BSD, and Windows.
+	state := &term.State{}
 
-	state, err := makeRawFunc(os.Stdin.Fd())
+	defer func() {
+		h.out.WriteString("\x1b[?1006l\x1b[?1000l")
+		h.out.Flush()
+		if restoreFunc != nil && state != nil {
+			_ = restoreFunc(os.Stdin.Fd(), state)
+		}
+		h.prevTermState = nil
+		if r := recover(); r != nil {
+			panic(r)
+		}
+	}()
+
+	state, err = makeRawFunc(os.Stdin.Fd())
 	if err != nil {
+		state = nil
 		return err
 	}
 	h.prevTermState = state
 	h.out.WriteString("\x1b[?1000h\x1b[?1006h")
 	h.out.Flush()
-
-	defer func() {
-		h.out.WriteString("\x1b[?1006l\x1b[?1000l")
-		h.out.Flush()
-		if h.prevTermState != nil {
-			_ = restoreFunc(os.Stdin.Fd(), h.prevTermState)
-			h.prevTermState = nil
-		}
-	}()
 
 	// exitRawMode is already deferred; recover catches widget panics and re-panics
 	// after the terminal has been restored to cooked mode.
@@ -352,26 +357,45 @@ func (h *Host) readInputLoop(in io.Reader) {
 	defer r.Close()
 
 	for {
+		if h.stopCh != nil {
+			select {
+			case <-h.stopCh:
+				_ = r.Close()
+				return
+			default:
+			}
+		}
+
+		resultCh := make(chan struct {
+			events []input.Event
+			err    error
+		}, 1)
+		go func() {
+			events, err := r.ReadEvents()
+			resultCh <- struct {
+				events []input.Event
+				err    error
+			}{events: events, err: err}
+		}()
+
 		select {
 		case <-h.stopCh:
+			_ = r.Close()
 			return
-		default:
-		}
+		case res := <-resultCh:
+			if res.err == io.EOF {
+				return
+			}
+			if res.err != nil {
+				return
+			}
 
-		// Read and parse all available events from stdin.
-		events, err := r.ReadEvents()
-		if err == io.EOF {
-			return
-		}
-		if err != nil {
-			return
-		}
-
-		// Dispatch canonical input.Event to widget tree.
-		// Widgets invoke ctx.Invalidate() explicitly when internal state mutates;
-		// the host does not auto-invalidate on event consumption.
-		for _, ev := range events {
-			h.root.HandleEvent(ev)
+			// Dispatch canonical input.Event to widget tree.
+			// Widgets invoke ctx.Invalidate() explicitly when internal state mutates;
+			// the host does not auto-invalidate on event consumption.
+			for _, ev := range res.events {
+				h.root.HandleEvent(ev)
+			}
 		}
 	}
 }
