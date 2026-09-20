@@ -3,11 +3,13 @@ package ui
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"sync"
 	"sync/atomic"
 
+	"github.com/charmbracelet/x/input"
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
 
@@ -224,20 +226,14 @@ func (h *Host) runScrollbackFrame() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	lines := h.scrollbackQueue
-	h.scrollbackQueue = nil
-	if len(lines) == 0 {
-		return
-	}
-
 	w, ht := h.querySize()
 	if w <= 0 || ht <= 0 {
 		return
 	}
 
-	// Re-allocate if dimensions changed (first use or resize between calls).
-	if h.currBuf.Width != w || h.currBuf.Height != ht {
-		h.currBuf = terminal.NewCellBuf(w, ht)
+	lines := h.scrollbackQueue
+	h.scrollbackQueue = nil
+	if len(lines) == 0 {
 		h.prevBuf = terminal.NewCellBuf(w, ht)
 	}
 
@@ -282,7 +278,15 @@ func (h *Host) runScrollbackFrame() {
 // ── Input loop ────────────────────────────────────────────────────────────────
 
 func (h *Host) readInputLoop() {
-	buf := make([]byte, 256)
+	// Use x/input.Reader for robust, protocol-complete keyboard and mouse event decoding.
+	// The reader handles buffer chunking, Kitty keyboard protocol, bracketed paste,
+	// SGR mouse tracking, UTF-8 decoding, and focus events automatically.
+	r, err := input.NewReader(os.Stdin, "", 0)
+	if err != nil {
+		return
+	}
+	defer r.Close()
+
 	for {
 		select {
 		case <-h.stopCh:
@@ -290,18 +294,25 @@ func (h *Host) readInputLoop() {
 		default:
 		}
 
-		n, err := os.Stdin.Read(buf)
-		if err != nil || n == 0 {
+		// Read and parse all available events from stdin.
+		events, err := r.ReadEvents()
+		if err == io.EOF {
+			return
+		}
+		if err != nil {
 			return
 		}
 
-		for _, ev := range parseInputBytes(buf[:n]) {
+		// Dispatch parsed events to the widget tree.
+		// All mouse event types (Click, Motion, Release, Wheel) satisfy input.MouseEvent;
+		// polymorphic dispatch handles them all without duplication.
+		for _, ev := range events {
 			switch e := ev.(type) {
-			case KeyEvent:
+			case input.KeyPressEvent:
 				if h.root.HandleKey(e) {
 					h.Invalidate()
 				}
-			case MouseEvent:
+			case input.MouseEvent:
 				if h.root.HandleMouse(e) {
 					h.Invalidate()
 				}
