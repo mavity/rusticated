@@ -41,6 +41,11 @@ func (w *AppWidget) SetScrollbackWriter(fn func(string)) {
 	w.writeScrollback = fn
 }
 
+// Shell returns the embedded shell widget for testing/debugging access.
+func (w *AppWidget) Shell() *shell.Shell {
+	return w.sh
+}
+
 // ── ui.Widget Interface Implementation ────────────────────────────────────────
 
 func (w *AppWidget) Measure(c ui.Constraints) ui.Size {
