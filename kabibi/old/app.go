@@ -29,18 +29,23 @@ type assetErrorMsg struct {
 	err   error
 }
 
+func (m *OldAppWidget_BubbleTea) SetDimensions(width, height int) {
+	m.width = width
+	m.height = height
+}
+
 func animTickCmd() tea.Cmd {
 	return tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
 		return animTickMsg(t)
 	})
 }
 
-func initialModel() *AppWidget {
+func initialModel() *OldAppWidget_BubbleTea {
 	conv := &Conversation{Messages: []Message{}}
-	return NewAppWidget("", conv, &OsFSService{}, NewLMSession(conv))
+	return NewOldAppWidget_BubbleTea("", conv, &OsFSService{}, NewLMSession(conv))
 }
 
-func NewAppWidget(cwd string, conv *Conversation, fs FSService, ai AIService) *AppWidget {
+func NewOldAppWidget_BubbleTea(cwd string, conv *Conversation, fs FSService, ai AIService) *OldAppWidget_BubbleTea {
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
@@ -58,7 +63,7 @@ func NewAppWidget(cwd string, conv *Conversation, fs FSService, ai AIService) *A
 	}
 
 	displayModel := strings.TrimSuffix(ActiveModelName(), ".litertlm")
-	m := &AppWidget{
+	m := &OldAppWidget_BubbleTea{
 		activePane:    leftPane,
 		chatOpen:      false,
 		panelsVisible: true,
