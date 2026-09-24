@@ -1,22 +1,5 @@
 package main
 
-import (
-	"context"
-	"sync"
-	"time"
-
-	tea "github.com/charmbracelet/bubbletea"
-	"mvdan.cc/sh/v3/interp"
-)
-
-type pane int
-
-const (
-	leftPane pane = iota
-	rightPane
-	chatPane
-)
-
 // Message represents a single conversation message.
 type Message struct {
 	Role    string // "user" or "assistant"
@@ -31,68 +14,19 @@ type Conversation struct {
 	Messages []Message
 }
 
-type fileItem struct {
-	name     string
-	isDir    bool
-	selected bool
+// ScrollbackWriter is a callback function for writing lines to the scrollback/plume
+type ScrollbackWriter func(text string)
+
+// SubmitHandler is called when the user submits a shell command
+type SubmitHandler func(command string)
+
+// ShellOptions configures shell behavior and callbacks
+type ShellOptions struct {
+	WriteToScrollback ScrollbackWriter // Callback to write output to scrollback
+	SubmitCommand     SubmitHandler    // Callback when command is submitted
 }
 
-type AppWidget struct {
-	shellW        *ShellInputWidget
-	dualPane      *DualPaneWidget
-	plumeW        *PlumeWidget
-	chatW         *ChatWidget
-	activePane    pane
-	chatOpen      bool
-	panelsVisible bool
-	width         int
-	height        int
-
-	plume             []string
-	lastTab           time.Time
-	conversation      *Conversation
-	lastExhaustHeight int
-	isInitialized     bool
-	quitting          bool
-	runner            *interp.Runner
-	shellOut          *SwitchableWriter
-	isThinking        bool
-	firstTokenRecv    bool      // first AI token arrived (thinking → streaming)
-	animStart         time.Time // when current glow animation began
-	flashActive       bool      // completion flash in progress
-	flashStart        time.Time // when flash began
-
-	streamMu  sync.Mutex // protects conversation message writes from callback goroutine
-	streamGen uint64     // incremented on each new stream; stale callbacks compare and drop
-
-	litertReady           bool
-	gemmaReady            bool
-	assetsReady           bool
-	isDownloading         bool
-	litertDownloadPercent int
-	litertDownloadDetails string
-	gemmaDownloadPercent  int
-	gemmaDownloadDetails  string
-	assetError            string
-	assetProgress         <-chan assetProgressMsg
-	assetDone             <-chan tea.Msg
-
-	// File-manager extensions
-	mode      uiMode
-	dialog    *dialogState
-	editor    *editorModel
-	opChan    <-chan tea.Msg
-	opCancel  context.CancelFunc
-	opActive  bool
-	opKind    fileOpKind
-	opCurrent string
-	opDone    int64
-	opTotal   int64
-
-	// Copy/move collision resolution + richer progress.
-	opResume    chan collisionChoice
-	opCollision bool
-	opFileDone  int64
-	opFileTotal int64
-	opRate      int64
+// PromptOptions configures AI prompt behavior and callbacks
+type PromptOptions struct {
+	WriteToScrollback ScrollbackWriter
 }

@@ -1,13 +1,20 @@
 package main
 
 import (
-	. "kabibi/cmd"
+	"log"
 
-	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mavity/rusticated/kabibi/ui/app"
 )
 
-var AppProgram *tea.Program
-
 func main() {
-	CliMain()
+	appWidget, host, err := app.Boot()
+	if err != nil {
+		log.Fatalf("kabibi boot error: %v", err)
+	}
+	_ = appWidget
+
+	errRun := host.Run()
+	if errRun != nil {
+		log.Fatalf("kabibi run error: %v", errRun)
+	}
 }
