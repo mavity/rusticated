@@ -190,7 +190,7 @@ func TestRoundTrip_CJKText(t *testing.T) {
 		// CJK characters are rendered from vt.Emulator; actual roundtrip depends on
 		// terminal emulation behavior, which may add spaces or strip them.
 		// The critical assertion is that roundtrips are stable and deterministic.
-		want := ToANSI(FromANSI([]string{"你好世界"}, 5))
+		want := "你好世界\r\n"
 		if got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
@@ -198,7 +198,7 @@ func TestRoundTrip_CJKText(t *testing.T) {
 
 	t.Run("W=20", func(t *testing.T) {
 		got := ToANSI(FromANSI([]string{"你好世界"}, 20))
-		want := ToANSI(FromANSI([]string{"你好世界"}, 20))
+		want := "你好世界\r\n"
 		if got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
@@ -206,7 +206,7 @@ func TestRoundTrip_CJKText(t *testing.T) {
 
 	t.Run("W=80", func(t *testing.T) {
 		got := ToANSI(FromANSI([]string{"你好世界"}, 80))
-		want := ToANSI(FromANSI([]string{"你好世界"}, 80))
+		want := "你好世界\r\n"
 		if got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
@@ -730,6 +730,253 @@ func TestRoundTrip_BlinkingText(t *testing.T) {
 	t.Run("W=80", func(t *testing.T) {
 		got := ToANSI(FromANSI([]string{"\x1b[5mBlink\x1b[0m"}, 80))
 		want := "\x1b[5mBlink\r\n"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Trailing Space Logic: Five Critical State-Sensitivity Scenarios
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestRoundTrip_PlainTrailingSpacesAfterColor(t *testing.T) {
+	t.Run("W=10", func(t *testing.T) {
+		got := ToANSI(FromANSI([]string{"\x1b[31mRed   "}, 10))
+		want := "\x1b[31mRed\r\n"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("W=20", func(t *testing.T) {
+		got := ToANSI(FromANSI([]string{"\x1b[31mRed   "}, 20))
+		want := "\x1b[31mRed\r\n"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("W=80", func(t *testing.T) {
+		got := ToANSI(FromANSI([]string{"\x1b[31mRed   "}, 80))
+		want := "\x1b[31mRed\r\n"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+}
+
+func TestRoundTrip_MixedMidAndTrailingSpaces(t *testing.T) {
+	t.Run("W=10", func(t *testing.T) {
+		got := ToANSI(FromANSI([]string{"  A  B  "}, 10))
+		want := "  A  B\r\n"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("W=20", func(t *testing.T) {
+		got := ToANSI(FromANSI([]string{"  A  B  "}, 20))
+		want := "  A  B\r\n"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("W=80", func(t *testing.T) {
+		got := ToANSI(FromANSI([]string{"  A  B  "}, 80))
+		want := "  A  B\r\n"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+}
+
+func TestRoundTrip_BackgroundColoredTrailingSpaces(t *testing.T) {
+	// Red background with trailing spaces: should preserve the background color
+	// across the spaces and emit appropriate SGR code.
+	t.Run("W=10", func(t *testing.T) {
+		got := ToANSI(FromANSI([]string{"\x1b[41mRed  \x1b[0m"}, 10))
+		// Red background text followed by plain spaces, line end implicit.
+		want := "\x1b[41mRed  \r\n"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("W=20", func(t *testing.T) {
+		got := ToANSI(FromANSI([]string{"\x1b[41mBG  \x1b[0m"}, 20))
+		want := "\x1b[41mBG  \r\n"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+}
+
+func TestRoundTrip_TrailingSpacesBeforeSoftWrap(t *testing.T) {
+	// Trailing spaces before a soft-wrap boundary: spaces should be preserved.
+	// At W=10, text may soft-wrap; line termination must preserve trailing spaces.
+	t.Run("W=10", func(t *testing.T) {
+		// "Hello   world" = 13 chars at W=10 may trigger soft-wrap decision.
+		// Output should have line breaks and preserve spaces.
+		got := ToANSI(FromANSI([]string{"Hello   world"}, 10))
+		// Round-trip: spaces between words are preserved, soft-wrap may insert \r\n
+		want := "Hello   world\r\n"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("W=20", func(t *testing.T) {
+		got := ToANSI(FromANSI([]string{"Word1   Word2"}, 20))
+		// At wider width, no soft-wrap; just plain text with line ending.
+		want := "Word1   Word2\r\n"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+}
+
+func TestRoundTrip_UnderlineResetBeforePlainTrailingSpaces(t *testing.T) {
+	t.Run("W=10", func(t *testing.T) {
+		got := ToANSI(FromANSI([]string{"\x1b[4mText\x1b[0m   "}, 10))
+		want := "\x1b[4mText\r\n"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("W=20", func(t *testing.T) {
+		got := ToANSI(FromANSI([]string{"\x1b[4mText\x1b[0m   "}, 20))
+		want := "\x1b[4mText\r\n"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("W=80", func(t *testing.T) {
+		got := ToANSI(FromANSI([]string{"\x1b[4mText\x1b[0m   "}, 80))
+		want := "\x1b[4mText\r\n"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+}
+
+func TestRoundTrip_ForegroundColorThenPlainTrailingSpaces(t *testing.T) {
+	// Foreground-only colored text (no background) followed by plain trailing spaces.
+	// The fg color active, but trailing spaces are default background, so no BG reset needed.
+	t.Run("W=10", func(t *testing.T) {
+		got := ToANSI(FromANSI([]string{"\x1b[33mYellow   "}, 10))
+		want := "\x1b[33mYellow\r\n"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("W=20", func(t *testing.T) {
+		got := ToANSI(FromANSI([]string{"\x1b[33mYellow   "}, 20))
+		want := "\x1b[33mYellow\r\n"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("W=80", func(t *testing.T) {
+		got := ToANSI(FromANSI([]string{"\x1b[33mYellow   "}, 80))
+		want := "\x1b[33mYellow\r\n"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Missing Blueprint Scenarios: Truecolor + Mixed BG Trailing Spaces
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestRoundTrip_TruecolorForeground(t *testing.T) {
+	// 24-bit Truecolor foreground: \x1b[38;2;R;G;Bm format.
+	t.Run("W=10", func(t *testing.T) {
+		got := ToANSI(FromANSI([]string{"\x1b[38;2;255;100;50mTruecolor"}, 10))
+		// Truecolor RGB is preserved through round-trip serialization.
+		want := "\x1b[38;2;255;100;50mTruecolor\r\n"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("W=20", func(t *testing.T) {
+		got := ToANSI(FromANSI([]string{"\x1b[38;2;0;255;128mRGB"}, 20))
+		want := "\x1b[38;2;0;255;128mRGB\r\n"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("W=80", func(t *testing.T) {
+		got := ToANSI(FromANSI([]string{"\x1b[38;2;64;32;200mText"}, 80))
+		want := "\x1b[38;2;64;32;200mText\r\n"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+}
+
+func TestRoundTrip_TruecolorBackground(t *testing.T) {
+	// 24-bit Truecolor background: \x1b[48;2;R;G;Bm format.
+	t.Run("W=10", func(t *testing.T) {
+		got := ToANSI(FromANSI([]string{"\x1b[48;2;10;20;30mBG"}, 10))
+		// Truecolor RGB background is preserved through round-trip serialization.
+		want := "\x1b[48;2;10;20;30mBG\r\n"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("W=20", func(t *testing.T) {
+		got := ToANSI(FromANSI([]string{"\x1b[48;2;200;100;50mBack"}, 20))
+		want := "\x1b[48;2;200;100;50mBack\r\n"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("W=80", func(t *testing.T) {
+		got := ToANSI(FromANSI([]string{"\x1b[48;2;100;150;200mBackground"}, 80))
+		want := "\x1b[48;2;100;150;200mBackground\r\n"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+}
+
+func TestRoundTrip_MixedPlainAndBGTrailingSpaces(t *testing.T) {
+	// Critical edge case: unstyled plain spaces followed by BG-colored spaces on same line.
+	// Tests whether flushPendingSpaces() correctly handles background color transitions mid-line.
+	t.Run("W=10", func(t *testing.T) {
+		got := ToANSI(FromANSI([]string{"A  \x1b[41m  \x1b[0m"}, 10))
+		// Plain 'A', 2 plain spaces (deferred), 2 red-BG spaces (styled), reset.
+		// flushPendingSpaces() must emit plain spaces before BG color code.
+		want := "A  \x1b[41m  \r\n"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("W=20", func(t *testing.T) {
+		got := ToANSI(FromANSI([]string{"Text   \x1b[43m   \x1b[0m"}, 20))
+		// Text, 3 plain spaces (deferred), 3 yellow-BG spaces (styled), reset.
+		want := "Text   \x1b[43m   \r\n"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("W=80", func(t *testing.T) {
+		got := ToANSI(FromANSI([]string{"Word   \x1b[46m  \x1b[0m"}, 80))
+		// Word, 3 plain spaces (deferred), 2 cyan-BG spaces (styled), reset.
+		want := "Word   \x1b[46m  \r\n"
 		if got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}

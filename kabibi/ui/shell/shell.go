@@ -1,6 +1,7 @@
 package shell
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -15,6 +16,25 @@ import (
 	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
 )
+
+// CommandBlockStatus represents the execution state of a command
+type CommandBlockStatus int
+
+const (
+	StatusActive  CommandBlockStatus = iota // Command is actively running or input is being edited
+	StatusSuccess                           // Command completed successfully
+	StatusError                             // Command failed with non-zero exit
+	StatusFailure                           // Command had an error (e.g., parse error)
+)
+
+// CommandBlock represents a single shell interaction: prompt + command + output + status
+type CommandBlock struct {
+	Prompt   string             // e.g., "$ "
+	Input    string             // The command text (e.g., "ls -la")
+	Output   bytes.Buffer       // Accumulated output from stdout/stderr
+	Status   CommandBlockStatus // Execution status
+	ExitCode int                // Exit code (0 = success, non-zero = failure)
+}
 
 // shellResultMsg contains the output of a command
 type shellResultMsg struct {
