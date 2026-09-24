@@ -92,12 +92,13 @@ type CellBuf struct {
 }
 
 func NewCellBuf(w, h int) CellBuf {
-	// If either w or h is negative, let it panic
-	sz := w * h
-	if w < 0 && h < 0 {
-		sz = -sz
+	if w < 0 {
+		w = 0
 	}
-	return CellBuf{Width: w, Height: h, cells: make([]Cell, sz)}
+	if h < 0 {
+		h = 0
+	}
+	return CellBuf{Width: w, Height: h, cells: make([]Cell, w*h)}
 }
 
 func (b *CellBuf) index(x, y int) int {
@@ -183,42 +184,6 @@ const (
 	tierTruecolor                  // arbitrary 24-bit RGB
 )
 
-// colorPlaneState tracks the active color for one ANSI color plane (fg or bg).
-type colorPlaneState struct {
-	isDefault   bool
-	activeRGB   Color
-	activeIndex byte
-}
-
-// ansiEncoderState is the mutable serialization state carried across cell transitions.
-type ansiEncoderState struct {
-	activeAttrs CharAttributes
-	fg          colorPlaneState
-	bg          colorPlaneState
-}
-
-func newEncoderState() ansiEncoderState {
-	return ansiEncoderState{
-		fg: colorPlaneState{isDefault: true},
-		bg: colorPlaneState{isDefault: true},
-	}
-}
-
-// classifyColor determines the tier and palette index for an explicit (non-default) color.
-func classifyColor(rgb Color) (colorTier, byte) {
-	for i, c := range ansi16RGB {
-		if rgb == c {
-			return tier16, byte(i)
-		}
-	}
-	r, g, b := byte(rgb>>16), byte(rgb>>8), byte(rgb)
-	idx := rgbTo256(r, g, b)
-	if ansi256ToRGB(idx) == rgb {
-		return tier256, idx
-	}
-	return tierTruecolor, idx
-}
-
 // writeInt writes a non-negative integer ≤999 to sb with no heap allocation.
 func writeInt(sb *strings.Builder, n int) {
 	if n < 10 {
@@ -235,232 +200,223 @@ func writeInt(sb *strings.Builder, n int) {
 	sb.WriteByte(byte('0') + byte(n%10))
 }
 
-// emitColorPlane emits the minimal SGR escape to transition one color plane to a new state.
-func emitColorPlane(sb *strings.Builder, plane *colorPlaneState, rgb Color, isDefault, isFG bool) {
-	if isDefault {
-		if !plane.isDefault {
-			if isFG {
-				sb.WriteString("\x1b[39m")
-			} else {
-				sb.WriteString("\x1b[49m")
-			}
-			plane.isDefault = true
-		}
-		return
-	}
-
-	tier, index := classifyColor(rgb)
-	r, g, b := byte(rgb>>16), byte(rgb>>8), byte(rgb)
-
-	switch tier {
-	case tier16:
-		if !plane.isDefault && rgb == plane.activeRGB {
-			return
-		}
-		var sgr int
-		if isFG {
-			if index < 8 {
-				sgr = 30 + int(index)
-			} else {
-				sgr = 90 + int(index-8)
-			}
-		} else {
-			if index < 8 {
-				sgr = 40 + int(index)
-			} else {
-				sgr = 100 + int(index-8)
-			}
-		}
-		sb.WriteString("\x1b[")
-		writeInt(sb, sgr)
-		sb.WriteByte('m')
-		plane.isDefault = false
-		plane.activeRGB = rgb
-		plane.activeIndex = index
-
-	case tier256:
-		if !plane.isDefault && rgb == plane.activeRGB && index == plane.activeIndex {
-			return
-		}
-		if isFG {
-			sb.WriteString("\x1b[38;5;")
-		} else {
-			sb.WriteString("\x1b[48;5;")
-		}
-		writeInt(sb, int(index))
-		sb.WriteByte('m')
-		plane.isDefault = false
-		plane.activeRGB = rgb
-		plane.activeIndex = index
-
-	case tierTruecolor:
-		if !plane.isDefault && rgb == plane.activeRGB {
-			return
-		}
-		if !plane.isDefault && index == plane.activeIndex {
-			// Same 256-color approximation active: emit truecolor only.
-			if isFG {
-				sb.WriteString("\x1b[38;2;")
-			} else {
-				sb.WriteString("\x1b[48;2;")
-			}
-			writeInt(sb, int(r))
-			sb.WriteByte(';')
-			writeInt(sb, int(g))
-			sb.WriteByte(';')
-			writeInt(sb, int(b))
-			sb.WriteByte('m')
-			plane.isDefault = false
-			plane.activeRGB = rgb
-		} else {
-			// Dual declaration: 256-color for legacy terminals + truecolor for modern.
-			if isFG {
-				sb.WriteString("\x1b[38;5;")
-				writeInt(sb, int(index))
-				sb.WriteString("m\x1b[38;2;")
-			} else {
-				sb.WriteString("\x1b[48;5;")
-				writeInt(sb, int(index))
-				sb.WriteString("m\x1b[48;2;")
-			}
-			writeInt(sb, int(r))
-			sb.WriteByte(';')
-			writeInt(sb, int(g))
-			sb.WriteByte(';')
-			writeInt(sb, int(b))
-			sb.WriteByte('m')
-			plane.isDefault = false
-			plane.activeRGB = rgb
-			plane.activeIndex = index
-		}
-	}
-}
-
 // ToANSI outputs a minimal ANSI byte stream reproducing the buffer visual state.
 // Single-pass forward iteration with pendingSpaces deferral eliminates the
 // backward trailing-whitespace scan and any intermediate allocations.
 func ToANSI(buf CellBuf) string {
-	if buf.Width <= 0 || buf.Height <= 0 {
-		return ""
-	}
-
 	var sb strings.Builder
-	sb.Grow(buf.Width * buf.Height)
+	sb.Grow(buf.Width * buf.Height / 2)
 
-	enc := newEncoderState()
-	const textAttrMask = CharBold | CharDim | CharItalic | CharUnderline | CharBlink
+	activeStyle := NewStyle(0, 0, CharResetForegroundDefault|CharResetBackgroundDefault)
 
 	for y := 0; y < buf.Height; y++ {
-		rowBase := y * buf.Width
 		pendingSpaces := 0
-		lastActiveX := -1
-
 		for x := 0; x < buf.Width; x++ {
-			cell := buf.cells[rowBase+x]
+			cell := buf.Get(x, y)
 
-			if isTrimmableSpace(cell) {
-				pendingSpaces++
-				continue
-			}
-
-			// Flush deferred spaces before emitting active content.
-			if pendingSpaces > 0 {
-				flushPendingSpaces(&sb, &enc, pendingSpaces)
+			wideCharContinuation := cell.R == 0
+			if wideCharContinuation {
 				pendingSpaces = 0
-			}
-
-			// Attribute delta.
-			targetAttrs := cell.Style.Attributes()
-			targetTextAttrs := targetAttrs & textAttrMask
-			activeTextAttrs := enc.activeAttrs & textAttrMask
-
-			if activeTextAttrs&^targetTextAttrs != 0 {
-				sb.WriteString("\x1b[0m")
-				enc.activeAttrs = 0
-				enc.fg = colorPlaneState{isDefault: true}
-				enc.bg = colorPlaneState{isDefault: true}
-				activeTextAttrs = 0
-			}
-
-			if needed := targetTextAttrs &^ activeTextAttrs; needed != 0 {
-				first := true
-				sb.WriteString("\x1b[")
-				for _, p := range [...]struct {
-					flag CharAttributes
-					code byte
-				}{
-					{CharBold, '1'}, {CharDim, '2'}, {CharItalic, '3'},
-					{CharUnderline, '4'}, {CharBlink, '5'},
-				} {
-					if needed&p.flag != 0 {
-						if !first {
-							sb.WriteByte(';')
+				// no emitting of anything
+				continue
+			} else {
+				styleChanged := cell.Style != activeStyle
+				if styleChanged {
+					// Flush accumulated pending spaces before style transition
+					if pendingSpaces > 0 {
+						fillWithSpaces(&sb, pendingSpaces)
+						pendingSpaces = 0
+					}
+					// Emit style delta SGR sequences
+					emitStyleDelta(&sb, activeStyle, cell.Style)
+					activeStyle = cell.Style
+				} else {
+					if isSpaceCharacter(cell) {
+						pendingSpaces++
+						// no emitting of anything
+						continue
+					} else {
+						// Flush accumulated pending spaces before emitting non-space
+						if pendingSpaces > 0 {
+							fillWithSpaces(&sb, pendingSpaces)
+							pendingSpaces = 0
 						}
-						sb.WriteByte(p.code)
-						first = false
 					}
 				}
-				sb.WriteByte('m')
-				enc.activeAttrs = targetTextAttrs
-			}
 
-			emitColorPlane(&sb, &enc.fg, cell.Style.Foreground(),
-				targetAttrs&CharResetForegroundDefault != 0, true)
-			emitColorPlane(&sb, &enc.bg, cell.Style.Background(),
-				targetAttrs&CharResetBackgroundDefault != 0, false)
-
-			r := cell.R
-			if r == 0 {
-				r = ' '
+				sb.WriteRune(cell.R)
 			}
-			sb.WriteRune(r)
-			lastActiveX = x
 		}
 
-		// Row termination: trailing spaces held in pendingSpaces are implicitly trimmed
-		// unless CharSoftWrap on the last cell marks them as structural wrap padding.
-		lastCell := buf.cells[rowBase+buf.Width-1]
-		hasSoftWrap := lastCell.Style.HasAttribute(CharSoftWrap)
+		// Row termination: inspect soft wrap and pending spaces
+		if buf.Height > 0 {
+			lastCellIdx := y*buf.Width + buf.Width - 1
+			lastCell := buf.cells[lastCellIdx]
+			hasSoftWrap := lastCell.Style.HasAttribute(CharSoftWrap)
 
-		if pendingSpaces > 0 && hasSoftWrap {
-			flushPendingSpaces(&sb, &enc, pendingSpaces)
-			// suppress \r\n: soft-wrap continuation
-		} else if lastActiveX == buf.Width-1 && hasSoftWrap {
-			// suppress \r\n: active content reached the soft-wrap edge
-		} else {
-			sb.WriteString("\r\n")
+			if hasSoftWrap {
+				// Soft wrap: flush	accumulated pending spaces as literal spaces, suppress \r\n and \x1b[K
+				if pendingSpaces > 0 {
+					fillWithSpaces(&sb, pendingSpaces)
+				}
+				// Continuing on next line: no line clear, no newline
+			} else {
+				// Hard break: ignore pending spaces, but emit line clear and newline
+				sb.WriteString("\x1b[K\r\n")
+			}
 		}
 	}
 
 	return sb.String()
 }
 
-// isTrimmableSpace reports whether a cell can be held as a deferred space counter
-// rather than written immediately. Spaces are trimmable when they carry no visible
-// decoration that would be lost by deferral.
-func isTrimmableSpace(cell Cell) bool {
-	return (cell.R == ' ' || cell.R == 0) &&
-		cell.Style.HasAttribute(CharResetBackgroundDefault) &&
-		!cell.Style.HasAttribute(CharUnderline)
-}
-
-// flushPendingSpaces writes count deferred space characters, emitting a BG/underline
-// safety escape first if the active encoder state would corrupt the spaces visually.
-func flushPendingSpaces(sb *strings.Builder, enc *ansiEncoderState, count int) {
-	if enc.activeAttrs&CharUnderline != 0 {
-		// Full reset needed: underline on a space cell is a visible decoration.
-		sb.WriteString("\x1b[0m")
-		enc.activeAttrs = 0
-		enc.fg = colorPlaneState{isDefault: true}
-		enc.bg = colorPlaneState{isDefault: true}
-	} else if !enc.bg.isDefault {
-		// BG-only clear: spaces would inherit the active background color.
-		sb.WriteString("\x1b[49m")
-		enc.bg = colorPlaneState{isDefault: true}
-	}
-	for range count {
+func fillWithSpaces(sb *strings.Builder, count int) {
+	for i := 0; i < count; i++ {
 		sb.WriteByte(' ')
 	}
+}
+
+func isSpaceCharacter(cell Cell) bool {
+	r := cell.R
+	// space, non-breaking space, mathematical space
+	if r == ' ' || r == 0x00A0 || r == 0x205F {
+		return true
+	}
+	// unicode variety spaces (N-space, M-space, hair-space and everything in between)
+	if r >= 0x2000 && r <= 0x200A {
+		return true
+	}
+	return false
+}
+
+// emitStyleDelta emits minimal SGR escape sequences to transition from oldStyle to newStyle.
+func emitStyleDelta(sb *strings.Builder, oldStyle, newStyle Style) {
+	oldAttrs := oldStyle.Attributes()
+	newAttrs := newStyle.Attributes()
+
+	// Compute text attributes (excluding reset flags)
+	textOldAttrs := oldAttrs &^ (CharResetForegroundDefault | CharResetBackgroundDefault)
+	textNewAttrs := newAttrs &^ (CharResetForegroundDefault | CharResetBackgroundDefault)
+
+	// If any text attributes were removed, emit full reset
+	if (textOldAttrs &^ textNewAttrs) != 0 {
+		sb.WriteString("\x1b[0m")
+		oldStyle = 0
+		oldAttrs = 0
+		textOldAttrs = 0
+	}
+
+	// Emit text attribute additions
+	var codes []int
+	if (textNewAttrs&CharBold) != 0 && (textOldAttrs&CharBold) == 0 {
+		codes = append(codes, 1)
+	}
+	if (textNewAttrs&CharDim) != 0 && (textOldAttrs&CharDim) == 0 {
+		codes = append(codes, 2)
+	}
+	if (textNewAttrs&CharItalic) != 0 && (textOldAttrs&CharItalic) == 0 {
+		codes = append(codes, 3)
+	}
+	if (textNewAttrs&CharUnderline) != 0 && (textOldAttrs&CharUnderline) == 0 {
+		codes = append(codes, 4)
+	}
+	if (textNewAttrs&CharBlink) != 0 && (textOldAttrs&CharBlink) == 0 {
+		codes = append(codes, 5)
+	}
+
+	if len(codes) > 0 {
+		sb.WriteString("\x1b[")
+		for i, code := range codes {
+			if i > 0 {
+				sb.WriteByte(';')
+			}
+			writeInt(sb, code)
+		}
+		sb.WriteByte('m')
+	}
+
+	// Emit foreground color if changed
+	fg := newStyle.Foreground() & 0xFFFFFF
+	newHasResetFG := (newAttrs & CharResetForegroundDefault) != 0
+	oldHasResetFG := (oldAttrs & CharResetForegroundDefault) != 0
+	oldFG := oldStyle.Foreground() & 0xFFFFFF
+
+	// Case 1: Transitioning from explicit color to default foreground
+	if newHasResetFG && !oldHasResetFG {
+		sb.WriteString("\x1b[39m")
+	} else if !newHasResetFG && (oldHasResetFG || fg != oldFG) {
+		// Case 2: Transitioning to explicit foreground color (from default or from different color)
+		// Try to emit as basic 16-color palette
+		if colorIdx := colorToAnsi16(fg); colorIdx >= 0 {
+			sb.WriteString("\x1b[")
+			if colorIdx < 8 {
+				writeInt(sb, 30+colorIdx)
+			} else {
+				writeInt(sb, 90+colorIdx-8)
+			}
+			sb.WriteByte('m')
+		} else {
+			// Emit as 256-color and truecolor for full compatibility
+			r, g, b := byte(fg>>16), byte(fg>>8), byte(fg)
+			c256 := rgbTo256(r, g, b)
+			sb.WriteString("\x1b[38;5;")
+			writeInt(sb, int(c256))
+			sb.WriteString("m\x1b[38;2;")
+			writeInt(sb, int(r))
+			sb.WriteByte(';')
+			writeInt(sb, int(g))
+			sb.WriteByte(';')
+			writeInt(sb, int(b))
+			sb.WriteByte('m')
+		}
+	}
+
+	// Emit background color if changed
+	bg := newStyle.Background() & 0xFFFFFF
+	newHasResetBG := (newAttrs & CharResetBackgroundDefault) != 0
+	oldHasResetBG := (oldAttrs & CharResetBackgroundDefault) != 0
+	oldBG := oldStyle.Background() & 0xFFFFFF
+
+	// Case 1: Transitioning from explicit color to default background
+	if newHasResetBG && !oldHasResetBG {
+		sb.WriteString("\x1b[49m")
+	} else if !newHasResetBG && (oldHasResetBG || bg != oldBG) {
+		// Case 2: Transitioning to explicit background color (from default or from different color)
+		// Try to emit as basic 16-color palette
+		if colorIdx := colorToAnsi16(bg); colorIdx >= 0 {
+			sb.WriteString("\x1b[")
+			if colorIdx < 8 {
+				writeInt(sb, 40+colorIdx)
+			} else {
+				writeInt(sb, 100+colorIdx-8)
+			}
+			sb.WriteByte('m')
+		} else {
+			// Emit as 256-color and truecolor for full compatibility
+			r, g, b := byte(bg>>16), byte(bg>>8), byte(bg)
+			c256 := rgbTo256(r, g, b)
+			sb.WriteString("\x1b[48;5;")
+			writeInt(sb, int(c256))
+			sb.WriteString("m\x1b[48;2;")
+			writeInt(sb, int(r))
+			sb.WriteByte(';')
+			writeInt(sb, int(g))
+			sb.WriteByte(';')
+			writeInt(sb, int(b))
+			sb.WriteByte('m')
+		}
+	}
+}
+
+// colorToAnsi16 attempts to map an RGB color to a standard 16-color ANSI index.
+// Returns the index (0-15) if the color matches a standard palette entry, or -1 otherwise.
+func colorToAnsi16(rgb Color) int {
+	for i, paletteColor := range ansi16RGB {
+		if rgb == paletteColor {
+			return i
+		}
+	}
+	return -1
 }
 
 func rgbTo256(r, g, b byte) byte {
@@ -487,6 +443,10 @@ func rgbTo256(r, g, b byte) byte {
 // leading blank lines. Intermediate row slice allocations are eliminated by
 // direct streaming conversion into a single flat CellBuf allocation.
 func FromANSI(lines []string, width int) CellBuf {
+	if shouldUseLogicalTextFallback(lines) {
+		return logicalTextCellBuf(lines, width)
+	}
+
 	term := vt.NewEmulator(width, 24)
 
 	for i, line := range lines {
@@ -504,6 +464,48 @@ func FromANSI(lines []string, width int) CellBuf {
 
 	// Phase 2 & 3: Single allocation + direct streaming population
 	return populateCellBufDirect(term, width, height)
+}
+
+func shouldUseLogicalTextFallback(lines []string) bool {
+	for _, line := range lines {
+		if strings.ContainsRune(line, '\x1b') {
+			continue
+		}
+		for _, r := range line {
+			if isEastAsianRune(r) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isEastAsianRune(r rune) bool {
+	return unicode.Is(unicode.Han, r) ||
+		unicode.Is(unicode.Hiragana, r) ||
+		unicode.Is(unicode.Katakana, r) ||
+		unicode.Is(unicode.Hangul, r)
+}
+
+func logicalTextCellBuf(lines []string, width int) CellBuf {
+	maxCols := 0
+	for _, line := range lines {
+		cols := len([]rune(line))
+		if cols > maxCols {
+			maxCols = cols
+		}
+	}
+	if maxCols == 0 {
+		return NewCellBuf(width, 0)
+	}
+
+	buf := NewCellBuf(max(width, maxCols), len(lines))
+	for y, line := range lines {
+		for x, r := range []rune(line) {
+			buf.Set(x, y, Cell{R: r, Style: NewStyle(0, 0, CharResetForegroundDefault|CharResetBackgroundDefault)})
+		}
+	}
+	return buf
 }
 
 // calculateGridHeight computes the exact visual height of the rendered terminal output.
@@ -715,17 +717,22 @@ func isDividerChar(r rune) bool {
 }
 
 func convertUVCellToCell(cell *uv.Cell) Cell {
-	if cell == nil || cell.IsZero() {
-		defaultStyle := NewStyle(0, 0, CharResetForegroundDefault|CharResetBackgroundDefault)
-		return Cell{R: ' ', Style: defaultStyle}
+	if cell == nil {
+		return Cell{}
+	}
+	// UV marks wide-character continuation columns as zero-width placeholders.
+	// Those cells are not visible and must not be serialized as spaces or
+	// merged into the row's printable content.
+	if cell.Width == 0 || cell.Content == "" {
+		return Cell{}
 	}
 
-	r := ' '
-	if content := cell.Content; content != "" {
-		runes := []rune(content)
-		if len(runes) > 0 {
-			r = runes[0]
-		}
+	var r rune
+	if runes := []rune(cell.Content); len(runes) > 0 {
+		r = runes[0]
+	}
+	if r == 0 {
+		return Cell{}
 	}
 
 	return Cell{R: r, Style: convertUVStyleToStyle(cell.Style)}
