@@ -93,8 +93,22 @@ func applyWasip1DepPatches(ws, projectDir, goroot string) (*depPatchResult, erro
 		encoded := encodeModPath(target.module)
 		srcDir := filepath.Join(gomodcache, encoded+"@"+version)
 		if _, err := os.Stat(srcDir); err != nil {
-			fmt.Printf("🍆  wasip1 JIT: %s@%s not in GOMODCACHE, skipping\n", target.module, version)
-			continue
+			if _, err := os.Stat(srcDir); err != nil {
+				fmt.Printf("🍆 wasip1 JIT: %s@%s not in GOMODCACHE, skipping\n", target.module, version)
+				continue
+			}
+
+			fmt.Printf("🍆 wasip1 JIT: downloading %s@%s\n", target.module, version)
+			dlCmd := exec.Command(goBin, "mod", "download", target.module+"@"+version)
+			if out, dlErr := dlCmd.CombinedOutput(); dlErr != nil {
+				fmt.Printf("🍆 wasip1 JIT: failed to download %s@%s: %v\n%s\n", target.module, version, dlErr, string(out))
+				continue
+			}
+
+			if _, err := os.Stat(srcDir); err != nil {
+				fmt.Printf("🍆 wasip1 JIT: %s@%s not in GOMODCACHE, skipping\n", target.module, version)
+				continue
+			}
 		}
 
 		// Sync source files into the JIT directory.

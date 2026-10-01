@@ -7,33 +7,6 @@ import (
 	"path/filepath"
 )
 
-func resolveWashmhostCommandDir(workspaceRoot, projectDir string) string {
-	if projectDir == "" {
-		projectDir = workspaceRoot
-	}
-	if projectDir == "." {
-		projectDir = workspaceRoot
-	}
-
-	for _, candidate := range []string{projectDir, filepath.Join(workspaceRoot, projectDir)} {
-		if candidate == "" {
-			continue
-		}
-		if abs, err := filepath.Abs(candidate); err == nil {
-			if info, statErr := os.Stat(abs); statErr == nil && info.IsDir() {
-				return filepath.Clean(abs)
-			}
-		}
-	}
-	if abs, err := filepath.Abs(workspaceRoot); err == nil {
-		return filepath.Clean(abs)
-	}
-	if wd, err := os.Getwd(); err == nil {
-		return filepath.Clean(wd)
-	}
-	return "."
-}
-
 // runUnderWashmhost runs a WASM file under washmhost.
 // When running inside a vegetable (MOHABBAT_VEGETABLE_PATH is set), it extracts
 // the appropriate pre-built washmhost binary from the vegetable's pool rather
@@ -88,7 +61,7 @@ func runUnderWashmhost(ws, projectDir, wasmPath string, extraArgs []string, plat
 		goBin = goBinFromRoot(goroot)
 	}
 	cmd := exec.Command(goBin, runArgs...)
-	cmd.Dir = resolveWashmhostCommandDir(ws, projectDir)
+	cmd.Dir = filepath.Join(ws, "mohabbat", "washmhost")
 	env := os.Environ()
 	env = upsertEnv(env, "MOHABBAT_WASM_FD", wasmPath)
 	if goroot != "" {
