@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -13,61 +12,27 @@ import (
 // Each flagged line is corrected with a single, self-contained turn that includes
 // the full page context, the line image crop, and the Phase 1 candidate text.
 // A fresh conversation is created per line to avoid state contamination.
-func RefineLines(ctx context.Context, cfg *Config, lines []TextLine, img image.Image) error {
-	_ = ctx
-	if cfg.LMLibPath == "" || cfg.GemmaModelPath == "" {
-		return fmt.Errorf("Gemma 4 or LiteRT-LM not available")
-	}
-
-	engine, err := NewLMEngine(cfg.LMLibPath, cfg.GemmaModelPath, cfg.LMBackend)
+// RefineOneLine refines a single TextLine in-place using Gemma 4 + the line image crop.
+func RefineOneLine(engine *LMEngine, pageText string, line *TextLine, img image.Image) error {
+	conv, err := engine.NewConversation()
 	if err != nil {
-		return fmt.Errorf("LM engine init: %w", err)
+		return err
 	}
-	defer engine.Close()
-
-	pageText := buildPageContext(lines)
-
-	var needsLLM []int
-	for i, l := range lines {
-		if l.NeedsLLM {
-			needsLLM = append(needsLLM, i)
-		}
+	defer conv.Close()
+	crop := CropRect(img, line.BBox.Rect())
+	payload, err := buildLineCorrectionPayload(pageText, *line, crop)
+	if err != nil {
+		return err
 	}
-	if cfg.Verbose {
-		fmt.Printf("[phase2] %d line(s) below \u03c4=%.2f — initialising Gemma 4\n", len(needsLLM), cfg.Threshold)
-		fmt.Printf("[phase2] refining %d flagged line(s)\n", len(needsLLM))
+	var corrected strings.Builder
+	if err := conv.SendMessageStream(payload, func(raw string) {
+		corrected.WriteString(extractTokenText(raw))
+	}); err != nil {
+		return err
 	}
-
-	for _, idx := range needsLLM {
-		conv, err := engine.NewConversation()
-		if err != nil {
-			return fmt.Errorf("conversation init: %w", err)
-		}
-
-		crop := CropRect(img, lines[idx].BBox.Rect())
-		payload, err := buildLineCorrectionPayload(pageText, lines[idx], crop)
-		if err != nil {
-			conv.Close()
-			continue
-		}
-		var corrected strings.Builder
-		if err := conv.SendMessageStream(payload, func(raw string) {
-			corrected.WriteString(extractTokenText(raw))
-		}); err != nil {
-			if cfg.Verbose {
-				fmt.Printf("[phase2] line %d: generation error: %v\n", idx, err)
-			}
-			conv.Close()
-			continue
-		}
-		conv.Close()
-		if t := strings.TrimSpace(corrected.String()); t != "" {
-			lines[idx].Text = t
-			lines[idx].NeedsLLM = false
-			if cfg.Verbose {
-				fmt.Printf("[phase2] line %d refined: %q\n", idx, t)
-			}
-		}
+	if t := strings.TrimSpace(corrected.String()); t != "" {
+		line.Text = t
+		line.NeedsLLM = false
 	}
 	return nil
 }
