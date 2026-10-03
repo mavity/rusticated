@@ -10,14 +10,27 @@ import (
 )
 
 const (
-	// ConfidenceThreshold is τ from the design document.
-	ConfidenceThreshold = 0.80
+	// ConfidenceThreshold is τ: lines below this score are sent to Gemma for refinement.
+	ConfidenceThreshold = 0.90
 
 	// RecHeight is the fixed input height for the SVTR/CRNN recognizer.
 	RecHeight = 64
 
-	// DBThreshold is the binarisation threshold on the DB probability map.
-	DBThreshold = 0.15
+	// CRAFTLowText is the binary threshold applied to score_text (channel 0).
+	// Lowered from 0.4: terminal screenshots produce weaker CRAFT responses than natural images.
+	CRAFTLowText = 0.35
+
+	// CRAFTLinkThreshold is the binary threshold applied to score_link (channel 1).
+	// Lowered from 0.4: link scores for monospace terminal fonts are weaker than natural-image text.
+	CRAFTLinkThreshold = 0.20
+
+	// CRAFTTextThreshold is the minimum peak score_text inside a component (box filter).
+	// Lowered from 0.7: prevents filtering out dimly-lit coloured characters (green "Finished" etc.).
+	CRAFTTextThreshold = 0.50
+
+	// UnclipRatio is the Minkowski expansion coefficient applied after min-area rect fitting.
+	// 1.6: balances adjacent-line bleed (too large at 1.8) vs edge-character loss (too tight at 1.4).
+	UnclipRatio = 1.6
 
 	// DBMinArea discards very small connected components (noise).
 	DBMinArea = 30
@@ -38,13 +51,53 @@ func (b BBox) Rect() image.Rectangle {
 	return image.Rect(b.X0, b.Y0, b.X1, b.Y1)
 }
 
-// SortByVertical sorts bounding boxes top-to-bottom (by Y0), left-to-right (by X0) as tiebreaker.
-func SortByVertical(boxes []BBox) {
-	sort.Slice(boxes, func(i, j int) bool {
-		if boxes[i].Y0 != boxes[j].Y0 {
-			return boxes[i].Y0 < boxes[j].Y0
+// Quad is a 4-corner polygon in image pixel coordinates, ordered clockwise from top-left.
+type Quad [4][2]float64
+
+// quadAABB returns the axis-aligned bounding box of a quad.
+func quadAABB(q Quad) BBox {
+	x0, y0, x1, y1 := q[0][0], q[0][1], q[0][0], q[0][1]
+	for _, p := range q[1:] {
+		if p[0] < x0 {
+			x0 = p[0]
 		}
-		return boxes[i].X0 < boxes[j].X0
+		if p[0] > x1 {
+			x1 = p[0]
+		}
+		if p[1] < y0 {
+			y0 = p[1]
+		}
+		if p[1] > y1 {
+			y1 = p[1]
+		}
+	}
+	return BBox{int(x0), int(y0), int(x1), int(y1)}
+}
+
+// SortByVertical sorts quads top-to-bottom (by min Y), left-to-right (by min X) as tiebreaker.
+func SortByVertical(quads []Quad) {
+	minF := func(a, b, c, d float64) float64 {
+		m := a
+		if b < m {
+			m = b
+		}
+		if c < m {
+			m = c
+		}
+		if d < m {
+			m = d
+		}
+		return m
+	}
+	sort.Slice(quads, func(i, j int) bool {
+		yi := minF(quads[i][0][1], quads[i][1][1], quads[i][2][1], quads[i][3][1])
+		yj := minF(quads[j][0][1], quads[j][1][1], quads[j][2][1], quads[j][3][1])
+		if yi != yj {
+			return yi < yj
+		}
+		xi := minF(quads[i][0][0], quads[i][1][0], quads[i][2][0], quads[i][3][0])
+		xj := minF(quads[j][0][0], quads[j][1][0], quads[j][2][0], quads[j][3][0])
+		return xi < xj
 	})
 }
 
@@ -56,9 +109,9 @@ type TextLine struct {
 	NeedsLLM   bool    // true when Confidence < ConfidenceThreshold
 }
 
-// DetectLines runs the DB detector on img and returns bounding boxes.
+// DetectLines runs the DB detector on img and returns rotated bounding quads.
 // interp must be loaded with the DB .tflite model (input [1,608,800,3] NHWC for EasyOCR).
-func DetectLines(interp *TFLiteInterpreter, img image.Image) ([]BBox, error) {
+func DetectLines(interp *TFLiteInterpreter, img image.Image) ([]Quad, error) {
 	b := img.Bounds()
 	origW, origH := b.Dx(), b.Dy()
 
@@ -126,192 +179,565 @@ func DetectLines(interp *TFLiteInterpreter, img image.Image) ([]BBox, error) {
 		mapH, mapW, mapC = modelH, modelW, 1
 	}
 
-	boxes := extractBBoxes(probMap, mapH, mapW, mapC, origW, origH, inW, inH, offsetX, offsetY)
-	fmt.Printf("[DBG] Detector: %d box(es) after merge (threshold=%.2f)\n", len(boxes), DBThreshold)
-	for i, b := range boxes {
-		fmt.Printf("  box[%d] x=%d..%d y=%d..%d (w=%d h=%d)\n", i, b.X0, b.X1, b.Y0, b.Y1, b.X1-b.X0, b.Y1-b.Y0)
+	// If the model exports the two CRAFT channels as separate output tensors (index 0 and 1)
+	// rather than one interleaved tensor with C=2, splice them together.
+	if mapC == 1 {
+		if linkMap, linkShape, linkErr := interp.GetOutput(1); linkErr == nil {
+			var lH, lW int
+			switch len(linkShape) {
+			case 4:
+				lH, lW = int(linkShape[1]), int(linkShape[2])
+			case 3:
+				lH, lW = int(linkShape[0]), int(linkShape[1])
+			}
+			if lH == mapH && lW == mapW && len(linkMap) == mapH*mapW {
+				// Interleave: combined[i*2+0]=textScore, combined[i*2+1]=linkScore.
+				combined := make([]float32, mapH*mapW*2)
+				for i := 0; i < mapH*mapW; i++ {
+					combined[i*2+0] = probMap[i]
+					combined[i*2+1] = linkMap[i]
+				}
+				probMap = combined
+				mapC = 2
+				fmt.Printf("[DBG] Detector: split-output model detected; spliced 2 channels\n")
+			}
+		}
 	}
-	return boxes, nil
+
+	// Print per-channel stats so we can verify the model is producing meaningful scores.
+	if mapC >= 1 && len(probMap) > 0 {
+		var minT, maxT, sumT float64
+		minT = float64(probMap[0])
+		for i := 0; i < len(probMap); i += mapC {
+			v := float64(probMap[i])
+			if v < minT {
+				minT = v
+			}
+			if v > maxT {
+				maxT = v
+			}
+			sumT += v
+		}
+		n := float64(len(probMap) / mapC)
+		fmt.Printf("[DBG] score_text: min=%.3f max=%.3f mean=%.4f\n", minT, maxT, sumT/n)
+		if mapC >= 2 {
+			var minL, maxL, sumL float64
+			minL = float64(probMap[1])
+			for i := 1; i < len(probMap); i += mapC {
+				v := float64(probMap[i])
+				if v < minL {
+					minL = v
+				}
+				if v > maxL {
+					maxL = v
+				}
+				sumL += v
+			}
+			fmt.Printf("[DBG] score_link: min=%.3f max=%.3f mean=%.4f\n", minL, maxL, sumL/n)
+		}
+	}
+
+	quads := extractQuads(probMap, mapH, mapW, mapC, origW, origH, inW, inH, offsetX, offsetY)
+	quads = mergeLineQuads(quads)
+	fmt.Printf("[DBG] Detector: mapC=%d shape=%v, %d quad(s) after merge (lowText=%.2f linkThr=%.2f textThr=%.2f)\n", mapC, shape, len(quads), CRAFTLowText, CRAFTLinkThreshold, CRAFTTextThreshold)
+	for i, q := range quads {
+		bb := quadAABB(q)
+		fmt.Printf("  quad[%d] x=%d..%d y=%d..%d\n", i, bb.X0, bb.X1, bb.Y0, bb.Y1)
+	}
+	return quads, nil
 }
 
-// extractBBoxes binarises probMap and returns bounding boxes in original image coordinates.
-// The output map is half-resolution: map coord × 2 gives padded-model-input coord.
-// offsetX/offsetY are the padding offsets applied when fitting orig into the model input.
-func extractBBoxes(probMap []float32, mapH, mapW, mapC, origW, origH, inW, inH, offsetX, offsetY int) []BBox {
+// extractQuads binarises probMap, applies 2×2 dilation, finds connected components,
+// scores each with a two-stage box_thresh filter, fits rotated min-area rects,
+// and applies Minkowski unclip. Returns quads in original image coordinates.
+func extractQuads(probMap []float32, mapH, mapW, mapC, origW, origH, inW, inH, offsetX, offsetY int) []Quad {
 	if len(probMap) != mapH*mapW*mapC {
-		return []BBox{}
+		return nil
 	}
+
+	// Build combined binary map from score_text (ch0) and score_link (ch1).
+	// This is the EasyOCR/CRAFT canonical combination:
+	//   text_score_comb = clip(score_text > lowText, 0,1) | (score_link > linkThr)
 	binary := make([]bool, mapH*mapW)
 	for i := 0; i < mapH*mapW; i++ {
-		// First channel is the text probability map.
-		v := probMap[i*mapC+0]
-		binary[i] = v > DBThreshold
+		textScore := float64(probMap[i*mapC+0])
+		linkScore := float64(0)
+		if mapC >= 2 {
+			linkScore = float64(probMap[i*mapC+1])
+		}
+		binary[i] = textScore > CRAFTLowText || linkScore > CRAFTLinkThreshold
 	}
 
-	visited := make([]bool, mapH*mapW)
-	var boxes []BBox
-	// Map from output-map coordinates to original image coordinates.
-	// Output map is half-res relative to model input (×2), then subtract padding, then scale.
-	scaleWOrig := float64(origW) / float64(inW)
-	scaleHOrig := float64(origH) / float64(inH)
+	// 2×2 morphological dilation bridges gaps in sparse strokes (e.g. "i", "j", punctuation).
+	binary = dilate2x2(binary, mapW, mapH)
 
-	for startY := 0; startY < mapH; startY++ {
-		for startX := 0; startX < mapW; startX++ {
-			idx := startY*mapW + startX
-			if !binary[idx] || visited[idx] {
-				continue
-			}
-			// BFS flood-fill to find connected component.
-			minX, minY, maxX, maxY := startX, startY, startX, startY
-			area := 0
-			queue := []int{idx}
-			visited[idx] = true
-			for len(queue) > 0 {
-				cur := queue[0]
-				queue = queue[1:]
-				cy, cx := cur/mapW, cur%mapW
-				area++
-				if cx < minX {
-					minX = cx
-				}
-				if cx > maxX {
-					maxX = cx
-				}
-				if cy < minY {
-					minY = cy
-				}
-				if cy > maxY {
-					maxY = cy
-				}
-				for _, n := range neighbors4(cx, cy, mapW, mapH) {
-					if !visited[n] && binary[n] {
-						visited[n] = true
-						queue = append(queue, n)
-					}
-				}
-			}
-			if area < DBMinArea {
-				continue
-			}
-			// ×2: undo half-res; subtract offset: undo letterbox; ×scale: undo resize.
-			// Extra ±4/±5 px: DB tight-boxes the stroke; pad to capture full character cells.
-			x0 := int(math.Round((float64(minX)*2-float64(offsetX))*scaleWOrig)) - 4
-			y0 := int(math.Round((float64(minY)*2-float64(offsetY))*scaleHOrig)) - 5
-			x1 := int(math.Round((float64(maxX+1)*2-float64(offsetX))*scaleWOrig)) + 4
-			y1 := int(math.Round((float64(maxY+1)*2-float64(offsetY))*scaleHOrig)) + 5
-			if x0 < 0 {
-				x0 = 0
-			}
-			if y0 < 0 {
-				y0 = 0
-			}
-			if x1 > origW {
-				x1 = origW
-			}
-			if y1 > origH {
-				y1 = origH
-			}
-			boxes = append(boxes, BBox{x0, y0, x1, y1})
+	// Coordinate scale: output map is half-res relative to model input.
+	scaleW := float64(origW) / float64(inW)
+	scaleH := float64(origH) / float64(inH)
+
+	// Count hot pixels (both channels combined) for debugging.
+	var hotPixels int
+	for _, v := range binary {
+		if v {
+			hotPixels++
 		}
 	}
-	return groupByTextLine(boxes)
+	fmt.Printf("[DBG] Binary map: %d/%d hot pixels (%.2f%%)\n", hotPixels, mapH*mapW, 100.0*float64(hotPixels)/float64(mapH*mapW))
+
+	components := findComponents(binary, mapW, mapH)
+	fmt.Printf("[DBG] Components: %d total\n", len(components))
+	var nTooSmall, nLowPeak int
+	var quads []Quad
+	for _, comp := range components {
+		if len(comp) < DBMinArea {
+			nTooSmall++
+			continue
+		}
+		// CRAFT box filter: maximum score_text in the component must exceed text_threshold.
+		// (EasyOCR: if np.max(textmap[labels==k]) < text_threshold: continue)
+		var maxTextScore float64
+		for _, px := range comp {
+			if s := float64(probMap[(px[1]*mapW+px[0])*mapC]); s > maxTextScore {
+				maxTextScore = s
+			}
+		}
+		if maxTextScore < CRAFTTextThreshold {
+			nLowPeak++
+			continue
+		}
+		pts := componentBoundaryPts(comp)
+		if len(pts) < 2 {
+			continue
+		}
+		hull := convexHullPts(pts)
+		if len(hull) < 2 {
+			continue
+		}
+		rect := minAreaRectFromHull(hull)
+
+		w := dist2D(rect[0], rect[1])
+		h := dist2D(rect[1], rect[2])
+		if w < 1 || h < 1 {
+			continue
+		}
+		// Ensure the longer side is rect[0]→rect[1] (the "width" axis).
+		if h > w {
+			rect[0], rect[1], rect[2], rect[3] = rect[3], rect[0], rect[1], rect[2]
+			w, h = h, w
+		}
+		// Discard vertical stripes: long axis is predominantly vertical.
+		ux := (rect[1][0] - rect[0][0]) / w
+		uy := (rect[1][1] - rect[0][1]) / w
+		if math.Abs(uy) > math.Abs(ux) {
+			continue
+		}
+
+		// Minkowski unclip: canonical DB expansion proportional to area/perimeter.
+		rect = unclipRect(rect, UnclipRatio)
+
+		// Convert map coords → original image coords (×2 undo half-res, subtract letterbox offset, scale).
+		var q Quad
+		for i, p := range rect {
+			ox := (p[0]*2 - float64(offsetX)) * scaleW
+			oy := (p[1]*2 - float64(offsetY)) * scaleH
+			if ox < 0 {
+				ox = 0
+			} else if ox > float64(origW) {
+				ox = float64(origW)
+			}
+			if oy < 0 {
+				oy = 0
+			} else if oy > float64(origH) {
+				oy = float64(origH)
+			}
+			q[i] = [2]float64{ox, oy}
+		}
+		quads = append(quads, q)
+	}
+	fmt.Printf("[DBG] Filtered: %d too-small, %d low-peak; %d quads passed\n", nTooSmall, nLowPeak, len(quads))
+	return quads
 }
 
-// groupByTextLine clusters sub-word detection boxes into one bounding box per text line.
-// Boxes whose Y-center falls within lineGapY pixels of the running group center are merged.
-// lineGapY=6 separates terminal text rows spaced ~12px apart while grouping same-row fragments.
-func groupByTextLine(boxes []BBox) []BBox {
-	if len(boxes) == 0 {
-		return boxes
+// mergeLineQuads groups word-level quads into line-level quads using two passes.
+//
+// Pass 1 — y-band grouping: sort by y-centre; assign each quad to the current
+//
+//	band if its y-centre is within shortHeight/3 of the last quad in that band.
+//	This collects ALL quads for a given text row before doing any x-merging,
+//	so a "foreign" quad at a large x-distance cannot break the chain.
+//
+// Pass 2 — horizontal merge: within each y-band, sort by x-centre and
+//
+//	merge adjacent quads whose gap is ≤ 4 × shortHeight.
+func mergeLineQuads(quads []Quad) []Quad {
+	if len(quads) == 0 {
+		return quads
 	}
-	// Sort by Y-center for stable sequential grouping.
+	type box struct{ x0, y0, x1, y1 float64 }
+	yc := func(b box) float64 { return (b.y0 + b.y1) / 2 }
+	xc := func(b box) float64 { return (b.x0 + b.x1) / 2 }
+	h := func(b box) float64 { return b.y1 - b.y0 }
+	shortH := func(a, b box) float64 {
+		ha, hb := h(a), h(b)
+		if ha < hb {
+			return ha
+		}
+		return hb
+	}
+
+	boxes := make([]box, len(quads))
+	for i, q := range quads {
+		bb := quadAABB(q)
+		boxes[i] = box{float64(bb.X0), float64(bb.Y0), float64(bb.X1), float64(bb.Y1)}
+	}
 	sort.Slice(boxes, func(i, j int) bool {
-		ci := (boxes[i].Y0 + boxes[i].Y1) / 2
-		cj := (boxes[j].Y0 + boxes[j].Y1) / 2
-		return ci < cj
+		yci, ycj := yc(boxes[i]), yc(boxes[j])
+		if yci != ycj {
+			return yci < ycj
+		}
+		return xc(boxes[i]) < xc(boxes[j])
 	})
-	const lineGapY = 6
-	type group struct {
-		merged  BBox
-		centerY int
-	}
-	var groups []group
+
+	// Pass 1: group into y-bands.
+	var bands [][]box
+	var curBand []box
 	for _, b := range boxes {
-		centerY := (b.Y0 + b.Y1) / 2
-		matched := -1
-		for i := range groups {
-			if absInt(centerY-groups[i].centerY) <= lineGapY {
-				matched = i
-				break
+		if len(curBand) == 0 {
+			curBand = append(curBand, b)
+			continue
+		}
+		last := curBand[len(curBand)-1]
+		if math.Abs(yc(last)-yc(b)) < shortH(last, b)/2.5 {
+			curBand = append(curBand, b)
+		} else {
+			bands = append(bands, curBand)
+			curBand = []box{b}
+		}
+	}
+	bands = append(bands, curBand)
+
+	// Pass 2: within each band sort by x-centre and merge horizontally.
+	var merged []box
+	for _, band := range bands {
+		sort.Slice(band, func(i, j int) bool { return xc(band[i]) < xc(band[j]) })
+		cur := band[0]
+		for _, b := range band[1:] {
+			sh := shortH(cur, b)
+			hGap := b.x0 - cur.x1
+			if hGap <= sh*4 {
+				if b.x1 > cur.x1 {
+					cur.x1 = b.x1
+				}
+				if b.x0 < cur.x0 {
+					cur.x0 = b.x0
+				}
+				if b.y0 < cur.y0 {
+					cur.y0 = b.y0
+				}
+				if b.y1 > cur.y1 {
+					cur.y1 = b.y1
+				}
+			} else {
+				merged = append(merged, cur)
+				cur = b
 			}
 		}
-		if matched >= 0 {
-			groups[matched].merged = unionBox(groups[matched].merged, b)
-			groups[matched].centerY = (groups[matched].merged.Y0 + groups[matched].merged.Y1) / 2
-		} else {
-			groups = append(groups, group{b, centerY})
+		merged = append(merged, cur)
+	}
+
+	// Sort merged quads top-to-bottom, left-to-right before returning.
+	sort.Slice(merged, func(i, j int) bool {
+		yci, ycj := yc(merged[i]), yc(merged[j])
+		if yci != ycj {
+			return yci < ycj
+		}
+		return xc(merged[i]) < xc(merged[j])
+	})
+
+	fmt.Printf("[DBG] mergeLineQuads: %d → %d quads\n", len(quads), len(merged))
+
+	result := make([]Quad, len(merged))
+	for i, m := range merged {
+		result[i] = Quad{
+			{m.x0, m.y0}, {m.x1, m.y0},
+			{m.x1, m.y1}, {m.x0, m.y1},
 		}
 	}
-	result := make([]BBox, len(groups))
-	for i, g := range groups {
-		result[i] = g.merged
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].Y0 < result[j].Y0 })
 	return result
 }
 
-func absInt(x int) int {
-	if x < 0 {
-		return -x
+// dilate2x2 applies a 2×2 morphological dilation: each true pixel also sets right, below, diagonal neighbours.
+func dilate2x2(binary []bool, w, h int) []bool {
+	out := make([]bool, len(binary))
+	copy(out, binary)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			if !binary[y*w+x] {
+				continue
+			}
+			if x+1 < w {
+				out[y*w+x+1] = true
+			}
+			if y+1 < h {
+				out[(y+1)*w+x] = true
+			}
+			if x+1 < w && y+1 < h {
+				out[(y+1)*w+x+1] = true
+			}
+		}
 	}
-	return x
+	return out
 }
 
-// neighbors4 returns the 4-connected neighbours of (x,y) within bounds.
-func neighbors4(x, y, w, h int) []int {
-	var ns []int
-	if x > 0 {
-		ns = append(ns, y*w+(x-1))
+// findComponents returns all 4-connected components as slices of (x,y) pixel coordinates.
+func findComponents(binary []bool, w, h int) [][][2]int {
+	visited := make([]bool, w*h)
+	var comps [][][2]int
+	for sy := 0; sy < h; sy++ {
+		for sx := 0; sx < w; sx++ {
+			if !binary[sy*w+sx] || visited[sy*w+sx] {
+				continue
+			}
+			var pixels [][2]int
+			queue := [][2]int{{sx, sy}}
+			visited[sy*w+sx] = true
+			for len(queue) > 0 {
+				cur := queue[0]
+				queue = queue[1:]
+				pixels = append(pixels, cur)
+				cx, cy := cur[0], cur[1]
+				for _, d := range [4][2]int{{-1, 0}, {1, 0}, {0, -1}, {0, 1}} {
+					nx, ny := cx+d[0], cy+d[1]
+					if nx < 0 || nx >= w || ny < 0 || ny >= h {
+						continue
+					}
+					ni := ny*w + nx
+					if !visited[ni] && binary[ni] {
+						visited[ni] = true
+						queue = append(queue, [2]int{nx, ny})
+					}
+				}
+			}
+			comps = append(comps, pixels)
+		}
 	}
-	if x < w-1 {
-		ns = append(ns, y*w+(x+1))
-	}
-	if y > 0 {
-		ns = append(ns, (y-1)*w+x)
-	}
-	if y < h-1 {
-		ns = append(ns, (y+1)*w+x)
-	}
-	return ns
+	return comps
 }
 
-func unionBox(a, b BBox) BBox {
-	return BBox{min(a.X0, b.X0), min(a.Y0, b.Y0), max(a.X1, b.X1), max(a.Y1, b.Y1)}
+// componentBoundaryPts returns the left/right extremes per row and top/bottom per column,
+// giving a compact point set sufficient for an accurate convex hull.
+func componentBoundaryPts(pixels [][2]int) [][2]float64 {
+	if len(pixels) == 0 {
+		return nil
+	}
+	minX, maxX, minY, maxY := pixels[0][0], pixels[0][0], pixels[0][1], pixels[0][1]
+	for _, p := range pixels {
+		if p[0] < minX {
+			minX = p[0]
+		}
+		if p[0] > maxX {
+			maxX = p[0]
+		}
+		if p[1] < minY {
+			minY = p[1]
+		}
+		if p[1] > maxY {
+			maxY = p[1]
+		}
+	}
+	numRows := maxY - minY + 1
+	numCols := maxX - minX + 1
+	rowMinX := make([]int, numRows)
+	rowMaxX := make([]int, numRows)
+	colMinY := make([]int, numCols)
+	colMaxY := make([]int, numCols)
+	for i := range rowMinX {
+		rowMinX[i] = maxX + 1
+		rowMaxX[i] = minX - 1
+	}
+	for i := range colMinY {
+		colMinY[i] = maxY + 1
+		colMaxY[i] = minY - 1
+	}
+	for _, p := range pixels {
+		r := p[1] - minY
+		if p[0] < rowMinX[r] {
+			rowMinX[r] = p[0]
+		}
+		if p[0] > rowMaxX[r] {
+			rowMaxX[r] = p[0]
+		}
+		c := p[0] - minX
+		if p[1] < colMinY[c] {
+			colMinY[c] = p[1]
+		}
+		if p[1] > colMaxY[c] {
+			colMaxY[c] = p[1]
+		}
+	}
+	pts := make([][2]float64, 0, 2*numRows+2*numCols)
+	for r := range rowMinX {
+		if rowMinX[r] <= maxX {
+			pts = append(pts, [2]float64{float64(rowMinX[r]), float64(r + minY)})
+			if rowMaxX[r] != rowMinX[r] {
+				pts = append(pts, [2]float64{float64(rowMaxX[r]), float64(r + minY)})
+			}
+		}
+	}
+	for c := range colMinY {
+		if colMinY[c] <= maxY {
+			pts = append(pts, [2]float64{float64(c + minX), float64(colMinY[c])})
+			if colMaxY[c] != colMinY[c] {
+				pts = append(pts, [2]float64{float64(c + minX), float64(colMaxY[c])})
+			}
+		}
+	}
+	return pts
 }
 
-// RecognizeLines runs the SVTR/CRNN recognizer on each bounding box crop.
+// cross2D returns the 2D cross product of vectors OA and OB.
+func cross2D(O, A, B [2]float64) float64 {
+	return (A[0]-O[0])*(B[1]-O[1]) - (A[1]-O[1])*(B[0]-O[0])
+}
+
+// convexHullPts computes the convex hull using Andrew's monotone chain (CCW order).
+func convexHullPts(pts [][2]float64) [][2]float64 {
+	n := len(pts)
+	if n < 2 {
+		return pts
+	}
+	sort.Slice(pts, func(i, j int) bool {
+		if pts[i][0] != pts[j][0] {
+			return pts[i][0] < pts[j][0]
+		}
+		return pts[i][1] < pts[j][1]
+	})
+	hull := make([][2]float64, 0, 2*n)
+	for _, p := range pts {
+		for len(hull) >= 2 && cross2D(hull[len(hull)-2], hull[len(hull)-1], p) <= 0 {
+			hull = hull[:len(hull)-1]
+		}
+		hull = append(hull, p)
+	}
+	lo := len(hull) + 1
+	for i := n - 1; i >= 0; i-- {
+		for len(hull) >= lo && cross2D(hull[len(hull)-2], hull[len(hull)-1], pts[i]) <= 0 {
+			hull = hull[:len(hull)-1]
+		}
+		hull = append(hull, pts[i])
+	}
+	return hull[:len(hull)-1]
+}
+
+// dist2D returns the Euclidean distance between two points.
+func dist2D(a, b [2]float64) float64 {
+	dx, dy := b[0]-a[0], b[1]-a[1]
+	return math.Sqrt(dx*dx + dy*dy)
+}
+
+// minAreaRectFromHull computes the minimum-area enclosing rectangle of a convex hull
+// using rotating calipers. Returns 4 corners in order matching the edge directions of the hull.
+func minAreaRectFromHull(hull [][2]float64) [4][2]float64 {
+	n := len(hull)
+	if n == 0 {
+		return [4][2]float64{}
+	}
+	if n == 1 {
+		return [4][2]float64{hull[0], hull[0], hull[0], hull[0]}
+	}
+	if n == 2 {
+		mx, my := (hull[0][0]+hull[1][0])/2, (hull[0][1]+hull[1][1])/2
+		return [4][2]float64{{mx, my}, hull[1], hull[1], hull[0]}
+	}
+	minArea := math.Inf(1)
+	var best [4][2]float64
+	for i := 0; i < n; i++ {
+		dx := hull[(i+1)%n][0] - hull[i][0]
+		dy := hull[(i+1)%n][1] - hull[i][1]
+		edgeLen := math.Sqrt(dx*dx + dy*dy)
+		if edgeLen < 1e-10 {
+			continue
+		}
+		ux, uy := dx/edgeLen, dy/edgeLen
+		vx, vy := -uy, ux
+		minU, maxU := math.Inf(1), math.Inf(-1)
+		minV, maxV := math.Inf(1), math.Inf(-1)
+		for _, p := range hull {
+			u := p[0]*ux + p[1]*uy
+			v := p[0]*vx + p[1]*vy
+			if u < minU {
+				minU = u
+			}
+			if u > maxU {
+				maxU = u
+			}
+			if v < minV {
+				minV = v
+			}
+			if v > maxV {
+				maxV = v
+			}
+		}
+		area := (maxU - minU) * (maxV - minV)
+		if area < minArea {
+			minArea = area
+			best[0] = [2]float64{minU*ux + minV*vx, minU*uy + minV*vy}
+			best[1] = [2]float64{maxU*ux + minV*vx, maxU*uy + minV*vy}
+			best[2] = [2]float64{maxU*ux + maxV*vx, maxU*uy + maxV*vy}
+			best[3] = [2]float64{minU*ux + maxV*vx, minU*uy + maxV*vy}
+		}
+	}
+	return best
+}
+
+// unclipRect expands a 4-point rectangle outward using the canonical DB Minkowski expansion:
+// distance = area * ratio / perimeter, applied uniformly on all sides.
+func unclipRect(rect [4][2]float64, ratio float64) [4][2]float64 {
+	w := dist2D(rect[0], rect[1])
+	h := dist2D(rect[1], rect[2])
+	area := w * h
+	perimeter := 2 * (w + h)
+	if perimeter < 1e-10 {
+		return rect
+	}
+	d := area * ratio / perimeter
+	cx := (rect[0][0] + rect[1][0] + rect[2][0] + rect[3][0]) / 4
+	cy := (rect[0][1] + rect[1][1] + rect[2][1] + rect[3][1]) / 4
+	var ux, uy, vx, vy float64
+	if w > 1e-10 {
+		ux = (rect[1][0] - rect[0][0]) / w
+		uy = (rect[1][1] - rect[0][1]) / w
+	}
+	if h > 1e-10 {
+		vx = (rect[2][0] - rect[1][0]) / h
+		vy = (rect[2][1] - rect[1][1]) / h
+	}
+	hw := (w + 2*d) / 2
+	hh := (h + 2*d) / 2
+	return [4][2]float64{
+		{cx - hw*ux - hh*vx, cy - hw*uy - hh*vy},
+		{cx + hw*ux - hh*vx, cy + hw*uy - hh*vy},
+		{cx + hw*ux + hh*vx, cy + hw*uy + hh*vy},
+		{cx - hw*ux + hh*vx, cy - hw*uy + hh*vy},
+	}
+}
+
+// RecognizeLines runs the SVTR/CRNN recognizer on each quad crop.
 // interp must be loaded with the recognizer .tflite model (input [1, 64, 800, 1] NHWC).
-func RecognizeLines(interp *TFLiteInterpreter, img image.Image, boxes []BBox) ([]TextLine, error) {
-	// EasyOCR CTCLabelConverter: index 0 = blank, indices 1..K-1 = characters.
+func RecognizeLines(interp *TFLiteInterpreter, img image.Image, quads []Quad) ([]TextLine, error) {
 	vocab := []rune(enCharset)
 	const blankIdx = 0
-	lines := make([]TextLine, 0, len(boxes))
+	lines := make([]TextLine, 0, len(quads))
 
-	for _, box := range boxes {
-		crop := CropRect(img, box.Rect())
-		// Recognizer expects [1, 64, 800, 1] NHWC (grayscale, not RGB)
-		// Resize to height 64, width up to 800
+	for _, q := range quads {
+		crop := PerspectiveCrop(img, q)
 		strip := ResizeHeightAndWidth(crop, 64, 800)
 		stripW := strip.Bounds().Dx()
 
 		// Build raw [0,1] grayscale tensor [64×800], left-aligned.
-		// The exported TFLite recognizer applies (x-0.5)/0.5 normalization internally.
+		// Remainder padded with 0.0 (maps to -1.0 in (x-0.5)/0.5 space — canonical empty).
 		const recH, recW = 64, 800
-		bgVal := float32(GrayscaleAt(strip.At(0, 0)))
 		tensor := make([]float32, recH*recW)
-		for i := range tensor {
-			tensor[i] = bgVal
-		}
 		for y := 0; y < recH; y++ {
 			for x := 0; x < stripW; x++ {
 				tensor[y*recW+x] = float32(GrayscaleAt(strip.At(x, y)))
@@ -329,7 +755,6 @@ func RecognizeLines(interp *TFLiteInterpreter, img image.Image, boxes []BBox) ([
 			return nil, err
 		}
 
-		// Output shape [1,T,K] or [T,K]: T timesteps, K classes (blank+chars).
 		var T, K int
 		switch len(shape) {
 		case 3:
@@ -337,11 +762,10 @@ func RecognizeLines(interp *TFLiteInterpreter, img image.Image, boxes []BBox) ([
 		case 2:
 			T, K = int(shape[0]), int(shape[1])
 		default:
-			fmt.Fprintf(os.Stderr, "[WARN] unexpected recognizer output shape %v, skipping box\n", shape)
+			fmt.Fprintf(os.Stderr, "[WARN] unexpected recognizer output shape %v, skipping quad\n", shape)
 			continue
 		}
 
-		// Log first box's recognizer output for diagnostics.
 		if len(lines) == 0 {
 			fmt.Printf("[DBG] Recognizer shape=%v T=%d K=%d\n", shape, T, K)
 			minL, maxL := logits[0], logits[0]
@@ -360,7 +784,7 @@ func RecognizeLines(interp *TFLiteInterpreter, img image.Image, boxes []BBox) ([
 		calibrated := plattScale(conf)
 
 		lines = append(lines, TextLine{
-			BBox:       box,
+			BBox:       quadAABB(q),
 			Text:       text,
 			Confidence: calibrated,
 			NeedsLLM:   calibrated < ConfidenceThreshold,
@@ -371,7 +795,7 @@ func RecognizeLines(interp *TFLiteInterpreter, img image.Image, boxes []BBox) ([
 
 // ctcGreedyDecode decodes a [T×K] logit matrix.
 // Blank token is at model index 0; characters map as vocab[bestK-1] for bestK>=1.
-// Confidence is the geometric mean of per-character softmax probabilities, per spec.
+// Confidence is the arithmetic mean of per-character softmax probabilities.
 func ctcGreedyDecode(logits []float32, T, K, blankIdx int, vocab []rune) (string, float64) {
 	var chars []rune
 	var probs []float64
@@ -414,15 +838,12 @@ func ctcGreedyDecode(logits []float32, T, K, blankIdx int, vocab []rune) (string
 	if len(probs) == 0 {
 		return "", 0
 	}
-	// Geometric mean per spec: C_line = exp(mean(ln p_i))
-	logSum := 0.0
+	// Arithmetic mean: less sensitive to individual low-confidence characters than geometric mean.
+	sum := 0.0
 	for _, p := range probs {
-		if p > 0 {
-			logSum += math.Log(p)
-		}
+		sum += p
 	}
-	cLine := math.Exp(logSum / float64(len(probs)))
-	return string(chars), cLine
+	return string(chars), sum / float64(len(probs))
 }
 
 // plattScale applies the Platt (logistic) calibration transform.
