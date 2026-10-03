@@ -111,7 +111,7 @@ type TextLine struct {
 
 // DetectLines runs the DB detector on img and returns rotated bounding quads.
 // interp must be loaded with the DB .tflite model (input [1,608,800,3] NHWC for EasyOCR).
-func DetectLines(interp *TFLiteInterpreter, img image.Image) ([]Quad, error) {
+func DetectLines(interp *TFLiteInterpreter, img image.Image, verbose bool) ([]Quad, error) {
 	b := img.Bounds()
 	origW, origH := b.Dx(), b.Dy()
 
@@ -199,7 +199,9 @@ func DetectLines(interp *TFLiteInterpreter, img image.Image) ([]Quad, error) {
 				}
 				probMap = combined
 				mapC = 2
-				fmt.Printf("[DBG] Detector: split-output model detected; spliced 2 channels\n")
+				if verbose {
+					fmt.Printf("[DBG] Detector: split-output model detected; spliced 2 channels\n")
+				}
 			}
 		}
 	}
@@ -219,7 +221,9 @@ func DetectLines(interp *TFLiteInterpreter, img image.Image) ([]Quad, error) {
 			sumT += v
 		}
 		n := float64(len(probMap) / mapC)
-		fmt.Printf("[DBG] score_text: min=%.3f max=%.3f mean=%.4f\n", minT, maxT, sumT/n)
+		if verbose {
+			fmt.Printf("[DBG] score_text: min=%.3f max=%.3f mean=%.4f\n", minT, maxT, sumT/n)
+		}
 		if mapC >= 2 {
 			var minL, maxL, sumL float64
 			minL = float64(probMap[1])
@@ -233,16 +237,22 @@ func DetectLines(interp *TFLiteInterpreter, img image.Image) ([]Quad, error) {
 				}
 				sumL += v
 			}
-			fmt.Printf("[DBG] score_link: min=%.3f max=%.3f mean=%.4f\n", minL, maxL, sumL/n)
+			if verbose {
+				fmt.Printf("[DBG] score_link: min=%.3f max=%.3f mean=%.4f\n", minL, maxL, sumL/n)
+			}
 		}
 	}
 
-	quads := extractQuads(probMap, mapH, mapW, mapC, origW, origH, inW, inH, offsetX, offsetY)
-	quads = mergeLineQuads(quads)
-	fmt.Printf("[DBG] Detector: mapC=%d shape=%v, %d quad(s) after merge (lowText=%.2f linkThr=%.2f textThr=%.2f)\n", mapC, shape, len(quads), CRAFTLowText, CRAFTLinkThreshold, CRAFTTextThreshold)
-	for i, q := range quads {
-		bb := quadAABB(q)
-		fmt.Printf("  quad[%d] x=%d..%d y=%d..%d\n", i, bb.X0, bb.X1, bb.Y0, bb.Y1)
+	quads := extractQuads(probMap, mapH, mapW, mapC, origW, origH, inW, inH, offsetX, offsetY, verbose)
+	quads = mergeLineQuads(quads, verbose)
+	if verbose {
+		fmt.Printf("[DBG] Detector: mapC=%d shape=%v, %d quad(s) after merge (lowText=%.2f linkThr=%.2f textThr=%.2f)\n", mapC, shape, len(quads), CRAFTLowText, CRAFTLinkThreshold, CRAFTTextThreshold)
+	}
+	if verbose {
+		for i, q := range quads {
+			bb := quadAABB(q)
+			fmt.Printf("  quad[%d] x=%d..%d y=%d..%d\n", i, bb.X0, bb.X1, bb.Y0, bb.Y1)
+		}
 	}
 	return quads, nil
 }
@@ -250,7 +260,7 @@ func DetectLines(interp *TFLiteInterpreter, img image.Image) ([]Quad, error) {
 // extractQuads binarises probMap, applies 2×2 dilation, finds connected components,
 // scores each with a two-stage box_thresh filter, fits rotated min-area rects,
 // and applies Minkowski unclip. Returns quads in original image coordinates.
-func extractQuads(probMap []float32, mapH, mapW, mapC, origW, origH, inW, inH, offsetX, offsetY int) []Quad {
+func extractQuads(probMap []float32, mapH, mapW, mapC, origW, origH, inW, inH, offsetX, offsetY int, verbose bool) []Quad {
 	if len(probMap) != mapH*mapW*mapC {
 		return nil
 	}
@@ -282,10 +292,14 @@ func extractQuads(probMap []float32, mapH, mapW, mapC, origW, origH, inW, inH, o
 			hotPixels++
 		}
 	}
-	fmt.Printf("[DBG] Binary map: %d/%d hot pixels (%.2f%%)\n", hotPixels, mapH*mapW, 100.0*float64(hotPixels)/float64(mapH*mapW))
+	if verbose {
+		fmt.Printf("[DBG] Binary map: %d/%d hot pixels (%.2f%%)\n", hotPixels, mapH*mapW, 100.0*float64(hotPixels)/float64(mapH*mapW))
+	}
 
 	components := findComponents(binary, mapW, mapH)
-	fmt.Printf("[DBG] Components: %d total\n", len(components))
+	if verbose {
+		fmt.Printf("[DBG] Components: %d total\n", len(components))
+	}
 	var nTooSmall, nLowPeak int
 	var quads []Quad
 	for _, comp := range components {
@@ -354,7 +368,9 @@ func extractQuads(probMap []float32, mapH, mapW, mapC, origW, origH, inW, inH, o
 		}
 		quads = append(quads, q)
 	}
-	fmt.Printf("[DBG] Filtered: %d too-small, %d low-peak; %d quads passed\n", nTooSmall, nLowPeak, len(quads))
+	if verbose {
+		fmt.Printf("[DBG] Filtered: %d too-small, %d low-peak; %d quads passed\n", nTooSmall, nLowPeak, len(quads))
+	}
 	return quads
 }
 
@@ -369,7 +385,7 @@ func extractQuads(probMap []float32, mapH, mapW, mapC, origW, origH, inW, inH, o
 // Pass 2 — horizontal merge: within each y-band, sort by x-centre and
 //
 //	merge adjacent quads whose gap is ≤ 4 × shortHeight.
-func mergeLineQuads(quads []Quad) []Quad {
+func mergeLineQuads(quads []Quad, verbose bool) []Quad {
 	if len(quads) == 0 {
 		return quads
 	}
@@ -454,7 +470,9 @@ func mergeLineQuads(quads []Quad) []Quad {
 		return xc(merged[i]) < xc(merged[j])
 	})
 
-	fmt.Printf("[DBG] mergeLineQuads: %d → %d quads\n", len(quads), len(merged))
+	if verbose {
+		fmt.Printf("[DBG] mergeLineQuads: %d → %d quads\n", len(quads), len(merged))
+	}
 
 	result := make([]Quad, len(merged))
 	for i, m := range merged {
@@ -724,7 +742,7 @@ func unclipRect(rect [4][2]float64, ratio float64) [4][2]float64 {
 
 // RecognizeLines runs the SVTR/CRNN recognizer on each quad crop.
 // interp must be loaded with the recognizer .tflite model (input [1, 64, 800, 1] NHWC).
-func RecognizeLines(interp *TFLiteInterpreter, img image.Image, quads []Quad) ([]TextLine, error) {
+func RecognizeLines(interp *TFLiteInterpreter, img image.Image, quads []Quad, verbose bool) ([]TextLine, error) {
 	vocab := []rune(enCharset)
 	const blankIdx = 0
 	lines := make([]TextLine, 0, len(quads))
@@ -766,7 +784,7 @@ func RecognizeLines(interp *TFLiteInterpreter, img image.Image, quads []Quad) ([
 			continue
 		}
 
-		if len(lines) == 0 {
+		if len(lines) == 0 && verbose {
 			fmt.Printf("[DBG] Recognizer shape=%v T=%d K=%d\n", shape, T, K)
 			minL, maxL := logits[0], logits[0]
 			for _, v := range logits {

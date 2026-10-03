@@ -186,12 +186,12 @@ func processImage(ctx context.Context, cfg *Config, detector, recognizer *TFLite
 	if err != nil {
 		return nil, fmt.Errorf("loading image: %w", err)
 	}
-	boxes, err := DetectLines(detector, img)
+	boxes, err := DetectLines(detector, img, cfg.Verbose)
 	if err != nil {
 		return nil, fmt.Errorf("line detection: %w", err)
 	}
 	SortByVertical(boxes)
-	lines, err := RecognizeLines(recognizer, img, boxes)
+	lines, err := RecognizeLines(recognizer, img, boxes, cfg.Verbose)
 	if err != nil {
 		return nil, fmt.Errorf("line recognition: %w", err)
 	}
