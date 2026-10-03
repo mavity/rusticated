@@ -1,0 +1,31 @@
+workspace: C:\Users\mihai\rustica\Cargo.toml
+Finished "release" profile [optimized] target(s) in 0.17s
+cargo build mohabbat\brot for win-amd64
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+Package: 'C:\Users\mihai\rustica\mohabbat\brot\Cargo.toml
+workspace: C:\Users\mihai\rustica\Cargo.toml
+Finished "release" profile [optimized] target(s) in 0.19s
+cargo build mohabbat/brt for win-arm64
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package: 'C:\Users\mihai\rustica\mohabbat\brot\Cargo.toml
+workspace: C:\Users\mihai\rustica\Cargo.toml
+Finished "release" profile [optimized] target(s) in 0.17s
+create build mohabbat\brot for linux-arm32
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package: 'C:\Users\mihai\rustica\mohabbat\brot\Cargo.toml
+workspace: C:\Users\mihai\rustica\Cargo.toml
+warning: dropping unsupported crate type 'cdylib' for target 'armv7-unknown-linux-musleabi64'
+warning: 'brot' (lib) generated 1 warning
+Finished "release" profile [optimized] target(s) in 0.17s
+Building brain WASM (mohabbat)
+SDK sdk v1.26.4 at C:\Users\mihai\sdk\go1.26.4
+Building brain WASM -> C:\Users\mihai\rustica\target\mohabbat-build\brain.wasm
+Building node slot..
+Reading brain payload: C:\Users\mihai\rustica\target\mohabbat-build\brain.wasm
+node: bro5s175,302 washmhost-56,4571
+Linux-amd64: brot-169,240 washhost-7,471,367
+linux-arm64: brot-162,768 washmhost-7,078,151
+darwin-arm64: brot-199,360 washmhost-7,205,314
+win-amd64: brot-172,544 washmhost-7,778,304
+Min-4re64: brot-166,912 washhost-7,176,1924
+linux-arm32: brot-162,716 washmhost-6,357,253

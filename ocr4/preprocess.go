@@ -167,3 +167,150 @@ func GrayscaleAt(c color.Color) float32 {
 	r, g, b, _ := c.RGBA()
 	return float32(0.299*float64(r)+0.587*float64(g)+0.114*float64(b)) / 65535.0
 }
+
+// PerspectiveCrop extracts a dewarped rectangular crop from img using a backward
+// perspective warp, so that rotated text quads are straightened before recognition.
+func PerspectiveCrop(img image.Image, q Quad) *image.NRGBA {
+	w1 := dist2D(q[0], q[1])
+	w2 := dist2D(q[3], q[2])
+	h1 := dist2D(q[0], q[3])
+	h2 := dist2D(q[1], q[2])
+	dstW := int(math.Round(math.Max(w1, w2)))
+	dstH := int(math.Round(math.Max(h1, h2)))
+	if dstW < 1 {
+		dstW = 1
+	}
+	if dstH < 1 {
+		dstH = 1
+	}
+	// Auto-rotate tall crops to landscape orientation.
+	if dstH > dstW {
+		dstW, dstH = dstH, dstW
+		q[0], q[1], q[2], q[3] = q[1], q[2], q[3], q[0]
+	}
+
+	// Backward homography: for each output pixel (u,v), find source (x,y) in img.
+	dst := [4][2]float64{
+		{0, 0}, {float64(dstW), 0},
+		{float64(dstW), float64(dstH)}, {0, float64(dstH)},
+	}
+	h := solvePerspective(dst, q)
+
+	bounds := img.Bounds()
+	imgW, imgH := bounds.Dx(), bounds.Dy()
+	out := image.NewNRGBA(image.Rect(0, 0, dstW, dstH))
+
+	for v := 0; v < dstH; v++ {
+		for u := 0; u < dstW; u++ {
+			uf, vf := float64(u)+0.5, float64(v)+0.5
+			denom := h[6]*uf + h[7]*vf + h[8]
+			if math.Abs(denom) < 1e-10 {
+				continue
+			}
+			sx := (h[0]*uf + h[1]*vf + h[2]) / denom
+			sy := (h[3]*uf + h[4]*vf + h[5]) / denom
+
+			x0 := int(sx)
+			y0 := int(sy)
+			x1 := x0 + 1
+			y1 := y0 + 1
+			fx := sx - float64(x0)
+			fy := sy - float64(y0)
+
+			if x0 < 0 {
+				x0 = 0
+			} else if x0 >= imgW {
+				x0 = imgW - 1
+			}
+			if x1 < 0 {
+				x1 = 0
+			} else if x1 >= imgW {
+				x1 = imgW - 1
+			}
+			if y0 < 0 {
+				y0 = 0
+			} else if y0 >= imgH {
+				y0 = imgH - 1
+			}
+			if y1 < 0 {
+				y1 = 0
+			} else if y1 >= imgH {
+				y1 = imgH - 1
+			}
+
+			r00, g00, b00, a00 := img.At(bounds.Min.X+x0, bounds.Min.Y+y0).RGBA()
+			r10, g10, b10, a10 := img.At(bounds.Min.X+x1, bounds.Min.Y+y0).RGBA()
+			r01, g01, b01, a01 := img.At(bounds.Min.X+x0, bounds.Min.Y+y1).RGBA()
+			r11, g11, b11, a11 := img.At(bounds.Min.X+x1, bounds.Min.Y+y1).RGBA()
+
+			// Bilinear interpolation; RGBA() returns [0,65535] values.
+			blerp := func(v00, v10, v01, v11 uint32) uint8 {
+				f := float64(v00)*(1-fx)*(1-fy) + float64(v10)*fx*(1-fy) +
+					float64(v01)*(1-fx)*fy + float64(v11)*fx*fy
+				return uint8(f / 257)
+			}
+			out.SetNRGBA(u, v, color.NRGBA{
+				R: blerp(r00, r10, r01, r11),
+				G: blerp(g00, g10, g01, g11),
+				B: blerp(b00, b10, b01, b11),
+				A: blerp(a00, a10, a01, a11),
+			})
+		}
+	}
+	return out
+}
+
+// solvePerspective computes the 8-DOF homography H mapping dst corners to src corners.
+// Used for backward warping: each output pixel (u,v) maps to source (x,y) via H.
+func solvePerspective(dst, src [4][2]float64) [9]float64 {
+	var A [8][8]float64
+	var b [8]float64
+	for i := 0; i < 4; i++ {
+		u, v := dst[i][0], dst[i][1]
+		x, y := src[i][0], src[i][1]
+		A[2*i] = [8]float64{u, v, 1, 0, 0, 0, -u * x, -v * x}
+		b[2*i] = x
+		A[2*i+1] = [8]float64{0, 0, 0, u, v, 1, -u * y, -v * y}
+		b[2*i+1] = y
+	}
+	h8 := gaussElim8(A, b)
+	return [9]float64{h8[0], h8[1], h8[2], h8[3], h8[4], h8[5], h8[6], h8[7], 1}
+}
+
+// gaussElim8 solves an 8×8 linear system Ax=b via Gaussian elimination with partial pivoting.
+func gaussElim8(A [8][8]float64, b [8]float64) [8]float64 {
+	var M [8][9]float64
+	for i := range A {
+		copy(M[i][:8], A[i][:])
+		M[i][8] = b[i]
+	}
+	for col := 0; col < 8; col++ {
+		pivot := col
+		for row := col + 1; row < 8; row++ {
+			if math.Abs(M[row][col]) > math.Abs(M[pivot][col]) {
+				pivot = row
+			}
+		}
+		M[col], M[pivot] = M[pivot], M[col]
+		if math.Abs(M[col][col]) < 1e-12 {
+			continue
+		}
+		for row := col + 1; row < 8; row++ {
+			f := M[row][col] / M[col][col]
+			for j := col; j <= 8; j++ {
+				M[row][j] -= f * M[col][j]
+			}
+		}
+	}
+	var x [8]float64
+	for i := 7; i >= 0; i-- {
+		x[i] = M[i][8]
+		for j := i + 1; j < 8; j++ {
+			x[i] -= M[i][j] * x[j]
+		}
+		if math.Abs(M[i][i]) > 1e-12 {
+			x[i] /= M[i][i]
+		}
+	}
+	return x
+}

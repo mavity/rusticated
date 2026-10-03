@@ -44,7 +44,7 @@ func main() {
 	fs.StringVar(&cfg.SaveTo, "save", "", "save output: no arg=alongside input, *.ext=per-file pattern, path=single file")
 	fs.StringVar(&cfg.DocContext, "doc-context", "", "surrounding document text for Phase 2 context")
 	fs.Float64Var(&cfg.Threshold, "threshold", ConfidenceThreshold, "line confidence threshold τ (0–1)")
-	fs.StringVar(&cfg.LMBackend, "backend", "auto", "LiteRT-LM backend: auto|gpu|npu|cpu")
+	fs.StringVar(&cfg.LMBackend, "backend", "gpu", "LiteRT-LM backend: gpu|npu|cpu|auto")
 	fs.StringVar(&cfg.Output, "output", "text", "output format: text|json")
 	fs.BoolVar(&cfg.Verbose, "verbose", false, "print progress and debug information")
 	fs.Parse(rawArgs)
