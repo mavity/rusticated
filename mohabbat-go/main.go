@@ -528,7 +528,7 @@ func cargoTargetName(s slot) (string, error) {
 	case s.goos == "linux":
 		return fmt.Sprintf("%s-unknown-linux-musl", targetArch), nil
 	case s.goos == "windows":
-		return fmt.Sprintf("%s-pc-windows-msvc", targetArch), nil
+		return fmt.Sprintf("%s-pc-windows-gnullvm", targetArch), nil
 	case s.goos == "darwin":
 		return fmt.Sprintf("%s-apple-darwin", targetArch), nil
 	default:
