@@ -344,9 +344,12 @@ The host is compiled for all supported targets, and is embedded in the brotli po
 
 In order for Go code to run on rusticated WASM ABI, the way Go reads and writes files, accessess network or environment must be re-implemented on top of that rusticated WASM ABI.
 
-This is what rusticated-go does. Go allows 'overlaying' or swapping system libraries with custom implementations. Our **rusticated-go** was carefully designed to fit with **Go 1.26.4** and makes normal unmodified Go code to run inside that WASM without any changes or limitations.
+This is what rusticated-go does. Go allows 'overlaying' or swapping system libraries with custom implementations. Our **rusticated-go** was carefully designed to fit with **Go 1.27.1** and makes normal unmodified Go code to run inside that WASM without any changes or limitations.
 
 The beauty of Go on rusticated is that its *green threads* (goroutines) are perfectly fit to rusticated WASM async model. That means while one goroutine is waiting for a file or network read, another goroutine can run and do something else. This is a very important feature of Go that makes WASM hosting very efficient and viable.
+
+**Go 1.27 Compatibility**
+Go 1.27 reserved the lower 4 bits of the lock counter for internal status flags. $2^4 = 16$. To increment the actual lock count without overwriting those flags, the runtime now adds 16 instead of 1. Our overlay must do the same.
 
 # Example projects
 
