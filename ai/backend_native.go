@@ -136,11 +136,11 @@ func ensureLMLibLoaded(libPath string) error {
 		purego.RegisterLibFunc(&lmSettingsCreate, lmLib, "litert_lm_engine_settings_create")
 		purego.RegisterLibFunc(&lmSettingsDelete, lmLib, "litert_lm_engine_settings_delete")
 		purego.RegisterLibFunc(&lmEngineCreate, lmLib, "litert_lm_engine_create")
-		tryRegisterLMFunc(&lmEngineDelete, lmLib, "litert_lm_engine_delete")
+		purego.RegisterLibFunc(&lmEngineDelete, lmLib, "litert_lm_engine_delete")
 		purego.RegisterLibFunc(&lmCfgCreate, lmLib, "litert_lm_conversation_config_create")
 		purego.RegisterLibFunc(&lmCfgDelete, lmLib, "litert_lm_conversation_config_delete")
 		purego.RegisterLibFunc(&lmConvCreate, lmLib, "litert_lm_conversation_create")
-		tryRegisterLMFunc(&lmConvDelete, lmLib, "litert_lm_conversation_delete")
+		purego.RegisterLibFunc(&lmConvDelete, lmLib, "litert_lm_conversation_delete")
 		purego.RegisterLibFunc(&lmConvSendStream, lmLib, "litert_lm_conversation_send_message_stream")
 		purego.RegisterLibFunc(&lmSetLogLevel, lmLib, "litert_lm_set_min_log_level")
 		purego.RegisterLibFunc(&lmGetDefaultLogger, lmLib, "LiteRtGetDefaultLogger")
@@ -152,35 +152,29 @@ func ensureLMLibLoaded(libPath string) error {
 		purego.RegisterLibFunc(&lmStreamChunkIsFinal, lmLib, "litert_lm_stream_chunk_is_final")
 		purego.RegisterLibFunc(&lmStreamChunkGetError, lmLib, "litert_lm_stream_chunk_get_error")
 
-		tryRegisterLMFunc(&lmCfgSetTools, lmLib, "litert_lm_conversation_config_set_tools")
-		tryRegisterLMFunc(&lmCfgSetSystemMessage, lmLib, "litert_lm_conversation_config_set_system_message")
-		tryRegisterLMFunc(&lmCfgSetStreamToolCalls, lmLib, "litert_lm_conversation_config_set_stream_tool_calls")
-		tryRegisterLMFunc(&lmCfgSetMessages, lmLib, "litert_lm_conversation_config_set_messages")
+		purego.RegisterLibFunc(&lmCfgSetTools, lmLib, "litert_lm_conversation_config_set_tools")
+		purego.RegisterLibFunc(&lmCfgSetSystemMessage, lmLib, "litert_lm_conversation_config_set_system_message")
+		purego.RegisterLibFunc(&lmCfgSetStreamToolCalls, lmLib, "litert_lm_conversation_config_set_stream_tool_calls")
+		purego.RegisterLibFunc(&lmCfgSetMessages, lmLib, "litert_lm_conversation_config_set_messages")
 
-		tryRegisterLMFunc(&lmSettingsSetEnableSpeculativeDecoding, lmLib, "litert_lm_engine_settings_set_enable_speculative_decoding")
-		tryRegisterLMFunc(&lmSettingsSetUseRingbuffersLocalAttention, lmLib, "litert_lm_engine_settings_set_use_ringbuffers_local_attention")
-		tryRegisterLMFunc(&lmSettingsSetGpuDecodeStepsPerSync, lmLib, "litert_lm_engine_settings_set_gpu_decode_steps_per_sync")
-		tryRegisterLMFunc(&lmSettingsSetNumThreads, lmLib, "litert_lm_engine_settings_set_num_threads")
-		tryRegisterLMFunc(&lmSettingsSetMaxNumTokens, lmLib, "litert_lm_engine_settings_set_max_num_tokens")
+		purego.RegisterLibFunc(&lmSettingsSetEnableSpeculativeDecoding, lmLib, "litert_lm_engine_settings_set_enable_speculative_decoding")
+		purego.RegisterLibFunc(&lmSettingsSetUseRingbuffersLocalAttention, lmLib, "litert_lm_engine_settings_set_use_ringbuffers_local_attention")
+		purego.RegisterLibFunc(&lmSettingsSetGpuDecodeStepsPerSync, lmLib, "litert_lm_engine_settings_set_gpu_decode_steps_per_sync")
+		purego.RegisterLibFunc(&lmSettingsSetNumThreads, lmLib, "litert_lm_engine_settings_set_num_threads")
+		purego.RegisterLibFunc(&lmSettingsSetMaxNumTokens, lmLib, "litert_lm_engine_settings_set_max_num_tokens")
 
-		tryRegisterLMFunc(&lmLoadedFileCreate, lmLib, "litert_lm_loaded_file_create")
-		tryRegisterLMFunc(&lmLoadedFileDelete, lmLib, "litert_lm_loaded_file_delete")
-		tryRegisterLMFunc(&lmLoadedFileHasSpeculativeDecodingSupport, lmLib, "litert_lm_loaded_file_has_speculative_decoding_support")
-		tryRegisterLMFunc(&lmLoadedFileMaxContextTokens, lmLib, "litert_lm_loaded_file_max_context_tokens")
-		tryRegisterLMFunc(&lmLoadedFileIsDynamicContext, lmLib, "litert_lm_loaded_file_is_dynamic_context")
-		tryRegisterLMFunc(&lmLoadedFileSupportsThinking, lmLib, "litert_lm_loaded_file_supports_thinking")
-		tryRegisterLMFunc(&lmLoadedFileSupportsFunctionCalling, lmLib, "litert_lm_loaded_file_supports_function_calling")
-		tryRegisterLMFunc(&lmLoadedFileModalitySupportedBackends, lmLib, "litert_lm_loaded_file_modality_supported_backends")
+		purego.RegisterLibFunc(&lmLoadedFileCreate, lmLib, "litert_lm_loaded_file_create")
+		purego.RegisterLibFunc(&lmLoadedFileDelete, lmLib, "litert_lm_loaded_file_delete")
+		purego.RegisterLibFunc(&lmLoadedFileHasSpeculativeDecodingSupport, lmLib, "litert_lm_loaded_file_has_speculative_decoding_support")
+		purego.RegisterLibFunc(&lmLoadedFileMaxContextTokens, lmLib, "litert_lm_loaded_file_max_context_tokens")
+		purego.RegisterLibFunc(&lmLoadedFileIsDynamicContext, lmLib, "litert_lm_loaded_file_is_dynamic_context")
+		purego.RegisterLibFunc(&lmLoadedFileSupportsThinking, lmLib, "litert_lm_loaded_file_supports_thinking")
+		purego.RegisterLibFunc(&lmLoadedFileSupportsFunctionCalling, lmLib, "litert_lm_loaded_file_supports_function_calling")
+		purego.RegisterLibFunc(&lmLoadedFileModalitySupportedBackends, lmLib, "litert_lm_loaded_file_modality_supported_backends")
 
-		tryRegisterLMFunc(&lmEngineTryLoadVisionExecutor, lmLib, "litert_lm_engine_try_loading_vision_executor")
+		purego.RegisterLibFunc(&lmEngineTryLoadVisionExecutor, lmLib, "litert_lm_engine_try_loading_vision_executor")
 	})
 	return lmLibErr
-}
-
-func tryRegisterLMFunc(target any, lib uintptr, name string) {
-	if sym, err := dlsym(lib, name); err == nil && sym != 0 {
-		purego.RegisterLibFunc(target, lib, name)
-	}
 }
 
 func configureLMLogging() {
