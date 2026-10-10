@@ -2,6 +2,7 @@ package shell
 
 import (
 	"bytes"
+	"strings"
 
 	"github.com/charmbracelet/x/input"
 	"github.com/mavity/rusticated/kabibi/ui"
@@ -35,6 +36,9 @@ type Shell struct {
 
 	// Options
 	opts ShellOptions
+
+	// Context from last render pass
+	ctx ui.RenderContext
 }
 
 // New creates a new Shell widget with the given options.
@@ -58,6 +62,13 @@ func New(opts ShellOptions) *Shell {
 	})
 
 	return s
+}
+
+// Blocks returns a copy of the shell's command block history.
+func (s *Shell) Blocks() []CommandBlock {
+	res := make([]CommandBlock, len(s.blocks))
+	copy(res, s.blocks)
+	return res
 }
 
 // SetInput sets the input buffer and cursor position for testing/snapshot generation.
@@ -106,42 +117,28 @@ func (s *Shell) Measure(c ui.Constraints) ui.Size {
 	return ui.Size{W: w, H: h}
 }
 
-// calculateVisualRows computes the total number of wrapped lines for a block at a given width.
-// Each CommandBlock's visual footprint is: 1 prompt line + wrapped input + wrapped output.
-func calculateVisualRows(block CommandBlock, width int) int {
+// renderBlock converts a CommandBlock into a rendered CellBuf using FromANSI.
+func renderBlock(block CommandBlock, width int) terminal.CellBuf {
 	if width <= 0 {
 		width = 80
 	}
-
-	rows := 0
-
-	// Prompt + Input line wrapping
 	promptInput := block.Prompt + block.Input
-	if promptInput == "" {
-		rows = 1 // At least 1 row for empty line
-	} else {
-		// Count wrapped lines for prompt+input
-		rows = (len([]rune(promptInput)) + width - 1) / width
-		if rows == 0 {
-			rows = 1
-		}
+	lines := []string{promptInput}
+	if block.Output.Len() > 0 {
+		out := block.Output.String()
+		out = strings.TrimSuffix(out, "\n")
+		lines = append(lines, strings.Split(out, "\n")...)
 	}
-
-	// Output line wrapping
-	outputStr := block.Output.String()
-	if outputStr != "" {
-		outputLines := 0
-		for _, line := range bytes.Split(block.Output.Bytes(), []byte{'\n'}) {
-			if len(line) > 0 {
-				outputLines += (len([]rune(string(line))) + width - 1) / width
-			} else {
-				outputLines++ // Empty line still counts
-			}
-		}
-		rows += outputLines
+	buf := terminal.FromANSI(lines, width)
+	if buf.Height == 0 {
+		return terminal.NewCellBuf(width, 1)
 	}
+	return buf
+}
 
-	return rows
+// calculateVisualRows computes the total number of visual rows for a block at a given width.
+func calculateVisualRows(block CommandBlock, width int) int {
+	return renderBlock(block, width).Height
 }
 
 // totalVisualRows computes the cumulative height of all CommandBlocks in the history.
@@ -159,19 +156,12 @@ func (s *Shell) totalVisualRows() int {
 // 2. Flush overflowing rows to WriteToScrollback callback
 // 3. Render remaining active viewport to CellBuf
 func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.CursorPos) {
+	s.ctx = ctx
 	s.width = rect.W
 	s.height = rect.H
 
 	// Allocate output buffer
 	buf := ui.NewCellBuf(rect.W, rect.H)
-
-	// Fill with default background
-	fillRect := ui.Rect{X: 0, Y: 0, W: rect.W, H: rect.H}
-	fillCell := terminal.Cell{
-		R:     ' ',
-		Style: terminal.NewStyle(0, 0, 0),
-	}
-	buf.Fill(fillRect, fillCell)
 
 	// ===== EJECTION ENGINE =====
 	// Calculate total visual line height
@@ -189,7 +179,6 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 		// Render and emit the delta rows [previouslyEjected : hTarget]
 		deltaRows := hTarget - s.previouslyEjected
 		ejectionBuf := ui.NewCellBuf(rect.W, deltaRows)
-		ejectionBuf.Fill(ui.Rect{X: 0, Y: 0, W: rect.W, H: deltaRows}, fillCell)
 
 		// Paint rows into ejection buffer
 		currentRow := 0
@@ -209,7 +198,7 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 
 		// Convert ejection buffer to ANSI and emit
 		ansiOutput := terminal.ToANSI(ejectionBuf)
-		s.opts.WriteToScrollback(ansiOutput)
+		s.opts.WriteToScrollback(ansiOutput + "\r\n")
 
 		// Advance watermark
 		s.previouslyEjected = hTarget
@@ -237,26 +226,18 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 	inputY := rect.H - 1
 	inputLine := s.prompt + s.inputValue
 
+	inputStyle := terminal.NewStyle(0, 0, terminal.CharResetForegroundDefault|terminal.CharResetBackgroundDefault)
 	col := 0
 	for _, ch := range inputLine {
 		if col >= rect.W {
 			break
 		}
 		cell := terminal.Cell{
-			R:     ch,
-			Style: terminal.NewStyle(0, 0, 0),
+			Grapheme: string(ch),
+			Style:    inputStyle,
 		}
 		buf.Set(col, inputY, cell)
 		col++
-	}
-
-	// Fill rest of input line with spaces
-	for ; col < rect.W; col++ {
-		cell := terminal.Cell{
-			R:     ' ',
-			Style: terminal.NewStyle(0, 0, 0),
-		}
-		buf.Set(col, inputY, cell)
 	}
 
 	// Cursor position: at prompt + cursorPos within input
@@ -277,180 +258,150 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 // paintBlock renders a single CommandBlock into the buffer at the given starting row.
 // Returns the final row written (for chaining to next block).
 func (s *Shell) paintBlock(buf ui.CellBuf, startRow int, block CommandBlock, width, startOffset, endOffset int) int {
+	blockBuf := renderBlock(block, width)
+	if startOffset < 0 {
+		startOffset = 0
+	}
+	if endOffset > blockBuf.Height {
+		endOffset = blockBuf.Height
+	}
 	row := startRow
-	currentRowInBlock := 0
-	rowsInBlock := calculateVisualRows(block, width)
-
-	// Skip rows before startOffset
-	if startOffset > 0 {
-		currentRowInBlock = startOffset
-		if currentRowInBlock >= rowsInBlock {
-			return row
+	for y := startOffset; y < endOffset && row < buf.Height; y++ {
+		for x := 0; x < width && x < blockBuf.Width; x++ {
+			buf.Set(x, row, blockBuf.Get(x, y))
 		}
-	}
-
-	// Paint prompt + input
-	promptInput := block.Prompt + block.Input
-	if promptInput != "" {
-		lines := wrapText(promptInput, width)
-		for i := currentRowInBlock; i < len(lines) && currentRowInBlock < endOffset; i++ {
-			s.paintLine(buf, row, lines[i], width)
-			row++
-			currentRowInBlock++
-		}
-	} else if currentRowInBlock == 0 && currentRowInBlock < endOffset {
 		row++
-		currentRowInBlock++
 	}
-
-	// Paint output
-	outputStr := block.Output.String()
-	if outputStr != "" {
-		outputLines := wrapText(outputStr, width)
-		for i := 0; i < len(outputLines) && currentRowInBlock < endOffset; i++ {
-			if currentRowInBlock >= startOffset {
-				s.paintLine(buf, row, outputLines[i], width)
-				row++
-			}
-			currentRowInBlock++
-		}
-	}
-
 	return row
 }
 
-// paintLine draws a single text line into the buffer at the given row.
-func (s *Shell) paintLine(buf ui.CellBuf, row int, line string, width int) {
-	col := 0
-	for _, ch := range line {
-		if col >= width {
-			break
-		}
-		cell := terminal.Cell{
-			R:     ch,
-			Style: terminal.NewStyle(0, 0, 0),
-		}
-		buf.Set(col, row, cell)
-		col++
+func (s *Shell) invalidate() {
+	if s.ctx.Invalidate != nil {
+		s.ctx.Invalidate()
 	}
-	// Fill rest of line with spaces
-	for ; col < width; col++ {
-		cell := terminal.Cell{
-			R:     ' ',
-			Style: terminal.NewStyle(0, 0, 0),
-		}
-		buf.Set(col, row, cell)
-	}
-}
-
-// wrapText wraps text to the given width, splitting on newlines and wrapping long lines.
-func wrapText(text string, width int) []string {
-	if width <= 0 {
-		width = 80
-	}
-
-	var result []string
-	for _, line := range bytes.Split([]byte(text), []byte{'\n'}) {
-		lineStr := string(line)
-		runes := []rune(lineStr)
-
-		for len(runes) > 0 {
-			if len(runes) <= width {
-				result = append(result, string(runes))
-				break
-			}
-			result = append(result, string(runes[:width]))
-			runes = runes[width:]
-		}
-	}
-
-	return result
 }
 
 // HandleEvent implements ui.Widget by processing input events.
 // Handles keyboard input for the shell, mouse events, and window resizes.
 func (s *Shell) HandleEvent(e input.Event) bool {
 	switch evt := e.(type) {
+	case input.KeyPressEvent:
+		return s.handleKeyPress(evt.String())
 	case *input.KeyPressEvent:
-		if !s.inputFocus {
-			return false
-		}
-
-		keyStr := evt.String()
-		switch keyStr {
-		case "enter":
-			// Submit command
-			if s.inputValue != "" || true { // Always create a block for interaction
-				block := CommandBlock{
-					Prompt:   s.prompt,
-					Input:    s.inputValue,
-					Output:   bytes.Buffer{},
-					Status:   StatusActive,
-					ExitCode: 0,
-				}
-				// Placeholder: add a response
-				block.Output.WriteString("[Command not yet implemented in Step 1]")
-				s.blocks = append(s.blocks, block)
-				s.inputValue = ""
-				s.cursorPos = 0
-			}
-			return true
-
-		case "backspace":
-			// Delete character before cursor
-			if s.cursorPos > 0 {
-				runes := []rune(s.inputValue)
-				runes = append(runes[:s.cursorPos-1], runes[s.cursorPos:]...)
-				s.inputValue = string(runes)
-				s.cursorPos--
-			}
-			return true
-
-		case "left":
-			// Move cursor left
-			if s.cursorPos > 0 {
-				s.cursorPos--
-			}
-			return true
-
-		case "right":
-			// Move cursor right
-			if s.cursorPos < len([]rune(s.inputValue)) {
-				s.cursorPos++
-			}
-			return true
-
-		case "home":
-			// Move cursor to start
-			s.cursorPos = 0
-			return true
-
-		case "end":
-			// Move cursor to end
-			s.cursorPos = len([]rune(s.inputValue))
-			return true
-
-		default:
-			// Insert printable character
-			if len(keyStr) == 1 && keyStr[0] >= 32 && keyStr[0] < 127 {
-				runes := []rune(s.inputValue)
-				runes = append(runes[:s.cursorPos], append([]rune(keyStr), runes[s.cursorPos:]...)...)
-				s.inputValue = string(runes)
-				s.cursorPos++
-				return true
-			}
+		if evt != nil {
+			return s.handleKeyPress(evt.String())
 		}
 		return false
 
-	case *input.WindowSizeEvent:
-		// Handle terminal resize
+	case input.WindowSizeEvent:
 		s.width = evt.Width
 		s.height = evt.Height
+		s.invalidate()
 		return true
+	case *input.WindowSizeEvent:
+		if evt != nil {
+			s.width = evt.Width
+			s.height = evt.Height
+			s.invalidate()
+			return true
+		}
+		return false
 
 	default:
 		return false
 	}
+}
+
+func (s *Shell) handleKeyPress(keyStr string) bool {
+	if !s.inputFocus {
+		return false
+	}
+
+	switch keyStr {
+	case "enter":
+		// Submit command
+		if s.inputValue != "" || true { // Always create a block for interaction
+			block := CommandBlock{
+				Prompt:   s.prompt,
+				Input:    s.inputValue,
+				Output:   bytes.Buffer{},
+				Status:   StatusActive,
+				ExitCode: 0,
+			}
+			// Placeholder: add a response
+			block.Output.WriteString("[Command not yet implemented in Step 1]")
+			s.blocks = append(s.blocks, block)
+			s.inputValue = ""
+			s.cursorPos = 0
+		}
+		s.invalidate()
+		return true
+
+	case "backspace":
+		// Delete character before cursor
+		if s.cursorPos > 0 {
+			runes := []rune(s.inputValue)
+			runes = append(runes[:s.cursorPos-1], runes[s.cursorPos:]...)
+			s.inputValue = string(runes)
+			s.cursorPos--
+			s.invalidate()
+		}
+		return true
+
+	case "left":
+		// Move cursor left
+		if s.cursorPos > 0 {
+			s.cursorPos--
+			s.invalidate()
+		}
+		return true
+
+	case "right":
+		// Move cursor right
+		if s.cursorPos < len([]rune(s.inputValue)) {
+			s.cursorPos++
+			s.invalidate()
+		}
+		return true
+
+	case "home":
+		// Move cursor to start
+		if s.cursorPos != 0 {
+			s.cursorPos = 0
+			s.invalidate()
+		}
+		return true
+
+	case "end":
+		// Move cursor to end
+		endPos := len([]rune(s.inputValue))
+		if s.cursorPos != endPos {
+			s.cursorPos = endPos
+			s.invalidate()
+		}
+		return true
+
+	case "space":
+		// Insert space
+		runes := []rune(s.inputValue)
+		runes = append(runes[:s.cursorPos], append([]rune(" "), runes[s.cursorPos:]...)...)
+		s.inputValue = string(runes)
+		s.cursorPos++
+		s.invalidate()
+		return true
+
+	default:
+		// Insert printable character
+		if len(keyStr) == 1 && keyStr[0] >= 32 && keyStr[0] < 127 {
+			runes := []rune(s.inputValue)
+			runes = append(runes[:s.cursorPos], append([]rune(keyStr), runes[s.cursorPos:]...)...)
+			s.inputValue = string(runes)
+			s.cursorPos++
+			s.invalidate()
+			return true
+		}
+	}
+	return false
 }
 
 // AddLine adds output to the last CommandBlock, creating one if needed.

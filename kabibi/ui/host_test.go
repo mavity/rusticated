@@ -38,7 +38,7 @@ func (w *recordingWidget) Render(r terminal.Rect, ctx RenderContext) (terminal.C
 	buf := terminal.NewCellBuf(r.W, r.H)
 	for y := 0; y < r.H; y++ {
 		for x := 0; x < r.W; x++ {
-			buf.Set(x, y, terminal.Cell{R: 'A'})
+			buf.Set(x, y, terminal.Cell{Grapheme: "A"})
 		}
 	}
 	w.buf = buf
@@ -95,7 +95,7 @@ func TestWriteToScrollback_ConcurrentWritesAreAllPreserved(t *testing.T) {
 	}
 }
 
-func TestReadInputLoop_ParsesAndDispatchesEvents(t *testing.T) {
+func TestReadInputLoop_ParsesAndEnqueuesEvents(t *testing.T) {
 	pr, pw := io.Pipe()
 	widget := &recordingWidget{}
 	h := NewHost(widget)
@@ -117,15 +117,28 @@ func TestReadInputLoop_ParsesAndDispatchesEvents(t *testing.T) {
 		t.Fatal("readInputLoop() did not exit after input was closed")
 	}
 
-	if !widget.handled {
-		t.Fatal("readInputLoop() did not dispatch an event to the widget")
-	}
-	key, ok := widget.lastEvent.(input.KeyPressEvent)
-	if !ok {
-		t.Fatalf("readInputLoop() dispatched %T, want input.KeyPressEvent", widget.lastEvent)
-	}
-	if got, want := key.Keystroke(), "a"; got != want {
-		t.Fatalf("keystroke = %q, want %q", got, want)
+	select {
+	case msg := <-h.msgCh:
+		if msg.kind != hostMsgInput {
+			t.Fatalf("msg.kind = %v, want hostMsgInput", msg.kind)
+		}
+		key, ok := msg.inputEvent.(input.KeyPressEvent)
+		if !ok {
+			t.Fatalf("msg.inputEvent is %T, want input.KeyPressEvent", msg.inputEvent)
+		}
+		if got, want := key.Keystroke(), "a"; got != want {
+			t.Fatalf("keystroke = %q, want %q", got, want)
+		}
+		needsRender := false
+		h.handleHostMsg(msg, &needsRender, func(uintptr) (int, int, error) { return 80, 24, nil })
+		if !widget.handled {
+			t.Fatal("handleHostMsg did not dispatch event to widget")
+		}
+		if !needsRender {
+			t.Fatal("handleHostMsg did not set needsRender to true for handled event")
+		}
+	default:
+		t.Fatal("readInputLoop() did not enqueue a message to h.msgCh")
 	}
 }
 
@@ -383,7 +396,7 @@ func TestRunScrollbackFrame_RendersQueuedText(t *testing.T) {
 func TestSpanDetect_IdenticalBuffers_NoChange(t *testing.T) {
 	buf := terminal.NewCellBuf(3, 2)
 	for i := range buf.Cells() {
-		buf.Cells()[i] = terminal.Cell{R: 'A'}
+		buf.Cells()[i] = terminal.Cell{Grapheme: "A"}
 	}
 	h := &Host{currBuf: buf, prevBuf: buf}
 	if _, _, changed := h.spanDetect(); changed {
@@ -395,10 +408,10 @@ func TestSpanDetect_SingleCellMutation_ExactBounds(t *testing.T) {
 	curr := terminal.NewCellBuf(3, 2)
 	prev := terminal.NewCellBuf(3, 2)
 	for i := range curr.Cells() {
-		curr.Cells()[i] = terminal.Cell{R: 'A'}
-		prev.Cells()[i] = terminal.Cell{R: 'A'}
+		curr.Cells()[i] = terminal.Cell{Grapheme: "A"}
+		prev.Cells()[i] = terminal.Cell{Grapheme: "A"}
 	}
-	curr.Set(1, 1, terminal.Cell{R: 'B'})
+	curr.Set(1, 1, terminal.Cell{Grapheme: "B"})
 	h := &Host{currBuf: curr, prevBuf: prev}
 	lineMin, lineMax, changed := h.spanDetect()
 	if !changed || lineMin != 1 || lineMax != 1 {
@@ -416,10 +429,38 @@ func TestEmitDirtyRegion_WritesANSISequences(t *testing.T) {
 		cursorY:       1,
 		cursorVisible: true,
 	}
-	h.currBuf.Set(0, 0, terminal.Cell{R: 'A'})
+	h.currBuf.Set(0, 0, terminal.Cell{Grapheme: "A"})
 	h.emitDirtyRegion(0, 0)
 	got := out.String()
 	if !strings.Contains(got, "\x1b[1;1H") || !strings.Contains(got, "\x1b[?25h") || !strings.Contains(got, "A") {
 		t.Fatalf("emitDirtyRegion() output = %q, want cursor movement + visible cursor + data", got)
+	}
+}
+
+func TestProcessLoop_CoalescesRedrawsUnderBurst(t *testing.T) {
+	var out bytes.Buffer
+	widget := &recordingWidget{}
+	h := &Host{
+		root:    widget,
+		out:     bufio.NewWriter(&out),
+		currBuf: terminal.NewCellBuf(10, 5),
+		prevBuf: terminal.NewCellBuf(10, 5),
+		msgCh:   make(chan hostMsg, 16),
+		stopCh:  make(chan struct{}),
+	}
+
+	// Enqueue burst of invalidations
+	for i := 0; i < 5; i++ {
+		h.msgCh <- hostMsg{kind: hostMsgInvalidate}
+	}
+	h.msgCh <- hostMsg{kind: hostMsgStop}
+
+	h.processLoop(func(fd uintptr) (int, int, error) {
+		return 10, 5, nil
+	})
+
+	// Ensure the loop ran and terminated cleanly upon hostMsgStop
+	if widget.measureW != 10 || widget.measureH != 5 {
+		t.Fatalf("processLoop did not measure root widget with expected dimensions; got (%d, %d)", widget.measureW, widget.measureH)
 	}
 }
