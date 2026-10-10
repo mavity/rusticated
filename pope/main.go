@@ -26,7 +26,7 @@ func cacheDir() (string, error) {
 	if err != nil || home == "" {
 		return "", fmt.Errorf("user home directory unavailable: %w", err)
 	}
-	if runtime.GOOS == "windows" {
+	if assets.HostOS() == "windows" {
 		return filepath.Join(home, "AppData", "Local", "kabibi", "litert_cache"), nil
 	}
 	return filepath.Join(home, ".cache", "kabibi", "litert_cache"), nil
