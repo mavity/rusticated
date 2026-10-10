@@ -1,13 +1,52 @@
 package app
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/charmbracelet/x/input"
 	"github.com/mavity/rusticated/kabibi/ui"
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
+
+func assertAppSnapshot(t *testing.T, snapFile string, widget *AppWidget, scrollback *string, rect ui.Rect) {
+	t.Helper()
+
+	buf, cursor := widget.Render(rect, ui.RenderContext{})
+	if cursor.Visible && cursor.X >= 0 && cursor.X < buf.Width && cursor.Y >= 0 && cursor.Y < buf.Height {
+		cell := buf.Get(cursor.X, cursor.Y)
+		cell.Grapheme = "\u0332" // Combining low line (non-destructive)
+		buf.Set(cursor.X, cursor.Y, cell)
+	}
+
+	sb := ""
+	if scrollback != nil && len(*scrollback) > 0 {
+		sb = *scrollback + "-------scrollback-------\r\n"
+	}
+	got := sb + terminal.ToANSI(buf)
+
+	snapPath := filepath.Join("snapshot", snapFile)
+
+	wantBytes, err := os.ReadFile(snapPath)
+	if err != nil {
+		t.Fatalf("failed to read snapshot %s: %v", snapPath, err)
+	}
+	want := string(wantBytes)
+
+	if got != want {
+		fmt.Fprintf(os.Stderr,
+			"\n\x1b[1;33m=== SNAPSHOT MISMATCH: %s ===\x1b[0m\n"+
+				"\x1b[1;31mWANT -------------------------------------------------------------------------\x1b[0m\n"+
+				"%s\x1b[0m\n"+
+				"\x1b[1;32mGOT --------------------------------------------------------------------------\x1b[0m\n"+
+				"%s\x1b[0m\n"+
+				"\x1b[1;33m------------------------------------------------------------------------------\x1b[0m\n\n",
+			snapPath, want, got)
+		t.Errorf("payload mismatch for %s (see rendered TTY diff above)", snapPath)
+	}
+}
 
 // TestAppWidget_Snapshot_Initial_W80H24 verifies initial state.
 // Viewport: 80×24
@@ -17,66 +56,41 @@ func TestAppWidget_Snapshot_Initial_W80H24(t *testing.T) {
 	widget := NewWidget(AppWidgetOptions{
 		WriteToScrollback: func(s string) { scrollback += s },
 	})
+	assertAppSnapshot(t, "initial_w80h24.snap", widget, &scrollback, ui.Rect{X: 0, Y: 0, W: 80, H: 24})
+}
 
-	rect := ui.Rect{X: 0, Y: 0, W: 80, H: 24}
-	buf, cursor := widget.Render(rect, ui.RenderContext{})
-
-	if cursor.Visible && cursor.X >= 0 && cursor.X < buf.Width && cursor.Y >= 0 && cursor.Y < buf.Height {
-		cell := buf.Get(cursor.X, cursor.Y)
-		if cell.R == 0 {
-			cell.R = ' '
+// typeString simulates keyboard typing by dispatching canonical input.KeyPressEvents.
+func typeString(w ui.Widget, s string) {
+	for _, r := range s {
+		switch r {
+		case ' ':
+			w.HandleEvent(input.KeyPressEvent{Code: ' ', Text: " "})
+		default:
+			w.HandleEvent(input.KeyPressEvent{Code: r, Text: string(r)})
 		}
-		cell.R = '\u0332' // Combining low line (non-destructive)
-		buf.Set(cursor.X, cursor.Y, cell)
-	}
-
-	payload := scrollback + terminal.ToANSI(buf)
-
-	snapPath := filepath.Join("snapshot", "initial_w80h24.snap")
-	wantPayload, err := os.ReadFile(snapPath)
-	if err != nil {
-		t.Fatalf("failed to read snapshot %s: %v", snapPath, err)
-	}
-
-	if payload != string(wantPayload) {
-		t.Errorf("payload mismatch for %s\n--- WANT ---\n%q\n--- GOT ---\n%q",
-			snapPath, string(wantPayload), payload)
 	}
 }
 
-// TestAppWidget_Snapshot_TypingCommand_W80H24 verifies typing behavior.
+// TestAppWidget_Snapshot_TypingCommand_W80H24 verifies typing behavior via input.KeyPressEvents.
 func TestAppWidget_Snapshot_TypingCommand_W80H24(t *testing.T) {
 	var scrollback string
 	widget := NewWidget(AppWidgetOptions{
 		WriteToScrollback: func(s string) { scrollback += s },
 	})
 
-	widget.Shell().SetInput("echo hello")
+	invalidated := 0
+	widget.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 24}, ui.RenderContext{
+		Focused:    true,
+		Invalidate: func() { invalidated++ },
+	})
 
-	rect := ui.Rect{X: 0, Y: 0, W: 80, H: 24}
-	buf, cursor := widget.Render(rect, ui.RenderContext{})
+	typeString(widget, "echo hello")
 
-	if cursor.Visible && cursor.X >= 0 && cursor.X < buf.Width && cursor.Y >= 0 && cursor.Y < buf.Height {
-		cell := buf.Get(cursor.X, cursor.Y)
-		if cell.R == 0 {
-			cell.R = ' '
-		}
-		cell.R = '\u0332' // Combining low line (non-destructive)
-		buf.Set(cursor.X, cursor.Y, cell)
+	if invalidated != len("echo hello") {
+		t.Fatalf("expected %d invalidations, got %d", len("echo hello"), invalidated)
 	}
 
-	payload := scrollback + terminal.ToANSI(buf)
-
-	snapPath := filepath.Join("snapshot", "typing_echo_w80h24.snap")
-	wantPayload, err := os.ReadFile(snapPath)
-	if err != nil {
-		t.Fatalf("failed to read snapshot %s: %v", snapPath, err)
-	}
-
-	if payload != string(wantPayload) {
-		t.Errorf("payload mismatch for %s\n--- WANT ---\n%q\n--- GOT ---\n%q",
-			snapPath, string(wantPayload), payload)
-	}
+	assertAppSnapshot(t, "typing_echo_w80h24.snap", widget, &scrollback, ui.Rect{X: 0, Y: 0, W: 80, H: 24})
 }
 
 // TestAppWidget_Snapshot_CommandSubmission_W80H24 verifies command submission and scrollback.
@@ -85,73 +99,26 @@ func TestAppWidget_Snapshot_CommandSubmission_W80H24(t *testing.T) {
 	widget := NewWidget(AppWidgetOptions{
 		WriteToScrollback: func(s string) { scrollback += s },
 	})
-
 	widget.Shell().SetInput("hello")
 	widget.Shell().SubmitCurrentInput()
-
-	rect := ui.Rect{X: 0, Y: 0, W: 80, H: 24}
-	buf, cursor := widget.Render(rect, ui.RenderContext{})
-
-	if cursor.Visible && cursor.X >= 0 && cursor.X < buf.Width && cursor.Y >= 0 && cursor.Y < buf.Height {
-		cell := buf.Get(cursor.X, cursor.Y)
-		if cell.R == 0 {
-			cell.R = ' '
-		}
-		cell.R = '\u0332' // Combining low line (non-destructive)
-		buf.Set(cursor.X, cursor.Y, cell)
-	}
-
-	payload := scrollback + terminal.ToANSI(buf)
-
-	snapPath := filepath.Join("snapshot", "submit_hello_w80h24.snap")
-	wantPayload, err := os.ReadFile(snapPath)
-	if err != nil {
-		t.Fatalf("failed to read snapshot %s: %v", snapPath, err)
-	}
-
-	if payload != string(wantPayload) {
-		t.Errorf("payload mismatch for %s\n--- WANT ---\n%q\n--- GOT ---\n%q",
-			snapPath, string(wantPayload), payload)
-	}
+	assertAppSnapshot(t, "submit_hello_w80h24.snap", widget, &scrollback, ui.Rect{X: 0, Y: 0, W: 80, H: 24})
 }
 
-// TestAppWidget_Snapshot_EjectionOverflow_W80H24 verifies watermark ejection.
-func TestAppWidget_Snapshot_EjectionOverflow_W80H24(t *testing.T) {
+// TestAppWidget_Snapshot_EjectionOverflow_W80H10 verifies watermark ejection into scrollback.
+// Viewport: 80×10 (9 history rows + 1 input row).
+// History: Welcome message (2 rows) + 12 submitted commands (12 rows) = 14 rows total.
+// Expected: 5 rows pushed into scrollback, 9 most recent history rows in viewport, plus input row.
+func TestAppWidget_Snapshot_EjectionOverflow_W80H10(t *testing.T) {
 	var scrollback string
 	widget := NewWidget(AppWidgetOptions{
 		WriteToScrollback: func(s string) { scrollback += s },
 	})
-
 	sh := widget.Shell()
-	for i := 0; i < 5; i++ {
-		sh.SetInput("cmd")
+	for i := 1; i <= 12; i++ {
+		sh.SetInput(fmt.Sprintf("cmd %d", i))
 		sh.SubmitCurrentInput()
 	}
-
-	rect := ui.Rect{X: 0, Y: 0, W: 80, H: 24}
-	buf, cursor := widget.Render(rect, ui.RenderContext{})
-
-	if cursor.Visible && cursor.X >= 0 && cursor.X < buf.Width && cursor.Y >= 0 && cursor.Y < buf.Height {
-		cell := buf.Get(cursor.X, cursor.Y)
-		if cell.R == 0 {
-			cell.R = ' '
-		}
-		cell.R = '\u0332' // Combining low line (non-destructive)
-		buf.Set(cursor.X, cursor.Y, cell)
-	}
-
-	payload := scrollback + terminal.ToANSI(buf)
-
-	snapPath := filepath.Join("snapshot", "ejection_overflow_w80h24.snap")
-	wantPayload, err := os.ReadFile(snapPath)
-	if err != nil {
-		t.Fatalf("failed to read snapshot %s: %v", snapPath, err)
-	}
-
-	if payload != string(wantPayload) {
-		t.Errorf("payload mismatch for %s\n--- WANT ---\n%q\n--- GOT ---\n%q",
-			snapPath, string(wantPayload), payload)
-	}
+	assertAppSnapshot(t, "ejection_overflow_w80h10.snap", widget, &scrollback, ui.Rect{X: 0, Y: 0, W: 80, H: 10})
 }
 
 // TestAppWidget_Snapshot_LineWrapping_W20H10 verifies wrapping at narrow width.
@@ -160,33 +127,8 @@ func TestAppWidget_Snapshot_LineWrapping_W20H10(t *testing.T) {
 	widget := NewWidget(AppWidgetOptions{
 		WriteToScrollback: func(s string) { scrollback += s },
 	})
-
 	widget.Shell().SetInput("this is a long command")
-
-	rect := ui.Rect{X: 0, Y: 0, W: 20, H: 10}
-	buf, cursor := widget.Render(rect, ui.RenderContext{})
-
-	if cursor.Visible && cursor.X >= 0 && cursor.X < buf.Width && cursor.Y >= 0 && cursor.Y < buf.Height {
-		cell := buf.Get(cursor.X, cursor.Y)
-		if cell.R == 0 {
-			cell.R = ' '
-		}
-		cell.R = '\u0332' // Combining low line (non-destructive)
-		buf.Set(cursor.X, cursor.Y, cell)
-	}
-
-	payload := scrollback + terminal.ToANSI(buf)
-
-	snapPath := filepath.Join("snapshot", "wrapping_w20h10.snap")
-	wantPayload, err := os.ReadFile(snapPath)
-	if err != nil {
-		t.Fatalf("failed to read snapshot %s: %v", snapPath, err)
-	}
-
-	if payload != string(wantPayload) {
-		t.Errorf("payload mismatch for %s\n--- WANT ---\n%q\n--- GOT ---\n%q",
-			snapPath, string(wantPayload), payload)
-	}
+	assertAppSnapshot(t, "wrapping_w20h10.snap", widget, &scrollback, ui.Rect{X: 0, Y: 0, W: 20, H: 10})
 }
 
 // TestAppWidget_Snapshot_CursorMovement_W80H24 verifies cursor positioning.
@@ -195,33 +137,8 @@ func TestAppWidget_Snapshot_CursorMovement_W80H24(t *testing.T) {
 	widget := NewWidget(AppWidgetOptions{
 		WriteToScrollback: func(s string) { scrollback += s },
 	})
-
 	sh := widget.Shell()
 	sh.SetInput("hello")
 	sh.SetCursorPos(3)
-
-	rect := ui.Rect{X: 0, Y: 0, W: 80, H: 24}
-	buf, cursor := widget.Render(rect, ui.RenderContext{})
-
-	if cursor.Visible && cursor.X >= 0 && cursor.X < buf.Width && cursor.Y >= 0 && cursor.Y < buf.Height {
-		cell := buf.Get(cursor.X, cursor.Y)
-		if cell.R == 0 {
-			cell.R = ' '
-		}
-		cell.R = '\u0332' // Combining low line (non-destructive)
-		buf.Set(cursor.X, cursor.Y, cell)
-	}
-
-	payload := scrollback + terminal.ToANSI(buf)
-
-	snapPath := filepath.Join("snapshot", "cursor_left_hello_w80h24.snap")
-	wantPayload, err := os.ReadFile(snapPath)
-	if err != nil {
-		t.Fatalf("failed to read snapshot %s: %v", snapPath, err)
-	}
-
-	if payload != string(wantPayload) {
-		t.Errorf("payload mismatch for %s\n--- WANT ---\n%q\n--- GOT ---\n%q",
-			snapPath, string(wantPayload), payload)
-	}
+	assertAppSnapshot(t, "cursor_left_hello_w80h24.snap", widget, &scrollback, ui.Rect{X: 0, Y: 0, W: 80, H: 24})
 }
