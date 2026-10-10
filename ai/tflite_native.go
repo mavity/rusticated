@@ -4,6 +4,7 @@ package ai
 
 import (
 	"fmt"
+	"os"
 	"runtime"
 	"sync"
 	"unsafe"
@@ -42,6 +43,9 @@ var (
 func ensureTFLiteLoaded(libPath string) error {
 	tflLibOnce.Do(func() {
 		var err error
+		if Verbose {
+			fmt.Fprintf(os.Stderr, "[ai] loading TFLite native library: %s\n", libPath)
+		}
 		tflLib, err = dlopen(libPath, RTLD_NOW|RTLD_GLOBAL)
 		if err != nil {
 			tflLibErr = fmt.Errorf("failed to load TFLite library %s: %w", libPath, err)

@@ -10,7 +10,11 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"time"
 )
+
+// Verbose enables verbose logging of library loading and other internals.
+var Verbose bool
 
 // ── Public interfaces (consumed by engine.go / ai.go) ───────────────────────
 
@@ -129,8 +133,14 @@ func sharedTokenCallback(drv LMDriver, userData, chunkPtr uint64) {
 			tokenCallbackMu.Lock()
 			ch := tokenDoneChannels[userData]
 			tokenCallbackMu.Unlock()
+			if Verbose {
+				fmt.Fprintf(os.Stderr, "[ai] stream final chunk for cb %d\n", userData)
+			}
 			if ch != nil {
-				ch <- struct{}{}
+				select {
+				case ch <- struct{}{}:
+				default:
+				}
 			}
 		}
 	}
@@ -294,13 +304,25 @@ func (c *drvConversationBackend) Close() error {
 	return nil
 }
 
+// diagTokenIdleTimeout is a TEMPORARY diagnostic: if no stream activity arrives
+// for this long, SendStream fails instead of hanging. It also keeps a pending
+// timer alive so Go's deadlock detector does not fire while native work runs.
+const diagTokenIdleTimeout = time.Minute
+
 func (c *drvConversationBackend) SendStream(ctx context.Context, messageJSON string, onChunk func(string)) error {
-	_ = ctx
+	actCh := make(chan struct{}, 1)
+	doneCh := make(chan struct{}, 1)
+	notifyActivity := func(token string) {
+		onChunk(token)
+		select {
+		case actCh <- struct{}{}:
+		default:
+		}
+	}
 	tokenCallbackMu.Lock()
 	tokenCallbackNextID++
 	cbID := tokenCallbackNextID
-	doneCh := make(chan struct{})
-	tokenCallbackRegistry[cbID] = onChunk
+	tokenCallbackRegistry[cbID] = notifyActivity
 	tokenDoneChannels[cbID] = doneCh
 	tokenCallbackMu.Unlock()
 
@@ -316,10 +338,35 @@ func (c *drvConversationBackend) SendStream(ctx context.Context, messageJSON str
 	cMsg, freeMsg := c.drv.stringToCPtr(messageJSON)
 	defer freeMsg()
 
+	if Verbose {
+		fmt.Fprintf(os.Stderr, "[ai] convSendStream cb %d: calling\n", cbID)
+	}
 	rc := c.drv.convSendStream(c.conv, cMsg, 0, 0, trampoline, cbID)
+	if Verbose {
+		fmt.Fprintf(os.Stderr, "[ai] convSendStream cb %d: returned rc=%d\n", cbID, rc)
+	}
 	if rc != 0 {
 		return fmt.Errorf("send_message_stream failed: %d", rc)
 	}
-	<-doneCh
-	return nil
+
+	idle := time.NewTimer(diagTokenIdleTimeout)
+	defer idle.Stop()
+	for {
+		select {
+		case <-doneCh:
+			return nil
+		case <-actCh:
+			if !idle.Stop() {
+				select {
+				case <-idle.C:
+				default:
+				}
+			}
+			idle.Reset(diagTokenIdleTimeout)
+		case <-idle.C:
+			return fmt.Errorf("[diag] no stream completion for cb %d within %v (native callback never reported is_final)", cbID, diagTokenIdleTimeout)
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
