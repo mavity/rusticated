@@ -1,6 +1,6 @@
 //go:build wasip1
 
-package main
+package ai
 
 import (
 	"fmt"
@@ -61,12 +61,13 @@ func ensureTFLiteLoaded(libPath string) error {
 	return tflLibErr
 }
 
-// TFLiteInterpreter wraps a TFLite interpreter session for one model.
-type TFLiteInterpreter struct {
+// interpreterImpl wraps a TFLite interpreter session for one model.
+type interpreterImpl struct {
 	ptr uintptr
 }
 
-// tflGoStringToCPtr uses the tflLib allocator rather than the LM lib allocator.
+// tflGoStringToCPtr allocates from the tflLib linear memory rather than the LM
+// lib allocator — using the wrong WASM memory would corrupt the pointer.
 func tflGoStringToCPtr(s string) (uint64, func()) {
 	ptr, free, err := syscall.CString(tflLib, s)
 	if err != nil {
@@ -75,7 +76,7 @@ func tflGoStringToCPtr(s string) (uint64, func()) {
 	return ptr, free
 }
 
-func NewTFLiteInterpreter(libPath, modelPath string) (*TFLiteInterpreter, error) {
+func newInterpreterImpl(libPath, modelPath string) (*interpreterImpl, error) {
 	if err := ensureTFLiteLoaded(libPath); err != nil {
 		return nil, err
 	}
@@ -107,17 +108,17 @@ func NewTFLiteInterpreter(libPath, modelPath string) (*TFLiteInterpreter, error)
 		_, _ = callDylib(symTflInterpreterDelete, []byte{i64}, nil, interp)
 		return nil, fmt.Errorf("TfLiteInterpreterAllocateTensors failed")
 	}
-	return &TFLiteInterpreter{ptr: uintptr(interp)}, nil
+	return &interpreterImpl{ptr: uintptr(interp)}, nil
 }
 
-func (t *TFLiteInterpreter) Close() {
+func (t *interpreterImpl) Close() {
 	if t.ptr != 0 {
 		_, _ = callDylib(symTflInterpreterDelete, []byte{i64}, nil, uint64(t.ptr))
 		t.ptr = 0
 	}
 }
 
-func (t *TFLiteInterpreter) SetInput(index int, data []float32) error {
+func (t *interpreterImpl) SetInput(index int, data []float32) error {
 	tensor, err := callDylib(symTflGetInputTensor, []byte{i64, i32}, []byte{i64}, uint64(t.ptr), uint64(index))
 	if err != nil || tensor == 0 {
 		return fmt.Errorf("input tensor %d is nil", index)
@@ -163,7 +164,7 @@ func (t *TFLiteInterpreter) SetInput(index int, data []float32) error {
 	return nil
 }
 
-func (t *TFLiteInterpreter) Invoke() error {
+func (t *interpreterImpl) Invoke() error {
 	rc, err := callDylib(symTflInterpreterInvoke, []byte{i64}, []byte{i32}, uint64(t.ptr))
 	if err != nil || int32(rc) != 0 {
 		return fmt.Errorf("TfLiteInterpreterInvoke failed")
@@ -171,7 +172,7 @@ func (t *TFLiteInterpreter) Invoke() error {
 	return nil
 }
 
-func (t *TFLiteInterpreter) GetOutput(index int) ([]float32, []int32, error) {
+func (t *interpreterImpl) GetOutput(index int) ([]float32, []int32, error) {
 	tensor, err := callDylib(symTflGetOutputTensor, []byte{i64, i32}, []byte{i64}, uint64(t.ptr), uint64(index))
 	if err != nil || tensor == 0 {
 		return nil, nil, fmt.Errorf("output tensor %d is nil", index)

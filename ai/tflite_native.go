@@ -1,6 +1,6 @@
 //go:build !wasip1
 
-package main
+package ai
 
 import (
 	"fmt"
@@ -69,12 +69,12 @@ func ensureTFLiteLoaded(libPath string) error {
 	return tflLibErr
 }
 
-// TFLiteInterpreter wraps a TFLite interpreter session for one model.
-type TFLiteInterpreter struct {
+// interpreterImpl wraps a TFLite interpreter session for one model.
+type interpreterImpl struct {
 	ptr uintptr
 }
 
-func NewTFLiteInterpreter(libPath, modelPath string) (*TFLiteInterpreter, error) {
+func newInterpreterImpl(libPath, modelPath string) (*interpreterImpl, error) {
 	if err := ensureTFLiteLoaded(libPath); err != nil {
 		return nil, err
 	}
@@ -104,31 +104,22 @@ func NewTFLiteInterpreter(libPath, modelPath string) (*TFLiteInterpreter, error)
 		tflInterpreterDelete(interp)
 		return nil, fmt.Errorf("TfLiteInterpreterAllocateTensors failed: %d", rc)
 	}
-	return &TFLiteInterpreter{ptr: interp}, nil
+	return &interpreterImpl{ptr: interp}, nil
 }
 
-func (t *TFLiteInterpreter) Close() {
+func (t *interpreterImpl) Close() {
 	if t.ptr != 0 {
 		tflInterpreterDelete(t.ptr)
 		t.ptr = 0
 	}
 }
 
-func (t *TFLiteInterpreter) SetInput(index int, data []float32) error {
+func (t *interpreterImpl) SetInput(index int, data []float32) error {
 	tensor := tflGetInputTensor(t.ptr, int32(index))
 	if tensor == 0 {
 		return fmt.Errorf("input tensor %d is nil", index)
 	}
-	// Log tensor info for debugging
 	dtype := tflTensorType(tensor)
-	ndims := tflTensorNumDims(tensor)
-	fmt.Printf("DEBUG SetInput: tensor type=%d, ndims=%d, data size=%d bytes\n", dtype, ndims, len(data)*4)
-
-	// Print tensor dims
-	for i := int32(0); i < ndims; i++ {
-		dim := tflTensorDim(tensor, i)
-		fmt.Printf("  dim[%d]=%d\n", i, dim)
-	}
 
 	byteSize := uintptr(len(data) * 4)
 	var pinner runtime.Pinner
@@ -136,7 +127,6 @@ func (t *TFLiteInterpreter) SetInput(index int, data []float32) error {
 	defer pinner.Unpin()
 	rc := tflTensorCopyFromBuffer(tensor, uintptr(unsafe.Pointer(&data[0])), byteSize)
 	if rc != 0 {
-		// Try converting to uint8 if float32 fails
 		// TfLiteType: 0=float32, 1=int32, 2=uint8, ...
 		if dtype == 2 { // uint8
 			return t.setInputUint8(index, data)
@@ -146,16 +136,14 @@ func (t *TFLiteInterpreter) SetInput(index int, data []float32) error {
 	return nil
 }
 
-func (t *TFLiteInterpreter) setInputUint8(index int, data []float32) error {
+func (t *interpreterImpl) setInputUint8(index int, data []float32) error {
 	tensor := tflGetInputTensor(t.ptr, int32(index))
 	if tensor == 0 {
 		return fmt.Errorf("input tensor %d is nil", index)
 	}
-	// Convert float32 [0,1] to uint8 [0,255]
+	// Convert float32 [0,1] to uint8 [0,255].
 	uint8Data := make([]uint8, len(data))
 	for i, f := range data {
-		// Assuming data is already in range [0, 1]
-		// Scale to 0-255
 		v := int(f * 255)
 		if v > 255 {
 			v = 255
@@ -175,14 +163,14 @@ func (t *TFLiteInterpreter) setInputUint8(index int, data []float32) error {
 	return nil
 }
 
-func (t *TFLiteInterpreter) Invoke() error {
+func (t *interpreterImpl) Invoke() error {
 	if rc := tflInterpreterInvoke(t.ptr); rc != 0 {
 		return fmt.Errorf("TfLiteInterpreterInvoke failed: %d", rc)
 	}
 	return nil
 }
 
-func (t *TFLiteInterpreter) GetOutput(index int) ([]float32, []int32, error) {
+func (t *interpreterImpl) GetOutput(index int) ([]float32, []int32, error) {
 	tensor := tflGetOutputTensor(t.ptr, int32(index))
 	if tensor == 0 {
 		return nil, nil, fmt.Errorf("output tensor %d is nil", index)

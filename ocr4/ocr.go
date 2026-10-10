@@ -7,6 +7,8 @@ import (
 	"math"
 	"os"
 	"sort"
+
+	"ai"
 )
 
 const (
@@ -111,7 +113,7 @@ type TextLine struct {
 
 // DetectLines runs the DB detector on img and returns rotated bounding quads.
 // interp must be loaded with the DB .tflite model (input [1,608,800,3] NHWC for EasyOCR).
-func DetectLines(interp *TFLiteInterpreter, img image.Image, verbose bool) ([]Quad, error) {
+func DetectLines(interp *ai.Interpreter, img image.Image, verbose bool) ([]Quad, error) {
 	b := img.Bounds()
 	origW, origH := b.Dx(), b.Dy()
 
@@ -742,7 +744,7 @@ func unclipRect(rect [4][2]float64, ratio float64) [4][2]float64 {
 
 // RecognizeLines runs the SVTR/CRNN recognizer on each quad crop.
 // interp must be loaded with the recognizer .tflite model (input [1, 64, 800, 1] NHWC).
-func RecognizeLines(interp *TFLiteInterpreter, img image.Image, quads []Quad, verbose bool) ([]TextLine, error) {
+func RecognizeLines(interp *ai.Interpreter, img image.Image, quads []Quad, verbose bool) ([]TextLine, error) {
 	vocab := []rune(enCharset)
 	const blankIdx = 0
 	lines := make([]TextLine, 0, len(quads))
