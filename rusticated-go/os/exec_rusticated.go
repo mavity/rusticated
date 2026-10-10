@@ -84,7 +84,7 @@ func joinPath(dir, file string) string {
 	if dir == "" {
 		return file
 	}
-	return dir + "\\" + file
+	return dir + string(os.PathSeparator) + file
 }
 
 func isExecutableFile(path string) bool {

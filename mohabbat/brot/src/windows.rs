@@ -134,14 +134,9 @@ pub unsafe fn run() -> ! {
         let total_pool = payload_offset + payload_len;
         let mut decompressed_pool = alloc::vec![0u8; total_pool];
 
-        let mut out_offset = 0;
-        let _ = crate::decompress::decompress_to_writer(&compressed_data, |chunk| {
-            let end = out_offset + chunk.len();
-            if end <= decompressed_pool.len() {
-                decompressed_pool[out_offset..end].copy_from_slice(chunk);
-                out_offset = end;
-            }
-        });
+        if crate::decompress::decompress(&compressed_data, &mut decompressed_pool).is_err() {
+            ExitProcess(8);
+        }
 
         let washmhost_data = &decompressed_pool
             [washmhost_offset..washmhost_offset + washmhost_len];

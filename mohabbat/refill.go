@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/andybalholm/brotli"
+	"github.com/klauspost/compress/zstd"
 )
 
 // DoRefill is Mode 2: juice bottle refill.
@@ -40,7 +40,11 @@ func DoRefill(ws, projectDir, vegPath, outputPath string, verbose bool) error {
 	}
 
 	// 4. Decompress pool.
-	poolReader := brotli.NewReader(bytes.NewReader(vegData[poolStart:]))
+	poolReader, err := zstd.NewReader(bytes.NewReader(vegData[poolStart:]))
+	if err != nil {
+		return fmt.Errorf("zstd reader init: %w", err)
+	}
+	defer poolReader.Close()
 	poolBytes, err := io.ReadAll(poolReader)
 	if err != nil {
 		return fmt.Errorf("decompress pool: %w", err)
@@ -73,12 +77,15 @@ func DoRefill(ws, projectDir, vegPath, outputPath string, verbose bool) error {
 
 	// 7. Recompress with maximum settings.
 	newCompressed := &bytes.Buffer{}
-	bw := brotli.NewWriterOptions(newCompressed, brotli.WriterOptions{Quality: 11, LGWin: 24})
-	if _, err := bw.Write(newPool); err != nil {
-		return fmt.Errorf("brotli write: %w", err)
+	zw, err := zstd.NewWriter(newCompressed, zstd.WithEncoderLevel(zstd.SpeedBestCompression))
+	if err != nil {
+		return fmt.Errorf("zstd init: %w", err)
 	}
-	if err := bw.Close(); err != nil {
-		return fmt.Errorf("brotli close: %w", err)
+	if _, err := zw.Write(newPool); err != nil {
+		return fmt.Errorf("zstd write: %w", err)
+	}
+	if err := zw.Close(); err != nil {
+		return fmt.Errorf("zstd close: %w", err)
 	}
 	newPoolLen := uint64(newCompressed.Len())
 	fmt.Printf("🍆  Refill pool: old=%s new=%s\n",
@@ -89,8 +96,8 @@ func DoRefill(ws, projectDir, vegPath, outputPath string, verbose bool) error {
 	copy(zoneAB, vegData[:poolStart])
 
 	// Update POSIX script variables (exact length preserved)
-	zoneAB = replaceExactPadded(zoneAB, `:; P_LEN="`, fmt.Sprintf("%-20d", newPoolLen))
-	zoneAB = replaceExactPadded(zoneAB, `:; PLD_LEN="`, fmt.Sprintf("%-20d", len(newPayload)))
+	zoneAB = replaceExactPadded(zoneAB, `; P_LEN="`, fmt.Sprintf("%-20d", newPoolLen))
+	zoneAB = replaceExactPadded(zoneAB, `; PLD_LEN="`, fmt.Sprintf("%-20d", len(newPayload)))
 
 	// Update Windows batch variables (exact length preserved)
 	zoneAB = replaceExactPadded(zoneAB, `set "P_LEN=`, fmt.Sprintf("%-20d", newPoolLen))
@@ -151,13 +158,19 @@ func parseVegetableMeta(vegData []byte) (poolLen, payloadOffset, payloadLen uint
 }
 
 func replaceExactPadded(data []byte, prefix, newVal string) []byte {
-	idx := bytes.Index(data, []byte(prefix))
-	if idx == -1 {
-		return data
-	}
-	start := idx + len(prefix)
-	if start+len(newVal) <= len(data) {
-		copy(data[start:start+len(newVal)], []byte(newVal))
+	searchFrom := 0
+	prefixBytes := []byte(prefix)
+	newValBytes := []byte(newVal)
+	for {
+		idx := bytes.Index(data[searchFrom:], prefixBytes)
+		if idx == -1 {
+			break
+		}
+		start := searchFrom + idx + len(prefixBytes)
+		if start+len(newValBytes) <= len(data) {
+			copy(data[start:start+len(newValBytes)], newValBytes)
+		}
+		searchFrom = start + len(newValBytes)
 	}
 	return data
 }

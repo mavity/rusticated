@@ -41,12 +41,3 @@ func (c *Certificate) systemVerify(opts *VerifyOptions) (chains [][]*Certificate
 	// Host says it's ok. Return a dummy chain to satisfy Go's Verify() logic.
 	return [][]*Certificate{{c}}, nil
 }
-
-// loadSystemRoots returns an empty pool with systemPool=true so that
-// verify.go's GOOS check routes to c.systemVerify, which delegates
-// chain verification to the host via net_cert_verify.
-func loadSystemRoots() (*CertPool, error) {
-	pool := NewCertPool()
-	pool.systemPool = true
-	return pool, nil
-}

@@ -13,11 +13,13 @@ import (
 // than re-compiling from source via `go run .`.
 // Natively, it compiles washmhost via `go run .`.
 func runUnderWashmhost(ws, projectDir, wasmPath string, extraArgs []string, platform string, verbose bool) error {
-	fmt.Printf("🍆 Running %s under washmhost", filepath.Base(wasmPath))
-	if platform != "" {
-		fmt.Printf(" (dev-run platform %s)", platform)
+	if verbose {
+		fmt.Printf("🍆 Running %s under washmhost", filepath.Base(wasmPath))
+		if platform != "" {
+			fmt.Printf(" (dev-run platform %s)", platform)
+		}
+		fmt.Println()
 	}
-	fmt.Println()
 
 	if platform == "node" {
 		runArgs := []string{filepath.Join(ws, "node-host", "index.js"), wasmPath}
@@ -53,6 +55,10 @@ func runUnderWashmhost(ws, projectDir, wasmPath string, extraArgs []string, plat
 	runArgs = append(runArgs, fmt.Sprintf("-ldflags=%s", ldflags), ".")
 	if platformArg != "" {
 		runArgs = append(runArgs, "--platform", platformArg)
+	}
+	cwd, err := os.Getwd()
+	if err == nil {
+		runArgs = append(runArgs, "--cwd", cwd)
 	}
 	runArgs = append(runArgs, "--")
 	runArgs = append(runArgs, extraArgs...)

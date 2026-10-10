@@ -60,7 +60,8 @@ async function run() {
   const inPtr = brot_alloc(compressedData.length);
   new Uint8Array(memory.buffer, inPtr, compressedData.length).set(compressedData);
 
-  const packed = brot_decompress(inPtr, compressedData.length);
+  const uncompressedLen = Number(NODE_PAYLOAD_OFF + NODE_PAYLOAD_LEN);
+  const packed = brot_decompress(inPtr, compressedData.length, uncompressedLen);
   L("[starter] decompress done, packed result:", packed);
   if (packed === 0n) {
     console.error("[mohabbat] brotli decompression failed");

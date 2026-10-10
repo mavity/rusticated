@@ -22,8 +22,16 @@ type slot struct {
 	jsTextLen int
 }
 
+type PrebuildScope int
+
+const (
+	PrebuildScopeAll          PrebuildScope = iota // Build everything (ModeBuild/ModePackage)
+	PrebuildScopeGoOnly                            // Build only Go overlay (Go -> WASM)
+	PrebuildScopeRustWasmOnly                      // Build only WASM sysroot (Rust -> WASM)
+)
+
 const mohabbatMagic = "MOHABBAT"
 
 // prebuildFn is set by prebuild.go on native (!wasip1) builds via init().
 // On WASM builds it remains nil; ModeBuild falls back to subprocess invocation.
-var prebuildFn func(ws string) error
+var prebuildFn func(ws string, verbose bool, scope PrebuildScope) error

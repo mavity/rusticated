@@ -76,7 +76,7 @@ func postProcessWasm(wasmPath string) error {
 		}
 		pos = sectionEnd
 	}
-	return os.WriteFile(wasmPath, newData, 0o644)
+	return writeFileIfChanged(wasmPath, newData)
 }
 
 func readVarUint32(data []byte) (uint32, int, error) {
@@ -109,4 +109,3 @@ func encodeVarUint32(v uint32) []byte {
 	}
 	return res
 }
-

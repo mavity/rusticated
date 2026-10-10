@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/andybalholm/brotli"
+	"github.com/klauspost/compress/zstd"
 )
 
 // assembleVegetable reads built artifacts and packages them into a vegetable .bat file.
@@ -52,17 +52,17 @@ func assembleVegetable(ws, brainPath, buildDir, outputPath string) error {
 	payloadLen := uint64(len(brainBytes))
 	pool.Write(brainBytes)
 
-	// Brotli compress with maximum compression settings.
+	// Zstd compress with maximum compression settings.
 	compressed := &bytes.Buffer{}
-	bw := brotli.NewWriterOptions(compressed, brotli.WriterOptions{
-		Quality: 11,
-		LGWin:   24,
-	})
-	if _, err := bw.Write(pool.Bytes()); err != nil {
-		return fmt.Errorf("brotli write: %w", err)
+	zw, err := zstd.NewWriter(compressed, zstd.WithEncoderLevel(zstd.SpeedBestCompression))
+	if err != nil {
+		return fmt.Errorf("zstd init: %w", err)
 	}
-	if err := bw.Close(); err != nil {
-		return fmt.Errorf("brotli close: %w", err)
+	if _, err := zw.Write(pool.Bytes()); err != nil {
+		return fmt.Errorf("zstd write: %w", err)
+	}
+	if err := zw.Close(); err != nil {
+		return fmt.Errorf("zstd close: %w", err)
 	}
 	poolLen := uint64(compressed.Len())
 	fmt.Printf("🍆  Pool: raw=%s compressed=%s\n", formatSize(int64(pool.Len())), formatSize(int64(poolLen)))
@@ -526,7 +526,7 @@ func ensureBrotStubs(dir string) error {
 		"libkernel32.a",
 	}
 	for _, lib := range libs {
-		if err := os.WriteFile(filepath.Join(dir, lib), emptyArchive, 0o644); err != nil {
+		if err := writeFileIfChanged(filepath.Join(dir, lib), emptyArchive); err != nil {
 			return fmt.Errorf("write stub %s: %w", lib, err)
 		}
 	}
@@ -563,7 +563,7 @@ exports:
 	if err == nil && string(existing) == tbdContent {
 		return nil // already up to date
 	}
-	if err := os.WriteFile(stubPath, []byte(tbdContent), 0o644); err != nil {
+	if err := writeFileIfChanged(stubPath, []byte(tbdContent)); err != nil {
 		return fmt.Errorf("write libSystem.B.tbd: %w", err)
 	}
 	return nil

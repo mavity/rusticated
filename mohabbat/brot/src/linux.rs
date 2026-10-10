@@ -793,14 +793,10 @@ pub unsafe fn run(sp: *const usize) -> ! {
     // ── Decompress pool ───────────────────────────────────────────────────
     let total_pool = payload_offset + payload_len;
     let mut decompressed = alloc::vec![0u8; total_pool];
-    let mut out_off = 0usize;
-    let _ = crate::decompress::decompress_to_writer(&compressed_data, |chunk| {
-        let end = out_off + chunk.len();
-        if end <= decompressed.len() {
-            decompressed[out_off..end].copy_from_slice(chunk);
-            out_off = end;
-        }
-    });
+    
+    if crate::decompress::decompress(&compressed_data, &mut decompressed).is_err() {
+        unsafe { sys_exit_group(8) };
+    }
     drop(compressed_data);
 
     let payload_data = &decompressed[payload_offset..payload_offset + payload_len];
