@@ -62,6 +62,7 @@ func archFromBitness(bits uint8) string {
 	return ""
 }
 
+// TODO: must be removed, environment variables have no role to play in it
 // hostOSEnv / hostArchEnv mirror the washmhost-provided environment conventions
 // as a last-resort fallback.
 func hostOSEnv() string {
@@ -77,6 +78,7 @@ func hostOSEnv() string {
 	return "linux"
 }
 
+// TODO: must be removed, environment variables have no role to play in it
 func hostArchEnv() string {
 	switch os.Getenv("PROCESSOR_ARCHITECTURE") {
 	case "AMD64":
