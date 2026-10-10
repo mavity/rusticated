@@ -82,6 +82,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Propagate verbose flag to ai package for DLL-load logging
+	if verboseFlag {
+		ai.Verbose = true
+		fmt.Fprintf(os.Stderr, "[pope] runtime library path: %s\n", libPath)
+	}
+
 	modelPath := modelFlag
 	if modelPath == "" {
 		m, err := assets.EnsureModel(ctx, gemmaModelURL, gemmaModelSize, opts)

@@ -4,6 +4,7 @@ package ai
 
 import (
 	"fmt"
+	"os"
 	"sync"
 	"unsafe"
 
@@ -211,6 +212,9 @@ func nativeDriverCallback(userData, chunkPtr uintptr) uintptr {
 func ensureLMLibLoadedImpl(libPath string) error {
 	lmLibOnce.Do(func() {
 		var err error
+		if Verbose {
+			fmt.Fprintf(os.Stderr, "[ai] loading LiteRT-LM native library: %s\n", libPath)
+		}
 		lmLib, err = dlopen(libPath, RTLD_NOW|RTLD_GLOBAL)
 		if err != nil {
 			lmLibErr = fmt.Errorf("failed to load %s: %w", libPath, err)

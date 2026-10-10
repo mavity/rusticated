@@ -2,7 +2,12 @@
 
 package ai
 
-import "github.com/ebitengine/purego"
+import (
+	"fmt"
+	"os"
+
+	"github.com/ebitengine/purego"
+)
 
 const (
 	RTLD_NOW    = 0x2
@@ -10,7 +15,17 @@ const (
 )
 
 func dlopen(path string, flags int) (uintptr, error) {
-	return purego.Dlopen(path, flags)
+	if Verbose {
+		fmt.Fprintf(os.Stderr, "[ai] dlopen: loading shared library: %s\n", path)
+	}
+	h, err := purego.Dlopen(path, flags)
+	if err != nil && Verbose {
+		fmt.Fprintf(os.Stderr, "[ai] dlopen: failed to load '%s': %v\n", path, err)
+	}
+	if err == nil && Verbose {
+		fmt.Fprintf(os.Stderr, "[ai] dlopen: loaded shared library: %s\n", path)
+	}
+	return h, err
 }
 
 func dlsym(handle uintptr, name string) (uintptr, error) {

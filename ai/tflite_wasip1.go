@@ -5,6 +5,7 @@ package ai
 import (
 	"fmt"
 	"math"
+	"os"
 	"runtime"
 	"sync"
 	"syscall"
@@ -36,6 +37,9 @@ var (
 func ensureTFLiteLoaded(libPath string) error {
 	tflLibOnce.Do(func() {
 		var err error
+		if Verbose {
+			fmt.Fprintf(os.Stderr, "[ai] loading TFLite WASM library: %s\n", libPath)
+		}
 		tflLib, err = syscall.DylibOpen(libPath, syscall.RTLD_NOW|syscall.RTLD_GLOBAL)
 		if err != nil {
 			tflLibErr = fmt.Errorf("failed to load TFLite library %s: %w", libPath, err)
