@@ -13,7 +13,7 @@ import (
 func buildRustProjectWasm(ws, absProjectDir, outputWasm string, verbose bool) error {
 	target := "wasm32-rusticated-unknown-unknown"
 	projectName := filepath.Base(absProjectDir)
-	fmt.Printf("🍆  Building Rust project %s -> WASM\n", absProjectDir)
+	vlogf(verbose, "🍆  Building Rust project %s -> WASM\n", absProjectDir)
 
 	meta := GetBuildMetadata(ws)
 	env := upsertEnv(os.Environ(), "RUST_TARGET_PATH", filepath.Join(ws, "target", "rusticated-spec"))
@@ -32,9 +32,7 @@ func buildRustProjectWasm(ws, absProjectDir, outputWasm string, verbose bool) er
 	cmd := exec.Command("cargo", args...)
 	cmd.Env = env
 	cmd.Dir = ws
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := runCmd(cmd, "cargo build "+projectName+" (wasm)", verbose); err != nil {
 		return fmt.Errorf("cargo build failed for %s: %w", projectName, err)
 	}
 	srcWasm := filepath.Join(ws, "target", target, "release", projectName+".wasm")
@@ -42,7 +40,7 @@ func buildRustProjectWasm(ws, absProjectDir, outputWasm string, verbose bool) er
 	if err != nil {
 		return fmt.Errorf("read built wasm %s: %w", srcWasm, err)
 	}
-	if err := os.WriteFile(outputWasm, data, 0o644); err != nil {
+	if err := writeFileIfChanged(outputWasm, data); err != nil {
 		return fmt.Errorf("write wasm %s: %w", outputWasm, err)
 	}
 	return nil
@@ -53,13 +51,14 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string, verbose bool) (strin
 	if err != nil {
 		return "", err
 	}
-	if err := ensureRustTargetInstalled(targetName); err != nil {
-		return "", err
-	}
 
 	isRusticatedTarget := strings.Contains(targetName, "rusticated")
+	absPkgDir := filepath.Join(ws, pkgDir)
 
-	buildTarget := func(name string) error {
+	// buildTarget runs the cargo build. overlaySysroot is empty on the normal
+	// (first) attempt and is only set on a failure-driven retry, where it is
+	// appended as an additive `--sysroot` to the target's rustflags.
+	buildTarget := func(name, overlaySysroot string) error {
 		targetArg := name
 		// --bin brot selects the binary target; the lib is built as rlib only
 		// since the Windows cdylib symbols are now provided by lib.rs.
@@ -78,8 +77,13 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string, verbose bool) (strin
 			args = append(args, "--config", "unstable.json-target-spec=true")
 		}
 		args = append(args, "--target", targetArg)
+
+		// Assemble the per-target rustflags as a single list so that the overlay
+		// `--sysroot` (retry only) is additive to the existing linker flags
+		// rather than overriding them (cargo takes the last rustflags config).
+		var rustflags []string
 		if s.goos == "linux" && !isRusticatedTarget {
-			args = append(args, "--config", fmt.Sprintf("target.%s.rustflags=['-C', 'link-self-contained=no', '-C', 'linker=rust-lld', '-C', 'linker-flavor=ld.lld']", name))
+			rustflags = append(rustflags, "'-C'", "'link-self-contained=no'", "'-C'", "'linker=rust-lld'", "'-C'", "'linker-flavor=ld.lld'")
 		}
 		if s.goos == "windows" && (strings.Contains(name, "windows-gnu") || strings.Contains(name, "windows-gnullvm")) {
 			// Brot is no_std/no_main and uses raw-dylib for all Win32 APIs.
@@ -93,7 +97,7 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string, verbose bool) (strin
 			if err := ensureBrotStubs(stubDir); err != nil {
 				return err
 			}
-			args = append(args, "--config", fmt.Sprintf("target.%s.rustflags=['-C', 'linker=rust-lld', '-C', 'linker-flavor=ld.lld', '-C', 'link-arg=-L%s']", name, stubDir))
+			rustflags = append(rustflags, "'-C'", "'linker=rust-lld'", "'-C'", "'linker-flavor=ld.lld'", "'-C'", fmt.Sprintf("'link-arg=-L%s'", stubDir))
 		}
 		if s.goos == "darwin" {
 			// Cross-compile darwin brot using lld in Mach-O mode (darwin-lld).
@@ -106,9 +110,13 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string, verbose bool) (strin
 				return err
 			}
 			stubDirSlash := filepath.ToSlash(strings.TrimPrefix(stubDir, `\\?\`))
-			args = append(args, "--config", fmt.Sprintf(
-				"target.%s.rustflags=['-C', 'linker=rust-lld', '-C', 'linker-flavor=darwin-lld', '-Z', 'unstable-options', '-C', 'link-arg=-L%s']",
-				name, stubDirSlash))
+			rustflags = append(rustflags, "'-C'", "'linker=rust-lld'", "'-C'", "'linker-flavor=darwin-lld'", "'-Z'", "'unstable-options'", "'-C'", fmt.Sprintf("'link-arg=-L%s'", stubDirSlash))
+		}
+		if overlaySysroot != "" {
+			rustflags = append(rustflags, "'--sysroot'", fmt.Sprintf("'%s'", overlaySysroot))
+		}
+		if len(rustflags) > 0 {
+			args = append(args, "--config", fmt.Sprintf("target.%s.rustflags=[%s]", name, strings.Join(rustflags, ", ")))
 		}
 
 		meta := GetBuildMetadata(ws)
@@ -128,17 +136,31 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string, verbose bool) (strin
 			cmd.Args = append(cmd.Args, "-Z", "unstable-options")
 		}
 
-		cmd.Dir = filepath.Join(ws, pkgDir)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		fmt.Printf("🍆    cargo build %s for %s\n", pkgDir, s.name)
-		return cmd.Run()
+		cmd.Dir = absPkgDir
+		vlogf(verbose, "🍆    cargo build %s for %s\n", pkgDir, s.name)
+		return runCmd(cmd, fmt.Sprintf("cargo build %s for %s", pkgDir, s.name), verbose)
 	}
 
-	err = buildTarget(targetName)
+	// Normal attempt — identical to the historical behavior (no overlay, no
+	// pre-flight probe). Only if it fails do we investigate and remediate.
+	err = buildTarget(targetName, "")
 	if err != nil {
+		// Classify: is the failure caused by a genuinely missing target std?
+		if !isRusticatedTarget && !rustTargetStdPresent(absPkgDir, targetName) {
+			overlaySysroot, remErr := remediateMissingTarget(absPkgDir, targetName)
+			if remErr != nil {
+				return "", fmt.Errorf("%s cargo build failed for %s (target %q missing, fallback failed: %v)", pkgDir, s.name, targetName, remErr)
+			}
+			// Retry exactly once. overlaySysroot is "" when rustup supplied the
+			// target (nothing extra needed) or a path when the overlay was built.
+			if err = buildTarget(targetName, overlaySysroot); err == nil {
+				goto copyArtifact
+			}
+		}
 		return "", fmt.Errorf("%s cargo build failed for %s: %w", pkgDir, s.name, err)
 	}
+
+copyArtifact:
 
 	// Copy the artifact to buildDir
 	srcExt := ""
@@ -183,35 +205,40 @@ func cargoTargetName(s slot) (string, error) {
 	}
 }
 
-func ensureRustTargetInstalled(targetName string) error {
-	if strings.Contains(targetName, "rusticated") {
-		return nil
+// remediateMissingTarget is invoked only after a brot build has already failed
+// and the failure was classified as a genuinely missing target std. It tries
+// rustup first (if present) and falls back to composing a project-local overlay
+// sysroot that supplies the target. It returns an overlay sysroot path to pass
+// to the retried build via `--sysroot`, or "" when rustup satisfied the target
+// (nothing extra needed on retry).
+func remediateMissingTarget(dir, targetName string) (string, error) {
+	if hasRustup() {
+		fmt.Printf("🍆    rustup target add %s\n", targetName)
+		addArgs := []string{"target", "add", targetName}
+		if tc := strings.TrimSpace(os.Getenv("RUSTUP_TOOLCHAIN")); tc != "" {
+			addArgs = append(addArgs, "--toolchain", tc)
+		}
+		add := exec.Command("rustup", addArgs...)
+		add.Stdout = os.Stdout
+		add.Stderr = os.Stderr
+		if add.Run() == nil {
+			return "", nil
+		}
+		fmt.Printf("🍆    rustup target add failed; composing overlay sysroot for %s\n", targetName)
+	} else {
+		fmt.Printf("🍆    rustup not found; composing overlay sysroot for %s\n", targetName)
 	}
 
-	check := exec.Command("rustup", "target", "list", "--installed")
-	var out bytes.Buffer
-	check.Stdout = &out
-	check.Stderr = os.Stderr
-	if err := check.Run(); err != nil {
-		return fmt.Errorf("failed checking installed rust targets: %w", err)
+	tc, err := resolveToolchain(dir)
+	if err != nil {
+		return "", fmt.Errorf("resolve toolchain: %w", err)
 	}
-	installed := out.String()
-	if strings.Contains(installed, targetName+"\n") || strings.HasSuffix(installed, targetName) {
-		return nil
+	overlayDir := filepath.Join("target", "rust-sysroot-overlay")
+	overlayPath, err := composeOverlay(tc, overlayDir, []string{targetName})
+	if err != nil {
+		return "", fmt.Errorf("compose overlay sysroot: %w", err)
 	}
-
-	fmt.Printf("🍆    rustup target add %s\n", targetName)
-	addArgs := []string{"target", "add", targetName}
-	if tc := strings.TrimSpace(os.Getenv("RUSTUP_TOOLCHAIN")); tc != "" {
-		addArgs = append(addArgs, "--toolchain", tc)
-	}
-	add := exec.Command("rustup", addArgs...)
-	add.Stdout = os.Stdout
-	add.Stderr = os.Stderr
-	if err := add.Run(); err != nil {
-		return fmt.Errorf("failed to install rust target %s: %w", targetName, err)
-	}
-	return nil
+	return overlayPath, nil
 }
 
 func rustcHostTriple() (string, error) {

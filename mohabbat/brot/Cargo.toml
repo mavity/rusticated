@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 
-brotli-decompressor = { version = "5.0.1", default-features = false, features = ["unsafe"] }
+ruzstd = { version = "0.7.3", default-features = false }
 
 [features]
 verbose = []

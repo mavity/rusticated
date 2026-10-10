@@ -13,6 +13,8 @@ const (
 
 	active_spin     = 4
 	active_spin_cnt = 30
+
+	mutexMLocksDelta = 16
 )
 
 type mWaitList struct{}
@@ -29,7 +31,7 @@ func lock2(l *mutex) {
 		// throw("self deadlock")
 	}
 	gp := getg()
-	gp.m.locks++
+	gp.m.locks += mutexMLocksDelta
 	l.key = mutex_locked
 }
 
@@ -42,7 +44,7 @@ func unlock2(l *mutex) {
 		// throw("unlock of unlocked lock")
 	}
 	gp := getg()
-	gp.m.locks--
+	gp.m.locks -= mutexMLocksDelta
 	l.key = mutex_unlocked
 }
 
@@ -84,7 +86,7 @@ func notetsleepg(n *note, ns int64) bool {
 		}
 
 		// Cleanly park the goroutine, setting its status to _Gwaiting.
-		// This completely empties it from the active run queues, allowing 
+		// This completely empties it from the active run queues, allowing
 		// beforeIdle to cleanly fire and pass execution control back to the host.
 		gopark(nil, nil, waitReasonSleep, traceBlockSleep, 1)
 	}

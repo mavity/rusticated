@@ -90,14 +90,11 @@ pub extern "C" fn brot_alloc(size: u32) -> u32 {
 
 #[cfg(target_family = "wasm")]
 #[unsafe(no_mangle)]
-pub extern "C" fn brot_decompress(in_ptr: u32, in_len: u32) -> u64 {
+pub extern "C" fn brot_decompress(in_ptr: u32, in_len: u32, out_len: u32) -> u64 {
     let input = unsafe { core::slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
-    let mut decompressed_pool = alloc::vec::Vec::new();
+    let mut decompressed_pool = alloc::vec![0u8; out_len as usize];
     
-    // Use the decompress_to_writer from brot's decompress
-    if decompress::decompress_to_writer(input, |chunk| {
-        decompressed_pool.extend_from_slice(chunk);
-    }).is_err() {
+    if decompress::decompress(input, &mut decompressed_pool).is_err() {
         return 0;
     }
     

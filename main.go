@@ -20,12 +20,13 @@ func main() {
 		// Now we rely on the host-provided /tmp mapping.
 	}
 
-	// Parse args manually: [project] [-o out] [-r [args...]]
+	// Parse args manually: [project] [-o out] [-r [args...]] [-t [args...]]
 	rawArgs := os.Args[1:]
 	projectDir := ""
 	outputPath := ""
 	platformOverride := ""
 	runMode := false
+	testMode := false
 	verbose := false
 	var runArgs []string
 
@@ -61,6 +62,10 @@ func main() {
 			runMode = true
 			runArgs = rawArgs[i+1:]
 			i = len(rawArgs)
+		case "-t", "--test":
+			testMode = true
+			runArgs = rawArgs[i+1:]
+			i = len(rawArgs)
 		case "-o":
 			if i+1 < len(rawArgs) {
 				outputPath = rawArgs[i+1]
@@ -91,8 +96,8 @@ func main() {
 	}
 	runArgs = cleanedRunArgs
 
-	// Heuristic: if -r was used and projectDir remains empty, check if first runArg is a project.
-	if projectDir == "" && runMode && len(runArgs) > 0 {
+	// Heuristic: if -r or -t was used and projectDir remains empty, check if first runArg is a project.
+	if projectDir == "" && (runMode || testMode) && len(runArgs) > 0 {
 		if mohabbat.IsProject(ws, runArgs[0]) {
 			projectDir = runArgs[0]
 			runArgs = runArgs[1:]
@@ -107,6 +112,11 @@ func main() {
 			projectDir = "."
 		}
 		mohabbat.Must(mohabbat.ModeDevRun(ws, projectDir, runArgs, platformOverride, verbose))
+	case testMode:
+		if projectDir == "" {
+			projectDir = "."
+		}
+		mohabbat.Must(mohabbat.ModeTest(ws, projectDir, runArgs, platformOverride, verbose))
 	case projectDir != "" && outputPath != "" && inVeg:
 		// Mode 2: juice bottle refill (running as WASM brain inside a vegetable)
 		// Refill mode logic for verbose is TBD but we can pass it if needed.

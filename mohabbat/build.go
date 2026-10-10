@@ -17,28 +17,28 @@ func ModeBuild(ws string, verbose bool) error {
 		return err
 	}
 
-	fmt.Println("🍆  Running prebuild (target specs + sysroot + overlay)...")
-	if err := runPrebuild(ws); err != nil {
+	vlogf(verbose, "🍆  Running prebuild (target specs + sysroot + overlay)...\n")
+	if err := runPrebuild(ws, verbose, PrebuildScopeAll); err != nil {
 		return fmt.Errorf("prebuild: %w", err)
 	}
 
-	fmt.Println("🍆  Building brotli-wasm base...")
+	vlogf(verbose, "🍆  Building brotli-wasm base...\n")
 	if err := buildBrotliWasm(ws, buildDir, verbose); err != nil {
 		return err
 	}
 
-	fmt.Println("🍆  Building brot (cargo) and washmhost for Modern Four...")
+	vlogf(verbose, "🍆  Building brot (cargo) and washmhost for Modern Four...\n")
 	if err := buildAllSlots(ws, buildDir, verbose); err != nil {
 		return err
 	}
 
 	brainPath := filepath.Join(buildDir, "brain.wasm")
-	fmt.Println("🍆  Building brain WASM (mohabbat)...")
+	vlogf(verbose, "🍆  Building brain WASM (mohabbat)...\n")
 	if err := buildBrainWasm(ws, brainPath, verbose); err != nil {
 		return fmt.Errorf("brain wasm build: %w", err)
 	}
 
-	fmt.Println("🍆  Building node slot...")
+	vlogf(verbose, "🍆  Building node slot...\n")
 	if err := buildNodeSlot(ws, buildDir, verbose); err != nil {
 		return err
 	}
@@ -71,24 +71,24 @@ func ModePackage(ws, projectDir, outputPath string, verbose bool) error {
 	}
 
 	if strings.HasSuffix(outputPath, ".wasm") {
-		fmt.Printf("🍆  Output is .wasm, skipping vegetable assembly: %s\n", outputPath)
+		vlogf(verbose, "🍆  Output is .wasm, skipping vegetable assembly: %s\n", outputPath)
 		absOutput, _ := filepath.Abs(outputPath)
 		return buildProjectToWasm(ws, absProject, absOutput, verbose)
 	}
 	wasmPath := filepath.Join(ws, "target", projectName+".wasm")
-	fmt.Printf("🍆  Packaging %s -> %s\n", projectDir, outputPath)
+	vlogf(verbose, "🍆  Packaging %s -> %s\n", projectDir, outputPath)
 	if err := buildProjectToWasm(ws, projectDir, wasmPath, verbose); err != nil {
 		return err
 	}
-	fmt.Println("🍆  Building brotli-wasm base...")
+	vlogf(verbose, "🍆  Building brotli-wasm base...\n")
 	if err := buildBrotliWasm(ws, buildDir, verbose); err != nil {
 		return err
 	}
-	fmt.Println("🍆  Building brot (cargo) and washmhost for Modern Four...")
+	vlogf(verbose, "🍆  Building brot (cargo) and washmhost for Modern Four...\n")
 	if err := buildAllSlots(ws, buildDir, verbose); err != nil {
 		return err
 	}
-	fmt.Println("🍆  Building node slot...")
+	vlogf(verbose, "🍆  Building node slot...\n")
 	if err := buildNodeSlot(ws, buildDir, verbose); err != nil {
 		return err
 	}
@@ -111,10 +111,40 @@ func ModeDevRun(ws, projectDir string, extraArgs []string, platform string, verb
 	}
 
 	wasmPath := filepath.Join(ws, "target", projectName+".wasm")
-	fmt.Printf("🍆  Dev-run: building %s\n", absProject)
+	vlogf(verbose, "🍆  Dev-run: building %s\n", absProject)
 	if err := buildProjectToWasm(ws, absProject, wasmPath, verbose); err != nil {
 		return err
 	}
+	return runUnderWashmhost(ws, absProject, wasmPath, extraArgs, platform, verbose)
+}
+
+// ModeTest is the test pipeline: build project tests to WASM and run under washmhost.
+func ModeTest(ws, projectDir string, extraArgs []string, platform string, verbose bool) error {
+	absProject, err := filepath.Abs(projectDir)
+	if err != nil || (!filepath.IsAbs(absProject) && !fileExists(absProject)) {
+		if !filepath.IsAbs(projectDir) {
+			absProject = filepath.Join(ws, projectDir)
+		} else {
+			absProject = projectDir
+		}
+	}
+	projectName := filepath.Base(absProject)
+	if projectName == "." || projectName == "" {
+		projectName = filepath.Base(ws)
+	}
+
+	wasmPath := filepath.Join(ws, "target", projectName+"_test.wasm")
+	vlogf(verbose, "🍆  Test-run: building tests for %s\n", absProject)
+
+	// Run prebuild scoped only to what this project type needs (Go).
+	if err := runPrebuild(ws, verbose, PrebuildScopeGoOnly); err != nil {
+		return fmt.Errorf("prebuild: %w", err)
+	}
+
+	if err := buildGoTestWasm(ws, absProject, wasmPath, verbose); err != nil {
+		return err
+	}
+
 	return runUnderWashmhost(ws, absProject, wasmPath, extraArgs, platform, verbose)
 }
 
@@ -128,7 +158,7 @@ func buildAllSlots(ws, buildDir string, verbose bool) error {
 	// Step 2: Build brot
 	for _, s := range slots {
 		if !shouldBuildSlot(s) {
-			fmt.Printf("🍆    skip %s\n", s.name)
+			vlogf(verbose, "🍆    skip %s\n", s.name)
 			continue
 		}
 		if s.goos == "js" {
@@ -146,7 +176,7 @@ func buildAllWashmhost(ws, buildDir string, verbose bool) (map[string]uint64, er
 	metadata := make(map[string]uint64)
 	for _, s := range slots {
 		if !shouldBuildSlot(s) {
-			fmt.Printf("🍆    skip %s washmhost\n", s.name)
+			vlogf(verbose, "🍆    skip %s washmhost\n", s.name)
 			continue
 		}
 		if s.goos == "js" {
@@ -166,13 +196,22 @@ func buildAllWashmhost(ws, buildDir string, verbose bool) (map[string]uint64, er
 	return metadata, nil
 }
 
+// findGoMod walks up the directory tree to find the directory containing go.mod
+func findGoMod(dir string) string {
+	for {
+		if fileExists(filepath.Join(dir, "go.mod")) {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
 // buildProjectToWasm auto-detects Go vs Rust project and builds to WASM.
 func buildProjectToWasm(ws, projectDir, outputWasm string, verbose bool) error {
-	// Unconditionally run prebuild to ensure target specs and overlay.json are up to date.
-	if err := runPrebuild(ws); err != nil {
-		return fmt.Errorf("prebuild: %w", err)
-	}
-
 	// Resolve projectDir.
 	absProject := projectDir
 	if !filepath.IsAbs(absProject) && !(len(absProject) > 2 && absProject[1] == ':' && (absProject[2] == '/' || absProject[2] == '\\')) {
@@ -182,8 +221,23 @@ func buildProjectToWasm(ws, projectDir, outputWasm string, verbose bool) error {
 	if !fileExists(absProject) {
 		return fmt.Errorf("project directory not found: %s (tried %s)", projectDir, absProject)
 	}
+
 	// Auto-detect: Go project has go.mod, Rust project has Cargo.toml.
-	if fileExists(filepath.Join(absProject, "go.mod")) {
+	// Walk up to find go.mod to support building subpackages.
+	goModDir := findGoMod(absProject)
+	isGo := goModDir != ""
+
+	scope := PrebuildScopeRustWasmOnly
+	if isGo {
+		scope = PrebuildScopeGoOnly
+	}
+
+	// Run prebuild scoped only to what this project type needs.
+	if err := runPrebuild(ws, verbose, scope); err != nil {
+		return fmt.Errorf("prebuild: %w", err)
+	}
+
+	if isGo {
 		return buildGoProjectWasm(ws, absProject, outputWasm, verbose)
 	}
 	return buildRustProjectWasm(ws, absProject, outputWasm, verbose)
@@ -211,10 +265,8 @@ func buildBrotliWasm(ws, buildDir string, verbose bool) error {
 	cmd := exec.Command("cargo", args...)
 	cmd.Dir = filepath.Join(ws, pkgDir)
 	cmd.Env = env
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
 
-	if err := cmd.Run(); err != nil {
+	if err := runCmd(cmd, "cargo build brot (wasm)", verbose); err != nil {
 		return fmt.Errorf("cargo build failed for brot (wasm): %w", err)
 	}
 
@@ -224,7 +276,7 @@ func buildBrotliWasm(ws, buildDir string, verbose bool) error {
 		return fmt.Errorf("read built brot.wasm %s: %w", srcWasm, err)
 	}
 	outPath := filepath.Join(buildDir, "brotli.wasm")
-	if err := os.WriteFile(outPath, data, 0o644); err != nil {
+	if err := writeFileIfChanged(outPath, data); err != nil {
 		return fmt.Errorf("write brotli.wasm %s: %w", outPath, err)
 	}
 	return nil

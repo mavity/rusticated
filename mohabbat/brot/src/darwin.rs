@@ -178,14 +178,9 @@ pub unsafe fn run(argc: i32, argv: *const *const u8, envp: *const *const u8) -> 
     let total_pool = payload_offset + payload_len;
     let mut decompressed_pool = vec![0u8; total_pool];
 
-    let mut out_offset = 0usize;
-    let _ = crate::decompress::decompress_to_writer(&compressed_data, |chunk| {
-        let end = out_offset + chunk.len();
-        if end <= decompressed_pool.len() {
-            decompressed_pool[out_offset..end].copy_from_slice(chunk);
-            out_offset = end;
-        }
-    });
+    if crate::decompress::decompress(&compressed_data, &mut decompressed_pool).is_err() {
+        unsafe { exit(8) };
+    }
 
     let washmhost_start = washmhost_offset;
     let washmhost_end = washmhost_offset + washmhost_len;

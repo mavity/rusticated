@@ -28,7 +28,7 @@ func buildNodeSlot(ws, buildDir string, verbose bool) error {
 
 	// Write washmhost-node.js to buildDir
 	outHostPath := filepath.Join(buildDir, "washmhost-node.js")
-	if err := os.WriteFile(outHostPath, hostBytes, 0644); err != nil {
+	if err := writeFileIfChanged(outHostPath, hostBytes); err != nil {
 		return fmt.Errorf("write washmhost-node.js: %w", err)
 	}
 
@@ -48,7 +48,7 @@ func buildNodeSlot(ws, buildDir string, verbose bool) error {
 	// Let's pass the textLen back or store it.
 	combined := append(starterBytes, wasmBytes...)
 
-	if err := os.WriteFile(outStarterPath, combined, 0644); err != nil {
+	if err := writeFileIfChanged(outStarterPath, combined); err != nil {
 		return fmt.Errorf("write brot-node.js: %w", err)
 	}
 	return nil

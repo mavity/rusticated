@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 )
 
 func init() {
@@ -17,33 +18,38 @@ func init() {
 // runPrebuild is the Go port of prebuild/src/main.rs.
 // It generates rusticated target specs, builds the sysroot for each target,
 // writes config.toml, and generates target/overlay.json for Go projects.
-func runPrebuild(ws string) error {
+func runPrebuild(ws string, verbose bool, scope PrebuildScope) error {
 	if runtime.GOOS == "wasip1" {
 		// When running inside a vegetable (WASM guest), we assume prebuild
 		// artifacts already exist in the 'target' directory, as we cannot
 		// run rustc/cargo/go compilers in the restricted WASM environment.
-		fmt.Println("🍆  Vegetable context: skipping prebuild steps")
+		vlogf(verbose, "🍆  Vegetable context: skipping prebuild steps\n")
 		return nil
 	}
 
-	if err := buildTargetSpecs(ws); err != nil {
-		return fmt.Errorf("target spec generation: %w", err)
+	if scope != PrebuildScopeGoOnly {
+		if err := buildTargetSpecs(ws, verbose, scope); err != nil {
+			return fmt.Errorf("target spec generation: %w", err)
+		}
 	}
-	goroot, rootSource, err := resolveGoroot(ws)
-	if err != nil {
-		return fmt.Errorf("resolving GOROOT: %w", err)
+
+	if scope != PrebuildScopeRustWasmOnly {
+		goroot, rootSource, err := resolveGoroot(ws)
+		if err != nil {
+			return fmt.Errorf("resolving GOROOT: %w", err)
+		}
+		if err := generateGoOverlay(ws, goroot, verbose); err != nil {
+			return fmt.Errorf("overlay generation: %w", err)
+		}
+		vlogf(verbose, "🍆  SDK %s at %s\n", rootSource, goroot)
 	}
-	if err := generateGoOverlay(ws, goroot); err != nil {
-		return fmt.Errorf("overlay generation: %w", err)
-	}
-	fmt.Println("🍆  SDK " + rootSource + " at " + goroot)
-	fmt.Println("🍆  Prebuild complete.")
+	vlogf(verbose, "🍆  Prebuild complete.\n")
 	return nil
 }
 
 // buildTargetSpecs generates rusticated JSON target specs, builds the sysroot
 // for each target, and writes target/rusticated-spec/config.toml.
-func buildTargetSpecs(ws string) error {
+func buildTargetSpecs(ws string, verbose bool, scope PrebuildScope) error {
 	// Get host triple from rustc.
 	out, err := exec.Command("rustc", "-vV").Output()
 	if err != nil {
@@ -72,7 +78,7 @@ func buildTargetSpecs(ws string) error {
 		return err
 	}
 	// Clear the config to avoid tainting the build-std below.
-	if err := os.WriteFile(filepath.Join(specDir, "config.toml"), nil, 0o644); err != nil {
+	if err := writeFileIfChanged(filepath.Join(specDir, "config.toml"), nil); err != nil {
 		return err
 	}
 
@@ -86,225 +92,264 @@ func buildTargetSpecs(ws string) error {
 
 	var configTOML strings.Builder
 	var builtTargets []string
+	var configMu sync.Mutex
 
+	var targetsToBuild [][2]string
 	for _, bt := range baseTargets {
-		baseName := bt[0]
-		customName := bt[1]
+		if scope == PrebuildScopeRustWasmOnly && bt[0] != "wasm32-unknown-unknown" {
+			continue // Skip non-wasm targets when only WASM is requested
+		}
+		targetsToBuild = append(targetsToBuild, bt)
+	}
 
-		fmt.Printf("🍆  Processing target: %s -> %s\n", baseName, customName)
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(targetsToBuild))
 
-		// Get target spec JSON from rustc.
-		specOut, err := exec.Command("rustc", "-Z", "unstable-options",
-			"--print", "target-spec-json", "--target", baseName).Output()
-		if err != nil {
-			fmt.Printf("🍆    Skipping %s (rustc error)\n", baseName)
-			continue
-		}
-		var spec map[string]interface{}
-		if err := json.Unmarshal(specOut, &spec); err != nil {
-			fmt.Printf("🍆    Skipping %s (JSON parse error: %v)\n", baseName, err)
-			continue
-		}
+	for _, bt := range targetsToBuild {
+		wg.Add(1)
+		go func(baseName, customName string) {
+			defer wg.Done()
 
-		isWindowsMSVC := strings.Contains(baseName, "-windows-msvc")
-		isWindowsGNU := strings.Contains(baseName, "-windows-gnu") ||
-			strings.Contains(baseName, "-windows-gnullvm")
+			vlogf(verbose, "🍆  Processing target: %s -> %s\n", baseName, customName)
 
-		spec["panic-strategy"] = "abort"
-
-		if strings.Contains(baseName, "-linux-") {
-			spec["os"] = "linux"
-			spec["position-independent-executables"] = true
-			spec["relocation-model"] = "pic"
-			extendPreLinkArgs(spec, "gnu-lld", []string{"-pie"})
-			extendPreLinkArgs(spec, "gnu-lld-cc", []string{"-pie"})
-		}
-
-		// Set target-family based on base_target.
-		var families []interface{}
-		switch {
-		case strings.Contains(baseName, "-linux-"):
-			families = []interface{}{"unix", "rusticated"}
-		case strings.Contains(baseName, "-darwin") || strings.Contains(baseName, "-freebsd"):
-			families = []interface{}{"unix", "rusticated"}
-		case strings.Contains(baseName, "-windows-"):
-			families = []interface{}{"windows", "rusticated"}
-		case strings.HasPrefix(baseName, "wasm32-"):
-			families = []interface{}{"wasm", "rusticated"}
-		default:
-			families = []interface{}{"rusticated"}
-		}
-		spec["target-family"] = families
-
-		if isWindowsMSVC {
-			extendPreLinkArgs(spec, "msvc", []string{
-				"/NOLOGO", "/NXCOMPAT", "/DYNAMICBASE",
-				"/ENTRY:mainCRTStartup", "/SUBSYSTEM:CONSOLE",
-				"/FORCE:MULTIPLE", "/NODEFAULTLIB",
-			})
-			extendPreLinkArgs(spec, "lld-link", []string{
-				"/NOLOGO", "/NXCOMPAT", "/DYNAMICBASE",
-				"/ENTRY:mainCRTStartup", "/SUBSYSTEM:CONSOLE",
-				"/FORCE:MULTIPLE", "/NODEFAULTLIB",
-			})
-		}
-
-		if isWindowsGNU {
-			spec["late-link-args"] = map[string]interface{}{}
-			archArg := "i386pep"
-			if strings.HasPrefix(baseName, "aarch64") {
-				archArg = "arm64pe"
-			}
-			extendPreLinkArgs(spec, "gnu", []string{"-m", archArg, "--entry=mainCRTStartup", "--subsystem=console"})
-			extendPreLinkArgs(spec, "gnu-cc", []string{"-nolibc", "--unwindlib=none", "-m", archArg, "-Wl,--entry=mainCRTStartup", "-Wl,--subsystem=console"})
-			extendPreLinkArgs(spec, "gnu-lld", []string{"-m", archArg, "--entry=mainCRTStartup", "--subsystem=console"})
-			extendPreLinkArgs(spec, "gnu-lld-cc", []string{"-nolibc", "--unwindlib=none", "-m", archArg, "-Wl,--entry=mainCRTStartup", "-Wl,--subsystem=console"})
-		}
-
-		if strings.Contains(baseName, "-linux-gnu") {
-			spec["late-link-args"] = map[string]interface{}{
-				"gnu":        []interface{}{"-nostdlib"},
-				"gcc":        []interface{}{"-nostdlib"},
-				"gnu-cc":     []interface{}{"-nostdlib"},
-				"gnu-lld":    []interface{}{"-nostdlib"},
-				"gnu-lld-cc": []interface{}{"-nostdlib"},
-			}
-			spec["no-default-libraries"] = true
-			extendPreLinkArgs(spec, "gnu-lld", []string{"-nostdlib", "--no-dynamic-linker", "--build-id=none"})
-			extendPreLinkArgs(spec, "gnu-lld-cc", []string{"-nostdlib", "-nodefaultlibs", "-nostartfiles", "-Wl,--build-id=none"})
-			extendPreLinkArgs(spec, "gnu", []string{"-nostdlib"})
-			extendPreLinkArgs(spec, "gnu-cc", []string{"-nostdlib", "-nodefaultlibs", "-nostartfiles"})
-			extendPreLinkArgs(spec, "gcc", []string{"-nostdlib", "-nodefaultlibs", "-nostartfiles"})
-			spec["linker-flavor"] = "gnu-lld"
-		}
-
-		spec["crt-static-respected"] = true
-		spec["no-default-libraries"] = true
-		if isWindowsMSVC || isWindowsGNU {
-			spec["crt-static-default"] = true
-		}
-		if strings.Contains(baseName, "-windows-gnullvm") {
-			spec["linker"] = "rust-lld"
-			spec["linker-flavor"] = "gnu-lld"
-		}
-		if strings.Contains(baseName, "-linux-gnu") {
-			spec["linker"] = "rust-lld"
-			spec["linker-flavor"] = "gnu-lld"
-			spec["env"] = ""
-		}
-
-		// Set metadata.std = false.
-		if meta, ok := spec["metadata"]; ok {
-			if metaMap, ok := meta.(map[string]interface{}); ok {
-				metaMap["std"] = false
-			}
-		} else {
-			spec["metadata"] = map[string]interface{}{"std": false}
-		}
-
-		// Write JSON spec.
-		specJSON, err := json.MarshalIndent(spec, "", "  ")
-		if err != nil {
-			return fmt.Errorf("marshal spec for %s: %w", customName, err)
-		}
-		jsonPath := filepath.Join(specDir, customName+".json")
-		if err := os.WriteFile(jsonPath, specJSON, 0o644); err != nil {
-			return err
-		}
-
-		// Build sysroot for this target.
-		existingRustflags := os.Getenv("RUSTFLAGS")
-		rustflags := "-Zunstable-options --cfg backtrace_in_libstd"
-		if existingRustflags != "" {
-			rustflags = existingRustflags + " " + rustflags
-		}
-		if strings.Contains(baseName, "-linux-gnu") {
-			rustflags += " -A explicit-builtin-cfgs-in-flags --cfg rusticated_linux"
-		}
-
-		targetArg := customName
-		if !strings.Contains(customName, "wasm32") {
-			absJSON, err := filepath.EvalSymlinks(jsonPath)
+			// Get target spec JSON from rustc.
+			specOut, err := exec.Command("rustc", "-Z", "unstable-options",
+				"--print", "target-spec-json", "--target", baseName).Output()
 			if err != nil {
-				absJSON = jsonPath
+				fmt.Printf("🍆    Skipping %s (rustc error)\n", baseName)
+				return
 			}
-			targetArg = filepath.ToSlash(cleanWindowsPath(absJSON))
-		}
-
-		buildCmd := exec.Command("cargo",
-			"build", "-p", "rusticated", "--release",
-			"-Z", "build-std=core,alloc,compiler_builtins",
-			"-Z", "build-std-features=compiler-builtins-mem",
-			"--config", "unstable.json-target-spec=true",
-			"--target", targetArg)
-		buildCmd.Env = upsertEnv(os.Environ(), "RUSTFLAGS", rustflags)
-		buildCmd.Env = upsertEnv(buildCmd.Env, "RUST_TARGET_PATH", rustTargetPath)
-		buildCmd.Dir = ws
-		buildCmd.Stdout = os.Stdout
-		buildCmd.Stderr = os.Stderr
-
-		fmt.Printf("🍆    Building sysroot for %s\n", customName)
-		if err := buildCmd.Run(); err != nil {
-			return fmt.Errorf("sysroot build failed for %s: %w", customName, err)
-		}
-
-		// Collect rlib paths by searching the deps directory.
-		paths := map[string]string{}
-		depsDir := filepath.Join(ws, "target", customName, "release", "deps")
-		entries, err := os.ReadDir(depsDir)
-		if err != nil {
-			return fmt.Errorf("read deps dir %s: %w", depsDir, err)
-		}
-
-		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".rlib") {
-				continue
+			var spec map[string]interface{}
+			if err := json.Unmarshal(specOut, &spec); err != nil {
+				fmt.Printf("🍆    Skipping %s (JSON parse error: %v)\n", baseName, err)
+				return
 			}
-			filename := entry.Name()
-			var crateName string
-			if filename == "libstd.rlib" {
-				crateName = "std"
-			} else if strings.HasPrefix(filename, "lib") {
-				stripped := filename[3:]
-				if idx := strings.LastIndex(stripped, "-"); idx >= 0 {
-					crateName = stripped[:idx]
-				} else {
-					crateName = strings.TrimSuffix(stripped, ".rlib")
+
+			isWindowsMSVC := strings.Contains(baseName, "-windows-msvc")
+			isWindowsGNU := strings.Contains(baseName, "-windows-gnu") ||
+				strings.Contains(baseName, "-windows-gnullvm")
+
+			spec["panic-strategy"] = "abort"
+
+			if strings.Contains(baseName, "-linux-") {
+				spec["os"] = "linux"
+				spec["position-independent-executables"] = true
+				spec["relocation-model"] = "pic"
+				extendPreLinkArgs(spec, "gnu-lld", []string{"-pie"})
+				extendPreLinkArgs(spec, "gnu-lld-cc", []string{"-pie"})
+			}
+
+			// Set target-family based on base_target.
+			var families []interface{}
+			switch {
+			case strings.Contains(baseName, "-linux-"):
+				families = []interface{}{"unix", "rusticated"}
+			case strings.Contains(baseName, "-darwin") || strings.Contains(baseName, "-freebsd"):
+				families = []interface{}{"unix", "rusticated"}
+			case strings.Contains(baseName, "-windows-"):
+				families = []interface{}{"windows", "rusticated"}
+			case strings.HasPrefix(baseName, "wasm32-"):
+				families = []interface{}{"wasm", "rusticated"}
+			default:
+				families = []interface{}{"rusticated"}
+			}
+			spec["target-family"] = families
+
+			if isWindowsMSVC {
+				extendPreLinkArgs(spec, "msvc", []string{
+					"/NOLOGO", "/NXCOMPAT", "/DYNAMICBASE",
+					"/ENTRY:mainCRTStartup", "/SUBSYSTEM:CONSOLE",
+					"/FORCE:MULTIPLE", "/NODEFAULTLIB",
+				})
+				extendPreLinkArgs(spec, "lld-link", []string{
+					"/NOLOGO", "/NXCOMPAT", "/DYNAMICBASE",
+					"/ENTRY:mainCRTStartup", "/SUBSYSTEM:CONSOLE",
+					"/FORCE:MULTIPLE", "/NODEFAULTLIB",
+				})
+			}
+
+			if isWindowsGNU {
+				spec["late-link-args"] = map[string]interface{}{}
+				archArg := "i386pep"
+				if strings.HasPrefix(baseName, "aarch64") {
+					archArg = "arm64pe"
+				}
+				extendPreLinkArgs(spec, "gnu", []string{"-m", archArg, "--entry=mainCRTStartup", "--subsystem=console"})
+				extendPreLinkArgs(spec, "gnu-cc", []string{"-nolibc", "--unwindlib=none", "-m", archArg, "-Wl,--entry=mainCRTStartup", "-Wl,--subsystem=console"})
+				extendPreLinkArgs(spec, "gnu-lld", []string{"-m", archArg, "--entry=mainCRTStartup", "--subsystem=console"})
+				extendPreLinkArgs(spec, "gnu-lld-cc", []string{"-nolibc", "--unwindlib=none", "-m", archArg, "-Wl,--entry=mainCRTStartup", "-Wl,--subsystem=console"})
+			}
+
+			if strings.Contains(baseName, "-linux-gnu") {
+				spec["late-link-args"] = map[string]interface{}{
+					"gnu":        []interface{}{"-nostdlib"},
+					"gcc":        []interface{}{"-nostdlib"},
+					"gnu-cc":     []interface{}{"-nostdlib"},
+					"gnu-lld":    []interface{}{"-nostdlib"},
+					"gnu-lld-cc": []interface{}{"-nostdlib"},
+				}
+				spec["no-default-libraries"] = true
+				extendPreLinkArgs(spec, "gnu-lld", []string{"-nostdlib", "--no-dynamic-linker", "--build-id=none"})
+				extendPreLinkArgs(spec, "gnu-lld-cc", []string{"-nostdlib", "-nodefaultlibs", "-nostartfiles", "-Wl,--build-id=none"})
+				extendPreLinkArgs(spec, "gnu", []string{"-nostdlib"})
+				extendPreLinkArgs(spec, "gnu-cc", []string{"-nostdlib", "-nodefaultlibs", "-nostartfiles"})
+				extendPreLinkArgs(spec, "gcc", []string{"-nostdlib", "-nodefaultlibs", "-nostartfiles"})
+				spec["linker-flavor"] = "gnu-lld"
+			}
+
+			spec["crt-static-respected"] = true
+			spec["no-default-libraries"] = true
+			if isWindowsMSVC || isWindowsGNU {
+				spec["crt-static-default"] = true
+			}
+			if strings.Contains(baseName, "-windows-gnullvm") {
+				spec["linker"] = "rust-lld"
+				spec["linker-flavor"] = "gnu-lld"
+			}
+			if strings.Contains(baseName, "-linux-gnu") {
+				spec["linker"] = "rust-lld"
+				spec["linker-flavor"] = "gnu-lld"
+				spec["env"] = ""
+			}
+
+			// Set metadata.std = false.
+			if meta, ok := spec["metadata"]; ok {
+				if metaMap, ok := meta.(map[string]interface{}); ok {
+					metaMap["std"] = false
 				}
 			} else {
-				continue
+				spec["metadata"] = map[string]interface{}{"std": false}
 			}
-			absPath, _ := filepath.Abs(filepath.Join(depsDir, filename))
-			paths[crateName] = filepath.ToSlash(cleanWindowsPath(absPath))
-		}
 
-		if _, ok := paths["std"]; !ok {
-			return fmt.Errorf("missing built artifact for std in %s", customName)
-		}
+			// Write JSON spec.
+			specJSON, err := json.MarshalIndent(spec, "", "  ")
+			if err != nil {
+				errCh <- fmt.Errorf("marshal spec for %s: %w", customName, err)
+				return
+			}
+			jsonPath := filepath.Join(specDir, customName+".json")
+			if err := writeFileIfChanged(jsonPath, specJSON); err != nil {
+				errCh <- err
+				return
+			}
 
-		// Build config.toml fragment for this target.
-		absDepsDir, err := filepath.EvalSymlinks(depsDir)
+			// Build sysroot for this target.
+			existingRustflags := os.Getenv("RUSTFLAGS")
+			rustflags := "-Zunstable-options --cfg backtrace_in_libstd"
+			if existingRustflags != "" {
+				rustflags = existingRustflags + " " + rustflags
+			}
+			if strings.Contains(baseName, "-linux-gnu") {
+				rustflags += " -A explicit-builtin-cfgs-in-flags --cfg rusticated_linux"
+			}
+
+			targetArg := customName
+			if !strings.Contains(customName, "wasm32") {
+				absJSON, err := filepath.EvalSymlinks(jsonPath)
+				if err != nil {
+					absJSON = jsonPath
+				}
+				targetArg = filepath.ToSlash(cleanWindowsPath(absJSON))
+			}
+
+			// Isolate this target's build to its own target directory to bypass Cargo's workspace lock
+			targetDir := filepath.Join(ws, "target", "sysroot-"+customName)
+
+			// runBuild constructs a fresh cargo invocation each call (an *exec.Cmd
+			// is single-use).
+			runBuild := func() error {
+				buildCmd := exec.Command("cargo",
+					"build", "-p", "rusticated", "--release",
+					"-Z", "build-std=core,alloc,compiler_builtins",
+					"-Z", "build-std-features=compiler-builtins-mem",
+					"--config", "unstable.json-target-spec=true",
+					"--target", targetArg)
+				buildCmd.Env = upsertEnv(os.Environ(), "RUSTFLAGS", rustflags)
+				buildCmd.Env = upsertEnv(buildCmd.Env, "RUST_TARGET_PATH", rustTargetPath)
+				buildCmd.Env = upsertEnv(buildCmd.Env, "CARGO_TARGET_DIR", targetDir)
+				buildCmd.Dir = ws
+				return runCmd(buildCmd, "sysroot build "+customName, verbose)
+			}
+
+			vlogf(verbose, "🍆    Building sysroot for %s\n", customName)
+			if err := runBuild(); err != nil {
+				errCh <- fmt.Errorf("sysroot build failed for %s: %w", customName, err)
+				return
+			}
+
+			// Collect rlib paths by searching the deps directory.
+			paths := map[string]string{}
+			depsDir := filepath.Join(targetDir, customName, "release", "deps")
+			entries, err := os.ReadDir(depsDir)
+			if err != nil {
+				errCh <- fmt.Errorf("read deps dir %s: %w", depsDir, err)
+				return
+			}
+
+			for _, entry := range entries {
+				if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".rlib") {
+					continue
+				}
+				filename := entry.Name()
+				var crateName string
+				if filename == "libstd.rlib" {
+					crateName = "std"
+				} else if strings.HasPrefix(filename, "lib") {
+					stripped := filename[3:]
+					if idx := strings.LastIndex(stripped, "-"); idx >= 0 {
+						crateName = stripped[:idx]
+					} else {
+						crateName = strings.TrimSuffix(stripped, ".rlib")
+					}
+				} else {
+					continue
+				}
+				absPath, _ := filepath.Abs(filepath.Join(depsDir, filename))
+				paths[crateName] = filepath.ToSlash(cleanWindowsPath(absPath))
+			}
+
+			if _, ok := paths["std"]; !ok {
+				errCh <- fmt.Errorf("missing built artifact for std in %s", customName)
+				return
+			}
+
+			// Build config.toml fragment for this target.
+			absDepsDir, err := filepath.EvalSymlinks(depsDir)
+			if err != nil {
+				absDepsDir = depsDir
+			}
+			absDepsDir = filepath.ToSlash(cleanWindowsPath(absDepsDir))
+
+			configMu.Lock()
+			var entry strings.Builder
+			fmt.Fprintf(&entry, "[target.%s]\nrustflags = [\n", customName)
+			entry.WriteString("    \"-Zunstable-options\",\n")
+			entry.WriteString("    \"--cfg\", \"backtrace_in_libstd\",\n")
+			for _, crate := range []string{"std", "core", "alloc", "compiler_builtins"} {
+				if p, ok := paths[crate]; ok {
+					fmt.Fprintf(&entry, "    \"--extern\", \"%s=%s\",\n", crate, p)
+				}
+			}
+			fmt.Fprintf(&entry, "    \"-L\", \"dependency=%s\",\n", absDepsDir)
+			if strings.Contains(customName, "-linux") {
+				entry.WriteString("    \"--cfg\", \"rusticated_linux\",\n")
+			}
+			entry.WriteString("]\n\n")
+			configTOML.WriteString(entry.String())
+			builtTargets = append(builtTargets, customName)
+			configMu.Unlock()
+
+			vlogf(verbose, "🍆    sysroot built: %s\n", customName)
+		}(bt[0], bt[1])
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
 		if err != nil {
-			absDepsDir = depsDir
+			return err
 		}
-		absDepsDir = filepath.ToSlash(cleanWindowsPath(absDepsDir))
-		var entry strings.Builder
-		fmt.Fprintf(&entry, "[target.%s]\nrustflags = [\n", customName)
-		entry.WriteString("    \"-Zunstable-options\",\n")
-		entry.WriteString("    \"--cfg\", \"backtrace_in_libstd\",\n")
-		for _, crate := range []string{"std", "core", "alloc", "compiler_builtins"} {
-			if p, ok := paths[crate]; ok {
-				fmt.Fprintf(&entry, "    \"--extern\", \"%s=%s\",\n", crate, p)
-			}
-		}
-		fmt.Fprintf(&entry, "    \"-L\", \"dependency=%s\",\n", absDepsDir)
-		if strings.Contains(customName, "-linux") {
-			entry.WriteString("    \"--cfg\", \"rusticated_linux\",\n")
-		}
-		entry.WriteString("]\n\n")
-		configTOML.WriteString(entry.String())
-		builtTargets = append(builtTargets, customName)
-		fmt.Printf("🍆    sysroot built: %s\n", customName)
 	}
 
 	if len(builtTargets) == 0 {
@@ -321,10 +366,10 @@ func buildTargetSpecs(ws string) error {
 	finalConfig.WriteString(configTOML.String())
 
 	configPath := filepath.Join(specDir, "config.toml")
-	if err := os.WriteFile(configPath, []byte(finalConfig.String()), 0o644); err != nil {
+	if err := writeFileIfChanged(configPath, []byte(finalConfig.String())); err != nil {
 		return fmt.Errorf("write config.toml: %w", err)
 	}
-	fmt.Printf("🍆  Wrote %s\n", configPath)
+	vlogf(verbose, "🍆  Wrote %s\n", configPath)
 	return nil
 }
 
@@ -411,7 +456,7 @@ func cleanWindowsPath(p string) string {
 
 // generateGoOverlay writes target/overlay.json mapping wasip1 runtime/syscall sources
 // to their rusticated counterparts in rusticated-go/.
-func generateGoOverlay(ws, goroot string) error {
+func generateGoOverlay(ws, goroot string, verbose bool) error {
 	overlayDir := filepath.Join(ws, "rusticated-go")
 	genDir := filepath.Join(ws, "target", "overlay-gen")
 
@@ -429,7 +474,7 @@ func generateGoOverlay(ws, goroot string) error {
 	}
 
 	// Create a dummy go.mod to prevent `go test ./...` from parsing patched overlay stdlib code
-	if err := os.WriteFile(filepath.Join(genDir, "go.mod"), []byte("module ignore_target\n"), 0644); err != nil {
+	if err := writeFileIfChanged(filepath.Join(genDir, "go.mod"), []byte("module ignore_target\n")); err != nil {
 		return fmt.Errorf("failed to write dummy go.mod: %w", err)
 	}
 
@@ -473,7 +518,7 @@ func generateGoOverlay(ws, goroot string) error {
 				repl: "func (s *CertPool) AddCert(cert *Certificate) {\n\ts.Certs = append(s.Certs, cert)\n\t$2\n}"},
 		})
 		if err == nil {
-			if err := os.WriteFile(filepath.Join(genDir, "crypto/x509/cert_pool.go"), []byte(certPoolStr), 0644); err != nil {
+			if err := writeFileIfChanged(filepath.Join(genDir, "crypto/x509/cert_pool.go"), []byte(certPoolStr)); err != nil {
 				return fmt.Errorf("failed to write patched crypto/x509/cert_pool.go: %w", err)
 			}
 		}
@@ -484,7 +529,7 @@ func generateGoOverlay(ws, goroot string) error {
 	}
 	modifiedPathGo := pathGoStr
 	genPathGo := filepath.Join(genDir, "path/filepath/path.go")
-	if err := os.WriteFile(genPathGo, []byte(modifiedPathGo), 0644); err != nil {
+	if err := writeFileIfChanged(genPathGo, []byte(modifiedPathGo)); err != nil {
 		return fmt.Errorf("failed to write patched path.go: %w", err)
 	}
 
@@ -511,7 +556,7 @@ func generateGoOverlay(ws, goroot string) error {
 	}
 	modifiedFsGo := fsGoStr
 	genFsGo := filepath.Join(genDir, "net/http/fs.go")
-	if err := os.WriteFile(genFsGo, []byte(modifiedFsGo), 0644); err != nil {
+	if err := writeFileIfChanged(genFsGo, []byte(modifiedFsGo)); err != nil {
 		return fmt.Errorf("failed to write patched fs.go: %w", err)
 	}
 
@@ -549,7 +594,7 @@ func generateGoOverlay(ws, goroot string) error {
 	}
 
 	genLiteGo := filepath.Join(genDir, "internal/filepathlite/path_unix.go")
-	if err := os.WriteFile(genLiteGo, []byte(liteUnixStr), 0644); err != nil {
+	if err := writeFileIfChanged(genLiteGo, []byte(liteUnixStr)); err != nil {
 		return fmt.Errorf("failed to write patched filepathlite/path_unix.go: %w", err)
 	}
 
@@ -584,7 +629,7 @@ func generateGoOverlay(ws, goroot string) error {
 		return fmt.Errorf("patch filepath/path_unix.go: %w", err)
 	}
 	genPathUnix := filepath.Join(genDir, "path/filepath/path_unix.go")
-	if err := os.WriteFile(genPathUnix, []byte(pathUnixStr), 0644); err != nil {
+	if err := writeFileIfChanged(genPathUnix, []byte(pathUnixStr)); err != nil {
 		return fmt.Errorf("failed to write patched filepath/path_unix.go: %w", err)
 	}
 
@@ -621,7 +666,7 @@ func generateGoOverlay(ws, goroot string) error {
 		return fmt.Errorf("failed to patch _NSIG in os_wasm.go")
 	}
 	genOsWasm := filepath.Join(genDir, "runtime/os_wasm.go")
-	if err := os.WriteFile(genOsWasm, []byte(osWasmStr), 0644); err != nil {
+	if err := writeFileIfChanged(genOsWasm, []byte(osWasmStr)); err != nil {
 		return fmt.Errorf("failed to write patched os_wasm.go: %w", err)
 	}
 
@@ -645,7 +690,7 @@ func generateGoOverlay(ws, goroot string) error {
 		return fmt.Errorf("patch os/file.go: %w", err)
 	}
 	genFileGo := filepath.Join(genDir, "os/file.go")
-	if err := os.WriteFile(genFileGo, []byte(fileGoStr), 0644); err != nil {
+	if err := writeFileIfChanged(genFileGo, []byte(fileGoStr)); err != nil {
 		return fmt.Errorf("failed to write patched os/file.go: %w", err)
 	}
 
@@ -663,7 +708,7 @@ func generateGoOverlay(ws, goroot string) error {
 		return fmt.Errorf("patch os/tempfile.go: %w", err)
 	}
 	genTempFileGo := filepath.Join(genDir, "os/tempfile.go")
-	if err := os.WriteFile(genTempFileGo, []byte(tempFileStr), 0644); err != nil {
+	if err := writeFileIfChanged(genTempFileGo, []byte(tempFileStr)); err != nil {
 		return fmt.Errorf("failed to write patched os/tempfile.go: %w", err)
 	}
 
@@ -711,14 +756,14 @@ func generateGoOverlay(ws, goroot string) error {
 				repl: "func (r *Resolver) lookupPort(ctx context.Context, network, service string) (port int, err error) {\n\treturn rusticatedLookupPort(ctx, network, service)\n}"},
 		})
 		if err == nil {
-			if err := os.WriteFile(filepath.Join(genDir, "net/lookup_unix.go"), []byte(lookupUnixStr), 0644); err != nil {
+			if err := writeFileIfChanged(filepath.Join(genDir, "net/lookup_unix.go"), []byte(lookupUnixStr)); err != nil {
 				return fmt.Errorf("failed to write patched net/lookup_unix.go: %w", err)
 			}
 		}
 	}
 
 	genNetFakeGo := filepath.Join(genDir, "net/net_fake.go")
-	if err := os.WriteFile(genNetFakeGo, []byte(netFakeStr), 0644); err != nil {
+	if err := writeFileIfChanged(genNetFakeGo, []byte(netFakeStr)); err != nil {
 		return fmt.Errorf("failed to write patched net_fake.go: %w", err)
 	}
 
@@ -730,13 +775,34 @@ func generateGoOverlay(ws, goroot string) error {
 	}
 	rootUnixSrc := filepath.Join(goroot, "src/crypto/x509/root_unix.go")
 	rootUnixContent, err := os.ReadFile(rootUnixSrc)
-	if err != nil {
-		return fmt.Errorf("failed to read src/crypto/x509/root_unix.go: %w", err)
-	}
-	rootUnixStr := strings.ReplaceAll(string(rootUnixContent), " || wasip1", "")
 	genRootUnixGo := filepath.Join(genDir, "crypto/x509/root_unix.go")
-	if err := os.WriteFile(genRootUnixGo, []byte(rootUnixStr), 0644); err != nil {
-		return fmt.Errorf("failed to write patched root_unix.go: %w", err)
+	if err == nil {
+		rootUnixStr := strings.ReplaceAll(string(rootUnixContent), " || wasip1", "")
+		if err := writeFileIfChanged(genRootUnixGo, []byte(rootUnixStr)); err != nil {
+			return fmt.Errorf("failed to write patched root_unix.go: %w", err)
+		}
+	}
+
+	// Patch for src/crypto/x509/root.go in Go 1.27+
+	// 1. Add "wasip1" to the GOOS platform check so it returns the dummy system pool.
+	// 2. Cast filepath.Separator to rune to avoid type mismatch with our overlay.
+	rootGoSrc := filepath.Join(goroot, "src/crypto/x509/root.go")
+	genRootGo := filepath.Join(genDir, "crypto/x509/root.go")
+	if rootGoContent, err := os.ReadFile(rootGoSrc); err == nil {
+		rootGoStr := string(rootGoContent)
+		rootGoStr = strings.ReplaceAll(
+			rootGoStr,
+			`runtime.GOOS == "windows" || runtime.GOOS == "darwin" || runtime.GOOS == "ios"`,
+			`runtime.GOOS == "windows" || runtime.GOOS == "darwin" || runtime.GOOS == "ios" || runtime.GOOS == "wasip1"`,
+		)
+		rootGoStr = strings.ReplaceAll(
+			rootGoStr,
+			`strings.ContainsRune(target, filepath.Separator)`,
+			`strings.ContainsRune(target, rune(filepath.Separator))`,
+		)
+		if err := writeFileIfChanged(genRootGo, []byte(rootGoStr)); err != nil {
+			return fmt.Errorf("failed to write patched crypto/x509/root.go: %w", err)
+		}
 	}
 
 	// Algorithmic patch for src/crypto/x509/verify.go.
@@ -753,8 +819,31 @@ func generateGoOverlay(ws, goroot string) error {
 		`runtime.GOOS == "windows" || runtime.GOOS == "darwin" || runtime.GOOS == "ios" || runtime.GOOS == "wasip1"`,
 	)
 	genVerifyGo := filepath.Join(genDir, "crypto/x509/verify.go")
-	if err := os.WriteFile(genVerifyGo, []byte(verifyStr), 0644); err != nil {
+	if err := writeFileIfChanged(genVerifyGo, []byte(verifyStr)); err != nil {
 		return fmt.Errorf("failed to write patched verify.go: %w", err)
+	}
+
+	// Patch for src/os/stat_wasip1.go
+	// Use real permissions from the rusticated ABI instead of hardcoded 0600/0700.
+	statWasip1Src := filepath.Join(goroot, "src/os/stat_wasip1.go")
+	genStatWasip1 := filepath.Join(genDir, "os/stat_wasip1.go")
+	if statContent, err := os.ReadFile(statWasip1Src); err == nil {
+		statStr := strings.Replace(
+			string(statContent),
+			"// WASI does not support unix-like permissions, but Go programs are likely\n"+
+				"\t// to expect the permission bits to not be zero so we set defaults to help\n"+
+				"\t// avoid breaking applications that are migrating to WASM.\n"+
+				"\tif fs.sys.Filetype == syscall.FILETYPE_DIRECTORY {\n"+
+				"\t\tfs.mode |= 0700\n"+
+				"\t} else {\n"+
+				"\t\tfs.mode |= 0600\n"+
+				"\t}",
+			"fs.mode |= FileMode(fs.sys.Mode) & 0777",
+			1,
+		)
+		if err := writeFileIfChanged(genStatWasip1, []byte(statStr)); err != nil {
+			return fmt.Errorf("failed to write patched os/stat_wasip1.go: %w", err)
+		}
 	}
 
 	genCertPoolGo := filepath.Join(genDir, "crypto/x509/cert_pool.go")
@@ -788,6 +877,8 @@ func generateGoOverlay(ws, goroot string) error {
 		{"src/internal/syscall/unix/net_wasip1.go", canon(filepath.Join(overlayDir, "internal/syscall/unix/net_rusticated.go"))},
 		// path
 		{"src/os/path_unix.go", canon(filepath.Join(overlayDir, "os/path_unix.go"))},
+		// stat (generated patch — real permissions from rusticated ABI)
+		{"src/os/stat_wasip1.go", canon(genStatWasip1)},
 		// os ABI-backed home/temp override (generated patched copy of stdlib source)
 		{"src/os/file.go", canon(genFileGo)},
 		{"src/os/tempfile.go", canon(genTempFileGo)},
@@ -811,6 +902,7 @@ func generateGoOverlay(ws, goroot string) error {
 		// net/http transport: wasip1-specific default timeout override
 		// crypto/x509 root CA injection
 		{"src/crypto/x509/root_unix.go", canon(genRootUnixGo)},
+		{"src/crypto/x509/root.go", canon(genRootGo)},
 		{"src/crypto/x509/cert_pool.go", canon(genCertPoolGo)},
 		{"src/crypto/x509/verify.go", canon(genVerifyGo)},
 		{"src/crypto/x509/root_rusticated.go", canon(filepath.Join(overlayDir, "crypto/x509/root_rusticated.go"))},
@@ -838,9 +930,9 @@ func generateGoOverlay(ws, goroot string) error {
 
 	overlayJSON := fmt.Sprintf("{\n  \"Replace\": {\n%s\n  }\n}\n", entries.String())
 	overlayPath := filepath.Join(ws, "target", "overlay.json")
-	if err := os.WriteFile(overlayPath, []byte(overlayJSON), 0o644); err != nil {
+	if err := writeFileIfChanged(overlayPath, []byte(overlayJSON)); err != nil {
 		return err
 	}
-	fmt.Printf("🍆  Wrote %s\n", overlayPath)
+	vlogf(verbose, "🍆  Wrote %s\n", overlayPath)
 	return nil
 }

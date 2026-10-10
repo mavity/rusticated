@@ -54,7 +54,7 @@ func parsePlatformOverride(raw string) (string, string, error) {
 	return "", "", fmt.Errorf("invalid --platform %q", raw)
 }
 
-func splitWashmhostArgs(args []string) (platform string, satellite bool, probePath string, guestArgs []string, err error) {
+func splitWashmhostArgs(args []string) (platform string, satellite bool, probePath string, cwd string, guestArgs []string, err error) {
 	guestArgs = []string{args[0]}
 	raw := args[1:]
 	passThrough := false
@@ -71,21 +71,27 @@ func splitWashmhostArgs(args []string) (platform string, satellite bool, probePa
 			satellite = true
 		case "--probe-dlopen":
 			if i+1 >= len(raw) {
-				return "", false, "", nil, fmt.Errorf("missing argument after --probe-dlopen")
+				return "", false, "", "", nil, fmt.Errorf("missing argument after --probe-dlopen")
 			}
 			probePath = raw[i+1]
 			i++
 		case "--platform":
 			if i+1 >= len(raw) {
-				return "", false, "", nil, fmt.Errorf("missing argument after --platform")
+				return "", false, "", "", nil, fmt.Errorf("missing argument after --platform")
 			}
 			platform = raw[i+1]
+			i++
+		case "--cwd":
+			if i+1 >= len(raw) {
+				return "", false, "", "", nil, fmt.Errorf("missing argument after --cwd")
+			}
+			cwd = raw[i+1]
 			i++
 		default:
 			guestArgs = append(guestArgs, arg)
 		}
 	}
-	return platform, satellite, probePath, guestArgs, nil
+	return platform, satellite, probePath, cwd, guestArgs, nil
 }
 
 func buildWashmhostForPlatform(goos, goarch string) (string, error) {
@@ -119,7 +125,7 @@ func buildWashmhostForPlatform(goos, goarch string) (string, error) {
 	return outPath, nil
 }
 
-func relaunchForPlatform(goos, goarch string, satellite bool, probePath string, guestArgs []string) error {
+func relaunchForPlatform(goos, goarch string, satellite bool, probePath string, cwd string, guestArgs []string) error {
 	outPath, err := buildWashmhostForPlatform(goos, goarch)
 	if err != nil {
 		return err
@@ -131,6 +137,9 @@ func relaunchForPlatform(goos, goarch string, satellite bool, probePath string, 
 	}
 	if probePath != "" {
 		args = append(args, "--probe-dlopen", probePath)
+	}
+	if cwd != "" {
+		args = append(args, "--cwd", cwd)
 	}
 	if !satellite && len(guestArgs) > 1 {
 		args = append(args, guestArgs[1:]...)
@@ -151,7 +160,7 @@ func relaunchForPlatform(goos, goarch string, satellite bool, probePath string, 
 }
 
 func main() {
-	platformOverride, satelliteMode, probePath, parsedArgs, err := splitWashmhostArgs(os.Args)
+	platformOverride, satelliteMode, probePath, cwd, parsedArgs, err := splitWashmhostArgs(os.Args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "washmhost: %v\n", err)
 		os.Exit(1)
@@ -163,7 +172,7 @@ func main() {
 			os.Exit(1)
 		}
 		if goos != runtime.GOOS || goarch != runtime.GOARCH {
-			if err := relaunchForPlatform(goos, goarch, satelliteMode, probePath, parsedArgs); err != nil {
+			if err := relaunchForPlatform(goos, goarch, satelliteMode, probePath, cwd, parsedArgs); err != nil {
 				fmt.Fprintf(os.Stderr, "washmhost: %v\n", err)
 				os.Exit(1)
 			}
@@ -229,6 +238,13 @@ func main() {
 	} else if _, err := strconv.ParseUint(ref, 10, 64); err != nil && !strings.HasSuffix(strings.ToLower(argSlice[0]), ".bat") {
 		// ref is not a numeric FD, assume it is a path to the WASM file.
 		argSlice[0] = ref
+	}
+
+	if cwd != "" {
+		if err := os.Chdir(cwd); err != nil {
+			fmt.Fprintf(os.Stderr, "washmhost: failed to chdir to %s: %v\n", cwd, err)
+			os.Exit(1)
+		}
 	}
 
 	exitCode, err := RunWasm(context.Background(), payloadBytes, argSlice)

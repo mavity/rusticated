@@ -93,16 +93,24 @@ func applyWasip1DepPatches(ws, projectDir, goroot string) (*depPatchResult, erro
 		encoded := encodeModPath(target.module)
 		srcDir := filepath.Join(gomodcache, encoded+"@"+version)
 		if _, err := os.Stat(srcDir); err != nil {
-			if _, err := os.Stat(srcDir); err != nil {
-				fmt.Printf("🍆 wasip1 JIT: %s@%s not in GOMODCACHE, skipping\n", target.module, version)
-				continue
-			}
-
-			fmt.Printf("🍆 wasip1 JIT: downloading %s@%s\n", target.module, version)
+			fmt.Printf("🍆  wasip1 JIT: downloading %s@%s\n", target.module, version)
 			dlCmd := exec.Command(goBin, "mod", "download", target.module+"@"+version)
 			if out, dlErr := dlCmd.CombinedOutput(); dlErr != nil {
-				fmt.Printf("🍆 wasip1 JIT: failed to download %s@%s: %v\n%s\n", target.module, version, dlErr, string(out))
+				fmt.Printf("🍆  wasip1 JIT: failed to download %s@%s: %v\n%s\n", target.module, version, dlErr, string(out))
 				continue
+			}
+			if _, err := os.Stat(srcDir); err != nil {
+				if _, err := os.Stat(srcDir); err != nil {
+					fmt.Printf("🍆 wasip1 JIT: %s@%s not in GOMODCACHE, skipping\n", target.module, version)
+					continue
+				}
+
+				fmt.Printf("🍆 wasip1 JIT: downloading %s@%s\n", target.module, version)
+				dlCmd := exec.Command(goBin, "mod", "download", target.module+"@"+version)
+				if out, dlErr := dlCmd.CombinedOutput(); dlErr != nil {
+					fmt.Printf("🍆 wasip1 JIT: failed to download %s@%s: %v\n%s\n", target.module, version, dlErr, string(out))
+					continue
+				}
 			}
 
 			if _, err := os.Stat(srcDir); err != nil {
@@ -685,7 +693,7 @@ func actuallyExcludeWasip1(filePath string) error {
 	}
 	content := string(data)
 	content = addWasip1ExclusionToTag(content)
-	return os.WriteFile(filePath, []byte(content), 0644)
+	return writeFileIfChanged(filePath, []byte(content))
 }
 
 // patchTermenvColorProfile rewrites termenv's TTY/colour detection so the guest
@@ -787,8 +795,39 @@ func mergeOverlay(srcOverlay string, extra map[string]string, dstPath string) (s
 	for k, v := range extra {
 		overlay.Replace[k] = v
 	}
-	merged, _ := json.MarshalIndent(overlay, "", "  ")
-	_ = os.WriteFile(dstPath, merged, 0644)
+
+	// Sort keys to ensure deterministic JSON output so we don't bust the Go build cache
+	var keys []string
+	for k := range overlay.Replace {
+		keys = append(keys, k)
+	}
+	// A simple bubble sort since we just need it to be deterministic and it's small
+	for i := 0; i < len(keys); i++ {
+		for j := i + 1; j < len(keys); j++ {
+			if keys[i] > keys[j] {
+				keys[i], keys[j] = keys[j], keys[i]
+			}
+		}
+	}
+
+	var buf bytes.Buffer
+	buf.WriteString("{\n  \"Replace\": {\n")
+	for i, k := range keys {
+		v := overlay.Replace[k]
+		kJSON, _ := json.Marshal(k)
+		vJSON, _ := json.Marshal(v)
+		buf.WriteString("    ")
+		buf.Write(kJSON)
+		buf.WriteString(": ")
+		buf.Write(vJSON)
+		if i < len(keys)-1 {
+			buf.WriteString(",")
+		}
+		buf.WriteString("\n")
+	}
+	buf.WriteString("  }\n}\n")
+
+	_ = writeFileIfChanged(dstPath, buf.Bytes())
 	return dstPath, nil
 }
 
