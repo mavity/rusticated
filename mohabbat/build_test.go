@@ -47,7 +47,7 @@ func TestGenerateGoOverlayIncludesABIUserHomeTempOverride(t *testing.T) {
 	goroot := runtime.GOROOT()
 
 	wantPath := filepath.ToSlash(filepath.Join(ws, "target", "overlay-gen", "os", "file.go"))
-	if err := generateGoOverlay(ws, goroot); err != nil {
+	if err := generateGoOverlay(ws, goroot, false); err != nil {
 		t.Fatalf("generateGoOverlay() error = %v", err)
 	}
 

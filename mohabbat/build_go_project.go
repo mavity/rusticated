@@ -24,10 +24,15 @@ func buildGoProjectWasm(ws, absProjectDir, outputWasm string, verbose bool) erro
 		}
 	}
 
+	goModDir := findGoMod(absProjectDir)
+	if goModDir == "" {
+		goModDir = absProjectDir
+	}
+
 	// Apply wasip1 dependency patches: copy affected modules to a mutable
 	// rusticated cache, flip their build-tag gates, and generate a temp go.mod
 	// with replace directives plus overlay entries for suffix-flip aliases.
-	patchResult, err := applyWasip1DepPatches(ws, absProjectDir, goroot)
+	patchResult, err := applyWasip1DepPatches(ws, goModDir, goroot)
 	if err != nil {
 		return fmt.Errorf("wasip1 dep patches: %w", err)
 	}
@@ -42,8 +47,8 @@ func buildGoProjectWasm(ws, absProjectDir, outputWasm string, verbose bool) erro
 		}
 	}
 
-	fmt.Println("🍆 SDK " + rootSource + " at " + goroot)
-	fmt.Printf("🍆  Building Go project %s -> %s\n", absProjectDir, outputWasm)
+	vlogf(verbose, "🍆 SDK %s at %s\n", rootSource, goroot)
+	vlogf(verbose, "🍆  Building Go project %s -> %s\n", absProjectDir, outputWasm)
 	goBin := goBinFromRoot(goroot)
 
 	args := []string{"build", "-buildmode=c-shared",
@@ -63,12 +68,78 @@ func buildGoProjectWasm(ws, absProjectDir, outputWasm string, verbose bool) erro
 	env = upsertEnv(env, "GOTMPDIR", goTmpDir)
 	env = upsertEnv(env, "GOCACHE", goCacheDir)
 	cmd.Env = env
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := runCmd(cmd, "go build "+filepath.Base(absProjectDir)+" (wasm)", verbose); err != nil {
 		return fmt.Errorf("go build failed for %s: %w", absProjectDir, err)
 	}
-	fmt.Printf("🍆  Post-processing %s (rename _initialize -> run)\n", outputWasm)
+	vlogf(verbose, "🍆  Post-processing %s (rename _initialize -> run)\n", outputWasm)
+	return postProcessWasm(outputWasm)
+}
+
+// buildGoTestWasm compiles a Go project's tests to rusticated WASM.
+func buildGoTestWasm(ws, absProjectDir, outputWasm string, verbose bool) error {
+	overlayPath := filepath.Join(ws, "target", "overlay.json")
+	goroot, rootSource, err := resolveGoroot(ws)
+	if err != nil {
+		return fmt.Errorf("cannot resolve GOROOT: %w", err)
+	}
+	buildDir := filepath.Join(ws, "target", "mohabbat-build")
+	projectName := filepath.Base(absProjectDir)
+	goTmpDir := filepath.Join(buildDir, projectName, "gotmp-test")
+	goCacheDir := filepath.Join(buildDir, projectName, "gocache-test")
+	for _, d := range []string{goTmpDir, goCacheDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			return err
+		}
+	}
+
+	goModDir := findGoMod(absProjectDir)
+	if goModDir == "" {
+		goModDir = absProjectDir
+	}
+
+	// Apply wasip1 dependency patches: copy affected modules to a mutable
+	// rusticated cache, flip their build-tag gates, and generate a temp go.mod
+	// with replace directives plus overlay entries for suffix-flip aliases.
+	patchResult, err := applyWasip1DepPatches(ws, goModDir, goroot)
+	if err != nil {
+		return fmt.Errorf("wasip1 dep patches: %w", err)
+	}
+
+	// Determination of effective overlay: merge suffix-flip extras if any.
+	effectiveOverlay := overlayPath
+	if len(patchResult.overlayExtra) > 0 {
+		mergedPath := filepath.Join(buildDir, projectName+"-test-overlay.json")
+		effectiveOverlay, err = mergeOverlay(overlayPath, patchResult.overlayExtra, mergedPath)
+		if err != nil {
+			return fmt.Errorf("merge overlay: %w", err)
+		}
+	}
+
+	vlogf(verbose, "🍆 SDK %s at %s\n", rootSource, goroot)
+	vlogf(verbose, "🍆  Building Go tests %s -> %s\n", absProjectDir, outputWasm)
+	goBin := goBinFromRoot(goroot)
+
+	args := []string{"test", "-c", "-buildmode=c-shared",
+		"-overlay", effectiveOverlay,
+		"-trimpath", "-ldflags=-s -w"}
+	if verbose {
+		args = append(args, "-tags=verbose")
+	}
+	args = append(args, "-o", outputWasm, ".")
+	cmd := exec.Command(goBin, args...)
+	cmd.Dir = absProjectDir
+	env := os.Environ()
+	env = upsertEnv(env, "GOOS", "wasip1")
+	env = upsertEnv(env, "GOARCH", "wasm")
+	env = upsertEnv(env, "GOROOT", goroot)
+	env = upsertEnv(env, "CGO_ENABLED", "0")
+	env = upsertEnv(env, "GOTMPDIR", goTmpDir)
+	env = upsertEnv(env, "GOCACHE", goCacheDir)
+	cmd.Env = env
+	if err := runCmd(cmd, "go test -c "+filepath.Base(absProjectDir)+" (wasm)", verbose); err != nil {
+		return fmt.Errorf("go test -c failed for %s: %w", absProjectDir, err)
+	}
+	vlogf(verbose, "🍆  Post-processing %s (rename _initialize -> run)\n", outputWasm)
 	return postProcessWasm(outputWasm)
 }
 
@@ -87,8 +158,8 @@ func buildBrainWasm(ws, outputWasm string, verbose bool) error {
 			return err
 		}
 	}
-	fmt.Println("🍆 SDK " + rootSource + " at " + goroot)
-	fmt.Printf("🍆  Building brain WASM -> %s\n", outputWasm)
+	vlogf(verbose, "🍆 SDK %s at %s\n", rootSource, goroot)
+	vlogf(verbose, "🍆  Building brain WASM -> %s\n", outputWasm)
 	goBin := goBinFromRoot(goroot)
 	args := []string{"build", "-buildmode=c-shared",
 		"-overlay", overlayPath,
@@ -107,9 +178,7 @@ func buildBrainWasm(ws, outputWasm string, verbose bool) error {
 	env = upsertEnv(env, "GOTMPDIR", goTmpDir)
 	env = upsertEnv(env, "GOCACHE", goCacheDir)
 	cmd.Env = env
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := runCmd(cmd, "go build brain (wasm)", verbose); err != nil {
 		return fmt.Errorf("brain WASM build failed: %w", err)
 	}
 	return postProcessWasm(outputWasm)
@@ -158,11 +227,8 @@ func goBuild(ws, pkgDir string, s slot, buildDir string, verbose bool) error {
 	env = upsertEnv(env, "TEMP", goTmpDir)
 	cmd.Env = env
 
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	fmt.Printf("🍆    go build %s for %s -> %s\n", pkgDir, s.name, filepath.Base(outPath))
-	if err := cmd.Run(); err != nil {
+	vlogf(verbose, "🍆    go build %s for %s -> %s\n", pkgDir, s.name, filepath.Base(outPath))
+	if err := runCmd(cmd, fmt.Sprintf("go build %s for %s", pkgDir, s.name), verbose); err != nil {
 		return fmt.Errorf("%s build failed for %s: %w", pkgDir, s.name, err)
 	}
 
