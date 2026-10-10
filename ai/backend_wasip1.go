@@ -5,6 +5,7 @@ package ai
 import (
 	"encoding/binary"
 	"fmt"
+	"os"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -294,6 +295,9 @@ func (d *wasip1Driver) createTrampoline(callbackID uint64) uint64 {
 func ensureLMLibLoadedImpl(libPath string) error {
 	lmLibOnce.Do(func() {
 		var err error
+		if Verbose {
+			fmt.Fprintf(os.Stderr, "[ai] loading LiteRT-LM WASM library: %s\n", libPath)
+		}
 		lmLib, err = syscall.DylibOpen(libPath, syscall.RTLD_NOW|syscall.RTLD_GLOBAL)
 		if err != nil {
 			lmLibErr = fmt.Errorf("failed to load %s: %w", libPath, err)
