@@ -20,7 +20,7 @@ func initSignalHandlers(h *Host) func() {
 		for {
 			select {
 			case <-winchCh:
-				h.Invalidate()
+				h.sendMsg(hostMsg{kind: hostMsgResize})
 			case <-termCh:
 				h.Stop()
 			case <-h.stopCh:

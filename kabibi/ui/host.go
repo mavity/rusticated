@@ -14,10 +14,28 @@ import (
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
 
+// hostMsgKind represents the variant of a host coordination message.
+type hostMsgKind int
+
+const (
+	hostMsgInput hostMsgKind = iota
+	hostMsgInvalidate
+	hostMsgScrollback
+	hostMsgResize
+	hostMsgStop
+)
+
+// hostMsg is a compound message passed to the Host's coordinator loop.
+type hostMsg struct {
+	kind       hostMsgKind
+	inputEvent input.Event
+	scrollback string
+}
+
 // Host owns the terminal I/O loop, double-buffered frame engine, and widget tree.
 //
 // Thread safety: Invalidate may be called from any goroutine. All I/O is
-// serialised through mu, which is held only during the actual frame dispatch.
+// serialised through the central event loop goroutine via msgCh.
 type Host struct {
 	root Widget
 
@@ -38,6 +56,7 @@ type Host struct {
 
 	scrollbackQueue []string
 
+	msgCh         chan hostMsg
 	stopCh        chan struct{}
 	prevTermState *term.State // holds the saved terminal state needed to restore cooked mode on exit.
 }
@@ -55,6 +74,7 @@ func NewHost(root Widget) *Host {
 	return &Host{
 		root:   root,
 		out:    bufio.NewWriterSize(os.Stdout, 64*1024),
+		msgCh:  make(chan hostMsg, 256),
 		stopCh: make(chan struct{}),
 	}
 }
@@ -66,13 +86,12 @@ func (h *Host) Invalidate() {
 }
 
 func (h *Host) invalidateCore(
-	getSizeFunc func(fd uintptr) (w int, ht int, err error),
+	_ func(fd uintptr) (w int, ht int, err error),
 ) {
-
 	if h.dirty.Swap(true) {
 		return // already scheduled; coalesced
 	}
-	go h.runFrame(getSizeFunc)
+	h.sendMsg(hostMsg{kind: hostMsgInvalidate})
 }
 
 // Run enters terminal raw mode, delivers an initial frame, and blocks on the
@@ -136,9 +155,109 @@ func (h *Host) runCore(
 	cleanupSignals := h.handleSignals()
 	defer cleanupSignals()
 
+	// Initial render
 	h.Invalidate()
-	h.readInputLoop(os.Stdin)
+
+	// Start reading input in background producer goroutine
+	inputDone := make(chan struct{})
+	go func() {
+		defer close(inputDone)
+		h.readInputLoop(os.Stdin)
+	}()
+
+	// Run central event coordinator loop on this main host goroutine
+	h.processLoop(term.GetSize)
+	<-inputDone
 	return nil
+}
+
+// processLoop is the single coordinator loop that owns all access to h.root.
+func (h *Host) processLoop(getSizeFunc func(fd uintptr) (w, ht int, err error)) {
+	for {
+		select {
+		case <-h.stopCh:
+			return
+		case msg, ok := <-h.msgCh:
+			if !ok {
+				return
+			}
+			if msg.kind == hostMsgStop {
+				return
+			}
+
+			needsRender := false
+			h.handleHostMsg(msg, &needsRender, getSizeFunc)
+
+			// Drain any immediately pending messages to coalesce redraws
+			for {
+				select {
+				case nextMsg, ok := <-h.msgCh:
+					if !ok || nextMsg.kind == hostMsgStop {
+						if needsRender {
+							h.runFrame(getSizeFunc)
+						}
+						return
+					}
+					h.handleHostMsg(nextMsg, &needsRender, getSizeFunc)
+				default:
+					goto drained
+				}
+			}
+
+		drained:
+			if needsRender {
+				h.runFrame(getSizeFunc)
+			}
+		}
+	}
+}
+
+func (h *Host) handleHostMsg(
+	msg hostMsg,
+	needsRender *bool,
+	getSizeFunc func(fd uintptr) (w, ht int, err error),
+) {
+	switch msg.kind {
+	case hostMsgInput:
+		if h.root.HandleEvent(msg.inputEvent) {
+			*needsRender = true
+		}
+	case hostMsgInvalidate:
+		*needsRender = true
+	case hostMsgResize:
+		*needsRender = true
+	case hostMsgScrollback:
+		h.runScrollbackFrame(getSizeFunc)
+	}
+}
+
+func (h *Host) sendMsg(msg hostMsg) {
+	if h.stopCh != nil {
+		select {
+		case <-h.stopCh:
+			return
+		default:
+		}
+	}
+	if h.msgCh == nil {
+		return
+	}
+	select {
+	case h.msgCh <- msg:
+	default:
+		// Queue full fallback
+		go func() {
+			if h.stopCh != nil {
+				select {
+				case <-h.stopCh:
+					return
+				case h.msgCh <- msg:
+				}
+			} else {
+				h.msgCh <- msg
+			}
+		}()
+	}
 }
 
 // Stop signals the Run loop to exit.
@@ -147,6 +266,7 @@ func (h *Host) Stop() {
 	case <-h.stopCh:
 	default:
 		close(h.stopCh)
+		h.sendMsg(hostMsg{kind: hostMsgStop})
 	}
 }
 
@@ -158,16 +278,13 @@ func (h *Host) WriteToScrollback(text string) {
 
 func (h *Host) writeToScrollbackCore(
 	text string,
-	getSizeFunc func(fd uintptr) (w, ht int, err error),
+	_ func(fd uintptr) (w, ht int, err error),
 ) {
 	h.mu.Lock()
 	h.scrollbackQueue = append(h.scrollbackQueue, text)
 	h.mu.Unlock()
 
-	if h.dirty.Swap(true) {
-		return
-	}
-	go h.runScrollbackFrame(getSizeFunc)
+	h.sendMsg(hostMsg{kind: hostMsgScrollback, scrollback: text})
 }
 
 // ── Frame engine ─────────────────────────────────────────────────────────────
@@ -390,11 +507,9 @@ func (h *Host) readInputLoop(in io.Reader) {
 				return
 			}
 
-			// Dispatch canonical input.Event to widget tree.
-			// Widgets invoke ctx.Invalidate() explicitly when internal state mutates;
-			// the host does not auto-invalidate on event consumption.
+			// Post canonical input.Events to coordinator loop.
 			for _, ev := range res.events {
-				h.root.HandleEvent(ev)
+				h.sendMsg(hostMsg{kind: hostMsgInput, inputEvent: ev})
 			}
 		}
 	}
