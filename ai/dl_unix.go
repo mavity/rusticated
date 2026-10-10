@@ -1,6 +1,6 @@
 //go:build !windows && !wasip1
 
-package main
+package ai
 
 import "github.com/ebitengine/purego"
 
