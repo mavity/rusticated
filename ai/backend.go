@@ -110,37 +110,33 @@ var (
 // C runtime emits a stream chunk.  It extracts text and completion status via
 // the driver and dispatches to the registered Go callback and done-channel.
 func sharedTokenCallback(drv LMDriver, userData, chunkPtr uint64) {
-	if drv.streamChunkGetError != nil {
-		if errPtr := drv.streamChunkGetError(chunkPtr); errPtr != 0 {
-			if s := drv.ptrToString(errPtr); s != "" {
-				fmt.Fprintf(os.Stderr, "LiteRT stream error: %s\n", s)
-			}
+	if errPtr := drv.streamChunkGetError(chunkPtr); errPtr != 0 {
+		if s := drv.ptrToString(errPtr); s != "" {
+			fmt.Fprintf(os.Stderr, "LiteRT stream error: %s\n", s)
 		}
 	}
-	if drv.streamChunkGetText != nil {
-		if textPtr := drv.streamChunkGetText(chunkPtr); textPtr != 0 {
-			token := drv.ptrToString(textPtr)
-			tokenCallbackMu.Lock()
-			fn := tokenCallbackRegistry[userData]
-			tokenCallbackMu.Unlock()
-			if fn != nil {
-				fn(token)
-			}
+
+	if textPtr := drv.streamChunkGetText(chunkPtr); textPtr != 0 {
+		token := drv.ptrToString(textPtr)
+		tokenCallbackMu.Lock()
+		fn := tokenCallbackRegistry[userData]
+		tokenCallbackMu.Unlock()
+		if fn != nil {
+			fn(token)
 		}
 	}
-	if drv.streamChunkIsFinal != nil {
-		if drv.streamChunkIsFinal(chunkPtr) {
-			tokenCallbackMu.Lock()
-			ch := tokenDoneChannels[userData]
-			tokenCallbackMu.Unlock()
-			if Verbose {
-				fmt.Fprintf(os.Stderr, "[ai] stream final chunk for cb %d\n", userData)
-			}
-			if ch != nil {
-				select {
-				case ch <- struct{}{}:
-				default:
-				}
+
+	if drv.streamChunkIsFinal(chunkPtr) {
+		tokenCallbackMu.Lock()
+		ch := tokenDoneChannels[userData]
+		tokenCallbackMu.Unlock()
+		if Verbose {
+			fmt.Fprintf(os.Stderr, "[ai] stream final chunk for cb %d\n", userData)
+		}
+		if ch != nil {
+			select {
+			case ch <- struct{}{}:
+			default:
 			}
 		}
 	}
