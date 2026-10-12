@@ -21,13 +21,15 @@ const (
 
 // PromptPart is a single typed fragment of a multimodal message. Set Text for
 // a text part, ImageBase64 for an image part, or ToolName and ToolResponse
-// when replying to a tool call with RoleTool.
+// when replying to a tool call with RoleTool. ToolCalls records the calls a
+// RoleModel turn made, so that seeded history replays the call/response pairs.
 type PromptPart struct {
 	Role         Role
 	Text         string
 	ImageBase64  string
 	ToolName     string
 	ToolResponse any
+	ToolCalls    []ToolCall
 }
 
 // ModelEvent represents an item emitted during model generation.
