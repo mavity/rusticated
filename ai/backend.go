@@ -10,7 +10,6 @@ import (
 	"os"
 	"runtime"
 	"sync"
-	"time"
 )
 
 // Verbose enables verbose logging of library loading and other internals.
@@ -99,45 +98,51 @@ type LMDriver interface {
 
 // ── Shared callback state ─────────────────────────────────────────────────
 
+// streamState is the state of one in-flight SendStream request.
+type streamState struct {
+	onChunk func(string)
+	// doneCh is 1-buffered: the terminal chunk delivers nil on clean
+	// completion or the native error, without ever blocking the C callback.
+	doneCh chan error
+}
+
 var (
 	tokenCallbackMu       sync.Mutex
-	tokenCallbackRegistry = make(map[uint64]func(string))
-	tokenDoneChannels     = make(map[uint64]chan struct{})
+	tokenCallbackRegistry = make(map[uint64]*streamState)
 	tokenCallbackNextID   uint64
 )
 
 // sharedTokenCallback is invoked by the platform-specific trampoline when the
-// C runtime emits a stream chunk.  It extracts text and completion status via
-// the driver and dispatches to the registered Go callback and done-channel.
+// C runtime emits a stream chunk. Text chunks go to the request's onChunk. The
+// terminal chunk (is_final) carries no text, and also carries the error if the
+// stream failed, so it is what completes the request.
 func sharedTokenCallback(drv LMDriver, userData, chunkPtr uint64) {
-	if errPtr := drv.streamChunkGetError(chunkPtr); errPtr != 0 {
-		if s := drv.ptrToString(errPtr); s != "" {
-			fmt.Fprintf(os.Stderr, "LiteRT stream error: %s\n", s)
-		}
-	}
+	tokenCallbackMu.Lock()
+	st := tokenCallbackRegistry[userData]
+	tokenCallbackMu.Unlock()
 
 	if textPtr := drv.streamChunkGetText(chunkPtr); textPtr != 0 {
-		token := drv.ptrToString(textPtr)
-		tokenCallbackMu.Lock()
-		fn := tokenCallbackRegistry[userData]
-		tokenCallbackMu.Unlock()
-		if fn != nil {
-			fn(token)
+		if token := drv.ptrToString(textPtr); token != "" {
+			st.onChunk(token)
 		}
 	}
 
 	if drv.streamChunkIsFinal(chunkPtr) {
-		tokenCallbackMu.Lock()
-		ch := tokenDoneChannels[userData]
-		tokenCallbackMu.Unlock()
-		if Verbose {
-			fmt.Fprintf(os.Stderr, "[ai] stream final chunk for cb %d\n", userData)
-		}
-		if ch != nil {
-			select {
-			case ch <- struct{}{}:
-			default:
+		var streamErr error
+		if errPtr := drv.streamChunkGetError(chunkPtr); errPtr != 0 {
+			// The chunk is only valid during this call, so copy the message now.
+			msg := drv.ptrToString(errPtr)
+			if msg == "" {
+				msg = "native stream reported an error without a message"
 			}
+			streamErr = fmt.Errorf("LiteRT stream error: %s", msg)
+		}
+		if Verbose {
+			fmt.Fprintf(os.Stderr, "[ai] stream final chunk for cb %d (err: %v)\n", userData, streamErr)
+		}
+		select {
+		case st.doneCh <- streamErr:
+		default:
 		}
 	}
 }
@@ -300,32 +305,26 @@ func (c *drvConversationBackend) Close() error {
 	return nil
 }
 
-// diagTokenIdleTimeout is a TEMPORARY diagnostic: if no stream activity arrives
-// for this long, SendStream fails instead of hanging. It also keeps a pending
-// timer alive so Go's deadlock detector does not fire while native work runs.
-const diagTokenIdleTimeout = time.Minute
-
+// SendStream blocks until the native stream's terminal chunk arrives.
+//
+// ctx is deliberately not honored: returning early would tear down the request
+// while the native runtime keeps generating on its own threads. The C API does
+// expose litert_lm_conversation_cancel_process, which the driver does not bind
+// yet; cancellation should be built on it rather than on abandoning the wait.
 func (c *drvConversationBackend) SendStream(ctx context.Context, messageJSON string, onChunk func(string)) error {
-	actCh := make(chan struct{}, 1)
-	doneCh := make(chan struct{}, 1)
-	notifyActivity := func(token string) {
-		onChunk(token)
-		select {
-		case actCh <- struct{}{}:
-		default:
-		}
+	st := &streamState{
+		onChunk: onChunk,
+		doneCh:  make(chan error, 1),
 	}
 	tokenCallbackMu.Lock()
 	tokenCallbackNextID++
 	cbID := tokenCallbackNextID
-	tokenCallbackRegistry[cbID] = notifyActivity
-	tokenDoneChannels[cbID] = doneCh
+	tokenCallbackRegistry[cbID] = st
 	tokenCallbackMu.Unlock()
 
 	defer func() {
 		tokenCallbackMu.Lock()
 		delete(tokenCallbackRegistry, cbID)
-		delete(tokenDoneChannels, cbID)
 		tokenCallbackMu.Unlock()
 	}()
 
@@ -342,27 +341,8 @@ func (c *drvConversationBackend) SendStream(ctx context.Context, messageJSON str
 		fmt.Fprintf(os.Stderr, "[ai] convSendStream cb %d: returned rc=%d\n", cbID, rc)
 	}
 	if rc != 0 {
-		return fmt.Errorf("send_message_stream failed: %d", rc)
+		return fmt.Errorf("send_message_stream failed to start: %d", rc)
 	}
 
-	idle := time.NewTimer(diagTokenIdleTimeout)
-	defer idle.Stop()
-	for {
-		select {
-		case <-doneCh:
-			return nil
-		case <-actCh:
-			if !idle.Stop() {
-				select {
-				case <-idle.C:
-				default:
-				}
-			}
-			idle.Reset(diagTokenIdleTimeout)
-		case <-idle.C:
-			return fmt.Errorf("[diag] no stream completion for cb %d within %v (native callback never reported is_final)", cbID, diagTokenIdleTimeout)
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
+	return <-st.doneCh
 }
