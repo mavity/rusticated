@@ -26,10 +26,13 @@ func RefineOneLine(engine *ai.Engine, pageText string, line *TextLine, img image
 		return err
 	}
 	var corrected strings.Builder
-	if err := conv.Send(context.Background(), parts, func(text string) {
-		corrected.WriteString(text)
-	}); err != nil {
-		return err
+	for event, err := range conv.SendStream(context.Background(), parts) {
+		if err != nil {
+			return err
+		}
+		if e, ok := event.(ai.TextEvent); ok {
+			corrected.WriteString(e.Text)
+		}
 	}
 	if t := strings.TrimSpace(corrected.String()); t != "" {
 		line.Text = t

@@ -19,7 +19,8 @@ To handle this elegantly, the `ai.go` API will move away from a basic text callb
 
 **New API Types:**
 ```go
-// ModelEvent represents an item emitted during model generation.
+// ModelEvent represents a valid item emitted during model generation.
+// Failures are not events: SendStream reports them as the iterator's error.
 type ModelEvent interface {
     isModelEvent()
 }
@@ -31,7 +32,6 @@ type ToolCall struct {
     Name      string
     Arguments map[string]any
 }
-type ErrorEvent struct { Err error }
 
 // ConversationConfig passes state to the engine BEFORE creating a conversation.
 type ConversationConfig struct {
@@ -54,7 +54,7 @@ type ModelInfo struct {
 ```go
 func LoadModelInfo(libPath, modelPath string) (*ModelInfo, error)
 func (e *Engine) NewConversationWithConfig(cfg ConversationConfig) (*Conversation, error)
-func (c *Conversation) SendStream(ctx context.Context, parts []PromptPart) (<-chan ModelEvent, error)
+func (c *Conversation) SendStream(ctx context.Context, parts []PromptPart) iter.Seq2[ModelEvent, error]
 ```
 
 **Required Binding Updates:**
@@ -67,7 +67,7 @@ The `purego` implementations (`engine_native.go` and `engine_wasip1.go`) will be
 - `litert_lm_conversation_config_set_messages` (required for seeding compacted history)
 - `litert_lm_loaded_file_*` family of functions to populate `ModelInfo` without fully loading the engine.
 
-*Note on Stream Concurrency:* Because the native `litert_lm_conversation_send_message_stream` blocks the thread until generation completes, `SendStream` must spawn a background goroutine. If the C function returns an error status (e.g., out of memory or context length exceeded), the goroutine catches it, pushes an `ErrorEvent` down the Go channel, and closes the channel so the caller isn't left hanging.
+*Note on Stream Concurrency:* The native `litert_lm_conversation_send_message_stream` returns as soon as the stream has started; chunks then arrive on a native background thread, and the terminal chunk (`is_final`, which also carries the error if generation failed) completes the request. The backend therefore blocks until that terminal chunk arrives. `SendStream` runs the backend call in a goroutine and hands events to the caller's goroutine, so the loop body never runs on the native callback thread. A failure (including a non-zero start status) is yielded once as `(nil, err)` and ends the iteration. The iterator does not return until generation has finished, even if the caller breaks out of the loop early: the remaining events are discarded, so the conversation is idle and safe to reuse or close as soon as the loop exits. Context cancellation is not honored mid-generation; the C API's `litert_lm_conversation_cancel_process` is not bound yet.
 
 *Note on JSON Schemas:* LiteRT-LM uses the OpenAI-style schema for tool declarations (an array of `{"type": "function", "function": {...}}` objects). When the model emits a tool call, the chunk arrives as a JSON object containing a `tool_calls` array.
 
@@ -75,7 +75,7 @@ The `purego` implementations (`engine_native.go` and `engine_wasip1.go`) will be
 
 Before starting the loop, Pope will use `LoadModelInfo` to introspect the model. It will use `SupportedBackends` to filter the user's requested `--backend` flag (falling back safely if unsupported) and check `SupportsFunctionCalling` to gracefully disable tools if the model doesn't support them natively.
 
-Pope will consume the `SendStream` channel and act as the executor for tool requests.
+Pope will range over the `SendStream` iterator and act as the executor for tool requests.
 
 1. **Text Events:** Printed directly to `os.Stdout`.
 2. **Tool Call Events:** Pope pauses UI output, executes the requested Go function, and feeds the result back to the model.
