@@ -73,38 +73,8 @@ func (e *engineImpl) NewConversationWithConfig(cfg ConversationConfig) (*convImp
 
 	var historyJSON string
 	if len(cfg.History) > 0 {
-		var messages []map[string]any
-		for _, part := range cfg.History {
-			var content []any
-			if part.Role == RoleTool {
-				resp := part.ToolResponse
-				if resp == nil {
-					resp = part.Text
-				}
-				content = append(content, map[string]any{
-					"type":     "tool_response",
-					"name":     part.ToolName,
-					"response": resp,
-				})
-			} else {
-				if part.ImageBase64 != "" {
-					content = append(content, map[string]string{"type": "image", "blob": part.ImageBase64})
-				}
-				if part.Text != "" {
-					content = append(content, map[string]string{"type": "text", "text": part.Text})
-				}
-			}
-			role := string(part.Role)
-			if role == "" {
-				role = "user"
-			}
-			messages = append(messages, map[string]any{
-				"role":    role,
-				"content": content,
-			})
-		}
-		if data, err := json.Marshal(messages); err == nil {
-			historyJSON = string(data)
+		if data, err := buildHistoryJSON(cfg.History); err == nil {
+			historyJSON = data
 		}
 	}
 
@@ -113,6 +83,66 @@ func (e *engineImpl) NewConversationWithConfig(cfg ConversationConfig) (*convImp
 		return nil, err
 	}
 	return &convImpl{backend: cBackend}, nil
+}
+
+// buildHistoryJSON encodes seeded history as a LiteRT-LM message array. Tool
+// responses are grouped into one message per consecutive run, mirroring how
+// buildMessageJSON sends them live, and a model turn's ToolCalls are emitted
+// as an OpenAI-style "tool_calls" array.
+func buildHistoryJSON(history []PromptPart) (string, error) {
+	var messages []map[string]any
+	for i := 0; i < len(history); i++ {
+		part := history[i]
+		content := []any{}
+		msg := map[string]any{}
+		role := string(part.Role)
+		if role == "" {
+			role = "user"
+		}
+		if part.Role == RoleTool {
+			for ; i < len(history) && history[i].Role == RoleTool; i++ {
+				resp := history[i].ToolResponse
+				if resp == nil {
+					resp = history[i].Text
+				}
+				content = append(content, map[string]any{
+					"type":     "tool_response",
+					"name":     history[i].ToolName,
+					"response": resp,
+				})
+			}
+			i--
+		} else {
+			if part.ImageBase64 != "" {
+				content = append(content, map[string]string{"type": "image", "blob": part.ImageBase64})
+			}
+			if part.Text != "" {
+				content = append(content, map[string]string{"type": "text", "text": part.Text})
+			}
+			if len(part.ToolCalls) > 0 {
+				calls := make([]map[string]any, 0, len(part.ToolCalls))
+				for _, tc := range part.ToolCalls {
+					args := tc.Arguments
+					if args == nil {
+						args = map[string]any{}
+					}
+					calls = append(calls, map[string]any{
+						"type": "function",
+						"function": map[string]any{
+							"name":      tc.Name,
+							"arguments": args,
+						},
+					})
+				}
+				msg["tool_calls"] = calls
+			}
+		}
+		msg["role"] = role
+		msg["content"] = content
+		messages = append(messages, msg)
+	}
+	data, err := json.Marshal(messages)
+	return string(data), err
 }
 
 func (e *engineImpl) NewConversation() (*convImpl, error) {
