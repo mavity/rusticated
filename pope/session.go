@@ -163,9 +163,14 @@ func (s *HarnessSession) compactContext(ctx context.Context) {
 	if err == nil {
 		defer summaryConv.Close()
 		var summary strings.Builder
-		_ = summaryConv.SendText(ctx, historyText.String(), func(token string) {
-			summary.WriteString(token)
-		})
+		stream, err := summaryConv.SendStream(ctx, []ai.PromptPart{{Role: ai.RoleUser, Text: historyText.String()}})
+		if err == nil {
+			for event := range stream {
+				if e, ok := event.(ai.TextEvent); ok {
+					summary.WriteString(e.Text)
+				}
+			}
+		}
 
 		sumText := strings.TrimSpace(summary.String())
 		if sumText != "" {
