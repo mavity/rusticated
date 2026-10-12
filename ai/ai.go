@@ -7,6 +7,7 @@ package ai
 import (
 	"context"
 	"encoding/json"
+	"iter"
 )
 
 // Role identifies the author of a prompt part.
@@ -32,7 +33,8 @@ type PromptPart struct {
 	ToolCalls    []ToolCall
 }
 
-// ModelEvent represents an item emitted during model generation.
+// ModelEvent represents a valid item emitted during model generation. Failures
+// are not events: SendStream reports them as the error of its iterator.
 type ModelEvent interface {
 	isModelEvent()
 }
@@ -56,13 +58,6 @@ type ToolCallEvent struct {
 }
 
 func (ToolCallEvent) isModelEvent() {}
-
-// ErrorEvent is emitted if generation fails during streaming.
-type ErrorEvent struct {
-	Err error
-}
-
-func (ErrorEvent) isModelEvent() {}
 
 // ModelInfo provides introspection into a LiteRT-LM file's capabilities.
 type ModelInfo struct {
@@ -128,44 +123,58 @@ type Conversation struct {
 	impl *convImpl
 }
 
-// Send submits a multimodal message and streams back decoded text tokens via
-// onToken. The LiteRT JSON schema is handled internally: callers receive and
-// provide only plain text and image bytes.
-func (c *Conversation) Send(ctx context.Context, parts []PromptPart, onToken func(string)) error {
-	payload, err := buildMessageJSON(parts)
-	if err != nil {
-		return err
-	}
-	return c.impl.sendStream(ctx, payload, func(raw string) {
-		if onToken != nil {
-			onToken(extractTokenText(raw))
-		}
-	})
+// streamItem is one element passed from the native callback thread to the
+// goroutine ranging over SendStream: an event, or the terminal error.
+type streamItem struct {
+	event ModelEvent
+	err   error
 }
 
-// SendText is a convenience wrapper for a single user text turn.
-func (c *Conversation) SendText(ctx context.Context, text string, onToken func(string)) error {
-	return c.Send(ctx, []PromptPart{{Role: RoleUser, Text: text}}, onToken)
-}
-
-// SendStream sends a message and returns an asynchronous channel of ModelEvents
-// (TextEvent, ToolCallEvent, or ErrorEvent).
-func (c *Conversation) SendStream(ctx context.Context, parts []PromptPart) (<-chan ModelEvent, error) {
-	payload, err := buildMessageJSON(parts)
-	if err != nil {
-		return nil, err
-	}
-	ch := make(chan ModelEvent, 16)
-	go func() {
-		defer close(ch)
-		err := c.impl.sendStream(ctx, payload, func(raw string) {
-			parseAndEmitEvents(raw, ch)
-		})
+// SendStream sends a message and returns an iterator over the generated
+// ModelEvents (TextEvent, ToolCallEvent). Events are yielded as (event, nil).
+// A failure, including one before generation starts, is yielded once as
+// (nil, err) and ends the iteration.
+//
+// The iterator does not return until the native generation has finished, even
+// if the caller breaks out of the loop early: the remaining events are
+// discarded. The conversation is therefore idle, and safe to reuse or Close,
+// as soon as the loop exits. The loop body runs on the caller's goroutine, not
+// on the native callback thread.
+func (c *Conversation) SendStream(ctx context.Context, parts []PromptPart) iter.Seq2[ModelEvent, error] {
+	return func(yield func(ModelEvent, error) bool) {
+		payload, err := buildMessageJSON(parts)
 		if err != nil {
-			ch <- ErrorEvent{Err: err}
+			yield(nil, err)
+			return
 		}
-	}()
-	return ch, nil
+
+		ch := make(chan streamItem, 16)
+		go func() {
+			defer close(ch)
+			err := c.impl.sendStream(ctx, payload, func(raw string) {
+				for _, event := range parseChunkEvents(raw) {
+					ch <- streamItem{event: event}
+				}
+			})
+			if err != nil {
+				ch <- streamItem{err: err}
+			}
+		}()
+
+		// Runs on normal completion (ch already closed), on early break, and if
+		// the loop body panics. An unread channel would fill up and block the
+		// native callback thread, so it must be drained until generation ends.
+		defer func() {
+			for range ch {
+			}
+		}()
+
+		for item := range ch {
+			if !yield(item.event, item.err) {
+				return
+			}
+		}
+	}
 }
 
 // Close releases the conversation. It is safe to call multiple times.
@@ -250,9 +259,9 @@ func buildMessageJSON(parts []PromptPart) (string, error) {
 	return string(out), err
 }
 
-// parseAndEmitEvents parses a raw chunk from LiteRT-LM and delivers TextEvent
-// and/or ToolCallEvent to ch.
-func parseAndEmitEvents(raw string, ch chan<- ModelEvent) {
+// parseChunkEvents parses a raw chunk from LiteRT-LM into its TextEvents and/or
+// ToolCallEvent.
+func parseChunkEvents(raw string) []ModelEvent {
 	var chunk struct {
 		Content []struct {
 			Type string `json:"type"`
@@ -269,14 +278,15 @@ func parseAndEmitEvents(raw string, ch chan<- ModelEvent) {
 
 	if err := json.Unmarshal([]byte(raw), &chunk); err != nil {
 		if raw != "" {
-			ch <- TextEvent{Text: raw}
+			return []ModelEvent{TextEvent{Text: raw}}
 		}
-		return
+		return nil
 	}
 
+	var events []ModelEvent
 	for _, c := range chunk.Content {
 		if c.Text != "" {
-			ch <- TextEvent{Text: c.Text}
+			events = append(events, TextEvent{Text: c.Text})
 		}
 	}
 
@@ -296,24 +306,8 @@ func parseAndEmitEvents(raw string, ch chan<- ModelEvent) {
 			})
 		}
 		if len(calls) > 0 {
-			ch <- ToolCallEvent{ToolCalls: calls}
+			events = append(events, ToolCallEvent{ToolCalls: calls})
 		}
 	}
-}
-
-// extractTokenText parses a raw streaming token emitted by litert_lm and
-// returns just its text.
-func extractTokenText(raw string) string {
-	var msg struct {
-		Content []struct {
-			Text string `json:"text"`
-		} `json:"content"`
-	}
-	if err := json.Unmarshal([]byte(raw), &msg); err != nil {
-		return raw
-	}
-	if len(msg.Content) > 0 {
-		return msg.Content[0].Text
-	}
-	return raw
+	return events
 }

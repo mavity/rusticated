@@ -55,24 +55,21 @@ func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
 	s.totalTokensEst += len(userText) / 4
 
 	for {
-		stream, err := s.conv.SendStream(ctx, turnParts)
-		if err != nil {
-			return err
-		}
-
 		var toolCalls []ai.ToolCall
 		var generatedText strings.Builder
 
 		var streamErr error
-		for event := range stream {
+		for event, err := range s.conv.SendStream(ctx, turnParts) {
+			if err != nil {
+				streamErr = err
+				break
+			}
 			switch e := event.(type) {
 			case ai.TextEvent:
 				fmt.Print(e.Text)
 				generatedText.WriteString(e.Text)
 			case ai.ToolCallEvent:
 				toolCalls = append(toolCalls, e.ToolCalls...)
-			case ai.ErrorEvent:
-				streamErr = e.Err
 			}
 		}
 
@@ -163,12 +160,12 @@ func (s *HarnessSession) compactContext(ctx context.Context) {
 	if err == nil {
 		defer summaryConv.Close()
 		var summary strings.Builder
-		stream, err := summaryConv.SendStream(ctx, []ai.PromptPart{{Role: ai.RoleUser, Text: historyText.String()}})
-		if err == nil {
-			for event := range stream {
-				if e, ok := event.(ai.TextEvent); ok {
-					summary.WriteString(e.Text)
-				}
+		for event, err := range summaryConv.SendStream(ctx, []ai.PromptPart{{Role: ai.RoleUser, Text: historyText.String()}}) {
+			if err != nil {
+				break
+			}
+			if e, ok := event.(ai.TextEvent); ok {
+				summary.WriteString(e.Text)
 			}
 		}
 
