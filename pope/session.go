@@ -97,7 +97,18 @@ func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
 			break
 		}
 
-		// Model emitted tool calls
+		// Model emitted tool calls: record the model turn (preamble text plus
+		// the calls) before the responses, so replayed history stays well-formed.
+		s.history = append(s.history, ai.PromptPart{
+			Role:      ai.RoleModel,
+			Text:      generatedText.String(),
+			ToolCalls: toolCalls,
+		})
+		s.totalTokensEst += generatedText.Len() / 4
+		if b, err := json.Marshal(toolCalls); err == nil {
+			s.totalTokensEst += len(b) / 4
+		}
+
 		var toolResponses []ai.PromptPart
 		for _, call := range toolCalls {
 			if s.verbose {
