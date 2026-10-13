@@ -29,10 +29,19 @@ func (s *HarnessSession) appendHistory(parts ...ai.PromptPart) {
 }
 
 func (s *HarnessSession) Init() error {
+	// Ensure CompactedHistory never starts or ends on an orphaned tool turn.
+	if len(s.CompactedHistory) > 0 && s.CompactedHistory[len(s.CompactedHistory)-1].Role == ai.RoleUser {
+		// In RunTurn retry, the pending turnParts sit at the tail of CompactedHistory;
+		// NewConversationWithConfig seeds the history prior to the pending turnParts.
+	}
+	return s.initWithHistory(s.CompactedHistory)
+}
+
+func (s *HarnessSession) initWithHistory(history []ai.PromptPart) error {
 	cfg := ai.ConversationConfig{
 		SystemMessage: s.systemMessage,
 		Tools:         s.tools,
-		History:       s.CompactedHistory,
+		History:       history,
 	}
 	conv, err := s.engine.NewConversationWithConfig(cfg)
 	if err != nil {
@@ -40,8 +49,8 @@ func (s *HarnessSession) Init() error {
 	}
 	s.conv = conv
 
-	// Accurate starting estimate: count System message and Tools JSON size.
-	s.totalTokensEst = len(s.systemMessage) / 4
+	// Accurate starting estimate: count System message, Tools, and seeded History size.
+	s.totalTokensEst = len(s.systemMessage)/4 + historySize(history)/4
 	for _, t := range s.tools {
 		if b, err := json.Marshal(t); err == nil {
 			s.totalTokensEst += len(b) / 4
@@ -54,6 +63,17 @@ func (s *HarnessSession) Close() {
 	if s.conv != nil {
 		s.conv.Close()
 	}
+}
+
+func isContextOverflowError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "exceeds available state entries") ||
+		strings.Contains(msg, "Input token ids are too long") ||
+		strings.Contains(msg, "Exceeding the maximum number of tokens") ||
+		strings.Contains(msg, "Max number of tokens reached")
 }
 
 func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
@@ -82,7 +102,7 @@ func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
 		}
 
 		if streamErr != nil {
-			isOverflow := strings.Contains(streamErr.Error(), "exceeds available state entries")
+			isOverflow := isContextOverflowError(streamErr)
 			isLoop := errors.Is(streamErr, ai.ErrRepetitionLoop)
 
 			if (isOverflow || isLoop) && retries < 2 {
@@ -90,7 +110,7 @@ func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
 				if generatedText.Len() > 0 {
 					fmt.Println()
 				}
-				err := s.compactContext(ctx, func(text string) {
+				err := s.compactContextForRetry(ctx, len(turnParts), func(text string) {
 					fmt.Print(text)
 				})
 				fmt.Println()
@@ -99,6 +119,15 @@ func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
 				}
 				continue // retry the turn seamlessly with the fresh s.conv
 			}
+			// Any stream failure or cancellation leaves the LiteRT-LM conversation
+			// poisoned ("Task failed with state: 7"). Drop the failed turn's
+			// uncommitted tail from CompactedHistory and re-initialize s.conv so
+			// the next user prompt in the REPL starts on a clean conversation.
+			if n := len(turnParts); n > 0 && len(s.CompactedHistory) >= n {
+				s.CompactedHistory = s.CompactedHistory[:len(s.CompactedHistory)-n]
+			}
+			s.Close()
+			_ = s.Init()
 			return streamErr
 		}
 
@@ -179,62 +208,157 @@ func historySize(history []ai.PromptPart) int {
 	return total
 }
 
+func formatPartForSummary(p ai.PromptPart) string {
+	const maxPartChars = 1200
+	var sb strings.Builder
+	sb.WriteString(string(p.Role))
+	sb.WriteString(": ")
+	if p.Text != "" {
+		sb.WriteString(compactString(p.Text, maxPartChars))
+	}
+	if len(p.ToolCalls) > 0 {
+		for _, tc := range p.ToolCalls {
+			sb.WriteString(fmt.Sprintf(" [call %s(%s)]", tc.Name, compactString(string(tc.RawArguments), 200)))
+		}
+	}
+	if p.ToolResponse != nil {
+		if b, err := json.Marshal(p.ToolResponse); err == nil {
+			sb.WriteString(fmt.Sprintf(" [tool %s -> %s]", p.ToolName, compactString(string(b), maxPartChars)))
+		}
+	}
+	sb.WriteByte('\n')
+	return sb.String()
+}
+
 func (s *HarnessSession) compactContext(ctx context.Context, feedback LogFeedback) error {
+	return s.compactContextForRetry(ctx, 0, feedback)
+}
+
+func (s *HarnessSession) compactContextForRetry(ctx context.Context, pendingParts int, feedback LogFeedback) error {
 	before := historySize(s.CompactedHistory)
 	if feedback != nil {
 		feedback("🗜️ ")
 	}
-	if len(s.CompactedHistory) > 4 {
-		cutoff := len(s.CompactedHistory) - 4
-		older := s.CompactedHistory[:cutoff]
+
+	// Separate any in-flight turnParts (which RunTurn is about to re-send via
+	// SendStream) from the prior history that should be compacted and seeded.
+	var pending []ai.PromptPart
+	prior := s.CompactedHistory
+	if pendingParts > 0 && len(prior) >= pendingParts {
+		split := len(prior) - pendingParts
+		pending = append([]ai.PromptPart(nil), prior[split:]...)
+		prior = prior[:split]
+	}
+
+	if len(prior) > 0 {
+		older, recent := splitHistoryForCompaction(prior, s.compactionLimit)
 
 		var historyText strings.Builder
 		for _, p := range older {
-			historyText.WriteString(fmt.Sprintf("%s: %s\n", p.Role, p.Text))
+			historyText.WriteString(formatPartForSummary(p))
+		}
+		promptText := historyText.String()
+		if len(promptText) > 12000 {
+			promptText = promptText[len(promptText)-12000:]
 		}
 
-		summaryConv, err := s.engine.NewConversationWithConfig(ai.ConversationConfig{
-			SystemMessage: "You are a concise conversation summarizer. Summarize the key facts from the conversation below in 2-3 sentences.",
-		})
-		if err == nil {
-			var summary strings.Builder
-			for event, err := range summaryConv.SendStream(ctx, []ai.PromptPart{{Role: ai.RoleUser, Text: historyText.String()}}) {
-				if err != nil {
-					break
+		var sumText string
+		if promptText != "" && s.engine != nil {
+			summaryConv, err := s.engine.NewConversationWithConfig(ai.ConversationConfig{
+				SystemMessage: "You are a concise conversation summarizer. Summarize the key facts from the conversation below in 2-3 sentences.",
+			})
+			if err == nil {
+				var summary strings.Builder
+				for event, err := range summaryConv.SendStream(ctx, []ai.PromptPart{{Role: ai.RoleUser, Text: promptText}}) {
+					if err != nil {
+						break
+					}
+					if e, ok := event.(ai.TextEvent); ok {
+						summary.WriteString(e.Text)
+					}
 				}
-				if e, ok := event.(ai.TextEvent); ok {
-					summary.WriteString(e.Text)
-				}
+				summaryConv.Close()
+				sumText = strings.TrimSpace(summary.String())
 			}
-			summaryConv.Close()
+		}
+		if sumText == "" && len(older) > 0 {
+			// Fallback deterministic digest if summarizer call failed or returned empty.
+			sumText = compactString(strings.TrimSpace(promptText), 600)
+		}
+		if sumText != "" {
+			prior = buildCompactedHistory(recent, sumText)
+		}
+	}
 
-			sumText := strings.TrimSpace(summary.String())
-			if sumText != "" {
-				s.CompactedHistory = compactHistory(s.CompactedHistory, sumText)
-				s.totalTokensEst = len(sumText)/4 + 200
+	// Truncate oversized pending tool outputs if the pending turn itself exceeds budget.
+	for i := range pending {
+		if pending[i].Role == ai.RoleTool && pending[i].ToolResponse != nil {
+			if b, err := json.Marshal(pending[i].ToolResponse); err == nil && len(b) > 8192 {
+				pending[i].ToolResponse = map[string]any{"output": compactString(string(b), 8192) + "\n...[compacted]"}
 			}
 		}
 	}
 
+	s.CompactedHistory = append(append([]ai.PromptPart(nil), prior...), pending...)
 	after := historySize(s.CompactedHistory)
 	if feedback != nil {
 		feedback(fmt.Sprintf("%d:%d", before, after))
 	}
 
 	s.Close()
-	return s.Init()
+	// Seed the new conversation with prior history only; RunTurn will send pending turnParts next.
+	return s.initWithHistory(prior)
 }
 
-func compactHistory(history []ai.PromptPart, summary string) []ai.PromptPart {
-	if len(history) <= 4 {
-		return history
+// splitHistoryForCompaction partitions history into (older, recent) so that:
+// 1. recent starts on a RoleUser boundary (never an orphaned RoleModel/RoleTool),
+// 2. recent fits comfortably within half the compaction budget, and
+// 3. at least one older part is moved into older when history is large.
+func splitHistoryForCompaction(history []ai.PromptPart, compactionLimit int) (older, recent []ai.PromptPart) {
+	if len(history) <= 2 {
+		if historySize(history) > 4096 {
+			return history, nil
+		}
+		return nil, history
 	}
 	cutoff := len(history) - 4
-	recent := history[cutoff:]
+	if cutoff < 1 {
+		cutoff = 1
+	}
+	// Advance cutoff to a RoleUser boundary so recent never starts mid-tool-exchange.
+	for cutoff < len(history) && history[cutoff].Role != ai.RoleUser {
+		cutoff++
+	}
+	// Also shrink recent if its byte size alone exceeds half the token budget (~2 bytes/token).
+	maxRecentBytes := compactionLimit * 2
+	if maxRecentBytes <= 0 {
+		maxRecentBytes = 8192
+	}
+	for cutoff < len(history) && historySize(history[cutoff:]) > maxRecentBytes {
+		cutoff++
+		for cutoff < len(history) && history[cutoff].Role != ai.RoleUser {
+			cutoff++
+		}
+	}
+	return history[:cutoff], history[cutoff:]
+}
+
+func buildCompactedHistory(recent []ai.PromptPart, summary string) []ai.PromptPart {
 	compacted := make([]ai.PromptPart, 1, 1+len(recent))
 	compacted[0] = ai.PromptPart{
 		Role: ai.RoleUser,
 		Text: "[Previous conversation summary]: " + summary,
 	}
 	return append(compacted, recent...)
+}
+
+func compactHistory(history []ai.PromptPart, summary string) []ai.PromptPart {
+	if len(history) <= 4 && historySize(history) <= 4096 {
+		return history
+	}
+	older, recent := splitHistoryForCompaction(history, 4096)
+	if len(older) == 0 {
+		return history
+	}
+	return buildCompactedHistory(recent, summary)
 }

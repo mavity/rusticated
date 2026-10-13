@@ -172,9 +172,13 @@ type loopDetector struct {
 }
 
 const (
-	loopWindowMax     = 1024
-	minRepeatSpan     = 64
-	entropyWindowSize = 384
+	loopWindowMax             = 1024
+	minRepeatSpan             = 64
+	entropyWindowSize         = 384
+	maxSummaryExcerpt         = 4096
+	shortRepeatMinSpan        = 128
+	shortRepeatMinRepetitions = 8
+	shortRepeatMaxPeriod      = 16
 )
 
 func (d *loopDetector) feedText(s string) bool {
@@ -183,12 +187,43 @@ func (d *loopDetector) feedText(s string) bool {
 		d.buf = d.buf[len(d.buf)-loopWindowMax:]
 	}
 	n := len(d.buf)
+
+	// 1. Short-period tandem repeat check uses a higher threshold because
+	// repeated short formatting fragments can be legitimate output.
+	if n >= shortRepeatMinSpan {
+		for l := 1; l <= shortRepeatMaxPeriod && l*shortRepeatMinRepetitions <= n; l++ {
+			reps := shortRepeatMinSpan / l
+			if shortRepeatMinSpan%l != 0 {
+				reps++
+			}
+			if reps < shortRepeatMinRepetitions {
+				reps = shortRepeatMinRepetitions
+			}
+			span := l * reps
+			if span > n {
+				continue
+			}
+			tail := d.buf[n-span:]
+			unit := tail[span-l:]
+			match := true
+			for r := 0; r < reps-1; r++ {
+				if !bytes.Equal(tail[r*l:(r+1)*l], unit) {
+					match = false
+					break
+				}
+			}
+			if match {
+				return true
+			}
+		}
+	}
+
 	if n < minRepeatSpan {
 		return false
 	}
 
-	// 1. Exact tandem repeat check: catches A-A-A and interleaved AB-AB-AB.
-	// Check periods L from 3 up to n/3.
+	// 2. General tandem repeat check: catches longer phrase/sentence loops and
+	// interleaved AB-AB-AB for periods L up to n/3.
 	maxL := n / 3
 	for l := 3; l <= maxL; l++ {
 		reps := minRepeatSpan / l
@@ -208,7 +243,7 @@ func (d *loopDetector) feedText(s string) bool {
 				break
 			}
 		}
-		if match {
+		if match && !hasShorterPeriod(unit) {
 			return true
 		}
 	}
@@ -217,6 +252,26 @@ func (d *loopDetector) feedText(s string) bool {
 	if n >= entropyWindowSize {
 		win := d.buf[n-entropyWindowSize:]
 		if lowComplexity(win) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasShorterPeriod(unit []byte) bool {
+	maxPeriod := min(shortRepeatMaxPeriod, len(unit)-1)
+	for period := 1; period <= maxPeriod; period++ {
+		if len(unit)%period != 0 {
+			continue
+		}
+		repeated := true
+		for i := period; i < len(unit); i++ {
+			if unit[i] != unit[i%period] {
+				repeated = false
+				break
+			}
+		}
+		if repeated {
 			return true
 		}
 	}
