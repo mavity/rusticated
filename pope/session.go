@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,10 +20,13 @@ type partEmbedder interface {
 	Embed(parts []ai.PromptPart) ([]float32, error)
 }
 
+type textCompressorFunc func(ctx context.Context, systemPrompt, userPrompt string) (string, error)
+
 // HarnessSession tracks conversation state, history, and context compaction.
 type HarnessSession struct {
 	engine           *ai.Engine
 	embedder         partEmbedder
+	compressor       textCompressorFunc
 	conv             *ai.Conversation
 	systemMessage    string
 	tools            []map[string]any
@@ -122,20 +126,48 @@ func (s *HarnessSession) processPendingEmbeddings(flushAll bool) {
 
 		vec, err := s.embedder.Embed([]ai.PromptPart{part})
 		s.historyMu.Lock()
-		if err == nil && len(vec) > 0 && idx < len(s.CanonicalHistory) {
-			s.CanonicalHistory[idx].Embedding = vec
-			syncCompactedEmbedding(s.CompactedHistory, part, vec)
-			if s.verbose {
-				fmt.Fprintf(os.Stderr, "[embed] #%d %s %s\n", idx, part.Role, formatEmbeddingSummary(vec))
-			}
-		} else if err != nil && s.verbose {
-			fmt.Fprintf(os.Stderr, "[embed] #%d %s error: %v\n", idx, part.Role, err)
-		}
-		if idx == s.embeddedUpTo {
-			s.embeddedUpTo++
-		}
+		s.applyEmbeddingLocked(idx, part, vec, err)
 		s.historyMu.Unlock()
 		s.turnGate.Unlock()
+	}
+}
+
+func (s *HarnessSession) applyEmbeddingLocked(idx int, part ai.PromptPart, vec []float32, err error) {
+	if err == nil && len(vec) > 0 && idx < len(s.CanonicalHistory) {
+		s.CanonicalHistory[idx].Embedding = vec
+		syncCompactedEmbedding(s.CompactedHistory, part, vec)
+		if s.verbose {
+			fmt.Fprintf(os.Stderr, "[embed] #%d %s %s\n", idx, part.Role, formatEmbeddingSummary(vec))
+		}
+	} else if err != nil && s.verbose {
+		fmt.Fprintf(os.Stderr, "[embed] #%d %s error: %v\n", idx, part.Role, err)
+	}
+	if idx == s.embeddedUpTo {
+		s.embeddedUpTo++
+	}
+}
+
+func (s *HarnessSession) flushEmbeddingsInline() {
+	if s.embedder == nil || reflect.ValueOf(s.embedder).IsNil() {
+		return
+	}
+	for {
+		s.historyMu.Lock()
+		for s.embeddedUpTo < len(s.CanonicalHistory) && len(s.CanonicalHistory[s.embeddedUpTo].Embedding) > 0 {
+			s.embeddedUpTo++
+		}
+		if s.embeddedUpTo >= len(s.CanonicalHistory) {
+			s.historyMu.Unlock()
+			return
+		}
+		idx := s.embeddedUpTo
+		part := s.CanonicalHistory[idx]
+		s.historyMu.Unlock()
+
+		vec, err := s.embedder.Embed([]ai.PromptPart{part})
+		s.historyMu.Lock()
+		s.applyEmbeddingLocked(idx, part, vec, err)
+		s.historyMu.Unlock()
 	}
 }
 
@@ -417,16 +449,484 @@ func (s *HarnessSession) compactContext(ctx context.Context, feedback LogFeedbac
 	return s.compactContextForRetry(ctx, 0, feedback)
 }
 
+const (
+	defaultActiveTailUnits = 8
+	topicDecayFactor       = 0.85
+)
+
+// atomicTurnUnit represents an indivisible unit of conversation history:
+// 1. A standalone RoleUser turn
+// 2. A standalone RoleModel turn without ToolCalls
+// 3. A RoleModel turn with ToolCalls plus all immediately following RoleTool responses
+type atomicTurnUnit struct {
+	parts     []ai.PromptPart
+	embedding []float32
+}
+
+// groupIntoAtomicUnits partitions a slice of PromptParts into indivisible atomicTurnUnits.
+func groupIntoAtomicUnits(history []ai.PromptPart) []atomicTurnUnit {
+	var units []atomicTurnUnit
+	for i := 0; i < len(history); i++ {
+		p := history[i]
+		if p.Role == ai.RoleModel && len(p.ToolCalls) > 0 {
+			end := i + 1
+			for end < len(history) && history[end].Role == ai.RoleTool {
+				end++
+			}
+			slice := append([]ai.PromptPart(nil), history[i:end]...)
+			units = append(units, atomicTurnUnit{
+				parts:     slice,
+				embedding: computeUnitEmbedding(slice),
+			})
+			i = end - 1
+			continue
+		}
+		slice := []ai.PromptPart{p}
+		units = append(units, atomicTurnUnit{
+			parts:     slice,
+			embedding: computeUnitEmbedding(slice),
+		})
+	}
+	return units
+}
+
+// computeUnitEmbedding returns the L2-normalized sum of constituent part embeddings.
+func computeUnitEmbedding(parts []ai.PromptPart) []float32 {
+	var dim int
+	for _, p := range parts {
+		if len(p.Embedding) > 0 {
+			dim = len(p.Embedding)
+			break
+		}
+	}
+	if dim == 0 {
+		return nil
+	}
+	sum := make([]float32, dim)
+	for _, p := range parts {
+		if len(p.Embedding) != dim {
+			continue
+		}
+		for i, v := range p.Embedding {
+			sum[i] += v
+		}
+	}
+	return l2Normalize(sum)
+}
+
+func l2Normalize(vec []float32) []float32 {
+	var sumSq float64
+	for _, v := range vec {
+		sumSq += float64(v) * float64(v)
+	}
+	if sumSq == 0 {
+		return nil
+	}
+	invNorm := float32(1.0 / math.Sqrt(sumSq))
+	out := make([]float32, len(vec))
+	for i, v := range vec {
+		out[i] = v * invNorm
+	}
+	return out
+}
+
+func cosineSimilarity(a, b []float32) float32 {
+	if len(a) == 0 || len(a) != len(b) {
+		return -1
+	}
+	var dot float32
+	for i := range a {
+		dot += a[i] * b[i]
+	}
+	return dot
+}
+
+// computeTopicAndBoundary computes the exponentially-weighted topic vector V_topic
+// over the last X units and calibrates T_boundary as the minimum similarity over the last X/2 units.
+func computeTopicAndBoundary(units []atomicTurnUnit, x int) (topic []float32, boundary float32, ok bool) {
+	n := len(units)
+	if n == 0 {
+		return nil, 0, false
+	}
+	if x > n {
+		x = n
+	}
+	var dim int
+	for i := n - x; i < n; i++ {
+		if len(units[i].embedding) > 0 {
+			dim = len(units[i].embedding)
+			break
+		}
+	}
+	if dim == 0 {
+		return nil, 0, false
+	}
+
+	weighted := make([]float32, dim)
+	weight := float32(1.0)
+	hasAny := false
+	for i := 0; i < x; i++ {
+		u := units[n-1-i]
+		if len(u.embedding) == dim {
+			hasAny = true
+			for d := 0; d < dim; d++ {
+				weighted[d] += weight * u.embedding[d]
+			}
+		}
+		weight *= float32(topicDecayFactor)
+	}
+	if !hasAny {
+		return nil, 0, false
+	}
+	topic = l2Normalize(weighted)
+	if len(topic) == 0 {
+		return nil, 0, false
+	}
+
+	calibCount := x / 2
+	if calibCount < 1 {
+		calibCount = 1
+	}
+	if calibCount > n {
+		calibCount = n
+	}
+	boundary = 2.0
+	for i := n - calibCount; i < n; i++ {
+		if len(units[i].embedding) == dim {
+			sim := cosineSimilarity(units[i].embedding, topic)
+			if sim < boundary {
+				boundary = sim
+			}
+		}
+	}
+	if boundary > 1.0 {
+		return nil, 0, false
+	}
+	return topic, boundary, true
+}
+
+// selectPinnedAnchors scans the discard/search zone (units[:searchEnd]), filters
+// for units with similarity >= boundary, and returns a boolean set of the top K = max(1, x/4) unit indices.
+func selectPinnedAnchors(units []atomicTurnUnit, searchEnd int, topic []float32, boundary float32, x int) map[int]bool {
+	pinned := make(map[int]bool)
+	if searchEnd <= 0 || len(topic) == 0 {
+		return pinned
+	}
+	k := x / 4
+	if k < 1 {
+		k = 1
+	}
+	type candidate struct {
+		idx int
+		sim float32
+	}
+	var candidates []candidate
+	for i := 0; i < searchEnd; i++ {
+		if len(units[i].embedding) != len(topic) {
+			continue
+		}
+		sim := cosineSimilarity(units[i].embedding, topic)
+		if sim >= boundary {
+			candidates = append(candidates, candidate{idx: i, sim: sim})
+		}
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].sim > candidates[j].sim
+	})
+	if len(candidates) > k {
+		candidates = candidates[:k]
+	}
+	for _, c := range candidates {
+		pinned[c.idx] = true
+	}
+	return pinned
+}
+
+// serializeGapUnits formats all parts in a gap into a plain text dialogue block
+// without algorithmic string truncation, replacing ImageBase64 with a textual descriptor.
+func serializeGapUnits(units []atomicTurnUnit) string {
+	var sb strings.Builder
+	for _, u := range units {
+		for _, p := range u.parts {
+			sb.WriteString(string(p.Role))
+			sb.WriteString(": ")
+			if p.ImageBase64 != "" {
+				sb.WriteString("[image: user attached image] ")
+			}
+			if p.Text != "" {
+				sb.WriteString(p.Text)
+			}
+			if len(p.ToolCalls) > 0 {
+				for _, tc := range p.ToolCalls {
+					args := string(tc.RawArguments)
+					if args == "" && len(tc.Arguments) > 0 {
+						if b, err := json.Marshal(tc.Arguments); err == nil {
+							args = string(b)
+						}
+					}
+					sb.WriteString(fmt.Sprintf(" [call %s(%s)]", tc.Name, args))
+				}
+			}
+			if p.ToolResponse != nil {
+				if b, err := json.Marshal(p.ToolResponse); err == nil {
+					sb.WriteString(fmt.Sprintf(" [tool %s -> %s]", p.ToolName, string(b)))
+				}
+			}
+			sb.WriteByte('\n')
+		}
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+func wordCount(s string) int {
+	return len(strings.Fields(s))
+}
+
+func truncateToWords(s string, maxWords int) string {
+	fields := strings.Fields(s)
+	if len(fields) <= maxWords || maxWords <= 0 {
+		return strings.TrimSpace(s)
+	}
+	return strings.Join(fields[:maxWords], " ")
+}
+
+func (s *HarnessSession) runCompressorPrompt(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
+	if s.compressor != nil {
+		return s.compressor(ctx, systemPrompt, userPrompt)
+	}
+	if s.engine == nil {
+		return "", errors.New("no engine configured for summarization")
+	}
+	summaryConv, err := s.engine.NewConversationWithConfig(ai.ConversationConfig{
+		SystemMessage: systemPrompt,
+	})
+	if err != nil {
+		return "", err
+	}
+	defer summaryConv.Close()
+
+	var summary strings.Builder
+	for event, err := range summaryConv.SendStream(ctx, []ai.PromptPart{{Role: ai.RoleUser, Text: userPrompt}}) {
+		if err != nil {
+			return strings.TrimSpace(summary.String()), err
+		}
+		if e, ok := event.(ai.TextEvent); ok {
+			summary.WriteString(e.Text)
+		}
+	}
+	return strings.TrimSpace(summary.String()), nil
+}
+
+// compressTextBlock enforces the word ceiling (40% of input words, min 15) with up to 2 retries
+// stepping down by 0.75x on budget overrun, and a deterministic word-truncation escape hatch.
+func (s *HarnessSession) compressTextBlock(ctx context.Context, gapText string) string {
+	gapText = strings.TrimSpace(gapText)
+	if gapText == "" {
+		return ""
+	}
+	wIn := wordCount(gapText)
+	if wIn == 0 {
+		return ""
+	}
+	wTarget := int(float64(wIn) * 0.40)
+	if wTarget < 15 {
+		wTarget = 15
+	}
+
+	var shortest string
+	for attempt := 0; attempt <= 2; attempt++ {
+		sysPrompt := fmt.Sprintf(
+			"You are a conversation compressor. Output ONLY a terse factual record of actions, decisions, and tool results from the dialogue below. Maximum %d words. NO commentary, NO intros.",
+			wTarget,
+		)
+		out, err := s.runCompressorPrompt(ctx, sysPrompt, gapText)
+		out = strings.TrimSpace(out)
+		if err == nil && out != "" {
+			wOut := wordCount(out)
+			if shortest == "" || wOut < wordCount(shortest) {
+				shortest = out
+			}
+			if wOut < wIn && wOut <= wTarget {
+				return out
+			}
+		}
+		wTarget = int(float64(wTarget) * 0.75)
+		if wTarget < 10 {
+			wTarget = 10
+		}
+	}
+
+	if shortest != "" {
+		return truncateToWords(shortest, wTarget)
+	}
+	return truncateToWords(gapText, wTarget)
+}
+
+func (s *HarnessSession) gapTokenBudget() int {
+	if s.compactionLimit > 0 {
+		return s.compactionLimit / 2
+	}
+	return 2048
+}
+
+// summarizeGap recursively halves gaps that exceed the context token budget,
+// respecting atomic unit boundaries when len(units) > 1 and splitting text in half when len(units) == 1.
+func (s *HarnessSession) summarizeGap(ctx context.Context, units []atomicTurnUnit) string {
+	if len(units) == 0 {
+		return ""
+	}
+	budget := s.gapTokenBudget()
+	gapText := serializeGapUnits(units)
+	if gapText == "" {
+		return ""
+	}
+	estTokens := len(gapText) / 4
+	if estTokens > budget {
+		if len(units) > 1 {
+			mid := len(units) / 2
+			left := s.summarizeGap(ctx, units[:mid])
+			right := s.summarizeGap(ctx, units[mid:])
+			return strings.TrimSpace(left + " " + right)
+		}
+		return s.summarizeOversizedText(ctx, gapText, budget)
+	}
+	return s.compressTextBlock(ctx, gapText)
+}
+
+func (s *HarnessSession) summarizeOversizedText(ctx context.Context, text string, budget int) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	if len(text)/4 <= budget || len(text) <= 64 {
+		return s.compressTextBlock(ctx, text)
+	}
+	mid := len(text) / 2
+	for mid < len(text) && text[mid] != ' ' && text[mid] != '\n' {
+		mid++
+	}
+	if mid >= len(text) {
+		mid = len(text) / 2
+	}
+	left := s.summarizeOversizedText(ctx, text[:mid], budget)
+	right := s.summarizeOversizedText(ctx, text[mid:], budget)
+	return strings.TrimSpace(left + " " + right)
+}
+
+// projectHistory builds the RAG-projected CompactedHistory from CanonicalHistory units.
+func (s *HarnessSession) projectHistory(ctx context.Context, prior []ai.PromptPart) []ai.PromptPart {
+	units := groupIntoAtomicUnits(prior)
+	n := len(units)
+	if n == 0 {
+		return nil
+	}
+
+	x := defaultActiveTailUnits
+	if x >= n {
+		// If history has fewer than defaultActiveTailUnits units, still allow compaction
+		// when there are > 2 units or oversized payloads.
+		if n <= 2 {
+			if historySize(prior) <= 4096 {
+				return prior
+			}
+			sumText := s.summarizeGap(ctx, units)
+			if sumText == "" {
+				return prior
+			}
+			return []ai.PromptPart{{Role: ai.RoleUser, Text: "[Context summary]: " + sumText}}
+		}
+		x = n - 2
+		if x < 2 {
+			x = 2
+		}
+	}
+
+	// Ensure the active tail fits within half the compaction byte budget (~2 bytes/token)
+	// and starts on a RoleUser boundary so seeded history is always grammatically valid.
+	tailStart := n - x
+	maxTailBytes := s.compactionLimit * 2
+	if maxTailBytes <= 0 {
+		maxTailBytes = 8192
+	}
+	for tailStart < n && units[tailStart].parts[0].Role != ai.RoleUser {
+		tailStart++
+	}
+	for tailStart < n {
+		var tailParts []ai.PromptPart
+		for i := tailStart; i < n; i++ {
+			tailParts = append(tailParts, units[i].parts...)
+		}
+		if historySize(tailParts) <= maxTailBytes {
+			break
+		}
+		tailStart++
+		for tailStart < n && units[tailStart].parts[0].Role != ai.RoleUser {
+			tailStart++
+		}
+	}
+
+	effectiveX := n - tailStart
+	if effectiveX < 2 {
+		effectiveX = 2
+	}
+	topic, boundary, hasEmbeddings := computeTopicAndBoundary(units, effectiveX)
+	var pinned map[int]bool
+	if hasEmbeddings {
+		pinned = selectPinnedAnchors(units, tailStart, topic, boundary, effectiveX)
+	}
+
+	var projected []ai.PromptPart
+	var currentGap []atomicTurnUnit
+
+	flushGap := func() {
+		if len(currentGap) == 0 {
+			return
+		}
+		if sumText := s.summarizeGap(ctx, currentGap); sumText != "" {
+			projected = append(projected, ai.PromptPart{
+				Role: ai.RoleUser,
+				Text: "[Context summary]: " + sumText,
+			})
+		}
+		currentGap = nil
+	}
+
+	for i := 0; i < tailStart; i++ {
+		if pinned[i] {
+			flushGap()
+			projected = append(projected, units[i].parts...)
+		} else {
+			currentGap = append(currentGap, units[i])
+		}
+	}
+	flushGap()
+
+	for i := tailStart; i < n; i++ {
+		projected = append(projected, units[i].parts...)
+	}
+	return projected
+}
+
 func (s *HarnessSession) compactContextForRetry(ctx context.Context, pendingParts int, feedback LogFeedback) error {
+	// Step 1: Synchronously flush any missing embeddings in CanonicalHistory.
+	s.flushEmbeddingsInline()
+
 	before := historySize(s.CompactedHistory)
 	if feedback != nil {
 		feedback("🗜️ ")
 	}
 
-	// Separate any in-flight turnParts (which RunTurn is about to re-send via
-	// SendStream) from the prior history that should be compacted and seeded.
+	// Project directly from CanonicalHistory so previously compacted turns can resurrect
+	// when the conversation topic returns to them.
+	s.historyMu.Lock()
+	source := append([]ai.PromptPart(nil), s.CanonicalHistory...)
+	if len(source) == 0 && len(s.CompactedHistory) > 0 {
+		source = append([]ai.PromptPart(nil), s.CompactedHistory...)
+	}
+	s.historyMu.Unlock()
+
 	var pending []ai.PromptPart
-	prior := s.CompactedHistory
+	prior := source
 	if pendingParts > 0 && len(prior) >= pendingParts {
 		split := len(prior) - pendingParts
 		pending = append([]ai.PromptPart(nil), prior[split:]...)
@@ -434,50 +934,15 @@ func (s *HarnessSession) compactContextForRetry(ctx context.Context, pendingPart
 	}
 
 	if len(prior) > 0 {
-		older, recent := splitHistoryForCompaction(prior, s.compactionLimit)
-
-		var historyText strings.Builder
-		for _, p := range older {
-			historyText.WriteString(formatPartForSummary(p))
-		}
-		promptText := historyText.String()
-		if len(promptText) > 12000 {
-			promptText = promptText[len(promptText)-12000:]
-		}
-
-		var sumText string
-		if promptText != "" && s.engine != nil {
-			summaryConv, err := s.engine.NewConversationWithConfig(ai.ConversationConfig{
-				SystemMessage: "You are a concise conversation summarizer. Summarize the key facts from the conversation below in 2-3 sentences.",
-			})
-			if err == nil {
-				var summary strings.Builder
-				for event, err := range summaryConv.SendStream(ctx, []ai.PromptPart{{Role: ai.RoleUser, Text: promptText}}) {
-					if err != nil {
-						break
-					}
-					if e, ok := event.(ai.TextEvent); ok {
-						summary.WriteString(e.Text)
-					}
-				}
-				summaryConv.Close()
-				sumText = strings.TrimSpace(summary.String())
-			}
-		}
-		if sumText == "" && len(older) > 0 {
-			// Fallback deterministic digest if summarizer call failed or returned empty.
-			sumText = compactString(strings.TrimSpace(promptText), 600)
-		}
-		if sumText != "" {
-			prior = buildCompactedHistory(recent, sumText)
-		}
+		prior = s.projectHistory(ctx, prior)
 	}
 
-	// Truncate oversized pending tool outputs if the pending turn itself exceeds budget.
+	// If a pending tool output itself exceeds budget on retry, compress its content via the gap pipeline.
 	for i := range pending {
 		if pending[i].Role == ai.RoleTool && pending[i].ToolResponse != nil {
 			if b, err := json.Marshal(pending[i].ToolResponse); err == nil && len(b) > 8192 {
-				pending[i].ToolResponse = map[string]any{"output": compactString(string(b), 8192) + "\n...[compacted]"}
+				compressed := s.summarizeOversizedText(ctx, string(b), s.gapTokenBudget())
+				pending[i].ToolResponse = map[string]any{"output": compressed}
 			}
 		}
 	}
