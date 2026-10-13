@@ -72,3 +72,39 @@ func TestHistorySizeBeforeAndAfterCompaction(t *testing.T) {
 		t.Fatalf("expected before (%d) > after (%d)", before, after)
 	}
 }
+
+func TestSplitHistoryCompactsLargeRecentToolOutputs(t *testing.T) {
+	big := make([]byte, 32768)
+	for i := range big {
+		big[i] = 'a'
+	}
+	history := []ai.PromptPart{
+		{Role: ai.RoleUser, Text: "explain"},
+		{Role: ai.RoleModel, ToolCalls: []ai.ToolCall{{Name: "read_file"}}},
+		{Role: ai.RoleTool, ToolName: "read_file", ToolResponse: map[string]any{"content": string(big)}},
+	}
+	older, recent := splitHistoryForCompaction(history, 4096)
+	if len(older) == 0 {
+		t.Fatal("expected oversized history to be moved into older for summarization")
+	}
+	if historySize(recent) > 8192 {
+		t.Fatalf("recent size = %d, want <= 8192", historySize(recent))
+	}
+}
+
+func TestIsContextOverflowError(t *testing.T) {
+	cases := []string{
+		"LiteRT stream error: INVALID_ARGUMENT: Input token ids are too long. Exceeding the maximum number of tokens allowed: 26439 >= 16001",
+		"Prefill input length exceeds available state entries",
+		"Max number of tokens reached, context window out of bounds",
+	}
+	for _, msg := range cases {
+		if !isContextOverflowError(fmtError(msg)) {
+			t.Fatalf("expected %q to be recognized as context overflow", msg)
+		}
+	}
+}
+
+type fmtError string
+
+func (e fmtError) Error() string { return string(e) }

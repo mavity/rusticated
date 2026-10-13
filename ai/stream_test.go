@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -222,6 +223,16 @@ func TestSendStreamDetectsExactTandemLoopAndCancels(t *testing.T) {
 	}
 	if !f.closed.Load() {
 		t.Fatal("conversation was not closed after loop detection")
+	}
+}
+
+func TestLoopDetectorRaisesShortPeriodThreshold(t *testing.T) {
+	var detector loopDetector
+	if detector.feedText(strings.Repeat("*\n", shortRepeatMinSpan/2-1)) {
+		t.Fatal("detected a short-period repeat below the configured span")
+	}
+	if !detector.feedText("*\n") {
+		t.Fatal("did not detect a short-period repeat at the configured span")
 	}
 }
 
