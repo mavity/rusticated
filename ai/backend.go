@@ -37,6 +37,17 @@ type conversationBackend interface {
 	Close() error
 }
 
+// embedderBackend abstracts the platform-specific execution of a LiteRT-LM EmbeddingEngine.
+type embedderBackend interface {
+	ComputeEmbedding(inputs []embedInput) ([]float32, error)
+	Close() error
+}
+
+type embedInput struct {
+	dataType int32 // 0 = TEXT, 1 = IMAGE
+	data     []byte
+}
+
 // ModelInfo is declared in ai.go — this file provides only shared orchestration.
 
 // ── LMDriver — minimal FFI abstraction each platform must implement ─────────
@@ -99,6 +110,20 @@ type LMDriver interface {
 	streamChunkGetText(chunk uint64) uint64
 	streamChunkIsFinal(chunk uint64) bool
 	streamChunkGetError(chunk uint64) uint64
+
+	// ── Embedding Engine ─────────────────────────────────────────────────
+	embeddingSettingsCreate(modelPath, backend, visionBackend, audioBackend uint64) uint64
+	embeddingSettingsDelete(settings uint64)
+	embeddingSettingsSetNumThreads(settings uint64, threads int32)
+	embeddingEngineCreate(settings uint64) uint64
+	embeddingEngineDelete(engine uint64)
+	embeddingOptionsCreate() uint64
+	embeddingOptionsDelete(options uint64)
+	embeddingOptionsSetNormalize(options uint64, normalize bool)
+	embeddingOptionsSetInputOverflowStrategy(options uint64, strategy int32)
+	inputDataCreate(dataType int32, data []byte) uint64
+	inputDataDelete(inputData uint64)
+	embeddingEngineCompute(engine uint64, inputs []uint64, options uint64) ([]float32, error)
 
 	// ── Callback trampoline creation ─────────────────────────────────────
 	// The trampoline is created once per process; the request is identified
@@ -503,4 +528,86 @@ func (c *drvConversationBackend) abort(st *streamState, pin *runtime.Pinner) {
 		c.releaseConv()
 		pin.Unpin()
 	}()
+}
+
+// ── Shared Embedder backend ────────────────────────────────────────────────
+
+const (
+	inputDataTypeText  int32 = 0
+	inputDataTypeImage int32 = 1
+
+	overflowStrategyTruncate int32 = 1
+)
+
+type drvEmbedderBackend struct {
+	drv    LMDriver
+	engine uint64
+}
+
+func sharedOpenEmbedder(drv LMDriver, libPath, modelPath, backend string) (embedderBackend, error) {
+	if err := drv.ensureLoaded(libPath); err != nil {
+		return nil, err
+	}
+	configureLMLogging(drv)
+
+	cModel, freeModel := drv.stringToCPtr(modelPath)
+	defer freeModel()
+
+	cBackend, freeBackend := drv.stringToCPtr(backend)
+	settings := drv.embeddingSettingsCreate(cModel, cBackend, 0, 0)
+	freeBackend()
+	if settings == 0 {
+		return nil, fmt.Errorf("embedding_engine_settings_create returned NULL for backend %s", backend)
+	}
+	drv.embeddingSettingsSetNumThreads(settings, int32(runtime.NumCPU()))
+
+	engine := drv.embeddingEngineCreate(settings)
+	drv.embeddingSettingsDelete(settings)
+	if engine == 0 {
+		return nil, fmt.Errorf("embedding_engine_create returned NULL for backend %s", backend)
+	}
+	return &drvEmbedderBackend{drv: drv, engine: engine}, nil
+}
+
+func (b *drvEmbedderBackend) ComputeEmbedding(inputs []embedInput) ([]float32, error) {
+	if b == nil || b.engine == 0 {
+		return nil, ErrClosed
+	}
+	if len(inputs) == 0 {
+		return nil, fmt.Errorf("ai: cannot compute embedding for empty input")
+	}
+
+	opts := b.drv.embeddingOptionsCreate()
+	if opts == 0 {
+		return nil, fmt.Errorf("embedding_options_create returned NULL")
+	}
+	defer b.drv.embeddingOptionsDelete(opts)
+
+	b.drv.embeddingOptionsSetNormalize(opts, true)
+	b.drv.embeddingOptionsSetInputOverflowStrategy(opts, overflowStrategyTruncate)
+
+	createdPtrs := make([]uint64, 0, len(inputs))
+	defer func() {
+		for _, ptr := range createdPtrs {
+			b.drv.inputDataDelete(ptr)
+		}
+	}()
+
+	for _, in := range inputs {
+		ptr := b.drv.inputDataCreate(in.dataType, in.data)
+		if ptr == 0 {
+			return nil, fmt.Errorf("litert_lm_input_data_create failed")
+		}
+		createdPtrs = append(createdPtrs, ptr)
+	}
+
+	return b.drv.embeddingEngineCompute(b.engine, createdPtrs, opts)
+}
+
+func (b *drvEmbedderBackend) Close() error {
+	if b != nil && b.engine != 0 {
+		b.drv.embeddingEngineDelete(b.engine)
+		b.engine = 0
+	}
+	return nil
 }

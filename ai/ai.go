@@ -76,3 +76,34 @@ func (i *Interpreter) Close() {
 		i.impl.Close()
 	}
 }
+
+// Embedder is a loaded LiteRT-LM EmbeddingEngine model (e.g. EmbeddingGemma 2)
+// ready to compute float32 vector representations of PromptParts.
+type Embedder struct {
+	impl *embedderImpl
+}
+
+// NewEmbedder loads the native runtime library and embedding model, selecting a
+// backend (e.g. "gpu", "npu", "cpu", "auto" or "").
+func NewEmbedder(libPath, modelPath, backend string) (*Embedder, error) {
+	impl, err := newEmbedderImpl(libPath, modelPath, backend)
+	if err != nil {
+		return nil, err
+	}
+	return &Embedder{impl: impl}, nil
+}
+
+// Embed computes a normalized float32 embedding vector for the given PromptParts.
+func (e *Embedder) Embed(parts []PromptPart) ([]float32, error) {
+	if e == nil || e.impl == nil {
+		return nil, ErrClosed
+	}
+	return e.impl.Embed(parts)
+}
+
+// Close releases the embedding engine. It is safe to call multiple times.
+func (e *Embedder) Close() {
+	if e != nil && e.impl != nil {
+		e.impl.Close()
+	}
+}
