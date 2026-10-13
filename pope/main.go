@@ -129,7 +129,7 @@ func main() {
 	// We force it to true and register tools anyway, as the model is instruction-tuned for it.
 	var tools []map[string]any
 	if true /* info == nil || info.SupportsFunctionCalling */ {
-		tools = getToolDeclarations()
+		tools = GetToolDeclarations()
 	}
 
 	// 5. Setup Compaction Threshold

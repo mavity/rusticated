@@ -111,7 +111,7 @@ func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
 			if s.verbose {
 				fmt.Printf("\n[tool call: %s(%v)]\n", call.Name, call.Arguments)
 			}
-			result := executeTool(call.Name, call.Arguments)
+			result := ExecuteTool(ctx, call)
 			if s.verbose {
 				fmt.Printf("[tool result: %v]\n", result)
 			}
