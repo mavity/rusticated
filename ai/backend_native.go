@@ -5,6 +5,7 @@ package ai
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"sync"
 	"unsafe"
 
@@ -14,20 +15,20 @@ import (
 // ── Purego C API bindings (one var per exported DLL symbol) ──────────────
 
 var (
-	lmSettingsCreate       func(modelPath, backend, visionBackend, audioBackend uintptr) uintptr
-	lmSettingsDelete       func(settings uintptr)
-	lmEngineCreate         func(settings uintptr) uintptr
-	lmEngineDelete         func(engine uintptr)
-	lmCfgCreate            func(engine uintptr) uintptr
-	lmCfgDelete            func(config uintptr)
-	lmConvCreate           func(engine, config uintptr) uintptr
-	lmConvDelete           func(conv uintptr)
-	lmConvSendStream       func(conv, message, extraCtx, optArgs, callback, userData uintptr) int32
-	lmConvCancelProcess    func(conv uintptr)
-	lmSetLogLevel          func(level uintptr)
-	lmStreamChunkGetText   func(chunk uintptr) uintptr
-	lmStreamChunkIsFinal   func(chunk uintptr) bool
-	lmStreamChunkGetError  func(chunk uintptr) uintptr
+	lmSettingsCreate      func(modelPath, backend, visionBackend, audioBackend uintptr) uintptr
+	lmSettingsDelete      func(settings uintptr)
+	lmEngineCreate        func(settings uintptr) uintptr
+	lmEngineDelete        func(engine uintptr)
+	lmCfgCreate           func(engine uintptr) uintptr
+	lmCfgDelete           func(config uintptr)
+	lmConvCreate          func(engine, config uintptr) uintptr
+	lmConvDelete          func(conv uintptr)
+	lmConvSendStream      func(conv, message, extraCtx, optArgs, callback, userData uintptr) int32
+	lmConvCancelProcess   func(conv uintptr)
+	lmSetLogLevel         func(level uintptr)
+	lmStreamChunkGetText  func(chunk uintptr) uintptr
+	lmStreamChunkIsFinal  func(chunk uintptr) bool
+	lmStreamChunkGetError func(chunk uintptr) uintptr
 
 	lmCfgSetTools           func(config, toolsJson uintptr)
 	lmCfgSetSystemMessage   func(config, systemMessageJson uintptr)
@@ -80,8 +81,13 @@ func (d *nativeDriver) writeBool(addr uint64, val bool) {
 }
 
 func (d *nativeDriver) stringToCPtr(s string) (uint64, func()) {
-	c := s + "\x00"
-	return uint64(uintptr(unsafe.Pointer(unsafe.StringData(c)))), func() {}
+	b := append([]byte(s), 0)
+	var p runtime.Pinner
+	p.Pin(&b[0])
+	return uint64(uintptr(unsafe.Pointer(&b[0]))), func() {
+		p.Unpin()
+		runtime.KeepAlive(b)
+	}
 }
 
 func (d *nativeDriver) ptrToString(ptr uint64) string {
@@ -119,11 +125,13 @@ func (d *nativeDriver) settingsSetNumThreads(settings uint64, threads int32) {
 func (d *nativeDriver) settingsSetMaxNumTokens(settings uint64, maxTokens int32) {
 	lmSettingsSetMaxNumTokens(uintptr(settings), maxTokens)
 }
-func (d *nativeDriver) engineCreate(settings uint64) uint64   { return uint64(lmEngineCreate(uintptr(settings))) }
-func (d *nativeDriver) engineDelete(engine uint64)            { lmEngineDelete(uintptr(engine)) }
-func (d *nativeDriver) setLogLevel(level uint64)              { lmSetLogLevel(uintptr(level)) }
-func (d *nativeDriver) cfgCreate(engine uint64) uint64        { return uint64(lmCfgCreate(uintptr(engine))) }
-func (d *nativeDriver) cfgDelete(cfg uint64)                  { lmCfgDelete(uintptr(cfg)) }
+func (d *nativeDriver) engineCreate(settings uint64) uint64 {
+	return uint64(lmEngineCreate(uintptr(settings)))
+}
+func (d *nativeDriver) engineDelete(engine uint64)     { lmEngineDelete(uintptr(engine)) }
+func (d *nativeDriver) setLogLevel(level uint64)       { lmSetLogLevel(uintptr(level)) }
+func (d *nativeDriver) cfgCreate(engine uint64) uint64 { return uint64(lmCfgCreate(uintptr(engine))) }
+func (d *nativeDriver) cfgDelete(cfg uint64)           { lmCfgDelete(uintptr(cfg)) }
 func (d *nativeDriver) cfgSetTools(cfg, toolsJSON uint64) {
 	lmCfgSetTools(uintptr(cfg), uintptr(toolsJSON))
 }
@@ -136,20 +144,30 @@ func (d *nativeDriver) cfgSetStreamToolCalls(cfg uint64, stream bool, channelNam
 func (d *nativeDriver) cfgSetMessages(cfg, messagesJSON uint64) {
 	lmCfgSetMessages(uintptr(cfg), uintptr(messagesJSON))
 }
-func (d *nativeDriver) convCreate(engine, cfg uint64) uint64  { return uint64(lmConvCreate(uintptr(engine), uintptr(cfg))) }
-func (d *nativeDriver) convDelete(conv uint64)                { lmConvDelete(uintptr(conv)) }
+func (d *nativeDriver) convCreate(engine, cfg uint64) uint64 {
+	return uint64(lmConvCreate(uintptr(engine), uintptr(cfg)))
+}
+func (d *nativeDriver) convDelete(conv uint64) { lmConvDelete(uintptr(conv)) }
 func (d *nativeDriver) convSendStream(conv, msg, extraCtx, optArgs, callback, userData uint64) int32 {
 	return lmConvSendStream(uintptr(conv), uintptr(msg), uintptr(extraCtx), uintptr(optArgs), uintptr(callback), uintptr(userData))
 }
 func (d *nativeDriver) convCancelProcess(conv uint64) { lmConvCancelProcess(uintptr(conv)) }
-func (d *nativeDriver) loadedFileCreate(modelPath uint64) uint64 { return uint64(lmLoadedFileCreate(uintptr(modelPath))) }
-func (d *nativeDriver) loadedFileDelete(file uint64)              { lmLoadedFileDelete(uintptr(file)) }
+func (d *nativeDriver) loadedFileCreate(modelPath uint64) uint64 {
+	return uint64(lmLoadedFileCreate(uintptr(modelPath)))
+}
+func (d *nativeDriver) loadedFileDelete(file uint64) { lmLoadedFileDelete(uintptr(file)) }
 func (d *nativeDriver) loadedFileHasSpeculativeDecodingSupport(file uint64) bool {
 	return lmLoadedFileHasSpeculativeDecodingSupport(uintptr(file))
 }
-func (d *nativeDriver) loadedFileMaxContextTokens(file uint64) uint32 { return lmLoadedFileMaxContextTokens(uintptr(file)) }
-func (d *nativeDriver) loadedFileIsDynamicContext(file uint64) bool   { return lmLoadedFileIsDynamicContext(uintptr(file)) }
-func (d *nativeDriver) loadedFileSupportsThinking(file uint64) bool   { return lmLoadedFileSupportsThinking(uintptr(file)) }
+func (d *nativeDriver) loadedFileMaxContextTokens(file uint64) uint32 {
+	return lmLoadedFileMaxContextTokens(uintptr(file))
+}
+func (d *nativeDriver) loadedFileIsDynamicContext(file uint64) bool {
+	return lmLoadedFileIsDynamicContext(uintptr(file))
+}
+func (d *nativeDriver) loadedFileSupportsThinking(file uint64) bool {
+	return lmLoadedFileSupportsThinking(uintptr(file))
+}
 func (d *nativeDriver) loadedFileSupportsFunctionCalling(file uint64) bool {
 	return lmLoadedFileSupportsFunctionCalling(uintptr(file))
 }
@@ -165,9 +183,15 @@ func (d *nativeDriver) loadedFileModalitySupportedBackends(file uint64, modality
 	}
 	return []uint32{}
 }
-func (d *nativeDriver) streamChunkGetText(chunk uint64) uint64  { return uint64(lmStreamChunkGetText(uintptr(chunk))) }
-func (d *nativeDriver) streamChunkIsFinal(chunk uint64) bool    { return lmStreamChunkIsFinal(uintptr(chunk)) }
-func (d *nativeDriver) streamChunkGetError(chunk uint64) uint64 { return uint64(lmStreamChunkGetError(uintptr(chunk))) }
+func (d *nativeDriver) streamChunkGetText(chunk uint64) uint64 {
+	return uint64(lmStreamChunkGetText(uintptr(chunk)))
+}
+func (d *nativeDriver) streamChunkIsFinal(chunk uint64) bool {
+	return lmStreamChunkIsFinal(uintptr(chunk))
+}
+func (d *nativeDriver) streamChunkGetError(chunk uint64) uint64 {
+	return uint64(lmStreamChunkGetError(uintptr(chunk)))
+}
 
 var callbackTrampoline uintptr
 
@@ -180,9 +204,9 @@ func (d *nativeDriver) createTrampoline() uint64 {
 
 // ── Public helpers (used by tflite_native.go and other platform code) ──────
 
-func goStringToCPtr(s string) (uintptr, string) {
-	c := s + "\x00"
-	return uintptr(unsafe.Pointer(unsafe.StringData(c))), c
+func goStringToCPtr(s string) (uintptr, func()) {
+	ptr, free := nativeDrv.stringToCPtr(s)
+	return uintptr(ptr), free
 }
 
 func ptrToGoString(ptr uintptr) string {
