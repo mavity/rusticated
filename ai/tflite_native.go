@@ -83,10 +83,10 @@ func newInterpreterImpl(libPath, modelPath string) (*interpreterImpl, error) {
 		return nil, err
 	}
 
-	cPath, keepPath := goStringToCPtr(modelPath)
-	_ = keepPath
+	cPath, freePath := nativeDrv.stringToCPtr(modelPath)
+	defer freePath()
 
-	modelPtr := tflModelCreateFromFile(cPath)
+	modelPtr := tflModelCreateFromFile(uintptr(cPath))
 	if modelPtr == 0 {
 		return nil, fmt.Errorf("TfLiteModelCreateFromFile failed for %s", modelPath)
 	}

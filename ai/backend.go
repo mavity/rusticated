@@ -11,6 +11,7 @@ import (
 	"os"
 	"runtime"
 	"sync/atomic"
+	"time"
 	"unsafe"
 )
 
@@ -458,21 +459,31 @@ func (c *drvConversationBackend) SendStream(ctx context.Context, messageJSON str
 		return fmt.Errorf("send_message_stream failed to start: %d", rc)
 	}
 
-	select {
-	case err := <-st.doneCh:
-		c.active.Store(nil)
-		pin.Unpin()
-		c.releaseConv()
-		if err != nil && c.closed.Load() {
+	// Inference runs on native threads the Go scheduler knows nothing about. On
+	// a platform without cgo the runtime only learns of a native callback
+	// thread once the first callback arrives, so until then a goroutine parked
+	// here with no timer registered is reported as "all goroutines are asleep".
+	// This ticker keeps a timer pending; it is not a stream timeout.
+	keepAlive := time.NewTicker(time.Minute)
+	defer keepAlive.Stop()
+	for {
+		select {
+		case err := <-st.doneCh:
+			c.active.Store(nil)
+			pin.Unpin()
+			c.releaseConv()
+			if err != nil && c.closed.Load() {
+				return ErrClosed
+			}
+			return err
+		case <-ctx.Done():
+			c.abort(st, pin)
+			return ctx.Err()
+		case <-st.closeCh:
+			c.abort(st, pin)
 			return ErrClosed
+		case <-keepAlive.C:
 		}
-		return err
-	case <-ctx.Done():
-		c.abort(st, pin)
-		return ctx.Err()
-	case <-st.closeCh:
-		c.abort(st, pin)
-		return ErrClosed
 	}
 }
 
