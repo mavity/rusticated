@@ -8,13 +8,16 @@ import (
 )
 
 type ExecInput struct {
-	_       struct{} `doc:"Execute a shell command on the host system and return its output."`
+	_       struct{} `doc:"Execute a shell command on the host system and return its output." emoji:"💻"`
 	Command string   `doc:"The shell command to run"`
 }
 
-func Exec(ctx context.Context, in ExecInput) (any, error) {
+func Exec(ctx context.Context, in ExecInput, feedback LogFeedback) (any, error) {
 	if in.Command == "" {
 		return nil, errors.New("command argument is required")
+	}
+	if feedback != nil {
+		feedback(toolLead(ExecInput{}, in.Command, 18))
 	}
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
@@ -27,6 +30,13 @@ func Exec(ctx context.Context, in ExecInput) (any, error) {
 	result := map[string]any{"output": truncateOutput(string(out))}
 	if err != nil {
 		result["error"] = err.Error()
+	}
+	if feedback != nil {
+		if err != nil {
+			feedback("failed")
+		} else {
+			feedback("ok")
+		}
 	}
 	return result, nil
 }

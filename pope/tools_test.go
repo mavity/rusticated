@@ -51,7 +51,7 @@ func TestExecuteTool(t *testing.T) {
 	file := filepath.Join(dir, "sub", "a.txt")
 
 	call := func(name, args string) any {
-		return ExecuteTool(ctx, ai.ToolCall{Name: name, RawArguments: json.RawMessage(args)})
+		return ExecuteTool(ctx, ai.ToolCall{Name: name, RawArguments: json.RawMessage(args)}, nil)
 	}
 	pathArg, _ := json.Marshal(file)
 
@@ -84,7 +84,7 @@ func TestExecuteTool(t *testing.T) {
 	if e := errOf(call("nope", `{}`)); e != "unknown tool: nope" {
 		t.Fatalf("unknown tool error = %q", e)
 	}
-	if e := errOf(ExecuteTool(ctx, ai.ToolCall{Name: "exec"})); e != "command argument is required" {
+	if e := errOf(ExecuteTool(ctx, ai.ToolCall{Name: "exec"}, nil)); e != "command argument is required" {
 		t.Fatalf("no arguments error = %q", e)
 	}
 
@@ -96,6 +96,42 @@ func TestExecuteTool(t *testing.T) {
 	if res["error"] == nil {
 		t.Fatalf("failing exec must report its error alongside its output, got %v", res)
 	}
+}
+
+func TestToolFeedbackIsCompactAndLineFree(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "a-long-file-name.txt")
+	if err := os.WriteFile(path, []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var feedback strings.Builder
+	got := ExecuteTool(context.Background(), ai.ToolCall{
+		Name:         "read_file",
+		RawArguments: json.RawMessage(`{"path":` + mustJSON(t, path) + `}`),
+	}, func(text string) {
+		if strings.ContainsAny(text, "\r\n") {
+			t.Fatalf("feedback contains newline: %q", text)
+		}
+		feedback.WriteString(text)
+	})
+	if !reflect.DeepEqual(got, map[string]any{"content": "hello"}) {
+		t.Fatalf("read_file = %v", got)
+	}
+	if want := "📖 a-long-file-na… ... 5 bytes read"; feedback.String() != want {
+		t.Fatalf("feedback = %q, want %q", feedback.String(), want)
+	}
+	if len([]rune(toolLead(ExecInput{}, strings.Repeat("界", 100), 18))) > 25 {
+		t.Fatalf("exec lead exceeds compact convention: %q", toolLead(ExecInput{}, strings.Repeat("界", 100), 18))
+	}
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }
 
 func TestToolInputTypeRejectsBadSignature(t *testing.T) {

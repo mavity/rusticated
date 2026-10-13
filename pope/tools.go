@@ -13,13 +13,15 @@ import (
 
 // Tools maps each tool name to its implementation, a function of the form
 //
-//	func(ctx context.Context, in T) (any, error)
+//	func(ctx context.Context, in T, feedback LogFeedback) (any, error)
 //
 // where T is a struct describing the arguments: a blank `_ struct{}` field
 // carries the tool description in its `doc` tag, and every exported field is a
 // parameter documented by its `doc` tag. A parameter is named by its `json`
 // tag, or by its lowercased field name, and is required unless the tag has
 // `omitempty`.
+type LogFeedback func(text string)
+
 var Tools = map[string]any{
 	"read_file":  ReadFile,
 	"write_file": WriteFile,
@@ -35,16 +37,39 @@ func truncateOutput(s string) string {
 	return s
 }
 
+func compactString(s string, maxLen int) string {
+	runes := []rune(strings.TrimSpace(s))
+	if maxLen <= 0 || len(runes) <= maxLen {
+		return string(runes)
+	}
+	if maxLen == 1 {
+		return "…"
+	}
+	return string(runes[:maxLen-1]) + "…"
+}
+
+func toolLead(input any, primaryArg string, maxArgLen int) string {
+	in := reflect.TypeOf(input)
+	for i := range in.NumField() {
+		field := in.Field(i)
+		if field.Name == "_" {
+			return field.Tag.Get("emoji") + " " + compactString(primaryArg, maxArgLen) + " ... "
+		}
+	}
+	panic(fmt.Sprintf("tool input %v has no metadata field", in))
+}
+
 // toolInputType returns the argument struct type T of a tool function. A tool
 // with any other shape is a programming error, so it panics.
 func toolInputType(name string, fn any) reflect.Type {
 	t := reflect.TypeOf(fn)
-	if t == nil || t.Kind() != reflect.Func || t.NumIn() != 2 || t.NumOut() != 2 ||
+	if t == nil || t.Kind() != reflect.Func || t.NumIn() != 3 || t.NumOut() != 2 ||
 		!reflect.TypeFor[context.Context]().AssignableTo(t.In(0)) ||
 		t.In(1).Kind() != reflect.Struct ||
+		!reflect.TypeFor[LogFeedback]().AssignableTo(t.In(2)) ||
 		t.Out(0).Kind() != reflect.Interface || t.Out(0).NumMethod() != 0 ||
 		t.Out(1) != reflect.TypeFor[error]() {
-		panic(fmt.Sprintf("tool %q must be func(context.Context, struct) (any, error), got %v", name, t))
+		panic(fmt.Sprintf("tool %q must be func(context.Context, struct, LogFeedback) (any, error), got %v", name, t))
 	}
 	return t.In(1)
 }
@@ -125,7 +150,7 @@ func typeSchema(tool string, t reflect.Type) map[string]any {
 // ExecuteTool decodes the call's raw JSON arguments straight into the tool's
 // argument struct and runs the tool. Failures are returned as {"error": ...}
 // for the model to read.
-func ExecuteTool(ctx context.Context, call ai.ToolCall) any {
+func ExecuteTool(ctx context.Context, call ai.ToolCall, feedback LogFeedback) any {
 	fn, ok := Tools[call.Name]
 	if !ok {
 		return map[string]any{"error": fmt.Sprintf("unknown tool: %s", call.Name)}
@@ -136,7 +161,11 @@ func ExecuteTool(ctx context.Context, call ai.ToolCall) any {
 			return map[string]any{"error": "invalid arguments: " + err.Error()}
 		}
 	}
-	out := reflect.ValueOf(fn).Call([]reflect.Value{reflect.ValueOf(ctx), in.Elem()})
+	feedbackValue := reflect.Zero(reflect.TypeFor[LogFeedback]())
+	if feedback != nil {
+		feedbackValue = reflect.ValueOf(feedback)
+	}
+	out := reflect.ValueOf(fn).Call([]reflect.Value{reflect.ValueOf(ctx), in.Elem(), feedbackValue})
 	if err, _ := out[1].Interface().(error); err != nil {
 		return map[string]any{"error": err.Error()}
 	}
