@@ -105,16 +105,16 @@ func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
 		if b, err := json.Marshal(toolCalls); err == nil {
 			s.totalTokensEst += len(b) / 4
 		}
+		if generatedText.Len() > 0 {
+			fmt.Println()
+		}
 
 		var toolResponses []ai.PromptPart
 		for _, call := range toolCalls {
-			if s.verbose {
-				fmt.Printf("\n[tool call: %s(%v)]\n", call.Name, call.Arguments)
-			}
-			result := ExecuteTool(ctx, call)
-			if s.verbose {
-				fmt.Printf("[tool result: %v]\n", result)
-			}
+			result := ExecuteTool(ctx, call, func(text string) {
+				fmt.Print(text)
+			})
+			fmt.Println()
 
 			// Track token consumption for the tool response
 			if b, err := json.Marshal(result); err == nil {
