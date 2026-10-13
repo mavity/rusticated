@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"ai"
@@ -181,5 +184,128 @@ func TestFormatEmbeddingSummary(t *testing.T) {
 	want := "dim=768 [+0.0412, -0.0189, +0.0731, ..., -0.0054] l2=0.0862 simhash=bfffffffffffffff"
 	if got != want {
 		t.Fatalf("formatEmbeddingSummary =\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestGroupIntoAtomicUnitsPreservesToolExchanges(t *testing.T) {
+	history := []ai.PromptPart{
+		{Role: ai.RoleUser, Text: "read two files", Embedding: []float32{1, 0}},
+		{
+			Role:      ai.RoleModel,
+			Text:      "reading",
+			ToolCalls: []ai.ToolCall{{Name: "read_file"}, {Name: "read_file"}},
+			Embedding: []float32{0, 1},
+		},
+		{Role: ai.RoleTool, ToolName: "read_file", ToolResponse: map[string]any{"content": "A"}, Embedding: []float32{0, 1}},
+		{Role: ai.RoleTool, ToolName: "read_file", ToolResponse: map[string]any{"content": "B"}, Embedding: []float32{0, 1}},
+		{Role: ai.RoleModel, Text: "done", Embedding: []float32{1, 0}},
+	}
+	units := groupIntoAtomicUnits(history)
+	if len(units) != 3 {
+		t.Fatalf("got %d units, want 3 (user, model+2 tools, model)", len(units))
+	}
+	if len(units[1].parts) != 3 {
+		t.Fatalf("tool exchange unit has %d parts, want 3", len(units[1].parts))
+	}
+	if units[1].embedding[1] < 0.99 {
+		t.Fatalf("tool exchange normalized embedding = %v, want ~[0, 1]", units[1].embedding)
+	}
+}
+
+func TestRAGProjectionPinsRelevantAnchorsAndResurrectsFromCanonical(t *testing.T) {
+	// Topic A vector: [1, 0], Topic B vector: [0, 1]
+	vecA := []float32{1, 0}
+	vecB := []float32{0, 1}
+
+	s := &HarnessSession{
+		compactionLimit: 4096,
+		compressor: func(ctx context.Context, sys, user string) (string, error) {
+			return "compressed-gap", nil
+		},
+	}
+
+	// Build 12 units:
+	// U0..U1: Topic A (early requirement & schema)
+	// U2..U7: Topic B (6 units of tangent exploration)
+	// U8..U11: Topic A returns in the last X/2 = 4 units!
+	history := []ai.PromptPart{
+		{Role: ai.RoleUser, Text: "Topic A schema definition", Embedding: vecA},
+		{Role: ai.RoleModel, Text: "Topic A schema ack", Embedding: vecA},
+		{Role: ai.RoleUser, Text: "Topic B tangent 1", Embedding: vecB},
+		{Role: ai.RoleModel, Text: "Topic B reply 1", Embedding: vecB},
+		{Role: ai.RoleUser, Text: "Topic B tangent 2", Embedding: vecB},
+		{Role: ai.RoleModel, Text: "Topic B reply 2", Embedding: vecB},
+		{Role: ai.RoleUser, Text: "Topic B tangent 3", Embedding: vecB},
+		{Role: ai.RoleModel, Text: "Topic B reply 3", Embedding: vecB},
+		{Role: ai.RoleUser, Text: "Back to Topic A step 1", Embedding: vecA},
+		{Role: ai.RoleModel, Text: "Working on Topic A step 1", Embedding: vecA},
+		{Role: ai.RoleUser, Text: "Back to Topic A step 2", Embedding: vecA},
+		{Role: ai.RoleModel, Text: "Working on Topic A step 2", Embedding: vecA},
+	}
+
+	projected := s.projectHistory(context.Background(), history)
+
+	// U0..U1 (Topic A in discard zone) must be pinned verbatim, while U2..U3 (Topic B in discard zone) get summarized!
+	foundPinnedTopicA := false
+	foundSummary := false
+	for _, p := range projected {
+		if p.Text == "Topic A schema definition" || p.Text == "Topic A schema ack" {
+			foundPinnedTopicA = true
+		}
+		if strings.HasPrefix(p.Text, "[Context summary]: ") {
+			foundSummary = true
+		}
+	}
+	if !foundPinnedTopicA {
+		t.Fatalf("expected early Topic A anchor to be pinned verbatim in projected history: %#v", projected)
+	}
+	if !foundSummary {
+		t.Fatalf("expected unpinned Topic B gap to be summarized into [Context summary]: %#v", projected)
+	}
+}
+
+func TestCompressTextBlockStepDownAndEscapeHatch(t *testing.T) {
+	var attempts int
+	var budgets []string
+	s := &HarnessSession{
+		compressor: func(ctx context.Context, sys, user string) (string, error) {
+			attempts++
+			budgets = append(budgets, sys)
+			// Always return a verbose 30-word output to trigger step-down retries and escape hatch
+			return strings.Repeat("verboseword ", 30), nil
+		},
+	}
+
+	input := strings.Repeat("inputword ", 40) // 40 words -> initial target = 16 words
+	out := s.compressTextBlock(context.Background(), input)
+	if attempts != 3 {
+		t.Fatalf("attempts = %d, want 3 (initial + 2 retries)", attempts)
+	}
+	// After 3 attempts (16 -> 12 -> 10), escape hatch truncates to final wTarget (10 words)
+	if gotWords := wordCount(out); gotWords > 12 {
+		t.Fatalf("output word count = %d, want <= 12 (truncated by escape hatch)", gotWords)
+	}
+}
+
+func TestSummarizeGapRecursiveHalving(t *testing.T) {
+	var calls int
+	s := &HarnessSession{
+		compactionLimit: 100, // gapTokenBudget = 50 tokens (~200 bytes)
+		compressor: func(ctx context.Context, sys, user string) (string, error) {
+			calls++
+			return fmt.Sprintf("part%d", calls), nil
+		},
+	}
+
+	units := []atomicTurnUnit{
+		{parts: []ai.PromptPart{{Role: ai.RoleUser, Text: strings.Repeat("a ", 80)}}},
+		{parts: []ai.PromptPart{{Role: ai.RoleModel, Text: strings.Repeat("b ", 80)}}},
+	}
+	got := s.summarizeGap(context.Background(), units)
+	if calls < 2 {
+		t.Fatalf("expected recursive halving across units, got %d compressor calls", calls)
+	}
+	if got != "part1 part2" {
+		t.Fatalf("summarizeGap = %q, want %q", got, "part1 part2")
 	}
 }
