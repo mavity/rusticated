@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"iter"
+	"sync/atomic"
 )
 
 // Role identifies the author of a prompt part.
@@ -85,56 +86,53 @@ type Conversation struct {
 	impl *convImpl
 }
 
-// streamItem is one element passed from the native callback thread to the
-// goroutine ranging over SendStream: an event, or the terminal error.
-type streamItem struct {
-	event ModelEvent
-	err   error
-}
-
 // SendStream sends a message and returns an iterator over the generated
 // ModelEvents (TextEvent, ToolCallEvent). Events are yielded as (event, nil).
 // A failure, including one before generation starts, is yielded once as
-// (nil, err) and ends the iteration.
+// (nil, err) and ends the iteration. A closed conversation yields
+// (nil, ErrClosed); so does closing it while the stream is running.
 //
-// The iterator does not return until the native generation has finished, even
-// if the caller breaks out of the loop early: the remaining events are
-// discarded. The conversation is therefore idle, and safe to reuse or Close,
-// as soon as the loop exits. The loop body runs on the caller's goroutine, not
-// on the native callback thread.
+// The loop body runs directly on the native runtime's callback thread, in
+// generation order, so a slow body delays the chunks after it, and a panic in
+// it is fatal. Breaking out of the loop, like cancelling ctx, cancels the
+// native generation and invalidates the conversation for good: it must be
+// replaced (LiteRT-LM leaves a cancelled conversation unusable). The iterator
+// returns without waiting for the native runtime to finish unwinding.
 func (c *Conversation) SendStream(ctx context.Context, parts []PromptPart) iter.Seq2[ModelEvent, error] {
 	return func(yield func(ModelEvent, error) bool) {
+		if c == nil || c.impl == nil {
+			yield(nil, ErrClosed)
+			return
+		}
 		payload, err := buildMessageJSON(parts)
 		if err != nil {
 			yield(nil, err)
 			return
 		}
 
-		ch := make(chan streamItem, 16)
-		go func() {
-			defer close(ch)
-			err := c.impl.sendStream(ctx, payload, func(raw string) {
-				for _, event := range parseChunkEvents(raw) {
-					ch <- streamItem{event: event}
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+
+		// stopped is written on the callback thread and read on this goroutine.
+		var stopped atomic.Bool
+		err = c.impl.sendStream(ctx, payload, func(raw string) {
+			for _, event := range parseChunkEvents(raw) {
+				if stopped.Load() {
+					return
 				}
-			})
-			if err != nil {
-				ch <- streamItem{err: err}
+				if !yield(event, nil) {
+					stopped.Store(true)
+					cancel()
+					return
+				}
 			}
-		}()
-
-		// Runs on normal completion (ch already closed), on early break, and if
-		// the loop body panics. An unread channel would fill up and block the
-		// native callback thread, so it must be drained until generation ends.
-		defer func() {
-			for range ch {
-			}
-		}()
-
-		for item := range ch {
-			if !yield(item.event, item.err) {
-				return
-			}
+		})
+		if stopped.Load() {
+			c.Close()
+			return
+		}
+		if err != nil {
+			yield(nil, err)
 		}
 	}
 }

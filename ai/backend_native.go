@@ -23,6 +23,7 @@ var (
 	lmConvCreate           func(engine, config uintptr) uintptr
 	lmConvDelete           func(conv uintptr)
 	lmConvSendStream       func(conv, message, extraCtx, optArgs, callback, userData uintptr) int32
+	lmConvCancelProcess    func(conv uintptr)
 	lmSetLogLevel          func(level uintptr)
 	lmStreamChunkGetText   func(chunk uintptr) uintptr
 	lmStreamChunkIsFinal   func(chunk uintptr) bool
@@ -140,6 +141,7 @@ func (d *nativeDriver) convDelete(conv uint64)                { lmConvDelete(uin
 func (d *nativeDriver) convSendStream(conv, msg, extraCtx, optArgs, callback, userData uint64) int32 {
 	return lmConvSendStream(uintptr(conv), uintptr(msg), uintptr(extraCtx), uintptr(optArgs), uintptr(callback), uintptr(userData))
 }
+func (d *nativeDriver) convCancelProcess(conv uint64) { lmConvCancelProcess(uintptr(conv)) }
 func (d *nativeDriver) loadedFileCreate(modelPath uint64) uint64 { return uint64(lmLoadedFileCreate(uintptr(modelPath))) }
 func (d *nativeDriver) loadedFileDelete(file uint64)              { lmLoadedFileDelete(uintptr(file)) }
 func (d *nativeDriver) loadedFileHasSpeculativeDecodingSupport(file uint64) bool {
@@ -169,8 +171,7 @@ func (d *nativeDriver) streamChunkGetError(chunk uint64) uint64 { return uint64(
 
 var callbackTrampoline uintptr
 
-func (d *nativeDriver) createTrampoline(callbackID uint64) uint64 {
-	_ = callbackID
+func (d *nativeDriver) createTrampoline() uint64 {
 	if callbackTrampoline == 0 {
 		callbackTrampoline = purego.NewCallback(nativeDriverCallback)
 	}
@@ -229,6 +230,7 @@ func ensureLMLibLoadedImpl(libPath string) error {
 		purego.RegisterLibFunc(&lmConvCreate, lmLib, "litert_lm_conversation_create")
 		purego.RegisterLibFunc(&lmConvDelete, lmLib, "litert_lm_conversation_delete")
 		purego.RegisterLibFunc(&lmConvSendStream, lmLib, "litert_lm_conversation_send_message_stream")
+		purego.RegisterLibFunc(&lmConvCancelProcess, lmLib, "litert_lm_conversation_cancel_process")
 		purego.RegisterLibFunc(&lmSetLogLevel, lmLib, "litert_lm_set_min_log_level")
 		purego.RegisterLibFunc(&lmStreamChunkGetText, lmLib, "litert_lm_stream_chunk_get_text")
 		purego.RegisterLibFunc(&lmStreamChunkIsFinal, lmLib, "litert_lm_stream_chunk_is_final")

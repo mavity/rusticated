@@ -161,7 +161,7 @@ func (c *convImpl) Close() {
 
 func (c *convImpl) sendStream(ctx context.Context, payloadJSON string, onToken func(string)) error {
 	if c == nil || c.backend == nil {
-		return fmt.Errorf("conversation is closed")
+		return ErrClosed
 	}
 	return c.backend.SendStream(ctx, payloadJSON, onToken)
 }
