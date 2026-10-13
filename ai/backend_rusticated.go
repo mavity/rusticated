@@ -23,20 +23,20 @@ var (
 	lmLibErr  error
 	lmLib     uint64
 
-	symLMSettingsCreate       uint64
-	symLMSettingsDelete       uint64
-	symLMEngineCreate         uint64
-	symLMEngineDelete         uint64
-	symLMCfgCreate            uint64
-	symLMCfgDelete            uint64
-	symLMConvCreate           uint64
-	symLMConvDelete           uint64
-	symLMConvSendStream       uint64
-	symLMConvCancelProcess    uint64
-	symLMSetLogLevel          uint64
-	symLMStreamChunkGetText   uint64
-	symLMStreamChunkIsFinal   uint64
-	symLMStreamChunkGetError  uint64
+	symLMSettingsCreate      uint64
+	symLMSettingsDelete      uint64
+	symLMEngineCreate        uint64
+	symLMEngineDelete        uint64
+	symLMCfgCreate           uint64
+	symLMCfgDelete           uint64
+	symLMConvCreate          uint64
+	symLMConvDelete          uint64
+	symLMConvSendStream      uint64
+	symLMConvCancelProcess   uint64
+	symLMSetLogLevel         uint64
+	symLMStreamChunkGetText  uint64
+	symLMStreamChunkIsFinal  uint64
+	symLMStreamChunkGetError uint64
 
 	symLMCfgSetTools           uint64
 	symLMCfgSetSystemMessage   uint64
@@ -58,7 +58,7 @@ var (
 	symLMLoadedFileSupportsFunctionCalling       uint64
 	symLMLoadedFileModalitySupportedBackends     uint64
 
-	wasip1Drv    wasip1Driver
+	rusticatedDrv rusticatedDriver
 )
 
 // callDylib invokes a WASM dynamic library function with typed parameters.
@@ -78,25 +78,25 @@ func callDylib(sym uint64, paramTypes, resultTypes []byte, args ...uint64) (uint
 	return 0, nil
 }
 
-// ── wasip1Driver — implements LMDriver via callDylib ─────────────────────
+// ── rusticatedDriver — implements LMDriver via callDylib ─────────────────────
 
-type wasip1Driver struct{}
+type rusticatedDriver struct{}
 
-func (d *wasip1Driver) ensureLoaded(libPath string) error {
+func (d *rusticatedDriver) ensureLoaded(libPath string) error {
 	return ensureLMLibLoadedImpl(libPath)
 }
 
-func (d *wasip1Driver) getSymbol(name string) (uint64, error) {
+func (d *rusticatedDriver) getSymbol(name string) (uint64, error) {
 	return syscall.DylibSym(lmLib, name)
 }
 
-func (d *wasip1Driver) writeInt32(addr uint64, val int32) {
+func (d *rusticatedDriver) writeInt32(addr uint64, val int32) {
 	var buf [4]byte
 	binary.LittleEndian.PutUint32(buf[:], uint32(val))
 	_ = syscall.DylibWriteMem(lmLib, addr, buf[:])
 }
 
-func (d *wasip1Driver) writeBool(addr uint64, val bool) {
+func (d *rusticatedDriver) writeBool(addr uint64, val bool) {
 	b := byte(0)
 	if val {
 		b = 1
@@ -104,7 +104,7 @@ func (d *wasip1Driver) writeBool(addr uint64, val bool) {
 	_ = syscall.DylibWriteMem(lmLib, addr, []byte{b})
 }
 
-func (d *wasip1Driver) stringToCPtr(s string) (uint64, func()) {
+func (d *rusticatedDriver) stringToCPtr(s string) (uint64, func()) {
 	ptr, free, err := syscall.CString(lmLib, s)
 	if err != nil {
 		return 0, func() {}
@@ -112,7 +112,7 @@ func (d *wasip1Driver) stringToCPtr(s string) (uint64, func()) {
 	return ptr, free
 }
 
-func (d *wasip1Driver) ptrToString(ptr uint64) string {
+func (d *rusticatedDriver) ptrToString(ptr uint64) string {
 	if ptr == 0 {
 		return ""
 	}
@@ -120,78 +120,78 @@ func (d *wasip1Driver) ptrToString(ptr uint64) string {
 	return s
 }
 
-func (d *wasip1Driver) settingsCreate(modelPath, backend, visionBackend, audioBackend uint64) uint64 {
+func (d *rusticatedDriver) settingsCreate(modelPath, backend, visionBackend, audioBackend uint64) uint64 {
 	v, _ := callDylib(symLMSettingsCreate, []byte{i64, i64, i64, i64}, []byte{i64},
 		modelPath, backend, visionBackend, audioBackend)
 	return v
 }
-func (d *wasip1Driver) settingsDelete(settings uint64) {
+func (d *rusticatedDriver) settingsDelete(settings uint64) {
 	_, _ = callDylib(symLMSettingsDelete, []byte{i64}, nil, settings)
 }
-func (d *wasip1Driver) settingsSetEnableSpeculativeDecoding(settings uint64, enable bool) {
+func (d *rusticatedDriver) settingsSetEnableSpeculativeDecoding(settings uint64, enable bool) {
 	en := byte(0)
 	if enable {
 		en = 1
 	}
 	_, _ = callDylib(symLMSettingsSetEnableSpeculativeDecoding, []byte{i64, i32}, nil, settings, uint64(en))
 }
-func (d *wasip1Driver) settingsSetUseRingbuffersLocalAttention(settings uint64, enable bool) {
+func (d *rusticatedDriver) settingsSetUseRingbuffersLocalAttention(settings uint64, enable bool) {
 	en := byte(0)
 	if enable {
 		en = 1
 	}
 	_, _ = callDylib(symLMSettingsSetUseRingbuffersLocalAttention, []byte{i64, i32}, nil, settings, uint64(en))
 }
-func (d *wasip1Driver) settingsSetGpuDecodeStepsPerSync(settings uint64, steps int32) {
+func (d *rusticatedDriver) settingsSetGpuDecodeStepsPerSync(settings uint64, steps int32) {
 	_, _ = callDylib(symLMSettingsSetGpuDecodeStepsPerSync, []byte{i64, i32}, nil, settings, uint64(steps))
 }
-func (d *wasip1Driver) settingsSetNumThreads(settings uint64, threads int32) {
+func (d *rusticatedDriver) settingsSetNumThreads(settings uint64, threads int32) {
 	_, _ = callDylib(symLMSettingsSetNumThreads, []byte{i64, i32}, nil, settings, uint64(threads))
 }
-func (d *wasip1Driver) settingsSetMaxNumTokens(settings uint64, maxTokens int32) {
+func (d *rusticatedDriver) settingsSetMaxNumTokens(settings uint64, maxTokens int32) {
 	_, _ = callDylib(symLMSettingsSetMaxNumTokens, []byte{i64, i32}, nil, settings, uint64(maxTokens))
 }
-func (d *wasip1Driver) engineCreate(settings uint64) uint64 {
+func (d *rusticatedDriver) engineCreate(settings uint64) uint64 {
 	v, _ := callDylib(symLMEngineCreate, []byte{i64}, []byte{i64}, settings)
 	return v
 }
-func (d *wasip1Driver) engineDelete(engine uint64) {
+func (d *rusticatedDriver) engineDelete(engine uint64) {
 	_, _ = callDylib(symLMEngineDelete, []byte{i64}, nil, engine)
 }
-func (d *wasip1Driver) setLogLevel(level uint64) {
+func (d *rusticatedDriver) setLogLevel(level uint64) {
 	_, _ = callDylib(symLMSetLogLevel, []byte{i64}, nil, level)
 }
-func (d *wasip1Driver) cfgCreate(engine uint64) uint64 {
+func (d *rusticatedDriver) cfgCreate(engine uint64) uint64 {
 	v, _ := callDylib(symLMCfgCreate, []byte{i64}, []byte{i64}, engine)
 	return v
 }
-func (d *wasip1Driver) cfgDelete(cfg uint64) {
+func (d *rusticatedDriver) cfgDelete(cfg uint64) {
 	_, _ = callDylib(symLMCfgDelete, []byte{i64}, nil, cfg)
 }
-func (d *wasip1Driver) cfgSetTools(cfg, toolsJSON uint64) {
+func (d *rusticatedDriver) cfgSetTools(cfg, toolsJSON uint64) {
 	_, _ = callDylib(symLMCfgSetTools, []byte{i64, i64}, nil, cfg, toolsJSON)
 }
-func (d *wasip1Driver) cfgSetSystemMessage(cfg, systemMsg uint64) {
+func (d *rusticatedDriver) cfgSetSystemMessage(cfg, systemMsg uint64) {
 	_, _ = callDylib(symLMCfgSetSystemMessage, []byte{i64, i64}, nil, cfg, systemMsg)
 }
-func (d *wasip1Driver) cfgSetStreamToolCalls(cfg uint64, stream bool, channelName uint64) {
+func (d *rusticatedDriver) cfgSetStreamToolCalls(cfg uint64, stream bool, channelName uint64) {
 	s := byte(0)
 	if stream {
 		s = 1
 	}
 	_, _ = callDylib(symLMCfgSetStreamToolCalls, []byte{i64, i32, i64}, nil, cfg, uint64(s), channelName)
 }
-func (d *wasip1Driver) cfgSetMessages(cfg, messagesJSON uint64) {
+func (d *rusticatedDriver) cfgSetMessages(cfg, messagesJSON uint64) {
 	_, _ = callDylib(symLMCfgSetMessages, []byte{i64, i64}, nil, cfg, messagesJSON)
 }
-func (d *wasip1Driver) convCreate(engine, cfg uint64) uint64 {
+func (d *rusticatedDriver) convCreate(engine, cfg uint64) uint64 {
 	v, _ := callDylib(symLMConvCreate, []byte{i64, i64}, []byte{i64}, engine, cfg)
 	return v
 }
-func (d *wasip1Driver) convDelete(conv uint64) {
+func (d *rusticatedDriver) convDelete(conv uint64) {
 	_, _ = callDylib(symLMConvDelete, []byte{i64}, nil, conv)
 }
-func (d *wasip1Driver) convSendStream(conv, msg, extraCtx, optArgs, callback, userData uint64) int32 {
+func (d *rusticatedDriver) convSendStream(conv, msg, extraCtx, optArgs, callback, userData uint64) int32 {
 	v, err := callDylib(symLMConvSendStream, []byte{i64, i64, i64, i64, i64, i64}, []byte{i32},
 		conv, msg, extraCtx, optArgs, callback, userData)
 	if err != nil {
@@ -199,37 +199,37 @@ func (d *wasip1Driver) convSendStream(conv, msg, extraCtx, optArgs, callback, us
 	}
 	return int32(v)
 }
-func (d *wasip1Driver) convCancelProcess(conv uint64) {
+func (d *rusticatedDriver) convCancelProcess(conv uint64) {
 	_, _ = callDylib(symLMConvCancelProcess, []byte{i64}, nil, conv)
 }
-func (d *wasip1Driver) loadedFileCreate(modelPath uint64) uint64 {
+func (d *rusticatedDriver) loadedFileCreate(modelPath uint64) uint64 {
 	v, _ := callDylib(symLMLoadedFileCreate, []byte{i64}, []byte{i64}, modelPath)
 	return v
 }
-func (d *wasip1Driver) loadedFileDelete(file uint64) {
+func (d *rusticatedDriver) loadedFileDelete(file uint64) {
 	_, _ = callDylib(symLMLoadedFileDelete, []byte{i64}, nil, file)
 }
-func (d *wasip1Driver) loadedFileHasSpeculativeDecodingSupport(file uint64) bool {
+func (d *rusticatedDriver) loadedFileHasSpeculativeDecodingSupport(file uint64) bool {
 	v, _ := callDylib(symLMLoadedFileHasSpeculativeDecodingSupport, []byte{i64}, []byte{i32}, file)
 	return int32(v) != 0
 }
-func (d *wasip1Driver) loadedFileMaxContextTokens(file uint64) uint32 {
+func (d *rusticatedDriver) loadedFileMaxContextTokens(file uint64) uint32 {
 	v, _ := callDylib(symLMLoadedFileMaxContextTokens, []byte{i64}, []byte{i32}, file)
 	return uint32(v)
 }
-func (d *wasip1Driver) loadedFileIsDynamicContext(file uint64) bool {
+func (d *rusticatedDriver) loadedFileIsDynamicContext(file uint64) bool {
 	v, _ := callDylib(symLMLoadedFileIsDynamicContext, []byte{i64}, []byte{i32}, file)
 	return int32(v) != 0
 }
-func (d *wasip1Driver) loadedFileSupportsThinking(file uint64) bool {
+func (d *rusticatedDriver) loadedFileSupportsThinking(file uint64) bool {
 	v, _ := callDylib(symLMLoadedFileSupportsThinking, []byte{i64}, []byte{i32}, file)
 	return int32(v) != 0
 }
-func (d *wasip1Driver) loadedFileSupportsFunctionCalling(file uint64) bool {
+func (d *rusticatedDriver) loadedFileSupportsFunctionCalling(file uint64) bool {
 	v, _ := callDylib(symLMLoadedFileSupportsFunctionCalling, []byte{i64}, []byte{i32}, file)
 	return int32(v) != 0
 }
-func (d *wasip1Driver) loadedFileModalitySupportedBackends(file uint64, modality int32) []uint32 {
+func (d *rusticatedDriver) loadedFileModalitySupportedBackends(file uint64, modality int32) []uint32 {
 	backendsBuf, err := syscall.DylibAlloc(lmLib, uint64(8*4))
 	if err != nil {
 		return []uint32{}
@@ -258,39 +258,43 @@ func (d *wasip1Driver) loadedFileModalitySupportedBackends(file uint64, modality
 	}
 	return out
 }
-func (d *wasip1Driver) streamChunkGetText(chunk uint64) uint64 {
+func (d *rusticatedDriver) streamChunkGetText(chunk uint64) uint64 {
 	v, _ := callDylib(symLMStreamChunkGetText, []byte{i64}, []byte{i64}, chunk)
 	return v
 }
-func (d *wasip1Driver) streamChunkIsFinal(chunk uint64) bool {
+func (d *rusticatedDriver) streamChunkIsFinal(chunk uint64) bool {
 	v, _ := callDylib(symLMStreamChunkIsFinal, []byte{i64}, []byte{i32}, chunk)
 	return int32(v) != 0
 }
-func (d *wasip1Driver) streamChunkGetError(chunk uint64) uint64 {
+func (d *rusticatedDriver) streamChunkGetError(chunk uint64) uint64 {
 	v, _ := callDylib(symLMStreamChunkGetError, []byte{i64}, []byte{i64}, chunk)
 	return v
 }
 
 var (
-	wasip1Trampoline   uint64
-	trampolineOv [512]byte
-	trampolineRegOnce      sync.Once
+	rusticatedTrampoline uint64
+	trampolineOv         [512]byte
+	trampolineRegOnce    sync.Once
 )
 
-func (d *wasip1Driver) createTrampoline() uint64 {
+func (d *rusticatedDriver) createTrampoline() uint64 {
 	trampolineRegOnce.Do(func() {
 		cbSig := []byte{0x60, 2, i64, i64, 0}
-			wasip1Trampoline, _ = syscall.DylibRegisterCallback(lmLib, cbSig, unsafe.Pointer(&trampolineOv[0]), 512,
+		rusticatedTrampoline, _ = syscall.DylibRegisterCallback(lmLib, cbSig, unsafe.Pointer(&trampolineOv[0]), 512,
 			func(args []uint64) []uint64 {
-				if len(args) < 2 { return nil }
+				if len(args) < 2 {
+					return nil
+				}
 				userData := args[0]
 				chunkPtr := args[1]
-				if chunkPtr == 0 { return nil }
-				sharedTokenCallback(&wasip1Drv, userData, chunkPtr)
+				if chunkPtr == 0 {
+					return nil
+				}
+				sharedTokenCallback(&rusticatedDrv, userData, chunkPtr)
 				return nil
 			})
 	})
-	return wasip1Trampoline
+	return rusticatedTrampoline
 }
 
 // ── Library loading ────────────────────────────────────────────────────────
@@ -347,9 +351,9 @@ func ensureLMLibLoadedImpl(libPath string) error {
 // ── Thin public wrappers ───────────────────────────────────────────────────
 
 func openBackend(libPath, modelPath, backend string, maxTokens int) (engineBackend, error) {
-	return sharedOpenBackend(&wasip1Drv, libPath, modelPath, backend, maxTokens)
+	return sharedOpenBackend(&rusticatedDrv, libPath, modelPath, backend, maxTokens)
 }
 
 func inspectModel(libPath, modelPath string) (*ModelInfo, error) {
-	return sharedInspectModel(&wasip1Drv, libPath, modelPath)
+	return sharedInspectModel(&rusticatedDrv, libPath, modelPath)
 }
