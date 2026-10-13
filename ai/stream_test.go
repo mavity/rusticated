@@ -192,3 +192,115 @@ func TestParseChunkEvents(t *testing.T) {
 		t.Fatalf("empty chunk: got %#v, want nil", got)
 	}
 }
+
+func TestSendStreamDetectsExactTandemLoopAndCancels(t *testing.T) {
+	f := &fakeConvBackend{}
+	for i := 0; i < 60; i++ {
+		f.chunks = append(f.chunks, textChunk(" *the*"))
+	}
+
+	var events int
+	var errs []error
+	for event, err := range newFakeConv(f).SendStream(context.Background(), []PromptPart{{Text: "hi"}}) {
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if event != nil {
+			events++
+		}
+	}
+
+	if len(errs) != 1 || !errors.Is(errs[0], ErrRepetitionLoop) {
+		t.Fatalf("errs = %v, want [ErrRepetitionLoop]", errs)
+	}
+	if events >= 30 {
+		t.Fatalf("yielded %d events before catching loop, want early stop (< 30)", events)
+	}
+	if got, _ := f.ctxErrEnd.Load().(struct{ error }); !errors.Is(got.error, context.Canceled) {
+		t.Fatalf("backend ctx error = %v, want context.Canceled", got.error)
+	}
+	if !f.closed.Load() {
+		t.Fatal("conversation was not closed after loop detection")
+	}
+}
+
+func TestSendStreamDetectsFuzzyInterleavedLoop(t *testing.T) {
+	f := &fakeConvBackend{}
+	patterns := []string{
+		"We must honor the gravity of this feeling. ",
+		"Tell me what this feeling looks like now. ",
+		"We must honor the weight of this feeling. ",
+	}
+	for i := 0; i < 40; i++ {
+		f.chunks = append(f.chunks, textChunk(patterns[i%len(patterns)]))
+	}
+
+	var errs []error
+	for _, err := range newFakeConv(f).SendStream(context.Background(), []PromptPart{{Text: "hi"}}) {
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if len(errs) != 1 || !errors.Is(errs[0], ErrRepetitionLoop) {
+		t.Fatalf("errs = %v, want [ErrRepetitionLoop]", errs)
+	}
+	if !f.closed.Load() {
+		t.Fatal("conversation was not closed after fuzzy loop detection")
+	}
+}
+
+func TestSendStreamDetectsRepeatedToolCalls(t *testing.T) {
+	callChunk := `{"role":"assistant","tool_calls":[{"type":"function","function":{"name":"read_file","arguments":{"path":"main.go"}}}]}`
+	f := &fakeConvBackend{
+		chunks: []string{callChunk, callChunk, callChunk, callChunk},
+	}
+
+	var yielded int
+	var errs []error
+	for event, err := range newFakeConv(f).SendStream(context.Background(), []PromptPart{{Text: "hi"}}) {
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if event != nil {
+			yielded++
+		}
+	}
+
+	if yielded != 2 {
+		t.Fatalf("yielded = %d, want 2 before 3rd identical tool call trips loop", yielded)
+	}
+	if len(errs) != 1 || !errors.Is(errs[0], ErrRepetitionLoop) {
+		t.Fatalf("errs = %v, want [ErrRepetitionLoop]", errs)
+	}
+	if !f.closed.Load() {
+		t.Fatal("conversation was not closed after repeated tool call loop")
+	}
+}
+
+func TestSendStreamAllowsNormalProseAndTables(t *testing.T) {
+	prose := []string{
+		textChunk("Paris has many famous bridges crossing the Seine River.\n"),
+		textChunk("| Bridge | Opened | Notes |\n"),
+		textChunk("| --- | --- | --- |\n"),
+		textChunk("| Pont Neuf | 1607 | Oldest standing bridge across the Seine in Paris. |\n"),
+		textChunk("| Pont Alexandre III | 1900 | Beaux-Arts style deck arch bridge with gilded statues. |\n"),
+		textChunk("| Pont des Arts | 1984 | Pedestrian bridge connecting the Institut de France and the Louvre. |\n"),
+		textChunk("| Pont de Bir-Hakeim | 1905 | Two-level steel viaduct carrying Metro Line 6 and road traffic. |\n"),
+		textChunk("| Pont Mirabeau | 1896 | Metal arch bridge celebrated in Guillaume Apollinaire's poem. |\n"),
+	}
+	f := &fakeConvBackend{chunks: prose}
+
+	var count int
+	for _, err := range newFakeConv(f).SendStream(context.Background(), []PromptPart{{Text: "hi"}}) {
+		if err != nil {
+			t.Fatalf("unexpected error on normal prose/table: %v", err)
+		}
+		count++
+	}
+	if count != len(prose) {
+		t.Fatalf("yielded %d chunks, want %d", count, len(prose))
+	}
+}

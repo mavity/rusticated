@@ -44,3 +44,14 @@ func TestCanonicalHistorySurvivesCompaction(t *testing.T) {
 		t.Fatalf("compacted history did not append next turn: %#v", got)
 	}
 }
+
+func TestCompactHistoryShortSliceUnchanged(t *testing.T) {
+	short := []ai.PromptPart{
+		{Role: ai.RoleUser, Text: "q1"},
+		{Role: ai.RoleModel, Text: "a1"},
+	}
+	got := compactHistory(short, "summary")
+	if !reflect.DeepEqual(got, short) {
+		t.Fatalf("compactHistory modified short slice: got %#v, want %#v", got, short)
+	}
+}
