@@ -55,3 +55,20 @@ func TestCompactHistoryShortSliceUnchanged(t *testing.T) {
 		t.Fatalf("compactHistory modified short slice: got %#v, want %#v", got, short)
 	}
 }
+
+func TestHistorySizeBeforeAndAfterCompaction(t *testing.T) {
+	raw := []ai.PromptPart{
+		{Role: ai.RoleUser, Text: "old question that is quite long"},
+		{Role: ai.RoleModel, Text: "old answer that is also quite long"},
+		{Role: ai.RoleUser, Text: "q1"},
+		{Role: ai.RoleModel, Text: "a1"},
+		{Role: ai.RoleUser, Text: "q2"},
+		{Role: ai.RoleModel, Text: "a2"},
+	}
+	before := historySize(raw)
+	compacted := compactHistory(raw, "short")
+	after := historySize(compacted)
+	if before <= after {
+		t.Fatalf("expected before (%d) > after (%d)", before, after)
+	}
+}

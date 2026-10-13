@@ -87,10 +87,14 @@ func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
 
 			if (isOverflow || isLoop) && retries < 2 {
 				retries++
-				if s.verbose {
-					fmt.Printf("\n[stream recovery (%v); compacting and retrying (%d/2)]\n", streamErr, retries)
+				if generatedText.Len() > 0 {
+					fmt.Println()
 				}
-				if err := s.compactContext(ctx); err != nil {
+				err := s.compactContext(ctx, func(text string) {
+					fmt.Print(text)
+				})
+				fmt.Println()
+				if err != nil {
 					return err
 				}
 				continue // retry the turn seamlessly with the fresh s.conv
@@ -148,15 +152,37 @@ func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
 
 	// Check if context compaction is needed
 	if s.totalTokensEst > s.compactionLimit && len(s.CompactedHistory) > 4 {
-		_ = s.compactContext(ctx)
+		_ = s.compactContext(ctx, func(text string) {
+			fmt.Print(text)
+		})
+		fmt.Println()
 	}
 
 	return nil
 }
 
-func (s *HarnessSession) compactContext(ctx context.Context) error {
-	if s.verbose {
-		fmt.Println("\n[context compaction: summarizing earlier history...]")
+func historySize(history []ai.PromptPart) int {
+	var total int
+	for _, p := range history {
+		total += len(p.Text)
+		if len(p.ToolCalls) > 0 {
+			if b, err := json.Marshal(p.ToolCalls); err == nil {
+				total += len(b)
+			}
+		}
+		if p.ToolResponse != nil {
+			if b, err := json.Marshal(p.ToolResponse); err == nil {
+				total += len(b)
+			}
+		}
+	}
+	return total
+}
+
+func (s *HarnessSession) compactContext(ctx context.Context, feedback LogFeedback) error {
+	before := historySize(s.CompactedHistory)
+	if feedback != nil {
+		feedback("🗜️ ")
 	}
 	if len(s.CompactedHistory) > 4 {
 		cutoff := len(s.CompactedHistory) - 4
@@ -184,13 +210,15 @@ func (s *HarnessSession) compactContext(ctx context.Context) error {
 
 			sumText := strings.TrimSpace(summary.String())
 			if sumText != "" {
-				if s.verbose {
-					fmt.Printf("[context compacted summary: %s]\n", sumText)
-				}
 				s.CompactedHistory = compactHistory(s.CompactedHistory, sumText)
 				s.totalTokensEst = len(sumText)/4 + 200
 			}
 		}
+	}
+
+	after := historySize(s.CompactedHistory)
+	if feedback != nil {
+		feedback(fmt.Sprintf("%d:%d", before, after))
 	}
 
 	s.Close()
