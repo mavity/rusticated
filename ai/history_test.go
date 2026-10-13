@@ -70,3 +70,46 @@ func TestBuildHistoryJSONToolOnlyModelTurnHasEmptyContent(t *testing.T) {
 		t.Fatalf("got %s", raw)
 	}
 }
+
+func TestFormatPartForEmbeddingAndJSONIsolation(t *testing.T) {
+	userPart := PromptPart{
+		Role:      RoleUser,
+		Text:      "Name a bridge in Paris",
+		Embedding: []float32{0.1, 0.2, 0.3},
+	}
+	if got := FormatPartForEmbedding(userPart); got != "task: search result | text: Name a bridge in Paris" {
+		t.Fatalf("user format = %q", got)
+	}
+
+	modelToolPart := PromptPart{
+		Role: RoleModel,
+		Text: "Checking file",
+		ToolCalls: []ToolCall{
+			{Name: "read_file", RawArguments: json.RawMessage(`{"path":"main.go"}`)},
+		},
+	}
+	if got := FormatPartForEmbedding(modelToolPart); got != "task: search result | text: Checking file\ntool_call read_file({\"path\":\"main.go\"})" {
+		t.Fatalf("model tool format = %q", got)
+	}
+
+	toolRespPart := PromptPart{
+		Role:         RoleTool,
+		ToolName:     "read_file",
+		ToolResponse: map[string]any{"content": "package main"},
+	}
+	if got := FormatPartForEmbedding(toolRespPart); got != `task: search result | text: tool_response read_file: {"content":"package main"}` {
+		t.Fatalf("tool response format = %q", got)
+	}
+
+	msgJSON, err := buildMessageJSON([]PromptPart{userPart})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(msgJSON), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if _, hasEmbedding := parsed["embedding"]; hasEmbedding {
+		t.Fatalf("buildMessageJSON leaked embedding field: %s", msgJSON)
+	}
+}

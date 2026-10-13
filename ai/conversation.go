@@ -33,6 +33,7 @@ type PromptPart struct {
 	ToolName     string
 	ToolResponse any
 	ToolCalls    []ToolCall
+	Embedding    []float32
 }
 
 // ModelEvent represents a valid item emitted during model generation. Failures

@@ -49,6 +49,22 @@ var (
 	lmLoadedFileSupportsThinking              func(file uintptr) bool
 	lmLoadedFileSupportsFunctionCalling       func(file uintptr) bool
 	lmLoadedFileModalitySupportedBackends     func(file uintptr, modality int32, backends *int32, max_size int32) int32
+
+	lmEmbeddingSettingsCreate             func(modelPath, backend, visionBackend, audioBackend uintptr) uintptr
+	lmEmbeddingSettingsDelete             func(settings uintptr)
+	lmEmbeddingSettingsSetNumThreads      func(settings uintptr, threads int32)
+	lmEmbeddingEngineCreate               func(settings uintptr) uintptr
+	lmEmbeddingEngineDelete               func(engine uintptr)
+	lmEmbeddingOptionsCreate              func() uintptr
+	lmEmbeddingOptionsDelete              func(options uintptr)
+	lmEmbeddingOptionsSetNormalize        func(options uintptr, normalize bool)
+	lmEmbeddingOptionsSetOverflowStrategy func(options uintptr, strategy int32)
+	lmInputDataCreate                     func(dataType int32, data uintptr, size uintptr) uintptr
+	lmInputDataDelete                     func(inputData uintptr)
+	lmEmbeddingEngineCompute              func(engine uintptr, inputs uintptr, numInputs uintptr, options uintptr) uintptr
+	lmEmbeddingResponseDelete             func(resp uintptr)
+	lmEmbeddingResponseGetSize            func(resp uintptr) uintptr
+	lmEmbeddingResponseGetValues          func(resp uintptr) *float32
 )
 
 var (
@@ -56,8 +72,15 @@ var (
 	lmLibErr  error
 	lmLib     uintptr
 
-	nativeDrv nativeDriver
+	nativeDrv        nativeDriver
+	nativeInputPinMu sync.Mutex
+	nativeInputPins  = map[uint64]pinnedInput{}
 )
+
+type pinnedInput struct {
+	pinner *runtime.Pinner
+	data   []byte
+}
 
 // ── nativeDriver — implements LMDriver via purego ─────────────────────────
 
@@ -193,6 +216,101 @@ func (d *nativeDriver) streamChunkGetError(chunk uint64) uint64 {
 	return uint64(lmStreamChunkGetError(uintptr(chunk)))
 }
 
+func (d *nativeDriver) embeddingSettingsCreate(modelPath, backend, visionBackend, audioBackend uint64) uint64 {
+	return uint64(lmEmbeddingSettingsCreate(uintptr(modelPath), uintptr(backend), uintptr(visionBackend), uintptr(audioBackend)))
+}
+func (d *nativeDriver) embeddingSettingsDelete(settings uint64) {
+	lmEmbeddingSettingsDelete(uintptr(settings))
+}
+func (d *nativeDriver) embeddingSettingsSetNumThreads(settings uint64, threads int32) {
+	lmEmbeddingSettingsSetNumThreads(uintptr(settings), threads)
+}
+func (d *nativeDriver) embeddingEngineCreate(settings uint64) uint64 {
+	return uint64(lmEmbeddingEngineCreate(uintptr(settings)))
+}
+func (d *nativeDriver) embeddingEngineDelete(engine uint64) {
+	lmEmbeddingEngineDelete(uintptr(engine))
+}
+func (d *nativeDriver) embeddingOptionsCreate() uint64 {
+	return uint64(lmEmbeddingOptionsCreate())
+}
+func (d *nativeDriver) embeddingOptionsDelete(options uint64) {
+	lmEmbeddingOptionsDelete(uintptr(options))
+}
+func (d *nativeDriver) embeddingOptionsSetNormalize(options uint64, normalize bool) {
+	lmEmbeddingOptionsSetNormalize(uintptr(options), normalize)
+}
+func (d *nativeDriver) embeddingOptionsSetInputOverflowStrategy(options uint64, strategy int32) {
+	lmEmbeddingOptionsSetOverflowStrategy(uintptr(options), strategy)
+}
+func (d *nativeDriver) inputDataCreate(dataType int32, data []byte) uint64 {
+	var ptr uintptr
+	var pinner *runtime.Pinner
+	if len(data) > 0 {
+		pinner = new(runtime.Pinner)
+		pinner.Pin(&data[0])
+		ptr = uintptr(unsafe.Pointer(&data[0]))
+	}
+	res := lmInputDataCreate(dataType, ptr, uintptr(len(data)))
+	if res == 0 {
+		if pinner != nil {
+			pinner.Unpin()
+		}
+		return 0
+	}
+	if pinner != nil {
+		nativeInputPinMu.Lock()
+		nativeInputPins[uint64(res)] = pinnedInput{pinner: pinner, data: data}
+		nativeInputPinMu.Unlock()
+	}
+	return uint64(res)
+}
+func (d *nativeDriver) inputDataDelete(inputData uint64) {
+	lmInputDataDelete(uintptr(inputData))
+	nativeInputPinMu.Lock()
+	pi, ok := nativeInputPins[inputData]
+	if ok {
+		delete(nativeInputPins, inputData)
+	}
+	nativeInputPinMu.Unlock()
+	if ok && pi.pinner != nil {
+		pi.pinner.Unpin()
+		runtime.KeepAlive(pi.data)
+	}
+}
+func (d *nativeDriver) embeddingEngineCompute(engine uint64, inputs []uint64, options uint64) ([]float32, error) {
+	if len(inputs) == 0 {
+		return nil, fmt.Errorf("no inputs provided")
+	}
+	cInputs := make([]uintptr, len(inputs))
+	for i, in := range inputs {
+		cInputs[i] = uintptr(in)
+	}
+	var pinner runtime.Pinner
+	pinner.Pin(&cInputs[0])
+	defer pinner.Unpin()
+
+	resp := lmEmbeddingEngineCompute(uintptr(engine), uintptr(unsafe.Pointer(&cInputs[0])), uintptr(len(cInputs)), uintptr(options))
+	runtime.KeepAlive(cInputs)
+	if resp == 0 {
+		return nil, fmt.Errorf("litert_lm_embedding_engine_compute_embedding failed")
+	}
+	defer lmEmbeddingResponseDelete(resp)
+
+	size := lmEmbeddingResponseGetSize(resp)
+	valsPtr := lmEmbeddingResponseGetValues(resp)
+	if size == 0 {
+		return []float32{}, nil
+	}
+	if valsPtr == nil {
+		return nil, fmt.Errorf("invalid embedding response values pointer")
+	}
+	src := unsafe.Slice(valsPtr, int(size))
+	out := make([]float32, int(size))
+	copy(out, src)
+	return out, nil
+}
+
 var callbackTrampoline uintptr
 
 func (d *nativeDriver) createTrampoline() uint64 {
@@ -279,6 +397,22 @@ func ensureLMLibLoadedImpl(libPath string) error {
 		purego.RegisterLibFunc(&lmLoadedFileSupportsThinking, lmLib, "litert_lm_loaded_file_supports_thinking")
 		purego.RegisterLibFunc(&lmLoadedFileSupportsFunctionCalling, lmLib, "litert_lm_loaded_file_supports_function_calling")
 		purego.RegisterLibFunc(&lmLoadedFileModalitySupportedBackends, lmLib, "litert_lm_loaded_file_modality_supported_backends")
+
+		purego.RegisterLibFunc(&lmEmbeddingSettingsCreate, lmLib, "litert_lm_embedding_engine_settings_create")
+		purego.RegisterLibFunc(&lmEmbeddingSettingsDelete, lmLib, "litert_lm_embedding_engine_settings_delete")
+		purego.RegisterLibFunc(&lmEmbeddingSettingsSetNumThreads, lmLib, "litert_lm_embedding_engine_settings_set_num_threads")
+		purego.RegisterLibFunc(&lmEmbeddingEngineCreate, lmLib, "litert_lm_embedding_engine_create")
+		purego.RegisterLibFunc(&lmEmbeddingEngineDelete, lmLib, "litert_lm_embedding_engine_delete")
+		purego.RegisterLibFunc(&lmEmbeddingOptionsCreate, lmLib, "litert_lm_embedding_options_create")
+		purego.RegisterLibFunc(&lmEmbeddingOptionsDelete, lmLib, "litert_lm_embedding_options_delete")
+		purego.RegisterLibFunc(&lmEmbeddingOptionsSetNormalize, lmLib, "litert_lm_embedding_options_set_normalize")
+		purego.RegisterLibFunc(&lmEmbeddingOptionsSetOverflowStrategy, lmLib, "litert_lm_embedding_options_set_input_overflow_strategy")
+		purego.RegisterLibFunc(&lmInputDataCreate, lmLib, "litert_lm_input_data_create")
+		purego.RegisterLibFunc(&lmInputDataDelete, lmLib, "litert_lm_input_data_delete")
+		purego.RegisterLibFunc(&lmEmbeddingEngineCompute, lmLib, "litert_lm_embedding_engine_compute_embedding")
+		purego.RegisterLibFunc(&lmEmbeddingResponseDelete, lmLib, "litert_lm_embedding_response_delete")
+		purego.RegisterLibFunc(&lmEmbeddingResponseGetSize, lmLib, "litert_lm_embedding_response_get_size")
+		purego.RegisterLibFunc(&lmEmbeddingResponseGetValues, lmLib, "litert_lm_embedding_response_get_values")
 	})
 	return lmLibErr
 }
@@ -287,6 +421,10 @@ func ensureLMLibLoadedImpl(libPath string) error {
 
 func openBackend(libPath, modelPath, backend string, maxTokens int) (engineBackend, error) {
 	return sharedOpenBackend(&nativeDrv, libPath, modelPath, backend, maxTokens)
+}
+
+func openEmbedderBackend(libPath, modelPath, backend string) (embedderBackend, error) {
+	return sharedOpenEmbedder(&nativeDrv, libPath, modelPath, backend)
 }
 
 func inspectModel(libPath, modelPath string) (*ModelInfo, error) {

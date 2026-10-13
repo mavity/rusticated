@@ -108,3 +108,78 @@ func TestIsContextOverflowError(t *testing.T) {
 type fmtError string
 
 func (e fmtError) Error() string { return string(e) }
+
+type fakeEmbedder struct {
+	calls int
+	block chan struct{}
+}
+
+func (f *fakeEmbedder) Embed(parts []ai.PromptPart) ([]float32, error) {
+	if f.block != nil {
+		<-f.block
+	}
+	f.calls++
+	return []float32{float32(f.calls), float32(len(parts[0].Text))}, nil
+}
+
+func TestBackgroundEmbedWorkerPopulatesHistoryAndYieldsToTurn(t *testing.T) {
+	emb := &fakeEmbedder{}
+	s := &HarnessSession{embedder: emb}
+	defer s.Shutdown()
+
+	s.appendHistory(
+		ai.PromptPart{Role: ai.RoleUser, Text: "hello"},
+		ai.PromptPart{Role: ai.RoleModel, Text: "world"},
+	)
+
+	s.FlushEmbeddings()
+
+	if emb.calls != 2 {
+		t.Fatalf("embed calls = %d, want 2", emb.calls)
+	}
+	for i, p := range s.CanonicalHistory {
+		if len(p.Embedding) != 2 {
+			t.Fatalf("CanonicalHistory[%d].Embedding = %v, want 2 elements", i, p.Embedding)
+		}
+	}
+	for i, p := range s.CompactedHistory {
+		if len(p.Embedding) != 2 {
+			t.Fatalf("CompactedHistory[%d].Embedding = %v, want 2 elements", i, p.Embedding)
+		}
+	}
+
+	// Simulate turnWaiting pre-empting background embedding between items.
+	emb2 := &fakeEmbedder{}
+	s2 := &HarnessSession{embedder: emb2}
+	defer s2.Shutdown()
+
+	s2.appendHistory(
+		ai.PromptPart{Role: ai.RoleUser, Text: "turn 1"},
+		ai.PromptPart{Role: ai.RoleModel, Text: "reply 1"},
+	)
+	s2.turnWaiting.Store(true)
+	s2.processPendingEmbeddings(false)
+	if emb2.calls != 0 {
+		t.Fatalf("expected worker to yield when turnWaiting is true, got %d calls", emb2.calls)
+	}
+
+	s2.turnWaiting.Store(false)
+	s2.processPendingEmbeddings(false)
+	if emb2.calls != 2 {
+		t.Fatalf("expected worker to embed 2 items once turnWaiting cleared, got %d", emb2.calls)
+	}
+}
+
+func TestFormatEmbeddingSummary(t *testing.T) {
+	vec := make([]float32, 768)
+	vec[0] = 0.0412
+	vec[1] = -0.0189
+	vec[2] = 0.0731
+	vec[767] = -0.0054
+
+	got := formatEmbeddingSummary(vec)
+	want := "dim=768 [+0.0412, -0.0189, +0.0731, ..., -0.0054] l2=0.0862 simhash=bfffffffffffffff"
+	if got != want {
+		t.Fatalf("formatEmbeddingSummary =\n got %q\nwant %q", got, want)
+	}
+}

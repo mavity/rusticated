@@ -5,14 +5,24 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"os"
+	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"ai"
 )
 
+type partEmbedder interface {
+	Embed(parts []ai.PromptPart) ([]float32, error)
+}
+
 // HarnessSession tracks conversation state, history, and context compaction.
 type HarnessSession struct {
 	engine           *ai.Engine
+	embedder         partEmbedder
 	conv             *ai.Conversation
 	systemMessage    string
 	tools            []map[string]any
@@ -21,11 +31,157 @@ type HarnessSession struct {
 	CanonicalHistory []ai.PromptPart
 	CompactedHistory []ai.PromptPart
 	totalTokensEst   int
+
+	historyMu      sync.Mutex
+	turnGate       sync.Mutex
+	turnWaiting    atomic.Bool
+	embeddedUpTo   int
+	embedTrigger   chan struct{}
+	embedStop      chan struct{}
+	embedDone      chan struct{}
+	embedOnce      sync.Once
+	embedCloseOnce sync.Once
 }
 
 func (s *HarnessSession) appendHistory(parts ...ai.PromptPart) {
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
 	s.CanonicalHistory = append(s.CanonicalHistory, parts...)
 	s.CompactedHistory = append(s.CompactedHistory, parts...)
+}
+
+func (s *HarnessSession) startEmbedWorker() {
+	if s.embedder == nil || reflect.ValueOf(s.embedder).IsNil() {
+		return
+	}
+	s.embedOnce.Do(func() {
+		s.embedTrigger = make(chan struct{}, 1)
+		s.embedStop = make(chan struct{})
+		s.embedDone = make(chan struct{})
+		go s.embedWorkerLoop()
+	})
+}
+
+func (s *HarnessSession) triggerBackgroundEmbedding() {
+	if s.embedder == nil || reflect.ValueOf(s.embedder).IsNil() {
+		return
+	}
+	s.startEmbedWorker()
+	select {
+	case s.embedTrigger <- struct{}{}:
+	default:
+	}
+}
+
+func (s *HarnessSession) embedWorkerLoop() {
+	defer close(s.embedDone)
+	for {
+		select {
+		case <-s.embedStop:
+			return
+		case <-s.embedTrigger:
+			s.processPendingEmbeddings(false)
+		}
+	}
+}
+
+// processPendingEmbeddings embeds unembedded PromptPart items in CanonicalHistory
+// one by one while holding turnGate so it never contends with active LLM generation.
+// If flushAll is false, it yields immediately as soon as a user turn is waiting.
+func (s *HarnessSession) processPendingEmbeddings(flushAll bool) {
+	for {
+		if !flushAll {
+			select {
+			case <-s.embedStop:
+				return
+			default:
+			}
+			if s.turnWaiting.Load() {
+				return
+			}
+		}
+
+		s.turnGate.Lock()
+		if !flushAll && s.turnWaiting.Load() {
+			s.turnGate.Unlock()
+			return
+		}
+
+		s.historyMu.Lock()
+		for s.embeddedUpTo < len(s.CanonicalHistory) && len(s.CanonicalHistory[s.embeddedUpTo].Embedding) > 0 {
+			s.embeddedUpTo++
+		}
+		if s.embeddedUpTo >= len(s.CanonicalHistory) {
+			s.historyMu.Unlock()
+			s.turnGate.Unlock()
+			return
+		}
+		idx := s.embeddedUpTo
+		part := s.CanonicalHistory[idx]
+		s.historyMu.Unlock()
+
+		vec, err := s.embedder.Embed([]ai.PromptPart{part})
+		s.historyMu.Lock()
+		if err == nil && len(vec) > 0 && idx < len(s.CanonicalHistory) {
+			s.CanonicalHistory[idx].Embedding = vec
+			syncCompactedEmbedding(s.CompactedHistory, part, vec)
+			if s.verbose {
+				fmt.Fprintf(os.Stderr, "[embed] #%d %s %s\n", idx, part.Role, formatEmbeddingSummary(vec))
+			}
+		} else if err != nil && s.verbose {
+			fmt.Fprintf(os.Stderr, "[embed] #%d %s error: %v\n", idx, part.Role, err)
+		}
+		if idx == s.embeddedUpTo {
+			s.embeddedUpTo++
+		}
+		s.historyMu.Unlock()
+		s.turnGate.Unlock()
+	}
+}
+
+// formatEmbeddingSummary returns an industry-standard compact diagnostic representation
+// of an embedding vector: dimension, preview of leading/trailing components, L2 norm, and 64-bit SimHash.
+func formatEmbeddingSummary(vec []float32) string {
+	n := len(vec)
+	if n == 0 {
+		return "dim=0 []"
+	}
+	var sumSq float64
+	var simhash uint64
+	for i, v := range vec {
+		sumSq += float64(v) * float64(v)
+		if i < 64 && v >= 0 {
+			simhash |= 1 << uint(63-i)
+		}
+	}
+	norm := math.Sqrt(sumSq)
+	if n <= 4 {
+		var parts []string
+		for _, v := range vec {
+			parts = append(parts, fmt.Sprintf("%+.4f", v))
+		}
+		return fmt.Sprintf("dim=%d [%s] l2=%.4f simhash=%016x", n, strings.Join(parts, ", "), norm, simhash)
+	}
+	return fmt.Sprintf("dim=%d [%+.4f, %+.4f, %+.4f, ..., %+.4f] l2=%.4f simhash=%016x",
+		n, vec[0], vec[1], vec[2], vec[n-1], norm, simhash)
+}
+
+func syncCompactedEmbedding(compacted []ai.PromptPart, target ai.PromptPart, vec []float32) {
+	for i := len(compacted) - 1; i >= 0; i-- {
+		p := &compacted[i]
+		if len(p.Embedding) == 0 && p.Role == target.Role && p.Text == target.Text && p.ToolName == target.ToolName && len(p.ToolCalls) == len(target.ToolCalls) {
+			p.Embedding = vec
+			return
+		}
+	}
+}
+
+// FlushEmbeddings synchronously finishes any pending embeddings in CanonicalHistory.
+func (s *HarnessSession) FlushEmbeddings() {
+	if s.embedder == nil || reflect.ValueOf(s.embedder).IsNil() {
+		return
+	}
+	s.processPendingEmbeddings(true)
 }
 
 func (s *HarnessSession) Init() error {
@@ -56,13 +212,30 @@ func (s *HarnessSession) initWithHistory(history []ai.PromptPart) error {
 			s.totalTokensEst += len(b) / 4
 		}
 	}
+	s.startEmbedWorker()
 	return nil
 }
 
 func (s *HarnessSession) Close() {
+	s.closeConv()
+}
+
+func (s *HarnessSession) closeConv() {
 	if s.conv != nil {
 		s.conv.Close()
 	}
+}
+
+// Shutdown stops the background embedding worker and closes the active conversation.
+func (s *HarnessSession) Shutdown() {
+	if s.embedStop != nil {
+		s.embedCloseOnce.Do(func() {
+			s.turnWaiting.Store(true)
+			close(s.embedStop)
+			<-s.embedDone
+		})
+	}
+	s.closeConv()
 }
 
 func isContextOverflowError(err error) bool {
@@ -77,6 +250,14 @@ func isContextOverflowError(err error) bool {
 }
 
 func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
+	s.turnWaiting.Store(true)
+	s.turnGate.Lock()
+	s.turnWaiting.Store(false)
+	defer func() {
+		s.turnGate.Unlock()
+		s.triggerBackgroundEmbedding()
+	}()
+
 	turnParts := []ai.PromptPart{{Role: ai.RoleUser, Text: userText}}
 	s.appendHistory(turnParts...)
 	s.totalTokensEst += len(userText) / 4
@@ -124,7 +305,9 @@ func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
 			// uncommitted tail from CompactedHistory and re-initialize s.conv so
 			// the next user prompt in the REPL starts on a clean conversation.
 			if n := len(turnParts); n > 0 && len(s.CompactedHistory) >= n {
+				s.historyMu.Lock()
 				s.CompactedHistory = s.CompactedHistory[:len(s.CompactedHistory)-n]
+				s.historyMu.Unlock()
 			}
 			s.Close()
 			_ = s.Init()
@@ -299,8 +482,10 @@ func (s *HarnessSession) compactContextForRetry(ctx context.Context, pendingPart
 		}
 	}
 
+	s.historyMu.Lock()
 	s.CompactedHistory = append(append([]ai.PromptPart(nil), prior...), pending...)
 	after := historySize(s.CompactedHistory)
+	s.historyMu.Unlock()
 	if feedback != nil {
 		feedback(fmt.Sprintf("%d:%d", before, after))
 	}

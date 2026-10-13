@@ -11,8 +11,10 @@ import (
 )
 
 const (
-	gemmaModelURL  = "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm"
-	gemmaModelSize = 2038755678
+	gemmaModelURL      = "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm"
+	gemmaModelSize     = 2038755678
+	embeddingModelURL  = "https://huggingface.co/litert-community/embeddinggemma-2-text-270m-litert-lm/resolve/main/embeddinggemma-2-text-270m.litertlm"
+	embeddingModelSize = 164626432
 )
 
 func main() {
@@ -124,6 +126,27 @@ func main() {
 	}
 	defer engine.Close()
 
+	// 3b. Initialize Embedder (EmbeddingGemma 2) unless disabled
+	var embedder partEmbedder
+	if !strings.EqualFold(cfg.EmbedModelFlag, "none") {
+		embedPath := cfg.EmbedModelFlag
+		if embedPath == "" {
+			if ep, err := assets.EnsureModel(ctx, embeddingModelURL, embeddingModelSize, opts); err == nil {
+				embedPath = ep
+			} else if cfg.VerboseFlag {
+				fmt.Fprintf(os.Stderr, "[pope] warning: embedding model fetch skipped: %v\n", err)
+			}
+		}
+		if embedPath != "" {
+			if emb, err := ai.NewEmbedder(libPath, embedPath, chosenBackend); err == nil {
+				embedder = emb
+				defer emb.Close()
+			} else if cfg.VerboseFlag {
+				fmt.Fprintf(os.Stderr, "[pope] warning: embedder init failed: %v\n", err)
+			}
+		}
+	}
+
 	// 4. Setup Tools
 	// The Gemma 4 E2B model metadata incorrectly reports SupportsFunctionCalling: false.
 	// We force it to true and register tools anyway, as the model is instruction-tuned for it.
@@ -138,6 +161,7 @@ func main() {
 
 	session := &HarnessSession{
 		engine:          engine,
+		embedder:        embedder,
 		systemMessage:   cfg.SystemFlag,
 		tools:           tools,
 		compactionLimit: compactionLimit,
@@ -148,7 +172,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "pope: conversation init failed: %v\n", err)
 		os.Exit(1)
 	}
-	defer session.Close()
+	defer session.Shutdown()
 
 	// 6. Execution: One-Shot or REPL
 	if cfg.PromptFlag != "" {
@@ -156,6 +180,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "pope: turn error: %v\n", err)
 			os.Exit(1)
 		}
+		session.FlushEmbeddings()
 		return
 	}
 

@@ -5,6 +5,7 @@ package ai
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"os"
 	"sync"
 	"syscall"
@@ -58,7 +59,25 @@ var (
 	symLMLoadedFileSupportsFunctionCalling       uint64
 	symLMLoadedFileModalitySupportedBackends     uint64
 
-	rusticatedDrv rusticatedDriver
+	symLMEmbeddingSettingsCreate             uint64
+	symLMEmbeddingSettingsDelete             uint64
+	symLMEmbeddingSettingsSetNumThreads      uint64
+	symLMEmbeddingEngineCreate               uint64
+	symLMEmbeddingEngineDelete               uint64
+	symLMEmbeddingOptionsCreate              uint64
+	symLMEmbeddingOptionsDelete              uint64
+	symLMEmbeddingOptionsSetNormalize        uint64
+	symLMEmbeddingOptionsSetOverflowStrategy uint64
+	symLMInputDataCreate                     uint64
+	symLMInputDataDelete                     uint64
+	symLMEmbeddingEngineCompute              uint64
+	symLMEmbeddingResponseDelete             uint64
+	symLMEmbeddingResponseGetSize            uint64
+	symLMEmbeddingResponseGetValues          uint64
+
+	rusticatedDrv        rusticatedDriver
+	rusticatedInputBufMu sync.Mutex
+	rusticatedInputBufs  = map[uint64]uint64{}
 )
 
 // callDylib invokes a WASM dynamic library function with typed parameters.
@@ -271,6 +290,126 @@ func (d *rusticatedDriver) streamChunkGetError(chunk uint64) uint64 {
 	return v
 }
 
+func (d *rusticatedDriver) embeddingSettingsCreate(modelPath, backend, visionBackend, audioBackend uint64) uint64 {
+	v, _ := callDylib(symLMEmbeddingSettingsCreate, []byte{i64, i64, i64, i64}, []byte{i64},
+		modelPath, backend, visionBackend, audioBackend)
+	return v
+}
+func (d *rusticatedDriver) embeddingSettingsDelete(settings uint64) {
+	_, _ = callDylib(symLMEmbeddingSettingsDelete, []byte{i64}, nil, settings)
+}
+func (d *rusticatedDriver) embeddingSettingsSetNumThreads(settings uint64, threads int32) {
+	_, _ = callDylib(symLMEmbeddingSettingsSetNumThreads, []byte{i64, i32}, nil, settings, uint64(threads))
+}
+func (d *rusticatedDriver) embeddingEngineCreate(settings uint64) uint64 {
+	v, _ := callDylib(symLMEmbeddingEngineCreate, []byte{i64}, []byte{i64}, settings)
+	return v
+}
+func (d *rusticatedDriver) embeddingEngineDelete(engine uint64) {
+	_, _ = callDylib(symLMEmbeddingEngineDelete, []byte{i64}, nil, engine)
+}
+func (d *rusticatedDriver) embeddingOptionsCreate() uint64 {
+	v, _ := callDylib(symLMEmbeddingOptionsCreate, nil, []byte{i64})
+	return v
+}
+func (d *rusticatedDriver) embeddingOptionsDelete(options uint64) {
+	_, _ = callDylib(symLMEmbeddingOptionsDelete, []byte{i64}, nil, options)
+}
+func (d *rusticatedDriver) embeddingOptionsSetNormalize(options uint64, normalize bool) {
+	b := byte(0)
+	if normalize {
+		b = 1
+	}
+	_, _ = callDylib(symLMEmbeddingOptionsSetNormalize, []byte{i64, i32}, nil, options, uint64(b))
+}
+func (d *rusticatedDriver) embeddingOptionsSetInputOverflowStrategy(options uint64, strategy int32) {
+	_, _ = callDylib(symLMEmbeddingOptionsSetOverflowStrategy, []byte{i64, i32}, nil, options, uint64(strategy))
+}
+func (d *rusticatedDriver) inputDataCreate(dataType int32, data []byte) uint64 {
+	var buf uint64
+	if len(data) > 0 {
+		var err error
+		buf, err = syscall.DylibAlloc(lmLib, uint64(len(data)))
+		if err != nil {
+			return 0
+		}
+		if syscall.DylibWriteMem(lmLib, buf, data) != nil {
+			_ = syscall.DylibFree(lmLib, buf)
+			return 0
+		}
+	}
+	v, err := callDylib(symLMInputDataCreate, []byte{i32, i64, i64}, []byte{i64},
+		uint64(dataType), buf, uint64(len(data)))
+	if err != nil || v == 0 {
+		if buf != 0 {
+			_ = syscall.DylibFree(lmLib, buf)
+		}
+		return 0
+	}
+	if buf != 0 {
+		rusticatedInputBufMu.Lock()
+		rusticatedInputBufs[v] = buf
+		rusticatedInputBufMu.Unlock()
+	}
+	return v
+}
+func (d *rusticatedDriver) inputDataDelete(inputData uint64) {
+	_, _ = callDylib(symLMInputDataDelete, []byte{i64}, nil, inputData)
+	rusticatedInputBufMu.Lock()
+	buf, ok := rusticatedInputBufs[inputData]
+	if ok {
+		delete(rusticatedInputBufs, inputData)
+	}
+	rusticatedInputBufMu.Unlock()
+	if ok && buf != 0 {
+		_ = syscall.DylibFree(lmLib, buf)
+	}
+}
+func (d *rusticatedDriver) embeddingEngineCompute(engine uint64, inputs []uint64, options uint64) ([]float32, error) {
+	if len(inputs) == 0 {
+		return nil, fmt.Errorf("no inputs provided")
+	}
+	inputsBuf, err := syscall.DylibAlloc(lmLib, uint64(len(inputs)*8))
+	if err != nil {
+		return nil, fmt.Errorf("DylibAlloc failed: %w", err)
+	}
+	defer func() { _ = syscall.DylibFree(lmLib, inputsBuf) }()
+
+	rawPtrs := make([]byte, len(inputs)*8)
+	for i, ptr := range inputs {
+		binary.LittleEndian.PutUint64(rawPtrs[i*8:(i+1)*8], ptr)
+	}
+	if err := syscall.DylibWriteMem(lmLib, inputsBuf, rawPtrs); err != nil {
+		return nil, fmt.Errorf("DylibWriteMem failed: %w", err)
+	}
+
+	resp, err := callDylib(symLMEmbeddingEngineCompute, []byte{i64, i64, i64, i64}, []byte{i64},
+		engine, inputsBuf, uint64(len(inputs)), options)
+	if err != nil || resp == 0 {
+		return nil, fmt.Errorf("litert_lm_embedding_engine_compute_embedding failed")
+	}
+	defer func() { _, _ = callDylib(symLMEmbeddingResponseDelete, []byte{i64}, nil, resp) }()
+
+	size, _ := callDylib(symLMEmbeddingResponseGetSize, []byte{i64}, []byte{i64}, resp)
+	valsPtr, _ := callDylib(symLMEmbeddingResponseGetValues, []byte{i64}, []byte{i64}, resp)
+	if size == 0 {
+		return []float32{}, nil
+	}
+	if valsPtr == 0 {
+		return nil, fmt.Errorf("invalid embedding response values pointer")
+	}
+	rawVals := make([]byte, int(size)*4)
+	if err := syscall.DylibReadMem(lmLib, valsPtr, rawVals); err != nil {
+		return nil, fmt.Errorf("DylibReadMem failed: %w", err)
+	}
+	out := make([]float32, int(size))
+	for i := 0; i < int(size); i++ {
+		bits := binary.LittleEndian.Uint32(rawVals[i*4 : (i+1)*4])
+		out[i] = math.Float32frombits(bits)
+	}
+	return out, nil
+}
+
 var (
 	rusticatedTrampoline uint64
 	trampolineOv         [512]byte
@@ -344,6 +483,22 @@ func ensureLMLibLoadedImpl(libPath string) error {
 		symLMLoadedFileSupportsThinking, _ = syscall.DylibSym(lmLib, "litert_lm_loaded_file_supports_thinking")
 		symLMLoadedFileSupportsFunctionCalling, _ = syscall.DylibSym(lmLib, "litert_lm_loaded_file_supports_function_calling")
 		symLMLoadedFileModalitySupportedBackends, _ = syscall.DylibSym(lmLib, "litert_lm_loaded_file_modality_supported_backends")
+
+		symLMEmbeddingSettingsCreate, _ = syscall.DylibSym(lmLib, "litert_lm_embedding_engine_settings_create")
+		symLMEmbeddingSettingsDelete, _ = syscall.DylibSym(lmLib, "litert_lm_embedding_engine_settings_delete")
+		symLMEmbeddingSettingsSetNumThreads, _ = syscall.DylibSym(lmLib, "litert_lm_embedding_engine_settings_set_num_threads")
+		symLMEmbeddingEngineCreate, _ = syscall.DylibSym(lmLib, "litert_lm_embedding_engine_create")
+		symLMEmbeddingEngineDelete, _ = syscall.DylibSym(lmLib, "litert_lm_embedding_engine_delete")
+		symLMEmbeddingOptionsCreate, _ = syscall.DylibSym(lmLib, "litert_lm_embedding_options_create")
+		symLMEmbeddingOptionsDelete, _ = syscall.DylibSym(lmLib, "litert_lm_embedding_options_delete")
+		symLMEmbeddingOptionsSetNormalize, _ = syscall.DylibSym(lmLib, "litert_lm_embedding_options_set_normalize")
+		symLMEmbeddingOptionsSetOverflowStrategy, _ = syscall.DylibSym(lmLib, "litert_lm_embedding_options_set_input_overflow_strategy")
+		symLMInputDataCreate, _ = syscall.DylibSym(lmLib, "litert_lm_input_data_create")
+		symLMInputDataDelete, _ = syscall.DylibSym(lmLib, "litert_lm_input_data_delete")
+		symLMEmbeddingEngineCompute, _ = syscall.DylibSym(lmLib, "litert_lm_embedding_engine_compute_embedding")
+		symLMEmbeddingResponseDelete, _ = syscall.DylibSym(lmLib, "litert_lm_embedding_response_delete")
+		symLMEmbeddingResponseGetSize, _ = syscall.DylibSym(lmLib, "litert_lm_embedding_response_get_size")
+		symLMEmbeddingResponseGetValues, _ = syscall.DylibSym(lmLib, "litert_lm_embedding_response_get_values")
 	})
 	return lmLibErr
 }
@@ -352,6 +507,10 @@ func ensureLMLibLoadedImpl(libPath string) error {
 
 func openBackend(libPath, modelPath, backend string, maxTokens int) (engineBackend, error) {
 	return sharedOpenBackend(&rusticatedDrv, libPath, modelPath, backend, maxTokens)
+}
+
+func openEmbedderBackend(libPath, modelPath, backend string) (embedderBackend, error) {
+	return sharedOpenEmbedder(&rusticatedDrv, libPath, modelPath, backend)
 }
 
 func inspectModel(libPath, modelPath string) (*ModelInfo, error) {

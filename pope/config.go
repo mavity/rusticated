@@ -11,12 +11,13 @@ import (
 
 // Config holds the parsed command-line flags.
 type Config struct {
-	PromptFlag  string
-	ModelFlag   string
-	BackendFlag string
-	SystemFlag  string
-	VerboseFlag bool
-	InfoFlag    bool
+	PromptFlag     string
+	ModelFlag      string
+	EmbedModelFlag string
+	BackendFlag    string
+	SystemFlag     string
+	VerboseFlag    bool
+	InfoFlag       bool
 }
 
 func parseConfig() Config {
@@ -26,6 +27,8 @@ func parseConfig() Config {
 	flag.StringVar(&cfg.PromptFlag, "prompt", "", "One-shot prompt execution")
 	flag.StringVar(&cfg.ModelFlag, "m", "", "Path to .litertlm model file (optional)")
 	flag.StringVar(&cfg.ModelFlag, "model", "", "Path to .litertlm model file (optional)")
+	flag.StringVar(&cfg.EmbedModelFlag, "e", "", "Path to .litertlm embedding model file (optional, or 'none' to disable)")
+	flag.StringVar(&cfg.EmbedModelFlag, "embed-model", "", "Path to .litertlm embedding model file (optional, or 'none' to disable)")
 	flag.StringVar(&cfg.BackendFlag, "b", "gpu", "LiteRT-LM backend (gpu, cpu, npu, auto)")
 	flag.StringVar(&cfg.BackendFlag, "backend", "gpu", "LiteRT-LM backend (gpu, cpu, npu, auto)")
 	flag.StringVar(&cfg.SystemFlag, "s", "You are Pope, a helpful and precise assistant equipped with system tools.", "System message")

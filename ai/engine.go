@@ -2,9 +2,11 @@ package ai
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 )
 
 type engineImpl struct {
@@ -164,4 +166,116 @@ func (c *convImpl) sendStream(ctx context.Context, payloadJSON string, onToken f
 		return ErrClosed
 	}
 	return c.backend.SendStream(ctx, payloadJSON, onToken)
+}
+
+type embedderImpl struct {
+	backend embedderBackend
+}
+
+func newEmbedderImpl(libPath, modelPath, backend string) (*embedderImpl, error) {
+	var lastErr error
+	for _, cand := range resolveLMBackendCandidates(backend) {
+		b, err := openEmbedderBackend(libPath, modelPath, cand)
+		if err == nil && b != nil {
+			return &embedderImpl{backend: b}, nil
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("failed to initialize LiteRT-LM embedder")
+}
+
+func (e *embedderImpl) Close() {
+	if e != nil && e.backend != nil {
+		_ = e.backend.Close()
+	}
+}
+
+func (e *embedderImpl) Embed(parts []PromptPart) ([]float32, error) {
+	if e == nil || e.backend == nil {
+		return nil, ErrClosed
+	}
+	inputs := buildEmbedInputs(parts)
+	if len(inputs) == 0 {
+		return nil, fmt.Errorf("ai: no embeddable content in PromptParts")
+	}
+	return e.backend.ComputeEmbedding(inputs)
+}
+
+// FormatPartForEmbedding formats a single PromptPart into its canonical text
+// representation with the EmbeddingGemma 2 asymmetric task prefix.
+func FormatPartForEmbedding(p PromptPart) string {
+	var body strings.Builder
+	switch p.Role {
+	case RoleTool:
+		body.WriteString("tool_response ")
+		body.WriteString(p.ToolName)
+		if p.ToolResponse != nil {
+			if b, err := json.Marshal(p.ToolResponse); err == nil {
+				body.WriteString(": ")
+				body.Write(b)
+			}
+		} else if p.Text != "" {
+			body.WriteString(": ")
+			body.WriteString(p.Text)
+		}
+	case RoleModel:
+		if p.Text != "" {
+			body.WriteString(p.Text)
+		}
+		for _, tc := range p.ToolCalls {
+			if body.Len() > 0 {
+				body.WriteByte('\n')
+			}
+			args := string(tc.RawArguments)
+			if args == "" && len(tc.Arguments) > 0 {
+				if b, err := json.Marshal(tc.Arguments); err == nil {
+					args = string(b)
+				}
+			}
+			body.WriteString("tool_call ")
+			body.WriteString(tc.Name)
+			body.WriteByte('(')
+			body.WriteString(args)
+			body.WriteByte(')')
+		}
+	default:
+		body.WriteString(p.Text)
+	}
+	text := strings.TrimSpace(body.String())
+	if text == "" {
+		return ""
+	}
+	if strings.HasPrefix(text, "task: ") {
+		return text
+	}
+	return "task: search result | text: " + text
+}
+
+func buildEmbedInputs(parts []PromptPart) []embedInput {
+	var inputs []embedInput
+	var textParts []string
+	for _, p := range parts {
+		if p.ImageBase64 != "" {
+			if raw, err := base64.StdEncoding.DecodeString(p.ImageBase64); err == nil && len(raw) > 0 {
+				inputs = append(inputs, embedInput{
+					dataType: inputDataTypeImage,
+					data:     raw,
+				})
+			}
+		}
+		if formatted := FormatPartForEmbedding(p); formatted != "" {
+			textParts = append(textParts, formatted)
+		}
+	}
+	if len(textParts) > 0 {
+		combined := strings.Join(textParts, "\n")
+		inputs = append(inputs, embedInput{
+			dataType: inputDataTypeText,
+			data:     []byte(combined),
+		})
+	}
+	return inputs
 }
