@@ -7,14 +7,15 @@ import (
 	"reflect"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
 type fakeConvBackend struct {
-	chunks   []string
-	err      error
-	called   atomic.Bool
-	finished atomic.Bool
+	chunks    []string
+	err       error
+	called    atomic.Bool
+	finished  atomic.Bool
+	closed    atomic.Bool
+	ctxErrEnd atomic.Value // error observed on ctx once all chunks were pushed
 }
 
 func (f *fakeConvBackend) SendStream(ctx context.Context, messageJSON string, onChunk func(string)) error {
@@ -22,11 +23,15 @@ func (f *fakeConvBackend) SendStream(ctx context.Context, messageJSON string, on
 	for _, c := range f.chunks {
 		onChunk(c)
 	}
+	f.ctxErrEnd.Store(struct{ error }{ctx.Err()})
 	f.finished.Store(true)
 	return f.err
 }
 
-func (f *fakeConvBackend) Close() error { return nil }
+func (f *fakeConvBackend) Close() error {
+	f.closed.Store(true)
+	return nil
+}
 
 func newFakeConv(f *fakeConvBackend) *Conversation {
 	return &Conversation{impl: &convImpl{backend: f}}
@@ -103,29 +108,68 @@ func TestSendStreamYieldsPayloadErrorWithoutCallingBackend(t *testing.T) {
 	}
 }
 
-// Breaking out early must not leave the native side blocked on an unread
-// channel, and must not return before the generation has finished.
-func TestSendStreamEarlyBreakDrainsUntilGenerationFinishes(t *testing.T) {
+// Breaking out cancels the native generation (through ctx) and invalidates the
+// conversation. Chunks the backend still pushes afterwards must not reach the
+// loop body, which would otherwise be called after the loop has exited.
+func TestSendStreamEarlyBreakCancelsAndInvalidates(t *testing.T) {
 	f := &fakeConvBackend{}
-	for i := 0; i < 100; i++ { // well beyond the internal channel buffer
+	for i := 0; i < 100; i++ {
 		f.chunks = append(f.chunks, textChunk("x"))
 	}
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for range newFakeConv(f).SendStream(context.Background(), []PromptPart{{Text: "hi"}}) {
-			break
-		}
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("early break deadlocked: native callbacks blocked on an unread channel")
+	n := 0
+	for range newFakeConv(f).SendStream(context.Background(), []PromptPart{{Text: "hi"}}) {
+		n++
+		break
 	}
-	if !f.finished.Load() {
-		t.Fatal("iterator returned while the backend was still generating")
+
+	if n != 1 {
+		t.Fatalf("loop body ran %d times after break, want 1", n)
+	}
+	if got, _ := f.ctxErrEnd.Load().(struct{ error }); !errors.Is(got.error, context.Canceled) {
+		t.Fatalf("backend ctx error = %v, want context.Canceled", got.error)
+	}
+	if !f.closed.Load() {
+		t.Fatal("conversation was not invalidated by the break")
+	}
+}
+
+func TestSendStreamOnClosedConversationYieldsErrClosed(t *testing.T) {
+	for name, conv := range map[string]*Conversation{
+		"nil":        nil,
+		"no impl":    {},
+		"no backend": {impl: &convImpl{}},
+	} {
+		var errs []error
+		for event, err := range conv.SendStream(context.Background(), []PromptPart{{Text: "hi"}}) {
+			if event != nil {
+				t.Fatalf("%s: unexpected event %v", name, event)
+			}
+			errs = append(errs, err)
+		}
+		if len(errs) != 1 || !errors.Is(errs[0], ErrClosed) {
+			t.Fatalf("%s: errs = %v, want exactly [ErrClosed]", name, errs)
+		}
+	}
+}
+
+// A conversation closed while a stream is running reports ErrClosed from the
+// backend; the loop sees it once, after the events that preceded it.
+func TestSendStreamYieldsErrClosedMidStream(t *testing.T) {
+	f := &fakeConvBackend{chunks: []string{textChunk("a")}, err: ErrClosed}
+
+	var events []ModelEvent
+	var errs []error
+	for event, err := range newFakeConv(f).SendStream(context.Background(), []PromptPart{{Text: "hi"}}) {
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		events = append(events, event)
+	}
+
+	if len(events) != 1 || len(errs) != 1 || !errors.Is(errs[0], ErrClosed) {
+		t.Fatalf("events = %v, errs = %v, want one event then [ErrClosed]", events, errs)
 	}
 }
 

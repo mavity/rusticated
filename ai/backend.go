@@ -6,11 +6,17 @@ package ai
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
-	"sync"
+	"sync/atomic"
+	"unsafe"
 )
+
+// ErrClosed is returned by SendStream when the conversation was closed, or
+// invalidated by cancellation, before or during the request.
+var ErrClosed = errors.New("ai: conversation is closed")
 
 // Verbose enables verbose logging of library loading and other internals.
 var Verbose bool
@@ -76,6 +82,7 @@ type LMDriver interface {
 	convCreate(engine, cfg uint64) uint64
 	convDelete(conv uint64)
 	convSendStream(conv, msg, extraCtx, optArgs, callback, userData uint64) int32
+	convCancelProcess(conv uint64)
 
 	// ── Loaded file inspection ───────────────────────────────────────────
 	loadedFileCreate(modelPath uint64) uint64
@@ -93,37 +100,109 @@ type LMDriver interface {
 	streamChunkGetError(chunk uint64) uint64
 
 	// ── Callback trampoline creation ─────────────────────────────────────
-	createTrampoline(callbackID uint64) uint64
+	// The trampoline is created once per process; the request is identified
+	// by the userData passed to convSendStream.
+	createTrampoline() uint64
 }
 
 // ── Shared callback state ─────────────────────────────────────────────────
 
-// streamState is the state of one in-flight SendStream request.
+// Delivery states of a stream, driving streamState.deliver and stop.
+const (
+	deliveryIdle          int32 = iota
+	deliveryActive              // onChunk is running on the native callback thread
+	deliveryStopRequested       // stop arrived while onChunk was running
+	deliveryStopped             // no further chunk reaches onChunk
+)
+
+// streamState is the state of one in-flight SendStream request. It is found by
+// the native callback through its userData: a pointer, kept alive and unmoved
+// by a runtime.Pinner for as long as native code may still call back.
 type streamState struct {
-	onChunk func(string)
+	onChunk  func(string)
+	delivery atomic.Int32
+	// bodyDone is closed by the callback thread when it finishes the onChunk
+	// that was running when stop was requested.
+	bodyDone chan struct{}
 	// doneCh is 1-buffered: the terminal chunk delivers nil on clean
 	// completion or the native error, without ever blocking the C callback.
 	doneCh chan error
+	// closeCh is closed to ask the SendStream goroutine to abandon the stream.
+	closeCh  chan struct{}
+	closeReq atomic.Bool
 }
 
-var (
-	tokenCallbackMu       sync.Mutex
-	tokenCallbackRegistry = make(map[uint64]*streamState)
-	tokenCallbackNextID   uint64
-)
+func newStreamState(onChunk func(string)) *streamState {
+	return &streamState{
+		onChunk:  onChunk,
+		bodyDone: make(chan struct{}),
+		doneCh:   make(chan error, 1),
+		closeCh:  make(chan struct{}),
+	}
+}
+
+func (st *streamState) requestClose() {
+	if st.closeReq.CompareAndSwap(false, true) {
+		close(st.closeCh)
+	}
+}
+
+// deliver runs onChunk on the calling (native callback) thread unless the
+// stream has been stopped.
+func (st *streamState) deliver(token string) {
+	if !st.delivery.CompareAndSwap(deliveryIdle, deliveryActive) {
+		return
+	}
+	st.onChunk(token)
+	if !st.delivery.CompareAndSwap(deliveryActive, deliveryIdle) {
+		st.delivery.Store(deliveryStopped)
+		close(st.bodyDone)
+	}
+}
+
+// stop guarantees that onChunk is not running, and will not run again, once it
+// returns. It waits for an onChunk that is already in progress.
+func (st *streamState) stop() {
+	for {
+		switch st.delivery.Load() {
+		case deliveryIdle:
+			if st.delivery.CompareAndSwap(deliveryIdle, deliveryStopped) {
+				return
+			}
+		case deliveryActive:
+			if st.delivery.CompareAndSwap(deliveryActive, deliveryStopRequested) {
+				<-st.bodyDone
+				return
+			}
+		default:
+			return
+		}
+	}
+}
+
+func streamStateUserData(st *streamState) uint64 {
+	return uint64(uintptr(unsafe.Pointer(st)))
+}
+
+// streamStateFromUserData reverses streamStateUserData. The pointer is
+// reinterpreted from memory rather than converted from a uintptr value, which
+// is how a pointer that only C holds has to be recovered.
+func streamStateFromUserData(userData uint64) *streamState {
+	p := uintptr(userData)
+	return (*streamState)(*(*unsafe.Pointer)(unsafe.Pointer(&p)))
+}
 
 // sharedTokenCallback is invoked by the platform-specific trampoline when the
 // C runtime emits a stream chunk. Text chunks go to the request's onChunk. The
 // terminal chunk (is_final) carries no text, and also carries the error if the
-// stream failed, so it is what completes the request.
+// stream failed, so it is what completes the request. The request state must
+// not be touched after the terminal chunk has been signalled.
 func sharedTokenCallback(drv LMDriver, userData, chunkPtr uint64) {
-	tokenCallbackMu.Lock()
-	st := tokenCallbackRegistry[userData]
-	tokenCallbackMu.Unlock()
+	st := streamStateFromUserData(userData)
 
 	if textPtr := drv.streamChunkGetText(chunkPtr); textPtr != 0 {
 		if token := drv.ptrToString(textPtr); token != "" {
-			st.onChunk(token)
+			st.deliver(token)
 		}
 	}
 
@@ -138,7 +217,7 @@ func sharedTokenCallback(drv LMDriver, userData, chunkPtr uint64) {
 			streamErr = fmt.Errorf("LiteRT stream error: %s", msg)
 		}
 		if Verbose {
-			fmt.Fprintf(os.Stderr, "[ai] stream final chunk for cb %d (err: %v)\n", userData, streamErr)
+			fmt.Fprintf(os.Stderr, "[ai] stream final chunk (err: %v)\n", streamErr)
 		}
 		select {
 		case st.doneCh <- streamErr:
@@ -210,6 +289,12 @@ func sharedInspectModel(drv LMDriver, libPath, modelPath string) (*ModelInfo, er
 type drvConversationBackend struct {
 	drv  LMDriver
 	conv uint64
+	// closed is set once, by Close or by cancellation, and is never cleared.
+	closed atomic.Bool
+	// deleted guards convDelete so it runs exactly once.
+	deleted atomic.Bool
+	// active is the stream the native runtime may still call back into.
+	active atomic.Pointer[streamState]
 }
 
 type drvEngineBackend struct {
@@ -297,52 +382,114 @@ func (b *drvEngineBackend) NewConversation(systemJSON, toolsJSON, historyJSON st
 	return &drvConversationBackend{drv: b.drv, conv: conv}, nil
 }
 
+// Close invalidates the conversation. Without a stream in flight it releases
+// the native conversation at once; with one, the stream's SendStream is asked
+// to abandon it, and the native conversation is released once the runtime has
+// delivered the stream's terminal chunk. Close never waits.
 func (c *drvConversationBackend) Close() error {
-	if c.conv != 0 {
-		c.drv.convDelete(c.conv)
-		c.conv = 0
+	c.closed.Store(true)
+	if st := c.active.Load(); st != nil {
+		st.requestClose()
 	}
+	c.releaseConv()
 	return nil
 }
 
-// SendStream blocks until the native stream's terminal chunk arrives.
-//
-// ctx is deliberately not honored: returning early would tear down the request
-// while the native runtime keeps generating on its own threads. The C API does
-// expose litert_lm_conversation_cancel_process, which the driver does not bind
-// yet; cancellation should be built on it rather than on abandoning the wait.
-func (c *drvConversationBackend) SendStream(ctx context.Context, messageJSON string, onChunk func(string)) error {
-	st := &streamState{
-		onChunk: onChunk,
-		doneCh:  make(chan error, 1),
+// releaseConv deletes the native conversation once it is both closed and no
+// longer referenced by a stream. It is called after each of those two events,
+// so whichever happens last performs the deletion, exactly once.
+func (c *drvConversationBackend) releaseConv() {
+	if c.closed.Load() && c.active.Load() == nil && c.deleted.CompareAndSwap(false, true) {
+		c.drv.convDelete(c.conv)
 	}
-	tokenCallbackMu.Lock()
-	tokenCallbackNextID++
-	cbID := tokenCallbackNextID
-	tokenCallbackRegistry[cbID] = st
-	tokenCallbackMu.Unlock()
+}
 
-	defer func() {
-		tokenCallbackMu.Lock()
-		delete(tokenCallbackRegistry, cbID)
-		tokenCallbackMu.Unlock()
-	}()
+var errStreamActive = errors.New("ai: conversation already has a stream in flight")
 
-	trampoline := c.drv.createTrampoline(cbID)
+// SendStream sends one message and delivers the response through onChunk,
+// directly on the native callback thread, until the terminal chunk arrives.
+//
+// If ctx is cancelled or the conversation is closed in the meantime, the
+// native runtime is asked to cancel (litert_lm_conversation_cancel_process),
+// the conversation is invalidated for good (LiteRT-LM leaves a cancelled
+// conversation unusable), and SendStream returns at once with ctx.Err() or
+// ErrClosed. The native runtime keeps unwinding on its own threads; a
+// goroutine waits for its terminal chunk, then deletes the conversation.
+// Chunks arriving after the return never reach onChunk.
+func (c *drvConversationBackend) SendStream(ctx context.Context, messageJSON string, onChunk func(string)) error {
+	if c.closed.Load() {
+		return ErrClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	st := newStreamState(onChunk)
+	if !c.active.CompareAndSwap(nil, st) {
+		return errStreamActive
+	}
+	// Close either saw the stream just registered (and will signal it) or
+	// ran first, in which case it is seen here.
+	if c.closed.Load() {
+		c.active.Store(nil)
+		c.releaseConv()
+		return ErrClosed
+	}
+
+	// The native runtime holds st only as an integer: pin it until the
+	// runtime can no longer call back.
+	pin := new(runtime.Pinner)
+	pin.Pin(st)
 
 	cMsg, freeMsg := c.drv.stringToCPtr(messageJSON)
 	defer freeMsg()
 
 	if Verbose {
-		fmt.Fprintf(os.Stderr, "[ai] convSendStream cb %d: calling\n", cbID)
+		fmt.Fprintf(os.Stderr, "[ai] convSendStream: calling\n")
 	}
-	rc := c.drv.convSendStream(c.conv, cMsg, 0, 0, trampoline, cbID)
+	rc := c.drv.convSendStream(c.conv, cMsg, 0, 0, c.drv.createTrampoline(), streamStateUserData(st))
 	if Verbose {
-		fmt.Fprintf(os.Stderr, "[ai] convSendStream cb %d: returned rc=%d\n", cbID, rc)
+		fmt.Fprintf(os.Stderr, "[ai] convSendStream: returned rc=%d\n", rc)
 	}
 	if rc != 0 {
+		c.active.Store(nil)
+		pin.Unpin()
+		c.releaseConv()
 		return fmt.Errorf("send_message_stream failed to start: %d", rc)
 	}
 
-	return <-st.doneCh
+	select {
+	case err := <-st.doneCh:
+		c.active.Store(nil)
+		pin.Unpin()
+		c.releaseConv()
+		if err != nil && c.closed.Load() {
+			return ErrClosed
+		}
+		return err
+	case <-ctx.Done():
+		c.abort(st, pin)
+		return ctx.Err()
+	case <-st.closeCh:
+		c.abort(st, pin)
+		return ErrClosed
+	}
+}
+
+// abort cancels the in-flight stream and invalidates the conversation. When it
+// returns, onChunk is neither running nor will run again.
+func (c *drvConversationBackend) abort(st *streamState, pin *runtime.Pinner) {
+	c.closed.Store(true)
+	st.stop()
+	c.drv.convCancelProcess(c.conv)
+
+	// The terminal chunk is delivered on the native callback thread, which is
+	// also what runs the conversation's destructor if it is deleted there, so
+	// deletion has to be done from a goroutine of our own.
+	go func() {
+		<-st.doneCh
+		c.active.Store(nil)
+		c.releaseConv()
+		pin.Unpin()
+	}()
 }
