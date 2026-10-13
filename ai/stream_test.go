@@ -2,6 +2,7 @@ package ai
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"sync/atomic"
@@ -53,7 +54,7 @@ func TestSendStreamYieldsEventsInOrder(t *testing.T) {
 	want := []ModelEvent{
 		TextEvent{Text: "a"},
 		TextEvent{Text: "b"},
-		ToolCallEvent{ToolCalls: []ToolCall{{Name: "exec", Arguments: map[string]any{"command": "ls"}}}},
+		ToolCallEvent{ToolCalls: []ToolCall{{Name: "exec", Arguments: map[string]any{"command": "ls"}, RawArguments: json.RawMessage(`{"command":"ls"}`)}}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("events = %#v, want %#v", got, want)
@@ -134,7 +135,7 @@ func TestParseChunkEvents(t *testing.T) {
 	want := []ModelEvent{
 		TextEvent{Text: "a"},
 		TextEvent{Text: "b"},
-		ToolCallEvent{ToolCalls: []ToolCall{{Name: "read_file", Arguments: map[string]any{"path": "p"}}}},
+		ToolCallEvent{ToolCalls: []ToolCall{{Name: "read_file", Arguments: map[string]any{"path": "p"}, RawArguments: json.RawMessage(`{"path":"p"}`)}}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %#v, want %#v", got, want)

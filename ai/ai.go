@@ -47,9 +47,12 @@ type TextEvent struct {
 func (TextEvent) isModelEvent() {}
 
 // ToolCall represents a single function call requested by the model.
+// RawArguments is the arguments object exactly as the runtime emitted it, for
+// decoding straight into a typed struct; Arguments is the same data as a map.
 type ToolCall struct {
-	Name      string         `json:"name"`
-	Arguments map[string]any `json:"arguments"`
+	Name         string          `json:"name"`
+	Arguments    map[string]any  `json:"arguments"`
+	RawArguments json.RawMessage `json:"-"`
 }
 
 // ToolCallEvent is emitted when the model calls one or more functions.
@@ -270,8 +273,8 @@ func parseChunkEvents(raw string) []ModelEvent {
 		ToolCalls []struct {
 			Type     string `json:"type"`
 			Function struct {
-				Name      string `json:"name"`
-				Arguments any    `json:"arguments"`
+				Name      string          `json:"name"`
+				Arguments json.RawMessage `json:"arguments"`
 			} `json:"function"`
 		} `json:"tool_calls"`
 	}
@@ -293,16 +296,20 @@ func parseChunkEvents(raw string) []ModelEvent {
 	if len(chunk.ToolCalls) > 0 {
 		var calls []ToolCall
 		for _, tc := range chunk.ToolCalls {
-			args := make(map[string]any)
-			switch a := tc.Function.Arguments.(type) {
-			case string:
-				_ = json.Unmarshal([]byte(a), &args)
-			case map[string]any:
-				args = a
+			raw := tc.Function.Arguments
+			// The runtime may deliver the arguments object as a JSON-encoded string.
+			if len(raw) > 0 && raw[0] == '"' {
+				var s string
+				if json.Unmarshal(raw, &s) == nil {
+					raw = json.RawMessage(s)
+				}
 			}
+			args := make(map[string]any)
+			_ = json.Unmarshal(raw, &args)
 			calls = append(calls, ToolCall{
-				Name:      tc.Function.Name,
-				Arguments: args,
+				Name:         tc.Function.Name,
+				Arguments:    args,
+				RawArguments: raw,
 			})
 		}
 		if len(calls) > 0 {
