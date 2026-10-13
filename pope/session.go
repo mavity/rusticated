@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -60,6 +61,7 @@ func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
 	s.appendHistory(turnParts...)
 	s.totalTokensEst += len(userText) / 4
 
+	var retries int
 	for {
 		var toolCalls []ai.ToolCall
 		var generatedText strings.Builder
@@ -80,13 +82,18 @@ func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
 		}
 
 		if streamErr != nil {
-			// Catch out-of-context errors and trigger silent compaction
-			if strings.Contains(streamErr.Error(), "exceeds available state entries") {
+			isOverflow := strings.Contains(streamErr.Error(), "exceeds available state entries")
+			isLoop := errors.Is(streamErr, ai.ErrRepetitionLoop)
+
+			if (isOverflow || isLoop) && retries < 2 {
+				retries++
 				if s.verbose {
-					fmt.Printf("\n[engine hit KV limit (%v); forcing immediate compaction and retry]\n", streamErr)
+					fmt.Printf("\n[stream recovery (%v); compacting and retrying (%d/2)]\n", streamErr, retries)
 				}
-				s.compactContext(ctx)
-				continue // retry the turn seamlessly
+				if err := s.compactContext(ctx); err != nil {
+					return err
+				}
+				continue // retry the turn seamlessly with the fresh s.conv
 			}
 			return streamErr
 		}
@@ -141,53 +148,59 @@ func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
 
 	// Check if context compaction is needed
 	if s.totalTokensEst > s.compactionLimit && len(s.CompactedHistory) > 4 {
-		s.compactContext(ctx)
+		_ = s.compactContext(ctx)
 	}
 
 	return nil
 }
 
-func (s *HarnessSession) compactContext(ctx context.Context) {
+func (s *HarnessSession) compactContext(ctx context.Context) error {
 	if s.verbose {
 		fmt.Println("\n[context compaction: summarizing earlier history...]")
 	}
-	cutoff := len(s.CompactedHistory) - 4
-	older := s.CompactedHistory[:cutoff]
+	if len(s.CompactedHistory) > 4 {
+		cutoff := len(s.CompactedHistory) - 4
+		older := s.CompactedHistory[:cutoff]
 
-	var historyText strings.Builder
-	for _, p := range older {
-		historyText.WriteString(fmt.Sprintf("%s: %s\n", p.Role, p.Text))
-	}
-
-	summaryConv, err := s.engine.NewConversationWithConfig(ai.ConversationConfig{
-		SystemMessage: "You are a concise conversation summarizer. Summarize the key facts from the conversation below in 2-3 sentences.",
-	})
-	if err == nil {
-		defer summaryConv.Close()
-		var summary strings.Builder
-		for event, err := range summaryConv.SendStream(ctx, []ai.PromptPart{{Role: ai.RoleUser, Text: historyText.String()}}) {
-			if err != nil {
-				break
-			}
-			if e, ok := event.(ai.TextEvent); ok {
-				summary.WriteString(e.Text)
-			}
+		var historyText strings.Builder
+		for _, p := range older {
+			historyText.WriteString(fmt.Sprintf("%s: %s\n", p.Role, p.Text))
 		}
 
-		sumText := strings.TrimSpace(summary.String())
-		if sumText != "" {
-			if s.verbose {
-				fmt.Printf("[context compacted summary: %s]\n", sumText)
+		summaryConv, err := s.engine.NewConversationWithConfig(ai.ConversationConfig{
+			SystemMessage: "You are a concise conversation summarizer. Summarize the key facts from the conversation below in 2-3 sentences.",
+		})
+		if err == nil {
+			var summary strings.Builder
+			for event, err := range summaryConv.SendStream(ctx, []ai.PromptPart{{Role: ai.RoleUser, Text: historyText.String()}}) {
+				if err != nil {
+					break
+				}
+				if e, ok := event.(ai.TextEvent); ok {
+					summary.WriteString(e.Text)
+				}
 			}
-			s.CompactedHistory = compactHistory(s.CompactedHistory, sumText)
-			s.totalTokensEst = len(sumText)/4 + 200
-			s.Close()
-			_ = s.Init()
+			summaryConv.Close()
+
+			sumText := strings.TrimSpace(summary.String())
+			if sumText != "" {
+				if s.verbose {
+					fmt.Printf("[context compacted summary: %s]\n", sumText)
+				}
+				s.CompactedHistory = compactHistory(s.CompactedHistory, sumText)
+				s.totalTokensEst = len(sumText)/4 + 200
+			}
 		}
 	}
+
+	s.Close()
+	return s.Init()
 }
 
 func compactHistory(history []ai.PromptPart, summary string) []ai.PromptPart {
+	if len(history) <= 4 {
+		return history
+	}
 	cutoff := len(history) - 4
 	recent := history[cutoff:]
 	compacted := make([]ai.PromptPart, 1, 1+len(recent))
