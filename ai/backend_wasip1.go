@@ -32,6 +32,7 @@ var (
 	symLMConvCreate           uint64
 	symLMConvDelete           uint64
 	symLMConvSendStream       uint64
+	symLMConvCancelProcess    uint64
 	symLMSetLogLevel          uint64
 	symLMStreamChunkGetText   uint64
 	symLMStreamChunkIsFinal   uint64
@@ -198,6 +199,9 @@ func (d *wasip1Driver) convSendStream(conv, msg, extraCtx, optArgs, callback, us
 	}
 	return int32(v)
 }
+func (d *wasip1Driver) convCancelProcess(conv uint64) {
+	_, _ = callDylib(symLMConvCancelProcess, []byte{i64}, nil, conv)
+}
 func (d *wasip1Driver) loadedFileCreate(modelPath uint64) uint64 {
 	v, _ := callDylib(symLMLoadedFileCreate, []byte{i64}, []byte{i64}, modelPath)
 	return v
@@ -273,8 +277,7 @@ var (
 	trampolineRegOnce      sync.Once
 )
 
-func (d *wasip1Driver) createTrampoline(callbackID uint64) uint64 {
-	_ = callbackID
+func (d *wasip1Driver) createTrampoline() uint64 {
 	trampolineRegOnce.Do(func() {
 		cbSig := []byte{0x60, 2, i64, i64, 0}
 			wasip1Trampoline, _ = syscall.DylibRegisterCallback(lmLib, cbSig, unsafe.Pointer(&trampolineOv[0]), 512,
@@ -312,6 +315,7 @@ func ensureLMLibLoadedImpl(libPath string) error {
 		symLMConvCreate, _ = syscall.DylibSym(lmLib, "litert_lm_conversation_create")
 		symLMConvDelete, _ = syscall.DylibSym(lmLib, "litert_lm_conversation_delete")
 		symLMConvSendStream, _ = syscall.DylibSym(lmLib, "litert_lm_conversation_send_message_stream")
+		symLMConvCancelProcess, _ = syscall.DylibSym(lmLib, "litert_lm_conversation_cancel_process")
 		symLMSetLogLevel, _ = syscall.DylibSym(lmLib, "litert_lm_set_min_log_level")
 		symLMStreamChunkGetText, _ = syscall.DylibSym(lmLib, "litert_lm_stream_chunk_get_text")
 		symLMStreamChunkIsFinal, _ = syscall.DylibSym(lmLib, "litert_lm_stream_chunk_is_final")
