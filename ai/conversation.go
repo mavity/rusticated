@@ -1,11 +1,16 @@
 package ai
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"iter"
 	"sync/atomic"
 )
+
+// ErrRepetitionLoop is yielded when the model falls into a repetitive generation loop.
+var ErrRepetitionLoop = errors.New("ai: model stuck in repetitive generation loop")
 
 // Role identifies the author of a prompt part.
 type Role string
@@ -113,12 +118,30 @@ func (c *Conversation) SendStream(ctx context.Context, parts []PromptPart) iter.
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
 
-		// stopped is written on the callback thread and read on this goroutine.
+		// stopped and looped are written on the callback thread and read on this goroutine.
 		var stopped atomic.Bool
+		var looped atomic.Bool
+		var detector loopDetector
 		err = c.impl.sendStream(ctx, payload, func(raw string) {
 			for _, event := range parseChunkEvents(raw) {
 				if stopped.Load() {
 					return
+				}
+				switch e := event.(type) {
+				case TextEvent:
+					if detector.feedText(e.Text) {
+						looped.Store(true)
+						stopped.Store(true)
+						cancel()
+						return
+					}
+				case ToolCallEvent:
+					if detector.feedToolCalls(e.ToolCalls) {
+						looped.Store(true)
+						stopped.Store(true)
+						cancel()
+						return
+					}
 				}
 				if !yield(event, nil) {
 					stopped.Store(true)
@@ -127,6 +150,11 @@ func (c *Conversation) SendStream(ctx context.Context, parts []PromptPart) iter.
 				}
 			}
 		})
+		if looped.Load() {
+			c.Close()
+			yield(nil, ErrRepetitionLoop)
+			return
+		}
 		if stopped.Load() {
 			c.Close()
 			return
@@ -135,6 +163,102 @@ func (c *Conversation) SendStream(ctx context.Context, parts []PromptPart) iter.
 			yield(nil, err)
 		}
 	}
+}
+
+type loopDetector struct {
+	buf       []byte
+	lastTool  string
+	toolCount int
+}
+
+const (
+	loopWindowMax     = 1024
+	minRepeatSpan     = 64
+	entropyWindowSize = 384
+)
+
+func (d *loopDetector) feedText(s string) bool {
+	d.buf = append(d.buf, s...)
+	if len(d.buf) > loopWindowMax {
+		d.buf = d.buf[len(d.buf)-loopWindowMax:]
+	}
+	n := len(d.buf)
+	if n < minRepeatSpan {
+		return false
+	}
+
+	// 1. Exact tandem repeat check: catches A-A-A and interleaved AB-AB-AB.
+	// Check periods L from 3 up to n/3.
+	maxL := n / 3
+	for l := 3; l <= maxL; l++ {
+		reps := minRepeatSpan / l
+		if reps < 3 {
+			reps = 3
+		}
+		span := l * reps
+		if span > n {
+			continue
+		}
+		tail := d.buf[n-span:]
+		unit := tail[span-l:]
+		match := true
+		for r := 0; r < reps-1; r++ {
+			if !bytes.Equal(tail[r*l:(r+1)*l], unit) {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+
+	// 2. Fuzzy / interleaved repetition via sliding-window shingle uniqueness ratio.
+	if n >= entropyWindowSize {
+		win := d.buf[n-entropyWindowSize:]
+		if lowComplexity(win) {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *loopDetector) feedToolCalls(calls []ToolCall) bool {
+	for _, call := range calls {
+		sig := call.Name + ":" + string(call.RawArguments)
+		if sig == d.lastTool {
+			d.toolCount++
+			if d.toolCount >= 3 {
+				return true
+			}
+		} else {
+			d.lastTool = sig
+			d.toolCount = 1
+		}
+	}
+	return false
+}
+
+// lowComplexity measures what fraction of win consists of novel 8-byte shingles.
+// Genuine prose/code/tables stay > 0.30; fuzzy interleaved loops drop < 0.18.
+func lowComplexity(win []byte) bool {
+	const k = 8
+	var seen [128]uint64
+	unique := 0
+	total := len(win) - k + 1
+	for i := 0; i < total; i++ {
+		h := uint64(14695981039346656037)
+		for j := 0; j < k; j++ {
+			h ^= uint64(win[i+j])
+			h *= 1099511628211
+		}
+		slot := h & 127
+		if seen[slot] != h {
+			seen[slot] = h
+			unique++
+		}
+	}
+	return unique*100/total < 18
 }
 
 // Close releases the conversation. It is safe to call multiple times.
