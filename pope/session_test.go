@@ -442,7 +442,8 @@ func TestRunTurnFastPathDirectBypass(t *testing.T) {
 			if cfg.Tools != nil {
 				t.Fatalf("Stage 1 must have Tools: nil")
 			}
-			onEvent(ai.TextEvent{Text: "DIRECT: "})
+			onEvent(ai.TextEvent{Text: "DIR"})
+			onEvent(ai.TextEvent{Text: "ECT: "})
 			onEvent(ai.TextEvent{Text: "Pont Neuf is the oldest standing bridge in Paris."})
 			return nil
 		},
@@ -466,6 +467,41 @@ func TestRunTurnFastPathDirectBypass(t *testing.T) {
 	}
 	if modelPart.CognitiveTrace == nil || !modelPart.CognitiveTrace.IsDirect {
 		t.Fatalf("expected CognitiveTrace{IsDirect: true}, got %#v", modelPart.CognitiveTrace)
+	}
+}
+
+func TestRunTurnFastPathUnprefixedStreamsImmediately(t *testing.T) {
+	var out bytes.Buffer
+	var stageCalls int
+	s := &HarnessSession{
+		out:           &out,
+		systemMessage: "You are Pope.",
+		tools:         GetToolDeclarations(),
+		ephemeralStream: func(ctx context.Context, cfg ai.ConversationConfig, trigger []ai.PromptPart, onEvent func(ai.ModelEvent) bool) error {
+			stageCalls++
+			if cfg.Tools != nil {
+				t.Fatalf("Stage 1 must have Tools: nil")
+			}
+			onEvent(ai.TextEvent{Text: "Pont"})
+			if got := out.String(); got != "Pont" {
+				t.Fatalf("unprefixed response was not streamed immediately: got %q", got)
+			}
+			onEvent(ai.TextEvent{Text: " Neuf."})
+			return nil
+		},
+	}
+
+	if err := s.RunTurn(context.Background(), "Name a bridge in Paris"); err != nil {
+		t.Fatal(err)
+	}
+	if stageCalls != 1 {
+		t.Fatalf("stageCalls = %d, want 1 (unprefixed fast path bypasses deliberation)", stageCalls)
+	}
+	if got := out.String(); got != "Pont Neuf." {
+		t.Fatalf("terminal output = %q, want %q", got, "Pont Neuf.")
+	}
+	if len(s.CanonicalHistory) != 2 || s.CanonicalHistory[1].Text != "Pont Neuf." {
+		t.Fatalf("unexpected canonical history: %#v", s.CanonicalHistory)
 	}
 }
 
