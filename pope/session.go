@@ -519,13 +519,15 @@ func (s *HarnessSession) compactForEphemeralRetry(ctx context.Context) error {
 }
 
 const (
-	stage1SyntheticWait = "Wait, let me think for a moment..."
-	stage1TriggerPrompt = "Take your time. If this is trivial and you are completely confident you can answer immediately without planning or tools, prefix your response with 'DIRECT:' followed by your answer. Otherwise, do not answer yet—first analyze the situation and state the underlying goal and task required to address my prompt above, prefixing your analysis with 'GOAL:'."
-	stage2TriggerPrompt = "What are the concrete steps you would take to achieve that goal?"
-	stage3APrefix       = "I think you might take these steps below, but are these actually relevant to the goal, or do they miss the point or include unnecessary detours?\n"
-	stage3BPrefix       = "I think you might take these steps below, but are these safe, or do they carry risks, edge cases, or destructive side effects?\n"
-	stage3CPrefix       = "I think you might take these steps below, but are these well-informed, or are they making unverified assumptions where we need to collect more information first?\n"
-	stage4TriggerPrompt = "I see. Given that analysis, what do you propose as the final, concrete execution plan?"
+	stage1SyntheticWait      = "Wait, let me think for a moment..."
+	stage1TriggerPrompt      = "Take your time. If this is trivial and you are completely confident you can answer immediately without planning or tools, prefix your response with 'DIRECT:' followed by your answer. Otherwise, do not answer yet—first analyze the situation and state the underlying goal and task required to address my prompt above, prefixing your analysis with 'GOAL:'."
+	stageExpectSyntheticWait = "Before I begin working on this, let me check how brief and direct the user expects the reply to be..."
+	stageExpectTriggerPrompt = "Look strictly at my prompt above. Default to extreme brevity—the shortest, most direct answer that fully satisfies the request. Unless I explicitly asked for an essay or exhaustive breakdown, prescribe a strict, tiny length limit (e.g., 'Just the name/value in 1-5 words', 'One short sentence under 15 words', or 'At most 2-3 brief sentences'). State ONLY the required format and strict maximum word/sentence cap in one short sentence."
+	stage2TriggerPrompt      = "What are the concrete steps you would take to achieve that goal?"
+	stage3APrefix            = "I think you might take these steps below, but are these actually relevant to the goal, or do they miss the point or include unnecessary detours?\n"
+	stage3BPrefix            = "I think you might take these steps below, but are these safe, or do they carry risks, edge cases, or destructive side effects?\n"
+	stage3CPrefix            = "I think you might take these steps below, but are these well-informed, or are they making unverified assumptions where we need to collect more information first?\n"
+	stage4TriggerPrompt      = "I see. Given that analysis, what do you propose as the final, concrete execution plan?"
 )
 
 // runStage1Triage runs Stage 1 and detects whether the model chose the "DIRECT:"
@@ -833,30 +835,31 @@ func (s *HarnessSession) runStage5Execution(
 	}
 }
 
-// runStage6Verify audits draftAnswer against userText and goal. If the model
-// replies with "OK", draftAnswer is printed and returned; otherwise the refined
-// response is streamed live to the user and returned.
-func (s *HarnessSession) runStage6Verify(
+// runStageConvergence replants workAndAnswer as a synthetic RoleModel turn
+// (omitting intermediate planning and raw tool turns) and asks the model to
+// reformulate the final response to strictly fit detailLevel. Right before the
+// first token arrives, streamer.Wipe() clears the [work] ticker line and the
+// tokens stream directly to stdout.
+func (s *HarnessSession) runStageConvergence(
 	ctx context.Context,
 	baseHistory *[]ai.PromptPart,
-	userText, goal string,
-	executedToolParts []ai.PromptPart,
-	draftAnswer string,
+	userText, detailLevel, workAndAnswer string,
 	streamer *liveStreamer,
 ) (string, error) {
 	outWriter := s.outputWriter()
 	trigger := []ai.PromptPart{{
 		Role: ai.RoleUser,
-		Text: "Review your answer above against my original request (" + userText + ") and your intended goal (" + goal + "). If it is accurate, complete, and directly answers the request, reply with 'OK'. Otherwise, provide the corrected, complete final response.",
+		Text: "That draft is far too wordy. Look at the strict target length and format: " + detailLevel + "\nRewrite your answer now to strictly obey that limit using the minimum words possible. Cut all prefaces, roleplay, meta-commentary, internal phases, failed tool mentions, bullet lists, and extra examples unless explicitly requested. Output ONLY the final distilled answer to: " + userText,
 	}}
 
 	var retries int
 	for {
-		seed := make([]ai.PromptPart, 0, len(*baseHistory)+2+len(executedToolParts))
+		seed := make([]ai.PromptPart, 0, len(*baseHistory)+2)
 		seed = append(seed, *baseHistory...)
-		seed = append(seed, ai.PromptPart{Role: ai.RoleUser, Text: userText})
-		seed = append(seed, executedToolParts...)
-		seed = append(seed, ai.PromptPart{Role: ai.RoleModel, Text: draftAnswer})
+		seed = append(seed,
+			ai.PromptPart{Role: ai.RoleUser, Text: userText},
+			ai.PromptPart{Role: ai.RoleModel, Text: workAndAnswer},
+		)
 
 		cfg := ai.ConversationConfig{
 			SystemMessage: s.systemMessage,
@@ -864,64 +867,36 @@ func (s *HarnessSession) runStage6Verify(
 			History:       seed,
 		}
 
-		streamer.StartStage("verify")
-		var verifyBuf strings.Builder
-		decidedRefine := false
-
-		checkRefine := func() {
-			if decidedRefine {
-				return
-			}
-			trimmed := strings.TrimLeft(verifyBuf.String(), " \t\r\n")
-			if utf8.RuneCountInString(trimmed) < 4 {
-				return
-			}
-			if !isVerifyOKPrefix(trimmed) {
-				decidedRefine = true
-				streamer.Wipe()
-				_, _ = fmt.Fprint(outWriter, trimmed)
-			}
-		}
+		var finalBuf strings.Builder
+		wiped := false
 
 		err := s.streamOnce(ctx, cfg, trigger, func(event ai.ModelEvent) bool {
 			e, ok := event.(ai.TextEvent)
-			if !ok {
+			if !ok || e.Text == "" {
 				return true
 			}
-			verifyBuf.WriteString(e.Text)
-			if decidedRefine {
-				_, _ = fmt.Fprint(outWriter, e.Text)
-				return true
+			if !wiped {
+				streamer.Wipe()
+				wiped = true
 			}
-			streamer.Feed(e.Text)
-			checkRefine()
+			_, _ = fmt.Fprint(outWriter, e.Text)
+			finalBuf.WriteString(e.Text)
 			return true
 		})
-		if !decidedRefine {
-			_ = streamer.EndStage()
-		}
 
 		if err == nil {
-			fullVerify := strings.TrimSpace(verifyBuf.String())
-			if decidedRefine {
-				if s.verbose && len(fullVerify) > 0 {
-					_, _ = fmt.Fprintln(outWriter)
-				}
-				return fullVerify, nil
+			if !wiped {
+				streamer.Wipe()
 			}
-			streamer.Wipe()
-			if isVerifyOK(fullVerify) || fullVerify == "" {
-				_, _ = fmt.Fprint(outWriter, draftAnswer)
-				if s.verbose && len(draftAnswer) > 0 {
-					_, _ = fmt.Fprintln(outWriter)
-				}
-				return draftAnswer, nil
+			finalText := strings.TrimSpace(finalBuf.String())
+			if finalText == "" && workAndAnswer != "" {
+				_, _ = fmt.Fprint(outWriter, workAndAnswer)
+				finalText = workAndAnswer
 			}
-			_, _ = fmt.Fprint(outWriter, fullVerify)
-			if s.verbose && len(fullVerify) > 0 {
+			if s.verbose && len(finalText) > 0 {
 				_, _ = fmt.Fprintln(outWriter)
 			}
-			return fullVerify, nil
+			return finalText, nil
 		}
 
 		if errors.Is(err, context.Canceled) {
@@ -931,7 +906,7 @@ func (s *HarnessSession) runStage6Verify(
 		if (isContextOverflowError(err) || errors.Is(err, ai.ErrRepetitionLoop)) && retries < 2 {
 			retries++
 			streamer.Wipe()
-			if decidedRefine && verifyBuf.Len() > 0 {
+			if wiped && finalBuf.Len() > 0 {
 				_, _ = fmt.Fprintln(outWriter)
 			}
 			if cerr := s.compactForEphemeralRetry(ctx); cerr != nil {
@@ -943,23 +918,6 @@ func (s *HarnessSession) runStage6Verify(
 		streamer.Wipe()
 		return "", err
 	}
-}
-
-func isVerifyOKPrefix(trimmed string) bool {
-	upper := strings.ToUpper(trimmed)
-	if !strings.HasPrefix(upper, "OK") {
-		return false
-	}
-	if len(upper) == 2 {
-		return true
-	}
-	next := upper[2]
-	return next == '.' || next == '!' || next == ' ' || next == '\n' || next == '\r' || next == '\t'
-}
-
-func isVerifyOK(s string) bool {
-	cleaned := strings.TrimSpace(strings.TrimRight(strings.TrimSpace(s), ".!"))
-	return strings.EqualFold(cleaned, "OK")
 }
 
 func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
@@ -1001,17 +959,39 @@ func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
 		goal := stage1Text
 		trace.Goal = goal
 
+		// Stage 2: Expectation Calibration (<detail_level>)
+		seedExpectation := func(base []ai.PromptPart) []ai.PromptPart {
+			seed := make([]ai.PromptPart, 0, len(base)+2)
+			seed = append(seed, base...)
+			seed = append(seed,
+				ai.PromptPart{Role: ai.RoleUser, Text: userText},
+				ai.PromptPart{Role: ai.RoleModel, Text: stageExpectSyntheticWait},
+			)
+			return seed
+		}
+		detailLevel, err := s.runEphemeralStage(ctx, &baseHistory, seedExpectation, stageExpectTriggerPrompt, s.systemMessage, "expectation", streamer)
+		if err != nil {
+			restorePersistentConv()
+			return err
+		}
+		trace.ExpectedDetail = detailLevel
+
+		effectiveGoal := goal
+		if detailLevel != "" {
+			effectiveGoal = goal + "\nExpected response detail: " + detailLevel
+		}
+
 		seedWithGoal := func(base []ai.PromptPart) []ai.PromptPart {
 			seed := make([]ai.PromptPart, 0, len(base)+2)
 			seed = append(seed, base...)
 			seed = append(seed,
 				ai.PromptPart{Role: ai.RoleUser, Text: userText},
-				ai.PromptPart{Role: ai.RoleModel, Text: "I need to think first, the goal here is probably: " + goal},
+				ai.PromptPart{Role: ai.RoleModel, Text: "I need to think first, the goal here is probably: " + effectiveGoal},
 			)
 			return seed
 		}
 
-		// Stage 2: Step Ideation (<steps>)
+		// Stage 3: Step Ideation (<steps>)
 		steps, err := s.runEphemeralStage(ctx, &baseHistory, seedWithGoal, stage2TriggerPrompt, s.systemMessage, "steps", streamer)
 		if err != nil {
 			restorePersistentConv()
@@ -1019,7 +999,7 @@ func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
 		}
 		trace.InitialSteps = steps
 
-		// Stage 3: The Orthogonal Triple-Fork Critique (<relevancy>, <safety>, <grounded>)
+		// Stage 4: The Orthogonal Triple-Fork Critique (<relevancy>, <safety>, <grounded>)
 		critiqueSysMsg := s.systemMessageWithToolNames()
 
 		relevancy, err := s.runEphemeralStage(ctx, &baseHistory, seedWithGoal, stage3APrefix+steps, critiqueSysMsg, "relevancy", streamer)
@@ -1043,13 +1023,13 @@ func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
 		}
 		trace.CritiqueGrounded = grounded
 
-		// Stage 4: The Tribunal Join & Plan Formulation (<plan>)
-		seedStage4 := func(base []ai.PromptPart) []ai.PromptPart {
+		// Stage 5: The Tribunal Join & Plan Formulation (<plan>)
+		seedStage5Plan := func(base []ai.PromptPart) []ai.PromptPart {
 			seed := make([]ai.PromptPart, 0, len(base)+4)
 			seed = append(seed, base...)
 			seed = append(seed,
 				ai.PromptPart{Role: ai.RoleUser, Text: userText},
-				ai.PromptPart{Role: ai.RoleModel, Text: "I need to think first, the goal here is probably: " + goal},
+				ai.PromptPart{Role: ai.RoleModel, Text: "I need to think first, the goal here is probably: " + effectiveGoal},
 				ai.PromptPart{Role: ai.RoleUser, Text: "Maybe these steps would get us there?\n" + steps},
 				ai.PromptPart{
 					Role: ai.RoleModel,
@@ -1058,29 +1038,30 @@ func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
 			)
 			return seed
 		}
-		plan, err := s.runEphemeralStage(ctx, &baseHistory, seedStage4, stage4TriggerPrompt, s.systemMessage, "plan", streamer)
+		plan, err := s.runEphemeralStage(ctx, &baseHistory, seedStage5Plan, stage4TriggerPrompt, s.systemMessage, "plan", streamer)
 		if err != nil {
 			restorePersistentConv()
 			return err
 		}
 		trace.SynthesizedPlan = plan
 
-		// Stage 5: Execution ("Let It Rip" — <work_and_answer>)
-		toolParts, draftAnswer, err := s.runStage5Execution(ctx, &baseHistory, userText, goal, plan, streamer)
+		// Stage 6: Execution ("Let It Rip" — <work_and_answer>)
+		toolParts, workAndAnswer, err := s.runStage5Execution(ctx, &baseHistory, userText, effectiveGoal, plan, streamer)
 		if err != nil {
 			restorePersistentConv()
 			return err
 		}
 		executedToolParts = toolParts
-		trace.DraftIterations = append(trace.DraftIterations, draftAnswer)
+		trace.RawWorkAndAnswer = workAndAnswer
+		trace.DraftIterations = append(trace.DraftIterations, workAndAnswer)
 
-		// Stage 6: Post-Execution Verification & Refinement
-		verifiedAnswer, err := s.runStage6Verify(ctx, &baseHistory, userText, goal, executedToolParts, draftAnswer, streamer)
+		// Stage 7: Convergence & Re-Formulation Flip
+		convergedAnswer, err := s.runStageConvergence(ctx, &baseHistory, userText, detailLevel, workAndAnswer, streamer)
 		if err != nil {
 			restorePersistentConv()
 			return err
 		}
-		finalAnswer = verifiedAnswer
+		finalAnswer = convergedAnswer
 	}
 
 	// Stage 7: Replanting the Iceberg & Syncing Session State
