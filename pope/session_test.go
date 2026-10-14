@@ -309,3 +309,85 @@ func TestSummarizeGapRecursiveHalving(t *testing.T) {
 		t.Fatalf("summarizeGap = %q, want %q", got, "part1 part2")
 	}
 }
+
+func TestCollapseUnpinnedLargeBlocksCachesAndPrefixesCompacted(t *testing.T) {
+	var prompts []string
+	var inputs []string
+	s := &HarnessSession{
+		compactionLimit: 1000, // gapTokenBudget = 500, largeBlockByteThreshold = 512 bytes
+		compressor: func(ctx context.Context, sys, user string) (string, error) {
+			prompts = append(prompts, sys)
+			inputs = append(inputs, user)
+			return "found port 8080 in config", nil
+		},
+	}
+
+	largeOutput := strings.Repeat("config_line=1\n", 80) // > 512 bytes
+	pinnedOutput := strings.Repeat("pinned_line=1\n", 80)
+
+	units := []atomicTurnUnit{
+		{
+			parts: []ai.PromptPart{
+				{
+					Role: ai.RoleModel,
+					ToolCalls: []ai.ToolCall{
+						{Name: "read_file", RawArguments: []byte(`{"path":"app.conf","explanation":"find server port"}`)},
+					},
+				},
+				{
+					Role:         ai.RoleTool,
+					ToolName:     "read_file",
+					Explanation:  "find server port",
+					ToolResponse: map[string]any{"content": largeOutput},
+				},
+			},
+		},
+		{
+			parts: []ai.PromptPart{
+				{
+					Role:         ai.RoleTool,
+					ToolName:     "read_file",
+					Explanation:  "keep pinned",
+					ToolResponse: map[string]any{"content": pinnedOutput},
+				},
+			},
+		},
+	}
+
+	pinned := map[int]bool{1: true}
+	s.collapseUnpinnedLargeBlocks(context.Background(), units, 2, pinned)
+
+	// 1. Unpinned unit[0] must be collapsed with "COMPACTED: " prefix and guided by explanation.
+	if len(prompts) != 1 || !strings.Contains(prompts[0], "find server port") {
+		t.Fatalf("expected 1 compressor call with explanation 'find server port', got %v", prompts)
+	}
+	resp0, _ := units[0].parts[1].ToolResponse.(map[string]any)
+	gotOut, _ := resp0["output"].(string)
+	if gotOut != "COMPACTED: found port 8080 in config" {
+		t.Fatalf("unpinned large tool output = %q, want %q", gotOut, "COMPACTED: found port 8080 in config")
+	}
+
+	// 2. Pinned unit[1] must remain untouched.
+	resp1, _ := units[1].parts[0].ToolResponse.(map[string]any)
+	if resp1["content"] != pinnedOutput {
+		t.Fatalf("pinned unit tool output was modified")
+	}
+
+	// 3. Re-running on identical unpinned artifact must hit artifactCache with zero extra LLM calls.
+	unitsAgain := []atomicTurnUnit{
+		{
+			parts: []ai.PromptPart{
+				{
+					Role:         ai.RoleTool,
+					ToolName:     "read_file",
+					Explanation:  "find server port",
+					ToolResponse: map[string]any{"content": largeOutput},
+				},
+			},
+		},
+	}
+	s.collapseUnpinnedLargeBlocks(context.Background(), unitsAgain, 1, nil)
+	if len(prompts) != 1 {
+		t.Fatalf("expected artifactCache hit (1 total call), got %d calls", len(prompts))
+	}
+}

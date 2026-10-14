@@ -15,11 +15,11 @@ import (
 // legacyDeclarations is the hand-written schema the reflected one replaced.
 const legacyDeclarations = `[
  {"type":"function","function":{"name":"exec","description":"Execute a shell command on the host system and return its output.",
-  "parameters":{"type":"object","properties":{"command":{"type":"string","description":"The shell command to run"}},"required":["command"]}}},
+  "parameters":{"type":"object","properties":{"command":{"type":"string","description":"The shell command to run"},"explanation":{"type":"string","description":"Brief explanation of why this command is being run and what information is sought"}},"required":["command","explanation"]}}},
  {"type":"function","function":{"name":"read_file","description":"Read the contents of a local file at the specified path.",
-  "parameters":{"type":"object","properties":{"path":{"type":"string","description":"The file path to read"}},"required":["path"]}}},
+  "parameters":{"type":"object","properties":{"path":{"type":"string","description":"The file path to read"},"explanation":{"type":"string","description":"Brief explanation of why this file is being read and what information is sought"}},"required":["path","explanation"]}}},
  {"type":"function","function":{"name":"write_file","description":"Write or overwrite content to a local file at the specified path.",
-  "parameters":{"type":"object","properties":{"path":{"type":"string","description":"The file path to write to"},"content":{"type":"string","description":"The text content to write"}},"required":["path","content"]}}}
+  "parameters":{"type":"object","properties":{"path":{"type":"string","description":"The file path to write to"},"content":{"type":"string","description":"The text content to write"},"explanation":{"type":"string","description":"Brief explanation of why this file is being written"}},"required":["path","content","explanation"]}}}
 ]`
 
 func roundTrip(t *testing.T, v any) any {

@@ -8,8 +8,9 @@ import (
 )
 
 type ExecInput struct {
-	_       struct{} `doc:"Execute a shell command on the host system and return its output." emoji:"💻"`
-	Command string   `doc:"The shell command to run"`
+	_           struct{} `doc:"Execute a shell command on the host system and return its output." emoji:"💻"`
+	Command     string   `doc:"The shell command to run"`
+	Explanation string   `doc:"Brief explanation of why this command is being run and what information is sought"`
 }
 
 func Exec(ctx context.Context, in ExecInput, feedback LogFeedback) (any, error) {

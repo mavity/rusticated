@@ -31,6 +31,7 @@ type PromptPart struct {
 	Text         string
 	ImageBase64  string
 	ToolName     string
+	Explanation  string
 	ToolResponse any
 	ToolCalls    []ToolCall
 	Embedding    []float32

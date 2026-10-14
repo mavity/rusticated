@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,6 +37,7 @@ type HarnessSession struct {
 	CanonicalHistory []ai.PromptPart
 	CompactedHistory []ai.PromptPart
 	totalTokensEst   int
+	artifactCache    map[string]string
 
 	historyMu      sync.Mutex
 	turnGate       sync.Mutex
@@ -372,6 +375,7 @@ func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
 
 		var toolResponses []ai.PromptPart
 		for _, call := range toolCalls {
+			explanation := extractToolExplanation(call)
 			result := ExecuteTool(ctx, call, func(text string) {
 				fmt.Print(text)
 			})
@@ -385,6 +389,7 @@ func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
 			toolResponses = append(toolResponses, ai.PromptPart{
 				Role:         ai.RoleTool,
 				ToolName:     call.Name,
+				Explanation:  explanation,
 				ToolResponse: result,
 			})
 		}
@@ -769,6 +774,144 @@ func (s *HarnessSession) gapTokenBudget() int {
 	return 2048
 }
 
+func extractToolExplanation(call ai.ToolCall) string {
+	if call.Arguments != nil {
+		if exp, ok := call.Arguments["explanation"].(string); ok && strings.TrimSpace(exp) != "" {
+			return strings.TrimSpace(exp)
+		}
+	}
+	if len(call.RawArguments) > 0 {
+		var m map[string]any
+		if json.Unmarshal(call.RawArguments, &m) == nil {
+			if exp, ok := m["explanation"].(string); ok && strings.TrimSpace(exp) != "" {
+				return strings.TrimSpace(exp)
+			}
+		}
+	}
+	return ""
+}
+
+func (s *HarnessSession) largeBlockByteThreshold() int {
+	// 1/5 of gapTokenBudget() in tokens (~4 bytes per token).
+	thresh := (s.gapTokenBudget() * 4) / 5
+	if thresh < 512 {
+		thresh = 512
+	}
+	return thresh
+}
+
+func artifactCacheKey(role ai.Role, toolName, explanation, rawContent string) string {
+	sum := sha256.Sum256([]byte(string(role) + "\x00" + toolName + "\x00" + explanation + "\x00" + rawContent))
+	return hex.EncodeToString(sum[:])
+}
+
+// compressLargeBlock collapses a single large unpinned block into a <=20-word gist
+// guided by explanation, using artifactCache to avoid redundant LLM calls across turns.
+func (s *HarnessSession) compressLargeBlock(ctx context.Context, role ai.Role, toolName, explanation, rawContent string) string {
+	if s.artifactCache == nil {
+		s.artifactCache = make(map[string]string)
+	}
+	key := artifactCacheKey(role, toolName, explanation, rawContent)
+	if cached, ok := s.artifactCache[key]; ok {
+		return cached
+	}
+
+	intent := strings.TrimSpace(explanation)
+	if intent == "" {
+		if toolName != "" {
+			intent = "tool execution of " + toolName
+		} else {
+			intent = "key facts and decisions"
+		}
+	}
+
+	inputText := strings.TrimSpace(rawContent)
+	budgetBytes := s.gapTokenBudget() * 4
+	if budgetBytes <= 0 {
+		budgetBytes = 8192
+	}
+	if len(inputText) > budgetBytes {
+		inputText = s.summarizeOversizedText(ctx, inputText, s.gapTokenBudget())
+	}
+
+	wTarget := 20
+	var shortest string
+	for attempt := 0; attempt <= 2; attempt++ {
+		sysPrompt := fmt.Sprintf(
+			"Extract only the factual findings relevant to: %s. Maximum %d words. No intro.",
+			intent, wTarget,
+		)
+		out, err := s.runCompressorPrompt(ctx, sysPrompt, inputText)
+		out = strings.TrimSpace(out)
+		if err == nil && out != "" {
+			wOut := wordCount(out)
+			if shortest == "" || wOut < wordCount(shortest) {
+				shortest = out
+			}
+			if wOut <= wTarget {
+				s.artifactCache[key] = "COMPACTED: " + out
+				return s.artifactCache[key]
+			}
+		}
+		wTarget = int(float64(wTarget) * 0.75)
+		if wTarget < 8 {
+			wTarget = 8
+		}
+	}
+
+	var gist string
+	if shortest != "" {
+		gist = truncateToWords(shortest, 20)
+	} else {
+		gist = truncateToWords(inputText, 20)
+	}
+	res := "COMPACTED: " + gist
+	s.artifactCache[key] = res
+	return res
+}
+
+// collapseUnpinnedLargeBlocks is the pre-main-compaction pass: for all unpinned units
+// prior to tailStart, any large tool response or large text block is collapsed into its
+// cached `COMPACTED: ...` gist before main gap summarization runs.
+func (s *HarnessSession) collapseUnpinnedLargeBlocks(ctx context.Context, units []atomicTurnUnit, tailStart int, pinned map[int]bool) {
+	thresh := s.largeBlockByteThreshold()
+	for i := 0; i < tailStart; i++ {
+		if pinned[i] {
+			continue
+		}
+		var callExplanations []string
+		for _, p := range units[i].parts {
+			for _, tc := range p.ToolCalls {
+				callExplanations = append(callExplanations, extractToolExplanation(tc))
+			}
+		}
+		expIdx := 0
+		parts := make([]ai.PromptPart, len(units[i].parts))
+		copy(parts, units[i].parts)
+		for j := range parts {
+			p := &parts[j]
+			if p.Role == ai.RoleTool {
+				exp := p.Explanation
+				if exp == "" && expIdx < len(callExplanations) {
+					exp = callExplanations[expIdx]
+				}
+				expIdx++
+				if p.ToolResponse != nil {
+					if b, err := json.Marshal(p.ToolResponse); err == nil && len(b) > thresh {
+						compacted := s.compressLargeBlock(ctx, p.Role, p.ToolName, exp, string(b))
+						p.ToolResponse = map[string]any{"output": compacted}
+					}
+				} else if len(p.Text) > thresh {
+					p.Text = s.compressLargeBlock(ctx, p.Role, p.ToolName, exp, p.Text)
+				}
+			} else if len(p.Text) > thresh {
+				p.Text = s.compressLargeBlock(ctx, p.Role, "", p.Explanation, p.Text)
+			}
+		}
+		units[i].parts = parts
+	}
+}
+
 // summarizeGap recursively halves gaps that exceed the context token budget,
 // respecting atomic unit boundaries when len(units) > 1 and splitting text in half when len(units) == 1.
 func (s *HarnessSession) summarizeGap(ctx context.Context, units []atomicTurnUnit) string {
@@ -829,6 +972,7 @@ func (s *HarnessSession) projectHistory(ctx context.Context, prior []ai.PromptPa
 			if historySize(prior) <= 4096 {
 				return prior
 			}
+			s.collapseUnpinnedLargeBlocks(ctx, units, n, nil)
 			sumText := s.summarizeGap(ctx, units)
 			if sumText == "" {
 				return prior
@@ -874,6 +1018,10 @@ func (s *HarnessSession) projectHistory(ctx context.Context, prior []ai.PromptPa
 	if hasEmbeddings {
 		pinned = selectPinnedAnchors(units, tailStart, topic, boundary, effectiveX)
 	}
+
+	// Pre-main-compaction step: collapse all large blocks outside of pinned units
+	// into their cached `COMPACTED: ...` gist guided by tool explanation.
+	s.collapseUnpinnedLargeBlocks(ctx, units, tailStart, pinned)
 
 	var projected []ai.PromptPart
 	var currentGap []atomicTurnUnit
@@ -937,12 +1085,12 @@ func (s *HarnessSession) compactContextForRetry(ctx context.Context, pendingPart
 		prior = s.projectHistory(ctx, prior)
 	}
 
-	// If a pending tool output itself exceeds budget on retry, compress its content via the gap pipeline.
+	// If a pending tool output itself exceeds budget on retry, collapse it into a COMPACTED: gist.
 	for i := range pending {
 		if pending[i].Role == ai.RoleTool && pending[i].ToolResponse != nil {
 			if b, err := json.Marshal(pending[i].ToolResponse); err == nil && len(b) > 8192 {
-				compressed := s.summarizeOversizedText(ctx, string(b), s.gapTokenBudget())
-				pending[i].ToolResponse = map[string]any{"output": compressed}
+				compacted := s.compressLargeBlock(ctx, pending[i].Role, pending[i].ToolName, pending[i].Explanation, string(b))
+				pending[i].ToolResponse = map[string]any{"output": compacted}
 			}
 		}
 	}

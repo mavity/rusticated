@@ -212,6 +212,11 @@ func FormatPartForEmbedding(p PromptPart) string {
 	case RoleTool:
 		body.WriteString("tool_response ")
 		body.WriteString(p.ToolName)
+		if p.Explanation != "" {
+			body.WriteString(" (")
+			body.WriteString(p.Explanation)
+			body.WriteString(")")
+		}
 		if p.ToolResponse != nil {
 			if b, err := json.Marshal(p.ToolResponse); err == nil {
 				body.WriteString(": ")
