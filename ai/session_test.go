@@ -1,4 +1,4 @@
-package main
+package ai
 
 import (
 	"bytes"
@@ -10,92 +10,45 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-
-	"ai"
 )
 
 func TestCanonicalHistorySurvivesCompaction(t *testing.T) {
-	s := &HarnessSession{}
-	raw := []ai.PromptPart{
-		{Role: ai.RoleUser, Text: "old question"},
-		{Role: ai.RoleModel, Text: "old answer"},
-		{Role: ai.RoleUser, Text: "recent question 1"},
-		{Role: ai.RoleModel, Text: "recent answer 1"},
-		{Role: ai.RoleUser, Text: "recent question 2"},
-		{Role: ai.RoleModel, Text: "recent answer 2"},
+	s := &Session{
+		compactionLimit: 4096,
+		compressor: func(context.Context, string, string) (string, error) {
+			return "summary of old exchange", nil
+		},
+	}
+	raw := []PromptPart{
+		{Role: RoleUser, Text: "old question"},
+		{Role: RoleModel, Text: "old answer"},
+		{Role: RoleUser, Text: "recent question 1"},
+		{Role: RoleModel, Text: "recent answer 1"},
+		{Role: RoleUser, Text: "recent question 2"},
+		{Role: RoleModel, Text: "recent answer 2"},
 	}
 	s.appendHistory(raw...)
 
-	s.CompactedHistory = compactHistory(s.CompactedHistory, "summary of old exchange")
-
+	if err := s.compactContext(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
 	if !reflect.DeepEqual(s.CanonicalHistory, raw) {
 		t.Fatalf("canonical history changed during compaction:\n got %#v\nwant %#v", s.CanonicalHistory, raw)
 	}
-	wantCompacted := []ai.PromptPart{
-		{Role: ai.RoleUser, Text: "[Previous conversation summary]: summary of old exchange"},
-		{Role: ai.RoleUser, Text: "recent question 1"},
-		{Role: ai.RoleModel, Text: "recent answer 1"},
-		{Role: ai.RoleUser, Text: "recent question 2"},
-		{Role: ai.RoleModel, Text: "recent answer 2"},
+	if len(s.CompactedHistory) >= len(raw) {
+		t.Fatalf("compacted history was not reduced: %#v", s.CompactedHistory)
 	}
-	if !reflect.DeepEqual(s.CompactedHistory, wantCompacted) {
-		t.Fatalf("compacted history = %#v, want %#v", s.CompactedHistory, wantCompacted)
+	if !strings.Contains(s.CompactedHistory[0].Text, "summary of old exchange") {
+		t.Fatalf("compacted history does not include summary: %#v", s.CompactedHistory)
 	}
 
-	next := ai.PromptPart{Role: ai.RoleUser, Text: "next question"}
+	next := PromptPart{Role: RoleUser, Text: "next question"}
 	s.appendHistory(next)
 	if got := s.CanonicalHistory[len(s.CanonicalHistory)-1]; !reflect.DeepEqual(got, next) {
 		t.Fatalf("canonical history did not append raw next turn: %#v", got)
 	}
 	if got := s.CompactedHistory[len(s.CompactedHistory)-1]; !reflect.DeepEqual(got, next) {
 		t.Fatalf("compacted history did not append next turn: %#v", got)
-	}
-}
-
-func TestCompactHistoryShortSliceUnchanged(t *testing.T) {
-	short := []ai.PromptPart{
-		{Role: ai.RoleUser, Text: "q1"},
-		{Role: ai.RoleModel, Text: "a1"},
-	}
-	got := compactHistory(short, "summary")
-	if !reflect.DeepEqual(got, short) {
-		t.Fatalf("compactHistory modified short slice: got %#v, want %#v", got, short)
-	}
-}
-
-func TestHistorySizeBeforeAndAfterCompaction(t *testing.T) {
-	raw := []ai.PromptPart{
-		{Role: ai.RoleUser, Text: "old question that is quite long"},
-		{Role: ai.RoleModel, Text: "old answer that is also quite long"},
-		{Role: ai.RoleUser, Text: "q1"},
-		{Role: ai.RoleModel, Text: "a1"},
-		{Role: ai.RoleUser, Text: "q2"},
-		{Role: ai.RoleModel, Text: "a2"},
-	}
-	before := historySize(raw)
-	compacted := compactHistory(raw, "short")
-	after := historySize(compacted)
-	if before <= after {
-		t.Fatalf("expected before (%d) > after (%d)", before, after)
-	}
-}
-
-func TestSplitHistoryCompactsLargeRecentToolOutputs(t *testing.T) {
-	big := make([]byte, 32768)
-	for i := range big {
-		big[i] = 'a'
-	}
-	history := []ai.PromptPart{
-		{Role: ai.RoleUser, Text: "explain"},
-		{Role: ai.RoleModel, ToolCalls: []ai.ToolCall{{Name: "read_file"}}},
-		{Role: ai.RoleTool, ToolName: "read_file", ToolResponse: map[string]any{"content": string(big)}},
-	}
-	older, recent := splitHistoryForCompaction(history, 4096)
-	if len(older) == 0 {
-		t.Fatal("expected oversized history to be moved into older for summarization")
-	}
-	if historySize(recent) > 8192 {
-		t.Fatalf("recent size = %d, want <= 8192", historySize(recent))
 	}
 }
 
@@ -116,12 +69,94 @@ type fmtError string
 
 func (e fmtError) Error() string { return string(e) }
 
+func TestNewSessionCompilesDeterministicToolSchemas(t *testing.T) {
+	originalProperties := map[string]any{
+		"item": map[string]any{"type": "string", "description": "The item"},
+	}
+	session, err := NewSession(SessionConfig{
+		Tools: map[string]Tool{
+			"z_tool": {
+				Description: "Second tool",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"count": map[string]any{"type": "integer"},
+					},
+					"required": []string{"count"},
+				},
+			},
+			"a_tool": {
+				Description: "First tool",
+				Parameters:  originalProperties,
+				Required:    []string{"item"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.tools) != 2 {
+		t.Fatalf("compiled tools = %d, want 2", len(session.tools))
+	}
+	first, _ := session.tools[0]["function"].(map[string]any)
+	if first["name"] != "a_tool" {
+		t.Fatalf("first compiled tool = %v, want a_tool", first["name"])
+	}
+	for i, want := range []string{"a_tool", "z_tool"} {
+		fn, _ := session.tools[i]["function"].(map[string]any)
+		params, _ := fn["parameters"].(map[string]any)
+		props, _ := params["properties"].(map[string]any)
+		explanation, _ := props["explanation"].(map[string]any)
+		if fn["name"] != want || explanation["type"] != "string" {
+			t.Fatalf("compiled %s schema missing explanation: %#v", want, session.tools[i])
+		}
+		required, _ := params["required"].([]string)
+		foundExplanation := false
+		for _, name := range required {
+			if name == "explanation" {
+				foundExplanation = true
+			}
+		}
+		if !foundExplanation {
+			t.Fatalf("%s required fields omit explanation: %v", want, required)
+		}
+	}
+	if _, mutated := originalProperties["explanation"]; mutated {
+		t.Fatal("schema compilation mutated the caller's property map")
+	}
+}
+
+func TestSessionToolDispatchReturnsErrorResults(t *testing.T) {
+	session, err := NewSession(SessionConfig{Tools: map[string]Tool{
+		"fail": {
+			Execute: func(context.Context, ToolCall, LogFeedback) (any, error) {
+				return nil, fmtError("failed execution")
+			},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name string
+		want string
+	}{
+		{name: "missing", want: "unknown tool: missing"},
+		{name: "fail", want: "failed execution"},
+	} {
+		result, _ := session.executeTool(context.Background(), ToolCall{Name: test.name}).(map[string]any)
+		if result["error"] != test.want {
+			t.Fatalf("dispatch %q error = %v, want %q", test.name, result["error"], test.want)
+		}
+	}
+}
+
 type fakeEmbedder struct {
 	calls int
 	block chan struct{}
 }
 
-func (f *fakeEmbedder) Embed(parts []ai.PromptPart) ([]float32, error) {
+func (f *fakeEmbedder) Embed(parts []PromptPart) ([]float32, error) {
 	if f.block != nil {
 		<-f.block
 	}
@@ -129,14 +164,42 @@ func (f *fakeEmbedder) Embed(parts []ai.PromptPart) ([]float32, error) {
 	return []float32{float32(f.calls), float32(len(parts[0].Text))}, nil
 }
 
+func sessionTestTools() map[string]Tool {
+	return map[string]Tool{
+		"read_file": {
+			Description: "Read a test file.",
+			Parameters: map[string]any{
+				"path": map[string]any{"type": "string", "description": "The file path to read"},
+			},
+			Required: []string{"path"},
+			Execute: func(ctx context.Context, call ToolCall, feedback LogFeedback) (any, error) {
+				var args struct {
+					Path string `json:"path"`
+				}
+				if err := json.Unmarshal(call.RawArguments, &args); err != nil {
+					return nil, err
+				}
+				if feedback != nil {
+					feedback("📖 reading test file")
+				}
+				data, err := os.ReadFile(args.Path)
+				if err != nil {
+					return nil, err
+				}
+				return map[string]any{"content": string(data)}, nil
+			},
+		},
+	}
+}
+
 func TestBackgroundEmbedWorkerPopulatesHistoryAndYieldsToTurn(t *testing.T) {
 	emb := &fakeEmbedder{}
-	s := &HarnessSession{embedder: emb}
+	s := &Session{embedder: emb}
 	defer s.Shutdown()
 
 	s.appendHistory(
-		ai.PromptPart{Role: ai.RoleUser, Text: "hello"},
-		ai.PromptPart{Role: ai.RoleModel, Text: "world"},
+		PromptPart{Role: RoleUser, Text: "hello"},
+		PromptPart{Role: RoleModel, Text: "world"},
 	)
 
 	s.FlushEmbeddings()
@@ -157,12 +220,12 @@ func TestBackgroundEmbedWorkerPopulatesHistoryAndYieldsToTurn(t *testing.T) {
 
 	// Simulate turnWaiting pre-empting background embedding between items.
 	emb2 := &fakeEmbedder{}
-	s2 := &HarnessSession{embedder: emb2}
+	s2 := &Session{embedder: emb2}
 	defer s2.Shutdown()
 
 	s2.appendHistory(
-		ai.PromptPart{Role: ai.RoleUser, Text: "turn 1"},
-		ai.PromptPart{Role: ai.RoleModel, Text: "reply 1"},
+		PromptPart{Role: RoleUser, Text: "turn 1"},
+		PromptPart{Role: RoleModel, Text: "reply 1"},
 	)
 	s2.turnWaiting.Store(true)
 	s2.processPendingEmbeddings(false)
@@ -192,17 +255,17 @@ func TestFormatEmbeddingSummary(t *testing.T) {
 }
 
 func TestGroupIntoAtomicUnitsPreservesToolExchanges(t *testing.T) {
-	history := []ai.PromptPart{
-		{Role: ai.RoleUser, Text: "read two files", Embedding: []float32{1, 0}},
+	history := []PromptPart{
+		{Role: RoleUser, Text: "read two files", Embedding: []float32{1, 0}},
 		{
-			Role:      ai.RoleModel,
+			Role:      RoleModel,
 			Text:      "reading",
-			ToolCalls: []ai.ToolCall{{Name: "read_file"}, {Name: "read_file"}},
+			ToolCalls: []ToolCall{{Name: "read_file"}, {Name: "read_file"}},
 			Embedding: []float32{0, 1},
 		},
-		{Role: ai.RoleTool, ToolName: "read_file", ToolResponse: map[string]any{"content": "A"}, Embedding: []float32{0, 1}},
-		{Role: ai.RoleTool, ToolName: "read_file", ToolResponse: map[string]any{"content": "B"}, Embedding: []float32{0, 1}},
-		{Role: ai.RoleModel, Text: "done", Embedding: []float32{1, 0}},
+		{Role: RoleTool, ToolName: "read_file", ToolResponse: map[string]any{"content": "A"}, Embedding: []float32{0, 1}},
+		{Role: RoleTool, ToolName: "read_file", ToolResponse: map[string]any{"content": "B"}, Embedding: []float32{0, 1}},
+		{Role: RoleModel, Text: "done", Embedding: []float32{1, 0}},
 	}
 	units := groupIntoAtomicUnits(history)
 	if len(units) != 3 {
@@ -221,7 +284,7 @@ func TestRAGProjectionPinsRelevantAnchorsAndResurrectsFromCanonical(t *testing.T
 	vecA := []float32{1, 0}
 	vecB := []float32{0, 1}
 
-	s := &HarnessSession{
+	s := &Session{
 		compactionLimit: 4096,
 		compressor: func(ctx context.Context, sys, user string) (string, error) {
 			return "compressed-gap", nil
@@ -232,19 +295,19 @@ func TestRAGProjectionPinsRelevantAnchorsAndResurrectsFromCanonical(t *testing.T
 	// U0..U1: Topic A (early requirement & schema)
 	// U2..U7: Topic B (6 units of tangent exploration)
 	// U8..U11: Topic A returns in the last X/2 = 4 units!
-	history := []ai.PromptPart{
-		{Role: ai.RoleUser, Text: "Topic A schema definition", Embedding: vecA},
-		{Role: ai.RoleModel, Text: "Topic A schema ack", Embedding: vecA},
-		{Role: ai.RoleUser, Text: "Topic B tangent 1", Embedding: vecB},
-		{Role: ai.RoleModel, Text: "Topic B reply 1", Embedding: vecB},
-		{Role: ai.RoleUser, Text: "Topic B tangent 2", Embedding: vecB},
-		{Role: ai.RoleModel, Text: "Topic B reply 2", Embedding: vecB},
-		{Role: ai.RoleUser, Text: "Topic B tangent 3", Embedding: vecB},
-		{Role: ai.RoleModel, Text: "Topic B reply 3", Embedding: vecB},
-		{Role: ai.RoleUser, Text: "Back to Topic A step 1", Embedding: vecA},
-		{Role: ai.RoleModel, Text: "Working on Topic A step 1", Embedding: vecA},
-		{Role: ai.RoleUser, Text: "Back to Topic A step 2", Embedding: vecA},
-		{Role: ai.RoleModel, Text: "Working on Topic A step 2", Embedding: vecA},
+	history := []PromptPart{
+		{Role: RoleUser, Text: "Topic A schema definition", Embedding: vecA},
+		{Role: RoleModel, Text: "Topic A schema ack", Embedding: vecA},
+		{Role: RoleUser, Text: "Topic B tangent 1", Embedding: vecB},
+		{Role: RoleModel, Text: "Topic B reply 1", Embedding: vecB},
+		{Role: RoleUser, Text: "Topic B tangent 2", Embedding: vecB},
+		{Role: RoleModel, Text: "Topic B reply 2", Embedding: vecB},
+		{Role: RoleUser, Text: "Topic B tangent 3", Embedding: vecB},
+		{Role: RoleModel, Text: "Topic B reply 3", Embedding: vecB},
+		{Role: RoleUser, Text: "Back to Topic A step 1", Embedding: vecA},
+		{Role: RoleModel, Text: "Working on Topic A step 1", Embedding: vecA},
+		{Role: RoleUser, Text: "Back to Topic A step 2", Embedding: vecA},
+		{Role: RoleModel, Text: "Working on Topic A step 2", Embedding: vecA},
 	}
 
 	projected := s.projectHistory(context.Background(), history)
@@ -271,7 +334,7 @@ func TestRAGProjectionPinsRelevantAnchorsAndResurrectsFromCanonical(t *testing.T
 func TestCompressTextBlockStepDownAndEscapeHatch(t *testing.T) {
 	var attempts int
 	var budgets []string
-	s := &HarnessSession{
+	s := &Session{
 		compressor: func(ctx context.Context, sys, user string) (string, error) {
 			attempts++
 			budgets = append(budgets, sys)
@@ -293,7 +356,7 @@ func TestCompressTextBlockStepDownAndEscapeHatch(t *testing.T) {
 
 func TestSummarizeGapRecursiveHalving(t *testing.T) {
 	var calls int
-	s := &HarnessSession{
+	s := &Session{
 		compactionLimit: 100, // gapTokenBudget = 50 tokens (~200 bytes)
 		compressor: func(ctx context.Context, sys, user string) (string, error) {
 			calls++
@@ -302,8 +365,8 @@ func TestSummarizeGapRecursiveHalving(t *testing.T) {
 	}
 
 	units := []atomicTurnUnit{
-		{parts: []ai.PromptPart{{Role: ai.RoleUser, Text: strings.Repeat("a ", 80)}}},
-		{parts: []ai.PromptPart{{Role: ai.RoleModel, Text: strings.Repeat("b ", 80)}}},
+		{parts: []PromptPart{{Role: RoleUser, Text: strings.Repeat("a ", 80)}}},
+		{parts: []PromptPart{{Role: RoleModel, Text: strings.Repeat("b ", 80)}}},
 	}
 	got := s.summarizeGap(context.Background(), units)
 	if calls < 2 {
@@ -317,7 +380,7 @@ func TestSummarizeGapRecursiveHalving(t *testing.T) {
 func TestCollapseUnpinnedLargeBlocksCachesAndPrefixesCompacted(t *testing.T) {
 	var prompts []string
 	var inputs []string
-	s := &HarnessSession{
+	s := &Session{
 		compactionLimit: 1000, // gapTokenBudget = 500, largeBlockByteThreshold = 512 bytes
 		compressor: func(ctx context.Context, sys, user string) (string, error) {
 			prompts = append(prompts, sys)
@@ -331,15 +394,15 @@ func TestCollapseUnpinnedLargeBlocksCachesAndPrefixesCompacted(t *testing.T) {
 
 	units := []atomicTurnUnit{
 		{
-			parts: []ai.PromptPart{
+			parts: []PromptPart{
 				{
-					Role: ai.RoleModel,
-					ToolCalls: []ai.ToolCall{
+					Role: RoleModel,
+					ToolCalls: []ToolCall{
 						{Name: "read_file", RawArguments: []byte(`{"path":"app.conf","explanation":"find server port"}`)},
 					},
 				},
 				{
-					Role:         ai.RoleTool,
+					Role:         RoleTool,
 					ToolName:     "read_file",
 					Explanation:  "find server port",
 					ToolResponse: map[string]any{"content": largeOutput},
@@ -347,9 +410,9 @@ func TestCollapseUnpinnedLargeBlocksCachesAndPrefixesCompacted(t *testing.T) {
 			},
 		},
 		{
-			parts: []ai.PromptPart{
+			parts: []PromptPart{
 				{
-					Role:         ai.RoleTool,
+					Role:         RoleTool,
 					ToolName:     "read_file",
 					Explanation:  "keep pinned",
 					ToolResponse: map[string]any{"content": pinnedOutput},
@@ -380,9 +443,9 @@ func TestCollapseUnpinnedLargeBlocksCachesAndPrefixesCompacted(t *testing.T) {
 	// 3. Re-running on identical unpinned artifact must hit artifactCache with zero extra LLM calls.
 	unitsAgain := []atomicTurnUnit{
 		{
-			parts: []ai.PromptPart{
+			parts: []PromptPart{
 				{
-					Role:         ai.RoleTool,
+					Role:         RoleTool,
 					ToolName:     "read_file",
 					Explanation:  "find server port",
 					ToolResponse: map[string]any{"content": largeOutput},
@@ -398,7 +461,7 @@ func TestCollapseUnpinnedLargeBlocksCachesAndPrefixesCompacted(t *testing.T) {
 
 func TestLiveStreamerZeroANSISpec(t *testing.T) {
 	var out bytes.Buffer
-	ls := newLiveStreamer(&out, 20)
+	ls := newLiveStreamer(func(text string) { _, _ = out.WriteString(text) }, 20)
 
 	ls.StartStage("goal")
 	ls.Feed("hello\n  world   from   exceedingly long text")
@@ -433,20 +496,23 @@ func TestLiveStreamerZeroANSISpec(t *testing.T) {
 func TestRunTurnFastPathDirectBypass(t *testing.T) {
 	var out bytes.Buffer
 	var stageCalls int
-	s := &HarnessSession{
-		out:           &out,
-		systemMessage: "You are Pope.",
-		tools:         GetToolDeclarations(),
-		ephemeralStream: func(ctx context.Context, cfg ai.ConversationConfig, trigger []ai.PromptPart, onEvent func(ai.ModelEvent) bool) error {
-			stageCalls++
-			if cfg.Tools != nil {
-				t.Fatalf("Stage 1 must have Tools: nil")
-			}
-			onEvent(ai.TextEvent{Text: "DIR"})
-			onEvent(ai.TextEvent{Text: "ECT: "})
-			onEvent(ai.TextEvent{Text: "Pont Neuf is the oldest standing bridge in Paris."})
-			return nil
-		},
+	s, err := NewSession(SessionConfig{
+		SystemMessage: "You are Pope.",
+		OnContent:     func(text string) { _, _ = out.WriteString(text) },
+		OnFeedback:    func(text string) {},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.ephemeralStream = func(ctx context.Context, cfg ConversationConfig, trigger []PromptPart, onEvent func(ModelEvent) bool) error {
+		stageCalls++
+		if cfg.Tools != nil {
+			t.Fatalf("Stage 1 must have Tools: nil")
+		}
+		onEvent(TextEvent{Text: "DIR"})
+		onEvent(TextEvent{Text: "ECT: "})
+		onEvent(TextEvent{Text: "Pont Neuf is the oldest standing bridge in Paris."})
+		return nil
 	}
 
 	if err := s.RunTurn(context.Background(), "Name a bridge in Paris"); err != nil {
@@ -473,22 +539,25 @@ func TestRunTurnFastPathDirectBypass(t *testing.T) {
 func TestRunTurnFastPathUnprefixedStreamsImmediately(t *testing.T) {
 	var out bytes.Buffer
 	var stageCalls int
-	s := &HarnessSession{
-		out:           &out,
-		systemMessage: "You are Pope.",
-		tools:         GetToolDeclarations(),
-		ephemeralStream: func(ctx context.Context, cfg ai.ConversationConfig, trigger []ai.PromptPart, onEvent func(ai.ModelEvent) bool) error {
-			stageCalls++
-			if cfg.Tools != nil {
-				t.Fatalf("Stage 1 must have Tools: nil")
-			}
-			onEvent(ai.TextEvent{Text: "Pont"})
-			if got := out.String(); got != "Pont" {
-				t.Fatalf("unprefixed response was not streamed immediately: got %q", got)
-			}
-			onEvent(ai.TextEvent{Text: " Neuf."})
-			return nil
-		},
+	s, err := NewSession(SessionConfig{
+		SystemMessage: "You are Pope.",
+		OnContent:     func(text string) { _, _ = out.WriteString(text) },
+		OnFeedback:    func(text string) {},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.ephemeralStream = func(ctx context.Context, cfg ConversationConfig, trigger []PromptPart, onEvent func(ModelEvent) bool) error {
+		stageCalls++
+		if cfg.Tools != nil {
+			t.Fatalf("Stage 1 must have Tools: nil")
+		}
+		onEvent(TextEvent{Text: "Pont"})
+		if got := out.String(); got != "Pont" {
+			t.Fatalf("unprefixed response was not streamed immediately: got %q", got)
+		}
+		onEvent(TextEvent{Text: " Neuf."})
+		return nil
 	}
 
 	if err := s.RunTurn(context.Background(), "Name a bridge in Paris"); err != nil {
@@ -513,74 +582,79 @@ func TestRunTurnFull7StageReflectivePipelineAndIcebergReplant(t *testing.T) {
 	pathJSON, _ := json.Marshal(tmpFile)
 
 	var out bytes.Buffer
+	var feedback strings.Builder
 	emb := &fakeEmbedder{}
 	var stageIdx int
 	var stage3SysMsgs []string
 
-	s := &HarnessSession{
-		out:           &out,
-		embedder:      emb,
-		systemMessage: "You are Pope.",
-		tools:         GetToolDeclarations(),
-		ephemeralStream: func(ctx context.Context, cfg ai.ConversationConfig, trigger []ai.PromptPart, onEvent func(ai.ModelEvent) bool) error {
-			stageIdx++
-			switch stageIdx {
-			case 1: // Stage 1: Triage -> GOAL:
-				if cfg.Tools != nil {
-					t.Fatal("Stage 1 must have Tools == nil")
-				}
-				onEvent(ai.TextEvent{Text: "GOAL: Read bridge.txt and report the bridge name."})
-			case 2: // Stage 2: Expectation Calibration -> <detail_level>
-				if cfg.Tools != nil {
-					t.Fatal("Stage 2 (expectation) must have Tools == nil")
-				}
-				onEvent(ai.TextEvent{Text: "A single bridge name, maximum one short sentence."})
-			case 3: // Stage 3: Steps
-				if cfg.Tools != nil {
-					t.Fatal("Stage 3 (steps) must have Tools == nil")
-				}
-				onEvent(ai.TextEvent{Text: "1. Call read_file on bridge.txt. 2. State the bridge."})
-			case 4, 5, 6: // Stage 4A, 4B, 4C
-				if cfg.Tools != nil {
-					t.Fatalf("Stage 4 critique branch %d must have Tools == nil", stageIdx-3)
-				}
-				stage3SysMsgs = append(stage3SysMsgs, cfg.SystemMessage)
-				if !strings.HasPrefix(trigger[0].Text, "I think you might take these steps below") {
-					t.Fatalf("Stage 4 role-swapped attribution missing: %q", trigger[0].Text)
-				}
-				onEvent(ai.TextEvent{Text: fmt.Sprintf("critique-%d", stageIdx-3)})
-			case 7: // Stage 5: Tribunal Join
-				if cfg.Tools != nil {
-					t.Fatal("Stage 5 (plan) must have Tools == nil")
-				}
-				onEvent(ai.TextEvent{Text: "Read bridge.txt using read_file and answer concisely."})
-			case 8: // Stage 6 turn 1: emits tool call
-				if len(cfg.Tools) == 0 {
-					t.Fatal("Stage 6 (work) must have Tools enabled")
-				}
-				onEvent(ai.ToolCallEvent{ToolCalls: []ai.ToolCall{{
-					Name:         "read_file",
-					RawArguments: json.RawMessage(`{"path":` + string(pathJSON) + `,"explanation":"read bridge name"}`),
-				}}})
-			case 9: // Stage 6 turn 2: receives tool output and produces verbose work_and_answer
-				onEvent(ai.TextEvent{Text: "Phase 1 complete. I read bridge.txt and found Pont Alexandre III."})
-			case 10: // Stage 7: Convergence & Re-Formulation Flip
-				if cfg.Tools != nil {
-					t.Fatal("Stage 7 (convergence) must have Tools == nil")
-				}
-				// Verify seeded history contains only User(P) and Model(workAndAnswer), without raw tool turns
-				if len(cfg.History) != 2 || cfg.History[1].Text != "Phase 1 complete. I read bridge.txt and found Pont Alexandre III." {
-					t.Fatalf("Stage 7 convergence seeded history = %#v", cfg.History)
-				}
-				if !strings.Contains(trigger[0].Text, "A single bridge name, maximum one short sentence.") {
-					t.Fatalf("Stage 7 convergence trigger missing detail_level: %q", trigger[0].Text)
-				}
-				onEvent(ai.TextEvent{Text: "The bridge in the file is Pont Alexandre III."})
-			default:
-				t.Fatalf("unexpected stage call %d", stageIdx)
+	s, err := NewSession(SessionConfig{
+		Embedder:      emb,
+		SystemMessage: "You are Pope.",
+		Tools:         sessionTestTools(),
+		OnContent:     func(text string) { _, _ = out.WriteString(text) },
+		OnFeedback:    func(text string) { _, _ = feedback.WriteString(text) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.ephemeralStream = func(ctx context.Context, cfg ConversationConfig, trigger []PromptPart, onEvent func(ModelEvent) bool) error {
+		stageIdx++
+		switch stageIdx {
+		case 1: // Stage 1: Triage -> GOAL:
+			if cfg.Tools != nil {
+				t.Fatal("Stage 1 must have Tools == nil")
 			}
-			return nil
-		},
+			onEvent(TextEvent{Text: "GOAL: Read bridge.txt and report the bridge name."})
+		case 2: // Stage 2: Expectation Calibration -> <detail_level>
+			if cfg.Tools != nil {
+				t.Fatal("Stage 2 (expectation) must have Tools == nil")
+			}
+			onEvent(TextEvent{Text: "A single bridge name, maximum one short sentence."})
+		case 3: // Stage 3: Steps
+			if cfg.Tools != nil {
+				t.Fatal("Stage 3 (steps) must have Tools == nil")
+			}
+			onEvent(TextEvent{Text: "1. Call read_file on bridge.txt. 2. State the bridge."})
+		case 4, 5, 6: // Stage 4A, 4B, 4C
+			if cfg.Tools != nil {
+				t.Fatalf("Stage 4 critique branch %d must have Tools == nil", stageIdx-3)
+			}
+			stage3SysMsgs = append(stage3SysMsgs, cfg.SystemMessage)
+			if !strings.HasPrefix(trigger[0].Text, "I think you might take these steps below") {
+				t.Fatalf("Stage 4 role-swapped attribution missing: %q", trigger[0].Text)
+			}
+			onEvent(TextEvent{Text: fmt.Sprintf("critique-%d", stageIdx-3)})
+		case 7: // Stage 5: Tribunal Join
+			if cfg.Tools != nil {
+				t.Fatal("Stage 5 (plan) must have Tools == nil")
+			}
+			onEvent(TextEvent{Text: "Read bridge.txt using read_file and answer concisely."})
+		case 8: // Stage 6 turn 1: emits tool call
+			if len(cfg.Tools) == 0 {
+				t.Fatal("Stage 6 (work) must have Tools enabled")
+			}
+			onEvent(ToolCallEvent{ToolCalls: []ToolCall{{
+				Name:         "read_file",
+				RawArguments: json.RawMessage(`{"path":` + string(pathJSON) + `,"explanation":"read bridge name"}`),
+			}}})
+		case 9: // Stage 6 turn 2: receives tool output and produces verbose work_and_answer
+			onEvent(TextEvent{Text: "Phase 1 complete. I read bridge.txt and found Pont Alexandre III."})
+		case 10: // Stage 7: Convergence & Re-Formulation Flip
+			if cfg.Tools != nil {
+				t.Fatal("Stage 7 (convergence) must have Tools == nil")
+			}
+			// Verify seeded history contains only User(P) and Model(workAndAnswer), without raw tool turns
+			if len(cfg.History) != 2 || cfg.History[1].Text != "Phase 1 complete. I read bridge.txt and found Pont Alexandre III." {
+				t.Fatalf("Stage 7 convergence seeded history = %#v", cfg.History)
+			}
+			if !strings.Contains(trigger[0].Text, "A single bridge name, maximum one short sentence.") {
+				t.Fatalf("Stage 7 convergence trigger missing detail_level: %q", trigger[0].Text)
+			}
+			onEvent(TextEvent{Text: "The bridge in the file is Pont Alexandre III."})
+		default:
+			t.Fatalf("unexpected stage call %d", stageIdx)
+		}
+		return nil
 	}
 	defer s.Shutdown()
 
@@ -590,6 +664,15 @@ func TestRunTurnFull7StageReflectivePipelineAndIcebergReplant(t *testing.T) {
 
 	if stageIdx != 10 {
 		t.Fatalf("stageIdx = %d, want 10", stageIdx)
+	}
+	if got := out.String(); got != "The bridge in the file is Pont Alexandre III." {
+		t.Fatalf("spoken content = %q", got)
+	}
+	if status := feedback.String(); !strings.Contains(status, "[goal]") || !strings.Contains(status, "📖 reading test file\n") {
+		t.Fatalf("feedback lacks stage/tool status: %q", status)
+	}
+	if strings.Contains(feedback.String(), "The bridge in the file is Pont Alexandre III.") {
+		t.Fatal("spoken response leaked into impermanent feedback")
 	}
 	for _, sm := range stage3SysMsgs {
 		if !strings.Contains(sm, "read_file") {

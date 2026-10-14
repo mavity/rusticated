@@ -90,7 +90,7 @@ type Tool struct {
 	Description string
 	Parameters  map[string]any // JSON Schema property map (or full {"type":"object","properties":...})
 	Required    []string
-	Execute     func(ctx context.Context, call ToolCall, feedback LogFeedback) any
+	Execute     func(ctx context.Context, call ToolCall, feedback LogFeedback) (any, error)
 }
 
 // SessionConfig configures a high-level reflective chat Session.
@@ -180,4 +180,3 @@ Replace `out io.Writer` with two helper methods `s.emitFeedback(text string)` an
 2. **`pope` Integration:**
 * Convert `pope`'s tools into `map[string]ai.Tool` and initialize `ai.NewSession(ai.SessionConfig{...})` in `pope/main.go` with `OnContent: func(s string) { fmt.Print(s) }` and `OnFeedback: func(s string) { fmt.Print(s) }`.
 * Move session/compaction unit tests into `ai/session_test.go` (or keep `pope` integration tests referencing `ai.Session`).
-

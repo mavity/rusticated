@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"ai"
 )
 
 // runTerminalLoop is the interactive REPL.
-func runTerminalLoop(ctx context.Context, session *HarnessSession) {
+func runTerminalLoop(ctx context.Context, session *ai.Session) {
 	fmt.Println("Pope CLI AI Harness (Ctrl+C or 'exit' to quit)")
 	scanner := bufio.NewScanner(os.Stdin)
 	for {

@@ -5,28 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
-	"sort"
 	"strings"
 
 	"ai"
 )
 
-// Tools maps each tool name to its implementation, a function of the form
-//
-//	func(ctx context.Context, in T, feedback LogFeedback) (any, error)
-//
-// where T is a struct describing the arguments: a blank `_ struct{}` field
-// carries the tool description in its `doc` tag, and every exported field is a
-// parameter documented by its `doc` tag. A parameter is named by its `json`
-// tag, or by its lowercased field name, and is required unless the tag has
-// `omitempty`.
-type LogFeedback func(text string)
-
-var Tools = map[string]any{
-	"read_file":  ReadFile,
-	"write_file": WriteFile,
-	"exec":       Exec,
-}
+type LogFeedback = ai.LogFeedback
 
 const maxToolOutput = 32768
 
@@ -59,115 +43,69 @@ func toolLead(input any, primaryArg string, maxArgLen int) string {
 	panic(fmt.Sprintf("tool input %v has no metadata field", in))
 }
 
-// toolInputType returns the argument struct type T of a tool function. A tool
-// with any other shape is a programming error, so it panics.
-func toolInputType(name string, fn any) reflect.Type {
-	t := reflect.TypeOf(fn)
-	if t == nil || t.Kind() != reflect.Func || t.NumIn() != 3 || t.NumOut() != 2 ||
-		!reflect.TypeFor[context.Context]().AssignableTo(t.In(0)) ||
-		t.In(1).Kind() != reflect.Struct ||
-		!reflect.TypeFor[LogFeedback]().AssignableTo(t.In(2)) ||
-		t.Out(0).Kind() != reflect.Interface || t.Out(0).NumMethod() != 0 ||
-		t.Out(1) != reflect.TypeFor[error]() {
-		panic(fmt.Sprintf("tool %q must be func(context.Context, struct, LogFeedback) (any, error), got %v", name, t))
+func decodeToolCall[T any](call ai.ToolCall) (T, error) {
+	var input T
+	raw := call.RawArguments
+	if len(raw) == 0 && call.Arguments != nil {
+		var err error
+		raw, err = json.Marshal(call.Arguments)
+		if err != nil {
+			return input, err
+		}
 	}
-	return t.In(1)
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return input, fmt.Errorf("invalid arguments: %w", err)
+		}
+	}
+	return input, nil
 }
 
-// GetToolDeclarations builds the LiteRT-LM tool declarations from Tools, sorted
-// by name so the declarations are identical from run to run.
-func GetToolDeclarations() []map[string]any {
-	names := make([]string, 0, len(Tools))
-	for name := range Tools {
-		names = append(names, name)
+func adaptTool[T any](execute func(context.Context, T, LogFeedback) (any, error)) func(context.Context, ai.ToolCall, ai.LogFeedback) (any, error) {
+	return func(ctx context.Context, call ai.ToolCall, feedback ai.LogFeedback) (any, error) {
+		input, err := decodeToolCall[T](call)
+		if err != nil {
+			return nil, err
+		}
+		return execute(ctx, input, feedback)
 	}
-	sort.Strings(names)
+}
 
-	decls := make([]map[string]any, 0, len(names))
-	for _, name := range names {
-		in := toolInputType(name, Tools[name])
-		description := ""
-		properties := map[string]any{}
-		required := []string{}
-		for i := range in.NumField() {
-			f := in.Field(i)
-			if f.Name == "_" {
-				description = f.Tag.Get("doc")
-				continue
-			}
-			if !f.IsExported() {
-				continue
-			}
-			param, opts, _ := strings.Cut(f.Tag.Get("json"), ",")
-			if param == "-" {
-				continue
-			}
-			if param == "" {
-				param = strings.ToLower(f.Name)
-			}
-			schema := typeSchema(name, f.Type)
-			if doc := f.Tag.Get("doc"); doc != "" {
-				schema["description"] = doc
-			}
-			properties[param] = schema
-			if !strings.Contains(opts, "omitempty") {
-				required = append(required, param)
-			}
-		}
-		parameters := map[string]any{"type": "object", "properties": properties}
-		if len(required) > 0 {
-			parameters["required"] = required
-		}
-		decls = append(decls, map[string]any{
-			"type": "function",
-			"function": map[string]any{
-				"name":        name,
-				"description": description,
-				"parameters":  parameters,
+// Tools is Pope's declarative capability registry. Session adds any missing
+// explanation property to the compiled JSON Schema.
+var Tools = map[string]ai.Tool{
+	"exec": {
+		Description: "Execute a shell command on the host system and return its output.",
+		Parameters: map[string]any{
+			"command": map[string]any{"type": "string", "description": "The shell command to run"},
+			"explanation": map[string]any{
+				"type": "string", "description": "Brief explanation of why this command is being run and what information is sought",
 			},
-		})
-	}
-	return decls
-}
-
-func typeSchema(tool string, t reflect.Type) map[string]any {
-	switch t.Kind() {
-	case reflect.String:
-		return map[string]any{"type": "string"}
-	case reflect.Bool:
-		return map[string]any{"type": "boolean"}
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return map[string]any{"type": "integer"}
-	case reflect.Float32, reflect.Float64:
-		return map[string]any{"type": "number"}
-	case reflect.Slice:
-		return map[string]any{"type": "array", "items": typeSchema(tool, t.Elem())}
-	}
-	panic(fmt.Sprintf("tool %q: unsupported parameter type %v", tool, t))
-}
-
-// ExecuteTool decodes the call's raw JSON arguments straight into the tool's
-// argument struct and runs the tool. Failures are returned as {"error": ...}
-// for the model to read.
-func ExecuteTool(ctx context.Context, call ai.ToolCall, feedback LogFeedback) any {
-	fn, ok := Tools[call.Name]
-	if !ok {
-		return map[string]any{"error": fmt.Sprintf("unknown tool: %s", call.Name)}
-	}
-	in := reflect.New(toolInputType(call.Name, fn))
-	if len(call.RawArguments) > 0 {
-		if err := json.Unmarshal(call.RawArguments, in.Interface()); err != nil {
-			return map[string]any{"error": "invalid arguments: " + err.Error()}
-		}
-	}
-	feedbackValue := reflect.Zero(reflect.TypeFor[LogFeedback]())
-	if feedback != nil {
-		feedbackValue = reflect.ValueOf(feedback)
-	}
-	out := reflect.ValueOf(fn).Call([]reflect.Value{reflect.ValueOf(ctx), in.Elem(), feedbackValue})
-	if err, _ := out[1].Interface().(error); err != nil {
-		return map[string]any{"error": err.Error()}
-	}
-	return out[0].Interface()
+		},
+		Required: []string{"command", "explanation"},
+		Execute:  adaptTool(Exec),
+	},
+	"read_file": {
+		Description: "Read the contents of a local file at the specified path.",
+		Parameters: map[string]any{
+			"path": map[string]any{"type": "string", "description": "The file path to read"},
+			"explanation": map[string]any{
+				"type": "string", "description": "Brief explanation of why this file is being read and what information is sought",
+			},
+		},
+		Required: []string{"path", "explanation"},
+		Execute:  adaptTool(ReadFile),
+	},
+	"write_file": {
+		Description: "Write or overwrite content to a local file at the specified path.",
+		Parameters: map[string]any{
+			"path":    map[string]any{"type": "string", "description": "The file path to write to"},
+			"content": map[string]any{"type": "string", "description": "The text content to write"},
+			"explanation": map[string]any{
+				"type": "string", "description": "Brief explanation of why this file is being written",
+			},
+		},
+		Required: []string{"path", "content", "explanation"},
+		Execute:  adaptTool(WriteFile),
+	},
 }
