@@ -9,8 +9,9 @@ import (
 )
 
 type ReadFileInput struct {
-	_    struct{} `doc:"Read the contents of a local file at the specified path." emoji:"📖"`
-	Path string   `doc:"The file path to read"`
+	_           struct{} `doc:"Read the contents of a local file at the specified path." emoji:"📖"`
+	Path        string   `doc:"The file path to read"`
+	Explanation string   `doc:"Brief explanation of why this file is being read and what information is sought"`
 }
 
 func ReadFile(ctx context.Context, in ReadFileInput, feedback LogFeedback) (any, error) {
@@ -34,9 +35,10 @@ func ReadFile(ctx context.Context, in ReadFileInput, feedback LogFeedback) (any,
 }
 
 type WriteFileInput struct {
-	_       struct{} `doc:"Write or overwrite content to a local file at the specified path." emoji:"📝"`
-	Path    string   `doc:"The file path to write to"`
-	Content string   `doc:"The text content to write"`
+	_           struct{} `doc:"Write or overwrite content to a local file at the specified path." emoji:"📝"`
+	Path        string   `doc:"The file path to write to"`
+	Content     string   `doc:"The text content to write"`
+	Explanation string   `doc:"Brief explanation of why this file is being written"`
 }
 
 func WriteFile(ctx context.Context, in WriteFileInput, feedback LogFeedback) (any, error) {
