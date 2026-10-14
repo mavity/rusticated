@@ -76,6 +76,10 @@ func TestFormatPartForEmbeddingAndJSONIsolation(t *testing.T) {
 		Role:      RoleUser,
 		Text:      "Name a bridge in Paris",
 		Embedding: []float32{0.1, 0.2, 0.3},
+		CognitiveTrace: &CognitiveTrace{
+			Goal:            "Identify a bridge in Paris",
+			SynthesizedPlan: "Answer directly with Pont Neuf",
+		},
 	}
 	if got := FormatPartForEmbedding(userPart); got != "task: search result | text: Name a bridge in Paris" {
 		t.Fatalf("user format = %q", got)
@@ -112,4 +116,30 @@ func TestFormatPartForEmbeddingAndJSONIsolation(t *testing.T) {
 	if _, hasEmbedding := parsed["embedding"]; hasEmbedding {
 		t.Fatalf("buildMessageJSON leaked embedding field: %s", msgJSON)
 	}
+	if _, hasTrace := parsed["cognitive_trace"]; hasTrace || bytesContainsFold(msgJSON, "SynthesizedPlan") {
+		t.Fatalf("buildMessageJSON leaked CognitiveTrace field: %s", msgJSON)
+	}
+
+	histJSON, err := buildHistoryJSON([]PromptPart{userPart})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytesContainsFold(histJSON, "SynthesizedPlan") || bytesContainsFold(histJSON, "Identify a bridge") {
+		t.Fatalf("buildHistoryJSON leaked CognitiveTrace field: %s", histJSON)
+	}
+}
+
+func bytesContainsFold(haystack, needle string) bool {
+	return len(needle) > 0 && len(haystack) >= len(needle) &&
+		json.Valid([]byte(haystack)) &&
+		containsSubstr(haystack, needle)
+}
+
+func containsSubstr(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }
