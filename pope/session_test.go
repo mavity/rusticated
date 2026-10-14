@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -389,5 +393,187 @@ func TestCollapseUnpinnedLargeBlocksCachesAndPrefixesCompacted(t *testing.T) {
 	s.collapseUnpinnedLargeBlocks(context.Background(), unitsAgain, 1, nil)
 	if len(prompts) != 1 {
 		t.Fatalf("expected artifactCache hit (1 total call), got %d calls", len(prompts))
+	}
+}
+
+func TestLiveStreamerZeroANSISpec(t *testing.T) {
+	var out bytes.Buffer
+	ls := newLiveStreamer(&out, 20)
+
+	ls.StartStage("goal")
+	ls.Feed("hello\n  world   from   exceedingly long text")
+	captured := ls.EndStage()
+
+	if captured != "hello\n  world   from   exceedingly long text" {
+		t.Fatalf("captured raw text = %q", captured)
+	}
+	// "[goal] " is 7 runes; with maxRunes=20, 12 runes of content + '…' = 20 runes total.
+	if got := out.String(); got != "[goal] hello world …" {
+		t.Fatalf("stage 1 visual output = %q, want %q", got, "[goal] hello world …")
+	}
+
+	out.Reset()
+	ls.StartStage("steps")
+	ls.Feed("short")
+	_ = ls.EndStage()
+
+	wantTransition := "\r" + strings.Repeat(" ", 20) + "\r[steps] short"
+	if got := out.String(); got != wantTransition {
+		t.Fatalf("stage transition = %q, want %q", got, wantTransition)
+	}
+
+	out.Reset()
+	ls.Wipe()
+	wantWipe := "\r" + strings.Repeat(" ", len("[steps] short")) + "\r"
+	if got := out.String(); got != wantWipe {
+		t.Fatalf("wipe output = %q, want %q", got, wantWipe)
+	}
+}
+
+func TestRunTurnFastPathDirectBypass(t *testing.T) {
+	var out bytes.Buffer
+	var stageCalls int
+	s := &HarnessSession{
+		out:           &out,
+		systemMessage: "You are Pope.",
+		tools:         GetToolDeclarations(),
+		ephemeralStream: func(ctx context.Context, cfg ai.ConversationConfig, trigger []ai.PromptPart, onEvent func(ai.ModelEvent) bool) error {
+			stageCalls++
+			if cfg.Tools != nil {
+				t.Fatalf("Stage 1 must have Tools: nil")
+			}
+			onEvent(ai.TextEvent{Text: "DIRECT: "})
+			onEvent(ai.TextEvent{Text: "Pont Neuf is the oldest standing bridge in Paris."})
+			return nil
+		},
+	}
+
+	if err := s.RunTurn(context.Background(), "Name a bridge in Paris"); err != nil {
+		t.Fatal(err)
+	}
+	if stageCalls != 1 {
+		t.Fatalf("stageCalls = %d, want 1 (fast path bypasses stages 2-6)", stageCalls)
+	}
+	if got := out.String(); got != "Pont Neuf is the oldest standing bridge in Paris." {
+		t.Fatalf("terminal output = %q", got)
+	}
+	if len(s.CanonicalHistory) != 2 {
+		t.Fatalf("CanonicalHistory len = %d, want 2", len(s.CanonicalHistory))
+	}
+	modelPart := s.CanonicalHistory[1]
+	if modelPart.Text != "Pont Neuf is the oldest standing bridge in Paris." {
+		t.Fatalf("modelPart.Text = %q", modelPart.Text)
+	}
+	if modelPart.CognitiveTrace == nil || !modelPart.CognitiveTrace.IsDirect {
+		t.Fatalf("expected CognitiveTrace{IsDirect: true}, got %#v", modelPart.CognitiveTrace)
+	}
+}
+
+func TestRunTurnFull7StageReflectivePipelineAndIcebergReplant(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "bridge.txt")
+	if err := os.WriteFile(tmpFile, []byte("Pont Alexandre III"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pathJSON, _ := json.Marshal(tmpFile)
+
+	var out bytes.Buffer
+	emb := &fakeEmbedder{}
+	var stageIdx int
+	var stage3SysMsgs []string
+
+	s := &HarnessSession{
+		out:           &out,
+		embedder:      emb,
+		systemMessage: "You are Pope.",
+		tools:         GetToolDeclarations(),
+		ephemeralStream: func(ctx context.Context, cfg ai.ConversationConfig, trigger []ai.PromptPart, onEvent func(ai.ModelEvent) bool) error {
+			stageIdx++
+			switch stageIdx {
+			case 1: // Stage 1: Triage -> GOAL:
+				if cfg.Tools != nil {
+					t.Fatal("Stage 1 must have Tools == nil")
+				}
+				onEvent(ai.TextEvent{Text: "GOAL: Read bridge.txt and report the bridge name."})
+			case 2: // Stage 2: Steps
+				if cfg.Tools != nil {
+					t.Fatal("Stage 2 must have Tools == nil")
+				}
+				onEvent(ai.TextEvent{Text: "1. Call read_file on bridge.txt. 2. State the bridge."})
+			case 3, 4, 5: // Stage 3A, 3B, 3C
+				if cfg.Tools != nil {
+					t.Fatalf("Stage 3 branch %d must have Tools == nil", stageIdx-2)
+				}
+				stage3SysMsgs = append(stage3SysMsgs, cfg.SystemMessage)
+				if !strings.HasPrefix(trigger[0].Text, "I think you might take these steps below") {
+					t.Fatalf("Stage 3 role-swapped attribution missing: %q", trigger[0].Text)
+				}
+				onEvent(ai.TextEvent{Text: fmt.Sprintf("critique-%d", stageIdx-2)})
+			case 6: // Stage 4: Tribunal Join
+				if cfg.Tools != nil {
+					t.Fatal("Stage 4 must have Tools == nil")
+				}
+				onEvent(ai.TextEvent{Text: "Read bridge.txt using read_file and answer concisely."})
+			case 7: // Stage 5 turn 1: emits tool call
+				if len(cfg.Tools) == 0 {
+					t.Fatal("Stage 5 must have Tools enabled")
+				}
+				onEvent(ai.ToolCallEvent{ToolCalls: []ai.ToolCall{{
+					Name:         "read_file",
+					RawArguments: json.RawMessage(`{"path":` + string(pathJSON) + `,"explanation":"read bridge name"}`),
+				}}})
+			case 8: // Stage 5 turn 2: receives tool output and produces draft answer
+				onEvent(ai.TextEvent{Text: "The bridge in the file is Pont Alexandre III."})
+			case 9: // Stage 6: Verification -> replies OK
+				if cfg.Tools != nil {
+					t.Fatal("Stage 6 must have Tools == nil")
+				}
+				onEvent(ai.TextEvent{Text: "OK"})
+			default:
+				t.Fatalf("unexpected stage call %d", stageIdx)
+			}
+			return nil
+		},
+	}
+	defer s.Shutdown()
+
+	if err := s.RunTurn(context.Background(), "Which bridge is in bridge.txt?"); err != nil {
+		t.Fatal(err)
+	}
+
+	if stageIdx != 9 {
+		t.Fatalf("stageIdx = %d, want 9", stageIdx)
+	}
+	for _, sm := range stage3SysMsgs {
+		if !strings.Contains(sm, "read_file") {
+			t.Fatalf("Stage 3 SystemMessage missing available tool names: %q", sm)
+		}
+	}
+
+	// Stage 7: Verify only the clean spoken surface is in CanonicalHistory & CompactedHistory
+	// [0] User, [1] Model+ToolCalls, [2] ToolResponse, [3] Model final answer with CognitiveTrace
+	if len(s.CanonicalHistory) != 4 {
+		t.Fatalf("CanonicalHistory len = %d, want 4: %#v", len(s.CanonicalHistory), s.CanonicalHistory)
+	}
+	finalPart := s.CanonicalHistory[3]
+	if finalPart.Text != "The bridge in the file is Pont Alexandre III." {
+		t.Fatalf("finalPart.Text = %q", finalPart.Text)
+	}
+	tr := finalPart.CognitiveTrace
+	if tr == nil || tr.IsDirect {
+		t.Fatalf("missing or direct CognitiveTrace: %#v", tr)
+	}
+	if tr.Goal != "Read bridge.txt and report the bridge name." ||
+		tr.InitialSteps != "1. Call read_file on bridge.txt. 2. State the bridge." ||
+		tr.CritiqueRelevancy != "critique-1" ||
+		tr.CritiqueSafety != "critique-2" ||
+		tr.CritiqueGrounded != "critique-3" ||
+		tr.SynthesizedPlan != "Read bridge.txt using read_file and answer concisely." {
+		t.Fatalf("unexpected CognitiveTrace fields: %#v", tr)
+	}
+
+	// Flush embeddings and verify both spoken parts and submerged CognitiveTrace are embedded
+	s.FlushEmbeddings()
+	if len(tr.TraceEmbeddings) != 1 || len(tr.TraceEmbeddings[0]) == 0 {
+		t.Fatalf("expected TraceEmbeddings to be populated by background embedder, got %#v", tr.TraceEmbeddings)
 	}
 }
