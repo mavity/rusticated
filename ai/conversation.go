@@ -22,19 +22,34 @@ const (
 	RoleTool   Role = "tool"
 )
 
+// CognitiveTrace stores the submerged multi-stage reasoning artifacts attached
+// to a spoken RoleModel turn without polluting the LiteRT-LM wire messages.
+type CognitiveTrace struct {
+	IsDirect          bool
+	Goal              string
+	InitialSteps      string
+	CritiqueRelevancy string
+	CritiqueSafety    string
+	CritiqueGrounded  string
+	SynthesizedPlan   string
+	DraftIterations   []string
+	TraceEmbeddings   [][]float32
+}
+
 // PromptPart is a single typed fragment of a multimodal message. Set Text for
 // a text part, ImageBase64 for an image part, or ToolName and ToolResponse
 // when replying to a tool call with RoleTool. ToolCalls records the calls a
 // RoleModel turn made, so that seeded history replays the call/response pairs.
 type PromptPart struct {
-	Role         Role
-	Text         string
-	ImageBase64  string
-	ToolName     string
-	Explanation  string
-	ToolResponse any
-	ToolCalls    []ToolCall
-	Embedding    []float32
+	Role           Role
+	Text           string
+	ImageBase64    string
+	ToolName       string
+	Explanation    string
+	ToolResponse   any
+	ToolCalls      []ToolCall
+	Embedding      []float32
+	CognitiveTrace *CognitiveTrace
 }
 
 // ModelEvent represents a valid item emitted during model generation. Failures
