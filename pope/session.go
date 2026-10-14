@@ -519,8 +519,8 @@ func (s *HarnessSession) compactForEphemeralRetry(ctx context.Context) error {
 }
 
 const (
-	stage1SyntheticWait      = "Wait, let me think for a moment..."
-	stage1TriggerPrompt      = "Take your time. If this is trivial and you are completely confident you can answer immediately without planning or tools, prefix your response with 'DIRECT:' followed by your answer. Otherwise, do not answer yet—first analyze the situation and state the underlying goal and task required to address my prompt above, prefixing your analysis with 'GOAL:'."
+	stage1SyntheticWait      = "Let me consider how to respond..."
+	stage1TriggerPrompt      = "If you can answer my request above directly without running tools or multi-step planning, simply write your final answer now, with or without a 'DIRECT:' prefix. ONLY if this request requires tool execution, codebase inspection, or multi-step problem solving, do NOT answer yet—instead, you MUST begin your response with the exact prefix 'GOAL:' followed by a one-sentence description of the goal and task required."
 	stageExpectSyntheticWait = "Before I begin working on this, let me check how brief and direct the user expects the reply to be..."
 	stageExpectTriggerPrompt = "Look strictly at my prompt above. Default to extreme brevity—the shortest, most direct answer that fully satisfies the request. Unless I explicitly asked for an essay or exhaustive breakdown, prescribe a strict, tiny length limit (e.g., 'Just the name/value in 1-5 words', 'One short sentence under 15 words', or 'At most 2-3 brief sentences'). State ONLY the required format and strict maximum word/sentence cap in one short sentence."
 	stage2TriggerPrompt      = "What are the concrete steps you would take to achieve that goal?"
@@ -530,8 +530,8 @@ const (
 	stage4TriggerPrompt      = "I see. Given that analysis, what do you propose as the final, concrete execution plan?"
 )
 
-// runStage1Triage runs Stage 1 and detects whether the model chose the "DIRECT:"
-// fast-path bypass or the "GOAL:" reflective path.
+// runStage1Triage sends unprefixed and "DIRECT:" replies to the fast path; only
+// an explicit "GOAL:" prefix enters the reflective path.
 func (s *HarnessSession) runStage1Triage(
 	ctx context.Context,
 	baseHistory *[]ai.PromptPart,
@@ -554,7 +554,6 @@ func (s *HarnessSession) runStage1Triage(
 			History:       seed,
 		}
 
-		const prefixProbeRunes = 12
 		var probeBuf strings.Builder
 		var fullDirect strings.Builder
 		decided := false
@@ -566,14 +565,18 @@ func (s *HarnessSession) runStage1Triage(
 			}
 			raw := probeBuf.String()
 			trimmed := strings.TrimLeft(raw, " \t\r\n")
-			if !finalFlush {
-				if utf8.RuneCountInString(trimmed) < prefixProbeRunes && !strings.Contains(trimmed, ":") {
-					return
-				}
-			}
-			decided = true
 			upper := strings.ToUpper(trimmed)
+			if strings.HasPrefix(upper, "GOAL:") {
+				decided = true
+				rest := strings.TrimLeft(trimmed[len("GOAL:"):], " ")
+				streamer.StartStage("goal")
+				if rest != "" {
+					streamer.Feed(rest)
+				}
+				return
+			}
 			if strings.HasPrefix(upper, "DIRECT:") {
+				decided = true
 				directMode = true
 				rest := strings.TrimLeft(trimmed[len("DIRECT:"):], " ")
 				streamer.Wipe()
@@ -583,14 +586,17 @@ func (s *HarnessSession) runStage1Triage(
 				}
 				return
 			}
-			rest := trimmed
-			if strings.HasPrefix(upper, "GOAL:") {
-				rest = strings.TrimLeft(trimmed[len("GOAL:"):], " ")
+
+			stillPossiblePrefix := strings.HasPrefix("GOAL:", upper) || strings.HasPrefix("DIRECT:", upper)
+			if !finalFlush && stillPossiblePrefix {
+				return
 			}
-			streamer.StartStage("goal")
-			if rest != "" {
-				streamer.Feed(rest)
-			}
+
+			decided = true
+			directMode = true
+			streamer.Wipe()
+			_, _ = fmt.Fprint(outWriter, raw)
+			fullDirect.WriteString(raw)
 		}
 
 		err := s.streamOnce(ctx, cfg, trigger, func(event ai.ModelEvent) bool {
