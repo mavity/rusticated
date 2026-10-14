@@ -27,11 +27,13 @@ const (
 type CognitiveTrace struct {
 	IsDirect          bool
 	Goal              string
+	ExpectedDetail    string
 	InitialSteps      string
 	CritiqueRelevancy string
 	CritiqueSafety    string
 	CritiqueGrounded  string
 	SynthesizedPlan   string
+	RawWorkAndAnswer  string
 	DraftIterations   []string
 	TraceEmbeddings   [][]float32
 }

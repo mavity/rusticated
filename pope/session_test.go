@@ -494,40 +494,52 @@ func TestRunTurnFull7StageReflectivePipelineAndIcebergReplant(t *testing.T) {
 					t.Fatal("Stage 1 must have Tools == nil")
 				}
 				onEvent(ai.TextEvent{Text: "GOAL: Read bridge.txt and report the bridge name."})
-			case 2: // Stage 2: Steps
+			case 2: // Stage 2: Expectation Calibration -> <detail_level>
 				if cfg.Tools != nil {
-					t.Fatal("Stage 2 must have Tools == nil")
+					t.Fatal("Stage 2 (expectation) must have Tools == nil")
+				}
+				onEvent(ai.TextEvent{Text: "A single bridge name, maximum one short sentence."})
+			case 3: // Stage 3: Steps
+				if cfg.Tools != nil {
+					t.Fatal("Stage 3 (steps) must have Tools == nil")
 				}
 				onEvent(ai.TextEvent{Text: "1. Call read_file on bridge.txt. 2. State the bridge."})
-			case 3, 4, 5: // Stage 3A, 3B, 3C
+			case 4, 5, 6: // Stage 4A, 4B, 4C
 				if cfg.Tools != nil {
-					t.Fatalf("Stage 3 branch %d must have Tools == nil", stageIdx-2)
+					t.Fatalf("Stage 4 critique branch %d must have Tools == nil", stageIdx-3)
 				}
 				stage3SysMsgs = append(stage3SysMsgs, cfg.SystemMessage)
 				if !strings.HasPrefix(trigger[0].Text, "I think you might take these steps below") {
-					t.Fatalf("Stage 3 role-swapped attribution missing: %q", trigger[0].Text)
+					t.Fatalf("Stage 4 role-swapped attribution missing: %q", trigger[0].Text)
 				}
-				onEvent(ai.TextEvent{Text: fmt.Sprintf("critique-%d", stageIdx-2)})
-			case 6: // Stage 4: Tribunal Join
+				onEvent(ai.TextEvent{Text: fmt.Sprintf("critique-%d", stageIdx-3)})
+			case 7: // Stage 5: Tribunal Join
 				if cfg.Tools != nil {
-					t.Fatal("Stage 4 must have Tools == nil")
+					t.Fatal("Stage 5 (plan) must have Tools == nil")
 				}
 				onEvent(ai.TextEvent{Text: "Read bridge.txt using read_file and answer concisely."})
-			case 7: // Stage 5 turn 1: emits tool call
+			case 8: // Stage 6 turn 1: emits tool call
 				if len(cfg.Tools) == 0 {
-					t.Fatal("Stage 5 must have Tools enabled")
+					t.Fatal("Stage 6 (work) must have Tools enabled")
 				}
 				onEvent(ai.ToolCallEvent{ToolCalls: []ai.ToolCall{{
 					Name:         "read_file",
 					RawArguments: json.RawMessage(`{"path":` + string(pathJSON) + `,"explanation":"read bridge name"}`),
 				}}})
-			case 8: // Stage 5 turn 2: receives tool output and produces draft answer
-				onEvent(ai.TextEvent{Text: "The bridge in the file is Pont Alexandre III."})
-			case 9: // Stage 6: Verification -> replies OK
+			case 9: // Stage 6 turn 2: receives tool output and produces verbose work_and_answer
+				onEvent(ai.TextEvent{Text: "Phase 1 complete. I read bridge.txt and found Pont Alexandre III."})
+			case 10: // Stage 7: Convergence & Re-Formulation Flip
 				if cfg.Tools != nil {
-					t.Fatal("Stage 6 must have Tools == nil")
+					t.Fatal("Stage 7 (convergence) must have Tools == nil")
 				}
-				onEvent(ai.TextEvent{Text: "OK"})
+				// Verify seeded history contains only User(P) and Model(workAndAnswer), without raw tool turns
+				if len(cfg.History) != 2 || cfg.History[1].Text != "Phase 1 complete. I read bridge.txt and found Pont Alexandre III." {
+					t.Fatalf("Stage 7 convergence seeded history = %#v", cfg.History)
+				}
+				if !strings.Contains(trigger[0].Text, "A single bridge name, maximum one short sentence.") {
+					t.Fatalf("Stage 7 convergence trigger missing detail_level: %q", trigger[0].Text)
+				}
+				onEvent(ai.TextEvent{Text: "The bridge in the file is Pont Alexandre III."})
 			default:
 				t.Fatalf("unexpected stage call %d", stageIdx)
 			}
@@ -540,16 +552,16 @@ func TestRunTurnFull7StageReflectivePipelineAndIcebergReplant(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if stageIdx != 9 {
-		t.Fatalf("stageIdx = %d, want 9", stageIdx)
+	if stageIdx != 10 {
+		t.Fatalf("stageIdx = %d, want 10", stageIdx)
 	}
 	for _, sm := range stage3SysMsgs {
 		if !strings.Contains(sm, "read_file") {
-			t.Fatalf("Stage 3 SystemMessage missing available tool names: %q", sm)
+			t.Fatalf("Critique SystemMessage missing available tool names: %q", sm)
 		}
 	}
 
-	// Stage 7: Verify only the clean spoken surface is in CanonicalHistory & CompactedHistory
+	// Replant Iceberg: Verify only the clean spoken surface is in CanonicalHistory & CompactedHistory
 	// [0] User, [1] Model+ToolCalls, [2] ToolResponse, [3] Model final answer with CognitiveTrace
 	if len(s.CanonicalHistory) != 4 {
 		t.Fatalf("CanonicalHistory len = %d, want 4: %#v", len(s.CanonicalHistory), s.CanonicalHistory)
@@ -563,11 +575,13 @@ func TestRunTurnFull7StageReflectivePipelineAndIcebergReplant(t *testing.T) {
 		t.Fatalf("missing or direct CognitiveTrace: %#v", tr)
 	}
 	if tr.Goal != "Read bridge.txt and report the bridge name." ||
+		tr.ExpectedDetail != "A single bridge name, maximum one short sentence." ||
 		tr.InitialSteps != "1. Call read_file on bridge.txt. 2. State the bridge." ||
 		tr.CritiqueRelevancy != "critique-1" ||
 		tr.CritiqueSafety != "critique-2" ||
 		tr.CritiqueGrounded != "critique-3" ||
-		tr.SynthesizedPlan != "Read bridge.txt using read_file and answer concisely." {
+		tr.SynthesizedPlan != "Read bridge.txt using read_file and answer concisely." ||
+		tr.RawWorkAndAnswer != "Phase 1 complete. I read bridge.txt and found Pont Alexandre III." {
 		t.Fatalf("unexpected CognitiveTrace fields: %#v", tr)
 	}
 
