@@ -127,7 +127,7 @@ func main() {
 	defer engine.Close()
 
 	// 3b. Initialize Embedder (EmbeddingGemma 2) unless disabled
-	var embedder partEmbedder
+	var embedder ai.PartEmbedder
 	if !strings.EqualFold(cfg.EmbedModelFlag, "none") {
 		embedPath := cfg.EmbedModelFlag
 		if embedPath == "" {
@@ -150,22 +150,25 @@ func main() {
 	// 4. Setup Tools
 	// The Gemma 4 E2B model metadata incorrectly reports SupportsFunctionCalling: false.
 	// We force it to true and register tools anyway, as the model is instruction-tuned for it.
-	var tools []map[string]any
-	if true /* info == nil || info.SupportsFunctionCalling */ {
-		tools = GetToolDeclarations()
-	}
+	tools := Tools
 
 	// 5. Setup Compaction Threshold
 	// We proactively trigger compaction well before we hit the allocated limit.
 	compactionLimit := int(float64(maxTokens) * 0.80)
 
-	session := &HarnessSession{
-		engine:          engine,
-		embedder:        embedder,
-		systemMessage:   cfg.SystemFlag,
-		tools:           tools,
-		compactionLimit: compactionLimit,
-		verbose:         cfg.VerboseFlag,
+	session, err := ai.NewSession(ai.SessionConfig{
+		Engine:          engine,
+		Embedder:        embedder,
+		SystemMessage:   cfg.SystemFlag,
+		Tools:           tools,
+		CompactionLimit: compactionLimit,
+		OnContent:       func(text string) { fmt.Print(text) },
+		OnFeedback:      func(text string) { fmt.Print(text) },
+		Verbose:         cfg.VerboseFlag,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pope: session config error: %v\n", err)
+		os.Exit(1)
 	}
 
 	if err := session.Init(); err != nil {

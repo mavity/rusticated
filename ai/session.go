@@ -1,4 +1,4 @@
-package main
+package ai
 
 import (
 	"context"
@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"os"
 	"reflect"
@@ -16,32 +15,56 @@ import (
 	"sync"
 	"sync/atomic"
 	"unicode/utf8"
-
-	"ai"
 )
-
-type partEmbedder interface {
-	Embed(parts []ai.PromptPart) ([]float32, error)
-}
 
 type textCompressorFunc func(ctx context.Context, systemPrompt, userPrompt string) (string, error)
 
-type ephemeralStreamFunc func(ctx context.Context, cfg ai.ConversationConfig, trigger []ai.PromptPart, onEvent func(ai.ModelEvent) bool) error
+type ephemeralStreamFunc func(ctx context.Context, cfg ConversationConfig, trigger []PromptPart, onEvent func(ModelEvent) bool) error
 
-// HarnessSession tracks conversation state, history, and context compaction.
-type HarnessSession struct {
-	engine           *ai.Engine
-	embedder         partEmbedder
+// PartEmbedder can embed prompt parts for background indexing and RAG compaction.
+type PartEmbedder interface {
+	Embed(parts []PromptPart) ([]float32, error)
+}
+
+// LogFeedback receives streamed text fragments.
+type LogFeedback func(text string)
+
+// Tool defines a capability registered with a Session.
+type Tool struct {
+	Description string
+	Parameters  map[string]any
+	Required    []string
+	Execute     func(ctx context.Context, call ToolCall, feedback LogFeedback) (any, error)
+}
+
+// SessionConfig configures a high-level reflective chat session.
+type SessionConfig struct {
+	Engine          *Engine
+	Embedder        PartEmbedder
+	SystemMessage   string
+	Tools           map[string]Tool
+	CompactionLimit int
+	OnContent       LogFeedback
+	OnFeedback      LogFeedback
+	Verbose         bool
+}
+
+// Session tracks conversation state, history, and context compaction.
+type Session struct {
+	engine           *Engine
+	embedder         PartEmbedder
 	compressor       textCompressorFunc
 	ephemeralStream  ephemeralStreamFunc
-	out              io.Writer
-	conv             *ai.Conversation
+	conv             *Conversation
 	systemMessage    string
 	tools            []map[string]any
+	toolRegistry     map[string]Tool
 	compactionLimit  int
 	verbose          bool
-	CanonicalHistory []ai.PromptPart
-	CompactedHistory []ai.PromptPart
+	onContent        LogFeedback
+	onFeedback       LogFeedback
+	CanonicalHistory []PromptPart
+	CompactedHistory []PromptPart
 	totalTokensEst   int
 	artifactCache    map[string]string
 
@@ -56,15 +79,148 @@ type HarnessSession struct {
 	embedCloseOnce sync.Once
 }
 
-func (s *HarnessSession) appendHistory(parts ...ai.PromptPart) {
+// NewSession constructs a Session from declarative configuration.
+func NewSession(cfg SessionConfig) (*Session, error) {
+	s := &Session{
+		engine:          cfg.Engine,
+		embedder:        cfg.Embedder,
+		systemMessage:   cfg.SystemMessage,
+		compactionLimit: cfg.CompactionLimit,
+		verbose:         cfg.Verbose,
+		onContent:       cfg.OnContent,
+		onFeedback:      cfg.OnFeedback,
+		toolRegistry:    make(map[string]Tool, len(cfg.Tools)),
+	}
+	if s.compactionLimit <= 0 {
+		s.compactionLimit = 6000
+	}
+	names := make([]string, 0, len(cfg.Tools))
+	for name := range cfg.Tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		tool := cfg.Tools[name]
+		s.toolRegistry[name] = tool
+		parameters := compileToolParameters(tool)
+		s.tools = append(s.tools, map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":        name,
+				"description": tool.Description,
+				"parameters":  parameters,
+			},
+		})
+	}
+	return s, nil
+}
+
+func compileToolParameters(tool Tool) map[string]any {
+	parameters := make(map[string]any)
+	for key, value := range tool.Parameters {
+		parameters[key] = value
+	}
+	properties, ok := parameters["properties"].(map[string]any)
+	if !ok {
+		properties = make(map[string]any, len(tool.Parameters)+1)
+		for key, value := range tool.Parameters {
+			properties[key] = value
+		}
+		parameters = map[string]any{"type": "object"}
+		parameters["properties"] = properties
+	} else {
+		propertiesCopy := make(map[string]any, len(properties)+1)
+		for key, value := range properties {
+			propertiesCopy[key] = value
+		}
+		properties = propertiesCopy
+		parameters["properties"] = properties
+	}
+	if _, ok := properties["explanation"]; !ok {
+		properties["explanation"] = map[string]any{
+			"type":        "string",
+			"description": "Brief explanation of why this tool is being called and what specific information is sought.",
+		}
+	}
+	required := append([]string(nil), tool.Required...)
+	switch raw := parameters["required"].(type) {
+	case []string:
+		required = append(required, raw...)
+	case []any:
+		for _, value := range raw {
+			if name, ok := value.(string); ok {
+				required = append(required, name)
+			}
+		}
+	}
+	seen := make(map[string]bool, len(required)+len(tool.Required)+1)
+	for _, name := range required {
+		seen[name] = true
+	}
+	for _, name := range tool.Required {
+		if !seen[name] {
+			required = append(required, name)
+			seen[name] = true
+		}
+	}
+	if !seen["explanation"] {
+		required = append(required, "explanation")
+	}
+	parameters["required"] = required
+	return parameters
+}
+
+func (s *Session) appendHistory(parts ...PromptPart) {
 	s.historyMu.Lock()
 	defer s.historyMu.Unlock()
 	s.CanonicalHistory = append(s.CanonicalHistory, parts...)
 	s.CompactedHistory = append(s.CompactedHistory, parts...)
 }
 
-func (s *HarnessSession) startEmbedWorker() {
-	if s.embedder == nil || reflect.ValueOf(s.embedder).IsNil() {
+func (s *Session) hasEmbedder() bool {
+	if s.embedder == nil {
+		return false
+	}
+	value := reflect.ValueOf(s.embedder)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return !value.IsNil()
+	default:
+		return true
+	}
+}
+
+func (s *Session) emitFeedback(text string) {
+	if s.onFeedback != nil {
+		s.onFeedback(text)
+	}
+}
+
+func (s *Session) emitContent(text string) {
+	if s.onContent != nil {
+		s.onContent(text)
+	}
+}
+
+// executeTool dispatches a model tool call and converts execution failures to
+// a result the model can inspect and recover from.
+func (s *Session) executeTool(ctx context.Context, call ToolCall) any {
+	tool, ok := s.toolRegistry[call.Name]
+	if !ok {
+		return map[string]any{"error": "unknown tool: " + call.Name}
+	}
+	if tool.Execute == nil {
+		return map[string]any{"error": "tool has no executor: " + call.Name}
+	}
+	result, err := tool.Execute(ctx, call, s.emitFeedback)
+	if err != nil {
+		return map[string]any{"error": err.Error()}
+	}
+	return result
+}
+
+func (s *Session) startEmbedWorker() {
+	if !s.hasEmbedder() {
 		return
 	}
 	s.embedOnce.Do(func() {
@@ -75,8 +231,8 @@ func (s *HarnessSession) startEmbedWorker() {
 	})
 }
 
-func (s *HarnessSession) triggerBackgroundEmbedding() {
-	if s.embedder == nil || reflect.ValueOf(s.embedder).IsNil() {
+func (s *Session) triggerBackgroundEmbedding() {
+	if !s.hasEmbedder() {
 		return
 	}
 	s.startEmbedWorker()
@@ -86,7 +242,7 @@ func (s *HarnessSession) triggerBackgroundEmbedding() {
 	}
 }
 
-func (s *HarnessSession) embedWorkerLoop() {
+func (s *Session) embedWorkerLoop() {
 	defer close(s.embedDone)
 	for {
 		select {
@@ -101,7 +257,7 @@ func (s *HarnessSession) embedWorkerLoop() {
 // processPendingEmbeddings embeds unembedded PromptPart items in CanonicalHistory
 // one by one while holding turnGate so it never contends with active LLM generation.
 // If flushAll is false, it yields immediately as soon as a user turn is waiting.
-func (s *HarnessSession) processPendingEmbeddings(flushAll bool) {
+func (s *Session) processPendingEmbeddings(flushAll bool) {
 	for {
 		if !flushAll {
 			select {
@@ -133,12 +289,12 @@ func (s *HarnessSession) processPendingEmbeddings(flushAll bool) {
 		part := s.CanonicalHistory[idx]
 		s.historyMu.Unlock()
 
-		vec, err := s.embedder.Embed([]ai.PromptPart{part})
+		vec, err := s.embedder.Embed([]PromptPart{part})
 		var traceVec []float32
 		if part.CognitiveTrace != nil && !part.CognitiveTrace.IsDirect && len(part.CognitiveTrace.TraceEmbeddings) == 0 {
 			traceText := strings.TrimSpace(part.CognitiveTrace.Goal + "\n" + part.CognitiveTrace.SynthesizedPlan)
 			if traceText != "" {
-				if tv, terr := s.embedder.Embed([]ai.PromptPart{{Role: ai.RoleModel, Text: traceText}}); terr == nil && len(tv) > 0 {
+				if tv, terr := s.embedder.Embed([]PromptPart{{Role: RoleModel, Text: traceText}}); terr == nil && len(tv) > 0 {
 					traceVec = tv
 				}
 			}
@@ -150,7 +306,7 @@ func (s *HarnessSession) processPendingEmbeddings(flushAll bool) {
 	}
 }
 
-func (s *HarnessSession) applyEmbeddingLocked(idx int, part ai.PromptPart, vec, traceVec []float32, err error) {
+func (s *Session) applyEmbeddingLocked(idx int, part PromptPart, vec, traceVec []float32, err error) {
 	if err == nil && len(vec) > 0 && idx < len(s.CanonicalHistory) {
 		s.CanonicalHistory[idx].Embedding = vec
 		syncCompactedEmbedding(s.CompactedHistory, part, vec)
@@ -171,8 +327,8 @@ func (s *HarnessSession) applyEmbeddingLocked(idx int, part ai.PromptPart, vec, 
 	}
 }
 
-func (s *HarnessSession) flushEmbeddingsInline() {
-	if s.embedder == nil || reflect.ValueOf(s.embedder).IsNil() {
+func (s *Session) flushEmbeddingsInline() {
+	if !s.hasEmbedder() {
 		return
 	}
 	for {
@@ -188,12 +344,12 @@ func (s *HarnessSession) flushEmbeddingsInline() {
 		part := s.CanonicalHistory[idx]
 		s.historyMu.Unlock()
 
-		vec, err := s.embedder.Embed([]ai.PromptPart{part})
+		vec, err := s.embedder.Embed([]PromptPart{part})
 		var traceVec []float32
 		if part.CognitiveTrace != nil && !part.CognitiveTrace.IsDirect && len(part.CognitiveTrace.TraceEmbeddings) == 0 {
 			traceText := strings.TrimSpace(part.CognitiveTrace.Goal + "\n" + part.CognitiveTrace.SynthesizedPlan)
 			if traceText != "" {
-				if tv, terr := s.embedder.Embed([]ai.PromptPart{{Role: ai.RoleModel, Text: traceText}}); terr == nil && len(tv) > 0 {
+				if tv, terr := s.embedder.Embed([]PromptPart{{Role: RoleModel, Text: traceText}}); terr == nil && len(tv) > 0 {
 					traceVec = tv
 				}
 			}
@@ -231,7 +387,7 @@ func formatEmbeddingSummary(vec []float32) string {
 		n, vec[0], vec[1], vec[2], vec[n-1], norm, simhash)
 }
 
-func syncCompactedEmbedding(compacted []ai.PromptPart, target ai.PromptPart, vec []float32) {
+func syncCompactedEmbedding(compacted []PromptPart, target PromptPart, vec []float32) {
 	for i := len(compacted) - 1; i >= 0; i-- {
 		p := &compacted[i]
 		if len(p.Embedding) == 0 && p.Role == target.Role && p.Text == target.Text && p.ToolName == target.ToolName && len(p.ToolCalls) == len(target.ToolCalls) {
@@ -242,27 +398,22 @@ func syncCompactedEmbedding(compacted []ai.PromptPart, target ai.PromptPart, vec
 }
 
 // FlushEmbeddings synchronously finishes any pending embeddings in CanonicalHistory.
-func (s *HarnessSession) FlushEmbeddings() {
-	if s.embedder == nil || reflect.ValueOf(s.embedder).IsNil() {
+func (s *Session) FlushEmbeddings() {
+	if !s.hasEmbedder() {
 		return
 	}
 	s.processPendingEmbeddings(true)
 }
 
-func (s *HarnessSession) Init() error {
-	// Ensure CompactedHistory never starts or ends on an orphaned tool turn.
-	if len(s.CompactedHistory) > 0 && s.CompactedHistory[len(s.CompactedHistory)-1].Role == ai.RoleUser {
-		// In RunTurn retry, the pending turnParts sit at the tail of CompactedHistory;
-		// NewConversationWithConfig seeds the history prior to the pending turnParts.
-	}
+func (s *Session) Init() error {
 	return s.initWithHistory(s.CompactedHistory)
 }
 
-func (s *HarnessSession) initWithHistory(history []ai.PromptPart) error {
+func (s *Session) initWithHistory(history []PromptPart) error {
 	if s.engine == nil {
 		return nil
 	}
-	cfg := ai.ConversationConfig{
+	cfg := ConversationConfig{
 		SystemMessage: s.systemMessage,
 		Tools:         s.tools,
 		History:       history,
@@ -284,11 +435,25 @@ func (s *HarnessSession) initWithHistory(history []ai.PromptPart) error {
 	return nil
 }
 
-func (s *HarnessSession) Close() {
+func (s *Session) Close() {
 	s.closeConv()
 }
 
-func (s *HarnessSession) closeConv() {
+// CompactContext projects canonical history into the compacted model context.
+func (s *Session) CompactContext(ctx context.Context) error {
+	s.turnWaiting.Store(true)
+	s.turnGate.Lock()
+	s.turnWaiting.Store(false)
+	defer func() {
+		s.turnGate.Unlock()
+		s.triggerBackgroundEmbedding()
+	}()
+	err := s.compactContext(ctx, s.emitFeedback)
+	s.emitFeedback("\n")
+	return err
+}
+
+func (s *Session) closeConv() {
 	if s.conv != nil {
 		s.conv.Close()
 		s.conv = nil
@@ -296,7 +461,7 @@ func (s *HarnessSession) closeConv() {
 }
 
 // Shutdown stops the background embedding worker and closes the active conversation.
-func (s *HarnessSession) Shutdown() {
+func (s *Session) Shutdown() {
 	if s.embedStop != nil {
 		s.embedCloseOnce.Do(func() {
 			s.turnWaiting.Store(true)
@@ -323,7 +488,7 @@ const defaultStreamerMaxRunes = 76
 // liveStreamer implements the Zero-ANSI Live Streamer specification: single-line
 // stage ticker overwritten via carriage-return + space-padding, without ANSI codes.
 type liveStreamer struct {
-	out           io.Writer
+	feedback      LogFeedback
 	maxRunes      int
 	prevLineRunes int
 	currLineRunes int
@@ -332,22 +497,25 @@ type liveStreamer struct {
 	buf           strings.Builder
 }
 
-func newLiveStreamer(out io.Writer, maxRunes int) *liveStreamer {
-	if out == nil {
-		out = os.Stdout
-	}
+func newLiveStreamer(feedback LogFeedback, maxRunes int) *liveStreamer {
 	if maxRunes <= 0 {
 		maxRunes = defaultStreamerMaxRunes
 	}
 	return &liveStreamer{
-		out:      out,
+		feedback: feedback,
 		maxRunes: maxRunes,
+	}
+}
+
+func (l *liveStreamer) write(text string) {
+	if l.feedback != nil {
+		l.feedback(text)
 	}
 }
 
 func (l *liveStreamer) StartStage(label string) {
 	if l.prevLineRunes > 0 {
-		_, _ = fmt.Fprintf(l.out, "\r%s\r", strings.Repeat(" ", l.prevLineRunes))
+		l.write(fmt.Sprintf("\r%s\r", strings.Repeat(" ", l.prevLineRunes)))
 	}
 	l.currLineRunes = 0
 	l.isCapped = false
@@ -355,7 +523,7 @@ func (l *liveStreamer) StartStage(label string) {
 	l.buf.Reset()
 
 	tag := "[" + label + "] "
-	_, _ = fmt.Fprint(l.out, tag)
+	l.write(tag)
 	l.currLineRunes = utf8.RuneCountInString(tag)
 }
 
@@ -375,12 +543,12 @@ func (l *liveStreamer) Feed(tokenChunk string) {
 			l.lastWasSpace = false
 		}
 		if l.currLineRunes+1 == l.maxRunes {
-			_, _ = fmt.Fprint(l.out, "…")
+			l.write("…")
 			l.currLineRunes++
 			l.isCapped = true
 			break
 		}
-		_, _ = fmt.Fprint(l.out, string(r))
+		l.write(string(r))
 		l.currLineRunes++
 	}
 }
@@ -392,30 +560,23 @@ func (l *liveStreamer) EndStage() string {
 
 func (l *liveStreamer) Wipe() {
 	if l.prevLineRunes > 0 {
-		_, _ = fmt.Fprintf(l.out, "\r%s\r", strings.Repeat(" ", l.prevLineRunes))
+		l.write(fmt.Sprintf("\r%s\r", strings.Repeat(" ", l.prevLineRunes)))
 		l.prevLineRunes = 0
 	} else if l.currLineRunes > 0 {
-		_, _ = fmt.Fprintf(l.out, "\r%s\r", strings.Repeat(" ", l.currLineRunes))
+		l.write(fmt.Sprintf("\r%s\r", strings.Repeat(" ", l.currLineRunes)))
 	}
 	l.currLineRunes = 0
 	l.isCapped = false
 	l.lastWasSpace = false
 }
 
-func (s *HarnessSession) outputWriter() io.Writer {
-	if s.out != nil {
-		return s.out
-	}
-	return os.Stdout
-}
-
-func (s *HarnessSession) snapshotCompactedHistory() []ai.PromptPart {
+func (s *Session) snapshotCompactedHistory() []PromptPart {
 	s.historyMu.Lock()
 	defer s.historyMu.Unlock()
-	return append([]ai.PromptPart(nil), s.CompactedHistory...)
+	return append([]PromptPart(nil), s.CompactedHistory...)
 }
 
-func (s *HarnessSession) systemMessageWithToolNames() string {
+func (s *Session) systemMessageWithToolNames() string {
 	var names []string
 	for _, t := range s.tools {
 		if fn, ok := t["function"].(map[string]any); ok {
@@ -435,7 +596,7 @@ func (s *HarnessSession) systemMessageWithToolNames() string {
 	return base + "Available tools (for planning reference only): " + strings.Join(names, ", ")
 }
 
-func (s *HarnessSession) streamOnce(ctx context.Context, cfg ai.ConversationConfig, trigger []ai.PromptPart, onEvent func(ai.ModelEvent) bool) error {
+func (s *Session) streamOnce(ctx context.Context, cfg ConversationConfig, trigger []PromptPart, onEvent func(ModelEvent) bool) error {
 	if s.ephemeralStream != nil {
 		return s.ephemeralStream(ctx, cfg, trigger, onEvent)
 	}
@@ -461,27 +622,27 @@ func (s *HarnessSession) streamOnce(ctx context.Context, cfg ai.ConversationConf
 
 // runEphemeralStage executes a single pure-text contemplation stage (Tools: nil)
 // with overflow/loop compaction retries.
-func (s *HarnessSession) runEphemeralStage(
+func (s *Session) runEphemeralStage(
 	ctx context.Context,
-	baseHistory *[]ai.PromptPart,
-	buildSeed func(base []ai.PromptPart) []ai.PromptPart,
+	baseHistory *[]PromptPart,
+	buildSeed func(base []PromptPart) []PromptPart,
 	triggerText string,
 	sysMessage string,
 	stageLabel string,
 	streamer *liveStreamer,
 ) (string, error) {
-	trigger := []ai.PromptPart{{Role: ai.RoleUser, Text: triggerText}}
+	trigger := []PromptPart{{Role: RoleUser, Text: triggerText}}
 	var retries int
 	for {
 		seed := buildSeed(*baseHistory)
-		cfg := ai.ConversationConfig{
+		cfg := ConversationConfig{
 			SystemMessage: sysMessage,
 			Tools:         nil,
 			History:       seed,
 		}
 		streamer.StartStage(stageLabel)
-		err := s.streamOnce(ctx, cfg, trigger, func(event ai.ModelEvent) bool {
-			if e, ok := event.(ai.TextEvent); ok {
+		err := s.streamOnce(ctx, cfg, trigger, func(event ModelEvent) bool {
+			if e, ok := event.(TextEvent); ok {
 				streamer.Feed(e.Text)
 			}
 			return true
@@ -494,7 +655,7 @@ func (s *HarnessSession) runEphemeralStage(
 			streamer.Wipe()
 			return "", err
 		}
-		if (isContextOverflowError(err) || errors.Is(err, ai.ErrRepetitionLoop)) && retries < 2 {
+		if (isContextOverflowError(err) || errors.Is(err, ErrRepetitionLoop)) && retries < 2 {
 			retries++
 			streamer.Wipe()
 			if cerr := s.compactForEphemeralRetry(ctx); cerr != nil {
@@ -508,12 +669,9 @@ func (s *HarnessSession) runEphemeralStage(
 	}
 }
 
-func (s *HarnessSession) compactForEphemeralRetry(ctx context.Context) error {
-	out := s.outputWriter()
-	err := s.compactContextForRetry(ctx, 0, func(text string) {
-		_, _ = fmt.Fprint(out, text)
-	})
-	_, _ = fmt.Fprintln(out)
+func (s *Session) compactForEphemeralRetry(ctx context.Context) error {
+	err := s.compactContextForRetry(ctx, 0, s.emitFeedback)
+	s.emitFeedback("\n")
 	s.closeConv()
 	return err
 }
@@ -532,23 +690,22 @@ const (
 
 // runStage1Triage sends unprefixed and "DIRECT:" replies to the fast path; only
 // an explicit "GOAL:" prefix enters the reflective path.
-func (s *HarnessSession) runStage1Triage(
+func (s *Session) runStage1Triage(
 	ctx context.Context,
-	baseHistory *[]ai.PromptPart,
+	baseHistory *[]PromptPart,
 	userText string,
 	streamer *liveStreamer,
 ) (isDirect bool, text string, err error) {
-	outWriter := s.outputWriter()
-	trigger := []ai.PromptPart{{Role: ai.RoleUser, Text: stage1TriggerPrompt}}
+	trigger := []PromptPart{{Role: RoleUser, Text: stage1TriggerPrompt}}
 	var retries int
 	for {
-		seed := make([]ai.PromptPart, 0, len(*baseHistory)+2)
+		seed := make([]PromptPart, 0, len(*baseHistory)+2)
 		seed = append(seed, *baseHistory...)
 		seed = append(seed,
-			ai.PromptPart{Role: ai.RoleUser, Text: userText},
-			ai.PromptPart{Role: ai.RoleModel, Text: stage1SyntheticWait},
+			PromptPart{Role: RoleUser, Text: userText},
+			PromptPart{Role: RoleModel, Text: stage1SyntheticWait},
 		)
-		cfg := ai.ConversationConfig{
+		cfg := ConversationConfig{
 			SystemMessage: s.systemMessage,
 			Tools:         nil,
 			History:       seed,
@@ -581,7 +738,7 @@ func (s *HarnessSession) runStage1Triage(
 				rest := strings.TrimLeft(trimmed[len("DIRECT:"):], " ")
 				streamer.Wipe()
 				if rest != "" {
-					_, _ = fmt.Fprint(outWriter, rest)
+					s.emitContent(rest)
 					fullDirect.WriteString(rest)
 				}
 				return
@@ -595,12 +752,12 @@ func (s *HarnessSession) runStage1Triage(
 			decided = true
 			directMode = true
 			streamer.Wipe()
-			_, _ = fmt.Fprint(outWriter, raw)
+			s.emitContent(raw)
 			fullDirect.WriteString(raw)
 		}
 
-		err := s.streamOnce(ctx, cfg, trigger, func(event ai.ModelEvent) bool {
-			e, ok := event.(ai.TextEvent)
+		err := s.streamOnce(ctx, cfg, trigger, func(event ModelEvent) bool {
+			e, ok := event.(TextEvent)
 			if !ok {
 				return true
 			}
@@ -610,7 +767,7 @@ func (s *HarnessSession) runStage1Triage(
 				return true
 			}
 			if directMode {
-				_, _ = fmt.Fprint(outWriter, e.Text)
+				s.emitContent(e.Text)
 				fullDirect.WriteString(e.Text)
 			} else {
 				streamer.Feed(e.Text)
@@ -623,7 +780,7 @@ func (s *HarnessSession) runStage1Triage(
 			}
 			if directMode {
 				if s.verbose && fullDirect.Len() > 0 {
-					_, _ = fmt.Fprintln(outWriter)
+					s.emitContent("\n")
 				}
 				return true, strings.TrimSpace(fullDirect.String()), nil
 			}
@@ -635,11 +792,11 @@ func (s *HarnessSession) runStage1Triage(
 			streamer.Wipe()
 			return false, "", err
 		}
-		if (isContextOverflowError(err) || errors.Is(err, ai.ErrRepetitionLoop)) && retries < 2 {
+		if (isContextOverflowError(err) || errors.Is(err, ErrRepetitionLoop)) && retries < 2 {
 			retries++
 			streamer.Wipe()
 			if directMode && fullDirect.Len() > 0 {
-				_, _ = fmt.Fprintln(outWriter)
+				s.emitContent("\n")
 			}
 			if cerr := s.compactForEphemeralRetry(ctx); cerr != nil {
 				return false, "", cerr
@@ -654,51 +811,50 @@ func (s *HarnessSession) runStage1Triage(
 
 // runStage5Execution runs Stage 5 ("Let It Rip") with tools enabled, executing
 // any requested tools in a loop and returning the executed tool parts and draft answer.
-func (s *HarnessSession) runStage5Execution(
+func (s *Session) runStage5Execution(
 	ctx context.Context,
-	baseHistory *[]ai.PromptPart,
+	baseHistory *[]PromptPart,
 	userText, goal, plan string,
 	streamer *liveStreamer,
-) (executedToolParts []ai.PromptPart, draftAnswer string, err error) {
-	outWriter := s.outputWriter()
+) (executedToolParts []PromptPart, draftAnswer string, err error) {
 	var retries int
 
 	for {
-		seed := make([]ai.PromptPart, 0, len(*baseHistory)+2)
+		seed := make([]PromptPart, 0, len(*baseHistory)+2)
 		seed = append(seed, *baseHistory...)
 		seed = append(seed,
-			ai.PromptPart{Role: ai.RoleUser, Text: userText},
-			ai.PromptPart{
-				Role: ai.RoleModel,
+			PromptPart{Role: RoleUser, Text: userText},
+			PromptPart{
+				Role: RoleModel,
 				Text: "I need to think first. The goal here is: " + goal + "\nMy execution plan is:\n" + plan,
 			},
 		)
 
-		turnParts := []ai.PromptPart{{
-			Role: ai.RoleUser,
+		turnParts := []PromptPart{{
+			Role: RoleUser,
 			Text: "I see what you mean. Please proceed with that plan now, using any necessary tools, and keep in mind the original request—answer it completely after your work is done:\n" + userText,
 		}}
 
 		executedToolParts = nil
 
 		if s.ephemeralStream != nil {
-			historyCursor := append([]ai.PromptPart(nil), seed...)
+			historyCursor := append([]PromptPart(nil), seed...)
 			var stageErr error
 			for {
-				var toolCalls []ai.ToolCall
+				var toolCalls []ToolCall
 				var generatedText strings.Builder
-				cfg := ai.ConversationConfig{
+				cfg := ConversationConfig{
 					SystemMessage: s.systemMessage,
 					Tools:         s.tools,
 					History:       historyCursor,
 				}
 				streamer.StartStage("work")
-				stageErr = s.ephemeralStream(ctx, cfg, turnParts, func(event ai.ModelEvent) bool {
+				stageErr = s.ephemeralStream(ctx, cfg, turnParts, func(event ModelEvent) bool {
 					switch e := event.(type) {
-					case ai.TextEvent:
+					case TextEvent:
 						streamer.Feed(e.Text)
 						generatedText.WriteString(e.Text)
-					case ai.ToolCallEvent:
+					case ToolCallEvent:
 						toolCalls = append(toolCalls, e.ToolCalls...)
 					}
 					return true
@@ -712,23 +868,21 @@ func (s *HarnessSession) runStage5Execution(
 					return executedToolParts, strings.TrimSpace(generatedText.String()), nil
 				}
 				streamer.Wipe()
-				modelTurn := ai.PromptPart{
-					Role:      ai.RoleModel,
+				modelTurn := PromptPart{
+					Role:      RoleModel,
 					Text:      generatedText.String(),
 					ToolCalls: toolCalls,
 				}
 				executedToolParts = append(executedToolParts, modelTurn)
 				historyCursor = append(historyCursor, modelTurn)
 
-				var toolResponses []ai.PromptPart
+				var toolResponses []PromptPart
 				for _, call := range toolCalls {
 					explanation := extractToolExplanation(call)
-					result := ExecuteTool(ctx, call, func(text string) {
-						_, _ = fmt.Fprint(outWriter, text)
-					})
-					_, _ = fmt.Fprintln(outWriter)
-					toolResponses = append(toolResponses, ai.PromptPart{
-						Role:         ai.RoleTool,
+					result := s.executeTool(ctx, call)
+					s.emitFeedback("\n")
+					toolResponses = append(toolResponses, PromptPart{
+						Role:         RoleTool,
 						ToolName:     call.Name,
 						Explanation:  explanation,
 						ToolResponse: result,
@@ -741,7 +895,7 @@ func (s *HarnessSession) runStage5Execution(
 				streamer.Wipe()
 				return nil, "", stageErr
 			}
-			if (isContextOverflowError(stageErr) || errors.Is(stageErr, ai.ErrRepetitionLoop)) && retries < 2 {
+			if (isContextOverflowError(stageErr) || errors.Is(stageErr, ErrRepetitionLoop)) && retries < 2 {
 				retries++
 				streamer.Wipe()
 				if cerr := s.compactForEphemeralRetry(ctx); cerr != nil {
@@ -758,7 +912,7 @@ func (s *HarnessSession) runStage5Execution(
 			streamer.Wipe()
 			return nil, "", errors.New("ai: engine is not initialized")
 		}
-		cfg := ai.ConversationConfig{
+		cfg := ConversationConfig{
 			SystemMessage: s.systemMessage,
 			Tools:         s.tools,
 			History:       seed,
@@ -771,7 +925,7 @@ func (s *HarnessSession) runStage5Execution(
 
 		var stageErr error
 		for {
-			var toolCalls []ai.ToolCall
+			var toolCalls []ToolCall
 			var generatedText strings.Builder
 			streamer.StartStage("work")
 			for event, err := range ephemeralConv.SendStream(ctx, turnParts) {
@@ -780,10 +934,10 @@ func (s *HarnessSession) runStage5Execution(
 					break
 				}
 				switch e := event.(type) {
-				case ai.TextEvent:
+				case TextEvent:
 					streamer.Feed(e.Text)
 					generatedText.WriteString(e.Text)
-				case ai.ToolCallEvent:
+				case ToolCallEvent:
 					toolCalls = append(toolCalls, e.ToolCalls...)
 				}
 			}
@@ -797,22 +951,20 @@ func (s *HarnessSession) runStage5Execution(
 			}
 
 			streamer.Wipe()
-			modelTurn := ai.PromptPart{
-				Role:      ai.RoleModel,
+			modelTurn := PromptPart{
+				Role:      RoleModel,
 				Text:      generatedText.String(),
 				ToolCalls: toolCalls,
 			}
 			executedToolParts = append(executedToolParts, modelTurn)
 
-			var toolResponses []ai.PromptPart
+			var toolResponses []PromptPart
 			for _, call := range toolCalls {
 				explanation := extractToolExplanation(call)
-				result := ExecuteTool(ctx, call, func(text string) {
-					_, _ = fmt.Fprint(outWriter, text)
-				})
-				_, _ = fmt.Fprintln(outWriter)
-				toolResponses = append(toolResponses, ai.PromptPart{
-					Role:         ai.RoleTool,
+				result := s.executeTool(ctx, call)
+				s.emitFeedback("\n")
+				toolResponses = append(toolResponses, PromptPart{
+					Role:         RoleTool,
 					ToolName:     call.Name,
 					Explanation:  explanation,
 					ToolResponse: result,
@@ -827,7 +979,7 @@ func (s *HarnessSession) runStage5Execution(
 			streamer.Wipe()
 			return nil, "", stageErr
 		}
-		if (isContextOverflowError(stageErr) || errors.Is(stageErr, ai.ErrRepetitionLoop)) && retries < 2 {
+		if (isContextOverflowError(stageErr) || errors.Is(stageErr, ErrRepetitionLoop)) && retries < 2 {
 			retries++
 			streamer.Wipe()
 			if cerr := s.compactForEphemeralRetry(ctx); cerr != nil {
@@ -844,30 +996,29 @@ func (s *HarnessSession) runStage5Execution(
 // runStageConvergence replants workAndAnswer as a synthetic RoleModel turn
 // (omitting intermediate planning and raw tool turns) and asks the model to
 // reformulate the final response to strictly fit detailLevel. Right before the
-// first token arrives, streamer.Wipe() clears the [work] ticker line and the
-// tokens stream directly to stdout.
-func (s *HarnessSession) runStageConvergence(
+// first token arrives, streamer.Wipe() clears the [work] ticker line and tokens
+// stream through the permanent-content callback.
+func (s *Session) runStageConvergence(
 	ctx context.Context,
-	baseHistory *[]ai.PromptPart,
+	baseHistory *[]PromptPart,
 	userText, detailLevel, workAndAnswer string,
 	streamer *liveStreamer,
 ) (string, error) {
-	outWriter := s.outputWriter()
-	trigger := []ai.PromptPart{{
-		Role: ai.RoleUser,
+	trigger := []PromptPart{{
+		Role: RoleUser,
 		Text: "That draft is far too wordy. Look at the strict target length and format: " + detailLevel + "\nRewrite your answer now to strictly obey that limit using the minimum words possible. Cut all prefaces, roleplay, meta-commentary, internal phases, failed tool mentions, bullet lists, and extra examples unless explicitly requested. Output ONLY the final distilled answer to: " + userText,
 	}}
 
 	var retries int
 	for {
-		seed := make([]ai.PromptPart, 0, len(*baseHistory)+2)
+		seed := make([]PromptPart, 0, len(*baseHistory)+2)
 		seed = append(seed, *baseHistory...)
 		seed = append(seed,
-			ai.PromptPart{Role: ai.RoleUser, Text: userText},
-			ai.PromptPart{Role: ai.RoleModel, Text: workAndAnswer},
+			PromptPart{Role: RoleUser, Text: userText},
+			PromptPart{Role: RoleModel, Text: workAndAnswer},
 		)
 
-		cfg := ai.ConversationConfig{
+		cfg := ConversationConfig{
 			SystemMessage: s.systemMessage,
 			Tools:         nil,
 			History:       seed,
@@ -876,8 +1027,8 @@ func (s *HarnessSession) runStageConvergence(
 		var finalBuf strings.Builder
 		wiped := false
 
-		err := s.streamOnce(ctx, cfg, trigger, func(event ai.ModelEvent) bool {
-			e, ok := event.(ai.TextEvent)
+		err := s.streamOnce(ctx, cfg, trigger, func(event ModelEvent) bool {
+			e, ok := event.(TextEvent)
 			if !ok || e.Text == "" {
 				return true
 			}
@@ -885,7 +1036,7 @@ func (s *HarnessSession) runStageConvergence(
 				streamer.Wipe()
 				wiped = true
 			}
-			_, _ = fmt.Fprint(outWriter, e.Text)
+			s.emitContent(e.Text)
 			finalBuf.WriteString(e.Text)
 			return true
 		})
@@ -896,11 +1047,11 @@ func (s *HarnessSession) runStageConvergence(
 			}
 			finalText := strings.TrimSpace(finalBuf.String())
 			if finalText == "" && workAndAnswer != "" {
-				_, _ = fmt.Fprint(outWriter, workAndAnswer)
+				s.emitContent(workAndAnswer)
 				finalText = workAndAnswer
 			}
 			if s.verbose && len(finalText) > 0 {
-				_, _ = fmt.Fprintln(outWriter)
+				s.emitContent("\n")
 			}
 			return finalText, nil
 		}
@@ -909,11 +1060,11 @@ func (s *HarnessSession) runStageConvergence(
 			streamer.Wipe()
 			return "", err
 		}
-		if (isContextOverflowError(err) || errors.Is(err, ai.ErrRepetitionLoop)) && retries < 2 {
+		if (isContextOverflowError(err) || errors.Is(err, ErrRepetitionLoop)) && retries < 2 {
 			retries++
 			streamer.Wipe()
 			if wiped && finalBuf.Len() > 0 {
-				_, _ = fmt.Fprintln(outWriter)
+				s.emitContent("\n")
 			}
 			if cerr := s.compactForEphemeralRetry(ctx); cerr != nil {
 				return "", cerr
@@ -926,7 +1077,7 @@ func (s *HarnessSession) runStageConvergence(
 	}
 }
 
-func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
+func (s *Session) RunTurn(ctx context.Context, userText string) error {
 	s.turnWaiting.Store(true)
 	s.turnGate.Lock()
 	s.turnWaiting.Store(false)
@@ -939,7 +1090,7 @@ func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
 	s.closeConv()
 
 	baseHistory := s.snapshotCompactedHistory()
-	streamer := newLiveStreamer(s.outputWriter(), defaultStreamerMaxRunes)
+	streamer := newLiveStreamer(s.emitFeedback, defaultStreamerMaxRunes)
 
 	restorePersistentConv := func() {
 		s.closeConv()
@@ -953,9 +1104,9 @@ func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
 		return err
 	}
 
-	var executedToolParts []ai.PromptPart
+	var executedToolParts []PromptPart
 	var finalAnswer string
-	trace := &ai.CognitiveTrace{
+	trace := &CognitiveTrace{
 		IsDirect: isDirect,
 	}
 
@@ -966,12 +1117,12 @@ func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
 		trace.Goal = goal
 
 		// Stage 2: Expectation Calibration (<detail_level>)
-		seedExpectation := func(base []ai.PromptPart) []ai.PromptPart {
-			seed := make([]ai.PromptPart, 0, len(base)+2)
+		seedExpectation := func(base []PromptPart) []PromptPart {
+			seed := make([]PromptPart, 0, len(base)+2)
 			seed = append(seed, base...)
 			seed = append(seed,
-				ai.PromptPart{Role: ai.RoleUser, Text: userText},
-				ai.PromptPart{Role: ai.RoleModel, Text: stageExpectSyntheticWait},
+				PromptPart{Role: RoleUser, Text: userText},
+				PromptPart{Role: RoleModel, Text: stageExpectSyntheticWait},
 			)
 			return seed
 		}
@@ -987,12 +1138,12 @@ func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
 			effectiveGoal = goal + "\nExpected response detail: " + detailLevel
 		}
 
-		seedWithGoal := func(base []ai.PromptPart) []ai.PromptPart {
-			seed := make([]ai.PromptPart, 0, len(base)+2)
+		seedWithGoal := func(base []PromptPart) []PromptPart {
+			seed := make([]PromptPart, 0, len(base)+2)
 			seed = append(seed, base...)
 			seed = append(seed,
-				ai.PromptPart{Role: ai.RoleUser, Text: userText},
-				ai.PromptPart{Role: ai.RoleModel, Text: "I need to think first, the goal here is probably: " + effectiveGoal},
+				PromptPart{Role: RoleUser, Text: userText},
+				PromptPart{Role: RoleModel, Text: "I need to think first, the goal here is probably: " + effectiveGoal},
 			)
 			return seed
 		}
@@ -1030,15 +1181,15 @@ func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
 		trace.CritiqueGrounded = grounded
 
 		// Stage 5: The Tribunal Join & Plan Formulation (<plan>)
-		seedStage5Plan := func(base []ai.PromptPart) []ai.PromptPart {
-			seed := make([]ai.PromptPart, 0, len(base)+4)
+		seedStage5Plan := func(base []PromptPart) []PromptPart {
+			seed := make([]PromptPart, 0, len(base)+4)
 			seed = append(seed, base...)
 			seed = append(seed,
-				ai.PromptPart{Role: ai.RoleUser, Text: userText},
-				ai.PromptPart{Role: ai.RoleModel, Text: "I need to think first, the goal here is probably: " + effectiveGoal},
-				ai.PromptPart{Role: ai.RoleUser, Text: "Maybe these steps would get us there?\n" + steps},
-				ai.PromptPart{
-					Role: ai.RoleModel,
+				PromptPart{Role: RoleUser, Text: userText},
+				PromptPart{Role: RoleModel, Text: "I need to think first, the goal here is probably: " + effectiveGoal},
+				PromptPart{Role: RoleUser, Text: "Maybe these steps would get us there?\n" + steps},
+				PromptPart{
+					Role: RoleModel,
 					Text: "I have analysed those proposed steps from three angles:\n- Relevancy: " + relevancy + "\n- Safety & Risks: " + safety + "\n- Information Grounding: " + grounded,
 				},
 			)
@@ -1071,11 +1222,11 @@ func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
 	}
 
 	// Stage 7: Replanting the Iceberg & Syncing Session State
-	spokenParts := make([]ai.PromptPart, 0, 2+len(executedToolParts))
-	spokenParts = append(spokenParts, ai.PromptPart{Role: ai.RoleUser, Text: userText})
+	spokenParts := make([]PromptPart, 0, 2+len(executedToolParts))
+	spokenParts = append(spokenParts, PromptPart{Role: RoleUser, Text: userText})
 	spokenParts = append(spokenParts, executedToolParts...)
-	spokenParts = append(spokenParts, ai.PromptPart{
-		Role:           ai.RoleModel,
+	spokenParts = append(spokenParts, PromptPart{
+		Role:           RoleModel,
 		Text:           finalAnswer,
 		CognitiveTrace: trace,
 	})
@@ -1087,17 +1238,14 @@ func (s *HarnessSession) RunTurn(ctx context.Context, userText string) error {
 
 	// Check if context compaction is needed
 	if s.totalTokensEst > s.compactionLimit && len(s.CompactedHistory) > 4 {
-		outWriter := s.outputWriter()
-		_ = s.compactContext(ctx, func(text string) {
-			_, _ = fmt.Fprint(outWriter, text)
-		})
-		_, _ = fmt.Fprintln(outWriter)
+		_ = s.compactContext(ctx, s.emitFeedback)
+		s.emitFeedback("\n")
 	}
 
 	return nil
 }
 
-func historySize(history []ai.PromptPart) int {
+func historySize(history []PromptPart) int {
 	var total int
 	for _, p := range history {
 		total += len(p.Text)
@@ -1115,29 +1263,7 @@ func historySize(history []ai.PromptPart) int {
 	return total
 }
 
-func formatPartForSummary(p ai.PromptPart) string {
-	const maxPartChars = 1200
-	var sb strings.Builder
-	sb.WriteString(string(p.Role))
-	sb.WriteString(": ")
-	if p.Text != "" {
-		sb.WriteString(compactString(p.Text, maxPartChars))
-	}
-	if len(p.ToolCalls) > 0 {
-		for _, tc := range p.ToolCalls {
-			sb.WriteString(fmt.Sprintf(" [call %s(%s)]", tc.Name, compactString(string(tc.RawArguments), 200)))
-		}
-	}
-	if p.ToolResponse != nil {
-		if b, err := json.Marshal(p.ToolResponse); err == nil {
-			sb.WriteString(fmt.Sprintf(" [tool %s -> %s]", p.ToolName, compactString(string(b), maxPartChars)))
-		}
-	}
-	sb.WriteByte('\n')
-	return sb.String()
-}
-
-func (s *HarnessSession) compactContext(ctx context.Context, feedback LogFeedback) error {
+func (s *Session) compactContext(ctx context.Context, feedback LogFeedback) error {
 	return s.compactContextForRetry(ctx, 0, feedback)
 }
 
@@ -1151,21 +1277,21 @@ const (
 // 2. A standalone RoleModel turn without ToolCalls
 // 3. A RoleModel turn with ToolCalls plus all immediately following RoleTool responses
 type atomicTurnUnit struct {
-	parts     []ai.PromptPart
+	parts     []PromptPart
 	embedding []float32
 }
 
 // groupIntoAtomicUnits partitions a slice of PromptParts into indivisible atomicTurnUnits.
-func groupIntoAtomicUnits(history []ai.PromptPart) []atomicTurnUnit {
+func groupIntoAtomicUnits(history []PromptPart) []atomicTurnUnit {
 	var units []atomicTurnUnit
 	for i := 0; i < len(history); i++ {
 		p := history[i]
-		if p.Role == ai.RoleModel && len(p.ToolCalls) > 0 {
+		if p.Role == RoleModel && len(p.ToolCalls) > 0 {
 			end := i + 1
-			for end < len(history) && history[end].Role == ai.RoleTool {
+			for end < len(history) && history[end].Role == RoleTool {
 				end++
 			}
-			slice := append([]ai.PromptPart(nil), history[i:end]...)
+			slice := append([]PromptPart(nil), history[i:end]...)
 			units = append(units, atomicTurnUnit{
 				parts:     slice,
 				embedding: computeUnitEmbedding(slice),
@@ -1173,7 +1299,7 @@ func groupIntoAtomicUnits(history []ai.PromptPart) []atomicTurnUnit {
 			i = end - 1
 			continue
 		}
-		slice := []ai.PromptPart{p}
+		slice := []PromptPart{p}
 		units = append(units, atomicTurnUnit{
 			parts:     slice,
 			embedding: computeUnitEmbedding(slice),
@@ -1183,7 +1309,7 @@ func groupIntoAtomicUnits(history []ai.PromptPart) []atomicTurnUnit {
 }
 
 // computeUnitEmbedding returns the L2-normalized sum of constituent part embeddings.
-func computeUnitEmbedding(parts []ai.PromptPart) []float32 {
+func computeUnitEmbedding(parts []PromptPart) []float32 {
 	var dim int
 	for _, p := range parts {
 		if len(p.Embedding) > 0 {
@@ -1382,14 +1508,14 @@ func truncateToWords(s string, maxWords int) string {
 	return strings.Join(fields[:maxWords], " ")
 }
 
-func (s *HarnessSession) runCompressorPrompt(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
+func (s *Session) runCompressorPrompt(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
 	if s.compressor != nil {
 		return s.compressor(ctx, systemPrompt, userPrompt)
 	}
 	if s.engine == nil {
 		return "", errors.New("no engine configured for summarization")
 	}
-	summaryConv, err := s.engine.NewConversationWithConfig(ai.ConversationConfig{
+	summaryConv, err := s.engine.NewConversationWithConfig(ConversationConfig{
 		SystemMessage: systemPrompt,
 	})
 	if err != nil {
@@ -1398,11 +1524,11 @@ func (s *HarnessSession) runCompressorPrompt(ctx context.Context, systemPrompt, 
 	defer summaryConv.Close()
 
 	var summary strings.Builder
-	for event, err := range summaryConv.SendStream(ctx, []ai.PromptPart{{Role: ai.RoleUser, Text: userPrompt}}) {
+	for event, err := range summaryConv.SendStream(ctx, []PromptPart{{Role: RoleUser, Text: userPrompt}}) {
 		if err != nil {
 			return strings.TrimSpace(summary.String()), err
 		}
-		if e, ok := event.(ai.TextEvent); ok {
+		if e, ok := event.(TextEvent); ok {
 			summary.WriteString(e.Text)
 		}
 	}
@@ -1411,7 +1537,7 @@ func (s *HarnessSession) runCompressorPrompt(ctx context.Context, systemPrompt, 
 
 // compressTextBlock enforces the word ceiling (40% of input words, min 15) with up to 2 retries
 // stepping down by 0.75x on budget overrun, and a deterministic word-truncation escape hatch.
-func (s *HarnessSession) compressTextBlock(ctx context.Context, gapText string) string {
+func (s *Session) compressTextBlock(ctx context.Context, gapText string) string {
 	gapText = strings.TrimSpace(gapText)
 	if gapText == "" {
 		return ""
@@ -1454,14 +1580,14 @@ func (s *HarnessSession) compressTextBlock(ctx context.Context, gapText string) 
 	return truncateToWords(gapText, wTarget)
 }
 
-func (s *HarnessSession) gapTokenBudget() int {
+func (s *Session) gapTokenBudget() int {
 	if s.compactionLimit > 0 {
 		return s.compactionLimit / 2
 	}
 	return 2048
 }
 
-func extractToolExplanation(call ai.ToolCall) string {
+func extractToolExplanation(call ToolCall) string {
 	if call.Arguments != nil {
 		if exp, ok := call.Arguments["explanation"].(string); ok && strings.TrimSpace(exp) != "" {
 			return strings.TrimSpace(exp)
@@ -1478,7 +1604,7 @@ func extractToolExplanation(call ai.ToolCall) string {
 	return ""
 }
 
-func (s *HarnessSession) largeBlockByteThreshold() int {
+func (s *Session) largeBlockByteThreshold() int {
 	// 1/5 of gapTokenBudget() in tokens (~4 bytes per token).
 	thresh := (s.gapTokenBudget() * 4) / 5
 	if thresh < 512 {
@@ -1487,14 +1613,14 @@ func (s *HarnessSession) largeBlockByteThreshold() int {
 	return thresh
 }
 
-func artifactCacheKey(role ai.Role, toolName, explanation, rawContent string) string {
+func artifactCacheKey(role Role, toolName, explanation, rawContent string) string {
 	sum := sha256.Sum256([]byte(string(role) + "\x00" + toolName + "\x00" + explanation + "\x00" + rawContent))
 	return hex.EncodeToString(sum[:])
 }
 
 // compressLargeBlock collapses a single large unpinned block into a <=20-word gist
 // guided by explanation, using artifactCache to avoid redundant LLM calls across turns.
-func (s *HarnessSession) compressLargeBlock(ctx context.Context, role ai.Role, toolName, explanation, rawContent string) string {
+func (s *Session) compressLargeBlock(ctx context.Context, role Role, toolName, explanation, rawContent string) string {
 	if s.artifactCache == nil {
 		s.artifactCache = make(map[string]string)
 	}
@@ -1560,7 +1686,7 @@ func (s *HarnessSession) compressLargeBlock(ctx context.Context, role ai.Role, t
 // collapseUnpinnedLargeBlocks is the pre-main-compaction pass: for all unpinned units
 // prior to tailStart, any large tool response or large text block is collapsed into its
 // cached `COMPACTED: ...` gist before main gap summarization runs.
-func (s *HarnessSession) collapseUnpinnedLargeBlocks(ctx context.Context, units []atomicTurnUnit, tailStart int, pinned map[int]bool) {
+func (s *Session) collapseUnpinnedLargeBlocks(ctx context.Context, units []atomicTurnUnit, tailStart int, pinned map[int]bool) {
 	thresh := s.largeBlockByteThreshold()
 	for i := 0; i < tailStart; i++ {
 		if pinned[i] {
@@ -1573,11 +1699,11 @@ func (s *HarnessSession) collapseUnpinnedLargeBlocks(ctx context.Context, units 
 			}
 		}
 		expIdx := 0
-		parts := make([]ai.PromptPart, len(units[i].parts))
+		parts := make([]PromptPart, len(units[i].parts))
 		copy(parts, units[i].parts)
 		for j := range parts {
 			p := &parts[j]
-			if p.Role == ai.RoleTool {
+			if p.Role == RoleTool {
 				exp := p.Explanation
 				if exp == "" && expIdx < len(callExplanations) {
 					exp = callExplanations[expIdx]
@@ -1601,7 +1727,7 @@ func (s *HarnessSession) collapseUnpinnedLargeBlocks(ctx context.Context, units 
 
 // summarizeGap recursively halves gaps that exceed the context token budget,
 // respecting atomic unit boundaries when len(units) > 1 and splitting text in half when len(units) == 1.
-func (s *HarnessSession) summarizeGap(ctx context.Context, units []atomicTurnUnit) string {
+func (s *Session) summarizeGap(ctx context.Context, units []atomicTurnUnit) string {
 	if len(units) == 0 {
 		return ""
 	}
@@ -1623,7 +1749,7 @@ func (s *HarnessSession) summarizeGap(ctx context.Context, units []atomicTurnUni
 	return s.compressTextBlock(ctx, gapText)
 }
 
-func (s *HarnessSession) summarizeOversizedText(ctx context.Context, text string, budget int) string {
+func (s *Session) summarizeOversizedText(ctx context.Context, text string, budget int) string {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return ""
@@ -1644,7 +1770,7 @@ func (s *HarnessSession) summarizeOversizedText(ctx context.Context, text string
 }
 
 // projectHistory builds the RAG-projected CompactedHistory from CanonicalHistory units.
-func (s *HarnessSession) projectHistory(ctx context.Context, prior []ai.PromptPart) []ai.PromptPart {
+func (s *Session) projectHistory(ctx context.Context, prior []PromptPart) []PromptPart {
 	units := groupIntoAtomicUnits(prior)
 	n := len(units)
 	if n == 0 {
@@ -1664,7 +1790,7 @@ func (s *HarnessSession) projectHistory(ctx context.Context, prior []ai.PromptPa
 			if sumText == "" {
 				return prior
 			}
-			return []ai.PromptPart{{Role: ai.RoleUser, Text: "[Context summary]: " + sumText}}
+			return []PromptPart{{Role: RoleUser, Text: "[Context summary]: " + sumText}}
 		}
 		x = n - 2
 		if x < 2 {
@@ -1679,11 +1805,11 @@ func (s *HarnessSession) projectHistory(ctx context.Context, prior []ai.PromptPa
 	if maxTailBytes <= 0 {
 		maxTailBytes = 8192
 	}
-	for tailStart < n && units[tailStart].parts[0].Role != ai.RoleUser {
+	for tailStart < n && units[tailStart].parts[0].Role != RoleUser {
 		tailStart++
 	}
 	for tailStart < n {
-		var tailParts []ai.PromptPart
+		var tailParts []PromptPart
 		for i := tailStart; i < n; i++ {
 			tailParts = append(tailParts, units[i].parts...)
 		}
@@ -1691,7 +1817,7 @@ func (s *HarnessSession) projectHistory(ctx context.Context, prior []ai.PromptPa
 			break
 		}
 		tailStart++
-		for tailStart < n && units[tailStart].parts[0].Role != ai.RoleUser {
+		for tailStart < n && units[tailStart].parts[0].Role != RoleUser {
 			tailStart++
 		}
 	}
@@ -1710,7 +1836,7 @@ func (s *HarnessSession) projectHistory(ctx context.Context, prior []ai.PromptPa
 	// into their cached `COMPACTED: ...` gist guided by tool explanation.
 	s.collapseUnpinnedLargeBlocks(ctx, units, tailStart, pinned)
 
-	var projected []ai.PromptPart
+	var projected []PromptPart
 	var currentGap []atomicTurnUnit
 
 	flushGap := func() {
@@ -1718,8 +1844,8 @@ func (s *HarnessSession) projectHistory(ctx context.Context, prior []ai.PromptPa
 			return
 		}
 		if sumText := s.summarizeGap(ctx, currentGap); sumText != "" {
-			projected = append(projected, ai.PromptPart{
-				Role: ai.RoleUser,
+			projected = append(projected, PromptPart{
+				Role: RoleUser,
 				Text: "[Context summary]: " + sumText,
 			})
 		}
@@ -1742,7 +1868,7 @@ func (s *HarnessSession) projectHistory(ctx context.Context, prior []ai.PromptPa
 	return projected
 }
 
-func (s *HarnessSession) compactContextForRetry(ctx context.Context, pendingParts int, feedback LogFeedback) error {
+func (s *Session) compactContextForRetry(ctx context.Context, pendingParts int, feedback LogFeedback) error {
 	// Step 1: Synchronously flush any missing embeddings in CanonicalHistory.
 	s.flushEmbeddingsInline()
 
@@ -1754,17 +1880,17 @@ func (s *HarnessSession) compactContextForRetry(ctx context.Context, pendingPart
 	// Project directly from CanonicalHistory so previously compacted turns can resurrect
 	// when the conversation topic returns to them.
 	s.historyMu.Lock()
-	source := append([]ai.PromptPart(nil), s.CanonicalHistory...)
+	source := append([]PromptPart(nil), s.CanonicalHistory...)
 	if len(source) == 0 && len(s.CompactedHistory) > 0 {
-		source = append([]ai.PromptPart(nil), s.CompactedHistory...)
+		source = append([]PromptPart(nil), s.CompactedHistory...)
 	}
 	s.historyMu.Unlock()
 
-	var pending []ai.PromptPart
+	var pending []PromptPart
 	prior := source
 	if pendingParts > 0 && len(prior) >= pendingParts {
 		split := len(prior) - pendingParts
-		pending = append([]ai.PromptPart(nil), prior[split:]...)
+		pending = append([]PromptPart(nil), prior[split:]...)
 		prior = prior[:split]
 	}
 
@@ -1774,7 +1900,7 @@ func (s *HarnessSession) compactContextForRetry(ctx context.Context, pendingPart
 
 	// If a pending tool output itself exceeds budget on retry, collapse it into a COMPACTED: gist.
 	for i := range pending {
-		if pending[i].Role == ai.RoleTool && pending[i].ToolResponse != nil {
+		if pending[i].Role == RoleTool && pending[i].ToolResponse != nil {
 			if b, err := json.Marshal(pending[i].ToolResponse); err == nil && len(b) > 8192 {
 				compacted := s.compressLargeBlock(ctx, pending[i].Role, pending[i].ToolName, pending[i].Explanation, string(b))
 				pending[i].ToolResponse = map[string]any{"output": compacted}
@@ -1783,7 +1909,7 @@ func (s *HarnessSession) compactContextForRetry(ctx context.Context, pendingPart
 	}
 
 	s.historyMu.Lock()
-	s.CompactedHistory = append(append([]ai.PromptPart(nil), prior...), pending...)
+	s.CompactedHistory = append(append([]PromptPart(nil), prior...), pending...)
 	after := historySize(s.CompactedHistory)
 	s.historyMu.Unlock()
 	if feedback != nil {
@@ -1793,57 +1919,4 @@ func (s *HarnessSession) compactContextForRetry(ctx context.Context, pendingPart
 	s.Close()
 	// Seed the new conversation with prior history only; RunTurn will send pending turnParts next.
 	return s.initWithHistory(prior)
-}
-
-// splitHistoryForCompaction partitions history into (older, recent) so that:
-// 1. recent starts on a RoleUser boundary (never an orphaned RoleModel/RoleTool),
-// 2. recent fits comfortably within half the compaction budget, and
-// 3. at least one older part is moved into older when history is large.
-func splitHistoryForCompaction(history []ai.PromptPart, compactionLimit int) (older, recent []ai.PromptPart) {
-	if len(history) <= 2 {
-		if historySize(history) > 4096 {
-			return history, nil
-		}
-		return nil, history
-	}
-	cutoff := len(history) - 4
-	if cutoff < 1 {
-		cutoff = 1
-	}
-	// Advance cutoff to a RoleUser boundary so recent never starts mid-tool-exchange.
-	for cutoff < len(history) && history[cutoff].Role != ai.RoleUser {
-		cutoff++
-	}
-	// Also shrink recent if its byte size alone exceeds half the token budget (~2 bytes/token).
-	maxRecentBytes := compactionLimit * 2
-	if maxRecentBytes <= 0 {
-		maxRecentBytes = 8192
-	}
-	for cutoff < len(history) && historySize(history[cutoff:]) > maxRecentBytes {
-		cutoff++
-		for cutoff < len(history) && history[cutoff].Role != ai.RoleUser {
-			cutoff++
-		}
-	}
-	return history[:cutoff], history[cutoff:]
-}
-
-func buildCompactedHistory(recent []ai.PromptPart, summary string) []ai.PromptPart {
-	compacted := make([]ai.PromptPart, 1, 1+len(recent))
-	compacted[0] = ai.PromptPart{
-		Role: ai.RoleUser,
-		Text: "[Previous conversation summary]: " + summary,
-	}
-	return append(compacted, recent...)
-}
-
-func compactHistory(history []ai.PromptPart, summary string) []ai.PromptPart {
-	if len(history) <= 4 && historySize(history) <= 4096 {
-		return history
-	}
-	older, recent := splitHistoryForCompaction(history, 4096)
-	if len(older) == 0 {
-		return history
-	}
-	return buildCompactedHistory(recent, summary)
 }
