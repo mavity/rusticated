@@ -250,6 +250,8 @@ func TestRunCore_UsesInjectedRawModeBoundary(t *testing.T) {
 	restored := false
 
 	if err := h.runCore(
+		os.Stdin,
+		&out,
 		func(fd uintptr) (*xterm.State, error) {
 			called = true
 			if got, want := int(fd), int(os.Stdin.Fd()); got != want {
@@ -267,6 +269,7 @@ func TestRunCore_UsesInjectedRawModeBoundary(t *testing.T) {
 			}
 			return nil
 		},
+		func(uintptr) (int, int, error) { return 80, 24, nil },
 	); err != nil {
 		t.Fatalf("runCore() error = %v", err)
 	}
@@ -284,11 +287,14 @@ func TestRunCore_PropagatesMakeRawError(t *testing.T) {
 	expected := errors.New("raw mode failed")
 
 	err := h.runCore(
+		os.Stdin,
+		io.Discard,
 		func(uintptr) (*xterm.State, error) { return nil, expected },
 		func(uintptr, *xterm.State) error {
 			t.Fatal("restoreFunc should not run when makeRaw fails")
 			return nil
 		},
+		func(uintptr) (int, int, error) { return 80, 24, nil },
 	)
 	if !errors.Is(err, expected) {
 		t.Fatalf("runCore() error = %v, want %v", err, expected)
@@ -332,6 +338,8 @@ func TestRunCore_RestoresTerminalBeforeRePanicking(t *testing.T) {
 			}
 		}()
 		_ = h.runCore(
+			os.Stdin,
+			&out,
 			func(uintptr) (*xterm.State, error) {
 				panic("widget explosion")
 			},
@@ -339,6 +347,7 @@ func TestRunCore_RestoresTerminalBeforeRePanicking(t *testing.T) {
 				restored = true
 				return nil
 			},
+			func(uintptr) (int, int, error) { return 80, 24, nil },
 		)
 	}()
 }
@@ -365,6 +374,8 @@ func TestRunCore_RePanicsAfterRestore(t *testing.T) {
 	}()
 
 	_ = h.runCore(
+		os.Stdin,
+		&out,
 		func(uintptr) (*xterm.State, error) {
 			panic("widget explosion")
 		},
@@ -372,6 +383,7 @@ func TestRunCore_RePanicsAfterRestore(t *testing.T) {
 			restored = true
 			return nil
 		},
+		func(uintptr) (int, int, error) { return 80, 24, nil },
 	)
 }
 
