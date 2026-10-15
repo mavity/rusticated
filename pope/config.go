@@ -2,11 +2,6 @@ package main
 
 import (
 	"flag"
-	"fmt"
-	"os"
-	"path/filepath"
-
-	"ai/assets"
 )
 
 // Config holds the parsed command-line flags.
@@ -40,15 +35,4 @@ func parseConfig() Config {
 	flag.Parse()
 
 	return cfg
-}
-
-func cacheDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return "", fmt.Errorf("user home directory unavailable: %w", err)
-	}
-	if assets.HostOS() == "windows" {
-		return filepath.Join(home, "AppData", "Local", "kabibi", "litert_cache"), nil
-	}
-	return filepath.Join(home, ".cache", "kabibi", "litert_cache"), nil
 }
