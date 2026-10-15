@@ -31,6 +31,7 @@ var (
 	symLMCfgCreate           uint64
 	symLMCfgDelete           uint64
 	symLMConvCreate          uint64
+	symLMConvClone           uint64
 	symLMConvDelete          uint64
 	symLMConvSendStream      uint64
 	symLMConvCancelProcess   uint64
@@ -205,6 +206,13 @@ func (d *rusticatedDriver) cfgSetMessages(cfg, messagesJSON uint64) {
 }
 func (d *rusticatedDriver) convCreate(engine, cfg uint64) uint64 {
 	v, _ := callDylib(symLMConvCreate, []byte{i64, i64}, []byte{i64}, engine, cfg)
+	return v
+}
+func (d *rusticatedDriver) convClone(conv uint64) uint64 {
+	if symLMConvClone == 0 {
+		return 0
+	}
+	v, _ := callDylib(symLMConvClone, []byte{i64}, []byte{i64}, conv)
 	return v
 }
 func (d *rusticatedDriver) convDelete(conv uint64) {
@@ -456,6 +464,7 @@ func ensureLMLibLoadedImpl(libPath string) error {
 		symLMCfgCreate, _ = syscall.DylibSym(lmLib, "litert_lm_conversation_config_create")
 		symLMCfgDelete, _ = syscall.DylibSym(lmLib, "litert_lm_conversation_config_delete")
 		symLMConvCreate, _ = syscall.DylibSym(lmLib, "litert_lm_conversation_create")
+		symLMConvClone, _ = syscall.DylibSym(lmLib, "litert_lm_conversation_clone")
 		symLMConvDelete, _ = syscall.DylibSym(lmLib, "litert_lm_conversation_delete")
 		symLMConvSendStream, _ = syscall.DylibSym(lmLib, "litert_lm_conversation_send_message_stream")
 		symLMConvCancelProcess, _ = syscall.DylibSym(lmLib, "litert_lm_conversation_cancel_process")
