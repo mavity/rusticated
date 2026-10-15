@@ -335,7 +335,7 @@ type customSessionAIRunner struct {
 }
 
 func (c *customSessionAIRunner) RunTurn(ctx context.Context, prompt string, onFeedback ai.LogFeedback, onContent ai.LogFeedback) error {
-	return c.aiSess.RunTurn(ctx, FormatPromptWithShellContext(c.execSess, prompt))
+	return c.aiSess.RunTurn(ctx, prompt)
 }
 
 func (c *customSessionAIRunner) Close() {
