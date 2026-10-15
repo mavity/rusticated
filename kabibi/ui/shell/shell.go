@@ -257,8 +257,18 @@ func resolvePlatformCommand(program string, cwd string, env map[string]string) (
 }
 
 func runResolvedCommand(ctx context.Context, hc interp.HandlerContext, program string, args []string) error {
-	cmd := exec.Command(program, args[1:]...)
-	cmd.Env = os.Environ()
+	cmd := exec.CommandContext(ctx, program, args[1:]...)
+	envPairs := make([]string, 0, len(os.Environ())+16)
+	envPairs = append(envPairs, os.Environ()...)
+	if hc.Env != nil {
+		hc.Env.Each(func(name string, vr expand.Variable) bool {
+			if vr.IsSet() {
+				envPairs = append(envPairs, name+"="+vr.String())
+			}
+			return true
+		})
+	}
+	cmd.Env = envPairs
 	if hc.Dir != "" {
 		cmd.Dir = hc.Dir
 	}
@@ -345,19 +355,21 @@ func createRunner(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer
 			}
 		}
 
-		// 2. On Windows-style guest environments, prefer the platform-aware resolver so
-		// PATH/PATHEXT and %VAR% expansion work before the interpreter emits the default
-		// not-found diagnostic for .bat/.cmd/.exe paths. This still leaves native shell
-		// builtins and script execution to the interpreter when our fallback does not apply.
+		// 2. Let the embedded u-root coreutils handle cross-platform standard tools
+		// (ls, cat, cp, mv, rm, mkdir, find, touch, etc.) first when matched.
+		if coreutilNames[path] {
+			coreHandler := coreutils.ExecHandler(interp.DefaultExecHandler(0))
+			return coreHandler(ctx, args)
+		}
+
+		// 3. On Windows-style guest environments, use the platform-aware resolver so
+		// PATH/PATHEXT and %VAR% expansion work for .bat/.cmd/.exe paths.
 		if resolved, ok := resolvePlatformExecutable(path, hc.Dir, envMapFromHandler(hc)); ok {
 			return runResolvedCommand(ctx, hc, resolved, args)
 		}
 
-		// 3. Let the interpreter do its normal PATH lookup for builtins and scripts.
+		// 4. Fall back to standard interpreter PATH lookup.
 		coreHandler := coreutils.ExecHandler(interp.DefaultExecHandler(0))
-		if err := coreHandler(ctx, args); err == nil {
-			return nil
-		}
 		return coreHandler(ctx, args)
 	}
 
