@@ -54,17 +54,8 @@ func New() *App {
 }
 
 // Run executes the application lifecycle:
-// 1. Runs cooked-mode startup sequence (terminal height queries, newline injection)
-// 2. Enters raw mode and starts the double-buffered event loop
-// 3. Returns when user exits or error occurs
+// Enters raw mode and starts the double-buffered event loop.
 func (a *App) Run() error {
-	// Cooked-mode startup: query terminal height and emit H-1 newlines to push
-	// the shell prompt into native scrollback without requiring a clear screen.
-	if err := a.startupSequence(); err != nil {
-		return fmt.Errorf("startup sequence failed: %w", err)
-	}
-
-	// Enter raw mode and run the double-buffered UI engine
 	return a.host.Run()
 }
 

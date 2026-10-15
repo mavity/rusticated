@@ -19,6 +19,7 @@ type AppWidgetOptions struct {
 	WriteToScrollback func(string)
 	OnExit            func()
 	WorkingDir        string
+	ShellMode         shell.ShellMode
 }
 
 // NewWidget constructs a clean AppWidget instance.
@@ -41,6 +42,7 @@ func NewWidget(opts AppWidgetOptions) *AppWidget {
 			}
 		},
 		WorkingDir: opts.WorkingDir,
+		Mode:       opts.ShellMode,
 	})
 
 	return w
