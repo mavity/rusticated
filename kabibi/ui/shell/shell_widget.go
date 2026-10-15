@@ -13,27 +13,47 @@ import (
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
 
+// ShellMode controls whether the Shell widget operates in the lightweight
+// Zero-Plume / Immediate Line Ejection model (1-row active prompt at the bottom
+// of the screen, all completed output streamed directly to native scrollback)
+// or the full multi-block Plume History model (used when integrating with
+// full-screen file panels).
+type ShellMode int
+
+const (
+	ModeZeroPlume    ShellMode = iota // Immediate line ejection, 1-line active prompt
+	ModePlumeHistory                  // Multi-block scrollable history / file panel integration
+)
+
 // ShellOptions configures shell behavior and callbacks
 type ShellOptions struct {
 	WriteToScrollback func(text string) // Callback to write lines to the host's scrollback
 	OnExit            func()            // Optional callback invoked when user runs 'exit' or 'quit'
 	WorkingDir        string            // Optional initial working directory for the shell runner
 	AIRunner          AIRunner          // Optional AI fallback runner (defaults to LazyAIRunner)
+	Mode              ShellMode         // Toggle between ModeZeroPlume (default) and ModePlumeHistory
 }
 
 // Shell is a shell widget that implements the ui.Widget interface.
-// It manages a history of CommandBlocks (prompt+input+output) with automatic
-// ejection of overflow rows to the native terminal scrollback buffer, executing
-// valid shell commands via mvdan.cc/sh and routing syntax/command-not-found
-// inputs to the integrated AI session.
+// In ModeZeroPlume (default), it renders a 1-row active prompt/status line and
+// ejects all submitted commands and completed output lines immediately into
+// native terminal scrollback. In ModePlumeHistory, it manages a history of
+// CommandBlocks with viewport row ejection for composite TUI layouts.
 type Shell struct {
 	mu sync.Mutex
 
-	// History model: structured CommandBlock entries
+	mode ShellMode
+
+	// History model (retained for ModePlumeHistory and block inspection)
 	blocks []CommandBlock
 
-	// Ejection watermark: how many visual rows have been flushed to native scrollback
+	// Ejection watermark: how many visual rows have been flushed to native scrollback in ModePlumeHistory
 	previouslyEjected int
+
+	// Transient status line displayed in ModeZeroPlume while an AI turn or tool is active
+	statusLine    string
+	bannerFlushed bool
+	exiting       bool
 
 	// Input buffer (for currently active incomplete command)
 	inputValue   string
@@ -72,6 +92,7 @@ func New(opts ShellOptions) *Shell {
 	}
 
 	s := &Shell{
+		mode:        opts.Mode,
 		blocks:      []CommandBlock{},
 		width:       80,
 		height:      24,
@@ -93,6 +114,21 @@ func New(opts ShellOptions) *Shell {
 	})
 
 	return s
+}
+
+// Mode returns the current ShellMode (ModeZeroPlume or ModePlumeHistory).
+func (s *Shell) Mode() ShellMode {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.mode
+}
+
+// SetMode switches the shell between ModeZeroPlume and ModePlumeHistory.
+func (s *Shell) SetMode(mode ShellMode) {
+	s.mu.Lock()
+	s.mode = mode
+	s.mu.Unlock()
+	s.invalidate()
 }
 
 // ExecutionSession returns the underlying mvdan shell execution session.
@@ -179,13 +215,16 @@ func (s *Shell) SetCursorPos(pos int) {
 }
 
 // SubmitCurrentInput adds the current input to history as a CommandBlock and clears the input buffer.
-// This directly implements the synchronous "enter key" block creation for snapshot testing.
+// In ModeZeroPlume, it also immediately ejects the submitted prompt line to WriteToScrollback.
 func (s *Shell) SubmitCurrentInput() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	rawInput := s.inputValue
+	prompt := s.prompt
+	mode := s.mode
+	writeSB := s.opts.WriteToScrollback
 	block := CommandBlock{
-		Prompt:   s.prompt,
-		Input:    s.inputValue,
+		Prompt:   prompt,
+		Input:    rawInput,
 		Output:   bytes.Buffer{},
 		Status:   StatusActive,
 		ExitCode: 0,
@@ -193,6 +232,11 @@ func (s *Shell) SubmitCurrentInput() {
 	s.blocks = append(s.blocks, block)
 	s.inputValue = ""
 	s.cursorPos = 0
+	s.mu.Unlock()
+
+	if mode == ModeZeroPlume && writeSB != nil {
+		writeSB(prompt + rawInput + "\r\n")
+	}
 }
 
 // ExecuteLine submits and executes a line through the Shell's smart classifier
@@ -207,10 +251,18 @@ func (s *Shell) ExecuteLine(line string) {
 }
 
 // Measure implements ui.Widget by reporting the shell's space requirements.
+// In ModeZeroPlume, the shell widget occupies a fixed 1-row height for the active prompt/status line.
+// In ModePlumeHistory, it requests the full available constraints.
 func (s *Shell) Measure(c ui.Constraints) ui.Size {
 	w := c.MaxW
 	if w <= 0 {
 		w = 80
+	}
+	s.mu.Lock()
+	mode := s.mode
+	s.mu.Unlock()
+	if mode == ModeZeroPlume {
+		return ui.Size{W: w, H: 1}
 	}
 	h := c.MaxH
 	if h <= 0 {
@@ -245,15 +297,77 @@ func calculateVisualRows(block CommandBlock, width int) int {
 }
 
 // Render implements ui.Widget by painting the shell into a CellBuf.
-// Implements the history ejection engine:
-// 1. Calculate total visual rows and ejection target
-// 2. Flush overflowing rows to WriteToScrollback callback
-// 3. Render remaining active viewport to CellBuf
+// In ModeZeroPlume, Render returns a 1-row CellBuf containing the active prompt
+// (or live AI/tool status line while running).
+// In ModePlumeHistory, Render paints the multi-block history viewport and ejects
+// overflowing rows via WriteToScrollback.
 func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.CursorPos) {
 	s.mu.Lock()
 	s.ctx = ctx
 	s.width = rect.W
 	s.height = rect.H
+	mode := s.mode
+
+	if mode == ModeZeroPlume {
+		needBanner := !s.bannerFlushed && s.opts.WriteToScrollback != nil && len(s.blocks) > 0 && s.blocks[0].Input == "" && s.blocks[0].Output.Len() > 0
+		var bannerText string
+		if needBanner {
+			s.bannerFlushed = true
+			bannerText = s.blocks[0].Output.String()
+		}
+		prompt := s.prompt
+		inputValue := s.inputValue
+		cursorPos := s.cursorPos
+		running := s.running
+		exiting := s.exiting
+		statusLine := s.statusLine
+		inputFocus := s.inputFocus && !running && !exiting
+		s.mu.Unlock()
+
+		if needBanner {
+			s.emitScrollbackLine(strings.TrimSuffix(bannerText, "\n"))
+		}
+
+		w := rect.W
+		if w <= 0 {
+			w = 80
+		}
+		buf := ui.NewCellBuf(w, 1)
+		inputStyle := terminal.NewStyle(0, 0, terminal.CharResetForegroundDefault|terminal.CharResetBackgroundDefault)
+
+		displayLine := prompt + inputValue
+		if exiting {
+			displayLine = ""
+		} else if running {
+			displayLine = statusLine
+		}
+
+		col := 0
+		for _, ch := range displayLine {
+			if col >= w {
+				break
+			}
+			buf.Set(col, 0, terminal.Cell{
+				Grapheme: string(ch),
+				Style:    inputStyle,
+			})
+			col++
+		}
+
+		cursorX := len([]rune(prompt)) + cursorPos
+		if cursorX > w-1 {
+			cursorX = w - 1
+		}
+		if cursorX < 0 {
+			cursorX = 0
+		}
+
+		return buf, ui.CursorPos{
+			X:       cursorX,
+			Y:       0,
+			Visible: inputFocus,
+		}
+	}
 
 	blocksSnapshot := make([]CommandBlock, len(s.blocks))
 	for i := range s.blocks {
@@ -623,12 +737,20 @@ func (s *Shell) handleKeyEvent(ev input.KeyPressEvent) bool {
 	return false
 }
 
+func (s *Shell) emitScrollbackLine(line string) {
+	if s.opts.WriteToScrollback != nil {
+		s.opts.WriteToScrollback(line + "\r\n")
+	}
+}
+
 func (s *Shell) submitAndExecuteAsync() {
 	s.mu.Lock()
 	rawInput := s.inputValue
+	prompt := s.prompt
+	mode := s.mode
 	trimmed := strings.TrimSpace(rawInput)
 	block := CommandBlock{
-		Prompt:   s.prompt,
+		Prompt:   prompt,
 		Input:    rawInput,
 		Output:   bytes.Buffer{},
 		Status:   StatusActive,
@@ -639,6 +761,7 @@ func (s *Shell) submitAndExecuteAsync() {
 	s.inputValue = ""
 	s.cursorPos = 0
 	s.historyIdx = -1
+	s.statusLine = ""
 	if trimmed != "" {
 		s.inputHistory = append(s.inputHistory, rawInput)
 	}
@@ -646,6 +769,9 @@ func (s *Shell) submitAndExecuteAsync() {
 	if trimmed == "" || s.execSess == nil {
 		s.blocks[blockIdx].Status = StatusSuccess
 		s.mu.Unlock()
+		if mode == ModeZeroPlume {
+			s.emitScrollbackLine(prompt + rawInput)
+		}
 		s.invalidate()
 		return
 	}
@@ -654,13 +780,20 @@ func (s *Shell) submitAndExecuteAsync() {
 	if route == RouteEmpty {
 		s.blocks[blockIdx].Status = StatusSuccess
 		s.mu.Unlock()
+		if mode == ModeZeroPlume {
+			s.emitScrollbackLine(prompt + rawInput)
+		}
 		s.invalidate()
 		return
 	}
 	if route == RouteBuiltin {
 		s.blocks[blockIdx].Status = StatusSuccess
+		s.exiting = true
 		onExit := s.opts.OnExit
 		s.mu.Unlock()
+		if mode == ModeZeroPlume {
+			s.emitScrollbackLine(prompt + rawInput)
+		}
 		s.invalidate()
 		if onExit != nil {
 			onExit()
@@ -678,6 +811,10 @@ func (s *Shell) submitAndExecuteAsync() {
 	execSess := s.execSess
 	s.mu.Unlock()
 
+	// Phase 2.1: Instant Command/Prompt Ejection on Enter in ModeZeroPlume
+	if mode == ModeZeroPlume {
+		s.emitScrollbackLine(prompt + rawInput)
+	}
 	s.invalidate()
 
 	go func() {
@@ -687,6 +824,7 @@ func (s *Shell) submitAndExecuteAsync() {
 			s.activeCancel = nil
 			s.activeBlock = -1
 			s.running = false
+			s.statusLine = ""
 			close(doneCh)
 			s.doneCh = nil
 			s.mu.Unlock()
@@ -705,19 +843,69 @@ func (s *Shell) submitAndExecuteAsync() {
 			s.invalidate()
 		}
 
+		// Line-buffered stream helper for Zero-Plume mode
+		var linePartial strings.Builder
+		var lineMu sync.Mutex
+		streamZeroPlumeLines := func(chunk string) {
+			if chunk == "" {
+				return
+			}
+			lineMu.Lock()
+			linePartial.WriteString(chunk)
+			bufStr := linePartial.String()
+			lastNL := strings.LastIndexByte(bufStr, '\n')
+			if lastNL < 0 {
+				lineMu.Unlock()
+				return
+			}
+			completed := bufStr[:lastNL]
+			rest := bufStr[lastNL+1:]
+			linePartial.Reset()
+			linePartial.WriteString(rest)
+			lineMu.Unlock()
+
+			completed = strings.ReplaceAll(completed, "\r\n", "\n")
+			for _, ln := range strings.Split(completed, "\n") {
+				s.emitScrollbackLine(ln)
+			}
+		}
+		flushZeroPlumeLines := func() {
+			lineMu.Lock()
+			rem := linePartial.String()
+			linePartial.Reset()
+			lineMu.Unlock()
+			if rem != "" {
+				rem = strings.TrimRight(rem, "\r\n")
+				s.emitScrollbackLine(rem)
+			}
+		}
+
+		emitOutputChunk := func(chunk string) {
+			appendBlockText(chunk)
+			if mode == ModeZeroPlume {
+				streamZeroPlumeLines(chunk)
+			}
+		}
+
 		if route == RouteShell {
 			if trimmed == "help" {
-				appendBlockText("Kabibi Plume Shell — valid bash commands run directly; natural language prompts fall back to AI.\n")
+				emitOutputChunk("Kabibi Plume Shell — valid bash commands run directly; natural language prompts fall back to AI.\n")
+				if mode == ModeZeroPlume {
+					flushZeroPlumeLines()
+				}
 				s.finishBlock(blockIdx, StatusSuccess, 0)
 				return
 			}
 
 			rec, err := execSess.RunCommand(ctx, rawInput, parsed, SourceUserShell, func(chunk []byte) {
-				appendBlockText(string(chunk))
+				emitOutputChunk(string(chunk))
 			})
 			if err != nil {
 				if errors.Is(err, context.Canceled) {
-					appendBlockText("^C\n")
+					emitOutputChunk("^C\n")
+					if mode == ModeZeroPlume {
+						flushZeroPlumeLines()
+					}
 					s.finishBlock(blockIdx, StatusError, 130)
 					return
 				}
@@ -728,52 +916,120 @@ func (s *Shell) submitAndExecuteAsync() {
 					s.mu.Lock()
 					s.blocks[blockIdx].Output.Reset()
 					s.mu.Unlock()
-					s.runAIFallback(ctx, blockIdx, rawInput, aiRunner, appendBlockText)
+					lineMu.Lock()
+					linePartial.Reset()
+					lineMu.Unlock()
+					s.runAIFallback(ctx, blockIdx, mode, rawInput, aiRunner, appendBlockText, streamZeroPlumeLines, flushZeroPlumeLines)
 					return
+				}
+				if mode == ModeZeroPlume {
+					flushZeroPlumeLines()
 				}
 				s.finishBlock(blockIdx, StatusError, rec.ExitCode)
 				return
+			}
+			if mode == ModeZeroPlume {
+				flushZeroPlumeLines()
 			}
 			s.finishBlock(blockIdx, StatusSuccess, 0)
 			return
 		}
 
-		// RouteAI: execute as an AI chat prompt in the plume
+		// RouteAI: execute as an AI chat prompt
 		if aiRunner == nil {
-			appendBlockText("AI session unavailable.\n")
+			emitOutputChunk("AI session unavailable.\n")
+			if mode == ModeZeroPlume {
+				flushZeroPlumeLines()
+			}
 			s.finishBlock(blockIdx, StatusFailure, 1)
 			return
 		}
-		s.runAIFallback(ctx, blockIdx, rawInput, aiRunner, appendBlockText)
+		s.runAIFallback(ctx, blockIdx, mode, rawInput, aiRunner, appendBlockText, streamZeroPlumeLines, flushZeroPlumeLines)
 	}()
+}
+
+func (s *Shell) updateZeroPlumeFeedback(feedback string) {
+	if feedback == "" {
+		return
+	}
+	s.mu.Lock()
+	cur := s.statusLine
+	for i := 0; i < len(feedback); i++ {
+		ch := feedback[i]
+		switch ch {
+		case '\r':
+			cur = ""
+		case '\n':
+			trimmed := strings.TrimSpace(cur)
+			if trimmed != "" && s.opts.WriteToScrollback != nil {
+				lineToEmit := cur
+				s.mu.Unlock()
+				s.emitScrollbackLine(lineToEmit)
+				s.mu.Lock()
+			}
+			cur = ""
+		default:
+			cur += string(ch)
+		}
+	}
+	if strings.TrimSpace(cur) == "" {
+		cur = ""
+	}
+	s.statusLine = cur
+	s.mu.Unlock()
+	s.invalidate()
 }
 
 func (s *Shell) runAIFallback(
 	ctx context.Context,
 	blockIdx int,
+	mode ShellMode,
 	prompt string,
 	aiRunner AIRunner,
 	appendBlockText func(string),
+	streamZeroPlumeLines func(string),
+	flushZeroPlumeLines func(),
 ) {
 	err := aiRunner.RunTurn(
 		ctx,
 		prompt,
 		func(feedback string) {
 			appendBlockText(feedback)
+			if mode == ModeZeroPlume {
+				s.updateZeroPlumeFeedback(feedback)
+			}
 		},
 		func(content string) {
 			appendBlockText(content)
+			if mode == ModeZeroPlume {
+				s.mu.Lock()
+				s.statusLine = ""
+				s.mu.Unlock()
+				streamZeroPlumeLines(content)
+			}
 		},
 	)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			appendBlockText("\n^C\n")
+			if mode == ModeZeroPlume {
+				streamZeroPlumeLines("\n^C\n")
+				flushZeroPlumeLines()
+			}
 			s.finishBlock(blockIdx, StatusError, 130)
 			return
 		}
-		appendBlockText(fmt.Sprintf("\n[ai error: %v]\n", err))
+		errMsg := fmt.Sprintf("\n[ai error: %v]\n", err)
+		appendBlockText(errMsg)
+		if mode == ModeZeroPlume {
+			streamZeroPlumeLines(errMsg)
+			flushZeroPlumeLines()
+		}
 		s.finishBlock(blockIdx, StatusFailure, 1)
 		return
+	}
+	if mode == ModeZeroPlume {
+		flushZeroPlumeLines()
 	}
 	s.finishBlock(blockIdx, StatusSuccess, 0)
 }
