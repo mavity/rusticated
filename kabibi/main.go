@@ -60,10 +60,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("kabibi boot error: %v", err)
 	}
-	defer appWidget.Close()
 
 	errRun := host.Run()
+	_ = appWidget.Close()
 	if errRun != nil {
 		log.Fatalf("kabibi run error: %v", errRun)
 	}
+	os.Exit(0)
 }
