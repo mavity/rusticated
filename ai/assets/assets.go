@@ -15,6 +15,37 @@ import (
 // LiteRT-LM runtime wheel for the current host platform.
 const litertlmPyPIURL = "https://pypi.org/pypi/litert-lm-api/json"
 
+// Default model URLs and minimum expected byte sizes.
+const (
+	DefaultLLMModelURL        = "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm"
+	DefaultLLMModelSize       = 2038755678
+	DefaultEmbeddingModelURL  = "https://huggingface.co/litert-community/embeddinggemma-2-text-270m-litert-lm/resolve/main/embeddinggemma-2-text-270m.litertlm"
+	DefaultEmbeddingModelSize = 164626432
+)
+
+// DefaultCacheDir returns the canonical host-OS cache directory for LiteRT-LM
+// runtime libraries and model files.
+func DefaultCacheDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "", fmt.Errorf("user home directory unavailable: %w", err)
+	}
+	if HostOS() == "windows" {
+		return filepath.Join(home, "AppData", "Local", "kabibi", "litert_cache"), nil
+	}
+	return filepath.Join(home, ".cache", "kabibi", "litert_cache"), nil
+}
+
+// EnsureDefaultLLMModel ensures the default Gemma 4 E2B model is cached and returns its path.
+func EnsureDefaultLLMModel(ctx context.Context, opts FetchOptions) (string, error) {
+	return EnsureModel(ctx, DefaultLLMModelURL, DefaultLLMModelSize, opts)
+}
+
+// EnsureDefaultEmbeddingModel ensures the default EmbeddingGemma 2 model is cached and returns its path.
+func EnsureDefaultEmbeddingModel(ctx context.Context, opts FetchOptions) (string, error) {
+	return EnsureModel(ctx, DefaultEmbeddingModelURL, DefaultEmbeddingModelSize, opts)
+}
+
 // FetchOptions configures asset fetching. CacheDir must already exist (or be
 // creatable). OnProgress, if set, is invoked with a coarse stage label, a
 // human-readable detail, and a percent in [0,100] (or -1 when unknown).

@@ -10,18 +10,11 @@ import (
 	"ai/assets"
 )
 
-const (
-	gemmaModelURL      = "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm"
-	gemmaModelSize     = 2038755678
-	embeddingModelURL  = "https://huggingface.co/litert-community/embeddinggemma-2-text-270m-litert-lm/resolve/main/embeddinggemma-2-text-270m.litertlm"
-	embeddingModelSize = 164626432
-)
-
 func main() {
 	cfg := parseConfig()
 
 	ctx := context.Background()
-	dir, err := cacheDir()
+	dir, err := assets.DefaultCacheDir()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "pope: cache dir error: %v\n", err)
 		os.Exit(1)
@@ -54,7 +47,7 @@ func main() {
 
 	modelPath := cfg.ModelFlag
 	if modelPath == "" {
-		m, err := assets.EnsureModel(ctx, gemmaModelURL, gemmaModelSize, opts)
+		m, err := assets.EnsureDefaultLLMModel(ctx, opts)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "pope: model download error: %v\n", err)
 			os.Exit(1)
@@ -131,7 +124,7 @@ func main() {
 	if !strings.EqualFold(cfg.EmbedModelFlag, "none") {
 		embedPath := cfg.EmbedModelFlag
 		if embedPath == "" {
-			if ep, err := assets.EnsureModel(ctx, embeddingModelURL, embeddingModelSize, opts); err == nil {
+			if ep, err := assets.EnsureDefaultEmbeddingModel(ctx, opts); err == nil {
 				embedPath = ep
 			} else if cfg.VerboseFlag {
 				fmt.Fprintf(os.Stderr, "[pope] warning: embedding model fetch skipped: %v\n", err)
