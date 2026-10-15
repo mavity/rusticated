@@ -110,6 +110,22 @@ type Conversation struct {
 	impl *convImpl
 }
 
+// Clone creates an isolated branch of the conversation sharing the existing
+// prefilled context and KV cache via litert_lm_conversation_clone.
+func (c *Conversation) Clone(ctx context.Context) (*Conversation, error) {
+	if c == nil || c.impl == nil {
+		return nil, ErrClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	clonedImpl, err := c.impl.Clone()
+	if err != nil {
+		return nil, err
+	}
+	return &Conversation{impl: clonedImpl}, nil
+}
+
 // SendStream sends a message and returns an iterator over the generated
 // ModelEvents (TextEvent, ToolCallEvent). Events are yielded as (event, nil).
 // A failure, including one before generation starts, is yielded once as

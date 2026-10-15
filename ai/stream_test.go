@@ -34,6 +34,16 @@ func (f *fakeConvBackend) Close() error {
 	return nil
 }
 
+func (f *fakeConvBackend) Clone() (conversationBackend, error) {
+	if f.closed.Load() {
+		return nil, ErrClosed
+	}
+	return &fakeConvBackend{
+		chunks: append([]string(nil), f.chunks...),
+		err:    f.err,
+	}, nil
+}
+
 func newFakeConv(f *fakeConvBackend) *Conversation {
 	return &Conversation{impl: &convImpl{backend: f}}
 }

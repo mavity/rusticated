@@ -29,12 +29,38 @@ type PartEmbedder interface {
 // LogFeedback receives streamed text fragments.
 type LogFeedback func(text string)
 
+// DeliberateToolName is the canonical name of the built-in deliberation tool.
+const DeliberateToolName = "deliberate"
+
+// ToolContext provides explicit runtime capabilities (including native
+// conversation cloning and isolated contemplation helpers) to tool handlers.
+type ToolContext struct {
+	Session      *Session
+	Engine       *Engine
+	Conversation *Conversation
+	Feedback     LogFeedback
+	baseHistory  *[]PromptPart
+	userText     string
+	streamer     *liveStreamer
+	trace        *CognitiveTrace
+}
+
+// CloneConversation creates a lightweight, zero-cost branched conversation handle
+// using LiteRT-LM's native litert_lm_conversation_clone C API.
+func (tc *ToolContext) CloneConversation(ctx context.Context) (*Conversation, error) {
+	if tc == nil || tc.Conversation == nil {
+		return nil, errors.New("ai: no active conversation handle in tool context")
+	}
+	return tc.Conversation.Clone(ctx)
+}
+
 // Tool defines a capability registered with a Session.
 type Tool struct {
-	Description string
-	Parameters  map[string]any
-	Required    []string
-	Execute     func(ctx context.Context, call ToolCall, feedback LogFeedback) (any, error)
+	Description        string
+	Parameters         map[string]any
+	Required           []string
+	Execute            func(ctx context.Context, call ToolCall, feedback LogFeedback) (any, error)
+	ExecuteWithContext func(ctx context.Context, tc *ToolContext, call ToolCall) (any, error)
 }
 
 // SessionConfig configures a high-level reflective chat session.
@@ -94,6 +120,10 @@ func NewSession(cfg SessionConfig) (*Session, error) {
 	if s.compactionLimit <= 0 {
 		s.compactionLimit = 6000
 	}
+	// Register the built-in "deliberate" tool so the model can invoke structured
+	// contemplation on demand via ToolContext (or via the Stage 1 GOAL: trigger).
+	s.toolRegistry[DeliberateToolName] = NewDeliberateTool()
+
 	names := make([]string, 0, len(cfg.Tools))
 	for name := range cfg.Tools {
 		names = append(names, name)
@@ -204,15 +234,34 @@ func (s *Session) emitContent(text string) {
 
 // executeTool dispatches a model tool call and converts execution failures to
 // a result the model can inspect and recover from.
-func (s *Session) executeTool(ctx context.Context, call ToolCall) any {
+func (s *Session) executeTool(ctx context.Context, tc *ToolContext, call ToolCall) any {
 	tool, ok := s.toolRegistry[call.Name]
 	if !ok {
 		return map[string]any{"error": "unknown tool: " + call.Name}
 	}
+	if tool.ExecuteWithContext != nil {
+		if tc == nil {
+			tc = &ToolContext{
+				Session:      s,
+				Engine:       s.engine,
+				Conversation: s.conv,
+				Feedback:     s.emitFeedback,
+			}
+		}
+		result, err := tool.ExecuteWithContext(ctx, tc, call)
+		if err != nil {
+			return map[string]any{"error": err.Error()}
+		}
+		return result
+	}
 	if tool.Execute == nil {
 		return map[string]any{"error": "tool has no executor: " + call.Name}
 	}
-	result, err := tool.Execute(ctx, call, s.emitFeedback)
+	fb := s.emitFeedback
+	if tc != nil && tc.Feedback != nil {
+		fb = tc.Feedback
+	}
+	result, err := tool.Execute(ctx, call, fb)
 	if err != nil {
 		return map[string]any{"error": err.Error()}
 	}
@@ -580,7 +629,7 @@ func (s *Session) systemMessageWithToolNames() string {
 	var names []string
 	for _, t := range s.tools {
 		if fn, ok := t["function"].(map[string]any); ok {
-			if name, ok := fn["name"].(string); ok && name != "" {
+			if name, ok := fn["name"].(string); ok && name != "" && name != DeliberateToolName {
 				names = append(names, name)
 			}
 		}
@@ -594,6 +643,249 @@ func (s *Session) systemMessageWithToolNames() string {
 		base += "\n"
 	}
 	return base + "Available tools (for planning reference only): " + strings.Join(names, ", ")
+}
+
+// DeliberateOutput is the structured synthesis returned by the built-in
+// "deliberate" tool after running expectation calibration, step ideation,
+// 3-way orthogonal critique, and tribunal plan synthesis.
+type DeliberateOutput struct {
+	Goal           string `json:"goal"`
+	ExpectedDetail string `json:"expected_detail"`
+	Steps          string `json:"steps"`
+	Plan           string `json:"plan"`
+}
+
+// NewDeliberateTool returns the built-in "deliberate" tool implementation that
+// uses ToolContext (and native Conversation.Clone when available) to execute
+// isolated, tool-free contemplation forks.
+func NewDeliberateTool() Tool {
+	return Tool{
+		Description: "Deliberate on a task before acting: calibrates expected response detail, breaks down initial steps, critiques relevancy/safety/groundedness, and synthesizes a concrete execution plan.",
+		Parameters: map[string]any{
+			"goal": map[string]any{
+				"type":        "string",
+				"description": "One-sentence description of the underlying goal and task required to address the user's request.",
+			},
+		},
+		Required: []string{"goal"},
+		ExecuteWithContext: func(ctx context.Context, tc *ToolContext, call ToolCall) (any, error) {
+			if tc == nil || tc.Session == nil {
+				return nil, errors.New("ai: deliberate requires a valid ToolContext with Session")
+			}
+			var in struct {
+				Goal string `json:"goal"`
+			}
+			if len(call.RawArguments) > 0 {
+				if err := json.Unmarshal(call.RawArguments, &in); err != nil {
+					return nil, fmt.Errorf("invalid arguments: %w", err)
+				}
+			} else if call.Arguments != nil {
+				if g, ok := call.Arguments["goal"].(string); ok {
+					in.Goal = g
+				}
+			}
+			goal := strings.TrimSpace(in.Goal)
+			if goal == "" && tc.trace != nil {
+				goal = strings.TrimSpace(tc.trace.Goal)
+			}
+			if goal == "" {
+				goal = tc.userText
+			}
+
+			out, err := tc.Session.executeDeliberationWithContext(ctx, tc, goal)
+			if err != nil {
+				return nil, err
+			}
+			return out, nil
+		},
+	}
+}
+
+// streamClonedStage attempts to fork parentConv via native litert_lm_conversation_clone
+// and stream trigger through the cloned handle. If parentConv is nil or Clone is
+// unsupported by the active backend, it returns (false, "", nil) so the caller
+// falls back seamlessly to runEphemeralStage.
+func (s *Session) streamClonedStage(
+	ctx context.Context,
+	parentConv *Conversation,
+	trigger []PromptPart,
+	stageLabel string,
+	streamer *liveStreamer,
+) (usedClone bool, out string, err error) {
+	if s.ephemeralStream != nil || parentConv == nil {
+		return false, "", nil
+	}
+	tc := &ToolContext{
+		Session:      s,
+		Engine:       s.engine,
+		Conversation: parentConv,
+		Feedback:     s.emitFeedback,
+	}
+	clonedConv, cloneErr := tc.CloneConversation(ctx)
+	if cloneErr != nil || clonedConv == nil {
+		return false, "", nil
+	}
+	defer clonedConv.Close()
+
+	streamer.StartStage(stageLabel)
+	for event, streamErr := range clonedConv.SendStream(ctx, trigger) {
+		if streamErr != nil {
+			_ = streamer.EndStage()
+			streamer.Wipe()
+			return true, "", streamErr
+		}
+		if e, ok := event.(TextEvent); ok {
+			streamer.Feed(e.Text)
+		}
+	}
+	return true, streamer.EndStage(), nil
+}
+
+func (s *Session) executeDeliberationWithContext(
+	ctx context.Context,
+	tc *ToolContext,
+	goal string,
+) (*DeliberateOutput, error) {
+	baseHistory := tc.baseHistory
+	if baseHistory == nil {
+		snap := s.snapshotCompactedHistory()
+		baseHistory = &snap
+	}
+	userText := tc.userText
+	streamer := tc.streamer
+	if streamer == nil {
+		streamer = newLiveStreamer(tc.Feedback, defaultStreamerMaxRunes)
+	}
+	trace := tc.trace
+	if trace == nil {
+		trace = &CognitiveTrace{}
+		tc.trace = trace
+	}
+	trace.IsDirect = false
+	trace.Goal = goal
+
+	// Stage 2: Expectation Calibration (<detail_level>)
+	seedExpectation := func(base []PromptPart) []PromptPart {
+		seed := make([]PromptPart, 0, len(base)+2)
+		seed = append(seed, base...)
+		seed = append(seed,
+			PromptPart{Role: RoleUser, Text: userText},
+			PromptPart{Role: RoleModel, Text: stageExpectSyntheticWait},
+		)
+		return seed
+	}
+	detailLevel, err := s.runEphemeralStage(ctx, baseHistory, seedExpectation, stageExpectTriggerPrompt, s.systemMessage, "expectation", streamer)
+	if err != nil {
+		return nil, err
+	}
+	trace.ExpectedDetail = detailLevel
+
+	effectiveGoal := goal
+	if detailLevel != "" {
+		effectiveGoal = goal + "\nExpected response detail: " + detailLevel
+	}
+
+	seedWithGoal := func(base []PromptPart) []PromptPart {
+		seed := make([]PromptPart, 0, len(base)+2)
+		seed = append(seed, base...)
+		seed = append(seed,
+			PromptPart{Role: RoleUser, Text: userText},
+			PromptPart{Role: RoleModel, Text: "I need to think first, the goal here is probably: " + effectiveGoal},
+		)
+		return seed
+	}
+
+	// Create a shared Tools: nil contemplation conversation seeded with seedWithGoal
+	// so Steps, Relevancy, Safety, and Groundedness can fork from it via
+	// litert_lm_conversation_clone (ToolContext.CloneConversation) without re-prefilling
+	// the entire conversation history four times.
+	var goalPrefixConv *Conversation
+	if s.ephemeralStream == nil && s.engine != nil {
+		if conv, cerr := s.engine.NewConversationWithConfig(ConversationConfig{
+			SystemMessage: s.systemMessageWithToolNames(),
+			Tools:         nil,
+			History:       seedWithGoal(*baseHistory),
+		}); cerr == nil {
+			goalPrefixConv = conv
+			defer goalPrefixConv.Close()
+		}
+	}
+
+	// Stage 3: Step Ideation (<steps>)
+	var steps string
+	if used, clonedOut, cerr := s.streamClonedStage(ctx, goalPrefixConv, []PromptPart{{Role: RoleUser, Text: stage2TriggerPrompt}}, "steps", streamer); used && cerr == nil {
+		steps = clonedOut
+	} else {
+		steps, err = s.runEphemeralStage(ctx, baseHistory, seedWithGoal, stage2TriggerPrompt, s.systemMessage, "steps", streamer)
+		if err != nil {
+			return nil, err
+		}
+	}
+	trace.InitialSteps = steps
+
+	// Stage 4: The Orthogonal Triple-Fork Critique (<relevancy>, <safety>, <grounded>)
+	critiqueSysMsg := s.systemMessageWithToolNames()
+
+	var relevancy string
+	if used, clonedOut, cerr := s.streamClonedStage(ctx, goalPrefixConv, []PromptPart{{Role: RoleUser, Text: stage3APrefix + steps}}, "relevancy", streamer); used && cerr == nil {
+		relevancy = clonedOut
+	} else {
+		relevancy, err = s.runEphemeralStage(ctx, baseHistory, seedWithGoal, stage3APrefix+steps, critiqueSysMsg, "relevancy", streamer)
+		if err != nil {
+			return nil, err
+		}
+	}
+	trace.CritiqueRelevancy = relevancy
+
+	var safety string
+	if used, clonedOut, cerr := s.streamClonedStage(ctx, goalPrefixConv, []PromptPart{{Role: RoleUser, Text: stage3BPrefix + steps}}, "safety", streamer); used && cerr == nil {
+		safety = clonedOut
+	} else {
+		safety, err = s.runEphemeralStage(ctx, baseHistory, seedWithGoal, stage3BPrefix+steps, critiqueSysMsg, "safety", streamer)
+		if err != nil {
+			return nil, err
+		}
+	}
+	trace.CritiqueSafety = safety
+
+	var grounded string
+	if used, clonedOut, cerr := s.streamClonedStage(ctx, goalPrefixConv, []PromptPart{{Role: RoleUser, Text: stage3CPrefix + steps}}, "grounded", streamer); used && cerr == nil {
+		grounded = clonedOut
+	} else {
+		grounded, err = s.runEphemeralStage(ctx, baseHistory, seedWithGoal, stage3CPrefix+steps, critiqueSysMsg, "grounded", streamer)
+		if err != nil {
+			return nil, err
+		}
+	}
+	trace.CritiqueGrounded = grounded
+
+	// Stage 5: The Tribunal Join & Plan Formulation (<plan>)
+	seedStage5Plan := func(base []PromptPart) []PromptPart {
+		seed := make([]PromptPart, 0, len(base)+4)
+		seed = append(seed, base...)
+		seed = append(seed,
+			PromptPart{Role: RoleUser, Text: userText},
+			PromptPart{Role: RoleModel, Text: "I need to think first, the goal here is probably: " + effectiveGoal},
+			PromptPart{Role: RoleUser, Text: "Maybe these steps would get us there?\n" + steps},
+			PromptPart{
+				Role: RoleModel,
+				Text: "I have analysed those proposed steps from three angles:\n- Relevancy: " + relevancy + "\n- Safety & Risks: " + safety + "\n- Information Grounding: " + grounded,
+			},
+		)
+		return seed
+	}
+	plan, err := s.runEphemeralStage(ctx, baseHistory, seedStage5Plan, stage4TriggerPrompt, s.systemMessage, "plan", streamer)
+	if err != nil {
+		return nil, err
+	}
+	trace.SynthesizedPlan = plan
+
+	return &DeliberateOutput{
+		Goal:           effectiveGoal,
+		ExpectedDetail: detailLevel,
+		Steps:          steps,
+		Plan:           plan,
+	}, nil
 }
 
 func (s *Session) streamOnce(ctx context.Context, cfg ConversationConfig, trigger []PromptPart, onEvent func(ModelEvent) bool) error {
@@ -879,7 +1171,15 @@ func (s *Session) runStage5Execution(
 				var toolResponses []PromptPart
 				for _, call := range toolCalls {
 					explanation := extractToolExplanation(call)
-					result := s.executeTool(ctx, call)
+					tc := &ToolContext{
+						Session:     s,
+						Engine:      s.engine,
+						Feedback:    s.emitFeedback,
+						baseHistory: baseHistory,
+						userText:    userText,
+						streamer:    streamer,
+					}
+					result := s.executeTool(ctx, tc, call)
 					s.emitFeedback("\n")
 					toolResponses = append(toolResponses, PromptPart{
 						Role:         RoleTool,
@@ -961,7 +1261,16 @@ func (s *Session) runStage5Execution(
 			var toolResponses []PromptPart
 			for _, call := range toolCalls {
 				explanation := extractToolExplanation(call)
-				result := s.executeTool(ctx, call)
+				tc := &ToolContext{
+					Session:      s,
+					Engine:       s.engine,
+					Conversation: ephemeralConv,
+					Feedback:     s.emitFeedback,
+					baseHistory:  baseHistory,
+					userText:     userText,
+					streamer:     streamer,
+				}
+				result := s.executeTool(ctx, tc, call)
 				s.emitFeedback("\n")
 				toolResponses = append(toolResponses, PromptPart{
 					Role:         RoleTool,
@@ -1114,93 +1423,41 @@ func (s *Session) RunTurn(ctx context.Context, userText string) error {
 		finalAnswer = stage1Text
 	} else {
 		goal := stage1Text
-		trace.Goal = goal
+		goalJSON, _ := json.Marshal(struct {
+			Goal        string `json:"goal"`
+			Explanation string `json:"explanation"`
+		}{
+			Goal:        goal,
+			Explanation: "Deliberate on the goal, expected response detail, steps, critiques, and execution plan.",
+		})
 
-		// Stage 2: Expectation Calibration (<detail_level>)
-		seedExpectation := func(base []PromptPart) []PromptPart {
-			seed := make([]PromptPart, 0, len(base)+2)
-			seed = append(seed, base...)
-			seed = append(seed,
-				PromptPart{Role: RoleUser, Text: userText},
-				PromptPart{Role: RoleModel, Text: stageExpectSyntheticWait},
-			)
-			return seed
+		tc := &ToolContext{
+			Session:      s,
+			Engine:       s.engine,
+			Conversation: s.conv,
+			Feedback:     s.emitFeedback,
+			baseHistory:  &baseHistory,
+			userText:     userText,
+			streamer:     streamer,
+			trace:        trace,
 		}
-		detailLevel, err := s.runEphemeralStage(ctx, &baseHistory, seedExpectation, stageExpectTriggerPrompt, s.systemMessage, "expectation", streamer)
+
+		delibTool := s.toolRegistry[DeliberateToolName]
+		delibRes, err := delibTool.ExecuteWithContext(ctx, tc, ToolCall{
+			Name:         DeliberateToolName,
+			RawArguments: goalJSON,
+		})
 		if err != nil {
 			restorePersistentConv()
 			return err
 		}
-		trace.ExpectedDetail = detailLevel
-
-		effectiveGoal := goal
-		if detailLevel != "" {
-			effectiveGoal = goal + "\nExpected response detail: " + detailLevel
+		delibOut, _ := delibRes.(*DeliberateOutput)
+		var effectiveGoal, detailLevel, plan string
+		if delibOut != nil {
+			effectiveGoal = delibOut.Goal
+			detailLevel = delibOut.ExpectedDetail
+			plan = delibOut.Plan
 		}
-
-		seedWithGoal := func(base []PromptPart) []PromptPart {
-			seed := make([]PromptPart, 0, len(base)+2)
-			seed = append(seed, base...)
-			seed = append(seed,
-				PromptPart{Role: RoleUser, Text: userText},
-				PromptPart{Role: RoleModel, Text: "I need to think first, the goal here is probably: " + effectiveGoal},
-			)
-			return seed
-		}
-
-		// Stage 3: Step Ideation (<steps>)
-		steps, err := s.runEphemeralStage(ctx, &baseHistory, seedWithGoal, stage2TriggerPrompt, s.systemMessage, "steps", streamer)
-		if err != nil {
-			restorePersistentConv()
-			return err
-		}
-		trace.InitialSteps = steps
-
-		// Stage 4: The Orthogonal Triple-Fork Critique (<relevancy>, <safety>, <grounded>)
-		critiqueSysMsg := s.systemMessageWithToolNames()
-
-		relevancy, err := s.runEphemeralStage(ctx, &baseHistory, seedWithGoal, stage3APrefix+steps, critiqueSysMsg, "relevancy", streamer)
-		if err != nil {
-			restorePersistentConv()
-			return err
-		}
-		trace.CritiqueRelevancy = relevancy
-
-		safety, err := s.runEphemeralStage(ctx, &baseHistory, seedWithGoal, stage3BPrefix+steps, critiqueSysMsg, "safety", streamer)
-		if err != nil {
-			restorePersistentConv()
-			return err
-		}
-		trace.CritiqueSafety = safety
-
-		grounded, err := s.runEphemeralStage(ctx, &baseHistory, seedWithGoal, stage3CPrefix+steps, critiqueSysMsg, "grounded", streamer)
-		if err != nil {
-			restorePersistentConv()
-			return err
-		}
-		trace.CritiqueGrounded = grounded
-
-		// Stage 5: The Tribunal Join & Plan Formulation (<plan>)
-		seedStage5Plan := func(base []PromptPart) []PromptPart {
-			seed := make([]PromptPart, 0, len(base)+4)
-			seed = append(seed, base...)
-			seed = append(seed,
-				PromptPart{Role: RoleUser, Text: userText},
-				PromptPart{Role: RoleModel, Text: "I need to think first, the goal here is probably: " + effectiveGoal},
-				PromptPart{Role: RoleUser, Text: "Maybe these steps would get us there?\n" + steps},
-				PromptPart{
-					Role: RoleModel,
-					Text: "I have analysed those proposed steps from three angles:\n- Relevancy: " + relevancy + "\n- Safety & Risks: " + safety + "\n- Information Grounding: " + grounded,
-				},
-			)
-			return seed
-		}
-		plan, err := s.runEphemeralStage(ctx, &baseHistory, seedStage5Plan, stage4TriggerPrompt, s.systemMessage, "plan", streamer)
-		if err != nil {
-			restorePersistentConv()
-			return err
-		}
-		trace.SynthesizedPlan = plan
 
 		// Stage 6: Execution ("Let It Rip" — <work_and_answer>)
 		toolParts, workAndAnswer, err := s.runStage5Execution(ctx, &baseHistory, userText, effectiveGoal, plan, streamer)

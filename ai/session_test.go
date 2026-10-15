@@ -144,7 +144,7 @@ func TestSessionToolDispatchReturnsErrorResults(t *testing.T) {
 		{name: "missing", want: "unknown tool: missing"},
 		{name: "fail", want: "failed execution"},
 	} {
-		result, _ := session.executeTool(context.Background(), ToolCall{Name: test.name}).(map[string]any)
+		result, _ := session.executeTool(context.Background(), nil, ToolCall{Name: test.name}).(map[string]any)
 		if result["error"] != test.want {
 			t.Fatalf("dispatch %q error = %v, want %q", test.name, result["error"], test.want)
 		}
@@ -708,5 +708,91 @@ func TestRunTurnFull7StageReflectivePipelineAndIcebergReplant(t *testing.T) {
 	s.FlushEmbeddings()
 	if len(tr.TraceEmbeddings) != 1 || len(tr.TraceEmbeddings[0]) == 0 {
 		t.Fatalf("expected TraceEmbeddings to be populated by background embedder, got %#v", tr.TraceEmbeddings)
+	}
+}
+
+func TestDeliberateToolAndNativeCloneConversation(t *testing.T) {
+	// 1. Verify ToolContext.CloneConversation delegates to Conversation.Clone (litert_lm_conversation_clone)
+	d := newFakeDrv()
+	d.onSend = func(d *fakeDrv, ud uint64) {
+		go func() {
+			d.emit(ud, `{"role":"assistant","content":[{"type":"text","text":"cloned reply"}]}`, false, "")
+			d.emit(ud, "", true, "")
+		}()
+	}
+	baseConv := &Conversation{impl: &convImpl{backend: newTestBackend(d)}}
+	tc := &ToolContext{Conversation: baseConv}
+
+	cloned, err := tc.CloneConversation(context.Background())
+	if err != nil {
+		t.Fatalf("CloneConversation failed: %v", err)
+	}
+	defer cloned.Close()
+
+	var clonedText strings.Builder
+	for ev, err := range cloned.SendStream(context.Background(), []PromptPart{{Role: RoleUser, Text: "ping"}}) {
+		if err != nil {
+			t.Fatalf("cloned SendStream error: %v", err)
+		}
+		if te, ok := ev.(TextEvent); ok {
+			clonedText.WriteString(te.Text)
+		}
+	}
+	if got := clonedText.String(); got != "cloned reply" {
+		t.Fatalf("cloned conversation output = %q, want %q", got, "cloned reply")
+	}
+
+	// 2. Verify invoking the built-in "deliberate" tool directly via executeTool / ToolContext
+	var feedback strings.Builder
+	s, err := NewSession(SessionConfig{
+		SystemMessage: "You are an assistant.",
+		Tools:         sessionTestTools(),
+		OnFeedback:    func(text string) { _, _ = feedback.WriteString(text) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var subStage int
+	s.ephemeralStream = func(ctx context.Context, cfg ConversationConfig, trigger []PromptPart, onEvent func(ModelEvent) bool) error {
+		subStage++
+		if cfg.Tools != nil {
+			t.Fatalf("deliberate sub-stage %d must strip tools (Tools: nil)", subStage)
+		}
+		switch subStage {
+		case 1: // expectation
+			onEvent(TextEvent{Text: "One concise sentence."})
+		case 2: // steps
+			onEvent(TextEvent{Text: "Step 1: inspect file."})
+		case 3, 4, 5: // 3 critiques
+			onEvent(TextEvent{Text: "Looks good."})
+		case 6: // plan
+			onEvent(TextEvent{Text: "Read file and report."})
+		}
+		return nil
+	}
+
+	trace := &CognitiveTrace{}
+	baseHist := []PromptPart{}
+	delibTC := &ToolContext{
+		Session:     s,
+		Feedback:    s.emitFeedback,
+		baseHistory: &baseHist,
+		userText:    "Check config",
+		trace:       trace,
+	}
+	res := s.executeTool(context.Background(), delibTC, ToolCall{
+		Name:         DeliberateToolName,
+		RawArguments: json.RawMessage(`{"goal":"Verify config settings","explanation":"need structured plan"}`),
+	})
+	out, ok := res.(*DeliberateOutput)
+	if !ok || out == nil {
+		t.Fatalf("expected *DeliberateOutput from deliberate tool, got %#v", res)
+	}
+	if out.ExpectedDetail != "One concise sentence." || out.Plan != "Read file and report." {
+		t.Fatalf("unexpected DeliberateOutput: %#v", out)
+	}
+	if trace.Goal != "Verify config settings" || trace.SynthesizedPlan != "Read file and report." {
+		t.Fatalf("expected CognitiveTrace to be populated by deliberate tool, got %#v", trace)
 	}
 }
