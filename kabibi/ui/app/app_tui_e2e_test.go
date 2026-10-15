@@ -15,6 +15,7 @@ import (
 	xterm "github.com/charmbracelet/x/term"
 	"github.com/charmbracelet/x/vt"
 	"github.com/mavity/rusticated/kabibi/ui"
+	"github.com/mavity/rusticated/kabibi/ui/shell"
 )
 
 type syncBuffer struct {
@@ -241,7 +242,6 @@ func TestAppTUI_EndToEnd_RealFilesystemAndAIFallback(t *testing.T) {
 		"$ Name a bridge in Paris",
 		"Pont Alexandre III is a famous bridge in Paris.",
 		"$ exit",
-		"$",
 	}
 
 	if len(nonEmptyScreenLines) != len(wantExactLines) {
@@ -252,6 +252,11 @@ func TestAppTUI_EndToEnd_RealFilesystemAndAIFallback(t *testing.T) {
 		if nonEmptyScreenLines[i] != wantExactLines[i] {
 			t.Errorf("screen line[%d] = %q, want %q", i, nonEmptyScreenLines[i], wantExactLines[i])
 		}
+	}
+
+	// Verify there are no vertical cursor jumps (\x1b[...;1H) in Zero-Plume inline mode
+	if strings.Contains(rawTermOut.String(), ";1H") {
+		t.Errorf("Zero-Plume inline mode emitted absolute row jump sequence (;1H): %q", rawTermOut.String())
 	}
 }
 
@@ -375,7 +380,6 @@ func TestAppTUI_EndToEnd_ScrollbackEjectionOnSmallViewport(t *testing.T) {
 		"$ echo line_6 > f.txt && cat f.txt",
 		"line_6",
 		"$ exit",
-		"$",
 	}
 
 	if len(nonEmptyAllLines) != len(wantFullHistoryAndViewport) {
@@ -431,37 +435,37 @@ func TestAppTUI_TrailingSpaceAndCursorMovementUpdatesImmediately(t *testing.T) {
 	// Wait for initial frame
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if strings.Contains(rawTermOut.String(), "\x1b[24;3H") {
+		if strings.Contains(rawTermOut.String(), "$") {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// Type "echo" -> cursor should move to column 7 (1-based: "$ echo" is 6 chars -> col 7)
+	// Type "echo" -> cursor should move to columnIndex 6 (\r\x1b[6C)
 	_, _ = io.WriteString(inW, "echo")
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if strings.Contains(rawTermOut.String(), "\x1b[24;7H") {
+		if strings.Contains(rawTermOut.String(), "\x1b[6C") || strings.Contains(rawTermOut.String(), "\x1b[24;7H") {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if !strings.Contains(rawTermOut.String(), "\x1b[24;7H") {
-		t.Fatalf("expected cursor at col 7 after typing 'echo', got:\n%q", rawTermOut.String())
+	if !strings.Contains(rawTermOut.String(), "\x1b[6C") && !strings.Contains(rawTermOut.String(), "\x1b[24;7H") {
+		t.Fatalf("expected cursor at colIndex 6 after typing 'echo', got:\n%q", rawTermOut.String())
 	}
 
-	// Now type a single trailing space " " -> even though cell (6, 23) was already ' ',
-	// the cursor MUST immediately advance to column 8 (\x1b[24;8H) without waiting for another char!
+	// Now type a single trailing space " " -> even though cell (6, 0) was already ' ',
+	// the cursor MUST immediately advance to columnIndex 7 (\x1b[7C) without waiting for another char!
 	_, _ = io.WriteString(inW, " ")
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if strings.Contains(rawTermOut.String(), "\x1b[24;8H") {
+		if strings.Contains(rawTermOut.String(), "\x1b[7C") || strings.Contains(rawTermOut.String(), "\x1b[24;8H") {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if !strings.Contains(rawTermOut.String(), "\x1b[24;8H") {
-		t.Fatalf("trailing space did not immediately advance terminal cursor to col 8:\n%q", rawTermOut.String())
+	if !strings.Contains(rawTermOut.String(), "\x1b[7C") && !strings.Contains(rawTermOut.String(), "\x1b[24;8H") {
+		t.Fatalf("trailing space did not immediately advance terminal cursor to colIndex 7:\n%q", rawTermOut.String())
 	}
 
 	_, _ = io.WriteString(inW, "\x03exit\r")
@@ -469,5 +473,39 @@ func TestAppTUI_TrailingSpaceAndCursorMovementUpdatesImmediately(t *testing.T) {
 	case <-runDone:
 	case <-time.After(3 * time.Second):
 		t.Fatal("Host.RunWithIO did not exit")
+	}
+}
+
+// TestAppTUI_ModeToggle_ZeroPlumeAndPlumeHistory verifies that ShellMode can be
+// toggled cleanly between ModeZeroPlume (1-row active prompt with immediate line
+// ejection) and ModePlumeHistory (full-viewport multi-block rendering retained
+// for future file-panel integration).
+func TestAppTUI_ModeToggle_ZeroPlumeAndPlumeHistory(t *testing.T) {
+	workDir := t.TempDir()
+
+	var scrollback []string
+	wZero := NewWidget(AppWidgetOptions{
+		WorkingDir:        workDir,
+		ShellMode:         shell.ModeZeroPlume,
+		WriteToScrollback: func(s string) { scrollback = append(scrollback, s) },
+	})
+	defer wZero.Close()
+
+	if got := wZero.Measure(ui.Constraints{MaxW: 80, MaxH: 24}); got != (ui.Size{W: 80, H: 1}) {
+		t.Fatalf("ModeZeroPlume Measure() = %#v, want {W:80, H:1}", got)
+	}
+	bufZero, curZero := wZero.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 24}, ui.RenderContext{Focused: true})
+	if bufZero.Height != 1 || curZero.Y != 0 {
+		t.Fatalf("ModeZeroPlume Render() height=%d cursorY=%d, want height=1 cursorY=0", bufZero.Height, curZero.Y)
+	}
+
+	// Switch dynamically to ModePlumeHistory and verify full-viewport Measure & Render
+	wZero.Shell().SetMode(shell.ModePlumeHistory)
+	if got := wZero.Measure(ui.Constraints{MaxW: 80, MaxH: 24}); got != (ui.Size{W: 80, H: 24}) {
+		t.Fatalf("ModePlumeHistory Measure() = %#v, want {W:80, H:24}", got)
+	}
+	bufPlume, curPlume := wZero.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 24}, ui.RenderContext{Focused: true})
+	if bufPlume.Height != 24 || curPlume.Y != 23 {
+		t.Fatalf("ModePlumeHistory Render() height=%d cursorY=%d, want height=24 cursorY=23", bufPlume.Height, curPlume.Y)
 	}
 }
