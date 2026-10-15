@@ -18,6 +18,7 @@ require (
 	github.com/mattn/go-runewidth v0.0.30
 	mvdan.cc/sh/moreinterp v0.0.0-20260602220355-3aa9ec1fa7d0
 	mvdan.cc/sh/v3 v3.14.1
+	ai v0.0.0-00010101000000-000000000000
 )
 
 require (
@@ -60,6 +61,7 @@ require (
 )
 
 replace (
+	ai => ../ai
 	github.com/atotto/clipboard => ../mohabbat/rusticated-jit/github.com/atotto/clipboard
 	github.com/charmbracelet/bubbletea => ../mohabbat/rusticated-jit/github.com/charmbracelet/bubbletea
 	github.com/charmbracelet/x/term => ../mohabbat/rusticated-jit/github.com/charmbracelet/x/term

@@ -173,7 +173,7 @@ copyArtifact:
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(outPath, bytes, 0755); err != nil {
+	if err := writeFileIfChangedMode(outPath, bytes, 0o755); err != nil {
 		return "", err
 	}
 	return targetName, nil
