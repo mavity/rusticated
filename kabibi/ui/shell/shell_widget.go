@@ -122,6 +122,13 @@ func (s *Shell) Close() error {
 	return nil
 }
 
+// IsRunning reports whether a foreground shell command or AI turn is currently active.
+func (s *Shell) IsRunning() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.running
+}
+
 // WaitActive blocks until any currently executing command or AI turn finishes.
 func (s *Shell) WaitActive() {
 	s.mu.Lock()

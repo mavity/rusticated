@@ -51,9 +51,12 @@ type Host struct {
 	out *bufio.Writer
 
 	// Logical cursor position returned by the focused widget tree.
-	cursorX, cursorY int
-	cursorVisible    bool
+	cursorX, cursorY                   int
+	cursorVisible                      bool
+	prevCursorX, prevCursorY           int
+	prevCursorVisible, hasRenderedOnce bool
 
+	scrollbackMu    sync.Mutex
 	scrollbackQueue []string
 
 	msgCh         chan hostMsg
@@ -97,20 +100,53 @@ func (h *Host) invalidateCore(
 // Run enters terminal raw mode, delivers an initial frame, and blocks on the
 // input loop until Stop is called or stdin closes.
 func (h *Host) Run() error {
-	return h.runCore(term.MakeRaw, term.Restore)
+	return h.runCore(os.Stdin, os.Stdout, term.MakeRaw, term.Restore, term.GetSize)
+}
+
+// RunWithIO runs the full Host event loop against custom input/output streams,
+// raw-mode hooks, and size query function. This allows deterministic end-to-end
+// TUI tests to drive the exact same Host loop as production without mocking widgets.
+func (h *Host) RunWithIO(
+	in io.Reader,
+	out io.Writer,
+	makeRawFunc func(uintptr) (*term.State, error),
+	restoreFunc func(uintptr, *term.State) error,
+	getSizeFunc func(fd uintptr) (w, ht int, err error),
+) error {
+	return h.runCore(in, out, makeRawFunc, restoreFunc, getSizeFunc)
 }
 
 func (h *Host) runCore(
+	in io.Reader,
+	out io.Writer,
 	makeRawFunc func(uintptr) (*term.State, error),
 	restoreFunc func(uintptr, *term.State) error,
+	getSizeFunc func(fd uintptr) (w, ht int, err error),
 ) (err error) {
+	if in == nil {
+		in = os.Stdin
+	}
+	if out != nil {
+		h.out = bufio.NewWriterSize(out, 64*1024)
+	} else if h.out == nil {
+		h.out = bufio.NewWriterSize(os.Stdout, 64*1024)
+	}
+	if getSizeFunc == nil {
+		getSizeFunc = term.GetSize
+	}
 
 	// enterRawMode puts stdin into raw mode and enables SGR mouse tracking.
 	// Uses golang.org/x/term.MakeRaw for cross-platform compatibility across
 	// Linux, macOS, BSD, and Windows.
 	state := &term.State{}
 
+	var inputReader *input.Reader
+
 	defer func() {
+		if inputReader != nil {
+			_ = inputReader.Cancel()
+			_ = inputReader.Close()
+		}
 		h.out.WriteString("\x1b[?1006l\x1b[?1000l")
 		h.out.Flush()
 		if restoreFunc != nil && state != nil {
@@ -122,10 +158,12 @@ func (h *Host) runCore(
 		}
 	}()
 
-	state, err = makeRawFunc(os.Stdin.Fd())
-	if err != nil {
-		state = nil
-		return err
+	if makeRawFunc != nil {
+		state, err = makeRawFunc(os.Stdin.Fd())
+		if err != nil {
+			state = nil
+			return err
+		}
 	}
 	h.prevTermState = state
 	h.out.WriteString("\x1b[?1000h\x1b[?1006h")
@@ -158,16 +196,29 @@ func (h *Host) runCore(
 	// Initial render
 	h.Invalidate()
 
+	r, err := input.NewReader(in, "", 0)
+	if err == nil {
+		inputReader = r
+	}
+
 	// Start reading input in background producer goroutine
 	inputDone := make(chan struct{})
 	go func() {
 		defer close(inputDone)
-		h.readInputLoop(os.Stdin)
+		if inputReader != nil {
+			h.readInputLoopWithReader(inputReader)
+		}
 	}()
 
 	// Run central event coordinator loop on this main host goroutine
-	h.processLoop(term.GetSize)
-	<-inputDone
+	h.processLoop(getSizeFunc)
+
+	// Cancel and close the input reader so readInputLoop unblocks immediately when Stop() is called
+	if inputReader != nil {
+		_ = inputReader.Cancel()
+		_ = inputReader.Close()
+		inputReader = nil
+	}
 	return nil
 }
 
@@ -280,9 +331,9 @@ func (h *Host) writeToScrollbackCore(
 	text string,
 	_ func(fd uintptr) (w, ht int, err error),
 ) {
-	h.mu.Lock()
+	h.scrollbackMu.Lock()
 	h.scrollbackQueue = append(h.scrollbackQueue, text)
-	h.mu.Unlock()
+	h.scrollbackMu.Unlock()
 
 	h.sendMsg(hostMsg{kind: hostMsgScrollback, scrollback: text})
 }
@@ -327,14 +378,27 @@ func (h *Host) runFrame(
 
 	// Span detection: find the minimum dirty row range.
 	lineMin, lineMax, changed := h.spanDetect()
-	if !changed {
+	cursorChanged := !h.hasRenderedOnce ||
+		h.cursorX != h.prevCursorX ||
+		h.cursorY != h.prevCursorY ||
+		h.cursorVisible != h.prevCursorVisible
+
+	if !changed && !cursorChanged {
 		return
 	}
 
-	h.emitDirtyRegion(lineMin, lineMax)
+	if changed {
+		h.emitDirtyRegion(lineMin, lineMax)
+		// Buffer swap recycles both backing arrays without an O(W*H) copy.
+		terminal.SwapBufCells(&h.currBuf, &h.prevBuf)
+	} else {
+		h.emitCursorOnly()
+	}
 
-	// Buffer swap recycles both backing arrays without an O(W*H) copy.
-	terminal.SwapBufCells(&h.currBuf, &h.prevBuf)
+	h.prevCursorX = h.cursorX
+	h.prevCursorY = h.cursorY
+	h.prevCursorVisible = h.cursorVisible
+	h.hasRenderedOnce = true
 }
 
 // spanDetect performs a forward scan (find iMin) and backward scan (find iMax)
@@ -383,14 +447,22 @@ func (h *Host) emitDirtyRegion(lineMin, lineMax int) {
 	h.out.WriteString(terminal.ToANSI(subBuf))
 
 	// 3. Show or hide hardware cursor depending on active focus state.
+	h.writeCursorSequence()
+	h.out.Flush()
+}
+
+func (h *Host) emitCursorOnly() {
+	h.writeCursorSequence()
+	h.out.Flush()
+}
+
+func (h *Host) writeCursorSequence() {
 	if h.cursorVisible {
 		h.out.WriteString("\x1b[?25h")
 		fmt.Fprintf(h.out, "\x1b[%d;%dH", h.cursorY+1, h.cursorX+1)
 	} else {
 		h.out.WriteString("\x1b[?25l")
 	}
-
-	h.out.Flush()
 }
 
 // ── Scrollback archival ───────────────────────────────────────────────────────
@@ -410,8 +482,10 @@ func (h *Host) runScrollbackFrame(
 	}
 
 	// Drain the queue only after validation succeeds.
+	h.scrollbackMu.Lock()
 	lines := h.scrollbackQueue
 	h.scrollbackQueue = nil
+	h.scrollbackMu.Unlock()
 	if len(lines) == 0 {
 		return
 	}
@@ -441,19 +515,21 @@ func (h *Host) runScrollbackFrame(
 	fmt.Fprintf(h.out, "\x1b[%d;1H", ht)
 
 	// 2. Emit parsed scrollback buffer rows with viewport advancement.
-	h.out.WriteString(terminal.ToANSI(scrollBuf))
+	if scrollBuf.Height > 0 {
+		h.out.WriteString("\r\n")
+		h.out.WriteString(terminal.ToANSI(scrollBuf))
+	}
 
 	// 3. Full UI redraw over the now-advanced viewport.
 	h.out.WriteString("\x1b[H")
 	h.out.WriteString(terminal.ToANSI(h.currBuf))
 
 	// 4. Show or hide hardware cursor.
-	if h.cursorVisible {
-		h.out.WriteString("\x1b[?25h")
-		fmt.Fprintf(h.out, "\x1b[%d;%dH", h.cursorY+1, h.cursorX+1)
-	} else {
-		h.out.WriteString("\x1b[?25l")
-	}
+	h.writeCursorSequence()
+	h.prevCursorX = h.cursorX
+	h.prevCursorY = h.cursorY
+	h.prevCursorVisible = h.cursorVisible
+	h.hasRenderedOnce = true
 
 	// 5. Sync prevBuf so the next spanDetect() correctly compares against the new screen state.
 	copy(h.prevBuf.Cells(), h.currBuf.Cells())
@@ -472,12 +548,14 @@ func (h *Host) readInputLoop(in io.Reader) {
 		return
 	}
 	defer r.Close()
+	h.readInputLoopWithReader(r)
+}
 
+func (h *Host) readInputLoopWithReader(r *input.Reader) {
 	for {
 		if h.stopCh != nil {
 			select {
 			case <-h.stopCh:
-				_ = r.Close()
 				return
 			default:
 			}
@@ -497,7 +575,6 @@ func (h *Host) readInputLoop(in io.Reader) {
 
 		select {
 		case <-h.stopCh:
-			_ = r.Close()
 			return
 		case res := <-resultCh:
 			if res.err == io.EOF {
