@@ -11,29 +11,50 @@ import (
 type AppWidget struct {
 	sh              *shell.Shell
 	writeScrollback func(string)
+	onExit          func()
 }
 
 // AppWidgetOptions contains initial parameters and service bindings for AppWidget.
 type AppWidgetOptions struct {
 	WriteToScrollback func(string)
+	OnExit            func()
 }
 
 // NewWidget constructs a clean AppWidget instance.
 func NewWidget(opts AppWidgetOptions) *AppWidget {
 	w := &AppWidget{
 		writeScrollback: opts.WriteToScrollback,
+		onExit:          opts.OnExit,
 	}
 
-	// Initialize child shell widget with a callback delegating to writeScrollback[cite: 1]
+	// Initialize child shell widget with a callback delegating to writeScrollback
 	w.sh = shell.New(shell.ShellOptions{
 		WriteToScrollback: func(text string) {
 			if w.writeScrollback != nil {
 				w.writeScrollback(text)
 			}
 		},
+		OnExit: func() {
+			if w.onExit != nil {
+				w.onExit()
+			}
+		},
 	})
 
 	return w
+}
+
+// SetExitHandler binds or updates the exit callback post-construction.
+func (w *AppWidget) SetExitHandler(fn func()) {
+	w.onExit = fn
+}
+
+// Close releases resources held by the widget and its embedded shell.
+func (w *AppWidget) Close() error {
+	if w.sh != nil {
+		return w.sh.Close()
+	}
+	return nil
 }
 
 // SetScrollbackWriter binds or updates the scrollback callback post-construction.

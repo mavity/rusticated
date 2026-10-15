@@ -25,6 +25,11 @@ func Boot() (*AppWidget, *ui.Host, error) {
 
 	app := NewWidget(AppWidgetOptions{
 		WriteToScrollback: writeToScrollbackDelegate,
+		OnExit: func() {
+			if h != nil {
+				h.Stop()
+			}
+		},
 	})
 
 	// Create Host with Shell as root widget

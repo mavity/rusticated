@@ -186,9 +186,6 @@ func buildBrainWasm(ws, outputWasm string, verbose bool) error {
 
 func goBuild(ws, pkgDir string, s slot, buildDir string, verbose bool) error {
 	outPath := washmhostPath(buildDir, s)
-	if err := os.Remove(outPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove stale output %s: %w", outPath, err)
-	}
 	goTmpDir := filepath.Join(buildDir, pkgDir, "gotmp", s.name)
 	goCacheDir := filepath.Join(buildDir, pkgDir, "gocache", s.name)
 	if err := os.MkdirAll(goTmpDir, 0o755); err != nil {
@@ -241,7 +238,7 @@ func goBuild(ws, pkgDir string, s slot, buildDir string, verbose bool) error {
 		return fmt.Errorf("%s build for %s produced 0 bytes", pkgDir, s.name)
 	}
 
-	if err := os.WriteFile(outPath, buildResult, 0755); err != nil {
+	if err := writeFileIfChangedMode(outPath, buildResult, 0o755); err != nil {
 		return fmt.Errorf("write %s to %s: %w", pkgDir, outPath, err)
 	}
 	return nil

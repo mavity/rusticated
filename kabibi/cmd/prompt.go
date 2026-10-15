@@ -1,21 +1,27 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
+
+	"github.com/mavity/rusticated/kabibi/ui/shell"
 )
 
-// RunPrompt is STUBBED FOR STEP 1 - interactive TUI only
-// TODO: Re-implement prompt mode by exporting ui/chat or ui/shell symbols
+// RunPrompt executes a one-shot AI or shell prompt and exits.
 func RunPrompt(prompt string) {
-	fmt.Fprintf(os.Stderr, "Prompt mode not yet available (stubbed for Step 1)\n")
-	os.Exit(1)
+	exitCode, err := shell.ExecuteOneShotLine(context.Background(), prompt, false, os.Stdout)
+	if err != nil && exitCode == 0 {
+		exitCode = 1
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kabibi: %v\n", err)
+	}
+	os.Exit(exitCode)
 }
 
-// RunPromptWithSession is for testing - left as placeholder
+// RunPromptWithSession is for testing.
 func RunPromptWithSession(ctx interface{}, session interface{}, prompt string) error {
-	fmt.Fprintf(os.Stderr, "RunPromptWithSession not yet available\n")
-	os.Exit(1)
-	return nil
+	_, err := shell.ExecuteOneShotLine(context.Background(), prompt, false, os.Stdout)
+	return err
 }
-

@@ -1,21 +1,35 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
+
+	"github.com/mavity/rusticated/kabibi/ui/shell"
 )
 
-// RunBatchCommand is STUBBED FOR STEP 1 - interactive TUI only
-// TODO: Re-implement batch mode by exporting ui/shell symbols
+// RunBatchCommand executes a command or AI prompt in headless batch mode and exits.
 func RunBatchCommand(cmdStr string, args []string) {
-	fmt.Fprintf(os.Stderr, "Batch command mode not yet available (stubbed for Step 1)\n")
-	os.Exit(1)
+	exitCode, err := shell.ExecuteOneShotLine(context.Background(), cmdStr, false, os.Stdout)
+	if err != nil && exitCode == 0 {
+		exitCode = 1
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kabibi: %v\n", err)
+	}
+	os.Exit(exitCode)
 }
 
-// RunBatchFile is STUBBED FOR STEP 1 - interactive TUI only
-// TODO: Re-implement batch file mode by exporting ui/shell symbols
+// RunBatchFile executes a shell script file in headless batch mode and exits.
 func RunBatchFile(filePath string, args []string) {
-	fmt.Fprintf(os.Stderr, "Batch file mode not yet available (stubbed for Step 1)\n")
-	os.Exit(1)
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kabibi: %v\n", err)
+		os.Exit(1)
+	}
+	exitCode, runErr := shell.ExecuteOneShotLine(context.Background(), string(data), false, os.Stdout)
+	if runErr != nil && exitCode == 0 {
+		exitCode = 1
+	}
+	os.Exit(exitCode)
 }
-

@@ -34,6 +34,11 @@ func New() *App {
 				hostPtr.WriteToScrollback(text)
 			}
 		},
+		OnExit: func() {
+			if hostPtr != nil {
+				hostPtr.Stop()
+			}
+		},
 	})
 
 	// Create Host with Shell as root widget
