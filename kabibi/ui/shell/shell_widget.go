@@ -55,12 +55,8 @@ type Shell struct {
 	bannerFlushed bool
 	exiting       bool
 
-	// Input buffer (for currently active incomplete command)
-	inputValue   string
-	inputFocus   bool
-	cursorPos    int
-	inputHistory []string
-	historyIdx   int
+	// Segregated prompt + command-line input widget
+	input *PromptInput
 
 	// Layout
 	width  int
@@ -97,13 +93,18 @@ func New(opts ShellOptions) *Shell {
 		width:       80,
 		height:      24,
 		prompt:      "$ ",
-		inputFocus:  true,
-		historyIdx:  -1,
 		activeBlock: -1,
 		execSess:    execSess,
 		aiRunner:    aiRunner,
 		opts:        opts,
 	}
+	s.input = NewPromptInput(PromptInputOptions{
+		Prompt: func() string {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			return s.prompt
+		},
+	})
 
 	// Add initial welcome message as a pseudo-CommandBlock
 	s.blocks = append(s.blocks, CommandBlock{
@@ -192,34 +193,31 @@ func (s *Shell) Blocks() []CommandBlock {
 	return res
 }
 
+// Input returns the embedded PromptInput widget.
+func (s *Shell) Input() *PromptInput {
+	return s.input
+}
+
 // SetInput sets the input buffer and cursor position for testing/snapshot generation.
 // This is a pragmatic helper for snapshot testing to avoid complex event construction.
 func (s *Shell) SetInput(value string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.inputValue = value
-	s.cursorPos = len([]rune(value))
+	s.input.SetValue(value)
 }
 
 // SetCursorPos sets the cursor position for testing/snapshot generation.
 func (s *Shell) SetCursorPos(pos int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if pos < 0 {
-		s.cursorPos = 0
-	} else if pos > len([]rune(s.inputValue)) {
-		s.cursorPos = len([]rune(s.inputValue))
-	} else {
-		s.cursorPos = pos
-	}
+	s.input.SetCursorPos(pos)
 }
 
 // SubmitCurrentInput adds the current input to history as a CommandBlock and clears the input buffer.
 // In ModeZeroPlume, it also immediately ejects the submitted prompt line to WriteToScrollback.
 func (s *Shell) SubmitCurrentInput() {
+	rawInput := s.input.Value()
+	prompt := s.input.PromptText()
+	s.input.AddHistory(rawInput)
+	s.input.Reset()
+
 	s.mu.Lock()
-	rawInput := s.inputValue
-	prompt := s.prompt
 	mode := s.mode
 	writeSB := s.opts.WriteToScrollback
 	block := CommandBlock{
@@ -230,8 +228,6 @@ func (s *Shell) SubmitCurrentInput() {
 		ExitCode: 0,
 	}
 	s.blocks = append(s.blocks, block)
-	s.inputValue = ""
-	s.cursorPos = 0
 	s.mu.Unlock()
 
 	if mode == ModeZeroPlume && writeSB != nil {
@@ -242,16 +238,14 @@ func (s *Shell) SubmitCurrentInput() {
 // ExecuteLine submits and executes a line through the Shell's smart classifier
 // (Shell first -> AI fallback) and waits for completion.
 func (s *Shell) ExecuteLine(line string) {
-	s.mu.Lock()
-	s.inputValue = line
-	s.cursorPos = len([]rune(line))
-	s.mu.Unlock()
+	s.input.SetValue(line)
 	s.submitAndExecuteAsync()
 	s.WaitActive()
 }
 
 // Measure implements ui.Widget by reporting the shell's space requirements.
-// In ModeZeroPlume, the shell widget occupies a fixed 1-row height for the active prompt/status line.
+// In ModeZeroPlume, the shell widget measures the active prompt/input height
+// (1 row when idle or running, or up to the PromptInput cap when wrapped).
 // In ModePlumeHistory, it requests the full available constraints.
 func (s *Shell) Measure(c ui.Constraints) ui.Size {
 	w := c.MaxW
@@ -260,9 +254,14 @@ func (s *Shell) Measure(c ui.Constraints) ui.Size {
 	}
 	s.mu.Lock()
 	mode := s.mode
+	running := s.running
+	exiting := s.exiting
 	s.mu.Unlock()
 	if mode == ModeZeroPlume {
-		return ui.Size{W: w, H: 1}
+		if running || exiting {
+			return ui.Size{W: w, H: 1}
+		}
+		return s.input.Measure(c)
 	}
 	h := c.MaxH
 	if h <= 0 {
@@ -315,13 +314,9 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 			s.bannerFlushed = true
 			bannerText = s.blocks[0].Output.String()
 		}
-		prompt := s.prompt
-		inputValue := s.inputValue
-		cursorPos := s.cursorPos
 		running := s.running
 		exiting := s.exiting
 		statusLine := s.statusLine
-		inputFocus := s.inputFocus && !running && !exiting
 		s.mu.Unlock()
 
 		if needBanner {
@@ -332,41 +327,33 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 		if w <= 0 {
 			w = 80
 		}
-		buf := ui.NewCellBuf(w, 1)
-		inputStyle := terminal.NewStyle(0, 0, terminal.CharResetForegroundDefault|terminal.CharResetBackgroundDefault)
 
-		displayLine := prompt + inputValue
-		if exiting {
-			displayLine = ""
-		} else if running {
-			displayLine = statusLine
-		}
-
-		col := 0
-		for _, ch := range displayLine {
-			if col >= w {
-				break
+		if exiting || running {
+			buf := ui.NewCellBuf(w, 1)
+			inputStyle := terminal.NewStyle(0, 0, terminal.CharResetForegroundDefault|terminal.CharResetBackgroundDefault)
+			displayLine := ""
+			if !exiting && running {
+				displayLine = statusLine
 			}
-			buf.Set(col, 0, terminal.Cell{
-				Grapheme: string(ch),
-				Style:    inputStyle,
-			})
-			col++
+			col := 0
+			for _, ch := range displayLine {
+				if col >= w {
+					break
+				}
+				buf.Set(col, 0, terminal.Cell{
+					Grapheme: string(ch),
+					Style:    inputStyle,
+				})
+				col++
+			}
+			return buf, ui.CursorPos{
+				X:       0,
+				Y:       0,
+				Visible: false,
+			}
 		}
 
-		cursorX := len([]rune(prompt)) + cursorPos
-		if cursorX > w-1 {
-			cursorX = w - 1
-		}
-		if cursorX < 0 {
-			cursorX = 0
-		}
-
-		return buf, ui.CursorPos{
-			X:       cursorX,
-			Y:       0,
-			Visible: inputFocus,
-		}
+		return s.input.Render(rect, ctx)
 	}
 
 	blocksSnapshot := make([]CommandBlock, len(s.blocks))
@@ -380,14 +367,26 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 		}
 	}
 	previouslyEjected := s.previouslyEjected
-	prompt := s.prompt
-	inputValue := s.inputValue
-	cursorPos := s.cursorPos
-	inputFocus := s.inputFocus && !s.running
+	running := s.running
 	s.mu.Unlock()
 
 	// Allocate output buffer
 	buf := ui.NewCellBuf(rect.W, rect.H)
+
+	// Measure and render the prompt input widget first so we know how many rows it occupies at the bottom
+	inputSize := s.input.Measure(ui.Constraints{MaxW: rect.W, MaxH: rect.H})
+	inputH := inputSize.H
+	if inputH < 1 {
+		inputH = 1
+	}
+	if rect.H > 0 && inputH > rect.H {
+		inputH = rect.H
+	}
+	inputCtx := ctx
+	if running {
+		inputCtx.Focused = false
+	}
+	inputBuf, inputCursor := s.input.Render(ui.Rect{X: 0, Y: 0, W: rect.W, H: rect.H}, inputCtx)
 
 	// ===== EJECTION ENGINE =====
 	// Calculate total visual line height
@@ -397,7 +396,10 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 	}
 
 	// Calculate target ejection boundary: max(0, total_rows - viewport_height)
-	hViewport := rect.H - 1 // Reserve 1 row for input prompt
+	hViewport := rect.H - inputBuf.Height
+	if hViewport < 0 {
+		hViewport = 0
+	}
 	hTarget := hTotal - hViewport
 	if hTarget < 0 {
 		hTarget = 0
@@ -455,34 +457,21 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 		rowsSeen = rowsEnd
 	}
 
-	// Render input line at bottom
-	inputY := rect.H - 1
-	inputLine := prompt + inputValue
-
-	inputStyle := terminal.NewStyle(0, 0, terminal.CharResetForegroundDefault|terminal.CharResetBackgroundDefault)
-	col := 0
-	for _, ch := range inputLine {
-		if col >= rect.W {
-			break
-		}
-		cell := terminal.Cell{
-			Grapheme: string(ch),
-			Style:    inputStyle,
-		}
-		buf.Set(col, inputY, cell)
-		col++
+	// Blit rendered PromptInput at the bottom of the viewport
+	inputTopY := rect.H - inputBuf.Height
+	if inputTopY < 0 {
+		inputTopY = 0
 	}
-
-	// Cursor position: at prompt + cursorPos within input
-	cursorX := len([]rune(prompt)) + cursorPos
-	if cursorX > rect.W-1 {
-		cursorX = rect.W - 1
+	for y := 0; y < inputBuf.Height && inputTopY+y < buf.Height; y++ {
+		for x := 0; x < rect.W && x < inputBuf.Width; x++ {
+			buf.Set(x, inputTopY+y, inputBuf.Get(x, y))
+		}
 	}
 
 	cursor := ui.CursorPos{
-		X:       cursorX,
-		Y:       inputY,
-		Visible: inputFocus,
+		X:       inputCursor.X,
+		Y:       inputTopY + inputCursor.Y,
+		Visible: inputCursor.Visible && !running,
 	}
 
 	return buf, cursor
@@ -530,10 +519,22 @@ func (s *Shell) HandleEvent(e input.Event) bool {
 		return false
 
 	case input.PasteEvent:
-		return s.insertText(string(evt))
+		s.mu.Lock()
+		running := s.running
+		s.mu.Unlock()
+		if running {
+			return false
+		}
+		return s.input.HandleEvent(evt)
 	case *input.PasteEvent:
 		if evt != nil {
-			return s.insertText(string(*evt))
+			s.mu.Lock()
+			running := s.running
+			s.mu.Unlock()
+			if running {
+				return false
+			}
+			return s.input.HandleEvent(*evt)
 		}
 		return false
 
@@ -560,27 +561,6 @@ func (s *Shell) HandleEvent(e input.Event) bool {
 	}
 }
 
-func (s *Shell) insertText(text string) bool {
-	if text == "" {
-		return false
-	}
-	// Strip newlines in single-line input mode
-	clean := strings.ReplaceAll(strings.ReplaceAll(text, "\r", " "), "\n", " ")
-	s.mu.Lock()
-	if !s.inputFocus || s.running {
-		s.mu.Unlock()
-		return false
-	}
-	runes := []rune(s.inputValue)
-	ins := []rune(clean)
-	runes = append(runes[:s.cursorPos], append(ins, runes[s.cursorPos:]...)...)
-	s.inputValue = string(runes)
-	s.cursorPos += len(ins)
-	s.mu.Unlock()
-	s.invalidate()
-	return true
-}
-
 func (s *Shell) handleKeyEvent(ev input.KeyPressEvent) bool {
 	keyStr := ev.String()
 
@@ -593,148 +573,28 @@ func (s *Shell) handleKeyEvent(ev input.KeyPressEvent) bool {
 			cancel()
 			return true
 		}
-		if s.inputValue != "" {
-			s.inputValue = ""
-			s.cursorPos = 0
-			s.mu.Unlock()
+		s.mu.Unlock()
+		if s.input.Value() != "" {
+			s.input.Reset()
 			s.invalidate()
 			return true
 		}
-		s.mu.Unlock()
 		return false
 	}
 
 	s.mu.Lock()
-	if !s.inputFocus || s.running {
-		s.mu.Unlock()
+	running := s.running
+	s.mu.Unlock()
+	if running || !s.input.Focused() {
 		return false
 	}
-	s.mu.Unlock()
 
-	switch keyStr {
-	case "enter":
+	if keyStr == "enter" {
 		s.submitAndExecuteAsync()
 		return true
-
-	case "backspace":
-		s.mu.Lock()
-		if s.cursorPos > 0 {
-			runes := []rune(s.inputValue)
-			runes = append(runes[:s.cursorPos-1], runes[s.cursorPos:]...)
-			s.inputValue = string(runes)
-			s.cursorPos--
-			s.mu.Unlock()
-			s.invalidate()
-			return true
-		}
-		s.mu.Unlock()
-		return true
-
-	case "delete":
-		s.mu.Lock()
-		runes := []rune(s.inputValue)
-		if s.cursorPos < len(runes) {
-			runes = append(runes[:s.cursorPos], runes[s.cursorPos+1:]...)
-			s.inputValue = string(runes)
-			s.mu.Unlock()
-			s.invalidate()
-			return true
-		}
-		s.mu.Unlock()
-		return true
-
-	case "left":
-		s.mu.Lock()
-		if s.cursorPos > 0 {
-			s.cursorPos--
-			s.mu.Unlock()
-			s.invalidate()
-			return true
-		}
-		s.mu.Unlock()
-		return true
-
-	case "right":
-		s.mu.Lock()
-		if s.cursorPos < len([]rune(s.inputValue)) {
-			s.cursorPos++
-			s.mu.Unlock()
-			s.invalidate()
-			return true
-		}
-		s.mu.Unlock()
-		return true
-
-	case "up":
-		s.mu.Lock()
-		if len(s.inputHistory) > 0 {
-			if s.historyIdx < 0 {
-				s.historyIdx = len(s.inputHistory) - 1
-			} else if s.historyIdx > 0 {
-				s.historyIdx--
-			}
-			s.inputValue = s.inputHistory[s.historyIdx]
-			s.cursorPos = len([]rune(s.inputValue))
-			s.mu.Unlock()
-			s.invalidate()
-			return true
-		}
-		s.mu.Unlock()
-		return true
-
-	case "down":
-		s.mu.Lock()
-		if s.historyIdx >= 0 {
-			if s.historyIdx < len(s.inputHistory)-1 {
-				s.historyIdx++
-				s.inputValue = s.inputHistory[s.historyIdx]
-			} else {
-				s.historyIdx = -1
-				s.inputValue = ""
-			}
-			s.cursorPos = len([]rune(s.inputValue))
-			s.mu.Unlock()
-			s.invalidate()
-			return true
-		}
-		s.mu.Unlock()
-		return true
-
-	case "home", "ctrl+a":
-		s.mu.Lock()
-		if s.cursorPos != 0 {
-			s.cursorPos = 0
-			s.mu.Unlock()
-			s.invalidate()
-			return true
-		}
-		s.mu.Unlock()
-		return true
-
-	case "end", "ctrl+e":
-		s.mu.Lock()
-		endPos := len([]rune(s.inputValue))
-		if s.cursorPos != endPos {
-			s.cursorPos = endPos
-			s.mu.Unlock()
-			s.invalidate()
-			return true
-		}
-		s.mu.Unlock()
-		return true
-
-	case "space":
-		return s.insertText(" ")
-
-	default:
-		if ev.Text != "" {
-			return s.insertText(ev.Text)
-		}
-		if len(keyStr) == 1 && keyStr[0] >= 32 && keyStr[0] < 127 {
-			return s.insertText(keyStr)
-		}
 	}
-	return false
+
+	return s.input.HandleEvent(ev)
 }
 
 func (s *Shell) emitScrollbackLine(line string) {
@@ -744,9 +604,12 @@ func (s *Shell) emitScrollbackLine(line string) {
 }
 
 func (s *Shell) submitAndExecuteAsync() {
+	rawInput := s.input.Value()
+	prompt := s.input.PromptText()
+	s.input.AddHistory(rawInput)
+	s.input.Reset()
+
 	s.mu.Lock()
-	rawInput := s.inputValue
-	prompt := s.prompt
 	mode := s.mode
 	trimmed := strings.TrimSpace(rawInput)
 	block := CommandBlock{
@@ -758,13 +621,7 @@ func (s *Shell) submitAndExecuteAsync() {
 	}
 	s.blocks = append(s.blocks, block)
 	blockIdx := len(s.blocks) - 1
-	s.inputValue = ""
-	s.cursorPos = 0
-	s.historyIdx = -1
 	s.statusLine = ""
-	if trimmed != "" {
-		s.inputHistory = append(s.inputHistory, rawInput)
-	}
 
 	if trimmed == "" || s.execSess == nil {
 		s.blocks[blockIdx].Status = StatusSuccess

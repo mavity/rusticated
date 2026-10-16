@@ -57,6 +57,7 @@ type Host struct {
 	prevCursorX, prevCursorY           int
 	prevCursorVisible, hasRenderedOnce bool
 	inlineMode                         bool
+	prevInlineHeight                   int
 
 	scrollbackMu    sync.Mutex
 	scrollbackQueue []string
@@ -150,7 +151,10 @@ func (h *Host) runCore(
 			_ = inputReader.Close()
 		}
 		if h.inlineMode {
-			h.out.WriteString("\r\x1b[2K\x1b[?25h")
+			if h.prevCursorY > 0 {
+				fmt.Fprintf(h.out, "\x1b[%dA", h.prevCursorY)
+			}
+			h.out.WriteString("\r\x1b[2K\x1b[J\x1b[?25h")
 		}
 		h.out.WriteString("\x1b[?1006l\x1b[?1000l")
 		h.out.Flush()
@@ -378,36 +382,44 @@ func (h *Host) runFrame(
 	h.cursorY = cursor.Y
 	h.cursorVisible = cursor.Visible
 
-	// Inline 1-row mode (Zero-Plume): render on the current line using relative
-	// carriage returns (\r) without jumping to the bottom of the screen.
-	if rendered.Height == 1 && measured.H == 1 && ht > 1 {
+	// Inline mode (Zero-Plume): render the active prompt (1 or more wrapped rows)
+	// using relative cursor movement (\r / \x1b[A / \x1b[B) without jumping to
+	// absolute screen coordinates.
+	if rendered.Height > 0 && rendered.Height < ht && measured.H == rendered.Height && ht > 1 {
 		h.inlineMode = true
-		if h.currBuf.Width != w || h.currBuf.Height != 1 {
-			h.currBuf = terminal.NewCellBuf(w, 1)
-			h.prevBuf = terminal.NewCellBuf(w, 1)
+		inlineH := rendered.Height
+		heightChanged := h.currBuf.Width != w || h.currBuf.Height != inlineH
+		if heightChanged {
+			h.currBuf = terminal.NewCellBuf(w, inlineH)
+			h.prevBuf = terminal.NewCellBuf(w, inlineH)
 		}
 		copy(h.currBuf.Cells(), rendered.Cells())
 		_, _, changed := h.spanDetect()
+		if heightChanged {
+			changed = true
+		}
 		cursorChanged := !h.hasRenderedOnce ||
 			h.cursorX != h.prevCursorX ||
+			h.cursorY != h.prevCursorY ||
 			h.cursorVisible != h.prevCursorVisible
 		if !changed && !cursorChanged {
 			return
 		}
-		if changed {
-			h.out.WriteString("\r\x1b[2K")
-			h.out.WriteString(terminal.ToANSI(h.currBuf))
-			terminal.SwapBufCells(&h.currBuf, &h.prevBuf)
+
+		// Move terminal cursor back to the top row (row 0) of the inline region.
+		if h.hasRenderedOnce && h.prevCursorY > 0 {
+			fmt.Fprintf(h.out, "\x1b[%dA", h.prevCursorY)
 		}
-		if h.cursorVisible {
-			h.out.WriteString("\x1b[?25h\r")
-			if h.cursorX > 0 {
-				fmt.Fprintf(h.out, "\x1b[%dC", h.cursorX)
-			}
+
+		if changed {
+			h.renderInlineRows(inlineH)
+			terminal.SwapBufCells(&h.currBuf, &h.prevBuf)
+			h.positionInlineCursor(inlineH - 1)
 		} else {
-			h.out.WriteString("\x1b[?25l")
+			h.positionInlineCursor(0)
 		}
 		h.out.Flush()
+		h.prevInlineHeight = inlineH
 		h.prevCursorX = h.cursorX
 		h.prevCursorY = h.cursorY
 		h.prevCursorVisible = h.cursorVisible
@@ -415,6 +427,7 @@ func (h *Host) runFrame(
 		return
 	}
 	h.inlineMode = false
+	h.prevInlineHeight = 0
 
 	// Copy rendered frame into currBuf; widgets must overwrite every cell they own.
 	copy(h.currBuf.Cells(), rendered.Cells())
@@ -508,6 +521,55 @@ func (h *Host) writeCursorSequence() {
 	}
 }
 
+// renderInlineRows writes each row of h.currBuf starting from the current terminal
+// line (row 0 of the inline region) and clears any leftover rows below when the
+// inline region shrinks from h.prevInlineHeight to inlineH. Leaves the terminal
+// cursor on row inlineH-1.
+func (h *Host) renderInlineRows(inlineH int) {
+	for y := 0; y < inlineH; y++ {
+		if y > 0 {
+			h.out.WriteString("\r\n")
+		}
+		h.out.WriteString("\r\x1b[2K")
+		rowBuf := terminal.NewSubBuf(h.currBuf, y, 1)
+		// Strip CharSoftWrap on the last column of the 1-row subBuf so ToANSI
+		// treats each visual row independently with \r\n progression.
+		savedCell := rowBuf.Get(rowBuf.Width-1, 0)
+		if savedCell.Style.HasAttribute(terminal.CharSoftWrap) {
+			cleanCell := savedCell
+			cleanCell.Style = cleanCell.Style.RemoveAttribute(terminal.CharSoftWrap)
+			rowBuf.Set(rowBuf.Width-1, 0, cleanCell)
+			h.out.WriteString(terminal.ToANSI(rowBuf))
+			rowBuf.Set(rowBuf.Width-1, 0, savedCell)
+		} else {
+			h.out.WriteString(terminal.ToANSI(rowBuf))
+		}
+	}
+	if h.prevInlineHeight > inlineH {
+		// Clear any stale wrapped rows below the shrunk inline widget.
+		h.out.WriteString("\x1b[J")
+	}
+}
+
+// positionInlineCursor moves the terminal cursor from fromRow (relative to the
+// inline region top) to (h.cursorX, h.cursorY) and updates cursor visibility.
+func (h *Host) positionInlineCursor(fromRow int) {
+	dy := h.cursorY - fromRow
+	if dy < 0 {
+		fmt.Fprintf(h.out, "\x1b[%dA", -dy)
+	} else if dy > 0 {
+		fmt.Fprintf(h.out, "\x1b[%dB", dy)
+	}
+	if h.cursorVisible {
+		h.out.WriteString("\x1b[?25h\r")
+		if h.cursorX > 0 {
+			fmt.Fprintf(h.out, "\x1b[%dC", h.cursorX)
+		}
+	} else {
+		h.out.WriteString("\r\x1b[?25l")
+	}
+}
+
 // ── Scrollback archival ───────────────────────────────────────────────────────
 
 func (h *Host) runScrollbackFrame(
@@ -556,32 +618,34 @@ func (h *Host) runScrollbackFrame(
 	// with word-wrapping and ANSI style handling directly into cells.
 	scrollBuf := terminal.FromANSI(normalizedLines, w)
 
-	// Inline 1-row mode (Zero-Plume): clear the current prompt line with \r\x1b[2K,
-	// emit the scrollback lines followed by \r\n, and redraw the 1-row prompt on
-	// the new current line (without ever jumping to row 1 or row ht!).
-	if rendered.Height == 1 && measured.H == 1 && ht > 1 {
+	// Inline mode (Zero-Plume): move to top of the current inline region, clear
+	// from cursor to end of screen, emit the scrollback lines followed by \r\n,
+	// and redraw the inline prompt on the new current line(s) without jumping to
+	// absolute screen coordinates.
+	if rendered.Height > 0 && rendered.Height < ht && measured.H == rendered.Height && ht > 1 {
 		h.inlineMode = true
-		if h.currBuf.Width != w || h.currBuf.Height != 1 {
-			h.currBuf = terminal.NewCellBuf(w, 1)
-			h.prevBuf = terminal.NewCellBuf(w, 1)
+		inlineH := rendered.Height
+		if h.currBuf.Width != w || h.currBuf.Height != inlineH {
+			h.currBuf = terminal.NewCellBuf(w, inlineH)
+			h.prevBuf = terminal.NewCellBuf(w, inlineH)
 		}
 		copy(h.currBuf.Cells(), rendered.Cells())
 
+		if h.hasRenderedOnce && h.prevCursorY > 0 {
+			fmt.Fprintf(h.out, "\x1b[%dA", h.prevCursorY)
+		}
+
 		if scrollBuf.Height > 0 {
 			h.out.WriteString("\r\x1b[2K")
+			if h.prevInlineHeight > 1 {
+				h.out.WriteString("\x1b[J")
+			}
 			h.out.WriteString(terminal.ToANSI(scrollBuf))
 			h.out.WriteString("\r\n")
 		}
-		h.out.WriteString("\r\x1b[2K")
-		h.out.WriteString(terminal.ToANSI(h.currBuf))
-		if h.cursorVisible {
-			h.out.WriteString("\x1b[?25h\r")
-			if h.cursorX > 0 {
-				fmt.Fprintf(h.out, "\x1b[%dC", h.cursorX)
-			}
-		} else {
-			h.out.WriteString("\x1b[?25l")
-		}
+		h.prevInlineHeight = inlineH
+		h.renderInlineRows(inlineH)
+		h.positionInlineCursor(inlineH - 1)
 		copy(h.prevBuf.Cells(), h.currBuf.Cells())
 		h.prevCursorX = h.cursorX
 		h.prevCursorY = h.cursorY
@@ -591,6 +655,7 @@ func (h *Host) runScrollbackFrame(
 		return
 	}
 	h.inlineMode = false
+	h.prevInlineHeight = 0
 
 	// Guard: Restore buffer allocation if dimensions changed since last frame.
 	if h.currBuf.Width != w || h.currBuf.Height != ht {

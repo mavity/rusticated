@@ -795,4 +795,76 @@ func TestDeliberateToolAndNativeCloneConversation(t *testing.T) {
 	if trace.Goal != "Verify config settings" || trace.SynthesizedPlan != "Read file and report." {
 		t.Fatalf("expected CognitiveTrace to be populated by deliberate tool, got %#v", trace)
 	}
+
+	// 3. Verify that a tool created with NewSessionTool can modify or replace tc.Session
+	// (e.g., an advanced memory tool re-compacting or resurfacing salient memories)
+	// and the active turn immediately adopts the replaced Session's history!
+	type MemoryRecallInput struct {
+		_           struct{} `doc:"Resurface salient memories into session history." emoji:"🧲"`
+		Query       string   `json:"query" doc:"Memory search query"`
+		Explanation string   `json:"explanation" doc:"Why memory recall is needed"`
+	}
+
+	var observedHistoryInTurn2 []PromptPart
+	memSession, err := NewSession(SessionConfig{
+		SystemMessage: "You are an assistant.",
+		Tools: map[string]Tool{
+			"recall_memory": NewSessionTool(func(ctx context.Context, tc *ToolContext, in MemoryRecallInput) (any, error) {
+				// Construct a replacement Session with resurfaced memory in CompactedHistory
+				replacement := &Session{
+					CanonicalHistory: append([]PromptPart{
+						{Role: RoleUser, Text: "Salient memory: secret bridge is Pont Mirabeau"},
+						{Role: RoleModel, Text: "Noted."},
+					}, tc.Session.CanonicalHistory...),
+					CompactedHistory: []PromptPart{
+						{Role: RoleUser, Text: "Salient memory: secret bridge is Pont Mirabeau"},
+						{Role: RoleModel, Text: "Noted."},
+					},
+				}
+				tc.ReplaceSession(replacement)
+				return map[string]any{"resurfaced": 1}, nil
+			}),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var turnStep int
+	memSession.ephemeralStream = func(ctx context.Context, cfg ConversationConfig, trigger []PromptPart, onEvent func(ModelEvent) bool) error {
+		turnStep++
+		switch turnStep {
+		case 1: // Stage 1: GOAL
+			onEvent(TextEvent{Text: "GOAL: Recall the secret bridge."})
+		case 2: // Expectation
+			onEvent(TextEvent{Text: "Just the bridge name."})
+		case 3: // Steps
+			onEvent(TextEvent{Text: "Call recall_memory."})
+		case 4, 5, 6: // Critiques
+			onEvent(TextEvent{Text: "OK"})
+		case 7: // Plan
+			onEvent(TextEvent{Text: "Use recall_memory."})
+		case 8: // Stage 6 turn 1: call recall_memory
+			onEvent(ToolCallEvent{ToolCalls: []ToolCall{{
+				Name:         "recall_memory",
+				RawArguments: json.RawMessage(`{"query":"secret bridge","explanation":"fetch bridge from memory"}`),
+			}}})
+		case 9: // Stage 6 turn 2: verify cfg.History now contains the resurfaced memory from the replaced Session!
+			observedHistoryInTurn2 = append([]PromptPart(nil), cfg.History...)
+			onEvent(TextEvent{Text: "Pont Mirabeau"})
+		case 10: // Stage 7: Convergence
+			onEvent(TextEvent{Text: "Pont Mirabeau"})
+		}
+		return nil
+	}
+
+	if err := memSession.RunTurn(context.Background(), "What is the secret bridge?"); err != nil {
+		t.Fatal(err)
+	}
+	if len(observedHistoryInTurn2) == 0 || !strings.Contains(observedHistoryInTurn2[0].Text, "Pont Mirabeau") {
+		t.Fatalf("expected replaced session history to be immediately visible on next tool turn, got: %#v", observedHistoryInTurn2)
+	}
+	if !strings.Contains(memSession.CompactedHistory[0].Text, "Pont Mirabeau") {
+		t.Fatalf("expected memSession.CompactedHistory to retain replaced session state, got: %#v", memSession.CompactedHistory)
+	}
 }

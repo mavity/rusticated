@@ -1,0 +1,158 @@
+package shell
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/charmbracelet/x/input"
+	"github.com/mavity/rusticated/kabibi/ui"
+)
+
+func extractRowString(buf ui.CellBuf, y int) string {
+	var sb strings.Builder
+	for x := 0; x < buf.Width; x++ {
+		g := buf.Get(x, y).Grapheme
+		if g == "" {
+			continue
+		}
+		sb.WriteString(g)
+	}
+	return strings.TrimRight(sb.String(), " ")
+}
+
+func TestPromptInput_WrapAndShrinkBackToOneLine(t *testing.T) {
+	p := NewPromptInput(PromptInputOptions{})
+
+	// Initially empty -> 1 line ("$ ")
+	sz := p.Measure(ui.Constraints{MaxW: 10, MaxH: 24})
+	if sz != (ui.Size{W: 10, H: 1}) {
+		t.Fatalf("empty Measure() = %#v, want {W:10, H:1}", sz)
+	}
+
+	// Type 8 characters: "$ " (2) + "12345678" (8) = 10 columns -> cursor wraps to row 1 col 0
+	for _, r := range "12345678" {
+		p.HandleEvent(input.KeyPressEvent{Code: r, Text: string(r)})
+	}
+	sz = p.Measure(ui.Constraints{MaxW: 10, MaxH: 24})
+	if sz.H != 2 {
+		t.Fatalf("at exact width 10, Measure().H = %d, want 2 (cursor at col 0 of row 1)", sz.H)
+	}
+	buf, cur := p.Render(ui.Rect{X: 0, Y: 0, W: 10, H: 24}, ui.RenderContext{Focused: true})
+	if buf.Height != 2 || cur.X != 0 || cur.Y != 1 {
+		t.Fatalf("at exact width 10, Render() height=%d cur=(%d,%d), want height=2 cur=(0,1)", buf.Height, cur.X, cur.Y)
+	}
+
+	// Type 12 more characters -> total 22 columns -> 3 visual rows at width 10
+	for _, r := range "abcdefghijkl" {
+		p.HandleEvent(input.KeyPressEvent{Code: r, Text: string(r)})
+	}
+	sz = p.Measure(ui.Constraints{MaxW: 10, MaxH: 24})
+	if sz.H != 3 {
+		t.Fatalf("after 20 chars, Measure().H = %d, want 3", sz.H)
+	}
+	buf, cur = p.Render(ui.Rect{X: 0, Y: 0, W: 10, H: 24}, ui.RenderContext{Focused: true})
+	if got := extractRowString(buf, 0); got != "$ 12345678" {
+		t.Fatalf("row 0 = %q, want %q", got, "$ 12345678")
+	}
+	if got := extractRowString(buf, 1); got != "abcdefghij" {
+		t.Fatalf("row 1 = %q, want %q", got, "abcdefghij")
+	}
+	if got := extractRowString(buf, 2); got != "kl" {
+		t.Fatalf("row 2 = %q, want %q", got, "kl")
+	}
+	if cur.X != 2 || cur.Y != 2 {
+		t.Fatalf("cursor = (%d,%d), want (2,2)", cur.X, cur.Y)
+	}
+
+	// Delete characters with backspace until only "123" remains -> shrinks back to 1 row
+	for i := 0; i < 17; i++ {
+		p.HandleEvent(input.KeyPressEvent{Code: input.KeyBackspace})
+	}
+	if got := p.Value(); got != "123" {
+		t.Fatalf("Value() after backspaces = %q, want %q", got, "123")
+	}
+	sz = p.Measure(ui.Constraints{MaxW: 10, MaxH: 24})
+	if sz.H != 1 {
+		t.Fatalf("after deleting back to '123', Measure().H = %d, want 1", sz.H)
+	}
+	buf, cur = p.Render(ui.Rect{X: 0, Y: 0, W: 10, H: 24}, ui.RenderContext{Focused: true})
+	if buf.Height != 1 || cur.X != 5 || cur.Y != 0 {
+		t.Fatalf("after deleting back to '123', Render() height=%d cur=(%d,%d), want height=1 cur=(5,0)", buf.Height, cur.X, cur.Y)
+	}
+}
+
+func TestPromptInput_HeightCapSixLinesAndThreeQuartersScreen(t *testing.T) {
+	p := NewPromptInput(PromptInputOptions{})
+	// 100 chars at width 10 -> 11 visual rows un-capped
+	p.SetValue(strings.Repeat("x", 100))
+
+	// On a 24-row terminal, 3/4 of 24 = 18, so cap is min(6, 18) = 6 lines.
+	sz24 := p.Measure(ui.Constraints{MaxW: 10, MaxH: 24})
+	if sz24.H != 6 {
+		t.Fatalf("Measure(MaxW:10, MaxH:24).H = %d, want 6 (capped at 6 lines)", sz24.H)
+	}
+	buf24, cur24 := p.Render(ui.Rect{X: 0, Y: 0, W: 10, H: 24}, ui.RenderContext{Focused: true})
+	if buf24.Height != 6 {
+		t.Fatalf("Render(W:10, H:24).Height = %d, want 6", buf24.Height)
+	}
+	// Cursor at the end should be scrolled into view on the last visible row (row 5).
+	if cur24.Y != 5 {
+		t.Fatalf("cur24.Y = %d, want 5 (bottom of capped 6-row viewport)", cur24.Y)
+	}
+
+	// On a 6-row terminal, floor(3/4 * 6) = 4, so cap is min(6, 4) = 4 lines.
+	sz6 := p.Measure(ui.Constraints{MaxW: 10, MaxH: 6})
+	if sz6.H != 4 {
+		t.Fatalf("Measure(MaxW:10, MaxH:6).H = %d, want 4 (3/4 of 6-row screen)", sz6.H)
+	}
+	buf6, cur6 := p.Render(ui.Rect{X: 0, Y: 0, W: 10, H: 6}, ui.RenderContext{Focused: true})
+	if buf6.Height != 4 || cur6.Y != 3 {
+		t.Fatalf("Render(W:10, H:6) height=%d curY=%d, want height=4 curY=3", buf6.Height, cur6.Y)
+	}
+}
+
+func TestPromptInput_DynamicPromptAndWideUnicode(t *testing.T) {
+	cwd := "~/proj"
+	p := NewPromptInput(PromptInputOptions{
+		Prompt: func() string {
+			return cwd + " $ "
+		},
+	})
+
+	if got := p.PromptText(); got != "~/proj $ " {
+		t.Fatalf("PromptText() = %q, want %q", got, "~/proj $ ")
+	}
+
+	// Update dynamic state; PromptInput reflects new prompt width and text immediately
+	cwd = "/very/long/path"
+	p.SetValue("你好世界") // 4 wide CJK runes = 8 display columns
+	// "/very/long/path $ " is 18 columns + 8 columns = 26 columns -> 2 rows on width 20
+	sz := p.Measure(ui.Constraints{MaxW: 20, MaxH: 24})
+	if sz.H != 2 {
+		t.Fatalf("Measure() with dynamic prompt + CJK = %d, want 2", sz.H)
+	}
+	buf, cur := p.Render(ui.Rect{X: 0, Y: 0, W: 20, H: 24}, ui.RenderContext{Focused: true})
+	// Row 0: "/very/long/path $ 你" (18 + 2 = 20 cols)
+	// Row 1: "好世界" (6 cols) -> cursor at (6, 1)
+	if got := extractRowString(buf, 0); got != "/very/long/path $ 你" {
+		t.Fatalf("row 0 = %q, want %q", got, "/very/long/path $ 你")
+	}
+	if got := extractRowString(buf, 1); got != "好世界" {
+		t.Fatalf("row 1 = %q, want %q", got, "好世界")
+	}
+	if cur.X != 6 || cur.Y != 1 {
+		t.Fatalf("cursor = (%d,%d), want (6,1)", cur.X, cur.Y)
+	}
+}
+
+func TestPromptInput_ParentOwnsEnterAndCtrlC(t *testing.T) {
+	p := NewPromptInput(PromptInputOptions{})
+	p.SetValue("echo hi")
+
+	if p.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter}) {
+		t.Fatal("PromptInput should not consume Enter; parent handles submission")
+	}
+	if p.Value() != "echo hi" {
+		t.Fatalf("Value() mutated on Enter = %q, want %q", p.Value(), "echo hi")
+	}
+}

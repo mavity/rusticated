@@ -32,17 +32,37 @@ type LogFeedback func(text string)
 // DeliberateToolName is the canonical name of the built-in deliberation tool.
 const DeliberateToolName = "deliberate"
 
-// ToolContext provides explicit runtime capabilities (including native
-// conversation cloning and isolated contemplation helpers) to tool handlers.
+// ToolContext provides explicit runtime and session capabilities to tool
+// handlers, allowing tools to inspect, clone, modify, or replace the Session
+// and active Conversation in place.
 type ToolContext struct {
-	Session      *Session
-	Engine       *Engine
-	Conversation *Conversation
-	Feedback     LogFeedback
-	baseHistory  *[]PromptPart
-	userText     string
-	streamer     *liveStreamer
-	trace        *CognitiveTrace
+	Session        *Session
+	Engine         *Engine
+	Conversation   *Conversation
+	Feedback       LogFeedback
+	baseHistory    *[]PromptPart
+	userText       string
+	streamer       *liveStreamer
+	trace          *CognitiveTrace
+	sessionSwapped bool
+}
+
+// ReplaceSession replaces the current Session with next, transferring modified
+// history, compaction state, or configuration so subsequent turns and stages
+// continue seamlessly with the updated session state.
+func (tc *ToolContext) ReplaceSession(next *Session) {
+	if tc == nil || next == nil {
+		return
+	}
+	if tc.Session != nil && tc.Session != next {
+		tc.Session.AdoptSessionState(next)
+	} else {
+		tc.Session = next
+	}
+	if tc.baseHistory != nil && tc.Session != nil {
+		*tc.baseHistory = tc.Session.snapshotCompactedHistory()
+	}
+	tc.sessionSwapped = true
 }
 
 // CloneConversation creates a lightweight, zero-cost branched conversation handle
@@ -69,34 +89,61 @@ type Tool struct {
 // JSON Schema property and whether it is required (unless `omitempty` or a
 // pointer type is used).
 func NewTool[T any](fn func(ctx context.Context, in T, feedback LogFeedback) (any, error)) Tool {
+	return NewSessionTool(func(ctx context.Context, tc *ToolContext, in T) (any, error) {
+		var fb LogFeedback
+		if tc != nil {
+			fb = tc.Feedback
+		}
+		return fn(ctx, in, fb)
+	})
+}
+
+// NewSessionTool constructs a declarative Tool whose handler receives *ToolContext
+// directly, giving the tool full access to inspect, clone, modify, or replace
+// tc.Session (including CanonicalHistory and CompactedHistory).
+func NewSessionTool[T any](fn func(ctx context.Context, tc *ToolContext, in T) (any, error)) Tool {
 	t := reflect.TypeFor[T]()
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	if t.Kind() != reflect.Struct {
-		panic(fmt.Sprintf("ai.NewTool: input type must be a struct, got %v", t))
+		panic(fmt.Sprintf("ai.NewSessionTool: input type must be a struct, got %v", t))
 	}
 	description, properties, required := reflectStructSchema(t)
+	decode := func(call ToolCall) (T, error) {
+		var in T
+		raw := call.RawArguments
+		if len(raw) == 0 && call.Arguments != nil {
+			var err error
+			raw, err = json.Marshal(call.Arguments)
+			if err != nil {
+				return in, err
+			}
+		}
+		if len(raw) > 0 {
+			if err := json.Unmarshal(raw, &in); err != nil {
+				return in, fmt.Errorf("invalid arguments: %w", err)
+			}
+		}
+		return in, nil
+	}
 	return Tool{
 		Description: description,
 		Parameters:  properties,
 		Required:    required,
 		Execute: func(ctx context.Context, call ToolCall, feedback LogFeedback) (any, error) {
-			var in T
-			raw := call.RawArguments
-			if len(raw) == 0 && call.Arguments != nil {
-				var err error
-				raw, err = json.Marshal(call.Arguments)
-				if err != nil {
-					return nil, err
-				}
+			in, err := decode(call)
+			if err != nil {
+				return nil, err
 			}
-			if len(raw) > 0 {
-				if err := json.Unmarshal(raw, &in); err != nil {
-					return nil, fmt.Errorf("invalid arguments: %w", err)
-				}
+			return fn(ctx, &ToolContext{Feedback: feedback}, in)
+		},
+		ExecuteWithContext: func(ctx context.Context, tc *ToolContext, call ToolCall) (any, error) {
+			in, err := decode(call)
+			if err != nil {
+				return nil, err
 			}
-			return fn(ctx, in, feedback)
+			return fn(ctx, tc, in)
 		},
 	}
 }
@@ -320,6 +367,35 @@ func (s *Session) appendHistory(parts ...PromptPart) {
 	s.CompactedHistory = append(s.CompactedHistory, parts...)
 }
 
+// AdoptSessionState replaces s's mutable history, compaction state, and
+// configuration with next's state in a thread-safe manner. This allows a tool
+// that constructs or modifies a replacement *Session (and assigns tc.Session = next
+// or calls tc.ReplaceSession(next)) to update the live session in place.
+func (s *Session) AdoptSessionState(next *Session) {
+	if s == nil || next == nil || s == next {
+		return
+	}
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+
+	s.CanonicalHistory = append([]PromptPart(nil), next.CanonicalHistory...)
+	s.CompactedHistory = append([]PromptPart(nil), next.CompactedHistory...)
+	if next.systemMessage != "" {
+		s.systemMessage = next.systemMessage
+	}
+	if next.compactionLimit > 0 {
+		s.compactionLimit = next.compactionLimit
+	}
+	if len(next.tools) > 0 {
+		s.tools = next.tools
+		s.toolRegistry = next.toolRegistry
+	}
+	if next.artifactCache != nil {
+		s.artifactCache = next.artifactCache
+	}
+	s.embeddedUpTo = 0
+}
+
 func (s *Session) hasEmbedder() bool {
 	if s.embedder == nil {
 		return false
@@ -346,22 +422,47 @@ func (s *Session) emitContent(text string) {
 }
 
 // executeTool dispatches a model tool call and converts execution failures to
-// a result the model can inspect and recover from.
+// a result the model can inspect and recover from. If the tool modifies or
+// replaces tc.Session, the active session state and baseHistory are synchronized.
 func (s *Session) executeTool(ctx context.Context, tc *ToolContext, call ToolCall) any {
 	tool, ok := s.toolRegistry[call.Name]
 	if !ok {
 		return map[string]any{"error": "unknown tool: " + call.Name}
 	}
-	if tool.ExecuteWithContext != nil {
-		if tc == nil {
-			tc = &ToolContext{
-				Session:      s,
-				Engine:       s.engine,
-				Conversation: s.conv,
-				Feedback:     s.emitFeedback,
-			}
+	if tc == nil {
+		tc = &ToolContext{
+			Session:      s,
+			Engine:       s.engine,
+			Conversation: s.conv,
+			Feedback:     s.emitFeedback,
 		}
+	} else if tc.Session == nil {
+		tc.Session = s
+	}
+
+	prevCompactedLen := len(s.CompactedHistory)
+	var prevFirstText string
+	if prevCompactedLen > 0 {
+		prevFirstText = s.CompactedHistory[0].Text
+	}
+
+	syncSessionAfterTool := func() {
+		if tc.Session != nil && tc.Session != s {
+			s.AdoptSessionState(tc.Session)
+			tc.Session = s
+			tc.sessionSwapped = true
+		}
+		if len(s.CompactedHistory) != prevCompactedLen || (len(s.CompactedHistory) > 0 && s.CompactedHistory[0].Text != prevFirstText) {
+			tc.sessionSwapped = true
+		}
+		if tc.sessionSwapped && tc.baseHistory != nil {
+			*tc.baseHistory = s.snapshotCompactedHistory()
+		}
+	}
+
+	if tool.ExecuteWithContext != nil {
 		result, err := tool.ExecuteWithContext(ctx, tc, call)
+		syncSessionAfterTool()
 		if err != nil {
 			return map[string]any{"error": err.Error()}
 		}
@@ -371,10 +472,11 @@ func (s *Session) executeTool(ctx context.Context, tc *ToolContext, call ToolCal
 		return map[string]any{"error": "tool has no executor: " + call.Name}
 	}
 	fb := s.emitFeedback
-	if tc != nil && tc.Feedback != nil {
+	if tc.Feedback != nil {
 		fb = tc.Feedback
 	}
 	result, err := tool.Execute(ctx, call, fb)
+	syncSessionAfterTool()
 	if err != nil {
 		return map[string]any{"error": err.Error()}
 	}
@@ -779,40 +881,19 @@ type DeliberateInput struct {
 // uses ToolContext (and native Conversation.Clone when available) to execute
 // isolated, tool-free contemplation forks.
 func NewDeliberateTool() Tool {
-	description, properties, required := reflectStructSchema(reflect.TypeFor[DeliberateInput]())
-	return Tool{
-		Description: description,
-		Parameters:  properties,
-		Required:    required,
-		ExecuteWithContext: func(ctx context.Context, tc *ToolContext, call ToolCall) (any, error) {
-			if tc == nil || tc.Session == nil {
-				return nil, errors.New("ai: deliberate requires a valid ToolContext with Session")
-			}
-			var in DeliberateInput
-			if len(call.RawArguments) > 0 {
-				if err := json.Unmarshal(call.RawArguments, &in); err != nil {
-					return nil, fmt.Errorf("invalid arguments: %w", err)
-				}
-			} else if call.Arguments != nil {
-				if g, ok := call.Arguments["goal"].(string); ok {
-					in.Goal = g
-				}
-			}
-			goal := strings.TrimSpace(in.Goal)
-			if goal == "" && tc.trace != nil {
-				goal = strings.TrimSpace(tc.trace.Goal)
-			}
-			if goal == "" {
-				goal = tc.userText
-			}
-
-			out, err := tc.Session.executeDeliberationWithContext(ctx, tc, goal)
-			if err != nil {
-				return nil, err
-			}
-			return out, nil
-		},
-	}
+	return NewSessionTool(func(ctx context.Context, tc *ToolContext, in DeliberateInput) (any, error) {
+		if tc == nil || tc.Session == nil {
+			return nil, errors.New("ai: deliberate requires a valid ToolContext with Session")
+		}
+		goal := strings.TrimSpace(in.Goal)
+		if goal == "" && tc.trace != nil {
+			goal = strings.TrimSpace(tc.trace.Goal)
+		}
+		if goal == "" {
+			goal = tc.userText
+		}
+		return tc.Session.executeDeliberationWithContext(ctx, tc, goal)
+	})
 }
 
 // streamClonedStage attempts to fork parentConv via native litert_lm_conversation_clone
@@ -1283,6 +1364,7 @@ func (s *Session) runStage5Execution(
 				historyCursor = append(historyCursor, modelTurn)
 
 				var toolResponses []PromptPart
+				sessionMutated := false
 				for _, call := range toolCalls {
 					explanation := extractToolExplanation(call)
 					tc := &ToolContext{
@@ -1294,6 +1376,9 @@ func (s *Session) runStage5Execution(
 						streamer:    streamer,
 					}
 					result := s.executeTool(ctx, tc, call)
+					if tc.sessionSwapped {
+						sessionMutated = true
+					}
 					s.emitFeedback("\n")
 					toolResponses = append(toolResponses, PromptPart{
 						Role:         RoleTool,
@@ -1303,6 +1388,23 @@ func (s *Session) runStage5Execution(
 					})
 				}
 				executedToolParts = append(executedToolParts, toolResponses...)
+				if sessionMutated {
+					rebuilt := make([]PromptPart, 0, len(*baseHistory)+2+1+len(executedToolParts)-len(toolResponses))
+					rebuilt = append(rebuilt, *baseHistory...)
+					rebuilt = append(rebuilt,
+						PromptPart{Role: RoleUser, Text: userText},
+						PromptPart{
+							Role: RoleModel,
+							Text: "I need to think first. The goal here is: " + goal + "\nMy execution plan is:\n" + plan,
+						},
+						PromptPart{
+							Role: RoleUser,
+							Text: "I see what you mean. Please proceed with that plan now, using any necessary tools, and keep in mind the original request—answer it completely after your work is done:\n" + userText,
+						},
+					)
+					rebuilt = append(rebuilt, executedToolParts[:len(executedToolParts)-len(toolResponses)]...)
+					historyCursor = rebuilt
+				}
 				turnParts = toolResponses
 			}
 			if errors.Is(stageErr, context.Canceled) {
@@ -1373,6 +1475,7 @@ func (s *Session) runStage5Execution(
 			executedToolParts = append(executedToolParts, modelTurn)
 
 			var toolResponses []PromptPart
+			sessionMutated := false
 			for _, call := range toolCalls {
 				explanation := extractToolExplanation(call)
 				tc := &ToolContext{
@@ -1385,6 +1488,9 @@ func (s *Session) runStage5Execution(
 					streamer:     streamer,
 				}
 				result := s.executeTool(ctx, tc, call)
+				if tc.sessionSwapped {
+					sessionMutated = true
+				}
 				s.emitFeedback("\n")
 				toolResponses = append(toolResponses, PromptPart{
 					Role:         RoleTool,
@@ -1394,6 +1500,31 @@ func (s *Session) runStage5Execution(
 				})
 			}
 			executedToolParts = append(executedToolParts, toolResponses...)
+			if sessionMutated {
+				rebuilt := make([]PromptPart, 0, len(*baseHistory)+3+len(executedToolParts)-len(toolResponses))
+				rebuilt = append(rebuilt, *baseHistory...)
+				rebuilt = append(rebuilt,
+					PromptPart{Role: RoleUser, Text: userText},
+					PromptPart{
+						Role: RoleModel,
+						Text: "I need to think first. The goal here is: " + goal + "\nMy execution plan is:\n" + plan,
+					},
+					PromptPart{
+						Role: RoleUser,
+						Text: "I see what you mean. Please proceed with that plan now, using any necessary tools, and keep in mind the original request—answer it completely after your work is done:\n" + userText,
+					},
+				)
+				rebuilt = append(rebuilt, executedToolParts[:len(executedToolParts)-len(toolResponses)]...)
+				newConv, cerr := s.engine.NewConversationWithConfig(ConversationConfig{
+					SystemMessage: s.systemMessage,
+					Tools:         s.tools,
+					History:       rebuilt,
+				})
+				if cerr == nil {
+					ephemeralConv.Close()
+					ephemeralConv = newConv
+				}
+			}
 			turnParts = toolResponses
 		}
 		ephemeralConv.Close()
