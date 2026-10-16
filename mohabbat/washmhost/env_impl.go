@@ -596,6 +596,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_tty_set_mode), []api.ValueType{api.ValueTypeI64, api.ValueTypeI32}, []api.ValueType{}).Export("tty_set_mode")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_tty_get_size), []api.ValueType{api.ValueTypeI64}, []api.ValueType{api.ValueTypeI32}).Export("tty_get_size")
+	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_tty_set_size), []api.ValueType{api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("tty_set_size")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_fd_isatty), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("fd_isatty")
 
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_open), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("dylib_open")

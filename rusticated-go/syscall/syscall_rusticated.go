@@ -1,4 +1,4 @@
-﻿// This file replaces syscall/syscall_wasip1.go for the rusticated WASM host.
+// This file replaces syscall/syscall_wasip1.go for the rusticated WASM host.
 // It replaces the WASI clock import with the rusticated env.get_time ABI.
 
 // Copyright 2023 The Go Authors. All rights reserved.
@@ -396,6 +396,13 @@ func Syscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err Errno) {
 			ws := (*Winsize)(unsafe.Pointer(a3))
 			ws.Row = uint16(size & 0xFFFF)
 			ws.Col = uint16(size >> 16)
+			return 0, 0, 0
+		case TIOCSWINSZ:
+			ws := (*Winsize)(unsafe.Pointer(a3))
+			errCode := rusticated_tty_set_size(handle, uint32(ws.Col), uint32(ws.Row))
+			if errCode != 0 {
+				return 0, 0, Errno(errCode)
+			}
 			return 0, 0, 0
 		case TCSETS, TCSETSW, TCSETSF:
 			// Inspect the requested termios to decide on raw mode.

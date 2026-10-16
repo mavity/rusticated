@@ -128,7 +128,7 @@ func (h *HostEnv) sys_tty_get_size(ctx context.Context, apiMod api.Module, stack
 	handle := stack[0]
 
 	h.mu.Lock()
-	f, ok := h.handles[handle].(*os.File)
+	fAny, ok := h.handles[handle]
 	h.mu.Unlock()
 
 	if !ok {
@@ -137,13 +137,53 @@ func (h *HostEnv) sys_tty_get_size(ctx context.Context, apiMod api.Module, stack
 		return
 	}
 
-	width, height, err := term.GetSize(int(f.Fd()))
-	if err != nil {
-		width = 80
-		height = 24
+	if f, ok := fAny.(*os.File); ok {
+		width, height, err := term.GetSize(int(f.Fd()))
+		if err != nil {
+			width = 80
+			height = 24
+		}
+		stack[0] = uint64(uint32(width)<<16 | uint32(height))
+		return
 	}
 
-	stack[0] = uint64(uint32(width)<<16 | uint32(height))
+	stack[0] = uint64(uint32(80)<<16 | uint32(24))
+}
+
+func (h *HostEnv) sys_tty_set_size(ctx context.Context, apiMod api.Module, stack []uint64) {
+	handle := stack[0]
+	cols := int(stack[1])
+	rows := int(stack[2])
+
+	h.mu.Lock()
+	fAny, ok := h.handles[handle]
+	h.mu.Unlock()
+
+	if !ok {
+		stack[0] = uint64(wasiEBADF)
+		return
+	}
+
+	if pty, ok := fAny.(PtySession); ok {
+		err := pty.Resize(cols, rows)
+		if err != nil {
+			stack[0] = uint64(mapErrno(err))
+		} else {
+			stack[0] = uint64(wasiSuccess)
+		}
+		return
+	}
+
+	if f, ok := fAny.(*os.File); ok {
+		if !term.IsTerminal(int(f.Fd())) {
+			stack[0] = uint64(wasiENOTTY)
+			return
+		}
+		stack[0] = uint64(wasiSuccess)
+		return
+	}
+
+	stack[0] = uint64(wasiENOTTY)
 }
 
 // sys_fd_isatty implements the "env" import fd_isatty(fd int32) int32.
@@ -153,16 +193,20 @@ func (h *HostEnv) sys_fd_isatty(ctx context.Context, apiMod api.Module, stack []
 	fd := int64(stack[0]) // fd is passed as i32 but wazero sign-extends into uint64
 
 	h.mu.Lock()
-	f, ok := h.handles[uint64(fd)].(*os.File)
+	fAny, ok := h.handles[uint64(fd)]
 	h.mu.Unlock()
 
 	if !ok {
 		stack[0] = 0
 		return
 	}
-	if term.IsTerminal(int(f.Fd())) {
+	if _, ok := fAny.(PtySession); ok {
 		stack[0] = 1
-	} else {
-		stack[0] = 0
+		return
 	}
+	if f, ok := fAny.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+		stack[0] = 1
+		return
+	}
+	stack[0] = 0
 }

@@ -1,4 +1,4 @@
-﻿//go:build wasip1
+//go:build wasip1
 
 package syscall
 
@@ -181,6 +181,9 @@ func rusticated_fd_isatty(fd int32) int32
 
 //go:wasmimport env tty_get_size
 func rusticated_tty_get_size(handle uint64) uint32
+
+//go:wasmimport env tty_set_size
+func rusticated_tty_set_size(handle uint64, cols uint32, rows uint32) uint32
 
 //go:wasmimport env tty_set_mode
 func rusticated_tty_set_mode(handle uint64, mode int32)
@@ -768,6 +771,63 @@ func Pipe(fd []int) error {
 
 	fd[0] = int(fd_r)
 	fd[1] = int(fd_w)
+	return nil
+}
+
+// ProcessSpawnWithPty spawns a child process with a PTY using the rusticated ABI.
+// It returns (childHandle, ptyFd, err).
+func ProcessSpawnWithPty(cfg []byte) (uint64, int, error) {
+	if len(cfg) == 0 {
+		return 0, -1, EINVAL
+	}
+
+	// 64-byte extended overlapped structure
+	type spawnPtyContext struct {
+		gp          uintptr
+		o           Overlapped
+		childHandle uint64
+		ptyHandle   uint64
+		inHandle    uint64
+		outHandle   uint64
+		errHandle   uint64
+	}
+
+	var ctx spawnPtyContext
+	rusticated_process_spawn(unsafe.Pointer(&ctx.o), &cfg[0], uint32(len(cfg)))
+	awaitOverlapped((*overlappedContext)(unsafe.Pointer(&ctx)))
+
+	if ctx.o.hostError != 0 {
+		return 0, -1, errnoErr(Errno(ctx.o.hostError))
+	}
+
+	childHandle := ctx.childHandle
+	if childHandle == 0 {
+		childHandle = uint64(uint32(ctx.o.resultExt))
+	}
+
+	ptyHandle := ctx.ptyHandle
+	if ptyHandle == 0 {
+		ptyHandle = uint64(uint32(ctx.o.resultExt >> 32))
+	}
+
+	fd, errAlloc := allocFD(ptyHandle, "/dev/ptmx")
+	if errAlloc != 0 {
+		return childHandle, -1, errnoErr(errAlloc)
+	}
+
+	return childHandle, int(fd), nil
+}
+
+// RawTtySetSize exposes direct rusticated_tty_set_size for guest packages.
+func RawTtySetSize(fd int, cols, rows int) error {
+	entry, ok := fdMap[int32(fd)]
+	if !ok {
+		return EBADF
+	}
+	errCode := rusticated_tty_set_size(entry.handle, uint32(cols), uint32(rows))
+	if errCode != 0 {
+		return errnoErr(Errno(errCode))
+	}
 	return nil
 }
 func SetNonblock(fd int, nonblocking bool) error { return nil }
