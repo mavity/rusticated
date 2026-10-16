@@ -138,7 +138,8 @@ func (h *Host) runCore(
 		getSizeFunc = term.GetSize
 	}
 
-	// enterRawMode puts stdin into raw mode and enables SGR mouse tracking.
+	// enterRawMode puts stdin into raw mode. Mouse tracking stays disabled so
+	// the terminal handles normal mouse and scrollback behavior itself.
 	// Uses golang.org/x/term.MakeRaw for cross-platform compatibility across
 	// Linux, macOS, BSD, and Windows.
 	state := &term.State{}
@@ -175,7 +176,7 @@ func (h *Host) runCore(
 		}
 	}
 	h.prevTermState = state
-	h.out.WriteString("\x1b[?1000h\x1b[?1006h")
+	h.out.WriteString("\x1b[?1006l\x1b[?1000l")
 	h.out.Flush()
 
 	// exitRawMode is already deferred; recover catches widget panics and re-panics
