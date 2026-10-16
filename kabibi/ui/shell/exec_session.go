@@ -3,12 +3,14 @@ package shell
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
@@ -48,27 +50,6 @@ type CommandRecord struct {
 }
 
 const maxHistoryRecordOutput = 32768
-
-// coreutilNames enumerates the commands provided by mvdan.cc/sh/moreinterp/coreutils.
-var coreutilNames = map[string]bool{
-	"base64": true,
-	"cat":    true,
-	"chmod":  true,
-	"cp":     true,
-	"find":   true,
-	"gunzip": true,
-	"gzcat":  true,
-	"gzip":   true,
-	"ls":     true,
-	"mkdir":  true,
-	"mktemp": true,
-	"mv":     true,
-	"rm":     true,
-	"shasum": true,
-	"tar":    true,
-	"touch":  true,
-	"xargs":  true,
-}
 
 // dynamicWriter routes stdout/stderr writes from the persistent interp.Runner
 // to the currently active command buffer in a thread-safe manner.
@@ -184,15 +165,16 @@ func (es *ExecutionSession) envMapLocked() map[string]string {
 	return env
 }
 
-// ClassifyInput determines whether a line of user input should be handled as an
-// immediate builtin, executed in the mvdan shell runner, or routed to AI chat.
+// ClassifyInput determines whether a line of user input is empty, an immediate
+// lifecycle builtin (exit/quit), a syntactically valid shell command to hand to
+// mvdan/sh, or a syntax error that should route directly to AI chat.
 func (es *ExecutionSession) ClassifyInput(input string) (InputRoute, *syntax.File) {
 	trimmed := strings.TrimSpace(input)
 	if trimmed == "" {
 		return RouteEmpty, nil
 	}
 
-	// 1. Parse with mvdan.cc/sh/v3/syntax (LangBash by default).
+	// Parse with mvdan.cc/sh/v3/syntax (LangBash by default).
 	parser := syntax.NewParser(syntax.KeepComments(false))
 	file, err := parser.Parse(strings.NewReader(input), "")
 	if err != nil {
@@ -212,149 +194,16 @@ func (es *ExecutionSession) ClassifyInput(input string) (InputRoute, *syntax.Fil
 		}
 	}
 
-	es.mu.Lock()
-	defer es.mu.Unlock()
-
-	if es.areStmtsExecutableLocked(file.Stmts) {
-		return RouteShell, file
-	}
-	return RouteAI, nil
+	return RouteShell, file
 }
 
-func (es *ExecutionSession) areStmtsExecutableLocked(stmts []*syntax.Stmt) bool {
-	if len(stmts) == 0 {
-		return false
-	}
-	for _, stmt := range stmts {
-		if !es.isStmtExecutableLocked(stmt) {
-			return false
+func firstNonSpaceOffset(s string) (uint, bool) {
+	for i, r := range s {
+		if !unicode.IsSpace(r) {
+			return uint(i), true
 		}
 	}
-	return true
-}
-
-func (es *ExecutionSession) isStmtExecutableLocked(stmt *syntax.Stmt) bool {
-	if stmt == nil {
-		return false
-	}
-	if stmt.Cmd == nil {
-		// Standalone redirections (e.g., "> file.txt") are valid shell statements.
-		return len(stmt.Redirs) > 0
-	}
-
-	switch cmd := stmt.Cmd.(type) {
-	case *syntax.CallExpr:
-		// Pure variable assignments (e.g., FOO=bar) are valid shell commands.
-		if len(cmd.Args) == 0 {
-			return len(cmd.Assigns) > 0
-		}
-		// If the user explicitly attached redirections, backgrounding, negation, or
-		// inline env assignments (e.g. "FOO=1 ./run"), check the command or allow shell constructs.
-		head := cmd.Args[0]
-		if lit := head.Lit(); lit != "" {
-			return es.isCommandNameResolvableLocked(lit)
-		}
-		// Dynamic head word (e.g., "$CMD", "$(which go)", or quoted executable):
-		// treat explicit shell expansions/quotes at the head as shell intent.
-		return hasShellExpansionOrQuoting(head)
-
-	case *syntax.BinaryCmd:
-		// For pipelines (|), logical chains (&&, ||), both sides should begin with
-		// a valid shell statement so natural language with accidental operators doesn't misfire,
-		// or at minimum the left-hand command must be a valid shell command.
-		return es.isStmtExecutableLocked(cmd.X)
-
-	case *syntax.Subshell, *syntax.Block, *syntax.IfClause, *syntax.WhileClause,
-		*syntax.ForClause, *syntax.CaseClause, *syntax.ArithmCmd, *syntax.TestClause,
-		*syntax.DeclClause, *syntax.FuncDecl, *syntax.TimeClause, *syntax.CoprocClause,
-		*syntax.LetClause:
-		return true
-
-	default:
-		return true
-	}
-}
-
-func hasShellExpansionOrQuoting(w *syntax.Word) bool {
-	if w == nil {
-		return false
-	}
-	for _, part := range w.Parts {
-		switch part.(type) {
-		case *syntax.SglQuoted, *syntax.DblQuoted, *syntax.ParamExp, *syntax.CmdSubst, *syntax.ArithmExp, *syntax.ProcSubst:
-			return true
-		}
-	}
-	return false
-}
-
-func (es *ExecutionSession) isCommandNameResolvableLocked(name string) bool {
-	if name == "" {
-		return false
-	}
-	switch name {
-	case "exit", "quit", "help":
-		return true
-	}
-
-	// 1. POSIX / Bash builtin recognized by mvdan/sh.
-	if interp.IsBuiltin(name) {
-		return true
-	}
-
-	// 2. User-defined shell function in the active runner.
-	if es.runner != nil && es.runner.Funcs != nil {
-		if _, ok := es.runner.Funcs[name]; ok {
-			return true
-		}
-	}
-
-	// 3. Embedded u-root coreutils builtin.
-	if coreutilNames[name] {
-		return true
-	}
-
-	cwd := es.initialCwd
-	if es.runner != nil && es.runner.Dir != "" {
-		cwd = es.runner.Dir
-	}
-	envMap := es.envMapLocked()
-
-	// 4. Explicit relative or absolute path (e.g. ./script.sh, ../bin/tool, C:\tool.exe).
-	if filepath.IsAbs(name) || strings.ContainsAny(name, `/\`) {
-		candidate := name
-		if !filepath.IsAbs(candidate) {
-			candidate = filepath.Join(cwd, candidate)
-		}
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return true
-		}
-		if _, ok := resolvePlatformExecutable(name, cwd, envMap); ok {
-			return true
-		}
-		return false
-	}
-
-	// 5. Platform-specific executable lookup (including Windows PATHEXT & %VAR% expansion).
-	if _, ok := resolvePlatformExecutable(name, cwd, envMap); ok {
-		return true
-	}
-
-	// 6. Standard PATH lookup via mvdan interp.LookPathDir.
-	if es.runner != nil && es.runner.Env != nil {
-		if _, err := interp.LookPathDir(cwd, es.runner.Env, name); err == nil {
-			return true
-		}
-	}
-	envPairs := make([]string, 0, len(envMap))
-	for k, v := range envMap {
-		envPairs = append(envPairs, k+"="+v)
-	}
-	if _, err := interp.LookPathDir(cwd, expand.ListEnviron(envPairs...), name); err == nil {
-		return true
-	}
-
-	return false
+	return 0, false
 }
 
 // RunCommand executes a shell command string (or pre-parsed syntax.File) inside
@@ -384,6 +233,13 @@ func (es *ExecutionSession) RunCommand(
 		}
 	}
 
+	runCtx := ctx
+	if source == SourceUserShell {
+		if offset, ok := firstNonSpaceOffset(command); ok {
+			runCtx = withTopLevelStartOffset(ctx, offset)
+		}
+	}
+
 	var outBuf bytes.Buffer
 	var outMu sync.Mutex
 	es.streamOut.setTarget(func(p []byte) {
@@ -396,7 +252,13 @@ func (es *ExecutionSession) RunCommand(
 	})
 	defer es.streamOut.setTarget(nil)
 
-	runErr := es.runner.Run(ctx, parsed)
+	runErr := es.runner.Run(runCtx, parsed)
+	if errors.Is(runErr, ErrUnknownCommandAtStart) {
+		// Do not record a shell history entry when an unrecognized leading word
+		// is being handed off to AI fallback.
+		return CommandRecord{ExitCode: 127}, ErrUnknownCommandAtStart
+	}
+
 	exitCode := 0
 	if runErr != nil {
 		if status, ok := interp.IsExitStatus(runErr); ok {

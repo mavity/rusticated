@@ -805,10 +805,9 @@ func (s *Shell) submitAndExecuteAsync() {
 					s.finishBlock(blockIdx, StatusError, 130)
 					return
 				}
-				// Stage B safety net: if a dynamic command failed solely because the
-				// command executable was not found (exit code 127) and produced no stdout,
-				// route it seamlessly to AI fallback.
-				if rec.ExitCode == 127 && aiRunner != nil {
+				// If mvdan/sh reports that the command token at the very start of the
+				// user's input line was not found, route the input seamlessly to AI.
+				if errors.Is(err, ErrUnknownCommandAtStart) && aiRunner != nil {
 					s.mu.Lock()
 					s.blocks[blockIdx].Output.Reset()
 					s.mu.Unlock()
