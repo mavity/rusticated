@@ -67,6 +67,7 @@ type Shell struct {
 
 	// Execution & AI Fallback
 	execSess     *ExecutionSession
+	sessionErr   error
 	aiRunner     AIRunner
 	activeCancel context.CancelFunc
 	activeBlock  int
@@ -83,7 +84,7 @@ type Shell struct {
 // New creates a new Shell widget with the given options.
 // If opts.WriteToScrollback is nil, scrollback is stored locally.
 func New(opts ShellOptions) *Shell {
-	execSess, _ := NewExecutionSession(opts.WorkingDir)
+	execSess, sessionErr := NewExecutionSession(opts.WorkingDir)
 	aiRunner := opts.AIRunner
 	if aiRunner == nil && execSess != nil {
 		aiRunner = NewLazyAIRunner(execSess)
@@ -100,6 +101,7 @@ func New(opts ShellOptions) *Shell {
 		promptTemplate: promptTmpl,
 		activeBlock:    -1,
 		execSess:       execSess,
+		sessionErr:     sessionErr,
 		aiRunner:       aiRunner,
 		opts:           opts,
 	}
@@ -113,10 +115,14 @@ func New(opts ShellOptions) *Shell {
 	})
 
 	// Add initial welcome message as a pseudo-CommandBlock
+	welcome := "Kabibi shell initialized. Type commands below."
+	if sessionErr != nil {
+		welcome += "\nShell initialization failed: " + sessionErr.Error()
+	}
 	s.blocks = append(s.blocks, CommandBlock{
 		Prompt: "",
 		Input:  "",
-		Output: *bytes.NewBufferString("Kabibi shell initialized. Type commands below."),
+		Output: *bytes.NewBufferString(welcome),
 		Status: StatusSuccess,
 	})
 
@@ -662,11 +668,27 @@ func (s *Shell) submitAndExecuteAsync() {
 	blockIdx := len(s.blocks) - 1
 	s.statusLine = ""
 
-	if trimmed == "" || s.execSess == nil {
+	if trimmed == "" {
 		s.blocks[blockIdx].Status = StatusSuccess
 		s.mu.Unlock()
 		if mode == ModeZeroPlume {
 			s.emitScrollbackLine(prompt + rawInput)
+		}
+		s.invalidate()
+		return
+	}
+	if s.execSess == nil {
+		message := "Shell unavailable"
+		if s.sessionErr != nil {
+			message += ": " + s.sessionErr.Error()
+		}
+		fmt.Fprintln(&s.blocks[blockIdx].Output, message)
+		s.blocks[blockIdx].Status = StatusFailure
+		s.blocks[blockIdx].ExitCode = 1
+		s.mu.Unlock()
+		if mode == ModeZeroPlume {
+			s.emitScrollbackLine(prompt + rawInput)
+			s.emitScrollbackLine(message)
 		}
 		s.invalidate()
 		return

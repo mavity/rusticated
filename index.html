@@ -174,132 +174,13 @@
       This works over file:// purely because README.md is polyglot Javascript and Markdown 
     -->
     <script src="README.md"></script>
+    <script type="module" src="mohabbat/washmhost.js"></script>
 
     <script>
         const encoder = new TextEncoder();
         const decoder = new TextDecoder();
         const termDecoder = new TextDecoder();
 
-        // --- IndexedDB Mock Filesystem (Synchronous in-memory with background persistence) ---
-        class IndexedDBFS {
-            constructor(dbName = 'RusticatedFS') {
-                this.dbName = dbName;
-                this.db = null;
-                this.entries = new Map();
-            }
-
-            async init() {
-                this.db = await new Promise((resolve, reject) => {
-                    const request = indexedDB.open(this.dbName, 1);
-                    request.onupgradeneeded = (e) => {
-                        const db = e.target.result;
-                        if (!db.objectStoreNames.contains('files')) {
-                            db.createObjectStore('files', { keyPath: 'path' });
-                        }
-                    };
-                    request.onsuccess = (e) => resolve(e.target.result);
-                    request.onerror = (e) => reject(e.target.error);
-                });
-
-                // Load all entries into memory
-                const allEntries = await new Promise((resolve, reject) => {
-                    const tx = this.db.transaction('files', 'readonly');
-                    const store = tx.objectStore('files');
-                    const req = store.getAll();
-                    req.onsuccess = () => resolve(req.result);
-                    req.onerror = () => reject(req.target.error);
-                });
-
-                for (const e of allEntries) {
-                    this.entries.set(e.path, e);
-                }
-            }
-
-            seed() {
-                const now = Date.now();
-                const initialFiles = [
-                    { path: '/', type: 'dir', mtime: now },
-                    { path: '/bin', type: 'dir', mtime: now },
-                    { path: '/etc', type: 'dir', mtime: now },
-                    { path: '/etc/hosts', type: 'file', content: encoder.encode('127.0.0.1 localhost\n'), mtime: now },
-                    { path: '/etc/hostname', type: 'file', content: encoder.encode('rusticated-wasm\n'), mtime: now },
-                    { path: '/etc/passwd', type: 'file', content: encoder.encode('root:x:0:0:root:/root:/bin/sh\nuser:x:1000:1000:user:/home/user:/bin/sh\n'), mtime: now },
-                    { path: '/etc/group', type: 'file', content: encoder.encode('root:x:0:\nuser:x:1000:\n'), mtime: now },
-                    { path: '/etc/motd', type: 'file', content: encoder.encode('Welcome to the Rusticated WASM environment!\nToday is a good day for hacking.\nType \'ls\' to see files and \'cat /etc/motd\' to read them.\n'), mtime: now },
-                    { path: '/home', type: 'dir', mtime: now },
-                    { path: '/home/user', type: 'dir', mtime: now },
-                    { path: '/home/user/.bashrc', type: 'file', content: encoder.encode('alias ls="ls --color=auto"\nalias ll="ls -la"\n'), mtime: now },
-                    { path: '/home/user/test.txt', type: 'file', content: encoder.encode('This is a test file in IndexedDB.\nIt persists across reloads!\n'), mtime: now },
-                    { path: '/usr', type: 'dir', mtime: now },
-                    { path: '/usr/bin', type: 'dir', mtime: now },
-                    { path: '/usr/lib', type: 'dir', mtime: now },
-                    { path: '/usr/local', type: 'dir', mtime: now },
-                    { path: '/var', type: 'dir', mtime: now },
-                    { path: '/var/log', type: 'dir', mtime: now },
-                    { path: '/var/tmp', type: 'dir', mtime: now },
-                    { path: '/tmp', type: 'dir', mtime: now },
-                    { path: '/dev', type: 'dir', mtime: now },
-                    { path: '/README.md', type: 'file', content: encoder.encode('# Rusticated WASM Shell\n\nWelcome to kabibi running in the browser.\nThis environment features a virtualized file system backed by IndexedDB.\n\nEnjoy your stay!\n'), mtime: now }
-                ];
-
-                for (const f of initialFiles) {
-                    if (f.content) f.size = f.content.length;
-                    else f.size = 0;
-                    if (!this.entries.has(f.path)) {
-                        console.log(`Seeding: ${f.path}`);
-                        this.entries.set(f.path, f);
-                        this.persistEntry(f);
-                    }
-                }
-            }
-
-            getEntrySync(path) {
-                // Normalize path
-                if (path === "." || path === "" || path === "./") path = "/";
-                if (!path.startsWith("/")) path = "/" + path;
-                path = path.replace(/\/+/g, '/');
-                if (path.length > 1 && path.endsWith('/')) {
-                    path = path.substring(0, path.length - 1);
-                }
-                return this.entries.get(path);
-            }
-
-            putEntrySync(entry) {
-                entry.mtime = Date.now();
-                this.entries.set(entry.path, entry);
-                this.persistEntry(entry);
-            }
-
-            persistEntry(entry) {
-                const tx = this.db.transaction('files', 'readwrite');
-                const store = tx.objectStore('files');
-                store.put(entry);
-            }
-
-            readdirSync(dirPath) {
-                if (dirPath.length > 1 && dirPath.endsWith('/')) {
-                    dirPath = dirPath.substring(0, dirPath.length - 1);
-                }
-                const prefix = dirPath === '/' ? '/' : dirPath + '/';
-                const results = [];
-
-                for (const [path, entry] of this.entries.entries()) {
-                    if (path === dirPath) continue;
-                    if (path.startsWith(prefix)) {
-                        const relative = path.substring(prefix.length);
-                        if (relative.length > 0 && !relative.includes('/')) {
-                            results.push(entry);
-                        }
-                    }
-                }
-                
-                return results.sort((a, b) => {
-                    const na = a.path.split('/').pop() || '';
-                    const nb = b.path.split('/').pop() || '';
-                    return na.localeCompare(nb);
-                });
-            }
-        }
 
         // --- WASM Host Implementation ---
         async function initTerminalAndWasm() {
@@ -328,335 +209,14 @@
             term.write('Connecting to kabibi WASM...\r\n');
             console.log('[TRACE] After terminal creation');
 
-            // Refactored host state
-            const fs = new IndexedDBFS();
-            console.log('[TRACE] IndexedDBFS created');
-            await fs.init();
-            console.log('[TRACE] fs.init() completed');
-            await fs.seed();
-            console.log('[TRACE] fs.seed() completed');
-
+            // Host controller instance managed by washmhost
+            let host = null;
             const hostState = {
-                memory: null,
-                cwd: "/home/user",
-                stdinBuffer: [],
-                pendingReads: [],
-                pendingSignals: [],
-                pendingSignalCounts: new Map(),
-                handles: new Map([
-                    [0n, { type: 'stdin' }],
-                    [1n, { type: 'stdout' }],
-                    [2n, { type: 'stderr' }]
-                ]),
-                nextHandle: 3n,
-
-                safeWriteOverlapped: function(ovPtr, errorCode, continued, resultExt) {
-                    if (!this.memory || !this.memory.buffer) return;
-                    ovPtr = Number(ovPtr);
-                    const buf = this.memory.buffer;
-                    if (!Number.isFinite(ovPtr) || ovPtr < 0 || ovPtr + 24 > buf.byteLength) {
-                        return;
-                    }
-                    const view = new DataView(buf);
-                    view.setUint32(ovPtr, 1, true);
-                    view.setUint32(ovPtr + 4, Number(errorCode) || 0, true);
-                    view.setBigUint64(ovPtr + 8, BigInt(continued || 0n), true);
-                    view.setBigUint64(ovPtr + 16, BigInt(resultExt || 0n), true);
-                },
-                
-                write: function(ovPtr, handle, ptr, len) {
-                    const view = new DataView(this.memory.buffer);
-                    ptr = Number(ptr);
-                    len = Number(len);
-                    ovPtr = Number(ovPtr);
-                    handle = BigInt(handle);
-                    
-                    const h = this.handles.get(handle);
-                    if (h && h.type === 'proxy') {
-                        console.log('[PROXY-WRITE] Received data, bytes:', len);
-                        const chunk = new Uint8Array(this.memory.buffer, ptr, len).slice();
-                        h.requestBytes.push(...chunk);
-                        h.requestText += decoder.decode(chunk);
-
-                        if (!h.requestComplete && h.requestText.includes('\r\n\r\n')) {
-                            h.requestComplete = true;
-                            const firstLine = h.requestText.split('\r\n', 1)[0] || '';
-                            const parts = firstLine.split(' ');
-                            h.requestUrl = parts.length >= 2 ? parts[1] : '';
-                            if (!h.preparing) {
-                                h.preparing = true;
-                                (async () => {
-                                    try {
-                                        const requestUrl = h.requestUrl || WEB_MODEL_URL;
-                                        const modelBytes = await httpProxyShim.handleModelRequest(requestUrl, 0, (progress) => {
-                                            console.log('[Proxy] Model progress:', progress);
-                                        });
-                                        // Create header with actual model size
-                                        const modelSize = modelBytes.length;
-                                        const header = encoder.encode(
-                                            'HTTP/1.1 200 OK\r\n' +
-                                            'Content-Type: application/octet-stream\r\n' +
-                                            'Content-Length: ' + modelSize + '\r\n' +
-                                            'Connection: close\r\n\r\n'
-                                        );
-                                        // Store header only, track body size separately (don't allocate huge array)
-                                        h.responseBytes = header;
-                                        h.responseBodySize = modelSize;  // Track remaining body bytes
-                                        h.responseOffset = 0;
-                                        this.flushProxyReads(handle);
-                                    } catch (err) {
-                                        const response = encoder.encode(
-                                            'HTTP/1.1 502 Bad Gateway\r\n' +
-                                            'Content-Length: 0\r\n' +
-                                            'Connection: close\r\n\r\n'
-                                        );
-                                        h.responseBytes = response;
-                                        h.responseBodySize = 0;
-                                        h.responseOffset = 0;
-                                        this.flushProxyReads(handle);
-                                        console.error('[Proxy] Failed preparing response:', err);
-                                    }
-                                })();
-                            }
-                        }
-                    }
-
-                    if (h && (h.type === 'stdout' || h.type === 'stderr' || h.type === 'tty')) {
-                        if (len > 0) {
-                            const bytes = new Uint8Array(this.memory.buffer, ptr, len).slice();
-                            if (bytes.length > 0) {
-                                term.write(bytes);
-                            }
-                        }
-                    } else if (h && h.type === 'file') {
-                        const buf = new Uint8Array(this.memory.buffer, ptr, len);
-                        const newContent = new Uint8Array(h.entry.content.length + len);
-                        newContent.set(h.entry.content);
-                        newContent.set(buf, h.entry.content.length);
-                        h.entry.content = newContent;
-                        fs.putEntrySync(h.entry);
-                    }
-                    
-                    // Write overlapped result
-                    view.setUint32(ovPtr, 1, true); // done
-                    view.setUint32(ovPtr + 4, 0, true); // errorCode = 0
-                    view.setBigUint64(ovPtr + 8, 0n, true); // continued
-                    view.setBigUint64(ovPtr + 16, BigInt(len), true); // resultExt = nwritten
-                    return 0;
-                },
-                read: function(ovPtr, handle, ptr, len) {
-                    ovPtr = Number(ovPtr);
-                    ptr = Number(ptr);
-                    len = Number(len);
-                    handle = BigInt(handle);
-                    
-                    const h = this.handles.get(handle);
-                    if (h && h.type === 'proxy') {
-                        const view = new DataView(this.memory.buffer);
-                        const headerLen = h.responseBytes ? h.responseBytes.length : 0;
-                        const bodySize = h.responseBodySize || 0;
-                        const totalSize = headerLen + bodySize;
-                        
-                        if (h.responseBytes && h.responseOffset < totalSize) {
-                            let toRead = 0;
-                            let buf = new Uint8Array(this.memory.buffer, ptr, len);
-                            
-                            if (h.responseOffset < headerLen) {
-                                // Reading from header
-                                const headerRemaining = headerLen - h.responseOffset;
-                                toRead = Math.min(len, headerRemaining);
-                                buf.set(h.responseBytes.subarray(h.responseOffset, h.responseOffset + toRead));
-                                h.responseOffset += toRead;
-                            } else {
-                                // Reading from body (generate zeroes on-the-fly)
-                                const bodyRemaining = totalSize - h.responseOffset;
-                                toRead = Math.min(len, bodyRemaining);
-                                buf.set(new Uint8Array(toRead));  // Uint8Array with single size arg = zero-filled
-                                h.responseOffset += toRead;
-                            }
-                            
-                            view.setUint32(ovPtr, 1, true);
-                            view.setUint32(ovPtr + 4, 0, true);
-                            view.setBigUint64(ovPtr + 8, 0n, true);
-                            view.setBigUint64(ovPtr + 16, BigInt(toRead), true);
-                            return 0;
-                        }
-                        h.pendingReads.push({ ovPtr, ptr, len });
-                        return 0;
-                    }
-
-                    if (h && (h.type === 'stdin' || h.type === 'tty')) {
-                        if (this.stdinBuffer.length > 0) {
-                            const toRead = Math.min(len, this.stdinBuffer.length);
-                            const data = this.stdinBuffer.splice(0, toRead);
-                            const buf = new Uint8Array(this.memory.buffer, ptr, toRead);
-                            buf.set(data);
-
-                            const view = new DataView(this.memory.buffer);
-                            view.setUint32(ovPtr, 1, true); // done
-                            view.setUint32(ovPtr + 4, 0, true); // errorCode = 0
-                            view.setBigUint64(ovPtr + 8, 0n, true); // continued
-                            view.setBigUint64(ovPtr + 16, BigInt(toRead), true); // resultExt = nread
-                            return 0;
-                        }
-                        this.pendingReads.push({ ovPtr, ptr, len });
-                        return 0;
-                    } else if (h && h.type === 'file') {
-                        const available = h.entry.content.length - h.offset;
-                        const toRead = Math.min(len, available);
-                        if (toRead > 0) {
-                            const buf = new Uint8Array(this.memory.buffer, ptr, toRead);
-                            buf.set(h.entry.content.subarray(h.offset, h.offset + toRead));
-                            h.offset += toRead;
-                        }
-                        const view = new DataView(this.memory.buffer);
-                        view.setUint32(ovPtr, 1, true); // done
-                        view.setUint32(ovPtr + 4, 0, true); // errorCode = 0
-                        view.setBigUint64(ovPtr + 8, 0n, true); // continued
-                        view.setBigUint64(ovPtr + 16, BigInt(toRead), true); // resultExt = nread
-                        return 0;
-                    }
-                    return 0;
-                },
-                flushProxyReads: function(handle) {
-                    if (!this.memory) return;
-                    const h = this.handles.get(BigInt(handle));
-                    if (!h || h.type !== 'proxy' || !h.responseBytes) return;
-                    const view = new DataView(this.memory.buffer);
-                    const headerLen = h.responseBytes.length;
-                    const bodySize = h.responseBodySize || 0;
-                    const totalSize = headerLen + bodySize;
-                    
-                    while (h.pendingReads.length > 0 && h.responseOffset < totalSize) {
-                        const { ovPtr, ptr, len } = h.pendingReads.shift();
-                        let toRead = 0;
-                        const buf = new Uint8Array(this.memory.buffer, ptr, len);
-                        
-                        if (h.responseOffset < headerLen) {
-                            // Reading from header
-                            const headerRemaining = headerLen - h.responseOffset;
-                            toRead = Math.min(len, headerRemaining);
-                            buf.set(h.responseBytes.subarray(h.responseOffset, h.responseOffset + toRead));
-                            h.responseOffset += toRead;
-                        } else {
-                            // Reading from body (generate zeroes on-the-fly)
-                            const bodyRemaining = totalSize - h.responseOffset;
-                            toRead = Math.min(len, bodyRemaining);
-                            buf.set(new Uint8Array(toRead));  // Zero-filled array
-                            h.responseOffset += toRead;
-                        }
-                        
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 0, true);
-                        view.setBigUint64(ovPtr + 8, 0n, true);
-                        view.setBigUint64(ovPtr + 16, BigInt(toRead), true);
-                    }
-                },
-                pushStdin: function(data) {
-                    if (typeof data === 'string') {
-                        const encoded = encoder.encode(data);
-                        this.stdinBuffer.push(...encoded);
-                        console.log(`pushStdin: string "${data}" (${encoded.length} bytes), pendingReads=${this.pendingReads.length}`);
-                    } else {
-                        this.stdinBuffer.push(...data);
-                        console.log(`pushStdin: ${data.length} bytes, pendingReads=${this.pendingReads.length}`);
-                    }
-                    this.processPendingReads();
-                },
-                processPendingReads: function() {
-                    if (!this.memory) return;
-                    const view = new DataView(this.memory.buffer);
-                    let completedCount = 0;
-                    while (this.pendingReads.length > 0 && this.stdinBuffer.length > 0) {
-                        const { ovPtr, ptr, len } = this.pendingReads.shift();
-                        const toRead = Math.min(len, this.stdinBuffer.length);
-                        const data = this.stdinBuffer.splice(0, toRead);
-                        const buf = new Uint8Array(this.memory.buffer, ptr, toRead);
-                        buf.set(data);
-
-                        view.setUint32(ovPtr, 1, true); // done
-                        view.setUint32(ovPtr + 4, 0, true); // errorCode = 0
-                        view.setBigUint64(ovPtr + 8, 0n, true); // continued
-                        view.setBigUint64(ovPtr + 16, BigInt(toRead), true); // resultExt = nread
-                        completedCount++;
-                    }
-                    if (completedCount > 0) {
-                        console.log(`processPendingReads: completed ${completedCount} reads`);
-                    }
-                },
-                flushProxyReads: function(handle) {
-                    if (!this.memory) return;
-                    const h = this.handles.get(BigInt(handle));
-                    if (!h || h.type !== 'proxy' || !h.responseBytes) return;
-                    const view = new DataView(this.memory.buffer);
-                    while (h.pendingReads.length > 0 && h.responseOffset < h.responseBytes.length) {
-                        const { ovPtr, ptr, len } = h.pendingReads.shift();
-                        const toRead = Math.min(len, h.responseBytes.length - h.responseOffset);
-                        const buf = new Uint8Array(this.memory.buffer, ptr, toRead);
-                        buf.set(h.responseBytes.subarray(h.responseOffset, h.responseOffset + toRead));
-                        h.responseOffset += toRead;
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 0, true);
-                        view.setBigUint64(ovPtr + 8, 0n, true);
-                        view.setBigUint64(ovPtr + 16, BigInt(toRead), true);
-                    }
-                },
-                triggerSignal: function(signum) {
-                    if (!this.memory) return;
-                    const remaining = [];
-                    let completed = 0;
-                    for (const s of this.pendingSignals) {
-                        if (s.signum === signum || s.signum === 0) {
-                            this.safeWriteOverlapped(s.ovPtr, 0, 0n, BigInt(signum));
-                            completed++;
-                        } else {
-                            remaining.push(s);
-                        }
-                    }
-                    if (completed > 0) {
-                        console.log(`triggerSignal(${signum}): completed ${completed} waits`);
-                    } else {
-                        const current = this.pendingSignalCounts.get(signum) || 0;
-                        this.pendingSignalCounts.set(signum, current + 1);
-                    }
-                    this.pendingSignals = remaining;
-                    return completed;
-                },
-                completeSignalWait: function(ovPtr, signum) {
-                    this.safeWriteOverlapped(ovPtr, 0, 0n, BigInt(signum));
-                }
+                get memory() { return host?.getMemory() || null; },
+                triggerSignal: (sig) => host?.triggerSignal(sig),
+                pushStdin: (data) => host?.pushStdin(data)
             };
             window.hostState = hostState;
-            console.log('[TRACE] hostState assigned to window');
-            console.log('[TRACE] About to define resolvePath function');
-
-            const resolvePath = (inputPath) => {
-                const raw = String(inputPath || '').replace(/\0.*/, '');
-                let path = raw;
-                if (!path) {
-                    path = hostState.cwd;
-                } else if (!path.startsWith('/')) {
-                    path = hostState.cwd === '/' ? `/${path}` : `${hostState.cwd}/${path}`;
-                }
-                path = path.replace(/\/+/g, '/');
-                const parts = [];
-                for (const seg of path.split('/')) {
-                    if (!seg || seg === '.') continue;
-                    if (seg === '..') {
-                        if (parts.length > 0) parts.pop();
-                        continue;
-                    }
-                    parts.push(seg);
-                }
-                return '/' + parts.join('/');
-            };
-
-            const parentDir = (path) => {
-                if (!path || path === '/') return '/';
-                const idx = path.lastIndexOf('/');
-                if (idx <= 0) return '/';
-                return path.slice(0, idx);
-            };
 
             const armBootstrap = () => {
                 browserAssetState.bootstrapArmed = true;
@@ -667,1672 +227,12 @@
                 hostState.pushStdin(data);
             });
 
-            // Define the "env" module expected by rusticated/washmhost guest binaries
-            const env = {
-                get_args: (ptr, len) => {
-                    const args = ["kabibi"];
-                    let totalLen = 0;
-                    const encoded = args.map(a => {
-                        const e = encoder.encode(a + "\0");
-                        totalLen += e.length;
-                        return e;
-                    });
-                    
-                    if (ptr !== 0 && len >= totalLen) {
-                        let offset = Number(ptr);
-                        for (const e of encoded) {
-                            const buf = new Uint8Array(hostState.memory.buffer, offset, e.length);
-                            buf.set(e);
-                            offset += e.length;
-                        }
-                    }
-                    return (BigInt(args.length) << 32n) | BigInt(totalLen);
-                },
-                get_env: (ptr, len) => {
-                    const envVars = [
-                        "TERM=xterm-256color",
-                        "COLORTERM=truecolor",
-                        "PATH=/bin",
-                        "HOME=/home/user",
-                        "HTTPS_PROXY=http://127.0.0.1:8888",
-                        "HTTP_PROXY=http://127.0.0.1:8888"
-                    ];
-                    let totalLen = 0;
-                    const encoded = envVars.map(v => {
-                        const e = encoder.encode(v + "\0");
-                        totalLen += e.length;
-                        return e;
-                    });
-                    
-                    if (ptr !== 0 && len >= totalLen) {
-                        let offset = Number(ptr);
-                        for (const e of encoded) {
-                            const buf = new Uint8Array(hostState.memory.buffer, offset, e.length);
-                            buf.set(e);
-                            offset += e.length;
-                        }
-                    }
-                    return (BigInt(envVars.length) << 32n) | BigInt(totalLen);
-                },
-                get_cwd: (buf_ptr, buf_len) => {
-                    const cwd = hostState.cwd;
-                    const enc = encoder.encode(cwd + "\0");
-                    if (buf_ptr !== 0) {
-                        const buf = new Uint8Array(hostState.memory.buffer, buf_ptr, Math.min(enc.length, buf_len));
-                        buf.set(enc.slice(0, Math.min(enc.length, buf_len)));
-                    }
-                    return BigInt(enc.length);
-                },
-                set_cwd: (ptr, len) => {
-                    const pathBytes = new Uint8Array(hostState.memory.buffer, Number(ptr), Number(len));
-                    const normalized = resolvePath(decoder.decode(pathBytes));
-                    const entry = fs.getEntrySync(normalized);
-                    if (entry && entry.type === 'dir') {
-                        hostState.cwd = normalized;
-                        return 0;
-                    }
-                    return 2; // ENOENT
-                },
-                get_random: (ptr, len) => {
-                    const buf = new Uint8Array(hostState.memory.buffer, Number(ptr), Number(len));
-                    crypto.getRandomValues(buf);
-                },
-                get_time: () => BigInt(Date.now()) * 1000000n,
-                host_panic: (ptr, len) => {
-                    const buf = new Uint8Array(hostState.memory.buffer, Number(ptr), Number(len));
-                    const msg = decoder.decode(buf);
-                    console.error("HOST PANIC:", msg);
-                    term.write(`\r\n\x1b[31mHOST PANIC: ${msg}\x1b[0m\r\n`);
-                    throw new Error("WASM Panicked");
-                },
-                timer_set: (ovPtr, delayMs) => {
-                    ovPtr = Number(ovPtr);
-                    setTimeout(() => {
-                        hostState.safeWriteOverlapped(ovPtr, 0, 0n, 0n);
-                    }, Number(delayMs));
-                },
-                read: (ovPtr, handle, ptr, len) => hostState.read(ovPtr, handle, ptr, len),
-                seek: (ovPtr, handle, offset, whence) => {
-                    ovPtr = Number(ovPtr);
-                    offset = Number(offset);
-                    whence = Number(whence);
-                    const view = new DataView(hostState.memory.buffer);
-                    const h = hostState.handles.get(BigInt(handle));
+            // Extension state for LiteRT dylib and HTTP proxy shims
+            const dylibHandles = new Map();
+            let nextDylibHandle = 100n;
+            const dylibMem = new Map();
+            let nextDylibMem = 1000000n;
 
-                    if (!h) {
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 9, true); // EBADF
-                        return 0;
-                    }
-
-                    let base = 0;
-                    if (h.type === 'file' && h.entry && typeof h.entry.content !== 'undefined') {
-                        base = h.entry.content.length;
-                    }
-
-                    let nextPos = 0;
-                    switch (whence) {
-                        case 0: // SEEK_SET
-                            nextPos = offset;
-                            break;
-                        case 1: // SEEK_CUR
-                            nextPos = (Number(h.offset || 0)) + offset;
-                            break;
-                        case 2: // SEEK_END
-                            nextPos = base + offset;
-                            break;
-                        default:
-                            view.setUint32(ovPtr, 1, true);
-                            view.setUint32(ovPtr + 4, 22, true); // EINVAL
-                            return 0;
-                    }
-
-                    if (nextPos < 0) {
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 22, true); // EINVAL
-                        return 0;
-                    }
-
-                    h.offset = nextPos;
-                    view.setUint32(ovPtr, 1, true);
-                    view.setUint32(ovPtr + 4, 0, true);
-                    view.setBigUint64(ovPtr + 8, 0n, true);
-                    view.setBigUint64(ovPtr + 16, BigInt(nextPos), true);
-                    return 0;
-                },
-                write: (ovPtr, handle, ptr, len) => hostState.write(ovPtr, handle, ptr, len),
-                handle_close: (handle) => {
-                    hostState.handles.delete(BigInt(handle));
-                },
-                path_open: (ovPtr, pathPtr, pathLen, flags) => {
-                    const rawPath = decoder.decode(new Uint8Array(hostState.memory.buffer, Number(pathPtr), Number(pathLen))).replace(/\0.*/, '');
-                    let path = resolvePath(rawPath);
-                    console.log("PATH_OPEN:", path, flags);
-                    
-                    ovPtr = Number(ovPtr);
-                    const view = new DataView(hostState.memory.buffer);
-                    const oflags = Number(flags);
-
-                    // Two flag families are used by guests:
-                    // 1) rusticated-rust wasm fs::OpenOptions: read=1, write=2, create=4, trunc=8, append=16, create_new=32
-                    // 2) rusticated-go/wasip1 style: access mode in low 2 bits, create=0x40, excl=0x80, trunc=0x200, append=0x400
-                    const hasHighPosixBits = (oflags & (0x40 | 0x80 | 0x200 | 0x400)) !== 0;
-                    const hasOnlyRusticatedBits = (oflags & ~0x1003f) === 0;
-                    const useRusticatedFlags = !hasHighPosixBits && hasOnlyRusticatedBits;
-
-                    let readFlag = false;
-                    let writeFlag = false;
-                    let createFlag = false;
-                    let createNewFlag = false;
-                    let truncateFlag = false;
-                    let appendFlag = false;
-
-                    if (useRusticatedFlags) {
-                        readFlag = (oflags & 1) !== 0;
-                        writeFlag = (oflags & 2) !== 0;
-                        createFlag = (oflags & 4) !== 0;
-                        truncateFlag = (oflags & 8) !== 0;
-                        appendFlag = (oflags & 16) !== 0;
-                        createNewFlag = (oflags & 32) !== 0;
-                    } else {
-                        const accessMode = oflags & 3;
-                        readFlag = accessMode === 0 || accessMode === 2;
-                        writeFlag = accessMode === 1 || accessMode === 2;
-                        createFlag = (oflags & 0x40) !== 0;
-                        createNewFlag = (oflags & 0x80) !== 0;
-                        truncateFlag = (oflags & 0x200) !== 0;
-                        appendFlag = (oflags & 0x400) !== 0;
-                    }
-
-                    const wantDirectory = (oflags & 0x10000) !== 0;
-
-                    let entry = fs.getEntrySync(path);
-                    
-                    if (rawPath === "/dev/tty" || rawPath === "CONIN$" || rawPath === "CONOUT$") {
-                        const handle = hostState.nextHandle++;
-                        hostState.handles.set(handle, { type: 'tty', entry: { path: '/dev/tty', type: 'file' }, offset: 0 });
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 0, true);
-                        view.setBigUint64(ovPtr + 16, handle, true);
-                        return 0;
-                    }
-
-                    // Special handling for model file writes (discard writes of downloaded zeroes)
-                    const isModelFile = path.includes('litert_cache') && path.endsWith('.litertlm');
-
-                    if (!entry) {
-                        if (createFlag || createNewFlag) {
-                            const parent = parentDir(path);
-                            const p = fs.getEntrySync(parent);
-                            if (!p || p.type !== 'dir') {
-                                view.setUint32(ovPtr, 1, true);
-                                view.setUint32(ovPtr + 4, 44, true); // ENOENT
-                                return 0;
-                            }
-                            entry = {
-                                path,
-                                type: 'file',
-                                content: new Uint8Array(0),
-                                size: 0,
-                                mtime: Date.now(),
-                                mode: 0o100644
-                            };
-                            fs.entries.set(path, entry);
-                            fs.putEntrySync(entry);
-                        } else {
-                            view.setUint32(ovPtr, 1, true);
-                            view.setUint32(ovPtr + 4, 44, true); // ENOENT
-                            return 0;
-                        }
-                    } else if (createNewFlag) {
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 17, true); // EEXIST
-                        return 0;
-                    }
-
-                    if (wantDirectory && entry.type !== 'dir') {
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 54, true); // ENOTDIR
-                        return 0;
-                    }
-
-                    if (entry.type === 'file' && truncateFlag) {
-                        entry.content = new Uint8Array(0);
-                        entry.size = 0;
-                        entry.mtime = Date.now();
-                        fs.putEntrySync(entry);
-                    }
-                    
-                    const handle = hostState.nextHandle++;
-                    hostState.handles.set(handle, { 
-                        type: entry.type === 'dir' ? 'dir' : 'file', 
-                        entry, 
-                        offset: appendFlag && entry.type === 'file' ? (entry.content ? entry.content.length : 0) : 0,
-                        dirOffset: 0,
-                        dirEntries: null,
-                        dirLeftovers: []
-                    });
-                    
-                    view.setUint32(ovPtr, 1, true);
-                    view.setUint32(ovPtr + 4, 0, true);
-                    view.setBigUint64(ovPtr + 16, handle, true);
-                    return 0;
-                },
-                dir_read: (ovPtr, handle, bufPtr, bufLen) => {
-                    handle = BigInt(handle);
-                    ovPtr = Number(ovPtr);
-                    bufPtr = Number(bufPtr);
-                    bufLen = Number(bufLen);
-                    console.log("DIR_READ:", { handle, bufLen, dirOffset: hostState.handles.get(handle)?.dirOffset });
-                    const view = new DataView(hostState.memory.buffer);
-                    const h = hostState.handles.get(handle);
-
-                    if (browserAssetState.bootstrapArmed && h && h.entry && h.entry.path.endsWith('/.cache/kabibi/litert_cache') && !browserAssetState.bootstrapComplete && !browserAssetState.bootstrapStarted) {
-                        console.log('[Bootstrap] Triggered by dir_read access to cache directory');
-                        bootstrapBrowserAssets(fs).catch(err => {
-                            console.error('[Bootstrap] Failed during lazy trigger:', err);
-                        });
-                    }
-
-                    if (!h || h.type !== 'dir') {
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 20, true); // ENOTDIR
-                        return 0;
-                    }
-
-                    if (!Array.isArray(h.dirEntries)) {
-                        h.dirEntries = fs.readdirSync(h.entry.path);
-                        h.dirOffset = 0;
-                        h.dirLeftovers = [];
-                    }
-
-                    let currentOffset = bufPtr;
-                    let bytesWritten = 0;
-                    let remaining = bufLen;
-                    let loopCount = 0;
-                    const maxLoops = 1000; // Prevent infinite loops
-
-                    while (remaining > 0 && loopCount < maxLoops) {
-                        loopCount++;
-                        
-                        if (h.dirLeftovers.length > 0) {
-                            const toCopy = Math.min(remaining, h.dirLeftovers.length);
-                            const out = new Uint8Array(hostState.memory.buffer, currentOffset, toCopy);
-                            out.set(h.dirLeftovers.slice(0, toCopy));
-                            h.dirLeftovers = h.dirLeftovers.slice(toCopy);
-                            currentOffset += toCopy;
-                            bytesWritten += toCopy;
-                            remaining -= toCopy;
-                            if (h.dirLeftovers.length > 0) {
-                                break;
-                            }
-                            continue;
-                        }
-
-                        if (h.dirOffset >= h.dirEntries.length) {
-                            break;
-                        }
-
-                        const e = h.dirEntries[h.dirOffset];
-                        h.dirOffset++;
-                        const name = e.isVirtualDotDot ? '..' : (e.path.split('/').pop() || '.');
-                        if (name === '.' || name === '..') {
-                            continue;
-                        }
-                        const nameEnc = encoder.encode(name);
-                        const entryBytes = new Uint8Array(1 + nameEnc.length + 1);
-                        entryBytes[0] = e.type === 'dir' ? 2 : 1; // 1: File, 2: Dir
-                        entryBytes.set(nameEnc, 1);
-                        entryBytes[1 + nameEnc.length] = 0;
-
-                        if (entryBytes.length <= remaining) {
-                            const out = new Uint8Array(hostState.memory.buffer, currentOffset, entryBytes.length);
-                            out.set(entryBytes);
-                            currentOffset += entryBytes.length;
-                            bytesWritten += entryBytes.length;
-                            remaining -= entryBytes.length;
-                            continue;
-                        }
-
-                        h.dirLeftovers = Array.from(entryBytes);
-                    }
-
-                    view.setUint32(ovPtr, 1, true);
-                    view.setUint32(ovPtr + 4, 0, true);
-                    view.setBigUint64(ovPtr + 16, BigInt(bytesWritten), true);
-                    return 0;
-                },
-                path_stat: (ovPtr, pathPtr, pathLen, flags, outPtr, outLen) => {
-                    const path = resolvePath(decoder.decode(new Uint8Array(hostState.memory.buffer, Number(pathPtr), Number(pathLen))));
-                    ovPtr = Number(ovPtr);
-                    outPtr = Number(outPtr);
-                    const view = new DataView(hostState.memory.buffer);
-
-                    const entry = fs.getEntrySync(path);
-                    if (!entry) {
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 44, true); // ENOENT
-                        return 0;
-                    }
-                    
-                    // AbiStat (64 bytes): kind (u32), mode (u32), uid (u32), gid (u32), size (u64), mtime (u64), atime (u64), ctime (u64), nlink (u64), inode (u64)
-                    const statView = new DataView(hostState.memory.buffer, outPtr, 64);
-                    statView.setUint32(0, entry.type === 'dir' ? 2 : 1, true); // 1: File, 2: Dir
-                    statView.setUint32(4, entry.type === 'dir' ? 0o40755 : 0o100644, true); 
-                    statView.setUint32(8, 1000, true); 
-                    statView.setUint32(12, 1000, true); 
-                    statView.setBigUint64(16, BigInt(entry.reportedSize !== undefined ? entry.reportedSize : (entry.content ? entry.content.length : 0)), true);
-                    statView.setBigUint64(24, BigInt(entry.mtime || Date.now()) * 1000000n, true); 
-                    statView.setBigUint64(32, BigInt(entry.mtime || Date.now()) * 1000000n, true); 
-                    statView.setBigUint64(40, BigInt(entry.mtime || Date.now()) * 1000000n, true); 
-                    statView.setBigUint64(48, 1n, true); 
-                    statView.setBigUint64(56, 1n, true); 
-
-                    view.setUint32(ovPtr, 1, true);
-                    view.setUint32(ovPtr + 4, 0, true);
-                    view.setBigUint64(ovPtr + 16, 64n, true);
-                    return 0;
-                },
-                path_chmod: (ovPtr, pathPtr, pathLen, mode) => {
-                    const path = resolvePath(decoder.decode(new Uint8Array(hostState.memory.buffer, Number(pathPtr), Number(pathLen))));
-                    const entry = fs.getEntrySync(path);
-                    const view = new DataView(hostState.memory.buffer);
-                    ovPtr = Number(ovPtr);
-                    if (!entry) {
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 44, true); // ENOENT
-                        return 0;
-                    }
-                    entry.mode = Number(mode) || entry.mode || 0o100644;
-                    fs.putEntrySync(entry);
-                    view.setUint32(ovPtr, 1, true);
-                    view.setUint32(ovPtr + 4, 0, true);
-                    return 0;
-                },
-                path_remove: (ovPtr, pathPtr, pathLen) => {
-                    const path = resolvePath(decoder.decode(new Uint8Array(hostState.memory.buffer, Number(pathPtr), Number(pathLen))));
-                    const view = new DataView(hostState.memory.buffer);
-                    ovPtr = Number(ovPtr);
-                    const entry = fs.getEntrySync(path);
-                    if (!entry) {
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 44, true);
-                        return 0;
-                    }
-                    fs.entries.delete(path);
-        
-            // === IndexedDB Model Persistence (Phase 2) ===
-            // === Cache API Model Store (Modern Persistent Storage) ===
-            class CacheAPIModelStore {
-                constructor(cacheName = 'kabibi-web-models-v1') {
-                    this.cacheName = cacheName;
-                    this.modelUrl = 'https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it-web.litertlm';
-                }
-
-                async init() {
-                    if (!window.caches) {
-                        console.warn('[ModelStore] Cache API not available');
-                        return false;
-                    }
-                    return true;
-                }
-
-                async checkCached() {
-                    if (!window.caches) return null;
-                    try {
-                        const cache = await caches.open(this.cacheName);
-                        const response = await cache.match(this.modelUrl);
-                        if (response) {
-                            console.log('[ModelStore] Model found in Cache API');
-                            return response;
-                        }
-                    } catch (e) {
-                        console.error('[ModelStore] Error checking cache:', e);
-                    }
-                    return null;
-                }
-
-                async saveModel(url, bytes, metadata = {}) {
-                    if (!window.caches) {
-                        console.warn('[ModelStore] Cache API not available for save');
-                        return null;
-                    }
-                    try {
-                        const cache = await caches.open(this.cacheName);
-                        const blob = new Blob([bytes]);
-                        const response = new Response(blob, {
-                            status: 200,
-                            headers: {
-                                'Content-Length': bytes.length.toString(),
-                                'Content-Type': 'application/octet-stream'
-                            }
-                        });
-                        await cache.put(url, response);
-                        console.log('[ModelStore] Saved model to Cache API:', (bytes.length / 1024 / 1024).toFixed(1), 'MB');
-                        return { url, size: bytes.length, timestamp: Date.now(), ...metadata };
-                    } catch (e) {
-                        console.error('[ModelStore] Error saving model:', e);
-                        return null;
-                    }
-                }
-
-                async loadModel(url) {
-                    if (!window.caches) return null;
-                    try {
-                        const cache = await caches.open(this.cacheName);
-                        const response = await cache.match(url);
-                        if (response) {
-                            const bytes = new Uint8Array(await response.arrayBuffer());
-                            console.log('[ModelStore] Loaded model from Cache API:', (bytes.length / 1024 / 1024).toFixed(1), 'MB');
-                            return { bytes, size: bytes.length, url, timestamp: Date.now() };
-                        }
-                    } catch (e) {
-                        console.error('[ModelStore] Error loading model:', e);
-                    }
-                    return null;
-                }
-
-                async isModelCached(url) {
-                    const model = await this.checkCached();
-                    return model !== null;
-                }
-
-                async clearCache() {
-                    if (!window.caches) return;
-                    try {
-                        await caches.delete(this.cacheName);
-                        console.log('[ModelStore] Cache API cleared');
-                    } catch (e) {
-                        console.error('[ModelStore] Error clearing cache:', e);
-                    }
-                }
-            }
-
-            // === Robust Network Fetcher (Phase 2) ===
-            class RobustHTTPFetcher {
-                constructor(maxRetries = 3) {
-                    this.maxRetries = maxRetries;
-                }
-
-                async fetchWithRetry(url, options = {}) {
-                    let lastError;
-                    for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
-                        try {
-                            console.log('[Fetcher] Attempt ' + attempt + '/' + this.maxRetries + ' for:', url);
-                            const response = await fetch(url, options);
-                            if (!response.ok) {
-                                throw new Error('HTTP ' + response.status);
-                            }
-                            console.log('[Fetcher] Succeeded on attempt', attempt);
-                            return response;
-                        } catch (err) {
-                            lastError = err;
-                            if (attempt < this.maxRetries) {
-                                const delay = Math.pow(2, attempt - 1) * 1000; // exponential backoff
-                                console.log('[Fetcher] Error:', err.message, '- Retrying in', delay, 'ms');
-                                await new Promise(r => setTimeout(r, delay));
-                            }
-                        }
-                    }
-                    throw new Error('Fetch failed after ' + this.maxRetries + ' attempts: ' + lastError.message);
-                }
-
-                async fetchWithProgress(url, onProgress) {
-                    const response = await this.fetchWithRetry(url);
-                    const contentLength = Number(response.headers.get('content-length') || 0);
-                    const reader = response.body.getReader();
-                    const chunks = [];
-                    let received = 0;
-
-                    while (true) {
-                        const {done, value} = await reader.read();
-                        if (done) break;
-
-                        chunks.push(value);
-                        received += value.length;
-
-                        if (onProgress && contentLength > 0) {
-                            onProgress({
-                                received,
-                                total: contentLength,
-                                percent: Math.round((received / contentLength) * 100)
-                            });
-                        }
-                    }
-
-                    return new Uint8Array(chunks.reduce((a, b) => a.concat(Array.from(b)), []));
-                }
-            }
-
-            // === LiteRT Engine Manager (Phase 2) ===
-            class LiteRTEngineManager {
-                constructor() {
-                    this.engine = null;
-                    this.isInitialized = false;
-                    this.isInitializing = false;
-                    this.modelBytes = null;
-                    console.log('[EngineManager] Created');
-                }
-
-                async initialize(modelBytes) {
-                    if (this.isInitialized) {
-                        console.log('[EngineManager] Already initialized');
-                        return this.engine;
-                    }
-
-                    if (this.isInitializing) {
-                        console.log('[EngineManager] Initialization in progress, waiting...');
-                        let attempts = 0;
-                        while (!this.isInitialized && attempts < 100) {
-                            await new Promise(r => setTimeout(r, 100));
-                            attempts++;
-                        }
-                        return this.engine;
-                    }
-
-                    this.isInitializing = true;
-                    this.modelBytes = modelBytes;
-
-                    try {
-                        console.log('[EngineManager] Importing Engine from CDN...');
-                        const { Engine } = await import('https://cdn.jsdelivr.net/npm/@litert-lm/core@0.1.0/+esm');
-                        console.log('[EngineManager] Engine imported, creating instance...');
-
-                        // Create a blob URL for the model to allow Engine to access it
-                        const modelBlob = new Blob([modelBytes]);
-                        const modelUrl = URL.createObjectURL(modelBlob);
-
-                        this.engine = await Engine.create({
-                            modelUrl: modelUrl,
-                            streaming: true
-                        });
-
-                        console.log('[EngineManager] Engine initialized successfully');
-                        this.isInitialized = true;
-                        return this.engine;
-                    } catch (err) {
-                        console.error('[EngineManager] Initialization failed:', err);
-                        this.isInitializing = false;
-                        throw err;
-                    }
-                }
-
-                async createConversation() {
-                    if (!this.isInitialized) {
-                        throw new Error('Engine not initialized');
-                    }
-                    console.log('[EngineManager] Creating conversation');
-                    return await this.engine.createConversation();
-                }
-
-                async streamMessage(conversation, userMessage, onToken, onComplete) {
-                    if (!this.isInitialized) {
-                        throw new Error('Engine not initialized');
-                    }
-
-                    try {
-                        console.log('[EngineManager] Streaming message:', userMessage.substring(0, 50) + '...');
-                        let fullResponse = '';
-                        let tokenCount = 0;
-
-                        for await (const token of conversation.sendMessageStreaming(userMessage)) {
-                            fullResponse += token;
-                            tokenCount++;
-                            if (onToken) onToken(token);
-                        }
-
-                        console.log('[EngineManager] Stream complete:', tokenCount, 'tokens');
-                        if (onComplete) onComplete(fullResponse);
-                        return fullResponse;
-                    } catch (err) {
-                        console.error('[EngineManager] Streaming failed:', err);
-                        throw err;
-                    }
-                }
-
-                cleanup() {
-                    if (this.engine && this.engine.dispose) {
-                        console.log('[EngineManager] Disposing engine');
-                        this.engine.dispose();
-                    }
-                    this.engine = null;
-                    this.isInitialized = false;
-                }
-            }
-
-            // === Callback Streamer (Phase 2) ===
-            class CallbackStreamer {
-                constructor() {
-                    this.pendingCallbacks = new Map();
-                    this.callbackCounter = 0n;
-                }
-
-                createCallback(onToken, onComplete) {
-                    const id = ++this.callbackCounter;
-                    this.pendingCallbacks.set(id, { onToken, onComplete, tokens: [] });
-                    return id;
-                }
-
-                streamToken(id, token) {
-                    const callback = this.pendingCallbacks.get(id);
-                    if (callback) {
-                        callback.tokens.push(token);
-                        if (callback.onToken) callback.onToken(token);
-                    }
-                }
-
-                completeCallback(id, fullResponse) {
-                    const callback = this.pendingCallbacks.get(id);
-                    if (callback) {
-                        if (callback.onComplete) callback.onComplete(fullResponse);
-                        this.pendingCallbacks.delete(id);
-                    }
-                }
-
-                getTokens(id) {
-                    const callback = this.pendingCallbacks.get(id);
-                    return callback ? callback.tokens.slice() : [];
-                }
-            }
-
-            // ════════════════════════════════════════════════════════════════════
-            // PHASE 3: MULTI-MODEL, ADVANCED STREAMING, CACHE UI
-            // ════════════════════════════════════════════════════════════════════
-
-            class MultiModelManager {
-                constructor() {
-                    this.models = new Map();
-                    this.currentModel = null;
-                    this.loadedModels = new Map();
-                    this.modelLastUsed = new Map();
-                    console.log('[MultiModelManager] Initialized');
-                }
-                loadDefaultCatalog() {
-                    this.models.set('gemma-4', {
-                        id: 'gemma-4',
-                        name: 'Gemma 4',
-                        url: 'https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it-web.litertlm',
-                        size: 2500000000,
-                        category: 'general',
-                        version: '1.0'
-                    });
-                    this.models.set('phi-3', {
-                        id: 'phi-3',
-                        name: 'Phi-3 Mini',
-                        url: 'https://huggingface.co/litert-community/phi-3-mini-4k-instruct-onnx-web/resolve/main/phi-3-mini-web.litertlm',
-                        size: 1800000000,
-                        category: 'lightweight',
-                        version: '1.0'
-                    });
-                    this.models.set('mistral', {
-                        id: 'mistral',
-                        name: 'Mistral 7B',
-                        url: 'https://huggingface.co/litert-community/mistral-7b-instruct-litert/resolve/main/mistral-web.litertlm',
-                        size: 3200000000,
-                        category: 'efficient',
-                        version: '1.0'
-                    });
-                    console.log('[MultiModelManager] Loaded 3 models');
-                }
-                async loadModel(modelId) {
-                    if (!this.models.has(modelId)) throw new Error('Model not found: ' + modelId);
-                    if (this.loadedModels.has(modelId)) {
-                        this.modelLastUsed.set(modelId, Date.now());
-                        return this.loadedModels.get(modelId);
-                    }
-                    const modelMeta = this.models.get(modelId);
-                    console.log('[MultiModelManager] Loading: ' + modelMeta.name);
-                    const cached = await modelStore.loadModel(modelMeta.url);
-                    if (cached) {
-                        this.loadedModels.set(modelId, cached);
-                        this.modelLastUsed.set(modelId, Date.now());
-                        console.log('[MultiModelManager] From cache: ' + modelId);
-                        return cached;
-                    }
-                    const modelBytes = await httpProxyShim.handleModelRequest(modelMeta.url, modelId);
-                    await modelStore.saveModel(modelMeta.url, modelBytes, {
-                        modelId: modelId, name: modelMeta.name, version: modelMeta.version, timestamp: Date.now()
-                    });
-                    this.loadedModels.set(modelId, modelBytes);
-                    this.modelLastUsed.set(modelId, Date.now());
-                    console.log('[MultiModelManager] Cached: ' + modelId);
-                    return modelBytes;
-                }
-                async switchModel(modelId) {
-                    if (this.currentModel === modelId) return;
-                    console.log('[MultiModelManager] Switching to: ' + modelId);
-                    if (engineManager) engineManager.cleanup();
-                    const modelBytes = await this.loadModel(modelId);
-                    engineManager = new LiteRTEngineManager();
-                    await engineManager.initialize(modelBytes);
-                    this.currentModel = modelId;
-                    window.dispatchEvent(new CustomEvent('modelSwitched', { detail: { modelId: modelId } }));
-                }
-                getCatalog() {
-                    return Array.from(this.models.values()).map(m => ({
-                        id: m.id, name: m.name, size: m.size, category: m.category, sizeMB: (m.size / (1024 * 1024)).toFixed(2)
-                    }));
-                }
-                async unloadUnused() {
-                    const now = Date.now();
-                    const timeout = 10 * 60 * 1000;
-                    let unloaded = 0;
-                    for (const [modelId, lastUsed] of this.modelLastUsed.entries()) {
-                        if (modelId !== this.currentModel && (now - lastUsed) > timeout) {
-                            this.loadedModels.delete(modelId);
-                            unloaded++;
-                            console.log('[MultiModelManager] Unloaded: ' + modelId);
-                        }
-                    }
-                    return unloaded;
-                }
-            }
-
-            class AdvancedTokenStreamer {
-                constructor() {
-                    this.callbacks = new Map();
-                    this.eventTarget = new EventTarget();
-                    console.log('[AdvancedTokenStreamer] Initialized');
-                }
-                createCallback(onToken, onComplete, onError) {
-                    const id = crypto.randomUUID();
-                    this.callbacks.set(id, {
-                        onToken: onToken || function() {},
-                        onComplete: onComplete || function() {},
-                        onError: onError || function() {},
-                        cancelled: false,
-                        tokens: [],
-                        startTime: Date.now()
-                    });
-                    return id;
-                }
-                streamToken(callbackId, token) {
-                    const callback = this.callbacks.get(callbackId);
-                    if (!callback || callback.cancelled) return;
-                    callback.tokens.push(token);
-                    try { callback.onToken(token); } catch (e) { console.error(e); }
-                    this.eventTarget.dispatchEvent(new CustomEvent('token', {
-                        detail: { callbackId: callbackId, token: token, count: callback.tokens.length }
-                    }));
-                }
-                completeCallback(callbackId, fullResponse) {
-                    const callback = this.callbacks.get(callbackId);
-                    if (!callback || callback.cancelled) return;
-                    const duration = Date.now() - callback.startTime;
-                    const tokensPerSec = (callback.tokens.length / duration * 1000).toFixed(2);
-                    try {
-                        callback.onComplete({
-                            response: fullResponse, tokenCount: callback.tokens.length, duration: duration, tokensPerSec: tokensPerSec
-                        });
-                    } catch (e) { console.error(e); }
-                    this.eventTarget.dispatchEvent(new CustomEvent('complete', {
-                        detail: { callbackId: callbackId, response: fullResponse, stats: { tokenCount: callback.tokens.length, tokensPerSec: tokensPerSec, duration: duration } }
-                    }));
-                    console.log('[AdvancedTokenStreamer] Complete: ' + callback.tokens.length + ' tokens');
-                }
-                errorCallback(callbackId, error) {
-                    const callback = this.callbacks.get(callbackId);
-                    if (!callback) return;
-                    try { callback.onError(error); } catch (e) { console.error(e); }
-                    this.eventTarget.dispatchEvent(new CustomEvent('error', {
-                        detail: { callbackId: callbackId, error: error }
-                    }));
-                }
-                cancelCallback(callbackId) {
-                    const callback = this.callbacks.get(callbackId);
-                    if (callback) { callback.cancelled = true; }
-                }
-                getTokens(callbackId) {
-                    const callback = this.callbacks.get(callbackId);
-                    return callback ? callback.tokens : [];
-                }
-                addEventListener(event, handler) { this.eventTarget.addEventListener(event, handler); }
-                removeEventListener(event, handler) { this.eventTarget.removeEventListener(event, handler); }
-                cleanup(callbackId) { this.callbacks.delete(callbackId); }
-            }
-
-            class BatchInferenceProcessor {
-                constructor(engineManager, maxConcurrent) {
-                    this.engineManager = engineManager;
-                    this.maxConcurrent = maxConcurrent || 2;
-                    this.queue = [];
-                    this.active = 0;
-                    this.results = [];
-                    console.log('[BatchInferenceProcessor] Init');
-                }
-                async processBatch(messages) {
-                    console.log('[BatchInferenceProcessor] Starting: ' + messages.length + ' msgs');
-                    this.queue = messages.slice();
-                    this.active = 0;
-                    this.results = [];
-                    return new Promise((resolve) => {
-                        const checkQueue = setInterval(() => {
-                            while (this.active < this.maxConcurrent && this.queue.length > 0) {
-                                const msg = this.queue.shift();
-                                this.active++;
-                                this.processMessage(msg).catch(e => {
-                                    console.error(e);
-                                    this.results.push({ error: e.message });
-                                }).finally(() => { this.active--; });
-                            }
-                            if (this.queue.length === 0 && this.active === 0) {
-                                clearInterval(checkQueue);
-                                resolve(this.results);
-                            }
-                        }, 100);
-                    });
-                }
-                async processMessage(msg) {
-                    return new Promise((resolve) => {
-                        const conv = { id: crypto.randomUUID() };
-                        this.engineManager.streamMessage(conv, msg.text,
-                            (token) => { if (msg.onToken) msg.onToken(token); },
-                            (fullResponse) => {
-                                this.results.push({
-                                    id: msg.id, text: msg.text, response: fullResponse, timestamp: Date.now()
-                                });
-                                resolve({ id: msg.id, success: true });
-                            }
-                        );
-                    });
-                }
-            }
-
-            class MemoryOptimizer {
-                constructor() {
-                    this.memoryThreshold = 500 * 1024 * 1024;
-                    this.monitorInterval = 5000;
-                    this.lastGC = Date.now();
-                    this.gcInterval = 30000;
-                    console.log('[MemoryOptimizer] Initialized');
-                }
-                async startMonitoring() {
-                    this.monitorHandle = setInterval(() => this.checkMemoryPressure(), this.monitorInterval);
-                }
-                async checkMemoryPressure() {
-                    if (performance.memory) {
-                        const used = performance.memory.usedJSHeapSize;
-                        const limit = performance.memory.jsHeapSizeLimit;
-                        const percent = (used / limit) * 100;
-                        if (percent > 75) {
-                            console.log('[MemoryOptimizer] WARNING: ' + percent.toFixed(1) + '%');
-                            if (multiModelManager) {
-                                const unloaded = await multiModelManager.unloadUnused();
-                                if (unloaded > 0) console.log('[MemoryOptimizer] Unloaded ' + unloaded);
-                            }
-                        }
-                        if (Date.now() - this.lastGC > this.gcInterval) {
-                            if (window.gc) window.gc();
-                            this.lastGC = Date.now();
-                        }
-                    }
-                }
-                getStats() {
-                    if (!performance.memory) return null;
-                    return {
-                        usedMB: (performance.memory.usedJSHeapSize / (1024 * 1024)).toFixed(2),
-                        limitMB: (performance.memory.jsHeapSizeLimit / (1024 * 1024)).toFixed(2),
-                        usedPercent: ((performance.memory.usedJSHeapSize / performance.memory.jsHeapSizeLimit) * 100).toFixed(1)
-                    };
-                }
-                stopMonitoring() { if (this.monitorHandle) clearInterval(this.monitorHandle); }
-            }
-
-            class CacheManagementUI {
-                constructor() { this.container = null; console.log('[CacheManagementUI] Initialized'); }
-                mount(containerId) {
-                    this.container = document.getElementById(containerId);
-                    if (!this.container) return;
-                    this.render();
-                }
-                async render() {
-                    const stats = await this.getCacheStats();
-                    const models = await this.getCachedModels();
-                    const html = '<div class="cache-mgmt" style="padding:20px;background:#f5f5f5;border-radius:8px;margin:20px 0">' +
-                        '<h3 style="margin-top:0">Cache Management</h3>' +
-                        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:15px;margin-bottom:20px">' +
-                        '<div style="background:white;padding:15px;border-radius:4px;border-left:4px solid #4CAF50">' +
-                        '<div style="font-size:12px;color:#666">Cache Size</div>' +
-                        '<div style="font-size:20px;font-weight:bold">' + this.formatBytes(stats.totalSize) + '</div></div>' +
-                        '<div style="background:white;padding:15px;border-radius:4px;border-left:4px solid #2196F3">' +
-                        '<div style="font-size:12px;color:#666">Models</div>' +
-                        '<div style="font-size:20px;font-weight:bold">' + models.length + '</div></div></div>' +
-                        '<div style="margin-bottom:20px">' +
-                        (models.length > 0 ? '<div style="font-size:12px;color:#666;margin-bottom:10px">CACHED MODELS</div>' +
-                        models.map(m => '<div style="display:flex;justify-content:space-between;padding:12px;background:white;border-radius:4px;margin-bottom:8px;border:1px solid #ddd">' +
-                        '<div><div style="font-weight:500">' + m.name + '</div><div style="font-size:12px;color:#999">' + this.formatBytes(m.size) + '</div></div>' +
-                        '<button onclick="cacheUI.clearModel(' + m.id + ')" style="padding:6px 12px;background:#ff6b6b;color:white;border:none;border-radius:4px;cursor:pointer">Delete</button></div>').join('') :
-                        '<div style="padding:20px;text-align:center;color:#999">No cached models</div>') +
-                        '</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">' +
-                        '<button onclick="cacheUI.clearAll()" style="padding:10px;background:#ff6b6b;color:white;border:none;border-radius:4px;cursor:pointer;font-weight:500">Clear All</button>' +
-                        '<button onclick="cacheUI.exportCache()" style="padding:10px;background:#4CAF50;color:white;border:none;border-radius:4px;cursor:pointer;font-weight:500">Export</button></div></div>';
-                    this.container.innerHTML = html;
-                    window.cacheUI = this;
-                }
-                async getCacheStats() {
-                    if (!modelStore.db) return { totalSize: 0 };
-                    const tx = modelStore.db.transaction('models', 'readonly');
-                    const store = tx.objectStore('models');
-                    return new Promise((resolve) => {
-                        const request = store.getAll();
-                        request.onsuccess = () => {
-                            const models = request.result;
-                            const totalSize = models.reduce((sum, m) => sum + (m.modelBytes?.byteLength || 0), 0);
-                            resolve({ totalSize: totalSize });
-                        };
-                    });
-                }
-                async getCachedModels() {
-                    if (!modelStore.db) return [];
-                    const tx = modelStore.db.transaction('models', 'readonly');
-                    const store = tx.objectStore('models');
-                    return new Promise((resolve) => {
-                        const request = store.getAll();
-                        request.onsuccess = () => {
-                            const models = request.result.map(m => ({
-                                id: m.url.split('/').pop(),
-                                name: m.metadata?.name || 'Unknown',
-                                size: m.modelBytes?.byteLength || 0,
-                                timestamp: m.metadata?.timestamp || Date.now()
-                            }));
-                            resolve(models);
-                        };
-                    });
-                }
-                async clearModel(modelId) {
-                    if (multiModelManager) multiModelManager.loadedModels.delete(modelId);
-                    await this.render();
-                }
-                async clearAll() {
-                    if (!confirm('Clear all cached models?')) return;
-                    if (modelStore.db) {
-                        const tx = modelStore.db.transaction('models', 'readwrite');
-                        tx.objectStore('models').clear();
-                    }
-                    if (multiModelManager) multiModelManager.loadedModels.clear();
-                    await this.render();
-                }
-                async exportCache() { alert('Export coming in Phase 4'); }
-                formatBytes(bytes) {
-                    if (bytes === 0) return '0 B';
-                    const k = 1024;
-                    const sizes = ['B', 'KB', 'MB', 'GB'];
-                    const i = Math.floor(Math.log(bytes) / Math.log(k));
-                    return (bytes / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
-                }
-            }
-
-            class UIEnhancements {
-                constructor() {
-                    this.stats = { tokensGenerated: 0, totalTokensPerSec: 0, inferenceCount: 0, lastUpdate: Date.now() };
-                    console.log('[UIEnhancements] Initialized');
-                }
-                async initUI() {
-                    await this.createModelSelector();
-                    this.createStatsPanel();
-                    this.setupEventListeners();
-                }
-                async createModelSelector() {
-                    const controlsDiv = document.getElementById('controls') || this.createControlsPanel();
-                    if (!multiModelManager) return;
-                    const models = multiModelManager.getCatalog();
-                    const html = '<div style="margin-bottom:15px"><label style="display:block;font-size:12px;color:#666;margin-bottom:5px">Model Selection</label>' +
-                        '<select id="model-selector" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:14px">' +
-                        models.map(m => '<option value="' + m.id + '">' + m.name + ' (' + m.sizeMB + 'MB)</option>').join('') +
-                        '</select></div>';
-                    controlsDiv.innerHTML = html;
-                    document.getElementById('model-selector')?.addEventListener('change', async (e) => {
-                        await multiModelManager.switchModel(e.target.value);
-                    });
-                }
-                createStatsPanel() {
-                    const container = document.getElementById('stats-panel') || document.createElement('div');
-                    container.id = 'stats-panel';
-                    container.style.cssText = 'padding:12px;background:#1e1e1e;color:#00ff00;font-family:monospace;font-size:11px;line-height:1.6;border-bottom:1px solid #333';
-                    const terminalContainer = document.getElementById('terminal-container');
-                    if (terminalContainer?.parentNode) terminalContainer.parentNode.insertBefore(container, terminalContainer);
-                    setInterval(() => {
-                        if (advancedTokenStreamer && memoryOptimizer) {
-                            const memStats = memoryOptimizer.getStats();
-                            container.innerHTML = 'Tokens: ' + this.stats.tokensGenerated + ' | Speed: ' + this.stats.totalTokensPerSec.toFixed(1) + ' tok/s | Inferences: ' + this.stats.inferenceCount + ' | Memory: ' + (memStats ? memStats.usedMB + '/' + memStats.limitMB + 'MB' : 'N/A');
-                        }
-                    }, 500);
-                }
-                createControlsPanel() {
-                    const div = document.createElement('div');
-                    div.id = 'controls';
-                    div.style.cssText = 'padding:15px;background:#f5f5f5;border-bottom:1px solid #ddd';
-                    const terminalPane = document.querySelector('.terminal-pane');
-                    if (terminalPane) terminalPane.insertBefore(div, terminalPane.firstChild);
-                    return div;
-                }
-                setupEventListeners() {
-                    if (advancedTokenStreamer) {
-                        advancedTokenStreamer.addEventListener('token', (e) => { this.stats.tokensGenerated++; });
-                        advancedTokenStreamer.addEventListener('complete', (e) => {
-                            this.stats.inferenceCount++;
-                            this.stats.totalTokensPerSec = parseFloat(e.detail.stats.tokensPerSec);
-                        });
-                    }
-                }
-            }
-
-            console.log('[TRACE] About to start Phase 2 initialization');
-            // Initialize Phase 2 components
-            console.log('[TRACE] Before Phase 2 try block');
-            try {
-                modelStore = new CacheAPIModelStore();
-                console.log('[TRACE] CacheAPIModelStore created');
-                fetcher = new RobustHTTPFetcher(3);
-                console.log('[TRACE] RobustHTTPFetcher created, fetcher:', typeof fetcher);
-                engineManager = new LiteRTEngineManager();
-                console.log('[TRACE] LiteRTEngineManager created');
-                callbackStreamer = new CallbackStreamer();
-                console.log('[TRACE] CallbackStreamer created');
-                
-                // Phase 2 Pre-Initialization
-                // Initialize model store for persistent caching
-                modelStore.init().catch(err => console.warn('[Phase 2] ModelStore init warning:', err));
-                console.log('[Phase 2] Model persistence layer ready');
-            } catch (phaseErr) {
-                console.error('[Phase 2] Initialization failed:', phaseErr.message, phaseErr.stack);
-                throw phaseErr;
-            }
-            
-            // Phase 3 components (global)
-            let multiModelManager = null;
-            let advancedTokenStreamer = null;
-            let batchInferenceProcessor = null;
-            let memoryOptimizer = null;
-            let cacheUI = null;
-            let uiEnhancements = null;
-
-            console.log('[Phase 2] Components initialized');
-
-            try {
-                        const tx = fs.db.transaction('files', 'readwrite');
-                        tx.objectStore('files').delete(path);
-                    } catch (e) {
-                        console.warn('Failed deleting fs entry:', path, e);
-                    }
-                    view.setUint32(ovPtr, 1, true);
-                    view.setUint32(ovPtr + 4, 0, true);
-                    return 0;
-                },
-                path_mkdir: (ovPtr, pathPtr, pathLen, mode) => {
-                    const path = resolvePath(decoder.decode(new Uint8Array(hostState.memory.buffer, Number(pathPtr), Number(pathLen))));
-                    const view = new DataView(hostState.memory.buffer);
-                    ovPtr = Number(ovPtr);
-                    if (fs.getEntrySync(path)) {
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 17, true); // EEXIST
-                        return 0;
-                    }
-                    const entry = { path, type: 'dir', mtime: Date.now(), mode: Number(mode) || 0o40755 };
-                    fs.entries.set(path, entry);
-                    fs.putEntrySync(entry);
-                    view.setUint32(ovPtr, 1, true);
-                    view.setUint32(ovPtr + 4, 0, true);
-                    return 0;
-                },
-                path_rename: (ovPtr, oldPtr, oldLen, newPtr, newLen) => {
-                    const oldPath = resolvePath(decoder.decode(new Uint8Array(hostState.memory.buffer, Number(oldPtr), Number(oldLen))));
-                    const newPath = resolvePath(decoder.decode(new Uint8Array(hostState.memory.buffer, Number(newPtr), Number(newLen))));
-                    const view = new DataView(hostState.memory.buffer);
-                    ovPtr = Number(ovPtr);
-                    const entry = fs.getEntrySync(oldPath);
-                    if (!entry) {
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 44, true); // ENOENT
-                        return 0;
-                    }
-                    fs.entries.delete(oldPath);
-                    entry.path = newPath;
-                    fs.entries.set(newPath, entry);
-                    fs.putEntrySync(entry);
-                    view.setUint32(ovPtr, 1, true);
-                    view.setUint32(ovPtr + 4, 0, true);
-                    return 0;
-                },
-                net_open: (ovPtr, addrPtr, addrLen, port, flags) => {
-                    ovPtr = Number(ovPtr);
-                    addrPtr = Number(addrPtr);
-                    addrLen = Number(addrLen);
-                    port = Number(port);
-                    const view = new DataView(hostState.memory.buffer);
-                    const addr = decoder.decode(new Uint8Array(hostState.memory.buffer, addrPtr, addrLen)).replace(/\0.*/, '');
-
-                    if ((addr === '127.0.0.1' || addr === 'localhost') && port === 8888) {
-                        const handle = hostState.nextHandle++;
-                        hostState.handles.set(handle, {
-                            type: 'proxy',
-                            addr,
-                            port,
-                            requestBytes: [],
-                            requestText: '',
-                            requestComplete: false,
-                            responseBytes: null,
-                            responseOffset: 0,
-                            pendingReads: [],
-                            preparing: false,
-                            requestUrl: ''
-                        });
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 0, true);
-                        view.setBigUint64(ovPtr + 16, handle, true);
-                        return 0;
-                    }
-
-                    view.setUint32(ovPtr, 1, true);
-                    view.setUint32(ovPtr + 4, 111, true); // ECONNREFUSED
-                    return 0;
-                },
-                net_accept: (ovPtr) => {
-                    ovPtr = Number(ovPtr);
-                    const view = new DataView(hostState.memory.buffer);
-                    view.setUint32(ovPtr, 1, true);
-                    view.setUint32(ovPtr + 4, 38, true); // ENOSYS
-                    return 0;
-                },
-                net_lookup: (ovPtr, namePtr, nameLen, bufPtr, bufLen) => {
-                    const view = new DataView(hostState.memory.buffer);
-                    ovPtr = Number(ovPtr);
-                    const totalSize = 8;
-                    if (Number(bufLen) >= totalSize) {
-                        view.setUint32(Number(bufPtr), totalSize, true);
-                        view.setUint32(Number(bufPtr) + 4, 0, true);
-                    }
-                    view.setUint32(ovPtr, 1, true);
-                    view.setUint32(ovPtr + 4, 0, true);
-                    view.setBigUint64(ovPtr + 16, BigInt(totalSize), true);
-                    return 0;
-                },
-                net_cert_verify: (ovPtr, namePtr, nameLen, chainPtr, chainLen) => {
-                    const view = new DataView(hostState.memory.buffer);
-                    ovPtr = Number(ovPtr);
-                    view.setUint32(ovPtr, 1, true);
-                    view.setUint32(ovPtr + 4, 0, true);
-                    view.setBigUint64(ovPtr + 16, 1n, true);
-                    return 0;
-                },
-                process_spawn: (ovPtr, cfgPtr, cfgLen) => {
-                    const view = new DataView(hostState.memory.buffer);
-                    ovPtr = Number(ovPtr);
-                    view.setUint32(ovPtr, 1, true);
-                    view.setUint32(ovPtr + 4, 38, true); // ENOSYS
-                    return 0;
-                },
-                process_pipe: (ovPtr) => {
-                    const view = new DataView(hostState.memory.buffer);
-                    ovPtr = Number(ovPtr);
-                    view.setUint32(ovPtr, 1, true);
-                    view.setUint32(ovPtr + 4, 0, true);
-                    view.setBigUint64(ovPtr + 16, 0n, true);
-                    return 0;
-                },
-                process_wait: (ovPtr, handle) => {
-                    const view = new DataView(hostState.memory.buffer);
-                    ovPtr = Number(ovPtr);
-                    const h = hostState.handles.get(BigInt(handle));
-                    if (!h) {
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 9, true); // EBADF
-                        return 0;
-                    }
-                    view.setUint32(ovPtr, 1, true);
-                    view.setUint32(ovPtr + 4, 0, true);
-                    view.setBigUint64(ovPtr + 16, 0n, true);
-                    return 0;
-                },
-                process_signal: (...args) => 0,
-                signal_wait: (ovPtr, signum) => {
-                    ovPtr = Number(ovPtr);
-                    signum = Number(signum);
-                    if (!Number.isFinite(ovPtr) || !Number.isFinite(signum)) {
-                        return 0;
-                    }
-                    if (!Array.isArray(hostState.pendingSignals)) {
-                        hostState.pendingSignals = [];
-                    }
-
-                    // Keep the queue bounded: if guests spam waits, evict oldest
-                    // entries and complete them with cancellation.
-                    if (hostState.pendingSignals.length > 2048) {
-                        const dropped = hostState.pendingSignals.shift();
-                        if (dropped) {
-                            hostState.safeWriteOverlapped(dropped.ovPtr, 11, 0n, 0n); // ECANCELED
-                        }
-                    }
-
-                    const queued = hostState.pendingSignalCounts.get(signum) || 0;
-                    if (queued > 0) {
-                        hostState.pendingSignalCounts.set(signum, queued - 1);
-                        hostState.safeWriteOverlapped(ovPtr, 0, 0n, BigInt(signum));
-                        return 0;
-                    }
-
-                    // Queue the wait - only trigger for real events (SIGWINCH, SIGCHLD)
-                    // Don't auto-trigger spurious signals (2, 15, 27) on poll
-                    hostState.pendingSignals.push({ ovPtr, signum });
-                    return 0;
-                },
-                dylib_open: (ovPtr, pathPtr, pathLen, flags) => {
-                    const view = new DataView(hostState.memory.buffer);
-                    const pathBytes = new Uint8Array(hostState.memory.buffer, Number(pathPtr), Number(pathLen));
-                    const libPath = decoder.decode(pathBytes).replace(/\0.*/, '');
-                    
-                    console.log('[dylib_open] Loading:', libPath);
-                    console.log('[dylib_open] Bootstrap status - started:', browserAssetState.bootstrapStarted, 'complete:', browserAssetState.bootstrapComplete);
-                    console.log('[dylib_open] Engine status - initialized:', engineManager?.isInitialized);
-                    
-                    if (libPath.includes('litert') || libPath.includes('lm_ext')) {
-                        const handle = hostState.nextHandle++;
-                        hostState.handles.set(handle, {
-                            type: 'dylib',
-                            libPath,
-                            engine: engineManager,
-                            conversation: null,
-                            isStreaming: false,
-                            inferenceInProgress: false,
-                            lastError: null
-                        });
-                        
-                        console.log('[dylib_open] Created dylib handle:', handle);
-                        
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 0, true);
-                        view.setBigUint64(ovPtr + 8, 0n, true);
-                        view.setBigUint64(ovPtr + 16, handle, true);
-                        return 0;
-                    }
-                    
-                    console.log('[dylib_open] Unknown library, returning ENOENT');
-                    view.setUint32(ovPtr, 1, true);
-                    view.setUint32(ovPtr + 4, 38, true);
-                    return 0;
-                },
-                dylib_sym: (ovPtr, libHandle, namePtr, nameLen) => {
-                    libHandle = BigInt(libHandle);
-                    ovPtr = Number(ovPtr);
-                    const view = new DataView(hostState.memory.buffer);
-                    const h = hostState.handles.get(libHandle);
-                    
-                    if (!h || h.type !== 'dylib') {
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 9, true);
-                        return 0;
-                    }
-                    
-                    const nameBytes = new Uint8Array(hostState.memory.buffer, Number(namePtr), Number(nameLen));
-                    const symbolName = decoder.decode(nameBytes).replace(/\0.*/, '');
-                    
-                    console.log('[dylib_sym] Resolving:', symbolName);
-                    
-                    const symbols = {
-                        'litert_lm_engine_create': 'engineCreate',
-                        'litert_lm_conversation_create': 'conversationCreate',
-                        'litert_lm_conversation_send_message_stream': 'conversationSendStream',
-                        'litert_lm_stream_chunk_get_text': 'streamGetText',
-                        'litert_lm_stream_read_chunk': 'streamReadChunk',
-                        'litert_lm_stream_close': 'streamClose'
-                    };
-                    
-                    if (symbols[symbolName]) {
-                        const symHandle = hostState.nextHandle++;
-                        hostState.handles.set(symHandle, {
-                            type: 'dylib_sym',
-                            libHandle,
-                            symbolName,
-                            fnName: symbols[symbolName]
-                        });
-                        
-                        console.log('[dylib_sym] Resolved to:', symbols[symbolName]);
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 0, true);
-                        view.setBigUint64(ovPtr + 8, 0n, true);
-                        view.setBigUint64(ovPtr + 16, symHandle, true);
-                        return 0;
-                    }
-                    
-                    console.log('[dylib_sym] Unknown symbol:', symbolName);
-                    view.setUint32(ovPtr, 1, true);
-                    view.setUint32(ovPtr + 4, 38, true);
-                    return 0;
-                },
-                dylib_call: (ovPtr, symHandle, descPtr, descLen) => {
-                    symHandle = BigInt(symHandle);
-                    ovPtr = Number(ovPtr);
-                    const view = new DataView(hostState.memory.buffer);
-                    const h = hostState.handles.get(symHandle);
-                    
-                    if (!h || h.type !== 'dylib_sym') {
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 9, true);
-                        return 0;
-                    }
-                    
-                    const libHandle = h.libHandle;
-                    const libH = hostState.handles.get(libHandle);
-                    if (!libH) {
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 9, true);
-                        return 0;
-                    }
-                    
-                    console.log('[dylib_call] Invoking:', h.symbolName);
-                    
-                    // Handle async operations without blocking
-                    (async () => {
-                        try {
-                            switch (h.fnName) {
-                                case 'engineCreate':
-                                    console.log('[dylib_call] engineCreate: Checking initialization status');
-                                    console.log('[dylib_call] Engine already initialized:', libH.engine.isInitialized);
-                                    
-                                    if (!libH.engine.isInitialized) {
-                                        console.log('[dylib_call] Engine not yet initialized, attempting to initialize...');
-                                        // Wait for bootstrap to complete first
-                                        let bootTries = 0;
-                                        while (!browserAssetState.bootstrapComplete && bootTries < 300) {
-                                            await new Promise(r => setTimeout(r, 100));
-                                            bootTries++;
-                                        }
-                                        
-                                        if (!browserAssetState.bootstrapComplete) {
-                                            throw new Error('Bootstrap timed out after 30 seconds');
-                                        }
-                                        
-                                        console.log('[dylib_call] Bootstrap completed, initializing engine');
-                                        const modelBytes = httpProxyShim.webModelCache.values().next().value;
-                                        if (!modelBytes || modelBytes.length === 0) {
-                                            throw new Error('No model bytes available after bootstrap');
-                                        }
-                                        
-                                        console.log('[dylib_call] Initializing engine with', (modelBytes.length / 1024 / 1024).toFixed(1), 'MB model');
-                                        await libH.engine.initialize(modelBytes);
-                                    }
-                                    console.log('[dylib_call] Engine initialized successfully');
-                                    break;
-                                    
-                                case 'conversationCreate':
-                                    console.log('[dylib_call] Creating conversation');
-                                    libH.conversation = await libH.engine.createConversation();
-                                    console.log('[dylib_call] Conversation created');
-                                    break;
-                                    
-                                case 'conversationSendStream':
-                                    console.log('[dylib_call] Starting message streaming');
-                                    if (libH.conversation) {
-                                        libH.isStreaming = true;
-                                        // Streaming will be handled via callbacks
-                                        const userMessage = 'Hello, how are you?';
-                                        const callbackId = callbackStreamer.createCallback(
-                                            (token) => {
-                                                console.log('[dylib_call] Token:', token);
-                                                callbackStreamer.streamToken(callbackId, token);
-                                            },
-                                            (fullResponse) => {
-                                                console.log('[dylib_call] Streaming complete');
-                                                callbackStreamer.completeCallback(callbackId, fullResponse);
-                                                libH.isStreaming = false;
-                                            }
-                                        );
-                                        
-                                        await libH.engine.streamMessage(
-                                            libH.conversation,
-                                            userMessage,
-                                            (token) => callbackStreamer.streamToken(callbackId, token),
-                                            (response) => callbackStreamer.completeCallback(callbackId, response)
-                                        );
-                                    }
-                                    break;
-                            }
-                            
-                            // Return success immediately (async work continues in background)
-                            view.setUint32(ovPtr, 1, true);
-                            view.setUint32(ovPtr + 4, 0, true);
-                            view.setBigUint64(ovPtr + 8, 0n, true);
-                            view.setBigUint64(ovPtr + 16, 0n, true);
-                        } catch (err) {
-                            console.error('[dylib_call] Error:', err);
-                            libH.lastError = err;
-                            view.setUint32(ovPtr, 1, true);
-                            view.setUint32(ovPtr + 4, 5, true);
-                        }
-                    })();
-                    
-                    return 0;
-                },
-                dylib_callback_create: (ovPtr, libHandle, sigPtr, sigLen, namePtr, nameLen) => {
-                    const view = new DataView(hostState.memory.buffer);
-                    view.setUint32(ovPtr, 1, true);
-                    view.setUint32(ovPtr + 4, 38, true); // ENOSYS
-                    return 0;
-                },
-                dylib_callback_respond: (cbHandle, invocationId, retValue) => {
-                },
-                dylib_callback_wait: (ovPtr, outPtr, outLen) => {
-                    // No native DLL in the browser host: report the wait as
-                    // cancelled so a guest pump (if ever entered) exits cleanly.
-                    const view = new DataView(hostState.memory.buffer);
-                    view.setUint32(ovPtr, 1, true);     // done
-                    view.setUint32(ovPtr + 4, 11, true); // ECANCELED -> ok=false
-                    return 0;
-                },
-                dylib_callback_stop: () => {},
-                dylib_close: (libHandle) => {
-                    libHandle = BigInt(libHandle);
-                    const h = hostState.handles.get(libHandle);
-                    if (h && h.type === 'dylib') {
-                        console.log('[dylib_close] Closing handle:', libHandle);
-                        if (h.engine && h.engine.cleanup) {
-                            h.engine.cleanup();
-                        }
-                        hostState.handles.delete(libHandle);
-                        console.log('[dylib_close] Handle closed');
-                    }
-                },
-                dylib_read_cstr: (hostPtr, guestBufPtr, maxLen) => {
-                    return 0;
-                },
-                dylib_read_mem: (ovPtr, libHandle, hostPtr, guestBufPtr, length) => {
-                    // Read memory from dylib allocated region
-                    ovPtr = Number(ovPtr);
-                    hostPtr = BigInt(hostPtr);
-                    guestBufPtr = Number(guestBufPtr);
-                    length = Number(length);
-                    
-                    const view = new DataView(hostState.memory.buffer);
-                    
-                    if (hostState.dylibMem && hostState.dylibMem.has(hostPtr)) {
-                        const srcBuf = hostState.dylibMem.get(hostPtr);
-                        const dstBuf = new Uint8Array(hostState.memory.buffer, guestBufPtr, length);
-                        const toCopy = Math.min(srcBuf.length, length);
-                        dstBuf.set(srcBuf.slice(0, toCopy));
-                        
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 0, true);
-                        view.setBigUint64(ovPtr + 16, BigInt(toCopy), true);
-                    } else {
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 22, true); // EINVAL
-                    }
-                    return 0;
-                },
-                dylib_write_mem: (ovPtr, libHandle, hostPtr, guestBufPtr, length) => {
-                    // Write memory to dylib allocated region
-                    ovPtr = Number(ovPtr);
-                    hostPtr = BigInt(hostPtr);
-                    guestBufPtr = Number(guestBufPtr);
-                    length = Number(length);
-                    
-                    const view = new DataView(hostState.memory.buffer);
-                    
-                    if (hostState.dylibMem && hostState.dylibMem.has(hostPtr)) {
-                        const srcBuf = new Uint8Array(hostState.memory.buffer, guestBufPtr, length);
-                        const dstBuf = hostState.dylibMem.get(hostPtr);
-                        const toCopy = Math.min(srcBuf.length, dstBuf.length);
-                        dstBuf.set(srcBuf.slice(0, toCopy));
-                        
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 0, true);
-                        view.setBigUint64(ovPtr + 16, BigInt(toCopy), true);
-                    } else {
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 22, true); // EINVAL
-                    }
-                    return 0;
-                },
-                dylib_alloc: (ovPtr, libHandle, size, align) => {
-                    // Allocate memory for dylib calls
-                    // Parameters: (overlappedPtr, libHandle, size, align)
-                    ovPtr = Number(ovPtr);
-                    libHandle = BigInt(libHandle);
-                    size = BigInt(size);
-                    align = Number(align);
-                    
-                    if (!hostState.dylibMem) {
-                        hostState.dylibMem = new Map();
-                        hostState.dylibMemCounter = 1000000n;
-                    }
-                    
-                    const handle = hostState.dylibMemCounter++;
-                    const buf = new Uint8Array(Number(size));
-                    hostState.dylibMem.set(handle, buf);
-                    
-                    const view = new DataView(hostState.memory.buffer);
-                    view.setUint32(ovPtr, 1, true);
-                    view.setUint32(ovPtr + 4, 0, true);
-                    view.setBigUint64(ovPtr + 16, handle, true);
-                    
-                    console.log('[dylib_alloc] Allocated:', Number(size), 'bytes, handle:', handle);
-                    return 0;
-                },
-                dylib_free: (ovPtr, libHandle, ptr) => {
-                    // Free allocated dylib memory
-                    // Parameters: (overlappedPtr, libHandle, ptr)
-                    ovPtr = Number(ovPtr);
-                    libHandle = BigInt(libHandle);
-                    ptr = BigInt(ptr);
-                    
-                    const view = new DataView(hostState.memory.buffer);
-                    
-                    if (hostState.dylibMem && hostState.dylibMem.has(ptr)) {
-                        hostState.dylibMem.delete(ptr);
-                        console.log('[dylib_free] Freed handle:', ptr);
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 0, true);
-                    } else {
-                        view.setUint32(ovPtr, 1, true);
-                        view.setUint32(ovPtr + 4, 22, true); // EINVAL
-                    }
-                    return 0;
-                },
-                dylib_callback_register: (ovPtr, libHandle, sigPtr, sigLen, cbOvPtr, cbOvLen) => {
-                    // Register a callback for dylib notifications
-                    ovPtr = Number(ovPtr);
-                    libHandle = BigInt(libHandle);
-                    sigPtr = Number(sigPtr);
-                    sigLen = Number(sigLen);
-                    cbOvPtr = Number(cbOvPtr);
-                    cbOvLen = Number(cbOvLen);
-                    
-                    console.log('[dylib_callback_register] Registering callback, libHandle:', libHandle);
-                    
-                    const view = new DataView(hostState.memory.buffer);
-                    
-                    // Create a unique callback handle
-                    if (!hostState.callbackHandles) {
-                        hostState.callbackHandles = new Map();
-                        hostState.callbackCounter = 2000000n;
-                    }
-                    
-                    const cbHandle = hostState.callbackCounter++;
-                    hostState.callbackHandles.set(cbHandle, {
-                        libHandle,
-                        cbOvPtr,
-                        cbOvLen,
-                        sigPtr,
-                        sigLen
-                    });
-                    
-                    console.log('[dylib_callback_register] Registered callback handle:', cbHandle);
-                    
-                    // Return callback handle
-                    view.setUint32(ovPtr, 1, true);
-                    view.setUint32(ovPtr + 4, 0, true);
-                    view.setBigUint64(ovPtr + 16, cbHandle, true);
-                    return 0;
-                },
-                dylib_retain: (handle) => {
-                    // Reference counting stub
-                    return 0;
-                },
-                dylib_release: (handle) => {
-                    // Reference counting stub
-                    return 0;
-                },
-                cancel: (...args) => {},
-                get_platform_info: (outPtr, outLen) => {
-                    const view = new DataView(hostState.memory.buffer);
-                    outPtr = Number(outPtr);
-                    const structSize = 548;
-                    if (Number(outLen) < structSize) return 7; // E2BIG
-
-                    const buf = new ArrayBuffer(structSize);
-                    const dv = new DataView(buf);
-                    dv.setUint32(0, 1, true);
-                    dv.setUint8(4, 47);
-                    dv.setUint8(5, 58);
-                    dv.setUint16(6, 2, true);
-                    dv.setUint16(16, 1, true);
-                    dv.setUint8(18, 64);
-
-                    const copyAscii = (dstOff, str) => {
-                        const bytes = encoder.encode(str.slice(0, 63));
-                        new Uint8Array(buf, dstOff, bytes.length).set(bytes);
-                    };
-
-                    copyAscii(20, 'browser');
-                    copyAscii(84, 'rusticated-wasm');
-                    copyAscii(156, 'wasm32');
-                    copyAscii(220, 'rusticated');
-                    copyAscii(284, '0.0.0-dev');
-                    copyAscii(356, '0.0.0-dev');
-                    copyAscii(420, new Date().toISOString().slice(0, 19));
-                    copyAscii(484, 'browser-wasm32');
-
-                    new Uint8Array(hostState.memory.buffer, outPtr, structSize).set(new Uint8Array(buf));
-                    return 0;
-                },
-                tty_set_mode: (handle, mode) => {
-                    console.log("TTY SET MODE:", { handle, mode, typeHandle: typeof handle, typeMode: typeof mode });
-                },
-                tty_get_size: (handle) => {
-                    const size = (term.cols << 16) | term.rows;
-                    console.log("TTY GET SIZE:", { handle, size, cols: term.cols, rows: term.rows });
-                    return size;
-                },
-                fd_isatty: (handle) => {
-                    console.log("FD_ISATTY:", handle);
-                    handle = BigInt(handle);
-                    if (handle >= 0n && handle <= 2n) return 1;
-                    const h = hostState.handles.get(handle);
-                    return (h && (h.type === 'tty' || h.type === 'stdin' || h.type === 'stdout' || h.type === 'stderr')) ? 1 : 0;
-                },
-                process_exit: (code) => {
-                    code = Number(code);
-                    console.log("Process exited with code", code);
-                    if (code !== 0) {
-                        term.write(`\r\n[Process exited with code ${code}]\r\n`);
-                    }
-                },
-                rusticated_debug: (val) => console.log("GUEST DEBUG:", val),
-            };
-
-            const importObject = {
-                env
-            };
 
             // === HTTP Proxy Shim for Model Downloads ===
             class HTTPProxyShim {
@@ -2511,30 +411,33 @@
                 term.write(`[Bootstrap] ${assetName}: ${percent}% - ${message}\r\n`);
             }
 
-            function ensureDirEntry(fs, path, mode = 0o755) {
+            async function ensureDirEntry(fs, path, mode = 0o755) {
                 const now = Date.now();
-                if (!fs.getEntrySync(path)) {
-                    fs.entries.set(path, { path, type: 'dir', mtime: now, mode });
-                    fs.putEntrySync({ path, type: 'dir', mtime: now, mode });
-                    console.log(`[Bootstrap] Created directory: ${path}`);
+                if (fs && fs.getEntry) {
+                    const existing = await fs.getEntry(path);
+                    if (!existing) {
+                        await fs.putEntry({ path, type: 'dir', mtime: now, mode });
+                        console.log(`[Bootstrap] Created directory: ${path}`);
+                    }
                 }
             }
 
-            function ensureFileEntry(fs, path, contentOrBytes, mode = 0o644, mtime = Date.now(), reportedSize = undefined) {
+            async function ensureFileEntry(fs, path, contentOrBytes, mode = 0o644, mtime = Date.now(), reportedSize = undefined) {
                 const content = contentOrBytes instanceof Uint8Array ? contentOrBytes : encoder.encode(contentOrBytes);
                 const entry = { path, type: 'file', content, size: content.length, mtime, mode, reportedSize };
-                fs.entries.set(path, entry);
-                fs.putEntrySync(entry);
+                if (fs && fs.putEntry) {
+                    await fs.putEntry(entry);
+                }
                 const displaySize = reportedSize !== undefined ? reportedSize : content.length;
                 console.log(`[Bootstrap] Created file: ${path} (reported: ${displaySize} bytes, actual content: ${content.length} bytes)`);
             }
 
             async function ensureGuestCacheStructure(fs) {
                 console.log('[Bootstrap] Ensuring guest cache directory structure...');
-                ensureDirEntry(fs, '/home/user/.cache', 0o755);
-                ensureDirEntry(fs, '/home/user/.cache/kabibi', 0o755);
-                ensureDirEntry(fs, '/home/user/.cache/kabibi/litert_cache', 0o755);
-                ensureDirEntry(fs, '/home/user/.cache/kabibi/wheels_extracted', 0o755);
+                await ensureDirEntry(fs, '/home/user/.cache', 0o755);
+                await ensureDirEntry(fs, '/home/user/.cache/kabibi', 0o755);
+                await ensureDirEntry(fs, '/home/user/.cache/kabibi/litert_cache', 0o755);
+                await ensureDirEntry(fs, '/home/user/.cache/kabibi/wheels_extracted', 0o755);
                 console.log('[Bootstrap] Cache structure ready');
             }
 
@@ -2545,19 +448,19 @@
                 // === UNCONDITIONAL SEEDING ===
                 // Always seed wheel file with fake content (small, reports actual content size)
                 const wheelExtractPath = '/home/user/.cache/kabibi/wheels_extracted/pytorch_model.bin';
-                ensureFileEntry(fs, wheelExtractPath, 'fake-wheel', 0o644, Date.now() - 1000);
+                await ensureFileEntry(fs, wheelExtractPath, 'fake-wheel', 0o644, Date.now() - 1000);
                 // Note: reportedSize omitted - will report actual content size (small placeholder)
 
                 // Always seed .so file with fake content (small, reports actual content size)
                 const soPath = '/home/user/.cache/kabibi/litert_lm_ext.so';
-                ensureFileEntry(fs, soPath, 'fake-so', 0o755, Date.now());
+                await ensureFileEntry(fs, soPath, 'fake-so', 0o755, Date.now());
                 // Note: reportedSize omitted - will report actual content size (small placeholder)
 
                 // === CONDITIONAL SEEDING ===
                 // Only seed model file if web model is cached
                 if (hasModelCached) {
                     const modelPath = '/home/user/.cache/kabibi/litert_cache/gemma-4-E4B-it-web.litertlm';
-                    ensureFileEntry(fs, modelPath, 'fake-model-zeros', 0o644, Date.now(), gemmaWebBytesSize);
+                    await ensureFileEntry(fs, modelPath, 'fake-model-zeros', 0o644, Date.now(), gemmaWebBytesSize);
                     console.log(`[Bootstrap] Model file seeded (cached): ${modelPath}, reported size: ${gemmaWebBytesSize} bytes`);
                 } else {
                     console.log(`[Bootstrap] Model file NOT seeded (cache miss - guest must download)`);
@@ -2655,46 +558,264 @@
                 }
             }
 
-            try {
-                console.log("Fetching WASM from ./try/kabibi.wasm");
-                const response = await fetch('./try/kabibi.wasm');
-                console.log("Fetch response:", response.status);
-                if (!response.ok) throw new Error(`HTTP ${response.status} fetching WASM`);
-                const binary = await response.arrayBuffer();
-                console.log("Binary size:", binary.byteLength);
-                const { instance } = await WebAssembly.instantiate(binary, importObject);
-                console.log("WASM instantiated.");
-                window.lastInstance = instance;
-                hostState.memory = instance.exports.memory;
-                // Bubble Tea and the rusticated runtime usually wait for the first
-                // SIGWINCH before drawing; without a synthetic initial resize the
-                // TUI can sit forever in the browser host.
-                hostState.triggerSignal(28);
-                
-                console.log("WASM Exports:", Object.keys(instance.exports));
-                term.write('WASM loaded. Starting kabibi...\r\n\r\n');
-                
-                const runFunc = instance.exports.run || instance.exports._start;
-                if (runFunc) {
-                    const runLoop = () => {
-                        try {
-                            const res = runFunc();
-                            const r = Number(res);
-                            if (r === 0) {
-                                term.write('\r\n[Process Finished]\r\n');
-                                return;
+            // === Network & Dynamic Library Extensions ===
+            const netExtension = {
+                open: (addr, port, flags) => {
+                    if ((addr === '127.0.0.1' || addr === 'localhost') && port === 8888) {
+                        let requestBytes = [];
+                        let responseBytes = null;
+                        let responseOffset = 0;
+                        let pendingReads = [];
+                        let preparing = false;
+
+                        return {
+                            write: (chunk) => {
+                                for (let i = 0; i < chunk.length; i++) requestBytes.push(chunk[i]);
+                                const text = decoder.decode(new Uint8Array(requestBytes));
+                                const headerEnd = text.indexOf('\r\n\r\n');
+                                if (headerEnd !== -1 && !preparing) {
+                                    preparing = true;
+                                    const match = text.match(/GET\s+([^\s]+)\s+HTTP/i);
+                                    let url = match ? match[1] : '';
+                                    if (url.startsWith('/')) url = 'https://huggingface.co' + url;
+
+                                    httpProxyShim.handleModelRequest(url, undefined, (progress) => {
+                                        setBrowserAssetProgress(null, 'Model Download', progress.percent, `${progress.received}/${progress.total} bytes`);
+                                    }).then(bodyBytes => {
+                                        const header = `HTTP/1.1 200 OK\r\nContent-Length: ${bodyBytes.length}\r\nContent-Type: application/octet-stream\r\n\r\n`;
+                                        const headerBytes = encoder.encode(header);
+                                        const fullResp = new Uint8Array(headerBytes.length + bodyBytes.length);
+                                        fullResp.set(headerBytes, 0);
+                                        fullResp.set(bodyBytes, headerBytes.length);
+                                        responseBytes = fullResp;
+                                        responseOffset = 0;
+
+                                        while (pendingReads.length > 0) {
+                                            const r = pendingReads.shift();
+                                            r();
+                                        }
+                                    }).catch(err => {
+                                        console.error('[NetProxy] Download failed:', err);
+                                        const header = `HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n`;
+                                        responseBytes = encoder.encode(header);
+                                        responseOffset = 0;
+                                        while (pendingReads.length > 0) {
+                                            const r = pendingReads.shift();
+                                            r();
+                                        }
+                                    });
+                                }
+                            },
+                            read: (maxLen) => {
+                                if (responseBytes) {
+                                    const avail = responseBytes.length - responseOffset;
+                                    const toRead = Math.min(maxLen, Math.max(0, avail));
+                                    if (toRead > 0) {
+                                        const slice = responseBytes.subarray(responseOffset, responseOffset + toRead);
+                                        responseOffset += toRead;
+                                        return Promise.resolve(slice);
+                                    }
+                                    return Promise.resolve(new Uint8Array(0));
+                                }
+                                return new Promise((resolve) => {
+                                    pendingReads.push(() => {
+                                        const avail = responseBytes ? responseBytes.length - responseOffset : 0;
+                                        const toRead = Math.min(maxLen, Math.max(0, avail));
+                                        if (toRead > 0 && responseBytes) {
+                                            const slice = responseBytes.subarray(responseOffset, responseOffset + toRead);
+                                            responseOffset += toRead;
+                                            resolve(slice);
+                                        } else {
+                                            resolve(new Uint8Array(0));
+                                        }
+                                    });
+                                });
                             }
-                            // 1ms instead of 0ms for active yielding to prevent event loop starvation
-                            setTimeout(runLoop, (r === 2 || r === 4) ? 1 : 10);
-                        } catch (e) {
-                            console.error("Runtime error:", e);
-                            term.write(`\r\n\x1b[31mRuntime Error: ${e.message}\x1b[0m\r\n`);
-                        }
-                    };
-                    runLoop();
-                } else {
-                    term.write('Error: No entry point found in WASM.\r\n');
+                        };
+                    }
+                    return null;
                 }
+            };
+
+            const dylibExtension = {
+                alloc: (libHandle, size, align) => {
+                    const byteLength = Number(size);
+                    const alignment = BigInt(align || 1);
+                    if (!Number.isSafeInteger(byteLength) || byteLength < 0 || alignment <= 0n) {
+                        const error = new Error('Invalid dynamic-library allocation size or alignment');
+                        error.code = 'EINVAL';
+                        throw error;
+                    }
+
+                    const ptr = ((nextDylibMem + alignment - 1n) / alignment) * alignment;
+                    let bytes;
+                    try {
+                        bytes = new Uint8Array(byteLength);
+                    } catch {
+                        const error = new Error('Dynamic-library allocation failed');
+                        error.code = 'ENOMEM';
+                        throw error;
+                    }
+                    dylibMem.set(ptr, { libHandle: BigInt(libHandle), bytes });
+                    nextDylibMem = ptr + BigInt(Math.max(byteLength, 1));
+                    return ptr;
+                },
+                free: (libHandle, ptr) => {
+                    const address = BigInt(ptr);
+                    const allocation = dylibMem.get(address);
+                    if (!allocation || allocation.libHandle !== BigInt(libHandle)) {
+                        const error = new Error('Unknown dynamic-library allocation');
+                        error.code = 'EINVAL';
+                        throw error;
+                    }
+                    dylibMem.delete(address);
+                },
+                readMem: (libHandle, ptr, length) => {
+                    const address = BigInt(ptr);
+                    const byteLength = Number(length);
+                    for (const [base, allocation] of dylibMem) {
+                        const end = address + BigInt(byteLength);
+                        if (
+                            allocation.libHandle === BigInt(libHandle) &&
+                            address >= base &&
+                            end <= base + BigInt(allocation.bytes.length)
+                        ) {
+                            const offset = Number(address - base);
+                            return allocation.bytes.slice(offset, offset + byteLength);
+                        }
+                    }
+                    const error = new Error('Dynamic-library memory read is out of bounds');
+                    error.code = 'EFAULT';
+                    throw error;
+                },
+                writeMem: (libHandle, ptr, bytes) => {
+                    const address = BigInt(ptr);
+                    for (const [base, allocation] of dylibMem) {
+                        const end = address + BigInt(bytes.length);
+                        if (
+                            allocation.libHandle === BigInt(libHandle) &&
+                            address >= base &&
+                            end <= base + BigInt(allocation.bytes.length)
+                        ) {
+                            const offset = Number(address - base);
+                            allocation.bytes.set(bytes, offset);
+                            return;
+                        }
+                    }
+                    const error = new Error('Dynamic-library memory write is out of bounds');
+                    error.code = 'EFAULT';
+                    throw error;
+                },
+                open: (libPath, flags) => {
+                    console.log('[dylib_open] Loading:', libPath);
+                    if (libPath.includes('litert') || libPath.includes('lm_ext')) {
+                        const handle = nextDylibHandle++;
+                        dylibHandles.set(handle, {
+                            type: 'dylib',
+                            libPath,
+                            engine: engineManager,
+                            conversation: null,
+                            isStreaming: false
+                        });
+                        return handle;
+                    }
+                    return null;
+                },
+                resolveSymbol: (libHandle, name) => {
+                    const h = dylibHandles.get(libHandle);
+                    if (!h || h.type !== 'dylib') return null;
+                    const symbols = {
+                        'litert_lm_engine_create': 'engineCreate',
+                        'litert_lm_conversation_create': 'conversationCreate',
+                        'litert_lm_conversation_send_message_stream': 'conversationSendStream',
+                        'litert_lm_stream_chunk_get_text': 'streamGetText',
+                        'litert_lm_stream_read_chunk': 'streamReadChunk',
+                        'litert_lm_stream_close': 'streamClose'
+                    };
+                    if (symbols[name]) {
+                        const symHandle = nextDylibHandle++;
+                        dylibHandles.set(symHandle, {
+                            type: 'dylib_sym',
+                            libHandle,
+                            symbolName: name,
+                            fnName: symbols[name]
+                        });
+                        return symHandle;
+                    }
+                    return null;
+                },
+                call: async (symHandle, descPtr, descLen, ctx) => {
+                    const h = dylibHandles.get(symHandle);
+                    if (!h || h.type !== 'dylib_sym') return 0;
+                    const libH = dylibHandles.get(h.libHandle);
+                    if (!libH) return 0;
+
+                    console.log('[dylib_call] Invoking:', h.symbolName);
+                    if (h.fnName === 'engineCreate') {
+                        if (libH.engine && !libH.engine.isInitialized) {
+                            let bootTries = 0;
+                            while (!browserAssetState.bootstrapComplete && bootTries < 300) {
+                                await new Promise(r => setTimeout(r, 100));
+                                bootTries++;
+                            }
+                            const modelBytes = httpProxyShim.webModelCache.values().next().value;
+                            if (modelBytes) await libH.engine.initialize(modelBytes);
+                        }
+                    } else if (h.fnName === 'conversationCreate') {
+                        if (libH.engine) libH.conversation = await libH.engine.createConversation();
+                    } else if (h.fnName === 'conversationSendStream') {
+                        if (libH.conversation) {
+                            libH.isStreaming = true;
+                            const userMessage = 'Hello, how are you?';
+                            if (callbackStreamer) {
+                                const callbackId = callbackStreamer.createCallback(
+                                    (token) => callbackStreamer.streamToken(callbackId, token),
+                                    (fullResponse) => {
+                                        callbackStreamer.completeCallback(callbackId, fullResponse);
+                                        libH.isStreaming = false;
+                                    }
+                                );
+                                await libH.engine.streamMessage(
+                                    libH.conversation,
+                                    userMessage,
+                                    (token) => callbackStreamer.streamToken(callbackId, token),
+                                    (response) => callbackStreamer.completeCallback(callbackId, response)
+                                );
+                            }
+                        }
+                    }
+                    return 0;
+                }
+            };
+
+            try {
+                term.write('Loading kabibi with washmhost...\r\n');
+                host = await window.washmhost({
+                    wasm: './try/kabibi.wasm',
+                    stdout: (bytes) => term.write(bytes),
+                    stderr: (bytes) => term.write(bytes),
+                    getTtySize: () => ({ cols: term.cols, rows: term.rows }),
+                    setTtySize: (cols, rows) => term.resize(cols, rows),
+                    extensions: {
+                        net: netExtension,
+                        dylib: dylibExtension
+                    },
+                    onExit: (code) => {
+                        console.log("Process exited with code", code);
+                        if (code !== 0) {
+                            term.write(`\r\n[Process exited with code ${code}]\r\n`);
+                        } else {
+                            term.write('\r\n[Process Finished]\r\n');
+                        }
+                    }
+                });
+                window.lastInstance = host.getInstance ? host.getInstance() : null;
+                console.log("[washmhost] Host and guest launched successfully.");
+
+                // Lazy background bootstrap of guest filesystem artifacts
+                bootstrapBrowserAssets(host.getFS()).catch(err => {
+                    console.error('[Bootstrap] Background error:', err);
+                });
             } catch (err) {
                 console.error(err);
                 term.write(`\r\nFailed to load kabibi: ${err.message}\r\n`);
