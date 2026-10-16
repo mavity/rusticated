@@ -1,8 +1,6 @@
 package shell
 
 import (
-	"strings"
-
 	"ai"
 )
 
@@ -13,17 +11,6 @@ func truncateToolOutput(s string) string {
 		return s[:maxKabibiToolOutput] + "\n...[truncated]"
 	}
 	return s
-}
-
-func compactToolLabel(s string, maxRunes int) string {
-	runes := []rune(strings.TrimSpace(s))
-	if maxRunes <= 0 || len(runes) <= maxRunes {
-		return string(runes)
-	}
-	if maxRunes == 1 {
-		return "…"
-	}
-	return string(runes[:maxRunes-1]) + "…"
 }
 
 // BuildKabibiTools assembles Kabibi's AI tool registry from its dedicated

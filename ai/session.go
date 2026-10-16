@@ -63,6 +63,119 @@ type Tool struct {
 	ExecuteWithContext func(ctx context.Context, tc *ToolContext, call ToolCall) (any, error)
 }
 
+// NewTool constructs a declarative Tool by reflecting over the typed input
+// struct T: a blank `_ struct{}` field's `doc` tag provides the tool
+// Description, and each exported field's `json` and `doc` tags define its
+// JSON Schema property and whether it is required (unless `omitempty` or a
+// pointer type is used).
+func NewTool[T any](fn func(ctx context.Context, in T, feedback LogFeedback) (any, error)) Tool {
+	t := reflect.TypeFor[T]()
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		panic(fmt.Sprintf("ai.NewTool: input type must be a struct, got %v", t))
+	}
+	description, properties, required := reflectStructSchema(t)
+	return Tool{
+		Description: description,
+		Parameters:  properties,
+		Required:    required,
+		Execute: func(ctx context.Context, call ToolCall, feedback LogFeedback) (any, error) {
+			var in T
+			raw := call.RawArguments
+			if len(raw) == 0 && call.Arguments != nil {
+				var err error
+				raw, err = json.Marshal(call.Arguments)
+				if err != nil {
+					return nil, err
+				}
+			}
+			if len(raw) > 0 {
+				if err := json.Unmarshal(raw, &in); err != nil {
+					return nil, fmt.Errorf("invalid arguments: %w", err)
+				}
+			}
+			return fn(ctx, in, feedback)
+		},
+	}
+}
+
+// ToolLead formats the standard tool progress prefix ("<emoji> <arg> ... ")
+// from the `_ struct{}` field's `emoji` tag on a tool input struct.
+func ToolLead(input any, primaryArg string, maxArgLen int) string {
+	in := reflect.TypeOf(input)
+	for in.Kind() == reflect.Pointer {
+		in = in.Elem()
+	}
+	for i := range in.NumField() {
+		field := in.Field(i)
+		if field.Name == "_" {
+			runes := []rune(strings.TrimSpace(primaryArg))
+			compact := string(runes)
+			if maxArgLen > 0 && len(runes) > maxArgLen {
+				if maxArgLen == 1 {
+					compact = "…"
+				} else {
+					compact = string(runes[:maxArgLen-1]) + "…"
+				}
+			}
+			return field.Tag.Get("emoji") + " " + compact + " ... "
+		}
+	}
+	panic(fmt.Sprintf("tool input %v has no metadata field", in))
+}
+
+func reflectStructSchema(in reflect.Type) (description string, properties map[string]any, required []string) {
+	properties = make(map[string]any)
+	for i := range in.NumField() {
+		f := in.Field(i)
+		if f.Name == "_" {
+			description = f.Tag.Get("doc")
+			continue
+		}
+		if !f.IsExported() {
+			continue
+		}
+		param, opts, _ := strings.Cut(f.Tag.Get("json"), ",")
+		if param == "-" {
+			continue
+		}
+		if param == "" {
+			param = strings.ToLower(f.Name)
+		}
+		schema := reflectFieldTypeSchema(f.Type)
+		if doc := f.Tag.Get("doc"); doc != "" {
+			schema["description"] = doc
+		}
+		properties[param] = schema
+		if !strings.Contains(opts, "omitempty") && f.Type.Kind() != reflect.Pointer {
+			required = append(required, param)
+		}
+	}
+	return description, properties, required
+}
+
+func reflectFieldTypeSchema(t reflect.Type) map[string]any {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	switch t.Kind() {
+	case reflect.String:
+		return map[string]any{"type": "string"}
+	case reflect.Bool:
+		return map[string]any{"type": "boolean"}
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return map[string]any{"type": "integer"}
+	case reflect.Float32, reflect.Float64:
+		return map[string]any{"type": "number"}
+	case reflect.Slice:
+		return map[string]any{"type": "array", "items": reflectFieldTypeSchema(t.Elem())}
+	}
+	panic(fmt.Sprintf("ai: unsupported tool parameter type %v", t))
+}
+
 // SessionConfig configures a high-level reflective chat session.
 type SessionConfig struct {
 	Engine          *Engine
@@ -655,26 +768,27 @@ type DeliberateOutput struct {
 	Plan           string `json:"plan"`
 }
 
+// DeliberateInput defines the typed argument struct for the built-in "deliberate" tool.
+type DeliberateInput struct {
+	_           struct{} `doc:"Deliberate on a task before acting: calibrates expected response detail, breaks down initial steps, critiques relevancy/safety/groundedness, and synthesizes a concrete execution plan." emoji:"🧠"`
+	Goal        string   `json:"goal" doc:"One-sentence description of the underlying goal and task required to address the user's request."`
+	Explanation string   `json:"explanation" doc:"Brief explanation of why deliberation is needed"`
+}
+
 // NewDeliberateTool returns the built-in "deliberate" tool implementation that
 // uses ToolContext (and native Conversation.Clone when available) to execute
 // isolated, tool-free contemplation forks.
 func NewDeliberateTool() Tool {
+	description, properties, required := reflectStructSchema(reflect.TypeFor[DeliberateInput]())
 	return Tool{
-		Description: "Deliberate on a task before acting: calibrates expected response detail, breaks down initial steps, critiques relevancy/safety/groundedness, and synthesizes a concrete execution plan.",
-		Parameters: map[string]any{
-			"goal": map[string]any{
-				"type":        "string",
-				"description": "One-sentence description of the underlying goal and task required to address the user's request.",
-			},
-		},
-		Required: []string{"goal"},
+		Description: description,
+		Parameters:  properties,
+		Required:    required,
 		ExecuteWithContext: func(ctx context.Context, tc *ToolContext, call ToolCall) (any, error) {
 			if tc == nil || tc.Session == nil {
 				return nil, errors.New("ai: deliberate requires a valid ToolContext with Session")
 			}
-			var in struct {
-				Goal string `json:"goal"`
-			}
+			var in DeliberateInput
 			if len(call.RawArguments) > 0 {
 				if err := json.Unmarshal(call.RawArguments, &in); err != nil {
 					return nil, fmt.Errorf("invalid arguments: %w", err)
