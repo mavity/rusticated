@@ -2,6 +2,7 @@ package shell
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -242,8 +243,8 @@ func ExecuteOneShotLine(ctx context.Context, line string, verbose bool, out io.W
 			_, _ = out.Write(chunk)
 		})
 		if runErr != nil {
-			if rec.ExitCode == 127 {
-				// Stage B safety net: fall back to AI if executable was not found
+			if errors.Is(runErr, ErrUnknownCommandAtStart) {
+				// Top-level unknown command at start of input: fall back to AI
 				if err := runOneShotAI(ctx, aiRunner, line, out); err != nil {
 					return 1, err
 				}

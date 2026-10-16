@@ -115,14 +115,9 @@ func TestClassifyInput_BashSyntaxAndCommandResolution(t *testing.T) {
 			want:  RouteAI,
 		},
 		{
-			name:  "valid syntax but unknown head command (natural language)",
+			name:  "valid syntax is handed to mvdan/sh first (fallback decided at execution time)",
 			input: "Name a bridge in Paris",
-			want:  RouteAI,
-		},
-		{
-			name:  "valid syntax natural question without punctuation",
-			input: "how do I revert the last commit",
-			want:  RouteAI,
+			want:  RouteShell,
 		},
 	}
 
@@ -133,6 +128,81 @@ func TestClassifyInput_BashSyntaxAndCommandResolution(t *testing.T) {
 				t.Fatalf("ClassifyInput(%q) = %v, want %v", tc.input, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestShell_NestedBuiltins_BashShKabibi_AndFallbackPosition(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "greet.sh")
+	if err := os.WriteFile(scriptPath, []byte("echo \"from_script:$1:$2\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	aiMock := &fakeAIRunner{}
+	sh := New(ShellOptions{
+		WorkingDir: dir,
+		AIRunner:   aiMock,
+	})
+	defer sh.Close()
+
+	// 1. bash -c, sh -c, and kabibi -c execute in-process and support nesting + exported vars
+	sh.ExecuteLine(`export SHARED_VAR=42; bash -c 'sh -c "kabibi -c '\''echo nested:\$SHARED_VAR:\$1'\'' _ arg_one"'`)
+	blocks := sh.Blocks()
+	last := blocks[len(blocks)-1]
+	if got := strings.TrimSpace(last.Output.String()); got != "nested:42:arg_one" {
+		t.Fatalf("nested bash/sh/kabibi output = %q, want %q", got, "nested:42:arg_one")
+	}
+	if len(aiMock.prompts) != 0 {
+		t.Fatalf("expected 0 AI prompts, got %v", aiMock.prompts)
+	}
+
+	// 2. Running a script file via `sh greet.sh alpha beta` works in-process
+	sh.ExecuteLine(`sh greet.sh alpha beta`)
+	blocks = sh.Blocks()
+	last = blocks[len(blocks)-1]
+	if got := strings.TrimSpace(last.Output.String()); got != "from_script:alpha:beta" {
+		t.Fatalf("script via sh output = %q, want %q", got, "from_script:alpha:beta")
+	}
+
+	// 3. Piping commands into `bash` via stdin works in-process
+	sh.ExecuteLine(`echo 'echo piped_into_bash' | bash`)
+	blocks = sh.Blocks()
+	last = blocks[len(blocks)-1]
+	if got := strings.TrimSpace(last.Output.String()); got != "piped_into_bash" {
+		t.Fatalf("piped bash output = %q, want %q", got, "piped_into_bash")
+	}
+
+	// 4. `echo start; unknown_word_xyz` is treated as Bash (NOT routed to AI) because
+	// unknown_word_xyz is not at the start of the line.
+	sh.ExecuteLine(`echo start; unknown_word_xyz`)
+	blocks = sh.Blocks()
+	last = blocks[len(blocks)-1]
+	if len(aiMock.prompts) != 0 {
+		t.Fatalf("expected `echo start; unknown_word_xyz` to stay in Bash without AI fallback, got AI prompts %v", aiMock.prompts)
+	}
+	if last.ExitCode != 127 {
+		t.Fatalf("expected exit code 127 for trailing unknown command, got %d (output=%q)", last.ExitCode, last.Output.String())
+	}
+	if !strings.Contains(last.Output.String(), "start") {
+		t.Fatalf("expected output to contain 'start', got %q", last.Output.String())
+	}
+
+	// 5. `bash -c "unknown_word_xyz"` is treated as Bash (NOT routed to AI) because
+	// the failure happens inside the nested shell, while outer `bash` is valid.
+	sh.ExecuteLine(`bash -c "unknown_word_xyz"`)
+	blocks = sh.Blocks()
+	last = blocks[len(blocks)-1]
+	if len(aiMock.prompts) != 0 {
+		t.Fatalf("expected `bash -c unknown_word_xyz` to stay in Bash without AI fallback, got AI prompts %v", aiMock.prompts)
+	}
+	if last.ExitCode != 127 {
+		t.Fatalf("expected exit code 127 for nested unknown command, got %d (output=%q)", last.ExitCode, last.Output.String())
+	}
+
+	// 6. Leading whitespace before an unknown word at the start of the line STILL routes to AI
+	sh.ExecuteLine(`   Tell me something interesting`)
+	if len(aiMock.prompts) != 1 || aiMock.prompts[0] != "   Tell me something interesting" {
+		t.Fatalf("expected leading-whitespace unknown command to route to AI, got %v", aiMock.prompts)
 	}
 }
 

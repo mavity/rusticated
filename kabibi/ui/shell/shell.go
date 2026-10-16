@@ -3,6 +3,7 @@ package shell
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,50 @@ import (
 	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
 )
+
+// ErrUnknownCommandAtStart is returned when the very first command token at the
+// start of a top-level user input line cannot be resolved as a builtin, function,
+// virtual shell builtin (bash/sh/kabibi), coreutil, script, or host executable.
+// Callers use this sentinel to fall back to AI without printing a shell error.
+var ErrUnknownCommandAtStart = errors.New("unknown command at start of input")
+
+type topLevelStartKey struct{}
+
+type topLevelStartInfo struct {
+	startOffset uint
+}
+
+func withTopLevelStartOffset(ctx context.Context, offset uint) context.Context {
+	return context.WithValue(ctx, topLevelStartKey{}, &topLevelStartInfo{startOffset: offset})
+}
+
+func withoutTopLevelStart(ctx context.Context) context.Context {
+	return context.WithValue(ctx, topLevelStartKey{}, (*topLevelStartInfo)(nil))
+}
+
+func isAtTopLevelStart(ctx context.Context, pos syntax.Pos) bool {
+	if !pos.IsValid() {
+		return false
+	}
+	info, ok := ctx.Value(topLevelStartKey{}).(*topLevelStartInfo)
+	if !ok || info == nil {
+		return false
+	}
+	return pos.Offset() == info.startOffset
+}
+
+func isNestedShellBuiltinName(name string) bool {
+	base := strings.ToLower(filepath.Base(name))
+	base = strings.TrimSuffix(base, ".exe")
+	base = strings.TrimSuffix(base, ".bat")
+	base = strings.TrimSuffix(base, ".cmd")
+	switch base {
+	case "bash", "sh", "kabibi":
+		return true
+	default:
+		return false
+	}
+}
 
 // CommandBlockStatus represents the execution state of a command
 type CommandBlockStatus int
@@ -279,17 +324,31 @@ func runResolvedCommand(ctx context.Context, hc interp.HandlerContext, program s
 }
 
 func createRunner(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, dir string, args []string) (*interp.Runner, error) {
+	return createRunnerWithEnv(ctx, stdin, stdout, stderr, dir, nil, args)
+}
+
+func createRunnerWithEnv(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, dir string, parentEnv expand.Environ, args []string) (*interp.Runner, error) {
 	if dir == "" {
 		dir, _ = os.Getwd()
 	}
 
-	envPairs := make([]string, 0, len(os.Environ())+2)
-	envPairs = append(envPairs, os.Environ()...)
-	if os.Getenv("PATH") != "" {
-		envPairs = append(envPairs, "PATH="+os.Getenv("PATH"))
-	}
-	if os.Getenv("PATHEXT") != "" {
-		envPairs = append(envPairs, "PATHEXT="+os.Getenv("PATHEXT"))
+	var envPairs []string
+	if parentEnv != nil {
+		parentEnv.Each(func(name string, vr expand.Variable) bool {
+			if vr.IsSet() {
+				envPairs = append(envPairs, name+"="+vr.String())
+			}
+			return true
+		})
+	} else {
+		envPairs = make([]string, 0, len(os.Environ())+2)
+		envPairs = append(envPairs, os.Environ()...)
+		if os.Getenv("PATH") != "" {
+			envPairs = append(envPairs, "PATH="+os.Getenv("PATH"))
+		}
+		if os.Getenv("PATHEXT") != "" {
+			envPairs = append(envPairs, "PATHEXT="+os.Getenv("PATHEXT"))
+		}
 	}
 
 	opts := []interp.RunnerOption{
@@ -299,82 +358,262 @@ func createRunner(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer
 		interp.Params(args...),
 	}
 
-	r, err := interp.New(opts...)
-	if err != nil {
-		return nil, err
-	}
+	// 1. Middleware for in-process nested shells (bash, sh, kabibi) and script files (.sh / #!).
+	nestedShellAndScriptMiddleware := func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+		return func(ctx context.Context, args []string) error {
+			if len(args) == 0 {
+				return nil
+			}
+			hc := interp.HandlerCtx(ctx)
+			path := args[0]
 
-	// Custom ExecHandler for recursive script execution, u-root builtins, and
-	// platform-aware fallback lookups for host executables such as Windows .bat/.cmd.
-	h := func(ctx context.Context, args []string) error {
-		hc := interp.HandlerCtx(ctx)
+			// Builtin nested shells: bash, sh, kabibi (when invoked as a command name, not an explicit path to another binary)
+			if !strings.ContainsAny(path, `/\`) && isNestedShellBuiltinName(path) {
+				return runNestedShellBuiltin(withoutTopLevelStart(ctx), hc, path, args[1:])
+			}
 
-		if len(args) == 0 {
-			return nil
-		}
+			// Check if it is a script relative to current dir or absolute path
+			absPath := path
+			if !filepath.IsAbs(path) {
+				absPath = filepath.Join(hc.Dir, path)
+			}
 
-		path := args[0]
-		// 1. Check if it is a script (heuristically or by looking at it)
-		// We try to find it relative to current dir
-		absPath := path
-		if !filepath.IsAbs(path) {
-			absPath = filepath.Join(hc.Dir, path)
-		}
-
-		if info, err := os.Stat(absPath); err == nil && !info.IsDir() {
-			// Check if it's a shell script (extension or shebang)
-			isScript := strings.HasSuffix(path, ".sh")
-			if !isScript {
-				// Peek for shebang
-				f, _ := os.Open(absPath)
-				if f != nil {
-					buf := make([]byte, 2)
-					f.Read(buf)
-					f.Close()
-					if string(buf) == "#!" {
-						isScript = true
+			if info, err := os.Stat(absPath); err == nil && !info.IsDir() {
+				isScript := strings.HasSuffix(strings.ToLower(path), ".sh")
+				if !isScript {
+					f, _ := os.Open(absPath)
+					if f != nil {
+						buf := make([]byte, 2)
+						_, _ = f.Read(buf)
+						_ = f.Close()
+						if string(buf) == "#!" {
+							isScript = true
+						}
 					}
 				}
+
+				if isScript {
+					return runNestedScriptFile(withoutTopLevelStart(ctx), hc, absPath, path, nil, args[1:])
+				}
 			}
 
-			if isScript {
-				// RECURSION: Spawn a new runner for the script
-				subArgs := args[1:]
-				subRunner, err := createRunner(ctx, hc.Stdin, hc.Stdout, hc.Stderr, hc.Dir, subArgs)
-				if err != nil {
-					return err
-				}
-
-				f, err := os.Open(absPath)
-				if err != nil {
-					return err
-				}
-				defer f.Close()
-
-				return subRunner.Run(ctx, parseCommandReader(f, path))
-			}
+			return next(ctx, args)
 		}
-
-		// 2. Let the embedded u-root coreutils handle cross-platform standard tools
-		// (ls, cat, cp, mv, rm, mkdir, find, touch, etc.) first when matched.
-		if coreutilNames[path] {
-			coreHandler := coreutils.ExecHandler(interp.DefaultExecHandler(0))
-			return coreHandler(ctx, args)
-		}
-
-		// 3. On Windows-style guest environments, use the platform-aware resolver so
-		// PATH/PATHEXT and %VAR% expansion work for .bat/.cmd/.exe paths.
-		if resolved, ok := resolvePlatformExecutable(path, hc.Dir, envMapFromHandler(hc)); ok {
-			return runResolvedCommand(ctx, hc, resolved, args)
-		}
-
-		// 4. Fall back to standard interpreter PATH lookup.
-		coreHandler := coreutils.ExecHandler(interp.DefaultExecHandler(0))
-		return coreHandler(ctx, args)
 	}
 
-	interp.ExecHandler(h)(r)
-	return r, nil
+	// 2. Terminal middleware: platform-aware host executable resolution + PATH lookup.
+	// If the command is not found anywhere and is at the very start of the top-level
+	// input line, return ErrUnknownCommandAtStart without polluting stderr so the
+	// caller can route the line to AI.
+	hostExecMiddleware := func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+		return func(ctx context.Context, args []string) error {
+			if len(args) == 0 {
+				return nil
+			}
+			hc := interp.HandlerCtx(ctx)
+			path := args[0]
+
+			if resolved, ok := resolvePlatformExecutable(path, hc.Dir, envMapFromHandler(hc)); ok {
+				return mapExecError(runResolvedCommand(ctx, hc, resolved, args), hc)
+			}
+
+			if resolved, err := interp.LookPathDir(hc.Dir, hc.Env, path); err == nil {
+				return mapExecError(runResolvedCommand(ctx, hc, resolved, args), hc)
+			}
+
+			if isAtTopLevelStart(ctx, hc.Pos) {
+				return ErrUnknownCommandAtStart
+			}
+
+			fmt.Fprintf(hc.Stderr, "%q: executable file not found in $PATH\n", path)
+			return interp.ExitStatus(127)
+		}
+	}
+
+	opts = append(opts, interp.ExecHandlers(
+		nestedShellAndScriptMiddleware,
+		coreutils.ExecHandler,
+		hostExecMiddleware,
+	))
+
+	return interp.New(opts...)
+}
+
+func mapExecError(err error, hc interp.HandlerContext) error {
+	if err == nil {
+		return nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return interp.ExitStatus(uint8(exitErr.ExitCode()))
+	}
+	var execErr *exec.Error
+	if errors.As(err, &execErr) {
+		fmt.Fprintf(hc.Stderr, "%v\n", execErr)
+		return interp.ExitStatus(127)
+	}
+	return err
+}
+
+func runNestedScriptFile(
+	ctx context.Context,
+	hc interp.HandlerContext,
+	absPath string,
+	displayName string,
+	shellFlags []string,
+	scriptArgs []string,
+) error {
+	f, err := os.Open(absPath)
+	if err != nil {
+		fmt.Fprintf(hc.Stderr, "%s: %v\n", displayName, err)
+		return interp.ExitStatus(127)
+	}
+	defer f.Close()
+
+	parser := syntax.NewParser()
+	file, err := parser.Parse(f, displayName)
+	if err != nil {
+		fmt.Fprintf(hc.Stderr, "%s: %v\n", displayName, err)
+		return interp.ExitStatus(2)
+	}
+
+	params := make([]string, 0, len(shellFlags)+1+len(scriptArgs))
+	params = append(params, shellFlags...)
+	params = append(params, "--")
+	params = append(params, scriptArgs...)
+
+	subRunner, err := createRunnerWithEnv(ctx, hc.Stdin, hc.Stdout, hc.Stderr, hc.Dir, hc.Env, params)
+	if err != nil {
+		fmt.Fprintf(hc.Stderr, "%s: %v\n", displayName, err)
+		return interp.ExitStatus(2)
+	}
+	return subRunner.Run(ctx, file)
+}
+
+func runNestedShellBuiltin(ctx context.Context, hc interp.HandlerContext, shellName string, rawArgs []string) error {
+	var (
+		shellFlags []string
+		cmdStr     string
+		hasCmdStr  bool
+		readStdin  bool
+		rest       []string
+	)
+
+	for i := 0; i < len(rawArgs); i++ {
+		arg := rawArgs[i]
+		if arg == "--" {
+			rest = rawArgs[i+1:]
+			break
+		}
+		if arg == "-" {
+			rest = rawArgs[i+1:]
+			break
+		}
+		if arg == "-c" || arg == "--command" {
+			if i+1 >= len(rawArgs) {
+				fmt.Fprintf(hc.Stderr, "%s: %s: option requires an argument\n", shellName, arg)
+				return interp.ExitStatus(2)
+			}
+			cmdStr = rawArgs[i+1]
+			hasCmdStr = true
+			rest = rawArgs[i+2:]
+			break
+		}
+		if arg == "-s" {
+			readStdin = true
+			continue
+		}
+		if arg == "-i" || arg == "-l" || arg == "--login" || arg == "--norc" || arg == "--noprofile" {
+			// Accepted for compatibility with bash/sh invocations.
+			continue
+		}
+		if (arg == "-o" || arg == "+o") && i+1 < len(rawArgs) {
+			shellFlags = append(shellFlags, arg, rawArgs[i+1])
+			i++
+			continue
+		}
+		if len(arg) > 1 && (arg[0] == '-' || arg[0] == '+') {
+			// Check if combined short flags ends with 'c' (e.g. -ec 'cmd')
+			if arg[0] == '-' && !strings.HasPrefix(arg, "--") && strings.ContainsRune(arg[1:], 'c') {
+				otherFlags := strings.ReplaceAll(arg[1:], "c", "")
+				if otherFlags != "" {
+					shellFlags = append(shellFlags, "-"+otherFlags)
+				}
+				if i+1 >= len(rawArgs) {
+					fmt.Fprintf(hc.Stderr, "%s: -c: option requires an argument\n", shellName)
+					return interp.ExitStatus(2)
+				}
+				cmdStr = rawArgs[i+1]
+				hasCmdStr = true
+				rest = rawArgs[i+2:]
+				break
+			}
+			shellFlags = append(shellFlags, arg)
+			continue
+		}
+		rest = rawArgs[i:]
+		break
+	}
+
+	// Case 1: -c <command_string> [command_name [argument ...]]
+	if hasCmdStr {
+		name := shellName
+		var scriptArgs []string
+		if len(rest) > 0 {
+			name = rest[0]
+			scriptArgs = rest[1:]
+		}
+		parser := syntax.NewParser()
+		file, err := parser.Parse(strings.NewReader(cmdStr), name)
+		if err != nil {
+			fmt.Fprintf(hc.Stderr, "%s: %v\n", name, err)
+			return interp.ExitStatus(2)
+		}
+		params := make([]string, 0, len(shellFlags)+1+len(scriptArgs))
+		params = append(params, shellFlags...)
+		params = append(params, "--")
+		params = append(params, scriptArgs...)
+
+		subRunner, err := createRunnerWithEnv(ctx, hc.Stdin, hc.Stdout, hc.Stderr, hc.Dir, hc.Env, params)
+		if err != nil {
+			fmt.Fprintf(hc.Stderr, "%s: %v\n", shellName, err)
+			return interp.ExitStatus(2)
+		}
+		return subRunner.Run(ctx, file)
+	}
+
+	// Case 2: <script_file> [argument ...] (when -s was not explicitly passed)
+	if !readStdin && len(rest) > 0 {
+		scriptPath := rest[0]
+		absPath := scriptPath
+		if !filepath.IsAbs(scriptPath) {
+			absPath = filepath.Join(hc.Dir, scriptPath)
+		}
+		return runNestedScriptFile(ctx, hc, absPath, scriptPath, shellFlags, rest[1:])
+	}
+
+	// Case 3: Read commands from hc.Stdin (e.g. `echo "echo hi" | bash`, `sh -s arg1 arg2`, or bare `bash`)
+	in := hc.Stdin
+	if in == nil {
+		return nil
+	}
+	parser := syntax.NewParser()
+	file, err := parser.Parse(in, shellName)
+	if err != nil {
+		fmt.Fprintf(hc.Stderr, "%s: %v\n", shellName, err)
+		return interp.ExitStatus(2)
+	}
+	params := make([]string, 0, len(shellFlags)+1+len(rest))
+	params = append(params, shellFlags...)
+	params = append(params, "--")
+	params = append(params, rest...)
+
+	subRunner, err := createRunnerWithEnv(ctx, hc.Stdin, hc.Stdout, hc.Stderr, hc.Dir, hc.Env, params)
+	if err != nil {
+		fmt.Fprintf(hc.Stderr, "%s: %v\n", shellName, err)
+		return interp.ExitStatus(2)
+	}
+	return subRunner.Run(ctx, file)
 }
 
 func envMapFromHandler(hc interp.HandlerContext) map[string]string {
