@@ -101,71 +101,22 @@ func Start(cmd *exec.Cmd, opts ...Options) (PTY, error) {
 		}
 	}
 
-	ws := struct {
-		Row    uint16
-		Col    uint16
-		Xpixel uint16
-		Ypixel uint16
-	}{
-		Row: uint16(rows),
-		Col: uint16(cols),
-	}
-
-	var masterFd, slaveFd int32
-	_, _, errno := syscall.Syscall6(
-		syscall.SYS_OPENPTY,
-		uintptr(unsafe.Pointer(&masterFd)),
-		uintptr(unsafe.Pointer(&slaveFd)),
-		0,
-		0,
-		uintptr(unsafe.Pointer(&ws)),
-		0,
-	)
-	if errno != 0 {
-		return openPtmxFallback(cmd, ws.Col, ws.Row)
-	}
-
-	master := os.NewFile(uintptr(masterFd), "/dev/ptmx")
-	slave := os.NewFile(uintptr(slaveFd), "/dev/pts")
-	defer slave.Close()
-
-	cmd.Stdin = slave
-	cmd.Stdout = slave
-	cmd.Stderr = slave
-	if cmd.SysProcAttr == nil {
-		cmd.SysProcAttr = &syscall.SysProcAttr{}
-	}
-	cmd.SysProcAttr.Setsid = true
-	cmd.SysProcAttr.Setctty = true
-	cmd.SysProcAttr.Ctty = int(slave.Fd())
-
-	err := cmd.Start()
-	if err != nil {
-		_ = master.Close()
-		return nil, err
-	}
-
-	return &unixPty{master: master, cmd: cmd}, nil
+	return openPtmx(cmd, uint16(cols), uint16(rows))
 }
 
-func openPtmxFallback(cmd *exec.Cmd, cols, rows uint16) (PTY, error) {
-	ptmx, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
+func openPtmx(cmd *exec.Cmd, cols, rows uint16) (PTY, error) {
+	ptmx, err := os.OpenFile("/dev/ptmx", os.O_RDWR|syscall.O_NOCTTY, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open /dev/ptmx: %w", err)
 	}
 
-	var unlock int32 = 0
-	_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, ptmx.Fd(), syscall.TIOCSPTLCK, uintptr(unsafe.Pointer(&unlock)))
-
-	var ptyNum int32
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, ptmx.Fd(), syscall.TIOCGPTN, uintptr(unsafe.Pointer(&ptyNum)))
-	if errno != 0 {
+	ptsName, err := unlockAndPtsName(ptmx)
+	if err != nil {
 		_ = ptmx.Close()
-		return nil, fmt.Errorf("ioctl TIOCGPTN: %w", errno)
+		return nil, err
 	}
 
-	ptsName := fmt.Sprintf("/dev/pts/%d", ptyNum)
-	pts, err := os.OpenFile(ptsName, os.O_RDWR, 0)
+	pts, err := os.OpenFile(ptsName, os.O_RDWR|syscall.O_NOCTTY, 0)
 	if err != nil {
 		_ = ptmx.Close()
 		return nil, fmt.Errorf("open %s: %w", ptsName, err)
@@ -200,4 +151,45 @@ func openPtmxFallback(cmd *exec.Cmd, cols, rows uint16) (PTY, error) {
 	}
 
 	return &unixPty{master: ptmx, cmd: cmd}, nil
+}
+
+const (
+	linuxTIOCSPTLCK    = 0x40045431
+	linuxTIOCGPTN      = 0x80045430
+	darwinTIOCPTYGNAME = 0x40807453
+	darwinTIOCPTYGRANT = 0x20007454
+	darwinTIOCPTYUNLK  = 0x20007452
+)
+
+func unlockAndPtsName(ptmx *os.File) (string, error) {
+	var unlock int32 = 0
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, ptmx.Fd(), uintptr(linuxTIOCSPTLCK), uintptr(unsafe.Pointer(&unlock)))
+	if errno == 0 {
+		var ptyNum uint32
+		_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, ptmx.Fd(), uintptr(linuxTIOCGPTN), uintptr(unsafe.Pointer(&ptyNum)))
+		if errno != 0 {
+			return "", fmt.Errorf("ioctl TIOCGPTN: %w", errno)
+		}
+		return fmt.Sprintf("/dev/pts/%d", ptyNum), nil
+	}
+
+	_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, ptmx.Fd(), uintptr(darwinTIOCPTYGRANT), 0)
+	if errno != 0 {
+		return "", fmt.Errorf("ioctl TIOCPTYGRANT: %w", errno)
+	}
+	_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, ptmx.Fd(), uintptr(darwinTIOCPTYUNLK), 0)
+	if errno != 0 {
+		return "", fmt.Errorf("ioctl TIOCPTYUNLK: %w", errno)
+	}
+	var nameBuf [128]byte
+	_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, ptmx.Fd(), uintptr(darwinTIOCPTYGNAME), uintptr(unsafe.Pointer(&nameBuf[0])))
+	if errno != 0 {
+		return "", fmt.Errorf("ioctl TIOCPTYGNAME: %w", errno)
+	}
+	for i, b := range nameBuf {
+		if b == 0 {
+			return string(nameBuf[:i]), nil
+		}
+	}
+	return string(nameBuf[:]), nil
 }
