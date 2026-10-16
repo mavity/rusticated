@@ -167,6 +167,40 @@ func TestAppTUI_EndToEnd_RealFilesystemAndAIFallback(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
+	// Verify wrapped multi-line input in ModeZeroPlume: type a command longer than 80 columns
+	// ("echo " + 85 'z' chars = 90 chars + 2 prompt chars = 92 columns -> 2 visual rows),
+	// verify the Shell measures 2 rows, then delete it all with Ctrl+C and verify it shrinks back to 1 row
+	// leaving the lines below clean before executing the real commands.
+	longPreview := "echo " + strings.Repeat("z", 85)
+	if _, err := io.WriteString(inW, longPreview); err != nil {
+		t.Fatalf("write long preview: %v", err)
+	}
+	waitWrapDeadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(waitWrapDeadline) {
+		if appWidget.Measure(ui.Constraints{MaxW: termW, MaxH: termH}).H == 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := appWidget.Measure(ui.Constraints{MaxW: termW, MaxH: termH}); got.H != 2 {
+		t.Fatalf("wrapped Measure() = %#v, want H=2", got)
+	}
+	// Clear wrapped input with Ctrl+C (\x03) so it shrinks back to 1 line and clears row 2
+	if _, err := io.WriteString(inW, "\x03"); err != nil {
+		t.Fatalf("write ctrl+c: %v", err)
+	}
+	waitShrinkDeadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(waitShrinkDeadline) {
+		if appWidget.Measure(ui.Constraints{MaxW: termW, MaxH: termH}).H == 1 && appWidget.Shell().Input().Value() == "" {
+			time.Sleep(25 * time.Millisecond)
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := appWidget.Measure(ui.Constraints{MaxW: termW, MaxH: termH}); got.H != 1 {
+		t.Fatalf("shrunk Measure() after Ctrl+C = %#v, want H=1", got)
+	}
+
 	sendCommandAndWait := func(line string, wantBlockCount int) {
 		t.Helper()
 		// Write keystrokes followed by Enter (\r) into the live terminal input pipe
@@ -504,8 +538,22 @@ func TestAppTUI_ModeToggle_ZeroPlumeAndPlumeHistory(t *testing.T) {
 	if got := wZero.Measure(ui.Constraints{MaxW: 80, MaxH: 24}); got != (ui.Size{W: 80, H: 24}) {
 		t.Fatalf("ModePlumeHistory Measure() = %#v, want {W:80, H:24}", got)
 	}
-	bufPlume, curPlume := wZero.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 24}, ui.RenderContext{Focused: true})
-	if bufPlume.Height != 24 || curPlume.Y != 23 {
-		t.Fatalf("ModePlumeHistory Render() height=%d cursorY=%d, want height=24 cursorY=23", bufPlume.Height, curPlume.Y)
+	// Verify dynamic wrapping in both modes when input exceeds 80 columns
+	wZero.Shell().SetInput(strings.Repeat("a", 170))
+	if got := wZero.Measure(ui.Constraints{MaxW: 80, MaxH: 24}); got != (ui.Size{W: 80, H: 24}) {
+		t.Fatalf("ModePlumeHistory Measure() with wrapped input = %#v, want {W:80, H:24}", got)
+	}
+	bufPlumeWrap, curPlumeWrap := wZero.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 24}, ui.RenderContext{Focused: true})
+	if bufPlumeWrap.Height != 24 || curPlumeWrap.Y != 23 {
+		t.Fatalf("ModePlumeHistory wrapped Render() height=%d cursorY=%d, want height=24 cursorY=23", bufPlumeWrap.Height, curPlumeWrap.Y)
+	}
+
+	wZero.Shell().SetMode(shell.ModeZeroPlume)
+	if got := wZero.Measure(ui.Constraints{MaxW: 80, MaxH: 24}); got != (ui.Size{W: 80, H: 3}) {
+		t.Fatalf("ModeZeroPlume wrapped Measure() = %#v, want {W:80, H:3}", got)
+	}
+	wZero.Shell().SetInput("")
+	if got := wZero.Measure(ui.Constraints{MaxW: 80, MaxH: 24}); got != (ui.Size{W: 80, H: 1}) {
+		t.Fatalf("ModeZeroPlume cleared Measure() = %#v, want {W:80, H:1}", got)
 	}
 }
