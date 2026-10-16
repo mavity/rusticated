@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -94,17 +93,6 @@ type ExecutionSession struct {
 
 // NewExecutionSession creates a new persistent shell execution session rooted at dir.
 func NewExecutionSession(dir string) (*ExecutionSession, error) {
-	if dir == "" {
-		var err error
-		dir, err = os.Getwd()
-		if err != nil || dir == "" {
-			dir = "."
-		}
-	}
-	if abs, err := filepath.Abs(dir); err == nil {
-		dir = abs
-	}
-
 	dw := &dynamicWriter{}
 	r, err := createRunner(context.Background(), strings.NewReader(""), dw, dw, dir, nil)
 	if err != nil {
@@ -117,7 +105,7 @@ func NewExecutionSession(dir string) (*ExecutionSession, error) {
 	return &ExecutionSession{
 		runner:       r,
 		streamOut:    dw,
-		initialCwd:   dir,
+		initialCwd:   r.Dir,
 		nextRecordID: 1,
 	}, nil
 }

@@ -35,6 +35,7 @@ func postProcessWasm(wasmPath string) error {
 			if err != nil {
 				return fmt.Errorf("export count: %w", err)
 			}
+
 			var newExportSec []byte
 			newExportSec = append(newExportSec, encodeVarUint32(count)...)
 			p := n2

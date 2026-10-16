@@ -328,10 +328,6 @@ func createRunner(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer
 }
 
 func createRunnerWithEnv(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, dir string, parentEnv expand.Environ, args []string) (*interp.Runner, error) {
-	if dir == "" {
-		dir, _ = os.Getwd()
-	}
-
 	var envPairs []string
 	if parentEnv != nil {
 		parentEnv.Each(func(name string, vr expand.Variable) bool {
