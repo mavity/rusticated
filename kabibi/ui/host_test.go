@@ -280,6 +280,14 @@ func TestRunCore_UsesInjectedRawModeBoundary(t *testing.T) {
 	if !restored {
 		t.Fatal("runCore() did not call the injected restoreFunc")
 	}
+	gotOutput := out.String()
+	const mouseTrackingOff = "\x1b[?1006l\x1b[?1000l"
+	if strings.Contains(gotOutput, "\x1b[?1000h") || strings.Contains(gotOutput, "\x1b[?1006h") {
+		t.Fatal("runCore() enabled mouse tracking; the terminal should handle mouse input")
+	}
+	if got := strings.Count(gotOutput, mouseTrackingOff); got < 2 {
+		t.Fatalf("runCore() emitted mouse-tracking-off sequence %d times, want startup and cleanup", got)
+	}
 }
 
 func TestRunCore_PropagatesMakeRawError(t *testing.T) {
