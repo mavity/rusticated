@@ -32,6 +32,7 @@ type ShellOptions struct {
 	WorkingDir        string            // Optional initial working directory for the shell runner
 	AIRunner          AIRunner          // Optional AI fallback runner (defaults to LazyAIRunner)
 	Mode              ShellMode         // Toggle between ModeZeroPlume (default) and ModePlumeHistory
+	Prompt            string            // Optional custom prompt template or fixed prompt (supports PS1 escapes if execSess present)
 }
 
 // Shell is a shell widget that implements the ui.Widget interface.
@@ -59,9 +60,10 @@ type Shell struct {
 	input *PromptInput
 
 	// Layout
-	width  int
-	height int
-	prompt string
+	width          int
+	height         int
+	prompt         string
+	promptTemplate string
 
 	// Execution & AI Fallback
 	execSess     *ExecutionSession
@@ -87,22 +89,26 @@ func New(opts ShellOptions) *Shell {
 		aiRunner = NewLazyAIRunner(execSess)
 	}
 
+	promptTmpl := opts.Prompt
+
 	s := &Shell{
-		mode:        opts.Mode,
-		blocks:      []CommandBlock{},
-		width:       80,
-		height:      24,
-		prompt:      "$ ",
-		activeBlock: -1,
-		execSess:    execSess,
-		aiRunner:    aiRunner,
-		opts:        opts,
+		mode:           opts.Mode,
+		blocks:         []CommandBlock{},
+		width:          80,
+		height:         24,
+		prompt:         "$ ",
+		promptTemplate: promptTmpl,
+		activeBlock:    -1,
+		execSess:       execSess,
+		aiRunner:       aiRunner,
+		opts:           opts,
 	}
 	s.input = NewPromptInput(PromptInputOptions{
 		Prompt: func() string {
 			s.mu.Lock()
 			defer s.mu.Unlock()
-			return s.prompt
+			p, _ := s.currentPromptLocked()
+			return p
 		},
 	})
 
@@ -207,6 +213,39 @@ func (s *Shell) SetInput(value string) {
 // SetCursorPos sets the cursor position for testing/snapshot generation.
 func (s *Shell) SetCursorPos(pos int) {
 	s.input.SetCursorPos(pos)
+}
+
+// SetPrompt sets a static prompt string or custom PS1 template.
+func (s *Shell) SetPrompt(prompt string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.prompt = prompt
+	s.promptTemplate = prompt
+	s.invalidate()
+}
+
+// currentPromptLocked evaluates the current prompt string and visual display width.
+func (s *Shell) currentPromptLocked() (string, int) {
+	if s.execSess != nil {
+		envMap := s.execSess.EnvMap()
+		tmpl := s.promptTemplate
+		if ps1, ok := envMap["PS1"]; ok && ps1 != "" {
+			tmpl = ps1
+		}
+		if tmpl != "" {
+			info := FormatPrompt(tmpl, s.execSess.Dir(), envMap)
+			return info.Text, info.Width
+		}
+		// Default fallback when neither template nor PS1 is provided
+		info := FormatPrompt(`\w$ `, s.execSess.Dir(), envMap)
+		return info.Text, info.Width
+	}
+
+	p := s.prompt
+	if p == "" {
+		p = "$ "
+	}
+	return p, len([]rune(p))
 }
 
 // SubmitCurrentInput adds the current input to history as a CommandBlock and clears the input buffer.
