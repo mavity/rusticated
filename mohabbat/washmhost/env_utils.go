@@ -228,6 +228,27 @@ func writeOverlapped(mod api.Module, ovPtr uint32, errorCode uint32, continued u
 	}
 	return nil
 }
+
+func writeOverlappedExtended(mod api.Module, ovPtr uint32, errorCode uint32, continued uint64, resultExt uint64, extra []byte) error {
+	mem := mod.Memory()
+	if mem == nil {
+		return fmt.Errorf("no memory export")
+	}
+
+	buf := make([]byte, 24+len(extra))
+	binary.LittleEndian.PutUint32(buf[0:4], 1)
+	binary.LittleEndian.PutUint32(buf[4:8], errorCode)
+	binary.LittleEndian.PutUint64(buf[8:16], continued)
+	binary.LittleEndian.PutUint64(buf[16:24], resultExt)
+	if len(extra) > 0 {
+		copy(buf[24:], extra)
+	}
+
+	if ok := mem.Write(ovPtr, buf); !ok {
+		return fmt.Errorf("ovPtr %d out of bounds", ovPtr)
+	}
+	return nil
+}
 func (h *HostEnv) sys_get_platform_info(ctx context.Context, m api.Module, stack []uint64) {
 	ptr := uint32(stack[0])
 	maxLen := uint32(stack[1])

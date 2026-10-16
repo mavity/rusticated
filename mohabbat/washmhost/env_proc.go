@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"os/exec"
@@ -101,6 +102,82 @@ func (h *HostEnv) sys_process_spawn(ctx context.Context, m api.Module, stack []u
 
 		if len(stdio) > 0 {
 			var pipeHandles []uint64
+			var ptySpec string
+			for _, spec := range stdio {
+				if spec == "pty" || strings.HasPrefix(spec, "pty:") {
+					ptySpec = spec
+					break
+				}
+			}
+
+			if ptySpec != "" {
+				cols := 80
+				rows := 24
+				if strings.HasPrefix(ptySpec, "pty:") {
+					parts := strings.Split(ptySpec[4:], ",")
+					if len(parts) >= 2 {
+						fmt.Sscanf(parts[0], "%d", &cols)
+						fmt.Sscanf(parts[1], "%d", &rows)
+					}
+					if len(parts) >= 3 && parts[2] != "" {
+						mergedEnv = append(mergedEnv, "TERM="+parts[2])
+						cmd.Env = guestRuntimeEnvForWasm(mergedEnv)
+					}
+				}
+
+				ptySession, proc, err := startWithPty(cmd, cols, rows)
+				if err != nil {
+					h.fileOpsQueue <- func() {
+						defer h.DecOps()
+						if !h.IsOpActive(ovPtr, state.opID) {
+							return
+						}
+						h.mu.Lock()
+						delete(h.activeOps, ovPtr)
+						h.mu.Unlock()
+						writeOverlapped(m, ovPtr, mapErrno(err), 0, 0)
+					}
+					return
+				}
+
+				h.mu.Lock()
+				childHandle := h.nextHandle
+				h.nextHandle++
+				h.handles[childHandle] = cmd
+
+				ptyHandle := h.nextHandle
+				h.nextHandle++
+				h.handles[ptyHandle] = ptySession
+				h.mu.Unlock()
+
+				_ = proc
+
+				// Construct 40-byte extended payload for ProcessSpawnOverlapped:
+				// Offset 24: child_handle (uint64)
+				// Offset 32: pty_handle   (uint64)
+				// Offset 40: in_handle    (uint64) = 0
+				// Offset 48: out_handle   (uint64) = 0
+				// Offset 56: err_handle   (uint64) = 0
+				extra := make([]byte, 40)
+				binary.LittleEndian.PutUint64(extra[0:8], childHandle)
+				binary.LittleEndian.PutUint64(extra[8:16], ptyHandle)
+
+				// resultExt in base 24-byte header: childHandle | (ptyHandle << 32)
+				extResult := childHandle | (ptyHandle << 32)
+
+				h.fileOpsQueue <- func() {
+					defer h.DecOpsFor(state)
+					if !h.IsOpActive(ovPtr, state.opID) {
+						return
+					}
+					h.mu.Lock()
+					delete(h.activeOps, ovPtr)
+					h.mu.Unlock()
+					writeOverlappedExtended(m, ovPtr, 0, 0, extResult, extra)
+				}
+				return
+			}
+
 			for i, spec := range stdio {
 				var f *os.File
 				if spec == "inherit" {
@@ -193,6 +270,10 @@ func (h *HostEnv) sys_process_spawn(ctx context.Context, m api.Module, stack []u
 		// resultExt = (pipeHandles << 32) | childHandle
 		extResult := ph | (state.reserved << 32)
 
+		extra := make([]byte, 40)
+		binary.LittleEndian.PutUint64(extra[0:8], ph) // child_handle
+		// pty_handle is 0 for non-PTY
+
 		h.fileOpsQueue <- func() {
 			defer h.DecOpsFor(state)
 			if !h.IsOpActive(ovPtr, state.opID) {
@@ -201,7 +282,7 @@ func (h *HostEnv) sys_process_spawn(ctx context.Context, m api.Module, stack []u
 			h.mu.Lock()
 			delete(h.activeOps, ovPtr)
 			h.mu.Unlock()
-			writeOverlapped(m, ovPtr, 0, 0, extResult)
+			writeOverlappedExtended(m, ovPtr, 0, 0, extResult, extra)
 		}
 	}()
 }

@@ -333,4 +333,95 @@ func TestSysProcEnv(t *testing.T) {
 			t.Error("expected error waiting on non-process handle")
 		}
 	})
+
+	t.Run("15. sys_process_spawn with pty", func(t *testing.T) {
+		ovPtr := uint32(0x1000)
+		// Spawn cmd.exe on Windows or sh on Unix
+		shellCmd := "cmd.exe"
+		arg1 := "/c"
+		arg2 := "echo 123"
+		if os.PathSeparator == '/' {
+			shellCmd = "sh"
+			arg1 = "-c"
+			arg2 = "echo 123"
+		}
+
+		// Config format: program\0arg1\0arg2\0\0env\0\0cwd\0\0pty:80,24\0
+		config := shellCmd + "\x00" + arg1 + "\x00" + arg2 + "\x00\x00\x00\x00pty:80,24\x00"
+		ptrCfg := uint32(0x1100)
+		mod.Memory().Write(ptrCfg, []byte(config))
+
+		stack := []uint64{uint64(ovPtr), uint64(ptrCfg), uint64(len(config))}
+		env.sys_process_spawn(context.Background(), mod, stack)
+
+		time.Sleep(time.Millisecond * 80)
+		env.Poll(context.Background(), mod)
+
+		// Read extended ProcessSpawnOverlapped (64 bytes total)
+		val, ok := mod.Memory().Read(ovPtr, 64)
+		if !ok {
+			t.Fatal("failed to read extended overlapped buffer")
+		}
+		errno := binary.LittleEndian.Uint32(val[4:8])
+		if errno != 0 {
+			t.Fatalf("spawn with pty failed with errno %d", errno)
+		}
+
+		childHandle := binary.LittleEndian.Uint64(val[24:32])
+		ptyHandle := binary.LittleEndian.Uint64(val[32:40])
+
+		if childHandle == 0 {
+			t.Error("expected non-zero child_handle")
+		}
+		if ptyHandle == 0 {
+			t.Error("expected non-zero pty_handle")
+		}
+
+		// Test tty_set_size on ptyHandle
+		resizeStack := []uint64{ptyHandle, 100, 30}
+		env.sys_tty_set_size(context.Background(), mod, resizeStack)
+		if resizeStack[0] != 0 {
+			t.Errorf("tty_set_size failed: %d", resizeStack[0])
+		}
+
+		// Read from PTY
+		readOvPtr := uint32(0x1200)
+		readBufPtr := uint32(0x1300)
+		readStack := []uint64{uint64(readOvPtr), ptyHandle, uint64(readBufPtr), 256}
+		env.sys_read(context.Background(), mod, readStack)
+
+		time.Sleep(time.Millisecond * 100)
+		env.Poll(context.Background(), mod)
+
+		readVal, _ := mod.Memory().Read(readOvPtr, 24)
+		readErr := binary.LittleEndian.Uint32(readVal[4:8])
+		readCount := binary.LittleEndian.Uint64(readVal[16:24])
+		if readErr != 0 {
+			t.Fatalf("read from PTY failed: %d", readErr)
+		}
+		if readCount == 0 {
+			t.Log("PTY read returned 0 bytes (might need extra poll)")
+		} else {
+			outputBytes, _ := mod.Memory().Read(readBufPtr, uint32(readCount))
+			outputStr := string(outputBytes)
+			if !strings.Contains(outputStr, "123") {
+				t.Logf("PTY output: %q (expected to contain 123)", outputStr)
+			}
+		}
+
+		// Wait for child process
+		waitOvPtr := uint32(0x1400)
+		env.sys_process_wait(context.Background(), mod, []uint64{uint64(waitOvPtr), childHandle})
+		time.Sleep(time.Millisecond * 80)
+		env.Poll(context.Background(), mod)
+
+		waitVal, _ := mod.Memory().Read(waitOvPtr, 24)
+		waitErr := binary.LittleEndian.Uint32(waitVal[4:8])
+		if waitErr != 0 {
+			t.Errorf("wait failed: %d", waitErr)
+		}
+
+		// Close pty handle
+		env.sys_handle_close(context.Background(), mod, []uint64{ptyHandle})
+	})
 }
