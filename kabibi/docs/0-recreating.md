@@ -42,7 +42,7 @@ Reimplement Kabibi's foundational interactive layer on top of the new `ui.Host` 
 ### Key Design Principles
 
 * **Coordinator-Safe UI Updates:** `Shell.blocks` is mutated safely and redraws are triggered via `Host.Invalidate()`. Because `CommandBlock.Output` is passed through `terminal.FromANSI` (`vt.Emulator`), carriage-return (`\r`) overwrites emitted by `ai.Session`'s `OnFeedback` ticker naturally overwrite the current line inside the block without special UI modes.
-* **Zero Legacy Coupling:** Ignore `kabibi/old`, `kabibi/ai`, and `kabibi/ui/chat`'s legacy FFI wrappers. Wire `kabibi/go.mod` directly to `ai => ../ai` and `ai/assets`.
+* **Zero Legacy Coupling:** The obsolete `kabibi/ai` and `kabibi/ui/chat` legacy FFI wrappers have been removed. Wire `kabibi/go.mod` directly to `ai => ../ai` and `ai/assets`.
 * **No Tool Sharing with Pope:** All AI tools are implemented inside Kabibi and bound to Kabibi's shell state (`cwd`, `env`, and `mvdan` runner).
 
 ---

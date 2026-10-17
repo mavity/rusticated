@@ -10,8 +10,12 @@ import (
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/atotto/clipboard"
-	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/input"
 )
+
+func editorKey(e *editorModel, code rune, mod input.KeyMod, text string) {
+	e.HandleEvent(input.KeyPressEvent{Code: code, Mod: mod, Text: text})
+}
 
 func TestNewEditorLFFile(t *testing.T) {
 	dir := t.TempDir()
@@ -298,13 +302,13 @@ func TestEditorKeyCommands(t *testing.T) {
 	}
 
 	ed := &editorModel{path: path, lines: []string{"new"}, eol: "\n", dirty: true}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyF2})
+	editorKey(ed, input.KeyF2, 0, "")
 	if content, err := os.ReadFile(path); err != nil || string(content) != "new" {
 		t.Fatalf("save on F2 wrote %q, err=%v", string(content), err)
 	}
 
 	ed = &editorModel{lines: []string{"abc"}, cy: 0, cx: 0, dirty: true}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	editorKey(ed, input.KeyEscape, 0, "")
 	if !ed.confirmQuit {
 		t.Fatal("Esc with dirty editor did not open save confirmation")
 	}
@@ -314,19 +318,19 @@ func TestEditorKeyCommands(t *testing.T) {
 	if err := clipboard.WriteAll(""); err != nil {
 		t.Skipf("clipboard unavailable in this environment: %v", err)
 	}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlV})
+	editorKey(ed, 'v', input.ModCtrl, "")
 	if got := strings.Join(ed.lines, "\n"); got != "clipabc" {
 		t.Fatalf("ctrl+v fallback result = %q, want %q", got, "clipabc")
 	}
 
 	ed = &editorModel{lines: []string{"abc"}, cy: 0, cx: 0}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlA})
+	editorKey(ed, 'a', input.ModCtrl, "")
 	if !ed.sel || ed.cy != 0 || ed.cx != 3 {
 		t.Fatalf("ctrl+a selection = (%d, %d), sel=%v; want sel=true and (0, 3)", ed.cy, ed.cx, ed.sel)
 	}
 
 	ed = &editorModel{lines: []string{"abc"}, cy: 0, cx: 1}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	editorKey(ed, input.KeyEnter, 0, "")
 	if got := strings.Join(ed.lines, "\n"); got != "a\nbc" {
 		t.Fatalf("enter split result = %q, want %q", got, "a\nbc")
 	}
@@ -479,19 +483,19 @@ func TestEditorRenderRowBarsAndScrollbar(t *testing.T) {
 
 func TestEditorExtraUpdateKeys(t *testing.T) {
 	e := &editorModel{lines: []string{"abc"}, cy: 0, cx: 1}
-	_ = e.HandleKey(tea.KeyMsg{Type: tea.KeyTab})
+	editorKey(e, input.KeyTab, 0, "")
 	if got := strings.Join(e.lines, "\n"); got != "a\tbc" {
 		t.Fatalf("tab insertion result = %q, want %q", got, "a\tbc")
 	}
 
 	e = &editorModel{lines: []string{"abc"}, cy: 0, cx: 0}
-	_ = e.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlHome})
+	editorKey(e, input.KeyHome, input.ModCtrl, "")
 	if e.cy != 0 || e.cx != 0 {
 		t.Fatalf("ctrl+home = (%d,%d), want (0,0)", e.cy, e.cx)
 	}
 
 	e = &editorModel{lines: []string{"abc"}, cy: 0, cx: 1}
-	_ = e.HandleKey(tea.KeyMsg{Type: tea.KeyDelete})
+	editorKey(e, input.KeyDelete, 0, "")
 	if got := strings.Join(e.lines, "\n"); got != "ac" {
 		t.Fatalf("delete key result = %q, want %q", got, "ac")
 	}
@@ -507,7 +511,7 @@ func TestEditorCloseEditorAndModelState(t *testing.T) {
 		dirty:       false,
 		OnCloseFunc: func() { closed = true },
 	}
-	_ = e.HandleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	editorKey(e, input.KeyEscape, 0, "")
 	if !closed {
 		t.Fatal("Esc on clean editor did not invoke OnCloseFunc")
 	}
@@ -639,18 +643,18 @@ func TestEditorUpdateKeyCoverage(t *testing.T) {
 	ed.lines = []string{"abcd", "xyz"}
 	ed.cy, ed.cx = 0, 1
 	ed.dirty = true
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlS})
+	editorKey(ed, 's', input.ModCtrl, "")
 	if ed.dirty {
 		t.Fatal("ctrl+s should clear dirty state")
 	}
 
 	closed := false
 	ed = &editorModel{path: path, lines: []string{"ab"}, eol: "\n", dirty: true, status: "dirty", OnCloseFunc: func() { closed = true }}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	editorKey(ed, input.KeyEscape, 0, "")
 	if !ed.confirmQuit {
 		t.Fatal("Esc on dirty buffer did not open confirmation")
 	}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	editorKey(ed, 'y', 0, "y")
 	if !closed {
 		t.Fatal("confirm-yes path should close the editor")
 	}
@@ -659,12 +663,12 @@ func TestEditorUpdateKeyCoverage(t *testing.T) {
 	if err := clipboard.WriteAll(""); err != nil {
 		t.Skipf("clipboard unavailable in this environment: %v", err)
 	}
-	_ = ed2.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+	editorKey(ed2, 'c', input.ModCtrl, "")
 	if got := ed2.status; got != "Copied" {
 		t.Fatalf("ctrl+c status = %q, want %q", got, "Copied")
 	}
 	ed = &editorModel{path: path, lines: []string{"abc"}, cy: 0, cx: 3, sel: true, ay: 0, ax: 0}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlX})
+	editorKey(ed, 'x', input.ModCtrl, "")
 	if got := strings.Join(ed.lines, "\n"); got != "" {
 		t.Fatalf("ctrl+x result = %q, want %q", got, "")
 	}
@@ -672,103 +676,103 @@ func TestEditorUpdateKeyCoverage(t *testing.T) {
 		t.Skipf("clipboard unavailable in this environment: %v", err)
 	}
 	ed = &editorModel{path: path, lines: []string{"abc"}, cy: 0, cx: 0, clip: "XYZ"}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlV})
+	editorKey(ed, 'v', input.ModCtrl, "")
 	if got := strings.Join(ed.lines, "\n"); got != "XYZabc" {
 		t.Fatalf("ctrl+v fallback result = %q, want %q", got, "XYZabc")
 	}
 
 	ed = &editorModel{lines: []string{"abc"}, cy: 0, cx: 0}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlA})
+	editorKey(ed, 'a', input.ModCtrl, "")
 	if !ed.sel || ed.cy != 0 || ed.cx != 3 {
 		t.Fatalf("ctrl+a selection = (%d,%d), sel=%v; want sel=true and (0,3)", ed.cy, ed.cx, ed.sel)
 	}
 	ed = &editorModel{lines: []string{"abc"}, cy: 0, cx: 1}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	editorKey(ed, input.KeyEnter, 0, "")
 	if got := strings.Join(ed.lines, "\n"); got != "a\nbc" {
 		t.Fatalf("enter split result = %q, want %q", got, "a\nbc")
 	}
 	ed = &editorModel{lines: []string{"ab", "cd"}, cy: 1, cx: 0}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyBackspace})
+	editorKey(ed, input.KeyBackspace, 0, "")
 	if got := strings.Join(ed.lines, "\n"); got != "abcd" {
 		t.Fatalf("backspace merge result = %q, want %q", got, "abcd")
 	}
 	ed = &editorModel{lines: []string{"abc"}, cy: 0, cx: 1}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyDelete})
+	editorKey(ed, input.KeyDelete, 0, "")
 	if got := strings.Join(ed.lines, "\n"); got != "ac" {
 		t.Fatalf("delete result = %q, want %q", got, "ac")
 	}
 	ed = &editorModel{lines: []string{"abc"}, cy: 0, cx: 1}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyTab})
+	editorKey(ed, input.KeyTab, 0, "")
 	if got := strings.Join(ed.lines, "\n"); got != "a\tbc" {
 		t.Fatalf("tab insertion result = %q, want %q", got, "a\tbc")
 	}
 	ed = &editorModel{lines: []string{"abc"}, cy: 0, cx: 1}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeySpace})
+	editorKey(ed, input.KeySpace, 0, "")
 	if got := strings.Join(ed.lines, "\n"); got != "a bc" {
 		t.Fatalf("space insertion result = %q, want %q", got, "a bc")
 	}
 	ed = &editorModel{lines: []string{"abc"}, cy: 0, cx: 1}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Z")})
+	editorKey(ed, 'Z', 0, "Z")
 	if got := strings.Join(ed.lines, "\n"); got != "aZbc" {
 		t.Fatalf("default insertion result = %q, want %q", got, "aZbc")
 	}
 
 	ed = &editorModel{lines: []string{"abc", "def"}, cy: 1, cx: 1, prefCol: 1}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyLeft})
+	editorKey(ed, input.KeyLeft, 0, "")
 	if ed.cy != 1 || ed.cx != 0 {
 		t.Fatalf("left key = (%d,%d), want (1,0)", ed.cy, ed.cx)
 	}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyRight})
+	editorKey(ed, input.KeyRight, 0, "")
 	if ed.cy != 1 || ed.cx != 1 {
 		t.Fatalf("right key = (%d,%d), want (1,1)", ed.cy, ed.cx)
 	}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyUp})
+	editorKey(ed, input.KeyUp, 0, "")
 	if ed.cy != 0 || ed.cx != 1 {
 		t.Fatalf("up key = (%d,%d), want (0,1)", ed.cy, ed.cx)
 	}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyDown})
+	editorKey(ed, input.KeyDown, 0, "")
 	if ed.cy != 1 || ed.cx != 1 {
 		t.Fatalf("down key = (%d,%d), want (1,1)", ed.cy, ed.cx)
 	}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyShiftLeft})
+	editorKey(ed, input.KeyLeft, input.ModShift, "")
 	if !ed.sel {
 		t.Fatal("shift+left did not start a selection")
 	}
 	ed = &editorModel{lines: []string{"abc"}, cy: 0, cx: 1, prefCol: 1}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyPgUp})
+	editorKey(ed, input.KeyPgUp, 0, "")
 	if ed.cy != 0 {
 		t.Fatalf("pgup from start = %d, want 0", ed.cy)
 	}
 	ed = &editorModel{lines: []string{"a", "b", "c"}, cy: 2, cx: 0, prefCol: 0, height: 5}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyPgDown})
+	editorKey(ed, input.KeyPgDown, 0, "")
 	if ed.cy != 2 {
 		t.Fatalf("pgdown result = %d, want 2", ed.cy)
 	}
 	ed = &editorModel{lines: []string{"abc", "def"}, cy: 1, cx: 1, prefCol: 1}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlLeft})
+	editorKey(ed, input.KeyLeft, input.ModCtrl, "")
 	if ed.cx != 0 {
 		t.Fatalf("ctrl+left result = %d, want 0", ed.cx)
 	}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlRight})
+	editorKey(ed, input.KeyRight, input.ModCtrl, "")
 	if ed.cx != 3 {
 		t.Fatalf("ctrl+right result = %d, want 3", ed.cx)
 	}
 	ed = &editorModel{lines: []string{"abc"}, cy: 0, cx: 1, prefCol: 1}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyHome})
+	editorKey(ed, input.KeyHome, 0, "")
 	if ed.cx != 0 {
 		t.Fatalf("home result = %d, want 0", ed.cx)
 	}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyEnd})
+	editorKey(ed, input.KeyEnd, 0, "")
 	if ed.cx != 3 {
 		t.Fatalf("end result = %d, want 3", ed.cx)
 	}
 	ed = &editorModel{lines: []string{"abc"}, cy: 0, cx: 1}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlHome})
+	editorKey(ed, input.KeyHome, input.ModCtrl, "")
 	if ed.cy != 0 || ed.cx != 0 {
 		t.Fatalf("ctrl+home = (%d,%d), want (0,0)", ed.cy, ed.cx)
 	}
 	ed = &editorModel{lines: []string{"abc"}, cy: 0, cx: 1}
-	_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyCtrlEnd})
+	editorKey(ed, input.KeyEnd, input.ModCtrl, "")
 	if ed.cy != 0 || ed.cx != 3 {
 		t.Fatalf("ctrl+end = (%d,%d), want (0,3)", ed.cy, ed.cx)
 	}
@@ -877,20 +881,20 @@ func TestEditorCoverageBoosters(t *testing.T) {
 		}
 		closed := false
 		ed := &editorModel{path: path, lines: []string{"save me"}, dirty: true, confirmQuit: true, OnCloseFunc: func() { closed = true }}
-		_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Y")})
+		editorKey(ed, 'Y', 0, "Y")
 		if !closed {
 			t.Fatal("confirm-yes path with uppercase Y did not close editor")
 		}
 
 		ed = &editorModel{path: path, lines: []string{"save me"}, dirty: true, confirmQuit: true}
-		_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyEsc})
+		editorKey(ed, input.KeyEscape, 0, "")
 		if ed.confirmQuit {
 			t.Fatal("confirm-esc path should cancel the confirmation prompt")
 		}
 
 		closed = false
 		ed = &editorModel{path: path, lines: []string{"save me"}, dirty: true, confirmQuit: true, OnCloseFunc: func() { closed = true }}
-		_ = ed.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("N")})
+		editorKey(ed, 'N', 0, "N")
 		if !closed {
 			t.Fatal("confirm-n uppercase path did not close editor")
 		}
