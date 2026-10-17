@@ -47,6 +47,7 @@ func formatStartupBanner(sessionErr error) string {
 type ShellOptions struct {
 	WriteToScrollback func(text string) // Callback to write lines to the host's scrollback
 	OnExit            func()            // Optional callback invoked when user runs 'exit' or 'quit'
+	OnCommandFinished func(cwd string)  // Optional callback invoked after a command or AI turn finishes
 	WorkingDir        string            // Optional initial working directory for the shell runner
 	AIRunner          AIRunner          // Optional AI fallback runner (defaults to LazyAIRunner)
 	Mode              ShellMode         // Toggle between ModeStack (default) and ModePlumeHistory
@@ -79,6 +80,7 @@ type Shell struct {
 	animFrame     int
 	bannerFlushed bool
 	exiting       bool
+	bottomAligned bool // When true, non-ejected blocks are bottom-aligned above PromptInput inside full viewport height
 
 	// Segregated prompt + command-line input widget
 	input *PromptInput
@@ -171,12 +173,62 @@ func (s *Shell) Mode() ShellMode {
 	return s.mode
 }
 
-// SetMode switches the shell between ModeZeroPlume and ModePlumeHistory.
+// SetMode switches the shell between ModeStack and ModePlumeHistory.
 func (s *Shell) SetMode(mode ShellMode) {
 	s.mu.Lock()
 	s.mode = mode
 	s.mu.Unlock()
 	s.invalidate()
+}
+
+// SetBottomAligned configures whether the shell renders its non-ejected blocks
+// bottom-aligned above PromptInput inside the full rect.H viewport (used when
+// the blue file panels are active or have claimed the full-screen HUD).
+func (s *Shell) SetBottomAligned(v bool) {
+	s.mu.Lock()
+	s.bottomAligned = v
+	s.mu.Unlock()
+	s.invalidate()
+}
+
+// BottomAligned reports whether the shell is currently bottom-aligned inside the full viewport.
+func (s *Shell) BottomAligned() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.bottomAligned
+}
+
+// SetOnCommandFinished sets or updates the callback invoked after a command or AI turn completes.
+func (s *Shell) SetOnCommandFinished(fn func(cwd string)) {
+	s.mu.Lock()
+	s.opts.OnCommandFinished = fn
+	s.mu.Unlock()
+}
+
+// SetDir updates the underlying ExecutionSession working directory and refreshes the prompt.
+func (s *Shell) SetDir(dir string) error {
+	s.mu.Lock()
+	es := s.execSess
+	s.mu.Unlock()
+	if es == nil {
+		return nil
+	}
+	if err := es.SetDir(dir); err != nil {
+		return err
+	}
+	s.invalidate()
+	return nil
+}
+
+// Dir returns the current shell working directory.
+func (s *Shell) Dir() string {
+	s.mu.Lock()
+	es := s.execSess
+	s.mu.Unlock()
+	if es == nil {
+		return ""
+	}
+	return es.Dir()
 }
 
 // ExecutionSession returns the underlying mvdan shell execution session.
@@ -466,8 +518,9 @@ func (s *Shell) Measure(c ui.Constraints) ui.Size {
 	}
 	s.mu.Lock()
 	mode := s.mode
+	bottomAligned := s.bottomAligned
 	s.mu.Unlock()
-	if mode == ModeStack {
+	if mode == ModeStack && !bottomAligned {
 		occH := s.computeStackHeight(w, maxH)
 		return ui.Size{W: w, H: occH}
 	}
@@ -501,6 +554,7 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 		s.execSess.ResizePTY(w, maxH)
 	}
 	mode := s.mode
+	bottomAligned := s.bottomAligned
 	exiting := s.exiting
 	running := s.running
 
@@ -639,24 +693,33 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 	s.mu.Unlock()
 
 	bufH := occH
-	if mode == ModePlumeHistory {
+	if mode == ModePlumeHistory || bottomAligned {
 		bufH = maxH
 	}
 	buf := ui.NewCellBuf(w, bufH)
 
-	// Paint collected block slices in chronological order (reverse of backward walk)
+	// Paint collected block slices in chronological order (reverse of backward walk).
+	// When bottomAligned is true (HUD panels mode), non-ejected blocks sit immediately
+	// above PromptInput at row (maxH - chromeH - collectedRows) so they climb upward
+	// behind the blue panels before reaching row 0!
 	bufferRow := 0
+	if bottomAligned && !exiting {
+		bufferRow = (maxH - chromeH) - collectedRows
+		if bufferRow < 0 {
+			bufferRow = 0
+		}
+	}
 	for i := len(collected) - 1; i >= 0; i-- {
 		sl := collected[i]
 		bufferRow = copyBlockRows(buf, bufferRow, sl.buf, w, sl.startRow, sl.endRow)
 	}
 
 	// Position of PromptInput:
-	// In ModeStack, PromptInput sits immediately below the collected blocks (at row collectedRows),
+	// In compact ModeStack, PromptInput sits immediately below the collected blocks (at row collectedRows),
 	// followed by the 1 reserved blank footer line at row (occH - 1).
-	// In ModePlumeHistory, PromptInput + footer are pinned to the bottom of the full viewport.
+	// In ModePlumeHistory or bottomAligned HUD mode, PromptInput + footer are pinned to the bottom of maxH.
 	inputTopY := collectedRows
-	if mode == ModePlumeHistory {
+	if mode == ModePlumeHistory || (bottomAligned && !exiting) {
 		inputTopY = maxH - chromeH
 		if inputTopY < 0 {
 			inputTopY = 0
@@ -1003,9 +1066,17 @@ func (s *Shell) submitAndExecuteAsync() {
 			s.activeBlock = -1
 			s.running = false
 			s.statusLine = ""
+			onDone := s.opts.OnCommandFinished
+			var finalCwd string
+			if s.execSess != nil {
+				finalCwd = s.execSess.Dir()
+			}
 			close(doneCh)
 			s.doneCh = nil
 			s.mu.Unlock()
+			if onDone != nil {
+				onDone(finalCwd)
+			}
 			s.invalidate()
 		}()
 

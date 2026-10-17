@@ -145,7 +145,8 @@ func applyWasip1DepPatches(ws, projectDir, goroot string) (*depPatchResult, erro
 		if strings.HasSuffix(filepath.ToSlash(target.jitDir), "github.com/mattn/go-isatty") {
 			for _, fname := range []string{
 				"isatty_others.go", "isatty_bsd.go",
-				"isatty_tcgets.go", "isatty_solaris.go", "isatty_plan9.go",
+				"isatty_tcgets.go", "isatty_tiocgwinsz.go",
+				"isatty_solaris.go", "isatty_plan9.go",
 			} {
 				if data, ok := files[fname]; ok {
 					files[fname] = []byte(addWasip1ExclusionToTag(string(data)))

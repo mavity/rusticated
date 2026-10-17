@@ -1,28 +1,186 @@
 package filemanager
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/input"
 	"github.com/mattn/go-runewidth"
+	"github.com/mavity/rusticated/kabibi/ui"
+	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
+
+type (
+	Constraints   = ui.Constraints
+	Size          = ui.Size
+	Rect          = ui.Rect
+	CellBuf       = terminal.CellBuf
+	Cell          = terminal.Cell
+	CursorPos     = ui.CursorPos
+	RenderContext = ui.RenderContext
+	Widget        = ui.Widget
+)
+
+var NewCellBuf = terminal.NewCellBuf
+
+// PaneSide identifies the left or right pane in DualPaneWidget.
+type PaneSide int
+
+const (
+	LeftPane PaneSide = iota
+	RightPane
+
+	// Aliases for legacy callers/tests
+	leftPane  = LeftPane
+	rightPane = RightPane
+)
+
+type pane = PaneSide
+
+// FSEntry is a single item returned by FSService.ReadDir.
+type FSEntry struct {
+	Name   string
+	IsDir  bool
+	IsExec bool
+}
+
+// FSService abstracts filesystem access for widgets that display directory contents.
+type FSService interface {
+	ReadDir(path string) ([]FSEntry, error)
+}
+
+// OsFSService reads directory listings from the local filesystem.
+type OsFSService struct{}
+
+func (s *OsFSService) ReadDir(path string) ([]FSEntry, error) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]FSEntry, 0, len(entries))
+	for _, e := range entries {
+		full := filepath.Join(path, e.Name())
+		isDir := e.IsDir()
+		out = append(out, FSEntry{
+			Name:   e.Name(),
+			IsDir:  isDir,
+			IsExec: !isDir && IsExecutableFile(full),
+		})
+	}
+	return out, nil
+}
+
+// FileItem represents a single entry inside a FilePaneWidget.
+type FileItem struct {
+	name     string
+	isDir    bool
+	isExec   bool
+	selected bool
+}
+
+func (f FileItem) Name() string   { return f.name }
+func (f FileItem) IsDir() bool    { return f.isDir }
+func (f FileItem) IsExec() bool   { return f.isExec }
+func (f FileItem) Selected() bool { return f.selected }
+
+type fileItem = FileItem
+
+// NewFileItem constructs a FileItem for programmatic initialization or tests.
+func NewFileItem(name string, isDir bool, selected bool) FileItem {
+	return FileItem{name: name, isDir: isDir, selected: selected}
+}
+
+// IsExecutableFile reports whether the file at path is executable (via mode bits,
+// Windows PATHEXT / .sh extension, or a #! shebang header).
+func IsExecutableFile(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".sh", ".exe", ".bat", ".cmd", ".com", ".ps1":
+		return true
+	}
+	if runtime.GOOS != "windows" && info.Mode()&0o111 != 0 {
+		return true
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var hdr [2]byte
+	if n, _ := f.Read(hdr[:]); n == 2 && bytes.Equal(hdr[:], []byte("#!")) {
+		return true
+	}
+	return false
+}
+
+// Color constants matching classic Norton / Far Manager blue panels.
+const (
+	colorBlue     terminal.Color = 0x0000A8
+	colorYellow   terminal.Color = 0xFFD700
+	colorWhite    terminal.Color = 0xE5E5E5
+	colorGray     terminal.Color = 0xB0B0B0
+	colorDarkGray terminal.Color = 0x3A3A3A
+	colorNavy     terminal.Color = 0x000080
+	colorCyan     terminal.Color = 0x00D9FF
+	colorGreen    terminal.Color = 0x00FF87
+)
+
+func makeCell(r rune, fg, bg terminal.Color, bold bool) Cell {
+	var attrs terminal.CharAttributes
+	if bold {
+		attrs |= terminal.CharBold
+	}
+	return Cell{
+		Grapheme: string(r),
+		Style:    terminal.NewStyle(fg, bg, attrs),
+	}
+}
+
+func truncateStringToWidth(s string, maxWidth int) string {
+	displayWidth := runewidth.StringWidth(s)
+	if displayWidth <= maxWidth {
+		return s
+	}
+	effectiveWidth := maxWidth - 1
+	if effectiveWidth <= 0 {
+		return ""
+	}
+	width := 0
+	var b strings.Builder
+	for _, r := range s {
+		w := runewidth.RuneWidth(r)
+		if width+w > effectiveWidth {
+			break
+		}
+		b.WriteRune(r)
+		width += w
+	}
+	return strings.TrimRight(b.String(), " ")
+}
 
 // FilePaneWidget is the complete model for a single file-browser pane.
 // It owns navigation state, handles keyboard input, and renders cells.
 // Title is structural state passed by the parent; operational state (items,
 // selection, scroll) is managed internally.
 type FilePaneWidget struct {
-	Title      string            // display name shown in the title bar
-	OnOpenFile func(path string) // called when the user selects a regular file
+	Title       string            // display name shown in the title bar
+	OnOpenFile  func(path string) // called when the user presses Enter on a regular file
+	OnChangeDir func(path string) // called when the pane changes its directory
 
 	active      bool
 	dir         string
 	items       []fileItem
 	selectedIdx int
 	service     FSService
+	ctx         RenderContext
 
 	Width  int
 	Height int
@@ -31,7 +189,10 @@ type FilePaneWidget struct {
 }
 
 func NewFilePaneWidget(title string) *FilePaneWidget {
-	return &FilePaneWidget{Title: title}
+	return &FilePaneWidget{
+		Title:   title,
+		service: &OsFSService{},
+	}
 }
 
 func (w *FilePaneWidget) SetActive(v bool) {
@@ -71,20 +232,36 @@ func (w *FilePaneWidget) SetDir(dir string) {
 
 // LoadDir loads path from the service into internal state.
 func (w *FilePaneWidget) LoadDir(path string) error {
-	if w == nil || w.service == nil {
+	return w.LoadDirFocus(path, "")
+}
+
+// LoadDirFocus loads path and optionally selects focusName if present.
+func (w *FilePaneWidget) LoadDirFocus(path string, focusName string) error {
+	if w == nil {
 		return nil
 	}
-	entries, err := w.service.ReadDir(path)
+	svc := w.service
+	if svc == nil {
+		svc = &OsFSService{}
+		w.service = svc
+	}
+	path = filepath.Clean(path)
+	entries, err := svc.ReadDir(path)
 	if err != nil {
 		return err
 	}
 	w.dir = path
+	w.Title = strings.TrimSpace(dirTitleName(path))
 	w.items = make([]fileItem, 0, len(entries)+1)
 	if filepath.Dir(path) != path {
 		w.items = append(w.items, fileItem{name: "..", isDir: true})
 	}
 	for _, e := range entries {
-		w.items = append(w.items, fileItem{name: e.Name, isDir: e.IsDir})
+		w.items = append(w.items, fileItem{
+			name:   e.Name,
+			isDir:  e.IsDir,
+			isExec: e.IsExec,
+		})
 	}
 	// Sort: ".." first, then dirs before files, then alphabetically.
 	sort.Slice(w.items, func(i, j int) bool {
@@ -100,9 +277,26 @@ func (w *FilePaneWidget) LoadDir(path string) error {
 		}
 		return strings.ToLower(ii.name) < strings.ToLower(jj.name)
 	})
-	// Always reset selection to the top on directory change.
 	w.selectedIdx = 0
+	if focusName != "" {
+		w.SelectByName(focusName)
+	}
+	if w.OnChangeDir != nil {
+		w.OnChangeDir(path)
+	}
 	return nil
+}
+
+// Refresh reloads the current directory while preserving the selected entry name if it still exists.
+func (w *FilePaneWidget) Refresh() error {
+	if w == nil || w.dir == "" {
+		return nil
+	}
+	var prevName string
+	if fi, ok := w.SelectedItem(); ok {
+		prevName = fi.name
+	}
+	return w.LoadDirFocus(w.dir, prevName)
 }
 
 // SelectedItem returns the currently highlighted item.
@@ -113,8 +307,6 @@ func (w *FilePaneWidget) SelectedItem() (fileItem, bool) {
 	return w.items[w.selectedIdx], true
 }
 
-// SetItemsBridge populates items directly; used by syncDualPaneWidgets during
-// the transition period only — remove when Phase F completes the wire-in.
 func (w *FilePaneWidget) Items() []fileItem {
 	if w == nil {
 		return nil
@@ -131,8 +323,14 @@ func (w *FilePaneWidget) SelectedIndex() int {
 
 // Select sets the highlighted index; no-op if out of range.
 func (w *FilePaneWidget) Select(idx int) {
-	if w == nil || idx < 0 || idx >= len(w.items) {
+	if w == nil || len(w.items) == 0 {
 		return
+	}
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(w.items) {
+		idx = len(w.items) - 1
 	}
 	w.selectedIdx = idx
 }
@@ -233,33 +431,41 @@ func (w *FilePaneWidget) Layout(r Rect) {
 	w.Height = r.H
 }
 
-func (w *FilePaneWidget) Render() CellBuf {
+func (w *FilePaneWidget) Render(r Rect, ctx RenderContext) (CellBuf, CursorPos) {
+	if r.W > 0 || r.H > 0 {
+		w.Layout(r)
+	}
+	w.ctx = ctx
+	return w.RenderBuf(), CursorPos{Visible: false}
+}
+
+func (w *FilePaneWidget) RenderBuf() CellBuf {
 	buf := NewCellBuf(w.Width, w.Height)
 	if w.Width <= 0 || w.Height <= 0 {
 		return buf
 	}
 
 	bg := colorBlue
-	buf.Fill(Rect{X: 0, Y: 0, W: w.Width, H: w.Height}, Cell{FG: colorWhite, BG: bg})
+	buf.Fill(Rect{X: 0, Y: 0, W: w.Width, H: w.Height}, makeCell(' ', colorWhite, bg, false))
 
 	if w.Width >= 2 && w.Height >= 2 {
 		for x := 1; x < w.Width-1; x++ {
-			buf.Set(x, 0, Cell{R: '─', FG: colorGray, BG: bg})
-			buf.Set(x, w.Height-1, Cell{R: '─', FG: colorGray, BG: bg})
+			buf.Set(x, 0, makeCell('─', colorGray, bg, false))
+			buf.Set(x, w.Height-1, makeCell('─', colorGray, bg, false))
 		}
 		for y := 1; y < w.Height-1; y++ {
-			buf.Set(0, y, Cell{R: '│', FG: colorGray, BG: bg})
-			buf.Set(w.Width-1, y, Cell{R: '│', FG: colorGray, BG: bg})
+			buf.Set(0, y, makeCell('│', colorGray, bg, false))
+			buf.Set(w.Width-1, y, makeCell('│', colorGray, bg, false))
 		}
-		buf.Set(0, 0, Cell{R: '┌', FG: colorGray, BG: bg})
-		buf.Set(w.Width-1, 0, Cell{R: '┐', FG: colorGray, BG: bg})
-		buf.Set(0, w.Height-1, Cell{R: '└', FG: colorGray, BG: bg})
-		buf.Set(w.Width-1, w.Height-1, Cell{R: '┘', FG: colorGray, BG: bg})
+		buf.Set(0, 0, makeCell('┌', colorGray, bg, false))
+		buf.Set(w.Width-1, 0, makeCell('┐', colorGray, bg, false))
+		buf.Set(0, w.Height-1, makeCell('└', colorGray, bg, false))
+		buf.Set(w.Width-1, w.Height-1, makeCell('┘', colorGray, bg, false))
 	}
 
-	title := w.Title
+	title := strings.TrimSpace(w.Title)
 	if title == "" {
-		title = " . "
+		title = "."
 	}
 	if runewidth.StringWidth(title) > w.Width-2 {
 		title = truncateStringToWidth(title, w.Width-2)
@@ -276,11 +482,13 @@ func (w *FilePaneWidget) Render() CellBuf {
 			titleBG = colorYellow
 			titleFG = colorDarkGray
 		}
-		for i, r := range label {
-			if start+i >= w.Width-1 {
+		colOff := 0
+		for _, rn := range label {
+			if start+colOff >= w.Width-1 {
 				break
 			}
-			buf.Set(start+i, 0, Cell{R: r, FG: titleFG, BG: titleBG, Bold: true})
+			buf.Set(start+colOff, 0, makeCell(rn, titleFG, titleBG, true))
+			colOff += runewidth.RuneWidth(rn)
 		}
 	}
 
@@ -318,6 +526,9 @@ func (w *FilePaneWidget) Render() CellBuf {
 			}
 			item := w.items[idx]
 			name := item.name
+			if item.isExec && !item.isDir && name != ".." {
+				name = name + "*"
+			}
 			if item.selected && name != ".." {
 				name = "•" + name
 			}
@@ -333,11 +544,13 @@ func (w *FilePaneWidget) Render() CellBuf {
 			}
 			cellY := 1 + r
 			cellX := 1 + c*colWidth
-			for i, rn := range name {
-				if cellX+i >= w.Width-1 {
+			colOff := 0
+			for _, rn := range name {
+				if cellX+colOff >= w.Width-1 {
 					break
 				}
-				buf.Set(cellX+i, cellY, paneCell(rn, item, idx == selectedIdx && w.active, item.selected))
+				buf.Set(cellX+colOff, cellY, paneCell(rn, item, idx == selectedIdx && w.active, item.selected))
+				colOff += runewidth.RuneWidth(rn)
 			}
 		}
 	}
@@ -346,61 +559,155 @@ func (w *FilePaneWidget) Render() CellBuf {
 
 func paneCell(rn rune, item fileItem, isSelected, marked bool) Cell {
 	bg := colorBlue
-	if marked {
-		return Cell{R: rn, FG: colorYellow, BG: bg, Bold: true}
-	}
 	if isSelected {
-		if item.isDir {
-			return Cell{R: rn, FG: colorDarkGray, BG: colorYellow}
+		if marked {
+			return makeCell(rn, colorNavy, colorYellow, true)
 		}
-		return Cell{R: rn, FG: colorNavy, BG: colorYellow}
+		if item.isDir {
+			return makeCell(rn, colorDarkGray, colorYellow, false)
+		}
+		return makeCell(rn, colorNavy, colorYellow, false)
+	}
+	if marked {
+		return makeCell(rn, colorYellow, bg, true)
 	}
 	if item.isDir {
-		return Cell{R: rn, FG: colorWhite, BG: bg}
+		return makeCell(rn, colorWhite, bg, false)
 	}
-	return Cell{R: rn, FG: colorCyan, BG: bg}
+	if item.isExec {
+		return makeCell(rn, colorGreen, bg, false)
+	}
+	return makeCell(rn, colorCyan, bg, false)
 }
 
-// HandleKey handles Up/Down navigation and Enter to open files or enter directories.
-func (w *FilePaneWidget) HandleKey(msg tea.KeyMsg) tea.Cmd {
-	if w == nil {
-		return nil
+func (w *FilePaneWidget) itemsPerCol() int {
+	h := w.Height - 2
+	if h < 1 {
+		h = 10
 	}
-	switch msg.Type {
-	case tea.KeyUp:
+	return h
+}
+
+// ActivateSelected steps into the selected directory (focusing the previous child
+// directory name when ascending via "..") or invokes OnOpenFile for regular files.
+func (w *FilePaneWidget) ActivateSelected() bool {
+	if w == nil {
+		return false
+	}
+	item, ok := w.SelectedItem()
+	if !ok {
+		return false
+	}
+	if item.isDir {
+		if item.name == ".." {
+			prevBase := filepath.Base(w.dir)
+			target := filepath.Dir(w.dir)
+			_ = w.LoadDirFocus(target, prevBase)
+		} else {
+			target := filepath.Join(w.dir, item.name)
+			_ = w.LoadDirFocus(target, "")
+		}
+		return true
+	}
+	if w.OnOpenFile != nil {
+		w.OnOpenFile(filepath.Join(w.dir, item.name))
+		return true
+	}
+	return false
+}
+
+// HandleEvent processes canonical x/input.Event navigation and actions.
+func (w *FilePaneWidget) HandleEvent(e input.Event) bool {
+	if w == nil {
+		return false
+	}
+	var ev input.KeyPressEvent
+	switch k := e.(type) {
+	case input.KeyPressEvent:
+		ev = k
+	case *input.KeyPressEvent:
+		if k == nil {
+			return false
+		}
+		ev = *k
+	default:
+		return false
+	}
+
+	switch ev.String() {
+	case "up":
 		if w.selectedIdx > 0 {
 			w.selectedIdx--
 		}
-	case tea.KeyDown:
+		return true
+	case "down":
 		if w.selectedIdx < len(w.items)-1 {
 			w.selectedIdx++
 		}
-	case tea.KeyEnter, tea.KeyRight:
-		if item, ok := w.SelectedItem(); ok {
-			if item.isDir {
-				var target string
-				if item.name == ".." {
-					target = filepath.Dir(w.dir)
-				} else {
-					target = filepath.Join(w.dir, item.name)
-				}
-				_ = w.LoadDir(target)
-			} else if w.OnOpenFile != nil {
-				w.OnOpenFile(filepath.Join(w.dir, item.name))
+		return true
+	case "left":
+		step := w.itemsPerCol()
+		if w.selectedIdx-step >= 0 {
+			w.selectedIdx -= step
+		} else {
+			w.selectedIdx = 0
+		}
+		return true
+	case "right":
+		step := w.itemsPerCol()
+		if len(w.items) > 0 {
+			if w.selectedIdx+step < len(w.items) {
+				w.selectedIdx += step
+			} else {
+				w.selectedIdx = len(w.items) - 1
 			}
 		}
-	case tea.KeyLeft, tea.KeyBackspace:
+		return true
+	case "pgup":
+		step := w.itemsPerCol() * 2
+		if w.selectedIdx-step >= 0 {
+			w.selectedIdx -= step
+		} else {
+			w.selectedIdx = 0
+		}
+		return true
+	case "pgdown":
+		step := w.itemsPerCol() * 2
+		if len(w.items) > 0 {
+			if w.selectedIdx+step < len(w.items) {
+				w.selectedIdx += step
+			} else {
+				w.selectedIdx = len(w.items) - 1
+			}
+		}
+		return true
+	case "home":
+		w.selectedIdx = 0
+		return true
+	case "end":
+		if len(w.items) > 0 {
+			w.selectedIdx = len(w.items) - 1
+		}
+		return true
+	case "insert":
+		w.MarkToggle(w.selectedIdx)
+		if w.selectedIdx+1 < len(w.items) {
+			w.selectedIdx++
+		}
+		return true
+	case "enter":
+		return w.ActivateSelected()
+	case "backspace":
 		if w.dir != "" {
-			_ = w.LoadDir(filepath.Dir(w.dir))
+			prevBase := filepath.Base(w.dir)
+			_ = w.LoadDirFocus(filepath.Dir(w.dir), prevBase)
+			return true
 		}
 	}
-	return nil
+	return false
 }
 
-func (w *FilePaneWidget) HandleMouse(msg tea.MouseMsg) tea.Cmd { return nil }
-
 var _ Widget = (*FilePaneWidget)(nil)
-var _ InputWidget = (*FilePaneWidget)(nil)
 
 // DualPaneWidget owns two FilePaneWidgets and routes keyboard input to the active one.
 type DualPaneWidget struct {
@@ -412,6 +719,7 @@ type DualPaneWidget struct {
 	Y      int
 
 	activePane int // 0=left, 1=right
+	ctx        RenderContext
 }
 
 func NewDualPaneWidget() *DualPaneWidget {
@@ -450,10 +758,7 @@ func (w *DualPaneWidget) Layout(r Rect) {
 	if w.Right == nil {
 		w.Right = NewFilePaneWidget("")
 	}
-	leftW := w.Width / 2
-	if leftW < 0 {
-		leftW = 0
-	}
+	leftW := 0
 	if w.Width > 0 {
 		leftW = (w.Width - 1) / 2
 	}
@@ -481,20 +786,28 @@ func (w *DualPaneWidget) Layout(r Rect) {
 	}
 }
 
-func (w *DualPaneWidget) Render() CellBuf {
+func (w *DualPaneWidget) Render(r Rect, ctx RenderContext) (CellBuf, CursorPos) {
+	if r.W > 0 || r.H > 0 {
+		w.Layout(r)
+	}
+	w.ctx = ctx
+	return w.RenderBuf(), CursorPos{Visible: false}
+}
+
+func (w *DualPaneWidget) RenderBuf() CellBuf {
 	buf := NewCellBuf(w.Width, w.Height)
 	if w == nil || w.Width <= 0 || w.Height <= 0 {
 		return buf
 	}
-	buf.Fill(Rect{X: 0, Y: 0, W: w.Width, H: w.Height}, Cell{BG: colorBlue})
+	buf.Fill(Rect{X: 0, Y: 0, W: w.Width, H: w.Height}, makeCell(' ', colorWhite, colorBlue, false))
 	if w.Left != nil {
-		leftBuf := w.Left.Render()
+		leftBuf := w.Left.RenderBuf()
 		if leftBuf.Width > 0 && leftBuf.Height > 0 {
 			buf.Blit(leftBuf, w.Left.X-w.X, w.Left.Y-w.Y)
 		}
 	}
 	if w.Right != nil {
-		rightBuf := w.Right.Render()
+		rightBuf := w.Right.RenderBuf()
 		if rightBuf.Width > 0 && rightBuf.Height > 0 {
 			buf.Blit(rightBuf, w.Right.X-w.X, w.Right.Y-w.Y)
 		}
@@ -510,37 +823,48 @@ func (w *DualPaneWidget) Render() CellBuf {
 		if dividerX >= 0 && dividerX < w.Width {
 			for y := 0; y < w.Height; y++ {
 				if dividerX-1 >= 0 {
-					buf.Set(dividerX-1, y, Cell{R: ' ', FG: colorWhite, BG: colorBlue})
+					buf.Set(dividerX-1, y, makeCell(' ', colorWhite, colorBlue, false))
 				}
 				if dividerX+1 < w.Width {
-					buf.Set(dividerX+1, y, Cell{R: ' ', FG: colorWhite, BG: colorBlue})
+					buf.Set(dividerX+1, y, makeCell(' ', colorWhite, colorBlue, false))
 				}
-				buf.Set(dividerX, y, Cell{R: '│', FG: colorGray, BG: colorBlue})
+				buf.Set(dividerX, y, makeCell('│', colorGray, colorBlue, false))
 			}
 		}
 	}
 	return buf
 }
 
-// HandleKey routes Tab to toggle the active pane; all other keys go to the active child.
-func (w *DualPaneWidget) HandleKey(msg tea.KeyMsg) tea.Cmd {
+// HandleEvent routes Tab to toggle the active pane; all other events go to the active child.
+func (w *DualPaneWidget) HandleEvent(e input.Event) bool {
 	if w == nil {
-		return nil
+		return false
 	}
-	if msg.String() == "tab" {
+	var ev input.KeyPressEvent
+	switch k := e.(type) {
+	case input.KeyPressEvent:
+		ev = k
+	case *input.KeyPressEvent:
+		if k == nil {
+			return false
+		}
+		ev = *k
+	default:
+		return false
+	}
+
+	if ev.String() == "tab" {
 		w.ToggleActivePane()
-		return nil
+		return true
 	}
 	if w.activePane == 0 && w.Left != nil {
-		return w.Left.HandleKey(msg)
+		return w.Left.HandleEvent(ev)
 	}
 	if w.Right != nil {
-		return w.Right.HandleKey(msg)
+		return w.Right.HandleEvent(ev)
 	}
-	return nil
+	return false
 }
-
-func (w *DualPaneWidget) HandleMouse(msg tea.MouseMsg) tea.Cmd { return nil }
 
 func (w *DualPaneWidget) ActivePaneIndex() int {
 	if w == nil {
@@ -569,7 +893,6 @@ func (w *DualPaneWidget) ToggleActivePane() {
 	w.SetActivePane(1 - w.activePane)
 }
 
-// SetActivePaneBridge is kept as a compatibility shim for the app-level router.
 func (w *DualPaneWidget) SetActivePaneBridge(idx int) {
 	w.SetActivePane(idx)
 }
@@ -616,41 +939,24 @@ func (w *DualPaneWidget) LoadDirForPane(p pane, path string, focusName string) {
 	if w == nil {
 		return
 	}
-	path = filepath.Clean(path)
 	filePane := w.PaneFor(p)
 	if filePane == nil {
 		return
 	}
+	_ = filePane.LoadDirFocus(path, focusName)
+}
 
-	entries, _ := os.ReadDir(path)
-	items := make([]fileItem, 0, len(entries)+1)
-	if filepath.Dir(path) != path {
-		items = append(items, fileItem{name: "..", isDir: true})
+// RefreshBoth reloads both Left and Right panes from disk, preserving their current selection names.
+func (w *DualPaneWidget) RefreshBoth() {
+	if w == nil {
+		return
 	}
-	for _, e := range entries {
-		items = append(items, fileItem{name: e.Name(), isDir: e.IsDir()})
+	if w.Left != nil {
+		_ = w.Left.Refresh()
 	}
-	sort.Slice(items, func(i, j int) bool {
-		ii, jj := items[i], items[j]
-		if ii.name == ".." {
-			return true
-		}
-		if jj.name == ".." {
-			return false
-		}
-		if ii.isDir != jj.isDir {
-			return ii.isDir
-		}
-		return strings.ToLower(ii.name) < strings.ToLower(jj.name)
-	})
-
-	filePane.SetDir(path)
-	filePane.SetItems(items)
-	filePane.Select(0)
-	if focusName != "" {
-		filePane.SelectByName(focusName)
+	if w.Right != nil {
+		_ = w.Right.Refresh()
 	}
-	filePane.Title = dirTitleName(path)
 }
 
 func (w *DualPaneWidget) MoveCursorHorizontal(dir int, height int) {
@@ -658,12 +964,12 @@ func (w *DualPaneWidget) MoveCursorHorizontal(dir int, height int) {
 		return
 	}
 	filePane := w.ActivePane()
-	if filePane == nil {
+	if filePane == nil || len(filePane.Items()) == 0 {
 		return
 	}
-	itemsPerCol := height - 7
+	itemsPerCol := height - 2
 	if itemsPerCol <= 0 {
-		return
+		itemsPerCol = 1
 	}
 	newIdx := filePane.SelectedIndex() + (dir * itemsPerCol)
 	if newIdx < 0 {
@@ -722,24 +1028,19 @@ func (w *DualPaneWidget) ActiveSelectedItem() (fileItem, bool) {
 }
 
 var _ Widget = (*DualPaneWidget)(nil)
-var _ InputWidget = (*DualPaneWidget)(nil)
 
 // dirTitleName returns a display title for a directory path.
 func dirTitleName(path string) string {
 	path = filepath.Clean(path)
 	trimmed := strings.TrimRight(path, "/\\")
 	if trimmed == "" || trimmed == "." {
-		// Handle root or relative current
 		if path == "" || path == "." {
 			return " . "
 		}
 		return " / "
 	}
-	// On Windows, filepath.Clean("C:\\") is "C:\\"
-	// filepath.Base("C:\\") is "\"
 	base := filepath.Base(path)
 	if base == "\\" || base == "/" {
-		// If it's a root, show the whole thing or just the drive
 		return " " + path + " "
 	}
 	return " " + base + " "
