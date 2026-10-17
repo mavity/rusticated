@@ -135,3 +135,82 @@ func TestGitBuiltinAddAndCommit(t *testing.T) {
 		t.Fatalf("git commit result = (exit %d, %q)", commitRecord.ExitCode, commitRecord.Output)
 	}
 }
+
+func TestGitBuiltinDiffLogBranchCheckout(t *testing.T) {
+	root := t.TempDir()
+	repo, err := git.PlainInit(root, false)
+	if err != nil {
+		t.Fatalf("initialize repository: %v", err)
+	}
+	cfg, err := repo.Config()
+	if err != nil {
+		t.Fatalf("read repository config: %v", err)
+	}
+	cfg.User.Name = "Kabibi Test"
+	cfg.User.Email = "author@example.test"
+	if err := repo.Storer.SetConfig(cfg); err != nil {
+		t.Fatalf("configure repository identity: %v", err)
+	}
+
+	testFile := filepath.Join(root, "file.txt")
+	if err := os.WriteFile(testFile, []byte("line1\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	session, err := NewExecutionSession(root)
+	if err != nil {
+		t.Fatalf("create execution session: %v", err)
+	}
+
+	// 1. Stage and commit first commit
+	if _, err := session.RunCommand(context.Background(), "git add file.txt", nil, SourceUserShell, nil); err != nil {
+		t.Fatalf("git add: %v", err)
+	}
+	if _, err := session.RunCommand(context.Background(), "git commit -m 'initial commit'", nil, SourceUserShell, nil); err != nil {
+		t.Fatalf("git commit: %v", err)
+	}
+
+	// 2. Modify file and test git diff
+	if err := os.WriteFile(testFile, []byte("line1\nline2\n"), 0o644); err != nil {
+		t.Fatalf("modify file: %v", err)
+	}
+	diffRecord, err := session.RunCommand(context.Background(), "git diff", nil, SourceUserShell, nil)
+	if err != nil {
+		t.Fatalf("git diff error: %v", err)
+	}
+	if diffRecord.ExitCode != 0 {
+		t.Fatalf("git diff exit code = %d, output: %q", diffRecord.ExitCode, diffRecord.Output)
+	}
+	if !strings.Contains(diffRecord.Output, "+line2") {
+		t.Fatalf("git diff expected to contain '+line2', got: %q", diffRecord.Output)
+	}
+
+	// 3. Test git log
+	logRecord, err := session.RunCommand(context.Background(), "git log --oneline", nil, SourceUserShell, nil)
+	if err != nil {
+		t.Fatalf("git log error: %v", err)
+	}
+	if logRecord.ExitCode != 0 {
+		t.Fatalf("git log exit code = %d, output: %q", logRecord.ExitCode, logRecord.Output)
+	}
+	if !strings.Contains(logRecord.Output, "initial commit") {
+		t.Fatalf("git log expected to contain 'initial commit', got: %q", logRecord.Output)
+	}
+
+	// 4. Test git branch and checkout -b
+	branchRecord, err := session.RunCommand(context.Background(), "git checkout -b feature-test", nil, SourceUserShell, nil)
+	if err != nil {
+		t.Fatalf("git checkout -b error: %v", err)
+	}
+	if branchRecord.ExitCode != 0 {
+		t.Fatalf("git checkout -b exit code = %d, output: %q", branchRecord.ExitCode, branchRecord.Output)
+	}
+
+	branchesRecord, err := session.RunCommand(context.Background(), "git branch", nil, SourceUserShell, nil)
+	if err != nil {
+		t.Fatalf("git branch error: %v", err)
+	}
+	if !strings.Contains(branchesRecord.Output, "feature-test") {
+		t.Fatalf("git branch output expected to contain 'feature-test', got: %q", branchesRecord.Output)
+	}
+}

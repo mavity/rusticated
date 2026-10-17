@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
+	"github.com/adrianliechti/go-git"
 	"github.com/mavity/rusticated/kabibi/gitcore"
 	"mvdan.cc/sh/v3/interp"
 )
@@ -52,9 +55,56 @@ func runGitBuiltin(ctx context.Context, args []string) error {
 	case "commit":
 		return runGitCommit(ctx, hc, args[1:])
 	default:
-		fmt.Fprintf(hc.Stderr, "git: unsupported subcommand %q\n", args[0])
-		return interp.ExitStatus(2)
+		return runGoGit(ctx, hc, args)
 	}
+}
+
+func runGoGit(ctx context.Context, hc interp.HandlerContext, args []string) error {
+	repo, err := gitcore.Open(hc.Dir)
+	if err != nil {
+		fmt.Fprintf(hc.Stderr, "git %s: %v\n", args[0], err)
+		return interp.ExitStatus(128)
+	}
+
+	repoRoot := repo.Root()
+	relDir, err := filepath.Rel(repoRoot, hc.Dir)
+	if err != nil {
+		relDir = "."
+	}
+	relDirSlash := "/" + filepath.ToSlash(relDir)
+	if relDir == "." || relDir == "" {
+		relDirSlash = "/"
+	}
+
+	execSess, _ := execSessionFromContext(ctx)
+	env := map[string]string{}
+	for _, kv := range os.Environ() {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			env[k] = v
+		}
+	}
+	if execSess != nil {
+		for k, v := range execSess.EnvMap() {
+			env[k] = v
+		}
+	}
+
+	code, runErr := git.Run(ctx, git.Options{
+		Args:   args,
+		Dir:    relDirSlash,
+		Env:    env,
+		Stdin:  hc.Stdin,
+		Stdout: hc.Stdout,
+		Stderr: hc.Stderr,
+		FS:     newOSFS(repoRoot),
+	})
+	if runErr != nil {
+		return runErr
+	}
+	if code != 0 {
+		return interp.ExitStatus(uint8(code))
+	}
+	return nil
 }
 
 func writeGitHelp(hc interp.HandlerContext) {
@@ -62,19 +112,38 @@ func writeGitHelp(hc interp.HandlerContext) {
 
 Usage:
   git --version
+  git --help
   git status [-s|--short|--porcelain]
   git add [-A|--all] <path...>
   git commit [-a|--all] -m <message> [--amend]
-  git commit -am <message>
+  git diff [--cached|--staged] [--stat] [<commit>...] [-- <path...>]
+  git log [-n <N>] [--oneline] [--stat] [<revision>...] [-- <path...>]
+  git branch [-a] [-d <name>] [<name>]
+  git checkout [-b <name>] <branch|commit|path...>
+  git switch [-c <name>] <branch>
+  git restore [--staged] <path...>
+  git reset [--soft|--mixed|--hard] [<commit>]
+  git merge <branch>
+  git stash [push|pop|list|drop]
+  git tag [-d <name>] [<name>]
+  git show [<object>]
 
 Commands:
   --version               Show the go-git library version
   status                  Show repository status
   add                     Stage the specified paths
-  add -A, --all           Stage all changes in the working tree
   commit                  Create a commit from staged changes
-  commit -a, --all        Include tracked changes in the commit
-  commit --amend          Replace the current commit (with -m)
+  diff                    Show changes between commits, commit and working tree, etc
+  log                     Show commit logs
+  branch                  List, create, or delete branches
+  checkout                Switch branches or restore working tree files
+  switch                  Switch branches
+  restore                 Restore working tree files
+  reset                   Reset current HEAD to the specified state
+  merge                   Join two or more development histories together
+  stash                   Stash changes in a dirty working directory
+  tag                     Create, list, or delete tags
+  show                    Show various types of objects
 
 Unsupported commands and options return an error; host Git is not invoked.`)
 }
