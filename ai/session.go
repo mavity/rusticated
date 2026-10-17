@@ -219,6 +219,8 @@ func reflectFieldTypeSchema(t reflect.Type) map[string]any {
 		return map[string]any{"type": "number"}
 	case reflect.Slice:
 		return map[string]any{"type": "array", "items": reflectFieldTypeSchema(t.Elem())}
+	case reflect.Map:
+		return map[string]any{"type": "object"}
 	case reflect.Struct:
 		desc, props, req := reflectStructSchema(t)
 		schema := map[string]any{

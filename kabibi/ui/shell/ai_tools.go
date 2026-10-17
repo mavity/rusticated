@@ -14,12 +14,13 @@ func truncateToolOutput(s string) string {
 }
 
 // BuildKabibiTools assembles Kabibi's AI tool registry from its file, exec,
-// shell-context, and Git tool buckets.
+// browser, shell-context, and Git tool buckets.
 func BuildKabibiTools(execSess *ExecutionSession) map[string]ai.Tool {
-	tools := make(map[string]ai.Tool, 8)
+	tools := make(map[string]ai.Tool, 16)
 	registerExecTools(tools, execSess)
 	registerFileTools(tools, execSess)
 	registerShellContextTools(tools, execSess)
 	registerGitTools(tools, execSess)
+	registerBrowserTools(tools, execSess)
 	return tools
 }

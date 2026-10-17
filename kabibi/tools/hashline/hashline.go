@@ -144,6 +144,11 @@ func ComputeLineHash(line string) string {
 	return fmt.Sprintf("%02x", xxHash64(buf)&0xFF)
 }
 
+// XXHash64String computes the 64-bit xxHash (seed 0) of a string.
+func XXHash64String(s string) uint64 {
+	return xxHash64([]byte(s))
+}
+
 // ComputeFileTag returns a 4-hex-char snapshot tag ("%04x") for raw file bytes.
 func ComputeFileTag(raw []byte) string {
 	return fmt.Sprintf("%04x", xxHash64(raw)&0xFFFF)
