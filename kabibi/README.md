@@ -53,3 +53,11 @@ For tests:
 `go -C kabibi test -v`
 
 -v stands for verbose to see test details.
+
+## Command-line usage
+
+* `kabibi --help` or `kabibi help` prints the command-line help.
+* `kabibi -c "command"` / `kabibi --command "command"` executes a shell command or AI prompt and exits.
+* `kabibi -p "prompt"` / `kabibi --prompt "prompt"` runs a one-shot prompt and exits.
+* `kabibi --edit <file>` or `kabibi edit <file>` opens the full-screen editor; Escape saves changes and exits Kabibi.
+* A single existing positional file is executed as a shell script. Other positional words are joined with spaces and sent directly to AI with the CLI help included in system context.

@@ -26,9 +26,9 @@ const defaultPanelGapRows = 5
 type AppWidget struct {
 	mu sync.Mutex
 
-	sh              *shell.Shell
-	panels          *filemanager.DualPaneWidget
-	panelsVisible   bool
+	sh                *shell.Shell
+	panels            *filemanager.DualPaneWidget
+	panelsVisible     bool
 	fullScreenClaimed bool
 
 	dialog *dialog.DialogWidget
@@ -173,6 +173,36 @@ func (w *AppWidget) Editor() *editor.EditorWidget {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.editor
+}
+
+// OpenEditor opens path in the full-screen editor. When exitOnClose is true,
+// Escape saves pending edits and invokes the app's exit handler after closing.
+func (w *AppWidget) OpenEditor(path string, exitOnClose bool) error {
+	ed, err := editor.NewEditor(path)
+	if err != nil {
+		return err
+	}
+	ed.SaveOnExit = exitOnClose
+	ed.OnCloseFunc = func() {
+		w.mu.Lock()
+		w.editor = nil
+		onExit := w.onExit
+		w.mu.Unlock()
+		if dir := filepath.Dir(path); w.panels != nil {
+			if active := w.panels.ActivePane(); active != nil && filepath.Clean(active.Dir()) == filepath.Clean(dir) {
+				_ = active.Refresh()
+			}
+		}
+		w.invalidate()
+		if exitOnClose && onExit != nil {
+			onExit()
+		}
+	}
+	w.mu.Lock()
+	w.editor = ed
+	w.mu.Unlock()
+	w.invalidate()
+	return nil
 }
 
 // SetExitHandler binds or updates the exit callback post-construction.
@@ -779,19 +809,5 @@ func (w *AppWidget) openEditorOnSelected() {
 		return
 	}
 	fullPath := filepath.Join(active.Dir(), item.Name())
-	ed, err := editor.NewEditor(fullPath)
-	if err != nil {
-		return
-	}
-	ed.OnCloseFunc = func() {
-		w.mu.Lock()
-		w.editor = nil
-		w.mu.Unlock()
-		_ = active.Refresh()
-		w.invalidate()
-	}
-	w.mu.Lock()
-	w.editor = ed
-	w.mu.Unlock()
-	w.invalidate()
+	_ = w.OpenEditor(fullPath, false)
 }
