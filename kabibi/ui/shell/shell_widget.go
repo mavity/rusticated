@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -32,10 +33,16 @@ var stackSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦
 
 // formatStartupBanner constructs the pompous retro diagnostic startup banner block.
 func formatStartupBanner(sessionErr error) string {
+	ver := "unknown"
+	if info, ok := debug.ReadBuildInfo(); ok {
+		ver = info.Main.Version
+	}
+
 	lines := []string{
-		"KABIBI // RUSTICATED COMPUTING SUPERVISOR v1.0",
-		"64K CELL MATRIX OK • MVDAN/SH + LITERT-LM NEURAL CO-PROCESSOR READY",
-		"Kabibi shell initialized. Type commands below.",
+		"🐚 K A B I B I : wearable all-weather shell",
+		"   v" + ver,
+		"",
+		"Preliminary version: be careful.",
 	}
 	if sessionErr != nil {
 		lines = append(lines, "Shell initialization failed: "+sessionErr.Error())
