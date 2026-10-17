@@ -2,9 +2,28 @@ package main
 
 import (
 	"bytes"
+	"os/exec"
 	"strings"
 	"testing"
 )
+
+func TestExecutableDoesNotImportCharmUIStack(t *testing.T) {
+	cmd := exec.Command("go", "list", "-deps", ".")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("go list -deps .: %v\n%s", err, output)
+	}
+
+	for _, dependency := range strings.Fields(string(output)) {
+		switch dependency {
+		case "github.com/charmbracelet/bubbletea",
+			"github.com/charmbracelet/bubbles",
+			"github.com/charmbracelet/glamour",
+			"github.com/charmbracelet/lipgloss":
+			t.Errorf("executable still imports Charm UI dependency %q", dependency)
+		}
+	}
+}
 
 func TestParseCLIHelpFormsMatch(t *testing.T) {
 	var flagHelp, positionalHelp bytes.Buffer

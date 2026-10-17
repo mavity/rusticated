@@ -1,8 +1,12 @@
 # kabibi: Dual-Pane File Manager & AI Chat
 
-## Current Architecture & Implementation
+## Current Architecture
 
-kabibi is a terminal-based dual-pane file manager and AI chat application written in Go, powered by the ubbletea framework. 
+Kabibi's interactive UI runs through `ui.Host`, `terminal.CellBuf`, and the native widgets in `ui/app` and `ui/shell`. It does not use Bubble Tea, Bubbles, Lipgloss, or Glamour. The legacy chat, markdown, and in-repository LiteRT FFI implementation has been removed; historical notes later in this README are not descriptions of the current executable.
+
+## Retired Architecture (Historical)
+
+Kabibi is a terminal-based dual-pane file manager and AI chat application written in Go. Its interactive UI uses the native CellBuf/Host architecture, without Bubble Tea or Lipgloss.
 
 ### 1. Dual-Pane File Manager
 *   **Panels**: Implements classic Left/Right directory viewing panels. 
