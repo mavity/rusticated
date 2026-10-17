@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -119,6 +120,17 @@ type ExecutionSession struct {
 	activePTY pty.PTY
 	ptyCols   int
 	ptyRows   int
+
+	bgMu       sync.Mutex
+	bgProcs    map[int]*ManagedPTY
+	nextProcID int
+	uiSink     AICommandUISink
+}
+
+// AICommandUISink allows the Shell widget to display live `SourceAITool` blocks
+// (rendered with the `W - 2` left gutter stripe) when the AI executes commands.
+type AICommandUISink interface {
+	OnAICommandStart(command string, cwd string) (onChunk func([]byte), onFinish func(exitCode int, elapsed time.Duration))
 }
 
 // NewExecutionSession creates a new persistent shell execution session rooted at dir.
@@ -131,6 +143,8 @@ func NewExecutionSession(dir string) (*ExecutionSession, error) {
 		nextRecordID: 1,
 		ptyCols:      80,
 		ptyRows:      24,
+		bgProcs:      make(map[int]*ManagedPTY),
+		nextProcID:   1,
 	}
 	r, err := createRunnerForSession(context.Background(), es, ttyIn, dw, dw, dir, nil, nil)
 	if err != nil {
@@ -551,3 +565,298 @@ func (es *ExecutionSession) LastAITurnCommandID() int {
 	defer es.mu.Unlock()
 	return es.lastAITurnCommandID
 }
+
+// SetAICommandUISink attaches a UI sink for live SourceAITool command blocks.
+func (es *ExecutionSession) SetAICommandUISink(sink AICommandUISink) {
+	if es == nil {
+		return
+	}
+	es.bgMu.Lock()
+	es.uiSink = sink
+	es.bgMu.Unlock()
+}
+
+// LookupManagedPTY looks up a managed PTY process by its 1-based ID.
+func (es *ExecutionSession) LookupManagedPTY(id int) (*ManagedPTY, bool) {
+	if es == nil {
+		return nil, false
+	}
+	es.bgMu.Lock()
+	defer es.bgMu.Unlock()
+	m, ok := es.bgProcs[id]
+	return m, ok
+}
+
+// RegisterManagedPTY registers a ManagedPTY in the session's background process table.
+func (es *ExecutionSession) RegisterManagedPTY(m *ManagedPTY) int {
+	es.bgMu.Lock()
+	defer es.bgMu.Unlock()
+	if es.bgProcs == nil {
+		es.bgProcs = make(map[int]*ManagedPTY)
+	}
+	if es.nextProcID <= 0 {
+		es.nextProcID = 1
+	}
+	m.ID = es.nextProcID
+	es.nextProcID++
+	es.bgProcs[m.ID] = m
+	return m.ID
+}
+
+// ExecuteAIToolCommand runs a command for the AI's `exec` tool with `Cols: max(20, termWidth - 2)`,
+// live UI streaming into a `SourceAITool` CommandBlock, and automatic timeout promotion into `bgProcs`.
+func (es *ExecutionSession) ExecuteAIToolCommand(
+	ctx context.Context,
+	command string,
+	timeoutSec int,
+	keepANSI bool,
+) (formatted string, procID int, stillRunning bool, exitCode int, err error) {
+	if timeoutSec <= 0 {
+		timeoutSec = 15
+	}
+	cwd := es.Dir()
+	termCols, termRows := es.PTYSize()
+	ptyCols := termCols - 2
+	if ptyCols < 20 {
+		ptyCols = 20
+	}
+	if termRows <= 0 {
+		termRows = 24
+	}
+
+	es.bgMu.Lock()
+	sink := es.uiSink
+	es.bgMu.Unlock()
+
+	var uiOnChunk func([]byte)
+	var uiOnFinish func(int, time.Duration)
+	if sink != nil {
+		uiOnChunk, uiOnFinish = sink.OnAICommandStart(command, cwd)
+	}
+
+	startedAt := time.Now()
+	m := &ManagedPTY{
+		Command:   command,
+		Cwd:       cwd,
+		Cols:      ptyCols,
+		Rows:      termRows,
+		StartedAt: startedAt,
+		notifyCh:  make(chan struct{}),
+		doneCh:    make(chan struct{}),
+		onChunk:   uiOnChunk,
+	}
+	procID = es.RegisterManagedPTY(m)
+
+	m.onFinish = func(code int, elapsed time.Duration) {
+		m.mu.Lock()
+		rawOut := m.rawBuf.String()
+		m.mu.Unlock()
+		es.appendRecord(BlockCommand, SourceAITool, command, es.Dir(), rawOut, code, startedAt)
+		if uiOnFinish != nil {
+			uiOnFinish(code, elapsed)
+		}
+	}
+
+	go es.runManagedExecution(m, command, cwd, ptyCols, termRows)
+
+	timeoutDur := time.Duration(timeoutSec) * time.Second
+	timer := time.NewTimer(timeoutDur)
+	defer timer.Stop()
+
+	select {
+	case <-m.doneCh:
+		outText, _, code, elapsed := m.Snapshot(false, keepANSI)
+		finalCwd := es.Dir()
+		footer := fmt.Sprintf("[exit: %d | elapsed: %.3fs | cwd: %s]", code, elapsed.Seconds(), filepath.ToSlash(finalCwd))
+		if outText != "" {
+			formatted = outText + "\n" + footer
+		} else {
+			formatted = footer
+		}
+		return formatted, procID, false, code, nil
+
+	case <-timer.C:
+		outText, exited, code, elapsed := m.Snapshot(false, keepANSI)
+		if exited {
+			finalCwd := es.Dir()
+			footer := fmt.Sprintf("[exit: %d | elapsed: %.3fs | cwd: %s]", code, elapsed.Seconds(), filepath.ToSlash(finalCwd))
+			if outText != "" {
+				formatted = outText + "\n" + footer
+			} else {
+				formatted = footer
+			}
+			return formatted, procID, false, code, nil
+		}
+		footer := fmt.Sprintf("[status: STILL RUNNING (pid_id: %d) after %.3fs | use term_read, term_input, or term_kill with id=%d]",
+			procID, elapsed.Seconds(), procID)
+		if outText != "" {
+			formatted = outText + "\n" + footer
+		} else {
+			formatted = footer
+		}
+		return formatted, procID, true, 0, nil
+
+	case <-ctx.Done():
+		_ = m.Kill("SIGTERM")
+		return "", procID, false, 130, ctx.Err()
+	}
+}
+
+func (es *ExecutionSession) runManagedExecution(m *ManagedPTY, command string, cwd string, ptyCols, ptyRows int) {
+	es.runMu.Lock()
+	prevCols, prevRows := es.PTYSize()
+	es.ResizePTY(ptyCols, ptyRows)
+
+	parser := syntax.NewParser()
+	parsed, parseErr := parser.Parse(strings.NewReader(command), "")
+	if parseErr != nil {
+		es.ResizePTY(prevCols, prevRows)
+		es.runMu.Unlock()
+		m.appendOutput([]byte(parseErr.Error() + "\n"))
+		m.markExited(2, parseErr)
+		return
+	}
+
+	if cmd, ok := es.tryBuildDirectPTYCommandLocked(parsed, cwd); ok {
+		es.ResizePTY(prevCols, prevRows)
+		es.runMu.Unlock()
+		if es.runDirectCommandInPTY(m, cmd, ptyCols, ptyRows) {
+			return
+		}
+		es.runMu.Lock()
+		es.ResizePTY(ptyCols, ptyRows)
+	}
+
+	runCtx := withExecSession(context.Background(), es, SourceAITool)
+	es.streamOut.setTarget(func(p []byte) {
+		m.appendOutput(p)
+	})
+
+	runErr := es.runner.Run(runCtx, parsed)
+	es.streamOut.setTarget(nil)
+	es.ResizePTY(prevCols, prevRows)
+	es.runMu.Unlock()
+
+	code := 0
+	if runErr != nil {
+		if status, ok := interp.IsExitStatus(runErr); ok {
+			code = int(status)
+		} else {
+			code = 1
+			errLine := fmt.Sprintf("%v\n", runErr)
+			m.appendOutput([]byte(errLine))
+		}
+	}
+	m.markExited(code, runErr)
+}
+
+func (es *ExecutionSession) tryBuildDirectPTYCommandLocked(parsed *syntax.File, cwd string) (*exec.Cmd, bool) {
+	if parsed == nil || len(parsed.Stmts) != 1 {
+		return nil, false
+	}
+	st := parsed.Stmts[0]
+	if st.Negated || st.Background || len(st.Redirs) > 0 {
+		return nil, false
+	}
+	call, ok := st.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Assigns) > 0 || len(call.Args) == 0 {
+		return nil, false
+	}
+	var litArgs []string
+	for _, w := range call.Args {
+		lit := w.Lit()
+		if lit == "" {
+			return nil, false
+		}
+		litArgs = append(litArgs, lit)
+	}
+	head := litArgs[0]
+	if interp.IsBuiltin(head) || isNestedShellBuiltinName(head) {
+		return nil, false
+	}
+	if es.runner != nil && es.runner.Funcs != nil {
+		if _, ok := es.runner.Funcs[head]; ok {
+			return nil, false
+		}
+	}
+	switch head {
+	case "base64", "cat", "chmod", "cp", "find", "gunzip", "gzcat", "gzip",
+		"ls", "mkdir", "mktemp", "mv", "rm", "shasum", "tar", "touch", "xargs":
+		return nil, false
+	}
+	if strings.HasSuffix(strings.ToLower(head), ".sh") {
+		return nil, false
+	}
+
+	envMap := es.envMapLocked()
+	resolved, ok := resolvePlatformExecutable(head, cwd, envMap)
+	if !ok {
+		if es.runner != nil && es.runner.Env != nil {
+			if p, err := interp.LookPathDir(cwd, es.runner.Env, head); err == nil {
+				resolved = p
+				ok = true
+			}
+		}
+	}
+	if !ok {
+		return nil, false
+	}
+
+	cmd := exec.Command(resolved, litArgs[1:]...)
+	cmd.Dir = cwd
+	envPairs := make([]string, 0, len(envMap))
+	for k, v := range envMap {
+		envPairs = append(envPairs, k+"="+v)
+	}
+	cmd.Env = envPairs
+	return cmd, true
+}
+
+func (es *ExecutionSession) runDirectCommandInPTY(m *ManagedPTY, cmd *exec.Cmd, cols, rows int) bool {
+	p, err := pty.Start(cmd, pty.Options{
+		Cols: cols,
+		Rows: rows,
+		Term: "xterm-256color",
+	})
+	if err != nil {
+		return false
+	}
+
+	m.mu.Lock()
+	m.ptyHandle = p
+	m.cmd = cmd
+	m.mu.Unlock()
+
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		buf := make([]byte, 4096)
+		for {
+			n, rerr := p.Read(buf)
+			if n > 0 {
+				m.appendOutput(buf[:n])
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}()
+
+	waitErr := p.Wait()
+	_ = p.Close()
+	<-readDone
+
+	code := 0
+	if waitErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(waitErr, &exitErr) {
+			code = exitErr.ExitCode()
+		} else {
+			code = 1
+		}
+	}
+	m.markExited(code, waitErr)
+	return true
+}
+
+

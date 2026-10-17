@@ -120,6 +120,8 @@ type CommandBlock struct {
 	cachedOutLen  int
 	cachedAnim    string
 	cachedKind    BlockKind
+	cachedSource  CommandSource
+	cachedStatus  CommandBlockStatus
 	cachedBuf     terminal.CellBuf
 	cachePopulated bool
 }
