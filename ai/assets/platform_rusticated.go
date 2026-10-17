@@ -16,6 +16,9 @@ import (
 func hostOSArch() (string, string) {
 	pi := syscall.GetPlatformInfo()
 	if pi != nil {
+		if os := osFromName(pi.OSName); os == "browser" {
+			return "browser", "wasm"
+		}
 		if goos, goarch, ok := parseBuildPlatform(pi.BuildPlatform); ok {
 			return goos, goarch
 		}
@@ -40,6 +43,8 @@ func parseBuildPlatform(bp string) (string, string, bool) {
 func osFromName(name string) string {
 	n := strings.ToLower(name)
 	switch {
+	case strings.Contains(n, "browser"):
+		return "browser"
 	case strings.Contains(n, "windows"):
 		return "windows"
 	case strings.Contains(n, "darwin"), strings.Contains(n, "mac"):

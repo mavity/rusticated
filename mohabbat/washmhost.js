@@ -147,6 +147,10 @@ export function resolvePath(baseCwd, target) {
   return '/' + parts.join('/');
 }
 
+// ── Virtual Eval Dylib Handles ──────────────────────────────────────────────
+export const EVAL_LIB_HANDLE = 0xEEEE0001n;
+export const EVAL_SYM_HANDLE = 0xEEEE0002n;
+
 // ── Stat Marshalling (64 bytes little-endian) ────────────────────────────────
 export const STAT_KIND_UNKNOWN = 0;
 export const STAT_KIND_FILE    = 1;
@@ -995,12 +999,17 @@ export function makeBrowserImports(hostState, fs, params = {}) {
 
     // ── Extension & Dynamic Library Hooks ────────────────────────────────────
     dylib_open: (ovPtr, pathPtr, pathLen, flags) => {
-      const libPath = pathStr(pathPtr, pathLen);
+      const raw = decoder.decode(hostState.getGuestSlice(Number(pathPtr), Number(pathLen)));
       const opId = hostState.registerOp(Number(ovPtr));
+      if (raw === 'eval' || raw.endsWith('/eval')) {
+        hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, 0, 0, EVAL_LIB_HANDLE));
+        return;
+      }
       if (!extensions.dylib) {
         hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiENOSYS, 0, 0));
         return;
       }
+      const libPath = pathStr(pathPtr, pathLen);
       Promise.resolve(extensions.dylib.open(libPath, Number(flags))).then((handle) => {
         hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, handle == null ? wasiENOENT : 0, 0, handle || 0));
       }).catch((err) => {
@@ -1011,6 +1020,14 @@ export function makeBrowserImports(hostState, fs, params = {}) {
     dylib_sym: (ovPtr, libHandle, symPtr, symLen) => {
       const sym = decoder.decode(hostState.getGuestSlice(Number(symPtr), Number(symLen)));
       const opId = hostState.registerOp(Number(ovPtr));
+      if (BigInt(libHandle) === EVAL_LIB_HANDLE) {
+        if (sym === 'eval') {
+          hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, 0, 0, EVAL_SYM_HANDLE));
+        } else {
+          hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiENOENT, 0, 0));
+        }
+        return;
+      }
       if (!extensions.dylib || !extensions.dylib.resolveSymbol) {
         hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiENOSYS, 0, 0));
         return;
@@ -1024,17 +1041,87 @@ export function makeBrowserImports(hostState, fs, params = {}) {
 
     dylib_resolve: (libHandle, symPtr, symLen) => {
       const sym = decoder.decode(hostState.getGuestSlice(Number(symPtr), Number(symLen)));
+      if (BigInt(libHandle) === EVAL_LIB_HANDLE) {
+        return sym === 'eval' ? EVAL_SYM_HANDLE : 0;
+      }
       if (!extensions.dylib || !extensions.dylib.resolveSymbol) return 0;
       return extensions.dylib.resolveSymbol(BigInt(libHandle), sym) || 0;
     },
 
-    dylib_call: (ovPtr, symHandle, descPtr, descLen) => {
+    dylib_call: (ovPtr, symHandle, sigPtr, sigLen, argsPtr, argsCount, parentInvID, resultsPtr, resultsCap) => {
       const opId = hostState.registerOp(Number(ovPtr));
+      if (BigInt(symHandle) === EVAL_SYM_HANDLE) {
+        try {
+          const count = Number(argsCount || 0);
+          const base = Number(argsPtr || 0);
+          const view = hostState.view;
+          if (count < 5 || base === 0) {
+            hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiEINVAL, 0, 0));
+            return;
+          }
+          const codePtr = Number(view.getBigUint64(base + 0, true));
+          const codeLen = Number(view.getBigUint64(base + 8, true));
+          const outPtr = Number(view.getBigUint64(base + 16, true));
+          const outCap = Number(view.getBigUint64(base + 24, true));
+          const outLenPtr = Number(view.getBigUint64(base + 32, true));
+
+          const code = decoder.decode(hostState.getGuestSlice(codePtr, codeLen));
+
+          const finishEval = (status, text) => {
+            const rawStr = String(text ?? '');
+            const encoded = encoder.encode(rawStr);
+            if (outLenPtr !== 0) {
+              view.setUint32(outLenPtr, encoded.length, true);
+            }
+            if (outCap > 0 && encoded.length > 0 && outPtr !== 0) {
+              const toCopy = Math.min(outCap, encoded.length);
+              hostState.getGuestSlice(outPtr, toCopy).set(encoded.subarray(0, toCopy));
+            }
+            let rc = BigInt(status);
+            if (encoded.length > outCap) {
+              rc = 2n; // buffer overflow
+              if (typeof globalThis !== 'undefined') {
+                globalThis.__rustica_overflow = rawStr;
+                globalThis.__rustica_take_overflow = () => {
+                  const s = globalThis.__rustica_overflow;
+                  globalThis.__rustica_overflow = '';
+                  return s;
+                };
+              }
+            }
+            if (Number(resultsCap || 0) > 0 && Number(resultsPtr || 0) !== 0) {
+              view.setBigUint64(Number(resultsPtr), rc, true);
+            }
+            hostState.completeOp(Number(ovPtr), opId, 0, 0, rc);
+          };
+
+          let result;
+          try {
+            result = (0, eval)(code);
+          } catch (syncErr) {
+            hostState.enqueue(() => finishEval(1, syncErr?.stack || syncErr?.message || String(syncErr)));
+            return;
+          }
+
+          if (result != null && typeof result.then === 'function') {
+            Promise.resolve(result).then(
+              (val) => hostState.enqueue(() => finishEval(0, val)),
+              (err) => hostState.enqueue(() => finishEval(1, err?.stack || err?.message || String(err)))
+            );
+          } else {
+            hostState.enqueue(() => finishEval(0, result));
+          }
+        } catch (e) {
+          hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, mapErrno(e), 0, 0));
+        }
+        return;
+      }
+
       if (!extensions.dylib || !extensions.dylib.call) {
         hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiENOSYS, 0, 0));
         return;
       }
-      Promise.resolve(extensions.dylib.call(BigInt(symHandle), Number(descPtr), Number(descLen), { hostState, fs })).then((res) => {
+      Promise.resolve(extensions.dylib.call(BigInt(symHandle), Number(sigPtr), Number(sigLen), { hostState, fs, argsPtr, argsCount, parentInvID, resultsPtr, resultsCap })).then((res) => {
         hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, 0, 0, res || 0));
       }).catch((err) => {
         hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, mapErrno(err), 0, 0));
