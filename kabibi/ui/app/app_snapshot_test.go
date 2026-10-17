@@ -8,6 +8,7 @@ import (
 
 	"github.com/charmbracelet/x/input"
 	"github.com/mavity/rusticated/kabibi/ui"
+	"github.com/mavity/rusticated/kabibi/ui/filemanager"
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
 
@@ -17,7 +18,11 @@ func assertAppSnapshot(t *testing.T, snapFile string, widget *AppWidget, scrollb
 	buf, cursor := widget.Render(rect, ui.RenderContext{})
 	if cursor.Visible && cursor.X >= 0 && cursor.X < buf.Width && cursor.Y >= 0 && cursor.Y < buf.Height {
 		cell := buf.Get(cursor.X, cursor.Y)
-		cell.Grapheme = "\u0332" // Combining low line (non-destructive)
+		if cell.Grapheme == "" || cell.Grapheme == " " {
+			cell.Grapheme = "\u0332" // Combining low line on blank cell
+		} else {
+			cell.Grapheme = cell.Grapheme + "\u0332" // Non-destructive underline on existing character
+		}
 		buf.Set(cursor.X, cursor.Y, cell)
 	}
 
@@ -51,6 +56,36 @@ func assertAppSnapshot(t *testing.T, snapFile string, widget *AppWidget, scrollb
 			snapPath, want, got)
 		t.Errorf("payload mismatch for %s (see rendered TTY diff above)", snapPath)
 	}
+}
+
+type deterministicSnapshotFS struct{}
+
+func (deterministicSnapshotFS) ReadDir(path string) ([]filemanager.FSEntry, error) {
+	return []filemanager.FSEntry{
+		{Name: "docs", IsDir: true},
+		{Name: "src", IsDir: true},
+		{Name: "build.sh", IsDir: false, IsExec: true},
+		{Name: "main.go", IsDir: false, IsExec: false},
+		{Name: "README.md", IsDir: false, IsExec: false},
+	}, nil
+}
+
+func newBluePanelsSnapshotWidget(scrollback *string) *AppWidget {
+	w := NewWidget(AppWidgetOptions{
+		WriteToScrollback: func(s string) {
+			if scrollback != nil {
+				*scrollback += s
+			}
+		},
+		FSService: deterministicSnapshotFS{},
+	})
+	w.Shell().SetPrompt("፧")
+	w.SetPanelsVisible(true)
+	_ = w.Panels().Left.LoadDir("/workspace/left")
+	_ = w.Panels().Right.LoadDir("/workspace/right")
+	w.Panels().Left.Title = "left"
+	w.Panels().Right.Title = "right"
+	return w
 }
 
 func newSnapshotWidget(scrollback *string) *AppWidget {
@@ -160,4 +195,56 @@ func TestAppWidget_Snapshot_CursorMovement_W80H24(t *testing.T) {
 	sh.SetInput("hello")
 	sh.SetCursorPos(3)
 	assertAppSnapshot(t, "cursor_left_hello_w80h24.snap", widget, &scrollback, ui.Rect{X: 0, Y: 0, W: 80, H: 24})
+}
+
+// TestAppWidget_Snapshot_BluePanels_Open_W80H24 verifies the dual blue panels
+// HUD over the top 19 rows with the 3-row retro banner + ፧ prompt + 1 blank
+// footer row sitting in the 5-row bottom gap with terminal-default background.
+func TestAppWidget_Snapshot_BluePanels_Open_W80H24(t *testing.T) {
+	var scrollback string
+	widget := newBluePanelsSnapshotWidget(&scrollback)
+	defer widget.Close()
+	assertAppSnapshot(t, "blue_panels_open_w80h24.snap", widget, &scrollback, ui.Rect{X: 0, Y: 0, W: 80, H: 24})
+}
+
+// TestAppWidget_Snapshot_BluePanels_TabAndMark_W80H24 verifies Tab switching
+// active pane (Left -> Right), Down navigation, and Insert item marking (•).
+func TestAppWidget_Snapshot_BluePanels_TabAndMark_W80H24(t *testing.T) {
+	var scrollback string
+	widget := newBluePanelsSnapshotWidget(&scrollback)
+	defer widget.Close()
+
+	// Mark "docs" in Left pane with Insert, then Tab to Right pane and move Down to "build.sh*"
+	widget.HandleEvent(input.KeyPressEvent{Code: input.KeyDown})
+	widget.HandleEvent(input.KeyPressEvent{Code: input.KeyInsert})
+	widget.HandleEvent(input.KeyPressEvent{Code: input.KeyTab})
+	widget.HandleEvent(input.KeyPressEvent{Code: input.KeyDown})
+	widget.HandleEvent(input.KeyPressEvent{Code: input.KeyDown})
+	widget.HandleEvent(input.KeyPressEvent{Code: input.KeyDown})
+
+	assertAppSnapshot(t, "blue_panels_tab_mark_w80h24.snap", widget, &scrollback, ui.Rect{X: 0, Y: 0, W: 80, H: 24})
+}
+
+// TestAppWidget_Snapshot_BluePanels_Withdrawn_W80H24 verifies that when panels
+// are opened via Ctrl+O and then withdrawn via Ctrl+O, the stack anchors cleanly
+// at row 0 without blue background bleed.
+func TestAppWidget_Snapshot_BluePanels_Withdrawn_W80H24(t *testing.T) {
+	var scrollback string
+	widget := newBluePanelsSnapshotWidget(&scrollback)
+	defer widget.Close()
+
+	widget.SetPanelsVisible(false)
+	assertAppSnapshot(t, "blue_panels_withdrawn_w80h24.snap", widget, &scrollback, ui.Rect{X: 0, Y: 0, W: 80, H: 24})
+}
+
+// TestAppWidget_Snapshot_BluePanels_MkdirDialog_W80H24 verifies the F7 Mkdir
+// modal dialog composited over the dual blue panels and bottom shell stack.
+func TestAppWidget_Snapshot_BluePanels_MkdirDialog_W80H24(t *testing.T) {
+	var scrollback string
+	widget := newBluePanelsSnapshotWidget(&scrollback)
+	defer widget.Close()
+
+	widget.HandleEvent(input.KeyPressEvent{Code: input.KeyF7})
+	typeString(widget, "new_folder")
+	assertAppSnapshot(t, "blue_panels_mkdir_dialog_w80h24.snap", widget, &scrollback, ui.Rect{X: 0, Y: 0, W: 80, H: 24})
 }

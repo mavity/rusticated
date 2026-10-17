@@ -158,8 +158,8 @@ func TestRunScrollbackFrame_RendersANSIOutputAndPayload(t *testing.T) {
 	if !strings.Contains(got, "some log line") {
 		t.Fatalf("scrollback output = %q, want rendered payload to contain %q", got, "some log line")
 	}
-	if !strings.Contains(got, "\x1b[H") || !strings.Contains(got, "\x1b[24;1H") {
-		t.Fatalf("scrollback output = %q, want ansi cursor movement and viewport reset", got)
+	if !strings.Contains(got, "\r\x1b[2K\x1b[J") || !strings.Contains(got, "\r\n") {
+		t.Fatalf("scrollback output = %q, want relative line clear and scroll progression", got)
 	}
 }
 
@@ -452,8 +452,8 @@ func TestEmitDirtyRegion_WritesANSISequences(t *testing.T) {
 	h.currBuf.Set(0, 0, terminal.Cell{Grapheme: "A"})
 	h.emitDirtyRegion(0, 0)
 	got := out.String()
-	if !strings.Contains(got, "\x1b[1;1H") || !strings.Contains(got, "\x1b[?25h") || !strings.Contains(got, "A") {
-		t.Fatalf("emitDirtyRegion() output = %q, want cursor movement + visible cursor + data", got)
+	if !strings.Contains(got, "\x1b[1B") || !strings.Contains(got, "\x1b[?25h") || !strings.Contains(got, "A") {
+		t.Fatalf("emitDirtyRegion() output = %q, want relative cursor movement + visible cursor + data", got)
 	}
 }
 
