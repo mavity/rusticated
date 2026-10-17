@@ -16,7 +16,7 @@ func truncateToolOutput(s string) string {
 // BuildKabibiTools assembles Kabibi's AI tool registry from its dedicated
 // file, exec, and shell-context tool buckets.
 func BuildKabibiTools(execSess *ExecutionSession) map[string]ai.Tool {
-	tools := make(map[string]ai.Tool, 6)
+	tools := make(map[string]ai.Tool, 7)
 	registerExecTools(tools, execSess)
 	registerFileTools(tools, execSess)
 	registerShellContextTools(tools, execSess)

@@ -7,23 +7,41 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/charmbracelet/x/input"
 	"github.com/mavity/rusticated/kabibi/ui"
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
 
-// ShellMode controls whether the Shell widget operates in the lightweight
-// Zero-Plume / Immediate Line Ejection model (1-row active prompt at the bottom
-// of the screen, all completed output streamed directly to native scrollback)
-// or the full multi-block Plume History model (used when integrating with
-// full-screen file panels).
+// ShellMode controls whether the Shell widget operates in the dynamic Stack Widget
+// model (growing from the 3-part banner + input + blank footer up to the terminal
+// height before ejecting top rows into native scrollback) or full-viewport
+// Plume History model (used when integrating with full-screen file panels).
 type ShellMode int
 
 const (
-	ModeZeroPlume    ShellMode = iota // Immediate line ejection, 1-line active prompt
-	ModePlumeHistory                  // Multi-block scrollable history / file panel integration
+	ModeStack        ShellMode = iota // Dynamic growing stack with slack-gap recovery & scrollback ejection (default)
+	ModePlumeHistory                  // Full-screen viewport history for file panel integration
+	ModeZeroPlume    = ModeStack      // Backward-compatible alias for the default inline stack mode
 )
+
+const reservedFooterRows = 1
+
+var stackSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// formatStartupBanner constructs the pompous retro diagnostic startup banner block.
+func formatStartupBanner(sessionErr error) string {
+	lines := []string{
+		"KABIBI // RUSTICATED COMPUTING SUPERVISOR v1.0",
+		"64K CELL MATRIX OK • MVDAN/SH + LITERT-LM NEURAL CO-PROCESSOR READY",
+		"Kabibi shell initialized. Type commands below.",
+	}
+	if sessionErr != nil {
+		lines = append(lines, "Shell initialization failed: "+sessionErr.Error())
+	}
+	return strings.Join(lines, "\n")
+}
 
 // ShellOptions configures shell behavior and callbacks
 type ShellOptions struct {
@@ -31,28 +49,34 @@ type ShellOptions struct {
 	OnExit            func()            // Optional callback invoked when user runs 'exit' or 'quit'
 	WorkingDir        string            // Optional initial working directory for the shell runner
 	AIRunner          AIRunner          // Optional AI fallback runner (defaults to LazyAIRunner)
-	Mode              ShellMode         // Toggle between ModeZeroPlume (default) and ModePlumeHistory
+	Mode              ShellMode         // Toggle between ModeStack (default) and ModePlumeHistory
 	Prompt            string            // Optional custom prompt template or fixed prompt (supports PS1 escapes if execSess present)
 }
 
-// Shell is a shell widget that implements the ui.Widget interface.
-// In ModeZeroPlume (default), it renders a 1-row active prompt/status line and
-// ejects all submitted commands and completed output lines immediately into
-// native terminal scrollback. In ModePlumeHistory, it manages a history of
-// CommandBlocks with viewport row ejection for composite TUI layouts.
+// Shell is a dynamic stack shell widget that implements the ui.Widget interface.
+// In ModeStack (default), it starts as a compact stack (BlockBanner + PromptInput +
+// 1 reserved blank footer line), grows downward as commands/animations/input wrap,
+// closes any bottom slack gap before ejecting, and ejects overflowing top rows
+// into native terminal scrollback.
 type Shell struct {
 	mu sync.Mutex
 
 	mode ShellMode
 
-	// History model (retained for ModePlumeHistory and block inspection)
+	// Unified append-only block store (BlockBanner, BlockCommand, BlockAITurn)
 	blocks []CommandBlock
 
-	// Ejection watermark: how many visual rows have been flushed to native scrollback in ModePlumeHistory
+	// Ejection watermark: how many visual block rows have been flushed to native scrollback
 	previouslyEjected int
 
-	// Transient status line displayed in ModeZeroPlume while an AI turn or tool is active
+	// Peak occupied stack height (in rows) observed at the current terminal width.
+	// Used to compute bottom slack gap G = peakOccupiedHeight - desiredOccupiedHeight
+	// so the stack pushes down to close any gap before ejecting upward.
+	peakOccupiedHeight int
+
+	// Transient status / animation state for the active block
 	statusLine    string
+	animFrame     int
 	bannerFlushed bool
 	exiting       bool
 
@@ -97,7 +121,7 @@ func New(opts ShellOptions) *Shell {
 		blocks:         []CommandBlock{},
 		width:          80,
 		height:         24,
-		prompt:         "$ ",
+		prompt:         "፧",
 		promptTemplate: promptTmpl,
 		activeBlock:    -1,
 		execSess:       execSess,
@@ -114,16 +138,27 @@ func New(opts ShellOptions) *Shell {
 		},
 	})
 
-	// Add initial welcome message as a pseudo-CommandBlock
-	welcome := "Kabibi shell initialized. Type commands below."
-	if sessionErr != nil {
-		welcome += "\nShell initialization failed: " + sessionErr.Error()
+	// Add initial pompous retro startup banner as BlockBanner (block 0)
+	bannerText := formatStartupBanner(sessionErr)
+	var bannerID int
+	var cwd string
+	if execSess != nil {
+		cwd = execSess.Dir()
+		rec := execSess.RecordBlock(BlockBanner, SourceSystem, "", bannerText, 0, time.Now())
+		bannerID = rec.ID
+	} else {
+		bannerID = 1
 	}
 	s.blocks = append(s.blocks, CommandBlock{
-		Prompt: "",
-		Input:  "",
-		Output: *bytes.NewBufferString(welcome),
-		Status: StatusSuccess,
+		ID:        bannerID,
+		Kind:      BlockBanner,
+		Source:    SourceSystem,
+		Cwd:       cwd,
+		Prompt:    "",
+		Input:     "",
+		Output:    *bytes.NewBufferString(bannerText),
+		Status:    StatusSuccess,
+		StartedAt: time.Now(),
 	})
 
 	return s
@@ -195,11 +230,18 @@ func (s *Shell) Blocks() []CommandBlock {
 	res := make([]CommandBlock, len(s.blocks))
 	for i := range s.blocks {
 		res[i] = CommandBlock{
-			Prompt:   s.blocks[i].Prompt,
-			Input:    s.blocks[i].Input,
-			Output:   *bytes.NewBuffer(append([]byte(nil), s.blocks[i].Output.Bytes()...)),
-			Status:   s.blocks[i].Status,
-			ExitCode: s.blocks[i].ExitCode,
+			ID:        s.blocks[i].ID,
+			Kind:      s.blocks[i].Kind,
+			Source:    s.blocks[i].Source,
+			Cwd:       s.blocks[i].Cwd,
+			Prompt:    s.blocks[i].Prompt,
+			Input:     s.blocks[i].Input,
+			Output:    *bytes.NewBuffer(append([]byte(nil), s.blocks[i].Output.Bytes()...)),
+			AnimLine:  s.blocks[i].AnimLine,
+			Status:    s.blocks[i].Status,
+			ExitCode:  s.blocks[i].ExitCode,
+			StartedAt: s.blocks[i].StartedAt,
+			Duration:  s.blocks[i].Duration,
 		}
 	}
 	return res
@@ -224,9 +266,9 @@ func (s *Shell) SetCursorPos(pos int) {
 // SetPrompt sets a static prompt string or custom PS1 template.
 func (s *Shell) SetPrompt(prompt string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.prompt = prompt
 	s.promptTemplate = prompt
+	s.mu.Unlock()
 	s.invalidate()
 }
 
@@ -243,19 +285,18 @@ func (s *Shell) currentPromptLocked() (string, int) {
 			return info.Text, info.Width
 		}
 		// Default fallback when neither template nor PS1 is provided
-		info := FormatPrompt(`\w$ `, s.execSess.Dir(), envMap)
+		info := FormatPrompt(`\w፧`, s.execSess.Dir(), envMap)
 		return info.Text, info.Width
 	}
 
 	p := s.prompt
 	if p == "" {
-		p = "$ "
+		p = "፧"
 	}
 	return p, len([]rune(p))
 }
 
 // SubmitCurrentInput adds the current input to history as a CommandBlock and clears the input buffer.
-// In ModeZeroPlume, it also immediately ejects the submitted prompt line to WriteToScrollback.
 func (s *Shell) SubmitCurrentInput() {
 	rawInput := s.input.Value()
 	prompt := s.input.PromptText()
@@ -263,21 +304,23 @@ func (s *Shell) SubmitCurrentInput() {
 	s.input.Reset()
 
 	s.mu.Lock()
-	mode := s.mode
-	writeSB := s.opts.WriteToScrollback
+	var cwd string
+	if s.execSess != nil {
+		cwd = s.execSess.Dir()
+	}
 	block := CommandBlock{
-		Prompt:   prompt,
-		Input:    rawInput,
-		Output:   bytes.Buffer{},
-		Status:   StatusActive,
-		ExitCode: 0,
+		Kind:      BlockCommand,
+		Source:    SourceUserShell,
+		Cwd:       cwd,
+		Prompt:    prompt,
+		Input:     rawInput,
+		Output:    bytes.Buffer{},
+		Status:    StatusActive,
+		ExitCode:  0,
+		StartedAt: time.Now(),
 	}
 	s.blocks = append(s.blocks, block)
 	s.mu.Unlock()
-
-	if mode == ModeZeroPlume && writeSB != nil {
-		writeSB(prompt + rawInput + "\r\n")
-	}
 }
 
 // ExecuteLine submits and executes a line through the Shell's smart classifier
@@ -288,194 +331,245 @@ func (s *Shell) ExecuteLine(line string) {
 	s.WaitActive()
 }
 
+// renderBlockCached renders a CommandBlock into a CellBuf, reusing its cached
+// CellBuf when width, prompt/input, output length, and animation line are unchanged.
+func renderBlockCached(block *CommandBlock, width int) terminal.CellBuf {
+	if width <= 0 {
+		width = 80
+	}
+	outLen := block.Output.Len()
+	if block.cachePopulated &&
+		block.cachedWidth == width &&
+		block.cachedPrompt == block.Prompt &&
+		block.cachedInput == block.Input &&
+		block.cachedOutLen == outLen &&
+		block.cachedAnim == block.AnimLine &&
+		block.cachedKind == block.Kind {
+		return block.cachedBuf
+	}
+
+	var lines []string
+	if block.Kind == BlockBanner || (block.Prompt == "" && block.Input == "") {
+		if outLen > 0 {
+			out := strings.ReplaceAll(block.Output.String(), "\r\n", "\n")
+			out = strings.TrimSuffix(out, "\n")
+			lines = append(lines, strings.Split(out, "\n")...)
+		}
+	} else {
+		lines = append(lines, block.Prompt+block.Input)
+		if outLen > 0 {
+			out := strings.ReplaceAll(block.Output.String(), "\r\n", "\n")
+			out = strings.TrimSuffix(out, "\n")
+			lines = append(lines, strings.Split(out, "\n")...)
+		}
+	}
+	if block.Status == StatusActive && block.AnimLine != "" {
+		lines = append(lines, block.AnimLine)
+	}
+	if len(lines) == 0 {
+		lines = []string{""}
+	}
+
+	buf := terminal.FromANSI(lines, width)
+	if buf.Height == 0 {
+		buf = terminal.NewCellBuf(width, 1)
+	}
+	block.cachedWidth = width
+	block.cachedPrompt = block.Prompt
+	block.cachedInput = block.Input
+	block.cachedOutLen = outLen
+	block.cachedAnim = block.AnimLine
+	block.cachedKind = block.Kind
+	block.cachedBuf = buf
+	block.cachePopulated = true
+	return buf
+}
+
+// renderBlock converts a CommandBlock value into a rendered CellBuf using FromANSI.
+func renderBlock(block CommandBlock, width int) terminal.CellBuf {
+	return renderBlockCached(&block, width)
+}
+
+// calculateVisualRows computes the total number of visual rows for a block at a given width.
+func calculateVisualRows(block CommandBlock, width int) int {
+	return renderBlockCached(&block, width).Height
+}
+
+// computeStackHeight calculates the current occupied height of the stack
+// (visible non-ejected block rows + PromptInput + 1 blank footer row) for Measure.
+func (s *Shell) computeStackHeight(w, maxH int) int {
+	if w <= 0 {
+		w = 80
+	}
+	if maxH <= 0 {
+		maxH = 24
+	}
+
+	s.mu.Lock()
+	var chromeH int
+	if !s.exiting {
+		s.mu.Unlock()
+		inputSize := s.input.Measure(ui.Constraints{MaxW: w, MaxH: maxH - reservedFooterRows})
+		inputH := inputSize.H
+		if inputH < 1 {
+			inputH = 1
+		}
+		chromeH = inputH + reservedFooterRows
+		if chromeH > maxH {
+			chromeH = maxH
+		}
+		s.mu.Lock()
+	}
+	totalBlockRows := 0
+	for i := range s.blocks {
+		totalBlockRows += renderBlockCached(&s.blocks[i], w).Height
+	}
+	previouslyEjected := s.previouslyEjected
+	s.mu.Unlock()
+
+	budget := maxH - chromeH
+	if budget < 0 {
+		budget = 0
+	}
+
+	unejected := totalBlockRows - previouslyEjected
+	if unejected < 0 {
+		unejected = 0
+	}
+	visBlockRows := unejected
+	if visBlockRows > budget {
+		visBlockRows = budget
+	}
+	occH := visBlockRows + chromeH
+	if occH < 1 {
+		occH = 1
+	}
+	if occH > maxH {
+		occH = maxH
+	}
+	return occH
+}
+
 // Measure implements ui.Widget by reporting the shell's space requirements.
-// In ModeZeroPlume, the shell widget measures the active prompt/input height
-// (1 row when idle or running, or up to the PromptInput cap when wrapped).
+// In ModeStack (default), the shell reports its exact occupied stack height:
+// visible non-ejected blocks + PromptInput + 1 reserved blank footer line,
+// growing from (H_banner + 1 + 1) up to c.MaxH.
 // In ModePlumeHistory, it requests the full available constraints.
 func (s *Shell) Measure(c ui.Constraints) ui.Size {
 	w := c.MaxW
 	if w <= 0 {
 		w = 80
 	}
+	maxH := c.MaxH
+	if maxH <= 0 {
+		maxH = 24
+	}
 	s.mu.Lock()
 	mode := s.mode
-	running := s.running
-	exiting := s.exiting
 	s.mu.Unlock()
-	if mode == ModeZeroPlume {
-		if running || exiting {
-			return ui.Size{W: w, H: 1}
-		}
-		return s.input.Measure(c)
+	if mode == ModeStack {
+		occH := s.computeStackHeight(w, maxH)
+		return ui.Size{W: w, H: occH}
 	}
-	h := c.MaxH
-	if h <= 0 {
-		h = 24
-	}
-	return ui.Size{W: w, H: h}
+	return ui.Size{W: w, H: maxH}
 }
 
-// renderBlock converts a CommandBlock into a rendered CellBuf using FromANSI.
-func renderBlock(block CommandBlock, width int) terminal.CellBuf {
-	if width <= 0 {
-		width = 80
-	}
-	promptInput := block.Prompt + block.Input
-	lines := []string{promptInput}
-	if block.Output.Len() > 0 {
-		out := block.Output.String()
-		out = strings.ReplaceAll(out, "\r\n", "\n")
-		out = strings.TrimSuffix(out, "\n")
-		lines = append(lines, strings.Split(out, "\n")...)
-	}
-	buf := terminal.FromANSI(lines, width)
-	if buf.Height == 0 {
-		return terminal.NewCellBuf(width, 1)
-	}
-	return buf
-}
-
-// calculateVisualRows computes the total number of visual rows for a block at a given width.
-func calculateVisualRows(block CommandBlock, width int) int {
-	return renderBlock(block, width).Height
-}
-
-// Render implements ui.Widget by painting the shell into a CellBuf.
-// In ModeZeroPlume, Render returns a 1-row CellBuf containing the active prompt
-// (or live AI/tool status line while running).
-// In ModePlumeHistory, Render paints the multi-block history viewport and ejects
-// overflowing rows via WriteToScrollback.
+// Render implements ui.Widget by painting the shell stack into a CellBuf.
+// Uses bottom-up viewport fitting: pins PromptInput + 1 reserved blank footer
+// row at the bottom, walks backwards across s.blocks from newest to oldest to
+// fill the remaining viewport budget, closes any bottom slack gap before ejecting,
+// and ejects overflowing top rows via WriteToScrollback.
 func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.CursorPos) {
-	s.mu.Lock()
-	s.ctx = ctx
-	s.width = rect.W
-	s.height = rect.H
-	mode := s.mode
-
-	if mode == ModeZeroPlume {
-		needBanner := !s.bannerFlushed && s.opts.WriteToScrollback != nil && len(s.blocks) > 0 && s.blocks[0].Input == "" && s.blocks[0].Output.Len() > 0
-		var bannerText string
-		if needBanner {
-			s.bannerFlushed = true
-			bannerText = s.blocks[0].Output.String()
-		}
-		running := s.running
-		exiting := s.exiting
-		statusLine := s.statusLine
-		s.mu.Unlock()
-
-		if needBanner {
-			s.emitScrollbackLine(strings.TrimSuffix(bannerText, "\n"))
-		}
-
-		w := rect.W
-		if w <= 0 {
-			w = 80
-		}
-
-		if exiting || running {
-			buf := ui.NewCellBuf(w, 1)
-			inputStyle := terminal.NewStyle(0, 0, terminal.CharResetForegroundDefault|terminal.CharResetBackgroundDefault)
-			displayLine := ""
-			if !exiting && running {
-				displayLine = statusLine
-			}
-			col := 0
-			for _, ch := range displayLine {
-				if col >= w {
-					break
-				}
-				buf.Set(col, 0, terminal.Cell{
-					Grapheme: string(ch),
-					Style:    inputStyle,
-				})
-				col++
-			}
-			return buf, ui.CursorPos{
-				X:       0,
-				Y:       0,
-				Visible: false,
-			}
-		}
-
-		return s.input.Render(rect, ctx)
+	w := rect.W
+	if w <= 0 {
+		w = 80
+	}
+	maxH := rect.H
+	if maxH <= 0 {
+		maxH = 24
 	}
 
-	blocksSnapshot := make([]CommandBlock, len(s.blocks))
+	s.mu.Lock()
+	widthChanged := s.width != w
+	s.ctx = ctx
+	s.width = w
+	s.height = maxH
+	if widthChanged {
+		s.peakOccupiedHeight = 0
+	}
+	if s.execSess != nil {
+		s.execSess.ResizePTY(w, maxH)
+	}
+	mode := s.mode
+	exiting := s.exiting
+	running := s.running
+
+	// Render and cache each block under the lock so cachedBuf is retained across frames
+	blockBufs := make([]terminal.CellBuf, len(s.blocks))
+	totalBlockRows := 0
 	for i := range s.blocks {
-		blocksSnapshot[i] = CommandBlock{
-			Prompt:   s.blocks[i].Prompt,
-			Input:    s.blocks[i].Input,
-			Output:   *bytes.NewBuffer(append([]byte(nil), s.blocks[i].Output.Bytes()...)),
-			Status:   s.blocks[i].Status,
-			ExitCode: s.blocks[i].ExitCode,
-		}
+		b := renderBlockCached(&s.blocks[i], w)
+		blockBufs[i] = b
+		totalBlockRows += b.Height
 	}
 	previouslyEjected := s.previouslyEjected
-	running := s.running
 	s.mu.Unlock()
 
-	// Allocate output buffer
-	buf := ui.NewCellBuf(rect.W, rect.H)
+	// 1. Pin Bottom Chrome: PromptInput + 1 blank reserved footer row (omitted when exiting)
+	var inputBuf terminal.CellBuf
+	var inputCursor ui.CursorPos
+	var chromeH int
+	if !exiting {
+		inputCtx := ctx
+		if running {
+			inputCtx.Focused = false
+		}
+		inputMaxH := maxH - reservedFooterRows
+		if inputMaxH < 1 {
+			inputMaxH = 1
+		}
+		inputBuf, inputCursor = s.input.Render(ui.Rect{X: 0, Y: 0, W: w, H: inputMaxH}, inputCtx)
+		footerH := reservedFooterRows
+		if inputBuf.Height+footerH > maxH {
+			footerH = maxH - inputBuf.Height
+			if footerH < 0 {
+				footerH = 0
+			}
+		}
+		chromeH = inputBuf.Height + footerH
+	}
 
-	// Measure and render the prompt input widget first so we know how many rows it occupies at the bottom
-	inputSize := s.input.Measure(ui.Constraints{MaxW: rect.W, MaxH: rect.H})
-	inputH := inputSize.H
-	if inputH < 1 {
-		inputH = 1
-	}
-	if rect.H > 0 && inputH > rect.H {
-		inputH = rect.H
-	}
-	inputCtx := ctx
-	if running {
-		inputCtx.Focused = false
-	}
-	inputBuf, inputCursor := s.input.Render(ui.Rect{X: 0, Y: 0, W: rect.W, H: rect.H}, inputCtx)
-
-	// ===== EJECTION ENGINE =====
-	// Calculate total visual line height
-	hTotal := 0
-	for _, block := range blocksSnapshot {
-		hTotal += calculateVisualRows(block, rect.W)
+	// 2. Remaining Block Budget
+	hBudget := maxH - chromeH
+	if hBudget < 0 {
+		hBudget = 0
 	}
 
-	// Calculate target ejection boundary: max(0, total_rows - viewport_height)
-	hViewport := rect.H - inputBuf.Height
-	if hViewport < 0 {
-		hViewport = 0
-	}
-	hTarget := hTotal - hViewport
+	// 3. Ejection Check (only when total non-ejected rows exceed the terminal's block budget,
+	// meaning any bottom slack gap G has already been completely closed and we hit maxH)
+	hTarget := totalBlockRows - hBudget
 	if hTarget < 0 {
 		hTarget = 0
 	}
-
-	// If ejection boundary has advanced, flush delta to scrollback
-	if hTarget > previouslyEjected && s.opts.WriteToScrollback != nil {
-		// Render and emit the delta rows [previouslyEjected : hTarget]
-		deltaRows := hTarget - previouslyEjected
-		ejectionBuf := ui.NewCellBuf(rect.W, deltaRows)
-
-		// Paint rows into ejection buffer
-		currentRow := 0
-		rowsSeen := 0
-		for _, block := range blocksSnapshot {
-			blockRows := calculateVisualRows(block, rect.W)
-			rowsEnd := rowsSeen + blockRows
-
-			// Render this block's portion that falls within ejection range
-			if rowsEnd > previouslyEjected && rowsSeen < hTarget {
-				currentRow = s.paintBlock(ejectionBuf, currentRow, block, rect.W,
-					previouslyEjected-rowsSeen, hTarget-rowsSeen)
+	if hTarget > previouslyEjected {
+		if s.opts.WriteToScrollback != nil {
+			deltaRows := hTarget - previouslyEjected
+			ejectionBuf := ui.NewCellBuf(w, deltaRows)
+			currentRow := 0
+			rowsSeen := 0
+			for i, bBuf := range blockBufs {
+				_ = i
+				blockRows := bBuf.Height
+				rowsEnd := rowsSeen + blockRows
+				if rowsEnd > previouslyEjected && rowsSeen < hTarget {
+					currentRow = copyBlockRows(ejectionBuf, currentRow, bBuf, w,
+						previouslyEjected-rowsSeen, hTarget-rowsSeen)
+				}
+				rowsSeen = rowsEnd
 			}
-			rowsSeen = rowsEnd
+			ansiOutput := terminal.ToANSI(ejectionBuf)
+			s.opts.WriteToScrollback(ansiOutput + "\r\n")
 		}
-
-		// Convert ejection buffer to ANSI and emit
-		ansiOutput := terminal.ToANSI(ejectionBuf)
-		s.opts.WriteToScrollback(ansiOutput + "\r\n")
-
-		// Advance watermark
 		s.mu.Lock()
 		if hTarget > s.previouslyEjected {
 			s.previouslyEjected = hTarget
@@ -484,48 +578,119 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 		previouslyEjected = hTarget
 	}
 
-	// ===== VIEWPORT RENDER =====
-	// Paint viewport rows [previouslyEjected : previouslyEjected + hViewport]
-	viewportStartRow := previouslyEjected
-	viewportEndRow := previouslyEjected + hViewport
+	// 4. Bottom-Up Backward Walk across blocks (from newest i = N-1 down to 0)
+	// after excluding previouslyEjected rows.
+	type blockSlice struct {
+		buf        terminal.CellBuf
+		startRow   int
+		endRow     int
+	}
+	var collected []blockSlice
+	remaining := hBudget
+	rowsBeforeBlock := totalBlockRows
+	for i := len(blockBufs) - 1; i >= 0 && remaining > 0; i-- {
+		bBuf := blockBufs[i]
+		rowsBeforeBlock -= bBuf.Height
+		blockGlobalStart := rowsBeforeBlock
+		blockGlobalEnd := blockGlobalStart + bBuf.Height
+		if blockGlobalEnd <= previouslyEjected {
+			break
+		}
+		localStart := 0
+		if previouslyEjected > blockGlobalStart {
+			localStart = previouslyEjected - blockGlobalStart
+		}
+		availRows := bBuf.Height - localStart
+		if availRows <= 0 {
+			continue
+		}
+		if availRows <= remaining {
+			collected = append(collected, blockSlice{
+				buf:      bBuf,
+				startRow: localStart,
+				endRow:   bBuf.Height,
+			})
+			remaining -= availRows
+		} else {
+			// Partially fits: take the tail `remaining` rows of this block
+			collected = append(collected, blockSlice{
+				buf:      bBuf,
+				startRow: bBuf.Height - remaining,
+				endRow:   bBuf.Height,
+			})
+			remaining = 0
+			break
+		}
+	}
 
+	collectedRows := hBudget - remaining
+	occH := collectedRows + chromeH
+	if occH < 1 {
+		occH = 1
+	}
+
+	s.mu.Lock()
+	if occH > s.peakOccupiedHeight {
+		s.peakOccupiedHeight = occH
+	}
+	if s.peakOccupiedHeight > maxH {
+		s.peakOccupiedHeight = maxH
+	}
+	s.mu.Unlock()
+
+	bufH := occH
+	if mode == ModePlumeHistory {
+		bufH = maxH
+	}
+	buf := ui.NewCellBuf(w, bufH)
+
+	// Paint collected block slices in chronological order (reverse of backward walk)
 	bufferRow := 0
-	rowsSeen := 0
-	for _, block := range blocksSnapshot {
-		blockRows := calculateVisualRows(block, rect.W)
-		rowsEnd := rowsSeen + blockRows
-
-		if rowsEnd > viewportStartRow && rowsSeen < viewportEndRow {
-			bufferRow = s.paintBlock(buf, bufferRow, block, rect.W,
-				viewportStartRow-rowsSeen, viewportEndRow-rowsSeen)
-		}
-		rowsSeen = rowsEnd
+	for i := len(collected) - 1; i >= 0; i-- {
+		sl := collected[i]
+		bufferRow = copyBlockRows(buf, bufferRow, sl.buf, w, sl.startRow, sl.endRow)
 	}
 
-	// Blit rendered PromptInput at the bottom of the viewport
-	inputTopY := rect.H - inputBuf.Height
-	if inputTopY < 0 {
-		inputTopY = 0
-	}
-	for y := 0; y < inputBuf.Height && inputTopY+y < buf.Height; y++ {
-		for x := 0; x < rect.W && x < inputBuf.Width; x++ {
-			buf.Set(x, inputTopY+y, inputBuf.Get(x, y))
+	// Position of PromptInput:
+	// In ModeStack, PromptInput sits immediately below the collected blocks (at row collectedRows),
+	// followed by the 1 reserved blank footer line at row (occH - 1).
+	// In ModePlumeHistory, PromptInput + footer are pinned to the bottom of the full viewport.
+	inputTopY := collectedRows
+	if mode == ModePlumeHistory {
+		inputTopY = maxH - chromeH
+		if inputTopY < 0 {
+			inputTopY = 0
 		}
 	}
-
-	cursor := ui.CursorPos{
-		X:       inputCursor.X,
-		Y:       inputTopY + inputCursor.Y,
-		Visible: inputCursor.Visible && !running,
+	var cursor ui.CursorPos
+	if !exiting && inputBuf.Height > 0 {
+		for y := 0; y < inputBuf.Height && inputTopY+y < buf.Height; y++ {
+			for x := 0; x < w && x < inputBuf.Width; x++ {
+				buf.Set(x, inputTopY+y, inputBuf.Get(x, y))
+			}
+		}
+		cursor = ui.CursorPos{
+			X:       inputCursor.X,
+			Y:       inputTopY + inputCursor.Y,
+			Visible: inputCursor.Visible && !running,
+		}
+	} else {
+		lastRow := collectedRows - 1
+		if lastRow < 0 {
+			lastRow = 0
+		}
+		cursor = ui.CursorPos{
+			X:       0,
+			Y:       lastRow,
+			Visible: false,
+		}
 	}
 
 	return buf, cursor
 }
 
-// paintBlock renders a single CommandBlock into the buffer at the given starting row.
-// Returns the final row written (for chaining to next block).
-func (s *Shell) paintBlock(buf ui.CellBuf, startRow int, block CommandBlock, width, startOffset, endOffset int) int {
-	blockBuf := renderBlock(block, width)
+// copyBlockRows copies rows [startOffset, endOffset) from blockBuf into dst starting at startRow.
+func copyBlockRows(dst ui.CellBuf, startRow int, blockBuf terminal.CellBuf, width, startOffset, endOffset int) int {
 	if startOffset < 0 {
 		startOffset = 0
 	}
@@ -533,13 +698,19 @@ func (s *Shell) paintBlock(buf ui.CellBuf, startRow int, block CommandBlock, wid
 		endOffset = blockBuf.Height
 	}
 	row := startRow
-	for y := startOffset; y < endOffset && row < buf.Height; y++ {
+	for y := startOffset; y < endOffset && row < dst.Height; y++ {
 		for x := 0; x < width && x < blockBuf.Width; x++ {
-			buf.Set(x, row, blockBuf.Get(x, y))
+			dst.Set(x, row, blockBuf.Get(x, y))
 		}
 		row++
 	}
 	return row
+}
+
+// paintBlock renders a single CommandBlock into the buffer at the given starting row.
+func (s *Shell) paintBlock(buf ui.CellBuf, startRow int, block CommandBlock, width, startOffset, endOffset int) int {
+	blockBuf := renderBlockCached(&block, width)
+	return copyBlockRows(buf, startRow, blockBuf, width, startOffset, endOffset)
 }
 
 func (s *Shell) invalidate() {
@@ -566,8 +737,12 @@ func (s *Shell) HandleEvent(e input.Event) bool {
 	case input.PasteEvent:
 		s.mu.Lock()
 		running := s.running
+		execSess := s.execSess
 		s.mu.Unlock()
 		if running {
+			if execSess != nil && execSess.WriteActivePTY([]byte(string(evt))) {
+				return true
+			}
 			return false
 		}
 		return s.input.HandleEvent(evt)
@@ -575,8 +750,12 @@ func (s *Shell) HandleEvent(e input.Event) bool {
 		if evt != nil {
 			s.mu.Lock()
 			running := s.running
+			execSess := s.execSess
 			s.mu.Unlock()
 			if running {
+				if execSess != nil && execSess.WriteActivePTY([]byte(string(*evt))) {
+					return true
+				}
 				return false
 			}
 			return s.input.HandleEvent(*evt)
@@ -587,7 +766,11 @@ func (s *Shell) HandleEvent(e input.Event) bool {
 		s.mu.Lock()
 		s.width = evt.Width
 		s.height = evt.Height
+		execSess := s.execSess
 		s.mu.Unlock()
+		if execSess != nil {
+			execSess.ResizePTY(evt.Width, evt.Height)
+		}
 		s.invalidate()
 		return true
 	case *input.WindowSizeEvent:
@@ -595,7 +778,11 @@ func (s *Shell) HandleEvent(e input.Event) bool {
 			s.mu.Lock()
 			s.width = evt.Width
 			s.height = evt.Height
+			execSess := s.execSess
 			s.mu.Unlock()
+			if execSess != nil {
+				execSess.ResizePTY(evt.Width, evt.Height)
+			}
 			s.invalidate()
 			return true
 		}
@@ -604,6 +791,37 @@ func (s *Shell) HandleEvent(e input.Event) bool {
 	default:
 		return false
 	}
+}
+
+func encodeKeyForPTY(ev input.KeyPressEvent) []byte {
+	switch ev.Code {
+	case input.KeyEnter:
+		return []byte("\r")
+	case input.KeyTab:
+		return []byte("\t")
+	case input.KeyBackspace:
+		return []byte{0x7f}
+	case input.KeyEscape:
+		return []byte{0x1b}
+	case input.KeyUp:
+		return []byte("\x1b[A")
+	case input.KeyDown:
+		return []byte("\x1b[B")
+	case input.KeyRight:
+		return []byte("\x1b[C")
+	case input.KeyLeft:
+		return []byte("\x1b[D")
+	case input.KeySpace:
+		return []byte(" ")
+	}
+	if ev.Text != "" {
+		return []byte(ev.Text)
+	}
+	s := ev.String()
+	if len(s) == 1 {
+		return []byte(s)
+	}
+	return nil
 }
 
 func (s *Shell) handleKeyEvent(ev input.KeyPressEvent) bool {
@@ -629,8 +847,17 @@ func (s *Shell) handleKeyEvent(ev input.KeyPressEvent) bool {
 
 	s.mu.Lock()
 	running := s.running
+	execSess := s.execSess
 	s.mu.Unlock()
-	if running || !s.input.Focused() {
+	if running {
+		if execSess != nil && execSess.HasActivePTY() {
+			if raw := encodeKeyForPTY(ev); len(raw) > 0 {
+				return execSess.WriteActivePTY(raw)
+			}
+		}
+		return false
+	}
+	if !s.input.Focused() {
 		return false
 	}
 
@@ -655,25 +882,31 @@ func (s *Shell) submitAndExecuteAsync() {
 	s.input.Reset()
 
 	s.mu.Lock()
-	mode := s.mode
 	trimmed := strings.TrimSpace(rawInput)
+	var cwd string
+	if s.execSess != nil {
+		cwd = s.execSess.Dir()
+	}
+	startedAt := time.Now()
 	block := CommandBlock{
-		Prompt:   prompt,
-		Input:    rawInput,
-		Output:   bytes.Buffer{},
-		Status:   StatusActive,
-		ExitCode: 0,
+		Kind:      BlockCommand,
+		Source:    SourceUserShell,
+		Cwd:       cwd,
+		Prompt:    prompt,
+		Input:     rawInput,
+		Output:    bytes.Buffer{},
+		Status:    StatusActive,
+		ExitCode:  0,
+		StartedAt: startedAt,
 	}
 	s.blocks = append(s.blocks, block)
 	blockIdx := len(s.blocks) - 1
 	s.statusLine = ""
+	s.animFrame = 0
 
 	if trimmed == "" {
 		s.blocks[blockIdx].Status = StatusSuccess
 		s.mu.Unlock()
-		if mode == ModeZeroPlume {
-			s.emitScrollbackLine(prompt + rawInput)
-		}
 		s.invalidate()
 		return
 	}
@@ -686,10 +919,6 @@ func (s *Shell) submitAndExecuteAsync() {
 		s.blocks[blockIdx].Status = StatusFailure
 		s.blocks[blockIdx].ExitCode = 1
 		s.mu.Unlock()
-		if mode == ModeZeroPlume {
-			s.emitScrollbackLine(prompt + rawInput)
-			s.emitScrollbackLine(message)
-		}
 		s.invalidate()
 		return
 	}
@@ -698,9 +927,6 @@ func (s *Shell) submitAndExecuteAsync() {
 	if route == RouteEmpty {
 		s.blocks[blockIdx].Status = StatusSuccess
 		s.mu.Unlock()
-		if mode == ModeZeroPlume {
-			s.emitScrollbackLine(prompt + rawInput)
-		}
 		s.invalidate()
 		return
 	}
@@ -709,14 +935,14 @@ func (s *Shell) submitAndExecuteAsync() {
 		s.exiting = true
 		onExit := s.opts.OnExit
 		s.mu.Unlock()
-		if mode == ModeZeroPlume {
-			s.emitScrollbackLine(prompt + rawInput)
-		}
 		s.invalidate()
 		if onExit != nil {
 			onExit()
 		}
 		return
+	}
+	if route == RouteAI {
+		s.blocks[blockIdx].Kind = BlockAITurn
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -729,16 +955,50 @@ func (s *Shell) submitAndExecuteAsync() {
 	execSess := s.execSess
 	s.mu.Unlock()
 
-	// Phase 2.1: Instant Command/Prompt Ejection on Enter in ModeZeroPlume
-	if mode == ModeZeroPlume {
-		s.emitScrollbackLine(prompt + rawInput)
-	}
 	s.invalidate()
+
+	// Animated artifact ticker goroutine: drives smooth spinner updates while active
+	animDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(80 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-animDone:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.mu.Lock()
+				if !s.running || s.activeBlock != blockIdx || blockIdx < 0 || blockIdx >= len(s.blocks) {
+					s.mu.Unlock()
+					return
+				}
+				s.animFrame = (s.animFrame + 1) % len(stackSpinnerFrames)
+				frameGlyph := stackSpinnerFrames[s.animFrame]
+				if s.statusLine != "" {
+					s.blocks[blockIdx].AnimLine = frameGlyph + " " + s.statusLine
+					s.mu.Unlock()
+					s.invalidate()
+				} else if s.blocks[blockIdx].Kind == BlockAITurn && s.blocks[blockIdx].Output.Len() == 0 {
+					s.blocks[blockIdx].AnimLine = frameGlyph + " thinking…"
+					s.mu.Unlock()
+					s.invalidate()
+				} else {
+					s.mu.Unlock()
+				}
+			}
+		}
+	}()
 
 	go func() {
 		defer func() {
+			close(animDone)
 			cancel()
 			s.mu.Lock()
+			if blockIdx >= 0 && blockIdx < len(s.blocks) {
+				s.blocks[blockIdx].AnimLine = ""
+			}
 			s.activeCancel = nil
 			s.activeBlock = -1
 			s.running = false
@@ -761,111 +1021,54 @@ func (s *Shell) submitAndExecuteAsync() {
 			s.invalidate()
 		}
 
-		// Line-buffered stream helper for Zero-Plume mode
-		var linePartial strings.Builder
-		var lineMu sync.Mutex
-		streamZeroPlumeLines := func(chunk string) {
-			if chunk == "" {
-				return
-			}
-			lineMu.Lock()
-			linePartial.WriteString(chunk)
-			bufStr := linePartial.String()
-			lastNL := strings.LastIndexByte(bufStr, '\n')
-			if lastNL < 0 {
-				lineMu.Unlock()
-				return
-			}
-			completed := bufStr[:lastNL]
-			rest := bufStr[lastNL+1:]
-			linePartial.Reset()
-			linePartial.WriteString(rest)
-			lineMu.Unlock()
-
-			completed = strings.ReplaceAll(completed, "\r\n", "\n")
-			for _, ln := range strings.Split(completed, "\n") {
-				s.emitScrollbackLine(ln)
-			}
-		}
-		flushZeroPlumeLines := func() {
-			lineMu.Lock()
-			rem := linePartial.String()
-			linePartial.Reset()
-			lineMu.Unlock()
-			if rem != "" {
-				rem = strings.TrimRight(rem, "\r\n")
-				s.emitScrollbackLine(rem)
-			}
-		}
-
-		emitOutputChunk := func(chunk string) {
-			appendBlockText(chunk)
-			if mode == ModeZeroPlume {
-				streamZeroPlumeLines(chunk)
-			}
-		}
-
 		if route == RouteShell {
 			if trimmed == "help" {
-				emitOutputChunk("Kabibi Plume Shell — valid bash commands run directly; natural language prompts fall back to AI.\n")
-				if mode == ModeZeroPlume {
-					flushZeroPlumeLines()
-				}
-				s.finishBlock(blockIdx, StatusSuccess, 0)
+				helpText := "Kabibi Plume Shell — valid bash commands run directly; natural language prompts fall back to AI.\n"
+				appendBlockText(helpText)
+				rec := execSess.RecordBlock(BlockCommand, SourceUserShell, rawInput, helpText, 0, startedAt)
+				s.finishBlockWithRecord(blockIdx, rec.ID, BlockCommand, StatusSuccess, 0, startedAt)
 				return
 			}
 
 			rec, err := execSess.RunCommand(ctx, rawInput, parsed, SourceUserShell, func(chunk []byte) {
-				emitOutputChunk(string(chunk))
+				appendBlockText(string(chunk))
 			})
 			if err != nil {
 				if errors.Is(err, context.Canceled) {
-					emitOutputChunk("^C\n")
-					if mode == ModeZeroPlume {
-						flushZeroPlumeLines()
-					}
-					s.finishBlock(blockIdx, StatusError, 130)
+					appendBlockText("^C\n")
+					s.finishBlockWithRecord(blockIdx, rec.ID, BlockCommand, StatusError, 130, startedAt)
 					return
 				}
 				// If mvdan/sh reports that the command token at the very start of the
 				// user's input line was not found, route the input seamlessly to AI.
 				if errors.Is(err, ErrUnknownCommandAtStart) && aiRunner != nil {
 					s.mu.Lock()
+					s.blocks[blockIdx].Kind = BlockAITurn
 					s.blocks[blockIdx].Output.Reset()
 					s.mu.Unlock()
-					lineMu.Lock()
-					linePartial.Reset()
-					lineMu.Unlock()
-					s.runAIFallback(ctx, blockIdx, mode, rawInput, aiRunner, appendBlockText, streamZeroPlumeLines, flushZeroPlumeLines)
+					s.runAIFallback(ctx, blockIdx, rawInput, aiRunner, execSess, startedAt, appendBlockText)
 					return
 				}
-				if mode == ModeZeroPlume {
-					flushZeroPlumeLines()
-				}
-				s.finishBlock(blockIdx, StatusError, rec.ExitCode)
+				s.finishBlockWithRecord(blockIdx, rec.ID, BlockCommand, StatusError, rec.ExitCode, startedAt)
 				return
 			}
-			if mode == ModeZeroPlume {
-				flushZeroPlumeLines()
-			}
-			s.finishBlock(blockIdx, StatusSuccess, 0)
+			s.finishBlockWithRecord(blockIdx, rec.ID, BlockCommand, StatusSuccess, 0, startedAt)
 			return
 		}
 
 		// RouteAI: execute as an AI chat prompt
 		if aiRunner == nil {
-			emitOutputChunk("AI session unavailable.\n")
-			if mode == ModeZeroPlume {
-				flushZeroPlumeLines()
-			}
-			s.finishBlock(blockIdx, StatusFailure, 1)
+			msg := "AI session unavailable.\n"
+			appendBlockText(msg)
+			rec := execSess.RecordBlock(BlockAITurn, SourceUserShell, rawInput, msg, 1, startedAt)
+			s.finishBlockWithRecord(blockIdx, rec.ID, BlockAITurn, StatusFailure, 1, startedAt)
 			return
 		}
-		s.runAIFallback(ctx, blockIdx, mode, rawInput, aiRunner, appendBlockText, streamZeroPlumeLines, flushZeroPlumeLines)
+		s.runAIFallback(ctx, blockIdx, rawInput, aiRunner, execSess, startedAt, appendBlockText)
 	}()
 }
 
-func (s *Shell) updateZeroPlumeFeedback(feedback string) {
+func (s *Shell) updateActiveArtifactFeedback(blockIdx int, feedback string) {
 	if feedback == "" {
 		return
 	}
@@ -874,25 +1077,22 @@ func (s *Shell) updateZeroPlumeFeedback(feedback string) {
 	for i := 0; i < len(feedback); i++ {
 		ch := feedback[i]
 		switch ch {
-		case '\r':
-			cur = ""
-		case '\n':
-			trimmed := strings.TrimSpace(cur)
-			if trimmed != "" && s.opts.WriteToScrollback != nil {
-				lineToEmit := cur
-				s.mu.Unlock()
-				s.emitScrollbackLine(lineToEmit)
-				s.mu.Lock()
-			}
+		case '\r', '\n':
 			cur = ""
 		default:
 			cur += string(ch)
 		}
 	}
-	if strings.TrimSpace(cur) == "" {
-		cur = ""
-	}
+	cur = strings.TrimSpace(cur)
 	s.statusLine = cur
+	if blockIdx >= 0 && blockIdx < len(s.blocks) {
+		if cur != "" {
+			glyph := stackSpinnerFrames[s.animFrame%len(stackSpinnerFrames)]
+			s.blocks[blockIdx].AnimLine = glyph + " " + cur
+		} else {
+			s.blocks[blockIdx].AnimLine = ""
+		}
+	}
 	s.mu.Unlock()
 	s.invalidate()
 }
@@ -900,64 +1100,91 @@ func (s *Shell) updateZeroPlumeFeedback(feedback string) {
 func (s *Shell) runAIFallback(
 	ctx context.Context,
 	blockIdx int,
-	mode ShellMode,
 	prompt string,
 	aiRunner AIRunner,
+	execSess *ExecutionSession,
+	startedAt time.Time,
 	appendBlockText func(string),
-	streamZeroPlumeLines func(string),
-	flushZeroPlumeLines func(),
 ) {
 	err := aiRunner.RunTurn(
 		ctx,
 		prompt,
 		func(feedback string) {
-			appendBlockText(feedback)
-			if mode == ModeZeroPlume {
-				s.updateZeroPlumeFeedback(feedback)
-			}
+			s.updateActiveArtifactFeedback(blockIdx, feedback)
 		},
 		func(content string) {
-			appendBlockText(content)
-			if mode == ModeZeroPlume {
-				s.mu.Lock()
-				s.statusLine = ""
-				s.mu.Unlock()
-				streamZeroPlumeLines(content)
+			s.mu.Lock()
+			s.statusLine = ""
+			if blockIdx >= 0 && blockIdx < len(s.blocks) {
+				s.blocks[blockIdx].AnimLine = ""
 			}
+			s.mu.Unlock()
+			appendBlockText(content)
 		},
 	)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			appendBlockText("\n^C\n")
-			if mode == ModeZeroPlume {
-				streamZeroPlumeLines("\n^C\n")
-				flushZeroPlumeLines()
+			var recID int
+			if execSess != nil {
+				s.mu.Lock()
+				out := s.blocks[blockIdx].Output.String()
+				s.mu.Unlock()
+				recID = execSess.RecordBlock(BlockAITurn, SourceUserShell, prompt, out, 130, startedAt).ID
 			}
-			s.finishBlock(blockIdx, StatusError, 130)
+			s.finishBlockWithRecord(blockIdx, recID, BlockAITurn, StatusError, 130, startedAt)
 			return
 		}
 		errMsg := fmt.Sprintf("\n[ai error: %v]\n", err)
 		appendBlockText(errMsg)
-		if mode == ModeZeroPlume {
-			streamZeroPlumeLines(errMsg)
-			flushZeroPlumeLines()
+		var recID int
+		if execSess != nil {
+			s.mu.Lock()
+			out := s.blocks[blockIdx].Output.String()
+			s.mu.Unlock()
+			recID = execSess.RecordBlock(BlockAITurn, SourceUserShell, prompt, out, 1, startedAt).ID
 		}
-		s.finishBlock(blockIdx, StatusFailure, 1)
+		s.finishBlockWithRecord(blockIdx, recID, BlockAITurn, StatusFailure, 1, startedAt)
 		return
 	}
-	if mode == ModeZeroPlume {
-		flushZeroPlumeLines()
+	var recID int
+	if execSess != nil {
+		s.mu.Lock()
+		out := s.blocks[blockIdx].Output.String()
+		s.mu.Unlock()
+		recID = execSess.RecordBlock(BlockAITurn, SourceUserShell, prompt, out, 0, startedAt).ID
 	}
-	s.finishBlock(blockIdx, StatusSuccess, 0)
+	s.finishBlockWithRecord(blockIdx, recID, BlockAITurn, StatusSuccess, 0, startedAt)
+}
+
+func (s *Shell) finishBlockWithRecord(
+	blockIdx int,
+	id int,
+	kind BlockKind,
+	status CommandBlockStatus,
+	exitCode int,
+	startedAt time.Time,
+) {
+	s.mu.Lock()
+	if blockIdx >= 0 && blockIdx < len(s.blocks) {
+		if id > 0 {
+			s.blocks[blockIdx].ID = id
+		}
+		if kind != "" {
+			s.blocks[blockIdx].Kind = kind
+		}
+		s.blocks[blockIdx].AnimLine = ""
+		s.blocks[blockIdx].Status = status
+		s.blocks[blockIdx].ExitCode = exitCode
+		if !startedAt.IsZero() {
+			s.blocks[blockIdx].Duration = time.Since(startedAt)
+		}
+	}
+	s.mu.Unlock()
 }
 
 func (s *Shell) finishBlock(blockIdx int, status CommandBlockStatus, exitCode int) {
-	s.mu.Lock()
-	if blockIdx >= 0 && blockIdx < len(s.blocks) {
-		s.blocks[blockIdx].Status = status
-		s.blocks[blockIdx].ExitCode = exitCode
-	}
-	s.mu.Unlock()
+	s.finishBlockWithRecord(blockIdx, 0, "", status, exitCode, time.Time{})
 }
 
 // AddLine adds output to the last CommandBlock, creating one if needed.

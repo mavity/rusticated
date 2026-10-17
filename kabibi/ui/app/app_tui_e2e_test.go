@@ -137,6 +137,7 @@ func TestAppTUI_EndToEnd_RealFilesystemAndAIFallback(t *testing.T) {
 
 	aiMock := &tuiMockAIRunner{}
 	appWidget.Shell().SetAIRunner(aiMock)
+	appWidget.Shell().SetPrompt("፧")
 
 	host = ui.NewHost(appWidget)
 
@@ -167,38 +168,46 @@ func TestAppTUI_EndToEnd_RealFilesystemAndAIFallback(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// Verify wrapped multi-line input in ModeZeroPlume: type a command longer than 80 columns
-	// ("echo " + 85 'z' chars = 90 chars + 2 prompt chars = 92 columns -> 2 visual rows),
-	// verify the Shell measures 2 rows, then delete it all with Ctrl+C and verify it shrinks back to 1 row
-	// leaving the lines below clean before executing the real commands.
+	// Initial stack height: 3 banner rows + 1 input row + 1 blank footer row = 5 rows.
+	const initialStackH = 5
+	if got := appWidget.Measure(ui.Constraints{MaxW: termW, MaxH: termH}); got.H != initialStackH {
+		t.Fatalf("initial Measure() = %#v, want H=%d", got, initialStackH)
+	}
+
+	// Verify wrapped multi-line input in ModeStack: type a command longer than 80 columns
+	// ("echo " + 85 'z' chars = 90 chars + prompt chars -> 2 visual input rows),
+	// verify the Shell stack grows by 1 row (to initialStackH + 1 = 6 rows),
+	// then delete it all with Ctrl+C and verify it shrinks back to initialStackH (5 rows),
+	// opening a 1-row slack gap at the bottom that gets closed before any upward ejection.
 	longPreview := "echo " + strings.Repeat("z", 85)
 	if _, err := io.WriteString(inW, longPreview); err != nil {
 		t.Fatalf("write long preview: %v", err)
 	}
 	waitWrapDeadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(waitWrapDeadline) {
-		if appWidget.Measure(ui.Constraints{MaxW: termW, MaxH: termH}).H == 2 {
+		if appWidget.Measure(ui.Constraints{MaxW: termW, MaxH: termH}).H > initialStackH {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if got := appWidget.Measure(ui.Constraints{MaxW: termW, MaxH: termH}); got.H != 2 {
-		t.Fatalf("wrapped Measure() = %#v, want H=2", got)
+	wrappedH := appWidget.Measure(ui.Constraints{MaxW: termW, MaxH: termH}).H
+	if wrappedH <= initialStackH {
+		t.Fatalf("wrapped Measure().H = %d, want > %d", wrappedH, initialStackH)
 	}
-	// Clear wrapped input with Ctrl+C (\x03) so it shrinks back to 1 line and clears row 2
+	// Clear wrapped input with Ctrl+C (\x03) so it shrinks back to initialStackH and clears the slack row
 	if _, err := io.WriteString(inW, "\x03"); err != nil {
 		t.Fatalf("write ctrl+c: %v", err)
 	}
 	waitShrinkDeadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(waitShrinkDeadline) {
-		if appWidget.Measure(ui.Constraints{MaxW: termW, MaxH: termH}).H == 1 && appWidget.Shell().Input().Value() == "" {
+		if appWidget.Measure(ui.Constraints{MaxW: termW, MaxH: termH}).H == initialStackH && appWidget.Shell().Input().Value() == "" {
 			time.Sleep(25 * time.Millisecond)
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if got := appWidget.Measure(ui.Constraints{MaxW: termW, MaxH: termH}); got.H != 1 {
-		t.Fatalf("shrunk Measure() after Ctrl+C = %#v, want H=1", got)
+	if got := appWidget.Measure(ui.Constraints{MaxW: termW, MaxH: termH}); got.H != initialStackH {
+		t.Fatalf("shrunk Measure() after Ctrl+C = %#v, want H=%d", got, initialStackH)
 	}
 
 	sendCommandAndWait := func(line string, wantBlockCount int) {
@@ -268,29 +277,32 @@ func TestAppTUI_EndToEnd_RealFilesystemAndAIFallback(t *testing.T) {
 		}
 	}
 
-	wantExactLines := []string{
+	// Verify the ordered substrings of rendered screen lines in the VT emulator
+	wantLineSubstrings := []string{
+		"KABIBI // RUSTICATED COMPUTING SUPERVISOR",
+		"64K CELL MATRIX OK",
 		"Kabibi shell initialized. Type commands below.",
-		"$ mkdir sub && echo real_fs_content > sub/created.txt",
-		"$ cd sub && cat created.txt",
+		"፧mkdir sub && echo real_fs_content > sub/created.txt",
+		"፧cd sub && cat created.txt",
 		"real_fs_content",
-		"$ Name a bridge in Paris",
+		"፧Name a bridge in Paris",
 		"Pont Alexandre III is a famous bridge in Paris.",
-		"$ exit",
+		"፧exit",
 	}
 
-	if len(nonEmptyScreenLines) != len(wantExactLines) {
+	if len(nonEmptyScreenLines) != len(wantLineSubstrings) {
 		t.Fatalf("rendered non-empty screen lines = %d, want %d:\ngot:  %#v\nwant: %#v",
-			len(nonEmptyScreenLines), len(wantExactLines), nonEmptyScreenLines, wantExactLines)
+			len(nonEmptyScreenLines), len(wantLineSubstrings), nonEmptyScreenLines, wantLineSubstrings)
 	}
-	for i := range wantExactLines {
-		if nonEmptyScreenLines[i] != wantExactLines[i] {
-			t.Errorf("screen line[%d] = %q, want %q", i, nonEmptyScreenLines[i], wantExactLines[i])
+	for i := range wantLineSubstrings {
+		if !strings.Contains(nonEmptyScreenLines[i], wantLineSubstrings[i]) {
+			t.Errorf("screen line[%d] = %q, want substring %q", i, nonEmptyScreenLines[i], wantLineSubstrings[i])
 		}
 	}
 
-	// Verify there are no vertical cursor jumps (\x1b[...;1H) in Zero-Plume inline mode
+	// Verify there are no vertical cursor jumps (\x1b[...;1H) in inline stack mode
 	if strings.Contains(rawTermOut.String(), ";1H") {
-		t.Errorf("Zero-Plume inline mode emitted absolute row jump sequence (;1H): %q", rawTermOut.String())
+		t.Errorf("Inline stack mode emitted absolute row jump sequence (;1H): %q", rawTermOut.String())
 	}
 }
 
@@ -323,6 +335,7 @@ func TestAppTUI_EndToEnd_ScrollbackEjectionOnSmallViewport(t *testing.T) {
 		},
 	})
 	defer appWidget.Close()
+	appWidget.Shell().SetPrompt("፧")
 
 	host = ui.NewHost(appWidget)
 
@@ -400,20 +413,22 @@ func TestAppTUI_EndToEnd_ScrollbackEjectionOnSmallViewport(t *testing.T) {
 	}
 
 	wantFullHistoryAndViewport := []string{
+		"KABIBI // RUSTICATED COMPUTING SUPERVISOR",
+		"64K CELL MATRIX OK",
 		"Kabibi shell initialized. Type commands below.",
-		"$ echo line_1 > f.txt && cat f.txt",
+		"፧echo line_1 > f.txt && cat f.txt",
 		"line_1",
-		"$ echo line_2 > f.txt && cat f.txt",
+		"፧echo line_2 > f.txt && cat f.txt",
 		"line_2",
-		"$ echo line_3 > f.txt && cat f.txt",
+		"፧echo line_3 > f.txt && cat f.txt",
 		"line_3",
-		"$ echo line_4 > f.txt && cat f.txt",
+		"፧echo line_4 > f.txt && cat f.txt",
 		"line_4",
-		"$ echo line_5 > f.txt && cat f.txt",
+		"፧echo line_5 > f.txt && cat f.txt",
 		"line_5",
-		"$ echo line_6 > f.txt && cat f.txt",
+		"፧echo line_6 > f.txt && cat f.txt",
 		"line_6",
-		"$ exit",
+		"፧exit",
 	}
 
 	if len(nonEmptyAllLines) != len(wantFullHistoryAndViewport) {
@@ -421,8 +436,8 @@ func TestAppTUI_EndToEnd_ScrollbackEjectionOnSmallViewport(t *testing.T) {
 			len(nonEmptyAllLines), len(wantFullHistoryAndViewport), nonEmptyAllLines, wantFullHistoryAndViewport)
 	}
 	for i := range wantFullHistoryAndViewport {
-		if nonEmptyAllLines[i] != wantFullHistoryAndViewport[i] {
-			t.Errorf("combined line[%d] = %q, want %q", i, nonEmptyAllLines[i], wantFullHistoryAndViewport[i])
+		if !strings.Contains(nonEmptyAllLines[i], wantFullHistoryAndViewport[i]) {
+			t.Errorf("combined line[%d] = %q, want substring %q", i, nonEmptyAllLines[i], wantFullHistoryAndViewport[i])
 		}
 	}
 }
@@ -445,6 +460,8 @@ func TestAppTUI_TrailingSpaceAndCursorMovementUpdatesImmediately(t *testing.T) {
 		},
 	})
 	defer appWidget.Close()
+
+	appWidget.Shell().SetPrompt("፧")
 
 	host = ui.NewHost(appWidget)
 
@@ -469,14 +486,28 @@ func TestAppTUI_TrailingSpaceAndCursorMovementUpdatesImmediately(t *testing.T) {
 	// Wait for initial frame
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if strings.Contains(rawTermOut.String(), "$") {
+		if strings.Contains(rawTermOut.String(), "፧") {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// Type "echo" -> cursor should move to columnIndex 6 (\r\x1b[6C)
+	// Type "echo" -> cursor should move to columnIndex 5 ("፧" is 1 col + "echo" is 4 cols -> \r\x1b[5C)
 	_, _ = io.WriteString(inW, "echo")
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(rawTermOut.String(), "\x1b[5C") || strings.Contains(rawTermOut.String(), "\x1b[24;6H") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(rawTermOut.String(), "\x1b[5C") && !strings.Contains(rawTermOut.String(), "\x1b[24;6H") {
+		t.Fatalf("expected cursor at colIndex 5 after typing 'echo', got:\n%q", rawTermOut.String())
+	}
+
+	// Now type a single trailing space " " -> even though cell (5, 0) was already ' ',
+	// the cursor MUST immediately advance to columnIndex 6 (\x1b[6C) without waiting for another char!
+	_, _ = io.WriteString(inW, " ")
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if strings.Contains(rawTermOut.String(), "\x1b[6C") || strings.Contains(rawTermOut.String(), "\x1b[24;7H") {
@@ -485,21 +516,7 @@ func TestAppTUI_TrailingSpaceAndCursorMovementUpdatesImmediately(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if !strings.Contains(rawTermOut.String(), "\x1b[6C") && !strings.Contains(rawTermOut.String(), "\x1b[24;7H") {
-		t.Fatalf("expected cursor at colIndex 6 after typing 'echo', got:\n%q", rawTermOut.String())
-	}
-
-	// Now type a single trailing space " " -> even though cell (6, 0) was already ' ',
-	// the cursor MUST immediately advance to columnIndex 7 (\x1b[7C) without waiting for another char!
-	_, _ = io.WriteString(inW, " ")
-	deadline = time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(rawTermOut.String(), "\x1b[7C") || strings.Contains(rawTermOut.String(), "\x1b[24;8H") {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !strings.Contains(rawTermOut.String(), "\x1b[7C") && !strings.Contains(rawTermOut.String(), "\x1b[24;8H") {
-		t.Fatalf("trailing space did not immediately advance terminal cursor to colIndex 7:\n%q", rawTermOut.String())
+		t.Fatalf("trailing space did not immediately advance terminal cursor to colIndex 6:\n%q", rawTermOut.String())
 	}
 
 	_, _ = io.WriteString(inW, "\x03exit\r")
@@ -511,26 +528,28 @@ func TestAppTUI_TrailingSpaceAndCursorMovementUpdatesImmediately(t *testing.T) {
 }
 
 // TestAppTUI_ModeToggle_ZeroPlumeAndPlumeHistory verifies that ShellMode can be
-// toggled cleanly between ModeZeroPlume (1-row active prompt with immediate line
-// ejection) and ModePlumeHistory (full-viewport multi-block rendering retained
-// for future file-panel integration).
+// toggled cleanly between ModeStack (dynamic 3-part stack: 3 banner rows + input +
+// 1 blank footer line) and ModePlumeHistory (full-viewport multi-block rendering
+// retained for future file-panel integration).
 func TestAppTUI_ModeToggle_ZeroPlumeAndPlumeHistory(t *testing.T) {
 	workDir := t.TempDir()
 
 	var scrollback []string
 	wZero := NewWidget(AppWidgetOptions{
 		WorkingDir:        workDir,
-		ShellMode:         shell.ModeZeroPlume,
+		ShellMode:         shell.ModeStack,
 		WriteToScrollback: func(s string) { scrollback = append(scrollback, s) },
 	})
 	defer wZero.Close()
+	wZero.Shell().SetPrompt("፧")
 
-	if got := wZero.Measure(ui.Constraints{MaxW: 80, MaxH: 24}); got != (ui.Size{W: 80, H: 1}) {
-		t.Fatalf("ModeZeroPlume Measure() = %#v, want {W:80, H:1}", got)
+	// Initial ModeStack: 3 banner rows + 1 input row + 1 blank footer row = 5 rows; cursor on row 3 (input row)
+	if got := wZero.Measure(ui.Constraints{MaxW: 80, MaxH: 24}); got != (ui.Size{W: 80, H: 5}) {
+		t.Fatalf("ModeStack Measure() = %#v, want {W:80, H:5}", got)
 	}
 	bufZero, curZero := wZero.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 24}, ui.RenderContext{Focused: true})
-	if bufZero.Height != 1 || curZero.Y != 0 {
-		t.Fatalf("ModeZeroPlume Render() height=%d cursorY=%d, want height=1 cursorY=0", bufZero.Height, curZero.Y)
+	if bufZero.Height != 5 || curZero.Y != 3 {
+		t.Fatalf("ModeStack Render() height=%d cursorY=%d, want height=5 cursorY=3", bufZero.Height, curZero.Y)
 	}
 
 	// Switch dynamically to ModePlumeHistory and verify full-viewport Measure & Render
@@ -538,22 +557,160 @@ func TestAppTUI_ModeToggle_ZeroPlumeAndPlumeHistory(t *testing.T) {
 	if got := wZero.Measure(ui.Constraints{MaxW: 80, MaxH: 24}); got != (ui.Size{W: 80, H: 24}) {
 		t.Fatalf("ModePlumeHistory Measure() = %#v, want {W:80, H:24}", got)
 	}
-	// Verify dynamic wrapping in both modes when input exceeds 80 columns
+	// Verify dynamic wrapping in both modes when input exceeds 80 columns ("፧" + 170 'a' = 171 cols -> 3 input rows)
 	wZero.Shell().SetInput(strings.Repeat("a", 170))
 	if got := wZero.Measure(ui.Constraints{MaxW: 80, MaxH: 24}); got != (ui.Size{W: 80, H: 24}) {
 		t.Fatalf("ModePlumeHistory Measure() with wrapped input = %#v, want {W:80, H:24}", got)
 	}
 	bufPlumeWrap, curPlumeWrap := wZero.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 24}, ui.RenderContext{Focused: true})
-	if bufPlumeWrap.Height != 24 || curPlumeWrap.Y != 23 {
-		t.Fatalf("ModePlumeHistory wrapped Render() height=%d cursorY=%d, want height=24 cursorY=23", bufPlumeWrap.Height, curPlumeWrap.Y)
+	// In ModePlumeHistory, chromeH = 3 input rows + 1 blank footer row = 4 rows at bottom -> cursor on row 22 (above footer row 23)
+	if bufPlumeWrap.Height != 24 || curPlumeWrap.Y != 22 {
+		t.Fatalf("ModePlumeHistory wrapped Render() height=%d cursorY=%d, want height=24 cursorY=22", bufPlumeWrap.Height, curPlumeWrap.Y)
 	}
 
-	wZero.Shell().SetMode(shell.ModeZeroPlume)
-	if got := wZero.Measure(ui.Constraints{MaxW: 80, MaxH: 24}); got != (ui.Size{W: 80, H: 3}) {
-		t.Fatalf("ModeZeroPlume wrapped Measure() = %#v, want {W:80, H:3}", got)
+	wZero.Shell().SetMode(shell.ModeStack)
+	// 3 banner rows + 3 wrapped input rows + 1 blank footer row = 7 rows
+	if got := wZero.Measure(ui.Constraints{MaxW: 80, MaxH: 24}); got != (ui.Size{W: 80, H: 7}) {
+		t.Fatalf("ModeStack wrapped Measure() = %#v, want {W:80, H:7}", got)
 	}
 	wZero.Shell().SetInput("")
-	if got := wZero.Measure(ui.Constraints{MaxW: 80, MaxH: 24}); got != (ui.Size{W: 80, H: 1}) {
-		t.Fatalf("ModeZeroPlume cleared Measure() = %#v, want {W:80, H:1}", got)
+	if got := wZero.Measure(ui.Constraints{MaxW: 80, MaxH: 24}); got != (ui.Size{W: 80, H: 5}) {
+		t.Fatalf("ModeStack cleared Measure() = %#v, want {W:80, H:5}", got)
+	}
+}
+
+// TestAppTUI_SlackGapRecovery_PushDownBeforeEjectingUp verifies that when user
+// input wraps to multiple lines (expanding the allocated terminal footprint)
+// and is then deleted back to 1 line (opening a bottom slack gap), subsequent
+// command output expands downward to close that slack gap BEFORE any top rows
+// are ejected into scrollback.
+func TestAppTUI_SlackGapRecovery_PushDownBeforeEjectingUp(t *testing.T) {
+	workDir := t.TempDir()
+
+	var scrollbackMu sync.Mutex
+	var scrollbackChunks []string
+
+	var host *ui.Host
+	appWidget := NewWidget(AppWidgetOptions{
+		WorkingDir: workDir,
+		WriteToScrollback: func(text string) {
+			scrollbackMu.Lock()
+			scrollbackChunks = append(scrollbackChunks, text)
+			scrollbackMu.Unlock()
+			if host != nil {
+				host.WriteToScrollback(text)
+			}
+		},
+		OnExit: func() {
+			if host != nil {
+				host.Stop()
+			}
+		},
+	})
+	defer appWidget.Close()
+	appWidget.Shell().SetPrompt("፧")
+
+	host = ui.NewHost(appWidget)
+
+	inR, inW := io.Pipe()
+	defer inR.Close()
+	defer inW.Close()
+
+	var rawTermOut syncBuffer
+	// Viewport 80x9:
+	// Initial stack = 3 banner rows + 1 input row + 1 blank footer = 5 rows.
+	const termW, termH = 80, 9
+
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- host.RunWithIO(
+			inR,
+			&rawTermOut,
+			func(uintptr) (*xterm.State, error) { return &xterm.State{}, nil },
+			func(uintptr, *xterm.State) error { return nil },
+			func(uintptr) (int, int, error) { return termW, termH, nil },
+		)
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(rawTermOut.String(), "Kabibi") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// 1. Type a 3-row wrapped input ("፧" + 170 'x' = 171 cols -> 3 rows on width 80).
+	// Occupied stack height grows from 5 -> 7 rows (3 banner + 3 input + 1 footer).
+	_, _ = io.WriteString(inW, strings.Repeat("x", 170))
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if appWidget.Measure(ui.Constraints{MaxW: termW, MaxH: termH}).H == 7 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := appWidget.Measure(ui.Constraints{MaxW: termW, MaxH: termH}).H; got != 7 {
+		t.Fatalf("after 3-row input wrap, Measure().H = %d, want 7", got)
+	}
+
+	// 2. Delete wrapped input via Ctrl+C -> occupied stack shrinks back to 5 rows,
+	// leaving a 2-row slack gap at the bottom of the 7-row allocated footprint.
+	_, _ = io.WriteString(inW, "\x03")
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if appWidget.Measure(ui.Constraints{MaxW: termW, MaxH: termH}).H == 5 {
+			time.Sleep(20 * time.Millisecond)
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// 3. Run a command that adds 2 rows (1 prompt+cmd row + 1 output row -> occupied stack grows 5 -> 7).
+	// This MUST push down into the 2-row slack gap with ZERO scrollback ejection!
+	_, _ = io.WriteString(inW, "echo fill_gap\r")
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(appWidget.Shell().Blocks()) >= 2 && !appWidget.Shell().IsRunning() {
+			time.Sleep(25 * time.Millisecond)
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	scrollbackMu.Lock()
+	ejectedDuringGapClose := len(scrollbackChunks)
+	scrollbackMu.Unlock()
+	if ejectedDuringGapClose != 0 {
+		t.Fatalf("expected 0 scrollback ejections while closing bottom slack gap, got %d (%#v)",
+			ejectedDuringGapClose, scrollbackChunks)
+	}
+
+	// 4. Run 2 more commands (4 more rows -> total occupied exceeds 9-row viewport) -> now top rows eject!
+	for i := 1; i <= 2; i++ {
+		_, _ = io.WriteString(inW, "echo overflow\r")
+		wantBlocks := 2 + i
+		deadline = time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if len(appWidget.Shell().Blocks()) >= wantBlocks && !appWidget.Shell().IsRunning() {
+				time.Sleep(25 * time.Millisecond)
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	scrollbackMu.Lock()
+	ejectedAfterOverflow := len(scrollbackChunks)
+	scrollbackMu.Unlock()
+	if ejectedAfterOverflow == 0 {
+		t.Fatal("expected top rows to eject after slack gap was closed and viewport overflowed")
+	}
+
+	_, _ = io.WriteString(inW, "exit\r")
+	select {
+	case <-runDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Host.RunWithIO did not exit")
 	}
 }

@@ -58,6 +58,7 @@ type Host struct {
 	prevCursorVisible, hasRenderedOnce bool
 	inlineMode                         bool
 	prevInlineHeight                   int
+	allocHeight                        int // Peak allocated inline height (supports slack gap G = allocHeight - occupiedHeight)
 
 	scrollbackMu    sync.Mutex
 	scrollbackQueue []string
@@ -151,11 +152,10 @@ func (h *Host) runCore(
 			_ = inputReader.Cancel()
 			_ = inputReader.Close()
 		}
-		if h.inlineMode {
-			if h.prevCursorY > 0 {
-				fmt.Fprintf(h.out, "\x1b[%dA", h.prevCursorY)
-			}
-			h.out.WriteString("\r\x1b[2K\x1b[J\x1b[?25h")
+		if h.inlineMode && h.hasRenderedOnce {
+			// Move to the start of the line below the last occupied row (h.prevCursorY on exit),
+			// clear any blank footer/slack rows below it, and show the cursor.
+			h.out.WriteString("\r\n\x1b[2K\x1b[J\x1b[?25h")
 		}
 		h.out.WriteString("\x1b[?1006l\x1b[?1000l")
 		h.out.Flush()
@@ -236,8 +236,6 @@ func (h *Host) runCore(
 func (h *Host) processLoop(getSizeFunc func(fd uintptr) (w, ht int, err error)) {
 	for {
 		select {
-		case <-h.stopCh:
-			return
 		case msg, ok := <-h.msgCh:
 			if !ok {
 				return
@@ -268,6 +266,26 @@ func (h *Host) processLoop(getSizeFunc func(fd uintptr) (w, ht int, err error)) 
 		drained:
 			if needsRender {
 				h.runFrame(getSizeFunc)
+			}
+		case <-h.stopCh:
+			// Drain any final messages queued just before Stop() was invoked
+			needsRender := false
+			for {
+				select {
+				case msg, ok := <-h.msgCh:
+					if !ok || msg.kind == hostMsgStop {
+						if needsRender {
+							h.runFrame(getSizeFunc)
+						}
+						return
+					}
+					h.handleHostMsg(msg, &needsRender, getSizeFunc)
+				default:
+					if needsRender {
+						h.runFrame(getSizeFunc)
+					}
+					return
+				}
 			}
 		}
 	}
@@ -367,14 +385,14 @@ func (h *Host) runFrame(
 		return
 	}
 
-	// Re-allocate both buffers on first use or after terminal resize.
-	if h.currBuf.Width != w || h.currBuf.Height != ht {
+	// Re-allocate both buffers on first use or after terminal resize in full-screen mode.
+	if !h.inlineMode && (h.currBuf.Width != w || h.currBuf.Height != ht) {
 		h.currBuf = terminal.NewCellBuf(w, ht)
 		h.prevBuf = terminal.NewCellBuf(w, ht)
 	}
 
 	// Measure → Render: let the widget hierarchy declare space needs before layout.
-	measured := h.root.Measure(Constraints{MaxW: w, MaxH: ht})
+	_ = h.root.Measure(Constraints{MaxW: w, MaxH: ht})
 	rendered, cursor := h.root.Render(
 		terminal.Rect{X: 0, Y: 0, W: w, H: ht},
 		RenderContext{Focused: true, Invalidate: h.Invalidate},
@@ -383,20 +401,91 @@ func (h *Host) runFrame(
 	h.cursorY = cursor.Y
 	h.cursorVisible = cursor.Visible
 
-	// Inline mode (Zero-Plume): render the active prompt (1 or more wrapped rows)
-	// using relative cursor movement (\r / \x1b[A / \x1b[B) without jumping to
-	// absolute screen coordinates.
-	if rendered.Height > 0 && rendered.Height < ht && measured.H == rendered.Height && ht > 1 {
+	// Inline Stack mode: render the active stack (banner + blocks + prompt + footer + any slack gap)
+	// using relative cursor movement (\r / \x1b[A / \x1b[B) and per-row dirty diffing without
+	// jumping to absolute screen coordinates unless full-screen panel mode is active.
+	if rendered.Height > 0 && rendered.Height <= ht && (rendered.Height < ht || h.inlineMode) && ht > 1 {
 		h.inlineMode = true
-		inlineH := rendered.Height
-		heightChanged := h.currBuf.Width != w || h.currBuf.Height != inlineH
-		if heightChanged {
-			h.currBuf = terminal.NewCellBuf(w, inlineH)
-			h.prevBuf = terminal.NewCellBuf(w, inlineH)
+		occH := rendered.Height
+		if occH > h.allocHeight {
+			h.allocHeight = occH
 		}
-		copy(h.currBuf.Cells(), rendered.Cells())
+		if h.allocHeight > ht {
+			h.allocHeight = ht
+		}
+		bufH := h.allocHeight
+		if occH > bufH {
+			bufH = occH
+		}
+
+		// Check if Render() enqueued scrollback ejection lines during this frame.
+		h.scrollbackMu.Lock()
+		sbLines := h.scrollbackQueue
+		h.scrollbackQueue = nil
+		h.scrollbackMu.Unlock()
+
+		if len(sbLines) > 0 {
+			var normalizedLines []string
+			for _, rawChunk := range sbLines {
+				clean := strings.ReplaceAll(rawChunk, "\r\n", "\n")
+				clean = strings.TrimSuffix(clean, "\n")
+				normalizedLines = append(normalizedLines, strings.Split(clean, "\n")...)
+			}
+			scrollBuf := terminal.FromANSI(normalizedLines, w)
+
+			h.currBuf = terminal.NewCellBuf(w, bufH)
+			h.prevBuf = terminal.NewCellBuf(w, bufH)
+			copy(h.currBuf.Cells()[:occH*w], rendered.Cells()[:occH*w])
+
+			if h.hasRenderedOnce && h.prevCursorY > 0 {
+				fmt.Fprintf(h.out, "\x1b[%dA", h.prevCursorY)
+			}
+			if scrollBuf.Height > 0 {
+				h.out.WriteString("\r\x1b[2K\x1b[J")
+				h.out.WriteString(terminal.ToANSI(scrollBuf))
+				h.out.WriteString("\r\n")
+			}
+			h.prevInlineHeight = bufH
+			h.renderInlineRows(bufH)
+			h.positionInlineCursor(bufH - 1)
+			copy(h.prevBuf.Cells(), h.currBuf.Cells())
+			h.prevCursorX = h.cursorX
+			h.prevCursorY = h.cursorY
+			h.prevCursorVisible = h.cursorVisible
+			h.hasRenderedOnce = true
+			h.out.Flush()
+			return
+		}
+
+		widthChanged := h.currBuf.Width != w
+		if widthChanged {
+			// On width change, resize both buffers to the current occupied height.
+			bufH = occH
+			h.allocHeight = occH
+			h.currBuf = terminal.NewCellBuf(w, bufH)
+			h.prevBuf = terminal.NewCellBuf(w, bufH)
+		} else if h.currBuf.Height != bufH {
+			newCurr := terminal.NewCellBuf(w, bufH)
+			newPrev := terminal.NewCellBuf(w, bufH)
+			if h.hasRenderedOnce && h.prevBuf.Width == w {
+				copyRows := h.prevBuf.Height
+				if copyRows > bufH {
+					copyRows = bufH
+				}
+				copy(newPrev.Cells()[:copyRows*w], h.prevBuf.Cells()[:copyRows*w])
+			}
+			h.currBuf = newCurr
+			h.prevBuf = newPrev
+		} else {
+			blank := terminal.NewCellBuf(w, bufH)
+			copy(h.currBuf.Cells(), blank.Cells())
+		}
+
+		// Copy the rendered occupied stack [0 : occH) into currBuf; slack rows [occH : bufH) remain blank.
+		copy(h.currBuf.Cells()[:occH*w], rendered.Cells()[:occH*w])
+
 		_, _, changed := h.spanDetect()
-		if heightChanged {
+		if !h.hasRenderedOnce || widthChanged {
 			changed = true
 		}
 		cursorChanged := !h.hasRenderedOnce ||
@@ -407,20 +496,18 @@ func (h *Host) runFrame(
 			return
 		}
 
-		// Move terminal cursor back to the top row (row 0) of the inline region.
-		if h.hasRenderedOnce && h.prevCursorY > 0 {
-			fmt.Fprintf(h.out, "\x1b[%dA", h.prevCursorY)
+		curY := 0
+		if h.hasRenderedOnce {
+			curY = h.prevCursorY
 		}
 
 		if changed {
-			h.renderInlineRows(inlineH)
+			curY = h.renderInlineDiff(curY, bufH, !h.hasRenderedOnce || widthChanged)
 			terminal.SwapBufCells(&h.currBuf, &h.prevBuf)
-			h.positionInlineCursor(inlineH - 1)
-		} else {
-			h.positionInlineCursor(0)
 		}
+		h.positionInlineCursor(curY)
 		h.out.Flush()
-		h.prevInlineHeight = inlineH
+		h.prevInlineHeight = bufH
 		h.prevCursorX = h.cursorX
 		h.prevCursorY = h.cursorY
 		h.prevCursorVisible = h.cursorVisible
@@ -429,6 +516,7 @@ func (h *Host) runFrame(
 	}
 	h.inlineMode = false
 	h.prevInlineHeight = 0
+	h.allocHeight = 0
 
 	// Copy rendered frame into currBuf; widgets must overwrite every cell they own.
 	copy(h.currBuf.Cells(), rendered.Cells())
@@ -522,29 +610,105 @@ func (h *Host) writeCursorSequence() {
 	}
 }
 
-// renderInlineRows writes each row of h.currBuf starting from the current terminal
-// line (row 0 of the inline region) and clears any leftover rows below when the
-// inline region shrinks from h.prevInlineHeight to inlineH. Leaves the terminal
-// cursor on row inlineH-1.
+// rowChanged reports whether row y differs between h.currBuf and h.prevBuf.
+func (h *Host) rowChanged(y int) bool {
+	w := h.currBuf.Width
+	if w <= 0 || y < 0 || y >= h.currBuf.Height || y >= h.prevBuf.Height {
+		return true
+	}
+	start := y * w
+	end := start + w
+	curr := h.currBuf.Cells()[start:end]
+	prev := h.prevBuf.Cells()[start:end]
+	for i := 0; i < w; i++ {
+		if curr[i] != prev[i] {
+			return true
+		}
+	}
+	return false
+}
+
+// moveInlineVertical moves the terminal cursor from curY to targetY within the
+// inline stack region, using \r\n only when stepping onto virgin rows >= prevAlloc
+// so existing terminal rows are never scrolled unintentionally.
+func (h *Host) moveInlineVertical(curY, targetY int, prevAlloc *int) int {
+	if targetY < curY {
+		fmt.Fprintf(h.out, "\x1b[%dA", curY-targetY)
+		return targetY
+	}
+	for curY < targetY {
+		if curY+1 < *prevAlloc {
+			// Within already-allocated rows: jump directly up to (*prevAlloc - 1) or targetY
+			stepTo := targetY
+			if *prevAlloc-1 < stepTo {
+				stepTo = *prevAlloc - 1
+			}
+			if stepTo > curY {
+				fmt.Fprintf(h.out, "\x1b[%dB", stepTo-curY)
+				curY = stepTo
+				continue
+			}
+		}
+		// Stepping onto a newly allocated row at the bottom of the inline footprint
+		h.out.WriteString("\r\n")
+		curY++
+		if curY+1 > *prevAlloc {
+			*prevAlloc = curY + 1
+		}
+	}
+	return curY
+}
+
+// writeInlineRow writes row y of h.currBuf at the current terminal line.
+func (h *Host) writeInlineRow(y int) {
+	h.out.WriteString("\r\x1b[2K")
+	rowBuf := terminal.NewSubBuf(h.currBuf, y, 1)
+	// Strip CharSoftWrap on the last column of the 1-row subBuf so ToANSI
+	// treats each visual row independently.
+	savedCell := rowBuf.Get(rowBuf.Width-1, 0)
+	if savedCell.Style.HasAttribute(terminal.CharSoftWrap) {
+		cleanCell := savedCell
+		cleanCell.Style = cleanCell.Style.RemoveAttribute(terminal.CharSoftWrap)
+		rowBuf.Set(rowBuf.Width-1, 0, cleanCell)
+		h.out.WriteString(terminal.ToANSI(rowBuf))
+		rowBuf.Set(rowBuf.Width-1, 0, savedCell)
+	} else {
+		h.out.WriteString(terminal.ToANSI(rowBuf))
+	}
+}
+
+// renderInlineDiff incrementally updates only the rows in [0, totalH) that changed
+// between h.prevBuf and h.currBuf (plus any newly allocated rows), returning the
+// final row index where the terminal cursor is left.
+func (h *Host) renderInlineDiff(curY, totalH int, forceAll bool) int {
+	prevAlloc := h.prevInlineHeight
+	if prevAlloc < 1 && totalH > 0 {
+		prevAlloc = 1
+	}
+	for y := 0; y < totalH; y++ {
+		if !forceAll && y < h.prevInlineHeight && !h.rowChanged(y) {
+			continue
+		}
+		curY = h.moveInlineVertical(curY, y, &prevAlloc)
+		h.writeInlineRow(y)
+	}
+	// Ensure any newly allocated trailing blank rows (e.g. initial blank footer line)
+	// are physically opened in the terminal even if their cells are spaces.
+	if totalH > prevAlloc {
+		curY = h.moveInlineVertical(curY, totalH-1, &prevAlloc)
+		h.writeInlineRow(totalH - 1)
+	}
+	return curY
+}
+
+// renderInlineRows writes each row of h.currBuf starting from row 0 of the inline
+// region and leaves the terminal cursor on row inlineH-1.
 func (h *Host) renderInlineRows(inlineH int) {
 	for y := 0; y < inlineH; y++ {
 		if y > 0 {
 			h.out.WriteString("\r\n")
 		}
-		h.out.WriteString("\r\x1b[2K")
-		rowBuf := terminal.NewSubBuf(h.currBuf, y, 1)
-		// Strip CharSoftWrap on the last column of the 1-row subBuf so ToANSI
-		// treats each visual row independently with \r\n progression.
-		savedCell := rowBuf.Get(rowBuf.Width-1, 0)
-		if savedCell.Style.HasAttribute(terminal.CharSoftWrap) {
-			cleanCell := savedCell
-			cleanCell.Style = cleanCell.Style.RemoveAttribute(terminal.CharSoftWrap)
-			rowBuf.Set(rowBuf.Width-1, 0, cleanCell)
-			h.out.WriteString(terminal.ToANSI(rowBuf))
-			rowBuf.Set(rowBuf.Width-1, 0, savedCell)
-		} else {
-			h.out.WriteString(terminal.ToANSI(rowBuf))
-		}
+		h.writeInlineRow(y)
 	}
 	if h.prevInlineHeight > inlineH {
 		// Clear any stale wrapped rows below the shrunk inline widget.
@@ -596,12 +760,31 @@ func (h *Host) runScrollbackFrame(
 		return
 	}
 
-	// Fresh render: paint current widget state before emitting the scrollback payload.
-	measured := h.root.Measure(Constraints{MaxW: w, MaxH: ht})
-	rendered, cursor := h.root.Render(
-		terminal.Rect{X: 0, Y: 0, W: w, H: ht},
-		RenderContext{Focused: true, Invalidate: h.Invalidate},
-	)
+	// If the root widget already rendered and updated h.currBuf during the render
+	// pass that queued this scrollback (e.g. Shell.Render ejecting overflow rows),
+	// reuse h.currBuf directly when h.dirty is false; otherwise render fresh.
+	var rendered terminal.CellBuf
+	var cursor CursorPos
+	if !h.hasRenderedOnce {
+		_ = h.root.Measure(Constraints{MaxW: w, MaxH: ht})
+		rendered, cursor = h.root.Render(
+			terminal.Rect{X: 0, Y: 0, W: w, H: ht},
+			RenderContext{Focused: true, Invalidate: h.Invalidate},
+		)
+		// Drain any extra scrollback chunks emitted during that initial Render
+		h.scrollbackMu.Lock()
+		if len(h.scrollbackQueue) > 0 {
+			lines = append(lines, h.scrollbackQueue...)
+			h.scrollbackQueue = nil
+		}
+		h.scrollbackMu.Unlock()
+	} else {
+		_ = h.root.Measure(Constraints{MaxW: w, MaxH: ht})
+		rendered, cursor = h.root.Render(
+			terminal.Rect{X: 0, Y: 0, W: w, H: ht},
+			RenderContext{Focused: true, Invalidate: h.Invalidate},
+		)
+	}
 	h.cursorX = cursor.X
 	h.cursorY = cursor.Y
 	h.cursorVisible = cursor.Visible
@@ -619,34 +802,38 @@ func (h *Host) runScrollbackFrame(
 	// with word-wrapping and ANSI style handling directly into cells.
 	scrollBuf := terminal.FromANSI(normalizedLines, w)
 
-	// Inline mode (Zero-Plume): move to top of the current inline region, clear
-	// from cursor to end of screen, emit the scrollback lines followed by \r\n,
-	// and redraw the inline prompt on the new current line(s) without jumping to
-	// absolute screen coordinates.
-	if rendered.Height > 0 && rendered.Height < ht && measured.H == rendered.Height && ht > 1 {
+	// Inline Stack mode: move to top of the current inline region, emit the ejected
+	// scrollback lines followed by \r\n, and redraw the active stack on the new
+	// current lines without jumping to absolute screen coordinates.
+	if rendered.Height > 0 && rendered.Height <= ht && (rendered.Height < ht || h.inlineMode) && ht > 1 {
 		h.inlineMode = true
-		inlineH := rendered.Height
-		if h.currBuf.Width != w || h.currBuf.Height != inlineH {
-			h.currBuf = terminal.NewCellBuf(w, inlineH)
-			h.prevBuf = terminal.NewCellBuf(w, inlineH)
+		occH := rendered.Height
+		if occH > h.allocHeight {
+			h.allocHeight = occH
 		}
-		copy(h.currBuf.Cells(), rendered.Cells())
+		if h.allocHeight > ht {
+			h.allocHeight = ht
+		}
+		bufH := occH
+		if h.allocHeight > bufH {
+			bufH = h.allocHeight
+		}
+		h.currBuf = terminal.NewCellBuf(w, bufH)
+		h.prevBuf = terminal.NewCellBuf(w, bufH)
+		copy(h.currBuf.Cells()[:occH*w], rendered.Cells()[:occH*w])
 
 		if h.hasRenderedOnce && h.prevCursorY > 0 {
 			fmt.Fprintf(h.out, "\x1b[%dA", h.prevCursorY)
 		}
 
 		if scrollBuf.Height > 0 {
-			h.out.WriteString("\r\x1b[2K")
-			if h.prevInlineHeight > 1 {
-				h.out.WriteString("\x1b[J")
-			}
+			h.out.WriteString("\r\x1b[2K\x1b[J")
 			h.out.WriteString(terminal.ToANSI(scrollBuf))
 			h.out.WriteString("\r\n")
 		}
-		h.prevInlineHeight = inlineH
-		h.renderInlineRows(inlineH)
-		h.positionInlineCursor(inlineH - 1)
+		h.prevInlineHeight = bufH
+		h.renderInlineRows(bufH)
+		h.positionInlineCursor(bufH - 1)
 		copy(h.prevBuf.Cells(), h.currBuf.Cells())
 		h.prevCursorX = h.cursorX
 		h.prevCursorY = h.cursorY
@@ -657,6 +844,7 @@ func (h *Host) runScrollbackFrame(
 	}
 	h.inlineMode = false
 	h.prevInlineHeight = 0
+	h.allocHeight = 0
 
 	// Guard: Restore buffer allocation if dimensions changed since last frame.
 	if h.currBuf.Width != w || h.currBuf.Height != ht {

@@ -15,7 +15,7 @@ func TestFormatPrompt_DefaultFallback(t *testing.T) {
 	}
 
 	info := FormatPrompt("", cwd, env)
-	expectedText := "~/projects/kabibi$ "
+	expectedText := "~/projects/kabibi፧"
 	if info.Text != expectedText {
 		t.Fatalf("got text %q, want %q", info.Text, expectedText)
 	}

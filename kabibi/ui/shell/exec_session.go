@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ import (
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
+	"pty"
 )
 
 // InputRoute identifies how a user-submitted input line should be handled.
@@ -27,18 +29,29 @@ const (
 )
 
 // CommandSource distinguishes commands entered directly by the user from
-// commands executed by the AI agent's exec tool.
+// commands executed by the AI agent's exec tool or system blocks.
 type CommandSource string
 
 const (
 	SourceUserShell CommandSource = "user_shell"
 	SourceAITool    CommandSource = "ai_tool"
+	SourceSystem    CommandSource = "system"
 )
 
-// CommandRecord stores the outcome of a single shell command execution for
-// inspection by the user or the AI agent's shell_history tool.
+// BlockKind classifies each interaction block in the shell history store.
+type BlockKind string
+
+const (
+	BlockBanner  BlockKind = "banner"
+	BlockCommand BlockKind = "command"
+	BlockAITurn  BlockKind = "ai_turn"
+)
+
+// CommandRecord stores the full outcome of a single shell or AI interaction block
+// for inspection by the user or the AI agent's shell_history / read_command_output tools.
 type CommandRecord struct {
 	ID        int           `json:"id"`
+	Kind      BlockKind     `json:"kind"`
 	Source    CommandSource `json:"source"`
 	Command   string        `json:"command"`
 	Cwd       string        `json:"cwd"`
@@ -46,9 +59,19 @@ type CommandRecord struct {
 	ExitCode  int           `json:"exit_code"`
 	StartedAt time.Time     `json:"started_at"`
 	Duration  string        `json:"duration"`
+	LineCount int           `json:"line_count"`
+	ByteLen   int           `json:"byte_len"`
 }
 
-const maxHistoryRecordOutput = 32768
+const maxHistoryPreviewOutput = 32768
+
+// shellTTYStdin is a sentinel reader used to detect when a command inside
+// mvdan/sh is running with unredirected foreground standard input.
+type shellTTYStdin struct{}
+
+func (shellTTYStdin) Read([]byte) (int, error) {
+	return 0, io.EOF
+}
 
 // dynamicWriter routes stdout/stderr writes from the persistent interp.Runner
 // to the currently active command buffer in a thread-safe manner.
@@ -79,22 +102,36 @@ func (w *dynamicWriter) Write(p []byte) (int, error) {
 }
 
 // ExecutionSession manages the persistent mvdan.cc/sh/v3 runner, working
-// directory, environment variables, command classification, and history records.
+// directory, environment variables, command classification, active PTY, and history records.
 type ExecutionSession struct {
 	mu                  sync.Mutex
 	runMu               sync.Mutex
 	runner              *interp.Runner
+	ttyIn               io.Reader
 	streamOut           *dynamicWriter
 	initialCwd          string
 	records             []CommandRecord
 	nextRecordID        int
 	lastAITurnCommandID int
+
+	ptyMu     sync.Mutex
+	activePTY pty.PTY
+	ptyCols   int
+	ptyRows   int
 }
 
 // NewExecutionSession creates a new persistent shell execution session rooted at dir.
 func NewExecutionSession(dir string) (*ExecutionSession, error) {
 	dw := &dynamicWriter{}
-	r, err := createRunner(context.Background(), strings.NewReader(""), dw, dw, dir, nil)
+	ttyIn := shellTTYStdin{}
+	es := &ExecutionSession{
+		ttyIn:        ttyIn,
+		streamOut:    dw,
+		nextRecordID: 1,
+		ptyCols:      80,
+		ptyRows:      24,
+	}
+	r, err := createRunnerForSession(context.Background(), es, ttyIn, dw, dw, dir, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -102,12 +139,9 @@ func NewExecutionSession(dir string) (*ExecutionSession, error) {
 	// Ensure runner.Vars and runner.Funcs maps are initialized by doing a no-op reset.
 	r.Reset()
 
-	return &ExecutionSession{
-		runner:       r,
-		streamOut:    dw,
-		initialCwd:   r.Dir,
-		nextRecordID: 1,
-	}, nil
+	es.runner = r
+	es.initialCwd = r.Dir
+	return es, nil
 }
 
 // Dir returns the shell runner's current working directory.
@@ -213,7 +247,7 @@ func (es *ExecutionSession) RunCommand(
 		var err error
 		parsed, err = parser.Parse(strings.NewReader(command), "")
 		if err != nil {
-			rec := es.appendRecord(source, command, es.Dir(), err.Error()+"\n", 2, start)
+			rec := es.appendRecord(BlockCommand, source, command, es.Dir(), err.Error()+"\n", 2, start)
 			if onChunk != nil {
 				onChunk([]byte(err.Error() + "\n"))
 			}
@@ -221,10 +255,10 @@ func (es *ExecutionSession) RunCommand(
 		}
 	}
 
-	runCtx := ctx
+	runCtx := withExecSession(ctx, es, source)
 	if source == SourceUserShell {
 		if offset, ok := firstNonSpaceOffset(command); ok {
-			runCtx = withTopLevelStartOffset(ctx, offset)
+			runCtx = withTopLevelStartOffset(runCtx, offset)
 		}
 	}
 
@@ -269,11 +303,40 @@ func (es *ExecutionSession) RunCommand(
 	rawOut := outBuf.String()
 	outMu.Unlock()
 
-	rec := es.appendRecord(source, command, es.Dir(), rawOut, exitCode, start)
+	rec := es.appendRecord(BlockCommand, source, command, es.Dir(), rawOut, exitCode, start)
 	return rec, runErr
 }
 
+// RecordBlock appends a completed banner, command, or AI turn block to the unified
+// session history store without truncating the stored output.
+func (es *ExecutionSession) RecordBlock(
+	kind BlockKind,
+	source CommandSource,
+	command string,
+	output string,
+	exitCode int,
+	startedAt time.Time,
+) CommandRecord {
+	if startedAt.IsZero() {
+		startedAt = time.Now()
+	}
+	return es.appendRecord(kind, source, command, es.Dir(), output, exitCode, startedAt)
+}
+
+func countOutputLines(s string) int {
+	if s == "" {
+		return 0
+	}
+	norm := strings.ReplaceAll(s, "\r\n", "\n")
+	norm = strings.TrimSuffix(norm, "\n")
+	if norm == "" {
+		return 1
+	}
+	return strings.Count(norm, "\n") + 1
+}
+
 func (es *ExecutionSession) appendRecord(
+	kind BlockKind,
 	source CommandSource,
 	command string,
 	cwd string,
@@ -284,28 +347,125 @@ func (es *ExecutionSession) appendRecord(
 	es.mu.Lock()
 	defer es.mu.Unlock()
 
-	trimmedOut := output
-	if len(trimmedOut) > maxHistoryRecordOutput {
-		trimmedOut = trimmedOut[:maxHistoryRecordOutput] + "\n...[truncated]"
+	if kind == "" {
+		kind = BlockCommand
 	}
-
 	rec := CommandRecord{
 		ID:        es.nextRecordID,
+		Kind:      kind,
 		Source:    source,
 		Command:   command,
 		Cwd:       cwd,
-		Output:    trimmedOut,
+		Output:    output,
 		ExitCode:  exitCode,
 		StartedAt: startedAt,
 		Duration:  time.Since(startedAt).Round(time.Millisecond).String(),
+		LineCount: countOutputLines(output),
+		ByteLen:   len(output),
 	}
 	es.nextRecordID++
 	es.records = append(es.records, rec)
 	return rec
 }
 
-// Records returns a copy of all recorded shell commands.
+// SetActivePTY registers or clears the currently running foreground child PTY.
+func (es *ExecutionSession) SetActivePTY(p pty.PTY) {
+	es.ptyMu.Lock()
+	es.activePTY = p
+	cols, rows := es.ptyCols, es.ptyRows
+	es.ptyMu.Unlock()
+	if p != nil && cols > 0 && rows > 0 {
+		_ = p.Resize(cols, rows)
+	}
+}
+
+// HasActivePTY reports whether a foreground child process is currently attached to a PTY.
+func (es *ExecutionSession) HasActivePTY() bool {
+	es.ptyMu.Lock()
+	defer es.ptyMu.Unlock()
+	return es.activePTY != nil
+}
+
+// WriteActivePTY forwards raw terminal bytes to the currently running foreground PTY, if any.
+func (es *ExecutionSession) WriteActivePTY(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	es.ptyMu.Lock()
+	p := es.activePTY
+	es.ptyMu.Unlock()
+	if p == nil {
+		return false
+	}
+	_, err := p.Write(data)
+	return err == nil
+}
+
+// ResizePTY updates the terminal dimensions for future and active PTY sessions.
+func (es *ExecutionSession) ResizePTY(cols, rows int) {
+	if cols <= 0 || rows <= 0 {
+		return
+	}
+	es.ptyMu.Lock()
+	es.ptyCols = cols
+	es.ptyRows = rows
+	p := es.activePTY
+	es.ptyMu.Unlock()
+	if p != nil {
+		_ = p.Resize(cols, rows)
+	}
+}
+
+// PTYSize returns the current PTY dimensions configured on the session.
+func (es *ExecutionSession) PTYSize() (cols, rows int) {
+	es.ptyMu.Lock()
+	defer es.ptyMu.Unlock()
+	if es.ptyCols <= 0 {
+		es.ptyCols = 80
+	}
+	if es.ptyRows <= 0 {
+		es.ptyRows = 24
+	}
+	return es.ptyCols, es.ptyRows
+}
+
+// IsUnredirectedTTY reports whether the given mvdan handler context is attached
+// directly to the interactive shell's unredirected standard input/output/error.
+func (es *ExecutionSession) IsUnredirectedTTY(hc interp.HandlerContext) bool {
+	if es == nil {
+		return false
+	}
+	return hc.Stdin == es.ttyIn && hc.Stdout == es.streamOut && hc.Stderr == es.streamOut
+}
+
+// RecordByID looks up a recorded block/command by its 1-based ID.
+func (es *ExecutionSession) RecordByID(id int) (CommandRecord, bool) {
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	for _, r := range es.records {
+		if r.ID == id {
+			return r, true
+		}
+	}
+	return CommandRecord{}, false
+}
+
+// Records returns a copy of all recorded shell commands and AI turns (excluding the startup banner).
 func (es *ExecutionSession) Records() []CommandRecord {
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	out := make([]CommandRecord, 0, len(es.records))
+	for _, r := range es.records {
+		if r.Kind == BlockBanner {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// AllRecords returns a copy of all recorded blocks, including BlockBanner.
+func (es *ExecutionSession) AllRecords() []CommandRecord {
 	es.mu.Lock()
 	defer es.mu.Unlock()
 	out := make([]CommandRecord, len(es.records))
@@ -320,12 +480,17 @@ func (es *ExecutionSession) QueryHistory(sinceLastAITurn bool, count int, includ
 
 	var filtered []CommandRecord
 	for _, r := range es.records {
+		if r.Kind == BlockBanner {
+			continue
+		}
 		if sinceLastAITurn && r.ID <= es.lastAITurnCommandID {
 			continue
 		}
 		cp := r
 		if !includeOutput {
 			cp.Output = ""
+		} else if len(cp.Output) > maxHistoryPreviewOutput {
+			cp.Output = cp.Output[:maxHistoryPreviewOutput] + "\n...[truncated; use read_command_output with id to inspect full output]"
 		}
 		filtered = append(filtered, cp)
 	}

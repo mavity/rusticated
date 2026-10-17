@@ -11,11 +11,14 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
+	"github.com/mavity/rusticated/kabibi/ui/terminal"
 	"mvdan.cc/sh/moreinterp/coreutils"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
+	"pty"
 )
 
 // ErrUnknownCommandAtStart is returned when the very first command token at the
@@ -28,6 +31,28 @@ type topLevelStartKey struct{}
 
 type topLevelStartInfo struct {
 	startOffset uint
+}
+
+type execSessionCtxKey struct{}
+
+type execSessionCtxInfo struct {
+	session *ExecutionSession
+	source  CommandSource
+}
+
+func withExecSession(ctx context.Context, es *ExecutionSession, source CommandSource) context.Context {
+	return context.WithValue(ctx, execSessionCtxKey{}, &execSessionCtxInfo{
+		session: es,
+		source:  source,
+	})
+}
+
+func execSessionFromContext(ctx context.Context) (*ExecutionSession, CommandSource) {
+	info, ok := ctx.Value(execSessionCtxKey{}).(*execSessionCtxInfo)
+	if !ok || info == nil {
+		return nil, ""
+	}
+	return info.session, info.source
 }
 
 func withTopLevelStartOffset(ctx context.Context, offset uint) context.Context {
@@ -72,13 +97,31 @@ const (
 	StatusFailure                           // Command had an error (e.g., parse error)
 )
 
-// CommandBlock represents a single shell interaction: prompt + command + output + status
+// CommandBlock represents a single shell or AI interaction block in the stack:
+// banner, user command, or AI turn, along with its rendered CellBuf cache.
 type CommandBlock struct {
-	Prompt   string             // e.g., "$ "
-	Input    string             // The command text (e.g., "ls -la")
-	Output   bytes.Buffer       // Accumulated output from stdout/stderr
-	Status   CommandBlockStatus // Execution status
-	ExitCode int                // Exit code (0 = success, non-zero = failure)
+	ID        int                // Monotonic 1-based block ID
+	Kind      BlockKind          // BlockBanner, BlockCommand, or BlockAITurn
+	Source    CommandSource      // SourceUserShell, SourceAITool, or SourceSystem
+	Cwd       string             // Working directory at execution time
+	Prompt    string             // e.g., "~/rustica፧"
+	Input     string             // The command or prompt text
+	Output    bytes.Buffer       // Full accumulated output from stdout/stderr or AI content
+	AnimLine  string             // Transient animated artifact/ticker line while Status == StatusActive
+	Status    CommandBlockStatus // Execution status
+	ExitCode  int                // Exit code (0 = success, non-zero = failure)
+	StartedAt time.Time          // Timestamp when block started
+	Duration  time.Duration      // Execution duration
+
+	// Cached visual rendering to avoid re-running FromANSI for unchanged blocks
+	cachedWidth   int
+	cachedPrompt  string
+	cachedInput   string
+	cachedOutLen  int
+	cachedAnim    string
+	cachedKind    BlockKind
+	cachedBuf     terminal.CellBuf
+	cachePopulated bool
 }
 
 // shellResultMsg contains the output of a command
@@ -317,7 +360,72 @@ func runResolvedCommand(ctx context.Context, hc interp.HandlerContext, program s
 	if hc.Dir != "" {
 		cmd.Dir = hc.Dir
 	}
-	cmd.Stdin = hc.Stdin
+
+	es, source := execSessionFromContext(ctx)
+	if es != nil && source == SourceUserShell && es.IsUnredirectedTTY(hc) {
+		cols, rows := es.PTYSize()
+		p, err := pty.Start(cmd, pty.Options{
+			Cols: cols,
+			Rows: rows,
+			Term: "xterm-256color",
+		})
+		if err == nil {
+			es.SetActivePTY(p)
+			defer func() {
+				es.SetActivePTY(nil)
+				_ = p.Close()
+			}()
+
+			// Watch context cancellation so Ctrl+C terminates the child PTY immediately
+			stopDone := make(chan struct{})
+			defer close(stopDone)
+			go func() {
+				select {
+				case <-ctx.Done():
+					_ = p.Close()
+					if cmd.Process != nil {
+						_ = cmd.Process.Kill()
+					}
+				case <-stopDone:
+				}
+			}()
+
+			readDone := make(chan struct{})
+			go func() {
+				defer close(readDone)
+				buf := make([]byte, 4096)
+				for {
+					n, rerr := p.Read(buf)
+					if n > 0 {
+						_, _ = hc.Stdout.Write(buf[:n])
+					}
+					if rerr != nil {
+						return
+					}
+				}
+			}()
+
+			waitErr := p.Wait()
+			_ = p.Close()
+			<-readDone
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return waitErr
+		}
+		// Fall back to standard pipes if PTY allocation is unsupported (e.g. browser WASM).
+		cmd = exec.CommandContext(ctx, program, args[1:]...)
+		cmd.Env = envPairs
+		if hc.Dir != "" {
+			cmd.Dir = hc.Dir
+		}
+	}
+
+	if es != nil && hc.Stdin == es.ttyIn {
+		cmd.Stdin = strings.NewReader("")
+	} else {
+		cmd.Stdin = hc.Stdin
+	}
 	cmd.Stdout = hc.Stdout
 	cmd.Stderr = hc.Stderr
 	return cmd.Run()
@@ -325,6 +433,10 @@ func runResolvedCommand(ctx context.Context, hc interp.HandlerContext, program s
 
 func createRunner(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, dir string, args []string) (*interp.Runner, error) {
 	return createRunnerWithEnv(ctx, stdin, stdout, stderr, dir, nil, args)
+}
+
+func createRunnerForSession(ctx context.Context, _ *ExecutionSession, stdin io.Reader, stdout, stderr io.Writer, dir string, parentEnv expand.Environ, args []string) (*interp.Runner, error) {
+	return createRunnerWithEnv(ctx, stdin, stdout, stderr, dir, parentEnv, args)
 }
 
 func createRunnerWithEnv(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, dir string, parentEnv expand.Environ, args []string) (*interp.Runner, error) {

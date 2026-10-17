@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"mohabbat/pty"
+	"pty"
 )
 
 func TestPtyExecution(t *testing.T) {

@@ -23,14 +23,14 @@ func extractRowString(buf ui.CellBuf, y int) string {
 func TestPromptInput_WrapAndShrinkBackToOneLine(t *testing.T) {
 	p := NewPromptInput(PromptInputOptions{})
 
-	// Initially empty -> 1 line ("$ ")
+	// Initially empty -> 1 line ("፧")
 	sz := p.Measure(ui.Constraints{MaxW: 10, MaxH: 24})
 	if sz != (ui.Size{W: 10, H: 1}) {
 		t.Fatalf("empty Measure() = %#v, want {W:10, H:1}", sz)
 	}
 
-	// Type 8 characters: "$ " (2) + "12345678" (8) = 10 columns -> cursor wraps to row 1 col 0
-	for _, r := range "12345678" {
+	// Type 9 characters: "፧" (1) + "123456789" (9) = 10 columns -> cursor wraps to row 1 col 0
+	for _, r := range "123456789" {
 		p.HandleEvent(input.KeyPressEvent{Code: r, Text: string(r)})
 	}
 	sz = p.Measure(ui.Constraints{MaxW: 10, MaxH: 24})
@@ -48,11 +48,11 @@ func TestPromptInput_WrapAndShrinkBackToOneLine(t *testing.T) {
 	}
 	sz = p.Measure(ui.Constraints{MaxW: 10, MaxH: 24})
 	if sz.H != 3 {
-		t.Fatalf("after 20 chars, Measure().H = %d, want 3", sz.H)
+		t.Fatalf("after 21 chars, Measure().H = %d, want 3", sz.H)
 	}
 	buf, cur = p.Render(ui.Rect{X: 0, Y: 0, W: 10, H: 24}, ui.RenderContext{Focused: true})
-	if got := extractRowString(buf, 0); got != "$ 12345678" {
-		t.Fatalf("row 0 = %q, want %q", got, "$ 12345678")
+	if got := extractRowString(buf, 0); got != "፧123456789" {
+		t.Fatalf("row 0 = %q, want %q", got, "፧123456789")
 	}
 	if got := extractRowString(buf, 1); got != "abcdefghij" {
 		t.Fatalf("row 1 = %q, want %q", got, "abcdefghij")
@@ -65,7 +65,7 @@ func TestPromptInput_WrapAndShrinkBackToOneLine(t *testing.T) {
 	}
 
 	// Delete characters with backspace until only "123" remains -> shrinks back to 1 row
-	for i := 0; i < 17; i++ {
+	for i := 0; i < 18; i++ {
 		p.HandleEvent(input.KeyPressEvent{Code: input.KeyBackspace})
 	}
 	if got := p.Value(); got != "123" {
@@ -76,8 +76,8 @@ func TestPromptInput_WrapAndShrinkBackToOneLine(t *testing.T) {
 		t.Fatalf("after deleting back to '123', Measure().H = %d, want 1", sz.H)
 	}
 	buf, cur = p.Render(ui.Rect{X: 0, Y: 0, W: 10, H: 24}, ui.RenderContext{Focused: true})
-	if buf.Height != 1 || cur.X != 5 || cur.Y != 0 {
-		t.Fatalf("after deleting back to '123', Render() height=%d cur=(%d,%d), want height=1 cur=(5,0)", buf.Height, cur.X, cur.Y)
+	if buf.Height != 1 || cur.X != 4 || cur.Y != 0 {
+		t.Fatalf("after deleting back to '123', Render() height=%d cur=(%d,%d), want height=1 cur=(4,0)", buf.Height, cur.X, cur.Y)
 	}
 }
 

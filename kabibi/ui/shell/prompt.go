@@ -20,10 +20,10 @@ type PromptInfo struct {
 }
 
 // FormatPrompt evaluates a bash-style PS1 template in the context of cwd and env.
-// If ps1 is empty, it uses the default fallback "\w$ ".
+// If ps1 is empty, it uses the default fallback "\w፧".
 func FormatPrompt(ps1, cwd string, env map[string]string) PromptInfo {
 	if ps1 == "" {
-		ps1 = `\w$ `
+		ps1 = `\w፧`
 	}
 	return ExpandPS1(ps1, cwd, env, time.Now())
 }
