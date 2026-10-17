@@ -9,8 +9,6 @@ import (
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/atotto/clipboard"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/input"
 	"github.com/mattn/go-runewidth"
 	"github.com/mavity/rusticated/kabibi/ui"
@@ -20,10 +18,10 @@ import (
 const editorTabWidth = 4
 
 const (
-	colorYellow   = lipgloss.Color("#ffd700")
-	colorNavy     = lipgloss.Color("#000080")
-	colorDarkGray = lipgloss.Color("#3a3a3a")
-	colorWhite    = lipgloss.Color("#e5e5e5")
+	colorYellow   terminal.Color = 0xFFD700
+	colorNavy     terminal.Color = 0x000080
+	colorDarkGray terminal.Color = 0x3A3A3A
+	colorWhite    terminal.Color = 0xE5E5E5
 )
 
 func truncateStringToWidth(s string, maxWidth int) string {
@@ -80,20 +78,18 @@ const (
 )
 
 var (
-	editorBgColor = lipgloss.Color("#000078") // exact same blue family as panels, just a bit darker
-	editorSelBg   = lipgloss.Color("#2d4f67")
-	editorGutterS = lipgloss.NewStyle().Foreground(lipgloss.Color("#4a5568")).Background(editorBgColor)
-	editorBarS    = lipgloss.NewStyle().Foreground(lipgloss.Color("#1a1f26")).Background(editorBgColor)
+	editorBgColor terminal.Color = 0x000078
+	editorSelBg   terminal.Color = 0x2D4F67
 
-	editorStyles = []lipgloss.Style{
-		sidDefault:  lipgloss.NewStyle().Foreground(lipgloss.Color("#d5dbe5")).Background(editorBgColor),
-		sidKeyword:  lipgloss.NewStyle().Foreground(lipgloss.Color("#c792ea")).Background(editorBgColor),
-		sidString:   lipgloss.NewStyle().Foreground(lipgloss.Color("#9ece6a")).Background(editorBgColor),
-		sidNumber:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff9e64")).Background(editorBgColor),
-		sidComment:  lipgloss.NewStyle().Foreground(lipgloss.Color("#5c6773")).Background(editorBgColor).Italic(true),
-		sidFunc:     lipgloss.NewStyle().Foreground(lipgloss.Color("#7aa2f7")).Background(editorBgColor),
-		sidType:     lipgloss.NewStyle().Foreground(lipgloss.Color("#2ac3de")).Background(editorBgColor),
-		sidOperator: lipgloss.NewStyle().Foreground(lipgloss.Color("#89ddff")).Background(editorBgColor),
+	editorForeground = []terminal.Color{
+		sidDefault:  0xD5DBE5,
+		sidKeyword:  0xC792EA,
+		sidString:   0x9ECE6A,
+		sidNumber:   0xFF9E64,
+		sidComment:  0x5C6773,
+		sidFunc:     0x7AA2F7,
+		sidType:     0x2AC3DE,
+		sidOperator: 0x89DDFF,
 	}
 )
 
@@ -126,8 +122,6 @@ type editorModel struct {
 	hl      [][]styledSpan
 	hlValid bool
 
-	// OnClose is called by the parent when the editor should close.
-	OnClose     func() tea.Cmd
 	OnCloseFunc func()
 
 	// SaveOnExit saves dirty changes instead of showing the interactive
@@ -589,43 +583,35 @@ func (e *editorModel) selectAll() {
 	e.cx = len([]rune(e.lines[e.cy]))
 }
 
-func (e *editorModel) triggerClose() tea.Cmd {
+func (e *editorModel) triggerClose() {
 	if e.OnCloseFunc != nil {
 		e.OnCloseFunc()
 	}
-	if e.OnClose != nil {
-		return e.OnClose()
-	}
-	return nil
 }
 
-// HandleKey processes a key event for the editor, calling OnClose when the
-// editor should be dismissed.
-func (e *editorModel) HandleKey(msg tea.KeyMsg) tea.Cmd {
+func (e *editorModel) handleKeyName(key string, runes []rune) {
 	if e == nil {
-		return nil
+		return
 	}
-	return e.handleKeyName(msg.String(), msg.Runes)
-}
-
-func (e *editorModel) handleKeyName(key string, runes []rune) tea.Cmd {
 	if e.confirmQuit {
 		switch key {
 		case "f2", "y", "Y", "enter":
 			if err := e.save(); err != nil {
 				e.confirmQuit = false
 				e.status = "save failed: " + err.Error()
-				return nil
+				return
 			}
-			return e.triggerClose()
+			e.triggerClose()
+			return
 		case "n", "N":
-			return e.triggerClose()
+			e.triggerClose()
+			return
 		case "esc":
 			e.confirmQuit = false
 			e.status = ""
-			return nil
+			return
 		default:
-			return nil
+			return
 		}
 	}
 
@@ -635,29 +621,31 @@ func (e *editorModel) handleKeyName(key string, runes []rune) tea.Cmd {
 			if e.SaveOnExit {
 				if err := e.save(); err != nil {
 					e.status = "save failed: " + err.Error()
-					return nil
+					return
 				}
-				return e.triggerClose()
+				e.triggerClose()
+				return
 			}
 			e.confirmQuit = true
 			e.status = "Save changes?  [Y] save   [N] discard   [Esc] cancel"
-			return nil
+			return
 		}
-		return e.triggerClose()
+		e.triggerClose()
+		return
 	case "f2", "ctrl+s":
 		if err := e.save(); err != nil {
 			e.status = "save failed: " + err.Error()
 		} else {
 			e.status = "Saved " + filepath.Base(e.path)
 		}
-		return nil
+		return
 	case "ctrl+c":
 		if txt := e.selectionText(); txt != "" {
 			e.clip = txt
 			_ = clipboard.WriteAll(txt)
 			e.status = "Copied"
 		}
-		return nil
+		return
 	case "ctrl+x":
 		if txt := e.selectionText(); txt != "" {
 			e.clip = txt
@@ -665,7 +653,7 @@ func (e *editorModel) handleKeyName(key string, runes []rune) tea.Cmd {
 			e.deleteSelection()
 			e.status = "Cut"
 		}
-		return nil
+		return
 	case "ctrl+v":
 		txt, err := clipboard.ReadAll()
 		if err != nil || txt == "" {
@@ -675,28 +663,28 @@ func (e *editorModel) handleKeyName(key string, runes []rune) tea.Cmd {
 			e.deleteSelectionIfAny()
 			e.insertText(txt)
 		}
-		return nil
+		return
 	case "ctrl+a":
 		e.selectAll()
-		return nil
+		return
 	case "enter":
 		e.deleteSelectionIfAny()
 		e.newline()
-		return nil
+		return
 	case "backspace":
 		if !e.deleteSelectionIfAny() {
 			e.backspace()
 		}
-		return nil
+		return
 	case "delete":
 		if !e.deleteSelectionIfAny() {
 			e.deleteForward()
 		}
-		return nil
+		return
 	case "tab":
 		e.deleteSelectionIfAny()
 		e.insertRune('\t')
-		return nil
+		return
 	case "left":
 		e.moveLeft(false)
 	case "right":
@@ -750,7 +738,6 @@ func (e *editorModel) handleKeyName(key string, runes []rune) tea.Cmd {
 	}
 
 	e.clampCursor()
-	return nil
 }
 
 // Measure implements ui.Widget.
@@ -783,11 +770,37 @@ func (e *editorModel) Render(r terminal.Rect, _ ui.RenderContext) (terminal.Cell
 	if e.width <= 0 || e.height <= 0 {
 		return terminal.NewCellBuf(0, 0), ui.CursorPos{Visible: false}
 	}
-	viewStr := e.View()
-	lines := strings.Split(strings.ReplaceAll(viewStr, "\r\n", "\n"), "\n")
-	buf := terminal.FromANSI(lines, e.width)
+
+	e.ensureHighlight()
 	out := terminal.NewCellBuf(e.width, e.height)
-	out.Blit(buf, 0, 0)
+	bgStyle := terminal.NewStyle(colorWhite, editorBgColor, 0)
+	out.Fill(terminal.Rect{X: 0, Y: 0, W: e.width, H: e.height}, terminal.Cell{Grapheme: " ", Style: bgStyle})
+	gutterW, textW, contentRows, curVis := e.prepareView()
+
+	titleStyle := terminal.NewStyle(colorNavy, colorYellow, terminal.CharBold)
+	drawEditorText(&out, 0, 0, e.titleText(e.width), e.width, titleStyle)
+
+	thumbStart, thumbEnd := scrollbarThumb(len(e.lines), contentRows, e.top)
+	for row := 0; row < contentRows && row+1 < e.height-1; row++ {
+		lineIndex := e.top + row
+		if lineIndex < len(e.lines) {
+			lineNumber := fmt.Sprint(lineIndex + 1)
+			gutterStyle := terminal.NewStyle(0x4A5568, editorBgColor, 0)
+			drawEditorText(&out, gutterW-runewidth.StringWidth(lineNumber)-1, row+1, lineNumber, gutterW, gutterStyle)
+			e.drawDocumentRow(&out, row+1, lineIndex, textW, curVis)
+		}
+
+		scroll := "│"
+		if row >= thumbStart && row < thumbEnd {
+			scroll = "█"
+		}
+		drawEditorText(&out, e.width-1, row+1, scroll, 1, terminal.NewStyle(0x4A5568, editorBgColor, 0))
+	}
+
+	if e.height > 1 {
+		statusStyle := terminal.NewStyle(colorWhite, colorDarkGray, 0)
+		drawEditorText(&out, 0, e.height-1, e.statusText(e.width), e.width, statusStyle)
+	}
 	return out, ui.CursorPos{Visible: false}
 }
 
@@ -844,146 +857,41 @@ func (e *editorModel) View() string {
 	if w <= 0 || h <= 0 {
 		return ""
 	}
-	contentRows := h - 2
-	if contentRows < 1 {
-		contentRows = 1
-	}
-
-	gutterW := len(fmt.Sprint(len(e.lines))) + 1
-	if gutterW < 4 {
-		gutterW = 4
-	}
-	scrollbarW := 1
-	textW := w - gutterW - scrollbarW
-	if textW < 1 {
-		textW = 1
-	}
-
-	// Keep cursor visible.
-	if e.cy < e.top {
-		e.top = e.cy
-	}
-	if e.cy >= e.top+contentRows {
-		e.top = e.cy - contentRows + 1
-	}
-	if e.top < 0 {
-		e.top = 0
-	}
-	curVis := visualColumn(e.curRunes(), e.cx)
-	if curVis < e.left {
-		e.left = curVis
-	}
-	if curVis >= e.left+textW {
-		e.left = curVis - textW + 1
-	}
-	if e.left < 0 {
-		e.left = 0
-	}
-
-	thumbStart, thumbEnd := scrollbarThumb(len(e.lines), contentRows, e.top)
-
-	var rows []string
+	_, textW, contentRows, curVis := e.prepareView()
+	rows := []string{e.titleText(w)}
 	for r := 0; r < contentRows; r++ {
 		y := e.top + r
-		var gutter, content string
+		line := strings.Repeat(" ", w)
 		if y < len(e.lines) {
-			gutter = editorGutterS.Width(gutterW).Align(lipgloss.Right).Render(fmt.Sprint(y+1) + " ")
-			content = e.renderRow(y, textW, curVis)
-		} else {
-			gutter = editorGutterS.Width(gutterW).Render("")
-			content = editorStyles[sidDefault].Width(textW).Render("")
+			line = e.renderRow(y, textW, curVis)
 		}
-		sb := "│"
-		if r >= thumbStart && r < thumbEnd {
-			sb = "█"
-		}
-		scroll := editorGutterS.Render(sb)
-		rows = append(rows, gutter+content+scroll)
+		rows = append(rows, line)
 	}
-
-	title := e.titleBar(w)
-	status := e.statusBar(w)
-	return lipgloss.JoinVertical(lipgloss.Left, append([]string{title}, append(rows, status)...)...)
+	if h > 1 {
+		rows = append(rows, e.statusText(w))
+	}
+	return strings.Join(rows, "\n")
 }
 
 func (e *editorModel) renderRow(y, textW, curVis int) string {
-	runes := []rune(e.lines[y])
-	ids := e.styleIDsForLine(y)
-	selStart, selEnd, hasSel := e.lineSelection(y)
-	isCursorRow := y == e.cy
-
-	// Expand to visual cells (tabs -> spaces). Wide runes are treated as one
-	// cell for cursor math; acceptable for basic editing of code files.
-	type cell struct {
-		r   rune
-		sid int
-		sel bool
-	}
-	var cells []cell
-	for i, r := range runes {
-		sid := sidDefault
-		if i < len(ids) {
-			sid = ids[i]
-		}
-		sel := hasSel && i >= selStart && i < selEnd
-		if r == '\t' {
-			n := editorTabWidth - (len(cells) % editorTabWidth)
-			for k := 0; k < n; k++ {
-				cells = append(cells, cell{r: ' ', sid: sid, sel: sel})
-			}
-		} else {
-			cells = append(cells, cell{r: r, sid: sid, sel: sel})
-		}
-	}
-
+	cells := e.visualLine(y)
 	var b strings.Builder
-	var runText strings.Builder
-	runSid := -1
-	runSel := false
-	flush := func() {
-		if runText.Len() > 0 {
-			st := editorStyles[runSid]
-			if runSel {
-				st = st.Background(editorSelBg)
-			}
-			b.WriteString(st.Render(runText.String()))
-			runText.Reset()
-		}
-	}
-
 	for col := 0; col < textW; col++ {
 		idx := e.left + col
-		r := ' '
-		sid := sidDefault
-		sel := false
-		if idx < len(cells) {
-			r = cells[idx].r
-			sid = cells[idx].sid
-			sel = cells[idx].sel
+		if idx >= 0 && idx < len(cells) && cells[idx].r != 0 {
+			b.WriteRune(cells[idx].r)
+		} else {
+			b.WriteByte(' ')
 		}
-		cursor := isCursorRow && idx == curVis
-		if cursor {
-			flush()
-			runSid = -1
-			st := editorStyles[sid]
-			if sel {
-				st = st.Background(editorSelBg)
-			}
-			b.WriteString(st.Reverse(true).Render(string(r)))
-			continue
-		}
-		if sid != runSid || sel != runSel {
-			flush()
-			runSid = sid
-			runSel = sel
-		}
-		runText.WriteRune(r)
 	}
-	flush()
 	return b.String()
 }
 
 func (e *editorModel) titleBar(w int) string {
+	return e.titleText(w)
+}
+
+func (e *editorModel) titleText(w int) string {
 	name := e.path
 	if e.dirty {
 		name += " *"
@@ -993,29 +901,167 @@ func (e *editorModel) titleBar(w int) string {
 		lang = e.lexer.Config().Name
 	}
 	left := " " + truncateStringToWidth(name, w-len(lang)-6)
-	style := lipgloss.NewStyle().Background(colorYellow).Foreground(colorNavy).Bold(true).Width(w)
 	right := lang + " "
 	pad := w - runewidth.StringWidth(left) - runewidth.StringWidth(right)
-	if pad < 1 {
-		pad = 1
+	if pad < 0 {
+		pad = 0
 	}
-	return style.Render(left + strings.Repeat(" ", pad) + right)
+	return truncateStringToWidth(left+strings.Repeat(" ", pad)+right, w)
 }
 
 func (e *editorModel) statusBar(w int) string {
+	return e.statusText(w)
+}
+
+func (e *editorModel) statusText(w int) string {
 	pos := fmt.Sprintf(" Ln %d, Col %d ", e.cy+1, e.cx+1)
 	hint := "F2 save  Ctrl+C/X/V clip  Esc quit "
 	msg := e.status
-	style := lipgloss.NewStyle().Background(colorDarkGray).Foreground(colorWhite).Width(w)
 	left := pos
 	if msg != "" {
 		left += "· " + msg + " "
 	}
-	pad := w - runewidth.StringWidth(left) - runewidth.StringWidth(hint)
-	if pad < 1 {
-		pad = 1
+	if runewidth.StringWidth(hint) >= w {
+		return truncateStringToWidth(hint, w)
 	}
-	return style.Render(truncateStringToWidth(left, w-runewidth.StringWidth(hint)-1) + strings.Repeat(" ", pad) + hint)
+	leftW := w - runewidth.StringWidth(hint)
+	left = truncateStringToWidth(left, leftW)
+	pad := leftW - runewidth.StringWidth(left)
+	if pad < 0 {
+		pad = 0
+	}
+	return left + strings.Repeat(" ", pad) + hint
+}
+
+type editorVisualCell struct {
+	r   rune
+	sid int
+	sel bool
+}
+
+func (e *editorModel) prepareView() (gutterW, textW, contentRows, curVis int) {
+	contentRows = e.height - 2
+	if contentRows < 0 {
+		contentRows = 0
+	}
+	gutterW = len(fmt.Sprint(len(e.lines))) + 1
+	if gutterW < 4 {
+		gutterW = 4
+	}
+	textW = e.width - gutterW - 1
+	if textW < 1 {
+		textW = 1
+	}
+	if e.cy < e.top {
+		e.top = e.cy
+	}
+	if contentRows > 0 && e.cy >= e.top+contentRows {
+		e.top = e.cy - contentRows + 1
+	}
+	if e.top < 0 {
+		e.top = 0
+	}
+	curVis = visualColumn(e.curRunes(), e.cx)
+	if curVis < e.left {
+		e.left = curVis
+	}
+	if curVis >= e.left+textW {
+		e.left = curVis - textW + 1
+	}
+	if e.left < 0 {
+		e.left = 0
+	}
+	return
+}
+
+func (e *editorModel) visualLine(y int) []editorVisualCell {
+	runes := []rune(e.lines[y])
+	ids := e.styleIDsForLine(y)
+	selStart, selEnd, hasSel := e.lineSelection(y)
+	var cells []editorVisualCell
+	for i, r := range runes {
+		sid := sidDefault
+		if i < len(ids) {
+			sid = ids[i]
+		}
+		selected := hasSel && i >= selStart && i < selEnd
+		if r == '\t' {
+			spaces := editorTabWidth - len(cells)%editorTabWidth
+			for n := 0; n < spaces; n++ {
+				cells = append(cells, editorVisualCell{r: ' ', sid: sid, sel: selected})
+			}
+			continue
+		}
+		cells = append(cells, editorVisualCell{r: r, sid: sid, sel: selected})
+		for n := 1; n < runewidth.RuneWidth(r); n++ {
+			cells = append(cells, editorVisualCell{sid: sid, sel: selected})
+		}
+	}
+	return cells
+}
+
+func (e *editorModel) drawDocumentRow(buf *terminal.CellBuf, y, lineIndex, textW, curVis int) {
+	cells := e.visualLine(lineIndex)
+	for col := 0; col < textW; col++ {
+		index := e.left + col
+		cell := editorVisualCell{r: ' ', sid: sidDefault}
+		if index >= 0 && index < len(cells) {
+			cell = cells[index]
+		}
+		cursor := lineIndex == e.cy && index == curVis
+		style := editorCellStyle(cell.sid, cell.sel, cursor)
+		grapheme := " "
+		if cell.r != 0 {
+			grapheme = string(cell.r)
+		}
+		if cell.r == 0 {
+			grapheme = ""
+		}
+		buf.Set(e.width-textW-1+col, y, terminal.Cell{Grapheme: grapheme, Style: style})
+	}
+}
+
+func editorCellStyle(sid int, selected, cursor bool) terminal.Style {
+	if sid < 0 || sid >= len(editorForeground) {
+		sid = sidDefault
+	}
+	fg := editorForeground[sid]
+	bg := editorBgColor
+	attrs := terminal.CharAttributes(0)
+	if sid == sidComment {
+		attrs |= terminal.CharItalic
+	}
+	if selected {
+		bg = editorSelBg
+	}
+	if cursor {
+		fg, bg = bg, fg
+	}
+	return terminal.NewStyle(fg, bg, attrs)
+}
+
+func drawEditorText(buf *terminal.CellBuf, x, y int, text string, maxWidth int, style terminal.Style) {
+	if x < 0 {
+		maxWidth += x
+		x = 0
+	}
+	column := 0
+	for _, r := range text {
+		width := runewidth.RuneWidth(r)
+		if width < 1 {
+			continue
+		}
+		if column+width > maxWidth || x+column >= buf.Width {
+			break
+		}
+		buf.Set(x+column, y, terminal.Cell{Grapheme: string(r), Style: style})
+		for continuation := 1; continuation < width; continuation++ {
+			if x+column+continuation < buf.Width {
+				buf.Set(x+column+continuation, y, terminal.Cell{Style: style})
+			}
+		}
+		column += width
+	}
 }
 
 // scrollbarThumb returns [start,end) rows of the scrollbar thumb.
