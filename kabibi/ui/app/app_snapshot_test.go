@@ -15,7 +15,7 @@ import (
 func assertAppSnapshot(t *testing.T, snapFile string, widget *AppWidget, scrollback *string, rect ui.Rect) {
 	t.Helper()
 
-	buf, cursor := widget.Render(rect, ui.RenderContext{})
+	buf, cursor := widget.Render(rect, ui.RenderContext{Focused: true})
 	if cursor.Visible && cursor.X >= 0 && cursor.X < buf.Width && cursor.Y >= 0 && cursor.Y < buf.Height {
 		cell := buf.Get(cursor.X, cursor.Y)
 		if cell.Grapheme == "" || cell.Grapheme == " " {
@@ -36,6 +36,8 @@ func assertAppSnapshot(t *testing.T, snapFile string, widget *AppWidget, scrollb
 
 	wantBytes, err := os.ReadFile(snapPath)
 	if err != nil {
+		// NEVER implement auto-update of snapshots
+		// Snapshots must be manually updated, NEVER automatically.
 		t.Fatalf("failed to read snapshot %s: %v", snapPath, err)
 	}
 	want := string(wantBytes)
