@@ -2,6 +2,16 @@
 
 At this point, it is a **purely technical, bounded engineering task** rather than an architectural or research gamble.
 
+### Review Findings and Starting Point
+
+The baseline already contains the `tools/hashline`, `tools/fabric`, and `tools/filelist` implementations, plus the PTY gutter and `term_read` / `term_input` / `term_kill` lifecycle. Those breakdown items should be treated as existing capabilities, not new work. One specification mismatch: the hashline implementation and tool schema use a ±30-line relocation window, while the breakdown below says ±3.
+
+The initial vertical slice is now implemented: `kabibi/gitcore` discovers repositories from the shell's working directory and reports status; the in-process `git` command supports `status` and its short/porcelain forms; and `git_inspect(action="status")` exposes structured status to the AI. Unsupported shell subcommands/options and AI inspection actions return explicit errors. Diff/log inspection, mutation tools, and broader CLI coverage remain outstanding.
+
+The custom Rusticated build also exposed dependencies that needed narrow compatibility handling: Mohabbat now avoids enabling platform-specific `x/sys/cpu` files on WASI, patches `filepath-securejoin`'s separator scan for the Rusticated filepath API, and supplies go-git's missing WASI symlink helper. The documented `go run . kabibi -r --help` build/run path passes with these changes.
+
+Before implementing the shell command's unsupported-subcommand behavior or mutating AI operations, settle the host-Git fallback policy, author identity precedence/fallback, and safeguards for destructive actions. The current proposal's “never fail” identity fallback should not fabricate author identity; missing identity should be resolved by documented Git-compatible precedence or returned as an actionable error.
+
 All the foundational hard problems in Kabibi are already solved and running at alpha stability at least:
 
 * **WASM / OS Portability:** `rusticated-go` (on Go 1.27.1) already maps goroutines, file I/O, and network sockets cleanly onto the async `washmhost` / `mohab.bat` runtime.
@@ -100,4 +110,3 @@ Every piece of this upgrade can be built and unit-tested modularly inside `kabib
 | **5. `kabibi/ui/shell` PTY Gutter & Lifecycle** | `Cols: W - 2` PTY launch, 2-column `┃ ` gutter blit in `renderBlock`, `CellBuf` color-stripped text extraction, timeout promotion (`bgProcs`), and `term_read` / `term_input` / `term_kill`.
 
  | **Medium** (~400 LOC, builds directly on `pty` and `terminal.CellBuf`) |
-

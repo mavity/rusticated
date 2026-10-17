@@ -1,7 +1,10 @@
 package mohabbat
 
 import (
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -85,5 +88,66 @@ func TestEncodeModPath(t *testing.T) {
 				t.Errorf("expected %s, got %s", c.out, got)
 			}
 		})
+	}
+}
+
+func TestXSysCPUFilesAreNotFlippedForWasip1(t *testing.T) {
+	files := map[string][]byte{
+		"cpu/cpu_linux.go":         []byte("//go:build !386 && !amd64\n\npackage cpu\n"),
+		"cpu/cpu_linux_mips64x.go": []byte("//go:build linux && (mips64 || mips64le)\n\npackage cpu\n"),
+		"cpu/cpu_wasm.go":          []byte("//go:build wasm\n\npackage cpu\n"),
+	}
+	flips := applyGateFlipsInMemory("golang.org/x/sys", files)
+	if len(flips) != 0 {
+		t.Fatalf("unexpected x/sys/cpu suffix aliases: %v", flips)
+	}
+	if strings.Contains(string(files["cpu/cpu_linux_mips64x.go"]), "wasip1") {
+		t.Fatal("Linux architecture-specific CPU file was enabled for wasip1")
+	}
+	if _, exists := files["cpu/cpu_wasip1.go"]; exists {
+		t.Fatal("Linux CPU file unexpectedly gained a wasip1 alias")
+	}
+}
+
+func TestRemoveStaleXSysCPUAliases(t *testing.T) {
+	jitDir := t.TempDir()
+	source := []byte("//go:build !386 && !amd64\n\npackage cpu\n")
+	files := map[string][]byte{"cpu/cpu_linux.go": source}
+	aliasPath := filepath.Join(jitDir, "cpu", "cpu_wasip1.go")
+	if err := os.MkdirAll(filepath.Dir(aliasPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(aliasPath, source, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeStaleXSysCPUAliases(jitDir, files); err != nil {
+		t.Fatalf("remove stale alias: %v", err)
+	}
+	if _, err := os.Stat(aliasPath); !os.IsNotExist(err) {
+		t.Fatalf("stale alias still exists: %v", err)
+	}
+}
+
+func TestPatchFilepathSecurejoinForByteSeparator(t *testing.T) {
+	files := map[string][]byte{
+		"join.go": []byte("strings.IndexRune(remainingPath, filepath.Separator)"),
+	}
+	if err := patchFilepathSecurejoinInMemory(files); err != nil {
+		t.Fatalf("patch securejoin source: %v", err)
+	}
+	if got := string(files["join.go"]); got != "strings.IndexByte(remainingPath, filepath.Separator)" {
+		t.Fatalf("patched join.go = %q", got)
+	}
+	if err := patchFilepathSecurejoinInMemory(map[string][]byte{"join.go": []byte("no separator scan")}); err == nil {
+		t.Fatal("patch accepted an unexpected securejoin source")
+	}
+}
+
+func TestAddGoGitWasip1Compatibility(t *testing.T) {
+	files := map[string][]byte{}
+	addGoGitWasip1Compatibility(files)
+	if got := string(files["worktree_rusticated_wasip1.go"]); !strings.Contains(got, "//go:build wasip1") ||
+		!strings.Contains(got, "func isSymlinkWindowsNonAdmin(error) bool") {
+		t.Fatalf("go-git compatibility source is incomplete: %q", got)
 	}
 }
