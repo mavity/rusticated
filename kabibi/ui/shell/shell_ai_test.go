@@ -1,6 +1,7 @@
 package shell
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -48,6 +49,152 @@ func (f *fakeAIRunner) RunTurn(ctx context.Context, prompt string, onFeedback ai
 }
 
 func (f *fakeAIRunner) Close() {}
+
+func TestUpdateActiveArtifactFeedbackNormalizesAccumulatedWhitespace(t *testing.T) {
+	s := &Shell{blocks: []CommandBlock{{}}}
+
+	s.updateActiveArtifactFeedback(0, "thinking \t")
+	s.updateActiveArtifactFeedback(0, " \nthrough")
+	if got, want := s.statusTextRaw, "thinking \t \nthrough"; got != want {
+		t.Fatalf("raw status text = %q, want %q", got, want)
+	}
+	if got, want := s.statusLine, "thinking through"; got != want {
+		t.Fatalf("display status text = %q, want %q", got, want)
+	}
+
+	s.updateActiveArtifactFeedback(0, "\rreplacement\nstatus")
+	if got, want := s.statusTextRaw, "replacement\nstatus"; got != want {
+		t.Fatalf("raw status text after carriage return = %q, want %q", got, want)
+	}
+	if got, want := s.statusLine, "replacement status"; got != want {
+		t.Fatalf("display status text after carriage return = %q, want %q", got, want)
+	}
+}
+
+func TestShell_HidesInputWhileRunningAndRestoresCursor(t *testing.T) {
+	s := &Shell{
+		mode:  ModeStack,
+		input: NewPromptInput(PromptInputOptions{}),
+	}
+	s.SetInput(strings.Repeat("x", 36))
+
+	const width, height = 20, 20
+	inputHeight := s.input.Measure(ui.Constraints{MaxW: width, MaxH: height - reservedFooterRows}).H
+	if inputHeight <= 1 {
+		t.Fatalf("test input should wrap to multiple rows, got height %d", inputHeight)
+	}
+	idleSize := s.Measure(ui.Constraints{MaxW: width, MaxH: height})
+	if idleSize.H != inputHeight+reservedFooterRows {
+		t.Fatalf("idle Measure().H = %d, want input height %d + footer", idleSize.H, inputHeight)
+	}
+
+	idleBuf, idleCursor := s.Render(ui.Rect{W: width, H: height}, ui.RenderContext{Focused: true})
+	if !idleCursor.Visible {
+		t.Fatal("input cursor should be visible while idle")
+	}
+
+	s.mu.Lock()
+	s.running = true
+	s.mu.Unlock()
+	runningSize := s.Measure(ui.Constraints{MaxW: width, MaxH: height})
+	if runningSize.H != reservedFooterRows {
+		t.Fatalf("running Measure().H = %d, want only %d reserved footer row(s)", runningSize.H, reservedFooterRows)
+	}
+	hiddenBuf, hiddenCursor := s.Render(ui.Rect{W: width, H: height}, ui.RenderContext{Focused: true})
+	if hiddenCursor.Visible {
+		t.Fatal("input cursor should be hidden while running")
+	}
+	for y := 0; y < hiddenBuf.Height; y++ {
+		if strings.Contains(extractRowString(hiddenBuf, y), "x") {
+			t.Fatalf("input text is still rendered while running: row %d = %q", y, extractRowString(hiddenBuf, y))
+		}
+	}
+
+	s.mu.Lock()
+	s.running = false
+	s.mu.Unlock()
+	restoredBuf, restoredCursor := s.Render(ui.Rect{W: width, H: height}, ui.RenderContext{Focused: true})
+	if !restoredCursor.Visible {
+		t.Fatal("input cursor should be visible again after completion")
+	}
+	if restoredCursor.X != idleCursor.X || restoredCursor.Y != idleCursor.Y {
+		t.Fatalf("restored cursor = (%d,%d), want prior position (%d,%d)",
+			restoredCursor.X, restoredCursor.Y, idleCursor.X, idleCursor.Y)
+	}
+	if restoredBuf.Height != idleBuf.Height {
+		t.Fatalf("restored render height = %d, want idle height %d", restoredBuf.Height, idleBuf.Height)
+	}
+	var restoredRows []string
+	for y := 0; y < restoredBuf.Height; y++ {
+		restoredRows = append(restoredRows, extractRowString(restoredBuf, y))
+	}
+	if !strings.Contains(strings.Join(restoredRows, "\n"), "x") {
+		t.Fatal("input text was not restored after completion")
+	}
+}
+
+func TestShell_AIToolOutputStaysAboveThinkingIndicator(t *testing.T) {
+	s := &Shell{
+		mode:        ModeStack,
+		input:       NewPromptInput(PromptInputOptions{}),
+		running:     true,
+		activeBlock: 0,
+		blocks: []CommandBlock{{
+			Kind:     BlockAITurn,
+			Source:   SourceUserShell,
+			Prompt:   "$ ",
+			Input:    "question",
+			AnimLine: "thinking marker",
+			Status:   StatusActive,
+		}},
+	}
+	onChunk, onFinish := s.OnAICommandStart("echo tool-output-marker", "")
+	onChunk([]byte("tool-output-marker\n"))
+	onFinish(0, 0)
+
+	buf, _ := s.Render(ui.Rect{W: 60, H: 12}, ui.RenderContext{})
+	var rows []string
+	for y := 0; y < buf.Height; y++ {
+		rows = append(rows, extractRowString(buf, y))
+	}
+	rendered := strings.Join(rows, "\n")
+	promptAt := strings.Index(rendered, "question")
+	outputAt := strings.Index(rendered, "tool-output-marker")
+	thinkingAt := strings.Index(rendered, "thinking marker")
+	if promptAt < 0 || outputAt < 0 || thinkingAt < 0 {
+		t.Fatalf("rendered stack missing expected prompt, tool output, or thinking indicator:\n%s", rendered)
+	}
+	if !(promptAt < outputAt && outputAt < thinkingAt) {
+		t.Fatalf("expected prompt, then AI-tool output, then thinking indicator; got:\n%s", rendered)
+	}
+}
+
+func TestAIToolBlockTrimsOnlyTrailingWhitespaceRows(t *testing.T) {
+	block := CommandBlock{
+		Kind:   BlockCommand,
+		Source: SourceAITool,
+		Prompt: "$ ",
+		Input:  "git --version",
+		Output: *bytes.NewBufferString("git version 2.52.0.windows.1\n\n \t\n"),
+		Status: StatusSuccess,
+	}
+	buf := renderBlock(block, 60)
+	if buf.Height != 2 {
+		t.Fatalf("AI tool block height = %d, want command and output rows only", buf.Height)
+	}
+
+	block.Output = *bytes.NewBufferString("first\n\nlast\n\n  ")
+	buf = renderBlock(block, 60)
+	if buf.Height != 4 {
+		t.Fatalf("AI tool block height with an internal blank row = %d, want 4", buf.Height)
+	}
+	if got := extractRowString(buf, 2); got != "┃" {
+		t.Fatalf("internal blank output row = %q, want its gutter-only row preserved", got)
+	}
+	if got := extractRowString(buf, 3); got != "┃ last" {
+		t.Fatalf("last content row = %q, want %q", got, "┃ last")
+	}
+}
 
 func TestClassifyInput_BashSyntaxAndCommandResolution(t *testing.T) {
 	dir := t.TempDir()
