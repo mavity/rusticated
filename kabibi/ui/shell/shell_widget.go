@@ -83,6 +83,7 @@ type Shell struct {
 	peakOccupiedHeight int
 
 	// Transient status / animation state for the active block
+	statusTextRaw string
 	statusLine    string
 	animFrame     int
 	bannerFlushed bool
@@ -467,6 +468,7 @@ func renderBlockCached(block *CommandBlock, width int) terminal.CellBuf {
 	if block.Source == SourceAITool && width > 4 {
 		innerW := width - 2
 		inner := terminal.FromANSI(lines, innerW)
+		inner = trimTrailingWhitespaceRows(inner)
 		if inner.Height == 0 {
 			inner = terminal.NewCellBuf(innerW, 1)
 		}
@@ -510,6 +512,11 @@ func renderBlockCached(block *CommandBlock, width int) terminal.CellBuf {
 func (s *Shell) OnAICommandStart(command string, cwd string) (onChunk func([]byte), onFinish func(exitCode int, elapsed time.Duration)) {
 	s.mu.Lock()
 	startedAt := time.Now()
+	parentIndex := -1
+	if s.running && s.activeBlock >= 0 && s.activeBlock < len(s.blocks) &&
+		s.blocks[s.activeBlock].Kind == BlockAITurn {
+		parentIndex = s.activeBlock
+	}
 	block := CommandBlock{
 		Kind:      BlockCommand,
 		Source:    SourceAITool,
@@ -521,8 +528,10 @@ func (s *Shell) OnAICommandStart(command string, cwd string) (onChunk func([]byt
 		ExitCode:  0,
 		StartedAt: startedAt,
 	}
-	// If the latest block is the active BlockAITurn, insert the AI tool block right before
-	// or append it cleanly so both the tool output and final AI answer are visible in chronological order.
+	if parentIndex >= 0 {
+		block.aiTurnParentIndex = parentIndex
+		block.hasAITurnParent = true
+	}
 	s.blocks = append(s.blocks, block)
 	idx := len(s.blocks) - 1
 	s.mu.Unlock()
@@ -566,8 +575,56 @@ func calculateVisualRows(block CommandBlock, width int) int {
 	return renderBlockCached(&block, width).Height
 }
 
+func (s *Shell) renderStackBlocksLocked(width int) []terminal.CellBuf {
+	toolBlocks := make(map[int][]int)
+	isToolBlock := make([]bool, len(s.blocks))
+	for i := range s.blocks {
+		block := &s.blocks[i]
+		parent := block.aiTurnParentIndex
+		if block.hasAITurnParent && parent >= 0 && parent < len(s.blocks) &&
+			s.blocks[parent].Kind == BlockAITurn {
+			toolBlocks[parent] = append(toolBlocks[parent], i)
+			isToolBlock[i] = true
+		}
+	}
+
+	rendered := make([]terminal.CellBuf, 0, len(s.blocks)+len(toolBlocks))
+	for i := range s.blocks {
+		if isToolBlock[i] {
+			continue
+		}
+		block := &s.blocks[i]
+		children := toolBlocks[i]
+		if len(children) == 0 {
+			rendered = append(rendered, renderBlockCached(block, width))
+			continue
+		}
+
+		if block.Prompt != "" || block.Input != "" {
+			promptBlock := CommandBlock{
+				Kind:   block.Kind,
+				Source: block.Source,
+				Prompt: block.Prompt,
+				Input:  block.Input,
+				Status: block.Status,
+			}
+			rendered = append(rendered, renderBlockCached(&promptBlock, width))
+		}
+		for _, childIndex := range children {
+			rendered = append(rendered, renderBlockCached(&s.blocks[childIndex], width))
+		}
+		if block.Output.Len() > 0 || block.AnimLine != "" {
+			responseBlock := *block
+			responseBlock.Prompt = ""
+			responseBlock.Input = ""
+			rendered = append(rendered, renderBlockCached(&responseBlock, width))
+		}
+	}
+	return rendered
+}
+
 // computeStackHeight calculates the current occupied height of the stack
-// (visible non-ejected block rows + PromptInput + 1 blank footer row) for Measure.
+// (visible non-ejected block rows + visible input + 1 blank footer row) for Measure.
 func (s *Shell) computeStackHeight(w, maxH int) int {
 	if w <= 0 {
 		w = 80
@@ -578,14 +635,18 @@ func (s *Shell) computeStackHeight(w, maxH int) int {
 
 	s.mu.Lock()
 	var chromeH int
+	inputVisible := !s.running && !s.exiting
 	if !s.exiting {
 		s.mu.Unlock()
-		inputSize := s.input.Measure(ui.Constraints{MaxW: w, MaxH: maxH - reservedFooterRows})
-		inputH := inputSize.H
-		if inputH < 1 {
-			inputH = 1
+		if inputVisible {
+			inputSize := s.input.Measure(ui.Constraints{MaxW: w, MaxH: maxH - reservedFooterRows})
+			inputH := inputSize.H
+			if inputH < 1 {
+				inputH = 1
+			}
+			chromeH = inputH
 		}
-		chromeH = inputH + reservedFooterRows
+		chromeH += reservedFooterRows
 		if chromeH > maxH {
 			chromeH = maxH
 		}
@@ -623,7 +684,7 @@ func (s *Shell) computeStackHeight(w, maxH int) int {
 
 // Measure implements ui.Widget by reporting the shell's space requirements.
 // In ModeStack (default), the shell reports its exact occupied stack height:
-// visible non-ejected blocks + PromptInput + 1 reserved blank footer line,
+// visible non-ejected blocks + visible PromptInput + 1 reserved blank footer line,
 // growing from (H_banner + 1 + 1) up to c.MaxH.
 // In ModePlumeHistory, it requests the full available constraints.
 func (s *Shell) Measure(c ui.Constraints) ui.Size {
@@ -647,7 +708,7 @@ func (s *Shell) Measure(c ui.Constraints) ui.Size {
 }
 
 // Render implements ui.Widget by painting the shell stack into a CellBuf.
-// Uses bottom-up viewport fitting: pins PromptInput + 1 reserved blank footer
+// Uses bottom-up viewport fitting: pins the visible PromptInput + 1 reserved blank footer
 // row at the bottom, walks backwards across s.blocks from newest to oldest to
 // fill the remaining viewport budget, closes any bottom slack gap before ejecting,
 // and ejects overflowing top rows via WriteToScrollback.
@@ -677,39 +738,37 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 	exiting := s.exiting
 	running := s.running
 
-	// Render and cache each block under the lock so cachedBuf is retained across frames
-	blockBufs := make([]terminal.CellBuf, len(s.blocks))
+	// Render and cache each block under the lock so cachedBuf is retained across frames.
+	// AI-turn tool output is placed between the prompt and response/status rows.
+	blockBufs := s.renderStackBlocksLocked(w)
 	totalBlockRows := 0
-	for i := range s.blocks {
-		b := renderBlockCached(&s.blocks[i], w)
-		blockBufs[i] = b
+	for _, b := range blockBufs {
 		totalBlockRows += b.Height
 	}
 	previouslyEjected := s.previouslyEjected
 	s.mu.Unlock()
 
-	// 1. Pin Bottom Chrome: PromptInput + 1 blank reserved footer row (omitted when exiting)
+	// 1. Pin Bottom Chrome: visible PromptInput + 1 blank reserved footer row (omitted when exiting)
 	var inputBuf terminal.CellBuf
 	var inputCursor ui.CursorPos
 	var chromeH int
 	if !exiting {
-		inputCtx := ctx
-		if running {
-			inputCtx.Focused = false
+		if !running {
+			inputMaxH := maxH - reservedFooterRows
+			if inputMaxH < 1 {
+				inputMaxH = 1
+			}
+			inputBuf, inputCursor = s.input.Render(ui.Rect{X: 0, Y: 0, W: w, H: inputMaxH}, ctx)
+			chromeH = inputBuf.Height
 		}
-		inputMaxH := maxH - reservedFooterRows
-		if inputMaxH < 1 {
-			inputMaxH = 1
-		}
-		inputBuf, inputCursor = s.input.Render(ui.Rect{X: 0, Y: 0, W: w, H: inputMaxH}, inputCtx)
 		footerH := reservedFooterRows
-		if inputBuf.Height+footerH > maxH {
-			footerH = maxH - inputBuf.Height
+		if chromeH+footerH > maxH {
+			footerH = maxH - chromeH
 			if footerH < 0 {
 				footerH = 0
 			}
 		}
-		chromeH = inputBuf.Height + footerH
+		chromeH += footerH
 	}
 
 	// 2. Remaining Block Budget
@@ -730,8 +789,7 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 			ejectionBuf := ui.NewCellBuf(w, deltaRows)
 			currentRow := 0
 			rowsSeen := 0
-			for i, bBuf := range blockBufs {
-				_ = i
+			for _, bBuf := range blockBufs {
 				blockRows := bBuf.Height
 				rowsEnd := rowsSeen + blockRows
 				if rowsEnd > previouslyEjected && rowsSeen < hTarget {
@@ -751,7 +809,7 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 		previouslyEjected = hTarget
 	}
 
-	// 4. Bottom-Up Backward Walk across blocks (from newest i = N-1 down to 0)
+	// 4. Bottom-Up Backward Walk across rendered block segments (newest to oldest)
 	// after excluding previouslyEjected rows.
 	type blockSlice struct {
 		buf      terminal.CellBuf
@@ -845,7 +903,7 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 		}
 	}
 	var cursor ui.CursorPos
-	if !exiting && inputBuf.Height > 0 {
+	if !exiting && !running && inputBuf.Height > 0 {
 		for y := 0; y < inputBuf.Height && inputTopY+y < buf.Height; y++ {
 			for x := 0; x < w && x < inputBuf.Width; x++ {
 				buf.Set(x, inputTopY+y, inputBuf.Get(x, y))
@@ -1083,6 +1141,7 @@ func (s *Shell) submitAndExecuteAsync() {
 	}
 	s.blocks = append(s.blocks, block)
 	blockIdx := len(s.blocks) - 1
+	s.statusTextRaw = ""
 	s.statusLine = ""
 	s.animFrame = 0
 
@@ -1184,6 +1243,7 @@ func (s *Shell) submitAndExecuteAsync() {
 			s.activeCancel = nil
 			s.activeBlock = -1
 			s.running = false
+			s.statusTextRaw = ""
 			s.statusLine = ""
 			onDone := s.opts.OnCommandFinished
 			var finalCwd string
@@ -1264,17 +1324,18 @@ func (s *Shell) updateActiveArtifactFeedback(blockIdx int, feedback string) {
 		return
 	}
 	s.mu.Lock()
-	cur := s.statusLine
+	var raw strings.Builder
+	raw.WriteString(s.statusTextRaw)
 	for i := 0; i < len(feedback); i++ {
 		ch := feedback[i]
-		switch ch {
-		case '\r', '\n':
-			cur = ""
-		default:
-			cur += string(ch)
+		if ch == '\r' {
+			raw.Reset()
+		} else {
+			raw.WriteByte(ch)
 		}
 	}
-	cur = strings.TrimSpace(cur)
+	s.statusTextRaw = raw.String()
+	cur := strings.Join(strings.Fields(s.statusTextRaw), " ")
 	s.statusLine = cur
 	if blockIdx >= 0 && blockIdx < len(s.blocks) {
 		if cur != "" {
@@ -1305,6 +1366,7 @@ func (s *Shell) runAIFallback(
 		},
 		func(content string) {
 			s.mu.Lock()
+			s.statusTextRaw = ""
 			s.statusLine = ""
 			if blockIdx >= 0 && blockIdx < len(s.blocks) {
 				s.blocks[blockIdx].AnimLine = ""

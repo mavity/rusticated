@@ -114,16 +114,19 @@ type CommandBlock struct {
 	Duration  time.Duration      // Execution duration
 
 	// Cached visual rendering to avoid re-running FromANSI for unchanged blocks
-	cachedWidth   int
-	cachedPrompt  string
-	cachedInput   string
-	cachedOutLen  int
-	cachedAnim    string
-	cachedKind    BlockKind
-	cachedSource  CommandSource
-	cachedStatus  CommandBlockStatus
-	cachedBuf     terminal.CellBuf
+	cachedWidth    int
+	cachedPrompt   string
+	cachedInput    string
+	cachedOutLen   int
+	cachedAnim     string
+	cachedKind     BlockKind
+	cachedSource   CommandSource
+	cachedStatus   CommandBlockStatus
+	cachedBuf      terminal.CellBuf
 	cachePopulated bool
+
+	aiTurnParentIndex int
+	hasAITurnParent   bool
 }
 
 // shellResultMsg contains the output of a command

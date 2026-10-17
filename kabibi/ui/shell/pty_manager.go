@@ -107,6 +107,10 @@ func CleanCellBufToText(buf terminal.CellBuf, keepANSI bool) string {
 	if buf.Width <= 0 || buf.Height <= 0 {
 		return ""
 	}
+	buf = trimTrailingWhitespaceRows(buf)
+	if buf.Height == 0 {
+		return ""
+	}
 	if keepANSI {
 		cloned := terminal.NewCellBuf(buf.Width, buf.Height)
 		for y := 0; y < buf.Height; y++ {
@@ -146,6 +150,32 @@ func CleanCellBufToText(buf terminal.CellBuf, keepANSI bool) string {
 		}
 	}
 	return strings.TrimRight(sb.String(), "\n")
+}
+
+func trimTrailingWhitespaceRows(buf terminal.CellBuf) terminal.CellBuf {
+	lastContentRow := -1
+	for y := buf.Height - 1; y >= 0; y-- {
+		for x := 0; x < buf.Width; x++ {
+			if strings.TrimSpace(buf.Get(x, y).Grapheme) != "" {
+				lastContentRow = y
+				break
+			}
+		}
+		if lastContentRow >= 0 {
+			break
+		}
+	}
+	if lastContentRow == buf.Height-1 {
+		return buf
+	}
+
+	trimmed := terminal.NewCellBuf(buf.Width, lastContentRow+1)
+	for y := 0; y <= lastContentRow; y++ {
+		for x := 0; x < buf.Width; x++ {
+			trimmed.Set(x, y, buf.Get(x, y))
+		}
+	}
+	return trimmed
 }
 
 // Snapshot reads the current settled output from the ManagedPTY.
