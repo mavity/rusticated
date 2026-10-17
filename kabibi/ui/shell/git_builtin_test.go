@@ -52,3 +52,46 @@ func TestGitBuiltinReportsMissingRepository(t *testing.T) {
 		t.Fatalf("git status result = (exit %d, %q), want missing-repository error", record.ExitCode, record.Output)
 	}
 }
+
+func TestGitBuiltinAddAndCommit(t *testing.T) {
+	root := t.TempDir()
+	repo, err := git.PlainInit(root, false)
+	if err != nil {
+		t.Fatalf("initialize repository: %v", err)
+	}
+	cfg, err := repo.Config()
+	if err != nil {
+		t.Fatalf("read repository config: %v", err)
+	}
+	cfg.User.Name = "Kabibi Test"
+	cfg.User.Email = "author@example.test"
+	if err := repo.Storer.SetConfig(cfg); err != nil {
+		t.Fatalf("configure repository identity: %v", err)
+	}
+	cwd := filepath.Join(root, "sub")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatalf("create subdirectory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "new.txt"), []byte("new\n"), 0o644); err != nil {
+		t.Fatalf("write untracked file: %v", err)
+	}
+
+	session, err := NewExecutionSession(cwd)
+	if err != nil {
+		t.Fatalf("create execution session: %v", err)
+	}
+	addRecord, err := session.RunCommand(context.Background(), "git add .", nil, SourceUserShell, nil)
+	if err != nil {
+		t.Fatalf("run git add: %v", err)
+	}
+	if addRecord.ExitCode != 0 {
+		t.Fatalf("git add exit code = %d, output: %q", addRecord.ExitCode, addRecord.Output)
+	}
+	commitRecord, err := session.RunCommand(context.Background(), "git commit -m 'add new file'", nil, SourceUserShell, nil)
+	if err != nil {
+		t.Fatalf("run git commit: %v", err)
+	}
+	if commitRecord.ExitCode != 0 || !strings.Contains(commitRecord.Output, "add new file") {
+		t.Fatalf("git commit result = (exit %d, %q)", commitRecord.ExitCode, commitRecord.Output)
+	}
+}
