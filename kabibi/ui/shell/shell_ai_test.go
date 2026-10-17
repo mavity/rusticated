@@ -356,6 +356,22 @@ func TestKabibiTools_RespectShellCwdAndInterstitialHistory(t *testing.T) {
 	if got := strings.TrimSpace(execMap["output"].(string)); got != "line1\nline2\nline3" {
 		t.Fatalf("exec tool output = %q, want %q", got, "line1\nline2\nline3")
 	}
+
+	// 5. read_command_output inspects a specific command block by ID with line range and search
+	readCmdTool := tools["read_command_output"]
+	allRecs := es.Records()
+	lastRec := allRecs[len(allRecs)-1]
+	rcOut, err := readCmdTool.Execute(context.Background(), ai.ToolCall{
+		Name:         "read_command_output",
+		RawArguments: json.RawMessage(`{"id":` + string(rune('0'+lastRec.ID)) + `,"start_line":2,"end_line":3,"explanation":"inspect lines 2-3 of command output"}`),
+	}, nil)
+	if err != nil {
+		t.Fatalf("read_command_output failed: %v", err)
+	}
+	rcMap := rcOut.(map[string]any)
+	if got := rcMap["output"]; got != "line2\nline3" {
+		t.Fatalf("read_command_output sliced output = %q, want %q", got, "line2\nline3")
+	}
 }
 
 func TestEndToEnd_ShellFallbackIntoAISessionWithTools(t *testing.T) {

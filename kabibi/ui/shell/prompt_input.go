@@ -17,8 +17,8 @@ const (
 
 // PromptInputOptions configures a PromptInput widget.
 type PromptInputOptions struct {
-	// Prompt returns the current prompt prefix string (e.g. "$ " or a dynamic path/status prompt).
-	// Defaults to returning "$ " when nil.
+	// Prompt returns the current prompt prefix string (e.g. "፧" or a dynamic path/status prompt).
+	// Defaults to returning "፧" when nil.
 	Prompt func() string
 
 	// MaxLines caps the maximum number of visual rows the input may expand to (defaults to 6).
@@ -54,7 +54,7 @@ type PromptInput struct {
 func NewPromptInput(opts PromptInputOptions) *PromptInput {
 	promptFn := opts.Prompt
 	if promptFn == nil {
-		promptFn = func() string { return "$ " }
+		promptFn = func() string { return "፧" }
 	}
 	maxLines := opts.MaxLines
 	if maxLines <= 0 {
@@ -77,7 +77,7 @@ func NewPromptInput(opts PromptInputOptions) *PromptInput {
 func (p *PromptInput) SetPrompt(fn func() string) {
 	p.mu.Lock()
 	if fn == nil {
-		fn = func() string { return "$ " }
+		fn = func() string { return "፧" }
 	}
 	p.promptFn = fn
 	p.mu.Unlock()
@@ -90,7 +90,7 @@ func (p *PromptInput) PromptText() string {
 	fn := p.promptFn
 	p.mu.Unlock()
 	if fn == nil {
-		return "$ "
+		return "፧"
 	}
 	return fn()
 }
