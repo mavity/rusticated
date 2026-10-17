@@ -137,6 +137,9 @@ func (w *AppWidget) PanelsVisible() bool {
 // When turned on, the shell stack switches to bottom-aligned full-viewport mode
 // so the banner + prompt + blank footer sit in the bottom gap while older lines
 // climb upward behind the blue panels.
+// When turned off, the shell stack returns to top-aligned mode (anchored at row 0,
+// immediately below the latest untouched row in terminal scrollback) and grows
+// downward toward the bottom before ejecting upward.
 func (w *AppWidget) SetPanelsVisible(v bool) {
 	w.mu.Lock()
 	w.panelsVisible = v
@@ -145,8 +148,8 @@ func (w *AppWidget) SetPanelsVisible(v bool) {
 	}
 	w.mu.Unlock()
 
+	w.sh.SetBottomAligned(v)
 	if v {
-		w.sh.SetBottomAligned(true)
 		if cwd := w.sh.Dir(); cwd != "" {
 			if active := w.panels.ActivePane(); active != nil && active.Dir() != cwd {
 				_ = active.LoadDir(cwd)

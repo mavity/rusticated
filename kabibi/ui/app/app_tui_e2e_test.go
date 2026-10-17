@@ -995,3 +995,154 @@ func TestAppTUI_BluePanels_FileOpsAndEditor(t *testing.T) {
 		t.Fatalf("expected renamed.txt to be deleted after F8 confirm, err=%v", err)
 	}
 }
+
+// TestAppTUI_BluePanels_ShownThenWithdrawn_TopAnchoredDownwardGrowth verifies
+// that when the blue panels are summoned via Ctrl+O (claiming the full screen)
+// and then withdrawn via Ctrl+O before the shell stack has filled the screen:
+// 1. The stack immediately top-aligns at row 0 (anchored right below the latest
+//    untouched row in terminal history), leaving blank space at the bottom.
+// 2. Subsequent command output grows downward toward the bottom into that space
+//    with ZERO scrollback ejection until the stack hits the bottom of the screen.
+// 3. Only after hitting the bottom does further output eject upward into scrollback.
+func TestAppTUI_BluePanels_ShownThenWithdrawn_TopAnchoredDownwardGrowth(t *testing.T) {
+	workDir := t.TempDir()
+
+	var scrollbackMu sync.Mutex
+	var scrollbackChunks []string
+
+	var host *ui.Host
+	appWidget := NewWidget(AppWidgetOptions{
+		WorkingDir: workDir,
+		WriteToScrollback: func(text string) {
+			scrollbackMu.Lock()
+			scrollbackChunks = append(scrollbackChunks, text)
+			scrollbackMu.Unlock()
+			if host != nil {
+				host.WriteToScrollback(text)
+			}
+		},
+		OnExit: func() {
+			if host != nil {
+				host.Stop()
+			}
+		},
+	})
+	defer appWidget.Close()
+	appWidget.Shell().SetPrompt("፧")
+
+	// 1. Open panels (Ctrl+O) and render at 80x10 -> claims full screen and bottom-aligns stack
+	appWidget.SetPanelsVisible(true)
+	bufOpen, curOpen := appWidget.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 10}, ui.RenderContext{Focused: true})
+	// When panels are open on 80x10, PromptInput sits at row 8 (above blank footer row 9)
+	if bufOpen.Height != 10 || curOpen.Y != 8 {
+		t.Fatalf("with panels open on 80x10: height=%d cursorY=%d, want height=10 cursorY=8", bufOpen.Height, curOpen.Y)
+	}
+
+	// 2. Withdraw panels (Ctrl+O again) -> stack must immediately anchor at row 0
+	// (3 banner rows at 0..2, PromptInput at row 3, blank footer at row 4 -> occupied height 5)
+	appWidget.SetPanelsVisible(false)
+	bufWithdrawn, curWithdrawn := appWidget.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 10}, ui.RenderContext{Focused: true})
+	if curWithdrawn.Y != 3 {
+		t.Fatalf("after withdrawing panels, expected PromptInput cursor at top-anchored row 3, got %d", curWithdrawn.Y)
+	}
+	if bufWithdrawn.Height != 5 {
+		t.Fatalf("after withdrawing panels, expected Shell rendered height 5 (3 banner + 1 input + 1 footer), got %d", bufWithdrawn.Height)
+	}
+
+	// 3. Now run inside Host on 80x10: open panels, withdraw panels, run 2 commands
+	// (4 rows -> occupied height grows 5 -> 7 -> 9 <= 10) and verify ZERO scrollback ejection!
+	host = ui.NewHost(appWidget)
+	inR, inW := io.Pipe()
+	defer inR.Close()
+	defer inW.Close()
+
+	var rawTermOut syncBuffer
+	const termW, termH = 80, 10
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- host.RunWithIO(
+			inR,
+			&rawTermOut,
+			func(uintptr) (*xterm.State, error) { return &xterm.State{}, nil },
+			func(uintptr, *xterm.State) error { return nil },
+			func(uintptr) (int, int, error) { return termW, termH, nil },
+		)
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(rawTermOut.String(), "Kabibi") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Summon panels with Ctrl+O, then withdraw with Ctrl+O
+	_, _ = io.WriteString(inW, "\x0f")
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if appWidget.PanelsVisible() {
+			time.Sleep(20 * time.Millisecond)
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	_, _ = io.WriteString(inW, "\x0f")
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !appWidget.PanelsVisible() {
+			time.Sleep(20 * time.Millisecond)
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Run 2 commands (each adds 2 rows -> stack grows from 5 -> 7 -> 9 rows inside 10-row screen)
+	for i := 1; i <= 2; i++ {
+		_, _ = io.WriteString(inW, fmt.Sprintf("echo down_%d\r", i))
+		wantBlocks := 1 + i
+		deadline = time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if len(appWidget.Shell().Blocks()) >= wantBlocks && !appWidget.Shell().IsRunning() {
+				time.Sleep(25 * time.Millisecond)
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	scrollbackMu.Lock()
+	ejectedBeforeHittingBottom := len(scrollbackChunks)
+	scrollbackMu.Unlock()
+	if ejectedBeforeHittingBottom != 0 {
+		t.Fatalf("expected 0 scrollback ejections while growing downward after withdrawing panels, got %d", ejectedBeforeHittingBottom)
+	}
+
+	// Run 1 more command (adds 2 rows -> 11 rows > 10-row screen) -> hits bottom and ejects!
+	_, _ = io.WriteString(inW, "echo hit_bottom_eject\r")
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(appWidget.Shell().Blocks()) >= 4 && !appWidget.Shell().IsRunning() {
+			time.Sleep(25 * time.Millisecond)
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	scrollbackMu.Lock()
+	ejectedAfterHittingBottom := len(scrollbackChunks)
+	scrollbackMu.Unlock()
+	if ejectedAfterHittingBottom == 0 {
+		t.Fatal("expected scrollback ejection once top-anchored stack hit the bottom of the screen")
+	}
+
+	_, _ = io.WriteString(inW, "exit\r")
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Host.RunWithIO returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Host.RunWithIO did not exit")
+	}
+}
