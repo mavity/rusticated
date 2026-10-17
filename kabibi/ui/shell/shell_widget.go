@@ -21,9 +21,9 @@ import (
 type ShellMode int
 
 const (
-	ModeStack        ShellMode = iota // Dynamic growing stack with slack-gap recovery & scrollback ejection (default)
-	ModePlumeHistory                  // Full-screen viewport history for file panel integration
-	ModeZeroPlume    = ModeStack      // Backward-compatible alias for the default inline stack mode
+	ModeStack        ShellMode   = iota // Dynamic growing stack with slack-gap recovery & scrollback ejection (default)
+	ModePlumeHistory                    // Full-screen viewport history for file panel integration
+	ModeZeroPlume    = ModeStack        // Backward-compatible alias for the default inline stack mode
 )
 
 const reservedFooterRows = 1
@@ -134,11 +134,12 @@ func New(opts ShellOptions) *Shell {
 	s.input = NewPromptInput(PromptInputOptions{
 		Prompt: func() string {
 			s.mu.Lock()
-			defer s.mu.Unlock()
-			p, _ := s.currentPromptLocked()
+			p := s.prompt
+			s.mu.Unlock()
 			return p
 		},
 	})
+	s.refreshPrompt()
 
 	// Add initial pompous retro startup banner as BlockBanner (block 0)
 	bannerText := formatStartupBanner(sessionErr)
@@ -216,6 +217,7 @@ func (s *Shell) SetDir(dir string) error {
 	if err := es.SetDir(dir); err != nil {
 		return err
 	}
+	s.refreshPrompt()
 	s.invalidate()
 	return nil
 }
@@ -346,6 +348,33 @@ func (s *Shell) currentPromptLocked() (string, int) {
 		p = "፧"
 	}
 	return p, len([]rune(p))
+}
+
+// refreshPrompt evaluates shell environment and directory state outside the
+// render path, then publishes a cached prompt for PromptInput to read.
+func (s *Shell) refreshPrompt() {
+	s.mu.Lock()
+	es := s.execSess
+	tmpl := s.promptTemplate
+	prompt := s.prompt
+	s.mu.Unlock()
+
+	if es != nil {
+		envMap := es.EnvMap()
+		if ps1, ok := envMap["PS1"]; ok && ps1 != "" {
+			tmpl = ps1
+		}
+		if tmpl == "" {
+			tmpl = `\w፧`
+		}
+		prompt = FormatPrompt(tmpl, es.Dir(), envMap).Text
+	} else if prompt == "" {
+		prompt = "፧"
+	}
+
+	s.mu.Lock()
+	s.prompt = prompt
+	s.mu.Unlock()
 }
 
 // SubmitCurrentInput adds the current input to history as a CommandBlock and clears the input buffer.
@@ -635,9 +664,9 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 	// 4. Bottom-Up Backward Walk across blocks (from newest i = N-1 down to 0)
 	// after excluding previouslyEjected rows.
 	type blockSlice struct {
-		buf        terminal.CellBuf
-		startRow   int
-		endRow     int
+		buf      terminal.CellBuf
+		startRow int
+		endRow   int
 	}
 	var collected []blockSlice
 	remaining := hBudget
@@ -1074,6 +1103,7 @@ func (s *Shell) submitAndExecuteAsync() {
 			close(doneCh)
 			s.doneCh = nil
 			s.mu.Unlock()
+			s.refreshPrompt()
 			if onDone != nil {
 				onDone(finalCwd)
 			}

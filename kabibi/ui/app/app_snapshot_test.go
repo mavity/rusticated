@@ -74,6 +74,23 @@ func TestAppWidget_Snapshot_Initial_W80H24(t *testing.T) {
 	assertAppSnapshot(t, "initial_w80h24.snap", widget, &scrollback, ui.Rect{X: 0, Y: 0, W: 80, H: 24})
 }
 
+func TestAppWidget_BluePanelsPreserveTerminalBackgroundOutsidePanels(t *testing.T) {
+	widget := NewWidget(AppWidgetOptions{PanelsVisible: true})
+	defer widget.Close()
+
+	buf, _ := widget.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 24}, ui.RenderContext{})
+
+	panelCell := buf.Get(10, 8)
+	if got := panelCell.Style.Background(); got != terminal.Color(0x0000A8) {
+		t.Fatalf("panel background = %#06x, want blue %#06x", got, 0x0000A8)
+	}
+
+	gapCell := buf.Get(79, 23)
+	if !gapCell.Style.HasAttribute(terminal.CharResetBackgroundDefault) {
+		t.Fatalf("bottom gap background style = %#x, want terminal default background", gapCell.Style.Attributes())
+	}
+}
+
 // typeString simulates keyboard typing by dispatching canonical input.KeyPressEvents.
 func typeString(w ui.Widget, s string) {
 	for _, r := range s {

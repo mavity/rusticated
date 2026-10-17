@@ -129,6 +129,10 @@ type editorModel struct {
 	// OnClose is called by the parent when the editor should close.
 	OnClose     func() tea.Cmd
 	OnCloseFunc func()
+
+	// SaveOnExit saves dirty changes instead of showing the interactive
+	// save/discard confirmation when Escape is pressed.
+	SaveOnExit bool
 }
 
 type EditorWidget = editorModel
@@ -139,7 +143,7 @@ func NewEditor(path string) (*editorModel, error) {
 
 func newEditor(path string) (*editorModel, error) {
 	b, err := os.ReadFile(path)
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
 	content := string(b)
@@ -628,6 +632,13 @@ func (e *editorModel) handleKeyName(key string, runes []rune) tea.Cmd {
 	switch key {
 	case "esc":
 		if e.dirty {
+			if e.SaveOnExit {
+				if err := e.save(); err != nil {
+					e.status = "save failed: " + err.Error()
+					return nil
+				}
+				return e.triggerClose()
+			}
 			e.confirmQuit = true
 			e.status = "Save changes?  [Y] save   [N] discard   [Esc] cancel"
 			return nil
