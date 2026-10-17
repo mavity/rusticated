@@ -466,3 +466,91 @@ test('tty_set_size validates handles and delegates standard TTY resizing', async
   const noResizeHost = await washmhost({ test: true, memory: mem });
   assert.equal(noResizeHost.env.tty_set_size(1n, 120, 40), wasiENOTTY);
 });
+
+test('Virtual eval dylib evaluates sync, async Promise, handles errors and overflow buffer', async () => {
+  const mem = new WebAssembly.Memory({ initial: 2 });
+  const host = await washmhost({ test: true, memory: mem });
+  const { env, hostState } = host;
+
+  // 1. dylib_open("eval")
+  const pathPtr = 100;
+  const pathBytes = new TextEncoder().encode('eval');
+  new Uint8Array(mem.buffer, pathPtr, pathBytes.length).set(pathBytes);
+  env.dylib_open(200, pathPtr, pathBytes.length, 0);
+  hostState.drainQueue();
+
+  const view = new DataView(mem.buffer);
+  assert.equal(view.getUint32(200, true), FLAG_COMPLETED);
+  assert.equal(view.getUint32(204, true), wasiSuccess);
+  const libHandle = view.getBigUint64(216, true);
+  assert.equal(libHandle, 0xEEEE0001n);
+
+  // 2. dylib_sym(libHandle, "eval")
+  const symPtr = 120;
+  const symBytes = new TextEncoder().encode('eval');
+  new Uint8Array(mem.buffer, symPtr, symBytes.length).set(symBytes);
+  env.dylib_sym(240, libHandle, symPtr, symBytes.length);
+  hostState.drainQueue();
+
+  assert.equal(view.getUint32(240, true), FLAG_COMPLETED);
+  assert.equal(view.getUint32(244, true), wasiSuccess);
+  const symHandle = view.getBigUint64(256, true);
+  assert.equal(symHandle, 0xEEEE0002n);
+
+  // Helper to execute eval call
+  const callEval = async (ovPtr, codeStr, outCap) => {
+    const codeBytes = new TextEncoder().encode(codeStr);
+    const codePtr = 1000;
+    new Uint8Array(mem.buffer, codePtr, codeBytes.length).set(codeBytes);
+
+    const outPtr = 2000;
+    const outLenPtr = 3000;
+    view.setUint32(outLenPtr, 0, true);
+
+    const argsBase = 4000;
+    view.setBigUint64(argsBase + 0, BigInt(codePtr), true);
+    view.setBigUint64(argsBase + 8, BigInt(codeBytes.length), true);
+    view.setBigUint64(argsBase + 16, BigInt(outPtr), true);
+    view.setBigUint64(argsBase + 24, BigInt(outCap), true);
+    view.setBigUint64(argsBase + 32, BigInt(outLenPtr), true);
+
+    const resultsPtr = 5000;
+    env.dylib_call(ovPtr, symHandle, 0, 0, argsBase, 5, 0n, resultsPtr, 1);
+    await new Promise(r => setTimeout(r, 10));
+    hostState.drainQueue();
+
+    const err = view.getUint32(ovPtr + 4, true);
+    const rc = view.getBigUint64(resultsPtr, true);
+    const actualLen = view.getUint32(outLenPtr, true);
+    const outText = new TextDecoder().decode(new Uint8Array(mem.buffer, outPtr, Math.min(outCap, actualLen)));
+    return { err, rc, actualLen, outText };
+  };
+
+  // Test sync evaluation
+  const res1 = await callEval(600, '21 + 21', 1024);
+  assert.equal(res1.err, wasiSuccess);
+  assert.equal(res1.rc, 0n);
+  assert.equal(res1.outText, '42');
+
+  // Test async Promise evaluation
+  const res2 = await callEval(650, 'Promise.resolve("hello from promise")', 1024);
+  assert.equal(res2.err, wasiSuccess);
+  assert.equal(res2.rc, 0n);
+  assert.equal(res2.outText, 'hello from promise');
+
+  // Test thrown error
+  const res3 = await callEval(700, 'throw new Error("boom")', 1024);
+  assert.equal(res3.err, wasiSuccess);
+  assert.equal(res3.rc, 1n);
+  assert.ok(res3.outText.includes('boom'));
+
+  // Test buffer overflow (rc == 2n) and global take overflow
+  const longStr = 'x'.repeat(200);
+  const res4 = await callEval(750, JSON.stringify(longStr), 10);
+  assert.equal(res4.err, wasiSuccess);
+  assert.equal(res4.rc, 2n);
+  assert.equal(res4.actualLen, 200);
+  assert.equal(res4.outText, 'xxxxxxxxxx');
+  assert.equal(globalThis.__rustica_take_overflow(), longStr);
+});
+

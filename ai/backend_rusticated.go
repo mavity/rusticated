@@ -515,13 +515,28 @@ func ensureLMLibLoadedImpl(libPath string) error {
 // ── Thin public wrappers ───────────────────────────────────────────────────
 
 func openBackend(libPath, modelPath, backend string, maxTokens int) (engineBackend, error) {
+	if isBrowserHost() || libPath == "eval" {
+		return openWebBackend(libPath, modelPath, backend, maxTokens)
+	}
 	return sharedOpenBackend(&rusticatedDrv, libPath, modelPath, backend, maxTokens)
 }
 
 func openEmbedderBackend(libPath, modelPath, backend string) (embedderBackend, error) {
+	if isBrowserHost() || libPath == "eval" {
+		return nil, fmt.Errorf("web embedding engine not configured")
+	}
 	return sharedOpenEmbedder(&rusticatedDrv, libPath, modelPath, backend)
 }
 
 func inspectModel(libPath, modelPath string) (*ModelInfo, error) {
+	if isBrowserHost() || libPath == "eval" {
+		return &ModelInfo{
+			MaxContextTokens:        8192,
+			IsDynamicContext:        true,
+			SupportsThinking:        true,
+			SupportsFunctionCalling: true,
+			SupportedBackends:       []string{"gpu", "cpu"},
+		}, nil
+	}
 	return sharedInspectModel(&rusticatedDrv, libPath, modelPath)
 }

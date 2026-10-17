@@ -19,6 +19,8 @@ const litertlmPyPIURL = "https://pypi.org/pypi/litert-lm-api/json"
 const (
 	DefaultLLMModelURL        = "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm"
 	DefaultLLMModelSize       = 2038755678
+	DefaultWebLLMModelURL     = "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.litertlm"
+	DefaultWebLLMModelSize    = 0
 	DefaultEmbeddingModelURL  = "https://huggingface.co/litert-community/embeddinggemma-2-text-270m-litert-lm/resolve/main/embeddinggemma-2-text-270m.litertlm"
 	DefaultEmbeddingModelSize = 164626432
 )
@@ -38,11 +40,17 @@ func DefaultCacheDir() (string, error) {
 
 // EnsureDefaultLLMModel ensures the default Gemma 4 E2B model is cached and returns its path.
 func EnsureDefaultLLMModel(ctx context.Context, opts FetchOptions) (string, error) {
+	if HostOS() == "browser" {
+		return EnsureModel(ctx, DefaultWebLLMModelURL, DefaultWebLLMModelSize, opts)
+	}
 	return EnsureModel(ctx, DefaultLLMModelURL, DefaultLLMModelSize, opts)
 }
 
 // EnsureDefaultEmbeddingModel ensures the default EmbeddingGemma 2 model is cached and returns its path.
 func EnsureDefaultEmbeddingModel(ctx context.Context, opts FetchOptions) (string, error) {
+	if HostOS() == "browser" {
+		return "", nil
+	}
 	return EnsureModel(ctx, DefaultEmbeddingModelURL, DefaultEmbeddingModelSize, opts)
 }
 
@@ -66,6 +74,10 @@ func (o FetchOptions) progress(stage, details string, percent int) {
 // returned library exposes both the LiteRT-LM Engine symbols and the TFLite C
 // API used by Interpreter.
 func EnsureRuntime(ctx context.Context, opts FetchOptions) (string, error) {
+	if HostOS() == "browser" {
+		opts.progress("runtime", "LiteRT-LM WebGPU eval bridge ready", 100)
+		return "eval", nil
+	}
 	if err := os.MkdirAll(opts.CacheDir, 0o755); err != nil {
 		return "", err
 	}
@@ -110,6 +122,9 @@ func EnsureRuntime(ctx context.Context, opts FetchOptions) (string, error) {
 // the cache and returns its path. If expectedSize > 0 it is used as a minimum
 // size sanity check. A valid cached copy is reused without a download.
 func EnsureModel(ctx context.Context, url string, expectedSize int64, opts FetchOptions) (string, error) {
+	if HostOS() == "browser" {
+		return ensureModelBrowser(ctx, url, expectedSize, opts)
+	}
 	if err := os.MkdirAll(opts.CacheDir, 0o755); err != nil {
 		return "", err
 	}
