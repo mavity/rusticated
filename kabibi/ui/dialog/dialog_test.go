@@ -4,208 +4,138 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/input"
+	"github.com/mavity/rusticated/kabibi/ui/filemanager"
+	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
 
 func TestOpenInputDialog(t *testing.T) {
-	m := initialModel()
-	m.openInputDialog(actionMkdir, "Create Dir", "Enter directory name:", "newdir")
-
-	if m.dialog == nil {
-		t.Fatalf("openInputDialog did not create dialog")
+	d := NewInputDialog(ActionMkdir, "Create Dir", "Enter directory name:", "newdir", nil)
+	if d == nil {
+		t.Fatal("NewInputDialog returned nil")
 	}
-
-	if m.dialog.kind != dialogInput {
-		t.Errorf("openInputDialog created kind %d, want %d", m.dialog.kind, dialogInput)
+	if d.Kind != DialogInput {
+		t.Errorf("Kind = %d, want %d", d.Kind, DialogInput)
 	}
-
-	if m.dialog.title != "Create Dir" {
-		t.Errorf("openInputDialog title = %q, want %q", m.dialog.title, "Create Dir")
+	if d.Title != "Create Dir" {
+		t.Errorf("Title = %q, want %q", d.Title, "Create Dir")
 	}
-
-	if m.dialog.prompt != "Enter directory name:" {
-		t.Errorf("openInputDialog prompt = %q, want %q", m.dialog.prompt, "Enter directory name:")
+	if d.Prompt != "Enter directory name:" {
+		t.Errorf("Prompt = %q, want %q", d.Prompt, "Enter directory name:")
 	}
-
-	if m.mode != modeDialog {
-		t.Errorf("openInputDialog did not set mode to modeDialog")
+	if d.InputValue != "newdir" {
+		t.Errorf("InputValue = %q, want %q", d.InputValue, "newdir")
 	}
 }
 
 func TestOpenConfirmDialog(t *testing.T) {
-	m := initialModel()
-	m.openConfirmDialog(actionDelete, "Confirm", "Really delete?", nil)
-
-	if m.dialog == nil {
-		t.Fatalf("openConfirmDialog did not create dialog")
+	d := NewConfirmDialog(ActionDelete, "Confirm", "Really delete?", nil)
+	if d == nil {
+		t.Fatal("NewConfirmDialog returned nil")
 	}
-
-	if m.dialog.kind != dialogConfirm {
-		t.Errorf("openConfirmDialog created kind %d, want %d", m.dialog.kind, dialogConfirm)
-	}
-
-	if m.mode != modeDialog {
-		t.Errorf("openConfirmDialog did not set mode to modeDialog")
+	if d.Kind != DialogConfirm {
+		t.Errorf("Kind = %d, want %d", d.Kind, DialogConfirm)
 	}
 }
 
 func TestOpenChoiceDialog(t *testing.T) {
-	m := initialModel()
-	choices := []dlgChoice{
-		{label: "Overwrite", hotkey: "o"},
-		{label: "Skip", hotkey: "s"},
+	choices := []Choice{
+		{Label: "Overwrite", Hotkey: "o"},
+		{Label: "Skip", Hotkey: "s"},
 	}
-	m.openChoiceDialog("Collision", "File exists", choices, nil)
-
-	if m.dialog == nil {
-		t.Fatalf("openChoiceDialog did not create dialog")
+	d := NewChoiceDialog("Collision", "File exists", choices, nil)
+	if d == nil {
+		t.Fatal("NewChoiceDialog returned nil")
 	}
-
-	if m.dialog.kind != dialogChoice {
-		t.Errorf("openChoiceDialog created kind %d, want %d", m.dialog.kind, dialogChoice)
+	if d.Kind != DialogChoice {
+		t.Errorf("Kind = %d, want %d", d.Kind, DialogChoice)
 	}
-
-	if len(m.dialog.choices) != 2 {
-		t.Errorf("openChoiceDialog has %d choices, want 2", len(m.dialog.choices))
-	}
-}
-
-func TestCloseDialog(t *testing.T) {
-	m := initialModel()
-	m.dialog = &dialogState{kind: dialogInput}
-	m.mode = modeDialog
-
-	m.closeDialog()
-
-	if m.dialog != nil {
-		t.Errorf("closeDialog did not clear dialog")
-	}
-
-	if m.mode != modeBrowser {
-		t.Errorf("closeDialog did not reset mode to modeBrowser")
+	if len(d.Choices) != 2 {
+		t.Errorf("len(Choices) = %d, want 2", len(d.Choices))
 	}
 }
 
 func TestUpdateChoiceHotkey(t *testing.T) {
-	m := initialModel()
-	m.openChoiceDialog("Test", "Pick", []dlgChoice{
-		{label: "First", hotkey: "f"},
-		{label: "Second", hotkey: "s"},
-	}, nil)
+	picked := -1
+	d := NewChoiceDialog("Test", "Pick", []Choice{
+		{Label: "First", Hotkey: "f"},
+		{Label: "Second", Hotkey: "s"},
+	}, func(idx int) {
+		picked = idx
+	})
 
-	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}}
-	_ = m.updateChoice(msg)
-
-	if m.dialog != nil {
-		t.Errorf("updateChoice with matching hotkey did not close dialog")
+	d.HandleEvent(input.KeyPressEvent{Code: 's', Text: "s"})
+	if picked != 1 {
+		t.Errorf("hotkey 's' picked = %d, want 1", picked)
 	}
 }
 
 func TestUpdateChoiceArrows(t *testing.T) {
-	m := initialModel()
-	m.openChoiceDialog("Test", "Pick", []dlgChoice{
-		{label: "First", hotkey: "f"},
-		{label: "Second", hotkey: "s"},
-		{label: "Third", hotkey: "t"},
+	d := NewChoiceDialog("Test", "Pick", []Choice{
+		{Label: "First", Hotkey: "f"},
+		{Label: "Second", Hotkey: "s"},
+		{Label: "Third", Hotkey: "t"},
 	}, nil)
 
-	d := m.dialog
-	if d.choiceIdx != 0 {
-		t.Fatalf("initial choiceIdx not 0")
+	if d.ChoiceIdx != 0 {
+		t.Fatalf("initial ChoiceIdx = %d, want 0", d.ChoiceIdx)
 	}
-
-	msg := tea.KeyMsg{Type: tea.KeyDown}
-	_ = m.updateChoice(msg)
-
-	if d.choiceIdx != 1 {
-		t.Errorf("updateChoice down: choiceIdx = %d, want 1", d.choiceIdx)
+	d.HandleEvent(input.KeyPressEvent{Code: input.KeyDown})
+	if d.ChoiceIdx != 1 {
+		t.Errorf("after Down ChoiceIdx = %d, want 1", d.ChoiceIdx)
 	}
-
-	msg = tea.KeyMsg{Type: tea.KeyUp}
-	_ = m.updateChoice(msg)
-
-	if d.choiceIdx != 0 {
-		t.Errorf("updateChoice up: choiceIdx = %d, want 0", d.choiceIdx)
+	d.HandleEvent(input.KeyPressEvent{Code: input.KeyUp})
+	if d.ChoiceIdx != 0 {
+		t.Errorf("after Up ChoiceIdx = %d, want 0", d.ChoiceIdx)
 	}
 }
 
 func TestUpdateChoiceEsc(t *testing.T) {
 	handlerCalled := false
-	m := initialModel()
-	m.openChoiceDialog("Test", "Pick", []dlgChoice{
-		{label: "OK", hotkey: "o"},
-		{label: "Cancel", hotkey: "c"},
-	}, func(m *AppWidget, idx int) tea.Cmd {
+	d := NewChoiceDialog("Test", "Pick", []Choice{
+		{Label: "OK", Hotkey: "o"},
+		{Label: "Cancel", Hotkey: "c"},
+	}, func(idx int) {
 		handlerCalled = true
 		if idx != -1 {
 			t.Errorf("Esc should pass idx=-1, got %d", idx)
 		}
-		return nil
 	})
 
-	msg := tea.KeyMsg{Type: tea.KeyEsc}
-	_ = m.updateChoice(msg)
-
-	if m.dialog != nil {
-		t.Errorf("Esc did not close dialog")
-	}
+	d.HandleEvent(input.KeyPressEvent{Code: input.KeyEscape})
 	if !handlerCalled {
 		t.Errorf("Esc did not call handler")
 	}
 }
 
 func TestAcceptInput(t *testing.T) {
-	m := initialModel()
-	m.openInputDialog(actionMkdir, "Create", "Name:", "test")
-	m.dialog.input.SetValue("myname")
-
-	_ = m.acceptInput()
-
-	if m.dialog != nil {
-		t.Errorf("acceptInput did not close dialog")
+	var submitted string
+	d := NewInputDialog(ActionMkdir, "Create", "Name:", "", nil)
+	d.OnSubmitInput = func(_ DialogAction, val string, _ *filemanager.FileOp) {
+		submitted = val
 	}
-
-	if m.mode != modeBrowser {
-		t.Errorf("acceptInput did not reset mode")
+	for _, r := range "myname" {
+		d.HandleEvent(input.KeyPressEvent{Code: r, Text: string(r)})
+	}
+	d.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
+	if submitted != "myname" {
+		t.Errorf("submitted = %q, want %q", submitted, "myname")
 	}
 }
 
 func TestDialogWidgetRender(t *testing.T) {
-	m := initialModel()
-	m.width = 100
-	m.height = 30
-	m.openChoiceDialog("Collision", "File exists", []dlgChoice{
-		{label: "Overwrite", hotkey: "o"},
-		{label: "Skip", hotkey: "s"},
+	d := NewChoiceDialog("Collision", "File exists", []Choice{
+		{Label: "Overwrite", Hotkey: "o"},
+		{Label: "Skip", Hotkey: "s"},
 	}, nil)
 
-	w := m.buildDialogWidget()
-	if w == nil {
-		t.Fatal("buildDialogWidget returned nil")
-	}
-
-	buf := w.Render()
+	buf := d.RenderBuf()
 	if buf.Width <= 0 || buf.Height <= 0 {
 		t.Fatalf("DialogWidget rendered empty buffer: %#v", buf)
 	}
 
-	out := Serialize(buf)
+	out := terminal.ToANSI(buf)
 	if !strings.Contains(out, "Overwrite") || !strings.Contains(out, "Skip") {
 		t.Fatalf("DialogWidget output missing expected choices: %q", out)
-	}
-}
-
-func TestViewRendersDialogOverlay(t *testing.T) {
-	m := initialModel()
-	m.width = 100
-	m.height = 30
-	m.openChoiceDialog("Collision", "File exists", []dlgChoice{
-		{label: "Overwrite", hotkey: "o"},
-		{label: "Skip", hotkey: "s"},
-	}, nil)
-
-	out := m.viewFrame()
-	if !strings.Contains(out, "Overwrite") || !strings.Contains(out, "Skip") {
-		t.Fatalf("viewFrame() did not include dialog overlay content: %q", out)
 	}
 }

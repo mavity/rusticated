@@ -5,9 +5,24 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/input"
+	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
+
+type mockFSService struct {
+	entries []FSEntry
+}
+
+func (m *mockFSService) ReadDir(path string) ([]FSEntry, error) {
+	out := make([]FSEntry, len(m.entries))
+	copy(out, m.entries)
+	return out, nil
+}
+
+func Serialize(buf CellBuf) string {
+	return terminal.ToANSI(buf)
+}
 
 func TestFilePaneWidgetMeasureAndRender(t *testing.T) {
 	pane := NewFilePaneWidget("demo")
@@ -23,7 +38,7 @@ func TestFilePaneWidgetMeasureAndRender(t *testing.T) {
 	}
 
 	pane.Layout(Rect{X: 0, Y: 0, W: 18, H: 8})
-	buf := pane.Render()
+	buf := pane.RenderBuf()
 	if buf.Width != 18 || buf.Height != 8 {
 		t.Fatalf("Render produced unexpected size: %#v", buf)
 	}
@@ -41,7 +56,7 @@ func TestFilePaneWidgetClipsLongNames(t *testing.T) {
 	pane := NewFilePaneWidget("long")
 	pane.SetItemsBridge([]fileItem{{name: "this-is-a-very-long-name"}}, 0)
 	pane.Layout(Rect{X: 0, Y: 0, W: 12, H: 5})
-	out := Serialize(pane.Render())
+	out := Serialize(pane.RenderBuf())
 	if strings.Contains(out, "this-is-a-very-long-name") {
 		t.Fatalf("render output should clip overlong names, got %q", ansi.Strip(out))
 	}
@@ -66,19 +81,19 @@ func TestFilePaneWidgetNavigationDownUp(t *testing.T) {
 		t.Fatalf("initial selection should be '..', got %q", item.name)
 	}
 
-	pane.HandleKey(tea.KeyMsg{Type: tea.KeyDown})
+	pane.HandleEvent(input.KeyPressEvent{Code: input.KeyDown})
 	if item, _ := pane.SelectedItem(); item.name != "alpha" {
 		t.Fatalf("after 1 down, want alpha; got %q", item.name)
 	}
 
-	pane.HandleKey(tea.KeyMsg{Type: tea.KeyDown})
-	pane.HandleKey(tea.KeyMsg{Type: tea.KeyDown}) // gamma
-	pane.HandleKey(tea.KeyMsg{Type: tea.KeyDown}) // clamped
+	pane.HandleEvent(input.KeyPressEvent{Code: input.KeyDown})
+	pane.HandleEvent(input.KeyPressEvent{Code: input.KeyDown}) // gamma
+	pane.HandleEvent(input.KeyPressEvent{Code: input.KeyDown}) // clamped
 	if item, _ := pane.SelectedItem(); item.name != "gamma" {
 		t.Fatalf("down past end should clamp; got %q", item.name)
 	}
 
-	pane.HandleKey(tea.KeyMsg{Type: tea.KeyUp})
+	pane.HandleEvent(input.KeyPressEvent{Code: input.KeyUp})
 	if item, _ := pane.SelectedItem(); item.name != "beta" {
 		t.Fatalf("after up from gamma, want beta; got %q", item.name)
 	}
@@ -93,8 +108,8 @@ func TestFilePaneWidgetEnterDirectoryChangesDir(t *testing.T) {
 	root := filepath.Join(string(filepath.Separator) + "root")
 	_ = pane.LoadDir(root)
 
-	pane.HandleKey(tea.KeyMsg{Type: tea.KeyDown}) // select "subdir"
-	pane.HandleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	pane.HandleEvent(input.KeyPressEvent{Code: input.KeyDown}) // select "subdir"
+	pane.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
 
 	want := filepath.Join(root, "subdir")
 	if pane.Dir() != want {
@@ -112,8 +127,8 @@ func TestFilePaneWidgetEnterFileCallsCallback(t *testing.T) {
 	var opened string
 	pane.OnOpenFile = func(path string) { opened = path }
 
-	pane.HandleKey(tea.KeyMsg{Type: tea.KeyDown}) // select readme.txt
-	pane.HandleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	pane.HandleEvent(input.KeyPressEvent{Code: input.KeyDown}) // select readme.txt
+	pane.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
 
 	want := filepath.Join(docs, "readme.txt")
 	if opened != want {
@@ -143,12 +158,12 @@ func TestDualPaneWidgetTabCyclesActivePane(t *testing.T) {
 		t.Fatal("left pane should start active")
 	}
 
-	dp.HandleKey(tea.KeyMsg{Type: tea.KeyTab})
+	dp.HandleEvent(input.KeyPressEvent{Code: input.KeyTab})
 	if !dp.Right.IsActive() || dp.Left.IsActive() {
 		t.Fatal("Tab should make right pane active")
 	}
 
-	dp.HandleKey(tea.KeyMsg{Type: tea.KeyTab})
+	dp.HandleEvent(input.KeyPressEvent{Code: input.KeyTab})
 	if !dp.Left.IsActive() || dp.Right.IsActive() {
 		t.Fatal("second Tab should return left pane active")
 	}
@@ -165,16 +180,16 @@ func TestDualPaneWidgetLayoutHasSingleDividerColumn(t *testing.T) {
 		t.Fatalf("total width should include exactly one divider column: left=%d right=%d divider=1 total=%d", dp.Left.Width, dp.Right.Width, dp.Width)
 	}
 
-	buf := dp.Render()
+	buf := dp.RenderBuf()
 	dividerX := dp.Right.X - 1
 	for y := 0; y < dp.Height; y++ {
-		if cell := buf.Get(dividerX, y); cell.R != '│' || cell.FG != colorGray || cell.BG != colorBlue {
+		if cell := buf.Get(dividerX, y); cell.Grapheme != "│" || cell.Style.Foreground() != colorGray || cell.Style.Background() != colorBlue {
 			t.Fatalf("divider column should be a single gray-on-blue pipe at x=%d,y=%d, got %#v", dividerX, y, cell)
 		}
-		if cell := buf.Get(dp.Left.X+dp.Left.Width-1, y); cell.R != ' ' || cell.BG != colorBlue {
+		if cell := buf.Get(dp.Left.X+dp.Left.Width-1, y); cell.Grapheme != " " || cell.Style.Background() != colorBlue {
 			t.Fatalf("left pane should not retain its right border at x=%d,y=%d, got %#v", dp.Left.X+dp.Left.Width-1, y, cell)
 		}
-		if cell := buf.Get(dp.Right.X, y); cell.R != ' ' || cell.BG != colorBlue {
+		if cell := buf.Get(dp.Right.X, y); cell.Grapheme != " " || cell.Style.Background() != colorBlue {
 			t.Fatalf("right pane should not retain its left border at x=%d,y=%d, got %#v", dp.Right.X, y, cell)
 		}
 	}
@@ -190,7 +205,7 @@ func TestDualPaneWidgetRoutesKeysToActiveChild(t *testing.T) {
 	_ = dp.Right.LoadDir("/right")
 	dp.SetActivePaneBridge(0)
 
-	dp.HandleKey(tea.KeyMsg{Type: tea.KeyDown}) // should move left selection only
+	dp.HandleEvent(input.KeyPressEvent{Code: input.KeyDown}) // should move left selection only
 
 	if item, _ := dp.Left.SelectedItem(); item.name != "a" {
 		t.Fatalf("Down should move left selection; got %q", item.name)
@@ -200,15 +215,24 @@ func TestDualPaneWidgetRoutesKeysToActiveChild(t *testing.T) {
 	}
 }
 
-func TestFilePaneWidgetActiveInactiveSnapshot(t *testing.T) {
+func TestFilePaneWidgetActiveInactiveRender(t *testing.T) {
 	active := NewFilePaneWidget("active")
 	active.SetItemsBridge([]fileItem{{name: "one"}, {name: "two"}}, 0)
 	active.SetActive(true)
+	active.Layout(Rect{X: 0, Y: 0, W: 22, H: 8})
+	actBuf := active.RenderBuf()
 
 	inactive := NewFilePaneWidget("inactive")
 	inactive.SetItemsBridge([]fileItem{{name: "one"}, {name: "two"}}, 0)
 	inactive.SetActive(false)
+	inactive.Layout(Rect{X: 0, Y: 0, W: 22, H: 8})
+	inactBuf := inactive.RenderBuf()
 
-	assertWidgetSnapshot(t, "filepane_active", active, Rect{X: 0, Y: 0, W: 22, H: 8})
-	assertWidgetSnapshot(t, "filepane_inactive", inactive, Rect{X: 0, Y: 0, W: 22, H: 8})
+	// Active pane highlights selected row 1 in yellow background; inactive pane keeps blue background.
+	if got := actBuf.Get(2, 1).Style.Background(); got != colorYellow {
+		t.Fatalf("active selected row background = 0x%06X, want 0x%06X", got, colorYellow)
+	}
+	if got := inactBuf.Get(2, 1).Style.Background(); got != colorBlue {
+		t.Fatalf("inactive selected row background = 0x%06X, want 0x%06X", got, colorBlue)
+	}
 }

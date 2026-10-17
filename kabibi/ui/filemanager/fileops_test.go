@@ -5,8 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestPathSizeFile(t *testing.T) {
@@ -88,11 +86,9 @@ func TestCopyFilePath(t *testing.T) {
 		t.Fatalf("WriteFile error: %v", err)
 	}
 
-	ch := make(chan tea.Msg, 10)
 	sink := &opSink{
 		ctx:        context.Background(),
-		ch:         ch,
-		resume:     make(chan collisionChoice),
+		resume:     make(chan CollisionChoice),
 		batchTotal: pathSize(src),
 	}
 
@@ -118,11 +114,9 @@ func TestCopyDirectory(t *testing.T) {
 	os.Mkdir(srcDir, 0o755)
 	os.WriteFile(filepath.Join(srcDir, "file.txt"), []byte("content"), 0o644)
 
-	ch := make(chan tea.Msg, 10)
 	sink := &opSink{
 		ctx:        context.Background(),
-		ch:         ch,
-		resume:     make(chan collisionChoice),
+		resume:     make(chan CollisionChoice),
 		batchTotal: pathSize(srcDir),
 	}
 
@@ -141,11 +135,9 @@ func TestDeleteFile(t *testing.T) {
 
 	os.WriteFile(path, []byte("content"), 0o644)
 
-	ch := make(chan tea.Msg, 10)
 	sink := &opSink{
 		ctx:    context.Background(),
-		ch:     ch,
-		resume: make(chan collisionChoice),
+		resume: make(chan CollisionChoice),
 	}
 
 	if err := deletePath(sink, path); err != nil {
@@ -164,11 +156,9 @@ func TestDeleteDirectory(t *testing.T) {
 	os.Mkdir(subdir, 0o755)
 	os.WriteFile(filepath.Join(subdir, "file.txt"), []byte("content"), 0o644)
 
-	ch := make(chan tea.Msg, 10)
 	sink := &opSink{
 		ctx:    context.Background(),
-		ch:     ch,
-		resume: make(chan collisionChoice),
+		resume: make(chan CollisionChoice),
 	}
 
 	if err := deletePath(sink, subdir); err != nil {
@@ -190,11 +180,9 @@ func TestMovePath(t *testing.T) {
 		t.Fatalf("WriteFile error: %v", err)
 	}
 
-	ch := make(chan tea.Msg, 10)
 	sink := &opSink{
 		ctx:    context.Background(),
-		ch:     ch,
-		resume: make(chan collisionChoice),
+		resume: make(chan CollisionChoice),
 	}
 
 	if err := movePath(sink, src, dst); err != nil {

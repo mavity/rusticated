@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -152,6 +153,37 @@ func (es *ExecutionSession) Dir() string {
 		return es.runner.Dir
 	}
 	return es.initialCwd
+}
+
+// SetDir updates the shell runner's working directory and PWD variable when
+// synchronized from an external UI component (such as the active blue file panel).
+func (es *ExecutionSession) SetDir(dir string) error {
+	if es == nil || dir == "" {
+		return nil
+	}
+	cleaned := filepath.Clean(dir)
+	info, err := os.Stat(cleaned)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("not a directory: %s", cleaned)
+	}
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	if es.runner != nil {
+		es.runner.Dir = cleaned
+		if es.runner.Vars != nil {
+			es.runner.Vars["PWD"] = expand.Variable{
+				Set:      true,
+				Exported: true,
+				Kind:     expand.String,
+				Str:      cleaned,
+			}
+		}
+	}
+	es.initialCwd = cleaned
+	return nil
 }
 
 // EnvMap returns a snapshot of the shell's current environment variables,

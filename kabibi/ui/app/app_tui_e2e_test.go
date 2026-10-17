@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"ai"
+	"github.com/charmbracelet/x/input"
 	xterm "github.com/charmbracelet/x/term"
 	"github.com/charmbracelet/x/vt"
 	"github.com/mavity/rusticated/kabibi/ui"
@@ -712,5 +714,284 @@ func TestAppTUI_SlackGapRecovery_PushDownBeforeEjectingUp(t *testing.T) {
 	case <-runDone:
 	case <-time.After(3 * time.Second):
 		t.Fatal("Host.RunWithIO did not exit")
+	}
+}
+
+// TestAppTUI_BluePanels_CtrlO_HiddenConveyorAndFarKeyRouting verifies the full
+// Blue Panels HUD lifecycle from docs/3-blue.md:
+// 1. Ctrl+O summons DualPaneWidget at the top of the screen while keeping the
+//    3-row BlockBanner + PromptInput + 1 blank footer line in the 5-row bottom gap.
+// 2. Far Manager split key routing:
+//    - Up/Down navigates files in the active blue pane even while PromptInput is live.
+//    - Tab switches Left <-> Right pane and syncs ExecutionSession.Dir() (`\w፧`).
+//    - Enter with empty PromptInput on a directory steps into it and updates `\w፧`.
+//    - Enter with empty PromptInput on an executable script runs `./script.sh` in the shell!
+// 3. The Hidden Conveyor Belt: running commands while panels are open slides output
+//    lines upward behind the blue panels with ZERO scrollback ejection until the
+//    hidden stack catches up to Row 0 at the physical top of the screen.
+func TestAppTUI_BluePanels_CtrlO_HiddenConveyorAndFarKeyRouting(t *testing.T) {
+	workDir := t.TempDir()
+	subDir := filepath.Join(workDir, "alpha_dir")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(subDir, "runme.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\necho executed_from_blue_panel\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	notePath := filepath.Join(subDir, "note.txt")
+	if err := os.WriteFile(notePath, []byte("hello editor\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var scrollbackMu sync.Mutex
+	var scrollbackChunks []string
+
+	var host *ui.Host
+	appWidget := NewWidget(AppWidgetOptions{
+		WorkingDir: workDir,
+		WriteToScrollback: func(text string) {
+			scrollbackMu.Lock()
+			scrollbackChunks = append(scrollbackChunks, text)
+			scrollbackMu.Unlock()
+			if host != nil {
+				host.WriteToScrollback(text)
+			}
+		},
+		OnExit: func() {
+			if host != nil {
+				host.Stop()
+			}
+		},
+	})
+	defer appWidget.Close()
+	appWidget.Shell().SetPrompt("፧")
+
+	host = ui.NewHost(appWidget)
+
+	inR, inW := io.Pipe()
+	defer inR.Close()
+	defer inW.Close()
+
+	var rawTermOut syncBuffer
+	// Viewport 80x14:
+	// H_gap = 5 rows (3 banner/plume rows + 1 PromptInput + 1 blank footer row)
+	// H_panels = 14 - 5 = 9 rows at the top of the screen.
+	// Total block budget behind + below panels = 14 - 2 = 12 block rows.
+	// Initial banner = 3 block rows -> 9 hidden rows behind the panels before any ejection!
+	const termW, termH = 80, 14
+
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- host.RunWithIO(
+			inR,
+			&rawTermOut,
+			func(uintptr) (*xterm.State, error) { return &xterm.State{}, nil },
+			func(uintptr, *xterm.State) error { return nil },
+			func(uintptr) (int, int, error) { return termW, termH, nil },
+		)
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(rawTermOut.String(), "Kabibi") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// 1. Press Ctrl+O (\x0f) to summon the dual blue panels
+	_, _ = io.WriteString(inW, "\x0f")
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if appWidget.PanelsVisible() && appWidget.Measure(ui.Constraints{MaxW: termW, MaxH: termH}).H == termH {
+			time.Sleep(25 * time.Millisecond)
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !appWidget.PanelsVisible() {
+		t.Fatal("Ctrl+O did not open the blue panels")
+	}
+
+	// Verify that no scrollback ejection happened just from opening the panels
+	scrollbackMu.Lock()
+	if len(scrollbackChunks) != 0 {
+		t.Fatalf("expected 0 scrollback chunks on Ctrl+O open, got %d", len(scrollbackChunks))
+	}
+	scrollbackMu.Unlock()
+
+	// 2. Navigate in the active left pane: items are ["..", "alpha_dir"].
+	// Press Down (\x1b[B) to highlight "alpha_dir", then Enter (\r) with empty PromptInput to cd into alpha_dir!
+	_, _ = io.WriteString(inW, "\x1b[B\r")
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if filepath.Clean(appWidget.Shell().Dir()) == filepath.Clean(subDir) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := filepath.Clean(appWidget.Shell().Dir()); got != filepath.Clean(subDir) {
+		t.Fatalf("Enter on alpha_dir in blue panel did not sync shell cwd: got %q, want %q", got, subDir)
+	}
+
+	// 3. In alpha_dir, items are ["..", "note.txt", "runme.sh"].
+	// Press Down twice to highlight "runme.sh", then press Enter with empty PromptInput
+	// to execute ./runme.sh in the shell stack below the panels!
+	_, _ = io.WriteString(inW, "\x1b[B\x1b[B\r")
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		blocks := appWidget.Shell().Blocks()
+		if len(blocks) >= 2 && !appWidget.Shell().IsRunning() {
+			time.Sleep(25 * time.Millisecond)
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	blocks := appWidget.Shell().Blocks()
+	if len(blocks) < 2 || !strings.Contains(blocks[1].Output.String(), "executed_from_blue_panel") {
+		t.Fatalf("Enter on executable runme.sh did not run in shell: blocks=%#v", blocks)
+	}
+
+	// 4. Verify Hidden Conveyor Belt:
+	// Total block rows so far = 3 (banner) + 2 (./runme.sh + output) = 5 rows <= 12-row budget.
+	// Even though the bottom gap below the panels is only 3 block rows tall, the older 2 banner
+	// rows slid underneath the blue panels with ZERO scrollback ejection!
+	scrollbackMu.Lock()
+	ejectedWhileSlidingUnderPanels := len(scrollbackChunks)
+	scrollbackMu.Unlock()
+	if ejectedWhileSlidingUnderPanels != 0 {
+		t.Fatalf("expected 0 scrollback ejections while blocks slide underneath blue panels, got %d", ejectedWhileSlidingUnderPanels)
+	}
+
+	// 5. Now run 5 more commands (10 more rows -> total 15 block rows > 12-row full-screen budget)
+	// so the hidden conveyor belt catches up to Row 0 at the top of the screen and ejects!
+	for i := 1; i <= 5; i++ {
+		_, _ = io.WriteString(inW, fmt.Sprintf("echo conveyor_%d\r", i))
+		wantBlocks := 2 + i
+		deadline = time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if len(appWidget.Shell().Blocks()) >= wantBlocks && !appWidget.Shell().IsRunning() {
+				time.Sleep(25 * time.Millisecond)
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	scrollbackMu.Lock()
+	ejectedAfterCatchingTop := len(scrollbackChunks)
+	scrollbackMu.Unlock()
+	if ejectedAfterCatchingTop == 0 {
+		t.Fatal("expected scrollback ejection once hidden stack behind panels caught up to row 0")
+	}
+
+	// 6. Press Tab to switch to the right pane (which is still in workDir) and verify shell cwd syncs back to workDir
+	_, _ = io.WriteString(inW, "\t")
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if filepath.Clean(appWidget.Shell().Dir()) == filepath.Clean(workDir) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := filepath.Clean(appWidget.Shell().Dir()); got != filepath.Clean(workDir) {
+		t.Fatalf("Tab to right pane did not sync shell cwd to %q: got %q", workDir, got)
+	}
+
+	// 7. Exit cleanly
+	_, _ = io.WriteString(inW, "exit\r")
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Host.RunWithIO returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Host.RunWithIO did not exit")
+	}
+}
+
+// TestAppTUI_BluePanels_FileOpsAndEditor verifies that when the blue panels are
+// open, F7 (Mkdir), F2 (Rename), F4 (Editor open/edit/save/close), and F8 (Delete)
+// operate against the real filesystem and refresh the panels cleanly.
+func TestAppTUI_BluePanels_FileOpsAndEditor(t *testing.T) {
+	workDir := t.TempDir()
+	filePath := filepath.Join(workDir, "hello.txt")
+	if err := os.WriteFile(filePath, []byte("initial_line\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	appWidget := NewWidget(AppWidgetOptions{
+		WorkingDir:    workDir,
+		PanelsVisible: true,
+	})
+	defer appWidget.Close()
+	appWidget.Shell().SetPrompt("፧")
+
+	// Render once at 80x24
+	_, _ = appWidget.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 24}, ui.RenderContext{Focused: true})
+
+	// 1. F7: Make Directory "created_dir"
+	appWidget.HandleEvent(input.KeyPressEvent{Code: input.KeyF7})
+	if appWidget.Dialog() == nil {
+		t.Fatal("F7 did not open Mkdir dialog")
+	}
+	for _, r := range "created_dir" {
+		appWidget.HandleEvent(input.KeyPressEvent{Code: r, Text: string(r)})
+	}
+	appWidget.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
+	if appWidget.Dialog() != nil {
+		t.Fatal("Enter did not close Mkdir dialog")
+	}
+	if info, err := os.Stat(filepath.Join(workDir, "created_dir")); err != nil || !info.IsDir() {
+		t.Fatalf("expected created_dir on disk, err=%v", err)
+	}
+
+	// 2. Select "hello.txt" in left pane and press F4 to open the editor
+	appWidget.Panels().Left.SelectByName("hello.txt")
+	appWidget.HandleEvent(input.KeyPressEvent{Code: input.KeyF4})
+	if appWidget.Editor() == nil {
+		t.Fatal("F4 on hello.txt did not open Editor")
+	}
+	// Type "!" into the editor, save with F2, and quit with Esc
+	appWidget.HandleEvent(input.KeyPressEvent{Code: '!', Text: "!"})
+	appWidget.HandleEvent(input.KeyPressEvent{Code: input.KeyF2})
+	appWidget.HandleEvent(input.KeyPressEvent{Code: input.KeyEscape})
+	if appWidget.Editor() != nil {
+		t.Fatal("Esc after saving did not close Editor")
+	}
+	editedBytes, err := os.ReadFile(filePath)
+	if err != nil || !strings.HasPrefix(string(editedBytes), "!initial_line") {
+		t.Fatalf("editor save content = %q, err=%v; want prefix %q", string(editedBytes), err, "!initial_line")
+	}
+
+	// 3. F2: Rename "hello.txt" -> "renamed.txt"
+	appWidget.Panels().Left.SelectByName("hello.txt")
+	appWidget.HandleEvent(input.KeyPressEvent{Code: input.KeyF2})
+	if appWidget.Dialog() == nil {
+		t.Fatal("F2 did not open Rename dialog")
+	}
+	appWidget.Dialog().InputValue = "renamed.txt"
+	appWidget.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
+	if _, err := os.Stat(filepath.Join(workDir, "renamed.txt")); err != nil {
+		t.Fatalf("expected renamed.txt after F2 rename: %v", err)
+	}
+
+	// 4. F8: Delete "renamed.txt"
+	appWidget.Panels().Left.SelectByName("renamed.txt")
+	appWidget.HandleEvent(input.KeyPressEvent{Code: input.KeyF8})
+	if appWidget.Dialog() == nil {
+		t.Fatal("F8 did not open Delete confirm dialog")
+	}
+	appWidget.HandleEvent(input.KeyPressEvent{Code: 'y', Text: "y"})
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(filepath.Join(workDir, "renamed.txt")); os.IsNotExist(err) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "renamed.txt")); !os.IsNotExist(err) {
+		t.Fatalf("expected renamed.txt to be deleted after F8 confirm, err=%v", err)
 	}
 }

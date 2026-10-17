@@ -11,10 +11,42 @@ import (
 	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/input"
 	"github.com/mattn/go-runewidth"
+	"github.com/mavity/rusticated/kabibi/ui"
+	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
 
 const editorTabWidth = 4
+
+const (
+	colorYellow   = lipgloss.Color("#ffd700")
+	colorNavy     = lipgloss.Color("#000080")
+	colorDarkGray = lipgloss.Color("#3a3a3a")
+	colorWhite    = lipgloss.Color("#e5e5e5")
+)
+
+func truncateStringToWidth(s string, maxWidth int) string {
+	displayWidth := runewidth.StringWidth(s)
+	if displayWidth <= maxWidth {
+		return s
+	}
+	effectiveWidth := maxWidth - 1
+	if effectiveWidth <= 0 {
+		return ""
+	}
+	width := 0
+	var b strings.Builder
+	for _, r := range s {
+		w := runewidth.RuneWidth(r)
+		if width+w > effectiveWidth {
+			break
+		}
+		b.WriteRune(r)
+		width += w
+	}
+	return strings.TrimRight(b.String(), " ")
+}
 
 func expandTabs(s string, tabWidth int) string {
 	var b strings.Builder
@@ -95,7 +127,14 @@ type editorModel struct {
 	hlValid bool
 
 	// OnClose is called by the parent when the editor should close.
-	OnClose func() tea.Cmd
+	OnClose     func() tea.Cmd
+	OnCloseFunc func()
+}
+
+type EditorWidget = editorModel
+
+func NewEditor(path string) (*editorModel, error) {
+	return newEditor(path)
 }
 
 func newEditor(path string) (*editorModel, error) {
@@ -121,19 +160,6 @@ func newEditor(path string) (*editorModel, error) {
 	lx = chroma.Coalesce(lx)
 
 	return &editorModel{path: path, eol: eol, lines: lines, lexer: lx}, nil
-}
-
-func (m *AppWidget) openEditor(path string) tea.Cmd {
-	e, err := newEditor(path)
-	if err != nil {
-		return m.AddPlume("edit: " + err.Error())
-	}
-	e.width = m.width
-	e.height = m.height
-	e.OnClose = func() tea.Cmd { return m.closeEditor() }
-	m.editor = e
-	m.mode = modeEditor
-	return nil
 }
 
 func (e *editorModel) save() error {
@@ -559,17 +585,26 @@ func (e *editorModel) selectAll() {
 	e.cx = len([]rune(e.lines[e.cy]))
 }
 
+func (e *editorModel) triggerClose() tea.Cmd {
+	if e.OnCloseFunc != nil {
+		e.OnCloseFunc()
+	}
+	if e.OnClose != nil {
+		return e.OnClose()
+	}
+	return nil
+}
+
 // HandleKey processes a key event for the editor, calling OnClose when the
 // editor should be dismissed.
 func (e *editorModel) HandleKey(msg tea.KeyMsg) tea.Cmd {
 	if e == nil {
-		if e != nil && e.OnClose != nil {
-			return e.OnClose()
-		}
 		return nil
 	}
-	key := msg.String()
+	return e.handleKeyName(msg.String(), msg.Runes)
+}
 
+func (e *editorModel) handleKeyName(key string, runes []rune) tea.Cmd {
 	if e.confirmQuit {
 		switch key {
 		case "f2", "y", "Y", "enter":
@@ -578,15 +613,9 @@ func (e *editorModel) HandleKey(msg tea.KeyMsg) tea.Cmd {
 				e.status = "save failed: " + err.Error()
 				return nil
 			}
-			if e.OnClose != nil {
-				return e.OnClose()
-			}
-			return nil
+			return e.triggerClose()
 		case "n", "N":
-			if e.OnClose != nil {
-				return e.OnClose()
-			}
-			return nil
+			return e.triggerClose()
 		case "esc":
 			e.confirmQuit = false
 			e.status = ""
@@ -603,10 +632,7 @@ func (e *editorModel) HandleKey(msg tea.KeyMsg) tea.Cmd {
 			e.status = "Save changes?  [Y] save   [N] discard   [Esc] cancel"
 			return nil
 		}
-		if e.OnClose != nil {
-			return e.OnClose()
-		}
-		return nil
+		return e.triggerClose()
 	case "f2", "ctrl+s":
 		if err := e.save(); err != nil {
 			e.status = "save failed: " + err.Error()
@@ -700,13 +726,13 @@ func (e *editorModel) HandleKey(msg tea.KeyMsg) tea.Cmd {
 		e.cy = len(e.lines) - 1
 		e.cx = len(e.curRunes())
 		e.prefCol = e.cx
-	case " ":
+	case " ", "space":
 		e.deleteSelectionIfAny()
 		e.insertRune(' ')
 	default:
-		if len(msg.Runes) > 0 {
+		if len(runes) > 0 {
 			e.deleteSelectionIfAny()
-			for _, r := range msg.Runes {
+			for _, r := range runes {
 				e.insertRune(r)
 			}
 		}
@@ -716,16 +742,79 @@ func (e *editorModel) HandleKey(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
-func (m *AppWidget) closeEditor() tea.Cmd {
-	m.editor = nil
-	m.mode = modeBrowser
-	if w, dir, p := m.activePaneState(); w != nil {
-		focus, _ := w.SelectedItem()
-		m.loadDir(p, dir, focus.name)
+// Measure implements ui.Widget.
+func (e *editorModel) Measure(c ui.Constraints) ui.Size {
+	w := c.MaxW
+	if w <= 0 {
+		w = e.width
 	}
-	m.refreshPrompt()
-	return nil
+	if w <= 0 {
+		w = 80
+	}
+	h := c.MaxH
+	if h <= 0 {
+		h = e.height
+	}
+	if h <= 0 {
+		h = 24
+	}
+	return ui.Size{W: w, H: h}
 }
+
+// Render implements ui.Widget by rendering the editor view into a CellBuf.
+func (e *editorModel) Render(r terminal.Rect, _ ui.RenderContext) (terminal.CellBuf, ui.CursorPos) {
+	if r.W > 0 {
+		e.width = r.W
+	}
+	if r.H > 0 {
+		e.height = r.H
+	}
+	if e.width <= 0 || e.height <= 0 {
+		return terminal.NewCellBuf(0, 0), ui.CursorPos{Visible: false}
+	}
+	viewStr := e.View()
+	lines := strings.Split(strings.ReplaceAll(viewStr, "\r\n", "\n"), "\n")
+	buf := terminal.FromANSI(lines, e.width)
+	out := terminal.NewCellBuf(e.width, e.height)
+	out.Blit(buf, 0, 0)
+	return out, ui.CursorPos{Visible: false}
+}
+
+// HandleEvent implements ui.Widget.
+func (e *editorModel) HandleEvent(ev input.Event) bool {
+	if e == nil {
+		return false
+	}
+	switch k := ev.(type) {
+	case input.KeyPressEvent:
+		var runes []rune
+		if k.Text != "" {
+			runes = []rune(k.Text)
+		} else if len(k.String()) == 1 {
+			runes = []rune(k.String())
+		}
+		e.handleKeyName(k.String(), runes)
+		return true
+	case *input.KeyPressEvent:
+		if k == nil {
+			return false
+		}
+		return e.HandleEvent(*k)
+	case input.PasteEvent:
+		e.deleteSelectionIfAny()
+		e.insertText(string(k))
+		e.clampCursor()
+		return true
+	case *input.PasteEvent:
+		if k == nil {
+			return false
+		}
+		return e.HandleEvent(*k)
+	}
+	return false
+}
+
+var _ ui.Widget = (*editorModel)(nil)
 
 func (e *editorModel) pageRows() int {
 	r := e.height - 2

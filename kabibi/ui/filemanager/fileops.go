@@ -6,74 +6,83 @@ import (
 	"os"
 	"path/filepath"
 	"time"
-
-	tea "github.com/charmbracelet/bubbletea"
 )
 
-type fileOpKind int
+type FileOpKind int
 
 const (
-	opCopy fileOpKind = iota
-	opMove
-	opDelete
+	OpCopy FileOpKind = iota
+	OpMove
+	OpDelete
+
+	opCopy   = OpCopy
+	opMove   = OpMove
+	opDelete = OpDelete
 )
 
-func (k fileOpKind) verb() string {
+type fileOpKind = FileOpKind
+
+func (k FileOpKind) Verb() string {
 	switch k {
-	case opCopy:
+	case OpCopy:
 		return "Copying"
-	case opMove:
+	case OpMove:
 		return "Moving"
-	case opDelete:
+	case OpDelete:
 		return "Deleting"
 	}
 	return "Working"
 }
 
-// fileOp describes a requested filesystem operation.
-type fileOp struct {
-	kind    fileOpKind
-	sources []string // absolute source paths
-	dest    string   // destination directory (copy/move only)
+// FileOp describes a requested filesystem operation.
+type FileOp struct {
+	Kind    FileOpKind
+	Sources []string // absolute source paths
+	Dest    string   // destination directory (copy/move only)
 }
 
-type fileOpProgressMsg struct {
-	current     string
-	done        int64
-	total       int64
-	fileDone    int64
-	fileTotal   int64
-	bytesPerSec int64
+type fileOp = FileOp
+
+type FileOpProgress struct {
+	Current     string
+	Done        int64
+	Total       int64
+	FileDone    int64
+	FileTotal   int64
+	BytesPerSec int64
 }
 
-type fileOpDoneMsg struct {
-	kind fileOpKind
-	err  error
+type FileOpDone struct {
+	Kind FileOpKind
+	Err  error
 }
 
-// fileOpCollisionMsg is emitted when a destination already exists and the op
-// pauses for the user to decide how to proceed.
-type fileOpCollisionMsg struct {
-	path string
-}
-
-// collisionChoice is the user's answer to an overwrite prompt.
-type collisionChoice int
+// CollisionChoice is the user's answer to an overwrite prompt.
+type CollisionChoice int
 
 const (
-	colOverwrite collisionChoice = iota
-	colSkip
-	colOverwriteAll
-	colSkipAll
-	colCancel
+	ColOverwrite CollisionChoice = iota
+	ColSkip
+	ColOverwriteAll
+	ColSkipAll
+	ColCancel
+
+	colOverwrite    = ColOverwrite
+	colSkip         = ColSkip
+	colOverwriteAll = ColOverwriteAll
+	colSkipAll      = ColSkipAll
+	colCancel       = ColCancel
 )
+
+type collisionChoice = CollisionChoice
 
 // opSink carries progress accounting and collision resolution through the
 // recursive copy/move/delete helpers.
 type opSink struct {
-	ctx    context.Context
-	ch     chan<- tea.Msg
-	resume <-chan collisionChoice
+	ctx        context.Context
+	onProgress func(FileOpProgress)
+	onCollide  func(path string)
+	resume     <-chan CollisionChoice
 
 	batchDone, batchTotal int64
 	fileDone, fileTotal   int64
@@ -106,16 +115,15 @@ func (s *opSink) emit(force bool) {
 	if el := time.Since(s.start).Seconds(); el > 0 {
 		rate = int64(float64(s.batchDone) / el)
 	}
-	select {
-	case s.ch <- fileOpProgressMsg{
-		current:     s.curName,
-		done:        s.batchDone,
-		total:       s.batchTotal,
-		fileDone:    s.fileDone,
-		fileTotal:   s.fileTotal,
-		bytesPerSec: rate,
-	}:
-	case <-s.ctx.Done():
+	if s.onProgress != nil {
+		s.onProgress(FileOpProgress{
+			Current:     s.curName,
+			Done:        s.batchDone,
+			Total:       s.batchTotal,
+			FileDone:    s.fileDone,
+			FileTotal:   s.fileTotal,
+			BytesPerSec: rate,
+		})
 	}
 }
 
@@ -129,22 +137,21 @@ func (s *opSink) decide(dst string) (bool, error) {
 	if s.skipAll {
 		return false, nil
 	}
-	select {
-	case s.ch <- fileOpCollisionMsg{path: dst}:
-	case <-s.ctx.Done():
-		return false, s.ctx.Err()
+	if s.onCollide == nil {
+		return true, nil
 	}
+	s.onCollide(dst)
 	select {
 	case c := <-s.resume:
 		switch c {
-		case colOverwrite:
+		case ColOverwrite:
 			return true, nil
-		case colSkip:
+		case ColSkip:
 			return false, nil
-		case colOverwriteAll:
+		case ColOverwriteAll:
 			s.overwriteAll = true
 			return true, nil
-		case colSkipAll:
+		case ColSkipAll:
 			s.skipAll = true
 			return false, nil
 		default:
@@ -155,53 +162,25 @@ func (s *opSink) decide(dst string) (bool, error) {
 	}
 }
 
-// startFileOp launches an operation in a goroutine and returns a command that
-// waits for the first progress/done message on the op channel.
-func (m *AppWidget) startFileOp(op fileOp) tea.Cmd {
-	ch := make(chan tea.Msg, 128)
-	resume := make(chan collisionChoice, 1)
-	ctx, cancel := context.WithCancel(context.Background())
-	m.opChan = ch
-	m.opCancel = cancel
-	m.opResume = resume
-	m.opActive = true
-	m.opCollision = false
-	m.opKind = op.kind
-	m.opCurrent = ""
-	m.opDone = 0
-	m.opTotal = 0
-	m.opFileDone = 0
-	m.opFileTotal = 0
-	m.opRate = 0
-	go runFileOp(ctx, op, ch, resume)
-	return m.watchFileOpCmd()
-}
-
-func (m *AppWidget) watchFileOpCmd() tea.Cmd {
-	ch := m.opChan
-	return func() tea.Msg {
-		msg, ok := <-ch
-		if !ok {
-			return fileOpDoneMsg{}
-		}
-		return msg
-	}
-}
-
-// runFileOp performs the operation, emitting throttled progress and a final
-// done message, then closes the channel.
-func runFileOp(ctx context.Context, op fileOp, ch chan<- tea.Msg, resume <-chan collisionChoice) {
-	defer close(ch)
-
+// RunFileOp performs the operation synchronously (or in a caller goroutine),
+// invoking onProgress, onCollide, and returning any error.
+func RunFileOp(
+	ctx context.Context,
+	op FileOp,
+	onProgress func(FileOpProgress),
+	onCollide func(path string),
+	resume <-chan CollisionChoice,
+) error {
 	total := int64(0)
-	for _, src := range op.sources {
+	for _, src := range op.Sources {
 		total += pathSize(src)
 	}
 
 	now := time.Now()
 	s := &opSink{
 		ctx:        ctx,
-		ch:         ch,
+		onProgress: onProgress,
+		onCollide:  onCollide,
 		resume:     resume,
 		batchTotal: total,
 		start:      now,
@@ -210,17 +189,17 @@ func runFileOp(ctx context.Context, op fileOp, ch chan<- tea.Msg, resume <-chan 
 	s.emit(true)
 
 	var err error
-	for _, src := range op.sources {
+	for _, src := range op.Sources {
 		if ctx.Err() != nil {
 			err = ctx.Err()
 			break
 		}
-		switch op.kind {
-		case opCopy:
-			err = copyPath(s, src, filepath.Join(op.dest, filepath.Base(src)))
-		case opMove:
-			err = movePath(s, src, filepath.Join(op.dest, filepath.Base(src)))
-		case opDelete:
+		switch op.Kind {
+		case OpCopy:
+			err = copyPath(s, src, filepath.Join(op.Dest, filepath.Base(src)))
+		case OpMove:
+			err = movePath(s, src, filepath.Join(op.Dest, filepath.Base(src)))
+		case OpDelete:
 			err = deletePath(s, src)
 		}
 		if err != nil {
@@ -232,10 +211,7 @@ func runFileOp(ctx context.Context, op fileOp, ch chan<- tea.Msg, resume <-chan 
 		s.batchDone = total
 		s.emit(true)
 	}
-	select {
-	case ch <- fileOpDoneMsg{kind: op.kind, err: err}:
-	case <-ctx.Done():
-	}
+	return err
 }
 
 // pathSize returns the total byte size of a file or directory tree.
@@ -390,7 +366,10 @@ func deletePath(s *opSink, src string) error {
 	return nil
 }
 
-// pathExists reports whether a path exists on disk.
+// PathExists reports whether a path exists on disk.
+func PathExists(path string) bool {
+	return pathExists(path)
+}
 func pathExists(path string) bool {
 	_, err := os.Lstat(path)
 	return err == nil
