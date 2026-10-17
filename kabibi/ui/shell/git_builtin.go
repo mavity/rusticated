@@ -22,10 +22,29 @@ func gitBuiltinMiddleware(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 func runGitBuiltin(ctx context.Context, args []string) error {
 	hc := interp.HandlerCtx(ctx)
 	if len(args) == 0 {
-		fmt.Fprintln(hc.Stderr, "usage: git status [-s|--short|--porcelain] | add [-A|--all] <path...> | commit [-a|--all] -m <message> [--amend]")
+		fmt.Fprintln(hc.Stderr, "usage: git --version | status [-s|--short|--porcelain] | add [-A|--all] <path...> | commit [-a|--all] -m <message> [--amend]")
 		return interp.ExitStatus(2)
 	}
 	switch args[0] {
+	case "--help", "-h":
+		if len(args) != 1 {
+			fmt.Fprintf(hc.Stderr, "git --help: unsupported argument %q\n", args[1])
+			return interp.ExitStatus(2)
+		}
+		writeGitHelp(hc)
+		return nil
+	case "--version":
+		if len(args) != 1 {
+			fmt.Fprintf(hc.Stderr, "git --version: unsupported argument %q\n", args[1])
+			return interp.ExitStatus(2)
+		}
+		version, err := gitcore.LibraryVersion()
+		if err != nil {
+			fmt.Fprintf(hc.Stderr, "git --version: %v\n", err)
+			return interp.ExitStatus(1)
+		}
+		fmt.Fprintf(hc.Stdout, "git version %s (go-git)\n", version)
+		return nil
 	case "status":
 		return runGitStatus(hc, args[1:])
 	case "add":
@@ -36,6 +55,28 @@ func runGitBuiltin(ctx context.Context, args []string) error {
 		fmt.Fprintf(hc.Stderr, "git: unsupported subcommand %q\n", args[0])
 		return interp.ExitStatus(2)
 	}
+}
+
+func writeGitHelp(hc interp.HandlerContext) {
+	fmt.Fprintln(hc.Stdout, `Kabibi built-in Git
+
+Usage:
+  git --version
+  git status [-s|--short|--porcelain]
+  git add [-A|--all] <path...>
+  git commit [-a|--all] -m <message> [--amend]
+  git commit -am <message>
+
+Commands:
+  --version               Show the go-git library version
+  status                  Show repository status
+  add                     Stage the specified paths
+  add -A, --all           Stage all changes in the working tree
+  commit                  Create a commit from staged changes
+  commit -a, --all        Include tracked changes in the commit
+  commit --amend          Replace the current commit (with -m)
+
+Unsupported commands and options return an error; host Git is not invoked.`)
 }
 
 func runGitStatus(hc interp.HandlerContext, args []string) error {
