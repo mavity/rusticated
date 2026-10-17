@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	git "github.com/go-git/go-git/v5"
+	"github.com/mavity/rusticated/kabibi/gitcore"
 )
 
 func TestGitBuiltinStatusUsesExecutionSessionDirectory(t *testing.T) {
@@ -15,6 +16,7 @@ func TestGitBuiltinStatusUsesExecutionSessionDirectory(t *testing.T) {
 	if _, err := git.PlainInit(root, false); err != nil {
 		t.Fatalf("initialize repository: %v", err)
 	}
+
 	nested := filepath.Join(root, "src")
 	if err := os.MkdirAll(nested, 0o755); err != nil {
 		t.Fatalf("create nested directory: %v", err)
@@ -36,6 +38,44 @@ func TestGitBuiltinStatusUsesExecutionSessionDirectory(t *testing.T) {
 	}
 	if !strings.Contains(record.Output, "?? src/new.go") {
 		t.Fatalf("git status output = %q, want untracked file from repository root", record.Output)
+	}
+}
+
+func TestGitBuiltinVersionReportsGoGitModuleVersion(t *testing.T) {
+	version, err := gitcore.LibraryVersion()
+	if err != nil {
+		t.Fatalf("read go-git version: %v", err)
+	}
+	session, err := NewExecutionSession(t.TempDir())
+	if err != nil {
+		t.Fatalf("create execution session: %v", err)
+	}
+	record, err := session.RunCommand(context.Background(), "git --version", nil, SourceUserShell, nil)
+	if err != nil {
+		t.Fatalf("run git --version: %v", err)
+	}
+	want := "git version " + version + " (go-git)"
+	if record.ExitCode != 0 || strings.TrimSpace(record.Output) != want {
+		t.Fatalf("git --version result = (exit %d, %q), want %q", record.ExitCode, record.Output, want)
+	}
+}
+
+func TestGitBuiltinHelpShowsSupportedCommands(t *testing.T) {
+	session, err := NewExecutionSession(t.TempDir())
+	if err != nil {
+		t.Fatalf("create execution session: %v", err)
+	}
+	record, err := session.RunCommand(context.Background(), "git --help", nil, SourceUserShell, nil)
+	if err != nil {
+		t.Fatalf("run git --help: %v", err)
+	}
+	for _, expected := range []string{"Usage:", "git --version", "git status", "git add", "git commit", "host Git is not invoked"} {
+		if !strings.Contains(record.Output, expected) {
+			t.Errorf("git --help output %q does not contain %q", record.Output, expected)
+		}
+	}
+	if record.ExitCode != 0 {
+		t.Fatalf("git --help exit code = %d, output: %q", record.ExitCode, record.Output)
 	}
 }
 
