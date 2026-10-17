@@ -147,6 +147,9 @@ func New(opts ShellOptions) *Shell {
 		},
 	})
 	s.refreshPrompt()
+	if execSess != nil {
+		execSess.SetAICommandUISink(s)
+	}
 
 	// Add initial pompous retro startup banner as BlockBanner (block 0)
 	bannerText := formatStartupBanner(sessionErr)
@@ -432,7 +435,9 @@ func renderBlockCached(block *CommandBlock, width int) terminal.CellBuf {
 		block.cachedInput == block.Input &&
 		block.cachedOutLen == outLen &&
 		block.cachedAnim == block.AnimLine &&
-		block.cachedKind == block.Kind {
+		block.cachedKind == block.Kind &&
+		block.cachedSource == block.Source &&
+		block.cachedStatus == block.Status {
 		return block.cachedBuf
 	}
 
@@ -458,19 +463,97 @@ func renderBlockCached(block *CommandBlock, width int) terminal.CellBuf {
 		lines = []string{""}
 	}
 
-	buf := terminal.FromANSI(lines, width)
-	if buf.Height == 0 {
-		buf = terminal.NewCellBuf(width, 1)
+	var buf terminal.CellBuf
+	if block.Source == SourceAITool && width > 4 {
+		innerW := width - 2
+		inner := terminal.FromANSI(lines, innerW)
+		if inner.Height == 0 {
+			inner = terminal.NewCellBuf(innerW, 1)
+		}
+		buf = terminal.NewCellBuf(width, inner.Height)
+		var stripeColor terminal.Color = 0x00ffff // cyan while active
+		switch block.Status {
+		case StatusSuccess:
+			stripeColor = 0x00ff00 // green on exit 0
+		case StatusError, StatusFailure:
+			stripeColor = 0xff0000 // red on non-zero exit
+		}
+		stripeStyle := terminal.NewStyle(stripeColor, 0, terminal.CharResetBackgroundDefault)
+		spaceStyle := terminal.NewStyle(0, 0, terminal.CharResetForegroundDefault|terminal.CharResetBackgroundDefault)
+		for y := 0; y < inner.Height; y++ {
+			buf.Set(0, y, terminal.Cell{Grapheme: "┃", Style: stripeStyle})
+			buf.Set(1, y, terminal.Cell{Grapheme: " ", Style: spaceStyle})
+		}
+		buf.Blit(inner, 2, 0)
+	} else {
+		buf = terminal.FromANSI(lines, width)
+		if buf.Height == 0 {
+			buf = terminal.NewCellBuf(width, 1)
+		}
 	}
+
 	block.cachedWidth = width
 	block.cachedPrompt = block.Prompt
 	block.cachedInput = block.Input
 	block.cachedOutLen = outLen
 	block.cachedAnim = block.AnimLine
 	block.cachedKind = block.Kind
+	block.cachedSource = block.Source
+	block.cachedStatus = block.Status
 	block.cachedBuf = buf
 	block.cachePopulated = true
 	return buf
+}
+
+// OnAICommandStart implements AICommandUISink so commands executed by the AI's `exec`
+// tool create a dedicated `SourceAITool` CommandBlock rendered with the `W - 2` left gutter stripe.
+func (s *Shell) OnAICommandStart(command string, cwd string) (onChunk func([]byte), onFinish func(exitCode int, elapsed time.Duration)) {
+	s.mu.Lock()
+	startedAt := time.Now()
+	block := CommandBlock{
+		Kind:      BlockCommand,
+		Source:    SourceAITool,
+		Cwd:       cwd,
+		Prompt:    "$ ",
+		Input:     command,
+		Output:    bytes.Buffer{},
+		Status:    StatusActive,
+		ExitCode:  0,
+		StartedAt: startedAt,
+	}
+	// If the latest block is the active BlockAITurn, insert the AI tool block right before
+	// or append it cleanly so both the tool output and final AI answer are visible in chronological order.
+	s.blocks = append(s.blocks, block)
+	idx := len(s.blocks) - 1
+	s.mu.Unlock()
+	s.invalidate()
+
+	onChunk = func(p []byte) {
+		if len(p) == 0 {
+			return
+		}
+		s.mu.Lock()
+		if idx >= 0 && idx < len(s.blocks) {
+			s.blocks[idx].Output.Write(p)
+		}
+		s.mu.Unlock()
+		s.invalidate()
+	}
+	onFinish = func(exitCode int, elapsed time.Duration) {
+		s.mu.Lock()
+		if idx >= 0 && idx < len(s.blocks) {
+			st := StatusSuccess
+			if exitCode != 0 {
+				st = StatusError
+			}
+			s.blocks[idx].Status = st
+			s.blocks[idx].ExitCode = exitCode
+			s.blocks[idx].Duration = elapsed
+		}
+		s.mu.Unlock()
+		s.invalidate()
+	}
+	return onChunk, onFinish
 }
 
 // renderBlock converts a CommandBlock value into a rendered CellBuf using FromANSI.

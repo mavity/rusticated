@@ -219,8 +219,29 @@ func reflectFieldTypeSchema(t reflect.Type) map[string]any {
 		return map[string]any{"type": "number"}
 	case reflect.Slice:
 		return map[string]any{"type": "array", "items": reflectFieldTypeSchema(t.Elem())}
+	case reflect.Struct:
+		desc, props, req := reflectStructSchema(t)
+		schema := map[string]any{
+			"type":       "object",
+			"properties": props,
+		}
+		if desc != "" {
+			schema["description"] = desc
+		}
+		if len(req) > 0 {
+			schema["required"] = req
+		}
+		return schema
 	}
 	panic(fmt.Sprintf("ai: unsupported tool parameter type %v", t))
+}
+
+// Embedder returns the Session's configured PartEmbedder, if any.
+func (s *Session) Embedder() PartEmbedder {
+	if s == nil {
+		return nil
+	}
+	return s.embedder
 }
 
 // SessionConfig configures a high-level reflective chat session.
