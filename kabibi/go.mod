@@ -3,6 +3,7 @@ module github.com/mavity/rusticated/kabibi
 go 1.27.1
 
 require (
+	ai v0.0.0-00010101000000-000000000000
 	github.com/alecthomas/chroma/v2 v2.27.0
 	github.com/atotto/clipboard v0.1.4
 	github.com/charmbracelet/bubbles v1.0.0
@@ -16,9 +17,9 @@ require (
 	github.com/charmbracelet/x/vt v0.0.0-20260924144451-d676b019604b
 	github.com/ebitengine/purego v0.11.1
 	github.com/mattn/go-runewidth v0.0.30
+	github.com/spf13/pflag v1.0.10
 	mvdan.cc/sh/moreinterp v0.0.0-20260602220355-3aa9ec1fa7d0
 	mvdan.cc/sh/v3 v3.14.1
-	ai v0.0.0-00010101000000-000000000000
 	pty v0.0.0-00010101000000-000000000000
 )
 
@@ -63,7 +64,6 @@ require (
 
 replace (
 	ai => ../ai
-	pty => ../pty
 	github.com/atotto/clipboard => ../mohabbat/rusticated-jit/github.com/atotto/clipboard
 	github.com/charmbracelet/bubbletea => ../mohabbat/rusticated-jit/github.com/charmbracelet/bubbletea
 	github.com/charmbracelet/x/term => ../mohabbat/rusticated-jit/github.com/charmbracelet/x/term
@@ -72,4 +72,5 @@ replace (
 	github.com/u-root/u-root => ../mohabbat/rusticated-jit/github.com/u-root/u-root
 	golang.org/x/sys => ../mohabbat/rusticated-jit/golang.org/x/sys
 	golang.org/x/term => ../mohabbat/rusticated-jit/golang.org/x/term
+	pty => ../pty
 )

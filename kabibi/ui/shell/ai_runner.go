@@ -28,12 +28,13 @@ type AIRunner interface {
 // when the first AI fallback turn occurs, forwarding all live feedback and content
 // callbacks to the currently active turn.
 type LazyAIRunner struct {
-	mu       sync.Mutex
-	execSess *ExecutionSession
-	engine   *ai.Engine
-	embedder *ai.Embedder
-	session  *ai.Session
-	verbose  bool
+	mu            sync.Mutex
+	execSess      *ExecutionSession
+	engine        *ai.Engine
+	embedder      *ai.Embedder
+	session       *ai.Session
+	verbose       bool
+	systemContext string
 
 	cbMu       sync.Mutex
 	onFeedback ai.LogFeedback
@@ -50,6 +51,14 @@ func (r *LazyAIRunner) SetVerbose(v bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.verbose = v
+}
+
+// SetSystemContext appends additional system-message context before the
+// underlying ai.Session is initialized.
+func (r *LazyAIRunner) SetSystemContext(context string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.systemContext = strings.TrimSpace(context)
 }
 
 // FlushEmbeddings waits for any pending background embeddings to complete.
@@ -164,7 +173,7 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 	sess, err := ai.NewSession(ai.SessionConfig{
 		Engine:          engine,
 		Embedder:        partEmb,
-		SystemMessage:   defaultKabibiSystemPrompt,
+		SystemMessage:   kabibiSystemMessage(r.systemContext),
 		Tools:           BuildKabibiTools(r.execSess),
 		CompactionLimit: compactionLimit,
 		OnFeedback:      r.emitFeedback,
@@ -190,6 +199,14 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 	r.embedder = emb
 	r.session = sess
 	return nil
+}
+
+func kabibiSystemMessage(additionalContext string) string {
+	additionalContext = strings.TrimSpace(additionalContext)
+	if additionalContext == "" {
+		return defaultKabibiSystemPrompt
+	}
+	return defaultKabibiSystemPrompt + "\n\n" + additionalContext
 }
 
 // RunTurn runs a single AI turn, lazily initializing the underlying ai.Session if needed.
@@ -263,6 +280,32 @@ func ExecuteOneShotLine(ctx context.Context, line string, verbose bool, out io.W
 		}
 		return 0, nil
 	}
+}
+
+// ExecuteOneShotPrompt sends prompt directly to the AI without shell
+// classification or execution, appending systemContext to Kabibi's system
+// message. This is used for unrecognized command-line invocations.
+func ExecuteOneShotPrompt(ctx context.Context, prompt, systemContext string, verbose bool, out io.Writer) (int, error) {
+	if out == nil {
+		out = os.Stdout
+	}
+	if strings.TrimSpace(prompt) == "" {
+		return 0, nil
+	}
+
+	es, err := NewExecutionSession("")
+	if err != nil {
+		return 1, err
+	}
+	aiRunner := NewLazyAIRunner(es)
+	aiRunner.SetVerbose(verbose)
+	aiRunner.SetSystemContext(systemContext)
+	defer aiRunner.Close()
+
+	if err := runOneShotAI(ctx, aiRunner, prompt, out); err != nil {
+		return 1, err
+	}
+	return 0, nil
 }
 
 func runOneShotAI(ctx context.Context, aiRunner *LazyAIRunner, prompt string, out io.Writer) error {
