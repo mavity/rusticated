@@ -458,6 +458,7 @@ func (h *Host) runFrame(
 		}
 
 		widthChanged := h.currBuf.Width != w
+		forceFullInline := !h.hasRenderedOnce || widthChanged
 		if widthChanged {
 			// On width change, resize both buffers to the current occupied height.
 			bufH = occH
@@ -472,7 +473,28 @@ func (h *Host) runFrame(
 				if copyRows > bufH {
 					copyRows = bufH
 				}
-				copy(newPrev.Cells()[:copyRows*w], h.prevBuf.Cells()[:copyRows*w])
+				// When transitioning straight to full-screen HUD height (bufH == ht) from
+				// a compact inline stack (h.prevInlineHeight < ht), push the prior external
+				// terminal lines above row 0 by advancing (ht - h.prevInlineHeight) newlines
+				// at the bottom of the old inline stack so the top rows are virgin screen space.
+				if bufH == ht && h.prevInlineHeight > 0 && h.prevInlineHeight < ht {
+					extraScroll := ht - h.prevInlineHeight
+					lastOldRow := h.prevInlineHeight - 1
+					if h.prevCursorY < lastOldRow {
+						fmt.Fprintf(h.out, "\x1b[%dB", lastOldRow-h.prevCursorY)
+					} else if h.prevCursorY > lastOldRow {
+						fmt.Fprintf(h.out, "\x1b[%dA", h.prevCursorY-lastOldRow)
+					}
+					for i := 0; i < extraScroll; i++ {
+						h.out.WriteString("\r\n")
+					}
+					fmt.Fprintf(h.out, "\x1b[%dA", ht-1)
+					h.prevCursorY = 0
+					h.prevInlineHeight = ht
+					forceFullInline = true
+				} else {
+					copy(newPrev.Cells()[:copyRows*w], h.prevBuf.Cells()[:copyRows*w])
+				}
 			}
 			h.currBuf = newCurr
 			h.prevBuf = newPrev
@@ -485,10 +507,10 @@ func (h *Host) runFrame(
 		copy(h.currBuf.Cells()[:occH*w], rendered.Cells()[:occH*w])
 
 		_, _, changed := h.spanDetect()
-		if !h.hasRenderedOnce || widthChanged {
+		if forceFullInline {
 			changed = true
 		}
-		cursorChanged := !h.hasRenderedOnce ||
+		cursorChanged := forceFullInline ||
 			h.cursorX != h.prevCursorX ||
 			h.cursorY != h.prevCursorY ||
 			h.cursorVisible != h.prevCursorVisible
@@ -502,7 +524,7 @@ func (h *Host) runFrame(
 		}
 
 		if changed {
-			curY = h.renderInlineDiff(curY, bufH, !h.hasRenderedOnce || widthChanged)
+			curY = h.renderInlineDiff(curY, bufH, forceFullInline)
 			terminal.SwapBufCells(&h.currBuf, &h.prevBuf)
 		}
 		h.positionInlineCursor(curY)
