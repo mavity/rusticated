@@ -33,11 +33,6 @@ func assertAppSnapshot(t *testing.T, snapFile string, widget *AppWidget, scrollb
 	got := sb + terminal.ToANSI(buf)
 
 	snapPath := filepath.Join("snapshot", snapFile)
-	if os.Getenv("UPDATE_SNAPSHOTS") == "1" {
-		if err := os.WriteFile(snapPath, []byte(got), 0o644); err != nil {
-			t.Fatalf("failed to write snapshot %s: %v", snapPath, err)
-		}
-	}
 
 	wantBytes, err := os.ReadFile(snapPath)
 	if err != nil {
