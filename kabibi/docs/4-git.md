@@ -116,3 +116,19 @@ Every piece of this upgrade can be built and unit-tested modularly inside `kabib
 | **5. `kabibi/ui/shell` PTY Gutter & Lifecycle** | `Cols: W - 2` PTY launch, 2-column `┃ ` gutter blit in `renderBlock`, `CellBuf` color-stripped text extraction, timeout promotion (`bgProcs`), and `term_read` / `term_input` / `term_kill`.
 
  | **Medium** (~400 LOC, builds directly on `pty` and `terminal.CellBuf`) |
+
+---
+
+### Broad Git CLI Coverage via `adrianliechti/go-git`
+
+While the initial vertical slice in commit `fcdb61f` provided a hand-rolled parser for a minimal subset (`status`, `add`, `commit`), full CLI breadth (`log`, `diff`, `branch`, `checkout`, `switch`, `reset`, `restore`, `merge`, `stash`, `tag`, etc.) is achieved by wiring `github.com/adrianliechti/go-git` directly into `gitBuiltinMiddleware`.
+
+#### 1. Why `adrianliechti/go-git`
+* **Pure Go & In-Process:** Translates 50+ standard Git CLI commands directly into `go-git/v5` porcelain/plumbing calls without shelling out or invoking CGO/host binaries.
+* **Pluggable Sandboxed Architecture:** Accepts `git.Options{Args, Dir, Env, Stdin, Stdout, Stderr, FS}` and returns standard Git exit codes.
+* **Complements `kabibi/gitcore`:** `kabibi/gitcore` remains the structured Go API powering the AI's `git_inspect` and `git_mutate` tools, while `adrianliechti/go-git` satisfies human and script commands typed into the shell.
+
+#### 2. Required Adapters
+* **OS Filesystem Bridge (`git.FS`):** An implementation of `git.FS` (`OpenFile`, `Mkdir`, `Remove`, `Rename`, `Open`) wrapping the native operating system / WASM filesystem with Windows drive path canonicalization (`C:\...` to slash-separated virtual paths).
+* **Identity & Environment Propagation:** Cascading fallback author/committer identities (`GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`) and shell environment variables (`hc.Env`) into `opts.Env`.
+* **Standard I/O Streams:** Direct binding of `hc.Stdin`, `hc.Stdout`, and `hc.Stderr` to stream progress, logs, and diffs with zero buffering latency.
