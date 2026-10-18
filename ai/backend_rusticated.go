@@ -535,7 +535,7 @@ func inspectModel(libPath, modelPath string) (*ModelInfo, error) {
 			IsDynamicContext:        true,
 			SupportsThinking:        true,
 			SupportsFunctionCalling: true,
-			SupportedBackends:       []string{"gpu", "cpu"},
+			SupportedBackends:       []string{"gpu"},
 		}, nil
 	}
 	return sharedInspectModel(&rusticatedDrv, libPath, modelPath)

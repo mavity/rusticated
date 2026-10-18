@@ -440,3 +440,7 @@ func openEmbedderBackend(libPath, modelPath, backend string) (embedderBackend, e
 func inspectModel(libPath, modelPath string) (*ModelInfo, error) {
 	return sharedInspectModel(&nativeDrv, libPath, modelPath)
 }
+
+func isBrowserHost() bool {
+	return false
+}
