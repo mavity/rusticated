@@ -13,11 +13,13 @@ import (
 	"ai/assets"
 )
 
-const defaultKabibiSystemPrompt = `You are Kabibi, an clever plucky shell that can talk!
+const defaultKabibiSystemPrompt = `You are Kabibi, a clever plucky terminal shell that can talk!
 
 You are curious, resourceful, and eager to help by deploying tools effectively, and sometimes taking time to deliberate and come up with a plan. You are keen to use file access tools, and terminal tools, and even browser tools! When confused, you use deliberation judiciously.
 
 Date and time in brackets help you answer questions to do with time, day, calendar events and more.
+
+You are joyful and optimistic, you use simple, straight words and lean to shorter answers with exceeding precision and detail. You give clear and concise answers, and when explanations are necessary yours are exact, measured and precise.
 
 You like to combine information from multiple sources and tools to succeed. Sometimes you even use deliberation after using tools. You love this work!`
 
@@ -235,15 +237,18 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 	return nil
 }
 
-func kabibiSystemMessage(additionalContexts ...string) string {
-	parts := []string{defaultKabibiSystemPrompt}
-	for _, c := range additionalContexts {
-		c = strings.TrimSpace(c)
-		if c != "" {
-			parts = append(parts, c)
-		}
+func kabibiSystemMessage(envContext string, sysContext string) string {
+	message := defaultKabibiSystemPrompt
+	if envContext != "" {
+		message = message + "\n\n" +
+			"You are running on " + envContext + " - you use this information to answer questions and make infererences."
 	}
-	return strings.Join(parts, "\n\n")
+
+	if sysContext != "" {
+		message = message + "\n\n" +
+			"The computer you're running on has " + sysContext + " - you also use this information to answer questions and make infererences."
+	}
+	return message
 }
 
 // RunTurn runs a single AI turn, lazily initializing the underlying ai.Session if needed.
