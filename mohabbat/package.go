@@ -269,7 +269,22 @@ func buildZoneA(offsets, lengths []int, nodeJsLen int, poolLen uint64, whOffsets
 :;   fi
 :; fi
 :; [ "$S_LEN" = "0" ] && { echo "🍆 Unsupported platform and node not available"; exit 1; }
-:; TMP_DIR="${TMPDIR:-/tmp}"; [ -d "./target" ] && TMP_DIR="./target"; TMP_EXE="$TMP_DIR/moh-$$"; dd if="$ME" bs=1 skip="$S_OFF" count="$S_LEN" of="$TMP_EXE" 2>/dev/null; chmod +x "$TMP_EXE"; "$TMP_EXE" "$ME" "$P_LEN" "$W_OFF" "$W_LEN" "$PLD_OFF" "$PLD_LEN" "$@"; RET=$?; rm "$TMP_EXE"; exit $RET
+:; TMP_DIR=""
+:; for cand in "$TMPDIR" "$TMP" "$TEMP" "./target" "${PREFIX:+$PREFIX/tmp}" /data/data/com.termux/files/usr/tmp /data/local/tmp /tmp /var/tmp /usr/tmp "$(dirname "$ME")" .; do
+:;   if [ -n "$cand" ] && [ -d "$cand" ] && [ -w "$cand" ]; then
+:;     TMP_DIR="$cand"
+:;     break
+:;   fi
+:; done
+:; [ -z "$TMP_DIR" ] && { echo "🍆 No writable temporary directory found" >&2; exit 1; }
+:; export TMPDIR="$TMP_DIR"
+:; TMP_EXE="$TMP_DIR/moh-$$"
+:; dd if="$ME" bs=1 skip="$S_OFF" count="$S_LEN" of="$TMP_EXE" 2>/dev/null
+:; chmod +x "$TMP_EXE"
+:; "$TMP_EXE" "$ME" "$P_LEN" "$W_OFF" "$W_LEN" "$PLD_OFF" "$PLD_LEN" "$@"
+:; RET=$?
+:; rm -f "$TMP_EXE"
+:; exit $RET
 `
 	const tmplWIN = `@echo off
 setlocal enabledelayedexpansion
