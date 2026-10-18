@@ -49,10 +49,11 @@ const webAdapterBootstrapJS = `
         return globalThis.LiteRtLmCore;
       }
       if (!this.corePromise) {
-        this.coreSource = 'https://cdn.jsdelivr.net/npm/@litert-lm/core@0.12.1/+esm';
+        const litertLMURL = 'https://cdn.jsdelivr.net/npm/@litert-lm/core@0.18.0/+esm'
+        this.coreSource = litertLMURL;
         this.corePromise = (async () => {
           try {
-            return await import('https://cdn.jsdelivr.net/npm/@litert-lm/core@0.12.1/+esm');
+            return await import(litertLMURL);
           } catch (e) {
             console.error('[rustica_ai] Failed to load @litert-lm/core from CDN:', e);
             throw e;
