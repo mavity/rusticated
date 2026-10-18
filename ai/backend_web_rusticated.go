@@ -114,19 +114,41 @@ const webAdapterBootstrapJS = `
         }
       }
 
-      let backendEnum = mod.Backend ? mod.Backend.GPU : 'gpu';
-      if (cfg.backend === 'cpu') {
-        backendEnum = mod.Backend ? mod.Backend.CPU : 'cpu';
+      let backendEnum;
+      if (mod.Backend) {
+        backendEnum = mod.Backend.GPU_ARTISAN ?? mod.Backend.GPU ?? 2;
+        if (cfg.backend === 'cpu') {
+          console.warn('[rustica_ai] CPU backend requested, but web models require GPU_ARTISAN; falling back to GPU_ARTISAN');
+          backendEnum = mod.Backend.GPU_ARTISAN ?? mod.Backend.GPU ?? 2;
+        } else if (cfg.backend === 'gpu' || cfg.backend === 'gpu_artisan') {
+          backendEnum = mod.Backend.GPU_ARTISAN ?? mod.Backend.GPU ?? 2;
+        }
+      } else {
+        backendEnum = 2;
       }
       context.resolvedBackend = String(backendEnum);
+
+      const mainExecutorSettings = {
+        maxNumTokens: (cfg.maxTokens && cfg.maxTokens > 0) ? cfg.maxTokens : 4096,
+        backendConfig: {
+          num_output_candidates: 1,
+          wait_for_weight_uploads: true,
+          num_decode_steps_per_sync: 1,
+          sequence_batch_size: 0,
+          supported_lora_ranks: [],
+          max_top_k: 64,
+          enable_decode_logits: false,
+          enable_external_embeddings: false,
+          use_submodel: true,
+          use_autosized_ringbuffers: true,
+        }
+      };
 
       const engineSettings = {
         model: modelSource,
         backend: backendEnum,
+        mainExecutorSettings: mainExecutorSettings,
       };
-      if (cfg.maxTokens > 0) {
-        engineSettings.mainExecutorSettings = { maxNumTokens: cfg.maxTokens };
-      }
 
       let engine;
       try {
@@ -212,7 +234,8 @@ const webAdapterBootstrapJS = `
         waiters: [],
         done: false,
         error: null,
-        conv: entry.conv
+        conv: entry.conv,
+        reader: null
       };
       this.streams.set(streamId, stream);
 
@@ -230,57 +253,86 @@ const webAdapterBootstrapJS = `
             }
           };
 
-          // Check if conv.conversation (WasmConversation) exists
-          if (conv.conversation && typeof conv.conversation.sendMessageAsync === 'function' && conv.engine && typeof conv.engine.waitUntilDone === 'function') {
-            const wasmConv = conv.conversation;
-            const wasmEngine = conv.engine;
-            const executor = conv.mutexes?.executor;
+          if (typeof conv.sendMessageStreaming === 'function') {
+            const responseStream = conv.sendMessageStreaming(msgObj);
+            const reader = responseStream.getReader();
+            stream.reader = reader;
 
-            const run = async () => {
-              await new Promise((resolve, reject) => {
-                wasmConv.sendMessageAsync(JSON.stringify(msgObj), (chunk, isDone, error) => {
-                  if (error) {
-                    reject(error);
-                    return;
-                  }
-                  if (chunk) {
-                    pushEvent({ type: 'chunk', data: chunk });
-                  }
-                  if (isDone) {
-                    resolve();
-                  }
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+
+              let chunk = value;
+              if (typeof chunk === 'string') {
+                try {
+                  chunk = JSON.parse(chunk);
+                } catch {
+                  chunk = { content: chunk };
+                }
+              }
+
+              let contentParts = [];
+
+              // Handle thought channel (e.g. Gemma 4 thinking tokens)
+              if (chunk && chunk.channels && typeof chunk.channels.thought === 'string' && chunk.channels.thought) {
+                contentParts.push({
+                  type: 'text',
+                  text: chunk.channels.thought
                 });
-              });
-              await wasmEngine.waitUntilDone();
-            };
+              }
 
-            if (executor && typeof executor.acquireAndRun === 'function') {
-              await executor.acquireAndRun(run);
-            } else {
-              await run();
-            }
-          } else if (typeof conv.sendMessageStreaming === 'function') {
-            // High-level fallback
-            const streamIter = conv.sendMessageStreaming(msgObj);
-            for await (const chunk of streamIter) {
-              // Convert chunk to standard LiteRT JSON
-              const chunkJson = JSON.stringify(chunk);
-              pushEvent({ type: 'chunk', data: chunkJson });
+              // Handle content
+              if (chunk && chunk.content) {
+                if (typeof chunk.content === 'string') {
+                  contentParts.push({
+                    type: 'text',
+                    text: chunk.content
+                  });
+                } else if (Array.isArray(chunk.content)) {
+                  for (const part of chunk.content) {
+                    if (typeof part === 'string') {
+                      contentParts.push({ type: 'text', text: part });
+                    } else if (part && typeof part === 'object') {
+                      if (part.type === 'text' && typeof part.text === 'string') {
+                        contentParts.push(part);
+                      } else if (typeof part.text === 'string') {
+                        contentParts.push({ type: 'text', text: part.text });
+                      }
+                    }
+                  }
+                }
+              }
+
+              const normalizedChunk = {
+                role: chunk?.role || 'model',
+                content: contentParts,
+              };
+
+              const toolCalls = chunk?.tool_calls || chunk?.toolCalls;
+              if (Array.isArray(toolCalls) && toolCalls.length > 0) {
+                normalizedChunk.tool_calls = toolCalls;
+              }
+
+              pushEvent({ type: 'chunk', data: JSON.stringify(normalizedChunk) });
             }
           } else {
-            throw new Error('no compatible sendMessage streaming method found');
+            throw new Error('no compatible sendMessage streaming method found (conv.sendMessageStreaming missing)');
           }
 
-          stream.done = true;
-          pushEvent({ type: 'done' });
+          if (!stream.done) {
+            stream.done = true;
+            pushEvent({ type: 'done' });
+          }
         } catch (e) {
-          stream.error = e?.message || String(e);
-          stream.done = true;
-          if (stream.waiters.length > 0) {
-            const resolve = stream.waiters.shift();
-            resolve(JSON.stringify({ type: 'error', error: stream.error }));
-          } else {
-            stream.queue.push({ type: 'error', error: stream.error });
+          if (!stream.done) {
+            stream.error = e?.message || String(e);
+            stream.done = true;
+            if (stream.waiters.length > 0) {
+              const resolve = stream.waiters.shift();
+              resolve(JSON.stringify({ type: 'error', error: stream.error }));
+            } else {
+              stream.queue.push({ type: 'error', error: stream.error });
+            }
           }
         }
       })();
@@ -314,6 +366,12 @@ const webAdapterBootstrapJS = `
     cancelStream(streamId) {
       const stream = this.streams.get(Number(streamId));
       if (!stream) return 'ok';
+
+      try {
+        if (stream.reader && typeof stream.reader.cancel === 'function') {
+          stream.reader.cancel().catch(() => {});
+        }
+      } catch (e) {}
 
       try {
         if (typeof stream.conv.cancel === 'function') {

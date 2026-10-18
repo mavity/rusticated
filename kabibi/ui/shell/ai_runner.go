@@ -131,7 +131,10 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 		return fmt.Errorf("model download error: %w", err)
 	}
 
-	chosenBackend := "cpu"
+	chosenBackend := "auto"
+	if assets.HostOS() == "browser" {
+		chosenBackend = "gpu"
+	}
 	maxTokens := 8192
 	if info, err := ai.LoadModelInfo(libPath, modelPath); err == nil && info != nil {
 		if r.verbose {
@@ -143,16 +146,27 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 		if info.MaxContextTokens > 0 {
 			maxTokens = int(float64(info.MaxContextTokens) * 0.5)
 		}
-		for _, b := range info.SupportedBackends {
-			if strings.EqualFold(b, "gpu") {
-				chosenBackend = "gpu"
-				break
+
+		// Pick the highest-performance backend supported by the model: NPU > GPU > CPU.
+		hasBackend := func(target string) bool {
+			for _, b := range info.SupportedBackends {
+				if strings.EqualFold(b, target) {
+					return true
+				}
 			}
+			return false
+		}
+		if hasBackend("npu") {
+			chosenBackend = "npu"
+		} else if hasBackend("gpu") {
+			chosenBackend = "gpu"
+		} else if hasBackend("cpu") {
+			chosenBackend = "cpu"
 		}
 	}
 
 	engine, err := ai.NewEngine(libPath, modelPath, chosenBackend, maxTokens)
-	if err != nil && chosenBackend != "cpu" {
+	if err != nil && chosenBackend != "cpu" && assets.HostOS() != "browser" {
 		chosenBackend = "cpu"
 		engine, err = ai.NewEngine(libPath, modelPath, chosenBackend, maxTokens)
 	}

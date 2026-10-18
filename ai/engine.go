@@ -14,6 +14,12 @@ type engineImpl struct {
 }
 
 func resolveLMBackendCandidates(backend string) []string {
+	if isBrowserHost() {
+		if backend != "" && backend != "auto" {
+			return []string{backend}
+		}
+		return []string{"gpu"}
+	}
 	if backend != "" && backend != "auto" {
 		if backend == "cpu" {
 			return []string{"cpu"}
