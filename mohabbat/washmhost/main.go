@@ -196,11 +196,21 @@ func main() {
 	// Host mode: capture workspace + toolchain location before the guest can chdir.
 
 	initWatchdog()
+	restoreConsole := setupConsoleUtf8()
+	defer restoreConsole()
 
+	exitCode := runHost(parsedArgs, cwd)
+	restoreConsole()
+	if exitCode != 0 {
+		os.Exit(exitCode)
+	}
+}
+
+func runHost(parsedArgs []string, cwd string) int {
 	ref := os.Getenv("MOHABBAT_WASM_FD")
 	if ref == "" {
 		fmt.Fprintf(os.Stderr, "washmhost: MOHABBAT_WASM_FD not set\n")
-		os.Exit(1)
+		return 1
 	}
 
 	var r io.Reader
@@ -210,7 +220,7 @@ func main() {
 		f, err := os.Open(ref)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "washmhost: failed to open payload: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 		defer f.Close()
 		r = f
@@ -219,7 +229,7 @@ func main() {
 	payloadBytes, err := io.ReadAll(r)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "washmhost: failed to read payload: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	argSlice := make([]string, len(parsedArgs))
@@ -243,7 +253,7 @@ func main() {
 	if cwd != "" {
 		if err := os.Chdir(cwd); err != nil {
 			fmt.Fprintf(os.Stderr, "washmhost: failed to chdir to %s: %v\n", cwd, err)
-			os.Exit(1)
+			return 1
 		}
 	}
 
@@ -251,10 +261,10 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "washmhost: %v\n", err)
 		if exitCode == 0 {
-			os.Exit(1)
+			return 1
 		}
-		os.Exit(exitCode)
+		return exitCode
 	}
 
-	os.Exit(exitCode)
+	return exitCode
 }
