@@ -81,7 +81,7 @@ const browserAssetBootstrapJS = `
           const fh = await root.getFileHandle(fname);
           const f = await fh.getFile();
           if (f && f.size > 0) {
-            return f;
+            return f.stream();
           }
         } catch (e) {}
       }
@@ -91,14 +91,15 @@ const browserAssetBootstrapJS = `
           const cache = await caches.open(CACHE_NAME);
           const resp = await cache.match(url);
           if (resp) {
-            return await resp.blob();
+            const blob = await resp.blob();
+            return blob.stream();
           }
         } catch (e) {}
       }
 
       const res = await fetch(url, { mode: 'cors', credentials: 'omit' });
       if (!res.ok) throw new Error('fetch model failed: HTTP ' + res.status);
-      return await res.blob();
+      return res.body;
     },
 
     startDownload(url) {

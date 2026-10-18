@@ -62,6 +62,10 @@
             height: 100%;
         }
 
+        #terminal-container .xterm-viewport {
+            overflow-y: auto !important;
+        }
+
         @media (max-width: 1024px) {
             body {
                 overflow: auto;
@@ -286,6 +290,7 @@
             };
 
             const candidateSources = [
+                './try/kabibi.wasm',
                 './release/kabibi.wasm',
                 './release/kabibi.bat'
             ];

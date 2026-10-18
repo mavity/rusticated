@@ -1054,24 +1054,25 @@ export function makeBrowserImports(hostState, fs, params = {}) {
         try {
           const count = Number(argsCount || 0);
           const base = Number(argsPtr || 0);
-          const view = hostState.view;
           if (count < 5 || base === 0) {
             hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiEINVAL, 0, 0));
             return;
           }
-          const codePtr = Number(view.getBigUint64(base + 0, true));
-          const codeLen = Number(view.getBigUint64(base + 8, true));
-          const outPtr = Number(view.getBigUint64(base + 16, true));
-          const outCap = Number(view.getBigUint64(base + 24, true));
-          const outLenPtr = Number(view.getBigUint64(base + 32, true));
+          const initialView = hostState.view;
+          const codePtr = Number(initialView.getBigUint64(base + 0, true));
+          const codeLen = Number(initialView.getBigUint64(base + 8, true));
+          const outPtr = Number(initialView.getBigUint64(base + 16, true));
+          const outCap = Number(initialView.getBigUint64(base + 24, true));
+          const outLenPtr = Number(initialView.getBigUint64(base + 32, true));
 
           const code = decoder.decode(hostState.getGuestSlice(codePtr, codeLen));
 
           const finishEval = (status, text) => {
             const rawStr = String(text ?? '');
             const encoded = encoder.encode(rawStr);
+            const currentView = hostState.view;
             if (outLenPtr !== 0) {
-              view.setUint32(outLenPtr, encoded.length, true);
+              currentView.setUint32(outLenPtr, encoded.length, true);
             }
             if (outCap > 0 && encoded.length > 0 && outPtr !== 0) {
               const toCopy = Math.min(outCap, encoded.length);
@@ -1090,7 +1091,7 @@ export function makeBrowserImports(hostState, fs, params = {}) {
               }
             }
             if (Number(resultsCap || 0) > 0 && Number(resultsPtr || 0) !== 0) {
-              view.setBigUint64(Number(resultsPtr), rc, true);
+              currentView.setBigUint64(Number(resultsPtr), rc, true);
             }
             hostState.completeOp(Number(ovPtr), opId, 0, 0, rc);
           };
