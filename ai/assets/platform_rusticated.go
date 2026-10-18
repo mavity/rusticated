@@ -111,3 +111,37 @@ func HostArch() string {
 	_, arch := hostOSArch()
 	return arch
 }
+
+// InspectRuntimePlatform returns environmental details when running inside a
+// Mohabbat / Rusticated WASM host (washmhost via wazero, Node.js, or browser).
+func InspectRuntimePlatform() RuntimePlatformInfo {
+	osName, arch := hostOSArch()
+	envKind := "desktop"
+	if osName == "browser" {
+		envKind = "browser"
+	}
+
+	info := RuntimePlatformInfo{
+		OS:              osName,
+		Arch:            arch,
+		ExecutionMode:   "mohabbat",
+		HostRuntime:     "washmhost",
+		EnvironmentKind: envKind,
+	}
+
+	if pi := syscall.GetPlatformInfo(); pi != nil {
+		wPlat := strings.TrimSpace(pi.WasmPlatform)
+		rName := strings.TrimSpace(pi.RusticatedName)
+		if rName != "" && wPlat != "" && !strings.EqualFold(rName, wPlat) {
+			info.HostRuntime = rName + " (" + wPlat + ")"
+		} else if rName != "" {
+			info.HostRuntime = rName
+		} else if wPlat != "" {
+			info.HostRuntime = wPlat
+		}
+		info.WasmPlatform = wPlat
+		info.BuildPlatform = strings.TrimSpace(pi.BuildPlatform)
+	}
+	return info
+}
+

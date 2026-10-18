@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"ai"
 	"github.com/charmbracelet/x/input"
 	"github.com/mavity/rusticated/kabibi/ui"
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
@@ -295,18 +296,21 @@ func (s *Shell) Blocks() []CommandBlock {
 	res := make([]CommandBlock, len(s.blocks))
 	for i := range s.blocks {
 		res[i] = CommandBlock{
-			ID:        s.blocks[i].ID,
-			Kind:      s.blocks[i].Kind,
-			Source:    s.blocks[i].Source,
-			Cwd:       s.blocks[i].Cwd,
-			Prompt:    s.blocks[i].Prompt,
-			Input:     s.blocks[i].Input,
-			Output:    *bytes.NewBuffer(append([]byte(nil), s.blocks[i].Output.Bytes()...)),
-			AnimLine:  s.blocks[i].AnimLine,
-			Status:    s.blocks[i].Status,
-			ExitCode:  s.blocks[i].ExitCode,
-			StartedAt: s.blocks[i].StartedAt,
-			Duration:  s.blocks[i].Duration,
+			ID:            s.blocks[i].ID,
+			Kind:          s.blocks[i].Kind,
+			Source:        s.blocks[i].Source,
+			Cwd:           s.blocks[i].Cwd,
+			Prompt:        s.blocks[i].Prompt,
+			Input:         s.blocks[i].Input,
+			Output:        *bytes.NewBuffer(append([]byte(nil), s.blocks[i].Output.Bytes()...)),
+			AnimLine:      s.blocks[i].AnimLine,
+			Status:        s.blocks[i].Status,
+			ExitCode:      s.blocks[i].ExitCode,
+			TypedAt:       s.blocks[i].TypedAt,
+			StartedAt:     s.blocks[i].StartedAt,
+			FirstOutputAt: s.blocks[i].FirstOutputAt,
+			CompletedAt:   s.blocks[i].CompletedAt,
+			Duration:      s.blocks[i].Duration,
 		}
 	}
 	return res
@@ -391,6 +395,7 @@ func (s *Shell) refreshPrompt() {
 // SubmitCurrentInput adds the current input to history as a CommandBlock and clears the input buffer.
 func (s *Shell) SubmitCurrentInput() {
 	rawInput := s.input.Value()
+	typedAt := s.input.FirstInputAt()
 	prompt := s.input.PromptText()
 	s.input.AddHistory(rawInput)
 	s.input.Reset()
@@ -399,6 +404,10 @@ func (s *Shell) SubmitCurrentInput() {
 	var cwd string
 	if s.execSess != nil {
 		cwd = s.execSess.Dir()
+	}
+	startedAt := time.Now()
+	if typedAt.IsZero() {
+		typedAt = startedAt
 	}
 	block := CommandBlock{
 		Kind:      BlockCommand,
@@ -409,7 +418,8 @@ func (s *Shell) SubmitCurrentInput() {
 		Output:    bytes.Buffer{},
 		Status:    StatusActive,
 		ExitCode:  0,
-		StartedAt: time.Now(),
+		TypedAt:   typedAt,
+		StartedAt: startedAt,
 	}
 	s.blocks = append(s.blocks, block)
 	s.mu.Unlock()
@@ -541,14 +551,19 @@ func (s *Shell) OnAICommandStart(command string, cwd string) (onChunk func([]byt
 		if len(p) == 0 {
 			return
 		}
+		now := time.Now()
 		s.mu.Lock()
 		if idx >= 0 && idx < len(s.blocks) {
+			if s.blocks[idx].FirstOutputAt.IsZero() {
+				s.blocks[idx].FirstOutputAt = now
+			}
 			s.blocks[idx].Output.Write(p)
 		}
 		s.mu.Unlock()
 		s.invalidate()
 	}
 	onFinish = func(exitCode int, elapsed time.Duration) {
+		now := time.Now()
 		s.mu.Lock()
 		if idx >= 0 && idx < len(s.blocks) {
 			st := StatusSuccess
@@ -557,6 +572,7 @@ func (s *Shell) OnAICommandStart(command string, cwd string) (onChunk func([]byt
 			}
 			s.blocks[idx].Status = st
 			s.blocks[idx].ExitCode = exitCode
+			s.blocks[idx].CompletedAt = now
 			s.blocks[idx].Duration = elapsed
 		}
 		s.mu.Unlock()
@@ -1117,6 +1133,7 @@ func (s *Shell) emitScrollbackLine(line string) {
 
 func (s *Shell) submitAndExecuteAsync() {
 	rawInput := s.input.Value()
+	typedAt := s.input.FirstInputAt()
 	prompt := s.input.PromptText()
 	s.input.AddHistory(rawInput)
 	s.input.Reset()
@@ -1128,6 +1145,9 @@ func (s *Shell) submitAndExecuteAsync() {
 		cwd = s.execSess.Dir()
 	}
 	startedAt := time.Now()
+	if typedAt.IsZero() {
+		typedAt = startedAt
+	}
 	block := CommandBlock{
 		Kind:      BlockCommand,
 		Source:    SourceUserShell,
@@ -1137,6 +1157,7 @@ func (s *Shell) submitAndExecuteAsync() {
 		Output:    bytes.Buffer{},
 		Status:    StatusActive,
 		ExitCode:  0,
+		TypedAt:   typedAt,
 		StartedAt: startedAt,
 	}
 	s.blocks = append(s.blocks, block)
@@ -1147,6 +1168,7 @@ func (s *Shell) submitAndExecuteAsync() {
 
 	if trimmed == "" {
 		s.blocks[blockIdx].Status = StatusSuccess
+		s.blocks[blockIdx].CompletedAt = startedAt
 		s.mu.Unlock()
 		s.invalidate()
 		return
@@ -1159,6 +1181,7 @@ func (s *Shell) submitAndExecuteAsync() {
 		fmt.Fprintln(&s.blocks[blockIdx].Output, message)
 		s.blocks[blockIdx].Status = StatusFailure
 		s.blocks[blockIdx].ExitCode = 1
+		s.blocks[blockIdx].CompletedAt = time.Now()
 		s.mu.Unlock()
 		s.invalidate()
 		return
@@ -1167,12 +1190,14 @@ func (s *Shell) submitAndExecuteAsync() {
 	route, parsed := s.execSess.ClassifyInput(rawInput)
 	if route == RouteEmpty {
 		s.blocks[blockIdx].Status = StatusSuccess
+		s.blocks[blockIdx].CompletedAt = startedAt
 		s.mu.Unlock()
 		s.invalidate()
 		return
 	}
 	if route == RouteBuiltin {
 		s.blocks[blockIdx].Status = StatusSuccess
+		s.blocks[blockIdx].CompletedAt = startedAt
 		s.exiting = true
 		onExit := s.opts.OnExit
 		s.mu.Unlock()
@@ -1186,7 +1211,11 @@ func (s *Shell) submitAndExecuteAsync() {
 		s.blocks[blockIdx].Kind = BlockAITurn
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx := ai.WithTurnTiming(context.Background(), ai.TurnTiming{
+		TypedAt:     typedAt,
+		SubmittedAt: startedAt,
+	})
+	ctx, cancel := context.WithCancel(ctx)
 	doneCh := make(chan struct{})
 	s.activeCancel = cancel
 	s.activeBlock = blockIdx
@@ -1264,8 +1293,12 @@ func (s *Shell) submitAndExecuteAsync() {
 			if text == "" {
 				return
 			}
+			now := time.Now()
 			s.mu.Lock()
 			if blockIdx >= 0 && blockIdx < len(s.blocks) {
+				if s.blocks[blockIdx].FirstOutputAt.IsZero() {
+					s.blocks[blockIdx].FirstOutputAt = now
+				}
 				s.blocks[blockIdx].Output.WriteString(text)
 			}
 			s.mu.Unlock()
@@ -1382,8 +1415,10 @@ func (s *Shell) runAIFallback(
 			if execSess != nil {
 				s.mu.Lock()
 				out := s.blocks[blockIdx].Output.String()
+				typedAt := s.blocks[blockIdx].TypedAt
+				firstOut := s.blocks[blockIdx].FirstOutputAt
 				s.mu.Unlock()
-				recID = execSess.RecordBlock(BlockAITurn, SourceUserShell, prompt, out, 130, startedAt).ID
+				recID = execSess.RecordBlockWithTimings(BlockAITurn, SourceUserShell, prompt, out, 130, typedAt, startedAt, firstOut, time.Now()).ID
 			}
 			s.finishBlockWithRecord(blockIdx, recID, BlockAITurn, StatusError, 130, startedAt)
 			return
@@ -1394,8 +1429,10 @@ func (s *Shell) runAIFallback(
 		if execSess != nil {
 			s.mu.Lock()
 			out := s.blocks[blockIdx].Output.String()
+			typedAt := s.blocks[blockIdx].TypedAt
+			firstOut := s.blocks[blockIdx].FirstOutputAt
 			s.mu.Unlock()
-			recID = execSess.RecordBlock(BlockAITurn, SourceUserShell, prompt, out, 1, startedAt).ID
+			recID = execSess.RecordBlockWithTimings(BlockAITurn, SourceUserShell, prompt, out, 1, typedAt, startedAt, firstOut, time.Now()).ID
 		}
 		s.finishBlockWithRecord(blockIdx, recID, BlockAITurn, StatusFailure, 1, startedAt)
 		return
@@ -1404,8 +1441,10 @@ func (s *Shell) runAIFallback(
 	if execSess != nil {
 		s.mu.Lock()
 		out := s.blocks[blockIdx].Output.String()
+		typedAt := s.blocks[blockIdx].TypedAt
+		firstOut := s.blocks[blockIdx].FirstOutputAt
 		s.mu.Unlock()
-		recID = execSess.RecordBlock(BlockAITurn, SourceUserShell, prompt, out, 0, startedAt).ID
+		recID = execSess.RecordBlockWithTimings(BlockAITurn, SourceUserShell, prompt, out, 0, typedAt, startedAt, firstOut, time.Now()).ID
 	}
 	s.finishBlockWithRecord(blockIdx, recID, BlockAITurn, StatusSuccess, 0, startedAt)
 }
@@ -1418,6 +1457,7 @@ func (s *Shell) finishBlockWithRecord(
 	exitCode int,
 	startedAt time.Time,
 ) {
+	now := time.Now()
 	s.mu.Lock()
 	if blockIdx >= 0 && blockIdx < len(s.blocks) {
 		if id > 0 {
@@ -1429,8 +1469,9 @@ func (s *Shell) finishBlockWithRecord(
 		s.blocks[blockIdx].AnimLine = ""
 		s.blocks[blockIdx].Status = status
 		s.blocks[blockIdx].ExitCode = exitCode
+		s.blocks[blockIdx].CompletedAt = now
 		if !startedAt.IsZero() {
-			s.blocks[blockIdx].Duration = time.Since(startedAt)
+			s.blocks[blockIdx].Duration = now.Sub(startedAt)
 		}
 	}
 	s.mu.Unlock()

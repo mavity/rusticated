@@ -14,8 +14,38 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode/utf8"
 )
+
+// TurnTiming records user-side timestamps for a single conversational turn:
+// when the user typed the first character of the prompt (TypedAt) and when the
+// user submitted the prompt (SubmittedAt).
+type TurnTiming struct {
+	TypedAt     time.Time
+	SubmittedAt time.Time
+}
+
+type turnTimingCtxKey struct{}
+
+// WithTurnTiming attaches user turn timing metadata to ctx for Session.RunTurn.
+func WithTurnTiming(ctx context.Context, timing TurnTiming) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, turnTimingCtxKey{}, timing)
+}
+
+// TurnTimingFromContext extracts any TurnTiming attached to ctx.
+func TurnTimingFromContext(ctx context.Context) TurnTiming {
+	if ctx == nil {
+		return TurnTiming{}
+	}
+	if t, ok := ctx.Value(turnTimingCtxKey{}).(TurnTiming); ok {
+		return t
+	}
+	return TurnTiming{}
+}
 
 type textCompressorFunc func(ctx context.Context, systemPrompt, userPrompt string) (string, error)
 
@@ -42,6 +72,7 @@ type ToolContext struct {
 	Feedback       LogFeedback
 	baseHistory    *[]PromptPart
 	userText       string
+	userPart       PromptPart
 	streamer       *liveStreamer
 	trace          *CognitiveTrace
 	sessionSwapped bool
@@ -970,6 +1001,10 @@ func (s *Session) executeDeliberationWithContext(
 		baseHistory = &snap
 	}
 	userText := tc.userText
+	userPart := tc.userPart
+	if userPart.Role == "" {
+		userPart = PromptPart{Role: RoleUser, Text: userText}
+	}
 	streamer := tc.streamer
 	if streamer == nil {
 		streamer = newLiveStreamer(tc.Feedback, defaultStreamerMaxRunes)
@@ -987,7 +1022,7 @@ func (s *Session) executeDeliberationWithContext(
 		seed := make([]PromptPart, 0, len(base)+2)
 		seed = append(seed, base...)
 		seed = append(seed,
-			PromptPart{Role: RoleUser, Text: userText},
+			userPart,
 			PromptPart{Role: RoleModel, Text: stageExpectSyntheticWait},
 		)
 		return seed
@@ -1007,7 +1042,7 @@ func (s *Session) executeDeliberationWithContext(
 		seed := make([]PromptPart, 0, len(base)+2)
 		seed = append(seed, base...)
 		seed = append(seed,
-			PromptPart{Role: RoleUser, Text: userText},
+			userPart,
 			PromptPart{Role: RoleModel, Text: "I need to think first, the goal here is probably: " + effectiveGoal},
 		)
 		return seed
@@ -1082,7 +1117,7 @@ func (s *Session) executeDeliberationWithContext(
 		seed := make([]PromptPart, 0, len(base)+4)
 		seed = append(seed, base...)
 		seed = append(seed,
-			PromptPart{Role: RoleUser, Text: userText},
+			userPart,
 			PromptPart{Role: RoleModel, Text: "I need to think first, the goal here is probably: " + effectiveGoal},
 			PromptPart{Role: RoleUser, Text: "Maybe these steps would get us there?\n" + steps},
 			PromptPart{
@@ -1203,16 +1238,16 @@ const (
 func (s *Session) runStage1Triage(
 	ctx context.Context,
 	baseHistory *[]PromptPart,
-	userText string,
+	userPart PromptPart,
 	streamer *liveStreamer,
-) (isDirect bool, text string, err error) {
+) (isDirect bool, text string, firstOutAt, lastOutAt time.Time, err error) {
 	trigger := []PromptPart{{Role: RoleUser, Text: stage1TriggerPrompt}}
 	var retries int
 	for {
 		seed := make([]PromptPart, 0, len(*baseHistory)+2)
 		seed = append(seed, *baseHistory...)
 		seed = append(seed,
-			PromptPart{Role: RoleUser, Text: userText},
+			userPart,
 			PromptPart{Role: RoleModel, Text: stage1SyntheticWait},
 		)
 		cfg := ConversationConfig{
@@ -1225,6 +1260,26 @@ func (s *Session) runStage1Triage(
 		var fullDirect strings.Builder
 		decided := false
 		directMode := false
+		var firstProbeAt time.Time
+		firstOutAt = time.Time{}
+		lastOutAt = time.Time{}
+
+		recordDirectChunk := func(chunk string, startHint time.Time) {
+			if chunk == "" {
+				return
+			}
+			now := time.Now()
+			if firstOutAt.IsZero() {
+				if !startHint.IsZero() {
+					firstOutAt = startHint
+				} else {
+					firstOutAt = now
+				}
+			}
+			lastOutAt = now
+			s.emitContent(chunk)
+			fullDirect.WriteString(chunk)
+		}
 
 		decidePrefix := func(finalFlush bool) {
 			if decided {
@@ -1248,8 +1303,7 @@ func (s *Session) runStage1Triage(
 				rest := strings.TrimLeft(trimmed[len("DIRECT:"):], " ")
 				streamer.Wipe()
 				if rest != "" {
-					s.emitContent(rest)
-					fullDirect.WriteString(rest)
+					recordDirectChunk(rest, firstProbeAt)
 				}
 				return
 			}
@@ -1262,8 +1316,7 @@ func (s *Session) runStage1Triage(
 			decided = true
 			directMode = true
 			streamer.Wipe()
-			s.emitContent(raw)
-			fullDirect.WriteString(raw)
+			recordDirectChunk(raw, firstProbeAt)
 		}
 
 		err := s.streamOnce(ctx, cfg, trigger, func(event ModelEvent) bool {
@@ -1272,13 +1325,15 @@ func (s *Session) runStage1Triage(
 				return true
 			}
 			if !decided {
+				if e.Text != "" && firstProbeAt.IsZero() {
+					firstProbeAt = time.Now()
+				}
 				probeBuf.WriteString(e.Text)
 				decidePrefix(false)
 				return true
 			}
 			if directMode {
-				s.emitContent(e.Text)
-				fullDirect.WriteString(e.Text)
+				recordDirectChunk(e.Text, time.Time{})
 			} else {
 				streamer.Feed(e.Text)
 			}
@@ -1289,18 +1344,25 @@ func (s *Session) runStage1Triage(
 				decidePrefix(true)
 			}
 			if directMode {
+				if firstOutAt.IsZero() {
+					now := time.Now()
+					firstOutAt = now
+					lastOutAt = now
+				} else if lastOutAt.IsZero() {
+					lastOutAt = time.Now()
+				}
 				if s.verbose && fullDirect.Len() > 0 {
 					s.emitContent("\n")
 				}
-				return true, strings.TrimSpace(fullDirect.String()), nil
+				return true, strings.TrimSpace(fullDirect.String()), firstOutAt, lastOutAt, nil
 			}
 			goalText := streamer.EndStage()
-			return false, goalText, nil
+			return false, goalText, time.Time{}, time.Time{}, nil
 		}
 
 		if errors.Is(err, context.Canceled) {
 			streamer.Wipe()
-			return false, "", err
+			return false, "", time.Time{}, time.Time{}, err
 		}
 		if (isContextOverflowError(err) || errors.Is(err, ErrRepetitionLoop)) && retries < 2 {
 			retries++
@@ -1309,13 +1371,13 @@ func (s *Session) runStage1Triage(
 				s.emitContent("\n")
 			}
 			if cerr := s.compactForEphemeralRetry(ctx); cerr != nil {
-				return false, "", cerr
+				return false, "", time.Time{}, time.Time{}, cerr
 			}
 			*baseHistory = s.snapshotCompactedHistory()
 			continue
 		}
 		streamer.Wipe()
-		return false, "", err
+		return false, "", time.Time{}, time.Time{}, err
 	}
 }
 
@@ -1324,16 +1386,18 @@ func (s *Session) runStage1Triage(
 func (s *Session) runStage5Execution(
 	ctx context.Context,
 	baseHistory *[]PromptPart,
-	userText, goal, plan string,
+	userPart PromptPart,
+	goal, plan string,
 	streamer *liveStreamer,
 ) (executedToolParts []PromptPart, draftAnswer string, err error) {
+	userText := userPart.Text
 	var retries int
 
 	for {
 		seed := make([]PromptPart, 0, len(*baseHistory)+2)
 		seed = append(seed, *baseHistory...)
 		seed = append(seed,
-			PromptPart{Role: RoleUser, Text: userText},
+			userPart,
 			PromptPart{
 				Role: RoleModel,
 				Text: "I need to think first. The goal here is: " + goal + "\nMy execution plan is:\n" + plan,
@@ -1353,6 +1417,7 @@ func (s *Session) runStage5Execution(
 			for {
 				var toolCalls []ToolCall
 				var generatedText strings.Builder
+				var genStart, genEnd time.Time
 				cfg := ConversationConfig{
 					SystemMessage: s.systemMessage,
 					Tools:         s.tools,
@@ -1360,6 +1425,11 @@ func (s *Session) runStage5Execution(
 				}
 				streamer.StartStage("work")
 				stageErr = s.ephemeralStream(ctx, cfg, turnParts, func(event ModelEvent) bool {
+					now := time.Now()
+					if genStart.IsZero() {
+						genStart = now
+					}
+					genEnd = now
 					switch e := event.(type) {
 					case TextEvent:
 						streamer.Feed(e.Text)
@@ -1378,10 +1448,17 @@ func (s *Session) runStage5Execution(
 					return executedToolParts, strings.TrimSpace(generatedText.String()), nil
 				}
 				streamer.Wipe()
+				if genStart.IsZero() {
+					genStart = time.Now()
+					genEnd = genStart
+				}
 				modelTurn := PromptPart{
-					Role:      RoleModel,
-					Text:      generatedText.String(),
-					ToolCalls: toolCalls,
+					Role:        RoleModel,
+					Text:        generatedText.String(),
+					ToolCalls:   toolCalls,
+					StartedAt:   genStart,
+					CompletedAt: genEnd,
+					Duration:    genEnd.Sub(genStart),
 				}
 				executedToolParts = append(executedToolParts, modelTurn)
 				historyCursor = append(historyCursor, modelTurn)
@@ -1396,9 +1473,12 @@ func (s *Session) runStage5Execution(
 						Feedback:    s.emitFeedback,
 						baseHistory: baseHistory,
 						userText:    userText,
+						userPart:    userPart,
 						streamer:    streamer,
 					}
+					toolStart := time.Now()
 					result := s.executeTool(ctx, tc, call)
+					toolEnd := time.Now()
 					if tc.sessionSwapped {
 						sessionMutated = true
 					}
@@ -1408,6 +1488,9 @@ func (s *Session) runStage5Execution(
 						ToolName:     call.Name,
 						Explanation:  explanation,
 						ToolResponse: result,
+						StartedAt:    toolStart,
+						CompletedAt:  toolEnd,
+						Duration:     toolEnd.Sub(toolStart),
 					})
 				}
 				executedToolParts = append(executedToolParts, toolResponses...)
@@ -1415,7 +1498,7 @@ func (s *Session) runStage5Execution(
 					rebuilt := make([]PromptPart, 0, len(*baseHistory)+2+1+len(executedToolParts)-len(toolResponses))
 					rebuilt = append(rebuilt, *baseHistory...)
 					rebuilt = append(rebuilt,
-						PromptPart{Role: RoleUser, Text: userText},
+						userPart,
 						PromptPart{
 							Role: RoleModel,
 							Text: "I need to think first. The goal here is: " + goal + "\nMy execution plan is:\n" + plan,
@@ -1466,12 +1549,18 @@ func (s *Session) runStage5Execution(
 		for {
 			var toolCalls []ToolCall
 			var generatedText strings.Builder
+			var genStart, genEnd time.Time
 			streamer.StartStage("work")
 			for event, err := range ephemeralConv.SendStream(ctx, turnParts) {
 				if err != nil {
 					stageErr = err
 					break
 				}
+				now := time.Now()
+				if genStart.IsZero() {
+					genStart = now
+				}
+				genEnd = now
 				switch e := event.(type) {
 				case TextEvent:
 					streamer.Feed(e.Text)
@@ -1490,10 +1579,17 @@ func (s *Session) runStage5Execution(
 			}
 
 			streamer.Wipe()
+			if genStart.IsZero() {
+				genStart = time.Now()
+				genEnd = genStart
+			}
 			modelTurn := PromptPart{
-				Role:      RoleModel,
-				Text:      generatedText.String(),
-				ToolCalls: toolCalls,
+				Role:        RoleModel,
+				Text:        generatedText.String(),
+				ToolCalls:   toolCalls,
+				StartedAt:   genStart,
+				CompletedAt: genEnd,
+				Duration:    genEnd.Sub(genStart),
 			}
 			executedToolParts = append(executedToolParts, modelTurn)
 
@@ -1508,9 +1604,12 @@ func (s *Session) runStage5Execution(
 					Feedback:     s.emitFeedback,
 					baseHistory:  baseHistory,
 					userText:     userText,
+					userPart:     userPart,
 					streamer:     streamer,
 				}
+				toolStart := time.Now()
 				result := s.executeTool(ctx, tc, call)
+				toolEnd := time.Now()
 				if tc.sessionSwapped {
 					sessionMutated = true
 				}
@@ -1520,6 +1619,9 @@ func (s *Session) runStage5Execution(
 					ToolName:     call.Name,
 					Explanation:  explanation,
 					ToolResponse: result,
+					StartedAt:    toolStart,
+					CompletedAt:  toolEnd,
+					Duration:     toolEnd.Sub(toolStart),
 				})
 			}
 			executedToolParts = append(executedToolParts, toolResponses...)
@@ -1527,7 +1629,7 @@ func (s *Session) runStage5Execution(
 				rebuilt := make([]PromptPart, 0, len(*baseHistory)+3+len(executedToolParts)-len(toolResponses))
 				rebuilt = append(rebuilt, *baseHistory...)
 				rebuilt = append(rebuilt,
-					PromptPart{Role: RoleUser, Text: userText},
+					userPart,
 					PromptPart{
 						Role: RoleModel,
 						Text: "I need to think first. The goal here is: " + goal + "\nMy execution plan is:\n" + plan,
@@ -1578,9 +1680,11 @@ func (s *Session) runStage5Execution(
 func (s *Session) runStageConvergence(
 	ctx context.Context,
 	baseHistory *[]PromptPart,
-	userText, detailLevel, workAndAnswer string,
+	userPart PromptPart,
+	detailLevel, workAndAnswer string,
 	streamer *liveStreamer,
-) (string, error) {
+) (finalText string, firstOutAt, lastOutAt time.Time, err error) {
+	userText := userPart.Text
 	trigger := []PromptPart{{
 		Role: RoleUser,
 		Text: "That draft is far too wordy. Look at the strict target length and format: " + detailLevel + "\nRewrite your answer now to strictly obey that limit using the minimum words possible. Cut all prefaces, roleplay, meta-commentary, internal phases, failed tool mentions, bullet lists, and extra examples unless explicitly requested. Output ONLY the final distilled answer to: " + userText,
@@ -1591,7 +1695,7 @@ func (s *Session) runStageConvergence(
 		seed := make([]PromptPart, 0, len(*baseHistory)+2)
 		seed = append(seed, *baseHistory...)
 		seed = append(seed,
-			PromptPart{Role: RoleUser, Text: userText},
+			userPart,
 			PromptPart{Role: RoleModel, Text: workAndAnswer},
 		)
 
@@ -1603,6 +1707,8 @@ func (s *Session) runStageConvergence(
 
 		var finalBuf strings.Builder
 		wiped := false
+		firstOutAt = time.Time{}
+		lastOutAt = time.Time{}
 
 		err := s.streamOnce(ctx, cfg, trigger, func(event ModelEvent) bool {
 			e, ok := event.(TextEvent)
@@ -1613,6 +1719,11 @@ func (s *Session) runStageConvergence(
 				streamer.Wipe()
 				wiped = true
 			}
+			now := time.Now()
+			if firstOutAt.IsZero() {
+				firstOutAt = now
+			}
+			lastOutAt = now
 			s.emitContent(e.Text)
 			finalBuf.WriteString(e.Text)
 			return true
@@ -1624,18 +1735,28 @@ func (s *Session) runStageConvergence(
 			}
 			finalText := strings.TrimSpace(finalBuf.String())
 			if finalText == "" && workAndAnswer != "" {
+				now := time.Now()
+				firstOutAt = now
 				s.emitContent(workAndAnswer)
+				lastOutAt = time.Now()
 				finalText = workAndAnswer
+			}
+			if firstOutAt.IsZero() {
+				now := time.Now()
+				firstOutAt = now
+				lastOutAt = now
+			} else if lastOutAt.IsZero() {
+				lastOutAt = time.Now()
 			}
 			if s.verbose && len(finalText) > 0 {
 				s.emitContent("\n")
 			}
-			return finalText, nil
+			return finalText, firstOutAt, lastOutAt, nil
 		}
 
 		if errors.Is(err, context.Canceled) {
 			streamer.Wipe()
-			return "", err
+			return "", time.Time{}, time.Time{}, err
 		}
 		if (isContextOverflowError(err) || errors.Is(err, ErrRepetitionLoop)) && retries < 2 {
 			retries++
@@ -1644,17 +1765,21 @@ func (s *Session) runStageConvergence(
 				s.emitContent("\n")
 			}
 			if cerr := s.compactForEphemeralRetry(ctx); cerr != nil {
-				return "", cerr
+				return "", time.Time{}, time.Time{}, cerr
 			}
 			*baseHistory = s.snapshotCompactedHistory()
 			continue
 		}
 		streamer.Wipe()
-		return "", err
+		return "", time.Time{}, time.Time{}, err
 	}
 }
 
 func (s *Session) RunTurn(ctx context.Context, userText string) error {
+	return s.RunTurnWithTiming(ctx, userText, TurnTimingFromContext(ctx))
+}
+
+func (s *Session) RunTurnWithTiming(ctx context.Context, userText string, timing TurnTiming) error {
 	s.turnWaiting.Store(true)
 	s.turnGate.Lock()
 	s.turnWaiting.Store(false)
@@ -1662,6 +1787,22 @@ func (s *Session) RunTurn(ctx context.Context, userText string) error {
 		s.turnGate.Unlock()
 		s.triggerBackgroundEmbedding()
 	}()
+
+	submittedAt := timing.SubmittedAt
+	if submittedAt.IsZero() {
+		submittedAt = time.Now()
+	}
+	typedAt := timing.TypedAt
+	if typedAt.IsZero() || typedAt.After(submittedAt) {
+		typedAt = submittedAt
+	}
+	userPart := PromptPart{
+		Role:        RoleUser,
+		Text:        userText,
+		StartedAt:   typedAt,
+		CompletedAt: submittedAt,
+		Duration:    submittedAt.Sub(typedAt),
+	}
 
 	// Release any idle persistent conversation before opening ephemeral stage forks.
 	s.closeConv()
@@ -1675,7 +1816,7 @@ func (s *Session) RunTurn(ctx context.Context, userText string) error {
 	}
 
 	// Stage 1: Triage & Goal Extraction ("DIRECT:" vs. "GOAL:")
-	isDirect, stage1Text, err := s.runStage1Triage(ctx, &baseHistory, userText, streamer)
+	isDirect, stage1Text, firstOutAt, lastOutAt, err := s.runStage1Triage(ctx, &baseHistory, userPart, streamer)
 	if err != nil {
 		restorePersistentConv()
 		return err
@@ -1706,6 +1847,7 @@ func (s *Session) RunTurn(ctx context.Context, userText string) error {
 			Feedback:     s.emitFeedback,
 			baseHistory:  &baseHistory,
 			userText:     userText,
+			userPart:     userPart,
 			streamer:     streamer,
 			trace:        trace,
 		}
@@ -1728,7 +1870,7 @@ func (s *Session) RunTurn(ctx context.Context, userText string) error {
 		}
 
 		// Stage 6: Execution ("Let It Rip" — <work_and_answer>)
-		toolParts, workAndAnswer, err := s.runStage5Execution(ctx, &baseHistory, userText, effectiveGoal, plan, streamer)
+		toolParts, workAndAnswer, err := s.runStage5Execution(ctx, &baseHistory, userPart, effectiveGoal, plan, streamer)
 		if err != nil {
 			restorePersistentConv()
 			return err
@@ -1738,22 +1880,36 @@ func (s *Session) RunTurn(ctx context.Context, userText string) error {
 		trace.DraftIterations = append(trace.DraftIterations, workAndAnswer)
 
 		// Stage 7: Convergence & Re-Formulation Flip
-		convergedAnswer, err := s.runStageConvergence(ctx, &baseHistory, userText, detailLevel, workAndAnswer, streamer)
+		var convFirstAt, convLastAt time.Time
+		convergedAnswer, convFirstAt, convLastAt, err := s.runStageConvergence(ctx, &baseHistory, userPart, detailLevel, workAndAnswer, streamer)
 		if err != nil {
 			restorePersistentConv()
 			return err
 		}
 		finalAnswer = convergedAnswer
+		firstOutAt = convFirstAt
+		lastOutAt = convLastAt
+	}
+
+	if firstOutAt.IsZero() {
+		now := time.Now()
+		firstOutAt = now
+		lastOutAt = now
+	} else if lastOutAt.Before(firstOutAt) {
+		lastOutAt = firstOutAt
 	}
 
 	// Stage 7: Replanting the Iceberg & Syncing Session State
 	spokenParts := make([]PromptPart, 0, 2+len(executedToolParts))
-	spokenParts = append(spokenParts, PromptPart{Role: RoleUser, Text: userText})
+	spokenParts = append(spokenParts, userPart)
 	spokenParts = append(spokenParts, executedToolParts...)
 	spokenParts = append(spokenParts, PromptPart{
 		Role:           RoleModel,
 		Text:           finalAnswer,
 		CognitiveTrace: trace,
+		StartedAt:      firstOutAt,
+		CompletedAt:    lastOutAt,
+		Duration:       lastOutAt.Sub(firstOutAt),
 	})
 	s.appendHistory(spokenParts...)
 

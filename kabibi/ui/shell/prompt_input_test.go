@@ -156,3 +156,39 @@ func TestPromptInput_ParentOwnsEnterAndCtrlC(t *testing.T) {
 		t.Fatalf("Value() mutated on Enter = %q, want %q", p.Value(), "echo hi")
 	}
 }
+
+func TestPromptInput_CapturesAndResetsFirstInputAt(t *testing.T) {
+	p := NewPromptInput(PromptInputOptions{})
+	if !p.FirstInputAt().IsZero() {
+		t.Fatalf("initial FirstInputAt() = %v, want zero", p.FirstInputAt())
+	}
+
+	p.HandleEvent(input.KeyPressEvent{Code: 'a', Text: "a"})
+	first := p.FirstInputAt()
+	if first.IsZero() {
+		t.Fatal("FirstInputAt() should be set after typing first character")
+	}
+
+	p.HandleEvent(input.KeyPressEvent{Code: 'b', Text: "b"})
+	if !p.FirstInputAt().Equal(first) {
+		t.Fatalf("FirstInputAt() changed on second character: got %v, want %v", p.FirstInputAt(), first)
+	}
+
+	// Deleting back to empty clears FirstInputAt
+	p.HandleEvent(input.KeyPressEvent{Code: input.KeyBackspace})
+	p.HandleEvent(input.KeyPressEvent{Code: input.KeyBackspace})
+	if !p.FirstInputAt().IsZero() {
+		t.Fatalf("FirstInputAt() after deleting all chars = %v, want zero", p.FirstInputAt())
+	}
+
+	// Typing again records a fresh timestamp, and Reset() clears it
+	p.HandleEvent(input.KeyPressEvent{Code: 'x', Text: "x"})
+	if p.FirstInputAt().IsZero() {
+		t.Fatal("FirstInputAt() should be set again after re-typing")
+	}
+	p.Reset()
+	if !p.FirstInputAt().IsZero() {
+		t.Fatalf("FirstInputAt() after Reset() = %v, want zero", p.FirstInputAt())
+	}
+}
+

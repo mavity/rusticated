@@ -41,6 +41,31 @@ func (e *Engine) Close() {
 	}
 }
 
+// Backend returns the active LiteRT-LM backend name ("gpu", "npu", "cpu") used by the engine.
+func (e *Engine) Backend() string {
+	if e == nil || e.impl == nil {
+		return ""
+	}
+	return e.impl.backendName
+}
+
+// ModelPath returns the path or URL of the model loaded into the engine.
+func (e *Engine) ModelPath() string {
+	if e == nil || e.impl == nil {
+		return ""
+	}
+	return e.impl.modelPath
+}
+
+// MaxTokens returns the configured KV-cache context token limit for the engine.
+func (e *Engine) MaxTokens() int {
+	if e == nil || e.impl == nil {
+		return 0
+	}
+	return e.impl.maxTokens
+}
+
+
 // Interpreter is a loaded TFLite model for generic/vision inference.
 type Interpreter struct {
 	impl *interpreterImpl

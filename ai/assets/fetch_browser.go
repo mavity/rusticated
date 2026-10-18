@@ -326,6 +326,11 @@ func ensureModelBrowser(ctx context.Context, url string, expectedSize int64, opt
 		if prog.Error != "" {
 			return "", fmt.Errorf("download model in browser: %s", prog.Error)
 		}
+		if prog.Total > 0 {
+			recordBrowserModelSize(url, prog.Total)
+		} else if prog.Received > 0 {
+			recordBrowserModelSize(url, prog.Received)
+		}
 		opts.progress("download", filename, 100)
 		return url, nil
 	}
@@ -358,9 +363,35 @@ func ensureModelBrowser(ctx context.Context, url string, expectedSize int64, opt
 				if p.Error != "" {
 					return "", errors.New(p.Error)
 				}
+				if p.Total > 0 {
+					recordBrowserModelSize(url, p.Total)
+				} else if p.Received > 0 {
+					recordBrowserModelSize(url, p.Received)
+				}
 				opts.progress("download", filename, 100)
 				return url, nil
 			}
 		}
 	}
 }
+
+var (
+	browserModelSizesMu sync.Mutex
+	browserModelSizes   = make(map[string]int64)
+)
+
+func recordBrowserModelSize(url string, size int64) {
+	if url == "" || size <= 0 {
+		return
+	}
+	browserModelSizesMu.Lock()
+	browserModelSizes[url] = size
+	browserModelSizesMu.Unlock()
+}
+
+func browserModelSize(url string) int64 {
+	browserModelSizesMu.Lock()
+	defer browserModelSizesMu.Unlock()
+	return browserModelSizes[url]
+}
+
