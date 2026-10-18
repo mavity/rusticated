@@ -21,7 +21,7 @@ func TestKabibiSystemMessageAppendsCLIHelpContext(t *testing.T) {
 	if !strings.Contains(got, defaultKabibiSystemPrompt) {
 		t.Fatal("system message lost Kabibi's default instructions")
 	}
-	if !strings.Contains(got, "Use the date and time in square-bracket message headers") {
+	if !strings.Contains(got, "Date and time in brackets help you answer questions") {
 		t.Fatal("system message does not instruct Kabibi to use message timestamps")
 	}
 	if !strings.HasSuffix(got, help) {
