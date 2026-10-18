@@ -1373,6 +1373,101 @@ export async function runEventLoop(hostState, runFunc, onExit) {
   }
 }
 
+// ── Vegetable Decompression Helper ───────────────────────────────────────────
+export async function unpackVegetable(buffer) {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  const headerSlice = bytes.subarray(0, Math.min(bytes.length, 32768));
+  const headerText = new TextDecoder('utf-8', { fatal: false }).decode(headerSlice);
+
+  const parseVar = (patterns) => {
+    for (const pat of patterns) {
+      const m = headerText.match(pat);
+      if (m && m[1]) return parseInt(m[1].trim(), 10);
+    }
+    return null;
+  };
+
+  const poolLen = parseVar([
+    /P_LEN\s*=\s*["']?([0-9]+)/,
+    /poolLen\s*=\s*["']?([0-9]+)/,
+    /set\s+"P_LEN=([0-9]+)/
+  ]);
+  const pldOff = parseVar([
+    /PLD_OFF\s*=\s*["']?([0-9]+)/,
+    /payloadOff\s*=\s*["']?([0-9]+)/,
+    /set\s+"PLD_OFF=([0-9]+)/
+  ]);
+  const pldLen = parseVar([
+    /PLD_LEN\s*=\s*["']?([0-9]+)/,
+    /payloadLen\s*=\s*["']?([0-9]+)/,
+    /set\s+"PLD_LEN=([0-9]+)/
+  ]);
+  const wasmLen = parseVar([
+    /wasmLen\s*=\s*["']?([0-9]+)/
+  ]);
+  const wasmOff = parseVar([
+    /wasmOff\s*=\s*["']?([0-9]+)/
+  ]);
+
+  if (poolLen === null || pldOff === null || pldLen === null) {
+    throw new Error('Invalid vegetable: missing required pool or payload metadata');
+  }
+
+  // Locate decompressor WASM
+  let decompressorBytes = null;
+  if (wasmOff !== null && wasmLen !== null && wasmOff + wasmLen <= bytes.length) {
+    decompressorBytes = bytes.subarray(wasmOff, wasmOff + wasmLen);
+  } else {
+    // Scan for WASM magic in Zone B
+    const wasmMagic = [0x00, 0x61, 0x73, 0x6D];
+    let found = -1;
+    for (let i = 0; i < Math.min(bytes.length - 4, 100000); i++) {
+      if (bytes[i] === wasmMagic[0] &&
+          bytes[i+1] === wasmMagic[1] &&
+          bytes[i+2] === wasmMagic[2] &&
+          bytes[i+3] === wasmMagic[3]) {
+        found = i;
+        break;
+      }
+    }
+    if (found === -1) {
+      throw new Error('Decompressor WASM module not found in vegetable');
+    }
+    const end = (wasmLen !== null) ? found + wasmLen : bytes.length - poolLen;
+    decompressorBytes = bytes.subarray(found, end);
+  }
+
+  // Instantiate decompressor WASM
+  const { instance } = await WebAssembly.instantiate(decompressorBytes, {});
+  const { memory, brot_alloc, brot_decompress } = instance.exports;
+  if (!brot_alloc || !brot_decompress || !memory) {
+    throw new Error('Vegetable decompressor WASM missing required exports');
+  }
+
+  const poolStart = bytes.length - poolLen;
+  if (poolStart < 0) {
+    throw new Error(`Invalid poolStart (${poolStart}) for vegetable of size ${bytes.length}`);
+  }
+  const compressedPool = bytes.subarray(poolStart);
+
+  const inPtr = brot_alloc(compressedPool.length);
+  new Uint8Array(memory.buffer, inPtr, compressedPool.length).set(compressedPool);
+
+  const uncompressedLen = pldOff + pldLen;
+  const packed = brot_decompress(inPtr, compressedPool.length, uncompressedLen);
+  if (packed === 0n) {
+    throw new Error('Vegetable pool decompression failed');
+  }
+
+  const outPtr = Number(packed & 0xFFFFFFFFn);
+  const brainWasm = new Uint8Array(memory.buffer, outPtr + pldOff, pldLen);
+
+  // Return an isolated ArrayBuffer copy of the payload WASM
+  const outBuf = new ArrayBuffer(pldLen);
+  new Uint8Array(outBuf).set(brainWasm);
+  return outBuf;
+}
+
 // ── Main Entry Closure ───────────────────────────────────────────────────────
 export default async function washmhost(params = {}) {
   const hostState = new HostState();
@@ -1397,7 +1492,7 @@ export default async function washmhost(params = {}) {
   await fs.init();
   await fs.seed(params.initialFiles || []);
 
-  // Fetch / load WASM binary
+  // Fetch / load WASM binary or Vegetable
   let wasmBinary = params.wasm;
   if (typeof wasmBinary === 'string') {
     const res = await fetch(wasmBinary);
@@ -1405,6 +1500,21 @@ export default async function washmhost(params = {}) {
     wasmBinary = await res.arrayBuffer();
   } else if (wasmBinary instanceof Response) {
     wasmBinary = await wasmBinary.arrayBuffer();
+  } else if (wasmBinary instanceof Blob) {
+    wasmBinary = await wasmBinary.arrayBuffer();
+  }
+
+  // Check if wasmBinary is a vegetable (.bat / polyglot) instead of raw WASM
+  const headBytes = new Uint8Array(wasmBinary, 0, Math.min(wasmBinary.byteLength, 4));
+  const isRawWasm = headBytes.length >= 4 &&
+                    headBytes[0] === 0x00 &&
+                    headBytes[1] === 0x61 &&
+                    headBytes[2] === 0x73 &&
+                    headBytes[3] === 0x6D;
+
+  if (!isRawWasm) {
+    // Unpack payload WASM (brain) directly from the vegetable
+    wasmBinary = await unpackVegetable(wasmBinary);
   }
 
   const { env } = makeBrowserImports(hostState, fs, params);

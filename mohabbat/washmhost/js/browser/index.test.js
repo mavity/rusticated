@@ -17,8 +17,11 @@ import washmhost, {
   wasiEPIPE,
   wasiENOTTY,
   wasiERANGE,
-  runEventLoop
+  runEventLoop,
+  unpackVegetable
 } from './index.js';
+import fs from 'node:fs';
+import path from 'node:path';
 
 test('Path resolution normalizes relative, root and parent segments', () => {
   assert.equal(resolvePath('/home/user', 'file.txt'), '/home/user/file.txt');
@@ -552,5 +555,32 @@ test('Virtual eval dylib evaluates sync, async Promise, handles errors and overf
   assert.equal(res4.actualLen, 200);
   assert.equal(res4.outText, 'xxxxxxxxxx');
   assert.equal(globalThis.__rustica_take_overflow(), longStr);
+});
+
+test('Vegetable unpacker unpacks payload WASM using embedded decompressor', async () => {
+  // Use trivial.bat or mohab.bat from repository root
+  const vegCandidates = ['trivial.bat', 'mohab.bat', 'demo.bat', 'kabibi.bat'];
+  let vegPath = null;
+  for (const cand of vegCandidates) {
+    const full = path.resolve(process.cwd(), cand);
+    if (fs.existsSync(full)) {
+      vegPath = full;
+      break;
+    }
+  }
+
+  assert.ok(vegPath, 'At least one vegetable candidate exists in repository');
+  const vegData = fs.readFileSync(vegPath);
+
+  const unpackedBuffer = await unpackVegetable(vegData);
+  assert.ok(unpackedBuffer instanceof ArrayBuffer);
+  assert.ok(unpackedBuffer.byteLength > 0);
+
+  const magic = new Uint8Array(unpackedBuffer, 0, 4);
+  assert.deepEqual(Array.from(magic), [0x00, 0x61, 0x73, 0x6D]);
+
+  // Ensure WebAssembly can compile the unpacked module
+  const mod = await WebAssembly.compile(unpackedBuffer);
+  assert.ok(mod instanceof WebAssembly.Module);
 });
 
