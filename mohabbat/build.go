@@ -224,8 +224,8 @@ func buildProjectToWasm(ws, projectDir, outputWasm string, verbose bool) error {
 
 	// Auto-detect: Go project has go.mod, Rust project has Cargo.toml.
 	// Walk up to find go.mod to support building subpackages.
-	goModDir := findGoMod(absProject)
-	isGo := goModDir != ""
+	isRust := absProject != ws && fileExists(filepath.Join(absProject, "Cargo.toml"))
+	isGo := !isRust && findGoMod(absProject) != ""
 
 	scope := PrebuildScopeRustWasmOnly
 	if isGo {
