@@ -35,6 +35,7 @@ const webAdapterBootstrapJS = `
   class RusticaAI {
     constructor() {
       this.corePromise = null;
+      this.coreSource = '';
       this.engines = new Map();
       this.conversations = new Map();
       this.streams = new Map();
@@ -44,9 +45,11 @@ const webAdapterBootstrapJS = `
 
     async loadCore() {
       if (globalThis.LiteRtLmCore) {
+        this.coreSource = 'preloaded globalThis.LiteRtLmCore (package/version unknown)';
         return globalThis.LiteRtLmCore;
       }
       if (!this.corePromise) {
+        this.coreSource = 'https://cdn.jsdelivr.net/npm/@litert-lm/core@0.12.1/+esm';
         this.corePromise = (async () => {
           try {
             return await import('https://cdn.jsdelivr.net/npm/@litert-lm/core@0.12.1/+esm');
@@ -59,15 +62,53 @@ const webAdapterBootstrapJS = `
       return await this.corePromise;
     }
 
+    initError(error, context) {
+      const detail = error?.stack || error?.message || String(error);
+      return new Error(
+        detail + '\n\nLiteRT-LM initialization context:\n' +
+        JSON.stringify(context, null, 2)
+      );
+    }
+
     async createEngine(cfgJson) {
       const cfg = JSON.parse(cfgJson);
-      const mod = await this.loadCore();
+      const context = {
+        model: {
+          requestedURL: cfg.modelUrl,
+          readFrom: 'model URL directly'
+        },
+        runtime: {
+          package: '@litert-lm/core',
+          source: 'not resolved'
+        },
+        backend: cfg.backend,
+        maxTokens: cfg.maxTokens,
+        page: globalThis.location ? globalThis.location.origin + globalThis.location.pathname : 'unknown',
+        userAgent: globalThis.navigator ? globalThis.navigator.userAgent : 'unknown'
+      };
+
+      let mod;
+      try {
+        mod = await this.loadCore();
+        context.runtime.source = this.coreSource || 'unknown';
+      } catch (e) {
+        context.runtime.source = this.coreSource || 'load failed before source was recorded';
+        throw this.initError(e, context);
+      }
 
       let modelSource = cfg.modelUrl;
       if (globalThis.__rustica_assets && typeof globalThis.__rustica_assets.openModelStream === 'function') {
         try {
-          modelSource = await globalThis.__rustica_assets.openModelStream(cfg.modelUrl);
+          const opened = await globalThis.__rustica_assets.openModelStream(cfg.modelUrl);
+          if (opened && opened.stream) {
+            modelSource = opened.stream;
+            context.model = opened.provenance || context.model;
+          } else {
+            modelSource = opened;
+            context.model.readFrom = 'asset adapter (provenance unavailable)';
+          }
         } catch (e) {
+          context.model.streamOpenError = e?.message || String(e);
           console.warn('[rustica_ai] openModelStream fallback to url:', e);
         }
       }
@@ -76,6 +117,7 @@ const webAdapterBootstrapJS = `
       if (cfg.backend === 'cpu') {
         backendEnum = mod.Backend ? mod.Backend.CPU : 'cpu';
       }
+      context.resolvedBackend = String(backendEnum);
 
       const engineSettings = {
         model: modelSource,
@@ -85,7 +127,12 @@ const webAdapterBootstrapJS = `
         engineSettings.mainExecutorSettings = { maxNumTokens: cfg.maxTokens };
       }
 
-      const engine = await mod.Engine.create(engineSettings);
+      let engine;
+      try {
+        engine = await mod.Engine.create(engineSettings);
+      } catch (e) {
+        throw this.initError(e, context);
+      }
       const id = this.nextEngineId++;
       this.engines.set(id, engine);
       return String(id);

@@ -42,6 +42,33 @@ const browserAssetBootstrapJS = `
     }
   }
 
+  function responseMetadata(resp) {
+    return {
+      finalURL: resp.url || '',
+      httpStatus: resp.status || 0,
+      contentType: resp.headers.get('content-type') || '',
+      contentLength: parseInt(resp.headers.get('content-length') || '0', 10) || 0
+    };
+  }
+
+  function downloadMetadata(url) {
+    const rec = downloads.get(url);
+    if (!rec || !rec.state.done || rec.state.error) return {};
+    const state = rec.state;
+    return {
+      download: {
+        requestedURL: url,
+        finalURL: state.finalURL || '',
+        httpStatus: state.httpStatus || 0,
+        contentType: state.contentType || '',
+        contentLength: state.total || 0,
+        bytesReceived: state.received || 0,
+        storedIn: state.storedIn || '',
+        cachedBeforeDownload: !!state.cached
+      }
+    };
+  }
+
   globalThis.__rustica_assets = {
     async checkCached(url) {
       const fname = filenameOf(url);
@@ -52,7 +79,7 @@ const browserAssetBootstrapJS = `
           const fh = await root.getFileHandle(fname);
           const f = await fh.getFile();
           if (f && f.size > 0) {
-            return { cached: true, size: f.size, source: 'opfs' };
+            return { cached: true, size: f.size, source: 'opfs', filename: fname };
           }
         } catch (e) {}
       }
@@ -63,9 +90,8 @@ const browserAssetBootstrapJS = `
           const cache = await caches.open(CACHE_NAME);
           const resp = await cache.match(url);
           if (resp) {
-            const cl = resp.headers.get('content-length');
-            const size = cl ? parseInt(cl, 10) : 0;
-            return { cached: true, size, source: 'cache_storage' };
+            const metadata = responseMetadata(resp);
+            return Object.assign({ cached: true, size: metadata.contentLength, source: 'cache_storage' }, metadata);
           }
         } catch (e) {}
       }
@@ -81,7 +107,16 @@ const browserAssetBootstrapJS = `
           const fh = await root.getFileHandle(fname);
           const f = await fh.getFile();
           if (f && f.size > 0) {
-            return f.stream();
+            return {
+              stream: f.stream(),
+              provenance: Object.assign({
+                requestedURL: url,
+                readFrom: 'opfs',
+                cacheName: 'OPFS',
+                filename: fname,
+                size: f.size
+              }, downloadMetadata(url))
+            };
           }
         } catch (e) {}
       }
@@ -92,14 +127,35 @@ const browserAssetBootstrapJS = `
           const resp = await cache.match(url);
           if (resp) {
             const blob = await resp.blob();
-            return blob.stream();
+            return {
+              stream: blob.stream(),
+              provenance: Object.assign({
+                requestedURL: url,
+                readFrom: 'cache_storage',
+                cacheName: CACHE_NAME,
+                cacheKey: url,
+                size: blob.size
+              }, responseMetadata(resp), downloadMetadata(url))
+            };
           }
         } catch (e) {}
       }
 
       const res = await fetch(url, { mode: 'cors', credentials: 'omit' });
-      if (!res.ok) throw new Error('fetch model failed: HTTP ' + res.status);
-      return res.body;
+      if (!res.ok) {
+        throw new Error('fetch model failed: HTTP ' + res.status + ' from ' + (res.url || url));
+      }
+      if (!res.body) {
+        throw new Error('fetch model returned no response body from ' + (res.url || url));
+      }
+      return {
+        stream: res.body,
+        provenance: Object.assign({
+          requestedURL: url,
+          readFrom: 'network',
+          size: 0
+        }, responseMetadata(res))
+      };
     },
 
     startDownload(url) {
@@ -113,6 +169,10 @@ const browserAssetBootstrapJS = `
         received: 0,
         total: 0,
         percent: 0,
+        finalURL: '',
+        httpStatus: 0,
+        contentType: '',
+        storedIn: '',
         error: null
       };
 
@@ -129,6 +189,10 @@ const browserAssetBootstrapJS = `
             state.received = check.size;
             state.total = check.size;
             state.percent = 100;
+            state.finalURL = check.finalURL || '';
+            state.httpStatus = check.httpStatus || 0;
+            state.contentType = check.contentType || '';
+            state.storedIn = check.source || '';
             return;
           }
 
@@ -140,8 +204,13 @@ const browserAssetBootstrapJS = `
             signal: ctrl.signal
           });
           if (!resp.ok) {
-            throw new Error('download failed HTTP ' + resp.status);
+            throw new Error('download failed HTTP ' + resp.status + ' from ' + (resp.url || url));
           }
+
+          const metadata = responseMetadata(resp);
+          state.finalURL = metadata.finalURL;
+          state.httpStatus = metadata.httpStatus;
+          state.contentType = metadata.contentType;
 
           const cl = resp.headers.get('content-length');
           if (cl) {
@@ -150,6 +219,7 @@ const browserAssetBootstrapJS = `
 
           if (root && typeof root.getFileHandle === 'function') {
             // Stream to OPFS
+            state.storedIn = 'opfs';
             const fh = await root.getFileHandle(fname, { create: true });
             const writable = await fh.createWritable();
             const reader = resp.body.getReader();
@@ -167,6 +237,7 @@ const browserAssetBootstrapJS = `
             await writable.close();
           } else if (typeof caches !== 'undefined') {
             // Stream clone to CacheStorage
+            state.storedIn = 'cache_storage';
             const cache = await caches.open(CACHE_NAME);
             const clone = resp.clone();
             const reader = resp.body.getReader();
@@ -183,6 +254,7 @@ const browserAssetBootstrapJS = `
             await cache.put(url, clone);
           } else {
             // Memory fallback
+            state.storedIn = 'memory_only';
             const buf = await resp.arrayBuffer();
             state.received = buf.byteLength;
           }
