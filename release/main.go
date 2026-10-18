@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,14 @@ type Target struct {
 	OutputName string
 	Language   string
 	Desc       string
+}
+
+type BuiltArtifact struct {
+	Name     string
+	Language string
+	Size     int64
+	Duration time.Duration
+	Desc     string
 }
 
 var allTargets = []Target{
@@ -97,6 +106,8 @@ func main() {
 	rootMohabPath := filepath.Join(ws, "mohab.bat")
 	releaseMohabPath := filepath.Join(releaseDir, "mohab.bat")
 
+	artifacts := make([]BuiltArtifact, 0, len(allTargets))
+
 	// Step 1: mohab.bat
 	fmt.Println("\n--------------------------------------------------------------------------------")
 	fmt.Println("🍆  [1/11] Building core compiler: mohab.bat")
@@ -123,7 +134,21 @@ func main() {
 		fmt.Fprintf(os.Stderr, "\n🍆  FAILED: copy mohab.bat to release/: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("🍆  Completed mohab.bat in %s\n", time.Since(t0).Round(time.Millisecond))
+
+	mohabStat, err := os.Stat(releaseMohabPath)
+	var mohabSize int64
+	if err == nil {
+		mohabSize = mohabStat.Size()
+	}
+	d0 := time.Since(t0)
+	artifacts = append(artifacts, BuiltArtifact{
+		Name:     "mohab.bat",
+		Language: allTargets[0].Language,
+		Size:     mohabSize,
+		Duration: d0,
+		Desc:     allTargets[0].Desc,
+	})
+	fmt.Printf("🍆  Completed mohab.bat (%s) in %s\n", formatSize(mohabSize), d0.Round(time.Millisecond))
 
 	// Step 2: Remaining targets
 	for i, t := range allTargets[1:] {
@@ -150,13 +175,146 @@ func main() {
 			fmt.Fprintf(os.Stderr, "\n🍆  FAILED: %s build failed after %s: %v\n", t.OutputName, time.Since(tStep).Round(time.Millisecond), err)
 			os.Exit(1)
 		}
-		fmt.Printf("🍆  Completed %s in %s\n", t.OutputName, time.Since(tStep).Round(time.Millisecond))
+
+		destStat, err := os.Stat(destPath)
+		var destSize int64
+		if err == nil {
+			destSize = destStat.Size()
+		}
+		dStep := time.Since(tStep)
+		artifacts = append(artifacts, BuiltArtifact{
+			Name:     t.OutputName,
+			Language: t.Language,
+			Size:     destSize,
+			Duration: dStep,
+			Desc:     t.Desc,
+		})
+		fmt.Printf("🍆  Completed %s (%s) in %s\n", t.OutputName, formatSize(destSize), dStep.Round(time.Millisecond))
 	}
 
+	// Step 3: Bundle all *.bat vegetables into release/vegetables.zip
+	fmt.Println("\n--------------------------------------------------------------------------------")
+	fmt.Println("🍆  [Zip Archive] Packaging all vegetables into release/vegetables.zip")
+	fmt.Println("--------------------------------------------------------------------------------")
+
+	tZip := time.Now()
+	zipPath := filepath.Join(releaseDir, "vegetables.zip")
+	if err := createReleaseZip(zipPath, releaseDir, allTargets); err != nil {
+		fmt.Fprintf(os.Stderr, "\n🍆  FAILED: create vegetables.zip: %v\n", err)
+		os.Exit(1)
+	}
+
+	zipStat, err := os.Stat(zipPath)
+	var zipSize int64
+	if err == nil {
+		zipSize = zipStat.Size()
+	}
+	dZip := time.Since(tZip)
+	fmt.Printf("🍆  Completed vegetables.zip (%s) in %s\n", formatSize(zipSize), dZip.Round(time.Millisecond))
+
 	totalDuration := time.Since(totalStart).Round(time.Millisecond)
-	fmt.Println("\n================================================================================")
-	fmt.Printf("🍆  Success: All 11 vegetables built cleanly into release/ in %s\n", totalDuration)
-	fmt.Println("================================================================================")
+
+	// Step 4: Summary output table
+	printBuildSummary(artifacts, BuiltArtifact{
+		Name:     "vegetables.zip",
+		Language: "Zip",
+		Size:     zipSize,
+		Duration: dZip,
+		Desc:     fmt.Sprintf("Complete archive containing all %d vegetables", len(allTargets)),
+	}, totalDuration)
+}
+
+func createReleaseZip(zipPath, releaseDir string, targets []Target) error {
+	zFile, err := os.Create(zipPath)
+	if err != nil {
+		return fmt.Errorf("create zip file: %w", err)
+	}
+	defer zFile.Close()
+
+	zw := zip.NewWriter(zFile)
+	defer zw.Close()
+
+	for _, t := range targets {
+		batPath := filepath.Join(releaseDir, t.OutputName)
+		info, err := os.Stat(batPath)
+		if err != nil {
+			return fmt.Errorf("stat %s: %w", t.OutputName, err)
+		}
+
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return fmt.Errorf("create header for %s: %w", t.OutputName, err)
+		}
+
+		header.Name = t.OutputName
+		header.Method = zip.Deflate
+		header.SetMode(0755)
+
+		w, err := zw.CreateHeader(header)
+		if err != nil {
+			return fmt.Errorf("create zip entry %s: %w", t.OutputName, err)
+		}
+
+		f, err := os.Open(batPath)
+		if err != nil {
+			return fmt.Errorf("open %s: %w", t.OutputName, err)
+		}
+
+		_, err = io.Copy(w, f)
+		_ = f.Close()
+		if err != nil {
+			return fmt.Errorf("compress %s: %w", t.OutputName, err)
+		}
+	}
+
+	return nil
+}
+
+func formatSize(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+func printBuildSummary(artifacts []BuiltArtifact, zipArtifact BuiltArtifact, totalDuration time.Duration) {
+	fmt.Println("\n====================================================================================================")
+	fmt.Printf("🍆  RELEASE SUMMARY (%d vegetables + 1 zip archive)\n", len(artifacts))
+	fmt.Println("====================================================================================================")
+	fmt.Printf("  %-18s %-6s %-12s %-10s %s\n", "Target", "Lang", "Size", "Time", "Description")
+	fmt.Println("  --------------------------------------------------------------------------------------------------")
+
+	var totalVegetablesSize int64
+	for _, a := range artifacts {
+		totalVegetablesSize += a.Size
+		fmt.Printf("  %-18s %-6s %-12s %-10s %s\n",
+			a.Name,
+			a.Language,
+			formatSize(a.Size),
+			a.Duration.Round(time.Millisecond).String(),
+			a.Desc,
+		)
+	}
+
+	fmt.Println("  --------------------------------------------------------------------------------------------------")
+	fmt.Printf("  %-18s %-6s %-12s %-10s %s\n",
+		zipArtifact.Name,
+		zipArtifact.Language,
+		formatSize(zipArtifact.Size),
+		zipArtifact.Duration.Round(time.Millisecond).String(),
+		zipArtifact.Desc,
+	)
+	fmt.Println("====================================================================================================")
+	fmt.Printf("🍆  Total Vegetables Size: %s (%d files)\n", formatSize(totalVegetablesSize), len(artifacts))
+	fmt.Printf("🍆  Zip Archive Size:      %s (%s)\n", formatSize(zipArtifact.Size), zipArtifact.Name)
+	fmt.Printf("🍆  Total Elapsed Time:    %s\n", totalDuration)
+	fmt.Println("====================================================================================================")
 }
 
 func copyFile(src, dst string) error {
