@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { env, argv } from 'node:process';
 import crypto from 'node:crypto';
+import { execSync } from 'node:child_process';
 
 const FLAG_COMPLETED = 1;
 
@@ -52,10 +53,36 @@ class HostState {
 // Holds the cleanup function for the currently-pending stdin read, or null.
 let cancelStdinRead = null;
 
+function setupConsoleUtf8() {
+  if (process.platform !== 'win32') return () => {};
+  try {
+    const cpOut = execSync('chcp', { encoding: 'utf8' });
+    const m = cpOut.match(/: (\d+)/);
+    const prevCP = m ? m[1] : null;
+    execSync('chcp 65001', { stdio: 'ignore' });
+    let restored = false;
+    const restore = () => {
+      if (restored) return;
+      restored = true;
+      if (prevCP) {
+        try {
+          execSync(`chcp ${prevCP}`, { stdio: 'ignore' });
+        } catch (_) {}
+      }
+    };
+    process.on('exit', restore);
+    return restore;
+  } catch (_) {
+    return () => {};
+  }
+}
+
 async function run() {
+  const restoreConsole = setupConsoleUtf8();
   const wasmPath = argv[2];
   if (!wasmPath) {
     console.error("Usage: node index.js <path.wasm>");
+    restoreConsole();
     process.exit(1);
   }
 
@@ -301,6 +328,10 @@ async function run() {
   // Cancel any pending stdin read so its handle is no longer active and the
   // event loop can drain naturally.  Any other concurrent async work continues.
   if (cancelStdinRead) cancelStdinRead();
+  restoreConsole();
 }
 
-run().catch(console.error);
+run().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
