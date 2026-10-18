@@ -10,3 +10,4 @@
 /*.wasm
 /mohabbat/rusticated-jit/
 /release/**/*.bat
+/release/**/*.bat.txt
