@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"mohabbat/mohabbat"
 )
@@ -84,6 +85,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	totalStart := time.Now()
+
 	fmt.Println("================================================================================")
 	fmt.Printf("🍆  Mohabbat Release Orchestrator v%s\n", meta.Version)
 	fmt.Printf("🍆  Workspace:   %s\n", ws)
@@ -99,6 +102,7 @@ func main() {
 	fmt.Println("🍆  [1/11] Building core compiler: mohab.bat")
 	fmt.Println("--------------------------------------------------------------------------------")
 
+	t0 := time.Now()
 	var cmd *exec.Cmd
 	if verbose {
 		cmd = exec.Command("go", "run", ".", "-v")
@@ -111,7 +115,7 @@ func main() {
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "\n🍆  FAILED: mohab.bat build failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "\n🍆  FAILED: mohab.bat build failed after %s: %v\n", time.Since(t0).Round(time.Millisecond), err)
 		os.Exit(1)
 	}
 
@@ -119,6 +123,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "\n🍆  FAILED: copy mohab.bat to release/: %v\n", err)
 		os.Exit(1)
 	}
+	fmt.Printf("🍆  Completed mohab.bat in %s\n", time.Since(t0).Round(time.Millisecond))
 
 	// Step 2: Remaining targets
 	for i, t := range allTargets[1:] {
@@ -129,6 +134,7 @@ func main() {
 		fmt.Printf("🍆  [%d/11] Assembling %s -> release/%s [%s]\n", idx, t.ProjectDir, t.OutputName, t.Language)
 		fmt.Println("--------------------------------------------------------------------------------")
 
+		tStep := time.Now()
 		args := []string{"run", ".", t.ProjectDir, "-o", destPath}
 		if verbose {
 			args = append(args, "-v")
@@ -141,13 +147,15 @@ func main() {
 		subCmd.Stderr = os.Stderr
 
 		if err := subCmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "\n🍆  FAILED: %s build failed: %v\n", t.OutputName, err)
+			fmt.Fprintf(os.Stderr, "\n🍆  FAILED: %s build failed after %s: %v\n", t.OutputName, time.Since(tStep).Round(time.Millisecond), err)
 			os.Exit(1)
 		}
+		fmt.Printf("🍆  Completed %s in %s\n", t.OutputName, time.Since(tStep).Round(time.Millisecond))
 	}
 
+	totalDuration := time.Since(totalStart).Round(time.Millisecond)
 	fmt.Println("\n================================================================================")
-	fmt.Println("🍆  Success: All 11 vegetables built cleanly into release/")
+	fmt.Printf("🍆  Success: All 11 vegetables built cleanly into release/ in %s\n", totalDuration)
 	fmt.Println("================================================================================")
 }
 
