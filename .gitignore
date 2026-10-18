@@ -9,3 +9,4 @@
 /*.bat
 /*.wasm
 /mohabbat/rusticated-jit/
+/release/**/*.bat
