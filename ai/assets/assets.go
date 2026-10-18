@@ -25,6 +25,41 @@ const (
 	DefaultEmbeddingModelSize = 164626432
 )
 
+// RuntimePlatformInfo describes the execution environment and host runtime.
+type RuntimePlatformInfo struct {
+	OS              string // e.g. "windows", "linux", "darwin", "browser"
+	Arch            string // e.g. "amd64", "arm64", "wasm"
+	ExecutionMode   string // "native" or "mohabbat"
+	HostRuntime     string // "native", "washmhost (wazero)", "washmhost-node (node)", "washmhost (browser)"
+	EnvironmentKind string // "desktop" or "browser"
+	WasmPlatform    string // e.g. "wazero", "node", "browser" when under mohabbat
+	BuildPlatform   string // e.g. "windows-amd64" when reported by mohabbat host
+}
+
+// ModelAssetSize returns the size in bytes of the model at modelPath, or 0 if unknown.
+func ModelAssetSize(modelPath string) int64 {
+	if modelPath == "" {
+		return 0
+	}
+	if HostOS() == "browser" {
+		if sz := browserModelSize(modelPath); sz > 0 {
+			return sz
+		}
+		if modelPath == DefaultWebLLMModelURL {
+			return 2008432640
+		}
+		return 0
+	}
+	if fi, err := os.Stat(modelPath); err == nil && fi.Size() > 0 {
+		return fi.Size()
+	}
+	if strings.HasSuffix(filepath.ToSlash(modelPath), "/gemma-4-E2B-it.litertlm") {
+		return DefaultLLMModelSize
+	}
+	return 0
+}
+
+
 // DefaultCacheDir returns the canonical host-OS cache directory for LiteRT-LM
 // runtime libraries and model files.
 func DefaultCacheDir() (string, error) {

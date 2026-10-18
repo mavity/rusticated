@@ -52,17 +52,20 @@ const (
 // CommandRecord stores the full outcome of a single shell or AI interaction block
 // for inspection by the user or the AI agent's shell_history / read_command_output tools.
 type CommandRecord struct {
-	ID        int           `json:"id"`
-	Kind      BlockKind     `json:"kind"`
-	Source    CommandSource `json:"source"`
-	Command   string        `json:"command"`
-	Cwd       string        `json:"cwd"`
-	Output    string        `json:"output"`
-	ExitCode  int           `json:"exit_code"`
-	StartedAt time.Time     `json:"started_at"`
-	Duration  string        `json:"duration"`
-	LineCount int           `json:"line_count"`
-	ByteLen   int           `json:"byte_len"`
+	ID            int           `json:"id"`
+	Kind          BlockKind     `json:"kind"`
+	Source        CommandSource `json:"source"`
+	Command       string        `json:"command"`
+	Cwd           string        `json:"cwd"`
+	Output        string        `json:"output"`
+	ExitCode      int           `json:"exit_code"`
+	TypedAt       time.Time     `json:"typed_at,omitempty"`
+	StartedAt     time.Time     `json:"started_at"`
+	FirstOutputAt time.Time     `json:"first_output_at,omitempty"`
+	CompletedAt   time.Time     `json:"completed_at,omitempty"`
+	Duration      string        `json:"duration"`
+	LineCount     int           `json:"line_count"`
+	ByteLen       int           `json:"byte_len"`
 }
 
 const maxHistoryPreviewOutput = 32768
@@ -367,6 +370,37 @@ func (es *ExecutionSession) RecordBlock(
 		startedAt = time.Now()
 	}
 	return es.appendRecord(kind, source, command, es.Dir(), output, exitCode, startedAt)
+}
+
+// RecordBlockWithTimings appends a completed block along with detailed user typing
+// and output timing milestones.
+func (es *ExecutionSession) RecordBlockWithTimings(
+	kind BlockKind,
+	source CommandSource,
+	command string,
+	output string,
+	exitCode int,
+	typedAt time.Time,
+	startedAt time.Time,
+	firstOutputAt time.Time,
+	completedAt time.Time,
+) CommandRecord {
+	if startedAt.IsZero() {
+		startedAt = time.Now()
+	}
+	if completedAt.IsZero() {
+		completedAt = time.Now()
+	}
+	rec := es.appendRecord(kind, source, command, es.Dir(), output, exitCode, startedAt)
+	es.mu.Lock()
+	if n := len(es.records); n > 0 && es.records[n-1].ID == rec.ID {
+		es.records[n-1].TypedAt = typedAt
+		es.records[n-1].FirstOutputAt = firstOutputAt
+		es.records[n-1].CompletedAt = completedAt
+		rec = es.records[n-1]
+	}
+	es.mu.Unlock()
+	return rec
 }
 
 func countOutputLines(s string) int {

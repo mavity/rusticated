@@ -136,7 +136,9 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 		chosenBackend = "gpu"
 	}
 	maxTokens := 8192
+	var modelInfo *ai.ModelInfo
 	if info, err := ai.LoadModelInfo(libPath, modelPath); err == nil && info != nil {
+		modelInfo = info
 		if r.verbose {
 			fmt.Fprintf(os.Stderr, "[info] Max Context Tokens: %d (dynamic: %v)\n", info.MaxContextTokens, info.IsDynamicContext)
 			fmt.Fprintf(os.Stderr, "[info] Supports Function Calling: %v\n", info.SupportsFunctionCalling)
@@ -183,11 +185,25 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 		}
 	}
 
+	var cwd string
+	if r.execSess != nil {
+		cwd = r.execSess.Dir()
+	}
+	envContext := ai.FormatEnvironmentContext(ai.EnvironmentConfig{
+		ModelPath:   modelPath,
+		ModelSize:   assets.ModelAssetSize(modelPath),
+		ModelInfo:   modelInfo,
+		Backend:     engine.Backend(),
+		MaxTokens:   maxTokens,
+		HasEmbedder: partEmb != nil,
+		WorkingDir:  cwd,
+	})
+
 	compactionLimit := int(float64(maxTokens) * 0.80)
 	sess, err := ai.NewSession(ai.SessionConfig{
 		Engine:          engine,
 		Embedder:        partEmb,
-		SystemMessage:   kabibiSystemMessage(r.systemContext),
+		SystemMessage:   kabibiSystemMessage(envContext, r.systemContext),
 		Tools:           BuildKabibiTools(r.execSess),
 		CompactionLimit: compactionLimit,
 		OnFeedback:      r.emitFeedback,
@@ -215,12 +231,15 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 	return nil
 }
 
-func kabibiSystemMessage(additionalContext string) string {
-	additionalContext = strings.TrimSpace(additionalContext)
-	if additionalContext == "" {
-		return defaultKabibiSystemPrompt
+func kabibiSystemMessage(additionalContexts ...string) string {
+	parts := []string{defaultKabibiSystemPrompt}
+	for _, c := range additionalContexts {
+		c = strings.TrimSpace(c)
+		if c != "" {
+			parts = append(parts, c)
+		}
 	}
-	return defaultKabibiSystemPrompt + "\n\n" + additionalContext
+	return strings.Join(parts, "\n\n")
 }
 
 // RunTurn runs a single AI turn, lazily initializing the underlying ai.Session if needed.

@@ -10,7 +10,10 @@ import (
 )
 
 type engineImpl struct {
-	backend engineBackend
+	backend     engineBackend
+	backendName string
+	modelPath   string
+	maxTokens   int
 }
 
 func resolveLMBackendCandidates(backend string) []string {
@@ -40,7 +43,12 @@ func newEngineImpl(libPath, modelPath, backend string, maxTokens int) (*engineIm
 	for _, cand := range resolveLMBackendCandidates(backend) {
 		b, err := openBackend(libPath, modelPath, cand, maxTokens)
 		if err == nil && b != nil {
-			return &engineImpl{backend: b}, nil
+			return &engineImpl{
+				backend:     b,
+				backendName: cand,
+				modelPath:   modelPath,
+				maxTokens:   maxTokens,
+			}, nil
 		}
 		lastErr = err
 	}
@@ -99,6 +107,7 @@ func (e *engineImpl) NewConversationWithConfig(cfg ConversationConfig) (*convImp
 // as an OpenAI-style "tool_calls" array.
 func buildHistoryJSON(history []PromptPart) (string, error) {
 	var messages []map[string]any
+	var lastDate string
 	for i := 0; i < len(history); i++ {
 		part := history[i]
 		content := []any{}
@@ -109,14 +118,10 @@ func buildHistoryJSON(history []PromptPart) (string, error) {
 		}
 		if part.Role == RoleTool {
 			for ; i < len(history) && history[i].Role == RoleTool; i++ {
-				resp := history[i].ToolResponse
-				if resp == nil {
-					resp = history[i].Text
-				}
 				content = append(content, map[string]any{
 					"type":     "tool_response",
 					"name":     history[i].ToolName,
-					"response": resp,
+					"response": formatWireToolResponse(history[i], &lastDate),
 				})
 			}
 			i--
@@ -124,8 +129,14 @@ func buildHistoryJSON(history []PromptPart) (string, error) {
 			if part.ImageBase64 != "" {
 				content = append(content, map[string]string{"type": "image", "blob": part.ImageBase64})
 			}
-			if part.Text != "" {
-				content = append(content, map[string]string{"type": "text", "text": part.Text})
+			if part.Text != "" || (len(part.ToolCalls) == 0 && (!part.StartedAt.IsZero() || !part.CompletedAt.IsZero())) {
+				wireText := formatWirePartText(part, &lastDate)
+				if wireText != "" {
+					content = append(content, map[string]string{"type": "text", "text": wireText})
+				}
+			} else if len(part.ToolCalls) > 0 && (!part.StartedAt.IsZero() || !part.CompletedAt.IsZero()) {
+				// Advance lastDate even if a tool-only model turn has no text part.
+				_ = formatPartTemporalHeader(part, &lastDate)
 			}
 			if len(part.ToolCalls) > 0 {
 				calls := make([]map[string]any, 0, len(part.ToolCalls))

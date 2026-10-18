@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"ai"
 )
@@ -16,9 +17,11 @@ func runTerminalLoop(ctx context.Context, session *ai.Session) {
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
 		fmt.Print("\n> ")
+		promptReadyAt := time.Now()
 		if !scanner.Scan() {
 			break
 		}
+		submittedAt := time.Now()
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
@@ -26,8 +29,13 @@ func runTerminalLoop(ctx context.Context, session *ai.Session) {
 		if line == "exit" || line == "quit" {
 			break
 		}
-		if err := session.RunTurn(ctx, line); err != nil {
+		turnCtx := ai.WithTurnTiming(ctx, ai.TurnTiming{
+			TypedAt:     promptReadyAt,
+			SubmittedAt: submittedAt,
+		})
+		if err := session.RunTurn(turnCtx, line); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		}
 	}
 }
+

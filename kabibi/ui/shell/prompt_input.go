@@ -3,6 +3,7 @@ package shell
 import (
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/charmbracelet/x/input"
 	"github.com/mattn/go-runewidth"
@@ -40,12 +41,13 @@ type PromptInput struct {
 	maxLines       int
 	maxScreenRatio float64
 
-	value      string
-	cursorPos  int
-	focused    bool
-	history    []string
-	historyIdx int
-	scrollRow  int
+	value        string
+	cursorPos    int
+	focused      bool
+	history      []string
+	historyIdx   int
+	scrollRow    int
+	firstInputAt time.Time
 
 	ctx ui.RenderContext
 }
@@ -110,6 +112,9 @@ func (p *PromptInput) SetValue(s string) {
 	p.cursorPos = len([]rune(clean))
 	if clean == "" {
 		p.scrollRow = 0
+		p.firstInputAt = time.Time{}
+	} else if p.firstInputAt.IsZero() {
+		p.firstInputAt = time.Now()
 	}
 	p.mu.Unlock()
 }
@@ -121,7 +126,16 @@ func (p *PromptInput) Reset() {
 	p.cursorPos = 0
 	p.historyIdx = -1
 	p.scrollRow = 0
+	p.firstInputAt = time.Time{}
 	p.mu.Unlock()
+}
+
+// FirstInputAt returns the timestamp when the first character of the current
+// input buffer was typed (or zero if the buffer is empty).
+func (p *PromptInput) FirstInputAt() time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.firstInputAt
 }
 
 // CursorPos returns the current rune cursor index within Value().
@@ -505,6 +519,9 @@ func (p *PromptInput) insertText(text string) bool {
 	runes = append(runes[:p.cursorPos], append(ins, runes[p.cursorPos:]...)...)
 	p.value = string(runes)
 	p.cursorPos += len(ins)
+	if p.value != "" && p.firstInputAt.IsZero() {
+		p.firstInputAt = time.Now()
+	}
 	p.mu.Unlock()
 	p.invalidate()
 	return true
@@ -536,6 +553,9 @@ func (p *PromptInput) handleKeyEvent(ev input.KeyPressEvent) bool {
 			runes = append(runes[:p.cursorPos-1], runes[p.cursorPos:]...)
 			p.value = string(runes)
 			p.cursorPos--
+			if p.value == "" {
+				p.firstInputAt = time.Time{}
+			}
 			p.mu.Unlock()
 			p.invalidate()
 			return true
@@ -549,6 +569,9 @@ func (p *PromptInput) handleKeyEvent(ev input.KeyPressEvent) bool {
 		if p.cursorPos < len(runes) {
 			runes = append(runes[:p.cursorPos], runes[p.cursorPos+1:]...)
 			p.value = string(runes)
+			if p.value == "" {
+				p.firstInputAt = time.Time{}
+			}
 			p.mu.Unlock()
 			p.invalidate()
 			return true
@@ -588,6 +611,9 @@ func (p *PromptInput) handleKeyEvent(ev input.KeyPressEvent) bool {
 			}
 			p.value = p.history[p.historyIdx]
 			p.cursorPos = len([]rune(p.value))
+			if p.value != "" && p.firstInputAt.IsZero() {
+				p.firstInputAt = time.Now()
+			}
 			p.mu.Unlock()
 			p.invalidate()
 			return true
@@ -601,9 +627,13 @@ func (p *PromptInput) handleKeyEvent(ev input.KeyPressEvent) bool {
 			if p.historyIdx < len(p.history)-1 {
 				p.historyIdx++
 				p.value = p.history[p.historyIdx]
+				if p.value != "" && p.firstInputAt.IsZero() {
+					p.firstInputAt = time.Now()
+				}
 			} else {
 				p.historyIdx = -1
 				p.value = ""
+				p.firstInputAt = time.Time{}
 			}
 			p.cursorPos = len([]rune(p.value))
 			p.mu.Unlock()

@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"iter"
 	"sync/atomic"
+	"time"
 )
 
 // ErrRepetitionLoop is yielded when the model falls into a repetitive generation loop.
@@ -52,6 +54,9 @@ type PromptPart struct {
 	ToolCalls      []ToolCall
 	Embedding      []float32
 	CognitiveTrace *CognitiveTrace
+	StartedAt      time.Time     `json:"-"`
+	CompletedAt    time.Time     `json:"-"`
+	Duration       time.Duration `json:"-"`
 }
 
 // ModelEvent represents a valid item emitted during model generation. Failures
@@ -358,12 +363,112 @@ func (c *Conversation) Close() {
 	}
 }
 
+// formatSeconds formats a whole-second duration count as "1 second" or "N seconds".
+func formatSeconds(secs int) string {
+	if secs < 0 {
+		secs = 0
+	}
+	if secs == 1 {
+		return "1 second"
+	}
+	return fmt.Sprintf("%d seconds", secs)
+}
+
+// formatPartTemporalHeader formats a PromptPart's timing metadata into the bracketed
+// header shown to the AI (e.g. "[2026-10-18 Sun 23:12, typed for 14 seconds]" on the
+// first timestamp or date flip, and "[23:12, typed for 14 seconds]" on the same date).
+// Returns "" when neither StartedAt nor CompletedAt is set.
+func formatPartTemporalHeader(p PromptPart, lastDate *string) string {
+	ts := p.CompletedAt
+	if ts.IsZero() {
+		ts = p.StartedAt
+	}
+	if ts.IsZero() {
+		return ""
+	}
+
+	dateKey := ts.Format("2006-01-02")
+	var timeStr string
+	if lastDate == nil || *lastDate == "" || *lastDate != dateKey {
+		timeStr = ts.Format("2006-01-02 Mon 15:04")
+		if lastDate != nil {
+			*lastDate = dateKey
+		}
+	} else {
+		timeStr = ts.Format("15:04")
+	}
+
+	dur := p.Duration
+	if dur <= 0 && !p.StartedAt.IsZero() && !p.CompletedAt.IsZero() && p.CompletedAt.After(p.StartedAt) {
+		dur = p.CompletedAt.Sub(p.StartedAt)
+	}
+	if dur < 0 {
+		dur = 0
+	}
+	secs := int(dur.Round(time.Second).Seconds())
+
+	verb := "typed"
+	switch p.Role {
+	case RoleModel:
+		verb = "talked"
+	case RoleTool:
+		verb = "ran"
+	}
+	return fmt.Sprintf("[%s, %s for %s]", timeStr, verb, formatSeconds(secs))
+}
+
+func formatWirePartText(p PromptPart, lastDate *string) string {
+	hdr := formatPartTemporalHeader(p, lastDate)
+	if hdr == "" {
+		return p.Text
+	}
+	if p.Text == "" {
+		return hdr
+	}
+	return hdr + "\n" + p.Text
+}
+
+func formatWireToolResponse(p PromptPart, lastDate *string) any {
+	resp := p.ToolResponse
+	if resp == nil {
+		resp = p.Text
+	}
+	hdr := formatPartTemporalHeader(p, lastDate)
+	if hdr == "" {
+		return resp
+	}
+	switch v := resp.(type) {
+	case map[string]any:
+		cp := make(map[string]any, len(v)+1)
+		for k, val := range v {
+			cp[k] = val
+		}
+		cp["timing"] = hdr
+		return cp
+	case string:
+		if v == "" {
+			return hdr
+		}
+		return hdr + "\n" + v
+	default:
+		return map[string]any{
+			"timing": hdr,
+			"result": resp,
+		}
+	}
+}
+
 // buildMessageJSON encodes a slice of PromptParts into a single LiteRT-LM
 // message. Per the litert-lm message schema, content is an array of typed
 // parts: images use {"type":"image","blob":"<base64>"}, text uses
 // {"type":"text","text":"..."}, and tool responses use
 // {"type":"tool_response","name":"...","response":...}.
 func buildMessageJSON(parts []PromptPart) (string, error) {
+	var lastDate string
+	return buildMessageJSONWithDate(parts, &lastDate)
+}
+
+func buildMessageJSONWithDate(parts []PromptPart, lastDate *string) (string, error) {
 	role := RoleUser
 	if len(parts) > 0 && parts[0].Role != "" {
 		role = parts[0].Role
@@ -371,22 +476,23 @@ func buildMessageJSON(parts []PromptPart) (string, error) {
 	content := make([]any, 0, len(parts))
 	for _, p := range parts {
 		if p.Role == RoleTool || role == RoleTool {
-			resp := p.ToolResponse
-			if resp == nil {
-				resp = p.Text
-			}
 			content = append(content, map[string]any{
 				"type":     "tool_response",
 				"name":     p.ToolName,
-				"response": resp,
+				"response": formatWireToolResponse(p, lastDate),
 			})
 			continue
 		}
 		if p.ImageBase64 != "" {
 			content = append(content, map[string]string{"type": "image", "blob": p.ImageBase64})
 		}
-		if p.Text != "" {
-			content = append(content, map[string]string{"type": "text", "text": p.Text})
+		if p.Text != "" || (!p.StartedAt.IsZero() || !p.CompletedAt.IsZero()) {
+			if p.Text != "" || len(p.ToolCalls) == 0 {
+				wireText := formatWirePartText(p, lastDate)
+				if wireText != "" {
+					content = append(content, map[string]string{"type": "text", "text": wireText})
+				}
+			}
 		}
 	}
 	msg := map[string]any{

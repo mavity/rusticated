@@ -145,14 +145,33 @@ func main() {
 	// We force it to true and register tools anyway, as the model is instruction-tuned for it.
 	tools := Tools
 
-	// 5. Setup Compaction Threshold
+	// 5. Setup Compaction Threshold & Environmental System Prompt
 	// We proactively trigger compaction well before we hit the allocated limit.
 	compactionLimit := int(float64(maxTokens) * 0.80)
+
+	cwd, _ := os.Getwd()
+	envContext := ai.FormatEnvironmentContext(ai.EnvironmentConfig{
+		ModelPath:   modelPath,
+		ModelSize:   assets.ModelAssetSize(modelPath),
+		ModelInfo:   info,
+		Backend:     engine.Backend(),
+		MaxTokens:   maxTokens,
+		HasEmbedder: embedder != nil,
+		WorkingDir:  cwd,
+	})
+	sysMsg := strings.TrimSpace(cfg.SystemFlag)
+	if envContext != "" {
+		if sysMsg != "" {
+			sysMsg += "\n\n" + envContext
+		} else {
+			sysMsg = envContext
+		}
+	}
 
 	session, err := ai.NewSession(ai.SessionConfig{
 		Engine:          engine,
 		Embedder:        embedder,
-		SystemMessage:   cfg.SystemFlag,
+		SystemMessage:   sysMsg,
 		Tools:           tools,
 		CompactionLimit: compactionLimit,
 		OnContent:       func(text string) { fmt.Print(text) },
