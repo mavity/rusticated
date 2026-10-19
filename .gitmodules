@@ -1,6 +1,9 @@
 [submodule "mohabbat/regast"]
 	path = mohabbat/regast
 	url = https://github.com/mavity/regast
+[submodule "u-root"]
+	path = u-root
+	url = https://github.com/mavity/u-root
 [submodule "release/dist"]
 	path = release/dist
 	url = https://github.com/mavity/dist

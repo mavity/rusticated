@@ -1,15 +1,19 @@
-# Master Plan: Submodule Fork and Full Adoption of u-root in Kabibi
+# Master Plan: In-Place Reentrant Modernization of u-root in Kabibi
 
-## 1. Executive Summary & Architectural Vision
+## 1. Executive Summary & Lessons Learned
 
-Kabibi integrates an in-process, bash-like execution environment powered by `mvdan.cc/sh/v3/interp`. Rather than shelling out to external OS binaries via `os/exec` (which fails in WebAssembly/`wasip1`, introduces platform-specific discrepancies between Windows, Linux, and macOS, and incurs heavy process-spawning latency), Kabibi's shell aims to provide a complete, self-contained Unix userland built directly into the binary.
+Kabibi integrates an in-process, bash-like execution environment powered by `mvdan.cc/sh/v3/interp`. Rather than shelling out to external OS binaries via `os/exec` (which fails in WebAssembly/`wasip1`, introduces platform discrepancies across Windows, Linux, and macOS, and incurs process-spawning overhead), Kabibi embeds a complete, self-contained Unix userland directly into the binary.
 
-Currently, Kabibi imports `mvdan.cc/sh/moreinterp/coreutils`, which in turn pulls 15 commands from `github.com/u-root/u-root/pkg/core` (`cat`, `chmod`, `cp`, `find`, `gzip`, `ls`, `mkdir`, `mktemp`, `mv`, `rm`, `shasum`, `tar`, `touch`, `xargs`, `base64`). However, over 100 essential commands remain stranded in `github.com/u-root/u-root/cmds/core/*` as standalone `package main` binaries.
+### Why the Previous Attempt Went Awry
+Our core agreement is **forking `u-root` and applying minimal, manual in-place tweaks** so we have direct compile-time control over turning commands into reentrant functions. The first attempt diverged in three ways:
+1. **Fixating on `pkg/core` instead of `cmds/core/*`**: Upstream `u-root` had an abandoned experiment in `pkg/core` covering only 15 commands. Trying to move all ~119 commands into `pkg/core` detached the work from the authentic command implementations in `cmds/core/*`.
+2. **Stubbing instead of adapting (Tiers 4 & 5)**: Instead of adapting the real implementations of the ~40 system/network/Linux utilities (`mount`, `ip`, `pci`, `kexec`, `insmod`, etc.) to run natively where supported with graceful fallbacks where not, the implementation stubbed them out unconditionally (`"command not supported on <OS>"`), losing their functionality even on Linux.
+3. **Destructive replacement of `cmds/core/*`**: The authentic source and test files in `cmds/core/<cmd>/` were wiped in the working tree and replaced with 21-line dummy wrappers.
 
-Because these standalone commands rely on global flags, direct `os.Exit`/`log.Fatal` terminations, and hardcoded `os.Stdout`/`os.Stdin` streams, they cannot be safely consumed via shallow JIT overlays or regex rewriting without catastrophic runtime panics.
-
-### The Strategy
-We will **fork `u-root`**, attach the fork as a Git submodule directly into the Rustica repository workspace, and systematically promote the `cmds/core/*` utilities into reusable, reentrant library packages under `pkg/core/<cmd>` implementing u-root's native `core.Command` interface.
+### The Corrected Strategy
+1. **Preserve Reference Work (`../uroot-try`)**: Save the existing working-tree work (which solved local `flag.FlagSet` extraction, stream decoupling, and context cancellation for ~74 commands) in a temporary side directory `../uroot-try/` for reference.
+2. **Reset Submodule to Clean Upstream `HEAD`**: Hard-reset `u-root/` to upstream `HEAD`, restoring 100% of the authentic `cmds/core/*` source files, OS-specific files (`*_linux.go`, `*_unix.go`, `*_windows.go`), and unit tests.
+3. **Modify `cmds/core/<cmd>` In-Place, Command by Command**: Convert each command in `cmds/core/<cmd>` directly into an importable package (`package <cmd>`) exposing a reentrant `Main(...) int` entrypoint. We are **not** building standalone CLI binaries; our sole target is working cleanly inside Kabibi across all target platforms.
 
 ```
 +-----------------------------------------------------------------------------------+
@@ -18,47 +22,38 @@ We will **fork `u-root`**, attach the fork as a Git submodule directly into the 
 |  +-----------------------+              +--------------------------------------+  |
 |  |        kabibi/        |              |          u-root/ (Git Submodule)     |  |
 |  |                       |              |                                      |  |
-|  |  ui/shell/shell.go    |              |  pkg/core/                           |  |
-|  |    |                  |              |    +-- cat, ls, cp, mv (Existing)    |  |
-|  |    +-- interp.Runner  |              |    +-- grep, sort, uniq, wc (New)    |  |
-|  |          |            |              |    +-- head, tail, echo, which (New) |  |
-|  |          v            |              |    +-- uname, date, sleep, cmp (New) |  |
-|  |    uroot.ExecHandler  |-- replace -->|    +-- ...all 115 core commands      |  |
-|  |                       |   directive  |                                      |  |
-|  |  go.mod               |              |  cmds/core/ (Thin CLI wrappers)      |  |
+|  |  ui/shell/shell.go    |              |  cmds/core/<cmd>/                    |  |
+|  |    |                  |              |    package <cmd>                     |  |
+|  |    +-- interp.Runner  |              |    func Main(ctx, io, args...) int   |  |
+|  |          |            |              |      +-- local flag.NewFlagSet       |  |
+|  |          v            |              |      +-- return int (no os.Exit)     |  |
+|  |  ui/shell/uroot.go    |-- replace -->|      +-- native Linux/macOS/Windows  |  |
+|  |  (urootRegistry)      |   directive  |      +-- Rusticated ABI integration  |  |
 |  +-----------------------+              +--------------------------------------+  |
 +-----------------------------------------------------------------------------------+
 ```
 
 ---
 
-## 2. Git Submodule & Workspace Wiring
+## 2. Target Standard: In-Place `Main(...) int` Convention
 
-### 2.1 Submodule Attachment
-The forked repository (e.g. `https://github.com/mavity/u-root`) is attached at the root of the Rustica repository as `u-root`:
+Every command in `u-root/cmds/core/<cmd>/` is modified in-place with minimal diff footprint according to the following rules:
 
-```bash
-git submodule add https://github.com/mavity/u-root u-root
-git submodule update --init --recursive
-```
+### 2.1 Package Naming
+In Go, `package main` cannot be imported by another package. Each command directory `cmds/core/<cmd>/` changes its declaration from `package main` to `package <cmd>`.
+* **Reserved Words & Punctuation Exceptions**:
+  * `cmds/core/false` $\to$ `package falsecmd`
+  * `cmds/core/true` $\to$ `package truecmd`
+  * `cmds/core/init` $\to$ `package initcmd`
+  * `cmds/core/io` $\to$ `package iocmd`
+  * `cmds/core/strings` $\to$ `package stringscmd`
+  * `cmds/core/time` $\to$ `package timecmd`
+  * `cmds/core/sync` $\to$ `package synccmd`
+  * `cmds/core/switch_root` $\to$ `package switchroot`
+  * `cmds/core/update-rc.d` $\to$ `package updatercd`
 
-### 2.2 Go Module Replacement
-In `kabibi/go.mod`, redirect the `github.com/u-root/u-root` dependency to the submodule:
-
-```go
-replace github.com/u-root/u-root => ../u-root
-```
-
-This ensures that:
-1. Standard Go tooling (`go -C kabibi run .`, `go -C kabibi test ./...`) compiles directly against the submodule fork without dependency resolution conflicts.
-2. The Mohabbat hydration pipeline (`mohabbat/patch_go_deps.go`) recognizes the local submodule and applies custom sysroot/wasip1 tag flips directly.
-3. Every refactoring to a command is versioned, committed, and peer-reviewed in Git history with zero ambient drift.
-
----
-
-## 3. The Target Standard: u-root's `core.Command` Interface
-
-The upstream u-root repository already designed the target interface in [`pkg/core/command.go`](file:///c:/Users/mihai/rustica/u-root/pkg/core/command.go):
+### 2.2 The Shared `IO` Contract & `Main` Signature
+A lightweight shared execution context struct (e.g. in `u-root/pkg/uroot/io.go` or `u-root/pkg/core/io.go`) supplies the command's virtualized process environment without touching OS globals:
 
 ```go
 package core
@@ -66,406 +61,380 @@ package core
 import (
 	"context"
 	"io"
+	"path/filepath"
 )
 
-type LookupEnvFunc func(string) (string, bool)
+type LookupEnvFunc func(key string) (string, bool)
 
-type Command interface {
-	SetIO(stdin io.Reader, stdout io.Writer, stderr io.Writer)
-	SetWorkingDir(workingDir string)
-	SetLookupEnv(lookupEnv LookupEnvFunc)
-	Run(args ...string) error
-	RunContext(ctx context.Context, args ...string) error
-}
-```
-
-And base state is embedded via [`pkg/core/base.go`](file:///c:/Users/mihai/rustica/u-root/pkg/core/base.go):
-
-```go
-type Base struct {
-	Stdin      io.Reader
-	Stdout     io.Writer
-	Stderr     io.Writer
-	WorkingDir string
-	LookupEnv  LookupEnvFunc
-}
-```
-
-### Why Every Command Must Match This Blueprint:
-1. **Zero Global Flag Collisions**: Flags are parsed via a per-execution `flag.NewFlagSet(name, flag.ContinueOnError)` allocated inside `RunContext()`. This completely eliminates the `panic: flag redefined: <x>` bug when multiple commands share flag letters (e.g. `-u`, `-n`, `-r`, `-c`).
-2. **Reentrancy**: Command execution never mutates package-level variables. Commands can be invoked sequentially or concurrently across multiple shell tabs without state leakage.
-3. **Pipeline Streaming**: Shell pipelines (`grep foo | wc -l`) pass connected `io.PipeReader`/`io.PipeWriter` streams directly into `SetIO()`, avoiding OS pipes.
-4. **Context Cancellation**: Commands check `ctx.Done()` during file scanning or streaming, enabling instant `Ctrl+C` interrupt handling without process killing.
-5. **Virtual Directory Resolution**: Relative paths are resolved against `c.WorkingDir` rather than the process-wide OS directory via `c.ResolvePath(arg)`.
-
----
-
-## 4. The Universal Refactoring Recipe
-
-For every command `<cmd>` currently residing in `cmds/core/<cmd>/`, the following 8-step recipe transforms it into `pkg/core/<cmd>/`:
-
-### Step 1: Package Placement
-Create `pkg/core/<cmd>/<cmd>.go` in `u-root/`. Declare `package <cmd>`.
-
-### Step 2: Command Struct & Constructor
-```go
-package <cmd>
-
-import (
-	"context"
-	"flag"
-	"fmt"
-	"io"
-	"github.com/u-root/u-root/pkg/core"
-)
-
-type command struct {
-	core.Base
+type IO struct {
+	Stdin     io.Reader
+	Stdout    io.Writer
+	Stderr    io.Writer
+	Dir       string
+	LookupEnv LookupEnvFunc
 }
 
-func New() core.Command {
-	c := &command{}
-	c.Init()
-	return c
-}
-```
-
-### Step 3: Flag Definitions in Local Scope
-Convert all package-level `var _ = flag.Bool(...)` or `init()`-bound flags into a local struct inside `RunContext`:
-```go
-type flags struct {
-	all     bool
-	lines   int
-	pattern string
-}
-
-func (c *command) RunContext(ctx context.Context, args ...string) error {
-	var f flags
-	fs := flag.NewFlagSet("<cmd>", flag.ContinueOnError)
-	fs.SetOutput(c.Stderr)
-
-	fs.BoolVar(&f.all, "a", false, "description")
-	fs.IntVar(&f.lines, "n", 10, "number of lines")
-	fs.StringVar(&f.pattern, "e", "", "pattern")
-
-	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: %s [options] [args]\n", "<cmd>")
-		fs.PrintDefaults()
+// ResolvePath resolves relative paths against io.Dir without mutating process cwd.
+func (ioEnv IO) ResolvePath(p string) string {
+	if p == "" || filepath.IsAbs(p) || ioEnv.Dir == "" {
+		return p
 	}
+	return filepath.Join(ioEnv.Dir, p)
+}
 
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return nil
+func (ioEnv IO) Getenv(key string) string {
+	if ioEnv.LookupEnv != nil {
+		if v, ok := ioEnv.LookupEnv(key); ok {
+			return v
 		}
-		return err
 	}
-	// proceed to business logic
+	return ""
 }
 ```
 
-### Step 4: Elimination of `os.Exit` and `log.Fatal`
-- In `main()` / top-level logic:
-  - Replace `os.Exit(0)` with `return nil`.
-  - Replace `os.Exit(1)` with `return errors.New("...")` or `return interp.ExitStatus(1)`.
-  - Replace `os.Exit(c)` with `return interp.ExitStatus(c)`.
-  - Replace `log.Fatal(err)` with `fmt.Fprintln(c.Stderr, err); return err`.
-- In helper functions (`usage()`, `fatal()`, loops):
-  - Change signatures from `func helper(...)` to `func helper(...) error`.
-  - Propagate errors up the call stack to prevent fallthrough into subsequent logic.
+Every command in `cmds/core/<cmd>` replaces `func main()` with:
 
-### Step 5: I/O Stream Decoupling
-- Replace all `os.Stdout` with `c.Stdout`.
-- Replace all `os.Stdin` with `c.Stdin`.
-- Replace all `os.Stderr` with `c.Stderr`.
-- Replace `fmt.Println(...)` with `fmt.Fprintln(c.Stdout, ...)`.
-- Replace `log.Printf(...)` with `fmt.Fprintf(c.Stderr, ...)`.
-
-### Step 6: Path & Environment Resolution
-- Replace `os.Open(path)` with `os.Open(c.ResolvePath(path))`.
-- Replace `os.Getenv(k)` with `c.Getenv(k)` or `c.LookupEnv(k)`.
-
-### Step 7: Context Responsiveness
-In any file-processing, line-scanning, or network loop:
 ```go
-select {
-case <-ctx.Done():
-    return ctx.Err()
-default:
-}
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int)
 ```
 
-### Step 8: Backward-Compatible CLI Thin Shim
-Keep `cmds/core/<cmd>/main.go` as a 5-line forwarder so u-root can still build standalone binaries if needed:
-```go
-package main
+### 2.3 The 7 Mandatory Reentrancy & Safety Rules
 
-import (
-	"context"
-	"os"
-	cmdpkg "github.com/u-root/u-root/pkg/core/<cmd>"
-)
-
-func main() {
-	cmd := cmdpkg.New()
-	if err := cmd.RunContext(context.Background(), os.Args[1:]...); err != nil {
-		os.Exit(1)
-	}
-}
-```
-
----
-
-## 5. Detailed Command Audit & Implementation Strategy
-
-All 115 commands in `cmds/core/*` are categorized into 5 implementation tiers based on utility, complexity, and system dependencies:
-
-### Tier 1: Core Shell & Text Utilities (Priority 1 — The Daily Drivers)
-*These 22 utilities are the lifeblood of interactive shell scripts and day-to-day work.*
-
-| Command | Current File | Key Quirks & Refactoring Specifics |
-| :--- | :--- | :--- |
-| `grep` | `cmds/core/grep/grep.go` | Already has `run(stdin, stdout, stderr, args)`. Promote to `pkg/core/grep`. Change `flag.ExitOnError` to `flag.ContinueOnError`. Return `interp.ExitStatus(1)` on no match (`errQuiet`). |
-| `head` | `cmds/core/head/head.go` | Move `c := flag.Int("c", ...)` out of `main()`. Bind to `fs.IntVar` in `RunContext`. Use `c.ResolvePath` for file targets. |
-| `tail` | `cmds/core/tail/tail.go` | Supports `-f` (follow). Must monitor `ctx.Done()` in polling loop so following tails break cleanly on `Ctrl+C`. |
-| `sort` | `cmds/core/sort/sort.go` | Strip package-level `var (reverse = flag.Bool("r", ...); unique = flag.Bool("u", ...))`. Move to `flags` struct. Fix `-o` to write to `c.ResolvePath(outputFile)` instead of raw `os.Create`. |
-| `uniq` | `cmds/core/uniq/uniq.go` | Strip package-level `var unique = flag.Bool("u", ...)`. Move into local flagset. Handle streaming input from `c.Stdin`. |
-| `wc` | `cmds/core/wc/wc.go` | Strip package-level `lines = flag.Bool("l", ...)`, `words = flag.Bool("w", ...)`. Connect output reporting to `c.Stdout`. |
-| `echo` | `cmds/core/echo/echo.go` | Strip package-level `noNewline = flag.Bool("n", ...)`. Support `\c` escape without `os.Exit(0)`. |
-| `which` | `cmds/core/which/which.go` | Read `PATH` via `c.Getenv("PATH")` instead of `os.Getenv`. Use `c.WorkingDir` for relative path checks. Return exit status 1 if no match found. |
-| `uname` | `cmds/core/uname/uname.go` | Move `all = flag.Bool("a", ...)` to local flags. On `wasip1` / non-Unix where `unix.Uname` fails or is unsupported, stub with synthetic `Utsname{Sysname: "wasip1", Machine: "wasm"}`. |
-| `date` | `cmds/core/date/date.go` | Remove `init()` mutating `flag.Usage`. Read clock via injected `Clock` interface. Disallow system clock setting on `wasip1` with friendly error. |
-| `sleep` | `cmds/core/sleep/sleep.go` | Instead of `time.Sleep(d)`, use `select { case <-time.After(d): case <-ctx.Done(): return ctx.Err() }` for cancellation. |
-| `false` | `cmds/core/false/false.go` | Return `interp.ExitStatus(1)` directly. |
-| `true` | `cmds/core/true/true.go` | Return `nil` directly. |
-| `cmp` | `cmds/core/cmp/cmp.go` | Replace `os.Exit(2)` with `interp.ExitStatus(2)` on difference. Ensure `silent` mode suppresses stdout while returning status. |
-| `comm` | `cmds/core/comm/comm.go` | Move flags `-1`, `-2`, `-3` into local flagset. Handle comparing stdin (`-`) with a file. |
-| `seq` | `cmds/core/seq/seq.go` | Parse float/int arguments. Stream output to `c.Stdout` with context cancellation checks. |
-| `tee` | `cmds/core/tee/tee.go` | Multi-writer forwarding from `c.Stdin` to `c.Stdout` and specified file paths. Support `-a` (append). |
-| `tr` | `cmds/core/tr/tr.go` | Stream character translation from `c.Stdin` to `c.Stdout`. |
-| `strings` | `cmds/core/strings/strings.go` | Move `-n` (min length) to local flag. Stream string detection from files/stdin. |
-| `basename`| `cmds/core/basename/basename.go`| Strip directory and optional suffix; output to `c.Stdout`. |
-| `dirname` | `cmds/core/dirname/dirname.go` | Return directory part of path; output to `c.Stdout`. |
-| `yes` | `cmds/core/yes/yes.go` | Infinite loop outputting string. Must break on `ctx.Done()` or when `c.Stdout.Write` returns `io.ErrClosedPipe` / `syscall.EPIPE`. |
-
----
-
-### Tier 2: System, Process & File Inspection Utilities (Priority 2)
-*Utilities providing environment inspection, file metrics, and job control.*
-
-| Command | Scope & Refactoring Notes |
-| :--- | :--- |
-| `df` | Inspects filesystem usage. On Linux uses `unix.Statfs`; on wasip1/Windows provide fallback reporting virtual mount points or memory stats. |
-| `du` | Recursive directory size calculation. Must honor `c.ResolvePath` and traverse symlinks according to `-L`/`-H` flags. |
-| `free` | Parses `/proc/meminfo`. Provide graceful fallback returning runtime `runtime.MemStats` when `/proc` is absent. |
-| `id` | Reports user/group IDs. Bind to `os/user` where available; fallback to synthetic uid=0/gid=0 on wasip1. |
-| `kill` | Process signaling. Map PID to OS processes; on wasip1 return error or map to internal shell job IDs. |
-| `more` | Pager utility. Must use `c.Stdin`/`c.Stdout` and query terminal height via terminal size helpers. |
-| `printenv` | Iterates `c.LookupEnv` or environment slice; outputs `KEY=VALUE`. |
-| `ps` | Process list. Read host processes where supported, or list active Kabibi background shell jobs. |
-| `pwd` | Returns `c.WorkingDir` directly (accounting for `-L` logical vs `-P` physical resolution). |
-| `readlink` | Evaluates symbolic links via `os.Readlink(c.ResolvePath(p))`. |
-| `realpath` | Resolves canonical absolute paths using `filepath.Abs` and symlink expansion relative to `c.WorkingDir`. |
-| `sync` | Calls `syscall.Sync()` where supported; no-op on platforms lacking sync. |
-| `time` | Measures execution duration of child arguments via `interp.Runner`. |
-| `timeout` | Runs command with deadline derived from `context.WithTimeout(ctx, duration)`. |
-| `truncate` | Resizes files to specified length using `os.Truncate(c.ResolvePath(p), size)`. |
-| `ts` | Timestamps each line of `c.Stdin` and writes to `c.Stdout`. |
-| `uptime` | Reads system uptime or application session uptime. |
-| `hexdump` | Canonical hex/ASCII dump from files or `c.Stdin`. |
-| `md5sum` | Cryptographic MD5 checksum computation and verification format (`-c`). |
-| `hostname` | Inspects or sets hostname. Read hostname from OS or environment variable `HOSTNAME`. |
-| `dmesg` | Kernel ring buffer reader. Stub gracefully on non-root or wasip1 systems. |
-| `chroot` | Changes root directory; error on non-privileged environments. |
-
----
-
-### Tier 3: Archival, Compression & Data Movement (Priority 3)
-*File transfer and block data manipulation.*
-
-| Command | Scope & Refactoring Notes |
-| :--- | :--- |
-| `dd` | Heavy refactoring: rewrite `usage()` (currently calls `log.Fatal`) to return usage error. Decouple `conv=`, `ibs=`, `obs=`, `status=` flags into local flagset. Ensure pipe section readers use `c.Stdin`/`c.Stdout`. |
-| `cpio` | Archive creation and extraction. Stream bytes through `c.Stdin`/`c.Stdout`. |
-| `netcat` | Network Swiss Army knife. Remove `log.Fatalf` in `evalParams`. Support TCP/UDP client and server modes. Bind `stdin`/`stdout` streams to connection socket. |
-| `wget` | HTTP/HTTPS file downloader. Use `net/http` client respecting `ctx`. Stream download progress to `c.Stderr`. |
-| `ping` | ICMP/IP echo. Requires raw sockets; on systems without raw socket capabilities, fallback to TCP dial ping or report permission error. |
-| `backoff` | Repeats command with exponential backoff until success or timeout. |
-
----
-
-### Tier 4: Network & Terminal Emulation (Priority 4)
-*Terminal control and network stack inspection.*
-
-| Command | Scope & Refactoring Notes |
-| :--- | :--- |
-| `ip` | Network interface and routing manager. Uses `netlink` on Linux. Provide build-tag gate `ip_linux.go` and fallback stub for wasip1. |
-| `netstat` | Displays active network sockets and routing tables. |
-| `dhclient` | DHCP client daemon. Non-applicable in browser/wasip1 userland; gate behind `//go:build linux`. |
-| `stty` | Terminal mode settings (`termios`). Query/set attributes on `c.Stdin` if it implements `Fd()`. |
-| `tty` | Prints the file name of the terminal connected to `c.Stdin`. |
-| `gosh` / `elvish` | Interactive subshells; invoke nested `interp.Runner`. |
-| `sshd` / `scp` | SSH server and copy tools using `golang.org/x/crypto/ssh`. |
-
----
-
-### Tier 5: Linux/Kernel/Firmware Admin Tools (Priority 5 — Conditional Shims)
-*Tools specifically targeting firmware, bootloaders, and physical machine initialization.*
-
-These 35 utilities (`kexec`, `insmod`, `rmmod`, `lsmod`, `mount`, `umount`, `bind`, `losetup`, `mknod`, `mkfifo`, `pci`, `msr`, `lockmsrs`, `gpt`, `blkid`, `brctl`, `fusermount`, `hwclock`, `io`, `lddfiles`, `lsdrivers`, `lsfd`, `poweroff`, `shutdown`, `switch_root`, `unshare`, `update-rc.d`, `watchdog`, `watchdogd`, `init`) are deeply tied to Linux kernel syscalls (`mount(2)`, `sys_reboot`, `/dev/mem`, `/dev/cpu/*/msr`).
-
-**Strategy for Tier 5**:
-1. Implement them in `pkg/core/<cmd>` with Linux build tags (`//go:build linux`).
-2. Provide a universal stub for wasip1/Windows/Darwin (`//go:build !linux`):
+1. **Zero Panic Guarantee**:
+   Every `Main` begins with a defensive recovery guard so neither syntax errors, bad flags, nor unexpected nil dereferences can crash Kabibi:
    ```go
-   func (c *command) RunContext(ctx context.Context, args ...string) error {
-       return fmt.Errorf("%s: command not supported on %s", "<cmd>", runtime.GOOS)
-   }
+   defer func() {
+       if r := recover(); r != nil {
+           fmt.Fprintf(ioEnv.Stderr, "<cmd>: internal panic: %v\n", r)
+           exitCode = 1
+       }
+   }()
    ```
-This guarantees that **all 115 commands compile cleanly on every platform and wasip1 without linker errors**, while clearly communicating platform limitations to the user.
+2. **Local `flag.FlagSet` Only (Zero Shared State)**:
+   Never use `flag.CommandLine`, package-level `flag.Bool(...)`, or package-level `flag.Usage`. Allocate a local `flag.NewFlagSet("<cmd>", flag.ContinueOnError)` inside `Main` (or `run`), bind flags to a stack-allocated struct, and direct flag errors/usage to `ioEnv.Stderr`:
+   ```go
+   fs := flag.NewFlagSet("<cmd>", flag.ContinueOnError)
+   fs.SetOutput(ioEnv.Stderr)
+   ```
+   * Handle `errors.Is(err, flag.ErrHelp)` by returning `0`.
+   * Handle other flag parse errors by returning `2` (or `1` per command convention).
+3. **Eliminate Global Mutable Caches**:
+   Any helper package with package-level caches (such as `uidCache` and `gidCache` in `u-root/pkg/ls/lookup.go`) must either be protected by a `sync.RWMutex` or moved to per-invocation state so concurrent pipelines (`ls -l | ...`) never race.
+4. **Return-Based Exit Control**:
+   * Replace `os.Exit(code)` with `return code`.
+   * Replace `log.Fatal(...)` / `log.Fatalf(...)` with `fmt.Fprintf(ioEnv.Stderr, ...)` followed by `return 1`.
+5. **Stream Decoupling**:
+   * Replace `os.Stdin`, `os.Stdout`, `os.Stderr` with `ioEnv.Stdin`, `ioEnv.Stdout`, `ioEnv.Stderr`.
+   * Replace `fmt.Print*` with `fmt.Fprint*(ioEnv.Stdout, ...)`.
+6. **Virtual Working Directory & Environment**:
+   * Never call `os.Chdir`. Resolve all file path arguments through `ioEnv.ResolvePath(path)`.
+   * Read environment variables through `ioEnv.Getenv(key)` / `ioEnv.LookupEnv(key)`.
+7. **Context Cancellation (`ctx.Done()`)**:
+   * All loops, file walks, `sleep` waits, `tail -f` pollers, and infinite emitters (`yes`) must select on `ctx.Done()` and return `130` (or non-zero exit status) immediately on interrupt.
 
 ---
 
-## 6. Wiring into Kabibi's Shell Pipeline
+## 3. Target Platform Matrix & Relaxation Policy
 
-### 6.1 The Central Command Registry
-In `kabibi/ui/shell/uroot.go`, establish an extensible registry of all u-root commands:
+Every command must compile and behave predictably across all four target environments:
 
-```go
-package shell
+| Target Platform | Requirement & Implementation Mechanism |
+| :--- | :--- |
+| **1. Linux (Native)** | **100% Functional.** Uses native Linux syscalls (`unix.Mount`, `unix.Reboot`, `unix.Unshare`, `unix.KexecLoad`, `ioctl`), Netlink sockets (`AF_NETLINK`), and `/proc`, `/sys`, `/dev`. |
+| **2. macOS (Native)** | **Fully Functional** for all portable, POSIX/BSD, and hardware/process inspection tools. Uses Darwin `golang.org/x/sys/unix`, `sysctl` (`KERN_PROC_ALL`, `KERN_BOOTTIME`, `kern.msgbuf`), Mach VM (`host_statistics64`), routing sockets, and IOKit via `purego`. |
+| **3. Windows (Native)** | **Fully Functional** for all ~75 portable utilities plus adapted system inspection tools via Win32 APIs (`kernel32.dll` for `GlobalMemoryStatusEx`, `CreateToolhelp32Snapshot`, `GetDiskFreeSpaceExW`, `GetTickCount64`; `iphlpapi.dll` for `GetAdaptersAddresses`, `GetExtendedTcpTable`, `IcmpSendEcho`). |
+| **4. Rusticated (`wasip1` / `washmhost`)** | **Fully Functional** matching the capabilities of the underlying host OS:<br>• **Portable & `/proc`/`/sys` tools**: Run directly over existing Rusticated `path_open`, `dir_read`, `read`, `write` ABIs.<br>• **Transport Networking (`netcat`, `wget`)**: Run directly over Rusticated `net_open`, `net_accept`, `read`, `write`.<br>• **Rusticated+Linux**: Extra syscalls (`mount`, `reboot`, `ioctl`, `AF_NETLINK`) routed through `washmhost` host imports.<br>• **Rusticated+macOS**: Darwin-specific inspection routed via host dylib / `washmhost`. |
 
-import (
-	"context"
-	"fmt"
-	"io"
-	"github.com/u-root/u-root/pkg/core"
-
-	// Tier 1 imports
-	"github.com/u-root/u-root/pkg/core/cmp"
-	"github.com/u-root/u-root/pkg/core/date"
-	"github.com/u-root/u-root/pkg/core/echo"
-	"github.com/u-root/u-root/pkg/core/falsecmd"
-	"github.com/u-root/u-root/pkg/core/grep"
-	"github.com/u-root/u-root/pkg/core/head"
-	"github.com/u-root/u-root/pkg/core/seq"
-	"github.com/u-root/u-root/pkg/core/sleep"
-	"github.com/u-root/u-root/pkg/core/sort"
-	"github.com/u-root/u-root/pkg/core/tail"
-	"github.com/u-root/u-root/pkg/core/tee"
-	"github.com/u-root/u-root/pkg/core/tr"
-	"github.com/u-root/u-root/pkg/core/truecmd"
-	"github.com/u-root/u-root/pkg/core/uname"
-	"github.com/u-root/u-root/pkg/core/uniq"
-	"github.com/u-root/u-root/pkg/core/wc"
-	"github.com/u-root/u-root/pkg/core/which"
-	"github.com/u-root/u-root/pkg/core/yes"
-	// ... additional tiers
-)
-
-type commandFactory func() core.Command
-
-var urootRegistry = map[string]commandFactory{
-	"grep":      grep.New,
-	"head":      head.New,
-	"tail":      tail.New,
-	"sort":      sort.New,
-	"uniq":      uniq.New,
-	"wc":        wc.New,
-	"echo":      echo.New,
-	"which":     which.New,
-	"uname":     uname.New,
-	"date":      date.New,
-	"sleep":     sleep.New,
-	"false":     falsecmd.New,
-	"true":      truecmd.New,
-	"cmp":       cmp.New,
-	"seq":       seq.New,
-	"tee":       tee.New,
-	"tr":        tr.New,
-	"yes":       yes.New,
-}
-
-func LookupURootCommand(name string) (commandFactory, bool) {
-	fn, ok := urootRegistry[name]
-	return fn, ok
-}
-
-func AllURootCommandNames() []string {
-	names := make([]string, 0, len(urootRegistry))
-	for name := range urootRegistry {
-		names = append(names, name)
-	}
-	return names
-}
-```
-
-### 6.2 ExecHandler Middleware Integration
-In `kabibi/ui/shell/shell.go`, wire the u-root execution middleware directly before `hostExecMiddleware`:
-
-```go
-urootBuiltinMiddleware := func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
-	return func(ctx context.Context, args []string) error {
-		if len(args) == 0 {
-			return nil
-		}
-		name := args[0]
-		factory, exists := LookupURootCommand(name)
-		if !exists {
-			return next(ctx, args)
-		}
-
-		hc := interp.HandlerCtx(ctx)
-		cmd := factory()
-		cmd.SetIO(hc.Stdin, hc.Stdout, hc.Stderr)
-		cmd.SetWorkingDir(hc.Dir)
-		cmd.SetLookupEnv(func(k string) (string, bool) {
-			v := hc.Env.Get(k)
-			return v.String(), v.IsSet()
-		})
-
-		return cmd.RunContext(ctx, args[1:]...)
-	}
-}
-
-opts = append(opts, interp.ExecHandlers(
-	nestedShellAndScriptMiddleware,
-	gitBuiltinMiddleware,
-	webBuiltinMiddleware,
-	coreutils.ExecHandler,       // Existing 15 commands from moreinterp
-	urootBuiltinMiddleware,     // All newly ported u-root commands
-	hostExecMiddleware,         // Host fallbacks
-))
-```
+### Allowed Relaxations (Case-by-Case Basis)
+Where a command targets a kernel subsystem that fundamentally does not exist on the host OS, it is allowed to fail gracefully (printing a clear diagnostic to `ioEnv.Stderr` and returning exit code `1`, never panicking or failing compilation):
+* **Example (`mount`)**: Expected to work on Linux, macOS, and Rusticated running on Linux/macOS. Allowed to fail gracefully on Windows and Rusticated running on Windows.
+* **Example (`kexec`, `insmod`, `rmmod`, `unshare`, `switch_root`)**: Linux kernel-specific subsystems. Must work on Linux (and Rusticated+Linux); allowed to fail gracefully on macOS and Windows.
 
 ---
 
-## 7. Phased Implementation Roadmap
+## 4. Execution Methodology: Command-by-Command Workflow
 
-```
-  Phase 1: Foundation (Days 1-2)
-  [Fork u-root] -> [Attach Submodule] -> [Add go.mod Replace] -> [Registry Scaffold]
-        |
-        v
-  Phase 2: Tier 1 Daily Drivers (Days 3-7)
-  [grep, head, tail, sort, uniq, wc, echo, which, uname, date, sleep, cmp, seq, tee, tr, yes]
-        |
-        v
-  Phase 3: Tier 2 Inspection Utilities (Days 8-12)
-  [df, du, free, id, kill, more, printenv, ps, pwd, readlink, realpath, sync, time, timeout, truncate]
-        |
-        v
-  Phase 4: Tier 3 Data & Networking (Days 13-16)
-  [dd, cpio, netcat, wget, ping, backoff]
-        |
-        v
-  Phase 5: Tier 4 & Tier 5 Kernel Gates & Stubs (Days 17-20)
-  [ip, stty, tty, sshd, and wasip1 fallback shims for kexec, mount, etc.]
-        |
-        v
-  Phase 6: Shell Autocompletion & Test Matrix Verification (Days 21-22)
-```
+While commands are grouped into logical bands below to organize similar technical challenges, **actual implementation proceeds strictly one command at a time**.
 
-### Verification Criteria
-1. **Zero Panics**: Every command passes a fuzz test running repeated invocations with overlapping and invalid flags without panic.
-2. **Pipe Integrity**: `echo "foo\nbar" | grep foo | wc -l` produces identical output to host GNU/BSD coreutils.
-3. **Interrupt Handling**: Running `sleep 100` or `yes` in the shell and pressing `Ctrl+C` immediately cancels the command and restores the prompt.
-4. **Wasip1 Build Validation**: Building Kabibi with `GOOS=wasip1 GOARCH=wasm` succeeds without missing symbol errors.
+### Phase 0: Workspace Preparation (Prerequisite)
+- [x] **0.1**: Copy current `u-root/pkg/core/*` working-tree files into `../uroot-try/` as a reference archive.
+- [x] **0.2**: Reset `u-root` submodule to clean upstream `HEAD` (`git checkout -- . && git clean -fd`).
+- [x] **0.3**: Fix concurrent map hazard in [`u-root/pkg/ls/lookup.go`](file:///c:/Users/mihai/rustic/u-root/pkg/ls/lookup.go) (`uidCache` / `gidCache` mutex protection) and retain `wasip1` build tags in `pkg/ls` and `pkg/cpio`.
+- [x] **0.4**: Add `core.IO` helper struct in `u-root/pkg/core` and update `kabibi/ui/shell/uroot.go` adapter to invoke `Main(ctx, ioEnv, args...) int`.
+
+### Per-Command Definition of Done (DoD)
+A command checkbox `[x]` may **only** be ticked when all 5 criteria are met:
+1. **In-Place Edit**: Authentic files in `u-root/cmds/core/<cmd>/` are modified in-place to `package <cmd>` and `func Main(ctx context.Context, ioEnv core.IO, args ...string) int`.
+2. **Reentrancy Verified**: Local `flag.FlagSet`, zero `os.Exit`/`log.Fatal`, all paths resolved via `ioEnv.ResolvePath`, all I/O via `ioEnv`, `ctx.Done()` respected.
+3. **Platform Coverage**: Builds and works across Linux, macOS, Windows, and Rusticated (`GOOS=wasip1 GOARCH=wasm`), with any OS-specific files (`_linux.go`, `_darwin.go`, `_windows.go`, `_other.go`) properly gated.
+4. **Command Unit Tests**: Existing unit tests in `u-root/cmds/core/<cmd>/*_test.go` are updated and passing.
+5. **Kabibi Integration Test**: Wired into [`kabibi/ui/shell/uroot.go`](file:///c:/Users/mihai/rustic/kabibi/ui/shell/uroot.go) and verified via [`kabibi/ui/shell/uroot_test.go`](file:///c:/Users/mihai/rustic/kabibi/ui/shell/uroot_test.go) (including double-invocation flag collision check and functional test).
+
+---
+
+## 5. Master Command-by-Command Checklist (All 119 Commands)
+
+### Band 1: Core Portable Text, File & Shell Utilities (55 Commands)
+*100% cross-platform (Linux, macOS, Windows, Rusticated). Pure algorithmic or standard file/stream I/O.*
+
+#### 1A. Pilot Commands (First 3 to Validate Architecture End-to-End)
+- [x] **`echo`** (`cmds/core/echo`): Convert `-n`, `-e`, `-E` to local FlagSet; support `\c` early return without `os.Exit`.
+- [ ] **`cat`** (`cmds/core/cat`): Stream files and `-` (`ioEnv.Stdin`) to `ioEnv.Stdout`; resolve paths via `ioEnv.ResolvePath`.
+- [ ] **`grep`** (`cmds/core/grep`): Local flags (`-i`, `-v`, `-r`, `-c`, `-n`, `-q`, `-F`, `-h`, `-l`); check `ctx.Done()` in scanner; return `1` on no match.
+
+#### 1B. Text Processing & Filters
+- [ ] **`head`** (`cmds/core/head`): Local `-c` and `-n` flags; resolve file paths; stream to `ioEnv.Stdout`.
+- [ ] **`tail`** (`cmds/core/tail`): Local `-c`, `-n`, `-f` flags; monitor `ctx.Done()` in `-f` follow loop.
+- [ ] **`sort`** (`cmds/core/sort`): Local `-r`, `-u`, `-f`, `-b`, `-n`, `-C`, `-o` flags; resolve `-o` output file via `ioEnv.ResolvePath`.
+- [ ] **`uniq`** (`cmds/core/uniq`): Local `-u`, `-d`, `-c`, `-i`, `-f`, `-s` flags; stream `ioEnv.Stdin` to `ioEnv.Stdout`.
+- [ ] **`wc`** (`cmds/core/wc`): Local `-l`, `-w`, `-c`, `-m`, `-L` flags; write counts to `ioEnv.Stdout`.
+- [ ] **`tr`** (`cmds/core/tr`): Local `-d`, `-s`, `-c`/`-C` flags; character translation from `ioEnv.Stdin` to `ioEnv.Stdout`.
+- [ ] **`tee`** (`cmds/core/tee`): Local `-a`, `-i` flags; multi-writer from `ioEnv.Stdin` to `ioEnv.Stdout` + resolved files.
+- [ ] **`seq`** (`cmds/core/seq`): Local `-f`, `-s`, `-w` flags; check `ctx.Done()` in emission loop.
+- [ ] **`comm`** (`cmds/core/comm`): Local `-1`, `-2`, `-3` flags; support `-` for `ioEnv.Stdin`.
+- [ ] **`cmp`** (`cmds/core/cmp`): Local `-s`, `-l`, `-n` flags; return `0` (equal), `1` (differ), `2` (error).
+- [ ] **`strings`** (`cmds/core/strings`): `package stringscmd`; local `-n`, `-t` flags; check `ctx.Done()` while scanning.
+- [ ] **`hexdump`** (`cmds/core/hexdump`): Local `-C`, `-n`, `-s`, `-v` flags; stream hex output to `ioEnv.Stdout`.
+- [ ] **`ts`** (`cmds/core/ts`): Prepend timestamps to each line from `ioEnv.Stdin` to `ioEnv.Stdout`.
+- [ ] **`tsort`** (`cmds/core/tsort`): Topological sort from file or `ioEnv.Stdin` to `ioEnv.Stdout`.
+- [ ] **`base64`** (`cmds/core/base64`): Local `-d` flag; encode/decode between `ioEnv.Stdin`/files and `ioEnv.Stdout`.
+- [ ] **`yes`** (`cmds/core/yes`): Loop writing to `ioEnv.Stdout`; terminate cleanly on `ctx.Done()` or broken pipe write error.
+- [ ] **`more`** (`cmds/core/more`): Pager reading files and `ioEnv.Stdin` to `ioEnv.Stdout`.
+- [ ] **`man`** (`cmds/core/man`): Render embedded manual data to `ioEnv.Stdout`.
+
+#### 1C. File & Directory Operations
+- [ ] **`ls`** (`cmds/core/ls`): Local `-a`, `-l`, `-h`, `-d`, `-R`, `-F`, `-Q`, `-S` flags; resolve target paths via `ioEnv.ResolvePath`.
+- [ ] **`cp`** (`cmds/core/cp`): Local `-r`/`-R`, `-a`, `-f`, `-i`, `-v`, `-P` flags; check `ctx.Done()` across file copies.
+- [ ] **`mv`** (`cmds/core/mv`): Local `-f`, `-i`, `-n`, `-u` flags; resolve source and destination paths via `ioEnv.ResolvePath`.
+- [ ] **`rm`** (`cmds/core/rm`): Local `-r`/`-R`, `-f`, `-i`, `-v`, `-d` flags; resolve paths via `ioEnv.ResolvePath`.
+- [ ] **`mkdir`** (`cmds/core/mkdir`): Local `-p`, `-m`, `-v` flags; create directories relative to `ioEnv.Dir`.
+- [ ] **`mktemp`** (`cmds/core/mktemp`): Local `-d`, `-u`, `-q`, `-p`, `-t` flags; fallback temp dir via `ioEnv.Getenv("TMPDIR")`.
+- [ ] **`touch`** (`cmds/core/touch`): Local `-a`, `-m`, `-c`, `-d`, `-r`, `-t` flags; resolve paths via `ioEnv.ResolvePath`.
+- [ ] **`truncate`** (`cmds/core/truncate`): Local `-s`, `-c` flags; resize target files relative to `ioEnv.Dir`.
+- [ ] **`ln`** (`cmds/core/ln`): Local `-s`, `-f`, `-v`, `-n`, `-r` flags; works on Linux, macOS, Windows (symlinks/hardlinks), and Rusticated.
+- [ ] **`chmod`** (`cmds/core/chmod`): Local `-R`, `-v`, `-c` flags; support octal and symbolic modes.
+- [ ] **`find`** (`cmds/core/find`): Local `-name`, `-type`, `-mode`, `-l`, `-d` flags; respect `ctx.Done()` during walk.
+- [ ] **`du`** (`cmds/core/du`): Local `-a`, `-c`, `-d`, `-h`, `-s`, `-L`, `-P` flags; resolve paths relative to `ioEnv.Dir`.
+- [ ] **`readlink`** (`cmds/core/readlink`): Local `-f`, `-n`, `-v` flags; evaluate symlinks relative to `ioEnv.Dir`.
+- [ ] **`realpath`** (`cmds/core/realpath`): Local `-s`, `-q` flags; resolve canonical path relative to `ioEnv.Dir`.
+- [ ] **`basename`** (`cmds/core/basename`): Strip directory and suffix; output to `ioEnv.Stdout`.
+- [ ] **`dirname`** (`cmds/core/dirname`): Output parent directory component to `ioEnv.Stdout`.
+- [ ] **`pwd`** (`cmds/core/pwd`): Local `-L`, `-P` flags; output `ioEnv.Dir` (or resolved physical path) to `ioEnv.Stdout`.
+
+#### 1D. Checksums, Archival & Compression
+- [ ] **`shasum`** (`cmds/core/shasum`): Local `-a` (1, 256, 512), `-b`, `-c`, `-t` flags; check `ctx.Done()` while hashing.
+- [ ] **`md5sum`** (`cmds/core/md5sum`): Local `-c`, `-b`, `-t`, `-q`, `-s` flags; check `ctx.Done()` while hashing.
+- [ ] **`gzip`** (`cmds/core/gzip`): Also registered as `gzcat`; local `-d`, `-c`, `-f`, `-k`, `-l`, `-q`, `-r`, `-v`, `-1`..`-9` flags.
+- [ ] **`tar`** (`cmds/core/tar`): Local `-c`, `-x`, `-t`, `-f`, `-v`, `-z`, `-C` flags; resolve paths via `ioEnv.ResolvePath`.
+- [ ] **`cpio`** (`cmds/core/cpio`): Archive in/out/pass-through streaming over `ioEnv.Stdin`/`ioEnv.Stdout`.
+- [ ] **`gpgv`** (`cmds/core/gpgv`): OpenPGP signature verification writing results to `ioEnv.Stdout`/`ioEnv.Stderr`.
+
+#### 1E. Shell Builtin & Control Utilities
+- [ ] **`true`** (`cmds/core/true`): `package truecmd`; return `0`.
+- [ ] **`false`** (`cmds/core/false`): `package falsecmd`; return `1`.
+- [ ] **`sleep`** (`cmds/core/sleep`): Wait on `select { case <-time.After(d): return 0; case <-ctx.Done(): return 130 }`.
+- [ ] **`which`** (`cmds/core/which`): Local `-a` flag; check `ioEnv.Getenv("PATH")` and registered Kabibi builtins.
+- [ ] **`printenv`** (`cmds/core/printenv`): Read from `ioEnv.LookupEnv` / environment; output to `ioEnv.Stdout`.
+- [ ] **`date`** (`cmds/core/date`): Local `-u`, `-d`, `-r`, `-I` flags; formatting works everywhere; clock setting (`settimeofday`) supported on privileged Linux/macOS and fails gracefully elsewhere.
+- [ ] **`hostname`** (`cmds/core/hostname`): Read hostname via `os.Hostname()` everywhere; setting hostname (`Sethostname`) supported on privileged Unix and fails gracefully elsewhere.
+- [ ] **`xargs`** (`cmds/core/xargs`): Local `-n`, `-I`, `-0`, `-t`, `-p`, `-r` flags; dispatch sub-commands through runner callback.
+- [ ] **`time`** (`cmds/core/time`): `package timecmd`; measure execution duration of target command and report to `ioEnv.Stderr`.
+- [ ] **`timeout`** (`cmds/core/timeout`): Derive `context.WithTimeout(ctx, d)` and execute target command.
+- [ ] **`backoff`** (`cmds/core/backoff`): Retry target command with exponential backoff respecting `ctx.Done()`.
+
+---
+
+### Band 2: Data Transfer, Subshells & Network Transport (8 Commands)
+*Cross-platform over standard I/O and Rusticated's existing `net_open`/`net_accept`/`read`/`write` ABI.*
+
+- [ ] **`dd`** (`cmds/core/dd`): Convert `if=`, `of=`, `bs=`, `ibs=`, `obs=`, `count=`, `seek=`, `skip=`, `conv=`, `status=` into local FlagSet; replace `usage()` `log.Fatal` with error return; stream between `ioEnv.Stdin`/`ioEnv.Stdout` or resolved files; check `ctx.Done()`.
+- [ ] **`wget`** (`cmds/core/wget`): HTTP/HTTPS download using `http.NewRequestWithContext(ctx, ...)`; write output to resolved path or `ioEnv.Stdout`.
+- [ ] **`netcat`** (`cmds/core/netcat`): Also registered as `nc`; TCP/UDP/Unix stream client and listener; replace `log.Fatalf` in parameter evaluation; bind `ioEnv.Stdin`/`ioEnv.Stdout` to connection; cancel on `ctx.Done()`.
+- [ ] **`scp`** (`cmds/core/scp`): SCP source/sink protocol over `ioEnv.Stdin`/`ioEnv.Stdout`.
+- [ ] **`sshd`** (`cmds/core/sshd`): SSH server daemon using `golang.org/x/crypto/ssh`; bind listener with `ctx` cancellation; on Windows/wasip1 without pty exec, support key auth and clean session error reporting.
+- [ ] **`gosh`** (`cmds/core/gosh`): Nested `mvdan.cc/sh/v3/interp` shell execution bound to `ioEnv` and `ctx`.
+- [ ] **`nohup`** (`cmds/core/nohup`): Ignore `SIGHUP` and redirect output to `nohup.out` (via `ioEnv.ResolvePath`) before running target command.
+- [ ] **`ufs`** (`cmds/core/ufs`): 9P2000 file server over TCP listener; respect `ctx.Done()` to shut down listener cleanly.
+
+---
+
+### Band 3: System Diagnostics, Process & Network Inspection (20 Commands)
+*Requires OS-specific implementations: Linux (`/proc`, `/sys`, `AF_NETLINK`), macOS (`sysctl`, Mach VM, IOKit via `purego`), Windows (`kernel32.dll`, `iphlpapi.dll`), and Rusticated.*
+
+- [ ] **`uname`** (`cmds/core/uname`):
+  * **Linux / macOS**: `unix.Uname`.
+  * **Windows**: Query OS version/arch via `kernel32.dll` (`GetVersionExW` / `GetNativeSystemInfo`) or runtime info.
+  * **Rusticated**: Query `syscall.GetPlatformInfo()` (`AbiPlatformInfo`) to report real host/guest details.
+- [ ] **`id`** (`cmds/core/id`):
+  * **Linux / macOS**: `os/user` + `syscall.Getuid`/`Getgid`/`Getgroups`.
+  * **Windows / Rusticated**: Use `os/user.Current()` and map SID/username cleanly.
+- [ ] **`df`** (`cmds/core/df`):
+  * **Linux**: Parse `/proc/mounts` + `unix.Statfs`.
+  * **macOS**: `unix.Getfsstat` + `unix.Statfs`.
+  * **Windows**: Enumerate logical drives (`GetLogicalDriveStringsW`) + `GetDiskFreeSpaceExW` in `kernel32.dll`.
+  * **Rusticated**: Host `/proc/mounts` when on Linux; fallback to stat on working directory.
+- [ ] **`free`** (`cmds/core/free`):
+  * **Linux / Rusticated+Linux**: Parse `/proc/meminfo`.
+  * **macOS**: Query `sysctl("hw.memsize")` and `host_statistics64` (`vm_statistics64`) via `purego`.
+  * **Windows**: Call `GlobalMemoryStatusEx` in `kernel32.dll`.
+- [ ] **`uptime`** (`cmds/core/uptime`):
+  * **Linux / Rusticated+Linux**: Parse `/proc/uptime` and `/proc/loadavg`.
+  * **macOS**: Query `sysctl("kern.boottime")` and `sysctl("vm.loadavg")` via `purego`.
+  * **Windows**: Call `GetTickCount64` in `kernel32.dll`.
+- [ ] **`ps`** (`cmds/core/ps`):
+  * **Linux / Rusticated+Linux**: Walk `/proc/<pid>/stat` and `/proc/<pid>/status`.
+  * **macOS**: Query `sysctl` (`CTL_KERN`, `KERN_PROC`, `KERN_PROC_ALL`) via `purego`.
+  * **Windows**: Call `CreateToolhelp32Snapshot` / `Process32FirstW` / `Process32NextW` in `kernel32.dll`.
+- [ ] **`pidof`** (`cmds/core/pidof`):
+  * Shares the cross-platform process enumeration backend with `ps` (Linux `/proc`, macOS `sysctl`, Windows Toolhelp32).
+- [ ] **`kill`** (`cmds/core/kill`):
+  * **Linux / macOS**: `syscall.Kill(pid, sig)`.
+  * **Windows**: `OpenProcess` + `TerminateProcess` via `os.FindProcess(pid).Kill()`.
+  * **Rusticated**: Route to `process_signal` ABI when targeting child handles, or host kill on Unix.
+- [ ] **`sync`** (`cmds/core/sync`): `package synccmd`;
+  * **Linux / macOS**: `unix.Sync()` / `unix.Fsync`.
+  * **Windows**: `FlushFileBuffers` on specified files (or no-op if no files).
+- [ ] **`tty`** (`cmds/core/tty`):
+  * **Linux / macOS**: Resolve `/dev` device corresponding to stdin's `stat.Ino`/`stat.Dev`.
+  * **Windows**: Check console mode on stdin (`CONIN$`) or stdout (`CONOUT$`).
+  * **Rusticated**: Check console mode or return `not a tty`.
+- [ ] **`stty`** (`cmds/core/stty`):
+  * **Linux / macOS**: `termios` `ioctl` (`TCGETS`/`TCSETS`, `TIOCGWINSZ`).
+  * **Windows**: `GetConsoleMode` / `GetConsoleScreenBufferInfo`.
+  * **Rusticated**: Fixed size fallback.
+- [ ] **`ping`** (`cmds/core/ping`):
+  * **Linux / macOS**: `golang.org/x/net/icmp` (`ip4:icmp` / `udp4` unprivileged ping socket).
+  * **Windows**: Use `IcmpCreateFile` / `IcmpSendEcho` in `iphlpapi.dll` (works without Administrator privileges) or `golang.org/x/net/icmp`.
+  * **Rusticated**: Raw/ICMP socket via `washmhost`.
+- [ ] **`ip`** (`cmds/core/ip`):
+  * **Linux / Rusticated+Linux**: Full authentic u-root `cmds/core/ip` implementation using `netlink` (`addr`, `link`, `route`, `neigh`, `rule`, `tunnel`).
+  * **macOS**: Interface inspection via `getifaddrs`/`net.Interfaces()`, routing via `AF_ROUTE` / `sysctl(NET_RT_DUMP)`.
+  * **Windows**: Interface & address inspection via `GetAdaptersAddresses` (`net.Interfaces()`) and `GetIpForwardTable` (`iphlpapi.dll`); state mutations fail gracefully.
+- [ ] **`netstat`** (`cmds/core/netstat`):
+  * **Linux / Rusticated+Linux**: Full authentic u-root `cmds/core/netstat` reading `/proc/net/{tcp,tcp6,udp,udp6,unix,route}`.
+  * **macOS**: Query `sysctl` (`net.inet.tcp.pcblist`, `net.inet.udp.pcblist`, `NET_RT_DUMP`).
+  * **Windows**: Query `GetExtendedTcpTable` and `GetExtendedUdpTable` in `iphlpapi.dll`.
+- [ ] **`pci`** (`cmds/core/pci`):
+  * **Linux / Rusticated+Linux**: Full authentic u-root `cmds/core/pci` walking `/sys/bus/pci/devices` and decoding config space.
+  * **macOS**: Enumerate `IOPCIDevice` entries via Apple `IOKit` framework (`purego`).
+  * **Windows**: Enumerate `PCI\*` devices via `SetupDiGetClassDevsW` (`setupapi.dll`) or fail gracefully if unavailable.
+- [ ] **`lsmod`** (`cmds/core/lsmod`):
+  * **Linux / Rusticated+Linux**: Read and format `/proc/modules`.
+  * **macOS / Windows**: Clean unsupported error (`return 1`).
+- [ ] **`lsdrivers`** (`cmds/core/lsdrivers`):
+  * **Linux / Rusticated+Linux**: Authentic `/sys/bus` driver inspection.
+  * **macOS / Windows**: Clean unsupported error (`return 1`).
+- [ ] **`lsfd`** (`cmds/core/lsfd`):
+  * **Linux / Rusticated+Linux**: Authentic `/proc/<pid>/fd` walk.
+  * **macOS / Windows**: Clean unsupported error (`return 1`).
+- [ ] **`lddfiles`** (`cmds/core/lddfiles`):
+  * Uses Go's portable `debug/elf` to resolve ELF dynamic library dependencies on any OS when given ELF binaries.
+- [ ] **`dmesg`** (`cmds/core/dmesg`):
+  * **Linux**: `unix.Klogctl` (`SYS_SYSLOG`) with fallback to reading `/dev/kmsg`.
+  * **macOS**: Query `sysctl("kern.msgbuf")` via `purego`.
+  * **Windows**: Clean unsupported error (`return 1`).
+
+---
+
+### Band 4: Kernel, Storage & Boot Administration (36 Commands)
+*Authentic implementations retained in full for Linux (and macOS where applicable), with clean non-panicking fallbacks on unsupported hosts per our relaxation policy.*
+
+#### 4A. Filesystem Mounting & Namespaces
+- [ ] **`mount`** (`cmds/core/mount`):
+  * **Linux / Rusticated+Linux**: Full authentic u-root `mount` (`pkg/mount`, `/proc/mounts`, `unix.Mount`).
+  * **macOS / Rusticated+macOS**: List mounts via `getfsstat` and invoke Darwin `mount(2)` via `purego` / `unix.Mount`.
+  * **Windows**: Allowed relaxation — clean error (`"mount: not supported on windows"`) and `return 1`.
+- [ ] **`umount`** (`cmds/core/umount`):
+  * **Linux / macOS**: Authentic `unix.Unmount` (`MNT_FORCE`, `MNT_DETACH` / Darwin flags).
+  * **Windows**: Clean unsupported error (`return 1`).
+- [ ] **`unmount`** (`cmds/core/unmount`): Alias/sibling to `umount`; same platform support.
+- [ ] **`bind`** (`cmds/core/bind`): Plan 9 style bind-mount wrapper over `mount`; works on Linux, clean fallback elsewhere.
+- [ ] **`mount9p`** (`cmds/core/mount9p`): 9P mount helper; works on Linux, clean fallback elsewhere.
+- [ ] **`fusermount`** (`cmds/core/fusermount`): FUSE mount helper; works on Linux, clean fallback elsewhere.
+- [ ] **`chroot`** (`cmds/core/chroot`):
+  * **Linux / macOS**: `unix.Chroot(ioEnv.ResolvePath(dir))` + command execution.
+  * **Windows**: Clean unsupported error (`return 1`).
+- [ ] **`unshare`** (`cmds/core/unshare`):
+  * **Linux**: Full authentic `unix.Unshare` namespace isolation.
+  * **macOS / Windows**: Clean unsupported error (`return 1`).
+- [ ] **`switch_root`** (`cmds/core/switch_root`): `package switchroot`;
+  * **Linux**: Authentic initramfs `switch_root` implementation.
+  * **macOS / Windows**: Clean unsupported error (`return 1`).
+
+#### 4B. Block Devices, Partitions & Special Nodes
+- [ ] **`blkid`** (`cmds/core/blkid`):
+  * Uses `u-root/pkg/mount/block` to inspect filesystem UUIDs/labels. Works natively on Linux `/sys/class/block` and on any OS when passed explicit disk image files.
+- [ ] **`gpt`** (`cmds/core/gpt`):
+  * Uses `u-root/pkg/boot/gpt` to read/write GUID Partition Tables on block devices or disk image files across all OSes.
+- [ ] **`losetup`** (`cmds/core/losetup`):
+  * **Linux**: Authentic `/dev/loop-control` and `/dev/loopN` `ioctl` implementation.
+  * **macOS / Windows**: Clean unsupported error (`return 1`).
+- [ ] **`mknod`** (`cmds/core/mknod`):
+  * **Linux / macOS**: Authentic `unix.Mknod`.
+  * **Windows**: Clean unsupported error (`return 1`).
+- [ ] **`mkfifo`** (`cmds/core/mkfifo`):
+  * **Linux / macOS**: Authentic `unix.Mkfifo`.
+  * **Windows**: Clean unsupported error (`return 1`).
+
+#### 4C. Network Daemons & Link Configuration
+- [ ] **`dhclient`** (`cmds/core/dhclient`):
+  * **Linux**: Authentic DHCPv4/DHCPv6 client configuring interfaces via netlink.
+  * **macOS / Windows**: Clean unsupported error (`return 1`).
+- [ ] **`brctl`** (`cmds/core/brctl`):
+  * **Linux**: Authentic Ethernet bridge administration (`pkg/brctl`).
+  * **macOS / Windows**: Clean unsupported error (`return 1`).
+- [ ] **`slattach`** (`cmds/core/slattach`):
+  * **Linux**: Authentic serial line network interface attachment (`ioctl`).
+  * **macOS / Windows**: Clean unsupported error (`return 1`).
+- [ ] **`ntpdate`** (`cmds/core/ntpdate`):
+  * Query NTP time via `u-root/pkg/ntp` (works on all platforms with `-q` query mode; setting system clock works on privileged Linux/macOS and fails gracefully on Windows).
+
+#### 4D. Kernel Modules, Bootloaders & Power Management
+- [ ] **`insmod`** (`cmds/core/insmod`):
+  * **Linux**: Authentic `pkg/kmod` (`finit_module` / `init_module`).
+  * **macOS / Windows**: Clean unsupported error (`return 1`).
+- [ ] **`rmmod`** (`cmds/core/rmmod`):
+  * **Linux**: Authentic `pkg/kmod` (`delete_module`).
+  * **macOS / Windows**: Clean unsupported error (`return 1`).
+- [ ] **`kexec`** (`cmds/core/kexec`):
+  * **Linux**: Authentic `kexec` kernel loader.
+  * **macOS / Windows**: Clean unsupported error (`return 1`).
+- [ ] **`reboot`** (`cmds/core/reboot`):
+  * **Linux / macOS**: Authentic `unix.Reboot` / `halt` syscall.
+  * **Windows**: Clean unsupported error (`return 1`).
+- [ ] **`poweroff`** (`cmds/core/poweroff`):
+  * **Linux / macOS**: Authentic poweroff via `unix.Reboot`.
+  * **Windows**: Clean unsupported error (`return 1`).
+- [ ] **`shutdown`** (`cmds/core/shutdown`):
+  * **Linux / macOS**: Authentic shutdown (`reboot` / `poweroff` / `halt`).
+  * **Windows**: Clean unsupported error (`return 1`).
+- [ ] **`init`** (`cmds/core/init`): `package initcmd`; Linux PID 1 initramfs initialization; clean error when not PID 1 or non-Linux.
+- [ ] **`sluinit`** (`cmds/core/sluinit`): Sabotage Linux uinit; clean error on non-Linux.
+- [ ] **`service`** (`cmds/core/service`): System V `/etc/init.d` script runner; works on Unix, clean error if `/etc/init.d` absent.
+- [ ] **`update-rc.d`** (`cmds/core/update-rc.d`): `package updatercd`; SysV init link manager; portable file/symlink logic.
+
+#### 4E. Hardware Registers, Tracing & Watchdogs
+- [ ] **`msr`** (`cmds/core/msr`):
+  * **Linux (x86)**: Authentic x86 Model-Specific Register reader/writer (`/dev/cpu/*/msr`).
+  * **Other**: Clean unsupported error (`return 1`).
+- [ ] **`lockmsrs`** (`cmds/core/lockmsrs`):
+  * **Linux (x86)**: Authentic Intel MSR lock verification.
+  * **Other**: Clean unsupported error (`return 1`).
+- [ ] **`io`** (`cmds/core/io`): `package iocmd`;
+  * **Linux**: Authentic `/dev/mem` and x86 port I/O (`pkg/memio`) reader/writer.
+  * **Other**: Clean unsupported error (`return 1`).
+- [ ] **`rsdp`** (`cmds/core/rsdp`):
+  * **Linux**: Authentic ACPI RSDP scanner (`pkg/acpi`).
+  * **Other**: Clean unsupported error (`return 1`).
+- [ ] **`hwclock`** (`cmds/core/hwclock`):
+  * **Linux**: Authentic `/dev/rtc` hardware clock reader/writer (`pkg/rtc`).
+  * **Other**: Clean unsupported error (`return 1`).
+- [ ] **`watchdog`** (`cmds/core/watchdog`):
+  * **Linux**: Authentic `/dev/watchdog` pet/control CLI (`pkg/watchdog`).
+  * **Other**: Clean unsupported error (`return 1`).
+- [ ] **`watchdogd`** (`cmds/core/watchdogd`):
+  * **Linux**: Authentic `/dev/watchdog` monitoring daemon (`pkg/watchdogd`).
+  * **Other**: Clean unsupported error (`return 1`).
+- [ ] **`strace`** (`cmds/core/strace`):
+  * **Linux**: Authentic `pkg/strace` (`ptrace` syscall tracer).
+  * **Other**: Clean unsupported error (`return 1`).
