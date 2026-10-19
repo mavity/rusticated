@@ -184,6 +184,14 @@ func buildBrainWasm(ws, outputWasm string, verbose bool) error {
 	return postProcessWasm(outputWasm)
 }
 
+// goBuildPIE reports whether the native washmhost for slot s is built as a
+// position-independent executable. Go's internal linker (CGO_ENABLED=0)
+// supports PIE on linux/amd64 and linux/arm64 only; linux/arm would need an
+// external linker, which this pipeline does not use.
+func goBuildPIE(s slot) bool {
+	return s.goos == "linux" && (s.goarch == "amd64" || s.goarch == "arm64")
+}
+
 func goBuild(ws, pkgDir string, s slot, buildDir string, verbose bool) error {
 	outPath := washmhostPath(buildDir, s)
 	goTmpDir := filepath.Join(buildDir, pkgDir, "gotmp", s.name)
@@ -205,6 +213,11 @@ func goBuild(ws, pkgDir string, s slot, buildDir string, verbose bool) error {
 
 	tmpOut := filepath.Join(goTmpDir, "build.dat")
 	args := []string{"build", "-trimpath", "-ldflags=" + ldFlags}
+	if goBuildPIE(s) {
+		// Static-PIE (ET_DYN): Android's linker rejects ET_EXEC with
+		// "unexpected e_type: 2"; desktop Linux runs PIE just as well.
+		args = append(args, "-buildmode=pie")
+	}
 	if verbose {
 		args = append(args, "-tags=verbose")
 	}

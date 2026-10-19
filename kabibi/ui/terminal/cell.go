@@ -602,8 +602,15 @@ func rgbTo256(r, g, b byte) byte {
 	return byte(16 + (36 * rIdx) + (6 * gIdx) + bIdx)
 }
 
-// FromANSIString renders raw ANSI-decorated text directly into an exact-fit CellBuf.
-func FromANSIString(s string, width int) CellBuf {
+// CursorPos represents a hardware cursor position in a virtual terminal buffer.
+type CursorPos struct {
+	X, Y    int
+	Visible bool
+}
+
+// FromANSIStringWithCursor renders raw ANSI-decorated text directly into an exact-fit CellBuf
+// and returns the exact cursor position reported by the virtual terminal emulator.
+func FromANSIStringWithCursor(s string, width int) (CellBuf, CursorPos) {
 	term := vt.NewEmulator(width, 24)
 	// In VT emulators without LNM (linefeed mode), bare LF only moves the cursor down (index)
 	// without carriage return. Ensure lines advance down-and-left.
@@ -616,10 +623,64 @@ func FromANSIString(s string, width int) CellBuf {
 	}
 
 	height := calculateGridHeight(term)
-	if height == 0 {
-		return NewCellBuf(width, 0)
+	sbLen := term.ScrollbackLen()
+	pos := term.CursorPosition()
+	cur := CursorPos{
+		X:       pos.X,
+		Y:       sbLen + pos.Y,
+		Visible: true,
 	}
-	return populateCellBufDirect(term, width, height)
+
+	if height == 0 {
+		return NewCellBuf(width, 0), cur
+	}
+	return populateCellBufDirect(term, width, height), cur
+}
+
+// FromANSIString renders raw ANSI-decorated text directly into an exact-fit CellBuf.
+func FromANSIString(s string, width int) CellBuf {
+	buf, _ := FromANSIStringWithCursor(s, width)
+	return buf
+}
+
+// TrimTrailingWhitespaceRows trims empty rows from the bottom of buf,
+// ensuring that the given cursor position (if visible and within bounds) is not trimmed off.
+func TrimTrailingWhitespaceRows(buf CellBuf, cur CursorPos) (CellBuf, CursorPos) {
+	if buf.Width <= 0 || buf.Height <= 0 {
+		return buf, cur
+	}
+	lastContentRow := -1
+	for y := buf.Height - 1; y >= 0; y-- {
+		for x := 0; x < buf.Width; x++ {
+			g := buf.Get(x, y).Grapheme
+			if g != "" && g != " " && !isInlineWhitespace(g) {
+				lastContentRow = y
+				break
+			}
+		}
+		if lastContentRow >= 0 {
+			break
+		}
+	}
+
+	keepRows := lastContentRow + 1
+	if cur.Visible && cur.Y >= 0 && cur.Y < buf.Height && cur.Y >= keepRows {
+		keepRows = cur.Y + 1
+	}
+	if keepRows < 1 {
+		keepRows = 1
+	}
+	if keepRows >= buf.Height {
+		return buf, cur
+	}
+
+	trimmed := NewCellBuf(buf.Width, keepRows)
+	for y := 0; y < keepRows; y++ {
+		for x := 0; x < buf.Width; x++ {
+			trimmed.Set(x, y, buf.Get(x, y))
+		}
+	}
+	return trimmed, cur
 }
 
 // FromANSI renders ANSI-decorated text lines into an exact-fit CellBuf.

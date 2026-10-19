@@ -125,6 +125,7 @@ type CommandBlock struct {
 	cachedSource   CommandSource
 	cachedStatus   CommandBlockStatus
 	cachedBuf      terminal.CellBuf
+	cachedCursor   terminal.CursorPos
 	cachePopulated bool
 
 	aiTurnParentIndex int

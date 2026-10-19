@@ -84,6 +84,13 @@ func cargoBuild(ws, pkgDir string, s slot, buildDir string, verbose bool) (strin
 		var rustflags []string
 		if s.goos == "linux" && !isRusticatedTarget {
 			rustflags = append(rustflags, "'-C'", "'link-self-contained=no'", "'-C'", "'linker=rust-lld'", "'-C'", "'linker-flavor=ld.lld'")
+			// Static-PIE (ET_DYN, no PT_INTERP). Android's linker rejects
+			// ET_EXEC; brot's _start applies the relocations itself.
+			rustflags = append(rustflags,
+				"'-C'", "'relocation-model=pic'",
+				"'-C'", "'target-feature=+crt-static'",
+				"'-C'", "'link-arg=-pie'",
+				"'-C'", "'link-arg=--no-dynamic-linker'")
 		}
 		if s.goos == "windows" && (strings.Contains(name, "windows-gnu") || strings.Contains(name, "windows-gnullvm")) {
 			// Brot is no_std/no_main and uses raw-dylib for all Win32 APIs.

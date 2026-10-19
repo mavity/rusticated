@@ -42,6 +42,27 @@ edition = "2021"
 	}
 }
 
+func TestGoBuildPIE(t *testing.T) {
+	tests := []struct {
+		name string
+		slot slot
+		want bool
+	}{
+		{name: "linux-amd64", slot: slot{goos: "linux", goarch: "amd64"}, want: true},
+		{name: "linux-arm64", slot: slot{goos: "linux", goarch: "arm64"}, want: true},
+		{name: "linux-arm", slot: slot{goos: "linux", goarch: "arm"}},
+		{name: "darwin-arm64", slot: slot{goos: "darwin", goarch: "arm64"}},
+		{name: "windows-amd64", slot: slot{goos: "windows", goarch: "amd64"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := goBuildPIE(tt.slot); got != tt.want {
+				t.Errorf("goBuildPIE(%+v) = %t, want %t", tt.slot, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestGenerateGoOverlayIncludesABIUserHomeTempOverride(t *testing.T) {
 	ws := t.TempDir()
 	goroot := runtime.GOROOT()

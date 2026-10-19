@@ -8,8 +8,9 @@ import (
 // Re-export terminal geometry types so sub-packages and tests can reference
 // them without a terminal. qualifier.
 type (
-	CellBuf = terminal.CellBuf
-	Rect    = terminal.Rect
+	CellBuf   = terminal.CellBuf
+	Rect      = terminal.Rect
+	CursorPos = terminal.CursorPos
 )
 
 // Re-export constructors that callers commonly need.
@@ -20,12 +21,6 @@ type Constraints struct{ MaxW, MaxH int }
 
 // Size defines the measured dimensions of a widget.
 type Size struct{ W, H int }
-
-// CursorPos describes a hardware cursor location relative to a widget's origin.
-type CursorPos struct {
-	X, Y    int
-	Visible bool
-}
 
 // InvalidateFunc is called by a widget to request a host redraw.
 type InvalidateFunc func()
