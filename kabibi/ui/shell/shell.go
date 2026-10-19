@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
-	"mvdan.cc/sh/moreinterp/coreutils"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
@@ -472,6 +471,7 @@ func createRunnerWithEnv(ctx context.Context, stdin io.Reader, stdout, stderr io
 		interp.Env(expand.ListEnviron(envPairs...)),
 		interp.StdIO(stdin, stdout, stderr),
 		interp.Params(args...),
+		interp.CallHandler(urootCallHandler),
 	}
 
 	// 1. Middleware for in-process nested shells (bash, sh, kabibi) and script files (.sh / #!).
@@ -550,7 +550,7 @@ func createRunnerWithEnv(ctx context.Context, stdin io.Reader, stdout, stderr io
 		nestedShellAndScriptMiddleware,
 		gitBuiltinMiddleware,
 		webBuiltinMiddleware,
-		coreutils.ExecHandler,
+		urootBuiltinMiddleware,
 		hostExecMiddleware,
 	))
 

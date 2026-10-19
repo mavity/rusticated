@@ -434,7 +434,7 @@ func RawSyscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err Errno) {
 		}
 
 		var sfx [][2]string
-		if target.module != "github.com/go-git/go-git/v5" {
+		if target.module != "github.com/go-git/go-git/v5" && target.module != "github.com/mattn/go-isatty" {
 			sfx = applyGateFlipsInMemory(target.jitDir, files)
 		}
 		for _, sf := range sfx {
@@ -642,7 +642,7 @@ func flipGoFileTagsInMemory(jitDir, rel string, files map[string][]byte) {
 	base := pathBaseSlash(rel)
 	dir := pathDirSlash(rel)
 
-	if isXSysCPUFile(jitDir, rel) {
+	if isXSysCPUFile(jitDir, rel) || strings.Contains(fullSlash, "github.com/mattn/go-isatty") {
 		return
 	}
 
@@ -848,7 +848,7 @@ func patchTermenvColorProfileInMemory(files map[string][]byte) {
 
 func addWasip1ExclusionToTag(content string) string {
 	// Clean up any existing wasip1 additions first
-	reWasip1 := regexp.MustCompile(`\s*(\|\||,)\s*wasip1|wasip1\s*(\|\||,)\s*`)
+	reWasip1 := regexp.MustCompile(`\s*(\|\||,)\s*wasip1|wasip1\s*(\|\||,)\s*|\s*(\|\||,)?\s*\bwasip1\b`)
 
 	re, err := regast.Compile(`(?m)^//(?:go:|\s*\+)build.*[\r\n]+\s*`)
 	if err != nil {
