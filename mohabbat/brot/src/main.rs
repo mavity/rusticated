@@ -200,16 +200,110 @@ pub fn print_err(msg: &str) {
 }
 
 // ─── Linux: naked _start — no CRT startup objects ────────────────────────────
+//
+// Brot is linked as a static-PIE (ET_DYN with no PT_INTERP). Nothing loads it
+// except the kernel, so nobody applies its dynamic relocations: _start must do
+// it before anything reads a pointer-bearing static, vtable or GOT slot.
+// _DYNAMIC and __ehdr_start are defined by the linker; both are addressed
+// PC-relative so no relocation is needed to reach them. __ehdr_start is the
+// load bias because the image is linked at base 0.
+
+/// Applies the RELATIVE relocations of a static-PIE image. Must not use any
+/// static data, vtable or panic path: it runs before relocations are applied.
+///
+/// # Safety
+/// `dynamic` must point at this image's `_DYNAMIC` array and `base` at its
+/// load address.
+#[cfg(target_os = "linux")]
+#[inline(never)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn brot_self_relocate(dynamic: *const usize, base: usize) {
+    const DT_NULL: usize = 0;
+    const DT_RELA: usize = 7;
+    const DT_RELASZ: usize = 8;
+    const DT_REL: usize = 17;
+    const DT_RELSZ: usize = 18;
+    #[cfg(target_arch = "x86_64")]
+    const R_RELATIVE: usize = 8; // R_X86_64_RELATIVE
+    #[cfg(target_arch = "aarch64")]
+    const R_RELATIVE: usize = 1027; // R_AARCH64_RELATIVE
+    #[cfg(target_arch = "arm")]
+    const R_RELATIVE: usize = 23; // R_ARM_RELATIVE
+
+    #[cfg(target_pointer_width = "64")]
+    const TYPE_MASK: usize = 0xffff_ffff;
+    #[cfg(target_pointer_width = "32")]
+    const TYPE_MASK: usize = 0xff;
+
+    let mut rela: usize = 0;
+    let mut rela_sz: usize = 0;
+    let mut rel: usize = 0;
+    let mut rel_sz: usize = 0;
+
+    let mut d = dynamic;
+    loop {
+        let tag = unsafe { *d };
+        if tag == DT_NULL {
+            break;
+        }
+        let val = unsafe { *d.add(1) };
+        if tag == DT_RELA {
+            rela = val;
+        } else if tag == DT_RELASZ {
+            rela_sz = val;
+        } else if tag == DT_REL {
+            rel = val;
+        } else if tag == DT_RELSZ {
+            rel_sz = val;
+        }
+        d = unsafe { d.add(2) };
+    }
+
+    // Elf{32,64}_Rela: offset, info, addend.
+    if rela != 0 {
+        let mut p = base.wrapping_add(rela) as *const usize;
+        let end = base.wrapping_add(rela).wrapping_add(rela_sz) as *const usize;
+        while p < end {
+            let offset = unsafe { *p };
+            let info = unsafe { *p.add(1) };
+            let addend = unsafe { *p.add(2) };
+            if info & TYPE_MASK == R_RELATIVE {
+                unsafe { *(base.wrapping_add(offset) as *mut usize) = base.wrapping_add(addend) };
+            }
+            p = unsafe { p.add(3) };
+        }
+    }
+
+    // Elf{32,64}_Rel: offset, info; the addend is stored in place.
+    if rel != 0 {
+        let mut p = base.wrapping_add(rel) as *const usize;
+        let end = base.wrapping_add(rel).wrapping_add(rel_sz) as *const usize;
+        while p < end {
+            let offset = unsafe { *p };
+            let info = unsafe { *p.add(1) };
+            if info & TYPE_MASK == R_RELATIVE {
+                let slot = base.wrapping_add(offset) as *mut usize;
+                unsafe { *slot = (*slot).wrapping_add(base) };
+            }
+            p = unsafe { p.add(2) };
+        }
+    }
+}
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
     core::arch::naked_asm!(
-        "mov rdi, rsp", // Pass original stack pointer to linux::run
+        "mov rbx, rsp", // Preserve original stack pointer for linux::run
         "xor rbp, rbp",
         "and rsp, -16",
+        "lea rdi, [rip + _DYNAMIC]",
+        "lea rsi, [rip + __ehdr_start]",
+        "call {reloc}",
+        "mov rdi, rbx", // Pass original stack pointer to linux::run
         "call {f}",
+        reloc = sym brot_self_relocate,
         f = sym linux::run,
     );
 }
@@ -219,10 +313,17 @@ pub unsafe extern "C" fn _start() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
     core::arch::naked_asm!(
-        "mov x0, sp", // Pass original stack pointer to linux::run
+        "mov x19, sp", // Preserve original stack pointer for linux::run
         "mov x29, xzr",
         "mov x30, xzr",
+        "adrp x0, _DYNAMIC",
+        "add x0, x0, :lo12:_DYNAMIC",
+        "adrp x1, __ehdr_start",
+        "add x1, x1, :lo12:__ehdr_start",
+        "bl {reloc}",
+        "mov x0, x19", // Pass original stack pointer to linux::run
         "b {f}",
+        reloc = sym brot_self_relocate,
         f = sym linux::run,
     );
 }
@@ -232,10 +333,19 @@ pub unsafe extern "C" fn _start() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
     core::arch::naked_asm!(
-        "mov r0, sp", // Pass original stack pointer to linux::run
+        "mov r4, sp", // Preserve original stack pointer for linux::run
         "mov r11, #0",
         "mov lr, #0",
+        "ldr r0, 2f",
+        "1: add r0, pc, r0", // pc reads as . + 8 in ARM state
+        "ldr r1, 3f",
+        "4: add r1, pc, r1",
+        "bl {reloc}",
+        "mov r0, r4", // Pass original stack pointer to linux::run
         "bl {f}",
+        "2: .word _DYNAMIC - (1b + 8)",
+        "3: .word __ehdr_start - (4b + 8)",
+        reloc = sym brot_self_relocate,
         f = sym linux::run,
     );
 }
