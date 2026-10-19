@@ -83,7 +83,7 @@ func (m *ManagedPTY) markExited(code int, err error) {
 }
 
 // CleanBytesToText renders raw PTY output through a virtual terminal CellBuf
-// (`terminal.FromANSI`) of width `cols` so `\r` spinner redraws, backspaces, and
+// (`terminal.FromANSIString`) of width `cols` so `\r` spinner redraws, backspaces, and
 // cursor jumps collapse into the settled 2D character grid.
 // When keepANSI is false (default), it extracts plain settled text with right-margin
 // spaces trimmed. When keepANSI is true, it strips foreground/background colors
@@ -95,10 +95,7 @@ func CleanBytesToText(raw []byte, cols int, keepANSI bool) string {
 	if cols <= 0 {
 		cols = 78
 	}
-	s := strings.ReplaceAll(string(raw), "\r\n", "\n")
-	s = strings.TrimSuffix(s, "\n")
-	lines := strings.Split(s, "\n")
-	buf := terminal.FromANSI(lines, cols)
+	buf := terminal.FromANSIString(string(raw), cols)
 	return CleanCellBufToText(buf, keepANSI)
 }
 

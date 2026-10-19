@@ -602,12 +602,37 @@ func rgbTo256(r, g, b byte) byte {
 	return byte(16 + (36 * rIdx) + (6 * gIdx) + bIdx)
 }
 
+// FromANSIString renders raw ANSI-decorated text directly into an exact-fit CellBuf.
+func FromANSIString(s string, width int) CellBuf {
+	term := vt.NewEmulator(width, 24)
+	// In VT emulators without LNM (linefeed mode), bare LF only moves the cursor down (index)
+	// without carriage return. Ensure lines advance down-and-left.
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' && (i == 0 || s[i-1] != '\r') {
+			_, _ = term.WriteString("\r\n")
+		} else {
+			_, _ = term.Write([]byte{s[i]})
+		}
+	}
+
+	height := calculateGridHeight(term)
+	if height == 0 {
+		return NewCellBuf(width, 0)
+	}
+	return populateCellBufDirect(term, width, height)
+}
+
 // FromANSI renders ANSI-decorated text lines into an exact-fit CellBuf.
 // The resulting buffer height is precisely sized to the visual output,
 // eliminating untouched trailing viewport space while preserving intentional
-// leading blank lines. Intermediate row slice allocations are eliminated by
-// direct streaming conversion into a single flat CellBuf allocation.
+// leading blank lines.
 func FromANSI(lines []string, width int) CellBuf {
+	if len(lines) == 0 {
+		return NewCellBuf(width, 0)
+	}
+	if len(lines) == 1 {
+		return FromANSIString(lines[0], width)
+	}
 	term := vt.NewEmulator(width, 24)
 
 	for i, line := range lines {
@@ -617,13 +642,10 @@ func FromANSI(lines []string, width int) CellBuf {
 		}
 	}
 
-	// Phase 1: Calculate exact grid height (no intermediate allocations)
 	height := calculateGridHeight(term)
 	if height == 0 {
 		return NewCellBuf(width, 0)
 	}
-
-	// Phase 2 & 3: Single allocation + direct streaming population
 	return populateCellBufDirect(term, width, height)
 }
 

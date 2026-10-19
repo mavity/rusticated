@@ -139,9 +139,14 @@ type AICommandUISink interface {
 // NewExecutionSession creates a new persistent shell execution session rooted at dir.
 func NewExecutionSession(dir string) (*ExecutionSession, error) {
 	dw := &dynamicWriter{}
-	ttyIn := shellTTYStdin{}
+	ttyPipeR, ttyPipeW, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	_ = ttyPipeW.Close()
+
 	es := &ExecutionSession{
-		ttyIn:        ttyIn,
+		ttyIn:        ttyPipeR,
 		streamOut:    dw,
 		nextRecordID: 1,
 		ptyCols:      80,
@@ -149,8 +154,9 @@ func NewExecutionSession(dir string) (*ExecutionSession, error) {
 		bgProcs:      make(map[int]*ManagedPTY),
 		nextProcID:   1,
 	}
-	r, err := createRunnerForSession(context.Background(), es, ttyIn, dw, dw, dir, nil, nil)
+	r, err := createRunnerForSession(context.Background(), es, ttyPipeR, dw, dw, dir, nil, nil)
 	if err != nil {
+		_ = ttyPipeR.Close()
 		return nil, err
 	}
 

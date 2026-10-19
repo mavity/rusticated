@@ -452,32 +452,23 @@ func renderBlockCached(block *CommandBlock, width int) terminal.CellBuf {
 		return block.cachedBuf
 	}
 
-	var lines []string
+	var rawText string
 	if block.Kind == BlockBanner || (block.Prompt == "" && block.Input == "") {
-		if outLen > 0 {
-			out := strings.ReplaceAll(block.Output.String(), "\r\n", "\n")
-			out = strings.TrimSuffix(out, "\n")
-			lines = append(lines, strings.Split(out, "\n")...)
-		}
+		rawText = block.Output.String()
 	} else {
-		lines = append(lines, block.Prompt+block.Input)
-		if outLen > 0 {
-			out := strings.ReplaceAll(block.Output.String(), "\r\n", "\n")
-			out = strings.TrimSuffix(out, "\n")
-			lines = append(lines, strings.Split(out, "\n")...)
-		}
+		rawText = block.Prompt + block.Input + "\n" + block.Output.String()
 	}
 	if block.Status == StatusActive && block.AnimLine != "" {
-		lines = append(lines, block.AnimLine)
-	}
-	if len(lines) == 0 {
-		lines = []string{""}
+		if rawText != "" && !strings.HasSuffix(rawText, "\n") {
+			rawText += "\n"
+		}
+		rawText += block.AnimLine
 	}
 
 	var buf terminal.CellBuf
 	if block.Source == SourceAITool && width > 4 {
 		innerW := width - 2
-		inner := terminal.FromANSI(lines, innerW)
+		inner := terminal.FromANSIString(rawText, innerW)
 		inner = trimTrailingWhitespaceRows(inner)
 		if inner.Height == 0 {
 			inner = terminal.NewCellBuf(innerW, 1)
@@ -498,7 +489,7 @@ func renderBlockCached(block *CommandBlock, width int) terminal.CellBuf {
 		}
 		buf.Blit(inner, 2, 0)
 	} else {
-		buf = terminal.FromANSI(lines, width)
+		buf = terminal.FromANSIString(rawText, width)
 		if buf.Height == 0 {
 			buf = terminal.NewCellBuf(width, 1)
 		}
@@ -928,7 +919,31 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 		cursor = ui.CursorPos{
 			X:       inputCursor.X,
 			Y:       inputTopY + inputCursor.Y,
-			Visible: inputCursor.Visible && !running,
+			Visible: inputCursor.Visible,
+		}
+	} else if running && s.execSess != nil && s.execSess.HasActivePTY() && bufferRow > 0 {
+		// When an interactive child command is running in a live PTY, place the cursor on the active row
+		activeRow := bufferRow - 1
+		if activeRow < 0 {
+			activeRow = 0
+		}
+		cursorX := 0
+		if activeRow < buf.Height {
+			// Find rightmost non-blank column on the active line
+			for col := w - 1; col >= 0; col-- {
+				if g := buf.Get(col, activeRow).Grapheme; g != "" && g != " " {
+					cursorX = col + 1
+					break
+				}
+			}
+			if cursorX >= w {
+				cursorX = w - 1
+			}
+		}
+		cursor = ui.CursorPos{
+			X:       cursorX,
+			Y:       activeRow,
+			Visible: true,
 		}
 	} else {
 		lastRow := collectedRows - 1
@@ -1050,6 +1065,29 @@ func (s *Shell) HandleEvent(e input.Event) bool {
 }
 
 func encodeKeyForPTY(ev input.KeyPressEvent) []byte {
+	// First check control character modifiers (ctrl+a through ctrl+z)
+	s := strings.ToLower(ev.String())
+	if strings.HasPrefix(s, "ctrl+") && len(s) == 6 {
+		ch := s[5]
+		if ch >= 'a' && ch <= 'z' {
+			return []byte{ch - 'a' + 1}
+		}
+		switch ch {
+		case '@', ' ':
+			return []byte{0x00}
+		case '[':
+			return []byte{0x1b}
+		case '\\':
+			return []byte{0x1c}
+		case ']':
+			return []byte{0x1d}
+		case '^':
+			return []byte{0x1e}
+		case '_':
+			return []byte{0x1f}
+		}
+	}
+
 	switch ev.Code {
 	case input.KeyEnter:
 		return []byte("\r")
@@ -1067,15 +1105,25 @@ func encodeKeyForPTY(ev input.KeyPressEvent) []byte {
 		return []byte("\x1b[C")
 	case input.KeyLeft:
 		return []byte("\x1b[D")
+	case input.KeyHome:
+		return []byte("\x1b[H")
+	case input.KeyEnd:
+		return []byte("\x1b[F")
+	case input.KeyPgUp:
+		return []byte("\x1b[5~")
+	case input.KeyPgDown:
+		return []byte("\x1b[6~")
+	case input.KeyDelete:
+		return []byte("\x1b[3~")
 	case input.KeySpace:
 		return []byte(" ")
 	}
 	if ev.Text != "" {
 		return []byte(ev.Text)
 	}
-	s := ev.String()
-	if len(s) == 1 {
-		return []byte(s)
+	raw := ev.String()
+	if len(raw) == 1 {
+		return []byte(raw)
 	}
 	return nil
 }
@@ -1083,24 +1131,7 @@ func encodeKeyForPTY(ev input.KeyPressEvent) []byte {
 func (s *Shell) handleKeyEvent(ev input.KeyPressEvent) bool {
 	keyStr := ev.String()
 
-	// Ctrl+C cancels an active command/AI turn or clears current input
-	if keyStr == "ctrl+c" {
-		s.mu.Lock()
-		if s.running && s.activeCancel != nil {
-			cancel := s.activeCancel
-			s.mu.Unlock()
-			cancel()
-			return true
-		}
-		s.mu.Unlock()
-		if s.input.Value() != "" {
-			s.input.Reset()
-			s.invalidate()
-			return true
-		}
-		return false
-	}
-
+	// If a command is actively running, prioritize forwarding keystrokes (including Ctrl+C) to the child PTY
 	s.mu.Lock()
 	running := s.running
 	execSess := s.execSess
@@ -1110,6 +1141,26 @@ func (s *Shell) handleKeyEvent(ev input.KeyPressEvent) bool {
 			if raw := encodeKeyForPTY(ev); len(raw) > 0 {
 				return execSess.WriteActivePTY(raw)
 			}
+		}
+		// If running without active PTY (e.g. AI turn), Ctrl+C cancels the active turn
+		if keyStr == "ctrl+c" {
+			s.mu.Lock()
+			cancel := s.activeCancel
+			s.mu.Unlock()
+			if cancel != nil {
+				cancel()
+				return true
+			}
+		}
+		return false
+	}
+
+	// When not running, Ctrl+C clears current input
+	if keyStr == "ctrl+c" {
+		if s.input.Value() != "" {
+			s.input.Reset()
+			s.invalidate()
+			return true
 		}
 		return false
 	}
