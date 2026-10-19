@@ -43,11 +43,12 @@ var allTargets = []Target{
 
 func printHelp(version string) {
 	fmt.Printf(`Mohabbat Release Builder v%s
-Orchestrates building all workspace projects into self-contained vegetables.
+Orchestrates building all workspace projects into self-contained vegetables
+and packaging a complete website distribution in release/dist/.
 
 Mohabbat turns Go and Rust projects into single-file polyglot executables (*.bat)
-capable of running across Linux, Windows, macOS, and Node.js. This tool executes
-the canonical build pipeline sequentially to populate the release/ directory.
+capable of running across Linux, Windows, macOS, and in browsers via washmhost.
+This tool executes the build pipeline sequentially to populate release/dist/.
 The first build error immediately halts the batch.
 
 USAGE:
@@ -88,9 +89,9 @@ func main() {
 		}
 	}
 
-	releaseDir := filepath.Join(ws, "release")
-	if err := os.MkdirAll(releaseDir, 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "🍆  error: failed to create release directory: %v\n", err)
+	distDir := filepath.Join(ws, "release", "dist")
+	if err := os.MkdirAll(distDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "🍆  error: failed to create release/dist directory: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -99,12 +100,12 @@ func main() {
 	fmt.Println("================================================================================")
 	fmt.Printf("🍆  Mohabbat Release Orchestrator v%s\n", meta.Version)
 	fmt.Printf("🍆  Workspace:   %s\n", ws)
-	fmt.Printf("🍆  Destination: %s\n", releaseDir)
-	fmt.Printf("🍆  Total:       %d vegetables\n", len(allTargets))
+	fmt.Printf("🍆  Destination: %s\n", distDir)
+	fmt.Printf("🍆  Total:       %d vegetables + website distribution\n", len(allTargets))
 	fmt.Println("================================================================================")
 
 	rootMohabPath := filepath.Join(ws, "mohab.bat")
-	releaseMohabPath := filepath.Join(releaseDir, "mohab.bat")
+	distMohabPath := filepath.Join(distDir, "mohab.bat")
 
 	artifacts := make([]BuiltArtifact, 0, len(allTargets))
 
@@ -130,12 +131,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := copyFile(rootMohabPath, releaseMohabPath); err != nil {
-		fmt.Fprintf(os.Stderr, "\n🍆  FAILED: copy mohab.bat to release/: %v\n", err)
+	if err := copyFile(rootMohabPath, distMohabPath); err != nil {
+		fmt.Fprintf(os.Stderr, "\n🍆  FAILED: copy mohab.bat to release/dist/: %v\n", err)
 		os.Exit(1)
 	}
 
-	mohabStat, err := os.Stat(releaseMohabPath)
+	mohabStat, err := os.Stat(distMohabPath)
 	var mohabSize int64
 	if err == nil {
 		mohabSize = mohabStat.Size()
@@ -153,10 +154,10 @@ func main() {
 	// Step 2: Remaining targets
 	for i, t := range allTargets[1:] {
 		idx := i + 2
-		destPath := filepath.Join(releaseDir, t.OutputName)
+		destPath := filepath.Join(distDir, t.OutputName)
 
 		fmt.Println("\n--------------------------------------------------------------------------------")
-		fmt.Printf("🍆  [%d/11] Assembling %s -> release/%s [%s]\n", idx, t.ProjectDir, t.OutputName, t.Language)
+		fmt.Printf("🍆  [%d/11] Assembling %s -> release/dist/%s [%s]\n", idx, t.ProjectDir, t.OutputName, t.Language)
 		fmt.Println("--------------------------------------------------------------------------------")
 
 		tStep := time.Now()
@@ -192,14 +193,54 @@ func main() {
 		fmt.Printf("🍆  Completed %s (%s) in %s\n", t.OutputName, formatSize(destSize), dStep.Round(time.Millisecond))
 	}
 
-	// Step 3: Bundle all *.bat vegetables into release/vegetables.zip
+	// Step 3: Stage website bundle into release/dist
 	fmt.Println("\n--------------------------------------------------------------------------------")
-	fmt.Println("🍆  [Zip Archive] Packaging all vegetables into release/vegetables.zip")
+	fmt.Println("🍆  [Website Bundle] Staging index.html, README.md, washmhost.js, and .nojekyll")
+	fmt.Println("--------------------------------------------------------------------------------")
+
+	siteAssets := []struct {
+		src string
+		dst string
+	}{
+		{src: filepath.Join(ws, "index.html"), dst: filepath.Join(distDir, "index.html")},
+		{src: filepath.Join(ws, "README.md"), dst: filepath.Join(distDir, "README.md")},
+		{src: filepath.Join(ws, "mohabbat", "washmhost", "js", "browser", "index.js"), dst: filepath.Join(distDir, "washmhost.js")},
+		{src: filepath.Join(ws, "mohabbat", "washmhost", "js", "browser", "index.js"), dst: filepath.Join(distDir, "mohabbat", "washmhost", "js", "browser", "index.js")},
+	}
+
+	for _, sa := range siteAssets {
+		if err := os.MkdirAll(filepath.Dir(sa.dst), 0o755); err != nil {
+			fmt.Fprintf(os.Stderr, "\n🍆  FAILED: create directory for %s: %v\n", sa.dst, err)
+			os.Exit(1)
+		}
+		if err := copyFile(sa.src, sa.dst); err != nil {
+			fmt.Fprintf(os.Stderr, "\n🍆  FAILED: copy %s -> %s: %v\n", sa.src, sa.dst, err)
+			os.Exit(1)
+		}
+	}
+
+	noJekyllPath := filepath.Join(distDir, ".nojekyll")
+	if err := os.WriteFile(noJekyllPath, []byte{}, 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "\n🍆  FAILED: create .nojekyll: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("🍆  Website bundle staged cleanly in release/dist/")
+
+	// Step 4: Bundle full monty into release/dist/vegetables.zip
+	fmt.Println("\n--------------------------------------------------------------------------------")
+	fmt.Println("🍆  [Zip Archive] Packaging all vegetables & website into release/dist/vegetables.zip")
 	fmt.Println("--------------------------------------------------------------------------------")
 
 	tZip := time.Now()
-	zipPath := filepath.Join(releaseDir, "vegetables.zip")
-	if err := createReleaseZip(zipPath, releaseDir, allTargets); err != nil {
+	zipPath := filepath.Join(distDir, "vegetables.zip")
+	extraZipFiles := []string{
+		"index.html",
+		"README.md",
+		"washmhost.js",
+		filepath.Join("mohabbat", "washmhost", "js", "browser", "index.js"),
+		".nojekyll",
+	}
+	if err := createReleaseZip(zipPath, distDir, allTargets, extraZipFiles); err != nil {
 		fmt.Fprintf(os.Stderr, "\n🍆  FAILED: create vegetables.zip: %v\n", err)
 		os.Exit(1)
 	}
@@ -214,17 +255,18 @@ func main() {
 
 	totalDuration := time.Since(totalStart).Round(time.Millisecond)
 
-	// Step 4: Summary output table
+	// Step 5: Summary output table
 	printBuildSummary(artifacts, BuiltArtifact{
 		Name:     "vegetables.zip",
 		Language: "Zip",
 		Size:     zipSize,
 		Duration: dZip,
-		Desc:     fmt.Sprintf("Complete archive containing all %d vegetables", len(allTargets)),
+		Desc:     fmt.Sprintf("Complete archive containing all %d vegetables + website", len(allTargets)),
 	}, totalDuration)
+	fmt.Println("🍆  Success: Full distribution ready in release/dist/ for GitHub Pages or offline use.")
 }
 
-func createReleaseZip(zipPath, releaseDir string, targets []Target) error {
+func createReleaseZip(zipPath, distDir string, targets []Target, extraFiles []string) error {
 	zFile, err := os.Create(zipPath)
 	if err != nil {
 		return fmt.Errorf("create zip file: %w", err)
@@ -234,36 +276,52 @@ func createReleaseZip(zipPath, releaseDir string, targets []Target) error {
 	zw := zip.NewWriter(zFile)
 	defer zw.Close()
 
-	for _, t := range targets {
-		batPath := filepath.Join(releaseDir, t.OutputName)
-		info, err := os.Stat(batPath)
+	addFileToZip := func(filePath, entryName string) error {
+		info, err := os.Stat(filePath)
 		if err != nil {
-			return fmt.Errorf("stat %s: %w", t.OutputName, err)
+			return fmt.Errorf("stat %s: %w", entryName, err)
 		}
 
 		header, err := zip.FileInfoHeader(info)
 		if err != nil {
-			return fmt.Errorf("create header for %s: %w", t.OutputName, err)
+			return fmt.Errorf("create header for %s: %w", entryName, err)
 		}
 
-		header.Name = t.OutputName
+		header.Name = filepath.ToSlash(entryName)
 		header.Method = zip.Deflate
 		header.SetMode(0755)
 
 		w, err := zw.CreateHeader(header)
 		if err != nil {
-			return fmt.Errorf("create zip entry %s: %w", t.OutputName, err)
+			return fmt.Errorf("create zip entry %s: %w", entryName, err)
 		}
 
-		f, err := os.Open(batPath)
+		f, err := os.Open(filePath)
 		if err != nil {
-			return fmt.Errorf("open %s: %w", t.OutputName, err)
+			return fmt.Errorf("open %s: %w", entryName, err)
 		}
+		defer f.Close()
 
 		_, err = io.Copy(w, f)
-		_ = f.Close()
 		if err != nil {
-			return fmt.Errorf("compress %s: %w", t.OutputName, err)
+			return fmt.Errorf("compress %s: %w", entryName, err)
+		}
+		return nil
+	}
+
+	for _, t := range targets {
+		batPath := filepath.Join(distDir, t.OutputName)
+		if err := addFileToZip(batPath, t.OutputName); err != nil {
+			return err
+		}
+	}
+
+	for _, relPath := range extraFiles {
+		filePath := filepath.Join(distDir, relPath)
+		if _, err := os.Stat(filePath); err == nil {
+			if err := addFileToZip(filePath, relPath); err != nil {
+				return err
+			}
 		}
 	}
 
