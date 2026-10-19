@@ -104,60 +104,14 @@ func main() {
 	fmt.Printf("🍆  Total:       %d vegetables + website distribution\n", len(allTargets))
 	fmt.Println("================================================================================")
 
-	rootMohabPath := filepath.Join(ws, "mohab.bat")
-	distMohabPath := filepath.Join(distDir, "mohab.bat")
-
 	artifacts := make([]BuiltArtifact, 0, len(allTargets))
 
-	// Step 1: mohab.bat
-	fmt.Println("\n--------------------------------------------------------------------------------")
-	fmt.Println("🍆  [1/11] Building core compiler: mohab.bat")
-	fmt.Println("--------------------------------------------------------------------------------")
-
-	t0 := time.Now()
-	var cmd *exec.Cmd
-	if verbose {
-		cmd = exec.Command("go", "run", ".", "-v")
-	} else {
-		cmd = exec.Command("go", "run", ".")
-	}
-	cmd.Dir = ws
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "\n🍆  FAILED: mohab.bat build failed after %s: %v\n", time.Since(t0).Round(time.Millisecond), err)
-		os.Exit(1)
-	}
-
-	if err := copyFile(rootMohabPath, distMohabPath); err != nil {
-		fmt.Fprintf(os.Stderr, "\n🍆  FAILED: copy mohab.bat to release/dist/: %v\n", err)
-		os.Exit(1)
-	}
-
-	mohabStat, err := os.Stat(distMohabPath)
-	var mohabSize int64
-	if err == nil {
-		mohabSize = mohabStat.Size()
-	}
-	d0 := time.Since(t0)
-	artifacts = append(artifacts, BuiltArtifact{
-		Name:     "mohab.bat",
-		Language: allTargets[0].Language,
-		Size:     mohabSize,
-		Duration: d0,
-		Desc:     allTargets[0].Desc,
-	})
-	fmt.Printf("🍆  Completed mohab.bat (%s) in %s\n", formatSize(mohabSize), d0.Round(time.Millisecond))
-
-	// Step 2: Remaining targets
-	for i, t := range allTargets[1:] {
-		idx := i + 2
+	for i, t := range allTargets {
+		idx := i + 1
 		destPath := filepath.Join(distDir, t.OutputName)
 
 		fmt.Println("\n--------------------------------------------------------------------------------")
-		fmt.Printf("🍆  [%d/11] Assembling %s -> release/dist/%s [%s]\n", idx, t.ProjectDir, t.OutputName, t.Language)
+		fmt.Printf("🍆  [%d/%d] Assembling %s -> release/dist/%s [%s]\n", idx, len(allTargets), t.ProjectDir, t.OutputName, t.Language)
 		fmt.Println("--------------------------------------------------------------------------------")
 
 		tStep := time.Now()
