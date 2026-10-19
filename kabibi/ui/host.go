@@ -267,7 +267,7 @@ func (h *Host) processLoop(getSizeFunc func(fd uintptr) (w, ht int, err error)) 
 			}
 		case <-h.stopCh:
 			// Drain any final messages queued just before Stop() was invoked
-			needsRender := false
+			needsRender := h.dirty.Swap(false)
 			for {
 				select {
 				case msg, ok := <-h.msgCh:

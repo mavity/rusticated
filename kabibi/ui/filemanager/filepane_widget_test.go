@@ -183,14 +183,23 @@ func TestDualPaneWidgetLayoutHasSingleDividerColumn(t *testing.T) {
 	buf := dp.RenderBuf()
 	dividerX := dp.Right.X - 1
 	for y := 0; y < dp.Height; y++ {
-		if cell := buf.Get(dividerX, y); cell.Grapheme != "│" || cell.Style.Foreground() != colorGray || cell.Style.Background() != colorBlue {
-			t.Fatalf("divider column should be a single gray-on-blue pipe at x=%d,y=%d, got %#v", dividerX, y, cell)
+		wantGrapheme := "│"
+		wantSide := " "
+		if y == 0 {
+			wantGrapheme = "┬"
+			wantSide = "─"
+		} else if y == dp.Height-1 {
+			wantGrapheme = "┴"
+			wantSide = "─"
 		}
-		if cell := buf.Get(dp.Left.X+dp.Left.Width-1, y); cell.Grapheme != " " || cell.Style.Background() != colorBlue {
-			t.Fatalf("left pane should not retain its right border at x=%d,y=%d, got %#v", dp.Left.X+dp.Left.Width-1, y, cell)
+		if cell := buf.Get(dividerX, y); cell.Grapheme != wantGrapheme || cell.Style.Foreground() != colorGray || cell.Style.Background() != colorBlue {
+			t.Fatalf("divider column junction at x=%d,y=%d want %q, got %#v", dividerX, y, wantGrapheme, cell)
 		}
-		if cell := buf.Get(dp.Right.X, y); cell.Grapheme != " " || cell.Style.Background() != colorBlue {
-			t.Fatalf("right pane should not retain its left border at x=%d,y=%d, got %#v", dp.Right.X, y, cell)
+		if cell := buf.Get(dp.Left.X+dp.Left.Width-1, y); cell.Grapheme != wantSide || cell.Style.Background() != colorBlue {
+			t.Fatalf("left border next to divider at x=%d,y=%d want %q, got %#v", dp.Left.X+dp.Left.Width-1, y, wantSide, cell)
+		}
+		if cell := buf.Get(dp.Right.X, y); cell.Grapheme != wantSide || cell.Style.Background() != colorBlue {
+			t.Fatalf("right border next to divider at x=%d,y=%d want %q, got %#v", dp.Right.X, y, wantSide, cell)
 		}
 	}
 }
@@ -234,5 +243,43 @@ func TestFilePaneWidgetActiveInactiveRender(t *testing.T) {
 	}
 	if got := inactBuf.Get(2, 1).Style.Background(); got != colorBlue {
 		t.Fatalf("inactive selected row background = 0x%06X, want 0x%06X", got, colorBlue)
+	}
+}
+
+func TestDualPaneWidget_DividerJunctions(t *testing.T) {
+	dp := NewDualPaneWidget()
+	dp.Layout(Rect{X: 0, Y: 0, W: 80, H: 20})
+	buf := dp.RenderBuf()
+
+	dividerX := dp.Left.Width
+	if dividerX <= 0 || dividerX >= 80 {
+		t.Fatalf("unexpected dividerX: %d", dividerX)
+	}
+
+	// Top junction: ┬ at dividerX, ─ on left and right
+	if got := buf.Get(dividerX, 0).Grapheme; got != "┬" {
+		t.Errorf("top junction grapheme at (%d, 0) = %q, want %q", dividerX, got, "┬")
+	}
+	if got := buf.Get(dividerX-1, 0).Grapheme; got != "─" {
+		t.Errorf("top border left of junction at (%d, 0) = %q, want %q", dividerX-1, got, "─")
+	}
+	if got := buf.Get(dividerX+1, 0).Grapheme; got != "─" {
+		t.Errorf("top border right of junction at (%d, 0) = %q, want %q", dividerX+1, got, "─")
+	}
+
+	// Bottom junction: ┴ at dividerX, ─ on left and right
+	if got := buf.Get(dividerX, 19).Grapheme; got != "┴" {
+		t.Errorf("bottom junction grapheme at (%d, 19) = %q, want %q", dividerX, got, "┴")
+	}
+	if got := buf.Get(dividerX-1, 19).Grapheme; got != "─" {
+		t.Errorf("bottom border left of junction at (%d, 19) = %q, want %q", dividerX-1, got, "─")
+	}
+	if got := buf.Get(dividerX+1, 19).Grapheme; got != "─" {
+		t.Errorf("bottom border right of junction at (%d, 19) = %q, want %q", dividerX+1, got, "─")
+	}
+
+	// Middle divider: │
+	if got := buf.Get(dividerX, 5).Grapheme; got != "│" {
+		t.Errorf("middle divider grapheme at (%d, 5) = %q, want %q", dividerX, got, "│")
 	}
 }

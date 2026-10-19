@@ -66,6 +66,7 @@ func NewWidget(opts AppWidgetOptions) *AppWidget {
 			}
 		},
 		OnExit: func() {
+			w.SetPanelsVisible(false)
 			if w.onExit != nil {
 				w.onExit()
 			}
@@ -143,9 +144,7 @@ func (w *AppWidget) PanelsVisible() bool {
 func (w *AppWidget) SetPanelsVisible(v bool) {
 	w.mu.Lock()
 	w.panelsVisible = v
-	if v {
-		w.fullScreenClaimed = true
-	}
+	w.fullScreenClaimed = v
 	w.mu.Unlock()
 
 	w.sh.SetBottomAligned(v)
@@ -215,6 +214,7 @@ func (w *AppWidget) SetExitHandler(fn func()) {
 
 // Close releases resources held by the widget and its embedded shell.
 func (w *AppWidget) Close() error {
+	w.SetPanelsVisible(false)
 	w.mu.Lock()
 	cancel := w.opCancel
 	w.mu.Unlock()

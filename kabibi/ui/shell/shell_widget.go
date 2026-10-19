@@ -1122,6 +1122,12 @@ func (s *Shell) handleKeyEvent(ev input.KeyPressEvent) bool {
 		return true
 	}
 
+	if keyStr == "ctrl+d" && s.input.Value() == "" {
+		s.input.SetValue("exit")
+		s.submitAndExecuteAsync()
+		return true
+	}
+
 	return s.input.HandleEvent(ev)
 }
 

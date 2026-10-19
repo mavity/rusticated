@@ -1039,14 +1039,14 @@ func TestAppTUI_BluePanels_ShownThenWithdrawn_TopAnchoredDownwardGrowth(t *testi
 	}
 
 	// 2. Withdraw panels (Ctrl+O again) -> stack must immediately anchor at row 0
-	// (3 banner rows at 0..2, PromptInput at row 3, blank footer at row 4 -> occupied height 5)
+	// (banner rows at 0..3, PromptInput at row 4, blank footer at row 5 -> occupied height 6)
 	appWidget.SetPanelsVisible(false)
 	bufWithdrawn, curWithdrawn := appWidget.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 10}, ui.RenderContext{Focused: true})
-	if curWithdrawn.Y != 3 {
-		t.Fatalf("after withdrawing panels, expected PromptInput cursor at top-anchored row 3, got %d", curWithdrawn.Y)
+	if curWithdrawn.Y != 4 {
+		t.Fatalf("after withdrawing panels, expected PromptInput cursor at top-anchored row 4, got %d", curWithdrawn.Y)
 	}
-	if bufWithdrawn.Height != 5 {
-		t.Fatalf("after withdrawing panels, expected Shell rendered height 5 (3 banner + 1 input + 1 footer), got %d", bufWithdrawn.Height)
+	if bufWithdrawn.Height != 6 {
+		t.Fatalf("after withdrawing panels, expected Shell rendered height 6 (4 banner + 1 input + 1 footer), got %d", bufWithdrawn.Height)
 	}
 
 	// 3. Now run inside Host on 80x10: open panels, withdraw panels, run 2 commands
@@ -1144,5 +1144,96 @@ func TestAppTUI_BluePanels_ShownThenWithdrawn_TopAnchoredDownwardGrowth(t *testi
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Host.RunWithIO did not exit")
+	}
+}
+
+// TestAppTUI_ExitWithPanelsOpenRemovesPanelsAndRetainsHistory verifies that
+// when the shell exits while blue panels are visible, the blue panels are
+// immediately removed and the TUI is rerendered with only the shell and history
+// so the final terminal viewport retains history without ephemeral panels.
+func TestAppTUI_ExitWithPanelsOpenRemovesPanelsAndRetainsHistory(t *testing.T) {
+	workDir := t.TempDir()
+
+	var host *ui.Host
+	appWidget := NewWidget(AppWidgetOptions{
+		WorkingDir:    workDir,
+		PanelsVisible: true,
+		OnExit: func() {
+			if host != nil {
+				host.Stop()
+			}
+		},
+	})
+	defer appWidget.Close()
+	appWidget.Shell().SetPrompt("፧")
+
+	host = ui.NewHost(appWidget)
+
+	inR, inW := io.Pipe()
+	defer inR.Close()
+	defer inW.Close()
+
+	var rawTermOut syncBuffer
+	const termW, termH = 80, 24
+
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- host.RunWithIO(
+			inR,
+			&rawTermOut,
+			func(uintptr) (*xterm.State, error) { return &xterm.State{}, nil },
+			func(uintptr, *xterm.State) error { return nil },
+			func(uintptr) (int, int, error) { return termW, termH, nil },
+		)
+	}()
+
+	// Wait for initial frame showing blue panels
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(rawTermOut.String(), "left") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if !appWidget.PanelsVisible() {
+		t.Fatal("expected panels to be visible initially")
+	}
+
+	// Exit the shell while panels are open
+	if _, err := io.WriteString(inW, "exit\r"); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Host.RunWithIO returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Host.RunWithIO stalled on exit")
+	}
+
+	if appWidget.PanelsVisible() {
+		t.Fatal("expected panelsVisible to be false after exit")
+	}
+
+	// Verify against VT emulator that the final screen has no blue panels
+	emu := vt.NewEmulator(termW, termH)
+	_, _ = emu.WriteString(rawTermOut.String())
+
+	var finalLines []string
+	for _, line := range extractEmulatorLines(emu, termW, termH) {
+		if strings.TrimSpace(line) != "" {
+			finalLines = append(finalLines, line)
+		}
+	}
+
+	finalJoined := strings.Join(finalLines, "\n")
+	if strings.Contains(finalJoined, "left") || strings.Contains(finalJoined, "right") || strings.Contains(finalJoined, "┬") {
+		t.Fatalf("final terminal screen still contains panel artifacts:\n%s", finalJoined)
+	}
+	if !strings.Contains(finalJoined, "exit") {
+		t.Fatalf("final terminal screen should retain shell exit command:\n%s", finalJoined)
 	}
 }
