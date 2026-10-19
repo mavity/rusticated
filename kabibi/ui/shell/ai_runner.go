@@ -239,12 +239,12 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 
 func kabibiSystemMessage(envContext string, sysContext string) string {
 	message := defaultKabibiSystemPrompt
-	if envContext != "" {
+	if strings.TrimSpace(envContext) != "" {
 		message = message + "\n\n" +
 			"You are running on " + envContext + " - you use this information to answer questions and make infererences."
 	}
 
-	if sysContext != "" {
+	if strings.TrimSpace(sysContext) != "" {
 		message = message + "\n\n" +
 			"The computer you're running on has " + sysContext + " - you also use this information to answer questions and make infererences."
 	}

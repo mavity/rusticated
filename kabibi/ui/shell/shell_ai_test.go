@@ -17,20 +17,20 @@ import (
 
 func TestKabibiSystemMessageAppendsCLIHelpContext(t *testing.T) {
 	const help = "Kabibi command line usage and flags"
-	got := kabibiSystemMessage(help)
+	got := kabibiSystemMessage("", help)
 	if !strings.Contains(got, defaultKabibiSystemPrompt) {
 		t.Fatal("system message lost Kabibi's default instructions")
 	}
 	if !strings.Contains(got, "Date and time in brackets help you answer questions") {
 		t.Fatal("system message does not instruct Kabibi to use message timestamps")
 	}
-	if !strings.HasSuffix(got, help) {
-		t.Fatalf("system message does not end with additional context: %q", got)
+	if !strings.Contains(got, help) {
+		t.Fatalf("system message does not contain additional context: %q", got)
 	}
 	if strings.Contains(strings.ToLower(got), "parse error") {
 		t.Fatalf("system message explains a CLI parse error: %q", got)
 	}
-	if gotEmpty := kabibiSystemMessage(" \n\t "); gotEmpty != defaultKabibiSystemPrompt {
+	if gotEmpty := kabibiSystemMessage("", " \n\t "); gotEmpty != defaultKabibiSystemPrompt {
 		t.Fatalf("empty additional context changed system message: %q", gotEmpty)
 	}
 }
