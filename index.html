@@ -178,6 +178,7 @@
       This works over file:// purely because README.md is polyglot Javascript and Markdown 
     -->
     <script src="README.md"></script>
+    <script type="module" src="washmhost.js"></script>
     <script type="module" src="mohabbat/washmhost/js/browser/index.js"></script>
 
     <script>
@@ -290,10 +291,15 @@
             };
 
             const candidateSources = [
-                'https://github.com/user-attachments/files/33643453/kabibi.bat.txt',
-                './release/kabibi.wasm',
+                './kabibi.bat',
+                './kabibi.wasm',
+                './release/dist/kabibi.bat',
+                './release/dist/kabibi.wasm',
                 './release/kabibi.bat',
-                './release/kabibi.bat.txt'
+                './release/kabibi.wasm',
+                'https://github.com/user-attachments/files/33643453/kabibi.bat.txt',
+                './release/kabibi.bat.txt',
+                './try/kabibi.wasm'
             ];
 
             let lastErr = null;
