@@ -152,8 +152,8 @@ func (h *Host) runCore(
 		}
 		if h.hasRenderedOnce {
 			// Move to the start of the line below the last occupied row (h.prevCursorY on exit),
-			// clear any blank footer/slack rows below it, and show the cursor.
-			h.out.WriteString("\r\n\x1b[2K\x1b[J\x1b[?25h")
+			// clear any blank footer/slack rows below it, reset SGR color, and show the cursor.
+			h.out.WriteString("\x1b[0m\r\n\x1b[2K\x1b[J\x1b[?25h")
 		}
 		h.out.WriteString("\x1b[?1006l\x1b[?1000l")
 		h.out.Flush()
@@ -449,10 +449,13 @@ func (h *Host) runFrame(
 			if prevAlloc > 0 && bufH > prevAlloc {
 				extraRows := bufH - prevAlloc
 				lastOldRow := prevAlloc - 1
-				h.moveRelativeRow(h.prevCursorY, lastOldRow)
+				var expSb strings.Builder
+				appendRelativeRow(&expSb, h.prevCursorY, lastOldRow)
+				expSb.WriteString("\x1b[0m")
 				for i := 0; i < extraRows; i++ {
-					h.out.WriteString("\r\n")
+					expSb.WriteString("\r\n")
 				}
+				h.out.WriteString(expSb.String())
 				h.prevCursorY = bufH - 1
 			}
 			// If jumping straight to full-screen HUD height (bufH == ht) from a smaller stack,
@@ -540,16 +543,24 @@ func (h *Host) spanDetect() (lineMin, lineMax int, changed bool) {
 	return iMin / W, iMax / W, true
 }
 
+// appendRelativeRow formats relative vertical cursor movement from fromRow to toRow
+// within h.currBuf into sb and returns the cursor to column 0.
+func appendRelativeRow(sb *strings.Builder, fromRow, toRow int) {
+	dy := toRow - fromRow
+	if dy < 0 {
+		fmt.Fprintf(sb, "\x1b[%dA", -dy)
+	} else if dy > 0 {
+		fmt.Fprintf(sb, "\x1b[%dB", dy)
+	}
+	sb.WriteString("\r")
+}
+
 // moveRelativeRow moves the terminal cursor vertically from fromRow to toRow
 // within h.currBuf and returns the cursor to column 0.
 func (h *Host) moveRelativeRow(fromRow, toRow int) {
-	dy := toRow - fromRow
-	if dy < 0 {
-		fmt.Fprintf(h.out, "\x1b[%dA", -dy)
-	} else if dy > 0 {
-		fmt.Fprintf(h.out, "\x1b[%dB", dy)
-	}
-	h.out.WriteString("\r")
+	var sb strings.Builder
+	appendRelativeRow(&sb, fromRow, toRow)
+	h.out.WriteString(sb.String())
 }
 
 func (h *Host) emitDirtyRegion(lineMin, lineMax int) {
@@ -558,8 +569,6 @@ func (h *Host) emitDirtyRegion(lineMin, lineMax int) {
 	if h.hasRenderedOnce {
 		fromRow = h.prevCursorY
 	}
-	h.moveRelativeRow(fromRow, lineMin)
-	h.out.WriteString("\x1b[2K")
 
 	// 2. Serialise the dirty sub-slice in a single ToANSI pass.
 	// Temporarily strip CharSoftWrap on the final row of subBuf so ToANSI always
@@ -580,7 +589,7 @@ func (h *Host) emitDirtyRegion(lineMin, lineMax int) {
 			}
 		}
 	}
-	h.out.WriteString(terminal.ToANSI(subBuf))
+	subAnsi := terminal.ToANSI(subBuf)
 	if subBuf.Width > 0 {
 		for y := 0; y < subH; y++ {
 			if hasSoft[y] {
@@ -589,8 +598,21 @@ func (h *Host) emitDirtyRegion(lineMin, lineMax int) {
 		}
 	}
 
-	// 3. Position hardware cursor from lineMax to (h.cursorX, h.cursorY) and set visibility.
-	h.positionCursorFrom(lineMax)
+	// 3. Assemble the entire rerender into ONE atomic string chunk:
+	// - Cursor movement to lineMin
+	// - SGR reset (\x1b[0m) so BCE uses default background color
+	// - Clear line (\x1b[2K)
+	// - The ToANSI serialized cells
+	// - Cursor positioning to (h.cursorX, h.cursorY) and visibility
+	var sb strings.Builder
+	sb.Grow(len(subAnsi) + 64)
+	appendRelativeRow(&sb, fromRow, lineMin)
+	sb.WriteString("\x1b[0m\x1b[2K")
+	sb.WriteString(subAnsi)
+	appendCursorPos(&sb, lineMax, h.cursorX, h.cursorY, h.cursorVisible)
+
+	// 4. Emit the entire frame in a single WriteString and Flush.
+	h.out.WriteString(sb.String())
 	h.out.Flush()
 }
 
@@ -599,25 +621,34 @@ func (h *Host) emitCursorOnly() {
 	if h.hasRenderedOnce {
 		fromRow = h.prevCursorY
 	}
-	h.positionCursorFrom(fromRow)
+	var sb strings.Builder
+	appendCursorPos(&sb, fromRow, h.cursorX, h.cursorY, h.cursorVisible)
+	h.out.WriteString(sb.String())
 	h.out.Flush()
 }
 
-func (h *Host) positionCursorFrom(fromRow int) {
-	dy := h.cursorY - fromRow
+// appendCursorPos formats cursor movement from fromRow to (cursorX, cursorY) and visibility into sb.
+func appendCursorPos(sb *strings.Builder, fromRow, cursorX, cursorY int, cursorVisible bool) {
+	dy := cursorY - fromRow
 	if dy < 0 {
-		fmt.Fprintf(h.out, "\x1b[%dA", -dy)
+		fmt.Fprintf(sb, "\x1b[%dA", -dy)
 	} else if dy > 0 {
-		fmt.Fprintf(h.out, "\x1b[%dB", dy)
+		fmt.Fprintf(sb, "\x1b[%dB", dy)
 	}
-	if h.cursorVisible {
-		h.out.WriteString("\x1b[?25h\r")
-		if h.cursorX > 0 {
-			fmt.Fprintf(h.out, "\x1b[%dC", h.cursorX)
+	if cursorVisible {
+		sb.WriteString("\x1b[?25h\r")
+		if cursorX > 0 {
+			fmt.Fprintf(sb, "\x1b[%dC", cursorX)
 		}
 	} else {
-		h.out.WriteString("\r\x1b[?25l")
+		sb.WriteString("\r\x1b[?25l")
 	}
+}
+
+func (h *Host) positionCursorFrom(fromRow int) {
+	var sb strings.Builder
+	appendCursorPos(&sb, fromRow, h.cursorX, h.cursorY, h.cursorVisible)
+	h.out.WriteString(sb.String())
 }
 
 func (h *Host) flushScrollbackAndFrame(
@@ -637,13 +668,17 @@ func (h *Host) flushScrollbackAndFrame(
 	h.prevBuf = terminal.NewCellBuf(w, bufH)
 	copy(h.currBuf.Cells()[:occH*w], rendered.Cells()[:occH*w])
 
+	var sb strings.Builder
 	if h.hasRenderedOnce && h.prevCursorY > 0 {
-		fmt.Fprintf(h.out, "\x1b[%dA", h.prevCursorY)
+		fmt.Fprintf(&sb, "\x1b[%dA", h.prevCursorY)
 	}
 	if scrollBuf.Height > 0 {
-		h.out.WriteString("\r\x1b[2K\x1b[J")
-		h.out.WriteString(terminal.ToANSI(scrollBuf))
-		h.out.WriteString("\r\n")
+		sb.WriteString("\x1b[0m\r\x1b[2K\x1b[J")
+		sb.WriteString(terminal.ToANSI(scrollBuf))
+		sb.WriteString("\r\n")
+	}
+	if sb.Len() > 0 {
+		h.out.WriteString(sb.String())
 	}
 
 	h.hasRenderedOnce = false
