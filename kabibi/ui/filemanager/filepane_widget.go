@@ -822,13 +822,32 @@ func (w *DualPaneWidget) RenderBuf() CellBuf {
 		}
 		if dividerX >= 0 && dividerX < w.Width {
 			for y := 0; y < w.Height; y++ {
-				if dividerX-1 >= 0 {
-					buf.Set(dividerX-1, y, makeCell(' ', colorWhite, colorBlue, false))
+				switch y {
+				case 0:
+					if dividerX-1 >= 0 {
+						buf.Set(dividerX-1, y, makeCell('─', colorGray, colorBlue, false))
+					}
+					if dividerX+1 < w.Width {
+						buf.Set(dividerX+1, y, makeCell('─', colorGray, colorBlue, false))
+					}
+					buf.Set(dividerX, y, makeCell('┬', colorGray, colorBlue, false))
+				case w.Height - 1:
+					if dividerX-1 >= 0 {
+						buf.Set(dividerX-1, y, makeCell('─', colorGray, colorBlue, false))
+					}
+					if dividerX+1 < w.Width {
+						buf.Set(dividerX+1, y, makeCell('─', colorGray, colorBlue, false))
+					}
+					buf.Set(dividerX, y, makeCell('┴', colorGray, colorBlue, false))
+				default:
+					if dividerX-1 >= 0 {
+						buf.Set(dividerX-1, y, makeCell(' ', colorWhite, colorBlue, false))
+					}
+					if dividerX+1 < w.Width {
+						buf.Set(dividerX+1, y, makeCell(' ', colorWhite, colorBlue, false))
+					}
+					buf.Set(dividerX, y, makeCell('│', colorGray, colorBlue, false))
 				}
-				if dividerX+1 < w.Width {
-					buf.Set(dividerX+1, y, makeCell(' ', colorWhite, colorBlue, false))
-				}
-				buf.Set(dividerX, y, makeCell('│', colorGray, colorBlue, false))
 			}
 		}
 	}
