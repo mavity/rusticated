@@ -1,9 +1,25 @@
 package dload
 
 import (
+	"os"
 	"runtime"
 	"testing"
 )
+
+func TestDloadOpenConfiguredLibrary(t *testing.T) {
+	path := os.Getenv("DLOAD_TEST_LIBRARY")
+	if path == "" {
+		t.Skip("set DLOAD_TEST_LIBRARY to test opening a native library through the satellite")
+	}
+
+	handle, err := DylibOpen(path, RTLD_NOW)
+	if err != nil {
+		t.Fatalf("DylibOpen(%q): %v", path, err)
+	}
+	if err := DylibClose(handle); err != nil {
+		t.Fatalf("DylibClose(%d): %v", handle, err)
+	}
+}
 
 func TestDloadBasic(t *testing.T) {
 	libName := "kernel32.dll"

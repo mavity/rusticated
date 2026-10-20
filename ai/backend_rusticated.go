@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"strings"
 	"sync"
 	"unsafe"
 )
@@ -125,6 +126,11 @@ func (d *rusticatedDriver) writeBool(addr uint64, val bool) {
 }
 
 func (d *rusticatedDriver) stringToCPtr(s string) (uint64, func()) {
+	if len(s) >= 4 && s[0] == '/' &&
+		((s[1] >= 'A' && s[1] <= 'Z') || (s[1] >= 'a' && s[1] <= 'z')) &&
+		s[2] == ':' && s[3] == '/' {
+		s = strings.ReplaceAll(s[1:], "/", `\`)
+	}
 	ptr, free, err := dload.CString(lmLib, s)
 	if err != nil {
 		return 0, func() {}
