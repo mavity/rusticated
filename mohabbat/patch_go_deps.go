@@ -141,6 +141,12 @@ func applyWasip1DepPatches(ws, projectDir, goroot string) (*depPatchResult, erro
 			}
 		}
 
+		if isKabibiClipboardDependency(target.module, string(gomodContent)) {
+			if err := patchAtottoClipboardInMemory(files); err != nil {
+				return nil, fmt.Errorf("patch %s for Kabibi: %w", target.module, err)
+			}
+		}
+
 		if target.module == "github.com/go-git/go-git/v5" {
 			addGoGitWasip1Compatibility(files)
 		}

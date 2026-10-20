@@ -23,7 +23,7 @@ type App struct {
 // 1. Creating Shell with a callback that captures the host pointer (initially nil)
 // 2. Creating Host with Shell as root
 // 3. Assigning the host pointer so the callback becomes live
-func New() *App {
+func New(verbose bool) *App {
 	// This pointer will be assigned after Host is created, resolving circular wiring
 	var hostPtr *ui.Host
 
@@ -42,7 +42,7 @@ func New() *App {
 	})
 
 	// Create Host with Shell as root widget
-	h := ui.NewHost(sh)
+	h := ui.NewHost(sh, verbose)
 
 	// NOW assign the host pointer so callbacks become live
 	hostPtr = h

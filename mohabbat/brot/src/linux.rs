@@ -1,4 +1,5 @@
 use alloc::vec::Vec;
+use core::fmt::{self, Write};
 
 // ─── Syscall wrappers ─────────────────────────────────────────────────────────
 
@@ -663,6 +664,73 @@ unsafe fn from_cstr<'a>(p: *const u8) -> &'a [u8] {
     unsafe { core::slice::from_raw_parts(p, len) }
 }
 
+unsafe fn env_is_verbose(envp: *const *const u8) -> bool {
+    let mut ptr = envp;
+    while !unsafe { (*ptr).is_null() } {
+        if unsafe { from_cstr(*ptr) } == b"MOHABBAT_VERBOSE=1" {
+            return true;
+        }
+        ptr = unsafe { ptr.add(1) };
+    }
+    false
+}
+
+struct TraceBuffer {
+    bytes: [u8; 1024],
+    len: usize,
+    truncated: bool,
+}
+
+impl TraceBuffer {
+    fn new() -> Self {
+        Self {
+            bytes: [0; 1024],
+            len: 0,
+            truncated: false,
+        }
+    }
+
+    fn finish(mut self) -> ([u8; 1024], usize) {
+        if self.truncated {
+            self.bytes[self.len..self.len + 3].copy_from_slice(b"...");
+            self.len += 3;
+        }
+        self.bytes[self.len] = b'\n';
+        self.len += 1;
+        (self.bytes, self.len)
+    }
+}
+
+impl Write for TraceBuffer {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        let available = self.bytes.len() - 4 - self.len;
+        let count = core::cmp::min(available, text.len());
+        self.bytes[self.len..self.len + count].copy_from_slice(&text.as_bytes()[..count]);
+        self.len += count;
+        self.truncated |= count < text.len();
+        Ok(())
+    }
+}
+
+fn trace_args(verbose: bool, args: fmt::Arguments<'_>) {
+    if !verbose {
+        return;
+    }
+    let mut line = TraceBuffer::new();
+    let _ = line.write_str("[mohabbat:brot] ");
+    let _ = line.write_fmt(args);
+    let (bytes, len) = line.finish();
+    unsafe {
+        let _ = write_all(2, &bytes[..len]);
+    }
+}
+
+macro_rules! trace {
+    ($enabled:expr, $($arg:tt)*) => {
+        trace_args($enabled, format_args!($($arg)*))
+    };
+}
+
 // ─── Main logic ──────────────────────────────────────────────────────────────
 
 pub unsafe fn run(sp: *const usize) -> ! {
@@ -681,56 +749,144 @@ pub unsafe fn run(sp: *const usize) -> ! {
     // [sp+8+8*argc] = NULL
     // [sp+8+8*argc+8] = envp[0]
     let argc = unsafe { *sp };
+    let argv = unsafe { sp.add(1) } as *const *const u8;
+    let envp = unsafe { sp.add(1 + argc + 1) } as *const *const u8;
+    let verbose = unsafe { env_is_verbose(envp) };
+    let arch = if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        "arm"
+    };
+    trace!(
+        verbose,
+        "entry pid={} argc={} arch={}",
+        unsafe { sys_getpid() },
+        argc,
+        arch
+    );
     if argc < 7 {
+        trace!(verbose, "invalid launcher argc={}", argc);
         unsafe { sys_exit_group(102) };
     }
 
-    let argv = unsafe { sp.add(1) } as *const *const u8;
-    let envp = unsafe { sp.add(1 + argc + 1) } as *const *const u8;
-
     // argv[1] is the bat file path (the "vegetable").
     let bat_path_ptr = unsafe { *argv.add(1) };
+    trace!(
+        verbose,
+        "vegetable path={}",
+        core::str::from_utf8(unsafe { from_cstr(bat_path_ptr) }).unwrap_or("<non-utf8>")
+    );
+    trace!(
+        verbose,
+        "forwarded argument count={}",
+        argc.saturating_sub(7)
+    );
 
     let pool_len = unsafe {
         let p = *argv.add(2);
-        if p.is_null() { sys_exit_group(102); }
+        if p.is_null() {
+            trace!(verbose, "missing launcher argument index=2 (pool length)");
+            sys_exit_group(102);
+        }
         match crate::parse_u64_bytes(from_cstr(p)) {
             Some(v) => v as usize,
-            None => sys_exit_group(103),
+            None => {
+                trace!(verbose, "invalid launcher argument index=2 (pool length)");
+                sys_exit_group(103);
+            }
         }
     };
     let washmhost_offset = unsafe {
         let p = *argv.add(3);
-        if p.is_null() { sys_exit_group(102); }
+        if p.is_null() {
+            trace!(
+                verbose,
+                "missing launcher argument index=3 (washmhost offset)"
+            );
+            sys_exit_group(102);
+        }
         match crate::parse_u64_bytes(from_cstr(p)) {
             Some(v) => v as usize,
-            None => sys_exit_group(103),
+            None => {
+                trace!(
+                    verbose,
+                    "invalid launcher argument index=3 (washmhost offset)"
+                );
+                sys_exit_group(103);
+            }
         }
     };
     let washmhost_len = unsafe {
         let p = *argv.add(4);
-        if p.is_null() { sys_exit_group(102); }
+        if p.is_null() {
+            trace!(
+                verbose,
+                "missing launcher argument index=4 (washmhost length)"
+            );
+            sys_exit_group(102);
+        }
         match crate::parse_u64_bytes(from_cstr(p)) {
             Some(v) => v as usize,
-            None => sys_exit_group(103),
+            None => {
+                trace!(
+                    verbose,
+                    "invalid launcher argument index=4 (washmhost length)"
+                );
+                sys_exit_group(103);
+            }
         }
     };
     let payload_offset = unsafe {
         let p = *argv.add(5);
-        if p.is_null() { sys_exit_group(102); }
+        if p.is_null() {
+            trace!(
+                verbose,
+                "missing launcher argument index=5 (payload offset)"
+            );
+            sys_exit_group(102);
+        }
         match crate::parse_u64_bytes(from_cstr(p)) {
             Some(v) => v as usize,
-            None => sys_exit_group(103),
+            None => {
+                trace!(
+                    verbose,
+                    "invalid launcher argument index=5 (payload offset)"
+                );
+                sys_exit_group(103);
+            }
         }
     };
     let payload_len = unsafe {
         let p = *argv.add(6);
-        if p.is_null() { sys_exit_group(102); }
+        if p.is_null() {
+            trace!(
+                verbose,
+                "missing launcher argument index=6 (payload length)"
+            );
+            sys_exit_group(102);
+        }
         match crate::parse_u64_bytes(from_cstr(p)) {
             Some(v) => v as usize,
-            None => sys_exit_group(103),
+            None => {
+                trace!(
+                    verbose,
+                    "invalid launcher argument index=6 (payload length)"
+                );
+                sys_exit_group(103);
+            }
         }
     };
+    trace!(
+        verbose,
+        "launcher metadata: pool_bytes={} washmhost_offset={} washmhost_bytes={} payload_offset={} payload_bytes={}",
+        pool_len,
+        washmhost_offset,
+        washmhost_len,
+        payload_offset,
+        payload_len
+    );
 
     // Filter out TMPDIR from environment.
     let mut tmp_prefix: &[u8] = b"/tmp";
@@ -747,27 +903,44 @@ pub unsafe fn run(sp: *const usize) -> ! {
     // ── Open the vegetable file and read the compressed pool ──────────────
     let fd = unsafe { sys_open(bat_path_ptr, O_RDONLY, 0) };
     if fd < 0 {
+        trace!(verbose, "open vegetable failed: syscall_result={}", fd);
         unsafe { sys_exit_group(2) };
     }
+    trace!(verbose, "opened vegetable fd={}", fd);
 
     let file_size = unsafe { sys_lseek(fd, 0, SEEK_END) };
     if file_size < 0 {
+        trace!(
+            verbose,
+            "seek vegetable end failed: syscall_result={}", file_size
+        );
         unsafe { sys_close(fd) };
         unsafe { sys_exit_group(3) };
     }
+    trace!(
+        verbose,
+        "vegetable bytes={} compressed_pool_bytes={}", file_size, pool_len
+    );
 
     if pool_len == 0 {
+        trace!(verbose, "invalid compressed pool length=0");
         unsafe { sys_close(fd) };
         unsafe { sys_exit_group(4) };
     }
 
     let pool_start = file_size - pool_len as i64;
     if pool_start < 0 {
+        trace!(
+            verbose,
+            "compressed pool starts before file: pool_start={}", pool_start
+        );
         unsafe { sys_close(fd) };
         unsafe { sys_exit_group(5) };
     }
+    trace!(verbose, "compressed pool offset={}", pool_start);
 
     if unsafe { sys_lseek(fd, pool_start, SEEK_SET) } < 0 {
+        trace!(verbose, "seek compressed pool failed");
         unsafe { sys_close(fd) };
         unsafe { sys_exit_group(6) };
     }
@@ -783,6 +956,10 @@ pub unsafe fn run(sp: *const usize) -> ! {
             )
         };
         if n <= 0 {
+            trace!(
+                verbose,
+                "read compressed pool failed: bytes_read={} syscall_result={}", total_read, n
+            );
             unsafe { sys_close(fd) };
             unsafe { sys_exit_group(7) };
         }
@@ -793,10 +970,26 @@ pub unsafe fn run(sp: *const usize) -> ! {
     // ── Decompress pool ───────────────────────────────────────────────────
     let total_pool = payload_offset + payload_len;
     let mut decompressed = alloc::vec![0u8; total_pool];
-    
+    trace!(
+        verbose,
+        "decompressing pool: compressed_bytes={} expected_output_bytes={} washmhost_offset={} washmhost_bytes={} payload_offset={} payload_bytes={}",
+        compressed_data.len(),
+        total_pool,
+        washmhost_offset,
+        washmhost_len,
+        payload_offset,
+        payload_len
+    );
+
     if crate::decompress::decompress(&compressed_data, &mut decompressed).is_err() {
+        trace!(verbose, "decompression failed");
         unsafe { sys_exit_group(8) };
     }
+    trace!(
+        verbose,
+        "decompression succeeded: bytes={}",
+        decompressed.len()
+    );
     drop(compressed_data);
 
     let payload_data = &decompressed[payload_offset..payload_offset + payload_len];
@@ -821,26 +1014,55 @@ pub unsafe fn run(sp: *const usize) -> ! {
 
     let tmp_fd = unsafe { sys_open(washmhost_path.as_ptr(), O_RDWR | O_CREAT | O_EXCL, 0o600) };
     if tmp_fd < 0 {
+        trace!(
+            verbose,
+            "create washmhost failed: syscall_result={}", tmp_fd
+        );
         unsafe { sys_exit_group(10) };
     }
+    trace!(
+        verbose,
+        "created washmhost path={} fd={} bytes={}",
+        core::str::from_utf8(&washmhost_path[..washmhost_path.len() - 1]).unwrap_or("<non-utf8>"),
+        tmp_fd,
+        washmhost_data.len()
+    );
 
     if !unsafe { write_all(tmp_fd, washmhost_data) } {
+        trace!(verbose, "writing washmhost failed");
         unsafe { sys_close(tmp_fd) };
         unsafe { sys_unlink(washmhost_path.as_ptr()) };
         unsafe { sys_exit_group(11) };
     }
     // Make washmhost executable via fchmod (we still have the fd from open).
-    unsafe { sys_fchmod(tmp_fd, 0o755) };
+    let chmod_result = unsafe { sys_fchmod(tmp_fd, 0o755) };
+    trace!(verbose, "washmhost chmod result={}", chmod_result);
     unsafe { sys_close(tmp_fd) };
+    if chmod_result < 0 {
+        unsafe { sys_unlink(washmhost_path.as_ptr()) };
+        unsafe { sys_exit_group(11) };
+    }
 
     // ── Write payload to a temp file ──────────────────────────────────────
     let payload_fd = unsafe { sys_open(payload_path.as_ptr(), O_RDWR | O_CREAT | O_EXCL, 0o600) };
     if payload_fd < 0 {
+        trace!(
+            verbose,
+            "create payload failed: syscall_result={}", payload_fd
+        );
         unsafe { sys_unlink(washmhost_path.as_ptr()) };
         unsafe { sys_exit_group(14) };
     }
+    trace!(
+        verbose,
+        "created payload path={} fd={} bytes={}",
+        core::str::from_utf8(&payload_path[..payload_path.len() - 1]).unwrap_or("<non-utf8>"),
+        payload_fd,
+        payload_data.len()
+    );
 
     if !unsafe { write_all(payload_fd, payload_data) } {
+        trace!(verbose, "writing payload failed");
         unsafe { sys_close(payload_fd) };
         unsafe { sys_unlink(payload_path.as_ptr()) };
         unsafe { sys_unlink(washmhost_path.as_ptr()) };
@@ -881,6 +1103,7 @@ pub unsafe fn run(sp: *const usize) -> ! {
 
     // ── fork + execve ─────────────────────────────────────────────────────
     let child_pid = unsafe { sys_fork() };
+    trace!(verbose, "fork result={}", child_pid);
 
     if child_pid < 0 {
         // fork failed
@@ -894,29 +1117,63 @@ pub unsafe fn run(sp: *const usize) -> ! {
         unsafe { sys_prctl(1, 9, 0, 0, 0) };
 
         // Child: exec washmhost
-        unsafe {
+        let exec_result = unsafe {
             sys_execve(
                 washmhost_path.as_ptr(),
                 argv_ptrs.as_ptr(),
                 envp_ptrs.as_ptr(),
             )
         };
+        trace!(
+            verbose,
+            "execve washmhost returned: syscall_result={}", exec_result
+        );
         // execve returned → failure
         unsafe { sys_exit_group(17) };
     }
 
     // ── Parent: wait for child ─────────────────────────────────────────────
     let mut wait_status: i32 = 0;
-    unsafe { sys_wait4(child_pid, &mut wait_status) };
+    let mut wait_result;
+    loop {
+        wait_result = unsafe { sys_wait4(child_pid, &mut wait_status) };
+        if wait_result != -4 {
+            break;
+        }
+        trace!(verbose, "wait4 interrupted by EINTR; retrying");
+    }
 
     unsafe { sys_unlink(payload_path.as_ptr()) };
     unsafe { sys_unlink(washmhost_path.as_ptr()) };
 
+    if wait_result < 0 {
+        trace!(
+            verbose,
+            "wait4 failed: syscall_result={} raw_status=0x{:08x}", wait_result, wait_status as u32
+        );
+        unsafe { sys_exit_group(1) };
+    }
+
     // WIFEXITED(status): (status & 0x7f) == 0
     // WEXITSTATUS(status): (status >> 8) & 0xff
     let exit_code = if (wait_status & 0x7f) == 0 {
-        (wait_status >> 8) & 0xff
+        let code = (wait_status >> 8) & 0xff;
+        trace!(
+            verbose,
+            "child exited normally: wait4_result={} raw_status=0x{:08x} exit_code={}",
+            wait_result,
+            wait_status as u32,
+            code
+        );
+        code
     } else {
+        trace!(
+            verbose,
+            "child terminated by signal: wait4_result={} raw_status=0x{:08x} signal={}",
+            wait_result,
+            wait_status as u32,
+            wait_status & 0x7f
+        );
         1
     };
 

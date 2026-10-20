@@ -93,32 +93,83 @@ func parseCLI(args []string, helpOut io.Writer) (cliOptions, error) {
 }
 
 func main() {
-	os.Exit(runCLI(os.Args[1:], os.Stdout, os.Stderr))
+	verbose := os.Getenv("MOHABBAT_VERBOSE") == "1"
+	for _, arg := range os.Args[1:] {
+		if arg == "-v" || arg == "--verbose" {
+			verbose = true
+		}
+	}
+	if verbose {
+		fmt.Fprintf(os.Stderr, "[kabibi] main entry: argc=%d\n", len(os.Args))
+		for i, arg := range os.Args[1:] {
+			if strings.HasPrefix(arg, "-") {
+				fmt.Fprintf(os.Stderr, "[kabibi] argv[%d]=%q\n", i+1, arg)
+			} else {
+				fmt.Fprintf(os.Stderr, "[kabibi] argv[%d]=<redacted value, %d bytes>\n", i+1, len(arg))
+			}
+		}
+	}
+	os.Exit(runCLI(os.Args[1:], os.Stdout, os.Stderr, verbose))
 }
 
-func runCLI(args []string, stdout, stderr io.Writer) int {
+func runCLI(args []string, stdout, stderr io.Writer, verbose bool) int {
+	if verbose {
+		fmt.Fprintf(stderr, "[kabibi] CLI parse begin: argc=%d\n", len(args))
+	}
 	opts, err := parseCLI(args, stdout)
 	if err != nil {
+		if verbose {
+			fmt.Fprintf(stderr, "[kabibi] CLI parse failed: %v\n", err)
+		}
 		fmt.Fprintf(stderr, "kabibi: %v\n", err)
 		return 2
+	}
+	verbose = verbose || opts.verbose || os.Getenv("MOHABBAT_VERBOSE") == "1"
+	mode := "interactive"
+	switch {
+	case opts.help:
+		mode = "help"
+	case opts.edit != "":
+		mode = "edit"
+	case opts.command != "":
+		mode = "command"
+	case opts.prompt != "":
+		mode = "prompt"
+	case opts.aiFallback || len(opts.positional) == 1:
+		mode = "one-shot"
+	}
+	if verbose {
+		fmt.Fprintf(stderr, "[kabibi] CLI parsed: mode=%s verbose=%t positional_count=%d\n", mode, opts.verbose, len(opts.positional))
 	}
 	if opts.help {
 		return 0
 	}
 
 	if opts.edit != "" {
-		appWidget, host, err := app.Boot()
+		if verbose {
+			fmt.Fprintln(stderr, "[kabibi] booting app for editor mode")
+		}
+		appWidget, host, err := app.Boot(verbose)
 		if err != nil {
+			if verbose {
+				fmt.Fprintf(stderr, "[kabibi] editor app boot failed: %v\n", err)
+			}
 			fmt.Fprintf(stderr, "kabibi boot error: %v\n", err)
 			return 1
 		}
 		defer appWidget.Close()
 		appWidget.SetExitHandler(func() { host.Stop() })
 		if err := appWidget.OpenEditor(opts.edit, true); err != nil {
+			if verbose {
+				fmt.Fprintf(stderr, "[kabibi] opening editor failed: %v\n", err)
+			}
 			fmt.Fprintf(stderr, "kabibi: %v\n", err)
 			return 1
 		}
 		if err := host.Run(); err != nil {
+			if verbose {
+				fmt.Fprintf(stderr, "[kabibi] editor host run failed: %v\n", err)
+			}
 			fmt.Fprintf(stderr, "kabibi run error: %v\n", err)
 			return 1
 		}
@@ -150,16 +201,28 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 		return runOneShotAIPrompt(strings.Join(opts.positional, " "), opts.verbose, stdout, stderr)
 	}
 
-	appWidget, host, err := app.Boot()
+	appWidget, host, err := app.Boot(verbose)
 	if err != nil {
+		if verbose {
+			fmt.Fprintf(stderr, "[kabibi] interactive app boot failed: %v\n", err)
+		}
 		log.Printf("kabibi boot error: %v", err)
 		return 1
+	}
+	if verbose {
+		fmt.Fprintln(stderr, "[kabibi] interactive app boot succeeded; entering host.Run")
 	}
 	defer appWidget.Close()
 
 	if err := host.Run(); err != nil {
+		if verbose {
+			fmt.Fprintf(stderr, "[kabibi] interactive host.Run failed: %v\n", err)
+		}
 		log.Printf("kabibi run error: %v", err)
 		return 1
+	}
+	if verbose {
+		fmt.Fprintln(stderr, "[kabibi] interactive host.Run returned normally")
 	}
 	return 0
 }

@@ -102,23 +102,27 @@ func (h *HostEnv) sys_read(ctx context.Context, m api.Module, stack []uint64) {
 	handle := stack[1]
 	ptr := uint32(stack[2])
 	lenBytes := uint32(stack[3])
+	debugLog("ABI read submitted: handle=%d buffer_bytes=%d", handle, lenBytes)
 
 	h.mu.Lock()
 	fAny, ok := h.handles[handle]
 	h.mu.Unlock()
 
 	if !ok {
+		debugLog("ABI read rejected: unknown handle=%d", handle)
 		writeOverlapped(m, ovPtr, wasiEBADF, 0, 0)
 		return
 	}
 	f, isReader := fAny.(interface{ Read([]byte) (int, error) })
 	if !isReader {
+		debugLog("ABI read rejected: handle=%d is not readable", handle)
 		writeOverlapped(m, ovPtr, wasiEBADF, 0, 0)
 		return
 	}
 	mem := m.Memory()
 	_, memOk := mem.Read(ptr, lenBytes)
 	if !memOk {
+		debugLog("ABI read rejected: guest memory range invalid ptr=%d len=%d", ptr, lenBytes)
 		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 		return
 	}
@@ -147,10 +151,12 @@ func (h *HostEnv) sys_read(ctx context.Context, m api.Module, stack []uint64) {
 
 			if retCode == 0 {
 				if ok := mem.Write(ptr, payload); !ok {
+					debugLog("ABI read completion: guest memory write failed handle=%d bytes=%d", handle, n)
 					writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 					return
 				}
 			}
+			debugLog("ABI read completed: handle=%d bytes=%d error=%v wasi_error=%d", handle, n, err, retCode)
 			writeOverlapped(m, ovPtr, retCode, 0, uint64(n))
 		}
 	}()
@@ -203,6 +209,9 @@ func (h *HostEnv) sys_write(ctx context.Context, m api.Module, stack []uint64) {
 	handle := stack[1]
 	ptr := uint32(stack[2])
 	lenBytes := uint32(stack[3])
+	if handle == 1 || handle == 2 {
+		debugLog("ABI write submitted: stream=%d bytes=%d", handle, lenBytes)
+	}
 
 	h.mu.Lock()
 	fAny, ok := h.handles[handle]
@@ -233,6 +242,7 @@ func (h *HostEnv) sys_write(ctx context.Context, m api.Module, stack []uint64) {
 		if err != nil {
 			retCode = mapErrno(err)
 		}
+		debugLog("ABI write completed: stream=%d bytes=%d written=%d error=%v wasi_error=%d", handle, lenBytes, n, err, retCode)
 		writeOverlapped(m, ovPtr, retCode, 0, uint64(n))
 		return
 	}

@@ -134,6 +134,10 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
     loop {}
 }
 
+#[cfg(all(not(windows), not(target_family = "wasm")))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_eh_personality() {}
+
 // ─── Windows: Standalone Entry Points ──────────────────────────────────────────
 
 #[cfg(windows)]

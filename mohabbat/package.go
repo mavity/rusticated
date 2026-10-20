@@ -186,6 +186,13 @@ func assembleVegetable(ws, brainPath, buildDir, outputPath string) error {
 func buildZoneA(offsets, lengths []int, nodeJsLen int, poolLen uint64, whOffsets, whLens []uint64, payloadOffset, payloadLen uint64) string {
 	const tmplPOSIX = `:; ME="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || printf "%s" "$0")"; S_OFF=0; S_LEN=0; W_OFF=0; W_LEN=0
 :; P_LEN="{{POOL_LEN}}"; PLD_OFF="{{PAYLOAD_OFF}}"; PLD_LEN="{{PAYLOAD_LEN}}"
+:; MOHABBAT_VERBOSE="${MOHABBAT_VERBOSE:-0}"
+:; for ARG in "$@"; do
+:;   if [ "$ARG" = "-v" ] || [ "$ARG" = "--verbose" ]; then MOHABBAT_VERBOSE=1; fi
+:; done
+:; export MOHABBAT_VERBOSE
+:; vlog() { if [ "$MOHABBAT_VERBOSE" = "1" ]; then printf '[mohabbat:sh] %s\n' "$*" >&2; fi; }
+:; if [ "$MOHABBAT_VERBOSE" = "1" ]; then vlog "entry: $(uname -s 2>/dev/null)/$(uname -m 2>/dev/null) argc=$#"; fi
 :; PLATFORM_OVERRIDE=""
 :; ARG_COUNT=$#
 :; while [ $ARG_COUNT -gt 0 ]; do
@@ -252,6 +259,7 @@ func buildZoneA(offsets, lengths []int, nodeJsLen int, poolLen uint64, whOffsets
 :;     S_OFF={{LINUX_ARM32_OFF}}; S_LEN={{LINUX_ARM32_LEN}}; W_OFF={{LINUX_ARM32_W_OFF}}; W_LEN={{LINUX_ARM32_W_LEN}}
 :;   fi
 :; fi
+:; vlog "platform: ${RESOLVED_PLATFORM:-auto} brot=$S_OFF+$S_LEN host=$W_OFF+$W_LEN pool=$P_LEN payload=$PLD_OFF+$PLD_LEN"
 :; USE_NODE=0
 :; [ -n "$MOHABBAT_USE_NODE" ] && USE_NODE=1
 :; [ "$S_LEN" = "0" ] && USE_NODE=1
@@ -279,10 +287,16 @@ func buildZoneA(offsets, lengths []int, nodeJsLen int, poolLen uint64, whOffsets
 :; [ -z "$TMP_DIR" ] && { echo "🍆 No writable temporary directory found" >&2; exit 1; }
 :; export TMPDIR="$TMP_DIR"
 :; TMP_EXE="$TMP_DIR/moh-$$"
+:; vlog "temporary directory: TMPDIR=$TMPDIR"
 :; dd if="$ME" bs=1 skip="$S_OFF" count="$S_LEN" of="$TMP_EXE" 2>/dev/null
+:; DD_RC=$?
+:; if [ "$MOHABBAT_VERBOSE" = "1" ]; then vlog "brot extraction: expected=$S_LEN actual=$(wc -c < "$TMP_EXE" 2>/dev/null) dd=$DD_RC"; fi
 :; chmod +x "$TMP_EXE"
+:; CHMOD_RC=$?
+:; vlog "brot chmod: exit=$CHMOD_RC"
 :; "$TMP_EXE" "$ME" "$P_LEN" "$W_OFF" "$W_LEN" "$PLD_OFF" "$PLD_LEN" "$@"
 :; RET=$?
+:; vlog "brot exit: status=$RET"
 :; rm -f "$TMP_EXE"
 :; exit $RET
 `
@@ -296,6 +310,7 @@ set "TMP_EXE=!TMP_DIR!\moh-!RANDOM!.exe"
 set "P_LEN={{POOL_LEN}}"
 set "PLD_OFF={{PAYLOAD_OFF}}"
 set "PLD_LEN={{PAYLOAD_LEN}}"
+if not defined MOHABBAT_VERBOSE set "MOHABBAT_VERBOSE=0"
 
 set "FWD_ARGS="
 set "PLATFORM_OVERRIDE="
@@ -307,6 +322,8 @@ for %%A in (%*) do (
   ) else if "%%~A"=="--platform" (
     set "SKIP_NEXT=1"
   ) else (
+    if /I "%%~A"=="-v" set "MOHABBAT_VERBOSE=1"
+    if /I "%%~A"=="--verbose" set "MOHABBAT_VERBOSE=1"
     set "FWD_ARGS=!FWD_ARGS! %%A"
   )
 )
@@ -318,6 +335,7 @@ set "S_LEN=0"
 set "W_OFF=0"
 set "W_LEN=0"
 set "RESOLVED_PLATFORM="
+if "!MOHABBAT_VERBOSE!"=="1" echo [mohabbat:bat] entry: path=!ME! arch=!ARCH! platform_override=!PLATFORM_OVERRIDE! 1>&2
 
 if defined PLATFORM_OVERRIDE (
   if "!PLATFORM_OVERRIDE!"=="node" set "RESOLVED_PLATFORM=node"
@@ -421,9 +439,12 @@ if "!S_LEN!"=="0" (
     echo [mohabbat] This vegetable does not support target platform on Windows and node is not available.
     exit /b 1
 )
+if "!MOHABBAT_VERBOSE!"=="1" echo [mohabbat:bat] platform: selected=!RESOLVED_PLATFORM! brot_offset=!S_OFF! brot_len=!S_LEN! washmhost_offset=!W_OFF! washmhost_len=!W_LEN! pool_len=!P_LEN! payload_offset=!PLD_OFF! payload_len=!PLD_LEN! 1>&2
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$a=[IO.File]::ReadAllBytes($env:ME); $b=New-Object byte[] !S_LEN!; [Array]::Copy($a, [int64]!S_OFF!, $b, 0, [int]!S_LEN!); [IO.File]::WriteAllBytes($env:TMP_EXE, $b)"
+if "!MOHABBAT_VERBOSE!"=="1" for %%F in ("!TMP_EXE!") do echo [mohabbat:bat] brot bytes=%%~zF expected=!S_LEN! 1>&2
 "!TMP_EXE!" "!ME!" "!P_LEN!" "!W_OFF!" "!W_LEN!" "!PLD_OFF!" "!PLD_LEN!"!FWD_ARGS!
 set "RET=!ERRORLEVEL!"
+if "!MOHABBAT_VERBOSE!"=="1" echo [mohabbat:bat] brot exit: status=!RET! 1>&2
 if exist "!TMP_EXE!" del /F /Q "!TMP_EXE!" >nul 2>&1
 exit /b !RET!
 `
@@ -461,7 +482,8 @@ exit /b !RET!
 	}
 
 	winCRLF := strings.ReplaceAll(tmplWIN, "\n", "\r\n")
-	s := tmplPOSIX + winCRLF
+	// Keep the CMD target near the start; the quoted here-doc hides that block from the POSIX shell.
+	s := ":; <<'BATCH'\n@goto windows\n:windows\r\n" + winCRLF + "BATCH\n" + tmplPOSIX
 
 	s = strings.ReplaceAll(s, "{{POOL_LEN}}", fmt.Sprintf("%-20d", poolLen))
 	s = strings.ReplaceAll(s, "{{PAYLOAD_OFF}}", fmt.Sprintf("%-20d", payloadOffset))

@@ -4,7 +4,7 @@ import (
 	"github.com/mavity/rusticated/kabibi/ui"
 )
 
-func Boot() (*AppWidget, *ui.Host, error) {
+func Boot(verbose bool) (*AppWidget, *ui.Host, error) {
 	var h *ui.Host
 	writeToScrollbackDelegate := func(text string) {
 		if h != nil {
@@ -22,7 +22,7 @@ func Boot() (*AppWidget, *ui.Host, error) {
 	})
 
 	// Create Host with Shell as root widget
-	h = ui.NewHost(app)
+	h = ui.NewHost(app, verbose)
 
 	return app, h, nil
 }

@@ -309,10 +309,12 @@ func (h *HostEnv) notifySignal(signum uint32) {
 	if ok {
 		delete(h.signalWaiters, signum)
 		h.mu.Unlock()
+		debugLog("host signal delivered: signum=%d overlapped=0x%x", signum, state.ovPtr)
 		h.pendingSignals <- state
 		h.fileOpsQueue <- func() {}
 	} else {
 		h.mu.Unlock()
+		debugLog("host signal received with no waiter: signum=%d", signum)
 	}
 }
 

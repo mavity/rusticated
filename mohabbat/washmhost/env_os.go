@@ -87,8 +87,10 @@ func (h *HostEnv) sys_panic(ctx context.Context, m api.Module, stack []uint64) {
 	mem := m.Memory()
 	buf, ok := mem.Read(ptr, lenBytes)
 	if !ok {
+		debugLog("ABI host_panic: invalid guest memory range ptr=%d len=%d", ptr, lenBytes)
 		os.Exit(1)
 	}
+	debugLog("ABI host_panic: %s", string(buf))
 	fmt.Fprintf(os.Stderr, "GUEST PANIC: %s\n", string(buf))
 	os.Exit(1)
 }
@@ -96,36 +98,45 @@ func (h *HostEnv) sys_panic(ctx context.Context, m api.Module, stack []uint64) {
 func (h *HostEnv) sys_tty_set_mode(ctx context.Context, apiMod api.Module, stack []uint64) {
 	handle := stack[0]
 	mode := uint32(stack[1])
+	debugLog("ABI tty_set_mode: handle=%d mode=%d", handle, mode)
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	f, ok := h.handles[handle].(*os.File)
 	if !ok {
+		debugLog("ABI tty_set_mode: handle=%d is not an OS file", handle)
 		return
 	}
 	fd := int(f.Fd())
 
 	if mode == 1 {
 		if h.ttyRawState != nil {
+			debugLog("ABI tty_set_mode: raw mode already active on fd=%d", h.ttyRawFd)
 			return
 		}
 		state, err := term.MakeRaw(fd)
 		if err != nil {
+			debugLog("ABI tty_set_mode: entering raw mode failed: fd=%d error=%v", fd, err)
 			return
 		}
 		h.ttyRawState = state
 		h.ttyRawFd = fd
+		debugLog("ABI tty_set_mode: raw mode enabled on fd=%d", fd)
 	} else {
 		if h.ttyRawState != nil {
-			_ = term.Restore(h.ttyRawFd, h.ttyRawState)
+			err := term.Restore(h.ttyRawFd, h.ttyRawState)
+			debugLog("ABI tty_set_mode: restored fd=%d error=%v", h.ttyRawFd, err)
 			h.ttyRawState = nil
+		} else {
+			debugLog("ABI tty_set_mode: restore requested but raw mode was not active")
 		}
 	}
 }
 
 func (h *HostEnv) sys_tty_get_size(ctx context.Context, apiMod api.Module, stack []uint64) {
 	handle := stack[0]
+	debugLog("ABI tty_get_size: handle=%d", handle)
 
 	h.mu.Lock()
 	fAny, ok := h.handles[handle]
@@ -134,26 +145,31 @@ func (h *HostEnv) sys_tty_get_size(ctx context.Context, apiMod api.Module, stack
 	if !ok {
 		// Default to 80x24 if handle not found
 		stack[0] = uint64(uint32(80)<<16 | uint32(24))
+		debugLog("ABI tty_get_size: unknown handle; returning fallback 80x24")
 		return
 	}
 
 	if f, ok := fAny.(*os.File); ok {
 		width, height, err := term.GetSize(int(f.Fd()))
 		if err != nil {
+			debugLog("ABI tty_get_size: fd=%d size query failed: %v; returning fallback 80x24", f.Fd(), err)
 			width = 80
 			height = 24
 		}
 		stack[0] = uint64(uint32(width)<<16 | uint32(height))
+		debugLog("ABI tty_get_size: fd=%d result=%dx%d", f.Fd(), width, height)
 		return
 	}
 
 	stack[0] = uint64(uint32(80)<<16 | uint32(24))
+	debugLog("ABI tty_get_size: handle=%d is not an OS file; returning fallback 80x24", handle)
 }
 
 func (h *HostEnv) sys_tty_set_size(ctx context.Context, apiMod api.Module, stack []uint64) {
 	handle := stack[0]
 	cols := int(stack[1])
 	rows := int(stack[2])
+	debugLog("ABI tty_set_size: handle=%d cols=%d rows=%d", handle, cols, rows)
 
 	h.mu.Lock()
 	fAny, ok := h.handles[handle]
@@ -161,6 +177,7 @@ func (h *HostEnv) sys_tty_set_size(ctx context.Context, apiMod api.Module, stack
 
 	if !ok {
 		stack[0] = uint64(wasiEBADF)
+		debugLog("ABI tty_set_size failed: unknown handle=%d", handle)
 		return
 	}
 
@@ -168,8 +185,10 @@ func (h *HostEnv) sys_tty_set_size(ctx context.Context, apiMod api.Module, stack
 		err := pty.Resize(cols, rows)
 		if err != nil {
 			stack[0] = uint64(mapErrno(err))
+			debugLog("ABI tty_set_size PTY resize failed: %v", err)
 		} else {
 			stack[0] = uint64(wasiSuccess)
+			debugLog("ABI tty_set_size PTY resize succeeded")
 		}
 		return
 	}
@@ -177,13 +196,16 @@ func (h *HostEnv) sys_tty_set_size(ctx context.Context, apiMod api.Module, stack
 	if f, ok := fAny.(*os.File); ok {
 		if !term.IsTerminal(int(f.Fd())) {
 			stack[0] = uint64(wasiENOTTY)
+			debugLog("ABI tty_set_size rejected non-terminal fd=%d", f.Fd())
 			return
 		}
 		stack[0] = uint64(wasiSuccess)
+		debugLog("ABI tty_set_size accepted terminal fd=%d", f.Fd())
 		return
 	}
 
 	stack[0] = uint64(wasiENOTTY)
+	debugLog("ABI tty_set_size rejected non-file handle=%d", handle)
 }
 
 // sys_fd_isatty implements the "env" import fd_isatty(fd int32) int32.
@@ -198,15 +220,19 @@ func (h *HostEnv) sys_fd_isatty(ctx context.Context, apiMod api.Module, stack []
 
 	if !ok {
 		stack[0] = 0
+		debugLog("ABI fd_isatty: fd=%d unknown result=false", fd)
 		return
 	}
 	if _, ok := fAny.(PtySession); ok {
 		stack[0] = 1
+		debugLog("ABI fd_isatty: fd=%d is PTY result=true", fd)
 		return
 	}
 	if f, ok := fAny.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
 		stack[0] = 1
+		debugLog("ABI fd_isatty: fd=%d host_fd=%d result=true", fd, f.Fd())
 		return
 	}
 	stack[0] = 0
+	debugLog("ABI fd_isatty: fd=%d result=false", fd)
 }
