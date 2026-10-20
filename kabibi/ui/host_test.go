@@ -53,21 +53,28 @@ func (w *recordingWidget) HandleEvent(ev input.Event) bool {
 
 func TestNewHost_BindsRoot(t *testing.T) {
 	root := noopWidget{}
-	h := NewHost(root)
+	h := NewHost(root, false)
 	if got, want := h.root, root; got != want {
 		t.Fatalf("NewHost().root = %#v, want %#v", got, want)
 	}
 }
 
+func TestNewHost_StoresVerboseFlag(t *testing.T) {
+	h := NewHost(noopWidget{}, true)
+	if !h.verbose {
+		t.Fatal("NewHost() did not preserve verbose=true")
+	}
+}
+
 func TestNewHost_InitialDirtyFlagIsFalse(t *testing.T) {
-	h := NewHost(noopWidget{})
+	h := NewHost(noopWidget{}, false)
 	if h.dirty.Load() {
 		t.Fatal("NewHost() should start with dirty == false")
 	}
 }
 
 func TestStop_ClosesChannelOnce(t *testing.T) {
-	h := NewHost(noopWidget{})
+	h := NewHost(noopWidget{}, false)
 	h.Stop()
 	if _, ok := <-h.stopCh; ok {
 		t.Fatal("Stop() should close stopCh")
@@ -75,7 +82,7 @@ func TestStop_ClosesChannelOnce(t *testing.T) {
 }
 
 func TestWriteToScrollback_QueuesText(t *testing.T) {
-	h := NewHost(noopWidget{})
+	h := NewHost(noopWidget{}, false)
 	h.WriteToScrollback("hello")
 	if got, want := len(h.scrollbackQueue), 1; got != want {
 		t.Fatalf("len(scrollbackQueue) = %d, want %d", got, want)
@@ -86,7 +93,7 @@ func TestWriteToScrollback_QueuesText(t *testing.T) {
 }
 
 func TestWriteToScrollback_ConcurrentWritesAreAllPreserved(t *testing.T) {
-	h := NewHost(noopWidget{})
+	h := NewHost(noopWidget{}, false)
 	for i := 0; i < 20; i++ {
 		h.WriteToScrollback("hello")
 	}
@@ -98,7 +105,7 @@ func TestWriteToScrollback_ConcurrentWritesAreAllPreserved(t *testing.T) {
 func TestReadInputLoop_ParsesAndEnqueuesEvents(t *testing.T) {
 	pr, pw := io.Pipe()
 	widget := &recordingWidget{}
-	h := NewHost(widget)
+	h := NewHost(widget, false)
 
 	done := make(chan struct{})
 	go func() {
@@ -313,7 +320,7 @@ func TestRunCore_PropagatesMakeRawError(t *testing.T) {
 }
 
 func TestReadInputLoop_ExitsOnReadError(t *testing.T) {
-	h := NewHost(noopWidget{})
+	h := NewHost(noopWidget{}, false)
 	done := make(chan struct{})
 	go func() {
 		h.readInputLoop(&errReader{err: errors.New("read failed")})

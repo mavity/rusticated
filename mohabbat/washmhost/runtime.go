@@ -11,9 +11,11 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/sys"
+	"golang.org/x/term"
 )
 
 func canonicalGuestEnvKey(key string) string {
@@ -146,7 +148,9 @@ func guestRuntimeEnvForWasm(env []string) []string {
 }
 
 func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
+	debugLog("RunWasm begin: payload_bytes=%d argc=%d", len(payload), len(args))
 	if len(payload) == 0 {
+		debugLog("RunWasm rejected empty payload")
 		return 1, fmt.Errorf("payload is empty")
 	}
 
@@ -156,17 +160,23 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 	defer r.Close(ctx)
 
 	// We decode earlier than module compilation to detect imports
+	compileStarted := time.Now()
 	decoded, err := r.CompileModule(ctx, payload)
 	if err != nil {
+		debugLog("WASM compile failed after %s: %v", time.Since(compileStarted), err)
 		recoveredErr := tryRecoverFunctionName(err, payload)
 		return 1, fmt.Errorf("failed to compile module: %w", recoveredErr)
 	}
+	debugLog("WASM compile succeeded: duration=%s", time.Since(compileStarted))
 
 	// 2. Register Host Environment
 	hEnv := NewHostEnv()
 	defer hEnv.Close()
 	hEnv.args = args
+	debugLog("host environment created: cwd=%q stdin_tty=%t stdout_tty=%t",
+		hEnv.currentCwd(), term.IsTerminal(int(os.Stdin.Fd())), term.IsTerminal(int(os.Stdout.Fd())))
 	if err := hEnv.Register(ctx, r); err != nil {
+		debugLog("host ABI registration failed: %v", err)
 		return 1, fmt.Errorf("failed to register rusticated host env: %w", err)
 	}
 
@@ -192,31 +202,42 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 	// mount-based filesystem remapping or implicit /tmp aliases.
 
 	// Since we provide rusticated ABI bindings via `hEnv.Register`, Wazero will resolve imports
+	instantiateStarted := time.Now()
 	mod, err := r.InstantiateModule(ctx, decoded, cfg)
 	if err != nil {
+		debugLog("WASM instantiate failed after %s: %v", time.Since(instantiateStarted), err)
 		// Module might exit with specific exit code (e.g. WASI exit)
 		if exitErr, ok := err.(*sys.ExitError); ok {
+			debugLog("WASM instantiate exited normally: code=%d", exitErr.ExitCode())
 			return int(exitErr.ExitCode()), nil // Normal exit flow
 		}
 		return 1, fmt.Errorf("failed to instantiate module: %w", err)
 	}
+	debugLog("WASM instantiate succeeded: duration=%s module=%q", time.Since(instantiateStarted), mod.Name())
 	hEnv.mod = mod
 
 	// 4. Drive completion
 	runFunc := mod.ExportedFunction("run")
 	if runFunc == nil {
+		debugLog("WASM module has no run export")
 		return 1, fmt.Errorf("rusticated module missing 'run' export")
 	}
+	debugLog("WASM run export found")
 
 	// 2. Event loop: poll for completions, then re-enter the guest.
 	var res []uint64
+	iteration := 0
 	for {
+		iteration++
+		debugLog("guest run iteration=%d begin pending_ops=%d active_ops=%t", iteration, hEnv.PendingOps(), hEnv.HasActiveOps())
 		for _, mgr := range hEnv.DylibManagersForPolling() {
 			mgr.BeforeRun(ctx, mod)
 		}
 		res, err = runFunc.Call(ctx)
 		if err != nil {
+			debugLog("guest run iteration=%d failed: result=%v error=%v", iteration, res, err)
 			if exitErr, ok := err.(*sys.ExitError); ok {
+				debugLog("guest exited through WASI: iteration=%d code=%d", iteration, exitErr.ExitCode())
 				return int(exitErr.ExitCode()), nil
 			}
 			return 1, fmt.Errorf("run failed: %w", err)
@@ -227,10 +248,15 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 
 		hEnv.mu.Lock()
 		forcedCode := hEnv.forcedExitCode
+		activeCount := len(hEnv.activeOps)
+		signalWaiters := len(hEnv.signalWaiters)
 		hEnv.mu.Unlock()
+		debugLog("guest run iteration=%d returned result=%v forced_exit=%d pending_ops=%d active_ops=%d signal_waiters=%d",
+			iteration, res, forcedCode, hEnv.PendingOps(), activeCount, signalWaiters)
 
 		// 1. Immediate override via process_exit
 		if forcedCode != -1 {
+			debugLog("guest completion: forced process_exit code=%d", forcedCode)
 			return int(forcedCode), nil
 		}
 
@@ -244,11 +270,14 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 					// so we treat "pending" as "finished with success"
 					// in the absence of any other information.
 					code = 0
+					debugLog("guest returned pending sentinel with no active operations; normalizing result to success")
 				}
 			}
+			debugLog("guest completion: no active operations, exit_code=%d", code)
 			return int(code), nil
 		}
 
+		debugLog("guest run iteration=%d polling host completions", iteration)
 		hEnv.Poll(ctx, mod)
 	}
 }

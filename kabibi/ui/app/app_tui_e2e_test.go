@@ -141,7 +141,7 @@ func TestAppTUI_EndToEnd_RealFilesystemAndAIFallback(t *testing.T) {
 	appWidget.Shell().SetAIRunner(aiMock)
 	appWidget.Shell().SetPrompt("፧")
 
-	host = ui.NewHost(appWidget)
+	host = ui.NewHost(appWidget, false)
 
 	inR, inW := io.Pipe()
 	defer inR.Close()
@@ -339,7 +339,7 @@ func TestAppTUI_EndToEnd_ScrollbackEjectionOnSmallViewport(t *testing.T) {
 	defer appWidget.Close()
 	appWidget.Shell().SetPrompt("፧")
 
-	host = ui.NewHost(appWidget)
+	host = ui.NewHost(appWidget, false)
 
 	inR, inW := io.Pipe()
 	defer inR.Close()
@@ -465,7 +465,7 @@ func TestAppTUI_TrailingSpaceAndCursorMovementUpdatesImmediately(t *testing.T) {
 
 	appWidget.Shell().SetPrompt("፧")
 
-	host = ui.NewHost(appWidget)
+	host = ui.NewHost(appWidget, false)
 
 	inR, inW := io.Pipe()
 	defer inR.Close()
@@ -612,7 +612,7 @@ func TestAppTUI_SlackGapRecovery_PushDownBeforeEjectingUp(t *testing.T) {
 	defer appWidget.Close()
 	appWidget.Shell().SetPrompt("፧")
 
-	host = ui.NewHost(appWidget)
+	host = ui.NewHost(appWidget, false)
 
 	inR, inW := io.Pipe()
 	defer inR.Close()
@@ -719,16 +719,16 @@ func TestAppTUI_SlackGapRecovery_PushDownBeforeEjectingUp(t *testing.T) {
 
 // TestAppTUI_BluePanels_CtrlO_HiddenConveyorAndFarKeyRouting verifies the full
 // Blue Panels HUD lifecycle from docs/3-blue.md:
-// 1. Ctrl+O summons DualPaneWidget at the top of the screen while keeping the
-//    3-row BlockBanner + PromptInput + 1 blank footer line in the 5-row bottom gap.
-// 2. Far Manager split key routing:
-//    - Up/Down navigates files in the active blue pane even while PromptInput is live.
-//    - Tab switches Left <-> Right pane and syncs ExecutionSession.Dir() (`\w፧`).
-//    - Enter with empty PromptInput on a directory steps into it and updates `\w፧`.
-//    - Enter with empty PromptInput on an executable script runs `./script.sh` in the shell!
-// 3. The Hidden Conveyor Belt: running commands while panels are open slides output
-//    lines upward behind the blue panels with ZERO scrollback ejection until the
-//    hidden stack catches up to Row 0 at the physical top of the screen.
+//  1. Ctrl+O summons DualPaneWidget at the top of the screen while keeping the
+//     3-row BlockBanner + PromptInput + 1 blank footer line in the 5-row bottom gap.
+//  2. Far Manager split key routing:
+//     - Up/Down navigates files in the active blue pane even while PromptInput is live.
+//     - Tab switches Left <-> Right pane and syncs ExecutionSession.Dir() (`\w፧`).
+//     - Enter with empty PromptInput on a directory steps into it and updates `\w፧`.
+//     - Enter with empty PromptInput on an executable script runs `./script.sh` in the shell!
+//  3. The Hidden Conveyor Belt: running commands while panels are open slides output
+//     lines upward behind the blue panels with ZERO scrollback ejection until the
+//     hidden stack catches up to Row 0 at the physical top of the screen.
 func TestAppTUI_BluePanels_CtrlO_HiddenConveyorAndFarKeyRouting(t *testing.T) {
 	workDir := t.TempDir()
 	subDir := filepath.Join(workDir, "alpha_dir")
@@ -767,7 +767,7 @@ func TestAppTUI_BluePanels_CtrlO_HiddenConveyorAndFarKeyRouting(t *testing.T) {
 	defer appWidget.Close()
 	appWidget.Shell().SetPrompt("፧")
 
-	host = ui.NewHost(appWidget)
+	host = ui.NewHost(appWidget, false)
 
 	inR, inW := io.Pipe()
 	defer inR.Close()
@@ -999,11 +999,11 @@ func TestAppTUI_BluePanels_FileOpsAndEditor(t *testing.T) {
 // TestAppTUI_BluePanels_ShownThenWithdrawn_TopAnchoredDownwardGrowth verifies
 // that when the blue panels are summoned via Ctrl+O (claiming the full screen)
 // and then withdrawn via Ctrl+O before the shell stack has filled the screen:
-// 1. The stack immediately top-aligns at row 0 (anchored right below the latest
-//    untouched row in terminal history), leaving blank space at the bottom.
-// 2. Subsequent command output grows downward toward the bottom into that space
-//    with ZERO scrollback ejection until the stack hits the bottom of the screen.
-// 3. Only after hitting the bottom does further output eject upward into scrollback.
+//  1. The stack immediately top-aligns at row 0 (anchored right below the latest
+//     untouched row in terminal history), leaving blank space at the bottom.
+//  2. Subsequent command output grows downward toward the bottom into that space
+//     with ZERO scrollback ejection until the stack hits the bottom of the screen.
+//  3. Only after hitting the bottom does further output eject upward into scrollback.
 func TestAppTUI_BluePanels_ShownThenWithdrawn_TopAnchoredDownwardGrowth(t *testing.T) {
 	workDir := t.TempDir()
 
@@ -1051,7 +1051,7 @@ func TestAppTUI_BluePanels_ShownThenWithdrawn_TopAnchoredDownwardGrowth(t *testi
 
 	// 3. Now run inside Host on 80x10: open panels, withdraw panels, run 2 commands
 	// (4 rows -> occupied height grows 5 -> 7 -> 9 <= 10) and verify ZERO scrollback ejection!
-	host = ui.NewHost(appWidget)
+	host = ui.NewHost(appWidget, false)
 	inR, inW := io.Pipe()
 	defer inR.Close()
 	defer inW.Close()
@@ -1167,7 +1167,7 @@ func TestAppTUI_ExitWithPanelsOpenRemovesPanelsAndRetainsHistory(t *testing.T) {
 	defer appWidget.Close()
 	appWidget.Shell().SetPrompt("፧")
 
-	host = ui.NewHost(appWidget)
+	host = ui.NewHost(appWidget, false)
 
 	inR, inW := io.Pipe()
 	defer inR.Close()

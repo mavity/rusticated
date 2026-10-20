@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 var (
@@ -160,11 +162,22 @@ func relaunchForPlatform(goos, goarch string, satellite bool, probePath string, 
 }
 
 func main() {
+	debugLog("entry: goos=%s goarch=%s argc=%d verbose=%t", runtime.GOOS, runtime.GOARCH, len(os.Args), os.Getenv("MOHABBAT_VERBOSE") == "1")
+	for i, arg := range os.Args {
+		if strings.HasPrefix(arg, "-") {
+			debugLog("argv[%d]=%q", i, arg)
+		} else {
+			debugLog("argv[%d]=<redacted value, %d bytes>", i, len(arg))
+		}
+	}
+	logTerminalState()
 	platformOverride, satelliteMode, probePath, cwd, parsedArgs, err := splitWashmhostArgs(os.Args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "washmhost: %v\n", err)
 		os.Exit(1)
 	}
+	debugLog("arguments parsed: platform=%q satellite=%t probe=%t cwd_supplied=%t guest_argc=%d",
+		platformOverride, satelliteMode, probePath != "", cwd != "", len(parsedArgs))
 	if platformOverride != "" {
 		goos, goarch, err := parsePlatformOverride(platformOverride)
 		if err != nil {
@@ -200,14 +213,34 @@ func main() {
 	defer restoreConsole()
 
 	exitCode := runHost(parsedArgs, cwd)
+	debugLog("host returned exit_code=%d", exitCode)
 	restoreConsole()
 	if exitCode != 0 {
 		os.Exit(exitCode)
 	}
 }
 
+func logTerminalState() {
+	if os.Getenv("MOHABBAT_VERBOSE") != "1" {
+		return
+	}
+	for _, stream := range []struct {
+		name string
+		file *os.File
+	}{
+		{name: "stdin", file: os.Stdin},
+		{name: "stdout", file: os.Stdout},
+		{name: "stderr", file: os.Stderr},
+	} {
+		w, h, err := term.GetSize(int(stream.file.Fd()))
+		debugLog("terminal %s: fd=%d is_tty=%t size=%dx%d size_error=%v",
+			stream.name, stream.file.Fd(), term.IsTerminal(int(stream.file.Fd())), w, h, err)
+	}
+}
+
 func runHost(parsedArgs []string, cwd string) int {
 	ref := os.Getenv("MOHABBAT_WASM_FD")
+	debugLog("host startup: cwd=%q payload_ref=%q guest_argc=%d", cwd, ref, len(parsedArgs))
 	if ref == "" {
 		fmt.Fprintf(os.Stderr, "washmhost: MOHABBAT_WASM_FD not set\n")
 		return 1
@@ -231,6 +264,7 @@ func runHost(parsedArgs []string, cwd string) int {
 		fmt.Fprintf(os.Stderr, "washmhost: failed to read payload: %v\n", err)
 		return 1
 	}
+	debugLog("payload read: bytes=%d", len(payloadBytes))
 
 	argSlice := make([]string, len(parsedArgs))
 	copy(argSlice, parsedArgs)
@@ -255,6 +289,11 @@ func runHost(parsedArgs []string, cwd string) int {
 			fmt.Fprintf(os.Stderr, "washmhost: failed to chdir to %s: %v\n", cwd, err)
 			return 1
 		}
+	}
+	if current, err := os.Getwd(); err != nil {
+		debugLog("current working directory query failed: %v", err)
+	} else {
+		debugLog("guest working directory: %q", current)
 	}
 
 	exitCode, err := RunWasm(context.Background(), payloadBytes, argSlice)

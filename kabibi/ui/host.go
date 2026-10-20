@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,7 +39,8 @@ type hostMsg struct {
 // Thread safety: Invalidate may be called from any goroutine. All I/O is
 // serialised through the central event loop goroutine via msgCh.
 type Host struct {
-	root Widget
+	root    Widget
+	verbose bool
 
 	// Double-buffered frames. currBuf holds the frame being built; prevBuf holds
 	// the frame currently visible on screen. SwapBufCells exchanges their backing
@@ -75,12 +77,13 @@ func (h *Host) handleSignals() (cleanup func()) {
 }
 
 // NewHost creates a Host bound to the given root widget. Call Run to start the event loop.
-func NewHost(root Widget) *Host {
+func NewHost(root Widget, verbose bool) *Host {
 	return &Host{
-		root:   root,
-		out:    bufio.NewWriterSize(os.Stdout, 64*1024),
-		msgCh:  make(chan hostMsg, 256),
-		stopCh: make(chan struct{}),
+		root:    root,
+		verbose: verbose,
+		out:     bufio.NewWriterSize(os.Stdout, 64*1024),
+		msgCh:   make(chan hostMsg, 256),
+		stopCh:  make(chan struct{}),
 	}
 }
 
@@ -125,6 +128,9 @@ func (h *Host) runCore(
 	restoreFunc func(uintptr, *term.State) error,
 	getSizeFunc func(fd uintptr) (w, ht int, err error),
 ) (err error) {
+	if h.verbose {
+		fmt.Fprintf(os.Stderr, "[kabibi] Host.runCore entry: input=%T output=%T make_raw=%t get_size=%t\n", in, out, makeRawFunc != nil, getSizeFunc != nil)
+	}
 	if in == nil {
 		in = os.Stdin
 	}
@@ -169,8 +175,18 @@ func (h *Host) runCore(
 	if makeRawFunc != nil {
 		state, err = makeRawFunc(os.Stdin.Fd())
 		if err != nil {
+			if h.verbose {
+				fmt.Fprintf(os.Stderr, "[kabibi] Host.runCore makeRaw failed: fd=%d error=%v\n", os.Stdin.Fd(), err)
+			}
 			state = nil
 			return err
+		}
+		if h.verbose {
+			fmt.Fprintf(os.Stderr, "[kabibi] Host.runCore raw mode enabled: fd=%d state_present=%t\n", os.Stdin.Fd(), state != nil)
+		}
+	} else {
+		if h.verbose {
+			fmt.Fprintln(os.Stderr, "[kabibi] Host.runCore has no raw-mode hook")
 		}
 	}
 	h.prevTermState = state
@@ -207,6 +223,13 @@ func (h *Host) runCore(
 	r, err := input.NewReader(in, "", 0)
 	if err == nil {
 		inputReader = r
+		if h.verbose {
+			fmt.Fprintln(os.Stderr, "[kabibi] Host.runCore input reader initialized")
+		}
+	} else {
+		if h.verbose {
+			fmt.Fprintf(os.Stderr, "[kabibi] Host.runCore input reader initialization failed: %v\n", err)
+		}
 	}
 
 	// Start reading input in background producer goroutine
@@ -220,6 +243,9 @@ func (h *Host) runCore(
 
 	// Run central event coordinator loop on this main host goroutine
 	h.processLoop(getSizeFunc)
+	if h.verbose {
+		fmt.Fprintln(os.Stderr, "[kabibi] Host.runCore process loop returned")
+	}
 
 	// Cancel and close the input reader so readInputLoop unblocks immediately when Stop() is called
 	if inputReader != nil {
@@ -232,6 +258,9 @@ func (h *Host) runCore(
 
 // processLoop is the single coordinator loop that owns all access to h.root.
 func (h *Host) processLoop(getSizeFunc func(fd uintptr) (w, ht int, err error)) {
+	if h.verbose {
+		fmt.Fprintln(os.Stderr, "[kabibi] Host.processLoop started")
+	}
 	for {
 		select {
 		case msg, ok := <-h.msgCh:
@@ -239,7 +268,13 @@ func (h *Host) processLoop(getSizeFunc func(fd uintptr) (w, ht int, err error)) 
 				return
 			}
 			if msg.kind == hostMsgStop {
+				if h.verbose {
+					fmt.Fprintln(os.Stderr, "[kabibi] Host.processLoop received stop message")
+				}
 				return
+			}
+			if h.verbose {
+				fmt.Fprintf(os.Stderr, "[kabibi] Host.processLoop received message kind=%d\n", msg.kind)
 			}
 
 			needsRender := false
@@ -250,6 +285,9 @@ func (h *Host) processLoop(getSizeFunc func(fd uintptr) (w, ht int, err error)) 
 				select {
 				case nextMsg, ok := <-h.msgCh:
 					if !ok || nextMsg.kind == hostMsgStop {
+						if h.verbose {
+							fmt.Fprintf(os.Stderr, "[kabibi] Host.processLoop drained stop/closed channel: open=%t\n", ok)
+						}
 						if needsRender {
 							h.runFrame(getSizeFunc)
 						}
@@ -266,12 +304,18 @@ func (h *Host) processLoop(getSizeFunc func(fd uintptr) (w, ht int, err error)) 
 				h.runFrame(getSizeFunc)
 			}
 		case <-h.stopCh:
+			if h.verbose {
+				fmt.Fprintln(os.Stderr, "[kabibi] Host.processLoop observed stop channel")
+			}
 			// Drain any final messages queued just before Stop() was invoked
 			needsRender := h.dirty.Swap(false)
 			for {
 				select {
 				case msg, ok := <-h.msgCh:
 					if !ok || msg.kind == hostMsgStop {
+						if h.verbose {
+							fmt.Fprintf(os.Stderr, "[kabibi] Host.processLoop stop drain ended: open=%t\n", ok)
+						}
 						if needsRender {
 							h.runFrame(getSizeFunc)
 						}
@@ -341,7 +385,13 @@ func (h *Host) sendMsg(msg hostMsg) {
 func (h *Host) Stop() {
 	select {
 	case <-h.stopCh:
+		if h.verbose {
+			fmt.Fprintln(os.Stderr, "[kabibi] Host.Stop called after stop was already requested")
+		}
 	default:
+		if h.verbose {
+			fmt.Fprintf(os.Stderr, "[kabibi] Host.Stop called; caller stack:\n%s\n", debug.Stack())
+		}
 		close(h.stopCh)
 		h.sendMsg(hostMsg{kind: hostMsgStop})
 	}
@@ -375,6 +425,9 @@ func (h *Host) runFrame(
 	defer h.mu.Unlock()
 
 	w, ht, err := getSizeFunc(os.Stdout.Fd())
+	if h.verbose {
+		fmt.Fprintf(os.Stderr, "[kabibi] Host.runFrame size query: fd=%d width=%d height=%d error=%v\n", os.Stdout.Fd(), w, ht, err)
+	}
 	if err != nil {
 		return
 	}
@@ -388,6 +441,10 @@ func (h *Host) runFrame(
 		terminal.Rect{X: 0, Y: 0, W: w, H: ht},
 		RenderContext{Focused: true, Invalidate: h.Invalidate},
 	)
+	if h.verbose {
+		fmt.Fprintf(os.Stderr, "[kabibi] Host.runFrame rendered: width=%d height=%d occupied_height=%d cursor=(%d,%d) visible=%t\n",
+			w, ht, rendered.Height, cursor.X, cursor.Y, cursor.Visible)
+	}
 	h.cursorX = cursor.X
 	h.cursorY = cursor.Y
 	h.cursorVisible = cursor.Visible
@@ -613,7 +670,10 @@ func (h *Host) emitDirtyRegion(lineMin, lineMax int) {
 
 	// 4. Emit the entire frame in a single WriteString and Flush.
 	h.out.WriteString(sb.String())
-	h.out.Flush()
+	flushErr := h.out.Flush()
+	if h.verbose {
+		fmt.Fprintf(os.Stderr, "[kabibi] Host.emitDirtyRegion: rows=%d..%d bytes=%d flush_error=%v\n", lineMin, lineMax, sb.Len(), flushErr)
+	}
 }
 
 func (h *Host) emitCursorOnly() {
@@ -771,6 +831,9 @@ func (h *Host) readInputLoop(in io.Reader) {
 }
 
 func (h *Host) readInputLoopWithReader(r *input.Reader) {
+	if h.verbose {
+		fmt.Fprintln(os.Stderr, "[kabibi] Host input loop started")
+	}
 	for {
 		if h.stopCh != nil {
 			select {
@@ -794,17 +857,32 @@ func (h *Host) readInputLoopWithReader(r *input.Reader) {
 
 		select {
 		case <-h.stopCh:
+			if h.verbose {
+				fmt.Fprintln(os.Stderr, "[kabibi] Host input loop stopped")
+			}
 			return
 		case res := <-resultCh:
 			if res.err == io.EOF {
+				if h.verbose {
+					fmt.Fprintln(os.Stderr, "[kabibi] Host input reader reached EOF")
+				}
 				return
 			}
 			if res.err != nil {
+				if h.verbose {
+					fmt.Fprintf(os.Stderr, "[kabibi] Host input reader failed: %v\n", res.err)
+				}
 				return
+			}
+			if h.verbose {
+				fmt.Fprintf(os.Stderr, "[kabibi] Host input reader returned %d event(s)\n", len(res.events))
 			}
 
 			// Post canonical input.Events to coordinator loop.
 			for _, ev := range res.events {
+				if h.verbose {
+					fmt.Fprintf(os.Stderr, "[kabibi] Host input event: type=%T\n", ev)
+				}
 				h.sendMsg(hostMsg{kind: hostMsgInput, inputEvent: ev})
 			}
 		}

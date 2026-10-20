@@ -48,6 +48,34 @@ func TestParseCLIHelpFormsMatch(t *testing.T) {
 	}
 }
 
+func TestRunCLIDiagnosticsFollowVerboseFlag(t *testing.T) {
+	t.Setenv("MOHABBAT_VERBOSE", "")
+
+	for _, verbose := range []bool{false, true} {
+		name := "disabled"
+		if verbose {
+			name = "enabled"
+		}
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := runCLI([]string{"--help"}, &stdout, &stderr, verbose); code != 0 {
+				t.Fatalf("runCLI(--help) = %d, want 0", code)
+			}
+
+			got := stderr.String()
+			if verbose && !strings.Contains(got, "[kabibi] CLI parse begin: argc=1\n") {
+				t.Fatalf("verbose diagnostics missing from stderr: %q", got)
+			}
+			if !verbose && got != "" {
+				t.Fatalf("diagnostics emitted while verbose=false: %q", got)
+			}
+			if strings.Contains(got, "2026/") || strings.Contains(got, "pid=") {
+				t.Fatalf("diagnostics contain custom timestamp or PID format: %q", got)
+			}
+		})
+	}
+}
+
 func TestParseCLIEditorForms(t *testing.T) {
 	for _, args := range [][]string{
 		{"--edit", "notes.txt"},

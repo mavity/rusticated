@@ -361,6 +361,7 @@ func (h *HostEnv) sys_process_signal(ctx context.Context, m api.Module, stack []
 func (h *HostEnv) sys_signal_wait(ctx context.Context, m api.Module, stack []uint64) {
 	ovPtr := uint32(stack[0])
 	signum := uint32(stack[1])
+	debugLog("ABI signal_wait submitted: signum=%d", signum)
 
 	h.mu.Lock()
 	if old, exists := h.signalWaiters[signum]; exists {
@@ -380,6 +381,7 @@ func (h *HostEnv) sys_signal_wait(ctx context.Context, m api.Module, stack []uin
 
 func (h *HostEnv) sys_process_exit(ctx context.Context, m api.Module, stack []uint64) {
 	code := int32(stack[0])
+	debugLog("ABI process_exit called: code=%d", code)
 	h.mu.Lock()
 	h.forcedExitCode = code
 	handlesCount := len(h.handles)
@@ -417,6 +419,7 @@ func (h *HostEnv) sys_get_args(ctx context.Context, m api.Module, stack []uint64
 	}
 
 	count := uint64(len(args))
+	debugLog("ABI get_args: requested_bytes=%d argc=%d required_bytes=%d", lenBytes, count, bytesNeeded)
 
 	if ptr != 0 && lenBytes >= bytesNeeded {
 		buf := make([]byte, bytesNeeded)
@@ -453,6 +456,15 @@ func (h *HostEnv) sys_get_env(ctx context.Context, m api.Module, stack []uint64)
 	}
 
 	count := uint64(len(vars))
+	verbosePresent := false
+	for _, envVar := range vars {
+		if envVar == "MOHABBAT_VERBOSE=1" {
+			verbosePresent = true
+			break
+		}
+	}
+	debugLog("ABI get_env: requested_bytes=%d variables=%d required_bytes=%d verbose_present=%t",
+		lenBytes, count, bytesNeeded, verbosePresent)
 
 	if ptr != 0 && lenBytes >= bytesNeeded {
 		buf := make([]byte, bytesNeeded)
