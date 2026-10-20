@@ -179,12 +179,12 @@ A command checkbox `[x]` may **only** be ticked when all 5 criteria are met:
 
 #### 1A. Pilot Commands (First 3 to Validate Architecture End-to-End)
 - [x] **`echo`** (`cmds/core/echo`): Convert `-n`, `-e`, `-E` to local FlagSet; support `\c` early return without `os.Exit`.
-- [ ] **`cat`** (`cmds/core/cat`): Stream files and `-` (`ioEnv.Stdin`) to `ioEnv.Stdout`; resolve paths via `ioEnv.ResolvePath`.
-- [ ] **`grep`** (`cmds/core/grep`): Local flags (`-i`, `-v`, `-r`, `-c`, `-n`, `-q`, `-F`, `-h`, `-l`); check `ctx.Done()` in scanner; return `1` on no match.
+- [x] **`cat`** (`cmds/core/cat`): Stream files and `-` (`ioEnv.Stdin`) to `ioEnv.Stdout`; resolve paths via `ioEnv.ResolvePath`.
+- [x] **`grep`** (`cmds/core/grep`): Local flags (`-i`, `-v`, `-r`, `-c`, `-n`, `-q`, `-F`, `-h`, `-l`); check `ctx.Done()` in scanner; return `1` on no match.
 
 #### 1B. Text Processing & Filters
-- [ ] **`head`** (`cmds/core/head`): Local `-c` and `-n` flags; resolve file paths; stream to `ioEnv.Stdout`.
-- [ ] **`tail`** (`cmds/core/tail`): Local `-c`, `-n`, `-f` flags; monitor `ctx.Done()` in `-f` follow loop.
+- [x] **`head`** (`cmds/core/head`): Local `-c` and `-n` flags; resolve file paths; stream to `ioEnv.Stdout`.
+- [x] **`tail`** (`cmds/core/tail`): Local `-c`, `-n`, `-f` flags; monitor `ctx.Done()` in `-f` follow loop.
 - [ ] **`sort`** (`cmds/core/sort`): Local `-r`, `-u`, `-f`, `-b`, `-n`, `-C`, `-o` flags; resolve `-o` output file via `ioEnv.ResolvePath`.
 - [ ] **`uniq`** (`cmds/core/uniq`): Local `-u`, `-d`, `-c`, `-i`, `-f`, `-s` flags; stream `ioEnv.Stdin` to `ioEnv.Stdout`.
 - [ ] **`wc`** (`cmds/core/wc`): Local `-l`, `-w`, `-c`, `-m`, `-L` flags; write counts to `ioEnv.Stdout`.

@@ -579,7 +579,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dir_read), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("dir_read")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_path_stat), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("path_stat")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_path_chmod), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("path_chmod")
-	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_path_remove), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("path_remove")
+	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_path_remove), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("path_remove")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_path_mkdir), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("path_mkdir")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_path_rename), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("path_rename")
 

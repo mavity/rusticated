@@ -426,7 +426,7 @@ func TestSysDirReadExtended(t *testing.T) {
 		runOp()
 
 		mem.Write(600, []byte(path))
-		env.sys_path_stat(context.Background(), mod, []uint64{300, 600, uint64(len(path)), 0, 700, 64})
+		env.sys_path_stat(context.Background(), mod, []uint64{300, 600, uint64(len(path)), 0, 700, 112})
 		runOp()
 
 		buf, _ := mem.Read(300, 8)

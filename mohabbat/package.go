@@ -184,7 +184,8 @@ func assembleVegetable(ws, brainPath, buildDir, outputPath string) error {
 
 // buildZoneA produces the polyglot script header for Modern Four.
 func buildZoneA(offsets, lengths []int, nodeJsLen int, poolLen uint64, whOffsets, whLens []uint64, payloadOffset, payloadLen uint64) string {
-	const tmplPOSIX = `:; ME="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || printf "%s" "$0")"; S_OFF=0; S_LEN=0; W_OFF=0; W_LEN=0
+	const tmplPOSIX = `# 2>nul || @echo off & @goto :_MOHABBAT_WIN_START_
+:; ME="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || printf "%s" "$0")"; S_OFF=0; S_LEN=0; W_OFF=0; W_LEN=0
 :; P_LEN="{{POOL_LEN}}"; PLD_OFF="{{PAYLOAD_OFF}}"; PLD_LEN="{{PAYLOAD_LEN}}"
 :; MOHABBAT_VERBOSE="${MOHABBAT_VERBOSE:-0}"
 :; for ARG in "$@"; do
@@ -301,6 +302,7 @@ func buildZoneA(offsets, lengths []int, nodeJsLen int, poolLen uint64, whOffsets
 :; exit $RET
 `
 	const tmplWIN = `@echo off
+:_MOHABBAT_WIN_START_
 setlocal enabledelayedexpansion
 set "ME=%~f0"
 set "TMP_DIR=!TEMP!"

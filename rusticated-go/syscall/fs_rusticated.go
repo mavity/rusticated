@@ -52,28 +52,51 @@ type iovec struct {
 	bufLen size
 }
 
-// Stat_t mirrors the WASI filestat structure (was in syscall/fs_wasip1.go).
+// Stat_t is Rusticated's Go-level Unix stat projection. Its layout is not an ABI.
 type Stat_t struct {
-	Dev      uint64
-	Ino      uint64
-	Filetype uint8
-	Nlink    uint64
-	Size     uint64
-	Atime    uint64
-	Mtime    uint64
-	Ctime    uint64
-	Mode     int
-	Uid      uint32
-	Gid      uint32
+	Dev     uint64
+	Ino     uint64
+	Nlink   uint64
+	Mode    uint32
+	Uid     uint32
+	Gid     uint32
+	Rdev    uint64
+	Size    int64
+	Blksize int64
+	Blocks  int64
+	Atim    Timespec
+	Mtim    Timespec
+	Ctim    Timespec
+	Btim    Timespec
 
-	// Compatibility fields for unix-ish code
-	Rdev          uint64
+	// BSD/macOS-compatible timestamp spellings.
 	Atimespec     Timespec
 	Mtimespec     Timespec
 	Ctimespec     Timespec
 	Birthtimespec Timespec
-	Blksize       int32
+
+	// Go's wasip1 os overlay still reads these legacy fields.
+	Filetype  uint8
+	Atime     int64
+	Mtime     int64
+	Ctime     int64
+	ValidMask uint64
 }
+
+const (
+	STAT_VALID_UID       uint64 = 1 << 0
+	STAT_VALID_GID       uint64 = 1 << 1
+	STAT_VALID_ATIME     uint64 = 1 << 2
+	STAT_VALID_MTIME     uint64 = 1 << 3
+	STAT_VALID_CTIME     uint64 = 1 << 4
+	STAT_VALID_BIRTHTIME uint64 = 1 << 5
+	STAT_VALID_NLINK     uint64 = 1 << 6
+	STAT_VALID_INODE     uint64 = 1 << 7
+	STAT_VALID_DEV       uint64 = 1 << 8
+	STAT_VALID_RDEV      uint64 = 1 << 9
+	STAT_VALID_BLKSIZE   uint64 = 1 << 10
+	STAT_VALID_BLOCKS    uint64 = 1 << 11
+)
 
 // ── Constants (from original syscall/fs_wasip1.go) ────────────────────────
 
@@ -202,7 +225,7 @@ func rusticated_set_cwd(strPtr *byte, strLen uint32) uint32
 
 //go:wasmimport env path_remove
 //go:noescape
-func rusticated_path_remove(overlapped unsafe.Pointer, pathPtr *byte, pathLen uint32)
+func rusticated_path_remove(overlapped unsafe.Pointer, pathPtr *byte, pathLen uint32, flags uint32)
 
 //go:wasmimport env path_mkdir
 //go:noescape
@@ -378,6 +401,7 @@ func path_open_ext(path string, mode int, perm uint32) (uint64, error) {
 }
 
 func Open(path string, mode int, perm uint32) (int, error) {
+	path = fixJoinedPath(path)
 	if path == "" {
 		return -1, EINVAL
 	}
@@ -514,7 +538,7 @@ func ReadDir(fd int, buf []byte, _ uint64) (int, error) {
 
 // ── Stat / Lstat / Fstat ──────────────────────────────────────────────────
 
-const abiStatSize = 64
+const abiStatSize = 112
 
 func abiKindToFiletype(kind uint32) uint8 {
 	switch kind {
@@ -524,6 +548,12 @@ func abiKindToFiletype(kind uint32) uint8 {
 		return 3 // FILETYPE_DIRECTORY
 	case 3:
 		return 7 // FILETYPE_SYMBOLIC_LINK
+	case 4:
+		return 2 // FILETYPE_CHARACTER_DEVICE
+	case 5:
+		return 1 // FILETYPE_BLOCK_DEVICE
+	case 7:
+		return 5 // FILETYPE_SOCKET_STREAM
 	default:
 		return 0 // FILETYPE_UNKNOWN
 	}
@@ -538,12 +568,18 @@ func leU64fs(b []byte) uint64 {
 		uint64(b[4])<<32 | uint64(b[5])<<40 | uint64(b[6])<<48 | uint64(b[7])<<56
 }
 
-func setDefaultMode(st *Stat_t) {
-	if st.Filetype == 3 {
-		st.Mode = 0700
-	} else {
-		st.Mode = 0600
+func leI64fs(b []byte) int64 {
+	return int64(leU64fs(b))
+}
+
+func nsToTimespec(ns int64) Timespec {
+	sec := ns / 1e9
+	nsec := ns % 1e9
+	if nsec < 0 {
+		sec--
+		nsec += 1e9
 	}
+	return Timespec{Sec: sec, Nsec: nsec}
 }
 
 func parseAbiStat(buf []byte, st *Stat_t) {
@@ -553,14 +589,26 @@ func parseAbiStat(buf []byte, st *Stat_t) {
 	st.Filetype = abiKindToFiletype(leU32fs(buf[0:4]))
 	st.Uid = leU32fs(buf[8:12])
 	st.Gid = leU32fs(buf[12:16])
-	st.Size = leU64fs(buf[16:24])
-	st.Mtime = leU64fs(buf[24:32])
-	st.Atime = leU64fs(buf[32:40])
-	st.Ctime = leU64fs(buf[40:48])
-	st.Nlink = leU64fs(buf[48:56])
-	st.Ino = leU64fs(buf[56:64])
-	st.Mode = int(leU32fs(buf[4:8]))
-	st.Dev = 1
+	st.Size = int64(leU64fs(buf[16:24]))
+	st.Mtime = leI64fs(buf[24:32])
+	st.Atime = leI64fs(buf[32:40])
+	st.Ctime = leI64fs(buf[40:48])
+	st.Nlink = leU64fs(buf[56:64])
+	st.Ino = leU64fs(buf[64:72])
+	st.Dev = leU64fs(buf[72:80])
+	st.Rdev = leU64fs(buf[80:88])
+	st.Blksize = leI64fs(buf[88:96])
+	st.Blocks = leI64fs(buf[96:104])
+	st.ValidMask = leU64fs(buf[104:112])
+	st.Mode = leU32fs(buf[4:8])
+	st.Mtim = nsToTimespec(st.Mtime)
+	st.Atim = nsToTimespec(st.Atime)
+	st.Ctim = nsToTimespec(st.Ctime)
+	st.Btim = nsToTimespec(leI64fs(buf[48:56]))
+	st.Atimespec = st.Atim
+	st.Mtimespec = st.Mtim
+	st.Ctimespec = st.Ctim
+	st.Birthtimespec = st.Btim
 }
 
 func statat_ext(dirFd int, path string, st *Stat_t, flags uint32) error {
@@ -661,8 +709,14 @@ func Mkdir(path string, perm uint32) error {
 }
 
 func Unlink(path string) error {
+	return pathRemove(path, 0)
+}
+
+const atRemoveDir = 0x200
+
+func pathRemove(path string, flags uint32) error {
 	var ctx overlappedContext
-	rusticated_path_remove(unsafe.Pointer(&ctx.o), (*byte)(unsafe.StringData(path)), uint32(len(path)))
+	rusticated_path_remove(unsafe.Pointer(&ctx.o), (*byte)(unsafe.StringData(path)), uint32(len(path)), flags)
 	runtime.KeepAlive(path)
 	awaitOverlapped(&ctx)
 	if ctx.o.hostError != 0 {
@@ -672,8 +726,29 @@ func Unlink(path string) error {
 }
 
 func Rmdir(path string) error {
-	// host os.Remove handles both files and empty directories
-	return Unlink(path)
+	return pathRemove(path, atRemoveDir)
+}
+
+// Unlinkat removes path relative to dirFd, matching the Rusticated host path
+// operation's file-versus-directory behavior.
+func Unlinkat(dirFd int, path string, flags int) error {
+	if flags != 0 && flags != atRemoveDir {
+		return EINVAL
+	}
+	if path == "" {
+		return EINVAL
+	}
+
+	fullPath := fixJoinedPath(path)
+	if !isAbs(fullPath) && dirFd != -100 {
+		entry, ok := fdMap[int32(dirFd)]
+		if !ok || entry.path == "" {
+			return EBADF
+		}
+		fullPath = joinPaths(entry.path, fullPath)
+	}
+
+	return pathRemove(fullPath, uint32(flags))
 }
 
 func Rename(from, to string) error {

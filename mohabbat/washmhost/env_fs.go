@@ -20,11 +20,17 @@ type AbiStat struct {
 	Uid        uint32
 	Gid        uint32
 	Size       uint64
-	ModifiedNs uint64
-	AccessedNs uint64
-	CreatedNs  uint64
+	ModifiedNs int64
+	AccessedNs int64
+	ChangedNs  int64
+	CreatedNs  int64
 	Nlink      uint64
 	Inode      uint64
+	Dev        uint64
+	Rdev       uint64
+	Blksize    int64
+	Blocks     int64
+	ValidMask  uint64
 }
 
 const (
@@ -33,6 +39,25 @@ const (
 	statKindFile     = 1
 	statKindDir      = 2
 	statKindSymlink  = 3
+	statKindChar     = 4
+	statKindBlock    = 5
+	statKindFIFO     = 6
+	statKindSocket   = 7
+)
+
+const (
+	statValidUID uint64 = 1 << iota
+	statValidGID
+	statValidAtime
+	statValidMtime
+	statValidCtime
+	statValidBirthtime
+	statValidNlink
+	statValidInode
+	statValidDev
+	statValidRdev
+	statValidBlksize
+	statValidBlocks
 )
 
 type dirEntryInfo struct {
@@ -49,52 +74,100 @@ type DirScan struct {
 }
 
 func createAbiStat(fi os.FileInfo) AbiStat {
-	kind := uint32(statKindUnknown)
-	if fi.IsDir() {
-		kind = statKindDir
-	} else if fi.Mode()&os.ModeSymlink != 0 {
-		kind = statKindSymlink
-	} else {
-		kind = statKindFile
-	}
+	return createAbiStatAt(fi, "", false)
+}
 
-	mode := uint32(fi.Mode().Perm())
-	if fi.IsDir() {
-		mode |= 0o040000
-	} else if fi.Mode()&os.ModeSymlink != 0 {
-		mode |= 0o120000
-	} else {
-		mode |= 0o100000
-	}
-
-	ns := uint64(fi.ModTime().UnixNano())
-	return AbiStat{
+func createAbiStatAt(fi os.FileInfo, hostPath string, noFollow bool) AbiStat {
+	mode, kind := statModeAndKind(fi.Mode())
+	stat := AbiStat{
 		Kind:       kind,
 		Mode:       mode,
-		Uid:        0,
-		Gid:        0,
 		Size:       uint64(fi.Size()),
-		ModifiedNs: ns,
-		AccessedNs: ns,
-		CreatedNs:  ns,
-		Nlink:      1,
-		Inode:      0,
+		ModifiedNs: fi.ModTime().UnixNano(),
+		Blksize:    4096,
 	}
+	stat.ValidMask |= statValidMtime | statValidBlksize
+	if fi.Size() >= 0 {
+		stat.Blocks = fi.Size() / 512
+		if fi.Size()%512 != 0 {
+			stat.Blocks++
+		}
+		stat.ValidMask |= statValidBlocks
+	}
+	populatePlatformAbiStat(fi, hostPath, noFollow, &stat)
+	return stat
 }
 
 func marshalAbiStat(stat AbiStat) []byte {
-	payload := make([]byte, 64)
+	payload := make([]byte, 112)
 	binary.LittleEndian.PutUint32(payload[0:4], stat.Kind)
 	binary.LittleEndian.PutUint32(payload[4:8], stat.Mode)
 	binary.LittleEndian.PutUint32(payload[8:12], stat.Uid)
 	binary.LittleEndian.PutUint32(payload[12:16], stat.Gid)
 	binary.LittleEndian.PutUint64(payload[16:24], stat.Size)
-	binary.LittleEndian.PutUint64(payload[24:32], stat.ModifiedNs)
-	binary.LittleEndian.PutUint64(payload[32:40], stat.AccessedNs)
-	binary.LittleEndian.PutUint64(payload[40:48], stat.CreatedNs)
-	binary.LittleEndian.PutUint64(payload[48:56], stat.Nlink)
-	binary.LittleEndian.PutUint64(payload[56:64], stat.Inode)
+	binary.LittleEndian.PutUint64(payload[24:32], uint64(stat.ModifiedNs))
+	binary.LittleEndian.PutUint64(payload[32:40], uint64(stat.AccessedNs))
+	binary.LittleEndian.PutUint64(payload[40:48], uint64(stat.ChangedNs))
+	binary.LittleEndian.PutUint64(payload[48:56], uint64(stat.CreatedNs))
+	binary.LittleEndian.PutUint64(payload[56:64], stat.Nlink)
+	binary.LittleEndian.PutUint64(payload[64:72], stat.Inode)
+	binary.LittleEndian.PutUint64(payload[72:80], stat.Dev)
+	binary.LittleEndian.PutUint64(payload[80:88], stat.Rdev)
+	binary.LittleEndian.PutUint64(payload[88:96], uint64(stat.Blksize))
+	binary.LittleEndian.PutUint64(payload[96:104], uint64(stat.Blocks))
+	binary.LittleEndian.PutUint64(payload[104:112], stat.ValidMask)
 	return payload
+}
+
+func statModeAndKind(mode os.FileMode) (uint32, uint32) {
+	rawMode := uint32(mode.Perm())
+	switch {
+	case mode&os.ModeSetuid != 0:
+		rawMode |= 0o4000
+	}
+	if mode&os.ModeSetgid != 0 {
+		rawMode |= 0o2000
+	}
+	if mode&os.ModeSticky != 0 {
+		rawMode |= 0o1000
+	}
+	switch {
+	case mode.IsDir():
+		return rawMode | 0o040000, statKindDir
+	case mode&os.ModeSymlink != 0:
+		return rawMode | 0o120000, statKindSymlink
+	case mode&os.ModeDevice != 0 && mode&os.ModeCharDevice != 0:
+		return rawMode | 0o020000, statKindChar
+	case mode&os.ModeDevice != 0:
+		return rawMode | 0o060000, statKindBlock
+	case mode&os.ModeNamedPipe != 0:
+		return rawMode | 0o010000, statKindFIFO
+	case mode&os.ModeSocket != 0:
+		return rawMode | 0o140000, statKindSocket
+	default:
+		return rawMode | 0o100000, statKindFile
+	}
+}
+
+func statKindFromUnixMode(mode uint32) uint32 {
+	switch mode & 0o170000 {
+	case 0o100000:
+		return statKindFile
+	case 0o040000:
+		return statKindDir
+	case 0o120000:
+		return statKindSymlink
+	case 0o020000:
+		return statKindChar
+	case 0o060000:
+		return statKindBlock
+	case 0o010000:
+		return statKindFIFO
+	case 0o140000:
+		return statKindSocket
+	default:
+		return statKindUnknown
+	}
 }
 
 func (h *HostEnv) sys_read(ctx context.Context, m api.Module, stack []uint64) {
@@ -572,16 +645,17 @@ func (h *HostEnv) sys_path_stat(ctx context.Context, m api.Module, stack []uint6
 			fi, err = os.Stat(hostPathStr)
 		}
 		retCode := uint32(0)
-		extResult := uint64(64)
+		extResult := uint64(112)
 		var payload []byte
 		if err != nil {
 			debugLog("path_stat fail: path=%q err=%v", hostPathStr, err)
 			retCode = mapErrno(err)
-		} else if outLen < 64 {
+		} else if outLen < 112 {
 			retCode = wasiERANGE
 		} else {
-			payload = marshalAbiStat(createAbiStat(fi))
-			debugLog("path_stat ok: path=%q kind=%d mode=%o", hostPathStr, createAbiStat(fi).Kind, createAbiStat(fi).Mode)
+			stat := createAbiStatAt(fi, hostPathStr, (flags&statFlagNoFollow) != 0)
+			payload = marshalAbiStat(stat)
+			debugLog("path_stat ok: path=%q kind=%d mode=%o", hostPathStr, stat.Kind, stat.Mode)
 		}
 		h.fileOpsQueue <- func() {
 			defer h.DecOpsFor(state)
@@ -624,13 +698,34 @@ func (h *HostEnv) sys_path_remove(ctx context.Context, m api.Module, stack []uin
 	ovPtr := uint32(stack[0])
 	pathPtr := uint32(stack[1])
 	pathLen := uint32(stack[2])
+	flags := uint32(stack[3])
 
 	buf, ok := m.Memory().Read(pathPtr, pathLen)
 	if !ok {
 		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0) // EINVAL
 		return
 	}
-	err := os.Remove(h.resolveGuestPathForHost(string(buf)))
+	if flags != 0 && flags != 0x200 {
+		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+		return
+	}
+
+	path := h.resolveGuestPathForHost(string(buf))
+	info, err := os.Lstat(path)
+	if err != nil {
+		writeOverlapped(m, ovPtr, mapErrno(err), 0, 0)
+		return
+	}
+	if flags == 0x200 && !info.IsDir() {
+		writeOverlapped(m, ovPtr, wasiENOTDIR, 0, 0)
+		return
+	}
+	if flags == 0 && info.IsDir() {
+		writeOverlapped(m, ovPtr, wasiEISDIR, 0, 0)
+		return
+	}
+	err = os.Remove(path)
+	err = os.Remove(path)
 	writeOverlapped(m, ovPtr, mapErrno(err), 0, 0)
 }
 

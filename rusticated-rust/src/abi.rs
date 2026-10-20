@@ -43,43 +43,71 @@ impl Overlapped {
     }
 }
 
-/// Stable stat payload written by host `path_stat` into guest memory.
-///
-/// The host fills this structure for filesystem metadata requests made by the
-/// WASM guest. All fields are stable in layout but may be platform-dependent
-/// in exact semantics.
+/// Stable 112-byte stat payload written by host `path_stat` into guest memory.
+/// Optional metadata is indicated by `valid_mask`.
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AbiStat {
     /// One of the `STAT_KIND_*` constants describing the filesystem object type.
     pub kind: u32,
-    /// Platform-specific mode bits.
-    ///
-    /// On Unix this includes permission and file type flags; on other targets it
-    /// is interpreted by the host ABI implementation.
+    /// Unix-compatible file type and permission bits, synthesized where needed.
     pub mode: u32,
-    /// Owner user identifier, if provided by the host.
+    /// Owner user identifier.
     pub uid: u32,
-    /// Owner group identifier, if provided by the host.
+    /// Owner group identifier.
     pub gid: u32,
     /// File size in bytes.
-    ///
-    /// For directories or special files this may be zero depending on the host.
     pub size: u64,
-    /// Last modification time in nanoseconds since the Unix epoch.
-    pub modified_ns: u64,
-    /// Last access time in nanoseconds since the Unix epoch.
-    pub accessed_ns: u64,
-    /// Creation time in nanoseconds since the Unix epoch.
-    pub created_ns: u64,
+    /// Last modification time in signed nanoseconds since the Unix epoch.
+    pub modified_ns: i64,
+    /// Last access time in signed nanoseconds since the Unix epoch.
+    pub accessed_ns: i64,
+    /// Last metadata-change time in signed nanoseconds since the Unix epoch.
+    pub changed_ns: i64,
+    /// Birth/creation time in signed nanoseconds since the Unix epoch.
+    pub created_ns: i64,
     /// Number of hard links pointing at the file.
     pub nlink: u64,
-    /// Filesystem object identifier.
-    ///
-    /// This is typically an inode or equivalent identifier; it is opaque and
-    /// should be used for equality or uniqueness checks only.
+    /// Filesystem object identifier, typically an inode.
     pub inode: u64,
+    /// Device containing the file.
+    pub dev: u64,
+    /// Device identifier for special files.
+    pub rdev: u64,
+    /// Preferred block size for filesystem I/O, or a documented estimate.
+    pub blksize: i64,
+    /// Allocated 512-byte blocks, or an estimate where the host lacks this data.
+    pub blocks: i64,
+    /// `STAT_VALID_*` flags indicating available metadata.
+    pub valid_mask: u64,
 }
+
+const _: [(); 112] = [(); core::mem::size_of::<AbiStat>()];
+
+/// `valid_mask` bit indicating that the user identifier is available.
+pub const STAT_VALID_UID: u64 = 1 << 0;
+/// `valid_mask` bit indicating that the group identifier is available.
+pub const STAT_VALID_GID: u64 = 1 << 1;
+/// `valid_mask` bit indicating that the access time is available.
+pub const STAT_VALID_ATIME: u64 = 1 << 2;
+/// `valid_mask` bit indicating that the modification time is available.
+pub const STAT_VALID_MTIME: u64 = 1 << 3;
+/// `valid_mask` bit indicating that the metadata-change time is available.
+pub const STAT_VALID_CTIME: u64 = 1 << 4;
+/// `valid_mask` bit indicating that the birth/creation time is available.
+pub const STAT_VALID_BIRTHTIME: u64 = 1 << 5;
+/// `valid_mask` bit indicating that the hard-link count is available.
+pub const STAT_VALID_NLINK: u64 = 1 << 6;
+/// `valid_mask` bit indicating that the filesystem object identifier is available.
+pub const STAT_VALID_INODE: u64 = 1 << 7;
+/// `valid_mask` bit indicating that the containing device is available.
+pub const STAT_VALID_DEV: u64 = 1 << 8;
+/// `valid_mask` bit indicating that the special-file device identifier is available.
+pub const STAT_VALID_RDEV: u64 = 1 << 9;
+/// `valid_mask` bit indicating that the preferred block size is available.
+pub const STAT_VALID_BLKSIZE: u64 = 1 << 10;
+/// `valid_mask` bit indicating that the allocated block count is available.
+pub const STAT_VALID_BLOCKS: u64 = 1 << 11;
 
 /// Do not follow symbolic links when statting a path.
 ///
@@ -150,6 +178,18 @@ pub const STAT_KIND_DIR: u32 = 2;
 
 /// Symbolic link kind returned by `path_stat`.
 pub const STAT_KIND_SYMLINK: u32 = 3;
+
+/// Character device kind returned by `path_stat`.
+pub const STAT_KIND_CHAR: u32 = 4;
+
+/// Block device kind returned by `path_stat`.
+pub const STAT_KIND_BLOCK: u32 = 5;
+
+/// FIFO kind returned by `path_stat`.
+pub const STAT_KIND_FIFO: u32 = 6;
+
+/// Socket kind returned by `path_stat`.
+pub const STAT_KIND_SOCKET: u32 = 7;
 
 /// WASM Host Imports
 #[cfg(target_family = "wasm")]

@@ -333,17 +333,22 @@ impl Metadata {
     }
 
     /// Last modification time from the host, in nanoseconds.
-    pub fn modified_ns(&self) -> u64 {
+    pub fn modified_ns(&self) -> i64 {
         self.stat.modified_ns
     }
 
     /// Last access time from the host, in nanoseconds.
-    pub fn accessed_ns(&self) -> u64 {
+    pub fn accessed_ns(&self) -> i64 {
         self.stat.accessed_ns
     }
 
-    /// Creation time from the host, in nanoseconds.
-    pub fn created_ns(&self) -> u64 {
+    /// Metadata-change time from the host, in nanoseconds.
+    pub fn changed_ns(&self) -> i64 {
+        self.stat.changed_ns
+    }
+
+    /// Birth/creation time from the host, in nanoseconds.
+    pub fn created_ns(&self) -> i64 {
         self.stat.created_ns
     }
 
@@ -370,6 +375,31 @@ impl Metadata {
     /// Host-provided filesystem object identifier.
     pub fn inode(&self) -> u64 {
         self.stat.inode
+    }
+
+    /// Device containing the file.
+    pub fn dev(&self) -> u64 {
+        self.stat.dev
+    }
+
+    /// Device identifier for special files.
+    pub fn rdev(&self) -> u64 {
+        self.stat.rdev
+    }
+
+    /// Preferred block size for filesystem I/O.
+    pub fn blksize(&self) -> i64 {
+        self.stat.blksize
+    }
+
+    /// Number of allocated 512-byte blocks, or an estimate if marked valid.
+    pub fn blocks(&self) -> i64 {
+        self.stat.blocks
+    }
+
+    /// Bit flags indicating which optional metadata values are available.
+    pub fn valid_mask(&self) -> u64 {
+        self.stat.valid_mask
     }
 
     /// Returns the file permissions derived from the host metadata.
@@ -1755,6 +1785,13 @@ fn read_u64_le(buf: &[u8], off: usize) -> u64 {
 }
 
 #[cfg(target_family = "wasm")]
+fn read_i64_le(buf: &[u8], off: usize) -> i64 {
+    let mut tmp = [0u8; 8];
+    tmp.copy_from_slice(&buf[off..off + 8]);
+    i64::from_le_bytes(tmp)
+}
+
+#[cfg(target_family = "wasm")]
 fn decode_abi_stat(buf: &[u8]) -> io::Result<crate::abi::AbiStat> {
     if buf.len() < ABI_STAT_WIRE_SIZE {
         return Err(io::Error::other("short stat payload"));
@@ -1765,11 +1802,17 @@ fn decode_abi_stat(buf: &[u8]) -> io::Result<crate::abi::AbiStat> {
         uid: read_u32_le(buf, 8),
         gid: read_u32_le(buf, 12),
         size: read_u64_le(buf, 16),
-        modified_ns: read_u64_le(buf, 24),
-        accessed_ns: read_u64_le(buf, 32),
-        created_ns: read_u64_le(buf, 40),
-        nlink: read_u64_le(buf, 48),
-        inode: read_u64_le(buf, 56),
+        modified_ns: read_i64_le(buf, 24),
+        accessed_ns: read_i64_le(buf, 32),
+        changed_ns: read_i64_le(buf, 40),
+        created_ns: read_i64_le(buf, 48),
+        nlink: read_u64_le(buf, 56),
+        inode: read_u64_le(buf, 64),
+        dev: read_u64_le(buf, 72),
+        rdev: read_u64_le(buf, 80),
+        blksize: read_i64_le(buf, 88),
+        blocks: read_i64_le(buf, 96),
+        valid_mask: read_u64_le(buf, 104),
     })
 }
 

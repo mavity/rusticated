@@ -151,7 +151,7 @@ func mapErrno(err error) uint32 {
 			return wasiENXIO
 		case syscall.EPERM:
 			return wasiEPERM
-		case syscall.EPIPE:
+		case syscall.EPIPE, syscall.Errno(109), syscall.Errno(232):
 			return wasiEPIPE
 		case syscall.EROFS:
 			return wasiEROFS

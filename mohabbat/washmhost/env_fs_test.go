@@ -191,11 +191,11 @@ func TestSysFs(t *testing.T) {
 		ovPtr := uint32(0x1F00)
 		statPtr := uint32(0xC00)
 		// sys_path_stat(ctx, mod, [ovPtr, pathPtr, pathLen, flags, outPtr, outLen])
-		env.sys_path_stat(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 0, uint64(statPtr), 64})
+		env.sys_path_stat(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 0, uint64(statPtr), 112})
 
 		env.Poll(context.Background(), mod)
 
-		val, _ := mod.Memory().Read(statPtr, 64)
+		val, _ := mod.Memory().Read(statPtr, 112)
 		kind := binary.LittleEndian.Uint32(val[0:4])
 		size := binary.LittleEndian.Uint64(val[16:24])
 
@@ -213,7 +213,7 @@ func TestSysFs(t *testing.T) {
 
 		ovPtr := uint32(0x2000)
 		statPtr := uint32(0xE00)
-		env.sys_path_stat(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(tmpDir)), 0, uint64(statPtr), 64})
+		env.sys_path_stat(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(tmpDir)), 0, uint64(statPtr), 112})
 
 		env.Poll(context.Background(), mod)
 
@@ -222,7 +222,7 @@ func TestSysFs(t *testing.T) {
 			t.Errorf("stat failed with %d", binary.LittleEndian.Uint32(valOv[4:8]))
 		}
 
-		val, _ := mod.Memory().Read(statPtr, 64)
+		val, _ := mod.Memory().Read(statPtr, 112)
 		kind := binary.LittleEndian.Uint32(val[0:4])
 
 		if kind != 2 { // statKindDir

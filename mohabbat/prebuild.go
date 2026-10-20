@@ -670,9 +670,8 @@ func generateGoOverlay(ws, goroot string, verbose bool) error {
 		return fmt.Errorf("failed to write patched os_wasm.go: %w", err)
 	}
 
-	// Algorithmic patch for src/os/file.go and src/os/tempfile.go.
-	// The ABI-backed user-home/temp metadata must override the Go stdlib's env-driven
-	// defaults, without replacing the rest of the os package with a stub.
+	// Patch src/os/file.go so user-home and temp paths come from Rusticated's
+	// platform metadata instead of the WASI defaults.
 	if err := os.MkdirAll(filepath.Join(genDir, "os"), 0755); err != nil {
 		return fmt.Errorf("failed to create gen os dir: %w", err)
 	}
@@ -685,31 +684,18 @@ func generateGoOverlay(ws, goroot string, verbose bool) error {
 	fileGoStr, err = patchGoStr(fileGoStr, []regastPatch{
 		{pat: `(?s)func UserHomeDir\(\) \(string, error\) \{.*?\n\}`,
 			repl: "func UserHomeDir() (string, error) {\n\tpi := syscall.GetPlatformInfo()\n\tif pi == nil || pi.UserHomeDir == \"\" {\n\t\treturn \"\", errors.New(\"user home dir is not defined\")\n\t}\n\treturn pi.UserHomeDir, nil\n}"},
-	})
-	if err != nil {
-		return fmt.Errorf("patch os/file.go: %w", err)
-	}
-	genFileGo := filepath.Join(genDir, "os/file.go")
-	if err := writeFileIfChanged(genFileGo, []byte(fileGoStr)); err != nil {
-		return fmt.Errorf("failed to write patched os/file.go: %w", err)
-	}
-
-	tempFileSrc := filepath.Join(goroot, "src/os/tempfile.go")
-	tempFileContent, err := os.ReadFile(tempFileSrc)
-	if err != nil {
-		return fmt.Errorf("failed to read src/os/tempfile.go: %w", err)
-	}
-	tempFileStr := string(tempFileContent)
-	tempFileStr, err = patchGoStr(tempFileStr, []regastPatch{
 		{pat: `(?s)func TempDir\(\) string \{.*?\n\}`,
 			repl: "func TempDir() string {\n\tpi := syscall.GetPlatformInfo()\n\tif pi == nil || pi.TempDir == \"\" {\n\t\treturn \"/tmp\"\n\t}\n\treturn pi.TempDir\n}"},
 	})
 	if err != nil {
-		return fmt.Errorf("patch os/tempfile.go: %w", err)
+		return fmt.Errorf("patch os/file.go: %w", err)
 	}
-	genTempFileGo := filepath.Join(genDir, "os/tempfile.go")
-	if err := writeFileIfChanged(genTempFileGo, []byte(tempFileStr)); err != nil {
-		return fmt.Errorf("failed to write patched os/tempfile.go: %w", err)
+	if !strings.Contains(fileGoStr, "func TempDir() string {\n\tpi := syscall.GetPlatformInfo()") {
+		return fmt.Errorf("could not patch TempDir in os/file.go")
+	}
+	genFileGo := filepath.Join(genDir, "os/file.go")
+	if err := writeFileIfChanged(genFileGo, []byte(fileGoStr)); err != nil {
+		return fmt.Errorf("failed to write patched os/file.go: %w", err)
 	}
 
 	// Algorithmic patch for src/net/net_fake.go.
@@ -881,7 +867,6 @@ func generateGoOverlay(ws, goroot string, verbose bool) error {
 		{"src/os/stat_wasip1.go", canon(genStatWasip1)},
 		// os ABI-backed home/temp override (generated patched copy of stdlib source)
 		{"src/os/file.go", canon(genFileGo)},
-		{"src/os/tempfile.go", canon(genTempFileGo)},
 		// pipe
 		{"src/os/pipe_wasm.go", canon(filepath.Join(overlayDir, "os/pipe_rusticated.go"))},
 		// exec
