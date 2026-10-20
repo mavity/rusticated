@@ -179,7 +179,7 @@ A command checkbox `[x]` may **only** be ticked when all 5 criteria are met:
 
 #### 1A. Pilot Commands (First 3 to Validate Architecture End-to-End)
 - [x] **`echo`** (`cmds/core/echo`): Convert `-n`, `-e`, `-E` to local FlagSet; support `\c` early return without `os.Exit`.
-- [x] **`cat`** (`cmds/core/cat`): Stream files and `-` (`ioEnv.Stdin`) to `ioEnv.Stdout`; resolve paths via `ioEnv.ResolvePath`.
+- [ ] **`cat`** (`cmds/core/cat`): Stream files and `-` (`ioEnv.Stdin`) to `ioEnv.Stdout`; resolve paths via `ioEnv.ResolvePath`.
 - [ ] **`grep`** (`cmds/core/grep`): Local flags (`-i`, `-v`, `-r`, `-c`, `-n`, `-q`, `-F`, `-h`, `-l`); check `ctx.Done()` in scanner; return `1` on no match.
 
 #### 1B. Text Processing & Filters
