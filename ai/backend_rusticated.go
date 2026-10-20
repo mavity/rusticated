@@ -3,12 +3,12 @@
 package ai
 
 import (
+	"dload"
 	"encoding/binary"
 	"fmt"
 	"math"
 	"os"
 	"sync"
-	"syscall"
 	"unsafe"
 )
 
@@ -88,7 +88,7 @@ func callDylib(sym uint64, paramTypes, resultTypes []byte, args ...uint64) (uint
 	sig = append(sig, paramTypes...)
 	sig = append(sig, byte(len(resultTypes)))
 	sig = append(sig, resultTypes...)
-	res, err := syscall.DylibCall(sym, sig, args, 0)
+	res, err := dload.DylibCall(sym, sig, args, 0)
 	if err != nil {
 		return 0, err
 	}
@@ -107,13 +107,13 @@ func (d *rusticatedDriver) ensureLoaded(libPath string) error {
 }
 
 func (d *rusticatedDriver) getSymbol(name string) (uint64, error) {
-	return syscall.DylibSym(lmLib, name)
+	return dload.DylibSym(lmLib, name)
 }
 
 func (d *rusticatedDriver) writeInt32(addr uint64, val int32) {
 	var buf [4]byte
 	binary.LittleEndian.PutUint32(buf[:], uint32(val))
-	_ = syscall.DylibWriteMem(lmLib, addr, buf[:])
+	_ = dload.DylibWriteMem(lmLib, addr, buf[:])
 }
 
 func (d *rusticatedDriver) writeBool(addr uint64, val bool) {
@@ -121,11 +121,11 @@ func (d *rusticatedDriver) writeBool(addr uint64, val bool) {
 	if val {
 		b = 1
 	}
-	_ = syscall.DylibWriteMem(lmLib, addr, []byte{b})
+	_ = dload.DylibWriteMem(lmLib, addr, []byte{b})
 }
 
 func (d *rusticatedDriver) stringToCPtr(s string) (uint64, func()) {
-	ptr, free, err := syscall.CString(lmLib, s)
+	ptr, free, err := dload.CString(lmLib, s)
 	if err != nil {
 		return 0, func() {}
 	}
@@ -136,7 +136,7 @@ func (d *rusticatedDriver) ptrToString(ptr uint64) string {
 	if ptr == 0 {
 		return ""
 	}
-	s, _ := syscall.GoString(lmLib, ptr)
+	s, _ := dload.GoString(lmLib, ptr)
 	return s
 }
 
@@ -257,11 +257,11 @@ func (d *rusticatedDriver) loadedFileSupportsFunctionCalling(file uint64) bool {
 	return int32(v) != 0
 }
 func (d *rusticatedDriver) loadedFileModalitySupportedBackends(file uint64, modality int32) []uint32 {
-	backendsBuf, err := syscall.DylibAlloc(lmLib, uint64(8*4))
+	backendsBuf, err := dload.DylibAlloc(lmLib, uint64(8*4))
 	if err != nil {
 		return []uint32{}
 	}
-	defer func() { _ = syscall.DylibFree(lmLib, backendsBuf) }()
+	defer func() { _ = dload.DylibFree(lmLib, backendsBuf) }()
 	count, err := callDylib(symLMLoadedFileModalitySupportedBackends, []byte{i64, i32, i64, i32}, []byte{i32},
 		file, uint64(modality), backendsBuf, 8)
 	if err != nil {
@@ -275,7 +275,7 @@ func (d *rusticatedDriver) loadedFileModalitySupportedBackends(file uint64, moda
 		return []uint32{}
 	}
 	bBytes := make([]byte, cnt*4)
-	if syscall.DylibReadMem(lmLib, backendsBuf, bBytes) != nil {
+	if dload.DylibReadMem(lmLib, backendsBuf, bBytes) != nil {
 		return []uint32{}
 	}
 	var out []uint32
@@ -337,12 +337,12 @@ func (d *rusticatedDriver) inputDataCreate(dataType int32, data []byte) uint64 {
 	var buf uint64
 	if len(data) > 0 {
 		var err error
-		buf, err = syscall.DylibAlloc(lmLib, uint64(len(data)))
+		buf, err = dload.DylibAlloc(lmLib, uint64(len(data)))
 		if err != nil {
 			return 0
 		}
-		if syscall.DylibWriteMem(lmLib, buf, data) != nil {
-			_ = syscall.DylibFree(lmLib, buf)
+		if dload.DylibWriteMem(lmLib, buf, data) != nil {
+			_ = dload.DylibFree(lmLib, buf)
 			return 0
 		}
 	}
@@ -350,7 +350,7 @@ func (d *rusticatedDriver) inputDataCreate(dataType int32, data []byte) uint64 {
 		uint64(dataType), buf, uint64(len(data)))
 	if err != nil || v == 0 {
 		if buf != 0 {
-			_ = syscall.DylibFree(lmLib, buf)
+			_ = dload.DylibFree(lmLib, buf)
 		}
 		return 0
 	}
@@ -370,24 +370,24 @@ func (d *rusticatedDriver) inputDataDelete(inputData uint64) {
 	}
 	rusticatedInputBufMu.Unlock()
 	if ok && buf != 0 {
-		_ = syscall.DylibFree(lmLib, buf)
+		_ = dload.DylibFree(lmLib, buf)
 	}
 }
 func (d *rusticatedDriver) embeddingEngineCompute(engine uint64, inputs []uint64, options uint64) ([]float32, error) {
 	if len(inputs) == 0 {
 		return nil, fmt.Errorf("no inputs provided")
 	}
-	inputsBuf, err := syscall.DylibAlloc(lmLib, uint64(len(inputs)*8))
+	inputsBuf, err := dload.DylibAlloc(lmLib, uint64(len(inputs)*8))
 	if err != nil {
 		return nil, fmt.Errorf("DylibAlloc failed: %w", err)
 	}
-	defer func() { _ = syscall.DylibFree(lmLib, inputsBuf) }()
+	defer func() { _ = dload.DylibFree(lmLib, inputsBuf) }()
 
 	rawPtrs := make([]byte, len(inputs)*8)
 	for i, ptr := range inputs {
 		binary.LittleEndian.PutUint64(rawPtrs[i*8:(i+1)*8], ptr)
 	}
-	if err := syscall.DylibWriteMem(lmLib, inputsBuf, rawPtrs); err != nil {
+	if err := dload.DylibWriteMem(lmLib, inputsBuf, rawPtrs); err != nil {
 		return nil, fmt.Errorf("DylibWriteMem failed: %w", err)
 	}
 
@@ -407,7 +407,7 @@ func (d *rusticatedDriver) embeddingEngineCompute(engine uint64, inputs []uint64
 		return nil, fmt.Errorf("invalid embedding response values pointer")
 	}
 	rawVals := make([]byte, int(size)*4)
-	if err := syscall.DylibReadMem(lmLib, valsPtr, rawVals); err != nil {
+	if err := dload.DylibReadMem(lmLib, valsPtr, rawVals); err != nil {
 		return nil, fmt.Errorf("DylibReadMem failed: %w", err)
 	}
 	out := make([]float32, int(size))
@@ -427,7 +427,7 @@ var (
 func (d *rusticatedDriver) createTrampoline() uint64 {
 	trampolineRegOnce.Do(func() {
 		cbSig := []byte{0x60, 2, i64, i64, 0}
-		rusticatedTrampoline, _ = syscall.DylibRegisterCallback(lmLib, cbSig, unsafe.Pointer(&trampolineOv[0]), 512,
+		rusticatedTrampoline, _ = dload.DylibRegisterCallback(lmLib, cbSig, unsafe.Pointer(&trampolineOv[0]), 512,
 			func(args []uint64) []uint64 {
 				if len(args) < 2 {
 					return nil
@@ -452,62 +452,62 @@ func ensureLMLibLoadedImpl(libPath string) error {
 		if Verbose {
 			fmt.Fprintf(os.Stderr, "[ai] loading LiteRT-LM WASM library: %s\n", libPath)
 		}
-		lmLib, err = syscall.DylibOpen(libPath, syscall.RTLD_NOW|syscall.RTLD_GLOBAL)
+		lmLib, err = dload.DylibOpen(libPath, dload.RTLD_NOW|dload.RTLD_GLOBAL)
 		if err != nil {
 			lmLibErr = fmt.Errorf("failed to load %s: %w", libPath, err)
 			return
 		}
-		symLMSettingsCreate, _ = syscall.DylibSym(lmLib, "litert_lm_engine_settings_create")
-		symLMSettingsDelete, _ = syscall.DylibSym(lmLib, "litert_lm_engine_settings_delete")
-		symLMEngineCreate, _ = syscall.DylibSym(lmLib, "litert_lm_engine_create")
-		symLMEngineDelete, _ = syscall.DylibSym(lmLib, "litert_lm_engine_delete")
-		symLMCfgCreate, _ = syscall.DylibSym(lmLib, "litert_lm_conversation_config_create")
-		symLMCfgDelete, _ = syscall.DylibSym(lmLib, "litert_lm_conversation_config_delete")
-		symLMConvCreate, _ = syscall.DylibSym(lmLib, "litert_lm_conversation_create")
-		symLMConvClone, _ = syscall.DylibSym(lmLib, "litert_lm_conversation_clone")
-		symLMConvDelete, _ = syscall.DylibSym(lmLib, "litert_lm_conversation_delete")
-		symLMConvSendStream, _ = syscall.DylibSym(lmLib, "litert_lm_conversation_send_message_stream")
-		symLMConvCancelProcess, _ = syscall.DylibSym(lmLib, "litert_lm_conversation_cancel_process")
-		symLMSetLogLevel, _ = syscall.DylibSym(lmLib, "litert_lm_set_min_log_level")
-		symLMStreamChunkGetText, _ = syscall.DylibSym(lmLib, "litert_lm_stream_chunk_get_text")
-		symLMStreamChunkIsFinal, _ = syscall.DylibSym(lmLib, "litert_lm_stream_chunk_is_final")
-		symLMStreamChunkGetError, _ = syscall.DylibSym(lmLib, "litert_lm_stream_chunk_get_error")
+		symLMSettingsCreate, _ = dload.DylibSym(lmLib, "litert_lm_engine_settings_create")
+		symLMSettingsDelete, _ = dload.DylibSym(lmLib, "litert_lm_engine_settings_delete")
+		symLMEngineCreate, _ = dload.DylibSym(lmLib, "litert_lm_engine_create")
+		symLMEngineDelete, _ = dload.DylibSym(lmLib, "litert_lm_engine_delete")
+		symLMCfgCreate, _ = dload.DylibSym(lmLib, "litert_lm_conversation_config_create")
+		symLMCfgDelete, _ = dload.DylibSym(lmLib, "litert_lm_conversation_config_delete")
+		symLMConvCreate, _ = dload.DylibSym(lmLib, "litert_lm_conversation_create")
+		symLMConvClone, _ = dload.DylibSym(lmLib, "litert_lm_conversation_clone")
+		symLMConvDelete, _ = dload.DylibSym(lmLib, "litert_lm_conversation_delete")
+		symLMConvSendStream, _ = dload.DylibSym(lmLib, "litert_lm_conversation_send_message_stream")
+		symLMConvCancelProcess, _ = dload.DylibSym(lmLib, "litert_lm_conversation_cancel_process")
+		symLMSetLogLevel, _ = dload.DylibSym(lmLib, "litert_lm_set_min_log_level")
+		symLMStreamChunkGetText, _ = dload.DylibSym(lmLib, "litert_lm_stream_chunk_get_text")
+		symLMStreamChunkIsFinal, _ = dload.DylibSym(lmLib, "litert_lm_stream_chunk_is_final")
+		symLMStreamChunkGetError, _ = dload.DylibSym(lmLib, "litert_lm_stream_chunk_get_error")
 
-		symLMCfgSetTools, _ = syscall.DylibSym(lmLib, "litert_lm_conversation_config_set_tools")
-		symLMCfgSetSystemMessage, _ = syscall.DylibSym(lmLib, "litert_lm_conversation_config_set_system_message")
-		symLMCfgSetStreamToolCalls, _ = syscall.DylibSym(lmLib, "litert_lm_conversation_config_set_stream_tool_calls")
-		symLMCfgSetMessages, _ = syscall.DylibSym(lmLib, "litert_lm_conversation_config_set_messages")
+		symLMCfgSetTools, _ = dload.DylibSym(lmLib, "litert_lm_conversation_config_set_tools")
+		symLMCfgSetSystemMessage, _ = dload.DylibSym(lmLib, "litert_lm_conversation_config_set_system_message")
+		symLMCfgSetStreamToolCalls, _ = dload.DylibSym(lmLib, "litert_lm_conversation_config_set_stream_tool_calls")
+		symLMCfgSetMessages, _ = dload.DylibSym(lmLib, "litert_lm_conversation_config_set_messages")
 
-		symLMSettingsSetEnableSpeculativeDecoding, _ = syscall.DylibSym(lmLib, "litert_lm_engine_settings_set_enable_speculative_decoding")
-		symLMSettingsSetUseRingbuffersLocalAttention, _ = syscall.DylibSym(lmLib, "litert_lm_engine_settings_set_use_ringbuffers_local_attention")
-		symLMSettingsSetGpuDecodeStepsPerSync, _ = syscall.DylibSym(lmLib, "litert_lm_engine_settings_set_gpu_decode_steps_per_sync")
-		symLMSettingsSetNumThreads, _ = syscall.DylibSym(lmLib, "litert_lm_engine_settings_set_num_threads")
-		symLMSettingsSetMaxNumTokens, _ = syscall.DylibSym(lmLib, "litert_lm_engine_settings_set_max_num_tokens")
+		symLMSettingsSetEnableSpeculativeDecoding, _ = dload.DylibSym(lmLib, "litert_lm_engine_settings_set_enable_speculative_decoding")
+		symLMSettingsSetUseRingbuffersLocalAttention, _ = dload.DylibSym(lmLib, "litert_lm_engine_settings_set_use_ringbuffers_local_attention")
+		symLMSettingsSetGpuDecodeStepsPerSync, _ = dload.DylibSym(lmLib, "litert_lm_engine_settings_set_gpu_decode_steps_per_sync")
+		symLMSettingsSetNumThreads, _ = dload.DylibSym(lmLib, "litert_lm_engine_settings_set_num_threads")
+		symLMSettingsSetMaxNumTokens, _ = dload.DylibSym(lmLib, "litert_lm_engine_settings_set_max_num_tokens")
 
-		symLMLoadedFileCreate, _ = syscall.DylibSym(lmLib, "litert_lm_loaded_file_create")
-		symLMLoadedFileDelete, _ = syscall.DylibSym(lmLib, "litert_lm_loaded_file_delete")
-		symLMLoadedFileHasSpeculativeDecodingSupport, _ = syscall.DylibSym(lmLib, "litert_lm_loaded_file_has_speculative_decoding_support")
-		symLMLoadedFileMaxContextTokens, _ = syscall.DylibSym(lmLib, "litert_lm_loaded_file_max_context_tokens")
-		symLMLoadedFileIsDynamicContext, _ = syscall.DylibSym(lmLib, "litert_lm_loaded_file_is_dynamic_context")
-		symLMLoadedFileSupportsThinking, _ = syscall.DylibSym(lmLib, "litert_lm_loaded_file_supports_thinking")
-		symLMLoadedFileSupportsFunctionCalling, _ = syscall.DylibSym(lmLib, "litert_lm_loaded_file_supports_function_calling")
-		symLMLoadedFileModalitySupportedBackends, _ = syscall.DylibSym(lmLib, "litert_lm_loaded_file_modality_supported_backends")
+		symLMLoadedFileCreate, _ = dload.DylibSym(lmLib, "litert_lm_loaded_file_create")
+		symLMLoadedFileDelete, _ = dload.DylibSym(lmLib, "litert_lm_loaded_file_delete")
+		symLMLoadedFileHasSpeculativeDecodingSupport, _ = dload.DylibSym(lmLib, "litert_lm_loaded_file_has_speculative_decoding_support")
+		symLMLoadedFileMaxContextTokens, _ = dload.DylibSym(lmLib, "litert_lm_loaded_file_max_context_tokens")
+		symLMLoadedFileIsDynamicContext, _ = dload.DylibSym(lmLib, "litert_lm_loaded_file_is_dynamic_context")
+		symLMLoadedFileSupportsThinking, _ = dload.DylibSym(lmLib, "litert_lm_loaded_file_supports_thinking")
+		symLMLoadedFileSupportsFunctionCalling, _ = dload.DylibSym(lmLib, "litert_lm_loaded_file_supports_function_calling")
+		symLMLoadedFileModalitySupportedBackends, _ = dload.DylibSym(lmLib, "litert_lm_loaded_file_modality_supported_backends")
 
-		symLMEmbeddingSettingsCreate, _ = syscall.DylibSym(lmLib, "litert_lm_embedding_engine_settings_create")
-		symLMEmbeddingSettingsDelete, _ = syscall.DylibSym(lmLib, "litert_lm_embedding_engine_settings_delete")
-		symLMEmbeddingSettingsSetNumThreads, _ = syscall.DylibSym(lmLib, "litert_lm_embedding_engine_settings_set_num_threads")
-		symLMEmbeddingEngineCreate, _ = syscall.DylibSym(lmLib, "litert_lm_embedding_engine_create")
-		symLMEmbeddingEngineDelete, _ = syscall.DylibSym(lmLib, "litert_lm_embedding_engine_delete")
-		symLMEmbeddingOptionsCreate, _ = syscall.DylibSym(lmLib, "litert_lm_embedding_options_create")
-		symLMEmbeddingOptionsDelete, _ = syscall.DylibSym(lmLib, "litert_lm_embedding_options_delete")
-		symLMEmbeddingOptionsSetNormalize, _ = syscall.DylibSym(lmLib, "litert_lm_embedding_options_set_normalize")
-		symLMEmbeddingOptionsSetOverflowStrategy, _ = syscall.DylibSym(lmLib, "litert_lm_embedding_options_set_input_overflow_strategy")
-		symLMInputDataCreate, _ = syscall.DylibSym(lmLib, "litert_lm_input_data_create")
-		symLMInputDataDelete, _ = syscall.DylibSym(lmLib, "litert_lm_input_data_delete")
-		symLMEmbeddingEngineCompute, _ = syscall.DylibSym(lmLib, "litert_lm_embedding_engine_compute_embedding")
-		symLMEmbeddingResponseDelete, _ = syscall.DylibSym(lmLib, "litert_lm_embedding_response_delete")
-		symLMEmbeddingResponseGetSize, _ = syscall.DylibSym(lmLib, "litert_lm_embedding_response_get_size")
-		symLMEmbeddingResponseGetValues, _ = syscall.DylibSym(lmLib, "litert_lm_embedding_response_get_values")
+		symLMEmbeddingSettingsCreate, _ = dload.DylibSym(lmLib, "litert_lm_embedding_engine_settings_create")
+		symLMEmbeddingSettingsDelete, _ = dload.DylibSym(lmLib, "litert_lm_embedding_engine_settings_delete")
+		symLMEmbeddingSettingsSetNumThreads, _ = dload.DylibSym(lmLib, "litert_lm_embedding_engine_settings_set_num_threads")
+		symLMEmbeddingEngineCreate, _ = dload.DylibSym(lmLib, "litert_lm_embedding_engine_create")
+		symLMEmbeddingEngineDelete, _ = dload.DylibSym(lmLib, "litert_lm_embedding_engine_delete")
+		symLMEmbeddingOptionsCreate, _ = dload.DylibSym(lmLib, "litert_lm_embedding_options_create")
+		symLMEmbeddingOptionsDelete, _ = dload.DylibSym(lmLib, "litert_lm_embedding_options_delete")
+		symLMEmbeddingOptionsSetNormalize, _ = dload.DylibSym(lmLib, "litert_lm_embedding_options_set_normalize")
+		symLMEmbeddingOptionsSetOverflowStrategy, _ = dload.DylibSym(lmLib, "litert_lm_embedding_options_set_input_overflow_strategy")
+		symLMInputDataCreate, _ = dload.DylibSym(lmLib, "litert_lm_input_data_create")
+		symLMInputDataDelete, _ = dload.DylibSym(lmLib, "litert_lm_input_data_delete")
+		symLMEmbeddingEngineCompute, _ = dload.DylibSym(lmLib, "litert_lm_embedding_engine_compute_embedding")
+		symLMEmbeddingResponseDelete, _ = dload.DylibSym(lmLib, "litert_lm_embedding_response_delete")
+		symLMEmbeddingResponseGetSize, _ = dload.DylibSym(lmLib, "litert_lm_embedding_response_get_size")
+		symLMEmbeddingResponseGetValues, _ = dload.DylibSym(lmLib, "litert_lm_embedding_response_get_values")
 	})
 	return lmLibErr
 }

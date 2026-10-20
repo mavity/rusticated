@@ -2,4 +2,10 @@ module ai
 
 go 1.27.1
 
-require github.com/ebitengine/purego v0.11.0
+require (
+	dload v0.0.0-00010101000000-000000000000
+	github.com/ebitengine/purego v0.11.0
+)
+
+replace dload => ../dload
+

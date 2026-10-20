@@ -324,16 +324,22 @@ func (h *HostEnv) sys_get_platform_info(ctx context.Context, m api.Module, stack
 	// OS Version (stub for now, could use syscall.GetVersion on Windows)
 	// binary.LittleEndian.PutUint16(buf[8:10], 10) ...
 
-	// CPU Type (1=x86_64, 2=arm64)
+	// CPU Type (1=x86_64, 2=arm64, 3=arm32)
 	cpuType := uint16(0)
 	switch runtime.GOARCH {
 	case "amd64":
 		cpuType = 1
 	case "arm64":
 		cpuType = 2
+	case "arm":
+		cpuType = 3
 	}
 	binary.LittleEndian.PutUint16(buf[16:18], cpuType)
-	buf[18] = 64 // bitness
+	bitness := uint8(64)
+	if runtime.GOARCH == "arm" || runtime.GOARCH == "386" {
+		bitness = 32
+	}
+	buf[18] = bitness // bitness
 
 	copySafe := func(offset int, s string) {
 		b := []byte(s)

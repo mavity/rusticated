@@ -42,6 +42,10 @@ func runPrebuild(ws string, verbose bool, scope PrebuildScope) error {
 			return fmt.Errorf("overlay generation: %w", err)
 		}
 		vlogf(verbose, "🍆  SDK %s at %s\n", rootSource, goroot)
+
+		if err := buildDloadWorkers(ws, verbose); err != nil {
+			return fmt.Errorf("dload workers build: %w", err)
+		}
 	}
 	vlogf(verbose, "🍆  Prebuild complete.\n")
 	return nil
@@ -854,7 +858,6 @@ func generateGoOverlay(ws, goroot string, verbose bool) error {
 		{"src/syscall/os_wasip1.go", canon(filepath.Join(overlayDir, "syscall/os_rusticated.go"))},
 		{"src/syscall/log_rusticated.go", canon(filepath.Join(overlayDir, "syscall/log_rusticated.go"))},
 		{"src/syscall/log_rusticated_verbose.go", canon(filepath.Join(overlayDir, "syscall/log_rusticated_verbose.go"))},
-		{"src/syscall/dylib_rusticated.go", canon(filepath.Join(overlayDir, "syscall/dylib_rusticated.go"))},
 		// internal/syscall/unix
 		{"src/internal/syscall/unix/at_wasip1.go", canon(filepath.Join(overlayDir, "internal/syscall/unix/at_rusticated.go"))},
 		{"src/internal/syscall/unix/utimes_wasip1.go", canon(filepath.Join(overlayDir, "internal/syscall/unix/utimes_rusticated.go"))},
@@ -920,5 +923,108 @@ func generateGoOverlay(ws, goroot string, verbose bool) error {
 		return err
 	}
 	vlogf(verbose, "🍆  Wrote %s\n", overlayPath)
+	return nil
+}
+
+func buildDloadWorkers(ws string, verbose bool) error {
+	vlogf(verbose, "🍆  Building dload workers...\n")
+	brotStubsDir := filepath.Join(ws, "target", "brot-stubs")
+	if err := ensureBrotStubs(brotStubsDir); err != nil {
+		return err
+	}
+	darwinStubsDir := filepath.Join(ws, "target", "darwin-stubs")
+	if err := ensureDarwinStubs(darwinStubsDir); err != nil {
+		return err
+	}
+
+	type workerTarget struct {
+		flavour   string
+		target    string
+		rustflags []string
+		outExt    string
+	}
+
+	targets := []workerTarget{
+		{
+			flavour:   "windows-amd64",
+			target:    "x86_64-pc-windows-gnullvm",
+			rustflags: []string{"'-C'", "'linker=rust-lld'", "'-C'", "'linker-flavor=ld.lld'", "'-C'", fmt.Sprintf("'link-arg=-L%s'", filepath.ToSlash(brotStubsDir))},
+			outExt:    ".exe",
+		},
+		{
+			flavour:   "windows-arm64",
+			target:    "aarch64-pc-windows-gnullvm",
+			rustflags: []string{"'-C'", "'linker=rust-lld'", "'-C'", "'linker-flavor=ld.lld'", "'-C'", fmt.Sprintf("'link-arg=-L%s'", filepath.ToSlash(brotStubsDir))},
+			outExt:    ".exe",
+		},
+		{
+			flavour:   "darwin-arm64",
+			target:    "aarch64-apple-darwin",
+			rustflags: []string{"'-C'", "'linker=rust-lld'", "'-C'", "'linker-flavor=darwin-lld'", "'-Z'", "'unstable-options'", "'-C'", fmt.Sprintf("'link-arg=-L%s'", filepath.ToSlash(darwinStubsDir))},
+			outExt:    "",
+		},
+		{
+			flavour:   "linux-gnu-amd64",
+			target:    "x86_64-unknown-linux-musl",
+			rustflags: []string{"'-C'", "'link-self-contained=no'", "'-C'", "'linker=rust-lld'", "'-C'", "'linker-flavor=ld.lld'", "'-C'", "'relocation-model=pic'", "'-C'", "'link-arg=-pie'", "'-C'", "'link-arg=--dynamic-linker=/lib64/ld-linux-x86-64.so.2'", "'-C'", "'link-arg=--unresolved-symbols=ignore-all'"},
+			outExt:    "",
+		},
+		{
+			flavour:   "linux-gnu-arm64",
+			target:    "aarch64-unknown-linux-musl",
+			rustflags: []string{"'-C'", "'link-self-contained=no'", "'-C'", "'linker=rust-lld'", "'-C'", "'linker-flavor=ld.lld'", "'-C'", "'relocation-model=pic'", "'-C'", "'link-arg=-pie'", "'-C'", "'link-arg=--dynamic-linker=/lib/ld-linux-aarch64.so.1'", "'-C'", "'link-arg=--unresolved-symbols=ignore-all'"},
+			outExt:    "",
+		},
+		{
+			flavour:   "linux-gnu-arm32",
+			target:    "armv7-unknown-linux-musleabihf",
+			rustflags: []string{"'-C'", "'link-self-contained=no'", "'-C'", "'linker=rust-lld'", "'-C'", "'linker-flavor=ld.lld'", "'-C'", "'relocation-model=pic'", "'-C'", "'link-arg=-pie'", "'-C'", "'link-arg=--dynamic-linker=/lib/ld-linux-armhf.so.3'", "'-C'", "'link-arg=--unresolved-symbols=ignore-all'"},
+			outExt:    "",
+		},
+		{
+			flavour:   "linux-android-arm64",
+			target:    "aarch64-unknown-linux-musl",
+			rustflags: []string{"'-C'", "'link-self-contained=no'", "'-C'", "'linker=rust-lld'", "'-C'", "'linker-flavor=ld.lld'", "'-C'", "'relocation-model=pic'", "'-C'", "'link-arg=-pie'", "'-C'", "'link-arg=--dynamic-linker=/system/bin/linker64'", "'-C'", "'link-arg=--unresolved-symbols=ignore-all'"},
+			outExt:    "",
+		},
+		{
+			flavour:   "linux-android-arm32",
+			target:    "armv7-unknown-linux-musleabihf",
+			rustflags: []string{"'-C'", "'link-self-contained=no'", "'-C'", "'linker=rust-lld'", "'-C'", "'linker-flavor=ld.lld'", "'-C'", "'relocation-model=pic'", "'-C'", "'link-arg=-pie'", "'-C'", "'link-arg=--dynamic-linker=/system/bin/linker'", "'-C'", "'link-arg=--unresolved-symbols=ignore-all'"},
+			outExt:    "",
+		},
+	}
+
+	embeddedDir := filepath.Join(ws, "dload", "embedded")
+	if err := os.MkdirAll(embeddedDir, 0o755); err != nil {
+		return err
+	}
+
+	for _, wt := range targets {
+		args := []string{"build", "-p", "dload", "--release", "--target", wt.target}
+		if len(wt.rustflags) > 0 {
+			args = append(args, "--config", fmt.Sprintf("target.%s.rustflags=[%s]", wt.target, strings.Join(wt.rustflags, ", ")))
+		}
+		cmd := exec.Command("cargo", args...)
+		cmd.Dir = ws
+		if err := runCmd(cmd, fmt.Sprintf("cargo build dload for %s", wt.flavour), verbose); err != nil {
+			return fmt.Errorf("build dload %s: %w", wt.flavour, err)
+		}
+
+		binSrcName := "dload"
+		if strings.HasPrefix(wt.flavour, "windows") {
+			binSrcName += ".exe"
+		}
+		srcPath := filepath.Join(ws, "target", wt.target, "release", binSrcName)
+		data, err := os.ReadFile(srcPath)
+		if err != nil {
+			return fmt.Errorf("read dload %s: %w", wt.flavour, err)
+		}
+		dstPath := filepath.Join(embeddedDir, fmt.Sprintf("dload-%s%s", wt.flavour, wt.outExt))
+		if err := writeFileIfChangedMode(dstPath, data, 0o755); err != nil {
+			return fmt.Errorf("write dload embedded %s: %w", wt.flavour, err)
+		}
+	}
+	vlogf(verbose, "🍆  dload workers built and embedded.\n")
 	return nil
 }

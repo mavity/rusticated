@@ -3,12 +3,12 @@
 package ai
 
 import (
+	"dload"
 	"fmt"
 	"math"
 	"os"
 	"runtime"
 	"sync"
-	"syscall"
 )
 
 var (
@@ -40,27 +40,27 @@ func ensureTFLiteLoaded(libPath string) error {
 		if Verbose {
 			fmt.Fprintf(os.Stderr, "[ai] loading TFLite WASM library: %s\n", libPath)
 		}
-		tflLib, err = syscall.DylibOpen(libPath, syscall.RTLD_NOW|syscall.RTLD_GLOBAL)
+		tflLib, err = dload.DylibOpen(libPath, dload.RTLD_NOW|dload.RTLD_GLOBAL)
 		if err != nil {
 			tflLibErr = fmt.Errorf("failed to load TFLite library %s: %w", libPath, err)
 			return
 		}
-		symTflModelCreateFromFile, _ = syscall.DylibSym(tflLib, "TfLiteModelCreateFromFile")
-		symTflModelDelete, _ = syscall.DylibSym(tflLib, "TfLiteModelDelete")
-		symTflOptionsCreate, _ = syscall.DylibSym(tflLib, "TfLiteInterpreterOptionsCreate")
-		symTflOptionsDelete, _ = syscall.DylibSym(tflLib, "TfLiteInterpreterOptionsDelete")
-		symTflOptionsSetNumThreads, _ = syscall.DylibSym(tflLib, "TfLiteInterpreterOptionsSetNumThreads")
-		symTflInterpreterCreate, _ = syscall.DylibSym(tflLib, "TfLiteInterpreterCreate")
-		symTflInterpreterDelete, _ = syscall.DylibSym(tflLib, "TfLiteInterpreterDelete")
-		symTflInterpreterAllocate, _ = syscall.DylibSym(tflLib, "TfLiteInterpreterAllocateTensors")
-		symTflInterpreterInvoke, _ = syscall.DylibSym(tflLib, "TfLiteInterpreterInvoke")
-		symTflGetInputTensor, _ = syscall.DylibSym(tflLib, "TfLiteInterpreterGetInputTensor")
-		symTflGetOutputTensor, _ = syscall.DylibSym(tflLib, "TfLiteInterpreterGetOutputTensor")
-		symTflTensorCopyFrom, _ = syscall.DylibSym(tflLib, "TfLiteTensorCopyFromBuffer")
-		symTflTensorCopyTo, _ = syscall.DylibSym(tflLib, "TfLiteTensorCopyToBuffer")
-		symTflTensorByteSize, _ = syscall.DylibSym(tflLib, "TfLiteTensorByteSize")
-		symTflTensorNumDims, _ = syscall.DylibSym(tflLib, "TfLiteTensorNumDims")
-		symTflTensorDim, _ = syscall.DylibSym(tflLib, "TfLiteTensorDim")
+		symTflModelCreateFromFile, _ = dload.DylibSym(tflLib, "TfLiteModelCreateFromFile")
+		symTflModelDelete, _ = dload.DylibSym(tflLib, "TfLiteModelDelete")
+		symTflOptionsCreate, _ = dload.DylibSym(tflLib, "TfLiteInterpreterOptionsCreate")
+		symTflOptionsDelete, _ = dload.DylibSym(tflLib, "TfLiteInterpreterOptionsDelete")
+		symTflOptionsSetNumThreads, _ = dload.DylibSym(tflLib, "TfLiteInterpreterOptionsSetNumThreads")
+		symTflInterpreterCreate, _ = dload.DylibSym(tflLib, "TfLiteInterpreterCreate")
+		symTflInterpreterDelete, _ = dload.DylibSym(tflLib, "TfLiteInterpreterDelete")
+		symTflInterpreterAllocate, _ = dload.DylibSym(tflLib, "TfLiteInterpreterAllocateTensors")
+		symTflInterpreterInvoke, _ = dload.DylibSym(tflLib, "TfLiteInterpreterInvoke")
+		symTflGetInputTensor, _ = dload.DylibSym(tflLib, "TfLiteInterpreterGetInputTensor")
+		symTflGetOutputTensor, _ = dload.DylibSym(tflLib, "TfLiteInterpreterGetOutputTensor")
+		symTflTensorCopyFrom, _ = dload.DylibSym(tflLib, "TfLiteTensorCopyFromBuffer")
+		symTflTensorCopyTo, _ = dload.DylibSym(tflLib, "TfLiteTensorCopyToBuffer")
+		symTflTensorByteSize, _ = dload.DylibSym(tflLib, "TfLiteTensorByteSize")
+		symTflTensorNumDims, _ = dload.DylibSym(tflLib, "TfLiteTensorNumDims")
+		symTflTensorDim, _ = dload.DylibSym(tflLib, "TfLiteTensorDim")
 	})
 	return tflLibErr
 }
@@ -73,7 +73,7 @@ type interpreterImpl struct {
 // tflGoStringToCPtr allocates from the tflLib linear memory rather than the LM
 // lib allocator — using the wrong WASM memory would corrupt the pointer.
 func tflGoStringToCPtr(s string) (uint64, func()) {
-	ptr, free, err := syscall.CString(tflLib, s)
+	ptr, free, err := dload.CString(tflLib, s)
 	if err != nil {
 		return 0, func() {}
 	}
@@ -142,11 +142,11 @@ func (t *interpreterImpl) SetInput(index int, data []float32) error {
 		return fmt.Errorf("tensor %d byte size mismatch: model expects %d, got %d", index, tensorByteSize, byteSize)
 	}
 
-	buf, err := syscall.DylibAlloc(tflLib, byteSize)
+	buf, err := dload.DylibAlloc(tflLib, byteSize)
 	if err != nil {
 		return fmt.Errorf("DylibAlloc failed: %w", err)
 	}
-	defer func() { _ = syscall.DylibFree(tflLib, buf) }()
+	defer func() { _ = dload.DylibFree(tflLib, buf) }()
 
 	raw := make([]byte, byteSize)
 	for i, f := range data {
@@ -157,7 +157,7 @@ func (t *interpreterImpl) SetInput(index int, data []float32) error {
 		raw[i*4+3] = byte(b >> 24)
 	}
 
-	if err := syscall.DylibWriteMem(tflLib, buf, raw); err != nil {
+	if err := dload.DylibWriteMem(tflLib, buf, raw); err != nil {
 		return fmt.Errorf("DylibWriteMem failed: %w", err)
 	}
 
@@ -183,18 +183,18 @@ func (t *interpreterImpl) GetOutput(index int) ([]float32, []int32, error) {
 	}
 	byteSize, _ := callDylib(symTflTensorByteSize, []byte{i64}, []byte{i64}, tensor)
 
-	buf, err := syscall.DylibAlloc(tflLib, byteSize)
+	buf, err := dload.DylibAlloc(tflLib, byteSize)
 	if err != nil {
 		return nil, nil, fmt.Errorf("DylibAlloc failed: %w", err)
 	}
-	defer func() { _ = syscall.DylibFree(tflLib, buf) }()
+	defer func() { _ = dload.DylibFree(tflLib, buf) }()
 
 	rc, _ := callDylib(symTflTensorCopyTo, []byte{i64, i64, i64}, []byte{i32}, tensor, buf, byteSize)
 	if int32(rc) != 0 {
 		return nil, nil, fmt.Errorf("TfLiteTensorCopyToBuffer failed")
 	}
 	raw := make([]byte, int(byteSize))
-	if err := syscall.DylibReadMem(tflLib, buf, raw); err != nil {
+	if err := dload.DylibReadMem(tflLib, buf, raw); err != nil {
 		return nil, nil, fmt.Errorf("DylibReadMem failed: %w", err)
 	}
 
