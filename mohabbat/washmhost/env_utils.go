@@ -356,10 +356,10 @@ func (h *HostEnv) sys_get_platform_info(ctx context.Context, m api.Module, stack
 
 	hostHome, err := os.UserHomeDir()
 	if err == nil {
-		copySafe(548, hostHome)
+		copySafe(548, normaliseHostPathForGuest(hostHome))
 	}
 	hostTempDir := os.TempDir()
-	copySafe(612, hostTempDir)
+	copySafe(612, normaliseHostPathForGuest(hostTempDir))
 
 	if ok := mem.Write(ptr, buf); !ok {
 		stack[0] = uint64(wasiEFAULT)

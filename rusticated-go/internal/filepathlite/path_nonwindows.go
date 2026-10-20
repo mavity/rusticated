@@ -22,6 +22,9 @@ func CoreIsPathSeparator(c uint8) bool {
 }
 
 func CoreIsAbs(path string) bool {
+	if isDriveAbsolutePath(path) {
+		return true
+	}
 	l := CoreVolumeNameLen(path)
 	if l > 0 {
 		path = path[l:]
@@ -30,7 +33,7 @@ func CoreIsAbs(path string) bool {
 }
 
 func CoreVolumeNameLen(path string) int {
-	if Separator != '\\' || len(path) < 2 || path[1] != ':' {
+	if len(path) < 2 || path[1] != ':' {
 		return 0
 	}
 	c := path[0]
@@ -40,7 +43,30 @@ func CoreVolumeNameLen(path string) int {
 	return 0
 }
 
+func isDriveAbsolutePath(path string) bool {
+	offset := 0
+	if len(path) >= 4 && path[0] == '/' && isDriveLetter(path[1]) && path[2] == ':' && (path[3] == '/' || path[3] == '\\') {
+		offset = 1
+	}
+	return len(path) >= offset+3 && isDriveLetter(path[offset]) && path[offset+1] == ':' &&
+		(path[offset+2] == '/' || path[offset+2] == '\\')
+}
+
+func isDriveLetter(c byte) bool {
+	return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z')
+}
+
+func canonicalDrivePath(path string) string {
+	if path[0] == '/' {
+		path = path[1:]
+	}
+	return "/" + strings.ReplaceAll(path, "\\", "/")
+}
+
 func CoreIsLocal(path string) bool {
+	if CoreVolumeNameLen(path) > 0 {
+		return false
+	}
 	return unixIsLocal(path)
 }
 
@@ -62,6 +88,11 @@ func CoreJoin(elem []string) string {
 		var b strings.Builder
 		for _, e := range elem {
 			if e == "" {
+				continue
+			}
+			if isDriveAbsolutePath(e) {
+				b.Reset()
+				b.WriteString(canonicalDrivePath(e))
 				continue
 			}
 			if b.Len() > 0 {

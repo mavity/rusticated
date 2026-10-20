@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -21,8 +22,14 @@ func TestGuestWindowsRootPathNormalization(t *testing.T) {
 		if got := normaliseGuestPathForHost(windowsRoot); got != "C:/Users/test/AppData/Local/Temp" {
 			t.Fatalf("normaliseGuestPathForHost(%q) = %q, want %q", windowsRoot, got, "C:/Users/test/AppData/Local/Temp")
 		}
-		if got := normaliseGuestPathForHost(`.\ tmp\washmhost-cwd-test`); got != "./ tmp/washmhost-cwd-test" {
-			t.Fatalf("normaliseGuestPathForHost backslash: got %q", got)
+		if got := normaliseGuestPathForHost(`C:\..\Windows`); got != "C:/Windows" {
+			t.Fatalf("normaliseGuestPathForHost drive traversal = %q, want %q", got, "C:/Windows")
+		}
+		if got := normaliseGuestPathForHost(`C:\`); got != "C:/" {
+			t.Fatalf("normaliseGuestPathForHost drive root = %q, want %q", got, "C:/")
+		}
+		if got := normaliseGuestPathForHost(`.\ tmp\washmhost-cwd-test`); got != " tmp/washmhost-cwd-test" {
+			t.Fatalf("normaliseGuestPathForHost backslash = %q, want %q", got, " tmp/washmhost-cwd-test")
 		}
 		wantWD, err := os.Getwd()
 		if err != nil {
@@ -35,8 +42,17 @@ func TestGuestWindowsRootPathNormalization(t *testing.T) {
 		if got := normaliseGuestPathForHost(canonical); got != canonical {
 			t.Fatalf("normaliseGuestPathForHost(%q) = %q, want %q", canonical, got, canonical)
 		}
-		if got := normaliseGuestPathForHost(windowsRoot); got != windowsRoot {
-			t.Fatalf("normaliseGuestPathForHost(%q) = %q, want %q", windowsRoot, got, windowsRoot)
+		if got := normaliseGuestPathForHost(windowsRoot); got != canonical {
+			t.Fatalf("normaliseGuestPathForHost(%q) = %q, want %q", windowsRoot, got, canonical)
+		}
+		if got := normaliseGuestPathForHost(`C:\..\Windows`); got != "/C:/Windows" {
+			t.Fatalf("normaliseGuestPathForHost drive traversal = %q, want %q", got, "/C:/Windows")
+		}
+		if got := normaliseGuestPathForHost(`C:\`); got != "/C:/" {
+			t.Fatalf("normaliseGuestPathForHost drive root = %q, want %q", got, "/C:/")
+		}
+		if got := normaliseGuestPathForHost(`name\with-backslash`); got != `name\with-backslash` {
+			t.Fatalf("normaliseGuestPathForHost(%q) = %q, want unchanged", `name\with-backslash`, got)
 		}
 	}
 	if got := normaliseGuestPathForHost("/tmp/washmhost-cwd-test"); got != "/tmp/washmhost-cwd-test" {
@@ -53,6 +69,7 @@ func TestNormaliseHostPathForGuest(t *testing.T) {
 			{"/tmp/something", "/tmp/something"},
 			{"", ""},
 		}
+
 		for _, tc := range tests {
 			if got := normaliseHostPathForGuest(tc.in); got != tc.want {
 				t.Errorf("normaliseHostPathForGuest(%q) = %q, want %q", tc.in, got, tc.want)
@@ -65,6 +82,67 @@ func TestNormaliseHostPathForGuest(t *testing.T) {
 				t.Errorf("normaliseHostPathForGuest(%q) = %q, want unchanged", p, got)
 			}
 		}
+	}
+}
+
+func TestResolveGuestDriveRootedPathDoesNotPrefixCwd(t *testing.T) {
+	cwd := "/workspace"
+	want := "/C:/Users/test/project"
+	if runtime.GOOS == "windows" {
+		cwd = filepath.Clean(`C:\workspace`)
+		want = filepath.Clean(`C:\Users\test\project`)
+	}
+	env := &HostEnv{cwd: cwd}
+	for _, input := range []string{
+		`C:\Users\test\project`,
+		`C:\Users\test\project\.`,
+		`/C:/Users/test/project`,
+		`/C:/Users/test/project/.`,
+	} {
+		if got := env.resolveGuestPathForHost(input); got != want {
+			t.Errorf("resolveGuestPathForHost(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestSysGetPlatformInfoCanonicalizesHostPaths(t *testing.T) {
+	env := NewHostEnv()
+	mod := newMockModule(0x10000)
+	const ptr = uint32(0x100)
+	stack := []uint64{uint64(ptr), 676}
+
+	env.sys_get_platform_info(context.Background(), mod, stack)
+	if stack[0] != 0 {
+		t.Fatalf("sys_get_platform_info returned %d", stack[0])
+	}
+	data, ok := mod.Memory().Read(ptr, 676)
+	if !ok {
+		t.Fatal("read platform info output")
+	}
+
+	readString := func(offset int) string {
+		field := data[offset : offset+64]
+		if nul := strings.IndexByte(string(field), 0); nul >= 0 {
+			field = field[:nul]
+		}
+		return string(field)
+	}
+	wantHome, err := os.UserHomeDir()
+	if err == nil {
+		wantHome = normaliseHostPathForGuest(wantHome)
+	}
+	wantTemp := normaliseHostPathForGuest(os.TempDir())
+	if len(wantHome) > 63 {
+		wantHome = wantHome[:63]
+	}
+	if len(wantTemp) > 63 {
+		wantTemp = wantTemp[:63]
+	}
+	if got := readString(548); got != wantHome {
+		t.Errorf("platform home = %q, want %q", got, wantHome)
+	}
+	if got := readString(612); got != wantTemp {
+		t.Errorf("platform temp = %q, want %q", got, wantTemp)
 	}
 }
 

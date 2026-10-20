@@ -97,4 +97,13 @@ func TestGenerateGoOverlayIncludesABIUserHomeTempOverride(t *testing.T) {
 	if !strings.Contains(jsonText, wantPath) {
 		t.Fatalf("overlay missing generated ABI override target %q; got %s", wantPath, jsonText)
 	}
+
+	openSrcPath := filepath.ToSlash(filepath.Join(goroot, "src", "os", "file_open_wasip1.go"))
+	if !strings.Contains(jsonText, openSrcPath) {
+		t.Fatalf("overlay missing SDK source path %q; got %s", openSrcPath, jsonText)
+	}
+	openOverlayPath := filepath.ToSlash(filepath.Join(ws, "rusticated-go", "os_overlay", "file_open_rusticated.go"))
+	if !strings.Contains(jsonText, openOverlayPath) {
+		t.Fatalf("overlay missing Rusticated os.open replacement %q; got %s", openOverlayPath, jsonText)
+	}
 }
