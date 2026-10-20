@@ -795,6 +795,73 @@ export function makeBrowserImports(hostState, fs, params = {}) {
       const p = pathStr(pathPtr, pathLen);
       const opId = hostState.registerOp(Number(ovPtr));
 
+      if (p === '/dev/eval' || p === 'dev/eval') {
+        const evalProxy = {
+          reqChunks: [],
+          respBytes: null,
+          readOffset: 0,
+          write(chunk) {
+            this.reqChunks.push(chunk);
+          },
+          read(uLen) {
+            if (!this.respBytes) {
+              let totalLen = 0;
+              for (const c of this.reqChunks) totalLen += c.length;
+              const allReq = new Uint8Array(totalLen);
+              let off = 0;
+              for (const c of this.reqChunks) {
+                allReq.set(c, off);
+                off += c.length;
+              }
+              const code = decoder.decode(allReq);
+              let resultPromise;
+              try {
+                const res = (0, eval)(code);
+                resultPromise = Promise.resolve(res);
+              } catch (syncErr) {
+                resultPromise = Promise.reject(syncErr);
+              }
+              return resultPromise.then((val) => {
+                const text = String(val ?? '');
+                const encoded = encoder.encode(text);
+                const out = new Uint8Array(1 + encoded.length);
+                out[0] = 0; // status ok
+                out.set(encoded, 1);
+                this.respBytes = out;
+                const sliceLen = Math.min(uLen, out.length - this.readOffset);
+                const chunk = out.subarray(this.readOffset, this.readOffset + sliceLen);
+                this.readOffset += sliceLen;
+                return chunk;
+              }).catch((err) => {
+                const errText = String(err?.stack || err?.message || err);
+                const encoded = encoder.encode(errText);
+                const out = new Uint8Array(1 + encoded.length);
+                out[0] = 1; // status error
+                out.set(encoded, 1);
+                this.respBytes = out;
+                const sliceLen = Math.min(uLen, out.length - this.readOffset);
+                const chunk = out.subarray(this.readOffset, this.readOffset + sliceLen);
+                this.readOffset += sliceLen;
+                return chunk;
+              });
+            }
+            if (this.readOffset >= this.respBytes.length) {
+              return new Uint8Array(0); // EOF
+            }
+            const sliceLen = Math.min(uLen, this.respBytes.length - this.readOffset);
+            const chunk = this.respBytes.subarray(this.readOffset, this.readOffset + sliceLen);
+            this.readOffset += sliceLen;
+            return chunk;
+          }
+        };
+        const handle = hostState.allocHandle({
+          type: 'proxy',
+          proxy: evalProxy,
+        });
+        hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, 0, 0, Number(handle)));
+        return;
+      }
+
       fs.getEntry(p).then((entry) => {
         if (!entry) {
           // If write flags allow creation
@@ -823,6 +890,13 @@ export function makeBrowserImports(hostState, fs, params = {}) {
     path_stat: (ovPtr, pathPtr, pathLen, flags, outPtr, outLen) => {
       const p = pathStr(pathPtr, pathLen);
       const opId = hostState.registerOp(Number(ovPtr));
+
+      if (p === '/dev/eval' || p === 'dev/eval') {
+        const statBytes = marshalStat({ path: p, type: 'file', size: 0, mode: 0o666, mtime: Date.now() });
+        hostState.getGuestSlice(Number(outPtr), 64).set(statBytes);
+        hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, 0, 0, 64));
+        return;
+      }
 
       fs.getEntry(p).then((entry) => {
         if (!entry) {

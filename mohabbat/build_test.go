@@ -42,17 +42,27 @@ edition = "2021"
 	}
 }
 
+func TestBuildDloadWorkers(t *testing.T) {
+	ws, err := ResolveWorkspace("")
+	if err != nil {
+		t.Fatalf("resolve workspace: %v", err)
+	}
+	if err := buildDloadWorkers(ws, true); err != nil {
+		t.Fatalf("buildDloadWorkers: %v", err)
+	}
+}
+
 func TestGoBuildPIE(t *testing.T) {
 	tests := []struct {
 		name string
 		slot slot
 		want bool
 	}{
-		{name: "linux-amd64", slot: slot{goos: "linux", goarch: "amd64"}, want: true},
-		{name: "linux-arm64", slot: slot{goos: "linux", goarch: "arm64"}, want: true},
-		{name: "linux-arm", slot: slot{goos: "linux", goarch: "arm"}},
-		{name: "darwin-arm64", slot: slot{goos: "darwin", goarch: "arm64"}},
-		{name: "windows-amd64", slot: slot{goos: "windows", goarch: "amd64"}},
+		{name: "linux-amd64", slot: slot{goos: "linux", goarch: "amd64"}, want: false},
+		{name: "linux-arm64", slot: slot{goos: "linux", goarch: "arm64"}, want: false},
+		{name: "linux-arm", slot: slot{goos: "linux", goarch: "arm"}, want: false},
+		{name: "darwin-arm64", slot: slot{goos: "darwin", goarch: "arm64"}, want: false},
+		{name: "windows-amd64", slot: slot{goos: "windows", goarch: "amd64"}, want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -230,9 +230,6 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 	for {
 		iteration++
 		debugLog("guest run iteration=%d begin pending_ops=%d active_ops=%t", iteration, hEnv.PendingOps(), hEnv.HasActiveOps())
-		for _, mgr := range hEnv.DylibManagersForPolling() {
-			mgr.BeforeRun(ctx, mod)
-		}
 		res, err = runFunc.Call(ctx)
 		if err != nil {
 			debugLog("guest run iteration=%d failed: result=%v error=%v", iteration, res, err)
@@ -241,9 +238,6 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 				return int(exitErr.ExitCode()), nil
 			}
 			return 1, fmt.Errorf("run failed: %w", err)
-		}
-		for _, mgr := range hEnv.DylibManagersForPolling() {
-			mgr.AfterRun(ctx, mod)
 		}
 
 		hEnv.mu.Lock()

@@ -56,7 +56,7 @@ func parsePlatformOverride(raw string) (string, string, error) {
 	return "", "", fmt.Errorf("invalid --platform %q", raw)
 }
 
-func splitWashmhostArgs(args []string) (platform string, satellite bool, probePath string, cwd string, guestArgs []string, err error) {
+func splitWashmhostArgs(args []string) (platform string, cwd string, guestArgs []string, err error) {
 	guestArgs = []string{args[0]}
 	raw := args[1:]
 	passThrough := false
@@ -69,23 +69,15 @@ func splitWashmhostArgs(args []string) (platform string, satellite bool, probePa
 		switch arg {
 		case "--":
 			passThrough = true
-		case "--dylib-satellite":
-			satellite = true
-		case "--probe-dlopen":
-			if i+1 >= len(raw) {
-				return "", false, "", "", nil, fmt.Errorf("missing argument after --probe-dlopen")
-			}
-			probePath = raw[i+1]
-			i++
 		case "--platform":
 			if i+1 >= len(raw) {
-				return "", false, "", "", nil, fmt.Errorf("missing argument after --platform")
+				return "", "", nil, fmt.Errorf("missing argument after --platform")
 			}
 			platform = raw[i+1]
 			i++
 		case "--cwd":
 			if i+1 >= len(raw) {
-				return "", false, "", "", nil, fmt.Errorf("missing argument after --cwd")
+				return "", "", nil, fmt.Errorf("missing argument after --cwd")
 			}
 			cwd = raw[i+1]
 			i++
@@ -93,7 +85,47 @@ func splitWashmhostArgs(args []string) (platform string, satellite bool, probePa
 			guestArgs = append(guestArgs, arg)
 		}
 	}
-	return platform, satellite, probePath, cwd, guestArgs, nil
+	return platform, cwd, guestArgs, nil
+}
+
+func findWorkspaceRoot() string {
+	starts := []string{}
+	if wd, err := os.Getwd(); err == nil {
+		starts = append(starts, wd)
+	}
+	if exe, err := os.Executable(); err == nil {
+		starts = append(starts, filepath.Dir(exe))
+	}
+	if len(os.Args) > 0 && os.Args[0] != "" {
+		starts = append(starts, filepath.Dir(os.Args[0]))
+	}
+	for _, start := range starts {
+		for dir := start; dir != ""; {
+			if _, err := os.Stat(filepath.Join(dir, "sysroot.toml")); err == nil {
+				return dir
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+	}
+	return ""
+}
+
+func resolveGoBinary() string {
+	goExe := "go"
+	if runtime.GOOS == "windows" {
+		goExe = "go.exe"
+	}
+	if goroot := os.Getenv("GOROOT"); goroot != "" {
+		cand := filepath.Join(goroot, "bin", goExe)
+		if _, err := os.Stat(cand); err == nil {
+			return cand
+		}
+	}
+	return goExe
 }
 
 func buildWashmhostForPlatform(goos, goarch string) (string, error) {
@@ -127,23 +159,17 @@ func buildWashmhostForPlatform(goos, goarch string) (string, error) {
 	return outPath, nil
 }
 
-func relaunchForPlatform(goos, goarch string, satellite bool, probePath string, cwd string, guestArgs []string) error {
+func relaunchForPlatform(goos, goarch string, cwd string, guestArgs []string) error {
 	outPath, err := buildWashmhostForPlatform(goos, goarch)
 	if err != nil {
 		return err
 	}
 
 	args := make([]string, 0, len(guestArgs)+1)
-	if satellite {
-		args = append(args, "--dylib-satellite")
-	}
-	if probePath != "" {
-		args = append(args, "--probe-dlopen", probePath)
-	}
 	if cwd != "" {
 		args = append(args, "--cwd", cwd)
 	}
-	if !satellite && len(guestArgs) > 1 {
+	if len(guestArgs) > 1 {
 		args = append(args, guestArgs[1:]...)
 	}
 	runCmd := exec.Command(outPath, args...)
@@ -171,13 +197,13 @@ func main() {
 		}
 	}
 	logTerminalState()
-	platformOverride, satelliteMode, probePath, cwd, parsedArgs, err := splitWashmhostArgs(os.Args)
+	platformOverride, cwd, parsedArgs, err := splitWashmhostArgs(os.Args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "washmhost: %v\n", err)
 		os.Exit(1)
 	}
-	debugLog("arguments parsed: platform=%q satellite=%t probe=%t cwd_supplied=%t guest_argc=%d",
-		platformOverride, satelliteMode, probePath != "", cwd != "", len(parsedArgs))
+	debugLog("arguments parsed: platform=%q cwd_supplied=%t guest_argc=%d",
+		platformOverride, cwd != "", len(parsedArgs))
 	if platformOverride != "" {
 		goos, goarch, err := parsePlatformOverride(platformOverride)
 		if err != nil {
@@ -185,25 +211,11 @@ func main() {
 			os.Exit(1)
 		}
 		if goos != runtime.GOOS || goarch != runtime.GOARCH {
-			if err := relaunchForPlatform(goos, goarch, satelliteMode, probePath, cwd, parsedArgs); err != nil {
+			if err := relaunchForPlatform(goos, goarch, cwd, parsedArgs); err != nil {
 				fmt.Fprintf(os.Stderr, "washmhost: %v\n", err)
 				os.Exit(1)
 			}
 		}
-	}
-	if satelliteMode {
-		runSatelliteMain()
-		return
-	}
-	if probePath != "" {
-		h, err := dlopen(probePath, RTLD_NOW|RTLD_GLOBAL)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "washmhost probe dlopen failed on %s/%s: %v\n", runtime.GOOS, runtime.GOARCH, err)
-			os.Exit(1)
-		}
-		_ = dlclose(h)
-		fmt.Fprintf(os.Stdout, "washmhost probe dlopen succeeded on %s/%s\n", runtime.GOOS, runtime.GOARCH)
-		return
 	}
 
 	// Host mode: capture workspace + toolchain location before the guest can chdir.

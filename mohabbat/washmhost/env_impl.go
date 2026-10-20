@@ -20,112 +20,6 @@ import (
 
 const sigwinch = syscall.Signal(0x1c) // SIGWINCH (28)
 
-type dylibTargetKey struct {
-	goos   string
-	goarch string
-}
-
-type satelliteEntryState int
-
-const (
-	satelliteEntryIdle satelliteEntryState = iota
-	satelliteEntryStarting
-	satelliteEntryReady
-	satelliteEntryFailed
-)
-
-type satelliteEntry struct {
-	target   dylibTargetKey
-	manager  *DylibHostManager
-	state    satelliteEntryState
-	readyCh  chan struct{}
-	startErr error
-}
-
-type DylibSatelliteRegistry struct {
-	mu      sync.Mutex
-	hEnv    *HostEnv
-	entries map[dylibTargetKey]*satelliteEntry
-}
-
-type dylibLibraryRef struct {
-	manager *DylibHostManager
-	remote  uint64
-	target  dylibTargetKey
-}
-
-type dylibSymbolRef struct {
-	manager   *DylibHostManager
-	remote    uint64
-	libraryID uint64
-}
-
-func NewDylibSatelliteRegistry(hEnv *HostEnv) *DylibSatelliteRegistry {
-	return &DylibSatelliteRegistry{
-		hEnv:    hEnv,
-		entries: make(map[dylibTargetKey]*satelliteEntry),
-	}
-}
-
-func (r *DylibSatelliteRegistry) Close() {
-	r.mu.Lock()
-	entries := make([]*satelliteEntry, 0, len(r.entries))
-	for _, entry := range r.entries {
-		entries = append(entries, entry)
-	}
-	r.mu.Unlock()
-
-	for _, entry := range entries {
-		if entry != nil && entry.manager != nil {
-			entry.manager.Close()
-		}
-	}
-}
-
-func (r *DylibSatelliteRegistry) HasActiveWork() bool {
-	r.mu.Lock()
-	entries := make([]*satelliteEntry, 0, len(r.entries))
-	for _, entry := range r.entries {
-		entries = append(entries, entry)
-	}
-	r.mu.Unlock()
-
-	for _, entry := range entries {
-		if entry != nil && entry.manager != nil && entry.manager.HasActiveWork() {
-			return true
-		}
-	}
-	return false
-}
-
-func (r *DylibSatelliteRegistry) ReadyManagers() []*DylibHostManager {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	managers := make([]*DylibHostManager, 0, len(r.entries))
-	for _, entry := range r.entries {
-		if entry == nil || entry.state != satelliteEntryReady || entry.manager == nil {
-			continue
-		}
-		managers = append(managers, entry.manager)
-	}
-	return managers
-}
-
-func (r *DylibSatelliteRegistry) SetReadyManager(target dylibTargetKey, manager *DylibHostManager) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	manager.target = target
-	entry := &satelliteEntry{
-		target:  target,
-		manager: manager,
-		state:   satelliteEntryReady,
-		readyCh: make(chan struct{}),
-	}
-	close(entry.readyCh)
-	r.entries[target] = entry
-}
-
 type HostEnv struct {
 	mu             sync.Mutex
 	activeOps      map[uint32]*OpState
@@ -146,11 +40,6 @@ type HostEnv struct {
 	owningGID      uint64
 	mod            api.Module
 	cwd            string
-	dylibRegistry  *DylibSatelliteRegistry
-	dylibMgr       *DylibHostManager
-	nextDylibID    uint64
-	dylibLibraries map[uint64]dylibLibraryRef
-	dylibSymbols   map[uint64]dylibSymbolRef
 }
 
 type OpState struct {
@@ -166,7 +55,6 @@ type OpState struct {
 
 func NewHostEnv() *HostEnv {
 	env := &HostEnv{
-
 		activeOps:      make(map[uint32]*OpState),
 		handles:        make(map[uint64]interface{}),
 		nextHandle:     3, // 0,1,2 reserved
@@ -177,17 +65,12 @@ func NewHostEnv() *HostEnv {
 		pendingSignals: make(chan *OpState, 100),
 		timers:         make(map[uint32]*time.Timer),
 		forcedExitCode: -1,
-		nextDylibID:    1,
-		dylibLibraries: make(map[uint64]dylibLibraryRef),
-		dylibSymbols:   make(map[uint64]dylibSymbolRef),
 	}
 	if cwd, err := resolveUsableCwd(); err == nil {
 		env.cwd = cwd
 	} else {
 		env.cwd = "/"
 	}
-	env.dylibRegistry = NewDylibSatelliteRegistry(env)
-	env.dylibMgr = NewDylibHostManager(env)
 	env.handles[0] = os.Stdin
 	env.handles[1] = os.Stdout
 	env.handles[2] = os.Stderr
@@ -240,12 +123,6 @@ func (h *HostEnv) Close() {
 	if h.ttyRawState != nil {
 		_ = term.Restore(h.ttyRawFd, h.ttyRawState)
 		h.ttyRawState = nil
-	}
-	if h.dylibMgr != nil {
-		h.dylibMgr.Close()
-	}
-	if h.dylibRegistry != nil {
-		h.dylibRegistry.Close()
 	}
 }
 
@@ -393,12 +270,6 @@ func (h *HostEnv) HasOutstandingOps() bool {
 	if atomic.LoadInt32(&h.outstandingOps) > 0 {
 		return true
 	}
-	if h.dylibRegistry != nil && h.dylibRegistry.HasActiveWork() {
-		return true
-	}
-	if h.dylibMgr != nil && h.dylibMgr.HasActiveWork() {
-		return true
-	}
 	return false
 }
 
@@ -421,12 +292,6 @@ func (h *HostEnv) HasActiveOps() bool {
 			return true
 		}
 	}
-	if h.dylibRegistry != nil && h.dylibRegistry.HasActiveWork() {
-		return true
-	}
-	if h.dylibMgr != nil && h.dylibMgr.HasActiveWork() {
-		return true
-	}
 	return false
 }
 
@@ -439,88 +304,6 @@ func (h *HostEnv) HasLiveOps() bool {
 		}
 	}
 	return false
-}
-
-func (h *HostEnv) DylibManagersForPolling() []*DylibHostManager {
-	h.mu.Lock()
-	registry := h.dylibRegistry
-	legacy := h.dylibMgr
-	h.mu.Unlock()
-
-	if registry != nil {
-		managers := registry.ReadyManagers()
-		if len(managers) > 0 {
-			return managers
-		}
-	}
-	if legacy != nil {
-		return []*DylibHostManager{legacy}
-	}
-	return nil
-}
-
-func (h *HostEnv) registerDylibLibrary(manager *DylibHostManager, remote uint64, target dylibTargetKey) uint64 {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	id := h.nextDylibID
-	h.nextDylibID++
-	h.dylibLibraries[id] = dylibLibraryRef{manager: manager, remote: remote, target: target}
-	return id
-}
-
-func (h *HostEnv) lookupDylibLibrary(id uint64) (dylibLibraryRef, bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	ref, ok := h.dylibLibraries[id]
-	return ref, ok
-}
-
-func (h *HostEnv) deleteDylibLibrary(id uint64) {
-	h.mu.Lock()
-	delete(h.dylibLibraries, id)
-	h.mu.Unlock()
-}
-
-func (h *HostEnv) registerDylibSymbol(manager *DylibHostManager, libraryID uint64, remote uint64) uint64 {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if existing, ok := h.dylibSymbols[remote]; ok {
-		if existing.manager != manager || existing.libraryID != libraryID || existing.remote != remote {
-			h.dylibSymbols[remote] = dylibSymbolRef{}
-			return remote
-		}
-		return remote
-	}
-	h.dylibSymbols[remote] = dylibSymbolRef{manager: manager, remote: remote, libraryID: libraryID}
-	return remote
-}
-
-func (h *HostEnv) lookupDylibSymbol(id uint64) (dylibSymbolRef, bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	ref, ok := h.dylibSymbols[id]
-	return ref, ok
-}
-
-func (h *HostEnv) deleteDylibSymbol(id uint64) {
-	h.mu.Lock()
-	delete(h.dylibSymbols, id)
-	h.mu.Unlock()
-}
-
-func (h *HostEnv) deleteDylibResourcesForManager(manager *DylibHostManager) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	for id, ref := range h.dylibLibraries {
-		if ref.manager == manager {
-			delete(h.dylibLibraries, id)
-		}
-	}
-	for id, ref := range h.dylibSymbols {
-		if ref.manager == manager {
-			delete(h.dylibSymbols, id)
-		}
-	}
 }
 
 func (h *HostEnv) CancelOp(ovPtr uint32) {
@@ -600,16 +383,6 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_tty_get_size), []api.ValueType{api.ValueTypeI64}, []api.ValueType{api.ValueTypeI32}).Export("tty_get_size")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_tty_set_size), []api.ValueType{api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("tty_set_size")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_fd_isatty), []api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("fd_isatty")
-
-	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_open), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("dylib_open")
-	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_sym), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("dylib_sym")
-	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_close), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64}, []api.ValueType{}).Export("dylib_close")
-	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_call), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("dylib_call")
-	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_alloc), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI64, api.ValueTypeI32}, []api.ValueType{}).Export("dylib_alloc")
-	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_free), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI64}, []api.ValueType{}).Export("dylib_free")
-	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_read_mem), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("dylib_read_mem")
-	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_write_mem), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("dylib_write_mem")
-	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dylib_callback_register), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("dylib_callback_register")
 
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_process_exit), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).Export("process_exit")
 

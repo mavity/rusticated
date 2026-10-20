@@ -1,0 +1,17 @@
+[package]
+name = "dload"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "dload"
+path = "src/main.rs"
+
+[features]
+verbose = []
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

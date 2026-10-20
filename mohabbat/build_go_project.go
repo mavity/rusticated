@@ -185,11 +185,11 @@ func buildBrainWasm(ws, outputWasm string, verbose bool) error {
 }
 
 // goBuildPIE reports whether the native washmhost for slot s is built as a
-// position-independent executable. Go's internal linker (CGO_ENABLED=0)
-// supports PIE on linux/amd64 and linux/arm64 only; linux/arm would need an
-// external linker, which this pipeline does not use.
+// position-independent executable. Without purego/dynamic-imports, Go produces
+// a pure static binary with no PT_INTERP when -buildmode=pie is omitted, allowing
+// direct kernel execution across glibc, musl, and Android alike.
 func goBuildPIE(s slot) bool {
-	return s.goos == "linux" && (s.goarch == "amd64" || s.goarch == "arm64")
+	return false
 }
 
 func goBuild(ws, pkgDir string, s slot, buildDir string, verbose bool) error {
@@ -208,8 +208,9 @@ func goBuild(ws, pkgDir string, s slot, buildDir string, verbose bool) error {
 	// Note: go build -o - is avoided here because on some Windows environments
 	// it incorrectly creates a literal file named "-" instead of streaming.
 	meta := GetBuildMetadata(ws)
+	slotPlatform := fmt.Sprintf("%s-%s", s.goos, s.goarch)
 	ldFlags := fmt.Sprintf("-s -w -X main.BuildVersion=%s -X main.BuildTime=%s -X main.BuildPlatform=%s",
-		meta.Version, meta.Time, meta.Platform)
+		meta.Version, meta.Time, slotPlatform)
 
 	tmpOut := filepath.Join(goTmpDir, "build.dat")
 	args := []string{"build", "-trimpath", "-ldflags=" + ldFlags}

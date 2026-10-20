@@ -289,14 +289,11 @@ func buildZoneA(offsets, lengths []int, nodeJsLen int, poolLen uint64, whOffsets
 :; export TMPDIR="$TMP_DIR"
 :; TMP_EXE="$TMP_DIR/moh-$$"
 :; vlog "temporary directory: TMPDIR=$TMPDIR"
-:; dd if="$ME" bs=1 skip="$S_OFF" count="$S_LEN" of="$TMP_EXE" 2>/dev/null
-:; DD_RC=$?
+:; dd if="$ME" bs=1 skip="$S_OFF" count="$S_LEN" of="$TMP_EXE" 2>/dev/null; DD_RC=$?
 :; if [ "$MOHABBAT_VERBOSE" = "1" ]; then vlog "brot extraction: expected=$S_LEN actual=$(wc -c < "$TMP_EXE" 2>/dev/null) dd=$DD_RC"; fi
-:; chmod +x "$TMP_EXE"
-:; CHMOD_RC=$?
+:; chmod +x "$TMP_EXE"; CHMOD_RC=$?
 :; vlog "brot chmod: exit=$CHMOD_RC"
-:; "$TMP_EXE" "$ME" "$P_LEN" "$W_OFF" "$W_LEN" "$PLD_OFF" "$PLD_LEN" "$@"
-:; RET=$?
+:; "$TMP_EXE" "$ME" "$P_LEN" "$W_OFF" "$W_LEN" "$PLD_OFF" "$PLD_LEN" "$@"; RET=$?
 :; vlog "brot exit: status=$RET"
 :; rm -f "$TMP_EXE"
 :; exit $RET
@@ -594,7 +591,8 @@ exports:
   - targets:     [ x86_64-macos, arm64-macos ]
     symbols:     [ _exit, _abort, _fork, _waitpid, _execve, _open, _read,
                    _write, _close, _lseek, _unlink, _fchmod, _getpid,
-                   _mmap, _munmap, _bzero, ___bzero, dyld_stub_binder ]
+                   _mmap, _munmap, _bzero, ___bzero, dyld_stub_binder,
+                   _dlopen, _dlerror, _dlsym, _dlclose, _malloc, _free, _usleep ]
 ...
 `
 	stubPath := filepath.Join(dir, "libSystem.tbd")
