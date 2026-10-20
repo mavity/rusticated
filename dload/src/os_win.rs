@@ -27,19 +27,49 @@ fn to_wide(s: &str) -> Vec<u16> {
     v
 }
 
+fn normalize_path(path: &str) -> String {
+    let mut normalized = path.replace('/', "\\");
+    let bytes = normalized.as_bytes();
+    if bytes.len() >= 4
+        && bytes[0] == b'\\'
+        && bytes[1].is_ascii_alphabetic()
+        && bytes[2] == b':'
+        && bytes[3] == b'\\'
+    {
+        normalized.remove(0);
+    }
+    normalized
+}
+
 pub fn open(path: &str, _flags: i32) -> Result<u64, String> {
-    // Set DLL directory to parent directory of path so dependencies are found
-    if let Some(pos) = path.rfind(['/', '\\']) {
+    let path = normalize_path(path);
+
+    // Set DLL directory to parent directory of path so sibling dependencies are found.
+    let mut dll_directory = None;
+    if let Some(pos) = path.rfind('\\') {
         let parent = &path[..pos];
         let w_parent = to_wide(parent);
-        unsafe { SetDllDirectoryW(w_parent.as_ptr()) };
+        if unsafe { SetDllDirectoryW(w_parent.as_ptr()) } == 0 {
+            let err = unsafe { GetLastError() };
+            return Err(alloc::format!(
+                "SetDllDirectoryW({}) failed with error code {}",
+                parent,
+                err
+            ));
+        }
+        dll_directory = Some(parent);
     }
 
-    let w_path = to_wide(path);
+    let w_path = to_wide(&path);
     let h = unsafe { LoadLibraryW(w_path.as_ptr()) };
     if h == 0 {
         let err = unsafe { GetLastError() };
-        return Err(alloc::format!("LoadLibraryW failed with error code {}", err));
+        return Err(alloc::format!(
+            "LoadLibraryW({}) failed with error code {} (DLL directory: {})",
+            path,
+            err,
+            dll_directory.unwrap_or("<unchanged>")
+        ));
     }
     Ok(h as u64)
 }
