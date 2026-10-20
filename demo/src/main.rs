@@ -214,7 +214,9 @@ async fn print_env_and_dir_diagnostics(out: &mut impl AsyncWrite) {
     write_all(out, b"\n").await;
 }
 
-fn format_age_ns(mtime_ns: u64, now_ns: u64) -> String {
+fn format_age_ns(mtime_ns: i64, now_ns: u64) -> String {
+    let now_ns = i128::from(now_ns);
+    let mtime_ns = i128::from(mtime_ns);
     if now_ns <= mtime_ns {
         return String::from("in the future");
     }
@@ -234,10 +236,10 @@ fn format_age_ns(mtime_ns: u64, now_ns: u64) -> String {
 }
 
 /// Convert nanoseconds since UNIX epoch to `YYYY-MM-DD HH:MM:SS` (UTC).
-fn format_datetime_ns(ns: u64) -> String {
-    let secs = ns / 1_000_000_000;
+fn format_datetime_ns(ns: i64) -> String {
+    let secs = ns.div_euclid(1_000_000_000);
     // Days since 1970-01-01 (civil calendar algorithm by Howard Hinnant)
-    let z = (secs / 86400) as i64 + 719_468;
+    let z = secs.div_euclid(86400) + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = (z - era * 146_097) as u64;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
@@ -247,7 +249,7 @@ fn format_datetime_ns(ns: u64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
-    let rem = secs % 86400;
+    let rem = secs.rem_euclid(86400) as u64;
     let h = rem / 3600;
     let min = (rem % 3600) / 60;
     let s = rem % 60;
