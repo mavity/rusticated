@@ -364,13 +364,20 @@ func (h *HostEnv) sys_handle_close(ctx context.Context, m api.Module, stack []ui
 	}
 }
 
-// normaliseGuestPathForHost converts a guest-supplied path to a form the host OS can use.
-// On Windows: bare / → cwd; /C:/... → C:/...; backslashes → forward slashes.
-// On other hosts the path is returned unchanged.
+// normaliseGuestPathForHost converts guest paths to a form the host OS can use.
+// Drive-rooted paths use /C:/... in the guest and map to the native host form.
 func normaliseGuestPathForHost(p string) string {
 	trimmed := strings.TrimSpace(p)
 	if trimmed == "" {
 		return ""
+	}
+	if runtime.GOOS == "windows" && trimmed == "/" {
+		if cwd, err := resolveUsableCwd(); err == nil {
+			return cwd
+		}
+	}
+	if guestPath, ok := normaliseDrivePathForHost(trimmed, runtime.GOOS == "windows"); ok {
+		return guestPath
 	}
 	if runtime.GOOS != "windows" {
 		return trimmed
@@ -385,6 +392,27 @@ func normaliseGuestPathForHost(p string) string {
 		}
 	}
 	return normalized
+}
+
+func isDriveLetter(c byte) bool {
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+}
+
+func normaliseDrivePathForHost(p string, windowsHost bool) (string, bool) {
+	normalized := strings.ReplaceAll(p, "\\", "/")
+	if len(normalized) >= 4 && normalized[0] == '/' && isDriveLetter(normalized[1]) && normalized[2] == ':' && normalized[3] == '/' {
+		normalized = normalized[1:]
+	}
+	if len(normalized) < 3 || !isDriveLetter(normalized[0]) || normalized[1] != ':' || normalized[2] != '/' {
+		return "", false
+	}
+
+	suffix := path.Clean("/" + normalized[3:])
+	guestPath := "/" + normalized[:2] + suffix
+	if windowsHost {
+		return guestPath[1:], true
+	}
+	return guestPath, true
 }
 
 // normaliseHostPathForGuest converts a host-native path to the canonical guest form.

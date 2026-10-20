@@ -863,6 +863,7 @@ func generateGoOverlay(ws, goroot string, verbose bool) error {
 		{"src/internal/syscall/unix/net_wasip1.go", canon(filepath.Join(overlayDir, "internal/syscall/unix/net_rusticated.go"))},
 		// path
 		{"src/os/path_unix.go", canon(filepath.Join(overlayDir, "os/path_unix.go"))},
+		{"src/os/file_open_wasip1.go", canon(filepath.Join(overlayDir, "os_overlay/file_open_rusticated.go"))},
 		// stat (generated patch — real permissions from rusticated ABI)
 		{"src/os/stat_wasip1.go", canon(genStatWasip1)},
 		// os ABI-backed home/temp override (generated patched copy of stdlib source)

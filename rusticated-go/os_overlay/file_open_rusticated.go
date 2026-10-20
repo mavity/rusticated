@@ -1,0 +1,29 @@
+//go:build wasip1
+
+package os
+
+import (
+	"internal/filepathlite"
+	"internal/poll"
+	"syscall"
+)
+
+func open(filePath string, flag int, perm uint32) (int, poll.SysFile, error) {
+	if filePath == "" {
+		return -1, poll.SysFile{}, syscall.EINVAL
+	}
+	absPath := filePath
+	// os.(*File).Chdir is emulated by setting the working directory to the
+	// absolute path that this file was opened at, which is why we have to
+	// resolve and capture it here.
+	// Rusticated also treats Windows drive-rooted paths as absolute.
+	if !filepathlite.CoreIsAbs(filePath) {
+		wd, err := syscall.Getwd()
+		if err != nil {
+			return -1, poll.SysFile{}, err
+		}
+		absPath = joinPath(wd, filePath)
+	}
+	fd, err := syscall.Open(absPath, flag, perm)
+	return fd, poll.SysFile{Path: absPath}, err
+}
