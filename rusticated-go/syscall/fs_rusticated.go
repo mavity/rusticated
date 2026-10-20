@@ -331,25 +331,6 @@ func isAbs(path string) bool {
 	return false
 }
 
-func fixJoinedPath(path string) string {
-	// Detect "doubled" paths like C:\cwd\C:/sdk/...
-	// This happens because the Go wasip1 runtime doesn't recognize
-	// Windows-style absolute paths and joins them with the current directory.
-	for i := 1; i < len(path)-1; i++ {
-		if path[i] == ':' && (path[i+1] == '/' || path[i+1] == '\\') {
-			if i > 1 {
-				// Found a drive letter (e.g., C:/) in the middle of a path.
-				// Ensure it's preceded by a letter to avoid false positives.
-				c := path[i-1]
-				if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
-					return path[i-1:]
-				}
-			}
-		}
-	}
-	return path
-}
-
 func joinPaths(base, rel string) string {
 	if rel == "" {
 		return base
@@ -382,7 +363,6 @@ func path_open_ext(path string, mode int, perm uint32) (uint64, error) {
 		}
 	}
 
-	path = fixJoinedPath(path)
 	// Final absolute path check before calling host
 	if isAbs(path) {
 		// No-op, use as is
@@ -401,7 +381,6 @@ func path_open_ext(path string, mode int, perm uint32) (uint64, error) {
 }
 
 func Open(path string, mode int, perm uint32) (int, error) {
-	path = fixJoinedPath(path)
 	if path == "" {
 		return -1, EINVAL
 	}
@@ -612,7 +591,6 @@ func parseAbiStat(buf []byte, st *Stat_t) {
 }
 
 func statat_ext(dirFd int, path string, st *Stat_t, flags uint32) error {
-	path = fixJoinedPath(path)
 	full := path
 	if !isAbs(path) && dirFd != -100 {
 		if entry, ok := fdMap[int32(dirFd)]; ok && entry.path != "" {
@@ -739,7 +717,7 @@ func Unlinkat(dirFd int, path string, flags int) error {
 		return EINVAL
 	}
 
-	fullPath := fixJoinedPath(path)
+	fullPath := path
 	if !isAbs(fullPath) && dirFd != -100 {
 		entry, ok := fdMap[int32(dirFd)]
 		if !ok || entry.path == "" {
