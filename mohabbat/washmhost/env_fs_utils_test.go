@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/binary"
 	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -20,6 +22,7 @@ func (m mockFileInfo) Size() int64        { return m.size }
 func (m mockFileInfo) Mode() os.FileMode  { return m.mode }
 func (m mockFileInfo) ModTime() time.Time { return m.modTime }
 func (m mockFileInfo) IsDir() bool        { return m.mode.IsDir() }
+func (m mockFileInfo) Sys() any           { return nil }
 
 func TestCreateAbiStat(t *testing.T) {
 	now := time.Now()
@@ -191,7 +194,7 @@ func TestCreateAbiStat(t *testing.T) {
 			wantTime: now.UnixNano(),
 		},
 		{
-			name: "strips setuid bit",
+			name: "preserves setuid bit",
 			fi: mockFileInfo{
 				name:    "setuid",
 				size:    1024,
@@ -199,7 +202,7 @@ func TestCreateAbiStat(t *testing.T) {
 				modTime: now,
 			},
 			wantKind: statKindFile,
-			wantMode: 0755 | 0o100000, // Should only have perm and file prefix
+			wantMode: 0o100000 | 0o4000 | 0755,
 			wantSize: 1024,
 			wantTime: now.UnixNano(),
 		},
@@ -230,118 +233,108 @@ func TestCreateAbiStat(t *testing.T) {
 			if stat.Size != tt.wantSize {
 				t.Errorf("Size = %v, want %v", stat.Size, tt.wantSize)
 			}
-			if int64(stat.ModifiedNs) != tt.wantTime {
+			if stat.ModifiedNs != tt.wantTime {
 				t.Errorf("ModifiedNs = %v, want %v", stat.ModifiedNs, tt.wantTime)
 			}
-			// Check symmetry of timestamps
-			if stat.AccessedNs != stat.ModifiedNs || stat.CreatedNs != stat.ModifiedNs {
-				t.Errorf("Timestamps are not symmetrical")
+			if stat.ValidMask&statValidMtime == 0 {
+				t.Errorf("modification time should be marked valid")
+			}
+			if stat.ValidMask&statValidAtime != 0 || stat.ValidMask&statValidBirthtime != 0 {
+				t.Errorf("unavailable timestamps should not be marked valid")
+			}
+		})
+	}
+}
+
+func TestCreateAbiStatUsesNativeMetadata(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "native-stat")
+	if err := os.WriteFile(path, []byte("file metadata"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat := createAbiStatAt(fi, path, false)
+	if stat.ValidMask&statValidMtime == 0 || stat.ModifiedNs != fi.ModTime().UnixNano() {
+		t.Fatalf("mtime missing or incorrect: %+v", stat)
+	}
+
+	switch runtime.GOOS {
+	case "linux", "darwin":
+		required := statValidUID | statValidGID | statValidAtime | statValidCtime |
+			statValidNlink | statValidInode | statValidDev | statValidRdev |
+			statValidBlksize | statValidBlocks
+		if stat.ValidMask&required != required {
+			t.Fatalf("Unix host omitted native stat fields: valid mask %#x, want %#x", stat.ValidMask, required)
+		}
+	case "windows":
+		required := statValidAtime | statValidBirthtime | statValidNlink |
+			statValidInode | statValidDev
+		if stat.ValidMask&required != required {
+			t.Fatalf("Windows host omitted available stat fields: valid mask %#x, want %#x", stat.ValidMask, required)
+		}
+	}
+}
+
+func TestStatModeAndKindPreservesUnixTypeAndSpecialBits(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		mode os.FileMode
+		want uint32
+		kind uint32
+	}{
+		{"setuid file", os.ModeSetuid | 0o755, 0o104755, statKindFile},
+		{"setgid dir", os.ModeDir | os.ModeSetgid | 0o750, 0o42750, statKindDir},
+		{"sticky dir", os.ModeDir | os.ModeSticky | 0o777, 0o041777, statKindDir},
+		{"symlink", os.ModeSymlink | 0o777, 0o120777, statKindSymlink},
+		{"socket", os.ModeSocket | 0o600, 0o140600, statKindSocket},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			mode, kind := statModeAndKind(tt.mode)
+			if mode != tt.want || kind != tt.kind {
+				t.Fatalf("statModeAndKind() = (%#o, %d), want (%#o, %d)", mode, kind, tt.want, tt.kind)
 			}
 		})
 	}
 }
 
 func TestMarshalAbiStat(t *testing.T) {
-	tests := []struct {
-		name string
-		stat AbiStat
-	}{
-		{
-			name: "basic file",
-			stat: AbiStat{Kind: statKindFile, Mode: 0644 | 0o100000, Size: 1234, ModifiedNs: 5678, AccessedNs: 5678, CreatedNs: 5678, Nlink: 1, Inode: 10},
-		},
-		{
-			name: "basic dir",
-			stat: AbiStat{Kind: statKindDir, Mode: 0755 | 0o040000, Size: 4096, ModifiedNs: 9999, AccessedNs: 9999, CreatedNs: 9999, Nlink: 2, Inode: 20},
-		},
-		{
-			name: "basic symlink",
-			stat: AbiStat{Kind: statKindSymlink, Mode: 0777 | 0o120000, Size: 20, ModifiedNs: 1111, AccessedNs: 1111, CreatedNs: 1111, Nlink: 1, Inode: 30},
-		},
-		{
-			name: "large values",
-			stat: AbiStat{Kind: 0xFFFFFFFF, Mode: 0xFFFFFFFF, Size: 0xFFFFFFFFFFFFFFFF, ModifiedNs: 0xFFFFFFFFFFFFFFFF, AccessedNs: 0xFFFFFFFFFFFFFFFF, CreatedNs: 0xFFFFFFFFFFFFFFFF, Nlink: 0xFFFFFFFFFFFFFFFF, Inode: 0xFFFFFFFFFFFFFFFF},
-		},
-		{
-			name: "zero values",
-			stat: AbiStat{Kind: 0, Mode: 0, Size: 0, ModifiedNs: 0, AccessedNs: 0, CreatedNs: 0, Nlink: 0, Inode: 0},
-		},
-		{
-			name: "max size",
-			stat: AbiStat{Kind: statKindFile, Mode: 0o100644, Size: 9223372036854775807, ModifiedNs: 123},
-		},
-		{
-			name: "high inode",
-			stat: AbiStat{Inode: 18446744073709551615},
-		},
-		{
-			name: "many nlinks",
-			stat: AbiStat{Nlink: 65535},
-		},
-		{
-			name: "uid-gid (ignored but marshaled)",
-			stat: AbiStat{Uid: 1000, Gid: 1000},
-		},
-		{
-			name: "mix of values",
-			stat: AbiStat{Kind: 1, Mode: 2, Uid: 3, Gid: 4, Size: 5, ModifiedNs: 6, AccessedNs: 7, CreatedNs: 8, Nlink: 9, Inode: 10},
-		},
-		{
-			name: "file with permission 000",
-			stat: AbiStat{Kind: statKindFile, Mode: 0o100000, Size: 0},
-		},
-		{
-			name: "dir with permission 700",
-			stat: AbiStat{Kind: statKindDir, Mode: 0o040700, Size: 4096},
-		},
-		{
-			name: "symlink with permission 777",
-			stat: AbiStat{Kind: statKindSymlink, Mode: 0o120777, Size: 12},
-		},
-		{
-			name: "negative-like values (unsigned)",
-			stat: AbiStat{Size: ^uint64(0)},
-		},
+	stat := AbiStat{
+		Kind: statKindFile, Mode: 0o104755, Uid: 12, Gid: 34, Size: 1234,
+		ModifiedNs: -1_000_000_002, AccessedNs: 2, ChangedNs: 3,
+		CreatedNs: 4, Nlink: 5, Inode: 6, Dev: 7, Rdev: 8,
+		Blksize: 4096, Blocks: 9, ValidMask: 0xabc,
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			buf := marshalAbiStat(tt.stat)
-			if len(buf) != 64 {
-				t.Fatalf("len(buf) = %v, want 64", len(buf))
-			}
-
-			// Verify each field using LittleEndian decoding
-			if val := binary.LittleEndian.Uint32(buf[0:4]); val != tt.stat.Kind {
-				t.Errorf("Kind: got %v, want %v", val, tt.stat.Kind)
-			}
-			if val := binary.LittleEndian.Uint32(buf[4:8]); val != tt.stat.Mode {
-				t.Errorf("Mode: got %v, want %v", val, tt.stat.Mode)
-			}
-			if val := binary.LittleEndian.Uint32(buf[8:12]); val != tt.stat.Uid {
-				t.Errorf("Uid: got %v, want %v", val, tt.stat.Uid)
-			}
-			if val := binary.LittleEndian.Uint32(buf[12:16]); val != tt.stat.Gid {
-				t.Errorf("Gid: got %v, want %v", val, tt.stat.Gid)
-			}
-			if val := binary.LittleEndian.Uint64(buf[16:24]); val != tt.stat.Size {
-				t.Errorf("Size: got %v, want %v", val, tt.stat.Size)
-			}
-			if val := binary.LittleEndian.Uint64(buf[24:32]); val != tt.stat.ModifiedNs {
-				t.Errorf("ModifiedNs: got %v, want %v", val, tt.stat.ModifiedNs)
-			}
-			if val := binary.LittleEndian.Uint64(buf[32:40]); val != tt.stat.AccessedNs {
-				t.Errorf("AccessedNs: got %v, want %v", val, tt.stat.AccessedNs)
-			}
-			if val := binary.LittleEndian.Uint64(buf[40:48]); val != tt.stat.CreatedNs {
-				t.Errorf("CreatedNs: got %v, want %v", val, tt.stat.CreatedNs)
-			}
-			if val := binary.LittleEndian.Uint64(buf[48:56]); val != tt.stat.Nlink {
-				t.Errorf("Nlink: got %v, want %v", val, tt.stat.Nlink)
-			}
-			if val := binary.LittleEndian.Uint64(buf[56:64]); val != tt.stat.Inode {
-				t.Errorf("Inode: got %v, want %v", val, tt.stat.Inode)
-			}
-		})
+	buf := marshalAbiStat(stat)
+	if len(buf) != 112 {
+		t.Fatalf("len(buf) = %v, want 112", len(buf))
+	}
+	checks := []struct {
+		name string
+		got  uint64
+		want uint64
+	}{
+		{"kind", uint64(binary.LittleEndian.Uint32(buf[0:4])), uint64(stat.Kind)},
+		{"mode", uint64(binary.LittleEndian.Uint32(buf[4:8])), uint64(stat.Mode)},
+		{"uid", uint64(binary.LittleEndian.Uint32(buf[8:12])), uint64(stat.Uid)},
+		{"gid", uint64(binary.LittleEndian.Uint32(buf[12:16])), uint64(stat.Gid)},
+		{"size", binary.LittleEndian.Uint64(buf[16:24]), stat.Size},
+		{"mtime", binary.LittleEndian.Uint64(buf[24:32]), uint64(stat.ModifiedNs)},
+		{"atime", binary.LittleEndian.Uint64(buf[32:40]), uint64(stat.AccessedNs)},
+		{"ctime", binary.LittleEndian.Uint64(buf[40:48]), uint64(stat.ChangedNs)},
+		{"birthtime", binary.LittleEndian.Uint64(buf[48:56]), uint64(stat.CreatedNs)},
+		{"nlink", binary.LittleEndian.Uint64(buf[56:64]), stat.Nlink},
+		{"inode", binary.LittleEndian.Uint64(buf[64:72]), stat.Inode},
+		{"dev", binary.LittleEndian.Uint64(buf[72:80]), stat.Dev},
+		{"rdev", binary.LittleEndian.Uint64(buf[80:88]), stat.Rdev},
+		{"blksize", binary.LittleEndian.Uint64(buf[88:96]), uint64(stat.Blksize)},
+		{"blocks", binary.LittleEndian.Uint64(buf[96:104]), uint64(stat.Blocks)},
+		{"valid_mask", binary.LittleEndian.Uint64(buf[104:112]), stat.ValidMask},
+	}
+	for _, check := range checks {
+		if check.got != check.want {
+			t.Errorf("%s = %d, want %d", check.name, check.got, check.want)
+		}
 	}
 }

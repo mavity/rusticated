@@ -323,6 +323,21 @@ type Iovec struct { Base *byte; Len uint64 }
 type Rlimit struct { Cur uint64; Max uint64 }
 type Timeval struct { Sec int64; Usec int64 }
 type Timespec struct { Sec int64; Nsec int64 }
+type Stat_t = syscall.Stat_t
+func Stat(path string, stat *Stat_t) error { return syscall.Stat(path, stat) }
+func Lstat(path string, stat *Stat_t) error { return syscall.Lstat(path, stat) }
+func Fstat(fd int, stat *Stat_t) error { return syscall.Fstat(fd, stat) }
+func Fstatat(dirfd int, path string, stat *Stat_t, flags int) error {
+	return syscall.Fstatat(dirfd, path, stat, flags)
+}
+func setTimespec(sec, nsec int64) Timespec { return Timespec{Sec: sec, Nsec: nsec} }
+func NsecToTimespec(nsec int64) Timespec {
+	sec := nsec / 1e9
+	nsec %= 1e9
+	if nsec < 0 { nsec += 1e9; sec-- }
+	return Timespec{Sec: sec, Nsec: nsec}
+}
+func TimespecToNsec(ts Timespec) int64 { return ts.Sec*1e9 + ts.Nsec }
 var errorList = [...]struct {
 	num  Errno
 	name string

@@ -154,35 +154,66 @@ function translatePath(p) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AbiStat marshalling  (64 bytes, little-endian)
+// AbiStat marshalling (112 bytes, little-endian)
 // Layout mirrors marshalAbiStat / createAbiStat in env_fs.go
 // ─────────────────────────────────────────────────────────────────────────────
 const STAT_KIND_UNKNOWN = 0;
 const STAT_KIND_FILE    = 1;
 const STAT_KIND_DIR     = 2;
 const STAT_KIND_SYMLINK = 3;
+const STAT_KIND_CHAR    = 4;
+const STAT_KIND_BLOCK   = 5;
+const STAT_KIND_FIFO    = 6;
+const STAT_KIND_SOCKET  = 7;
 
-function marshalStat(st) {
+const STAT_VALID_UID       = 1n << 0n;
+const STAT_VALID_GID       = 1n << 1n;
+const STAT_VALID_ATIME     = 1n << 2n;
+const STAT_VALID_MTIME     = 1n << 3n;
+const STAT_VALID_CTIME     = 1n << 4n;
+const STAT_VALID_BIRTHTIME = 1n << 5n;
+const STAT_VALID_NLINK     = 1n << 6n;
+const STAT_VALID_INODE     = 1n << 7n;
+const STAT_VALID_DEV       = 1n << 8n;
+const STAT_VALID_RDEV      = 1n << 9n;
+const STAT_VALID_BLKSIZE   = 1n << 10n;
+const STAT_VALID_BLOCKS    = 1n << 11n;
+
+export function marshalStat(st) {
   let kind = STAT_KIND_UNKNOWN;
-  let modeBase = 0;
-  if (st.isSymbolicLink())      { kind = STAT_KIND_SYMLINK; modeBase = 0o120000; }
-  else if (st.isDirectory())    { kind = STAT_KIND_DIR;     modeBase = 0o040000; }
-  else                           { kind = STAT_KIND_FILE;    modeBase = 0o100000; }
+  if (st.isFile())               kind = STAT_KIND_FILE;
+  else if (st.isDirectory())     kind = STAT_KIND_DIR;
+  else if (st.isSymbolicLink()) kind = STAT_KIND_SYMLINK;
+  else if (st.isCharacterDevice()) kind = STAT_KIND_CHAR;
+  else if (st.isBlockDevice())  kind = STAT_KIND_BLOCK;
+  else if (st.isFIFO())         kind = STAT_KIND_FIFO;
+  else if (st.isSocket())       kind = STAT_KIND_SOCKET;
 
-  const mode = modeBase | (st.mode & 0o7777);
-  const size = BigInt(st.size);
-  const mtime = BigInt(st.mtimeNs != null ? st.mtimeNs : Math.round(st.mtimeMs * 1e6));
-  const buf = Buffer.alloc(64);
+  const mode = Number(st.mode & 0xffffffffn);
+  const size = st.size;
+  const blksize = st.blksize > 0n ? st.blksize : 4096n;
+  const blocks = st.blocks > 0n || size === 0n ? st.blocks : (size + 511n) / 512n;
+  let validMask = STAT_VALID_ATIME | STAT_VALID_MTIME | STAT_VALID_CTIME |
+    STAT_VALID_BIRTHTIME | STAT_VALID_NLINK | STAT_VALID_INODE | STAT_VALID_DEV |
+    STAT_VALID_RDEV | STAT_VALID_BLKSIZE | STAT_VALID_BLOCKS;
+  if (process.platform !== 'win32') validMask |= STAT_VALID_UID | STAT_VALID_GID;
+  const buf = Buffer.alloc(112);
   buf.writeUInt32LE(kind, 0);
   buf.writeUInt32LE(mode, 4);
-  buf.writeUInt32LE(0, 8);   // uid
-  buf.writeUInt32LE(0, 12);  // gid
+  buf.writeUInt32LE(Number(st.uid & 0xffffffffn), 8);
+  buf.writeUInt32LE(Number(st.gid & 0xffffffffn), 12);
   buf.writeBigUInt64LE(size, 16);
-  buf.writeBigUInt64LE(mtime, 24); // modifiedNs
-  buf.writeBigUInt64LE(mtime, 32); // accessedNs
-  buf.writeBigUInt64LE(mtime, 40); // createdNs
-  buf.writeBigUInt64LE(1n, 48);    // nlink
-  buf.writeBigUInt64LE(0n, 56);    // inode
+  buf.writeBigInt64LE(st.mtimeNs, 24);
+  buf.writeBigInt64LE(st.atimeNs, 32);
+  buf.writeBigInt64LE(st.ctimeNs, 40);
+  buf.writeBigInt64LE(st.birthtimeNs, 48);
+  buf.writeBigUInt64LE(st.nlink, 56);
+  buf.writeBigUInt64LE(st.ino, 64);
+  buf.writeBigUInt64LE(st.dev, 72);
+  buf.writeBigUInt64LE(st.rdev, 80);
+  buf.writeBigInt64LE(blksize, 88);
+  buf.writeBigInt64LE(blocks, 96);
+  buf.writeBigUInt64LE(validMask, 104);
   return buf;
 }
 
@@ -708,12 +739,12 @@ export function makeBrainImports(hostState, argv) {
     const opId = hs.registerOp(ovPtr);
 
     const statFn = noFollow ? fs.promises.lstat : fs.promises.stat;
-    statFn(pathStr).then((st) => {
+    statFn(pathStr, { bigint: true }).then((st) => {
       hs.enqueue(() => {
         if (!hs.isOpActive(ovPtr, opId)) return;
-        if (Number(outLen) < 64) { hs.completeOp(ovPtr, opId, wasiERANGE, 0, 64); return; }
+        if (Number(outLen) < 112) { hs.completeOp(ovPtr, opId, wasiERANGE, 0, 112); return; }
         guestWrite(Number(outPtr), marshalStat(st));
-        hs.completeOp(ovPtr, opId, 0, 0, 64);
+        hs.completeOp(ovPtr, opId, 0, 0, 112);
       });
     }).catch((e) => {
       hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(e), 0, 0));

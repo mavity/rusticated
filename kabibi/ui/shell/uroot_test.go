@@ -698,5 +698,120 @@ func TestURootCommand_Cat(t *testing.T) {
 	}
 }
 
+func TestURootCommand_Grep(t *testing.T) {
+	runner, ok := LookupURootCommand("grep")
+	if !ok || runner == nil {
+		t.Fatalf("LookupURootCommand(\"grep\") returned false/nil")
+	}
 
+	tempDir := t.TempDir()
+	f1 := filepath.Join(tempDir, "fruit.txt")
+	if err := os.WriteFile(f1, []byte("Apple\nbanana\napricot\ngrep pattern\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	runGrep := func(ctx context.Context, in string, dir string, args ...string) (string, string, int) {
+		var outBuf, errBuf bytes.Buffer
+		ioEnv := core.IO{
+			Stdin:  strings.NewReader(in),
+			Stdout: &outBuf,
+			Stderr: &errBuf,
+			Dir:    dir,
+		}
+		code := runner(ctx, ioEnv, args...)
+		return outBuf.String(), errBuf.String(), code
+	}
+
+	// 1. Basic regex match from stdin
+	out, errOut, code := runGrep(context.Background(), "Apple\nbanana\napricot\n", "", "^a")
+	if code != 0 || out != "apricot\n" || errOut != "" {
+		t.Fatalf("grep regex failed: code=%d out=%q err=%q", code, out, errOut)
+	}
+
+	// 2. Reading from file relative to Dir
+	out, errOut, code = runGrep(context.Background(), "", tempDir, "banana", "fruit.txt")
+	if code != 0 || out != "banana\n" || errOut != "" {
+		t.Fatalf("grep file failed: code=%d out=%q err=%q", code, out, errOut)
+	}
+
+	// 3. -i case insensitive
+	out, errOut, code = runGrep(context.Background(), "Apple\nbanana\n", "", "-i", "apple")
+	if code != 0 || out != "Apple\n" || errOut != "" {
+		t.Fatalf("grep -i failed: code=%d out=%q err=%q", code, out, errOut)
+	}
+
+	// 4. -v invert match
+	out, errOut, code = runGrep(context.Background(), "Apple\nbanana\n", "", "-v", "banana")
+	if code != 0 || out != "Apple\n" || errOut != "" {
+		t.Fatalf("grep -v failed: code=%d out=%q err=%q", code, out, errOut)
+	}
+
+	// 5. -c count
+	out, errOut, code = runGrep(context.Background(), "Apple\nbanana\napricot\n", "", "-c", "a")
+	if code != 0 || out != "2\n" || errOut != "" {
+		t.Fatalf("grep -c failed: code=%d out=%q err=%q", code, out, errOut)
+	}
+
+	// 6. -n line numbers
+	out, errOut, code = runGrep(context.Background(), "Apple\nbanana\n", "", "-n", "banana")
+	if code != 0 || out != "2:banana\n" || errOut != "" {
+		t.Fatalf("grep -n failed: code=%d out=%q err=%q", code, out, errOut)
+	}
+
+	// 7. -q match returns 0, empty stdout
+	out, errOut, code = runGrep(context.Background(), "hello world\n", "", "-q", "world")
+	if code != 0 || out != "" {
+		t.Fatalf("grep -q match failed: code=%d out=%q err=%q", code, out, errOut)
+	}
+
+	// 8. -q no-match returns 1, empty stdout
+	out, errOut, code = runGrep(context.Background(), "hello world\n", "", "-q", "notfound")
+	if code != 1 || out != "" {
+		t.Fatalf("grep -q no-match failed: code=%d out=%q err=%q", code, out, errOut)
+	}
+
+	// 9. No match without -q returns 1
+	out, errOut, code = runGrep(context.Background(), "hello world\n", "", "notfound")
+	if code != 1 || out != "" {
+		t.Fatalf("grep no-match failed: code=%d out=%q err=%q", code, out, errOut)
+	}
+
+	// 10. Searching for the literal word "grep" (ensuring it is not stripped by legacy argv[0] hacks)
+	out, errOut, code = runGrep(context.Background(), "", tempDir, "grep", "fruit.txt")
+	if code != 0 || out != "grep pattern\n" || errOut != "" {
+		t.Fatalf("grep for 'grep' failed: code=%d out=%q err=%q", code, out, errOut)
+	}
+
+	// 11. -F fixed string (dots not treated as regex wildcards)
+	out, errOut, code = runGrep(context.Background(), "a.b\naxb\n", "", "-F", "a.b")
+	if code != 0 || out != "a.b\n" || errOut != "" {
+		t.Fatalf("grep -F failed: code=%d out=%q err=%q", code, out, errOut)
+	}
+
+	// 12. --help returns 0 with usage
+	out, errOut, code = runGrep(context.Background(), "", "", "--help")
+	if code != 0 || !strings.Contains(errOut, "Usage:") {
+		t.Fatalf("grep --help failed: code=%d out=%q err=%q", code, out, errOut)
+	}
+
+	// 13. Invalid flag returns 2
+	out, errOut, code = runGrep(context.Background(), "", "", "-invalid-flag-xyz")
+	if code != 2 {
+		t.Fatalf("grep invalid flag failed: expected code 2, got %d", code)
+	}
+
+	// 14. FlagSet isolation on subsequent call
+	out, errOut, code = runGrep(context.Background(), "hello\n", "", "hello")
+	if code != 0 || out != "hello\n" {
+		t.Fatalf("grep recovery failed: code=%d out=%q", code, out)
+	}
+
+	// 15. Context cancellation returns 130
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	out, errOut, code = runGrep(ctx, "hello\n", "", "hello")
+	if code != 130 {
+		t.Fatalf("grep cancellation failed: expected code 130, got %d", code)
+	}
+}
 
