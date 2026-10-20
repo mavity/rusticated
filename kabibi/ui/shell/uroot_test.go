@@ -613,4 +613,90 @@ func TestURootCommand_Echo(t *testing.T) {
 	}
 }
 
+func TestURootCommand_Cat(t *testing.T) {
+	runner, ok := LookupURootCommand("cat")
+	if !ok || runner == nil {
+		t.Fatalf("LookupURootCommand(\"cat\") returned false/nil")
+	}
+
+	tempDir := t.TempDir()
+	f1 := filepath.Join(tempDir, "file1.txt")
+	f2 := filepath.Join(tempDir, "file2.txt")
+	if err := os.WriteFile(f1, []byte("alpha\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f2, []byte("gamma\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	runCat := func(ctx context.Context, in string, dir string, args ...string) (string, string, int) {
+		var outBuf, errBuf bytes.Buffer
+		ioEnv := core.IO{
+			Stdin:  strings.NewReader(in),
+			Stdout: &outBuf,
+			Stderr: &errBuf,
+			Dir:    dir,
+		}
+		code := runner(ctx, ioEnv, args...)
+		return outBuf.String(), errBuf.String(), code
+	}
+
+	// 1. Reading from stdin when no files specified
+	out, errOut, code := runCat(context.Background(), "stream data", "")
+	if code != 0 || out != "stream data" || errOut != "" {
+		t.Fatalf("cat stdin failed: code=%d out=%q err=%q", code, out, errOut)
+	}
+
+	// 2. Reading single file relative to Dir
+	out, errOut, code = runCat(context.Background(), "", tempDir, "file1.txt")
+	if code != 0 || out != "alpha\n" || errOut != "" {
+		t.Fatalf("cat single file failed: code=%d out=%q err=%q", code, out, errOut)
+	}
+
+	// 3. Concatenating multiple files and stdin via '-'
+	out, errOut, code = runCat(context.Background(), "beta\n", tempDir, "file1.txt", "-", "file2.txt")
+	if code != 0 || out != "alpha\nbeta\ngamma\n" || errOut != "" {
+		t.Fatalf("cat multi+dash failed: code=%d out=%q err=%q", code, out, errOut)
+	}
+
+	// 4. -u flag (unbuffered, accepted)
+	out, errOut, code = runCat(context.Background(), "unbuffered", "", "-u")
+	if code != 0 || out != "unbuffered" || errOut != "" {
+		t.Fatalf("cat -u failed: code=%d out=%q err=%q", code, out, errOut)
+	}
+
+	// 5. Missing file returns 1 and prints diagnostic to Stderr
+	out, errOut, code = runCat(context.Background(), "", tempDir, "nonexistent.txt")
+	if code != 1 || !strings.Contains(errOut, "cat:") {
+		t.Fatalf("cat missing file failed: expected code 1 with diagnostic, got code=%d err=%q", code, errOut)
+	}
+
+	// 6. -h returns 0 with usage
+	out, errOut, code = runCat(context.Background(), "", "", "-h")
+	if code != 0 || !strings.Contains(errOut, "Usage:") {
+		t.Fatalf("cat -h failed: code=%d out=%q err=%q", code, out, errOut)
+	}
+
+	// 7. Invalid flag returns 1
+	out, errOut, code = runCat(context.Background(), "", "", "-invalid-flag-xyz")
+	if code != 1 {
+		t.Fatalf("cat invalid flag failed: expected code 1, got %d", code)
+	}
+
+	// 8. FlagSet isolation on subsequent call
+	out, errOut, code = runCat(context.Background(), "recovered", "")
+	if code != 0 || out != "recovered" {
+		t.Fatalf("cat recovery failed: code=%d out=%q", code, out)
+	}
+
+	// 9. Context cancellation
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	out, errOut, code = runCat(ctx, "cancelled", "")
+	if code != 130 {
+		t.Fatalf("cat cancellation failed: expected code 130, got %d", code)
+	}
+}
+
+
 
