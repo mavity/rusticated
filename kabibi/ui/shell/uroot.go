@@ -2,14 +2,14 @@ package shell
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 
+	"github.com/u-root/u-root/cmds/core/backoff"
 	base64cmd "github.com/u-root/u-root/cmds/core/base64"
 	"github.com/u-root/u-root/cmds/core/basename"
-	"github.com/u-root/u-root/cmds/core/backoff"
 	"github.com/u-root/u-root/cmds/core/cat"
 	"github.com/u-root/u-root/cmds/core/chmod"
 	"github.com/u-root/u-root/cmds/core/cmp"
@@ -22,7 +22,6 @@ import (
 	"github.com/u-root/u-root/cmds/core/dirname"
 	dmesgcmd "github.com/u-root/u-root/cmds/core/dmesg"
 	"github.com/u-root/u-root/cmds/core/du"
-	"github.com/u-root/u-root/cmds/core/echo"
 	falsecmd "github.com/u-root/u-root/cmds/core/false"
 	"github.com/u-root/u-root/cmds/core/find"
 	freecmd "github.com/u-root/u-root/cmds/core/free"
@@ -52,9 +51,9 @@ import (
 	netstatcmd "github.com/u-root/u-root/cmds/core/netstat"
 	"github.com/u-root/u-root/cmds/core/nohup"
 	pcicmd "github.com/u-root/u-root/cmds/core/pci"
+	"github.com/u-root/u-root/cmds/core/pidof"
 	pingcmd "github.com/u-root/u-root/cmds/core/ping"
 	"github.com/u-root/u-root/cmds/core/printenv"
-	"github.com/u-root/u-root/cmds/core/pidof"
 	pscmd "github.com/u-root/u-root/cmds/core/ps"
 	"github.com/u-root/u-root/cmds/core/pwd"
 	"github.com/u-root/u-root/cmds/core/readlink"
@@ -65,8 +64,8 @@ import (
 	"github.com/u-root/u-root/cmds/core/shasum"
 	"github.com/u-root/u-root/cmds/core/sleep"
 	"github.com/u-root/u-root/cmds/core/sort"
-	stringscmd "github.com/u-root/u-root/cmds/core/strings"
 	sshdcmd "github.com/u-root/u-root/cmds/core/sshd"
+	stringscmd "github.com/u-root/u-root/cmds/core/strings"
 	"github.com/u-root/u-root/cmds/core/stty"
 	synccmd "github.com/u-root/u-root/cmds/core/sync"
 	"github.com/u-root/u-root/cmds/core/tail"
@@ -93,6 +92,7 @@ import (
 	"github.com/u-root/u-root/pkg/core"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 type commandRunner func(ctx context.Context, ioEnv core.IO, args ...string) int
@@ -100,7 +100,6 @@ type commandRunner func(ctx context.Context, ioEnv core.IO, args ...string) int
 var urootRegistry = map[string]commandRunner{
 	// Pilot commands (Band 1A)
 	"cat":  cat.Main,
-	"echo": echo.Main,
 	"grep": grep.Main,
 
 	// Band 1B: Text Processing & Filters
@@ -132,8 +131,8 @@ var urootRegistry = map[string]commandRunner{
 	"find":     findcmd.Main,
 	"ln":       ln.Main,
 	"ls":       lscmd.Main,
-	"mkdir":  mkdir.Main,
-	"mktemp": mktemp.Main,
+	"mkdir":    mkdir.Main,
+	"mktemp":   mktemp.Main,
 	"mv":       mv.Main,
 	"pwd":      pwd.Main,
 	"readlink": readlink.Main,
@@ -176,26 +175,26 @@ var urootRegistry = map[string]commandRunner{
 	"wget":   wgetcmd.Main,
 
 	// Band 3: System Diagnostics, Process & Network Inspection
-	"df":     dfcmd.Main,
-	"dmesg":  dmesgcmd.Main,
-	"free":   freecmd.Main,
-	"id":     idcmd.Main,
-	"ip":     ipcmd.Main,
+	"df":        dfcmd.Main,
+	"dmesg":     dmesgcmd.Main,
+	"free":      freecmd.Main,
+	"id":        idcmd.Main,
+	"ip":        ipcmd.Main,
 	"kill":      killcmd.Main,
 	"lddfiles":  lddfilescmd.Main,
 	"lsdrivers": lsdriverscmd.Main,
 	"lsfd":      lsfdcmd.Main,
 	"lsmod":     lsmodcmd.Main,
-	"netstat": netstatcmd.Main,
-	"pci":     pcicmd.Main,
-	"pidof":   pidof.Main,
-	"ping":   pingcmd.Main,
-	"ps":     pscmd.Main,
-	"stty":   stty.Main,
-	"sync":   synccmd.Main,
-	"tty":    tty.Main,
-	"uname":  uname.Main,
-	"uptime": uptimecmd.Main,
+	"netstat":   netstatcmd.Main,
+	"pci":       pcicmd.Main,
+	"pidof":     pidof.Main,
+	"ping":      pingcmd.Main,
+	"ps":        pscmd.Main,
+	"stty":      stty.Main,
+	"sync":      synccmd.Main,
+	"tty":       tty.Main,
+	"uname":     uname.Main,
+	"uptime":    uptimecmd.Main,
 }
 
 // LookupURootCommand looks up a u-root commandRunner by command name.
@@ -214,36 +213,12 @@ func AllURootCommandNames() []string {
 	return names
 }
 
-// urootPrefix is an internal prefix prepended by urootCallHandler to bypass
-// mvdan/sh's hardcoded POSIX builtins (such as "kill") that are unimplemented
-// or stubbed inside interp.Runner.builtin().
-const urootPrefix = "__uroot_builtin__:"
-
-func urootCallHandler(_ context.Context, args []string) ([]string, error) {
-	if len(args) == 0 {
-		return args, nil
-	}
-	name := args[0]
-	// Only rewrite commands that are POSIX/Bash builtins that mvdan/sh does not support
-	// (e.g. "kill: unsupported builtin") so that standard builtins like "echo", "pwd", "true", "false"
-	// continue to function seamlessly via interp.Runner without breaking shell pipelines.
-	switch name {
-	case "kill":
-		if _, exists := LookupURootCommand(name); exists {
-			cloned := slices.Clone(args)
-			cloned[0] = urootPrefix + name
-			return cloned, nil
-		}
-	}
-	return args, nil
-}
-
 func urootBuiltinMiddleware(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 	return func(ctx context.Context, args []string) error {
 		if len(args) == 0 {
 			return nil
 		}
-		name := strings.TrimPrefix(args[0], urootPrefix)
+		name := args[0]
 		if filepath.Base(name) != name {
 			return next(ctx, args)
 		}
@@ -254,6 +229,7 @@ func urootBuiltinMiddleware(next interp.ExecHandlerFunc) interp.ExecHandlerFunc 
 
 		hc := interp.HandlerCtx(ctx)
 
+		var echoRunner *interp.Runner
 		var ioEnv core.IO
 		ioEnv = core.IO{
 			Stdin:  hc.Stdin,
@@ -289,6 +265,30 @@ func urootBuiltinMiddleware(next interp.ExecHandlerFunc) interp.ExecHandlerFunc 
 				if len(subArgs) == 0 {
 					return 0
 				}
+				if subArgs[0] == "echo" {
+					if echoRunner == nil {
+						var err error
+						echoRunner, err = createRunnerWithEnv(runCtx, subIO.Stdin, subIO.Stdout, subIO.Stderr, subIO.Dir, hc.Env, nil)
+						if err != nil {
+							fmt.Fprintf(subIO.Stderr, "echo: failed to initialize shell builtin: %v\n", err)
+							return 1
+						}
+					}
+
+					echoRunner.Reset()
+					callArgs := make([]*syntax.Word, 0, len(subArgs))
+					for _, arg := range subArgs {
+						callArgs = append(callArgs, &syntax.Word{Parts: []syntax.WordPart{&syntax.SglQuoted{Value: arg}}})
+					}
+					if err := echoRunner.Run(runCtx, &syntax.CallExpr{Args: callArgs}); err != nil {
+						if status, ok := interp.IsExitStatus(err); ok {
+							return int(status)
+						}
+						fmt.Fprintf(subIO.Stderr, "echo: %v\n", err)
+						return 1
+					}
+					return 0
+				}
 				if r, ok := LookupURootCommand(subArgs[0]); ok {
 					return r(runCtx, subIO, subArgs[1:]...)
 				}
@@ -301,6 +301,9 @@ func urootBuiltinMiddleware(next interp.ExecHandlerFunc) interp.ExecHandlerFunc 
 				return 0
 			},
 			IsBuiltin: func(cmdName string) bool {
+				if cmdName == "echo" {
+					return true
+				}
 				_, ok := LookupURootCommand(cmdName)
 				return ok
 			},

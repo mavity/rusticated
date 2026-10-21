@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/hugelgupf/p9/p9"
-	"github.com/u-root/u-root/cmds/core/echo"
 	"github.com/u-root/u-root/pkg/core"
 	"golang.org/x/crypto/ssh"
 )
@@ -61,16 +60,14 @@ func TestURoot_Band1A_Pilot(t *testing.T) {
 			t.Errorf("echo -n failed: code=%d out=%q", code, out)
 		}
 
+		out, code, _ = run("echo 'a\\nb'")
+		if code != 0 || out != "a\\nb\n" {
+			t.Errorf("echo default escape handling failed: code=%d out=%q", code, out)
+		}
+
 		out, code, _ = run("echo -e 'a\\nb'")
 		if code != 0 || strings.TrimSpace(out) != "a\nb" {
 			t.Errorf("echo -e newline failed: code=%d out=%q", code, out)
-		}
-
-		// Direct u-root echo.Main test verifying \c escape support
-		var buf bytes.Buffer
-		dcode := echo.Main(context.Background(), core.IO{Stdout: &buf, Stderr: io.Discard}, "-e", "first\\c second")
-		if dcode != 0 || strings.TrimSpace(buf.String()) != "first" {
-			t.Errorf("echo.Main -e \\c failed: code=%d out=%q", dcode, buf.String())
 		}
 	})
 
@@ -229,6 +226,16 @@ func TestURoot_Band1B_TextProcessing(t *testing.T) {
 			t.Errorf("uniq -d failed: code=%d out=%q", code, out)
 		}
 
+		out, code, _ = run("echo -e 'one same\\n two same\\nthree other' | uniq -f 1")
+		if code != 0 || strings.TrimSpace(out) != "one same\nthree other" {
+			t.Errorf("uniq -f failed: code=%d out=%q", code, out)
+		}
+
+		out, code, _ = run("echo -e 'xapple\\nyapple\\nzberry' | uniq -s 1")
+		if code != 0 || strings.TrimSpace(out) != "xapple\nzberry" {
+			t.Errorf("uniq -s failed: code=%d out=%q", code, out)
+		}
+
 		out, code, _ = run("echo -e 'a\\na\\nb\\nc\\nc' | uniq -u")
 		if code != 0 || strings.TrimSpace(out) != "b" {
 			t.Errorf("uniq -u failed: code=%d out=%q", code, out)
@@ -258,6 +265,16 @@ func TestURoot_Band1B_TextProcessing(t *testing.T) {
 		if code != 0 || strings.TrimSpace(out) != "24 wc_sample.txt" {
 			t.Errorf("wc -c failed: code=%d out=%q", code, out)
 		}
+
+		out, code, _ = run("wc -m wc_sample.txt")
+		if code != 0 || strings.TrimSpace(out) != "24 wc_sample.txt" {
+			t.Errorf("wc -m failed: code=%d out=%q", code, out)
+		}
+
+		out, code, _ = run("wc -L wc_sample.txt")
+		if code != 0 || strings.TrimSpace(out) != "11 wc_sample.txt" {
+			t.Errorf("wc -L failed: code=%d out=%q", code, out)
+		}
 	})
 
 	t.Run("tr", func(t *testing.T) {
@@ -275,6 +292,16 @@ func TestURoot_Band1B_TextProcessing(t *testing.T) {
 		if code != 0 || strings.TrimSpace(out) != "god" {
 			t.Errorf("tr -s failed: code=%d out=%q", code, out)
 		}
+
+		out, code, _ = run("echo 'banana' | tr -cd 'a'")
+		if code != 0 || strings.TrimSpace(out) != "aaa" {
+			t.Errorf("tr -c -d failed: code=%d out=%q", code, out)
+		}
+
+		out, code, _ = run("echo 'aaaabbbb' | tr -s a X")
+		if code != 0 || strings.TrimSpace(out) != "Xbbbb" {
+			t.Errorf("tr -s SET2 failed: code=%d out=%q", code, out)
+		}
 	})
 
 	t.Run("tee", func(t *testing.T) {
@@ -290,9 +317,15 @@ func TestURoot_Band1B_TextProcessing(t *testing.T) {
 			t.Errorf("tee files failed: c1=%q c2=%q", c1, c2)
 		}
 
+		_, code, _ = run("echo again | tee -a t1.txt")
+		c1, _ = os.ReadFile(t1)
+		if code != 0 || string(c1) != "stream\nagain\n" {
+			t.Errorf("tee -a failed: code=%d file=%q", code, c1)
+		}
+
 		out, code, _ = run("echo more | tee -a t1.txt")
 		c1, _ = os.ReadFile(t1)
-		if strings.TrimSpace(string(c1)) != "stream\nmore" {
+		if code != 0 || strings.TrimSpace(string(c1)) != "stream\nagain\nmore" {
 			t.Errorf("tee -a failed: %q", string(c1))
 		}
 	})
@@ -306,6 +339,16 @@ func TestURoot_Band1B_TextProcessing(t *testing.T) {
 		out, code, _ = run("seq 2 4")
 		if code != 0 || strings.TrimSpace(out) != "2\n3\n4" {
 			t.Errorf("seq 2-args failed: code=%d out=%q", code, out)
+		}
+
+		out, code, _ = run("seq -s , 1 3")
+		if code != 0 || strings.TrimSpace(out) != "1,2,3" {
+			t.Errorf("seq -s failed: code=%d out=%q", code, out)
+		}
+
+		out, code, _ = run("seq -f %02g 1 3")
+		if code != 0 || strings.TrimSpace(out) != "01\n02\n03" {
+			t.Errorf("seq -f failed: code=%d out=%q", code, out)
 		}
 
 		out, code, _ = run("seq 1 2 5")
@@ -334,6 +377,11 @@ func TestURoot_Band1B_TextProcessing(t *testing.T) {
 		if code != 0 || strings.TrimSpace(out) != "a" {
 			t.Errorf("comm -23 failed: code=%d out=%q", code, out)
 		}
+
+		out, code, _ = run("echo -e 'a\\nb' | comm - comm2.txt")
+		if code != 0 || !strings.Contains(out, "a") || !strings.Contains(out, "b") {
+			t.Errorf("comm stdin failed: code=%d out=%q", code, out)
+		}
 	})
 
 	t.Run("cmp", func(t *testing.T) {
@@ -356,6 +404,16 @@ func TestURoot_Band1B_TextProcessing(t *testing.T) {
 		if code != 1 || out != "" {
 			t.Errorf("cmp -s expected silent code 1, got code=%d out=%q", code, out)
 		}
+
+		_, code, _ = run("cmp -n 3 cmp1.txt cmp2.txt")
+		if code != 0 {
+			t.Errorf("cmp -n equal prefix expected 0, got %d", code)
+		}
+
+		_, code, _ = run("cmp -n 4 cmp1.txt cmp2.txt")
+		if code != 1 {
+			t.Errorf("cmp -n differing prefix expected 1, got %d", code)
+		}
 	})
 
 	t.Run("strings", func(t *testing.T) {
@@ -371,6 +429,11 @@ func TestURoot_Band1B_TextProcessing(t *testing.T) {
 		if code != 0 || strings.TrimSpace(out) != "world!" {
 			t.Errorf("strings -n 6 failed: code=%d out=%q", code, out)
 		}
+
+		out, code, _ = run("strings -t d data.bin")
+		if code != 0 || strings.TrimSpace(out) != "2 hello\n12 world!" {
+			t.Errorf("strings -t d failed: code=%d out=%q", code, out)
+		}
 	})
 
 	t.Run("hexdump", func(t *testing.T) {
@@ -382,6 +445,11 @@ func TestURoot_Band1B_TextProcessing(t *testing.T) {
 		out, code, _ = run("echo -n 'ABC' | hexdump -C")
 		if code != 0 || !strings.Contains(out, "|ABC|") {
 			t.Errorf("hexdump -C failed: code=%d out=%q", code, out)
+		}
+
+		out, code, _ = run("echo -n 'ABCDEF' | hexdump -s 1 -n 2 -v")
+		if code != 0 || !strings.Contains(out, "00000001") || !strings.Contains(out, "42 43") || strings.Contains(out, "44") {
+			t.Errorf("hexdump -s -n -v failed: code=%d out=%q", code, out)
 		}
 	})
 
@@ -789,6 +857,16 @@ func TestURoot_Band1E_ShellControlAndBuiltins(t *testing.T) {
 		out, code, _ := run("echo 'one two three' | xargs -n 1 echo")
 		if code != 0 || strings.TrimSpace(out) != "one\ntwo\nthree" {
 			t.Errorf("xargs -n 1 failed: code=%d out=%q", code, out)
+		}
+
+		for _, command := range []string{
+			"printf '%s\\0' 'a\\nb' | xargs -0",
+			"printf '%s\\0' 'a\\nb' | xargs -0 echo",
+		} {
+			out, code, _ = run(command)
+			if code != 0 || out != "a\\nb\n" {
+				t.Errorf("%s failed: code=%d out=%q", command, code, out)
+			}
 		}
 	})
 
@@ -1907,10 +1985,3 @@ func TestURoot_Band3_SystemDiagnosticsProcessAndNetwork(t *testing.T) {
 		}
 	})
 }
-
-
-
-
-
-
-

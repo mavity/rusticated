@@ -178,56 +178,263 @@ A command checkbox `[x]` may **only** be ticked when all 5 criteria are met:
 *100% cross-platform (Linux, macOS, Windows, Rusticated). Pure algorithmic or standard file/stream I/O.*
 
 #### 1A. Pilot Commands (First 3 to Validate Architecture End-to-End)
-- [x] **`echo`** (`cmds/core/echo`): Convert `-n`, `-e`, `-E` to local FlagSet; support `\c` early return without `os.Exit`.
+- [x] **`echo`** (mvdan/sh shell builtin; u-root echo deliberately not registered): Use one selected implementation for ordinary shell commands and commands launched by Kabibi's `xargs`.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1A_Pilot$' -v` — passed; covers ordinary shell `echo`, `cat`, and `grep`.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band1E_ShellControlAndBuiltins/xargs' -v` — passed; `xargs` child `echo` uses mvdan/sh.
+  - `go run . kabibi -r -c "echo 'a\nb' | hexdump"` — bytes `61 5c 6e 62 0a`; default shell echo preserves the literal `\n`.
+  - `go run . kabibi -r -c "printf '%s\0' 'a\nb' | xargs -0 | hexdump"` and `go run . kabibi -r -c "printf '%s\0' 'a\nb' | xargs -0 echo | hexdump"` — both emitted `61 5c 6e 62 0a`; xargs passes the argument unchanged to mvdan/sh's echo builtin.
+  - Bash comparison: `echo` default and `-E` preserve `\n`; `-e` expands it; `-e ...\c` emits the prefix without a newline. mvdan/sh still differs for `-e ...\c` by printing `\c` literally; the u-root echo implementation previously differed by adding a newline after truncation.
 - [x] **`cat`** (`cmds/core/cat`): Stream files and `-` (`ioEnv.Stdin`) to `ioEnv.Stdout`; resolve paths via `ioEnv.ResolvePath`.
+  - `go -C u-root test ./cmds/core/cat -v` — passed; covers files, stdin, interleaved `-`, missing files, I/O errors, cancellation, and reentrancy.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1A_Pilot$/cat$' -v` — passed; covers concatenated files, piped stdin through `-`, and missing-file status.
+  - `go run . kabibi -r -c "echo piped | cat"` — printed `piped` from pipeline stdin.
+  - `go run . kabibi -r -c "echo piped | cat -"` — printed `piped` from pipeline stdin with explicit `-`.
+  - `go run . kabibi -r -c "cat README.md | head -n 1"` — read the relative file and printed `<!--`.
+  - `go run . kabibi -r -c "cat definitely_nonexistent_file_xyz.txt"` — reported the missing path and exited nonzero (1).
 - [x] **`grep`** (`cmds/core/grep`): Local flags (`-i`, `-v`, `-r`, `-c`, `-n`, `-q`, `-F`, `-h`, `-l`); check `ctx.Done()` in scanner; return `1` on no match.
+  - `go -C u-root test ./cmds/core/grep -v` — passed; covers stdin/files, recursive search, all listed flags, cancellation, and reentrancy.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1A_Pilot$/grep$' -v` — passed; shell integration covered basic match, `-i`, `-v`, `-c`, `-n`, `-q`, and `-F`.
+  - `go run . kabibi -r -c "printf 'Apple\nbanana\nAPRICOT\n' | grep -i -n ap"` — printed numbered case-insensitive matches (`1:Apple`, `3:APRICOT`).
+  - `go run . kabibi -r -c "printf 'Apple\nbanana\nAPRICOT\n' | grep -v banana"` — printed `Apple` and `APRICOT`.
+  - `go run . kabibi -r -c "printf 'Apple\nbanana\nAPRICOT\n' | grep -c banana"` — printed `1`.
+  - `go run . kabibi -r -c "printf 'a.b\naxb\n' | grep -F 'a.b'"` — matched only the literal `a.b`.
+  - `go run . kabibi -r -c "grep -n '^# Mohabbat' README.md"` — read the relative file and printed `4:# Mohabbat`.
+  - `go run . kabibi -r -c "printf 'Apple\nbanana\n' | grep -q strawberry"` — no match; exited 1.
 
 #### 1B. Text Processing & Filters
 - [x] **`head`** (`cmds/core/head`): Local `-c` and `-n` flags; resolve file paths; stream to `ioEnv.Stdout`.
+  - `go -C u-root test ./cmds/core/head -v` — passed; covers default/requested lines, bytes, stdin, files, invalid counts, I/O errors, and cancellation.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/head$' -v` — passed; covers `-n`, `-c`, and piped stdin.
+  - `go run . kabibi -r -c "head -n 3 README.md"` — printed the first three lines from the relative file.
+  - `go run . kabibi -r -c "head -c 5 README.md"` — printed the first five bytes (`<!--` plus newline).
+  - `go run . kabibi -r -c "printf 'a\nb\nc\n' | head -n 1"` — printed only `a` from stdin.
 - [x] **`tail`** (`cmds/core/tail`): Local `-c`, `-n`, `-f` flags; monitor `ctx.Done()` in `-f` follow loop.
-- [ ] **`sort`** (`cmds/core/sort`): Local `-r`, `-u`, `-f`, `-b`, `-n`, `-C`, `-o` flags; resolve `-o` output file via `ioEnv.ResolvePath`.
-- [ ] **`uniq`** (`cmds/core/uniq`): Local `-u`, `-d`, `-c`, `-i`, `-f`, `-s` flags; stream `ioEnv.Stdin` to `ioEnv.Stdout`.
+  - `go -C u-root test ./cmds/core/tail -v` — passed; covers line/byte counts, stdin/files, `-f` append and cancellation, broken pipes, and invalid counts.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/tail$' -v` — passed; covers `-n` on a file and piped stdin.
+  - `go run . kabibi -r -c "printf 'one\ntwo\nthree\n' | tail -n 2"` — printed the final two lines (`two`, `three`).
+  - `go run . kabibi -r -c "printf 'one\ntwo\nthree\n' | tail -c 5"` — printed the final five bytes (`hree` plus newline).
+  - `go run . kabibi -r -c "tail -n 3 README.md"` — read the relative file and printed its final three lines.
+- [x] **`sort`** (`cmds/core/sort`): Local `-r`, `-u`, `-f`, `-b`, `-n`, `-C`, `-o` flags; resolve `-o` output file via `ioEnv.ResolvePath`.
+  - `go -C u-root test ./cmds/core/sort -v` — passed; covers stdin/files, all listed flags and combinations, ordered checks, and relative `-o` paths.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/sort$' -v` — passed; covers default, `-r`, `-u`, `-n`, and `-o`.
+  - `go run . kabibi -r -c "printf 'banana\napple\ncherry\napple\n' | sort -ru"` — printed unique lines in reverse order (`cherry`, `banana`, `apple`).
+  - `go run . kabibi -r -c "printf '10\n2\n1\n' | sort -n"` — printed numeric order (`1`, `2`, `10`).
+  - `go run . kabibi -r -c "printf 'b\nA\na\n' | sort -f"` — sorted case-insensitively, preserving the tie order of `A` and `a`.
+  - `go run . kabibi -r -c "printf 'a\nb\n' | sort -C"` — ordered input passed with no output (exit 0).
+  - `go run . kabibi -r -c "printf 'b\na\n' | sort -C"` — unordered input was rejected (exit 1).
+  - `go run . kabibi -r -c "printf 'b\na\n' | sort -o sort-probe.txt; cat sort-probe.txt; rm sort-probe.txt"` — wrote and read back sorted output (`a`, `b`), then removed the probe file.
+- [x] **`uniq`** (`cmds/core/uniq`): Local `-u`, `-d`, `-c`, `-i`, `-f`, `-s` flags; stream `ioEnv.Stdin` to `ioEnv.Stdout`.
+  - `go -C u-root test ./cmds/core/uniq -v` — passed; covers stdin/files, all flags, long lines, read/write errors, and missing final newline.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/uniq$' -v` — passed; shell integration covered default, `-c`, `-d`, `-u`, `-i`, `-f`, and `-s`.
+  - `go run . kabibi -r -c "printf 'a\na\nb\nb\nb\nc\n' | uniq -c"` — printed counts `2`, `3`, and `1` for the adjacent groups.
+  - `go run . kabibi -r -c "printf 'one same\n two same\nthree other\n' | uniq -f 1"` — compared after the first field and printed `one same`, `three other`.
+  - `go run . kabibi -r -c "printf 'xapple\nyapple\nzberry\n' | uniq -s 1"` — compared after the first character and printed `xapple`, `zberry`.
+  - `go run . kabibi -r -c "printf 'a\nA\nb\n' | uniq -i"` — treated adjacent `a` and `A` as duplicates.
 - [ ] **`wc`** (`cmds/core/wc`): Local `-l`, `-w`, `-c`, `-m`, `-L` flags; write counts to `ioEnv.Stdout`.
-- [ ] **`tr`** (`cmds/core/tr`): Local `-d`, `-s`, `-c`/`-C` flags; character translation from `ioEnv.Stdin` to `ioEnv.Stdout`.
+  - `go -C u-root test ./cmds/core/wc -v` — passed; covers files/stdin, counts, UTF-8, `-L`, and output errors.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/wc$' -v` — passed; covers `-l`, `-w`, `-c`, `-m`, and `-L` on a file.
+  - `go run . kabibi -r -c "printf 'a b\nccc\n' | wc -l -w -c -m -L"` — printed `2 3 8 8 3`.
+  - `go run . kabibi -r -c "printf 'é\n' | wc -c"` — counted 3 UTF-8 bytes.
+  - `go run . kabibi -r -c "printf 'é\n' | wc -m"` — counted 2 Unicode code points (including newline).
+  - `go run . kabibi -r -c "printf '界\n' | wc -L"` — reported 1, and `go run . kabibi -r -c "printf 'a\tb\n' | wc -L"` reported 3. **Finding:** `-L` counts runes, not terminal display columns (wide characters and tabs are undercounted), so this item remains unchecked.
+- [x] **`tr`** (`cmds/core/tr`): Local `-d`, `-s`, `-c`/`-C` flags; character translation from `ioEnv.Stdin` to `ioEnv.Stdout`.
+  - `go -C u-root test ./cmds/core/tr -v` — passed; covers character classes, deletion, complement, squeeze, replacement characters, and output errors.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/tr$' -v` — passed; shell integration covered translation, deletion, squeeze, and complement deletion.
+  - `go run . kabibi -r -c "printf 'hello\n' | tr a-z A-Z"` — translated to `HELLO`.
+  - `go run . kabibi -r -c "printf 'h1e2l3l4o\n' | tr -d '0-9'"` — deleted digits, leaving `hello`.
+  - `go run . kabibi -r -c "printf 'goooood\n' | tr -s o"` — squeezed repeated `o` characters to `god`.
+  - `go run . kabibi -r -c "printf 'banana\n' | tr -cd a"` and `go run . kabibi -r -c "printf 'banana' | tr -Cd a"` — complement deletion retained only `aaa` with both `-c` and `-C`.
+  - `go run . kabibi -r -c "printf 'abcda\n' | tr -c ab XY"` — printed `XYYYXY`; the final `Y` is the newline, also mapped by complement translation. Without an input newline, `go run . kabibi -r -c "printf 'abcda' | tr -c ab XY"` printed `XYYYX`.
+  - `go run . kabibi -r -c "printf 'aaaabbbb\n' | tr -s a X"` — squeezed the translation output set, yielding `Xbbbb`.
 - [ ] **`tee`** (`cmds/core/tee`): Local `-a`, `-i` flags; multi-writer from `ioEnv.Stdin` to `ioEnv.Stdout` + resolved files.
+  - `go -C u-root test ./cmds/core/tee -v` — passed; covers output/append, flag parsing, relative paths, and write errors.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/tee$' -v` — passed; covers multiple output files, stdout, and append.
+  - `go run . kabibi -r -c "printf 'first\n' | tee tee-probe.txt; printf 'second\n' | tee -a tee-probe.txt; cat tee-probe.txt; rm tee-probe.txt"` — tee passed both streams through, appended to the file, read back both lines, and removed the probe file.
+  - `go run . kabibi -r -c "printf 'ignored\n' | tee -i tee-ignore-probe.txt; cat tee-ignore-probe.txt; rm tee-ignore-probe.txt"` — `-i` completed a non-interrupt operation and wrote/read the expected data. **Limitation:** Ctrl-C behavior was not exercised; this item remains unchecked pending an interrupt test.
 - [ ] **`seq`** (`cmds/core/seq`): Local `-f`, `-s`, `-w` flags; check `ctx.Done()` in emission loop.
-- [ ] **`comm`** (`cmds/core/comm`): Local `-1`, `-2`, `-3` flags; support `-` for `ioEnv.Stdin`.
-- [ ] **`cmp`** (`cmds/core/cmp`): Local `-s`, `-l`, `-n` flags; return `0` (equal), `1` (differ), `2` (error).
-- [ ] **`strings`** (`cmds/core/strings`): `package stringscmd`; local `-n`, `-t` flags; check `ctx.Done()` while scanning.
+  - `go -C u-root test ./cmds/core/seq -v` — passed; covers separators, formats, widths, decimal values, errors, and output failures.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/seq$' -v` — passed; covers basic sequences, `-s`, and `-f`.
+  - `go run . kabibi -r -c "seq -s , 1 3"` — printed `1,2,3`.
+  - `go run . kabibi -r -c "seq -f %02g 1 3"` — printed zero-padded `01`, `02`, `03`.
+  - `go run . kabibi -r -c "seq -w -10 2 -2"` — printed `-10`, `-08`, `-06`, `-04`, `-02`.
+  - `go run . kabibi -r -c "seq 3 -1 -1"`, `go run . kabibi -r -c "seq 3 -1 1"`, and `go run . kabibi -r -c "seq 1 -1 -3"` — each failed with the usage message and exit 1. **Finding:** valid negative increments fail when a negative operand follows an earlier positional argument; the command-line flag handling inserts `--` too late. This item remains unchecked.
+- [x] **`comm`** (`cmds/core/comm`): Local `-1`, `-2`, `-3` flags; support `-` for `ioEnv.Stdin`.
+  - `go -C u-root test ./cmds/core/comm -v` — passed; covers column suppression, stdin, long lines, file errors, and output errors.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/comm$' -v` — passed; covers `-12`, `-23`, and stdin with `-`.
+  - `go run . kabibi -r -c "printf 'a\nb\nd\n' > comm-left.txt; printf 'b\nc\nd\n' > comm-right.txt; comm -12 comm-left.txt comm-right.txt; comm -23 comm-left.txt comm-right.txt; printf 'a\nb\n' | comm - comm-right.txt; rm comm-left.txt comm-right.txt"` — printed shared lines `b`, `d`, first-only line `a`, then compared stdin with the second file; removed both probe files.
+- [x] **`cmp`** (`cmds/core/cmp`): Local `-s`, `-l`, `-n` flags; return `0` (equal), `1` (differ), `2` (error).
+  - `go -C u-root test ./cmds/core/cmp -v` — passed; covers equality, differing bytes/lengths, offsets, `-s`, `-l`, `-L`, `-n`, and file errors.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/cmp$' -v` — passed; covers equal/different files, silent status, and `-n` boundaries.
+  - `go run . kabibi -r -c "printf 'same' > cmp-left.txt; printf 'sameX' > cmp-right.txt; if cmp -s cmp-left.txt cmp-left.txt; then echo equal_exit_0; else echo equal_failed; fi; if cmp -n 4 cmp-left.txt cmp-right.txt; then echo prefix_equal_exit_0; else echo prefix_failed; fi; if cmp -s cmp-left.txt cmp-right.txt; then echo differ_failed; else echo differ_exit_1; fi; cmp cmp-left.txt cmp-right.txt; rm cmp-left.txt cmp-right.txt"` — confirmed equal status 0, equal four-byte prefix status 0, difference status 1, diagnostic at byte 5, then removed both probe files.
+- [x] **`strings`** (`cmds/core/strings`): `package stringscmd`; local `-n`, `-t` flags; check `ctx.Done()` while scanning.
+  - `go -C u-root test ./cmds/core/strings -v` — passed; covers minimum lengths, non-printable delimiters, long runs, decimal/octal/hex offsets, and output errors.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/strings$' -v` — passed; covers binary input, `-n`, and decimal offsets.
+  - `go run . kabibi -r -c "printf '\0\0hello\0\0bye\0world!\0' | strings"` — found the default-length runs `hello` and `world!`.
+  - `go run . kabibi -r -c "printf '\0\0hello\0\0bye\0world!\0' | strings -n 6"` — emitted only `world!`.
+  - `go run . kabibi -r -c "printf '\0\0hello\0\0bye\0world!\0' | strings -t d"` — reported decimal start offsets `2` for `hello` and `13` for `world!`.
 - [ ] **`hexdump`** (`cmds/core/hexdump`): Local `-C`, `-n`, `-s`, `-v` flags; stream hex output to `ioEnv.Stdout`.
-- [ ] **`ts`** (`cmds/core/ts`): Prepend timestamps to each line from `ioEnv.Stdin` to `ioEnv.Stdout`.
-- [ ] **`tsort`** (`cmds/core/tsort`): Topological sort from file or `ioEnv.Stdin` to `ioEnv.Stdout`.
-- [ ] **`base64`** (`cmds/core/base64`): Local `-d` flag; encode/decode between `ioEnv.Stdin`/files and `ioEnv.Stdout`.
-- [ ] **`yes`** (`cmds/core/yes`): Loop writing to `ioEnv.Stdout`; terminate cleanly on `ctx.Done()` or broken pipe write error.
-- [ ] **`more`** (`cmds/core/more`): Pager reading files and `ioEnv.Stdin` to `ioEnv.Stdout`.
+  - `go -C u-root test ./cmds/core/hexdump -v` — passed; covers stdin/files, offsets, limits, missing files, and write errors.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/hexdump$' -v` — passed; covers default output, `-C`, and combined `-s`/`-n`/`-v`.
+  - `go run . kabibi -r -c "printf 'ABC' | hexdump"` and `go run . kabibi -r -c "printf 'ABC' | hexdump -C"` — both printed identical canonical hex+ASCII output. **Finding:** `-C` is currently a no-op; default output is already canonical.
+  - `go run . kabibi -r -c "printf 'ABCDEF' | hexdump -s 1 -n 2"` — displayed only bytes `42 43` at offset `00000001`.
+  - `go run . kabibi -r -c "printf '0123456789ABCDEF0123456789ABCDEF' | hexdump"` and the same command with `-v` — both displayed both repeated rows. **Finding:** `-v` does not change output (and repeated-line suppression is not implemented); this item remains unchecked pending compatibility decision.
+- [x] **`ts`** (`cmds/core/ts`): Prepend timestamps to each line from `ioEnv.Stdin` to `ioEnv.Stdout`.
+  - `go -C u-root test ./cmds/core/ts -v` — passed; covers timestamped lines, invalid operands, and output errors.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/ts$' -v` — passed; shell integration confirmed input lines are timestamped.
+  - `go run . kabibi -r -c "printf 'hello\nworld\n' | ts"` — prefixed both lines with relative timestamps.
+  - `go run . kabibi -r -c "printf 'hello\nworld\n' | ts -R"` — prefixed both lines with signed relative timestamps.
+- [x] **`tsort`** (`cmds/core/tsort`): Topological sort from file or `ioEnv.Stdin` to `ioEnv.Stdout`.
+  - `go -C u-root test ./cmds/core/tsort -v` — passed; covers DAG orderings, cycles, malformed input, file/stdin input, long tokens, and output errors.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/tsort$' -v` — passed; shell integration checked a DAG and a cycle.
+  - `go run . kabibi -r -c "printf 'a b b c c d' | tsort"` — emitted a valid order `a`, `b`, `c`, `d`.
+  - `go run . kabibi -r -c "printf 'a b b a' | tsort"` — reported the cycle and returned exit 1.
+  - `go run . kabibi -r -c "printf 'a b c' | tsort"` — reported odd token count and returned exit 1.
+- [x] **`base64`** (`cmds/core/base64`): Local `-d` flag; encode/decode between `ioEnv.Stdin`/files and `ioEnv.Stdout`.
+  - `go -C u-root test ./cmds/core/base64 -v` — passed; covers stdin/files, encode/decode, invalid data, write errors, usage, and cancellation.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/base64$' -v` — passed; shell integration verified encoding and decoding.
+  - `go run . kabibi -r -c "printf 'testing 123' | base64"` — encoded to `dGVzdGluZyAxMjM=`.
+  - `go run . kabibi -r -c "printf 'dGVzdGluZyAxMjM=' | base64 -d"` — decoded to `testing 123`.
+  - `go run . kabibi -r -c "printf 'dGVzdGluZyAxMjM=' > base64-probe.txt; base64 -d base64-probe.txt; rm base64-probe.txt"` — decoded file input and removed the probe.
+  - `go run . kabibi -r -c "printf '!!!!' | base64 -d"` — rejected invalid input and exited 1.
+  - `go run . kabibi -r -c "printf '%%%!' | base64 -d"` — not a valid base64 test: `printf` interpreted `%!` as a format error; the follow-up `!!!!` probe above correctly reached the decoder.
+- [x] **`yes`** (`cmds/core/yes`): Loop writing to `ioEnv.Stdout`; terminate cleanly on `ctx.Done()` or broken pipe write error.
+  - `go -C u-root test ./cmds/core/yes -v` — passed; covers argument output, broken-pipe handling, cancellation, and help.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/yes$' -v` — passed; bounded `yes foo` with `head -n 3`.
+  - `go run . kabibi -r -c "yes foo | head -n 3"` — printed exactly three `foo` lines and terminated.
+  - `go run . kabibi -r -c "yes | head -n 2"` — printed exactly two default `y` lines and terminated.
+- [x] **`more`** (`cmds/core/more`): Pager reading files and `ioEnv.Stdin` to `ioEnv.Stdout`.
+  - `go -C u-root test ./cmds/core/more -v` — passed; covers files, page boundaries, stdin passthrough, path resolution, invalid page sizes, and help.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/more$' -v` — passed; shell integration verified piped input.
+  - `go run . kabibi -r -c "printf 'row1\nrow2\nrow3\n' | more"` — passed all three stdin lines through.
+  - `go run . kabibi -r -c "printf 'file1\nfile2\n' > more-probe.txt; more more-probe.txt; rm more-probe.txt"` — read the relative file and printed both lines, then removed the probe.
+  - `go run . kabibi -r -c "more -n 0"` — rejected a zero page size and exited 1.
 - [ ] **`man`** (`cmds/core/man`): Render embedded manual data to `ioEnv.Stdout`.
+  - `go -C u-root test ./cmds/core/man -v` — passed, but the existing-entry test replaces the embedded data with a test fixture.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/man$' -v` — passed; covers help and unknown-entry reporting.
+  - `go run . kabibi -r -c "man -h"` — printed help.
+  - `go run . kabibi -r -c "man echo"` — reported no manual entry and exited 1. **Finding:** checked-in `u-root/cmds/core/man/data/data.go` contains only `{}`, so no real command manual can currently render; this item remains unchecked.
+  - `go run . kabibi -r -c "man definitely_unknown_cmd_123"` — reported the unknown entry and exited 1.
 
 #### 1C. File & Directory Operations
-- [ ] **`ls`** (`cmds/core/ls`): Local `-a`, `-l`, `-h`, `-d`, `-R`, `-F`, `-Q`, `-S` flags; resolve target paths via `ioEnv.ResolvePath`.
+- [x] **`ls`** (`cmds/core/ls`): Local `-a`, `-l`, `-h`, `-d`, `-R`, `-F`, `-Q`, `-S` flags; resolve target paths via `ioEnv.ResolvePath`.
+  - `go -C u-root test ./cmds/core/ls -v` — passed; covers directory listing, recursion, `-d`, classification, quoting, permissions, and missing paths.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1C_FileAndDirOps$/ls$' -v` — passed; covers default visibility, `-a`, and `-d`.
+  - `go run . kabibi -r -c "mkdir -p ls-probe/subdir; printf 'x' > ls-probe/file.txt; printf 'longer' > ls-probe/.hidden.txt; printf 'y' > ls-probe/subdir/inner; ls ls-probe; ls -a ls-probe; ls -lhS ls-probe; ls -d ls-probe; ls -F ls-probe; ls -Q ls-probe; ls -R ls-probe; rm -r ls-probe"` — verified visibility, hidden files, long/human-readable size output, directory-only output, suffixes, quoting, recursion, and cleanup.
 - [ ] **`cp`** (`cmds/core/cp`): Local `-r`/`-R`, `-a`, `-f`, `-i`, `-v`, `-P` flags; check `ctx.Done()` across file copies.
+  - `go -C u-root test ./cmds/core/cp -v` — passed; covers simple and recursive copies, overwrite prompts, verbose mode, symlinks, paths, and missing sources.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1C_FileAndDirOps$/cp_mv_rm$' -v` — passed; shell integration verified file copy and readback.
+  - `go run . kabibi -r -c "mkdir -p cp-probe/tree/sub; printf 'source\n' > cp-probe/src.txt; printf 'old\n' > cp-probe/dest.txt; printf 'leaf\n' > cp-probe/tree/sub/leaf.txt; printf 'n\n' | cp -i cp-probe/src.txt cp-probe/dest.txt; cat cp-probe/dest.txt; cp -f cp-probe/src.txt cp-probe/dest.txt; cat cp-probe/dest.txt; cp -v cp-probe/src.txt cp-probe/verbose.txt; cp -R cp-probe/tree cp-probe/tree-copy; cat cp-probe/tree-copy/sub/leaf.txt; rm -r cp-probe"` — verified declined overwrite, forced overwrite, verbose output, recursive copy, and cleanup.
+  - `go run . kabibi -r -c "cp -a README.md cp-archive-probe.txt"` — rejected `-a` as an undefined flag. **Finding:** `-a` is listed as required here but is not implemented; this item remains unchecked.
 - [ ] **`mv`** (`cmds/core/mv`): Local `-f`, `-i`, `-n`, `-u` flags; resolve source and destination paths via `ioEnv.ResolvePath`.
+  - `go -C u-root test ./cmds/core/mv -v` — passed; covers renaming, moves into directories, `-u`/`-n` helpers, path resolution, and errors.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1C_FileAndDirOps$/cp_mv_rm$' -v` — passed; shell integration verified rename and readback.
+  - `go run . kabibi -r -c "mkdir mv-probe; printf 'source\n' > mv-probe/src.txt; printf 'destination\n' > mv-probe/dest.txt; mv -n mv-probe/src.txt mv-probe/dest.txt; cat mv-probe/dest.txt; cat mv-probe/src.txt; mv mv-probe/src.txt mv-probe/renamed.txt; cat mv-probe/renamed.txt; rm -r mv-probe"` — `-n` preserved both the existing destination and source; normal rename then succeeded, and the fixture was removed.
+  - `go run . kabibi -r -c "mv -f README.md mv-force-probe.txt"` and `go run . kabibi -r -c "mv -i README.md mv-interactive-probe.txt"` — both rejected their flags. **Finding:** checklist-listed `-f` and `-i` are not implemented; this item remains unchecked.
 - [ ] **`rm`** (`cmds/core/rm`): Local `-r`/`-R`, `-f`, `-i`, `-v`, `-d` flags; resolve paths via `ioEnv.ResolvePath`.
+  - `go -C u-root test ./cmds/core/rm -v` — passed; covers files, recursive removal, force, prompts, verbose output, and errors.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1C_FileAndDirOps$/cp_mv_rm$' -v` — passed; shell integration covered ordinary removal and `-f`.
+  - `go run . kabibi -r -c "mkdir -p rm-probe/tree/sub; printf 'remove me\n' > rm-probe/file.txt; printf 'child\n' > rm-probe/tree/sub/child.txt; rm -v rm-probe/file.txt; printf 'n\n' | rm -i rm-probe/tree/sub/child.txt; cat rm-probe/tree/sub/child.txt; printf 'y\n' | rm -i rm-probe/tree/sub/child.txt; rm -R rm-probe"` — verified verbose output, declined and confirmed prompts, recursive directory deletion, and cleanup.
+  - `go run . kabibi -r -c "rm -f nonexistent-rm-probe.txt"` — ignored the missing path and succeeded.
+  - `go run . kabibi -r -c "rm -d rm-probe"` — rejected `-d` as undefined. **Finding:** checklist-listed `-d` is not implemented; this item remains unchecked.
 - [ ] **`mkdir`** (`cmds/core/mkdir`): Local `-p`, `-m`, `-v` flags; create directories relative to `ioEnv.Dir`.
+  - `go -C u-root test ./cmds/core/mkdir -v` — passed; covers creation, existing paths, `-p`, `-v`, mode validation, and octal permission bits.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1C_FileAndDirOps$/mkdir_mktemp$' -v` — passed; shell integration covered ordinary and nested directory creation.
+  - `go run . kabibi -r -c "mkdir -p -m 700 -v mkdir-probe/a/b; ls -ld mkdir-probe/a/b; rm -r mkdir-probe"` — created nested directories and printed the verbose path; `ls` showed `drwxrwxrwx` despite requested mode `700`. **Finding:** mode bits were not observable on Rusticated+Windows (host reports all permissions); this remains unchecked pending clarification of expected Windows semantics.
+  - `go run . kabibi -r -c "mkdir -m 888 mkdir-invalid-probe"` — rejected invalid octal mode and exited 1.
 - [ ] **`mktemp`** (`cmds/core/mktemp`): Local `-d`, `-u`, `-q`, `-p`, `-t` flags; fallback temp dir via `ioEnv.Getenv("TMPDIR")`.
+  - `go -C u-root test ./cmds/core/mktemp -v` — passed; covers default file/directory creation, prefixes/suffixes, dry-run, `-p`, and quiet errors.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1C_FileAndDirOps$/mkdir_mktemp$' -v` — passed; shell integration checked default file and directory creation.
+  - `go run . kabibi -r -c 'mkdir -p mktemp-probe; tmp=$(mktemp -p mktemp-probe sample); printf content > "$tmp"; echo file; cat "$tmp"; echo directory; dir=$(mktemp -d -p mktemp-probe dir); ls -d "$dir"; rm "$tmp"; rm -r "$dir"; rm -r mktemp-probe'` — created and read a file, created a directory under the chosen prefix, and cleaned up.
+  - `go run . kabibi -r -c "mktemp -t sample"` — rejected `-t` as undefined. **Finding:** the checklist-listed `-t` flag is not implemented.
+  - `go run . kabibi -r -c "mktemp -u"` — exited 0 but emitted only a global log warning and no temporary name. **Finding:** dry-run neither returns the promised name nor respects the injected stderr; this item remains unchecked.
 - [ ] **`touch`** (`cmds/core/touch`): Local `-a`, `-m`, `-c`, `-d`, `-r`, `-t` flags; resolve paths via `ioEnv.ResolvePath`.
+  - `go -C u-root test ./cmds/core/touch -v` — passed; covers parameter parsing and RFC3339 date parsing.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1C_FileAndDirOps$/touch_truncate$' -v` — passed; integration test confirms creation of a missing file before exercising truncate.
+  - `go run . kabibi -r -c "mkdir touch-probe; touch -d 2001-01-01T00:00:00Z touch-probe/file.txt; ls -l touch-probe/file.txt; touch -c touch-probe/missing.txt; ls touch-probe; rm -r touch-probe"` — the file was created and `-c` did not create the missing target, but setting timestamps failed with `chtimes ... Not implemented on wasip1`; cleanup succeeded. **Finding:** Rusticated's WASI environment cannot currently implement the `-d` timestamp operation.
+  - `go run . kabibi -r -c "touch -r README.md touch-reference-probe.txt"` — rejected `-r` as undefined. **Finding:** the checklist-listed reference-time flag is not implemented.
+  - `go run . kabibi -r -c "touch -t 010100002000.00 touch-time-probe.txt"` — rejected `-t` as undefined. **Finding:** the checklist-listed timestamp-format flag is not implemented.
 - [ ] **`truncate`** (`cmds/core/truncate`): Local `-s`, `-c` flags; resize target files relative to `ioEnv.Dir`.
+  - `go -C u-root test ./cmds/core/truncate -v` — passed; native tests cover validation, positive/negative sizes, and `-o`.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1C_FileAndDirOps$/touch_truncate$' -v` — passed; the test observes successful 128-byte extension and 16-byte shrink on the host-backed shell.
+  - `go run . kabibi -r -c "mkdir truncate-verify; printf abc > truncate-verify/source; wc -c truncate-verify/source; truncate -s 8 truncate-verify/source; wc -c truncate-verify/source; truncate -s 8 truncate-verify/new; wc -c truncate-verify/new; truncate -c -s 9 truncate-verify/missing; ls truncate-verify; rm -r truncate-verify"` — printed source size 3 both before and after `-s 8`; newly created file remained size 0; `-c` did not create the missing file; command returned success and cleanup worked. **Finding:** Rusticated's WASI `os.Truncate` path is ineffective, and its error is discarded, so resizing silently reports success without changing file sizes.
+  - `go run . kabibi -r -c "truncate -s 1k truncate-size-suffix.txt"` — rejected `1k` (`unit "k" is not valid`). **Finding:** GNU-style size suffixes are not accepted by the current parser.
 - [ ] **`ln`** (`cmds/core/ln`): Local `-s`, `-f`, `-v`, `-n`, `-r` flags; works on Linux, macOS, Windows (symlinks/hardlinks), and Rusticated.
+  - `go -C u-root test ./cmds/core/ln -v` — passed; native unit tests cover symbolic links, multiple targets, `-t`, relative links, and overwrite prompting.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1C_FileAndDirOps$/ln_readlink_realpath$' -v` — passed; host-backed shell integration verified symlink creation, `readlink`, and `realpath`.
+  - `go run . kabibi -r -c "mkdir ln-probe; printf original > ln-probe/target; ln -s target ln-probe/symlink; readlink ln-probe/symlink; cat ln-probe/symlink; ln -v -s target ln-probe/verbose-link; ln -s -r ln-probe/target ln-probe/relative-link; readlink ln-probe/relative-link; ln ln-probe/target ln-probe/hardlink; cat ln-probe/hardlink; ln -f ln-probe/target ln-probe/hardlink; ls ln-probe; rm -r ln-probe"` — Rusticated reported `Not implemented on wasip1` for all symlink and hard-link operations; target creation/listing and cleanup worked. **Finding:** links are unavailable in this runtime, so the Rusticated platform claim is unmet.
+  - `go run . kabibi -r -c "ln -n -s target link"` — rejected `-n` as undefined. **Finding:** the checklist-listed `-n` flag is not implemented.
 - [ ] **`chmod`** (`cmds/core/chmod`): Local `-R`, `-v`, `-c` flags; support octal and symbolic modes.
-- [ ] **`find`** (`cmds/core/find`): Local `-name`, `-type`, `-mode`, `-l`, `-d` flags; respect `ctx.Done()` during walk.
+  - `go -C u-root test ./cmds/core/chmod -v` — passed; native tests cover octal and symbolic modes, multiple paths, and reference modes.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1C_FileAndDirOps$/chmod_find_du_pwd$' -v` — passed; host-backed integration confirms `chmod 0755` returns successfully.
+  - `go run . kabibi -r -c "mkdir -p chmod-probe/sub; printf x > chmod-probe/file; chmod 0600 chmod-probe/file; ls -l chmod-probe/file; chmod u+x chmod-probe/file; ls -l chmod-probe/file; chmod -R 0700 chmod-probe; ls -l chmod-probe chmod-probe/sub; rm -r chmod-probe"` — each chmod returned success, but `ls -l` continued to show `-rw-rw-rw-` and `drwxrwxrwx`, with no changes. **Finding:** mode changes are no-ops in Rusticated/WASI despite success status.
+  - `go run . kabibi -r -c "chmod -v 0644 README.md"` — parsed `-v` as the mode and rejected it. **Finding:** the checklist-listed verbose flag is not implemented.
+  - `go run . kabibi -r -c "chmod -c 0644 README.md"` — parsed `-c` as the mode and rejected it. **Finding:** the checklist-listed change-reporting flag is not implemented.
+- [x] **`find`** (`cmds/core/find`): Local `-name`, `-type`, `-mode`, `-l`, `-d` flags; respect `ctx.Done()` during walk.
+  - `go -C u-root test ./cmds/core/find -v` — passed; native package tests cover matching and long output.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1C_FileAndDirOps$/chmod_find_du_pwd$' -v` — passed; shell integration confirms `find -name`.
+  - `go run . kabibi -r -c "mkdir -p find-probe/sub; printf x > find-probe/file.txt; echo name; find -name file.txt find-probe; echo type; find -type d find-probe; echo mode; find -mode 0666 find-probe; echo long; find -l find-probe; echo debug; find -d -name file.txt find-probe; rm -r find-probe"` — all filters returned expected matches; `-l` displayed metadata and `-d` emitted debug logs; cleanup succeeded. The implementation checks `ctx.Done()` while consuming traversal results.
 - [ ] **`du`** (`cmds/core/du`): Local `-a`, `-c`, `-d`, `-h`, `-s`, `-L`, `-P` flags; resolve paths relative to `ioEnv.Dir`.
+  - `go -C u-root test ./cmds/core/du -v` — passed; native tests cover block accounting, `-a`, `-k`, `-s`, `-H`, `-L`, and relative symlinks.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1C_FileAndDirOps$/chmod_find_du_pwd$' -v` — passed; host-backed integration confirms `du -s`.
+  - `go run . kabibi -r -c "mkdir -p du-probe/sub; printf x > du-probe/file; printf yy > du-probe/sub/child; echo all; du -a du-probe; echo summary; du -s du-probe; echo kilobytes; du -k du-probe; echo human; du -h du-probe; echo follow-command; du -H du-probe; rm -r du-probe"` — `-a`, `-s`, `-k`, `-h`, and `-H` ran and reported 512-byte block totals as expected; cleanup succeeded. (WASI symlink support is separately unavailable, so following links could not be exercised.)
+  - `go run . kabibi -r -c "du -c README.md"` — rejected `-c` as undefined.
+  - `go run . kabibi -r -c "du -d 1 README.md"` — rejected `-d` as undefined.
+  - `go run . kabibi -r -c "du -P README.md"` — rejected `-P` as undefined. **Finding:** all three flags listed in the checklist are missing; this entry remains unchecked.
 - [ ] **`readlink`** (`cmds/core/readlink`): Local `-f`, `-n`, `-v` flags; evaluate symlinks relative to `ioEnv.Dir`.
+  - `go -C u-root test ./cmds/core/readlink -v` — passed; native package tests cover symlink read output, newline behavior, and verbose errors.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1C_FileAndDirOps$/ln_readlink_realpath$' -v` — passed; host-backed shell integration verifies reading a symlink target.
+  - `go run . kabibi -r -c "mkdir readlink-probe; ln -s target readlink-probe/link; readlink -n readlink-probe/link; readlink -f readlink-probe/link; readlink -v readlink-probe/link; rm -r readlink-probe"` — WASI rejected symlink creation with `Not implemented on wasip1`; `-n`/`-f` could not produce a target and `-v` reported the read error. Cleanup succeeded. **Finding:** successful symlink reads and these flags cannot currently be verified in Rusticated because WASI link operations are unavailable.
 - [ ] **`realpath`** (`cmds/core/realpath`): Local `-s`, `-q` flags; resolve canonical path relative to `ioEnv.Dir`.
-- [ ] **`basename`** (`cmds/core/basename`): Strip directory and suffix; output to `ioEnv.Stdout`.
+  - `go -C u-root test ./cmds/core/realpath -v` — passed; native test covers path canonicalization and symlinks.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1C_FileAndDirOps$/ln_readlink_realpath$' -v` — passed; host-backed integration verifies resolving a symlink path.
+  - `go run . kabibi -r -c "realpath README.md; realpath -q missing-realpath-probe"` — resolved `README.md` to its absolute path; quiet mode suppressed the missing-path diagnostic and returned failure.
+  - `go run . kabibi -r -c "realpath -s README.md"` — rejected `-s` as undefined. **Finding:** the checklist-listed `-s` flag is missing; this item remains unchecked.
+- [x] **`basename`** (`cmds/core/basename`): Strip directory and suffix; output to `ioEnv.Stdout`.
+  - `go -C u-root test ./cmds/core/basename ./cmds/core/dirname -v` — passed; native tests cover suffix stripping and directory extraction.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1C_FileAndDirOps$/basename_dirname$' -v` — passed; host-backed shell integration covers suffix and multiple-name handling.
+  - `go run . kabibi -r -c "basename /path/to/my_file.tar.gz .tar.gz; basename -a /a/b.txt /c/d.txt; dirname /var/log/syslog; dirname /single; dirname relative/file"` — basename produced `my_file`, `b.txt`, and `d.txt` as expected.
 - [ ] **`dirname`** (`cmds/core/dirname`): Output parent directory component to `ioEnv.Stdout`.
+  - `go -C u-root test ./cmds/core/basename ./cmds/core/dirname -v` — passed; native tests cover directory extraction.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1C_FileAndDirOps$/basename_dirname$' -v` — passed; host-backed shell integration passes for `/var/log/syslog`.
+  - `go run . kabibi -r -c "basename /path/to/my_file.tar.gz .tar.gz; basename -a /a/b.txt /c/d.txt; dirname /var/log/syslog; dirname /single; dirname relative/file"` — returned `\var\log` for `/var/log/syslog` and `\` for `/single`, rather than POSIX `/var/log` and `/`. **Finding:** Rusticated dirname exposes Windows separators for Unix-style input; item remains unchecked.
 - [ ] **`pwd`** (`cmds/core/pwd`): Local `-L`, `-P` flags; output `ioEnv.Dir` (or resolved physical path) to `ioEnv.Stdout`.
+  - `go -C u-root test ./cmds/core/pwd -v` — passed; native tests cover physical and logical paths.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1C_FileAndDirOps$/chmod_find_du_pwd$' -v` — passed; shell integration confirms `pwd` produces a non-empty directory.
+  - The previous forced-dispatch probe is obsolete; ordinary `pwd` is handled by mvdan/sh's builtin, so the shell probe does not verify the registered u-root `pwd` implementation.
+  - Ordinary `pwd` is handled by mvdan/sh's builtin, so the shell probe does not verify the registered u-root `pwd` implementation. This duplicate still needs a case-by-case implementation decision.
 
 #### 1D. Checksums, Archival & Compression
 - [ ] **`shasum`** (`cmds/core/shasum`): Local `-a` (1, 256, 512), `-b`, `-c`, `-t` flags; check `ctx.Done()` while hashing.
+  - `go -C u-root test ./cmds/core/shasum ./cmds/core/md5sum -v` — passed; native tests cover SHA-1/224/256/384/512 variants, stdin, files, and MD5 check mode.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1D_ArchivalAndChecksums$/(shasum|md5sum)$' -v` — passed; shell integration verifies SHA-256 file hashing, SHA-1 stdin hashing, and MD5 verification.
+  - `go run . kabibi -r -c "printf abc > hash-probe; shasum -a 256 hash-probe; printf abc | shasum -a 1; rm hash-probe"` — produced the known SHA-256 and SHA-1 digests; cleanup succeeded.
+  - `go run . kabibi -r -c "shasum -b README.md; shasum -c README.md; shasum -t README.md"` — rejected `-b`, `-c`, and `-t` as undefined. **Finding:** these checklist-listed flags are missing. The implementation also checks cancellation only between files; `shaGenerator` copies the stream without observing `ctx.Done()` during hashing.
 - [ ] **`md5sum`** (`cmds/core/md5sum`): Local `-c`, `-b`, `-t`, `-q`, `-s` flags; check `ctx.Done()` while hashing.
+  - `go -C u-root test ./cmds/core/shasum ./cmds/core/md5sum -v` — passed; native tests cover MD5 stdin, files, and checksum verification.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1D_ArchivalAndChecksums$/(shasum|md5sum)$' -v` — passed; shell integration verified a known MD5 digest and `-c`.
+  - `go run . kabibi -r -c "printf abc > hash-probe; md5sum hash-probe; printf '900150983cd24fb0d6963f7d28e17f72  hash-probe\\n' > hash-check.md5; md5sum -c hash-check.md5; rm hash-probe; rm hash-check.md5"` — produced the known MD5 digest, reported `hash-probe: OK`, and cleaned up.
+  - `go run . kabibi -r -c "md5sum -b README.md; md5sum -t README.md; md5sum -q README.md; md5sum -s README.md"` — rejected all four flags as undefined. **Finding:** the checklist-listed `-b`, `-t`, `-q`, and `-s` flags are missing; this entry remains unchecked.
 - [ ] **`gzip`** (`cmds/core/gzip`): Also registered as `gzcat`; local `-d`, `-c`, `-f`, `-k`, `-l`, `-q`, `-r`, `-v`, `-1`..`-9` flags.
+  - `go -C u-root test ./cmds/core/gzip -v` — passed; native smoke test covers level selection and compression/decompression.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1D_ArchivalAndChecksums$/gzip_and_gzcat$' -v` — passed; shell integration verifies `-k`, `gzcat`, and `-d`.
+  - `go run . kabibi -r -c "mkdir gzip-probe; printf 'payload\\n' > gzip-probe/data; gzip -k gzip-probe/data; ls gzip-probe; gzcat gzip-probe/data.gz; gzip -t gzip-probe/data.gz; gzip -d gzip-probe/data.gz; cat gzip-probe/data; rm -r gzip-probe"` — kept the original while creating `.gz`, `gzcat` returned payload, integrity test passed, decompression restored content, and cleanup succeeded.
+  - `go run . kabibi -r -c "gzip -l README.md"` — rejected `-l` as undefined.
+  - `go run . kabibi -r -c "gzip -r README.md"` — rejected `-r` as undefined. **Finding:** the listed list and recursive flags are not implemented; this item remains unchecked.
 - [ ] **`tar`** (`cmds/core/tar`): Local `-c`, `-x`, `-t`, `-f`, `-v`, `-z`, `-C` flags; resolve paths via `ioEnv.ResolvePath`.
+  - `go -C u-root test ./cmds/core/tar -v` — passed; native tests cover create, list, extract, and argument validation.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1D_ArchivalAndChecksums$/tar$' -v` — passed; host-backed shell integration creates, lists, and extracts an archive.
+  - `go run . kabibi -r -c "mkdir -p tar-probe/out; printf 'tar payload\\n' > tar-probe/file; tar -cvf tar-probe/archive.tar tar-probe/file; tar -tvf tar-probe/archive.tar; tar -xvf tar-probe/archive.tar tar-probe/out; ls -R tar-probe/out; cat tar-probe/out/tar-probe/file; rm -r tar-probe"` — create and list reported `tar-probe\file`; extract returned success and printed the entry, but `tar-probe/out` remained empty and the subsequent `cat` failed. **Finding:** Rusticated extraction silently omits the archived file; item remains unchecked.
+  - `go run . kabibi -r -c "tar -czf tar-probe.tar README.md"` — rejected `-z` as undefined.
+  - `go run . kabibi -r -c "tar -cf tar-probe.tar -C . README.md"` — rejected `-C` as undefined. **Finding:** both checklist-listed flags are missing.
 - [ ] **`cpio`** (`cmds/core/cpio`): Archive in/out/pass-through streaming over `ioEnv.Stdin`/`ioEnv.Stdout`.
-- [ ] **`gpgv`** (`cmds/core/gpgv`): OpenPGP signature verification writing results to `ioEnv.Stdout`/`ioEnv.Stderr`.
+  - `go -C u-root test ./cmds/core/cpio -v` — passed; native tests cover archive creation, listing, extraction, and directory hard-link records.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1D_ArchivalAndChecksums$/cpio$' -v` — passed; host-backed shell integration creates an archive and lists its contents.
+  - `go run . kabibi -r -c "mkdir cpio-probe; cd cpio-probe; printf 'cpio payload\\n' > file; echo file | cpio o > archive.cpio; cpio t < archive.cpio; rm file; cpio i < archive.cpio; cat file; cd ..; rm -r cpio-probe"` — Rusticated could not read source data for archive creation (`Not implemented on wasip1`); listing/extraction then failed on `ReadAt`, and deleting the source also reported I/O error. Retried with `go run . kabibi -r -c "rm -r cpio-probe"`; cleanup succeeded. **Finding:** cpio's file-backed operations fail in this Rusticated/WASI environment.
+  - `go run . kabibi -r -c "cpio p output"` — rejected operation with usage. **Finding:** the listed pass-through operation is not implemented; this item remains unchecked.
+- [x] **`gpgv`** (`cmds/core/gpgv`): OpenPGP signature verification writing results to `ioEnv.Stdout`/`ioEnv.Stderr`.
+  - `go -C u-root test ./cmds/core/gpgv -v` — passed; covers valid signatures, invalid key/signature files, missing inputs, and usage errors.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1D_ArchivalAndChecksums$/gpgv$' -v` — passed; confirms nonzero status when arguments are missing.
+  - `go run . kabibi -r -c "gpgv u-root/cmds/core/gpgv/testdata/key.pub u-root/cmds/core/gpgv/testdata/datafile.sig u-root/cmds/core/gpgv/testdata/datafile.txt"` — verified the checked-in signature and printed `OK`.
 
 #### 1E. Shell Builtin & Control Utilities
 - [ ] **`true`** (`cmds/core/true`): `package truecmd`; return `0`.
@@ -238,6 +445,14 @@ A command checkbox `[x]` may **only** be ticked when all 5 criteria are met:
 - [ ] **`date`** (`cmds/core/date`): Local `-u`, `-d`, `-r`, `-I` flags; formatting works everywhere; clock setting (`settimeofday`) supported on privileged Linux/macOS and fails gracefully elsewhere.
 - [ ] **`hostname`** (`cmds/core/hostname`): Read hostname via `os.Hostname()` everywhere; setting hostname (`Sethostname`) supported on privileged Unix and fails gracefully elsewhere.
 - [ ] **`xargs`** (`cmds/core/xargs`): Local `-n`, `-I`, `-0`, `-t`, `-p`, `-r` flags; dispatch sub-commands through runner callback.
+  - `go -C u-root test ./cmds/core/xargs -v` — passed; covers default `echo`, argument batching, `-0`, command-not-found, and interactive behavior.
+  - `go run . kabibi -r -c "printf '%s\n' 'one two' | xargs | hexdump"` and `bash -c "printf '%s\n' 'one two' | xargs | od -An -tx1"` — both emitted `one two\n`.
+  - `go run . kabibi -r -c "printf '%s\0' 'a\nb' | xargs -0 | hexdump"` — bytes `61 5c 6e 62 0a`; Kabibi's runner passes the child command to mvdan/sh's echo builtin without altering its argument.
+  - `go run . kabibi -r -c "printf '%s\0' 'a\nb' | xargs -0 echo | hexdump"` — also emitted `61 5c 6e 62 0a`; explicit child `echo` uses the same path.
+  - `bash -c "printf '%s\0' 'a\nb' | xargs -0 | od -An -tx1"` — bytes `61 5c 6e 62 0a`; host `xargs` preserves the argument and Bash's external `echo` leaves `\n` literal by default.
+  - `go run . kabibi -r -c "printf '%s\0' 'a\cb' | xargs -0 | hexdump"` — bytes `61 5c 63 62 0a`; mvdan/sh leaves `\c` literal by default.
+  - `bash -c "printf '%s\0' 'a\cb' | xargs -0 | od -An -tx1"` — bytes `61 5c 63 62 0a`; host `xargs` plus external `echo` prints the literal `\c`.
+  - Dispatch comparison: mvdan/sh does not provide an `xargs` builtin; Kabibi's `xargs` is the u-root command. Its child-command callback now routes `echo` invocations to mvdan/sh, and the u-root echo command is not registered in Kabibi.
 - [ ] **`time`** (`cmds/core/time`): `package timecmd`; measure execution duration of target command and report to `ioEnv.Stderr`.
 - [ ] **`timeout`** (`cmds/core/timeout`): Derive `context.WithTimeout(ctx, d)` and execute target command.
 - [ ] **`backoff`** (`cmds/core/backoff`): Retry target command with exponential backoff respecting `ctx.Done()`.
@@ -291,6 +506,9 @@ A command checkbox `[x]` may **only** be ticked when all 5 criteria are met:
   * **Linux / macOS**: `syscall.Kill(pid, sig)`.
   * **Windows**: `OpenProcess` + `TerminateProcess` via `os.FindProcess(pid).Kill()`.
   * **Rusticated**: Route to `process_signal` ABI when targeting child handles, or host kill on Unix.
+  - `go -C kabibi test ./ui/shell -run 'TestKillIsRoutedAsCommand|TestURoot_Band3_SystemDiagnosticsProcessAndNetwork/kill' -v` — passed; confirms mvdan/sh no longer classifies `kill` as a builtin and shell `kill -l` reaches u-root.
+  - `go run . kabibi -r -c "kill -l"` — passed on Rusticated; printed the u-root signal list.
+  - No process was signalled in these probes; actual process signalling remains unverified.
 - [ ] **`sync`** (`cmds/core/sync`): `package synccmd`;
   * **Linux / macOS**: `unix.Sync()` / `unix.Fsync`.
   * **Windows**: `FlushFileBuffers` on specified files (or no-op if no files).

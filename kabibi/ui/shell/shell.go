@@ -472,7 +472,6 @@ func createRunnerWithEnv(ctx context.Context, stdin io.Reader, stdout, stderr io
 		interp.Env(expand.ListEnviron(envPairs...)),
 		interp.StdIO(stdin, stdout, stderr),
 		interp.Params(args...),
-		interp.CallHandler(urootCallHandler),
 	}
 
 	// 1. Middleware for in-process nested shells (bash, sh, kabibi) and script files (.sh / #!).
