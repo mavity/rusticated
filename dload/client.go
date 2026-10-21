@@ -100,6 +100,9 @@ func ensureWorkerExtracted(flavour string) (string, error) {
 	targetPath := filepath.Join(os.TempDir(), fmt.Sprintf("dload-%s-%s%s", flavour, hashStr, ext))
 
 	if info, err := os.Stat(targetPath); err == nil && info.Size() == int64(len(data)) {
+		if err := os.Chmod(targetPath, 0o755); err != nil {
+			return "", fmt.Errorf("set worker executable mode %s: %w", targetPath, err)
+		}
 		return targetPath, nil
 	}
 
@@ -107,11 +110,17 @@ func ensureWorkerExtracted(flavour string) (string, error) {
 	if err := os.WriteFile(tmpPath, data, 0o755); err != nil {
 		return "", fmt.Errorf("extract worker %s: %w", targetPath, err)
 	}
-	_ = os.Chmod(tmpPath, 0o755)
+	if err := os.Chmod(tmpPath, 0o755); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("set worker executable mode %s: %w", tmpPath, err)
+	}
 	if err := os.Rename(tmpPath, targetPath); err != nil {
 		_ = os.Remove(tmpPath)
 		if _, statErr := os.Stat(targetPath); statErr != nil {
 			return "", fmt.Errorf("rename worker %s: %w", targetPath, err)
+		}
+		if chmodErr := os.Chmod(targetPath, 0o755); chmodErr != nil {
+			return "", fmt.Errorf("set worker executable mode %s: %w", targetPath, chmodErr)
 		}
 	}
 	return targetPath, nil
