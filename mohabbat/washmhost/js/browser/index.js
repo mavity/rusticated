@@ -732,8 +732,9 @@ export function makeBrowserImports(hostState, fs, params = {}) {
           buf = next;
         }
         buf.set(chunk, offset);
-        entry.content = buf;
-        entry.size = Math.max(entry.size || 0, needed);
+        const newSize = Math.max(entry.size || 0, needed);
+        entry.size = newSize;
+        entry.content = buf.subarray(0, newSize);
         entry.mtime = Date.now();
         h.offset = needed;
 
@@ -862,24 +863,43 @@ export function makeBrowserImports(hostState, fs, params = {}) {
         return;
       }
 
+      const openFlags = Number(flags);
+      const O_CREAT = 64;
+      const O_EXCL = 128;
+      const O_TRUNC = 512;
+      const O_APPEND = 1024;
+
       fs.getEntry(p).then((entry) => {
         if (!entry) {
           // If write flags allow creation
-          const O_CREAT = 64;
-          if ((Number(flags) & O_CREAT) !== 0) {
+          if ((openFlags & O_CREAT) !== 0) {
             const newEntry = { path: p, type: 'file', content: new Uint8Array(0), size: 0, mode: Number(mode) || 0o644, mtime: Date.now() };
             return fs.putEntry(newEntry).then(() => newEntry);
           }
           hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiENOENT, 0, 0));
           return null;
         }
+        if ((openFlags & O_CREAT) !== 0 && (openFlags & O_EXCL) !== 0) {
+          hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiEEXIST, 0, 0));
+          return null;
+        }
+        if (entry.type === 'file' && (openFlags & O_TRUNC) !== 0) {
+          entry.content = new Uint8Array(0);
+          entry.size = 0;
+          entry.mtime = Date.now();
+          return fs.putEntry(entry).then(() => entry);
+        }
         return entry;
       }).then((entry) => {
         if (!entry) return;
+        const initialOffset = (entry.type === 'file' && (openFlags & O_APPEND) !== 0)
+          ? Number(entry.size ?? entry.content?.length ?? 0)
+          : 0;
         const handle = hostState.allocHandle({
           type: entry.type === 'dir' ? 'dir' : 'file',
           entry,
-          offset: 0
+          offset: initialOffset,
+          flags: openFlags
         });
         hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, 0, 0, Number(handle)));
       }).catch((err) => {
@@ -898,7 +918,8 @@ export function makeBrowserImports(hostState, fs, params = {}) {
         return;
       }
 
-      fs.getEntry(p).then((entry) => {
+      const statPromise = typeof fs.statEntry === 'function' ? fs.statEntry(p) : fs.getEntry(p);
+      statPromise.then((entry) => {
         if (!entry) {
           hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiENOENT, 0, 0));
           return;
@@ -991,6 +1012,14 @@ export function makeBrowserImports(hostState, fs, params = {}) {
       const src = pathStr(srcPtr, srcLen);
       const dst = pathStr(dstPtr, dstLen);
       const opId = hostState.registerOp(Number(ovPtr));
+      if (typeof fs.renameEntry === 'function') {
+        fs.renameEntry(src, dst).then((ok) => {
+          hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, ok === false ? wasiENOENT : 0, 0, 0));
+        }).catch((err) => {
+          hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, mapErrno(err), 0, 0));
+        });
+        return;
+      }
       fs.getEntry(src).then((ent) => {
         if (!ent) {
           hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiENOENT, 0, 0));
@@ -1120,6 +1149,24 @@ export function makeBrowserImports(hostState, fs, params = {}) {
       }
       if (!extensions.dylib || !extensions.dylib.resolveSymbol) return 0;
       return extensions.dylib.resolveSymbol(BigInt(libHandle), sym) || 0;
+    },
+
+    dylib_close: (ovPtr, libHandle) => {
+      const ptr = Number(ovPtr);
+      const opId = hostState.registerOp(ptr);
+      if (BigInt(libHandle) === EVAL_LIB_HANDLE) {
+        hostState.enqueue(() => hostState.completeOp(ptr, opId, 0, 0, 0));
+        return;
+      }
+      if (!extensions.dylib || !extensions.dylib.close) {
+        hostState.enqueue(() => hostState.completeOp(ptr, opId, 0, 0, 0));
+        return;
+      }
+      Promise.resolve().then(() => extensions.dylib.close(BigInt(libHandle))).then(() => {
+        hostState.enqueue(() => hostState.completeOp(ptr, opId, 0, 0, 0));
+      }).catch((err) => {
+        hostState.enqueue(() => hostState.completeOp(ptr, opId, mapErrno(err), 0, 0));
+      });
     },
 
     dylib_call: (ovPtr, symHandle, sigPtr, sigLen, argsPtr, argsCount, parentInvID, resultsPtr, resultsCap) => {
@@ -1313,6 +1360,25 @@ export function makeBrowserImports(hostState, fs, params = {}) {
       } catch (err) {
         hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, mapErrno(err), 0, 0));
       }
+    },
+
+    net_accept: (ovPtr, handle) => {
+      const ptr = Number(ovPtr);
+      const opId = hostState.registerOp(ptr);
+      if (!extensions.net || !extensions.net.accept) {
+        hostState.enqueue(() => hostState.completeOp(ptr, opId, wasiENOTSUP, 0, 0));
+        return;
+      }
+      Promise.resolve().then(() => extensions.net.accept(BigInt(handle))).then((proxy) => {
+        if (!proxy) {
+          hostState.enqueue(() => hostState.completeOp(ptr, opId, wasiECONNABORTED, 0, 0));
+          return;
+        }
+        const clientHandle = hostState.allocHandle({ type: 'proxy', proxy });
+        hostState.enqueue(() => hostState.completeOp(ptr, opId, 0, 0, Number(clientHandle)));
+      }).catch((err) => {
+        hostState.enqueue(() => hostState.completeOp(ptr, opId, mapErrno(err), 0, 0));
+      });
     },
 
     net_lookup: (ovPtr, hostPtr, hostLen, outPtr, outLen) => {
@@ -1546,6 +1612,9 @@ export async function unpackVegetable(buffer) {
 // ── Main Entry Closure ───────────────────────────────────────────────────────
 export default async function washmhost(params = {}) {
   const hostState = new HostState();
+  if (typeof params.cwd === 'string' && params.cwd.trim() !== '') {
+    hostState.cwd = resolvePath('/', params.cwd);
+  }
   const fs = params.fs || new AsyncIndexedDBFS(params.dbName || 'RusticatedFS');
 
   // Whitebox / Unit Test Mode
@@ -1577,6 +1646,8 @@ export default async function washmhost(params = {}) {
     wasmBinary = await wasmBinary.arrayBuffer();
   } else if (wasmBinary instanceof Blob) {
     wasmBinary = await wasmBinary.arrayBuffer();
+  } else if (ArrayBuffer.isView(wasmBinary)) {
+    wasmBinary = wasmBinary.buffer.slice(wasmBinary.byteOffset, wasmBinary.byteOffset + wasmBinary.byteLength);
   }
 
   // Check if wasmBinary is a vegetable (.bat / polyglot) instead of raw WASM
@@ -1602,8 +1673,9 @@ export default async function washmhost(params = {}) {
     throw new Error('WASM module missing "run" or "_start" export');
   }
 
-  // Trigger initial resize signal to notify TUI
-  hostState.triggerSignal(28); // SIGWINCH
+  // Trigger initial resize signals to notify TUI (27 = Go wasip1 SIGWINCH, 28 = Unix/Rust SIGWINCH)
+  hostState.triggerSignal(27);
+  hostState.triggerSignal(28);
 
   // Launch cooperative scheduler in background
   runEventLoop(hostState, runFunc, params.onExit);
@@ -1625,4 +1697,23 @@ export default async function washmhost(params = {}) {
 
 if (typeof window !== 'undefined') {
   window.washmhost = washmhost;
+}
+if (typeof globalThis !== 'undefined') {
+  globalThis.washmhost = washmhost;
+  globalThis.washmhostExports = {
+    washmhost,
+    HostState,
+    AsyncIndexedDBFS,
+    resolvePath,
+    marshalStat,
+    STAT_KIND_UNKNOWN,
+    STAT_KIND_FILE,
+    STAT_KIND_DIR,
+    STAT_KIND_SYMLINK,
+    FLAG_COMPLETED,
+    mapErrno,
+    unpackVegetable,
+    makeBrowserImports,
+    runEventLoop
+  };
 }

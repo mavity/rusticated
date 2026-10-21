@@ -1,0 +1,64 @@
+{
+  "name": "kabibi-vscode",
+  "displayName": "Kabibi Shell",
+  "description": "Kabibi wearable all-weather shell and AI assistant for VS Code and vscode.dev",
+  "version": "0.1.0",
+  "publisher": "rusticated",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/oyin-bo/rusticated"
+  },
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "categories": [
+    "Other",
+    "Terminal"
+  ],
+  "extensionKind": [
+    "ui",
+    "workspace"
+  ],
+  "activationEvents": [
+    "onCommand:kabibi.openTerminal",
+    "onTerminalProfile:kabibi.terminalProfile"
+  ],
+  "browser": "./extension.js",
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "kabibi.openTerminal",
+        "title": "Kabibi: Open Shell"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "kabibi.openTerminal"
+        }
+      ]
+    },
+    "terminal": {
+      "profiles": [
+        {
+          "id": "kabibi.terminalProfile",
+          "title": "Kabibi",
+          "icon": "terminal"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node --test ./test/vfs.test.js",
+    "start-web": "vscode-test-web --browserType=chromium --extensionDevelopmentPath=. .",
+    "vsce_package": "vsce package",
+    "vsce_publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.18",
+    "@types/vscode": "^1.91.0",
+    "@vscode/test-web": "^0.0.69",
+    "@vscode/vsce": "^3.4.0"
+  }
+}
