@@ -412,11 +412,13 @@ test('WASM ABI exports metadata and seek imports with expected behavior', async 
   for (const name of [
     'seek',
     'tty_set_size',
+    'dylib_close',
     'dylib_alloc',
     'dylib_free',
     'dylib_read_mem',
     'dylib_write_mem',
     'dylib_callback_register',
+    'net_accept',
     'net_cert_verify'
   ]) {
     assert.equal(typeof env[name], 'function', `${name} import should be callable`);
@@ -583,4 +585,119 @@ test('Vegetable unpacker unpacks payload WASM using embedded decompressor', asyn
   const mod = await WebAssembly.compile(unpackedBuffer);
   assert.ok(mod instanceof WebAssembly.Module);
 });
+
+test('path_open supports O_TRUNC, O_APPEND, O_EXCL and write slices exact content length', async () => {
+  const mem = new WebAssembly.Memory({ initial: 1 });
+  const host = await washmhost({ test: true, memory: mem, cwd: '/workspace' });
+  const { env, hostState, fs } = host;
+  const view = new DataView(mem.buffer);
+  const enc = new TextEncoder();
+
+  assert.equal(hostState.cwd, '/workspace');
+
+  await fs.putEntry({
+    path: '/workspace',
+    type: 'dir',
+    mode: 0o755,
+    mtime: Date.now()
+  });
+
+  // 1. Create file with initial 20-byte content via O_CREAT (64)
+  const filePath = enc.encode('notes.txt');
+  new Uint8Array(mem.buffer, 32, filePath.length).set(filePath);
+  env.path_open(100, 32, filePath.length, 64, 0o644);
+  await new Promise(r => setTimeout(r, 0));
+  hostState.drainQueue();
+  const h1 = view.getBigUint64(116, true);
+  assert.ok(h1 >= 3n);
+
+  const initialPayload = enc.encode('0123456789abcdefghij');
+  new Uint8Array(mem.buffer, 200, initialPayload.length).set(initialPayload);
+  env.write(140, h1, 200, initialPayload.length);
+  await new Promise(r => setTimeout(r, 0));
+  hostState.drainQueue();
+  env.handle_close(h1);
+
+  let stored = await fs.getEntry('/workspace/notes.txt');
+  assert.equal(stored.size, 20);
+  assert.equal(stored.content.length, 20);
+
+  // 2. O_CREAT | O_EXCL (64 | 128 = 192) on existing file fails with EEXIST (20)
+  env.path_open(180, 32, filePath.length, 64 | 128, 0o644);
+  await new Promise(r => setTimeout(r, 0));
+  hostState.drainQueue();
+  assert.equal(view.getUint32(184, true), 20); // wasiEEXIST
+
+  // 3. Reopen with O_TRUNC (512) and write 5 bytes -> no stale tail or buffer-doubling padding
+  env.path_open(220, 32, filePath.length, 512, 0o644);
+  await new Promise(r => setTimeout(r, 0));
+  hostState.drainQueue();
+  const h2 = view.getBigUint64(236, true);
+
+  const shortPayload = enc.encode('short');
+  new Uint8Array(mem.buffer, 200, shortPayload.length).set(shortPayload);
+  env.write(260, h2, 200, shortPayload.length);
+  await new Promise(r => setTimeout(r, 0));
+  hostState.drainQueue();
+  env.handle_close(h2);
+
+  stored = await fs.getEntry('/workspace/notes.txt');
+  assert.equal(stored.size, 5);
+  assert.equal(stored.content.length, 5);
+  assert.equal(new TextDecoder().decode(stored.content), 'short');
+
+  // 4. Reopen with O_APPEND (1024) and write 3 bytes -> appends to end
+  env.path_open(300, 32, filePath.length, 1024, 0o644);
+  await new Promise(r => setTimeout(r, 0));
+  hostState.drainQueue();
+  const h3 = view.getBigUint64(316, true);
+
+  const appendPayload = enc.encode('-ok');
+  new Uint8Array(mem.buffer, 200, appendPayload.length).set(appendPayload);
+  env.write(340, h3, 200, appendPayload.length);
+  await new Promise(r => setTimeout(r, 0));
+  hostState.drainQueue();
+  env.handle_close(h3);
+
+  stored = await fs.getEntry('/workspace/notes.txt');
+  assert.equal(stored.size, 8);
+  assert.equal(stored.content.length, 8);
+  assert.equal(new TextDecoder().decode(stored.content), 'short-ok');
+});
+
+test('path_stat prefers fs.statEntry over fs.getEntry when provided', async () => {
+  const mem = new WebAssembly.Memory({ initial: 1 });
+  let statCalls = 0;
+  let getCalls = 0;
+  const customFS = {
+    async init() {},
+    async seed() {},
+    async statEntry(p) {
+      statCalls++;
+      return { path: p, type: 'file', size: 4096, mode: 0o644, mtime: 1700000000000 };
+    },
+    async getEntry(p) {
+      getCalls++;
+      return { path: p, type: 'file', content: new Uint8Array(4096), size: 4096, mode: 0o644, mtime: 1700000000000 };
+    }
+  };
+
+  const host = await washmhost({ test: true, memory: mem, fs: customFS });
+  const { env, hostState } = host;
+  const view = new DataView(mem.buffer);
+
+  const pBytes = new TextEncoder().encode('/workspace/large.bin');
+  new Uint8Array(mem.buffer, 32, pBytes.length).set(pBytes);
+  env.path_stat(100, 32, pBytes.length, 0, 200, 64);
+  await new Promise(r => setTimeout(r, 0));
+  hostState.drainQueue();
+
+  assert.equal(statCalls, 1);
+  assert.equal(getCalls, 0);
+  assert.equal(view.getUint32(100, true), FLAG_COMPLETED);
+  assert.equal(view.getUint32(104, true), wasiSuccess);
+  assert.equal(view.getBigUint64(200 + 16, true), 4096n);
+  assert.ok(globalThis.washmhostExports && globalThis.washmhostExports.washmhost === washmhost);
+});
+
 
