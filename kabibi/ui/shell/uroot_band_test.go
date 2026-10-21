@@ -871,9 +871,15 @@ func TestURoot_Band1E_ShellControlAndBuiltins(t *testing.T) {
 	})
 
 	t.Run("time", func(t *testing.T) {
-		out, code, _ := run("time echo timing_test")
-		if code != 0 || !strings.Contains(out, "timing_test") {
-			t.Errorf("time command failed: code=%d out=%q", code, out)
+		out, code, _ := run("time echo shell_timing_test")
+		if code != 0 || !strings.Contains(out, "shell_timing_test") {
+			t.Errorf("shell time syntax failed: code=%d out=%q", code, out)
+		}
+
+		out, code, _ = run("command time echo uroot_timing_test")
+		if code != 0 || !strings.Contains(out, "uroot_timing_test") ||
+			!strings.Contains(out, "real ") || !strings.Contains(out, "user ") || !strings.Contains(out, "sys ") {
+			t.Errorf("u-root time command failed: code=%d out=%q", code, out)
 		}
 	})
 
