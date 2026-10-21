@@ -453,23 +453,66 @@ A command checkbox `[x]` may **only** be ticked when all 5 criteria are met:
   - `go run . kabibi -r -c "printf '%s\0' 'a\cb' | xargs -0 | hexdump"` — bytes `61 5c 63 62 0a`; mvdan/sh leaves `\c` literal by default.
   - `bash -c "printf '%s\0' 'a\cb' | xargs -0 | od -An -tx1"` — bytes `61 5c 63 62 0a`; host `xargs` plus external `echo` prints the literal `\c`.
   - Dispatch comparison: mvdan/sh does not provide an `xargs` builtin; Kabibi's `xargs` is the u-root command. Its child-command callback now routes `echo` invocations to mvdan/sh, and the u-root echo command is not registered in Kabibi.
-- [ ] **`time`** (`cmds/core/time`): `package timecmd`; measure execution duration of target command and report to `ioEnv.Stderr`.
-- [ ] **`timeout`** (`cmds/core/timeout`): Derive `context.WithTimeout(ctx, d)` and execute target command.
-- [ ] **`backoff`** (`cmds/core/backoff`): Retry target command with exponential backoff respecting `ctx.Done()`.
+- [x] **`time`** (`cmds/core/time`): `package timecmd`; measure execution duration of target command and report to `ioEnv.Stderr`.
+  - `go -C u-root test ./cmds/core/time -v` — passed; covers no-argument output, runner-based timing, and missing command.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band1E_ShellControlAndBuiltins/time$' -v` — passed; now separately checks mvdan's `time` shell syntax and the u-root utility via `command time`.
+  - `go run . kabibi -r -c "time echo shell_keyword_probe"` — passed; shell keyword executed and printed mvdan's timing format.
+  - `go run . kabibi -r -c "command time echo uroot_time_probe"` — passed; u-root `time` executed and printed `real`, `user`, and `sys` timing lines.
+  - Dispatch note: bare `time` is parsed as mvdan/sh shell timing syntax; `command time` reaches the registered u-root utility. Both work, but they are distinct code paths.
+- [x] **`timeout`** (`cmds/core/timeout`): Derive `context.WithTimeout(ctx, d)` and execute target command.
+  - `go -C u-root test ./cmds/core/timeout -v` — passed; includes successful and timed-out runner cases.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band1E_ShellControlAndBuiltins/timeout$' -v` — passed; checks quick command success and exit status 124 after timeout.
+  - `go run . kabibi -r -c "timeout 500ms echo timeout_ok"` — passed; printed `timeout_ok`.
+  - `go run . kabibi -r -c "timeout -t 20ms sleep 1"` — timed out as intended with shell status 124 (the `go run` wrapper reports a non-zero child exit as its own failure).
+  - `go run . kabibi -r -c 'timeout -t 20ms sleep 1; echo exit:$?'` — passed; printed `exit:124`, confirming status propagation.
+- [x] **`backoff`** (`cmds/core/backoff`): Retry target command with exponential backoff respecting `ctx.Done()`.
+  - `go -C u-root test ./cmds/core/backoff -v` — passed; unit test runner fails once then succeeds on retry.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band1E_ShellControlAndBuiltins/backoff$' -v` — passed; checks successful command dispatch.
+  - `go run . kabibi -r -c "backoff -t 500ms true"` — passed; completed successfully.
+  - `go run . kabibi -r -c "backoff -t 50ms false"` — failed with status 1 and reported the child command failure, as expected when the command does not succeed before the deadline.
 
 ---
 
 ### Band 2: Data Transfer, Subshells & Network Transport (8 Commands)
 *Cross-platform over standard I/O and Rusticated's existing `net_open`/`net_accept`/`read`/`write` ABI.*
 
-- [ ] **`dd`** (`cmds/core/dd`): Convert `if=`, `of=`, `bs=`, `ibs=`, `obs=`, `count=`, `seek=`, `skip=`, `conv=`, `status=` into local FlagSet; replace `usage()` `log.Fatal` with error return; stream between `ioEnv.Stdin`/`ioEnv.Stdout` or resolved files; check `ctx.Done()`.
-- [ ] **`wget`** (`cmds/core/wget`): HTTP/HTTPS download using `http.NewRequestWithContext(ctx, ...)`; write output to resolved path or `ioEnv.Stdout`.
+- [x] **`dd`** (`cmds/core/dd`): Convert `if=`, `of=`, `bs=`, `ibs=`, `obs=`, `count=`, `seek=`, `skip=`, `conv=`, `status=` into local FlagSet; replace `usage()` `log.Fatal` with error return; stream between `ioEnv.Stdin`/`ioEnv.Stdout` or resolved files; check `ctx.Done()`.
+  - `go -C u-root test ./cmds/core/dd -v` — passed; covers stream/file copies, block sizes, skip/count, truncation, seek, `/dev/zero`, and conversions.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band2_DataTransferAndNetwork/dd$' -v` — passed; shell integration covers file copy, skip/count, `/dev/zero`, and piped input.
+  - `go run . kabibi -r -c "printf abcde | dd ibs=3 obs=2 status=xfer"` — transferred `abcde` and reported 5 bytes copied.
+  - **Fixed during retest:** `ddWithCtx` copied data correctly when `ibs != obs` but failed to increment the byte counter used by transfer status, reporting `0 bytes copied`. The regression test now checks byte counts with both input blocks larger and smaller than output blocks.
+- [x] **`wget`** (`cmds/core/wget`): HTTP/HTTPS download using `http.NewRequestWithContext(ctx, ...)`; write output to resolved path or `ioEnv.Stdout`.
+  - `go -C u-root test ./pkg/curl ./cmds/core/wget -v` — passed; covers HTTP/HTTPS scheme handling, output paths/stdout, redirects, error statuses, and closing downloaded readers.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band2_DataTransferAndNetwork/wget$' -v` — passed; covers file output, stdout output, and HTTP 404 handling.
+  - `go run . kabibi -r -c "wget -O - https://example.com"` — passed on Rusticated; fetched and printed the Example Domain response.
+  - **Fixed during retest:** `curl.FetchWithoutCache` wrapped HTTP response bodies and local-file readers in a reader-only wrapper, hiding their `io.Closer`. The wrapper now preserves close behavior, and `wget` closes the fetched reader and reports close errors.
 - [ ] **`netcat`** (`cmds/core/netcat`): Also registered as `nc`; TCP/UDP/Unix stream client and listener; replace `log.Fatalf` in parameter evaluation; bind `ioEnv.Stdin`/`ioEnv.Stdout` to connection; cancel on `ctx.Done()`.
+  - `go -C u-root test ./cmds/core/netcat` — passed.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band2_DataTransferAndNetwork/netcat$' -v` — passed; host-backed client and listener transfer tests passed.
+  - `go -C u-root test ./cmds/core/netcat -run 'TestListenMode|TestParseRemoteAddr' -v` — passed; includes context cancellation and empty-peer-address coverage.
+  - `go run . kabibi -r -c "timeout 3s netcat -l 127.0.0.1 48763 & sleep 100ms; printf 'netcat_probe\n' | netcat -w 1 127.0.0.1 48763; wait"` — exceeded the 15-second process timeout; its process tree was terminated. No output was captured.
+  - `go run . kabibi -r -c "timeout 2s netcat -l 127.0.0.1 48764"` — exceeded the 60-second process timeout; its process tree was terminated. No output was captured.
+  - **Fixed during retest:** `parseRemoteAddr` now skips reverse lookup when the peer address is empty, avoiding the observed `lookup : unrecognized address` warning. Listener shutdown is now tied to `ctx.Done()` and its native cancellation test passes, but the Rusticated listener still does not terminate in the bounded probes; WASI accept/cancellation behavior remains unresolved, so this item stays unchecked.
 - [ ] **`scp`** (`cmds/core/scp`): SCP source/sink protocol over `ioEnv.Stdin`/`ioEnv.Stdout`.
+  - `go -C u-root test ./cmds/core/scp` — passed.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band2_DataTransferAndNetwork/scp$' -v` — passed; validation and bidirectional in-memory source/sink transfer passed.
+  - Rusticated end-to-end source/sink transfer was not verified.
 - [ ] **`sshd`** (`cmds/core/sshd`): SSH server daemon using `golang.org/x/crypto/ssh`; bind listener with `ctx` cancellation; on Windows/wasip1 without pty exec, support key auth and clean session error reporting.
-- [ ] **`gosh`** (`cmds/core/gosh`): Nested `mvdan.cc/sh/v3/interp` shell execution bound to `ioEnv` and `ctx`.
-- [ ] **`nohup`** (`cmds/core/nohup`): Ignore `SIGHUP` and redirect output to `nohup.out` (via `ioEnv.ResolvePath`) before running target command.
+  - `go -C u-root test ./cmds/core/sshd` — passed.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band2_DataTransferAndNetwork/sshd$' -v` — passed; host-backed key-authenticated session and context shutdown passed.
+  - `go run . kabibi -r -c "sshd -keys nonexistent_keys"` — exited 1 with `sshd: SSH daemon is not supported on wasip1`; Rusticated SSH serving is not implemented.
+- [x] **`gosh`** (`cmds/core/gosh`): Nested `mvdan.cc/sh/v3/interp` shell execution bound to `ioEnv` and `ctx`.
+  - `go -C u-root test ./cmds/core/gosh` — passed.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band2_DataTransferAndNetwork/gosh$' -v` — passed; command strings, environment expansion, script files, and exit status propagation passed.
+  - `go run . kabibi -r -c "gosh -c 'echo nested_shell_ok'"` — passed on Rusticated; printed `nested_shell_ok`.
+- [x] **`nohup`** (`cmds/core/nohup`): Ignore `SIGHUP` and redirect output to `nohup.out` (via `ioEnv.ResolvePath`) before running target command.
+  - `go -C u-root test ./cmds/core/nohup` — passed.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band2_DataTransferAndNetwork/nohup$' -v` — passed; missing-command status, output, and child exit status passed.
+  - `go run . kabibi -r -c "nohup echo nohup_ok"` — passed on Rusticated; printed `nohup_ok`.
 - [ ] **`ufs`** (`cmds/core/ufs`): 9P2000 file server over TCP listener; respect `ctx.Done()` to shut down listener cleanly.
+  - `go -C u-root test ./cmds/core/ufs` — passed.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band2_DataTransferAndNetwork/ufs$' -v` — passed; host-backed 9P file transfer and context shutdown passed.
+  - `go run . kabibi -r -c "ufs -help"` — exited 1 with `ufs: 9P file server is not supported on wasip1`; Rusticated serving is not implemented.
 
 ---
 
@@ -480,6 +523,10 @@ A command checkbox `[x]` may **only** be ticked when all 5 criteria are met:
   * **Linux / macOS**: `unix.Uname`.
   * **Windows**: Query OS version/arch via `kernel32.dll` (`GetVersionExW` / `GetNativeSystemInfo`) or runtime info.
   * **Rusticated**: Query `syscall.GetPlatformInfo()` (`AbiPlatformInfo`) to report real host/guest details.
+  - `go -C u-root test ./cmds/core/uname -v` — passed.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band3_SystemDiagnosticsProcessAndNetwork/uname$' -v` — passed; default, `-a`, individual/combined flags, help, and invalid-flag behavior passed.
+  - `go run . kabibi -r -c "uname -a"` — passed on Rusticated; printed `Windows_NT rusticated unknown washmhost 0.8.1 aarch64`.
+  - **Fixed during retest:** Rusticated uname now reads host OS and architecture plus Rusticated runtime metadata from `syscall.GetPlatformInfo()` rather than reporting `wasip1/wasm`. The ABI currently supplies no host OS version, so the release field is honestly reported as `unknown`; this checklist item remains unchecked pending host-version support.
 - [ ] **`id`** (`cmds/core/id`):
   * **Linux / macOS**: `os/user` + `syscall.Getuid`/`Getgid`/`Getgroups`.
   * **Windows / Rusticated**: Use `os/user.Current()` and map SID/username cleanly.
