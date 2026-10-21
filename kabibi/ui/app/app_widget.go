@@ -142,6 +142,10 @@ func (w *AppWidget) PanelsVisible() bool {
 // immediately below the latest untouched row in terminal scrollback) and grows
 // downward toward the bottom before ejecting upward.
 func (w *AppWidget) SetPanelsVisible(v bool) {
+	if !v && w.panels != nil {
+		w.panels.Left.CloseSearch()
+		w.panels.Right.CloseSearch()
+	}
 	w.mu.Lock()
 	w.panelsVisible = v
 	w.fullScreenClaimed = v
@@ -465,6 +469,35 @@ func (w *AppWidget) HandleEvent(e input.Event) bool {
 
 		// When blue panels are visible, apply the Far Manager Split Key-Routing Table
 		if panelsVis && w.panels != nil {
+			active := w.panels.ActivePane()
+			if active != nil && active.SearchActive() {
+				switch keyStr {
+				case "esc":
+					active.CloseSearch()
+					w.invalidate()
+					return true
+				case "enter":
+					active.CloseSearch()
+					active.ActivateSelected()
+					w.invalidate()
+					return true
+				case "up", "down":
+					active.CloseSearch()
+					active.HandleEvent(keyEv)
+					w.invalidate()
+					return true
+				default:
+					if active.HandleSearchEvent(keyEv) {
+						w.invalidate()
+						return true
+					}
+					active.CloseSearch()
+				}
+			} else if active != nil && active.BeginSearch(keyEv) {
+				w.invalidate()
+				return true
+			}
+
 			hasInput := w.sh.Input().Value() != ""
 
 			switch keyStr {

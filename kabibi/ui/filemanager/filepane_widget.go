@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/charmbracelet/x/input"
 	"github.com/mattn/go-runewidth"
@@ -189,6 +190,11 @@ type FilePaneWidget struct {
 	selectedIdx int
 	service     FSService
 	ctx         RenderContext
+	searchText  []rune
+	searchPos   int
+	searchStart int
+	searching   bool
+	searchMatch bool
 
 	Width  int
 	Height int
@@ -334,6 +340,167 @@ func (w *FilePaneWidget) SelectedIndex() int {
 		return 0
 	}
 	return w.selectedIdx
+}
+
+// SearchActive reports whether this pane's instant-search editor is open.
+func (w *FilePaneWidget) SearchActive() bool {
+	return w != nil && w.searching
+}
+
+// BeginSearch activates instant search from an Alt+printable key event.
+func (w *FilePaneWidget) BeginSearch(ev input.KeyPressEvent) bool {
+	if w == nil || !ev.Mod.Contains(input.ModAlt) {
+		return false
+	}
+	text := ev.Text
+	if text == "" {
+		rn := ev.Code
+		if ev.ShiftedCode != 0 {
+			rn = ev.ShiftedCode
+		}
+		if unicode.IsPrint(rn) {
+			text = string(rn)
+		}
+	}
+	if text == "" {
+		return false
+	}
+	w.searching = true
+	w.searchStart = w.selectedIdx
+	w.searchText = nil
+	w.searchPos = 0
+	w.searchMatch = true
+	w.insertSearchText(text)
+	return true
+}
+
+// CloseSearch closes instant search without changing the current selection.
+func (w *FilePaneWidget) CloseSearch() {
+	if w == nil || !w.searching {
+		return
+	}
+	w.searching = false
+	w.searchText = nil
+	w.searchPos = 0
+	w.searchMatch = false
+}
+
+// HandleSearchEvent edits the active instant-search query. It returns false
+// when the event should be handled by the surrounding file manager instead.
+func (w *FilePaneWidget) HandleSearchEvent(ev input.KeyPressEvent) bool {
+	if w == nil || !w.searching || ev.Mod.Contains(input.ModCtrl) || ev.Mod.Contains(input.ModMeta) {
+		return false
+	}
+	switch ev.String() {
+	case "left":
+		if w.searchPos > 0 {
+			w.searchPos--
+		}
+		return true
+	case "right":
+		if w.searchPos < len(w.searchText) {
+			w.searchPos++
+		}
+		return true
+	case "home":
+		w.searchPos = 0
+		return true
+	case "end":
+		w.searchPos = len(w.searchText)
+		return true
+	case "backspace":
+		if w.searchPos > 0 {
+			w.searchText = append(w.searchText[:w.searchPos-1], w.searchText[w.searchPos:]...)
+			w.searchPos--
+			w.updateSearchMatch()
+		}
+		return true
+	case "delete":
+		if w.searchPos < len(w.searchText) {
+			w.searchText = append(w.searchText[:w.searchPos], w.searchText[w.searchPos+1:]...)
+			w.updateSearchMatch()
+		}
+		return true
+	}
+	if ev.Text != "" {
+		w.insertSearchText(ev.Text)
+		return true
+	}
+	if unicode.IsPrint(ev.Code) {
+		w.insertSearchText(string(ev.Code))
+		return true
+	}
+	return false
+}
+
+func (w *FilePaneWidget) insertSearchText(text string) {
+	runes := []rune(text)
+	if len(runes) == 0 {
+		return
+	}
+	w.searchText = append(w.searchText[:w.searchPos], append(runes, w.searchText[w.searchPos:]...)...)
+	w.searchPos += len(runes)
+	w.updateSearchMatch()
+}
+
+func (w *FilePaneWidget) updateSearchMatch() {
+	if len(w.searchText) == 0 {
+		w.selectedIdx = w.searchStart
+		w.searchMatch = true
+		return
+	}
+	query := strings.ToLower(string(w.searchText))
+	if idx := w.findSearchMatch(func(name string) bool {
+		return strings.HasPrefix(strings.ToLower(name), query)
+	}); idx >= 0 {
+		w.selectedIdx = idx
+		w.searchMatch = true
+		return
+	}
+	if idx := w.findSearchMatch(func(name string) bool {
+		return matchesSearchSubsequence(name, query)
+	}); idx >= 0 {
+		w.selectedIdx = idx
+		w.searchMatch = true
+		return
+	}
+	w.searchMatch = false
+}
+
+func (w *FilePaneWidget) findSearchMatch(matches func(string) bool) int {
+	if len(w.items) == 0 {
+		return -1
+	}
+	start := w.selectedIdx + 1
+	if start < 0 || start >= len(w.items) {
+		start = 0
+	}
+	for offset := 0; offset < len(w.items); offset++ {
+		idx := (start + offset) % len(w.items)
+		item := w.items[idx]
+		if item.name != ".." && matches(item.name) {
+			return idx
+		}
+	}
+	return -1
+}
+
+func matchesSearchSubsequence(name, query string) bool {
+	nameRunes := []rune(strings.ToLower(name))
+	queryRunes := []rune(query)
+	if len(queryRunes) == 0 || len(nameRunes) == 0 || nameRunes[0] != queryRunes[0] {
+		return false
+	}
+	next := 1
+	for _, rn := range nameRunes[1:] {
+		if next < len(queryRunes) && rn == queryRunes[next] {
+			next++
+		}
+		if next == len(queryRunes) {
+			return true
+		}
+	}
+	return next == len(queryRunes)
 }
 
 // Select sets the highlighted index; no-op if out of range.
@@ -569,7 +736,48 @@ func (w *FilePaneWidget) RenderBuf() CellBuf {
 			}
 		}
 	}
+	if w.searching {
+		w.renderSearch(buf)
+	}
 	return buf
+}
+
+func (w *FilePaneWidget) renderSearch(buf CellBuf) {
+	if w.Width < 4 || w.Height < 2 {
+		return
+	}
+	var display strings.Builder
+	for i, rn := range w.searchText {
+		if i == w.searchPos {
+			display.WriteRune('|')
+		}
+		display.WriteRune(rn)
+	}
+	if w.searchPos == len(w.searchText) {
+		display.WriteRune('|')
+	}
+	content := display.String()
+	available := w.Width - 4
+	if runewidth.StringWidth(content) > available {
+		content = truncateStringToWidth(content, available)
+	}
+	color := colorCyan
+	if w.searchMatch {
+		color = colorYellow
+	}
+	fieldW := runewidth.StringWidth(content) + 2
+	startX := w.Width - 1 - fieldW
+	y := w.Height - 1
+	buf.Set(startX, y, makeCell('[', color, colorNavy, true))
+	col := startX + 1
+	for _, rn := range content {
+		if col >= w.Width-2 {
+			break
+		}
+		buf.Set(col, y, makeCell(rn, color, colorNavy, true))
+		col += runewidth.RuneWidth(rn)
+	}
+	buf.Set(w.Width-2, y, makeCell(']', color, colorNavy, true))
 }
 
 func paneCell(rn rune, item fileItem, isSelected, marked bool) Cell {
