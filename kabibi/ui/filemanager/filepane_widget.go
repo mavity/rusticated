@@ -1,7 +1,6 @@
 package filemanager
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -94,31 +93,27 @@ func NewFileItem(name string, isDir bool, selected bool) FileItem {
 	return FileItem{name: name, isDir: isDir, selected: selected}
 }
 
-// IsExecutableFile reports whether the file at path is executable (via mode bits,
-// Windows PATHEXT / .sh extension, or a #! shebang header).
+// IsExecutableFile reports whether the file at path is executable. Unix-like
+// systems use execute permission bits; Windows uses PATHEXT, with .sh treated
+// as a Kabibi shell script.
 func IsExecutableFile(path string) bool {
 	info, err := os.Stat(path)
 	if err != nil || info.IsDir() {
 		return false
 	}
 	ext := strings.ToLower(filepath.Ext(path))
-	switch ext {
-	case ".sh", ".exe", ".bat", ".cmd", ".com", ".ps1":
-		return true
-	}
-	if runtime.GOOS != "windows" && info.Mode()&0o111 != 0 {
-		return true
-	}
-	f, err := os.Open(path)
-	if err != nil {
+	if runtime.GOOS == "windows" {
+		if ext == ".sh" {
+			return true
+		}
+		for _, pathext := range strings.Split(os.Getenv("PATHEXT"), ";") {
+			if strings.EqualFold(strings.TrimSpace(pathext), ext) {
+				return true
+			}
+		}
 		return false
 	}
-	defer f.Close()
-	var hdr [2]byte
-	if n, _ := f.Read(hdr[:]); n == 2 && bytes.Equal(hdr[:], []byte("#!")) {
-		return true
-	}
-	return false
+	return info.Mode()&0o111 != 0
 }
 
 // Color constants matching classic Norton / Far Manager blue panels.

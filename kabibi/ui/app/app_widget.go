@@ -107,7 +107,7 @@ func NewWidget(opts AppWidgetOptions) *AppWidget {
 		}
 	}
 
-	// Wire Enter on a file in the active pane: run if executable, else no-op
+	// Wire Enter on a file in the active pane: run executables, edit other files.
 	w.panels.Left.OnOpenFile = func(path string) {
 		w.handlePaneOpenFile(path)
 	}
@@ -274,6 +274,9 @@ func shellQuoteFilename(name string) string {
 
 func (w *AppWidget) handlePaneOpenFile(fullPath string) {
 	if !filemanager.IsExecutableFile(fullPath) {
+		if err := w.OpenEditor(fullPath, false); err != nil && w.writeScrollback != nil {
+			w.writeScrollback(fmt.Sprintf("Unable to open %q: %v\n", fullPath, err))
+		}
 		return
 	}
 	base := filepath.Base(fullPath)

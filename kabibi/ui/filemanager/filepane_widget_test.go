@@ -1,7 +1,9 @@
 package filemanager
 
 import (
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -133,6 +135,53 @@ func TestFilePaneWidgetEnterFileCallsCallback(t *testing.T) {
 	want := filepath.Join(docs, "readme.txt")
 	if opened != want {
 		t.Fatalf("OnOpenFile should receive full path; got %q want %q", opened, want)
+	}
+}
+
+func TestIsExecutableFileUsesPlatformRules(t *testing.T) {
+	dir := t.TempDir()
+
+	if runtime.GOOS == "windows" {
+		t.Setenv("PATHEXT", ".EXE;.COM")
+
+		executable := filepath.Join(dir, "tool.exe")
+		if err := os.WriteFile(executable, []byte("binary"), 0o600); err != nil {
+			t.Fatalf("WriteFile executable: %v", err)
+		}
+		if !IsExecutableFile(executable) {
+			t.Fatal("PATHEXT extension should be executable on Windows")
+		}
+
+		script := filepath.Join(dir, "tool.sh")
+		if err := os.WriteFile(script, []byte("echo hi"), 0o600); err != nil {
+			t.Fatalf("WriteFile shell script: %v", err)
+		}
+		if !IsExecutableFile(script) {
+			t.Fatal(".sh files should be executable Kabibi scripts on Windows")
+		}
+
+		nonExecutable := filepath.Join(dir, "notes.txt")
+		if err := os.WriteFile(nonExecutable, []byte("notes"), 0o600); err != nil {
+			t.Fatalf("WriteFile non-executable: %v", err)
+		}
+		if IsExecutableFile(nonExecutable) {
+			t.Fatal("extension absent from PATHEXT should not be executable on Windows")
+		}
+		return
+	}
+
+	file := filepath.Join(dir, "tool.sh")
+	if err := os.WriteFile(file, []byte("#!/bin/sh\necho hi\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if IsExecutableFile(file) {
+		t.Fatal("Unix file without execute permission should not be executable")
+	}
+	if err := os.Chmod(file, 0o700); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	if !IsExecutableFile(file) {
+		t.Fatal("Unix file with execute permission should be executable")
 	}
 }
 

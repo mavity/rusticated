@@ -79,7 +79,7 @@ keys and Insert:
 
 - `F2` rename, `F4` edit (open editor), `F5` copy, `F6` move, `F7` mkdir, `F8` delete.
 - `Insert` toggle mark on the current item and move down (multi-select).
-- Arrows/PgUp/PgDn/Home/End navigate; `Enter` opens dirs / runs files; `Tab` switches panes; double-`Tab` opens chat.
+- Arrows/PgUp/PgDn/Home/End navigate; `Enter` opens dirs, runs executable files, or opens other files in the editor; `Tab` switches panes; double-`Tab` opens chat.
 - Copy/move default destination is the other pane's directory. With items marked,
   operations apply to the marked set; otherwise to the highlighted item.
 
@@ -95,4 +95,3 @@ keys and Insert:
 - Dialogs/progress render as centred modal boxes composited over the browser (whole-line replacement).
 - Wide runes are treated as one cell for cursor math in the editor (basic editing focus).
 - Copy overwrites existing destinations (truncate); the confirm dialog is the safeguard.
-
