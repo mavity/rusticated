@@ -93,6 +93,19 @@ func NewFileItem(name string, isDir bool, selected bool) FileItem {
 	return FileItem{name: name, isDir: isDir, selected: selected}
 }
 
+func fileItemLess(ii, jj fileItem) bool {
+	if ii.name == ".." {
+		return true
+	}
+	if jj.name == ".." {
+		return false
+	}
+	if ii.isDir != jj.isDir {
+		return ii.isDir
+	}
+	return strings.ToLower(ii.name) < strings.ToLower(jj.name)
+}
+
 // IsExecutableFile reports whether the file at path is executable. Unix-like
 // systems use execute permission bits; Windows uses PATHEXT, with .sh treated
 // as a Kabibi shell script.
@@ -259,19 +272,7 @@ func (w *FilePaneWidget) LoadDirFocus(path string, focusName string) error {
 		})
 	}
 	// Sort: ".." first, then dirs before files, then alphabetically.
-	sort.Slice(w.items, func(i, j int) bool {
-		ii, jj := w.items[i], w.items[j]
-		if ii.name == ".." {
-			return true
-		}
-		if jj.name == ".." {
-			return false
-		}
-		if ii.isDir != jj.isDir {
-			return ii.isDir
-		}
-		return strings.ToLower(ii.name) < strings.ToLower(jj.name)
-	})
+	sort.Slice(w.items, func(i, j int) bool { return fileItemLess(w.items[i], w.items[j]) })
 	w.selectedIdx = 0
 	if focusName != "" {
 		w.SelectByName(focusName)
@@ -282,16 +283,35 @@ func (w *FilePaneWidget) LoadDirFocus(path string, focusName string) error {
 	return nil
 }
 
-// Refresh reloads the current directory while preserving the selected entry name if it still exists.
+// Refresh reloads the current directory while preserving the selected entry name
+// or, if it disappeared, its position in the sorted list.
 func (w *FilePaneWidget) Refresh() error {
 	if w == nil || w.dir == "" {
 		return nil
 	}
-	var prevName string
-	if fi, ok := w.SelectedItem(); ok {
-		prevName = fi.name
+	prevItem, ok := w.SelectedItem()
+	if !ok {
+		return w.LoadDir(w.dir)
 	}
-	return w.LoadDirFocus(w.dir, prevName)
+	if err := w.LoadDirFocus(w.dir, prevItem.name); err != nil {
+		return err
+	}
+	for _, item := range w.items {
+		if item.name == prevItem.name {
+			return nil
+		}
+	}
+	if len(w.items) == 0 {
+		return nil
+	}
+	// Find where the missing entry would be inserted among the refreshed items.
+	w.selectedIdx = sort.Search(len(w.items), func(i int) bool {
+		return !fileItemLess(w.items[i], prevItem)
+	})
+	if w.selectedIdx == len(w.items) {
+		w.selectedIdx--
+	}
+	return nil
 }
 
 // SelectedItem returns the currently highlighted item.

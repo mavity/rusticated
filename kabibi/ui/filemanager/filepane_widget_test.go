@@ -185,6 +185,66 @@ func TestIsExecutableFileUsesPlatformRules(t *testing.T) {
 	}
 }
 
+func TestFilePaneWidgetRefreshKeepsMissingSelectionSortPosition(t *testing.T) {
+	svc := &mockFSService{entries: []FSEntry{
+		{Name: "alpha"},
+		{Name: "bravo"},
+		{Name: "charlie"},
+		{Name: "delta"},
+		{Name: "echo"},
+		{Name: "foxtrot"},
+	}}
+	pane := NewFilePaneWidget("files")
+	pane.SetService(svc)
+	if err := pane.LoadDir("/files"); err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	pane.SelectByName("delta")
+
+	svc.entries = []FSEntry{
+		{Name: "charlie"},
+		{Name: "foxtrot"},
+		{Name: "golf"},
+		{Name: "hotel"},
+		{Name: "india"},
+	}
+	if err := pane.Refresh(); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	item, ok := pane.SelectedItem()
+	if !ok || item.Name() != "foxtrot" {
+		t.Fatalf("selection after refresh = %q, want item at deleted delta's sort position (foxtrot)", item.Name())
+	}
+}
+
+func TestFilePaneWidgetRefreshClampsMissingFinalSelection(t *testing.T) {
+	svc := &mockFSService{entries: []FSEntry{
+		{Name: "alpha"},
+		{Name: "bravo"},
+		{Name: "charlie"},
+	}}
+	pane := NewFilePaneWidget("files")
+	pane.SetService(svc)
+	if err := pane.LoadDir("/files"); err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	pane.SelectByName("charlie")
+
+	svc.entries = []FSEntry{
+		{Name: "alpha"},
+		{Name: "bravo"},
+	}
+	if err := pane.Refresh(); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	item, ok := pane.SelectedItem()
+	if !ok || item.Name() != "bravo" {
+		t.Fatalf("selection after refresh = %q, want last remaining item bravo", item.Name())
+	}
+}
+
 func TestDualPaneWidgetStartsWithLeftPaneActive(t *testing.T) {
 	dp := NewDualPaneWidget()
 
