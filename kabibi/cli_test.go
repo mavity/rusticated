@@ -104,6 +104,12 @@ func TestRunCLI_UsesPipedSessionForRedirectedStdin(t *testing.T) {
 	if got, want := stdout.String(), "routed through stdin\n"; got != want {
 		t.Fatalf("stdout = %q, want %q", got, want)
 	}
+	if strings.ContainsAny(stdout.String()+stderr.String(), "\x1b\r") {
+		t.Fatalf("headless CLI emitted terminal control sequences: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("headless CLI emitted unexpected stderr output: %q", stderr.String())
+	}
 }
 
 func TestParseCLIEditorForms(t *testing.T) {

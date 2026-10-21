@@ -1,6 +1,7 @@
 package shell
 
 import (
+	"math"
 	"strings"
 	"testing"
 
@@ -173,39 +174,101 @@ func TestPromptInput_ClassifierGatesBashHighlighting(t *testing.T) {
 		Prompt:     func() string { return "$ " },
 		StyleInput: sh.styleInput,
 	})
-	p.SetValue("Name a bridge in Paris")
-	aiBuf, _ := p.Render(ui.Rect{W: 80, H: 4}, ui.RenderContext{Focused: true})
-	for x := 2; x < 2+len("Name a bridge in Paris"); x++ {
-		if !aiBuf.Get(x, 0).Style.HasAttribute(terminal.CharResetForegroundDefault) {
-			t.Fatalf("AI text at column %d was syntax-highlighted", x)
+	for _, value := range []string{"Name a bridge in Paris", "What's the time?"} {
+		p.SetValue(value)
+		aiBuf, _ := p.Render(ui.Rect{W: 80, H: 4}, ui.RenderContext{Focused: true})
+		for i := range []rune(value) {
+			cell := aiBuf.Get(2+i, 0)
+			if !cell.Style.HasAttribute(terminal.CharResetForegroundDefault) {
+				t.Fatalf("AI text %q at rune %d was syntax-highlighted", value, i)
+			}
 		}
 	}
 
-	p.SetValue(`echo "hello" | cat $HOME`)
+	const shellInput = `echo "hello" | cat $HOME`
+	p.SetValue(shellInput)
 	shellBuf, _ := p.Render(ui.Rect{W: 80, H: 4}, ui.RenderContext{Focused: true})
-	colored := false
-	for x := 2; x < 2+len(`echo "hello" | cat $HOME`); x++ {
-		if !shellBuf.Get(x, 0).Style.HasAttribute(terminal.CharResetForegroundDefault) {
-			colored = true
-			break
+	for _, token := range []struct {
+		text  string
+		style terminal.Style
+	}{
+		{text: "echo", style: bashKeywordStyle},
+		{text: "hello", style: bashStringStyle},
+		{text: "|", style: bashOperatorStyle},
+		{text: "$HOME", style: bashNumberStyle},
+	} {
+		runeOffset := len([]rune(shellInput[:strings.Index(shellInput, token.text)]))
+		got := shellBuf.Get(2+runeOffset, 0).Style.Foreground()
+		if got != token.style.Foreground() {
+			t.Errorf("foreground at %q = #%06X, want #%06X", token.text, got, token.style.Foreground())
 		}
-	}
-	if !colored {
-		t.Fatal("valid shell input received no syntax highlighting")
 	}
 
-	p.SetValue("if true; then")
+	const incompleteInput = "if true; then"
+	p.SetValue(incompleteInput)
 	incompleteBuf, _ := p.Render(ui.Rect{W: 80, H: 4}, ui.RenderContext{Focused: true})
-	colored = false
-	for x := 2; x < 2+len("if true; then"); x++ {
-		if !incompleteBuf.Get(x, 0).Style.HasAttribute(terminal.CharResetForegroundDefault) {
-			colored = true
-			break
+	for _, token := range []struct {
+		text  string
+		style terminal.Style
+	}{
+		{text: "if", style: bashKeywordStyle},
+		{text: ";", style: bashOperatorStyle},
+		{text: "then", style: bashKeywordStyle},
+	} {
+		runeOffset := len([]rune(incompleteInput[:strings.Index(incompleteInput, token.text)]))
+		got := incompleteBuf.Get(2+runeOffset, 0).Style.Foreground()
+		if got != token.style.Foreground() {
+			t.Errorf("incomplete-input foreground at %q = #%06X, want #%06X",
+				token.text, got, token.style.Foreground())
 		}
 	}
-	if !colored {
-		t.Fatal("incomplete shell input received no syntax highlighting")
+}
+
+func TestBashInputPaletteContrastOnBlackAndWhite(t *testing.T) {
+	colors := []struct {
+		name  string
+		color terminal.Color
+	}{
+		{name: "keyword", color: bashKeywordStyle.Foreground()},
+		{name: "string", color: bashStringStyle.Foreground()},
+		{name: "number", color: bashNumberStyle.Foreground()},
+		{name: "operator", color: bashOperatorStyle.Foreground()},
+		{name: "comment", color: bashCommentStyle.Foreground()},
 	}
+	backgrounds := []struct {
+		name  string
+		color terminal.Color
+	}{
+		{name: "black", color: 0x000000},
+		{name: "white", color: 0xFFFFFF},
+	}
+	for _, foreground := range colors {
+		for _, background := range backgrounds {
+			ratio := contrastRatio(foreground.color, background.color)
+			if ratio < 3 {
+				t.Errorf("%s color #%06X contrast on %s = %.2f:1, want at least 3:1",
+					foreground.name, foreground.color, background.name, ratio)
+			}
+		}
+	}
+}
+
+func contrastRatio(foreground, background terminal.Color) float64 {
+	luminance := func(color terminal.Color) float64 {
+		channel := func(shift uint) float64 {
+			value := float64((uint32(color)>>shift)&0xFF) / 255
+			if value <= 0.04045 {
+				return value / 12.92
+			}
+			return math.Pow((value+0.055)/1.055, 2.4)
+		}
+		return 0.2126*channel(16) + 0.7152*channel(8) + 0.0722*channel(0)
+	}
+	l1, l2 := luminance(foreground), luminance(background)
+	if l1 < l2 {
+		l1, l2 = l2, l1
+	}
+	return (l1 + 0.05) / (l2 + 0.05)
 }
 
 func TestPromptInput_ParentOwnsEnterAndCtrlC(t *testing.T) {
