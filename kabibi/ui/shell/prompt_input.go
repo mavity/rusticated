@@ -5,6 +5,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alecthomas/chroma/v2"
+	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/charmbracelet/x/input"
 	"github.com/mattn/go-runewidth"
 	"github.com/mavity/rusticated/kabibi/ui"
@@ -27,6 +29,9 @@ type PromptInputOptions struct {
 
 	// MaxScreenRatio caps the visual height as a fraction of the available screen height (defaults to 0.75).
 	MaxScreenRatio float64
+
+	// StyleInput returns one terminal style per input rune. Nil styles use terminal defaults.
+	StyleInput func(value string) []terminal.Style
 }
 
 // PromptInput is a self-contained, reusable prompt + command-line input widget
@@ -40,6 +45,7 @@ type PromptInput struct {
 	promptFn       func() string
 	maxLines       int
 	maxScreenRatio float64
+	styleInput     func(value string) []terminal.Style
 
 	value        string
 	cursorPos    int
@@ -70,6 +76,7 @@ func NewPromptInput(opts PromptInputOptions) *PromptInput {
 		promptFn:       promptFn,
 		maxLines:       maxLines,
 		maxScreenRatio: ratio,
+		styleInput:     opts.StyleInput,
 		focused:        true,
 		historyIdx:     -1,
 	}
@@ -106,7 +113,7 @@ func (p *PromptInput) Value() string {
 
 // SetValue replaces the current input text and moves the cursor to the end.
 func (p *PromptInput) SetValue(s string) {
-	clean := strings.ReplaceAll(strings.ReplaceAll(s, "\r", " "), "\n", " ")
+	clean := strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\r", "\n")
 	p.mu.Lock()
 	p.value = clean
 	p.cursorPos = len([]rune(clean))
@@ -117,6 +124,7 @@ func (p *PromptInput) SetValue(s string) {
 		p.firstInputAt = time.Now()
 	}
 	p.mu.Unlock()
+	p.invalidate()
 }
 
 // Reset clears the input value, resets the cursor to 0, and exits history navigation.
@@ -157,6 +165,27 @@ func (p *PromptInput) SetCursorPos(pos int) {
 	} else {
 		p.cursorPos = pos
 	}
+}
+
+// InsertNewline inserts a shell continuation newline at the current cursor.
+func (p *PromptInput) InsertNewline() {
+	p.mu.Lock()
+	runes := []rune(p.value)
+	if p.cursorPos < 0 {
+		p.cursorPos = 0
+	} else if p.cursorPos > len(runes) {
+		p.cursorPos = len(runes)
+	}
+	runes = append(runes, 0)
+	copy(runes[p.cursorPos+1:], runes[p.cursorPos:])
+	runes[p.cursorPos] = '\n'
+	p.value = string(runes)
+	p.cursorPos++
+	if p.firstInputAt.IsZero() {
+		p.firstInputAt = time.Now()
+	}
+	p.mu.Unlock()
+	p.invalidate()
 }
 
 // Focus gives keyboard focus to the input widget.
@@ -230,6 +259,56 @@ type visualLayout struct {
 	totalLines int
 }
 
+var bashInputLexer = lexers.Get("bash")
+
+var (
+	bashKeywordStyle  = terminal.NewStyle(0x5B82A6, 0, terminal.CharResetBackgroundDefault)
+	bashStringStyle   = terminal.NewStyle(0x5E8C6A, 0, terminal.CharResetBackgroundDefault)
+	bashNumberStyle   = terminal.NewStyle(0xA67C52, 0, terminal.CharResetBackgroundDefault)
+	bashOperatorStyle = terminal.NewStyle(0x856B9E, 0, terminal.CharResetBackgroundDefault)
+	bashCommentStyle  = terminal.NewStyle(0x76808A, 0, terminal.CharResetBackgroundDefault)
+)
+
+func bashInputStyles(value string) []terminal.Style {
+	runeCount := len([]rune(value))
+	styles := make([]terminal.Style, runeCount)
+	defaultStyle := terminal.NewStyle(0, 0, terminal.CharResetForegroundDefault|terminal.CharResetBackgroundDefault)
+	for i := range styles {
+		styles[i] = defaultStyle
+	}
+	if bashInputLexer == nil {
+		return styles
+	}
+	iter, err := bashInputLexer.Tokenise(nil, value)
+	if err != nil {
+		return styles
+	}
+	runeOffset := 0
+	for _, token := range iter.Tokens() {
+		style := defaultStyle
+		switch {
+		case token.Type.InCategory(chroma.Comment):
+			style = bashCommentStyle
+		case token.Type.InCategory(chroma.Keyword), token.Type == chroma.NameBuiltin:
+			style = bashKeywordStyle
+		case token.Type.InSubCategory(chroma.LiteralString):
+			style = bashStringStyle
+		case token.Type.InSubCategory(chroma.LiteralNumber),
+			strings.Contains(strings.ToLower(token.Type.String()), "variable"):
+			style = bashNumberStyle
+		case token.Type.InCategory(chroma.Operator), token.Type.InCategory(chroma.Punctuation):
+			style = bashOperatorStyle
+		}
+		for range token.Value {
+			if runeOffset < len(styles) {
+				styles[runeOffset] = style
+			}
+			runeOffset++
+		}
+	}
+	return styles
+}
+
 func runeCellWidth(r rune) int {
 	w := runewidth.RuneWidth(r)
 	if w <= 0 {
@@ -240,7 +319,7 @@ func runeCellWidth(r rune) int {
 
 // buildVisualLayout lays out prompt + input runes into wrapped rows of width W
 // and computes the exact visual (cursorX, cursorY) cell coordinates.
-func buildVisualLayout(prompt, value string, cursorPos, width int) visualLayout {
+func buildVisualLayout(prompt, value string, cursorPos, width int, inputStyles []terminal.Style) visualLayout {
 	if width <= 0 {
 		width = 80
 	}
@@ -269,7 +348,7 @@ func buildVisualLayout(prompt, value string, cursorPos, width int) visualLayout 
 		col = 0
 	}
 
-	putRune := func(r rune) {
+	putRune := func(r rune, runeStyle terminal.Style) {
 		if r == '\n' {
 			rows = append(rows, newRow())
 			softWraps = append(softWraps, false)
@@ -286,19 +365,19 @@ func buildVisualLayout(prompt, value string, cursorPos, width int) visualLayout 
 		}
 		rows[row][col] = terminal.Cell{
 			Grapheme: string(r),
-			Style:    style,
+			Style:    runeStyle,
 		}
 		for k := 1; k < rw && col+k < width; k++ {
 			rows[row][col+k] = terminal.Cell{
 				Grapheme: "",
-				Style:    style,
+				Style:    runeStyle,
 			}
 		}
 		col += rw
 	}
 
 	for _, r := range prompt {
-		putRune(r)
+		putRune(r, style)
 	}
 
 	valRunes := []rune(value)
@@ -323,7 +402,11 @@ func buildVisualLayout(prompt, value string, cursorPos, width int) visualLayout 
 			cursorX = col
 			cursorY = row
 		}
-		putRune(r)
+		runeStyle := style
+		if i < len(inputStyles) {
+			runeStyle = inputStyles[i]
+		}
+		putRune(r, runeStyle)
 	}
 
 	if cursorPos == len(valRunes) {
@@ -375,7 +458,7 @@ func (p *PromptInput) Measure(c ui.Constraints) ui.Size {
 		prompt = promptFn()
 	}
 
-	layout := buildVisualLayout(prompt, value, cursorPos, w)
+	layout := buildVisualLayout(prompt, value, cursorPos, w, nil)
 	h := layout.totalLines
 	if h < 1 {
 		h = 1
@@ -397,6 +480,7 @@ func (p *PromptInput) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui
 	p.mu.Lock()
 	p.ctx = ctx
 	promptFn := p.promptFn
+	styleInput := p.styleInput
 	value := p.value
 	cursorPos := p.cursorPos
 	focused := p.focused && ctx.Focused
@@ -409,7 +493,11 @@ func (p *PromptInput) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui
 		prompt = promptFn()
 	}
 
-	layout := buildVisualLayout(prompt, value, cursorPos, w)
+	var inputStyles []terminal.Style
+	if styleInput != nil {
+		inputStyles = styleInput(value)
+	}
+	layout := buildVisualLayout(prompt, value, cursorPos, w, inputStyles)
 
 	visH := layout.totalLines
 	if visH < 1 {
@@ -503,7 +591,7 @@ func (p *PromptInput) insertText(text string) bool {
 	if text == "" {
 		return false
 	}
-	clean := strings.ReplaceAll(strings.ReplaceAll(text, "\r", " "), "\n", " ")
+	clean := strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
 	p.mu.Lock()
 	if !p.focused {
 		p.mu.Unlock()

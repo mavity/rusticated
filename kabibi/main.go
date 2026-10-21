@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/charmbracelet/x/term"
 	"github.com/mavity/rusticated/kabibi/ui/app"
 	"github.com/mavity/rusticated/kabibi/ui/shell"
 	"github.com/spf13/pflag"
@@ -44,6 +45,10 @@ Flags:
 A single positional file path runs that file as a shell script. Other positional
 arguments are joined with spaces and sent directly to the AI as a one-shot prompt.
 For that prompt, Kabibi also includes this help text in the system context.
+
+With no command-line input, Kabibi starts its TUI when stdin is a terminal.
+When stdin is redirected, it reads shell commands and AI prompts incrementally
+from stdin; an incomplete shell construct continues across lines.
 `
 
 func printCLIHelp(w io.Writer) {
@@ -199,6 +204,11 @@ func runCLI(args []string, stdout, stderr io.Writer, verbose bool) int {
 			return runOneShotLine(string(data), opts.verbose, stdout, stderr)
 		}
 		return runOneShotAIPrompt(strings.Join(opts.positional, " "), opts.verbose, stdout, stderr)
+	}
+
+	if !term.IsTerminal(os.Stdin.Fd()) {
+		opts.verbose = verbose
+		return runPipedSession(os.Stdin, stdout, stderr, opts)
 	}
 
 	appWidget, host, err := app.Boot(verbose)

@@ -297,6 +297,9 @@ func ExecuteOneShotLine(ctx context.Context, line string, verbose bool, out io.W
 	case RouteEmpty, RouteBuiltin:
 		return 0, nil
 
+	case RouteIncomplete:
+		return 2, errors.New("incomplete shell input")
+
 	case RouteShell:
 		rec, runErr := es.RunCommand(ctx, line, parsed, SourceUserShell, func(chunk []byte) {
 			_, _ = out.Write(chunk)

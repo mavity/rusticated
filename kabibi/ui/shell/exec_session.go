@@ -24,10 +24,11 @@ import (
 type InputRoute int
 
 const (
-	RouteEmpty   InputRoute = iota // Blank or comment-only line
-	RouteBuiltin                   // Session/UI lifecycle command (exit, quit)
-	RouteShell                     // Execute in the mvdan shell runner
-	RouteAI                        // Route as a natural-language prompt to ai.Session
+	RouteEmpty      InputRoute = iota // Blank or comment-only line
+	RouteBuiltin                      // Session/UI lifecycle command (exit, quit)
+	RouteIncomplete                   // Valid shell input that needs more bytes before it can run
+	RouteShell                        // Execute in the mvdan shell runner
+	RouteAI                           // Route as a natural-language prompt to ai.Session
 )
 
 // CommandSource distinguishes commands entered directly by the user from
@@ -242,24 +243,29 @@ func (es *ExecutionSession) envMapLocked() map[string]string {
 	return env
 }
 
-// ClassifyInput determines whether a line of user input is empty, an immediate
-// lifecycle builtin (exit/quit), a syntactically valid shell command to hand to
-// mvdan/sh, or a syntax error that should route directly to AI chat.
+// ClassifyInput determines how user input should be handled without executing it.
 func (es *ExecutionSession) ClassifyInput(input string) (InputRoute, *syntax.File) {
 	trimmed := strings.TrimSpace(input)
 	if trimmed == "" {
 		return RouteEmpty, nil
 	}
 
-	// Parse with mvdan.cc/sh/v3/syntax (LangBash by default).
 	parser := syntax.NewParser(syntax.KeepComments(false))
 	file, err := parser.Parse(strings.NewReader(input), "")
 	if err != nil {
-		// Any bash syntax error routes immediately to AI fallback.
-		return RouteAI, nil
+		if !syntax.IsIncomplete(err) {
+			return RouteAI, nil
+		}
+		if es.hasShellHead(file, input) {
+			return RouteIncomplete, file
+		}
+		return RouteAI, file
 	}
 	if len(file.Stmts) == 0 {
 		return RouteEmpty, file
+	}
+	if hasTrailingContinuation(input) && es.hasShellHead(file, input) {
+		return RouteIncomplete, file
 	}
 
 	// Check for clean exit/quit builtins when entered as a standalone simple command.
@@ -271,7 +277,145 @@ func (es *ExecutionSession) ClassifyInput(input string) (InputRoute, *syntax.Fil
 		}
 	}
 
-	return RouteShell, file
+	head, compound, dynamic := firstCommandHead(file)
+	if compound || dynamic || head == "" || es.hasShellHead(file, input) {
+		return RouteShell, file
+	}
+	return RouteAI, file
+}
+
+var shellKeywordHeads = map[string]struct{}{
+	"!": {}, "case": {}, "coproc": {}, "do": {}, "done": {}, "elif": {}, "else": {},
+	"esac": {}, "fi": {}, "for": {}, "function": {}, "if": {}, "in": {},
+	"select": {}, "then": {}, "time": {}, "until": {}, "while": {},
+}
+
+func isShellKeyword(word string) bool {
+	_, ok := shellKeywordHeads[word]
+	return ok
+}
+
+func isAssignmentWord(word string) bool {
+	name, _, ok := strings.Cut(word, "=")
+	return ok && syntax.ValidName(name)
+}
+
+func leadingWord(input string) string {
+	fields := strings.Fields(input)
+	if len(fields) == 0 {
+		return ""
+	}
+	return strings.TrimLeft(fields[0], "{(")
+}
+
+func startsShellCompound(input string) bool {
+	trimmed := strings.TrimLeftFunc(input, unicode.IsSpace)
+	return strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "(")
+}
+
+func hasTrailingContinuation(input string) bool {
+	trimmed := strings.TrimSuffix(input, "\n")
+	trimmed = strings.TrimSuffix(trimmed, "\r")
+	backslashes := 0
+	for i := len(trimmed) - 1; i >= 0 && trimmed[i] == '\\'; i-- {
+		backslashes++
+	}
+	return backslashes%2 == 1
+}
+
+func firstCommandHead(file *syntax.File) (head string, compound, dynamic bool) {
+	if file == nil || len(file.Stmts) == 0 {
+		return "", false, false
+	}
+	cmd := file.Stmts[0].Cmd
+	switch cmd.(type) {
+	case *syntax.IfClause, *syntax.ForClause, *syntax.WhileClause,
+		*syntax.CaseClause, *syntax.Block, *syntax.Subshell, *syntax.FuncDecl:
+		return "", true, false
+	}
+	if cmd == nil {
+		return "", false, false
+	}
+	found := false
+	dynamic = false
+	syntax.Walk(cmd, func(node syntax.Node) bool {
+		if found {
+			return false
+		}
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		head = call.Args[0].Lit()
+		dynamic = head == ""
+		found = true
+		return false
+	})
+	return head, false, dynamic
+}
+
+func (es *ExecutionSession) hasShellHead(file *syntax.File, input string) bool {
+	head, compound, dynamic := firstCommandHead(file)
+	word := leadingWord(input)
+	return compound || dynamic || startsShellCompound(input) || isShellKeyword(head) ||
+		isShellKeyword(word) || isAssignmentWord(word) ||
+		es.CanResolveCommand(head) || es.CanResolveCommand(word)
+}
+
+// CanResolveCommand reports whether name would be handled by Kabibi's shell
+// command chain, without launching it or changing session state.
+func (es *ExecutionSession) CanResolveCommand(name string) bool {
+	if es == nil || name == "" {
+		return false
+	}
+	if interp.IsBuiltin(name) || (!strings.ContainsAny(name, `/\`) && isNestedShellBuiltinName(name)) {
+		return true
+	}
+	if name == "help" || name == "git" || name == "web" || name == "cdp" {
+		return true
+	}
+	if _, ok := LookupURootCommand(name); ok {
+		return true
+	}
+
+	es.runMu.Lock()
+	defer es.runMu.Unlock()
+
+	cwd := es.Dir()
+	env := es.EnvMap()
+	if es.runner != nil && es.runner.Funcs != nil {
+		if _, ok := es.runner.Funcs[name]; ok {
+			return true
+		}
+	}
+
+	path := name
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(cwd, path)
+	}
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		if strings.HasSuffix(strings.ToLower(name), ".sh") {
+			return true
+		}
+		if f, err := os.Open(path); err == nil {
+			var marker [2]byte
+			_, readErr := f.Read(marker[:])
+			_ = f.Close()
+			if readErr == nil && string(marker[:]) == "#!" {
+				return true
+			}
+		}
+	}
+
+	if _, ok := resolvePlatformExecutable(name, cwd, env); ok {
+		return true
+	}
+	if es.runner != nil && es.runner.Env != nil {
+		if _, err := interp.LookPathDir(cwd, es.runner.Env, name); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func firstNonSpaceOffset(s string) (uint, bool) {
@@ -898,5 +1042,3 @@ func (es *ExecutionSession) runDirectCommandInPTY(m *ManagedPTY, cmd *exec.Cmd, 
 	m.markExited(code, waitErr)
 	return true
 }
-
-

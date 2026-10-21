@@ -257,6 +257,11 @@ func TestClassifyInput_BashSyntaxAndCommandResolution(t *testing.T) {
 			want:  RouteShell,
 		},
 		{
+			name:  "dynamic command word",
+			input: "$KABIBI_DYNAMIC_COMMAND argument",
+			want:  RouteShell,
+		},
+		{
 			name:  "for loop construct",
 			input: "for i in 1 2 3; do echo $i; done",
 			want:  RouteShell,
@@ -272,6 +277,11 @@ func TestClassifyInput_BashSyntaxAndCommandResolution(t *testing.T) {
 			want:  RouteShell,
 		},
 		{
+			name:  "backslash escaping trailing space is not continuation",
+			input: `echo hi\ `,
+			want:  RouteShell,
+		},
+		{
 			name:  "syntax error unmatched apostrophe",
 			input: "What's the largest file in this directory?",
 			want:  RouteAI,
@@ -282,9 +292,9 @@ func TestClassifyInput_BashSyntaxAndCommandResolution(t *testing.T) {
 			want:  RouteAI,
 		},
 		{
-			name:  "valid syntax is handed to mvdan/sh first (fallback decided at execution time)",
+			name:  "valid syntax with unresolved command routes to AI",
 			input: "Name a bridge in Paris",
-			want:  RouteShell,
+			want:  RouteAI,
 		},
 	}
 
@@ -295,6 +305,74 @@ func TestClassifyInput_BashSyntaxAndCommandResolution(t *testing.T) {
 				t.Fatalf("ClassifyInput(%q) = %v, want %v", tc.input, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestClassifyInput_IncompleteShellConstructs(t *testing.T) {
+	es, err := NewExecutionSession("")
+	if err != nil {
+		t.Fatalf("NewExecutionSession: %v", err)
+	}
+
+	tests := []string{
+		"if true; then",
+		"for i in 1 2; do",
+		"echo 'unfinished",
+		"echo hi |",
+		"echo hi &&",
+		"cat <<EOF\nhello",
+		"{ echo hi",
+		"echo hi \\",
+	}
+	for _, input := range tests {
+		t.Run(input, func(t *testing.T) {
+			route, _ := es.ClassifyInput(input)
+			if route != RouteIncomplete {
+				t.Fatalf("ClassifyInput(%q) = %v, want RouteIncomplete", input, route)
+			}
+		})
+	}
+}
+
+func TestExecuteOneShotLine_RejectsIncompleteShellInput(t *testing.T) {
+	var output bytes.Buffer
+	code, err := ExecuteOneShotLine(context.Background(), "if true; then", false, &output)
+	if code != 2 || err == nil || err.Error() != "incomplete shell input" {
+		t.Fatalf("ExecuteOneShotLine() = (%d, %v), want (2, incomplete shell input)", code, err)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("incomplete input unexpectedly produced output: %q", output.String())
+	}
+}
+
+func TestShell_EnterContinuesIncompleteShellInput(t *testing.T) {
+	aiMock := &fakeAIRunner{}
+	sh := New(ShellOptions{AIRunner: aiMock})
+	defer sh.Close()
+
+	sh.SetInput("if true; then")
+	before := len(sh.Blocks())
+	if !sh.handleKeyEvent(input.KeyPressEvent{Code: input.KeyEnter}) {
+		t.Fatal("Enter was not handled for incomplete shell input")
+	}
+	if got, want := sh.Input().Value(), "if true; then\n"; got != want {
+		t.Fatalf("input after continuation Enter = %q, want %q", got, want)
+	}
+	if sh.IsRunning() || len(sh.Blocks()) != before {
+		t.Fatal("incomplete shell input was submitted instead of continued")
+	}
+
+	sh.SetInput("if true; then\necho continuation\nfi")
+	if !sh.handleKeyEvent(input.KeyPressEvent{Code: input.KeyEnter}) {
+		t.Fatal("Enter was not handled for complete shell input")
+	}
+	sh.WaitActive()
+	blocks := sh.Blocks()
+	if got := strings.TrimSpace(blocks[len(blocks)-1].Output.String()); got != "continuation" {
+		t.Fatalf("completed multiline block output = %q, want %q", got, "continuation")
+	}
+	if len(aiMock.prompts) != 0 {
+		t.Fatalf("multiline shell block unexpectedly routed to AI: %v", aiMock.prompts)
 	}
 }
 

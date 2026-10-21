@@ -1,11 +1,11 @@
-# Kabibi Architectural Plan: Three-Way Classifier, Subtle Inline Syntax Highlighting, and Headless Piped Shell
+# Kabibi Input Classification, Highlighting, and Piped Mode
 
-## 1. Executive Summary & Staged Roadmap
+## 1. Implementation Status
 
-Kabibi is a hybrid bash shell and natural-language AI assistant. To unify interactive TTY operation, live prompt feedback, and non-TTY piped execution under a single deterministic model, implementation proceeds in **three sequential stages**:
+Kabibi is a hybrid bash shell and natural-language AI assistant. The three planned stages below are implemented and share one classifier. “Three-way” refers to the primary decision among shell input, incomplete shell input, and AI input; `RouteEmpty` and `RouteBuiltin` are additional control-flow outcomes.
 
 1. **Stage 1 — Pre-Execution Three-Way Input Classifier & Multiline TTY Continuation (Prerequisite):**
-   - Upgrade `ExecutionSession.ClassifyInput` from a post-hoc execution fallback into a deterministic **pre-execution classifier** that distinguishes:
+   - `ExecutionSession.ClassifyInput` is a deterministic **pre-execution classifier** that distinguishes:
      1. **`RouteEmpty`**: blank or comment-only input.
      2. **`RouteBuiltin`**: standalone `exit` or `quit`.
      3. **`RouteIncomplete`**: syntactically incomplete bash construct (e.g. `if true; then`, `for i in 1 2; do`, trailing `|`/`&&`/`\`, unclosed `{`/`(`/`'`, or unclosed here-doc) whose leading command token is a valid shell keyword, builtin, function, script, or executable.
@@ -20,8 +20,8 @@ Kabibi is a hybrid bash shell and natural-language AI assistant. To unify intera
      - If the classifier routes the current buffer to **`RouteShell`**, **`RouteBuiltin`**, or **`RouteIncomplete`**, tokens are highlighted using a **muted, desaturated mid-luminance palette** (greyish-blue, greyish-green, greyish-orange, greyish-violet, slate-grey) calibrated to remain legible and understated on **both dark/black and light/white terminal backgrounds**.
 
 3. **Stage 3 — Early-Fork Headless Piped Mode (`kabibi/piped.go` + `kabibi/main.go`):**
-   - When `kabibi` is invoked with no one-shot flags and non-TTY standard streams (`!term.IsTerminal(os.Stdin.Fd())`), fork early in `kabibi/main.go` to `runPipedSession` — bypassing `app.Boot()`, `DualPaneWidget` (file panels permanently absent), and `ui.Host` (no raw mode, no 80ms spinner ticker).
-   - Process standard input incrementally line-by-line using the **exact same Stage 1 three-way classifier**: accumulating multiline blocks while `RouteIncomplete`, executing complete `RouteShell` blocks immediately (without waiting for whole-stream EOF), and routing `RouteAI` prompts to `LazyAIRunner`.
+   - When `kabibi` is invoked with no one-shot flags and stdin is not a terminal (`!term.IsTerminal(os.Stdin.Fd())`), `runCLI` routes to `runPipedSession` — bypassing `app.Boot()`, `DualPaneWidget` (file panels are not instantiated), and `ui.Host` (no raw mode or Kabibi spinner ticker).
+   - Process standard input incrementally line-by-line using the **same classifier**: accumulating multiline blocks while `RouteIncomplete`, executing complete `RouteShell` blocks immediately (without waiting for whole-stream EOF), and routing each `RouteAI` line to `LazyAIRunner`.
    - Retain PTY execution (`pty.Start` and `ManagedPTY`) for child processes spawned by shell commands and AI `exec` tools.
 
 ---
@@ -38,7 +38,7 @@ To support both **multiline shell continuation** and **classifier-driven syntax 
 
 ### 2.2 Pre-Execution Command Resolution (`ExecutionSession.CanResolveCommand`)
 
-Add a read-only resolution helper on `ExecutionSession` that mirrors the exact execution middleware chain in `shell.go` without spawning or mutating anything:
+`ExecutionSession.CanResolveCommand` performs a read-only check without spawning or mutating anything. It accounts for:
 
 1. **Shell Keywords & Control Structures:**
    - Reserved words (`if`, `for`, `while`, `until`, `case`, `select`, `function`, `{`, `(`, `[[`, `((`, `!`, `time`, `coproc`).
@@ -58,26 +58,15 @@ Add a read-only resolution helper on `ExecutionSession` that mirrors the exact e
 
 Given raw input string $S$:
 
-1. **Empty / Comment Check:**
-   - If `strings.TrimSpace(S) == ""`, return `RouteEmpty`.
-2. **Leading Token Pre-Check (Disambiguating English Contractions from Multiline Shell):**
-   - Extract the first statement/command head token of $S$.
-   - If the head token is a plain literal word that is **not** a bash keyword, **not** a variable assignment (`NAME=val`), and `es.CanResolveCommand(head) == false` (for example, `What's` in `What's the largest file?` or `Name` in `Name a bridge in Paris`), classify immediately as **`RouteAI`**.
-   - This prevents English contractions (`What's`, `don't`, `I'm`) from being misclassified as unclosed single-quoted shell strings, and ensures `Name a bridge in Paris` is classified as `RouteAI` right away (so Stage 2 never highlights it as bash).
-3. **Trailing Unescaped Backslash Check:**
-   - Because `mvdan/sh` treats `"echo hi \\\n"` at EOF as a complete command, explicitly check whether $S$ ends with an unescaped trailing `\` (or `\\\n` continuation). If the leading command resolves, return **`RouteIncomplete`**.
-4. **AST Parse (`syntax.NewParser(syntax.KeepComments(true)).Parse`):**
-   - **Case A — `err == nil`:**
-     - If `len(file.Stmts) == 0`: return `RouteEmpty` (comment-only input).
-     - If standalone `exit` or `quit`: return `RouteBuiltin`.
-     - Inspect the first top-level statement (`file.Stmts[0]`):
-       - If it is a compound command (`IfClause`, `ForClause`, `WhileClause`, `CaseClause`, `Block`, `Subshell`, `FuncDecl`, `ArithmCmd`, `TestClause`, `DeclClause`, `TimeClause`, `CoprocClause`), return **`RouteShell`**.
-       - If its leading `CallExpr` has assignments with no command word, or its literal command word satisfies `es.CanResolveCommand(head)` (or uses dynamic expansion like `$CMD`), return **`RouteShell`**.
-       - Otherwise (the first command word is an unknown literal token like `Name` in `Name a bridge in Paris`), return **`RouteAI`**.
-   - **Case B — `err != nil && syntax.IsIncomplete(err)`:**
-     - Because Step 2 already verified that the leading token is a valid shell keyword, assignment, or resolvable command, an incomplete parse error (`unclosed quote`, `then must be followed by a statement list`, `| must be followed by a statement`, unclosed `{`/`(`/`<<EOF`) is genuinely an in-progress shell construct $\rightarrow$ return **`RouteIncomplete`**.
-   - **Case C — `err != nil && !syntax.IsIncomplete(err)`:**
-     - Definitive syntax error (e.g. `explain (in detail) why the build broke` or malformed syntax) $\rightarrow$ return **`RouteAI`**.
+1. If input is whitespace-only, return `RouteEmpty`.
+2. Parse using `syntax.NewParser(syntax.KeepComments(false))`.
+   - A definitive parse error (`!syntax.IsIncomplete(err)`) routes to `RouteAI`.
+   - An incomplete parse routes to `RouteIncomplete` only when `hasShellHead` recognizes a shell compound, keyword, assignment, dynamic command word, or resolvable command; otherwise it routes to `RouteAI`. This is what keeps questions such as `What's the largest file?` from becoming shell continuations.
+3. For a successful parse, no statements means `RouteEmpty`; a standalone `exit` or `quit` means `RouteBuiltin`.
+4. An unescaped trailing backslash before the final newline is explicitly treated as `RouteIncomplete` when the input has a shell head; the parser may otherwise accept that input at EOF. A backslash escaping a trailing space is not a continuation.
+5. A compound command, dynamic command word, assignment-only command, or resolvable first command routes to `RouteShell`. A complete command whose leading word is unresolved (such as `Name` in `Name a bridge in Paris`) routes to `RouteAI`.
+
+This classifier is a routing heuristic, not a full Bash validator: definitive syntax errors route to AI so prose can still receive the natural-language fallback.**.
    - *Defense in depth:* Keep `ErrUnknownCommandAtStart` in `RunCommand` as a safety net in case an executable disappears between classification and execution.
 
 ### 2.4 Interactive TTY Multiline Continuation (`PromptInput` & `Shell`)
@@ -144,8 +133,8 @@ flowchart TD
     H -- "false (Piped / Redirected)" --> J["runPipedSession(os.Stdin, stdout, stderr, opts)\n[Headless Mode: No TUI, No Anim, No File Panels, Incremental Stream]"]
 ```
 
-When `term.IsTerminal(int(os.Stdin.Fd()))` is `false`:
-1. **No TUI or Raw Mode:** `app.Boot()` and `host.Run()` are never called; `term.MakeRaw` is never invoked; no cursor-positioning or screen-clearing ANSI sequences are emitted by Kabibi.
+When `term.IsTerminal(os.Stdin.Fd())` is `false`:
+1. **No TUI or Raw Mode:** `app.Boot()` and `host.Run()` are never called; `term.MakeRaw` is never invoked; Kabibi does not emit TUI cursor-positioning or screen-clearing sequences (child processes may still emit their own terminal output).
 2. **File Panels Permanently Disabled:** `AppWidget` and `DualPaneWidget` are never instantiated; `Ctrl+O` and F-key dialogs do not exist in this mode.
 3. **Animations Permanently Silenced:** Because `Shell` widget's 80ms `stackSpinnerFrames` ticker lives in `shell_widget.go`, bypassing `AppWidget`/`Shell` guarantees zero spinner frames are ever emitted. In `runPipedAI`, `onFeedback` is silenced by default (or logged as plain `[ai] ...` lines to `stderr` only when `--verbose` is set, stripping any `\r` spinner rewrites).
 
@@ -155,12 +144,11 @@ Unlike a naive batch runner that slurps all of `stdin` until EOF before running 
 
 1. Maintain an accumulator buffer `var pending strings.Builder`.
 2. Read the next line from `stdin`:
-   - If `pending.Len() == 0` and the line is blank or a `#` comment, skip it immediately.
    - Append the line to `pending`.
 3. Classify `current := pending.String()` using Stage 1's `route, parsed := es.ClassifyInput(current)`:
    - **`RouteIncomplete`**:
      - If **not at EOF**, keep reading the next line into `pending` (allowing `if ... then ... fi`, `for ... do ... done`, trailing `\`, trailing `|`, and here-docs to span multiple lines naturally).
-     - If **at EOF** (the stream ended while a shell construct was still unclosed), attempt `es.RunCommand` so `mvdan/sh` reports a deterministic syntax error and returns exit code `2` (rather than hanging or silently dropping the buffer).
+     - If **at EOF** (the stream ended while a shell construct was still unclosed), print `kabibi: incomplete shell input at end of stdin` to stderr and return exit code `2`; do not pass the incomplete buffer to the AI or execute it.
    - **`RouteEmpty`**:
      - `pending.Reset()` and continue.
    - **`RouteBuiltin`** (`exit` / `quit`):
@@ -172,8 +160,9 @@ Unlike a naive batch runner that slurps all of `stdin` until EOF before running 
      - Otherwise update `lastExitCode = rec.ExitCode`.
    - **`RouteAI`**:
      - `pending.Reset()`.
-     - Execute `runPipedAI(ctx, aiRunner, strings.TrimSpace(current), stdout, stderr, opts.verbose)`.
+     - Execute `runPipedAI(ctx, aiRunner, strings.TrimSpace(current), stdout, stderr, opts.verbose)`. AI input is handled one classified physical line at a time; multiline accumulation is reserved for inputs classified as incomplete shell syntax.
      - Record the AI turn in `es` history so subsequent shell commands or AI turns in the same piped stream share full session context.
+4. Shell and AI output is streamed to stdout. Output-write failures are reported to stderr and produce a non-zero result. At EOF, the session returns the last command or AI turn's exit code; standalone `exit`/`quit` returns the current last exit code immediately.
 
 ### 4.3 Retained PTY Execution for Child Processes & AI Tools
 
@@ -194,7 +183,7 @@ Even though Kabibi itself reads from a non-TTY `stdin` and streams to `stdout`/`
 | **Terminal Raw Mode** | Yes (`term.MakeRaw`) | No (standard streams) |
 | **Blue File Panels (`Ctrl+O`)** | Available (hidden by default) | **Permanently disabled (not instantiated)** |
 | **80ms Spinner Animation** | Active on running block | **Permanently silenced** |
-| **Input Classification** | Shared 3-way `es.ClassifyInput` | Shared 3-way `es.ClassifyInput` |
+| **Input Classification** | Shared shell/incomplete/AI classifier (plus empty and lifecycle routes) | Shared shell/incomplete/AI classifier (plus empty and lifecycle routes) |
 | **Multiline `if`/`for`/quotes** | `Enter` inserts `\n` while `RouteIncomplete` | Accumulates lines while `RouteIncomplete` |
 | **Inline Syntax Highlighting** | Subtle 5-color bash palette; disabled on `RouteAI` | N/A (no prompt echo) |
 | **Child Process & AI PTY** | Enabled (`pty.Start` / `ManagedPTY`) | **Enabled (`pty.Start` / `ManagedPTY`)** |
@@ -202,37 +191,33 @@ Even though Kabibi itself reads from a non-TTY `stdin` and streams to `stdout`/`
 
 ---
 
-## 6. Implementation & Verification Plan
+## 6. Implemented Coverage
 
-### Step 1: Three-Way Classifier & Multiline TTY Continuation
+### Stage 1: Implemented Classifier & Multiline TTY Continuation
 - **Files:** `kabibi/ui/shell/exec_session.go`, `kabibi/ui/shell/prompt_input.go`, `kabibi/ui/shell/shell_widget.go`
-- **Tasks:**
-  1. Add `RouteIncomplete` to `InputRoute`.
-  2. Implement `ExecutionSession.CanResolveCommand(name string) bool` covering builtins, functions, nested shells (`bash`/`sh`/`kabibi`), `git`/`web`/`cdp`, u-root commands, local scripts, and `PATH`/`PATHEXT` executables.
-  3. Update `ExecutionSession.ClassifyInput` to return `RouteIncomplete`, `RouteShell`, `RouteAI`, `RouteBuiltin`, or `RouteEmpty` prior to execution.
-  4. Preserve `\n` in `PromptInput` and update `Shell.handleKeyEvent` so pressing `Enter` when `ClassifyInput` returns `RouteIncomplete` inserts a newline instead of submitting.
+- `InputRoute` includes `RouteIncomplete`; `CanResolveCommand` checks builtins, functions, nested shells (`bash`/`sh`/`kabibi`), `git`/`web`/`cdp`, u-root commands, local scripts, and platform-resolved executables.
+- `ClassifyInput` routes input before execution. `PromptInput` preserves newlines, and `Shell` inserts one on Enter when the current input is `RouteIncomplete`.
 - **Unit Tests (`kabibi/ui/shell/shell_ai_test.go`, `prompt_input_test.go`):**
   - Verify `if true; then`, `for i in 1 2; do`, `echo "unclosed`, `echo hi |`, and `echo hi \` classify as `RouteIncomplete`.
   - Verify `Name a bridge in Paris`, `What's the largest file?`, and `explain (in detail) why` classify immediately as `RouteAI`.
   - Verify pressing `Enter` in TTY `Shell` on `if true; then` inserts `\n` and waits until `fi` before executing.
 
-### Step 2: Classifier-Driven Subtle Inline Syntax Highlighting
+### Stage 2: Implemented Classifier-Driven Subtle Inline Syntax Highlighting
 - **Files:** `kabibi/ui/shell/prompt_input.go`, `kabibi/ui/shell/shell_widget.go`
-- **Tasks:**
-  1. Add the muted dual-background palette (`#5B82A6`, `#5E8C6A`, `#A67C52`, `#856B9E`, `#76808A`) and classifier-backed rune styler to `PromptInput`.
-  2. Ensure `RouteAI` inputs render completely unhighlighted (default foreground), while `RouteShell`, `RouteBuiltin`, and `RouteIncomplete` inputs highlight keywords, strings, variables, operators, and comments.
+- `PromptInput` uses the muted palette (`#5B82A6`, `#5E8C6A`, `#A67C52`, `#856B9E`, `#76808A`) with classifier-backed styling: `RouteAI` uses the default foreground, while shell, builtin, and incomplete routes receive bash token colors.
 - **Unit Tests (`kabibi/ui/shell/prompt_input_test.go`):**
   - Verify `echo "hello" | cat $FOO` produces distinct subtle foreground colors on keyword, string, operator, and variable cells.
   - Verify `Name a bridge in Paris` and `What's the time?` render with default foreground style on every rune (`CharResetForegroundDefault`).
   - Verify incomplete bash (`if true; then`) still highlights `if`, `true`, `;`, and `then`.
 
-### Step 3: Headless Piped Mode
+### Stage 3: Implemented Headless Piped Mode
 - **Files:** `kabibi/piped.go`, `kabibi/main.go`, `kabibi/piped_test.go`
-- **Tasks:**
-  1. Implement `runPipedSession` and `runPipedAI` in `kabibi/piped.go` using incremental `bufio.Reader` line reading and Stage 1's `ClassifyInput`.
-  2. Update `runCLI` in `kabibi/main.go` to check `term.IsTerminal(int(os.Stdin.Fd()))` and route non-TTY invocations to `runPipedSession`.
+- `runPipedSession` and `runPipedAI` process input incrementally with `bufio.Reader` and the shared classifier.
+- `runCLI` checks `term.IsTerminal(os.Stdin.Fd())` and routes non-TTY stdin to `runPipedSession`.
 - **Unit Tests (`kabibi/piped_test.go`):**
   - Persistent state across piped lines (`export FOO=bar` followed by `echo $FOO`).
-  - Multiline compound statements (`if`/`then`/`fi`, `for`/`do`/`done`, heredocs) streamed across lines.
+  - Multiline compound statements (`if`/`then`/`fi`), persistent shell state, and incomplete-syntax EOF behavior.
   - Mixed bash commands and AI prompts in the same piped session.
-  - Verification that no spinner animations or TUI escape sequences are emitted, and exit codes propagate accurately (including unclosed syntax at EOF returning non-zero).
+  - Redirected-stdin CLI routing and preservation of command/AI exit codes.
+
+The full `ui/shell` test suite and focused classifier, prompt-input, TTY continuation, piped-reader, and redirected-stdin CLI tests pass. The root-package suite still fails `TestExecutableDoesNotImportCharmUIStack`: `go mod why` traces Bubble Tea and Lipgloss through `ui/shell` → u-root's `gosh` → `bubbline`. This is a static dependency-graph issue, separate from piped mode's runtime behavior. Headless mode guarantees no TUI startup or Kabibi animation at runtime; it does not remove those dependencies from the executable.

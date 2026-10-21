@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/x/input"
 	"github.com/mavity/rusticated/kabibi/ui"
+	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
 
 func extractRowString(buf ui.CellBuf, y int) string {
@@ -145,6 +146,68 @@ func TestPromptInput_DynamicPromptAndWideUnicode(t *testing.T) {
 	}
 }
 
+func TestPromptInput_PreservesAndInsertsNewlines(t *testing.T) {
+	p := NewPromptInput(PromptInputOptions{})
+	p.SetValue("if true; then\r\necho ready")
+	if got, want := p.Value(), "if true; then\necho ready"; got != want {
+		t.Fatalf("SetValue() = %q, want %q", got, want)
+	}
+	p.SetCursorPos(2)
+	p.InsertNewline()
+	if got, want := p.Value(), "if\n true; then\necho ready"; got != want {
+		t.Fatalf("InsertNewline() = %q, want %q", got, want)
+	}
+
+	p.Reset()
+	p.HandleEvent(input.PasteEvent("first\nsecond"))
+	if got, want := p.Value(), "first\nsecond"; got != want {
+		t.Fatalf("pasted value = %q, want %q", got, want)
+	}
+}
+
+func TestPromptInput_ClassifierGatesBashHighlighting(t *testing.T) {
+	sh := New(ShellOptions{AIRunner: &fakeAIRunner{}})
+	defer sh.Close()
+
+	p := NewPromptInput(PromptInputOptions{
+		Prompt:     func() string { return "$ " },
+		StyleInput: sh.styleInput,
+	})
+	p.SetValue("Name a bridge in Paris")
+	aiBuf, _ := p.Render(ui.Rect{W: 80, H: 4}, ui.RenderContext{Focused: true})
+	for x := 2; x < 2+len("Name a bridge in Paris"); x++ {
+		if !aiBuf.Get(x, 0).Style.HasAttribute(terminal.CharResetForegroundDefault) {
+			t.Fatalf("AI text at column %d was syntax-highlighted", x)
+		}
+	}
+
+	p.SetValue(`echo "hello" | cat $HOME`)
+	shellBuf, _ := p.Render(ui.Rect{W: 80, H: 4}, ui.RenderContext{Focused: true})
+	colored := false
+	for x := 2; x < 2+len(`echo "hello" | cat $HOME`); x++ {
+		if !shellBuf.Get(x, 0).Style.HasAttribute(terminal.CharResetForegroundDefault) {
+			colored = true
+			break
+		}
+	}
+	if !colored {
+		t.Fatal("valid shell input received no syntax highlighting")
+	}
+
+	p.SetValue("if true; then")
+	incompleteBuf, _ := p.Render(ui.Rect{W: 80, H: 4}, ui.RenderContext{Focused: true})
+	colored = false
+	for x := 2; x < 2+len("if true; then"); x++ {
+		if !incompleteBuf.Get(x, 0).Style.HasAttribute(terminal.CharResetForegroundDefault) {
+			colored = true
+			break
+		}
+	}
+	if !colored {
+		t.Fatal("incomplete shell input received no syntax highlighting")
+	}
+}
+
 func TestPromptInput_ParentOwnsEnterAndCtrlC(t *testing.T) {
 	p := NewPromptInput(PromptInputOptions{})
 	p.SetValue("echo hi")
@@ -191,4 +254,3 @@ func TestPromptInput_CapturesAndResetsFirstInputAt(t *testing.T) {
 		t.Fatalf("FirstInputAt() after Reset() = %v, want zero", p.FirstInputAt())
 	}
 }
-
