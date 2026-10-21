@@ -94,6 +94,7 @@ replace (
 	github.com/go-git/go-git/v5 => ../mohabbat/rusticated-jit/github.com/go-git/go-git/v5
 	github.com/mattn/go-isatty => ../mohabbat/rusticated-jit/github.com/mattn/go-isatty
 	github.com/u-root/u-root => ../u-root
+	mvdan.cc/sh/v3 => ../mohabbat/rusticated-jit/mvdan.cc/sh/v3
 	golang.org/x/sys => ../mohabbat/rusticated-jit/golang.org/x/sys
 	golang.org/x/term => ../mohabbat/rusticated-jit/golang.org/x/term
 	pty => ../pty

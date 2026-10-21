@@ -753,7 +753,6 @@ func (h *HostEnv) sys_path_remove(ctx context.Context, m api.Module, stack []uin
 		return
 	}
 	err = os.Remove(path)
-	err = os.Remove(path)
 	writeOverlapped(m, ovPtr, mapErrno(err), 0, 0)
 }
 

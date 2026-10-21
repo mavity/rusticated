@@ -16,11 +16,13 @@ go 1.20
 require (
 	github.com/u-root/u-root v0.12.0
 	golang.org/x/sys v0.26.0
+	mvdan.cc/sh/v3 v3.14.1
 	other.com/foo v1.0.0
 )
 
 replace github.com/u-root/u-root => ./mohabbat/rusticated-jit/github.com/u-root/u-root
 replace golang.org/x/sys => ../../mohabbat/rusticated-jit/golang.org/x/sys
+replace mvdan.cc/sh/v3 => ../mohabbat/rusticated-jit/mvdan.cc/sh/v3
 replace other.com/foo => ../local/other
 `
 	jitBase := "/abs/workspace/mohabbat/rusticated-jit"
@@ -32,8 +34,8 @@ replace other.com/foo => ../local/other
 		return targets[i].module < targets[j].module
 	})
 
-	if len(targets) != 2 {
-		t.Fatalf("expected 2 targets, got %d: %v", len(targets), targets)
+	if len(targets) != 3 {
+		t.Fatalf("expected 3 targets, got %d: %v", len(targets), targets)
 	}
 
 	if targets[0].module != "github.com/u-root/u-root" {
@@ -42,6 +44,9 @@ replace other.com/foo => ../local/other
 
 	if targets[1].module != "golang.org/x/sys" {
 		t.Errorf("expected module golang.org/x/sys, got %s", targets[1].module)
+	}
+	if targets[2].module != "mvdan.cc/sh/v3" {
+		t.Errorf("expected module mvdan.cc/sh/v3, got %s", targets[2].module)
 	}
 }
 
@@ -140,6 +145,30 @@ func TestPatchFilepathSecurejoinForByteSeparator(t *testing.T) {
 	}
 	if err := patchFilepathSecurejoinInMemory(map[string][]byte{"join.go": []byte("no separator scan")}); err == nil {
 		t.Fatal("patch accepted an unexpected securejoin source")
+	}
+}
+
+func TestPatchMvdanKillBuiltin(t *testing.T) {
+	files := map[string][]byte{
+		"interp/builtin.go": []byte("case\n\t\t\"jobs\",\n\t\t\"kill\",\n\t\t\"newgrp\",\n"),
+	}
+	if err := patchMvdanKillBuiltinInMemory(files); err != nil {
+		t.Fatalf("patch mvdan kill builtin: %v", err)
+	}
+	if got := string(files["interp/builtin.go"]); strings.Contains(got, "\"kill\"") {
+		t.Fatalf("kill remains in builtin list: %q", got)
+	}
+
+	for name, unexpected := range map[string]map[string][]byte{
+		"missing file":    {},
+		"changed source":  {"interp/builtin.go": []byte("case\n\t\t\"jobs\",\n\t\t\"newgrp\",\n")},
+		"duplicate entry": {"interp/builtin.go": []byte("\t\t\"kill\",\n\t\t\"kill\",\n")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := patchMvdanKillBuiltinInMemory(unexpected); err == nil {
+				t.Fatal("patch accepted unexpected mvdan source")
+			}
+		})
 	}
 }
 

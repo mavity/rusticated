@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/u-root/u-root/pkg/core"
+	"mvdan.cc/sh/v3/interp"
 )
 
 func TestURootRegistry_AllCommandsRegisteredAndZeroPanicOnReinvocation(t *testing.T) {
@@ -534,82 +535,18 @@ func TestURootAdversarial_FlagSafetyAndVirtualization(t *testing.T) {
 	}
 }
 
-func TestURootCommand_Echo(t *testing.T) {
-	runner, ok := LookupURootCommand("echo")
-	if !ok || runner == nil {
-		t.Fatalf("LookupURootCommand(\"echo\") returned false/nil")
+func TestURootCommand_EchoNotRegistered(t *testing.T) {
+	if _, ok := LookupURootCommand("echo"); ok {
+		t.Fatal("echo must use mvdan/sh's shell builtin, not the u-root registry")
 	}
+}
 
-	runEcho := func(ctx context.Context, args ...string) (string, string, int) {
-		var outBuf, errBuf bytes.Buffer
-		ioEnv := core.IO{
-			Stdout: &outBuf,
-			Stderr: &errBuf,
-		}
-		code := runner(ctx, ioEnv, args...)
-		return outBuf.String(), errBuf.String(), code
+func TestKillIsRoutedAsCommand(t *testing.T) {
+	if interp.IsBuiltin("kill") {
+		t.Fatal("kill must not be classified as an mvdan/sh builtin")
 	}
-
-	// 1. Basic echo
-	out, errOut, code := runEcho(context.Background(), "hello", "world")
-	if code != 0 || out != "hello world\n" || errOut != "" {
-		t.Fatalf("basic echo failed: code=%d out=%q err=%q", code, out, errOut)
-	}
-
-	// 2. Empty echo (should print newline)
-	out, errOut, code = runEcho(context.Background())
-	if code != 0 || out != "\n" || errOut != "" {
-		t.Fatalf("empty echo failed: code=%d out=%q err=%q", code, out, errOut)
-	}
-
-	// 3. -n flag (suppress newline)
-	out, errOut, code = runEcho(context.Background(), "-n", "no-newline")
-	if code != 0 || out != "no-newline" || errOut != "" {
-		t.Fatalf("echo -n failed: code=%d out=%q err=%q", code, out, errOut)
-	}
-
-	// 4. -e escapes: \n, \t, quotes, \x41, \0101
-	out, errOut, code = runEcho(context.Background(), "-e", "line1\\nline2\\t\"quoted\"\\x41\\0101")
-	if code != 0 || out != "line1\nline2\t\"quoted\"AA\n" || errOut != "" {
-		t.Fatalf("echo -e escapes failed: code=%d out=%q err=%q", code, out, errOut)
-	}
-
-	// 5. -E flag (escapes disabled)
-	out, errOut, code = runEcho(context.Background(), "-E", "raw\\nstring")
-	if code != 0 || out != "raw\\nstring\n" || errOut != "" {
-		t.Fatalf("echo -E failed: code=%d out=%q err=%q", code, out, errOut)
-	}
-
-	// 6. \c produces no further output
-	out, errOut, code = runEcho(context.Background(), "-e", "hello\\cworld")
-	if code != 0 || out != "hello\n" || errOut != "" {
-		t.Fatalf("echo \\c failed: code=%d out=%q err=%q", code, out, errOut)
-	}
-
-	// 7. -h returns 0 with usage
-	out, errOut, code = runEcho(context.Background(), "-h")
-	if code != 0 || !strings.Contains(errOut, "Usage:") {
-		t.Fatalf("echo -h failed: code=%d out=%q err=%q", code, out, errOut)
-	}
-
-	// 8. Invalid flag returns 1
-	out, errOut, code = runEcho(context.Background(), "-invalid-flag")
-	if code != 1 {
-		t.Fatalf("echo invalid flag failed: expected code 1, got %d", code)
-	}
-
-	// 9. FlagSet isolation on subsequent call
-	out, errOut, code = runEcho(context.Background(), "recovered")
-	if code != 0 || out != "recovered\n" {
-		t.Fatalf("echo recovery after invalid flag failed: code=%d out=%q", code, out)
-	}
-
-	// 10. Context cancellation
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	out, errOut, code = runEcho(ctx, "cancelled")
-	if code != 130 {
-		t.Fatalf("echo context cancellation failed: expected code 130, got %d", code)
+	if _, ok := LookupURootCommand("kill"); !ok {
+		t.Fatal("kill must be registered as a u-root command")
 	}
 }
 
@@ -814,4 +751,3 @@ func TestURootCommand_Grep(t *testing.T) {
 		t.Fatalf("grep cancellation failed: expected code 130, got %d", code)
 	}
 }
-

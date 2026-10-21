@@ -157,6 +157,12 @@ func applyWasip1DepPatches(ws, projectDir, goroot string) (*depPatchResult, erro
 			}
 		}
 
+		if target.module == "mvdan.cc/sh/v3" {
+			if err := patchMvdanKillBuiltinInMemory(files); err != nil {
+				return nil, fmt.Errorf("patch %s: %w", target.module, err)
+			}
+		}
+
 		// SPECIAL CASE: go-isatty
 		if strings.HasSuffix(filepath.ToSlash(target.jitDir), "github.com/mattn/go-isatty") {
 			for _, fname := range []string{
@@ -455,7 +461,11 @@ func RawSyscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err Errno) {
 		}
 
 		var sfx [][2]string
-		if target.module != "github.com/go-git/go-git/v5" && target.module != "github.com/mattn/go-isatty" {
+		// mvdan/sh's !unix implementations work for wasip1; broadening its
+		// Unix-only tags also selects implementations that need Unix syscalls.
+		if target.module != "github.com/go-git/go-git/v5" &&
+			target.module != "github.com/mattn/go-isatty" &&
+			target.module != "mvdan.cc/sh/v3" {
 			sfx = applyGateFlipsInMemory(target.jitDir, files)
 		}
 		for _, sf := range sfx {
@@ -787,6 +797,24 @@ func patchFilepathSecurejoinInMemory(files map[string][]byte) error {
 		return fmt.Errorf("expected exactly one filepath separator scan, found %d", strings.Count(content, old))
 	}
 	files["join.go"] = []byte(strings.Replace(content, old, patched, 1))
+	return nil
+}
+
+func patchMvdanKillBuiltinInMemory(files map[string][]byte) error {
+	const sourcePath = "interp/builtin.go"
+	const killBuiltin = "\t\t\"kill\",\n"
+
+	data, ok := files[sourcePath]
+	if !ok {
+		return fmt.Errorf("%s is missing", sourcePath)
+	}
+
+	content := string(data)
+	if strings.Count(content, killBuiltin) != 1 {
+		return fmt.Errorf("expected exactly one kill builtin entry, found %d", strings.Count(content, killBuiltin))
+	}
+
+	files[sourcePath] = []byte(strings.Replace(content, killBuiltin, "", 1))
 	return nil
 }
 
