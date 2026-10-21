@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/input"
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
+	"golang.org/x/text/number"
 )
 
 type mockFSService struct {
@@ -182,6 +183,177 @@ func TestIsExecutableFileUsesPlatformRules(t *testing.T) {
 	}
 	if !IsExecutableFile(file) {
 		t.Fatal("Unix file with execute permission should be executable")
+	}
+}
+
+func TestOsFSServiceReadDirMetadataAndNonRecursiveTotals(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "one.bin"), []byte("12345"), 0o644); err != nil {
+		t.Fatalf("WriteFile one.bin: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "subdir"), 0o755); err != nil {
+		t.Fatalf("Mkdir subdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "subdir", "nested.bin"), []byte("nested"), 0o644); err != nil {
+		t.Fatalf("WriteFile nested.bin: %v", err)
+	}
+
+	entries, err := (&OsFSService{}).ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	var one FSEntry
+	for _, entry := range entries {
+		if entry.Name == "one.bin" {
+			one = entry
+		}
+	}
+	if one.Size != 5 || one.Mode.Perm() == 0 {
+		t.Fatalf("one.bin metadata = size %d, mode %v; want size 5 and permissions", one.Size, one.Mode)
+	}
+
+	pane := NewFilePaneWidget("files")
+	if err := pane.LoadDir(dir); err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	count, size := pane.fileTotals()
+	if count != 1 || size != 5 {
+		t.Fatalf("directory totals = (%d, %d), want (1, 5) without descending", count, size)
+	}
+}
+
+func TestFilePaneWidgetRefreshesSelectedMetadataAndTotal(t *testing.T) {
+	svc := &mockFSService{entries: []FSEntry{
+		{Name: "alpha", Size: 10, Mode: 0o644},
+		{Name: "beta", Size: 20, Mode: 0o644},
+	}}
+	pane := NewFilePaneWidget("files")
+	pane.SetService(svc)
+	if err := pane.LoadDir("/files"); err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	pane.SelectByName("alpha")
+	if _, total := pane.fileTotals(); total != 30 {
+		t.Fatalf("initial total = %d, want 30", total)
+	}
+
+	svc.entries[0].Size = 100
+	svc.entries[0].Mode = 0o444
+	pane.HandleEvent(input.KeyPressEvent{Code: input.KeyDown})
+	pane.HandleEvent(input.KeyPressEvent{Code: input.KeyUp})
+
+	item, ok := pane.SelectedItem()
+	if !ok || item.Name() != "alpha" {
+		t.Fatalf("selected item after navigation = %q, want alpha", item.Name())
+	}
+	if item.Size() != 100 || item.Mode().Perm() != 0o444 {
+		t.Fatalf("refreshed metadata = size %d, mode %v; want size 100 and mode 0444", item.Size(), item.Mode())
+	}
+	if _, total := pane.fileTotals(); total != 120 {
+		t.Fatalf("updated total = %d, want 120", total)
+	}
+}
+
+func TestFilePaneWidgetLstatsSelectedFileAfterNavigation(t *testing.T) {
+	dir := t.TempDir()
+	alpha := filepath.Join(dir, "alpha")
+	beta := filepath.Join(dir, "beta")
+	if err := os.WriteFile(alpha, []byte("0123456789"), 0o644); err != nil {
+		t.Fatalf("WriteFile alpha: %v", err)
+	}
+	if err := os.WriteFile(beta, []byte("12345"), 0o644); err != nil {
+		t.Fatalf("WriteFile beta: %v", err)
+	}
+
+	pane := NewFilePaneWidget("files")
+	if err := pane.LoadDir(dir); err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	pane.SelectByName("alpha")
+	if _, total := pane.fileTotals(); total != 15 {
+		t.Fatalf("initial total = %d, want 15", total)
+	}
+	if err := os.WriteFile(alpha, []byte(strings.Repeat("a", 100)), 0o444); err != nil {
+		t.Fatalf("WriteFile updated alpha: %v", err)
+	}
+	if err := os.Chmod(alpha, 0o444); err != nil {
+		t.Fatalf("Chmod updated alpha: %v", err)
+	}
+
+	pane.HandleEvent(input.KeyPressEvent{Code: input.KeyDown})
+	pane.HandleEvent(input.KeyPressEvent{Code: input.KeyUp})
+	item, ok := pane.SelectedItem()
+	if !ok || item.Name() != "alpha" {
+		t.Fatalf("selected item after navigation = %q, want alpha", item.Name())
+	}
+	if item.Size() != 100 || item.Mode().Perm()&0o222 != 0 {
+		t.Fatalf("selected metadata = size %d, mode %v; want size 100 and read-only", item.Size(), item.Mode())
+	}
+	if _, total := pane.fileTotals(); total != 105 {
+		t.Fatalf("updated total = %d, want 105", total)
+	}
+}
+
+func TestNumberPrinterUsesLocaleEnvironmentOrCommaFallback(t *testing.T) {
+	t.Setenv("LC_ALL", "de_DE.UTF-8")
+	t.Setenv("LC_NUMERIC", "en_US.UTF-8")
+	t.Setenv("LANG", "en_US")
+	if got := numberPrinterFromEnv().Sprintf("%v", number.Decimal(uint64(1234567))); got != "1.234.567" {
+		t.Fatalf("German locale number = %q, want 1.234.567", got)
+	}
+
+	t.Setenv("LC_ALL", "C")
+	t.Setenv("LC_NUMERIC", "")
+	t.Setenv("LANG", "")
+	if got := numberPrinterFromEnv().Sprintf("%v", number.Decimal(uint64(1234567))); got != "1,234,567" {
+		t.Fatalf("fallback number = %q, want 1,234,567", got)
+	}
+}
+
+func TestFilePaneWidgetRendersTotalAndSelectedDetails(t *testing.T) {
+	t.Setenv("LC_ALL", "en_US.UTF-8")
+	t.Setenv("LC_NUMERIC", "")
+	t.Setenv("LANG", "")
+	svc := &mockFSService{entries: []FSEntry{{
+		Name: ".sample.bin",
+		Size: 1234,
+		Mode: 0o444,
+	}}}
+	pane := NewFilePaneWidget("files")
+	pane.SetService(svc)
+	if err := pane.LoadDir("/files"); err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	pane.SelectByName(".sample.bin")
+	pane.Layout(Rect{X: 0, Y: 0, W: 60, H: 8})
+
+	buf := pane.RenderBuf()
+	if got := buf.Get(1, 5).Grapheme; got != "─" {
+		t.Fatalf("detail separator = %q, want horizontal line", got)
+	}
+	var details strings.Builder
+	for x := 1; x < buf.Width-1; x++ {
+		details.WriteString(buf.Get(x, 6).Grapheme)
+	}
+	for _, want := range []string{".sample.bin", "[R,H]", "r--r--r--", "1,234b"} {
+		if !strings.Contains(details.String(), want) {
+			t.Fatalf("selected details %q do not contain %q", details.String(), want)
+		}
+	}
+	if got := buf.Get(4, 7).Grapheme; got != "[" {
+		t.Fatalf("summary begins at x=4 with [, got %q", got)
+	}
+	if got := buf.Get(5, 7).Style.Foreground(); got != colorBrightCyan {
+		t.Fatalf("summary number color = 0x%06X, want bright cyan", got)
+	}
+	if got := buf.Get(10, 7).Style.Foreground(); got != colorGray {
+		t.Fatalf("locale group separator color = 0x%06X, want border color", got)
+	}
+
+	pane.BeginSearch(input.KeyPressEvent{Code: 'z', Mod: input.ModAlt})
+	buf = pane.RenderBuf()
+	if got := buf.Get(4, 7).Grapheme; got != "─" {
+		t.Fatalf("total should be hidden while search is active; got %q at summary position", got)
 	}
 }
 

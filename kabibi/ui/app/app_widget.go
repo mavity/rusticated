@@ -82,6 +82,13 @@ func NewWidget(opts AppWidgetOptions) *AppWidget {
 	if opts.FSService != nil {
 		w.panels.SetFSService(opts.FSService)
 	}
+	reportMetadataError := func(path string, err error) {
+		if w.writeScrollback != nil {
+			w.writeScrollback(fmt.Sprintf("Unable to refresh metadata for %q: %v\n", path, err))
+		}
+	}
+	w.panels.Left.OnMetadataError = reportMetadataError
+	w.panels.Right.OnMetadataError = reportMetadataError
 
 	initDir := w.sh.Dir()
 	if initDir == "" {

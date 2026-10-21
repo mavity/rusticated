@@ -59,11 +59,11 @@ type deterministicSnapshotFS struct{}
 
 func (deterministicSnapshotFS) ReadDir(path string) ([]filemanager.FSEntry, error) {
 	return []filemanager.FSEntry{
-		{Name: "docs", IsDir: true},
-		{Name: "src", IsDir: true},
-		{Name: "build.sh", IsDir: false, IsExec: true},
-		{Name: "main.go", IsDir: false, IsExec: false},
-		{Name: "README.md", IsDir: false, IsExec: false},
+		{Name: "docs", IsDir: true, Size: 4096, Mode: 0o755},
+		{Name: "src", IsDir: true, Size: 4096, Mode: 0o755},
+		{Name: "build.sh", IsExec: true, Size: 128, Mode: 0o755},
+		{Name: "main.go", Size: 4096, Mode: 0o644},
+		{Name: "README.md", Size: 2048, Mode: 0o644},
 	}, nil
 }
 
