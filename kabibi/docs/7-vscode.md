@@ -323,3 +323,6 @@ Connects a VS Code Terminal tab directly to a `washmhost` instance running `kabi
 3. **Workspace Mount Point**:
    - Should the active VS Code workspace folder be mounted directly at `/workspace` (with initial `cwd = '/workspace'`), while `/home/user`, `/tmp`, `/etc` stay backed by `AsyncIndexedDBFS`?+]
 
+> 1. Yes, kabibi/vscode sounds about right.
+> 2. Yes definitely native VSCode Terminal, and both in web and native VSCode in the same fashion.
+> 3. Yes I like this idea: /workspace as the mount point for the VSCode filesystem.
