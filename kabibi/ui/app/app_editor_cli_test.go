@@ -6,7 +6,16 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/x/input"
+	"github.com/mavity/rusticated/kabibi/ui/filemanager"
 )
+
+type instantSearchFS struct {
+	entries []filemanager.FSEntry
+}
+
+func (s *instantSearchFS) ReadDir(string) ([]filemanager.FSEntry, error) {
+	return s.entries, nil
+}
 
 func TestOpenEditorSaveAndExit(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "new-file.txt")
@@ -60,6 +69,63 @@ func TestEnterOnNonExecutableFileOpensEditor(t *testing.T) {
 
 	if widget.Editor() == nil {
 		t.Fatal("Enter on a non-executable file did not open the editor")
+	}
+}
+
+func TestInstantSearchPanelKeyboardRouting(t *testing.T) {
+	dir := t.TempDir()
+	widget := NewWidget(AppWidgetOptions{
+		WorkingDir:    dir,
+		PanelsVisible: true,
+		FSService: &instantSearchFS{entries: []filemanager.FSEntry{
+			{Name: "alpha"},
+			{Name: "test-dir", IsDir: true},
+			{Name: "zeta"},
+		}},
+	})
+	defer widget.Close()
+
+	pane := widget.Panels().Left
+	pane.SelectByName("alpha")
+	widget.HandleEvent(input.KeyPressEvent{Code: 't', Mod: input.ModAlt})
+	if !pane.SearchActive() {
+		t.Fatal("Alt+t with panels visible did not activate instant search")
+	}
+	if item, _ := pane.SelectedItem(); item.Name() != "test-dir" {
+		t.Fatalf("instant search selected %q, want test-dir", item.Name())
+	}
+	widget.HandleEvent(input.KeyPressEvent{Code: input.KeyEscape})
+	if pane.SearchActive() {
+		t.Fatal("Escape did not close instant search")
+	}
+	if item, _ := pane.SelectedItem(); item.Name() != "test-dir" {
+		t.Fatalf("Escape changed the matched selection to %q", item.Name())
+	}
+
+	pane.SelectByName("alpha")
+	widget.HandleEvent(input.KeyPressEvent{Code: 't', Mod: input.ModAlt})
+	widget.HandleEvent(input.KeyPressEvent{Code: input.KeyDown})
+	if pane.SearchActive() {
+		t.Fatal("Down did not close instant search")
+	}
+	if item, _ := pane.SelectedItem(); item.Name() != "alpha" {
+		t.Fatalf("Down after closing search selected %q, want alpha", item.Name())
+	}
+
+	pane.SelectByName("alpha")
+	widget.HandleEvent(input.KeyPressEvent{Code: 't', Mod: input.ModAlt})
+	widget.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
+	if pane.SearchActive() {
+		t.Fatal("Enter did not close instant search")
+	}
+	if filepath.Clean(pane.Dir()) != filepath.Clean(filepath.Join(dir, "test-dir")) {
+		t.Fatalf("Enter did not activate the selected directory: %q", pane.Dir())
+	}
+
+	widget.SetPanelsVisible(false)
+	widget.HandleEvent(input.KeyPressEvent{Code: 't', Mod: input.ModAlt})
+	if pane.SearchActive() {
+		t.Fatal("Alt+type activated instant search while panels were hidden")
 	}
 }
 

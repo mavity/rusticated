@@ -245,6 +245,140 @@ func TestFilePaneWidgetRefreshClampsMissingFinalSelection(t *testing.T) {
 	}
 }
 
+func TestFilePaneWidgetInstantSearchPrefersPrefixAndWraps(t *testing.T) {
+	svc := &mockFSService{entries: []FSEntry{
+		{Name: "alpha"},
+		{Name: "tango"},
+		{Name: "test"},
+		{Name: "tst-file"},
+		{Name: "zeta"},
+	}}
+	pane := NewFilePaneWidget("files")
+	pane.SetService(svc)
+	if err := pane.LoadDir("/files"); err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	pane.SelectByName("tango")
+
+	if !pane.BeginSearch(input.KeyPressEvent{Code: 't', Mod: input.ModAlt}) {
+		t.Fatal("Alt+t did not start instant search")
+	}
+	if item, _ := pane.SelectedItem(); item.Name() != "test" {
+		t.Fatalf("initial prefix match = %q, want test", item.Name())
+	}
+	if !pane.HandleSearchEvent(input.KeyPressEvent{Code: 's', Text: "s"}) {
+		t.Fatal("typing into search was not handled")
+	}
+	if item, _ := pane.SelectedItem(); item.Name() != "tst-file" {
+		t.Fatalf("exact prefix should beat fuzzy match = %q, want tst-file", item.Name())
+	}
+
+	pane.CloseSearch()
+	pane.SelectByName("zeta")
+	if !pane.BeginSearch(input.KeyPressEvent{Code: 'a', Mod: input.ModAlt}) {
+		t.Fatal("Alt+a did not start instant search")
+	}
+	if item, _ := pane.SelectedItem(); item.Name() != "alpha" {
+		t.Fatalf("search should wrap forward from zeta; got %q, want alpha", item.Name())
+	}
+}
+
+func TestFilePaneWidgetInstantSearchFuzzyNoMatchAndClear(t *testing.T) {
+	svc := &mockFSService{entries: []FSEntry{
+		{Name: "alpha"},
+		{Name: "tango"},
+		{Name: "test"},
+	}}
+	pane := NewFilePaneWidget("files")
+	pane.SetService(svc)
+	if err := pane.LoadDir("/files"); err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	pane.SelectByName("alpha")
+
+	if !pane.BeginSearch(input.KeyPressEvent{Code: 't', Mod: input.ModAlt}) {
+		t.Fatal("Alt+t did not start instant search")
+	}
+	pane.HandleSearchEvent(input.KeyPressEvent{Code: 's', Text: "s"})
+	pane.HandleSearchEvent(input.KeyPressEvent{Code: 't', Text: "t"})
+	if item, _ := pane.SelectedItem(); item.Name() != "test" {
+		t.Fatalf("fuzzy subsequence match = %q, want test", item.Name())
+	}
+
+	pane.HandleSearchEvent(input.KeyPressEvent{Code: 'z', Text: "z"})
+	if item, _ := pane.SelectedItem(); item.Name() != "test" {
+		t.Fatalf("selection on no-match query = %q, want last match test", item.Name())
+	}
+	if pane.searchMatch {
+		t.Fatal("search should report no match after unmatched input")
+	}
+
+	for range pane.searchText {
+		pane.HandleSearchEvent(input.KeyPressEvent{Code: input.KeyBackspace})
+	}
+	if item, _ := pane.SelectedItem(); item.Name() != "alpha" {
+		t.Fatalf("clearing query should restore initial selection alpha, got %q", item.Name())
+	}
+}
+
+func TestFilePaneWidgetInstantSearchEditsAtCaret(t *testing.T) {
+	svc := &mockFSService{entries: []FSEntry{
+		{Name: "alpha"},
+		{Name: "tango"},
+		{Name: "test"},
+		{Name: "xray"},
+	}}
+	pane := NewFilePaneWidget("files")
+	pane.SetService(svc)
+	if err := pane.LoadDir("/files"); err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	pane.SelectByName("alpha")
+	pane.BeginSearch(input.KeyPressEvent{Code: 't', Mod: input.ModAlt})
+
+	pane.HandleSearchEvent(input.KeyPressEvent{Code: input.KeyLeft})
+	pane.HandleSearchEvent(input.KeyPressEvent{Code: 'x', Text: "x"})
+	if item, _ := pane.SelectedItem(); item.Name() != "tango" {
+		t.Fatalf("unmatched edited query moved selection to %q, want last match tango", item.Name())
+	}
+
+	pane.HandleSearchEvent(input.KeyPressEvent{Code: input.KeyDelete})
+	if item, _ := pane.SelectedItem(); item.Name() != "xray" {
+		t.Fatalf("Delete at caret should leave query x and select xray; got %q", item.Name())
+	}
+	pane.HandleSearchEvent(input.KeyPressEvent{Code: input.KeyBackspace})
+	if item, _ := pane.SelectedItem(); item.Name() != "alpha" {
+		t.Fatalf("clearing edited query should restore alpha, got %q", item.Name())
+	}
+}
+
+func TestFilePaneWidgetInstantSearchOverlayRendersOnBottomBorder(t *testing.T) {
+	pane := NewFilePaneWidget("files")
+	pane.SetItemsBridge([]fileItem{{name: "test"}}, 0)
+	pane.Layout(Rect{X: 0, Y: 0, W: 20, H: 5})
+	if !pane.BeginSearch(input.KeyPressEvent{Code: 'z', Mod: input.ModAlt}) {
+		t.Fatal("Alt+z did not start instant search")
+	}
+
+	buf := pane.RenderBuf()
+	if got := buf.Get(18, 4).Grapheme; got != "]" {
+		t.Fatalf("search widget should end inside the bottom-right border; got %q", got)
+	}
+	if got := buf.Get(17, 4).Style.Foreground(); got != colorCyan {
+		t.Fatalf("non-matching query foreground = 0x%06X, want cyan 0x%06X", got, colorCyan)
+	}
+
+	pane.CloseSearch()
+	pane.SelectByName("test")
+	if !pane.BeginSearch(input.KeyPressEvent{Code: 't', Mod: input.ModAlt}) {
+		t.Fatal("Alt+t did not start instant search")
+	}
+	buf = pane.RenderBuf()
+	if got := buf.Get(15, 4).Style.Foreground(); got != colorYellow {
+		t.Fatalf("matching query foreground = 0x%06X, want yellow 0x%06X", got, colorYellow)
+	}
+}
+
 func TestDualPaneWidgetStartsWithLeftPaneActive(t *testing.T) {
 	dp := NewDualPaneWidget()
 
