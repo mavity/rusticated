@@ -192,6 +192,10 @@ func rusticated_dir_read(overlapped unsafe.Pointer, handle uint64, bufPtr *byte,
 //go:noescape
 func rusticated_path_stat(overlapped unsafe.Pointer, pathPtr *byte, pathLen uint32, flags uint32, outPtr *byte, outLen uint32)
 
+//go:wasmimport env path_chmod
+//go:noescape
+func rusticated_path_chmod(overlapped unsafe.Pointer, pathPtr *byte, pathLen uint32, mode uint32)
+
 //go:wasmimport env seek
 //go:noescape
 func rusticated_seek(overlapped unsafe.Pointer, handle uint64, offset int64, whence uint32)
@@ -746,12 +750,25 @@ func Symlink(path, link string) error               { return ENOSYS }
 func Truncate(path string, length int64) error      { return ENOSYS }
 func Ftruncate(fd int, length int64) error          { return ENOSYS }
 func Fsync(fd int) error                            { return nil }
-func Chmod(path string, mode uint32) error          { return nil }
-func Fchmod(fd int, mode uint32) error              { return nil }
-func Chown(path string, uid, gid int) error         { return ENOSYS }
-func Fchown(fd int, uid, gid int) error             { return ENOSYS }
-func Lchown(path string, uid, gid int) error        { return ENOSYS }
-func UtimesNano(path string, ts []Timespec) error   { return ENOSYS }
+func Chmod(path string, mode uint32) error {
+	if path == "" {
+		return EINVAL
+	}
+
+	var ctx overlappedContext
+	rusticated_path_chmod(unsafe.Pointer(&ctx.o), (*byte)(unsafe.StringData(path)), uint32(len(path)), mode)
+	runtime.KeepAlive(path)
+	awaitOverlapped(&ctx)
+	if ctx.o.hostError != 0 {
+		return errnoErr(Errno(ctx.o.hostError))
+	}
+	return nil
+}
+func Fchmod(fd int, mode uint32) error            { return nil }
+func Chown(path string, uid, gid int) error       { return ENOSYS }
+func Fchown(fd int, uid, gid int) error           { return ENOSYS }
+func Lchown(path string, uid, gid int) error      { return ENOSYS }
+func UtimesNano(path string, ts []Timespec) error { return ENOSYS }
 
 // ── Seek / Pread / Pwrite / Dup / Pipe ───────────────────────────────────
 
