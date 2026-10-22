@@ -530,25 +530,48 @@ A command checkbox `[x]` may **only** be ticked when all 5 criteria are met:
 - [ ] **`id`** (`cmds/core/id`):
   * **Linux / macOS**: `os/user` + `syscall.Getuid`/`Getgid`/`Getgroups`.
   * **Windows / Rusticated**: Use `os/user.Current()` and map SID/username cleanly.
+  - `go -C u-root test ./cmds/core/id -v` — passed.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band3_SystemDiagnosticsProcessAndNetwork/id$' -v` — passed; default, numeric/name UID, GID, group list, conflicting flags, and help passed on the host.
+  - `go run . kabibi -r -c "id; id -u; id -un; id -g; id -G"` — failed on Rusticated; each invocation printed `id: id: unknown user or uid:` and the overall exit code was 1.
+  - Rusticated checks found `/etc/passwd` and `/etc/group` unreadable. `id` falls back to `os/user.Current()`, which did not resolve the current account; the command does not use shell-provided user environment values as an identity source. Accurate numeric UID/GID mapping needs a Rusticated identity source, so this item remains unchecked.
 - [ ] **`df`** (`cmds/core/df`):
   * **Linux**: Parse `/proc/mounts` + `unix.Statfs`.
   * **macOS**: `unix.Getfsstat` + `unix.Statfs`.
   * **Windows**: Enumerate logical drives (`GetLogicalDriveStringsW`) + `GetDiskFreeSpaceExW` in `kernel32.dll`.
   * **Rusticated**: Host `/proc/mounts` when on Linux; fallback to stat on working directory.
+  - `go -C u-root test ./cmds/core/df -v` — passed.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band3_SystemDiagnosticsProcessAndNetwork/df$' -v` — passed on the host; default, MB header, directory argument, mutually exclusive units, and help passed.
+  - `go run . kabibi -r -c "df; df -m; df .; df -k -m"` — Rusticated printed the synthetic `/dev/root` row for default, `-m`, and `.`; conflicting `-k -m` exited 1 as expected.
+  - **Finding:** the `wasip1` fallback uses fixed synthetic capacity values and its device-number helper returns the same value for every path; `df -m` consequently prints unchanged KB-sized numbers under the `1M-blocks` header, and a path-specific result is not based on filesystem capacity. This item remains unchecked.
 - [ ] **`free`** (`cmds/core/free`):
   * **Linux / Rusticated+Linux**: Parse `/proc/meminfo`.
   * **macOS**: Query `sysctl("hw.memsize")` and `host_statistics64` (`vm_statistics64`) via `purego`.
   * **Windows**: Call `GlobalMemoryStatusEx` in `kernel32.dll`.
+  - `go -C u-root test ./cmds/core/free -v` — passed.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band3_SystemDiagnosticsProcessAndNetwork/free$' -v` — passed on the host; default, MB, human-readable, JSON, conflicting-unit, and help behavior passed.
+  - `go run . kabibi -r -c "free; free -m; free -json"` — exited 0 on Rusticated, but returned fixed emulated values (1 GiB total, 512 MiB used/free, no swap) rather than host memory statistics; this item remains unchecked.
 - [ ] **`uptime`** (`cmds/core/uptime`):
   * **Linux / Rusticated+Linux**: Parse `/proc/uptime` and `/proc/loadavg`.
   * **macOS**: Query `sysctl("kern.boottime")` and `sysctl("vm.loadavg")` via `purego`.
   * **Windows**: Call `GetTickCount64` in `kernel32.dll`.
+  - `go -C u-root test ./cmds/core/uptime -v` — passed.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band3_SystemDiagnosticsProcessAndNetwork/uptime$' -v` — passed on the host; output and flag behavior passed.
+  - `go run . kabibi -r -c "uptime"` — exited 0 on Rusticated and printed `23:32:05 up 0 days, 1 hours, 0 min, loadaverage: 0.00, 0.00, 0.00`.
+  - **Finding:** the non-Linux fallback returns a hard-coded one-hour uptime and zero load averages when `/proc` is unavailable; this is not live Windows/Rusticated data, so the item remains unchecked.
 - [ ] **`ps`** (`cmds/core/ps`):
   * **Linux / Rusticated+Linux**: Walk `/proc/<pid>/stat` and `/proc/<pid>/status`.
   * **macOS**: Query `sysctl` (`CTL_KERN`, `KERN_PROC`, `KERN_PROC_ALL`) via `purego`.
   * **Windows**: Call `CreateToolhelp32Snapshot` / `Process32FirstW` / `Process32NextW` in `kernel32.dll`.
+  - `go -C u-root test ./cmds/core/ps -v` — passed.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band3_SystemDiagnosticsProcessAndNetwork/ps$' -v` — passed on the host; default, `aux`, `-A`, `-x`, and help behavior passed.
+  - `go run . kabibi -r -c "ps; ps aux; ps -A"` — exited 0 on Rusticated, but each mode listed only the synthetic PID 3 `rusticated` process; host process enumeration is not implemented in the non-Windows/non-Linux fallback, so this item remains unchecked.
 - [ ] **`pidof`** (`cmds/core/pidof`):
   * Shares the cross-platform process enumeration backend with `ps` (Linux `/proc`, macOS `sysctl`, Windows Toolhelp32).
+  - `go -C u-root test ./cmds/core/pidof -v` — passed; includes fallback-name coverage.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band3_SystemDiagnosticsProcessAndNetwork/pidof$' -v` — passed on the host; current-process lookup, `-s`, missing-process status, and help passed.
+  - `go run . kabibi -r -c "pidof rusticated"` — passed on Rusticated after aligning its fallback process name with `ps`; printed PID `3`.
+  - `go run . kabibi -r -c "pidof nonexistentprogram12345"` — exited 1 as expected.
+  - **Fixed during retest:** when `/proc` is absent, Rusticated `pidof` now uses the same synthetic `rusticated` process name as `ps` instead of the WASM executable argument. It still reports only that synthetic guest process rather than host processes; this item remains unchecked.
 - [ ] **`kill`** (`cmds/core/kill`):
   * **Linux / macOS**: `syscall.Kill(pid, sig)`.
   * **Windows**: `OpenProcess` + `TerminateProcess` via `os.FindProcess(pid).Kill()`.
@@ -559,45 +582,92 @@ A command checkbox `[x]` may **only** be ticked when all 5 criteria are met:
 - [ ] **`sync`** (`cmds/core/sync`): `package synccmd`;
   * **Linux / macOS**: `unix.Sync()` / `unix.Fsync`.
   * **Windows**: `FlushFileBuffers` on specified files (or no-op if no files).
-- [ ] **`tty`** (`cmds/core/tty`):
+  - `go -C u-root test ./cmds/core/sync -v` — passed.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band3_SystemDiagnosticsProcessAndNetwork/sync$' -v` — passed on the host; global sync, an existing file, `-d`, and missing-file failure passed.
+  - `go run . kabibi -r -c "sync; echo sync:$?; sync nonexistent_file_xyz_123; echo missing:$?"` — Rusticated completed with exit code 0 and printed `sync:True` and `missing:True`.
+  - **Finding:** the unsupported-platform implementation is an unconditional no-op, so even a missing path reports success on Rusticated; this item remains unchecked.
+- [x] **`tty`** (`cmds/core/tty`):
   * **Linux / macOS**: Resolve `/dev` device corresponding to stdin's `stat.Ino`/`stat.Dev`.
   * **Windows**: Check console mode on stdin (`CONIN$`) or stdout (`CONOUT$`).
   * **Rusticated**: Check console mode or return `not a tty`.
+  - `go -C u-root test ./cmds/core/tty -v` — passed.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band3_SystemDiagnosticsProcessAndNetwork/tty$' -v` — passed on the host; non-terminal input, silent mode, and help passed.
+  - `go run . kabibi -r -c "tty"` — printed `not a tty` and returned 1 on Rusticated, as expected when stdin is not a terminal.
+  - `go run . kabibi -r -c "tty -s"` — emitted no stdout and returned 1, as required for silent non-terminal detection.
 - [ ] **`stty`** (`cmds/core/stty`):
   * **Linux / macOS**: `termios` `ioctl` (`TCGETS`/`TCSETS`, `TIOCGWINSZ`).
   * **Windows**: `GetConsoleMode` / `GetConsoleScreenBufferInfo`.
   * **Rusticated**: Fixed size fallback.
+  - `go -C u-root test ./cmds/core/stty -v` — passed.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band3_SystemDiagnosticsProcessAndNetwork/stty$' -v` — passed on the host; default state, JSON dump, and size output passed.
+  - `go run . kabibi -r -c "stty; stty dump; stty size"` — exited 0 on Rusticated, but all three invocations printed the same fixed `rows:24 cols:80 speed:38400` line; `dump` and `size` forms are not implemented by the fallback, so this item remains unchecked.
 - [ ] **`ping`** (`cmds/core/ping`):
   * **Linux / macOS**: `golang.org/x/net/icmp` (`ip4:icmp` / `udp4` unprivileged ping socket).
   * **Windows**: Use `IcmpCreateFile` / `IcmpSendEcho` in `iphlpapi.dll` (works without Administrator privileges) or `golang.org/x/net/icmp`.
   * **Rusticated**: Raw/ICMP socket via `washmhost`.
+  - `go -C u-root test ./cmds/core/ping -v` — passed; the raw-ping VM test was skipped.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band3_SystemDiagnosticsProcessAndNetwork/ping$' -v` — passed on the host; version/help, missing-argument handling, and loopback ping passed.
+  - `go run . kabibi -r -c "ping -V"` — passed on Rusticated; printed `u-root ping`.
+  - `go run . kabibi -r -c "ping"` — exited 1 with usage as expected.
+  - `go run . kabibi -r -c "ping -c 1 127.0.0.1"` — exited 1 with `not implemented on wasip1/wasm`; only loopback was targeted, and WASI ICMP sockets are unavailable, so this item remains unchecked.
 - [ ] **`ip`** (`cmds/core/ip`):
   * **Linux / Rusticated+Linux**: Full authentic u-root `cmds/core/ip` implementation using `netlink` (`addr`, `link`, `route`, `neigh`, `rule`, `tunnel`).
   * **macOS**: Interface inspection via `getifaddrs`/`net.Interfaces()`, routing via `AF_ROUTE` / `sysctl(NET_RT_DUMP)`.
   * **Windows**: Interface & address inspection via `GetAdaptersAddresses` (`net.Interfaces()`) and `GetIpForwardTable` (`iphlpapi.dll`); state mutations fail gracefully.
+  - `go -C u-root test ./cmds/core/ip -v` — passed.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band3_SystemDiagnosticsProcessAndNetwork/ip$' -v` — passed on the host; help, link, address, route, and invalid-object handling passed.
+  - `go run . kabibi -r -c "ip link"`, `go run . kabibi -r -c "ip addr"`, and `go run . kabibi -r -c "ip route"` — all exited 0 on Rusticated but printed no interfaces, addresses, or routes; WASI `net.Interfaces()` provides no host network inventory, so this item remains unchecked.
 - [ ] **`netstat`** (`cmds/core/netstat`):
   * **Linux / Rusticated+Linux**: Full authentic u-root `cmds/core/netstat` reading `/proc/net/{tcp,tcp6,udp,udp6,unix,route}`.
   * **macOS**: Query `sysctl` (`net.inet.tcp.pcblist`, `net.inet.udp.pcblist`, `NET_RT_DUMP`).
   * **Windows**: Query `GetExtendedTcpTable` and `GetExtendedUdpTable` in `iphlpapi.dll`.
+  - `go -C u-root test ./cmds/core/netstat -v` — passed; Windows netstat tests ran.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band3_SystemDiagnosticsProcessAndNetwork/netstat$' -v` — passed on the host; help, interface, route, and socket-table cases passed.
+  - `go run . kabibi -r -c "netstat -i"`, `go run . kabibi -r -c "netstat -r"`, and `go run . kabibi -r -c "netstat -a"` — all exited 0 on Rusticated but printed headers only; no interface, route, or socket rows were available, and `-a` silently fell through to the interface view. This item remains unchecked.
 - [ ] **`pci`** (`cmds/core/pci`):
   * **Linux / Rusticated+Linux**: Full authentic u-root `cmds/core/pci` walking `/sys/bus/pci/devices` and decoding config space.
   * **macOS**: Enumerate `IOPCIDevice` entries via Apple `IOKit` framework (`purego`).
   * **Windows**: Enumerate `PCI\*` devices via `SetupDiGetClassDevsW` (`setupapi.dll`) or fail gracefully if unavailable.
+  - `go -C u-root test ./cmds/core/pci -v` — passed on Windows; enumerated PCI devices, including the NVMe controller and Qualcomm Wi-Fi adapter.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band3_SystemDiagnosticsProcessAndNetwork/pci$' -v` — passed on the host.
+  - `go run . kabibi -r -c "pci -h"` — passed on Rusticated and printed usage.
+  - `go run . kabibi -r -c "pci"` — exited 1 with `pci: not available on this platform`; this is an explicit WASI unsupported fallback, not PCI enumeration, so the item remains unchecked.
 - [ ] **`lsmod`** (`cmds/core/lsmod`):
   * **Linux / Rusticated+Linux**: Read and format `/proc/modules`.
   * **macOS / Windows**: Clean unsupported error (`return 1`).
+  - `go -C u-root test ./cmds/core/lsmod -v` — passed.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band3_SystemDiagnosticsProcessAndNetwork/lsmod$' -v` — passed on Windows; `lsmod` exited 1 with an explicit `/proc/modules` open error.
+  - `go run . kabibi -r -c "lsmod -help"` — passed on Rusticated.
+  - `go run . kabibi -r -c "lsmod"` — exited 1 with `open /proc/modules: No such file or directory`; Rusticated does not expose the module list, so this item remains unchecked.
 - [ ] **`lsdrivers`** (`cmds/core/lsdrivers`):
   * **Linux / Rusticated+Linux**: Authentic `/sys/bus` driver inspection.
   * **macOS / Windows**: Clean unsupported error (`return 1`).
+  - `go -C u-root test ./cmds/core/lsdrivers -v` — passed.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band3_SystemDiagnosticsProcessAndNetwork/lsdrivers$' -v` — passed on Windows; command reports `/sys/bus` is unavailable.
+  - `go run . kabibi -r -c "lsdrivers -help"` — passed on Rusticated.
+  - `go run . kabibi -r -c "lsdrivers"` — exited 1 with `open /sys/bus: No such file or directory`; no driver inventory is available, so this item remains unchecked.
 - [ ] **`lsfd`** (`cmds/core/lsfd`):
   * **Linux / Rusticated+Linux**: Authentic `/proc/<pid>/fd` walk.
   * **macOS / Windows**: Clean unsupported error (`return 1`).
+  - `go -C u-root test ./cmds/core/lsfd -v` — passed on Windows; Linux `/proc` enumeration was skipped.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band3_SystemDiagnosticsProcessAndNetwork/lsfd$' -v` — passed on Windows; command reports `/proc` is unavailable.
+  - `go run . kabibi -r -c "lsfd -help"` — passed on Rusticated.
+  - `go run . kabibi -r -c "lsfd"` — exited 1 with `open /proc: No such file or directory`; no descriptor inventory is available, so this item remains unchecked.
 - [ ] **`lddfiles`** (`cmds/core/lddfiles`):
   * Uses Go's portable `debug/elf` to resolve ELF dynamic library dependencies on any OS when given ELF binaries.
+  - `go -C u-root test ./cmds/core/lddfiles -v` — passed.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band3_SystemDiagnosticsProcessAndNetwork/lddfiles$' -v` — passed on the host; help and missing-file error handling passed.
+  - `go run . kabibi -r -c "lddfiles -help"` — passed on Rusticated.
+  - `go run . kabibi -r -c "lddfiles go.mod"` — exited 0 and printed the resolved input path, but `go.mod` is not an ELF and this only verifies path handling.
+  - `go run . kabibi -r -c "lddfiles definitely_nonexistent_binary_xyz"` — exited 1 with an explicit `stat` error. No valid ELF input was tested, so dependency resolution remains unverified and this item remains unchecked.
 - [ ] **`dmesg`** (`cmds/core/dmesg`):
   * **Linux**: `unix.Klogctl` (`SYS_SYSLOG`) with fallback to reading `/dev/kmsg`.
   * **macOS**: Query `sysctl("kern.msgbuf")` via `purego`.
   * **Windows**: Clean unsupported error (`return 1`).
+  - `go -C u-root test ./cmds/core/dmesg -v` — passed; the command returned the expected unsupported-platform error on Windows.
+  - `go -C kabibi test ./ui/shell -run 'TestURoot_Band3_SystemDiagnosticsProcessAndNetwork/dmesg$' -v` — passed; the shell integration accepts the explicit unsupported result.
+  - `go run . kabibi -r -c "dmesg -help"` — passed on Rusticated.
+  - `go run . kabibi -r -c "dmesg"` — exited 1 with `dmesg: unsupported on this operating system`; no kernel messages are available, so this item remains unchecked.
 
 ---
 
@@ -609,6 +679,10 @@ A command checkbox `[x]` may **only** be ticked when all 5 criteria are met:
   * **Linux / Rusticated+Linux**: Full authentic u-root `mount` (`pkg/mount`, `/proc/mounts`, `unix.Mount`).
   * **macOS / Rusticated+macOS**: List mounts via `getfsstat` and invoke Darwin `mount(2)` via `purego` / `unix.Mount`.
   * **Windows**: Allowed relaxation — clean error (`"mount: not supported on windows"`) and `return 1`.
+  - `go -C u-root test ./cmds/core/mount -v` — could not build on Windows: the Linux-only command implementation is excluded, but `mount_test.go` is included and refers to undefined `mountOptions`, `errUsage`, `errMountPath`, `command`, and `cmd`.
+  - No focused Kabibi shell integration test for `mount` was found.
+  - `go run . kabibi -r -c "mount -help"` — Rusticated invocation returned a natural-language help response rather than command usage, indicating the u-root command was not executed; no mount operation was attempted. A prior probe failed at runtime initialization, but a `true` control probe and the retry succeeded.
+  - The read-only `mount` inventory probe was not run because Rusticated command dispatch was not established; this item remains unchecked.
 - [ ] **`umount`** (`cmds/core/umount`):
   * **Linux / macOS**: Authentic `unix.Unmount` (`MNT_FORCE`, `MNT_DETACH` / Darwin flags).
   * **Windows**: Clean unsupported error (`return 1`).
