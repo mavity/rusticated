@@ -534,7 +534,7 @@ A command checkbox `[x]` may **only** be ticked when all 5 criteria are met:
   * **Rusticated**: Query `syscall.GetPlatformInfo()` (`AbiPlatformInfo`) to report real host/guest details.
   - `go -C u-root test ./cmds/core/uname -v` — passed.
   - `go -C kabibi test ./ui/shell -run 'TestURoot_Band3_SystemDiagnosticsProcessAndNetwork/uname$' -v` — passed; default, `-a`, individual/combined flags, help, and invalid-flag behavior passed.
-  - `go run . kabibi -r -c "uname -a"` — passed on Rusticated; printed `Windows_NT rusticated unknown washmhost 0.8.1 aarch64`.
+  - `go run . kabibi -r -c "uname -a"` — passed on Rusticated; printed `Windows_NT rusticated unknown washmhost 0.8.2 aarch64`.
   - **Fixed during retest:** Rusticated uname now reads host OS and architecture plus Rusticated runtime metadata from `syscall.GetPlatformInfo()` rather than reporting `wasip1/wasm`. The ABI currently supplies no host OS version, so the release field is honestly reported as `unknown`; this checklist item remains unchecked pending host-version support.
 - [ ] **`id`** (`cmds/core/id`):
   * **Linux / macOS**: `os/user` + `syscall.Getuid`/`Getgid`/`Getgroups`.
