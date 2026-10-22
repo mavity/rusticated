@@ -273,6 +273,7 @@ The host provides the complete `env` import dictionary required by Go (`wasip1` 
 | `read` | Overlapped async read | Reads from stdin queue, IndexedDB file content, or net proxy handle |
 | `write` | Overlapped async write | Routes fd 1/2 to `stdout`/`stderr`; writes chunk to IndexedDB or net handle |
 | `seek` | Move a file handle offset | Supports absolute, current-relative, and end-relative offsets |
+| `handle_truncate` | Set an open file's logical length | Resizes file content, zero-fills growth, and persists through `AsyncFS` |
 | `handle_close` | Close resource handle | Frees open file, directory, or socket descriptor |
 | `path_open` | File/dir handle creation | Resolves mode/flags against IndexedDB asynchronously |
 | `path_stat` | File metadata inspection | Emits 64-byte `AbiStat` structure filled from `AsyncFS` |

@@ -277,6 +277,45 @@ func (h *HostEnv) sys_seek(ctx context.Context, m api.Module, stack []uint64) {
 	}()
 }
 
+func (h *HostEnv) sys_handle_truncate(ctx context.Context, m api.Module, stack []uint64) {
+	ovPtr := uint32(stack[0])
+	handle := stack[1]
+	length := int64(stack[2])
+
+	h.mu.Lock()
+	fAny, ok := h.handles[handle]
+	h.mu.Unlock()
+	if !ok {
+		writeOverlapped(m, ovPtr, wasiEBADF, 0, 0)
+		return
+	}
+	if length < 0 {
+		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+		return
+	}
+	truncater, canTruncate := fAny.(interface{ Truncate(int64) error })
+	if !canTruncate {
+		writeOverlapped(m, ovPtr, wasiENOTSUP, 0, 0)
+		return
+	}
+
+	state := h.RegisterOp(ovPtr, fAny)
+	go func() {
+		err := truncater.Truncate(length)
+		retCode := mapErrno(err)
+		h.fileOpsQueue <- func() {
+			defer h.DecOpsFor(state)
+			if !h.IsOpActive(ovPtr, state.opID) {
+				return
+			}
+			h.mu.Lock()
+			delete(h.activeOps, ovPtr)
+			h.mu.Unlock()
+			writeOverlapped(m, ovPtr, retCode, 0, 0)
+		}
+	}()
+}
+
 func (h *HostEnv) sys_write(ctx context.Context, m api.Module, stack []uint64) {
 	ovPtr := uint32(stack[0])
 	handle := stack[1]

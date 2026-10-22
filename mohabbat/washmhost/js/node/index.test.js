@@ -156,3 +156,49 @@ test('path_set_times uses lutimes for no-follow symlink updates', async (t) => {
         fs.rmSync(dir, { recursive: true, force: true });
     }
 });
+
+test('handle_truncate resizes files and rejects invalid lengths and handles', async () => {
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const host = new HostState();
+    host.memory = memory;
+    const { env } = makeBrainImports(host, []);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'washmhost-truncate-'));
+    const file = path.join(dir, 'file.bin');
+    fs.writeFileSync(file, 'abcdef');
+    const fd = fs.openSync(file, 'r+');
+    const handle = host.allocHandle({ type: 'file', fd, path: file });
+    const view = new DataView(memory.buffer);
+
+    const callAndWait = async (ovPtr, target, length) => {
+        env.handle_truncate(ovPtr, target, length);
+        for (let attempt = 0; attempt < 100 && host.completionQueue.length === 0; attempt++) {
+            await new Promise(resolve => setTimeout(resolve, 1));
+        }
+        host.drainQueue();
+        return view.getUint32(ovPtr + 4, true);
+    };
+
+    try {
+        const firstByte = Buffer.alloc(1);
+        assert.equal(fs.readSync(fd, firstByte, 0, 1, null), 1);
+        assert.equal(firstByte.toString(), 'a');
+
+        assert.equal(await callAndWait(32, handle, 3n), 0);
+        assert.equal(fs.readFileSync(file, 'utf8'), 'abc');
+        const secondByte = Buffer.alloc(1);
+        assert.equal(fs.readSync(fd, secondByte, 0, 1, null), 1);
+        assert.equal(secondByte.toString(), 'b');
+
+        assert.equal(await callAndWait(64, handle, 7n), 0);
+        assert.deepEqual(fs.readFileSync(file), Buffer.from([0x61, 0x62, 0x63, 0, 0, 0, 0]));
+        assert.equal(await callAndWait(96, handle, 0n), 0);
+        assert.equal(fs.statSync(file).size, 0);
+        assert.equal(await callAndWait(128, handle, -1n), 28);
+        assert.equal(await callAndWait(160, handle, BigInt(Number.MAX_SAFE_INTEGER) + 1n), 22);
+        assert.equal(await callAndWait(192, 999n, 0n), 8);
+    } finally {
+        host.handles.delete(handle);
+        fs.closeSync(fd);
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});

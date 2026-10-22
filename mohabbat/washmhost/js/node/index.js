@@ -124,6 +124,7 @@ function mapErrno(e) {
     case 'EFAULT':    return wasiEFAULT;
     case 'EBUSY':     return wasiEBUSY;
     case 'EEXIST':    return wasiEEXIST;
+    case 'EFBIG':     return wasiEFBIG;
     case 'EXDEV':     return wasiEXDEV;
     case 'ENODEV':    return wasiENODEV;
     case 'ENOTDIR':   return wasiENOTDIR;
@@ -614,6 +615,47 @@ export function makeBrainImports(hostState, argv) {
 
     hs.activeOps.delete(ovPtr); hs.pendingCount--;
     writeOverlapped(hs.view, ovPtr, wasiEBADF, 0, 0);
+  }
+
+  // ── handle_truncate ──────────────────────────────────────────────────────────
+  // Signature: (ovPtr i32, handle i64, length i64)
+  function handle_truncate(ovPtr, handle, length) {
+    const ptr = Number(ovPtr);
+    const opId = hs.registerOp(ptr);
+    const h = hs.getHandle(handle);
+    if (!h || h.type !== 'file') {
+      hs.enqueue(() => hs.completeOp(ptr, opId, wasiEBADF, 0, 0));
+      return;
+    }
+
+    let size;
+    if (typeof length === 'bigint') {
+      if (length < 0n) {
+        hs.enqueue(() => hs.completeOp(ptr, opId, wasiEINVAL, 0, 0));
+        return;
+      }
+      if (length > BigInt(Number.MAX_SAFE_INTEGER)) {
+        hs.enqueue(() => hs.completeOp(ptr, opId, wasiEFBIG, 0, 0));
+        return;
+      }
+      size = Number(length);
+    } else if (typeof length === 'number' && Number.isSafeInteger(length)) {
+      if (length < 0) {
+        hs.enqueue(() => hs.completeOp(ptr, opId, wasiEINVAL, 0, 0));
+        return;
+      }
+      size = length;
+    } else {
+      hs.enqueue(() => hs.completeOp(ptr, opId, wasiEINVAL, 0, 0));
+      return;
+    }
+
+    fs.ftruncate(h.fd, size, (err) => {
+      hs.enqueue(() => {
+        if (!hs.isOpActive(ptr, opId)) return;
+        hs.completeOp(ptr, opId, err ? mapErrno(err) : 0, 0, 0);
+      });
+    });
   }
 
   // ── handle_close ─────────────────────────────────────────────────────────────
@@ -1312,6 +1354,7 @@ export function makeBrainImports(hostState, argv) {
     cancel,
     read,
     write,
+    handle_truncate,
     handle_close,
     path_open,
     dir_read,

@@ -120,6 +120,8 @@ func mapErrno(err error) uint32 {
 			return wasiEACCES
 		case syscall.EBADF:
 			return wasiEBADF
+		case syscall.EFBIG:
+			return wasiEFBIG
 		case syscall.EEXIST:
 			return wasiEEXIST
 		case syscall.EINVAL:

@@ -181,6 +181,10 @@ func rusticated_read(overlapped unsafe.Pointer, handle uint64, bufPtr *byte, buf
 //go:noescape
 func rusticated_write(overlapped unsafe.Pointer, handle uint64, bufPtr *byte, bufLen uint32)
 
+//go:wasmimport env handle_truncate
+//go:noescape
+func rusticated_handle_truncate(overlapped unsafe.Pointer, handle uint64, length int64)
+
 //go:wasmimport env handle_close
 func rusticated_handle_close(handle uint64)
 
@@ -751,8 +755,40 @@ func Rename(from, to string) error {
 func Readlink(path string, buf []byte) (int, error) { return 0, ENOSYS }
 func Link(path, link string) error                  { return ENOSYS }
 func Symlink(path, link string) error               { return ENOSYS }
-func Truncate(path string, length int64) error      { return ENOSYS }
-func Ftruncate(fd int, length int64) error          { return ENOSYS }
+func Truncate(path string, length int64) error {
+	if path == "" {
+		return EINVAL
+	}
+	if length < 0 {
+		return EINVAL
+	}
+	fd, err := Open(path, 1, 0)
+	if err != nil {
+		return err
+	}
+	truncateErr := Ftruncate(fd, length)
+	closeErr := Close(fd)
+	if truncateErr != nil {
+		return truncateErr
+	}
+	return closeErr
+}
+func Ftruncate(fd int, length int64) error {
+	if length < 0 {
+		return EINVAL
+	}
+	handle, err := fdToHandle(int32(fd))
+	if err != 0 {
+		return errnoErr(err)
+	}
+	var ctx overlappedContext
+	rusticated_handle_truncate(unsafe.Pointer(&ctx.o), handle, length)
+	awaitOverlapped(&ctx)
+	if ctx.o.hostError != 0 {
+		return errnoErr(Errno(ctx.o.hostError))
+	}
+	return nil
+}
 func Fsync(fd int) error                            { return nil }
 func Chmod(path string, mode uint32) error {
 	if path == "" {

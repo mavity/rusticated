@@ -10,6 +10,7 @@ import washmhost, {
   STAT_KIND_SYMLINK,
   FLAG_COMPLETED,
   wasiSuccess,
+  wasiEFBIG,
   wasiENOENT,
   wasiENOTSUP,
   wasiECANCELED,
@@ -673,6 +674,72 @@ test('path_open supports O_TRUNC, O_APPEND, O_EXCL and write slices exact conten
   assert.equal(stored.size, 8);
   assert.equal(stored.content.length, 8);
   assert.equal(new TextDecoder().decode(stored.content), 'short-ok');
+});
+
+test('handle_truncate resizes and persists browser files', async () => {
+  const mem = new WebAssembly.Memory({ initial: 1 });
+  const host = await washmhost({ test: true, memory: mem, cwd: '/workspace' });
+  const { env, hostState, fs } = host;
+  const view = new DataView(mem.buffer);
+  const enc = new TextEncoder();
+
+  await fs.putEntry({
+    path: '/workspace',
+    type: 'dir',
+    mode: 0o755,
+    mtime: Date.now()
+  });
+  const filePath = enc.encode('resize.bin');
+  new Uint8Array(mem.buffer, 32, filePath.length).set(filePath);
+  const waitForCompletion = async (ovPtr) => {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 1));
+      hostState.drainQueue();
+      if ((view.getUint32(ovPtr, true) & FLAG_COMPLETED) !== 0) return view.getUint32(ovPtr + 4, true);
+    }
+    throw new Error(`timed out waiting for operation at ${ovPtr}`);
+  };
+
+  env.path_open(100, 32, filePath.length, 64 | 2, 0o644);
+  assert.equal(await waitForCompletion(100), 0);
+  const handle = view.getBigUint64(116, true);
+  const initial = enc.encode('abc');
+  new Uint8Array(mem.buffer, 200, initial.length).set(initial);
+  env.write(140, handle, 200, initial.length);
+  assert.equal(await waitForCompletion(140), 0);
+  assert.equal(hostState.getHandle(handle).offset, 3);
+
+  env.handle_truncate(180, handle, 8n);
+  assert.equal(await waitForCompletion(180), 0);
+  let stored = await fs.getEntry('/workspace/resize.bin');
+  assert.equal(stored.size, 8);
+  assert.deepEqual(Array.from(stored.content), [97, 98, 99, 0, 0, 0, 0, 0]);
+  assert.equal(hostState.getHandle(handle).offset, 3);
+
+  env.handle_truncate(220, handle, 2n);
+  assert.equal(await waitForCompletion(220), 0);
+  stored = await fs.getEntry('/workspace/resize.bin');
+  assert.equal(stored.size, 2);
+  assert.deepEqual(Array.from(stored.content), [97, 98]);
+  assert.equal(hostState.getHandle(handle).offset, 3);
+
+  env.handle_truncate(260, handle, -1n);
+  assert.equal(await waitForCompletion(260), wasiEINVAL);
+  env.handle_truncate(300, handle, BigInt(Number.MAX_SAFE_INTEGER) + 1n);
+  assert.equal(await waitForCompletion(300), wasiEFBIG);
+  env.handle_truncate(320, 999n, 0n);
+  assert.equal(await waitForCompletion(320), wasiEBADF);
+
+  env.path_open(340, 32, filePath.length, 0, 0);
+  assert.equal(await waitForCompletion(340), 0);
+  const reopened = view.getBigUint64(356, true);
+  env.read(380, reopened, 512, 2);
+  assert.equal(await waitForCompletion(380), 0);
+  assert.equal(view.getBigUint64(396, true), 2n);
+  assert.deepEqual(Array.from(new Uint8Array(mem.buffer, 512, 2)), [97, 98]);
+
+  env.handle_close(reopened);
+  env.handle_close(handle);
 });
 
 test('path_stat prefers fs.statEntry over fs.getEntry when provided', async () => {

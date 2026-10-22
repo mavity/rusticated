@@ -1,6 +1,7 @@
 # Rusticated File-Size ABI
 
-**Status:** Proposed
+**Status:** Implemented in the Rust ABI declarations, the Go/Node/browser hosts,
+and the Rusticated Go syscall layer.
 
 ## 1. Purpose
 
