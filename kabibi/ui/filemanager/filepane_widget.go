@@ -105,6 +105,7 @@ type FileItem struct {
 	selected bool
 	size     int64
 	mode     os.FileMode
+	modeKnown bool
 }
 
 func (f FileItem) Name() string      { return f.name }
@@ -352,6 +353,11 @@ func (w *FilePaneWidget) LoadDirFocus(path string, focusName string) error {
 	if w.OnChangeDir != nil {
 		w.OnChangeDir(path)
 	}
+	if item, ok := w.SelectedItem(); ok && item.name == ".." {
+		if _, ok := svc.(FSMetadataService); ok {
+			w.refreshSelectedMetadata()
+		}
+	}
 	return nil
 }
 
@@ -443,7 +449,7 @@ func (w *FilePaneWidget) selectIndex(idx int) {
 
 func (w *FilePaneWidget) refreshSelectedMetadata() {
 	item, ok := w.SelectedItem()
-	if !ok || item.name == ".." || w.dir == "" {
+	if !ok || w.dir == "" {
 		return
 	}
 	previousIsDir := item.isDir
@@ -453,16 +459,28 @@ func (w *FilePaneWidget) refreshSelectedMetadata() {
 		w.service = svc
 	}
 	path := filepath.Join(w.dir, item.name)
+	if item.name == ".." {
+		path = filepath.Dir(w.dir)
+	}
 	var size int64
 	var mode os.FileMode
 	if statSvc, ok := svc.(FSMetadataService); ok {
 		info, err := statSvc.Lstat(path)
 		if err != nil {
-			w.handleMetadataError(path, err)
+			if item.name == ".." {
+				if w.OnMetadataError != nil {
+					w.OnMetadataError(path, err)
+				}
+			} else {
+				w.handleMetadataError(path, err)
+			}
 			return
 		}
 		size, mode = info.Size(), info.Mode()
 	} else {
+		if item.name == ".." {
+			return
+		}
 		entries, err := w.service.ReadDir(w.dir)
 		if err != nil {
 			w.handleMetadataError(path, err)
@@ -486,6 +504,7 @@ func (w *FilePaneWidget) refreshSelectedMetadata() {
 	}
 	item.size = size
 	item.mode = mode
+	item.modeKnown = item.name == ".."
 	if _, ok := svc.(FSMetadataService); ok {
 		item.isDir = mode.IsDir()
 		item.isExec = !item.isDir && IsExecutableFile(path)
@@ -924,15 +943,20 @@ func (w *FilePaneWidget) renderSelectedDetails(buf *CellBuf) {
 		buf.Set(x, separatorY, makeCell('─', colorGray, colorBlue, false))
 		buf.Set(x, detailY, makeCell(' ', colorWhite, colorBlue, false))
 	}
+	if w.Width > 1 {
+		buf.Set(0, separatorY, makeCell('├', colorGray, colorBlue, false))
+		buf.Set(w.Width-1, separatorY, makeCell('┤', colorGray, colorBlue, false))
+	}
 	item, ok := w.SelectedItem()
 	if !ok {
 		return
 	}
-	flags := make([]string, 0, 4)
-	if item.isDir {
-		flags = append(flags, "D")
+	displayName := item.name
+	if item.name == ".." && w.dir != "" {
+		displayName = strings.TrimSpace(dirTitleName(filepath.Dir(w.dir)))
 	}
-	if item.name != ".." && item.mode.Perm()&0o222 == 0 {
+	flags := make([]string, 0, 4)
+	if (item.name != ".." || item.modeKnown) && item.mode.Perm()&0o222 == 0 {
 		flags = append(flags, "R")
 	}
 	if item.name != ".." && strings.HasPrefix(item.name, ".") {
@@ -941,30 +965,65 @@ func (w *FilePaneWidget) renderSelectedDetails(buf *CellBuf) {
 	if item.isExec {
 		flags = append(flags, "X")
 	}
-	flagText := strings.Join(flags, ",")
-	if flagText == "" {
-		flagText = "-"
+	suffix := ""
+	if len(flags) > 0 {
+		suffix = fmt.Sprintf("[%s]", strings.Join(flags, ","))
 	}
-	suffix := fmt.Sprintf("[%s] %s %sb", flagText, item.mode.Perm(), w.formatNumber(item.size))
-	nameWidth := w.Width - 3 - runewidth.StringWidth(suffix)
+	if item.name != ".." || item.modeKnown {
+		if suffix != "" {
+			suffix += " "
+		}
+		suffix += item.mode.Perm().String()
+	}
+	sizeStart := -1
+	if !item.isDir {
+		if suffix != "" {
+			sizeStart = runewidth.StringWidth(suffix) + 1
+			suffix += " "
+		} else {
+			sizeStart = 0
+		}
+		suffix += w.formatNumber(item.size) + "b"
+	}
+	availableWidth := w.Width - 2
+	if suffixWidth := runewidth.StringWidth(suffix); suffixWidth > availableWidth {
+		suffix = truncateStringToWidth(suffix, availableWidth)
+	}
+	suffixWidth := runewidth.StringWidth(suffix)
+	suffixX := w.Width - 1 - suffixWidth
+	nameWidth := suffixX - 2
 	if nameWidth < 0 {
 		nameWidth = 0
 	}
-	name := truncateStringToWidth(item.name, nameWidth)
-	detail := name + " " + suffix
+	name := truncateStringToWidth(displayName, nameWidth)
 	col := 1
-	for _, rn := range detail {
+	for _, rn := range name {
 		if col >= w.Width-1 {
 			break
 		}
 		buf.Set(col, detailY, makeCell(rn, colorWhite, colorBlue, false))
 		col += runewidth.RuneWidth(rn)
 	}
+	col = suffixX
+	suffixOffset := 0
+	for _, rn := range suffix {
+		if col >= w.Width-1 {
+			break
+		}
+		fg := colorGray
+		if suffixOffset >= sizeStart && unicode.IsDigit(rn) {
+			fg = colorBrightCyan
+		}
+		buf.Set(col, detailY, makeCell(rn, fg, colorBlue, false))
+		runeWidth := runewidth.RuneWidth(rn)
+		col += runeWidth
+		suffixOffset += runeWidth
+	}
 }
 
 func (w *FilePaneWidget) renderTotal(buf *CellBuf) {
 	count, total := w.fileTotals()
-	text := fmt.Sprintf("[%s]--%sb", w.formatNumber(int64(count)), w.formatNumber(total))
+	text := fmt.Sprintf("[%s]──%sb", w.formatNumber(int64(count)), w.formatNumber(total))
 	y := w.Height - 1
 	col := 4
 	for _, rn := range text {
@@ -1279,6 +1338,14 @@ func (w *DualPaneWidget) RenderBuf() CellBuf {
 						buf.Set(dividerX+1, y, makeCell('─', colorGray, colorBlue, false))
 					}
 					buf.Set(dividerX, y, makeCell('┴', colorGray, colorBlue, false))
+				case w.Height - 3:
+					if dividerX-1 >= 0 {
+						buf.Set(dividerX-1, y, makeCell('─', colorGray, colorBlue, false))
+					}
+					if dividerX+1 < w.Width {
+						buf.Set(dividerX+1, y, makeCell('─', colorGray, colorBlue, false))
+					}
+					buf.Set(dividerX, y, makeCell('┼', colorGray, colorBlue, false))
 				default:
 					if dividerX-1 >= 0 {
 						buf.Set(dividerX-1, y, makeCell(' ', colorWhite, colorBlue, false))

@@ -331,6 +331,12 @@ func TestFilePaneWidgetRendersTotalAndSelectedDetails(t *testing.T) {
 	if got := buf.Get(1, 5).Grapheme; got != "─" {
 		t.Fatalf("detail separator = %q, want horizontal line", got)
 	}
+	if got := buf.Get(0, 5).Grapheme; got != "├" {
+		t.Fatalf("left detail separator join = %q, want ├", got)
+	}
+	if got := buf.Get(buf.Width-1, 5).Grapheme; got != "┤" {
+		t.Fatalf("right detail separator join = %q, want ┤", got)
+	}
 	var details strings.Builder
 	for x := 1; x < buf.Width-1; x++ {
 		details.WriteString(buf.Get(x, 6).Grapheme)
@@ -339,6 +345,25 @@ func TestFilePaneWidgetRendersTotalAndSelectedDetails(t *testing.T) {
 		if !strings.Contains(details.String(), want) {
 			t.Fatalf("selected details %q do not contain %q", details.String(), want)
 		}
+	}
+	suffix := "[R,H] -r--r--r-- 1,234b"
+	trimmedDetails := strings.TrimRight(details.String(), " ")
+	if !strings.HasPrefix(strings.TrimLeft(trimmedDetails, " "), ".sample.bin") || !strings.HasSuffix(trimmedDetails, suffix) {
+		t.Fatalf("selected detail should left-align the name and right-align %q: %q", suffix, details.String())
+	}
+	suffixStart := buf.Width - 1 - len(suffix)
+	if got := buf.Get(suffixStart, 6).Style.Foreground(); got != colorGray {
+		t.Fatalf("attribute color = 0x%06X, want muted gray", got)
+	}
+	sizeStart := suffixStart + len("[R,H] -r--r--r-- ")
+	if got := buf.Get(sizeStart, 6).Style.Foreground(); got != colorBrightCyan {
+		t.Fatalf("size digit color = 0x%06X, want bright cyan", got)
+	}
+	if got := buf.Get(sizeStart+1, 6).Style.Foreground(); got != colorGray {
+		t.Fatalf("size group separator color = 0x%06X, want muted gray", got)
+	}
+	if got := buf.Get(buf.Width-2, 6).Style.Foreground(); got != colorGray {
+		t.Fatalf("size suffix color = 0x%06X, want muted gray", got)
 	}
 	if got := buf.Get(4, 7).Grapheme; got != "[" {
 		t.Fatalf("summary begins at x=4 with [, got %q", got)
@@ -349,11 +374,54 @@ func TestFilePaneWidgetRendersTotalAndSelectedDetails(t *testing.T) {
 	if got := buf.Get(10, 7).Style.Foreground(); got != colorGray {
 		t.Fatalf("locale group separator color = 0x%06X, want border color", got)
 	}
+	if got := buf.Get(7, 7).Grapheme; got != "─" {
+		t.Fatalf("summary count/size separator = %q, want horizontal line", got)
+	}
 
 	pane.BeginSearch(input.KeyPressEvent{Code: 'z', Mod: input.ModAlt})
 	buf = pane.RenderBuf()
 	if got := buf.Get(4, 7).Grapheme; got != "─" {
 		t.Fatalf("total should be hidden while search is active; got %q at summary position", got)
+	}
+}
+
+func TestFilePaneWidgetParentDirectoryDetailsUseMetadataWithoutSize(t *testing.T) {
+	parentDir := filepath.Join(t.TempDir(), "parent")
+	dir := filepath.Join(parentDir, "child")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create child directory: %v", err)
+	}
+	parentInfo, err := os.Stat(parentDir)
+	if err != nil {
+		t.Fatalf("stat parent directory: %v", err)
+	}
+
+	pane := NewFilePaneWidget("files")
+	pane.SetService(&OsFSService{})
+	if err := pane.LoadDir(dir); err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	pane.Layout(Rect{X: 0, Y: 0, W: 60, H: 8})
+	buf := pane.RenderBuf()
+
+	var details strings.Builder
+	for x := 1; x < buf.Width-1; x++ {
+		details.WriteString(buf.Get(x, 6).Grapheme)
+	}
+	got := strings.TrimRight(details.String(), " ")
+	wantName := filepath.Base(parentDir)
+	wantSuffix := parentInfo.Mode().Perm().String()
+	if !strings.HasPrefix(strings.TrimLeft(got, " "), wantName) {
+		t.Fatalf("parent details should show its actual name %q: %q", wantName, details.String())
+	}
+	if !strings.HasSuffix(got, wantSuffix) {
+		t.Fatalf("parent details should show its actual attributes %q: %q", wantSuffix, details.String())
+	}
+	if strings.Contains(got, "[D]") {
+		t.Fatalf("parent details should not show a directory indicator: %q", details.String())
+	}
+	if strings.HasSuffix(got, "b") {
+		t.Fatalf("directory details should omit size: %q", details.String())
 	}
 }
 
@@ -602,6 +670,9 @@ func TestDualPaneWidgetLayoutHasSingleDividerColumn(t *testing.T) {
 		wantSide := " "
 		if y == 0 {
 			wantGrapheme = "┬"
+			wantSide = "─"
+		} else if y == dp.Height-3 {
+			wantGrapheme = "┼"
 			wantSide = "─"
 		} else if y == dp.Height-1 {
 			wantGrapheme = "┴"
