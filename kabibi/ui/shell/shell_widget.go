@@ -147,6 +147,7 @@ func New(opts ShellOptions) *Shell {
 			s.mu.Unlock()
 			return p
 		},
+		StyleInput: s.styleInput,
 	})
 	s.refreshPrompt()
 	if execSess != nil {
@@ -319,6 +320,19 @@ func (s *Shell) Blocks() []CommandBlock {
 // Input returns the embedded PromptInput widget.
 func (s *Shell) Input() *PromptInput {
 	return s.input
+}
+
+func (s *Shell) styleInput(value string) []terminal.Style {
+	if s.execSess == nil {
+		return nil
+	}
+	route, _ := s.execSess.ClassifyInput(value)
+	switch route {
+	case RouteShell, RouteBuiltin, RouteIncomplete:
+		return bashInputStyles(value)
+	default:
+		return nil
+	}
 }
 
 // SetInput sets the input buffer and cursor position for testing/snapshot generation.
@@ -1169,6 +1183,13 @@ func (s *Shell) handleKeyEvent(ev input.KeyPressEvent) bool {
 	}
 
 	if keyStr == "enter" {
+		if s.execSess != nil {
+			if route, _ := s.execSess.ClassifyInput(s.input.Value()); route == RouteIncomplete {
+				s.input.InsertNewline()
+				s.invalidate()
+				return true
+			}
+		}
 		s.submitAndExecuteAsync()
 		return true
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -56,6 +57,7 @@ func TestRunCLIDiagnosticsFollowVerboseFlag(t *testing.T) {
 		if verbose {
 			name = "enabled"
 		}
+
 		t.Run(name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			if code := runCLI([]string{"--help"}, &stdout, &stderr, verbose); code != 0 {
@@ -73,6 +75,34 @@ func TestRunCLIDiagnosticsFollowVerboseFlag(t *testing.T) {
 				t.Fatalf("diagnostics contain custom timestamp or PID format: %q", got)
 			}
 		})
+	}
+}
+
+func TestRunCLI_UsesPipedSessionForRedirectedStdin(t *testing.T) {
+	previousStdin := os.Stdin
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdin = reader
+	defer func() {
+		os.Stdin = previousStdin
+		_ = reader.Close()
+	}()
+	if _, err := writer.WriteString("echo routed through stdin\n"); err != nil {
+		_ = writer.Close()
+		t.Fatalf("write test input: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close test input: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runCLI(nil, &stdout, &stderr, false); code != 0 {
+		t.Fatalf("runCLI() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if got, want := stdout.String(), "routed through stdin\n"; got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
 	}
 }
 
