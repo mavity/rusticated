@@ -93,6 +93,128 @@ func TestGitBuiltinReportsMissingRepository(t *testing.T) {
 	}
 }
 
+func TestGitBuiltinSupportsInitAndGlobalConfigOutsideRepository(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	workingDir := t.TempDir()
+	repoDir := filepath.Join(workingDir, "new-repo")
+	session, err := NewExecutionSession(workingDir)
+	if err != nil {
+		t.Fatalf("create execution session: %v", err)
+	}
+
+	for _, command := range []string{
+		"git -C '" + repoDir + "' init",
+		"git config --global user.name 'Kabibi Global'",
+		"git config --global user.email 'global@example.test'",
+	} {
+		record, err := session.RunCommand(context.Background(), command, nil, SourceUserShell, nil)
+		if err != nil || record.ExitCode != 0 {
+			t.Fatalf("%s: (exit %d, err %v, output %q)", command, record.ExitCode, err, record.Output)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(repoDir, ".git")); err != nil {
+		t.Fatalf("git init did not create repository outside current directory: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".gitconfig")); err != nil {
+		t.Fatalf("git config --global did not use HOME: %v", err)
+	}
+}
+
+func TestGitBuiltinForwardsFullStatusAddAndCommitOptions(t *testing.T) {
+	root := t.TempDir()
+	repo, err := git.PlainInit(root, false)
+	if err != nil {
+		t.Fatalf("initialize repository: %v", err)
+	}
+	cfg, err := repo.Config()
+	if err != nil {
+		t.Fatalf("read repository config: %v", err)
+	}
+	cfg.User.Name = "Kabibi Test"
+	cfg.User.Email = "author@example.test"
+	if err := repo.Storer.SetConfig(cfg); err != nil {
+		t.Fatalf("configure repository identity: %v", err)
+	}
+	trackedPath := filepath.Join(root, "tracked.txt")
+	if err := os.WriteFile(trackedPath, []byte("initial\n"), 0o644); err != nil {
+		t.Fatalf("write tracked file: %v", err)
+	}
+	session, err := NewExecutionSession(root)
+	if err != nil {
+		t.Fatalf("create execution session: %v", err)
+	}
+	for _, command := range []string{
+		"git add tracked.txt",
+		"git commit -m initial",
+	} {
+		record, err := session.RunCommand(context.Background(), command, nil, SourceUserShell, nil)
+		if err != nil || record.ExitCode != 0 {
+			t.Fatalf("%s: (exit %d, err %v, output %q)", command, record.ExitCode, err, record.Output)
+		}
+	}
+
+	if err := os.WriteFile(trackedPath, []byte("updated\n"), 0o644); err != nil {
+		t.Fatalf("modify tracked file: %v", err)
+	}
+	addRecord, err := session.RunCommand(context.Background(), "git add -u", nil, SourceUserShell, nil)
+	if err != nil || addRecord.ExitCode != 0 {
+		t.Fatalf("git add -u: (exit %d, err %v, output %q)", addRecord.ExitCode, err, addRecord.Output)
+	}
+	statusRecord, err := session.RunCommand(context.Background(), "git status --porcelain=v1 --untracked-files=all", nil, SourceUserShell, nil)
+	if err != nil || statusRecord.ExitCode != 0 || !strings.Contains(statusRecord.Output, "M  tracked.txt") {
+		t.Fatalf("extended git status = (exit %d, err %v, output %q)", statusRecord.ExitCode, err, statusRecord.Output)
+	}
+	commitRecord, err := session.RunCommand(context.Background(), "git commit --allow-empty -m extended --author='Inline Author <inline@example.test>'", nil, SourceUserShell, nil)
+	if err != nil || commitRecord.ExitCode != 0 {
+		t.Fatalf("extended git commit: (exit %d, err %v, output %q)", commitRecord.ExitCode, err, commitRecord.Output)
+	}
+}
+
+func TestGitBuiltinHonorsInlineEnvironmentAndGlobalConfigFlags(t *testing.T) {
+	root := t.TempDir()
+	if _, err := git.PlainInit(root, false); err != nil {
+		t.Fatalf("initialize repository: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "file.txt"), []byte("contents\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	session, err := NewExecutionSession(root)
+	if err != nil {
+		t.Fatalf("create execution session: %v", err)
+	}
+
+	addRecord, err := session.RunCommand(context.Background(), "git -C . add file.txt", nil, SourceUserShell, nil)
+	if err != nil || addRecord.ExitCode != 0 {
+		t.Fatalf("git -C add: (exit %d, err %v, output %q)", addRecord.ExitCode, err, addRecord.Output)
+	}
+	commitRecord, err := session.RunCommand(context.Background(),
+		`GIT_AUTHOR_NAME="Inline Author" GIT_AUTHOR_EMAIL=inline@example.test GIT_COMMITTER_NAME="Inline Committer" GIT_COMMITTER_EMAIL=committer@example.test git -c user.name=Override -c user.email=override@example.test commit -m inline`,
+		nil, SourceUserShell, nil)
+	if err != nil || commitRecord.ExitCode != 0 {
+		t.Fatalf("inline git commit: (exit %d, err %v, output %q)", commitRecord.ExitCode, err, commitRecord.Output)
+	}
+	opened, err := git.PlainOpen(root)
+	if err != nil {
+		t.Fatalf("open repository: %v", err)
+	}
+	head, err := opened.Head()
+	if err != nil {
+		t.Fatalf("read HEAD: %v", err)
+	}
+	commit, err := opened.CommitObject(head.Hash())
+	if err != nil {
+		t.Fatalf("read commit: %v", err)
+	}
+	if commit.Author.Name != "Inline Author" || commit.Author.Email != "inline@example.test" {
+		t.Fatalf("commit author = %q <%s>, want inline identity", commit.Author.Name, commit.Author.Email)
+	}
+	if commit.Committer.Name != "Inline Committer" || commit.Committer.Email != "committer@example.test" {
+		t.Fatalf("commit committer = %q <%s>, want inline identity", commit.Committer.Name, commit.Committer.Email)
+	}
+}
+
 func TestGitBuiltinAddAndCommit(t *testing.T) {
 	root := t.TempDir()
 	repo, err := git.PlainInit(root, false)

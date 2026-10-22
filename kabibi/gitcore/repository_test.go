@@ -2,11 +2,14 @@ package gitcore
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 )
 
 func TestOpenFindsRepositoryFromShellSubdirectory(t *testing.T) {
@@ -127,4 +130,106 @@ func TestStageCommitAndLog(t *testing.T) {
 	if err := opened.Stage([]string{"../outside.txt"}, false); err == nil {
 		t.Fatal("Stage() accepted a path outside the repository")
 	}
+}
+
+func TestBackupDirtyFilesStoresLooseBlobs(t *testing.T) {
+	root, opened, gitRepo := newCommittedRepository(t, "tracked.txt", "committed\n")
+	if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("modified raw bytes\n"), 0o644); err != nil {
+		t.Fatalf("modify tracked file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "other.txt"), []byte("untracked\n"), 0o644); err != nil {
+		t.Fatalf("write untracked file: %v", err)
+	}
+
+	backups, err := opened.BackupDirtyFiles([]string{"tracked.txt"})
+	if err != nil {
+		t.Fatalf("BackupDirtyFiles(): %v", err)
+	}
+	if len(backups) != 1 || backups["tracked.txt"] == "" {
+		t.Fatalf("backups = %#v, want only tracked.txt", backups)
+	}
+	blob, err := gitRepo.BlobObject(plumbing.NewHash(backups["tracked.txt"]))
+	if err != nil {
+		t.Fatalf("read backup blob: %v", err)
+	}
+	reader, err := blob.Reader()
+	if err != nil {
+		t.Fatalf("open backup blob: %v", err)
+	}
+	got, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read backup blob: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("close backup blob: %v", err)
+	}
+	if string(got) != "modified raw bytes\n" {
+		t.Fatalf("backup blob content = %q, want exact raw worktree bytes", got)
+	}
+}
+
+func TestDiffSeparatesStagedAndWorktreeChanges(t *testing.T) {
+	root, opened, _ := newCommittedRepository(t, "tracked.txt", "committed\n")
+	path := filepath.Join(root, "tracked.txt")
+	if err := os.WriteFile(path, []byte("staged version\n"), 0o644); err != nil {
+		t.Fatalf("write staged version: %v", err)
+	}
+	if err := opened.Stage([]string{"tracked.txt"}, false); err != nil {
+		t.Fatalf("stage version: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("worktree version\n"), 0o644); err != nil {
+		t.Fatalf("write worktree version: %v", err)
+	}
+
+	staged, err := opened.Diff(true, "", "tracked.txt")
+	if err != nil {
+		t.Fatalf("staged Diff(): %v", err)
+	}
+	stagedPatch := FormatPatch(staged)
+	if !strings.Contains(stagedPatch, "+staged version") || strings.Contains(stagedPatch, "+worktree version") {
+		t.Fatalf("staged diff = %q, want staged content only", stagedPatch)
+	}
+	worktree, err := opened.Diff(false, "", "tracked.txt")
+	if err != nil {
+		t.Fatalf("worktree Diff(): %v", err)
+	}
+	worktreePatch := FormatPatch(worktree)
+	if !strings.Contains(worktreePatch, "-staged version") || !strings.Contains(worktreePatch, "+worktree version") {
+		t.Fatalf("worktree diff = %q, want index-to-worktree change", worktreePatch)
+	}
+}
+
+func newCommittedRepository(t *testing.T, name, contents string) (string, *Repository, *git.Repository) {
+	t.Helper()
+	root := t.TempDir()
+	gitRepo, err := git.PlainInit(root, false)
+	if err != nil {
+		t.Fatalf("initialize repository: %v", err)
+	}
+	cfg, err := gitRepo.Config()
+	if err != nil {
+		t.Fatalf("read repository config: %v", err)
+	}
+	cfg.User.Name = "Test User"
+	cfg.User.Email = "test@example.test"
+	if err := gitRepo.Storer.SetConfig(cfg); err != nil {
+		t.Fatalf("configure repository identity: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, name), []byte(contents), 0o644); err != nil {
+		t.Fatalf("write committed file: %v", err)
+	}
+	opened, err := Open(root)
+	if err != nil {
+		t.Fatalf("open repository: %v", err)
+	}
+	if err := opened.Stage([]string{name}, false); err != nil {
+		t.Fatalf("stage committed file: %v", err)
+	}
+	if _, err := opened.Commit("initial", false, false, map[string]string{
+		"GIT_AUTHOR_NAME": "Test User", "GIT_AUTHOR_EMAIL": "test@example.test",
+		"GIT_COMMITTER_NAME": "Test User", "GIT_COMMITTER_EMAIL": "test@example.test",
+	}); err != nil {
+		t.Fatalf("commit test file: %v", err)
+	}
+	return root, opened, gitRepo
 }
