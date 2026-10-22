@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 )
 
@@ -611,15 +612,24 @@ type CursorPos struct {
 // FromANSIStringWithCursor renders raw ANSI-decorated text directly into an exact-fit CellBuf
 // and returns the exact cursor position reported by the virtual terminal emulator.
 func FromANSIStringWithCursor(s string, width int) (CellBuf, CursorPos) {
-	term := vt.NewEmulator(width, 24)
+	term := newUnicodeCoreEmulator(width)
 	// In VT emulators without LNM (linefeed mode), bare LF only moves the cursor down (index)
 	// without carriage return. Ensure lines advance down-and-left.
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' && (i == 0 || s[i-1] != '\r') {
+	for start := 0; start < len(s); {
+		newline := strings.IndexByte(s[start:], '\n')
+		if newline < 0 {
+			_, _ = term.WriteString(s[start:])
+			break
+		}
+
+		end := start + newline
+		_, _ = term.WriteString(s[start:end])
+		if end == 0 || s[end-1] != '\r' {
 			_, _ = term.WriteString("\r\n")
 		} else {
-			_, _ = term.Write([]byte{s[i]})
+			_, _ = term.WriteString("\n")
 		}
+		start = end + 1
 	}
 
 	height := calculateGridHeight(term)
@@ -694,7 +704,7 @@ func FromANSI(lines []string, width int) CellBuf {
 	if len(lines) == 1 {
 		return FromANSIString(lines[0], width)
 	}
-	term := vt.NewEmulator(width, 24)
+	term := newUnicodeCoreEmulator(width)
 
 	for i, line := range lines {
 		_, _ = term.WriteString(line)
@@ -708,6 +718,12 @@ func FromANSI(lines []string, width int) CellBuf {
 		return NewCellBuf(width, 0)
 	}
 	return populateCellBufDirect(term, width, height)
+}
+
+func newUnicodeCoreEmulator(width int) *vt.Emulator {
+	term := vt.NewEmulator(width, 24)
+	_, _ = term.WriteString(ansi.SetMode(ansi.ModeUnicodeCore))
+	return term
 }
 
 // calculateGridHeight computes the exact visual height of the rendered terminal output.

@@ -230,13 +230,16 @@ A command checkbox `[x]` may **only** be ticked when all 5 criteria are met:
   - `go run . kabibi -r -c "printf 'one same\n two same\nthree other\n' | uniq -f 1"` — compared after the first field and printed `one same`, `three other`.
   - `go run . kabibi -r -c "printf 'xapple\nyapple\nzberry\n' | uniq -s 1"` — compared after the first character and printed `xapple`, `zberry`.
   - `go run . kabibi -r -c "printf 'a\nA\nb\n' | uniq -i"` — treated adjacent `a` and `A` as duplicates.
-- [ ] **`wc`** (`cmds/core/wc`): Local `-l`, `-w`, `-c`, `-m`, `-L` flags; write counts to `ioEnv.Stdout`.
-  - `go -C u-root test ./cmds/core/wc -v` — passed; covers files/stdin, counts, UTF-8, `-L`, and output errors.
-  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/wc$' -v` — passed; covers `-l`, `-w`, `-c`, `-m`, and `-L` on a file.
+- [x] **`wc`** (`cmds/core/wc`): Local `-l`, `-w`, `-c`, `-m`, `-L` flags; write counts to `ioEnv.Stdout`.
+  - `go -C u-root test ./cmds/core/wc -v` — passed; covers files/stdin, counts, UTF-8, display widths, tab stops, graphemes, ANSI styling, CRLF, and output errors.
+  - `go -C kabibi test ./ui/terminal` — passed; verifies both CellBuf VT paths enable Unicode Core mode and retain a ZWJ family emoji as a width-2 grapheme.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/wc$' -v` — passed; covers `-l`, `-w`, `-c`, `-m`, `-L`, wide characters, tabs, and graphemes through shell integration.
   - `go run . kabibi -r -c "printf 'a b\nccc\n' | wc -l -w -c -m -L"` — printed `2 3 8 8 3`.
   - `go run . kabibi -r -c "printf 'é\n' | wc -c"` — counted 3 UTF-8 bytes.
   - `go run . kabibi -r -c "printf 'é\n' | wc -m"` — counted 2 Unicode code points (including newline).
-  - `go run . kabibi -r -c "printf '界\n' | wc -L"` — reported 1, and `go run . kabibi -r -c "printf 'a\tb\n' | wc -L"` reported 3. **Finding:** `-L` counts runes, not terminal display columns (wide characters and tabs are undercounted), so this item remains unchecked.
+  - `go run . kabibi -r -c "printf '界\n' | wc -L"` — reported 2 display columns.
+  - `go run . kabibi -r -c "printf 'a\tb\n' | wc -L"` — reported 9 columns with tab expansion to the next 8-column stop.
+  - `go run . kabibi -r -c "printf '👨‍👩‍👧‍👦\n' | wc -L"` — reported 2 columns for the grapheme cluster.
 - [x] **`tr`** (`cmds/core/tr`): Local `-d`, `-s`, `-c`/`-C` flags; character translation from `ioEnv.Stdin` to `ioEnv.Stdout`.
   - `go -C u-root test ./cmds/core/tr -v` — passed; covers character classes, deletion, complement, squeeze, replacement characters, and output errors.
   - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/tr$' -v` — passed; shell integration covered translation, deletion, squeeze, and complement deletion.
