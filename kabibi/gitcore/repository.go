@@ -415,7 +415,32 @@ func (r *Repository) indexFiles(filePath string) (map[string][]byte, error) {
 
 func (r *Repository) diffRevision(revision, filePath string) ([]DiffFile, error) {
 	if strings.Contains(revision, "...") {
-		return nil, errors.New("three-dot Git diff ranges are not supported")
+		from, to, ranged := strings.Cut(revision, "...")
+		if !ranged || strings.Contains(to, "...") {
+			return nil, fmt.Errorf("invalid three-dot Git diff range %q", revision)
+		}
+		if from == "" {
+			from = "HEAD"
+		}
+		if to == "" {
+			to = "HEAD"
+		}
+		fromCommit, err := r.commit(from)
+		if err != nil {
+			return nil, err
+		}
+		toCommit, err := r.commit(to)
+		if err != nil {
+			return nil, err
+		}
+		mergeBases, err := fromCommit.MergeBase(toCommit)
+		if err != nil {
+			return nil, fmt.Errorf("find merge base for Git diff range %q: %w", revision, err)
+		}
+		if len(mergeBases) == 0 {
+			return nil, fmt.Errorf("Git diff range %q has no merge base", revision)
+		}
+		return r.compareTrees(mergeBases[0].TreeHash, toCommit.TreeHash, filePath)
 	}
 	from, to, ranged := strings.Cut(revision, "..")
 	if !ranged {

@@ -165,6 +165,28 @@ func TestGitReplaceCreatesListsAndDeletesReplacementRef(t *testing.T) {
 	if err != nil || list.ExitCode != 0 || strings.Contains(list.Output, commits[0]) {
 		t.Fatalf("list after deletion: (exit %d, err %v, output %q)", list.ExitCode, err, list.Output)
 	}
+	graft, err := session.RunCommand(context.Background(),
+		"git replace --graft "+commits[1], nil, SourceUserShell, nil)
+	if err != nil || graft.ExitCode != 0 {
+		t.Fatalf("graft commit: (exit %d, err %v, output %q)", graft.ExitCode, err, graft.Output)
+	}
+	replacementRef := plumbing.ReferenceName("refs/replace/" + commits[1])
+	replacement, err := repo.Reference(replacementRef, false)
+	if err != nil {
+		t.Fatalf("read graft replacement ref: %v", err)
+	}
+	originalCommit, err := repo.CommitObject(plumbing.NewHash(commits[1]))
+	if err != nil {
+		t.Fatalf("read original commit: %v", err)
+	}
+	graftedCommit, err := repo.CommitObject(replacement.Hash())
+	if err != nil {
+		t.Fatalf("read grafted commit: %v", err)
+	}
+	if len(graftedCommit.ParentHashes) != 0 || graftedCommit.TreeHash != originalCommit.TreeHash ||
+		graftedCommit.Message != originalCommit.Message {
+		t.Fatalf("grafted commit = %#v, want same tree/message and no parents", graftedCommit)
+	}
 }
 
 func TestGitNotesAddAppendListShowAndRemove(t *testing.T) {
@@ -255,5 +277,71 @@ func TestEncodeGitNotesTreeSortsEntries(t *testing.T) {
 	}
 	if _, err := encodeNoteTree(repo, root); err != nil {
 		t.Fatalf("encode notes tree: %v", err)
+	}
+}
+
+func TestGitNotesPruneRemovesNotesForUnreachableObjects(t *testing.T) {
+	root := t.TempDir()
+	repo, err := git.PlainInit(root, false)
+	if err != nil {
+		t.Fatalf("initialize repository: %v", err)
+	}
+	config, err := repo.Config()
+	if err != nil {
+		t.Fatalf("read repository config: %v", err)
+	}
+	config.User.Name = "Kabibi Test"
+	config.User.Email = "test@example.test"
+	if err := repo.Storer.SetConfig(config); err != nil {
+		t.Fatalf("configure repository identity: %v", err)
+	}
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("open worktree: %v", err)
+	}
+	author := &object.Signature{Name: "Kabibi Test", Email: "test@example.test"}
+	var commits []plumbing.Hash
+	for _, content := range []string{"reachable\n", "unreachable\n"} {
+		if err := os.WriteFile(filepath.Join(root, "state.txt"), []byte(content), 0o644); err != nil {
+			t.Fatalf("write commit content: %v", err)
+		}
+		if _, err := worktree.Add("state.txt"); err != nil {
+			t.Fatalf("stage commit content: %v", err)
+		}
+		hash, err := worktree.Commit("commit "+content, &git.CommitOptions{Author: author})
+		if err != nil {
+			t.Fatalf("create commit: %v", err)
+		}
+		commits = append(commits, hash)
+	}
+	session, err := NewExecutionSession(root)
+	if err != nil {
+		t.Fatalf("create execution session: %v", err)
+	}
+	for _, hash := range commits {
+		add, err := session.RunCommand(context.Background(),
+			"git notes add -m note "+hash.String(), nil, SourceUserShell, nil)
+		if err != nil || add.ExitCode != 0 {
+			t.Fatalf("add note for %s: (exit %d, err %v, output %q)", hash, add.ExitCode, err, add.Output)
+		}
+	}
+	head, err := repo.Reference(plumbing.HEAD, false)
+	if err != nil || head.Type() != plumbing.SymbolicReference {
+		t.Fatalf("read symbolic HEAD: (%v, err %v)", head, err)
+	}
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(head.Target(), commits[0])); err != nil {
+		t.Fatalf("move branch back to reachable commit: %v", err)
+	}
+	prune, err := session.RunCommand(context.Background(), "git notes prune", nil, SourceUserShell, nil)
+	if err != nil || prune.ExitCode != 0 {
+		t.Fatalf("prune notes: (exit %d, err %v, output %q)", prune.ExitCode, err, prune.Output)
+	}
+	list, err := session.RunCommand(context.Background(), "git notes list", nil, SourceUserShell, nil)
+	if err != nil || list.ExitCode != 0 {
+		t.Fatalf("list notes after prune: (exit %d, err %v, output %q)", list.ExitCode, err, list.Output)
+	}
+	if !strings.Contains(list.Output, " "+commits[0].String()) ||
+		strings.Contains(list.Output, " "+commits[1].String()) {
+		t.Fatalf("notes after prune = %q, want only reachable target %s", list.Output, commits[0])
 	}
 }
