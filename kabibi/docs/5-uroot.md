@@ -253,14 +253,20 @@ A command checkbox `[x]` may **only** be ticked when all 5 criteria are met:
   - `go -C u-root test ./cmds/core/tee -v` — passed; covers output/append, flag parsing, relative paths, and write errors.
   - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/tee$' -v` — passed; covers multiple output files, stdout, and append.
   - `go run . kabibi -r -c "printf 'first\n' | tee tee-probe.txt; printf 'second\n' | tee -a tee-probe.txt; cat tee-probe.txt; rm tee-probe.txt"` — tee passed both streams through, appended to the file, read back both lines, and removed the probe file.
-  - `go run . kabibi -r -c "printf 'ignored\n' | tee -i tee-ignore-probe.txt; cat tee-ignore-probe.txt; rm tee-ignore-probe.txt"` — `-i` completed a non-interrupt operation and wrote/read the expected data. **Limitation:** Ctrl-C behavior was not exercised; this item remains unchecked pending an interrupt test.
-- [ ] **`seq`** (`cmds/core/seq`): Local `-f`, `-s`, `-w` flags; check `ctx.Done()` in emission loop.
-  - `go -C u-root test ./cmds/core/seq -v` — passed; covers separators, formats, widths, decimal values, errors, and output failures.
-  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/seq$' -v` — passed; covers basic sequences, `-s`, and `-f`.
+  - `go run . kabibi -r -c "printf 'ignored\n' | tee -i tee-ignore-probe.txt; cat tee-ignore-probe.txt; rm tee-ignore-probe.txt"` — `-i` completed a non-interrupt operation and wrote/read the expected data.
+  - Retested with `go -C u-root test ./cmds/core/tee -v` and `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/tee$' -v` — both passed, but neither test sends Ctrl-C or SIGINT.
+  - **Finding:** `-i` registers `os.Interrupt` with `signal.Notify`, but in Kabibi the in-process shell routes Ctrl-C through context cancellation. `runTee` returns on `ctx.Done()` regardless of `-i`, so the flag does not suppress that cancellation path. Ctrl-C behavior remains untested and this item stays unchecked.
+- [x] **`seq`** (`cmds/core/seq`): Local `-f`, `-s`, `-w` flags; check `ctx.Done()` in emission loop.
+  - `go -C u-root test ./cmds/core/seq -v` — passed; covers separators, formats, widths, decimal values, negative increments, context cancellation, errors, and output failures.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/seq$' -v` — passed; covers basic sequences, `-s`, `-f`, and negative increments after positional operands.
   - `go run . kabibi -r -c "seq -s , 1 3"` — printed `1,2,3`.
   - `go run . kabibi -r -c "seq -f %02g 1 3"` — printed zero-padded `01`, `02`, `03`.
   - `go run . kabibi -r -c "seq -w -10 2 -2"` — printed `-10`, `-08`, `-06`, `-04`, `-02`.
-  - `go run . kabibi -r -c "seq 3 -1 -1"`, `go run . kabibi -r -c "seq 3 -1 1"`, and `go run . kabibi -r -c "seq 1 -1 -3"` — each failed with the usage message and exit 1. **Finding:** valid negative increments fail when a negative operand follows an earlier positional argument; the command-line flag handling inserts `--` too late. This item remains unchecked.
+  - `go run . kabibi -r -c "seq 3 -1 -1"` — printed `3`, `2`, `1`, `0`, `-1`.
+  - `go run . kabibi -r -c "seq 3 -1 1"` — printed `3`, `2`, `1`.
+  - `go run . kabibi -r -c "seq 1 -1 -3"` — printed `1`, `0`, `-1`, `-2`, `-3`.
+  - `go run . kabibi -r -c "seq -s , 1 -1 -3"` — printed `1,0,-1,-2,-3`.
+  - `go run . kabibi -r -c "seq -w -10 2 -2"` — retained zero-padding and printed `-10`, `-08`, `-06`, `-04`, `-02`.
 - [x] **`comm`** (`cmds/core/comm`): Local `-1`, `-2`, `-3` flags; support `-` for `ioEnv.Stdin`.
   - `go -C u-root test ./cmds/core/comm -v` — passed; covers column suppression, stdin, long lines, file errors, and output errors.
   - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/comm$' -v` — passed; covers `-12`, `-23`, and stdin with `-`.

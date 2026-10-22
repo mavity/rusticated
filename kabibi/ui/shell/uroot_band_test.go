@@ -375,6 +375,21 @@ func TestURoot_Band1B_TextProcessing(t *testing.T) {
 		if code != 0 || strings.TrimSpace(out) != "1,2,3" {
 			t.Errorf("seq -s failed: code=%d out=%q", code, out)
 		}
+
+		out, code, _ = run("seq 3 -1 -1")
+		if code != 0 || strings.TrimSpace(out) != "3\n2\n1\n0\n-1" {
+			t.Errorf("seq negative increment after positive start failed: code=%d out=%q", code, out)
+		}
+
+		out, code, _ = run("seq 3 -1 1")
+		if code != 0 || strings.TrimSpace(out) != "3\n2\n1" {
+			t.Errorf("seq negative increment to positive end failed: code=%d out=%q", code, out)
+		}
+
+		out, code, _ = run("seq 1 -1 -3")
+		if code != 0 || strings.TrimSpace(out) != "1\n0\n-1\n-2\n-3" {
+			t.Errorf("seq negative increment to negative end failed: code=%d out=%q", code, out)
+		}
 	})
 
 	t.Run("comm", func(t *testing.T) {
