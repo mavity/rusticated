@@ -376,6 +376,27 @@ func TestShell_EnterContinuesIncompleteShellInput(t *testing.T) {
 	}
 }
 
+func TestShell_CtrlCClearsIncompleteMultilineInput(t *testing.T) {
+	aiMock := &fakeAIRunner{}
+	sh := New(ShellOptions{AIRunner: aiMock})
+	defer sh.Close()
+
+	sh.SetInput("if true; then\necho unfinished")
+	blocksBefore := len(sh.Blocks())
+	if !sh.handleKeyEvent(input.KeyPressEvent{Code: 'c', Mod: input.ModCtrl}) {
+		t.Fatal("Ctrl+C was not handled for multiline input")
+	}
+	if got := sh.Input().Value(); got != "" {
+		t.Fatalf("input after Ctrl+C = %q, want empty", got)
+	}
+	if sh.IsRunning() || len(sh.Blocks()) != blocksBefore {
+		t.Fatal("Ctrl+C submitted the incomplete input")
+	}
+	if len(aiMock.prompts) != 0 {
+		t.Fatalf("incomplete input was routed to AI: %v", aiMock.prompts)
+	}
+}
+
 func TestShell_NestedBuiltins_BashShKabibi_AndFallbackPosition(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "greet.sh")

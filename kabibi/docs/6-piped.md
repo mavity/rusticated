@@ -66,7 +66,7 @@ Given raw input string $S$:
 4. An unescaped trailing backslash before the final newline is explicitly treated as `RouteIncomplete` when the input has a shell head; the parser may otherwise accept that input at EOF. A backslash escaping a trailing space is not a continuation.
 5. A compound command, dynamic command word, assignment-only command, or resolvable first command routes to `RouteShell`. A complete command whose leading word is unresolved (such as `Name` in `Name a bridge in Paris`) routes to `RouteAI`.
 
-This classifier is a routing heuristic, not a full Bash validator: definitive syntax errors route to AI so prose can still receive the natural-language fallback.**.
+This classifier is a routing heuristic, not a full Bash validator: definitive syntax errors route to AI so prose can still receive the natural-language fallback.
    - *Defense in depth:* Keep `ErrUnknownCommandAtStart` in `RunCommand` as a safety net in case an executable disappears between classification and execution.
 
 ### 2.4 Interactive TTY Multiline Continuation (`PromptInput` & `Shell`)
@@ -96,7 +96,7 @@ Syntax highlighting in `PromptInput` is **strictly gated by the Stage 1 classifi
 
 ### 3.2 Dual-Background Subtle Colour Palette
 
-To avoid a loud or "childish" appearance and ensure legibility on **both black (`#000000`–`#1E1E1E`) and white (`#FFFFFF`–`#F5F5F5`) terminal backgrounds**, all highlight colors use **muted mid-luminance, desaturated RGB values** (approximate relative luminance $Y \approx 0.22\text{–}0.35$, yielding balanced contrast against both extremes):
+To avoid a loud or "childish" appearance while keeping the colors legible on **both black (`#000000`) and white (`#FFFFFF`) terminal backgrounds**, the muted palette is checked by an automated contrast test requiring at least **3:1** against both backgrounds:
 
 | Token Category | Visual Description | Hex RGB | `terminal.Color` | Applies To |
 | :--- | :--- | :--- | :--- | :--- |
@@ -201,23 +201,27 @@ Even though Kabibi itself reads from a non-TTY `stdin` and streams to `stdout`/`
   - Verify `if true; then`, `for i in 1 2; do`, `echo "unclosed`, `echo hi |`, and `echo hi \` classify as `RouteIncomplete`.
   - Verify `Name a bridge in Paris`, `What's the largest file?`, and `explain (in detail) why` classify immediately as `RouteAI`.
   - Verify pressing `Enter` in TTY `Shell` on `if true; then` inserts `\n` and waits until `fi` before executing.
+  - Verify Ctrl+C clears an incomplete multiline buffer without submitting it.
 
 ### Stage 2: Implemented Classifier-Driven Subtle Inline Syntax Highlighting
 - **Files:** `kabibi/ui/shell/prompt_input.go`, `kabibi/ui/shell/shell_widget.go`
 - `PromptInput` uses the muted palette (`#5B82A6`, `#5E8C6A`, `#A67C52`, `#856B9E`, `#76808A`) with classifier-backed styling: `RouteAI` uses the default foreground, while shell, builtin, and incomplete routes receive bash token colors.
 - **Unit Tests (`kabibi/ui/shell/prompt_input_test.go`):**
-  - Verify `echo "hello" | cat $FOO` produces distinct subtle foreground colors on keyword, string, operator, and variable cells.
+  - Verify `echo "hello" | cat $HOME` uses the expected distinct colors for the builtin, string, pipe operator, and variable.
   - Verify `Name a bridge in Paris` and `What's the time?` render with default foreground style on every rune (`CharResetForegroundDefault`).
-  - Verify incomplete bash (`if true; then`) still highlights `if`, `true`, `;`, and `then`.
+  - Verify incomplete bash (`if true; then`) still highlights its keyword and operator tokens.
+  - Verify every palette color has at least 3:1 contrast against pure black and white.
 
 ### Stage 3: Implemented Headless Piped Mode
 - **Files:** `kabibi/piped.go`, `kabibi/main.go`, `kabibi/piped_test.go`
 - `runPipedSession` and `runPipedAI` process input incrementally with `bufio.Reader` and the shared classifier.
 - `runCLI` checks `term.IsTerminal(os.Stdin.Fd())` and routes non-TTY stdin to `runPipedSession`.
 - **Unit Tests (`kabibi/piped_test.go`):**
-  - Persistent state across piped lines (`export FOO=bar` followed by `echo $FOO`).
-  - Multiline compound statements (`if`/`then`/`fi`), persistent shell state, and incomplete-syntax EOF behavior.
-  - Mixed bash commands and AI prompts in the same piped session.
-  - Redirected-stdin CLI routing and preservation of command/AI exit codes.
+  - Prove a command's output arrives while an `io.Pipe` writer is still open, before stdin reaches EOF.
+  - Verify persistent shell state and multiline `if`/`for` blocks and heredocs.
+  - Verify mixed shell commands and per-line AI fallback, plus AI-runner failures.
+  - Verify last-command exit-code behavior and shell/AI output-writer errors, including short writes.
+- **CLI integration test (`kabibi/cli_test.go`):**
+  - Verify redirected stdin selects piped mode and emits only expected command output, with no ANSI escape sequences, carriage-return animation, or unexpected stderr.
 
-The full `ui/shell` test suite and focused classifier, prompt-input, TTY continuation, piped-reader, and redirected-stdin CLI tests pass. The root-package suite still fails `TestExecutableDoesNotImportCharmUIStack`: `go mod why` traces Bubble Tea and Lipgloss through `ui/shell` → u-root's `gosh` → `bubbline`. This is a static dependency-graph issue, separate from piped mode's runtime behavior. Headless mode guarantees no TUI startup or Kabibi animation at runtime; it does not remove those dependencies from the executable.
+The automated tests cover the behavioral checks listed above. The root-package suite still fails `TestExecutableDoesNotImportCharmUIStack`: `go mod why` traces Bubble Tea and Lipgloss through `ui/shell` → u-root's `gosh` → `bubbline`. This is a static dependency-graph issue, separate from piped mode's runtime behavior. Headless mode guarantees no TUI startup or Kabibi animation at runtime; it does not remove those dependencies from the executable.
