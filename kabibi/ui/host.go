@@ -11,10 +11,15 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/input"
 	"github.com/charmbracelet/x/term"
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
+
+const kittyKeyboardFlags = ansi.KittyDisambiguateEscapeCodes |
+	ansi.KittyReportAllKeysAsEscapeCodes |
+	ansi.KittyReportAssociatedKeys
 
 // hostMsgKind represents the variant of a host coordination message.
 type hostMsgKind int
@@ -150,6 +155,7 @@ func (h *Host) runCore(
 	state := &term.State{}
 
 	var inputReader *input.Reader
+	kittyKeyboardPushed := false
 
 	defer func() {
 		if inputReader != nil {
@@ -160,6 +166,9 @@ func (h *Host) runCore(
 			// Move to the start of the line below the last occupied row (h.prevCursorY on exit),
 			// clear any blank footer/slack rows below it, reset SGR color, and show the cursor.
 			h.out.WriteString("\x1b[0m\r\n\x1b[2K\x1b[J\x1b[?25h")
+		}
+		if kittyKeyboardPushed {
+			h.out.WriteString(ansi.PopKittyKeyboard(1))
 		}
 		h.out.WriteString("\x1b[?1006l\x1b[?1000l")
 		h.out.Flush()
@@ -192,6 +201,13 @@ func (h *Host) runCore(
 	h.prevTermState = state
 	h.out.WriteString("\x1b[?1006l\x1b[?1000l")
 	h.out.Flush()
+	if _, err = h.out.WriteString(ansi.PushKittyKeyboard(kittyKeyboardFlags)); err != nil {
+		return fmt.Errorf("enable Kitty keyboard protocol: %w", err)
+	}
+	kittyKeyboardPushed = true
+	if err = h.out.Flush(); err != nil {
+		return fmt.Errorf("enable Kitty keyboard protocol: %w", err)
+	}
 
 	// exitRawMode is already deferred; recover catches widget panics and re-panics
 	// after the terminal has been restored to cooked mode.

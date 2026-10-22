@@ -283,6 +283,47 @@ func shellQuoteFilename(name string) string {
 	return "'" + strings.ReplaceAll(name, "'", `'\''`) + "'"
 }
 
+func (w *AppWidget) insertSelectedFileIntoPrompt(absolutePath bool) {
+	if w.panels == nil {
+		return
+	}
+	active := w.panels.ActivePane()
+	if active == nil {
+		return
+	}
+	item, ok := active.SelectedItem()
+	if !ok || item.Name() == ".." {
+		return
+	}
+	name := item.Name()
+	if absolutePath {
+		fullPath, err := filepath.Abs(filepath.Join(active.Dir(), name))
+		if err != nil {
+			if w.writeScrollback != nil {
+				w.writeScrollback(fmt.Sprintf("Unable to resolve absolute path for %q: %v\n", name, err))
+			}
+			return
+		}
+		name = fullPath
+	}
+
+	inserted := []rune(shellQuoteFilename(name))
+	promptInput := w.sh.Input()
+	value := []rune(promptInput.Value())
+	cursor := promptInput.CursorPos()
+	if cursor < 0 {
+		cursor = 0
+	} else if cursor > len(value) {
+		cursor = len(value)
+	}
+	updated := make([]rune, 0, len(value)+len(inserted))
+	updated = append(updated, value[:cursor]...)
+	updated = append(updated, inserted...)
+	updated = append(updated, value[cursor:]...)
+	promptInput.SetValue(string(updated))
+	promptInput.SetCursorPos(cursor + len(inserted))
+}
+
 func (w *AppWidget) handlePaneOpenFile(fullPath string) {
 	if !filemanager.IsExecutableFile(fullPath) {
 		if err := w.OpenEditor(fullPath, false); err != nil && w.writeScrollback != nil {
@@ -507,6 +548,12 @@ func (w *AppWidget) HandleEvent(e input.Event) bool {
 
 			hasInput := w.sh.Input().Value() != ""
 
+			if keyEv.Code == input.KeyEnter && keyEv.Mod.Contains(input.ModCtrl) && keyEv.Mod.Contains(input.ModShift) {
+				w.insertSelectedFileIntoPrompt(true)
+				w.invalidate()
+				return true
+			}
+
 			switch keyStr {
 			case "esc":
 				if hasInput {
@@ -543,18 +590,8 @@ func (w *AppWidget) HandleEvent(e input.Event) bool {
 				return w.sh.HandleEvent(keyEv)
 
 			case "ctrl+enter", "ctrl+f":
-				if active := w.panels.ActivePane(); active != nil {
-					if item, ok := active.SelectedItem(); ok && item.Name() != ".." {
-						curVal := w.sh.Input().Value()
-						quoted := shellQuoteFilename(item.Name())
-						if curVal != "" && !strings.HasSuffix(curVal, " ") {
-							curVal += " "
-						}
-						w.sh.SetInput(curVal + quoted)
-						w.invalidate()
-						return true
-					}
-				}
+				w.insertSelectedFileIntoPrompt(false)
+				w.invalidate()
 				return true
 
 			case "enter":
