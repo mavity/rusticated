@@ -242,18 +242,19 @@ type FilePaneWidget struct {
 	OnChangeDir     func(path string) // called when the pane changes its directory
 	OnMetadataError func(path string, err error)
 
-	active        bool
-	dir           string
-	items         []fileItem
-	selectedIdx   int
-	service       FSService
-	ctx           RenderContext
-	searchText    []rune
-	searchPos     int
-	searchStart   int
-	searching     bool
-	searchMatch   bool
-	numberPrinter *message.Printer
+	active          bool
+	dir             string
+	items           []fileItem
+	selectedIdx     int
+	firstVisibleCol int
+	service         FSService
+	ctx             RenderContext
+	searchText      []rune
+	searchPos       int
+	searchStart     int
+	searching       bool
+	searchMatch     bool
+	numberPrinter   *message.Printer
 
 	Width  int
 	Height int
@@ -342,6 +343,7 @@ func (w *FilePaneWidget) LoadDirFocus(path string, focusName string) error {
 	// Sort: ".." first, then dirs before files, then alphabetically.
 	sort.Slice(w.items, func(i, j int) bool { return fileItemLess(w.items[i], w.items[j]) })
 	w.selectedIdx = 0
+	w.firstVisibleCol = 0
 	if focusName != "" {
 		for i, item := range w.items {
 			if item.name == focusName {
@@ -376,6 +378,7 @@ func (w *FilePaneWidget) Refresh() error {
 	}
 	for _, item := range w.items {
 		if item.name == prevItem.name {
+			w.ensureSelectedColumnVisible()
 			return nil
 		}
 	}
@@ -389,6 +392,7 @@ func (w *FilePaneWidget) Refresh() error {
 	if w.selectedIdx == len(w.items) {
 		w.selectedIdx--
 	}
+	w.ensureSelectedColumnVisible()
 	return nil
 }
 
@@ -444,7 +448,54 @@ func (w *FilePaneWidget) selectIndex(idx int) {
 		idx = len(w.items) - 1
 	}
 	w.selectedIdx = idx
+	w.ensureSelectedColumnVisible()
 	w.refreshSelectedMetadata()
+}
+
+func (w *FilePaneWidget) gridMetrics() (numCols, itemsPerCol int) {
+	numCols = (w.Width - 2) / 18
+	if numCols < 1 {
+		numCols = 1
+	}
+	if w.Height <= 0 {
+		return numCols, 10
+	}
+	innerH := w.Height - 4
+	if innerH < 1 {
+		innerH = 1
+	}
+	return numCols, innerH
+}
+
+func (w *FilePaneWidget) clampFirstVisibleCol(numCols, itemsPerCol int) {
+	if itemsPerCol < 1 {
+		itemsPerCol = 1
+	}
+	totalCols := (len(w.items) + itemsPerCol - 1) / itemsPerCol
+	maxFirstCol := totalCols - numCols
+	if maxFirstCol < 0 {
+		maxFirstCol = 0
+	}
+	if w.firstVisibleCol < 0 {
+		w.firstVisibleCol = 0
+	} else if w.firstVisibleCol > maxFirstCol {
+		w.firstVisibleCol = maxFirstCol
+	}
+}
+
+func (w *FilePaneWidget) ensureSelectedColumnVisible() {
+	numCols, itemsPerCol := w.gridMetrics()
+	if itemsPerCol < 1 {
+		itemsPerCol = 1
+	}
+	selectedCol := w.selectedIdx / itemsPerCol
+	w.clampFirstVisibleCol(numCols, itemsPerCol)
+	if selectedCol < w.firstVisibleCol {
+		w.firstVisibleCol = selectedCol
+	} else if selectedCol >= w.firstVisibleCol+numCols {
+		w.firstVisibleCol = selectedCol - numCols + 1
+	}
+	w.clampFirstVisibleCol(numCols, itemsPerCol)
 }
 
 func (w *FilePaneWidget) refreshSelectedMetadata() {
@@ -518,6 +569,7 @@ func (w *FilePaneWidget) refreshSelectedMetadata() {
 				break
 			}
 		}
+		w.ensureSelectedColumnVisible()
 	}
 }
 
@@ -724,6 +776,7 @@ func (w *FilePaneWidget) SetItems(items []fileItem) {
 	if w.selectedIdx >= len(items) {
 		w.selectedIdx = 0
 	}
+	w.ensureSelectedColumnVisible()
 }
 
 // MarkToggle flips the selected flag on item idx. Returns false for ".." or out of range.
@@ -779,6 +832,8 @@ func (w *FilePaneWidget) SetItemsBridge(items []fileItem, selectedIdx int) {
 	} else {
 		w.selectedIdx = 0
 	}
+	w.firstVisibleCol = 0
+	w.ensureSelectedColumnVisible()
 }
 
 func (w *FilePaneWidget) Measure(c Constraints) Size {
@@ -796,6 +851,7 @@ func (w *FilePaneWidget) Layout(r Rect) {
 	w.Y = r.Y
 	w.Width = r.W
 	w.Height = r.H
+	w.ensureSelectedColumnVisible()
 }
 
 func (w *FilePaneWidget) Render(r Rect, ctx RenderContext) (CellBuf, CursorPos) {
@@ -870,18 +926,14 @@ func (w *FilePaneWidget) RenderBuf() CellBuf {
 		listHeight -= 2
 	}
 	if listHeight > 0 {
-		numCols := innerW / 18
-		if numCols < 1 {
-			numCols = 1
-		}
-		itemsPerCol := listHeight
-		itemsPerPage := numCols * itemsPerCol
+		numCols, itemsPerCol := w.gridMetrics()
+		itemsPerCol = listHeight
+		w.ensureSelectedColumnVisible()
 		selectedIdx := w.selectedIdx
 		if selectedIdx < 0 {
 			selectedIdx = 0
 		}
-		page := selectedIdx / itemsPerPage
-		startIdx := page * itemsPerPage
+		startIdx := w.firstVisibleCol * itemsPerCol
 		colWidth := innerW / numCols
 		if colWidth < 1 {
 			colWidth = 1
@@ -1100,14 +1152,8 @@ func paneCell(rn rune, item fileItem, isSelected, marked bool) Cell {
 }
 
 func (w *FilePaneWidget) itemsPerCol() int {
-	if w.Height <= 0 {
-		return 10
-	}
-	h := w.Height - 4
-	if h < 1 {
-		h = 1
-	}
-	return h
+	_, itemsPerCol := w.gridMetrics()
+	return itemsPerCol
 }
 
 // ActivateSelected steps into the selected directory (focusing the previous child
@@ -1172,11 +1218,15 @@ func (w *FilePaneWidget) HandleEvent(e input.Event) bool {
 		w.selectIndex(w.selectedIdx + step)
 		return true
 	case "pgup":
-		step := w.itemsPerCol() * 2
+		numCols, itemsPerCol := w.gridMetrics()
+		step := itemsPerCol * numCols
+		w.firstVisibleCol -= numCols
 		w.selectIndex(w.selectedIdx - step)
 		return true
 	case "pgdown":
-		step := w.itemsPerCol() * 2
+		numCols, itemsPerCol := w.gridMetrics()
+		step := itemsPerCol * numCols
+		w.firstVisibleCol += numCols
 		w.selectIndex(w.selectedIdx + step)
 		return true
 	case "home":

@@ -1,6 +1,7 @@
 package filemanager
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -99,6 +100,75 @@ func TestFilePaneWidgetNavigationDownUp(t *testing.T) {
 	pane.HandleEvent(input.KeyPressEvent{Code: input.KeyUp})
 	if item, _ := pane.SelectedItem(); item.name != "beta" {
 		t.Fatalf("after up from gamma, want beta; got %q", item.name)
+	}
+}
+
+func numberedFileItems(count int) []fileItem {
+	items := make([]fileItem, count)
+	for i := range items {
+		items[i] = fileItem{name: fmt.Sprintf("item%02d", i)}
+	}
+	return items
+}
+
+func TestFilePaneWidgetHorizontalNavigationScrollsOneColumn(t *testing.T) {
+	pane := NewFilePaneWidget("columns")
+	pane.SetItemsBridge(numberedFileItems(24), 0)
+	pane.Layout(Rect{W: 60, H: 8})
+
+	for i := 0; i < 3; i++ {
+		pane.HandleEvent(input.KeyPressEvent{Code: input.KeyRight})
+	}
+	if got, want := pane.SelectedIndex(), 12; got != want {
+		t.Fatalf("selected index after moving right three columns = %d, want %d", got, want)
+	}
+	if got, want := pane.firstVisibleCol, 1; got != want {
+		t.Fatalf("first visible column = %d, want one-column scroll to %d", got, want)
+	}
+
+	rendered := ansi.Strip(Serialize(pane.RenderBuf()))
+	for _, visible := range []string{"item04", "item15", "item12"} {
+		if !strings.Contains(rendered, visible) {
+			t.Errorf("rendered viewport missing %q: %q", visible, rendered)
+		}
+	}
+	for _, hidden := range []string{"item00", "item16"} {
+		if strings.Contains(rendered, hidden) {
+			t.Errorf("rendered viewport unexpectedly contains %q: %q", hidden, rendered)
+		}
+	}
+}
+
+func TestFilePaneWidgetPageNavigationMovesWholeVisiblePage(t *testing.T) {
+	pane := NewFilePaneWidget("pages")
+	pane.SetItemsBridge(numberedFileItems(30), 0)
+	pane.Layout(Rect{W: 60, H: 8})
+
+	pane.HandleEvent(input.KeyPressEvent{Code: input.KeyPgDown})
+	if got, want := pane.SelectedIndex(), 12; got != want {
+		t.Fatalf("selected index after PgDown = %d, want one visible page (%d)", got, want)
+	}
+	if got, want := pane.firstVisibleCol, 3; got != want {
+		t.Fatalf("first visible column after PgDown = %d, want %d", got, want)
+	}
+	rendered := ansi.Strip(Serialize(pane.RenderBuf()))
+	for _, visible := range []string{"item12", "item23"} {
+		if !strings.Contains(rendered, visible) {
+			t.Errorf("page after PgDown missing %q: %q", visible, rendered)
+		}
+	}
+	for _, hidden := range []string{"item00", "item24"} {
+		if strings.Contains(rendered, hidden) {
+			t.Errorf("page after PgDown unexpectedly contains %q: %q", hidden, rendered)
+		}
+	}
+
+	pane.HandleEvent(input.KeyPressEvent{Code: input.KeyPgUp})
+	if got, want := pane.SelectedIndex(), 0; got != want {
+		t.Fatalf("selected index after PgUp = %d, want %d", got, want)
+	}
+	if got, want := pane.firstVisibleCol, 0; got != want {
+		t.Fatalf("first visible column after PgUp = %d, want %d", got, want)
 	}
 }
 
