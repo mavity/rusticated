@@ -7,9 +7,11 @@ import washmhost, {
   marshalStat,
   STAT_KIND_FILE,
   STAT_KIND_DIR,
+  STAT_KIND_SYMLINK,
   FLAG_COMPLETED,
   wasiSuccess,
   wasiENOENT,
+  wasiENOTSUP,
   wasiECANCELED,
   wasiEBADF,
   wasiE2BIG,
@@ -50,21 +52,24 @@ test('Overlapped struct marshalling and completion flags', () => {
   assert.equal(view.getBigUint64(ovPtr + 16, true), 128n); // resultExt = 128
 });
 
-test('AbiStat encodes 64-byte descriptor accurately', () => {
+test('AbiStat encodes the 112-byte Rusticated stat descriptor', () => {
   const enc = new TextEncoder();
   const content = enc.encode('hello rustica');
   const fileStat = marshalStat({
     type: 'file',
     size: content.length,
     mode: 0o644,
-    mtime: 1700000000000
+    atimeNs: 1690000000000000000n,
+    mtimeNs: 1700000000000000000n
   });
 
-  assert.equal(fileStat.length, 64);
+  assert.equal(fileStat.length, 112);
   const view = new DataView(fileStat.buffer);
   assert.equal(view.getUint32(0, true), STAT_KIND_FILE);
   assert.equal(view.getUint32(4, true), 0o100644); // file mode
   assert.equal(view.getBigUint64(16, true), BigInt(content.length));
+  assert.equal(view.getBigInt64(24, true), 1700000000000000000n);
+  assert.equal(view.getBigInt64(32, true), 1690000000000000000n);
 
   const dirStat = marshalStat({
     type: 'dir',
@@ -74,6 +79,11 @@ test('AbiStat encodes 64-byte descriptor accurately', () => {
   const dirView = new DataView(dirStat.buffer);
   assert.equal(dirView.getUint32(0, true), STAT_KIND_DIR);
   assert.equal(dirView.getUint32(4, true), 0o040755); // dir mode
+  assert.equal(dirView.getBigInt64(24, true), 1700000000000000000n);
+  assert.equal(dirView.getBigInt64(32, true), 1700000000000000000n);
+
+  const symlinkStat = marshalStat({ type: 'symlink', mtime: 1700000000000 });
+  assert.equal(new DataView(symlinkStat.buffer).getUint32(0, true), STAT_KIND_SYMLINK);
 });
 
 test('Async filesystem storage operations and seed tree', async () => {
@@ -688,7 +698,7 @@ test('path_stat prefers fs.statEntry over fs.getEntry when provided', async () =
 
   const pBytes = new TextEncoder().encode('/workspace/large.bin');
   new Uint8Array(mem.buffer, 32, pBytes.length).set(pBytes);
-  env.path_stat(100, 32, pBytes.length, 0, 200, 64);
+  env.path_stat(100, 32, pBytes.length, 0, 200, 112);
   await new Promise(r => setTimeout(r, 0));
   hostState.drainQueue();
 
@@ -697,7 +707,77 @@ test('path_stat prefers fs.statEntry over fs.getEntry when provided', async () =
   assert.equal(view.getUint32(100, true), FLAG_COMPLETED);
   assert.equal(view.getUint32(104, true), wasiSuccess);
   assert.equal(view.getBigUint64(200 + 16, true), 4096n);
+  assert.equal(view.getBigUint64(100 + 16, true), 112n);
   assert.ok(globalThis.washmhostExports && globalThis.washmhostExports.washmhost === washmhost);
 });
 
+test('path_set_times persists independent atime and mtime values', async () => {
+  const mem = new WebAssembly.Memory({ initial: 1 });
+  const entry = {
+    path: '/workspace/times.txt',
+    type: 'file',
+    content: new Uint8Array(0),
+    size: 0,
+    mode: 0o644,
+    mtime: 1700000000000
+  };
+  const customFS = {
+    async init() {},
+    async seed() {},
+    async getEntry(p) { return p === entry.path ? entry : null; },
+    async putEntry(value) { Object.assign(entry, value); }
+  };
+  const host = await washmhost({ test: true, memory: mem, fs: customFS });
+  const { env, hostState } = host;
+  const pathBytes = new TextEncoder().encode(entry.path);
+  new Uint8Array(mem.buffer, 32, pathBytes.length).set(pathBytes);
 
+  env.path_set_times(100, 32, pathBytes.length, 1690000000n, 123456789, 1700000000n, 987654321, 0x01 | 0x04);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  hostState.drainQueue();
+  assert.equal(new DataView(mem.buffer).getUint32(104, true), wasiSuccess);
+  assert.equal(entry.atimeNs, 1690000000123456789n);
+  assert.equal(entry.mtimeNs, 1700000000987654321n);
+
+  env.path_set_times(120, 32, pathBytes.length, 0n, 0, 1800000000n, 1, 0x04);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  hostState.drainQueue();
+  assert.equal(new DataView(mem.buffer).getUint32(124, true), wasiSuccess);
+  assert.equal(entry.atimeNs, 1690000000123456789n);
+  assert.equal(entry.mtimeNs, 1800000000000000001n);
+
+  const beforeNowNs = BigInt(Date.now()) * 1_000_000n;
+  env.path_set_times(140, 32, pathBytes.length, 0n, 0, 0n, 0, 0x02 | 0x08);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  hostState.drainQueue();
+  assert.equal(new DataView(mem.buffer).getUint32(144, true), wasiSuccess);
+  assert.ok(entry.atimeNs >= beforeNowNs && entry.atimeNs - beforeNowNs < 5_000_000_000n);
+  assert.ok(entry.mtimeNs >= beforeNowNs && entry.mtimeNs - beforeNowNs < 5_000_000_000n);
+});
+
+test('path_set_times rejects invalid values and unsupported symlink updates', async () => {
+  const mem = new WebAssembly.Memory({ initial: 1 });
+  const entries = new Map([
+    ['/workspace/link', { path: '/workspace/link', type: 'symlink', mtime: 1700000000000 }]
+  ]);
+  const customFS = {
+    async init() {},
+    async seed() {},
+    async getEntry(p) { return entries.get(p) || null; },
+    async putEntry(entry) { entries.set(entry.path, entry); }
+  };
+  const host = await washmhost({ test: true, memory: mem, fs: customFS });
+  const { env, hostState } = host;
+  const pathBytes = new TextEncoder().encode('/workspace/link');
+  new Uint8Array(mem.buffer, 32, pathBytes.length).set(pathBytes);
+
+  env.path_set_times(100, 32, pathBytes.length, 1n, 1_000_000_000, 0n, 0, 0x01);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  hostState.drainQueue();
+  assert.equal(new DataView(mem.buffer).getUint32(104, true), wasiEINVAL);
+
+  env.path_set_times(120, 32, pathBytes.length, 1n, 0, 0n, 0, 0x11);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  hostState.drainQueue();
+  assert.equal(new DataView(mem.buffer).getUint32(124, true), wasiENOTSUP);
+});

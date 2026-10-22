@@ -102,6 +102,9 @@ func mapErrno(err error) uint32 {
 	if err == nil {
 		return wasiSuccess
 	}
+	if errors.Is(err, errors.ErrUnsupported) {
+		return wasiENOTSUP
+	}
 	if os.IsNotExist(err) {
 		return wasiENOENT
 	}

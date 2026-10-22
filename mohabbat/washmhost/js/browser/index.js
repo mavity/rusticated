@@ -151,33 +151,71 @@ export function resolvePath(baseCwd, target) {
 export const EVAL_LIB_HANDLE = 0xEEEE0001n;
 export const EVAL_SYM_HANDLE = 0xEEEE0002n;
 
-// ── Stat Marshalling (64 bytes little-endian) ────────────────────────────────
+// ── Stat Marshalling (112 bytes little-endian) ───────────────────────────────
 export const STAT_KIND_UNKNOWN = 0;
 export const STAT_KIND_FILE    = 1;
 export const STAT_KIND_DIR     = 2;
 export const STAT_KIND_SYMLINK = 3;
 
+function storedTimeNs(entry, field, legacyField, fallback = null) {
+  const value = entry[field];
+  if (typeof value === 'bigint') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return BigInt(Math.trunc(value));
+  const legacyValue = entry[legacyField];
+  if (typeof legacyValue === 'number' && Number.isFinite(legacyValue)) {
+    return BigInt(Math.trunc(legacyValue)) * 1_000_000n;
+  }
+  return fallback;
+}
+
+function normalizeEntryTimes(entry) {
+  const mtimeNs = storedTimeNs(entry, 'mtimeNs', 'mtime', BigInt(Date.now()) * 1_000_000n);
+  const atimeNs = storedTimeNs(entry, 'atimeNs', 'atime', mtimeNs);
+  entry.mtimeNs = mtimeNs;
+  entry.atimeNs = atimeNs;
+  return entry;
+}
+
+function updateEntryMtime(entry) {
+  const now = Date.now();
+  entry.mtime = now;
+  entry.mtimeNs = BigInt(now) * 1_000_000n;
+}
+
 export function marshalStat(entry) {
   const isDir = entry.type === 'dir';
-  const kind = isDir ? STAT_KIND_DIR : STAT_KIND_FILE;
-  const modeBase = isDir ? 0o040000 : 0o100000;
+  const isSymlink = entry.type === 'symlink';
+  const kind = isDir ? STAT_KIND_DIR : isSymlink ? STAT_KIND_SYMLINK : STAT_KIND_FILE;
+  const modeBase = isDir ? 0o040000 : isSymlink ? 0o120000 : 0o100000;
   const mode = modeBase | ((entry.mode ?? (isDir ? 0o755 : 0o644)) & 0o7777);
   const size = BigInt(entry.size ?? (entry.content ? entry.content.length : 0));
-  const mtimeMs = entry.mtime || Date.now();
-  const mtimeNs = BigInt(mtimeMs) * 1000000n;
+  const mtimeNs = storedTimeNs(entry, 'mtimeNs', 'mtime', BigInt(Date.now()) * 1_000_000n);
+  const atimeNs = storedTimeNs(entry, 'atimeNs', 'atime', mtimeNs);
+  const ctimeNs = storedTimeNs(entry, 'ctimeNs', 'ctime', mtimeNs);
+  const birthtimeNs = storedTimeNs(entry, 'birthtimeNs', 'birthtime', mtimeNs);
+  const blksize = 4096n;
+  const blocks = (size + 511n) / 512n;
+  const validMask = (1n << 2n) | (1n << 3n) | (1n << 6n) |
+    (1n << 10n) | (1n << 11n);
 
-  const ab = new ArrayBuffer(64);
+  const ab = new ArrayBuffer(112);
   const view = new DataView(ab);
   view.setUint32(0, kind, true);
   view.setUint32(4, mode, true);
   view.setUint32(8, 0, true);     // uid
   view.setUint32(12, 0, true);    // gid
   view.setBigUint64(16, size, true);
-  view.setBigUint64(24, mtimeNs, true); // modifiedNs
-  view.setBigUint64(32, mtimeNs, true); // accessedNs
-  view.setBigUint64(40, mtimeNs, true); // createdNs
-  view.setBigUint64(48, 1n, true);      // nlink
-  view.setBigUint64(56, 0n, true);      // inode
+  view.setBigInt64(24, mtimeNs, true);
+  view.setBigInt64(32, atimeNs, true);
+  view.setBigInt64(40, ctimeNs, true);
+  view.setBigInt64(48, birthtimeNs, true);
+  view.setBigUint64(56, 1n, true);
+  view.setBigUint64(64, 0n, true);
+  view.setBigUint64(72, 0n, true);
+  view.setBigUint64(80, 0n, true);
+  view.setBigInt64(88, blksize, true);
+  view.setBigInt64(96, blocks, true);
+  view.setBigUint64(104, validMask, true);
   return new Uint8Array(ab);
 }
 
@@ -228,6 +266,7 @@ export class AsyncIndexedDBFS {
   }
 
   async putEntry(entry) {
+    normalizeEntryTimes(entry);
     if (this.memFallback) {
       this.memFallback.set(entry.path, entry);
       return;
@@ -735,7 +774,7 @@ export function makeBrowserImports(hostState, fs, params = {}) {
         const newSize = Math.max(entry.size || 0, needed);
         entry.size = newSize;
         entry.content = buf.subarray(0, newSize);
-        entry.mtime = Date.now();
+        updateEntryMtime(entry);
         h.offset = needed;
 
         fs.putEntry(entry).then(() => {
@@ -873,7 +912,9 @@ export function makeBrowserImports(hostState, fs, params = {}) {
         if (!entry) {
           // If write flags allow creation
           if ((openFlags & O_CREAT) !== 0) {
-            const newEntry = { path: p, type: 'file', content: new Uint8Array(0), size: 0, mode: Number(mode) || 0o644, mtime: Date.now() };
+            const newEntry = { path: p, type: 'file', content: new Uint8Array(0), size: 0, mode: Number(mode) || 0o644 };
+            updateEntryMtime(newEntry);
+            newEntry.atimeNs = newEntry.mtimeNs;
             return fs.putEntry(newEntry).then(() => newEntry);
           }
           hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiENOENT, 0, 0));
@@ -886,7 +927,7 @@ export function makeBrowserImports(hostState, fs, params = {}) {
         if (entry.type === 'file' && (openFlags & O_TRUNC) !== 0) {
           entry.content = new Uint8Array(0);
           entry.size = 0;
-          entry.mtime = Date.now();
+          updateEntryMtime(entry);
           return fs.putEntry(entry).then(() => entry);
         }
         return entry;
@@ -912,9 +953,13 @@ export function makeBrowserImports(hostState, fs, params = {}) {
       const opId = hostState.registerOp(Number(ovPtr));
 
       if (p === '/dev/eval' || p === 'dev/eval') {
+        if (Number(outLen) < 112) {
+          hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiERANGE, 0, 112));
+          return;
+        }
         const statBytes = marshalStat({ path: p, type: 'file', size: 0, mode: 0o666, mtime: Date.now() });
-        hostState.getGuestSlice(Number(outPtr), 64).set(statBytes);
-        hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, 0, 0, 64));
+        hostState.getGuestSlice(Number(outPtr), 112).set(statBytes);
+        hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, 0, 0, 112));
         return;
       }
 
@@ -924,13 +969,13 @@ export function makeBrowserImports(hostState, fs, params = {}) {
           hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiENOENT, 0, 0));
           return;
         }
-        if (Number(outLen) < 64) {
-          hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiERANGE, 0, 64));
+        if (Number(outLen) < 112) {
+          hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiERANGE, 0, 112));
           return;
         }
         const statBytes = marshalStat(entry);
-        hostState.getGuestSlice(Number(outPtr), 64).set(statBytes);
-        hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, 0, 0, 64));
+        hostState.getGuestSlice(Number(outPtr), 112).set(statBytes);
+        hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, 0, 0, 112));
       }).catch((err) => {
         hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, mapErrno(err), 0, 0));
       });
@@ -984,6 +1029,57 @@ export function makeBrowserImports(hostState, fs, params = {}) {
         });
       }).catch((err) => {
         hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, mapErrno(err), 0, 0));
+      });
+    },
+
+    path_set_times: (ovPtr, pathPtr, pathLen, atimeSec, atimeNsec, mtimeSec, mtimeNsec, flags) => {
+      const p = pathStr(pathPtr, pathLen);
+      const ptr = Number(ovPtr);
+      const opId = hostState.registerOp(ptr);
+      const flagBits = Number(flags);
+      const setAtime = (flagBits & 0x01) !== 0;
+      const atimeNow = (flagBits & 0x02) !== 0;
+      const setMtime = (flagBits & 0x04) !== 0;
+      const mtimeNow = (flagBits & 0x08) !== 0;
+      const invalid = (flagBits & ~0x1f) !== 0 ||
+        (setAtime && atimeNow) || (setMtime && mtimeNow) ||
+        (setAtime && (Number(atimeNsec) < 0 || Number(atimeNsec) >= 1_000_000_000)) ||
+        (setMtime && (Number(mtimeNsec) < 0 || Number(mtimeNsec) >= 1_000_000_000));
+      if (invalid) {
+        hostState.enqueue(() => hostState.completeOp(ptr, opId, wasiEINVAL, 0, 0));
+        return;
+      }
+
+      fs.getEntry(p).then((entry) => {
+        if (!entry) {
+          hostState.enqueue(() => hostState.completeOp(ptr, opId, wasiENOENT, 0, 0));
+          return;
+        }
+        if (entry.type === 'symlink') {
+          hostState.enqueue(() => hostState.completeOp(ptr, opId, wasiENOTSUP, 0, 0));
+          return;
+        }
+        normalizeEntryTimes(entry);
+        if (setAtime) {
+          entry.atimeNs = BigInt(atimeSec) * 1_000_000_000n + BigInt(atimeNsec);
+        } else if (atimeNow) {
+          entry.atimeNs = BigInt(Date.now()) * 1_000_000n;
+        }
+        if (setMtime) {
+          entry.mtimeNs = BigInt(mtimeSec) * 1_000_000_000n + BigInt(mtimeNsec);
+          entry.mtime = Number(entry.mtimeNs / 1_000_000n);
+        } else if (mtimeNow) {
+          updateEntryMtime(entry);
+        }
+        if (!setAtime && !atimeNow && !setMtime && !mtimeNow) {
+          hostState.enqueue(() => hostState.completeOp(ptr, opId, wasiSuccess, 0, 0));
+          return;
+        }
+        return fs.putEntry(entry).then(() => {
+          hostState.enqueue(() => hostState.completeOp(ptr, opId, wasiSuccess, 0, 0));
+        });
+      }).catch((err) => {
+        hostState.enqueue(() => hostState.completeOp(ptr, opId, mapErrno(err), 0, 0));
       });
     },
 

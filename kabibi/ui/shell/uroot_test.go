@@ -19,6 +19,9 @@ func TestURootRegistry_AllCommandsRegisteredAndZeroPanicOnReinvocation(t *testin
 	if len(names) == 0 {
 		t.Fatalf("expected registered u-root commands, got none")
 	}
+	if _, ok := LookupURootCommand("man"); ok {
+		t.Fatal("man should not be registered as a Kabibi u-root command")
+	}
 
 	dir := t.TempDir()
 	// Exercise every registered command twice with overlapping/invalid flags and cancelled contexts
@@ -58,6 +61,23 @@ func TestURootRegistry_AllCommandsRegisteredAndZeroPanicOnReinvocation(t *testin
 				_ = runner(ctx, ioEnv, "--definitely-invalid-flag-xyz")
 			}()
 		}
+	}
+}
+
+func TestURootManFallsThroughToNextExecHandler(t *testing.T) {
+	called := false
+	next := func(_ context.Context, args []string) error {
+		called = true
+		if len(args) != 2 || args[0] != "man" || args[1] != "echo" {
+			t.Errorf("next handler args = %q, want [man echo]", args)
+		}
+		return nil
+	}
+	if err := urootBuiltinMiddleware(next)(context.Background(), []string{"man", "echo"}); err != nil {
+		t.Fatalf("urootBuiltinMiddleware returned error: %v", err)
+	}
+	if !called {
+		t.Fatal("unregistered man command did not reach the next exec handler")
 	}
 }
 
@@ -152,7 +172,7 @@ func TestURootPilotCommands(t *testing.T) {
 		t.Fatalf("strings failed (code=%d, err=%v): %q", code, err, out)
 	}
 
-	out, code, err = runShell("echo abc | hexdump")
+	out, code, err = runShell("echo abc | hexdump -C")
 	if err != nil || code != 0 || !strings.Contains(out, "61 62 63") {
 		t.Fatalf("hexdump failed (code=%d, err=%v): %q", code, err, out)
 	}
@@ -180,11 +200,6 @@ func TestURootPilotCommands(t *testing.T) {
 	out, code, err = runShell("echo -e 'line1\\nline2' | more")
 	if err != nil || code != 0 || strings.TrimSpace(out) != "line1\nline2" {
 		t.Fatalf("more failed (code=%d, err=%v): %q", code, err, out)
-	}
-
-	_, code, _ = runShell("man")
-	if code != 1 {
-		t.Fatalf("man with no args expected 1, got %d", code)
 	}
 
 	out, code, err = runShell("ls")

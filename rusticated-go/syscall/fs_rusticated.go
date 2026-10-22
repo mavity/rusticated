@@ -196,6 +196,10 @@ func rusticated_path_stat(overlapped unsafe.Pointer, pathPtr *byte, pathLen uint
 //go:noescape
 func rusticated_path_chmod(overlapped unsafe.Pointer, pathPtr *byte, pathLen uint32, mode uint32)
 
+//go:wasmimport env path_set_times
+//go:noescape
+func rusticated_path_set_times(overlapped unsafe.Pointer, pathPtr *byte, pathLen uint32, atimeSec int64, atimeNsec uint32, mtimeSec int64, mtimeNsec uint32, flags uint32)
+
 //go:wasmimport env seek
 //go:noescape
 func rusticated_seek(overlapped unsafe.Pointer, handle uint64, offset int64, whence uint32)
@@ -764,11 +768,89 @@ func Chmod(path string, mode uint32) error {
 	}
 	return nil
 }
-func Fchmod(fd int, mode uint32) error            { return nil }
-func Chown(path string, uid, gid int) error       { return ENOSYS }
-func Fchown(fd int, uid, gid int) error           { return ENOSYS }
-func Lchown(path string, uid, gid int) error      { return ENOSYS }
-func UtimesNano(path string, ts []Timespec) error { return ENOSYS }
+func Fchmod(fd int, mode uint32) error       { return nil }
+func Chown(path string, uid, gid int) error  { return ENOSYS }
+func Fchown(fd int, uid, gid int) error      { return ENOSYS }
+func Lchown(path string, uid, gid int) error { return ENOSYS }
+
+const (
+	atFDCWD              = -100
+	atSymlinkNoFollow    = 0x100
+	utimeNow             = 1<<30 - 1
+	utimeOmit            = 1<<30 - 2
+	pathSetAtime         = 1 << 0
+	pathSetAtimeNow      = 1 << 1
+	pathSetMtime         = 1 << 2
+	pathSetMtimeNow      = 1 << 3
+	pathSetTimesNoFollow = 1 << 4
+)
+
+func UtimesNano(path string, ts []Timespec) error {
+	return UtimesNanoAt(atFDCWD, path, ts, 0)
+}
+
+func UtimesNanoAt(dirFd int, path string, ts []Timespec, flags int) error {
+	if path == "" || flags&^atSymlinkNoFollow != 0 {
+		return EINVAL
+	}
+	if ts != nil && len(ts) != 2 {
+		return EINVAL
+	}
+
+	if !isAbs(path) && dirFd != atFDCWD {
+		entry, ok := fdMap[int32(dirFd)]
+		if !ok || entry.path == "" {
+			return EBADF
+		}
+		path = joinPaths(entry.path, path)
+	}
+
+	var atimeSec, mtimeSec int64
+	var atimeNsec, mtimeNsec uint32
+	abiFlags := uint32(0)
+	if ts == nil {
+		abiFlags |= pathSetAtimeNow | pathSetMtimeNow
+	} else {
+		var err error
+		atimeSec, atimeNsec, abiFlags, err = encodeTimespec(ts[0], pathSetAtime, pathSetAtimeNow, abiFlags)
+		if err != nil {
+			return err
+		}
+		mtimeSec, mtimeNsec, abiFlags, err = encodeTimespec(ts[1], pathSetMtime, pathSetMtimeNow, abiFlags)
+		if err != nil {
+			return err
+		}
+	}
+	if flags&atSymlinkNoFollow != 0 {
+		abiFlags |= pathSetTimesNoFollow
+	}
+
+	var ctx overlappedContext
+	rusticated_path_set_times(
+		unsafe.Pointer(&ctx.o),
+		(*byte)(unsafe.StringData(path)), uint32(len(path)),
+		atimeSec, atimeNsec, mtimeSec, mtimeNsec, abiFlags,
+	)
+	runtime.KeepAlive(path)
+	awaitOverlapped(&ctx)
+	if ctx.o.hostError != 0 {
+		return errnoErr(Errno(ctx.o.hostError))
+	}
+	return nil
+}
+
+func encodeTimespec(ts Timespec, setFlag, nowFlag, abiFlags uint32) (int64, uint32, uint32, error) {
+	switch ts.Nsec {
+	case utimeNow:
+		return 0, 0, abiFlags | nowFlag, nil
+	case utimeOmit:
+		return 0, 0, abiFlags, nil
+	}
+	if ts.Nsec < 0 || ts.Nsec >= 1e9 {
+		return 0, 0, abiFlags, EINVAL
+	}
+	return ts.Sec, uint32(ts.Nsec), abiFlags | setFlag, nil
+}
 
 // ── Seek / Pread / Pwrite / Dup / Pipe ───────────────────────────────────
 

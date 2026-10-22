@@ -264,6 +264,19 @@ pub mod imports {
             path_len: u32,
             mode: u32,
         );
+        /// Set path access and modification times.
+        ///
+        /// Timestamp flag bits are defined by Rusticated's `path_set_times` contract.
+        pub fn path_set_times(
+            overlapped: *mut Overlapped,
+            path_ptr: *const u8,
+            path_len: u32,
+            atime_sec: i64,
+            atime_nsec: u32,
+            mtime_sec: i64,
+            mtime_nsec: u32,
+            flags: u32,
+        );
 
         /// Create listener or connection. Result_ext = Socket Handle.
         pub fn net_open(

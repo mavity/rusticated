@@ -128,9 +128,12 @@ function mapErrno(e) {
     case 'ENODEV':    return wasiENODEV;
     case 'ENOTDIR':   return wasiENOTDIR;
     case 'EISDIR':    return wasiEISDIR;
+    case 'EPERM':     return wasiEPERM;
     case 'EINVAL':    return wasiEINVAL;
     case 'EMFILE':    return wasiEMFILE;
     case 'ENOSPC':    return wasiENOSPC;
+    case 'ENOTSUP':
+    case 'EOPNOTSUPP': return wasiENOTSUP;
     case 'EPIPE':     return wasiEPIPE;
     case 'ERANGE':    return wasiERANGE;
     case 'ENOTEMPTY': return wasiENOTEMPTY;
@@ -762,6 +765,48 @@ export function makeBrainImports(hostState, argv) {
     });
   }
 
+  // ── path_set_times ──────────────────────────────────────────────────────────
+  // Signature: (ovPtr, pathPtr, pathLen, atimeSec, atimeNsec,
+  //             mtimeSec, mtimeNsec, flags)
+  function path_set_times(ovPtr, pathPtr, pathLen, atimeSec, atimeNsec, mtimeSec, mtimeNsec, flags) {
+    const pathStr = translatePath(Buffer.from(hs.getGuestSlice(Number(pathPtr), Number(pathLen))).toString());
+    const opId = hs.registerOp(ovPtr);
+    const flagBits = Number(flags);
+    const setAtime = (flagBits & 0x01) !== 0;
+    const atimeNow = (flagBits & 0x02) !== 0;
+    const setMtime = (flagBits & 0x04) !== 0;
+    const mtimeNow = (flagBits & 0x08) !== 0;
+    const noFollow = (flagBits & 0x10) !== 0;
+    const invalid = (flagBits & ~0x1f) !== 0 ||
+      (setAtime && atimeNow) || (setMtime && mtimeNow) ||
+      (setAtime && (Number(atimeNsec) < 0 || Number(atimeNsec) >= 1_000_000_000)) ||
+      (setMtime && (Number(mtimeNsec) < 0 || Number(mtimeNsec) >= 1_000_000_000));
+    if (invalid) {
+      hs.enqueue(() => hs.completeOp(Number(ovPtr), opId, wasiEINVAL, 0, 0));
+      return;
+    }
+
+    const hasUpdate = setAtime || atimeNow || setMtime || mtimeNow;
+    const statFn = noFollow ? fs.promises.lstat : fs.promises.stat;
+    const setFn = noFollow ? fs.promises.lutimes : fs.promises.utimes;
+    if (noFollow && hasUpdate && typeof setFn !== 'function') {
+      hs.enqueue(() => hs.completeOp(Number(ovPtr), opId, wasiENOTSUP, 0, 0));
+      return;
+    }
+    statFn(pathStr, { bigint: true }).then((st) => {
+      if (!hasUpdate) return;
+      const now = new Date();
+      const toSeconds = (sec, nsec) => Number(sec) + Number(nsec) / 1_000_000_000;
+      const atime = atimeNow ? now : setAtime ? toSeconds(atimeSec, atimeNsec) : Number(st.atimeNs) / 1_000_000_000;
+      const mtime = mtimeNow ? now : setMtime ? toSeconds(mtimeSec, mtimeNsec) : Number(st.mtimeNs) / 1_000_000_000;
+      return setFn(pathStr, atime, mtime);
+    }).then(() => {
+      hs.enqueue(() => hs.completeOp(Number(ovPtr), opId, wasiSuccess, 0, 0));
+    }).catch((e) => {
+      hs.enqueue(() => hs.completeOp(Number(ovPtr), opId, mapErrno(e), 0, 0));
+    });
+  }
+
   // ── path_remove ──────────────────────────────────────────────────────────────
   // Signature: (ovPtr i32, pathPtr i32, pathLen i32)
   // Go impl uses os.Remove (non-recursive). Mirror that.
@@ -1272,6 +1317,7 @@ export function makeBrainImports(hostState, argv) {
     dir_read,
     path_stat,
     path_chmod,
+    path_set_times,
     path_remove,
     path_mkdir,
     path_rename,
