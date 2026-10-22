@@ -10,6 +10,7 @@ import (
 
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 func TestOpenFindsRepositoryFromShellSubdirectory(t *testing.T) {
@@ -196,6 +197,58 @@ func TestDiffSeparatesStagedAndWorktreeChanges(t *testing.T) {
 	worktreePatch := FormatPatch(worktree)
 	if !strings.Contains(worktreePatch, "-staged version") || !strings.Contains(worktreePatch, "+worktree version") {
 		t.Fatalf("worktree diff = %q, want index-to-worktree change", worktreePatch)
+	}
+}
+
+func TestDiffThreeDotUsesMergeBaseAndRightSide(t *testing.T) {
+	root, opened, gitRepo := newCommittedRepository(t, "tracked.txt", "base\n")
+	base, err := gitRepo.Head()
+	if err != nil {
+		t.Fatalf("read base branch: %v", err)
+	}
+	baseBranch := base.Target()
+	featureBranch := plumbing.NewBranchReferenceName("feature")
+	if err := gitRepo.Storer.SetReference(plumbing.NewHashReference(featureBranch, base.Hash())); err != nil {
+		t.Fatalf("create feature branch: %v", err)
+	}
+	if err := opened.worktree.Checkout(&git.CheckoutOptions{Branch: featureBranch}); err != nil {
+		t.Fatalf("switch to feature branch: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("base\nfeature\n"), 0o644); err != nil {
+		t.Fatalf("write feature change: %v", err)
+	}
+	if _, err := opened.worktree.Add("tracked.txt"); err != nil {
+		t.Fatalf("stage feature change: %v", err)
+	}
+	featureHash, err := opened.worktree.Commit("feature change", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test User", Email: "test@example.test"},
+	})
+	if err != nil {
+		t.Fatalf("commit feature change: %v", err)
+	}
+	if err := opened.worktree.Checkout(&git.CheckoutOptions{Branch: baseBranch}); err != nil {
+		t.Fatalf("switch to base branch: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("base\nmain\n"), 0o644); err != nil {
+		t.Fatalf("write base-branch change: %v", err)
+	}
+	if _, err := opened.worktree.Add("tracked.txt"); err != nil {
+		t.Fatalf("stage base-branch change: %v", err)
+	}
+	mainHash, err := opened.worktree.Commit("base-branch change", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test User", Email: "test@example.test"},
+	})
+	if err != nil {
+		t.Fatalf("commit base-branch change: %v", err)
+	}
+
+	files, err := opened.Diff(false, mainHash.String()+"..."+featureHash.String(), "tracked.txt")
+	if err != nil {
+		t.Fatalf("three-dot Diff(): %v", err)
+	}
+	patch := FormatPatch(files)
+	if !strings.Contains(patch, "+feature") || strings.Contains(patch, "+main") {
+		t.Fatalf("three-dot diff = %q, want only changes from merge base to right side", patch)
 	}
 }
 

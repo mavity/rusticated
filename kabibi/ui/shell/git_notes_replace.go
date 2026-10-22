@@ -71,7 +71,10 @@ func runGitReplace(hc interp.HandlerContext, invocation gitInvocation) error {
 		force = true
 		args = args[1:]
 	}
-	if len(args) != 2 || args[0] == "-g" || args[0] == "--graft" {
+	if len(args) > 0 && (args[0] == "-g" || args[0] == "--graft") {
+		return runGitReplaceGraft(hc, repo, args[1:], force)
+	}
+	if len(args) != 2 {
 		fmt.Fprintln(hc.Stderr, "usage: git replace [-f] <object> <replacement>")
 		return interp.ExitStatus(2)
 	}
@@ -109,6 +112,85 @@ func runGitReplace(hc interp.HandlerContext, invocation gitInvocation) error {
 	}
 	if err := repo.Storer.SetReference(plumbing.NewHashReference(refName, replacement)); err != nil {
 		fmt.Fprintf(hc.Stderr, "git replace: write replacement ref: %v\n", err)
+		return interp.ExitStatus(1)
+	}
+	return nil
+}
+
+func runGitReplaceGraft(hc interp.HandlerContext, repo *git.Repository, args []string, force bool) error {
+	var positional []string
+	for _, arg := range args {
+		switch arg {
+		case "-f", "--force":
+			force = true
+		default:
+			if strings.HasPrefix(arg, "-") {
+				fmt.Fprintln(hc.Stderr, "usage: git replace [-f] --graft <commit> [<parent>...]")
+				return interp.ExitStatus(2)
+			}
+			positional = append(positional, arg)
+		}
+	}
+	if len(positional) == 0 {
+		fmt.Fprintln(hc.Stderr, "usage: git replace [-f] --graft <commit> [<parent>...]")
+		return interp.ExitStatus(2)
+	}
+	targetHash, err := resolveGitObject(repo, positional[0])
+	if err != nil {
+		fmt.Fprintf(hc.Stderr, "git replace --graft: %v\n", err)
+		return interp.ExitStatus(1)
+	}
+	target, err := repo.CommitObject(targetHash)
+	if err != nil {
+		fmt.Fprintf(hc.Stderr, "git replace --graft: target %s is not a commit: %v\n", targetHash, err)
+		return interp.ExitStatus(1)
+	}
+	parents := make([]plumbing.Hash, 0, len(positional)-1)
+	seen := make(map[plumbing.Hash]struct{}, len(positional)-1)
+	for _, revision := range positional[1:] {
+		parentHash, err := resolveGitObject(repo, revision)
+		if err != nil {
+			fmt.Fprintf(hc.Stderr, "git replace --graft: %v\n", err)
+			return interp.ExitStatus(1)
+		}
+		if parentHash == targetHash {
+			fmt.Fprintln(hc.Stderr, "git replace --graft: a commit cannot be its own parent")
+			return interp.ExitStatus(1)
+		}
+		if _, exists := seen[parentHash]; exists {
+			fmt.Fprintf(hc.Stderr, "git replace --graft: duplicate parent %s\n", parentHash)
+			return interp.ExitStatus(1)
+		}
+		if _, err := repo.CommitObject(parentHash); err != nil {
+			fmt.Fprintf(hc.Stderr, "git replace --graft: parent %s is not a commit: %v\n", parentHash, err)
+			return interp.ExitStatus(1)
+		}
+		seen[parentHash] = struct{}{}
+		parents = append(parents, parentHash)
+	}
+	refName := plumbing.ReferenceName("refs/replace/" + targetHash.String())
+	if !force {
+		if _, err := repo.Storer.Reference(refName); err == nil {
+			fmt.Fprintf(hc.Stderr, "git replace --graft: replacement for %s already exists\n", targetHash)
+			return interp.ExitStatus(1)
+		}
+	}
+	replacement := *target
+	replacement.Hash = plumbing.ZeroHash
+	replacement.ParentHashes = parents
+	replacement.PGPSignature = ""
+	encoded := repo.Storer.NewEncodedObject()
+	if err := replacement.Encode(encoded); err != nil {
+		fmt.Fprintf(hc.Stderr, "git replace --graft: encode replacement commit: %v\n", err)
+		return interp.ExitStatus(1)
+	}
+	replacementHash, err := repo.Storer.SetEncodedObject(encoded)
+	if err != nil {
+		fmt.Fprintf(hc.Stderr, "git replace --graft: store replacement commit: %v\n", err)
+		return interp.ExitStatus(1)
+	}
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(refName, replacementHash)); err != nil {
+		fmt.Fprintf(hc.Stderr, "git replace --graft: write replacement ref: %v\n", err)
 		return interp.ExitStatus(1)
 	}
 	return nil
@@ -309,10 +391,101 @@ func runGitNotes(ctx context.Context, hc interp.HandlerContext, invocation gitIn
 			return interp.ExitStatus(1)
 		}
 		return nil
+	case "prune":
+		if len(args) != 1 {
+			fmt.Fprintln(hc.Stderr, "usage: git notes prune")
+			return interp.ExitStatus(2)
+		}
+		reachable, err := reachableGitObjects(repo)
+		if err != nil {
+			fmt.Fprintf(hc.Stderr, "git notes prune: %v\n", err)
+			return interp.ExitStatus(1)
+		}
+		pruned := false
+		for target := range notes {
+			if _, ok := reachable[target]; !ok {
+				delete(notes, target)
+				pruned = true
+			}
+		}
+		if pruned {
+			if err := writeGitNotes(repo, refName, parent, notes, env); err != nil {
+				fmt.Fprintf(hc.Stderr, "git notes prune: update notes ref: %v\n", err)
+				return interp.ExitStatus(1)
+			}
+		}
+		return nil
 	default:
 		fmt.Fprintf(hc.Stderr, "git notes: unsupported subcommand %q\n", args[0])
 		return interp.ExitStatus(2)
 	}
+}
+
+func reachableGitObjects(repo *git.Repository) (map[plumbing.Hash]struct{}, error) {
+	iter, err := repo.References()
+	if err != nil {
+		return nil, fmt.Errorf("list references: %w", err)
+	}
+	defer iter.Close()
+
+	reachable := make(map[plumbing.Hash]struct{})
+	pending := make([]plumbing.Hash, 0)
+	if err := iter.ForEach(func(ref *plumbing.Reference) error {
+		resolved := ref
+		if ref.Type() == plumbing.SymbolicReference {
+			resolved, err = repo.Reference(ref.Name(), true)
+			if err != nil {
+				return fmt.Errorf("resolve reference %s: %w", ref.Name(), err)
+			}
+		}
+		pending = append(pending, resolved.Hash())
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("iterate references: %w", err)
+	}
+
+	for len(pending) > 0 {
+		hash := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if hash.IsZero() {
+			continue
+		}
+		if _, seen := reachable[hash]; seen {
+			continue
+		}
+		encoded, err := repo.Storer.EncodedObject(plumbing.AnyObject, hash)
+		if err != nil {
+			return nil, fmt.Errorf("read reachable object %s: %w", hash, err)
+		}
+		reachable[hash] = struct{}{}
+		switch encoded.Type() {
+		case plumbing.CommitObject:
+			commit, err := repo.CommitObject(hash)
+			if err != nil {
+				return nil, fmt.Errorf("decode reachable commit %s: %w", hash, err)
+			}
+			pending = append(pending, commit.TreeHash)
+			pending = append(pending, commit.ParentHashes...)
+		case plumbing.TreeObject:
+			tree, err := repo.TreeObject(hash)
+			if err != nil {
+				return nil, fmt.Errorf("decode reachable tree %s: %w", hash, err)
+			}
+			for _, entry := range tree.Entries {
+				pending = append(pending, entry.Hash)
+			}
+		case plumbing.TagObject:
+			tag, err := repo.TagObject(hash)
+			if err != nil {
+				return nil, fmt.Errorf("decode reachable tag %s: %w", hash, err)
+			}
+			pending = append(pending, tag.Target)
+		case plumbing.BlobObject:
+		default:
+			return nil, fmt.Errorf("reachable object %s has unsupported type %s", hash, encoded.Type())
+		}
+	}
+	return reachable, nil
 }
 
 func parseGitNoteMutation(args []string) (bool, string, []string, error) {
