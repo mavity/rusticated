@@ -1,10 +1,13 @@
 package shell
 
 import (
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/adrianliechti/go-git"
@@ -16,7 +19,11 @@ type osFS struct {
 	baseDir string // Clean absolute path of the root
 }
 
-var _ git.FS = (*osFS)(nil)
+var (
+	_ git.FS       = (*osFS)(nil)
+	_ fs.StatFS    = (*osFS)(nil)
+	_ fs.ReadDirFS = (*osFS)(nil)
+)
 
 func newOSFS(baseDir string) *osFS {
 	abs, err := filepath.Abs(baseDir)
@@ -26,17 +33,67 @@ func newOSFS(baseDir string) *osFS {
 	return &osFS{baseDir: abs}
 }
 
+func newHostFS(workingDir string) (*osFS, string, error) {
+	absDir, err := filepath.Abs(workingDir)
+	if err != nil {
+		return nil, "", fmt.Errorf("resolve git working directory %q: %w", workingDir, err)
+	}
+	absDir = filepath.Clean(absDir)
+
+	baseDir := string(filepath.Separator)
+	virtualDir := filepath.ToSlash(absDir)
+	if runtime.GOOS == "windows" {
+		volume := filepath.VolumeName(absDir)
+		if volume == "" {
+			return nil, "", fmt.Errorf("git working directory %q has no Windows volume", absDir)
+		}
+		baseDir = volume + string(filepath.Separator)
+		relative := strings.TrimPrefix(absDir, volume)
+		virtualDir = "/" + strings.Trim(filepath.ToSlash(relative), "/")
+	}
+	return &osFS{baseDir: baseDir}, path.Clean("/" + strings.TrimPrefix(virtualDir, "/")), nil
+}
+
+func (o *osFS) virtualPath(name string) string {
+	normalized := strings.ReplaceAll(name, `\`, "/")
+	return path.Clean("/" + strings.TrimPrefix(normalized, "/"))
+}
+
+func (o *osFS) toVirtualPath(hostPath string) (string, error) {
+	absPath, err := filepath.Abs(hostPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve Git filesystem path %q: %w", hostPath, err)
+	}
+	if runtime.GOOS == "windows" && !strings.EqualFold(filepath.VolumeName(absPath), filepath.VolumeName(o.baseDir)) {
+		return "", fmt.Errorf("Git path %q is outside filesystem volume %q", absPath, filepath.VolumeName(o.baseDir))
+	}
+	relative, err := filepath.Rel(o.baseDir, absPath)
+	if err != nil {
+		return "", fmt.Errorf("map Git path %q: %w", absPath, err)
+	}
+	return o.virtualPath(filepath.ToSlash(relative)), nil
+}
+
 // toOSPath converts an io/fs relative name (or "." for root) to a host filesystem path.
 func (o *osFS) toOSPath(name string) string {
-	if name == "." || name == "" {
+	virtual := o.virtualPath(name)
+	if virtual == "/" {
 		return o.baseDir
 	}
-	cleanRel := filepath.FromSlash(strings.TrimPrefix(name, "/"))
+	cleanRel := filepath.FromSlash(strings.TrimPrefix(virtual, "/"))
 	return filepath.Join(o.baseDir, cleanRel)
 }
 
 func (o *osFS) Open(name string) (fs.File, error) {
 	return os.Open(o.toOSPath(name))
+}
+
+func (o *osFS) Stat(name string) (fs.FileInfo, error) {
+	return os.Stat(o.toOSPath(name))
+}
+
+func (o *osFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	return os.ReadDir(o.toOSPath(name))
 }
 
 func (o *osFS) OpenFile(name string, flag int, perm fs.FileMode) (git.File, error) {
