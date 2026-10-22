@@ -1,6 +1,7 @@
 package filemanager
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,6 +13,9 @@ import (
 	"github.com/mattn/go-runewidth"
 	"github.com/mavity/rusticated/kabibi/ui"
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
+	"golang.org/x/text/language"
+	"golang.org/x/text/message"
+	"golang.org/x/text/number"
 )
 
 type (
@@ -46,11 +50,20 @@ type FSEntry struct {
 	Name   string
 	IsDir  bool
 	IsExec bool
+	Size   int64
+	Mode   os.FileMode
 }
 
 // FSService abstracts filesystem access for widgets that display directory contents.
 type FSService interface {
 	ReadDir(path string) ([]FSEntry, error)
+}
+
+// FSMetadataService provides a direct metadata lookup for the selected item.
+// Services without this capability can still refresh metadata by rereading the
+// directory through FSService.
+type FSMetadataService interface {
+	Lstat(path string) (os.FileInfo, error)
 }
 
 // OsFSService reads directory listings from the local filesystem.
@@ -64,14 +77,24 @@ func (s *OsFSService) ReadDir(path string) ([]FSEntry, error) {
 	out := make([]FSEntry, 0, len(entries))
 	for _, e := range entries {
 		full := filepath.Join(path, e.Name())
+		info, err := e.Info()
+		if err != nil {
+			return nil, fmt.Errorf("read metadata for %q: %w", full, err)
+		}
 		isDir := e.IsDir()
 		out = append(out, FSEntry{
 			Name:   e.Name(),
 			IsDir:  isDir,
 			IsExec: !isDir && IsExecutableFile(full),
+			Size:   info.Size(),
+			Mode:   info.Mode(),
 		})
 	}
 	return out, nil
+}
+
+func (s *OsFSService) Lstat(path string) (os.FileInfo, error) {
+	return os.Lstat(path)
 }
 
 // FileItem represents a single entry inside a FilePaneWidget.
@@ -80,12 +103,16 @@ type FileItem struct {
 	isDir    bool
 	isExec   bool
 	selected bool
+	size     int64
+	mode     os.FileMode
 }
 
-func (f FileItem) Name() string   { return f.name }
-func (f FileItem) IsDir() bool    { return f.isDir }
-func (f FileItem) IsExec() bool   { return f.isExec }
-func (f FileItem) Selected() bool { return f.selected }
+func (f FileItem) Name() string      { return f.name }
+func (f FileItem) IsDir() bool       { return f.isDir }
+func (f FileItem) IsExec() bool      { return f.isExec }
+func (f FileItem) Selected() bool    { return f.selected }
+func (f FileItem) Size() int64       { return f.size }
+func (f FileItem) Mode() os.FileMode { return f.mode }
 
 type fileItem = FileItem
 
@@ -130,16 +157,45 @@ func IsExecutableFile(path string) bool {
 	return info.Mode()&0o111 != 0
 }
 
+func numberPrinterFromEnv() *message.Printer {
+	for _, key := range []string{"LC_ALL", "LC_NUMERIC", "LANG"} {
+		locale := strings.TrimSpace(os.Getenv(key))
+		if locale == "" {
+			continue
+		}
+		locale = strings.SplitN(locale, "@", 2)[0]
+		locale = strings.SplitN(locale, ".", 2)[0]
+		if strings.EqualFold(locale, "C") || strings.EqualFold(locale, "POSIX") {
+			continue
+		}
+		locale = strings.ReplaceAll(locale, "_", "-")
+		tag, err := language.Parse(locale)
+		if err == nil && tag != language.Und {
+			return message.NewPrinter(tag)
+		}
+	}
+	return message.NewPrinter(language.English)
+}
+
+func (w *FilePaneWidget) formatNumber(value any) string {
+	printer := w.numberPrinter
+	if printer == nil {
+		printer = numberPrinterFromEnv()
+	}
+	return printer.Sprintf("%v", number.Decimal(value))
+}
+
 // Color constants matching classic Norton / Far Manager blue panels.
 const (
-	colorBlue     terminal.Color = 0x0000A8
-	colorYellow   terminal.Color = 0xFFD700
-	colorWhite    terminal.Color = 0xE5E5E5
-	colorGray     terminal.Color = 0xB0B0B0
-	colorDarkGray terminal.Color = 0x3A3A3A
-	colorNavy     terminal.Color = 0x000080
-	colorCyan     terminal.Color = 0x00D9FF
-	colorGreen    terminal.Color = 0x00FF87
+	colorBlue       terminal.Color = 0x0000A8
+	colorYellow     terminal.Color = 0xFFD700
+	colorWhite      terminal.Color = 0xE5E5E5
+	colorGray       terminal.Color = 0xB0B0B0
+	colorDarkGray   terminal.Color = 0x3A3A3A
+	colorNavy       terminal.Color = 0x000080
+	colorCyan       terminal.Color = 0x00D9FF
+	colorBrightCyan terminal.Color = 0x55FFFF
+	colorGreen      terminal.Color = 0x00FF87
 )
 
 func makeCell(r rune, fg, bg terminal.Color, bold bool) Cell {
@@ -180,21 +236,23 @@ func truncateStringToWidth(s string, maxWidth int) string {
 // Title is structural state passed by the parent; operational state (items,
 // selection, scroll) is managed internally.
 type FilePaneWidget struct {
-	Title       string            // display name shown in the title bar
-	OnOpenFile  func(path string) // called when the user presses Enter on a regular file
-	OnChangeDir func(path string) // called when the pane changes its directory
+	Title           string            // display name shown in the title bar
+	OnOpenFile      func(path string) // called when the user presses Enter on a regular file
+	OnChangeDir     func(path string) // called when the pane changes its directory
+	OnMetadataError func(path string, err error)
 
-	active      bool
-	dir         string
-	items       []fileItem
-	selectedIdx int
-	service     FSService
-	ctx         RenderContext
-	searchText  []rune
-	searchPos   int
-	searchStart int
-	searching   bool
-	searchMatch bool
+	active        bool
+	dir           string
+	items         []fileItem
+	selectedIdx   int
+	service       FSService
+	ctx           RenderContext
+	searchText    []rune
+	searchPos     int
+	searchStart   int
+	searching     bool
+	searchMatch   bool
+	numberPrinter *message.Printer
 
 	Width  int
 	Height int
@@ -204,8 +262,9 @@ type FilePaneWidget struct {
 
 func NewFilePaneWidget(title string) *FilePaneWidget {
 	return &FilePaneWidget{
-		Title:   title,
-		service: &OsFSService{},
+		Title:         title,
+		service:       &OsFSService{},
+		numberPrinter: numberPrinterFromEnv(),
 	}
 }
 
@@ -275,13 +334,20 @@ func (w *FilePaneWidget) LoadDirFocus(path string, focusName string) error {
 			name:   e.Name,
 			isDir:  e.IsDir,
 			isExec: e.IsExec,
+			size:   e.Size,
+			mode:   e.Mode,
 		})
 	}
 	// Sort: ".." first, then dirs before files, then alphabetically.
 	sort.Slice(w.items, func(i, j int) bool { return fileItemLess(w.items[i], w.items[j]) })
 	w.selectedIdx = 0
 	if focusName != "" {
-		w.SelectByName(focusName)
+		for i, item := range w.items {
+			if item.name == focusName {
+				w.selectedIdx = i
+				break
+			}
+		}
 	}
 	if w.OnChangeDir != nil {
 		w.OnChangeDir(path)
@@ -340,6 +406,113 @@ func (w *FilePaneWidget) SelectedIndex() int {
 		return 0
 	}
 	return w.selectedIdx
+}
+
+func (w *FilePaneWidget) fileTotals() (int, uint64) {
+	if w == nil {
+		return 0, 0
+	}
+	count := 0
+	var total uint64
+	for _, item := range w.items {
+		if item.name == ".." || item.isDir {
+			continue
+		}
+		count++
+		if item.size > 0 {
+			total += uint64(item.size)
+		}
+	}
+	return count, total
+}
+
+func (w *FilePaneWidget) selectIndex(idx int) {
+	if len(w.items) == 0 {
+		w.selectedIdx = 0
+		return
+	}
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(w.items) {
+		idx = len(w.items) - 1
+	}
+	w.selectedIdx = idx
+	w.refreshSelectedMetadata()
+}
+
+func (w *FilePaneWidget) refreshSelectedMetadata() {
+	item, ok := w.SelectedItem()
+	if !ok || item.name == ".." || w.dir == "" {
+		return
+	}
+	previousIsDir := item.isDir
+	svc := w.service
+	if svc == nil {
+		svc = &OsFSService{}
+		w.service = svc
+	}
+	path := filepath.Join(w.dir, item.name)
+	var size int64
+	var mode os.FileMode
+	if statSvc, ok := svc.(FSMetadataService); ok {
+		info, err := statSvc.Lstat(path)
+		if err != nil {
+			w.handleMetadataError(path, err)
+			return
+		}
+		size, mode = info.Size(), info.Mode()
+	} else {
+		entries, err := w.service.ReadDir(w.dir)
+		if err != nil {
+			w.handleMetadataError(path, err)
+			return
+		}
+		found := false
+		for _, entry := range entries {
+			if entry.Name == item.name {
+				size, mode = entry.Size, entry.Mode
+				item.isDir, item.isExec = entry.IsDir, entry.IsExec
+				found = true
+				break
+			}
+		}
+		if !found {
+			if err := w.Refresh(); err != nil {
+				w.handleMetadataError(path, err)
+			}
+			return
+		}
+	}
+	item.size = size
+	item.mode = mode
+	if _, ok := svc.(FSMetadataService); ok {
+		item.isDir = mode.IsDir()
+		item.isExec = !item.isDir && IsExecutableFile(path)
+	}
+	w.items[w.selectedIdx] = item
+	if item.isDir != previousIsDir {
+		sort.Slice(w.items, func(i, j int) bool { return fileItemLess(w.items[i], w.items[j]) })
+		for i, current := range w.items {
+			if current.name == item.name {
+				w.selectedIdx = i
+				break
+			}
+		}
+	}
+}
+
+func (w *FilePaneWidget) handleMetadataError(path string, err error) {
+	if os.IsNotExist(err) {
+		if refreshErr := w.Refresh(); refreshErr == nil {
+			return
+		} else {
+			err = refreshErr
+		}
+	}
+	if w.OnMetadataError != nil {
+		w.OnMetadataError(path, err)
+	}
 }
 
 // SearchActive reports whether this pane's instant-search editor is open.
@@ -445,7 +618,7 @@ func (w *FilePaneWidget) insertSearchText(text string) {
 
 func (w *FilePaneWidget) updateSearchMatch() {
 	if len(w.searchText) == 0 {
-		w.selectedIdx = w.searchStart
+		w.selectIndex(w.searchStart)
 		w.searchMatch = true
 		return
 	}
@@ -453,14 +626,14 @@ func (w *FilePaneWidget) updateSearchMatch() {
 	if idx := w.findSearchMatch(func(name string) bool {
 		return strings.HasPrefix(strings.ToLower(name), query)
 	}); idx >= 0 {
-		w.selectedIdx = idx
+		w.selectIndex(idx)
 		w.searchMatch = true
 		return
 	}
 	if idx := w.findSearchMatch(func(name string) bool {
 		return matchesSearchSubsequence(name, query)
 	}); idx >= 0 {
-		w.selectedIdx = idx
+		w.selectIndex(idx)
 		w.searchMatch = true
 		return
 	}
@@ -505,16 +678,10 @@ func matchesSearchSubsequence(name, query string) bool {
 
 // Select sets the highlighted index; no-op if out of range.
 func (w *FilePaneWidget) Select(idx int) {
-	if w == nil || len(w.items) == 0 {
+	if w == nil {
 		return
 	}
-	if idx < 0 {
-		idx = 0
-	}
-	if idx >= len(w.items) {
-		idx = len(w.items) - 1
-	}
-	w.selectedIdx = idx
+	w.selectIndex(idx)
 }
 
 // SelectByName scrolls to the first item whose name matches; no-op if not found.
@@ -524,7 +691,7 @@ func (w *FilePaneWidget) SelectByName(name string) {
 	}
 	for i, fi := range w.items {
 		if fi.name == name {
-			w.selectedIdx = i
+			w.selectIndex(i)
 			return
 		}
 	}
@@ -680,66 +847,137 @@ func (w *FilePaneWidget) RenderBuf() CellBuf {
 		return buf
 	}
 
-	numCols := innerW / 18
-	if numCols < 1 {
-		numCols = 1
+	listHeight := innerH
+	if innerH >= 2 {
+		listHeight -= 2
 	}
-	itemsPerCol := innerH
-	if itemsPerCol < 1 {
-		itemsPerCol = 1
-	}
-	itemsPerPage := numCols * itemsPerCol
-	selectedIdx := w.selectedIdx
-	if selectedIdx < 0 {
-		selectedIdx = 0
-	}
-	page := selectedIdx / itemsPerPage
-	startIdx := page * itemsPerPage
-	colWidth := innerW / numCols
-	if colWidth < 1 {
-		colWidth = 1
-	}
+	if listHeight > 0 {
+		numCols := innerW / 18
+		if numCols < 1 {
+			numCols = 1
+		}
+		itemsPerCol := listHeight
+		itemsPerPage := numCols * itemsPerCol
+		selectedIdx := w.selectedIdx
+		if selectedIdx < 0 {
+			selectedIdx = 0
+		}
+		page := selectedIdx / itemsPerPage
+		startIdx := page * itemsPerPage
+		colWidth := innerW / numCols
+		if colWidth < 1 {
+			colWidth = 1
+		}
 
-	for c := 0; c < numCols; c++ {
-		for r := 0; r < itemsPerCol; r++ {
-			idx := startIdx + c*itemsPerCol + r
-			if idx >= len(w.items) {
-				continue
-			}
-			item := w.items[idx]
-			name := item.name
-			if item.isExec && !item.isDir && name != ".." {
-				name = name + "*"
-			}
-			if item.selected && name != ".." {
-				name = "•" + name
-			}
-			if runewidth.StringWidth(name) > colWidth-2 {
-				if colWidth >= 4 {
-					name = truncateStringToWidth(name, colWidth-3) + "…"
-				} else if colWidth >= 1 {
-					name = truncateStringToWidth(name, colWidth-1)
+		for c := 0; c < numCols; c++ {
+			for r := 0; r < itemsPerCol; r++ {
+				idx := startIdx + c*itemsPerCol + r
+				if idx >= len(w.items) {
+					continue
 				}
-			}
-			if runewidth.StringWidth(name) < colWidth {
-				name += strings.Repeat(" ", colWidth-runewidth.StringWidth(name))
-			}
-			cellY := 1 + r
-			cellX := 1 + c*colWidth
-			colOff := 0
-			for _, rn := range name {
-				if cellX+colOff >= w.Width-1 {
-					break
+				item := w.items[idx]
+				name := item.name
+				if item.isExec && !item.isDir && name != ".." {
+					name = name + "*"
 				}
-				buf.Set(cellX+colOff, cellY, paneCell(rn, item, idx == selectedIdx && w.active, item.selected))
-				colOff += runewidth.RuneWidth(rn)
+				if item.selected && name != ".." {
+					name = "•" + name
+				}
+				if runewidth.StringWidth(name) > colWidth-2 {
+					if colWidth >= 4 {
+						name = truncateStringToWidth(name, colWidth-3) + "…"
+					} else if colWidth >= 1 {
+						name = truncateStringToWidth(name, colWidth-1)
+					}
+				}
+				if runewidth.StringWidth(name) < colWidth {
+					name += strings.Repeat(" ", colWidth-runewidth.StringWidth(name))
+				}
+				cellY := 1 + r
+				cellX := 1 + c*colWidth
+				colOff := 0
+				for _, rn := range name {
+					if cellX+colOff >= w.Width-1 {
+						break
+					}
+					buf.Set(cellX+colOff, cellY, paneCell(rn, item, idx == selectedIdx && w.active, item.selected))
+					colOff += runewidth.RuneWidth(rn)
+				}
 			}
 		}
 	}
+	if innerH >= 2 {
+		w.renderSelectedDetails(&buf)
+	}
 	if w.searching {
 		w.renderSearch(buf)
+	} else {
+		w.renderTotal(&buf)
 	}
 	return buf
+}
+
+func (w *FilePaneWidget) renderSelectedDetails(buf *CellBuf) {
+	separatorY := w.Height - 3
+	detailY := w.Height - 2
+	for x := 1; x < w.Width-1; x++ {
+		buf.Set(x, separatorY, makeCell('─', colorGray, colorBlue, false))
+		buf.Set(x, detailY, makeCell(' ', colorWhite, colorBlue, false))
+	}
+	item, ok := w.SelectedItem()
+	if !ok {
+		return
+	}
+	flags := make([]string, 0, 4)
+	if item.isDir {
+		flags = append(flags, "D")
+	}
+	if item.name != ".." && item.mode.Perm()&0o222 == 0 {
+		flags = append(flags, "R")
+	}
+	if item.name != ".." && strings.HasPrefix(item.name, ".") {
+		flags = append(flags, "H")
+	}
+	if item.isExec {
+		flags = append(flags, "X")
+	}
+	flagText := strings.Join(flags, ",")
+	if flagText == "" {
+		flagText = "-"
+	}
+	suffix := fmt.Sprintf("[%s] %s %sb", flagText, item.mode.Perm(), w.formatNumber(item.size))
+	nameWidth := w.Width - 3 - runewidth.StringWidth(suffix)
+	if nameWidth < 0 {
+		nameWidth = 0
+	}
+	name := truncateStringToWidth(item.name, nameWidth)
+	detail := name + " " + suffix
+	col := 1
+	for _, rn := range detail {
+		if col >= w.Width-1 {
+			break
+		}
+		buf.Set(col, detailY, makeCell(rn, colorWhite, colorBlue, false))
+		col += runewidth.RuneWidth(rn)
+	}
+}
+
+func (w *FilePaneWidget) renderTotal(buf *CellBuf) {
+	count, total := w.fileTotals()
+	text := fmt.Sprintf("[%s]--%sb", w.formatNumber(int64(count)), w.formatNumber(total))
+	y := w.Height - 1
+	col := 4
+	for _, rn := range text {
+		if col >= w.Width-1 {
+			break
+		}
+		fg := colorGray
+		if unicode.IsDigit(rn) {
+			fg = colorBrightCyan
+		}
+		buf.Set(col, y, makeCell(rn, fg, colorBlue, false))
+		col += runewidth.RuneWidth(rn)
+	}
 }
 
 func (w *FilePaneWidget) renderSearch(buf CellBuf) {
@@ -804,9 +1042,12 @@ func paneCell(rn rune, item fileItem, isSelected, marked bool) Cell {
 }
 
 func (w *FilePaneWidget) itemsPerCol() int {
-	h := w.Height - 2
+	if w.Height <= 0 {
+		return 10
+	}
+	h := w.Height - 4
 	if h < 1 {
-		h = 10
+		h = 1
 	}
 	return h
 }
@@ -859,63 +1100,39 @@ func (w *FilePaneWidget) HandleEvent(e input.Event) bool {
 
 	switch ev.String() {
 	case "up":
-		if w.selectedIdx > 0 {
-			w.selectedIdx--
-		}
+		w.selectIndex(w.selectedIdx - 1)
 		return true
 	case "down":
-		if w.selectedIdx < len(w.items)-1 {
-			w.selectedIdx++
-		}
+		w.selectIndex(w.selectedIdx + 1)
 		return true
 	case "left":
 		step := w.itemsPerCol()
-		if w.selectedIdx-step >= 0 {
-			w.selectedIdx -= step
-		} else {
-			w.selectedIdx = 0
-		}
+		w.selectIndex(w.selectedIdx - step)
 		return true
 	case "right":
 		step := w.itemsPerCol()
-		if len(w.items) > 0 {
-			if w.selectedIdx+step < len(w.items) {
-				w.selectedIdx += step
-			} else {
-				w.selectedIdx = len(w.items) - 1
-			}
-		}
+		w.selectIndex(w.selectedIdx + step)
 		return true
 	case "pgup":
 		step := w.itemsPerCol() * 2
-		if w.selectedIdx-step >= 0 {
-			w.selectedIdx -= step
-		} else {
-			w.selectedIdx = 0
-		}
+		w.selectIndex(w.selectedIdx - step)
 		return true
 	case "pgdown":
 		step := w.itemsPerCol() * 2
-		if len(w.items) > 0 {
-			if w.selectedIdx+step < len(w.items) {
-				w.selectedIdx += step
-			} else {
-				w.selectedIdx = len(w.items) - 1
-			}
-		}
+		w.selectIndex(w.selectedIdx + step)
 		return true
 	case "home":
-		w.selectedIdx = 0
+		w.selectIndex(0)
 		return true
 	case "end":
-		if len(w.items) > 0 {
-			w.selectedIdx = len(w.items) - 1
-		}
+		w.selectIndex(len(w.items) - 1)
 		return true
 	case "insert":
 		w.MarkToggle(w.selectedIdx)
 		if w.selectedIdx+1 < len(w.items) {
-			w.selectedIdx++
+			w.selectIndex(w.selectedIdx + 1)
+		} else {
+			w.refreshSelectedMetadata()
 		}
 		return true
 	case "enter":

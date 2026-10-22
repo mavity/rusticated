@@ -18,6 +18,7 @@ require (
 	github.com/spf13/pflag v1.0.10
 	github.com/u-root/u-root v0.16.0
 	golang.org/x/crypto v0.56.0
+	golang.org/x/text v0.41.0
 	mvdan.cc/sh/v3 v3.14.1
 	pty v0.0.0-00010101000000-000000000000
 )
@@ -80,7 +81,6 @@ require (
 	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/term v0.46.0 // indirect
-	golang.org/x/text v0.41.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	pack.ag/tftp v1.0.1-0.20181129014014-07909dfbde3c // indirect
 )
