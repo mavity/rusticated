@@ -104,6 +104,7 @@ export function mapErrno(e) {
     case 'EFAULT':            return wasiEFAULT;
     case 'EBUSY':             return wasiEBUSY;
     case 'EEXIST':            return wasiEEXIST;
+    case 'EFBIG':             return wasiEFBIG;
     case 'EXDEV':             return wasiEXDEV;
     case 'ENODEV':            return wasiENODEV;
     case 'ENOTDIR':           return wasiENOTDIR;
@@ -796,6 +797,69 @@ export function makeBrowserImports(hostState, fs, params = {}) {
       }
 
       hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiEINVAL, 0, 0));
+    },
+
+    handle_truncate: (ovPtr, handle, length) => {
+      const ptr = Number(ovPtr);
+      const opId = hostState.registerOp(ptr);
+      const h = hostState.getHandle(handle);
+      if (!h) {
+        hostState.enqueue(() => hostState.completeOp(ptr, opId, wasiEBADF, 0, 0));
+        return;
+      }
+      if (h.type !== 'file' || !h.entry || h.entry.type !== 'file') {
+        const err = h.entry?.type === 'dir' ? wasiEISDIR : wasiEBADF;
+        hostState.enqueue(() => hostState.completeOp(ptr, opId, err, 0, 0));
+        return;
+      }
+
+      let size;
+      if (typeof length === 'bigint') {
+        if (length < 0n) {
+          hostState.enqueue(() => hostState.completeOp(ptr, opId, wasiEINVAL, 0, 0));
+          return;
+        }
+        if (length > BigInt(Number.MAX_SAFE_INTEGER)) {
+          hostState.enqueue(() => hostState.completeOp(ptr, opId, wasiEFBIG, 0, 0));
+          return;
+        }
+        size = Number(length);
+      } else if (typeof length === 'number' && Number.isSafeInteger(length)) {
+        if (length < 0) {
+          hostState.enqueue(() => hostState.completeOp(ptr, opId, wasiEINVAL, 0, 0));
+          return;
+        }
+        size = length;
+      } else {
+        hostState.enqueue(() => hostState.completeOp(ptr, opId, wasiEINVAL, 0, 0));
+        return;
+      }
+
+      let content;
+      try {
+        content = new Uint8Array(size);
+      } catch (err) {
+        hostState.enqueue(() => hostState.completeOp(
+          ptr,
+          opId,
+          err instanceof RangeError ? wasiEFBIG : mapErrno(err),
+          0,
+          0
+        ));
+        return;
+      }
+
+      const previous = h.entry.content;
+      if (previous) content.set(previous.subarray(0, Math.min(previous.length, size)));
+      const updatedEntry = { ...h.entry, content, size };
+      updateEntryMtime(updatedEntry);
+
+      fs.putEntry(updatedEntry).then(() => {
+        Object.assign(h.entry, updatedEntry);
+        hostState.enqueue(() => hostState.completeOp(ptr, opId, 0, 0, 0));
+      }).catch((err) => {
+        hostState.enqueue(() => hostState.completeOp(ptr, opId, mapErrno(err), 0, 0));
+      });
     },
 
     handle_close: (handle) => {

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -503,4 +504,80 @@ func TestSysFs(t *testing.T) {
 			t.Errorf("expected EBADF (9), got %d", errCode)
 		}
 	})
+}
+
+func TestSysHandleTruncate(t *testing.T) {
+	env := NewHostEnv()
+	mod := newMockModule(4096)
+	path := filepath.Join(t.TempDir(), "truncate.txt")
+	if err := os.WriteFile(path, []byte("abcdef"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const handle = uint64(42)
+	env.mu.Lock()
+	env.handles[handle] = f
+	env.mu.Unlock()
+	defer env.sys_handle_close(context.Background(), mod, []uint64{handle})
+	if _, err := f.Seek(5, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(ovPtr uint32, length int64, handle uint64) uint32 {
+		t.Helper()
+		if !mod.Memory().Write(ovPtr, make([]byte, 24)) {
+			t.Fatal("failed to clear overlapped result")
+		}
+		env.sys_handle_truncate(context.Background(), mod, []uint64{
+			uint64(ovPtr), handle, uint64(length),
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		for {
+			env.Poll(ctx, mod)
+			result, ok := mod.Memory().Read(ovPtr, 24)
+			if !ok {
+				t.Fatal("failed to read overlapped result")
+			}
+			if binary.LittleEndian.Uint32(result)&1 != 0 {
+				return binary.LittleEndian.Uint32(result[4:8])
+			}
+			if ctx.Err() != nil {
+				t.Fatal("timed out waiting for file truncation")
+			}
+		}
+	}
+
+	if got := run(0x100, 3, handle); got != wasiSuccess {
+		t.Fatalf("shrinking file returned errno %d, want success", got)
+	}
+	if got, err := f.Seek(0, 1); err != nil || got != 5 {
+		t.Fatalf("truncate changed file offset: offset=%d err=%v, want 5", got, err)
+	}
+	if got := run(0x140, 7, handle); got != wasiSuccess {
+		t.Fatalf("extending file returned errno %d, want success", got)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []byte{'a', 'b', 'c', 0, 0, 0, 0}
+	if string(content) != string(want) {
+		t.Fatalf("file content after extension = %v, want %v", content, want)
+	}
+	if got := run(0x180, -1, handle); got != wasiEINVAL {
+		t.Fatalf("negative length returned errno %d, want %d", got, wasiEINVAL)
+	}
+	if got := run(0x1C0, 0, handle+1); got != wasiEBADF {
+		t.Fatalf("invalid handle returned errno %d, want %d", got, wasiEBADF)
+	}
+}
+
+func TestMapErrnoEFBIG(t *testing.T) {
+	if got := mapErrno(syscall.EFBIG); got != wasiEFBIG {
+		t.Fatalf("mapErrno(EFBIG) = %d, want %d", got, wasiEFBIG)
+	}
 }

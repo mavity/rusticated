@@ -228,6 +228,8 @@ pub mod imports {
             buffer_ptr: *const u8,
             buffer_len: u32,
         );
+        /// Set a file handle's logical length in bytes. Result_ext = 0.
+        pub fn handle_truncate(overlapped: *mut Overlapped, handle: u64, length: i64);
         /// Close handle (Sync)
         pub fn handle_close(handle: u64);
 
