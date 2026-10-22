@@ -3,6 +3,7 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/x/input"
@@ -72,6 +73,53 @@ func TestEnterOnNonExecutableFileOpensEditor(t *testing.T) {
 	}
 }
 
+func TestCtrlEnterInsertsSelectedFileAtPromptCursor(t *testing.T) {
+	dir := t.TempDir()
+	name := "file with spaces.txt"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("hello"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	widget := NewWidget(AppWidgetOptions{
+		WorkingDir:    dir,
+		PanelsVisible: true,
+	})
+	defer widget.Close()
+	widget.Panels().Left.SelectByName(name)
+
+	inputText := "echo  after"
+	cursor := len([]rune("echo "))
+	widget.Shell().SetInput(inputText)
+	widget.Shell().SetCursorPos(cursor)
+	widget.HandleEvent(readKittyKeyPress(t, "\x1b[13;5u"))
+
+	filename := shellQuoteFilename(name)
+	want := "echo " + filename + " after"
+	if got := widget.Shell().Input().Value(); got != want {
+		t.Fatalf("Ctrl+Enter input = %q, want %q", got, want)
+	}
+	if got, wantCursor := widget.Shell().Input().CursorPos(), len([]rune("echo "+filename)); got != wantCursor {
+		t.Fatalf("Ctrl+Enter cursor = %d, want %d", got, wantCursor)
+	}
+
+	fullPath, err := filepath.Abs(filepath.Join(dir, name))
+	if err != nil {
+		t.Fatalf("Abs: %v", err)
+	}
+	widget.Shell().SetInput(inputText)
+	widget.Shell().SetCursorPos(cursor)
+	widget.HandleEvent(readKittyKeyPress(t, "\x1b[13;6u"))
+
+	quotedPath := shellQuoteFilename(fullPath)
+	want = "echo " + quotedPath + " after"
+	if got := widget.Shell().Input().Value(); got != want {
+		t.Fatalf("Ctrl+Shift+Enter input = %q, want %q", got, want)
+	}
+	if got, wantCursor := widget.Shell().Input().CursorPos(), len([]rune("echo "+quotedPath)); got != wantCursor {
+		t.Fatalf("Ctrl+Shift+Enter cursor = %d, want %d", got, wantCursor)
+	}
+}
+
 func TestInstantSearchPanelKeyboardRouting(t *testing.T) {
 	dir := t.TempDir()
 	widget := NewWidget(AppWidgetOptions{
@@ -87,7 +135,11 @@ func TestInstantSearchPanelKeyboardRouting(t *testing.T) {
 
 	pane := widget.Panels().Left
 	pane.SelectByName("alpha")
-	widget.HandleEvent(input.KeyPressEvent{Code: 't', Mod: input.ModAlt})
+	altT := readKittyKeyPress(t, "\x1b[116;3:1;8224u")
+	if altT.Code != 't' || altT.Mod != input.ModAlt || altT.Text != "†" {
+		t.Fatalf("decoded Alt+t event = %#v, want key t with Alt and Option-produced text", altT)
+	}
+	widget.HandleEvent(altT)
 	if !pane.SearchActive() {
 		t.Fatal("Alt+t with panels visible did not activate instant search")
 	}
@@ -127,6 +179,29 @@ func TestInstantSearchPanelKeyboardRouting(t *testing.T) {
 	if pane.SearchActive() {
 		t.Fatal("Alt+type activated instant search while panels were hidden")
 	}
+}
+
+func readKittyKeyPress(t *testing.T, sequence string) input.KeyPressEvent {
+	t.Helper()
+
+	reader, err := input.NewReader(strings.NewReader(sequence), "", 0)
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	defer reader.Close()
+
+	events, err := reader.ReadEvents()
+	if err != nil {
+		t.Fatalf("ReadEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("ReadEvents returned %d events, want 1", len(events))
+	}
+	key, ok := events[0].(input.KeyPressEvent)
+	if !ok {
+		t.Fatalf("decoded event = %T, want input.KeyPressEvent", events[0])
+	}
+	return key
 }
 
 func TestOpenEditorSaveFailureKeepsEditorOpen(t *testing.T) {

@@ -329,4 +329,3 @@ When `panelsVisible == true`, `PromptInput` is empty (`!hasInput`), and the user
    - `Ctrl+O` summoning the blue panels over the top $H_{\text{panels}}$ rows with `BlockBanner` + `PromptInput` + blank footer fitting in the bottom gap.
    - Output sliding underneath the blue panels and only ejecting into scrollback once it catches up to row 0.
    - Far Manager split key routing, directory navigation, and running executables with `Enter`.
-

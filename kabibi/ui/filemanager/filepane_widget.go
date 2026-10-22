@@ -99,12 +99,12 @@ func (s *OsFSService) Lstat(path string) (os.FileInfo, error) {
 
 // FileItem represents a single entry inside a FilePaneWidget.
 type FileItem struct {
-	name     string
-	isDir    bool
-	isExec   bool
-	selected bool
-	size     int64
-	mode     os.FileMode
+	name      string
+	isDir     bool
+	isExec    bool
+	selected  bool
+	size      int64
+	mode      os.FileMode
 	modeKnown bool
 }
 
@@ -544,15 +544,14 @@ func (w *FilePaneWidget) BeginSearch(ev input.KeyPressEvent) bool {
 	if w == nil || !ev.Mod.Contains(input.ModAlt) {
 		return false
 	}
+	rn := ev.Code
+	if ev.ShiftedCode != 0 {
+		rn = ev.ShiftedCode
+	}
 	text := ev.Text
-	if text == "" {
-		rn := ev.Code
-		if ev.ShiftedCode != 0 {
-			rn = ev.ShiftedCode
-		}
-		if unicode.IsPrint(rn) {
-			text = string(rn)
-		}
+	if unicode.IsPrint(rn) {
+		// Option/Alt can attach a composed glyph to Text; instant search uses the key.
+		text = string(rn)
 	}
 	if text == "" {
 		return false

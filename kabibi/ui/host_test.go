@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/input"
 	xterm "github.com/charmbracelet/x/term"
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
@@ -294,6 +295,17 @@ func TestRunCore_UsesInjectedRawModeBoundary(t *testing.T) {
 	}
 	if got := strings.Count(gotOutput, mouseTrackingOff); got < 2 {
 		t.Fatalf("runCore() emitted mouse-tracking-off sequence %d times, want startup and cleanup", got)
+	}
+	pushKeyboard := ansi.PushKittyKeyboard(kittyKeyboardFlags)
+	popKeyboard := ansi.PopKittyKeyboard(1)
+	if !strings.Contains(gotOutput, pushKeyboard) {
+		t.Fatalf("runCore() output does not enable Kitty keyboard reporting with %q", pushKeyboard)
+	}
+	if !strings.Contains(gotOutput, popKeyboard) {
+		t.Fatalf("runCore() output does not restore the prior Kitty keyboard mode with %q", popKeyboard)
+	}
+	if strings.Index(gotOutput, pushKeyboard) > strings.Index(gotOutput, popKeyboard) {
+		t.Fatal("runCore() restored Kitty keyboard mode before enabling it")
 	}
 }
 
