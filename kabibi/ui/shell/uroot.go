@@ -41,7 +41,6 @@ import (
 	lsdriverscmd "github.com/u-root/u-root/cmds/core/lsdrivers"
 	lsfdcmd "github.com/u-root/u-root/cmds/core/lsfd"
 	lsmodcmd "github.com/u-root/u-root/cmds/core/lsmod"
-	"github.com/u-root/u-root/cmds/core/man"
 	"github.com/u-root/u-root/cmds/core/md5sum"
 	"github.com/u-root/u-root/cmds/core/mkdir"
 	"github.com/u-root/u-root/cmds/core/mktemp"
@@ -108,7 +107,6 @@ var urootRegistry = map[string]commandRunner{
 	"comm":    comm.Main,
 	"head":    head.Main,
 	"hexdump": hexdump.Main,
-	"man":     man.Main,
 	"more":    more.Main,
 	"seq":     seq.Main,
 	"sort":    sort.Main,
@@ -228,14 +226,23 @@ func urootBuiltinMiddleware(next interp.ExecHandlerFunc) interp.ExecHandlerFunc 
 		}
 
 		hc := interp.HandlerCtx(ctx)
+		stdoutIsTerminal := false
+		terminalWidth := 0
+		if session, source := execSessionFromContext(ctx); session != nil &&
+			source == SourceUserShell && session.IsUnredirectedTTY(hc) {
+			stdoutIsTerminal = true
+			terminalWidth, _ = session.PTYSize()
+		}
 
 		var echoRunner *interp.Runner
 		var ioEnv core.IO
 		ioEnv = core.IO{
-			Stdin:  hc.Stdin,
-			Stdout: hc.Stdout,
-			Stderr: hc.Stderr,
-			Dir:    hc.Dir,
+			Stdin:            hc.Stdin,
+			Stdout:           hc.Stdout,
+			Stderr:           hc.Stderr,
+			Dir:              hc.Dir,
+			StdoutIsTerminal: stdoutIsTerminal,
+			TerminalWidth:    terminalWidth,
 			LookupEnv: func(k string) (string, bool) {
 				if hc.Env != nil {
 					v := hc.Env.Get(k)

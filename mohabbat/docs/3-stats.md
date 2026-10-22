@@ -8,9 +8,9 @@ Here is the field-by-field breakdown across all three layers:
 
 ---
 
-### 1. Proposed `AbiStat` Wire Contract (112 bytes, 8-byte aligned)
+### 1. Implemented `AbiStat` Wire Contract (112 bytes, 8-byte aligned)
 
-Currently `AbiStat` is 64 bytes and conflates `ctime` (Unix status change time) with `btime` (creation/birth time), while omitting `dev`, `rdev`, `blksize`, and `blocks`. Expanding it to **112 bytes** (14 × 8-byte slots, zero internal padding) captures the full portable Unix stat model without losing precision or conflating concepts.
+The shared `AbiStat` record is **112 bytes** (14 × 8-byte slots, zero internal padding). It separates `ctime` (Unix status-change time) from `btime` (creation/birth time) and includes `dev`, `rdev`, `blksize`, and `blocks`. Go, Node, and browser hosts marshal this same layout.
 
 | Offset | Wire Field | Type | Linux Host (`syscall.Stat_t`) | macOS Host (`syscall.Stat_t`) | Windows Host (`os.FileInfo` / Win32) | Node.js Host (`fs.Stats` with `bigint: true`) |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -35,6 +35,7 @@ Currently `AbiStat` is 64 bytes and conflates `ctime` (Unix status change time) 
 * **Why separate `changed_ns` and `created_ns`?** Previously `AbiStat` only had `modified_ns`, `accessed_ns`, and `created_ns`, and Go's `parseAbiStat` mapped `created_ns` into `st.Ctime`. On Unix, `ctime` is inode metadata change time, whereas birth/creation time is `btime` (`Birthtimespec`). Separating them allows both `Ctim` and `Birthtimespec` to be faithful.
 * **Why widen `kind` and `mode` handling?** `createAbiStat` in `env_fs.go` previously did `uint32(fi.Mode().Perm())` and only checked `IsDir()` and `ModeSymlink`. That stripped `setuid`/`setgid`/`sticky` bits (`0o7000`) and misclassified sockets, FIFOs, and device nodes as regular files. Preserving the full Unix `st_mode` (or translating all `os.FileMode` flags) fixes `ls`, `find`, `stat`, and `p9`.
 * **Why synthesize `blksize = 4096` and `blocks = ceil(size/512)` on Windows?** Commands like `du` (`u-root/cmds/core/du/du.go`) and `ls -s` sum `st.Blocks` directly. If `Blocks` is left `0` on Windows hosts, `du` reports `0` disk usage for every file. Computing 512-byte blocks when the host OS doesn't provide them gives consistent, useful behaviour everywhere.
+* **Browser virtual filesystem:** Entries persist separate `atimeNs` and `mtimeNs` values as integers. Legacy entries with only millisecond `mtime` project that value into both fields until an entry is written and migrated. Reads do not update virtual atime. The browser synthesizes `ctime` and birth time from mtime but leaves their validity bits clear; its block size and block count are synthetic.
 
 ---
 
@@ -81,4 +82,3 @@ In addition, `unix/zerrors_rusticated_wasip1.go` should expose:
 1. **Zero-loss Unix fidelity on Linux & macOS hosts**: `washmhost` extracts the real `syscall.Stat_t` from `fi.Sys()` in OS-specific helpers (`stat_unix.go` / `stat_windows.go`) instead of zeroing `Uid`, `Gid`, `Ino`, `Dev`, `Rdev`, `Blocks` or copying `Mtime` over `Atime`/`Ctime`.
 2. **Intelligent Windows defaults**: `washmhost` on Windows reads real `LastAccessTime` and `CreationTime` from `syscall.Win32FileAttributeData`, synthesizes `Blksize = 4096` and `Blocks = (Size + 511) / 512`, and sets proper `S_IFMT` mode bits.
 3. **Fixes `p9` and `u-root` under Rusticated**: `github.com/hugelgupf/p9/internal` gets `unix.Stat_t` (and its `stat_standard.go` gate-flips cleanly because `Stat_t` matches the Linux field names and types), unblocking the Rusticated Kabibi test suite.
-

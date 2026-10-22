@@ -467,17 +467,17 @@ func TestURoot_Band1B_TextProcessing(t *testing.T) {
 	})
 
 	t.Run("hexdump", func(t *testing.T) {
-		out, code, _ := run("echo -n 'ABC' | hexdump")
-		if code != 0 || !strings.Contains(out, "41 42 43") {
+		out, code, _ := run("echo -n 'AA' | hexdump")
+		if code != 0 || !strings.Contains(out, "4141") || strings.Contains(out, "|AA|") {
 			t.Errorf("hexdump default failed: code=%d out=%q", code, out)
 		}
 
-		out, code, _ = run("echo -n 'ABC' | hexdump -C")
-		if code != 0 || !strings.Contains(out, "|ABC|") {
+		out, code, _ = run("echo -n 'AA' | hexdump -C")
+		if code != 0 || !strings.Contains(out, "|AA|") || !strings.Contains(out, "41 41") {
 			t.Errorf("hexdump -C failed: code=%d out=%q", code, out)
 		}
 
-		out, code, _ = run("echo -n 'ABCDEF' | hexdump -s 1 -n 2 -v")
+		out, code, _ = run("echo -n 'ABCDEF' | hexdump -C -s 1 -n 2 -v")
 		if code != 0 || !strings.Contains(out, "00000001") || !strings.Contains(out, "42 43") || strings.Contains(out, "44") {
 			t.Errorf("hexdump -s -n -v failed: code=%d out=%q", code, out)
 		}
@@ -528,17 +528,6 @@ func TestURoot_Band1B_TextProcessing(t *testing.T) {
 		}
 	})
 
-	t.Run("man", func(t *testing.T) {
-		out, code, _ := run("man -h")
-		if code != 0 || !strings.Contains(out, "Usage of man") {
-			t.Errorf("man -h failed: code=%d out=%q", code, out)
-		}
-
-		out, code, _ = run("man definitely_unknown_cmd_123")
-		if code == 0 || !strings.Contains(out, "No manual entry") {
-			t.Errorf("man unknown expected non-zero with message, got code=%d out=%q", code, out)
-		}
-	})
 }
 
 // ---------------------------------------------------------------------------
@@ -581,9 +570,63 @@ func TestURoot_Band1C_FileAndDirOps(t *testing.T) {
 			t.Errorf("mv failed: code=%d out=%q", code, out)
 		}
 
+		_ = os.WriteFile(filepath.Join(dir, "force_src.txt"), []byte("forced"), 0o644)
+		_ = os.WriteFile(filepath.Join(dir, "force_dst.txt"), []byte("old"), 0o644)
+		out, code, _ = run("mv -f force_src.txt force_dst.txt && cat force_dst.txt")
+		if code != 0 || strings.TrimSpace(out) != "forced" {
+			t.Errorf("mv -f failed: code=%d out=%q", code, out)
+		}
+
+		_ = os.WriteFile(filepath.Join(dir, "interactive_src.txt"), []byte("new"), 0o644)
+		_ = os.WriteFile(filepath.Join(dir, "interactive_dst.txt"), []byte("old"), 0o644)
+		out, code, _ = run("printf 'n\\n' | mv -i interactive_src.txt interactive_dst.txt; cat interactive_dst.txt")
+		if code != 0 || !strings.Contains(out, "old") {
+			t.Errorf("mv -i declined overwrite incorrectly: code=%d out=%q", code, out)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "interactive_src.txt")); err != nil {
+			t.Errorf("mv -i decline removed source: %v", err)
+		}
+		out, code, _ = run("printf 'y\\n' | mv -i interactive_src.txt interactive_dst.txt; cat interactive_dst.txt")
+		if code != 0 || !strings.Contains(out, "new") {
+			t.Errorf("mv -i confirmation failed: code=%d out=%q", code, out)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "interactive_src.txt")); !os.IsNotExist(err) {
+			t.Errorf("mv -i confirmation left source: err=%v", err)
+		}
+
 		out, code, _ = run("rm renamed.txt && ls")
 		if code != 0 || strings.Contains(out, "renamed.txt") {
 			t.Errorf("rm failed: code=%d out=%q", code, out)
+		}
+
+		emptyDir := filepath.Join(dir, "rm-empty")
+		if err := os.Mkdir(emptyDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		_, code, _ = run("rm -d rm-empty")
+		if code != 0 {
+			t.Errorf("rm -d empty directory failed: code=%d", code)
+		}
+		if _, err := os.Stat(emptyDir); !os.IsNotExist(err) {
+			t.Errorf("rm -d left empty directory: err=%v", err)
+		}
+
+		nonEmptyDir := filepath.Join(dir, "rm-nonempty")
+		if err := os.Mkdir(nonEmptyDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(nonEmptyDir, "child"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, code, _ = run("rm -d rm-nonempty")
+		if code == 0 {
+			t.Error("rm -d unexpectedly removed a non-empty directory")
+		}
+		if _, err := os.Stat(filepath.Join(nonEmptyDir, "child")); err != nil {
+			t.Errorf("rm -d removed non-empty directory contents: %v", err)
+		}
+		if err := os.RemoveAll(nonEmptyDir); err != nil {
+			t.Fatal(err)
 		}
 
 		_, code, _ = run("rm -f non_existent_file_xyz.txt")
