@@ -275,6 +275,21 @@ func TestURoot_Band1B_TextProcessing(t *testing.T) {
 		if code != 0 || strings.TrimSpace(out) != "11 wc_sample.txt" {
 			t.Errorf("wc -L failed: code=%d out=%q", code, out)
 		}
+
+		out, code, _ = run("printf '界\\n' | wc -L")
+		if code != 0 || strings.TrimSpace(out) != "2" {
+			t.Errorf("wc -L wide character failed: code=%d out=%q", code, out)
+		}
+
+		out, code, _ = run("printf 'a\\tb\\n' | wc -L")
+		if code != 0 || strings.TrimSpace(out) != "9" {
+			t.Errorf("wc -L tab stop failed: code=%d out=%q", code, out)
+		}
+
+		out, code, _ = run("printf '👨‍👩‍👧‍👦\\n' | wc -L")
+		if code != 0 || strings.TrimSpace(out) != "2" {
+			t.Errorf("wc -L grapheme failed: code=%d out=%q", code, out)
+		}
 	})
 
 	t.Run("tr", func(t *testing.T) {

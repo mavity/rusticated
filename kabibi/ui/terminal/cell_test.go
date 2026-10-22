@@ -335,6 +335,33 @@ func TestFromANSIExactWidthBoundary(t *testing.T) {
 	}
 }
 
+func TestFromANSIUsesUnicodeCoreGraphemeWidth(t *testing.T) {
+	const width = 12
+	family := "\U0001F468\u200D\U0001F469\u200D\U0001F467\u200D\U0001F466"
+
+	tests := []struct {
+		name string
+		buf  CellBuf
+	}{
+		{name: "string", buf: FromANSIString(family+"x", width)},
+		{name: "lines", buf: FromANSI([]string{family + "x", "next"}, width)},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.buf.Get(0, 0).Grapheme; got != family {
+				t.Fatalf("first cell grapheme = %q, want %q", got, family)
+			}
+			if got := test.buf.Get(1, 0).Grapheme; got != "" {
+				t.Fatalf("wide-grapheme continuation = %q, want empty", got)
+			}
+			if got := test.buf.Get(2, 0).Grapheme; got != "x" {
+				t.Fatalf("cell after family grapheme = %q, want x", got)
+			}
+		})
+	}
+}
+
 func TestFromANSIOneCharOverWidth(t *testing.T) {
 	const w = 10
 	buf := FromANSI([]string{strings.Repeat("x", w+1)}, w)
