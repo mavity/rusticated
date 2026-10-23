@@ -196,6 +196,18 @@ func rusticated_dir_read(overlapped unsafe.Pointer, handle uint64, bufPtr *byte,
 //go:noescape
 func rusticated_path_stat(overlapped unsafe.Pointer, pathPtr *byte, pathLen uint32, flags uint32, outPtr *byte, outLen uint32)
 
+//go:wasmimport env path_link
+//go:noescape
+func rusticated_path_link(overlapped unsafe.Pointer, sourcePtr *byte, sourceLen uint32, newPathPtr *byte, newPathLen uint32, flags uint32)
+
+//go:wasmimport env path_symlink
+//go:noescape
+func rusticated_path_symlink(overlapped unsafe.Pointer, targetPtr *byte, targetLen uint32, linkPathPtr *byte, linkPathLen uint32, targetKind uint32)
+
+//go:wasmimport env path_readlink
+//go:noescape
+func rusticated_path_readlink(overlapped unsafe.Pointer, pathPtr *byte, pathLen uint32, outPtr *byte, outLen uint32)
+
 //go:wasmimport env path_chmod
 //go:noescape
 func rusticated_path_chmod(overlapped unsafe.Pointer, pathPtr *byte, pathLen uint32, mode uint32)
@@ -752,9 +764,118 @@ func Rename(from, to string) error {
 	}
 	return nil
 }
-func Readlink(path string, buf []byte) (int, error) { return 0, ENOSYS }
-func Link(path, link string) error                  { return ENOSYS }
-func Symlink(path, link string) error               { return ENOSYS }
+
+const (
+	LinkFlagFollowSource uint32 = 1
+
+	SymlinkTargetUnknown   uint32 = 0
+	SymlinkTargetFile      uint32 = 1
+	SymlinkTargetDirectory uint32 = 2
+)
+
+func readlinkInto(path string, buf []byte) (uint64, error) {
+	var ctx overlappedContext
+	var outPtr *byte
+	if len(buf) > 0 {
+		outPtr = (*byte)(unsafe.Pointer(unsafe.SliceData(buf)))
+	}
+	rusticated_path_readlink(
+		unsafe.Pointer(&ctx.o),
+		(*byte)(unsafe.StringData(path)), uint32(len(path)),
+		outPtr, uint32(len(buf)),
+	)
+	runtime.KeepAlive(path)
+	runtime.KeepAlive(buf)
+	awaitOverlapped(&ctx)
+	if ctx.o.hostError != 0 {
+		return ctx.o.resultExt, errnoErr(Errno(ctx.o.hostError))
+	}
+	return ctx.o.resultExt, nil
+}
+
+func Readlink(path string, buf []byte) (int, error) {
+	if path == "" || uint64(len(path)) > uint64(^uint32(0)) || uint64(len(buf)) > uint64(^uint32(0)) {
+		return 0, EINVAL
+	}
+
+	size := len(buf)
+	for {
+		tmp := make([]byte, size)
+		required, err := readlinkInto(path, tmp)
+		if err != nil {
+			errno, ok := err.(Errno)
+			if !ok || errno != ERANGE {
+				return 0, err
+			}
+			if required > uint64(^uint32(0)) || required > uint64(int(^uint(0)>>1)) {
+				return 0, EOVERFLOW
+			}
+			if int(required) <= size {
+				return 0, EIO
+			}
+			size = int(required)
+			continue
+		}
+
+		n := int(required)
+		if n > len(tmp) {
+			return 0, EIO
+		}
+		if n > len(buf) {
+			n = len(buf)
+		}
+		copy(buf, tmp[:n])
+		return n, nil
+	}
+}
+
+func Link(path, link string) error {
+	return LinkWithFlags(path, link, 0)
+}
+
+func LinkWithFlags(path, link string, flags uint32) error {
+	if path == "" || link == "" || uint64(len(path)) > uint64(^uint32(0)) ||
+		uint64(len(link)) > uint64(^uint32(0)) || flags&^LinkFlagFollowSource != 0 {
+		return EINVAL
+	}
+	var ctx overlappedContext
+	rusticated_path_link(
+		unsafe.Pointer(&ctx.o),
+		(*byte)(unsafe.StringData(path)), uint32(len(path)),
+		(*byte)(unsafe.StringData(link)), uint32(len(link)), flags,
+	)
+	runtime.KeepAlive(path)
+	runtime.KeepAlive(link)
+	awaitOverlapped(&ctx)
+	if ctx.o.hostError != 0 {
+		return errnoErr(Errno(ctx.o.hostError))
+	}
+	return nil
+}
+
+func Symlink(path, link string) error {
+	return SymlinkWithType(path, link, SymlinkTargetUnknown)
+}
+
+func SymlinkWithType(path, link string, targetKind uint32) error {
+	if link == "" || uint64(len(path)) > uint64(^uint32(0)) ||
+		uint64(len(link)) > uint64(^uint32(0)) || targetKind > SymlinkTargetDirectory {
+		return EINVAL
+	}
+	var ctx overlappedContext
+	rusticated_path_symlink(
+		unsafe.Pointer(&ctx.o),
+		(*byte)(unsafe.StringData(path)), uint32(len(path)),
+		(*byte)(unsafe.StringData(link)), uint32(len(link)), targetKind,
+	)
+	runtime.KeepAlive(path)
+	runtime.KeepAlive(link)
+	awaitOverlapped(&ctx)
+	if ctx.o.hostError != 0 {
+		return errnoErr(Errno(ctx.o.hostError))
+	}
+	return nil
+}
 func Truncate(path string, length int64) error {
 	if path == "" {
 		return EINVAL
@@ -789,7 +910,7 @@ func Ftruncate(fd int, length int64) error {
 	}
 	return nil
 }
-func Fsync(fd int) error                            { return nil }
+func Fsync(fd int) error { return nil }
 func Chmod(path string, mode uint32) error {
 	if path == "" {
 		return EINVAL

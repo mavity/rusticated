@@ -115,6 +115,16 @@ pub const STAT_VALID_BLOCKS: u64 = 1 << 11;
 /// rather than the target it points to.
 pub const STAT_FLAG_NOFOLLOW: u32 = 1;
 
+/// Follow the final source symlink when creating a hard link.
+pub const LINK_FLAG_FOLLOW_SOURCE: u32 = 1;
+
+/// The guest does not specify a symbolic-link target kind.
+pub const SYMLINK_TARGET_UNKNOWN: u32 = 0;
+/// The symbolic-link target is intended to be a file.
+pub const SYMLINK_TARGET_FILE: u32 = 1;
+/// The symbolic-link target is intended to be a directory.
+pub const SYMLINK_TARGET_DIRECTORY: u32 = 2;
+
 /// Platform information structure populated by the host.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -256,6 +266,32 @@ pub mod imports {
             path_ptr: *const u8,
             path_len: u32,
             flags: u32,
+            out_ptr: *mut u8,
+            out_len: u32,
+        );
+        /// Create a hard link. `flags` accepts `LINK_FLAG_FOLLOW_SOURCE`.
+        pub fn path_link(
+            overlapped: *mut Overlapped,
+            source_ptr: *const u8,
+            source_len: u32,
+            new_path_ptr: *const u8,
+            new_path_len: u32,
+            flags: u32,
+        );
+        /// Create a symbolic link containing `target_ptr` as link data.
+        pub fn path_symlink(
+            overlapped: *mut Overlapped,
+            target_ptr: *const u8,
+            target_len: u32,
+            link_path_ptr: *const u8,
+            link_path_len: u32,
+            target_kind: u32,
+        );
+        /// Read the target stored in the final symbolic-link path component.
+        pub fn path_readlink(
+            overlapped: *mut Overlapped,
+            path_ptr: *const u8,
+            path_len: u32,
             out_ptr: *mut u8,
             out_len: u32,
         );

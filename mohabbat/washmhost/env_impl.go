@@ -143,11 +143,10 @@ func (h *HostEnv) currentCwd() string {
 }
 
 func (h *HostEnv) resolveGuestPathForHost(p string) string {
-	trimmed := strings.TrimSpace(p)
-	if trimmed == "" {
+	if p == "" {
 		return h.currentCwd()
 	}
-	converted := normaliseGuestPathForHost(trimmed)
+	converted := normaliseGuestPathForHost(p)
 	if converted == "" {
 		return h.currentCwd()
 	}
@@ -362,6 +361,9 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_path_open), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("path_open")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_dir_read), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("dir_read")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_path_stat), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("path_stat")
+	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_path_link), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("path_link")
+	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_path_symlink), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("path_symlink")
+	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_path_readlink), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("path_readlink")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_path_chmod), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("path_chmod")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_path_set_times), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("path_set_times")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_path_remove), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("path_remove")

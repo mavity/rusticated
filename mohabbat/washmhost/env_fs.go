@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"os"
 	"path"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -406,24 +408,23 @@ func (h *HostEnv) sys_handle_close(ctx context.Context, m api.Module, stack []ui
 // normaliseGuestPathForHost converts guest paths to a form the host OS can use.
 // Drive-rooted paths use /C:/... in the guest and map to the native host form.
 func normaliseGuestPathForHost(p string) string {
-	trimmed := strings.TrimSpace(p)
-	if trimmed == "" {
+	if p == "" {
 		return ""
 	}
-	if runtime.GOOS == "windows" && trimmed == "/" {
+	if runtime.GOOS == "windows" && p == "/" {
 		if cwd, err := resolveUsableCwd(); err == nil {
 			return cwd
 		}
 	}
-	if guestPath, ok := normaliseDrivePathForHost(trimmed, runtime.GOOS == "windows"); ok {
+	if guestPath, ok := normaliseDrivePathForHost(p, runtime.GOOS == "windows"); ok {
 		return guestPath
 	}
 	if runtime.GOOS != "windows" {
-		return trimmed
+		return p
 	}
 	// Normalise backslashes then apply lexical clean so that paths like
 	// "/.", "//", "/./foo" reduce to their canonical form before translation.
-	normalized := path.Clean(strings.ReplaceAll(trimmed, "\\", "/"))
+	normalized := path.Clean(strings.ReplaceAll(p, "\\", "/"))
 	if len(normalized) >= 4 && normalized[0] == '/' {
 		drive := normalized[1]
 		if (drive >= 'A' && drive <= 'Z' || drive >= 'a' && drive <= 'z') && normalized[2] == ':' && normalized[3] == '/' {
@@ -740,6 +741,120 @@ func (h *HostEnv) sys_path_stat(ctx context.Context, m api.Module, stack []uint6
 				}
 			}
 			writeOverlapped(m, ovPtr, retCode, 0, extResult)
+		}
+	}()
+}
+
+func (h *HostEnv) sys_path_link(ctx context.Context, m api.Module, stack []uint64) {
+	ovPtr := uint32(stack[0])
+	sourceBytes, ok1 := m.Memory().Read(uint32(stack[1]), uint32(stack[2]))
+	newPathBytes, ok2 := m.Memory().Read(uint32(stack[3]), uint32(stack[4]))
+	flags := uint32(stack[5])
+	if !ok1 || !ok2 || flags&^uint32(1) != 0 || len(sourceBytes) == 0 || len(newPathBytes) == 0 {
+		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+		return
+	}
+
+	source := h.resolveGuestPathForHost(string(sourceBytes))
+	newPath := h.resolveGuestPathForHost(string(newPathBytes))
+	state := h.RegisterOp(ovPtr, nil)
+	go func() {
+		var err error
+		if flags&1 != 0 {
+			source, err = filepath.EvalSymlinks(source)
+		} else if runtime.GOOS == "windows" {
+			var info os.FileInfo
+			info, err = os.Lstat(source)
+			if err == nil && info.Mode()&os.ModeSymlink != 0 {
+				err = errors.ErrUnsupported
+			}
+		}
+		if err == nil {
+			err = os.Link(source, newPath)
+		}
+		retCode := mapErrno(err)
+		h.fileOpsQueue <- func() {
+			defer h.DecOpsFor(state)
+			if !h.IsOpActive(ovPtr, state.opID) {
+				return
+			}
+			h.mu.Lock()
+			delete(h.activeOps, ovPtr)
+			h.mu.Unlock()
+			writeOverlapped(m, ovPtr, retCode, 0, 0)
+		}
+	}()
+}
+
+func (h *HostEnv) sys_path_symlink(ctx context.Context, m api.Module, stack []uint64) {
+	ovPtr := uint32(stack[0])
+	targetBytes, ok1 := m.Memory().Read(uint32(stack[1]), uint32(stack[2]))
+	linkPathBytes, ok2 := m.Memory().Read(uint32(stack[3]), uint32(stack[4]))
+	targetKind := uint32(stack[5])
+	if !ok1 || !ok2 || len(linkPathBytes) == 0 || targetKind > 2 {
+		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+		return
+	}
+
+	target := string(targetBytes)
+	linkPath := h.resolveGuestPathForHost(string(linkPathBytes))
+	state := h.RegisterOp(ovPtr, nil)
+	go func() {
+		err := createHostSymlink(target, linkPath, targetKind)
+		retCode := mapErrno(err)
+		h.fileOpsQueue <- func() {
+			defer h.DecOpsFor(state)
+			if !h.IsOpActive(ovPtr, state.opID) {
+				return
+			}
+			h.mu.Lock()
+			delete(h.activeOps, ovPtr)
+			h.mu.Unlock()
+			writeOverlapped(m, ovPtr, retCode, 0, 0)
+		}
+	}()
+}
+
+func (h *HostEnv) sys_path_readlink(ctx context.Context, m api.Module, stack []uint64) {
+	ovPtr := uint32(stack[0])
+	pathBytes, ok := m.Memory().Read(uint32(stack[1]), uint32(stack[2]))
+	outPtr := uint32(stack[3])
+	outLen := uint32(stack[4])
+	if !ok || len(pathBytes) == 0 {
+		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+		return
+	}
+	if _, ok := m.Memory().Read(outPtr, outLen); !ok {
+		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+		return
+	}
+
+	hostPath := h.resolveGuestPathForHost(string(pathBytes))
+	state := h.RegisterOp(ovPtr, nil)
+	go func() {
+		target, err := os.Readlink(hostPath)
+		retCode := mapErrno(err)
+		payload := []byte(target)
+		result := uint64(len(payload))
+		if err == nil && uint64(len(payload)) > uint64(outLen) {
+			retCode = wasiERANGE
+			payload = nil
+		}
+		h.fileOpsQueue <- func() {
+			defer h.DecOpsFor(state)
+			if !h.IsOpActive(ovPtr, state.opID) {
+				return
+			}
+			h.mu.Lock()
+			delete(h.activeOps, ovPtr)
+			h.mu.Unlock()
+			if retCode == 0 && len(payload) > 0 {
+				if !m.Memory().Write(outPtr, payload) {
+					writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+					return
+				}
+			}
+			writeOverlapped(m, ovPtr, retCode, 0, result)
 		}
 	}()
 }

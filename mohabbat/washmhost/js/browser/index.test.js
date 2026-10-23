@@ -13,6 +13,7 @@ import washmhost, {
   wasiEFBIG,
   wasiENOENT,
   wasiENOTSUP,
+  wasiELOOP,
   wasiECANCELED,
   wasiEBADF,
   wasiE2BIG,
@@ -32,6 +33,10 @@ test('Path resolution normalizes relative, root and parent segments', () => {
   assert.equal(resolvePath('/home/user', '/var/log/syslog'), '/var/log/syslog');
   assert.equal(resolvePath('/home/user', '../../../etc/passwd'), '/etc/passwd');
   assert.equal(resolvePath('/', '..'), '/');
+});
+
+test('Path resolution preserves leading and trailing whitespace', () => {
+  assert.equal(resolvePath('/home/user', ' name '), '/home/user/ name ');
 });
 
 test('Overlapped struct marshalling and completion flags', () => {
@@ -776,6 +781,112 @@ test('path_stat prefers fs.statEntry over fs.getEntry when provided', async () =
   assert.equal(view.getBigUint64(200 + 16, true), 4096n);
   assert.equal(view.getBigUint64(100 + 16, true), 112n);
   assert.ok(globalThis.washmhostExports && globalThis.washmhostExports.washmhost === washmhost);
+});
+
+test('symbolic links preserve targets, resolve on open, and are removed without following', async () => {
+  const memory = new WebAssembly.Memory({ initial: 1 });
+  const fs = new AsyncIndexedDBFS(`RusticatedLinkTest-${Date.now()}-${Math.random()}`);
+  const host = await washmhost({ test: true, memory, fs, cwd: '/workspace' });
+  const { env, hostState } = host;
+  await fs.seed();
+  await fs.putEntry({ path: '/workspace', type: 'dir', mode: 0o755 });
+  await fs.putEntry({
+    path: '/workspace/target',
+    type: 'file',
+    content: new TextEncoder().encode('link content'),
+    size: 12,
+    mode: 0o644
+  });
+  const view = new DataView(memory.buffer);
+  const encodeAt = (ptr, value) => {
+    const bytes = new TextEncoder().encode(value);
+    new Uint8Array(memory.buffer, ptr, bytes.length).set(bytes);
+    return bytes.length;
+  };
+  const waitForCompletion = async (ovPtr) => {
+    for (let attempt = 0; attempt < 100 && view.getUint32(ovPtr, true) !== FLAG_COMPLETED; attempt++) {
+      hostState.drainQueue();
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+    hostState.drainQueue();
+    return view.getUint32(ovPtr + 4, true);
+  };
+
+  const targetLen = encodeAt(128, 'target');
+  const linkPathLen = encodeAt(160, '/workspace/link');
+  env.path_symlink(32, 128, targetLen, 160, linkPathLen, 0);
+  assert.equal(await waitForCompletion(32), wasiSuccess);
+  assert.equal((await fs.getEntry('/workspace/link')).target, 'target');
+
+  const linkLen = encodeAt(128, '/workspace/link');
+  env.path_readlink(64, 128, linkLen, 256, 3);
+  assert.equal(await waitForCompletion(64), wasiERANGE);
+  assert.equal(view.getBigUint64(80, true), 6n);
+  env.path_readlink(96, 128, linkLen, 256, 16);
+  assert.equal(await waitForCompletion(96), wasiSuccess);
+  assert.equal(new TextDecoder().decode(new Uint8Array(memory.buffer, 256, 6)), 'target');
+
+  env.path_stat(320, 128, linkLen, 1, 512, 112);
+  assert.equal(await waitForCompletion(320), wasiSuccess);
+  assert.equal(view.getUint32(512, true), STAT_KIND_SYMLINK);
+  env.path_stat(360, 128, linkLen, 0, 1120, 112);
+  assert.equal(await waitForCompletion(360), wasiSuccess);
+  assert.equal(view.getUint32(1120, true), STAT_KIND_FILE);
+
+  await fs.putEntry({ path: '/workspace/dir', type: 'dir', mode: 0o755 });
+  await fs.putEntry({
+    path: '/workspace/dir/child',
+    type: 'file',
+    content: new TextEncoder().encode('child'),
+    size: 5,
+    mode: 0o644
+  });
+  const dirTargetLen = encodeAt(128, 'dir');
+  const dirLinkLen = encodeAt(160, '/workspace/dir-link');
+  env.path_symlink(560, 128, dirTargetLen, 160, dirLinkLen, 2);
+  assert.equal(await waitForCompletion(560), wasiSuccess);
+  const childPathLen = encodeAt(128, '/workspace/dir-link/child');
+  env.path_stat(600, 128, childPathLen, 0, 700, 112);
+  assert.equal(await waitForCompletion(600), wasiSuccess);
+  assert.equal(view.getUint32(700, true), STAT_KIND_FILE);
+
+  await fs.putEntry({ path: '/workspace/loop-a', type: 'symlink', target: 'loop-b', mode: 0o777 });
+  await fs.putEntry({ path: '/workspace/loop-b', type: 'symlink', target: 'loop-a', mode: 0o777 });
+  const loopPathLen = encodeAt(128, '/workspace/loop-a');
+  env.path_stat(640, 128, loopPathLen, 0, 1200, 112);
+  assert.equal(await waitForCompletion(640), wasiELOOP);
+
+  const danglingTargetLen = encodeAt(128, 'missing file');
+  const danglingLinkLen = encodeAt(160, '/workspace/dangling');
+  env.path_symlink(680, 128, danglingTargetLen, 160, danglingLinkLen, 1);
+  assert.equal(await waitForCompletion(680), wasiSuccess);
+  const danglingPathLen = encodeAt(128, '/workspace/dangling');
+  env.path_open(720, 128, danglingPathLen, 64, 0o644);
+  assert.equal(await waitForCompletion(720), wasiSuccess);
+  const createdHandle = view.getBigUint64(736, true);
+  const createdContents = new TextEncoder().encode('created');
+  new Uint8Array(memory.buffer, 900, createdContents.length).set(createdContents);
+  env.write(760, createdHandle, 900, createdContents.length);
+  assert.equal(await waitForCompletion(760), wasiSuccess);
+  env.handle_close(createdHandle);
+  assert.equal(new TextDecoder().decode((await fs.getEntry('/workspace/missing file')).content), 'created');
+
+  encodeAt(128, '/workspace/link');
+  encodeAt(160, '/workspace/link');
+  env.path_open(400, 128, linkLen, 0, 0);
+  assert.equal(await waitForCompletion(400), wasiSuccess);
+  const handle = view.getBigUint64(416, true);
+  env.read(440, handle, 800, 32);
+  assert.equal(await waitForCompletion(440), wasiSuccess);
+  assert.equal(new TextDecoder().decode(new Uint8Array(memory.buffer, 800, 12)), 'link content');
+  env.handle_close(handle);
+
+  env.path_link(480, 128, linkLen, 160, linkPathLen, 0);
+  assert.equal(await waitForCompletion(480), wasiENOTSUP);
+  env.path_remove(520, 160, linkPathLen, 0);
+  assert.equal(await waitForCompletion(520), wasiSuccess);
+  assert.equal(await fs.getEntry('/workspace/link'), null);
+  assert.ok(await fs.getEntry('/workspace/target'));
 });
 
 test('path_set_times persists independent atime and mtime values', async () => {
