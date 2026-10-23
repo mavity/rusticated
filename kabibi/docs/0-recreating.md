@@ -86,7 +86,7 @@ If a command passes pre-flight (for example, dynamic variable expansion `$CMD` o
 
 ### 1. `CommandBlock` Lifecycle & `FromANSI` Rendering
 
-Currently in `kabibi/ui/shell/shell_widget.go`, `renderBlock` splits `block.Output.String()` on `\n` before calling `terminal.FromANSI(lines, width)`.
+Currently in `kabibi/ui/shell/shell_widget.go`, `renderBlock` passes the raw output stream to `terminal.FromANSI(raw, width, height)`, which returns both the rendered buffer and cursor state.
 - **Important Refinement:** In `ai.Session`, `OnFeedback` uses `\r` + spaces + `\r` (without `\n`) to overwrite the single-line `[goal]`, `[expectation]`, `[steps]`, `[plan]`, and `[work]` ticker in place, and then wipes the line with `\r   \r` right before `OnContent` streams the final answer.
 - If `renderBlock` naively splits on `\n` and `FromANSI` appends `\r\n` after every slice element, a live `\r` ticker works within a single line, **provided** we don't prematurely split or lose trailing `\r` state.
 - Passing the raw byte stream (or preserving `\r` semantics inside `FromANSI`) ensures that:
