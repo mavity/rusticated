@@ -275,11 +275,14 @@ The host provides the complete `env` import dictionary required by Go (`wasip1` 
 | `seek` | Move a file handle offset | Supports absolute, current-relative, and end-relative offsets |
 | `handle_truncate` | Set an open file's logical length | Resizes file content, zero-fills growth, and persists through `AsyncFS` |
 | `handle_close` | Close resource handle | Frees open file, directory, or socket descriptor |
-| `path_open` | File/dir handle creation | Resolves mode/flags against IndexedDB asynchronously |
-| `path_stat` | File metadata inspection | Emits 64-byte `AbiStat` structure filled from `AsyncFS` |
+| `path_open` | File/dir handle creation | Resolves mode/flags and follows symbolic links through `AsyncFS` |
+| `path_stat` | File metadata inspection | Emits the 112-byte `AbiStat` structure; honors no-follow for the final link |
+| `path_link` | Hard-link creation | Returns `wasiENOTSUP` until `AsyncFS` supports shared file identity |
+| `path_symlink` | Symbolic-link creation | Persists the exact target bytes and target-kind hint in `AsyncFS` |
+| `path_readlink` | Read symbolic-link target | Returns stored target bytes, reporting `wasiERANGE` and the required size |
 | `dir_read` | Directory enumeration | Paginates entries encoded as kind byte + NUL-terminated name |
 | `path_chmod` | Change file permissions | Updates `mode` in `AsyncFS` |
-| `path_remove` | File or empty dir deletion | Deletes entry from IndexedDB; returns `wasiENOENT` / `wasiENOTEMPTY` |
+| `path_remove` | File or empty dir deletion | Removes the final entry without following it; resolves intermediate links |
 | `path_mkdir` | Directory creation | Creates dir entry in `AsyncFS` |
 | `path_rename` | File/dir move | Renames key in IndexedDB |
 | `signal_wait` | Signal registration | Queues overlapped wait; completed immediately on buffered or incoming signals |

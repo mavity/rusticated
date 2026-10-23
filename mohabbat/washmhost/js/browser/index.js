@@ -110,6 +110,7 @@ export function mapErrno(e) {
     case 'ENOTDIR':           return wasiENOTDIR;
     case 'EISDIR':            return wasiEISDIR;
     case 'EINVAL':            return wasiEINVAL;
+    case 'ELOOP':              return wasiELOOP;
     case 'EMFILE':            return wasiEMFILE;
     case 'ENOSPC':            return wasiENOSPC;
     case 'ENOSYS':            return wasiENOSYS;
@@ -129,11 +130,11 @@ export function mapErrno(e) {
 // ── Path resolution ──────────────────────────────────────────────────────────
 export function resolvePath(baseCwd, target) {
   let full;
-  const t = (target || '').trim().replace(/\\/g, '/');
+  const t = String(target ?? '').replace(/\\/g, '/');
   if (t.startsWith('/')) {
     full = t;
   } else {
-    const cwd = (baseCwd || '/').trim().replace(/\\/g, '/');
+    const cwd = String(baseCwd || '/').replace(/\\/g, '/');
     full = cwd.endsWith('/') ? cwd + t : cwd + '/' + t;
   }
   const parts = [];
@@ -189,7 +190,10 @@ export function marshalStat(entry) {
   const kind = isDir ? STAT_KIND_DIR : isSymlink ? STAT_KIND_SYMLINK : STAT_KIND_FILE;
   const modeBase = isDir ? 0o040000 : isSymlink ? 0o120000 : 0o100000;
   const mode = modeBase | ((entry.mode ?? (isDir ? 0o755 : 0o644)) & 0o7777);
-  const size = BigInt(entry.size ?? (entry.content ? entry.content.length : 0));
+  const symlinkSize = isSymlink
+    ? (entry.targetBytes?.length ?? new TextEncoder().encode(entry.target ?? '').length)
+    : 0;
+  const size = BigInt(entry.size ?? (isSymlink ? symlinkSize : entry.content ? entry.content.length : 0));
   const mtimeNs = storedTimeNs(entry, 'mtimeNs', 'mtime', BigInt(Date.now()) * 1_000_000n);
   const atimeNs = storedTimeNs(entry, 'atimeNs', 'atime', mtimeNs);
   const ctimeNs = storedTimeNs(entry, 'ctimeNs', 'ctime', mtimeNs);
@@ -264,6 +268,50 @@ export class AsyncIndexedDBFS {
       req.onsuccess = () => resolve(req.result || null);
       req.onerror = () => reject(req.error);
     });
+  }
+
+  async resolveEntryPath(path, cwd = '/', followFinal = true) {
+    const raw = String(path).replace(/\\/g, '/');
+    const absolute = raw.startsWith('/') ? raw : `${cwd}/${raw}`;
+    const pending = absolute.split('/');
+    const resolved = [];
+    let followed = 0;
+
+    while (pending.length > 0) {
+      const component = pending.shift();
+      if (!component || component === '.') continue;
+      if (component === '..') {
+        resolved.pop();
+        continue;
+      }
+
+      const candidate = `/${resolved.concat(component).join('/')}`;
+      const entry = await this.getEntry(candidate);
+      const hasMore = pending.some((part) => part !== '' && part !== '.');
+      if (!entry) {
+        if (hasMore) throw Object.assign(new Error(`no such file or directory: ${candidate}`), { code: 'ENOENT' });
+        return { path: candidate, entry: null };
+      }
+
+      if (entry.type === 'symlink' && (hasMore || followFinal)) {
+        if (++followed > 40) throw Object.assign(new Error('too many symbolic links'), { code: 'ELOOP' });
+        const target = entry.target;
+        if (typeof target !== 'string' || target.length === 0) {
+          throw Object.assign(new Error('empty symbolic link target'), { code: 'ENOENT' });
+        }
+        if (target.startsWith('/')) resolved.length = 0;
+        pending.unshift(...target.replace(/\\/g, '/').split('/'));
+        continue;
+      }
+
+      if (hasMore && entry.type !== 'dir') {
+        throw Object.assign(new Error(`not a directory: ${candidate}`), { code: 'ENOTDIR' });
+      }
+      resolved.push(component);
+    }
+
+    const resolvedPath = resolved.length === 0 ? '/' : `/${resolved.join('/')}`;
+    return { path: resolvedPath, entry: await this.getEntry(resolvedPath) };
   }
 
   async putEntry(entry) {
@@ -547,6 +595,16 @@ export function makeBrowserImports(hostState, fs, params = {}) {
   function pathStr(ptr, len) {
     const raw = decoder.decode(hostState.getGuestSlice(Number(ptr), Number(len)));
     return resolvePath(hostState.cwd, raw);
+  }
+
+  async function resolveStoredPath(path, followFinal = true) {
+    if (typeof fs.resolveEntryPath === 'function') {
+      return fs.resolveEntryPath(path, hostState.cwd, followFinal);
+    }
+    const entry = followFinal && typeof fs.statEntry === 'function'
+      ? await fs.statEntry(path)
+      : await fs.getEntry(path);
+    return { path, entry };
   }
 
   function finishPipeReads(pipe) {
@@ -972,20 +1030,24 @@ export function makeBrowserImports(hostState, fs, params = {}) {
       const O_TRUNC = 512;
       const O_APPEND = 1024;
 
-      fs.getEntry(p).then((entry) => {
+      const exclusive = (openFlags & O_CREAT) !== 0 && (openFlags & O_EXCL) !== 0;
+      const existingLink = exclusive ? fs.getEntry(p) : Promise.resolve(null);
+      Promise.all([resolveStoredPath(p, true), existingLink]).then(([resolved, rawEntry]) => {
+        const resolvedPath = resolved.path;
+        let entry = resolved.entry;
+        if (exclusive && (rawEntry || entry)) {
+          hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiEEXIST, 0, 0));
+          return null;
+        }
         if (!entry) {
           // If write flags allow creation
           if ((openFlags & O_CREAT) !== 0) {
-            const newEntry = { path: p, type: 'file', content: new Uint8Array(0), size: 0, mode: Number(mode) || 0o644 };
+            const newEntry = { path: resolvedPath, type: 'file', content: new Uint8Array(0), size: 0, mode: Number(mode) || 0o644 };
             updateEntryMtime(newEntry);
             newEntry.atimeNs = newEntry.mtimeNs;
             return fs.putEntry(newEntry).then(() => newEntry);
           }
           hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiENOENT, 0, 0));
-          return null;
-        }
-        if ((openFlags & O_CREAT) !== 0 && (openFlags & O_EXCL) !== 0) {
-          hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiEEXIST, 0, 0));
           return null;
         }
         if (entry.type === 'file' && (openFlags & O_TRUNC) !== 0) {
@@ -1027,8 +1089,8 @@ export function makeBrowserImports(hostState, fs, params = {}) {
         return;
       }
 
-      const statPromise = typeof fs.statEntry === 'function' ? fs.statEntry(p) : fs.getEntry(p);
-      statPromise.then((entry) => {
+      const noFollow = (Number(flags) & 1) !== 0;
+      resolveStoredPath(p, !noFollow).then(({ entry }) => {
         if (!entry) {
           hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiENOENT, 0, 0));
           return;
@@ -1040,6 +1102,80 @@ export function makeBrowserImports(hostState, fs, params = {}) {
         const statBytes = marshalStat(entry);
         hostState.getGuestSlice(Number(outPtr), 112).set(statBytes);
         hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, 0, 0, 112));
+      }).catch((err) => {
+        hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, mapErrno(err), 0, 0));
+      });
+    },
+
+    path_link: (ovPtr, sourcePtr, sourceLen, newPathPtr, newPathLen, flags) => {
+      const source = pathStr(sourcePtr, sourceLen);
+      const newPath = pathStr(newPathPtr, newPathLen);
+      const flagBits = Number(flags);
+      const opId = hostState.registerOp(Number(ovPtr));
+      if ((flagBits & ~1) !== 0) {
+        hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiEINVAL, 0, 0));
+        return;
+      }
+      hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiENOTSUP, 0, 0));
+    },
+
+    path_symlink: (ovPtr, targetPtr, targetLen, linkPathPtr, linkPathLen, targetKind) => {
+      const targetBytes = hostState.getGuestSlice(Number(targetPtr), Number(targetLen)).slice();
+      const target = decoder.decode(targetBytes);
+      const linkPath = pathStr(linkPathPtr, linkPathLen);
+      const kind = Number(targetKind);
+      const opId = hostState.registerOp(Number(ovPtr));
+      if (!Number.isInteger(kind) || kind < 0 || kind > 2) {
+        hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiEINVAL, 0, 0));
+        return;
+      }
+      resolveStoredPath(linkPath, false).then(({ path: resolvedLink, entry }) => {
+        if (entry) {
+          hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiEEXIST, 0, 0));
+          return;
+        }
+        const linkEntry = {
+          path: resolvedLink,
+          type: 'symlink',
+          target,
+          targetBytes,
+          size: targetBytes.length,
+          mode: 0o777,
+          mtime: Date.now()
+        };
+        return fs.putEntry(linkEntry).then(() => {
+          hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiSuccess, 0, 0));
+        });
+      }).catch((err) => {
+        hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, mapErrno(err), 0, 0));
+      });
+    },
+
+    path_readlink: (ovPtr, pathPtr, pathLen, outPtr, outLen) => {
+      const p = pathStr(pathPtr, pathLen);
+      const output = hostState.getGuestSlice(Number(outPtr), Number(outLen));
+      const opId = hostState.registerOp(Number(ovPtr));
+      resolveStoredPath(p, false).then(({ entry }) => {
+        if (!entry) {
+          hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiENOENT, 0, 0));
+          return;
+        }
+        if (entry.type !== 'symlink') {
+          hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiEINVAL, 0, 0));
+          return;
+        }
+        const target = entry.targetBytes
+          ? new Uint8Array(entry.targetBytes)
+          : encoder.encode(entry.target ?? '');
+        if (target.length > output.length) {
+          hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiERANGE, 0, target.length));
+          return;
+        }
+        hostState.enqueue(() => {
+          if (!hostState.isOpActive(Number(ovPtr), opId)) return;
+          output.set(target);
+          hostState.completeOp(Number(ovPtr), opId, wasiSuccess, 0, target.length);
+        });
       }).catch((err) => {
         hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, mapErrno(err), 0, 0));
       });
@@ -1082,7 +1218,7 @@ export function makeBrowserImports(hostState, fs, params = {}) {
     path_chmod: (ovPtr, pathPtr, pathLen, mode) => {
       const p = pathStr(pathPtr, pathLen);
       const opId = hostState.registerOp(Number(ovPtr));
-      fs.getEntry(p).then((entry) => {
+      resolveStoredPath(p, true).then(({ entry }) => {
         if (!entry) {
           hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiENOENT, 0, 0));
           return;
@@ -1114,7 +1250,8 @@ export function makeBrowserImports(hostState, fs, params = {}) {
         return;
       }
 
-      fs.getEntry(p).then((entry) => {
+      const noFollow = (flagBits & 0x10) !== 0;
+      resolveStoredPath(p, !noFollow).then(({ entry }) => {
         if (!entry) {
           hostState.enqueue(() => hostState.completeOp(ptr, opId, wasiENOENT, 0, 0));
           return;
@@ -1147,10 +1284,24 @@ export function makeBrowserImports(hostState, fs, params = {}) {
       });
     },
 
-    path_remove: (ovPtr, pathPtr, pathLen) => {
+    path_remove: (ovPtr, pathPtr, pathLen, flags = 0) => {
       const p = pathStr(pathPtr, pathLen);
       const opId = hostState.registerOp(Number(ovPtr));
-      fs.removeEntry(p).then((ok) => {
+      const removeFlags = Number(flags);
+      if (removeFlags !== 0 && removeFlags !== 0x200) {
+        hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiEINVAL, 0, 0));
+        return;
+      }
+      resolveStoredPath(p, false).then(({ path: resolved, entry }) => {
+        if (!entry) return false;
+        if (removeFlags === 0x200 && entry.type !== 'dir') {
+          throw Object.assign(new Error('not a directory'), { code: 'ENOTDIR' });
+        }
+        if (removeFlags === 0 && entry.type === 'dir') {
+          throw Object.assign(new Error('is a directory'), { code: 'EISDIR' });
+        }
+        return fs.removeEntry(resolved);
+      }).then((ok) => {
         hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, ok ? 0 : wasiENOENT, 0, 0));
       }).catch((err) => {
         hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, mapErrno(err), 0, 0));
@@ -1160,9 +1311,12 @@ export function makeBrowserImports(hostState, fs, params = {}) {
     path_mkdir: (ovPtr, pathPtr, pathLen, mode) => {
       const p = pathStr(pathPtr, pathLen);
       const opId = hostState.registerOp(Number(ovPtr));
-      const entry = { path: p, type: 'dir', mode: Number(mode) || 0o755, mtime: Date.now() };
-      fs.putEntry(entry).then(() => {
-        hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, 0, 0, 0));
+      resolveStoredPath(p, false).then(({ path: resolved, entry: existing }) => {
+        if (existing) throw Object.assign(new Error('file exists'), { code: 'EEXIST' });
+        const entry = { path: resolved, type: 'dir', mode: Number(mode) || 0o755, mtime: Date.now() };
+        return fs.putEntry(entry).then(() => {
+          hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, 0, 0, 0));
+        });
       }).catch((err) => {
         hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, mapErrno(err), 0, 0));
       });
@@ -1173,20 +1327,26 @@ export function makeBrowserImports(hostState, fs, params = {}) {
       const dst = pathStr(dstPtr, dstLen);
       const opId = hostState.registerOp(Number(ovPtr));
       if (typeof fs.renameEntry === 'function') {
-        fs.renameEntry(src, dst).then((ok) => {
+        Promise.all([resolveStoredPath(src, false), resolveStoredPath(dst, false)]).then(([source, destination]) =>
+          fs.renameEntry(source.path, destination.path)).then((ok) => {
           hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, ok === false ? wasiENOENT : 0, 0, 0));
         }).catch((err) => {
           hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, mapErrno(err), 0, 0));
         });
         return;
       }
-      fs.getEntry(src).then((ent) => {
+      Promise.all([resolveStoredPath(src, false), resolveStoredPath(dst, false)]).then(([source, destination]) => {
+        const ent = source.entry;
         if (!ent) {
           hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiENOENT, 0, 0));
           return;
         }
-        ent.path = dst;
-        return fs.putEntry(ent).then(() => fs.removeEntry(src)).then(() => {
+        if (source.path === destination.path) {
+          hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, 0, 0, 0));
+          return;
+        }
+        ent.path = destination.path;
+        return fs.putEntry(ent).then(() => fs.removeEntry(source.path)).then(() => {
           hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, 0, 0, 0));
         });
       }).catch((err) => {

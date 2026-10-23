@@ -1,6 +1,6 @@
 # Rusticated File-Link ABI
 
-**Status:** Proposed
+**Status:** Implemented
 
 ## 1. Purpose and Scope
 
@@ -20,10 +20,14 @@ junction operation, if needed, must be separately named and specified.
 
 - `path_stat` can identify a symbolic link and can return its metadata without
   following it. Its stat record includes a hard-link count when available.
-- The ABI has no operation to create a hard link or symbolic link, or to read a
-  link's stored target.
-- The Rusticated Go syscall functions `Link`, `Symlink`, and `Readlink`
-  currently return `ENOSYS`.
+- `path_link`, `path_symlink`, and `path_readlink` are declared in the Rust ABI
+  and exported by the Go, Node.js, and browser hosts.
+- Rusticated Go maps `Link`, `Symlink`, and `Readlink` to these operations;
+  `LinkWithFlags` and `SymlinkWithType` expose the ABI-specific source-follow
+  and target-kind options.
+- The browser host persists symbolic-link targets and follows links for path
+  operations. Browser hard-link creation returns `ENOTSUP` because its current
+  storage model does not provide shared file identity.
 - Host capabilities vary by filesystem, server, driver, and permissions.
   Mounting a filesystem on a host does not imply that the host driver exposes
   every link operation.
@@ -158,9 +162,11 @@ Declare imports for all three operations and implement:
 - The Go syscall bridge's follow-source variant, if required by the supported
   Go API, using `LINK_FLAG_FOLLOW_SOURCE`.
 - `Symlink(target, linkPath)` using `path_symlink`.
-- `Readlink(path, buffer)` using `path_readlink`; retry when the returned
-  required length exceeds the buffer, while preserving the Go API's return
-  count and error behavior.
+- `SymlinkWithType(target, linkPath, targetKind)` for an explicit target-kind
+  hint.
+- `Readlink(path, buffer)` using `path_readlink`; retry with the reported
+  required length, then copy the available prefix to the caller's buffer and
+  return the count expected by the syscall API.
 
 Path resolution must use existing Rusticated guest path rules. The symlink
 target must remain link data; do not resolve it relative to the guest working
@@ -168,11 +174,10 @@ directory before calling the ABI.
 
 ### 5.2 Rusticated Rust
 
-Declare the ABI imports and provide async filesystem wrappers for hard-link
-creation, symbolic-link creation, and reading a link target where those
-operations are part of the Rusticated filesystem API. They must use the
-overlapped runtime and return host errors; they must not introduce blocking
-filesystem calls on the WASM guest.
+Declare the ABI imports and constants. No higher-level Rust link API is
+currently exposed; any future wrapper must use the overlapped runtime and
+return host errors without introducing blocking filesystem calls on the WASM
+guest.
 
 ## 6. Host Implementations
 
@@ -182,6 +187,9 @@ filesystem calls on the WASM guest.
 - Use native filesystem operations for hard links and link-target reads.
 - Use native symbolic-link operations, including a platform-specific API where
   necessary to honor `target_kind`.
+- Windows target-kind inference is relative to the link's parent directory;
+  explicit directory hints can create dangling directory links when host
+  policy permits.
 - Perform potentially blocking filesystem calls outside the guest run loop and
   publish completion through the existing file-operation queue.
 - Preserve native errors, including unsupported behavior and cross-volume
@@ -221,8 +229,10 @@ level command behavior remains in `ln`:
 - GNU source-following options map to the hard-link source flag.
 - `-r` computes a relative target in the guest and passes that target string
   unchanged to `path_symlink`.
-- `-n` and destination-directory handling are command-layer path-selection
-  rules, not filesystem link types.
+- `-n` (also accepted as `-T`) and destination-directory handling are
+  command-layer path-selection rules, not filesystem link types.
+- `--target-kind=file|directory` supplies the target-kind hint for symbolic
+  links, including dangling directory targets.
 - `-f` replacement is not an ABI create flag. The command removes the
   destination according to its documented rules, then requests creation. The
   sequence may not be atomic on every backend and must report failure.
@@ -244,8 +254,8 @@ Tests must cover:
 - Existing destinations, missing sources, invalid flags/kinds, permissions,
   cross-filesystem hard links, and unsupported filesystems return errors and
   never success-shaped fallbacks.
-- Browser persistence and shared hard-link identity are tested if hard links
-  are implemented there; otherwise the backend returns `ENOTSUP`.
+- Browser symbolic-link persistence, traversal, and readlink behavior are
+  tested; hard-link creation returns `ENOTSUP` until shared identity exists.
 - Cancellation does not publish duplicate or stale completion. A cancelled
   creation may still have taken effect if the host completed it before
   cancellation.

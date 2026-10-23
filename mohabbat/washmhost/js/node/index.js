@@ -8,6 +8,7 @@ import { PassThrough } from 'node:stream';
 import crypto from 'node:crypto';
 import process from 'node:process';
 import os from 'node:os';
+import path from 'node:path';
 
 // Patched by buildNodeSlot:
 const VERBOSE = false; // {{VERBOSE}}
@@ -152,7 +153,7 @@ function mapErrno(e) {
 // ─────────────────────────────────────────────────────────────────────────────
 function translatePath(p) {
   if (typeof p !== 'string' || p.length === 0) return p;
-  const s = p.trim().replace(/\\/g, '/');
+  const s = p.replace(/\\/g, '/');
   if (/^\/[A-Za-z]:\//.test(s)) return s.slice(1);
   return s;
 }
@@ -796,6 +797,85 @@ export function makeBrainImports(hostState, argv) {
     });
   }
 
+  // ── path_link ────────────────────────────────────────────────────────────────
+  function path_link(ovPtr, sourcePtr, sourceLen, newPathPtr, newPathLen, flags) {
+    const sourcePath = translatePath(Buffer.from(hs.getGuestSlice(Number(sourcePtr), Number(sourceLen))).toString());
+    const newPath = translatePath(Buffer.from(hs.getGuestSlice(Number(newPathPtr), Number(newPathLen))).toString());
+    const flagBits = Number(flags);
+    const opId = hs.registerOp(ovPtr);
+    if ((flagBits & ~1) !== 0) {
+      hs.enqueue(() => hs.completeOp(ovPtr, opId, wasiEINVAL, 0, 0));
+      return;
+    }
+
+    let sourceOperation = Promise.resolve(sourcePath);
+    if ((flagBits & 1) !== 0) {
+      sourceOperation = fs.promises.realpath(sourcePath);
+    } else if (process.platform === 'win32') {
+      sourceOperation = fs.promises.lstat(sourcePath).then((st) => {
+        if (st.isSymbolicLink()) {
+          const err = new Error('hard links to symbolic links are unsupported on this host');
+          err.code = 'ENOTSUP';
+          throw err;
+        }
+        return sourcePath;
+      });
+    }
+    sourceOperation.then((resolvedSource) => fs.promises.link(resolvedSource, newPath)).then(() => {
+      hs.enqueue(() => hs.completeOp(ovPtr, opId, wasiSuccess, 0, 0));
+    }).catch((e) => {
+      hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(e), 0, 0));
+    });
+  }
+
+  // ── path_symlink ────────────────────────────────────────────────────────────
+  function path_symlink(ovPtr, targetPtr, targetLen, linkPathPtr, linkPathLen, targetKind) {
+    const target = Buffer.from(hs.getGuestSlice(Number(targetPtr), Number(targetLen))).toString();
+    const linkPath = translatePath(Buffer.from(hs.getGuestSlice(Number(linkPathPtr), Number(linkPathLen))).toString());
+    const kind = Number(targetKind);
+    const opId = hs.registerOp(ovPtr);
+    if (kind < 0 || kind > 2 || !Number.isInteger(kind)) {
+      hs.enqueue(() => hs.completeOp(ovPtr, opId, wasiEINVAL, 0, 0));
+      return;
+    }
+
+    let symlinkType = kind === 2 ? 'dir' : 'file';
+    let typeOperation = Promise.resolve(symlinkType);
+    if (process.platform === 'win32' && kind === 0) {
+      let statPath = target;
+      if (!path.isAbsolute(statPath)) statPath = path.resolve(path.dirname(linkPath), statPath);
+      typeOperation = fs.promises.stat(statPath).then((st) => st.isDirectory() ? 'dir' : 'file').catch((e) => {
+        if (e.code === 'ENOENT') return 'file';
+        throw e;
+      });
+    }
+    typeOperation.then((type) => fs.promises.symlink(target, linkPath, type)).then(() => {
+      hs.enqueue(() => hs.completeOp(ovPtr, opId, wasiSuccess, 0, 0));
+    }).catch((e) => {
+      hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(e), 0, 0));
+    });
+  }
+
+  // ── path_readlink ───────────────────────────────────────────────────────────
+  function path_readlink(ovPtr, pathPtr, pathLen, outPtr, outLen) {
+    const pathStr = translatePath(Buffer.from(hs.getGuestSlice(Number(pathPtr), Number(pathLen))).toString());
+    const output = hs.getGuestSlice(Number(outPtr), Number(outLen));
+    const opId = hs.registerOp(ovPtr);
+    fs.promises.readlink(pathStr, { encoding: 'buffer' }).then((target) => {
+      if (target.length > output.length) {
+        hs.enqueue(() => hs.completeOp(ovPtr, opId, wasiERANGE, 0, target.length));
+        return;
+      }
+      hs.enqueue(() => {
+        if (!hs.isOpActive(ovPtr, opId)) return;
+        output.set(target);
+        hs.completeOp(ovPtr, opId, wasiSuccess, 0, target.length);
+      });
+    }).catch((e) => {
+      hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(e), 0, 0));
+    });
+  }
+
   // ── path_chmod ───────────────────────────────────────────────────────────────
   // Signature: (ovPtr i32, pathPtr i32, pathLen i32, mode i32)
   // Go impl is synchronous for chmod; mirror that.
@@ -1359,6 +1439,9 @@ export function makeBrainImports(hostState, argv) {
     path_open,
     dir_read,
     path_stat,
+    path_link,
+    path_symlink,
+    path_readlink,
     path_chmod,
     path_set_times,
     path_remove,

@@ -5,6 +5,20 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+async function waitForHostResult(host, memory, ovPtr) {
+    for (let attempt = 0; attempt < 100 && host.completionQueue.length === 0; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 1));
+    }
+    host.drainQueue();
+    return new DataView(memory.buffer).getUint32(ovPtr + 4, true);
+}
+
+function writeString(memory, ptr, value) {
+    const bytes = new TextEncoder().encode(value);
+    new Uint8Array(memory.buffer, ptr, bytes.length).set(bytes);
+    return bytes.length;
+}
+
 test('marshalStat encodes the 112-byte Rusticated stat record', () => {
     const stat = marshalStat({
         mode: 0o100755n,
@@ -56,6 +70,70 @@ test('writeOverlapped sets FLAG_COMPLETED', () => {
     assert.equal(view.getUint32(0, true), 1); // FLAG_COMPLETED
     assert.equal(view.getUint32(4, true), 0); // error
     assert.equal(view.getBigUint64(16, true), 42n); // resultExt
+});
+
+test('path link ABI creates hard links and reports readlink buffer requirements', async (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'washmhost-links-'));
+    const source = path.join(dir, 'source');
+    const hardLink = path.join(dir, 'hard-link');
+    const target = 'relative target';
+    const symbolicLink = path.join(dir, 'symbolic-link');
+    fs.writeFileSync(source, 'shared data');
+
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const host = new HostState();
+    host.memory = memory;
+    const { env } = makeBrainImports(host, []);
+    try {
+        const sourceLen = writeString(memory, 128, source);
+        const hardLen = writeString(memory, 256, hardLink);
+        env.path_link(32, 128, sourceLen, 256, hardLen, 0);
+        assert.equal(await waitForHostResult(host, memory, 32), 0);
+        assert.equal(fs.statSync(source).ino, fs.statSync(hardLink).ino);
+        assert.equal(fs.readFileSync(hardLink, 'utf8'), 'shared data');
+
+        const sourceSymlink = path.join(dir, 'source-link');
+        const followedLink = path.join(dir, 'followed-link');
+        try {
+            fs.symlinkSync('source', sourceSymlink, 'file');
+        } catch (err) {
+            if (['EPERM', 'EACCES', 'ENOTSUP'].includes(err.code)) {
+                t.skip(`cannot create source symlink on this host: ${err.code}`);
+                return;
+            }
+            throw err;
+        }
+        const sourceLinkLen = writeString(memory, 1024, sourceSymlink);
+        const followedLen = writeString(memory, 1400, followedLink);
+        env.path_link(192, 1024, sourceLinkLen, 1400, followedLen, 1);
+        assert.equal(await waitForHostResult(host, memory, 192), 0);
+        assert.equal(fs.statSync(source).ino, fs.statSync(followedLink).ino);
+
+        const targetLen = writeString(memory, 384, target);
+        const symbolicLen = writeString(memory, 512, symbolicLink);
+        env.path_symlink(64, 384, targetLen, 512, symbolicLen, 0);
+        const symlinkResult = await waitForHostResult(host, memory, 64);
+        if ([2, 58, 63].includes(symlinkResult)) {
+            t.skip(`host filesystem or policy does not permit symbolic links (errno ${symlinkResult})`);
+            return;
+        }
+        assert.equal(symlinkResult, 0);
+
+        const linkLen = writeString(memory, 128, symbolicLink);
+        env.path_readlink(96, 128, linkLen, 640, 3);
+        assert.equal(await waitForHostResult(host, memory, 96), 68);
+        assert.equal(new DataView(memory.buffer).getBigUint64(112, true), BigInt(Buffer.byteLength(target)));
+
+        env.path_readlink(128, 128, linkLen, 640, 64);
+        assert.equal(await waitForHostResult(host, memory, 128), 0);
+        const readCount = Number(new DataView(memory.buffer).getBigUint64(144, true));
+        assert.equal(Buffer.from(memory.buffer, 640, readCount).toString(), target);
+
+        env.path_link(160, 128, linkLen, 256, hardLen, 2);
+        assert.equal(await waitForHostResult(host, memory, 160), 28);
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
 });
 
 test('allocHandle assigns incrementing descriptors', () => {
