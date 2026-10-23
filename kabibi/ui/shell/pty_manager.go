@@ -245,6 +245,25 @@ func (m *ManagedPTY) WriteKeys(keys string) error {
 	return err
 }
 
+// Resize updates the stored frame and the underlying PTY when the process is live.
+func (m *ManagedPTY) Resize(cols, rows int) error {
+	if cols < 1 || rows < 1 {
+		return fmt.Errorf("invalid PTY size %dx%d", cols, rows)
+	}
+	m.mu.Lock()
+	if m.exited {
+		m.mu.Unlock()
+		return nil
+	}
+	m.Cols, m.Rows = cols, rows
+	p := m.ptyHandle
+	m.mu.Unlock()
+	if p == nil {
+		return nil
+	}
+	return p.Resize(cols, rows)
+}
+
 // Kill terminates or interrupts the managed process.
 func (m *ManagedPTY) Kill(sigName string) error {
 	m.mu.Lock()

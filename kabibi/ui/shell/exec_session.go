@@ -124,6 +124,12 @@ type ExecutionSession struct {
 	activePTY pty.PTY
 	ptyCols   int
 	ptyRows   int
+	aiCols    int
+	aiRows    int
+
+	terminalMu       sync.Mutex
+	activeTerminal   *CommandTerminal
+	terminalAttached bool
 
 	bgMu       sync.Mutex
 	bgProcs    map[int]*ManagedPTY
@@ -145,13 +151,14 @@ func NewExecutionSession(dir string) (*ExecutionSession, error) {
 		return nil, err
 	}
 	_ = ttyPipeW.Close()
-
 	es := &ExecutionSession{
 		ttyIn:        ttyPipeR,
 		streamOut:    dw,
 		nextRecordID: 1,
 		ptyCols:      80,
-		ptyRows:      24,
+		ptyRows:      23,
+		aiCols:       78,
+		aiRows:       20,
 		bgProcs:      make(map[int]*ManagedPTY),
 		nextProcID:   1,
 	}
@@ -455,6 +462,27 @@ func (es *ExecutionSession) RunCommand(
 	}
 
 	runCtx := withExecSession(ctx, es, source)
+	var commandTerminal *CommandTerminal
+	if source == SourceUserShell {
+		es.terminalMu.Lock()
+		attached := es.terminalAttached
+		es.terminalMu.Unlock()
+		if attached {
+			cols, rows := es.PTYSize()
+			commandTerminal = newCommandTerminal(ctx, cols, rows)
+			es.terminalMu.Lock()
+			es.activeTerminal = commandTerminal
+			es.terminalMu.Unlock()
+			defer func() {
+				es.terminalMu.Lock()
+				if es.activeTerminal == commandTerminal {
+					es.activeTerminal = nil
+				}
+				es.terminalMu.Unlock()
+			}()
+			runCtx = withCommandTerminal(runCtx, es, source, commandTerminal)
+		}
+	}
 	if source == SourceUserShell {
 		if offset, ok := firstNonSpaceOffset(command); ok {
 			runCtx = withTopLevelStartOffset(runCtx, offset)
@@ -632,18 +660,28 @@ func (es *ExecutionSession) WriteActivePTY(data []byte) bool {
 }
 
 // ResizePTY updates the terminal dimensions for future and active PTY sessions.
-func (es *ExecutionSession) ResizePTY(cols, rows int) {
+func (es *ExecutionSession) ResizePTY(cols, rows int) error {
 	if cols <= 0 || rows <= 0 {
-		return
+		return fmt.Errorf("invalid PTY size %dx%d", cols, rows)
 	}
 	es.ptyMu.Lock()
 	es.ptyCols = cols
 	es.ptyRows = rows
 	p := es.activePTY
 	es.ptyMu.Unlock()
+	var resizeErr error
 	if p != nil {
-		_ = p.Resize(cols, rows)
+		if err := p.Resize(cols, rows); err != nil {
+			resizeErr = fmt.Errorf("resize foreground PTY to %dx%d: %w", cols, rows, err)
+		}
 	}
+	es.terminalMu.Lock()
+	term := es.activeTerminal
+	es.terminalMu.Unlock()
+	if term != nil {
+		term.Resize(cols, rows)
+	}
+	return resizeErr
 }
 
 // PTYSize returns the current PTY dimensions configured on the session.
@@ -654,9 +692,118 @@ func (es *ExecutionSession) PTYSize() (cols, rows int) {
 		es.ptyCols = 80
 	}
 	if es.ptyRows <= 0 {
-		es.ptyRows = 24
+		es.ptyRows = 23
 	}
 	return es.ptyCols, es.ptyRows
+}
+
+// AIExecPTYSize returns the compact terminal frame used by AI exec processes.
+func (es *ExecutionSession) AIExecPTYSize() (cols, rows int) {
+	es.ptyMu.Lock()
+	defer es.ptyMu.Unlock()
+	if es.aiCols <= 0 {
+		es.aiCols = 78
+	}
+	if es.aiRows <= 0 {
+		es.aiRows = 20
+	}
+	return es.aiCols, es.aiRows
+}
+
+// SetCommandTerminalAttached enables interactive command-terminal input when
+// this session is hosted by a Shell widget.
+func (es *ExecutionSession) SetCommandTerminalAttached(attached bool) {
+	if es == nil {
+		return
+	}
+	es.terminalMu.Lock()
+	es.terminalAttached = attached
+	if !attached {
+		es.activeTerminal = nil
+	}
+	es.terminalMu.Unlock()
+}
+
+// ActiveCommandTerminal returns the current foreground command terminal.
+func (es *ExecutionSession) ActiveCommandTerminal() *CommandTerminal {
+	if es == nil {
+		return nil
+	}
+	es.terminalMu.Lock()
+	defer es.terminalMu.Unlock()
+	return es.activeTerminal
+}
+
+// WriteCommandTerminalInput forwards user input to the active logical terminal.
+func (es *ExecutionSession) WriteCommandTerminalInput(data []byte) bool {
+	return es.WriteCommandTerminalInputError(data) == nil
+}
+
+// WriteCommandTerminalInputError forwards input and preserves the reason it
+// could not be queued for Shell-side diagnostics.
+func (es *ExecutionSession) WriteCommandTerminalInputError(data []byte) error {
+	term := es.ActiveCommandTerminal()
+	if term == nil {
+		return ErrNoActiveCommandTerminal
+	}
+	return term.WriteInput(data)
+}
+
+// SetViewportSize updates foreground and AI terminal frames from outer Shell dimensions.
+func (es *ExecutionSession) SetViewportSize(width, height int) error {
+	if es == nil {
+		return nil
+	}
+	cols, rows := childPTYFrameSize(width, height)
+	aiCols, aiRows := aiExecPTYFrameSize(width, height)
+
+	es.ptyMu.Lock()
+	foregroundChanged := es.ptyCols != cols || es.ptyRows != rows
+	aiChanged := es.aiCols != aiCols || es.aiRows != aiRows
+	es.aiCols, es.aiRows = aiCols, aiRows
+	es.ptyMu.Unlock()
+	var resizeErrors []error
+	if foregroundChanged {
+		if err := es.ResizePTY(cols, rows); err != nil {
+			resizeErrors = append(resizeErrors, err)
+		}
+	}
+	if !aiChanged {
+		return errors.Join(resizeErrors...)
+	}
+
+	es.bgMu.Lock()
+	procs := make([]*ManagedPTY, 0, len(es.bgProcs))
+	for _, proc := range es.bgProcs {
+		procs = append(procs, proc)
+	}
+	es.bgMu.Unlock()
+	for _, proc := range procs {
+		if err := proc.Resize(aiCols, aiRows); err != nil {
+			resizeErrors = append(resizeErrors, fmt.Errorf("resize managed PTY #%d to %dx%d: %w",
+				proc.ID, aiCols, aiRows, err))
+		}
+	}
+	return errors.Join(resizeErrors...)
+}
+
+type StreamTTYStatus struct {
+	Stdin  bool
+	Stdout bool
+	Stderr bool
+}
+
+// StreamTTY reports terminal status independently for each effective stream.
+func (es *ExecutionSession) StreamTTY(ctx context.Context, hc interp.HandlerContext) StreamTTYStatus {
+	term := commandTerminalFromContext(ctx)
+	if es == nil || term == nil {
+		return StreamTTYStatus{}
+	}
+	return StreamTTYStatus{
+		Stdin:  hc.Stdin == es.ttyIn,
+		Stdout: hc.Stdout == es.streamOut,
+		Stderr: hc.Stderr == es.streamOut,
+	}
 }
 
 // IsUnredirectedTTY reports whether the given mvdan handler context is attached
@@ -665,7 +812,8 @@ func (es *ExecutionSession) IsUnredirectedTTY(hc interp.HandlerContext) bool {
 	if es == nil {
 		return false
 	}
-	return hc.Stdin == es.ttyIn && hc.Stdout == es.streamOut && hc.Stderr == es.streamOut
+	return es.ActiveCommandTerminal() != nil &&
+		hc.Stdin == es.ttyIn && hc.Stdout == es.streamOut && hc.Stderr == es.streamOut
 }
 
 // RecordByID looks up a recorded block/command by its 1-based ID.
@@ -799,37 +947,27 @@ func (es *ExecutionSession) ExecuteAIToolCommand(
 		timeoutSec = 15
 	}
 	cwd := es.Dir()
-	termCols, termRows := es.PTYSize()
-	ptyCols := termCols - 2
-	if ptyCols < 20 {
-		ptyCols = 20
-	}
-	if termRows <= 0 {
-		termRows = 24
-	}
+	ptyCols, ptyRows := es.AIExecPTYSize()
 
 	es.bgMu.Lock()
 	sink := es.uiSink
 	es.bgMu.Unlock()
-
-	var uiOnChunk func([]byte)
-	var uiOnFinish func(int, time.Duration)
-	if sink != nil {
-		uiOnChunk, uiOnFinish = sink.OnAICommandStart(command, cwd)
-	}
 
 	startedAt := time.Now()
 	m := &ManagedPTY{
 		Command:   command,
 		Cwd:       cwd,
 		Cols:      ptyCols,
-		Rows:      termRows,
+		Rows:      ptyRows,
 		StartedAt: startedAt,
 		notifyCh:  make(chan struct{}),
 		doneCh:    make(chan struct{}),
-		onChunk:   uiOnChunk,
 	}
 	procID = es.RegisterManagedPTY(m)
+	var uiOnFinish func(int, time.Duration)
+	if sink != nil {
+		m.onChunk, uiOnFinish = sink.OnAICommandStart(command, cwd)
+	}
 
 	m.onFinish = func(code int, elapsed time.Duration) {
 		m.mu.Lock()
@@ -841,7 +979,7 @@ func (es *ExecutionSession) ExecuteAIToolCommand(
 		}
 	}
 
-	go es.runManagedExecution(m, command, cwd, ptyCols, termRows)
+	go es.runManagedExecution(m, command, cwd, ptyCols, ptyRows)
 
 	timeoutDur := time.Duration(timeoutSec) * time.Second
 	timer := time.NewTimer(timeoutDur)
@@ -888,13 +1026,10 @@ func (es *ExecutionSession) ExecuteAIToolCommand(
 
 func (es *ExecutionSession) runManagedExecution(m *ManagedPTY, command string, cwd string, ptyCols, ptyRows int) {
 	es.runMu.Lock()
-	prevCols, prevRows := es.PTYSize()
-	es.ResizePTY(ptyCols, ptyRows)
 
 	parser := syntax.NewParser()
 	parsed, parseErr := parser.Parse(strings.NewReader(command), "")
 	if parseErr != nil {
-		es.ResizePTY(prevCols, prevRows)
 		es.runMu.Unlock()
 		m.appendOutput([]byte(parseErr.Error() + "\n"))
 		m.markExited(2, parseErr)
@@ -902,13 +1037,11 @@ func (es *ExecutionSession) runManagedExecution(m *ManagedPTY, command string, c
 	}
 
 	if cmd, ok := es.tryBuildDirectPTYCommandLocked(parsed, cwd); ok {
-		es.ResizePTY(prevCols, prevRows)
 		es.runMu.Unlock()
 		if es.runDirectCommandInPTY(m, cmd, ptyCols, ptyRows) {
 			return
 		}
 		es.runMu.Lock()
-		es.ResizePTY(ptyCols, ptyRows)
 	}
 
 	runCtx := withExecSession(context.Background(), es, SourceAITool)
@@ -918,7 +1051,6 @@ func (es *ExecutionSession) runManagedExecution(m *ManagedPTY, command string, c
 
 	runErr := es.runner.Run(runCtx, parsed)
 	es.streamOut.setTarget(nil)
-	es.ResizePTY(prevCols, prevRows)
 	es.runMu.Unlock()
 
 	code := 0
@@ -1009,7 +1141,11 @@ func (es *ExecutionSession) runDirectCommandInPTY(m *ManagedPTY, cmd *exec.Cmd, 
 	m.mu.Lock()
 	m.ptyHandle = p
 	m.cmd = cmd
+	resizeCols, resizeRows := m.Cols, m.Rows
 	m.mu.Unlock()
+	if resizeCols > 0 && resizeRows > 0 && (resizeCols != cols || resizeRows != rows) {
+		_ = p.Resize(resizeCols, resizeRows)
+	}
 
 	readDone := make(chan struct{})
 	go func() {

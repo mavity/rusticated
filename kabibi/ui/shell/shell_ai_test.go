@@ -172,6 +172,74 @@ func TestShell_AIToolOutputStaysAboveThinkingIndicator(t *testing.T) {
 	}
 }
 
+func TestShell_LiveTerminalCursorTracksVTPosition(t *testing.T) {
+	block := CommandBlock{
+		Kind:   BlockCommand,
+		Source: SourceUserShell,
+		Prompt: "$ ",
+		Input:  "run",
+		Status: StatusActive,
+	}
+	block.liveOutput = newLiveOutputState(10, 3)
+	block.liveOutput.enqueue([]byte("abc\x1b[2;4H"))
+	s := &Shell{
+		mode:        ModeStack,
+		running:     true,
+		activeBlock: 0,
+		blocks:      []CommandBlock{block},
+	}
+
+	_, cursor := s.Render(ui.Rect{W: 10, H: 8}, ui.RenderContext{})
+	if !cursor.Visible || cursor.X != 3 || cursor.Y != 2 {
+		t.Fatalf("live cursor = %+v, want visible at (3,2)", cursor)
+	}
+}
+
+func TestShell_AlternateScreenOutputIsNotEjectedToPlume(t *testing.T) {
+	var scrollback strings.Builder
+	block := CommandBlock{
+		Kind:   BlockCommand,
+		Source: SourceUserShell,
+		Prompt: "$ ",
+		Input:  "run",
+		Status: StatusActive,
+	}
+	block.liveOutput = newLiveOutputState(24, 3)
+	block.liveOutput.enqueue([]byte("main-1\r\nmain-2\r\nmain-3\r\nmain-4"))
+	s := &Shell{
+		mode:        ModeStack,
+		running:     true,
+		activeBlock: 0,
+		blocks:      []CommandBlock{block},
+		opts: ShellOptions{
+			WriteToScrollback: func(text string) {
+				scrollback.WriteString(text)
+			},
+		},
+	}
+
+	blockState := s.blocks[0].liveOutput
+	blockState.enqueue([]byte("\x1b[?1049halt-alternate-screen"))
+	s.Render(ui.Rect{W: 24, H: 4}, ui.RenderContext{})
+	if scrollback.Len() != 0 {
+		t.Fatalf("alternate-screen redraw was ejected to plume: %q", scrollback.String())
+	}
+
+	blockState.enqueue([]byte("\x1b[?1049l"))
+	s.Render(ui.Rect{W: 24, H: 4}, ui.RenderContext{})
+	if strings.Contains(scrollback.String(), "alternate-screen") {
+		t.Fatalf("alternate-screen content reached plume after returning to main screen: %q", scrollback.String())
+	}
+	if !strings.Contains(scrollback.String(), "main-1") {
+		t.Fatalf("main-screen scrollback was not restored to plume: %q", scrollback.String())
+	}
+	ejected := scrollback.String()
+	s.Render(ui.Rect{W: 24, H: 4}, ui.RenderContext{})
+	if scrollback.String() != ejected {
+		t.Fatalf("re-render duplicated plume rows: before=%q after=%q", ejected, scrollback.String())
+	}
+}
+
 func TestAIToolBlockTrimsOnlyTrailingWhitespaceRows(t *testing.T) {
 	block := CommandBlock{
 		Kind:   BlockCommand,

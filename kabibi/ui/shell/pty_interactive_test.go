@@ -13,82 +13,63 @@ import (
 	"github.com/mavity/rusticated/kabibi/ui/shell"
 )
 
-func TestExecutionSession_InteractivePTY(t *testing.T) {
+type processRegistrationSink struct {
+	session    *shell.ExecutionSession
+	registered chan bool
+}
+
+func (sink *processRegistrationSink) OnAICommandStart(string, string) (func([]byte), func(int, time.Duration)) {
+	_, registered := sink.session.LookupManagedPTY(1)
+	sink.registered <- registered
+	return nil, nil
+}
+
+func TestExecutionSession_WithoutAttachedShell_IsNonInteractive(t *testing.T) {
 	es, err := shell.NewExecutionSession(t.TempDir())
 	if err != nil {
 		t.Fatalf("NewExecutionSession failed: %v", err)
 	}
 
-	var cmdStr string
-	var inputCmd string
-	var expectedMarker string
-
-	if runtime.GOOS == "windows" {
-		cmdStr = "cmd.exe"
-		inputCmd = "echo PTY_TEST_456\r\nexit\r\n"
-		expectedMarker = "PTY_TEST_456"
-	} else {
-		path, err := exec.LookPath("sh")
-		if err != nil {
-			t.Skipf("sh not found in PATH: %v", err)
-		}
-		cmdStr = path
-		inputCmd = "echo PTY_TEST_456\nexit\n"
-		expectedMarker = "PTY_TEST_456"
-	}
-
 	var outputChunks []string
-	chunkChan := make(chan string, 100)
-
-	done := make(chan error, 1)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		_, rerr := es.RunCommand(ctx, cmdStr, nil, shell.SourceUserShell, func(chunk []byte) {
-			chunkChan <- string(chunk)
-		})
-		done <- rerr
-	}()
-
-	// Wait for the child process to start and attach to PTY
-	deadline := time.Now().Add(3 * time.Second)
-	for !es.HasActivePTY() && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	record, err := es.RunCommand(ctx, "echo PTY_TEST_456", nil, shell.SourceUserShell, func(chunk []byte) {
+		outputChunks = append(outputChunks, string(chunk))
+	})
+	if err != nil {
+		t.Fatalf("RunCommand returned error: %v", err)
 	}
-
-	if !es.HasActivePTY() {
-		t.Fatal("expected es.HasActivePTY() to be true while interactive child process is running")
-	}
-
-	// Forward input into the active child PTY
-	time.Sleep(100 * time.Millisecond)
-	if ok := es.WriteActivePTY([]byte(inputCmd)); !ok {
-		t.Fatal("WriteActivePTY returned false")
-	}
-
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("RunCommand returned error: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for interactive command to finish after exit")
-	}
-
-	// Drain chunks
-	close(chunkChan)
-	for ch := range chunkChan {
-		outputChunks = append(outputChunks, ch)
+	if record.ExitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", record.ExitCode)
 	}
 	combined := strings.Join(outputChunks, "")
 
-	if !strings.Contains(combined, expectedMarker) {
-		t.Fatalf("expected PTY output to contain %q, got: %q", expectedMarker, combined)
+	if !strings.Contains(combined, "PTY_TEST_456") {
+		t.Fatalf("expected output to contain %q, got: %q", "PTY_TEST_456", combined)
 	}
 
 	if es.HasActivePTY() {
-		t.Fatal("expected es.HasActivePTY() to be false after child process exited")
+		t.Fatal("expected standalone execution session to remain non-interactive")
+	}
+}
+
+func TestExecuteAIToolCommand_RegistersBeforeCreatingView(t *testing.T) {
+	es, err := shell.NewExecutionSession(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewExecutionSession failed: %v", err)
+	}
+	sink := &processRegistrationSink{
+		session:    es,
+		registered: make(chan bool, 1),
+	}
+	es.SetAICommandUISink(sink)
+
+	_, _, _, _, err = es.ExecuteAIToolCommand(context.Background(), "echo registration-order", 5, false)
+	if err != nil {
+		t.Fatalf("ExecuteAIToolCommand returned error: %v", err)
+	}
+	if !<-sink.registered {
+		t.Fatal("managed process was not registered before its UI view was created")
 	}
 }
 

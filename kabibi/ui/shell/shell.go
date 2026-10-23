@@ -35,8 +35,9 @@ type topLevelStartInfo struct {
 type execSessionCtxKey struct{}
 
 type execSessionCtxInfo struct {
-	session *ExecutionSession
-	source  CommandSource
+	session  *ExecutionSession
+	source   CommandSource
+	terminal *CommandTerminal
 }
 
 func withExecSession(ctx context.Context, es *ExecutionSession, source CommandSource) context.Context {
@@ -46,12 +47,28 @@ func withExecSession(ctx context.Context, es *ExecutionSession, source CommandSo
 	})
 }
 
+func withCommandTerminal(ctx context.Context, es *ExecutionSession, source CommandSource, term *CommandTerminal) context.Context {
+	return context.WithValue(ctx, execSessionCtxKey{}, &execSessionCtxInfo{
+		session:  es,
+		source:   source,
+		terminal: term,
+	})
+}
+
 func execSessionFromContext(ctx context.Context) (*ExecutionSession, CommandSource) {
 	info, ok := ctx.Value(execSessionCtxKey{}).(*execSessionCtxInfo)
 	if !ok || info == nil {
 		return nil, ""
 	}
 	return info.session, info.source
+}
+
+func commandTerminalFromContext(ctx context.Context) *CommandTerminal {
+	info, ok := ctx.Value(execSessionCtxKey{}).(*execSessionCtxInfo)
+	if !ok || info == nil {
+		return nil
+	}
+	return info.terminal
 }
 
 func withTopLevelStartOffset(ctx context.Context, offset uint) context.Context {
@@ -114,12 +131,16 @@ type CommandBlock struct {
 	FirstOutputAt time.Time          // Timestamp when first output character arrived
 	CompletedAt   time.Time          // Timestamp when block completed / last output character arrived
 	Duration      time.Duration      // Execution duration
+	liveOutput    *liveOutputState
+	renderError   string
 
 	// Cached visual rendering to avoid re-running FromANSI for unchanged blocks
 	cachedWidth    int
+	cachedHeight   int
 	cachedPrompt   string
 	cachedInput    string
 	cachedOutLen   int
+	cachedLiveGen  uint64
 	cachedAnim     string
 	cachedKind     BlockKind
 	cachedSource   CommandSource
@@ -370,8 +391,13 @@ func runResolvedCommand(ctx context.Context, hc interp.HandlerContext, program s
 	}
 
 	es, source := execSessionFromContext(ctx)
-	if es != nil && source == SourceUserShell && es.IsUnredirectedTTY(hc) {
-		cols, rows := es.PTYSize()
+	tty := StreamTTYStatus{}
+	if es != nil && source == SourceUserShell {
+		tty = es.StreamTTY(ctx, hc)
+	}
+	if es != nil && source == SourceUserShell &&
+		tty.Stdin && tty.Stdout && tty.Stderr && commandTerminalFromContext(ctx) != nil {
+		cols, rows := commandTerminalFromContext(ctx).Size()
 		p, err := pty.Start(cmd, pty.Options{
 			Cols: cols,
 			Rows: rows,
@@ -429,11 +455,7 @@ func runResolvedCommand(ctx context.Context, hc interp.HandlerContext, program s
 		}
 	}
 
-	if es != nil && hc.Stdin == es.ttyIn {
-		cmd.Stdin = strings.NewReader("")
-	} else {
-		cmd.Stdin = hc.Stdin
-	}
+	cmd.Stdin = hc.Stdin
 	cmd.Stdout = hc.Stdout
 	cmd.Stderr = hc.Stderr
 	return cmd.Run()
