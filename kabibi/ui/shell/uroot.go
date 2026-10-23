@@ -107,7 +107,7 @@ var urootRegistry = map[string]commandRunner{
 	"comm":    comm.Main,
 	"head":    head.Main,
 	"hexdump": hexdump.Main,
-	"more":    more.Main,
+	"more":    runMore,
 	"seq":     seq.Main,
 	"sort":    sort.Main,
 	"strings": stringscmd.Main,
@@ -193,6 +193,22 @@ var urootRegistry = map[string]commandRunner{
 	"tty":       tty.Main,
 	"uname":     uname.Main,
 	"uptime":    uptimecmd.Main,
+}
+
+func runMore(ctx context.Context, ioEnv core.IO, args ...string) int {
+	if len(args) > 0 {
+		return more.Main(ctx, ioEnv, args...)
+	}
+	session, source := execSessionFromContext(ctx)
+	term := commandTerminalFromContext(ctx)
+	if session == nil || source != SourceUserShell || term == nil || !ioEnv.StdoutIsTerminal {
+		return more.Main(ctx, ioEnv, args...)
+	}
+	if err := runPager(ctx, term, ioEnv.Stdin, ioEnv.Stdout); err != nil {
+		fmt.Fprintf(ioEnv.Stderr, "more: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 // LookupURootCommand looks up a u-root commandRunner by command name.
