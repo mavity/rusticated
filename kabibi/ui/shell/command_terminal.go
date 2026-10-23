@@ -17,12 +17,13 @@ var (
 type CommandTerminal struct {
 	ctx context.Context
 
-	mu      sync.RWMutex
-	cols    int
-	rows    int
-	stdin   chan []byte
-	keys    chan []byte
-	writeMu sync.Mutex
+	mu             sync.RWMutex
+	cols           int
+	rows           int
+	stdin          chan []byte
+	keys           chan []byte
+	writeMu        sync.Mutex
+	controlReaders int
 
 	stdinMu  sync.Mutex
 	stdinBuf []byte
@@ -72,8 +73,8 @@ func (t *CommandTerminal) Resize(cols, rows int) {
 	t.mu.Unlock()
 }
 
-// WriteInput supplies user input to a command reading terminal stdin and to
-// consumers that read controlling-terminal keys separately from stdin.
+// WriteInput routes user input to the active controlling-terminal consumer, or
+// to command stdin when no such consumer is registered.
 func (t *CommandTerminal) WriteInput(p []byte) error {
 	if t == nil || len(p) == 0 {
 		return nil
@@ -86,12 +87,50 @@ func (t *CommandTerminal) WriteInput(p []byte) error {
 		return t.ctx.Err()
 	default:
 	}
-	if len(t.stdin) == cap(t.stdin) || len(t.keys) == cap(t.keys) {
+	if t.controlReaders > 0 {
+		if len(t.keys) == cap(t.keys) {
+			return ErrTerminalInputQueueFull
+		}
+		t.keys <- chunk
+		return nil
+	}
+	if len(t.stdin) == cap(t.stdin) {
 		return ErrTerminalInputQueueFull
 	}
 	t.stdin <- chunk
-	t.keys <- chunk
 	return nil
+}
+
+// SubscribeControlInput routes subsequent user input to ReadControlInput until
+// the returned release function is called.
+func (t *CommandTerminal) SubscribeControlInput() func() {
+	if t == nil {
+		return func() {}
+	}
+	t.writeMu.Lock()
+	t.controlReaders++
+	t.writeMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			t.writeMu.Lock()
+			t.controlReaders--
+			if t.controlReaders == 0 {
+				t.keysMu.Lock()
+				t.keysBuf = nil
+				for {
+					select {
+					case <-t.keys:
+					default:
+						t.keysMu.Unlock()
+						t.writeMu.Unlock()
+						return
+					}
+				}
+			}
+			t.writeMu.Unlock()
+		})
+	}
 }
 
 // ReadInput reads bytes supplied as command stdin.
@@ -99,7 +138,7 @@ func (t *CommandTerminal) ReadInput(p []byte) (int, error) {
 	if t == nil {
 		return 0, io.EOF
 	}
-	return readTerminalInput(t.ctx, t.stdin, &t.stdinMu, &t.stdinBuf, p)
+	return readTerminalInput(t.ctx, t.ctx, t.stdin, &t.stdinMu, &t.stdinBuf, p)
 }
 
 // Read implements io.Reader using the command's terminal stdin endpoint.
@@ -112,10 +151,19 @@ func (t *CommandTerminal) ReadControlInput(p []byte) (int, error) {
 	if t == nil {
 		return 0, io.EOF
 	}
-	return readTerminalInput(t.ctx, t.keys, &t.keysMu, &t.keysBuf, p)
+	return readTerminalInput(t.ctx, t.ctx, t.keys, &t.keysMu, &t.keysBuf, p)
 }
 
-func readTerminalInput(ctx context.Context, input <-chan []byte, mu *sync.Mutex, pending *[]byte, p []byte) (int, error) {
+// ReadControlInputContext reads controlling-terminal keys and also stops when
+// the caller's context is canceled.
+func (t *CommandTerminal) ReadControlInputContext(ctx context.Context, p []byte) (int, error) {
+	if t == nil {
+		return 0, io.EOF
+	}
+	return readTerminalInput(ctx, t.ctx, t.keys, &t.keysMu, &t.keysBuf, p)
+}
+
+func readTerminalInput(ctx, terminalCtx context.Context, input <-chan []byte, mu *sync.Mutex, pending *[]byte, p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
@@ -125,6 +173,8 @@ func readTerminalInput(ctx context.Context, input <-chan []byte, mu *sync.Mutex,
 		select {
 		case <-ctx.Done():
 			return 0, ctx.Err()
+		case <-terminalCtx.Done():
+			return 0, terminalCtx.Err()
 		case chunk := <-input:
 			*pending = chunk
 		}

@@ -22,6 +22,7 @@ type gitInvocation struct {
 	config       []string
 	gitDir       string
 	workTree     string
+	noPager      bool
 }
 
 func gitBuiltinMiddleware(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
@@ -45,6 +46,12 @@ func runGitBuiltin(ctx context.Context, args []string) error {
 		return nil
 	}
 	if handled, err := runSSHRemoteBuiltin(ctx, hc, invocation); handled {
+		return err
+	}
+	if handled, err := runStreamedGitLog(ctx, hc, invocation); handled {
+		return err
+	}
+	if handled, err := runBufferedGitLogWithPager(ctx, hc, invocation); handled {
 		return err
 	}
 
@@ -126,7 +133,10 @@ func parseGitInvocation(cwd string, args []string) (gitInvocation, error) {
 			invocation.workTree = resolveShellPath(invocation.effectiveDir, args[i])
 		case strings.HasPrefix(arg, "--work-tree="):
 			invocation.workTree = resolveShellPath(invocation.effectiveDir, strings.TrimPrefix(arg, "--work-tree="))
-		case arg == "--no-pager" || arg == "-P" || arg == "--no-replace-objects" || arg == "--bare":
+		case arg == "--no-pager" || arg == "-P":
+			invocation.noPager = true
+			invocation.args = append(invocation.args, arg)
+		case arg == "--no-replace-objects" || arg == "--bare":
 			invocation.args = append(invocation.args, arg)
 		default:
 			invocation.args = append(invocation.args, args[i:]...)

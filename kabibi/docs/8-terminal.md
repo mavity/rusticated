@@ -293,6 +293,8 @@ Implementation proceeds in dependency order. Each step has a gate that must pass
 
 **Gate:** interactive logs pause at a page boundary and respond to keys; short logs finish without pausing; `q` stops traversal where streaming permits; non-TTY output completes without waiting; supported output matches the existing implementation.
 
+**Implementation note:** the in-process pager is wired to interactive `more` (stdin may be a pipeline) and `git log`. It supports page/line advance, backward movement over buffered pages, quit, and cancellation. The current streamed log subset is default medium output, `--oneline`, positive count limits, one non-range revision, and one literal file/directory path. Ranges, other formats, pathspec magic/globs, and order/filter modes fall back to the existing Git engine; those modes are still paged interactively, but first-page output waits for the existing engine to finish. Paging is disabled for non-TTY/redirected output, `--no-pager`/`-P`, pass-through pager commands, and `pager.log=false`.
+
 ### Step 8: Final validation
 
 - Run `gofmt` on changed Go files and `go test ./ui/terminal ./ui/shell`.

@@ -9,12 +9,14 @@ import (
 	"mvdan.cc/sh/v3/interp"
 )
 
-func TestCommandTerminalInputRoutesAndRejectsAtomically(t *testing.T) {
+func TestCommandTerminalInputRoutesToControlConsumer(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	term := newCommandTerminal(ctx, 80, 23)
+	release := term.SubscribeControlInput()
+	defer release()
 
-	for i := 0; i < cap(term.stdin); i++ {
+	for i := 0; i < cap(term.keys); i++ {
 		if err := term.WriteInput([]byte{byte(i)}); err != nil {
 			t.Fatalf("WriteInput(%d) failed: %v", i, err)
 		}
@@ -22,17 +24,29 @@ func TestCommandTerminalInputRoutesAndRejectsAtomically(t *testing.T) {
 	if err := term.WriteInput([]byte("overflow")); !errors.Is(err, ErrTerminalInputQueueFull) {
 		t.Fatalf("overflow WriteInput error = %v, want %v", err, ErrTerminalInputQueueFull)
 	}
-	if got, want := len(term.stdin), len(term.keys); got != want {
-		t.Fatalf("input queue lengths = %d/%d, want equal", got, want)
+	if len(term.stdin) != 0 {
+		t.Fatalf("command stdin received %d control key chunks, want none", len(term.stdin))
 	}
 
-	stdin := make([]byte, 1)
-	if n, err := term.ReadInput(stdin); err != nil || n != 1 || stdin[0] != 0 {
-		t.Fatalf("ReadInput() = %d, %v, %q; want first byte 0", n, err, stdin)
-	}
 	keys := make([]byte, 1)
 	if n, err := term.ReadControlInput(keys); err != nil || n != 1 || keys[0] != 0 {
 		t.Fatalf("ReadControlInput() = %d, %v, %q; want first byte 0", n, err, keys)
+	}
+}
+
+func TestCommandTerminalInputDefaultsToStdin(t *testing.T) {
+	term := newCommandTerminal(context.Background(), 80, 23)
+	for i := 0; i < cap(term.stdin)+1; i++ {
+		err := term.WriteInput([]byte("x"))
+		if i < cap(term.stdin) && err != nil {
+			t.Fatalf("WriteInput(%d) failed: %v", i, err)
+		}
+		if i == cap(term.stdin) && !errors.Is(err, ErrTerminalInputQueueFull) {
+			t.Fatalf("overflow WriteInput error = %v, want %v", err, ErrTerminalInputQueueFull)
+		}
+	}
+	if len(term.keys) != 0 {
+		t.Fatalf("control-input queue has %d chunks without a subscriber", len(term.keys))
 	}
 }
 

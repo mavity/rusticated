@@ -38,10 +38,14 @@ type StatusEntry struct {
 }
 
 type CommitSummary struct {
-	Hash    string
-	Author  string
-	Date    time.Time
-	Message string
+	Hash        string
+	Author      string
+	AuthorName  string
+	AuthorEmail string
+	Date        time.Time
+	Message     string
+	FullMessage string
+	Parents     []string
 }
 
 type BranchSummary struct {
@@ -132,6 +136,20 @@ func (r *Repository) Root() string {
 
 func (r *Repository) IsBare() bool {
 	return r != nil && r.worktree == nil
+}
+
+// ConfigValue returns a value from this repository's resolved Git config.
+func (r *Repository) ConfigValue(section, option string) (string, bool, error) {
+	if r == nil || r.repo == nil {
+		return "", false, errors.New("git repository is nil")
+	}
+	cfg, err := r.repo.ConfigScoped(config.SystemScope)
+	if err != nil {
+		return "", false, fmt.Errorf("read git configuration: %w", err)
+	}
+	options := cfg.Raw.Section(section).Options
+	value, ok := options.Get(option), options.Has(option)
+	return value, ok, nil
 }
 
 func (r *Repository) CurrentBranch() (string, error) {
@@ -235,14 +253,203 @@ func (r *Repository) LogRevision(limit int, filePath, revision string) ([]Commit
 		if excluded[commit.Hash] {
 			continue
 		}
-		commits = append(commits, CommitSummary{
-			Hash:    commit.Hash.String(),
-			Author:  commit.Author.String(),
-			Date:    commit.Author.When,
-			Message: strings.TrimSpace(strings.SplitN(commit.Message, "\n", 2)[0]),
-		})
+		commits = append(commits, summarizeCommit(commit))
 	}
 	return commits, nil
+}
+
+// WalkLog visits commits in committer-time order without collecting the ordered
+// log first. Range revisions may require an ancestry set before output begins.
+// A non-positive limit means unlimited; returning an error from visit stops the
+// walk and is propagated to the caller.
+func (r *Repository) WalkLog(filePath, revision string, visit func(CommitSummary) error, limit int) error {
+	if r == nil || r.repo == nil {
+		return errors.New("git repository is nil")
+	}
+	if visit == nil {
+		return errors.New("git log visitor is nil")
+	}
+	var excluded map[plumbing.Hash]bool
+	if filePath != "" {
+		filePath = filepath.ToSlash(filePath)
+	}
+	include := make([]plumbing.Hash, 0, 1)
+	if revision != "" {
+		if from, to, ranged := strings.Cut(revision, ".."); ranged {
+			if from == "" {
+				from = "HEAD"
+			}
+			if to == "" {
+				to = "HEAD"
+			}
+			hash, err := r.resolveCommitHash(to)
+			if err != nil {
+				return err
+			}
+			include = append(include, hash)
+			fromHash, err := r.resolveCommitHash(from)
+			if err != nil {
+				return err
+			}
+			excluded, err = r.commitAncestorSet(fromHash)
+			if err != nil {
+				return err
+			}
+		} else {
+			hash, err := r.resolveCommitHash(revision)
+			if err != nil {
+				return err
+			}
+			include = append(include, hash)
+		}
+	} else {
+		hash, err := r.resolveCommitHash("HEAD")
+		if err != nil {
+			return err
+		}
+		include = append(include, hash)
+	}
+
+	type queueItem struct {
+		commit *object.Commit
+		order  int
+	}
+	queue := make([]queueItem, 0, len(include))
+	added := make(map[plumbing.Hash]bool)
+	order := 0
+	push := func(hash plumbing.Hash) error {
+		if added[hash] {
+			return nil
+		}
+		added[hash] = true
+		commit, err := r.repo.CommitObject(hash)
+		if err != nil {
+			return fmt.Errorf("read Git log commit %s: %w", hash, err)
+		}
+		queue = append(queue, queueItem{commit: commit, order: order})
+		order++
+		return nil
+	}
+	for _, hash := range include {
+		if err := push(hash); err != nil {
+			return err
+		}
+	}
+	count := 0
+	for len(queue) > 0 && (limit <= 0 || count < limit) {
+		best := 0
+		for i := 1; i < len(queue); i++ {
+			candidate, current := queue[i], queue[best]
+			if candidate.commit.Committer.When.After(current.commit.Committer.When) ||
+				(candidate.commit.Committer.When.Equal(current.commit.Committer.When) && candidate.order < current.order) {
+				best = i
+			}
+		}
+		commit := queue[best].commit
+		queue = append(queue[:best], queue[best+1:]...)
+		if excluded[commit.Hash] {
+			continue
+		}
+		for _, parent := range commit.ParentHashes {
+			if err := push(parent); err != nil {
+				return err
+			}
+		}
+		if filePath != "" {
+			changed, err := r.commitChangesPath(commit, filePath)
+			if err != nil {
+				return err
+			}
+			if !changed {
+				continue
+			}
+		}
+		if err := visit(summarizeCommit(commit)); err != nil {
+			return err
+		}
+		count++
+	}
+	return nil
+}
+
+func summarizeCommit(commit *object.Commit) CommitSummary {
+	summary := CommitSummary{
+		Hash:        commit.Hash.String(),
+		Author:      commit.Author.String(),
+		AuthorName:  commit.Author.Name,
+		AuthorEmail: commit.Author.Email,
+		Date:        commit.Author.When,
+		Message:     strings.TrimSpace(strings.SplitN(commit.Message, "\n", 2)[0]),
+		FullMessage: commit.Message,
+		Parents:     make([]string, len(commit.ParentHashes)),
+	}
+	for i, parent := range commit.ParentHashes {
+		summary.Parents[i] = parent.String()
+	}
+	return summary
+}
+
+func (r *Repository) commitChangesPath(commit *object.Commit, filePath string) (bool, error) {
+	currentTree, err := commit.Tree()
+	if err != nil {
+		return false, fmt.Errorf("read tree for Git log commit %s: %w", commit.Hash, err)
+	}
+	currentHash, currentExists, err := treePathHash(currentTree, filePath)
+	if err != nil {
+		return false, fmt.Errorf("read path %q from Git log commit %s: %w", filePath, commit.Hash, err)
+	}
+	var parentHash plumbing.Hash
+	parentExists := false
+	if len(commit.ParentHashes) > 0 {
+		parent, err := r.repo.CommitObject(commit.ParentHashes[0])
+		if err != nil {
+			return false, fmt.Errorf("read parent of Git log commit %s: %w", commit.Hash, err)
+		}
+		parentTree, err := parent.Tree()
+		if err != nil {
+			return false, fmt.Errorf("read parent tree of Git log commit %s: %w", commit.Hash, err)
+		}
+		parentHash, parentExists, err = treePathHash(parentTree, filePath)
+		if err != nil {
+			return false, fmt.Errorf("read path %q from parent of Git log commit %s: %w", filePath, commit.Hash, err)
+		}
+	}
+	return currentExists != parentExists || currentHash != parentHash, nil
+}
+
+func treePathHash(tree *object.Tree, filePath string) (plumbing.Hash, bool, error) {
+	if file, err := tree.File(filePath); err == nil {
+		return file.Hash, true, nil
+	} else if !errors.Is(err, object.ErrFileNotFound) {
+		return plumbing.ZeroHash, false, err
+	}
+	subtree, err := tree.Tree(strings.TrimSuffix(filePath, "/"))
+	if errors.Is(err, object.ErrFileNotFound) {
+		return plumbing.ZeroHash, false, nil
+	}
+	if err != nil {
+		return plumbing.ZeroHash, false, err
+	}
+	return subtree.Hash, true, nil
+}
+
+func (r *Repository) commitAncestorSet(start plumbing.Hash) (map[plumbing.Hash]bool, error) {
+	seen := make(map[plumbing.Hash]bool)
+	pending := []plumbing.Hash{start}
+	for len(pending) > 0 {
+		hash := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if seen[hash] {
+			continue
+		}
+		seen[hash] = true
+		commit, err := r.repo.CommitObject(hash)
+		if err != nil {
+			return nil, fmt.Errorf("read commit %s while walking Git log range: %w", hash, err)
+		}
+		pending = append(pending, commit.ParentHashes...)
+	}
+	return seen, nil
 }
 
 func (r *Repository) commitAncestors(start plumbing.Hash) map[plumbing.Hash]bool {
