@@ -118,6 +118,15 @@ If no exclusion triggered, `CharSoftWrap` is set to `true` if any rule matches:
 * **Rule P2b**: $E_0 \in \mathcal{C}_{text} \land S_0 \in \mathcal{S}_{inline} \land S_1 \in \mathcal{C}_{text}$.
 
 
+### 2.5 Stateful `Terminal` API
+
+`Terminal` owns one `vt.Emulator` for incremental output. It is single-owner and is not safe for concurrent access. `NewTerminal(width, height)` clamps each dimension to at least one cell, enables Unicode-core mode and initializes LNM. `Write` and `WriteString` pass bytes through unchanged, so parser state and in-band mode changes persist across calls.
+
+`Resize` changes the active emulator dimensions without replaying the transcript. `Snapshot` returns the retained scrollback followed by the active screen, with the cursor position and visibility reported by the emulator. `IsAltScreen` reports the current alternate-screen state, allowing the Shell to keep transient alternate-screen redraws out of plume history.
+
+The existing one-shot helpers remain compatibility entry points: `FromANSIStringWithCursor` creates a 24-row `Terminal`, writes the raw stream, and snapshots it; `FromANSIString` returns that snapshot's cells. `FromANSI([]string, width)` uses the same backend and inserts CRLF between input lines. `ToANSI` remains an independent `CellBuf` serializer and is not modified by the stateful ingestion API.
+
+
 
 ---
 

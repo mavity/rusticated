@@ -30,6 +30,42 @@ const (
 
 const reservedFooterRows = 1
 
+func childPTYFrameSize(width, height int) (cols, rows int) {
+	if width <= 0 {
+		width = 80
+	}
+	if height <= 0 {
+		height = 24
+	}
+	cols = width
+	rows = height - reservedFooterRows
+	if rows < 1 {
+		rows = 1
+	}
+	return cols, rows
+}
+
+func aiExecPTYFrameSize(width, height int) (cols, rows int) {
+	if width <= 0 {
+		width = 80
+	}
+	if height <= 0 {
+		height = 24
+	}
+	cols = width - 2
+	if cols < 1 {
+		cols = 1
+	}
+	rows = height - reservedFooterRows
+	if rows < 1 {
+		rows = 1
+	}
+	if rows > 20 {
+		rows = 20
+	}
+	return cols, rows
+}
+
 var stackSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 // formatStartupBanner constructs the pompous retro diagnostic startup banner block.
@@ -84,12 +120,13 @@ type Shell struct {
 	peakOccupiedHeight int
 
 	// Transient status / animation state for the active block
-	statusTextRaw string
-	statusLine    string
-	animFrame     int
-	bannerFlushed bool
-	exiting       bool
-	bottomAligned bool // When true, non-ejected blocks are bottom-aligned above PromptInput inside full viewport height
+	statusTextRaw     string
+	statusLine        string
+	lastTerminalError string
+	animFrame         int
+	bannerFlushed     bool
+	exiting           bool
+	bottomAligned     bool // When true, non-ejected blocks are bottom-aligned above PromptInput inside full viewport height
 
 	// Segregated prompt + command-line input widget
 	input *PromptInput
@@ -151,6 +188,7 @@ func New(opts ShellOptions) *Shell {
 	})
 	s.refreshPrompt()
 	if execSess != nil {
+		execSess.SetCommandTerminalAttached(true)
 		execSess.SetAICommandUISink(s)
 	}
 
@@ -267,6 +305,9 @@ func (s *Shell) Close() error {
 	if cancel != nil {
 		cancel()
 	}
+	if s.execSess != nil {
+		s.execSess.SetCommandTerminalAttached(false)
+	}
 	if aiRunner != nil {
 		aiRunner.Close()
 	}
@@ -294,8 +335,13 @@ func (s *Shell) WaitActive() {
 func (s *Shell) Blocks() []CommandBlock {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.drainLiveOutputsLocked()
 	res := make([]CommandBlock, len(s.blocks))
 	for i := range s.blocks {
+		output := s.blocks[i].Output.Bytes()
+		if live := s.blocks[i].liveOutput; live != nil {
+			output = live.raw
+		}
 		res[i] = CommandBlock{
 			ID:            s.blocks[i].ID,
 			Kind:          s.blocks[i].Kind,
@@ -303,7 +349,7 @@ func (s *Shell) Blocks() []CommandBlock {
 			Cwd:           s.blocks[i].Cwd,
 			Prompt:        s.blocks[i].Prompt,
 			Input:         s.blocks[i].Input,
-			Output:        *bytes.NewBuffer(append([]byte(nil), s.blocks[i].Output.Bytes()...)),
+			Output:        *bytes.NewBuffer(append([]byte(nil), output...)),
 			AnimLine:      s.blocks[i].AnimLine,
 			Status:        s.blocks[i].Status,
 			ExitCode:      s.blocks[i].ExitCode,
@@ -315,6 +361,72 @@ func (s *Shell) Blocks() []CommandBlock {
 		}
 	}
 	return res
+}
+
+func (s *Shell) drainLiveOutputsLocked() {
+	seen := make(map[*liveOutputState]struct{})
+	now := time.Now()
+	for i := range s.blocks {
+		state := s.blocks[i].liveOutput
+		if state == nil {
+			continue
+		}
+		if _, ok := seen[state]; ok {
+			continue
+		}
+		seen[state] = struct{}{}
+
+		completed := false
+		for j := range s.blocks {
+			if s.blocks[j].liveOutput == state && s.blocks[j].Status != StatusActive {
+				completed = true
+				break
+			}
+		}
+		before := len(state.raw)
+		err := state.drain(completed)
+		if err != nil {
+			s.blocks[i].renderError = err.Error()
+		}
+		if len(state.raw) > before {
+			chunk := state.raw[before:]
+			for j := range s.blocks {
+				if s.blocks[j].liveOutput != state {
+					continue
+				}
+				if s.blocks[j].FirstOutputAt.IsZero() {
+					s.blocks[j].FirstOutputAt = now
+				}
+				_, _ = s.blocks[j].Output.Write(chunk)
+				s.blocks[j].cachePopulated = false
+			}
+		}
+	}
+}
+
+func (s *Shell) resizeLiveTerminalsLocked(width, height int) {
+	seen := make(map[*liveOutputState]struct{})
+	for i := range s.blocks {
+		block := &s.blocks[i]
+		state := block.liveOutput
+		if state == nil || state.terminal == nil || state.finalized {
+			continue
+		}
+		if _, ok := seen[state]; ok {
+			continue
+		}
+		seen[state] = struct{}{}
+
+		cols, rows := childPTYFrameSize(width, height)
+		if block.Source == SourceAITool {
+			cols, rows = aiExecPTYFrameSize(width, height)
+		}
+		oldCols, oldRows := state.terminal.Size()
+		if oldCols != cols || oldRows != rows {
+			state.terminal.Resize(cols, rows)
+			state.generation++
+		}
+	}
 }
 
 // Input returns the embedded PromptInput widget.
@@ -454,11 +566,22 @@ func renderBlockCached(block *CommandBlock, width int) terminal.CellBuf {
 		width = 80
 	}
 	outLen := block.Output.Len()
+	liveGeneration := uint64(0)
+	liveHeight := 0
+	if block.liveOutput != nil {
+		outLen = len(block.liveOutput.raw)
+		liveGeneration = block.liveOutput.generation
+		if block.liveOutput.terminal != nil {
+			_, liveHeight = block.liveOutput.terminal.Size()
+		}
+	}
 	if block.cachePopulated &&
 		block.cachedWidth == width &&
+		block.cachedHeight == liveHeight &&
 		block.cachedPrompt == block.Prompt &&
 		block.cachedInput == block.Input &&
 		block.cachedOutLen == outLen &&
+		block.cachedLiveGen == liveGeneration &&
 		block.cachedAnim == block.AnimLine &&
 		block.cachedKind == block.Kind &&
 		block.cachedSource == block.Source &&
@@ -466,53 +589,60 @@ func renderBlockCached(block *CommandBlock, width int) terminal.CellBuf {
 		return block.cachedBuf
 	}
 
-	var rawText string
-	if block.Kind == BlockBanner || (block.Prompt == "" && block.Input == "") {
-		rawText = block.Output.String()
-	} else {
-		rawText = block.Prompt + block.Input + "\n" + block.Output.String()
-	}
-	if block.Status == StatusActive && block.AnimLine != "" {
-		if rawText != "" && !strings.HasSuffix(rawText, "\n") {
-			rawText += "\n"
-		}
-		rawText += block.AnimLine
-	}
-
 	var buf terminal.CellBuf
-	if block.Source == SourceAITool && width > 4 {
-		innerW := width - 2
-		inner := terminal.FromANSIString(rawText, innerW)
-		inner = trimTrailingWhitespaceRows(inner)
-		if inner.Height == 0 {
-			inner = terminal.NewCellBuf(innerW, 1)
-		}
-		buf = terminal.NewCellBuf(width, inner.Height)
-		var stripeColor terminal.Color = 0x00ffff // cyan while active
-		switch block.Status {
-		case StatusSuccess:
-			stripeColor = 0x00ff00 // green on exit 0
-		case StatusError, StatusFailure:
-			stripeColor = 0xff0000 // red on non-zero exit
-		}
-		stripeStyle := terminal.NewStyle(stripeColor, 0, terminal.CharResetBackgroundDefault)
-		spaceStyle := terminal.NewStyle(0, 0, terminal.CharResetForegroundDefault|terminal.CharResetBackgroundDefault)
-		for y := 0; y < inner.Height; y++ {
-			buf.Set(0, y, terminal.Cell{Grapheme: "┃", Style: stripeStyle})
-			buf.Set(1, y, terminal.Cell{Grapheme: " ", Style: spaceStyle})
-		}
-		buf.Blit(inner, 2, 0)
+	if block.liveOutput != nil {
+		buf, block.cachedCursor = renderLiveBlock(block, width)
 	} else {
-		buf = terminal.FromANSIString(rawText, width)
-		if buf.Height == 0 {
-			buf = terminal.NewCellBuf(width, 1)
+		var rawText string
+		if block.Kind == BlockBanner || (block.Prompt == "" && block.Input == "") {
+			rawText = block.Output.String()
+		} else {
+			rawText = block.Prompt + block.Input + "\n" + block.Output.String()
 		}
+		if block.Status == StatusActive && block.AnimLine != "" {
+			if rawText != "" && !strings.HasSuffix(rawText, "\n") {
+				rawText += "\n"
+			}
+			rawText += block.AnimLine
+		}
+
+		if block.Source == SourceAITool && width > 4 {
+			innerW := width - 2
+			inner := terminal.FromANSIString(rawText, innerW)
+			inner = trimTrailingWhitespaceRows(inner)
+			if inner.Height == 0 {
+				inner = terminal.NewCellBuf(innerW, 1)
+			}
+			buf = terminal.NewCellBuf(width, inner.Height)
+			var stripeColor terminal.Color = 0x00ffff // cyan while active
+			switch block.Status {
+			case StatusSuccess:
+				stripeColor = 0x00ff00 // green on exit 0
+			case StatusError, StatusFailure:
+				stripeColor = 0xff0000 // red on non-zero exit
+			}
+			stripeStyle := terminal.NewStyle(stripeColor, 0, terminal.CharResetBackgroundDefault)
+			spaceStyle := terminal.NewStyle(0, 0, terminal.CharResetForegroundDefault|terminal.CharResetBackgroundDefault)
+			for y := 0; y < inner.Height; y++ {
+				buf.Set(0, y, terminal.Cell{Grapheme: "┃", Style: stripeStyle})
+				buf.Set(1, y, terminal.Cell{Grapheme: " ", Style: spaceStyle})
+			}
+			buf.Blit(inner, 2, 0)
+		} else {
+			buf = terminal.FromANSIString(rawText, width)
+			if buf.Height == 0 {
+				buf = terminal.NewCellBuf(width, 1)
+			}
+		}
+		block.cachedCursor = terminal.CursorPos{}
 	}
 
 	block.cachedWidth = width
+	block.cachedHeight = liveHeight
 	block.cachedPrompt = block.Prompt
 	block.cachedInput = block.Input
 	block.cachedOutLen = outLen
+	block.cachedLiveGen = liveGeneration
 	block.cachedAnim = block.AnimLine
 	block.cachedKind = block.Kind
 	block.cachedSource = block.Source
@@ -520,6 +650,75 @@ func renderBlockCached(block *CommandBlock, width int) terminal.CellBuf {
 	block.cachedBuf = buf
 	block.cachePopulated = true
 	return buf
+}
+
+func renderLiveBlock(block *CommandBlock, width int) (terminal.CellBuf, terminal.CursorPos) {
+	innerWidth := width
+	gutter := 0
+	if block.Source == SourceAITool && width > 4 {
+		innerWidth = width - 2
+		gutter = 2
+	}
+	state := block.liveOutput
+	if state == nil || state.terminal == nil {
+		return terminal.NewCellBuf(width, 1), terminal.CursorPos{}
+	}
+
+	output, cursor := state.terminal.Snapshot()
+	if state.finalized {
+		output, cursor = state.frozen, state.frozenCursor
+	}
+	if block.Status != StatusActive {
+		cursor.Visible = false
+	}
+	output, cursor = terminal.TrimTrailingWhitespaceRows(output, cursor)
+
+	var prefix terminal.CellBuf
+	if block.Kind != BlockBanner && (block.Prompt != "" || block.Input != "") {
+		prefix = terminal.FromANSIString(block.Prompt+block.Input+"\n", innerWidth)
+	}
+	animation := terminal.CellBuf{}
+	if block.Status == StatusActive && block.AnimLine != "" {
+		animation = terminal.FromANSIString(block.AnimLine, innerWidth)
+	}
+	errorRows := terminal.CellBuf{}
+	if block.renderError != "" {
+		errorRows = terminal.FromANSIString("[terminal error: "+block.renderError+"]", innerWidth)
+	}
+
+	height := prefix.Height + output.Height + animation.Height + errorRows.Height
+	if height < 1 {
+		height = 1
+	}
+	inner := terminal.NewCellBuf(innerWidth, height)
+	inner.Blit(prefix, 0, 0)
+	inner.Blit(output, 0, prefix.Height)
+	inner.Blit(animation, 0, prefix.Height+output.Height)
+	inner.Blit(errorRows, 0, prefix.Height+output.Height+animation.Height)
+
+	if cursor.Visible {
+		cursor.Y += prefix.Height
+		cursor.X += gutter
+	}
+	if gutter == 0 {
+		return inner, cursor
+	}
+	outer := terminal.NewCellBuf(width, height)
+	stripeColor := terminal.Color(0x00ffff)
+	switch block.Status {
+	case StatusSuccess:
+		stripeColor = 0x00ff00
+	case StatusError, StatusFailure:
+		stripeColor = 0xff0000
+	}
+	stripeStyle := terminal.NewStyle(stripeColor, 0, terminal.CharResetBackgroundDefault)
+	spaceStyle := terminal.NewStyle(0, 0, terminal.CharResetForegroundDefault|terminal.CharResetBackgroundDefault)
+	for y := 0; y < height; y++ {
+		outer.Set(0, y, terminal.Cell{Grapheme: "┃", Style: stripeStyle})
+		outer.Set(1, y, terminal.Cell{Grapheme: " ", Style: spaceStyle})
+	}
+	outer.Blit(inner, gutter, 0)
+	return outer, cursor
 }
 
 // OnAICommandStart implements AICommandUISink so commands executed by the AI's `exec`
@@ -543,6 +742,11 @@ func (s *Shell) OnAICommandStart(command string, cwd string) (onChunk func([]byt
 		ExitCode:  0,
 		StartedAt: startedAt,
 	}
+	cols, rows := 78, 20
+	if s.execSess != nil {
+		cols, rows = s.execSess.AIExecPTYSize()
+	}
+	block.liveOutput = newLiveOutputState(cols, rows)
 	if parentIndex >= 0 {
 		block.aiTurnParentIndex = parentIndex
 		block.hasAITurnParent = true
@@ -556,15 +760,7 @@ func (s *Shell) OnAICommandStart(command string, cwd string) (onChunk func([]byt
 		if len(p) == 0 {
 			return
 		}
-		now := time.Now()
-		s.mu.Lock()
-		if idx >= 0 && idx < len(s.blocks) {
-			if s.blocks[idx].FirstOutputAt.IsZero() {
-				s.blocks[idx].FirstOutputAt = now
-			}
-			s.blocks[idx].Output.Write(p)
-		}
-		s.mu.Unlock()
+		block.liveOutput.enqueue(p)
 		s.invalidate()
 	}
 	onFinish = func(exitCode int, elapsed time.Duration) {
@@ -596,7 +792,7 @@ func calculateVisualRows(block CommandBlock, width int) int {
 	return renderBlockCached(&block, width).Height
 }
 
-func (s *Shell) renderStackBlocksLocked(width int) []terminal.CellBuf {
+func (s *Shell) renderStackBlocksLocked(width int) ([]terminal.CellBuf, []int) {
 	toolBlocks := make(map[int][]int)
 	isToolBlock := make([]bool, len(s.blocks))
 	for i := range s.blocks {
@@ -610,6 +806,7 @@ func (s *Shell) renderStackBlocksLocked(width int) []terminal.CellBuf {
 	}
 
 	rendered := make([]terminal.CellBuf, 0, len(s.blocks)+len(toolBlocks))
+	blockIndexes := make([]int, 0, len(s.blocks)+len(toolBlocks))
 	for i := range s.blocks {
 		if isToolBlock[i] {
 			continue
@@ -618,6 +815,7 @@ func (s *Shell) renderStackBlocksLocked(width int) []terminal.CellBuf {
 		children := toolBlocks[i]
 		if len(children) == 0 {
 			rendered = append(rendered, renderBlockCached(block, width))
+			blockIndexes = append(blockIndexes, i)
 			continue
 		}
 
@@ -630,18 +828,21 @@ func (s *Shell) renderStackBlocksLocked(width int) []terminal.CellBuf {
 				Status: block.Status,
 			}
 			rendered = append(rendered, renderBlockCached(&promptBlock, width))
+			blockIndexes = append(blockIndexes, i)
 		}
 		for _, childIndex := range children {
 			rendered = append(rendered, renderBlockCached(&s.blocks[childIndex], width))
+			blockIndexes = append(blockIndexes, childIndex)
 		}
 		if block.Output.Len() > 0 || block.AnimLine != "" {
 			responseBlock := *block
 			responseBlock.Prompt = ""
 			responseBlock.Input = ""
 			rendered = append(rendered, renderBlockCached(&responseBlock, width))
+			blockIndexes = append(blockIndexes, i)
 		}
 	}
-	return rendered
+	return rendered, blockIndexes
 }
 
 // computeStackHeight calculates the current occupied height of the stack
@@ -655,6 +856,10 @@ func (s *Shell) computeStackHeight(w, maxH int) int {
 	}
 
 	s.mu.Lock()
+	s.width = w
+	s.height = maxH
+	s.resizeLiveTerminalsLocked(w, maxH)
+	s.drainLiveOutputsLocked()
 	var chromeH int
 	inputVisible := !s.running && !s.exiting
 	if !s.exiting {
@@ -717,6 +922,11 @@ func (s *Shell) Measure(c ui.Constraints) ui.Size {
 	if maxH <= 0 {
 		maxH = 24
 	}
+	if s.execSess != nil {
+		if err := s.execSess.SetViewportSize(w, maxH); err != nil {
+			s.reportTerminalError(err)
+		}
+	}
 	s.mu.Lock()
 	mode := s.mode
 	bottomAligned := s.bottomAligned
@@ -743,6 +953,11 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 		maxH = 24
 	}
 
+	if s.execSess != nil {
+		if err := s.execSess.SetViewportSize(w, maxH); err != nil {
+			s.reportTerminalError(err)
+		}
+	}
 	s.mu.Lock()
 	widthChanged := s.width != w
 	s.ctx = ctx
@@ -751,9 +966,8 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 	if widthChanged {
 		s.peakOccupiedHeight = 0
 	}
-	if s.execSess != nil {
-		s.execSess.ResizePTY(w, maxH)
-	}
+	s.resizeLiveTerminalsLocked(w, maxH)
+	s.drainLiveOutputsLocked()
 	mode := s.mode
 	bottomAligned := s.bottomAligned
 	exiting := s.exiting
@@ -761,10 +975,33 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 
 	// Render and cache each block under the lock so cachedBuf is retained across frames.
 	// AI-turn tool output is placed between the prompt and response/status rows.
-	blockBufs := s.renderStackBlocksLocked(w)
+	blockBufs, renderedBlockIndexes := s.renderStackBlocksLocked(w)
 	totalBlockRows := 0
 	for _, b := range blockBufs {
 		totalBlockRows += b.Height
+	}
+	activeBlock := s.activeBlock
+	activeCursor := terminal.CursorPos{}
+	activeBlockStart := -1
+	renderedRow := 0
+	for i, b := range blockBufs {
+		if i < len(renderedBlockIndexes) && renderedBlockIndexes[i] == activeBlock &&
+			activeBlockStart < 0 {
+			activeBlockStart = renderedRow
+			if activeBlock >= 0 && activeBlock < len(s.blocks) &&
+				s.blocks[activeBlock].liveOutput != nil {
+				activeCursor = s.blocks[activeBlock].cachedCursor
+			}
+		}
+		renderedRow += b.Height
+	}
+	suppressPlume := false
+	for i := range s.blocks {
+		if state := s.blocks[i].liveOutput; state != nil && state.terminal != nil &&
+			state.terminal.IsAltScreen() {
+			suppressPlume = true
+			break
+		}
 	}
 	previouslyEjected := s.previouslyEjected
 	s.mu.Unlock()
@@ -804,7 +1041,7 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 	if hTarget < 0 {
 		hTarget = 0
 	}
-	if hTarget > previouslyEjected {
+	if hTarget > previouslyEjected && !suppressPlume {
 		if s.opts.WriteToScrollback != nil {
 			deltaRows := hTarget - previouslyEjected
 			ejectionBuf := ui.NewCellBuf(w, deltaRows)
@@ -907,6 +1144,7 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 			bufferRow = 0
 		}
 	}
+	contentStartY := bufferRow
 	for i := len(collected) - 1; i >= 0; i-- {
 		sl := collected[i]
 		bufferRow = copyBlockRows(buf, bufferRow, sl.buf, w, sl.startRow, sl.endRow)
@@ -934,6 +1172,23 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 			X:       inputCursor.X,
 			Y:       inputTopY + inputCursor.Y,
 			Visible: inputCursor.Visible,
+		}
+	} else if running && activeBlockStart >= 0 {
+		if activeCursor.Visible {
+			activeCursor.Y += activeBlockStart - previouslyEjected + contentStartY
+			if activeCursor.Y >= 0 && activeCursor.Y < buf.Height {
+				if activeCursor.X < 0 {
+					activeCursor.X = 0
+				}
+				if activeCursor.X >= w {
+					activeCursor.X = w - 1
+				}
+				cursor = ui.CursorPos{
+					X:       activeCursor.X,
+					Y:       activeCursor.Y,
+					Visible: true,
+				}
+			}
 		}
 	} else if running && s.execSess != nil && s.execSess.HasActivePTY() && bufferRow > 0 {
 		// When an interactive child command is running in a live PTY, place the cursor on the active row
@@ -1007,6 +1262,48 @@ func (s *Shell) invalidate() {
 	}
 }
 
+func (s *Shell) reportTerminalError(err error) {
+	if err == nil {
+		return
+	}
+	message := err.Error()
+	s.mu.Lock()
+	if s.lastTerminalError == message {
+		s.mu.Unlock()
+		return
+	}
+	s.lastTerminalError = message
+	if s.activeBlock >= 0 && s.activeBlock < len(s.blocks) &&
+		s.blocks[s.activeBlock].liveOutput != nil {
+		s.blocks[s.activeBlock].renderError = message
+		s.blocks[s.activeBlock].cachePopulated = false
+	} else {
+		s.blocks = append(s.blocks, CommandBlock{
+			Kind:   BlockBanner,
+			Source: SourceSystem,
+			Output: *bytes.NewBufferString("[terminal error: " + message + "]\n"),
+			Status: StatusError,
+		})
+	}
+	s.mu.Unlock()
+	s.invalidate()
+}
+
+func (s *Shell) writeCommandTerminalInput(execSess *ExecutionSession, data []byte) bool {
+	if execSess == nil {
+		return false
+	}
+	err := execSess.WriteCommandTerminalInputError(data)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, ErrNoActiveCommandTerminal) {
+		return false
+	}
+	s.reportTerminalError(fmt.Errorf("terminal input: %w", err))
+	return false
+}
+
 // HandleEvent implements ui.Widget by processing input events.
 // Handles keyboard input for the shell, paste events, mouse events, and window resizes.
 func (s *Shell) HandleEvent(e input.Event) bool {
@@ -1028,7 +1325,7 @@ func (s *Shell) HandleEvent(e input.Event) bool {
 			if execSess != nil && execSess.WriteActivePTY([]byte(string(evt))) {
 				return true
 			}
-			return false
+			return s.writeCommandTerminalInput(execSess, []byte(string(evt)))
 		}
 		return s.input.HandleEvent(evt)
 	case *input.PasteEvent:
@@ -1041,7 +1338,7 @@ func (s *Shell) HandleEvent(e input.Event) bool {
 				if execSess != nil && execSess.WriteActivePTY([]byte(string(*evt))) {
 					return true
 				}
-				return false
+				return s.writeCommandTerminalInput(execSess, []byte(string(*evt)))
 			}
 			return s.input.HandleEvent(*evt)
 		}
@@ -1054,8 +1351,14 @@ func (s *Shell) HandleEvent(e input.Event) bool {
 		execSess := s.execSess
 		s.mu.Unlock()
 		if execSess != nil {
-			execSess.ResizePTY(evt.Width, evt.Height)
+			if err := execSess.SetViewportSize(evt.Width, evt.Height); err != nil {
+				s.reportTerminalError(err)
+			}
 		}
+		s.mu.Lock()
+		s.resizeLiveTerminalsLocked(evt.Width, evt.Height)
+		s.drainLiveOutputsLocked()
+		s.mu.Unlock()
 		s.invalidate()
 		return true
 	case *input.WindowSizeEvent:
@@ -1066,8 +1369,14 @@ func (s *Shell) HandleEvent(e input.Event) bool {
 			execSess := s.execSess
 			s.mu.Unlock()
 			if execSess != nil {
-				execSess.ResizePTY(evt.Width, evt.Height)
+				if err := execSess.SetViewportSize(evt.Width, evt.Height); err != nil {
+					s.reportTerminalError(err)
+				}
 			}
+			s.mu.Lock()
+			s.resizeLiveTerminalsLocked(evt.Width, evt.Height)
+			s.drainLiveOutputsLocked()
+			s.mu.Unlock()
 			s.invalidate()
 			return true
 		}
@@ -1156,7 +1465,6 @@ func (s *Shell) handleKeyEvent(ev input.KeyPressEvent) bool {
 				return execSess.WriteActivePTY(raw)
 			}
 		}
-		// If running without active PTY (e.g. AI turn), Ctrl+C cancels the active turn
 		if keyStr == "ctrl+c" {
 			s.mu.Lock()
 			cancel := s.activeCancel
@@ -1165,6 +1473,9 @@ func (s *Shell) handleKeyEvent(ev input.KeyPressEvent) bool {
 				cancel()
 				return true
 			}
+		}
+		if raw := encodeKeyForPTY(ev); len(raw) > 0 {
+			return s.writeCommandTerminalInput(execSess, raw)
 		}
 		return false
 	}
@@ -1266,6 +1577,7 @@ func (s *Shell) submitAndExecuteAsync() {
 	}
 
 	route, parsed := s.execSess.ClassifyInput(rawInput)
+	var liveState *liveOutputState
 	if route == RouteEmpty {
 		s.blocks[blockIdx].Status = StatusSuccess
 		s.blocks[blockIdx].CompletedAt = startedAt
@@ -1287,6 +1599,10 @@ func (s *Shell) submitAndExecuteAsync() {
 	}
 	if route == RouteAI {
 		s.blocks[blockIdx].Kind = BlockAITurn
+	} else if route == RouteShell {
+		cols, rows := childPTYFrameSize(s.width, s.height)
+		liveState = newLiveOutputState(cols, rows)
+		s.blocks[blockIdx].liveOutput = liveState
 	}
 
 	ctx := ai.WithTurnTiming(context.Background(), ai.TurnTiming{
@@ -1371,6 +1687,11 @@ func (s *Shell) submitAndExecuteAsync() {
 			if text == "" {
 				return
 			}
+			if liveState != nil {
+				liveState.enqueue([]byte(text))
+				s.invalidate()
+				return
+			}
 			now := time.Now()
 			s.mu.Lock()
 			if blockIdx >= 0 && blockIdx < len(s.blocks) {
@@ -1407,7 +1728,9 @@ func (s *Shell) submitAndExecuteAsync() {
 					s.mu.Lock()
 					s.blocks[blockIdx].Kind = BlockAITurn
 					s.blocks[blockIdx].Output.Reset()
+					s.blocks[blockIdx].liveOutput = nil
 					s.mu.Unlock()
+					liveState = nil
 					s.runAIFallback(ctx, blockIdx, rawInput, aiRunner, execSess, startedAt, appendBlockText)
 					return
 				}

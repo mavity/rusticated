@@ -228,16 +228,31 @@ func urootBuiltinMiddleware(next interp.ExecHandlerFunc) interp.ExecHandlerFunc 
 		hc := interp.HandlerCtx(ctx)
 		stdoutIsTerminal := false
 		terminalWidth := 0
-		if session, source := execSessionFromContext(ctx); session != nil &&
-			source == SourceUserShell && session.IsUnredirectedTTY(hc) {
-			stdoutIsTerminal = true
-			terminalWidth, _ = session.PTYSize()
+		stdin := hc.Stdin
+		var commandTerminal *CommandTerminal
+		if session, source := execSessionFromContext(ctx); session != nil && source == SourceUserShell {
+			tty := session.StreamTTY(ctx, hc)
+			stdoutIsTerminal = tty.Stdout
+			if tty.Stdin {
+				commandTerminal = commandTerminalFromContext(ctx)
+				if commandTerminal != nil {
+					stdin = commandTerminal
+				}
+			}
+			if stdoutIsTerminal {
+				if commandTerminal == nil {
+					commandTerminal = commandTerminalFromContext(ctx)
+				}
+				if commandTerminal != nil {
+					terminalWidth, _ = commandTerminal.Size()
+				}
+			}
 		}
 
 		var echoRunner *interp.Runner
 		var ioEnv core.IO
 		ioEnv = core.IO{
-			Stdin:            hc.Stdin,
+			Stdin:            stdin,
 			Stdout:           hc.Stdout,
 			Stderr:           hc.Stderr,
 			Dir:              hc.Dir,
