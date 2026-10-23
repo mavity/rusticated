@@ -671,6 +671,11 @@ func renderLiveBlock(block *CommandBlock, width int) (terminal.CellBuf, terminal
 	if block.Status != StatusActive {
 		cursor.Visible = false
 	}
+	if cursor.Visible && cursor.Y >= output.Height {
+		withCursorRow := terminal.NewCellBuf(output.Width, cursor.Y+1)
+		withCursorRow.Blit(output, 0, 0)
+		output = withCursorRow
+	}
 	output, cursor = terminal.TrimTrailingWhitespaceRows(output, cursor)
 
 	var prefix terminal.CellBuf
