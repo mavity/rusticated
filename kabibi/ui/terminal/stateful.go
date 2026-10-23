@@ -8,11 +8,12 @@ import (
 // Terminal is a stateful virtual terminal. Its owner must serialize all access;
 // the underlying emulator is not safe for concurrent use.
 type Terminal struct {
-	emulator      *vt.Emulator
-	width         int
-	height        int
-	cursorVisible bool
-	alternate     bool
+	emulator       *vt.Emulator
+	width          int
+	height         int
+	cursorVisible  bool
+	alternate      bool
+	retainedHeight int
 }
 
 // NewTerminal creates a stateful terminal with LNM and Unicode-core modes enabled.
@@ -47,7 +48,9 @@ func (t *Terminal) Write(p []byte) (int, error) {
 	if t == nil || t.emulator == nil {
 		return 0, nil
 	}
-	return t.emulator.Write(p)
+	n, err := t.emulator.Write(p)
+	t.retainSnapshotHeight()
+	return n, err
 }
 
 // WriteString feeds the string unchanged to the emulator.
@@ -55,7 +58,16 @@ func (t *Terminal) WriteString(s string) (int, error) {
 	if t == nil || t.emulator == nil {
 		return 0, nil
 	}
-	return t.emulator.WriteString(s)
+	n, err := t.emulator.WriteString(s)
+	t.retainSnapshotHeight()
+	return n, err
+}
+
+func (t *Terminal) retainSnapshotHeight() {
+	// Resize can clear the emulator's touched-row metadata while retaining its cells.
+	if height := calculateGridHeight(t.emulator); height > t.retainedHeight {
+		t.retainedHeight = height
+	}
 }
 
 // Resize changes the terminal dimensions without replaying prior output.
@@ -72,6 +84,7 @@ func (t *Terminal) Resize(width, height int) {
 	if width == t.width && height == t.height {
 		return
 	}
+	t.retainSnapshotHeight()
 	t.width, t.height = width, height
 	t.emulator.Resize(width, height)
 }
@@ -103,6 +116,9 @@ func (t *Terminal) Snapshot() (CellBuf, CursorPos) {
 		return CellBuf{}, CursorPos{}
 	}
 	height := calculateGridHeight(t.emulator)
+	if height < t.retainedHeight {
+		height = t.retainedHeight
+	}
 	pos := t.emulator.CursorPosition()
 	cur := CursorPos{
 		X:       pos.X,

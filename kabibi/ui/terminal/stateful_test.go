@@ -74,6 +74,10 @@ func TestTerminalResizePreservesStateWithoutReplay(t *testing.T) {
 		t.Fatalf("Size() = (%d,%d), want (10,4)", width, height)
 	}
 	after, _ := term.Snapshot()
+	if after.Height < before.Height {
+		t.Fatalf("snapshot height after resize = %d, want at least prior height %d",
+			after.Height, before.Height)
+	}
 	for y := 0; y < before.Height && y < after.Height; y++ {
 		for x := 0; x < before.Width && x < after.Width; x++ {
 			if before.Get(x, y) != after.Get(x, y) {
