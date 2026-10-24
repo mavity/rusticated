@@ -172,6 +172,71 @@ func TestPatchMvdanKillBuiltin(t *testing.T) {
 	}
 }
 
+func TestPatchMvdanUmaskBuiltin(t *testing.T) {
+	files := map[string][]byte{
+		"interp/builtin.go": []byte("case \"shift\":\n"),
+	}
+	if err := patchMvdanUmaskBuiltinInMemory(files); err != nil {
+		t.Fatalf("patch mvdan umask builtin: %v", err)
+	}
+	if got := string(files["interp/builtin.go"]); !strings.Contains(got, "case \"umask\":\n") ||
+		!strings.Contains(got, "r.runUmask(args)") {
+		t.Fatalf("umask dispatch was not added: %q", got)
+	}
+	for _, name := range []string{
+		"interp/umask.go",
+		"interp/umask_unix.go",
+		"interp/umask_wasip1.go",
+		"interp/umask_unsupported.go",
+	} {
+		if len(files[name]) == 0 {
+			t.Fatalf("generated source %q is empty", name)
+		}
+	}
+	if !strings.Contains(string(files["interp/umask_wasip1.go"]), "syscall.GetUmask()") {
+		t.Fatal("WASI umask getter does not use guest-local state")
+	}
+	if err := patchMvdanUmaskBuiltinInMemory(map[string][]byte{}); err == nil {
+		t.Fatal("patch accepted missing mvdan builtin source")
+	}
+	if err := patchMvdanUmaskBuiltinInMemory(map[string][]byte{
+		"interp/builtin.go": []byte("no shift builtin dispatch"),
+	}); err == nil {
+		t.Fatal("patch accepted unexpected mvdan builtin source")
+	}
+}
+
+func TestPatchWasiStatModePreservesSpecialBits(t *testing.T) {
+	fallback := "// WASI does not support unix-like permissions, but Go programs are likely\n" +
+		"\t// to expect the permission bits to not be zero so we set defaults to help\n" +
+		"\t// avoid breaking applications that are migrating to WASM.\n" +
+		"\tif fs.sys.Filetype == syscall.FILETYPE_DIRECTORY {\n" +
+		"\t\tfs.mode |= 0700\n" +
+		"\t} else {\n" +
+		"\t\tfs.mode |= 0600\n" +
+		"\t}"
+	got, err := patchWasiStatMode(fallback)
+	if err != nil {
+		t.Fatalf("patch WASI stat mode: %v", err)
+	}
+	for _, want := range []string{
+		"FileMode(fs.sys.Mode) & 0777",
+		"fs.sys.Mode&04000",
+		"fs.mode |= ModeSetuid",
+		"fs.sys.Mode&02000",
+		"fs.mode |= ModeSetgid",
+		"fs.sys.Mode&01000",
+		"fs.mode |= ModeSticky",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("patched stat source does not contain %q: %s", want, got)
+		}
+	}
+	if _, err := patchWasiStatMode("unexpected source"); err == nil {
+		t.Fatal("patch accepted a changed WASI permission fallback")
+	}
+}
+
 func TestAddGoGitWasip1Compatibility(t *testing.T) {
 	files := map[string][]byte{}
 	addGoGitWasip1Compatibility(files)

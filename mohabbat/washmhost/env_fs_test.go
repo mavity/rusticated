@@ -346,6 +346,34 @@ func TestSysFs(t *testing.T) {
 		}
 	})
 
+	t.Run("7a. sys_path_chmod preserves special bits", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows chmod does not expose POSIX special mode bits")
+		}
+		path := filepath.Join(tmpDir, "chmod-setuid.txt")
+		if err := ioutil.WriteFile(path, []byte("DATA"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		pathPtr := uint32(0x1180)
+		mod.Memory().Write(pathPtr, []byte(path))
+		ovPtr := uint32(0x2780)
+		env.sys_path_chmod(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 0o4755})
+		env.Poll(context.Background(), mod)
+
+		result, ok := mod.Memory().Read(ovPtr, 24)
+		if !ok || binary.LittleEndian.Uint32(result[4:8]) != 0 {
+			t.Fatalf("sys_path_chmod failed with result %v", result)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode()&os.ModeSetuid == 0 || info.Mode().Perm() != 0o755 {
+			t.Fatalf("mode after POSIX chmod 04755 = %#o, want setuid and 0755", info.Mode())
+		}
+	})
+
 	t.Run("8. sys_dir_read", func(t *testing.T) {
 		d := filepath.Join(tmpDir, "subdir")
 		os.Mkdir(d, 0755)

@@ -686,6 +686,20 @@ func (h *HostEnv) sys_dir_read(ctx context.Context, m api.Module, stack []uint64
 	}()
 }
 
+func posixModeToGoFileMode(mode uint32) os.FileMode {
+	goMode := os.FileMode(mode & 0o777)
+	if mode&0o4000 != 0 {
+		goMode |= os.ModeSetuid
+	}
+	if mode&0o2000 != 0 {
+		goMode |= os.ModeSetgid
+	}
+	if mode&0o1000 != 0 {
+		goMode |= os.ModeSticky
+	}
+	return goMode
+}
+
 func (h *HostEnv) sys_path_stat(ctx context.Context, m api.Module, stack []uint64) {
 	ovPtr := uint32(stack[0])
 	pathPtr := uint32(stack[1])
@@ -872,7 +886,7 @@ func (h *HostEnv) sys_path_chmod(ctx context.Context, m api.Module, stack []uint
 		return
 	}
 
-	err := os.Chmod(h.resolveGuestPathForHost(string(buf)), os.FileMode(mode))
+	err := os.Chmod(h.resolveGuestPathForHost(string(buf)), posixModeToGoFileMode(mode))
 	writeOverlapped(m, ovPtr, mapErrno(err), 0, 0)
 }
 
