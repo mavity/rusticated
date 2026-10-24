@@ -161,6 +161,9 @@ func applyWasip1DepPatches(ws, projectDir, goroot string) (*depPatchResult, erro
 			if err := patchMvdanKillBuiltinInMemory(files); err != nil {
 				return nil, fmt.Errorf("patch %s: %w", target.module, err)
 			}
+			if err := patchMvdanUmaskBuiltinInMemory(files); err != nil {
+				return nil, fmt.Errorf("patch %s: %w", target.module, err)
+			}
 		}
 
 		// SPECIAL CASE: go-isatty
@@ -817,6 +820,173 @@ func patchMvdanKillBuiltinInMemory(files map[string][]byte) error {
 	files[sourcePath] = []byte(strings.Replace(content, killBuiltin, "", 1))
 	return nil
 }
+
+func patchMvdanUmaskBuiltinInMemory(files map[string][]byte) error {
+	const sourcePath = "interp/builtin.go"
+	const dispatch = "\tcase \"shift\":\n"
+
+	data, ok := files[sourcePath]
+	if !ok {
+		return fmt.Errorf("%s is missing", sourcePath)
+	}
+
+	content := string(data)
+	if strings.Count(content, dispatch) != 1 {
+		return fmt.Errorf("expected exactly one shift builtin dispatch, found %d", strings.Count(content, dispatch))
+	}
+	content = strings.Replace(content, dispatch, "\tcase \"umask\":\n\t\texit.code = uint8(r.runUmask(args))\n"+dispatch, 1)
+	files[sourcePath] = []byte(content)
+	files["interp/umask.go"] = []byte(umaskSource)
+	files["interp/umask_unix.go"] = []byte(umaskUnixSource)
+	files["interp/umask_wasip1.go"] = []byte(umaskWasip1Source)
+	files["interp/umask_unsupported.go"] = []byte(umaskUnsupportedSource)
+	return nil
+}
+
+const umaskSource = `package interp
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+)
+
+func (r *Runner) runUmask(args []string) int {
+	symbolic := false
+	printCommand := false
+	var mode string
+	hasMode := false
+	endOptions := false
+
+	for _, arg := range args {
+		if !endOptions && arg == "--" {
+			endOptions = true
+			continue
+		}
+		if !endOptions {
+			switch arg {
+			case "-S":
+				symbolic = true
+				continue
+			case "-p":
+				printCommand = true
+				continue
+			}
+			if strings.HasPrefix(arg, "-") {
+				r.errf("umask: invalid option %q\n", arg)
+				return 2
+			}
+		}
+		if hasMode {
+			r.errf("umask: too many arguments\n")
+			return 2
+		}
+		mode = arg
+		hasMode = true
+	}
+
+	if !hasMode {
+		mask, err := currentUmask()
+		if err != nil {
+			r.errf("umask: %v\n", err)
+			return 2
+		}
+		if symbolic {
+			if printCommand {
+				r.out("umask -S " + symbolicUmask(mask) + "\n")
+			} else {
+				r.out(symbolicUmask(mask) + "\n")
+			}
+		} else if printCommand {
+			r.outf("umask %04o\n", mask)
+		} else {
+			r.outf("%04o\n", mask)
+		}
+		return 0
+	}
+	if symbolic || printCommand {
+		r.errf("umask: -S and -p cannot be used when setting the mask\n")
+		return 2
+	}
+
+	mask, err := strconv.ParseUint(mode, 8, 12)
+	if err != nil || mask > 0o777 {
+		r.errf("umask: invalid mask %q\n", mode)
+		return 2
+	}
+	if _, err := setUmask(int(mask)); err != nil {
+		r.errf("umask: %v\n", err)
+		return 2
+	}
+	return 0
+}
+
+func symbolicUmask(mask int) string {
+	allowed := 0o777 &^ mask
+	class := func(shift uint) string {
+		bits := (allowed >> shift) & 0o7
+		var permissions strings.Builder
+		if bits&0o4 != 0 {
+			permissions.WriteByte('r')
+		}
+		if bits&0o2 != 0 {
+			permissions.WriteByte('w')
+		}
+		if bits&0o1 != 0 {
+			permissions.WriteByte('x')
+		}
+		return permissions.String()
+	}
+	return fmt.Sprintf("u=%s,g=%s,o=%s", class(6), class(3), class(0))
+}
+`
+
+const umaskUnixSource = `//go:build unix
+
+package interp
+
+import "syscall"
+
+func currentUmask() (int, error) {
+	mask := syscall.Umask(0)
+	syscall.Umask(mask)
+	return mask, nil
+}
+
+func setUmask(mask int) (int, error) {
+	return syscall.Umask(mask), nil
+}
+`
+
+const umaskWasip1Source = `//go:build wasip1
+
+package interp
+
+import "syscall"
+
+func currentUmask() (int, error) {
+	return syscall.GetUmask(), nil
+}
+
+func setUmask(mask int) (int, error) {
+	return syscall.Umask(mask), nil
+}
+`
+
+const umaskUnsupportedSource = `//go:build !unix && !wasip1
+
+package interp
+
+import "fmt"
+
+func currentUmask() (int, error) {
+	return 0, fmt.Errorf("umask is unsupported on this platform")
+}
+
+func setUmask(int) (int, error) {
+	return 0, fmt.Errorf("umask is unsupported on this platform")
+}
+`
 
 func addGoGitWasip1Compatibility(files map[string][]byte) {
 	files["worktree_rusticated_wasip1.go"] = []byte(`//go:build wasip1

@@ -299,6 +299,25 @@ func TestStatModeAndKindPreservesUnixTypeAndSpecialBits(t *testing.T) {
 	}
 }
 
+func TestPosixModeToGoFileModePreservesSpecialBits(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		mode uint32
+		want os.FileMode
+	}{
+		{"setuid", 0o4755, os.ModeSetuid | 0o755},
+		{"setgid", 0o2750, os.ModeSetgid | 0o750},
+		{"sticky", 0o1777, os.ModeSticky | 0o777},
+		{"permissions only", 0o0644, 0o644},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := posixModeToGoFileMode(tt.mode); got != tt.want {
+				t.Fatalf("posixModeToGoFileMode(%#o) = %#o, want %#o", tt.mode, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestMarshalAbiStat(t *testing.T) {
 	stat := AbiStat{
 		Kind: statKindFile, Mode: 0o104755, Uid: 12, Gid: 34, Size: 1234,

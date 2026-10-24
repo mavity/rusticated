@@ -818,19 +818,10 @@ func generateGoOverlay(ws, goroot string, verbose bool) error {
 	statWasip1Src := filepath.Join(goroot, "src/os/stat_wasip1.go")
 	genStatWasip1 := filepath.Join(genDir, "os/stat_wasip1.go")
 	if statContent, err := os.ReadFile(statWasip1Src); err == nil {
-		statStr := strings.Replace(
-			string(statContent),
-			"// WASI does not support unix-like permissions, but Go programs are likely\n"+
-				"\t// to expect the permission bits to not be zero so we set defaults to help\n"+
-				"\t// avoid breaking applications that are migrating to WASM.\n"+
-				"\tif fs.sys.Filetype == syscall.FILETYPE_DIRECTORY {\n"+
-				"\t\tfs.mode |= 0700\n"+
-				"\t} else {\n"+
-				"\t\tfs.mode |= 0600\n"+
-				"\t}",
-			"fs.mode |= FileMode(fs.sys.Mode) & 0777",
-			1,
-		)
+		statStr, err := patchWasiStatMode(string(statContent))
+		if err != nil {
+			return fmt.Errorf("patch os/stat_wasip1.go: %w", err)
+		}
 		if err := writeFileIfChanged(genStatWasip1, []byte(statStr)); err != nil {
 			return fmt.Errorf("failed to write patched os/stat_wasip1.go: %w", err)
 		}
@@ -924,6 +915,31 @@ func generateGoOverlay(ws, goroot string, verbose bool) error {
 	}
 	vlogf(verbose, "🍆  Wrote %s\n", overlayPath)
 	return nil
+}
+
+func patchWasiStatMode(content string) (string, error) {
+	const fallback = "// WASI does not support unix-like permissions, but Go programs are likely\n" +
+		"\t// to expect the permission bits to not be zero so we set defaults to help\n" +
+		"\t// avoid breaking applications that are migrating to WASM.\n" +
+		"\tif fs.sys.Filetype == syscall.FILETYPE_DIRECTORY {\n" +
+		"\t\tfs.mode |= 0700\n" +
+		"\t} else {\n" +
+		"\t\tfs.mode |= 0600\n" +
+		"\t}"
+	const replacement = "fs.mode |= FileMode(fs.sys.Mode) & 0777\n" +
+		"\tif fs.sys.Mode&04000 != 0 {\n" +
+		"\t\tfs.mode |= ModeSetuid\n" +
+		"\t}\n" +
+		"\tif fs.sys.Mode&02000 != 0 {\n" +
+		"\t\tfs.mode |= ModeSetgid\n" +
+		"\t}\n" +
+		"\tif fs.sys.Mode&01000 != 0 {\n" +
+		"\t\tfs.mode |= ModeSticky\n" +
+		"}"
+	if strings.Count(content, fallback) != 1 {
+		return "", fmt.Errorf("expected exactly one WASI permission fallback, found %d", strings.Count(content, fallback))
+	}
+	return strings.Replace(content, fallback, replacement, 1), nil
 }
 
 func buildDloadWorkers(ws string, verbose bool) error {

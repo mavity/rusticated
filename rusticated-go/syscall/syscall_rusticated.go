@@ -13,6 +13,7 @@ import (
 	"errors"
 	"internal/oserror"
 	"internal/strconv"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -582,8 +583,18 @@ func Wait4(pid int, wstatus *WaitStatus, options int, rusage *Rusage) (wpid int,
 	return pid, nil
 }
 
+var rusticatedUmask atomic.Uint32
+
+func init() {
+	rusticatedUmask.Store(0o022)
+}
+
 func Umask(mask int) int {
-	return 0
+	return int(rusticatedUmask.Swap(uint32(mask) & 0o777))
+}
+
+func GetUmask() int {
+	return int(rusticatedUmask.Load())
 }
 
 type Timespec struct {
