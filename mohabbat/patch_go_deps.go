@@ -823,6 +823,43 @@ func addGoGitWasip1Compatibility(files map[string][]byte) {
 
 package git
 
+import (
+	"syscall"
+	"time"
+
+	"github.com/go-git/go-git/v5/plumbing/format/index"
+)
+
+func init() {
+	fillSystemInfo = func(e *index.Entry, sys interface{}) {
+		st, ok := sys.(*syscall.Stat_t)
+		if !ok || st == nil {
+			return
+		}
+
+		switch {
+		case st.ValidMask&syscall.STAT_VALID_CTIME != 0:
+			e.CreatedAt = time.Unix(st.Ctim.Sec, st.Ctim.Nsec)
+		case st.ValidMask&syscall.STAT_VALID_BIRTHTIME != 0:
+			e.CreatedAt = time.Unix(st.Btim.Sec, st.Btim.Nsec)
+		case st.ValidMask&syscall.STAT_VALID_MTIME != 0:
+			e.CreatedAt = time.Unix(st.Mtim.Sec, st.Mtim.Nsec)
+		}
+		if st.ValidMask&syscall.STAT_VALID_DEV != 0 {
+			e.Dev = uint32(st.Dev)
+		}
+		if st.ValidMask&syscall.STAT_VALID_INODE != 0 {
+			e.Inode = uint32(st.Ino)
+		}
+		if st.ValidMask&syscall.STAT_VALID_UID != 0 {
+			e.UID = st.Uid
+		}
+		if st.ValidMask&syscall.STAT_VALID_GID != 0 {
+			e.GID = st.Gid
+		}
+	}
+}
+
 func isSymlinkWindowsNonAdmin(error) bool { return false }
 `)
 }

@@ -175,8 +175,22 @@ func TestPatchMvdanKillBuiltin(t *testing.T) {
 func TestAddGoGitWasip1Compatibility(t *testing.T) {
 	files := map[string][]byte{}
 	addGoGitWasip1Compatibility(files)
-	if got := string(files["worktree_rusticated_wasip1.go"]); !strings.Contains(got, "//go:build wasip1") ||
-		!strings.Contains(got, "func isSymlinkWindowsNonAdmin(error) bool") {
-		t.Fatalf("go-git compatibility source is incomplete: %q", got)
+	got := string(files["worktree_rusticated_wasip1.go"])
+	for _, want := range []string{
+		"//go:build wasip1",
+		"fillSystemInfo = func(e *index.Entry, sys interface{})",
+		"sys.(*syscall.Stat_t)",
+		"syscall.STAT_VALID_CTIME",
+		"syscall.STAT_VALID_BIRTHTIME",
+		"syscall.STAT_VALID_MTIME",
+		"syscall.STAT_VALID_DEV",
+		"syscall.STAT_VALID_INODE",
+		"syscall.STAT_VALID_UID",
+		"syscall.STAT_VALID_GID",
+		"func isSymlinkWindowsNonAdmin(error) bool",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("go-git compatibility source is incomplete: %q", got)
+		}
 	}
 }
