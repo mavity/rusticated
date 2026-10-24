@@ -29,21 +29,6 @@
   let unpackedWasmPromise = null;
 
   /**
-   * Transforms ES module `export` syntax in `washmhost.js` so it can be
-   * evaluated directly in CommonJS / WebWorker contexts without a bundler,
-   * populating `globalThis.washmhostExports`.
-   *
-   * @param {string} src
-   * @returns {string}
-   */
-  function stripEsmExportsForEval(src) {
-    return src
-      .replace(/^\s*export\s+default\s+async\s+function\s+washmhost/m, 'async function washmhost')
-      .replace(/^\s*export\s+default\s+/gm, '')
-      .replace(/^\s*export\s+(const|let|var|class|async\s+function|function)\s+/gm, '$1 ');
-  }
-
-  /**
    * Dynamically loads `washmhost.js` and `vfs.js` from the extension directory
    * via `vscode.workspace.fs.readFile` so it works identically in `vscode.dev`
    * (where relative CommonJS `require('./...')` is unavailable over HTTP) and
@@ -67,7 +52,7 @@
         if (!globalThis.washmhostExports) {
           const whUri = vscode.Uri.joinPath(extensionUri, 'washmhost.js');
           const whBytes = await vscode.workspace.fs.readFile(whUri);
-          const whCode = stripEsmExportsForEval(decoder.decode(whBytes));
+          const whCode = decoder.decode(whBytes);
           (0, eval)(whCode);
         }
 
@@ -375,7 +360,6 @@
     moduleExports.createKabibiPseudoterminal = createKabibiPseudoterminal;
     moduleExports.ensureRuntimeModules = ensureRuntimeModules;
     moduleExports.loadCachedKabibiWasm = loadCachedKabibiWasm;
-    moduleExports.stripEsmExportsForEval = stripEsmExportsForEval;
   }
 
   if (typeof module !== 'undefined' && module.exports) {
@@ -386,8 +370,7 @@
       registerVscodeExtension,
       createKabibiPseudoterminal,
       ensureRuntimeModules,
-      loadCachedKabibiWasm,
-      stripEsmExportsForEval
+      loadCachedKabibiWasm
     };
   }
 })();

@@ -5,88 +5,91 @@
 // event-driven scheduler.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const FLAG_COMPLETED = 1;
+(function () {
+'use strict';
+
+const FLAG_COMPLETED = 1;
 
 // ── WASI (wasip1) errno mapping ───────────────────────────────────────────────
-export const wasiSuccess          = 0;
-export const wasiE2BIG            = 1;
-export const wasiEACCES           = 2;
-export const wasiEADDRINUSE       = 3;
-export const wasiEADDRNOTAVAIL    = 4;
-export const wasiEAFNOSUPPORT     = 5;
-export const wasiEAGAIN           = 6;
-export const wasiEALREADY         = 7;
-export const wasiEBADF            = 8;
-export const wasiEBADMSG          = 9;
-export const wasiEBUSY            = 10;
-export const wasiECANCELED        = 11;
-export const wasiECHILD           = 12;
-export const wasiECONNABORTED     = 13;
-export const wasiECONNREFUSED     = 14;
-export const wasiECONNRESET       = 15;
-export const wasiEDEADLK          = 16;
-export const wasiEDESTADDRREQ     = 17;
-export const wasiEDOM             = 18;
-export const wasiEDQUOT           = 19;
-export const wasiEEXIST           = 20;
-export const wasiEFAULT           = 21;
-export const wasiEFBIG            = 22;
-export const wasiEHOSTUNREACH     = 23;
-export const wasiEIDRM            = 24;
-export const wasiEILSEQ           = 25;
-export const wasiEINPROGRESS      = 26;
-export const wasiEINTR            = 27;
-export const wasiEINVAL           = 28;
-export const wasiEIO              = 29;
-export const wasiEISCONN          = 30;
-export const wasiEISDIR           = 31;
-export const wasiELOOP            = 32;
-export const wasiEMFILE           = 33;
-export const wasiEMLINK           = 34;
-export const wasiEMSGSIZE         = 35;
-export const wasiEMULTIHOP        = 36;
-export const wasiENAMETOOLONG     = 37;
-export const wasiENETDOWN         = 38;
-export const wasiENETRESET        = 39;
-export const wasiENETUNREACH      = 40;
-export const wasiENFILE           = 41;
-export const wasiENOBUFS          = 42;
-export const wasiENODEV           = 43;
-export const wasiENOENT           = 44;
-export const wasiENOEXEC          = 45;
-export const wasiENOLCK           = 46;
-export const wasiENOLINK          = 47;
-export const wasiENOMEM           = 48;
-export const wasiENOMSG           = 49;
-export const wasiENOPROTOOPT      = 50;
-export const wasiENOSPC           = 51;
-export const wasiENOSYS           = 52;
-export const wasiENOTCONN         = 53;
-export const wasiENOTDIR          = 54;
-export const wasiENOTEMPTY        = 55;
-export const wasiENOTRECOVERABLE  = 56;
-export const wasiENOTSOCK         = 57;
-export const wasiENOTSUP          = 58;
-export const wasiENOTTY           = 59;
-export const wasiENXIO            = 60;
-export const wasiEOVERFLOW        = 61;
-export const wasiEOWNERDEAD       = 62;
-export const wasiEPERM            = 63;
-export const wasiEPIPE            = 64;
-export const wasiEPROTO           = 65;
-export const wasiEPROTONOSUPPORT  = 66;
-export const wasiEPROTOTYPE       = 67;
-export const wasiERANGE           = 68;
-export const wasiEROFS            = 69;
-export const wasiESPIPE           = 70;
-export const wasiESRCH            = 71;
-export const wasiESTALE           = 72;
-export const wasiETIMEDOUT        = 73;
-export const wasiETXTBSY          = 74;
-export const wasiEXDEV            = 75;
-export const wasiENOTCAPABLE      = 76;
+const wasiSuccess          = 0;
+const wasiE2BIG            = 1;
+const wasiEACCES           = 2;
+const wasiEADDRINUSE       = 3;
+const wasiEADDRNOTAVAIL    = 4;
+const wasiEAFNOSUPPORT     = 5;
+const wasiEAGAIN           = 6;
+const wasiEALREADY         = 7;
+const wasiEBADF            = 8;
+const wasiEBADMSG          = 9;
+const wasiEBUSY            = 10;
+const wasiECANCELED        = 11;
+const wasiECHILD           = 12;
+const wasiECONNABORTED     = 13;
+const wasiECONNREFUSED     = 14;
+const wasiECONNRESET       = 15;
+const wasiEDEADLK          = 16;
+const wasiEDESTADDRREQ     = 17;
+const wasiEDOM             = 18;
+const wasiEDQUOT           = 19;
+const wasiEEXIST           = 20;
+const wasiEFAULT           = 21;
+const wasiEFBIG            = 22;
+const wasiEHOSTUNREACH     = 23;
+const wasiEIDRM            = 24;
+const wasiEILSEQ           = 25;
+const wasiEINPROGRESS      = 26;
+const wasiEINTR            = 27;
+const wasiEINVAL           = 28;
+const wasiEIO              = 29;
+const wasiEISCONN          = 30;
+const wasiEISDIR           = 31;
+const wasiELOOP            = 32;
+const wasiEMFILE           = 33;
+const wasiEMLINK           = 34;
+const wasiEMSGSIZE         = 35;
+const wasiEMULTIHOP        = 36;
+const wasiENAMETOOLONG     = 37;
+const wasiENETDOWN         = 38;
+const wasiENETRESET        = 39;
+const wasiENETUNREACH      = 40;
+const wasiENFILE           = 41;
+const wasiENOBUFS          = 42;
+const wasiENODEV           = 43;
+const wasiENOENT           = 44;
+const wasiENOEXEC          = 45;
+const wasiENOLCK           = 46;
+const wasiENOLINK          = 47;
+const wasiENOMEM           = 48;
+const wasiENOMSG           = 49;
+const wasiENOPROTOOPT      = 50;
+const wasiENOSPC           = 51;
+const wasiENOSYS           = 52;
+const wasiENOTCONN         = 53;
+const wasiENOTDIR          = 54;
+const wasiENOTEMPTY        = 55;
+const wasiENOTRECOVERABLE  = 56;
+const wasiENOTSOCK         = 57;
+const wasiENOTSUP          = 58;
+const wasiENOTTY           = 59;
+const wasiENXIO            = 60;
+const wasiEOVERFLOW        = 61;
+const wasiEOWNERDEAD       = 62;
+const wasiEPERM            = 63;
+const wasiEPIPE            = 64;
+const wasiEPROTO           = 65;
+const wasiEPROTONOSUPPORT  = 66;
+const wasiEPROTOTYPE       = 67;
+const wasiERANGE           = 68;
+const wasiEROFS            = 69;
+const wasiESPIPE           = 70;
+const wasiESRCH            = 71;
+const wasiESTALE           = 72;
+const wasiETIMEDOUT        = 73;
+const wasiETXTBSY          = 74;
+const wasiEXDEV            = 75;
+const wasiENOTCAPABLE      = 76;
 
-export function mapErrno(e) {
+function mapErrno(e) {
   if (!e) return wasiSuccess;
   switch (e.code || e.name) {
     case 'ENOENT':
@@ -128,7 +131,7 @@ export function mapErrno(e) {
 }
 
 // ── Path resolution ──────────────────────────────────────────────────────────
-export function resolvePath(baseCwd, target) {
+function resolvePath(baseCwd, target) {
   let full;
   const t = String(target ?? '').replace(/\\/g, '/');
   if (t.startsWith('/')) {
@@ -150,14 +153,14 @@ export function resolvePath(baseCwd, target) {
 }
 
 // ── Virtual Eval Dylib Handles ──────────────────────────────────────────────
-export const EVAL_LIB_HANDLE = 0xEEEE0001n;
-export const EVAL_SYM_HANDLE = 0xEEEE0002n;
+const EVAL_LIB_HANDLE = 0xEEEE0001n;
+const EVAL_SYM_HANDLE = 0xEEEE0002n;
 
 // ── Stat Marshalling (112 bytes little-endian) ───────────────────────────────
-export const STAT_KIND_UNKNOWN = 0;
-export const STAT_KIND_FILE    = 1;
-export const STAT_KIND_DIR     = 2;
-export const STAT_KIND_SYMLINK = 3;
+const STAT_KIND_UNKNOWN = 0;
+const STAT_KIND_FILE    = 1;
+const STAT_KIND_DIR     = 2;
+const STAT_KIND_SYMLINK = 3;
 
 function storedTimeNs(entry, field, legacyField, fallback = null) {
   const value = entry[field];
@@ -184,7 +187,7 @@ function updateEntryMtime(entry) {
   entry.mtimeNs = BigInt(now) * 1_000_000n;
 }
 
-export function marshalStat(entry) {
+function marshalStat(entry) {
   const isDir = entry.type === 'dir';
   const isSymlink = entry.type === 'symlink';
   const kind = isDir ? STAT_KIND_DIR : isSymlink ? STAT_KIND_SYMLINK : STAT_KIND_FILE;
@@ -226,7 +229,7 @@ export function marshalStat(entry) {
 
 // ── Overlapped struct write helper ───────────────────────────────────────────
 // Layout: u32 FLAG_COMPLETED | u32 errorCode | u64 continued | u64 resultExt
-export function writeOverlapped(view, ovPtr, errorCode, continued, resultExt) {
+function writeOverlapped(view, ovPtr, errorCode, continued, resultExt) {
   view.setUint32(ovPtr,      FLAG_COMPLETED, true);
   view.setUint32(ovPtr + 4,  errorCode,      true);
   view.setBigUint64(ovPtr + 8,  BigInt(continued), true);
@@ -234,7 +237,7 @@ export function writeOverlapped(view, ovPtr, errorCode, continued, resultExt) {
 }
 
 // ── Asynchronous IndexedDB Storage ───────────────────────────────────────────
-export class AsyncIndexedDBFS {
+class AsyncIndexedDBFS {
   constructor(dbName = 'RusticatedFS') {
     this.dbName = dbName;
     this.db = null;
@@ -405,7 +408,7 @@ export class AsyncIndexedDBFS {
 }
 
 // ── HostState: Handles, Overlapped Ops, and Wakers ────────────────────────────
-export class HostState {
+class HostState {
   constructor(memory = null) {
     this.memory = memory;
     this.handles = new Map();
@@ -575,7 +578,7 @@ export class HostState {
 }
 
 // ── ABI Import Constructor ───────────────────────────────────────────────────
-export function makeBrowserImports(hostState, fs, params = {}) {
+function makeBrowserImports(hostState, fs, params = {}) {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
 
@@ -1529,12 +1532,7 @@ export function makeBrowserImports(hostState, fs, params = {}) {
             if (encoded.length > outCap) {
               rc = 2n; // buffer overflow
               if (typeof globalThis !== 'undefined') {
-                globalThis.__rustica_overflow = rawStr;
-                globalThis.__rustica_take_overflow = () => {
-                  const s = globalThis.__rustica_overflow;
-                  globalThis.__rustica_overflow = '';
-                  return s;
-                };
+                evalOverflow = rawStr;
               }
             }
             if (Number(resultsCap || 0) > 0 && Number(resultsPtr || 0) !== 0) {
@@ -1784,7 +1782,7 @@ export function makeBrowserImports(hostState, fs, params = {}) {
 }
 
 // ── Cooperative Event Loop ───────────────────────────────────────────────────
-export async function runEventLoop(hostState, runFunc, onExit) {
+async function runEventLoop(hostState, runFunc, onExit) {
   let firstTurn = true;
   while (true) {
     // 1. Drain pending completions into guest WASM memory
@@ -1841,7 +1839,7 @@ export async function runEventLoop(hostState, runFunc, onExit) {
 }
 
 // ── Vegetable Decompression Helper ───────────────────────────────────────────
-export async function unpackVegetable(buffer) {
+async function unpackVegetable(buffer) {
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
   const headerSlice = bytes.subarray(0, Math.min(bytes.length, 32768));
   const headerText = new TextDecoder('utf-8', { fatal: false }).decode(headerSlice);
@@ -1936,7 +1934,9 @@ export async function unpackVegetable(buffer) {
 }
 
 // ── Main Entry Closure ───────────────────────────────────────────────────────
-export default async function washmhost(params = {}) {
+let evalOverflow = '';
+
+async function washmhost(params = {}) {
   const hostState = new HostState();
   if (typeof params.cwd === 'string' && params.cwd.trim() !== '') {
     hostState.cwd = resolvePath('/', params.cwd);
@@ -2021,12 +2021,7 @@ export default async function washmhost(params = {}) {
   };
 }
 
-if (typeof window !== 'undefined') {
-  window.washmhost = washmhost;
-}
-if (typeof globalThis !== 'undefined') {
-  globalThis.washmhost = washmhost;
-  globalThis.washmhostExports = {
+globalThis.washmhostExports = {
     washmhost,
     HostState,
     AsyncIndexedDBFS,
@@ -2037,9 +2032,26 @@ if (typeof globalThis !== 'undefined') {
     STAT_KIND_DIR,
     STAT_KIND_SYMLINK,
     FLAG_COMPLETED,
+    wasiSuccess,
+    wasiEFBIG,
+    wasiENOENT,
+    wasiENOTSUP,
+    wasiELOOP,
+    wasiECANCELED,
+    wasiEBADF,
+    wasiE2BIG,
+    wasiEINVAL,
+    wasiEPIPE,
+    wasiENOTTY,
+    wasiERANGE,
     mapErrno,
     unpackVegetable,
     makeBrowserImports,
-    runEventLoop
+    runEventLoop,
+    takeEvalOverflow: () => {
+      const result = evalOverflow;
+      evalOverflow = '';
+      return result;
+    }
   };
-}
+})();

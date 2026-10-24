@@ -166,10 +166,12 @@ function createMockVSCode(options = {}) {
           };
         },
         readFile: async (uri) => {
-          // Support reading extension assets (`washmhost.js`, `vfs.js`, `kabibi.bat`) from disk
+          // Read the canonical browser host and generated extension assets.
           if (uri.scheme === 'vscode-extension' && uri.path.startsWith('/ext/')) {
             const rel = uri.path.slice('/ext/'.length);
-            const diskPath = path.join(extRoot, rel);
+            const diskPath = rel === 'washmhost.js'
+              ? path.resolve(extRoot, '..', '..', 'mohabbat', 'washmhost', 'js', 'browser', 'index.js')
+              : path.join(extRoot, rel);
             if (!fs.existsSync(diskPath)) {
               const err = new Error(`FileNotFound: ${diskPath}`);
               err.code = 'FileNotFound';
@@ -544,4 +546,3 @@ test('KabibiPseudoterminal interactive TUI renders startup banner, executes shel
     'Interactive TUI workspace test!\n'
   );
 });
-

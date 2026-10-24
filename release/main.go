@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -159,7 +160,6 @@ func main() {
 		{src: filepath.Join(ws, "index.html"), dst: filepath.Join(distDir, "index.html")},
 		{src: filepath.Join(ws, "README.md"), dst: filepath.Join(distDir, "README.md")},
 		{src: filepath.Join(ws, "mohabbat", "washmhost", "js", "browser", "index.js"), dst: filepath.Join(distDir, "washmhost.js")},
-		{src: filepath.Join(ws, "mohabbat", "washmhost", "js", "browser", "index.js"), dst: filepath.Join(distDir, "mohabbat", "washmhost", "js", "browser", "index.js")},
 		{src: filepath.Join(ws, "mohabbat", "washmhost", "js", "browser", "index.js"), dst: filepath.Join(ws, "kabibi", "vscode", "washmhost.js")},
 		{src: filepath.Join(distDir, "kabibi.bat"), dst: filepath.Join(ws, "kabibi", "vscode", "kabibi.bat")},
 	}
@@ -173,6 +173,12 @@ func main() {
 			fmt.Fprintf(os.Stderr, "\n🍆  FAILED: copy %s -> %s: %v\n", sa.src, sa.dst, err)
 			os.Exit(1)
 		}
+	}
+
+	legacyBrowserHost := filepath.Join(distDir, "mohabbat", "washmhost", "js", "browser", "index.js")
+	if err := os.Remove(legacyBrowserHost); err != nil && !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(os.Stderr, "\n🍆  FAILED: remove obsolete browser host copy %s: %v\n", legacyBrowserHost, err)
+		os.Exit(1)
 	}
 
 	noJekyllPath := filepath.Join(distDir, ".nojekyll")
@@ -193,7 +199,6 @@ func main() {
 		"index.html",
 		"README.md",
 		"washmhost.js",
-		filepath.Join("mohabbat", "washmhost", "js", "browser", "index.js"),
 		".nojekyll",
 	}
 	if err := createReleaseZip(zipPath, distDir, allTargets, extraZipFiles); err != nil {

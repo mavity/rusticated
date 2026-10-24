@@ -178,8 +178,7 @@
       This works over file:// purely because README.md is polyglot Javascript and Markdown 
     -->
     <script src="README.md"></script>
-    <script type="module" src="washmhost.js"></script>
-    <script type="module" src="mohabbat/washmhost/js/browser/index.js"></script>
+    <script src="washmhost.js"></script>
 
     <script>
         const termDecoder = new TextDecoder();
@@ -306,7 +305,7 @@
             for (const src of candidateSources) {
                 try {
                     term.write(`Attempting to load kabibi from ${src}...\r\n`);
-                    host = await window.washmhost({
+                    host = await window.washmhostExports.washmhost({
                         wasm: src,
                         stdout: (bytes) => term.write(bytes),
                         stderr: (bytes) => term.write(bytes),

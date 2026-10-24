@@ -358,7 +358,7 @@ kabibi/vscode/
 ├── .vscodeignore         # Excludes node_modules/, test artifacts, and dev configs from .vsix
 ├── extension.js          # Raw JS CommonJS entry point (activate / deactivate, Pseudoterminal, commands)
 ├── vfs.js                # VSCodeMountedFS: hybrid AsyncIndexedDBFS + vscode.workspace.fs mount at /workspace
-├── washmhost.js          # Staged copy of mohabbat/washmhost/js/browser/index.js (with UMD/CJS+ESM export)
+├── washmhost.js          # Generated classic-script copy of the browser host
 ├── kabibi.bat            # Staged Kabibi vegetable (or kabibi.wasm), unpacked in memory by unpackVegetable()
 └── test/
     └── vfs.test.js       # Node-runnable unit tests for VSCodeMountedFS path routing, stat, read, write, readdir
@@ -377,25 +377,23 @@ VS Code's Web Extension Host loads the `"browser"` entry point (`./extension.js`
 To run in `vscode.dev` **without a bundler** while keeping clean source files:
 1. **Option 1 (Single-File Polyglot/Concatenated `extension.js` or `importScripts` in Worker)**:
    - In a WebWorker (`vscode.dev`), `importScripts` or `fetch(vscode.Uri.joinPath(context.extensionUri, '...').toString())` can load sibling scripts, **or** even simpler:
-   - Make `mohabbat/washmhost/js/browser/index.js` support both ES Modules and global/CommonJS attachment (or dynamically load it via `vscode.workspace.fs.readFile(vscode.Uri.joinPath(context.extensionUri, 'washmhost.js'))` on terminal open!).
+   - Load the generated classic-script copy through
+     `vscode.workspace.fs.readFile(vscode.Uri.joinPath(context.extensionUri, 'washmhost.js'))`
+     and evaluate it directly; the canonical source needs no ESM stripping.
    - Think about how clean `vscode.workspace.fs.readFile` is:
      - `vscode.workspace.fs.readFile(vscode.Uri.joinPath(context.extensionUri, '...'))` works in **every** VS Code environment (Desktop, `vscode.dev`, `github.dev`, Serverless Web) because `context.extensionUri` is always readable by `vscode.workspace.fs`!
      - Or, if `extension.js` is self-contained (or loads `washmhost.js` via `vscode.workspace.fs.readFile` / `import()`), there is zero dependency on `webpack`/`esbuild` and zero `require('./...')` failure in `vscode.dev`.
-2. **Universal Export in `mohabbat/washmhost/js/browser/index.js`**:
-   - Currently `mohabbat/washmhost/js/browser/index.js` uses `export const ...` and `export default async function washmhost(...)`, plus `if (typeof window !== 'undefined') window.washmhost = washmhost;`.
-   - In a WebWorker (`self` / `globalThis`), `window` is `undefined`!
-   - We should update the bottom of `mohabbat/washmhost/js/browser/index.js` to also attach to `globalThis`:
-     ```js
-     if (typeof globalThis !== 'undefined') {
-       globalThis.washmhost = washmhost;
-       globalThis.washmhostExports = {
-         washmhost, HostState, AsyncIndexedDBFS, resolvePath, marshalStat,
-         STAT_KIND_UNKNOWN, STAT_KIND_FILE, STAT_KIND_DIR, STAT_KIND_SYMLINK,
-         FLAG_COMPLETED, mapErrno, unpackVegetable, makeBrowserImports, runEventLoop
-       };
-     }
-     ```
-   - This preserves 100% ES Module compatibility for `<script type="module">` and `node:test`, while allowing any Worker or non-ESM host to access `globalThis.washmhostExports`!
+2. **Classic Script API in `mohabbat/washmhost/js/browser/index.js`**:
+   - The browser host is a classic script, not an ES module. Its implementation
+     is enclosed in an IIFE, and only the deliberate API object is attached to
+     `globalThis.washmhostExports`.
+   - The VS Code extension reads the generated `washmhost.js` asset and
+     evaluates it directly, without stripping ESM syntax or using a bundler.
+   - The website also loads its single generated host copy as a classic script
+     and invokes `window.washmhostExports.washmhost(...)`.
+   - Browser-host tests execute the canonical script in an isolated VM context
+     and consume the same explicit API object. Private helpers and mutable
+     host state remain inside the IIFE.
 
 ---
 
@@ -554,7 +552,9 @@ Because Kabibi runs in the Extension Host Worker and `washmhost.js` already prov
    - Support optional `fs.statEntry(path)` in `path_stat` so statting files on a mounted VFS does not download full file contents.
    - Support `params.cwd` in `washmhost(params)`.
    - Trigger both `27` (Go `wasip1` `SIGWINCH`) and `28` (Unix/Rust `SIGWINCH`) on resize.
-   - Export `washmhost` and helpers on `globalThis.washmhostExports` in addition to ES module `export` so WebWorkers without ESM bundlers can consume it directly.
+   - Keep the browser host as a classic script with a scoped implementation
+     and an explicit `globalThis.washmhostExports` API for the website and
+     WebWorker-based extension host.
    - Add unit tests in `mohabbat/washmhost/js/browser/index.test.js` covering `O_TRUNC`, `statEntry`, `params.cwd`, and signal `27`.
 
 2. **Step 2 — Create `kabibi/vscode/` Raw-JS Web Extension**:
