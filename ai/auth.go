@@ -10,6 +10,9 @@ import (
 )
 
 func ValidateRemoteCredential(ctx context.Context, cfg RemoteEngineConfig) error {
+	if cfg.APIKey == "" && cfg.Credential != nil {
+		cfg.APIKey = cfg.Credential.SecretToken()
+	}
 	if cfg.APIKey == "" {
 		return fmt.Errorf("remote AI credential must not be empty")
 	}
@@ -37,14 +40,33 @@ func ValidateRemoteCredential(ctx context.Context, cfg RemoteEngineConfig) error
 		if request.url == "" {
 			request.url = "https://api.anthropic.com/v1/models"
 		}
-		request.headers["x-api-key"] = cfg.APIKey
 		request.headers["anthropic-version"] = "2023-06-01"
+		if isAnthropicOAuthToken(cfg.Credential, cfg.APIKey) {
+			request.headers["Authorization"] = "Bearer " + cfg.APIKey
+			request.headers["anthropic-beta"] = "claude-code-20250219,oauth-2025-04-20"
+		} else {
+			request.headers["x-api-key"] = cfg.APIKey
+		}
 	case RemoteGemini:
 		request.url = cfg.BaseURL
 		if request.url == "" {
 			request.url = "https://generativelanguage.googleapis.com/v1beta/models"
 		}
 		request.headers["x-goog-api-key"] = cfg.APIKey
+	case RemoteCopilot:
+		enterpriseDomain := ""
+		if cfg.Credential != nil {
+			enterpriseDomain = cfg.Credential.MetaString("enterprise_url")
+		}
+		request.url = cfg.BaseURL
+		if request.url == "" {
+			request.url = DeriveGitHubCopilotBaseURL(cfg.APIKey, enterpriseDomain) + "/models"
+		}
+		request.headers["Authorization"] = "Bearer " + cfg.APIKey
+		request.headers["X-GitHub-Api-Version"] = copilotAPIVersion
+		for k, v := range copilotStaticHeaders {
+			request.headers[k] = v
+		}
 	default:
 		return fmt.Errorf("unsupported remote AI provider %q", cfg.Provider)
 	}

@@ -6,27 +6,156 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strconv"
+	"os"
 	"strings"
 	"sync"
+	"time"
 
-	"github.com/charmbracelet/x/input"
-	"github.com/mavity/rusticated/kabibi/ui/wizard"
+	"ai"
+	"mvdan.cc/sh/v3/interp"
 )
 
-var errOnboardingCancelled = errors.New("AI onboarding cancelled")
+var errOnboardingCancelled = ai.ErrAuthCancelled
 
-type wizardResult struct {
-	answer wizard.Answer
-	err    error
-}
-
+// OnboardingPrompter is retained as a backwards-compatible adapter that can
+// drive a TerminalSession or be driven by legacy unit tests.
 type OnboardingPrompter interface {
 	Choose(ctx context.Context, title, message string, options []string, defaultChoice int) (int, error)
 	Confirm(ctx context.Context, title, message string) (bool, error)
 	Input(ctx context.Context, title, message string, secret bool) (string, error)
 }
 
+// commandTerminalSession adapts an in-process *CommandTerminal and output writer
+// to ai.TerminalSession, following the exact pattern of runPager in pager.go.
+type commandTerminalSession struct {
+	term   *CommandTerminal
+	writer io.Writer
+	isTTY  bool
+}
+
+func newCommandTerminalSession(term *CommandTerminal, writer io.Writer, isTTY bool) *commandTerminalSession {
+	return &commandTerminalSession{
+		term:   term,
+		writer: writer,
+		isTTY:  isTTY && term != nil,
+	}
+}
+
+func (s *commandTerminalSession) Read(p []byte) (int, error) {
+	if s == nil || s.term == nil {
+		return 0, io.EOF
+	}
+	return s.term.ReadInput(p)
+}
+
+func (s *commandTerminalSession) Write(p []byte) (int, error) {
+	if s == nil || s.writer == nil {
+		return len(p), nil
+	}
+	return s.writer.Write(p)
+}
+
+func (s *commandTerminalSession) Size() (int, int) {
+	if s == nil || s.term == nil {
+		return 80, 23
+	}
+	return s.term.Size()
+}
+
+func (s *commandTerminalSession) IsTTY() bool {
+	return s != nil && s.isTTY && s.term != nil
+}
+
+func (s *commandTerminalSession) SubscribeRawInput() (func(context.Context, []byte) (int, error), func()) {
+	if s == nil || s.term == nil {
+		return func(context.Context, []byte) (int, error) { return 0, io.EOF }, func() {}
+	}
+	release := s.term.SubscribeControlInput()
+	readKey := func(ctx context.Context, p []byte) (int, error) {
+		return s.term.ReadControlInputContext(ctx, p)
+	}
+	return readKey, release
+}
+
+type writeFunc func([]byte) (int, error)
+
+func (f writeFunc) Write(p []byte) (int, error) {
+	return f(p)
+}
+
+// openInteractiveTerminalSession attaches a temporary in-process CommandTerminal
+// and liveOutputState block inside Shell (just like OnAICommandStart + RunCommand)
+// so AI initialization and provider authentication run inside a virtual PTY block.
+func (s *Shell) openInteractiveTerminalSession(ctx context.Context, title string) (ai.TerminalSession, func(exitCode int)) {
+	if s == nil {
+		return &ai.StdioTerminalSession{Reader: strings.NewReader(""), Writer: io.Discard}, func(int) {}
+	}
+	execSess := s.execSess
+	cols, rows := 78, 20
+	var cwd string
+	if execSess != nil {
+		cols, rows = execSess.AIExecPTYSize()
+		cwd = execSess.Dir()
+	}
+
+	cmdTerm := newCommandTerminal(ctx, cols, rows)
+	var prevTerm *CommandTerminal
+	if execSess != nil {
+		execSess.terminalMu.Lock()
+		prevTerm = execSess.activeTerminal
+		execSess.activeTerminal = cmdTerm
+		execSess.terminalMu.Unlock()
+	}
+
+	onChunk, onFinish := s.OnAICommandStart(title, cwd)
+	startedAt := time.Now()
+	var closeOnce sync.Once
+	closeFn := func(exitCode int) {
+		closeOnce.Do(func() {
+			if execSess != nil {
+				execSess.terminalMu.Lock()
+				if execSess.activeTerminal == cmdTerm {
+					execSess.activeTerminal = prevTerm
+				}
+				execSess.terminalMu.Unlock()
+			}
+			if onFinish != nil {
+				onFinish(exitCode, time.Since(startedAt))
+			}
+		})
+	}
+
+	writer := writeFunc(func(p []byte) (int, error) {
+		if onChunk != nil {
+			onChunk(p)
+		}
+		return len(p), nil
+	})
+	return newCommandTerminalSession(cmdTerm, writer, true), closeFn
+}
+
+// prompterTerminalAdapter wraps an OnboardingPrompter over an ai.TerminalSession.
+type terminalOnboardingPrompter struct {
+	term ai.TerminalSession
+}
+
+func newTerminalOnboardingPrompter(term ai.TerminalSession) *terminalOnboardingPrompter {
+	return &terminalOnboardingPrompter{term: term}
+}
+
+func (p *terminalOnboardingPrompter) Choose(ctx context.Context, title, message string, options []string, defaultChoice int) (int, error) {
+	return ai.PromptSelect(ctx, p.term, title, message, options, defaultChoice)
+}
+
+func (p *terminalOnboardingPrompter) Confirm(ctx context.Context, title, message string) (bool, error) {
+	return ai.PromptConfirm(ctx, p.term, title, message)
+}
+
+func (p *terminalOnboardingPrompter) Input(ctx context.Context, title, message string, secret bool) (string, error) {
+	return ai.PromptLine(ctx, p.term, title, message, secret)
+}
+
+// TUIOnboardingPrompter opens a virtual PTY terminal session on Shell when needed.
 type TUIOnboardingPrompter struct {
 	shell *Shell
 }
@@ -35,78 +164,44 @@ func NewTUIOnboardingPrompter(shell *Shell) *TUIOnboardingPrompter {
 	return &TUIOnboardingPrompter{shell: shell}
 }
 
+func (p *TUIOnboardingPrompter) openTerminal(ctx context.Context, title string) (ai.TerminalSession, func(int)) {
+	if p == nil || p.shell == nil {
+		return &ai.StdioTerminalSession{Reader: strings.NewReader(""), Writer: io.Discard}, func(int) {}
+	}
+	return p.shell.openInteractiveTerminalSession(ctx, title)
+}
+
 func (p *TUIOnboardingPrompter) Choose(ctx context.Context, title, message string, options []string, defaultChoice int) (int, error) {
-	answer, err := p.prompt(ctx, wizard.Prompt{
-		Title: title, Message: message, Kind: wizard.Choose, Options: append([]string(nil), options...), Default: defaultChoice,
-	})
-	return answer.Choice, err
+	term, closeFn := p.openTerminal(ctx, "ai setup")
+	choice, err := ai.PromptSelect(ctx, term, title, message, options, defaultChoice)
+	if err != nil {
+		closeFn(1)
+		return -1, err
+	}
+	closeFn(0)
+	return choice, nil
 }
 
 func (p *TUIOnboardingPrompter) Confirm(ctx context.Context, title, message string) (bool, error) {
-	answer, err := p.prompt(ctx, wizard.Prompt{Title: title, Message: message, Kind: wizard.Confirm})
-	return answer.Accepted, err
+	term, closeFn := p.openTerminal(ctx, "ai setup")
+	ok, err := ai.PromptConfirm(ctx, term, title, message)
+	if err != nil || !ok {
+		closeFn(1)
+		return ok, err
+	}
+	closeFn(0)
+	return true, nil
 }
 
 func (p *TUIOnboardingPrompter) Input(ctx context.Context, title, message string, secret bool) (string, error) {
-	kind := wizard.Text
-	if secret {
-		kind = wizard.Secret
+	term, closeFn := p.openTerminal(ctx, "ai setup")
+	val, err := ai.PromptLine(ctx, term, title, message, secret)
+	if err != nil {
+		closeFn(1)
+		return "", err
 	}
-	answer, err := p.prompt(ctx, wizard.Prompt{Title: title, Message: message, Kind: kind})
-	return answer.Text, err
-}
-
-func (p *TUIOnboardingPrompter) prompt(ctx context.Context, prompt wizard.Prompt) (wizard.Answer, error) {
-	if p == nil || p.shell == nil {
-		return wizard.Answer{}, fmt.Errorf("interactive onboarding requires a shell widget")
-	}
-	return p.shell.promptWizard(ctx, prompt)
-}
-
-func (s *Shell) promptWizard(ctx context.Context, prompt wizard.Prompt) (wizard.Answer, error) {
-	result := make(chan wizardResult, 1)
-	var once sync.Once
-	widget := wizard.New(prompt, func(answer wizard.Answer) {
-		once.Do(func() { result <- wizardResult{answer: answer} })
-	}, func() {
-		once.Do(func() { result <- wizardResult{err: errOnboardingCancelled} })
-	})
-	s.mu.Lock()
-	if s.wizardWidget != nil {
-		s.mu.Unlock()
-		return wizard.Answer{}, fmt.Errorf("another onboarding prompt is already active")
-	}
-	s.wizardWidget = widget
-	s.mu.Unlock()
-	s.invalidate()
-
-	var response wizardResult
-	select {
-	case response = <-result:
-	case <-ctx.Done():
-		response.err = ctx.Err()
-	}
-	s.mu.Lock()
-	if s.wizardWidget == widget {
-		s.wizardWidget = nil
-	}
-	s.mu.Unlock()
-	s.invalidate()
-	return response.answer, response.err
-}
-
-func (s *Shell) handleWizardEvent(event input.Event) bool {
-	s.mu.Lock()
-	widget := s.wizardWidget
-	s.mu.Unlock()
-	if widget == nil {
-		return false
-	}
-	consumed := widget.HandleEvent(event)
-	if consumed {
-		s.invalidate()
-	}
-	return consumed
+	closeFn(0)
+	return val, nil
 }
 
 type StdioOnboardingPrompter struct {
@@ -124,76 +219,107 @@ func NewStdioOnboardingPrompter(reader io.Reader, writer io.Writer) *StdioOnboar
 	return &StdioOnboardingPrompter{reader: bufio.NewReader(reader), writer: writer}
 }
 
+func (p *StdioOnboardingPrompter) terminalSession() ai.TerminalSession {
+	if p == nil {
+		return &ai.StdioTerminalSession{Reader: strings.NewReader(""), Writer: io.Discard}
+	}
+	return &ai.StdioTerminalSession{Reader: p.reader, Writer: p.writer, TTY: false}
+}
+
 func (p *StdioOnboardingPrompter) Choose(ctx context.Context, title, message string, options []string, defaultChoice int) (int, error) {
-	if err := ctx.Err(); err != nil {
-		return -1, err
-	}
-	if _, err := fmt.Fprintf(p.writer, "\n%s\n%s\n", title, message); err != nil {
-		return -1, fmt.Errorf("write AI onboarding prompt: %w", err)
-	}
-	for i, option := range options {
-		if _, err := fmt.Fprintf(p.writer, "  [%d] %s\n", i+1, option); err != nil {
-			return -1, fmt.Errorf("write AI onboarding option: %w", err)
-		}
-	}
-	var promptErr error
-	if defaultChoice >= 0 && defaultChoice < len(options) {
-		_, promptErr = fmt.Fprintf(p.writer, "Choice [1-%d, default %d]: ", len(options), defaultChoice+1)
-	} else {
-		_, promptErr = fmt.Fprintf(p.writer, "Choice [1-%d]: ", len(options))
-	}
-	if promptErr != nil {
-		return -1, fmt.Errorf("write AI choice prompt: %w", promptErr)
-	}
-	line, err := p.readLine()
-	if err != nil {
-		return -1, err
-	}
-	if line == "" && defaultChoice >= 0 && defaultChoice < len(options) {
-		return defaultChoice, nil
-	}
-	choice, err := strconv.Atoi(line)
-	if err != nil || choice < 1 || choice > len(options) {
-		return -1, fmt.Errorf("invalid choice %q; enter a number from 1 to %d", line, len(options))
-	}
-	return choice - 1, nil
+	return ai.PromptSelect(ctx, p.terminalSession(), title, message, options, defaultChoice)
 }
 
 func (p *StdioOnboardingPrompter) Confirm(ctx context.Context, title, message string) (bool, error) {
-	if err := ctx.Err(); err != nil {
-		return false, err
+	return ai.PromptConfirm(ctx, p.terminalSession(), title, message)
+}
+
+func (p *StdioOnboardingPrompter) Input(ctx context.Context, title, message string, secret bool) (string, error) {
+	return ai.PromptLine(ctx, p.terminalSession(), title, message, secret)
+}
+
+// aiBuiltinMiddleware intercepts `ai` commands (`ai setup`, `ai login [provider]`,
+// `ai logout [provider]`, `ai status`) and runs them in-process over CommandTerminal,
+// just like `git log` in git_builtin.go.
+func aiBuiltinMiddleware(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+	return func(ctx context.Context, args []string) error {
+		if len(args) == 0 || args[0] != "ai" {
+			return next(ctx, args)
+		}
+		return runAIBuiltin(ctx, args[1:])
 	}
-	if _, err := fmt.Fprintf(p.writer, "\n%s\n%s [y/N]: ", title, message); err != nil {
-		return false, fmt.Errorf("write AI confirmation prompt: %w", err)
+}
+
+func runAIBuiltin(ctx context.Context, args []string) error {
+	hc := interp.HandlerCtx(ctx)
+	execSess, _ := execSessionFromContext(ctx)
+	cmdTerm := commandTerminalFromContext(ctx)
+	isTTY := false
+	if execSess != nil && cmdTerm != nil {
+		isTTY = execSess.StreamTTY(ctx, hc).Stdout
 	}
-	line, err := p.readLine()
-	if err != nil {
-		return false, err
+	var term ai.TerminalSession
+	if cmdTerm != nil {
+		term = newCommandTerminalSession(cmdTerm, hc.Stdout, isTTY)
+	} else {
+		term = &ai.StdioTerminalSession{Reader: hc.Stdin, Writer: hc.Stdout, TTY: false}
 	}
-	switch strings.ToLower(line) {
-	case "", "n", "no":
-		return false, nil
-	case "y", "yes":
-		return true, nil
+
+	sub := "setup"
+	if len(args) > 0 {
+		sub = strings.ToLower(strings.TrimSpace(args[0]))
+	}
+	switch sub {
+	case "help", "--help", "-h":
+		fmt.Fprintln(hc.Stdout, `Kabibi built-in AI control
+
+Usage:
+  ai setup              Configure local Gemma or cloud AI provider
+  ai login [provider]   Authenticate with a cloud provider (openrouter, anthropic, openai, github-copilot, gemini)
+  ai logout [provider]  Remove stored credentials for a provider
+  ai status             Show current AI configuration and stored credentials`)
+		return nil
+	case "status":
+		return runAIStatusBuiltin(ctx, hc.Stdout)
+	case "logout":
+		providerArg := ""
+		if len(args) > 1 {
+			providerArg = strings.ToLower(strings.TrimSpace(args[1]))
+		}
+		return runAILogoutBuiltin(ctx, term, providerArg)
+	case "login":
+		providerArg := ""
+		if len(args) > 1 {
+			providerArg = strings.ToLower(strings.TrimSpace(args[1]))
+		}
+		runner := NewLazyAIRunner(execSess)
+		if _, err := runner.configureRemoteProviderWithTerm(ctx, term, providerArg); err != nil {
+			if errors.Is(err, errOnboardingCancelled) {
+				fmt.Fprintln(hc.Stderr, "ai login: cancelled")
+				return interp.ExitStatus(1)
+			}
+			fmt.Fprintf(hc.Stderr, "ai login: %v\n", err)
+			return interp.ExitStatus(1)
+		}
+		return nil
+	case "setup":
+		runner := NewLazyAIRunner(execSess)
+		if _, err := runner.configureAIWithTerm(ctx, term); err != nil {
+			if errors.Is(err, errOnboardingCancelled) {
+				fmt.Fprintln(hc.Stderr, "ai setup: cancelled")
+				return interp.ExitStatus(1)
+			}
+			fmt.Fprintf(hc.Stderr, "ai setup: %v\n", err)
+			return interp.ExitStatus(1)
+		}
+		return nil
 	default:
-		return false, fmt.Errorf("invalid confirmation %q; enter y or n", line)
+		fmt.Fprintf(hc.Stderr, "ai: unknown subcommand %q (try 'ai --help')\n", sub)
+		return interp.ExitStatus(2)
 	}
 }
 
-func (p *StdioOnboardingPrompter) Input(ctx context.Context, title, message string, _ bool) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	if _, err := fmt.Fprintf(p.writer, "\n%s\n%s: ", title, message); err != nil {
-		return "", fmt.Errorf("write AI input prompt: %w", err)
-	}
-	return p.readLine()
+func init() {
+	_ = os.Stdin
 }
 
-func (p *StdioOnboardingPrompter) readLine() (string, error) {
-	line, err := p.reader.ReadString('\n')
-	if err != nil && !(errors.Is(err, io.EOF) && line != "") {
-		return "", fmt.Errorf("AI setup needs an interactive response from stdin: %w", err)
-	}
-	return strings.TrimSpace(line), nil
-}

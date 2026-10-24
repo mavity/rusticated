@@ -571,6 +571,7 @@ func createRunnerWithEnv(ctx context.Context, stdin io.Reader, stdout, stderr io
 	opts = append(opts, interp.ExecHandlers(
 		nestedShellAndScriptMiddleware,
 		gitBuiltinMiddleware,
+		aiBuiltinMiddleware,
 		webBuiltinMiddleware,
 		urootBuiltinMiddleware,
 		hostExecMiddleware,

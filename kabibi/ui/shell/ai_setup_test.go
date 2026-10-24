@@ -3,6 +3,7 @@ package shell
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/mavity/rusticated/kabibi/config"
@@ -57,3 +58,32 @@ func TestFormatAIBytes(t *testing.T) {
 		t.Fatalf("formatAIBytes(0) = %q", got)
 	}
 }
+
+func TestAIBuiltinStatusAndHelpOverCommandTerminal(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	es, err := NewExecutionSession(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewExecutionSession() error = %v", err)
+	}
+	es.SetCommandTerminalAttached(true)
+
+	rec, err := es.RunCommand(context.Background(), "ai status", nil, SourceUserShell, nil)
+	if err != nil {
+		t.Fatalf("RunCommand('ai status') error = %v", err)
+	}
+	if rec.ExitCode != 0 || !strings.Contains(rec.Output, "unconfigured") {
+		t.Fatalf("ai status output = %q (exit %d)", rec.Output, rec.ExitCode)
+	}
+
+	recHelp, err := es.RunCommand(context.Background(), "ai --help", nil, SourceUserShell, nil)
+	if err != nil {
+		t.Fatalf("RunCommand('ai --help') error = %v", err)
+	}
+	if recHelp.ExitCode != 0 || !strings.Contains(recHelp.Output, "ai login") {
+		t.Fatalf("ai --help output = %q (exit %d)", recHelp.Output, recHelp.ExitCode)
+	}
+}
+

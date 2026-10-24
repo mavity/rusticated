@@ -378,7 +378,7 @@ func (es *ExecutionSession) CanResolveCommand(name string) bool {
 	if interp.IsBuiltin(name) || (!strings.ContainsAny(name, `/\`) && isNestedShellBuiltinName(name)) {
 		return true
 	}
-	if name == "help" || name == "git" || name == "web" || name == "cdp" {
+	if name == "help" || name == "git" || name == "ai" || name == "web" || name == "cdp" {
 		return true
 	}
 	if _, ok := LookupURootCommand(name); ok {

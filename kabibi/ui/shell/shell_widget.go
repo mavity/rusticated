@@ -14,7 +14,6 @@ import (
 	"github.com/charmbracelet/x/input"
 	"github.com/mavity/rusticated/kabibi/ui"
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
-	"github.com/mavity/rusticated/kabibi/ui/wizard"
 )
 
 // ShellMode controls whether the Shell widget operates in the dynamic Stack Widget
@@ -142,7 +141,6 @@ type Shell struct {
 	execSess     *ExecutionSession
 	sessionErr   error
 	aiRunner     AIRunner
-	wizardWidget *wizard.Widget
 	activeCancel context.CancelFunc
 	activeBlock  int
 	running      bool
@@ -180,6 +178,7 @@ func New(opts ShellOptions) *Shell {
 		opts:           opts,
 	}
 	if lazy, ok := aiRunner.(*LazyAIRunner); ok {
+		lazy.SetTerminalOpener(s.openInteractiveTerminalSession)
 		lazy.SetOnboardingPrompter(NewTUIOnboardingPrompter(s))
 	}
 	s.input = NewPromptInput(PromptInputOptions{
@@ -940,11 +939,7 @@ func (s *Shell) Measure(c ui.Constraints) ui.Size {
 	s.mu.Lock()
 	mode := s.mode
 	bottomAligned := s.bottomAligned
-	wizardActive := s.wizardWidget != nil
 	s.mu.Unlock()
-	if wizardActive {
-		return ui.Size{W: w, H: maxH}
-	}
 	if mode == ModeStack && !bottomAligned {
 		occH := s.computeStackHeight(w, maxH)
 		return ui.Size{W: w, H: occH}
@@ -986,7 +981,6 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 	bottomAligned := s.bottomAligned
 	exiting := s.exiting
 	running := s.running
-	wizardWidget := s.wizardWidget
 
 	// Render and cache each block under the lock so cachedBuf is retained across frames.
 	// AI-turn tool output is placed between the prompt and response/status rows.
@@ -1146,9 +1140,6 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 	if mode == ModePlumeHistory || bottomAligned {
 		bufH = maxH
 	}
-	if wizardWidget != nil {
-		bufH = maxH
-	}
 	buf := ui.NewCellBuf(w, bufH)
 
 	// Paint collected block slices in chronological order (reverse of backward walk).
@@ -1243,27 +1234,6 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 			Visible: false,
 		}
 	}
-
-	if wizardWidget != nil {
-		size := wizardWidget.Measure(ui.Constraints{MaxW: w, MaxH: buf.Height})
-		x := (w - size.W) / 2
-		y := (buf.Height - size.H) / 2
-		if x < 0 {
-			x = 0
-		}
-		if y < 0 {
-			y = 0
-		}
-		overlay, overlayCursor := wizardWidget.Render(ui.Rect{W: size.W, H: size.H}, ctx)
-		for oy := 0; oy < overlay.Height && y+oy < buf.Height; oy++ {
-			for ox := 0; ox < overlay.Width && x+ox < buf.Width; ox++ {
-				buf.Set(x+ox, y+oy, overlay.Get(ox, oy))
-			}
-		}
-		if overlayCursor.Visible {
-			cursor = ui.CursorPos{X: x + overlayCursor.X, Y: y + overlayCursor.Y, Visible: true}
-		}
-	}
 	return buf, cursor
 }
 
@@ -1355,9 +1325,6 @@ func (s *Shell) HandleEvent(e input.Event) bool {
 		return false
 
 	case input.PasteEvent:
-		if s.handleWizardEvent(evt) {
-			return true
-		}
 		s.mu.Lock()
 		running := s.running
 		execSess := s.execSess
@@ -1371,9 +1338,6 @@ func (s *Shell) HandleEvent(e input.Event) bool {
 		return s.input.HandleEvent(evt)
 	case *input.PasteEvent:
 		if evt != nil {
-			if s.handleWizardEvent(*evt) {
-				return true
-			}
 			s.mu.Lock()
 			running := s.running
 			execSess := s.execSess
@@ -1496,9 +1460,6 @@ func encodeKeyForPTY(ev input.KeyPressEvent) []byte {
 }
 
 func (s *Shell) handleKeyEvent(ev input.KeyPressEvent) bool {
-	if s.handleWizardEvent(ev) {
-		return true
-	}
 	keyStr := ev.String()
 
 	// If a command is actively running, prioritize forwarding keystrokes (including Ctrl+C) to the child PTY

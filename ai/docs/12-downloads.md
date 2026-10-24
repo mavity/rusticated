@@ -1,8 +1,10 @@
 # Kabibi AI Setup, Hardware Calibration, and Provider Support
 
-This document records the implemented first-run AI setup flow and its current
-scope. The user-approved provider scope is **API keys only**: Google/GitHub
-OAuth and GitHub Copilot are deferred.
+This document records the implemented AI setup flow, hardware calibration,
+virtual-PTY (`CommandTerminal` / `TerminalSession`) onboarding and built-in
+commands (`ai setup`, `ai login`, `ai logout`, `ai status`), structured
+credential store with locked token refresh, and cloud provider authentication
+and wire protocols (OpenRouter, Anthropic, OpenAI, GitHub Copilot, and Google Gemini).
 
 ## 1. Runtime behavior and guarantees
 
@@ -449,4 +451,13 @@ To keep the codebase modular without forcing artificial unification:
 ### 13.2 What Remains Strictly Provider-Owned
 - Each provider owns its own `Login(ctx, term)` state machine, endpoints, client IDs, scopes, token exchange payload format (JSON vs. form-urlencoded), model discovery/enabling calls (e.g., Copilot `/models/<id>/policy`, OpenRouter `/models/user`), `Refresh(ctx, cred)` implementation, and `PrepareRequest` wire headers/body adjustments.
 - Neither `Shell` nor `ai.Session` knows how any provider authenticates; they only attach a `TerminalSession` when setup or login is invoked and pass resolved request auth to the backend.
+
+### 13.3 Implementation Status
+The specification in Sections 9–13 has been implemented across:
+- `ai/auth_terminal.go`: `TerminalSession`, `StdioTerminalSession`, `PromptSelect`, `PromptConfirm`, `PromptLine` (with masked secret input), `GeneratePKCE`, `StartLoopbackCallbackServer`, `WaitForCallbackOrManualInput`, and `PollDeviceCodeFlow`.
+- `ai/auth_providers.go`: Structured `Credential`, `CredentialStore`, `ResolveProviderCredential` (double-checked locking + uncancellable rotation commit), and provider-owned authentication/refresh flows for OpenRouter, Anthropic, OpenAI (ChatGPT OAuth + Device Code + API key), GitHub Copilot (Device Code + session token + model catalog & policy enabling), and Google Gemini.
+- `ai/backend_remote.go` & `ai/auth.go`: Per-request credential resolution/refresh, OpenAI `/v1/responses` wire protocol for ChatGPT OAuth tokens, Anthropic Claude Code OAuth wire protocol (`Bearer` auth, `anthropic-beta`, system identity block, canonical tool casing), and GitHub Copilot dynamic `proxy-ep` base URL and per-turn headers.
+- `kabibi/credstore/credstore.go`: Structured `Credential` persistence with `Read`, `Modify`, `Remove`, and `List` (retaining backwards compatibility with legacy `Get`/`Set`/`Delete`).
+- `kabibi/ui/shell/ai_onboarding.go`, `ai_setup.go`, `ai_runner.go`, `shell_widget.go`, `shell.go`, `exec_session.go`: Retired `Shell.wizardWidget` overlay in favor of `CommandTerminal`-backed `TerminalSession` blocks and added the in-process `ai` built-in command (`ai setup`, `ai login`, `ai logout`, `ai status`).
+
 
