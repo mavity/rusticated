@@ -1,6 +1,33 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import washmhost, {
+import vm from 'node:vm';
+import fs from 'node:fs';
+import path from 'node:path';
+
+const washmhostSource = fs.readFileSync(new URL('./index.js', import.meta.url), 'utf8');
+const browserHostContext = vm.createContext({
+  AbortController: globalThis.AbortController,
+  ArrayBuffer,
+  Blob: globalThis.Blob,
+  DataView,
+  fetch: globalThis.fetch,
+  indexedDB: globalThis.indexedDB,
+  IDBKeyRange: globalThis.IDBKeyRange,
+  Map,
+  Promise,
+  Response: globalThis.Response,
+  setTimeout,
+  clearTimeout,
+  TextDecoder,
+  TextEncoder,
+  Uint8Array,
+  WebAssembly,
+  console
+});
+vm.runInContext(washmhostSource, browserHostContext, { filename: 'washmhost-browser.js' });
+
+const {
+  washmhost,
   HostState,
   AsyncIndexedDBFS,
   resolvePath,
@@ -22,10 +49,8 @@ import washmhost, {
   wasiENOTTY,
   wasiERANGE,
   runEventLoop,
-  unpackVegetable
-} from './index.js';
-import fs from 'node:fs';
-import path from 'node:path';
+  unpackVegetable,
+} = browserHostContext.washmhostExports;
 
 test('Path resolution normalizes relative, root and parent segments', () => {
   assert.equal(resolvePath('/home/user', 'file.txt'), '/home/user/file.txt');
@@ -37,6 +62,16 @@ test('Path resolution normalizes relative, root and parent segments', () => {
 
 test('Path resolution preserves leading and trailing whitespace', () => {
   assert.equal(resolvePath('/home/user', ' name '), '/home/user/ name ');
+});
+
+test('Browser host script exposes only its documented API', () => {
+  assert.ok(browserHostContext.washmhostExports);
+  assert.equal(vm.runInContext('typeof HostState', browserHostContext), 'undefined');
+  assert.equal(vm.runInContext('typeof resolvePath', browserHostContext), 'undefined');
+  assert.equal(vm.runInContext('typeof washmhost', browserHostContext), 'undefined');
+  assert.equal(vm.runInContext('typeof evalOverflow', browserHostContext), 'undefined');
+  assert.equal(vm.runInContext('typeof __rustica_overflow', browserHostContext), 'undefined');
+  assert.equal(vm.runInContext('typeof __rustica_take_overflow', browserHostContext), 'undefined');
 });
 
 test('Overlapped struct marshalling and completion flags', () => {
@@ -572,12 +607,21 @@ test('Virtual eval dylib evaluates sync, async Promise, handles errors and overf
   assert.equal(res4.rc, 2n);
   assert.equal(res4.actualLen, 200);
   assert.equal(res4.outText, 'xxxxxxxxxx');
-  assert.equal(globalThis.__rustica_take_overflow(), longStr);
+  assert.equal(vm.runInContext('globalThis.washmhostExports.takeEvalOverflow()', browserHostContext), longStr);
 });
 
 test('Vegetable unpacker unpacks payload WASM using embedded decompressor', async () => {
   // Use trivial.bat or mohab.bat from repository root
-  const vegCandidates = ['trivial.bat', 'mohab.bat', 'demo.bat', 'kabibi.bat'];
+  const vegCandidates = [
+    'trivial.bat',
+    'mohab.bat',
+    'demo.bat',
+    'kabibi.bat',
+    path.join('release', 'dist', 'trivial.bat'),
+    path.join('release', 'dist', 'mohab.bat'),
+    path.join('release', 'dist', 'demo.bat'),
+    path.join('release', 'dist', 'kabibi.bat')
+  ];
   let vegPath = null;
   for (const cand of vegCandidates) {
     const full = path.resolve(process.cwd(), cand);
@@ -780,7 +824,7 @@ test('path_stat prefers fs.statEntry over fs.getEntry when provided', async () =
   assert.equal(view.getUint32(104, true), wasiSuccess);
   assert.equal(view.getBigUint64(200 + 16, true), 4096n);
   assert.equal(view.getBigUint64(100 + 16, true), 112n);
-  assert.ok(globalThis.washmhostExports && globalThis.washmhostExports.washmhost === washmhost);
+  assert.ok(browserHostContext.washmhostExports && browserHostContext.washmhostExports.washmhost === washmhost);
 });
 
 test('symbolic links preserve targets, resolve on open, and are removed without following', async () => {

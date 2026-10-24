@@ -307,15 +307,17 @@ The host provides the complete `env` import dictionary required by Go (`wasip1` 
 ## 7. Delivery, Migration & Comprehensive Unit Testing Plan
 
 1. **Artifact Location**:
-   - Create `mohabbat/washmhost/js/browser/index.js` (core reusable browser implementation).
-   - Bundle / expose as `mohabbat/washmhost.js` in the repository root for direct consumption by web clients.
+   - Maintain `mohabbat/washmhost/js/browser/index.js` as the canonical browser-host script.
+   - Generate `release/dist/washmhost.js` for the website and an ignored `kabibi/vscode/washmhost.js` for the VS Code extension. Do not maintain additional checked-in copies.
 2. **Refactoring `index.html`**:
-   - Include `<script type="module" src="mohabbat/washmhost.js"></script>` so the
-     ES module runs and publishes `window.washmhost` for the existing page script.
+   - Load the single website copy with `<script src="washmhost.js"></script>`.
+   - Invoke `window.washmhostExports.washmhost(...)` from the page. The host is a classic script whose implementation is scoped in an IIFE; only its deliberate API is attached to `globalThis`.
    - Extract UI concerns (xterm.js initialization, DOM rendering).
    - Pass LiteRT and proxy shims via `washmhost({ extensions: ... })`.
 3. **Automated Unit Testing Suite**:
-   - Unit tests must be provided covering **all** points of the rusticated ABI:
+   - Load the canonical classic script in an isolated VM context and exercise
+     its explicit `washmhostExports` API. Keep implementation bindings private.
+   - Unit tests must cover **all** points of the rusticated ABI:
      - **Path resolution & normalization** (handling relative paths, `..`, root boundaries).
      - **Overlapped buffer mechanics**: verify `registerOp`, `completeOp`, `drainQueue`, and cancellation with `FLAG_COMPLETED`.
      - **Async IndexedDB file operations**: test `putEntry`, `getEntry`, `readdir`, `removeEntry`, and binary file read/write roundtrips.
