@@ -441,8 +441,8 @@ test('WASM ABI exports metadata and seek imports with expected behavior', async 
   }
 
   const infoPtr = 128;
-  assert.equal(env.get_platform_info(infoPtr, 676), 0);
-  assert.equal(env.get_platform_info(infoPtr, 548), wasiE2BIG);
+  assert.equal(env.get_platform_info(infoPtr, 932), 0);
+  assert.equal(env.get_platform_info(infoPtr, 676), wasiE2BIG);
   const infoView = new DataView(mem.buffer);
   assert.equal(infoView.getUint8(infoPtr + 4), '/'.charCodeAt(0));
   assert.equal(infoView.getUint8(infoPtr + 5), ':'.charCodeAt(0));

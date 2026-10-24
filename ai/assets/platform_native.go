@@ -20,4 +20,3 @@ func InspectRuntimePlatform() RuntimePlatformInfo {
 		EnvironmentKind: "desktop",
 	}
 }
-

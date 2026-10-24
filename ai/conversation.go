@@ -49,6 +49,7 @@ type PromptPart struct {
 	Text           string
 	ImageBase64    string
 	ToolName       string
+	ToolCallID     string
 	Explanation    string
 	ToolResponse   any
 	ToolCalls      []ToolCall
@@ -76,6 +77,7 @@ func (TextEvent) isModelEvent() {}
 // RawArguments is the arguments object exactly as the runtime emitted it, for
 // decoding straight into a typed struct; Arguments is the same data as a map.
 type ToolCall struct {
+	ID           string          `json:"id,omitempty"`
 	Name         string          `json:"name"`
 	Arguments    map[string]any  `json:"arguments"`
 	RawArguments json.RawMessage `json:"-"`
@@ -149,12 +151,6 @@ func (c *Conversation) SendStream(ctx context.Context, parts []PromptPart) iter.
 			yield(nil, ErrClosed)
 			return
 		}
-		payload, err := buildMessageJSON(parts)
-		if err != nil {
-			yield(nil, err)
-			return
-		}
-
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
 
@@ -162,32 +158,29 @@ func (c *Conversation) SendStream(ctx context.Context, parts []PromptPart) iter.
 		var stopped atomic.Bool
 		var looped atomic.Bool
 		var detector loopDetector
-		err = c.impl.sendStream(ctx, payload, func(raw string) {
-			for _, event := range parseChunkEvents(raw) {
-				if stopped.Load() {
-					return
-				}
-				switch e := event.(type) {
-				case TextEvent:
-					if detector.feedText(e.Text) {
-						looped.Store(true)
-						stopped.Store(true)
-						cancel()
-						return
-					}
-				case ToolCallEvent:
-					if detector.feedToolCalls(e.ToolCalls) {
-						looped.Store(true)
-						stopped.Store(true)
-						cancel()
-						return
-					}
-				}
-				if !yield(event, nil) {
+		err := c.impl.sendStream(ctx, parts, func(event ModelEvent) {
+			if stopped.Load() {
+				return
+			}
+			switch e := event.(type) {
+			case TextEvent:
+				if detector.feedText(e.Text) {
+					looped.Store(true)
 					stopped.Store(true)
 					cancel()
 					return
 				}
+			case ToolCallEvent:
+				if detector.feedToolCalls(e.ToolCalls) {
+					looped.Store(true)
+					stopped.Store(true)
+					cancel()
+					return
+				}
+			}
+			if !yield(event, nil) {
+				stopped.Store(true)
+				cancel()
 			}
 		})
 		if looped.Load() {
@@ -477,9 +470,10 @@ func buildMessageJSONWithDate(parts []PromptPart, lastDate *string) (string, err
 	for _, p := range parts {
 		if p.Role == RoleTool || role == RoleTool {
 			content = append(content, map[string]any{
-				"type":     "tool_response",
-				"name":     p.ToolName,
-				"response": formatWireToolResponse(p, lastDate),
+				"type":         "tool_response",
+				"name":         p.ToolName,
+				"tool_call_id": p.ToolCallID,
+				"response":     formatWireToolResponse(p, lastDate),
 			})
 			continue
 		}
@@ -512,6 +506,7 @@ func parseChunkEvents(raw string) []ModelEvent {
 			Text string `json:"text"`
 		} `json:"content"`
 		ToolCalls []struct {
+			ID       string `json:"id"`
 			Type     string `json:"type"`
 			Function struct {
 				Name      string          `json:"name"`
@@ -548,6 +543,7 @@ func parseChunkEvents(raw string) []ModelEvent {
 			args := make(map[string]any)
 			_ = json.Unmarshal(raw, &args)
 			calls = append(calls, ToolCall{
+				ID:           tc.ID,
 				Name:         tc.Function.Name,
 				Arguments:    args,
 				RawArguments: raw,

@@ -394,4 +394,3 @@ func browserModelSize(url string) int64 {
 	defer browserModelSizesMu.Unlock()
 	return browserModelSizes[url]
 }
-

@@ -1398,7 +1398,7 @@ export function makeBrowserImports(hostState, fs, params = {}) {
     },
 
     get_platform_info: (ptr, maxLen) => {
-      const descriptor = new Uint8Array(676);
+      const descriptor = new Uint8Array(932);
       const view = new DataView(descriptor.buffer);
       view.setUint32(0, 1, true);
       descriptor[4] = '/'.charCodeAt(0);
@@ -1414,6 +1414,12 @@ export function makeBrowserImports(hostState, fs, params = {}) {
       setString(220, 'washmhost');
       setString(548, '/home/user');
       setString(612, '/tmp');
+      const memoryGB = Number(navigator.deviceMemory || 0);
+      if (Number.isFinite(memoryGB) && memoryGB > 0) {
+        descriptor[676] = 1;
+        descriptor[677] = 2;
+        view.setBigUint64(684, BigInt(Math.floor(memoryGB * 1024 ** 3)), true);
+      }
 
       if (Number(maxLen) < descriptor.length) return wasiE2BIG;
       hostState.getGuestSlice(Number(ptr), descriptor.length).set(descriptor);

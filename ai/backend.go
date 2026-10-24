@@ -24,16 +24,16 @@ var Verbose bool
 
 // ── Public interfaces (consumed by engine.go / ai.go) ───────────────────────
 
-// engineBackend abstracts the platform-specific dynamic library execution for
-// a LiteRT-LM engine. All cross-boundary payloads are passed as plain Go JSON strings.
+// engineBackend abstracts the engine implementation. Wire-format serialization
+// belongs in the concrete backend, not in the conversation orchestration layer.
 type engineBackend interface {
-	NewConversation(systemJSON, toolsJSON, historyJSON string) (conversationBackend, error)
+	NewConversation(cfg ConversationConfig) (conversationBackend, error)
 	Close() error
 }
 
-// conversationBackend abstracts the platform-specific execution of an active chat turn.
+// conversationBackend abstracts the execution of an active chat turn.
 type conversationBackend interface {
-	SendStream(ctx context.Context, messageJSON string, onChunk func(string)) error
+	SendStream(ctx context.Context, parts []PromptPart, onEvent func(ModelEvent)) error
 	Clone() (conversationBackend, error)
 	Close() error
 }
@@ -375,7 +375,11 @@ func (b *drvEngineBackend) Close() error {
 	return nil
 }
 
-func (b *drvEngineBackend) NewConversation(systemJSON, toolsJSON, historyJSON string) (conversationBackend, error) {
+func (b *drvEngineBackend) NewConversation(cfg ConversationConfig) (conversationBackend, error) {
+	systemJSON, toolsJSON, historyJSON, err := buildLiteRTConversationConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
 	config := b.drv.cfgCreate(b.engine)
 	if config == 0 {
 		return nil, fmt.Errorf("conversation_config_create returned NULL")
@@ -460,7 +464,7 @@ var errStreamActive = errors.New("ai: conversation already has a stream in fligh
 // ErrClosed. The native runtime keeps unwinding on its own threads; a
 // goroutine waits for its terminal chunk, then deletes the conversation.
 // Chunks arriving after the return never reach onChunk.
-func (c *drvConversationBackend) SendStream(ctx context.Context, messageJSON string, onChunk func(string)) error {
+func (c *drvConversationBackend) SendStream(ctx context.Context, parts []PromptPart, onEvent func(ModelEvent)) error {
 	if c.closed.Load() {
 		return ErrClosed
 	}
@@ -468,6 +472,16 @@ func (c *drvConversationBackend) SendStream(ctx context.Context, messageJSON str
 		return err
 	}
 
+	messageJSON, err := buildMessageJSON(parts)
+	if err != nil {
+		return err
+	}
+
+	onChunk := func(raw string) {
+		for _, event := range parseChunkEvents(raw) {
+			onEvent(event)
+		}
+	}
 	st := newStreamState(onChunk)
 	if !c.active.CompareAndSwap(nil, st) {
 		return errStreamActive

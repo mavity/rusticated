@@ -22,6 +22,26 @@ func rusticated_process_wait(overlapped unsafe.Pointer, handle uint64)
 //go:wasmimport env get_platform_info
 func rusticated_get_platform_info(ptr unsafe.Pointer, maxLen uint32) uint32
 
+const (
+	MemorySlotCount = 16
+
+	MemKindNone         uint8 = 0
+	MemKindSystemTotal  uint8 = 1
+	MemKindSystemAvail  uint8 = 2
+	MemKindGPUDiscrete  uint8 = 3
+	MemKindGPUShared    uint8 = 4
+	MemKindNPUDedicated uint8 = 5
+	MemKindNPUShared    uint8 = 6
+	MemKindSwapTotal    uint8 = 7
+)
+
+type MemorySlot struct {
+	Kind  uint8
+	Flags uint8
+	_     [6]byte
+	Bytes uint64
+}
+
 type PlatformInfo struct {
 	Flags                uint32
 	PathSeparator        byte
@@ -42,6 +62,7 @@ type PlatformInfo struct {
 	BuildPlatform        string
 	UserHomeDir          string
 	TempDir              string
+	MemorySlots          [MemorySlotCount]MemorySlot
 }
 
 var (
@@ -93,6 +114,14 @@ func GetPlatformInfo() *PlatformInfo {
 	pi.BuildPlatform = stringFromBuf(buf[484:548])
 	pi.UserHomeDir = stringFromBuf(buf[548:612])
 	pi.TempDir = stringFromBuf(buf[612:676])
+	for i := range pi.MemorySlots {
+		offset := 676 + i*16
+		pi.MemorySlots[i] = MemorySlot{
+			Kind:  buf[offset],
+			Flags: buf[offset+1],
+			Bytes: readU64(buf[offset+8 : offset+16]),
+		}
+	}
 	platformData = pi
 
 	atomicStore(&platformOnce, 2)
@@ -105,6 +134,10 @@ func readU32(b []byte) uint32 {
 }
 func readU16(b []byte) uint16 {
 	return uint16(b[0]) | uint16(b[1])<<8
+}
+func readU64(b []byte) uint64 {
+	return uint64(b[0]) | uint64(b[1])<<8 | uint64(b[2])<<16 | uint64(b[3])<<24 |
+		uint64(b[4])<<32 | uint64(b[5])<<40 | uint64(b[6])<<48 | uint64(b[7])<<56
 }
 func stringFromBuf(b []byte) string {
 	n := 0

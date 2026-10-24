@@ -444,17 +444,21 @@ func openWebBackend(libPath, modelPath, backend string, maxTokens int) (engineBa
 	return &webEngineBackend{engineID: id}, nil
 }
 
-func (e *webEngineBackend) NewConversation(systemJSON, toolsJSON, historyJSON string) (conversationBackend, error) {
+func (e *webEngineBackend) NewConversation(cfg ConversationConfig) (conversationBackend, error) {
+	systemJSON, toolsJSON, historyJSON, err := buildLiteRTConversationConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
 	convID := atomic.AddUint64(&nextWebConvID, 1)
-	cfg := map[string]any{
+	request := map[string]any{
 		"engineId":    e.engineID,
 		"convId":      convID,
 		"systemJSON":  systemJSON,
 		"toolsJSON":   toolsJSON,
 		"historyJSON": historyJSON,
 	}
-	cfgBytes, _ := json.Marshal(cfg)
-	_, err := EvalJS(fmt.Sprintf("globalThis.__rustica_ai.createConversation(%s)", strconv.Quote(string(cfgBytes))))
+	cfgBytes, _ := json.Marshal(request)
+	_, err = EvalJS(fmt.Sprintf("globalThis.__rustica_ai.createConversation(%s)", strconv.Quote(string(cfgBytes))))
 	if err != nil {
 		return nil, fmt.Errorf("web createConversation: %w", err)
 	}
@@ -502,11 +506,15 @@ type webStreamEvent struct {
 	Error string `json:"error"`
 }
 
-func (c *webConversationBackend) SendStream(ctx context.Context, messageJSON string, onChunk func(string)) error {
+func (c *webConversationBackend) SendStream(ctx context.Context, parts []PromptPart, onEvent func(ModelEvent)) error {
 	if c.closed.Load() {
 		return ErrClosed
 	}
 
+	messageJSON, err := buildMessageJSON(parts)
+	if err != nil {
+		return err
+	}
 	streamIDStr, err := EvalJS(fmt.Sprintf("globalThis.__rustica_ai.startStream(%d, %s)", c.convID, strconv.Quote(messageJSON)))
 	if err != nil {
 		return fmt.Errorf("web startStream: %w", err)
@@ -546,7 +554,9 @@ func (c *webConversationBackend) SendStream(ctx context.Context, messageJSON str
 		switch ev.Type {
 		case "chunk":
 			if ev.Data != "" {
-				onChunk(ev.Data)
+				for _, event := range parseChunkEvents(ev.Data) {
+					onEvent(event)
+				}
 			}
 		case "done":
 			return nil

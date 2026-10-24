@@ -19,10 +19,12 @@ type fakeConvBackend struct {
 	ctxErrEnd atomic.Value // error observed on ctx once all chunks were pushed
 }
 
-func (f *fakeConvBackend) SendStream(ctx context.Context, messageJSON string, onChunk func(string)) error {
+func (f *fakeConvBackend) SendStream(ctx context.Context, _ []PromptPart, onEvent func(ModelEvent)) error {
 	f.called.Store(true)
 	for _, c := range f.chunks {
-		onChunk(c)
+		for _, event := range parseChunkEvents(c) {
+			onEvent(event)
+		}
 	}
 	f.ctxErrEnd.Store(struct{ error }{ctx.Err()})
 	f.finished.Store(true)
@@ -102,20 +104,11 @@ func TestSendStreamYieldsBackendErrorOnceAfterEvents(t *testing.T) {
 	}
 }
 
-func TestSendStreamYieldsPayloadErrorWithoutCallingBackend(t *testing.T) {
-	f := &fakeConvBackend{}
+func TestLiteRTMessageBuilderRejectsUnencodableToolResponse(t *testing.T) {
 	parts := []PromptPart{{Role: RoleTool, ToolName: "x", ToolResponse: make(chan int)}}
 
-	var errs []error
-	for _, err := range newFakeConv(f).SendStream(context.Background(), parts) {
-		errs = append(errs, err)
-	}
-
-	if len(errs) != 1 || errs[0] == nil {
-		t.Fatalf("errs = %v, want exactly one error", errs)
-	}
-	if f.called.Load() {
-		t.Fatal("backend was called despite an unencodable payload")
+	if _, err := buildMessageJSON(parts); err == nil {
+		t.Fatal("buildMessageJSON accepted an unencodable tool response")
 	}
 }
 

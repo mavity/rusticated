@@ -69,6 +69,49 @@ type fmtError string
 
 func (e fmtError) Error() string { return string(e) }
 
+type captureHistoryBackend struct {
+	history []PromptPart
+}
+
+func (b *captureHistoryBackend) NewConversation(cfg ConversationConfig) (conversationBackend, error) {
+	b.history = append([]PromptPart(nil), cfg.History...)
+	return &captureHistoryConversation{}, nil
+}
+
+func (*captureHistoryBackend) Close() error { return nil }
+
+type captureHistoryConversation struct{}
+
+func (*captureHistoryConversation) SendStream(context.Context, []PromptPart, func(ModelEvent)) error {
+	return nil
+}
+
+func (*captureHistoryConversation) Clone() (conversationBackend, error) {
+	return &captureHistoryConversation{}, nil
+}
+
+func (*captureHistoryConversation) Close() error { return nil }
+
+func TestReplaceEngineRestoresCompactedHistory(t *testing.T) {
+	history := []PromptPart{
+		{Role: RoleUser, Text: "retained question"},
+		{Role: RoleModel, Text: "retained answer"},
+	}
+	backend := &captureHistoryBackend{}
+	engine := &Engine{impl: &engineImpl{backend: backend}}
+	session := &Session{
+		systemMessage:    "test system",
+		CompactedHistory: history,
+	}
+	if err := session.ReplaceEngine(engine); err != nil {
+		t.Fatalf("ReplaceEngine() error = %v", err)
+	}
+	if !reflect.DeepEqual(backend.history, history) {
+		t.Fatalf("restored history = %#v, want %#v", backend.history, history)
+	}
+	session.Close()
+}
+
 func TestNewSessionCompilesDeterministicToolSchemas(t *testing.T) {
 	originalProperties := map[string]any{
 		"item": map[string]any{"type": "string", "description": "The item"},
