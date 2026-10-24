@@ -16,9 +16,30 @@ import (
 	"github.com/charmbracelet/x/input"
 	xterm "github.com/charmbracelet/x/term"
 	"github.com/charmbracelet/x/vt"
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/cache"
+	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/storage/filesystem"
+	"github.com/mavity/rusticated/kabibi/internal/gitfs"
 	"github.com/mavity/rusticated/kabibi/ui"
 	"github.com/mavity/rusticated/kabibi/ui/shell"
 )
+
+func initAppTestRepository(t *testing.T, root string) *git.Repository {
+	t.Helper()
+
+	worktreeFS := gitfs.New(root)
+	dotGitFS, err := worktreeFS.Chroot(git.GitDirName)
+	if err != nil {
+		t.Fatalf("create test repository storage filesystem: %v", err)
+	}
+	storer := filesystem.NewStorage(dotGitFS, cache.NewObjectLRUDefault())
+	repo, err := git.Init(storer, worktreeFS)
+	if err != nil {
+		t.Fatalf("initialize test repository: %v", err)
+	}
+	return repo
+}
 
 type syncBuffer struct {
 	mu  sync.Mutex
@@ -549,6 +570,7 @@ func TestAppTUI_ModeToggle_ZeroPlumeAndPlumeHistory(t *testing.T) {
 	if got := wZero.Measure(ui.Constraints{MaxW: 80, MaxH: 24}); got != (ui.Size{W: 80, H: 5}) {
 		t.Fatalf("ModeStack Measure() = %#v, want {W:80, H:5}", got)
 	}
+
 	bufZero, curZero := wZero.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 24}, ui.RenderContext{Focused: true})
 	if bufZero.Height != 5 || curZero.Y != 3 {
 		t.Fatalf("ModeStack Render() height=%d cursorY=%d, want height=5 cursorY=3", bufZero.Height, curZero.Y)
@@ -1235,5 +1257,122 @@ func TestAppTUI_ExitWithPanelsOpenRemovesPanelsAndRetainsHistory(t *testing.T) {
 	}
 	if !strings.Contains(finalJoined, "exit") {
 		t.Fatalf("final terminal screen should retain shell exit command:\n%s", finalJoined)
+	}
+}
+
+func TestAppTUI_EndToEnd_GitLogPagerQuit(t *testing.T) {
+	const gitPagerPrompt = "--More-- (Space: page, Enter: line, b: back, q: quit)"
+
+	workDir := t.TempDir()
+	repo := initAppTestRepository(t, workDir)
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("open Git worktree: %v", err)
+	}
+	for i := 0; i < 20; i++ {
+		if err := os.WriteFile(filepath.Join(workDir, "history.txt"), []byte(fmt.Sprintf("%02d\n", i)), 0o644); err != nil {
+			t.Fatalf("write commit %d: %v", i, err)
+		}
+		if _, err := worktree.Add("history.txt"); err != nil {
+			t.Fatalf("stage commit %d: %v", i, err)
+		}
+		when := time.Unix(1_700_000_000+int64(i), 0)
+		signature := &object.Signature{Name: "Kabibi Test", Email: "author@example.test", When: when}
+		if _, err := worktree.Commit(fmt.Sprintf("commit-%02d", i), &git.CommitOptions{
+			Author: signature, Committer: signature,
+		}); err != nil {
+			t.Fatalf("create commit %d: %v", i, err)
+		}
+	}
+
+	var host *ui.Host
+	appWidget := NewWidget(AppWidgetOptions{
+		WorkingDir: workDir,
+		OnExit: func() {
+			if host != nil {
+				host.Stop()
+			}
+		},
+	})
+	defer appWidget.Close()
+	appWidget.Shell().SetPrompt("፧")
+
+	host = ui.NewHost(appWidget, false)
+	defer host.Stop()
+
+	inR, inW := io.Pipe()
+	defer inR.Close()
+	defer inW.Close()
+
+	var rawTermOut syncBuffer
+	const termW, termH = 80, 10
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- host.RunWithIO(
+			inR,
+			&rawTermOut,
+			func(uintptr) (*xterm.State, error) { return &xterm.State{}, nil },
+			func(uintptr, *xterm.State) error { return nil },
+			func(uintptr) (int, int, error) { return termW, termH, nil },
+		)
+	}()
+
+	waitUntil := func(timeout time.Duration, condition func() bool, description string) {
+		t.Helper()
+		deadline := time.Now().Add(timeout)
+		for time.Now().Before(deadline) {
+			if condition() {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for %s; terminal output: %q", description, rawTermOut.String())
+	}
+	waitUntil(3*time.Second, func() bool {
+		return strings.Contains(rawTermOut.String(), "Preliminary version: be careful.")
+	}, "initial TUI frame")
+
+	if _, err := io.WriteString(inW, "export GIT_PAGER=less\r"); err != nil {
+		t.Fatalf("set interactive pager: %v", err)
+	}
+	waitUntil(5*time.Second, func() bool {
+		return len(appWidget.Shell().Blocks()) >= 2 && !appWidget.Shell().IsRunning()
+	}, "pager environment setup command")
+
+	if _, err := io.WriteString(inW, "git log\r"); err != nil {
+		t.Fatalf("start git log: %v", err)
+	}
+	waitUntil(5*time.Second, func() bool {
+		return strings.Contains(rawTermOut.String(), gitPagerPrompt)
+	}, "Git log pager prompt")
+	if !appWidget.Shell().IsRunning() {
+		t.Fatal("Git log command finished before receiving pager input")
+	}
+	if output := rawTermOut.String(); !strings.Contains(output, "commit-19") {
+		t.Fatal("first page did not display the newest commit")
+	} else if strings.Contains(output, "commit-00") {
+		t.Fatal("oldest commit was displayed before the pager was dismissed")
+	}
+
+	if _, err := io.WriteString(inW, "q"); err != nil {
+		t.Fatalf("send pager quit key through TUI input: %v", err)
+	}
+	waitUntil(5*time.Second, func() bool {
+		return len(appWidget.Shell().Blocks()) >= 3 && !appWidget.Shell().IsRunning()
+	}, "Git log command to finish after q")
+	if strings.Contains(rawTermOut.String(), "commit-00") {
+		t.Fatal("oldest commit was displayed after quitting the first page")
+	}
+
+	if _, err := io.WriteString(inW, "exit\r"); err != nil {
+		t.Fatalf("exit TUI: %v", err)
+	}
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Host.RunWithIO returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Host.RunWithIO stalled after exiting")
 	}
 }

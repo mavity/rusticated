@@ -63,7 +63,7 @@ func runStreamedGitLog(ctx context.Context, hc interp.HandlerContext, invocation
 		return true, produce(hc.Stdout)
 	}
 
-	pagerEnabled, err := gitLogPagerEnabled(execSess, hc, invocation, repo)
+	pagerEnabled, err := gitPagerEnabled(execSess, hc, invocation, repo, "log")
 	if err != nil {
 		fmt.Fprintf(hc.Stderr, "git log: %v\n", err)
 		return true, interp.ExitStatus(1)
@@ -109,7 +109,7 @@ func runBufferedGitLogWithPager(ctx context.Context, hc interp.HandlerContext, i
 	if err != nil {
 		return false, nil
 	}
-	pagerEnabled, err := gitLogPagerEnabled(execSess, hc, invocation, repo)
+	pagerEnabled, err := gitPagerEnabled(execSess, hc, invocation, repo, "log")
 	if err != nil {
 		fmt.Fprintf(hc.Stderr, "git log: %v\n", err)
 		return true, interp.ExitStatus(1)
@@ -130,6 +130,62 @@ func runBufferedGitLogWithPager(ctx context.Context, hc interp.HandlerContext, i
 		return true, interp.ExitStatus(1)
 	}
 	return true, commandErr
+}
+
+func runBufferedGitDiffWithPager(ctx context.Context, hc interp.HandlerContext, invocation gitInvocation) (bool, error) {
+	commandIndex := gitCommandIndex(invocation.args)
+	if commandIndex >= len(invocation.args) || invocation.args[commandIndex] != "diff" ||
+		invocation.noPager || hasNoPagerOption(invocation.args) ||
+		gitInvocationHasAlternateRepo(ctx, hc, invocation) {
+		return false, nil
+	}
+	_, supported := parseStreamedGitDiffArgs(invocation.args[commandIndex+1:])
+	if !supported {
+		return false, nil
+	}
+	execSess, _ := execSessionFromContext(ctx)
+	terminal := commandTerminalFromContext(ctx)
+	if execSess == nil || terminal == nil || !execSess.StreamTTY(ctx, hc).Stdout {
+		return false, nil
+	}
+	repo, err := gitcore.Open(invocation.effectiveDir)
+	if err != nil {
+		return false, nil
+	}
+	pagerEnabled, err := gitPagerEnabled(execSess, hc, invocation, repo, "diff")
+	if err != nil {
+		fmt.Fprintf(hc.Stderr, "git diff: %v\n", err)
+		return true, interp.ExitStatus(1)
+	}
+	if !pagerEnabled {
+		return false, nil
+	}
+
+	var output bytes.Buffer
+	bufferedHC := hc
+	bufferedHC.Stdout = &output
+	commandErr := runGoGit(ctx, bufferedHC, invocation)
+	if ctx.Err() != nil {
+		return true, commandErr
+	}
+	if err := runPager(ctx, terminal, &output, hc.Stdout); err != nil {
+		fmt.Fprintf(hc.Stderr, "git diff pager: %v\n", err)
+		return true, interp.ExitStatus(1)
+	}
+	return true, commandErr
+}
+
+func parseStreamedGitDiffArgs(args []string) (staged bool, supported bool) {
+	for _, arg := range args {
+		switch arg {
+		case "--cached", "--staged":
+			staged = true
+		case "--no-color":
+		default:
+			return false, false
+		}
+	}
+	return staged, true
 }
 
 func streamedLogInvocationSupported(ctx context.Context, hc interp.HandlerContext, invocation gitInvocation) bool {
@@ -291,7 +347,7 @@ func formatStreamedCommit(commit gitcore.CommitSummary, oneline bool) string {
 	return output.String()
 }
 
-func gitLogPagerEnabled(execSess *ExecutionSession, hc interp.HandlerContext, invocation gitInvocation, repo *gitcore.Repository) (bool, error) {
+func gitPagerEnabled(execSess *ExecutionSession, hc interp.HandlerContext, invocation gitInvocation, repo *gitcore.Repository, command string) (bool, error) {
 	env := execSess.EnvMap()
 	if hc.Env != nil {
 		hc.Env.Each(func(name string, value expand.Variable) bool {
@@ -304,9 +360,10 @@ func gitLogPagerEnabled(execSess *ExecutionSession, hc interp.HandlerContext, in
 	if pager, ok := env["GIT_PAGER"]; ok {
 		return !isPassThroughPager(pager), nil
 	}
+	pagerKey := "pager." + command
 	for i := 0; i < len(invocation.config); i++ {
 		key, value, ok := strings.Cut(invocation.config[i], "=")
-		if ok && strings.EqualFold(strings.TrimSpace(key), "pager.log") &&
+		if ok && strings.EqualFold(strings.TrimSpace(key), pagerKey) &&
 			strings.EqualFold(strings.TrimSpace(value), "false") {
 			return false, nil
 		}
@@ -317,11 +374,11 @@ func gitLogPagerEnabled(execSess *ExecutionSession, hc interp.HandlerContext, in
 			return !isPassThroughPager(value), nil
 		}
 	}
-	pagerLog, found, err := repo.ConfigValue("pager", "log")
+	pagerCommand, found, err := repo.ConfigValue("pager", command)
 	if err != nil {
 		return false, err
 	}
-	if found && strings.EqualFold(strings.TrimSpace(pagerLog), "false") {
+	if found && strings.EqualFold(strings.TrimSpace(pagerCommand), "false") {
 		return false, nil
 	}
 	pager, found, err := repo.ConfigValue("core", "pager")
