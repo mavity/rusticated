@@ -33,6 +33,20 @@ func CoreIsAbs(path string) bool {
 }
 
 func CoreVolumeNameLen(path string) int {
+	if Separator == '\\' && len(path) >= 2 &&
+		CoreIsPathSeparator(path[0]) && CoreIsPathSeparator(path[1]) {
+		// A Windows UNC server/share prefix is a volume for path cleaning.
+		separators := 0
+		for i := 2; i < len(path); i++ {
+			if CoreIsPathSeparator(path[i]) {
+				separators++
+				if separators == 2 {
+					return i
+				}
+			}
+		}
+		return len(path)
+	}
 	if len(path) < 2 || path[1] != ':' {
 		return 0
 	}
@@ -100,30 +114,39 @@ func CoreJoin(elem []string) string {
 			}
 			b.WriteString(e)
 		}
-		return b.String()
+		if b.Len() == 0 {
+			return ""
+		}
+		return Clean(b.String())
 	}
 	// Windows-like join (simplified)
 	var b strings.Builder
+	var lastChar byte
 	for _, e := range elem {
 		if e == "" {
 			continue
 		}
 		if b.Len() == 0 {
 			b.WriteString(e)
+			lastChar = e[len(e)-1]
 			continue
 		}
-		if CoreIsAbs(e) {
-			b.Reset()
-			b.WriteString(e)
-			continue
-		}
-		last := b.String()
-		if !CoreIsPathSeparator(last[len(last)-1]) && !strings.HasSuffix(last, ":") {
+		if CoreIsPathSeparator(lastChar) {
+			for len(e) > 0 && CoreIsPathSeparator(e[0]) {
+				e = e[1:]
+			}
+		} else if lastChar != ':' {
 			b.WriteByte(Separator)
 		}
-		b.WriteString(e)
+		if len(e) > 0 {
+			b.WriteString(e)
+			lastChar = e[len(e)-1]
+		}
 	}
-	return b.String()
+	if b.Len() == 0 {
+		return ""
+	}
+	return Clean(b.String())
 }
 
 func postClean(out *lazybuf) {}

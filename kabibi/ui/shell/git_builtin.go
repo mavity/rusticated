@@ -54,6 +54,9 @@ func runGitBuiltin(ctx context.Context, args []string) error {
 	if handled, err := runBufferedGitLogWithPager(ctx, hc, invocation); handled {
 		return err
 	}
+	if handled, err := runBufferedGitDiffWithPager(ctx, hc, invocation); handled {
+		return err
+	}
 
 	switch invocation.args[0] {
 	case "--help", "-h":

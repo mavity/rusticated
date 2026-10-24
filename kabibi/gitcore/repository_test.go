@@ -8,16 +8,44 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-git/go-billy/v5"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/storage/filesystem"
+	"github.com/mavity/rusticated/kabibi/internal/gitfs"
 )
+
+func initTestRepository(t *testing.T, root string, bare bool) *git.Repository {
+	t.Helper()
+
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("create test repository directory: %v", err)
+	}
+	worktreeFS := gitfs.New(root)
+	var dotGitFS billy.Filesystem = worktreeFS
+	var worktree billy.Filesystem
+	if !bare {
+		worktree = worktreeFS
+		var err error
+		dotGitFS, err = worktreeFS.Chroot(git.GitDirName)
+		if err != nil {
+			t.Fatalf("create test repository storage filesystem: %v", err)
+		}
+	}
+
+	storer := filesystem.NewStorage(dotGitFS, cache.NewObjectLRUDefault())
+	repo, err := git.Init(storer, worktree)
+	if err != nil {
+		t.Fatalf("initialize test repository: %v", err)
+	}
+	return repo
+}
 
 func TestOpenFindsRepositoryFromShellSubdirectory(t *testing.T) {
 	root := t.TempDir()
-	if _, err := git.PlainInit(root, false); err != nil {
-		t.Fatalf("initialize repository: %v", err)
-	}
+	initTestRepository(t, root, false)
 	nested := filepath.Join(root, "src", "internal")
 	if err := os.MkdirAll(nested, 0o755); err != nil {
 		t.Fatalf("create nested directory: %v", err)
@@ -48,9 +76,7 @@ func TestOpenFindsRepositoryFromShellSubdirectory(t *testing.T) {
 
 func TestOpenSupportsBareRepository(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "bare.git")
-	if _, err := git.PlainInit(root, true); err != nil {
-		t.Fatalf("initialize bare repository: %v", err)
-	}
+	initTestRepository(t, root, true)
 
 	repo, err := Open(root)
 	if err != nil {
@@ -83,10 +109,8 @@ func TestOpenRejectsFilePath(t *testing.T) {
 
 func TestStageCommitAndLog(t *testing.T) {
 	root := t.TempDir()
-	gitRepo, err := git.PlainInit(root, false)
-	if err != nil {
-		t.Fatalf("initialize repository: %v", err)
-	}
+	gitRepo := initTestRepository(t, root, false)
+	var err error
 	cfg, err := gitRepo.Config()
 	if err != nil {
 		t.Fatalf("read repository config: %v", err)
@@ -255,10 +279,8 @@ func TestDiffThreeDotUsesMergeBaseAndRightSide(t *testing.T) {
 func newCommittedRepository(t *testing.T, name, contents string) (string, *Repository, *git.Repository) {
 	t.Helper()
 	root := t.TempDir()
-	gitRepo, err := git.PlainInit(root, false)
-	if err != nil {
-		t.Fatalf("initialize repository: %v", err)
-	}
+	gitRepo := initTestRepository(t, root, false)
+	var err error
 	cfg, err := gitRepo.Config()
 	if err != nil {
 		t.Fatalf("read repository config: %v", err)

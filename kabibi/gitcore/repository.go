@@ -12,11 +12,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-git/go-billy/v5"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/storage/filesystem"
+	"github.com/go-git/go-git/v5/storage/filesystem/dotgit"
+	"github.com/mavity/rusticated/kabibi/internal/gitfs"
 )
 
 var (
@@ -96,14 +101,9 @@ func Open(path string) (*Repository, error) {
 		return nil, fmt.Errorf("git repository start path %q is not a directory", start)
 	}
 
-	repo, err := git.PlainOpenWithOptions(start, &git.PlainOpenOptions{
-		EnableDotGitCommonDir: true,
-	})
+	repo, err := openWithPathAwareFS(start, false)
 	if errors.Is(err, git.ErrRepositoryNotExists) {
-		repo, err = git.PlainOpenWithOptions(start, &git.PlainOpenOptions{
-			DetectDotGit:          true,
-			EnableDotGitCommonDir: true,
-		})
+		repo, err = openWithPathAwareFS(start, true)
 	}
 	if err != nil {
 		if errors.Is(err, git.ErrRepositoryNotExists) {
@@ -125,6 +125,113 @@ func Open(path string) (*Repository, error) {
 	}
 
 	return &Repository{root: filepath.Clean(root), repo: repo, worktree: worktree}, nil
+}
+
+func openWithPathAwareFS(start string, detect bool) (*git.Repository, error) {
+	path := start
+	for {
+		worktreeFS := gitfs.New(path)
+		gitDirInfo, err := worktreeFS.Stat(git.GitDirName)
+
+		var dotGitFS billy.Filesystem
+		var worktree billy.Filesystem
+		if err != nil {
+			if !os.IsNotExist(err) {
+				return nil, err
+			}
+			dotGitFS = worktreeFS
+		} else {
+			worktree = worktreeFS
+			if gitDirInfo.IsDir() {
+				dotGitFS, err = worktreeFS.Chroot(git.GitDirName)
+			} else {
+				dotGitFS, err = dotGitFileToFilesystem(path, worktreeFS)
+			}
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		commonDirFS, err := commonDirectory(dotGitFS)
+		if err != nil {
+			return nil, err
+		}
+		repositoryFS := dotgit.NewRepositoryFilesystem(dotGitFS, commonDirFS)
+		storer := filesystem.NewStorage(repositoryFS, cache.NewObjectLRUDefault())
+		repo, err := git.Open(storer, worktree)
+		if !detect || !errors.Is(err, git.ErrRepositoryNotExists) {
+			return repo, err
+		}
+
+		parent := filepath.Dir(path)
+		if parent == path {
+			return nil, err
+		}
+		path = parent
+	}
+}
+
+func dotGitFileToFilesystem(path string, fs billy.Filesystem) (billy.Filesystem, error) {
+	data, err := readFilesystemFile(fs, git.GitDirName)
+	if err != nil {
+		return nil, err
+	}
+
+	line := strings.TrimSpace(strings.SplitN(string(data), "\n", 2)[0])
+	const prefix = "gitdir: "
+	if !strings.HasPrefix(line, prefix) {
+		return nil, fmt.Errorf(".git file has no %s prefix", prefix)
+	}
+
+	gitDir := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+	if filepath.IsAbs(gitDir) {
+		return gitfs.New(gitDir), nil
+	}
+	return gitfs.New(fs.Join(path, gitDir)), nil
+}
+
+func commonDirectory(fs billy.Filesystem) (billy.Filesystem, error) {
+	data, err := readFilesystemFile(fs, "commondir")
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+
+	path := strings.TrimSpace(string(data))
+	var commonDir billy.Filesystem
+	if filepath.IsAbs(path) {
+		commonDir = gitfs.New(path)
+	} else {
+		commonDir = gitfs.New(filepath.Join(fs.Root(), path))
+	}
+	if _, err := commonDir.Stat(""); err != nil {
+		if os.IsNotExist(err) {
+			return nil, git.ErrRepositoryIncomplete
+		}
+		return nil, err
+	}
+	return commonDir, nil
+}
+
+func readFilesystemFile(fs billy.Filesystem, name string) ([]byte, error) {
+	file, err := fs.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	data, readErr := io.ReadAll(file)
+	closeErr := file.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	return data, nil
 }
 
 func (r *Repository) Root() string {

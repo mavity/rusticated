@@ -58,8 +58,11 @@ These issues provide useful context. They are not all direct reports of the
 Rusticated regression, and should not be cited as if they were.
 
 1. [golang/go#11551 — document Windows drive-relative `Join` behavior](https://github.com/golang/go/issues/11551)
-   - Documents the established result of `filepath.Join("c:", "a")` on
-     Windows (`c:\a`), rather than changing it to a drive-relative path.
+   - Records a historical debate over whether `filepath.Join("c:", "a")`
+     should insert a separator on Windows. The issue's original reproducer and
+     title describe an older behavior; the
+     [current Windows implementation](https://go.dev/src/path/filepath/path_windows.go)
+     documents `Join("C:", "f")` as `C:f` and `Join("C:", "\f")` as `C:\f`.
    - Relevant as an example of platform-specific path behavior and
      compatibility expectations; it is not about a later `/` component.
 
