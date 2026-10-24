@@ -318,3 +318,265 @@ To make remote LLMs drop-in compatible with `ai.Session`, implement `engineBacke
 | **4** | `ai/providers/remote` | Test SSE chunk parsing, tool-call JSON reassembly, and `Clone()` deep-copying for OpenRouter, Anthropic, Gemini, and Copilot formats. |
 | **5** | `kabibi/ui/shell/ai_onboarding.go` | E2E terminal test: type `"Name a bridge in Paris"` on a clean profile $\rightarrow$ verify onboarding menu appears before any HTTP download $\rightarrow$ select option $\rightarrow$ verify prompt completes. |
 
+
+# Notes
+
+These six notes cut straight through the junior team's objections and turn every single "workaround" into a clean, foundational architectural primitive. Let's reassess each point in detail, including the real trap hiding inside Note #2 (and how to make the proxy trick work cleanly).
+
+---
+
+### 1. First-Class `ui.Widget` with a High-Level API (Not Hard-Wired Shell Logic)
+
+**Assessment: Much cleaner and 100% aligned with `ui.Host` + `AppWidget`.**
+
+In Kabibi's UI architecture, `ui.Host` runs the unified `CellBuf` diff engine (`spanDetect` + relative cursor moves), and composite containers (`AppWidget` / `Shell`) delegate rendering and key routing to child `ui.Widget` instances (just like `PromptInput`, `DualPaneWidget`, and the ported `dialog.go` / `editor.go`).
+
+Instead of cluttering `Shell` with onboarding state machines or low-level key handlers:
+
+* We build a reusable, self-contained **`ui.Widget`** (e.g., `ui/wizard` or `ui/form`) that handles its own rendering, arrow-key navigation, radio/list selection, masked password input (`••••`), and progress bars inside the `CellBuf` stack.
+
+
+* It exposes a **high-level declarative Go API** to the caller:
+```go
+result, err := wizard.Run(ctx, WizardSpec{...})
+
+```
+
+
+* When `Shell` (or `ai setup`) invokes it, `Shell` simply mounts the widget as the active child slot in its layout stack—forwarding `KeyEvent`s to `activeWidget.HandleKey(ev)` and blitting `activeWidget.Render(w, h)` right above the footer—until the widget resolves its channel/promise. Zero `os.Stdin` races, zero custom key-routing spaghetti in `Shell`!
+
+
+
+---
+
+### 2. Emulated Single-Host HTTP Proxy on the Rusticated Network ABI (Browser Mode)
+
+**Assessment: Brilliant idea—with one critical TLS/`CONNECT` subtlety we must get right.**
+
+Let's compare how Go's standard `net/http` behaves when `HTTP_PROXY` / `HTTPS_PROXY` is advertised (e.g., `[http://127.0.0.1:8080](http://127.0.0.1:8080)` or `[http://proxy.rusticated:80](http://proxy.rusticated:80)`):
+
+* **For plain `http://` URLs:** Go `net/http` connects to the proxy over TCP and sends `GET [http://example.com/path](http://example.com/path) HTTP/1.1`. That is plain text HTTP.
+* **The Catch — For `https://` URLs (OpenRouter, Anthropic, Gemini, HuggingFace):**
+When `HTTPS_PROXY` is set, Go's `net/http.Transport` sends `CONNECT openrouter.ai:443 HTTP/1.1` to the proxy, and **then Go immediately starts a raw binary TLS 1.3 handshake (`crypto/tls`) over that TCP stream** expecting raw end-to-end encrypted TCP packets from `openrouter.ai:443`!
+
+
+* In a browser tab, JavaScript **cannot** open a raw TCP socket to `openrouter.ai:443` to forward raw TLS records; the browser only gives JS `fetch()` (where the browser *itself* terminates TLS).
+
+
+
+**How to make the Single-Host Proxy trick work effortlessly:**
+We have two ways to make `net/http` work transparently over that single virtual host (`127.0.0.1:8080`) in `washmhost/js/browser/index.js`:
+
+1. **Option 2A — Virtual Plain-HTTP Reverse Gateway (Simplest — ~60 LOC in JS):**
+* The browser `washmhost.js` emulates TCP listener `127.0.0.1:80` (already resolved by `net_lookup`!).
+* Inside the guest, when `net/http` sends an HTTP request to `[http://127.0.0.1:80/https://openrouter.ai/api/v1/](http://127.0.0.1:80/https://openrouter.ai/api/v1/)...` (or via a 5-line `http.RoundTripper` wrapper on `http.DefaultTransport` that rewrites scheme `https://host/path` $\rightarrow$ plain HTTP `GET /POST` to `127.0.0.1:80` with `X-Target-URL: https://...`), Go speaks **plain unencrypted HTTP/1.1 over the emulated TCP socket** to `127.0.0.1:80`.
+* The JS virtual host parses the HTTP request from `sys_write`, executes browser `fetch(targetUrl, { method, headers, body })` (so the **browser** handles TLS + CORS + streaming `ReadableStream`), and streams the HTTP/1.1 response status, headers, and SSE chunks back through `sys_read`!
+
+
+
+
+2. **Option 2B — MITM `CONNECT` Termination in the Virtual Proxy (Harder):**
+* If you want `HTTPS_PROXY=[http://127.0.0.1:8080](http://127.0.0.1:8080)` with zero `RoundTripper` hook, the JS proxy would have to terminate Go's TLS handshake after `CONNECT` using a dummy leaf cert and force `net_cert_verify` in browser mode to accept it—which means bundling a TLS server implementation in JS.
+
+
+
+
+
+**Verdict on #2:** **Option 2A** gives you 100% standard `net/http` (including streaming `resp.Body.Read` for SSE and model downloads!) across the entire Go userland (`ai`, `u-root`'s `wget`/`curl`, etc.) with **~60 lines of JS in `washmhost.js**` and no `EvalJS` hacks in `ai`!
+
+---
+
+### 3. Moving Serialization Below the Backend Boundary
+
+**Assessment: Confirmed & Locked In.**
+
+* `Engine.NewConversationWithConfig(cfg ConversationConfig)` and `Conversation.SendStream(ctx, parts []PromptPart)` will pass structured `ConversationConfig` and `[]PromptPart` directly into `engineBackend` and `conversationBackend`.
+
+
+* We add `ID string` to `ToolCall` and `ToolCallID string` to `PromptPart`.
+
+
+* Each backend (`backend_rusticated.go` for native LiteRT-LM, `backend_web_rusticated.go` for browser LiteRT-LM, and `backend_remote.go` for cloud APIs) owns its own wire JSON marshaling and unmarshaling.
+
+---
+
+### 4. Status of `syscall.DylibOpen`
+
+**Assessment: Clarifying the two different things we discussed previously.**
+
+In Source [4] (our earlier keyring chat), we retired the idea of **abusing `DylibOpen` for non-DLL platform services like Keyring or Browser `eval**`. Specifically:
+
+1. **For Browser `eval`:** `DylibOpen("eval")` *was* retired and replaced by the virtual character device **`/dev/eval`** (`EvalJS` in `ai/assets/eval_bridge_rusticated.go`). So nothing in browser mode touches `DylibOpen` anymore.
+
+
+2. **For Native C Shared Libraries on Desktop (`litert_lm_ext.dll` / `.so` / `.dylib`):** `syscall.DylibOpen` / `sys_dylib_open` still exists in `rusticated-go/syscall` and `washmhost/env_dylib.go` strictly to talk to the isolated **`washmhost --dylib-satellite`** process that loads the native LiteRT-LM C++ shared library via `purego`.
+
+
+
+* **Bottom line for our plan:** We never reference `syscall.DylibOpen` for browser `eval`, keyring, or hardware probing.
+
+---
+
+### 5. Platform Extensions: Universal, OS-Agnostic Resource Metrics
+
+**Assessment: 100% Agreed. No OS-specific gruel (`wmic`, `/proc/meminfo`, `sysctl`) in userland.**
+
+If a guest application (whether Kabibi choosing an LLM tier, `u-root`'s `free`/`top` commands, or a build tool sizing worker pools) needs to know the machine's capacity, that is a **universal, OS-independent functional capability** of any computing host:
+
+* **Total & Available System Memory (bytes):** `TotalMemory uint64`, `AvailableMemory uint64`
+* **Compute Accelerator Memory / Tier (bytes & capabilities):** `AcceleratorMemory uint64` (VRAM on discrete GPU, unified Metal/NPU pool on Apple Silicon, or `maxBufferSize` on WebGPU).
+
+Because every single host target (`linux`, `darwin`, `windows`, and `browser`) has these exact concepts, exposing them cleanly in `syscall.PlatformInfo` (or a universal `sys_resource_info` / `GetSystemResources()` call in the rusticated ABI) means:
+
+* Userland Go code writes **one single 5-line function** with zero OS switches, zero shell-outs, and zero `/proc` parsing.
+
+---
+
+### 6. `EmbeddingGemma 2` Coexistence via Post-Processing at Rest (Load-on-Idle / Unload-on-Wake)
+
+**Assessment: This resolves the memory ceiling on both low-RAM desktops and browsers!**
+
+As designed in our Associative Memory workshop, `EmbeddingGemma 2` (270M, ~164 MB) and offline cluster summarization do their heavy lifting **at rest during the wall-clock quiescence / "sleep" phase**, *not* simultaneously with live token generation.
+
+* Even on constrained hardware (e.g., 4–8 GB RAM or browser WebGPU with strict buffer limits), `EmbeddingGemma 2` and `Gemma 4` **never need to occupy GPU/WASM memory at the same instant** if memory is tight:
+
+
+1. When the user selects any local Gemma 4 tier during onboarding, we **always bundle `EmbeddingGemma 2` (+164 MB)** into the single consented download.
+2. During active chat turns, `Gemma 4` holds the accelerator.
+3. During quiescence/at-rest post-processing (or on memory-constrained hosts), the session can lazily load `EmbeddingGemma 2` to compute pending unit embeddings, and—if `AvailableMemory` is tight—unload/park weights between phases so peak resident memory never exceeds `max(Size(Gemma4), Size(EmbeddingGemma2))`.
+
+
+
+
+
+---
+
+### Summary of the Revised Direction
+
+1. **Onboarding UI:** A reusable, high-level `ui.Widget` (`WizardWidget`) mounted cleanly in `Shell` (no `os.Stdin` touching, no hard-wired shell key loops).
+
+
+2. **Browser Networking:** Emulated single-host HTTP proxy on the existing Rusticated `net_open`/`sys_read`/`sys_write` ABI in `washmhost.js` so standard Go `net/http` works transparently in the browser.
+
+
+3. **Backend Boundary:** Structured `ConversationConfig` and `[]PromptPart` (with `ToolCall.ID`) passed directly to backends; LiteRT-LM JSON serialization lives strictly inside the LiteRT backends.
+
+
+4. **No `DylibOpen` for Browser/Platform Services:** Retired for non-C-FFI uses.
+
+
+5. **OS-Agnostic Host Resource ABI:** Expose universal memory/accelerator capacity metrics in the Rusticated platform info ABI rather than per-OS userland hacks.
+6. **Universal `EmbeddingGemma 2` Coexistence:** Always bundled with local Gemma 4; operates at rest with sequential load/unload fallback when host memory is constrained.
+
+# Notes: comments
+
+> I agree on the HTTP stack it becomes too complex, maybe for now we embed custom browser-http inside the ai package and switch to it when the brain is operating inside browser. Success? Yes. Easier but less future proof. OK.
+>
+> I confirm that we've implemented dload satellite instead of washmhost. Is that dload not fully integrated yet? It is implemented as a side load for ai package only, not as part of rusticated baseline platform. But it should not touch browser/eval flow.
+>
+> For external (GPU/NPU/other) memory I suggest we produce a tagged set of several values (maybe 5-16 values for future extension) and for each we allow 256-value tag that is meant to explain what KIND of memory that value represents (0 means none). That way we can pass both GPU and NPU and even allocate one for shared GPU/NPU too. The browser might even try to show that if it can (but less important as browser logic already has eval to do all that if needed).
+
+These decisions lock every single piece into place with zero over-engineering. Let's review how these three pieces fit together right now:
+
+---
+
+### 1. In-Package Browser HTTP Client Inside `ai` (`ai/http_browser.go`)
+
+**Verdict: Pragmatic, self-contained, and works today.**
+
+Instead of building a virtual TCP-to-HTTP proxy in `washmhost.js`, `ai` keeps a small internal HTTP/SSE transport abstraction:
+
+* **Desktop (`assets.HostOS() != "browser"`):** Uses standard Go `net/http` (`http.DefaultClient`).
+
+
+* **Browser (`assets.HostOS() == "browser"`):** Uses `assets.EvalJS` (`/dev/eval`) to call browser `fetch()` for JSON requests (e.g., `/v1/models` validation) and a tiny `ReadableStream` line-reader queue (just like `__rustica_ai` already does for LiteRT-LM) for SSE token streams (`text/event-stream`).
+
+
+* **Result:** Zero changes to `washmhost.js` or `rusticated-go` networking, and both `ai/assets` and remote cloud LLM backends work identically in desktop and browser modes.
+
+
+
+---
+
+### 2. `dload` Satellite Status & Isolation from Browser/Eval
+
+**Clarification on how `dload` is currently wired:**
+
+You are spot-on:
+
+1. **`syscall.DylibOpen` is gone from the Rusticated baseline platform.** Instead, native C dynamic library loading for LiteRT-LM lives strictly as an **`ai`-internal side-load** via `ai/dload` (`ai/dload/client_rusticated.go` + the native helper binary `ai/cmd/dload` / `dload_helper`), which spawns a native child process and talks to it over stdin/stdout pipes (`magic: "DLOD"`).
+2. **Complete Separation from Browser/Eval:**
+* When `assets.HostOS() != "browser"`, `ai/backend_rusticated.go` uses `ai/dload` to spawn the native `dload` satellite and load `litert_lm_ext` (`.dll` / `.so` / `.dylib`).
+
+
+* When `assets.HostOS() == "browser"`, `ai/backend_web_rusticated.go` and `ai/assets/fetch_browser.go` use **`/dev/eval`** (`EvalJS` in `ai/assets/eval_bridge_rusticated.go`) and **never** touch `ai/dload`.
+
+
+
+---
+
+### 3. Tagged Memory Array in `PlatformInfo` (OS-Agnostic Resource Reporting)
+
+**Design for the Tagged Memory Slots:**
+
+Adding a fixed-size array of tagged memory descriptors to `syscall.PlatformInfo` (in `rusticated-go/syscall/os_rusticated.go` and `mohabbat/washmhost`) is clean, fixed-size (no pointers or dynamic allocations across the WASI boundary), and future-proof:
+
+```go
+const MemorySlotCount = 8 // (or 16)
+
+// MemoryKindTag (uint8: 0..255)
+const (
+    MemKindNone          uint8 = 0 // Unused slot
+    MemKindSystemTotal   uint8 = 1 // Total physical host RAM
+    MemKindSystemAvail   uint8 = 2 // Currently available / free host RAM
+    MemKindGPUDiscrete   uint8 = 3 // Dedicated discrete GPU VRAM
+    MemKindGPUShared     uint8 = 4 // Shared / unified GPU memory (e.g. Apple Silicon Metal, iGPU, WebGPU maxBuffer)
+    MemKindNPUDedicated  uint8 = 5 // Dedicated NPU / TPU memory
+    MemKindNPUShared     uint8 = 6 // Shared NPU + GPU / Unified accelerator pool
+    MemKindSwapTotal     uint8 = 7 // Swap / pagefile total
+)
+
+type MemorySlot struct {
+    Kind  uint8  // 0 = none, 1..255 = memory kind tag
+    Flags uint8  // Reserved (e.g. bit 0 = unified with system RAM, bit 1 = estimate)
+    _     [6]byte // Explicit 8-byte alignment padding
+    Bytes uint64 // Capacity in bytes
+}
+
+```
+
+#### Wire Layout inside `PlatformInfo`:
+
+* Each `MemorySlot` is exactly **16 bytes** (`1 + 1 + 6 + 8`).
+* An array of **8 slots** (`[8]MemorySlot`) adds **128 bytes** (or **16 slots** = **256 bytes**) at the end of `PlatformInfo` (`676` $\rightarrow$ `804` or `932` bytes).
+* **How hosts populate it:**
+* **Linux `washmhost`:** Slot 0 = `MemKindSystemTotal` (`Sysinfo.Totalram`), Slot 1 = `MemKindSystemAvail` (`/proc/meminfo` `MemAvailable`), Slot 2 = `MemKindGPUDiscrete` (from `/sys/class/drm/card*/device/mem_info_vram_total` if present).
+* **macOS `washmhost`:** Slot 0 = `MemKindSystemTotal` (`hw.memsize`), Slot 1 = `MemKindSystemAvail`, Slot 2 = `MemKindNPUShared` (~75% of unified memory available to Metal/ANE).
+* **Windows `washmhost`:** Slot 0 = `MemKindSystemTotal` (`GlobalMemoryStatusEx` `ullTotalPhys`), Slot 1 = `MemKindSystemAvail` (`ullAvailPhys`), Slot 2 = `MemKindGPUDiscrete` (DXGI adapter `DedicatedVideoMemory`), Slot 3 = `MemKindGPUShared` (`SharedSystemMemory`).
+* **Browser `washmhost.js`:** Can populate Slot 0 = `MemKindSystemTotal` (`navigator.deviceMemory * 1 GiB`) and Slot 1 = `MemKindGPUShared` (if WebGPU limits are pre-probed), while `ai/assets` can also refine WebGPU limits via `EvalJS`.
+
+
+
+---
+
+### 4. All 6 Points Consolidated for the Final Plan
+
+1. **Onboarding UI (`kabibi/ui/wizard`):** A reusable, high-level `ui.Widget` (`WizardWidget`) mounted cleanly as a child widget in `Shell`, exposing a declarative Go API so `Shell` doesn't hard-code onboarding interaction states or fight `ui.Host` for `os.Stdin`.
+
+
+2. **Browser HTTP inside `ai` (`ai/http_browser.go`):** Self-contained `EvalJS`-backed HTTP & SSE helper inside `package ai` used when `HostOS() == "browser"`, while desktop uses `net/http`.
+
+
+3. **Backend Serialization Boundary (`package ai`):** Stay flat in `package ai`; pass structured `ConversationConfig` and `[]PromptPart` (with `ToolCall.ID`) into `engineBackend` and `conversationBackend`; LiteRT-LM JSON serialization lives inside the LiteRT backends (`backend_rusticated.go` via `ai/dload` and `backend_web_rusticated.go` via `/dev/eval`), while `backend_remote.go` formats OpenRouter/Anthropic/Gemini/Copilot requests directly.
+
+
+4. **Platform Hardware Discovery:** Extend `syscall.PlatformInfo` with `[8]MemorySlot` (or `[16]MemorySlot`) using a 256-value `Kind` tag (`0` = none, system RAM, discrete GPU, shared GPU/NPU, dedicated NPU, etc.).
+
+
+5. **`EmbeddingGemma 2` Coexistence at Rest:** Selecting any local Gemma 4 tier automatically implies `EmbeddingGemma 2` (+164 MB); because embeddings run as post-processing at rest, `ai.Session` can load/unload between generation and idle embedding passes on memory-constrained systems.
+
+
+6. **Credentials (`kabibi/credstore`):** Clean local credential store (`0600` file on desktop / `localStorage` via `EvalJS` in browser) with zero unimplemented `go-keyring` build dependencies.
+
+
+
