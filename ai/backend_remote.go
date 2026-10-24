@@ -22,25 +22,28 @@ const (
 	RemoteOpenRouter RemoteProvider = "openrouter"
 	RemoteAnthropic  RemoteProvider = "anthropic"
 	RemoteGemini     RemoteProvider = "gemini"
+	RemoteCopilot    RemoteProvider = "github-copilot"
 )
 
 type RemoteEngineConfig struct {
-	Provider   RemoteProvider
-	Model      string
-	APIKey     string
-	BaseURL    string
-	HTTPClient *http.Client
+	Provider    RemoteProvider
+	Model       string
+	APIKey      string
+	Credential  *Credential
+	Credentials CredentialStore
+	BaseURL     string
+	HTTPClient  *http.Client
 }
 
 func NewRemoteEngine(cfg RemoteEngineConfig) (*Engine, error) {
 	if cfg.Model == "" {
 		return nil, fmt.Errorf("remote AI model must not be empty")
 	}
-	if cfg.APIKey == "" {
+	if cfg.APIKey == "" && cfg.Credential == nil && cfg.Credentials == nil {
 		return nil, fmt.Errorf("remote AI credential must not be empty")
 	}
 	switch cfg.Provider {
-	case RemoteOpenAI, RemoteOpenRouter, RemoteAnthropic, RemoteGemini:
+	case RemoteOpenAI, RemoteOpenRouter, RemoteAnthropic, RemoteGemini, RemoteCopilot:
 	default:
 		return nil, fmt.Errorf("unsupported remote AI provider %q", cfg.Provider)
 	}
@@ -158,12 +161,16 @@ func (c *remoteConversationBackend) SendStream(ctx context.Context, parts []Prom
 	}()
 
 	requestParts := append(history, parts...)
-	req, err := buildRemoteRequest(c.engine.cfg, config, requestParts)
+	effectiveCfg, err := c.engine.resolveEffectiveConfig(streamCtx)
 	if err != nil {
 		return err
 	}
-	acc := newRemoteAccumulator(c.engine.cfg.Provider, onEvent)
-	if err := remoteStreamRequest(streamCtx, c.engine.cfg.HTTPClient, req, acc.consume); err != nil {
+	req, wireKind, err := buildRemoteRequestWithWire(effectiveCfg, config, requestParts)
+	if err != nil {
+		return err
+	}
+	acc := newRemoteAccumulatorWithWire(effectiveCfg.Provider, wireKind, config.Tools, onEvent)
+	if err := remoteStreamRequest(streamCtx, effectiveCfg.HTTPClient, req, acc.consume); err != nil {
 		return err
 	}
 	calls, err := acc.toolCalls()
@@ -231,17 +238,232 @@ type remoteRequest struct {
 	body    []byte
 }
 
-func buildRemoteRequest(remote RemoteEngineConfig, cfg ConversationConfig, parts []PromptPart) (remoteRequest, error) {
-	switch remote.Provider {
-	case RemoteOpenAI, RemoteOpenRouter:
-		return buildOpenAIRequest(remote, cfg, parts)
-	case RemoteAnthropic:
-		return buildAnthropicRequest(remote, cfg, parts)
-	case RemoteGemini:
-		return buildGeminiRequest(remote, cfg, parts)
-	default:
-		return remoteRequest{}, fmt.Errorf("unsupported remote AI provider %q", remote.Provider)
+type remoteWireKind string
+
+const (
+	wireOpenAICompletions remoteWireKind = "openai-completions"
+	wireOpenAIResponses   remoteWireKind = "openai-responses"
+	wireAnthropicMessages remoteWireKind = "anthropic-messages"
+	wireGeminiContent     remoteWireKind = "gemini-content"
+)
+
+func (e *remoteEngineBackend) resolveEffectiveConfig(ctx context.Context) (RemoteEngineConfig, error) {
+	cfg := e.cfg
+	if cfg.Credentials != nil {
+		cred, err := ResolveProviderCredential(ctx, cfg.Provider, cfg.Credentials, cfg.HTTPClient)
+		if err != nil {
+			return RemoteEngineConfig{}, err
+		}
+		cfg.Credential = cred
+		cfg.APIKey = cred.SecretToken()
+	} else if cfg.Credential != nil && cfg.APIKey == "" {
+		cfg.APIKey = cfg.Credential.SecretToken()
 	}
+	if cfg.APIKey == "" {
+		return RemoteEngineConfig{}, fmt.Errorf("remote AI credential must not be empty")
+	}
+	return cfg, nil
+}
+
+func buildRemoteRequest(remote RemoteEngineConfig, cfg ConversationConfig, parts []PromptPart) (remoteRequest, error) {
+	req, _, err := buildRemoteRequestWithWire(remote, cfg, parts)
+	return req, err
+}
+
+func buildRemoteRequestWithWire(remote RemoteEngineConfig, cfg ConversationConfig, parts []PromptPart) (remoteRequest, remoteWireKind, error) {
+	if remote.APIKey == "" && remote.Credential != nil {
+		remote.APIKey = remote.Credential.SecretToken()
+	}
+	switch remote.Provider {
+	case RemoteOpenRouter:
+		req, err := buildOpenAIRequest(remote, cfg, parts)
+		return req, wireOpenAICompletions, err
+	case RemoteOpenAI:
+		if isOpenAIChatGPTOAuth(remote.Credential, remote.APIKey) {
+			req, err := buildOpenAIResponsesRequest(remote, cfg, parts)
+			return req, wireOpenAIResponses, err
+		}
+		req, err := buildOpenAIRequest(remote, cfg, parts)
+		return req, wireOpenAICompletions, err
+	case RemoteAnthropic:
+		req, err := buildAnthropicRequest(remote, cfg, parts)
+		return req, wireAnthropicMessages, err
+	case RemoteGemini:
+		req, err := buildGeminiRequest(remote, cfg, parts)
+		return req, wireGeminiContent, err
+	case RemoteCopilot:
+		return buildGitHubCopilotRequest(remote, cfg, parts)
+	default:
+		return remoteRequest{}, "", fmt.Errorf("unsupported remote AI provider %q", remote.Provider)
+	}
+}
+
+func buildGitHubCopilotRequest(remote RemoteEngineConfig, cfg ConversationConfig, parts []PromptPart) (remoteRequest, remoteWireKind, error) {
+	enterpriseDomain := ""
+	if remote.Credential != nil {
+		enterpriseDomain = remote.Credential.MetaString("enterprise_url")
+	}
+	baseURL := remote.BaseURL
+	if baseURL == "" {
+		baseURL = DeriveGitHubCopilotBaseURL(remote.APIKey, enterpriseDomain)
+	}
+	baseURL = strings.TrimRight(baseURL, "/")
+	dynHeaders := BuildCopilotDynamicHeaders(parts)
+
+	if strings.HasPrefix(strings.ToLower(remote.Model), "claude-") {
+		anthRemote := remote
+		if !strings.HasSuffix(baseURL, "/v1/messages") {
+			anthRemote.BaseURL = baseURL + "/v1/messages"
+		}
+		req, err := buildAnthropicRequest(anthRemote, cfg, parts)
+		if err != nil {
+			return remoteRequest{}, "", err
+		}
+		delete(req.headers, "x-api-key")
+		req.headers["Authorization"] = "Bearer " + remote.APIKey
+		for k, v := range dynHeaders {
+			req.headers[k] = v
+		}
+		return req, wireAnthropicMessages, nil
+	}
+
+	openAIRemote := remote
+	if !strings.HasSuffix(baseURL, "/chat/completions") {
+		openAIRemote.BaseURL = baseURL + "/chat/completions"
+	}
+	req, err := buildOpenAIRequest(openAIRemote, cfg, parts)
+	if err != nil {
+		return remoteRequest{}, "", err
+	}
+	for k, v := range dynHeaders {
+		req.headers[k] = v
+	}
+	return req, wireOpenAICompletions, nil
+}
+
+func buildOpenAIResponsesRequest(remote RemoteEngineConfig, cfg ConversationConfig, parts []PromptPart) (remoteRequest, error) {
+	inputItems, err := openAIResponsesInput(cfg.SystemMessage, parts)
+	if err != nil {
+		return remoteRequest{}, err
+	}
+	// Note: Sign in with ChatGPT tokens reject temperature, max_output_tokens, and prompt_cache_retention
+	// (external/pi/packages/ai/src/api/openai-responses.ts:368-385).
+	body := map[string]any{
+		"model":  remote.Model,
+		"input":  inputItems,
+		"stream": true,
+		"store":  false,
+	}
+	if len(cfg.Tools) > 0 {
+		tools := make([]map[string]any, 0, len(cfg.Tools))
+		for _, decl := range cfg.Tools {
+			fn, ok := decl["function"].(map[string]any)
+			if !ok {
+				continue
+			}
+			tools = append(tools, map[string]any{
+				"type":        "function",
+				"name":        fn["name"],
+				"description": fn["description"],
+				"parameters":  fn["parameters"],
+			})
+		}
+		if len(tools) > 0 {
+			body["tools"] = tools
+		}
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return remoteRequest{}, fmt.Errorf("encode OpenAI Responses request: %w", err)
+	}
+	endpoint := remote.BaseURL
+	if endpoint == "" {
+		endpoint = "https://api.openai.com/v1/responses"
+	} else if !strings.HasSuffix(endpoint, "/responses") && !strings.HasSuffix(endpoint, "/v1/responses") {
+		endpoint = strings.TrimRight(endpoint, "/") + "/responses"
+	}
+	headers := map[string]string{
+		"Authorization": "Bearer " + remote.APIKey,
+		"Content-Type":  "application/json",
+		"Accept":        "text/event-stream",
+	}
+	if remote.Credential != nil {
+		if accountID := remote.Credential.MetaString("account_id"); accountID != "" {
+			headers["chatgpt-account-id"] = accountID
+		}
+		if remote.Credential.MetaString("flow") == "codex" {
+			headers["originator"] = "kabibi"
+		}
+	}
+	return remoteRequest{method: http.MethodPost, url: endpoint, headers: headers, body: payload}, nil
+}
+
+func openAIResponsesInput(system string, parts []PromptPart) ([]map[string]any, error) {
+	items := make([]map[string]any, 0, len(parts)+1)
+	if system != "" {
+		items = append(items, map[string]any{
+			"role":    "developer",
+			"content": system,
+		})
+	}
+	var lastDate string
+	for _, part := range parts {
+		switch part.Role {
+		case RoleTool:
+			text, err := json.Marshal(formatWireToolResponse(part, &lastDate))
+			if err != nil {
+				return nil, fmt.Errorf("encode tool response: %w", err)
+			}
+			callID := part.ToolCallID
+			if callID == "" {
+				callID = part.ToolName
+			}
+			items = append(items, map[string]any{
+				"type":    "function_call_output",
+				"call_id": callID,
+				"output":  string(text),
+			})
+		case RoleModel:
+			if text := formatWirePartText(part, &lastDate); text != "" {
+				items = append(items, map[string]any{
+					"role":    "assistant",
+					"content": text,
+				})
+			}
+			for _, call := range part.ToolCalls {
+				args, err := remoteToolArguments(call)
+				if err != nil {
+					return nil, err
+				}
+				callID := call.ID
+				if callID == "" {
+					callID = call.Name
+				}
+				items = append(items, map[string]any{
+					"type":      "function_call",
+					"call_id":   callID,
+					"name":      call.Name,
+					"arguments": string(args),
+				})
+			}
+		default:
+			if part.ImageBase64 != "" {
+				items = append(items, map[string]any{
+					"role": "user",
+					"content": []map[string]any{
+						{"type": "input_text", "text": formatWirePartText(part, &lastDate)},
+						{"type": "input_image", "image_url": "data:image/jpeg;base64," + part.ImageBase64},
+					},
+				})
+			} else {
+				items = append(items, map[string]any{
+					"role":    "user",
+					"content": formatWirePartText(part, &lastDate),
+				})
+			}
+		}
+	}
+	return items, nil
 }
 
 func buildOpenAIRequest(remote RemoteEngineConfig, cfg ConversationConfig, parts []PromptPart) (remoteRequest, error) {
@@ -328,7 +550,8 @@ func openAIMessages(system string, parts []PromptPart) ([]map[string]any, error)
 }
 
 func buildAnthropicRequest(remote RemoteEngineConfig, cfg ConversationConfig, parts []PromptPart) (remoteRequest, error) {
-	messages, err := anthropicMessages(parts)
+	oauthMode := isAnthropicOAuthToken(remote.Credential, remote.APIKey)
+	messages, err := anthropicMessagesWithOAuth(parts, oauthMode)
 	if err != nil {
 		return remoteRequest{}, err
 	}
@@ -338,7 +561,17 @@ func buildAnthropicRequest(remote RemoteEngineConfig, cfg ConversationConfig, pa
 		"stream":     true,
 		"messages":   messages,
 	}
-	if cfg.SystemMessage != "" {
+	if oauthMode {
+		// Anthropic Claude Pro/Max OAuth requires the Claude Code system identity block first
+		// (external/pi/packages/ai/src/api/anthropic-messages.ts:1246-1262).
+		sysBlocks := []map[string]any{
+			{"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."},
+		}
+		if cfg.SystemMessage != "" {
+			sysBlocks = append(sysBlocks, map[string]any{"type": "text", "text": cfg.SystemMessage})
+		}
+		body["system"] = sysBlocks
+	} else if cfg.SystemMessage != "" {
 		body["system"] = cfg.SystemMessage
 	}
 	if len(cfg.Tools) > 0 {
@@ -348,8 +581,12 @@ func buildAnthropicRequest(remote RemoteEngineConfig, cfg ConversationConfig, pa
 			if !ok {
 				return remoteRequest{}, fmt.Errorf("invalid Anthropic tool declaration")
 			}
+			toolName, _ := fn["name"].(string)
+			if oauthMode {
+				toolName = toClaudeCodeToolName(toolName)
+			}
 			tools = append(tools, map[string]any{
-				"name":         fn["name"],
+				"name":         toolName,
 				"description":  fn["description"],
 				"input_schema": fn["parameters"],
 			})
@@ -365,10 +602,17 @@ func buildAnthropicRequest(remote RemoteEngineConfig, cfg ConversationConfig, pa
 		url = "https://api.anthropic.com/v1/messages"
 	}
 	headers := map[string]string{
-		"x-api-key":         remote.APIKey,
 		"anthropic-version": "2023-06-01",
 		"Content-Type":      "application/json",
 		"Accept":            "text/event-stream",
+	}
+	if oauthMode {
+		headers["Authorization"] = "Bearer " + remote.APIKey
+		headers["anthropic-beta"] = "claude-code-20250219,oauth-2025-04-20"
+		headers["user-agent"] = "claude-cli/" + anthropicClaudeCodeVersion
+		headers["x-app"] = "cli"
+	} else {
+		headers["x-api-key"] = remote.APIKey
 	}
 	if assets.HostOS() == "browser" {
 		headers["anthropic-dangerous-direct-browser-access"] = "true"
@@ -377,6 +621,10 @@ func buildAnthropicRequest(remote RemoteEngineConfig, cfg ConversationConfig, pa
 }
 
 func anthropicMessages(parts []PromptPart) ([]map[string]any, error) {
+	return anthropicMessagesWithOAuth(parts, false)
+}
+
+func anthropicMessagesWithOAuth(parts []PromptPart, oauthMode bool) ([]map[string]any, error) {
 	messages := make([]map[string]any, 0, len(parts))
 	var lastDate string
 	for _, part := range parts {
@@ -420,8 +668,12 @@ func anthropicMessages(parts []PromptPart) ([]map[string]any, error) {
 			if err := json.Unmarshal(args, &input); err != nil {
 				return nil, fmt.Errorf("decode tool arguments: %w", err)
 			}
+			callName := call.Name
+			if oauthMode {
+				callName = toClaudeCodeToolName(callName)
+			}
 			content = append(content, map[string]any{
-				"type": "tool_use", "id": call.ID, "name": call.Name, "input": input,
+				"type": "tool_use", "id": call.ID, "name": callName, "input": input,
 			})
 		}
 		messages = append(messages, map[string]any{"role": role, "content": content})
@@ -543,10 +795,12 @@ func remoteToolArguments(call ToolCall) ([]byte, error) {
 }
 
 type remoteAccumulator struct {
-	provider RemoteProvider
-	onEvent  func(ModelEvent)
-	text     strings.Builder
-	tools    map[int]*remoteToolAssembly
+	provider      RemoteProvider
+	wire          remoteWireKind
+	declaredTools []map[string]any
+	onEvent       func(ModelEvent)
+	text          strings.Builder
+	tools         map[int]*remoteToolAssembly
 }
 
 type remoteToolAssembly struct {
@@ -556,23 +810,121 @@ type remoteToolAssembly struct {
 }
 
 func newRemoteAccumulator(provider RemoteProvider, onEvent func(ModelEvent)) *remoteAccumulator {
-	return &remoteAccumulator{provider: provider, onEvent: onEvent, tools: make(map[int]*remoteToolAssembly)}
+	var wire remoteWireKind
+	switch provider {
+	case RemoteOpenAI, RemoteOpenRouter, RemoteCopilot:
+		wire = wireOpenAICompletions
+	case RemoteAnthropic:
+		wire = wireAnthropicMessages
+	case RemoteGemini:
+		wire = wireGeminiContent
+	}
+	return newRemoteAccumulatorWithWire(provider, wire, nil, onEvent)
+}
+
+func newRemoteAccumulatorWithWire(provider RemoteProvider, wire remoteWireKind, declaredTools []map[string]any, onEvent func(ModelEvent)) *remoteAccumulator {
+	return &remoteAccumulator{
+		provider:      provider,
+		wire:          wire,
+		declaredTools: declaredTools,
+		onEvent:       onEvent,
+		tools:         make(map[int]*remoteToolAssembly),
+	}
 }
 
 func (a *remoteAccumulator) consume(event, data string) error {
 	if data == "" || data == "[DONE]" {
 		return nil
 	}
-	switch a.provider {
-	case RemoteOpenAI, RemoteOpenRouter:
+	switch a.wire {
+	case wireOpenAICompletions:
 		return a.consumeOpenAI(data)
-	case RemoteAnthropic:
+	case wireOpenAIResponses:
+		return a.consumeOpenAIResponses(event, data)
+	case wireAnthropicMessages:
 		return a.consumeAnthropic(event, data)
-	case RemoteGemini:
+	case wireGeminiContent:
 		return a.consumeGemini(data)
 	default:
-		return fmt.Errorf("unsupported remote AI provider %q", a.provider)
+		switch a.provider {
+		case RemoteOpenAI, RemoteOpenRouter, RemoteCopilot:
+			return a.consumeOpenAI(data)
+		case RemoteAnthropic:
+			return a.consumeAnthropic(event, data)
+		case RemoteGemini:
+			return a.consumeGemini(data)
+		default:
+			return fmt.Errorf("unsupported remote AI provider %q", a.provider)
+		}
 	}
+}
+
+func (a *remoteAccumulator) consumeOpenAIResponses(event, data string) error {
+	var item struct {
+		Type        string `json:"type"`
+		OutputIndex int    `json:"output_index"`
+		Delta       string `json:"delta"`
+		Arguments   string `json:"arguments"`
+		Error       *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+		Response *struct {
+			Error *struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		} `json:"response"`
+		Item *struct {
+			Type      string `json:"type"`
+			ID        string `json:"id"`
+			CallID    string `json:"call_id"`
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal([]byte(data), &item); err != nil {
+		return fmt.Errorf("decode OpenAI Responses stream event: %w", err)
+	}
+	if item.Type == "" {
+		item.Type = event
+	}
+	if item.Error != nil && item.Error.Message != "" {
+		return fmt.Errorf("OpenAI Responses: %s", item.Error.Message)
+	}
+	if item.Response != nil && item.Response.Error != nil && item.Response.Error.Message != "" {
+		return fmt.Errorf("OpenAI Responses: %s", item.Response.Error.Message)
+	}
+	switch item.Type {
+	case "response.output_text.delta":
+		if item.Delta != "" {
+			a.text.WriteString(item.Delta)
+			a.onEvent(TextEvent{Text: item.Delta})
+		}
+	case "response.output_item.added", "response.output_item.done":
+		if item.Item != nil && item.Item.Type == "function_call" {
+			call := a.tool(item.OutputIndex)
+			if item.Item.CallID != "" {
+				call.id = item.Item.CallID
+			} else if item.Item.ID != "" && call.id == "" {
+				call.id = item.Item.ID
+			}
+			if item.Item.Name != "" {
+				call.name = item.Item.Name
+			}
+			if item.Type == "response.output_item.done" && item.Item.Arguments != "" && call.arguments.Len() == 0 {
+				call.arguments.WriteString(item.Item.Arguments)
+			}
+		}
+	case "response.function_call_arguments.delta":
+		if item.Delta != "" {
+			a.tool(item.OutputIndex).arguments.WriteString(item.Delta)
+		}
+	case "response.function_call_arguments.done":
+		call := a.tool(item.OutputIndex)
+		if item.Arguments != "" && call.arguments.Len() == 0 {
+			call.arguments.WriteString(item.Arguments)
+		}
+	}
+	return nil
 }
 
 func (a *remoteAccumulator) consumeOpenAI(data string) error {
@@ -652,7 +1004,7 @@ func (a *remoteAccumulator) consumeAnthropic(event, data string) error {
 		if item.ContentBlock.Type == "tool_use" {
 			call := a.tool(item.Index)
 			call.id = item.ContentBlock.ID
-			call.name = item.ContentBlock.Name
+			call.name = fromClaudeCodeToolName(item.ContentBlock.Name, a.declaredTools)
 			if len(item.ContentBlock.Input) > 0 {
 				data, err := json.Marshal(item.ContentBlock.Input)
 				if err != nil {

@@ -57,13 +57,82 @@ func TestCredentialStoreReportsMalformedFile(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	if err := os.MkdirAll(filepath.Join(home, ".config", "kabibi"), 0o700); err != nil {
+	dir, err := config.Directory()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(home, ".config", "kabibi", "ai-credentials.json"), []byte("{"), 0o600); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ai-credentials.json"), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Get("openai", "default"); err == nil {
 		t.Fatal("malformed credential file was accepted")
 	}
 }
+
+func TestModifyReadAndListStructuredOAuthCredentials(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	ctx := t.Context()
+	stored, err := Modify(ctx, "anthropic", func(current *Credential) (*Credential, error) {
+		if current != nil {
+			t.Fatalf("expected nil initial credential, got %+v", current)
+		}
+		return &Credential{
+			Type:      CredentialOAuth,
+			Access:    "sk-ant-oat-access-1",
+			Refresh:   "refresh-1",
+			ExpiresAt: 123456789,
+			Metadata:  map[string]any{"account": "pro"},
+		}, nil
+	})
+	if err != nil {
+		t.Fatalf("Modify() error = %v", err)
+	}
+	if stored == nil || stored.Access != "sk-ant-oat-access-1" || stored.Refresh != "refresh-1" {
+		t.Fatalf("Modify() returned %+v", stored)
+	}
+
+	// No-op Modify when callback returns nil
+	unchanged, err := Modify(ctx, "anthropic", func(current *Credential) (*Credential, error) {
+		if current == nil || current.Refresh != "refresh-1" {
+			t.Fatalf("unexpected current credential in Modify: %+v", current)
+		}
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatalf("Modify(nil) error = %v", err)
+	}
+	if unchanged == nil || unchanged.Access != "sk-ant-oat-access-1" {
+		t.Fatalf("Modify(nil) returned %+v", unchanged)
+	}
+
+	readBack, err := Read(ctx, "anthropic")
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if readBack == nil || readBack.Type != CredentialOAuth || readBack.Metadata["account"] != "pro" {
+		t.Fatalf("Read() = %+v", readBack)
+	}
+
+	infos, err := List(ctx)
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(infos) != 1 || infos[0].ProviderID != "anthropic" || infos[0].Type != CredentialOAuth {
+		t.Fatalf("List() = %+v", infos)
+	}
+
+	if err := Remove(ctx, "anthropic"); err != nil {
+		t.Fatalf("Remove() error = %v", err)
+	}
+	after, err := Read(ctx, "anthropic")
+	if err != nil || after != nil {
+		t.Fatalf("Read after Remove = %+v, %v", after, err)
+	}
+}
+

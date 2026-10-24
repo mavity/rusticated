@@ -45,6 +45,7 @@ type LazyAIRunner struct {
 	verbose       bool
 	systemContext string
 	onboarding    OnboardingPrompter
+	openTerm      func(ctx context.Context, title string) (ai.TerminalSession, func(exitCode int))
 	lifecycleErr  error
 
 	cbMu       sync.Mutex
@@ -78,6 +79,14 @@ func (r *LazyAIRunner) SetOnboardingPrompter(prompter OnboardingPrompter) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onboarding = prompter
+}
+
+// SetTerminalOpener injects the virtual PTY / CommandTerminal opener used for
+// interactive AI setup and provider authentication flows.
+func (r *LazyAIRunner) SetTerminalOpener(openFn func(ctx context.Context, title string) (ai.TerminalSession, func(exitCode int))) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.openTerm = openFn
 }
 
 // FlushEmbeddings waits for any pending background embeddings to complete.
@@ -215,15 +224,17 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 		}
 	case "remote":
 		provider := ai.RemoteProvider(cfg.Provider)
-		secret, secretErr := credstore.Get(cfg.Provider, "api-key")
-		if secretErr != nil {
-			return fmt.Errorf("load %s AI credential: %w; rerun AI setup", cfg.Provider, secretErr)
+		store := credstore.NewStore()
+		cred, credErr := store.Read(ctx, cfg.Provider)
+		if credErr != nil || cred == nil {
+			return fmt.Errorf("load %s AI credential: no stored credential; run `ai login %s` or `ai setup`", cfg.Provider, cfg.Provider)
 		}
 		engine, err = ai.NewRemoteEngine(ai.RemoteEngineConfig{
-			Provider: provider,
-			Model:    cfg.Model,
-			APIKey:   secret,
-			BaseURL:  cfg.BaseURL,
+			Provider:    provider,
+			Model:       cfg.Model,
+			Credential:  cred,
+			Credentials: store,
+			BaseURL:     cfg.BaseURL,
 		})
 	default:
 		return fmt.Errorf("unsupported AI mode %q; rerun AI setup", cfg.Mode)
