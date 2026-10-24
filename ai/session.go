@@ -753,6 +753,33 @@ func (s *Session) initWithHistory(history []PromptPart) error {
 	return nil
 }
 
+// ReplaceEngine rebuilds the active conversation on engine using the current
+// compacted history. Callers must hold the turn gate and ensure no generation
+// or other embedding operation is active while replacing the engine.
+func (s *Session) ReplaceEngine(engine *Engine) error {
+	if s == nil || engine == nil {
+		return errors.New("replace session engine requires a non-nil session and engine")
+	}
+	s.closeConv()
+	s.engine = engine
+	s.historyMu.Lock()
+	history := append([]PromptPart(nil), s.CompactedHistory...)
+	s.historyMu.Unlock()
+	if err := s.initWithHistory(history); err != nil {
+		s.engine = nil
+		return err
+	}
+	return nil
+}
+
+// SuspendConversation closes the current model conversation before an engine
+// is released. The caller must hold the Session turn gate.
+func (s *Session) SuspendConversation() {
+	if s != nil {
+		s.closeConv()
+	}
+}
+
 func (s *Session) Close() {
 	s.closeConv()
 }
@@ -1486,6 +1513,7 @@ func (s *Session) runStage5Execution(
 					toolResponses = append(toolResponses, PromptPart{
 						Role:         RoleTool,
 						ToolName:     call.Name,
+						ToolCallID:   call.ID,
 						Explanation:  explanation,
 						ToolResponse: result,
 						StartedAt:    toolStart,
@@ -1617,6 +1645,7 @@ func (s *Session) runStage5Execution(
 				toolResponses = append(toolResponses, PromptPart{
 					Role:         RoleTool,
 					ToolName:     call.Name,
+					ToolCallID:   call.ID,
 					Explanation:  explanation,
 					ToolResponse: result,
 					StartedAt:    toolStart,

@@ -110,13 +110,13 @@ func TestSysGetPlatformInfoCanonicalizesHostPaths(t *testing.T) {
 	env := NewHostEnv()
 	mod := newMockModule(0x10000)
 	const ptr = uint32(0x100)
-	stack := []uint64{uint64(ptr), 676}
+	stack := []uint64{uint64(ptr), 932}
 
 	env.sys_get_platform_info(context.Background(), mod, stack)
 	if stack[0] != 0 {
 		t.Fatalf("sys_get_platform_info returned %d", stack[0])
 	}
-	data, ok := mod.Memory().Read(ptr, 676)
+	data, ok := mod.Memory().Read(ptr, 932)
 	if !ok {
 		t.Fatal("read platform info output")
 	}

@@ -11,6 +11,8 @@ import (
 
 	"ai"
 	"ai/assets"
+	"github.com/mavity/rusticated/kabibi/config"
+	"github.com/mavity/rusticated/kabibi/credstore"
 )
 
 const defaultKabibiSystemPrompt = `You are Kabibi, a clever plucky terminal shell that can talk!
@@ -35,12 +37,15 @@ type AIRunner interface {
 // callbacks to the currently active turn.
 type LazyAIRunner struct {
 	mu            sync.Mutex
+	lifeMu        sync.Mutex
 	execSess      *ExecutionSession
 	engine        *ai.Engine
-	embedder      *ai.Embedder
+	embedder      ai.PartEmbedder
 	session       *ai.Session
 	verbose       bool
 	systemContext string
+	onboarding    OnboardingPrompter
+	lifecycleErr  error
 
 	cbMu       sync.Mutex
 	onFeedback ai.LogFeedback
@@ -65,6 +70,14 @@ func (r *LazyAIRunner) SetSystemContext(context string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.systemContext = strings.TrimSpace(context)
+}
+
+// SetOnboardingPrompter injects the UI-specific callback used to configure AI
+// on the first turn. It must be set before the first call to RunTurn.
+func (r *LazyAIRunner) SetOnboardingPrompter(prompter OnboardingPrompter) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onboarding = prompter
 }
 
 // FlushEmbeddings waits for any pending background embeddings to complete.
@@ -104,7 +117,21 @@ func (r *LazyAIRunner) emitContent(text string) {
 
 func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 	if r.session != nil {
-		return nil
+		return r.checkLifecycleError()
+	}
+
+	cfg, err := config.LoadAI()
+	if err != nil {
+		return err
+	}
+	if !cfg.Configured {
+		cfg, err = r.configureAI(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	if !cfg.ConsentGiven {
+		return fmt.Errorf("AI setup has no recorded download consent; run onboarding again")
 	}
 
 	cacheDir, err := assets.DefaultCacheDir()
@@ -123,72 +150,130 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 		},
 	}
 
-	libPath, err := assets.EnsureRuntime(ctx, opts)
-	if err != nil {
-		return fmt.Errorf("runtime library error: %w", err)
-	}
-	if r.verbose {
-		ai.Verbose = true
-		fmt.Fprintf(os.Stderr, "[kabibi] runtime library path: %s\n", libPath)
-	}
-
-	modelPath, err := assets.EnsureDefaultLLMModel(ctx, opts)
-	if err != nil {
-		return fmt.Errorf("model download error: %w", err)
-	}
-
-	chosenBackend := "auto"
-	if assets.HostOS() == "browser" {
-		chosenBackend = "gpu"
-	}
 	maxTokens := 8192
+	var engine *ai.Engine
+	var libPath, modelPath string
 	var modelInfo *ai.ModelInfo
-	if info, err := ai.LoadModelInfo(libPath, modelPath); err == nil && info != nil {
-		modelInfo = info
-		if r.verbose {
-			fmt.Fprintf(os.Stderr, "[info] Max Context Tokens: %d (dynamic: %v)\n", info.MaxContextTokens, info.IsDynamicContext)
-			fmt.Fprintf(os.Stderr, "[info] Supports Function Calling: %v\n", info.SupportsFunctionCalling)
-			fmt.Fprintf(os.Stderr, "[info] Supports Thinking: %v\n", info.SupportsThinking)
-			fmt.Fprintf(os.Stderr, "[info] Supported Backends: %v\n", info.SupportedBackends)
+	var chosenBackend string
+	switch cfg.Mode {
+	case "local":
+		tier, ok := assets.LookupModelTier(cfg.TierID)
+		if !ok {
+			return fmt.Errorf("configured local AI tier %q is unknown; rerun AI setup", cfg.TierID)
 		}
-		if info.MaxContextTokens > 0 {
-			maxTokens = int(float64(info.MaxContextTokens) * 0.5)
+		if assets.HostOS() == "browser" && !tier.WebGPUSupported {
+			return fmt.Errorf("configured local AI tier %q is unavailable in the browser", cfg.TierID)
 		}
-
-		// Pick the highest-performance backend supported by the model: NPU > GPU > CPU.
-		hasBackend := func(target string) bool {
-			for _, b := range info.SupportedBackends {
-				if strings.EqualFold(b, target) {
-					return true
-				}
-			}
-			return false
+		libPath, err = assets.EnsureRuntime(ctx, opts)
+		if err != nil {
+			return fmt.Errorf("runtime library error: %w", err)
 		}
-		if hasBackend("npu") {
-			chosenBackend = "npu"
-		} else if hasBackend("gpu") {
+		modelPath, err = assets.EnsureModelTier(ctx, cfg.TierID, opts)
+		if err != nil {
+			return fmt.Errorf("model download error: %w", err)
+		}
+		chosenBackend = "auto"
+		if assets.HostOS() == "browser" {
 			chosenBackend = "gpu"
-		} else if hasBackend("cpu") {
-			chosenBackend = "cpu"
 		}
-	}
+		if r.verbose {
+			ai.Verbose = true
+			fmt.Fprintf(os.Stderr, "[kabibi] runtime library path: %s\n", libPath)
+		}
+		if info, infoErr := ai.LoadModelInfo(libPath, modelPath); infoErr == nil && info != nil {
+			modelInfo = info
+			if r.verbose {
+				fmt.Fprintf(os.Stderr, "[info] Max Context Tokens: %d (dynamic: %v)\n", info.MaxContextTokens, info.IsDynamicContext)
+				fmt.Fprintf(os.Stderr, "[info] Supports Function Calling: %v\n", info.SupportsFunctionCalling)
+				fmt.Fprintf(os.Stderr, "[info] Supports Thinking: %v\n", info.SupportsThinking)
+				fmt.Fprintf(os.Stderr, "[info] Supported Backends: %v\n", info.SupportedBackends)
+			}
+			if info.MaxContextTokens > 0 {
+				maxTokens = int(float64(info.MaxContextTokens) * 0.5)
+			}
 
-	engine, err := ai.NewEngine(libPath, modelPath, chosenBackend, maxTokens)
-	if err != nil && chosenBackend != "cpu" && assets.HostOS() != "browser" {
-		chosenBackend = "cpu"
+			hasBackend := func(target string) bool {
+				for _, backend := range info.SupportedBackends {
+					if strings.EqualFold(backend, target) {
+						return true
+					}
+				}
+				return false
+			}
+			if hasBackend("npu") {
+				chosenBackend = "npu"
+			} else if hasBackend("gpu") {
+				chosenBackend = "gpu"
+			} else if hasBackend("cpu") {
+				chosenBackend = "cpu"
+			}
+		}
 		engine, err = ai.NewEngine(libPath, modelPath, chosenBackend, maxTokens)
+		if err != nil && chosenBackend != "cpu" && assets.HostOS() != "browser" {
+			chosenBackend = "cpu"
+			engine, err = ai.NewEngine(libPath, modelPath, chosenBackend, maxTokens)
+		}
+	case "remote":
+		provider := ai.RemoteProvider(cfg.Provider)
+		secret, secretErr := credstore.Get(cfg.Provider, "api-key")
+		if secretErr != nil {
+			return fmt.Errorf("load %s AI credential: %w; rerun AI setup", cfg.Provider, secretErr)
+		}
+		engine, err = ai.NewRemoteEngine(ai.RemoteEngineConfig{
+			Provider: provider,
+			Model:    cfg.Model,
+			APIKey:   secret,
+			BaseURL:  cfg.BaseURL,
+		})
+	default:
+		return fmt.Errorf("unsupported AI mode %q; rerun AI setup", cfg.Mode)
 	}
 	if err != nil {
-		return fmt.Errorf("create engine: %w", err)
+		return fmt.Errorf("create AI engine: %w", err)
+	}
+	if engine == nil {
+		return fmt.Errorf("AI engine initialization returned no engine")
 	}
 
 	var partEmb ai.PartEmbedder
-	var emb *ai.Embedder
-	if embedPath, err := assets.EnsureDefaultEmbeddingModel(ctx, opts); err == nil && embedPath != "" {
-		if e, err := ai.NewEmbedder(libPath, embedPath, chosenBackend); err == nil {
-			emb = e
-			partEmb = e
+	var adaptiveEmb *adaptiveEmbedder
+	if cfg.Embedder {
+		if cfg.Mode != "local" || assets.HostOS() == "browser" {
+			engine.Close()
+			return fmt.Errorf("configured embedder is not supported for this AI mode")
 		}
+		embedPath, embedErr := assets.EnsureDefaultEmbeddingModel(ctx, opts)
+		if embedErr != nil {
+			engine.Close()
+			return fmt.Errorf("embedding model download error: %w", embedErr)
+		}
+		if embedPath == "" {
+			engine.Close()
+			return fmt.Errorf("embedding model path is empty")
+		}
+		resident, residentErr := ai.NewEmbedder(libPath, embedPath, chosenBackend)
+		reloadBackend := chosenBackend
+		openEmbedder := func() (*ai.Embedder, error) {
+			return ai.NewEmbedder(libPath, embedPath, reloadBackend)
+		}
+		reopenEngine := func() (*ai.Engine, error) {
+			next, openErr := ai.NewEngine(libPath, modelPath, reloadBackend, maxTokens)
+			if openErr != nil && reloadBackend != "cpu" && assets.HostOS() != "browser" {
+				next, openErr = ai.NewEngine(libPath, modelPath, "cpu", maxTokens)
+			}
+			if openErr != nil {
+				return nil, openErr
+			}
+			return next, nil
+		}
+		if residentErr != nil {
+			if resident != nil {
+				resident.Close()
+			}
+			resident = nil
+		}
+		adaptiveEmb = newAdaptiveEmbedder(r, resident, openEmbedder, reopenEngine)
+		partEmb = adaptiveEmb
 	}
 
 	var cwd string
@@ -196,7 +281,7 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 		cwd = r.execSess.Dir()
 	}
 	envContext := ai.FormatEnvironmentContext(ai.EnvironmentConfig{
-		ModelPath:   modelPath,
+		ModelPath:   modelPathOrRemote(cfg, modelPath),
 		ModelSize:   assets.ModelAssetSize(modelPath),
 		ModelInfo:   modelInfo,
 		Backend:     engine.Backend(),
@@ -218,22 +303,26 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 	})
 	if err != nil {
 		engine.Close()
-		if emb != nil {
-			emb.Close()
+		if adaptiveEmb != nil {
+			adaptiveEmb.Close()
 		}
 		return err
 	}
 	if err := sess.Init(); err != nil {
 		engine.Close()
-		if emb != nil {
-			emb.Close()
+		sess.Shutdown()
+		if adaptiveEmb != nil {
+			adaptiveEmb.Close()
 		}
 		return err
 	}
 
 	r.engine = engine
-	r.embedder = emb
+	r.embedder = partEmb
 	r.session = sess
+	if adaptiveEmb != nil {
+		adaptiveEmb.BindSession(sess)
+	}
 	return nil
 }
 
@@ -290,6 +379,7 @@ func ExecuteOneShotLine(ctx context.Context, line string, verbose bool, out io.W
 
 	aiRunner := NewLazyAIRunner(es)
 	aiRunner.SetVerbose(verbose)
+	aiRunner.SetOnboardingPrompter(NewStdioOnboardingPrompter(os.Stdin, out))
 	defer aiRunner.Close()
 
 	route, parsed := es.ClassifyInput(line)
@@ -345,6 +435,7 @@ func ExecuteOneShotPrompt(ctx context.Context, prompt, systemContext string, ver
 	aiRunner := NewLazyAIRunner(es)
 	aiRunner.SetVerbose(verbose)
 	aiRunner.SetSystemContext(systemContext)
+	aiRunner.SetOnboardingPrompter(NewStdioOnboardingPrompter(os.Stdin, out))
 	defer aiRunner.Close()
 
 	if err := runOneShotAI(ctx, aiRunner, prompt, out); err != nil {
@@ -386,8 +477,12 @@ func (r *LazyAIRunner) Close() {
 		r.session.Shutdown()
 		r.session = nil
 	}
+	r.lifeMu.Lock()
+	defer r.lifeMu.Unlock()
 	if r.embedder != nil {
-		r.embedder.Close()
+		if closer, ok := r.embedder.(interface{ Close() }); ok {
+			closer.Close()
+		}
 		r.embedder = nil
 	}
 	if r.engine != nil {

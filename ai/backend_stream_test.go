@@ -108,6 +108,18 @@ type chunkLog struct {
 	list []string
 }
 
+func textEventCallback(fn func(string)) func(ModelEvent) {
+	return func(event ModelEvent) {
+		if text, ok := event.(TextEvent); ok {
+			fn(text.Text)
+		}
+	}
+}
+
+func testPrompt() []PromptPart {
+	return []PromptPart{{Role: RoleUser, Text: "prompt"}}
+}
+
 func (l *chunkLog) add(s string) {
 	l.mu.Lock()
 	l.list = append(l.list, s)
@@ -147,7 +159,7 @@ func TestBackendDeliversChunksAndCompletes(t *testing.T) {
 	c := newTestBackend(d)
 
 	var log chunkLog
-	if err := c.SendStream(context.Background(), "{}", log.add); err != nil {
+	if err := c.SendStream(context.Background(), testPrompt(), textEventCallback(log.add)); err != nil {
 		t.Fatal(err)
 	}
 	if got := log.get(); got != "a,b" {
@@ -158,7 +170,7 @@ func TestBackendDeliversChunksAndCompletes(t *testing.T) {
 	}
 
 	// Reusable after completion, and deleted exactly once on Close.
-	if err := c.SendStream(context.Background(), "{}", log.add); err != nil {
+	if err := c.SendStream(context.Background(), testPrompt(), textEventCallback(log.add)); err != nil {
 		t.Fatal(err)
 	}
 	c.Close()
@@ -166,7 +178,7 @@ func TestBackendDeliversChunksAndCompletes(t *testing.T) {
 	if d.deleteCalls.Load() != 1 {
 		t.Fatalf("convDelete calls = %d, want 1", d.deleteCalls.Load())
 	}
-	if err := c.SendStream(context.Background(), "{}", log.add); !errors.Is(err, ErrClosed) {
+	if err := c.SendStream(context.Background(), testPrompt(), textEventCallback(log.add)); !errors.Is(err, ErrClosed) {
 		t.Fatalf("SendStream after Close = %v, want ErrClosed", err)
 	}
 	if d.sendCalls.Load() != 2 {
@@ -182,7 +194,7 @@ func TestBackendCallbacksBeforeSendReturns(t *testing.T) {
 		d.emit(ud, "", true, "")
 	}
 	var log chunkLog
-	if err := newTestBackend(d).SendStream(context.Background(), "{}", log.add); err != nil {
+	if err := newTestBackend(d).SendStream(context.Background(), testPrompt(), textEventCallback(log.add)); err != nil {
 		t.Fatal(err)
 	}
 	if got := log.get(); got != "a" {
@@ -198,7 +210,7 @@ func TestBackendReturnsTerminalChunkError(t *testing.T) {
 			d.emit(ud, "", true, "boom")
 		}()
 	}
-	err := newTestBackend(d).SendStream(context.Background(), "{}", func(string) {})
+	err := newTestBackend(d).SendStream(context.Background(), testPrompt(), func(ModelEvent) {})
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("err = %v, want one mentioning boom", err)
 	}
@@ -208,7 +220,7 @@ func TestBackendCancelledContextDoesNotStartStream(t *testing.T) {
 	d := newFakeDrv()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := newTestBackend(d).SendStream(ctx, "{}", func(string) {}); !errors.Is(err, context.Canceled) {
+	if err := newTestBackend(d).SendStream(ctx, testPrompt(), func(ModelEvent) {}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 	if d.sendCalls.Load() != 0 {
@@ -238,9 +250,13 @@ func TestBackendContextCancelReturnsEarlyAndTearsDownAfterTerminalChunk(t *testi
 	var log chunkLog
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- c.SendStream(ctx, "{}", func(s string) {
-			log.add(s)
-			if s == "a" {
+		errCh <- c.SendStream(ctx, testPrompt(), func(event ModelEvent) {
+			text, ok := event.(TextEvent)
+			if !ok {
+				return
+			}
+			log.add(text.Text)
+			if text.Text == "a" {
 				close(firstChunk)
 			}
 		})
@@ -259,7 +275,7 @@ func TestBackendContextCancelReturnsEarlyAndTearsDownAfterTerminalChunk(t *testi
 	if d.cancelCalls.Load() != 1 {
 		t.Fatalf("native cancel calls = %d, want 1", d.cancelCalls.Load())
 	}
-	if err := c.SendStream(context.Background(), "{}", log.add); !errors.Is(err, ErrClosed) {
+	if err := c.SendStream(context.Background(), testPrompt(), textEventCallback(log.add)); !errors.Is(err, ErrClosed) {
 		t.Fatalf("SendStream on a cancelled conversation = %v, want ErrClosed", err)
 	}
 
@@ -297,7 +313,7 @@ func TestBackendCancelWaitsForRunningOnChunk(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- c.SendStream(ctx, "{}", func(string) {
+		errCh <- c.SendStream(ctx, testPrompt(), func(ModelEvent) {
 			close(entered)
 			<-release
 		})
@@ -336,7 +352,7 @@ func TestBackendCloseMidStreamReturnsErrClosedAndDeletesAfterTerminalChunk(t *te
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- c.SendStream(context.Background(), "{}", func(string) { close(firstChunk) })
+		errCh <- c.SendStream(context.Background(), testPrompt(), func(ModelEvent) { close(firstChunk) })
 	}()
 	<-firstChunk
 	c.Close()
@@ -371,8 +387,10 @@ func TestBackendCloseFromOnChunkDoesNotDeadlock(t *testing.T) {
 	var log chunkLog
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- c.SendStream(context.Background(), "{}", func(s string) {
-			log.add(s)
+		errCh <- c.SendStream(context.Background(), testPrompt(), func(event ModelEvent) {
+			if text, ok := event.(TextEvent); ok {
+				log.add(text.Text)
+			}
 			c.Close()
 		})
 	}()
@@ -394,10 +412,10 @@ func TestBackendRejectsSecondConcurrentStream(t *testing.T) {
 	c := newTestBackend(d)
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- c.SendStream(context.Background(), "{}", func(string) {}) }()
+	go func() { errCh <- c.SendStream(context.Background(), testPrompt(), func(ModelEvent) {}) }()
 	ud := <-started
 
-	if err := c.SendStream(context.Background(), "{}", func(string) {}); !errors.Is(err, errStreamActive) {
+	if err := c.SendStream(context.Background(), testPrompt(), func(ModelEvent) {}); !errors.Is(err, errStreamActive) {
 		t.Fatalf("second stream err = %v, want errStreamActive", err)
 	}
 	d.emit(ud, "", true, "")

@@ -1370,9 +1370,9 @@ export function makeBrainImports(hostState, argv) {
 
   // ── get_platform_info ────────────────────────────────────────────────────────
   // Signature: (ptr i32, len i32) -> i32 errno
-  // 676-byte binary struct — mirrors env_utils.go layout
+  // 932-byte binary struct — mirrors env_utils.go layout
   function get_platform_info(ptr, maxLen) {
-    const structSize = 676;
+    const structSize = 932;
     if (Number(maxLen) < structSize) return wasiE2BIG;
 
     const buf = Buffer.alloc(structSize);
@@ -1412,6 +1412,10 @@ export function makeBrainImports(hostState, argv) {
     copySafe(484, `${process.platform}-${arch}`);
     copySafe(548, os.homedir());
     copySafe(612, os.tmpdir());
+    buf[676] = 1;
+    buf.writeBigUInt64LE(BigInt(os.totalmem()), 684);
+    buf[692] = 2;
+    buf.writeBigUInt64LE(BigInt(os.freemem()), 700);
 
     guestWrite(Number(ptr), buf);
     return 0;

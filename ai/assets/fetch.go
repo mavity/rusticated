@@ -240,22 +240,22 @@ func libUpToDate(libDir, wheelPath, libPrefix string) bool {
 	return false
 }
 
-func selectWheelURL(ctx context.Context, pypiURL string) (string, string, error) {
+func selectWheelURL(ctx context.Context, pypiURL string) (string, string, int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pypiURL, nil)
 	if err != nil {
-		return "", "", err
+		return "", "", 0, err
 	}
 	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
 	if err != nil {
-		return "", "", err
+		return "", "", 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("PyPI %s: %s", pypiURL, resp.Status)
+		return "", "", 0, fmt.Errorf("PyPI %s: %s", pypiURL, resp.Status)
 	}
 	var data pypiResponse
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return "", "", err
+		return "", "", 0, err
 	}
 	var matches []pypiArtifact
 	for version, arts := range data.Releases {
@@ -267,12 +267,12 @@ func selectWheelURL(ctx context.Context, pypiURL string) (string, string, error)
 		}
 	}
 	if len(matches) == 0 {
-		return "", "", fmt.Errorf("no compatible wheel found for %s/%s", HostOS(), HostArch())
+		return "", "", 0, fmt.Errorf("no compatible wheel found for %s/%s", HostOS(), HostArch())
 	}
 	sort.Slice(matches, func(i, j int) bool {
 		return versionLess(matches[j].Version, matches[i].Version)
 	})
-	return matches[0].URL, matches[0].Filename, nil
+	return matches[0].URL, matches[0].Filename, matches[0].Size, nil
 }
 
 func wheelMatchesPlatform(filename string) bool {

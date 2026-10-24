@@ -144,4 +144,3 @@ func InspectRuntimePlatform() RuntimePlatformInfo {
 	}
 	return info
 }
-

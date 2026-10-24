@@ -18,9 +18,9 @@ const litertlmPyPIURL = "https://pypi.org/pypi/litert-lm-api/json"
 // Default model URLs and minimum expected byte sizes.
 const (
 	DefaultLLMModelURL        = "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm"
-	DefaultLLMModelSize       = 2038755678
+	DefaultLLMModelSize       = 2588147712
 	DefaultWebLLMModelURL     = "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.litertlm"
-	DefaultWebLLMModelSize    = 0
+	DefaultWebLLMModelSize    = 2008432640
 	DefaultEmbeddingModelURL  = "https://huggingface.co/litert-community/embeddinggemma-2-text-270m-litert-lm/resolve/main/embeddinggemma-2-text-270m.litertlm"
 	DefaultEmbeddingModelSize = 164626432
 )
@@ -45,8 +45,10 @@ func ModelAssetSize(modelPath string) int64 {
 		if sz := browserModelSize(modelPath); sz > 0 {
 			return sz
 		}
-		if modelPath == DefaultWebLLMModelURL {
-			return 2008432640
+		for _, tier := range gemma4Tiers {
+			if modelPath == tier.WebURL {
+				return tier.WebSize
+			}
 		}
 		return 0
 	}
@@ -58,7 +60,6 @@ func ModelAssetSize(modelPath string) int64 {
 	}
 	return 0
 }
-
 
 // DefaultCacheDir returns the canonical host-OS cache directory for LiteRT-LM
 // runtime libraries and model files.
@@ -75,10 +76,7 @@ func DefaultCacheDir() (string, error) {
 
 // EnsureDefaultLLMModel ensures the default Gemma 4 E2B model is cached and returns its path.
 func EnsureDefaultLLMModel(ctx context.Context, opts FetchOptions) (string, error) {
-	if HostOS() == "browser" {
-		return EnsureModel(ctx, DefaultWebLLMModelURL, DefaultWebLLMModelSize, opts)
-	}
-	return EnsureModel(ctx, DefaultLLMModelURL, DefaultLLMModelSize, opts)
+	return EnsureModelTier(ctx, "gemma-4-e2b", opts)
 }
 
 // EnsureDefaultEmbeddingModel ensures the default EmbeddingGemma 2 model is cached and returns its path.
@@ -129,7 +127,7 @@ func EnsureRuntime(ctx context.Context, opts FetchOptions) (string, error) {
 			return lib, nil
 		}
 		opts.progress("discover", "LiteRT-LM wheel from PyPI", -1)
-		url, filename, err := selectWheelURL(ctx, litertlmPyPIURL)
+		url, filename, _, err := selectWheelURL(ctx, litertlmPyPIURL)
 		if err != nil {
 			return "", err
 		}
@@ -151,6 +149,29 @@ func EnsureRuntime(ctx context.Context, opts FetchOptions) (string, error) {
 		return "", fmt.Errorf("LiteRT-LM library not found after extraction")
 	}
 	return lib, nil
+}
+
+// RuntimeDownloadSize estimates the exact runtime-wheel transfer before consent.
+// It reads PyPI metadata only when a compatible wheel is not already cached.
+func RuntimeDownloadSize(ctx context.Context, cacheDir string) (int64, error) {
+	if HostOS() == "browser" {
+		return 0, nil
+	}
+	if findCachedWheel(cacheDir, "litert_lm") != "" {
+		return 0, nil
+	}
+	libDir := filepath.Join(cacheDir, "lib")
+	if resolveLMLib(libDir) != "" {
+		return 0, nil
+	}
+	_, _, size, err := selectWheelURL(ctx, litertlmPyPIURL)
+	if err != nil {
+		return 0, fmt.Errorf("inspect LiteRT-LM runtime download: %w", err)
+	}
+	if size <= 0 {
+		return 0, fmt.Errorf("PyPI did not provide a valid LiteRT-LM wheel size")
+	}
+	return size, nil
 }
 
 // EnsureModel downloads a single-file model (e.g. a .litertlm) from url into

@@ -69,32 +69,7 @@ func (e *engineImpl) Close() {
 }
 
 func (e *engineImpl) NewConversationWithConfig(cfg ConversationConfig) (*convImpl, error) {
-	var systemJSON string
-	if cfg.SystemMessage != "" {
-		sysObj := map[string]string{
-			"type": "text",
-			"text": cfg.SystemMessage,
-		}
-		if data, err := json.Marshal(sysObj); err == nil {
-			systemJSON = string(data)
-		}
-	}
-
-	var toolsJSON string
-	if len(cfg.Tools) > 0 {
-		if data, err := json.Marshal(cfg.Tools); err == nil {
-			toolsJSON = string(data)
-		}
-	}
-
-	var historyJSON string
-	if len(cfg.History) > 0 {
-		if data, err := buildHistoryJSON(cfg.History); err == nil {
-			historyJSON = data
-		}
-	}
-
-	cBackend, err := e.backend.NewConversation(systemJSON, toolsJSON, historyJSON)
+	cBackend, err := e.backend.NewConversation(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -146,6 +121,7 @@ func buildHistoryJSON(history []PromptPart) (string, error) {
 						args = map[string]any{}
 					}
 					calls = append(calls, map[string]any{
+						"id":   tc.ID,
 						"type": "function",
 						"function": map[string]any{
 							"name":      tc.Name,
@@ -189,11 +165,11 @@ func (c *convImpl) Close() {
 	}
 }
 
-func (c *convImpl) sendStream(ctx context.Context, payloadJSON string, onToken func(string)) error {
+func (c *convImpl) sendStream(ctx context.Context, parts []PromptPart, onEvent func(ModelEvent)) error {
 	if c == nil || c.backend == nil {
 		return ErrClosed
 	}
-	return c.backend.SendStream(ctx, payloadJSON, onToken)
+	return c.backend.SendStream(ctx, parts, onEvent)
 }
 
 type embedderImpl struct {
