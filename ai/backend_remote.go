@@ -171,7 +171,17 @@ func (c *remoteConversationBackend) SendStream(ctx context.Context, parts []Prom
 	}
 	acc := newRemoteAccumulatorWithWire(effectiveCfg.Provider, wireKind, config.Tools, onEvent)
 	if err := remoteStreamRequest(streamCtx, effectiveCfg.HTTPClient, req, acc.consume); err != nil {
-		return err
+		if effectiveCfg.Provider != RemoteCopilot || wireKind != wireOpenAICompletions || !errors.Is(err, errUnsupportedRemoteAPI) {
+			return err
+		}
+		req, err = buildGitHubCopilotResponsesRequest(effectiveCfg, config, requestParts)
+		if err != nil {
+			return err
+		}
+		acc = newRemoteAccumulatorWithWire(effectiveCfg.Provider, wireOpenAIResponses, config.Tools, onEvent)
+		if err := remoteStreamRequest(streamCtx, effectiveCfg.HTTPClient, req, acc.consume); err != nil {
+			return err
+		}
 	}
 	calls, err := acc.toolCalls()
 	if err != nil {
@@ -339,6 +349,27 @@ func buildGitHubCopilotRequest(remote RemoteEngineConfig, cfg ConversationConfig
 		req.headers[k] = v
 	}
 	return req, wireOpenAICompletions, nil
+}
+
+func buildGitHubCopilotResponsesRequest(remote RemoteEngineConfig, cfg ConversationConfig, parts []PromptPart) (remoteRequest, error) {
+	enterpriseDomain := ""
+	if remote.Credential != nil {
+		enterpriseDomain = remote.Credential.MetaString("enterprise_url")
+	}
+	baseURL := remote.BaseURL
+	if baseURL == "" {
+		baseURL = DeriveGitHubCopilotBaseURL(remote.APIKey, enterpriseDomain)
+	}
+	responsesRemote := remote
+	responsesRemote.BaseURL = strings.TrimRight(baseURL, "/") + "/responses"
+	req, err := buildOpenAIResponsesRequest(responsesRemote, cfg, parts)
+	if err != nil {
+		return remoteRequest{}, err
+	}
+	for name, value := range BuildCopilotDynamicHeaders(parts) {
+		req.headers[name] = value
+	}
+	return req, nil
 }
 
 func buildOpenAIResponsesRequest(remote RemoteEngineConfig, cfg ConversationConfig, parts []PromptPart) (remoteRequest, error) {

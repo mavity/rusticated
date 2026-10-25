@@ -83,19 +83,27 @@ func (r *LazyAIRunner) configureAIWithTerm(ctx context.Context, term ai.Terminal
 }
 
 func (r *LazyAIRunner) configureAIWithPrompter(ctx context.Context, prompter OnboardingPrompter, term ai.TerminalSession) (config.AIConfig, error) {
+	previous, err := config.LoadAI()
+	if err != nil {
+		return config.AIConfig{}, err
+	}
+	defaultMode := 0
+	if previous.Configured && previous.Mode == "remote" {
+		defaultMode = 1
+	}
 	mode, err := prompter.Choose(ctx, "Set up Kabibi AI", "Choose where AI requests should run.", []string{
 		"Local Gemma model",
 		"Cloud provider (OAuth / API key)",
 		"Cancel",
-	}, 0)
+	}, defaultMode)
 	if err != nil {
 		return config.AIConfig{}, err
 	}
 	switch mode {
 	case 0:
-		return r.configureLocalAI(ctx, prompter)
+		return r.configureLocalAI(ctx, prompter, previous)
 	case 1:
-		return r.configureRemoteAI(ctx, prompter, term)
+		return r.configureRemoteAI(ctx, prompter, term, previous)
 	case 2:
 		return config.AIConfig{}, errOnboardingCancelled
 	default:
@@ -103,7 +111,7 @@ func (r *LazyAIRunner) configureAIWithPrompter(ctx context.Context, prompter Onb
 	}
 }
 
-func (r *LazyAIRunner) configureLocalAI(ctx context.Context, prompter OnboardingPrompter) (config.AIConfig, error) {
+func (r *LazyAIRunner) configureLocalAI(ctx context.Context, prompter OnboardingPrompter, previous config.AIConfig) (config.AIConfig, error) {
 	profile, err := assets.ProbeHardware()
 	if err != nil {
 		return config.AIConfig{}, fmt.Errorf("inspect hardware for local AI setup: %w", err)
@@ -127,6 +135,9 @@ func (r *LazyAIRunner) configureLocalAI(ctx context.Context, prompter Onboarding
 		}
 		options = append(options, label)
 		available = append(available, tier)
+		if previous.Configured && previous.Mode == "local" && previous.TierID == tier.ID {
+			defaultChoice = len(options) - 1
+		}
 	}
 	if len(options) == 0 {
 		return config.AIConfig{}, fmt.Errorf("no local AI model is supported by this host")
@@ -190,12 +201,16 @@ func (r *LazyAIRunner) configureLocalAI(ctx context.Context, prompter Onboarding
 	return cfg, nil
 }
 
-func (r *LazyAIRunner) configureRemoteAI(ctx context.Context, prompter OnboardingPrompter, term ai.TerminalSession) (config.AIConfig, error) {
+func (r *LazyAIRunner) configureRemoteAI(ctx context.Context, prompter OnboardingPrompter, term ai.TerminalSession, previous config.AIConfig) (config.AIConfig, error) {
 	options := make([]string, len(supportedRemoteProviders))
+	defaultChoice := 0
 	for i, p := range supportedRemoteProviders {
 		options[i] = p.label
+		if previous.Configured && previous.Mode == "remote" && previous.Provider == string(p.provider) {
+			defaultChoice = i
+		}
 	}
-	choice, err := prompter.Choose(ctx, "Choose a cloud provider", "Cloud requests are sent to the selected provider and may incur usage or subscription charges.", options, 0)
+	choice, err := prompter.Choose(ctx, "Choose a cloud provider", "Cloud requests are sent to the selected provider and may incur usage or subscription charges.", options, defaultChoice)
 	if err != nil {
 		return config.AIConfig{}, err
 	}
@@ -203,17 +218,21 @@ func (r *LazyAIRunner) configureRemoteAI(ctx context.Context, prompter Onboardin
 		return config.AIConfig{}, fmt.Errorf("invalid cloud provider selection %d", choice)
 	}
 	entry := supportedRemoteProviders[choice]
-	return r.authenticateAndSaveRemoteProvider(ctx, prompter, term, entry.provider, entry.label)
+	return r.authenticateAndSaveRemoteProvider(ctx, prompter, term, entry.provider, entry.label, previous)
 }
 
 func (r *LazyAIRunner) configureRemoteProviderWithTerm(ctx context.Context, term ai.TerminalSession, providerArg string) (config.AIConfig, error) {
 	prompter := newTerminalOnboardingPrompter(term)
+	previous, err := config.LoadAI()
+	if err != nil {
+		return config.AIConfig{}, err
+	}
 	if providerArg == "" {
-		return r.configureRemoteAI(ctx, prompter, term)
+		return r.configureRemoteAI(ctx, prompter, term, previous)
 	}
 	for _, entry := range supportedRemoteProviders {
 		if string(entry.provider) == providerArg || (providerArg == "copilot" && entry.provider == ai.RemoteCopilot) {
-			return r.authenticateAndSaveRemoteProvider(ctx, prompter, term, entry.provider, entry.label)
+			return r.authenticateAndSaveRemoteProvider(ctx, prompter, term, entry.provider, entry.label, previous)
 		}
 	}
 	return config.AIConfig{}, fmt.Errorf("unknown provider %q (supported: openrouter, anthropic, openai, github-copilot, gemini)", providerArg)
@@ -225,6 +244,7 @@ func (r *LazyAIRunner) authenticateAndSaveRemoteProvider(
 	term ai.TerminalSession,
 	provider ai.RemoteProvider,
 	label string,
+	previous config.AIConfig,
 ) (config.AIConfig, error) {
 	confirmed, err := prompter.Confirm(ctx, "Confirm cloud AI setup", "Kabibi will send prompts and tool results to "+label+". Provider billing and data-retention policies apply. Continue?")
 	if err != nil {
@@ -234,28 +254,31 @@ func (r *LazyAIRunner) authenticateAndSaveRemoteProvider(
 		return config.AIConfig{}, errOnboardingCancelled
 	}
 
-	var cred *ai.Credential
-	if term != nil {
-		cred, err = ai.AuthenticateProvider(ctx, provider, term, nil)
+	baseURL := ""
+	if previous.Configured && previous.Mode == "remote" && previous.Provider == string(provider) {
+		baseURL = previous.BaseURL
+	}
+	cred, err := reusableRemoteCredential(ctx, provider, baseURL)
+	if err != nil {
+		return config.AIConfig{}, err
+	}
+	if cred == nil {
+		cred, err = authenticateRemoteProvider(ctx, prompter, term, provider, label, baseURL)
 		if err != nil {
 			return config.AIConfig{}, err
 		}
-	} else {
-		apiKey, inputErr := prompter.Input(ctx, "Provider credential", "Enter the API key for "+label, true)
-		if inputErr != nil {
-			return config.AIConfig{}, inputErr
-		}
-		apiKey = strings.TrimSpace(apiKey)
-		if apiKey == "" {
-			return config.AIConfig{}, fmt.Errorf("%s API key must not be empty", label)
-		}
-		if err := ai.ValidateRemoteCredential(ctx, ai.RemoteEngineConfig{Provider: provider, Model: "validation", APIKey: apiKey}); err != nil {
-			return config.AIConfig{}, err
-		}
-		cred = &ai.Credential{Type: ai.CredentialAPIKey, Key: apiKey}
 	}
-
-	model, err := chooseRemoteModel(ctx, prompter, provider, cred)
+	previousModel := ""
+	if previous.Configured && previous.Mode == "remote" && previous.Provider == string(provider) && previous.Model != "" {
+		previousModel = previous.Model
+	}
+	model, err := chooseRemoteModel(ctx, prompter, provider, cred, baseURL, ai.DefaultRemoteModel(provider), previousModel)
+	if errors.Is(err, ai.ErrRemoteCredentialRejected) {
+		cred, err = authenticateRemoteProvider(ctx, prompter, term, provider, label, baseURL)
+		if err == nil {
+			model, err = chooseRemoteModel(ctx, prompter, provider, cred, baseURL, ai.DefaultRemoteModel(provider), previousModel)
+		}
+	}
 	if err != nil {
 		return config.AIConfig{}, err
 	}
@@ -271,6 +294,7 @@ func (r *LazyAIRunner) authenticateAndSaveRemoteProvider(
 		Mode:         "remote",
 		Provider:     string(provider),
 		Model:        model,
+		BaseURL:      baseURL,
 		ConsentGiven: true,
 	}
 	if err := config.SaveAI(cfg); err != nil {
@@ -282,21 +306,93 @@ func (r *LazyAIRunner) authenticateAndSaveRemoteProvider(
 	return cfg, nil
 }
 
-func chooseRemoteModel(ctx context.Context, prompter OnboardingPrompter, provider ai.RemoteProvider, cred *ai.Credential) (string, error) {
-	curated := ai.CuratedModelsForProvider(provider, cred)
-	if len(curated) == 0 {
-		return "", fmt.Errorf("unsupported provider %q", provider)
+func reusableRemoteCredential(ctx context.Context, provider ai.RemoteProvider, baseURL string) (*ai.Credential, error) {
+	cred, err := credstore.Read(ctx, string(provider))
+	if err != nil {
+		return nil, fmt.Errorf("read stored %s credential: %w", provider, err)
 	}
-	choices := append(append([]string(nil), curated...), "Enter a model ID")
-	choice, err := prompter.Choose(ctx, "Choose a provider model", "Select a curated/discovered model or enter a model identifier.", choices, 0)
+	if cred == nil || cred.SecretToken() == "" {
+		return nil, nil
+	}
+	engineConfig := ai.RemoteEngineConfig{Provider: provider, Credential: cred, BaseURL: baseURL}
+	if err := ai.ValidateRemoteCredential(ctx, engineConfig); err == nil {
+		return cred, nil
+	} else if !errors.Is(err, ai.ErrRemoteCredentialRejected) {
+		return nil, err
+	}
+
+	refreshed, refreshErr := ai.ResolveProviderCredential(ctx, provider, credstore.NewStore(), nil)
+	if refreshErr == nil && refreshed != nil {
+		if err := ai.ValidateRemoteCredential(ctx, ai.RemoteEngineConfig{Provider: provider, Credential: refreshed, BaseURL: baseURL}); err == nil {
+			return refreshed, nil
+		} else if !errors.Is(err, ai.ErrRemoteCredentialRejected) {
+			return nil, err
+		}
+	}
+	return nil, nil
+}
+
+func authenticateRemoteProvider(ctx context.Context, prompter OnboardingPrompter, term ai.TerminalSession, provider ai.RemoteProvider, label, baseURL string) (*ai.Credential, error) {
+	if term != nil {
+		cred, err := ai.AuthenticateProvider(ctx, provider, term, nil)
+		if err != nil {
+			return nil, err
+		}
+		return cred, nil
+	}
+	apiKey, err := prompter.Input(ctx, "Provider credential", "Enter the API key for "+label, true)
+	if err != nil {
+		return nil, err
+	}
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return nil, fmt.Errorf("%s API key must not be empty", label)
+	}
+	cred := &ai.Credential{Type: ai.CredentialAPIKey, Key: apiKey}
+	if err := ai.ValidateRemoteCredential(ctx, ai.RemoteEngineConfig{Provider: provider, Credential: cred, BaseURL: baseURL}); err != nil {
+		return nil, err
+	}
+	return cred, nil
+}
+
+func chooseRemoteModel(ctx context.Context, prompter OnboardingPrompter, provider ai.RemoteProvider, cred *ai.Credential, baseURL, preferredModel, previousModel string) (string, error) {
+	models, err := ai.ListRemoteModels(ctx, ai.RemoteEngineConfig{Provider: provider, Credential: cred, BaseURL: baseURL})
+	if err != nil {
+		return "", err
+	}
+	if len(models) == 0 {
+		return "", fmt.Errorf("%s returned no selectable models", provider)
+	}
+	modelChoices := append([]string(nil), models...)
+	choices := append([]string(nil), models...)
+	defaultChoice := 0
+	defaultModel := previousModel
+	if defaultModel == "" {
+		defaultModel = preferredModel
+	}
+	foundDefault := false
+	for i, model := range models {
+		if model == defaultModel {
+			defaultChoice = i
+			foundDefault = true
+			break
+		}
+	}
+	if previousModel != "" && !foundDefault {
+		choices = append(choices, previousModel+" (previously selected; not in provider catalog)")
+		modelChoices = append(modelChoices, previousModel)
+		defaultChoice = len(modelChoices) - 1
+	}
+	choices = append(choices, "Enter a model ID")
+	choice, err := prompter.Choose(ctx, "Choose a provider model", "Select a model from the provider catalog or enter a model identifier.", choices, defaultChoice)
 	if err != nil {
 		return "", err
 	}
 	if choice < 0 || choice >= len(choices) {
 		return "", fmt.Errorf("invalid provider model selection %d", choice)
 	}
-	if choice != len(choices)-1 {
-		return choices[choice], nil
+	if choice < len(modelChoices) {
+		return modelChoices[choice], nil
 	}
 	model, err := prompter.Input(ctx, "Model identifier", "Enter the provider model ID", false)
 	if err != nil {
