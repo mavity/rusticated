@@ -116,12 +116,14 @@ const (
 // CommandBlock represents a single shell or AI interaction block in the stack:
 // banner, user command, or AI turn, along with its rendered CellBuf cache.
 type CommandBlock struct {
-	ID            int                // Monotonic 1-based block ID
-	Kind          BlockKind          // BlockBanner, BlockCommand, or BlockAITurn
-	Source        CommandSource      // SourceUserShell, SourceAITool, or SourceSystem
-	Cwd           string             // Working directory at execution time
-	Prompt        string             // e.g., "~/rustica፧"
-	Input         string             // The command or prompt text
+	ID            int           // Monotonic 1-based block ID
+	Kind          BlockKind     // BlockBanner, BlockCommand, or BlockAITurn
+	Source        CommandSource // SourceUserShell, SourceAITool, or SourceSystem
+	Cwd           string        // Working directory at execution time
+	Prompt        string        // e.g., "~/rustica፧"
+	Input         string        // The command or prompt text
+	inputStyles   []terminal.Style
+	submitAnim    *commandSubmitAnimation
 	Output        bytes.Buffer       // Full accumulated output from stdout/stderr or AI content
 	AnimLine      string             // Transient animated artifact/ticker line while Status == StatusActive
 	Status        CommandBlockStatus // Execution status

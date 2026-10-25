@@ -257,6 +257,11 @@ type visualLayout struct {
 	cursorX    int
 	cursorY    int
 	totalLines int
+	inputCells []inputCell
+}
+
+type inputCell struct {
+	x, y, width int
 }
 
 var bashInputLexer = lexers.Get("bash")
@@ -348,13 +353,13 @@ func buildVisualLayout(prompt, value string, cursorPos, width int, inputStyles [
 		col = 0
 	}
 
-	putRune := func(r rune, runeStyle terminal.Style) {
+	putRune := func(r rune, runeStyle terminal.Style) inputCell {
 		if r == '\n' {
 			rows = append(rows, newRow())
 			softWraps = append(softWraps, false)
 			row++
 			col = 0
-			return
+			return inputCell{y: row}
 		}
 		rw := runeCellWidth(r)
 		if rw > width {
@@ -363,6 +368,7 @@ func buildVisualLayout(prompt, value string, cursorPos, width int, inputStyles [
 		if col+rw > width {
 			advanceWrap()
 		}
+		position := inputCell{x: col, y: row, width: rw}
 		rows[row][col] = terminal.Cell{
 			Grapheme: string(r),
 			Style:    runeStyle,
@@ -374,6 +380,7 @@ func buildVisualLayout(prompt, value string, cursorPos, width int, inputStyles [
 			}
 		}
 		col += rw
+		return position
 	}
 
 	for _, r := range prompt {
@@ -389,6 +396,7 @@ func buildVisualLayout(prompt, value string, cursorPos, width int, inputStyles [
 	}
 
 	cursorX, cursorY := -1, -1
+	inputCells := make([]inputCell, 0, len(valRunes))
 
 	for i, r := range valRunes {
 		if i == cursorPos {
@@ -406,7 +414,7 @@ func buildVisualLayout(prompt, value string, cursorPos, width int, inputStyles [
 		if i < len(inputStyles) {
 			runeStyle = inputStyles[i]
 		}
-		putRune(r, runeStyle)
+		inputCells = append(inputCells, putRune(r, runeStyle))
 	}
 
 	if cursorPos == len(valRunes) {
@@ -435,6 +443,7 @@ func buildVisualLayout(prompt, value string, cursorPos, width int, inputStyles [
 		cursorX:    cursorX,
 		cursorY:    cursorY,
 		totalLines: len(rows),
+		inputCells: inputCells,
 	}
 }
 

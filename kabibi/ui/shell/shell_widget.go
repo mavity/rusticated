@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -67,6 +68,19 @@ func aiExecPTYFrameSize(width, height int) (cols, rows int) {
 }
 
 var stackSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+const (
+	submitWipeDuration       = 200 * time.Millisecond
+	submitRestoreDuration    = 100 * time.Millisecond
+	submitColorDuration      = 100 * time.Millisecond
+	submitBackgroundDuration = 100 * time.Millisecond
+	submitAnimationDuration  = submitWipeDuration + submitRestoreDuration +
+		submitColorDuration + submitBackgroundDuration
+)
+
+type commandSubmitAnimation struct {
+	startedAt time.Time
+}
 
 // formatStartupBanner constructs the pompous retro diagnostic startup banner block.
 func formatStartupBanner(sessionErr error) string {
@@ -559,7 +573,7 @@ func (s *Shell) SubmitCurrentInput() {
 // (Shell first -> AI fallback) and waits for completion.
 func (s *Shell) ExecuteLine(line string) {
 	s.input.SetValue(line)
-	s.submitAndExecuteAsync()
+	s.submitAndExecuteAsync(false)
 	s.WaitActive()
 }
 
@@ -569,6 +583,7 @@ func renderBlockCached(block *CommandBlock, width int) terminal.CellBuf {
 	if width <= 0 {
 		width = 80
 	}
+	animationRunning := block.submitAnim != nil
 	outLen := block.Output.Len()
 	liveGeneration := uint64(0)
 	liveHeight := 0
@@ -579,7 +594,7 @@ func renderBlockCached(block *CommandBlock, width int) terminal.CellBuf {
 			_, liveHeight = block.liveOutput.terminal.Size()
 		}
 	}
-	if block.cachePopulated &&
+	if !animationRunning && block.cachePopulated &&
 		block.cachedWidth == width &&
 		block.cachedHeight == liveHeight &&
 		block.cachedPrompt == block.Prompt &&
@@ -637,8 +652,25 @@ func renderBlockCached(block *CommandBlock, width int) terminal.CellBuf {
 			if buf.Height == 0 {
 				buf = terminal.NewCellBuf(width, 1)
 			}
+			if block.Kind == BlockCommand && (len(block.inputStyles) > 0 || block.submitAnim != nil) {
+				layout := buildVisualLayout(
+					ansiRegex.ReplaceAllString(block.Prompt, ""),
+					block.Input,
+					len([]rune(block.Input)),
+					width,
+					block.inputStyles,
+				)
+				applyCommandInputStyles(&buf, layout.inputCells, block.inputStyles)
+				if block.submitAnim != nil {
+					renderCommandSubmitAnimation(&buf, layout, block.inputStyles, block.submitAnim, time.Now())
+				}
+			}
 		}
 		block.cachedCursor = terminal.CursorPos{}
+	}
+
+	if animationRunning {
+		return buf
 	}
 
 	block.cachedWidth = width
@@ -654,6 +686,186 @@ func renderBlockCached(block *CommandBlock, width int) terminal.CellBuf {
 	block.cachedBuf = buf
 	block.cachePopulated = true
 	return buf
+}
+
+func applyCommandInputStyles(buf *terminal.CellBuf, cells []inputCell, styles []terminal.Style) {
+	for i, position := range cells {
+		if i >= len(styles) || position.width == 0 {
+			continue
+		}
+		for x := position.x; x < position.x+position.width; x++ {
+			cell := buf.Get(x, position.y)
+			cell.Style = styles[i]
+			if x > position.x {
+				cell.Grapheme = ""
+			}
+			buf.Set(x, position.y, cell)
+		}
+	}
+}
+
+func renderCommandSubmitAnimation(buf *terminal.CellBuf, layout visualLayout, styles []terminal.Style, animation *commandSubmitAnimation, now time.Time) {
+	elapsed := now.Sub(animation.startedAt)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	elapsed %= submitAnimationDuration
+
+	commandIndexes := make([]int, 0, len(layout.inputCells))
+	for i, cell := range layout.inputCells {
+		if cell.width > 0 {
+			commandIndexes = append(commandIndexes, i)
+		}
+	}
+	if len(commandIndexes) == 0 {
+		return
+	}
+
+	switch {
+	case elapsed < submitWipeDuration:
+		progress := float64(elapsed) / float64(submitWipeDuration)
+		visible := len(commandIndexes) - int(math.Floor(easeInCubic(progress)*float64(len(commandIndexes))))
+		hideCommandSuffix(buf, layout.inputCells, styles, commandIndexes, visible)
+		drawSubmitDot(buf, layout.inputCells, styles, commandIndexes, visible, elapsed)
+	case elapsed < submitWipeDuration+submitRestoreDuration:
+		progress := float64(elapsed-submitWipeDuration) / float64(submitRestoreDuration)
+		visible := int(math.Ceil(progress * float64(len(commandIndexes))))
+		hideCommandSuffix(buf, layout.inputCells, styles, commandIndexes, visible)
+		dotElapsed := submitWipeDuration - time.Duration(progress*float64(submitWipeDuration))
+		drawSubmitDot(buf, layout.inputCells, styles, commandIndexes, visible, dotElapsed)
+	case elapsed < submitWipeDuration+submitRestoreDuration+submitColorDuration:
+		progress := float64(elapsed-submitWipeDuration-submitRestoreDuration) / float64(submitColorDuration)
+		applySubmitColorTransition(buf, layout.inputCells, styles, progress)
+	case elapsed < submitAnimationDuration:
+		progress := float64(elapsed-submitWipeDuration-submitRestoreDuration-submitColorDuration) /
+			float64(submitBackgroundDuration)
+		paintCommandBackground(buf, layout, uint8(math.Round((1-progress)*255)))
+	default:
+		resetCommandBackground(buf, layout)
+	}
+}
+
+func easeInCubic(progress float64) float64 {
+	if progress < 0 {
+		progress = 0
+	} else if progress > 1 {
+		progress = 1
+	}
+	return progress * progress * progress
+}
+
+func hideCommandSuffix(buf *terminal.CellBuf, cells []inputCell, styles []terminal.Style, commandIndexes []int, visible int) {
+	for j := visible; j < len(commandIndexes); j++ {
+		i := commandIndexes[j]
+		position := cells[i]
+		style := terminal.NewStyle(0, 0, terminal.CharResetForegroundDefault|terminal.CharResetBackgroundDefault)
+		if i < len(styles) {
+			style = styles[i]
+		}
+		for x := position.x; x < position.x+position.width; x++ {
+			buf.Set(x, position.y, terminal.Cell{Grapheme: " ", Style: style})
+		}
+	}
+}
+
+func drawSubmitDot(buf *terminal.CellBuf, cells []inputCell, styles []terminal.Style, commandIndexes []int, visible int, elapsed time.Duration) {
+	if visible > len(commandIndexes) {
+		visible = len(commandIndexes)
+	}
+	dotIndex := 0
+	if visible > 0 {
+		dotIndex = commandIndexes[visible-1]
+	} else if len(commandIndexes) > 0 {
+		dotIndex = commandIndexes[0]
+	}
+	position := cells[dotIndex]
+	style := terminal.NewStyle(0xD0D0D0, 0, terminal.CharResetBackgroundDefault)
+	if dotIndex < len(styles) {
+		style = styles[dotIndex]
+	}
+	glyph := "·"
+	switch {
+	case elapsed >= 140*time.Millisecond:
+		glyph = "  "
+	case elapsed >= 80*time.Millisecond:
+		glyph = "●"
+	}
+	if glyph == "  " {
+		for x := position.x; x < position.x+2 && x < buf.Width; x++ {
+			buf.Set(x, position.y, terminal.Cell{Grapheme: " ", Style: style})
+		}
+		return
+	}
+	buf.Set(position.x, position.y, terminal.Cell{Grapheme: glyph, Style: style})
+}
+
+func applySubmitColorTransition(buf *terminal.CellBuf, cells []inputCell, styles []terminal.Style, progress float64) {
+	if progress < 0 {
+		progress = 0
+	} else if progress > 1 {
+		progress = 1
+	}
+	for i, position := range cells {
+		if position.width == 0 {
+			continue
+		}
+		style := terminal.NewStyle(0xC0C0C0, 0, terminal.CharResetBackgroundDefault)
+		if i < len(styles) {
+			style = styles[i]
+		}
+		base := style.Foreground()
+		if style.HasAttribute(terminal.CharResetForegroundDefault) {
+			base = 0xC0C0C0
+		}
+		var color terminal.Color
+		if progress <= 0.5 {
+			color = scaleColor(base, 0.03+progress*2*0.97)
+		} else {
+			color = blendColor(base, 0xF8F8F8, (progress-0.5)*2)
+		}
+		style = style.WithForeground(color).RemoveAttribute(terminal.CharResetForegroundDefault)
+		for x := position.x; x < position.x+position.width; x++ {
+			cell := buf.Get(x, position.y)
+			cell.Style = style
+			buf.Set(x, position.y, cell)
+		}
+	}
+}
+
+func scaleColor(color terminal.Color, factor float64) terminal.Color {
+	return terminal.Color(uint32(math.Round(float64((color>>16)&0xFF)*factor))<<16 |
+		uint32(math.Round(float64((color>>8)&0xFF)*factor))<<8 |
+		uint32(math.Round(float64(color&0xFF)*factor)))
+}
+
+func blendColor(from, to terminal.Color, progress float64) terminal.Color {
+	blend := func(a, b uint32) uint32 {
+		return uint32(math.Round(float64(a)*(1-progress) + float64(b)*progress))
+	}
+	return terminal.Color(blend(uint32((from>>16)&0xFF), uint32((to>>16)&0xFF))<<16 |
+		blend(uint32((from>>8)&0xFF), uint32((to>>8)&0xFF))<<8 |
+		blend(uint32(from&0xFF), uint32(to&0xFF)))
+}
+
+func paintCommandBackground(buf *terminal.CellBuf, layout visualLayout, brightness uint8) {
+	background := terminal.Color(uint32(brightness)<<16 | uint32(brightness)<<8 | uint32(brightness))
+	for y := 0; y < layout.totalLines && y < buf.Height; y++ {
+		for x := 0; x < buf.Width; x++ {
+			cell := buf.Get(x, y)
+			cell.Style = cell.Style.WithBackground(background).RemoveAttribute(terminal.CharResetBackgroundDefault)
+			buf.Set(x, y, cell)
+		}
+	}
+}
+
+func resetCommandBackground(buf *terminal.CellBuf, layout visualLayout) {
+	for y := 0; y < layout.totalLines && y < buf.Height; y++ {
+		for x := 0; x < buf.Width; x++ {
+			cell := buf.Get(x, y)
+			cell.Style = cell.Style.WithBackground(0).AddAttribute(terminal.CharResetBackgroundDefault)
+			buf.Set(x, y, cell)
+		}
+	}
 }
 
 func renderLiveBlock(block *CommandBlock, width int) (terminal.CellBuf, terminal.CursorPos) {
@@ -685,6 +897,19 @@ func renderLiveBlock(block *CommandBlock, width int) (terminal.CellBuf, terminal
 	var prefix terminal.CellBuf
 	if block.Kind != BlockBanner && (block.Prompt != "" || block.Input != "") {
 		prefix = terminal.FromANSIString(block.Prompt+block.Input+"\n", innerWidth)
+		if block.Kind == BlockCommand && (len(block.inputStyles) > 0 || block.submitAnim != nil) {
+			layout := buildVisualLayout(
+				ansiRegex.ReplaceAllString(block.Prompt, ""),
+				block.Input,
+				len([]rune(block.Input)),
+				innerWidth,
+				block.inputStyles,
+			)
+			applyCommandInputStyles(&prefix, layout.inputCells, block.inputStyles)
+			if block.submitAnim != nil {
+				renderCommandSubmitAnimation(&prefix, layout, block.inputStyles, block.submitAnim, time.Now())
+			}
+		}
 	}
 	animation := terminal.CellBuf{}
 	if block.Status == StatusActive && block.AnimLine != "" {
@@ -1509,13 +1734,13 @@ func (s *Shell) handleKeyEvent(ev input.KeyPressEvent) bool {
 				return true
 			}
 		}
-		s.submitAndExecuteAsync()
+		s.submitAndExecuteAsync(true)
 		return true
 	}
 
 	if keyStr == "ctrl+d" && s.input.Value() == "" {
 		s.input.SetValue("exit")
-		s.submitAndExecuteAsync()
+		s.submitAndExecuteAsync(true)
 		return true
 	}
 
@@ -1528,10 +1753,11 @@ func (s *Shell) emitScrollbackLine(line string) {
 	}
 }
 
-func (s *Shell) submitAndExecuteAsync() {
+func (s *Shell) submitAndExecuteAsync(animate bool) {
 	rawInput := s.input.Value()
 	typedAt := s.input.FirstInputAt()
 	prompt := s.input.PromptText()
+	inputStyles := s.styleInput(rawInput)
 	s.input.AddHistory(rawInput)
 	s.input.Reset()
 
@@ -1546,16 +1772,17 @@ func (s *Shell) submitAndExecuteAsync() {
 		typedAt = startedAt
 	}
 	block := CommandBlock{
-		Kind:      BlockCommand,
-		Source:    SourceUserShell,
-		Cwd:       cwd,
-		Prompt:    prompt,
-		Input:     rawInput,
-		Output:    bytes.Buffer{},
-		Status:    StatusActive,
-		ExitCode:  0,
-		TypedAt:   typedAt,
-		StartedAt: startedAt,
+		Kind:        BlockCommand,
+		Source:      SourceUserShell,
+		Cwd:         cwd,
+		Prompt:      prompt,
+		Input:       rawInput,
+		inputStyles: inputStyles,
+		Output:      bytes.Buffer{},
+		Status:      StatusActive,
+		ExitCode:    0,
+		TypedAt:     typedAt,
+		StartedAt:   startedAt,
 	}
 	s.blocks = append(s.blocks, block)
 	blockIdx := len(s.blocks) - 1
@@ -1585,6 +1812,11 @@ func (s *Shell) submitAndExecuteAsync() {
 	}
 
 	route, parsed := s.execSess.ClassifyInput(rawInput)
+	var submitAnimation *commandSubmitAnimation
+	if animate && trimmed != "" && route == RouteShell {
+		submitAnimation = &commandSubmitAnimation{startedAt: startedAt}
+		s.blocks[blockIdx].submitAnim = submitAnimation
+	}
 	var liveState *liveOutputState
 	if route == RouteEmpty {
 		s.blocks[blockIdx].Status = StatusSuccess
@@ -1628,6 +1860,9 @@ func (s *Shell) submitAndExecuteAsync() {
 	s.mu.Unlock()
 
 	s.invalidate()
+	if submitAnimation != nil {
+		go s.runCommandSubmitAnimation(blockIdx, submitAnimation)
+	}
 
 	// Animated artifact ticker goroutine: drives smooth spinner updates while active
 	animDone := make(chan struct{})
@@ -1646,6 +1881,7 @@ func (s *Shell) submitAndExecuteAsync() {
 					s.mu.Unlock()
 					return
 				}
+
 				s.animFrame = (s.animFrame + 1) % len(stackSpinnerFrames)
 				frameGlyph := stackSpinnerFrames[s.animFrame]
 				if s.statusLine != "" {
@@ -1670,6 +1906,7 @@ func (s *Shell) submitAndExecuteAsync() {
 			s.mu.Lock()
 			if blockIdx >= 0 && blockIdx < len(s.blocks) {
 				s.blocks[blockIdx].AnimLine = ""
+				stopCommandSubmitAnimationLocked(&s.blocks[blockIdx])
 			}
 			s.activeCancel = nil
 			s.activeBlock = -1
@@ -1695,6 +1932,7 @@ func (s *Shell) submitAndExecuteAsync() {
 			if text == "" {
 				return
 			}
+			s.stopCommandSubmitAnimation(blockIdx)
 			if liveState != nil {
 				liveState.enqueue([]byte(text))
 				s.invalidate()
@@ -1759,6 +1997,33 @@ func (s *Shell) submitAndExecuteAsync() {
 		}
 		s.runAIFallback(ctx, blockIdx, rawInput, aiRunner, execSess, startedAt, appendBlockText)
 	}()
+}
+
+func (s *Shell) runCommandSubmitAnimation(blockIdx int, animation *commandSubmitAnimation) {
+	ticker := time.NewTicker(16 * time.Millisecond)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.mu.Lock()
+		if blockIdx < 0 || blockIdx >= len(s.blocks) || s.blocks[blockIdx].submitAnim != animation {
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Unlock()
+		s.invalidate()
+	}
+}
+
+func (s *Shell) stopCommandSubmitAnimation(blockIdx int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if blockIdx >= 0 && blockIdx < len(s.blocks) {
+		stopCommandSubmitAnimationLocked(&s.blocks[blockIdx])
+	}
+}
+
+func stopCommandSubmitAnimationLocked(block *CommandBlock) {
+	block.submitAnim = nil
+	block.cachePopulated = false
 }
 
 func (s *Shell) updateActiveArtifactFeedback(blockIdx int, feedback string) {
