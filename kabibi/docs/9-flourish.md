@@ -663,3 +663,52 @@ How do keyboard and mouse events work when the DOM panels are open?
 
 * **Smooth Cursor Glide Check:** Verify that holding `Down`/`Up` or pressing `Left`/`Right`/`PgDn`/`Home`/`End` in the active panel glides the cyan selection bar smoothly across rows and columns while `Tab` transitions active-pane focus and updates the CRT `~/path፧` prompt below on the exact same frame.
 
+# Notes and adjustments
+
+> Few notes for you:
+>
+> 1. We absolutely MUST review the xterm.js code to figure how to make it help us to generate off-screen surface. If xterm.js is not immediately fit right away, we can even vendor and patch it for that purpose.
+> 2. Mouse and keyboard works in the current index.html integration and in Kabibi's browser code. But if that needs to adjust for off-screen full-screen setup, that needs to be explored.
+> 3. For non-GPU fallback I propose we simply switch into direct-to-dom full-page rendering in xterm.js with no flourish.
+
+Understood: the xterm.js off-screen surface is an explicit research requirement, and the existing browser input integration must be traced rather than presumed absent. I’ll inspect the actual `index.html`/Kabibi browser path and the pinned xterm.js renderer implementation, then check how the proposed non-GPU fallback fits. No code changes.
+
+The notes above adjust the assessment. The existing integration is real, and your proposed direct-to-DOM fallback is a strong way to preserve a usable terminal when the flourish cannot run.
+
+One correction to my previous review: I was wrong to imply there was no current browser integration. I overlooked the root `index.html`. It currently hosts xterm.js 5.3 beside the README and wires terminal input, output, and sizing to `washmhost`. `Kabibi’s VS Code extension` has another working terminal path through VS Code’s pseudoterminal. Neither is the proposed full-screen CRT yet—the root page’s layout is side-by-side, and the VS Code extension uses VS Code’s own terminal—but they establish input/output behavior we should preserve.
+
+I also reviewed the pinned xterm.js 6.0 source. It gives us a concrete route to the off-screen surface:
+
+- [`WebglRenderer.ts`](https://github.com/xtermjs/xterm.js/blob/6.0.0/addons/addon-webgl/src/WebglRenderer.ts) creates a screen-rendering canvas, requests its WebGL2 context, sizes it with terminal dimensions, and appends it to xterm’s screen element. The canvas is private, not exposed as a public output-surface API.
+- The public `WebglAddon.textureAtlas` is only the **glyph atlas**, not the rendered terminal screen. The plan must not use it as `xtermTexture`.
+- [`WebglAddon.ts`](https://github.com/xtermjs/xterm.js/blob/6.0.0/addons/addon-webgl/src/WebglAddon.ts) accepts `preserveDrawingBuffer` directly; for this version, `new WebglAddon(true)` is the route to try. That avoids the proposed global `getContext` monkey-patch.
+- `Terminal.onRender` exists in xterm 6.0’s public API. We can test whether it is the right update signal for Three’s `CanvasTexture.needsUpdate`. The screen canvas can also be exposed through a small maintained xterm patch—for example, a documented `renderCanvas` getter on the addon—rather than relying on private selectors.
+- xterm’s [`DomRenderer.ts`](https://github.com/xtermjs/xterm.js/blob/6.0.0/src/browser/renderer/dom/DomRenderer.ts) identifies the DOM renderer as its standard fallback, and disposing the WebGL addon restores the core renderer. That supports your proposal: if Three or the accelerated path is unavailable, display the same terminal directly in the page, without flourish.
+
+So the off-screen CRT path is **plausible and worth prototyping**, not blocked. The key unknown is whether the exposed/patched xterm canvas can be sampled reliably and efficiently by Three while xterm remains laid out, focused, and interactive.
+
+I’d revise the plan’s order accordingly:
+
+1. **Prototype the xterm surface first:** use the root browser integration as the starting point, move it to a full-page layout, try xterm 6.0’s WebGL renderer with `preserveDrawingBuffer`, and expose the screen canvas intentionally if needed. Put real Kabibi ANSI output on a simple Three plane before adding curvature, glass, or HUD.
+2. **Prove off-screen interaction:** preserve the current keyboard and resize paths, then test pointer events, selection, and mouse-reporting after the terminal surface is visually hidden behind the rendered screen. That’s a risk to investigate—not a reason to assume existing input fails.
+3. **Implement the direct-DOM fallback:** on initialization failure or loss of the required rendering capability, reveal the same xterm instance as a full-page DOM terminal. Keep the guest running; avoid a second terminal or WASM restart.
+4. **Only after those gates pass, add the DOM HUD and visual effects.** Measure frame time and resize behavior before investing in detailed refraction and reflection.
+
+One choice the spec should make explicit: Three’s `WebGPURenderer` may use WebGL2 as a GPU backend, while your fallback is specifically non-GPU direct-to-DOM. The mode selection should distinguish those cases clearly. No files were changed.
+
+> Now do you understand that if we render in WebGL2 with blurs and cuvatures, we need two more things: the camera should point at the curved screen from slightly bottom-right angle, subtly but like in stylish low-angle car posters, plus there should be very subtle blur that keeps most of the screen sharp but the part that is closer to the camera (right-bottom) should be slightly out of focus? Do you reckon you understand that?
+
+Yes. I understand the intended look:
+
+- The camera should view the curved screen from slightly below and to the right, with a restrained perspective—like a stylish low-angle car poster, not a dramatic skew that harms readability.
+- The curvature and viewpoint should make the lower-right area feel closer to the camera.
+- A subtle, depth-aware focus effect should keep most of the terminal sharp while softening that nearer lower-right area just a little. This is not a general blur or vignette.
+
+The two effects should work together: the screen’s 3D depth and camera position determine where the soft focus falls. In WebGL2, that means using depth-aware post-processing and carefully tuning it so terminal text remains readable. I’ll treat crispness as the default for any DOM HUD unless it’s deliberately placed into that same 3D scene.
+
+> We also want to pause the DOM HUD completely for now, leave it out for the phase 2. Does it make sense?
+
+Yes. Pausing the DOM HUD for phase 2 makes sense: it removes a separate rendering and synchronization problem while we prove the core CRT effect.
+
+I’d make the phase boundary explicit: phase 2 covers the xterm surface, curved screen, low-angle camera, subtle depth-of-field, and preserving terminal input and resize behavior. It excludes the DOM HUD entirely—no overlay, HUD-to-Go synchronization, or alignment work. The HUD can be reconsidered once the terminal rendering path is proven.
+
