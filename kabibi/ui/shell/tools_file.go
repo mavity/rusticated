@@ -232,11 +232,17 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 
 		// When explicitly requested with hashline=false or start_line/end_line without hashline flag,
 		// return both `content` and `hashlines` so callers inspecting either field succeed.
-		contentOut := formatted
-		if in.Hashline != nil && !*in.Hashline {
-			contentOut = rawSlice
-		} else if (in.StartLine > 0 || in.EndLine > 0) && in.Hashline == nil && strings.TrimSpace(in.Search) == "" {
-			contentOut = rawSlice
+		// Otherwise, omit the duplicate `hashlines` field so the JSON tool payload is not doubled!
+		if (in.Hashline != nil && !*in.Hashline) ||
+			((in.StartLine > 0 || in.EndLine > 0) && in.Hashline == nil && strings.TrimSpace(in.Search) == "") {
+			return map[string]any{
+				"path":        resolved,
+				"tag":         tag,
+				"header":      fmt.Sprintf("[%s#%s]", relDisp, tag),
+				"total_lines": totalLines,
+				"content":     truncateToolOutput(rawSlice),
+				"hashlines":   truncateToolOutput(formatted),
+			}, nil
 		}
 
 		return map[string]any{
@@ -244,8 +250,7 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 			"tag":         tag,
 			"header":      fmt.Sprintf("[%s#%s]", relDisp, tag),
 			"total_lines": totalLines,
-			"content":     truncateToolOutput(contentOut),
-			"hashlines":   truncateToolOutput(formatted),
+			"content":     truncateToolOutput(formatted),
 		}, nil
 	})
 

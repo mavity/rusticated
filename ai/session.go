@@ -828,6 +828,145 @@ func isContextOverflowError(err error) bool {
 		strings.Contains(msg, "Max number of tokens reached")
 }
 
+func isToolCallParseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Failed to parse tool calls") ||
+		strings.Contains(msg, "Failed to parse FC tool calls")
+}
+
+// recoverMalformedGemmaToolCalls extracts valid tool calls from a LiteRT-LM
+// `Failed to parse tool calls` error or from raw `<|tool_call>call:name{...}<tool_call|>`
+// text when the model emitted an empty `<|"|>` value on one argument (such as `explanation:<|"|>,path:<|"|>README.md<|"|>`).
+func recoverMalformedGemmaToolCalls(raw string) ([]ToolCall, string) {
+	if !strings.Contains(raw, "call:") {
+		return nil, raw
+	}
+	var calls []ToolCall
+	cleaned := raw
+	for {
+		startIdx := strings.Index(cleaned, "call:")
+		if startIdx < 0 {
+			break
+		}
+		rest := cleaned[startIdx+len("call:"):]
+		openBrace := strings.IndexByte(rest, '{')
+		closeBrace := strings.IndexByte(rest, '}')
+		if openBrace <= 0 || closeBrace <= openBrace {
+			break
+		}
+		toolName := strings.TrimSpace(rest[:openBrace])
+		body := rest[openBrace+1 : closeBrace]
+
+		// Strip surrounding `<|tool_call>...<tool_call|>` tags from cleaned text
+		cutStart := startIdx
+		if prefix := strings.LastIndex(cleaned[:startIdx], "<|tool_call>"); prefix >= 0 {
+			cutStart = prefix
+		}
+		cutEnd := startIdx + len("call:") + closeBrace + 1
+		if strings.HasPrefix(cleaned[cutEnd:], "<tool_call|>") {
+			cutEnd += len("<tool_call|>")
+		}
+		cleaned = strings.TrimSpace(cleaned[:cutStart] + " " + cleaned[cutEnd:])
+
+		args := make(map[string]any)
+		// Parse key:<|"|>value<|"|> or key:value pairs inside {...}
+		rem := body
+		for len(rem) > 0 {
+			rem = strings.TrimLeft(rem, " ,")
+			if rem == "" {
+				break
+			}
+			// Skip stray `<|"|>` before a key
+			for strings.HasPrefix(rem, `<|"|>`) {
+				rem = strings.TrimLeft(rem[len(`<|"|>`):], " ,")
+			}
+			colon := strings.IndexByte(rem, ':')
+			if colon <= 0 {
+				break
+			}
+			key := strings.Trim(rem[:colon], ` "<>|`)
+			rem = rem[colon+1:]
+			if strings.HasPrefix(rem, `<|"|>`) {
+				rem = rem[len(`<|"|>`):]
+				// If immediately followed by `,` or end (i.e. empty `explanation:<|"|>,`), treat as empty string!
+				if strings.HasPrefix(rem, ",") || len(rem) == 0 {
+					if key != "" {
+						args[key] = ""
+					}
+					continue
+				}
+				endQuote := strings.Index(rem, `<|"|>`)
+				if endQuote >= 0 {
+					val := rem[:endQuote]
+					if key != "" {
+						args[key] = val
+					}
+					rem = rem[endQuote+len(`<|"|>`):]
+					continue
+				}
+			}
+			// Non-quoted scalar (bool/number) up to next comma
+			comma := strings.IndexByte(rem, ',')
+			var valStr string
+			if comma >= 0 {
+				valStr = strings.TrimSpace(rem[:comma])
+				rem = rem[comma+1:]
+			} else {
+				valStr = strings.TrimSpace(rem)
+				rem = ""
+			}
+			if key != "" && valStr != "" {
+				if valStr == "true" {
+					args[key] = true
+				} else if valStr == "false" {
+					args[key] = false
+				} else {
+					args[key] = strings.Trim(valStr, `"'`)
+				}
+			}
+		}
+
+		// Normalize common model aliases (`readfile` -> `read_file`, `listfiles` -> `list_files`, `listdir` -> `list_dir`)
+		switch strings.ToLower(toolName) {
+		case "readfile":
+			toolName = "read_file"
+		case "listfiles":
+			toolName = "list_files"
+		case "listdir":
+			toolName = "list_dir"
+		case "editfile":
+			toolName = "edit_file"
+		case "writefile":
+			toolName = "write_file"
+		}
+
+		// Reject degenerate recovered calls where `read_file` / `edit_file` / `write_file`
+		// had no usable `path` argument (e.g. `path:<|"|>,path:<|"|>` which left `path` empty or ":").
+		if toolName == "read_file" || toolName == "edit_file" || toolName == "write_file" {
+			p, _ := args["path"].(string)
+			p = strings.Trim(p, " :\"'<>|")
+			if p == "" {
+				continue
+			}
+			args["path"] = p
+		}
+
+		if toolName != "" {
+			rawArgs, _ := json.Marshal(args)
+			calls = append(calls, ToolCall{
+				ID:           fmt.Sprintf("recovered_%s_%d", toolName, len(calls)+1),
+				Name:         toolName,
+				Arguments:    args,
+				RawArguments: rawArgs,
+			})
+		}
+	}
+	return calls, strings.TrimSpace(cleaned)
+}
+
 const defaultStreamerMaxRunes = 76
 
 // liveStreamer implements the Zero-ANSI Live Streamer specification: single-line
@@ -1468,11 +1607,36 @@ func (s *Session) runStage5Execution(
 				})
 				_ = streamer.EndStage()
 				if stageErr != nil {
+					if isToolCallParseError(stageErr) {
+						if recCalls, _ := recoverMalformedGemmaToolCalls(stageErr.Error()); len(recCalls) > 0 {
+							toolCalls = append(toolCalls, recCalls...)
+							stageErr = nil
+						}
+					}
+				}
+				if stageErr != nil {
 					if isContextOverflowError(stageErr) && s.tryCompressTurnPartsOnOverflow(ctx, turnParts, executedToolParts) {
 						stageErr = nil
 						continue
 					}
+					if isToolCallParseError(stageErr) && retries < 2 {
+						retries++
+						historyCursor = append(historyCursor, turnParts...)
+						turnParts = []PromptPart{{
+							Role: RoleUser,
+							Text: fmt.Sprintf("Your previous tool call had a syntax error and could not be parsed (%v). Make sure every string argument (including explanation) has a non-empty value between quotes, or write your final answer directly.", stageErr),
+						}}
+						stageErr = nil
+						continue
+					}
 					break
+				}
+				if len(toolCalls) == 0 && strings.Contains(generatedText.String(), "<|tool_call>") {
+					if recCalls, cleaned := recoverMalformedGemmaToolCalls(generatedText.String()); len(recCalls) > 0 {
+						toolCalls = append(toolCalls, recCalls...)
+						generatedText.Reset()
+						generatedText.WriteString(cleaned)
+					}
 				}
 				historyCursor = append(historyCursor, turnParts...)
 				if len(toolCalls) == 0 {
@@ -1578,6 +1742,8 @@ func (s *Session) runStage5Execution(
 		}
 
 		var stageErr error
+		var parseRetries int
+		var lastGeneratedText string
 		for {
 			var toolCalls []ToolCall
 			var generatedText strings.Builder
@@ -1601,7 +1767,18 @@ func (s *Session) runStage5Execution(
 					toolCalls = append(toolCalls, e.ToolCalls...)
 				}
 			}
+			lastGeneratedText = generatedText.String()
 			_ = streamer.EndStage()
+			var recoveredFromParseErr bool
+			if stageErr != nil {
+				if isToolCallParseError(stageErr) {
+					if recCalls, _ := recoverMalformedGemmaToolCalls(stageErr.Error()); len(recCalls) > 0 {
+						toolCalls = append(toolCalls, recCalls...)
+						stageErr = nil
+						recoveredFromParseErr = true
+					}
+				}
+			}
 			if stageErr != nil {
 				if isContextOverflowError(stageErr) && s.tryCompressTurnPartsOnOverflow(ctx, turnParts, executedToolParts) {
 					rebuilt := make([]PromptPart, 0, len(*baseHistory)+3+len(executedToolParts)-len(turnParts))
@@ -1630,7 +1807,55 @@ func (s *Session) runStage5Execution(
 						continue
 					}
 				}
+				if isToolCallParseError(stageErr) && parseRetries < 3 {
+					parseRetries++
+					rebuilt := make([]PromptPart, 0, len(*baseHistory)+3+len(executedToolParts))
+					rebuilt = append(rebuilt, *baseHistory...)
+					rebuilt = append(rebuilt,
+						userPart,
+						PromptPart{
+							Role: RoleModel,
+							Text: "I need to think first. The goal here is: " + goal + "\nMy execution plan is:\n" + plan,
+						},
+						PromptPart{
+							Role: RoleUser,
+							Text: "I see what you mean. Please proceed with that plan now, using any necessary tools, and keep in mind the original request—answer it completely after your work is done:\n" + userText,
+						},
+					)
+					rebuilt = append(rebuilt, executedToolParts...)
+					// After 2 failed tool-call syntax attempts (or if we already gathered tool results),
+					// disable tools on the fallback conversation so the model writes its final answer
+					// directly from the gathered context instead of failing FC grammar parsing!
+					var retryTools []map[string]any
+					retryPrompt := "Your previous tool call had a syntax error. Write your complete final answer now based on the information already gathered."
+					if parseRetries == 1 && len(executedToolParts) == 0 {
+						retryTools = s.tools
+						retryPrompt = "Your previous tool call had a syntax error. Provide a valid non-empty string for every tool argument, or write your final answer directly."
+					}
+					newConv, cerr := s.engine.NewConversationWithConfig(ConversationConfig{
+						SystemMessage: s.systemMessage,
+						Tools:         retryTools,
+						History:       rebuilt,
+					})
+					if cerr == nil {
+						ephemeralConv.Close()
+						ephemeralConv = newConv
+						turnParts = []PromptPart{{
+							Role: RoleUser,
+							Text: retryPrompt,
+						}}
+						stageErr = nil
+						continue
+					}
+				}
 				break
+			}
+			if len(toolCalls) == 0 && strings.Contains(generatedText.String(), "<|tool_call>") {
+				if recCalls, cleaned := recoverMalformedGemmaToolCalls(generatedText.String()); len(recCalls) > 0 {
+					toolCalls = append(toolCalls, recCalls...)
+					generatedText.Reset()
+					generatedText.WriteString(cleaned)
+				}
 			}
 			if len(toolCalls) == 0 {
 				ephemeralConv.Close()
@@ -1685,7 +1910,11 @@ func (s *Session) runStage5Execution(
 				})
 			}
 			executedToolParts = append(executedToolParts, toolResponses...)
-			if sessionMutated {
+			if sessionMutated || recoveredFromParseErr {
+				// If we recovered from a LiteRT-LM tool-call parse error, the C++ ephemeralConv's
+				// internal history did NOT record the failed assistant tool_call turn!
+				// Re-create ephemeralConv seeded with executedToolParts (which includes both
+				// modelTurn and previous turns) so the C++ conversation history stays in sync.
 				rebuilt := make([]PromptPart, 0, len(*baseHistory)+3+len(executedToolParts)-len(toolResponses))
 				rebuilt = append(rebuilt, *baseHistory...)
 				rebuilt = append(rebuilt,
@@ -1721,6 +1950,55 @@ func (s *Session) runStage5Execution(
 		if (isContextOverflowError(stageErr) || errors.Is(stageErr, ErrRepetitionLoop)) && retries < 2 {
 			retries++
 			streamer.Wipe()
+			// If we already gathered tool results and draft text before hitting a repetition loop
+			// (such as a poem with repeating rhyme/meter or a repeated tool-call attempt),
+			// synthesize the final draft directly from the gathered tool results with tools disabled
+			// instead of throwing away executedToolParts and restarting Stage 5 from scratch!
+			if len(executedToolParts) > 0 {
+				if trimmed := strings.TrimSpace(lastGeneratedText); len(trimmed) >= 64 {
+					return executedToolParts, trimmed, nil
+				}
+				rebuilt := make([]PromptPart, 0, len(*baseHistory)+3+len(executedToolParts))
+				rebuilt = append(rebuilt, *baseHistory...)
+				rebuilt = append(rebuilt,
+					userPart,
+					PromptPart{
+						Role: RoleModel,
+						Text: "I need to think first. The goal here is: " + goal + "\nMy execution plan is:\n" + plan,
+					},
+					PromptPart{
+						Role: RoleUser,
+						Text: "I see what you mean. Please proceed with that plan now, using any necessary tools, and keep in mind the original request—answer it completely after your work is done:\n" + userText,
+					},
+				)
+				rebuilt = append(rebuilt, executedToolParts...)
+				synthConv, cerr := s.engine.NewConversationWithConfig(ConversationConfig{
+					SystemMessage: s.systemMessage,
+					Tools:         nil,
+					History:       rebuilt,
+				})
+				if cerr == nil {
+					var synthBuf strings.Builder
+					streamer.StartStage("work")
+					for event, sErr := range synthConv.SendStream(ctx, []PromptPart{{
+						Role: RoleUser,
+						Text: "Based on the files and tool outputs already inspected above, write your complete final answer now without calling any more tools:\n" + userText,
+					}}) {
+						if sErr != nil {
+							break
+						}
+						if e, ok := event.(TextEvent); ok {
+							streamer.Feed(e.Text)
+							synthBuf.WriteString(e.Text)
+						}
+					}
+					_ = streamer.EndStage()
+					synthConv.Close()
+					if out := strings.TrimSpace(synthBuf.String()); out != "" {
+						return executedToolParts, out, nil
+					}
+				}
+			}
 			if cerr := s.compactForEphemeralRetry(ctx); cerr != nil {
 				return nil, "", cerr
 			}

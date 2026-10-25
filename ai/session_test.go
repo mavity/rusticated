@@ -1030,3 +1030,22 @@ func TestImmediateToolOverflowCompressesWithHeadTailOverlappedMiddleAndPurpose(t
 	}
 }
 
+func TestRecoverMalformedGemmaToolCalls(t *testing.T) {
+	errStr := `LiteRT stream error: INVALID_ARGUMENT: Failed to parse tool calls from code block: call:readfile{explanation:<|"|>,path:<|"|>README.md<|"|>}
+full response: <|tool_call>call:readfile{explanation:<|"|>,path:<|"|>README.md<|"|>}<tool_call|>`
+	calls, _ := recoverMalformedGemmaToolCalls(errStr)
+	if len(calls) == 0 {
+		t.Fatal("expected recoverMalformedGemmaToolCalls to recover at least 1 call")
+	}
+	if calls[0].Name != "read_file" || calls[0].Arguments["path"] != "README.md" {
+		t.Fatalf("recovered call = %+v, want read_file(path=README.md)", calls[0])
+	}
+
+	errStr2 := `<|tool_call>call:read_file{explanation:<|"|>Read the README.md file.<|"|>,<|"|>path:<|"|>,path:<|"|>README.md<|"|>,explanation:<|"|>}<tool_call|>`
+	calls2, cleaned2 := recoverMalformedGemmaToolCalls(errStr2)
+	if len(calls2) != 1 || calls2[0].Name != "read_file" || calls2[0].Arguments["path"] != "README.md" {
+		t.Fatalf("recovered call 2 = %+v (cleaned=%q)", calls2, cleaned2)
+	}
+}
+
+

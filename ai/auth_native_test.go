@@ -433,8 +433,14 @@ func TestLocalGemmaLoadModelInfoAndBackendDiscoveryWhenCached(t *testing.T) {
 		t.Fatalf("EnsureModelTier(%q) error = %v", cachedTierID, err)
 	}
 	info, err := LoadModelInfo(libPath, modelPath)
-	if err != nil || info == nil {
+	if err != nil {
+		if strings.Contains(err.Error(), "not a valid Win32 application") {
+			t.Skipf("cached litert_lm_ext.dll is for a different host architecture (e.g. amd64 vs arm64): %v", err)
+		}
 		t.Fatalf("LoadModelInfo(%q, %q) = (%+v, %v), want non-nil ModelInfo", libPath, modelPath, info, err)
+	}
+	if info == nil {
+		t.Fatalf("LoadModelInfo(%q, %q) returned nil ModelInfo", libPath, modelPath)
 	}
 	if len(info.SupportedBackends) == 0 {
 		t.Fatalf("LoadModelInfo(%q) returned empty SupportedBackends: %+v", modelPath, info)
@@ -483,6 +489,7 @@ func TestLocalGemmaLoadModelInfoAndBackendDiscoveryWhenCached(t *testing.T) {
 	}
 	t.Logf("Successfully created local Gemma engine on backend=%q", eng.Backend())
 }
+
 
 
 
