@@ -117,6 +117,15 @@ func TestAppWidget_BluePanelsPreserveTerminalBackgroundOutsidePanels(t *testing.
 		t.Fatalf("panel background = %#06x, want blue %#06x", got, 0x0000A8)
 	}
 
+	panelBottomCell := buf.Get(10, 17)
+	if got := panelBottomCell.Style.Background(); got != terminal.Color(0x0000A8) {
+		t.Fatalf("panel bottom background = %#06x, want blue through row 17", got)
+	}
+	gapStartCell := buf.Get(10, 18)
+	if !gapStartCell.Style.HasAttribute(terminal.CharResetBackgroundDefault) {
+		t.Fatalf("row 18 background style = %#x, want terminal default below panels", gapStartCell.Style.Attributes())
+	}
+
 	gapCell := buf.Get(79, 23)
 	if !gapCell.Style.HasAttribute(terminal.CharResetBackgroundDefault) {
 		t.Fatalf("bottom gap background style = %#x, want terminal default background", gapCell.Style.Attributes())
@@ -195,8 +204,8 @@ func TestAppWidget_Snapshot_CursorMovement_W80H24(t *testing.T) {
 }
 
 // TestAppWidget_Snapshot_BluePanels_Open_W80H24 verifies the dual blue panels
-// HUD over the top 19 rows with the 3-row retro banner + ፧ prompt + 1 blank
-// footer row sitting in the 5-row bottom gap with terminal-default background.
+// HUD over the top 18 rows with a 6-row bottom gap for the retro banner,
+// spacer, ፧ prompt, and blank footer.
 func TestAppWidget_Snapshot_BluePanels_Open_W80H24(t *testing.T) {
 	var scrollback string
 	widget := newBluePanelsSnapshotWidget(&scrollback)

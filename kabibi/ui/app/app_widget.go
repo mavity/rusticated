@@ -21,7 +21,7 @@ import (
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
 
-const defaultPanelGapRows = 5
+const defaultPanelGapRows = 6
 
 // AppWidget is the composite root UI coordinator implementing ui.Widget.
 // It coordinates the bottom-up Shell stack, the DualPaneWidget blue HUD panels
@@ -344,9 +344,9 @@ func (w *AppWidget) handlePaneOpenFile(fullPath string) {
 	w.sh.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
 }
 
-// computePanelHeight calculates H_panels and H_gap so the bottom gap matches
-// the initial 5-row banner + prompt + blank footer stack (expanding if PromptInput wraps)
-// while respecting the 40% lower-area cap on short terminals.
+// computePanelHeight calculates H_panels and H_gap so the bottom gap contains
+// the initial banner + prompt + blank footer stack with one extra spacer row
+// (expanding if PromptInput wraps), while respecting the 40% lower-area cap on short terminals.
 func (w *AppWidget) computePanelHeight(totalW, totalH int) (panelH, gapH int) {
 	if totalH <= 0 {
 		totalH = 24
@@ -356,7 +356,7 @@ func (w *AppWidget) computePanelHeight(totalW, totalH int) (panelH, gapH int) {
 	if inputH < 1 {
 		inputH = 1
 	}
-	gapH = 3 + inputH + 1 // 3 banner/plume peek rows + PromptInput + 1 blank footer row
+	gapH = 3 + inputH + 2 // 3 banner/plume peek rows + PromptInput + spacer + blank footer
 	if gapH < defaultPanelGapRows {
 		gapH = defaultPanelGapRows
 	}
