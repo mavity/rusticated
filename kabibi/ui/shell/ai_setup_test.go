@@ -145,6 +145,86 @@ func TestShellInteractiveTerminalSessionPasteAndComplete(t *testing.T) {
 	}
 }
 
+func TestShellInteractiveTerminalSessionEmptyEnterOpensAuthURL(t *testing.T) {
+	const authURL = "https://openrouter.ai/auth?authorize=oauth-test"
+	opened := make(chan string, 1)
+	s := New(ShellOptions{
+		WorkingDir: t.TempDir(),
+		OpenURL: func(target string) error {
+			opened <- target
+			return nil
+		},
+	})
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	s.mu.Lock()
+	s.running = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.running = false
+		s.mu.Unlock()
+	}()
+
+	term, closeFn := s.openInteractiveTerminalSession(ctx, "ai setup")
+	defer closeFn(0)
+	if _, err := term.Write([]byte("Open this URL in your browser:\n" + authURL + "\n")); err != nil {
+		t.Fatalf("write authorization URL: %v", err)
+	}
+
+	lineCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		value, err := ai.PromptLine(ctx, term, "OpenRouter OAuth", "Paste redirect URL or code", false)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		lineCh <- value
+	}()
+
+	time.Sleep(25 * time.Millisecond)
+	if !s.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter}) {
+		t.Fatal("empty Enter was not handled while the auth prompt was active")
+	}
+	select {
+	case got := <-opened:
+		if got != authURL {
+			t.Fatalf("opened URL = %q, want %q", got, authURL)
+		}
+	case err := <-errCh:
+		t.Fatalf("PromptLine() returned before opening the auth URL: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("empty Enter did not open the authorization URL")
+	}
+
+	select {
+	case got := <-lineCh:
+		t.Fatalf("empty Enter submitted %q instead of keeping the auth prompt open", got)
+	case err := <-errCh:
+		t.Fatalf("PromptLine() returned after opening the auth URL: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	pasted := "http://127.0.0.1:43210/oauth/callback/uuid-1?code=pasted-code-xyz"
+	if !s.HandleEvent(input.PasteEvent(pasted + "\n")) {
+		t.Fatal("Shell.HandleEvent(PasteEvent) returned false while TerminalSession was active")
+	}
+	select {
+	case err := <-errCh:
+		t.Fatalf("PromptLine() error = %v", err)
+	case got := <-lineCh:
+		if got != pasted {
+			t.Fatalf("PromptLine() = %q, want %q", got, pasted)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("PromptLine() hung after the authorization URL was opened and response pasted")
+	}
+}
+
 func TestEndToEnd_ShellUnconfiguredPrompt_InteractiveLocalGemmaOnboardingAndTurn(t *testing.T) {
 	if runtime.GOARCH != "wasm" {
 		t.Skip("End-to-end local Gemma Shell test runs under Rusticated WASM (washmhost + dload satellite)")
@@ -288,6 +368,3 @@ func TestEndToEnd_ShellUnconfiguredPrompt_InteractiveLocalGemmaOnboardingAndTurn
 		t.Fatalf("unexpected saved AIConfig: %+v", savedCfg)
 	}
 }
-
-
-

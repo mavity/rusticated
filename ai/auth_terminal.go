@@ -38,6 +38,12 @@ type TerminalSession interface {
 	SubscribeRawInput() (readKey func(ctx context.Context, p []byte) (int, error), release func())
 }
 
+// EmptyEnterHandler lets an interactive terminal perform an action instead of
+// submitting an empty line. Non-TTY input deliberately does not use this hook.
+type EmptyEnterHandler interface {
+	HandleEmptyEnter() bool
+}
+
 // StdioTerminalSession wraps an io.Reader and io.Writer as a non-TTY (or simple line)
 // TerminalSession for headless / one-shot CLI execution and deterministic unit tests.
 type StdioTerminalSession struct {
@@ -359,6 +365,12 @@ func readLineFromTerm(ctx context.Context, term TerminalSession, secret bool) (s
 				_, _ = io.WriteString(term, "\n")
 				return "", ErrAuthCancelled
 			case b == '\r' || b == '\n':
+				if len(runes) == 0 {
+					if handler, ok := term.(EmptyEnterHandler); ok && handler.HandleEmptyEnter() {
+						i++
+						continue
+					}
+				}
 				_, _ = io.WriteString(term, "\n")
 				return strings.TrimSpace(string(runes)), nil
 			case b == 0x7f || b == 0x08: // Backspace
@@ -749,10 +761,10 @@ type DeviceCodePollResult[T any] struct {
 }
 
 type DeviceCodePollOptions[T any] struct {
-	IntervalSeconds   int
-	ExpiresInSeconds  int
-	WaitBeforeFirst   bool
-	Poll              func(ctx context.Context) (DeviceCodePollResult[T], error)
+	IntervalSeconds  int
+	ExpiresInSeconds int
+	WaitBeforeFirst  bool
+	Poll             func(ctx context.Context) (DeviceCodePollResult[T], error)
 }
 
 // PollDeviceCodeFlow implements RFC 8628 device-code polling with slow_down backoff

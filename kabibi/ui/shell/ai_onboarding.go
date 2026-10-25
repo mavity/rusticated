@@ -28,9 +28,10 @@ type OnboardingPrompter interface {
 // commandTerminalSession adapts an in-process *CommandTerminal and output writer
 // to ai.TerminalSession, following the exact pattern of runPager in pager.go.
 type commandTerminalSession struct {
-	term   *CommandTerminal
-	writer io.Writer
-	isTTY  bool
+	term         *CommandTerminal
+	writer       io.Writer
+	isTTY        bool
+	onEmptyEnter func() bool
 }
 
 func newCommandTerminalSession(term *CommandTerminal, writer io.Writer, isTTY bool) *commandTerminalSession {
@@ -64,6 +65,10 @@ func (s *commandTerminalSession) Size() (int, int) {
 
 func (s *commandTerminalSession) IsTTY() bool {
 	return s != nil && s.isTTY && s.term != nil
+}
+
+func (s *commandTerminalSession) HandleEmptyEnter() bool {
+	return s != nil && s.isTTY && s.onEmptyEnter != nil && s.onEmptyEnter()
 }
 
 func (s *commandTerminalSession) SubscribeRawInput() (func(context.Context, []byte) (int, error), func()) {
@@ -140,7 +145,9 @@ func (s *Shell) openInteractiveTerminalSession(ctx context.Context, title string
 		}
 		return len(p), nil
 	})
-	return newCommandTerminalSession(cmdTerm, writer, true), closeFn
+	term := newCommandTerminalSession(cmdTerm, writer, true)
+	term.onEmptyEnter = s.openLatestOutputURL
+	return term, closeFn
 }
 
 // prompterTerminalAdapter wraps an OnboardingPrompter over an ai.TerminalSession.
@@ -331,4 +338,3 @@ Usage:
 func init() {
 	_ = os.Stdin
 }
-
