@@ -38,7 +38,7 @@ func remoteStreamRequest(
 		if readErr != nil {
 			return fmt.Errorf("remote AI returned HTTP %s (read error body: %w)", resp.Status, readErr)
 		}
-		return fmt.Errorf("remote AI returned HTTP %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		return remoteStatusError(resp.Status, body)
 	}
 	if mediaType := resp.Header.Get("Content-Type"); !strings.Contains(strings.ToLower(mediaType), "text/event-stream") {
 		return fmt.Errorf("remote AI returned unexpected content type %q", mediaType)

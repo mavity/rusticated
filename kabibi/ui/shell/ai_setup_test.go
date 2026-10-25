@@ -3,6 +3,9 @@ package shell
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"runtime"
 	"strings"
 	"testing"
@@ -12,19 +15,24 @@ import (
 	"ai/assets"
 	"github.com/charmbracelet/x/input"
 	"github.com/mavity/rusticated/kabibi/config"
+	"github.com/mavity/rusticated/kabibi/credstore"
 	"github.com/mavity/rusticated/kabibi/ui"
 )
 
 type scriptedOnboardingPrompter struct {
-	choices []int
+	choices        []int
+	defaultChoices []int
+	optionSets     [][]string
 }
 
-func (p *scriptedOnboardingPrompter) Choose(context.Context, string, string, []string, int) (int, error) {
+func (p *scriptedOnboardingPrompter) Choose(_ context.Context, _, _ string, options []string, defaultChoice int) (int, error) {
 	if len(p.choices) == 0 {
 		return -1, errors.New("unexpected choice prompt")
 	}
 	choice := p.choices[0]
 	p.choices = p.choices[1:]
+	p.defaultChoices = append(p.defaultChoices, defaultChoice)
+	p.optionSets = append(p.optionSets, append([]string(nil), options...))
 	return choice, nil
 }
 
@@ -56,12 +64,174 @@ func TestConfigureAICancelDoesNotPersistConfiguration(t *testing.T) {
 	}
 }
 
+func TestGitHubCopilotOpenURLPromptOpensVerificationPageOnEnter(t *testing.T) {
+	const authURL = "https://github.com/login/device"
+	opened := make(chan string, 1)
+	s := New(ShellOptions{
+		WorkingDir: t.TempDir(),
+		OpenURL: func(target string) error {
+			opened <- target
+			return nil
+		},
+	})
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.mu.Lock()
+	s.running = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.running = false
+		s.mu.Unlock()
+	}()
+
+	term, closeFn := s.openInteractiveTerminalSession(ctx, "ai setup")
+	defer closeFn(0)
+	if _, err := term.Write([]byte("Visit: " + authURL + "\n")); err != nil {
+		t.Fatalf("write verification URL: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- ai.PromptOpenURL(ctx, term, "Press Enter to open the verification page.")
+	}()
+	time.Sleep(25 * time.Millisecond)
+	if !s.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter}) {
+		t.Fatal("Enter was not handled while the browser-open prompt was active")
+	}
+	select {
+	case got := <-opened:
+		if got != authURL {
+			t.Fatalf("opened URL = %q, want %q", got, authURL)
+		}
+	case err := <-done:
+		t.Fatalf("PromptOpenURL() returned before opening the browser: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("Enter did not open the verification page")
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("PromptOpenURL() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("PromptOpenURL() did not finish after opening the page")
+	}
+}
+
 func TestFormatAIBytes(t *testing.T) {
 	if got := formatAIBytes(1 << 30); got != "1.00 GiB" {
 		t.Fatalf("formatAIBytes(1 GiB) = %q", got)
 	}
 	if got := formatAIBytes(0); got != "0 B" {
 		t.Fatalf("formatAIBytes(0) = %q", got)
+	}
+}
+
+func TestChooseRemoteModelUsesCompleteCatalogAndPriorChoice(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `{"data":[{"id":"gpt-6-luna"},{"id":"gpt-6-sol"},{"id":"gpt-6-astra"}]}`)
+	}))
+	defer server.Close()
+	prompter := &scriptedOnboardingPrompter{choices: []int{2}}
+
+	model, err := chooseRemoteModel(
+		context.Background(),
+		prompter,
+		ai.RemoteOpenAI,
+		&ai.Credential{Type: ai.CredentialAPIKey, Key: "test-token"},
+		server.URL+"/models",
+		"gpt-6-luna",
+		"gpt-6-luna",
+	)
+	if err != nil {
+		t.Fatalf("chooseRemoteModel() error = %v", err)
+	}
+	if model != "gpt-6-sol" {
+		t.Fatalf("chooseRemoteModel() = %q, want gpt-6-sol", model)
+	}
+	if len(prompter.optionSets) != 1 || len(prompter.optionSets[0]) != 4 {
+		t.Fatalf("model options = %v, want all three catalog entries and the custom-ID option", prompter.optionSets)
+	}
+	if prompter.defaultChoices[0] != 1 {
+		t.Fatalf("default choice = %d, want previous GPT-6 Luna selection at index 1", prompter.defaultChoices[0])
+	}
+}
+
+func TestChooseRemoteModelDefaultsToGPT6LunaWhenAvailable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `{"data":[{"id":"gpt-6-luna"},{"id":"gpt-6-sol"}]}`)
+	}))
+	defer server.Close()
+	prompter := &scriptedOnboardingPrompter{choices: []int{0}}
+
+	model, err := chooseRemoteModel(
+		context.Background(),
+		prompter,
+		ai.RemoteOpenAI,
+		&ai.Credential{Type: ai.CredentialAPIKey, Key: "test-token"},
+		server.URL+"/models",
+		"gpt-6-luna",
+		"",
+	)
+	if err != nil {
+		t.Fatalf("chooseRemoteModel() error = %v", err)
+	}
+	if model != "gpt-6-luna" {
+		t.Fatalf("chooseRemoteModel() = %q, want gpt-6-luna", model)
+	}
+	if len(prompter.defaultChoices) != 1 || prompter.defaultChoices[0] != 0 {
+		t.Fatalf("default choices = %v, want GPT-6 Luna at index 0", prompter.defaultChoices)
+	}
+}
+
+func TestConfigureAISelectsPreviousRemoteProviderByDefault(t *testing.T) {
+	t.Setenv("KABIBI_CONFIG_DIR", t.TempDir())
+	if err := config.SaveAI(config.AIConfig{
+		Configured:   true,
+		Mode:         "remote",
+		Provider:     string(ai.RemoteOpenAI),
+		Model:        "gpt-6-luna",
+		ConsentGiven: true,
+	}); err != nil {
+		t.Fatalf("save previous configuration: %v", err)
+	}
+	prompter := &scriptedOnboardingPrompter{choices: []int{1, 2}}
+
+	_, err := NewLazyAIRunner(nil).configureAIWithPrompter(context.Background(), prompter, nil)
+	if err == nil || !strings.Contains(err.Error(), "unexpected confirmation prompt") {
+		t.Fatalf("configureAIWithPrompter() error = %v, want stop at confirmation prompt", err)
+	}
+	if len(prompter.defaultChoices) != 2 || prompter.defaultChoices[0] != 1 || prompter.defaultChoices[1] != 2 {
+		t.Fatalf("choice defaults = %v, want remote mode index 1 and OpenAI provider index 2", prompter.defaultChoices)
+	}
+}
+
+func TestReusableRemoteCredentialKeepsWorkingStoredCredential(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("KABIBI_CONFIG_DIR", configDir)
+	stored := &ai.Credential{Type: ai.CredentialAPIKey, Key: "working-token"}
+	if _, err := credstore.Modify(context.Background(), string(ai.RemoteOpenAI), func(*credstore.Credential) (*credstore.Credential, error) {
+		return stored, nil
+	}); err != nil {
+		t.Fatalf("store credential: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer working-token" {
+			t.Errorf("Authorization = %q, want stored bearer token", got)
+		}
+		_, _ = fmt.Fprint(w, `{"data":[]}`)
+	}))
+	defer server.Close()
+
+	got, err := reusableRemoteCredential(context.Background(), ai.RemoteOpenAI, server.URL+"/models")
+	if err != nil {
+		t.Fatalf("reusableRemoteCredential() error = %v", err)
+	}
+	if got == nil || got.SecretToken() != "working-token" {
+		t.Fatalf("reusableRemoteCredential() = %#v, want existing credential", got)
 	}
 }
 

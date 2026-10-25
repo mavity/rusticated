@@ -313,6 +313,47 @@ func PromptLine(ctx context.Context, term TerminalSession, title, prompt string,
 	return readLineFromTerm(ctx, term, secret)
 }
 
+// PromptOpenURL lets an interactive terminal open the latest displayed URL on Enter.
+func PromptOpenURL(ctx context.Context, term TerminalSession, prompt string) error {
+	if term == nil {
+		return errors.New("AI URL prompt requires an active terminal session")
+	}
+	if !term.IsTTY() {
+		return nil
+	}
+	handler, ok := term.(EmptyEnterHandler)
+	if !ok {
+		return nil
+	}
+	if _, err := fmt.Fprintln(term, prompt); err != nil {
+		return err
+	}
+	readKey, release := term.SubscribeRawInput()
+	defer release()
+	var buf [64]byte
+	for {
+		n, err := readKey(ctx, buf[:])
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return ErrAuthCancelled
+			}
+			return fmt.Errorf("read browser-open prompt: %w", err)
+		}
+		for _, b := range buf[:n] {
+			switch b {
+			case '\r', '\n':
+				if !handler.HandleEmptyEnter() {
+					return errors.New("no authorization URL was available to open")
+				}
+				_, _ = fmt.Fprintln(term)
+				return nil
+			case 3, 0x1b:
+				return ErrAuthCancelled
+			}
+		}
+	}
+}
+
 func readLineFromTerm(ctx context.Context, term TerminalSession, secret bool) (string, error) {
 	if !term.IsTTY() {
 		var out []byte

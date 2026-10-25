@@ -6,10 +6,72 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
 )
+
+func TestGitHubCopilotRetriesWithResponsesAPIWhenModelRejectsCompletions(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		switch r.URL.Path {
+		case "/chat/completions":
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = fmt.Fprint(w, `{"error":{"message":"model is not accessible via chat completions","code":"unsupported_api_for_model"}}`)
+		case "/responses":
+			if r.Header.Get("Authorization") != "Bearer copilot-token" {
+				t.Errorf("Authorization = %q, want Copilot bearer token", r.Header.Get("Authorization"))
+			}
+			if r.Header.Get("Copilot-Integration-Id") != "vscode-chat" {
+				t.Errorf("Copilot-Integration-Id = %q, want vscode-chat", r.Header.Get("Copilot-Integration-Id"))
+			}
+			var request map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode Responses request: %v", err)
+			}
+			if request["model"] != "gpt-6-luna" || request["input"] == nil || request["messages"] != nil {
+				t.Errorf("Responses request = %#v, want model/input and no messages", request)
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprintln(w, `event: response.output_text.delta`)
+			_, _ = fmt.Fprintln(w, `data: {"type":"response.output_text.delta","delta":"hello"}`)
+			_, _ = fmt.Fprintln(w)
+			_, _ = fmt.Fprintln(w, `event: response.completed`)
+			_, _ = fmt.Fprintln(w, `data: {"type":"response.completed"}`)
+			_, _ = fmt.Fprintln(w)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	backend := &remoteConversationBackend{
+		engine: &remoteEngineBackend{cfg: RemoteEngineConfig{
+			Provider:   RemoteCopilot,
+			Model:      "gpt-6-luna",
+			Credential: &Credential{Type: CredentialOAuth, Access: "copilot-token"},
+			BaseURL:    server.URL,
+		}},
+		config: ConversationConfig{SystemMessage: "system"},
+	}
+	var text strings.Builder
+	err := backend.SendStream(context.Background(), []PromptPart{{Role: RoleUser, Text: "hello"}}, func(event ModelEvent) {
+		if delta, ok := event.(TextEvent); ok {
+			text.WriteString(delta.Text)
+		}
+	})
+	if err != nil {
+		t.Fatalf("SendStream() error = %v", err)
+	}
+	if !strings.EqualFold(text.String(), "hello") {
+		t.Fatalf("streamed text = %q, want hello", text.String())
+	}
+	if !reflect.DeepEqual(paths, []string{"/chat/completions", "/responses"}) {
+		t.Fatalf("request paths = %v, want chat/completions then responses", paths)
+	}
+}
 
 func TestRemoteOpenAIStreamPreservesToolCallIDsInHistory(t *testing.T) {
 	var requests atomic.Int32

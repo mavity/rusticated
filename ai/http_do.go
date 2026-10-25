@@ -3,16 +3,34 @@ package ai
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
+
+var errUnsupportedRemoteAPI = errors.New("remote model does not support the requested API")
 
 type remoteResponse struct {
 	StatusCode int
 	Status     string
 	Header     http.Header
 	Body       []byte
+}
+
+func remoteStatusError(status string, body []byte) error {
+	message := fmt.Errorf("remote AI returned HTTP %s: %s", status, strings.TrimSpace(string(body)))
+	var payload struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &payload) == nil && payload.Error.Code == "unsupported_api_for_model" {
+		return fmt.Errorf("%w: %w", errUnsupportedRemoteAPI, message)
+	}
+	return message
 }
 
 func remoteHTTPRequest(ctx context.Context, client *http.Client, request remoteRequest) (remoteResponse, error) {
@@ -40,7 +58,7 @@ func doStdHTTPRequest(ctx context.Context, client *http.Client, request remoteRe
 }
 
 func readRemoteResponse(body io.Reader) ([]byte, error) {
-	const maxResponseBytes = 1 << 20
+	const maxResponseBytes = 8 << 20
 	data, err := io.ReadAll(io.LimitReader(body, maxResponseBytes+1))
 	if err != nil {
 		return nil, err

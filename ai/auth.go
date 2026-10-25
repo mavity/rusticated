@@ -2,12 +2,15 @@ package ai
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
 	"ai/assets"
 )
+
+var ErrRemoteCredentialRejected = errors.New("remote AI credential was rejected")
 
 func ValidateRemoteCredential(ctx context.Context, cfg RemoteEngineConfig) error {
 	if cfg.APIKey == "" && cfg.Credential != nil {
@@ -85,7 +88,11 @@ func ValidateRemoteCredential(ctx context.Context, cfg RemoteEngineConfig) error
 		if body == "" {
 			body = "empty response body"
 		}
-		return fmt.Errorf("validate %s credential returned HTTP %s: %s", cfg.Provider, response.Status, body)
+		err := fmt.Errorf("validate %s credential returned HTTP %s: %s", cfg.Provider, response.Status, body)
+		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+			return fmt.Errorf("%w: %w", ErrRemoteCredentialRejected, err)
+		}
+		return err
 	}
 	return nil
 }

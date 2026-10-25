@@ -193,15 +193,15 @@ func CuratedModelsForProvider(provider RemoteProvider, cred *Credential) []strin
 	}
 	switch provider {
 	case RemoteOpenAI:
-		return []string{"gpt-4.1-mini", "gpt-4.1", "o4-mini"}
+		return []string{"gpt-6-luna", "gpt-6-sol", "gpt-6-astra"}
 	case RemoteOpenRouter:
-		return []string{"openrouter/auto", "openai/gpt-4.1-mini", "anthropic/claude-sonnet-4"}
+		return []string{"openai/gpt-6-luna", "openai/gpt-6-sol", "openai/gpt-6-astra"}
 	case RemoteAnthropic:
 		return []string{"claude-3-5-haiku-latest", "claude-3-7-sonnet-latest", "claude-sonnet-4-20250514"}
 	case RemoteGemini:
 		return []string{"gemini-2.5-flash", "gemini-2.5-pro"}
 	case RemoteCopilot:
-		return []string{"gpt-4.1", "claude-sonnet-4", "gemini-2.5-pro"}
+		return []string{"gpt-6-luna", "gpt-6-sol", "gpt-6-astra"}
 	default:
 		return nil
 	}
@@ -1142,6 +1142,9 @@ func loginGitHubCopilot(ctx context.Context, term TerminalSession, client *http.
 	_, _ = fmt.Fprintf(term, "Visit: \x1b[4;34m%s\x1b[0m\n", parsedURI.String())
 	_, _ = fmt.Fprintf(term, "Enter code: \x1b[1;33m%s\x1b[0m\n", dev.UserCode)
 	_, _ = fmt.Fprintln(term, "Waiting for GitHub authorization...")
+	if err := PromptOpenURL(ctx, term, "Press Enter to open the GitHub verification page in your browser (Esc to cancel)."); err != nil {
+		return nil, err
+	}
 
 	githubAccessToken, err := PollDeviceCodeFlow(ctx, DeviceCodePollOptions[string]{
 		IntervalSeconds:  dev.Interval,
