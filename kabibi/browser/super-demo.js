@@ -314,29 +314,54 @@
       let maxX = -Infinity;
       let minY = Infinity;
       let maxY = -Infinity;
+      let leftSum = 0;
+      let rightSum = 0;
+      let bottomSum = 0;
+      let topSum = 0;
       const samples = [-1, -0.5, 0, 0.5, 1];
-      for (const nx of samples) {
-        for (const ny of samples) {
-          if (Math.abs(nx) !== 1 && Math.abs(ny) !== 1) continue;
-          const px = nx * (screenWidth / 2);
-          const py = ny * (screenHeight / 2);
-          const pz = flat ? 0 : -0.24 * (nx * nx + 0.72 * ny * ny);
-          const vx = px - camX;
-          const vy = py - camY;
-          const vz = pz - camZ;
-          const camSpaceX = vx * rx + vy * ry + vz * rz;
-          const camSpaceY = vx * ux + vy * uy + vz * uz;
-          const camSpaceZ = vx * fx + vy * fy + vz * fz;
-          if (camSpaceZ <= 0.001) continue;
-          const ndcX = camSpaceX / (camSpaceZ * halfTan * aspect);
-          const ndcY = camSpaceY / (camSpaceZ * halfTan);
-          if (ndcX < minX) minX = ndcX;
-          if (ndcX > maxX) maxX = ndcX;
-          if (ndcY < minY) minY = ndcY;
-          if (ndcY > maxY) maxY = ndcY;
-        }
+      const projectPoint = (nx, ny) => {
+        const px = nx * (screenWidth / 2);
+        const py = ny * (screenHeight / 2);
+        const pz = flat ? 0 : -0.24 * (nx * nx + 0.72 * ny * ny);
+        const vx = px - camX;
+        const vy = py - camY;
+        const vz = pz - camZ;
+        const camSpaceX = vx * rx + vy * ry + vz * rz;
+        const camSpaceY = vx * ux + vy * uy + vz * uz;
+        const camSpaceZ = vx * fx + vy * fy + vz * fz;
+        const depth = Math.max(0.001, camSpaceZ);
+        return {
+          x: camSpaceX / (depth * halfTan * aspect),
+          y: camSpaceY / (depth * halfTan)
+        };
+      };
+      for (const t of samples) {
+        const leftPt = projectPoint(-1, t);
+        const rightPt = projectPoint(1, t);
+        const bottomPt = projectPoint(t, -1);
+        const topPt = projectPoint(t, 1);
+        leftSum += leftPt.x;
+        rightSum += rightPt.x;
+        bottomSum += bottomPt.y;
+        topSum += topPt.y;
+        if (leftPt.x < minX) minX = leftPt.x;
+        if (rightPt.x > maxX) maxX = rightPt.x;
+        if (bottomPt.y < minY) minY = bottomPt.y;
+        if (topPt.y > maxY) maxY = topPt.y;
       }
-      return { minX, maxX, minY, maxY, rx, ry, rz, ux, uy, uz };
+      const count = samples.length;
+      return {
+        minX: 0.5 * (minX + leftSum / count),
+        maxX: 0.5 * (maxX + rightSum / count),
+        minY: 0.5 * (minY + bottomSum / count),
+        maxY: 0.5 * (maxY + topSum / count),
+        rx,
+        ry,
+        rz,
+        ux,
+        uy,
+        uz
+      };
     }
 
     function frameCamera() {
