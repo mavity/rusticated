@@ -1044,6 +1044,7 @@ test('loadVegetable tries relative candidate first and falls back to release/dis
   const controller = await loadVegetable('kabibi.bat', { fetch: fakeFetch });
   assert.deepEqual(requestedUrls, ['./kabibi.bat', './release/dist/kabibi.bat']);
   assert.equal(getActiveHost(), controller);
+  assert.equal(controller.getLoadedWasmURL(), './release/dist/kabibi.bat');
   assert.equal(controller.hasTerminal(), false);
 
   const attachedOut = [];

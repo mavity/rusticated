@@ -30,3 +30,17 @@ func Install() error {
 	}
 	return nil
 }
+
+func Available() bool {
+	return assets.HostOS() == "browser"
+}
+
+func Download() error {
+	if !Available() {
+		return fmt.Errorf("download is only available in the browser")
+	}
+	if _, err := ai.EvalJS(`globalThis.KabibiBrowser.downloadLoadedArtifact()`); err != nil {
+		return fmt.Errorf("download Kabibi browser artifact: %w", err)
+	}
+	return nil
+}

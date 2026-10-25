@@ -106,6 +106,70 @@ func TestCopyFilePath(t *testing.T) {
 	}
 }
 
+func TestCopyFileNoOverwritePreservesDestination(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "source.txt")
+	dst := filepath.Join(dir, "dest.txt")
+	if err := os.WriteFile(src, []byte("source"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, []byte("existing"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := RunFileOp(context.Background(), FileOp{
+		Kind:        OpCopy,
+		Sources:     []string{src},
+		Dest:        dir,
+		NoOverwrite: true,
+	}, nil, nil, nil)
+	if err == nil {
+		t.Fatal("RunFileOp() succeeded despite an existing destination")
+	}
+	got, readErr := os.ReadFile(dst)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "existing" {
+		t.Fatalf("destination content = %q, want existing", got)
+	}
+}
+
+func TestMoveFileNoOverwritePreservesBothFiles(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "destination")
+	if err := os.Mkdir(destination, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(dir, "source")
+	dst := filepath.Join(destination, "source")
+	if err := os.WriteFile(src, []byte("source"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, []byte("existing"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := RunFileOp(context.Background(), FileOp{
+		Kind:        OpMove,
+		Sources:     []string{src},
+		Dest:        destination,
+		NoOverwrite: true,
+	}, nil, nil, nil)
+	if err == nil {
+		t.Fatal("RunFileOp() succeeded despite an existing destination")
+	}
+	for path, want := range map[string]string{src: "source", dst: "existing"} {
+		got, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if string(got) != want {
+			t.Fatalf("%s content = %q, want %q", path, got, want)
+		}
+	}
+}
+
 func TestCopyDirectory(t *testing.T) {
 	dir := t.TempDir()
 	srcDir := filepath.Join(dir, "src")

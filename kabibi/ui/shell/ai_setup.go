@@ -18,6 +18,24 @@ type remoteProviderEntry struct {
 	label    string
 }
 
+// RunAISetup runs the existing setup flow with caller-supplied text streams.
+func RunAISetup(ctx context.Context, es *ExecutionSession, stdin io.Reader, stdout io.Writer) error {
+	if stdin == nil {
+		stdin = strings.NewReader("")
+	}
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	runner := NewLazyAIRunner(es)
+	defer runner.Close()
+	_, err := runner.configureAIWithTerm(ctx, &ai.StdioTerminalSession{
+		Reader: stdin,
+		Writer: stdout,
+		TTY:    false,
+	})
+	return err
+}
+
 var supportedRemoteProviders = []remoteProviderEntry{
 	{provider: ai.RemoteOpenRouter, label: "OpenRouter (OAuth PKCE or API key)"},
 	{provider: ai.RemoteAnthropic, label: "Anthropic Claude (Claude Pro/Max OAuth or API key)"},
@@ -362,4 +380,3 @@ func modelPathOrRemote(cfg config.AIConfig, modelPath string) string {
 	}
 	return modelPath
 }
-

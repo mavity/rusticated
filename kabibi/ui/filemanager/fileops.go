@@ -2,6 +2,7 @@ package filemanager
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -36,9 +37,10 @@ func (k FileOpKind) Verb() string {
 
 // FileOp describes a requested filesystem operation.
 type FileOp struct {
-	Kind    FileOpKind
-	Sources []string // absolute source paths
-	Dest    string   // destination directory (copy/move only)
+	Kind        FileOpKind
+	Sources     []string // absolute source paths
+	Dest        string   // destination directory (copy/move only)
+	NoOverwrite bool     // fail rather than replace or merge an existing destination
 }
 
 type fileOp = FileOp
@@ -79,10 +81,11 @@ type collisionChoice = CollisionChoice
 // opSink carries progress accounting and collision resolution through the
 // recursive copy/move/delete helpers.
 type opSink struct {
-	ctx        context.Context
-	onProgress func(FileOpProgress)
-	onCollide  func(path string)
-	resume     <-chan CollisionChoice
+	ctx         context.Context
+	onProgress  func(FileOpProgress)
+	onCollide   func(path string)
+	resume      <-chan CollisionChoice
+	noOverwrite bool
 
 	batchDone, batchTotal int64
 	fileDone, fileTotal   int64
@@ -131,6 +134,9 @@ func (s *opSink) emit(force bool) {
 // remembered "apply to all" answer. It returns whether to proceed and an error
 // when the whole operation should abort.
 func (s *opSink) decide(dst string) (bool, error) {
+	if s.noOverwrite {
+		return false, fmt.Errorf("destination already exists: %s", dst)
+	}
 	if s.overwriteAll {
 		return true, nil
 	}
@@ -178,13 +184,14 @@ func RunFileOp(
 
 	now := time.Now()
 	s := &opSink{
-		ctx:        ctx,
-		onProgress: onProgress,
-		onCollide:  onCollide,
-		resume:     resume,
-		batchTotal: total,
-		start:      now,
-		last:       now,
+		ctx:         ctx,
+		onProgress:  onProgress,
+		onCollide:   onCollide,
+		resume:      resume,
+		noOverwrite: op.NoOverwrite,
+		batchTotal:  total,
+		start:       now,
+		last:        now,
 	}
 	s.emit(true)
 
@@ -238,7 +245,16 @@ func copyPath(s *opSink, src, dst string) error {
 		return err
 	}
 	if info.IsDir() {
-		if err := os.MkdirAll(dst, info.Mode().Perm()); err != nil {
+		var err error
+		if s.noOverwrite {
+			err = os.Mkdir(dst, info.Mode().Perm())
+			if os.IsExist(err) {
+				return fmt.Errorf("destination already exists: %s", dst)
+			}
+		} else {
+			err = os.MkdirAll(dst, info.Mode().Perm())
+		}
+		if err != nil {
 			return err
 		}
 		entries, err := os.ReadDir(src)
@@ -255,7 +271,11 @@ func copyPath(s *opSink, src, dst string) error {
 		}
 		return nil
 	}
-	if pathExists(dst) {
+	if s.noOverwrite {
+		if err := ensureDestinationAbsent(dst); err != nil {
+			return err
+		}
+	} else if pathExists(dst) {
 		proceed, err := s.decide(dst)
 		if err != nil {
 			return err
@@ -276,7 +296,11 @@ func copyFileContents(s *opSink, src, dst string, info os.FileInfo) error {
 	}
 	defer in.Close()
 
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm())
+	flags := os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	if s.noOverwrite {
+		flags = os.O_WRONLY | os.O_CREATE | os.O_EXCL
+	}
+	out, err := os.OpenFile(dst, flags, info.Mode().Perm())
 	if err != nil {
 		return err
 	}
@@ -307,6 +331,15 @@ func copyFileContents(s *opSink, src, dst string, info os.FileInfo) error {
 }
 
 func movePath(s *opSink, src, dst string) error {
+	if s.noOverwrite {
+		if err := ensureDestinationAbsent(dst); err != nil {
+			return err
+		}
+		if err := copyPath(s, src, dst); err != nil {
+			return err
+		}
+		return os.RemoveAll(src)
+	}
 	if pathExists(dst) {
 		proceed, err := s.decide(dst)
 		if err != nil {
@@ -332,6 +365,17 @@ func movePath(s *opSink, src, dst string) error {
 		return err
 	}
 	return os.RemoveAll(src)
+}
+
+func ensureDestinationAbsent(path string) error {
+	_, err := os.Lstat(path)
+	if err == nil {
+		return fmt.Errorf("destination already exists: %s", path)
+	}
+	if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect destination %s: %w", path, err)
+	}
+	return nil
 }
 
 func deletePath(s *opSink, src string) error {

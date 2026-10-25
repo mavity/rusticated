@@ -518,6 +518,37 @@
     return mounted;
   }
 
+  function downloadLoadedArtifact() {
+    const host = global.washmhostExports &&
+      typeof global.washmhostExports.getActiveHost === 'function'
+      ? global.washmhostExports.getActiveHost()
+      : null;
+    if (!host || typeof host.getLoadedWasmURL !== 'function') {
+      throw new Error('Kabibi browser artifact URL is unavailable');
+    }
+    const url = host.getLoadedWasmURL();
+    if (typeof url !== 'string' || url.length === 0) {
+      throw new Error('Kabibi browser artifact was not loaded from a URL');
+    }
+    if (!global.document || typeof global.document.createElement !== 'function' || !global.document.body) {
+      throw new Error('Kabibi browser download requires document.body');
+    }
+    const anchor = global.document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'kabibi.bat';
+    anchor.style.display = 'none';
+    global.document.body.appendChild(anchor);
+    try {
+      if (typeof anchor.click !== 'function') {
+        throw new Error('Kabibi browser download link cannot be clicked');
+      }
+      anchor.click();
+    } finally {
+      anchor.remove();
+    }
+    return url;
+  }
+
   global.KabibiBrowser = Object.freeze({
     mount,
     bootFromGuest,
@@ -526,6 +557,7 @@
     isWebGL2Supported,
     ensureBrowserStyles,
     loadBrowserDependencies,
+    downloadLoadedArtifact,
     conventionalParentId: CONVENTIONAL_PARENT_ID
   });
 })(globalThis);
