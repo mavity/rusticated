@@ -1739,17 +1739,8 @@ func (s *Shell) handleKeyEvent(ev input.KeyPressEvent) bool {
 	}
 
 	if keyStr == "enter" {
-		if s.input.Value() == "" {
-			if target := s.latestOutputURL(); target != "" {
-				opener := s.opts.OpenURL
-				if opener == nil {
-					opener = openExternalURL
-				}
-				if err := opener(target); err != nil {
-					s.reportTerminalError(fmt.Errorf("open URL %s: %w", target, err))
-				}
-				return true
-			}
+		if s.input.Value() == "" && s.openLatestOutputURL() {
+			return true
 		}
 		if s.execSess != nil {
 			if route, _ := s.execSess.ClassifyInput(s.input.Value()); route == RouteIncomplete {

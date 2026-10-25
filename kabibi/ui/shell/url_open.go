@@ -1,6 +1,7 @@
 package shell
 
 import (
+	"fmt"
 	"net/url"
 	"regexp"
 	"strings"
@@ -24,6 +25,21 @@ func (s *Shell) latestOutputURL() string {
 		return extractLastOpenableURL(text)
 	}
 	return ""
+}
+
+func (s *Shell) openLatestOutputURL() bool {
+	target := s.latestOutputURL()
+	if target == "" {
+		return false
+	}
+	opener := s.opts.OpenURL
+	if opener == nil {
+		opener = openExternalURL
+	}
+	if err := opener(target); err != nil {
+		s.reportTerminalError(fmt.Errorf("open URL %s: %w", target, err))
+	}
+	return true
 }
 
 func extractLastOpenableURL(text string) string {
