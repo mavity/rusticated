@@ -723,3 +723,15 @@ Yes—both are salient architectural requirements, not implementation details.
 2. **Browser JavaScript should live in JavaScript files.** Kabibi should load those files into Go at build time with `//go:embed`, rather than maintaining large JS snippets as quoted or backtick-escaped Go strings. Keeping the JS independently testable with Node’s built-in test runner should be part of the design.
 
 I’ll treat these as constraints when revising the spec: separate the default embed path from the super-demo CRT path, and define a JS module/embedding/testing structure.
+
+# Flourish polish
+
+> Now we need to remove move the HTML part of our demo into the root of repository index.html, and cleanup the rest.
+>
+> By that I mean that the index.html should refer to washmhost/js script next to index.html itself. At start it should verify if the washmhost was loaded. If it wasn't, assume that it runs from dev environment and should instead be loaded from './mohabbat/washmhost/js/browser/index.js' relative to index.html
+>
+> When washmhost is loaded, the embedded in index.html script should trigger a function inside it that would boot washmhost and request to load a vegetable kabibi.bat from next to index.html, or if not then from './release/dist/kabibi.bat'.
+>
+> The logic for loading a vegetable should be implemented inside washmhost itself, as part of the API.  Washmhost/JS should only load vegetables in a headless mode (no terminal). The logic inside Kabibi/browser mode should enable super-demo mode if certain parameter is set before it's loaded, for example __super_demo__ is set on window object. Naturally the code embedded inside index.html should set it before asking washmhost to load kabibi.bat.
+>
+> The loading of xterm.js THREE.hs and wiring it to full-screen and all that should move inside Kabibi/browser support logic. That logic should verify if WebGL2 is supported and instantiate the rendering pipeline and then present Kabibi into it. If WebGL2 is not supported, that Kabibi/browser logic needs to instantiate flat full-page xterm.js with auto-sized terminal and run inside that without the flourish.
