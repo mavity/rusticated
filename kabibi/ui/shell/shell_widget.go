@@ -710,7 +710,6 @@ func renderCommandSubmitAnimation(buf *terminal.CellBuf, layout visualLayout, st
 	if elapsed < 0 {
 		elapsed = 0
 	}
-	elapsed %= submitAnimationDuration
 
 	commandIndexes := make([]int, 0, len(layout.inputCells))
 	for i, cell := range layout.inputCells {
@@ -2019,6 +2018,12 @@ func (s *Shell) runCommandSubmitAnimation(blockIdx int, animation *commandSubmit
 		s.mu.Lock()
 		if blockIdx < 0 || blockIdx >= len(s.blocks) || s.blocks[blockIdx].submitAnim != animation {
 			s.mu.Unlock()
+			return
+		}
+		if time.Since(animation.startedAt) >= submitAnimationDuration {
+			stopCommandSubmitAnimationLocked(&s.blocks[blockIdx])
+			s.mu.Unlock()
+			s.invalidate()
 			return
 		}
 		s.mu.Unlock()

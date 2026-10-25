@@ -98,7 +98,7 @@ func TestCommandOutputStopsSubmissionAnimationImmediately(t *testing.T) {
 
 	sh := New(ShellOptions{})
 	defer sh.Close()
-	sh.SetInput(`node -e "setTimeout(function(){console.log('ready'); setTimeout(function(){},1500)},1200)"`)
+	sh.SetInput(`node -e "setTimeout(function(){console.log('ready'); setTimeout(function(){},1500)},100)"`)
 	if !sh.handleKeyEvent(input.KeyPressEvent{Code: input.KeyEnter}) {
 		t.Fatal("Enter did not submit the test command")
 	}
@@ -153,15 +153,15 @@ func TestCommandOutputStopsSubmissionAnimationImmediately(t *testing.T) {
 	}
 }
 
-func TestCommandSubmitAnimationTickerKeepsRunningUntilStopped(t *testing.T) {
+func TestCommandSubmitAnimationTickerStopsAfterOneCycle(t *testing.T) {
 	sh := New(ShellOptions{})
 	defer sh.Close()
 
-	animation := &commandSubmitAnimation{startedAt: time.Now().Add(-submitAnimationDuration - 100*time.Millisecond)}
+	animation := &commandSubmitAnimation{startedAt: time.Now()}
 	sh.mu.Lock()
 	sh.blocks = append(sh.blocks, CommandBlock{
 		Kind:       BlockCommand,
-		Input:      "sleep",
+		Input:      "echo done",
 		submitAnim: animation,
 	})
 	blockIdx := len(sh.blocks) - 1
@@ -178,14 +178,48 @@ func TestCommandSubmitAnimationTickerKeepsRunningUntilStopped(t *testing.T) {
 	stillRunning := sh.blocks[blockIdx].submitAnim == animation
 	sh.mu.Unlock()
 	if !stillRunning {
-		t.Fatal("submission animation stopped at the end of its first cycle")
+		t.Fatal("submission animation stopped before completing its first cycle")
 	}
 
+	select {
+	case <-done:
+	case <-time.After(2 * submitAnimationDuration):
+		t.Fatal("submission animation continued after its first cycle")
+	}
+
+	sh.mu.Lock()
+	stillRunning = sh.blocks[blockIdx].submitAnim == animation
+	sh.mu.Unlock()
+	if stillRunning {
+		t.Fatal("submission animation remained active after its first cycle")
+	}
+}
+
+func TestCommandSubmitAnimationTickerStopsWhenOutputArrives(t *testing.T) {
+	sh := New(ShellOptions{})
+	defer sh.Close()
+
+	animation := &commandSubmitAnimation{startedAt: time.Now()}
+	sh.mu.Lock()
+	sh.blocks = append(sh.blocks, CommandBlock{
+		Kind:       BlockCommand,
+		Input:      "echo done",
+		submitAnim: animation,
+	})
+	blockIdx := len(sh.blocks) - 1
+	sh.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		sh.runCommandSubmitAnimation(blockIdx, animation)
+		close(done)
+	}()
+	time.Sleep(50 * time.Millisecond)
 	sh.stopCommandSubmitAnimation(blockIdx)
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("submission animation ticker did not stop after cancellation")
+		t.Fatal("submission animation ticker did not stop after output")
 	}
 }
 
@@ -275,8 +309,8 @@ func TestCommandSubmitAnimationUsesCellPositionsAndPhases(t *testing.T) {
 	if got := white.Get(0, 0).Style.Background(); got != 0xFFFFFF {
 		t.Fatalf("background at flash transition = #%06X, want white", got)
 	}
-	finalFrame := renderAt(submitAnimationDuration)
-	if got := finalFrame.Get(last.x, last.y).Grapheme; got != "·" {
-		t.Fatalf("animation did not restart after one cycle: glyph = %q, want middle dot", got)
+	finalFrame := renderAt(submitAnimationDuration + 50*time.Millisecond)
+	if got := finalFrame.Get(last.x, last.y).Grapheme; got != "好" {
+		t.Fatalf("animation replayed after one cycle: final glyph = %q, want original input", got)
 	}
 }
