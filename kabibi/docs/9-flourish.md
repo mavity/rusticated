@@ -735,3 +735,59 @@ I’ll treat these as constraints when revising the spec: separate the default e
 > The logic for loading a vegetable should be implemented inside washmhost itself, as part of the API.  Washmhost/JS should only load vegetables in a headless mode (no terminal). The logic inside Kabibi/browser mode should enable super-demo mode if certain parameter is set before it's loaded, for example __super_demo__ is set on window object. Naturally the code embedded inside index.html should set it before asking washmhost to load kabibi.bat.
 >
 > The loading of xterm.js THREE.hs and wiring it to full-screen and all that should move inside Kabibi/browser support logic. That logic should verify if WebGL2 is supported and instantiate the rendering pipeline and then present Kabibi into it. If WebGL2 is not supported, that Kabibi/browser logic needs to instantiate flat full-page xterm.js with auto-sized terminal and run inside that without the flourish.
+
+Here is the implementation plan for moving the demo boot into the repository root `index.html`, keeping `index.js` purely headless, and driving all terminal/CRT presentation from inside the Kabibi WASM guest via `kabibi/browser`.
+
+---
+
+### 1. Root `index.html` — Minimal Boot & Fallback Loader
+Replace the legacy split-pane README/xterm page in `index.html` with a minimal HTML entrypoint that contains **no xterm.js or Three.js tags**:
+1. **Load `washmhost` with dev fallback:**
+   - Include `<script src="./washmhost.js"></script>` first (which resolves in a staged distribution like `release/dist/index.html`).
+   - In the inline bootstrap script, check whether `globalThis.washmhostExports` is defined. If not, assume a development environment and dynamically inject `<script src="./mohabbat/washmhost/js/browser/index.js"></script>` and wait for `onload`.
+2. **Set the super-demo flag & request vegetable boot:**
+   - Set `window.__super_demo__ = true` before booting the vegetable (while also honoring optional URL overrides like `?flat=1` or `?super_demo=0` if needed for diagnostics).
+   - Call the vegetable loader API on `globalThis.washmhostExports` with candidate paths `['./kabibi.bat', './release/dist/kabibi.bat']` (also honoring an optional `?artifact=` / `?wasm=` query parameter override before falling back to those defaults).
+
+---
+
+### 2. Headless Vegetable Loader API in `index.js`
+Extend `index.js` while keeping `washmhost` completely headless (zero DOM or terminal dependencies):
+1. **Candidate-based vegetable loading inside `washmhost` / new helper `loadVegetable(candidates, options)` on `washmhostExports`:**
+   - Accept either a single URL/binary or an array of candidate URLs (e.g., `['./kabibi.bat', './release/dist/kabibi.bat']`) in `params.wasm` (and expose a convenience method such as `washmhostExports.loadVegetable(candidates, options)` that delegates to `washmhost`).
+   - Iterate through candidate URLs sequentially via `fetch`, unpack the first reachable vegetable via `unpackVegetable`, and boot the guest headlessly.
+2. **Dynamic Terminal Attachment on the Running Headless Host:**
+   - Currently, `makeBrowserImports` captures `params.stdout`, `params.stderr`, `params.getTtySize`, and `params.setTtySize` once at instantiation time. When `washmhost` boots a vegetable headlessly, no terminal exists yet until the guest calls `Install` via `EvalJS`.
+   - Store mutable I/O and TTY delegates on the controller / `HostState` (along with a small early-stdout buffer for any bytes written before a terminal attaches) and expose `attachTerminal({ stdout, stderr, getTtySize, setTtySize, onExit })` (plus `pushStdin` and `triggerSignal`) on the active host handle—accessible to the guest's `EvalJS` runtime via `globalThis.washmhostExports.getActiveHost()` (or `host.attachTerminal(...)`).
+   - Existing callers that pass `stdout`/`stderr`/`getTtySize` up front (such as `extension.js` in VS Code and existing unit tests in `index.test.js`) continue to work unchanged.
+
+---
+
+### 3. Self-Contained Browser & CRT Boot Inside `kabibi/browser`
+Move all stylesheet/module loading, WebGL2 capability detection, full-screen host creation, and `washmhost` wiring into `main.js`, `super-demo.js`, and `install_wasip1.go`:
+1. **Guard against non-DOM hosts (such as the VS Code extension host):**
+   - In `Install` / `main.js`, check whether we are in a browser DOM environment (`typeof window !== 'undefined' && typeof document !== 'undefined'`) and no external host terminal was pre-attached (so `extension.js` is unaffected).
+2. **Mode Detection via `window.__super_demo__`:**
+   - In `install_wasip1.go`, detect `Boolean(globalThis.__super_demo__ || globalThis.__kabibiBrowserMode === "super-demo")`.
+   - Evaluate `main.js` (and `super-demo.js` when super-demo mode is enabled), then invoke an async bootstrap function (`KabibiBrowser.bootFromGuest({ superDemo })`) whose returned `Promise` is awaited by `ai.EvalJS` before `Boot` constructs `ui.Host` and queries initial terminal size.
+3. **Dynamic Dependency Loading & WebGL2 Check Inside `kabibi/browser`:**
+   - Ensure the `@xterm/xterm@6.0.0/css/xterm.css` stylesheet and base page styling (`margin: 0; height: 100%`) are injected if not already present.
+   - Dynamically `import()` `@xterm/xterm@6.0.0/+esm` and `@xterm/addon-fit@0.11.0/+esm`.
+   - If `superDemo` is enabled:
+     - Probe WebGL2 support first (checking `canvas.getContext('webgl2')` and rejecting software rasterizers).
+     - If WebGL2 is supported, dynamically `import()` `@xterm/addon-webgl@0.19.0/+esm` and `three@0.180.0/build/three.module.js`, instantiate the CRT rendering pipeline via `super-demo.js`, and attach it to the active `washmhost` session.
+     - If WebGL2 is **not** supported (or if Three.js / WebGL addon loading or initialization fails, or context is lost), fall back cleanly to flat, full-page auto-sized xterm.js (`FitAddon.fit()`) with zero flourish.
+   - If `superDemo` is not enabled:
+     - Resolve the caller parent (`#kabibi-terminal` or explicit parent) or create a full-page container if none exists, mount flat auto-sized xterm.js, and attach it to the active `washmhost` session.
+
+---
+
+### 4. Cleanup & Tests
+1. **Remove obsolete demo files in `kabibi/browser`:**
+   - Remove `demo.html`, `super-demo.html`, and the local untracked/sideloaded `kabibi.bat` in `kabibi/browser`.
+   - Update `README.md` and `release/main.go` (if needed) to reflect that root `index.html` is the single demo page.
+2. **Unit & Browser Validation:**
+   - Add unit tests in `index.test.js` covering headless candidate vegetable loading (`./kabibi.bat` fallback to `./release/dist/kabibi.bat`) and `attachTerminal` rebinding.
+   - Update `main.test.cjs` to test `__super_demo__` detection, WebGL2 probing + automatic fallback to flat full-page auto-sized xterm.js when WebGL2 is unavailable, and guest-driven mounting against an active `washmhost` session.
+   - Rebuild the `kabibi.bat` vegetable and dogfood root `index.html` via `demo-go/server`.
+
