@@ -106,6 +106,7 @@ type ShellOptions struct {
 	WriteToScrollback func(text string) // Callback to write lines to the host's scrollback
 	OnExit            func()            // Optional callback invoked when user runs 'exit' or 'quit'
 	OnCommandFinished func(cwd string)  // Optional callback invoked after a command or AI turn finishes
+	OpenURL           func(url string) error
 	WorkingDir        string            // Optional initial working directory for the shell runner
 	AIRunner          AIRunner          // Optional AI fallback runner (defaults to LazyAIRunner)
 	Mode              ShellMode         // Toggle between ModeStack (default) and ModePlumeHistory
@@ -640,10 +641,10 @@ func renderBlockCached(block *CommandBlock, width int) terminal.CellBuf {
 			case StatusError, StatusFailure:
 				stripeColor = 0xff0000 // red on non-zero exit
 			}
-			stripeStyle := terminal.NewStyle(stripeColor, 0, terminal.CharResetBackgroundDefault)
+			stripeStyle := terminal.NewStyle(0, stripeColor, terminal.CharResetForegroundDefault)
 			spaceStyle := terminal.NewStyle(0, 0, terminal.CharResetForegroundDefault|terminal.CharResetBackgroundDefault)
 			for y := 0; y < inner.Height; y++ {
-				buf.Set(0, y, terminal.Cell{Grapheme: "┃", Style: stripeStyle})
+				buf.Set(0, y, terminal.Cell{Grapheme: " ", Style: stripeStyle})
 				buf.Set(1, y, terminal.Cell{Grapheme: " ", Style: spaceStyle})
 			}
 			buf.Blit(inner, 2, 0)
@@ -945,10 +946,10 @@ func renderLiveBlock(block *CommandBlock, width int) (terminal.CellBuf, terminal
 	case StatusError, StatusFailure:
 		stripeColor = 0xff0000
 	}
-	stripeStyle := terminal.NewStyle(stripeColor, 0, terminal.CharResetBackgroundDefault)
+	stripeStyle := terminal.NewStyle(0, stripeColor, terminal.CharResetForegroundDefault)
 	spaceStyle := terminal.NewStyle(0, 0, terminal.CharResetForegroundDefault|terminal.CharResetBackgroundDefault)
 	for y := 0; y < height; y++ {
-		outer.Set(0, y, terminal.Cell{Grapheme: "┃", Style: stripeStyle})
+		outer.Set(0, y, terminal.Cell{Grapheme: " ", Style: stripeStyle})
 		outer.Set(1, y, terminal.Cell{Grapheme: " ", Style: spaceStyle})
 	}
 	outer.Blit(inner, gutter, 0)
@@ -1727,6 +1728,18 @@ func (s *Shell) handleKeyEvent(ev input.KeyPressEvent) bool {
 	}
 
 	if keyStr == "enter" {
+		if s.input.Value() == "" {
+			if target := s.latestOutputURL(); target != "" {
+				opener := s.opts.OpenURL
+				if opener == nil {
+					opener = openExternalURL
+				}
+				if err := opener(target); err != nil {
+					s.reportTerminalError(fmt.Errorf("open URL %s: %w", target, err))
+				}
+				return true
+			}
+		}
 		if s.execSess != nil {
 			if route, _ := s.execSess.ClassifyInput(s.input.Value()); route == RouteIncomplete {
 				s.input.InsertNewline()

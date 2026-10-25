@@ -53,6 +53,11 @@ class FakeElement {
     this.listeners.delete(name);
   }
 
+  contains(target) {
+    if (target === this) return true;
+    return this.children.some(child => child.contains(target));
+  }
+
   getContext() {
     return null;
   }
@@ -65,6 +70,7 @@ class FakeElement {
 class FakeDocument {
   constructor() {
     this.body = new FakeElement('body');
+    this.listeners = new Map();
   }
 
   createElement(tagName) {
@@ -81,6 +87,14 @@ class FakeDocument {
       return null;
     };
     return find(this.body);
+  }
+
+  addEventListener(name, callback) {
+    this.listeners.set(name, callback);
+  }
+
+  removeEventListener(name) {
+    this.listeners.delete(name);
   }
 }
 
@@ -104,6 +118,8 @@ class FakeTerminal {
     this.loadedAddons = [];
     this.disposed = false;
     this.writes = [];
+    this.selection = 'selected text';
+    this.customKeyEventHandler = null;
   }
 
   open(element) {
@@ -124,6 +140,14 @@ class FakeTerminal {
     return { dispose: () => this.resizeListeners.splice(this.resizeListeners.indexOf(callback), 1) };
   }
 
+  attachCustomKeyEventHandler(callback) {
+    this.customKeyEventHandler = callback;
+  }
+
+  getSelection() { return this.selection; }
+  hasSelection() { return Boolean(this.selection); }
+  selectAll() { this.selection = 'all terminal text'; }
+  paste(text) { this.emitData(text); }
   emitData(data) {
     for (const callback of this.dataListeners) callback(data);
   }
@@ -243,6 +267,86 @@ test('missing parent creates a fixed full-viewport host and removes it on dispos
   assert.equal(mounted.parent.style.inset, '0');
   assert.equal(mounted.parent.style.width, '100vw');
   assert.equal(mounted.parent.style.height, '100vh');
+  mounted.dispose();
+  assert.equal(document.body.children.length, 0);
+});
+
+test('browser terminal supports right-click clipboard menu and Ctrl/Cmd+V', async () => {
+  const { document, window, context } = createHarness();
+  const pasted = [];
+  const copied = [];
+  window.navigator = {
+    clipboard: {
+      async readText() { return 'clipboard contents'; },
+      async writeText(text) { copied.push(text); }
+    }
+  };
+  let terminal;
+  const mounted = await context.KabibiBrowser.mount({
+    document,
+    window,
+    Terminal: class extends FakeTerminal {
+      constructor(options) {
+        super(options);
+        terminal = this;
+      }
+    },
+    FitAddon: FakeFitAddon,
+    onData: (data) => pasted.push(data)
+  });
+
+  assert.equal(terminal.options.rightClickSelectsWord, true);
+  const keyHandler = terminal.customKeyEventHandler;
+  assert.equal(typeof keyHandler, 'function');
+  const keyEvent = {
+    type: 'keydown',
+    key: 'v',
+    ctrlKey: true,
+    metaKey: false,
+    altKey: false,
+    preventDefault() { this.defaultPrevented = true; },
+    stopPropagation() {}
+  };
+  assert.equal(keyHandler(keyEvent), false);
+  assert.equal(keyEvent.defaultPrevented, true);
+  await new Promise(setImmediate);
+  assert.deepEqual(pasted, ['clipboard contents']);
+
+  const contextMenu = mounted.terminalContainer.listeners.get('contextmenu');
+  let defaultPrevented = false;
+  contextMenu({
+    clientX: 12,
+    clientY: 18,
+    preventDefault() { defaultPrevented = true; },
+    stopPropagation() {}
+  });
+  assert.equal(defaultPrevented, true);
+  const menu = document.body.children.find(child => child.getAttribute === undefined
+    ? child.attributes.role === 'menu'
+    : child.getAttribute('role') === 'menu');
+  assert.ok(menu, 'expected a terminal context menu');
+  const copyButton = menu.children.find(child => child.textContent === 'Copy');
+  assert.ok(copyButton);
+  copyButton.listeners.get('click')({
+    preventDefault() {},
+    stopPropagation() {}
+  });
+  await new Promise(setImmediate);
+  assert.deepEqual(copied, ['selected text']);
+
+  const metaPaste = {
+    type: 'keydown',
+    key: 'v',
+    ctrlKey: false,
+    metaKey: true,
+    altKey: false,
+    preventDefault() {},
+    stopPropagation() {}
+  };
+  assert.equal(keyHandler(metaPaste), false);
+  await new Promise(setImmediate);
+  assert.deepEqual(pasted, ['clipboard contents', 'clipboard contents']);
+
   mounted.dispose();
   assert.equal(document.body.children.length, 0);
 });
