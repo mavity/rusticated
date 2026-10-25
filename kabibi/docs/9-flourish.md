@@ -1,85 +1,70 @@
 # Kabibi Browser Visual Flourish Overview
 
-The overall complexity is **moderate-to-high, but highly partitioned**.
-
-Because the architectural boundaries are decoupled, the complexity doesn't compound into a fragile mess. It divides cleanly into two independent technical challenges:
+The overall complexity is **moderate-to-high, but highly partitioned**, and the project is explicitly structured into two independent phases so the core 3D CRT pipeline is proven and shippable on its own before adding any DOM overlay work:
 
 ---
 
-### 1. The CRT / Glass Refraction Shader (Moderate Complexity)
+### 1. Phase 1: The 3D Curved CRT, Low-Angle Camera & Near-Field Depth-of-Field (Active Scope)
 
-The rendering pipeline is self-contained:
+The rendering pipeline builds directly on the existing working browser integration in root `index.html` and `mohabbat/washmhost/js/browser/index.js`:
 
-* **The Easy Part:** xterm.js’s WebGL addon renders into an offscreen `<canvas>`. Treating that canvas as a `sampler2D` texture in a post-processing WebGL2 pass is standard graphics programming.
-* **The Shader Math:** A standard post-processing fragment shader over a screen-filling quad:
-* **Spherical/Barrel Distortion:** Warping UVs ($UV_{curved} = UV + (UV - 0.5) \cdot r^2 \cdot k$).
-* **Vignette & Scanlines:** Radial attenuation and a periodic sine function ($0.5 + 0.5 \sin(y \cdot \text{scale})$).
-* **Glass Reflection & Refraction:** Adding a secondary blurred reflection gradient/tint over the top.
-
-
-* **The Real Hurdle:** **Mouse coordinate inversion.** If the CRT curve is purely aesthetic/output-only, it’s trivial. But if the user clicks or drags text inside xterm.js, browser mouse coordinates `(clientX, clientY)` will not match the warped character cells unless you apply the inverse distortion transformation in the event listener before passing events into xterm.
+* **Off-Screen `@xterm/xterm` Surface (Vendored / Patched as Needed):** `@xterm/addon-webgl` renders the full terminal screen into its internal WebGL2 `<canvas>` (`WebglRenderer._canvas`) with `new WebglAddon(true)` (`preserveDrawingBuffer: true`). Exposing this screen framebuffer canvas (and hooking `RenderService.onRender` via a small vendored patch or direct service hook) gives Three.js a live `CanvasTexture` source without touching the glyph sprite sheet (`WebglAddon.textureAtlas`).
+* **3D Curved Geometry, Stylized Glass & Low-Angle Camera:** Instead of a flat 2D post-processing quad, Three.js bends two 3D meshes (the inner phosphor screen and outer refractive/reflective glass faceplate). The `PerspectiveCamera` views the curved screen from a **subtle bottom-right low angle**—like a stylish low-angle car poster—so the lower-right corner curves closer toward the lens while preserving clean terminal legibility.
+* **Subtle Near-Field Depth-of-Field (DoF) Blur:** Coupled with the low-angle camera and 3D surface curvature, a depth-aware post-processing pass keeps the primary reading zone of the screen razor-sharp while rendering the closer bottom-right region slightly and tastefully out of focus.
+* **Off-Screen Input & Raycast Mouse Inversion:** Keyboard input (`term.onData` $\rightarrow$ `hostState.pushStdin`), clipboard, and `SIGWINCH` resizing already work in `index.html`. For the full-screen off-screen setup, pointer events on `#crt-stage` are raycast onto the 3D phosphor mesh to invert $(u, v)$ back into xterm’s screen coordinates while preventing raw `document`-level mouse drag events from bypassing the raycast mapping.
+* **Non-GPU Direct-to-DOM Fallback:** When WebGL2/GPU acceleration is unavailable, slow, or loses context, the host disposes `WebglAddon`—which automatically restores xterm.js’s built-in `DomRenderer` on the **exact same `Terminal` instance**—and reveals `#xterm-offscreen-host` as a 100% full-page direct-to-DOM terminal with zero flourish and zero state loss.
 
 ---
 
-### 2. The DOM File Panels & Animations (Low-to-Moderate Complexity)
+### 2. Phase 2 (Paused / Deferred): The DOM File Panels HUD & Animations
 
-This is standard modern web UI engineering:
+To keep Phase 1 focused strictly on the off-screen xterm surface, 3D CRT optics, camera framing, depth-of-field, and input fidelity, the **Floating DOM Blue Panels HUD is paused and deferred to Phase 2**:
 
-* **DOM vs Canvas:** By building the blue panels as standard HTML/CSS (`position: fixed` or `position: absolute`), you bypass xterm.js entirely.
-* **Visual Polish:** CSS transitions handle smooth selection highlights (`transform: translateY(...)`), drawer slide-downs (`transform: translateY(-100%)` $\rightarrow$ `translateY(0)`), and SVG file icons cleanly.
-* **The Real Hurdle:** **Input multiplexing & synchronization.** Kabibi’s core Far Manager logic (directory state, cursor selection, split-pane routing) is driven from Go.
-* If the DOM panel is purely a visual HUD mirror, the Go guest needs to stream lightweight state updates (e.g., active index, file list) over the eval bridge or host communication channel to update the DOM elements.
-* You need clean focus management so navigation keys (arrows, Tab, Enter) route to the DOM panels when open, and fall through to xterm.js when hidden.
-
-
+* **Phase 1 Behavior:** Pressing `Ctrl+O` renders Kabibi’s Dual Blue File Manager Panels directly inside the curved CRT terminal `CellBuf` via standard ANSI output—requiring zero Go-to-DOM synchronization.
+* **Phase 2 Behavior (Future):** Once Phase 1 is complete and verified, the blue panels can optionally be promoted to a crisp HTML/CSS DOM overlay (`position: fixed`) above the CRT canvas with CSS spring transitions, SVG icons, and `eval`-bridge cursor synchronization.
 
 ---
 
 ### Complexity Summary
 
-| Component | Effort / Difficulty | Primary Risk / Edge Case |
-| --- | --- | --- |
-| **WebGL2 CRT Shader** | Medium (~150 LOC GLSL/JS) | Mouse/click hit-testing offset if text selection is needed on curved canvas. |
-| **DOM File Panels HUD** | Low–Medium (CSS + DOM) | Managing z-index and CSS layout transitions without lagging terminal frame rates. |
-| **Bridge & Key Routing** | Medium | Keeping Go WASM state and browser DOM/xterm focus strictly in sync. |
-
-Overall, it is **very feasible**—the CRT shader and DOM HUD can be prototyped and tuned completely in isolation in plain HTML/JS before wiring them to Kabibi's guest engine.
+| Phase & Component | Status | Effort / Difficulty | Primary Risk / Edge Case |
+| --- | --- | --- | --- |
+| **Phase 1a: Off-Screen xterm.js Surface & Fallback** | **Active** | Low–Medium | Keeping `IntersectionObserver` active while hidden (`opacity: 0`) and exposing `WebglRenderer._canvas` + `RenderService.onRender`. |
+| **Phase 1b: 3D Curved CRT, Low-Angle Camera & Near-Field DoF** | **Active** | Medium (~200 LOC TSL/JS) | Tuning the bottom-right low-angle camera pose and shallow near-field blur so the closer corner softens subtly without hurting text legibility. |
+| **Phase 1c: Raycast Mouse/Selection & Input Routing** | **Active** | Medium | Intercepting `document`-level drag listeners in xterm’s `SelectionService` / `bindMouse()` so only raycast-inverted coordinates reach xterm. |
+| **Phase 2: Floating DOM File Panels HUD & `eval` Bridge** | **Paused (Phase 2)** | Low–Medium (CSS + Go bridge) | Perspective projection alignment against the angled 3D CRT screen and Go $\leftrightarrow$ DOM state synchronization. |
 
 ---
 
-# Kabibi Browser Visual Flourish Specification: Full-Screen Curved CRT, Physical Glass Refraction & Floating DOM Blue HUD
+# Kabibi Browser Visual Flourish Specification: Full-Screen Curved CRT, Low-Angle Optics, Near-Field DoF & Phase 2 DOM HUD
 
 
-Here is a comprehensive, end-to-end architectural and implementation plan to build Kabibi’s **100% Full-Screen Curved CRT + Refractive Glass Shell + Floating DOM Blue Panels HUD**, engineered against the latest **Three.js r186 (`0.186.0`)** and **`@xterm/xterm` (`6.0.0`)** ecosystems and integrated directly with Kabibi’s `ui.Host` and `eval` virtual dylib bridge.
+Here is the end-to-end architectural and implementation specification for Kabibi’s browser terminal experience, building on the existing root `index.html` and `mohabbat/washmhost/js/browser/index.js` integration and engineered against **Three.js r186 (`0.186.0`)** and **`@xterm/xterm` (`6.0.0`)** (with optional vendoring/patching of `@xterm/xterm` and `@xterm/addon-webgl`).
 
 
 ## 1. Architectural Vision & Core Invariants
 
 1. **100% Full-Screen Viewport (`100vw × 100vh`) — Zero Sidebars:**
-* There are no external browser sidebars, split webviews, or inspector chrome. The Three.js CRT viewport fills the entire browser window (`100vw × 100vh`, `overflow: hidden`).
-* All diagnostic output, AI deliberation tickers (`[goal]…`, `[steps]…`, `[work]…`), tool statuses, and shell history live **inside the terminal stack itself**, exactly as designed in the Unified `CellBuf` & Plume architecture.
+* Replacing the side-by-side README split in root `index.html`, the browser terminal viewport fills the entire window (`100vw × 100vh`, `overflow: hidden`).
+* All diagnostic output, AI deliberation tickers (`[goal]…`, `[steps]…`, `[work]…`), tool statuses, Dual Blue File Manager Panels (in Phase 1), and shell history live **inside the terminal stack itself**, exactly as designed in the Unified `CellBuf` & Plume architecture.
 
+2. **Off-Screen `@xterm/xterm` (v6.0.0) + `@xterm/addon-webgl` (v0.11.0) Framebuffer Source:**
+* `@xterm/xterm` renders at native high-DPI resolution inside a full-viewport background container (`position: fixed; inset: 0; opacity: 0; pointer-events: none`) using `new WebglAddon(true)` (`preserveDrawingBuffer: true`) so glyph rasterization, ligatures, DEC mode 2026 synchronized output, and truecolor ANSI sequences emitted by `ui.Host` remain fast and accurate.
+* Rather than misusing the public `webglAddon.textureAtlas` getter (which in xterm.js 6.0.0 returns only the 2D character glyph sprite sheet `this._charAtlas?.pages[0].canvas`), we capture the actual rendered terminal screen canvas (`WebglRenderer._canvas`) and trigger texture uploads from `RenderService.onRender`—vendoring and patching xterm.js / `@xterm/addon-webgl` if needed to expose a clean public `renderCanvas` getter and frame-render callback.
 
+3. **Three.js r186 (`three@0.186.0`) Dual-Surface Curved CRT, Low-Angle Camera & Near-Field Depth-of-Field:**
+* Uses `WebGPURenderer` (`import * as THREE from 'three/webgpu'`) with WebGL2 backend support and **TSL (Three.js Shading Language)** (`import { ... } from 'three/tsl'`) plus `THREE.RenderPipeline`.
+* **Inner Surface (Curved Phosphor CRT Mesh):** A high-subdivision bowed 3D surface (`PlaneGeometry(W, H, 128, 128)` displaced along $-Z$ toward the edges) mapped with a live `THREE.CanvasTexture` driven by xterm’s WebGL2 screen canvas, shaded with phosphor sub-pixel aperture grille, scanline modulation, and dynamic phosphor bloom.
+* **Outer Surface (Curved Refractive & Reflective Front Glass Plate):** A second, slightly flatter curved 3D glass mesh positioned in front of the phosphor screen ($\Delta Z = +0.055$), using `THREE.MeshPhysicalNodeMaterial` with volumetric transmission (`transmission: 1.0`), index of refraction (`ior: 1.48`), chromatic dispersion (`dispersion: 1.6`), and a stylized multi-tap blurred internal back-reflection of the terminal text.
+* **Stylish Low-Angle Bottom-Right Camera Pose:** The `PerspectiveCamera` views the curved CRT assembly from a **subtle bottom-right low angle**—reminiscent of stylish low-angle car posters—so the lower-right quadrant of the curved screen sits physically closer to the camera while the screen remains comfortably readable edge-to-edge.
+* **Subtle Depth-of-Field (Near-Field Soft Focus on Bottom-Right):** A depth-aware post-processing pass in `THREE.RenderPipeline` keeps the focal plane locked across the main body of the screen so almost all terminal text stays razor-sharp, while applying a **very subtle near-field out-of-focus blur to the closer bottom-right region** of the curved screen.
 
+4. **Zero-Flourish Direct-to-DOM Non-GPU Fallback:**
+* If GPU/WebGL2 initialization fails, software rendering is detected, or the WebGL context is lost and not restored, the page falls back immediately to **direct-to-DOM full-page rendering in xterm.js with no flourish**.
+* Because calling `webglAddon.dispose()` in xterm.js 6.0.0 automatically restores the core `DomRenderer` (`renderService.setRenderer(_core._createRenderer())`) on the live `Terminal` instance, fallback simply disposes the 3D stage and `WebglAddon` and sets `#xterm-offscreen-host` to `opacity: 1; pointer-events: auto`, preserving the running `washmhost` WASM guest, scrollback buffer, and `term.onData` input stream without interruption.
 
-2. **Off-Screen `@xterm/xterm` (v6.0.0) + `@xterm/addon-webgl` (v0.11.0) Source:**
-* `@xterm/xterm` renders at native high-DPI resolution into an off-screen/hidden container (`opacity: 0; pointer-events: none; position: fixed`) using its WebGL2 texture-atlas renderer (`preserveDrawingBuffer: true`) so glyph rasterization, ligatures, DEC mode 2026 synchronized output, and truecolor ANSI sequences emitted by `ui.Host` remain fast and accurate.
-
-
-
-
-3. **Three.js r186 (`three@0.186.0`) Dual-Surface Physical CRT Assembly:**
-* Uses `WebGPURenderer` (`import * as THREE from 'three/webgpu'`) with automatic WebGL2 fallback and **TSL (Three.js Shading Language)** (`import { ... } from 'three/tsl'`) plus `THREE.RenderPipeline` (which replaced `PostProcessing` / `EffectComposer` in Three.js r183–r186).
-* **Inner Surface (Curved Phosphor CRT Mesh):** A high-subdivision bicubic/spherically bowed 3D surface (`PlaneGeometry(W, H, 128, 128)` displaced along $+Z$) mapped with a live `THREE.CanvasTexture` driven by xterm’s WebGL2 canvas, shaded with phosphor sub-pixel aperture grille, scanline modulation, and dynamic phosphor bloom.
-* **Outer Surface (Thick Refractive & Reflective Front Glass Plate):** A second, slightly flatter curved 3D glass mesh positioned physically in front of the phosphor screen ($\Delta Z = +0.06$), using `THREE.MeshPhysicalNodeMaterial` with **real volumetric transmission (`transmission: 1.0`)**, **index of refraction (`ior: 1.48`)**, **chromatic dispersion (`dispersion: 2.5`)**, **thickness attenuation**, and **blurred internal back-reflection** of the terminal text itself.
-
-
-4. **Crisp Floating DOM Blue Panels HUD (`z-index: 20`):**
-* When Kabibi detects it is running in the browser (`syscall.GetPlatformInfo().OSName == "browser"`) and the user presses `Ctrl+O`, the Dual Blue File Manager Panels do **not** suffer CRT barrel distortion or scanline blurring.
-
-
-* Instead, they render in a razor-sharp **HTML/CSS DOM Overlay** suspended directly *in front of* the Three.js CRT glass canvas, animating down from the top edge (`translateY(-105%)` $\rightarrow$ `translateY(0)`) with spring physics, distinct SVG file-type icons, and a gliding selection highlight pill (`transition: transform 110ms cubic-bezier(0.22, 1, 0.36, 1)`).
-* Meanwhile, underneath the floating DOM panels, Kabibi’s `Shell` stack still executes the exact **Phase B Bottom-Aligned Illusion** (`sh.SetBottomAligned(true)`): the bottom $H_{\text{gap}}$ rows of the curved CRT screen stay uncovered right below the DOM panels, showing the `BlockBanner`, `~/path፧` `PromptInput`, and live command output sliding upward *behind* the DOM panels!
+5. **Phase 2 (Paused): Floating DOM Blue Panels HUD (`z-index: 20`):**
+* The Floating DOM Blue Panels HUD (§5–§6 below) is explicitly **paused for Phase 1** and reserved for Phase 2 once the off-screen xterm surface, low-angle curved CRT, near-field depth-of-field, raycast mouse forwarding, and direct-to-DOM fallback are proven in production.
 
 
 
@@ -117,93 +102,129 @@ Here is a comprehensive, end-to-end architectural and implementation plan to bui
 
 ---
 
-## 3. Layer Cake & Full-Screen Spatial Geometry
+## 3. Layer Cake, Off-Screen `@xterm/xterm` Internals & Non-GPU Fallback
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ Browser Window (100vw × 100vh, position: fixed, overflow: hidden, #050608)   │
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────────┐  │
-│  │ Layer 3 (z-index: 20): Floating DOM Blue Panels HUD (#kabibi-dom-hud)  │  │
-│  │  • Height: exactamente (H_panels / H_term) * 100vh                     │  │
-│  │  • Slides down from top via cubic-bezier spring when Ctrl+O is active  │  │
-│  │  • Crisp sub-pixel typography, SVG file icons, gliding cursor bar      │  │
+│  │ Layer 3 (z-index: 20) [PHASE 2 — PAUSED]:                              │  │
+│  │  • Floating DOM Blue Panels HUD (#kabibi-dom-hud)                      │  │
+│  │  • Omitted in Phase 1 (Blue Panels render natively inside Layer 1/2)   │  │
 │  └────────────────────────────────────────────────────────────────────────┘  │
 │  ┌────────────────────────────────────────────────────────────────────────┐  │
 │  │ Layer 2 (z-index: 10): Three.js r186 Full-Screen Canvas (#crt-stage)   │  │
-│  │  • Outer Mesh: Curved Physical Glass Plate (IOR 1.48, Refraction,      │  │
-│  │    Chromatic Dispersion, Blurred Back-Reflection of Phosphor Text)     │  │
+│  │  • Camera: Subtle bottom-right low angle (stylish car-poster framing)  │  │
+│  │  • Outer Mesh: Curved Glass Plate (IOR 1.48, Refraction, Dispersion,   │  │
+│  │    Stylized Blurred Back-Reflection of Phosphor Text)                  │  │
 │  │  • Inner Mesh: Bowed CRT Phosphor Screen (xterm CanvasTexture,         │  │
-│  │    Scanlines, Aperture Grille, RenderPipeline Bloom)                   │  │
-│  │  • Bottom Gap (H_gap rows): Uncovered by Layer 3! Displays Kabibi      │  │
-│  │    Banner, ~/path፧ PromptInput, and AI/Shell Plume sliding under HUD   │  │
+│  │    Scanlines, Aperture Grille, RenderPipeline Bloom + Near-Field DoF)  │  │
 │  └────────────────────────────────────────────────────────────────────────┘  │
 │  ┌────────────────────────────────────────────────────────────────────────┐  │
-│  │ Layer 1 (z-index: -1, opacity: 0): Off-Screen @xterm/xterm + WebglAddon│  │
+│  │ Layer 1 (z-index: 0, opacity: 0, inset: 0): Off-Screen @xterm/xterm    │  │
+│  │  • Full-viewport layout so IntersectionObserver & ResizeObserver run   │  │
 │  │  • Receives raw ANSI diffs from ui.Host (ToANSI) and keyboard focus    │  │
+│  │  • Direct-to-DOM Fallback: switches to opacity: 1, z-index: 10 if      │  │
+│  │    GPU/WebGL2 is unavailable or lost, disposing WebglAddon & Layer 2   │  │
 │  └────────────────────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────────────────────┘
-
 ```
 
-### 3.1 Off-Screen `@xterm/xterm` Composite Canvas Problem & Solution
+### 3.1 `@xterm/xterm` (v6.0.0) & `@xterm/addon-webgl` Source Audit for Off-Screen Rendering
 
-A critical detail of `@xterm/xterm`:
+Direct inspection of the pinned `@xterm/xterm@6.0.0` source (`addons/addon-webgl/src/WebglAddon.ts`, `addons/addon-webgl/src/WebglRenderer.ts`, `addons/addon-webgl/src/DevicePixelObserver.ts`, and `src/browser/services/RenderService.ts`) establishes four implementation rules for capturing the off-screen terminal surface—and shows *exactly* what to vendor/patch if we want a clean first-class API:
 
-* When `@xterm/addon-webgl` is loaded, xterm renders the character cells, background colors, and selection into the **WebGL2 `<canvas class="xterm-webgl-canvas">**` (or the main `.xterm-screen canvas`), while keeping `.xterm-helper-textarea` in the DOM for IME, paste, and keyboard capture.
-* **Crucial WebGL2 Context Rule:** By default, WebGL2 clears its drawing buffer after compositing to the DOM unless `preserveDrawingBuffer: true` is set, OR we sample the canvas inside the same `requestAnimationFrame` tick immediately after `term.onRender`.
-* **Zero-Flicker Hook:**
-1. Intercept `HTMLCanvasElement.prototype.getContext` on the off-screen xterm container so when `WebglAddon` requests `'webgl2'`, we force `{ preserveDrawingBuffer: true, antialias: false, powerPreference: 'high-performance' }`.
-2. Attach `term.onRender(() => { xtermCanvasTexture.needsUpdate = true; })` so Three.js only uploads the texture to the GPU when `ui.Host` actually flushes dirty rows or the cursor blinks!
+1. **`new WebglAddon(true)` Native `preserveDrawingBuffer` Support (`WebglAddon.ts` / `WebglRenderer.ts`):**
+   * `WebglAddon`’s constructor is `constructor(private _preserveDrawingBuffer?: boolean)` and forwards `preserveDrawingBuffer` directly to `this._canvas.getContext('webgl2', { antialias: false, depth: false, preserveDrawingBuffer })` inside `WebglRenderer`.
+   * Instantiating `new WebglAddon(true)` preserves the WebGL2 drawing buffer natively across frames without needing a global `HTMLCanvasElement.prototype.getContext` monkey-patch.
 
+2. **Screen Framebuffer Canvas vs. `textureAtlas` (`WebglRenderer.ts`):**
+   * The public `webglAddon.textureAtlas` getter returns `this._charAtlas?.pages[0].canvas`, which is only the **2D glyph sprite sheet**, *not* the rendered terminal screen.
+   * The actual rendered terminal framebuffer is `WebglRenderer._canvas` (`private _canvas: HTMLCanvasElement`), appended to `this._core.screenElement!` (`div.xterm-screen`) and sized to `this.dimensions.device.canvas.{width,height}` on resize and DPI changes.
+   * **Access / Vendored Patch:** We can either read `(webglAddon as any)._renderer?._canvas` (or `term.element.querySelector('.xterm-screen canvas')`), or vendor/patch `@xterm/addon-webgl` to expose a public `get renderCanvas(): HTMLCanvasElement | undefined { return this._renderer?.canvas; }` getter on `WebglAddon`.
 
+3. **Catching All Frame Redraws (`RenderService.ts` vs. `Terminal.onRender`):**
+   * In `src/browser/CoreBrowserTerminal.ts`, public `term.onRender` only forwards `this._renderService.onRenderedViewportChange`.
+   * In `src/browser/services/RenderService.ts` (`_renderRows`), `_onRenderedViewportChange` is skipped whenever `_isNextRenderRedrawOnly` is `true`—which is the case for **cursor blink frames** (`_requestRedrawCursor`), **mouse text selection highlights** (`handleSelectionChanged`), and **focus/blur cursor style updates** (`refreshRows(..., true)`).
+   * However, `RenderService._onRender` fires unconditionally at the end of every `_renderRows` WebGL draw pass.
+   * **Zero-Missed-Frame Hook:** Subscribe to `(term as any)._core._renderService.onRender(() => { xtermTexture.needsUpdate = true; })` (or expose `onDidRenderFrame` in our vendored xterm/addon patch) so Three.js uploads `xtermTexture` on **both** ANSI content writes and redraw-only frames (cursor blink and selection drag).
 
+4. **Keeping `IntersectionObserver` & `ResizeObserver` Active (`RenderService.ts` & `DevicePixelObserver.ts`):**
+   * `RenderService._registerIntersectionObserver` observes `screenElement` with `new IntersectionObserver(..., { threshold: 0 })`. If `#xterm-offscreen-host` is placed outside the viewport (`left: -9999px`), set to `display: none`, or collapsed to `0×0`, `entry.isIntersecting` becomes `false`, setting `this._isPaused = true` and **silently halting all `refreshRows` and `handleResize` calls**.
+   * Similarly, `observeDevicePixelDimensions` in `DevicePixelObserver.ts` observes `_canvas` with `ResizeObserver` (`box: ['device-pixel-content-box']`) and ignores `0×0` sizes.
+   * **Layout Rule:** `#xterm-offscreen-host` **must** remain positioned inside the live `100vw × 100vh` viewport at full size (`position: fixed; inset: 0; width: 100vw; height: 100vh; opacity: 0; pointer-events: none; z-index: 0`). Because `opacity: 0` elements still intersect the viewport and have full layout boxes, `IntersectionObserver`, `ResizeObserver`, and `FitAddon.fit()` all operate at 100% accuracy.
 
+### 3.2 Direct-to-DOM Non-GPU Fallback (Zero Flourish, Zero State Loss)
+
+Look at `WebglAddon.activate` in `addons/addon-webgl/src/WebglAddon.ts`:
+
+```ts
+this._register(toDisposable(() => {
+  if ((this._terminal as any)._core._store._isDisposed) {
+    return;
+  }
+  const renderService: IRenderService = (this._terminal as any)._core._renderService;
+  renderService.setRenderer((this._terminal as any)._core._createRenderer());
+  renderService.handleResize(terminal.cols, terminal.rows);
+}));
+```
+
+When `webglAddon.dispose()` is called, xterm.js automatically creates its built-in `DomRenderer` (`_core._createRenderer()`), attaches it to the existing `RenderService`, and triggers a full resize and redraw on the **same `Terminal` instance**.
+
+Therefore, our non-GPU fallback path is completely seamless:
+
+1. **When Fallback Triggers:**
+   * `WebglAddon` throws during WebGL2 context creation, OR
+   * Three.js `WebGPURenderer` (with WebGL2 backend) fails to initialize or detects a software/unsupported GPU, OR
+   * `webglAddon.onContextLoss` fires after its 3000ms restoration timeout (`WebglRenderer.ts`).
+2. **Fallback Transition (`activateDirectDomFallback()`):**
+   * Call `webglAddon?.dispose()` (restoring xterm’s `DomRenderer` in-place) and tear down the Three.js `#crt-stage` canvas.
+   * Switch `#xterm-offscreen-host` to direct full-page visibility (`opacity: 1; pointer-events: auto; z-index: 10`).
+   * Call `fitAddon.fit()` and `term.focus()`.
+   * The running `washmhost` WASM guest (`index.html` / `mohabbat/washmhost/js/browser/index.js`), `term.onData` keyboard stream, scrollback buffer, and `SIGWINCH` resize handler continue uninterrupted in a crisp, full-page direct-to-DOM terminal with no flourish.
 
 ---
 
-## 4. Three.js r186 3D Scene, Curved Geometry & TSL Shaders
+## 4. Three.js r186 3D Scene, Low-Angle Camera, Curved Geometry & TSL Shaders
 
-### 4.1 Full-Screen Camera & Aspect-Locked CRT Mesh Sizing
+### 4.1 Stylish Low-Angle Bottom-Right Camera Pose & Aspect-Locked Mesh Sizing
 
-We want the curved terminal to fill the entire `100vw × 100vh` screen edge-to-edge with just enough bezel curvature at the corners to sell the physical CRT + glass depth without wasting screen real estate:
+Instead of viewing the screen dead-on from `(0, 0, D)`, the camera is positioned at a **subtle bottom-right low angle**—like a stylish low-angle car poster—so you feel the 3D sculptural bow of the CRT faceplate and the closer lower-right corner without sacrificing terminal readability:
 
-* Use a `THREE.PerspectiveCamera(fov = 32, aspect = window.innerWidth / window.innerHeight, 0.1, 100)` positioned at `z = 2.8`.
-* At distance $D = 2.8$, the visible frustum height is:
-
-$$H_{\text{world}} = 2 \cdot D \cdot \tan\left(\frac{\text{fov}}{2}\right), \qquad W_{\text{world}} = H_{\text{world}} \cdot \text{aspect}$$
-
-
-* Whenever the browser window resizes, we update the geometry scale `(W_world * 0.965, H_world * 0.965, 1)` so the terminal occupies **96.5% of the full viewport**, framed by a subtle, dark anodized curved bezel around the outer 1.75% margin.
+* **Camera Pose (Subtle Bottom-Right Low Angle):**
+  * Use `THREE.PerspectiveCamera(fov = 30, aspect = window.innerWidth / window.innerHeight, 0.1, 100)`.
+  * Place the camera slightly to the **right (`+X`)** and **below (`-Y`)** center, looking back toward the screen center:
+    $$\mathbf{P}_{\text{cam}} = (x = +0.36,\; y = -0.24,\; z = 2.68), \qquad \mathbf{P}_{\text{target}} = (x = +0.03,\; y = -0.02,\; z = 0.0)$$
+  * Optional subtle mouse parallax ($\pm 0.04$ world units around $\mathbf{P}_{\text{cam}}$) shifts the glass specular glint and internal reflection gently as the pointer moves.
+* **Aspect-Locked Viewport Framing:**
+  * At focal distance $D = \|\mathbf{P}_{\text{cam}} - \mathbf{P}_{\text{target}}\| \approx 2.71$, the visible frustum dimensions at the target plane are:
+    $$H_{\text{world}} = 2 \cdot D \cdot \tan\left(\frac{\text{fov}}{2}\right), \qquad W_{\text{world}} = H_{\text{world}} \cdot \text{aspect}$$
+  * On window resize, update the mesh scale to `(W_world * 0.94, H_world * 0.94, 1)` so the angled curved screen fills the viewport cleanly without clipping its closer bottom-right corner or receding top-left corner.
 
 ### 4.2 Mathematical Surface Bending (Phosphor Mesh vs. Front Glass Plate)
 
-Instead of a cheap 2D post-processing UV warp (which cannot produce true 3D glass thickness or paralactic reflection as the eye/mouse moves), we bend **real 3D vertex geometry**:
+Rather than a 2D post-processing UV warp (which cannot produce 3D perspective foreshortening from the low-angle camera or varying glass thickness), we bend **real 3D vertex geometry**:
 
 * Given normalized plane coordinates $(u, v) \in [-1, 1]^2$:
 
 $$r^2 = u^2 + v^2, \qquad z_{\text{bend}}(u, v) = -k_{\text{curve}} \cdot \left(u^2 + v^2 + 0.15 \cdot u^2 v^2\right)$$
 
-
 * **Mesh 1 — Inner Phosphor Screen (`z_base = 0.0`, $k_{\text{curve}} = 0.14$):**
-* Bowed backward at the edges and corners, bulging softly toward the viewer at the center $(0,0)$.
-* Normals are recomputed analytically (`geometry.computeVertexNormals()`) so lighting and reflections curve naturally across the surface.
-
-
+  * Bowed backward toward the edges and corners, bulging softly toward the viewer at $(0,0)$.
+  * Normals are recomputed analytically (`geometry.computeVertexNormals()`) so lighting and reflections curve naturally across the surface.
 * **Mesh 2 — Outer Refractive Glass Plate (`z_base = +0.055`, $k_{\text{curve}} = 0.085$):**
-* Positioned $0.055$ world units in front of the phosphor screen with a slightly shallower curvature ($k_{\text{curve}} = 0.085$).
-* **Why differential curvature matters:** Because $k_{\text{glass}} < k_{\text{phosphor}}$, the optical air/glass gap $\Delta Z(u,v)$ between the phosphor and the front glass is thinner in the center ($0.055$) and thicker toward the corners ($0.11$). When `MeshPhysicalNodeMaterial` computes volumetric refraction through this varying thickness, the edges naturally exhibit richer glass refraction, chromatic dispersion, and internal reflection—just like a real Sony Trinitron / Tektronix glass faceplate!
-
-
+  * Positioned $0.055$ world units in front of the phosphor screen with a slightly shallower curvature ($k_{\text{curve}} = 0.085$).
+  * **Differential Curvature Gap:** Because $k_{\text{glass}} < k_{\text{phosphor}}$, the optical gap $\Delta Z(u,v) = 0.055 + (k_{\text{phosphor}} - k_{\text{glass}})(u^2 + v^2 + 0.15 u^2 v^2)$ between the phosphor and the front glass is thinner in the center ($0.055$), widens to $0.11$ at the edge midpoints ($\pm 1, 0$), and reaches $\approx 0.173$ at the corners ($\pm 1, \pm 1$). Combined with the bottom-right low-angle camera, this gives the nearer bottom-right glass edge tangible depth, refraction, and internal reflection.
 
 ### 4.3 TSL Shader Graph for the Inner Phosphor Screen (`MeshBasicNodeMaterial`)
 
-Using `three/tsl` in r186:
+Using `three/tsl` in r186 (note the portable increasing-edge `smoothstep(0.75, 1.35, ...)` inverted via `float(1.0).sub(...)` so WebGL2 GLSL and WebGPU WGSL both evaluate it identically):
 
 ```js
 import * as THREE from 'three/webgpu';
 import {
-  texture, uv, vec2, vec3, float, sin, cos, mix, smoothstep, uniform
+  texture, uv, vec2, vec3, float, sin, mix, smoothstep, uniform
 } from 'three/tsl';
 
 const crtResolution = uniform(new THREE.Vector2(canvas.width, canvas.height));
@@ -229,29 +250,23 @@ const grille = vec3(
   sin(triadPhase.add(4.188)).mul(0.04).add(0.96)
 );
 
-// 4. Corner shadow (tube mask vignette)
+// 4. Corner shadow (tube mask vignette, using increasing smoothstep bounds)
 const edgeDist = vUv.sub(0.5).mul(2.0);
-const vignette = smoothstep(1.35, 0.75, edgeDist.dot(edgeDist));
+const vignette = float(1.0).sub(smoothstep(0.75, 1.35, edgeDist.dot(edgeDist)));
 
 const phosphorMaterial = new THREE.MeshBasicNodeMaterial();
 phosphorMaterial.colorNode = phosphorCol.rgb.mul(scanMask).mul(grille).mul(vignette);
-
 ```
 
-### 4.4 TSL Shader Graph for the Outer Glass Plate (Refraction + Blurry Internal Reflection)
+### 4.4 TSL Shader Graph for the Outer Glass Plate (Refraction + Stylized Blurry Internal Reflection)
 
-For the front glass sheet (`Mesh 2`), you specifically asked for **a bit of refraction and a bit of blurry reflection back**:
+For the front glass sheet (`Mesh 2`), we combine screen-space refraction with a stylized blurry internal reflection of the phosphor text:
 
-1. **Physical Refraction & Chromatic Dispersion:**
-* `MeshPhysicalNodeMaterial` in Three.js r186 supports native screen-space volume refraction via `transmission: 1.0`, `ior: 1.48`, `thickness: 0.45`, and `dispersion: 1.8`.
-* Because Three.js renders transmissive objects in a separate pass after opaque meshes, the glass mesh automatically samples the rendered inner phosphor screen behind it, bending rays along the curved glass surface normals and splitting RGB slightly at steep viewing angles near the corners.
-
-
-2. **Blurry Reflection Back (Internal Double-Reflection / Ghosting + Ambient Studio Glint):**
-* In a physical CRT with a laminated safety glass faceplate, bright phosphor characters reflect off the *inside* of the front glass and bounce back toward the viewer as a soft, out-of-focus ghost reflection offset by the glass thickness and viewing angle (`viewDir`).
-* In TSL, we construct a custom `emissiveNode` on the glass material that samples a **multi-tap Gaussian-blurred mip** of `xtermTexture` at a view-dependent parallax offset $\Delta UV = \text{reflect}(\text{viewDir}, \text{normal}).xy \times 0.012$:
-
-
+1. **Refraction & Chromatic Dispersion:**
+   * `MeshPhysicalNodeMaterial` in Three.js r186 provides screen-space transmissive refraction via `transmission: 1.0`, `ior: 1.48`, `thickness: 0.42`, and `dispersion: 1.6`.
+   * Because Three.js renders transmissive objects in a separate pass after opaque meshes, the glass mesh samples the rendered inner phosphor screen behind it, bending rays along the curved glass normals.
+2. **Stylized Blurry Back-Reflection (Internal Ghosting + Overhead Studio Glint):**
+   * To evoke bright phosphor characters reflecting off the inside of the curved faceplate and bouncing back toward the low-angle camera as a soft ghost image, we construct a custom `emissiveNode` on the glass material that samples a **9-tap tent-blurred neighborhood** of `xtermTexture` at a view-dependent parallax offset $\Delta UV = \text{reflect}(-\text{viewDir}, \text{normal}).xy \times 0.014$:
 
 ```js
 import {
@@ -260,10 +275,10 @@ import {
 
 const vUv = uv();
 const reflDir = reflect(positionViewDirection.negate(), normalView);
-const parallaxOffset = reflDir.xy.mul(0.014); // Shifted by viewing angle on curved glass
+const parallaxOffset = reflDir.xy.mul(0.014); // Shifted by low-angle view & curved glass
 const reflUv = vUv.add(parallaxOffset);
 
-// 9-tap wide tent blur of the terminal texture for the blurry glass back-reflection
+// 9-tap tent blur of the terminal texture for the blurry glass back-reflection
 const blurRadius = vec2(0.0035, 0.0055);
 const blurredReflection =
   texture(xtermTexture, reflUv).mul(0.25)
@@ -276,12 +291,12 @@ const blurredReflection =
   .add(texture(xtermTexture, reflUv.add(vec2( blurRadius.x, -blurRadius.y))).mul(0.0625))
   .add(texture(xtermTexture, reflUv.add(vec2(-blurRadius.x, -blurRadius.y))).mul(0.0625));
 
-// Schlick Fresnel term so reflection is subtle dead-center (~3%) and stronger on curved edges (~18%)
+// Schlick Fresnel term so reflection is subtle near normal incidence (~3%) and stronger on grazing curves (~18%)
 const cosTheta = max(dot(normalView, positionViewDirection), 0.0);
 const fresnel = float(0.03).add(float(0.18).mul(pow(float(1.0).sub(cosTheta), 3.5)));
 
 // Subtle diagonal overhead softbox reflection across the curved glass
-const studioGlint = pow(max( dot(normalView, vec3(-0.35, 0.55, 0.75)), 0.0 ), 16.0).mul(0.035);
+const studioGlint = pow(max(dot(normalView, vec3(-0.35, 0.55, 0.75)), 0.0), 16.0).mul(0.035);
 
 const glassMaterial = new THREE.MeshPhysicalNodeMaterial({
   transmission: 1.0,
@@ -295,65 +310,103 @@ const glassMaterial = new THREE.MeshPhysicalNodeMaterial({
   attenuationDistance: 4.0,
 });
 glassMaterial.emissiveNode = blurredReflection.rgb.mul(fresnel).add(vec3(studioGlint));
-
 ```
 
-### 4.5 Post-Processing via `THREE.RenderPipeline` (r186)
+### 4.5 Post-Processing (`THREE.RenderPipeline`): Phosphor Bloom + Subtle Near-Field Depth-of-Field (Bottom-Right Soft Focus)
 
-To give bright text and the `፧` prompt a warm phosphor halo without washing out readability:
+Because the camera views the curved screen from a **slightly bottom-right low angle** ($\mathbf{P}_{\text{cam}} = (+0.36, -0.24, 2.68)$), the 3D distance from the camera lens varies continuously across the screen surface:
+
+* The **center, upper-left, upper-right, and bottom-left** regions sit near or slightly beyond the focal plane ($d_{\text{view}} \in [2.62, 2.95]$) and must remain **100% sharp**.
+* The **bottom-right region** of the curved screen is physically closer to the camera lens ($d_{\text{view}} \in [2.35, 2.58]$).
+* Using a depth-aware near-field Circle-of-Confusion ($\text{CoC}$) factor in `THREE.RenderPipeline`, we keep the entire main working area crisp while applying a **very subtle macro-lens out-of-focus blur ($\le 1.8\text{px}$ radius)** exclusively to that closer bottom-right zone:
 
 ```js
-import { pass, bloom } from 'three/tsl';
+import { pass, bloom, uv, vec2, float, smoothstep, mix } from 'three/tsl';
 
 const renderPipeline = new THREE.RenderPipeline(renderer);
 const scenePass = pass(scene, camera);
 const sceneColor = scenePass.getTextureNode('output');
+const viewZNode  = scenePass.getViewZNode(); // Positive camera-space distance along -Z
 
-// Subtle phosphor bloom (threshold 0.65, strength 0.22, radius 0.35)
-const bloomPass = bloom(sceneColor, 0.22, 0.35, 0.65);
-renderPipeline.outputNode = sceneColor.add(bloomPass);
+// 1. Subtle phosphor bloom (threshold 0.65, strength 0.20, radius 0.32)
+const bloomPass = bloom(sceneColor, 0.20, 0.32, 0.65);
+const litScene  = sceneColor.add(bloomPass);
 
+// 2. Asymmetric Near-Field Depth-of-Field (Bottom-Right Closer to Camera)
+// Fragments with viewZ >= 2.58 (center, top, left) have nearCoC = 0.0 (razor-sharp).
+// Fragments closer than 2.58 (the nearer bottom-right quadrant) ramp smoothly up to nearCoC = 1.0.
+const nearCoC = float(1.0).sub(smoothstep(2.36, 2.58, viewZNode.negate()));
+
+// Subtle 9-tap disc/tent kernel scaled by nearCoC (max ~1.6px softening in bottom-right)
+const vUv = uv();
+const dofStep = vec2(1.5 / window.innerWidth, 1.5 / window.innerHeight).mul(nearCoC);
+const nearBlurred =
+  sceneColor.sample(vUv).mul(0.28)
+  .add(sceneColor.sample(vUv.add(vec2( dofStep.x,  0.0))).mul(0.12))
+  .add(sceneColor.sample(vUv.add(vec2(-dofStep.x,  0.0))).mul(0.12))
+  .add(sceneColor.sample(vUv.add(vec2( 0.0,  dofStep.y))).mul(0.12))
+  .add(sceneColor.sample(vUv.add(vec2( 0.0, -dofStep.y))).mul(0.12))
+  .add(sceneColor.sample(vUv.add(vec2( dofStep.x * 0.7,  dofStep.y * 0.7))).mul(0.06))
+  .add(sceneColor.sample(vUv.add(vec2(-dofStep.x * 0.7,  dofStep.y * 0.7))).mul(0.06))
+  .add(sceneColor.sample(vUv.add(vec2( dofStep.x * 0.7, -dofStep.y * 0.7))).mul(0.06))
+  .add(sceneColor.sample(vUv.add(vec2(-dofStep.x * 0.7, -dofStep.y * 0.7))).mul(0.06))
+  .add(bloomPass);
+
+renderPipeline.outputNode = mix(litScene, nearBlurred, nearCoC.mul(0.65));
 ```
 
-### 4.6 Exact Raycast Mouse Coordinate Inversion (Clicking & Selecting on the Curved CRT)
+### 4.6 Off-Screen Keyboard & Exact Raycast Mouse Coordinate Inversion
 
-Because the terminal sits on a curved 3D mesh behind glass, standard browser mouse coordinates `(e.clientX, e.clientY)` will not line up with xterm's flat off-screen grid unless mapped through 3D space:
+In the current root `index.html`, keyboard (`term.onData` $\rightarrow$ `hostState.pushStdin`) and terminal resize (`FitAddon` $\rightarrow$ `SIGWINCH`) already work with `washmhost`. Adapting input to the full-screen 3D CRT requires respecting how `@xterm/xterm@6.0.0` binds mouse and keyboard listeners internally (`src/browser/CoreBrowserTerminal.ts`, `src/browser/services/SelectionService.ts`, and `src/browser/input/Mouse.ts`):
 
-1. Listen to `pointerdown`, `pointermove`, `pointerup`, and `wheel` on `#crt-stage`.
-2. Convert `(e.clientX, e.clientY)` to Normalized Device Coordinates $\text{NDC} \in [-1, 1]^2$.
-3. Run `raycaster.setFromCamera(ndc, camera)` against `phosphorMesh`.
-4. Read `hit.uv` $(u, v) \in [0, 1]^2$ directly from the triangle intersection!
-5. Map $(u, 1 - v)$ to the off-screen xterm container’s bounding box `(u * xtermWidth, (1 - v) * xtermHeight)` and dispatch a synthetic `MouseEvent` / `WheelEvent` to the off-screen `.xterm-screen` element.
-6. **Result:** Even near the heavily curved corners of the CRT, clicking or dragging text selects the exact character cell under the user's cursor!
+1. **Keyboard Focus Preservation (`.xterm-helper-textarea`):**
+   * `CoreBrowserTerminal._bindKeys()` attaches all `keydown`, `keypress`, `keyup`, `input`, `composition*`, and `paste` listeners to `this.textarea` (`.xterm-helper-textarea`), and `copy`/`paste` to `this.element`.
+   * Because `#xterm-offscreen-host` stays in the live viewport with `opacity: 0; pointer-events: none`, calling `term.focus()` on startup and on any pointer interaction with `#crt-stage` keeps `.xterm-helper-textarea` focused so all keyboard shortcuts (`Ctrl+O`, `Tab`, arrows, function keys), IME composition, and clipboard copy/paste work identically to direct DOM mode.
+
+2. **How xterm.js Computes Mouse Cell Coordinates (`Mouse.ts` & `MouseService.ts`):**
+   * Both `SelectionService` (text selection) and `CoreBrowserTerminal.bindMouse()` (VT mouse tracking sequences when enabled by TUI apps) call `getCoordsRelativeToElement(window, event, this.screenElement)`:
+     ```ts
+     const rect = element.getBoundingClientRect();
+     return [
+       event.clientX - rect.left - leftPadding,
+       event.clientY - rect.top - topPadding
+     ];
+     ```
+   * Crucially, when `mousedown` fires on `term.element`, **both** `SelectionService._addMouseDownListeners()` and `CoreBrowserTerminal.bindMouse()` attach their drag (`mousemove`) and release (`mouseup`) listeners directly to **`document`**, not `term.element`!
+   * If a raw browser `mousemove` or `mouseup` event on `#crt-stage` is allowed to bubble up to `document`, xterm’s `document` listeners will process the **unwarped** `(e.clientX, e.clientY)` coordinates before or alongside any synthetic event.
+
+3. **3D Raycast Inversion & Event Forwarding Protocol:**
+   * Listen to `mousedown`, `mousemove`, `mouseup`, `wheel`, `dblclick`, and `contextmenu` on `#crt-stage` (and capture pointer during drag).
+   * For any native mouse event on `#crt-stage`, call `e.stopPropagation()` so raw unwarped `mousemove`/`mouseup` events do not reach xterm’s `document` drag listeners directly.
+   * Convert `(e.clientX, e.clientY)` to Normalized Device Coordinates $\text{NDC} \in [-1, 1]^2$ and run `raycaster.setFromCamera(ndc, camera)` against `phosphorMesh` (accounting for both the low-angle camera pose and the 3D surface curvature).
+   * Read `hit.uv` $(u, v) \in [0, 1]^2$ from the mesh intersection and map it into `term._core.screenElement.getBoundingClientRect()`:
+     $$\text{clientX}_{\text{mapped}} = \text{rect.left} + u \cdot \text{rect.width}, \qquad \text{clientY}_{\text{mapped}} = \text{rect.top} + (1 - v) \cdot \text{rect.height}$$
+   * Dispatch a synthetic `MouseEvent` / `WheelEvent` with `(clientX: clientX_mapped, clientY: clientY_mapped, bubbles: true, cancelable: true, button, buttons, detail, shiftKey, ctrlKey, altKey, metaKey)` onto `term.element`. Because `bubbles: true` is set on the synthetic event (while the raw `#crt-stage` event was stopped), both `term.element` listeners (`mousedown`, `wheel`) and `document` listeners (`mousemove`, `mouseup` during selection or VT mouse drag) receive the exact raycast-corrected coordinates.
 
 ---
 
-## 5. The Floating DOM Blue Panels HUD (Outside & Above the CRT)
+## 5. Phase 2 (Paused / Deferred): The Floating DOM Blue Panels HUD
 
-When Kabibi runs in the browser, pressing `Ctrl+O` summons the dual-pane file manager in two coordinated layers:
+> **Phase Boundary Note:** Everything in **§5 and §6** is **paused for Phase 1** and deferred to **Phase 2**. In Phase 1, Kabibi’s Dual Blue File Manager Panels (`Ctrl+O`) render directly inside the curved CRT terminal via standard VT/ANSI output with zero DOM HUD overlay and zero changes to Go’s `AppWidget.Render`.
 
-### 5.1 How the Terminal & DOM HUD Coexist seamlessly (No Blank Void, Exact Fit)
+When Phase 2 is activated later, pressing `Ctrl+O` in browser mode will summon the dual-pane file manager in two coordinated layers:
 
-Look at how cleanly this marries your **Unified `CellBuf` & Blue Panel Illusion (`3-blue.md`)**:
+### 5.1 How the Terminal & DOM HUD Coexist (Phase 2 Design)
+
+Look at how this pairs with the **Unified `CellBuf` & Blue Panel Illusion (`3-blue.md`)**:
 
 1. **In Go (`kabibi/ui/app/app_widget.go`):**
 * When `Ctrl+O` toggles `w.panelsVisible = true`, `AppWidget` still executes the exact height calculation:
 
-
-
 $$H_{\text{panels}} = H_{\text{term}} - H_{\text{gap}}$$
-
-
 
 and sets `w.sh.SetBottomAligned(true)`.
 
-
-* **Browser Mode Hook:** When `syscall.GetPlatformInfo().OSName == "browser"`:
-
-
-* Instead of blitting the ASCII `DualPaneWidget` cells over rows `0 .. H_panels-1` of the terminal `CellBuf` (which would cause the blue panels to be drawn *twice*—once curved inside the CRT and once flat in the DOM!), `AppWidget.Render` leaves rows `0 .. H_panels-1` showing the **unmasked shell block history** (or dims them slightly) while emitting the structured panel state to the browser DOM via the `eval` bridge!
-* **Wait—think about how cool that is:** Because the DOM blue panels have a semi-translucent deep-blue acrylic backdrop (`background: rgba(0, 10, 95, 0.86); backdrop-filter: blur(8px)`) and hang down from the top of the screen over rows `0 .. H_panels-1`, you can faintly see the curved CRT terminal output *physically sliding upward behind the frosted blue DOM panels* as commands run in the bottom gap!
-* And when the user presses `Ctrl+O` again (`panelsVisible = false`), the DOM panels animate smoothly back up into the top bezel (`translateY(-105%)`), revealing the curved CRT shell underneath at full brightness!
+* **Browser Mode Hook (Phase 2):** When `syscall.GetPlatformInfo().OSName == "browser"` and the Phase 2 DOM HUD is enabled:
+* Instead of blitting the ASCII `DualPaneWidget` cells over rows `0 .. H_panels-1` of the terminal `CellBuf` (which would cause the blue panels to be drawn *twice*—once curved inside the CRT and once flat in the DOM), `AppWidget.Render` leaves rows `0 .. H_panels-1` showing the **unmasked shell block history** (dimmed by 40%) while emitting the structured panel state to the browser DOM via the `eval` bridge.
+* Because the DOM blue panels have a semi-translucent deep-blue acrylic backdrop (`background: rgba(0, 10, 95, 0.86); backdrop-filter: blur(8px)`) and hang down from the top of the screen over rows `0 .. H_panels-1`, you faintly see the curved CRT terminal output sliding upward behind the frosted blue DOM panels as commands run in the bottom gap.
+* When the user presses `Ctrl+O` again (`panelsVisible = false`), the DOM panels animate smoothly back up (`translateY(-105%)`), revealing the curved CRT shell underneath at full brightness.
+* **Note on Low-Angle Camera Alignment in Phase 2:** Because Phase 1 positions the camera at a subtle bottom-right low angle, the projected 2D screen boundary of row $H_{\text{panels}}$ on the curved mesh is slightly perspective-tilted rather than a flat horizontal line. In Phase 2, `#kabibi-dom-hud` can either project the 3D coordinates of row $H_{\text{panels}}$ through `camera.project(...)` or apply a matching CSS 3D `perspective` / `matrix3d` transform so the HUD remains crisp while respecting the low-angle framing.
 
 
 
@@ -481,17 +534,16 @@ $$\text{hudHeightPx} = \text{crtScreenTopPx} + \left(\frac{H_{\text{panels}}}{H_
 
 ---
 
-## 6. Go $\leftrightarrow$ Browser State Synchronization Over the `eval` Bridge
+## 6. Phase 2 (Paused / Deferred): Go $\leftrightarrow$ Browser State Synchronization Over the `eval` Bridge
 
-Because Kabibi already has the pure `eval` virtual dylib (`syscall.DylibOpen("eval", 0)` / `EvalJS`) in `washmhost.js`, we do **not** need any new WASM ABI imports or custom host syscalls!
+> **Phase Boundary Note:** This synchronization bridge is only required for the **Phase 2 Floating DOM Blue Panels HUD**. Phase 1 requires **no changes** to Go’s `AppWidget` or `filemanager` packages, as all terminal UI (including `Ctrl+O` Blue Panels) renders through the standard VT/ANSI stream into the off-screen `@xterm/xterm` surface.
 
-### 6.1 Go Side: `kabibi/ui/filemanager/dom_bridge.go`
+Because Kabibi already has the pure `eval` virtual dylib (`syscall.DylibOpen("eval", 0)` / `EvalJS`) in `mohabbat/washmhost/js/browser/index.js`, Phase 2 will not need any new WASM ABI imports or custom host syscalls.
+
+### 6.1 Go Side: `kabibi/ui/filemanager/dom_bridge.go` (Phase 2)
 
 1. Detect browser mode once at startup via `syscall.GetPlatformInfo().OSName == "browser"`.
-
-
 2. Define a compact JSON state payload representing `DualPaneWidget` + modal dialogs:
-
 
 ```go
 type DOMHUDState struct {
@@ -521,194 +573,81 @@ type DOMFileItem struct {
     IsExec bool   `json:"isExec"`
     Marked bool   `json:"marked"`
 }
-
 ```
 
-
-3. **Delta-Only Push:**
-* Whenever `AppWidget.Render` runs in browser mode and the `DOMHUDState` hash differs from the previous frame:
+3. **Change-Driven Delta Push (Phase 2):**
+* Whenever `AppWidget.Render` runs in browser mode (triggered by UI state invalidations) and the `DOMHUDState` hash differs from the previous render:
 * If only `Cursor`, `ActivePane`, or `Marked` changed (e.g. the user pressed `Down`, `Up`, `Tab`, or `Insert`), Go calls:
 ```go
 EvalJS(fmt.Sprintf("globalThis.__kabibi_hud?.updateCursor(%d, %d, %d, %d)",
     activePane, left.Cursor, left.ScrollCol, right.Cursor))
-
 ```
-
-
-This costs **< 60 bytes** across the eval bridge and triggers the 95ms CSS gliding animation at 120fps!
+This sends `< 60 bytes` across the `eval` bridge and triggers the 95ms CSS gliding transition on the browser side.
 * When a directory loads (`LoadDir`), panels toggle (`Ctrl+O`), or terminal dimensions change (`SIGWINCH`), Go serializes the full `DOMHUDState` JSON and calls:
 ```go
 EvalJS(fmt.Sprintf("globalThis.__kabibi_hud?.syncState(%s)", strconv.Quote(string(stateJSON))))
-
 ```
 
+### 6.2 Input Routing: Zero Desynchronization Between DOM HUD and Go `AppWidget` (Phase 2)
 
-
-
-
-
-
-### 6.2 Input Routing: Zero Desynchronization Between DOM HUD and Go `AppWidget`
-
-How do keyboard and mouse events work when the DOM panels are open?
-
-* Keyboard Events (100% Controlled by Go `AppWidget.HandleEvent`):
-
-
-* The hidden `.xterm-helper-textarea` retains keyboard focus at all times!
-* When the user presses `Tab`, `Up`, `Down`, `Left`, `Right`, `Insert`, `Enter`, `Ctrl+O`, `F5`, or types characters into `~/path፧`, `@xterm/xterm` sends the standard VT sequence straight into `washmhost.pushStdin(data)`.
-
-
-* Go’s `AppWidget.HandleEvent` executes the **Far Manager Split Key-Routing Matrix (§5.1 of `3-blue.md`)**, updates the active `FilePaneWidget` or `PromptInput`, and immediately emits the 1-line `updateCursor(...)` or `syncState(...)` JS eval call on the same frame!
-
-
-* **Why this is rock-solid:** We never duplicate Far Manager’s key-routing logic in JavaScript. Go remains the single source of truth for CWD sync, executable launching on `Enter`, and `PromptInput` routing.
-
-
-
-
+* **Keyboard Events (100% Controlled by Go `AppWidget.HandleEvent`):**
+  * The hidden `.xterm-helper-textarea` retains keyboard focus at all times.
+  * When the user presses `Tab`, `Up`, `Down`, `Left`, `Right`, `Insert`, `Enter`, `Ctrl+O`, `F5`, or types characters into `~/path፧`, `@xterm/xterm` sends the standard VT sequence straight into `hostState.pushStdin(data)`.
+  * Go’s `AppWidget.HandleEvent` executes the **Far Manager Split Key-Routing Matrix (§5.1 of `3-blue.md`)**, updates the active `FilePaneWidget` or `PromptInput`, and emits the `updateCursor(...)` or `syncState(...)` `EvalJS` call on the resulting render pass.
 * **Mouse Clicks & Hover on the DOM Blue Panels:**
-* Clicking a file row in the DOM panel emits the corresponding VT sequence or synthetic key chord into `host.pushStdin(...)` (or invokes a lightweight `__kabibi_hud_action` queue read by Go), and double-clicking a directory or executable triggers `Enter`!
-
-
+  * Clicking a file row in the DOM panel emits the corresponding VT sequence or synthetic key chord into `hostState.pushStdin(...)` (or invokes a lightweight `__kabibi_hud_action` queue read by Go), and double-clicking a directory or executable triggers `Enter`.
 
 ---
 
 ## 7. Phased Implementation Plan
 
-### Phase 1: Full-Screen Off-Screen `@xterm/xterm` + `Three.js r186` CRT Stage (`mohabbat/washmhost/js/browser/`)
+### Phase 1 (Active): Full-Screen Off-Screen `@xterm/xterm` + `Three.js r186` Low-Angle Curved CRT, Near-Field DoF & Direct-to-DOM Fallback
 
-1. **Upgrade `index.html` Layout to 100% Full-Screen:**
-* Remove any split panes, sidebars, or debug logs outside the terminal.
-* Create the three stacked full-screen layers: `#xterm-offscreen-host`, `#crt-stage` (`<canvas>`), and `#kabibi-dom-hud`.
+1. **Upgrade Root `index.html` (and Browser Host Wiring in `mohabbat/washmhost/js/browser/index.js`) to 100% Full-Screen:**
+   * Transition from the side-by-side README layout in `index.html` to the full-viewport (`100vw × 100vh`) terminal stage while preserving the existing working `washmhost` stdin/stdout/stderr and `getTtySize` integration.
+   * Create the two Phase 1 full-screen layers:
+     * `#xterm-offscreen-host` (`position: fixed; inset: 0; width: 100vw; height: 100vh; opacity: 0; pointer-events: none; z-index: 0`) so xterm’s `IntersectionObserver` and `ResizeObserver` remain active at full viewport dimensions.
+     * `#crt-stage` (`position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 10`).
 
+2. **Initialize `@xterm/xterm@6.0.0` + `@xterm/addon-webgl@0.11.0` + `@xterm/addon-fit@0.10.0` (Vendor/Patch as Needed):**
+   * Instantiate `const webglAddon = new WebglAddon(true)` so `WebglRenderer` requests its WebGL2 context with `preserveDrawingBuffer: true`.
+   * Acquire the rendered terminal screen canvas (`WebglRenderer._canvas`, exposed via a clean `webglAddon.renderCanvas` getter if vendored/patched, rather than `webglAddon.textureAtlas`).
+   * Hook `(term as any)._core._renderService.onRender` (or a vendored `onDidRenderFrame` event) to set `xtermCanvasTexture.needsUpdate = true` on every content render, cursor blink, and selection highlight change.
+   * Compute full-screen `{ cols, rows }` via `FitAddon.fit()` and wire `window.addEventListener('resize', ...)` to update `FitAddon` and trigger `SIGWINCH` (`28`) via `hostState.triggerSignal(28)`.
 
-2. **Initialize `@xterm/xterm@6.0.0` + `@xterm/addon-webgl@0.11.0` + `@xterm/addon-fit@0.10.0`:**
-* Configure xterm with `allowProposedApi: true`, JetBrains Mono / Fira Code font, and a rich dark CRT background (`#07090e`).
-* Patch the off-screen container’s `getContext('webgl2')` call to enforce `preserveDrawingBuffer: true`.
-* Compute full-screen `{ cols, rows }` via `FitAddon` and pass `getTtySize: () => ({ cols: term.cols, rows: term.rows })` to `washmhost`, triggering both signal `27` and `28` (`SIGWINCH`) on window resize.
+3. **Implement Non-GPU Direct-to-DOM Fallback (`activateDirectDomFallback()`):**
+   * If WebGL2 or Three.js GPU initialization fails, software rendering is detected, or `webglAddon.onContextLoss` fires, call `webglAddon.dispose()` (which automatically restores xterm.js’s core `DomRenderer` on the live `Terminal`), tear down `#crt-stage`, and set `#xterm-offscreen-host` to `opacity: 1; pointer-events: auto; z-index: 10` for full-page direct-to-DOM rendering with zero flourish.
 
+4. **Build the `CRTRenderer` in Three.js r186 (`crt_stage.js`):**
+   * Initialize `WebGPURenderer` (`await renderer.init()`) and `RenderPipeline`.
+   * Position the `PerspectiveCamera` at the **subtle bottom-right low angle** ($\mathbf{P}_{\text{cam}} = (+0.36, -0.24, 2.68)$ looking at $(+0.03, -0.02, 0.0)$) so the curved screen is framed like a stylish low-angle car poster with the bottom-right region closer to the lens.
+   * Construct `phosphorMesh` ($128\times128$ bowed grid, $k=0.14$) with the TSL scanline + aperture grille + halation + vignette node material bound to `new THREE.CanvasTexture(xtermRenderCanvas)`.
+   * Construct `glassMesh` ($64\times64$ bowed grid, $k=0.085$, $z=+0.055$) with `MeshPhysicalNodeMaterial` (`transmission: 1.0`, `ior: 1.48`, `dispersion: 1.6`) and the 9-tap parallax-shifted blurry internal reflection `emissiveNode`.
+   * Configure `THREE.RenderPipeline` with both **phosphor bloom** and the **depth-aware near-field Depth-of-Field pass** (`viewZNode`) so most of the screen remains razor-sharp while the closer bottom-right area softens subtly.
 
+5. **Implement 3D Raycast Pointer, Selection & Keyboard Focus Forwarding:**
+   * Keep `.xterm-helper-textarea` focused on pointer interaction so `term.onData` keyboard input, IME, and clipboard copy/paste work seamlessly.
+   * On `#crt-stage`, call `e.stopPropagation()` on raw mouse events (preventing unwarped coordinates from reaching xterm’s `document`-level drag listeners), raycast through the low-angle camera onto `phosphorMesh`, map `hit.uv` $(u, 1-v)$ into `screenElement.getBoundingClientRect()`, and dispatch synthetic `MouseEvent` / `WheelEvent` instances (`bubbles: true`) onto `term.element`.
 
+6. **Phase 1 Verification Matrix:**
+   * **Off-Screen Surface & Frame Pacing Check:** Verify that `xtermCanvasTexture` updates on ANSI output, cursor blink, and mouse selection drag without flicker or missed redraws, and maintains smooth 60/120 FPS pacing.
+   * **Low-Angle Framing & Near-Field DoF Check:** Verify that the bottom-right low-angle camera pose and near-field blur soften only the closer bottom-right corner subtly while keeping the main terminal workspace and prompt sharp and readable.
+   * **Input & Raycast Accuracy Check:** Verify that keyboard input (`Ctrl+O` TUI panels, shell commands, vim/less pagers) and mouse text selection/dragging hit the exact character cell across both flat center regions and curved edges.
+   * **Direct-to-DOM Fallback Check:** Simulate WebGL context loss / non-GPU fallback and verify that `webglAddon.dispose()` switches cleanly to full-page direct-to-DOM xterm.js rendering without dropping the active `washmhost` session.
 
-3. **Build the `CRTRenderer` in Three.js r186 (`crt_stage.js`):**
-* Initialize `WebGPURenderer` (`await renderer.init()`) and `RenderPipeline`.
-* Construct `phosphorMesh` ($128\times128$ bowed grid, $k=0.14$) with the TSL scanline + aperture grille + halation node material bound to `new THREE.CanvasTexture(xtermWebglCanvas)`.
-* Construct `glassMesh` ($64\times64$ bowed grid, $k=0.085$, $z=+0.055$) with `MeshPhysicalNodeMaterial` (`transmission: 1.0`, `ior: 1.48`, `dispersion: 1.6`) and the 9-tap parallax-shifted blurry internal reflection `emissiveNode`.
-* Add subtle mouse-driven camera parallax ($\pm 1.2^\circ$ tilt) so moving the mouse gently shifts the overhead glass glint and internal reflection, making the glass thickness immediately palpable.
+---
 
-
-4. **Implement 3D Raycast Pointer & Selection Forwarding:**
-* Raycast pointer events on `#crt-stage` onto `phosphorMesh`, invert `hit.uv` to off-screen xterm pixel coordinates, and forward `mousedown`/`mousemove`/`mouseup`/`wheel` events so text selection and scrolling work accurately across the curved surface.
-
-
-
-### Phase 2: Floating DOM Blue Panels HUD & Self-Smuggling JS Adapter
+### Phase 2 (Paused / Deferred): Floating DOM Blue Panels HUD & `eval` Bridge Integration
 
 1. **Smuggle HUD Controller from Go (`kabibi/ui/filemanager/dom_hud_js.go`):**
-* Following the established `eval` bridge philosophy (where `washmhost.js` remains pure and agnostic, and Kabibi smuggles its own UI/AI adapters via `EvalJS`), Kabibi injects `globalThis.__kabibi_hud` on first startup when `OSName == "browser"`.
+   * Inject `globalThis.__kabibi_hud` via `EvalJS` when `OSName == "browser"` and Phase 2 HUD mode is enabled.
+   * Build `#kabibi-dom-hud`, scoped CSS rules (top-drawer spring transition, `.hud-selection-pill` cubic-bezier glide, frosted deep-blue surface, and multi-column grid), and inline SVG file-icon registry.
 
+2. **`AppWidget` Browser HUD Hook (`kabibi/ui/app/app_widget.go`):**
+   * When `w.panelsVisible == true` in Phase 2 browser HUD mode, keep `w.sh.SetBottomAligned(true)`, dim rows $0 \dots H_{\text{panels}}-1$ of the CRT `CellBuf` instead of drawing duplicate TUI panel cells, and push `DOMHUDState` deltas via `EvalJS`.
+   * Align `#kabibi-dom-hud` with the projected 3D screen boundary of row $H_{\text{panels}}$ under the low-angle camera.
 
-* The injected adapter builds `#kabibi-dom-hud`, injects the scoped CSS rules (top-drawer spring transition, `.hud-selection-pill` cubic-bezier glide, frosted deep-blue `#000868e0` surface, and responsive multi-column grid), and registers the inline SVG file-icon renderer.
+3. **Optional Crisp DOM Modal Overlay (F2/F5/F6/F7/F8):**
+   * Render file operation modals either inside `#kabibi-dom-hud` when panels are open or inside the CRT `CellBuf`.
 
-
-2. **Implement Fast Cursor Glide & Multi-Column Virtualization:**
-* In `__kabibi_hud.syncState(state)`, render the Left and Right panes with crisp box-drawing headers, path pills, and multi-column file cells matching `numCols` and `rowsPerCol`.
-* In `__kabibi_hud.updateCursor(...)`, update `--cursor-x` and `--cursor-y` on `#hud-cursor-left` / `#hud-cursor-right` so the highlight bar glides smoothly between items without re-rendering DOM nodes.
-
-
-
-### Phase 3: `AppWidget` Browser HUD Hook & Uncovered Bottom Gap Alignment (`kabibi/ui/app/app_widget.go`)
-
-1. **Browser Mode Detection in `AppWidget`:**
-* Add `isBrowserDOM bool` (set when `syscall.GetPlatformInfo().OSName == "browser"` and `EvalJS` is available).
-
-
-
-
-2. **Coordinated `Render` Path (`AppWidget.Render`):**
-* When `w.panelsVisible == true`:
-* `w.sh.SetBottomAligned(true)` remains active so the `Shell` stack bottom-aligns into the full $W \times H_{\text{term}}$ `CellBuf`, placing the newest rows in the bottom gap ($H_{\text{panels}} \dots H_{\text{term}}-1$) and sliding older rows up through rows $0 \dots H_{\text{panels}}-1$.
-
-
-* **If `!w.isBrowserDOM` (Native Terminal / SSH / VS Code Pseudoterminal):** Blit `w.panels.Render(...)` into rows $0 \dots H_{\text{panels}}-1$ of the `CellBuf` as standard TUI cells.
-
-
-* **If `w.isBrowserDOM` (Full-Screen Browser CRT):** Do *not* overwrite rows $0 \dots H_{\text{panels}}-1$ of the CRT `CellBuf` with TUI panel cells; instead, dim the foreground/background of rows $0 \dots H_{\text{panels}}-1$ by 40% in the `CellBuf` (so the shell history glows softly behind the translucent DOM panels!) and push the `DOMHUDState` to `globalThis.__kabibi_hud`.
-
-
-* When `w.panelsVisible == false`:
-* Call `globalThis.__kabibi_hud.setVisible(false)` so the DOM panels retract smoothly upward out of view, and restore `w.sh.SetBottomAligned(false)`.
-
-
-
-
-
-
-
-### Phase 4: Modal Dialogs (F2/F5/F6/F7/F8) & Verification
-
-1. **Crisp DOM Modal Overlay (Optional Toggle or TUI-in-CRT):**
-* Allow F5/F6/F7/F8 file operation dialogs and byte-rate progress bars to either render inside the DOM HUD layer (centered over the dual panes with crisp elevation shadows) when `panelsVisible == true`, or inside the CRT `CellBuf`.
-
-
-
-
-2. **End-to-End Verification Matrix:**
-* **60/120 FPS Budget Check:** Verify that when typing rapidly at the `~/path፧` prompt or streaming AI tokens, `xtermTexture.needsUpdate` only fires on dirty frames and `WebGPURenderer` maintains locked frame pacing.
-
-
-* **Geometric Alignment Check:** Verify that on `1080p`, `1440p`, and `4K` full-screen viewports (and across window resizes), the bottom border of `#kabibi-dom-hud` lands cleanly between row $H_{\text{panels}}-1$ and row $H_{\text{panels}}$ of the curved CRT screen, leaving the 5-row `H_gap` (`BlockBanner` + `PromptInput` + blank footer) completely unobstructed below.
-
-
-* **Smooth Cursor Glide Check:** Verify that holding `Down`/`Up` or pressing `Left`/`Right`/`PgDn`/`Home`/`End` in the active panel glides the cyan selection bar smoothly across rows and columns while `Tab` transitions active-pane focus and updates the CRT `~/path፧` prompt below on the exact same frame.
-
-# Notes and adjustments
-
-> Few notes for you:
->
-> 1. We absolutely MUST review the xterm.js code to figure how to make it help us to generate off-screen surface. If xterm.js is not immediately fit right away, we can even vendor and patch it for that purpose.
-> 2. Mouse and keyboard works in the current index.html integration and in Kabibi's browser code. But if that needs to adjust for off-screen full-screen setup, that needs to be explored.
-> 3. For non-GPU fallback I propose we simply switch into direct-to-dom full-page rendering in xterm.js with no flourish.
-
-Understood: the xterm.js off-screen surface is an explicit research requirement, and the existing browser input integration must be traced rather than presumed absent. I’ll inspect the actual `index.html`/Kabibi browser path and the pinned xterm.js renderer implementation, then check how the proposed non-GPU fallback fits. No code changes.
-
-The notes above adjust the assessment. The existing integration is real, and your proposed direct-to-DOM fallback is a strong way to preserve a usable terminal when the flourish cannot run.
-
-One correction to my previous review: I was wrong to imply there was no current browser integration. I overlooked the root `index.html`. It currently hosts xterm.js 5.3 beside the README and wires terminal input, output, and sizing to `washmhost`. `Kabibi’s VS Code extension` has another working terminal path through VS Code’s pseudoterminal. Neither is the proposed full-screen CRT yet—the root page’s layout is side-by-side, and the VS Code extension uses VS Code’s own terminal—but they establish input/output behavior we should preserve.
-
-I also reviewed the pinned xterm.js 6.0 source. It gives us a concrete route to the off-screen surface:
-
-- [`WebglRenderer.ts`](https://github.com/xtermjs/xterm.js/blob/6.0.0/addons/addon-webgl/src/WebglRenderer.ts) creates a screen-rendering canvas, requests its WebGL2 context, sizes it with terminal dimensions, and appends it to xterm’s screen element. The canvas is private, not exposed as a public output-surface API.
-- The public `WebglAddon.textureAtlas` is only the **glyph atlas**, not the rendered terminal screen. The plan must not use it as `xtermTexture`.
-- [`WebglAddon.ts`](https://github.com/xtermjs/xterm.js/blob/6.0.0/addons/addon-webgl/src/WebglAddon.ts) accepts `preserveDrawingBuffer` directly; for this version, `new WebglAddon(true)` is the route to try. That avoids the proposed global `getContext` monkey-patch.
-- `Terminal.onRender` exists in xterm 6.0’s public API. We can test whether it is the right update signal for Three’s `CanvasTexture.needsUpdate`. The screen canvas can also be exposed through a small maintained xterm patch—for example, a documented `renderCanvas` getter on the addon—rather than relying on private selectors.
-- xterm’s [`DomRenderer.ts`](https://github.com/xtermjs/xterm.js/blob/6.0.0/src/browser/renderer/dom/DomRenderer.ts) identifies the DOM renderer as its standard fallback, and disposing the WebGL addon restores the core renderer. That supports your proposal: if Three or the accelerated path is unavailable, display the same terminal directly in the page, without flourish.
-
-So the off-screen CRT path is **plausible and worth prototyping**, not blocked. The key unknown is whether the exposed/patched xterm canvas can be sampled reliably and efficiently by Three while xterm remains laid out, focused, and interactive.
-
-I’d revise the plan’s order accordingly:
-
-1. **Prototype the xterm surface first:** use the root browser integration as the starting point, move it to a full-page layout, try xterm 6.0’s WebGL renderer with `preserveDrawingBuffer`, and expose the screen canvas intentionally if needed. Put real Kabibi ANSI output on a simple Three plane before adding curvature, glass, or HUD.
-2. **Prove off-screen interaction:** preserve the current keyboard and resize paths, then test pointer events, selection, and mouse-reporting after the terminal surface is visually hidden behind the rendered screen. That’s a risk to investigate—not a reason to assume existing input fails.
-3. **Implement the direct-DOM fallback:** on initialization failure or loss of the required rendering capability, reveal the same xterm instance as a full-page DOM terminal. Keep the guest running; avoid a second terminal or WASM restart.
-4. **Only after those gates pass, add the DOM HUD and visual effects.** Measure frame time and resize behavior before investing in detailed refraction and reflection.
-
-One choice the spec should make explicit: Three’s `WebGPURenderer` may use WebGL2 as a GPU backend, while your fallback is specifically non-GPU direct-to-DOM. The mode selection should distinguish those cases clearly. No files were changed.
-
-> Now do you understand that if we render in WebGL2 with blurs and cuvatures, we need two more things: the camera should point at the curved screen from slightly bottom-right angle, subtly but like in stylish low-angle car posters, plus there should be very subtle blur that keeps most of the screen sharp but the part that is closer to the camera (right-bottom) should be slightly out of focus? Do you reckon you understand that?
-
-Yes. I understand the intended look:
-
-- The camera should view the curved screen from slightly below and to the right, with a restrained perspective—like a stylish low-angle car poster, not a dramatic skew that harms readability.
-- The curvature and viewpoint should make the lower-right area feel closer to the camera.
-- A subtle, depth-aware focus effect should keep most of the terminal sharp while softening that nearer lower-right area just a little. This is not a general blur or vignette.
-
-The two effects should work together: the screen’s 3D depth and camera position determine where the soft focus falls. In WebGL2, that means using depth-aware post-processing and carefully tuning it so terminal text remains readable. I’ll treat crispness as the default for any DOM HUD unless it’s deliberately placed into that same 3D scene.
-
-> We also want to pause the DOM HUD completely for now, leave it out for the phase 2. Does it make sense?
-
-Yes. Pausing the DOM HUD for phase 2 makes sense: it removes a separate rendering and synchronization problem while we prove the core CRT effect.
-
-I’d make the phase boundary explicit: phase 2 covers the xterm surface, curved screen, low-angle camera, subtle depth-of-field, and preserving terminal input and resize behavior. It excludes the DOM HUD entirely—no overlay, HUD-to-Go synchronization, or alignment work. The HUD can be reconsidered once the terminal rendering path is proven.
 
