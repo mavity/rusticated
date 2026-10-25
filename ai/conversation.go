@@ -24,40 +24,23 @@ const (
 	RoleTool   Role = "tool"
 )
 
-// CognitiveTrace stores the submerged multi-stage reasoning artifacts attached
-// to a spoken RoleModel turn without polluting the LiteRT-LM wire messages.
-type CognitiveTrace struct {
-	IsDirect          bool
-	Goal              string
-	ExpectedDetail    string
-	InitialSteps      string
-	CritiqueRelevancy string
-	CritiqueSafety    string
-	CritiqueGrounded  string
-	SynthesizedPlan   string
-	RawWorkAndAnswer  string
-	DraftIterations   []string
-	TraceEmbeddings   [][]float32
-}
-
 // PromptPart is a single typed fragment of a multimodal message. Set Text for
 // a text part, ImageBase64 for an image part, or ToolName and ToolResponse
 // when replying to a tool call with RoleTool. ToolCalls records the calls a
 // RoleModel turn made, so that seeded history replays the call/response pairs.
 type PromptPart struct {
-	Role           Role
-	Text           string
-	ImageBase64    string
-	ToolName       string
-	ToolCallID     string
-	Explanation    string
-	ToolResponse   any
-	ToolCalls      []ToolCall
-	Embedding      []float32
-	CognitiveTrace *CognitiveTrace
-	StartedAt      time.Time     `json:"-"`
-	CompletedAt    time.Time     `json:"-"`
-	Duration       time.Duration `json:"-"`
+	Role         Role
+	Text         string
+	ImageBase64  string
+	ToolName     string
+	ToolCallID   string
+	Explanation  string
+	ToolResponse any
+	ToolCalls    []ToolCall
+	Embedding    []float32
+	StartedAt    time.Time     `json:"-"`
+	CompletedAt  time.Time     `json:"-"`
+	Duration     time.Duration `json:"-"`
 }
 
 // ModelEvent represents a valid item emitted during model generation. Failures
@@ -115,22 +98,6 @@ func (e *Engine) NewConversation() (*Conversation, error) {
 // Conversation is a single stateful chat session.
 type Conversation struct {
 	impl *convImpl
-}
-
-// Clone creates an isolated branch of the conversation sharing the existing
-// prefilled context and KV cache via litert_lm_conversation_clone.
-func (c *Conversation) Clone(ctx context.Context) (*Conversation, error) {
-	if c == nil || c.impl == nil {
-		return nil, ErrClosed
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	clonedImpl, err := c.impl.Clone()
-	if err != nil {
-		return nil, err
-	}
-	return &Conversation{impl: clonedImpl}, nil
 }
 
 // SendStream sends a message and returns an iterator over the generated

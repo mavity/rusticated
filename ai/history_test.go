@@ -79,10 +79,6 @@ func TestFormatPartForEmbeddingAndJSONIsolation(t *testing.T) {
 		Role:      RoleUser,
 		Text:      "Name a bridge in Paris",
 		Embedding: []float32{0.1, 0.2, 0.3},
-		CognitiveTrace: &CognitiveTrace{
-			Goal:            "Identify a bridge in Paris",
-			SynthesizedPlan: "Answer directly with Pont Neuf",
-		},
 	}
 	if got := FormatPartForEmbedding(userPart); got != "task: search result | text: Name a bridge in Paris" {
 		t.Fatalf("user format = %q", got)
@@ -119,32 +115,13 @@ func TestFormatPartForEmbeddingAndJSONIsolation(t *testing.T) {
 	if _, hasEmbedding := parsed["embedding"]; hasEmbedding {
 		t.Fatalf("buildMessageJSON leaked embedding field: %s", msgJSON)
 	}
-	if _, hasTrace := parsed["cognitive_trace"]; hasTrace || bytesContainsFold(msgJSON, "SynthesizedPlan") {
-		t.Fatalf("buildMessageJSON leaked CognitiveTrace field: %s", msgJSON)
-	}
-
 	histJSON, err := buildHistoryJSON([]PromptPart{userPart})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytesContainsFold(histJSON, "SynthesizedPlan") || bytesContainsFold(histJSON, "Identify a bridge") {
-		t.Fatalf("buildHistoryJSON leaked CognitiveTrace field: %s", histJSON)
+	if !json.Valid([]byte(histJSON)) {
+		t.Fatalf("buildHistoryJSON returned invalid JSON: %s", histJSON)
 	}
-}
-
-func bytesContainsFold(haystack, needle string) bool {
-	return len(needle) > 0 && len(haystack) >= len(needle) &&
-		json.Valid([]byte(haystack)) &&
-		containsSubstr(haystack, needle)
-}
-
-func containsSubstr(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }
 
 func TestTemporalWireFormattingAndDateFlipIsolation(t *testing.T) {
@@ -241,7 +218,7 @@ func TestTemporalWireFormattingAndDateFlipIsolation(t *testing.T) {
 }
 
 func TestRunTurnCapturesUserModelAndToolTimingsPurely(t *testing.T) {
-	var seenStage1History []PromptPart
+	var seenInitialInput []PromptPart
 	s, err := NewSession(SessionConfig{
 		Tools: map[string]Tool{
 			"check_time": {
@@ -258,10 +235,10 @@ func TestRunTurnCapturesUserModelAndToolTimingsPurely(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.ephemeralStream = func(ctx context.Context, cfg ConversationConfig, trigger []PromptPart, onEvent func(ModelEvent) bool) error {
-		if len(seenStage1History) == 0 {
-			seenStage1History = append([]PromptPart(nil), cfg.History...)
+		if len(seenInitialInput) == 0 {
+			seenInitialInput = append([]PromptPart(nil), trigger...)
 		}
-		onEvent(TextEvent{Text: "DIRECT: Pont Neuf is the oldest standing bridge across the river Seine in Paris."})
+		onEvent(TextEvent{Text: "Pont Neuf is the oldest standing bridge across the river Seine in Paris."})
 		return nil
 	}
 
@@ -292,8 +269,15 @@ func TestRunTurnCapturesUserModelAndToolTimingsPurely(t *testing.T) {
 	if m.StartedAt.IsZero() || m.CompletedAt.IsZero() || m.CompletedAt.Before(m.StartedAt) {
 		t.Fatalf("model timings not recorded: start=%v end=%v", m.StartedAt, m.CompletedAt)
 	}
-	if len(seenStage1History) == 0 || !seenStage1History[len(seenStage1History)-2].CompletedAt.Equal(sentAt) {
-		t.Fatalf("Stage 1 seed did not carry timed user PromptPart: %#v", seenStage1History)
+	if len(seenInitialInput) != 1 || !seenInitialInput[0].CompletedAt.Equal(sentAt) {
+		t.Fatalf("initial model input did not carry timed user PromptPart: %#v", seenInitialInput)
+	}
+	wire, err := buildMessageJSON(seenInitialInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(wire, "[2026-10-18 Sun 23:12, typed for 14 seconds]") {
+		t.Fatalf("initial model input lacks user timing header: %s", wire)
 	}
 }
 
@@ -329,4 +313,3 @@ func TestFormatEnvironmentContextIncludesPlatformModelAndSize(t *testing.T) {
 		}
 	}
 }
-

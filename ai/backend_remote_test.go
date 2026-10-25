@@ -171,39 +171,6 @@ func TestRemoteOpenAIStreamPreservesToolCallIDsInHistory(t *testing.T) {
 	}
 }
 
-func TestRemoteConversationCloneCopiesHistory(t *testing.T) {
-	engine, err := NewRemoteEngine(RemoteEngineConfig{
-		Provider: RemoteOpenAI,
-		Model:    "test-model",
-		APIKey:   "test-token",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	conv, err := engine.NewConversationWithConfig(ConversationConfig{
-		History: []PromptPart{{Role: RoleUser, Text: "original"}},
-		Tools:   []map[string]any{{"type": "function", "function": map[string]any{"name": "test"}}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	clone, err := conv.Clone(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer clone.Close()
-	sourceBackend := conv.impl.backend.(*remoteConversationBackend)
-	cloneBackend := clone.impl.backend.(*remoteConversationBackend)
-	cloneBackend.history[0].Text = "changed"
-	cloneBackend.config.Tools[0]["function"].(map[string]any)["name"] = "changed"
-	if sourceBackend.history[0].Text != "original" {
-		t.Fatalf("mutating cloned history changed original conversation")
-	}
-	if sourceBackend.config.Tools[0]["function"].(map[string]any)["name"] == "changed" {
-		t.Fatalf("mutating cloned tools changed original conversation")
-	}
-}
-
 func TestRemoteProviderRequestTranslation(t *testing.T) {
 	cfg := ConversationConfig{
 		SystemMessage: "system",

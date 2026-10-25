@@ -15,7 +15,7 @@ import (
 type BrowserNavigateInput struct {
 	_           struct{} `doc:"Open a URL or navigate history (back/forward/reload) in a nickname-owned browser tab, wait for network + DOM/AX settling, and return the AX tree diff and network activity summary." emoji:"🌐"`
 	Nickname    string   `json:"nickname" doc:"Mandatory tab owner nickname (e.g. 'main', 'researcher', 'shopping') stored inside the browser"`
-	URL         string   `json:"url,omitempty" doc:"URL to navigate to (required unless back, forward, or reload is true)"`
+	URL         string   `json:"url" doc:"Always include this field; use an empty string only when using back, forward, or reload"`
 	Back        bool     `json:"back,omitempty" doc:"If true, navigate back in tab history"`
 	Forward     bool     `json:"forward,omitempty" doc:"If true, navigate forward in tab history"`
 	Reload      bool     `json:"reload,omitempty" doc:"If true, reload the current page"`

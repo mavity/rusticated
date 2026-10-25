@@ -34,7 +34,6 @@ type engineBackend interface {
 // conversationBackend abstracts the execution of an active chat turn.
 type conversationBackend interface {
 	SendStream(ctx context.Context, parts []PromptPart, onEvent func(ModelEvent)) error
-	Clone() (conversationBackend, error)
 	Close() error
 }
 
@@ -93,7 +92,6 @@ type LMDriver interface {
 
 	// ── Conversation ─────────────────────────────────────────────────────
 	convCreate(engine, cfg uint64) uint64
-	convClone(conv uint64) uint64
 	convDelete(conv uint64)
 	convSendStream(conv, msg, extraCtx, optArgs, callback, userData uint64) int32
 	convCancelProcess(conv uint64)
@@ -457,22 +455,6 @@ func (b *drvEngineBackend) NewConversation(cfg ConversationConfig) (conversation
 		return nil, fmt.Errorf("conversation_create returned NULL")
 	}
 	return &drvConversationBackend{drv: b.drv, conv: conv}, nil
-}
-
-// Clone forks the underlying C++ conversation state and KV cache via
-// litert_lm_conversation_clone without re-prefilling history tokens.
-func (c *drvConversationBackend) Clone() (conversationBackend, error) {
-	if c == nil || c.closed.Load() {
-		return nil, ErrClosed
-	}
-	if c.active.Load() != nil {
-		return nil, errStreamActive
-	}
-	cloned := c.drv.convClone(c.conv)
-	if cloned == 0 {
-		return nil, fmt.Errorf("ai: conversation_clone returned NULL")
-	}
-	return &drvConversationBackend{drv: c.drv, conv: cloned}, nil
 }
 
 // Close invalidates the conversation. Without a stream in flight it releases

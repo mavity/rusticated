@@ -164,17 +164,6 @@ type convImpl struct {
 	backend conversationBackend
 }
 
-func (c *convImpl) Clone() (*convImpl, error) {
-	if c == nil || c.backend == nil {
-		return nil, ErrClosed
-	}
-	cloned, err := c.backend.Clone()
-	if err != nil {
-		return nil, err
-	}
-	return &convImpl{backend: cloned}, nil
-}
-
 func (c *convImpl) Close() {
 	if c != nil && c.backend != nil {
 		_ = c.backend.Close()

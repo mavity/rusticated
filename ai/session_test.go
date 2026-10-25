@@ -86,10 +86,6 @@ func (*captureHistoryConversation) SendStream(context.Context, []PromptPart, fun
 	return nil
 }
 
-func (*captureHistoryConversation) Clone() (conversationBackend, error) {
-	return &captureHistoryConversation{}, nil
-}
-
 func (*captureHistoryConversation) Close() error { return nil }
 
 func TestReplaceEngineRestoresCompactedHistory(t *testing.T) {
@@ -536,9 +532,9 @@ func TestLiveStreamerZeroANSISpec(t *testing.T) {
 	}
 }
 
-func TestRunTurnFastPathDirectBypass(t *testing.T) {
+func TestRunTurnDirectAnswerUsesSingleCall(t *testing.T) {
 	var out bytes.Buffer
-	var stageCalls int
+	var modelCalls int
 	s, err := NewSession(SessionConfig{
 		SystemMessage: "You are Pope.",
 		OnContent:     func(text string) { _, _ = out.WriteString(text) },
@@ -548,12 +544,10 @@ func TestRunTurnFastPathDirectBypass(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.ephemeralStream = func(ctx context.Context, cfg ConversationConfig, trigger []PromptPart, onEvent func(ModelEvent) bool) error {
-		stageCalls++
+		modelCalls++
 		if cfg.Tools != nil {
-			t.Fatalf("Stage 1 must have Tools: nil")
+			t.Fatalf("unexpected tools in a session without registered tools")
 		}
-		onEvent(TextEvent{Text: "DIR"})
-		onEvent(TextEvent{Text: "ECT: "})
 		onEvent(TextEvent{Text: "Pont Neuf is the oldest standing bridge in Paris."})
 		return nil
 	}
@@ -561,8 +555,8 @@ func TestRunTurnFastPathDirectBypass(t *testing.T) {
 	if err := s.RunTurn(context.Background(), "Name a bridge in Paris"); err != nil {
 		t.Fatal(err)
 	}
-	if stageCalls != 1 {
-		t.Fatalf("stageCalls = %d, want 1 (fast path bypasses stages 2-6)", stageCalls)
+	if modelCalls != 1 {
+		t.Fatalf("model calls = %d, want one", modelCalls)
 	}
 	if got := out.String(); got != "Pont Neuf is the oldest standing bridge in Paris." {
 		t.Fatalf("terminal output = %q", got)
@@ -570,18 +564,11 @@ func TestRunTurnFastPathDirectBypass(t *testing.T) {
 	if len(s.CanonicalHistory) != 2 {
 		t.Fatalf("CanonicalHistory len = %d, want 2", len(s.CanonicalHistory))
 	}
-	modelPart := s.CanonicalHistory[1]
-	if modelPart.Text != "Pont Neuf is the oldest standing bridge in Paris." {
-		t.Fatalf("modelPart.Text = %q", modelPart.Text)
-	}
-	if modelPart.CognitiveTrace == nil || !modelPart.CognitiveTrace.IsDirect {
-		t.Fatalf("expected CognitiveTrace{IsDirect: true}, got %#v", modelPart.CognitiveTrace)
-	}
 }
 
-func TestRunTurnFastPathUnprefixedStreamsImmediately(t *testing.T) {
+func TestRunTurnUnprefixedAnswerUsesSingleCall(t *testing.T) {
 	var out bytes.Buffer
-	var stageCalls int
+	var modelCalls int
 	s, err := NewSession(SessionConfig{
 		SystemMessage: "You are Pope.",
 		OnContent:     func(text string) { _, _ = out.WriteString(text) },
@@ -591,14 +578,11 @@ func TestRunTurnFastPathUnprefixedStreamsImmediately(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.ephemeralStream = func(ctx context.Context, cfg ConversationConfig, trigger []PromptPart, onEvent func(ModelEvent) bool) error {
-		stageCalls++
+		modelCalls++
 		if cfg.Tools != nil {
-			t.Fatalf("Stage 1 must have Tools: nil")
+			t.Fatalf("unexpected tools in a session without registered tools")
 		}
 		onEvent(TextEvent{Text: "Pont"})
-		if got := out.String(); got != "Pont" {
-			t.Fatalf("unprefixed response was not streamed immediately: got %q", got)
-		}
 		onEvent(TextEvent{Text: " Neuf."})
 		return nil
 	}
@@ -606,8 +590,8 @@ func TestRunTurnFastPathUnprefixedStreamsImmediately(t *testing.T) {
 	if err := s.RunTurn(context.Background(), "Name a bridge in Paris"); err != nil {
 		t.Fatal(err)
 	}
-	if stageCalls != 1 {
-		t.Fatalf("stageCalls = %d, want 1 (unprefixed fast path bypasses deliberation)", stageCalls)
+	if modelCalls != 1 {
+		t.Fatalf("model calls = %d, want one", modelCalls)
 	}
 	if got := out.String(); got != "Pont Neuf." {
 		t.Fatalf("terminal output = %q, want %q", got, "Pont Neuf.")
@@ -617,7 +601,7 @@ func TestRunTurnFastPathUnprefixedStreamsImmediately(t *testing.T) {
 	}
 }
 
-func TestRunTurnFull7StageReflectivePipelineAndIcebergReplant(t *testing.T) {
+func TestRunTurnToolExecutionAndHistory(t *testing.T) {
 	tmpFile := filepath.Join(t.TempDir(), "bridge.txt")
 	if err := os.WriteFile(tmpFile, []byte("Pont Alexandre III"), 0o600); err != nil {
 		t.Fatal(err)
@@ -627,8 +611,7 @@ func TestRunTurnFull7StageReflectivePipelineAndIcebergReplant(t *testing.T) {
 	var out bytes.Buffer
 	var feedback strings.Builder
 	emb := &fakeEmbedder{}
-	var stageIdx int
-	var stage3SysMsgs []string
+	var modelCalls int
 
 	s, err := NewSession(SessionConfig{
 		Embedder:      emb,
@@ -641,61 +624,26 @@ func TestRunTurnFull7StageReflectivePipelineAndIcebergReplant(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.ephemeralStream = func(ctx context.Context, cfg ConversationConfig, trigger []PromptPart, onEvent func(ModelEvent) bool) error {
-		stageIdx++
-		switch stageIdx {
-		case 1: // Stage 1: Triage -> GOAL:
-			if cfg.Tools != nil {
-				t.Fatal("Stage 1 must have Tools == nil")
-			}
-			onEvent(TextEvent{Text: "GOAL: Read bridge.txt and report the bridge name."})
-		case 2: // Stage 2: Expectation Calibration -> <detail_level>
-			if cfg.Tools != nil {
-				t.Fatal("Stage 2 (expectation) must have Tools == nil")
-			}
-			onEvent(TextEvent{Text: "A single bridge name, maximum one short sentence."})
-		case 3: // Stage 3: Steps
-			if cfg.Tools != nil {
-				t.Fatal("Stage 3 (steps) must have Tools == nil")
-			}
-			onEvent(TextEvent{Text: "1. Call read_file on bridge.txt. 2. State the bridge."})
-		case 4, 5, 6: // Stage 4A, 4B, 4C
-			if cfg.Tools != nil {
-				t.Fatalf("Stage 4 critique branch %d must have Tools == nil", stageIdx-3)
-			}
-			stage3SysMsgs = append(stage3SysMsgs, cfg.SystemMessage)
-			if !strings.HasPrefix(trigger[0].Text, "I think you might take these steps below") {
-				t.Fatalf("Stage 4 role-swapped attribution missing: %q", trigger[0].Text)
-			}
-			onEvent(TextEvent{Text: fmt.Sprintf("critique-%d", stageIdx-3)})
-		case 7: // Stage 5: Tribunal Join
-			if cfg.Tools != nil {
-				t.Fatal("Stage 5 (plan) must have Tools == nil")
-			}
-			onEvent(TextEvent{Text: "Read bridge.txt using read_file and answer concisely."})
-		case 8: // Stage 6 turn 1: emits tool call
-			if len(cfg.Tools) == 0 {
-				t.Fatal("Stage 6 (work) must have Tools enabled")
+		modelCalls++
+		if len(cfg.Tools) == 0 {
+			t.Fatal("tool-enabled turn must expose registered tools")
+		}
+		switch modelCalls {
+		case 1:
+			if len(cfg.History) != 0 || len(trigger) != 1 || trigger[0].Text != "Which bridge is in bridge.txt?" {
+				t.Fatalf("initial model input = history %#v, trigger %#v", cfg.History, trigger)
 			}
 			onEvent(ToolCallEvent{ToolCalls: []ToolCall{{
 				Name:         "read_file",
 				RawArguments: json.RawMessage(`{"path":` + string(pathJSON) + `,"explanation":"read bridge name"}`),
 			}}})
-		case 9: // Stage 6 turn 2: receives tool output and produces verbose work_and_answer
-			onEvent(TextEvent{Text: "Phase 1 complete. I read bridge.txt and found Pont Alexandre III."})
-		case 10: // Stage 7: Convergence & Re-Formulation Flip
-			if cfg.Tools != nil {
-				t.Fatal("Stage 7 (convergence) must have Tools == nil")
-			}
-			// Verify seeded history contains only User(P) and Model(workAndAnswer), without raw tool turns
-			if len(cfg.History) != 2 || cfg.History[1].Text != "Phase 1 complete. I read bridge.txt and found Pont Alexandre III." {
-				t.Fatalf("Stage 7 convergence seeded history = %#v", cfg.History)
-			}
-			if !strings.Contains(trigger[0].Text, "A single bridge name, maximum one short sentence.") {
-				t.Fatalf("Stage 7 convergence trigger missing detail_level: %q", trigger[0].Text)
+		case 2:
+			if len(trigger) != 1 || trigger[0].Role != RoleTool {
+				t.Fatalf("tool result turn = %#v, want one tool response", trigger)
 			}
 			onEvent(TextEvent{Text: "The bridge in the file is Pont Alexandre III."})
 		default:
-			t.Fatalf("unexpected stage call %d", stageIdx)
+			t.Fatalf("unexpected model call %d", modelCalls)
 		}
 		return nil
 	}
@@ -705,26 +653,19 @@ func TestRunTurnFull7StageReflectivePipelineAndIcebergReplant(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if stageIdx != 10 {
-		t.Fatalf("stageIdx = %d, want 10", stageIdx)
+	if modelCalls != 2 {
+		t.Fatalf("model calls = %d, want 2", modelCalls)
 	}
 	if got := out.String(); got != "The bridge in the file is Pont Alexandre III." {
 		t.Fatalf("spoken content = %q", got)
 	}
-	if status := feedback.String(); !strings.Contains(status, "[goal]") || !strings.Contains(status, "📖 reading test file\n") {
-		t.Fatalf("feedback lacks stage/tool status: %q", status)
+	if status := feedback.String(); !strings.Contains(status, "📖 reading test file\n") {
+		t.Fatalf("feedback lacks tool status: %q", status)
 	}
 	if strings.Contains(feedback.String(), "The bridge in the file is Pont Alexandre III.") {
 		t.Fatal("spoken response leaked into impermanent feedback")
 	}
-	for _, sm := range stage3SysMsgs {
-		if !strings.Contains(sm, "read_file") {
-			t.Fatalf("Critique SystemMessage missing available tool names: %q", sm)
-		}
-	}
-
-	// Replant Iceberg: Verify only the clean spoken surface is in CanonicalHistory & CompactedHistory
-	// [0] User, [1] Model+ToolCalls, [2] ToolResponse, [3] Model final answer with CognitiveTrace
+	// The ordinary turn history retains the tool-call/response exchange.
 	if len(s.CanonicalHistory) != 4 {
 		t.Fatalf("CanonicalHistory len = %d, want 4: %#v", len(s.CanonicalHistory), s.CanonicalHistory)
 	}
@@ -732,114 +673,15 @@ func TestRunTurnFull7StageReflectivePipelineAndIcebergReplant(t *testing.T) {
 	if finalPart.Text != "The bridge in the file is Pont Alexandre III." {
 		t.Fatalf("finalPart.Text = %q", finalPart.Text)
 	}
-	tr := finalPart.CognitiveTrace
-	if tr == nil || tr.IsDirect {
-		t.Fatalf("missing or direct CognitiveTrace: %#v", tr)
-	}
-	if tr.Goal != "Read bridge.txt and report the bridge name." ||
-		tr.ExpectedDetail != "A single bridge name, maximum one short sentence." ||
-		tr.InitialSteps != "1. Call read_file on bridge.txt. 2. State the bridge." ||
-		tr.CritiqueRelevancy != "critique-1" ||
-		tr.CritiqueSafety != "critique-2" ||
-		tr.CritiqueGrounded != "critique-3" ||
-		tr.SynthesizedPlan != "Read bridge.txt using read_file and answer concisely." ||
-		tr.RawWorkAndAnswer != "Phase 1 complete. I read bridge.txt and found Pont Alexandre III." {
-		t.Fatalf("unexpected CognitiveTrace fields: %#v", tr)
-	}
-
-	// Flush embeddings and verify both spoken parts and submerged CognitiveTrace are embedded
+	// Flush embeddings and verify ordinary history remains indexed.
 	s.FlushEmbeddings()
-	if len(tr.TraceEmbeddings) != 1 || len(tr.TraceEmbeddings[0]) == 0 {
-		t.Fatalf("expected TraceEmbeddings to be populated by background embedder, got %#v", tr.TraceEmbeddings)
+	if len(s.CanonicalHistory[3].Embedding) == 0 {
+		t.Fatalf("expected final answer embedding, got %#v", s.CanonicalHistory[3].Embedding)
 	}
 }
 
-func TestDeliberateToolAndNativeCloneConversation(t *testing.T) {
-	// 1. Verify ToolContext.CloneConversation delegates to Conversation.Clone (litert_lm_conversation_clone)
-	d := newFakeDrv()
-	d.onSend = func(d *fakeDrv, ud uint64) {
-		go func() {
-			d.emit(ud, `{"role":"assistant","content":[{"type":"text","text":"cloned reply"}]}`, false, "")
-			d.emit(ud, "", true, "")
-		}()
-	}
-	baseConv := &Conversation{impl: &convImpl{backend: newTestBackend(d)}}
-	tc := &ToolContext{Conversation: baseConv}
-
-	cloned, err := tc.CloneConversation(context.Background())
-	if err != nil {
-		t.Fatalf("CloneConversation failed: %v", err)
-	}
-	defer cloned.Close()
-
-	var clonedText strings.Builder
-	for ev, err := range cloned.SendStream(context.Background(), []PromptPart{{Role: RoleUser, Text: "ping"}}) {
-		if err != nil {
-			t.Fatalf("cloned SendStream error: %v", err)
-		}
-		if te, ok := ev.(TextEvent); ok {
-			clonedText.WriteString(te.Text)
-		}
-	}
-	if got := clonedText.String(); got != "cloned reply" {
-		t.Fatalf("cloned conversation output = %q, want %q", got, "cloned reply")
-	}
-
-	// 2. Verify invoking the built-in "deliberate" tool directly via executeTool / ToolContext
-	var feedback strings.Builder
-	s, err := NewSession(SessionConfig{
-		SystemMessage: "You are an assistant.",
-		Tools:         sessionTestTools(),
-		OnFeedback:    func(text string) { _, _ = feedback.WriteString(text) },
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var subStage int
-	s.ephemeralStream = func(ctx context.Context, cfg ConversationConfig, trigger []PromptPart, onEvent func(ModelEvent) bool) error {
-		subStage++
-		if cfg.Tools != nil {
-			t.Fatalf("deliberate sub-stage %d must strip tools (Tools: nil)", subStage)
-		}
-		switch subStage {
-		case 1: // expectation
-			onEvent(TextEvent{Text: "One concise sentence."})
-		case 2: // steps
-			onEvent(TextEvent{Text: "Step 1: inspect file."})
-		case 3, 4, 5: // 3 critiques
-			onEvent(TextEvent{Text: "Looks good."})
-		case 6: // plan
-			onEvent(TextEvent{Text: "Read file and report."})
-		}
-		return nil
-	}
-
-	trace := &CognitiveTrace{}
-	baseHist := []PromptPart{}
-	delibTC := &ToolContext{
-		Session:     s,
-		Feedback:    s.emitFeedback,
-		baseHistory: &baseHist,
-		userText:    "Check config",
-		trace:       trace,
-	}
-	res := s.executeTool(context.Background(), delibTC, ToolCall{
-		Name:         DeliberateToolName,
-		RawArguments: json.RawMessage(`{"goal":"Verify config settings","explanation":"need structured plan"}`),
-	})
-	out, ok := res.(*DeliberateOutput)
-	if !ok || out == nil {
-		t.Fatalf("expected *DeliberateOutput from deliberate tool, got %#v", res)
-	}
-	if out.ExpectedDetail != "One concise sentence." || out.Plan != "Read file and report." {
-		t.Fatalf("unexpected DeliberateOutput: %#v", out)
-	}
-	if trace.Goal != "Verify config settings" || trace.SynthesizedPlan != "Read file and report." {
-		t.Fatalf("expected CognitiveTrace to be populated by deliberate tool, got %#v", trace)
-	}
-
-	// 3. Verify that a tool created with NewSessionTool can modify or replace tc.Session
+func TestSessionToolCanReplaceSessionHistory(t *testing.T) {
+	// Verify that a tool created with NewSessionTool can modify or replace tc.Session
 	// (e.g., an advanced memory tool re-compacting or resurfacing salient memories)
 	// and the active turn immediately adopts the replaced Session's history!
 	type MemoryRecallInput struct {
@@ -877,25 +719,13 @@ func TestDeliberateToolAndNativeCloneConversation(t *testing.T) {
 	memSession.ephemeralStream = func(ctx context.Context, cfg ConversationConfig, trigger []PromptPart, onEvent func(ModelEvent) bool) error {
 		turnStep++
 		switch turnStep {
-		case 1: // Stage 1: GOAL
-			onEvent(TextEvent{Text: "GOAL: Recall the secret bridge."})
-		case 2: // Expectation
-			onEvent(TextEvent{Text: "Just the bridge name."})
-		case 3: // Steps
-			onEvent(TextEvent{Text: "Call recall_memory."})
-		case 4, 5, 6: // Critiques
-			onEvent(TextEvent{Text: "OK"})
-		case 7: // Plan
-			onEvent(TextEvent{Text: "Use recall_memory."})
-		case 8: // Stage 6 turn 1: call recall_memory
+		case 1:
 			onEvent(ToolCallEvent{ToolCalls: []ToolCall{{
 				Name:         "recall_memory",
 				RawArguments: json.RawMessage(`{"query":"secret bridge","explanation":"fetch bridge from memory"}`),
 			}}})
-		case 9: // Stage 6 turn 2: verify cfg.History now contains the resurfaced memory from the replaced Session!
+		case 2:
 			observedHistoryInTurn2 = append([]PromptPart(nil), cfg.History...)
-			onEvent(TextEvent{Text: "Pont Mirabeau"})
-		case 10: // Stage 7: Convergence
 			onEvent(TextEvent{Text: "Pont Mirabeau"})
 		}
 		return nil
@@ -951,33 +781,20 @@ func TestImmediateToolOverflowCompressesWithHeadTailOverlappedMiddleAndPurpose(t
 		step++
 		switch step {
 		case 1:
-			onEvent(TextEvent{Text: "GOAL: Summarize README into a Ukrainian poem."})
-		case 2:
-			onEvent(TextEvent{Text: "Short poem."})
-		case 3:
-			onEvent(TextEvent{Text: "Read README.md."})
-		case 4, 5, 6:
-			onEvent(TextEvent{Text: "OK"})
-		case 7:
-			onEvent(TextEvent{Text: "Call read_file on README.md."})
-		case 8:
-			// Stage 5 turn 1: model calls read_file with a purpose explanation
 			onEvent(ToolCallEvent{ToolCalls: []ToolCall{{
 				ID:           "call_readme",
 				Name:         "read_file",
 				RawArguments: json.RawMessage(`{"path":"README.md","explanation":"extract architecture and vision for Ukrainian poem"}`),
 			}}})
-		case 9:
-			// Stage 5 turn 2 (attempt 1): raw 12 KB tool response triggers LiteRT context overflow!
+		case 2:
+			// Raw 12 KB tool response triggers LiteRT context overflow.
 			return fmt.Errorf("LiteRT stream error: INVALID_ARGUMENT: Input token ids are too long. Exceeding the maximum number of tokens allowed: 28085 >= 8192")
-		case 10:
-			// Stage 5 turn 2 (attempt 2 after immediate overlapped tool compression):
+		case 3:
+			// The compressed tool response is retried without rerunning the tool.
 			// Verify the tool was NOT re-executed from scratch, and trigger[0] now holds the compressed map!
 			if len(trigger) == 1 && trigger[0].Role == RoleTool {
 				retriedToolResponse, _ = trigger[0].ToolResponse.(map[string]any)
 			}
-			onEvent(TextEvent{Text: "Код звучить як пісня."})
-		case 11:
 			onEvent(TextEvent{Text: "Код звучить як пісня."})
 		}
 		return nil
@@ -987,7 +804,7 @@ func TestImmediateToolOverflowCompressesWithHeadTailOverlappedMiddleAndPurpose(t
 		t.Fatalf("RunTurn() error = %v", err)
 	}
 	if readFileCallCount != 1 {
-		t.Fatalf("read_file was called %d times, want 1 (must not restart Stage 5 from scratch)", readFileCallCount)
+		t.Fatalf("read_file was called %d times, want 1 (must not restart the agentic turn from scratch)", readFileCallCount)
 	}
 	if len(compressorSysPrompts) < 2 {
 		t.Fatalf("expected multiple overlapped middle chunks to be summarized, got %d chunks", len(compressorSysPrompts))
@@ -1047,5 +864,3 @@ full response: <|tool_call>call:readfile{explanation:<|"|>,path:<|"|>README.md<|
 		t.Fatalf("recovered call 2 = %+v (cleaned=%q)", calls2, cleaned2)
 	}
 }
-
-

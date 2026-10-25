@@ -13,6 +13,17 @@ import (
 // NavigateAction performs a `browser_navigate` transaction (open URL, back, forward, or reload),
 // waits for Dual-Signal Settling, and returns the AX diff/tree + network summary.
 func (m *Manager) NavigateAction(ctx context.Context, nickname, targetURL string, back, forward, reload bool) (string, error) {
+	u := ""
+	if !back && !forward && !reload {
+		u = strings.TrimSpace(targetURL)
+		if u == "" {
+			return "", errors.New("url is required when back/forward/reload are not set")
+		}
+		if !strings.Contains(u, "://") && !strings.HasPrefix(u, "about:") && !strings.HasPrefix(u, "data:") {
+			u = "https://" + u
+		}
+	}
+
 	conn, tab, err := m.EnsureTab(ctx, nickname)
 	if err != nil {
 		return "", err
@@ -55,17 +66,16 @@ func (m *Manager) NavigateAction(ctx context.Context, nickname, targetURL string
 			return "", err
 		}
 	default:
-		u := strings.TrimSpace(targetURL)
-		if u == "" {
-			return "", errors.New("url is required when back/forward/reload are not set")
-		}
-		if !strings.Contains(u, "://") && !strings.HasPrefix(u, "about:") && !strings.HasPrefix(u, "data:") {
-			u = "https://" + u
+		var result struct {
+			ErrorText string `json:"errorText"`
 		}
 		if err := conn.Call(ctx, sid, "Page.navigate", map[string]any{
 			"url": u,
-		}, nil); err != nil {
+		}, &result); err != nil {
 			return "", err
+		}
+		if result.ErrorText != "" {
+			return "", fmt.Errorf("navigate to %q: %s", u, result.ErrorText)
 		}
 	}
 
@@ -79,6 +89,10 @@ func (m *Manager) NavigateAction(ctx context.Context, nickname, targetURL string
 	settled, err := WaitForSettle(ctx, conn, tab, 8000)
 	if err != nil {
 		return "", err
+	}
+	if u != "" && !strings.HasPrefix(u, "about:") &&
+		(settled.Snapshot == nil || strings.EqualFold(settled.Snapshot.URL, "about:blank")) {
+		return "", fmt.Errorf("navigation to %q did not leave about:blank", u)
 	}
 
 	tab.mu.Lock()

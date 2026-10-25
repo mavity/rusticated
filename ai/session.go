@@ -59,28 +59,18 @@ type PartEmbedder interface {
 // LogFeedback receives streamed text fragments.
 type LogFeedback func(text string)
 
-// DeliberateToolName is the canonical name of the built-in deliberation tool.
-const DeliberateToolName = "deliberate"
-
 // ToolContext provides explicit runtime and session capabilities to tool
 // handlers, allowing tools to inspect, clone, modify, or replace the Session
 // and active Conversation in place.
 type ToolContext struct {
 	Session        *Session
-	Engine         *Engine
-	Conversation   *Conversation
 	Feedback       LogFeedback
 	baseHistory    *[]PromptPart
-	userText       string
-	userPart       PromptPart
-	streamer       *liveStreamer
-	trace          *CognitiveTrace
 	sessionSwapped bool
 }
 
-// ReplaceSession replaces the current Session with next, transferring modified
-// history, compaction state, or configuration so subsequent turns and stages
-// continue seamlessly with the updated session state.
+// ReplaceSession adopts next and makes its updated history available to the
+// active turn and subsequent turns.
 func (tc *ToolContext) ReplaceSession(next *Session) {
 	if tc == nil || next == nil {
 		return
@@ -94,15 +84,6 @@ func (tc *ToolContext) ReplaceSession(next *Session) {
 		*tc.baseHistory = tc.Session.snapshotCompactedHistory()
 	}
 	tc.sessionSwapped = true
-}
-
-// CloneConversation creates a lightweight, zero-cost branched conversation handle
-// using LiteRT-LM's native litert_lm_conversation_clone C API.
-func (tc *ToolContext) CloneConversation(ctx context.Context) (*Conversation, error) {
-	if tc == nil || tc.Conversation == nil {
-		return nil, errors.New("ai: no active conversation handle in tool context")
-	}
-	return tc.Conversation.Clone(ctx)
 }
 
 // Tool defines a capability registered with a Session.
@@ -334,9 +315,8 @@ func NewSession(cfg SessionConfig) (*Session, error) {
 	if s.compactionLimit <= 0 {
 		s.compactionLimit = 6000
 	}
-	// Register the built-in "deliberate" tool so the model can invoke structured
-	// contemplation on demand via ToolContext (or via the Stage 1 GOAL: trigger).
-	s.toolRegistry[DeliberateToolName] = NewDeliberateTool()
+	// The removed deliberation pipeline classified prompts and generated steps,
+	// critiques, and a plan through staged model calls; see around v0.8.9.
 
 	names := make([]string, 0, len(cfg.Tools))
 	for name := range cfg.Tools {
@@ -485,10 +465,8 @@ func (s *Session) executeTool(ctx context.Context, tc *ToolContext, call ToolCal
 	}
 	if tc == nil {
 		tc = &ToolContext{
-			Session:      s,
-			Engine:       s.engine,
-			Conversation: s.conv,
-			Feedback:     s.emitFeedback,
+			Session:  s,
+			Feedback: s.emitFeedback,
 		}
 	} else if tc.Session == nil {
 		tc.Session = s
@@ -608,23 +586,14 @@ func (s *Session) processPendingEmbeddings(flushAll bool) {
 		s.historyMu.Unlock()
 
 		vec, err := s.embedder.Embed([]PromptPart{part})
-		var traceVec []float32
-		if part.CognitiveTrace != nil && !part.CognitiveTrace.IsDirect && len(part.CognitiveTrace.TraceEmbeddings) == 0 {
-			traceText := strings.TrimSpace(part.CognitiveTrace.Goal + "\n" + part.CognitiveTrace.SynthesizedPlan)
-			if traceText != "" {
-				if tv, terr := s.embedder.Embed([]PromptPart{{Role: RoleModel, Text: traceText}}); terr == nil && len(tv) > 0 {
-					traceVec = tv
-				}
-			}
-		}
 		s.historyMu.Lock()
-		s.applyEmbeddingLocked(idx, part, vec, traceVec, err)
+		s.applyEmbeddingLocked(idx, part, vec, err)
 		s.historyMu.Unlock()
 		s.turnGate.Unlock()
 	}
 }
 
-func (s *Session) applyEmbeddingLocked(idx int, part PromptPart, vec, traceVec []float32, err error) {
+func (s *Session) applyEmbeddingLocked(idx int, part PromptPart, vec []float32, err error) {
 	if err == nil && len(vec) > 0 && idx < len(s.CanonicalHistory) {
 		s.CanonicalHistory[idx].Embedding = vec
 		syncCompactedEmbedding(s.CompactedHistory, part, vec)
@@ -633,12 +602,6 @@ func (s *Session) applyEmbeddingLocked(idx int, part PromptPart, vec, traceVec [
 		}
 	} else if err != nil && s.verbose {
 		fmt.Fprintf(os.Stderr, "[embed] #%d %s error: %v\n", idx, part.Role, err)
-	}
-	if len(traceVec) > 0 && idx < len(s.CanonicalHistory) && s.CanonicalHistory[idx].CognitiveTrace != nil {
-		s.CanonicalHistory[idx].CognitiveTrace.TraceEmbeddings = [][]float32{traceVec}
-		if s.verbose {
-			fmt.Fprintf(os.Stderr, "[embed] #%d trace %s\n", idx, formatEmbeddingSummary(traceVec))
-		}
 	}
 	if idx == s.embeddedUpTo {
 		s.embeddedUpTo++
@@ -663,17 +626,8 @@ func (s *Session) flushEmbeddingsInline() {
 		s.historyMu.Unlock()
 
 		vec, err := s.embedder.Embed([]PromptPart{part})
-		var traceVec []float32
-		if part.CognitiveTrace != nil && !part.CognitiveTrace.IsDirect && len(part.CognitiveTrace.TraceEmbeddings) == 0 {
-			traceText := strings.TrimSpace(part.CognitiveTrace.Goal + "\n" + part.CognitiveTrace.SynthesizedPlan)
-			if traceText != "" {
-				if tv, terr := s.embedder.Embed([]PromptPart{{Role: RoleModel, Text: traceText}}); terr == nil && len(tv) > 0 {
-					traceVec = tv
-				}
-			}
-		}
 		s.historyMu.Lock()
-		s.applyEmbeddingLocked(idx, part, vec, traceVec, err)
+		s.applyEmbeddingLocked(idx, part, vec, err)
 		s.historyMu.Unlock()
 	}
 }
@@ -1080,520 +1034,25 @@ func (s *Session) snapshotCompactedHistory() []PromptPart {
 	return append([]PromptPart(nil), s.CompactedHistory...)
 }
 
-func (s *Session) systemMessageWithToolNames() string {
-	var names []string
-	for _, t := range s.tools {
-		if fn, ok := t["function"].(map[string]any); ok {
-			if name, ok := fn["name"].(string); ok && name != "" && name != DeliberateToolName {
-				names = append(names, name)
-			}
-		}
-	}
-	if len(names) == 0 {
-		return s.systemMessage
-	}
-	sort.Strings(names)
-	base := strings.TrimSpace(s.systemMessage)
-	if base != "" {
-		base += "\n"
-	}
-	return base + "Available tools (for planning reference only): " + strings.Join(names, ", ")
-}
-
-// DeliberateOutput is the structured synthesis returned by the built-in
-// "deliberate" tool after running expectation calibration, step ideation,
-// 3-way orthogonal critique, and tribunal plan synthesis.
-type DeliberateOutput struct {
-	Goal           string `json:"goal"`
-	ExpectedDetail string `json:"expected_detail"`
-	Steps          string `json:"steps"`
-	Plan           string `json:"plan"`
-}
-
-// DeliberateInput defines the typed argument struct for the built-in "deliberate" tool.
-type DeliberateInput struct {
-	_           struct{} `doc:"Deliberate on a task before acting: calibrates expected response detail, breaks down initial steps, critiques relevancy/safety/groundedness, and synthesizes a concrete execution plan." emoji:"🧠"`
-	Goal        string   `json:"goal" doc:"One-sentence description of the underlying goal and task required to address the user's request."`
-	Explanation string   `json:"explanation" doc:"Brief explanation of why deliberation is needed"`
-}
-
-// NewDeliberateTool returns the built-in "deliberate" tool implementation that
-// uses ToolContext (and native Conversation.Clone when available) to execute
-// isolated, tool-free contemplation forks.
-func NewDeliberateTool() Tool {
-	return NewSessionTool(func(ctx context.Context, tc *ToolContext, in DeliberateInput) (any, error) {
-		if tc == nil || tc.Session == nil {
-			return nil, errors.New("ai: deliberate requires a valid ToolContext with Session")
-		}
-		goal := strings.TrimSpace(in.Goal)
-		if goal == "" && tc.trace != nil {
-			goal = strings.TrimSpace(tc.trace.Goal)
-		}
-		if goal == "" {
-			goal = tc.userText
-		}
-		return tc.Session.executeDeliberationWithContext(ctx, tc, goal)
-	})
-}
-
-// streamClonedStage attempts to fork parentConv via native litert_lm_conversation_clone
-// and stream trigger through the cloned handle. If parentConv is nil or Clone is
-// unsupported by the active backend, it returns (false, "", nil) so the caller
-// falls back seamlessly to runEphemeralStage.
-func (s *Session) streamClonedStage(
-	ctx context.Context,
-	parentConv *Conversation,
-	trigger []PromptPart,
-	stageLabel string,
-	streamer *liveStreamer,
-) (usedClone bool, out string, err error) {
-	if s.ephemeralStream != nil || parentConv == nil {
-		return false, "", nil
-	}
-	tc := &ToolContext{
-		Session:      s,
-		Engine:       s.engine,
-		Conversation: parentConv,
-		Feedback:     s.emitFeedback,
-	}
-	clonedConv, cloneErr := tc.CloneConversation(ctx)
-	if cloneErr != nil || clonedConv == nil {
-		return false, "", nil
-	}
-	defer clonedConv.Close()
-
-	streamer.StartStage(stageLabel)
-	for event, streamErr := range clonedConv.SendStream(ctx, trigger) {
-		if streamErr != nil {
-			_ = streamer.EndStage()
-			streamer.Wipe()
-			return true, "", streamErr
-		}
-		if e, ok := event.(TextEvent); ok {
-			streamer.Feed(e.Text)
-		}
-	}
-	return true, streamer.EndStage(), nil
-}
-
-func (s *Session) executeDeliberationWithContext(
-	ctx context.Context,
-	tc *ToolContext,
-	goal string,
-) (*DeliberateOutput, error) {
-	baseHistory := tc.baseHistory
-	if baseHistory == nil {
-		snap := s.snapshotCompactedHistory()
-		baseHistory = &snap
-	}
-	userText := tc.userText
-	userPart := tc.userPart
-	if userPart.Role == "" {
-		userPart = PromptPart{Role: RoleUser, Text: userText}
-	}
-	streamer := tc.streamer
-	if streamer == nil {
-		streamer = newLiveStreamer(tc.Feedback, defaultStreamerMaxRunes)
-	}
-	trace := tc.trace
-	if trace == nil {
-		trace = &CognitiveTrace{}
-		tc.trace = trace
-	}
-	trace.IsDirect = false
-	trace.Goal = goal
-
-	// Stage 2: Expectation Calibration (<detail_level>)
-	seedExpectation := func(base []PromptPart) []PromptPart {
-		seed := make([]PromptPart, 0, len(base)+2)
-		seed = append(seed, base...)
-		seed = append(seed,
-			userPart,
-			PromptPart{Role: RoleModel, Text: stageExpectSyntheticWait},
-		)
-		return seed
-	}
-	detailLevel, err := s.runEphemeralStage(ctx, baseHistory, seedExpectation, stageExpectTriggerPrompt, s.systemMessage, "expectation", streamer)
-	if err != nil {
-		return nil, err
-	}
-	trace.ExpectedDetail = detailLevel
-
-	effectiveGoal := goal
-	if detailLevel != "" {
-		effectiveGoal = goal + "\nExpected response detail: " + detailLevel
-	}
-
-	seedWithGoal := func(base []PromptPart) []PromptPart {
-		seed := make([]PromptPart, 0, len(base)+2)
-		seed = append(seed, base...)
-		seed = append(seed,
-			userPart,
-			PromptPart{Role: RoleModel, Text: "I need to think first, the goal here is probably: " + effectiveGoal},
-		)
-		return seed
-	}
-
-	// Create a shared Tools: nil contemplation conversation seeded with seedWithGoal
-	// so Steps, Relevancy, Safety, and Groundedness can fork from it via
-	// litert_lm_conversation_clone (ToolContext.CloneConversation) without re-prefilling
-	// the entire conversation history four times.
-	var goalPrefixConv *Conversation
-	if s.ephemeralStream == nil && s.engine != nil {
-		if conv, cerr := s.engine.NewConversationWithConfig(ConversationConfig{
-			SystemMessage: s.systemMessageWithToolNames(),
-			Tools:         nil,
-			History:       seedWithGoal(*baseHistory),
-		}); cerr == nil {
-			goalPrefixConv = conv
-			defer goalPrefixConv.Close()
-		}
-	}
-
-	// Stage 3: Step Ideation (<steps>)
-	var steps string
-	if used, clonedOut, cerr := s.streamClonedStage(ctx, goalPrefixConv, []PromptPart{{Role: RoleUser, Text: stage2TriggerPrompt}}, "steps", streamer); used && cerr == nil {
-		steps = clonedOut
-	} else {
-		steps, err = s.runEphemeralStage(ctx, baseHistory, seedWithGoal, stage2TriggerPrompt, s.systemMessage, "steps", streamer)
-		if err != nil {
-			return nil, err
-		}
-	}
-	trace.InitialSteps = steps
-
-	// Stage 4: The Orthogonal Triple-Fork Critique (<relevancy>, <safety>, <grounded>)
-	critiqueSysMsg := s.systemMessageWithToolNames()
-
-	var relevancy string
-	if used, clonedOut, cerr := s.streamClonedStage(ctx, goalPrefixConv, []PromptPart{{Role: RoleUser, Text: stage3APrefix + steps}}, "relevancy", streamer); used && cerr == nil {
-		relevancy = clonedOut
-	} else {
-		relevancy, err = s.runEphemeralStage(ctx, baseHistory, seedWithGoal, stage3APrefix+steps, critiqueSysMsg, "relevancy", streamer)
-		if err != nil {
-			return nil, err
-		}
-	}
-	trace.CritiqueRelevancy = relevancy
-
-	var safety string
-	if used, clonedOut, cerr := s.streamClonedStage(ctx, goalPrefixConv, []PromptPart{{Role: RoleUser, Text: stage3BPrefix + steps}}, "safety", streamer); used && cerr == nil {
-		safety = clonedOut
-	} else {
-		safety, err = s.runEphemeralStage(ctx, baseHistory, seedWithGoal, stage3BPrefix+steps, critiqueSysMsg, "safety", streamer)
-		if err != nil {
-			return nil, err
-		}
-	}
-	trace.CritiqueSafety = safety
-
-	var grounded string
-	if used, clonedOut, cerr := s.streamClonedStage(ctx, goalPrefixConv, []PromptPart{{Role: RoleUser, Text: stage3CPrefix + steps}}, "grounded", streamer); used && cerr == nil {
-		grounded = clonedOut
-	} else {
-		grounded, err = s.runEphemeralStage(ctx, baseHistory, seedWithGoal, stage3CPrefix+steps, critiqueSysMsg, "grounded", streamer)
-		if err != nil {
-			return nil, err
-		}
-	}
-	trace.CritiqueGrounded = grounded
-
-	// Stage 5: The Tribunal Join & Plan Formulation (<plan>)
-	seedStage5Plan := func(base []PromptPart) []PromptPart {
-		seed := make([]PromptPart, 0, len(base)+4)
-		seed = append(seed, base...)
-		seed = append(seed,
-			userPart,
-			PromptPart{Role: RoleModel, Text: "I need to think first, the goal here is probably: " + effectiveGoal},
-			PromptPart{Role: RoleUser, Text: "Maybe these steps would get us there?\n" + steps},
-			PromptPart{
-				Role: RoleModel,
-				Text: "I have analysed those proposed steps from three angles:\n- Relevancy: " + relevancy + "\n- Safety & Risks: " + safety + "\n- Information Grounding: " + grounded,
-			},
-		)
-		return seed
-	}
-	plan, err := s.runEphemeralStage(ctx, baseHistory, seedStage5Plan, stage4TriggerPrompt, s.systemMessage, "plan", streamer)
-	if err != nil {
-		return nil, err
-	}
-	trace.SynthesizedPlan = plan
-
-	return &DeliberateOutput{
-		Goal:           effectiveGoal,
-		ExpectedDetail: detailLevel,
-		Steps:          steps,
-		Plan:           plan,
-	}, nil
-}
-
-func (s *Session) streamOnce(ctx context.Context, cfg ConversationConfig, trigger []PromptPart, onEvent func(ModelEvent) bool) error {
-	if s.ephemeralStream != nil {
-		return s.ephemeralStream(ctx, cfg, trigger, onEvent)
-	}
-	if s.engine == nil {
-		return errors.New("ai: engine is not initialized")
-	}
-	ephemeralConv, err := s.engine.NewConversationWithConfig(cfg)
-	if err != nil {
-		return err
-	}
-	defer ephemeralConv.Close()
-
-	for event, err := range ephemeralConv.SendStream(ctx, trigger) {
-		if err != nil {
-			return err
-		}
-		if onEvent != nil && !onEvent(event) {
-			break
-		}
-	}
-	return nil
-}
-
-// runEphemeralStage executes a single pure-text contemplation stage (Tools: nil)
-// with overflow/loop compaction retries.
-func (s *Session) runEphemeralStage(
-	ctx context.Context,
-	baseHistory *[]PromptPart,
-	buildSeed func(base []PromptPart) []PromptPart,
-	triggerText string,
-	sysMessage string,
-	stageLabel string,
-	streamer *liveStreamer,
-) (string, error) {
-	trigger := []PromptPart{{Role: RoleUser, Text: triggerText}}
-	var retries int
-	for {
-		seed := buildSeed(*baseHistory)
-		cfg := ConversationConfig{
-			SystemMessage: sysMessage,
-			Tools:         nil,
-			History:       seed,
-		}
-		streamer.StartStage(stageLabel)
-		err := s.streamOnce(ctx, cfg, trigger, func(event ModelEvent) bool {
-			if e, ok := event.(TextEvent); ok {
-				streamer.Feed(e.Text)
-			}
-			return true
-		})
-		out := streamer.EndStage()
-		if err == nil {
-			return out, nil
-		}
-		if errors.Is(err, context.Canceled) {
-			streamer.Wipe()
-			return "", err
-		}
-		if (isContextOverflowError(err) || errors.Is(err, ErrRepetitionLoop)) && retries < 2 {
-			retries++
-			streamer.Wipe()
-			if cerr := s.compactForEphemeralRetry(ctx); cerr != nil {
-				return "", cerr
-			}
-			*baseHistory = s.snapshotCompactedHistory()
-			continue
-		}
-		streamer.Wipe()
-		return "", err
-	}
-}
-
-func (s *Session) compactForEphemeralRetry(ctx context.Context) error {
-	err := s.compactContextForRetry(ctx, 0, s.emitFeedback)
-	s.emitFeedback("\n")
-	s.closeConv()
-	return err
-}
-
-const (
-	stage1SyntheticWait      = "Let me consider how to respond..."
-	stage1TriggerPrompt      = "If you can answer my request above directly without running tools or multi-step planning, simply write your final answer now, with or without a 'DIRECT:' prefix. ONLY if this request requires tool execution, codebase inspection, or multi-step problem solving, do NOT answer yet—instead, you MUST begin your response with the exact prefix 'GOAL:' followed by a one-sentence description of the goal and task required."
-	stageExpectSyntheticWait = "Before I begin working on this, let me check how brief and direct the user expects the reply to be..."
-	stageExpectTriggerPrompt = "Look strictly at my prompt above. Default to extreme brevity—the shortest, most direct answer that fully satisfies the request. Unless I explicitly asked for an essay or exhaustive breakdown, prescribe a strict, tiny length limit (e.g., 'Just the name/value in 1-5 words', 'One short sentence under 15 words', or 'At most 2-3 brief sentences'). State ONLY the required format and strict maximum word/sentence cap in one short sentence."
-	stage2TriggerPrompt      = "What are the concrete steps you would take to achieve that goal?"
-	stage3APrefix            = "I think you might take these steps below, but are these actually relevant to the goal, or do they miss the point or include unnecessary detours?\n"
-	stage3BPrefix            = "I think you might take these steps below, but are these safe, or do they carry risks, edge cases, or destructive side effects?\n"
-	stage3CPrefix            = "I think you might take these steps below, but are these well-informed, or are they making unverified assumptions where we need to collect more information first?\n"
-	stage4TriggerPrompt      = "I see. Given that analysis, what do you propose as the final, concrete execution plan?"
-)
-
-// runStage1Triage sends unprefixed and "DIRECT:" replies to the fast path; only
-// an explicit "GOAL:" prefix enters the reflective path.
-func (s *Session) runStage1Triage(
+// runAgenticTurn runs the user's request with registered tools until the model
+// returns a final answer.
+func (s *Session) runAgenticTurn(
 	ctx context.Context,
 	baseHistory *[]PromptPart,
 	userPart PromptPart,
-	streamer *liveStreamer,
-) (isDirect bool, text string, firstOutAt, lastOutAt time.Time, err error) {
-	trigger := []PromptPart{{Role: RoleUser, Text: stage1TriggerPrompt}}
-	var retries int
-	for {
-		seed := make([]PromptPart, 0, len(*baseHistory)+2)
-		seed = append(seed, *baseHistory...)
-		seed = append(seed,
-			userPart,
-			PromptPart{Role: RoleModel, Text: stage1SyntheticWait},
-		)
-		cfg := ConversationConfig{
-			SystemMessage: s.systemMessage,
-			Tools:         nil,
-			History:       seed,
-		}
-
-		var probeBuf strings.Builder
-		var fullDirect strings.Builder
-		decided := false
-		directMode := false
-		var firstProbeAt time.Time
-		firstOutAt = time.Time{}
-		lastOutAt = time.Time{}
-
-		recordDirectChunk := func(chunk string, startHint time.Time) {
-			if chunk == "" {
-				return
-			}
-			now := time.Now()
-			if firstOutAt.IsZero() {
-				if !startHint.IsZero() {
-					firstOutAt = startHint
-				} else {
-					firstOutAt = now
-				}
-			}
-			lastOutAt = now
-			s.emitContent(chunk)
-			fullDirect.WriteString(chunk)
-		}
-
-		decidePrefix := func(finalFlush bool) {
-			if decided {
-				return
-			}
-			raw := probeBuf.String()
-			trimmed := strings.TrimLeft(raw, " \t\r\n")
-			upper := strings.ToUpper(trimmed)
-			if strings.HasPrefix(upper, "GOAL:") {
-				decided = true
-				rest := strings.TrimLeft(trimmed[len("GOAL:"):], " ")
-				streamer.StartStage("goal")
-				if rest != "" {
-					streamer.Feed(rest)
-				}
-				return
-			}
-			if strings.HasPrefix(upper, "DIRECT:") {
-				decided = true
-				directMode = true
-				rest := strings.TrimLeft(trimmed[len("DIRECT:"):], " ")
-				streamer.Wipe()
-				if rest != "" {
-					recordDirectChunk(rest, firstProbeAt)
-				}
-				return
-			}
-
-			stillPossiblePrefix := strings.HasPrefix("GOAL:", upper) || strings.HasPrefix("DIRECT:", upper)
-			if !finalFlush && stillPossiblePrefix {
-				return
-			}
-
-			decided = true
-			directMode = true
-			streamer.Wipe()
-			recordDirectChunk(raw, firstProbeAt)
-		}
-
-		err := s.streamOnce(ctx, cfg, trigger, func(event ModelEvent) bool {
-			e, ok := event.(TextEvent)
-			if !ok {
-				return true
-			}
-			if !decided {
-				if e.Text != "" && firstProbeAt.IsZero() {
-					firstProbeAt = time.Now()
-				}
-				probeBuf.WriteString(e.Text)
-				decidePrefix(false)
-				return true
-			}
-			if directMode {
-				recordDirectChunk(e.Text, time.Time{})
-			} else {
-				streamer.Feed(e.Text)
-			}
-			return true
-		})
-		if err == nil {
-			if !decided {
-				decidePrefix(true)
-			}
-			if directMode {
-				if firstOutAt.IsZero() {
-					now := time.Now()
-					firstOutAt = now
-					lastOutAt = now
-				} else if lastOutAt.IsZero() {
-					lastOutAt = time.Now()
-				}
-				if s.verbose && fullDirect.Len() > 0 {
-					s.emitContent("\n")
-				}
-				return true, strings.TrimSpace(fullDirect.String()), firstOutAt, lastOutAt, nil
-			}
-			goalText := streamer.EndStage()
-			return false, goalText, time.Time{}, time.Time{}, nil
-		}
-
-		if errors.Is(err, context.Canceled) {
-			streamer.Wipe()
-			return false, "", time.Time{}, time.Time{}, err
-		}
-		if (isContextOverflowError(err) || errors.Is(err, ErrRepetitionLoop)) && retries < 2 {
-			retries++
-			streamer.Wipe()
-			if directMode && fullDirect.Len() > 0 {
-				s.emitContent("\n")
-			}
-			if cerr := s.compactForEphemeralRetry(ctx); cerr != nil {
-				return false, "", time.Time{}, time.Time{}, cerr
-			}
-			*baseHistory = s.snapshotCompactedHistory()
-			continue
-		}
-		streamer.Wipe()
-		return false, "", time.Time{}, time.Time{}, err
-	}
-}
-
-// runStage5Execution runs Stage 5 ("Let It Rip") with tools enabled, executing
-// any requested tools in a loop and returning the executed tool parts and draft answer.
-func (s *Session) runStage5Execution(
-	ctx context.Context,
-	baseHistory *[]PromptPart,
-	userPart PromptPart,
-	goal, plan string,
 	streamer *liveStreamer,
 ) (executedToolParts []PromptPart, draftAnswer string, err error) {
 	userText := userPart.Text
 	var retries int
 
 	for {
-		seed := make([]PromptPart, 0, len(*baseHistory)+2)
-		seed = append(seed, *baseHistory...)
-		seed = append(seed,
-			userPart,
-			PromptPart{
-				Role: RoleModel,
-				Text: "I need to think first. The goal here is: " + goal + "\nMy execution plan is:\n" + plan,
-			},
-		)
-
-		turnParts := []PromptPart{{
-			Role: RoleUser,
-			Text: "I see what you mean. Please proceed with that plan now, using any necessary tools, and keep in mind the original request—answer it completely after your work is done:\n" + userText,
-		}}
+		seed := append([]PromptPart(nil), (*baseHistory)...)
+		turnParts := []PromptPart{userPart}
+		buildHistory := func(parts []PromptPart) []PromptPart {
+			history := append([]PromptPart(nil), (*baseHistory)...)
+			history = append(history, userPart)
+			return append(history, parts...)
+		}
 
 		executedToolParts = nil
 
@@ -1618,7 +1077,6 @@ func (s *Session) runStage5Execution(
 					genEnd = now
 					switch e := event.(type) {
 					case TextEvent:
-						streamer.Feed(e.Text)
 						generatedText.WriteString(e.Text)
 					case ToolCallEvent:
 						toolCalls = append(toolCalls, e.ToolCalls...)
@@ -1691,12 +1149,8 @@ func (s *Session) runStage5Execution(
 					explanation := extractToolExplanation(call)
 					tc := &ToolContext{
 						Session:     s,
-						Engine:      s.engine,
 						Feedback:    s.emitFeedback,
 						baseHistory: baseHistory,
-						userText:    userText,
-						userPart:    userPart,
-						streamer:    streamer,
 					}
 					var emittedFeedback bool
 					tc.Feedback = func(text string) {
@@ -1727,21 +1181,7 @@ func (s *Session) runStage5Execution(
 				}
 				executedToolParts = append(executedToolParts, toolResponses...)
 				if sessionMutated {
-					rebuilt := make([]PromptPart, 0, len(*baseHistory)+2+1+len(executedToolParts)-len(toolResponses))
-					rebuilt = append(rebuilt, *baseHistory...)
-					rebuilt = append(rebuilt,
-						userPart,
-						PromptPart{
-							Role: RoleModel,
-							Text: "I need to think first. The goal here is: " + goal + "\nMy execution plan is:\n" + plan,
-						},
-						PromptPart{
-							Role: RoleUser,
-							Text: "I see what you mean. Please proceed with that plan now, using any necessary tools, and keep in mind the original request—answer it completely after your work is done:\n" + userText,
-						},
-					)
-					rebuilt = append(rebuilt, executedToolParts[:len(executedToolParts)-len(toolResponses)]...)
-					historyCursor = rebuilt
+					historyCursor = buildHistory(executedToolParts[:len(executedToolParts)-len(toolResponses)])
 				}
 				turnParts = toolResponses
 			}
@@ -1752,9 +1192,11 @@ func (s *Session) runStage5Execution(
 			if (isContextOverflowError(stageErr) || errors.Is(stageErr, ErrRepetitionLoop)) && retries < 2 {
 				retries++
 				streamer.Wipe()
-				if cerr := s.compactForEphemeralRetry(ctx); cerr != nil {
+				if cerr := s.compactContextForRetry(ctx, 0, s.emitFeedback); cerr != nil {
 					return nil, "", cerr
 				}
+				s.emitFeedback("\n")
+				s.closeConv()
 				*baseHistory = s.snapshotCompactedHistory()
 				continue
 			}
@@ -1797,7 +1239,6 @@ func (s *Session) runStage5Execution(
 				genEnd = now
 				switch e := event.(type) {
 				case TextEvent:
-					streamer.Feed(e.Text)
 					generatedText.WriteString(e.Text)
 				case ToolCallEvent:
 					toolCalls = append(toolCalls, e.ToolCalls...)
@@ -1819,20 +1260,7 @@ func (s *Session) runStage5Execution(
 				if isContextOverflowError(stageErr) {
 					streamer.Wipe()
 					if s.tryCompressTurnPartsOnOverflow(ctx, turnParts, executedToolParts) {
-						rebuilt := make([]PromptPart, 0, len(*baseHistory)+3+len(executedToolParts)-len(turnParts))
-						rebuilt = append(rebuilt, *baseHistory...)
-						rebuilt = append(rebuilt,
-							userPart,
-							PromptPart{
-								Role: RoleModel,
-								Text: "I need to think first. The goal here is: " + goal + "\nMy execution plan is:\n" + plan,
-							},
-							PromptPart{
-								Role: RoleUser,
-								Text: "I see what you mean. Please proceed with that plan now, using any necessary tools, and keep in mind the original request—answer it completely after your work is done:\n" + userText,
-							},
-						)
-						rebuilt = append(rebuilt, executedToolParts[:len(executedToolParts)-len(turnParts)]...)
+						rebuilt := buildHistory(executedToolParts[:len(executedToolParts)-len(turnParts)])
 						newConv, cerr := s.engine.NewConversationWithConfig(ConversationConfig{
 							SystemMessage: s.systemMessage,
 							Tools:         s.tools,
@@ -1849,20 +1277,7 @@ func (s *Session) runStage5Execution(
 				if isToolCallParseError(stageErr) && parseRetries < 3 {
 					parseRetries++
 					streamer.Wipe()
-					rebuilt := make([]PromptPart, 0, len(*baseHistory)+3+len(executedToolParts))
-					rebuilt = append(rebuilt, *baseHistory...)
-					rebuilt = append(rebuilt,
-						userPart,
-						PromptPart{
-							Role: RoleModel,
-							Text: "I need to think first. The goal here is: " + goal + "\nMy execution plan is:\n" + plan,
-						},
-						PromptPart{
-							Role: RoleUser,
-							Text: "I see what you mean. Please proceed with that plan now, using any necessary tools, and keep in mind the original request—answer it completely after your work is done:\n" + userText,
-						},
-					)
-					rebuilt = append(rebuilt, executedToolParts...)
+					rebuilt := buildHistory(executedToolParts)
 					// After 2 failed tool-call syntax attempts (or if we already gathered tool results),
 					// disable tools on the fallback conversation so the model writes its final answer
 					// directly from the gathered context instead of failing FC grammar parsing!
@@ -1925,14 +1340,9 @@ func (s *Session) runStage5Execution(
 				}
 				explanation := extractToolExplanation(call)
 				tc := &ToolContext{
-					Session:      s,
-					Engine:       s.engine,
-					Conversation: ephemeralConv,
-					Feedback:     s.emitFeedback,
-					baseHistory:  baseHistory,
-					userText:     userText,
-					userPart:     userPart,
-					streamer:     streamer,
+					Session:     s,
+					Feedback:    s.emitFeedback,
+					baseHistory: baseHistory,
 				}
 				var emittedFeedback bool
 				tc.Feedback = func(text string) {
@@ -1970,20 +1380,7 @@ func (s *Session) runStage5Execution(
 				// internal history did NOT record the failed assistant tool_call turn!
 				// Re-create ephemeralConv seeded with executedToolParts (which includes both
 				// modelTurn and previous turns) so the C++ conversation history stays in sync.
-				rebuilt := make([]PromptPart, 0, len(*baseHistory)+3+len(executedToolParts)-len(toolResponses))
-				rebuilt = append(rebuilt, *baseHistory...)
-				rebuilt = append(rebuilt,
-					userPart,
-					PromptPart{
-						Role: RoleModel,
-						Text: "I need to think first. The goal here is: " + goal + "\nMy execution plan is:\n" + plan,
-					},
-					PromptPart{
-						Role: RoleUser,
-						Text: "I see what you mean. Please proceed with that plan now, using any necessary tools, and keep in mind the original request—answer it completely after your work is done:\n" + userText,
-					},
-				)
-				rebuilt = append(rebuilt, executedToolParts[:len(executedToolParts)-len(toolResponses)]...)
+				rebuilt := buildHistory(executedToolParts[:len(executedToolParts)-len(toolResponses)])
 				newConv, cerr := s.engine.NewConversationWithConfig(ConversationConfig{
 					SystemMessage: s.systemMessage,
 					Tools:         s.tools,
@@ -2008,25 +1405,12 @@ func (s *Session) runStage5Execution(
 			// If we already gathered tool results and draft text before hitting a repetition loop
 			// (such as a poem with repeating rhyme/meter or a repeated tool-call attempt),
 			// synthesize the final draft directly from the gathered tool results with tools disabled
-			// instead of throwing away executedToolParts and restarting Stage 5 from scratch!
+			// instead of throwing away executedToolParts and restarting the turn from scratch!
 			if len(executedToolParts) > 0 {
 				if trimmed := strings.TrimSpace(lastGeneratedText); len(trimmed) >= 64 {
 					return executedToolParts, trimmed, nil
 				}
-				rebuilt := make([]PromptPart, 0, len(*baseHistory)+3+len(executedToolParts))
-				rebuilt = append(rebuilt, *baseHistory...)
-				rebuilt = append(rebuilt,
-					userPart,
-					PromptPart{
-						Role: RoleModel,
-						Text: "I need to think first. The goal here is: " + goal + "\nMy execution plan is:\n" + plan,
-					},
-					PromptPart{
-						Role: RoleUser,
-						Text: "I see what you mean. Please proceed with that plan now, using any necessary tools, and keep in mind the original request—answer it completely after your work is done:\n" + userText,
-					},
-				)
-				rebuilt = append(rebuilt, executedToolParts...)
+				rebuilt := buildHistory(executedToolParts)
 				synthConv, cerr := s.engine.NewConversationWithConfig(ConversationConfig{
 					SystemMessage: s.systemMessage,
 					Tools:         nil,
@@ -2043,7 +1427,6 @@ func (s *Session) runStage5Execution(
 							break
 						}
 						if e, ok := event.(TextEvent); ok {
-							streamer.Feed(e.Text)
 							synthBuf.WriteString(e.Text)
 						}
 					}
@@ -2054,117 +1437,16 @@ func (s *Session) runStage5Execution(
 					}
 				}
 			}
-			if cerr := s.compactForEphemeralRetry(ctx); cerr != nil {
+			if cerr := s.compactContextForRetry(ctx, 0, s.emitFeedback); cerr != nil {
 				return nil, "", cerr
 			}
+			s.emitFeedback("\n")
+			s.closeConv()
 			*baseHistory = s.snapshotCompactedHistory()
 			continue
 		}
 		streamer.Wipe()
 		return nil, "", stageErr
-	}
-}
-
-// runStageConvergence replants workAndAnswer as a synthetic RoleModel turn
-// (omitting intermediate planning and raw tool turns) and asks the model to
-// reformulate the final response to strictly fit detailLevel. Right before the
-// first token arrives, streamer.Wipe() clears the [work] ticker line and tokens
-// stream through the permanent-content callback.
-func (s *Session) runStageConvergence(
-	ctx context.Context,
-	baseHistory *[]PromptPart,
-	userPart PromptPart,
-	detailLevel, workAndAnswer string,
-	streamer *liveStreamer,
-) (finalText string, firstOutAt, lastOutAt time.Time, err error) {
-	userText := userPart.Text
-	trigger := []PromptPart{{
-		Role: RoleUser,
-		Text: "That draft is far too wordy. Look at the strict target length and format: " + detailLevel + "\nRewrite your answer now to strictly obey that limit using the minimum words possible. Cut all prefaces, roleplay, meta-commentary, internal phases, failed tool mentions, bullet lists, and extra examples unless explicitly requested. Output ONLY the final distilled answer to: " + userText,
-	}}
-
-	var retries int
-	for {
-		seed := make([]PromptPart, 0, len(*baseHistory)+2)
-		seed = append(seed, *baseHistory...)
-		seed = append(seed,
-			userPart,
-			PromptPart{Role: RoleModel, Text: workAndAnswer},
-		)
-
-		cfg := ConversationConfig{
-			SystemMessage: s.systemMessage,
-			Tools:         nil,
-			History:       seed,
-		}
-
-		var finalBuf strings.Builder
-		wiped := false
-		firstOutAt = time.Time{}
-		lastOutAt = time.Time{}
-
-		err := s.streamOnce(ctx, cfg, trigger, func(event ModelEvent) bool {
-			e, ok := event.(TextEvent)
-			if !ok || e.Text == "" {
-				return true
-			}
-			if !wiped {
-				streamer.Wipe()
-				wiped = true
-			}
-			now := time.Now()
-			if firstOutAt.IsZero() {
-				firstOutAt = now
-			}
-			lastOutAt = now
-			s.emitContent(e.Text)
-			finalBuf.WriteString(e.Text)
-			return true
-		})
-
-		if err == nil {
-			if !wiped {
-				streamer.Wipe()
-			}
-			finalText := strings.TrimSpace(finalBuf.String())
-			if finalText == "" && workAndAnswer != "" {
-				now := time.Now()
-				firstOutAt = now
-				s.emitContent(workAndAnswer)
-				lastOutAt = time.Now()
-				finalText = workAndAnswer
-			}
-			if firstOutAt.IsZero() {
-				now := time.Now()
-				firstOutAt = now
-				lastOutAt = now
-			} else if lastOutAt.IsZero() {
-				lastOutAt = time.Now()
-			}
-			if s.verbose && len(finalText) > 0 {
-				s.emitContent("\n")
-			}
-			return finalText, firstOutAt, lastOutAt, nil
-		}
-
-		if errors.Is(err, context.Canceled) {
-			streamer.Wipe()
-			return "", time.Time{}, time.Time{}, err
-		}
-		if (isContextOverflowError(err) || errors.Is(err, ErrRepetitionLoop)) && retries < 2 {
-			retries++
-			streamer.Wipe()
-			if wiped && finalBuf.Len() > 0 {
-				s.emitContent("\n")
-			}
-			if cerr := s.compactForEphemeralRetry(ctx); cerr != nil {
-				return "", time.Time{}, time.Time{}, cerr
-			}
-			*baseHistory = s.snapshotCompactedHistory()
-			continue
-		}
-		streamer.Wipe()
-		return "", time.Time{}, time.Time{}, err
 	}
 }
 
@@ -2197,112 +1479,39 @@ func (s *Session) RunTurnWithTiming(ctx context.Context, userText string, timing
 		Duration:    submittedAt.Sub(typedAt),
 	}
 
-	// Release any idle persistent conversation before opening ephemeral stage forks.
+	// Start this turn from the committed history in a fresh tool-enabled conversation.
 	s.closeConv()
 
 	baseHistory := s.snapshotCompactedHistory()
 	streamer := newLiveStreamer(s.emitFeedback, defaultStreamerMaxRunes)
 
-	restorePersistentConv := func() {
+	// The removed planner calibrated response length, drafted steps, ran three critiques, and synthesized a plan.
+	// See its historical implementation around tag v0.8.9.
+	responseStartedAt := time.Now()
+	executedToolParts, finalAnswer, err := s.runAgenticTurn(ctx, &baseHistory, userPart, streamer)
+	if err != nil {
 		s.closeConv()
 		_ = s.Init()
-	}
-
-	// Stage 1: Triage & Goal Extraction ("DIRECT:" vs. "GOAL:")
-	isDirect, stage1Text, firstOutAt, lastOutAt, err := s.runStage1Triage(ctx, &baseHistory, userPart, streamer)
-	if err != nil {
-		restorePersistentConv()
 		return err
 	}
-
-	var executedToolParts []PromptPart
-	var finalAnswer string
-	trace := &CognitiveTrace{
-		IsDirect: isDirect,
+	streamer.Wipe()
+	if finalAnswer != "" {
+		s.emitContent(finalAnswer)
+		if s.verbose {
+			s.emitContent("\n")
+		}
 	}
+	responseCompletedAt := time.Now()
 
-	if isDirect {
-		finalAnswer = stage1Text
-	} else {
-		goal := stage1Text
-		goalJSON, _ := json.Marshal(struct {
-			Goal        string `json:"goal"`
-			Explanation string `json:"explanation"`
-		}{
-			Goal:        goal,
-			Explanation: "Deliberate on the goal, expected response detail, steps, critiques, and execution plan.",
-		})
-
-		tc := &ToolContext{
-			Session:      s,
-			Engine:       s.engine,
-			Conversation: s.conv,
-			Feedback:     s.emitFeedback,
-			baseHistory:  &baseHistory,
-			userText:     userText,
-			userPart:     userPart,
-			streamer:     streamer,
-			trace:        trace,
-		}
-
-		delibTool := s.toolRegistry[DeliberateToolName]
-		delibRes, err := delibTool.ExecuteWithContext(ctx, tc, ToolCall{
-			Name:         DeliberateToolName,
-			RawArguments: goalJSON,
-		})
-		if err != nil {
-			restorePersistentConv()
-			return err
-		}
-		delibOut, _ := delibRes.(*DeliberateOutput)
-		var effectiveGoal, detailLevel, plan string
-		if delibOut != nil {
-			effectiveGoal = delibOut.Goal
-			detailLevel = delibOut.ExpectedDetail
-			plan = delibOut.Plan
-		}
-
-		// Stage 6: Execution ("Let It Rip" — <work_and_answer>)
-		toolParts, workAndAnswer, err := s.runStage5Execution(ctx, &baseHistory, userPart, effectiveGoal, plan, streamer)
-		if err != nil {
-			restorePersistentConv()
-			return err
-		}
-		executedToolParts = toolParts
-		trace.RawWorkAndAnswer = workAndAnswer
-		trace.DraftIterations = append(trace.DraftIterations, workAndAnswer)
-
-		// Stage 7: Convergence & Re-Formulation Flip
-		var convFirstAt, convLastAt time.Time
-		convergedAnswer, convFirstAt, convLastAt, err := s.runStageConvergence(ctx, &baseHistory, userPart, detailLevel, workAndAnswer, streamer)
-		if err != nil {
-			restorePersistentConv()
-			return err
-		}
-		finalAnswer = convergedAnswer
-		firstOutAt = convFirstAt
-		lastOutAt = convLastAt
-	}
-
-	if firstOutAt.IsZero() {
-		now := time.Now()
-		firstOutAt = now
-		lastOutAt = now
-	} else if lastOutAt.Before(firstOutAt) {
-		lastOutAt = firstOutAt
-	}
-
-	// Stage 7: Replanting the Iceberg & Syncing Session State
 	spokenParts := make([]PromptPart, 0, 2+len(executedToolParts))
 	spokenParts = append(spokenParts, userPart)
 	spokenParts = append(spokenParts, executedToolParts...)
 	spokenParts = append(spokenParts, PromptPart{
-		Role:           RoleModel,
-		Text:           finalAnswer,
-		CognitiveTrace: trace,
-		StartedAt:      firstOutAt,
-		CompletedAt:    lastOutAt,
-		Duration:       lastOutAt.Sub(firstOutAt),
+		Role:        RoleModel,
+		Text:        finalAnswer,
+		StartedAt:   responseStartedAt,
+		CompletedAt: responseCompletedAt,
+		Duration:    responseCompletedAt.Sub(responseStartedAt),
 	})
 	s.appendHistory(spokenParts...)
 
@@ -2681,7 +1890,7 @@ func extractToolExplanation(call ToolCall) string {
 }
 
 // compressImmediateToolOverflow compresses an oversized immediate tool output
-// that exceeded the context window during Stage 5 execution. It:
+// that exceeded the context window during tool execution. It:
 //  1. Retains a short verbatim head and tail of the raw tool output,
 //  2. Breaks the middle into overlapped consumable chunks,
 //  3. Summarizes each chunk via a dedicated LLM call adorned with an aggressive
