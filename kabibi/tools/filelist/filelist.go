@@ -49,7 +49,6 @@ var defaultSkippedDirs = map[string]bool{
 	".svn":         true,
 	"__pycache__":  true,
 	".next":        true,
-	"dist":         true,
 }
 
 // ListFiles walks cwd, applies the progressive escalation ladder (glob/exact ->

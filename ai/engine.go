@@ -39,18 +39,34 @@ func resolveLMBackendCandidates(backend string) []string {
 }
 
 func newEngineImpl(libPath, modelPath, backend string, maxTokens int) (*engineImpl, error) {
+	if maxTokens <= 0 {
+		maxTokens = 8192
+	}
 	var lastErr error
 	for _, cand := range resolveLMBackendCandidates(backend) {
-		b, err := openBackend(libPath, modelPath, cand, maxTokens)
-		if err == nil && b != nil {
-			return &engineImpl{
-				backend:     b,
-				backendName: cand,
-				modelPath:   modelPath,
-				maxTokens:   maxTokens,
-			}, nil
+		tokensToTry := []int{maxTokens}
+		if cand != "cpu" {
+			// Before falling back from an accelerator (gpu/npu) to cpu, step down
+			// the context window size in notches in case only the larger KV cache
+			// allocation exceeded accelerator memory.
+			for _, fallbackTok := range []int{16384, 12288, 8192} {
+				if fallbackTok < maxTokens {
+					tokensToTry = append(tokensToTry, fallbackTok)
+				}
+			}
 		}
-		lastErr = err
+		for _, tok := range tokensToTry {
+			b, err := openBackend(libPath, modelPath, cand, tok)
+			if err == nil && b != nil {
+				return &engineImpl{
+					backend:     b,
+					backendName: cand,
+					modelPath:   modelPath,
+					maxTokens:   tok,
+				}, nil
+			}
+			lastErr = err
+		}
 	}
 	if lastErr != nil {
 		return nil, lastErr

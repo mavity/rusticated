@@ -10,9 +10,9 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 )
 
 // ErrClosed is returned by SendStream when the conversation was closed, or
@@ -224,16 +224,31 @@ func (st *streamState) stop() {
 	}
 }
 
-func streamStateUserData(st *streamState) uint64 {
-	return uint64(uintptr(unsafe.Pointer(st)))
+var (
+	streamRegistryMu  sync.RWMutex
+	streamRegistry    = make(map[uint64]*streamState)
+	streamRegistrySeq uint64
+)
+
+func registerStreamState(st *streamState) uint64 {
+	id := atomic.AddUint64(&streamRegistrySeq, 1)
+	streamRegistryMu.Lock()
+	streamRegistry[id] = st
+	streamRegistryMu.Unlock()
+	return id
 }
 
-// streamStateFromUserData reverses streamStateUserData. The pointer is
-// reinterpreted from memory rather than converted from a uintptr value, which
-// is how a pointer that only C holds has to be recovered.
+func unregisterStreamState(id uint64) {
+	streamRegistryMu.Lock()
+	delete(streamRegistry, id)
+	streamRegistryMu.Unlock()
+}
+
 func streamStateFromUserData(userData uint64) *streamState {
-	p := uintptr(userData)
-	return (*streamState)(*(*unsafe.Pointer)(unsafe.Pointer(&p)))
+	streamRegistryMu.RLock()
+	st := streamRegistry[userData]
+	streamRegistryMu.RUnlock()
+	return st
 }
 
 // sharedTokenCallback is invoked by the platform-specific trampoline when the
@@ -243,10 +258,12 @@ func streamStateFromUserData(userData uint64) *streamState {
 // not be touched after the terminal chunk has been signalled.
 func sharedTokenCallback(drv LMDriver, userData, chunkPtr uint64) {
 	st := streamStateFromUserData(userData)
+	if st == nil {
+		return
+	}
 
 	entered := st.beginCallback()
 	if entered {
-		defer st.endCallback()
 		if textPtr := drv.streamChunkGetText(chunkPtr); textPtr != 0 {
 			if token := drv.ptrToString(textPtr); token != "" {
 				st.onChunk(token)
@@ -254,8 +271,9 @@ func sharedTokenCallback(drv LMDriver, userData, chunkPtr uint64) {
 		}
 	}
 
-	if drv.streamChunkIsFinal(chunkPtr) {
-		var streamErr error
+	isFinal := drv.streamChunkIsFinal(chunkPtr)
+	var streamErr error
+	if isFinal {
 		if errPtr := drv.streamChunkGetError(chunkPtr); errPtr != 0 {
 			// The chunk is only valid during this call, so copy the message now.
 			msg := drv.ptrToString(errPtr)
@@ -267,6 +285,13 @@ func sharedTokenCallback(drv LMDriver, userData, chunkPtr uint64) {
 		if Verbose {
 			fmt.Fprintf(os.Stderr, "[ai] stream final chunk (err: %v)\n", streamErr)
 		}
+	}
+
+	if entered {
+		st.endCallback()
+	}
+
+	if isFinal {
 		select {
 		case st.doneCh <- streamErr:
 		default:
@@ -514,10 +539,7 @@ func (c *drvConversationBackend) SendStream(ctx context.Context, parts []PromptP
 		return ErrClosed
 	}
 
-	// The native runtime holds st only as an integer: pin it until the
-	// runtime can no longer call back.
-	pin := new(runtime.Pinner)
-	pin.Pin(st)
+	streamID := registerStreamState(st)
 
 	cMsg, freeMsg := c.drv.stringToCPtr(messageJSON)
 	defer freeMsg()
@@ -525,13 +547,13 @@ func (c *drvConversationBackend) SendStream(ctx context.Context, parts []PromptP
 	if Verbose {
 		fmt.Fprintf(os.Stderr, "[ai] convSendStream: calling\n")
 	}
-	rc := c.drv.convSendStream(c.conv, cMsg, 0, 0, c.drv.createTrampoline(), streamStateUserData(st))
+	rc := c.drv.convSendStream(c.conv, cMsg, 0, 0, c.drv.createTrampoline(), streamID)
 	if Verbose {
 		fmt.Fprintf(os.Stderr, "[ai] convSendStream: returned rc=%d\n", rc)
 	}
 	if rc != 0 {
+		unregisterStreamState(streamID)
 		c.active.Store(nil)
-		pin.Unpin()
 		c.releaseConv()
 		return fmt.Errorf("send_message_stream failed to start: %d", rc)
 	}
@@ -546,18 +568,18 @@ func (c *drvConversationBackend) SendStream(ctx context.Context, parts []PromptP
 	for {
 		select {
 		case err := <-st.doneCh:
+			unregisterStreamState(streamID)
 			c.active.Store(nil)
-			pin.Unpin()
 			c.releaseConv()
 			if err != nil && c.closed.Load() {
 				return ErrClosed
 			}
 			return err
 		case <-ctx.Done():
-			c.abort(st, pin)
+			c.abort(st, streamID)
 			return ctx.Err()
 		case <-st.closeCh:
-			c.abort(st, pin)
+			c.abort(st, streamID)
 			return ErrClosed
 		case <-keepAlive.C:
 		}
@@ -566,7 +588,7 @@ func (c *drvConversationBackend) SendStream(ctx context.Context, parts []PromptP
 
 // abort cancels the in-flight stream and invalidates the conversation. When it
 // returns, onChunk is neither running nor will run again.
-func (c *drvConversationBackend) abort(st *streamState, pin *runtime.Pinner) {
+func (c *drvConversationBackend) abort(st *streamState, streamID uint64) {
 	c.closed.Store(true)
 	st.stop()
 	c.drv.convCancelProcess(c.conv)
@@ -576,9 +598,9 @@ func (c *drvConversationBackend) abort(st *streamState, pin *runtime.Pinner) {
 	// deletion has to be done from a goroutine of our own.
 	go func() {
 		<-st.doneCh
+		unregisterStreamState(streamID)
 		c.active.Store(nil)
 		c.releaseConv()
-		pin.Unpin()
 	}()
 }
 
