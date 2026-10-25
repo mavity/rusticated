@@ -552,12 +552,12 @@
             float facing = max(dot(normalize(vNormal), normalize(vViewPosition)), 0.0);
             float fresnel = pow(1.0 - facing, 2.0);
             float streakAxis = vUv.x + 0.34 * (1.0 - vUv.y);
-              float streak = exp(-pow((streakAxis - 0.50) / 0.11, 2.0)) *
+              float streak = exp(-pow((streakAxis - 0.50) / 0.12, 2.0)) *
                 smoothstep(0.08, 0.28, vUv.y) *
                 (1.0 - smoothstep(0.92, 0.99, vUv.y));
               float bloom = exp(-pow((vUv.x - 0.18) / 0.22, 2.0) -
                 pow((vUv.y - 0.82) / 0.22, 2.0));
-              float alpha = clamp(streak * 0.22 + bloom * 0.08 + fresnel * 0.07, 0.0, 0.24);
+                float alpha = clamp(streak * 0.34 + bloom * 0.15 + fresnel * 0.10, 0.0, 0.36);
             gl_FragColor = vec4(0.78, 0.88, 1.0, alpha);
           }
         `
