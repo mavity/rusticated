@@ -48,17 +48,22 @@ type frame struct {
 	body   []byte
 }
 
+type CallbackHandler func(invID uint64, threadID uint64, args []uint64) []uint64
+
 type WorkerClient struct {
-	mu        sync.Mutex
-	writeMu   sync.Mutex
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	stdout    io.Reader
-	reqSeq    uint64
-	pending   map[uint64]chan frame
-	cbMu      sync.RWMutex
-	callbacks map[uint64]func([]uint64) []uint64
-	cbSeq     uint64
+	mu              sync.Mutex
+	writeMu         sync.Mutex
+	cmd             *exec.Cmd
+	stdin           io.WriteCloser
+	stdout          io.Reader
+	reqSeq          uint64
+	pending         map[uint64]chan frame
+	cbMu            sync.RWMutex
+	callbacks       map[uint64]CallbackHandler
+	cbSeq           uint64
+	activeCbMu      sync.Mutex
+	activeBgCbCount int
+	activeBgCbIdle  chan struct{}
 }
 
 var (
@@ -151,12 +156,14 @@ func launchWorker(flavour string) (*WorkerClient, error) {
 	}
 
 	client := &WorkerClient{
-		cmd:       cmd,
-		stdin:     stdin,
-		stdout:    stdout,
-		pending:   make(map[uint64]chan frame),
-		callbacks: make(map[uint64]func([]uint64) []uint64),
+		cmd:            cmd,
+		stdin:          stdin,
+		stdout:         stdout,
+		pending:        make(map[uint64]chan frame),
+		callbacks:      make(map[uint64]CallbackHandler),
+		activeBgCbIdle: make(chan struct{}),
 	}
+	close(client.activeBgCbIdle)
 
 	// Read handshake frame
 	hsHeader := make([]byte, headerSize)
@@ -266,11 +273,39 @@ func (c *WorkerClient) roundTrip(opcode byte, payload []byte) (frame, error) {
 	return resp, nil
 }
 
+func (c *WorkerClient) beginCallback() {
+	c.activeCbMu.Lock()
+	if c.activeBgCbCount == 0 {
+		c.activeBgCbIdle = make(chan struct{})
+	}
+	c.activeBgCbCount++
+	c.activeCbMu.Unlock()
+}
+
+func (c *WorkerClient) endCallback() {
+	c.activeCbMu.Lock()
+	c.activeBgCbCount--
+	if c.activeBgCbCount == 0 && c.activeBgCbIdle != nil {
+		close(c.activeBgCbIdle)
+	}
+	c.activeCbMu.Unlock()
+}
+
+func (c *WorkerClient) waitNoActiveCallback() {
+	c.activeCbMu.Lock()
+	ch := c.activeBgCbIdle
+	c.activeCbMu.Unlock()
+	if ch != nil {
+		<-ch
+	}
+}
+
 func (c *WorkerClient) handleCbInvoke(invID uint64, body []byte) {
 	if len(body) < 20 {
 		return
 	}
 	cbID := binary.LittleEndian.Uint64(body[0:8])
+	threadID := binary.LittleEndian.Uint64(body[8:16])
 	argc := int(binary.LittleEndian.Uint32(body[16:20]))
 	args := make([]uint64, argc)
 	for i := 0; i < argc; i++ {
@@ -284,9 +319,10 @@ func (c *WorkerClient) handleCbInvoke(invID uint64, body []byte) {
 	fn := c.callbacks[cbID]
 	c.cbMu.RUnlock()
 
+	c.beginCallback()
 	var results []uint64
 	if fn != nil {
-		results = fn(args)
+		results = fn(invID, threadID, args)
 	}
 
 	resPayload := make([]byte, 1+4+len(results)*8)
@@ -296,9 +332,10 @@ func (c *WorkerClient) handleCbInvoke(invID uint64, body []byte) {
 		binary.LittleEndian.PutUint64(resPayload[5+i*8:5+(i+1)*8], r)
 	}
 	_ = c.send(opCbReturn, invID, resPayload)
+	c.endCallback()
 }
 
-func (c *WorkerClient) registerCallback(fn func([]uint64) []uint64) uint64 {
+func (c *WorkerClient) registerCallback(fn CallbackHandler) uint64 {
 	c.cbMu.Lock()
 	defer c.cbMu.Unlock()
 	c.cbSeq++

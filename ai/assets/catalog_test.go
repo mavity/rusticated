@@ -110,3 +110,19 @@ func TestValidateMemorySlots(t *testing.T) {
 		t.Fatalf("E2B recommended RAM = %d, want %d", got, uint64(4<<30))
 	}
 }
+
+func TestDefaultCacheDirHasValidNativeFormat(t *testing.T) {
+	dir, err := DefaultCacheDir()
+	if err != nil {
+		t.Fatalf("DefaultCacheDir() error = %v", err)
+	}
+	if dir == "" {
+		t.Fatal("DefaultCacheDir() returned empty string")
+	}
+	if HostOS() == "windows" {
+		if dir[0] == '/' || dir[0] == '\\' {
+			t.Fatalf("DefaultCacheDir() on Windows = %q, must not start with leading slash or backslash", dir)
+		}
+	}
+}
+

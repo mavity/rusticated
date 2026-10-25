@@ -170,6 +170,9 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 		if !ok {
 			return fmt.Errorf("configured local AI tier %q is unknown; rerun AI setup", cfg.TierID)
 		}
+		if tier.PracticalContextTokens > 0 {
+			maxTokens = tier.PracticalContextTokens
+		}
 		if assets.HostOS() == "browser" && !tier.WebGPUSupported {
 			return fmt.Errorf("configured local AI tier %q is unavailable in the browser", cfg.TierID)
 		}
@@ -197,8 +200,8 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 				fmt.Fprintf(os.Stderr, "[info] Supports Thinking: %v\n", info.SupportsThinking)
 				fmt.Fprintf(os.Stderr, "[info] Supported Backends: %v\n", info.SupportedBackends)
 			}
-			if info.MaxContextTokens > 0 {
-				maxTokens = int(float64(info.MaxContextTokens) * 0.5)
+			if info.MaxContextTokens > 0 && info.MaxContextTokens < maxTokens {
+				maxTokens = info.MaxContextTokens
 			}
 
 			hasBackend := func(target string) bool {

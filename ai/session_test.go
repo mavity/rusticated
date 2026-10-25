@@ -911,3 +911,122 @@ func TestDeliberateToolAndNativeCloneConversation(t *testing.T) {
 		t.Fatalf("expected memSession.CompactedHistory to retain replaced session state, got: %#v", memSession.CompactedHistory)
 	}
 }
+
+func TestImmediateToolOverflowCompressesWithHeadTailOverlappedMiddleAndPurpose(t *testing.T) {
+	type ReadFileInput struct {
+		_           struct{} `doc:"Read a file."`
+		Path        string   `json:"path" doc:"File path"`
+		Explanation string   `json:"explanation" doc:"Purpose of reading the file"`
+	}
+
+	// Build a large 12,000-char payload with distinct HEAD, MIDDLE, and TAIL markers
+	bigContent := "HEAD_MARKER_START " + strings.Repeat("alpha beta gamma delta ", 400) + " TAIL_MARKER_END"
+
+	var compressorSysPrompts []string
+	var compressorChunks []string
+	var retriedToolResponse map[string]any
+	var readFileCallCount int
+
+	sess, err := NewSession(SessionConfig{
+		SystemMessage:   "You are an assistant.",
+		CompactionLimit: 1000, // gapTokenBudget = 500 -> chunkSize = 1000 runes
+		Tools: map[string]Tool{
+			"read_file": NewTool(func(ctx context.Context, in ReadFileInput, _ LogFeedback) (any, error) {
+				readFileCallCount++
+				return map[string]any{"content": bigContent}, nil
+			}),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.compressor = func(ctx context.Context, sysPrompt, userPrompt string) (string, error) {
+		compressorSysPrompts = append(compressorSysPrompts, sysPrompt)
+		compressorChunks = append(compressorChunks, userPrompt)
+		return fmt.Sprintf("condensed_part_%d", len(compressorChunks)), nil
+	}
+
+	var step int
+	sess.ephemeralStream = func(ctx context.Context, cfg ConversationConfig, trigger []PromptPart, onEvent func(ModelEvent) bool) error {
+		step++
+		switch step {
+		case 1:
+			onEvent(TextEvent{Text: "GOAL: Summarize README into a Ukrainian poem."})
+		case 2:
+			onEvent(TextEvent{Text: "Short poem."})
+		case 3:
+			onEvent(TextEvent{Text: "Read README.md."})
+		case 4, 5, 6:
+			onEvent(TextEvent{Text: "OK"})
+		case 7:
+			onEvent(TextEvent{Text: "Call read_file on README.md."})
+		case 8:
+			// Stage 5 turn 1: model calls read_file with a purpose explanation
+			onEvent(ToolCallEvent{ToolCalls: []ToolCall{{
+				ID:           "call_readme",
+				Name:         "read_file",
+				RawArguments: json.RawMessage(`{"path":"README.md","explanation":"extract architecture and vision for Ukrainian poem"}`),
+			}}})
+		case 9:
+			// Stage 5 turn 2 (attempt 1): raw 12 KB tool response triggers LiteRT context overflow!
+			return fmt.Errorf("LiteRT stream error: INVALID_ARGUMENT: Input token ids are too long. Exceeding the maximum number of tokens allowed: 28085 >= 8192")
+		case 10:
+			// Stage 5 turn 2 (attempt 2 after immediate overlapped tool compression):
+			// Verify the tool was NOT re-executed from scratch, and trigger[0] now holds the compressed map!
+			if len(trigger) == 1 && trigger[0].Role == RoleTool {
+				retriedToolResponse, _ = trigger[0].ToolResponse.(map[string]any)
+			}
+			onEvent(TextEvent{Text: "Код звучить як пісня."})
+		case 11:
+			onEvent(TextEvent{Text: "Код звучить як пісня."})
+		}
+		return nil
+	}
+
+	if err := sess.RunTurn(context.Background(), "Write a poem in Ukrainian"); err != nil {
+		t.Fatalf("RunTurn() error = %v", err)
+	}
+	if readFileCallCount != 1 {
+		t.Fatalf("read_file was called %d times, want 1 (must not restart Stage 5 from scratch)", readFileCallCount)
+	}
+	if len(compressorSysPrompts) < 2 {
+		t.Fatalf("expected multiple overlapped middle chunks to be summarized, got %d chunks", len(compressorSysPrompts))
+	}
+	for i, sp := range compressorSysPrompts {
+		if !strings.Contains(sp, "extract architecture and vision for Ukrainian poem") {
+			t.Fatalf("compressor sysPrompt[%d] missing tool purpose note: %q", i, sp)
+		}
+	}
+	// Verify adjacent chunks overlap
+	if len(compressorChunks) >= 2 {
+		first := compressorChunks[0]
+		second := compressorChunks[1]
+		tailOfFirst := first[len(first)-80:]
+		if !strings.Contains(second, tailOfFirst) {
+			t.Fatalf("expected chunk 1 and chunk 2 to overlap; tail of chunk 1 %q not found in chunk 2", tailOfFirst)
+		}
+	}
+	if retriedToolResponse == nil {
+		t.Fatal("expected retried tool response map to be passed to model")
+	}
+	if compressed, _ := retriedToolResponse["compressed_due_to_size"].(bool); !compressed {
+		t.Fatalf("compressed_due_to_size = %v, want true", retriedToolResponse["compressed_due_to_size"])
+	}
+	headExcerpt, _ := retriedToolResponse["head_excerpt"].(string)
+	tailExcerpt, _ := retriedToolResponse["tail_excerpt"].(string)
+	midSummary, _ := retriedToolResponse["overlapped_middle_summary"].(string)
+	notice, _ := retriedToolResponse["notice"].(string)
+	if !strings.Contains(headExcerpt, "HEAD_MARKER_START") {
+		t.Fatalf("head_excerpt missing HEAD_MARKER_START: %q", headExcerpt)
+	}
+	if !strings.Contains(tailExcerpt, "TAIL_MARKER_END") {
+		t.Fatalf("tail_excerpt missing TAIL_MARKER_END: %q", tailExcerpt)
+	}
+	if !strings.Contains(midSummary, "condensed_part_1") || !strings.Contains(midSummary, "condensed_part_2") {
+		t.Fatalf("overlapped_middle_summary missing condensed parts: %q", midSummary)
+	}
+	if !strings.Contains(notice, "Compression was necessary") || !strings.Contains(notice, "extract architecture and vision for Ukrainian poem") {
+		t.Fatalf("notice missing compression explanation or purpose: %q", notice)
+	}
+}
+

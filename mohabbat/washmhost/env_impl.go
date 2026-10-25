@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -333,6 +334,8 @@ func (h *HostEnv) CancelOp(ovPtr uint32) {
 		if state.handle != nil {
 			if c, ok := state.handle.(interface{ SetDeadline(time.Time) error }); ok {
 				_ = c.SetDeadline(pastTime)
+			} else if closer, ok := state.handle.(io.Closer); ok {
+				_ = closer.Close()
 			}
 		}
 		h.DecOpsFor(state)

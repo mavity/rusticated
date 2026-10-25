@@ -1002,7 +1002,9 @@ export function makeBrainImports(hostState, argv) {
       });
       server.listen(iPort, addr, () => {
         const h = hs.allocHandle({ type: 'server', server });
-        hs.enqueue(() => hs.completeOp(ovPtr, opId, 0, 0, h));
+        const address = server.address();
+        const boundPort = (address && typeof address === 'object' && address.port) ? address.port : iPort;
+        hs.enqueue(() => hs.completeOp(ovPtr, opId, 0, boundPort, h));
       });
     }
   }

@@ -108,10 +108,19 @@ func (s *Shell) openInteractiveTerminalSession(ctx context.Context, title string
 	}
 
 	onChunk, onFinish := s.OnAICommandStart(title, cwd)
+	s.mu.Lock()
+	prevStatus := s.statusLine
+	s.statusLine = "awaiting AI setup..."
+	s.mu.Unlock()
 	startedAt := time.Now()
 	var closeOnce sync.Once
 	closeFn := func(exitCode int) {
 		closeOnce.Do(func() {
+			s.mu.Lock()
+			if s.statusLine == "awaiting AI setup..." {
+				s.statusLine = prevStatus
+			}
+			s.mu.Unlock()
 			if execSess != nil {
 				execSess.terminalMu.Lock()
 				if execSess.activeTerminal == cmdTerm {

@@ -1468,6 +1468,10 @@ func (s *Session) runStage5Execution(
 				})
 				_ = streamer.EndStage()
 				if stageErr != nil {
+					if isContextOverflowError(stageErr) && s.tryCompressTurnPartsOnOverflow(ctx, turnParts, executedToolParts) {
+						stageErr = nil
+						continue
+					}
 					break
 				}
 				historyCursor = append(historyCursor, turnParts...)
@@ -1599,6 +1603,33 @@ func (s *Session) runStage5Execution(
 			}
 			_ = streamer.EndStage()
 			if stageErr != nil {
+				if isContextOverflowError(stageErr) && s.tryCompressTurnPartsOnOverflow(ctx, turnParts, executedToolParts) {
+					rebuilt := make([]PromptPart, 0, len(*baseHistory)+3+len(executedToolParts)-len(turnParts))
+					rebuilt = append(rebuilt, *baseHistory...)
+					rebuilt = append(rebuilt,
+						userPart,
+						PromptPart{
+							Role: RoleModel,
+							Text: "I need to think first. The goal here is: " + goal + "\nMy execution plan is:\n" + plan,
+						},
+						PromptPart{
+							Role: RoleUser,
+							Text: "I see what you mean. Please proceed with that plan now, using any necessary tools, and keep in mind the original request—answer it completely after your work is done:\n" + userText,
+						},
+					)
+					rebuilt = append(rebuilt, executedToolParts[:len(executedToolParts)-len(turnParts)]...)
+					newConv, cerr := s.engine.NewConversationWithConfig(ConversationConfig{
+						SystemMessage: s.systemMessage,
+						Tools:         s.tools,
+						History:       rebuilt,
+					})
+					if cerr == nil {
+						ephemeralConv.Close()
+						ephemeralConv = newConv
+						stageErr = nil
+						continue
+					}
+				}
 				break
 			}
 			if len(toolCalls) == 0 {
@@ -2298,20 +2329,177 @@ func (s *Session) gapTokenBudget() int {
 }
 
 func extractToolExplanation(call ToolCall) string {
-	if call.Arguments != nil {
-		if exp, ok := call.Arguments["explanation"].(string); ok && strings.TrimSpace(exp) != "" {
-			return strings.TrimSpace(exp)
-		}
-	}
-	if len(call.RawArguments) > 0 {
-		var m map[string]any
-		if json.Unmarshal(call.RawArguments, &m) == nil {
-			if exp, ok := m["explanation"].(string); ok && strings.TrimSpace(exp) != "" {
+	for _, key := range []string{"explanation", "purpose", "reason", "note"} {
+		if call.Arguments != nil {
+			if exp, ok := call.Arguments[key].(string); ok && strings.TrimSpace(exp) != "" {
 				return strings.TrimSpace(exp)
+			}
+		}
+		if len(call.RawArguments) > 0 {
+			var m map[string]any
+			if json.Unmarshal(call.RawArguments, &m) == nil {
+				if exp, ok := m[key].(string); ok && strings.TrimSpace(exp) != "" {
+					return strings.TrimSpace(exp)
+				}
 			}
 		}
 	}
 	return ""
+}
+
+// compressImmediateToolOverflow compresses an oversized immediate tool output
+// that exceeded the context window during Stage 5 execution. It:
+//  1. Retains a short verbatim head and tail of the raw tool output,
+//  2. Breaks the middle into overlapped consumable chunks,
+//  3. Summarizes each chunk via a dedicated LLM call adorned with an aggressive
+//     summarization prompt that includes the tool call's purpose/explanation note,
+//  4. Tells the agent explicitly that compression was necessary because the tool
+//     output size was too large for the context window.
+func (s *Session) compressImmediateToolOverflow(ctx context.Context, part PromptPart, rawJSON string) map[string]any {
+	purpose := strings.TrimSpace(part.Explanation)
+	if purpose == "" {
+		if part.ToolName != "" {
+			purpose = "inspecting output of tool " + part.ToolName
+		} else {
+			purpose = "answering the user's request"
+		}
+	}
+
+	runes := []rune(rawJSON)
+	totalRunes := len(runes)
+	const (
+		headRunes = 400
+		tailRunes = 400
+	)
+	if totalRunes <= headRunes+tailRunes+200 {
+		return map[string]any{
+			"compressed_due_to_size": true,
+			"notice":                 fmt.Sprintf("Tool output (%d bytes) exceeded the context window and was compressed.", len(rawJSON)),
+			"purpose":                purpose,
+			"content":                rawJSON,
+		}
+	}
+
+	headText := strings.TrimSpace(string(runes[:headRunes]))
+	tailText := strings.TrimSpace(string(runes[totalRunes-tailRunes:]))
+	middle := runes[headRunes : totalRunes-tailRunes]
+
+	// Determine consumable chunk size in runes (~1600 runes per chunk, or scaled to gapTokenBudget)
+	chunkSize := 1600
+	if budget := s.gapTokenBudget(); budget > 0 {
+		if candidate := budget * 2; candidate >= 600 && candidate <= 3200 {
+			chunkSize = candidate
+		}
+	}
+	overlap := chunkSize / 5
+	if overlap < 100 {
+		overlap = 100
+	}
+	step := chunkSize - overlap
+	if step < 1 {
+		step = 1
+	}
+
+	var chunks []string
+	for start := 0; start < len(middle); start += step {
+		end := start + chunkSize
+		if end > len(middle) {
+			end = len(middle)
+		}
+		chunkStr := strings.TrimSpace(string(middle[start:end]))
+		if chunkStr != "" {
+			chunks = append(chunks, chunkStr)
+		}
+		if end == len(middle) {
+			break
+		}
+	}
+
+	// Cap total chunks so an enormous file doesn't trigger dozens of LLM calls;
+	// if there are more than 6 chunks, evenly sample/merge into at most 6 overlapped windows.
+	const maxChunks = 3
+	if len(chunks) > maxChunks {
+		merged := make([]string, 0, maxChunks)
+		groupSize := (len(chunks) + maxChunks - 1) / maxChunks
+		for i := 0; i < len(chunks); i += groupSize {
+			end := i + groupSize
+			if end > len(chunks) {
+				end = len(chunks)
+			}
+			combined := strings.Join(chunks[i:end], "\n")
+			cRunes := []rune(combined)
+			if len(cRunes) > chunkSize*2 {
+				cRunes = cRunes[:chunkSize*2]
+			}
+			merged = append(merged, string(cRunes))
+		}
+		chunks = merged
+	}
+
+	if s.onFeedback != nil {
+		s.onFeedback(fmt.Sprintf("🗜️ tool(%d chunks) ", len(chunks)))
+	}
+
+	var chunkSummaries []string
+	for idx, ch := range chunks {
+		sysPrompt := fmt.Sprintf(
+			"AGGRESSIVE TOOL OUTPUT COMPRESSOR: This tool output was too large for the context window and is being compressed in overlapped parts (part %d of %d). "+
+				"The agent invoked tool %q for this specific purpose: %q. "+
+				"Aggressively extract ONLY the concrete facts, identifiers, structure, and details relevant to that purpose. "+
+				"Discard decorative ASCII/emoji art, repetitive boilerplate, and filler. Maximum 80 words. No preamble.",
+			idx+1, len(chunks), part.ToolName, purpose,
+		)
+		sum, err := s.runCompressorPrompt(ctx, sysPrompt, ch)
+		sum = strings.TrimSpace(sum)
+		if err != nil || sum == "" {
+			sum = truncateToWords(ch, 60)
+		} else if wordCount(sum) > 100 {
+			sum = truncateToWords(sum, 90)
+		}
+		if sum != "" {
+			chunkSummaries = append(chunkSummaries, fmt.Sprintf("[Part %d/%d]: %s", idx+1, len(chunks), sum))
+		}
+	}
+
+	return map[string]any{
+		"compressed_due_to_size": true,
+		"notice": fmt.Sprintf(
+			"NOTE TO AGENT: Compression was necessary because the raw %s output (%d bytes) exceeded the context window. "+
+				"Below are the verbatim head, the purpose-guided summary of %d overlapped middle segments (for purpose: %q), and the verbatim tail.",
+			part.ToolName, len(rawJSON), len(chunks), purpose,
+		),
+		"head_excerpt":              headText,
+		"overlapped_middle_summary": strings.Join(chunkSummaries, "\n"),
+		"tail_excerpt":              tailText,
+	}
+}
+
+func (s *Session) tryCompressTurnPartsOnOverflow(ctx context.Context, turnParts []PromptPart, executedToolParts []PromptPart) bool {
+	compressedAny := false
+	for i := range turnParts {
+		if turnParts[i].Role != RoleTool || turnParts[i].ToolResponse == nil {
+			continue
+		}
+		if m, ok := turnParts[i].ToolResponse.(map[string]any); ok {
+			if already, _ := m["compressed_due_to_size"].(bool); already {
+				continue
+			}
+		}
+		b, err := json.Marshal(turnParts[i].ToolResponse)
+		if err != nil || len(b) <= 1200 {
+			continue
+		}
+		compacted := s.compressImmediateToolOverflow(ctx, turnParts[i], string(b))
+		turnParts[i].ToolResponse = compacted
+		compressedAny = true
+	}
+	if compressedAny && len(executedToolParts) >= len(turnParts) {
+		offset := len(executedToolParts) - len(turnParts)
+		for i := range turnParts {
+			executedToolParts[offset+i].ToolResponse = turnParts[i].ToolResponse
+		}
+	}
+	return compressedAny
 }
 
 func (s *Session) largeBlockByteThreshold() int {

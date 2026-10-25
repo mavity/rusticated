@@ -366,11 +366,13 @@ func (h *HostEnv) sys_get_platform_info(ctx context.Context, m api.Module, stack
 	copySafe(484, BuildPlatform)
 
 	hostHome, err := os.UserHomeDir()
-	if err == nil {
-		copySafe(548, normaliseHostPathForGuest(hostHome))
+	if err == nil && hostHome != "" {
+		copySafe(548, filepath.Clean(hostHome))
 	}
 	hostTempDir := os.TempDir()
-	copySafe(612, normaliseHostPathForGuest(hostTempDir))
+	if hostTempDir != "" {
+		copySafe(612, filepath.Clean(hostTempDir))
+	}
 
 	for i, slot := range hostPlatformMemorySlots() {
 		offset := 676 + i*16

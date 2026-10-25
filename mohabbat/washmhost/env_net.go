@@ -50,6 +50,9 @@ func (h *HostEnv) sys_net_open(ctx context.Context, m api.Module, stack []uint64
 			var ln net.Listener
 			ln, err = net.Listen("tcp", fmt.Sprintf("%s:%d", addr, port))
 			if err == nil {
+				if tcpAddr, ok := ln.Addr().(*net.TCPAddr); ok && tcpAddr.Port > 0 {
+					port = uint16(tcpAddr.Port)
+				}
 				h.mu.Lock()
 				handle = h.nextHandle
 				h.nextHandle++
@@ -62,6 +65,7 @@ func (h *HostEnv) sys_net_open(ctx context.Context, m api.Module, stack []uint64
 		if err != nil {
 			retCode = mapErrno(err)
 		}
+		boundPort := uint64(port)
 		h.fileOpsQueue <- func() {
 			defer h.DecOpsFor(state)
 			if !h.IsOpActive(ovPtr, state.opID) {
@@ -79,7 +83,7 @@ func (h *HostEnv) sys_net_open(ctx context.Context, m api.Module, stack []uint64
 			h.mu.Lock()
 			delete(h.activeOps, ovPtr)
 			h.mu.Unlock()
-			writeOverlapped(m, ovPtr, retCode, 0, handle)
+			writeOverlapped(m, ovPtr, retCode, boundPort, handle)
 		}
 	}()
 }

@@ -12,6 +12,26 @@ unsafe extern "C" {
     fn c_free(ptr: usize);
 }
 
+#[cfg(target_os = "linux")]
+pub fn current_thread_id() -> u64 {
+    let tid: usize;
+    unsafe {
+        #[cfg(target_arch = "x86_64")]
+        core::arch::asm!("syscall", in("rax") 186usize, lateout("rax") tid, clobber_abi("system"));
+        #[cfg(target_arch = "aarch64")]
+        core::arch::asm!("svc #0", in("x8") 178usize, lateout("x0") tid, clobber_abi("system"));
+        #[cfg(target_arch = "arm")]
+        core::arch::asm!("svc #0", in("r7") 224usize, lateout("r0") tid, clobber_abi("system"));
+    }
+    tid as u64
+}
+
+#[cfg(target_os = "macos")]
+pub fn current_thread_id() -> u64 {
+    let mut sp: usize = 0;
+    (&mut sp as *mut usize as u64) & !0x3fff
+}
+
 fn last_dlerror() -> String {
     let p = unsafe { dlerror() };
     if p.is_null() {

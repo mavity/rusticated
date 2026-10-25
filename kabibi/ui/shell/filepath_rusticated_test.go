@@ -55,3 +55,30 @@ func TestRusticatedOpenAcceptsDriveRootedWorkingDirectory(t *testing.T) {
 		t.Fatalf("ReadDir(%q): %v", cwd, err)
 	}
 }
+
+func TestRusticatedUserHomeAndTempDirHaveNoLeadingSlashBeforeDrive(t *testing.T) {
+	if filepath.Separator != '\\' {
+		t.Skip("requires Windows-style path separator")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+	if len(home) > 0 && (home[0] == '/' || home[0] == '\\') {
+		t.Fatalf("UserHomeDir() = %q, must not start with leading slash/backslash on Windows", home)
+	}
+	if filepath.VolumeName(home) == "" {
+		t.Fatalf("UserHomeDir() = %q, want Windows drive volume", home)
+	}
+
+	joined := filepath.Join(home, "AppData", "Local", "kabibi", "litert_cache")
+	if len(joined) > 0 && (joined[0] == '/' || joined[0] == '\\') {
+		t.Fatalf("filepath.Join(UserHomeDir(), ...) = %q, must not start with leading slash/backslash", joined)
+	}
+
+	temp := os.TempDir()
+	if len(temp) > 0 && (temp[0] == '/' || temp[0] == '\\') {
+		t.Fatalf("TempDir() = %q, must not start with leading slash/backslash on Windows", temp)
+	}
+}
+

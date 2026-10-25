@@ -77,6 +77,15 @@ func rusticatedSocket(
 			syscall.Close(sysfd)
 			return nil, os.NewSyscallError("listen", listenErr)
 		}
+		if boundPort := syscall.SocketBoundPort(sysfd); boundPort > 0 {
+			if tcpAddr, ok := laddr.(*TCPAddr); ok && tcpAddr != nil && tcpAddr.Port == 0 {
+				cp := *tcpAddr
+				cp.Port = boundPort
+				laddr = &cp
+			} else if laddr == nil {
+				laddr = &TCPAddr{Port: boundPort}
+			}
+		}
 	}
 
 	fd := newFD(netStr, sysfd)

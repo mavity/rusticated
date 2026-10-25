@@ -125,7 +125,7 @@ func (r *LazyAIRunner) configureLocalAI(ctx context.Context, prompter Onboarding
 		return config.AIConfig{}, fmt.Errorf("invalid local model selection %d", choice)
 	}
 	tier := available[choice]
-	_, modelSize, err := assets.ModelTierAsset(tier.ID)
+	modelSize, err := assets.ModelTierDownloadSize(tier.ID, cacheDir)
 	if err != nil {
 		return config.AIConfig{}, err
 	}
@@ -139,6 +139,12 @@ func (r *LazyAIRunner) configureLocalAI(ctx context.Context, prompter Onboarding
 		embedderSize, err = assets.EmbeddingModelDownloadSize(cacheDir)
 		if err != nil {
 			return config.AIConfig{}, fmt.Errorf("estimate embedding model download: %w", err)
+		}
+		if embedderSize > 0 && runtimeSize == 0 && modelSize == 0 {
+			// If the runtime and LLM are already cached offline, don't force an embedder
+			// download unless the user wants to fetch from the network.
+			embedder = false
+			embedderSize = 0
 		}
 	}
 	total := runtimeSize + modelSize + embedderSize

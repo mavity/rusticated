@@ -1,15 +1,18 @@
-//go:build !wasip1
-
 package ai
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"ai/assets"
 )
 
 func TestValidateRemoteCredentialSendsProviderAuthentication(t *testing.T) {
@@ -131,6 +134,11 @@ func TestOpenRouterOAuthPKCEExchangeAndManualInput(t *testing.T) {
 	}
 	if cred.Type != CredentialOAuth || cred.Access != "sk-or-v1-minted" {
 		t.Fatalf("cred = %+v, want sk-or-v1-minted", cred)
+	}
+	if !strings.Contains(out.String(), "127.0.0.1:0") {
+		// Verify the emitted callback URL never uses port 0 (which browsers block with ERR_UNSAFE_PORT).
+	} else {
+		t.Fatalf("OpenRouter emitted unsafe port 0 callback URL in output: %q", out.String())
 	}
 	if gotCode != "or-code-123" || gotMethod != "S256" || len(gotVerifier) < 32 {
 		t.Fatalf("exchange body = code:%q method:%q verifier:%q", gotCode, gotMethod, gotVerifier)
@@ -377,4 +385,245 @@ func decodeJSONRequest(r *http.Request, dst any) error {
 	}
 	return json.Unmarshal(data, dst)
 }
+
+func TestDefaultCacheDirAndUserHomeDirAreNativePaths(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir() error = %v", err)
+	}
+	cacheDir, err := assets.DefaultCacheDir()
+	if err != nil {
+		t.Fatalf("DefaultCacheDir() error = %v", err)
+	}
+	if assets.HostOS() == "windows" {
+		if strings.HasPrefix(home, `/`) || strings.HasPrefix(home, `\`) {
+			t.Fatalf("UserHomeDir() on Windows = %q, must not start with slash or backslash", home)
+		}
+		if strings.HasPrefix(cacheDir, `/`) || strings.HasPrefix(cacheDir, `\`) {
+			t.Fatalf("DefaultCacheDir() on Windows = %q, must not start with slash or backslash", cacheDir)
+		}
+	}
+}
+
+func TestLocalGemmaLoadModelInfoAndBackendDiscoveryWhenCached(t *testing.T) {
+	cacheDir, err := assets.DefaultCacheDir()
+	if err != nil {
+		t.Skipf("DefaultCacheDir unavailable: %v", err)
+	}
+	ctx := context.Background()
+	if sz, err := assets.RuntimeDownloadSize(ctx, cacheDir); err != nil || sz != 0 {
+		t.Skip("LiteRT-LM runtime is not cached locally; skipping live DLL model inspection test")
+	}
+	libPath, err := assets.EnsureRuntime(ctx, assets.FetchOptions{CacheDir: cacheDir})
+	if err != nil {
+		t.Fatalf("EnsureRuntime() error = %v", err)
+	}
+	var cachedTierID string
+	for _, tier := range assets.ModelTiers() {
+		if sz, err := assets.ModelTierDownloadSize(tier.ID, cacheDir); err == nil && sz == 0 {
+			cachedTierID = tier.ID
+			break
+		}
+	}
+	if cachedTierID == "" {
+		t.Skip("no Gemma 4 model tier is cached locally; skipping live LoadModelInfo test")
+	}
+	modelPath, err := assets.EnsureModelTier(ctx, cachedTierID, assets.FetchOptions{CacheDir: cacheDir})
+	if err != nil {
+		t.Fatalf("EnsureModelTier(%q) error = %v", cachedTierID, err)
+	}
+	info, err := LoadModelInfo(libPath, modelPath)
+	if err != nil || info == nil {
+		t.Fatalf("LoadModelInfo(%q, %q) = (%+v, %v), want non-nil ModelInfo", libPath, modelPath, info, err)
+	}
+	if len(info.SupportedBackends) == 0 {
+		t.Fatalf("LoadModelInfo(%q) returned empty SupportedBackends: %+v", modelPath, info)
+	}
+	t.Logf("Verified cached tier %s (%s): MaxContextTokens=%d SupportedBackends=%v",
+		cachedTierID, modelPath, info.MaxContextTokens, info.SupportedBackends)
+
+	// Also verify that even if a legacy path with a leading '\' or '/' before the drive letter
+	// is passed to LoadModelInfo, normalizeHostNativePath strips it so LiteRT-LM still loads it.
+	if assets.HostOS() == "windows" && len(modelPath) >= 3 && modelPath[1] == ':' {
+		for _, mangled := range []string{
+			`\` + modelPath,
+			`/` + strings.ReplaceAll(modelPath, `\`, `/`),
+		} {
+			mInfo, mErr := LoadModelInfo(libPath, mangled)
+			if mErr != nil || mInfo == nil || len(mInfo.SupportedBackends) == 0 {
+				t.Fatalf("LoadModelInfo with mangled path %q failed: info=%+v err=%v", mangled, mInfo, mErr)
+			}
+		}
+	}
+
+	// Verify backend selection chooses GPU/NPU over CPU when supported by the model,
+	// and that NewEngine succeeds with the selected backend.
+	chosenBackend := "auto"
+	for _, want := range []string{"npu", "gpu", "cpu"} {
+		for _, b := range info.SupportedBackends {
+			if strings.EqualFold(b, want) {
+				chosenBackend = want
+				break
+			}
+		}
+		if chosenBackend != "auto" {
+			break
+		}
+	}
+	if chosenBackend == "cpu" && len(info.SupportedBackends) > 1 {
+		t.Fatalf("chosenBackend selected cpu despite accelerator backends in %v", info.SupportedBackends)
+	}
+	eng, err := NewEngine(libPath, modelPath, chosenBackend, 2048)
+	if err != nil || eng == nil {
+		t.Fatalf("NewEngine(%q, %q, %q) failed: %v", libPath, modelPath, chosenBackend, err)
+	}
+	defer eng.Close()
+	if got := eng.Backend(); got == "cpu" && chosenBackend != "cpu" {
+		t.Fatalf("eng.Backend() = %q, expected accelerator backend %q", got, chosenBackend)
+	}
+	t.Logf("Successfully created local Gemma engine on backend=%q", eng.Backend())
+}
+
+
+
+func TestLoopbackListenerPortZeroAndCloseWhileAccepting(t *testing.T) {
+	// 1. Verify net.Listen("tcp", "127.0.0.1:0") assigns a non-zero port on both native and Rusticated WASM.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen(127.0.0.1:0) error = %v", err)
+	}
+	tcpAddr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok || tcpAddr.Port <= 0 {
+		_ = ln.Close()
+		t.Fatalf("ln.Addr() = %v (%T), want non-zero TCP port", ln.Addr(), ln.Addr())
+	}
+
+	// 2. Verify ln.Close() while Accept() is blocked in another goroutine returns promptly without deadlock.
+	acceptErrCh := make(chan error, 1)
+	go func() {
+		conn, accErr := ln.Accept()
+		if conn != nil {
+			_ = conn.Close()
+		}
+		acceptErrCh <- accErr
+	}()
+	time.Sleep(25 * time.Millisecond)
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- ln.Close()
+	}()
+	select {
+	case closeErr := <-closeDone:
+		if closeErr != nil {
+			t.Fatalf("ln.Close() error = %v", closeErr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("ln.Close() deadlocked while ln.Accept() was pending")
+	}
+
+	select {
+	case accErr := <-acceptErrCh:
+		if accErr == nil {
+			t.Fatal("expected ln.Accept() to return an error after ln.Close()")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("ln.Accept() did not unblock after ln.Close()")
+	}
+}
+
+func TestOpenRouterOAuthLoopbackHTTPBrowserRedirect(t *testing.T) {
+	origTokenURL := openRouterTokenURL
+	defer func() { openRouterTokenURL = origTokenURL }()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		_ = decodeJSONRequest(r, &body)
+		if body["code"] != "browser-redirect-code" || body["code_challenge_method"] != "S256" {
+			http.Error(w, "bad exchange payload", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"key":"sk-or-from-loopback"}`)
+	}))
+	defer server.Close()
+	openRouterTokenURL = server.URL
+
+	// Use a blocking reader for manual input so the loopback HTTP callback wins the race,
+	// and verify that WaitForCallbackOrManualInput returns promptly without deadlocking on Close().
+	pr, pw := net.Pipe()
+	defer pr.Close()
+	defer pw.Close()
+
+	var out strings.Builder
+	term := &callbackTriggerTerm{
+		Reader: pr,
+		Writer: &out,
+		onWrite: func(text string) {
+			if idx := strings.Index(text, "Listening for callback on http://"); idx >= 0 {
+				rest := text[idx+len("Listening for callback on "):]
+				if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+					cbURL := strings.TrimSpace(rest[:nl])
+					go func() {
+						resp, err := http.Get(cbURL + "?code=browser-redirect-code")
+						if err == nil {
+							_ = resp.Body.Close()
+						}
+					}()
+				}
+			}
+		},
+	}
+
+	done := make(chan *Credential, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		cred, err := loginOpenRouterOAuth(context.Background(), term, server.Client())
+		if err != nil {
+			errCh <- err
+			return
+		}
+		done <- cred
+	}()
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("loginOpenRouterOAuth() error = %v", err)
+	case cred := <-done:
+		if cred == nil || cred.Access != "sk-or-from-loopback" {
+			t.Fatalf("cred = %+v, want sk-or-from-loopback", cred)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("loginOpenRouterOAuth() timed out or deadlocked")
+	}
+}
+
+type callbackTriggerTerm struct {
+	Reader  net.Conn
+	Writer  *strings.Builder
+	onWrite func(string)
+	fired   bool
+}
+
+func (c *callbackTriggerTerm) Read(p []byte) (int, error) {
+	return c.Reader.Read(p)
+}
+
+func (c *callbackTriggerTerm) Write(p []byte) (int, error) {
+	n, err := c.Writer.Write(p)
+	if !c.fired && c.onWrite != nil && strings.Contains(c.Writer.String(), "Listening for callback on http://") {
+		c.fired = true
+		c.onWrite(c.Writer.String())
+	}
+	return n, err
+}
+
+func (c *callbackTriggerTerm) Size() (int, int) { return 78, 20 }
+func (c *callbackTriggerTerm) IsTTY() bool      { return false }
+func (c *callbackTriggerTerm) SubscribeRawInput() (func(context.Context, []byte) (int, error), func()) {
+	return func(ctx context.Context, p []byte) (int, error) {
+		return c.Reader.Read(p)
+	}, func() { _ = c.Reader.Close() }
+}
+
 

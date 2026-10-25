@@ -470,6 +470,7 @@ type LoopbackCallbackServer[T any] struct {
 	closeOnce   sync.Once
 	connsMu     sync.Mutex
 	conns       map[net.Conn]struct{}
+	wakeAddr    string
 }
 
 type loopbackResult[T any] struct {
@@ -512,17 +513,26 @@ func StartLoopbackCallbackServer[T any](ctx context.Context, opts LoopbackCallba
 		_ = ln.Close()
 		return nil, errors.New("loopback listener did not bind to TCP")
 	}
+	actualPort := tcpAddr.Port
+	if actualPort == 0 && opts.Port > 0 {
+		actualPort = opts.Port
+	}
+	if actualPort <= 0 {
+		_ = ln.Close()
+		return nil, errors.New("loopback listener requires a non-zero TCP port")
+	}
 	redirectHost := opts.RedirectHost
 	if redirectHost == "" {
 		redirectHost = host
 	}
-	redirectURI := fmt.Sprintf("http://%s:%d%s", redirectHost, tcpAddr.Port, opts.Path)
+	redirectURI := fmt.Sprintf("http://%s:%d%s", redirectHost, actualPort, opts.Path)
 
 	srv := &LoopbackCallbackServer[T]{
 		RedirectURI: redirectURI,
 		listener:    ln,
 		resultCh:    make(chan loopbackResult[T], 1),
 		conns:       make(map[net.Conn]struct{}),
+		wakeAddr:    net.JoinHostPort(host, strconv.Itoa(actualPort)),
 	}
 
 	var claimed sync.Mutex
@@ -618,6 +628,10 @@ func (s *LoopbackCallbackServer[T]) Close() {
 		return
 	}
 	s.closeOnce.Do(func() {
+		// On the single-threaded Rusticated WASM runtime, Accept() blocks inside
+		// env.net_accept on the host until either a client connects or handle_close
+		// is called. Closing the listener first and only poking wakeAddr on non-wasip1
+		// avoids a synchronous Dial timeout inside the WASM guest.
 		_ = s.listener.Close()
 		_ = s.server.Close()
 		s.connsMu.Lock()
@@ -679,7 +693,6 @@ func WaitForCallbackOrManualInput[T any](
 		}
 		return zero, ErrAuthCancelled
 	case mRes := <-manualCh:
-		callback.Close()
 		if mRes.err != nil {
 			return zero, mRes.err
 		}
@@ -693,17 +706,29 @@ func parseOAuthCodeAndState(input string) (code string, state string) {
 		return "", ""
 	}
 	if parsed, err := url.Parse(value); err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") {
-		return parsed.Query().Get("code"), parsed.Query().Get("state")
-	}
-	if before, after, ok := strings.Cut(value, "#"); ok {
-		return before, after
-	}
-	if strings.Contains(value, "code=") {
-		if q, err := url.ParseQuery(value); err == nil {
-			return q.Get("code"), q.Get("state")
+		if c := parsed.Query().Get("code"); c != "" {
+			return c, parsed.Query().Get("state")
 		}
 	}
+	if idx := strings.Index(value, "code="); idx >= 0 {
+		sub := value[idx:]
+		if q, err := url.ParseQuery(sub); err == nil {
+			if c := q.Get("code"); c != "" {
+				return c, q.Get("state")
+			}
+		}
+	}
+	if before, after, ok := strings.Cut(value, "#"); ok {
+		return strings.TrimSpace(before), strings.TrimSpace(after)
+	}
 	return value, ""
+}
+
+// FormatClickableURL wraps urlStr in an OSC-8 terminal hyperlink escape sequence
+// so clicking the link in an OSC-8 terminal opens the full URL even if wrapped,
+// and prints it at column 0 without leading indentation.
+func FormatClickableURL(urlStr string) string {
+	return fmt.Sprintf("\x1b]8;;%s\x1b\\\x1b[4;34m%s\x1b[0m\x1b]8;;\x1b\\", urlStr, urlStr)
 }
 
 // DeviceCodePollStatus represents the outcome of a single RFC 8628 poll attempt.

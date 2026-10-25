@@ -423,3 +423,73 @@ func TestBackendRejectsSecondConcurrentStream(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+type mutexCallbackDrv struct {
+	*fakeDrv
+	nativeStreamMu sync.Mutex
+}
+
+func (m *mutexCallbackDrv) streamChunkIsFinal(c uint64) bool {
+	// Simulate work/delay inside sharedTokenCallback AFTER onChunk returns
+	// while the native C++ stream thread still holds nativeStreamMu.
+	time.Sleep(25 * time.Millisecond)
+	return m.fakeDrv.streamChunkIsFinal(c)
+}
+
+func (m *mutexCallbackDrv) convCancelProcess(conv uint64) {
+	// Simulate LiteRT-LM's C++ conversation mutex: convCancelProcess blocks if
+	// called while sharedTokenCallback is still executing on the C++ stream thread!
+	m.nativeStreamMu.Lock()
+	defer m.nativeStreamMu.Unlock()
+	m.fakeDrv.convCancelProcess(conv)
+}
+
+func (m *mutexCallbackDrv) emitLocked(userData uint64, text string, final bool, errMsg string) {
+	if final {
+		m.terminalStarted.Store(true)
+	}
+	m.mu.Lock()
+	m.nextID++
+	id := m.nextID
+	m.chunks[id] = fakeChunk{text: text, final: final, errMsg: errMsg}
+	m.mu.Unlock()
+
+	m.nativeStreamMu.Lock()
+	sharedTokenCallback(m, userData, id)
+	m.nativeStreamMu.Unlock()
+}
+
+func TestStreamAbortFromInsideChunkCallbackWaitsForFullCallbackExit(t *testing.T) {
+	base := newFakeDrv()
+	d := &mutexCallbackDrv{fakeDrv: base}
+	d.onSend = func(_ *fakeDrv, ud uint64) {
+		go func() {
+			// Emit a chunk whose handler cancels ctx, while nativeStreamMu is held
+			// across the entire sharedTokenCallback (including streamChunkIsFinal).
+			d.emitLocked(ud, "trigger-cancel", false, "")
+			<-d.cancelSeen
+			d.emitLocked(ud, "", true, "CANCELLED")
+		}()
+	}
+	c := &drvConversationBackend{drv: d, conv: 42}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- c.SendStream(ctx, testPrompt(), func(ModelEvent) {
+			cancel()
+		})
+	}()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("SendStream err = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("deadlock: convCancelProcess ran before sharedTokenCallback finished and released nativeStreamMu")
+	}
+}
+

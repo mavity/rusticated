@@ -231,6 +231,26 @@ func loginOpenRouter(ctx context.Context, term TerminalSession, client *http.Cli
 	return loginOpenRouterOAuth(ctx, term, client)
 }
 
+func startLoopbackCallbackServerWithFallback[T any](ctx context.Context, preferredPort int, opts LoopbackCallbackOptions[T]) (*LoopbackCallbackServer[T], error) {
+	candidates := []int{preferredPort, 3000, 3001, 53692, 53693, 8088, 8089, 14555}
+	var lastErr error
+	for _, port := range candidates {
+		if port <= 0 {
+			continue
+		}
+		opts.Port = port
+		srv, err := StartLoopbackCallbackServer(ctx, opts)
+		if err == nil {
+			return srv, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = errors.New("unable to bind any loopback OAuth callback port")
+	}
+	return nil, lastErr
+}
+
 func loginOpenRouterOAuth(ctx context.Context, term TerminalSession, client *http.Client) (*Credential, error) {
 	verifier, challenge, err := GeneratePKCE()
 	if err != nil {
@@ -251,6 +271,16 @@ func loginOpenRouterOAuth(ctx context.Context, term TerminalSession, client *htt
 			return exchangeOpenRouterCode(ctx, code, verifier, client)
 		},
 	})
+	if cbErr != nil || callback == nil {
+		callback, cbErr = startLoopbackCallbackServerWithFallback(ctx, 3000, LoopbackCallbackOptions[*Credential]{
+			ProviderName: "OpenRouter",
+			Host:         "127.0.0.1",
+			Path:         cbPath,
+			Complete: func(_ *http.Request, code string) (*Credential, error) {
+				return exchangeOpenRouterCode(ctx, code, verifier, client)
+			},
+		})
+	}
 	redirectURI := "http://127.0.0.1:3000" + cbPath
 	if cbErr == nil && callback != nil {
 		redirectURI = callback.RedirectURI
@@ -273,8 +303,12 @@ func loginOpenRouterOAuth(ctx context.Context, term TerminalSession, client *htt
 	if callback != nil {
 		_, _ = fmt.Fprintf(term, "Listening for callback on %s\n", callback.RedirectURI)
 	}
-	_, _ = fmt.Fprintf(term, "Open this URL in your browser:\n  \x1b[4;34m%s\x1b[0m\n\n", authURL.String())
+	_, _ = fmt.Fprintf(term, "Open this URL in your browser:\n%s\n\n", FormatClickableURL(authURL.String()))
 
+	// 3. Paste events (Ctrl+V / bracketed paste) arrive as raw multi-byte strings
+	// without going through handleKeyEvent. When running and no OS PTY is active,
+	//HandleEvent routes PasteEvent to writeCommandTerminalInput, which feeds
+	// ReadControlInputContext when SubscribeRawInput is active.
 	return WaitForCallbackOrManualInput(
 		ctx,
 		term,
@@ -286,7 +320,12 @@ func loginOpenRouterOAuth(ctx context.Context, term TerminalSession, client *htt
 				return nil, errors.New("missing OpenRouter authorization code")
 			}
 			_, _ = fmt.Fprintln(term, "Exchanging authorization code for an OpenRouter API key...")
-			return exchangeOpenRouterCode(ctx, code, verifier, client)
+			cred, exErr := exchangeOpenRouterCode(ctx, code, verifier, client)
+			if exErr != nil {
+				_, _ = fmt.Fprintf(term, "\x1b[31m✗ %v\x1b[0m\n", exErr)
+				return nil, exErr
+			}
+			return cred, nil
 		},
 	)
 }
@@ -379,11 +418,22 @@ func loginAnthropicOAuthBrowser(ctx context.Context, term TerminalSession, clien
 	if err != nil {
 		return nil, err
 	}
-	startServer := func(port int) (*LoopbackCallbackServer[string], error) {
-		return StartLoopbackCallbackServer(ctx, LoopbackCallbackOptions[string]{
+	callback, err := StartLoopbackCallbackServer(ctx, LoopbackCallbackOptions[string]{
+		ProviderName: "Anthropic",
+		Host:         "127.0.0.1",
+		Port:         anthropicPreferredPort,
+		Path:         anthropicCallbackPath,
+		RedirectHost: "localhost",
+		State:        verifier,
+		Complete: func(_ *http.Request, code string) (string, error) {
+			return code, nil
+		},
+	})
+	if err != nil || callback == nil {
+		callback, _ = StartLoopbackCallbackServer(ctx, LoopbackCallbackOptions[string]{
 			ProviderName: "Anthropic",
 			Host:         "127.0.0.1",
-			Port:         port,
+			Port:         0,
 			Path:         anthropicCallbackPath,
 			RedirectHost: "localhost",
 			State:        verifier,
@@ -392,10 +442,6 @@ func loginAnthropicOAuthBrowser(ctx context.Context, term TerminalSession, clien
 			},
 		})
 	}
-	callback, err := startServer(anthropicPreferredPort)
-	if err != nil {
-		callback, _ = startServer(0)
-	}
 	redirectURI := fmt.Sprintf("http://localhost:%d%s", anthropicPreferredPort, anthropicCallbackPath)
 	if callback != nil {
 		redirectURI = callback.RedirectURI
@@ -403,7 +449,7 @@ func loginAnthropicOAuthBrowser(ctx context.Context, term TerminalSession, clien
 
 	authURL := buildAnthropicAuthorizeURL(challenge, verifier, redirectURI)
 	_, _ = fmt.Fprintf(term, "\n\x1b[1;36mAnthropic Claude OAuth Sign-In\x1b[0m\n")
-	_, _ = fmt.Fprintf(term, "Complete login in your browser:\n  \x1b[4;34m%s\x1b[0m\n\n", authURL)
+	_, _ = fmt.Fprintf(term, "Complete login in your browser:\n%s\n\n", FormatClickableURL(authURL))
 
 	code, err := WaitForCallbackOrManualInput(
 		ctx,
@@ -435,7 +481,7 @@ func loginAnthropicOAuthCopyCode(ctx context.Context, term TerminalSession, clie
 	}
 	authURL := buildAnthropicAuthorizeURL(challenge, verifier, anthropicCopyCodeRedirect)
 	_, _ = fmt.Fprintf(term, "\n\x1b[1;36mAnthropic Claude Copy-Code Sign-In\x1b[0m\n")
-	_, _ = fmt.Fprintf(term, "Open this URL in your browser, sign in, and copy the code shown:\n  \x1b[4;34m%s\x1b[0m\n\n", authURL)
+	_, _ = fmt.Fprintf(term, "Open this URL in your browser, sign in, and copy the code shown:\n%s\n\n", FormatClickableURL(authURL))
 
 	input, err := PromptLine(ctx, term, "", "Paste the code Anthropic shows (code#state)", false)
 	if err != nil {
@@ -674,7 +720,7 @@ func loginOpenAIChatGPTBrowser(ctx context.Context, term TerminalSession, client
 	authURL := openAIChatGPTAuthorizeURL + "?" + q.Encode()
 
 	_, _ = fmt.Fprintf(term, "\n\x1b[1;36mOpenAI ChatGPT Sign-In\x1b[0m\n")
-	_, _ = fmt.Fprintf(term, "Complete sign-in in your browser:\n  \x1b[4;34m%s\x1b[0m\n\n", authURL)
+	_, _ = fmt.Fprintf(term, "Complete sign-in in your browser:\n%s\n\n", FormatClickableURL(authURL))
 
 	res, err := WaitForCallbackOrManualInput(
 		ctx,

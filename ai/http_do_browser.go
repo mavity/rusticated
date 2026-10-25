@@ -8,11 +8,16 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+
+	"ai/assets"
 )
 
-func doRemoteHTTPRequest(ctx context.Context, _ *http.Client, request remoteRequest) (remoteResponse, error) {
+func doRemoteHTTPRequest(ctx context.Context, client *http.Client, request remoteRequest) (remoteResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return remoteResponse{}, err
+	}
+	if assets.HostOS() != "browser" {
+		return doStdHTTPRequest(ctx, client, request)
 	}
 	wire, err := json.Marshal(map[string]any{
 		"method":  request.method,
@@ -53,3 +58,4 @@ func doRemoteHTTPRequest(ctx context.Context, _ *http.Client, request remoteRequ
 		Body:       []byte(result.Body),
 	}, nil
 }
+

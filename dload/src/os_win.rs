@@ -19,6 +19,11 @@ unsafe extern "system" {
         dwFlags: u32,
         lpMem: *mut core::ffi::c_void,
     ) -> i32;
+    fn GetCurrentThreadId() -> u32;
+}
+
+pub fn current_thread_id() -> u64 {
+    unsafe { GetCurrentThreadId() as u64 }
 }
 
 fn to_wide(s: &str) -> Vec<u16> {
