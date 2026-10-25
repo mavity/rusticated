@@ -23,26 +23,32 @@
 
     const params = new URLSearchParams(location.search);
     const artifact = params.get('artifact') || params.get('wasm') || './kabibi.bat';
+    const flat = params.get('flat') === '1';
     let mounted = null;
     let guestOutputSeen = false;
-    let displayTestSent = false;
+    let lastDisplayTestGrid = '';
     const sendDisplayTestWhenReady = () => {
-      if (displayTestSent || !mounted || !guestOutputSeen) return;
-      displayTestSent = true;
-      setTimeout(() => KabibiBrowserSuperDemo.sendDisplayTest(
-        mounted.host,
-        mounted.term.cols,
-        mounted.term.rows
-      ), 350);
+      if (!mounted || !guestOutputSeen) return;
+      const cols = mounted.term.cols;
+      const rows = mounted.term.rows;
+      const grid = `${cols}x${rows}`;
+      if (grid === lastDisplayTestGrid) return;
+      lastDisplayTestGrid = grid;
+      setTimeout(() => {
+        if (!mounted || !mounted.host || grid !== `${mounted.term.cols}x${mounted.term.rows}` ||
+            grid !== lastDisplayTestGrid) return;
+        KabibiBrowserSuperDemo.sendDisplayTest(mounted.host, cols, rows);
+      }, 350);
     };
     KabibiBrowser.mount({
       Terminal,
       FitAddon,
       wasm: artifact,
       mode: 'super-demo',
-      superDemoDependencies: { THREE, WebglAddon },
+      superDemoDependencies: { THREE, WebglAddon, flat },
+      onResize: sendDisplayTestWhenReady,
       onStdout(bytes) {
-        if (displayTestSent || !(bytes.byteLength || bytes.length)) return;
+        if (!(bytes.byteLength || bytes.length)) return;
         guestOutputSeen = true;
         sendDisplayTestWhenReady();
       }

@@ -5,6 +5,9 @@
     const THREE = dependencies.THREE;
     const WebglAddon = dependencies.WebglAddon;
     const document = dependencies.document || global.document;
+    const flat = dependencies.flat === true;
+    const upscaleFactor = 2;
+    const scanlinePeriod = 4;
     if (!THREE || !WebglAddon) {
       throw new Error('Super-demo mode requires Three.js and the xterm.js WebGL addon');
     }
@@ -155,24 +158,52 @@
       animationFrame = requestAnimationFrame(render);
     }
 
+    function getScreenViewport() {
+      const renderService = terminal._core && terminal._core._renderService;
+      const deviceCanvas = renderService && renderService.dimensions &&
+        renderService.dimensions.device && renderService.dimensions.device.canvas;
+      return calculateCaptureViewport(
+        screenCanvas.width,
+        screenCanvas.height,
+        deviceCanvas && deviceCanvas.width,
+        deviceCanvas && deviceCanvas.height
+      );
+    }
+
     function updateScreenTexture() {
       const latestCanvas = addon && addon._renderer && addon._renderer._canvas;
       if (latestCanvas) screenCanvas = latestCanvas;
       if (!screenCanvas || screenCanvas.width <= 0 || screenCanvas.height <= 0 ||
           !textureCanvas || !textureContext) return;
 
-      const resized = textureCanvas.width !== screenCanvas.width ||
-        textureCanvas.height !== screenCanvas.height;
+      const viewport = getScreenViewport();
+      const targetWidth = viewport.width * upscaleFactor;
+      const targetHeight = viewport.height * upscaleFactor;
+      const resized = textureCanvas.width !== targetWidth ||
+        textureCanvas.height !== targetHeight;
       if (resized) {
-        textureCanvas.width = screenCanvas.width;
-        textureCanvas.height = screenCanvas.height;
+        textureCanvas.width = targetWidth;
+        textureCanvas.height = targetHeight;
       }
       textureContext.fillStyle = terminal.options.theme.background || '#07090e';
       textureContext.fillRect(0, 0, textureCanvas.width, textureCanvas.height);
-      textureContext.drawImage(screenCanvas, 0, 0);
+      textureContext.imageSmoothingEnabled = false;
+      textureContext.drawImage(
+        screenCanvas,
+        viewport.x,
+        viewport.y,
+        viewport.width,
+        viewport.height,
+        0,
+        0,
+        targetWidth,
+        targetHeight
+      );
+      applyScanlines();
+      updateImageScale();
       const resolution = screenMaterial.uniforms.resolution.value;
-      if (resolution.x !== screenCanvas.width || resolution.y !== screenCanvas.height) {
-        resolution.set(screenCanvas.width, screenCanvas.height);
+      if (resolution.x !== targetWidth || resolution.y !== targetHeight) {
+        resolution.set(targetWidth, targetHeight);
       }
       if (resized) {
         const previousTexture = screenTexture;
@@ -218,6 +249,29 @@
       if (screenMesh) screenMesh.scale.set(scaleX, scaleY, 1);
       if (glassMesh) glassMesh.scale.set(scaleX, scaleY, 1);
       if (reflectionMesh) reflectionMesh.scale.set(scaleX, scaleY, 1);
+      updateImageScale();
+    }
+
+    function updateImageScale() {
+      if (!screenMaterial || !textureCanvas || textureCanvas.height <= 0 ||
+          screenHeight <= 0) return;
+      const scale = calculateImageScale(
+        textureCanvas.width,
+        textureCanvas.height,
+        screenWidth,
+        screenHeight
+      );
+      screenMaterial.uniforms.imageScale.value.set(scale.x, scale.y);
+    }
+
+    function applyScanlines() {
+      textureContext.save();
+      textureContext.globalCompositeOperation = 'multiply';
+      textureContext.fillStyle = 'rgba(0, 0, 0, 0.30)';
+      for (let y = scanlinePeriod - 1; y < textureCanvas.height; y += scanlinePeriod) {
+        textureContext.fillRect(0, y, textureCanvas.width, 1);
+      }
+      textureContext.restore();
     }
 
     function frameCamera() {
@@ -242,13 +296,14 @@
 
     function makeGeometry() {
       const result = new THREE.PlaneGeometry(screenWidth, screenHeight, 96, 56);
+      if (flat) return result;
       const position = result.attributes.position;
       for (let index = 0; index < position.count; index += 1) {
         const x = position.getX(index);
         const y = position.getY(index);
         const nx = x / (screenWidth / 2);
         const ny = y / (screenHeight / 2);
-        position.setZ(index, -0.12 * (nx * nx + 0.72 * ny * ny));
+        position.setZ(index, -0.24 * (nx * nx + 0.72 * ny * ny));
       }
       position.needsUpdate = true;
       result.computeVertexNormals();
@@ -260,6 +315,10 @@
         uniforms: {
           screen: { value: screenTexture },
           resolution: { value: new THREE.Vector2(1, 1) },
+          imageScale: { value: new THREE.Vector2(1, 1) },
+          terminalBackground: { value: new THREE.Color(terminal.options.theme.background || '#07090e') },
+          screenBackground: { value: new THREE.Color(0x101923) },
+          opticalEffects: { value: flat ? 0 : 1 },
           focusStart: { value: 2.5 },
           focusEnd: { value: 2.8 }
         },
@@ -276,30 +335,43 @@
         fragmentShader: `
           uniform sampler2D screen;
           uniform vec2 resolution;
+          uniform vec2 imageScale;
+          uniform vec3 terminalBackground;
+          uniform vec3 screenBackground;
+          uniform float opticalEffects;
           uniform float focusStart;
           uniform float focusEnd;
           varying vec2 vUv;
           varying float vViewDepth;
           void main() {
+            vec2 imageUv = (vUv - 0.5) / imageScale + 0.5;
+            bool outsideImage = any(greaterThan(abs(vUv - 0.5), imageScale * 0.5));
             float nearFocus = 1.0 - smoothstep(focusStart, focusEnd, vViewDepth);
             float lowerRight = smoothstep(0.60, 0.98, vUv.x) *
               (1.0 - smoothstep(0.05, 0.56, vUv.y));
-            float blur = clamp(nearFocus * lowerRight, 0.0, 1.0);
+            float blur = clamp(nearFocus * lowerRight * opticalEffects, 0.0, 1.0);
             vec2 texel = 1.0 / max(resolution, vec2(1.0));
             vec2 offset = texel * blur * 1.25;
-            vec4 color = texture2D(screen, vUv) * 0.40;
-            color += texture2D(screen, vUv + vec2(offset.x, 0.0)) * 0.10;
-            color += texture2D(screen, vUv - vec2(offset.x, 0.0)) * 0.10;
-            color += texture2D(screen, vUv + vec2(0.0, offset.y)) * 0.10;
-            color += texture2D(screen, vUv - vec2(0.0, offset.y)) * 0.10;
-            color += texture2D(screen, vUv + offset) * 0.05;
-            color += texture2D(screen, vUv - offset) * 0.05;
-            color += texture2D(screen, vUv + vec2(offset.x, -offset.y)) * 0.05;
-            color += texture2D(screen, vUv + vec2(-offset.x, offset.y)) * 0.05;
-            float scanline = 0.965 + 0.035 * cos(vUv.y * resolution.y * 6.28318);
-            float grille = 0.992 + 0.008 * cos(vUv.x * resolution.x * 2.094);
-            float vignette = 1.0 - 0.10 * smoothstep(0.48, 0.90, length((vUv - 0.5) * vec2(1.0, 0.78)));
-            gl_FragColor = vec4(color.rgb * scanline * grille * vignette, color.a);
+            vec4 color = vec4(screenBackground, 1.0);
+            if (!outsideImage) {
+              color = texture2D(screen, imageUv) * 0.40;
+              color += texture2D(screen, imageUv + vec2(offset.x, 0.0)) * 0.10;
+              color += texture2D(screen, imageUv - vec2(offset.x, 0.0)) * 0.10;
+              color += texture2D(screen, imageUv + vec2(0.0, offset.y)) * 0.10;
+              color += texture2D(screen, imageUv - vec2(0.0, offset.y)) * 0.10;
+              color += texture2D(screen, imageUv + offset) * 0.05;
+              color += texture2D(screen, imageUv - offset) * 0.05;
+              color += texture2D(screen, imageUv + vec2(offset.x, -offset.y)) * 0.05;
+              color += texture2D(screen, imageUv + vec2(-offset.x, offset.y)) * 0.05;
+            }
+            float backgroundPixel = 1.0 - smoothstep(0.003, 0.018, distance(color.rgb, terminalBackground));
+            color.rgb = mix(color.rgb, screenBackground, backgroundPixel * 0.90);
+            float grille = mix(1.0, 0.992 + 0.008 * cos(vUv.x * resolution.x * 2.094), opticalEffects);
+            float vignette = mix(1.0, 1.0 - 0.10 * smoothstep(0.48, 0.90, length((vUv - 0.5) * vec2(1.0, 0.78))), opticalEffects);
+            float edgeDistance = min(min(vUv.x, 1.0 - vUv.x), min(vUv.y, 1.0 - vUv.y));
+            float edgeLine = 1.0 - smoothstep(0.002, 0.008, edgeDistance);
+            color.rgb = mix(color.rgb, vec3(0.045, 0.065, 0.085), edgeLine * 0.65);
+            gl_FragColor = vec4(color.rgb * grille * vignette, color.a);
             #include <tonemapping_fragment>
             #include <colorspace_fragment>
           }
@@ -397,21 +469,34 @@
       renderer.toneMappingExposure = 1.08;
 
       textureCanvas = document.createElement('canvas');
-      textureCanvas.width = screenCanvas.width;
-      textureCanvas.height = screenCanvas.height;
+      const viewport = getScreenViewport();
+      textureCanvas.width = viewport.width * upscaleFactor;
+      textureCanvas.height = viewport.height * upscaleFactor;
       textureContext = textureCanvas.getContext('2d', { alpha: false });
       if (!textureContext) {
         throw new Error('A 2D canvas is unavailable for transferring the xterm screen');
       }
       textureContext.fillStyle = terminal.options.theme.background || '#07090e';
       textureContext.fillRect(0, 0, textureCanvas.width, textureCanvas.height);
-      textureContext.drawImage(screenCanvas, 0, 0);
+      textureContext.imageSmoothingEnabled = false;
+      textureContext.drawImage(
+        screenCanvas,
+        viewport.x,
+        viewport.y,
+        viewport.width,
+        viewport.height,
+        0,
+        0,
+        textureCanvas.width,
+        textureCanvas.height
+      );
+      applyScanlines();
       screenTexture = new THREE.CanvasTexture(textureCanvas);
       screenTexture.colorSpace = THREE.SRGBColorSpace;
       screenTexture.minFilter = THREE.LinearFilter;
       screenTexture.magFilter = THREE.LinearFilter;
       screenMaterial = createScreenMaterial();
-      screenMaterial.uniforms.resolution.value.set(screenCanvas.width, screenCanvas.height);
+      screenMaterial.uniforms.resolution.value.set(textureCanvas.width, textureCanvas.height);
       geometry = makeGeometry();
 
       scene = new THREE.Scene();
@@ -421,7 +506,7 @@
       screenMesh = new THREE.Mesh(geometry, screenMaterial);
       scene.add(screenMesh);
 
-      glassMaterial = new THREE.MeshPhysicalMaterial({
+      if (!flat) glassMaterial = new THREE.MeshPhysicalMaterial({
         color: 0xeaf3ff,
         roughness: 0.16,
         metalness: 0,
@@ -435,11 +520,13 @@
         side: THREE.DoubleSide,
         depthWrite: false
       });
-      glassMesh = new THREE.Mesh(geometry, glassMaterial);
-      glassMesh.position.z = 0.014;
-      scene.add(glassMesh);
+      if (glassMaterial) {
+        glassMesh = new THREE.Mesh(geometry, glassMaterial);
+        glassMesh.position.z = 0.014;
+        scene.add(glassMesh);
+      }
 
-      reflectionMaterial = new THREE.ShaderMaterial({
+      if (!flat) reflectionMaterial = new THREE.ShaderMaterial({
         transparent: true,
         depthWrite: false,
         side: THREE.DoubleSide,
@@ -447,28 +534,40 @@
         blending: THREE.AdditiveBlending,
         vertexShader: `
           varying vec2 vUv;
+          varying vec3 vViewPosition;
+          varying vec3 vNormal;
           void main() {
             vUv = uv;
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+            vViewPosition = -viewPosition.xyz;
+            vNormal = normalize(normalMatrix * normal);
+            gl_Position = projectionMatrix * viewPosition;
           }
         `,
         fragmentShader: `
           varying vec2 vUv;
+          varying vec3 vViewPosition;
+          varying vec3 vNormal;
           void main() {
+            float facing = max(dot(normalize(vNormal), normalize(vViewPosition)), 0.0);
+            float fresnel = pow(1.0 - facing, 2.0);
             float streakAxis = vUv.x + 0.34 * (1.0 - vUv.y);
-            float streak = exp(-pow((streakAxis - 0.42) / 0.10, 2.0)) *
-              smoothstep(0.52, 0.92, vUv.y);
-            float bloom = exp(-pow((vUv.x - 0.18) / 0.20, 2.0) -
-              pow((vUv.y - 0.84) / 0.15, 2.0));
-            float alpha = clamp(streak * 0.075 + bloom * 0.11, 0.0, 0.16);
-            gl_FragColor = vec4(0.72, 0.84, 1.0, alpha);
+              float streak = exp(-pow((streakAxis - 0.50) / 0.11, 2.0)) *
+                smoothstep(0.08, 0.28, vUv.y) *
+                (1.0 - smoothstep(0.92, 0.99, vUv.y));
+              float bloom = exp(-pow((vUv.x - 0.18) / 0.22, 2.0) -
+                pow((vUv.y - 0.82) / 0.22, 2.0));
+              float alpha = clamp(streak * 0.22 + bloom * 0.08 + fresnel * 0.07, 0.0, 0.24);
+            gl_FragColor = vec4(0.78, 0.88, 1.0, alpha);
           }
         `
       });
-      reflectionMesh = new THREE.Mesh(geometry, reflectionMaterial);
-      reflectionMesh.position.z = 0.024;
-      reflectionMesh.renderOrder = 2;
-      scene.add(reflectionMesh);
+      if (reflectionMaterial) {
+        reflectionMesh = new THREE.Mesh(geometry, reflectionMaterial);
+        reflectionMesh.position.z = 0.024;
+        reflectionMesh.renderOrder = 2;
+        scene.add(reflectionMesh);
+      }
 
       const ambient = new THREE.AmbientLight(0x9db4d0, 0.30);
       const key = new THREE.DirectionalLight(0xd6e4ff, 0.50);
@@ -539,14 +638,48 @@
   }
 
   function calculateGrid(width, height) {
-    const aspect = width > 0 && height > 0 ? width / height : 1.6;
+    const viewportAspect = width > 0 && height > 0 ? width / height : 1.6;
+    const aspect = Number.isFinite(viewportAspect) ? viewportAspect : 1.6;
     const targetCells = 72 * 20;
     const referenceAspect = 1.6;
     const referenceGridAspect = 72 / 20;
-    const gridAspect = referenceGridAspect * Math.pow(aspect / referenceAspect, 1.5);
-    const cols = Math.max(20, Math.round(Math.sqrt(targetCells * gridAspect)));
-    return { cols, rows: Math.max(20, Math.round(targetCells / cols)) };
+    const requestedGridAspect = referenceGridAspect * (aspect / referenceAspect);
+    const gridAspect = Math.min(72 / 20, Math.max(20 / 72, requestedGridAspect));
+    const cols = Math.min(72, Math.max(20, Math.round(Math.sqrt(targetCells * gridAspect))));
+    const rows = Math.min(72, Math.max(20, Math.round(targetCells / cols)));
+    return { cols, rows };
   }
 
-  global.KabibiBrowserSuperDemo = Object.freeze({ start, sendDisplayTest, calculateGrid });
+  function calculateImageScale(sourceWidth, sourceHeight, surfaceWidth, surfaceHeight) {
+    const sourceAspect = sourceWidth > 0 && sourceHeight > 0
+      ? sourceWidth / sourceHeight
+      : surfaceWidth / surfaceHeight;
+    const surfaceAspect = surfaceWidth / surfaceHeight;
+    return {
+      x: Math.min(1, sourceAspect / surfaceAspect),
+      y: Math.min(1, surfaceAspect / sourceAspect)
+    };
+  }
+
+  function calculateCaptureViewport(canvasWidth, canvasHeight, deviceWidth, deviceHeight) {
+    if (deviceWidth > 0 && deviceHeight > 0 &&
+        deviceWidth <= canvasWidth && deviceHeight <= canvasHeight) {
+      return {
+        x: 0,
+        // The WebGL viewport is bottom-origin; drawImage uses top-origin canvas coordinates.
+        y: canvasHeight - deviceHeight,
+        width: deviceWidth,
+        height: deviceHeight
+      };
+    }
+    return { x: 0, y: 0, width: canvasWidth, height: canvasHeight };
+  }
+
+  global.KabibiBrowserSuperDemo = Object.freeze({
+    start,
+    sendDisplayTest,
+    calculateGrid,
+    calculateImageScale,
+    calculateCaptureViewport
+  });
 })(globalThis);
