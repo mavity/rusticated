@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -490,9 +491,6 @@ func TestLocalGemmaLoadModelInfoAndBackendDiscoveryWhenCached(t *testing.T) {
 	t.Logf("Successfully created local Gemma engine on backend=%q", eng.Backend())
 }
 
-
-
-
 func TestLoopbackListenerPortZeroAndCloseWhileAccepting(t *testing.T) {
 	// 1. Verify net.Listen("tcp", "127.0.0.1:0") assigns a non-zero port on both native and Rusticated WASM.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -563,6 +561,7 @@ func TestOpenRouterOAuthLoopbackHTTPBrowserRedirect(t *testing.T) {
 	defer pw.Close()
 
 	var out strings.Builder
+	callbackPageCh := make(chan error, 1)
 	term := &callbackTriggerTerm{
 		Reader: pr,
 		Writer: &out,
@@ -573,9 +572,32 @@ func TestOpenRouterOAuthLoopbackHTTPBrowserRedirect(t *testing.T) {
 					cbURL := strings.TrimSpace(rest[:nl])
 					go func() {
 						resp, err := http.Get(cbURL + "?code=browser-redirect-code")
-						if err == nil {
-							_ = resp.Body.Close()
+						if err != nil {
+							callbackPageCh <- fmt.Errorf("GET OAuth callback: %w", err)
+							return
 						}
+						defer resp.Body.Close()
+						body, err := io.ReadAll(resp.Body)
+						if err != nil {
+							callbackPageCh <- fmt.Errorf("read OAuth callback page: %w", err)
+							return
+						}
+						if resp.StatusCode != http.StatusOK {
+							callbackPageCh <- fmt.Errorf("OAuth callback status = %d, want %d", resp.StatusCode, http.StatusOK)
+							return
+						}
+						if got := resp.Header.Get("Content-Type"); !strings.Contains(got, "text/html") {
+							callbackPageCh <- fmt.Errorf("OAuth callback Content-Type = %q, want HTML", got)
+							return
+						}
+						page := string(body)
+						for _, text := range []string{"Login completed successfully", "You can close this page and return to Kabibi.", "aria-live=\"polite\""} {
+							if !strings.Contains(page, text) {
+								callbackPageCh <- fmt.Errorf("OAuth callback page does not contain %q", text)
+								return
+							}
+						}
+						callbackPageCh <- nil
 					}()
 				}
 			}
@@ -602,6 +624,14 @@ func TestOpenRouterOAuthLoopbackHTTPBrowserRedirect(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("loginOpenRouterOAuth() timed out or deadlocked")
+	}
+	select {
+	case err := <-callbackPageCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("OAuth callback page response timed out")
 	}
 }
 
@@ -632,5 +662,3 @@ func (c *callbackTriggerTerm) SubscribeRawInput() (func(context.Context, []byte)
 		return c.Reader.Read(p)
 	}, func() { _ = c.Reader.Close() }
 }
-
-
