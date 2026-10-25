@@ -426,8 +426,38 @@ test('CRT grid adapts orientation while keeping a constant character budget', ()
 
   const landscape = context.KabibiBrowserSuperDemo.calculateGrid(1600, 1000);
   const portrait = context.KabibiBrowserSuperDemo.calculateGrid(600, 1000);
+  const extremeLandscape = context.KabibiBrowserSuperDemo.calculateGrid(10000, 1000);
+  const extremePortrait = context.KabibiBrowserSuperDemo.calculateGrid(10, 1000);
 
   assert.deepEqual({ ...landscape }, { cols: 72, rows: 20 });
-  assert.ok(portrait.cols < portrait.rows);
+  assert.deepEqual({ ...portrait }, { cols: 44, rows: 33 });
+  assert.deepEqual({ ...extremeLandscape }, { cols: 72, rows: 20 });
+  assert.deepEqual({ ...extremePortrait }, { cols: 20, rows: 72 });
+  assert.ok(portrait.cols < landscape.cols);
+  assert.ok(portrait.rows > landscape.rows);
   assert.ok(Math.abs(portrait.cols * portrait.rows - 72 * 20) <= portrait.cols);
+});
+
+test('CRT image fitting preserves the source aspect ratio', () => {
+  const { context } = createHarness();
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'super-demo.js'), 'utf8'), context);
+
+  const portraitFit = context.KabibiBrowserSuperDemo.calculateImageScale(396, 743, 600, 1000);
+  const landscapeFit = context.KabibiBrowserSuperDemo.calculateImageScale(936, 374, 1600, 1000);
+
+  assert.ok(Math.abs(portraitFit.x - 0.888) < 0.002);
+  assert.equal(portraitFit.y, 1);
+  assert.equal(landscapeFit.x, 1);
+  assert.ok(Math.abs(landscapeFit.y - 0.639) < 0.002);
+});
+
+test('CRT capture crops the WebGL viewport rather than its unused canvas area', () => {
+  const { context } = createHarness();
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'super-demo.js'), 'utf8'), context);
+
+  const viewport = context.KabibiBrowserSuperDemo.calculateCaptureViewport(648, 450, 432, 300);
+  const fallback = context.KabibiBrowserSuperDemo.calculateCaptureViewport(432, 300, 648, 450);
+
+  assert.deepEqual({ ...viewport }, { x: 0, y: 150, width: 432, height: 300 });
+  assert.deepEqual({ ...fallback }, { x: 0, y: 0, width: 432, height: 300 });
 });
