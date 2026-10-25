@@ -73,6 +73,7 @@ type interpreterImpl struct {
 // tflGoStringToCPtr allocates from the tflLib linear memory rather than the LM
 // lib allocator — using the wrong WASM memory would corrupt the pointer.
 func tflGoStringToCPtr(s string) (uint64, func()) {
+	s = normalizeHostNativePath(s)
 	ptr, free, err := dload.CString(tflLib, s)
 	if err != nil {
 		return 0, func() {}

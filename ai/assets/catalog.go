@@ -19,6 +19,7 @@ type ModelTier struct {
 	WebSize                int64
 	MinRecommendedRAMBytes uint64
 	MinAcceleratorBytes    uint64
+	PracticalContextTokens int
 	WebGPUSupported        bool
 	NativeRequiresGPU      bool
 }
@@ -33,6 +34,7 @@ var gemma4Tiers = [...]ModelTier{
 		WebSize:                2_008_432_640,
 		MinRecommendedRAMBytes: 4 << 30,
 		MinAcceleratorBytes:    2 << 30,
+		PracticalContextTokens: 8192,
 		WebGPUSupported:        true,
 	},
 	{
@@ -44,6 +46,7 @@ var gemma4Tiers = [...]ModelTier{
 		WebSize:                2_969_059_328,
 		MinRecommendedRAMBytes: 8 << 30,
 		MinAcceleratorBytes:    4 << 30,
+		PracticalContextTokens: 16384,
 		WebGPUSupported:        true,
 	},
 	{
@@ -55,6 +58,7 @@ var gemma4Tiers = [...]ModelTier{
 		WebSize:                5_986_074_624,
 		MinRecommendedRAMBytes: 16 << 30,
 		MinAcceleratorBytes:    8 << 30,
+		PracticalContextTokens: 24576,
 		WebGPUSupported:        true,
 	},
 	{
@@ -66,6 +70,7 @@ var gemma4Tiers = [...]ModelTier{
 		WebSize:                15_786_524_672,
 		MinRecommendedRAMBytes: 24 << 30,
 		MinAcceleratorBytes:    16 << 30,
+		PracticalContextTokens: 32768,
 		NativeRequiresGPU:      true,
 	},
 	{
@@ -77,6 +82,7 @@ var gemma4Tiers = [...]ModelTier{
 		WebSize:                19_217_989_632,
 		MinRecommendedRAMBytes: 32 << 30,
 		MinAcceleratorBytes:    24 << 30,
+		PracticalContextTokens: 32768,
 		NativeRequiresGPU:      true,
 	},
 }

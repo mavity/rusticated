@@ -440,6 +440,8 @@ func Close(fd int) error {
 	if fd < 3 {
 		return nil // Never close stdin/stdout/stderr handles
 	}
+	delete(netSocketBind, int32(fd))
+	delete(netSocketPort, int32(fd))
 	entry, ok := fdMap[int32(fd)]
 	if !ok {
 		return errnoErr(EBADF)

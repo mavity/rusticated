@@ -20,7 +20,20 @@ use os_unix as os;
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 use protocol::*;
+
+static READER_BUSY: AtomicBool = AtomicBool::new(false);
+
+pub fn try_acquire_reader_lock() -> bool {
+    READER_BUSY
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
+}
+
+pub fn release_reader_lock() {
+    READER_BUSY.store(false, Ordering::Release);
+}
 
 #[global_allocator]
 static ALLOCATOR: allocator::OsAllocator = allocator::OsAllocator;
@@ -191,7 +204,7 @@ pub fn dispatch_frame(hdr: Header, body: &[u8]) {
                 return;
             }
             let sym_addr = u64::from_le_bytes(body[0..8].try_into().unwrap());
-            let _parent_inv_id = u64::from_le_bytes(body[8..16].try_into().unwrap());
+            let parent_inv_id = u64::from_le_bytes(body[8..16].try_into().unwrap());
             let sig_len = u32::from_le_bytes(body[16..20].try_into().unwrap()) as usize;
             let off = 20 + sig_len;
             if body.len() < off + 4 {
@@ -206,6 +219,10 @@ pub fn dispatch_frame(hdr: Header, body: &[u8]) {
                 }
                 args.push(u64::from_le_bytes(body[arg_off..arg_off + 8].try_into().unwrap()));
                 arg_off += 8;
+            }
+
+            if callbacks::try_delegate_call(parent_inv_id, hdr.id, sym_addr as usize, &args) {
+                return;
             }
 
             let ret_val = unsafe { arch_call::call_c_func(sym_addr as usize, &args) };
@@ -329,13 +346,21 @@ pub fn dispatch_frame(hdr: Header, body: &[u8]) {
             let _ = send_frame(OP_CB_REG_RESP, hdr.id, &resp);
         }
         OP_CB_RETURN => {
-            callbacks::on_cb_return(hdr.id);
+            let mut ret_val = 0u64;
+            if body.len() >= 13 {
+                let res_count = u32::from_le_bytes(body[1..5].try_into().unwrap());
+                if res_count > 0 {
+                    ret_val = u64::from_le_bytes(body[5..13].try_into().unwrap());
+                }
+            }
+            callbacks::on_cb_return(hdr.id, ret_val);
         }
         _ => {}
     }
 }
 
 fn run() {
+    callbacks::set_reader_thread_id(os::current_thread_id());
     // Send initial handshake frame: [os_kind: u8][arch_kind: u8][version: u16]
     #[cfg(windows)]
     let os_kind: u8 = 1;
@@ -356,8 +381,16 @@ fn run() {
     let handshake_payload: [u8; 4] = [os_kind, arch_kind, 1, 0];
     let _ = send_frame(OP_HANDSHAKE, 0, &handshake_payload);
 
-    while let Ok((hdr, body)) = read_frame() {
-        dispatch_frame(hdr, &body);
+    loop {
+        while !try_acquire_reader_lock() {
+            core::hint::spin_loop();
+        }
+        let frame_res = read_frame();
+        release_reader_lock();
+        match frame_res {
+            Ok((hdr, body)) => dispatch_frame(hdr, &body),
+            Err(()) => break,
+        }
     }
 }
 

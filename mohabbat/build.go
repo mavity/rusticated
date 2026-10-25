@@ -133,7 +133,10 @@ func ModeTest(ws, projectDir string, extraArgs []string, platform string, verbos
 		projectName = filepath.Base(ws)
 	}
 
-	wasmPath := filepath.Join(ws, "target", projectName+"_test.wasm")
+	wasmPath, err := filepath.Abs(filepath.Join(ws, "target", projectName+"_test.wasm"))
+	if err != nil {
+		wasmPath = filepath.Join(ws, "target", projectName+"_test.wasm")
+	}
 	vlogf(verbose, "🍆  Test-run: building tests for %s\n", absProject)
 
 	// Run prebuild scoped only to what this project type needs (Go).

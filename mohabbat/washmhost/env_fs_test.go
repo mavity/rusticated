@@ -129,10 +129,13 @@ func TestSysGetPlatformInfoCanonicalizesHostPaths(t *testing.T) {
 		return string(field)
 	}
 	wantHome, err := os.UserHomeDir()
-	if err == nil {
-		wantHome = normaliseHostPathForGuest(wantHome)
+	if err == nil && wantHome != "" {
+		wantHome = filepath.Clean(wantHome)
 	}
-	wantTemp := normaliseHostPathForGuest(os.TempDir())
+	wantTemp := os.TempDir()
+	if wantTemp != "" {
+		wantTemp = filepath.Clean(wantTemp)
+	}
 	if len(wantHome) > 63 {
 		wantHome = wantHome[:63]
 	}

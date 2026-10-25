@@ -84,12 +84,16 @@ var (
 
 // callDylib invokes a WASM dynamic library function with typed parameters.
 func callDylib(sym uint64, paramTypes, resultTypes []byte, args ...uint64) (uint64, error) {
+	return callDylibWithParent(sym, 0, paramTypes, resultTypes, args...)
+}
+
+func callDylibWithParent(sym uint64, parentInvID uint64, paramTypes, resultTypes []byte, args ...uint64) (uint64, error) {
 	sig := make([]byte, 0, 3+len(paramTypes)+len(resultTypes))
 	sig = append(sig, 0x60, byte(len(paramTypes)))
 	sig = append(sig, paramTypes...)
 	sig = append(sig, byte(len(resultTypes)))
 	sig = append(sig, resultTypes...)
-	res, err := dload.DylibCall(sym, sig, args, 0)
+	res, err := dload.DylibCall(sym, sig, args, parentInvID)
 	if err != nil {
 		return 0, err
 	}
@@ -101,7 +105,9 @@ func callDylib(sym uint64, paramTypes, resultTypes []byte, args ...uint64) (uint
 
 // ── rusticatedDriver — implements LMDriver via callDylib ─────────────────────
 
-type rusticatedDriver struct{}
+type rusticatedDriver struct {
+	parentInvID uint64
+}
 
 func (d *rusticatedDriver) ensureLoaded(libPath string) error {
 	return ensureLMLibLoadedImpl(libPath)
@@ -125,12 +131,17 @@ func (d *rusticatedDriver) writeBool(addr uint64, val bool) {
 	_ = dload.DylibWriteMem(lmLib, addr, []byte{b})
 }
 
-func (d *rusticatedDriver) stringToCPtr(s string) (uint64, func()) {
-	if len(s) >= 4 && s[0] == '/' &&
+func normalizeHostNativePath(s string) string {
+	if len(s) >= 4 && (s[0] == '/' || s[0] == '\\') &&
 		((s[1] >= 'A' && s[1] <= 'Z') || (s[1] >= 'a' && s[1] <= 'z')) &&
-		s[2] == ':' && s[3] == '/' {
+		s[2] == ':' && (s[3] == '/' || s[3] == '\\') {
 		s = strings.ReplaceAll(s[1:], "/", `\`)
 	}
+	return s
+}
+
+func (d *rusticatedDriver) stringToCPtr(s string) (uint64, func()) {
+	s = normalizeHostNativePath(s)
 	ptr, free, err := dload.CString(lmLib, s)
 	if err != nil {
 		return 0, func() {}
@@ -292,15 +303,15 @@ func (d *rusticatedDriver) loadedFileModalitySupportedBackends(file uint64, moda
 	return out
 }
 func (d *rusticatedDriver) streamChunkGetText(chunk uint64) uint64 {
-	v, _ := callDylib(symLMStreamChunkGetText, []byte{i64}, []byte{i64}, chunk)
+	v, _ := callDylibWithParent(symLMStreamChunkGetText, d.parentInvID, []byte{i64}, []byte{i64}, chunk)
 	return v
 }
 func (d *rusticatedDriver) streamChunkIsFinal(chunk uint64) bool {
-	v, _ := callDylib(symLMStreamChunkIsFinal, []byte{i64}, []byte{i32}, chunk)
+	v, _ := callDylibWithParent(symLMStreamChunkIsFinal, d.parentInvID, []byte{i64}, []byte{i32}, chunk)
 	return int32(v) != 0
 }
 func (d *rusticatedDriver) streamChunkGetError(chunk uint64) uint64 {
-	v, _ := callDylib(symLMStreamChunkGetError, []byte{i64}, []byte{i64}, chunk)
+	v, _ := callDylibWithParent(symLMStreamChunkGetError, d.parentInvID, []byte{i64}, []byte{i64}, chunk)
 	return v
 }
 
@@ -433,8 +444,8 @@ var (
 func (d *rusticatedDriver) createTrampoline() uint64 {
 	trampolineRegOnce.Do(func() {
 		cbSig := []byte{0x60, 2, i64, i64, 0}
-		rusticatedTrampoline, _ = dload.DylibRegisterCallback(lmLib, cbSig, unsafe.Pointer(&trampolineOv[0]), 512,
-			func(args []uint64) []uint64 {
+		rusticatedTrampoline, _ = dload.DylibRegisterCallbackWithContext(lmLib, cbSig, unsafe.Pointer(&trampolineOv[0]), 512,
+			func(invID uint64, _ uint64, args []uint64) []uint64 {
 				if len(args) < 2 {
 					return nil
 				}
@@ -443,7 +454,8 @@ func (d *rusticatedDriver) createTrampoline() uint64 {
 				if chunkPtr == 0 {
 					return nil
 				}
-				sharedTokenCallback(&rusticatedDrv, userData, chunkPtr)
+				cbDrv := rusticatedDriver{parentInvID: invID}
+				sharedTokenCallback(&cbDrv, userData, chunkPtr)
 				return nil
 			})
 	})

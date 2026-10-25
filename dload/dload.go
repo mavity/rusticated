@@ -81,7 +81,25 @@ func clientForHandle(libHandle uint64) (*WorkerClient, uint64, error) {
 	return client, libHandle, nil
 }
 
+func normalizeNativeLibraryPath(path string) string {
+	if len(path) >= 4 && (path[0] == '/' || path[0] == '\\') &&
+		((path[1] >= 'A' && path[1] <= 'Z') || (path[1] >= 'a' && path[1] <= 'z')) &&
+		path[2] == ':' && (path[3] == '/' || path[3] == '\\') {
+		out := make([]byte, len(path)-1)
+		for i := 1; i < len(path); i++ {
+			if path[i] == '/' {
+				out[i-1] = '\\'
+			} else {
+				out[i-1] = path[i]
+			}
+		}
+		return string(out)
+	}
+	return path
+}
+
 func DylibOpen(path string, flags int) (uint64, error) {
+	path = normalizeNativeLibraryPath(path)
 	client, err := getWorkerForPath(path)
 	if err != nil {
 		return 0, err
@@ -173,6 +191,12 @@ func DylibCall(sym uint64, sig []byte, args []uint64, parentInvID uint64) ([]uin
 	client, err := clientForSym(sym)
 	if err != nil {
 		return nil, err
+	}
+	if parentInvID == 0 {
+		// Serialize outer (non-reentrant) calls behind any in-flight Go callback
+		// so opCbReturn is never starved behind an outer C call that waits on the
+		// callback thread's C++ mutex.
+		client.waitNoActiveCallback()
 	}
 
 	payload := make([]byte, 8+8+4+len(sig)+4+len(args)*8)
@@ -301,6 +325,15 @@ func DylibWriteMem(libHandle uint64, ptr uint64, src []byte) error {
 }
 
 func DylibRegisterCallback(libHandle uint64, sig []byte, cbOvPtr unsafe.Pointer, _ uint32, fn func(args []uint64) []uint64) (uint64, error) {
+	return DylibRegisterCallbackWithContext(libHandle, sig, cbOvPtr, 0, func(_ uint64, _ uint64, args []uint64) []uint64 {
+		if fn == nil {
+			return nil
+		}
+		return fn(args)
+	})
+}
+
+func DylibRegisterCallbackWithContext(libHandle uint64, sig []byte, cbOvPtr unsafe.Pointer, _ uint32, fn CallbackHandler) (uint64, error) {
 	client, _, err := clientForHandle(libHandle)
 	if err != nil {
 		return 0, err
@@ -327,7 +360,11 @@ func DylibRegisterCallback(libHandle uint64, sig []byte, cbOvPtr unsafe.Pointer,
 		client.unregisterCallback(cbID)
 		return 0, errors.New("register callback failed")
 	}
-	return binary.LittleEndian.Uint64(resp.body[1:9]), nil
+	trampoline := binary.LittleEndian.Uint64(resp.body[1:9])
+	symsMu.Lock()
+	syms[trampoline] = client
+	symsMu.Unlock()
+	return trampoline, nil
 }
 
 func DylibUnregisterCallback(cbOvPtr unsafe.Pointer) {

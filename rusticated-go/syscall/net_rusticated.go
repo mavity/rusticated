@@ -97,9 +97,17 @@ func netFmtIPv6(addr [16]byte) string {
 	return string(buf[:j])
 }
 
+// netSocketPort records the actual OS-assigned bound port after Listen() succeeds.
+var netSocketPort = map[int32]int{}
+
+// SocketBoundPort returns the local port assigned to fd by Listen(), or 0 if unknown.
+func SocketBoundPort(fd int) int {
+	return netSocketPort[int32(fd)]
+}
+
 // ── callNetOpen: shared helper ─────────────────────────────────────────────
 
-func callNetOpen(addr string, port uint16, flags uint32) (uint64, Errno) {
+func callNetOpen(addr string, port uint16, flags uint32) (uint64, uint16, Errno) {
 	var dummy byte
 	var ctx overlappedContext
 	if len(addr) > 0 {
@@ -111,9 +119,13 @@ func callNetOpen(addr string, port uint16, flags uint32) (uint64, Errno) {
 	}
 	awaitOverlapped(&ctx)
 	if ctx.o.hostError != 0 {
-		return 0, Errno(ctx.o.hostError)
+		return 0, 0, Errno(ctx.o.hostError)
 	}
-	return ctx.o.resultExt, 0
+	boundPort := uint16(ctx.o.continued)
+	if boundPort == 0 {
+		boundPort = port
+	}
+	return ctx.o.resultExt, boundPort, 0
 }
 
 // ── Socket syscall bridge ──────────────────────────────────────────────────
@@ -141,7 +153,12 @@ func Bind(fd int, sa Sockaddr) error {
 	return nil
 }
 
-func StopIO(fd int) error { return nil }
+func StopIO(fd int) error {
+	if entry, ok := fdMap[int32(fd)]; ok && entry.handle != 0 && entry.handle != netPendingHandle {
+		rusticated_handle_close(entry.handle)
+	}
+	return nil
+}
 
 func Listen(fd int, backlog int) error {
 	bind, ok := netSocketBind[int32(fd)]
@@ -150,11 +167,14 @@ func Listen(fd int, backlog int) error {
 		bind.addr = ""
 		bind.port = 0
 	}
-	handle, errno := callNetOpen(bind.addr, bind.port, 0 /* listen */)
+	handle, boundPort, errno := callNetOpen(bind.addr, bind.port, 0 /* listen */)
 	if errno != 0 {
 		return errnoErr(errno)
 	}
 	fdMap[int32(fd)] = fdEntry{handle: handle, path: "socket:listening"}
+	if boundPort > 0 {
+		netSocketPort[int32(fd)] = int(boundPort)
+	}
 	delete(netSocketBind, int32(fd))
 	return nil
 }
@@ -189,7 +209,7 @@ func Connect(fd int, sa Sockaddr) error {
 	if addr == "" {
 		return errnoErr(EADDRNOTAVAIL)
 	}
-	handle, errno := callNetOpen(addr, port, 1 /* connect */)
+	handle, _, errno := callNetOpen(addr, port, 1 /* connect */)
 	if errno != 0 {
 		return errnoErr(errno)
 	}

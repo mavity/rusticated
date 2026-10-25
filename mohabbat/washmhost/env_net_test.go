@@ -240,9 +240,13 @@ func TestSysNet(t *testing.T) {
 		env.Poll(context.Background(), mod)
 
 		val, _ := mod.Memory().Read(ovPtr, 24)
+		boundPort := binary.LittleEndian.Uint64(val[8:16])
 		handle := binary.LittleEndian.Uint64(val[16:24])
 		if handle == 0 {
 			t.Error("listen failed")
+		}
+		if boundPort == 0 {
+			t.Error("expected non-zero bound port in Overlapped.continued for port 0 listen")
 		}
 		env.sys_handle_close(context.Background(), mod, []uint64{handle})
 	})

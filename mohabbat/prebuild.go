@@ -733,6 +733,36 @@ func generateGoOverlay(ws, goroot string, verbose bool) error {
 		return fmt.Errorf("could not patch socket() in net_fake.go: rusticatedSocket call not inserted")
 	}
 
+	// Patch src/net/fd_fake.go so (fd *netFD) Close() immediately invokes
+	// syscall.Close(fd.pfd.Sysfd) before fd.pfd.Close() waits on csema.
+	// Without this, closing a listener/conn while Accept()/Read() is parked in
+	// awaitOverlapped deadlocks forever waiting for the syscall to return.
+	fdFakeSrc := filepath.Join(goroot, "src/net/fd_fake.go")
+	fdFakeContent, err := os.ReadFile(fdFakeSrc)
+	if err != nil {
+		return fmt.Errorf("failed to read src/net/fd_fake.go: %w", err)
+	}
+	fdFakeStr := strings.Replace(
+		string(fdFakeContent),
+		"import (\n\t\"internal/poll\"\n\t\"runtime\"\n\t\"time\"\n)",
+		"import (\n\t\"internal/poll\"\n\t\"runtime\"\n\t\"syscall\"\n\t\"time\"\n)",
+		1,
+	)
+	fdFakeStr, err = patchGoStr(fdFakeStr, []regastPatch{
+		{pat: `(?s)func \(fd \*netFD\) Close\(\) error \{.*?return fd\.pfd\.Close\(\)\n\}`,
+			repl: "func (fd *netFD) Close() error {\n\tif fd.fakeNetFD != nil {\n\t\treturn fd.fakeNetFD.Close()\n\t}\n\truntime.SetFinalizer(fd, nil)\n\tsyscall.Close(fd.pfd.Sysfd)\n\treturn fd.pfd.Close()\n}"},
+	})
+	if err != nil {
+		return fmt.Errorf("patch fd_fake.go: %w", err)
+	}
+	if !strings.Contains(fdFakeStr, "syscall.Close(fd.pfd.Sysfd)") {
+		return fmt.Errorf("could not patch Close() in fd_fake.go")
+	}
+	genFdFakeGo := filepath.Join(genDir, "net/fd_fake.go")
+	if err := writeFileIfChanged(genFdFakeGo, []byte(fdFakeStr)); err != nil {
+		return fmt.Errorf("failed to write patched fd_fake.go: %w", err)
+	}
+
 	// PATCH: net/lookup_unix.go to preserve Context across DNS lookups for http.Get stability.
 	lookupUnixSrc := filepath.Join(goroot, "src/net/lookup_unix.go")
 	if lookupUnixContent, err := os.ReadFile(lookupUnixSrc); err == nil {
@@ -871,8 +901,9 @@ func generateGoOverlay(ws, goroot string, verbose bool) error {
 		{"src/path/filepath/path_unix.go", canon(genPathUnix)},
 		// net/http (generated patch)
 		{"src/net/http/fs.go", canon(genFsGo)},
-		// net (generated patch — socket() redirected to rusticatedSocket)
+		// net (generated patch — socket() redirected to rusticatedSocket, netFD.Close() patched in fd_fake.go)
 		{"src/net/net_fake.go", canon(genNetFakeGo)},
+		{"src/net/fd_fake.go", canon(genFdFakeGo)},
 		{"src/net/lookup_unix.go", canon(filepath.Join(genDir, "net/lookup_unix.go"))},
 		// net (new overlay file — rusticatedSocket + DNS init)
 		{"src/net/net_rusticated.go", canon(filepath.Join(overlayDir, "net/net_rusticated.go"))},

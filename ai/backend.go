@@ -175,21 +175,37 @@ func (st *streamState) requestClose() {
 	}
 }
 
-// deliver runs onChunk on the calling (native callback) thread unless the
-// stream has been stopped.
-func (st *streamState) deliver(token string) {
-	if !st.delivery.CompareAndSwap(deliveryIdle, deliveryActive) {
-		return
-	}
-	st.onChunk(token)
+// beginCallback enters the callback critical section unless the stream has
+// already been stopped.
+func (st *streamState) beginCallback() bool {
+	return st.delivery.CompareAndSwap(deliveryIdle, deliveryActive)
+}
+
+// endCallback exits the callback critical section, closing bodyDone if stop()
+// was requested while this callback was in progress.
+func (st *streamState) endCallback() {
 	if !st.delivery.CompareAndSwap(deliveryActive, deliveryIdle) {
 		st.delivery.Store(deliveryStopped)
 		close(st.bodyDone)
 	}
 }
 
-// stop guarantees that onChunk is not running, and will not run again, once it
-// returns. It waits for an onChunk that is already in progress.
+// deliver runs onChunk on the calling (native callback) thread unless the
+// stream has been stopped.
+func (st *streamState) deliver(token string) {
+	if st.delivery.Load() == deliveryActive {
+		st.onChunk(token)
+		return
+	}
+	if !st.beginCallback() {
+		return
+	}
+	defer st.endCallback()
+	st.onChunk(token)
+}
+
+// stop guarantees that sharedTokenCallback/onChunk is not running, and will
+// not run again, once it returns. It waits for a callback that is already in progress.
 func (st *streamState) stop() {
 	for {
 		switch st.delivery.Load() {
@@ -228,9 +244,13 @@ func streamStateFromUserData(userData uint64) *streamState {
 func sharedTokenCallback(drv LMDriver, userData, chunkPtr uint64) {
 	st := streamStateFromUserData(userData)
 
-	if textPtr := drv.streamChunkGetText(chunkPtr); textPtr != 0 {
-		if token := drv.ptrToString(textPtr); token != "" {
-			st.deliver(token)
+	entered := st.beginCallback()
+	if entered {
+		defer st.endCallback()
+		if textPtr := drv.streamChunkGetText(chunkPtr); textPtr != 0 {
+			if token := drv.ptrToString(textPtr); token != "" {
+				st.onChunk(token)
+			}
 		}
 	}
 

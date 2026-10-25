@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/mavity/rusticated/kabibi/internal/privatefile"
 )
@@ -22,14 +23,24 @@ type AIConfig struct {
 }
 
 func Directory() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve user home directory: %w", err)
+	if custom := strings.TrimSpace(os.Getenv("KABIBI_CONFIG_DIR")); custom != "" {
+		return filepath.Clean(custom), nil
+	}
+	home := strings.TrimSpace(os.Getenv("USERPROFILE"))
+	if home == "" {
+		home = strings.TrimSpace(os.Getenv("HOME"))
+	}
+	if home == "" {
+		var err error
+		home, err = os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve user home directory: %w", err)
+		}
 	}
 	if home == "" {
 		return "", fmt.Errorf("user home directory is empty")
 	}
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == "windows" || filepath.Separator == '\\' {
 		return filepath.Join(home, "AppData", "Local", "kabibi"), nil
 	}
 	return filepath.Join(home, ".config", "kabibi"), nil
