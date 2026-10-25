@@ -146,22 +146,163 @@ That gives us **six deterministic, fine-grained unit tests** in `dload/dload_tes
 
 ---
 
-### Proposed Plan (For Your Approval Before Any Code Changes)
+## 4. Detailed Engineering Specification for `dload` & `ai` Fixes
 
-1. **`dload` Rust Worker (`dload/src/callbacks.rs` & `dload/src/main.rs`):**
-   - Replace the single global `CB_RETURN_INV: AtomicU64` with a fixed table of active callback invocation slots (`[CallbackSlot; 32]`), each tracking `inv_id`, `thread_id`, a delegated call mailbox (`sym_addr`, `args`, `result`), and `returned` / `return_val`.
-   - Record the reader thread's OS thread ID (`GetCurrentThreadId` / `gettid` / `pthread_self`).
-   - In `on_callback`:
-     - Send `OP_CB_INVOKE` with the real OS `thread_id` and up to 8 arguments, and return the callback's `u64` result.
-     - If `current_thread_id == reader_thread_id` (synchronous callback on main thread), pump `read_frame()` / `dispatch_frame()` directly until this slot's `inv_id` receives `OP_CB_RETURN`!
-     - If on a background thread (async C++ thread), loop waiting until either:
-       - A delegated `OP_CALL_REQ` with `parent_inv_id == inv_id` is placed in this slot's mailbox -> execute `call_c_func` **on this callback thread**, send `OP_CALL_RESP`, and continue waiting; or
-       - `OP_CB_RETURN(inv_id)` arrives -> return `return_val` to C++.
-2. **`dload` Go Client (`dload/client.go` & `dload/dload.go`):**
-   - Pass `invID` into registered callbacks (or provide `DylibRegisterCallbackWithInvID` / thread-local callback context) so re-entrant `DylibCall`s pass `parentInvID = invID`.
-3. **`ai/backend.go` (`sharedTokenCallback` & `streamState`):**
-   - Move the `deliveryIdle -> deliveryActive` transition and `close(st.bodyDone)` to wrap the **entire** `sharedTokenCallback` (so `st.stop()` in `c.abort()` never unblocks until `sharedTokenCallback` has finished all `drv.streamChunk*` calls and is returning `opCbReturn`).
-   - Revert the proactive `8 KiB` `compressLargeBlock` snippet in `ai/session.go`.
-4. **Unit Tests (`dload/dload_test.go` & `ai/backend_stream_test.go`):**
-   - Implement all 6 unit tests above and run them on both native Go and inside `washmhost` (`go run . ./dload --test` and `go run . ./ai --test`).
+### 4.1 Rust Worker: Invocation Slot Table & Thread-Affiliated Dispatch (`dload/src/callbacks.rs`, `dload/src/main.rs`)
+
+#### 4.1.1 OS Thread ID Discovery (`os_win.rs` / `os_unix.rs`)
+Each worker flavour exposes `pub fn current_thread_id() -> u64`:
+- **Windows (`os_win.rs`):** Calls `GetCurrentThreadId() -> u32` from `kernel32.dll` (`raw-dylib`), cast to `u64`.
+- **Linux (`os_unix.rs`):** Executes raw `SYS_gettid` syscall (`186` on `x86_64`, `178` on `aarch64`, `224` on `arm`).
+- **macOS (`os_unix.rs`):** Calls `pthread_mach_thread_np(pthread_self())` or `pthread_self() as usize as u64` from `libSystem.B.dylib`.
+
+When `run()` starts in `dload/src/main.rs`, it records `READER_THREAD_ID.store(os::current_thread_id(), Ordering::Release)` before entering the main `read_frame()` loop.
+
+#### 4.1.2 Active Callback Invocation Table (`callbacks.rs`)
+Replace the single global `CB_RETURN_INV: AtomicU64` with a fixed lock-free/spinlocked table of `MAX_ACTIVE_INVOCATIONS = 32` slots so concurrent and nested callbacks never overwrite each other:
+
+```rust
+pub struct DelegatedCall {
+    pub req_id: u64,
+    pub sym_addr: usize,
+    pub args: [u64; 8],
+    pub argc: usize,
+}
+
+pub struct InvocationSlot {
+    pub state: AtomicU32, // 0 = Free, 1 = Waiting, 2 = HasCall, 3 = Returned
+    pub inv_id: AtomicU64,
+    pub thread_id: AtomicU64,
+    pub return_val: AtomicU64,
+    pub call: UnsafeCell<DelegatedCall>,
+}
+```
+State transitions for an `InvocationSlot`:
+1. **Allocation on Callback Entry (`on_callback`):**
+   - Generates `inv_id = NEXT_INV_ID.fetch_add(1, Ordering::SeqCst)`.
+   - Claims a free slot (`state: 0 -> 1`), stores `inv_id` and `thread_id = os::current_thread_id()`.
+   - Sends `OP_CB_INVOKE` with header `id = inv_id` and payload `[cb_id: u64][thread_id: u64][argc: u32][args: u64 * 8]`.
+2. **Waiting & Re-entrant Execution Loop (`on_callback`):**
+   - **Case 1 — Synchronous Callback on the Reader Thread (`thread_id == READER_THREAD_ID`):**
+     - Because this callback was invoked *by* `call_c_func` on the main reader thread itself, nobody else is reading `stdin`!
+     - `on_callback` loops:
+       - If `slot.state == 3` (`Returned`), reads `ret = slot.return_val`, resets `slot.state = 0`, and returns `ret` to the C caller.
+       - If `slot.state == 2` (`HasCall`), executes `call_c_func` directly, sends `OP_CALL_RESP`, sets `slot.state = 1`, and continues.
+       - Otherwise, calls `read_frame()` and `dispatch_frame(hdr, &body)` directly on this thread!
+       - If a nested synchronous callback (`trampoline_B`) is triggered inside `dispatch_frame`, the inner `on_callback` allocates a second `InvocationSlot` and recursively pumps `read_frame()` until the inner `inv_id` receives `OP_CB_RETURN`, then returns to the outer `on_callback` loop!
+   - **Case 2 — Asynchronous Callback on a Background C/C++ Thread (`thread_id != READER_THREAD_ID`):**
+     - The main reader thread is still running `while let Ok((hdr, body)) = read_frame()`.
+     - The background C++ thread loops until `slot.state` leaves `1` (`Waiting`):
+       - If `slot.state == 2` (`HasCall`): a re-entrant `OP_CALL_REQ` with `parent_inv_id == inv_id` (or matching `thread_id`) was routed to this slot by `dispatch_frame`. The C++ callback thread itself executes `arch_call::call_c_func(call.sym_addr, &call.args[..call.argc])`, sends `OP_CALL_RESP(call.req_id, ret_val)`, transitions `slot.state: 2 -> 1`, and continues waiting!
+       - If `slot.state == 3` (`Returned`): reads `ret = slot.return_val`, releases the slot (`slot.state = 0`), and returns `ret` to the C++ caller.
+3. **Routing `OP_CALL_REQ` in `dispatch_frame` (`main.rs`):**
+   - Parse `parent_inv_id = u64::from_le_bytes(body[8..16])`.
+   - **If `parent_inv_id != 0`:**
+     - Find the active `InvocationSlot` with `slot.inv_id == parent_inv_id`.
+     - If `slot.thread_id == os::current_thread_id()` (we are already on that thread inside a synchronous pump), execute `call_c_func` immediately and send `OP_CALL_RESP`.
+     - Otherwise (the target callback is on a background C++ thread waiting in Case 2), write `DelegatedCall { req_id: hdr.id, sym_addr, args, argc }` into `slot.call` and transition `slot.state: 1 -> 2` (`HasCall`)! The `main` reader thread returns **immediately** to `read_frame()` without blocking, while the background C++ callback thread executes the call on its own OS thread and sends `OP_CALL_RESP`!
+   - **If `parent_inv_id == 0` (Outer call):**
+     - Execute on the main thread (or if an asynchronous callback is currently active in `Waiting`, see Section 4.3 below for how `backend.go` + `dload` prevent outer cancellation from blocking `stdin`).
+4. **Handling `OP_CB_RETURN` in `dispatch_frame` (`main.rs`):**
+   - Parse `ret_val` from `body` (if `body.len() >= 13` and `res_count >= 1`, `u64::from_le_bytes(body[5..13])`, else `0`).
+   - Find the active `InvocationSlot` with `slot.inv_id == hdr.id`, store `slot.return_val = ret_val`, and transition `slot.state = 3` (`Returned`).
+5. **Expanding Trampoline Signatures (`callbacks.rs`):**
+   - Expand `TRAMPOLINES` from 8 slots of `(usize, usize) -> ()` to 16 slots of `unsafe extern "C" fn(usize, usize, usize, usize, usize, usize, usize, usize) -> usize`, passing all 8 register arguments and returning the `usize` (`u64`) result from `on_callback`.
+
+---
+
+### 4.2 Go Client: Propagating `invID` for Re-Entrant Calls (`dload/dload.go`, `dload/client.go`, `ai/backend_rusticated.go`)
+
+1. **Callback Context & `invID` Tracking in `dload`:**
+   - In `dload/client.go`, when `handleCbInvoke(invID uint64, body []byte)` runs in its goroutine:
+     - Store the active `invID` (or pass `invID` directly to callbacks registered via `DylibRegisterCallback` / an `activeInvID` atomic/context helper).
+     - Even simpler and zero-allocation for callers:
+       - Provide `DylibCall(sym uint64, sig []byte, args []uint64, parentInvID uint64)` (which already accepts `parentInvID`!).
+       - Add `CurrentCallbackInvID() uint64` or pass `invID` into `sharedTokenCallback` by storing the active callback's `invID` in `rusticatedDriver` (or passing it via a callback registration helper `DylibRegisterCallbackWithInvID` / `atomic.Uint64` per active callback).
+       - In `ai/backend_rusticated.go`, `rusticatedDriver` tracks the current callback's `invID` (or passes it through `callDylib`) so every `streamChunkGetText(chunkPtr)` and `streamChunkIsFinal(chunkPtr)` made during `sharedTokenCallback` passes `parentInvID = activeInvID` instead of `0`!
+
+---
+
+### 4.3 Fixing the Stream Cancellation / `convCancelProcess` Race (`ai/backend.go`, `ai/session.go`)
+
+Even with `parent_inv_id` funnelled onto the C++ callback thread, look at what happens when `loopDetector` (or caller `ctx` cancellation) aborts a stream:
+1. In `ai/backend.go`:
+   - Currently, `sharedTokenCallback` calls `st.deliver(token)` **before** calling `drv.streamChunkIsFinal(chunkPtr)`, and `st.deliver(token)` transitions `deliveryActive -> deliveryIdle` (or closes `st.bodyDone`) **before** `sharedTokenCallback` returns to `dload` (`opCbReturn`).
+   - That allows `c.abort()` on the `SendStream` goroutine to unblock from `st.stop()` and call `c.drv.convCancelProcess(c.conv)` (`parent_inv_id = 0`) **while `sharedTokenCallback` is still running `streamChunkIsFinal` and before `opCbReturn` has been sent to `dload`**!
+   - When `dload`'s main reader thread receives `OP_CALL_REQ(litert_lm_conversation_cancel_process, parent_inv_id=0)` before `OP_CB_RETURN`, `dload`'s main thread calls `litert_lm_conversation_cancel_process`, which blocks inside C++ waiting for the C++ stream callback thread to exit `on_callback()`—while the C++ stream callback thread is waiting for `dload`'s main thread to read `OP_CB_RETURN`!
+2. **The Two-Part Fix (Defense in Depth):**
+   - **Part 1 (`ai/backend.go` — `sharedTokenCallback` lifecycle):**
+     - Move the `deliveryIdle -> deliveryActive` guard to wrap the **entire** `sharedTokenCallback(drv, userData, chunkPtr)` function!
+     - Specifically: `st.beginCallback()` at the very top of `sharedTokenCallback` (before `streamChunkGetText`), and `defer st.endCallback()` at the very end of `sharedTokenCallback` (after `streamChunkIsFinal` and `doneCh` send).
+     - `st.stop()` waits for `<-st.bodyDone` (which is closed by `st.endCallback()`).
+   - **Part 2 (`dload/src/main.rs` — Non-blocking Outer Calls While a Callback Is Active):**
+     - What if an external goroutine (e.g., user pressing `Ctrl+C` on `ctx.Done()`) sends `OP_CALL_REQ(litert_lm_conversation_cancel_process, parent_inv_id = 0)` at the exact microsecond that the C++ stream thread just emitted `OP_CB_INVOKE` over `stdout`?
+     - If `dload`'s main reader thread calls `arch_call::call_c_func` synchronously while any background callback slot is in `state == 1` (`Waiting`), and that C function waits on the callback thread's lock, the main reader thread will block and never read `OP_CB_RETURN`!
+     - **Solution in `dload`:** When `OP_CALL_REQ` arrives with `parent_inv_id == 0` while any background callback slot is active (`callbacks::has_active_background_callback()`), either:
+       1. Spawn a short-lived OS worker thread (`CreateThread` / `pthread_create`) to execute that `parent_inv_id == 0` `call_c_func` and send `OP_CALL_RESP` when it finishes, keeping the `main` stdin reader thread 100% unblocked so it can always read `OP_CB_RETURN`! **OR**
+       2. In Go (`dload/client.go`), serialize `opCallReq` (`parentInvID == 0`) behind any in-flight `handleCbInvoke` on the same `WorkerClient` so Go never sends a `parentInvID == 0` `opCallReq` down the pipe while an `opCbInvoke` is currently being handled in Go and hasn't sent `opCbReturn` yet!
+     - Doing **both** (serializing `parentInvID == 0` behind active `opCbInvoke` in `dload/client.go` **and** spawning a worker thread in Rust when an outer call runs concurrently) guarantees 100% freedom from pipe/reader deadlocks under all possible interleavings!
+3. **Reverting the `8 KiB` `compressLargeBlock` Workaround in `ai/session.go`:**
+   - Remove the proactive `len(b) > 8192 -> s.compressLargeBlock` loop in `runStage5Execution` (`ai/session.go:1658-1668`) so tool outputs (like `README.md`) are not crushed into 20-word gists or subjected to 3 extra LLM compressor calls mid-turn.
+
+---
+
+## 5. Total Test Coverage Specification
+
+All tests below must run **both** natively (`go test`) and inside `washmhost` (`go run . ./dload --test` and `go run . ./ai --test`), with zero skips and strict timeouts (`<= 5s` per test) so any deadlock fails loudly and immediately.
+
+### 5.1 `dload/dload_test.go` — Fine-Grained & Stress Unit Tests
+
+1. **`TestDloadSynchronousCallbackOnMainThread` (Verifies Flaw A Fix & Return Value):**
+   - Registers a callback `cb` via `DylibRegisterCallback` that receives `(a0, a1)` and returns `a0 + a1 + 42`.
+   - Calls `DylibCall(trampolinePtr, sig, []uint64{100, 200}, 0)` directly from Go (causing `dload`'s main reader thread to call `trampoline_0(100, 200)` synchronously).
+   - Verifies that `on_callback` detects `current_thread_id() == READER_THREAD_ID`, pumps `OP_CB_RETURN` without deadlocking, and returns `342`.
+
+2. **`TestDloadSynchronousCallbackWithReentrantCallsAndMemoryOps` (Verifies Re-entrant `DylibCall` + `DylibReadMem` + `DylibWriteMem`):**
+   - Registers a callback that, while inside the callback:
+     - Calls `DylibAlloc`, `DylibWriteMem`, `DylibReadMem`, and `DylibFree`.
+     - Calls `GetCurrentProcessId` / `getpid` via `DylibCall(..., parentInvID)`.
+   - Invokes `trampolinePtr` via `DylibCall` and asserts the inner memory round-trip and PID call succeed and return the expected value.
+
+3. **`TestDloadNestedCallbacksLIFO` (Verifies Flaw C Fix — Multi-Slot Table):**
+   - Registers two distinct callbacks: `cbOuter` and `cbInner`.
+   - Calls `trampolineOuter(10, 20)`.
+   - Inside `cbOuter`, makes a re-entrant `DylibCall(trampolineInner, ..., []uint64{3, 4}, outerInvID)`.
+   - Inside `cbInner`, verifies args `(3, 4)` and returns `3 * 4 = 12`.
+   - `cbOuter` receives `12` from the inner `DylibCall` and returns `10 + 20 + 12 = 42`.
+   - Asserts the outer `DylibCall` returns `42` without slot collision.
+
+4. **`TestDloadBackgroundThreadCallbackFunnelsParentInvIDToSameOSThread` (Verifies Flaw B Fix — Strict OS Thread Affinity):**
+   - Resolves `CreateThread` + `WaitForSingleObject` + `GetCurrentThreadId` in `kernel32.dll` (or `pthread_create` + `pthread_join` + `pthread_self` on Unix).
+   - Registers a callback `cbWorker`.
+   - Spawns a real native OS thread inside the `dload` worker whose entry point is `trampolineWorker`.
+   - When `cbWorker` is invoked in Go:
+     - Reads the `thread_id` reported in `OP_CB_INVOKE`.
+     - Calls `GetCurrentThreadId` / `pthread_self` with `parentInvID = invID` (funnelled to the callback thread) and with `parentInvID = 0` (executed on the reader/main thread).
+     - Asserts that:
+       1. `tid(parentInvID == invID) == callback_thread_id` (proving the re-entrant call ran on the exact OS thread of the callback!).
+       2. `tid(parentInvID == 0) != callback_thread_id` (proving the callback is genuinely on a separate background OS thread from the main reader thread!).
+
+5. **`TestDloadConcurrentBackgroundCallbacksStress` (Verifies Multi-Thread Slot Concurrency):**
+   - Spawns 4 native OS threads via `CreateThread` / `pthread_create` pointing at `trampolinePtr` (or loops 50 parallel callback invocations across multiple goroutines and native threads), each performing re-entrant `DylibReadMem` and `DylibCall(..., invID)` calls and returning a unique checksum.
+   - Asserts all invocations complete with exact checksums and zero timeouts.
+
+6. **`TestDloadOuterCallWhileCallbackInFlightDoesNotDeadlock` (Verifies Section 4.3 Pipe Serialization):**
+   - Starts a callback on a background thread (`CreateThread` -> `trampolinePtr`).
+   - While the Go callback is paused inside `handleCbInvoke` (before `opCbReturn` is sent), a second Go goroutine issues an outer `DylibCall(..., parentInvID = 0)` that would contend or run concurrently.
+   - Verifies that `opCbReturn` is never starved behind the outer call and both complete within `< 1s`.
+
+### 5.2 `ai/backend_stream_test.go` — Holistic Stream & Cancellation Tests
+
+7. **`TestStreamAbortFromInsideChunkCallbackWaitsForFullCallbackExit`:**
+   - Uses a mock `LMDriver` where the simulated C stream thread holds a `sync.Mutex` (`nativeStreamMu`) across the **entire** `sharedTokenCallback(drv, userData, chunkPtr)` call (including `streamChunkGetText` **and** `streamChunkIsFinal`), and where `convCancelProcess` acquires `nativeStreamMu` (mirroring LiteRT-LM's internal C++ conversation mutex).
+   - Feeds repeating tokens so `Conversation.SendStream`'s `loopDetector` triggers `cancel()` inside `st.deliver(token)`, while `streamChunkIsFinal` is deliberately delayed by `20ms` after `st.deliver(token)` returns.
+   - Without the `sharedTokenCallback` lifecycle fix, `c.abort()` calls `convCancelProcess` during that `20ms` window while `nativeStreamMu` is still held by `sharedTokenCallback`, causing an immediate deadlock/test failure.
+   - With the fix, `st.stop()` waits until `sharedTokenCallback` has completely exited and released `nativeStreamMu` before calling `convCancelProcess`, completing cleanly in `< 100ms`.
+
+8. **Manual Verification of the Original `-p` Ukrainian Poem Prompt:**
+   - After all unit tests pass on both native Go and inside `washmhost`, run the exact command:
+     `go run . kabibi -r -p "Now review the project's sources and codebase, plus documentation in this project that is nestled in this directory, and write a short and succint summary in a form of a small-sized to medium-sized poem in Ukrainian language. Sophisticated? Yes."`
+   - Verify it completes end-to-end without hanging on `[work]`.
+
 
