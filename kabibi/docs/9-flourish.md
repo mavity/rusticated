@@ -651,3 +651,22 @@ EvalJS(fmt.Sprintf("globalThis.__kabibi_hud?.syncState(%s)", strconv.Quote(strin
    * Render file operation modals either inside `#kabibi-dom-hud` when panels are open or inside the CRT `CellBuf`.
 
 
+# CRITICAL implementation rules
+
+> I want to say, this CRT blurry presentation should be a separate mode, which is not what Kabibi in browser does by default.
+>
+> The default should look for the parent (by id or convention or explicit parameter) to add xterm.js and simply operate inside it. And if the parent is not found, add one and lock it for full screen.
+>
+> However the CRT/blurry/flourish should be flipped on for running in the super-demo mode.
+>
+> We can code both of those inside the Kabibi code, or have the super-demo mode in super-demo page whichever easier.
+>
+> Also I want to be clear: currently Kabibi's JS code is awkwardly embedded in Golang source code with quotes and backticks. We want as much as possible of that out in JS files, that are puled into Golang at build time with //go:... directives. That allows us to test JS too, in node.js built-in tester separately from the page.
+
+Yes—both are salient architectural requirements, not implementation details.
+
+1. **Kabibi’s default browser mode is an embeddable terminal.** It should use a caller-supplied parent when provided, otherwise find the agreed parent element by ID or convention. Only if no parent exists should it create a container and make it full-screen. CRT, blur, and other flourish effects must be **opt-in for super-demo mode**, not the default browser presentation. Super-demo can be a separate page or an explicit mode in Kabibi; that choice can follow whichever fits the existing structure best.
+
+2. **Browser JavaScript should live in JavaScript files.** Kabibi should load those files into Go at build time with `//go:embed`, rather than maintaining large JS snippets as quoted or backtick-escaped Go strings. Keeping the JS independently testable with Node’s built-in test runner should be part of the design.
+
+I’ll treat these as constraints when revising the spec: separate the default embed path from the super-demo CRT path, and define a JS module/embedding/testing structure.
