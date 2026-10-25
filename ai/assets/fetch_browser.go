@@ -313,7 +313,6 @@ func ensureModelBrowser(ctx context.Context, url string, expectedSize int64, opt
 	}
 
 	filename := filepath.Base(url)
-	opts.progress("download", filename, 0)
 
 	startCode := fmt.Sprintf("globalThis.__rustica_assets.startDownload(%s)", strconv.Quote(url))
 	initProgressJSON, err := EvalJS(startCode)
@@ -331,7 +330,9 @@ func ensureModelBrowser(ctx context.Context, url string, expectedSize int64, opt
 		} else if prog.Received > 0 {
 			recordBrowserModelSize(url, prog.Received)
 		}
-		opts.progress("download", filename, 100)
+		if !prog.Cached {
+			opts.progress("download", filename, 100)
+		}
 		return url, nil
 	}
 
@@ -355,7 +356,7 @@ func ensureModelBrowser(ctx context.Context, url string, expectedSize int64, opt
 			if err := json.Unmarshal([]byte(pJSON), &p); err != nil {
 				continue
 			}
-			if p.Percent != lastPct {
+			if !p.Cached && p.Percent != lastPct {
 				lastPct = p.Percent
 				opts.progress("download", filename, p.Percent)
 			}
@@ -368,7 +369,9 @@ func ensureModelBrowser(ctx context.Context, url string, expectedSize int64, opt
 				} else if p.Received > 0 {
 					recordBrowserModelSize(url, p.Received)
 				}
-				opts.progress("download", filename, 100)
+				if !p.Cached && lastPct != 100 {
+					opts.progress("download", filename, 100)
+				}
 				return url, nil
 			}
 		}
