@@ -19,9 +19,9 @@ func hostPlatformMemorySlots() [memorySlotCount]hostMemorySlot {
 		if unit == 0 {
 			unit = 1
 		}
-		putHostMemorySlot(&slots, memKindSystemTotal, 0, info.Totalram*unit)
-		putHostMemorySlot(&slots, memKindSystemAvail, 0, info.Freeram*unit)
-		putHostMemorySlot(&slots, memKindSwapTotal, 0, info.Totalswap*unit)
+		putHostMemorySlot(&slots, memKindSystemTotal, 0, uint64(info.Totalram)*unit)
+		putHostMemorySlot(&slots, memKindSystemAvail, 0, uint64(info.Freeram)*unit)
+		putHostMemorySlot(&slots, memKindSwapTotal, 0, uint64(info.Totalswap)*unit)
 	}
 
 	paths, _ := filepath.Glob("/sys/class/drm/card*/device/mem_info_vram_total")

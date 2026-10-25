@@ -1,27 +1,69 @@
-# Kabibi Browser Visual Flourish Overview
+# Kabibi Browser Terminal & Super-Demo CRT Specification
 
-The overall complexity is **moderate-to-high, but highly partitioned**, and the project is explicitly structured into two independent phases so the core 3D CRT pipeline is proven and shippable on its own before adding any DOM overlay work:
+This specification separates Kabibi’s normal browser terminal from its optional CRT super-demo. The standard browser experience is an embeddable xterm.js terminal; it is not full-screen by default and has no CRT blur or flourish. The CRT is an explicit super-demo presentation built on the same terminal and host integration. The DOM File Panels HUD remains deferred to Phase 2.
+
+## 1. Modes, Mounting Contract & Core Invariants
+
+### 1.1 Default Mode: Mount a Normal Terminal in the Caller’s Parent
+
+Kabibi’s default browser mode creates and runs xterm.js inside a parent supplied by its caller. Parent selection follows a documented precedence:
+
+1. An explicit DOM element passed in the Kabibi browser options.
+2. An explicit parent element ID passed in those options.
+3. A documented conventional parent ID used by the embedding page.
+4. If no parent resolves, create a parent container, append it to `document.body`, and lock that newly created host to the full viewport.
+
+When an existing parent is found, Kabibi must not move it, resize it to full-screen, or take over surrounding page layout. xterm should fill the parent’s available content box and fit its terminal rows and columns to that size. Observe the parent’s size so fitting follows container resizes, not just window resizes. The caller retains responsibility for the parent’s dimensions. Input, output, TTY sizing, and resize notifications continue through the existing browser host path.
+
+Default mode uses ordinary xterm.js rendering, with no Three.js stage, off-screen framebuffer capture, curvature, blur, or CRT-specific event translation. It remains usable as a normal embedded terminal inside a larger page.
+
+### 1.2 Super-Demo Mode: Explicitly Opt Into the CRT Presentation
+
+The CRT / blur / flourish is enabled only when the embedding page explicitly selects super-demo mode, either by passing a mode option to Kabibi or by loading a dedicated super-demo page that does so. The implementation may choose whichever is simpler, but the default mode must never infer super-demo from being in a browser or from the host being full-screen.
+
+Super-demo mode uses the same Kabibi terminal guest and host callbacks while rendering xterm’s screen surface through Three.js. When it creates its own parent, that parent is full-screen. If super-demo is embedded in a caller-provided parent, it uses that parent’s bounds rather than silently taking over the browser viewport.
+
+### 1.3 Super-Demo CRT Visual Requirements
+
+* **Off-Screen xterm Surface:** The current implementation pins `@xterm/xterm` 6.0.0 and uses `new WebglAddon(true)` (`preserveDrawingBuffer: true`). It reads the addon's private `WebglRenderer._canvas` and subscribes to the private `RenderService.onRender` notification to refresh a Three.js `CanvasTexture`. These private xterm.js APIs are version-sensitive; if either is unavailable, the CRT path must fall back rather than treating the glyph `textureAtlas` as the screen.
+* **3D Curved Geometry & Glass:** Three.js bends inner phosphor and outer refractive/reflective glass meshes. The glass effects should be restrained and keep terminal text readable.
+* **Subtle Bottom-Right Low-Angle Camera:** The `PerspectiveCamera` views the curved screen from a slightly below-and-right position, with restrained perspective inspired by low-angle car posters. The composition should make the lower-right appear closer without compromising readability.
+* **Near-Field Depth-of-Field:** A subtle camera-space depth mask in the phosphor shader applies a small multi-sample blur only to the nearer lower-right area, leaving most terminal text sharp.
+* **Pointer Translation:** Mouse events on the rendered surface are raycast onto the CRT geometry and mapped to xterm screen coordinates, including drag tracking outside the canvas. Keyboard input remains on the same focused terminal; preserve selection, clipboard, TTY resize, and mouse-reporting behavior.
+* **Non-GPU Fallback:** If the accelerated CRT path cannot run or loses its context, show the same terminal instance using direct-to-DOM xterm.js inside the selected parent, with no flourish and no loss of guest state.
+
+### 1.4 JavaScript Source, Go Embedding & Node Tests
+
+Kabibi browser JavaScript must be authored in standalone `.js` files, not maintained as large quoted or backtick-escaped Go string literals. Go packages should embed the relevant JavaScript assets at build time with `//go:embed` and pass or evaluate those sources through the existing browser host mechanism.
+
+Keep browser runtime code and DOM-independent logic in JavaScript files that can also be exercised outside the browser. Use Node.js’s built-in test runner (`node --test`) for focused tests of mount-parent resolution, default-versus-super-demo mode selection, fallback decisions, and other testable behavior. Tests should not require a browser page or Go build. Avoid introducing a transpilation or bundling step unless module loading through the current `EvalJS` mechanism proves it necessary; document that constraint if a bundle is required.
+
+### 1.5 DOM HUD Phase Boundary
+
+The Floating DOM Blue Panels HUD and Go-to-DOM state synchronization remain paused and are not part of the CRT super-demo phase. In both default and super-demo modes, the existing TUI file panels render inside the terminal via their normal VT/ANSI output. The DOM HUD can be reconsidered as a later phase after terminal rendering, pointer behavior, and fallback are proven.
+
+The overall complexity is **moderate-to-high, but highly partitioned**. The standard embedded terminal is the baseline; the CRT is a separate, explicitly enabled super-demo mode. The CRT pipeline is proven independently before any DOM overlay work.
 
 ---
 
-### 1. Phase 1: The 3D Curved CRT, Low-Angle Camera & Near-Field Depth-of-Field (Active Scope)
+### Super-Demo Track: The 3D Curved CRT, Low-Angle Camera & Near-Field Depth-of-Field (Active Scope)
 
-The rendering pipeline builds directly on the existing working browser integration in root `index.html` and `mohabbat/washmhost/js/browser/index.js`:
+The super-demo rendering pipeline builds on Kabibi’s browser host integration. It is opt-in and must not change the default embedded xterm.js behavior:
 
-* **Off-Screen `@xterm/xterm` Surface (Vendored / Patched as Needed):** `@xterm/addon-webgl` renders the full terminal screen into its internal WebGL2 `<canvas>` (`WebglRenderer._canvas`) with `new WebglAddon(true)` (`preserveDrawingBuffer: true`). Exposing this screen framebuffer canvas (and hooking `RenderService.onRender` via a small vendored patch or direct service hook) gives Three.js a live `CanvasTexture` source without touching the glyph sprite sheet (`WebglAddon.textureAtlas`).
+* **Off-Screen `@xterm/xterm` Surface:** The implementation uses xterm.js 6.0.0's private `WebglRenderer._canvas` and `RenderService.onRender` hook with `new WebglAddon(true)` (`preserveDrawingBuffer: true`) to give Three.js a live `CanvasTexture` source. This is an explicit version-sensitive dependency, not a public xterm contract; the glyph sprite sheet (`WebglAddon.textureAtlas`) is not the screen.
 * **3D Curved Geometry, Stylized Glass & Low-Angle Camera:** Instead of a flat 2D post-processing quad, Three.js bends two 3D meshes (the inner phosphor screen and outer refractive/reflective glass faceplate). The `PerspectiveCamera` views the curved screen from a **subtle bottom-right low angle**—like a stylish low-angle car poster—so the lower-right corner curves closer toward the lens while preserving clean terminal legibility.
-* **Subtle Near-Field Depth-of-Field (DoF) Blur:** Coupled with the low-angle camera and 3D surface curvature, a depth-aware post-processing pass keeps the primary reading zone of the screen razor-sharp while rendering the closer bottom-right region slightly and tastefully out of focus.
-* **Off-Screen Input & Raycast Mouse Inversion:** Keyboard input (`term.onData` $\rightarrow$ `hostState.pushStdin`), clipboard, and `SIGWINCH` resizing already work in `index.html`. For the full-screen off-screen setup, pointer events on `#crt-stage` are raycast onto the 3D phosphor mesh to invert $(u, v)$ back into xterm’s screen coordinates while preventing raw `document`-level mouse drag events from bypassing the raycast mapping.
-* **Non-GPU Direct-to-DOM Fallback:** When WebGL2/GPU acceleration is unavailable, slow, or loses context, the host disposes `WebglAddon`—which automatically restores xterm.js’s built-in `DomRenderer` on the **exact same `Terminal` instance**—and reveals `#xterm-offscreen-host` as a 100% full-page direct-to-DOM terminal with zero flourish and zero state loss.
+* **Subtle Near-Field Depth-of-Field (DoF) Blur:** Coupled with the low-angle camera and 3D surface curvature, the phosphor shader applies a subtle camera-space depth mask and multi-sample blur to the closer lower-right region while keeping the main reading area sharp.
+* **Off-Screen Input & Raycast Mouse Inversion:** Preserve the existing keyboard, clipboard, and resize wiring. In super-demo mode, mouse events on the rendered canvas are raycast onto the 3D phosphor mesh and mapped back into xterm’s screen coordinates; drag events continue through the same mapping when the pointer leaves the canvas.
+* **Non-GPU Direct-to-DOM Fallback:** When the super-demo GPU path is unavailable or loses context, dispose `WebglAddon` and reveal xterm.js’s built-in `DomRenderer` on the same `Terminal` instance. The terminal fills its selected parent, but only fills the viewport when that parent was created by Kabibi as a full-screen host.
 
 ---
 
-### 2. Phase 2 (Paused / Deferred): The DOM File Panels HUD & Animations
+### Phase 2 (Paused / Deferred): The DOM File Panels HUD & Animations
 
 To keep Phase 1 focused strictly on the off-screen xterm surface, 3D CRT optics, camera framing, depth-of-field, and input fidelity, the **Floating DOM Blue Panels HUD is paused and deferred to Phase 2**:
 
-* **Phase 1 Behavior:** Pressing `Ctrl+O` renders Kabibi’s Dual Blue File Manager Panels directly inside the curved CRT terminal `CellBuf` via standard ANSI output—requiring zero Go-to-DOM synchronization.
-* **Phase 2 Behavior (Future):** Once Phase 1 is complete and verified, the blue panels can optionally be promoted to a crisp HTML/CSS DOM overlay (`position: fixed`) above the CRT canvas with CSS spring transitions, SVG icons, and `eval`-bridge cursor synchronization.
+* **Current Behavior:** Pressing `Ctrl+O` renders Kabibi’s Dual Blue File Manager Panels inside the terminal via standard ANSI output—requiring zero Go-to-DOM synchronization in either browser mode.
+* **Phase 2 Behavior (Future):** Once the embedded terminal and super-demo CRT paths are complete, the blue panels can optionally be promoted to a crisp HTML/CSS DOM overlay above the CRT canvas with CSS spring transitions, SVG icons, and `eval`-bridge cursor synchronization.
 
 ---
 
@@ -29,27 +71,30 @@ To keep Phase 1 focused strictly on the off-screen xterm surface, 3D CRT optics,
 
 | Phase & Component | Status | Effort / Difficulty | Primary Risk / Edge Case |
 | --- | --- | --- | --- |
-| **Phase 1a: Off-Screen xterm.js Surface & Fallback** | **Active** | Low–Medium | Keeping `IntersectionObserver` active while hidden (`opacity: 0`) and exposing `WebglRenderer._canvas` + `RenderService.onRender`. |
-| **Phase 1b: 3D Curved CRT, Low-Angle Camera & Near-Field DoF** | **Active** | Medium (~200 LOC TSL/JS) | Tuning the bottom-right low-angle camera pose and shallow near-field blur so the closer corner softens subtly without hurting text legibility. |
-| **Phase 1c: Raycast Mouse/Selection & Input Routing** | **Active** | Medium | Intercepting `document`-level drag listeners in xterm’s `SelectionService` / `bindMouse()` so only raycast-inverted coordinates reach xterm. |
-| **Phase 2: Floating DOM File Panels HUD & `eval` Bridge** | **Paused (Phase 2)** | Low–Medium (CSS + Go bridge) | Perspective projection alignment against the angled 3D CRT screen and Go $\leftrightarrow$ DOM state synchronization. |
+| **Default embedded xterm mode** | **Required baseline** | Low–Medium | Resolve caller parent and fit to its content box without taking over page layout. |
+| **Standalone JS assets & Node tests** | **Required foundation** | Low–Medium | Keep embedded JS compatible with `EvalJS` while independently testable. |
+| **Super-demo xterm surface & fallback** | **Active** | Medium | Expose framebuffer and redraw notifications without breaking xterm’s rendering lifecycle. |
+| **Super-demo curved CRT, camera & DoF** | **Active** | Medium–High | Tune perspective and shallow blur while preserving text legibility. |
+| **Super-demo raycast input** | **Active** | Medium | Prevent raw document-level drag events from bypassing coordinate translation. |
+| **Floating DOM File Panels HUD** | **Paused / Deferred** | Low–Medium | Later synchronization and perspective alignment; excluded from current phase. |
 
 ---
 
-# Kabibi Browser Visual Flourish Specification: Full-Screen Curved CRT, Low-Angle Optics, Near-Field DoF & Phase 2 DOM HUD
+# Super-Demo Rendering Design
 
 
-Here is the end-to-end architectural and implementation specification for Kabibi’s browser terminal experience, building on the existing root `index.html` and `mohabbat/washmhost/js/browser/index.js` integration and engineered against **Three.js r186 (`0.186.0`)** and **`@xterm/xterm` (`6.0.0`)** (with optional vendoring/patching of `@xterm/xterm` and `@xterm/addon-webgl`).
+The following sections describe the opt-in super-demo CRT presentation, engineered against **Three.js r186 (`0.186.0`)** and **`@xterm/xterm` (`6.0.0`)** (with optional vendoring/patching of `@xterm/xterm` and `@xterm/addon-webgl`). They do not redefine Kabibi’s default embedded terminal mode.
 
 
-## 1. Architectural Vision & Core Invariants
+## 2. Super-Demo Architecture & Core Invariants
 
-1. **100% Full-Screen Viewport (`100vw × 100vh`) — Zero Sidebars:**
-* Replacing the side-by-side README split in root `index.html`, the browser terminal viewport fills the entire window (`100vw × 100vh`, `overflow: hidden`).
+1. **Super-Demo Viewport Uses Its Selected Parent:**
+* A dedicated super-demo page is the preferred low-coupling option; an explicit `super-demo` mode flag is also acceptable. Do not repurpose or silently alter Kabibi’s default embedding page.
+* If the caller supplies a parent, the super-demo stage fills that parent. If Kabibi creates its own parent because none was found, it locks that host to the full viewport (`100vw × 100vh`, `overflow: hidden`).
 * All diagnostic output, AI deliberation tickers (`[goal]…`, `[steps]…`, `[work]…`), tool statuses, Dual Blue File Manager Panels (in Phase 1), and shell history live **inside the terminal stack itself**, exactly as designed in the Unified `CellBuf` & Plume architecture.
 
 2. **Off-Screen `@xterm/xterm` (v6.0.0) + `@xterm/addon-webgl` (v0.11.0) Framebuffer Source:**
-* `@xterm/xterm` renders at native high-DPI resolution inside a full-viewport background container (`position: fixed; inset: 0; opacity: 0; pointer-events: none`) using `new WebglAddon(true)` (`preserveDrawingBuffer: true`) so glyph rasterization, ligatures, DEC mode 2026 synchronized output, and truecolor ANSI sequences emitted by `ui.Host` remain fast and accurate.
+* In super-demo mode, `@xterm/xterm` renders at native high-DPI resolution inside a background container covering the selected host (`position: absolute; inset: 0; opacity: 0; pointer-events: none`) using `new WebglAddon(true)` (`preserveDrawingBuffer: true`) so glyph rasterization, ligatures, DEC mode 2026 synchronized output, and truecolor ANSI sequences emitted by `ui.Host` remain fast and accurate. The host is full-viewport only when Kabibi created it.
 * Rather than misusing the public `webglAddon.textureAtlas` getter (which in xterm.js 6.0.0 returns only the 2D character glyph sprite sheet `this._charAtlas?.pages[0].canvas`), we capture the actual rendered terminal screen canvas (`WebglRenderer._canvas`) and trigger texture uploads from `RenderService.onRender`—vendoring and patching xterm.js / `@xterm/addon-webgl` if needed to expose a clean public `renderCanvas` getter and frame-render callback.
 
 3. **Three.js r186 (`three@0.186.0`) Dual-Surface Curved CRT, Low-Angle Camera & Near-Field Depth-of-Field:**
@@ -59,12 +104,12 @@ Here is the end-to-end architectural and implementation specification for Kabibi
 * **Stylish Low-Angle Bottom-Right Camera Pose:** The `PerspectiveCamera` views the curved CRT assembly from a **subtle bottom-right low angle**—reminiscent of stylish low-angle car posters—so the lower-right quadrant of the curved screen sits physically closer to the camera while the screen remains comfortably readable edge-to-edge.
 * **Subtle Depth-of-Field (Near-Field Soft Focus on Bottom-Right):** A depth-aware post-processing pass in `THREE.RenderPipeline` keeps the focal plane locked across the main body of the screen so almost all terminal text stays razor-sharp, while applying a **very subtle near-field out-of-focus blur to the closer bottom-right region** of the curved screen.
 
-4. **Zero-Flourish Direct-to-DOM Non-GPU Fallback:**
-* If GPU/WebGL2 initialization fails, software rendering is detected, or the WebGL context is lost and not restored, the page falls back immediately to **direct-to-DOM full-page rendering in xterm.js with no flourish**.
-* Because calling `webglAddon.dispose()` in xterm.js 6.0.0 automatically restores the core `DomRenderer` (`renderService.setRenderer(_core._createRenderer())`) on the live `Terminal` instance, fallback simply disposes the 3D stage and `WebglAddon` and sets `#xterm-offscreen-host` to `opacity: 1; pointer-events: auto`, preserving the running `washmhost` WASM guest, scrollback buffer, and `term.onData` input stream without interruption.
+4. **Zero-Flourish Direct-to-DOM Non-GPU Fallback (Super-Demo Only):**
+* If GPU/WebGL2 initialization fails or the WebGL context is lost and not restored, the super-demo falls back to direct-to-DOM rendering in xterm.js with no flourish.
+* Because calling `webglAddon.dispose()` in xterm.js 6.0.0 automatically restores the core `DomRenderer` (`renderService.setRenderer(_core._createRenderer())`) on the live `Terminal` instance, fallback disposes the 3D stage and `WebglAddon` and makes `#xterm-offscreen-host` visible within the selected parent, preserving the running guest, scrollback buffer, and `term.onData` input stream without interruption. This becomes full-page only when Kabibi created a full-screen host.
 
 5. **Phase 2 (Paused): Floating DOM Blue Panels HUD (`z-index: 20`):**
-* The Floating DOM Blue Panels HUD (§5–§6 below) is explicitly **paused for Phase 1** and reserved for Phase 2 once the off-screen xterm surface, low-angle curved CRT, near-field depth-of-field, raycast mouse forwarding, and direct-to-DOM fallback are proven in production.
+* The Floating DOM Blue Panels HUD (§6–§7 below) is explicitly **paused for the current CRT phase** and reserved for Phase 2 once the super-demo off-screen xterm surface, low-angle curved CRT, near-field depth-of-field, raycast mouse forwarding, and direct-to-DOM fallback are proven.
 
 
 
@@ -72,16 +117,16 @@ Here is the end-to-end architectural and implementation specification for Kabibi
 
 ---
 
-## 2. Technology Stack & 2026 Version Pinning
+## 3. Super-Demo Technology Stack & Version Pinning
 
 | Package | Version | Import / Entrypoint | Role in Kabibi Browser Host |
 | --- | --- | --- | --- |
 | **`three`** | **`0.186.0` (r186)** | `three/webgpu` & `three/tsl` | `WebGPURenderer` (with auto WebGL2 fallback), `MeshPhysicalNodeMaterial`, `RenderPipeline`, and TSL shader graph nodes. |
-| **`@xterm/xterm`** | **`6.0.0`** | `@xterm/xterm` | Headless/off-screen VT emulator with DEC mode 2026 synchronized output support. |
-| **`@xterm/addon-webgl`** | **`0.11.0`** | `@xterm/addon-webgl` | GPU texture-atlas renderer producing the source `<canvas>` bound to Three.js `CanvasTexture`. |
-| **`@xterm/addon-fit`** | **`0.10.0`** | `@xterm/addon-fit` | Computes exact `{ cols, rows }` grid matching the full-screen viewport aspect ratio and font metrics. |
+| **`@xterm/xterm`** | **`6.0.0`** | `@xterm/xterm` | Terminal emulator; DOM rendering is the default, with the WebGL renderer used only by super-demo. |
+| **`@xterm/addon-webgl`** | **`0.11.0`** | `@xterm/addon-webgl` | Super-demo GPU renderer whose screen canvas is sampled by Three.js `CanvasTexture`. |
+| **`@xterm/addon-fit`** | **`0.10.0`** | `@xterm/addon-fit` | Computes `{ cols, rows }` from the selected parent’s available bounds and font metrics. |
 
-*Import Map for `index.html`:*
+*Import map for the dedicated super-demo page (or super-demo-only entrypoint):*
 
 ```html
 <script type="importmap">
@@ -102,11 +147,11 @@ Here is the end-to-end architectural and implementation specification for Kabibi
 
 ---
 
-## 3. Layer Cake, Off-Screen `@xterm/xterm` Internals & Non-GPU Fallback
+## 4. Super-Demo Layer Cake, Off-Screen `@xterm/xterm` Internals & Non-GPU Fallback
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ Browser Window (100vw × 100vh, position: fixed, overflow: hidden, #050608)   │
+│ Selected Super-Demo Parent (viewport-sized only if Kabibi created it)        │
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────────┐  │
 │  │ Layer 3 (z-index: 20) [PHASE 2 — PAUSED]:                              │  │
@@ -114,7 +159,7 @@ Here is the end-to-end architectural and implementation specification for Kabibi
 │  │  • Omitted in Phase 1 (Blue Panels render natively inside Layer 1/2)   │  │
 │  └────────────────────────────────────────────────────────────────────────┘  │
 │  ┌────────────────────────────────────────────────────────────────────────┐  │
-│  │ Layer 2 (z-index: 10): Three.js r186 Full-Screen Canvas (#crt-stage)   │  │
+│  │ Layer 2 (z-index: 10): Three.js r186 Canvas (#crt-stage)               │  │
 │  │  • Camera: Subtle bottom-right low angle (stylish car-poster framing)  │  │
 │  │  • Outer Mesh: Curved Glass Plate (IOR 1.48, Refraction, Dispersion,   │  │
 │  │    Stylized Blurred Back-Reflection of Phosphor Text)                  │  │
@@ -123,7 +168,7 @@ Here is the end-to-end architectural and implementation specification for Kabibi
 │  └────────────────────────────────────────────────────────────────────────┘  │
 │  ┌────────────────────────────────────────────────────────────────────────┐  │
 │  │ Layer 1 (z-index: 0, opacity: 0, inset: 0): Off-Screen @xterm/xterm    │  │
-│  │  • Full-viewport layout so IntersectionObserver & ResizeObserver run   │  │
+│  │  • Selected-parent layout so IntersectionObserver & ResizeObserver run│  │
 │  │  • Receives raw ANSI diffs from ui.Host (ToANSI) and keyboard focus    │  │
 │  │  • Direct-to-DOM Fallback: switches to opacity: 1, z-index: 10 if      │  │
 │  │    GPU/WebGL2 is unavailable or lost, disposing WebglAddon & Layer 2   │  │
@@ -131,7 +176,7 @@ Here is the end-to-end architectural and implementation specification for Kabibi
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.1 `@xterm/xterm` (v6.0.0) & `@xterm/addon-webgl` Source Audit for Off-Screen Rendering
+### 4.1 `@xterm/xterm` (v6.0.0) & `@xterm/addon-webgl` Source Audit for Off-Screen Rendering
 
 Direct inspection of the pinned `@xterm/xterm@6.0.0` source (`addons/addon-webgl/src/WebglAddon.ts`, `addons/addon-webgl/src/WebglRenderer.ts`, `addons/addon-webgl/src/DevicePixelObserver.ts`, and `src/browser/services/RenderService.ts`) establishes four implementation rules for capturing the off-screen terminal surface—and shows *exactly* what to vendor/patch if we want a clean first-class API:
 
@@ -153,9 +198,9 @@ Direct inspection of the pinned `@xterm/xterm@6.0.0` source (`addons/addon-webgl
 4. **Keeping `IntersectionObserver` & `ResizeObserver` Active (`RenderService.ts` & `DevicePixelObserver.ts`):**
    * `RenderService._registerIntersectionObserver` observes `screenElement` with `new IntersectionObserver(..., { threshold: 0 })`. If `#xterm-offscreen-host` is placed outside the viewport (`left: -9999px`), set to `display: none`, or collapsed to `0×0`, `entry.isIntersecting` becomes `false`, setting `this._isPaused = true` and **silently halting all `refreshRows` and `handleResize` calls**.
    * Similarly, `observeDevicePixelDimensions` in `DevicePixelObserver.ts` observes `_canvas` with `ResizeObserver` (`box: ['device-pixel-content-box']`) and ignores `0×0` sizes.
-   * **Layout Rule:** `#xterm-offscreen-host` **must** remain positioned inside the live `100vw × 100vh` viewport at full size (`position: fixed; inset: 0; width: 100vw; height: 100vh; opacity: 0; pointer-events: none; z-index: 0`). Because `opacity: 0` elements still intersect the viewport and have full layout boxes, `IntersectionObserver`, `ResizeObserver`, and `FitAddon.fit()` all operate at 100% accuracy.
+   * **Layout Rule (Super-Demo Only):** `#xterm-offscreen-host` **must** remain laid out, nonzero-sized, and intersecting within the selected parent (`position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; pointer-events: none`). Use a full-viewport fixed host only when Kabibi created the parent itself. Because `opacity: 0` elements retain layout boxes, xterm’s `IntersectionObserver`, `ResizeObserver`, and `FitAddon.fit()` continue to operate; never hide this host with `display: none` or move it off-screen.
 
-### 3.2 Direct-to-DOM Non-GPU Fallback (Zero Flourish, Zero State Loss)
+### 4.2 Direct-to-DOM Non-GPU Fallback (Zero Flourish, Zero State Loss)
 
 Look at `WebglAddon.activate` in `addons/addon-webgl/src/WebglAddon.ts`:
 
@@ -180,15 +225,15 @@ Therefore, our non-GPU fallback path is completely seamless:
    * `webglAddon.onContextLoss` fires after its 3000ms restoration timeout (`WebglRenderer.ts`).
 2. **Fallback Transition (`activateDirectDomFallback()`):**
    * Call `webglAddon?.dispose()` (restoring xterm’s `DomRenderer` in-place) and tear down the Three.js `#crt-stage` canvas.
-   * Switch `#xterm-offscreen-host` to direct full-page visibility (`opacity: 1; pointer-events: auto; z-index: 10`).
+   * Switch `#xterm-offscreen-host` to direct visibility within its parent (`opacity: 1; pointer-events: auto; z-index: 10`). This fills the viewport only when the selected parent is Kabibi’s auto-created full-screen host.
    * Call `fitAddon.fit()` and `term.focus()`.
-   * The running `washmhost` WASM guest (`index.html` / `mohabbat/washmhost/js/browser/index.js`), `term.onData` keyboard stream, scrollback buffer, and `SIGWINCH` resize handler continue uninterrupted in a crisp, full-page direct-to-DOM terminal with no flourish.
+   * The running `washmhost` guest, `term.onData` keyboard stream, scrollback buffer, and resize handler continue uninterrupted in a crisp direct-to-DOM terminal with no flourish.
 
 ---
 
-## 4. Three.js r186 3D Scene, Low-Angle Camera, Curved Geometry & TSL Shaders
+## 5. Three.js r186 3D Scene, Low-Angle Camera, Curved Geometry & TSL Shaders
 
-### 4.1 Stylish Low-Angle Bottom-Right Camera Pose & Aspect-Locked Mesh Sizing
+### 5.1 Stylish Low-Angle Bottom-Right Camera Pose & Aspect-Locked Mesh Sizing
 
 Instead of viewing the screen dead-on from `(0, 0, D)`, the camera is positioned at a **subtle bottom-right low angle**—like a stylish low-angle car poster—so you feel the 3D sculptural bow of the CRT faceplate and the closer lower-right corner without sacrificing terminal readability:
 
@@ -202,7 +247,7 @@ Instead of viewing the screen dead-on from `(0, 0, D)`, the camera is positioned
     $$H_{\text{world}} = 2 \cdot D \cdot \tan\left(\frac{\text{fov}}{2}\right), \qquad W_{\text{world}} = H_{\text{world}} \cdot \text{aspect}$$
   * On window resize, update the mesh scale to `(W_world * 0.94, H_world * 0.94, 1)` so the angled curved screen fills the viewport cleanly without clipping its closer bottom-right corner or receding top-left corner.
 
-### 4.2 Mathematical Surface Bending (Phosphor Mesh vs. Front Glass Plate)
+### 5.2 Mathematical Surface Bending (Phosphor Mesh vs. Front Glass Plate)
 
 Rather than a 2D post-processing UV warp (which cannot produce 3D perspective foreshortening from the low-angle camera or varying glass thickness), we bend **real 3D vertex geometry**:
 
@@ -217,7 +262,7 @@ $$r^2 = u^2 + v^2, \qquad z_{\text{bend}}(u, v) = -k_{\text{curve}} \cdot \left(
   * Positioned $0.055$ world units in front of the phosphor screen with a slightly shallower curvature ($k_{\text{curve}} = 0.085$).
   * **Differential Curvature Gap:** Because $k_{\text{glass}} < k_{\text{phosphor}}$, the optical gap $\Delta Z(u,v) = 0.055 + (k_{\text{phosphor}} - k_{\text{glass}})(u^2 + v^2 + 0.15 u^2 v^2)$ between the phosphor and the front glass is thinner in the center ($0.055$), widens to $0.11$ at the edge midpoints ($\pm 1, 0$), and reaches $\approx 0.173$ at the corners ($\pm 1, \pm 1$). Combined with the bottom-right low-angle camera, this gives the nearer bottom-right glass edge tangible depth, refraction, and internal reflection.
 
-### 4.3 TSL Shader Graph for the Inner Phosphor Screen (`MeshBasicNodeMaterial`)
+### 5.3 TSL Shader Graph for the Inner Phosphor Screen (`MeshBasicNodeMaterial`)
 
 Using `three/tsl` in r186 (note the portable increasing-edge `smoothstep(0.75, 1.35, ...)` inverted via `float(1.0).sub(...)` so WebGL2 GLSL and WebGPU WGSL both evaluate it identically):
 
@@ -258,7 +303,7 @@ const phosphorMaterial = new THREE.MeshBasicNodeMaterial();
 phosphorMaterial.colorNode = phosphorCol.rgb.mul(scanMask).mul(grille).mul(vignette);
 ```
 
-### 4.4 TSL Shader Graph for the Outer Glass Plate (Refraction + Stylized Blurry Internal Reflection)
+### 5.4 TSL Shader Graph for the Outer Glass Plate (Refraction + Stylized Blurry Internal Reflection)
 
 For the front glass sheet (`Mesh 2`), we combine screen-space refraction with a stylized blurry internal reflection of the phosphor text:
 
@@ -312,7 +357,7 @@ const glassMaterial = new THREE.MeshPhysicalNodeMaterial({
 glassMaterial.emissiveNode = blurredReflection.rgb.mul(fresnel).add(vec3(studioGlint));
 ```
 
-### 4.5 Post-Processing (`THREE.RenderPipeline`): Phosphor Bloom + Subtle Near-Field Depth-of-Field (Bottom-Right Soft Focus)
+### 5.5 Post-Processing (`THREE.RenderPipeline`): Phosphor Bloom + Subtle Near-Field Depth-of-Field (Bottom-Right Soft Focus)
 
 Because the camera views the curved screen from a **slightly bottom-right low angle** ($\mathbf{P}_{\text{cam}} = (+0.36, -0.24, 2.68)$), the 3D distance from the camera lens varies continuously across the screen surface:
 
@@ -355,7 +400,7 @@ const nearBlurred =
 renderPipeline.outputNode = mix(litScene, nearBlurred, nearCoC.mul(0.65));
 ```
 
-### 4.6 Off-Screen Keyboard & Exact Raycast Mouse Coordinate Inversion
+### 5.6 Off-Screen Keyboard & Exact Raycast Mouse Coordinate Inversion
 
 In the current root `index.html`, keyboard (`term.onData` $\rightarrow$ `hostState.pushStdin`) and terminal resize (`FitAddon` $\rightarrow$ `SIGWINCH`) already work with `washmhost`. Adapting input to the full-screen 3D CRT requires respecting how `@xterm/xterm@6.0.0` binds mouse and keyboard listeners internally (`src/browser/CoreBrowserTerminal.ts`, `src/browser/services/SelectionService.ts`, and `src/browser/input/Mouse.ts`):
 
@@ -385,13 +430,13 @@ In the current root `index.html`, keyboard (`term.onData` $\rightarrow$ `hostSta
 
 ---
 
-## 5. Phase 2 (Paused / Deferred): The Floating DOM Blue Panels HUD
+## 6. Phase 2 (Paused / Deferred): The Floating DOM Blue Panels HUD
 
-> **Phase Boundary Note:** Everything in **§5 and §6** is **paused for Phase 1** and deferred to **Phase 2**. In Phase 1, Kabibi’s Dual Blue File Manager Panels (`Ctrl+O`) render directly inside the curved CRT terminal via standard VT/ANSI output with zero DOM HUD overlay and zero changes to Go’s `AppWidget.Render`.
+> **Phase Boundary Note:** Everything in **§6 and §7** is **paused for the current super-demo phase** and deferred to **Phase 2**. During the super-demo phase, Kabibi’s Dual Blue File Manager Panels (`Ctrl+O`) render inside the terminal via standard VT/ANSI output with zero DOM HUD overlay and zero changes to Go’s `AppWidget.Render`.
 
 When Phase 2 is activated later, pressing `Ctrl+O` in browser mode will summon the dual-pane file manager in two coordinated layers:
 
-### 5.1 How the Terminal & DOM HUD Coexist (Phase 2 Design)
+### 6.1 How the Terminal & DOM HUD Coexist (Phase 2 Design)
 
 Look at how this pairs with the **Unified `CellBuf` & Blue Panel Illusion (`3-blue.md`)**:
 
@@ -412,7 +457,7 @@ and sets `w.sh.SetBottomAligned(true)`.
 
 
 
-### 5.2 DOM Structure & CSS Motion Architecture
+### 6.2 DOM Structure & CSS Motion Architecture
 
 ```html
 <div id="kabibi-dom-hud" class="hud-hidden" aria-hidden="true">
@@ -449,7 +494,7 @@ and sets `w.sh.SetBottomAligned(true)`.
 
 ```
 
-### 5.3 The Three Visual Flourishes of the DOM Panels
+### 6.3 The Three Visual Flourishes of the DOM Panels
 
 1. **Top-Drawer Spring Animation (`Ctrl+O`):**
 * The height of `#kabibi-dom-hud` is dynamically synchronized to the exact pixel row where `H_panels` ends on the CRT screen:
@@ -534,13 +579,13 @@ $$\text{hudHeightPx} = \text{crtScreenTopPx} + \left(\frac{H_{\text{panels}}}{H_
 
 ---
 
-## 6. Phase 2 (Paused / Deferred): Go $\leftrightarrow$ Browser State Synchronization Over the `eval` Bridge
+## 7. Phase 2 (Paused / Deferred): Go $\leftrightarrow$ Browser State Synchronization Over the `eval` Bridge
 
 > **Phase Boundary Note:** This synchronization bridge is only required for the **Phase 2 Floating DOM Blue Panels HUD**. Phase 1 requires **no changes** to Go’s `AppWidget` or `filemanager` packages, as all terminal UI (including `Ctrl+O` Blue Panels) renders through the standard VT/ANSI stream into the off-screen `@xterm/xterm` surface.
 
 Because Kabibi already has the pure `eval` virtual dylib (`syscall.DylibOpen("eval", 0)` / `EvalJS`) in `mohabbat/washmhost/js/browser/index.js`, Phase 2 will not need any new WASM ABI imports or custom host syscalls.
 
-### 6.1 Go Side: `kabibi/ui/filemanager/dom_bridge.go` (Phase 2)
+### 7.1 Go Side: `kabibi/ui/filemanager/dom_bridge.go` (Phase 2)
 
 1. Detect browser mode once at startup via `syscall.GetPlatformInfo().OSName == "browser"`.
 2. Define a compact JSON state payload representing `DualPaneWidget` + modal dialogs:
@@ -588,7 +633,7 @@ This sends `< 60 bytes` across the `eval` bridge and triggers the 95ms CSS glidi
 EvalJS(fmt.Sprintf("globalThis.__kabibi_hud?.syncState(%s)", strconv.Quote(string(stateJSON))))
 ```
 
-### 6.2 Input Routing: Zero Desynchronization Between DOM HUD and Go `AppWidget` (Phase 2)
+### 7.2 Input Routing: Zero Desynchronization Between DOM HUD and Go `AppWidget` (Phase 2)
 
 * **Keyboard Events (100% Controlled by Go `AppWidget.HandleEvent`):**
   * The hidden `.xterm-helper-textarea` retains keyboard focus at all times.
@@ -599,41 +644,50 @@ EvalJS(fmt.Sprintf("globalThis.__kabibi_hud?.syncState(%s)", strconv.Quote(strin
 
 ---
 
-## 7. Phased Implementation Plan
+## 8. Phased Implementation Plan
 
-### Phase 1 (Active): Full-Screen Off-Screen `@xterm/xterm` + `Three.js r186` Low-Angle Curved CRT, Near-Field DoF & Direct-to-DOM Fallback
+### Phase 1 (Active): Default Embed Contract & Opt-In Super-Demo CRT
 
-1. **Upgrade Root `index.html` (and Browser Host Wiring in `mohabbat/washmhost/js/browser/index.js`) to 100% Full-Screen:**
-   * Transition from the side-by-side README layout in `index.html` to the full-viewport (`100vw × 100vh`) terminal stage while preserving the existing working `washmhost` stdin/stdout/stderr and `getTtySize` integration.
-   * Create the two Phase 1 full-screen layers:
-     * `#xterm-offscreen-host` (`position: fixed; inset: 0; width: 100vw; height: 100vh; opacity: 0; pointer-events: none; z-index: 0`) so xterm’s `IntersectionObserver` and `ResizeObserver` remain active at full viewport dimensions.
-     * `#crt-stage` (`position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 10`).
+1. **Implement and Preserve Kabibi’s Default Browser Mount Contract:**
+   * Accept an explicit parent element or parent ID; when neither is supplied, search for the documented conventional parent ID.
+   * If a parent resolves, mount ordinary xterm.js in that parent and fit to its content box without claiming full-screen layout.
+   * If no parent resolves, create a host, append it to `document.body`, and make that newly created host full-screen. Preserve working `washmhost` input/output, TTY sizing, focus, and resize behavior.
 
-2. **Initialize `@xterm/xterm@6.0.0` + `@xterm/addon-webgl@0.11.0` + `@xterm/addon-fit@0.10.0` (Vendor/Patch as Needed):**
+2. **Keep JavaScript in Standalone Files and Embed It for Go:**
+   * Move Kabibi’s browser runtime and adapter code out of quoted/backtick Go literals into authored `.js` source files.
+   * Embed the required scripts with Go’s `//go:embed` directive and evaluate them through the existing browser host mechanism. Keep default-mode mount logic separate from the super-demo entrypoint so CRT dependencies are not loaded or initialized by default.
+   * Add `node --test` tests for DOM-independent mode selection, parent resolution, full-screen host creation decisions, and fallback state selection. Keep the source directly testable in Node; add bundling only if the current `EvalJS` loading mechanism requires it.
+
+3. **Add an Explicit Super-Demo Entrypoint and Its Stage:**
+   * Prefer a dedicated super-demo page that explicitly opts into the CRT mode, avoiding changes to Kabibi’s default embedding behavior. An explicit Kabibi mode parameter is an acceptable alternative.
+   * In super-demo, use the caller’s selected parent bounds if one was supplied. If no parent exists, create and lock a full-viewport host.
+   * Create the off-screen xterm host and `#crt-stage` within that selected host. Keep xterm laid out, nonzero-sized, and intersecting so its observers and fitting continue to work.
+
+4. **Initialize `@xterm/xterm@6.0.0` + `@xterm/addon-webgl@0.11.0` + `@xterm/addon-fit@0.10.0` (Vendor/Patch as Needed):**
    * Instantiate `const webglAddon = new WebglAddon(true)` so `WebglRenderer` requests its WebGL2 context with `preserveDrawingBuffer: true`.
    * Acquire the rendered terminal screen canvas (`WebglRenderer._canvas`, exposed via a clean `webglAddon.renderCanvas` getter if vendored/patched, rather than `webglAddon.textureAtlas`).
    * Hook `(term as any)._core._renderService.onRender` (or a vendored `onDidRenderFrame` event) to set `xtermCanvasTexture.needsUpdate = true` on every content render, cursor blink, and selection highlight change.
-   * Compute full-screen `{ cols, rows }` via `FitAddon.fit()` and wire `window.addEventListener('resize', ...)` to update `FitAddon` and trigger `SIGWINCH` (`28`) via `hostState.triggerSignal(28)`.
+   * Compute `{ cols, rows }` from the selected parent’s bounds via `FitAddon.fit()`. Observe parent and window resizing, then notify the host of the updated TTY size and trigger `SIGWINCH` (`28`) via `hostState.triggerSignal(28)`.
 
-3. **Implement Non-GPU Direct-to-DOM Fallback (`activateDirectDomFallback()`):**
-   * If WebGL2 or Three.js GPU initialization fails, software rendering is detected, or `webglAddon.onContextLoss` fires, call `webglAddon.dispose()` (which automatically restores xterm.js’s core `DomRenderer` on the live `Terminal`), tear down `#crt-stage`, and set `#xterm-offscreen-host` to `opacity: 1; pointer-events: auto; z-index: 10` for full-page direct-to-DOM rendering with zero flourish.
+5. **Implement Non-GPU Direct-to-DOM Fallback (`activateDirectDomFallback()`):**
+   * If WebGL2 or Three.js GPU initialization fails, the GPU path is unusably slow, or `webglAddon.onContextLoss` fires, call `webglAddon.dispose()` (which automatically restores xterm.js’s core `DomRenderer` on the live `Terminal`), tear down `#crt-stage`, and set `#xterm-offscreen-host` to `opacity: 1; pointer-events: auto; z-index: 10` for direct-to-DOM rendering within the selected parent, with zero flourish.
 
-4. **Build the `CRTRenderer` in Three.js r186 (`crt_stage.js`):**
+6. **Build the `CRTRenderer` in Three.js r186 (`crt_stage.js`):**
    * Initialize `WebGPURenderer` (`await renderer.init()`) and `RenderPipeline`.
    * Position the `PerspectiveCamera` at the **subtle bottom-right low angle** ($\mathbf{P}_{\text{cam}} = (+0.36, -0.24, 2.68)$ looking at $(+0.03, -0.02, 0.0)$) so the curved screen is framed like a stylish low-angle car poster with the bottom-right region closer to the lens.
    * Construct `phosphorMesh` ($128\times128$ bowed grid, $k=0.14$) with the TSL scanline + aperture grille + halation + vignette node material bound to `new THREE.CanvasTexture(xtermRenderCanvas)`.
    * Construct `glassMesh` ($64\times64$ bowed grid, $k=0.085$, $z=+0.055$) with `MeshPhysicalNodeMaterial` (`transmission: 1.0`, `ior: 1.48`, `dispersion: 1.6`) and the 9-tap parallax-shifted blurry internal reflection `emissiveNode`.
    * Configure `THREE.RenderPipeline` with both **phosphor bloom** and the **depth-aware near-field Depth-of-Field pass** (`viewZNode`) so most of the screen remains razor-sharp while the closer bottom-right area softens subtly.
 
-5. **Implement 3D Raycast Pointer, Selection & Keyboard Focus Forwarding:**
+7. **Implement 3D Raycast Pointer, Selection & Keyboard Focus Forwarding:**
    * Keep `.xterm-helper-textarea` focused on pointer interaction so `term.onData` keyboard input, IME, and clipboard copy/paste work seamlessly.
    * On `#crt-stage`, call `e.stopPropagation()` on raw mouse events (preventing unwarped coordinates from reaching xterm’s `document`-level drag listeners), raycast through the low-angle camera onto `phosphorMesh`, map `hit.uv` $(u, 1-v)$ into `screenElement.getBoundingClientRect()`, and dispatch synthetic `MouseEvent` / `WheelEvent` instances (`bubbles: true`) onto `term.element`.
 
-6. **Phase 1 Verification Matrix:**
+8. **Phase 1 Verification Matrix:**
    * **Off-Screen Surface & Frame Pacing Check:** Verify that `xtermCanvasTexture` updates on ANSI output, cursor blink, and mouse selection drag without flicker or missed redraws, and maintains smooth 60/120 FPS pacing.
    * **Low-Angle Framing & Near-Field DoF Check:** Verify that the bottom-right low-angle camera pose and near-field blur soften only the closer bottom-right corner subtly while keeping the main terminal workspace and prompt sharp and readable.
    * **Input & Raycast Accuracy Check:** Verify that keyboard input (`Ctrl+O` TUI panels, shell commands, vim/less pagers) and mouse text selection/dragging hit the exact character cell across both flat center regions and curved edges.
-   * **Direct-to-DOM Fallback Check:** Simulate WebGL context loss / non-GPU fallback and verify that `webglAddon.dispose()` switches cleanly to full-page direct-to-DOM xterm.js rendering without dropping the active `washmhost` session.
+   * **Direct-to-DOM Fallback Check:** Simulate WebGL context loss / non-GPU fallback and verify that `webglAddon.dispose()` switches cleanly to direct-to-DOM xterm.js rendering inside the selected parent without dropping the active `washmhost` session. Confirm it is full-page only when Kabibi created the host itself.
 
 ---
 
@@ -649,7 +703,6 @@ EvalJS(fmt.Sprintf("globalThis.__kabibi_hud?.syncState(%s)", strconv.Quote(strin
 
 3. **Optional Crisp DOM Modal Overlay (F2/F5/F6/F7/F8):**
    * Render file operation modals either inside `#kabibi-dom-hud` when panels are open or inside the CRT `CellBuf`.
-
 
 # CRITICAL implementation rules
 

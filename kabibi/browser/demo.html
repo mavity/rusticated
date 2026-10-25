@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kabibi Browser Terminal</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css">
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; padding: 2rem; background: #111722; color: #e5edf8; }
+    main { max-width: 1100px; margin: 0 auto; }
+    #kabibi-terminal { height: min(72vh, 820px); min-height: 320px; padding: 1rem; background: #07090e; }
+    .xterm { height: 100%; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Kabibi Browser Terminal</h1>
+    <p>This example mounts the standard, unadorned xterm.js terminal in the parent below.</p>
+    <div id="kabibi-terminal"></div>
+  </main>
+  <script src="../../mohabbat/washmhost/js/browser/index.js"></script>
+  <script src="./main.js"></script>
+  <script type="module">
+    import { Terminal } from 'https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/+esm';
+    import { FitAddon } from 'https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/+esm';
+
+    const params = new URLSearchParams(location.search);
+    const artifact = params.get('artifact') || params.get('wasm') || './kabibi.bat';
+    KabibiBrowser.mount({
+      Terminal,
+      FitAddon,
+      wasm: artifact,
+      parentId: 'kabibi-terminal'
+    }).catch((error) => {
+      console.error('Kabibi browser terminal failed to start:', error);
+    });
+  </script>
+</body>
+</html>

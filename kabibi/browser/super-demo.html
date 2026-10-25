@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kabibi CRT Super-Demo</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css">
+  <style>
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #07090e; }
+    .xterm { height: 100%; }
+  </style>
+</head>
+<body>
+  <script>globalThis.__kabibiBrowserMode = 'super-demo';</script>
+  <script src="../../mohabbat/washmhost/js/browser/index.js"></script>
+  <script src="./main.js"></script>
+  <script src="./super-demo.js"></script>
+  <script type="module">
+    import { Terminal } from 'https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/+esm';
+    import { FitAddon } from 'https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/+esm';
+    import { WebglAddon } from 'https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.19.0/+esm';
+    import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js';
+
+    const params = new URLSearchParams(location.search);
+    const artifact = params.get('artifact') || params.get('wasm') || './kabibi.bat';
+    let mounted = null;
+    let guestOutputSeen = false;
+    let displayTestSent = false;
+    const sendDisplayTestWhenReady = () => {
+      if (displayTestSent || !mounted || !guestOutputSeen) return;
+      displayTestSent = true;
+      setTimeout(() => KabibiBrowserSuperDemo.sendDisplayTest(mounted.host), 350);
+    };
+    KabibiBrowser.mount({
+      Terminal,
+      FitAddon,
+      wasm: artifact,
+      mode: 'super-demo',
+      superDemoDependencies: { THREE, WebglAddon },
+      onStdout(bytes) {
+        if (displayTestSent || !(bytes.byteLength || bytes.length)) return;
+        guestOutputSeen = true;
+        sendDisplayTestWhenReady();
+      }
+    }).then((result) => {
+      mounted = result;
+      sendDisplayTestWhenReady();
+    }).catch((error) => {
+      console.error('Kabibi CRT super-demo failed to start:', error);
+    });
+  </script>
+</body>
+</html>

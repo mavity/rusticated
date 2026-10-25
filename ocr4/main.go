@@ -10,8 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"ai"
 )
 
 const saveAlongsideSentinel = "\x01" // sentinel: --save with no arg
@@ -107,21 +105,21 @@ func runAll(cfg *Config) error {
 		}
 		return nil
 	}
-	detector, err := ai.NewInterpreter(tflPath, cfg.DBModelPath)
+	detector, err := NewTFLiteInterpreter(tflPath, cfg.DBModelPath)
 	if err != nil {
 		return fmt.Errorf("DB detector: %w", err)
 	}
 	defer detector.Close()
-	recognizer, err := ai.NewInterpreter(tflPath, cfg.RecModelPath)
+	recognizer, err := NewTFLiteInterpreter(tflPath, cfg.RecModelPath)
 	if err != nil {
 		return fmt.Errorf("recognizer: %w", err)
 	}
 	defer recognizer.Close()
 
 	// LM engine is expensive; create once and share across all images.
-	var lmEngine *ai.Engine
+	var lmEngine *LMEngine
 	if cfg.LMLibPath != "" && cfg.GemmaModelPath != "" {
-		lmEngine, err = ai.NewEngine(cfg.LMLibPath, cfg.GemmaModelPath, cfg.LMBackend, 0)
+		lmEngine, err = NewLMEngine(cfg.LMLibPath, cfg.GemmaModelPath, cfg.LMBackend)
 		if err != nil && cfg.Verbose {
 			fmt.Fprintf(os.Stderr, "[phase2] engine init: %v\n", err)
 		}
@@ -179,7 +177,7 @@ func runAll(cfg *Config) error {
 }
 
 // processImage runs Phase 1 + Phase 2 on one image, printing each line as soon as it is ready.
-func processImage(ctx context.Context, cfg *Config, detector, recognizer *ai.Interpreter, engine *ai.Engine, imgPath string) ([]TextLine, error) {
+func processImage(ctx context.Context, cfg *Config, detector, recognizer *TFLiteInterpreter, engine *LMEngine, imgPath string) ([]TextLine, error) {
 	_ = ctx
 	if cfg.Verbose {
 		fmt.Println("[phase1] loading image:", imgPath)
@@ -188,12 +186,12 @@ func processImage(ctx context.Context, cfg *Config, detector, recognizer *ai.Int
 	if err != nil {
 		return nil, fmt.Errorf("loading image: %w", err)
 	}
-	boxes, err := DetectLines(detector, img, cfg.Verbose)
+	boxes, err := DetectLines(detector, img)
 	if err != nil {
 		return nil, fmt.Errorf("line detection: %w", err)
 	}
 	SortByVertical(boxes)
-	lines, err := RecognizeLines(recognizer, img, boxes, cfg.Verbose)
+	lines, err := RecognizeLines(recognizer, img, boxes)
 	if err != nil {
 		return nil, fmt.Errorf("line recognition: %w", err)
 	}
