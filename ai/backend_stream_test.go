@@ -42,8 +42,6 @@ func newFakeDrv() *fakeDrv {
 
 func (d *fakeDrv) stringToCPtr(s string) (uint64, func()) { return 1, func() {} }
 func (d *fakeDrv) createTrampoline() uint64               { return 1 }
-func (d *fakeDrv) convClone(conv uint64) uint64           { return conv + 1 }
-
 func (d *fakeDrv) convSendStream(conv, msg, extraCtx, optArgs, callback, userData uint64) int32 {
 	d.sendCalls.Add(1)
 	d.onSend(d, userData)
@@ -492,4 +490,3 @@ func TestStreamAbortFromInsideChunkCallbackWaitsForFullCallbackExit(t *testing.T
 		t.Fatal("deadlock: convCancelProcess ran before sharedTokenCallback finished and released nativeStreamMu")
 	}
 }
-

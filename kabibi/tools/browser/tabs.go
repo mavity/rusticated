@@ -79,11 +79,13 @@ func (t *TabSession) ConsoleSnapshot() []ConsoleEntry {
 //     `[🤖 nickname]` so both CDP discovery and the human user can immediately identify tab ownership across
 //     processes and cross-origin navigations.
 type Manager struct {
-	mu         sync.Mutex
-	profileDir string
-	wsURL      string
-	conn       *Conn
-	tabs       map[string]*TabSession
+	mu sync.Mutex
+	// Serialize tab setup while leaving mu free during CDP calls; event callbacks need mu.
+	ensureTabMu sync.Mutex
+	profileDir  string
+	wsURL       string
+	conn        *Conn
+	tabs        map[string]*TabSession
 }
 
 var (
@@ -112,6 +114,9 @@ func NewManager(profileDir string) *Manager {
 
 // SetWebSocketURL overrides the browser WebSocket endpoint (used in tests or custom remote debugging setups).
 func (m *Manager) SetWebSocketURL(wsURL string) {
+	m.ensureTabMu.Lock()
+	defer m.ensureTabMu.Unlock()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.conn != nil {
@@ -124,6 +129,9 @@ func (m *Manager) SetWebSocketURL(wsURL string) {
 
 // Close closes the underlying CDP WebSocket connection (leaving the browser process itself running!).
 func (m *Manager) Close() error {
+	m.ensureTabMu.Lock()
+	defer m.ensureTabMu.Unlock()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.conn != nil {
@@ -249,10 +257,13 @@ func (m *Manager) EnsureTab(ctx context.Context, nickname string) (*Conn, *TabSe
 		return nil, nil, errors.New("nickname parameter is required to identify which browser tab this agent owns")
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.ensureTabMu.Lock()
+	defer m.ensureTabMu.Unlock()
 
+	m.mu.Lock()
 	conn, err := m.ensureConnLocked(ctx)
+	existing := m.tabs[nickname]
+	m.mu.Unlock()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -269,7 +280,7 @@ func (m *Manager) EnsureTab(ctx context.Context, nickname string) (*Conn, *TabSe
 		}
 	}
 
-	if existing, ok := m.tabs[nickname]; ok {
+	if existing != nil {
 		if ti, alive := targetExists[existing.TargetID]; alive {
 			existing.mu.Lock()
 			if ti.URL != "" {
@@ -278,11 +289,15 @@ func (m *Manager) EnsureTab(ctx context.Context, nickname string) (*Conn, *TabSe
 			existing.mu.Unlock()
 			return conn, existing, nil
 		}
-		delete(m.tabs, nickname)
+		m.mu.Lock()
+		if m.tabs[nickname] == existing {
+			delete(m.tabs, nickname)
+		}
+		m.mu.Unlock()
 	}
 
 	// 2. Query in-browser registry target (`about:blank#__kabibi_registry__`) and page targets' `window.__kabibi_nick`
-	targetID := m.findTargetInBrowserLocked(ctx, conn, targets, nickname)
+	targetID := m.findTargetInBrowser(ctx, conn, targets, nickname)
 
 	// 3. If not found in browser, claim an initial blank unowned tab or create a fresh tab
 	if targetID == "" {
@@ -336,7 +351,7 @@ func (m *Manager) EnsureTab(ctx context.Context, nickname string) (*Conn, *TabSe
 		"returnByValue": true,
 	}, nil)
 
-	m.saveTargetToBrowserRegistryLocked(ctx, conn, targets, nickname, targetID)
+	m.saveTargetToBrowserRegistry(ctx, conn, targets, nickname, targetID)
 
 	curURL := "about:blank"
 	if ti, ok := targetExists[targetID]; ok && ti.URL != "" {
@@ -350,7 +365,9 @@ func (m *Manager) EnsureTab(ctx context.Context, nickname string) (*Conn, *TabSe
 		CurrentURL: curURL,
 		netTracker: NewNetworkTracker(conn, sid),
 	}
+	m.mu.Lock()
 	m.tabs[nickname] = tab
+	m.mu.Unlock()
 	return conn, tab, nil
 }
 
@@ -391,7 +408,7 @@ func buildNicknameStampScript(nickname string) string {
 	})()`, string(nickJSON))
 }
 
-func (m *Manager) findTargetInBrowserLocked(ctx context.Context, conn *Conn, targets []TargetInfo, nickname string) string {
+func (m *Manager) findTargetInBrowser(ctx context.Context, conn *Conn, targets []TargetInfo, nickname string) string {
 	pageSet := make(map[string]bool, len(targets))
 	var regTargetID string
 	for _, ti := range targets {
@@ -486,7 +503,7 @@ func readFromBrowserRegistry(ctx context.Context, conn *Conn, regTargetID, nickn
 	return evalRes.Result.Value
 }
 
-func (m *Manager) saveTargetToBrowserRegistryLocked(ctx context.Context, conn *Conn, targets []TargetInfo, nickname, targetID string) {
+func (m *Manager) saveTargetToBrowserRegistry(ctx context.Context, conn *Conn, targets []TargetInfo, nickname, targetID string) {
 	var regTargetID string
 	for _, ti := range targets {
 		if ti.Type == "page" && ti.URL == registryURLMarker {

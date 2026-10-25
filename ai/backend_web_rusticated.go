@@ -209,21 +209,6 @@ const webAdapterBootstrapJS = `
       return String(convId);
     }
 
-    async cloneConversation(convId, newConvId) {
-      const entry = this.conversations.get(Number(convId));
-      if (!entry) throw new Error('invalid conv id to clone: ' + convId);
-
-      let cloned;
-      if (typeof entry.conv.clone === 'function') {
-        cloned = await entry.conv.clone();
-      } else {
-        throw new Error('conversation clone not supported');
-      }
-
-      this.conversations.set(Number(newConvId), { conv: cloned, engine: entry.engine });
-      return String(newConvId);
-    }
-
     startStream(convId, messageJSON) {
       const entry = this.conversations.get(Number(convId));
       if (!entry) throw new Error('invalid conv id: ' + convId);
@@ -482,22 +467,6 @@ type webConversationBackend struct {
 	engine *webEngineBackend
 	convID uint64
 	closed atomic.Bool
-}
-
-func (c *webConversationBackend) Clone() (conversationBackend, error) {
-	if c.closed.Load() {
-		return nil, ErrClosed
-	}
-	newConvID := atomic.AddUint64(&nextWebConvID, 1)
-	_, err := EvalJS(fmt.Sprintf("globalThis.__rustica_ai.cloneConversation(%d, %d)", c.convID, newConvID))
-	if err != nil {
-		return nil, fmt.Errorf("web cloneConversation: %w", err)
-	}
-
-	return &webConversationBackend{
-		engine: c.engine,
-		convID: newConvID,
-	}, nil
 }
 
 type webStreamEvent struct {

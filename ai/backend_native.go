@@ -22,7 +22,6 @@ var (
 	lmCfgCreate           func(engine uintptr) uintptr
 	lmCfgDelete           func(config uintptr)
 	lmConvCreate          func(engine, config uintptr) uintptr
-	lmConvClone           func(conv uintptr) uintptr
 	lmConvDelete          func(conv uintptr)
 	lmConvSendStream      func(conv, message, extraCtx, optArgs, callback, userData uintptr) int32
 	lmConvCancelProcess   func(conv uintptr)
@@ -170,12 +169,6 @@ func (d *nativeDriver) cfgSetMessages(cfg, messagesJSON uint64) {
 }
 func (d *nativeDriver) convCreate(engine, cfg uint64) uint64 {
 	return uint64(lmConvCreate(uintptr(engine), uintptr(cfg)))
-}
-func (d *nativeDriver) convClone(conv uint64) uint64 {
-	if lmConvClone == nil {
-		return 0
-	}
-	return uint64(lmConvClone(uintptr(conv)))
 }
 func (d *nativeDriver) convDelete(conv uint64) { lmConvDelete(uintptr(conv)) }
 func (d *nativeDriver) convSendStream(conv, msg, extraCtx, optArgs, callback, userData uint64) int32 {
@@ -377,9 +370,6 @@ func ensureLMLibLoadedImpl(libPath string) error {
 		purego.RegisterLibFunc(&lmCfgCreate, lmLib, "litert_lm_conversation_config_create")
 		purego.RegisterLibFunc(&lmCfgDelete, lmLib, "litert_lm_conversation_config_delete")
 		purego.RegisterLibFunc(&lmConvCreate, lmLib, "litert_lm_conversation_create")
-		if sym, err := dlsym(lmLib, "litert_lm_conversation_clone"); err == nil && sym != 0 {
-			purego.RegisterFunc(&lmConvClone, sym)
-		}
 		purego.RegisterLibFunc(&lmConvDelete, lmLib, "litert_lm_conversation_delete")
 		purego.RegisterLibFunc(&lmConvSendStream, lmLib, "litert_lm_conversation_send_message_stream")
 		purego.RegisterLibFunc(&lmConvCancelProcess, lmLib, "litert_lm_conversation_cancel_process")

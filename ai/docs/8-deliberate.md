@@ -1,5 +1,8 @@
 # Architecture Plan: Harmonizing Deliberation as an Agentic Tool (`deliberate`)
 
+> Historical note: The removed planner calibrated reply length, generated steps, ran three critiques, and synthesized a plan through isolated model calls.
+> Its implementation was removed; inspect history around tag `v0.8.9`.
+
 ## 1. Investigation Findings: What the Junior Developer Got Right & Wrong
 
 ### What Is Actually True in `litert_lm_ext.dll`

@@ -1,5 +1,8 @@
 # 11. Environmental System Context & Temporal Turn Telemetry (`11-more-context.md`)
 
+> Historical note: The removed planner routed prompts, generated steps and critiques, and synthesized plans through staged model calls.
+> Its implementation was removed; inspect history around tag `v0.8.9`.
+
 ## 1. Objective & Design Principles
 
 We want the AI assistant in both **Kabibi** and **Pope** to have rich, accurate situational awareness of:
@@ -13,7 +16,7 @@ We want the AI assistant in both **Kabibi** and **Pope** to have rich, accurate 
    - **AI Turn:** Capture when the first output character arrived (`StartedAt`) and when the final output character arrived (`CompletedAt`).
    - **Tool Execution:** Capture when each tool invocation started (`StartedAt`) and finished (`CompletedAt`).
    - **Strict Data Separation Invariant:** In Go data structures (`ai.PromptPart`, `shell.CommandBlock`, `shell.CommandRecord`), `.Text`, `.Input`, `.Output`, and `.ToolResponse` store **pure, untimestamped content** so UI rendering, history assertions, and vector embeddings (`FormatPartForEmbedding`) are never polluted by timestamp strings.
-   - **Wire Projection to the AI:** Only when serializing conversation turns for the LLM wire payload (`buildHistoryJSON`, `buildMessageJSON`, and multi-stage deliberation/execution seeds) does the `ai` package prepend the formatted temporal header:
+   - **Wire Projection to the AI:** Only when serializing conversation turns for the LLM wire payload (`buildHistoryJSON`, `buildMessageJSON`, and tool-enabled turn inputs) does the `ai` package prepend the formatted temporal header:
      - **First timestamp in a sequence, or whenever the calendar date (`YYYY-MM-DD`) flips from the previous timestamp:** include the date, weekday, and `HH:MM`:
        - `[2026-10-18 Sun 23:12, typed for 14 seconds]`
      - **Subsequent timestamps on the same calendar date:** omit the date and show only `HH:MM`:
@@ -73,7 +76,6 @@ Owns the canonical data structures, wire serialization, session-level turn timin
        ToolResponse   any
        ToolCalls      []ToolCall
        Embedding      []float32
-       CognitiveTrace *CognitiveTrace
        StartedAt      time.Time     `json:"-"`
        CompletedAt    time.Time     `json:"-"`
        Duration       time.Duration `json:"-"`
@@ -92,7 +94,7 @@ Owns the canonical data structures, wire serialization, session-level turn timin
      - If `timing.SubmittedAt.IsZero()`, defaults to `time.Now()`.
      - If `timing.TypedAt.IsZero()` or `timing.TypedAt.After(timing.SubmittedAt)`, defaults `TypedAt = timing.SubmittedAt`.
      - Constructs the user `PromptPart` with `StartedAt: timing.TypedAt`, `CompletedAt: timing.SubmittedAt`, `Duration: timing.SubmittedAt.Sub(timing.TypedAt)`.
-     - Tracks AI response streaming across Stage 1 (direct reply) and Stage 7 (converged reply): records `firstTokenAt` on the first emitted content chunk (`s.emitContent`) and `lastTokenAt` when the final content chunk finishes, storing `StartedAt: firstTokenAt`, `CompletedAt: lastTokenAt`, `Duration: lastTokenAt.Sub(firstTokenAt)` on the final `RoleModel` `PromptPart`.
+     - Records the AI turn start and completion around the tool-enabled model interaction, storing `StartedAt`, `CompletedAt`, and `Duration` on the final `RoleModel` `PromptPart`.
      - Tracks tool execution in `runStage5Execution`: wraps each `s.executeTool(ctx, tc, call)` call with `toolStart := time.Now()` and `toolEnd := time.Now()`, storing `StartedAt: toolStart`, `CompletedAt: toolEnd`, `Duration: toolEnd.Sub(toolStart)` on each `RoleTool` `PromptPart` (and on the intermediate `RoleModel` tool-call turn).
 
 5. **Temporal Wire Formatting (`ai/conversation.go`, `ai/engine.go`, `ai/session.go`):**
@@ -113,8 +115,8 @@ Owns the canonical data structures, wire serialization, session-level turn timin
      - For `RoleTool`, attaches `"timing": prefix` inside a shallow copy of the wire `tool_response` map (or wraps non-map responses) without mutating `history[i].ToolResponse`.
    - In `buildMessageJSON(parts []PromptPart)` (and `buildMessageJSONWithDate(parts []PromptPart, lastDate *string)`):
      - Applies the same wire formatting for live messages.
-   - In `Session` ephemeral stages (`runStage1Triage`, `executeDeliberationWithContext`, `runStage5Execution`, `runStageConvergence`):
-     - Uses the timed `userPart` (`PromptPart{Role: RoleUser, Text: userText, StartedAt: userTypedAt, CompletedAt: userSubmittedAt, Duration: ...}`) in `seed` histories so that during Stage 1, deliberation, tool execution, and convergence, the LLM immediately sees the current turn's `[YYYY-MM-DD Day HH:MM, typed for X seconds]` header and knows the exact current date, day of week, and time of day!
+   - In a standard tool-enabled turn:
+     - Sends the timed user part (`PromptPart{Role: RoleUser, Text: userText, StartedAt: userTypedAt, CompletedAt: userSubmittedAt, Duration: ...}`) directly as the first model input so the LLM sees the current turn's `[YYYY-MM-DD Day HH:MM, typed for X seconds]` header.
 
 ---
 
@@ -148,4 +150,3 @@ Yes—Pope should also benefit from both features!
    - Append `ai.FormatEnvironmentContext(...)` to `cfg.SystemFlag` when creating `ai.NewSession` so Pope also knows its OS, platform (native vs. Mohabbat), loaded model, model size, active backend, and working directory.
 2. **REPL & One-Shot Turn Timings (`pope/main.go`, `pope/terminal.go`):**
    - In `runTerminalLoop` (`pope/terminal.go`), record when the prompt `> ` is ready / line is submitted and pass `ai.WithTurnTiming` (or let `Session.RunTurn` automatically stamp `SubmittedAt = time.Now()` and track AI response and tool timings).
-

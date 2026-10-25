@@ -235,8 +235,9 @@ type mockTarget struct {
 	Typed    string
 }
 
-func startMockCDPServer(t *testing.T) string {
+func startMockCDPServer(t *testing.T, emitEventBeforeResponse ...bool) string {
 	t.Helper()
+	emitPageEventBeforeResponse := len(emitEventBeforeResponse) > 0 && emitEventBeforeResponse[0]
 	b := &mockCDPBrowser{
 		targets: make(map[string]*mockTarget),
 	}
@@ -279,6 +280,18 @@ func startMockCDPServer(t *testing.T) string {
 				continue
 			}
 			res := b.handleRPC(req)
+			if emitPageEventBeforeResponse && req.Method == "Page.enable" {
+				eventBytes, _ := json.Marshal(map[string]any{
+					"method":    "Page.frameNavigated",
+					"sessionId": req.SessionID,
+					"params": map[string]any{
+						"frame": map[string]any{"url": "about:blank"},
+					},
+				})
+				if err := writeMockWSFrame(conn, eventBytes); err != nil {
+					return
+				}
+			}
 			respBytes, _ := json.Marshal(map[string]any{
 				"id":        req.ID,
 				"sessionId": req.SessionID,
@@ -347,6 +360,12 @@ func (b *mockCDPBrowser) handleRPC(req rpcRequest) any {
 	case "Page.navigate":
 		tgt := b.targetBySession(req.SessionID)
 		if u, ok := paramsMap["url"].(string); ok {
+			if u == "https://navigation-error.invalid" {
+				return map[string]any{
+					"frameId":   "frame_1",
+					"errorText": "net::ERR_NAME_NOT_RESOLVED",
+				}
+			}
 			tgt.URL = u
 			tgt.Title = "Kabibi Test Page"
 		}
@@ -544,6 +563,42 @@ func writeMockWSFrame(w net.Conn, payload []byte) error {
 	buf.Write(payload)
 	_, err := w.Write(buf.Bytes())
 	return err
+}
+
+func TestEnsureTabDoesNotDeadlockOnEventsDuringSetup(t *testing.T) {
+	wsURL := startMockCDPServer(t, true)
+	mgr := NewManager(t.TempDir())
+	mgr.SetWebSocketURL(wsURL)
+	defer mgr.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if _, _, err := mgr.EnsureTab(ctx, "researcher"); err != nil {
+		t.Fatalf("EnsureTab() failed while CDP emitted an event before its response: %v", err)
+	}
+}
+
+func TestNavigateActionRequiresURLBeforeBrowserLaunch(t *testing.T) {
+	mgr := NewManager(t.TempDir())
+	mgr.SetWebSocketURL("ws://127.0.0.1:1")
+
+	_, err := mgr.NavigateAction(context.Background(), "researcher", "", false, false, false)
+	if err == nil || !strings.Contains(err.Error(), "url is required") {
+		t.Fatalf("NavigateAction() error = %v, want missing-URL error before connecting", err)
+	}
+}
+
+func TestNavigateActionReportsNavigationError(t *testing.T) {
+	wsURL := startMockCDPServer(t)
+	mgr := NewManager(t.TempDir())
+	mgr.SetWebSocketURL(wsURL)
+	defer mgr.Close()
+
+	_, err := mgr.NavigateAction(context.Background(), "researcher", "navigation-error.invalid", false, false, false)
+	if err == nil || !strings.Contains(err.Error(), "net::ERR_NAME_NOT_RESOLVED") {
+		t.Fatalf("NavigateAction() error = %v, want CDP navigation error", err)
+	}
 }
 
 func TestManager_InBrowserNicknamePersistence_AndFullActions(t *testing.T) {

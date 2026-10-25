@@ -108,23 +108,6 @@ type remoteConversationBackend struct {
 	cancel context.CancelFunc
 }
 
-func (c *remoteConversationBackend) Clone() (conversationBackend, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
-		return nil, ErrClosed
-	}
-	history, err := clonePromptParts(c.history)
-	if err != nil {
-		return nil, fmt.Errorf("clone remote conversation history: %w", err)
-	}
-	config, err := cloneConversationConfig(c.config)
-	if err != nil {
-		return nil, fmt.Errorf("clone remote conversation config: %w", err)
-	}
-	return &remoteConversationBackend{engine: c.engine, config: config, history: history}, nil
-}
-
 func (c *remoteConversationBackend) Close() error {
 	c.mu.Lock()
 	c.closed = true
@@ -225,19 +208,6 @@ func clonePromptParts(parts []PromptPart) ([]PromptPart, error) {
 			}
 		}
 	}
-	return clone, nil
-}
-
-func cloneConversationConfig(cfg ConversationConfig) (ConversationConfig, error) {
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		return ConversationConfig{}, err
-	}
-	var clone ConversationConfig
-	if err := json.Unmarshal(data, &clone); err != nil {
-		return ConversationConfig{}, err
-	}
-	clone.History = nil
 	return clone, nil
 }
 

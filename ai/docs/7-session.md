@@ -1,5 +1,8 @@
 # Meta-Spec: Extract `ai.Session` & Flip Stage 1 Triage Polarity
 
+> Historical note: The removed planner routed prompts, generated steps and critiques, and synthesized plans before tool execution.
+> Its implementation was removed; inspect history around tag `v0.8.9`.
+
 ## Objective
 
 1. **Flip Stage 1 Triage Polarity:** Make **either `DIRECT:` or no prefix** take the fast-path bypass straight to spoken output, while **only an explicit `GOAL:` prefix** triggers the 7-stage heavy reasoning pipeline.

@@ -1,3 +1,6 @@
+> Historical note: The removed planner generated a response-length target, steps, three critiques, and a final plan through staged model calls.
+> Its implementation was removed; inspect history around tag `v0.8.9`.
+
 Transitioning `pope` from a single-pass chat wrapper into a reflective reasoning engine requires restructuring how turns are stored, how conversations are forked on the LiteRT-LM engine, and how synthetic dialogue is woven and stripped across stages.
 
 Below is the architectural and algorithmic specification for the engineering team to implement.
