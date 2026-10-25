@@ -28,6 +28,9 @@ vm.runInContext(washmhostSource, browserHostContext, { filename: 'washmhost-brow
 
 const {
   washmhost,
+  loadVegetable,
+  normalizeVegetableCandidates,
+  getActiveHost,
   HostState,
   AsyncIndexedDBFS,
   resolvePath,
@@ -1002,4 +1005,54 @@ test('path_set_times rejects invalid values and unsupported symlink updates', as
   await new Promise(resolve => setTimeout(resolve, 0));
   hostState.drainQueue();
   assert.equal(new DataView(mem.buffer).getUint32(124, true), wasiENOTSUP);
+});
+
+test('loadVegetable tries relative candidate first and falls back to release/dist, and supports late terminal attachment', async () => {
+  assert.deepEqual(Array.from(normalizeVegetableCandidates('kabibi.bat')), ['./kabibi.bat', './release/dist/kabibi.bat']);
+  assert.deepEqual(Array.from(normalizeVegetableCandidates('./kabibi.bat')), ['./kabibi.bat', './release/dist/kabibi.bat']);
+
+  // Minimal valid WASM module exporting memory (1 page) and a no-op run() function
+  const minimalWasm = new Uint8Array([
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+    0x03, 0x02, 0x01, 0x00,
+    0x05, 0x03, 0x01, 0x00, 0x01,
+    0x07, 0x10, 0x02,
+    0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00,
+    0x03, 0x72, 0x75, 0x6e, 0x00, 0x00,
+    0x0a, 0x04, 0x01, 0x02, 0x00, 0x0b
+  ]);
+
+  const requestedUrls = [];
+  const fakeFetch = async (url) => {
+    requestedUrls.push(url);
+    if (url === './kabibi.bat') {
+      return { ok: false, status: 404 };
+    }
+    if (url === './release/dist/kabibi.bat') {
+      return {
+        ok: true,
+        status: 200,
+        async arrayBuffer() {
+          return minimalWasm.buffer.slice(minimalWasm.byteOffset, minimalWasm.byteOffset + minimalWasm.byteLength);
+        }
+      };
+    }
+    throw new Error(`unexpected URL ${url}`);
+  };
+
+  const controller = await loadVegetable('kabibi.bat', { fetch: fakeFetch });
+  assert.deepEqual(requestedUrls, ['./kabibi.bat', './release/dist/kabibi.bat']);
+  assert.equal(getActiveHost(), controller);
+  assert.equal(controller.hasTerminal(), false);
+
+  const attachedOut = [];
+  let currentSize = { cols: 72, rows: 20 };
+  controller.attachTerminal({
+    stdout: (bytes) => attachedOut.push(bytes),
+    getTtySize: () => currentSize,
+    setTtySize: (cols, rows) => { currentSize = { cols, rows }; }
+  });
+  assert.equal(controller.hasTerminal(), true);
+  controller.terminate(0);
 });

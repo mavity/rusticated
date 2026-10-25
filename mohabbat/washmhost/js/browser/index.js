@@ -434,6 +434,14 @@ class HostState {
     this.forcedExitCode = -1;
     this.rawTtyMode = 0;
 
+    this.terminalAttached = false;
+    this.stdoutCb = null;
+    this.stderrCb = null;
+    this.getTtySizeCb = () => ({ cols: 80, rows: 24 });
+    this.setTtySizeCb = null;
+    this.onExitCb = null;
+    this.earlyOutput = [];
+
     // Async wake coordination
     this._wakeResolver = null;
   }
@@ -582,10 +590,25 @@ function makeBrowserImports(hostState, fs, params = {}) {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
 
-  const stdoutCb = params.stdout || ((bytes) => {});
-  const stderrCb = params.stderr || ((bytes) => {});
-  const getTtySizeCb = params.getTtySize || (() => ({ cols: 80, rows: 24 }));
-  const setTtySizeCb = params.setTtySize;
+  if (typeof params.stdout === 'function') {
+    hostState.stdoutCb = params.stdout;
+    hostState.terminalAttached = true;
+  }
+  if (typeof params.stderr === 'function') {
+    hostState.stderrCb = params.stderr;
+    hostState.terminalAttached = true;
+  }
+  if (typeof params.getTtySize === 'function') {
+    hostState.getTtySizeCb = params.getTtySize;
+    hostState.terminalAttached = true;
+  }
+  if (typeof params.setTtySize === 'function') {
+    hostState.setTtySizeCb = params.setTtySize;
+    hostState.terminalAttached = true;
+  }
+  if (typeof params.onExit === 'function') {
+    hostState.onExitCb = params.onExit;
+  }
   const args = params.args || ['vegetable'];
   const envObj = params.env || {
     TERM: 'xterm-256color',
@@ -713,7 +736,9 @@ function makeBrowserImports(hostState, fs, params = {}) {
     host_panic: (ptr, len) => {
       const msg = decoder.decode(hostState.getGuestSlice(Number(ptr), Number(len)));
       console.error('[HOST PANIC]', msg);
-      if (params.stderr) params.stderr(encoder.encode(`\r\n[HOST PANIC]: ${msg}\r\n`));
+      if (typeof hostState.stderrCb === 'function') {
+        hostState.stderrCb(encoder.encode(`\r\n[HOST PANIC]: ${msg}\r\n`));
+      }
       throw new Error(`Guest panicked: ${msg}`);
     },
 
@@ -800,13 +825,21 @@ function makeBrowserImports(hostState, fs, params = {}) {
       const chunk = hostState.getGuestSlice(uPtr, uLen).slice();
 
       if (h.type === 'stdout') {
-        stdoutCb(chunk);
+        if (typeof hostState.stdoutCb === 'function') {
+          hostState.stdoutCb(chunk);
+        } else if (Array.isArray(hostState.earlyOutput)) {
+          hostState.earlyOutput.push({ stream: 'stdout', bytes: chunk });
+        }
         hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, 0, 0, uLen));
         return;
       }
 
       if (h.type === 'stderr') {
-        stderrCb(chunk);
+        if (typeof hostState.stderrCb === 'function') {
+          hostState.stderrCb(chunk);
+        } else if (Array.isArray(hostState.earlyOutput)) {
+          hostState.earlyOutput.push({ stream: 'stderr', bytes: chunk });
+        }
         hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, 0, 0, uLen));
         return;
       }
@@ -1365,7 +1398,10 @@ function makeBrowserImports(hostState, fs, params = {}) {
     },
 
     tty_get_size: (ptr) => {
-      const { cols, rows } = getTtySizeCb();
+      const sizeCb = typeof hostState.getTtySizeCb === 'function'
+        ? hostState.getTtySizeCb
+        : (() => ({ cols: 80, rows: 24 }));
+      const { cols, rows } = sizeCb();
       if (ptr !== 0) {
         const view = hostState.view;
         view.setUint16(Number(ptr), rows, true);
@@ -1385,8 +1421,8 @@ function makeBrowserImports(hostState, fs, params = {}) {
         return wasiSuccess;
       }
       if (h.type !== 'stdin' && h.type !== 'stdout' && h.type !== 'stderr') return wasiENOTTY;
-      if (typeof setTtySizeCb !== 'function') return wasiENOTTY;
-      setTtySizeCb(cols, rows);
+      if (typeof hostState.setTtySizeCb !== 'function') return wasiENOTTY;
+      hostState.setTtySizeCb(cols, rows);
       return wasiSuccess;
     },
 
@@ -1417,7 +1453,7 @@ function makeBrowserImports(hostState, fs, params = {}) {
       setString(220, 'washmhost');
       setString(548, '/home/user');
       setString(612, '/tmp');
-      const memoryGB = Number(navigator.deviceMemory || 0);
+      const memoryGB = Number(typeof navigator !== 'undefined' && navigator ? navigator.deviceMemory : 0);
       if (Number.isFinite(memoryGB) && memoryGB > 0) {
         descriptor[676] = 1;
         descriptor[677] = 2;
@@ -1935,6 +1971,72 @@ async function unpackVegetable(buffer) {
 
 // ── Main Entry Closure ───────────────────────────────────────────────────────
 let evalOverflow = '';
+let activeHost = null;
+
+function normalizeVegetableCandidates(target) {
+  if (Array.isArray(target)) {
+    return target.filter((item) => item !== null && typeof item !== 'undefined' && item !== '');
+  }
+  if (typeof target === 'string') {
+    const trimmed = target.trim();
+    if (!trimmed) return ['./kabibi.bat', './release/dist/kabibi.bat'];
+    const normalized = trimmed.startsWith('./') || trimmed.startsWith('../') || trimmed.startsWith('/') || /^[a-z]+:\/\//i.test(trimmed)
+      ? trimmed
+      : `./${trimmed}`;
+    const relativeName = normalized.replace(/^\.\//, '');
+    if (!relativeName.startsWith('release/dist/') && !normalized.startsWith('/') && !/^[a-z]+:\/\//i.test(normalized)) {
+      return [normalized, `./release/dist/${relativeName}`];
+    }
+    return [normalized];
+  }
+  if (target !== null && typeof target !== 'undefined') {
+    return [target];
+  }
+  return ['./kabibi.bat', './release/dist/kabibi.bat'];
+}
+
+async function resolveWasmBinary(wasmSource, fetchImpl = fetch) {
+  if (Array.isArray(wasmSource)) {
+    if (wasmSource.length === 0) {
+      throw new Error('No WASM or vegetable candidates provided');
+    }
+    let lastError = null;
+    for (const candidate of wasmSource) {
+      try {
+        return await resolveWasmBinary(candidate, fetchImpl);
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    throw lastError || new Error('Failed to load WASM from candidate sources');
+  }
+  if (typeof wasmSource === 'string') {
+    const res = await fetchImpl(wasmSource);
+    if (!res.ok) throw new Error(`HTTP ${res.status} fetching WASM from ${wasmSource}`);
+    return await res.arrayBuffer();
+  }
+  if (typeof Response !== 'undefined' && wasmSource instanceof Response) {
+    return await wasmSource.arrayBuffer();
+  }
+  if (typeof Blob !== 'undefined' && wasmSource instanceof Blob) {
+    return await wasmSource.arrayBuffer();
+  }
+  if (ArrayBuffer.isView(wasmSource)) {
+    return wasmSource.buffer.slice(wasmSource.byteOffset, wasmSource.byteOffset + wasmSource.byteLength);
+  }
+  if (wasmSource instanceof ArrayBuffer) {
+    return wasmSource;
+  }
+  throw new Error('Unsupported WASM binary source');
+}
+
+async function loadVegetable(candidates = ['./kabibi.bat', './release/dist/kabibi.bat'], options = {}) {
+  const wasmCandidates = normalizeVegetableCandidates(candidates);
+  return washmhost({
+    ...options,
+    wasm: wasmCandidates
+  });
+}
 
 async function washmhost(params = {}) {
   const hostState = new HostState();
@@ -1963,18 +2065,7 @@ async function washmhost(params = {}) {
   await fs.seed(params.initialFiles || []);
 
   // Fetch / load WASM binary or Vegetable
-  let wasmBinary = params.wasm;
-  if (typeof wasmBinary === 'string') {
-    const res = await fetch(wasmBinary);
-    if (!res.ok) throw new Error(`HTTP ${res.status} fetching WASM from ${wasmBinary}`);
-    wasmBinary = await res.arrayBuffer();
-  } else if (wasmBinary instanceof Response) {
-    wasmBinary = await wasmBinary.arrayBuffer();
-  } else if (wasmBinary instanceof Blob) {
-    wasmBinary = await wasmBinary.arrayBuffer();
-  } else if (ArrayBuffer.isView(wasmBinary)) {
-    wasmBinary = wasmBinary.buffer.slice(wasmBinary.byteOffset, wasmBinary.byteOffset + wasmBinary.byteLength);
-  }
+  let wasmBinary = await resolveWasmBinary(params.wasm, params.fetch || fetch);
 
   // Check if wasmBinary is a vegetable (.bat / polyglot) instead of raw WASM
   const headBytes = new Uint8Array(wasmBinary, 0, Math.min(wasmBinary.byteLength, 4));
@@ -1999,16 +2090,45 @@ async function washmhost(params = {}) {
     throw new Error('WASM module missing "run" or "_start" export');
   }
 
-  // Trigger initial resize signals to notify TUI (27 = Go wasip1 SIGWINCH, 28 = Unix/Rust SIGWINCH)
-  hostState.triggerSignal(27);
-  hostState.triggerSignal(28);
-
-  // Launch cooperative scheduler in background
-  runEventLoop(hostState, runFunc, params.onExit);
-
-  return {
+  const controller = {
     pushStdin: (data) => hostState.pushStdin(data),
     triggerSignal: (signum) => hostState.triggerSignal(signum),
+    hasTerminal: () => Boolean(hostState.terminalAttached),
+    attachTerminal: (terminalCallbacks = {}) => {
+      if (typeof terminalCallbacks.stdout === 'function') {
+        hostState.stdoutCb = terminalCallbacks.stdout;
+      }
+      if (typeof terminalCallbacks.stderr === 'function') {
+        hostState.stderrCb = terminalCallbacks.stderr;
+      }
+      if (typeof terminalCallbacks.getTtySize === 'function') {
+        hostState.getTtySizeCb = terminalCallbacks.getTtySize;
+      }
+      if (typeof terminalCallbacks.setTtySize === 'function') {
+        hostState.setTtySizeCb = terminalCallbacks.setTtySize;
+      }
+      if (typeof terminalCallbacks.onExit === 'function') {
+        const prevOnExit = hostState.onExitCb;
+        hostState.onExitCb = (code) => {
+          if (typeof prevOnExit === 'function') prevOnExit(code);
+          terminalCallbacks.onExit(code);
+        };
+      }
+      hostState.terminalAttached = true;
+      if (Array.isArray(hostState.earlyOutput) && hostState.earlyOutput.length > 0) {
+        const queued = hostState.earlyOutput.splice(0);
+        for (const item of queued) {
+          if (item.stream === 'stderr' && typeof hostState.stderrCb === 'function') {
+            hostState.stderrCb(item.bytes);
+          } else if (typeof hostState.stdoutCb === 'function') {
+            hostState.stdoutCb(item.bytes);
+          }
+        }
+      }
+      hostState.triggerSignal(27);
+      hostState.triggerSignal(28);
+      return controller;
+    },
     isRunning: () => hostState.forcedExitCode === -1,
     getExitCode: () => hostState.forcedExitCode !== -1 ? hostState.forcedExitCode : null,
     getMemory: () => hostState.memory,
@@ -2019,10 +2139,27 @@ async function washmhost(params = {}) {
       hostState.wakeScheduler();
     }
   };
+  activeHost = controller;
+
+  // Trigger initial resize signals to notify TUI (27 = Go wasip1 SIGWINCH, 28 = Unix/Rust SIGWINCH)
+  hostState.triggerSignal(27);
+  hostState.triggerSignal(28);
+
+  // Launch cooperative scheduler in background
+  runEventLoop(hostState, runFunc, (code) => {
+    if (typeof hostState.onExitCb === 'function') {
+      hostState.onExitCb(code);
+    }
+  });
+
+  return controller;
 }
 
 globalThis.washmhostExports = {
     washmhost,
+    loadVegetable,
+    normalizeVegetableCandidates,
+    getActiveHost: () => activeHost,
     HostState,
     AsyncIndexedDBFS,
     resolvePath,
