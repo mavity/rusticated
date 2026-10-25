@@ -191,7 +191,21 @@ Even though Kabibi itself reads from a non-TTY `stdin` and streams to `stdout`/`
 
 ---
 
-## 6. Implemented Coverage
+## 6. Slash Commands
+
+Slash commands share a registry and literal-argument parser. In TTY mode, matching commands appear in the footer; Up/Down and Tab cycle through multiple matches, Enter accepts a partial match, and Tab completes a unique match. Tab after a completed command opens its argument position. Piped mode has no hints.
+
+- `/settings` opens the settings dialog in TTY mode. In piped mode it reports that the TUI is required and prints the AI configuration JSON path.
+- `/model` runs the existing AI setup flow; piped mode uses numbered/text prompts on standard input and output.
+- `/panels` toggles file panels in TTY mode. `/edit` and `/panels` report that the TUI is required in piped mode.
+- `/copy`, `/move`, `/rename`, `/delete`, and `/remove` accept paths in either mode; `/edit` is TUI-only. In TTY mode, no paths use the selected panel item; if the panels are hidden, these file actions show them first. Piped copy/move commands take one or more sources followed by a destination directory; `/rename` takes a source and destination; `/delete` requires `--yes` followed by one or more paths. Piped copy and move fail on destination collisions.
+- `/remove` aliases `/delete`; `/download` is browser-only and downloads the exact `kabibi.bat` URL that successfully loaded the running artifact.
+
+Quoted paths are supported, but shell operators, redirections, and expansions are rejected in slash-command invocations. Absolute executable paths continue through normal shell routing.
+
+---
+
+## 7. Implemented Coverage
 
 ### Stage 1: Implemented Classifier & Multiline TTY Continuation
 - **Files:** `kabibi/ui/shell/exec_session.go`, `kabibi/ui/shell/prompt_input.go`, `kabibi/ui/shell/shell_widget.go`

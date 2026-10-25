@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,9 @@ import (
 	"sync"
 
 	"github.com/charmbracelet/x/input"
+	"github.com/mattn/go-runewidth"
+	"github.com/mavity/rusticated/kabibi/browser"
+	"github.com/mavity/rusticated/kabibi/slashcmd"
 	"github.com/mavity/rusticated/kabibi/ui"
 	"github.com/mavity/rusticated/kabibi/ui/dialog"
 	"github.com/mavity/rusticated/kabibi/ui/editor"
@@ -36,6 +40,9 @@ type AppWidget struct {
 
 	opCancel context.CancelFunc
 	opResume chan filemanager.CollisionChoice
+
+	slashPrefix string
+	slashIndex  int
 
 	writeScrollback func(string)
 	onExit          func()
@@ -411,6 +418,7 @@ func (w *AppWidget) Render(r terminal.Rect, ctx ui.RenderContext) (terminal.Cell
 	}
 
 	shellBuf, cursor := w.sh.Render(r, ctx)
+	w.renderSlashHints(&shellBuf)
 
 	if panelsVis && w.panels != nil && r.W > 0 && r.H > 0 {
 		panelH, _ := w.computePanelHeight(r.W, r.H)
@@ -513,6 +521,15 @@ func (w *AppWidget) HandleEvent(e input.Event) bool {
 		if keyStr == "ctrl+o" {
 			w.TogglePanels()
 			return true
+		}
+
+		inputValue := w.sh.Input().Value()
+		_, _, isSlashInput := slashcmd.InputToken(inputValue)
+		if isSlashInput || (inputValue == "" && keyEv.Text == "/") {
+			if w.handleSlashKey(keyEv) {
+				return true
+			}
+			return w.sh.HandleEvent(keyEv)
 		}
 
 		// When blue panels are visible, apply the Far Manager Split Key-Routing Table
@@ -627,9 +644,385 @@ func (w *AppWidget) HandleEvent(e input.Event) bool {
 				return true
 			}
 		}
+
+		if keyStr == "esc" {
+			if w.sh.Input().Value() != "" {
+				w.sh.Input().Reset()
+				w.invalidate()
+				return true
+			}
+			if !panelsVis {
+				w.SetPanelsVisible(true)
+				return true
+			}
+		}
 	}
 
 	return w.sh.HandleEvent(e)
+}
+
+func (w *AppWidget) slashMatches() ([]slashcmd.Command, int) {
+	token, args, isSlash := slashcmd.InputToken(w.sh.Input().Value())
+	if !isSlash || strings.Count(token, "/") != 1 {
+		w.mu.Lock()
+		w.slashPrefix = ""
+		w.slashIndex = 0
+		w.mu.Unlock()
+		return nil, 0
+	}
+	matches := slashcmd.Matches(token, browser.Available())
+	w.mu.Lock()
+	if token != w.slashPrefix {
+		w.slashPrefix = token
+		w.slashIndex = 0
+	}
+	if len(matches) == 0 {
+		w.slashIndex = 0
+	} else if w.slashIndex >= len(matches) {
+		w.slashIndex = len(matches) - 1
+	}
+	index := w.slashIndex
+	w.mu.Unlock()
+	if args != "" {
+		return nil, index
+	}
+	return matches, index
+}
+
+func (w *AppWidget) renderSlashHints(buf *terminal.CellBuf) {
+	matches, selected := w.slashMatches()
+	if len(matches) == 0 || buf.Width == 0 || buf.Height == 0 {
+		return
+	}
+
+	y := buf.Height - 1
+	plain := terminal.NewStyle(0, 0, terminal.CharResetForegroundDefault|terminal.CharResetBackgroundDefault)
+	buf.Fill(terminal.Rect{Y: y, W: buf.Width, H: 1}, terminal.Cell{Grapheme: " ", Style: plain})
+
+	var names strings.Builder
+	for i, command := range matches {
+		if i > 0 {
+			names.WriteString("  ")
+		}
+		names.WriteString(command.Name)
+	}
+	showDescription := false
+	description := "  " + matches[selected].Description
+	if runewidth.StringWidth(names.String())+runewidth.StringWidth(description) <= buf.Width {
+		showDescription = true
+	}
+
+	x := 0
+	draw := func(text string, style terminal.Style) {
+		for _, r := range text {
+			width := runewidth.RuneWidth(r)
+			if width <= 0 {
+				continue
+			}
+			if x+width > buf.Width {
+				return
+			}
+			buf.Set(x, y, terminal.Cell{Grapheme: string(r), Style: style})
+			for offset := 1; offset < width; offset++ {
+				buf.Set(x+offset, y, terminal.Cell{Grapheme: "", Style: style})
+			}
+			x += width
+		}
+	}
+	muted := terminal.NewStyle(0x9AA9B8, 0, terminal.CharResetBackgroundDefault)
+	for i, command := range matches {
+		if i > 0 {
+			draw("  ", muted)
+		}
+		style := muted
+		if i == selected {
+			style = terminal.NewStyle(0xFFFFFF, 0x005F87, terminal.CharBold)
+		}
+		draw(command.Name, style)
+	}
+	if showDescription {
+		draw(description, muted)
+	}
+}
+
+func (w *AppWidget) handleSlashKey(key input.KeyPressEvent) bool {
+	value := w.sh.Input().Value()
+	token, args, isSlash := slashcmd.InputToken(value)
+	if !isSlash {
+		return false
+	}
+	if strings.Count(token, "/") > 1 {
+		return false
+	}
+	matches, selected := w.slashMatches()
+	if args != "" {
+		matches = slashcmd.Matches(token, browser.Available())
+	}
+
+	switch key.String() {
+	case "esc":
+		w.sh.Input().Reset()
+		w.invalidate()
+		return true
+	case "left", "right":
+		if args == "" && len(matches) > 1 {
+			w.mu.Lock()
+			if key.String() == "left" {
+				w.slashIndex = (w.slashIndex - 1 + len(matches)) % len(matches)
+			} else {
+				w.slashIndex = (w.slashIndex + 1) % len(matches)
+			}
+			w.mu.Unlock()
+			w.invalidate()
+			return true
+		}
+	case "tab":
+		if args == "" && len(matches) > 1 {
+			w.mu.Lock()
+			w.slashIndex = (selected + 1) % len(matches)
+			w.mu.Unlock()
+			w.invalidate()
+			return true
+		}
+		if args == "" && len(matches) == 1 {
+			w.acceptSlashMatch(matches[selected].Name, args, args == "")
+			return true
+		}
+	case "enter":
+		line := value
+		if len(matches) > 0 {
+			line = matches[selected].Name
+			if args != "" {
+				line += " " + args
+			}
+		}
+		invocation, recognized, err := slashcmd.Parse(line)
+		if recognized {
+			w.sh.Input().Reset()
+			if err != nil {
+				w.showSlashError(err)
+			} else {
+				w.dispatchSlashCommand(invocation)
+			}
+			w.invalidate()
+			return true
+		}
+	}
+	return false
+}
+
+func (w *AppWidget) acceptSlashMatch(name, args string, addSpace bool) {
+	value := w.sh.Input().Value()
+	leading := len(value) - len(strings.TrimLeft(value, " \t\r\n"))
+	updated := value[:leading] + name
+	if args != "" {
+		updated += " " + args
+	} else if addSpace {
+		updated += " "
+	}
+	w.sh.SetInput(updated)
+	w.sh.Input().SetCursorPos(len([]rune(updated)))
+	w.invalidate()
+}
+
+func (w *AppWidget) dispatchSlashCommand(invocation slashcmd.Invocation) {
+	command, ok := slashcmd.Lookup(invocation.Name)
+	if !ok {
+		w.showSlashError(fmt.Errorf("unknown slash command %q", invocation.Name))
+		return
+	}
+	if command.BrowserOnly && !browser.Available() {
+		w.showSlashError(fmt.Errorf("%s is only available in the browser", command.Name))
+		return
+	}
+
+	name := command.Name
+	if name == "/remove" {
+		name = "/delete"
+	}
+	switch name {
+	case "/panels":
+		if len(invocation.Args) != 0 {
+			w.showSlashError(slashcmd.UsageError(name, ""))
+			return
+		}
+		w.TogglePanels()
+	case "/settings":
+		if len(invocation.Args) != 0 {
+			w.showSlashError(slashcmd.UsageError(name, ""))
+			return
+		}
+		w.openSettingsDialog()
+	case "/model":
+		if len(invocation.Args) != 0 {
+			w.showSlashError(slashcmd.UsageError(name, ""))
+			return
+		}
+		w.launchModelSetup()
+	case "/download":
+		if len(invocation.Args) != 0 {
+			w.showSlashError(slashcmd.UsageError(name, ""))
+			return
+		}
+		if err := browser.Download(); err != nil {
+			w.showSlashError(err)
+		}
+	case "/edit":
+		if len(invocation.Args) == 0 {
+			if w.showPanelsForFileAction() {
+				return
+			}
+			if len(w.opSources()) == 0 {
+				w.showSlashError(fmt.Errorf("no file is selected"))
+				return
+			}
+			w.openEditorOnSelected()
+			return
+		}
+		if len(invocation.Args) != 1 {
+			w.showSlashError(slashcmd.UsageError(name, " [path]"))
+			return
+		}
+		if err := w.OpenEditor(w.slashPath(invocation.Args[0]), false); err != nil {
+			w.showSlashError(fmt.Errorf("open %q: %w", invocation.Args[0], err))
+		}
+	case "/copy", "/move":
+		if len(invocation.Args) == 0 {
+			if w.showPanelsForFileAction() {
+				return
+			}
+			if len(w.opSources()) == 0 {
+				w.showSlashError(fmt.Errorf("no file is selected"))
+				return
+			}
+			kind := filemanager.OpCopy
+			if name == "/move" {
+				kind = filemanager.OpMove
+			}
+			w.openTransferDialog(kind)
+			return
+		}
+		if len(invocation.Args) < 2 {
+			w.showSlashError(slashcmd.UsageError(name, " <source>... <destination-directory>"))
+			return
+		}
+		sources := make([]string, len(invocation.Args)-1)
+		for i, path := range invocation.Args[:len(invocation.Args)-1] {
+			sources[i] = w.slashPath(path)
+		}
+		dest := w.slashPath(invocation.Args[len(invocation.Args)-1])
+		kind := filemanager.OpCopy
+		if name == "/move" {
+			kind = filemanager.OpMove
+		}
+		w.startFileOp(filemanager.FileOp{Kind: kind, Sources: sources, Dest: dest})
+	case "/delete":
+		if len(invocation.Args) == 0 {
+			if w.showPanelsForFileAction() {
+				return
+			}
+			if len(w.opSources()) == 0 {
+				w.showSlashError(fmt.Errorf("no file is selected"))
+				return
+			}
+			w.openDeleteDialog()
+			return
+		}
+		sources := make([]string, len(invocation.Args))
+		for i, path := range invocation.Args {
+			sources[i] = w.slashPath(path)
+		}
+		w.openDeleteDialogForSources(sources)
+	case "/rename":
+		if len(invocation.Args) == 0 {
+			if w.showPanelsForFileAction() {
+				return
+			}
+			if len(w.opSources()) == 0 {
+				w.showSlashError(fmt.Errorf("no file is selected"))
+				return
+			}
+			w.openRenameDialog()
+			return
+		}
+		if len(invocation.Args) != 2 {
+			w.showSlashError(slashcmd.UsageError(name, " <source> <destination>"))
+			return
+		}
+		oldPath := w.slashPath(invocation.Args[0])
+		newPath := w.slashPath(invocation.Args[1])
+		if err := os.Rename(oldPath, newPath); err != nil {
+			w.showSlashError(fmt.Errorf("rename %q to %q: %w", oldPath, newPath, err))
+			return
+		}
+		w.refreshPanels()
+	default:
+		w.showSlashError(fmt.Errorf("unsupported slash command %q", name))
+	}
+}
+
+func (w *AppWidget) slashPath(path string) string {
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(w.sh.Dir(), path)
+	}
+	return filepath.Clean(path)
+}
+
+func (w *AppWidget) showPanelsForFileAction() bool {
+	if !w.PanelsVisible() {
+		w.SetPanelsVisible(true)
+		return true
+	}
+	return false
+}
+
+func (w *AppWidget) openSettingsDialog() {
+	dlg := dialog.NewChoiceDialog("Settings", "Choose an option:", []dialog.Choice{
+		{Label: "AI provider and model", Hotkey: "a"},
+	}, func(index int) {
+		w.closeDialog()
+		if index == 0 {
+			w.launchModelSetup()
+		}
+	})
+	dlg.OnCancel = w.closeDialog
+	w.mu.Lock()
+	w.dialog = dlg
+	w.mu.Unlock()
+	w.invalidate()
+}
+
+func (w *AppWidget) launchModelSetup() {
+	w.sh.SetInput("ai setup")
+	w.sh.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
+}
+
+func (w *AppWidget) showSlashError(err error) {
+	if err == nil {
+		return
+	}
+	dlg := dialog.NewChoiceDialog("Slash Command Error", err.Error(), []dialog.Choice{
+		{Label: "[OK]", Hotkey: "o"},
+	}, func(int) {
+		w.closeDialog()
+	})
+	dlg.OnCancel = w.closeDialog
+	w.mu.Lock()
+	w.dialog = dlg
+	w.mu.Unlock()
+	w.invalidate()
+}
+
+func (w *AppWidget) refreshPanels() {
+	if w.panels == nil {
+		return
+	}
+	if w.panels.Left != nil {
+		_ = w.panels.Left.Refresh()
+	}
+	if w.panels.Right != nil {
+		_ = w.panels.Right.Refresh()
+	}
 }
 
 // ── File Manager Modal & Editor Actions (F2–F8) ───────────────────────────────
@@ -723,7 +1116,10 @@ func (w *AppWidget) openTransferDialog(kind filemanager.FileOpKind) {
 }
 
 func (w *AppWidget) openDeleteDialog() {
-	sources := w.opSources()
+	w.openDeleteDialogForSources(w.opSources())
+}
+
+func (w *AppWidget) openDeleteDialogForSources(sources []string) {
 	if len(sources) == 0 {
 		return
 	}
@@ -810,7 +1206,7 @@ func (w *AppWidget) startFileOp(op filemanager.FileOp) {
 	w.invalidate()
 
 	go func() {
-		_ = filemanager.RunFileOp(
+		opErr := filemanager.RunFileOp(
 			ctx,
 			op,
 			func(prog filemanager.FileOpProgress) {
@@ -875,22 +1271,34 @@ func (w *AppWidget) startFileOp(op filemanager.FileOp) {
 				_ = w.panels.Right.Refresh()
 			}
 		}
+		if opErr != nil && !errors.Is(opErr, context.Canceled) {
+			w.showSlashError(fmt.Errorf("%s: %w", op.Kind.Verb(), opErr))
+		}
 		w.invalidate()
 	}()
 }
 
 func (w *AppWidget) openEditorOnSelected() {
 	if w.panels == nil {
+		w.showSlashError(fmt.Errorf("file panels are unavailable"))
 		return
 	}
 	active := w.panels.ActivePane()
 	if active == nil {
+		w.showSlashError(fmt.Errorf("no active file panel"))
 		return
 	}
 	item, ok := active.SelectedItem()
-	if !ok || item.IsDir() || item.Name() == ".." {
+	if !ok || item.Name() == ".." {
+		w.showSlashError(fmt.Errorf("no file is selected"))
+		return
+	}
+	if item.IsDir() {
+		w.showSlashError(fmt.Errorf("cannot edit a directory"))
 		return
 	}
 	fullPath := filepath.Join(active.Dir(), item.Name())
-	_ = w.OpenEditor(fullPath, false)
+	if err := w.OpenEditor(fullPath, false); err != nil {
+		w.showSlashError(fmt.Errorf("open %q: %w", fullPath, err))
+	}
 }

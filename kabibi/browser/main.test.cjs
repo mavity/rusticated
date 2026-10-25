@@ -37,6 +37,10 @@ class FakeElement {
     this.parentElement = null;
   }
 
+  click() {
+    if (typeof this.onclick === 'function') this.onclick();
+  }
+
   setAttribute(name, value) {
     this.attributes[name] = value;
   }
@@ -186,6 +190,30 @@ test('default mode mounts inside the caller parent without taking over its layou
     window,
     Terminal: FakeTerminal,
     FitAddon: FakeFitAddon
+  });
+
+  test('downloadLoadedArtifact downloads the exact loaded URL as kabibi.bat', () => {
+    const { document, context, api } = createHarness();
+    const url = './release/dist/kabibi.bat';
+    let clicked;
+    context.washmhostExports = {
+      getActiveHost: () => ({ getLoadedWasmURL: () => url })
+    };
+    const createElement = document.createElement.bind(document);
+    document.createElement = (tagName) => {
+      const element = createElement(tagName);
+      if (tagName === 'a') {
+        element.click = () => { clicked = element; };
+      }
+      return element;
+    };
+
+    assert.equal(api.downloadLoadedArtifact(), url);
+    assert.ok(clicked);
+    assert.equal(clicked.href, url);
+    assert.equal(clicked.download, 'kabibi.bat');
+    assert.equal(clicked.parentElement, null);
+    assert.equal(document.body.children.length, 0);
   });
 
   assert.equal(mounted.parent, parent);

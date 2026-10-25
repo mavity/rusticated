@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -90,6 +92,90 @@ func TestRunPipedReader_ExecutesIncrementallyAndRetainsShellState(t *testing.T) 
 	}
 	if len(runner.prompts) != 0 {
 		t.Fatalf("unexpected AI prompts: %v", runner.prompts)
+	}
+}
+
+func TestRunPipedReader_RoutesSlashFileCommandsBeforeAI(t *testing.T) {
+	dir := t.TempDir()
+	es, err := shell.NewExecutionSession(dir)
+	if err != nil {
+		t.Fatalf("NewExecutionSession: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "dest"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "source"), []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	runner := &pipedAIRunner{}
+	input := "/copy source dest\n/rename dest/source dest/renamed\n/delete --yes dest/renamed\n"
+	if code := runPipedReader(context.Background(), strings.NewReader(input), &stdout, &stderr, cliOptions{}, es, runner); code != 0 {
+		t.Fatalf("runPipedReader() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if len(runner.prompts) != 0 {
+		t.Fatalf("slash commands were routed to AI: %v", runner.prompts)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "dest", "renamed")); !os.IsNotExist(err) {
+		t.Fatalf("renamed file still exists or stat failed: %v", err)
+	}
+}
+
+func TestRunPipedReader_RequiresDeleteConfirmationFlag(t *testing.T) {
+	dir := t.TempDir()
+	es, err := shell.NewExecutionSession(dir)
+	if err != nil {
+		t.Fatalf("NewExecutionSession: %v", err)
+	}
+	path := filepath.Join(dir, "keep")
+	if err := os.WriteFile(path, []byte("safe"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runPipedReader(context.Background(), strings.NewReader("/delete keep\n"), &stdout, &stderr, cliOptions{}, es, &pipedAIRunner{}); code != 1 {
+		t.Fatalf("runPipedReader() = %d, want 1; stderr=%q", code, stderr.String())
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("file was deleted without --yes: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "--yes") {
+		t.Fatalf("stderr = %q, want --yes usage", stderr.String())
+	}
+}
+
+func TestRunPipedReader_SettingsErrorIncludesAIConfigPath(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("KABIBI_CONFIG_DIR", configDir)
+	es, err := shell.NewExecutionSession(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewExecutionSession: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runPipedReader(context.Background(), strings.NewReader("/settings\n"), &stdout, &stderr, cliOptions{}, es, &pipedAIRunner{}); code != 1 {
+		t.Fatalf("runPipedReader() = %d, want 1; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), filepath.Join(configDir, "ai.json")) {
+		t.Fatalf("stderr = %q, want AI config path", stderr.String())
+	}
+}
+
+func TestRunPipedReader_ModelUsesTextSetupPrompt(t *testing.T) {
+	es, err := shell.NewExecutionSession(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewExecutionSession: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	runner := &pipedAIRunner{}
+	code := runPipedReader(context.Background(), strings.NewReader("/model\n3\n"), &stdout, &stderr, cliOptions{}, es, runner)
+	if code != 1 {
+		t.Fatalf("runPipedReader() = %d, want canceled setup status 1; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Choose where AI requests should run.") {
+		t.Fatalf("stdout = %q, want the text AI setup prompt", stdout.String())
+	}
+	if len(runner.prompts) != 0 {
+		t.Fatalf("model selection was routed to AI: %v", runner.prompts)
 	}
 }
 

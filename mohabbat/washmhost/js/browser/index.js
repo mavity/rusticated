@@ -1995,7 +1995,7 @@ function normalizeVegetableCandidates(target) {
   return ['./kabibi.bat', './release/dist/kabibi.bat'];
 }
 
-async function resolveWasmBinary(wasmSource, fetchImpl = fetch) {
+async function resolveWasmBinary(wasmSource, fetchImpl = fetch, onSourceResolved) {
   if (Array.isArray(wasmSource)) {
     if (wasmSource.length === 0) {
       throw new Error('No WASM or vegetable candidates provided');
@@ -2003,7 +2003,7 @@ async function resolveWasmBinary(wasmSource, fetchImpl = fetch) {
     let lastError = null;
     for (const candidate of wasmSource) {
       try {
-        return await resolveWasmBinary(candidate, fetchImpl);
+        return await resolveWasmBinary(candidate, fetchImpl, onSourceResolved);
       } catch (err) {
         lastError = err;
       }
@@ -2013,7 +2013,9 @@ async function resolveWasmBinary(wasmSource, fetchImpl = fetch) {
   if (typeof wasmSource === 'string') {
     const res = await fetchImpl(wasmSource);
     if (!res.ok) throw new Error(`HTTP ${res.status} fetching WASM from ${wasmSource}`);
-    return await res.arrayBuffer();
+    const binary = await res.arrayBuffer();
+    if (typeof onSourceResolved === 'function') onSourceResolved(wasmSource);
+    return binary;
   }
   if (typeof Response !== 'undefined' && wasmSource instanceof Response) {
     return await wasmSource.arrayBuffer();
@@ -2065,7 +2067,10 @@ async function washmhost(params = {}) {
   await fs.seed(params.initialFiles || []);
 
   // Fetch / load WASM binary or Vegetable
-  let wasmBinary = await resolveWasmBinary(params.wasm, params.fetch || fetch);
+  let loadedWasmURL = '';
+  let wasmBinary = await resolveWasmBinary(params.wasm, params.fetch || fetch, (source) => {
+    loadedWasmURL = source;
+  });
 
   // Check if wasmBinary is a vegetable (.bat / polyglot) instead of raw WASM
   const headBytes = new Uint8Array(wasmBinary, 0, Math.min(wasmBinary.byteLength, 4));
@@ -2134,6 +2139,7 @@ async function washmhost(params = {}) {
     getMemory: () => hostState.memory,
     getInstance: () => instance,
     getFS: () => fs,
+    getLoadedWasmURL: () => loadedWasmURL,
     terminate: (exitCode = 0) => {
       hostState.forcedExitCode = exitCode;
       hostState.wakeScheduler();
