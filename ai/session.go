@@ -851,6 +851,14 @@ func recoverMalformedGemmaToolCalls(raw string) ([]ToolCall, string) {
 		if startIdx < 0 {
 			break
 		}
+		if startIdx > 0 {
+			prev := cleaned[startIdx-1]
+			if (prev >= 'a' && prev <= 'z') || (prev >= 'A' && prev <= 'Z') || (prev >= '0' && prev <= '9') || prev == '_' {
+				// Part of an identifier like `tool_call:`; advance past `call:`.
+				cleaned = cleaned[:startIdx] + " " + cleaned[startIdx+len("call:"):]
+				continue
+			}
+		}
 		rest := cleaned[startIdx+len("call:"):]
 		openBrace := strings.IndexByte(rest, '{')
 		closeBrace := strings.IndexByte(rest, '}')
@@ -858,6 +866,18 @@ func recoverMalformedGemmaToolCalls(raw string) ([]ToolCall, string) {
 			break
 		}
 		toolName := strings.TrimSpace(rest[:openBrace])
+		validIdent := len(toolName) > 0
+		for i := 0; i < len(toolName); i++ {
+			c := toolName[i]
+			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+				validIdent = false
+				break
+			}
+		}
+		if !validIdent {
+			cleaned = cleaned[:startIdx] + " " + cleaned[startIdx+len("call:"):]
+			continue
+		}
 		body := rest[openBrace+1 : closeBrace]
 
 		// Strip surrounding `<|tool_call>...<tool_call|>` tags from cleaned text
@@ -1615,12 +1635,16 @@ func (s *Session) runStage5Execution(
 					}
 				}
 				if stageErr != nil {
-					if isContextOverflowError(stageErr) && s.tryCompressTurnPartsOnOverflow(ctx, turnParts, executedToolParts) {
-						stageErr = nil
-						continue
+					if isContextOverflowError(stageErr) {
+						streamer.Wipe()
+						if s.tryCompressTurnPartsOnOverflow(ctx, turnParts, executedToolParts) {
+							stageErr = nil
+							continue
+						}
 					}
 					if isToolCallParseError(stageErr) && retries < 2 {
 						retries++
+						streamer.Wipe()
 						historyCursor = append(historyCursor, turnParts...)
 						turnParts = []PromptPart{{
 							Role: RoleUser,
@@ -1661,6 +1685,9 @@ func (s *Session) runStage5Execution(
 				var toolResponses []PromptPart
 				sessionMutated := false
 				for _, call := range toolCalls {
+					if _, exists := s.toolRegistry[call.Name]; !exists {
+						continue
+					}
 					explanation := extractToolExplanation(call)
 					tc := &ToolContext{
 						Session:     s,
@@ -1671,13 +1698,22 @@ func (s *Session) runStage5Execution(
 						userPart:    userPart,
 						streamer:    streamer,
 					}
+					var emittedFeedback bool
+					tc.Feedback = func(text string) {
+						if text != "" {
+							emittedFeedback = true
+						}
+						s.emitFeedback(text)
+					}
 					toolStart := time.Now()
 					result := s.executeTool(ctx, tc, call)
 					toolEnd := time.Now()
 					if tc.sessionSwapped {
 						sessionMutated = true
 					}
-					s.emitFeedback("\n")
+					if emittedFeedback {
+						s.emitFeedback("\n")
+					}
 					toolResponses = append(toolResponses, PromptPart{
 						Role:         RoleTool,
 						ToolName:     call.Name,
@@ -1780,35 +1816,39 @@ func (s *Session) runStage5Execution(
 				}
 			}
 			if stageErr != nil {
-				if isContextOverflowError(stageErr) && s.tryCompressTurnPartsOnOverflow(ctx, turnParts, executedToolParts) {
-					rebuilt := make([]PromptPart, 0, len(*baseHistory)+3+len(executedToolParts)-len(turnParts))
-					rebuilt = append(rebuilt, *baseHistory...)
-					rebuilt = append(rebuilt,
-						userPart,
-						PromptPart{
-							Role: RoleModel,
-							Text: "I need to think first. The goal here is: " + goal + "\nMy execution plan is:\n" + plan,
-						},
-						PromptPart{
-							Role: RoleUser,
-							Text: "I see what you mean. Please proceed with that plan now, using any necessary tools, and keep in mind the original request—answer it completely after your work is done:\n" + userText,
-						},
-					)
-					rebuilt = append(rebuilt, executedToolParts[:len(executedToolParts)-len(turnParts)]...)
-					newConv, cerr := s.engine.NewConversationWithConfig(ConversationConfig{
-						SystemMessage: s.systemMessage,
-						Tools:         s.tools,
-						History:       rebuilt,
-					})
-					if cerr == nil {
-						ephemeralConv.Close()
-						ephemeralConv = newConv
-						stageErr = nil
-						continue
+				if isContextOverflowError(stageErr) {
+					streamer.Wipe()
+					if s.tryCompressTurnPartsOnOverflow(ctx, turnParts, executedToolParts) {
+						rebuilt := make([]PromptPart, 0, len(*baseHistory)+3+len(executedToolParts)-len(turnParts))
+						rebuilt = append(rebuilt, *baseHistory...)
+						rebuilt = append(rebuilt,
+							userPart,
+							PromptPart{
+								Role: RoleModel,
+								Text: "I need to think first. The goal here is: " + goal + "\nMy execution plan is:\n" + plan,
+							},
+							PromptPart{
+								Role: RoleUser,
+								Text: "I see what you mean. Please proceed with that plan now, using any necessary tools, and keep in mind the original request—answer it completely after your work is done:\n" + userText,
+							},
+						)
+						rebuilt = append(rebuilt, executedToolParts[:len(executedToolParts)-len(turnParts)]...)
+						newConv, cerr := s.engine.NewConversationWithConfig(ConversationConfig{
+							SystemMessage: s.systemMessage,
+							Tools:         s.tools,
+							History:       rebuilt,
+						})
+						if cerr == nil {
+							ephemeralConv.Close()
+							ephemeralConv = newConv
+							stageErr = nil
+							continue
+						}
 					}
 				}
 				if isToolCallParseError(stageErr) && parseRetries < 3 {
 					parseRetries++
+					streamer.Wipe()
 					rebuilt := make([]PromptPart, 0, len(*baseHistory)+3+len(executedToolParts))
 					rebuilt = append(rebuilt, *baseHistory...)
 					rebuilt = append(rebuilt,
@@ -1880,6 +1920,9 @@ func (s *Session) runStage5Execution(
 			var toolResponses []PromptPart
 			sessionMutated := false
 			for _, call := range toolCalls {
+				if _, exists := s.toolRegistry[call.Name]; !exists {
+					continue
+				}
 				explanation := extractToolExplanation(call)
 				tc := &ToolContext{
 					Session:      s,
@@ -1891,13 +1934,22 @@ func (s *Session) runStage5Execution(
 					userPart:     userPart,
 					streamer:     streamer,
 				}
+				var emittedFeedback bool
+				tc.Feedback = func(text string) {
+					if text != "" {
+						emittedFeedback = true
+					}
+					s.emitFeedback(text)
+				}
 				toolStart := time.Now()
 				result := s.executeTool(ctx, tc, call)
 				toolEnd := time.Now()
 				if tc.sessionSwapped {
 					sessionMutated = true
 				}
-				s.emitFeedback("\n")
+				if emittedFeedback {
+					s.emitFeedback("\n")
+				}
 				toolResponses = append(toolResponses, PromptPart{
 					Role:         RoleTool,
 					ToolName:     call.Name,
@@ -1908,6 +1960,9 @@ func (s *Session) runStage5Execution(
 					CompletedAt:  toolEnd,
 					Duration:     toolEnd.Sub(toolStart),
 				})
+			}
+			if len(toolResponses) == 0 {
+				continue
 			}
 			executedToolParts = append(executedToolParts, toolResponses...)
 			if sessionMutated || recoveredFromParseErr {
@@ -2715,7 +2770,7 @@ func (s *Session) compressImmediateToolOverflow(ctx context.Context, part Prompt
 	}
 
 	if s.onFeedback != nil {
-		s.onFeedback(fmt.Sprintf("🗜️ tool(%d chunks) ", len(chunks)))
+		s.onFeedback(fmt.Sprintf("🗜️ tool(%d chunks)\n", len(chunks)))
 	}
 
 	var chunkSummaries []string
