@@ -519,11 +519,18 @@
     };
   }
 
-  function sendDisplayTest(host) {
+  function sendDisplayTest(host, cols = 72, rows = 20) {
     if (!host || typeof host.pushStdin !== 'function') {
       throw new Error('CRT display test requires a running terminal host');
     }
-    host.pushStdin('for i in 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18; do printf \'\\033[1;36m%s  KABIBI CRT / COLOR GRID  0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ\\033[0m\\n\' "$i"; done\r');
+    const safeCols = Math.max(20, Math.floor(cols));
+    const safeRows = Math.max(20, Math.floor(rows));
+    const label = `|KABIBI_CRT_0123456789_ABCDEFGHIJKLMNOPQRSTUVWXYZ`.repeat(2)
+      .slice(0, Math.max(0, safeCols - 3));
+    const values = Array.from({ length: safeRows * 2 - 2 }, (_, index) =>
+      String(index + 1).padStart(2, '0')).join(' ');
+    const command = `for i in ${values}; do printf '\\033[48;2;10;38;46m\\033[1;36m%s${label}\\033[0m\\n' "$i"; done`;
+    host.pushStdin(`${command}${String.fromCharCode(13)}`);
   }
 
   function rendererContextProbe(THREE, canvas) {

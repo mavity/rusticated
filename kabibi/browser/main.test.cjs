@@ -404,10 +404,17 @@ test('CRT setup falls back to the same terminal when WebGL2 is unavailable', asy
     pushStdin(input) { inputs.push(input); }
   });
   assert.equal(inputs.length, 1);
-  assert.match(inputs[0], /KABIBI CRT \/ COLOR GRID/);
+  assert.match(inputs[0], /KABIBI_CRT_/);
+  assert.match(inputs[0], /48;2;10;38;46m/);
   assert.match(inputs[0], /\\033\[1;36m/);
-  assert.match(inputs[0], /18; do printf/);
+  assert.match(inputs[0], /38; do printf/);
+  assert.match(inputs[0], /%s\|KABIBI_CRT_0123456789/);
   assert.equal(inputs[0].endsWith('\r'), true);
+  context.KabibiBrowserSuperDemo.sendDisplayTest({
+    pushStdin(input) { inputs.push(input); }
+  }, 36, 40);
+  assert.match(inputs[1], /78; do printf/);
+  assert.ok(inputs[1].length < inputs[0].length * 2);
 
   mounted.dispose();
   assert.equal(terminal.disposed, true);

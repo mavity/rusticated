@@ -29,7 +29,11 @@
     const sendDisplayTestWhenReady = () => {
       if (displayTestSent || !mounted || !guestOutputSeen) return;
       displayTestSent = true;
-      setTimeout(() => KabibiBrowserSuperDemo.sendDisplayTest(mounted.host), 350);
+      setTimeout(() => KabibiBrowserSuperDemo.sendDisplayTest(
+        mounted.host,
+        mounted.term.cols,
+        mounted.term.rows
+      ), 350);
     };
     KabibiBrowser.mount({
       Terminal,
