@@ -1,6 +1,175 @@
 (function (global) {
   'use strict';
 
+  const VIRTUAL_KEYS = [
+    { label: 'Esc', ariaLabel: 'Escape', sequence: '\x1b' },
+    { label: 'Tab', ariaLabel: 'Tab', sequence: '\t' },
+    { label: 'F1', ariaLabel: 'F1', sequence: '\x1bOP' },
+    { label: 'F2', ariaLabel: 'F2', sequence: '\x1bOQ' },
+    { label: 'F3', ariaLabel: 'F3', sequence: '\x1bOR' },
+    { label: 'F4', ariaLabel: 'F4', sequence: '\x1bOS' },
+    { label: 'F5', ariaLabel: 'F5', sequence: '\x1b[15~' },
+    { label: 'F6', ariaLabel: 'F6', sequence: '\x1b[17~' },
+    { label: 'F7', ariaLabel: 'F7', sequence: '\x1b[18~' },
+    { label: 'F8', ariaLabel: 'F8', sequence: '\x1b[19~' },
+    { label: 'F9', ariaLabel: 'F9', sequence: '\x1b[20~' },
+    { label: 'F10', ariaLabel: 'F10', sequence: '\x1b[21~' },
+    { label: 'F11', ariaLabel: 'F11', sequence: '\x1b[23~' },
+    { label: 'F12', ariaLabel: 'F12', sequence: '\x1b[24~' },
+    { label: '←', ariaLabel: 'Arrow left', arrow: 'D' },
+    { label: '↑', ariaLabel: 'Arrow up', arrow: 'A' },
+    { label: '↓', ariaLabel: 'Arrow down', arrow: 'B' },
+    { label: '→', ariaLabel: 'Arrow right', arrow: 'C' }
+  ];
+
+  function createVirtualKeyboard(document, terminal, root) {
+    if (!terminal || typeof terminal.input !== 'function') {
+      throw new Error('Super-demo screen keys require the xterm.js input API');
+    }
+
+    const style = document.createElement('style');
+    style.textContent = `
+      .kabibi-keyboard {
+        box-sizing: border-box;
+        flex: 0 0 auto;
+        width: 100%;
+        padding: clamp(4px, 0.8cqw, 10px) max(6px, env(safe-area-inset-right))
+          max(6px, env(safe-area-inset-bottom)) max(6px, env(safe-area-inset-left));
+        border-top: 1px solid #4b525a;
+        background:
+          linear-gradient(180deg, rgba(255,255,255,.07), transparent 12px),
+          linear-gradient(180deg, #252a30 0%, #121519 46%, #080a0c 100%);
+        box-shadow: 0 -5px 18px rgba(0,0,0,.62), inset 0 1px 0 rgba(255,255,255,.12);
+        user-select: none;
+        -webkit-user-select: none;
+        touch-action: manipulation;
+      }
+      .kabibi-keyboard-grid {
+        display: grid;
+        grid-template-columns: repeat(18, minmax(0, 1fr));
+        gap: clamp(2px, 0.42cqw, 7px);
+        width: 100%;
+      }
+      .kabibi-keyboard--narrow .kabibi-keyboard-grid {
+        grid-template-columns: repeat(9, minmax(0, 1fr));
+      }
+      .kabibi-key {
+        position: relative;
+        box-sizing: border-box;
+        min-width: 0;
+        height: clamp(2.25rem, 6dvh, 3.5rem);
+        padding: 0 2px;
+        overflow: hidden;
+        border: 1px solid #030405;
+        border-radius: clamp(4px, 0.55cqw, 9px);
+        color: #d9e0e8;
+        background:
+          linear-gradient(180deg, #454b53 0%, #252a30 25%, #111417 100%);
+        box-shadow:
+          0 3px 0 #030405,
+          0 4px 6px rgba(0,0,0,.65),
+          inset 0 1px 1px rgba(255,255,255,.3),
+          inset 0 -2px 3px rgba(0,0,0,.82);
+        font: 600 clamp(.62rem, 1.45cqw, 1rem)/1 system-ui, sans-serif;
+        text-shadow: 0 -1px 1px #000, 0 1px 1px rgba(255,255,255,.15);
+        cursor: pointer;
+        -webkit-tap-highlight-color: transparent;
+      }
+      .kabibi-key::before {
+        position: absolute;
+        inset: 1px 2px auto;
+        height: 31%;
+        border-radius: inherit;
+        background: linear-gradient(180deg, rgba(255,255,255,.2), transparent);
+        content: '';
+        pointer-events: none;
+      }
+      .kabibi-key::after {
+        position: absolute;
+        top: 4px;
+        right: 5px;
+        width: 3px;
+        height: 3px;
+        border-radius: 50%;
+        background: #aa7733;
+        box-shadow: 0 0 3px 1px rgba(201,143,57,.38);
+        content: '';
+        opacity: .72;
+        pointer-events: none;
+      }
+      .kabibi-key:active {
+        transform: translateY(2px);
+        background: linear-gradient(180deg, #252a30 0%, #101316 100%);
+        box-shadow:
+          0 1px 0 #030405,
+          0 2px 3px rgba(0,0,0,.65),
+          inset 0 1px 2px rgba(0,0,0,.8);
+      }
+      .kabibi-key:active::after {
+        background: #ffd27a;
+        box-shadow: 0 0 6px 2px rgba(255,178,62,.8);
+        opacity: 1;
+      }
+      @supports not (height: 1dvh) {
+        .kabibi-key { height: clamp(2.25rem, 6vh, 3.5rem); }
+      }
+      @supports not (width: 1cqw) {
+        .kabibi-keyboard {
+          padding: clamp(4px, 0.8vw, 10px) max(6px, env(safe-area-inset-right))
+            max(6px, env(safe-area-inset-bottom)) max(6px, env(safe-area-inset-left));
+        }
+        .kabibi-keyboard-grid { gap: clamp(2px, 0.42vw, 7px); }
+        .kabibi-key {
+          border-radius: clamp(4px, 0.55vw, 9px);
+          font-size: clamp(.62rem, 1.45vw, 1rem);
+        }
+      }
+    `;
+    const controls = document.createElement('div');
+    controls.className = 'kabibi-keyboard';
+    controls.setAttribute('role', 'group');
+    controls.setAttribute('aria-label', 'Kabibi screen keyboard');
+    const grid = document.createElement('div');
+    grid.className = 'kabibi-keyboard-grid';
+    controls.appendChild(grid);
+
+    for (const key of VIRTUAL_KEYS) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'kabibi-key';
+      button.textContent = key.label;
+      button.setAttribute('aria-label', key.ariaLabel);
+      button.title = key.ariaLabel;
+      button.addEventListener('pointerdown', (event) => event.preventDefault());
+      button.addEventListener('contextmenu', (event) => event.preventDefault());
+      button.addEventListener('click', (event) => {
+        event.preventDefault();
+        let sequence = key.sequence;
+        if (key.arrow) {
+          const applicationMode = Boolean(
+            terminal.modes && terminal.modes.applicationCursorKeys
+          );
+          sequence = `\x1b${applicationMode ? 'O' : '['}${key.arrow}`;
+        }
+        terminal.input(sequence, true);
+      });
+      grid.appendChild(button);
+    }
+
+    root.appendChild(style);
+    root.appendChild(controls);
+    return {
+      element: controls,
+      setNarrow(narrow) {
+        controls.className = `kabibi-keyboard${narrow ? ' kabibi-keyboard--narrow' : ''}`;
+      },
+      dispose() {
+        controls.remove();
+        style.remove();
+      }
+    };
+  }
+
   function start({ terminal, fitAddon, root, terminalContainer, dependencies = {} }) {
     const THREE = dependencies.THREE;
     const WebglAddon = dependencies.WebglAddon;
@@ -15,8 +184,10 @@
     const stage = document.createElement('div');
     stage.className = 'kabibi-crt-stage';
     Object.assign(stage.style, {
-      position: 'absolute',
-      inset: '0',
+      position: 'relative',
+      flex: '1 1 0',
+      width: '100%',
+      minHeight: '0',
       overflow: 'hidden',
       background: 'radial-gradient(ellipse at 50% 45%, #17202d 0%, #07090e 68%)',
       touchAction: 'none'
@@ -32,7 +203,20 @@
       touchAction: 'none'
     });
     stage.appendChild(canvas);
+    Object.assign(root.style, {
+      display: 'flex',
+      flexDirection: 'column',
+      minHeight: '0',
+      containerType: 'inline-size'
+    });
+    Object.assign(terminalContainer.style, {
+      position: 'absolute',
+      inset: '0',
+      width: '100%',
+      height: '100%'
+    });
     root.appendChild(stage);
+    const keyboard = createVirtualKeyboard(document, terminal, root);
 
     let addon;
     let renderer;
@@ -145,6 +329,7 @@
       if (addon) addon.dispose();
       addon = null;
       stage.remove();
+      keyboard.dispose();
       terminalContainer.style.opacity = '';
       terminalContainer.style.pointerEvents = '';
       restoreTerminalSize();
@@ -229,6 +414,7 @@
       if (!active || usingFallback || !renderer) return;
       const bounds = stage.getBoundingClientRect();
       if (bounds.width <= 0 || bounds.height <= 0) return;
+      keyboard.setNarrow(bounds.width <= 720);
       fitTerminal();
       const pixelRatio = Math.min(global.devicePixelRatio || 1, 2);
       renderer.setPixelRatio(pixelRatio);
@@ -735,6 +921,7 @@
         disposeScene();
         if (addon) addon.dispose();
         addon = null;
+        keyboard.dispose();
         stage.remove();
         root.style.opacity = '';
         root.style.pointerEvents = '';
@@ -787,6 +974,7 @@
 
   global.KabibiBrowserSuperDemo = Object.freeze({
     start,
+    createVirtualKeyboard,
     calculateGrid,
     calculateImageScale,
     calculateCaptureViewport

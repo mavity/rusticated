@@ -39,6 +39,8 @@ class FakeElement {
 
   click() {
     if (typeof this.onclick === 'function') this.onclick();
+    const handler = this.listeners.get('click');
+    if (handler) handler({ preventDefault() {} });
   }
 
   setAttribute(name, value) {
@@ -118,6 +120,7 @@ class FakeTerminal {
     this.loadedAddons = [];
     this.disposed = false;
     this.writes = [];
+    this.inputs = [];
     this.selection = 'selected text';
     this.customKeyEventHandler = null;
   }
@@ -160,6 +163,7 @@ class FakeTerminal {
 
   focus() {}
   write(data) { this.writes.push(data); }
+  input(data) { this.inputs.push(data); }
   dispose() { this.disposed = true; }
 }
 
@@ -216,6 +220,41 @@ test('default mode mounts inside the caller parent without taking over its layou
     FitAddon: FakeFitAddon
   });
 
+  test('owned host follows visual viewport geometry and removes its listeners on dispose', async () => {
+    const { document, window, context } = createHarness();
+    const listeners = new Map();
+    const viewport = {
+      width: 360,
+      height: 640,
+      offsetLeft: 0,
+      offsetTop: 18,
+      addEventListener(name, callback) { listeners.set(name, callback); },
+      removeEventListener(name) { listeners.delete(name); }
+    };
+    window.visualViewport = viewport;
+    window.innerWidth = 400;
+    window.innerHeight = 800;
+
+    const mounted = await context.KabibiBrowser.mount({
+      document,
+      window,
+      Terminal: FakeTerminal,
+      FitAddon: FakeFitAddon
+    });
+    assert.equal(mounted.parent.style.width, '360px');
+    assert.equal(mounted.parent.style.height, '640px');
+    assert.equal(mounted.parent.style.top, '18px');
+
+    viewport.height = 570;
+    viewport.offsetTop = 4;
+    listeners.get('resize')();
+    assert.equal(mounted.parent.style.height, '570px');
+    assert.equal(mounted.parent.style.top, '4px');
+
+    mounted.dispose();
+    assert.equal(listeners.size, 0);
+  });
+
   test('downloadLoadedArtifact downloads the exact loaded URL as kabibi.bat', () => {
     const { document, context, api } = createHarness();
     const url = './release/dist/kabibi.bat';
@@ -264,7 +303,9 @@ test('missing parent creates a fixed full-viewport host and removes it on dispos
 
   assert.equal(mounted.createdHost, true);
   assert.equal(mounted.parent.style.position, 'fixed');
-  assert.equal(mounted.parent.style.inset, '0');
+  assert.equal(mounted.parent.style.inset, 'auto');
+  assert.equal(mounted.parent.style.left, '0px');
+  assert.equal(mounted.parent.style.top, '0px');
   assert.equal(mounted.parent.style.width, '100vw');
   assert.equal(mounted.parent.style.height, '100vh');
   mounted.dispose();
@@ -380,6 +421,60 @@ test('super-demo is only started when explicitly selected', async () => {
   assert.equal(mounted.mode, 'super-demo');
   mounted.dispose();
   assert.equal(disposals, 1);
+});
+
+test('super-demo screen keyboard renders all keys and sends xterm sequences', () => {
+  const { document, context } = createHarness();
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'super-demo.js'), 'utf8'), context);
+  const root = document.createElement('div');
+  const terminal = new FakeTerminal({});
+  terminal.modes = { applicationCursorKeys: false };
+  const keyboard = context.KabibiBrowserSuperDemo.createVirtualKeyboard(document, terminal, root);
+  const style = root.children.find((child) => child.tagName === 'STYLE');
+  const grid = root.children.find((child) => child.className === 'kabibi-keyboard').children[0];
+  const buttons = new Map(grid.children.map((button) => [button.textContent, button]));
+
+  assert.equal(grid.children.length, 18);
+  assert.match(style.textContent, /repeat\(18, minmax\(0, 1fr\)\)/);
+  assert.match(style.textContent, /repeat\(9, minmax\(0, 1fr\)\)/);
+  const functionSequences = [
+    '\x1bOP', '\x1bOQ', '\x1bOR', '\x1bOS',
+    '\x1b[15~', '\x1b[17~', '\x1b[18~', '\x1b[19~',
+    '\x1b[20~', '\x1b[21~', '\x1b[23~', '\x1b[24~'
+  ];
+  const expected = ['\x1b', '\t', ...functionSequences];
+  buttons.get('Esc').click();
+  buttons.get('Tab').click();
+  for (let index = 0; index < functionSequences.length; index += 1) {
+    buttons.get(`F${index + 1}`).click();
+  }
+  for (const [label, sequence] of [
+    ['←', '\x1b[D'],
+    ['↑', '\x1b[A'],
+    ['↓', '\x1b[B'],
+    ['→', '\x1b[C']
+  ]) {
+    buttons.get(label).click();
+    expected.push(sequence);
+  }
+  terminal.modes.applicationCursorKeys = true;
+  for (const [label, sequence] of [
+    ['←', '\x1bOD'],
+    ['↑', '\x1bOA'],
+    ['↓', '\x1bOB'],
+    ['→', '\x1bOC']
+  ]) {
+    buttons.get(label).click();
+    expected.push(sequence);
+  }
+  assert.deepEqual(terminal.inputs, expected);
+
+  keyboard.setNarrow(true);
+  assert.match(keyboard.element.className, /kabibi-keyboard--narrow/);
+  keyboard.setNarrow(false);
+  assert.doesNotMatch(keyboard.element.className, /kabibi-keyboard--narrow/);
+  keyboard.dispose();
+  assert.equal(root.children.length, 0);
 });
 
 test('artifact startup routes output and queues terminal input until host readiness', async () => {

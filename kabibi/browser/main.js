@@ -187,6 +187,45 @@
     return host;
   }
 
+  function observeVisualViewport(host, window) {
+    const viewport = window.visualViewport;
+    const update = () => {
+      const width = Number(viewport && viewport.width) || Number(window.innerWidth) || 0;
+      const height = Number(viewport && viewport.height) || Number(window.innerHeight) || 0;
+      const left = Number(viewport && viewport.offsetLeft) || 0;
+      const top = Number(viewport && viewport.offsetTop) || 0;
+      if (width > 0) host.style.width = `${width}px`;
+      if (height > 0) host.style.height = `${height}px`;
+      host.style.inset = 'auto';
+      host.style.left = `${left}px`;
+      host.style.top = `${top}px`;
+      host.style.right = 'auto';
+      host.style.bottom = 'auto';
+    };
+    const listen = (target, event) => {
+      if (target && typeof target.addEventListener === 'function') {
+        target.addEventListener(event, update, { passive: true });
+      }
+    };
+    const unlisten = (target, event) => {
+      if (target && typeof target.removeEventListener === 'function') {
+        target.removeEventListener(event, update);
+      }
+    };
+
+    update();
+    listen(window, 'resize');
+    listen(window, 'orientationchange');
+    listen(viewport, 'resize');
+    listen(viewport, 'scroll');
+    return () => {
+      unlisten(window, 'resize');
+      unlisten(window, 'orientationchange');
+      unlisten(viewport, 'resize');
+      unlisten(viewport, 'scroll');
+    };
+  }
+
   function createTerminalRoot(document, parent) {
     const root = document.createElement('div');
     root.className = 'kabibi-terminal-root';
@@ -376,6 +415,7 @@
     if (!parent) {
       parent = createHost(document, options.createdParentId || CONVENTIONAL_PARENT_ID);
     }
+    const cleanupViewport = createdHost ? observeVisualViewport(parent, window) : () => {};
 
     const root = createTerminalRoot(document, parent);
     const terminalContainer = document.createElement('div');
@@ -410,6 +450,7 @@
     } catch (error) {
       term.dispose();
       root.remove();
+      cleanupViewport();
       if (createdHost) parent.remove();
       throw error;
     }
@@ -419,6 +460,7 @@
     if (mode === 'super-demo') {
       if (!global.KabibiBrowserSuperDemo) {
         root.remove();
+        cleanupViewport();
         if (createdHost) parent.remove();
         term.dispose();
         throw new Error('Super-demo mode was requested but its JavaScript entrypoint is not loaded');
@@ -433,6 +475,7 @@
         });
       } catch (error) {
         root.remove();
+        cleanupViewport();
         if (createdHost) parent.remove();
         term.dispose();
         throw error;
@@ -462,6 +505,7 @@
     const dispose = () => {
       if (disposed) return;
       disposed = true;
+      cleanupViewport();
       window.removeEventListener('resize', fit);
       if (resizeObserver) resizeObserver.disconnect();
       if (inputSubscription) inputSubscription.dispose();
