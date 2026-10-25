@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"ai"
+
 	"github.com/charmbracelet/x/input"
 	"github.com/mavity/rusticated/kabibi/ui"
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
@@ -82,18 +83,24 @@ type commandSubmitAnimation struct {
 	startedAt time.Time
 }
 
-// formatStartupBanner constructs the pompous retro diagnostic startup banner block.
-func formatStartupBanner(sessionErr error) string {
-	ver := "unknown"
+func getVer() string {
+	ver := "0.8.5"
 	if info, ok := debug.ReadBuildInfo(); ok {
-		ver = info.Main.Version
+		if info.Main.Version != "devel" && info.Main.Version != "(devel)" {
+			ver = info.Main.Version
+		}
 	}
 
+	return ver
+}
+
+// formatStartupBanner constructs the pompous retro diagnostic startup banner block.
+func formatStartupBanner(sessionErr error) string {
 	lines := []string{
-		"🐚 K A B I B I : wearable all-weather shell",
-		"   v" + ver,
-		"",
-		"Preliminary version: be careful.",
+		"🐚 K A B I B I : wearable all-weather shell v" + getVer(),
+		"   - bash",
+		"   - file manager (Ctrl+O)",
+		"   - AI harness (ask anything in prompt)",
 	}
 	if sessionErr != nil {
 		lines = append(lines, "Shell initialization failed: "+sessionErr.Error())
@@ -107,10 +114,10 @@ type ShellOptions struct {
 	OnExit            func()            // Optional callback invoked when user runs 'exit' or 'quit'
 	OnCommandFinished func(cwd string)  // Optional callback invoked after a command or AI turn finishes
 	OpenURL           func(url string) error
-	WorkingDir        string            // Optional initial working directory for the shell runner
-	AIRunner          AIRunner          // Optional AI fallback runner (defaults to LazyAIRunner)
-	Mode              ShellMode         // Toggle between ModeStack (default) and ModePlumeHistory
-	Prompt            string            // Optional custom prompt template or fixed prompt (supports PS1 escapes if execSess present)
+	WorkingDir        string    // Optional initial working directory for the shell runner
+	AIRunner          AIRunner  // Optional AI fallback runner (defaults to LazyAIRunner)
+	Mode              ShellMode // Toggle between ModeStack (default) and ModePlumeHistory
+	Prompt            string    // Optional custom prompt template or fixed prompt (supports PS1 escapes if execSess present)
 }
 
 // Shell is a dynamic stack shell widget that implements the ui.Widget interface.
@@ -1964,7 +1971,20 @@ func (s *Shell) submitAndExecuteAsync(animate bool) {
 
 		if route == RouteShell {
 			if trimmed == "help" {
-				helpText := "Kabibi Plume Shell — valid bash commands run directly; natural language prompts fall back to AI.\n"
+				helpText :=
+					"🐚 K A B I B I : wearable all-weather shell v" + getVer() + "\n" +
+						"> This is a prototype shell able to run on any platform: Windows, MacOS, Linux.\n" +
+						"\n" +
+						" - Kabibi is written in Go and compiled using a framework called Mohabbat (मोहब्बत love).\n" +
+						" - The binary file format is called 🍆vegetable, it's based on WASM.\n" +
+						" - Kabibi supports bash syntax and carries most of the busybox-like commands embedded inside to enable full compatiblity across all platforms.\n" +
+						" - Slash commands such as /panels or /edit enable visual interactions too if you don't want to deal with bash syntax.\n" +
+						" - Or just type anything at it will be handed to AI as a prompt.\n" +
+						" - Kabibi supports downloading local LLM Gemma 4, or connecting to remote AI providers such as OpenRouter or Antropic and so on.\n" +
+						"\n" +
+						"Mos of all, Kabibi aims to make technical tasks simpler and easy for everyone.\n" +
+						"\n" +
+						"Remember, this is an **early** version and be careful.\n"
 				appendBlockText(helpText)
 				rec := execSess.RecordBlock(BlockCommand, SourceUserShell, rawInput, helpText, 0, startedAt)
 				s.finishBlockWithRecord(blockIdx, rec.ID, BlockCommand, StatusSuccess, 0, startedAt)

@@ -108,15 +108,15 @@ The spatial illusion of the dual blue panels works by combining that exact same 
 ```
 
 1. **The Perfect Fit at the Bottom ($H_{\text{gap}}$):**
-   - On startup, Kabibi's `BlockBanner` (3 rows), `PromptInput` (`~/path፧`, 1 row), and reserved blank footer row (1 row) occupy $H_{\text{gap}} = 5$ rows (or up to $3 + H_{\text{input}} + 1$ if `PromptInput` is currently wrapped, capped at $\lfloor 0.40 \times H_{\text{term}} \rfloor$).
+   - On startup, Kabibi's `BlockBanner` (3 rows), one spacer row, `PromptInput` (`~/path፧`, 1 row), and reserved blank footer row (1 row) occupy $H_{\text{gap}} = 6$ rows (or up to $3 + H_{\text{input}} + 2$ if `PromptInput` is currently wrapped, capped at $\lfloor 0.40 \times H_{\text{term}} \rfloor$).
    - When the user hits `Ctrl+O` to summon the dual blue panels, `DualPaneWidget` hangs down from row 0 at the top of the `CellBuf` with height:
      $$H_{\text{panels}} = H_{\text{term}} - H_{\text{gap}}$$
-   - The uncovered bottom gap of height $H_{\text{gap}}$ beneath the blue panels **exactingly matches** the height of the initial banner + prompt + footer stack.
+   - The uncovered bottom gap of height $H_{\text{gap}}$ beneath the blue panels contains the initial banner + spacer + prompt + footer stack.
 2. **The Ejection & Slapped-On-Top Illusion:**
    - To claim the full screen height $H_{\text{term}}$ for the panels + bottom stack when `allocHeight < H_term`, `Host` advances `allocHeight` from its current height to $H_{\text{term}}$ by emitting $H_{\text{term}} - \text{allocHeight}$ linefeeds (`\r\n`) at the bottom of the current occupied region.
    - This pushes any prior external terminal lines all the way up into native terminal scrollback above row 0.
    - In the very same flush, `AppWidget` renders a $W \times H_{\text{term}}$ `CellBuf` where `DualPaneWidget` paints rows $0 \dots H_{\text{panels}}-1$ and `BlockBanner` + `PromptInput` + footer sit in rows $H_{\text{panels}} \dots H_{\text{term}}-1$.
-   - Because the blue panels immediately paint over the top $H_{\text{panels}}$ rows and Kabibi's banner sits snugly in the gap directly underneath them, the user never sees a blank void—visually, it looks as though the blue panels were simply slapped *on top* of the terminal like a floating HUD.
+   - Because the blue panels paint over the top $H_{\text{panels}}$ rows and Kabibi's banner sits just below a one-row spacer, the user never sees a large blank void—visually, it looks as though the blue panels were simply slapped *on top* of the terminal like a floating HUD.
 3. **Sliding Underneath the Panels (The Hidden Buffer):**
    - While `panelsVisible == true`, `Shell` renders into the full $W \times H_{\text{term}}$ `CellBuf` with its non-ejected block slice positioned so the latest rows sit directly above `PromptInput` in the bottom gap:
      - If $H_{\text{collected}} < H_{\text{term}} - H_{\text{chrome}}$, the collected block rows occupy rows:
