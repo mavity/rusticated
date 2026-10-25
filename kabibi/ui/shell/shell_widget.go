@@ -468,6 +468,8 @@ func (s *Shell) styleInput(value string) []terminal.Style {
 	switch route {
 	case RouteShell, RouteBuiltin, RouteIncomplete:
 		return bashInputStyles(value)
+	case RouteAI:
+		return aiPromptStyles(value)
 	default:
 		return nil
 	}
@@ -660,7 +662,8 @@ func renderBlockCached(block *CommandBlock, width int) terminal.CellBuf {
 			if buf.Height == 0 {
 				buf = terminal.NewCellBuf(width, 1)
 			}
-			if block.Kind == BlockCommand && (len(block.inputStyles) > 0 || block.submitAnim != nil) {
+			if (block.Kind == BlockCommand || block.Kind == BlockAITurn) &&
+				(len(block.inputStyles) > 0 || block.submitAnim != nil) {
 				layout := buildVisualLayout(
 					ansiRegex.ReplaceAllString(block.Prompt, ""),
 					block.Input,
@@ -904,7 +907,8 @@ func renderLiveBlock(block *CommandBlock, width int) (terminal.CellBuf, terminal
 	var prefix terminal.CellBuf
 	if block.Kind != BlockBanner && (block.Prompt != "" || block.Input != "") {
 		prefix = terminal.FromANSIString(block.Prompt+block.Input+"\n", innerWidth)
-		if block.Kind == BlockCommand && (len(block.inputStyles) > 0 || block.submitAnim != nil) {
+		if (block.Kind == BlockCommand || block.Kind == BlockAITurn) &&
+			(len(block.inputStyles) > 0 || block.submitAnim != nil) {
 			layout := buildVisualLayout(
 				ansiRegex.ReplaceAllString(block.Prompt, ""),
 				block.Input,
@@ -1062,11 +1066,12 @@ func (s *Shell) renderStackBlocksLocked(width int) ([]terminal.CellBuf, []int) {
 
 		if block.Prompt != "" || block.Input != "" {
 			promptBlock := CommandBlock{
-				Kind:   block.Kind,
-				Source: block.Source,
-				Prompt: block.Prompt,
-				Input:  block.Input,
-				Status: block.Status,
+				Kind:        block.Kind,
+				Source:      block.Source,
+				Prompt:      block.Prompt,
+				Input:       block.Input,
+				inputStyles: block.inputStyles,
+				Status:      block.Status,
 			}
 			rendered = append(rendered, renderBlockCached(&promptBlock, width))
 			blockIndexes = append(blockIndexes, i)

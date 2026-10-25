@@ -24,6 +24,9 @@ func TestSubmittedCommandRetainsSyntaxStylesInPlume(t *testing.T) {
 	}
 
 	buf := renderBlockCached(&block, 40)
+	if !buf.Get(2, 0).Style.HasAttribute(terminal.CharBold) {
+		t.Error("submitted command keyword is not bold")
+	}
 	if got := buf.Get(2, 0).Style.Foreground(); got != bashKeywordStyle.Foreground() {
 		t.Errorf("submitted command keyword color = #%06X, want #%06X", got, bashKeywordStyle.Foreground())
 	}
@@ -31,6 +34,54 @@ func TestSubmittedCommandRetainsSyntaxStylesInPlume(t *testing.T) {
 	if got := buf.Get(hello, 0).Style.Foreground(); got != bashStringStyle.Foreground() {
 		t.Errorf("submitted string color = #%06X, want #%06X", got, bashStringStyle.Foreground())
 	}
+}
+
+func TestSubmittedAIPromptRetainsBoldItalicInHistoryAndToolSplit(t *testing.T) {
+	sh := New(ShellOptions{AIRunner: &fakeAIRunner{}})
+	defer sh.Close()
+
+	const prompt = "Name a bridge in Paris"
+	styles := sh.styleInput(prompt)
+	if len(styles) != len([]rune(prompt)) {
+		t.Fatalf("AI prompt style count = %d, want %d", len(styles), len([]rune(prompt)))
+	}
+
+	assertPromptStyle := func(t *testing.T, buf terminal.CellBuf) {
+		t.Helper()
+		style := buf.Get(visualWidth("፧"), 0).Style
+		if !style.HasAttribute(terminal.CharBold) || !style.HasAttribute(terminal.CharItalic) {
+			t.Fatalf("AI prompt style = %#x, want bold italic", style.Attributes())
+		}
+	}
+
+	block := CommandBlock{
+		Kind:        BlockAITurn,
+		Source:      SourceUserShell,
+		Prompt:      "፧",
+		Input:       prompt,
+		inputStyles: styles,
+		Status:      StatusSuccess,
+	}
+	assertPromptStyle(t, renderBlockCached(&block, 80))
+
+	sh.mu.Lock()
+	sh.blocks = []CommandBlock{
+		block,
+		{
+			Kind:              BlockAITurn,
+			Source:            SourceAITool,
+			aiTurnParentIndex: 0,
+			hasAITurnParent:   true,
+			Status:            StatusSuccess,
+		},
+	}
+	splitBlocks, _ := sh.renderStackBlocksLocked(80)
+	sh.mu.Unlock()
+
+	if len(splitBlocks) != 2 {
+		t.Fatalf("rendered AI prompt/tool blocks = %d, want 2", len(splitBlocks))
+	}
+	assertPromptStyle(t, splitBlocks[0])
 }
 
 func TestInteractiveShellCommandIsStyledWithoutAnimatingProgrammaticExecution(t *testing.T) {

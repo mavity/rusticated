@@ -80,6 +80,9 @@ session creates a **fresh input channel for each command**:
     (`inputValue`).
   - When a command is running, typing forwards bytes directly to
     `session.WriteStdin`.
+- **Input appearance**: Inputs classified as shell commands are bold and retain
+  Bash syntax colors. Inputs classified for the AI are bold italic, both while
+  editing and in the saved conversation history.
 
 ## How output flows out and handling background jobs (`&`)
 
