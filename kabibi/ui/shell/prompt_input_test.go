@@ -182,6 +182,9 @@ func TestPromptInput_ClassifierGatesBashHighlighting(t *testing.T) {
 			if !cell.Style.HasAttribute(terminal.CharResetForegroundDefault) {
 				t.Fatalf("AI text %q at rune %d was syntax-highlighted", value, i)
 			}
+			if !cell.Style.HasAttribute(terminal.CharBold) || !cell.Style.HasAttribute(terminal.CharItalic) {
+				t.Fatalf("AI text %q at rune %d lacks bold italic styling", value, i)
+			}
 		}
 	}
 
@@ -202,6 +205,9 @@ func TestPromptInput_ClassifierGatesBashHighlighting(t *testing.T) {
 		if got != token.style.Foreground() {
 			t.Errorf("foreground at %q = #%06X, want #%06X", token.text, got, token.style.Foreground())
 		}
+		if !shellBuf.Get(2+runeOffset, 0).Style.HasAttribute(terminal.CharBold) {
+			t.Errorf("command token %q is not bold", token.text)
+		}
 	}
 
 	const incompleteInput = "if true; then"
@@ -220,6 +226,9 @@ func TestPromptInput_ClassifierGatesBashHighlighting(t *testing.T) {
 		if got != token.style.Foreground() {
 			t.Errorf("incomplete-input foreground at %q = #%06X, want #%06X",
 				token.text, got, token.style.Foreground())
+		}
+		if !incompleteBuf.Get(2+runeOffset, 0).Style.HasAttribute(terminal.CharBold) {
+			t.Errorf("incomplete command token %q is not bold", token.text)
 		}
 	}
 }

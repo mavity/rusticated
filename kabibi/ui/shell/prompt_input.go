@@ -277,7 +277,11 @@ var (
 func bashInputStyles(value string) []terminal.Style {
 	runeCount := len([]rune(value))
 	styles := make([]terminal.Style, runeCount)
-	defaultStyle := terminal.NewStyle(0, 0, terminal.CharResetForegroundDefault|terminal.CharResetBackgroundDefault)
+	defaultStyle := terminal.NewStyle(
+		0,
+		0,
+		terminal.CharResetForegroundDefault|terminal.CharResetBackgroundDefault|terminal.CharBold,
+	)
 	for i := range styles {
 		styles[i] = defaultStyle
 	}
@@ -304,12 +308,27 @@ func bashInputStyles(value string) []terminal.Style {
 		case token.Type.InCategory(chroma.Operator), token.Type.InCategory(chroma.Punctuation):
 			style = bashOperatorStyle
 		}
+		style = style.AddAttribute(terminal.CharBold)
 		for range token.Value {
 			if runeOffset < len(styles) {
 				styles[runeOffset] = style
 			}
 			runeOffset++
 		}
+	}
+	return styles
+}
+
+func aiPromptStyles(value string) []terminal.Style {
+	style := terminal.NewStyle(
+		0,
+		0,
+		terminal.CharResetForegroundDefault|terminal.CharResetBackgroundDefault|
+			terminal.CharBold|terminal.CharItalic,
+	)
+	styles := make([]terminal.Style, len([]rune(value)))
+	for i := range styles {
+		styles[i] = style
 	}
 	return styles
 }
