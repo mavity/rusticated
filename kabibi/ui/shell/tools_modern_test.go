@@ -10,6 +10,7 @@ import (
 
 	"ai"
 	"github.com/mavity/rusticated/kabibi/tools/hashline"
+	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
 
 func TestModernTools_ReadFileHashlineFabricAndEditFile(t *testing.T) {
@@ -111,7 +112,7 @@ func TestModernTools_GutterStripeAndExecLifecycle(t *testing.T) {
 
 	tools := BuildKabibiTools(sh.ExecutionSession())
 
-	// 1. Fast exec finishes within timeout and creates a SourceAITool block with the left gutter stripe `┃ `
+	// 1. Fast exec finishes within timeout and creates a SourceAITool block with a background-colored space gutter.
 	execOut, err := tools["exec"].Execute(context.Background(), ai.ToolCall{
 		Name:         "exec",
 		RawArguments: json.RawMessage(`{"command":"echo gutter_test_ok","timeout_sec":5}`),
@@ -127,7 +128,7 @@ func TestModernTools_GutterStripeAndExecLifecycle(t *testing.T) {
 		t.Fatalf("expected settled footer in result, got %q", execMap["result"].(string))
 	}
 
-	// Verify the UI Shell created a SourceAITool block and rendered column 0 with `┃` and column 1 with `' '`
+	// Verify the UI Shell created a SourceAITool block and rendered column 0 as a non-printable colored space.
 	blocks := sh.Blocks()
 	var foundAIBlock *CommandBlock
 	for i := range blocks {
@@ -140,8 +141,8 @@ func TestModernTools_GutterStripeAndExecLifecycle(t *testing.T) {
 		t.Fatal("expected SourceAITool CommandBlock to be added to Shell")
 	}
 	buf := renderBlock(*foundAIBlock, 80)
-	if got := buf.Get(0, 0).Grapheme; got != "┃" {
-		t.Fatalf("expected col 0 of SourceAITool block to be '┃', got %q", got)
+	if got := buf.Get(0, 0); got.Grapheme != " " || got.Style.Background() != terminal.Color(0x00ff00) {
+		t.Fatalf("expected col 0 of SourceAITool block to be a green background-colored space, got %#v", got)
 	}
 	if got := buf.Get(1, 0).Grapheme; got != " " {
 		t.Fatalf("expected col 1 of SourceAITool block to be ' ', got %q", got)

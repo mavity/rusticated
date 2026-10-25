@@ -23,3 +23,7 @@ Then open `http://127.0.0.1:8080/index.html`. Pass `?artifact=<url>` to load ano
 ```powershell
 node --test .\kabibi\browser\main.test.cjs
 ```
+
+In browser terminals, right-click opens Kabibi's Copy/Paste/Select all menu.
+Ctrl+V and Cmd+V read from the browser clipboard when its permission is
+available; terminal-emulator paste events continue to work in native TUI use.

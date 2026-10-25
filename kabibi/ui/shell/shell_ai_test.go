@@ -259,11 +259,14 @@ func TestAIToolBlockTrimsOnlyTrailingWhitespaceRows(t *testing.T) {
 	if buf.Height != 4 {
 		t.Fatalf("AI tool block height with an internal blank row = %d, want 4", buf.Height)
 	}
-	if got := extractRowString(buf, 2); got != "┃" {
-		t.Fatalf("internal blank output row = %q, want its gutter-only row preserved", got)
+	if got := extractRowString(buf, 2); got != "" {
+		t.Fatalf("internal blank output row = %q, want only non-printable background gutter", got)
 	}
-	if got := extractRowString(buf, 3); got != "┃ last" {
-		t.Fatalf("last content row = %q, want %q", got, "┃ last")
+	if got := extractRowString(buf, 3); got != "  last" {
+		t.Fatalf("last content row = %q, want %q", got, "  last")
+	}
+	if got := buf.Get(0, 2); got.Grapheme != " " || got.Style.Background() != 0x00ff00 {
+		t.Fatalf("gutter cell = %#v, want a green background-colored space", got)
 	}
 }
 

@@ -220,6 +220,15 @@ message passing, matching the existing `Host.processLoop`:
     Command $N$'s `Output` buffer, trigger byte chunk messages, and the widget
     re-renders that block without disturbing the active prompt.
 
+## URL and clipboard interaction
+
+Press Enter on an empty prompt to open the last URL in the latest output block
+with the host's default browser. On browser-hosted terminals this opens a new
+tab; on native hosts it uses the platform URL handler. Typing a response and
+pressing Enter continues to submit that input. Paste events are accepted by
+the prompt and active PTY; browser terminals also expose clipboard actions in a
+right-click menu and support Ctrl+V/Cmd+V when clipboard access is available.
+
 ## Rendering strategy: from raw bytes to screen cells
 
 The widget **never** stores rendered `CellBuf` objects in the data model. Instead,

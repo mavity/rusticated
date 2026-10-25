@@ -229,6 +229,140 @@
     if (callback) callback({ cols, rows });
   }
 
+  function clipboardFor(window) {
+    return (window && window.navigator && window.navigator.clipboard) ||
+      (global.navigator && global.navigator.clipboard) ||
+      null;
+  }
+
+  function reportClipboardError(action, error) {
+    if (global.console && typeof global.console.error === 'function') {
+      global.console.error(`Kabibi clipboard ${action} failed:`, error);
+    }
+  }
+
+  function installTerminalContextMenu(term, container, document, window) {
+    let menu = null;
+    const closeMenu = () => {
+      if (menu) menu.remove();
+      menu = null;
+    };
+    const onContextMenu = (event) => {
+      event.preventDefault();
+      if (typeof event.stopPropagation === 'function') event.stopPropagation();
+      closeMenu();
+
+      const clipboard = clipboardFor(window);
+      const selection = typeof term.getSelection === 'function' ? term.getSelection() : '';
+      const nextMenu = document.createElement('div');
+      menu = nextMenu;
+      nextMenu.setAttribute('role', 'menu');
+      Object.assign(nextMenu.style, {
+        position: 'fixed',
+        zIndex: '2147483647',
+        minWidth: '144px',
+        padding: '4px',
+        border: '1px solid #526477',
+        borderRadius: '5px',
+        background: '#101923',
+        boxShadow: '0 4px 16px rgba(0, 0, 0, 0.55)',
+        color: '#d7e4ef',
+        font: '13px system-ui, sans-serif'
+      });
+      const maxLeft = Math.max(0, (window.innerWidth || 0) - 160);
+      const maxTop = Math.max(0, (window.innerHeight || 0) - 116);
+      nextMenu.style.left = `${Math.max(0, Math.min(Number(event.clientX) || 0, maxLeft))}px`;
+      nextMenu.style.top = `${Math.max(0, Math.min(Number(event.clientY) || 0, maxTop))}px`;
+
+      const addItem = (label, disabled, action) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = label;
+        button.disabled = disabled;
+        button.setAttribute('role', 'menuitem');
+        Object.assign(button.style, {
+          display: 'block',
+          width: '100%',
+          padding: '7px 10px',
+          border: '0',
+          borderRadius: '3px',
+          background: 'transparent',
+          color: 'inherit',
+          font: 'inherit',
+          textAlign: 'left',
+          cursor: disabled ? 'default' : 'pointer',
+          opacity: disabled ? '0.5' : '1'
+        });
+        button.addEventListener('click', (clickEvent) => {
+          clickEvent.preventDefault();
+          if (disabled) return;
+          Promise.resolve()
+            .then(action)
+            .then(() => {
+              closeMenu();
+              term.focus();
+            })
+            .catch((error) => reportClipboardError(label.toLowerCase(), error));
+        });
+        nextMenu.appendChild(button);
+      };
+
+      addItem('Copy', !selection || !clipboard || typeof clipboard.writeText !== 'function', () =>
+        clipboard.writeText(selection));
+      addItem('Paste', !clipboard || typeof clipboard.readText !== 'function', () =>
+        clipboard.readText().then((text) => {
+          if (text) term.paste(text);
+        }));
+      addItem('Select all', false, () => {
+        if (typeof term.selectAll === 'function') term.selectAll();
+      });
+      (document.body || container).appendChild(nextMenu);
+    };
+    const onOutsidePointerDown = (event) => {
+      if (!menu) return;
+      if (typeof menu.contains === 'function' && menu.contains(event.target)) return;
+      closeMenu();
+    };
+    const onEscape = (event) => {
+      if (event.key === 'Escape') closeMenu();
+    };
+
+    container.addEventListener('contextmenu', onContextMenu);
+    if (typeof document.addEventListener === 'function') {
+      document.addEventListener('pointerdown', onOutsidePointerDown, true);
+    }
+    if (typeof window.addEventListener === 'function') window.addEventListener('keydown', onEscape, true);
+
+    if (typeof term.attachCustomKeyEventHandler === 'function') {
+      term.attachCustomKeyEventHandler((event) => {
+        if (event.type !== 'keydown' || !(event.ctrlKey || event.metaKey) || event.altKey ||
+            String(event.key || '').toLowerCase() !== 'v') {
+          return true;
+        }
+        const clipboard = clipboardFor(window);
+        if (!clipboard || typeof clipboard.readText !== 'function') return true;
+
+        event.preventDefault();
+        if (typeof event.stopPropagation === 'function') event.stopPropagation();
+        clipboard.readText()
+          .then((text) => {
+            if (text) term.paste(text);
+          })
+          .catch((error) => reportClipboardError('paste', error));
+        return false;
+      });
+    }
+
+    return () => {
+      closeMenu();
+      container.removeEventListener('contextmenu', onContextMenu);
+      if (typeof document.removeEventListener === 'function') {
+        document.removeEventListener('pointerdown', onOutsidePointerDown, true);
+      }
+      if (typeof window.removeEventListener === 'function') window.removeEventListener('keydown', onEscape, true);
+    };
+  }
+
   async function mount(options = {}) {
     const document = options.document || global.document;
     const window = options.window || global.window;
@@ -255,6 +389,7 @@
     const term = new dependencies.Terminal({
       cursorBlink: true,
       allowProposedApi: true,
+      rightClickSelectsWord: true,
       fontFamily: options.fontFamily || 'Consolas, "Cascadia Mono", "Fira Code", Menlo, monospace',
       theme: {
         background: '#07090e',
@@ -304,6 +439,7 @@
       }
     }
 
+    const terminalContextMenuDispose = installTerminalContextMenu(term, terminalContainer, document, window);
     let host = options.host || null;
     let startingHost = typeof options.wasm !== 'undefined' && options.wasm !== null;
     const pendingInput = [];
@@ -330,6 +466,7 @@
       if (resizeObserver) resizeObserver.disconnect();
       if (inputSubscription) inputSubscription.dispose();
       if (resizeSubscription) resizeSubscription.dispose();
+      terminalContextMenuDispose();
       if (superDemo) superDemo.dispose();
       if (host && options.stopHostOnDispose !== false && typeof host.terminate === 'function') {
         host.terminate(0);
