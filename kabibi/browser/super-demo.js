@@ -419,10 +419,6 @@
         target.z + cameraOffset.z * scale
       );
       camera.lookAt(target.x, target.y, target.z);
-      if (screenMaterial) {
-        screenMaterial.uniforms.focusStart.value = distance - 0.16;
-        screenMaterial.uniforms.focusEnd.value = distance + 0.08;
-      }
     }
 
     function makeGeometry() {
@@ -449,18 +445,13 @@
           imageScale: { value: new THREE.Vector2(1, 1) },
           terminalBackground: { value: new THREE.Color(terminal.options.theme.background || '#07090e') },
           screenBackground: { value: new THREE.Color(0x101923) },
-          opticalEffects: { value: flat ? 0 : 1 },
-          focusStart: { value: 2.5 },
-          focusEnd: { value: 2.8 }
+          opticalEffects: { value: flat ? 0 : 1 }
         },
         vertexShader: `
           varying vec2 vUv;
-          varying float vViewDepth;
           void main() {
             vUv = uv;
-            vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
-            vViewDepth = -viewPosition.z;
-            gl_Position = projectionMatrix * viewPosition;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
           }
         `,
         fragmentShader: `
@@ -470,19 +461,15 @@
           uniform vec3 terminalBackground;
           uniform vec3 screenBackground;
           uniform float opticalEffects;
-          uniform float focusStart;
-          uniform float focusEnd;
           varying vec2 vUv;
-          varying float vViewDepth;
           void main() {
             vec2 imageUv = (vUv - 0.5) / imageScale + 0.5;
             bool outsideImage = any(greaterThan(abs(vUv - 0.5), imageScale * 0.5));
-            float nearFocus = 1.0 - smoothstep(focusStart, focusEnd, vViewDepth);
-            float lowerRight = smoothstep(0.60, 0.98, vUv.x) *
-              (1.0 - smoothstep(0.05, 0.56, vUv.y));
-            float blur = clamp(nearFocus * lowerRight * opticalEffects, 0.0, 1.0);
+            float cornerDistance = length(vec2(1.0, 0.0) - imageUv);
+            float lowerRight = 1.0 - smoothstep(0.08, 0.48, cornerDistance);
+            float blur = lowerRight * opticalEffects;
             vec2 texel = 1.0 / max(resolution, vec2(1.0));
-            vec2 offset = texel * blur * 1.25;
+            vec2 offset = texel * blur * 8.0;
             vec4 color = vec4(screenBackground, 1.0);
             if (!outsideImage) {
               color = texture2D(screen, imageUv) * 0.40;
