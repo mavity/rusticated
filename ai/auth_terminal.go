@@ -496,11 +496,34 @@ func oauthHTMLPage(title, heading, message string, isError bool) string {
 	if isError {
 		accent = "#F09082"
 	}
-	return fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><title>%s</title></head>`+
-		`<body style="font-family:system-ui,sans-serif;background:#111827;color:#f9fafb;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">`+
-		`<div style="max-width:460px;padding:24px;border:1px solid %s;border-radius:8px;background:#1f2937">`+
-		`<h2 style="margin-top:0;color:%s">%s</h2><p>%s</p></div></body></html>`,
-		html.EscapeString(title), accent, accent, html.EscapeString(heading), html.EscapeString(message))
+	return fmt.Sprintf(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>%s</title>
+<style>
+:root { color-scheme: dark; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+* { box-sizing: border-box; }
+body { min-height: 100vh; min-height: 100svh; margin: 0; padding: 24px; display: grid; place-items: center; background: #101722; color: #f4f7fb; }
+main { width: min(100%%, 460px); padding: 32px; border: 1px solid #334155; border-radius: 18px; background: #192433; box-shadow: 0 24px 70px #0008; text-align: center; }
+.mark { width: 56px; height: 56px; margin: 0 auto 20px; display: grid; place-items: center; border-radius: 50%%; background: %s22; color: %s; font-size: 30px; font-weight: 700; }
+h1 { margin: 0; color: %s; font-size: clamp(1.4rem, 5vw, 1.8rem); line-height: 1.25; }
+p { margin: 14px 0 0; color: #c4cfdd; font-size: 1rem; line-height: 1.6; }
+</style>
+</head>
+<body>
+<main role="status" aria-live="polite">
+<div class="mark" aria-hidden="true">%s</div>
+<h1>%s</h1>
+<p>%s</p>
+</main>
+</body>
+</html>`,
+		html.EscapeString(title), accent, accent, accent,
+		map[bool]string{true: "!", false: "✓"}[isError],
+		html.EscapeString(heading), html.EscapeString(message))
 }
 
 // StartLoopbackCallbackServer binds a local HTTP listener and handles a single OAuth redirect.
@@ -601,7 +624,7 @@ func StartLoopbackCallbackServer[T any](ctx context.Context, opts LoopbackCallba
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, oauthHTMLPage(opts.ProviderName, "Authentication successful", "Signed in to "+opts.ProviderName+". You may now close this page.", false))
+		_, _ = io.WriteString(w, oauthHTMLPage(opts.ProviderName, "Login completed successfully", "You are now signed in to "+opts.ProviderName+". You can close this page and return to Kabibi.", false))
 		srv.finish(loopbackResult[T]{value: val, ok: true})
 	})
 
