@@ -36,7 +36,7 @@ func ProbeHardware() (HardwareProfile, error) {
 
 func probeBrowserGPU(profile *HardwareProfile) error {
 	const script = `(() => {
-  (async () => {
+  return (async () => {
     const mem = navigator.deviceMemory || 0;
     if (!navigator.gpu) return JSON.stringify({ramGB: mem, webgpu: false});
     const adapter = await navigator.gpu.requestAdapter();
