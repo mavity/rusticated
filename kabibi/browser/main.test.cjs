@@ -399,23 +399,6 @@ test('CRT setup falls back to the same terminal when WebGL2 is unavailable', asy
   assert.equal(terminal.rows, 24);
   assert.equal(mounted.root.children.length, 1);
 
-  const inputs = [];
-  context.KabibiBrowserSuperDemo.sendDisplayTest({
-    pushStdin(input) { inputs.push(input); }
-  });
-  assert.equal(inputs.length, 1);
-  assert.match(inputs[0], /KABIBI_CRT_/);
-  assert.match(inputs[0], /48;2;10;38;46m/);
-  assert.match(inputs[0], /\\033\[1;36m/);
-  assert.match(inputs[0], /38; do printf/);
-  assert.match(inputs[0], /%s\|KABIBI_CRT_0123456789/);
-  assert.equal(inputs[0].endsWith('\r'), true);
-  context.KabibiBrowserSuperDemo.sendDisplayTest({
-    pushStdin(input) { inputs.push(input); }
-  }, 36, 40);
-  assert.match(inputs[1], /78; do printf/);
-  assert.ok(inputs[1].length < inputs[0].length * 2);
-
   mounted.dispose();
   assert.equal(terminal.disposed, true);
 });
@@ -460,4 +443,108 @@ test('CRT capture crops the WebGL viewport rather than its unused canvas area', 
 
   assert.deepEqual({ ...viewport }, { x: 0, y: 150, width: 432, height: 300 });
   assert.deepEqual({ ...fallback }, { x: 0, y: 0, width: 432, height: 300 });
+});
+
+test('bootFromGuest honors __super_demo__ and falls back to flat full-page xterm when WebGL2 is unsupported', async () => {
+  const { document, window, context } = createHarness();
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'super-demo.js'), 'utf8'), context);
+  context.__super_demo__ = true;
+
+  let attachedCallbacks = null;
+  const signals = [];
+  const activeHost = {
+    hasTerminal() { return Boolean(attachedCallbacks); },
+    attachTerminal(callbacks) { attachedCallbacks = callbacks; },
+    pushStdin() {},
+    triggerSignal(sig) { signals.push(sig); },
+    terminate() {}
+  };
+  context.washmhostExports = {
+    getActiveHost: () => activeHost
+  };
+
+  let superDemoStarts = 0;
+  context.KabibiBrowserSuperDemo = {
+    start() {
+      superDemoStarts += 1;
+      return { resize() {}, dispose() {} };
+    }
+  };
+
+  const importedUrls = [];
+  const mounted = await context.KabibiBrowser.bootFromGuest({
+    document,
+    window,
+    webgl2Supported: false,
+    importModule: async (url) => {
+      importedUrls.push(url);
+      return {
+        Terminal: FakeTerminal,
+        FitAddon: FakeFitAddon
+      };
+    }
+  });
+
+  assert.ok(mounted);
+  assert.equal(mounted.mode, 'default');
+  assert.equal(mounted.createdHost, true);
+  assert.equal(mounted.parent.style.position, 'fixed');
+  assert.equal(superDemoStarts, 0);
+  assert.equal(importedUrls.some((u) => u.includes('three')), false);
+  assert.ok(attachedCallbacks);
+  assert.deepEqual({ ...attachedCallbacks.getTtySize() }, { cols: 80, rows: 24 });
+
+  // Second call is a no-op because activeHost now has a terminal attached
+  const second = await context.KabibiBrowser.bootFromGuest({ document, window });
+  assert.equal(second, null);
+
+  mounted.dispose();
+});
+
+test('bootFromGuest starts CRT super-demo when __super_demo__ and WebGL2 are available', async () => {
+  const { document, window, context } = createHarness();
+  context.__super_demo__ = true;
+
+  let attachedCallbacks = null;
+  const activeHost = {
+    hasTerminal() { return Boolean(attachedCallbacks); },
+    attachTerminal(callbacks) { attachedCallbacks = callbacks; },
+    pushStdin() {},
+    triggerSignal() {},
+    terminate() {}
+  };
+  context.washmhostExports = {
+    getActiveHost: () => activeHost
+  };
+
+  let superDemoStarts = 0;
+  context.KabibiBrowserSuperDemo = {
+    start() {
+      superDemoStarts += 1;
+      return {
+        fitTerminal() { return true; },
+        resize() {},
+        isFallback() { return false; },
+        dispose() {}
+      };
+    }
+  };
+
+  const mounted = await context.KabibiBrowser.bootFromGuest({
+    document,
+    window,
+    webgl2Supported: true,
+    importModule: async () => ({
+      Terminal: FakeTerminal,
+      FitAddon: FakeFitAddon,
+      WebglAddon: class {},
+      THREE: {}
+    })
+  });
+
+  assert.ok(mounted);
+  assert.equal(mounted.mode, 'super-demo');
+  assert.equal(superDemoStarts, 1);
+  assert.ok(attachedCallbacks);
+  mounted.dispose();
 });

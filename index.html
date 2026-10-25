@@ -1,370 +1,52 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Rusticated README</title>
-    <!-- Load Marked.js to parse the Markdown -->
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
-    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
-    <style>
-        body {
-            margin: 0;
-            padding: 0;
-            background-color: #fcfcfc;
-            color: #333;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            opacity: 0;
-            transition: opacity 1.2s ease-in-out;
-            display: flex;
-            height: 100vh;
-            overflow: hidden;
-        }
-
-        .main-container {
-            display: flex;
-            width: 100%;
-            height: 100%;
-            flex-direction: row;
-        }
-
-        .pane {
-            flex: 1;
-            height: 100%;
-            box-sizing: border-box;
-            overflow: hidden;
-        }
-
-        .readme-pane {
-            padding: 40px;
-            background: #ffffff;
-            overflow-y: auto;
-        }
-
-        .container {
-            max-width: 820px;
-            margin: 0 auto;
-            line-height: 1.6;
-        }
-
-        .terminal-pane {
-            background: #000;
-            display: flex;
-            flex-direction: column;
-            border-left: 1px solid #dfe2e5;
-        }
-
-        #terminal-container {
-            flex: 1;
-            width: 100%;
-            height: 100%;
-        }
-
-        #terminal-container .xterm-viewport {
-            overflow-y: auto !important;
-        }
-
-        @media (max-width: 1024px) {
-            body {
-                overflow: auto;
-                height: auto;
-            }
-            .main-container {
-                flex-direction: column;
-            }
-            .pane {
-                height: auto;
-                flex: none;
-            }
-            .terminal-pane {
-                height: 50vh;
-                order: -1; /* Terminal on top in mobile */
-                position: sticky;
-                top: 0;
-                z-index: 100;
-            }
-            .readme-pane {
-                overflow-y: visible;
-            }
-        }
-        
-        h1, h2, h3 { 
-            border-bottom: 1px solid #eaecef; 
-            padding-bottom: 0.3em;
-            margin-top: 1.5em;
-        }
-        
-        h1 { margin-top: 0; }
-
-        code { 
-            background: #f6f8fa; 
-            padding: 0.2em 0.4em; 
-            border-radius: 3px; 
-            font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace; 
-            font-size: 0.9em;
-        }
-
-        pre { 
-            background: #f6f8fa; 
-            padding: 16px; 
-            border-radius: 6px; 
-            overflow: auto; 
-        }
-
-        pre code { 
-            background: none; 
-            padding: 0; 
-        }
-
-        pre.splash {
-            font-size: 6.6px;
-            white-space: pre;
-            text-align: center;
-            background: transparent;
-            border: none;
-            padding: 0;
-            margin: 0;
-            filter: contrast(1.5);
-        }
-
-        blockquote { 
-            border-left: 4px solid #dfe2e5; 
-            color: #6a737d; 
-            padding: 0 1em; 
-            margin: 0 0 16px 0; 
-        }
-
-        table {
-            border-collapse: collapse;
-            width: 100%;
-            margin-bottom: 16px;
-        }
-
-        table th, table td {
-            border: 1px solid #dfe2e5;
-            padding: 6px 13px;
-        }
-
-        table tr:nth-child(2n) {
-            background-color: #f6f8fa;
-        }
-        
-        #error-msg {
-            color: #d73a49;
-            text-align: center;
-            font-weight: bold;
-        }
-    </style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kabibi CRT Super-Demo</title>
+  <style>
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #07090e; }
+  </style>
 </head>
-<body id="main-body">
-    <div class="main-container">
-        <div class="pane readme-pane">
-            <div id="content" class="container">
-                <!-- Rendered markdown goes here -->
-            </div>
-        </div>
-        <div class="pane terminal-pane">
-            <div id="stats-panel"></div>
-            <div id="controls"></div>
-            <div id="terminal-container"></div>
-            <div id="cache-container" style="padding: 15px; border-top: 1px solid #ddd; overflow-y: auto; max-height: 200px;"></div>
-        </div>
-    </div>
+<body>
+  <script src="./washmhost.js"></script>
+  <script>
+    (function () {
+      'use strict';
 
-    <!-- 
-      Pull in README.md dynamically.
-      This works over file:// purely because README.md is polyglot Javascript and Markdown 
-    -->
-    <script src="README.md"></script>
-    <script src="washmhost.js"></script>
-
-    <script>
-        const termDecoder = new TextDecoder();
-
-        // --- WASM Host Implementation ---
-        async function initTerminalAndWasm() {
-            console.log("initTerminalAndWasm START");
-            const term = new Terminal({
-                cursorBlink: true,
-                allowProposedApi: true,
-                fontFamily: 'Consolas, "Cascadia Mono", "Fira Code", Menlo, monospace'
-            });
-            const fitAddon = new FitAddon.FitAddon();
-            term.loadAddon(fitAddon);
-            window.term = term;
-
-            term.open(document.getElementById('terminal-container'));
-            fitAddon.fit();
-            window.addEventListener('resize', () => {
-                fitAddon.fit();
-                if (window.hostState && window.hostState.triggerSignal) {
-                    window.hostState.triggerSignal(28); // SIGWINCH
-                }
-            });
-
-            term.write('Connecting to kabibi WASM...\r\n');
-            console.log('[TRACE] After terminal creation');
-
-            // Host controller instance managed by washmhost
-            let host = null;
-            const hostState = {
-                get memory() { return host?.getMemory() || null; },
-                triggerSignal: (sig) => host?.triggerSignal(sig),
-                pushStdin: (data) => host?.pushStdin(data)
-            };
-            window.hostState = hostState;
-
-            term.onData(data => {
-                hostState.pushStdin(data);
-            });
-
-            // === Browser Debug Helpers ===
-            window._debug_term = {
-                term,
-                hostState,
-                command: async (cmd) => {
-                    if (!term) return 'Terminal not ready';
-                    term.write(cmd + '\r\n');
-                    hostState.pushStdin(cmd + '\r\n');
-                    return `Sent: ${cmd}`;
-                },
-                send: (text) => {
-                    if (!term) return 'Terminal not ready';
-                    term.write(text + '\r\n');
-                    hostState.pushStdin(text + '\r\n');
-                    return `Sent: ${text}`;
-                },
-                type: (text) => {
-                    if (!term) return 'Terminal not ready';
-                    term.write(text);
-                    hostState.pushStdin(text);
-                    return `Typed: ${text}`;
-                },
-                pressEnter: () => {
-                    term.write('\r\n');
-                    hostState.pushStdin('\r\n');
-                    return 'Enter pressed';
-                },
-                getOutput: () => {
-                    if (!term) return 'Terminal not ready';
-                    try {
-                        const lines = [];
-                        const buffer = term.buffer.active;
-                        if (buffer && buffer.length) {
-                            for (let y = 0; y < Math.min(buffer.length, 100); y++) {
-                                let line = '';
-                                const lineData = buffer.getLine(y);
-                                if (lineData) {
-                                    for (let x = 0; x < lineData.length; x++) {
-                                        const cell = lineData.getCell(x);
-                                        if (cell) {
-                                            line += cell.getChars && cell.getChars() ? cell.getChars() : cell.char || ' ';
-                                        } else {
-                                            line += ' ';
-                                        }
-                                    }
-                                }
-                                lines.push(line.trimEnd());
-                            }
-                        }
-                        return lines.join('\n');
-                    } catch (e) {
-                        try {
-                            const rows = term.element?.querySelectorAll('.xterm-row');
-                            const output = [];
-                            if (rows) {
-                                for (const row of rows) {
-                                    output.push(row.textContent || '');
-                                }
-                            }
-                            return output.join('\n');
-                        } catch (e2) {
-                            return `Terminal output unavailable: ${e2.message}`;
-                        }
-                    }
-                },
-                getTerminal: () => term,
-                getHostState: () => hostState
-            };
-
-            const candidateSources = [
-                './kabibi.bat',
-                './kabibi.wasm',
-                './release/dist/kabibi.bat',
-                './release/dist/kabibi.wasm',
-                './release/kabibi.bat',
-                './release/kabibi.wasm',
-                'https://github.com/user-attachments/files/33643453/kabibi.bat.txt',
-                './release/kabibi.bat.txt',
-                './try/kabibi.wasm'
-            ];
-
-            let lastErr = null;
-            for (const src of candidateSources) {
-                try {
-                    term.write(`Attempting to load kabibi from ${src}...\r\n`);
-                    host = await window.washmhostExports.washmhost({
-                        wasm: src,
-                        stdout: (bytes) => term.write(bytes),
-                        stderr: (bytes) => term.write(bytes),
-                        getTtySize: () => ({ cols: term.cols, rows: term.rows }),
-                        setTtySize: (cols, rows) => term.resize(cols, rows),
-                        onExit: (code) => {
-                            console.log("Process exited with code", code);
-                            if (code !== 0) {
-                                term.write(`\r\n[Process exited with code ${code}]\r\n`);
-                            } else {
-                                term.write('\r\n[Process Finished]\r\n');
-                            }
-                        }
-                    });
-                    window.lastInstance = host.getInstance ? host.getInstance() : null;
-                    console.log(`[washmhost] Launched successfully from ${src}`);
-                    lastErr = null;
-                    break;
-                } catch (err) {
-                    console.warn(`[washmhost] Failed to load from ${src}:`, err.message);
-                    lastErr = err;
-                }
-            }
-
-            if (lastErr) {
-                console.error(lastErr);
-                term.write(`\r\nFailed to load kabibi: ${lastErr.message}\r\n`);
-            }
+      function ensureWashmhostLoaded() {
+        if (window.washmhostExports && typeof window.washmhostExports.loadVegetable === 'function') {
+          return Promise.resolve(window.washmhostExports);
         }
-
-        window.onload = () => {
-            const contentDiv = document.getElementById('content');
-            
-            try {
-                if (typeof __README__ === 'function') {
-                    const funcStr = __README__.toString();
-                    const startIdx = funcStr.indexOf('/*') + 2;
-                    const endIdx = funcStr.lastIndexOf('*/');
-                    
-                    if (startIdx !== -1 && endIdx !== -1) {
-                        let rawMarkdown = funcStr.substring(startIdx, endIdx);
-                        rawMarkdown = rawMarkdown.replace(/^\s*-->\s*/, '').replace(/\s*<!--\s*$/, '');
-                        contentDiv.innerHTML = marked.parse(rawMarkdown);
-                    } else {
-                        throw new Error("Could not find polyglot comment boundaries.");
-                    }
-                } else {
-                    throw new Error("__README__ function not found in README.md script payload.");
-                }
-            } catch (err) {
-                console.error(err);
-                contentDiv.innerHTML = `<p id="error-msg">Failed to load README.md.<br><small>${err.message}</small></p>`;
+        return new Promise((resolve, reject) => {
+          const script = document.createElement('script');
+          script.src = './mohabbat/washmhost/js/browser/index.js';
+          script.onload = () => {
+            if (window.washmhostExports && typeof window.washmhostExports.loadVegetable === 'function') {
+              resolve(window.washmhostExports);
+            } else {
+              reject(new Error('washmhost loaded but did not expose loadVegetable'));
             }
+          };
+          script.onerror = () => reject(new Error('Failed to load ./mohabbat/washmhost/js/browser/index.js'));
+          document.head.appendChild(script);
+        });
+      }
 
-            document.getElementById('main-body').style.opacity = 1;
+      const params = new URLSearchParams(location.search);
+      window.__super_demo__ = params.get('super_demo') !== '0';
 
-            // Initialize Terminal and WASM
-            initTerminalAndWasm();
-        };
-    </script>
+      const customArtifact = params.get('artifact') || params.get('wasm');
+      const candidates = customArtifact
+        ? [customArtifact]
+        : ['./kabibi.bat', './release/dist/kabibi.bat'];
+
+      ensureWashmhostLoaded()
+        .then((washmhostExports) => washmhostExports.loadVegetable(candidates))
+        .catch((error) => {
+          console.error('Kabibi failed to start:', error);
+        });
+    })();
+  </script>
 </body>
 </html>

@@ -229,6 +229,7 @@
       if (!active || usingFallback || !renderer) return;
       const bounds = stage.getBoundingClientRect();
       if (bounds.width <= 0 || bounds.height <= 0) return;
+      fitTerminal();
       const pixelRatio = Math.min(global.devicePixelRatio || 1, 2);
       renderer.setPixelRatio(pixelRatio);
       renderer.setSize(bounds.width, bounds.height, false);
@@ -255,13 +256,20 @@
     function updateImageScale() {
       if (!screenMaterial || !textureCanvas || textureCanvas.height <= 0 ||
           screenHeight <= 0) return;
-      const scale = calculateImageScale(
+      const fit = calculateImageScale(
         textureCanvas.width,
         textureCanvas.height,
         screenWidth,
         screenHeight
       );
-      screenMaterial.uniforms.imageScale.value.set(scale.x, scale.y);
+      const minFit = Math.min(fit.x, fit.y);
+      const proportional = minFit >= 0.84 ? 1 : minFit / 0.84;
+      const innerMargin = 0.032 * Math.min(screenWidth, screenHeight);
+      const bezelScaleX = Math.max(0.5, 1 - (2 * innerMargin) / screenWidth);
+      const bezelScaleY = Math.max(0.5, 1 - (2 * innerMargin) / screenHeight);
+      const scaleX = bezelScaleX * (fit.x < fit.y ? proportional : 1);
+      const scaleY = bezelScaleY * (fit.y < fit.x ? proportional : 1);
+      screenMaterial.uniforms.imageScale.value.set(scaleX, scaleY);
     }
 
     function applyScanlines() {
@@ -274,20 +282,118 @@
       textureContext.restore();
     }
 
+    function projectScreenBounds(target, distance, halfTan, aspect) {
+      const scale = distance / cameraOffsetLength;
+      const camX = target.x + cameraOffset.x * scale;
+      const camY = target.y + cameraOffset.y * scale;
+      const camZ = target.z + cameraOffset.z * scale;
+
+      let fx = target.x - camX;
+      let fy = target.y - camY;
+      let fz = target.z - camZ;
+      const fLen = Math.hypot(fx, fy, fz) || 1;
+      fx /= fLen;
+      fy /= fLen;
+      fz /= fLen;
+
+      // right = normalize(cross(f, (0, 1, 0))) = normalize((-fz, 0, fx))
+      let rx = -fz;
+      let ry = 0;
+      let rz = fx;
+      const rLen = Math.hypot(rx, ry, rz) || 1;
+      rx /= rLen;
+      ry /= rLen;
+      rz /= rLen;
+
+      // up = cross(r, f)
+      const ux = ry * fz - rz * fy;
+      const uy = rz * fx - rx * fz;
+      const uz = rx * fy - ry * fx;
+
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minY = Infinity;
+      let maxY = -Infinity;
+      const samples = [-1, -0.5, 0, 0.5, 1];
+      for (const nx of samples) {
+        for (const ny of samples) {
+          if (Math.abs(nx) !== 1 && Math.abs(ny) !== 1) continue;
+          const px = nx * (screenWidth / 2);
+          const py = ny * (screenHeight / 2);
+          const pz = flat ? 0 : -0.24 * (nx * nx + 0.72 * ny * ny);
+          const vx = px - camX;
+          const vy = py - camY;
+          const vz = pz - camZ;
+          const camSpaceX = vx * rx + vy * ry + vz * rz;
+          const camSpaceY = vx * ux + vy * uy + vz * uz;
+          const camSpaceZ = vx * fx + vy * fy + vz * fz;
+          if (camSpaceZ <= 0.001) continue;
+          const ndcX = camSpaceX / (camSpaceZ * halfTan * aspect);
+          const ndcY = camSpaceY / (camSpaceZ * halfTan);
+          if (ndcX < minX) minX = ndcX;
+          if (ndcX > maxX) maxX = ndcX;
+          if (ndcY < minY) minY = ndcY;
+          if (ndcY > maxY) maxY = ndcY;
+        }
+      }
+      return { minX, maxX, minY, maxY, rx, ry, rz, ux, uy, uz };
+    }
+
     function frameCamera() {
+      const bounds = stage.getBoundingClientRect();
+      const stageWidth = Math.max(1, bounds.width || root.clientWidth || 1);
+      const stageHeight = Math.max(1, bounds.height || root.clientHeight || 1);
+      const aspect = camera.aspect || (stageWidth / stageHeight) || 1.6;
       const halfFov = camera.fov * Math.PI / 360;
-      const fitMargin = 1.1;
-      const distanceForHeight = screenHeight * fitMargin / (2 * Math.tan(halfFov));
-      const distanceForWidth = screenWidth * fitMargin /
-        (2 * Math.tan(halfFov) * camera.aspect);
-      const distance = Math.max(distanceForHeight, distanceForWidth);
+      const halfTan = Math.tan(halfFov);
+      const area = baseScreenWidth * baseScreenHeight;
+
+      const marginPx = 0.058 * Math.min(stageWidth, stageHeight);
+      const targetSpanX = Math.max(0.2, 2 * (1 - (2 * marginPx) / stageWidth));
+      const targetSpanY = Math.max(0.2, 2 * (1 - (2 * marginPx) / stageHeight));
+
+      let distance = Math.max(
+        screenHeight / (targetSpanY * halfTan),
+        screenWidth / (targetSpanX * halfTan * aspect)
+      );
+      const target = { x: cameraTarget.x, y: cameraTarget.y, z: cameraTarget.z };
+
+      for (let step = 0; step < 5; step += 1) {
+        const projected = projectScreenBounds(target, distance, halfTan, aspect);
+        const spanX = projected.maxX - projected.minX;
+        const spanY = projected.maxY - projected.minY;
+        if (!(spanX > 0) || !(spanY > 0)) break;
+
+        const centerX = (projected.minX + projected.maxX) / 2;
+        const centerY = (projected.minY + projected.maxY) / 2;
+        const shiftRight = centerX * distance * halfTan * aspect;
+        const shiftUp = centerY * distance * halfTan;
+        target.x += projected.rx * shiftRight + projected.ux * shiftUp;
+        target.y += projected.ry * shiftRight + projected.uy * shiftUp;
+        target.z += projected.rz * shiftRight + projected.uz * shiftUp;
+
+        screenWidth *= targetSpanX / spanX;
+        screenHeight *= targetSpanY / spanY;
+        const normalizeScale = Math.sqrt(area / (screenWidth * screenHeight));
+        screenWidth *= normalizeScale;
+        screenHeight *= normalizeScale;
+        distance *= normalizeScale;
+      }
+
+      const scaleX = screenWidth / baseScreenWidth;
+      const scaleY = screenHeight / baseScreenHeight;
+      if (screenMesh) screenMesh.scale.set(scaleX, scaleY, 1);
+      if (glassMesh) glassMesh.scale.set(scaleX, scaleY, 1);
+      if (reflectionMesh) reflectionMesh.scale.set(scaleX, scaleY, 1);
+      updateImageScale();
+
       const scale = distance / cameraOffsetLength;
       camera.position.set(
-        cameraTarget.x + cameraOffset.x * scale,
-        cameraTarget.y + cameraOffset.y * scale,
-        cameraTarget.z + cameraOffset.z * scale
+        target.x + cameraOffset.x * scale,
+        target.y + cameraOffset.y * scale,
+        target.z + cameraOffset.z * scale
       );
-      camera.lookAt(cameraTarget.x, cameraTarget.y, cameraTarget.z);
+      camera.lookAt(target.x, target.y, target.z);
       if (screenMaterial) {
         screenMaterial.uniforms.focusStart.value = distance - 0.16;
         screenMaterial.uniforms.focusEnd.value = distance + 0.08;
@@ -390,7 +496,12 @@
       raycaster.setFromCamera(pointer, camera);
       const hit = raycaster.intersectObject(screenMesh, false)[0];
       if (!hit || !hit.uv) return null;
-      hitPoint.copy(hit.uv);
+      const imageScale = screenMaterial && screenMaterial.uniforms && screenMaterial.uniforms.imageScale
+        ? screenMaterial.uniforms.imageScale.value
+        : { x: 1, y: 1 };
+      const u = (hit.uv.x - 0.5) / (imageScale.x || 1) + 0.5;
+      const v = (hit.uv.y - 0.5) / (imageScale.y || 1) + 0.5;
+      hitPoint.set(Math.max(0, Math.min(1, u)), Math.max(0, Math.min(1, v)));
       const targetBounds = terminalScreen.getBoundingClientRect();
       return {
         clientX: targetBounds.left + hitPoint.x * targetBounds.width,
@@ -604,6 +715,7 @@
       fitTerminal,
       resize,
       fallback,
+      isFallback: () => usingFallback,
       dispose() {
         if (!active) return;
         active = false;
@@ -616,20 +728,6 @@
         root.style.pointerEvents = '';
       }
     };
-  }
-
-  function sendDisplayTest(host, cols = 72, rows = 20) {
-    if (!host || typeof host.pushStdin !== 'function') {
-      throw new Error('CRT display test requires a running terminal host');
-    }
-    const safeCols = Math.max(20, Math.floor(cols));
-    const safeRows = Math.max(20, Math.floor(rows));
-    const label = `|KABIBI_CRT_0123456789_ABCDEFGHIJKLMNOPQRSTUVWXYZ`.repeat(2)
-      .slice(0, Math.max(0, safeCols - 3));
-    const values = Array.from({ length: safeRows * 2 - 2 }, (_, index) =>
-      String(index + 1).padStart(2, '0')).join(' ');
-    const command = `for i in ${values}; do printf '\\033[48;2;10;38;46m\\033[1;36m%s${label}\\033[0m\\n' "$i"; done`;
-    host.pushStdin(`${command}${String.fromCharCode(13)}`);
   }
 
   function rendererContextProbe(THREE, canvas) {
@@ -677,7 +775,6 @@
 
   global.KabibiBrowserSuperDemo = Object.freeze({
     start,
-    sendDisplayTest,
     calculateGrid,
     calculateImageScale,
     calculateCaptureViewport
