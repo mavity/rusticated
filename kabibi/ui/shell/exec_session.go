@@ -135,6 +135,8 @@ type ExecutionSession struct {
 	bgProcs    map[int]*ManagedPTY
 	nextProcID int
 	uiSink     AICommandUISink
+
+	pathCache *pathCommandCache
 }
 
 // AICommandUISink allows the Shell widget to display live `SourceAITool` blocks
@@ -173,6 +175,8 @@ func NewExecutionSession(dir string) (*ExecutionSession, error) {
 
 	es.runner = r
 	es.initialCwd = r.Dir
+	es.pathCache = newPathCommandCache()
+	es.requestPathCacheRefresh(true)
 	return es, nil
 }
 
@@ -184,6 +188,14 @@ func (es *ExecutionSession) Dir() string {
 		return es.runner.Dir
 	}
 	return es.initialCwd
+}
+
+// Close releases background cache work associated with the session.
+func (es *ExecutionSession) Close() error {
+	if es != nil && es.pathCache != nil {
+		es.pathCache.close()
+	}
+	return nil
 }
 
 // SetDir updates the shell runner's working directory and PWD variable when
@@ -252,6 +264,17 @@ func (es *ExecutionSession) envMapLocked() map[string]string {
 
 // ClassifyInput determines how user input should be handled without executing it.
 func (es *ExecutionSession) ClassifyInput(input string) (InputRoute, *syntax.File) {
+	return es.classifyInput(input, es.CanResolveCommand)
+}
+
+// ClassifyInputForDisplay classifies prompt text without doing PATH filesystem
+// lookups on the UI render path. Actual command submission uses ClassifyInput,
+// which resolves commands against the current filesystem.
+func (es *ExecutionSession) ClassifyInputForDisplay(input string) (InputRoute, *syntax.File) {
+	return es.classifyInput(input, es.canResolveCommandFromCache)
+}
+
+func (es *ExecutionSession) classifyInput(input string, canResolve func(string) bool) (InputRoute, *syntax.File) {
 	trimmed := strings.TrimSpace(input)
 	if trimmed == "" {
 		return RouteEmpty, nil
@@ -263,7 +286,7 @@ func (es *ExecutionSession) ClassifyInput(input string) (InputRoute, *syntax.Fil
 		if !syntax.IsIncomplete(err) {
 			return RouteAI, nil
 		}
-		if es.hasShellHead(file, input) {
+		if es.hasShellHead(file, input, canResolve) {
 			return RouteIncomplete, file
 		}
 		return RouteAI, file
@@ -271,7 +294,7 @@ func (es *ExecutionSession) ClassifyInput(input string) (InputRoute, *syntax.Fil
 	if len(file.Stmts) == 0 {
 		return RouteEmpty, file
 	}
-	if hasTrailingContinuation(input) && es.hasShellHead(file, input) {
+	if hasTrailingContinuation(input) && es.hasShellHead(file, input, canResolve) {
 		return RouteIncomplete, file
 	}
 
@@ -285,7 +308,7 @@ func (es *ExecutionSession) ClassifyInput(input string) (InputRoute, *syntax.Fil
 	}
 
 	head, compound, dynamic := firstCommandHead(file)
-	if compound || dynamic || head == "" || es.hasShellHead(file, input) {
+	if compound || dynamic || head == "" || es.hasShellHead(file, input, canResolve) {
 		return RouteShell, file
 	}
 	return RouteAI, file
@@ -361,12 +384,100 @@ func firstCommandHead(file *syntax.File) (head string, compound, dynamic bool) {
 	return head, false, dynamic
 }
 
-func (es *ExecutionSession) hasShellHead(file *syntax.File, input string) bool {
+func (es *ExecutionSession) hasShellHead(file *syntax.File, input string, canResolve func(string) bool) bool {
 	head, compound, dynamic := firstCommandHead(file)
 	word := leadingWord(input)
 	return compound || dynamic || startsShellCompound(input) || isShellKeyword(head) ||
 		isShellKeyword(word) || isAssignmentWord(word) ||
-		es.CanResolveCommand(head) || es.CanResolveCommand(word)
+		canResolve(head) || canResolve(word)
+}
+
+func (es *ExecutionSession) requestPathCacheRefresh(immediate bool) {
+	if es == nil || es.pathCache == nil {
+		return
+	}
+	cwd := es.Dir()
+	env := es.EnvMap()
+	path, _ := lookupEnvValue(env, "PATH")
+	pathExt, _ := lookupEnvValue(env, "PATHEXT")
+	es.pathCache.schedule(pathCacheKey{
+		cwd:         cwd,
+		path:        path,
+		pathExt:     pathExt,
+		windowsLike: isWindowsLikeEnv(env),
+	}, immediate)
+}
+
+func (es *ExecutionSession) canResolveCommandFromCache(name string) bool {
+	if es == nil || name == "" {
+		return false
+	}
+	if isAlwaysResolvedCommand(name) {
+		return true
+	}
+
+	es.runMu.Lock()
+	cwd := es.Dir()
+	env := es.EnvMap()
+	hasFunction := false
+	if es.runner != nil && es.runner.Funcs != nil {
+		_, hasFunction = es.runner.Funcs[name]
+	}
+	es.runMu.Unlock()
+	if hasFunction {
+		return true
+	}
+
+	if strings.ContainsAny(name, `/\`) || filepath.IsAbs(name) {
+		return canResolveLocalScript(name, cwd)
+	}
+
+	if es.pathCache == nil {
+		return false
+	}
+	path, _ := lookupEnvValue(env, "PATH")
+	pathExt, _ := lookupEnvValue(env, "PATHEXT")
+	key := pathCacheKey{
+		cwd:         cwd,
+		path:        path,
+		pathExt:     pathExt,
+		windowsLike: isWindowsLikeEnv(env),
+	}
+	return es.pathCache.contains(key, name)
+}
+
+func isAlwaysResolvedCommand(name string) bool {
+	if interp.IsBuiltin(name) || (!strings.ContainsAny(name, `/\`) && isNestedShellBuiltinName(name)) {
+		return true
+	}
+	switch name {
+	case "help", "git", "ai", "web", "cdp":
+		return true
+	}
+	_, ok := LookupURootCommand(name)
+	return ok
+}
+
+func canResolveLocalScript(name, cwd string) bool {
+	path := name
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(cwd, path)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	if strings.HasSuffix(strings.ToLower(name), ".sh") {
+		return true
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	var marker [2]byte
+	_, readErr := file.Read(marker[:])
+	_ = file.Close()
+	return readErr == nil && string(marker[:]) == "#!"
 }
 
 // CanResolveCommand reports whether name would be handled by Kabibi's shell
@@ -375,13 +486,7 @@ func (es *ExecutionSession) CanResolveCommand(name string) bool {
 	if es == nil || name == "" {
 		return false
 	}
-	if interp.IsBuiltin(name) || (!strings.ContainsAny(name, `/\`) && isNestedShellBuiltinName(name)) {
-		return true
-	}
-	if name == "help" || name == "git" || name == "ai" || name == "web" || name == "cdp" {
-		return true
-	}
-	if _, ok := LookupURootCommand(name); ok {
+	if isAlwaysResolvedCommand(name) {
 		return true
 	}
 
