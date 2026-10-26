@@ -672,6 +672,39 @@ test('CRT capture crops the WebGL viewport rather than its unused canvas area', 
   assert.deepEqual({ ...fallback }, { x: 0, y: 0, width: 432, height: 300 });
 });
 
+test('CRT blur is a final composite pass with endpoints measured on curved geometry', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'super-demo.js'), 'utf8');
+  const renderPass = source.slice(source.indexOf('function render()'), source.indexOf('function resize()'));
+  const firstPostRender = renderPass.indexOf('renderer.render(postScene, postCamera)');
+  const passOrder = [
+    'renderer.setRenderTarget(renderTarget)',
+    'renderer.render(scene, camera)',
+    'postMesh.material = horizontalBlurMaterial',
+    'renderer.setRenderTarget(blurTarget)',
+    firstPostRender,
+    'postMesh.material = postMaterial',
+    'renderer.setRenderTarget(null)',
+    renderPass.indexOf('renderer.render(postScene, postCamera)', firstPostRender + 1)
+  ].map((step) => typeof step === 'number' ? step : renderPass.indexOf(step));
+  assert.ok(passOrder.every((index) => index >= 0));
+  assert.ok(passOrder.every((index, position) => position === 0 || index > passOrder[position - 1]));
+  assert.match(source, /triangleShape\.set\(pointA, pointB, pointC\)\.closestPointToPoint\(cameraPosition, closestPoint\)/);
+  assert.match(source, /if \(distance < nearestDistance\) nearestDistance = distance/);
+  assert.match(source, /const distance = farthestPoint\.distanceTo\(cameraPosition\)/);
+  assert.match(source, /if \(distance > farthestDistance\) farthestDistance = distance/);
+  assert.match(
+    source,
+    /\(farthestDistance - distanceToObserver\) \/ distanceRange/
+  );
+  assert.match(source, /maxBlurPixels: \{ value: 4\.0 \}/);
+  assert.match(source, /float blurAmount = proximity \* proximity/);
+  assert.match(source, /float radius = blurAmount \* maxBlurPixels/);
+  assert.match(source, /for \(int tap = -6; tap <= 6; tap\+\+\)/);
+  assert.match(source, /exp\(-0\.5 \* normalizedOffset \* normalizedOffset\)/);
+  assert.match(source, /uniform vec2 direction/);
+  assert.doesNotMatch(source, /cornerDistance|lowerRight/);
+});
+
 test('bootFromGuest honors __super_demo__ and falls back to flat full-page xterm when WebGL2 is unsupported', async () => {
   const { document, window, context } = createHarness();
   vm.runInContext(fs.readFileSync(path.join(__dirname, 'super-demo.js'), 'utf8'), context);

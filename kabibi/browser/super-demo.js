@@ -228,14 +228,22 @@
     let resizeObserver = null;
     let geometry = null;
     let screenMaterial = null;
+    let postMaterial = null;
+    let horizontalBlurMaterial = null;
     let glassMaterial = null;
     let reflectionMaterial = null;
     let screenTexture = null;
+    let renderTarget = null;
+    let blurTarget = null;
+    let postGeometry = null;
+    let postMesh = null;
     let screenCanvas = null;
     let textureCanvas = null;
     let textureContext = null;
     let scene = null;
     let camera = null;
+    let postScene = null;
+    let postCamera = null;
     let screenMesh = null;
     let glassMesh = null;
     let reflectionMesh = null;
@@ -296,6 +304,20 @@
       textureContext = null;
       if (screenMaterial) screenMaterial.dispose();
       screenMaterial = null;
+      if (postMaterial) postMaterial.dispose();
+      postMaterial = null;
+      if (horizontalBlurMaterial) horizontalBlurMaterial.dispose();
+      horizontalBlurMaterial = null;
+      if (postGeometry) postGeometry.dispose();
+      postGeometry = null;
+      if (blurTarget) blurTarget.dispose();
+      blurTarget = null;
+      if (renderTarget) {
+        if (renderTarget.depthTexture) renderTarget.depthTexture.dispose();
+        renderTarget.dispose();
+      }
+      renderTarget = null;
+      postMesh = null;
       if (glassMaterial) glassMaterial.dispose();
       glassMaterial = null;
       if (reflectionMaterial) reflectionMaterial.dispose();
@@ -304,6 +326,8 @@
       geometry = null;
       scene = null;
       camera = null;
+      postScene = null;
+      postCamera = null;
       screenMesh = null;
       glassMesh = null;
       reflectionMesh = null;
@@ -407,7 +431,18 @@
       animationFrame = 0;
       if (!active || usingFallback) return;
       updateScreenTexture();
+      renderer.setRenderTarget(renderTarget);
       renderer.render(scene, camera);
+      postMesh.material = horizontalBlurMaterial;
+      horizontalBlurMaterial.uniforms.sceneColor.value = renderTarget.texture;
+      horizontalBlurMaterial.uniforms.direction.value.set(1, 0);
+      renderer.setRenderTarget(blurTarget);
+      renderer.render(postScene, postCamera);
+      postMesh.material = postMaterial;
+      postMaterial.uniforms.sceneColor.value = blurTarget.texture;
+      postMaterial.uniforms.direction.value.set(0, 1);
+      renderer.setRenderTarget(null);
+      renderer.render(postScene, postCamera);
     }
 
     function resize() {
@@ -423,7 +458,61 @@
       camera.updateProjectionMatrix();
       updateScreenDimensions(camera.aspect);
       frameCamera();
+      resizePostProcess();
       requestFrame();
+    }
+
+    function resizePostProcess() {
+      if (!renderer || !renderTarget || !postMaterial) return;
+      const size = renderer.getDrawingBufferSize(new THREE.Vector2());
+      const width = Math.max(1, Math.floor(size.x));
+      const height = Math.max(1, Math.floor(size.y));
+      if (renderTarget.width !== width || renderTarget.height !== height) {
+        renderTarget.setSize(width, height);
+        blurTarget.setSize(width, height);
+      }
+      postMaterial.uniforms.resolution.value.set(width, height);
+      postMaterial.uniforms.projectionMatrixInverse.value.copy(camera.projectionMatrixInverse);
+      updateBlurDistanceRange();
+    }
+
+    function updateBlurDistanceRange() {
+      if (!screenMesh || !camera || !postMaterial || !geometry) return;
+      screenMesh.updateMatrixWorld(true);
+      camera.updateMatrixWorld(true);
+      const cameraPosition = camera.getWorldPosition(new THREE.Vector3());
+      const positions = geometry.attributes.position;
+      const indices = geometry.index;
+      const pointA = new THREE.Vector3();
+      const pointB = new THREE.Vector3();
+      const pointC = new THREE.Vector3();
+      const closestPoint = new THREE.Vector3();
+      const farthestPoint = new THREE.Vector3();
+      let nearestDistance = Infinity;
+      let farthestDistance = -Infinity;
+
+      for (let index = 0; index < positions.count; index += 1) {
+        farthestPoint.fromBufferAttribute(positions, index).applyMatrix4(screenMesh.matrixWorld);
+        const distance = farthestPoint.distanceTo(cameraPosition);
+        if (distance > farthestDistance) farthestDistance = distance;
+      }
+
+      const triangleCount = indices ? indices.count / 3 : positions.count / 3;
+      const vertexIndex = (index) => indices ? indices.getX(index) : index;
+      const triangleShape = new THREE.Triangle();
+      for (let triangle = 0; triangle < triangleCount; triangle += 1) {
+        const offset = triangle * 3;
+        pointA.fromBufferAttribute(positions, vertexIndex(offset)).applyMatrix4(screenMesh.matrixWorld);
+        pointB.fromBufferAttribute(positions, vertexIndex(offset + 1)).applyMatrix4(screenMesh.matrixWorld);
+        pointC.fromBufferAttribute(positions, vertexIndex(offset + 2)).applyMatrix4(screenMesh.matrixWorld);
+        triangleShape.set(pointA, pointB, pointC).closestPointToPoint(cameraPosition, closestPoint);
+        const distance = closestPoint.distanceTo(cameraPosition);
+        if (distance < nearestDistance) nearestDistance = distance;
+      }
+
+      if (!Number.isFinite(nearestDistance) || !Number.isFinite(farthestDistance)) return;
+      postMaterial.uniforms.nearestDistance.value = nearestDistance;
+      postMaterial.uniforms.farthestDistance.value = farthestDistance;
     }
 
     function updateScreenDimensions(aspect) {
@@ -651,22 +740,9 @@
           void main() {
             vec2 imageUv = (vUv - 0.5) / imageScale + 0.5;
             bool outsideImage = any(greaterThan(abs(vUv - 0.5), imageScale * 0.5));
-            float cornerDistance = length(vec2(1.0, 0.0) - imageUv);
-            float lowerRight = 1.0 - smoothstep(0.08, 0.48, cornerDistance);
-            float blur = lowerRight * opticalEffects;
-            vec2 texel = 1.0 / max(resolution, vec2(1.0));
-            vec2 offset = texel * blur * 8.0;
             vec4 color = vec4(screenBackground, 1.0);
             if (!outsideImage) {
-              color = texture2D(screen, imageUv) * 0.40;
-              color += texture2D(screen, imageUv + vec2(offset.x, 0.0)) * 0.10;
-              color += texture2D(screen, imageUv - vec2(offset.x, 0.0)) * 0.10;
-              color += texture2D(screen, imageUv + vec2(0.0, offset.y)) * 0.10;
-              color += texture2D(screen, imageUv - vec2(0.0, offset.y)) * 0.10;
-              color += texture2D(screen, imageUv + offset) * 0.05;
-              color += texture2D(screen, imageUv - offset) * 0.05;
-              color += texture2D(screen, imageUv + vec2(offset.x, -offset.y)) * 0.05;
-              color += texture2D(screen, imageUv + vec2(-offset.x, offset.y)) * 0.05;
+              color = texture2D(screen, imageUv);
             }
             float backgroundPixel = 1.0 - smoothstep(0.003, 0.018, distance(color.rgb, terminalBackground));
             color.rgb = mix(color.rgb, screenBackground, backgroundPixel * 0.90);
@@ -682,6 +758,120 @@
         `,
         toneMapped: false
       });
+    }
+
+    function createPostProcess() {
+      const depthTexture = new THREE.DepthTexture(1, 1, THREE.UnsignedIntType);
+      depthTexture.format = THREE.DepthFormat;
+      depthTexture.minFilter = THREE.NearestFilter;
+      depthTexture.magFilter = THREE.NearestFilter;
+      renderTarget = new THREE.WebGLRenderTarget(1, 1, {
+        depthBuffer: true,
+        stencilBuffer: false
+      });
+      renderTarget.texture.colorSpace = THREE.NoColorSpace;
+      renderTarget.texture.minFilter = THREE.LinearFilter;
+      renderTarget.texture.magFilter = THREE.LinearFilter;
+      renderTarget.depthTexture = depthTexture;
+      blurTarget = new THREE.WebGLRenderTarget(1, 1, {
+        depthBuffer: false,
+        stencilBuffer: false
+      });
+      blurTarget.texture.colorSpace = THREE.NoColorSpace;
+      blurTarget.texture.minFilter = THREE.LinearFilter;
+      blurTarget.texture.magFilter = THREE.LinearFilter;
+
+      const uniforms = {
+        sceneColor: { value: renderTarget.texture },
+        sceneDepth: { value: depthTexture },
+        resolution: { value: new THREE.Vector2(1, 1) },
+        direction: { value: new THREE.Vector2(1, 0) },
+        projectionMatrixInverse: { value: new THREE.Matrix4() },
+        nearestDistance: { value: 0 },
+        farthestDistance: { value: 1 },
+        maxBlurPixels: { value: 4.0 },
+        opticalEffects: { value: flat ? 0 : 1 }
+      };
+      const vertexShader = `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `;
+      const fragmentShader = `
+          uniform sampler2D sceneColor;
+          uniform sampler2D sceneDepth;
+          uniform vec2 resolution;
+          uniform vec2 direction;
+          uniform mat4 projectionMatrixInverse;
+          uniform float nearestDistance;
+          uniform float farthestDistance;
+          uniform float maxBlurPixels;
+          uniform float opticalEffects;
+          varying vec2 vUv;
+
+          void main() {
+            float depth = texture2D(sceneDepth, vUv).r;
+            vec4 source = texture2D(sceneColor, vUv);
+            if (opticalEffects < 0.5 || depth >= 0.999999) {
+              gl_FragColor = source;
+              OUTPUT_COLOR
+              return;
+            }
+
+            vec4 clipPosition = vec4(vUv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+            vec4 viewPosition = projectionMatrixInverse * clipPosition;
+            viewPosition /= viewPosition.w;
+            float distanceToObserver = length(viewPosition.xyz);
+            float distanceRange = max(farthestDistance - nearestDistance, 0.0001);
+            float proximity = clamp(
+              (farthestDistance - distanceToObserver) / distanceRange,
+              0.0,
+              1.0
+            );
+            float blurAmount = proximity * proximity;
+            float radius = blurAmount * maxBlurPixels;
+            vec2 texel = 1.0 / max(resolution, vec2(1.0));
+            vec4 colorSum = vec4(0.0);
+            float weightSum = 0.0;
+            for (int tap = -6; tap <= 6; tap++) {
+              float normalizedOffset = float(tap) * 0.5;
+              float weight = exp(-0.5 * normalizedOffset * normalizedOffset);
+              vec2 sampleUv = vUv +
+                direction * texel * radius * (float(tap) / 6.0);
+              vec2 boundedUv = clamp(sampleUv, vec2(0.0), vec2(1.0));
+              if (texture2D(sceneDepth, boundedUv).r < 0.999999) {
+                colorSum += texture2D(sceneColor, boundedUv) * weight;
+                weightSum += weight;
+              }
+            }
+            gl_FragColor = weightSum > 0.0 ? colorSum / weightSum : source;
+            OUTPUT_COLOR
+          }
+        `;
+      const outputTransform = '#include <tonemapping_fragment>\n#include <colorspace_fragment>';
+      const horizontalShader = fragmentShader.replace(/OUTPUT_COLOR/g, '');
+      const finalShader = fragmentShader.replace(/OUTPUT_COLOR/g, outputTransform);
+      horizontalBlurMaterial = new THREE.ShaderMaterial({
+        uniforms,
+        vertexShader,
+        fragmentShader: horizontalShader,
+        toneMapped: false
+      });
+      postMaterial = new THREE.ShaderMaterial({
+        uniforms,
+        vertexShader,
+        fragmentShader: finalShader,
+        toneMapped: false
+      });
+
+      postGeometry = new THREE.PlaneGeometry(2, 2);
+      postScene = new THREE.Scene();
+      postMesh = new THREE.Mesh(postGeometry, postMaterial);
+      postScene.add(postMesh);
+      postCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+      postCamera.position.z = 1;
     }
 
     function screenCoordinates(event) {
@@ -776,6 +966,7 @@
       renderer.outputColorSpace = THREE.SRGBColorSpace;
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
       renderer.toneMappingExposure = 1.08;
+      createPostProcess();
 
       textureCanvas = document.createElement('canvas');
       const viewport = getScreenViewport();
