@@ -150,7 +150,7 @@ func remoteStreamRequest(
 			return ctx.Err()
 		default:
 		}
-		raw, err := EvalJS("JSON.stringify(await globalThis.__kabibi_ai_http.next(" + strconv.Quote(streamID) + "))")
+		raw, err := EvalJS("(async () => JSON.stringify(await globalThis.__kabibi_ai_http.next(" + strconv.Quote(streamID) + ")))()")
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
