@@ -71,7 +71,6 @@ func (h *HostEnv) sys_process_spawn(ctx context.Context, m api.Module, stack []u
 			}
 		}
 
-		program = normaliseGuestPathForHost(program)
 		cmd := exec.Command(program, args...)
 		mergedEnv := append([]string{}, os.Environ()...)
 		if len(envVars) > 0 {

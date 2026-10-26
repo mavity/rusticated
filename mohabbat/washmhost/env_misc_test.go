@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -175,23 +174,6 @@ func TestGuestRuntimeEnvOmitsCwdValues(t *testing.T) {
 			t.Fatalf("runtime env unexpectedly contains cwd value: %q", kv)
 		}
 	}
-}
-
-func TestGuestRuntimeEnvNormalizesGOROOTForHost(t *testing.T) {
-	guestGOROOT := `/C:/Users/test\sdk\go1.27.1`
-	want := `/C:/Users/test/sdk/go1.27.1`
-	if runtime.GOOS == "windows" {
-		want = `C:/Users/test/sdk/go1.27.1`
-	}
-	for _, kv := range guestRuntimeEnvForWasm([]string{"GOROOT=" + guestGOROOT}) {
-		if key, value, ok := strings.Cut(kv, "="); ok && strings.EqualFold(key, "GOROOT") {
-			if value != want {
-				t.Fatalf("GOROOT = %q, want host path %q", value, want)
-			}
-			return
-		}
-	}
-	t.Fatal("runtime environment omitted GOROOT")
 }
 
 func TestHostEnvTracksModuleCwd(t *testing.T) {

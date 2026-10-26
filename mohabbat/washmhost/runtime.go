@@ -132,9 +132,6 @@ func guestRuntimeEnvForWasm(env []string) []string {
 		if !ok {
 			continue
 		}
-		if strings.EqualFold(k, "GOROOT") {
-			v = normaliseGuestPathForHost(v)
-		}
 		if strings.EqualFold(k, "PWD") || strings.EqualFold(k, "OLDPWD") {
 			continue
 		}

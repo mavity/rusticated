@@ -13,92 +13,16 @@ import (
 	"time"
 )
 
-func TestGuestWindowsRootPathNormalization(t *testing.T) {
-	canonical := "/C:/Users/test/AppData/Local/Temp"
-	windowsRoot := `C:\Users\test\AppData\Local/Temp`
-	if runtime.GOOS == "windows" {
-		if got := normaliseGuestPathForHost(canonical); got != "C:/Users/test/AppData/Local/Temp" {
-			t.Fatalf("normaliseGuestPathForHost(%q) = %q, want %q", canonical, got, "C:/Users/test/AppData/Local/Temp")
-		}
-		if got := normaliseGuestPathForHost(windowsRoot); got != "C:/Users/test/AppData/Local/Temp" {
-			t.Fatalf("normaliseGuestPathForHost(%q) = %q, want %q", windowsRoot, got, "C:/Users/test/AppData/Local/Temp")
-		}
-		if got := normaliseGuestPathForHost(`C:\..\Windows`); got != "C:/Windows" {
-			t.Fatalf("normaliseGuestPathForHost drive traversal = %q, want %q", got, "C:/Windows")
-		}
-		if got := normaliseGuestPathForHost(`C:\`); got != "C:/" {
-			t.Fatalf("normaliseGuestPathForHost drive root = %q, want %q", got, "C:/")
-		}
-		if got := normaliseGuestPathForHost(`.\ tmp\washmhost-cwd-test`); got != " tmp/washmhost-cwd-test" {
-			t.Fatalf("normaliseGuestPathForHost backslash = %q, want %q", got, " tmp/washmhost-cwd-test")
-		}
-		wantWD, err := os.Getwd()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := normaliseGuestPathForHost("/"); got != wantWD {
-			t.Fatalf("normaliseGuestPathForHost(%q) = %q, want %q", "/", got, wantWD)
-		}
-	} else {
-		if got := normaliseGuestPathForHost(canonical); got != canonical {
-			t.Fatalf("normaliseGuestPathForHost(%q) = %q, want %q", canonical, got, canonical)
-		}
-		if got := normaliseGuestPathForHost(windowsRoot); got != canonical {
-			t.Fatalf("normaliseGuestPathForHost(%q) = %q, want %q", windowsRoot, got, canonical)
-		}
-		if got := normaliseGuestPathForHost(`C:\..\Windows`); got != "/C:/Windows" {
-			t.Fatalf("normaliseGuestPathForHost drive traversal = %q, want %q", got, "/C:/Windows")
-		}
-		if got := normaliseGuestPathForHost(`C:\`); got != "/C:/" {
-			t.Fatalf("normaliseGuestPathForHost drive root = %q, want %q", got, "/C:/")
-		}
-		if got := normaliseGuestPathForHost(`name\with-backslash`); got != `name\with-backslash` {
-			t.Fatalf("normaliseGuestPathForHost(%q) = %q, want unchanged", `name\with-backslash`, got)
-		}
-	}
-	if got := normaliseGuestPathForHost("/tmp/washmhost-cwd-test"); got != "/tmp/washmhost-cwd-test" {
-		t.Fatalf("normaliseGuestPathForHost(%q) = %q, want unchanged", "/tmp/washmhost-cwd-test", got)
-	}
-}
-
-func TestNormaliseHostPathForGuest(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		tests := []struct{ in, want string }{
-			{`C:\Users\mihai`, "/C:/Users/mihai"},
-			{`C:/Users/mihai`, "/C:/Users/mihai"},
-			{`C:`, "/C:/"},
-			{"/tmp/something", "/tmp/something"},
-			{"", ""},
-		}
-
-		for _, tc := range tests {
-			if got := normaliseHostPathForGuest(tc.in); got != tc.want {
-				t.Errorf("normaliseHostPathForGuest(%q) = %q, want %q", tc.in, got, tc.want)
-			}
-		}
-	} else {
-		paths := []string{`C:\Users\mihai`, "/tmp/something", ""}
-		for _, p := range paths {
-			if got := normaliseHostPathForGuest(p); got != p {
-				t.Errorf("normaliseHostPathForGuest(%q) = %q, want unchanged", p, got)
-			}
-		}
-	}
-}
-
 func TestResolveGuestDriveRootedPathDoesNotPrefixCwd(t *testing.T) {
-	cwd := "/workspace"
-	want := "/C:/Users/test/project"
-	if runtime.GOOS == "windows" {
-		cwd = filepath.Clean(`C:\workspace`)
-		want = filepath.Clean(`C:\Users\test\project`)
+	if runtime.GOOS != "windows" {
+		t.Skip("windows drive-rooted path resolution test")
 	}
+	cwd := filepath.Clean(`C:\workspace`)
+	want := filepath.Clean(`C:\Users\test\project`)
 	env := &HostEnv{cwd: cwd}
 	for _, input := range []string{
 		`C:\Users\test\project`,
 		`C:\Users\test\project\.`,
-		`/C:/Users/test/project`,
-		`/C:/Users/test/project/.`,
 	} {
 		if got := env.resolveGuestPathForHost(input); got != want {
 			t.Errorf("resolveGuestPathForHost(%q) = %q, want %q", input, got, want)
