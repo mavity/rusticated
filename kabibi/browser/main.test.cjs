@@ -688,19 +688,24 @@ test('CRT blur is a final composite pass with endpoints measured on curved geome
   ].map((step) => typeof step === 'number' ? step : renderPass.indexOf(step));
   assert.ok(passOrder.every((index) => index >= 0));
   assert.ok(passOrder.every((index, position) => position === 0 || index > passOrder[position - 1]));
-  assert.match(source, /triangleShape\.set\(pointA, pointB, pointC\)\.closestPointToPoint\(cameraPosition, closestPoint\)/);
+  assert.match(source, /new THREE\.Vector3\(\)\.setFromMatrixColumn\(camera\.matrixWorld, 1\)\.normalize\(\)/);
+  assert.match(source, /const focalHeight = cameraPosition\.clone\(\)\.sub\(cornerPoint\)\.dot\(cameraUp\)/);
+  assert.match(source, /const focalPoint = cornerPoint\.clone\(\)\.addScaledVector\(cameraUp, focalHeight\)/);
+  assert.match(source, /triangleShape\.set\(pointA, pointB, pointC\)\.closestPointToPoint\(focalPoint, closestPoint\)/);
   assert.match(source, /if \(distance < nearestDistance\) nearestDistance = distance/);
-  assert.match(source, /const distance = farthestPoint\.distanceTo\(cameraPosition\)/);
+  assert.match(source, /const distance = farthestPoint\.distanceTo\(focalPoint\)/);
   assert.match(source, /if \(distance > farthestDistance\) farthestDistance = distance/);
   assert.match(
     source,
-    /\(farthestDistance - distanceToObserver\) \/ distanceRange/
+    /\(farthestDistance - distanceToFocalPoint\) \/ distanceRange/
   );
-  assert.match(source, /maxBlurPixels: \{ value: 4\.0 \}/);
+  assert.match(source, /maxBlurPixels: \{ value: 6\.0 \}/);
   assert.match(source, /float blurAmount = proximity \* proximity/);
   assert.match(source, /float radius = blurAmount \* maxBlurPixels/);
-  assert.match(source, /for \(int tap = -6; tap <= 6; tap\+\+\)/);
-  assert.match(source, /exp\(-0\.5 \* normalizedOffset \* normalizedOffset\)/);
+  assert.match(source, /addGaussianTap\(-6\.0, 0\.011109/);
+  assert.match(source, /addGaussianTap\(0\.0, 1\.0/);
+  assert.match(source, /addGaussianTap\(6\.0, 0\.011109/);
+  assert.doesNotMatch(source, /for \(int tap = -6; tap <= 6; tap\+\+\)/);
   assert.match(source, /uniform vec2 direction/);
   assert.doesNotMatch(source, /cornerDistance|lowerRight/);
 });
