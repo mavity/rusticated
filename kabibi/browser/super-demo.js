@@ -379,6 +379,23 @@
       );
     }
 
+    function drawWarmTerminalImage(viewport, targetWidth, targetHeight) {
+      textureContext.save();
+      textureContext.filter = 'sepia(40%) saturate(1.05)';
+      textureContext.drawImage(
+        screenCanvas,
+        viewport.x,
+        viewport.y,
+        viewport.width,
+        viewport.height,
+        0,
+        0,
+        targetWidth,
+        targetHeight
+      );
+      textureContext.restore();
+    }
+
     function updateScreenTexture() {
       const latestCanvas = addon && addon._renderer && addon._renderer._canvas;
       if (latestCanvas) screenCanvas = latestCanvas;
@@ -397,17 +414,7 @@
       textureContext.fillStyle = terminal.options.theme.background || '#07090e';
       textureContext.fillRect(0, 0, textureCanvas.width, textureCanvas.height);
       textureContext.imageSmoothingEnabled = false;
-      textureContext.drawImage(
-        screenCanvas,
-        viewport.x,
-        viewport.y,
-        viewport.width,
-        viewport.height,
-        0,
-        0,
-        targetWidth,
-        targetHeight
-      );
+      drawWarmTerminalImage(viewport, targetWidth, targetHeight);
       applyScanlines();
       updateImageScale();
       const resolution = screenMaterial.uniforms.resolution.value;
@@ -1022,17 +1029,7 @@
       textureContext.fillStyle = terminal.options.theme.background || '#07090e';
       textureContext.fillRect(0, 0, textureCanvas.width, textureCanvas.height);
       textureContext.imageSmoothingEnabled = false;
-      textureContext.drawImage(
-        screenCanvas,
-        viewport.x,
-        viewport.y,
-        viewport.width,
-        viewport.height,
-        0,
-        0,
-        textureCanvas.width,
-        textureCanvas.height
-      );
+      drawWarmTerminalImage(viewport, textureCanvas.width, textureCanvas.height);
       applyScanlines();
       screenTexture = new THREE.CanvasTexture(textureCanvas);
       screenTexture.colorSpace = THREE.SRGBColorSpace;

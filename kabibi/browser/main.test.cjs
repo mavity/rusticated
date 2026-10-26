@@ -707,6 +707,11 @@ test('CRT blur is a final composite pass with endpoints measured on curved geome
   assert.match(source, /addGaussianTap\(6\.0, 0\.011109/);
   assert.doesNotMatch(source, /for \(int tap = -6; tap <= 6; tap\+\+\)/);
   assert.match(source, /uniform vec2 direction/);
+  assert.match(source, /textureContext\.filter = 'sepia\(10%\) saturate\(1\.05\)'/);
+  assert.equal(
+    (source.match(/drawWarmTerminalImage\((?:viewport, targetWidth, targetHeight|viewport, textureCanvas\.width, textureCanvas\.height)\);\s*applyScanlines\(\);/g) || []).length,
+    2
+  );
   assert.doesNotMatch(source, /cornerDistance|lowerRight/);
 });
 
