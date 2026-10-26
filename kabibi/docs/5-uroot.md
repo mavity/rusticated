@@ -172,9 +172,9 @@ A command checkbox `[x]` may **only** be ticked when all 5 criteria are met:
 
 ---
 
-## 5. Master Command-by-Command Checklist (All 119 Commands)
+## 5. Master Command-by-Command Checklist (All 120 Commands)
 
-### Band 1: Core Portable Text, File & Shell Utilities (55 Commands)
+### Band 1: Core Portable Text, File & Shell Utilities (56 Commands)
 *100% cross-platform (Linux, macOS, Windows, Rusticated). Pure algorithmic or standard file/stream I/O.*
 
 #### 1A. Pilot Commands (First 3 to Validate Architecture End-to-End)
@@ -267,6 +267,19 @@ A command checkbox `[x]` may **only** be ticked when all 5 criteria are met:
   - `go run . kabibi -r -c "seq 1 -1 -3"` — printed `1`, `0`, `-1`, `-2`, `-3`.
   - `go run . kabibi -r -c "seq -s , 1 -1 -3"` — printed `1,0,-1,-2,-3`.
   - `go run . kabibi -r -c "seq -w -10 2 -2"` — retained zero-padding and printed `-10`, `-08`, `-06`, `-04`, `-02`.
+- [ ] **`sed`** (`cmds/core/sed`): Implement a reentrant, cross-platform stream editor with broad POSIX and GNU sed behavior; expose `Main(ctx, ioEnv, args...)`, use `ioEnv` for streams and resolved paths, honor cancellation, and never depend on a host `sed`. Use [uutils/sed](https://github.com/uutils/sed) as a permissively licensed Rust reference and GNU sed's manual/test suite as the compatibility oracle; uutils currently implements POSIX features while GNU compatibility and extensions remain ongoing, so do not treat it as GNU-complete.
+  - `go -C u-root test ./cmds/core/sed -count=1` — passing package suite covers parser/diagnostics, command execution, streams, files, cancellation, and reentrancy.
+  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/sed$' -count=1` — integration exercises stdin and files, flags/scripts, and `sed` in pipelines.
+  - GNU differential suite: run the upstream GNU sed tests through a documented compatibility harness; record pass/fail/skip counts and investigate each failure rather than claiming full compatibility from package tests alone.
+  - Cross-platform differential probes compare matching GNU sed results for basic and extended regular expressions, escaped delimiters, backreferences, replacement `&`, and first/global/nth substitutions.
+  - Script-language probes cover `-e`/`-f`, numeric and regex addresses, address ranges and negation, `-n`, `p`, `d`, `q`/`Q`, labels and branches, and pattern/hold-space commands (`h`, `H`, `g`, `G`, `x`).
+  - Multiline probes cover `N`, `D`, and `P`, end-of-file behavior, empty input, multiple files, and input without a final newline.
+  - GNU-extension probes cover `-E`, case-insensitive and multiline regex flags, `z`, `-z`, in-place editing `-i` with and without backups, and documented symlink behavior.
+  - `e` command probes cover both forms: executing pattern space into pattern space, and executing a supplied command with immediate output. Verify trailing-newline handling and command failures against GNU sed.
+  - `s///e` probes verify replacement-command expansion, output trimming, conditional execution only after a successful substitution, and interaction/order with `p`.
+  - Kabibi shell-execution probes verify `e` and `s///e` can run shell builtins, registered u-root commands, and Kabibi's `git` handler through the in-process nested-shell path, with cwd, environment, redirected streams, and exit status preserved.
+  - In-place/error probes verify relative and spaced paths, backup contents, atomic replacement on failure, malformed scripts, invalid options, missing files, and nonzero exit status without corrupting originals.
+  - Validate `GOOS=wasip1 GOARCH=wasm` using the repository's documented Rusticated sysroot/build workflow, then run Rusticated+Windows and raw Windows smoke tests for representative substitutions, scripts, pipelines, `e`, in-place edits, and failure cases.
 - [x] **`comm`** (`cmds/core/comm`): Local `-1`, `-2`, `-3` flags; support `-` for `ioEnv.Stdin`.
   - `go -C u-root test ./cmds/core/comm -v` — passed; covers column suppression, stdin, long lines, file errors, and output errors.
   - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/comm$' -v` — passed; covers `-12`, `-23`, and stdin with `-`.
