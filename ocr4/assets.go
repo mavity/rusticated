@@ -27,7 +27,7 @@ func cacheDir() (string, error) {
 		return "", fmt.Errorf("user home directory unavailable: %w", err)
 	}
 	// Share cache with kabibi so the LM wheel + Gemma are reused.
-	if HostOS() == "windows" {
+	if assets.HostOS() == "windows" {
 		return filepath.Join(home, "AppData", "Local", "kabibi", "litert_cache"), nil
 	}
 	return filepath.Join(home, ".cache", "kabibi", "litert_cache"), nil

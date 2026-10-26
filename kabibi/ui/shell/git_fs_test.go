@@ -19,6 +19,13 @@ func TestNewHostFSUsesFilesystemRootAndFastStatInterfaces(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newHostFS: %v", err)
 	}
+	mappedDir, err := fsys.toVirtualPath(dir)
+	if err != nil {
+		t.Fatalf("map host directory to Git filesystem: %v", err)
+	}
+	if mappedDir != virtualDir {
+		t.Fatalf("mapped host directory = %q, want %q", mappedDir, virtualDir)
+	}
 	if _, ok := any(fsys).(fs.StatFS); !ok {
 		t.Fatal("Git filesystem does not implement fs.StatFS")
 	}
