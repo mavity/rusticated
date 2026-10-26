@@ -7,10 +7,10 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/adrianliechti/go-git"
+	"github.com/mavity/rusticated/platform"
 )
 
 // osFS implements git.FS on top of the host or WASM OS filesystem.
@@ -42,7 +42,7 @@ func newHostFS(workingDir string) (*osFS, string, error) {
 
 	baseDir := string(filepath.Separator)
 	virtualDir := filepath.ToSlash(absDir)
-	if runtime.GOOS == "windows" {
+	if platform.HostOS() == "windows" {
 		volume := filepath.VolumeName(absDir)
 		if volume == "" {
 			return nil, "", fmt.Errorf("git working directory %q has no Windows volume", absDir)
@@ -64,7 +64,7 @@ func (o *osFS) toVirtualPath(hostPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve Git filesystem path %q: %w", hostPath, err)
 	}
-	if runtime.GOOS == "windows" && !strings.EqualFold(filepath.VolumeName(absPath), filepath.VolumeName(o.baseDir)) {
+	if platform.HostOS() == "windows" && !strings.EqualFold(filepath.VolumeName(absPath), filepath.VolumeName(o.baseDir)) {
 		return "", fmt.Errorf("Git path %q is outside filesystem volume %q", absPath, filepath.VolumeName(o.baseDir))
 	}
 	relative, err := filepath.Rel(o.baseDir, absPath)

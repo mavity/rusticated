@@ -2,19 +2,19 @@
 
 package assets
 
-import "runtime"
+import "github.com/mavity/rusticated/platform"
 
-// HostOS returns the native host operating system.
-func HostOS() string { return runtime.GOOS }
+// HostOS returns the host operating system.
+func HostOS() string { return platform.HostOS() }
 
-// HostArch returns the native host CPU architecture.
-func HostArch() string { return runtime.GOARCH }
+// HostArch returns the host CPU architecture.
+func HostArch() string { return platform.HostArch() }
 
 // InspectRuntimePlatform returns environmental details for native Go builds.
 func InspectRuntimePlatform() RuntimePlatformInfo {
 	return RuntimePlatformInfo{
-		OS:              runtime.GOOS,
-		Arch:            runtime.GOARCH,
+		OS:              platform.HostOS(),
+		Arch:            platform.HostArch(),
 		ExecutionMode:   "native",
 		HostRuntime:     "native",
 		EnvironmentKind: "desktop",

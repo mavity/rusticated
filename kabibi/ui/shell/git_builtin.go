@@ -7,11 +7,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/adrianliechti/go-git"
 	"github.com/mavity/rusticated/kabibi/gitcore"
+	"github.com/mavity/rusticated/platform"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
 )
@@ -210,7 +210,7 @@ func buildGitEnv(execSess *ExecutionSession, hc interp.HandlerContext, fsys *osF
 			}
 		}
 	}
-	if runtime.GOOS == "windows" && env["EMAIL"] == "" {
+	if platform.HostOS() == "windows" && env["EMAIL"] == "" {
 		env["EMAIL"] = env["GIT_AUTHOR_EMAIL"]
 	}
 	return env, nil

@@ -15,6 +15,7 @@ require (
 	github.com/charmbracelet/x/vt v0.0.0-20260924144451-d676b019604b
 	github.com/go-git/go-git/v5 v5.19.3
 	github.com/mattn/go-runewidth v0.0.30
+	github.com/mavity/rusticated/platform v0.0.0-00010101000000-000000000000
 	github.com/spf13/pflag v1.0.10
 	github.com/u-root/u-root v0.16.0
 	golang.org/x/crypto v0.56.0
@@ -93,6 +94,7 @@ replace (
 	github.com/cyphar/filepath-securejoin => ../mohabbat/rusticated-jit/github.com/cyphar/filepath-securejoin
 	github.com/go-git/go-git/v5 => ../mohabbat/rusticated-jit/github.com/go-git/go-git/v5
 	github.com/mattn/go-isatty => ../mohabbat/rusticated-jit/github.com/mattn/go-isatty
+	github.com/mavity/rusticated/platform => ../platform
 	github.com/u-root/u-root => ../u-root
 	mvdan.cc/sh/v3 => ../mohabbat/rusticated-jit/mvdan.cc/sh/v3
 	golang.org/x/sys => ../mohabbat/rusticated-jit/golang.org/x/sys
