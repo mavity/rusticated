@@ -699,7 +699,9 @@ test('CRT blur is a final composite pass with endpoints measured on curved geome
     source,
     /\(farthestDistance - distanceToFocalPoint\) \/ distanceRange/
   );
-  assert.match(source, /maxBlurPixels: \{ value: 6\.0 \}/);
+  assert.match(source, /maxBlurPixels: \{ value: 8\.0 \}/);
+  assert.match(source, /renderTarget\.texture\.colorSpace = THREE\.SRGBColorSpace/);
+  assert.match(source, /blurTarget\.texture\.colorSpace = THREE\.SRGBColorSpace/);
   assert.match(source, /float blurAmount = proximity \* proximity/);
   assert.match(source, /float radius = blurAmount \* maxBlurPixels/);
   assert.match(source, /addGaussianTap\(-6\.0, 0\.011109/);
