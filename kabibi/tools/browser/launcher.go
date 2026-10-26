@@ -9,10 +9,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mavity/rusticated/platform"
 )
 
 const DefaultRemoteDebuggingPort = 9222
@@ -25,71 +26,16 @@ func FindBrowserBinary() (string, error) {
 		}
 	}
 
-	var candidates []string
-
-	switch runtime.GOOS {
-	case "windows":
-		progFiles := os.Getenv("ProgramFiles")
-		progFilesX86 := os.Getenv("ProgramFiles(x86)")
-		localAppData := os.Getenv("LocalAppData")
-		prefixes := []string{progFiles, progFilesX86, localAppData}
-		relPaths := []string{
-			`Google\Chrome\Application\chrome.exe`,
-			`Microsoft\Edge\Application\msedge.exe`,
-			`BraveSoftware\Brave-Browser\Application\brave.exe`,
-			`Vivaldi\Application\vivaldi.exe`,
-			`Chromium\Application\chrome.exe`,
-		}
-		for _, rel := range relPaths {
-			for _, pfx := range prefixes {
-				if pfx != "" {
-					candidates = append(candidates, filepath.Join(pfx, rel))
-				}
-			}
-		}
-
-	case "darwin":
-		home, _ := os.UserHomeDir()
-		appRel := []string{
-			`/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`,
-			`/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge`,
-			`/Applications/Chromium.app/Contents/MacOS/Chromium`,
-			`/Applications/Brave Browser.app/Contents/MacOS/Brave Browser`,
-		}
-		candidates = append(candidates, appRel...)
-		if home != "" {
-			for _, rel := range appRel {
-				candidates = append(candidates, filepath.Join(home, strings.TrimPrefix(rel, "/")))
-			}
-		}
-
-	default: // linux & unix
-		names := []string{
-			"google-chrome-stable",
-			"google-chrome",
-			"microsoft-edge-stable",
-			"microsoft-edge",
-			"chromium-browser",
-			"chromium",
-			"brave-browser",
-		}
-		for _, name := range names {
+	hostOS := platform.HostOS()
+	if hostOS != "windows" {
+		for _, name := range nativeBrowserNames(hostOS) {
 			if resolved, err := exec.LookPath(name); err == nil {
 				return resolved, nil
 			}
 		}
-		candidates = append(candidates,
-			"/opt/google/chrome/chrome",
-			"/opt/microsoft/msedge/msedge",
-			"/usr/bin/google-chrome-stable",
-			"/usr/bin/google-chrome",
-			"/usr/bin/microsoft-edge-stable",
-			"/usr/bin/chromium-browser",
-			"/usr/bin/chromium",
-			"/snap/bin/chromium",
-		)
 	}
 
+	candidates := browserCandidatePaths(hostOS)
 	for _, c := range candidates {
 		if c == "" {
 			continue
@@ -99,7 +45,81 @@ func FindBrowserBinary() (string, error) {
 		}
 	}
 
-	return "", errors.New("no Chrome, Edge, or Chromium browser binary found; set KABIBI_BROWSER_BIN if installed in a custom path")
+	return "", fmt.Errorf(
+		"no Chrome, Edge, or Chromium browser binary found for host OS %q; checked %v; set KABIBI_BROWSER_BIN if installed in a custom path",
+		hostOS,
+		candidates,
+	)
+}
+
+func nativeBrowserNames(hostOS string) []string {
+	if hostOS == "darwin" {
+		return nil
+	}
+	return []string{
+		"google-chrome-stable", "google-chrome", "microsoft-edge-stable",
+		"microsoft-edge", "chromium-browser", "chromium", "brave-browser",
+	}
+}
+
+// browserCandidatePaths returns filesystem candidates for the actual host OS.
+// Keeping this separate makes platform selection testable without starting a browser.
+func browserCandidatePaths(hostOS string) []string {
+	if hostOS == "windows" {
+		prefixes := []string{os.Getenv("ProgramFiles"), os.Getenv("ProgramFiles(x86)"), os.Getenv("LocalAppData")}
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			driveEnd := strings.IndexByte(home, ':')
+			if prefixes[0] == "" && driveEnd == 1 {
+				prefixes[0] = filepath.Join(home[:driveEnd+1], "Program Files")
+			}
+			if prefixes[1] == "" && driveEnd == 1 {
+				prefixes[1] = filepath.Join(home[:driveEnd+1], "Program Files (x86)")
+			}
+			if prefixes[2] == "" {
+				prefixes[2] = filepath.Join(home, "AppData", "Local")
+			}
+		}
+		relPaths := []string{
+			`Google\Chrome\Application\chrome.exe`,
+			`Microsoft\Edge\Application\msedge.exe`,
+			`BraveSoftware\Brave-Browser\Application\brave.exe`,
+			`Vivaldi\Application\vivaldi.exe`,
+			`Chromium\Application\chrome.exe`,
+		}
+		candidates := make([]string, 0, len(prefixes)*len(relPaths))
+		for _, rel := range relPaths {
+			for _, pfx := range prefixes {
+				if pfx != "" {
+					candidates = append(candidates, filepath.Join(pfx, rel))
+				}
+			}
+		}
+		return candidates
+	}
+
+	if hostOS == "darwin" {
+		home, _ := os.UserHomeDir()
+		appRel := []string{
+			`/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`,
+			`/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge`,
+			`/Applications/Chromium.app/Contents/MacOS/Chromium`,
+			`/Applications/Brave Browser.app/Contents/MacOS/Brave Browser`,
+		}
+		candidates := append([]string(nil), appRel...)
+		if home != "" {
+			for _, rel := range appRel {
+				candidates = append(candidates, filepath.Join(home, strings.TrimPrefix(rel, "/")))
+			}
+		}
+		return candidates
+	}
+
+	return []string{
+		"/opt/google/chrome/chrome", "/opt/microsoft/msedge/msedge",
+		"/usr/bin/google-chrome-stable", "/usr/bin/google-chrome",
+		"/usr/bin/microsoft-edge-stable", "/usr/bin/chromium-browser",
+		"/usr/bin/chromium", "/snap/bin/chromium",
+	}
 }
 
 // DefaultProfileDir returns the persistent user-data-dir for Kabibi's browser instance.
