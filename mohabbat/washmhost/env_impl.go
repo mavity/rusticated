@@ -144,21 +144,17 @@ func (h *HostEnv) currentCwd() string {
 }
 
 func (h *HostEnv) resolveGuestPathForHost(p string) string {
-	if p == "" {
+	if p == "" || (runtime.GOOS == "windows" && p == "/") {
 		return h.currentCwd()
 	}
-	converted := normaliseGuestPathForHost(p)
-	if converted == "" {
-		return h.currentCwd()
-	}
-	if filepath.IsAbs(converted) {
-		return filepath.Clean(converted)
+	if filepath.IsAbs(p) {
+		return filepath.Clean(p)
 	}
 	base := h.currentCwd()
 	if base == "" {
 		base = "/"
 	}
-	return filepath.Clean(filepath.Join(base, converted))
+	return filepath.Clean(filepath.Join(base, p))
 }
 
 func (h *HostEnv) setCwd(p string) error {

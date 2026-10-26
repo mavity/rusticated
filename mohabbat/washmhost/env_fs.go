@@ -6,10 +6,8 @@ import (
 	"errors"
 	"io"
 	"os"
-	"path"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"time"
 
@@ -403,76 +401,6 @@ func (h *HostEnv) sys_handle_close(ctx context.Context, m api.Module, stack []ui
 		}
 		delete(h.handles, handle)
 	}
-}
-
-// normaliseGuestPathForHost converts guest paths to a form the host OS can use.
-// Drive-rooted paths use /C:/... in the guest and map to the native host form.
-func normaliseGuestPathForHost(p string) string {
-	if p == "" {
-		return ""
-	}
-	if runtime.GOOS == "windows" && p == "/" {
-		if cwd, err := resolveUsableCwd(); err == nil {
-			return cwd
-		}
-	}
-	if guestPath, ok := normaliseDrivePathForHost(p, runtime.GOOS == "windows"); ok {
-		return guestPath
-	}
-	if runtime.GOOS != "windows" {
-		return p
-	}
-	// Normalise backslashes then apply lexical clean so that paths like
-	// "/.", "//", "/./foo" reduce to their canonical form before translation.
-	normalized := path.Clean(strings.ReplaceAll(p, "\\", "/"))
-	if len(normalized) >= 4 && normalized[0] == '/' {
-		drive := normalized[1]
-		if (drive >= 'A' && drive <= 'Z' || drive >= 'a' && drive <= 'z') && normalized[2] == ':' && normalized[3] == '/' {
-			return normalized[1:] // /C:/foo → C:/foo
-		}
-	}
-	return normalized
-}
-
-func isDriveLetter(c byte) bool {
-	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
-}
-
-func normaliseDrivePathForHost(p string, windowsHost bool) (string, bool) {
-	normalized := strings.ReplaceAll(p, "\\", "/")
-	if len(normalized) >= 4 && normalized[0] == '/' && isDriveLetter(normalized[1]) && normalized[2] == ':' && normalized[3] == '/' {
-		normalized = normalized[1:]
-	}
-	if len(normalized) < 3 || !isDriveLetter(normalized[0]) || normalized[1] != ':' || normalized[2] != '/' {
-		return "", false
-	}
-
-	suffix := path.Clean("/" + normalized[3:])
-	guestPath := "/" + normalized[:2] + suffix
-	if windowsHost {
-		return guestPath[1:], true
-	}
-	return guestPath, true
-}
-
-// normaliseHostPathForGuest converts a host-native path to the canonical guest form.
-// On Windows: C:\... or C:/... → /C:/...
-// On other hosts the path is returned unchanged.
-func normaliseHostPathForGuest(p string) string {
-	if p == "" || runtime.GOOS != "windows" {
-		return p
-	}
-	normalized := strings.ReplaceAll(p, "\\", "/")
-	if len(normalized) >= 2 {
-		drive := normalized[0]
-		if (drive >= 'A' && drive <= 'Z' || drive >= 'a' && drive <= 'z') && normalized[1] == ':' {
-			if len(normalized) == 2 {
-				normalized += "/"
-			}
-			return "/" + normalized
-		}
-	}
-	return normalized
 }
 
 func (h *HostEnv) sys_path_open(ctx context.Context, m api.Module, stack []uint64) {
