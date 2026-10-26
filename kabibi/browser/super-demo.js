@@ -796,7 +796,7 @@
         depthBuffer: true,
         stencilBuffer: false
       });
-      renderTarget.texture.colorSpace = THREE.NoColorSpace;
+      renderTarget.texture.colorSpace = THREE.SRGBColorSpace;
       renderTarget.texture.minFilter = THREE.LinearFilter;
       renderTarget.texture.magFilter = THREE.LinearFilter;
       renderTarget.depthTexture = depthTexture;
@@ -804,7 +804,7 @@
         depthBuffer: false,
         stencilBuffer: false
       });
-      blurTarget.texture.colorSpace = THREE.NoColorSpace;
+      blurTarget.texture.colorSpace = THREE.SRGBColorSpace;
       blurTarget.texture.minFilter = THREE.LinearFilter;
       blurTarget.texture.magFilter = THREE.LinearFilter;
 
@@ -817,7 +817,7 @@
         focalPointView: { value: new THREE.Vector3() },
         nearestDistance: { value: 0 },
         farthestDistance: { value: 1 },
-        maxBlurPixels: { value: 6.0 },
+        maxBlurPixels: { value: 8.0 },
         opticalEffects: { value: flat ? 0 : 1 }
       };
       const vertexShader = `
