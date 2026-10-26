@@ -333,6 +333,7 @@ func (s *Shell) Close() error {
 	}
 	if s.execSess != nil {
 		s.execSess.SetCommandTerminalAttached(false)
+		_ = s.execSess.Close()
 	}
 	if aiRunner != nil {
 		aiRunner.Close()
@@ -464,7 +465,10 @@ func (s *Shell) styleInput(value string) []terminal.Style {
 	if s.execSess == nil {
 		return nil
 	}
-	route, _ := s.execSess.ClassifyInput(value)
+	if strings.HasPrefix(strings.TrimLeft(value, " \t\r\n"), "/") {
+		return aiPromptStyles(value)
+	}
+	route, _ := s.execSess.ClassifyInputForDisplay(value)
 	switch route {
 	case RouteShell, RouteBuiltin, RouteIncomplete:
 		return bashInputStyles(value)
