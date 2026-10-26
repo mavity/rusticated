@@ -143,7 +143,7 @@ func (h *HostEnv) sys_process_spawn(ctx context.Context, m api.Module, stack []u
 				h.mu.Lock()
 				childHandle := h.nextHandle
 				h.nextHandle++
-				h.handles[childHandle] = cmd
+				h.handles[childHandle] = &ptyProcessEntry{cmd: cmd, pty: ptySession}
 
 				ptyHandle := h.nextHandle
 				h.nextHandle++
@@ -287,6 +287,11 @@ func (h *HostEnv) sys_process_spawn(ctx context.Context, m api.Module, stack []u
 	}()
 }
 
+type ptyProcessEntry struct {
+	cmd *exec.Cmd
+	pty PtySession
+}
+
 func (h *HostEnv) sys_process_wait(ctx context.Context, m api.Module, stack []uint64) {
 	ovPtr := uint32(stack[0])
 	handle := stack[1]
@@ -299,20 +304,37 @@ func (h *HostEnv) sys_process_wait(ctx context.Context, m api.Module, stack []ui
 		writeOverlapped(m, ovPtr, wasiEBADF, 0, 0)
 		return
 	}
-	cmd, isCmd := fAny.(*exec.Cmd)
-	if !isCmd || cmd == nil {
+	var cmd *exec.Cmd
+	var ptyWaiter interface{ Wait() (int, error) }
+	switch v := fAny.(type) {
+	case *exec.Cmd:
+		cmd = v
+	case *ptyProcessEntry:
+		if v != nil {
+			cmd = v.cmd
+			if w, ok := v.pty.(interface{ Wait() (int, error) }); ok {
+				ptyWaiter = w
+			}
+		}
+	}
+	if cmd == nil && ptyWaiter == nil {
 		writeOverlapped(m, ovPtr, wasiEBADF, 0, 0)
 		return
 	}
 
 	state := h.RegisterOp(ovPtr, nil)
 	go func() {
-		err := cmd.Wait()
-		exitCode := uint64(0)
-		if cmd.ProcessState != nil {
-			exitCode = uint64(uint32(cmd.ProcessState.ExitCode()))
-		} else if err != nil {
-			exitCode = 1
+		var exitCode uint64
+		if ptyWaiter != nil {
+			code, _ := ptyWaiter.Wait()
+			exitCode = uint64(uint32(code))
+		} else {
+			err := cmd.Wait()
+			if cmd.ProcessState != nil {
+				exitCode = uint64(uint32(cmd.ProcessState.ExitCode()))
+			} else if err != nil {
+				exitCode = 1
+			}
 		}
 		packed := (exitCode << 32) | (exitCode & 0xFFFF_FFFF)
 		h.fileOpsQueue <- func() {
@@ -339,8 +361,16 @@ func (h *HostEnv) sys_process_signal(ctx context.Context, m api.Module, stack []
 	if !ok {
 		return
 	}
-	cmd, isCmd := fAny.(*exec.Cmd)
-	if !isCmd || cmd == nil || cmd.Process == nil {
+	var cmd *exec.Cmd
+	switch v := fAny.(type) {
+	case *exec.Cmd:
+		cmd = v
+	case *ptyProcessEntry:
+		if v != nil {
+			cmd = v.cmd
+		}
+	}
+	if cmd == nil || cmd.Process == nil {
 		return
 	}
 

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"unicode/utf16"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -141,11 +142,11 @@ func createEnvironmentBlock(env []string) *uint16 {
 		b.WriteByte(0)
 	}
 	b.WriteByte(0)
-	utf16, err := windows.UTF16FromString(b.String())
-	if err != nil {
+	utf16Slice := utf16.Encode([]rune(b.String()))
+	if len(utf16Slice) == 0 {
 		return nil
 	}
-	return &utf16[0]
+	return &utf16Slice[0]
 }
 
 // Start executes cmd attached to a newly allocated Windows ConPTY.
@@ -247,7 +248,7 @@ func Start(cmd *exec.Cmd, opts ...Options) (PTY, error) {
 	envBlock := createEnvironmentBlock(cmd.Environ())
 	var procInfo windows.ProcessInformation
 
-	creationFlags := uint32(windows.EXTENDED_STARTUPINFO_PRESENT)
+	creationFlags := uint32(windows.EXTENDED_STARTUPINFO_PRESENT | windows.CREATE_UNICODE_ENVIRONMENT)
 
 	err = windows.CreateProcess(
 		nil,

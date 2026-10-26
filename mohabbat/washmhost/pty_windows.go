@@ -9,18 +9,20 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"unicode/utf16"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
 type windowsPtySession struct {
-	hpcon   windows.Handle
-	inPipe  *os.File // Parent writes to this -> goes into ConPTY input
-	outPipe *os.File // Parent reads from this -> comes from ConPTY output
-	proc    *os.Process
-	mu      sync.Mutex
-	closed  bool
+	hpcon      windows.Handle
+	procHandle windows.Handle
+	inPipe     *os.File // Parent writes to this -> goes into ConPTY input
+	outPipe    *os.File // Parent reads from this -> comes from ConPTY output
+	proc       *os.Process
+	mu         sync.Mutex
+	closed     bool
 }
 
 func (s *windowsPtySession) Read(p []byte) (int, error) {
@@ -38,6 +40,30 @@ func (s *windowsPtySession) Resize(cols, rows int) error {
 		return syscall.EINVAL
 	}
 	return windows.ResizePseudoConsole(s.hpcon, windows.Coord{X: int16(cols), Y: int16(rows)})
+}
+
+func (s *windowsPtySession) Wait() (int, error) {
+	if s.procHandle != 0 {
+		_, _ = windows.WaitForSingleObject(s.procHandle, windows.INFINITE)
+	}
+
+	s.mu.Lock()
+	if s.hpcon != 0 {
+		windows.ClosePseudoConsole(s.hpcon)
+		s.hpcon = 0
+	}
+	s.mu.Unlock()
+
+	if s.proc != nil {
+		state, err := s.proc.Wait()
+		if state != nil {
+			return state.ExitCode(), err
+		}
+		if err != nil {
+			return 1, err
+		}
+	}
+	return 0, nil
 }
 
 func (s *windowsPtySession) Close() error {
@@ -59,6 +85,11 @@ func (s *windowsPtySession) Close() error {
 
 	if s.outPipe != nil {
 		_ = s.outPipe.Close()
+	}
+
+	if s.procHandle != 0 {
+		_ = windows.CloseHandle(s.procHandle)
+		s.procHandle = 0
 	}
 
 	return nil
@@ -113,11 +144,11 @@ func createEnvironmentBlock(env []string) *uint16 {
 		b.WriteByte(0)
 	}
 	b.WriteByte(0)
-	utf16, err := windows.UTF16FromString(b.String())
-	if err != nil {
+	utf16Slice := utf16.Encode([]rune(b.String()))
+	if len(utf16Slice) == 0 {
 		return nil
 	}
-	return &utf16[0]
+	return &utf16Slice[0]
 }
 
 // startWithPty starts cmd under Windows ConPTY, setting up a PseudoConsole
@@ -220,7 +251,7 @@ func startWithPty(cmd *exec.Cmd, cols, rows int) (PtySession, *os.Process, error
 	envBlock := createEnvironmentBlock(cmd.Env)
 	var procInfo windows.ProcessInformation
 
-	creationFlags := uint32(windows.EXTENDED_STARTUPINFO_PRESENT)
+	creationFlags := uint32(windows.EXTENDED_STARTUPINFO_PRESENT | windows.CREATE_UNICODE_ENVIRONMENT)
 
 	// 5. Spawn child process
 	err = windows.CreateProcess(
@@ -257,10 +288,11 @@ func startWithPty(cmd *exec.Cmd, cols, rows int) (PtySession, *os.Process, error
 	outPipeFile := os.NewFile(uintptr(outRead), "|pty_out")
 
 	session := &windowsPtySession{
-		hpcon:   hpcon,
-		inPipe:  inPipeFile,
-		outPipe: outPipeFile,
-		proc:    proc,
+		hpcon:      hpcon,
+		procHandle: procInfo.Process,
+		inPipe:     inPipeFile,
+		outPipe:    outPipeFile,
+		proc:       proc,
 	}
 
 	// Store process on cmd

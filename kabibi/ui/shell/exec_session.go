@@ -1268,6 +1268,9 @@ func (es *ExecutionSession) runDirectCommandInPTY(m *ManagedPTY, cmd *exec.Cmd, 
 	}()
 
 	waitErr := p.Wait()
+	m.mu.Lock()
+	m.ptyHandle = nil
+	m.mu.Unlock()
 	_ = p.Close()
 	<-readDone
 
