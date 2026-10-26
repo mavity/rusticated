@@ -272,11 +272,11 @@ func (r *LazyAIRunner) authenticateAndSaveRemoteProvider(
 	if previous.Configured && previous.Mode == "remote" && previous.Provider == string(provider) && previous.Model != "" {
 		previousModel = previous.Model
 	}
-	model, err := chooseRemoteModel(ctx, prompter, provider, cred, baseURL, ai.DefaultRemoteModel(provider), previousModel)
+	model, contextTokens, err := chooseRemoteModel(ctx, prompter, provider, cred, baseURL, ai.DefaultRemoteModel(provider), previousModel)
 	if errors.Is(err, ai.ErrRemoteCredentialRejected) {
 		cred, err = authenticateRemoteProvider(ctx, prompter, term, provider, label, baseURL)
 		if err == nil {
-			model, err = chooseRemoteModel(ctx, prompter, provider, cred, baseURL, ai.DefaultRemoteModel(provider), previousModel)
+			model, contextTokens, err = chooseRemoteModel(ctx, prompter, provider, cred, baseURL, ai.DefaultRemoteModel(provider), previousModel)
 		}
 	}
 	if err != nil {
@@ -290,12 +290,13 @@ func (r *LazyAIRunner) authenticateAndSaveRemoteProvider(
 	}
 
 	cfg := config.AIConfig{
-		Configured:   true,
-		Mode:         "remote",
-		Provider:     string(provider),
-		Model:        model,
-		BaseURL:      baseURL,
-		ConsentGiven: true,
+		Configured:    true,
+		Mode:          "remote",
+		Provider:      string(provider),
+		Model:         model,
+		ContextTokens: contextTokens,
+		BaseURL:       baseURL,
+		ConsentGiven:  true,
 	}
 	if err := config.SaveAI(cfg); err != nil {
 		return config.AIConfig{}, err
@@ -355,16 +356,19 @@ func authenticateRemoteProvider(ctx context.Context, prompter OnboardingPrompter
 	return cred, nil
 }
 
-func chooseRemoteModel(ctx context.Context, prompter OnboardingPrompter, provider ai.RemoteProvider, cred *ai.Credential, baseURL, preferredModel, previousModel string) (string, error) {
-	models, err := ai.ListRemoteModels(ctx, ai.RemoteEngineConfig{Provider: provider, Credential: cred, BaseURL: baseURL})
+func chooseRemoteModel(ctx context.Context, prompter OnboardingPrompter, provider ai.RemoteProvider, cred *ai.Credential, baseURL, preferredModel, previousModel string) (string, int, error) {
+	models, err := ai.ListRemoteModelDetails(ctx, ai.RemoteEngineConfig{Provider: provider, Credential: cred, BaseURL: baseURL})
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	if len(models) == 0 {
-		return "", fmt.Errorf("%s returned no selectable models", provider)
+		return "", 0, fmt.Errorf("%s returned no selectable models", provider)
 	}
-	modelChoices := append([]string(nil), models...)
-	choices := append([]string(nil), models...)
+	modelChoices := append([]ai.RemoteModelInfo(nil), models...)
+	choices := make([]string, 0, len(models)+2)
+	for _, model := range models {
+		choices = append(choices, model.ID)
+	}
 	defaultChoice := 0
 	defaultModel := previousModel
 	if defaultModel == "" {
@@ -372,7 +376,7 @@ func chooseRemoteModel(ctx context.Context, prompter OnboardingPrompter, provide
 	}
 	foundDefault := false
 	for i, model := range models {
-		if model == defaultModel {
+		if model.ID == defaultModel {
 			defaultChoice = i
 			foundDefault = true
 			break
@@ -380,29 +384,30 @@ func chooseRemoteModel(ctx context.Context, prompter OnboardingPrompter, provide
 	}
 	if previousModel != "" && !foundDefault {
 		choices = append(choices, previousModel+" (previously selected; not in provider catalog)")
-		modelChoices = append(modelChoices, previousModel)
+		modelChoices = append(modelChoices, ai.RemoteModelInfo{ID: previousModel})
 		defaultChoice = len(modelChoices) - 1
 	}
 	choices = append(choices, "Enter a model ID")
 	choice, err := prompter.Choose(ctx, "Choose a provider model", "Select a model from the provider catalog or enter a model identifier.", choices, defaultChoice)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	if choice < 0 || choice >= len(choices) {
-		return "", fmt.Errorf("invalid provider model selection %d", choice)
+		return "", 0, fmt.Errorf("invalid provider model selection %d", choice)
 	}
 	if choice < len(modelChoices) {
-		return modelChoices[choice], nil
+		model := modelChoices[choice]
+		return model.ID, model.MaxInputTokens, nil
 	}
 	model, err := prompter.Input(ctx, "Model identifier", "Enter the provider model ID", false)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	model = strings.TrimSpace(model)
 	if model == "" {
-		return "", errors.New("provider model ID must not be empty")
+		return "", 0, errors.New("provider model ID must not be empty")
 	}
-	return model, nil
+	return model, 0, nil
 }
 
 func runAIStatusBuiltin(ctx context.Context, out io.Writer) error {

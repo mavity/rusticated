@@ -132,12 +132,12 @@ func TestFormatAIBytes(t *testing.T) {
 
 func TestChooseRemoteModelUsesCompleteCatalogAndPriorChoice(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = fmt.Fprint(w, `{"data":[{"id":"gpt-6-luna"},{"id":"gpt-6-sol"},{"id":"gpt-6-astra"}]}`)
+		_, _ = fmt.Fprint(w, `{"data":[{"id":"gpt-6-luna","context_length":80000},{"id":"gpt-6-sol","context_length":120000},{"id":"gpt-6-astra"}]}`)
 	}))
 	defer server.Close()
 	prompter := &scriptedOnboardingPrompter{choices: []int{2}}
 
-	model, err := chooseRemoteModel(
+	model, contextTokens, err := chooseRemoteModel(
 		context.Background(),
 		prompter,
 		ai.RemoteOpenAI,
@@ -151,6 +151,9 @@ func TestChooseRemoteModelUsesCompleteCatalogAndPriorChoice(t *testing.T) {
 	}
 	if model != "gpt-6-sol" {
 		t.Fatalf("chooseRemoteModel() = %q, want gpt-6-sol", model)
+	}
+	if contextTokens != 120000 {
+		t.Fatalf("chooseRemoteModel() context limit = %d, want 120000", contextTokens)
 	}
 	if len(prompter.optionSets) != 1 || len(prompter.optionSets[0]) != 4 {
 		t.Fatalf("model options = %v, want all three catalog entries and the custom-ID option", prompter.optionSets)
@@ -167,7 +170,7 @@ func TestChooseRemoteModelDefaultsToGPT6LunaWhenAvailable(t *testing.T) {
 	defer server.Close()
 	prompter := &scriptedOnboardingPrompter{choices: []int{0}}
 
-	model, err := chooseRemoteModel(
+	model, contextTokens, err := chooseRemoteModel(
 		context.Background(),
 		prompter,
 		ai.RemoteOpenAI,
@@ -182,8 +185,38 @@ func TestChooseRemoteModelDefaultsToGPT6LunaWhenAvailable(t *testing.T) {
 	if model != "gpt-6-luna" {
 		t.Fatalf("chooseRemoteModel() = %q, want gpt-6-luna", model)
 	}
+	if contextTokens != 0 {
+		t.Fatalf("chooseRemoteModel() context limit = %d, want 0 for missing catalog metadata", contextTokens)
+	}
 	if len(prompter.defaultChoices) != 1 || prompter.defaultChoices[0] != 0 {
 		t.Fatalf("default choices = %v, want GPT-6 Luna at index 0", prompter.defaultChoices)
+	}
+}
+
+func TestRemoteContextTokenBudgetUsesDeclaredLimitOrConservativeFallback(t *testing.T) {
+	if got := remoteContextTokenBudget(128000); got != 128000 {
+		t.Fatalf("remoteContextTokenBudget(128000) = %d, want 128000", got)
+	}
+	if got := remoteContextTokenBudget(0); got != 8192 {
+		t.Fatalf("remoteContextTokenBudget(0) = %d, want conservative 8192-token fallback", got)
+	}
+	if got := remoteContextTokenBudget(-1); got != 8192 {
+		t.Fatalf("remoteContextTokenBudget(-1) = %d, want conservative 8192-token fallback", got)
+	}
+}
+
+func TestContextCompactionLimitScalesProportionally(t *testing.T) {
+	for _, test := range []struct {
+		maxContext int
+		want       int
+	}{
+		{maxContext: 8192, want: 6553},
+		{maxContext: 128000, want: 102400},
+		{maxContext: 1048576, want: 838860},
+	} {
+		if got := contextCompactionLimit(test.maxContext); got != test.want {
+			t.Errorf("contextCompactionLimit(%d) = %d, want %d", test.maxContext, got, test.want)
+		}
 	}
 }
 

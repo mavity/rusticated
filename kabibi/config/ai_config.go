@@ -12,14 +12,15 @@ import (
 )
 
 type AIConfig struct {
-	Configured   bool   `json:"configured"`
-	Mode         string `json:"mode,omitempty"`
-	TierID       string `json:"tier_id,omitempty"`
-	Provider     string `json:"provider,omitempty"`
-	Model        string `json:"model,omitempty"`
-	BaseURL      string `json:"base_url,omitempty"`
-	Embedder     bool   `json:"embedder,omitempty"`
-	ConsentGiven bool   `json:"consent_given,omitempty"`
+	Configured    bool   `json:"configured"`
+	Mode          string `json:"mode,omitempty"`
+	TierID        string `json:"tier_id,omitempty"`
+	Provider      string `json:"provider,omitempty"`
+	Model         string `json:"model,omitempty"`
+	ContextTokens int    `json:"context_tokens,omitempty"`
+	BaseURL       string `json:"base_url,omitempty"`
+	Embedder      bool   `json:"embedder,omitempty"`
+	ConsentGiven  bool   `json:"consent_given,omitempty"`
 }
 
 func Directory() (string, error) {

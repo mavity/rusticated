@@ -12,6 +12,12 @@ import (
 
 const maxRemoteModelCatalogPages = 100
 
+// RemoteModelInfo contains provider-declared limits for a selectable model.
+type RemoteModelInfo struct {
+	ID             string
+	MaxInputTokens int
+}
+
 // DefaultRemoteModel returns the preferred default model ID for a provider.
 func DefaultRemoteModel(provider RemoteProvider) string {
 	switch provider {
@@ -26,6 +32,19 @@ func DefaultRemoteModel(provider RemoteProvider) string {
 
 // ListRemoteModels fetches the provider's selectable text-generation model IDs.
 func ListRemoteModels(ctx context.Context, cfg RemoteEngineConfig) ([]string, error) {
+	details, err := ListRemoteModelDetails(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	models := make([]string, 0, len(details))
+	for _, model := range details {
+		models = append(models, model.ID)
+	}
+	return models, nil
+}
+
+// ListRemoteModelDetails fetches selectable models and any declared input limits.
+func ListRemoteModelDetails(ctx context.Context, cfg RemoteEngineConfig) ([]RemoteModelInfo, error) {
 	if cfg.APIKey == "" && cfg.Credential != nil {
 		cfg.APIKey = cfg.Credential.SecretToken()
 	}
@@ -37,11 +56,11 @@ func ListRemoteModels(ctx context.Context, cfg RemoteEngineConfig) ([]string, er
 		if cfg.Credential != nil {
 			enterpriseDomain = cfg.Credential.MetaString("enterprise_url")
 		}
-		catalog, _, err := fetchGitHubCopilotModelCatalog(ctx, cfg.APIKey, enterpriseDomain, cfg.HTTPClient)
+		catalog, _, err := fetchGitHubCopilotModelCatalogDetails(ctx, cfg.APIKey, enterpriseDomain, cfg.HTTPClient)
 		if err != nil {
 			return nil, fmt.Errorf("fetch %s model catalog: %w", cfg.Provider, err)
 		}
-		return sortedUniqueModels(catalog), nil
+		return sortedUniqueRemoteModels(catalog), nil
 	}
 
 	endpoint, err := remoteModelsEndpoint(cfg)
@@ -66,7 +85,7 @@ func ListRemoteModels(ctx context.Context, cfg RemoteEngineConfig) ([]string, er
 		return nil, fmt.Errorf("unsupported remote AI provider %q", cfg.Provider)
 	}
 
-	var models []string
+	var models []RemoteModelInfo
 	cursor := ""
 	seenCursors := make(map[string]struct{})
 	for page := 0; page < maxRemoteModelCatalogPages; page++ {
@@ -96,11 +115,27 @@ func ListRemoteModels(ctx context.Context, cfg RemoteEngineConfig) ([]string, er
 
 		var payload struct {
 			Data []struct {
-				ID string `json:"id"`
+				ID              string `json:"id"`
+				ContextLength   int    `json:"context_length"`
+				MaxInputTokens  int    `json:"max_input_tokens"`
+				MaxPromptTokens int    `json:"max_prompt_tokens"`
+				ContextWindow   int    `json:"context_window"`
+				TopProvider     *struct {
+					ContextLength int `json:"context_length"`
+				} `json:"top_provider"`
+				Capabilities *struct {
+					Limits *struct {
+						MaxPromptTokens        int `json:"max_prompt_tokens"`
+						MaxContextWindowTokens int `json:"max_context_window_tokens"`
+						MaxInputTokens         int `json:"max_input_tokens"`
+					} `json:"limits"`
+				} `json:"capabilities"`
 			} `json:"data"`
 			Models []struct {
 				Name                       string   `json:"name"`
 				SupportedGenerationMethods []string `json:"supportedGenerationMethods"`
+				InputTokenLimit            int      `json:"inputTokenLimit"`
+				MaxInputTokens             int      `json:"max_input_tokens"`
 			} `json:"models"`
 			HasMore       bool   `json:"has_more"`
 			LastID        string `json:"last_id"`
@@ -111,14 +146,33 @@ func ListRemoteModels(ctx context.Context, cfg RemoteEngineConfig) ([]string, er
 		}
 		for _, model := range payload.Data {
 			if model.ID != "" {
-				models = append(models, model.ID)
+				limits := []int{
+					model.ContextLength,
+					model.MaxInputTokens,
+					model.MaxPromptTokens,
+					model.ContextWindow,
+				}
+				if model.TopProvider != nil {
+					limits = append(limits, model.TopProvider.ContextLength)
+				}
+				if model.Capabilities != nil && model.Capabilities.Limits != nil {
+					limits = append(limits,
+						model.Capabilities.Limits.MaxPromptTokens,
+						model.Capabilities.Limits.MaxContextWindowTokens,
+						model.Capabilities.Limits.MaxInputTokens,
+					)
+				}
+				models = append(models, RemoteModelInfo{ID: model.ID, MaxInputTokens: conservativePositiveLimit(limits...)})
 			}
 		}
 		for _, model := range payload.Models {
 			if model.Name == "" || !hasGenerationMethod(model.SupportedGenerationMethods) {
 				continue
 			}
-			models = append(models, strings.TrimPrefix(model.Name, "models/"))
+			models = append(models, RemoteModelInfo{
+				ID:             strings.TrimPrefix(model.Name, "models/"),
+				MaxInputTokens: conservativePositiveLimit(model.InputTokenLimit, model.MaxInputTokens),
+			})
 		}
 
 		next := ""
@@ -141,7 +195,7 @@ func ListRemoteModels(ctx context.Context, cfg RemoteEngineConfig) ([]string, er
 			next = payload.NextPageToken
 		}
 		if next == "" {
-			return sortedUniqueModels(models), nil
+			return sortedUniqueRemoteModels(models), nil
 		}
 		if _, exists := seenCursors[next]; exists {
 			return nil, fmt.Errorf("%s model catalog repeated pagination cursor %q", cfg.Provider, next)
@@ -208,14 +262,39 @@ func hasGenerationMethod(methods []string) bool {
 	return false
 }
 
-func sortedUniqueModels(models []string) []string {
-	sort.Strings(models)
-	unique := models[:0]
-	for _, model := range models {
-		if model == "" || (len(unique) > 0 && unique[len(unique)-1] == model) {
+func conservativePositiveLimit(limits ...int) int {
+	result := 0
+	for _, limit := range limits {
+		if limit <= 0 {
 			continue
 		}
-		unique = append(unique, model)
+		if result == 0 || limit < result {
+			result = limit
+		}
+	}
+	return result
+}
+
+func sortedUniqueRemoteModels(models []RemoteModelInfo) []RemoteModelInfo {
+	limitsByID := make(map[string]int, len(models))
+	for _, model := range models {
+		if model.ID == "" {
+			continue
+		}
+		if existing, ok := limitsByID[model.ID]; !ok {
+			limitsByID[model.ID] = model.MaxInputTokens
+		} else {
+			limitsByID[model.ID] = conservativePositiveLimit(existing, model.MaxInputTokens)
+		}
+	}
+	ids := make([]string, 0, len(limitsByID))
+	for id := range limitsByID {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	unique := make([]RemoteModelInfo, 0, len(ids))
+	for _, id := range ids {
+		unique = append(unique, RemoteModelInfo{ID: id, MaxInputTokens: limitsByID[id]})
 	}
 	return unique
 }
