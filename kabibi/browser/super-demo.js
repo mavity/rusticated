@@ -481,19 +481,38 @@
       screenMesh.updateMatrixWorld(true);
       camera.updateMatrixWorld(true);
       const cameraPosition = camera.getWorldPosition(new THREE.Vector3());
+      const cameraUp = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1).normalize();
       const positions = geometry.attributes.position;
       const indices = geometry.index;
+      const cornerPoint = new THREE.Vector3();
       const pointA = new THREE.Vector3();
       const pointB = new THREE.Vector3();
       const pointC = new THREE.Vector3();
       const closestPoint = new THREE.Vector3();
       const farthestPoint = new THREE.Vector3();
+      let bottomRightLocalX = -Infinity;
+      let bottomRightLocalY = Infinity;
       let nearestDistance = Infinity;
       let farthestDistance = -Infinity;
 
       for (let index = 0; index < positions.count; index += 1) {
+        const localX = positions.getX(index);
+        const localY = positions.getY(index);
+        if (localX > bottomRightLocalX ||
+            (localX === bottomRightLocalX && localY < bottomRightLocalY)) {
+          bottomRightLocalX = localX;
+          bottomRightLocalY = localY;
+          cornerPoint.fromBufferAttribute(positions, index);
+        }
+      }
+      cornerPoint.applyMatrix4(screenMesh.matrixWorld);
+      const focalHeight = cameraPosition.clone().sub(cornerPoint).dot(cameraUp);
+      const focalPoint = cornerPoint.clone().addScaledVector(cameraUp, focalHeight);
+      const focalPointView = camera.worldToLocal(focalPoint.clone());
+
+      for (let index = 0; index < positions.count; index += 1) {
         farthestPoint.fromBufferAttribute(positions, index).applyMatrix4(screenMesh.matrixWorld);
-        const distance = farthestPoint.distanceTo(cameraPosition);
+        const distance = farthestPoint.distanceTo(focalPoint);
         if (distance > farthestDistance) farthestDistance = distance;
       }
 
@@ -505,12 +524,13 @@
         pointA.fromBufferAttribute(positions, vertexIndex(offset)).applyMatrix4(screenMesh.matrixWorld);
         pointB.fromBufferAttribute(positions, vertexIndex(offset + 1)).applyMatrix4(screenMesh.matrixWorld);
         pointC.fromBufferAttribute(positions, vertexIndex(offset + 2)).applyMatrix4(screenMesh.matrixWorld);
-        triangleShape.set(pointA, pointB, pointC).closestPointToPoint(cameraPosition, closestPoint);
-        const distance = closestPoint.distanceTo(cameraPosition);
+        triangleShape.set(pointA, pointB, pointC).closestPointToPoint(focalPoint, closestPoint);
+        const distance = closestPoint.distanceTo(focalPoint);
         if (distance < nearestDistance) nearestDistance = distance;
       }
 
       if (!Number.isFinite(nearestDistance) || !Number.isFinite(farthestDistance)) return;
+      postMaterial.uniforms.focalPointView.value.copy(focalPointView);
       postMaterial.uniforms.nearestDistance.value = nearestDistance;
       postMaterial.uniforms.farthestDistance.value = farthestDistance;
     }
@@ -787,9 +807,10 @@
         resolution: { value: new THREE.Vector2(1, 1) },
         direction: { value: new THREE.Vector2(1, 0) },
         projectionMatrixInverse: { value: new THREE.Matrix4() },
+        focalPointView: { value: new THREE.Vector3() },
         nearestDistance: { value: 0 },
         farthestDistance: { value: 1 },
-        maxBlurPixels: { value: 4.0 },
+        maxBlurPixels: { value: 6.0 },
         opticalEffects: { value: flat ? 0 : 1 }
       };
       const vertexShader = `
@@ -805,16 +826,35 @@
           uniform vec2 resolution;
           uniform vec2 direction;
           uniform mat4 projectionMatrixInverse;
+          uniform vec3 focalPointView;
           uniform float nearestDistance;
           uniform float farthestDistance;
           uniform float maxBlurPixels;
           uniform float opticalEffects;
           varying vec2 vUv;
 
+          void addGaussianTap(
+            float tap,
+            float weight,
+            vec2 texel,
+            float radius,
+            inout vec4 colorSum,
+            inout float weightSum
+          ) {
+            vec2 sampleUv = clamp(
+              vUv + direction * texel * radius * (tap / 6.0),
+              vec2(0.0),
+              vec2(1.0)
+            );
+            float valid = step(texture2D(sceneDepth, sampleUv).r, 0.999999);
+            colorSum += texture2D(sceneColor, sampleUv) * (weight * valid);
+            weightSum += weight * valid;
+          }
+
           void main() {
             float depth = texture2D(sceneDepth, vUv).r;
             vec4 source = texture2D(sceneColor, vUv);
-            if (opticalEffects < 0.5 || depth >= 0.999999) {
+            if (opticalEffects < 0.5) {
               gl_FragColor = source;
               OUTPUT_COLOR
               return;
@@ -823,30 +863,33 @@
             vec4 clipPosition = vec4(vUv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
             vec4 viewPosition = projectionMatrixInverse * clipPosition;
             viewPosition /= viewPosition.w;
-            float distanceToObserver = length(viewPosition.xyz);
+            float distanceToFocalPoint = length(viewPosition.xyz - focalPointView);
             float distanceRange = max(farthestDistance - nearestDistance, 0.0001);
             float proximity = clamp(
-              (farthestDistance - distanceToObserver) / distanceRange,
+              (farthestDistance - distanceToFocalPoint) / distanceRange,
               0.0,
               1.0
             );
-            float blurAmount = proximity * proximity;
+            float blurAmount = proximity * proximity * step(depth, 0.999999);
             float radius = blurAmount * maxBlurPixels;
             vec2 texel = 1.0 / max(resolution, vec2(1.0));
             vec4 colorSum = vec4(0.0);
             float weightSum = 0.0;
-            for (int tap = -6; tap <= 6; tap++) {
-              float normalizedOffset = float(tap) * 0.5;
-              float weight = exp(-0.5 * normalizedOffset * normalizedOffset);
-              vec2 sampleUv = vUv +
-                direction * texel * radius * (float(tap) / 6.0);
-              vec2 boundedUv = clamp(sampleUv, vec2(0.0), vec2(1.0));
-              if (texture2D(sceneDepth, boundedUv).r < 0.999999) {
-                colorSum += texture2D(sceneColor, boundedUv) * weight;
-                weightSum += weight;
-              }
-            }
-            gl_FragColor = weightSum > 0.0 ? colorSum / weightSum : source;
+            addGaussianTap(-6.0, 0.011109, texel, radius, colorSum, weightSum);
+            addGaussianTap(-5.0, 0.043937, texel, radius, colorSum, weightSum);
+            addGaussianTap(-4.0, 0.135335, texel, radius, colorSum, weightSum);
+            addGaussianTap(-3.0, 0.324652, texel, radius, colorSum, weightSum);
+            addGaussianTap(-2.0, 0.606531, texel, radius, colorSum, weightSum);
+            addGaussianTap(-1.0, 0.882497, texel, radius, colorSum, weightSum);
+            addGaussianTap(0.0, 1.0, texel, radius, colorSum, weightSum);
+            addGaussianTap(1.0, 0.882497, texel, radius, colorSum, weightSum);
+            addGaussianTap(2.0, 0.606531, texel, radius, colorSum, weightSum);
+            addGaussianTap(3.0, 0.324652, texel, radius, colorSum, weightSum);
+            addGaussianTap(4.0, 0.135335, texel, radius, colorSum, weightSum);
+            addGaussianTap(5.0, 0.043937, texel, radius, colorSum, weightSum);
+            addGaussianTap(6.0, 0.011109, texel, radius, colorSum, weightSum);
+            vec4 blurred = colorSum / max(weightSum, 0.0001);
+            gl_FragColor = mix(source, blurred, step(0.0001, weightSum));
             OUTPUT_COLOR
           }
         `;
