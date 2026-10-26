@@ -226,6 +226,7 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 			engine, err = ai.NewEngine(libPath, modelPath, chosenBackend, maxTokens)
 		}
 	case "remote":
+		maxTokens = remoteContextTokenBudget(cfg.ContextTokens)
 		provider := ai.RemoteProvider(cfg.Provider)
 		store := credstore.NewStore()
 		cred, credErr := store.Read(ctx, cfg.Provider)
@@ -304,7 +305,7 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 		WorkingDir:  cwd,
 	})
 
-	compactionLimit := int(float64(maxTokens) * 0.80)
+	compactionLimit := contextCompactionLimit(maxTokens)
 	sess, err := ai.NewSession(ai.SessionConfig{
 		Engine:          engine,
 		Embedder:        partEmb,
@@ -338,6 +339,17 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 		adaptiveEmb.BindSession(sess)
 	}
 	return nil
+}
+
+func remoteContextTokenBudget(declaredInputTokens int) int {
+	if declaredInputTokens > 0 {
+		return declaredInputTokens
+	}
+	return 8192
+}
+
+func contextCompactionLimit(maxContextTokens int) int {
+	return int(float64(maxContextTokens) * 0.80)
 }
 
 func kabibiSystemMessage(envContext string, sysContext string) string {

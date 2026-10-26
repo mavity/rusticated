@@ -58,7 +58,7 @@ Pope will range over the `SendStream` iterator and act as the executor for tool 
 
 ## 4. Context Window Management (Compaction)
 
-`ai.Session` owns logical turn history, compaction, and conversation replacement because LiteRT-LM conversation state is opaque and does not support deleting old turns in place. Callers provide a `CompactionLimit` in `SessionConfig`; `LazyAIRunner` derives a limit from model metadata where available. The Session projects compacted history into a replacement conversation seeded through the backend interface. Pope and other clients should use `ai.Session` rather than implementing a second history-compaction loop.
+`ai.Session` owns logical turn history, compaction, and conversation replacement because LiteRT-LM conversation state is opaque and does not support deleting old turns in place. Callers provide a `CompactionLimit` in `SessionConfig`; Kabibi uses 80% of the selected model's declared input-context limit when its provider catalog publishes one, and otherwise uses a conservative 8K-token budget. The Session projects compacted history into a replacement conversation seeded through the backend interface. Pope and other clients should use `ai.Session` rather than implementing a second history-compaction loop.
 
 # Platform Abstraction
 

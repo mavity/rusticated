@@ -152,3 +152,92 @@ func TestListRemoteModelsMarksRejectedCredential(t *testing.T) {
 		t.Fatalf("ListRemoteModels() error = %v, want ErrRemoteCredentialRejected", err)
 	}
 }
+
+func TestListRemoteModelDetailsReadsDeclaredInputLimits(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider RemoteProvider
+		response string
+		want     int
+	}{
+		{
+			name:     "OpenRouter uses conservative route limit",
+			provider: RemoteOpenRouter,
+			response: `{"data":[{"id":"model-a","context_length":131072,"top_provider":{"context_length":65536}}]}`,
+			want:     65536,
+		},
+		{
+			name:     "Anthropic input limit",
+			provider: RemoteAnthropic,
+			response: `{"data":[{"id":"model-a","max_input_tokens":200000}]}`,
+			want:     200000,
+		},
+		{
+			name:     "Gemini input limit",
+			provider: RemoteGemini,
+			response: `{"models":[{"name":"models/model-a","supportedGenerationMethods":["generateContent"],"inputTokenLimit":1048576}]}`,
+			want:     1048576,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = fmt.Fprint(w, test.response)
+			}))
+			defer server.Close()
+
+			models, err := ListRemoteModelDetails(context.Background(), RemoteEngineConfig{
+				Provider:   test.provider,
+				Credential: &Credential{Type: CredentialAPIKey, Key: "test-token"},
+				BaseURL:    server.URL + "/models",
+			})
+			if err != nil {
+				t.Fatalf("ListRemoteModelDetails() error = %v", err)
+			}
+			if len(models) != 1 || models[0].ID != "model-a" || models[0].MaxInputTokens != test.want {
+				t.Fatalf("ListRemoteModelDetails() = %+v, want model-a with %d input tokens", models, test.want)
+			}
+		})
+	}
+}
+
+func TestListRemoteModelDetailsReadsCopilotNestedInputLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			t.Errorf("request path = %q, want /models", r.URL.Path)
+		}
+		_, _ = fmt.Fprint(w, `{"data":[{"id":"copilot-model","model_picker_enabled":true,"capabilities":{"limits":{"max_prompt_tokens":128000,"max_context_window_tokens":200000}}}]}`)
+	}))
+	defer server.Close()
+
+	models, err := ListRemoteModelDetails(context.Background(), RemoteEngineConfig{
+		Provider:   RemoteCopilot,
+		Credential: &Credential{Type: CredentialAPIKey, Key: "proxy-ep=" + server.URL + ";"},
+		HTTPClient: server.Client(),
+	})
+	if err != nil {
+		t.Fatalf("ListRemoteModelDetails() error = %v", err)
+	}
+	if len(models) != 1 || models[0].ID != "copilot-model" || models[0].MaxInputTokens != 128000 {
+		t.Fatalf("ListRemoteModelDetails() = %+v, want copilot-model with 128000 input tokens", models)
+	}
+}
+
+func TestListRemoteModelDetailsLeavesMissingLimitsUnset(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `{"data":[{"id":"model-without-limit"}]}`)
+	}))
+	defer server.Close()
+
+	models, err := ListRemoteModelDetails(context.Background(), RemoteEngineConfig{
+		Provider:   RemoteOpenAI,
+		Credential: &Credential{Type: CredentialAPIKey, Key: "test-token"},
+		BaseURL:    server.URL + "/models",
+	})
+	if err != nil {
+		t.Fatalf("ListRemoteModelDetails() error = %v", err)
+	}
+	if len(models) != 1 || models[0].MaxInputTokens != 0 {
+		t.Fatalf("ListRemoteModelDetails() = %+v, want unset input limit", models)
+	}
+}

@@ -24,11 +24,12 @@ func TestAIConfigRoundTripAndPrivatePermissions(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	want := AIConfig{
-		Configured:   true,
-		Mode:         "local",
-		TierID:       "gemma-4-e2b",
-		Embedder:     true,
-		ConsentGiven: true,
+		Configured:    true,
+		Mode:          "remote",
+		Provider:      "openrouter",
+		Model:         "openai/gpt-6-luna",
+		ContextTokens: 128000,
+		ConsentGiven:  true,
 	}
 	if err := SaveAI(want); err != nil {
 		t.Fatal(err)

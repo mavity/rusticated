@@ -1278,6 +1278,18 @@ func refreshGitHubCopilotOAuth(ctx context.Context, cred *Credential, client *ht
 }
 
 func fetchGitHubCopilotModelCatalog(ctx context.Context, copilotToken, enterpriseDomain string, client *http.Client) (available []string, policyUnconfigured []string, err error) {
+	details, policyUnconfigured, err := fetchGitHubCopilotModelCatalogDetails(ctx, copilotToken, enterpriseDomain, client)
+	if err != nil {
+		return nil, nil, err
+	}
+	available = make([]string, 0, len(details))
+	for _, model := range details {
+		available = append(available, model.ID)
+	}
+	return available, policyUnconfigured, nil
+}
+
+func fetchGitHubCopilotModelCatalogDetails(ctx context.Context, copilotToken, enterpriseDomain string, client *http.Client) (available []RemoteModelInfo, policyUnconfigured []string, err error) {
 	baseURL := DeriveGitHubCopilotBaseURL(copilotToken, enterpriseDomain)
 	allowPolicyFallback := baseURL == "https://api.individual.githubcopilot.com"
 	headers := map[string]string{
@@ -1303,10 +1315,19 @@ func fetchGitHubCopilotModelCatalog(ctx context.Context, copilotToken, enterpris
 		Data []struct {
 			ID                 string `json:"id"`
 			ModelPickerEnabled bool   `json:"model_picker_enabled"`
+			ContextLength      int    `json:"context_length"`
+			MaxInputTokens     int    `json:"max_input_tokens"`
+			MaxPromptTokens    int    `json:"max_prompt_tokens"`
+			ContextWindow      int    `json:"context_window"`
 			Policy             *struct {
 				State string `json:"state"`
 			} `json:"policy"`
 			Capabilities *struct {
+				Limits *struct {
+					MaxPromptTokens        int `json:"max_prompt_tokens"`
+					MaxContextWindowTokens int `json:"max_context_window_tokens"`
+					MaxInputTokens         int `json:"max_input_tokens"`
+				} `json:"limits"`
 				Supports *struct {
 					ToolCalls *bool `json:"tool_calls"`
 				} `json:"supports"`
@@ -1318,7 +1339,7 @@ func fetchGitHubCopilotModelCatalog(ctx context.Context, copilotToken, enterpris
 	}
 
 	type modelEntry struct {
-		id            string
+		model         RemoteModelInfo
 		pickerEnabled bool
 		policyState   string
 	}
@@ -1334,12 +1355,24 @@ func fetchGitHubCopilotModelCatalog(ctx context.Context, copilotToken, enterpris
 		if item.Policy != nil {
 			state = item.Policy.State
 		}
-		entries = append(entries, modelEntry{id: item.ID, pickerEnabled: item.ModelPickerEnabled, policyState: state})
+		limits := []int{item.ContextLength, item.MaxInputTokens, item.MaxPromptTokens, item.ContextWindow}
+		if item.Capabilities != nil && item.Capabilities.Limits != nil {
+			limits = append(limits,
+				item.Capabilities.Limits.MaxPromptTokens,
+				item.Capabilities.Limits.MaxContextWindowTokens,
+				item.Capabilities.Limits.MaxInputTokens,
+			)
+		}
+		entries = append(entries, modelEntry{
+			model:         RemoteModelInfo{ID: item.ID, MaxInputTokens: conservativePositiveLimit(limits...)},
+			pickerEnabled: item.ModelPickerEnabled,
+			policyState:   state,
+		})
 	}
-	var pickerIDs []string
+	var pickerIDs []RemoteModelInfo
 	for _, e := range entries {
 		if e.pickerEnabled && e.policyState != "disabled" {
-			pickerIDs = append(pickerIDs, e.id)
+			pickerIDs = append(pickerIDs, e.model)
 		}
 	}
 	useFallback := allowPolicyFallback && len(pickerIDs) == 0
@@ -1348,16 +1381,16 @@ func fetchGitHubCopilotModelCatalog(ctx context.Context, copilotToken, enterpris
 	} else {
 		for _, e := range entries {
 			if e.policyState == "enabled" {
-				available = append(available, e.id)
+				available = append(available, e.model)
 			}
 		}
 	}
 	for _, e := range entries {
 		if e.policyState == "unconfigured" && (e.pickerEnabled || useFallback) {
-			policyUnconfigured = append(policyUnconfigured, e.id)
+			policyUnconfigured = append(policyUnconfigured, e.model.ID)
 		}
 	}
-	return available, policyUnconfigured, nil
+	return sortedUniqueRemoteModels(available), policyUnconfigured, nil
 }
 
 func enableGitHubCopilotModelPolicies(ctx context.Context, copilotToken, enterpriseDomain string, modelIDs []string, client *http.Client) []string {
