@@ -29,6 +29,8 @@ import (
 // is cancelled by the user (Ctrl+C, Esc, or explicit cancel option).
 var ErrAuthCancelled = errors.New("AI authentication cancelled")
 
+const terminalSelectionStyle = "\x1b[38;2;0;0;128;48;2;255;215;0m"
+
 // TerminalSession is the narrow visual and input bottleneck passed to AI
 // initialization and provider authentication flows. It models an in-process
 // virtual PTY (backed by CommandTerminal in Shell TUI mode or stdio in CLI mode).
@@ -141,7 +143,7 @@ func PromptSelect(ctx context.Context, term TerminalSession, title, message stri
 		}
 		for i, opt := range options {
 			if i == selected {
-				fmt.Fprintf(&sb, " \x1b[1;33m▸ [%d] %s\x1b[0m\n", i+1, opt)
+				fmt.Fprintf(&sb, terminalSelectionStyle+" ▸ [%d] %s \x1b[0m\n", i+1, opt)
 			} else {
 				fmt.Fprintf(&sb, "   [%d] %s\n", i+1, opt)
 			}
@@ -354,6 +356,7 @@ func promptSearchSelect(ctx context.Context, term TerminalSession, title, messag
 		}
 
 		lines := make([]string, 0, headerLines+visibleRows+1)
+		searchLineIndex := headerLines - 1
 		if title != "" {
 			lines = append(lines, "\x1b[1;36m"+truncateTerminalText(title, cols)+"\x1b[0m")
 		}
@@ -375,24 +378,30 @@ func promptSearchSelect(ctx context.Context, term TerminalSession, title, messag
 					break
 				}
 				optionIndex := filtered[optionPosition]
-				marker := "  "
 				optionLabel := strings.TrimPrefix(options[optionIndex], "\x00")
 				label := truncateTerminalText(optionLabel, max(1, cellWidth-2))
 				if optionPosition == selected {
-					marker = "\x1b[1;33m▸ \x1b[0m"
-					label = "\x1b[1;33m" + label + "\x1b[0m"
-				}
-				if column > 0 {
-					line.WriteString(strings.Repeat(" ", columnGap))
-				}
-				line.WriteString(marker)
-				line.WriteString(label)
-				padding := cellWidth - 2 - terminalTextWidth(optionLabel)
-				if optionPosition == selected {
-					padding = cellWidth - 2 - terminalTextWidth(optionLabel)
-				}
-				if padding > 0 && column+1 < columnCount {
-					line.WriteString(strings.Repeat(" ", padding))
+					if column > 0 {
+						line.WriteString(strings.Repeat(" ", columnGap))
+					}
+					line.WriteString(terminalSelectionStyle)
+					line.WriteString("▸ ")
+					line.WriteString(label)
+					padding := cellWidth - 2 - terminalTextWidth(label)
+					if padding > 0 {
+						line.WriteString(strings.Repeat(" ", padding))
+					}
+					line.WriteString("\x1b[0m")
+				} else {
+					if column > 0 {
+						line.WriteString(strings.Repeat(" ", columnGap))
+					}
+					line.WriteString("  ")
+					line.WriteString(label)
+					padding := cellWidth - 2 - terminalTextWidth(optionLabel)
+					if padding > 0 && column+1 < columnCount {
+						line.WriteString(strings.Repeat(" ", padding))
+					}
 				}
 			}
 			lines = append(lines, line.String())
@@ -407,13 +416,7 @@ func promptSearchSelect(ctx context.Context, term TerminalSession, title, messag
 
 		var output strings.Builder
 		if renderedLines > 0 {
-			if compact {
-				searchLineIndex := 0
-				if title != "" {
-					searchLineIndex++
-				}
-				fmt.Fprintf(&output, "\x1b[%dB\r", renderedLines-searchLineIndex)
-			}
+			fmt.Fprintf(&output, "\x1b[%dB\r", renderedLines-searchLineIndex)
 			fmt.Fprintf(&output, "\r\x1b[%dA\x1b[J", renderedLines)
 		}
 		for _, line := range lines {
@@ -421,19 +424,17 @@ func promptSearchSelect(ctx context.Context, term TerminalSession, title, messag
 			output.WriteByte('\n')
 		}
 		renderedLines = len(lines)
-		if compact {
-			searchLineIndex := 0
-			if title != "" {
-				searchLineIndex++
-			}
-			cursorUp := renderedLines - searchLineIndex
-			if cursorUp > 0 {
-				fmt.Fprintf(&output, "\x1b[%dA", cursorUp)
-			}
-			searchText := truncateTerminalText(query, max(0, cols-2))
-			cursorColumn := min(cols, 3+terminalTextWidth(searchText))
-			fmt.Fprintf(&output, "\x1b[%dG", max(1, cursorColumn))
+		cursorUp := renderedLines - searchLineIndex
+		if cursorUp > 0 {
+			fmt.Fprintf(&output, "\x1b[%dA", cursorUp)
 		}
+		searchPrefixWidth := 8
+		if compact {
+			searchPrefixWidth = 2
+		}
+		searchText := truncateTerminalText(query, max(0, cols-searchPrefixWidth))
+		cursorColumn := min(cols, searchPrefixWidth+1+terminalTextWidth(searchText))
+		fmt.Fprintf(&output, "\x1b[%dG", max(1, cursorColumn))
 		_, err := io.WriteString(term, output.String())
 		return err
 	}

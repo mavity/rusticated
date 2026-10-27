@@ -64,6 +64,20 @@ func (s *searchSelectTerm) SubscribeRawInput() (func(context.Context, []byte) (i
 	return func(_ context.Context, p []byte) (int, error) { return s.Read(p) }, func() {}
 }
 
+func TestPromptSelectUsesFilePanelSelectionColors(t *testing.T) {
+	term := &searchSelectTerm{
+		keys: [][]byte{[]byte("\n")},
+		cols: 80,
+		rows: 24,
+	}
+	if _, err := PromptSelect(context.Background(), term, "Choose", "", []string{"First", "Second"}, 0); err != nil {
+		t.Fatalf("PromptSelect() error = %v", err)
+	}
+	if !strings.Contains(term.out.String(), "\x1b[38;2;0;0;128;48;2;255;215;0m ▸ [1] First ") {
+		t.Fatalf("selector did not render the selected option in file-panel colors: %q", term.out.String())
+	}
+}
+
 func TestPromptSearchSelectFiltersAndAccepts(t *testing.T) {
 	term := &searchSelectTerm{
 		keys: [][]byte{[]byte("c"), []byte("l"), []byte("a"), []byte("u"), []byte("d"), []byte("e"), []byte("\n")},
@@ -83,6 +97,9 @@ func TestPromptSearchSelectFiltersAndAccepts(t *testing.T) {
 	}
 	if !strings.Contains(term.out.String(), "Search: claude") {
 		t.Fatalf("selector output omitted live search query: %q", term.out.String())
+	}
+	if !strings.Contains(term.out.String(), "\x1b[3A\x1b[15G") {
+		t.Fatalf("selector did not position the cursor after the search query: %q", term.out.String())
 	}
 }
 
@@ -156,6 +173,9 @@ func TestPromptSearchSelectCompactOmitsDecorativeCaptions(t *testing.T) {
 		if strings.Contains(output, caption) {
 			t.Errorf("compact selector output contains unwanted caption %q: %q", caption, output)
 		}
+	}
+	if !strings.Contains(output, "\x1b[38;2;0;0;128;48;2;255;215;0m▸ claude-sonnet") {
+		t.Errorf("compact selector did not render the selected model in file-panel colors: %q", output)
 	}
 	if !strings.Contains(output, "\x1b[2A\x1b[4G") {
 		t.Errorf("compact selector did not position the cursor after the search query: %q", output)
