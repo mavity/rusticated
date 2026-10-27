@@ -280,7 +280,7 @@
     }
   }
 
-  function installTerminalContextMenu(term, container, document, window) {
+  function installTerminalContextMenu(term, container, document, window, superDemo) {
     let menu = null;
     const closeMenu = () => {
       if (menu) menu.remove();
@@ -374,6 +374,10 @@
 
     if (typeof term.attachCustomKeyEventHandler === 'function') {
       term.attachCustomKeyEventHandler((event) => {
+        if (superDemo && typeof superDemo.handleKeyEvent === 'function' &&
+            !superDemo.handleKeyEvent(event)) {
+          return false;
+        }
         if (event.type !== 'keydown' || !(event.ctrlKey || event.metaKey) || event.altKey ||
             String(event.key || '').toLowerCase() !== 'v') {
           return true;
@@ -482,13 +486,41 @@
       }
     }
 
-    const terminalContextMenuDispose = installTerminalContextMenu(term, terminalContainer, document, window);
+    const terminalContextMenuDispose = installTerminalContextMenu(term, terminalContainer, document, window, superDemo);
     let host = options.host || null;
     let startingHost = typeof options.wasm !== 'undefined' && options.wasm !== null;
     const pendingInput = [];
     let disposed = false;
     const resizeState = { cols: -1, rows: -1 };
-
+    const originalTitle = document.title;
+    let appliedTitle = null;
+    let startupOutput = '';
+    const startupOutputDecoder = typeof global.TextDecoder === 'function'
+      ? new global.TextDecoder()
+      : null;
+    const updateTitleFromStartupOutput = (bytes) => {
+      if (mode !== 'super-demo' || appliedTitle !== null) return;
+      const text = typeof bytes === 'string'
+        ? bytes
+        : startupOutputDecoder
+          ? startupOutputDecoder.decode(bytes, { stream: true })
+          : '';
+      if (!text) return;
+      startupOutput += text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
+      const banner = /K\s*A\s*B\s*I\s*B\s*I\s*:\s*wearable all-weather shell\s+(v[^\s\x1b]+)[\t \r\n]/.exec(startupOutput);
+      if (!banner) {
+        if (startupOutput.length > 1024) startupOutput = startupOutput.slice(-1024);
+        return;
+      }
+      appliedTitle = `Kabibi ${banner[1]}`;
+      document.title = appliedTitle;
+      startupOutput = '';
+    };
+    const forwardStdout = (bytes) => {
+      if (!disposed) term.write(bytes);
+      updateTitleFromStartupOutput(bytes);
+      if (options.onStdout) options.onStdout(bytes);
+    };
     const inputSubscription = term.onData((data) => {
       if (host) {
         host.pushStdin(data);
@@ -505,6 +537,9 @@
     const dispose = () => {
       if (disposed) return;
       disposed = true;
+      if (appliedTitle !== null && document.title === appliedTitle) {
+        document.title = originalTitle;
+      }
       cleanupViewport();
       window.removeEventListener('resize', fit);
       if (resizeObserver) resizeObserver.disconnect();
@@ -542,10 +577,7 @@
 
     if (host && !startingHost && typeof host.attachTerminal === 'function') {
       host.attachTerminal({
-        stdout: (bytes) => {
-          if (!disposed) term.write(bytes);
-          if (options.onStdout) options.onStdout(bytes);
-        },
+        stdout: forwardStdout,
         stderr: (bytes) => {
           if (!disposed) term.write(bytes);
           if (options.onStderr) options.onStderr(bytes);
@@ -574,10 +606,7 @@
         host = await hostFactory({
           ...(options.hostOptions || {}),
           wasm: options.wasm,
-          stdout: (bytes) => {
-            if (!disposed) term.write(bytes);
-            if (options.onStdout) options.onStdout(bytes);
-          },
+          stdout: forwardStdout,
           stderr: (bytes) => {
             if (!disposed) term.write(bytes);
             if (options.onStderr) options.onStderr(bytes);

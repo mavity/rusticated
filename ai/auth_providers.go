@@ -82,6 +82,7 @@ type CredentialStore interface {
 const (
 	defaultOAuthMinimumValidity = 5 * time.Minute
 	defaultOAuthRefreshTimeout  = 15 * time.Second
+	authorizationCodePrompt     = "URL above - press Enter to open browser, or paste authorization code/address"
 )
 
 // ResolveProviderCredential resolves the stored credential for provider, refreshing
@@ -307,9 +308,6 @@ func loginOpenRouterOAuth(ctx context.Context, term TerminalSession, client *htt
 		_, _ = fmt.Fprintf(term, "Listening for callback on %s\n", callback.RedirectURI)
 	}
 	_, _ = fmt.Fprintf(term, "Open this URL in your browser:\n%s\n\n", FormatClickableURL(authURL.String()))
-	if err := PromptOpenURL(ctx, term, authURL.String(), "Press Enter to open the authorization page in your browser (Esc to cancel)."); err != nil {
-		return nil, err
-	}
 
 	// 3. Paste events (Ctrl+V / bracketed paste) arrive as raw multi-byte strings
 	// without going through handleKeyEvent. When running and no OS PTY is active,
@@ -317,9 +315,9 @@ func loginOpenRouterOAuth(ctx context.Context, term TerminalSession, client *htt
 	// ReadControlInputContext when SubscribeRawInput is active.
 	return WaitForCallbackOrManualInput(
 		ctx,
-		term,
+		openURLOnEmptyEnter(term, authURL.String()),
 		callback,
-		"Complete sign-in in browser, or paste the authorization code / redirect URL here",
+		authorizationCodePrompt,
 		func(input string) (*Credential, error) {
 			code, _ := parseOAuthCodeAndState(input)
 			if code == "" {
@@ -457,15 +455,12 @@ func loginAnthropicOAuthBrowser(ctx context.Context, term TerminalSession, clien
 	authURL := buildAnthropicAuthorizeURL(challenge, verifier, redirectURI)
 	_, _ = fmt.Fprintf(term, "\n\x1b[1;36mAnthropic Claude OAuth Sign-In\x1b[0m\n")
 	_, _ = fmt.Fprintf(term, "Complete login in your browser:\n%s\n\n", FormatClickableURL(authURL))
-	if err := PromptOpenURL(ctx, term, authURL, "Press Enter to open the authorization page in your browser (Esc to cancel)."); err != nil {
-		return nil, err
-	}
 
 	code, err := WaitForCallbackOrManualInput(
 		ctx,
-		term,
+		openURLOnEmptyEnter(term, authURL),
 		callback,
-		"Complete login in browser, or paste the authorization code / redirect URL here",
+		authorizationCodePrompt,
 		func(input string) (string, error) {
 			parsedCode, parsedState := parseOAuthCodeAndState(input)
 			if parsedState != "" && parsedState != verifier {
@@ -492,11 +487,8 @@ func loginAnthropicOAuthCopyCode(ctx context.Context, term TerminalSession, clie
 	authURL := buildAnthropicAuthorizeURL(challenge, verifier, anthropicCopyCodeRedirect)
 	_, _ = fmt.Fprintf(term, "\n\x1b[1;36mAnthropic Claude Copy-Code Sign-In\x1b[0m\n")
 	_, _ = fmt.Fprintf(term, "Open this URL in your browser, sign in, and copy the code shown:\n%s\n\n", FormatClickableURL(authURL))
-	if err := PromptOpenURL(ctx, term, authURL, "Press Enter to open the authorization page in your browser (Esc to cancel)."); err != nil {
-		return nil, err
-	}
 
-	input, err := PromptLine(ctx, withoutEmptyEnter(term), "", "Paste the code Anthropic shows (code#state)", false)
+	input, err := PromptLine(ctx, openURLOnEmptyEnter(term, authURL), "", authorizationCodePrompt, false)
 	if err != nil {
 		return nil, err
 	}
@@ -737,15 +729,12 @@ func loginOpenAIChatGPTBrowser(ctx context.Context, term TerminalSession, client
 	}
 	_, _ = fmt.Fprintf(term, "\n\x1b[1;36mOpenAI ChatGPT Sign-In\x1b[0m\n")
 	_, _ = fmt.Fprintf(term, "Complete sign-in in your browser:\n%s\n\n", FormatClickableURL(authURL))
-	if err := PromptOpenURL(ctx, term, authURL, "Press Enter to open the authorization page in your browser (Esc to cancel)."); err != nil {
-		return nil, err
-	}
 
 	res, err := WaitForCallbackOrManualInput(
 		ctx,
-		term,
+		openURLOnEmptyEnter(term, authURL),
 		callback,
-		"Complete login in browser, or paste the final redirect URL here",
+		authorizationCodePrompt,
 		func(input string) (openAICallbackAuth, error) {
 			parsed, parseErr := url.Parse(strings.TrimSpace(input))
 			if parseErr != nil || parsed.Scheme == "" {
