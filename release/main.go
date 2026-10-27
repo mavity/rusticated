@@ -1,15 +1,21 @@
 package main
 
 import (
-	"archive/zip"
+	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/srwiley/oksvg"
+	"github.com/srwiley/rasterx"
 	"mohabbat/mohabbat"
 )
 
@@ -45,7 +51,7 @@ var allTargets = []Target{
 func printHelp(version string) {
 	fmt.Printf(`Mohabbat Release Builder v%s
 Orchestrates building all workspace projects into self-contained vegetables
-and packaging a complete website distribution in release/dist/.
+	and staging a complete website distribution in release/dist/.
 
 Mohabbat turns Go and Rust projects into single-file polyglot executables (*.bat)
 capable of running across Linux, Windows, macOS, and in browsers via washmhost.
@@ -93,6 +99,10 @@ func main() {
 	distDir := filepath.Join(ws, "release", "dist")
 	if err := os.MkdirAll(distDir, 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "🍆  error: failed to create release/dist directory: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.Remove(filepath.Join(distDir, "vegetables.zip")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(os.Stderr, "🍆  error: failed to remove obsolete release archive: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -150,14 +160,13 @@ func main() {
 
 	// Step 3: Stage website bundle into release/dist
 	fmt.Println("\n--------------------------------------------------------------------------------")
-	fmt.Println("🍆  [Website Bundle] Staging index.html, README.md, washmhost.js, and .nojekyll")
+	fmt.Println("🍆  [Website Bundle] Staging index.html with embedded icons, README.md, washmhost.js, and .nojekyll")
 	fmt.Println("--------------------------------------------------------------------------------")
 
 	siteAssets := []struct {
 		src string
 		dst string
 	}{
-		{src: filepath.Join(ws, "index.html"), dst: filepath.Join(distDir, "index.html")},
 		{src: filepath.Join(ws, "README.md"), dst: filepath.Join(distDir, "README.md")},
 		{src: filepath.Join(ws, "mohabbat", "washmhost", "js", "browser", "index.js"), dst: filepath.Join(distDir, "washmhost.js")},
 		{src: filepath.Join(ws, "mohabbat", "washmhost", "js", "browser", "index.js"), dst: filepath.Join(ws, "kabibi", "vscode", "washmhost.js")},
@@ -175,6 +184,11 @@ func main() {
 		}
 	}
 
+	if err := stageWebsiteIndex(ws, distDir); err != nil {
+		fmt.Fprintf(os.Stderr, "\n🍆  FAILED: stage index.html with embedded icons: %v\n", err)
+		os.Exit(1)
+	}
+
 	legacyBrowserHost := filepath.Join(distDir, "mohabbat", "washmhost", "js", "browser", "index.js")
 	if err := os.Remove(legacyBrowserHost); err != nil && !errors.Is(err, os.ErrNotExist) {
 		fmt.Fprintf(os.Stderr, "\n🍆  FAILED: remove obsolete browser host copy %s: %v\n", legacyBrowserHost, err)
@@ -188,105 +202,90 @@ func main() {
 	}
 	fmt.Println("🍆  Website bundle staged cleanly in release/dist/")
 
-	// Step 4: Bundle full monty into release/dist/vegetables.zip
-	fmt.Println("\n--------------------------------------------------------------------------------")
-	fmt.Println("🍆  [Zip Archive] Packaging all vegetables & website into release/dist/vegetables.zip")
-	fmt.Println("--------------------------------------------------------------------------------")
-
-	tZip := time.Now()
-	zipPath := filepath.Join(distDir, "vegetables.zip")
-	extraZipFiles := []string{
-		"index.html",
-		"README.md",
-		"washmhost.js",
-		".nojekyll",
-	}
-	if err := createReleaseZip(zipPath, distDir, allTargets, extraZipFiles); err != nil {
-		fmt.Fprintf(os.Stderr, "\n🍆  FAILED: create vegetables.zip: %v\n", err)
-		os.Exit(1)
-	}
-
-	zipStat, err := os.Stat(zipPath)
-	var zipSize int64
-	if err == nil {
-		zipSize = zipStat.Size()
-	}
-	dZip := time.Since(tZip)
-	fmt.Printf("🍆  Completed vegetables.zip (%s) in %s\n", formatSize(zipSize), dZip.Round(time.Millisecond))
-
 	totalDuration := time.Since(totalStart).Round(time.Millisecond)
-
-	// Step 5: Summary output table
-	printBuildSummary(artifacts, BuiltArtifact{
-		Name:     "vegetables.zip",
-		Language: "Zip",
-		Size:     zipSize,
-		Duration: dZip,
-		Desc:     fmt.Sprintf("Complete archive containing all %d vegetables + website", len(allTargets)),
-	}, totalDuration)
-	fmt.Println("🍆  Success: Full distribution ready in release/dist/ for GitHub Pages or offline use.")
+	printBuildSummary(artifacts, totalDuration)
+	fmt.Println("🍆  Success: Website and vegetables staged in release/dist/ for GitHub Pages.")
 }
 
-func createReleaseZip(zipPath, distDir string, targets []Target, extraFiles []string) error {
-	zFile, err := os.Create(zipPath)
+const (
+	sourceFaviconLink = `<link rel='icon' type='image/svg+xml' href="kabibi/kabibi.svg">`
+	faviconPNGSize    = 180
+)
+
+func stageWebsiteIndex(ws, distDir string) error {
+	indexTemplate, err := os.ReadFile(filepath.Join(ws, "index.html"))
 	if err != nil {
-		return fmt.Errorf("create zip file: %w", err)
+		return fmt.Errorf("read index.html: %w", err)
 	}
-	defer zFile.Close()
-
-	zw := zip.NewWriter(zFile)
-	defer zw.Close()
-
-	addFileToZip := func(filePath, entryName string) error {
-		info, err := os.Stat(filePath)
-		if err != nil {
-			return fmt.Errorf("stat %s: %w", entryName, err)
-		}
-
-		header, err := zip.FileInfoHeader(info)
-		if err != nil {
-			return fmt.Errorf("create header for %s: %w", entryName, err)
-		}
-
-		header.Name = filepath.ToSlash(entryName)
-		header.Method = zip.Deflate
-		header.SetMode(0755)
-
-		w, err := zw.CreateHeader(header)
-		if err != nil {
-			return fmt.Errorf("create zip entry %s: %w", entryName, err)
-		}
-
-		f, err := os.Open(filePath)
-		if err != nil {
-			return fmt.Errorf("open %s: %w", entryName, err)
-		}
-		defer f.Close()
-
-		_, err = io.Copy(w, f)
-		if err != nil {
-			return fmt.Errorf("compress %s: %w", entryName, err)
-		}
-		return nil
+	svg, err := os.ReadFile(filepath.Join(ws, "kabibi", "kabibi.svg"))
+	if err != nil {
+		return fmt.Errorf("read Kabibi SVG: %w", err)
 	}
-
-	for _, t := range targets {
-		batPath := filepath.Join(distDir, t.OutputName)
-		if err := addFileToZip(batPath, t.OutputName); err != nil {
-			return err
-		}
+	index, err := buildIndexWithEmbeddedFavicons(indexTemplate, svg)
+	if err != nil {
+		return err
 	}
-
-	for _, relPath := range extraFiles {
-		filePath := filepath.Join(distDir, relPath)
-		if _, err := os.Stat(filePath); err == nil {
-			if err := addFileToZip(filePath, relPath); err != nil {
-				return err
-			}
-		}
+	if err := os.WriteFile(filepath.Join(distDir, "index.html"), index, 0o644); err != nil {
+		return fmt.Errorf("write staged index.html: %w", err)
 	}
-
 	return nil
+}
+
+func buildIndexWithEmbeddedFavicons(indexTemplate, svg []byte) ([]byte, error) {
+	if count := bytes.Count(indexTemplate, []byte(sourceFaviconLink)); count != 1 {
+		return nil, fmt.Errorf("expected exactly one source favicon link in index.html, found %d", count)
+	}
+
+	pngBytes, err := renderSVGToPNG(svg, faviconPNGSize)
+	if err != nil {
+		return nil, fmt.Errorf("render Apple touch icon: %w", err)
+	}
+
+	svgDataURI := "data:image/svg+xml," + percentEncode(strings.Join(strings.Fields(string(svg)), " "))
+	pngDataURI := "data:image/png;base64," + base64.StdEncoding.EncodeToString(pngBytes)
+	links := fmt.Sprintf(
+		`<link rel="icon" type="image/svg+xml" href="%s">`+"\n  "+`<link rel="apple-touch-icon" type="image/png" sizes="%dx%d" href="%s">`,
+		svgDataURI,
+		faviconPNGSize,
+		faviconPNGSize,
+		pngDataURI,
+	)
+	return bytes.Replace(indexTemplate, []byte(sourceFaviconLink), []byte(links), 1), nil
+}
+
+func percentEncode(value string) string {
+	const hex = "0123456789ABCDEF"
+	var encoded strings.Builder
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("-._~", rune(c)) {
+			encoded.WriteByte(c)
+			continue
+		}
+		encoded.WriteByte('%')
+		encoded.WriteByte(hex[c>>4])
+		encoded.WriteByte(hex[c&0x0f])
+	}
+	return encoded.String()
+}
+
+func renderSVGToPNG(svg []byte, size int) ([]byte, error) {
+	icon, err := oksvg.ReadIconStream(bytes.NewReader(svg))
+	if err != nil {
+		return nil, fmt.Errorf("parse SVG: %w", err)
+	}
+	icon.SetTarget(0, 0, float64(size), float64(size))
+
+	canvas := image.NewRGBA(image.Rect(0, 0, size, size))
+	scanner := rasterx.NewScannerGV(size, size, canvas, canvas.Bounds())
+	dasher := rasterx.NewDasher(size, size, scanner)
+	icon.Draw(dasher, 1)
+
+	var pngBuffer bytes.Buffer
+	if err := png.Encode(&pngBuffer, canvas); err != nil {
+		return nil, fmt.Errorf("encode PNG: %w", err)
+	}
+	return pngBuffer.Bytes(), nil
 }
 
 func formatSize(b int64) string {
@@ -302,9 +301,9 @@ func formatSize(b int64) string {
 	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
-func printBuildSummary(artifacts []BuiltArtifact, zipArtifact BuiltArtifact, totalDuration time.Duration) {
+func printBuildSummary(artifacts []BuiltArtifact, totalDuration time.Duration) {
 	fmt.Println("\n====================================================================================================")
-	fmt.Printf("🍆  RELEASE SUMMARY (%d vegetables + 1 zip archive)\n", len(artifacts))
+	fmt.Printf("🍆  RELEASE SUMMARY (%d vegetables)\n", len(artifacts))
 	fmt.Println("====================================================================================================")
 	fmt.Printf("  %-18s %-6s %-12s %-10s %s\n", "Target", "Lang", "Size", "Time", "Description")
 	fmt.Println("  --------------------------------------------------------------------------------------------------")
@@ -322,16 +321,8 @@ func printBuildSummary(artifacts []BuiltArtifact, zipArtifact BuiltArtifact, tot
 	}
 
 	fmt.Println("  --------------------------------------------------------------------------------------------------")
-	fmt.Printf("  %-18s %-6s %-12s %-10s %s\n",
-		zipArtifact.Name,
-		zipArtifact.Language,
-		formatSize(zipArtifact.Size),
-		zipArtifact.Duration.Round(time.Millisecond).String(),
-		zipArtifact.Desc,
-	)
 	fmt.Println("====================================================================================================")
 	fmt.Printf("🍆  Total Vegetables Size: %s (%d files)\n", formatSize(totalVegetablesSize), len(artifacts))
-	fmt.Printf("🍆  Zip Archive Size:      %s (%s)\n", formatSize(zipArtifact.Size), zipArtifact.Name)
 	fmt.Printf("🍆  Total Elapsed Time:    %s\n", totalDuration)
 	fmt.Println("====================================================================================================")
 }
