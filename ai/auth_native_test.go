@@ -87,6 +87,8 @@ func TestTerminalSelectorRecognizesProviderAndModelIcons(t *testing.T) {
 		want  terminalSelectorIcon
 	}{
 		{label: "Google Gemini", want: terminalSelectorIcon{glyph: "✦", color: 0x4E87F8, width: 1}},
+		{label: "Qwen3-72B", want: terminalSelectorIcon{glyph: "🟌", color: 0x615CED, width: 2}},
+		{label: "z.ai/glm-4", want: terminalSelectorIcon{glyph: "⁙", color: 0x3859FF, width: 1}},
 		{label: "anthropic/claude-sonnet", want: terminalSelectorIcon{glyph: "✳", color: 0xD97757, width: 1}},
 		{label: "openai/gpt-6-luna", want: terminalSelectorIcon{glyph: "꩜", color: 0x10A37F, width: 1}},
 		{label: "meta-llama/llama-3", want: terminalSelectorIcon{glyph: "∞", color: 0x0081FB, width: 1}},
@@ -100,6 +102,27 @@ func TestTerminalSelectorRecognizesProviderAndModelIcons(t *testing.T) {
 	for _, test := range tests {
 		if got := terminalSelectorIconFor(test.label); got != test.want {
 			t.Errorf("terminalSelectorIconFor(%q) = %+v, want %+v", test.label, got, test.want)
+		}
+	}
+}
+
+func TestPromptSearchSelectPlacesModelIconAfterKeepLoginMarkers(t *testing.T) {
+	term := &searchSelectTerm{
+		keys: [][]byte{[]byte("\n")},
+		cols: 80,
+		rows: 24,
+	}
+	options := []string{"[Keep] openai/gpt-6-luna", "[Login] anthropic/claude-sonnet"}
+	if _, err := PromptSearchSelect(context.Background(), term, "Models", "", options, 0); err != nil {
+		t.Fatalf("PromptSearchSelect() error = %v", err)
+	}
+	output := term.out.String()
+	for _, expected := range []string{
+		" [Keep] \x1b[38;2;16;163;127m꩜\x1b[38;2;0;0;128m openai/gpt-6-luna",
+		"[Login] \x1b[38;2;217;119;87m✳\x1b[39m anthropic/claude-sonnet",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Errorf("selector output omitted %q: %q", expected, output)
 		}
 	}
 }
