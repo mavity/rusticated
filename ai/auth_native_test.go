@@ -64,17 +64,37 @@ func (s *searchSelectTerm) SubscribeRawInput() (func(context.Context, []byte) (i
 	return func(_ context.Context, p []byte) (int, error) { return s.Read(p) }, func() {}
 }
 
+func TestRemoteModelDisplayNameStripsDuplicatedNamespace(t *testing.T) {
+	tests := []struct {
+		model string
+		want  string
+	}{
+		{model: "XYZ/XYZ-model", want: "XYZ-model"},
+		{model: "XYZ/xyz-model", want: "xyz-model"},
+		{model: "meta-llama/llama-3.1", want: "meta-llama/llama-3.1"},
+		{model: "vendor/model", want: "vendor/model"},
+	}
+	for _, test := range tests {
+		if got := RemoteModelDisplayName(test.model); got != test.want {
+			t.Errorf("RemoteModelDisplayName(%q) = %q, want %q", test.model, got, test.want)
+		}
+	}
+}
+
 func TestPromptSelectUsesFilePanelSelectionColors(t *testing.T) {
 	term := &searchSelectTerm{
 		keys: [][]byte{[]byte("\n")},
 		cols: 80,
 		rows: 24,
 	}
-	if _, err := PromptSelect(context.Background(), term, "Choose", "", []string{"First", "Second"}, 0); err != nil {
+	if _, err := PromptSelect(context.Background(), term, "Choose", "", []string{"XYZ/XYZ-model", "Second"}, 0); err != nil {
 		t.Fatalf("PromptSelect() error = %v", err)
 	}
-	if !strings.Contains(term.out.String(), "\x1b[38;2;0;0;128;48;2;255;215;0m ▸ [1] First ") {
+	if !strings.Contains(term.out.String(), "\x1b[38;2;0;0;128;48;2;255;215;0m [1] XYZ-model ") {
 		t.Fatalf("selector did not render the selected option in file-panel colors: %q", term.out.String())
+	}
+	if strings.Contains(term.out.String(), "XYZ/XYZ-model") {
+		t.Fatalf("selector output retained the duplicated namespace: %q", term.out.String())
 	}
 }
 
@@ -119,11 +139,33 @@ func TestPromptSearchSelectBackspaceAndGridNavigation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PromptSearchSelect() error = %v", err)
 	}
-	if choice != 2 {
-		t.Fatalf("PromptSearchSelect() = %d, want down-arrow row selection at index 2", choice)
+	if choice != 3 {
+		t.Fatalf("PromptSearchSelect() = %d, want down-arrow row selection at index 3", choice)
 	}
 	if !strings.Contains(term.out.String(), "Search: x") || !strings.Contains(term.out.String(), "Search: ") {
 		t.Fatalf("selector did not render query edits: %q", term.out.String())
+	}
+}
+
+func TestPromptSearchSelectUsesCompactModelLabels(t *testing.T) {
+	term := &searchSelectTerm{
+		keys: [][]byte{[]byte("\n")},
+		cols: 40,
+		rows: 12,
+	}
+	_, err := PromptSearchSelect(context.Background(), term, "Models", "", []string{
+		"XYZ/XYZ-model",
+		"vendor/model",
+	}, 0)
+	if err != nil {
+		t.Fatalf("PromptSearchSelect() error = %v", err)
+	}
+	output := term.out.String()
+	if !strings.Contains(output, " XYZ-model") {
+		t.Fatalf("selector did not remove the duplicated namespace: %q", output)
+	}
+	if strings.Contains(output, "XYZ/XYZ-model") || strings.Contains(output, "▸") {
+		t.Fatalf("selector output retained a duplicated namespace or selection marker: %q", output)
 	}
 }
 
@@ -174,7 +216,7 @@ func TestPromptSearchSelectCompactOmitsDecorativeCaptions(t *testing.T) {
 			t.Errorf("compact selector output contains unwanted caption %q: %q", caption, output)
 		}
 	}
-	if !strings.Contains(output, "\x1b[38;2;0;0;128;48;2;255;215;0m▸ claude-sonnet") {
+	if !strings.Contains(output, "\x1b[38;2;0;0;128;48;2;255;215;0m claude-sonnet") {
 		t.Errorf("compact selector did not render the selected model in file-panel colors: %q", output)
 	}
 	if !strings.Contains(output, "\x1b[2A\x1b[4G") {
