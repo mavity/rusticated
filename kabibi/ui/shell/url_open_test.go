@@ -44,7 +44,6 @@ func TestEmptyEnterOpensLatestOutputURL(t *testing.T) {
 	sh.mu.Unlock()
 	before := len(sh.Blocks())
 
-	sh.input.Focus()
 	if !sh.handleKeyEvent(input.KeyPressEvent{Code: input.KeyEnter}) {
 		t.Fatal("Enter did not handle the URL-opening action")
 	}

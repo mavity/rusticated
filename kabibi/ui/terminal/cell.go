@@ -8,6 +8,7 @@ import (
 
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/vt"
+	"github.com/mattn/go-runewidth"
 )
 
 // Cell represents a single terminal character and its visual state.
@@ -163,6 +164,76 @@ func (b *CellBuf) Blit(src CellBuf, x, y int) {
 				continue
 			}
 			b.Set(x+sx, y+sy, cell)
+		}
+	}
+}
+
+// BlitWithResetFallback replaces the destination rectangle with src while
+// resolving default foreground/background channels against each destination
+// cell. Other style attributes come from src.
+func (b *CellBuf) BlitWithResetFallback(src CellBuf, x, y int) {
+	if b == nil || src.Width <= 0 || src.Height <= 0 {
+		return
+	}
+	left := max(0, x)
+	top := max(0, y)
+	right := min(b.Width, x+src.Width)
+	bottom := min(b.Height, y+src.Height)
+	if left >= right || top >= bottom {
+		return
+	}
+	clearOverlappingWideCells(b, left, top, right, bottom)
+	for sy := 0; sy < src.Height; sy++ {
+		dy := y + sy
+		if dy < top || dy >= bottom {
+			continue
+		}
+		for sx := 0; sx < src.Width; sx++ {
+			dx := x + sx
+			if dx < left || dx >= right {
+				continue
+			}
+			source := src.Get(sx, sy)
+			destination := b.Get(dx, dy)
+			sourceStyle := source.Style
+			destinationStyle := destination.Style
+			attrs := sourceStyle.Attributes()
+			fg := sourceStyle.Foreground()
+			bg := sourceStyle.Background()
+			if attrs&CharResetForegroundDefault != 0 {
+				fg = destinationStyle.Foreground()
+				attrs = attrs&^CharResetForegroundDefault |
+					destinationStyle.Attributes()&CharResetForegroundDefault
+			}
+			if attrs&CharResetBackgroundDefault != 0 {
+				bg = destinationStyle.Background()
+				attrs = attrs&^CharResetBackgroundDefault |
+					destinationStyle.Attributes()&CharResetBackgroundDefault
+			}
+			b.Set(dx, dy, Cell{
+				Grapheme: source.Grapheme,
+				Style:    NewStyle(fg, bg, attrs),
+			})
+		}
+	}
+}
+
+func clearOverlappingWideCells(buf *CellBuf, left, top, right, bottom int) {
+	for y := top; y < bottom; y++ {
+		for x := 0; x < buf.Width; x++ {
+			cell := buf.Get(x, y)
+			if cell.Grapheme == "" {
+				continue
+			}
+			cellWidth := runewidth.StringWidth(cell.Grapheme)
+			if cellWidth <= 1 || x >= right || x+cellWidth <= left {
+				continue
+			}
+			for col := x; col < x+cellWidth && col < buf.Width; col++ {
+				overlapped := buf.Get(col, y)
+				overlapped.Grapheme = " "
+				buf.Set(col, y, overlapped)
+			}
 		}
 	}
 }
@@ -945,10 +1016,9 @@ func convertUVCellToCell(cell *uv.Cell) Cell {
 		return blankCell()
 	}
 	// UV marks wide-character continuation columns as zero-width placeholders
-	// (Width == 0): the trailing half of a double-width cell. These carry no
-	// content so ToANSI and Blit skip them.
+	// (Width == 0): the trailing half of a double-width cell.
 	if cell.Width == 0 {
-		return Cell{}
+		return Cell{Grapheme: "", Style: convertUVStyleToStyle(cell.Style)}
 	}
 	// A written-but-empty cell renders as a blank space, preserving its style.
 	if cell.Content == "" {

@@ -691,7 +691,7 @@ func TestEndToEnd_ShellUnconfiguredPrompt_InteractiveLocalGemmaOnboardingAndTurn
 	waitForBlockText := func(substr string, timeout time.Duration) string {
 		deadline := time.Now().Add(timeout)
 		for time.Now().Before(deadline) {
-			buf, _ := s.Render(ui.Rect{W: 80, H: 24}, ui.RenderContext{Focused: true})
+			buf, _ := renderANSIForTest(t, s.Render(ui.Rect{W: 80, H: 24}, ui.RenderContext{Focused: true}), 80, 24)
 			var screen strings.Builder
 			for y := 0; y < buf.Height; y++ {
 				for x := 0; x < buf.Width; x++ {
@@ -710,7 +710,7 @@ func TestEndToEnd_ShellUnconfiguredPrompt_InteractiveLocalGemmaOnboardingAndTurn
 			}
 			time.Sleep(25 * time.Millisecond)
 		}
-		buf, _ := s.Render(ui.Rect{W: 80, H: 24}, ui.RenderContext{Focused: true})
+		buf, _ := renderANSIForTest(t, s.Render(ui.Rect{W: 80, H: 24}, ui.RenderContext{Focused: true}), 80, 24)
 		var dump strings.Builder
 		for y := 0; y < buf.Height; y++ {
 			for x := 0; x < buf.Width; x++ {

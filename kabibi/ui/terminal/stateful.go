@@ -30,7 +30,12 @@ func NewTerminal(width, height int) *Terminal {
 		height:        height,
 		cursorVisible: true,
 	}
-	t.emulator = vt.NewEmulator(width, height)
+	t.initEmulator()
+	return t
+}
+
+func (t *Terminal) initEmulator() {
+	t.emulator = vt.NewEmulator(t.width, t.height)
 	t.emulator.SetCallbacks(vt.Callbacks{
 		CursorVisibility: func(visible bool) {
 			t.cursorVisible = visible
@@ -40,7 +45,6 @@ func NewTerminal(width, height int) *Terminal {
 		},
 	})
 	_, _ = t.emulator.WriteString(ansi.SetMode(ansi.ModeUnicodeCore) + ansi.SetMode(ansi.ModeLineFeedNewLine))
-	return t
 }
 
 // Write feeds bytes unchanged to the emulator.
@@ -89,12 +93,116 @@ func (t *Terminal) Resize(width, height int) {
 	t.emulator.Resize(width, height)
 }
 
+// Reset starts a fresh frame at the requested size. It discards prior screen,
+// scrollback, cursor, parser, and alternate-screen state.
+func (t *Terminal) Reset(width, height int) {
+	if t == nil {
+		return
+	}
+	if width < 1 {
+		width = 1
+	}
+	if height < 1 {
+		height = 1
+	}
+	t.width, t.height = width, height
+	t.cursorVisible = false
+	t.alternate = false
+	t.retainedHeight = 0
+	t.initEmulator()
+	_, _ = t.emulator.WriteString("\x1b[?25l")
+}
+
 // Size returns the current terminal dimensions.
 func (t *Terminal) Size() (width, height int) {
 	if t == nil {
 		return 0, 0
 	}
 	return t.width, t.height
+}
+
+// RenderANSI interprets one widget frame in a clean, fixed-size terminal and
+// returns the visible viewport and its cursor. Unlike Snapshot, the returned
+// buffer is always exactly width by height and excludes scrollback.
+func (t *Terminal) RenderANSI(text string, width, height int) (CellBuf, CursorPos, error) {
+	buf, cursor, _, err := t.RenderANSIWithExtent(text, width, height)
+	return buf, cursor, err
+}
+
+// RenderANSIWithExtent interprets one widget frame in a clean, fixed-size
+// terminal and also reports the rendered extent before the unused viewport.
+func (t *Terminal) RenderANSIWithExtent(text string, width, height int) (CellBuf, CursorPos, int, error) {
+	if t == nil {
+		return CellBuf{}, CursorPos{}, 0, nil
+	}
+	t.Reset(width, height)
+	if _, err := t.WriteString(text); err != nil {
+		return CellBuf{}, CursorPos{}, 0, err
+	}
+	extent := calculateGridHeight(t.emulator)
+	if extent < t.retainedHeight {
+		extent = t.retainedHeight
+	}
+	if extent > t.height {
+		extent = t.height
+	}
+	cursor := t.viewportCursor()
+	if cursor.Y+1 > extent {
+		extent = cursor.Y + 1
+	}
+	if extent > t.height {
+		extent = t.height
+	}
+	return t.ViewportSnapshot(), cursor, extent, nil
+}
+
+// RenderANSIForComposition parses a frame with one spare column to avoid
+// terminal-emulator wide-glyph loss at the right margin, then returns the
+// requested viewport width.
+func (t *Terminal) RenderANSIForComposition(text string, width, height int) (CellBuf, CursorPos, int, error) {
+	if width <= 0 {
+		return CellBuf{}, CursorPos{}, 0, nil
+	}
+	frame, cursor, extent, err := t.RenderANSIWithExtent(text, width+1, height)
+	if err != nil {
+		return CellBuf{}, CursorPos{}, 0, err
+	}
+	if extent > height {
+		extent = height
+	}
+	cropped := NewCellBuf(width, height)
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			cropped.Set(x, y, frame.Get(x, y))
+		}
+	}
+	if cursor.X >= width {
+		cursor.X = width - 1
+	}
+	return cropped, cursor, extent, nil
+}
+
+// ViewportSnapshot returns exactly the emulator's visible screen, excluding
+// scrollback retained by Snapshot.
+func (t *Terminal) ViewportSnapshot() CellBuf {
+	if t == nil || t.emulator == nil {
+		return CellBuf{}
+	}
+	buf := NewCellBuf(t.width, t.height)
+	for y := 0; y < t.height; y++ {
+		for x := 0; x < t.width; x++ {
+			buf.Set(x, y, convertUVCellToCell(t.emulator.CellAt(x, y)))
+		}
+	}
+	return buf
+}
+
+func (t *Terminal) viewportCursor() CursorPos {
+	if t == nil || t.emulator == nil {
+		return CursorPos{}
+	}
+	pos := t.emulator.CursorPosition()
+	return CursorPos{X: pos.X, Y: pos.Y, Visible: t.cursorVisible}
 }
 
 // IsAltScreen reports whether the emulator is currently displaying its alternate screen.

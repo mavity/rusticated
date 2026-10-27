@@ -46,6 +46,7 @@ type hostMsg struct {
 type Host struct {
 	root    Widget
 	verbose bool
+	frameVT *terminal.Terminal
 
 	// Double-buffered frames. currBuf holds the frame being built; prevBuf holds
 	// the frame currently visible on screen. SwapBufCells exchanges their backing
@@ -432,6 +433,35 @@ func (h *Host) writeToScrollbackCore(
 
 // ── Frame engine ─────────────────────────────────────────────────────────────
 
+func (h *Host) renderRootFrame(width, height int) (terminal.CellBuf, terminal.CursorPos, error) {
+	if h.frameVT == nil {
+		h.frameVT = terminal.NewTerminal(width, height)
+	}
+	renderedANSI := h.root.Render(
+		terminal.Rect{X: 0, Y: 0, W: width, H: height},
+		RenderContext{
+			Focused:    true,
+			Invalidate: h.Invalidate,
+			OnError: func(err error) {
+				fmt.Fprintf(os.Stderr, "[kabibi] compose child widget: %v\n", err)
+			},
+		},
+	)
+	frame, cursor, extent, err := h.frameVT.RenderANSIForComposition(renderedANSI, width, height)
+	if err != nil {
+		return terminal.CellBuf{}, terminal.CursorPos{}, err
+	}
+	if extent < 0 {
+		extent = 0
+	}
+	if extent > height {
+		extent = height
+	}
+	buf := terminal.NewCellBuf(width, extent)
+	copy(buf.Cells(), frame.Cells()[:extent*width])
+	return buf, cursor, nil
+}
+
 func (h *Host) runFrame(
 	getSizeFunc func(fd uintptr) (w, ht int, err error),
 ) {
@@ -453,10 +483,11 @@ func (h *Host) runFrame(
 
 	// Measure → Render: let the widget hierarchy declare space needs before layout.
 	_ = h.root.Measure(Constraints{MaxW: w, MaxH: ht})
-	rendered, cursor := h.root.Render(
-		terminal.Rect{X: 0, Y: 0, W: w, H: ht},
-		RenderContext{Focused: true, Invalidate: h.Invalidate},
-	)
+	rendered, cursor, err := h.renderRootFrame(w, ht)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[kabibi] render root widget: %v\n", err)
+		return
+	}
 	if h.verbose {
 		fmt.Fprintf(os.Stderr, "[kabibi] Host.runFrame rendered: width=%d height=%d occupied_height=%d cursor=(%d,%d) visible=%t\n",
 			w, ht, rendered.Height, cursor.X, cursor.Y, cursor.Visible)
@@ -792,10 +823,11 @@ func (h *Host) runScrollbackFrame(
 	}
 
 	_ = h.root.Measure(Constraints{MaxW: w, MaxH: ht})
-	rendered, cursor := h.root.Render(
-		terminal.Rect{X: 0, Y: 0, W: w, H: ht},
-		RenderContext{Focused: true, Invalidate: h.Invalidate},
-	)
+	rendered, cursor, err := h.renderRootFrame(w, ht)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[kabibi] render root widget: %v\n", err)
+		return
+	}
 	// Drain any extra scrollback chunks emitted during Render
 	h.scrollbackMu.Lock()
 	if len(h.scrollbackQueue) > 0 {

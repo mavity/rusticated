@@ -12,10 +12,21 @@ import (
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
 
+func renderAppANSIForTest(t *testing.T, text string, width, height int) (terminal.CellBuf, ui.CursorPos) {
+	t.Helper()
+	frame, cursor, extent, err := terminal.NewTerminal(width, height).RenderANSIForComposition(text, width, height)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := terminal.NewCellBuf(width, extent)
+	copy(buf.Cells(), frame.Cells()[:extent*width])
+	return buf, cursor
+}
+
 func assertAppSnapshot(t *testing.T, snapFile string, widget *AppWidget, scrollback *string, rect ui.Rect) {
 	t.Helper()
 
-	buf, cursor := widget.Render(rect, ui.RenderContext{Focused: true})
+	buf, cursor := renderAppANSIForTest(t, widget.Render(rect, ui.RenderContext{Focused: true}), rect.W, rect.H)
 	if cursor.Visible && cursor.X >= 0 && cursor.X < buf.Width && cursor.Y >= 0 && cursor.Y < buf.Height {
 		cell := buf.Get(cursor.X, cursor.Y)
 		if cell.Grapheme == "" || cell.Grapheme == " " {
@@ -110,7 +121,7 @@ func TestAppWidget_BluePanelsPreserveTerminalBackgroundOutsidePanels(t *testing.
 	widget := NewWidget(AppWidgetOptions{PanelsVisible: true})
 	defer widget.Close()
 
-	buf, _ := widget.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 24}, ui.RenderContext{})
+	buf, _ := renderAppANSIForTest(t, widget.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 24}, ui.RenderContext{}), 80, 24)
 
 	panelCell := buf.Get(10, 8)
 	if got := panelCell.Style.Background(); got != terminal.Color(0x0000A8) {

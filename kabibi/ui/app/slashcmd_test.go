@@ -17,7 +17,7 @@ func TestSlashCommandHintsAndUniqueCompletion(t *testing.T) {
 	defer widget.Close()
 
 	widget.Shell().SetInput("/set")
-	buf, _ := widget.Render(ui.Rect{W: 80, H: 24}, ui.RenderContext{})
+	buf, _ := renderAppANSIForTest(t, widget.Render(ui.Rect{W: 80, H: 24}, ui.RenderContext{}), 80, 24)
 	var footer strings.Builder
 	for x := 0; x < buf.Width; x++ {
 		footer.WriteString(buf.Get(x, buf.Height-1).Grapheme)

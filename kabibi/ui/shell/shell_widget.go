@@ -173,7 +173,8 @@ type Shell struct {
 	opts ShellOptions
 
 	// Context from last render pass
-	ctx ui.RenderContext
+	ctx        ui.RenderContext
+	compositor *terminal.Terminal
 }
 
 // New creates a new Shell widget with the given options.
@@ -199,6 +200,7 @@ func New(opts ShellOptions) *Shell {
 		sessionErr:     sessionErr,
 		aiRunner:       aiRunner,
 		opts:           opts,
+		compositor:     terminal.NewTerminal(1, 1),
 	}
 	if lazy, ok := aiRunner.(*LazyAIRunner); ok {
 		lazy.SetTerminalOpener(s.openInteractiveTerminalSession)
@@ -723,6 +725,39 @@ func renderBlockCached(block *CommandBlock, width int) terminal.CellBuf {
 	return buf
 }
 
+func (block *CommandBlock) Measure(c ui.Constraints) ui.Size {
+	width := c.MaxW
+	if width <= 0 {
+		width = 80
+	}
+	buf := renderBlockCached(block, width)
+	height := buf.Height
+	if c.MaxH > 0 && height > c.MaxH {
+		height = c.MaxH
+	}
+	return ui.Size{W: width, H: height}
+}
+
+func (block *CommandBlock) Render(r ui.Rect, ctx ui.RenderContext) string {
+	width := r.W
+	if width <= 0 {
+		width = 80
+	}
+	buf := renderBlockCached(block, width)
+	if r.H > 0 && buf.Height > r.H {
+		clipped := terminal.NewCellBuf(width, r.H)
+		clipped.Blit(buf, 0, 0)
+		buf = clipped
+	}
+	cursor := block.cachedCursor
+	cursor.Visible = cursor.Visible && ctx.Focused
+	return ui.ANSIFrame(buf, cursor)
+}
+
+func (*CommandBlock) HandleEvent(input.Event) bool { return false }
+
+var _ ui.Widget = (*CommandBlock)(nil)
+
 func applyCommandInputStyles(buf *terminal.CellBuf, cells []inputCell, styles []terminal.Style) {
 	for i, position := range cells {
 		if i >= len(styles) || position.width == 0 {
@@ -1083,7 +1118,7 @@ func (s *Shell) renderStackBlocksLocked(width int) ([]terminal.CellBuf, []int) {
 		block := &s.blocks[i]
 		children := toolBlocks[i]
 		if len(children) == 0 {
-			rendered = append(rendered, renderBlockCached(block, width))
+			rendered = append(rendered, s.renderBlockWidgetLocked(block, width))
 			blockIndexes = append(blockIndexes, i)
 			continue
 		}
@@ -1097,22 +1132,39 @@ func (s *Shell) renderStackBlocksLocked(width int) ([]terminal.CellBuf, []int) {
 				inputStyles: block.inputStyles,
 				Status:      block.Status,
 			}
-			rendered = append(rendered, renderBlockCached(&promptBlock, width))
+			rendered = append(rendered, s.renderBlockWidgetLocked(&promptBlock, width))
 			blockIndexes = append(blockIndexes, i)
 		}
 		for _, childIndex := range children {
-			rendered = append(rendered, renderBlockCached(&s.blocks[childIndex], width))
+			rendered = append(rendered, s.renderBlockWidgetLocked(&s.blocks[childIndex], width))
 			blockIndexes = append(blockIndexes, childIndex)
 		}
 		if block.Output.Len() > 0 || block.AnimLine != "" {
 			responseBlock := *block
 			responseBlock.Prompt = ""
 			responseBlock.Input = ""
-			rendered = append(rendered, renderBlockCached(&responseBlock, width))
+			rendered = append(rendered, s.renderBlockWidgetLocked(&responseBlock, width))
 			blockIndexes = append(blockIndexes, i)
 		}
 	}
 	return rendered, blockIndexes
+}
+
+func (s *Shell) renderBlockWidgetLocked(block *CommandBlock, width int) terminal.CellBuf {
+	if s.compositor == nil {
+		s.compositor = terminal.NewTerminal(1, 1)
+	}
+	size := block.Measure(ui.Constraints{MaxW: width})
+	if size.H < 1 {
+		size.H = 1
+	}
+	ansiFrame := block.Render(ui.Rect{W: width, H: size.H}, ui.RenderContext{})
+	frame, _, _, err := s.compositor.RenderANSIForComposition(ansiFrame, width, size.H)
+	if err != nil {
+		block.renderError = err.Error()
+		return terminal.FromANSIString("[command block render error: "+err.Error()+"]", width)
+	}
+	return frame
 }
 
 // computeStackHeight calculates the current occupied height of the stack
@@ -1208,12 +1260,12 @@ func (s *Shell) Measure(c ui.Constraints) ui.Size {
 	return ui.Size{W: w, H: maxH}
 }
 
-// Render implements ui.Widget by painting the shell stack into a CellBuf.
+// Render implements ui.Widget by returning the shell stack as ANSI text.
 // Uses bottom-up viewport fitting: pins the visible PromptInput + 1 reserved blank footer
 // row at the bottom, walks backwards across s.blocks from newest to oldest to
 // fill the remaining viewport budget, closes any bottom slack gap before ejecting,
 // and ejects overflowing top rows via WriteToScrollback.
-func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.CursorPos) {
+func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) string {
 	w := rect.W
 	if w <= 0 {
 		w = 80
@@ -1229,6 +1281,9 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 		}
 	}
 	s.mu.Lock()
+	if s.compositor == nil {
+		s.compositor = terminal.NewTerminal(1, 1)
+	}
 	widthChanged := s.width != w
 	s.ctx = ctx
 	s.width = w
@@ -1286,7 +1341,17 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 			if inputMaxH < 1 {
 				inputMaxH = 1
 			}
-			inputBuf, inputCursor = s.input.Render(ui.Rect{X: 0, Y: 0, W: w, H: inputMaxH}, ctx)
+			inputANSI := s.input.Render(ui.Rect{X: 0, Y: 0, W: w, H: inputMaxH}, ctx.ForChild(true))
+			inputFrame, cursor, inputHeight, err := s.compositor.RenderANSIForComposition(inputANSI, w, inputMaxH)
+			if err != nil {
+				s.reportTerminalError(err)
+				inputBuf = terminal.NewCellBuf(w, 0)
+				inputCursor = ui.CursorPos{}
+			} else {
+				inputBuf = terminal.NewCellBuf(w, inputHeight)
+				copy(inputBuf.Cells(), inputFrame.Cells()[:inputHeight*w])
+				inputCursor = cursor
+			}
 			chromeH = inputBuf.Height
 		}
 		footerH := reservedFooterRows
@@ -1444,7 +1509,7 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 			Visible: inputCursor.Visible,
 		}
 	} else if running && activeBlockStart >= 0 {
-		if activeCursor.Visible {
+		if ctx.Focused && activeCursor.Visible {
 			activeCursor.Y += activeBlockStart - previouslyEjected + contentStartY
 			if activeCursor.Y >= 0 && activeCursor.Y < buf.Height {
 				if activeCursor.X < 0 {
@@ -1482,7 +1547,7 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 		cursor = ui.CursorPos{
 			X:       cursorX,
 			Y:       activeRow,
-			Visible: true,
+			Visible: ctx.Focused,
 		}
 	} else {
 		lastRow := collectedRows - 1
@@ -1495,7 +1560,7 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.Curso
 			Visible: false,
 		}
 	}
-	return buf, cursor
+	return ui.ANSIFrame(buf, cursor)
 }
 
 // copyBlockRows copies rows [startOffset, endOffset) from blockBuf into dst starting at startRow.
@@ -1758,10 +1823,6 @@ func (s *Shell) handleKeyEvent(ev input.KeyPressEvent) bool {
 		}
 		return false
 	}
-	if !s.input.Focused() {
-		return false
-	}
-
 	if keyStr == "enter" {
 		if s.input.Value() == "" && s.openLatestOutputURL() {
 			return true

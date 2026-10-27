@@ -6,7 +6,19 @@ import (
 
 	"github.com/charmbracelet/x/input"
 	"github.com/mavity/rusticated/kabibi/ui/filemanager"
+	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
+
+func renderDialogANSIForTest(t *testing.T, text string, width, height int) (terminal.CellBuf, terminal.CursorPos) {
+	t.Helper()
+	frame, cursor, extent, err := terminal.NewTerminal(width, height).RenderANSIForComposition(text, width, height)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := terminal.NewCellBuf(width, extent)
+	copy(buf.Cells(), frame.Cells()[:extent*width])
+	return buf, cursor
+}
 
 func TestOpenInputDialog(t *testing.T) {
 	d := NewInputDialog(ActionMkdir, "Create Dir", "Enter directory name:", "newdir", nil)
@@ -156,7 +168,7 @@ func TestDialogMeasuresWithinSmallAndLargeConstraints(t *testing.T) {
 		if size.W > constraints.MaxW || size.H > constraints.MaxH || size.W < 1 || size.H < 1 {
 			t.Fatalf("Measure(%+v) = %+v, outside constraints", constraints, size)
 		}
-		buf, cursor := d.Render(Rect{W: size.W, H: size.H}, RenderContext{Focused: true})
+		buf, cursor := renderDialogANSIForTest(t, d.Render(Rect{W: size.W, H: size.H}, RenderContext{Focused: true}), size.W, size.H)
 		if buf.Width != size.W || buf.Height != size.H {
 			t.Fatalf("Render size = %dx%d, want %dx%d", buf.Width, buf.Height, size.W, size.H)
 		}

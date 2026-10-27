@@ -46,7 +46,6 @@ type TextInput struct {
 	anchor     int
 	selecting  bool
 	scrollCol  int
-	focused    bool
 	history    []string
 	historyIdx int
 	complete   func(string, int) (string, int, bool)
@@ -54,14 +53,12 @@ type TextInput struct {
 	onChange   func(string)
 	selectAll  bool
 	allowPaste bool
-	ctx        RenderContext
 }
 
 func NewTextInput(opts TextInputOptions) *TextInput {
 	w := &TextInput{
 		value:      []rune(opts.Value),
 		cursor:     len([]rune(opts.Value)),
-		focused:    true,
 		history:    append([]string(nil), opts.History...),
 		historyIdx: -1,
 		complete:   opts.Complete,
@@ -96,19 +93,6 @@ func (w *TextInput) SetValue(value string) {
 	w.changed()
 }
 
-func (w *TextInput) SetFocused(focused bool) {
-	if w == nil || w.focused == focused {
-		return
-	}
-	w.focused = focused
-	if !focused {
-		w.selecting = false
-	}
-	w.invalidate()
-}
-
-func (w *TextInput) Focused() bool { return w != nil && w.focused }
-
 func (w *TextInput) Measure(c Constraints) Size {
 	width := c.MaxW
 	if width <= 0 {
@@ -120,21 +104,20 @@ func (w *TextInput) Measure(c Constraints) Size {
 	return Size{W: width, H: 1}
 }
 
-func (w *TextInput) Render(r Rect, ctx RenderContext) (CellBuf, CursorPos) {
+func (w *TextInput) Render(r Rect, ctx RenderContext) string {
 	width := r.W
 	if width < 0 {
 		width = 0
 	}
 	buf := terminal.NewCellBuf(width, 1)
 	if w == nil || width == 0 {
-		return buf, CursorPos{}
+		return ui.ANSIFrame(buf, CursorPos{})
 	}
-	w.ctx = ctx
 	if width == 1 {
 		if len(w.value) > 0 {
 			buf.Set(0, 0, terminal.Cell{Grapheme: "…", Style: styleOr(w.styles.Overflow, terminal.NewStyle(0xFFD700, 0x0D1014, terminal.CharBold))})
 		}
-		return buf, CursorPos{Visible: w.focused && ctx.Focused}
+		return ui.ANSIFrame(buf, CursorPos{Visible: ctx.Focused})
 	}
 
 	styles := w.styles
@@ -187,7 +170,7 @@ func (w *TextInput) Render(r Rect, ctx RenderContext) (CellBuf, CursorPos) {
 		x := startX + col - w.scrollCol
 		inSelection := w.selecting && i >= selStart && i < selEnd
 		style := textStyle
-		if w.focused {
+		if ctx.Focused {
 			style = focusedStyle
 		}
 		if inSelection {
@@ -208,11 +191,11 @@ func (w *TextInput) Render(r Rect, ctx RenderContext) (CellBuf, CursorPos) {
 	if cursorX >= startX+available {
 		cursorX = startX + available - 1
 	}
-	return buf, CursorPos{X: cursorX, Y: 0, Visible: w.focused && ctx.Focused}
+	return ui.ANSIFrame(buf, CursorPos{X: cursorX, Y: 0, Visible: ctx.Focused})
 }
 
 func (w *TextInput) HandleEvent(event input.Event) bool {
-	if w == nil || !w.focused {
+	if w == nil {
 		return false
 	}
 	switch ev := event.(type) {
@@ -318,7 +301,6 @@ func (w *TextInput) handleKey(ev input.KeyPressEvent) bool {
 			return false
 		}
 	}
-	w.invalidate()
 	return true
 }
 
@@ -337,7 +319,6 @@ func (w *TextInput) insert(text string) {
 		w.cursor += len(runes)
 	}
 	w.changed()
-	w.invalidate()
 }
 
 func (w *TextInput) moveCursor(pos int, extend bool) {
@@ -353,7 +334,6 @@ func (w *TextInput) moveCursor(pos int, extend bool) {
 		w.anchor = pos
 		w.selecting = false
 	}
-	w.invalidate()
 }
 
 func (w *TextInput) deleteSelection() bool {
@@ -420,13 +400,6 @@ func (w *TextInput) recallHistory(direction int) {
 func (w *TextInput) changed() {
 	if w.onChange != nil {
 		w.onChange(string(w.value))
-	}
-	w.invalidate()
-}
-
-func (w *TextInput) invalidate() {
-	if w.ctx.Invalidate != nil {
-		w.ctx.Invalidate()
 	}
 }
 
@@ -502,7 +475,6 @@ type Checkbox struct {
 	Label    string
 	Checked  bool
 	Disabled bool
-	Focused  bool
 	Styles   CheckboxStyles
 }
 
@@ -510,15 +482,15 @@ func (w *Checkbox) Measure(c Constraints) Size {
 	return Size{W: max(0, c.MaxW), H: 1}
 }
 
-func (w *Checkbox) Render(r Rect, _ RenderContext) (CellBuf, CursorPos) {
+func (w *Checkbox) Render(r Rect, ctx RenderContext) string {
 	buf := terminal.NewCellBuf(max(0, r.W), 1)
 	if w == nil || r.W <= 0 {
-		return buf, CursorPos{}
+		return ui.ANSIFrame(buf, CursorPos{})
 	}
 	style := styleOr(w.Styles.Normal, terminal.NewStyle(0xE5E5E5, 0x1A1F26, 0))
 	if w.Disabled {
 		style = styleOr(w.Styles.Disabled, terminal.NewStyle(0x8A95A5, 0x1A1F26, terminal.CharDim))
-	} else if w.Focused {
+	} else if ctx.Focused {
 		style = styleOr(w.Styles.Focused, terminal.NewStyle(0x1A1F26, 0xFFD700, terminal.CharBold))
 	}
 	for i, r := range []rune("[ ] " + w.Label) {
@@ -534,7 +506,7 @@ func (w *Checkbox) Render(r Rect, _ RenderContext) (CellBuf, CursorPos) {
 	if buf.Width > 1 {
 		buf.Set(1, 0, terminal.Cell{Grapheme: check, Style: style})
 	}
-	return buf, CursorPos{}
+	return ui.ANSIFrame(buf, CursorPos{})
 }
 
 func (w *Checkbox) HandleEvent(event input.Event) bool {
@@ -565,7 +537,6 @@ type ButtonStyles struct {
 type ButtonRow struct {
 	Buttons []Button
 	Index   int
-	Focused bool
 	Styles  ButtonStyles
 }
 
@@ -592,11 +563,11 @@ func (w *ButtonRow) Measure(c Constraints) Size {
 	return Size{W: min(width, maxWidth), H: rows}
 }
 
-func (w *ButtonRow) Render(r Rect, ctx RenderContext) (CellBuf, CursorPos) {
+func (w *ButtonRow) Render(r Rect, ctx RenderContext) string {
 	width, height := max(0, r.W), max(0, r.H)
 	buf := terminal.NewCellBuf(width, height)
 	if w == nil || width == 0 || height == 0 {
-		return buf, CursorPos{}
+		return ui.ANSIFrame(buf, CursorPos{})
 	}
 	normal := styleOr(w.Styles.Normal, terminal.NewStyle(0xE5E5E5, 0x2A323D, 0))
 	focused := styleOr(w.Styles.Focused, terminal.NewStyle(0x1A1F26, 0xFFD700, terminal.CharBold))
@@ -615,7 +586,7 @@ func (w *ButtonRow) Render(r Rect, ctx RenderContext) (CellBuf, CursorPos) {
 		style := normal
 		if button.Disabled {
 			style = disabled
-		} else if i == w.Index && w.Focused {
+		} else if i == w.Index && ctx.Focused {
 			style = focused
 		}
 		col := x
@@ -645,7 +616,7 @@ func (w *ButtonRow) Render(r Rect, ctx RenderContext) (CellBuf, CursorPos) {
 		}
 		x += textWidth + 2
 	}
-	return buf, CursorPos{Visible: false}
+	return ui.ANSIFrame(buf, CursorPos{})
 }
 
 func (w *ButtonRow) HandleEvent(event input.Event) bool {
@@ -725,11 +696,11 @@ func (w *ProgressBar) Measure(c Constraints) Size {
 	return Size{W: max(0, c.MaxW), H: height}
 }
 
-func (w *ProgressBar) Render(r Rect, _ RenderContext) (CellBuf, CursorPos) {
+func (w *ProgressBar) Render(r Rect, _ RenderContext) string {
 	width, height := max(0, r.W), max(0, r.H)
 	buf := terminal.NewCellBuf(width, height)
 	if w == nil || width == 0 || height == 0 {
-		return buf, CursorPos{}
+		return ui.ANSIFrame(buf, CursorPos{})
 	}
 	labelStyle := styleOr(w.Styles.Label, terminal.NewStyle(0xE5E5E5, 0x1A1F26, 0))
 	filledStyle := styleOr(w.Styles.Filled, terminal.NewStyle(0xFFD700, 0x1A1F26, 0))
@@ -756,7 +727,7 @@ func (w *ProgressBar) Render(r Rect, _ RenderContext) (CellBuf, CursorPos) {
 		meta := fmt.Sprintf("%s / %s  %s/s", formatBytes(w.Done), formatBytes(w.Total), formatBytes(w.Rate))
 		writeText(&buf, 0, 2, middleTruncate(meta, width), metaStyle)
 	}
-	return buf, CursorPos{}
+	return ui.ANSIFrame(buf, CursorPos{})
 }
 
 func (w *ProgressBar) HandleEvent(input.Event) bool { return false }

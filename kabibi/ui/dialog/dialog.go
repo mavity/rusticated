@@ -141,12 +141,12 @@ type DialogWidget struct {
 	CollisionPath string
 	Collision     bool
 
-	OnSubmitInput  func(action DialogAction, value string, pending *filemanager.FileOp)
-	OnSubmitForm   func(action DialogAction, values []string, pending *filemanager.FileOp)
-	OnConfirm      func(action DialogAction, pending *filemanager.FileOp)
-	OnPickChoice   func(idx int)
-	OnCancel       func()
-	OnCollision    func(filemanager.CollisionChoice)
+	OnSubmitInput func(action DialogAction, value string, pending *filemanager.FileOp)
+	OnSubmitForm  func(action DialogAction, values []string, pending *filemanager.FileOp)
+	OnConfirm     func(action DialogAction, pending *filemanager.FileOp)
+	OnPickChoice  func(idx int)
+	OnCancel      func()
+	OnCollision   func(filemanager.CollisionChoice)
 
 	Width  int
 	Height int
@@ -154,6 +154,7 @@ type DialogWidget struct {
 	Y      int
 
 	buttons           *widgets.ButtonRow
+	compositor        *terminal.Terminal
 	focusedField      int
 	focusedButton     bool
 	legacyInputMirror string
@@ -223,7 +224,6 @@ func NewConfirmDialog(action DialogAction, title, prompt string, pending *filema
 	d.ChoiceIdx = 1
 	d.buttons.Index = 1
 	d.focusedButton = true
-	d.buttons.Focused = true
 	return d
 }
 
@@ -239,7 +239,6 @@ func NewChoiceDialog(title, prompt string, choices []Choice, onPick func(idx int
 	}
 	d.setButtons(d.Choices)
 	d.focusedButton = true
-	d.buttons.Focused = true
 	return d
 }
 
@@ -254,7 +253,6 @@ func NewProgressDialog(title string, progress filemanager.FileOpProgress, onCanc
 	}
 	d.setButtons([]Choice{{Label: "Cancel", Hotkey: "c"}})
 	d.focusedButton = true
-	d.buttons.Focused = true
 	return d
 }
 
@@ -369,12 +367,12 @@ func (w *DialogWidget) Layout(r Rect) {
 	w.X, w.Y, w.Width, w.Height = r.X, r.Y, r.W, r.H
 }
 
-func (w *DialogWidget) Render(r Rect, ctx RenderContext) (CellBuf, CursorPos) {
+func (w *DialogWidget) Render(r Rect, ctx RenderContext) string {
 	if r.W > 0 || r.H > 0 {
 		w.Layout(r)
 	}
 	buf, cursor := w.RenderBufWithContext(ctx)
-	return buf, cursor
+	return ui.ANSIFrame(buf, cursor)
 }
 
 func (w *DialogWidget) RenderBuf() CellBuf {
@@ -437,11 +435,11 @@ func (w *DialogWidget) RenderBufWithContext(ctx RenderContext) (CellBuf, CursorP
 			if y >= height-1 {
 				break
 			}
-			field.Input.SetFocused(i == w.focusedField && !w.focusedButton)
-			inputBuf, inputCursor := field.Input.Render(Rect{X: inputX, Y: y, W: inputWidth, H: 1}, ctx)
-			buf.Blit(inputBuf, inputX, y)
-			if i == w.focusedField && inputCursor.Visible {
-				cursor = CursorPos{X: inputX + inputCursor.X, Y: y + inputCursor.Y, Visible: true}
+			fieldCtx := ctx.ForChild(i == w.focusedField && !w.focusedButton)
+			inputANSI := field.Input.Render(Rect{W: inputWidth, H: 1}, fieldCtx)
+			inputCursor := fieldCtx.CompositeANSI(&buf, w.ansiTerminal(), Rect{X: inputX, Y: y, W: inputWidth, H: 1}, inputANSI)
+			if inputCursor.Visible {
+				cursor = inputCursor
 			}
 			y++
 			if i == 0 {
@@ -458,11 +456,14 @@ func (w *DialogWidget) RenderBufWithContext(ctx RenderContext) (CellBuf, CursorP
 		}
 		p := &widgets.ProgressBar{
 			Current: current,
-			Done: w.Progress.Done, Total: w.Progress.Total, Rate: w.Progress.BytesPerSec,
+			Done:    w.Progress.Done, Total: w.Progress.Total, Rate: w.Progress.BytesPerSec,
 		}
-		pbuf, _ := p.Render(Rect{X: 2, Y: y, W: innerW, H: min(progressRows, max(0, height-y-1))}, ctx)
-		buf.Blit(pbuf, 2, y)
-		y += pbuf.Height
+		pHeight := min(progressRows, max(0, height-y-1))
+		pANSI := p.Render(Rect{W: innerW, H: pHeight}, ctx.ForChild(false))
+		if pHeight > 0 {
+			ctx.CompositeANSI(&buf, w.ansiTerminal(), Rect{X: 2, Y: y, W: innerW, H: pHeight}, pANSI)
+			y += pHeight
+		}
 		if w.Collision && y < height-1 {
 			if !compact {
 				y++
@@ -476,16 +477,23 @@ func (w *DialogWidget) RenderBufWithContext(ctx RenderContext) (CellBuf, CursorP
 	buttons := w.buttonRow()
 	if buttons != nil && height > 2 {
 		buttons.Index = w.ChoiceIdx
-		buttons.Focused = w.focusedButton || w.Kind == DialogChoice || w.Kind == DialogConfirm || w.Kind == DialogProgress
 		btnHeight := min(buttons.Measure(Constraints{MaxW: innerW, MaxH: height}).H, height-2)
 		btnY := height - 1 - btnHeight
 		if btnY < 1 {
 			btnY = 1
 		}
-		btnBuf, _ := buttons.Render(Rect{X: 2, Y: btnY, W: innerW, H: height - 1 - btnY}, ctx)
-		buf.Blit(btnBuf, 2, btnY)
+		buttonCtx := ctx.ForChild(w.focusedButton || w.Kind == DialogChoice || w.Kind == DialogConfirm || w.Kind == DialogProgress)
+		buttonANSI := buttons.Render(Rect{W: innerW, H: height - 1 - btnY}, buttonCtx)
+		ctx.CompositeANSI(&buf, w.ansiTerminal(), Rect{X: 2, Y: btnY, W: innerW, H: height - 1 - btnY}, buttonANSI)
 	}
 	return buf, cursor
+}
+
+func (w *DialogWidget) ansiTerminal() *terminal.Terminal {
+	if w.compositor == nil {
+		w.compositor = terminal.NewTerminal(1, 1)
+	}
+	return w.compositor
 }
 
 func (w *DialogWidget) buttonRow() *widgets.ButtonRow {
@@ -729,32 +737,23 @@ func (w *DialogWidget) moveFocus(step int) {
 	total := len(w.Fields) + 1
 	if w.focusedButton {
 		w.focusedButton = false
-		w.buttonRow().Focused = false
 		w.focusedField = len(w.Fields) - 1
 		if step > 0 {
 			w.focusedButton = true
-			w.buttonRow().Focused = true
 			return
-		}
-		if len(w.Fields) > 0 {
-			w.Fields[w.focusedField].Input.SetFocused(true)
 		}
 		return
 	}
 	if len(w.Fields) == 0 {
 		w.focusedButton = true
-		w.buttonRow().Focused = true
 		return
 	}
-	w.Fields[w.focusedField].Input.SetFocused(false)
 	next := (w.focusedField + step + total) % total
 	if next == len(w.Fields) {
 		w.focusedButton = true
-		w.buttonRow().Focused = true
 		return
 	}
 	w.focusedField = next
-	w.Fields[w.focusedField].Input.SetFocused(true)
 }
 
 func (w *DialogWidget) drawBorder(buf *CellBuf, width, height int, title string) {

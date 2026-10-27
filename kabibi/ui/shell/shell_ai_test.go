@@ -74,6 +74,37 @@ func TestUpdateActiveArtifactFeedbackNormalizesAccumulatedWhitespace(t *testing.
 	}
 }
 
+func TestCommandBlockRendersThroughWidgetANSIContract(t *testing.T) {
+	block := CommandBlock{
+		Kind:   BlockCommand,
+		Source: SourceUserShell,
+		Prompt: "$ ",
+		Input:  "echo hi",
+		Output: *bytes.NewBufferString("done"),
+		Status: StatusSuccess,
+	}
+	size := block.Measure(ui.Constraints{MaxW: 24, MaxH: 8})
+	if size.W != 24 || size.H < 1 {
+		t.Fatalf("CommandBlock.Measure() = %+v, want width 24 and nonzero height", size)
+	}
+	text := block.Render(ui.Rect{W: size.W, H: size.H}, ui.RenderContext{})
+	buf, _ := renderANSIForTest(t, text, size.W, size.H)
+	var output strings.Builder
+	for y := 0; y < buf.Height; y++ {
+		for x := 0; x < buf.Width; x++ {
+			output.WriteString(buf.Get(x, y).Grapheme)
+		}
+	}
+	for _, want := range []string{"$ echo hi", "done"} {
+		if !strings.Contains(output.String(), want) {
+			t.Errorf("CommandBlock ANSI output %q lacks %q", output.String(), want)
+		}
+	}
+	if block.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter}) {
+		t.Fatal("passive CommandBlock should leave event routing to Shell")
+	}
+}
+
 func TestShell_HidesInputWhileRunningAndRestoresCursor(t *testing.T) {
 	s := &Shell{
 		mode:  ModeStack,
@@ -91,7 +122,7 @@ func TestShell_HidesInputWhileRunningAndRestoresCursor(t *testing.T) {
 		t.Fatalf("idle Measure().H = %d, want input height %d + footer", idleSize.H, inputHeight)
 	}
 
-	idleBuf, idleCursor := s.Render(ui.Rect{W: width, H: height}, ui.RenderContext{Focused: true})
+	idleBuf, idleCursor := renderANSIForTest(t, s.Render(ui.Rect{W: width, H: height}, ui.RenderContext{Focused: true}), width, height)
 	if !idleCursor.Visible {
 		t.Fatal("input cursor should be visible while idle")
 	}
@@ -103,7 +134,7 @@ func TestShell_HidesInputWhileRunningAndRestoresCursor(t *testing.T) {
 	if runningSize.H != reservedFooterRows {
 		t.Fatalf("running Measure().H = %d, want only %d reserved footer row(s)", runningSize.H, reservedFooterRows)
 	}
-	hiddenBuf, hiddenCursor := s.Render(ui.Rect{W: width, H: height}, ui.RenderContext{Focused: true})
+	hiddenBuf, hiddenCursor := renderANSIForTest(t, s.Render(ui.Rect{W: width, H: height}, ui.RenderContext{Focused: true}), width, height)
 	if hiddenCursor.Visible {
 		t.Fatal("input cursor should be hidden while running")
 	}
@@ -116,7 +147,7 @@ func TestShell_HidesInputWhileRunningAndRestoresCursor(t *testing.T) {
 	s.mu.Lock()
 	s.running = false
 	s.mu.Unlock()
-	restoredBuf, restoredCursor := s.Render(ui.Rect{W: width, H: height}, ui.RenderContext{Focused: true})
+	restoredBuf, restoredCursor := renderANSIForTest(t, s.Render(ui.Rect{W: width, H: height}, ui.RenderContext{Focused: true}), width, height)
 	if !restoredCursor.Visible {
 		t.Fatal("input cursor should be visible again after completion")
 	}
@@ -155,7 +186,7 @@ func TestShell_AIToolOutputStaysAboveThinkingIndicator(t *testing.T) {
 	onChunk([]byte("tool-output-marker\n"))
 	onFinish(0, 0)
 
-	buf, _ := s.Render(ui.Rect{W: 60, H: 12}, ui.RenderContext{})
+	buf, _ := renderANSIForTest(t, s.Render(ui.Rect{W: 60, H: 12}, ui.RenderContext{}), 60, 12)
 	var rows []string
 	for y := 0; y < buf.Height; y++ {
 		rows = append(rows, extractRowString(buf, y))
@@ -189,7 +220,7 @@ func TestShell_LiveTerminalCursorTracksVTPosition(t *testing.T) {
 		blocks:      []CommandBlock{block},
 	}
 
-	_, cursor := s.Render(ui.Rect{W: 10, H: 8}, ui.RenderContext{})
+	_, cursor := renderANSIForTest(t, s.Render(ui.Rect{W: 10, H: 8}, ui.RenderContext{Focused: true}), 10, 8)
 	if !cursor.Visible || cursor.X != 3 || cursor.Y != 2 {
 		t.Fatalf("live cursor = %+v, want visible at (3,2)", cursor)
 	}
@@ -749,7 +780,7 @@ func TestEndToEnd_ShellFallbackIntoAISessionWithTools(t *testing.T) {
 	}
 
 	// Render check to ensure widget renders cleanly at 80x24
-	_, _ = sh.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 24}, ui.RenderContext{Focused: true})
+	_ = sh.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 24}, ui.RenderContext{Focused: true})
 }
 
 type customSessionAIRunner struct {

@@ -50,7 +50,7 @@ func TestShellRenderTracksLiveTerminalCursorAndResizesOnlyWhenFrameChanges(t *te
 		}},
 	}
 
-	_, cursor := s.Render(ui.Rect{W: 40, H: 12}, ui.RenderContext{})
+	_, cursor := renderANSIForTest(t, s.Render(ui.Rect{W: 40, H: 12}, ui.RenderContext{Focused: true}), 40, 12)
 	if cursor != (ui.CursorPos{X: 3, Y: 2, Visible: true}) {
 		t.Fatalf("active cursor = %+v, want {X:3 Y:2 Visible:true}", cursor)
 	}
@@ -103,7 +103,7 @@ func TestShellCompletedLiveOutputHidesCursorTrimsBlankRowsAndKeepsFrame(t *testi
 		}},
 	}
 
-	_, activeCursor := s.Render(ui.Rect{W: 40, H: 9}, ui.RenderContext{})
+	_, activeCursor := renderANSIForTest(t, s.Render(ui.Rect{W: 40, H: 9}, ui.RenderContext{Focused: true}), 40, 9)
 	if !activeCursor.Visible || activeCursor.Y != 5 {
 		_, terminalCursor := state.terminal.Snapshot()
 		t.Fatalf("active cursor = %+v, want visible cursor on row 5; terminal cursor=%+v",
@@ -113,7 +113,7 @@ func TestShellCompletedLiveOutputHidesCursorTrimsBlankRowsAndKeepsFrame(t *testi
 	s.mu.Lock()
 	s.blocks[0].Status = StatusSuccess
 	s.mu.Unlock()
-	_, completedCursor := s.Render(ui.Rect{W: 40, H: 9}, ui.RenderContext{})
+	_, completedCursor := renderANSIForTest(t, s.Render(ui.Rect{W: 40, H: 9}, ui.RenderContext{}), 40, 9)
 	if completedCursor.Visible {
 		t.Fatalf("completed block retained a visible shell cursor at %+v", completedCursor)
 	}

@@ -35,7 +35,7 @@ func (w *recordingWidget) Measure(c Constraints) Size {
 	return Size{W: c.MaxW, H: c.MaxH}
 }
 
-func (w *recordingWidget) Render(r terminal.Rect, ctx RenderContext) (terminal.CellBuf, CursorPos) {
+func (w *recordingWidget) Render(r terminal.Rect, ctx RenderContext) string {
 	buf := terminal.NewCellBuf(r.W, r.H)
 	for y := 0; y < r.H; y++ {
 		for x := 0; x < r.W; x++ {
@@ -43,7 +43,7 @@ func (w *recordingWidget) Render(r terminal.Rect, ctx RenderContext) (terminal.C
 		}
 	}
 	w.buf = buf
-	return buf, w.cursor
+	return ANSIFrame(buf, w.cursor)
 }
 
 func (w *recordingWidget) HandleEvent(ev input.Event) bool {

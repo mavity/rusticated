@@ -10,6 +10,17 @@ import (
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
 
+func renderANSIForTest(t *testing.T, text string, width, height int) (terminal.CellBuf, ui.CursorPos) {
+	t.Helper()
+	frame, cursor, extent, err := terminal.NewTerminal(width, height).RenderANSIForComposition(text, width, height)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := terminal.NewCellBuf(width, extent)
+	copy(buf.Cells(), frame.Cells()[:extent*width])
+	return buf, cursor
+}
+
 func extractRowString(buf ui.CellBuf, y int) string {
 	var sb strings.Builder
 	for x := 0; x < buf.Width; x++ {
@@ -39,7 +50,7 @@ func TestPromptInput_WrapAndShrinkBackToOneLine(t *testing.T) {
 	if sz.H != 2 {
 		t.Fatalf("at exact width 10, Measure().H = %d, want 2 (cursor at col 0 of row 1)", sz.H)
 	}
-	buf, cur := p.Render(ui.Rect{X: 0, Y: 0, W: 10, H: 24}, ui.RenderContext{Focused: true})
+	buf, cur := renderANSIForTest(t, p.Render(ui.Rect{X: 0, Y: 0, W: 10, H: 24}, ui.RenderContext{Focused: true}), 10, 24)
 	if buf.Height != 2 || cur.X != 0 || cur.Y != 1 {
 		t.Fatalf("at exact width 10, Render() height=%d cur=(%d,%d), want height=2 cur=(0,1)", buf.Height, cur.X, cur.Y)
 	}
@@ -52,7 +63,7 @@ func TestPromptInput_WrapAndShrinkBackToOneLine(t *testing.T) {
 	if sz.H != 3 {
 		t.Fatalf("after 21 chars, Measure().H = %d, want 3", sz.H)
 	}
-	buf, cur = p.Render(ui.Rect{X: 0, Y: 0, W: 10, H: 24}, ui.RenderContext{Focused: true})
+	buf, cur = renderANSIForTest(t, p.Render(ui.Rect{X: 0, Y: 0, W: 10, H: 24}, ui.RenderContext{Focused: true}), 10, 24)
 	if got := extractRowString(buf, 0); got != "፧123456789" {
 		t.Fatalf("row 0 = %q, want %q", got, "፧123456789")
 	}
@@ -77,7 +88,7 @@ func TestPromptInput_WrapAndShrinkBackToOneLine(t *testing.T) {
 	if sz.H != 1 {
 		t.Fatalf("after deleting back to '123', Measure().H = %d, want 1", sz.H)
 	}
-	buf, cur = p.Render(ui.Rect{X: 0, Y: 0, W: 10, H: 24}, ui.RenderContext{Focused: true})
+	buf, cur = renderANSIForTest(t, p.Render(ui.Rect{X: 0, Y: 0, W: 10, H: 24}, ui.RenderContext{Focused: true}), 10, 24)
 	if buf.Height != 1 || cur.X != 4 || cur.Y != 0 {
 		t.Fatalf("after deleting back to '123', Render() height=%d cur=(%d,%d), want height=1 cur=(4,0)", buf.Height, cur.X, cur.Y)
 	}
@@ -93,7 +104,7 @@ func TestPromptInput_HeightCapSixLinesAndThreeQuartersScreen(t *testing.T) {
 	if sz24.H != 6 {
 		t.Fatalf("Measure(MaxW:10, MaxH:24).H = %d, want 6 (capped at 6 lines)", sz24.H)
 	}
-	buf24, cur24 := p.Render(ui.Rect{X: 0, Y: 0, W: 10, H: 24}, ui.RenderContext{Focused: true})
+	buf24, cur24 := renderANSIForTest(t, p.Render(ui.Rect{X: 0, Y: 0, W: 10, H: 24}, ui.RenderContext{Focused: true}), 10, 24)
 	if buf24.Height != 6 {
 		t.Fatalf("Render(W:10, H:24).Height = %d, want 6", buf24.Height)
 	}
@@ -107,7 +118,7 @@ func TestPromptInput_HeightCapSixLinesAndThreeQuartersScreen(t *testing.T) {
 	if sz6.H != 4 {
 		t.Fatalf("Measure(MaxW:10, MaxH:6).H = %d, want 4 (3/4 of 6-row screen)", sz6.H)
 	}
-	buf6, cur6 := p.Render(ui.Rect{X: 0, Y: 0, W: 10, H: 6}, ui.RenderContext{Focused: true})
+	buf6, cur6 := renderANSIForTest(t, p.Render(ui.Rect{X: 0, Y: 0, W: 10, H: 6}, ui.RenderContext{Focused: true}), 10, 6)
 	if buf6.Height != 4 || cur6.Y != 3 {
 		t.Fatalf("Render(W:10, H:6) height=%d curY=%d, want height=4 curY=3", buf6.Height, cur6.Y)
 	}
@@ -133,7 +144,7 @@ func TestPromptInput_DynamicPromptAndWideUnicode(t *testing.T) {
 	if sz.H != 2 {
 		t.Fatalf("Measure() with dynamic prompt + CJK = %d, want 2", sz.H)
 	}
-	buf, cur := p.Render(ui.Rect{X: 0, Y: 0, W: 20, H: 24}, ui.RenderContext{Focused: true})
+	buf, cur := renderANSIForTest(t, p.Render(ui.Rect{X: 0, Y: 0, W: 20, H: 24}, ui.RenderContext{Focused: true}), 20, 24)
 	// Row 0: "/very/long/path $ 你" (18 + 2 = 20 cols)
 	// Row 1: "好世界" (6 cols) -> cursor at (6, 1)
 	if got := extractRowString(buf, 0); got != "/very/long/path $ 你" {
@@ -176,7 +187,7 @@ func TestPromptInput_ClassifierGatesBashHighlighting(t *testing.T) {
 	})
 	for _, value := range []string{"Name a bridge in Paris", "What's the time?"} {
 		p.SetValue(value)
-		aiBuf, _ := p.Render(ui.Rect{W: 80, H: 4}, ui.RenderContext{Focused: true})
+		aiBuf, _ := renderANSIForTest(t, p.Render(ui.Rect{W: 80, H: 4}, ui.RenderContext{Focused: true}), 80, 4)
 		for i := range []rune(value) {
 			cell := aiBuf.Get(2+i, 0)
 			if !cell.Style.HasAttribute(terminal.CharResetForegroundDefault) {
@@ -190,7 +201,7 @@ func TestPromptInput_ClassifierGatesBashHighlighting(t *testing.T) {
 
 	const shellInput = `echo "hello" | cat $HOME`
 	p.SetValue(shellInput)
-	shellBuf, _ := p.Render(ui.Rect{W: 80, H: 4}, ui.RenderContext{Focused: true})
+	shellBuf, _ := renderANSIForTest(t, p.Render(ui.Rect{W: 80, H: 4}, ui.RenderContext{Focused: true}), 80, 4)
 	for _, token := range []struct {
 		text  string
 		style terminal.Style
@@ -212,7 +223,7 @@ func TestPromptInput_ClassifierGatesBashHighlighting(t *testing.T) {
 
 	const incompleteInput = "if true; then"
 	p.SetValue(incompleteInput)
-	incompleteBuf, _ := p.Render(ui.Rect{W: 80, H: 4}, ui.RenderContext{Focused: true})
+	incompleteBuf, _ := renderANSIForTest(t, p.Render(ui.Rect{W: 80, H: 4}, ui.RenderContext{Focused: true}), 80, 4)
 	for _, token := range []struct {
 		text  string
 		style terminal.Style

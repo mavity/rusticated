@@ -230,6 +230,55 @@ func TestCellBufBlitSkipsZeroCells(t *testing.T) {
 	}
 }
 
+func TestCellBufBlitWithResetFallbackUsesDestinationChannelsIndependently(t *testing.T) {
+	dst := NewCellBuf(3, 1)
+	dst.Set(0, 0, Cell{Grapheme: "x", Style: NewStyle(0x123456, 0x654321, CharItalic)})
+	dst.Set(1, 0, Cell{Grapheme: "y", Style: NewStyle(0xABCDEF, 0x102030, 0)})
+	dst.Set(2, 0, Cell{Grapheme: "z", Style: NewStyle(0, 0, CharResetForegroundDefault|CharResetBackgroundDefault)})
+
+	src := NewCellBuf(3, 1)
+	src.Set(0, 0, Cell{Grapheme: "A", Style: NewStyle(0, 0x00FF00, CharResetForegroundDefault|CharBold)})
+	src.Set(1, 0, Cell{Grapheme: "B", Style: NewStyle(0xFF0000, 0, CharResetBackgroundDefault)})
+	src.Set(2, 0, Cell{Grapheme: "C", Style: NewStyle(0, 0, CharResetForegroundDefault|CharResetBackgroundDefault)})
+
+	dst.BlitWithResetFallback(src, 0, 0)
+
+	first := dst.Get(0, 0)
+	if first.Grapheme != "A" || first.Style.Foreground() != 0x123456 || first.Style.Background() != 0x00FF00 {
+		t.Fatalf("first cell = %+v, want inherited fg and explicit bg", first)
+	}
+	if !first.Style.HasAttribute(CharBold) || first.Style.HasAttribute(CharResetForegroundDefault) {
+		t.Fatalf("first cell attributes = %#x, want bold and concrete inherited fg", first.Style.Attributes())
+	}
+	second := dst.Get(1, 0)
+	if second.Grapheme != "B" || second.Style.Foreground() != 0xFF0000 || second.Style.Background() != 0x102030 {
+		t.Fatalf("second cell = %+v, want explicit fg and inherited bg", second)
+	}
+	third := dst.Get(2, 0)
+	if third.Grapheme != "C" || !third.Style.HasAttribute(CharResetForegroundDefault) ||
+		!third.Style.HasAttribute(CharResetBackgroundDefault) {
+		t.Fatalf("third cell = %+v, want root-default channels preserved", third)
+	}
+}
+
+func TestCellBufBlitWithResetFallbackClearsOverlappedWideGlyph(t *testing.T) {
+	dst := NewCellBuf(3, 1)
+	dst.Set(0, 0, Cell{Grapheme: "界"})
+	dst.Set(1, 0, Cell{Grapheme: "", Style: NewStyle(0, 0, CharResetForegroundDefault|CharResetBackgroundDefault)})
+	dst.Set(2, 0, Cell{Grapheme: "z"})
+	src := NewCellBuf(1, 1)
+	src.Set(0, 0, Cell{Grapheme: "x", Style: NewStyle(0, 0, CharResetForegroundDefault|CharResetBackgroundDefault)})
+
+	dst.BlitWithResetFallback(src, 1, 0)
+
+	if got := dst.Get(0, 0).Grapheme; got != " " {
+		t.Fatalf("left half of replaced wide glyph = %q, want blank", got)
+	}
+	if got := dst.Get(1, 0).Grapheme; got != "x" {
+		t.Fatalf("replacement cell = %q, want x", got)
+	}
+}
+
 func TestCellBufBlitOutOfBoundsOffset(t *testing.T) {
 	dst := NewCellBuf(3, 3)
 	src := NewCellBuf(2, 2)
