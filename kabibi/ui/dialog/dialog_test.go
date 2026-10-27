@@ -6,7 +6,6 @@ import (
 
 	"github.com/charmbracelet/x/input"
 	"github.com/mavity/rusticated/kabibi/ui/filemanager"
-	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
 
 func TestOpenInputDialog(t *testing.T) {
@@ -134,8 +133,72 @@ func TestDialogWidgetRender(t *testing.T) {
 		t.Fatalf("DialogWidget rendered empty buffer: %#v", buf)
 	}
 
-	out := terminal.ToANSI(buf)
+	var output strings.Builder
+	for y := 0; y < buf.Height; y++ {
+		for x := 0; x < buf.Width; x++ {
+			output.WriteString(buf.Get(x, y).Grapheme)
+		}
+	}
+	out := output.String()
 	if !strings.Contains(out, "Overwrite") || !strings.Contains(out, "Skip") {
 		t.Fatalf("DialogWidget output missing expected choices: %q", out)
+	}
+}
+
+func TestDialogMeasuresWithinSmallAndLargeConstraints(t *testing.T) {
+	d := NewFormDialog(ActionCopy, "Copy", "Enter source and destination paths:",
+		[]string{"Source", "Destination"}, []string{"", "."}, nil)
+	for _, constraints := range []Constraints{
+		{MaxW: 24, MaxH: 8},
+		{MaxW: 120, MaxH: 40},
+	} {
+		size := d.Measure(constraints)
+		if size.W > constraints.MaxW || size.H > constraints.MaxH || size.W < 1 || size.H < 1 {
+			t.Fatalf("Measure(%+v) = %+v, outside constraints", constraints, size)
+		}
+		buf, cursor := d.Render(Rect{W: size.W, H: size.H}, RenderContext{Focused: true})
+		if buf.Width != size.W || buf.Height != size.H {
+			t.Fatalf("Render size = %dx%d, want %dx%d", buf.Width, buf.Height, size.W, size.H)
+		}
+		if constraints.MaxW > 24 && !cursor.Visible {
+			t.Fatal("focused input dialog did not return its input cursor")
+		}
+	}
+}
+
+func TestMultiFieldDialogTabFocusAndSubmit(t *testing.T) {
+	var submitted []string
+	d := NewFormDialog(ActionCopy, "Copy", "Paths:",
+		[]string{"Source", "Destination"}, []string{"a", "b"}, nil)
+	d.OnSubmitForm = func(_ DialogAction, values []string, _ *filemanager.FileOp) {
+		submitted = values
+	}
+	if !d.HandleEvent(input.KeyPressEvent{Code: input.KeyTab}) {
+		t.Fatal("Tab was not consumed")
+	}
+	d.HandleEvent(input.KeyPressEvent{Code: 'x', Text: "x"})
+	d.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
+	if len(submitted) != 2 || submitted[0] != "a" || submitted[1] != "x" {
+		t.Fatalf("submitted values = %#v, want [a x]", submitted)
+	}
+}
+
+func TestProgressCollisionExpandsInPlaceAndResolves(t *testing.T) {
+	d := NewProgressDialog("Copying", filemanager.FileOpProgress{Done: 5, Total: 10}, nil)
+	before := d.Measure(Constraints{MaxW: 80, MaxH: 24})
+	var selected filemanager.CollisionChoice
+	d.SetCollision("target/file.txt", func(choice filemanager.CollisionChoice) {
+		selected = choice
+	})
+	after := d.Measure(Constraints{MaxW: 80, MaxH: 24})
+	if !d.Collision || after.H <= before.H {
+		t.Fatalf("collision state did not expand: before=%+v after=%+v", before, after)
+	}
+	d.HandleEvent(input.KeyPressEvent{Code: 'k', Text: "k"})
+	if d.Collision {
+		t.Fatal("collision state was not cleared after selecting Skip all")
+	}
+	if selected != filemanager.ColSkipAll {
+		t.Fatalf("collision choice = %v, want skip all", selected)
 	}
 }

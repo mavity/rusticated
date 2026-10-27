@@ -19,6 +19,7 @@ var commands = []Command{
 	{Name: "/delete", Description: "Delete selected files or paths"},
 	{Name: "/download", Description: "Download kabibi.bat", BrowserOnly: true},
 	{Name: "/edit", Description: "Edit a selected file or path"},
+	{Name: "/mkdir", Description: "Create a directory"},
 	{Name: "/model", Description: "Choose an AI provider and model"},
 	{Name: "/move", Description: "Move selected files or paths"},
 	{Name: "/panels", Description: "Show or hide the file panels"},
