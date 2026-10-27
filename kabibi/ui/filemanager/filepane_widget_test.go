@@ -721,6 +721,40 @@ func TestDualPaneWidgetTabCyclesActivePane(t *testing.T) {
 	}
 }
 
+func TestDualPaneWidgetPreservesLeftSelectionOnFirstRender(t *testing.T) {
+	dp := NewDualPaneWidget()
+	dp.Left.SetItemsBridge([]fileItem{{name: "left"}}, 0)
+	dp.Right.SetItemsBridge([]fileItem{{name: "right"}}, 0)
+	rect := Rect{W: 40, H: 8}
+
+	render := func() CellBuf {
+		text := dp.Render(rect, RenderContext{Focused: true})
+		frame, _, _, err := terminal.NewTerminal(rect.W, rect.H).RenderANSIForComposition(text, rect.W, rect.H)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return frame
+	}
+
+	first := render()
+	rightX := dp.Right.X - dp.X
+	if got := first.Get(2, 1).Style.Background(); got != colorYellow {
+		t.Fatalf("first render left selection background = 0x%06X, want 0x%06X", got, colorYellow)
+	}
+	if got := first.Get(rightX+2, 1).Style.Background(); got != colorBlue {
+		t.Fatalf("first render inactive right selection background = 0x%06X, want 0x%06X", got, colorBlue)
+	}
+
+	dp.HandleEvent(input.KeyPressEvent{Code: input.KeyTab})
+	afterTab := render()
+	if got := afterTab.Get(2, 1).Style.Background(); got != colorBlue {
+		t.Fatalf("after Tab left selection background = 0x%06X, want 0x%06X", got, colorBlue)
+	}
+	if got := afterTab.Get(rightX+2, 1).Style.Background(); got != colorYellow {
+		t.Fatalf("after Tab right selection background = 0x%06X, want 0x%06X", got, colorYellow)
+	}
+}
+
 func TestDualPaneWidgetLayoutHasSingleDividerColumn(t *testing.T) {
 	dp := NewDualPaneWidget()
 	dp.Layout(Rect{X: 0, Y: 0, W: 20, H: 10})

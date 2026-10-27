@@ -1151,20 +1151,7 @@ func (s *Shell) renderStackBlocksLocked(width int) ([]terminal.CellBuf, []int) {
 }
 
 func (s *Shell) renderBlockWidgetLocked(block *CommandBlock, width int) terminal.CellBuf {
-	if s.compositor == nil {
-		s.compositor = terminal.NewTerminal(1, 1)
-	}
-	size := block.Measure(ui.Constraints{MaxW: width})
-	if size.H < 1 {
-		size.H = 1
-	}
-	ansiFrame := block.Render(ui.Rect{W: width, H: size.H}, ui.RenderContext{})
-	frame, _, _, err := s.compositor.RenderANSIForComposition(ansiFrame, width, size.H)
-	if err != nil {
-		block.renderError = err.Error()
-		return terminal.FromANSIString("[command block render error: "+err.Error()+"]", width)
-	}
-	return frame
+	return renderBlockCached(block, width)
 }
 
 // computeStackHeight calculates the current occupied height of the stack

@@ -1331,7 +1331,7 @@ func (w *DualPaneWidget) Render(r Rect, ctx RenderContext) string {
 	buf := w.renderBuf()
 	if w.Left != nil {
 		leftANSI := w.Left.Render(
-			Rect{W: w.Left.Width, H: w.Left.Height},
+			Rect{X: w.Left.X, Y: w.Left.Y, W: w.Left.Width, H: w.Left.Height},
 			ctx.ForChild(ctx.Focused && w.activePane == 0),
 		)
 		ctx.CompositeANSI(&buf, w.compositor, terminal.Rect{
@@ -1340,7 +1340,7 @@ func (w *DualPaneWidget) Render(r Rect, ctx RenderContext) string {
 	}
 	if w.Right != nil {
 		rightANSI := w.Right.Render(
-			Rect{W: w.Right.Width, H: w.Right.Height},
+			Rect{X: w.Right.X, Y: w.Right.Y, W: w.Right.Width, H: w.Right.Height},
 			ctx.ForChild(ctx.Focused && w.activePane == 1),
 		)
 		ctx.CompositeANSI(&buf, w.compositor, terminal.Rect{
