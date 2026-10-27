@@ -24,7 +24,7 @@ type scriptedOnboardingPrompter struct {
 	defaultChoices []int
 	optionSets     [][]string
 	confirmations  []bool
-	inputs          []string
+	inputs         []string
 }
 
 func (p *scriptedOnboardingPrompter) Choose(_ context.Context, _, _ string, options []string, defaultChoice int) (int, error) {
@@ -224,7 +224,7 @@ func TestConfigureCustomEndpointSelectsProtocolAndPersistsModel(t *testing.T) {
 
 	prompter := &scriptedOnboardingPrompter{
 		choices: []int{0, 0},
-		inputs:   []string{server.URL, ""},
+		inputs:  []string{server.URL, ""},
 	}
 	cfg, err := NewLazyAIRunner(nil).configureCustomEndpoint(context.Background(), prompter, config.AIConfig{})
 	if err != nil {
@@ -266,7 +266,7 @@ func TestConfigureCustomEndpointDetectsProtocolFromURL(t *testing.T) {
 
 	prompter := &scriptedOnboardingPrompter{
 		choices: []int{0},
-		inputs:   []string{server.URL + "/v1/chat/completions", ""},
+		inputs:  []string{server.URL + "/v1/chat/completions", ""},
 	}
 	cfg, err := NewLazyAIRunner(nil).configureCustomEndpoint(context.Background(), prompter, config.AIConfig{})
 	if err != nil {
@@ -306,17 +306,17 @@ func TestModelSetupMenuOffersReauthenticationOnlyForStoredCredential(t *testing.
 		Mode:       "remote",
 		Provider:   string(ai.RemoteCustom),
 		Protocol:   string(ai.RemoteProtocolOpenAIResponses),
-		Model:      "current-model",
+		Model:      "XYZ/XYZ-model",
 		BaseURL:    "https://example.test/v1",
 	}
 	_, withoutCredential, _, err := modelSetupMenu(context.Background(), current)
 	if err != nil {
 		t.Fatalf("modelSetupMenu() without credential: %v", err)
 	}
-	if !strings.HasPrefix(withoutCredential[0], "Keep current:") {
+	if withoutCredential[0] != "[Keep] XYZ-model" {
 		t.Fatalf("first menu option = %q, want keep-current action", withoutCredential[0])
 	}
-	if len(withoutCredential) > 1 && strings.HasPrefix(withoutCredential[1], "Re-authenticate current:") {
+	if len(withoutCredential) > 1 && strings.HasPrefix(withoutCredential[1], "[Login]") {
 		t.Fatal("reauthentication was offered without a stored credential")
 	}
 
@@ -330,7 +330,7 @@ func TestModelSetupMenuOffersReauthenticationOnlyForStoredCredential(t *testing.
 	if err != nil {
 		t.Fatalf("modelSetupMenu() with credential: %v", err)
 	}
-	if len(withCredential) < 2 || !strings.HasPrefix(withCredential[1], "Re-authenticate current:") {
+	if len(withCredential) < 2 || withCredential[1] != "[Login] XYZ-model" {
 		t.Fatalf("second menu option = %v, want reauthentication action", withCredential)
 	}
 }

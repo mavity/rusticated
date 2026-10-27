@@ -18,6 +18,15 @@ type RemoteModelInfo struct {
 	MaxInputTokens int
 }
 
+// RemoteModelDisplayName removes a duplicated namespace prefix from a model ID.
+func RemoteModelDisplayName(model string) string {
+	namespace, name, ok := strings.Cut(model, "/")
+	if ok && strings.HasPrefix(strings.ToLower(name), strings.ToLower(namespace)+"-") {
+		return name
+	}
+	return model
+}
+
 // DefaultRemoteModel returns the preferred default model ID for a provider.
 func DefaultRemoteModel(provider RemoteProvider) string {
 	switch provider {

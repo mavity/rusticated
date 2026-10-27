@@ -147,14 +147,10 @@ func modelSetupMenu(ctx context.Context, previous config.AIConfig) ([]modelSetup
 			if tier, ok := assets.LookupModelTier(previous.TierID); ok {
 				current = tier.Name
 			}
-		} else if previous.Mode == "remote" {
-			if previous.Provider == string(ai.RemoteCustom) {
-				current = fmt.Sprintf("Custom (%s, %s) / %s", previous.Protocol, previous.BaseURL, previous.Model)
-			} else {
-				current = fmt.Sprintf("%s / %s", previous.Provider, previous.Model)
-			}
+		} else if previous.Mode == "remote" && previous.Model != "" {
+			current = ai.RemoteModelDisplayName(previous.Model)
 		}
-		options = append(options, "Keep current: "+current)
+		options = append(options, "[Keep] "+current)
 		actions = append(actions, modelSetupAction{kind: "keep"})
 		if previous.Mode == "remote" {
 			credential, err := storedCredentialForConfig(ctx, previous)
@@ -162,7 +158,7 @@ func modelSetupMenu(ctx context.Context, previous config.AIConfig) ([]modelSetup
 				return nil, nil, 0, err
 			}
 			if credential != nil && credential.SecretToken() != "" {
-				options = append(options, "Re-authenticate current: "+current)
+				options = append(options, "[Login] "+current)
 				actions = append(actions, modelSetupAction{kind: "reauth"})
 			}
 		}

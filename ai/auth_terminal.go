@@ -142,10 +142,11 @@ func PromptSelect(ctx context.Context, term TerminalSession, title, message stri
 			}
 		}
 		for i, opt := range options {
+			label := RemoteModelDisplayName(opt)
 			if i == selected {
-				fmt.Fprintf(&sb, terminalSelectionStyle+" ▸ [%d] %s \x1b[0m\n", i+1, opt)
+				fmt.Fprintf(&sb, terminalSelectionStyle+" [%d] %s \x1b[0m\n", i+1, label)
 			} else {
-				fmt.Fprintf(&sb, "   [%d] %s\n", i+1, opt)
+				fmt.Fprintf(&sb, " [%d] %s\n", i+1, label)
 			}
 			lines++
 		}
@@ -178,7 +179,7 @@ func PromptSelect(ctx context.Context, term TerminalSession, title, message stri
 			_, _ = io.WriteString(term, "\n")
 			return -1, ErrAuthCancelled
 		case b[0] == '\r' || b[0] == '\n':
-			_, _ = fmt.Fprintf(term, "\r\x1b[2K\x1b[32m✓ %s\x1b[0m\n", options[selected])
+			_, _ = fmt.Fprintf(term, "\r\x1b[2K\x1b[32m✓ %s\x1b[0m\n", RemoteModelDisplayName(options[selected]))
 			return selected, nil
 		case b[0] == 0x1b:
 			if len(b) == 1 {
@@ -300,7 +301,10 @@ func promptSearchSelect(ctx context.Context, term TerminalSession, title, messag
 		needle := strings.ToLower(query)
 		for i, option := range options {
 			label := strings.TrimPrefix(option, "\x00")
-			if strings.HasPrefix(option, "\x00") || needle == "" || strings.Contains(strings.ToLower(label), needle) {
+			displayLabel := RemoteModelDisplayName(label)
+			if strings.HasPrefix(option, "\x00") || needle == "" ||
+				strings.Contains(strings.ToLower(label), needle) ||
+				strings.Contains(strings.ToLower(displayLabel), needle) {
 				filtered = append(filtered, i)
 			}
 		}
@@ -313,20 +317,19 @@ func promptSearchSelect(ctx context.Context, term TerminalSession, title, messag
 
 		maxLabelWidth := 1
 		for _, optionIndex := range filtered {
-			width := terminalTextWidth(strings.TrimPrefix(options[optionIndex], "\x00"))
+			label := RemoteModelDisplayName(strings.TrimPrefix(options[optionIndex], "\x00"))
+			width := terminalTextWidth(label)
 			if width > maxLabelWidth {
 				maxLabelWidth = width
 			}
 		}
-		columnGap := 2
-		columnWidth := maxLabelWidth + 2
-		columnCount := max(1, (cols+columnGap)/(columnWidth+columnGap))
+		columnWidth := maxLabelWidth + 1
+		columnCount := max(1, cols/columnWidth)
 		if columnCount > len(filtered) && len(filtered) > 0 {
 			columnCount = len(filtered)
 		}
 		lastColumnCount = columnCount
-		availableWidth := cols - (columnCount-1)*columnGap
-		cellWidth := max(1, availableWidth/max(1, columnCount))
+		cellWidth := min(columnWidth, cols)
 		totalRows := (len(filtered) + columnCount - 1) / columnCount
 
 		headerLines := 1
@@ -378,27 +381,21 @@ func promptSearchSelect(ctx context.Context, term TerminalSession, title, messag
 					break
 				}
 				optionIndex := filtered[optionPosition]
-				optionLabel := strings.TrimPrefix(options[optionIndex], "\x00")
-				label := truncateTerminalText(optionLabel, max(1, cellWidth-2))
+				optionLabel := RemoteModelDisplayName(strings.TrimPrefix(options[optionIndex], "\x00"))
+				label := truncateTerminalText(optionLabel, max(1, cellWidth-1))
 				if optionPosition == selected {
-					if column > 0 {
-						line.WriteString(strings.Repeat(" ", columnGap))
-					}
 					line.WriteString(terminalSelectionStyle)
-					line.WriteString("▸ ")
+					line.WriteByte(' ')
 					line.WriteString(label)
-					padding := cellWidth - 2 - terminalTextWidth(label)
+					padding := cellWidth - 1 - terminalTextWidth(label)
 					if padding > 0 {
 						line.WriteString(strings.Repeat(" ", padding))
 					}
 					line.WriteString("\x1b[0m")
 				} else {
-					if column > 0 {
-						line.WriteString(strings.Repeat(" ", columnGap))
-					}
-					line.WriteString("  ")
+					line.WriteByte(' ')
 					line.WriteString(label)
-					padding := cellWidth - 2 - terminalTextWidth(optionLabel)
+					padding := cellWidth - 1 - terminalTextWidth(optionLabel)
 					if padding > 0 && column+1 < columnCount {
 						line.WriteString(strings.Repeat(" ", padding))
 					}
@@ -491,7 +488,8 @@ func promptSearchSelect(ctx context.Context, term TerminalSession, title, messag
 					_, err := io.WriteString(term, "\n")
 					return choice, err
 				}
-				_, err := fmt.Fprintf(term, "\r\x1b[2K\x1b[32m✓ %s\x1b[0m\n", strings.TrimPrefix(options[choice], "\x00"))
+				label := RemoteModelDisplayName(strings.TrimPrefix(options[choice], "\x00"))
+				_, err := fmt.Fprintf(term, "\r\x1b[2K\x1b[32m✓ %s\x1b[0m\n", label)
 				return choice, err
 			case data[0] == 0x1b:
 				if len(data) == 1 {
@@ -589,7 +587,8 @@ func promptSelectLine(ctx context.Context, term TerminalSession, title, message 
 		}
 	}
 	for i, opt := range options {
-		if _, err := fmt.Fprintf(term, "  [%d] %s\n", i+1, strings.TrimPrefix(opt, "\x00")); err != nil {
+		label := RemoteModelDisplayName(strings.TrimPrefix(opt, "\x00"))
+		if _, err := fmt.Fprintf(term, "  [%d] %s\n", i+1, label); err != nil {
 			return -1, err
 		}
 	}
