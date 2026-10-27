@@ -168,6 +168,12 @@ type BackgroundChunk struct {
   visual presentation (inline, separate drawer, or collapsable folds) is decided
   independently by the UI layer.
 
+Assistant responses are stored as raw Markdown and rendered to ANSI with
+Glamour when the turn completes. The renderer uses the current block width and a
+centralized palette in `markdown.go`; while a response is streaming, sanitized
+plain Markdown is shown so incomplete fences and tables are not repeatedly
+reflowed. Untrusted control characters are removed before either display path.
+
 ## Concurrency and execution model (Who touches what)
 
 State ownership follows a strict single-goroutine coordinator model using
