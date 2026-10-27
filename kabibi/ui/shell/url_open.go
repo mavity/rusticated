@@ -8,6 +8,7 @@ import (
 )
 
 var openableURLPattern = regexp.MustCompile(`(?i)(?:https?://|www\.)[^\s<>"']+`)
+var oscSequencePattern = regexp.MustCompile(`\x1b\][^\x1b\x07]*(\x07|\x1b\\)`)
 
 func (s *Shell) latestOutputURL() string {
 	s.mu.Lock()
@@ -43,6 +44,7 @@ func (s *Shell) openLatestOutputURL() bool {
 }
 
 func extractLastOpenableURL(text string) string {
+	text = oscSequencePattern.ReplaceAllString(text, "")
 	text = ansiRegex.ReplaceAllString(text, "")
 	matches := openableURLPattern.FindAllString(text, -1)
 	for i := len(matches) - 1; i >= 0; i-- {
