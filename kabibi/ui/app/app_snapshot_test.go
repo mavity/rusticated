@@ -23,6 +23,27 @@ func renderAppANSIForTest(t *testing.T, text string, width, height int) (termina
 	return buf, cursor
 }
 
+func TestAppWidgetShellCursorRemainsVisibleWhilePanelsRouteNavigation(t *testing.T) {
+	widget := NewWidget(AppWidgetOptions{WorkingDir: t.TempDir(), PanelsVisible: true})
+	defer widget.Close()
+	rect := ui.Rect{W: 80, H: 24}
+
+	widget.HandleEvent(input.KeyPressEvent{Code: 'x', Text: "x"})
+	if got := widget.Shell().Input().Value(); got != "x" {
+		t.Fatalf("shell input after typing with panels visible = %q, want %q", got, "x")
+	}
+	_, cursor := renderAppANSIForTest(t, widget.Render(rect, ui.RenderContext{Focused: true}), rect.W, rect.H)
+	if !cursor.Visible {
+		t.Fatal("shell cursor should be visible while shell typing is allowed with panels visible")
+	}
+
+	widget.openSettingsDialog()
+	_, cursor = renderAppANSIForTest(t, widget.Render(rect, ui.RenderContext{Focused: true}), rect.W, rect.H)
+	if cursor.Visible {
+		t.Fatal("shell cursor should be hidden while a modal dialog takes focus")
+	}
+}
+
 func assertAppSnapshot(t *testing.T, snapFile string, widget *AppWidget, scrollback *string, rect ui.Rect) {
 	t.Helper()
 

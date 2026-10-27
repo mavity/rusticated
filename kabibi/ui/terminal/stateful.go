@@ -93,8 +93,8 @@ func (t *Terminal) Resize(width, height int) {
 	t.emulator.Resize(width, height)
 }
 
-// Reset starts a fresh frame at the requested size. It discards prior screen,
-// scrollback, cursor, parser, and alternate-screen state.
+// Reset starts a fresh frame at the requested size while retaining the emulator
+// and its parser/screen allocations.
 func (t *Terminal) Reset(width, height int) {
 	if t == nil {
 		return
@@ -105,12 +105,25 @@ func (t *Terminal) Reset(width, height int) {
 	if height < 1 {
 		height = 1
 	}
+	if t.emulator == nil {
+		t.width, t.height = width, height
+		t.cursorVisible = true
+		t.initEmulator()
+	}
+	if width != t.width || height != t.height {
+		t.emulator.Resize(width, height)
+	}
 	t.width, t.height = width, height
 	t.cursorVisible = false
 	t.alternate = false
 	t.retainedHeight = 0
-	t.initEmulator()
-	_, _ = t.emulator.WriteString("\x1b[?25l")
+	_, _ = t.emulator.WriteString(
+		"\x18\x1bc" +
+			ansi.SetMode(ansi.ModeUnicodeCore) +
+			ansi.SetMode(ansi.ModeLineFeedNewLine) +
+			"\x1b[?25l",
+	)
+	t.emulator.ClearScrollback()
 }
 
 // Size returns the current terminal dimensions.

@@ -1108,6 +1108,9 @@ func TestAppTUI_BluePanels_ShownThenWithdrawn_TopAnchoredDownwardGrowth(t *testi
 	if bufOpen.Height != 10 || curOpen.Y != 8 {
 		t.Fatalf("with panels open on 80x10: height=%d cursorY=%d, want height=10 cursorY=8", bufOpen.Height, curOpen.Y)
 	}
+	if !curOpen.Visible {
+		t.Fatal("shell input cursor should remain visible while panels are open")
+	}
 
 	// 2. Withdraw panels (Ctrl+O again) -> stack must immediately anchor at row 0
 	// (banner rows at 0..3, PromptInput at row 4, blank footer at row 5 -> occupied height 6)

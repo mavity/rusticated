@@ -136,6 +136,62 @@ func TestTerminalRenderANSIResetsBetweenExactSizeFrames(t *testing.T) {
 	}
 }
 
+func TestTerminalResetReusesAndClearsEmulator(t *testing.T) {
+	term := NewTerminal(4, 2)
+	emulator := term.emulator
+	if _, err := term.WriteString("one\r\ntwo\r\nthree"); err != nil {
+		t.Fatal(err)
+	}
+	if term.ScrollbackLen() == 0 {
+		t.Fatal("test setup did not create scrollback")
+	}
+	if _, err := term.WriteString("\x1b[?1049halt\x1b[?25h\x1b[31"); err != nil {
+		t.Fatal(err)
+	}
+
+	term.Reset(6, 3)
+	if term.emulator != emulator {
+		t.Fatal("Reset replaced the VT emulator instead of reusing it")
+	}
+	if term.IsAltScreen() {
+		t.Fatal("Reset left the emulator on the alternate screen")
+	}
+	if got := term.ScrollbackLen(); got != 0 {
+		t.Fatalf("Reset scrollback length = %d, want 0", got)
+	}
+	if got := term.viewportCursor(); got.Visible {
+		t.Fatalf("Reset cursor visibility = true, want hidden: %+v", got)
+	}
+
+	frame := term.ViewportSnapshot()
+	if frame.Width != 6 || frame.Height != 3 {
+		t.Fatalf("Reset frame size = %dx%d, want 6x3", frame.Width, frame.Height)
+	}
+	for y := 0; y < frame.Height; y++ {
+		for x := 0; x < frame.Width; x++ {
+			cell := frame.Get(x, y)
+			if cell.Grapheme != " " ||
+				!cell.Style.HasAttribute(CharResetForegroundDefault) ||
+				!cell.Style.HasAttribute(CharResetBackgroundDefault) {
+				t.Fatalf("Reset cell (%d,%d) = %+v, want blank with default colors", x, y, cell)
+			}
+		}
+	}
+
+	if _, err := term.WriteString("a\nb"); err != nil {
+		t.Fatal(err)
+	}
+	_, cursor := term.Snapshot()
+	if cursor.X != 1 || cursor.Y != 1 {
+		t.Fatalf("cursor after Reset lost line-feed-newline mode: got (%d,%d), want (1,1)",
+			cursor.X, cursor.Y)
+	}
+	after := term.ViewportSnapshot()
+	if got := after.Get(0, 0).Grapheme; got != "a" {
+		t.Fatalf("first cell after Reset = %q, want %q", got, "a")
+	}
+}
+
 func TestTerminalAlternateScreenDoesNotReplaceMainScreen(t *testing.T) {
 	term := NewTerminal(12, 4)
 	if _, err := term.WriteString("main"); err != nil {

@@ -371,12 +371,13 @@ Currently, the codebase is **inconsistent**—`RenderContext` exists and carries
   * `PromptInput` has `p.focused bool` on the struct (`Focus()` / `Blur()`), and checks `focused := p.focused && ctx.Focused`.
   * `FilePaneWidget` has `w.active bool` on the struct (`SetActive(bool)`), and `DualPaneWidget` calls `w.Left.RenderBuf()` without even passing `RenderContext`!
   * `widgets.TextInput` and `widgets.ButtonRow` added `focused bool` / `Focused bool` fields on the struct, and `DialogWidget` mutates `field.Input.SetFocused(...)` and `buttons.Focused = ...` before calling `Render(..., ctx)`.
-  * Worse, `AppWidget.Render` passes the exact same incoming `ctx` (with `ctx.Focused == true`) down to `w.sh.Render(r, ctx)`, `w.panels.Render(..., ctx)`, and `dlg.Render(..., ctx)`—even when a modal dialog or blue panel is open and `Shell` does **not** have focus!
+  * Worse, `AppWidget.Render` passes the exact same incoming `ctx` (with `ctx.Focused == true`) down to `w.sh.Render(r, ctx)`, `w.panels.Render(..., ctx)`, and `dlg.Render(..., ctx)`—even when a modal dialog is open and `Shell` and `DualPaneWidget` do **not** have focus!
 
 **Your rule makes this much cleaner:**
 * Widgets should **not** store a `focused` / `active` boolean field on themselves.
-* Instead, `Render` takes `ctx RenderContext` (e.g. `Render(r Rect, ctx RenderContext) string` or `Render(w, h int, ctx RenderContext) string`), and **only the parent decides who is focused** by passing `ctx.Focused = true` to the single active child and `ctx.Focused = false` to inactive children:
-  * `AppWidget` passes `ctx.Focused = (dlg == nil && !panelsVis)` to `Shell`, `ctx.Focused = (dlg == nil && panelsVis)` to `DualPaneWidget`, and `ctx.Focused = true` to `dlg`.
+* Instead, `Render` takes `ctx RenderContext` (e.g. `Render(r Rect, ctx RenderContext) string` or `Render(w, h int, ctx RenderContext) string`), and **only the parent decides who is focused** by passing `ctx.Focused` down to its children:
+  * In `AppWidget`, focus in `Shell` reflects whether typing is expected and allowed in the shell prompt. Showing the blue file panels splits navigation keys (`Up`/`Down`/`PgUp`/`PgDn`/`Tab`) to the panels while printable typing continues into the shell prompt, so **both `Shell` and `DualPaneWidget` receive `ctx.Focused = (dlg == nil)`** when the panels are visible. The shell keeps its visible input cursor while the active file pane highlights its selection bar.
+  * When a modal popup/dialog (`dlg != nil`) is open, it takes focus away from both the shell and the panels: `AppWidget` passes `ctx.Focused = false` to `Shell` and `DualPaneWidget`, and `ctx.Focused = true` to `dlg`.
   * `DualPaneWidget` passes `ctx.Focused = (ctx.Focused && w.activePane == 0)` to `Left` and `ctx.Focused = (ctx.Focused && w.activePane == 1)` to `Right`.
   * `DialogWidget` passes `ctx.Focused = (ctx.Focused && i == w.focusedField && !w.focusedButton)` to `field.Input.Render(...)`, and `ctx.Focused = (ctx.Focused && w.focusedButton)` to `buttons.Render(...)`.
 * And `ctx.Invalidate` stays on `RenderContext` just as it is today.
@@ -587,3 +588,15 @@ That is a useful compositing rule, but the section needs a few corrections befor
 This is a plausible solution to the background-bleed problem **if** the contract is explicitly: “In a child snapshot, reset foreground/background means inherit that channel from the corresponding destination cell; the child replaces the destination’s grapheme throughout its allocated rectangle.” It is not a general alpha model, and the distinction between inheritance and literal terminal-default color must be a conscious choice.
 
 I’d add tests for independent FG/BG fallback, nonuniform destination colors, nested composition, root-default preservation, resets and erase/overwrite sequences, exact rectangle sizing, and wide-character overlap before adopting it. No changes were made.
+
+---
+
+## Performance Update: Cached Terminals & Pre-Seeded Surfaces
+
+The composition path reuses each parent's cached `terminal.Terminal`. `Terminal.Reset(width, height)` resizes the existing emulator only when dimensions change, cancels any incomplete ANSI sequence, performs an in-place RIS reset, restores Unicode-core and line-feed/newline modes, hides the cursor, and clears scrollback. This retains the VT parser and screen allocations between frames while discarding prior frame state.
+
+Parent destination buffers are initialized with the surface colors used by reset-channel inheritance: dialogs use `FG: #E5E5E5, BG: #1A1F26`; file panes and the dual-pane surface use `FG: #FFFFFF, BG: #0000A8`; shell and host surfaces retain terminal-default FG/BG markers. Child VT snapshots begin with blank cells carrying reset-default FG/BG markers, which inherit from the corresponding pre-seeded destination cells during composition.
+
+`CommandBlock` keeps its settled `CellBuf` cache keyed by width and content state (`Prompt`, `Input`, output length, live-output generation, animation state, and status). `Shell.renderStackBlocksLocked` now assembles those cached cells directly, avoiding the previous per-block `CommandBlock.Render` → ANSI serialization → VT parse round-trip on every frame. Dirty blocks and width changes still regenerate the cache; the public widget API remains ANSI-string rendering.
+
+`BenchmarkShellRenderSettledBlocks` compares cached-cell assembly with the previous ANSI/VT round-trip using 100 settled blocks. On the recorded run, cached-cell assembly measured **4.22 µs/op, 5.1 KB/op, 3 allocs/op**, compared with **3.63 ms/op, 2.85 MB/op, 18,502 allocs/op** for the ANSI/VT path. These figures are benchmark-specific, but confirm the avoided work is substantial.

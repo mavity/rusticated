@@ -459,7 +459,7 @@ func (w *AppWidget) Render(r terminal.Rect, ctx ui.RenderContext) string {
 		return ed.Render(r, ctx.ForChild(true))
 	}
 
-	shellANSI := w.sh.Render(r, ctx.ForChild(dlg == nil && !panelsVis))
+	shellANSI := w.sh.Render(r, ctx.ForChild(dlg == nil))
 	shellFrame, cursor, shellHeight, err := w.compositor.RenderANSIForComposition(shellANSI, r.W, r.H)
 	if err != nil {
 		if ctx.OnError != nil {
