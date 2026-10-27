@@ -152,6 +152,11 @@ type EmptyEnterHandler interface {
 	HandleEmptyEnter() bool
 }
 
+// BrowserURLOpener opens a URL supplied directly by an authentication flow.
+type BrowserURLOpener interface {
+	OpenURL(url string) error
+}
+
 // StdioTerminalSession wraps an io.Reader and io.Writer as a non-TTY (or simple line)
 // TerminalSession for headless / one-shot CLI execution and deterministic unit tests.
 type StdioTerminalSession struct {
@@ -787,17 +792,21 @@ func PromptLine(ctx context.Context, term TerminalSession, title, prompt string,
 	return readLineFromTerm(ctx, term, secret)
 }
 
-// PromptOpenURL lets an interactive terminal open the latest displayed URL on Enter.
-func PromptOpenURL(ctx context.Context, term TerminalSession, prompt string) error {
+// PromptOpenURL lets an interactive terminal open the supplied URL on Enter.
+func PromptOpenURL(ctx context.Context, term TerminalSession, target, prompt string) error {
 	if term == nil {
 		return errors.New("AI URL prompt requires an active terminal session")
+	}
+	parsed, err := url.Parse(target)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return fmt.Errorf("invalid browser URL %q", target)
 	}
 	if !term.IsTTY() {
 		return nil
 	}
-	handler, ok := term.(EmptyEnterHandler)
+	opener, ok := term.(BrowserURLOpener)
 	if !ok {
-		return nil
+		return errors.New("AI terminal does not support direct browser URL opening")
 	}
 	if _, err := fmt.Fprintln(term, prompt); err != nil {
 		return err
@@ -816,16 +825,29 @@ func PromptOpenURL(ctx context.Context, term TerminalSession, prompt string) err
 		for _, b := range buf[:n] {
 			switch b {
 			case '\r', '\n':
-				if !handler.HandleEmptyEnter() {
-					return errors.New("no authorization URL was available to open")
+				if err := opener.OpenURL(target); err != nil {
+					return fmt.Errorf("open authorization URL: %w", err)
 				}
-				_, _ = fmt.Fprintln(term)
+				if _, err := fmt.Fprintln(term); err != nil {
+					return err
+				}
 				return nil
 			case 3, 0x1b:
 				return ErrAuthCancelled
 			}
 		}
 	}
+}
+
+type terminalWithoutEmptyEnter struct {
+	TerminalSession
+}
+
+func withoutEmptyEnter(term TerminalSession) TerminalSession {
+	if term == nil {
+		return nil
+	}
+	return terminalWithoutEmptyEnter{TerminalSession: term}
 }
 
 func readLineFromTerm(ctx context.Context, term TerminalSession, secret bool) (string, error) {
@@ -1202,6 +1224,7 @@ func WaitForCallbackOrManualInput[T any](
 	parseManual func(input string) (T, error),
 ) (T, error) {
 	var zero T
+	term = withoutEmptyEnter(term)
 	if callback == nil {
 		input, err := PromptLine(ctx, term, "", promptMessage, false)
 		if err != nil {
