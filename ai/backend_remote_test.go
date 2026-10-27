@@ -73,6 +73,223 @@ func TestGitHubCopilotRetriesWithResponsesAPIWhenModelRejectsCompletions(t *test
 	}
 }
 
+func TestCustomRemoteEndpointBuildsProtocolSpecificRequests(t *testing.T) {
+	tests := []struct {
+		name     string
+		protocol RemoteAPIProtocol
+		baseURL  string
+		apiKey   string
+		wantURL  string
+		wire     remoteWireKind
+		wantAuth string
+	}{
+		{
+			name:     "OpenAI Chat Completions",
+			protocol: RemoteProtocolOpenAIChatCompletions,
+			baseURL:  "https://example.test/v1",
+			wantURL:  "https://example.test/v1/chat/completions",
+			wire:     wireOpenAICompletions,
+		},
+		{
+			name:     "OpenAI Responses",
+			protocol: RemoteProtocolOpenAIResponses,
+			baseURL:  "https://example.test/v1/responses",
+			apiKey:   "secret",
+			wantURL:  "https://example.test/v1/responses",
+			wire:     wireOpenAIResponses,
+			wantAuth: "Bearer secret",
+		},
+		{
+			name:     "Anthropic Messages",
+			protocol: RemoteProtocolAnthropicMessages,
+			baseURL:  "https://example.test/v1/messages",
+			apiKey:   "secret",
+			wantURL:  "https://example.test/v1/messages",
+			wire:     wireAnthropicMessages,
+		},
+		{
+			name:     "Gemini generateContent",
+			protocol: RemoteProtocolGeminiGenerateContent,
+			baseURL:  "https://example.test/v1beta",
+			apiKey:   "secret",
+			wantURL:  "https://example.test/v1beta/models/test-model:streamGenerateContent?alt=sse",
+			wire:     wireGeminiContent,
+		},
+		{
+			name:     "GitHub Copilot",
+			protocol: RemoteProtocolCopilot,
+			baseURL:  "https://example.test/api",
+			apiKey:   "secret",
+			wantURL:  "https://example.test/api/chat/completions",
+			wire:     wireOpenAICompletions,
+			wantAuth: "Bearer secret",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			remote := RemoteEngineConfig{
+				Provider: RemoteCustom,
+				Protocol: test.protocol,
+				Model:    "test-model",
+				APIKey:   test.apiKey,
+				BaseURL:  test.baseURL,
+			}
+			engine, err := NewRemoteEngine(remote)
+			if err != nil {
+				t.Fatalf("NewRemoteEngine() error = %v", err)
+			}
+			engine.Close()
+			request, wire, err := buildRemoteRequestWithWire(remote, ConversationConfig{}, []PromptPart{{Role: RoleUser, Text: "hello"}})
+			if err != nil {
+				t.Fatalf("buildRemoteRequestWithWire() error = %v", err)
+			}
+			if request.url != test.wantURL {
+				t.Errorf("request URL = %q, want %q", request.url, test.wantURL)
+			}
+			if wire != test.wire {
+				t.Errorf("wire protocol = %q, want %q", wire, test.wire)
+			}
+			if got := request.headers["Authorization"]; got != test.wantAuth {
+				t.Errorf("Authorization = %q, want %q", got, test.wantAuth)
+			}
+			if test.protocol == RemoteProtocolAnthropicMessages {
+				if got := request.headers["x-api-key"]; got != test.apiKey {
+					t.Errorf("x-api-key = %q, want configured key", got)
+				}
+			}
+			if test.protocol == RemoteProtocolGeminiGenerateContent {
+				if got := request.headers["x-goog-api-key"]; got != test.apiKey {
+					t.Errorf("x-goog-api-key = %q, want configured key", got)
+				}
+			}
+		})
+	}
+}
+
+func TestCustomRemoteCatalogUsesSelectedProtocolAndOptionalAuthentication(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" {
+			t.Errorf("catalog request = %s %s, want GET /v1/models", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("unexpected Authorization header on unauthenticated catalog request: %q", got)
+		}
+		_, _ = fmt.Fprint(w, `{"data":[{"id":"model-a","context_length":4096},{"id":"model-b"}]}`)
+	}))
+	defer server.Close()
+
+	models, err := ListRemoteModelDetails(context.Background(), RemoteEngineConfig{
+		Provider: RemoteCustom,
+		Protocol: RemoteProtocolOpenAIResponses,
+		BaseURL:  server.URL + "/v1/responses",
+	})
+	if err != nil {
+		t.Fatalf("ListRemoteModelDetails() error = %v", err)
+	}
+	if len(models) != 2 || models[0].ID != "model-a" || models[0].MaxInputTokens != 4096 {
+		t.Fatalf("catalog models = %+v, want model-a with its context limit and model-b", models)
+	}
+}
+
+func TestCustomRemoteEndpointCanStreamWithoutAnAPIKey(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
+			t.Errorf("generation request = %s %s, want POST /v1/chat/completions", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("unexpected Authorization header: %q", got)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintln(w, `data: {"choices":[{"delta":{"content":"ok"}}]}`)
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "data: [DONE]")
+		_, _ = fmt.Fprintln(w)
+	}))
+	defer server.Close()
+
+	engine, err := NewRemoteEngine(RemoteEngineConfig{
+		Provider: RemoteCustom,
+		Protocol: RemoteProtocolOpenAIChatCompletions,
+		Model:    "test-model",
+		BaseURL:  server.URL + "/v1",
+	})
+	if err != nil {
+		t.Fatalf("NewRemoteEngine() error = %v", err)
+	}
+	defer engine.Close()
+	conversation, err := engine.NewConversationWithConfig(ConversationConfig{})
+	if err != nil {
+		t.Fatalf("NewConversationWithConfig() error = %v", err)
+	}
+	defer conversation.Close()
+	var text strings.Builder
+	for event, streamErr := range conversation.SendStream(context.Background(), []PromptPart{{Role: RoleUser, Text: "hello"}}) {
+		if streamErr != nil {
+			t.Fatalf("SendStream() error = %v", streamErr)
+		}
+		if delta, ok := event.(TextEvent); ok {
+			text.WriteString(delta.Text)
+		}
+	}
+	if text.String() != "ok" {
+		t.Fatalf("streamed text = %q, want %q", text.String(), "ok")
+	}
+}
+
+func TestCustomCopilotEndpointRetriesWithResponsesProtocol(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		switch r.URL.Path {
+		case "/api/chat/completions":
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = fmt.Fprint(w, `{"error":{"message":"unsupported API for model","code":"unsupported_api_for_model"}}`)
+		case "/api/responses":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprintln(w, `event: response.output_text.delta`)
+			_, _ = fmt.Fprintln(w, `data: {"type":"response.output_text.delta","delta":"copilot"}`)
+			_, _ = fmt.Fprintln(w)
+			_, _ = fmt.Fprintln(w, `event: response.completed`)
+			_, _ = fmt.Fprintln(w, `data: {"type":"response.completed"}`)
+			_, _ = fmt.Fprintln(w)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	engine, err := NewRemoteEngine(RemoteEngineConfig{
+		Provider: RemoteCustom,
+		Protocol: RemoteProtocolCopilot,
+		Model:    "gpt-6-luna",
+		BaseURL:  server.URL + "/api",
+	})
+	if err != nil {
+		t.Fatalf("NewRemoteEngine() error = %v", err)
+	}
+	defer engine.Close()
+	conversation, err := engine.NewConversationWithConfig(ConversationConfig{})
+	if err != nil {
+		t.Fatalf("NewConversationWithConfig() error = %v", err)
+	}
+	defer conversation.Close()
+	var text strings.Builder
+	for event, streamErr := range conversation.SendStream(context.Background(), []PromptPart{{Role: RoleUser, Text: "hello"}}) {
+		if streamErr != nil {
+			t.Fatalf("SendStream() error = %v", streamErr)
+		}
+		if delta, ok := event.(TextEvent); ok {
+			text.WriteString(delta.Text)
+		}
+	}
+	if text.String() != "copilot" {
+		t.Fatalf("streamed text = %q, want %q", text.String(), "copilot")
+	}
+	if !reflect.DeepEqual(paths, []string{"/api/chat/completions", "/api/responses"}) {
+		t.Fatalf("request paths = %v, want chat/completions then responses", paths)
+	}
+}
+
 func TestRemoteOpenAIStreamPreservesToolCallIDsInHistory(t *testing.T) {
 	var requests atomic.Int32
 	var toolCallID string

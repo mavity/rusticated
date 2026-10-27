@@ -48,8 +48,12 @@ func ListRemoteModelDetails(ctx context.Context, cfg RemoteEngineConfig) ([]Remo
 	if cfg.APIKey == "" && cfg.Credential != nil {
 		cfg.APIKey = cfg.Credential.SecretToken()
 	}
-	if cfg.APIKey == "" {
+	if cfg.APIKey == "" && cfg.Provider != RemoteCustom {
 		return nil, fmt.Errorf("remote AI credential must not be empty")
+	}
+	catalogProvider := cfg.Provider
+	if cfg.Provider == RemoteCustom {
+		catalogProvider = remoteCatalogProvider(cfg.Protocol)
 	}
 	if cfg.Provider == RemoteCopilot {
 		enterpriseDomain := ""
@@ -70,17 +74,45 @@ func ListRemoteModelDetails(ctx context.Context, cfg RemoteEngineConfig) ([]Remo
 	headers := map[string]string{"Accept": "application/json"}
 	switch cfg.Provider {
 	case RemoteOpenAI, RemoteOpenRouter:
-		headers["Authorization"] = "Bearer " + cfg.APIKey
+		if cfg.APIKey != "" {
+			headers["Authorization"] = "Bearer " + cfg.APIKey
+		}
 	case RemoteAnthropic:
 		headers["anthropic-version"] = "2023-06-01"
 		if isAnthropicOAuthToken(cfg.Credential, cfg.APIKey) {
 			headers["Authorization"] = "Bearer " + cfg.APIKey
 			headers["anthropic-beta"] = "claude-code-20250219,oauth-2025-04-20"
-		} else {
+		} else if cfg.APIKey != "" {
 			headers["x-api-key"] = cfg.APIKey
 		}
 	case RemoteGemini:
-		headers["x-goog-api-key"] = cfg.APIKey
+		if cfg.APIKey != "" {
+			headers["x-goog-api-key"] = cfg.APIKey
+		}
+	case RemoteCustom:
+		switch cfg.Protocol {
+		case RemoteProtocolOpenAIChatCompletions, RemoteProtocolOpenAIResponses:
+			if cfg.APIKey != "" {
+				headers["Authorization"] = "Bearer " + cfg.APIKey
+			}
+		case RemoteProtocolAnthropicMessages:
+			headers["anthropic-version"] = "2023-06-01"
+			if cfg.APIKey != "" {
+				headers["x-api-key"] = cfg.APIKey
+			}
+		case RemoteProtocolGeminiGenerateContent:
+			if cfg.APIKey != "" {
+				headers["x-goog-api-key"] = cfg.APIKey
+			}
+		case RemoteProtocolCopilot:
+			if cfg.APIKey != "" {
+				headers["Authorization"] = "Bearer " + cfg.APIKey
+			}
+			headers["X-GitHub-Api-Version"] = copilotAPIVersion
+			for key, value := range copilotStaticHeaders {
+				headers[key] = value
+			}
+		}
 	default:
 		return nil, fmt.Errorf("unsupported remote AI provider %q", cfg.Provider)
 	}
@@ -89,7 +121,7 @@ func ListRemoteModelDetails(ctx context.Context, cfg RemoteEngineConfig) ([]Remo
 	cursor := ""
 	seenCursors := make(map[string]struct{})
 	for page := 0; page < maxRemoteModelCatalogPages; page++ {
-		pageURL, err := remoteModelsPageURL(endpoint, cfg.Provider, cursor)
+		pageURL, err := remoteModelsPageURL(endpoint, catalogProvider, cursor)
 		if err != nil {
 			return nil, fmt.Errorf("build %s model catalog request: %w", cfg.Provider, err)
 		}
@@ -176,7 +208,7 @@ func ListRemoteModelDetails(ctx context.Context, cfg RemoteEngineConfig) ([]Remo
 		}
 
 		next := ""
-		switch cfg.Provider {
+		switch catalogProvider {
 		case RemoteOpenAI:
 			if payload.HasMore {
 				next = payload.LastID
@@ -211,6 +243,20 @@ func remoteModelsEndpoint(cfg RemoteEngineConfig) (string, error) {
 		if err := validateRemoteBaseURL(cfg.BaseURL); err != nil {
 			return "", fmt.Errorf("validate %s model catalog endpoint: %w", cfg.Provider, err)
 		}
+		if cfg.Provider == RemoteCustom {
+			switch cfg.Protocol {
+			case RemoteProtocolOpenAIChatCompletions, RemoteProtocolOpenAIResponses:
+				return customEndpoint(cfg.BaseURL, "/v1/models"), nil
+			case RemoteProtocolAnthropicMessages:
+				return customEndpoint(cfg.BaseURL, "/v1/models"), nil
+			case RemoteProtocolGeminiGenerateContent:
+				return customEndpoint(cfg.BaseURL, "/v1beta/models"), nil
+			case RemoteProtocolCopilot:
+				return customEndpoint(cfg.BaseURL, "/models"), nil
+			default:
+				return "", fmt.Errorf("unsupported custom remote API protocol %q", cfg.Protocol)
+			}
+		}
 		return cfg.BaseURL, nil
 	}
 	switch cfg.Provider {
@@ -224,6 +270,19 @@ func remoteModelsEndpoint(cfg RemoteEngineConfig) (string, error) {
 		return "https://generativelanguage.googleapis.com/v1beta/models", nil
 	default:
 		return "", fmt.Errorf("unsupported remote AI provider %q", cfg.Provider)
+	}
+}
+
+func remoteCatalogProvider(protocol RemoteAPIProtocol) RemoteProvider {
+	switch protocol {
+	case RemoteProtocolOpenAIChatCompletions, RemoteProtocolOpenAIResponses, RemoteProtocolCopilot:
+		return RemoteOpenAI
+	case RemoteProtocolAnthropicMessages:
+		return RemoteAnthropic
+	case RemoteProtocolGeminiGenerateContent:
+		return RemoteGemini
+	default:
+		return RemoteCustom
 	}
 }
 

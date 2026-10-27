@@ -229,15 +229,24 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 		maxTokens = remoteContextTokenBudget(cfg.ContextTokens)
 		provider := ai.RemoteProvider(cfg.Provider)
 		store := credstore.NewStore()
-		cred, credErr := store.Read(ctx, cfg.Provider)
-		if credErr != nil || cred == nil {
+		credentialID := credentialStoreID(cfg)
+		cred, credErr := store.Read(ctx, credentialID)
+		if credErr != nil {
+			return fmt.Errorf("load %s AI credential: %w", cfg.Provider, credErr)
+		}
+		if cred == nil && provider != ai.RemoteCustom {
 			return fmt.Errorf("load %s AI credential: no stored credential; run `ai login %s` or `ai setup`", cfg.Provider, cfg.Provider)
+		}
+		var credentials ai.CredentialStore
+		if provider != ai.RemoteCustom {
+			credentials = store
 		}
 		engine, err = ai.NewRemoteEngine(ai.RemoteEngineConfig{
 			Provider:    provider,
+			Protocol:    ai.RemoteAPIProtocol(cfg.Protocol),
 			Model:       cfg.Model,
 			Credential:  cred,
-			Credentials: store,
+			Credentials: credentials,
 			BaseURL:     cfg.BaseURL,
 		})
 	default:

@@ -41,6 +41,55 @@ func initAppTestRepository(t *testing.T, root string) *git.Repository {
 	return repo
 }
 
+func TestPanelsHideDuringCommandAndRestorePreviousVisibility(t *testing.T) {
+	widget := NewWidget(AppWidgetOptions{WorkingDir: t.TempDir(), PanelsVisible: true})
+	defer widget.Close()
+
+	commandDone := make(chan struct{})
+	go func() {
+		widget.Shell().ExecuteLine("sleep 0.2")
+		close(commandDone)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for widget.PanelsVisible() && time.Now().Before(deadline) {
+		time.Sleep(1 * time.Millisecond)
+	}
+	if widget.PanelsVisible() {
+		t.Fatal("panels remained visible after command start")
+	}
+	if widget.Shell().BottomAligned() {
+		t.Fatal("shell remained bottom-aligned while panels were hidden")
+	}
+
+	select {
+	case <-commandDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("command did not finish")
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for !widget.PanelsVisible() && time.Now().Before(deadline) {
+		time.Sleep(1 * time.Millisecond)
+	}
+	if !widget.PanelsVisible() || !widget.Shell().BottomAligned() {
+		t.Fatal("panels were not restored after command completion")
+	}
+
+	widget.SetPanelsVisible(false)
+	commandDone = make(chan struct{})
+	go func() {
+		widget.Shell().ExecuteLine("sleep 0.2")
+		close(commandDone)
+	}()
+	select {
+	case <-commandDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("command with hidden panels did not finish")
+	}
+	if widget.PanelsVisible() || widget.Shell().BottomAligned() {
+		t.Fatal("command changed panel visibility that was initially hidden")
+	}
+}
+
 type syncBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer

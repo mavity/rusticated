@@ -26,6 +26,29 @@ func ValidateRemoteCredential(ctx context.Context, cfg RemoteEngineConfig) error
 		},
 	}
 	switch cfg.Provider {
+	case RemoteCustom:
+		endpoint, err := remoteModelsEndpoint(cfg)
+		if err != nil {
+			return err
+		}
+		request.url = endpoint
+		switch cfg.Protocol {
+		case RemoteProtocolOpenAIChatCompletions, RemoteProtocolOpenAIResponses:
+			request.headers["Authorization"] = "Bearer " + cfg.APIKey
+		case RemoteProtocolAnthropicMessages:
+			request.headers["anthropic-version"] = "2023-06-01"
+			request.headers["x-api-key"] = cfg.APIKey
+		case RemoteProtocolGeminiGenerateContent:
+			request.headers["x-goog-api-key"] = cfg.APIKey
+		case RemoteProtocolCopilot:
+			request.headers["Authorization"] = "Bearer " + cfg.APIKey
+			request.headers["X-GitHub-Api-Version"] = copilotAPIVersion
+			for key, value := range copilotStaticHeaders {
+				request.headers[key] = value
+			}
+		default:
+			return fmt.Errorf("unsupported custom remote API protocol %q", cfg.Protocol)
+		}
 	case RemoteOpenAI:
 		request.url = cfg.BaseURL
 		if request.url == "" {

@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"ai/assets"
 )
@@ -217,6 +219,316 @@ func PromptSelect(ctx context.Context, term TerminalSession, title, message stri
 	}
 }
 
+// PromptSearchSelect renders a searchable, multi-column terminal selector.
+// Typing filters options immediately; arrow keys move the selection.
+func PromptSearchSelect(ctx context.Context, term TerminalSession, title, message string, options []string, defaultIdx int) (int, error) {
+	if len(options) == 0 {
+		return -1, errors.New("prompt select requires at least one option")
+	}
+	if defaultIdx < 0 || defaultIdx >= len(options) {
+		defaultIdx = 0
+	}
+	if term == nil {
+		return -1, errors.New("AI setup requires an active terminal session")
+	}
+	if !term.IsTTY() {
+		return promptSelectLine(ctx, term, title, message, options, defaultIdx)
+	}
+
+	readKey, release := term.SubscribeRawInput()
+	inputCtx, cancelInput := context.WithCancel(ctx)
+	defer release()
+	defer cancelInput()
+
+	type keyResult struct {
+		data []byte
+		err  error
+	}
+	keys := make(chan keyResult, 1)
+	go func() {
+		var buf [64]byte
+		for {
+			n, err := readKey(inputCtx, buf[:])
+			if err != nil {
+				select {
+				case keys <- keyResult{err: err}:
+				case <-inputCtx.Done():
+				}
+				return
+			}
+			if n == 0 {
+				continue
+			}
+			data := append([]byte(nil), buf[:n]...)
+			select {
+			case keys <- keyResult{data: data}:
+			case <-inputCtx.Done():
+				return
+			}
+		}
+	}()
+
+	query := ""
+	selected := defaultIdx
+	renderedLines := 0
+	lastCols, lastRows := 0, 0
+	lastColumnCount := 1
+	lastFiltered := []int(nil)
+	render := func() error {
+		cols, rows := term.Size()
+		if cols < 1 {
+			cols = 80
+		}
+		if rows < 1 {
+			rows = 24
+		}
+		lastCols, lastRows = cols, rows
+
+		filtered := make([]int, 0, len(options))
+		needle := strings.ToLower(query)
+		for i, option := range options {
+			label := strings.TrimPrefix(option, "\x00")
+			if strings.HasPrefix(option, "\x00") || needle == "" || strings.Contains(strings.ToLower(label), needle) {
+				filtered = append(filtered, i)
+			}
+		}
+		lastFiltered = filtered
+		if len(filtered) == 0 {
+			selected = -1
+		} else if selected < 0 || selected >= len(filtered) {
+			selected = 0
+		}
+
+		maxLabelWidth := 1
+		for _, optionIndex := range filtered {
+			width := terminalTextWidth(strings.TrimPrefix(options[optionIndex], "\x00"))
+			if width > maxLabelWidth {
+				maxLabelWidth = width
+			}
+		}
+		columnGap := 2
+		columnWidth := maxLabelWidth + 2
+		columnCount := max(1, (cols+columnGap)/(columnWidth+columnGap))
+		if columnCount > len(filtered) && len(filtered) > 0 {
+			columnCount = len(filtered)
+		}
+		lastColumnCount = columnCount
+		availableWidth := cols - (columnCount-1)*columnGap
+		cellWidth := max(1, availableWidth/max(1, columnCount))
+		totalRows := (len(filtered) + columnCount - 1) / columnCount
+
+		headerLines := 1 // Search field.
+		if title != "" {
+			headerLines++
+		}
+		if message != "" {
+			headerLines += strings.Count(message, "\n") + 1
+		}
+		visibleRows := max(1, rows-headerLines-3)
+		if visibleRows > totalRows {
+			visibleRows = totalRows
+		}
+		if visibleRows < 1 {
+			visibleRows = 1
+		}
+		startRow := 0
+		if selected >= 0 {
+			selectedRow := selected / columnCount
+			if selectedRow >= visibleRows {
+				startRow = selectedRow - visibleRows + 1
+			}
+		}
+
+		lines := make([]string, 0, headerLines+visibleRows+1)
+		if title != "" {
+			lines = append(lines, "\x1b[1;36m"+truncateTerminalText(title, cols)+"\x1b[0m")
+		}
+		if message != "" {
+			for _, line := range strings.Split(message, "\n") {
+				lines = append(lines, truncateTerminalText(line, cols))
+			}
+		}
+		lines = append(lines, "Search: "+truncateTerminalText(query, max(0, cols-8)))
+		for row := startRow; row < startRow+visibleRows; row++ {
+			var line strings.Builder
+			for column := 0; column < columnCount; column++ {
+				optionPosition := row*columnCount + column
+				if optionPosition >= len(filtered) {
+					break
+				}
+				optionIndex := filtered[optionPosition]
+				marker := "  "
+				optionLabel := strings.TrimPrefix(options[optionIndex], "\x00")
+				label := truncateTerminalText(optionLabel, max(1, cellWidth-2))
+				if optionPosition == selected {
+					marker = "\x1b[1;33m▸ \x1b[0m"
+					label = "\x1b[1;33m" + label + "\x1b[0m"
+				}
+				if column > 0 {
+					line.WriteString(strings.Repeat(" ", columnGap))
+				}
+				line.WriteString(marker)
+				line.WriteString(label)
+				padding := cellWidth - 2 - terminalTextWidth(optionLabel)
+				if optionPosition == selected {
+					padding = cellWidth - 2 - terminalTextWidth(optionLabel)
+				}
+				if padding > 0 && column+1 < columnCount {
+					line.WriteString(strings.Repeat(" ", padding))
+				}
+			}
+			lines = append(lines, line.String())
+		}
+		if len(filtered) == 0 {
+			lines = append(lines, "No matches. Edit the search or press Esc to cancel.")
+		} else {
+			lines = append(lines, "Type to search · ↑/↓/←/→ select · Enter accept · Esc cancel")
+		}
+
+		var output strings.Builder
+		if renderedLines > 0 {
+			fmt.Fprintf(&output, "\r\x1b[%dA\x1b[J", renderedLines)
+		}
+		for _, line := range lines {
+			output.WriteString(line)
+			output.WriteByte('\n')
+		}
+		renderedLines = len(lines)
+		_, err := io.WriteString(term, output.String())
+		return err
+	}
+
+	if err := render(); err != nil {
+		return -1, err
+	}
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			_, _ = io.WriteString(term, "\n")
+			if errors.Is(ctx.Err(), context.Canceled) {
+				return -1, ErrAuthCancelled
+			}
+			return -1, ctx.Err()
+		case <-ticker.C:
+			cols, rows := term.Size()
+			if cols != lastCols || rows != lastRows {
+				if err := render(); err != nil {
+					return -1, err
+				}
+			}
+		case result := <-keys:
+			if result.err != nil {
+				_, _ = io.WriteString(term, "\n")
+				if errors.Is(result.err, context.Canceled) {
+					return -1, ErrAuthCancelled
+				}
+				return -1, result.err
+			}
+			data := result.data
+			switch {
+			case len(data) == 1 && data[0] == 3:
+				_, _ = io.WriteString(term, "\n")
+				return -1, ErrAuthCancelled
+			case data[0] == '\r' || data[0] == '\n':
+				if selected < 0 {
+					continue
+				}
+				filtered := make([]int, 0, len(options))
+				for i, option := range options {
+					label := strings.TrimPrefix(option, "\x00")
+					if strings.HasPrefix(option, "\x00") || query == "" || strings.Contains(strings.ToLower(label), strings.ToLower(query)) {
+						filtered = append(filtered, i)
+					}
+				}
+				if selected >= len(filtered) {
+					continue
+				}
+				choice := filtered[selected]
+				_, err := fmt.Fprintf(term, "\r\x1b[2K\x1b[32m✓ %s\x1b[0m\n", strings.TrimPrefix(options[choice], "\x00"))
+				return choice, err
+			case data[0] == 0x1b:
+				if len(data) == 1 {
+					_, _ = io.WriteString(term, "\n")
+					return -1, ErrAuthCancelled
+				}
+				if len(data) >= 3 && data[1] == '[' {
+					switch data[2] {
+					case 'A':
+						if selected >= 0 {
+							selected = (selected - lastColumnCount + len(lastFiltered)) % len(lastFiltered)
+						}
+					case 'B':
+						if selected >= 0 {
+							selected = (selected + lastColumnCount) % len(lastFiltered)
+						}
+					case 'C':
+						if selected >= 0 {
+							selected = (selected + 1) % len(lastFiltered)
+						}
+					case 'D':
+						if selected >= 0 {
+							selected = (selected - 1 + len(lastFiltered)) % len(lastFiltered)
+						}
+					}
+					if err := render(); err != nil {
+						return -1, err
+					}
+				}
+			case len(data) == 1 && (data[0] == 0x7f || data[0] == 0x08):
+				if query != "" {
+					_, size := utf8.DecodeLastRuneInString(query)
+					query = query[:len(query)-size]
+					selected = 0
+					if err := render(); err != nil {
+						return -1, err
+					}
+				}
+			default:
+				runes := []rune(string(data))
+				changed := false
+				for _, r := range runes {
+					if !unicode.IsControl(r) && r != utf8.RuneError {
+						query += string(r)
+						changed = true
+					}
+				}
+				if changed {
+					selected = 0
+					if err := render(); err != nil {
+						return -1, err
+					}
+				}
+			}
+		}
+	}
+}
+
+func terminalTextWidth(text string) int {
+	width := 0
+	for _, r := range text {
+		if !unicode.IsControl(r) {
+			width++
+		}
+	}
+	return width
+}
+
+func truncateTerminalText(text string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= width {
+		return text
+	}
+	if width == 1 {
+		return "…"
+	}
+	return string(runes[:width-1]) + "…"
+}
+
 func promptSelectLine(ctx context.Context, term TerminalSession, title, message string, options []string, defaultIdx int) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return -1, err
@@ -232,7 +544,7 @@ func promptSelectLine(ctx context.Context, term TerminalSession, title, message 
 		}
 	}
 	for i, opt := range options {
-		if _, err := fmt.Fprintf(term, "  [%d] %s\n", i+1, opt); err != nil {
+		if _, err := fmt.Fprintf(term, "  [%d] %s\n", i+1, strings.TrimPrefix(opt, "\x00")); err != nil {
 			return -1, err
 		}
 	}

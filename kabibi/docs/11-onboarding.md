@@ -2,9 +2,12 @@
 
 ## Status
 
-Planning document. Implementation has not started.
+Implemented. The focused AI/onboarding/panel tests pass, and the Kabibi
+vegetable builds through the documented root build path. The broader
+`ui/shell` and `ui/app` suites still report unrelated failures, so they are not
+reported as passing.
 
-## Current behavior
+## Previous behavior
 
 `/model` starts `ai setup`. The setup flow first asks whether to use local Gemma
 or a cloud provider, then asks for a tier or provider. Local setup separately
@@ -30,12 +33,14 @@ Replace the multi-step top-level wizard with a contextual first menu:
   GitHub Copilot, and Gemini.
 - Show Custom endpoint and Cancel.
 
-Selecting a cloud provider retains necessary billing/data-use disclosure and
-authentication. Reuse a valid saved credential without asking the user to
-authenticate again. After authentication, present the provider's model catalog
-in a searchable picker rather than adding another wizard layer. Preserve the
-existing preferred/current-model selection as the initial highlight. Keep an
-explicit way to enter an exact model ID when it is absent from the catalog.
+Selecting a cloud provider does not add a separate confirmation prompt. The
+model menu discloses that prompts and tool results go to the selected provider
+and that provider billing/data-use policies may apply. Reuse a valid saved
+credential without asking the user to authenticate again. After authentication,
+present the provider's model catalog in a searchable picker rather than adding
+another wizard layer. Preserve the existing preferred/current-model selection
+as the initial highlight. Keep an explicit way to enter an exact model ID when
+it is absent from the catalog.
 
 The model picker should use the available terminal width for multiple columns,
 and limit its visible list height to terminal height minus a small fixed area
