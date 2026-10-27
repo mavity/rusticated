@@ -635,7 +635,19 @@ func renderBlockCached(block *CommandBlock, width int) terminal.CellBuf {
 		buf, block.cachedCursor = renderLiveBlock(block, width)
 	} else {
 		var rawText string
-		if block.Kind == BlockBanner || (block.Prompt == "" && block.Input == "") {
+		if block.Kind == BlockAITurn && block.Source == SourceUserShell {
+			if block.Prompt != "" || block.Input != "" {
+				rawText = block.Prompt + block.Input + "\n"
+			}
+			output := block.Output.String()
+			if block.Status == StatusActive {
+				rawText += sanitizeMarkdownControls(output)
+			} else if rendered, err := renderAssistantMarkdown(output, width); err != nil {
+				rawText += "[markdown render error: " + err.Error() + "]\n" + sanitizeMarkdownControls(output)
+			} else {
+				rawText += rendered
+			}
+		} else if block.Kind == BlockBanner || (block.Prompt == "" && block.Input == "") {
 			rawText = block.Output.String()
 		} else {
 			rawText = block.Prompt + block.Input + "\n" + block.Output.String()
