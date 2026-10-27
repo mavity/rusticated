@@ -23,6 +23,8 @@ type scriptedOnboardingPrompter struct {
 	choices        []int
 	defaultChoices []int
 	optionSets     [][]string
+	confirmations  []bool
+	inputs          []string
 }
 
 func (p *scriptedOnboardingPrompter) Choose(_ context.Context, _, _ string, options []string, defaultChoice int) (int, error) {
@@ -36,22 +38,36 @@ func (p *scriptedOnboardingPrompter) Choose(_ context.Context, _, _ string, opti
 	return choice, nil
 }
 
-func (*scriptedOnboardingPrompter) Confirm(context.Context, string, string) (bool, error) {
-	return false, errors.New("unexpected confirmation prompt")
+func (p *scriptedOnboardingPrompter) Confirm(context.Context, string, string) (bool, error) {
+	if len(p.confirmations) == 0 {
+		return false, errors.New("unexpected confirmation prompt")
+	}
+	confirmed := p.confirmations[0]
+	p.confirmations = p.confirmations[1:]
+	return confirmed, nil
 }
 
-func (*scriptedOnboardingPrompter) Input(context.Context, string, string, bool) (string, error) {
-	return "", errors.New("unexpected input prompt")
+func (p *scriptedOnboardingPrompter) Input(context.Context, string, string, bool) (string, error) {
+	if len(p.inputs) == 0 {
+		return "", errors.New("unexpected input prompt")
+	}
+	value := p.inputs[0]
+	p.inputs = p.inputs[1:]
+	return value, nil
 }
 
 func TestConfigureAICancelDoesNotPersistConfiguration(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	_, options, _, err := modelSetupMenu(context.Background(), config.AIConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	runner := NewLazyAIRunner(nil)
-	runner.SetOnboardingPrompter(&scriptedOnboardingPrompter{choices: []int{2}})
+	runner.SetOnboardingPrompter(&scriptedOnboardingPrompter{choices: []int{len(options) - 1}})
 
-	_, err := runner.configureAI(context.Background())
+	_, err = runner.configureAI(context.Background())
 	if !errors.Is(err, errOnboardingCancelled) {
 		t.Fatalf("configureAI() error = %v, want onboarding cancellation", err)
 	}
@@ -193,6 +209,165 @@ func TestChooseRemoteModelDefaultsToGPT6LunaWhenAvailable(t *testing.T) {
 	}
 }
 
+func TestConfigureCustomEndpointSelectsProtocolAndPersistsModel(t *testing.T) {
+	t.Setenv("KABIBI_CONFIG_DIR", t.TempDir())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" {
+			t.Errorf("catalog request = %s %s, want GET /v1/models", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("unauthenticated endpoint received Authorization: %q", got)
+		}
+		_, _ = fmt.Fprint(w, `{"data":[{"id":"local-model","context_length":4096}]}`)
+	}))
+	defer server.Close()
+
+	prompter := &scriptedOnboardingPrompter{
+		choices: []int{0, 0},
+		inputs:   []string{server.URL, ""},
+	}
+	cfg, err := NewLazyAIRunner(nil).configureCustomEndpoint(context.Background(), prompter, config.AIConfig{})
+	if err != nil {
+		t.Fatalf("configureCustomEndpoint() error = %v", err)
+	}
+	if !cfg.Configured || cfg.Provider != string(ai.RemoteCustom) ||
+		cfg.Protocol != string(ai.RemoteProtocolOpenAIChatCompletions) ||
+		cfg.Model != "local-model" || cfg.ContextTokens != 4096 || cfg.BaseURL != server.URL {
+		t.Fatalf("custom configuration = %+v", cfg)
+	}
+	if len(prompter.optionSets) != 2 || len(prompter.optionSets[0]) != len(ai.RemoteAPIProtocols()) {
+		t.Fatalf("prompt option sets = %v, want protocol and model selection menus", prompter.optionSets)
+	}
+	saved, err := config.LoadAI()
+	if err != nil {
+		t.Fatalf("LoadAI() error = %v", err)
+	}
+	if saved != cfg {
+		t.Fatalf("saved configuration = %+v, want %+v", saved, cfg)
+	}
+	credential, err := credstore.Read(context.Background(), credentialStoreID(cfg))
+	if err != nil {
+		t.Fatalf("read endpoint credential: %v", err)
+	}
+	if credential != nil {
+		t.Fatalf("unexpected credential saved for keyless endpoint: %+v", credential)
+	}
+}
+
+func TestConfigureCustomEndpointDetectsProtocolFromURL(t *testing.T) {
+	t.Setenv("KABIBI_CONFIG_DIR", t.TempDir())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Errorf("catalog path = %q, want /v1/models", r.URL.Path)
+		}
+		_, _ = fmt.Fprint(w, `{"data":[{"id":"detected-model"}]}`)
+	}))
+	defer server.Close()
+
+	prompter := &scriptedOnboardingPrompter{
+		choices: []int{0},
+		inputs:   []string{server.URL + "/v1/chat/completions", ""},
+	}
+	cfg, err := NewLazyAIRunner(nil).configureCustomEndpoint(context.Background(), prompter, config.AIConfig{})
+	if err != nil {
+		t.Fatalf("configureCustomEndpoint() error = %v", err)
+	}
+	if cfg.Protocol != string(ai.RemoteProtocolOpenAIChatCompletions) || cfg.Model != "detected-model" {
+		t.Fatalf("configuration = %+v, want detected OpenAI Chat Completions protocol and model", cfg)
+	}
+	if len(prompter.optionSets) != 1 {
+		t.Fatalf("prompt option sets = %v, want only model selection after URL detection", prompter.optionSets)
+	}
+}
+
+func TestCustomCredentialIdentityIncludesEndpointAndProtocol(t *testing.T) {
+	base := config.AIConfig{Provider: string(ai.RemoteCustom), Protocol: string(ai.RemoteProtocolOpenAIChatCompletions), BaseURL: "https://example.test/v1"}
+	same := base
+	same.BaseURL += "/"
+	otherProtocol := base
+	otherProtocol.Protocol = string(ai.RemoteProtocolOpenAIResponses)
+	otherEndpoint := base
+	otherEndpoint.BaseURL = "https://other.example.test/v1"
+	if credentialStoreID(base) != credentialStoreID(same) {
+		t.Fatal("trailing slash changed custom endpoint credential identity")
+	}
+	if credentialStoreID(base) == credentialStoreID(otherProtocol) {
+		t.Fatal("different protocols shared a custom endpoint credential identity")
+	}
+	if credentialStoreID(base) == credentialStoreID(otherEndpoint) {
+		t.Fatal("different endpoints shared a custom endpoint credential identity")
+	}
+}
+
+func TestModelSetupMenuOffersReauthenticationOnlyForStoredCredential(t *testing.T) {
+	t.Setenv("KABIBI_CONFIG_DIR", t.TempDir())
+	current := config.AIConfig{
+		Configured: true,
+		Mode:       "remote",
+		Provider:   string(ai.RemoteCustom),
+		Protocol:   string(ai.RemoteProtocolOpenAIResponses),
+		Model:      "current-model",
+		BaseURL:    "https://example.test/v1",
+	}
+	_, withoutCredential, _, err := modelSetupMenu(context.Background(), current)
+	if err != nil {
+		t.Fatalf("modelSetupMenu() without credential: %v", err)
+	}
+	if !strings.HasPrefix(withoutCredential[0], "Keep current:") {
+		t.Fatalf("first menu option = %q, want keep-current action", withoutCredential[0])
+	}
+	if len(withoutCredential) > 1 && strings.HasPrefix(withoutCredential[1], "Re-authenticate current:") {
+		t.Fatal("reauthentication was offered without a stored credential")
+	}
+
+	stored := &ai.Credential{Type: ai.CredentialAPIKey, Key: "secret"}
+	if _, err := credstore.Modify(context.Background(), credentialStoreID(current), func(*credstore.Credential) (*credstore.Credential, error) {
+		return stored, nil
+	}); err != nil {
+		t.Fatalf("store custom endpoint credential: %v", err)
+	}
+	_, withCredential, _, err := modelSetupMenu(context.Background(), current)
+	if err != nil {
+		t.Fatalf("modelSetupMenu() with credential: %v", err)
+	}
+	if len(withCredential) < 2 || !strings.HasPrefix(withCredential[1], "Re-authenticate current:") {
+		t.Fatalf("second menu option = %v, want reauthentication action", withCredential)
+	}
+}
+
+func TestRemoteSetupDoesNotAskForInterstitialConfirmation(t *testing.T) {
+	t.Setenv("KABIBI_CONFIG_DIR", t.TempDir())
+	stored := &ai.Credential{Type: ai.CredentialAPIKey, Key: "test-token"}
+	if _, err := credstore.Modify(context.Background(), string(ai.RemoteOpenAI), func(*credstore.Credential) (*credstore.Credential, error) {
+		return stored, nil
+	}); err != nil {
+		t.Fatalf("store provider credential: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, `{"data":[{"id":"test-model"}]}`)
+	}))
+	defer server.Close()
+
+	prompter := &scriptedOnboardingPrompter{
+		choices: []int{0},
+	}
+	previous := config.AIConfig{Configured: true, Mode: "remote", Provider: string(ai.RemoteOpenAI), BaseURL: server.URL + "/models"}
+	cfg, err := NewLazyAIRunner(nil).authenticateAndSaveRemoteProvider(
+		context.Background(),
+		prompter,
+		nil,
+		ai.RemoteOpenAI,
+		"OpenAI",
+		previous,
+	)
+	if err != nil {
+		t.Fatalf("authenticateAndSaveRemoteProvider() error = %v", err)
+	}
+	if cfg.Model != "test-model" || len(prompter.defaultChoices) != 1 {
+		t.Fatalf("remote configuration = %+v, choices = %v", cfg, prompter.defaultChoices)
+	}
+}
+
 func TestRemoteContextTokenBudgetUsesDeclaredLimitOrConservativeFallback(t *testing.T) {
 	if got := remoteContextTokenBudget(128000); got != 128000 {
 		t.Fatalf("remoteContextTokenBudget(128000) = %d, want 128000", got)
@@ -220,7 +395,7 @@ func TestContextCompactionLimitScalesProportionally(t *testing.T) {
 	}
 }
 
-func TestConfigureAISelectsPreviousRemoteProviderByDefault(t *testing.T) {
+func TestConfigureAIKeepsCurrentConfigurationFromFirstMenu(t *testing.T) {
 	t.Setenv("KABIBI_CONFIG_DIR", t.TempDir())
 	if err := config.SaveAI(config.AIConfig{
 		Configured:   true,
@@ -231,14 +406,17 @@ func TestConfigureAISelectsPreviousRemoteProviderByDefault(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save previous configuration: %v", err)
 	}
-	prompter := &scriptedOnboardingPrompter{choices: []int{1, 2}}
+	prompter := &scriptedOnboardingPrompter{choices: []int{0}}
 
-	_, err := NewLazyAIRunner(nil).configureAIWithPrompter(context.Background(), prompter, nil)
-	if err == nil || !strings.Contains(err.Error(), "unexpected confirmation prompt") {
-		t.Fatalf("configureAIWithPrompter() error = %v, want stop at confirmation prompt", err)
+	got, err := NewLazyAIRunner(nil).configureAIWithPrompter(context.Background(), prompter, nil)
+	if err != nil {
+		t.Fatalf("configureAIWithPrompter() error = %v", err)
 	}
-	if len(prompter.defaultChoices) != 2 || prompter.defaultChoices[0] != 1 || prompter.defaultChoices[1] != 2 {
-		t.Fatalf("choice defaults = %v, want remote mode index 1 and OpenAI provider index 2", prompter.defaultChoices)
+	if got.Provider != string(ai.RemoteOpenAI) || got.Model != "gpt-6-luna" {
+		t.Fatalf("current config = %+v, want prior OpenAI selection", got)
+	}
+	if len(prompter.defaultChoices) != 1 || prompter.defaultChoices[0] != 0 {
+		t.Fatalf("choice defaults = %v, want current selection at index 0", prompter.defaultChoices)
 	}
 }
 
@@ -471,7 +649,7 @@ func TestEndToEnd_ShellUnconfiguredPrompt_InteractiveLocalGemmaOnboardingAndTurn
 	}
 	s.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
 
-	// 2. Wait for the interactive virtual PTY setup block to render "Set up Kabibi AI"
+	// 2. Wait for the first searchable model menu.
 	waitForBlockText := func(substr string, timeout time.Duration) string {
 		deadline := time.Now().Add(timeout)
 		for time.Now().Before(deadline) {
@@ -511,28 +689,17 @@ func TestEndToEnd_ShellUnconfiguredPrompt_InteractiveLocalGemmaOnboardingAndTurn
 		return ""
 	}
 
-	waitForBlockText("Set up Kabibi AI", 5*time.Second)
-
-	// Select [1] Local Gemma model
-	s.HandleEvent(input.KeyPressEvent{Code: '1', Text: "1"})
-	s.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
-
-	// 3. Wait for "Choose a local model" menu and select the cached tier (1-based number key + Enter)
-	waitForBlockText("Choose a local model", 5*time.Second)
-	tierKey := rune('1' + cachedTierIdx)
-	s.HandleEvent(input.KeyPressEvent{Code: tierKey, Text: string(tierKey)})
-	s.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
-
-	// 4. Wait for "Confirm local AI downloads" and verify the cache path has NO leading '\C:\' or '/C:/'
-	confirmScreen := waitForBlockText("Confirm local AI downloads", 5*time.Second)
-	if strings.Contains(confirmScreen, `\C:\`) || strings.Contains(confirmScreen, `/C:/`) {
-		t.Fatalf("Confirm screen contains malformed leading slash before Windows drive:\n%s", confirmScreen)
+	waitForBlockText("Choose an AI model", 5*time.Second)
+	tier, ok := assets.LookupModelTier(cachedTierID)
+	if !ok {
+		t.Fatalf("cached tier %q disappeared from the model catalog", cachedTierID)
 	}
-	// Select [1] Yes, continue
-	s.HandleEvent(input.KeyPressEvent{Code: '1', Text: "1"})
+	for _, ch := range tier.Name {
+		s.HandleEvent(input.KeyPressEvent{Code: ch, Text: string(ch)})
+	}
 	s.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
 
-	// 5. Wait for the AI turn to initialize the GPU/NPU engine and complete the turn without error!
+	// 3. Wait for the AI turn to initialize the GPU/NPU engine and complete without error.
 	deadline := time.Now().Add(90 * time.Second)
 	for s.IsRunning() && time.Now().Before(deadline) {
 		s.Render(ui.Rect{W: 80, H: 24}, ui.RenderContext{Focused: true})

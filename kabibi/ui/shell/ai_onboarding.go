@@ -163,6 +163,10 @@ func (p *terminalOnboardingPrompter) Choose(ctx context.Context, title, message 
 	return ai.PromptSelect(ctx, p.term, title, message, options, defaultChoice)
 }
 
+func (p *terminalOnboardingPrompter) SearchChoose(ctx context.Context, title, message string, options []string, defaultChoice int) (int, error) {
+	return ai.PromptSearchSelect(ctx, p.term, title, message, options, defaultChoice)
+}
+
 func (p *terminalOnboardingPrompter) Confirm(ctx context.Context, title, message string) (bool, error) {
 	return ai.PromptConfirm(ctx, p.term, title, message)
 }
@@ -190,6 +194,17 @@ func (p *TUIOnboardingPrompter) openTerminal(ctx context.Context, title string) 
 func (p *TUIOnboardingPrompter) Choose(ctx context.Context, title, message string, options []string, defaultChoice int) (int, error) {
 	term, closeFn := p.openTerminal(ctx, "ai setup")
 	choice, err := ai.PromptSelect(ctx, term, title, message, options, defaultChoice)
+	if err != nil {
+		closeFn(1)
+		return -1, err
+	}
+	closeFn(0)
+	return choice, nil
+}
+
+func (p *TUIOnboardingPrompter) SearchChoose(ctx context.Context, title, message string, options []string, defaultChoice int) (int, error) {
+	term, closeFn := p.openTerminal(ctx, "ai setup")
+	choice, err := ai.PromptSearchSelect(ctx, term, title, message, options, defaultChoice)
 	if err != nil {
 		closeFn(1)
 		return -1, err
@@ -244,6 +259,10 @@ func (p *StdioOnboardingPrompter) terminalSession() ai.TerminalSession {
 
 func (p *StdioOnboardingPrompter) Choose(ctx context.Context, title, message string, options []string, defaultChoice int) (int, error) {
 	return ai.PromptSelect(ctx, p.terminalSession(), title, message, options, defaultChoice)
+}
+
+func (p *StdioOnboardingPrompter) SearchChoose(ctx context.Context, title, message string, options []string, defaultChoice int) (int, error) {
+	return ai.PromptSearchSelect(ctx, p.terminalSession(), title, message, options, defaultChoice)
 }
 
 func (p *StdioOnboardingPrompter) Confirm(ctx context.Context, title, message string) (bool, error) {

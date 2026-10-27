@@ -16,6 +16,7 @@ type AIConfig struct {
 	Mode          string `json:"mode,omitempty"`
 	TierID        string `json:"tier_id,omitempty"`
 	Provider      string `json:"provider,omitempty"`
+	Protocol      string `json:"protocol,omitempty"`
 	Model         string `json:"model,omitempty"`
 	ContextTokens int    `json:"context_tokens,omitempty"`
 	BaseURL       string `json:"base_url,omitempty"`

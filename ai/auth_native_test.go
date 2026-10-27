@@ -40,6 +40,95 @@ func TestValidateRemoteCredentialSendsProviderAuthentication(t *testing.T) {
 	}
 }
 
+type searchSelectTerm struct {
+	keys  [][]byte
+	index int
+	out   strings.Builder
+	cols  int
+	rows  int
+}
+
+func (s *searchSelectTerm) Read(p []byte) (int, error) {
+	if s.index >= len(s.keys) {
+		return 0, io.EOF
+	}
+	key := s.keys[s.index]
+	s.index++
+	return copy(p, key), nil
+}
+
+func (s *searchSelectTerm) Write(p []byte) (int, error) { return s.out.Write(p) }
+func (s *searchSelectTerm) Size() (int, int)            { return s.cols, s.rows }
+func (s *searchSelectTerm) IsTTY() bool                 { return true }
+func (s *searchSelectTerm) SubscribeRawInput() (func(context.Context, []byte) (int, error), func()) {
+	return func(_ context.Context, p []byte) (int, error) { return s.Read(p) }, func() {}
+}
+
+func TestPromptSearchSelectFiltersAndAccepts(t *testing.T) {
+	term := &searchSelectTerm{
+		keys: [][]byte{[]byte("c"), []byte("l"), []byte("a"), []byte("u"), []byte("d"), []byte("e"), []byte("\n")},
+		cols: 80,
+		rows: 24,
+	}
+	choice, err := PromptSearchSelect(context.Background(), term, "Models", "Choose a model.", []string{
+		"gpt-6-luna",
+		"claude-sonnet",
+		"gemini-pro",
+	}, 0)
+	if err != nil {
+		t.Fatalf("PromptSearchSelect() error = %v", err)
+	}
+	if choice != 1 {
+		t.Fatalf("PromptSearchSelect() = %d, want filtered Claude model at index 1", choice)
+	}
+	if !strings.Contains(term.out.String(), "Search: claude") {
+		t.Fatalf("selector output omitted live search query: %q", term.out.String())
+	}
+}
+
+func TestPromptSearchSelectBackspaceAndGridNavigation(t *testing.T) {
+	term := &searchSelectTerm{
+		keys: [][]byte{
+			[]byte("x"),
+			[]byte("\x7f"),
+			[]byte("\x1b[B"),
+			[]byte("\n"),
+		},
+		cols: 48,
+		rows: 12,
+	}
+	options := []string{"model-alpha", "model-bravo", "model-charlie", "model-delta"}
+	choice, err := PromptSearchSelect(context.Background(), term, "Models", "", options, 0)
+	if err != nil {
+		t.Fatalf("PromptSearchSelect() error = %v", err)
+	}
+	if choice != 2 {
+		t.Fatalf("PromptSearchSelect() = %d, want down-arrow row selection at index 2", choice)
+	}
+	if !strings.Contains(term.out.String(), "Search: x") || !strings.Contains(term.out.String(), "Search: ") {
+		t.Fatalf("selector did not render query edits: %q", term.out.String())
+	}
+}
+
+func TestPromptSearchSelectKeepsManualActionAfterFilteringAllModels(t *testing.T) {
+	term := &searchSelectTerm{
+		keys: [][]byte{[]byte("missing-model"), []byte("\n")},
+		cols: 80,
+		rows: 24,
+	}
+	options := []string{"model-alpha", "\x00Enter a model ID manually"}
+	choice, err := PromptSearchSelect(context.Background(), term, "Models", "", options, 0)
+	if err != nil {
+		t.Fatalf("PromptSearchSelect() error = %v", err)
+	}
+	if choice != 1 {
+		t.Fatalf("PromptSearchSelect() = %d, want the always-visible manual model action at index 1", choice)
+	}
+	if !strings.Contains(term.out.String(), "Enter a model ID manually") {
+		t.Fatal("manual model action was not rendered")
+	}
+}
+
 func TestValidateRemoteCredentialRejectsUnauthorizedResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)

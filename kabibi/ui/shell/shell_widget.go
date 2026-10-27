@@ -112,6 +112,7 @@ func formatStartupBanner(sessionErr error) string {
 type ShellOptions struct {
 	WriteToScrollback func(text string) // Callback to write lines to the host's scrollback
 	OnExit            func()            // Optional callback invoked when user runs 'exit' or 'quit'
+	OnCommandStarted  func()            // Optional callback invoked before a shell command or AI turn starts
 	OnCommandFinished func(cwd string)  // Optional callback invoked after a command or AI turn finishes
 	OpenURL           func(url string) error
 	WorkingDir        string    // Optional initial working directory for the shell runner
@@ -280,6 +281,13 @@ func (s *Shell) BottomAligned() bool {
 func (s *Shell) SetOnCommandFinished(fn func(cwd string)) {
 	s.mu.Lock()
 	s.opts.OnCommandFinished = fn
+	s.mu.Unlock()
+}
+
+// SetOnCommandStarted sets the callback invoked before a shell command or AI turn starts.
+func (s *Shell) SetOnCommandStarted(fn func()) {
+	s.mu.Lock()
+	s.opts.OnCommandStarted = fn
 	s.mu.Unlock()
 }
 
@@ -1874,10 +1882,14 @@ func (s *Shell) submitAndExecuteAsync(animate bool) {
 	s.activeBlock = blockIdx
 	s.running = true
 	s.doneCh = doneCh
+	onStarted := s.opts.OnCommandStarted
 	aiRunner := s.aiRunner
 	execSess := s.execSess
 	s.mu.Unlock()
 
+	if onStarted != nil {
+		onStarted()
+	}
 	s.invalidate()
 	if submitAnimation != nil {
 		go s.runCommandSubmitAnimation(blockIdx, submitAnimation)

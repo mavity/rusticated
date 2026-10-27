@@ -34,6 +34,8 @@ type AppWidget struct {
 	panels            *filemanager.DualPaneWidget
 	panelsVisible     bool
 	fullScreenClaimed bool
+	closed                    bool
+	restorePanelsAfterCommand bool
 
 	dialog *dialog.DialogWidget
 	editor *editor.EditorWidget
@@ -80,6 +82,9 @@ func NewWidget(opts AppWidgetOptions) *AppWidget {
 		},
 		OnCommandFinished: func(cwd string) {
 			w.onShellCommandFinished(cwd)
+		},
+		OnCommandStarted: func() {
+			w.onShellCommandStarted()
 		},
 		WorkingDir: opts.WorkingDir,
 		Mode:       opts.ShellMode,
@@ -232,10 +237,12 @@ func (w *AppWidget) SetExitHandler(fn func()) {
 
 // Close releases resources held by the widget and its embedded shell.
 func (w *AppWidget) Close() error {
-	w.SetPanelsVisible(false)
 	w.mu.Lock()
+	w.closed = true
+	w.restorePanelsAfterCommand = false
 	cancel := w.opCancel
 	w.mu.Unlock()
+	w.SetPanelsVisible(false)
 	if cancel != nil {
 		cancel()
 	}
@@ -280,7 +287,28 @@ func (w *AppWidget) onShellCommandFinished(cwd string) {
 	if other != nil {
 		_ = other.Refresh()
 	}
+	w.mu.Lock()
+	restorePanels := w.restorePanelsAfterCommand && !w.closed
+	w.restorePanelsAfterCommand = false
+	w.mu.Unlock()
+	if restorePanels {
+		w.SetPanelsVisible(true)
+	}
 	w.invalidate()
+}
+
+func (w *AppWidget) onShellCommandStarted() {
+	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		return
+	}
+	restorePanels := w.panelsVisible
+	w.restorePanelsAfterCommand = restorePanels
+	w.mu.Unlock()
+	if restorePanels {
+		w.SetPanelsVisible(false)
+	}
 }
 
 func shellQuoteFilename(name string) string {

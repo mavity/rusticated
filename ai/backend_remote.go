@@ -23,10 +23,22 @@ const (
 	RemoteAnthropic  RemoteProvider = "anthropic"
 	RemoteGemini     RemoteProvider = "gemini"
 	RemoteCopilot    RemoteProvider = "github-copilot"
+	RemoteCustom     RemoteProvider = "custom"
+)
+
+type RemoteAPIProtocol string
+
+const (
+	RemoteProtocolOpenAIChatCompletions RemoteAPIProtocol = "openai-chat-completions"
+	RemoteProtocolOpenAIResponses       RemoteAPIProtocol = "openai-responses"
+	RemoteProtocolAnthropicMessages     RemoteAPIProtocol = "anthropic-messages"
+	RemoteProtocolGeminiGenerateContent RemoteAPIProtocol = "gemini-generate-content"
+	RemoteProtocolCopilot               RemoteAPIProtocol = "github-copilot"
 )
 
 type RemoteEngineConfig struct {
 	Provider    RemoteProvider
+	Protocol    RemoteAPIProtocol
 	Model       string
 	APIKey      string
 	Credential  *Credential
@@ -39,11 +51,18 @@ func NewRemoteEngine(cfg RemoteEngineConfig) (*Engine, error) {
 	if cfg.Model == "" {
 		return nil, fmt.Errorf("remote AI model must not be empty")
 	}
-	if cfg.APIKey == "" && cfg.Credential == nil && cfg.Credentials == nil {
+	if cfg.APIKey == "" && cfg.Credential == nil && cfg.Credentials == nil && cfg.Provider != RemoteCustom {
 		return nil, fmt.Errorf("remote AI credential must not be empty")
 	}
 	switch cfg.Provider {
 	case RemoteOpenAI, RemoteOpenRouter, RemoteAnthropic, RemoteGemini, RemoteCopilot:
+	case RemoteCustom:
+		if !isSupportedRemoteAPIProtocol(cfg.Protocol) {
+			return nil, fmt.Errorf("unsupported custom remote API protocol %q", cfg.Protocol)
+		}
+		if cfg.BaseURL == "" {
+			return nil, fmt.Errorf("custom remote AI endpoint URL must not be empty")
+		}
 	default:
 		return nil, fmt.Errorf("unsupported remote AI provider %q", cfg.Provider)
 	}
@@ -58,6 +77,56 @@ func NewRemoteEngine(cfg RemoteEngineConfig) (*Engine, error) {
 		backendName: string(cfg.Provider),
 		modelPath:   string(cfg.Provider) + ":" + cfg.Model,
 	}}, nil
+}
+
+func isSupportedRemoteAPIProtocol(protocol RemoteAPIProtocol) bool {
+	switch protocol {
+	case RemoteProtocolOpenAIChatCompletions, RemoteProtocolOpenAIResponses,
+		RemoteProtocolAnthropicMessages, RemoteProtocolGeminiGenerateContent,
+		RemoteProtocolCopilot:
+		return true
+	default:
+		return false
+	}
+}
+
+// RemoteAPIProtocols returns the supported protocols for a custom endpoint.
+func RemoteAPIProtocols() []RemoteAPIProtocol {
+	return []RemoteAPIProtocol{
+		RemoteProtocolOpenAIChatCompletions,
+		RemoteProtocolOpenAIResponses,
+		RemoteProtocolAnthropicMessages,
+		RemoteProtocolGeminiGenerateContent,
+		RemoteProtocolCopilot,
+	}
+}
+
+// ValidateRemoteBaseURL validates a remote endpoint URL before credentials are
+// requested or network requests are made.
+func ValidateRemoteBaseURL(value string) error {
+	return validateRemoteBaseURL(value)
+}
+
+// DetectRemoteAPIProtocol recognizes protocols from distinctive endpoint paths.
+// It deliberately does not make unauthenticated network probes.
+func DetectRemoteAPIProtocol(value string) (RemoteAPIProtocol, bool) {
+	parsed, err := url.ParseRequestURI(value)
+	if err != nil {
+		return "", false
+	}
+	path := strings.TrimRight(strings.ToLower(parsed.Path), "/")
+	switch {
+	case strings.HasSuffix(path, "/chat/completions"):
+		return RemoteProtocolOpenAIChatCompletions, true
+	case strings.HasSuffix(path, "/responses"):
+		return RemoteProtocolOpenAIResponses, true
+	case strings.HasSuffix(path, "/messages"):
+		return RemoteProtocolAnthropicMessages, true
+	case strings.Contains(path, "/v1beta/models") || strings.HasSuffix(path, ":streamgeneratecontent"):
+		return RemoteProtocolGeminiGenerateContent, true
+	default:
+		return "", false
+	}
 }
 
 func validateRemoteBaseURL(value string) error {
@@ -154,7 +223,9 @@ func (c *remoteConversationBackend) SendStream(ctx context.Context, parts []Prom
 	}
 	acc := newRemoteAccumulatorWithWire(effectiveCfg.Provider, wireKind, config.Tools, onEvent)
 	if err := remoteStreamRequest(streamCtx, effectiveCfg.HTTPClient, req, acc.consume); err != nil {
-		if effectiveCfg.Provider != RemoteCopilot || wireKind != wireOpenAICompletions || !errors.Is(err, errUnsupportedRemoteAPI) {
+		isCopilotProtocol := effectiveCfg.Provider == RemoteCopilot ||
+			(effectiveCfg.Provider == RemoteCustom && effectiveCfg.Protocol == RemoteProtocolCopilot)
+		if !isCopilotProtocol || wireKind != wireOpenAICompletions || !errors.Is(err, errUnsupportedRemoteAPI) {
 			return err
 		}
 		req, err = buildGitHubCopilotResponsesRequest(effectiveCfg, config, requestParts)
@@ -239,7 +310,7 @@ func (e *remoteEngineBackend) resolveEffectiveConfig(ctx context.Context) (Remot
 	} else if cfg.Credential != nil && cfg.APIKey == "" {
 		cfg.APIKey = cfg.Credential.SecretToken()
 	}
-	if cfg.APIKey == "" {
+	if cfg.APIKey == "" && cfg.Provider != RemoteCustom {
 		return RemoteEngineConfig{}, fmt.Errorf("remote AI credential must not be empty")
 	}
 	return cfg, nil
@@ -273,9 +344,104 @@ func buildRemoteRequestWithWire(remote RemoteEngineConfig, cfg ConversationConfi
 		return req, wireGeminiContent, err
 	case RemoteCopilot:
 		return buildGitHubCopilotRequest(remote, cfg, parts)
+	case RemoteCustom:
+		switch remote.Protocol {
+		case RemoteProtocolOpenAIChatCompletions:
+			custom := remote
+			custom.Provider = RemoteOpenAI
+			custom.BaseURL = customEndpoint(remote.BaseURL, "/v1/chat/completions")
+			req, err := buildOpenAIRequest(custom, cfg, parts)
+			return req, wireOpenAICompletions, err
+		case RemoteProtocolOpenAIResponses:
+			custom := remote
+			custom.BaseURL = customEndpoint(remote.BaseURL, "/v1/responses")
+			req, err := buildOpenAIResponsesRequest(custom, cfg, parts)
+			return req, wireOpenAIResponses, err
+		case RemoteProtocolAnthropicMessages:
+			custom := remote
+			custom.Provider = RemoteAnthropic
+			custom.BaseURL = customEndpoint(remote.BaseURL, "/v1/messages")
+			req, err := buildAnthropicRequest(custom, cfg, parts)
+			return req, wireAnthropicMessages, err
+		case RemoteProtocolGeminiGenerateContent:
+			custom := remote
+			custom.Provider = RemoteGemini
+			custom.BaseURL = customGeminiGenerationEndpoint(remote.BaseURL, remote.Model)
+			req, err := buildGeminiRequest(custom, cfg, parts)
+			return req, wireGeminiContent, err
+		case RemoteProtocolCopilot:
+			custom := remote
+			custom.Provider = RemoteCopilot
+			return buildGitHubCopilotRequest(custom, cfg, parts)
+		default:
+			return remoteRequest{}, "", fmt.Errorf("unsupported custom remote API protocol %q", remote.Protocol)
+		}
 	default:
 		return remoteRequest{}, "", fmt.Errorf("unsupported remote AI provider %q", remote.Provider)
 	}
+}
+
+func customEndpoint(baseURL, suffix string) string {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return baseURL
+	}
+	path := strings.TrimRight(parsed.Path, "/")
+	if strings.HasSuffix(path, suffix) {
+		return parsed.String()
+	}
+	for _, endpointSuffix := range []string{
+		"/chat/completions",
+		"/responses",
+		"/messages",
+		"/models",
+	} {
+		if strings.HasSuffix(path, endpointSuffix) {
+			path = strings.TrimSuffix(path, endpointSuffix)
+			break
+		}
+	}
+	if marker := strings.LastIndex(path, "/v1beta/models/"); marker >= 0 {
+		path = path[:marker] + "/v1beta/models"
+	}
+	if strings.HasSuffix(path, suffix) {
+		parsed.Path = path
+		return parsed.String()
+	}
+	if strings.HasPrefix(suffix, "/v1/") && strings.HasSuffix(path, "/v1") {
+		suffix = strings.TrimPrefix(suffix, "/v1")
+	}
+	if strings.HasPrefix(suffix, "/v1beta/") && strings.HasSuffix(path, "/v1beta") {
+		suffix = strings.TrimPrefix(suffix, "/v1beta")
+	}
+	parsed.Path = path + suffix
+	return parsed.String()
+}
+
+func customGeminiGenerationEndpoint(baseURL, model string) string {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return baseURL
+	}
+	path := strings.TrimRight(parsed.Path, "/")
+	escapedModel := url.PathEscape(model)
+	if marker := strings.LastIndex(strings.ToLower(path), "/v1beta/models/"); marker >= 0 {
+		parsed.Path = path[:marker] + "/v1beta/models/" + escapedModel + ":streamGenerateContent"
+	} else if strings.HasSuffix(strings.ToLower(path), "/v1beta/models") {
+		parsed.Path = path + "/" + escapedModel + ":streamGenerateContent"
+	} else if strings.HasSuffix(strings.ToLower(path), "/v1beta") {
+		parsed.Path = path + "/models/" + escapedModel + ":streamGenerateContent"
+	} else if strings.HasSuffix(strings.ToLower(path), "/models") {
+		parsed.Path = path + "/" + escapedModel + ":streamGenerateContent"
+	} else if strings.Contains(path, "/v1beta") {
+		parsed.Path = path + "/models/" + escapedModel + ":streamGenerateContent"
+	} else {
+		parsed.Path = path + "/v1beta/models/" + escapedModel + ":streamGenerateContent"
+	}
+	query := parsed.Query()
+	query.Set("alt", "sse")
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }
 
 func buildGitHubCopilotRequest(remote RemoteEngineConfig, cfg ConversationConfig, parts []PromptPart) (remoteRequest, remoteWireKind, error) {
@@ -300,7 +466,11 @@ func buildGitHubCopilotRequest(remote RemoteEngineConfig, cfg ConversationConfig
 			return remoteRequest{}, "", err
 		}
 		delete(req.headers, "x-api-key")
-		req.headers["Authorization"] = "Bearer " + remote.APIKey
+		if remote.APIKey != "" {
+			req.headers["Authorization"] = "Bearer " + remote.APIKey
+		} else {
+			delete(req.headers, "Authorization")
+		}
 		for k, v := range dynHeaders {
 			req.headers[k] = v
 		}
@@ -318,6 +488,9 @@ func buildGitHubCopilotRequest(remote RemoteEngineConfig, cfg ConversationConfig
 	for k, v := range dynHeaders {
 		req.headers[k] = v
 	}
+	if remote.APIKey == "" {
+		delete(req.headers, "Authorization")
+	}
 	return req, wireOpenAICompletions, nil
 }
 
@@ -331,7 +504,11 @@ func buildGitHubCopilotResponsesRequest(remote RemoteEngineConfig, cfg Conversat
 		baseURL = DeriveGitHubCopilotBaseURL(remote.APIKey, enterpriseDomain)
 	}
 	responsesRemote := remote
-	responsesRemote.BaseURL = strings.TrimRight(baseURL, "/") + "/responses"
+	if remote.Provider == RemoteCustom {
+		responsesRemote.BaseURL = customEndpoint(baseURL, "/responses")
+	} else {
+		responsesRemote.BaseURL = strings.TrimRight(baseURL, "/") + "/responses"
+	}
 	req, err := buildOpenAIResponsesRequest(responsesRemote, cfg, parts)
 	if err != nil {
 		return remoteRequest{}, err
@@ -384,9 +561,11 @@ func buildOpenAIResponsesRequest(remote RemoteEngineConfig, cfg ConversationConf
 		endpoint = strings.TrimRight(endpoint, "/") + "/responses"
 	}
 	headers := map[string]string{
-		"Authorization": "Bearer " + remote.APIKey,
 		"Content-Type":  "application/json",
 		"Accept":        "text/event-stream",
+	}
+	if remote.APIKey != "" {
+		headers["Authorization"] = "Bearer " + remote.APIKey
 	}
 	if remote.Credential != nil {
 		if accountID := remote.Credential.MetaString("account_id"); accountID != "" {
@@ -490,9 +669,11 @@ func buildOpenAIRequest(remote RemoteEngineConfig, cfg ConversationConfig, parts
 		}
 	}
 	headers := map[string]string{
-		"Authorization": "Bearer " + remote.APIKey,
 		"Content-Type":  "application/json",
 		"Accept":        "text/event-stream",
+	}
+	if remote.APIKey != "" {
+		headers["Authorization"] = "Bearer " + remote.APIKey
 	}
 	return remoteRequest{method: http.MethodPost, url: url, headers: headers, body: payload}, nil
 }
@@ -612,7 +793,7 @@ func buildAnthropicRequest(remote RemoteEngineConfig, cfg ConversationConfig, pa
 		headers["anthropic-beta"] = "claude-code-20250219,oauth-2025-04-20"
 		headers["user-agent"] = "claude-cli/" + anthropicClaudeCodeVersion
 		headers["x-app"] = "cli"
-	} else {
+	} else if remote.APIKey != "" {
 		headers["x-api-key"] = remote.APIKey
 	}
 	if assets.HostOS() == "browser" {
@@ -714,14 +895,17 @@ func buildGeminiRequest(remote RemoteEngineConfig, cfg ConversationConfig, parts
 	if url == "" {
 		url = "https://generativelanguage.googleapis.com/v1beta/models/" + remote.Model + ":streamGenerateContent?alt=sse"
 	}
+	headers := map[string]string{
+		"Content-Type": "application/json",
+		"Accept":       "text/event-stream",
+	}
+	if remote.APIKey != "" {
+		headers["x-goog-api-key"] = remote.APIKey
+	}
 	return remoteRequest{
 		method: http.MethodPost,
 		url:    url,
-		headers: map[string]string{
-			"x-goog-api-key": remote.APIKey,
-			"Content-Type":   "application/json",
-			"Accept":         "text/event-stream",
-		},
+		headers: headers,
 		body: payload,
 	}, nil
 }
