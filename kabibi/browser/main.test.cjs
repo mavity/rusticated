@@ -47,6 +47,10 @@ class FakeElement {
     this.attributes[name] = value;
   }
 
+  getAttribute(name) {
+    return this.attributes[name] || null;
+  }
+
   addEventListener(name, callback) {
     this.listeners.set(name, callback);
   }
@@ -73,6 +77,12 @@ class FakeDocument {
   constructor() {
     this.body = new FakeElement('body');
     this.listeners = new Map();
+    this.iconLink = null;
+    this.title = '';
+  }
+
+  querySelector(selector) {
+    return selector === 'link[rel="icon"][type="image/svg+xml"]' ? this.iconLink : null;
   }
 
   createElement(tagName) {
@@ -182,6 +192,7 @@ function createHarness() {
     document,
     window,
     console,
+    TextDecoder,
     addEventListener() {},
     removeEventListener() {},
     setTimeout,
@@ -423,6 +434,89 @@ test('super-demo is only started when explicitly selected', async () => {
   assert.equal(disposals, 1);
 });
 
+test('super-demo Ctrl toggle modifies physical keys through the terminal handler', async () => {
+  const { document, window, context } = createHarness();
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'super-demo.js'), 'utf8'), context);
+  const superDemo = context.KabibiBrowserSuperDemo;
+  document.iconLink = { href: 'data:image/svg+xml,%3Csvg%3E' };
+  context.KabibiBrowserSuperDemo = {
+    start({ terminal, root }) {
+      const keyboard = superDemo.createVirtualKeyboard(document, terminal, root);
+      return {
+        handleKeyEvent: keyboard.handleKeyEvent,
+        isFallback: () => false,
+        resize() {},
+        dispose() { keyboard.dispose(); }
+      };
+    }
+  };
+  const parent = document.createElement('div');
+  document.body.appendChild(parent);
+  const mounted = await context.KabibiBrowser.mount({
+    parent,
+    document,
+    window,
+    Terminal: FakeTerminal,
+    FitAddon: FakeFitAddon,
+    mode: 'super-demo'
+  });
+  const controls = mounted.root.children.find((child) => child.className === 'kabibi-keyboard');
+  const ctrl = controls.children[0].children[0];
+  assert.equal(ctrl.children[0].src, document.iconLink.href);
+  ctrl.click();
+
+  let prevented = false;
+  const handled = mounted.term.customKeyEventHandler({
+    type: 'keydown',
+    key: 'c',
+    ctrlKey: false,
+    metaKey: false,
+    altKey: false,
+    preventDefault() { prevented = true; },
+    stopPropagation() {}
+  });
+  assert.equal(handled, false);
+  assert.equal(prevented, true);
+  assert.deepEqual(mounted.term.inputs, ['\x03']);
+  mounted.dispose();
+});
+
+test('super-demo updates the page title from its startup banner version', async () => {
+  const { document, window, context } = createHarness();
+  document.title = 'CRT Super-Demo';
+  context.KabibiBrowserSuperDemo = {
+    start() {
+      return { resize() {}, dispose() {} };
+    }
+  };
+  let attachedCallbacks;
+  const host = {
+    attachTerminal(callbacks) { attachedCallbacks = callbacks; },
+    pushStdin() {},
+    triggerSignal() {},
+    terminate() {}
+  };
+  const parent = document.createElement('div');
+  document.body.appendChild(parent);
+
+  const mounted = await context.KabibiBrowser.mount({
+    parent,
+    document,
+    window,
+    Terminal: FakeTerminal,
+    FitAddon: FakeFitAddon,
+    host,
+    mode: 'super-demo'
+  });
+  attachedCallbacks.stdout(new TextEncoder().encode('🐚 K A B I B I : wearable all-weather shell v0.8.'));
+  assert.equal(document.title, 'CRT Super-Demo');
+  attachedCallbacks.stdout(new TextEncoder().encode('15\n   - bash\n'));
+  assert.equal(document.title, 'Kabibi v0.8.15');
+
+  mounted.dispose();
+  assert.equal(document.title, 'CRT Super-Demo');
+});
+
 test('super-demo screen keyboard renders all keys and sends xterm sequences', () => {
   const { document, context } = createHarness();
   vm.runInContext(fs.readFileSync(path.join(__dirname, 'super-demo.js'), 'utf8'), context);
@@ -434,9 +528,9 @@ test('super-demo screen keyboard renders all keys and sends xterm sequences', ()
   const grid = root.children.find((child) => child.className === 'kabibi-keyboard').children[0];
   const buttons = new Map(grid.children.map((button) => [button.textContent, button]));
 
-  assert.equal(grid.children.length, 18);
-  assert.match(style.textContent, /repeat\(18, minmax\(0, 1fr\)\)/);
-  assert.match(style.textContent, /repeat\(9, minmax\(0, 1fr\)\)/);
+  assert.equal(grid.children.length, 19);
+  assert.match(style.textContent, /1\.55fr repeat\(18, minmax\(0, 1fr\)\)/);
+  assert.match(style.textContent, /1\.55fr repeat\(8, minmax\(0, 1fr\)\)/);
   const functionSequences = [
     '\x1bOP', '\x1bOQ', '\x1bOR', '\x1bOS',
     '\x1b[15~', '\x1b[17~', '\x1b[18~', '\x1b[19~',
@@ -468,6 +562,37 @@ test('super-demo screen keyboard renders all keys and sends xterm sequences', ()
     expected.push(sequence);
   }
   assert.deepEqual(terminal.inputs, expected);
+
+  const controlButton = grid.children[0];
+  assert.equal(controlButton.getAttribute('aria-label'), 'Ctrl');
+  assert.equal(controlButton.children[0].src, 'kabibi/kabibi.svg');
+  assert.equal(controlButton.children[1].textContent, 'Ctrl');
+  assert.equal(controlButton.getAttribute('aria-pressed'), 'false');
+  controlButton.click();
+  assert.equal(controlButton.getAttribute('aria-pressed'), 'true');
+  assert.equal(keyboard.isControlActive(), true);
+
+  let prevented = false;
+  assert.equal(keyboard.handleKeyEvent({
+    type: 'keydown',
+    key: 'c',
+    preventDefault() { prevented = true; },
+    stopPropagation() {}
+  }), false);
+  assert.equal(prevented, true);
+  assert.equal(terminal.inputs[terminal.inputs.length - 1], '\x03');
+  buttons.get('↑').click();
+  assert.equal(terminal.inputs[terminal.inputs.length - 1], '\x1b[1;5A');
+
+  controlButton.click();
+  assert.equal(controlButton.getAttribute('aria-pressed'), 'false');
+  assert.equal(keyboard.isControlActive(), false);
+  assert.equal(keyboard.handleKeyEvent({
+    type: 'keydown',
+    key: 'c',
+    preventDefault() {},
+    stopPropagation() {}
+  }), true);
 
   keyboard.setNarrow(true);
   assert.match(keyboard.element.className, /kabibi-keyboard--narrow/);

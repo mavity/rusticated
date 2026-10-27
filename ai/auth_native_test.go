@@ -48,6 +48,20 @@ type searchSelectTerm struct {
 	rows  int
 }
 
+type browserURLPromptTerm struct {
+	*searchSelectTerm
+	openedURL string
+	onOpen    func()
+}
+
+func (t *browserURLPromptTerm) OpenURL(target string) error {
+	t.openedURL = target
+	if t.onOpen != nil {
+		t.onOpen()
+	}
+	return nil
+}
+
 func (s *searchSelectTerm) Read(p []byte) (int, error) {
 	if s.index >= len(s.keys) {
 		return 0, io.EOF
@@ -62,6 +76,36 @@ func (s *searchSelectTerm) Size() (int, int)            { return s.cols, s.rows 
 func (s *searchSelectTerm) IsTTY() bool                 { return true }
 func (s *searchSelectTerm) SubscribeRawInput() (func(context.Context, []byte) (int, error), func()) {
 	return func(_ context.Context, p []byte) (int, error) { return s.Read(p) }, func() {}
+}
+
+func TestPromptLineOpensBrowserOnBlankEnterAndKeepsPastePromptActive(t *testing.T) {
+	const target = "https://provider.example/oauth?state=xyz"
+	const prompt = "URL above - press Enter to open browser, or paste authorization code/address"
+	base := &searchSelectTerm{
+		keys: [][]byte{[]byte("  "), []byte("\r\n"), []byte("authorization-code\n")},
+		cols: 80,
+		rows: 24,
+	}
+	term := &browserURLPromptTerm{searchSelectTerm: base}
+	term.onOpen = func() {
+		if !strings.HasSuffix(strings.TrimRight(base.out.String(), " "), prompt+":") {
+			t.Errorf("browser opened after prompt line changed: %q", base.out.String())
+		}
+	}
+
+	got, err := PromptLine(context.Background(), openURLOnEmptyEnter(term, target), "", prompt, false)
+	if err != nil {
+		t.Fatalf("PromptLine() error = %v", err)
+	}
+	if got != "authorization-code" {
+		t.Fatalf("PromptLine() = %q, want authorization-code", got)
+	}
+	if term.openedURL != target {
+		t.Fatalf("opened URL = %q, want %q", term.openedURL, target)
+	}
+	if strings.Count(base.out.String(), prompt) != 1 {
+		t.Fatalf("prompt was displayed more than once: %q", base.out.String())
+	}
 }
 
 func TestRemoteModelDisplayNameStripsDuplicatedNamespace(t *testing.T) {

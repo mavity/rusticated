@@ -68,8 +68,8 @@ func (s *commandTerminalSession) IsTTY() bool {
 	return s != nil && s.isTTY && s.term != nil
 }
 
-func (s *commandTerminalSession) HandleEmptyEnter() bool {
-	return s != nil && s.isTTY && s.onEmptyEnter != nil && s.onEmptyEnter()
+func (s *commandTerminalSession) HandleEmptyEnter() (bool, error) {
+	return s != nil && s.isTTY && s.onEmptyEnter != nil && s.onEmptyEnter(), nil
 }
 
 func (s *commandTerminalSession) OpenURL(target string) error {

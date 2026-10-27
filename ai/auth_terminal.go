@@ -149,7 +149,7 @@ type TerminalSession interface {
 // EmptyEnterHandler lets an interactive terminal perform an action instead of
 // submitting an empty line. Non-TTY input deliberately does not use this hook.
 type EmptyEnterHandler interface {
-	HandleEmptyEnter() bool
+	HandleEmptyEnter() (bool, error)
 }
 
 // BrowserURLOpener opens a URL supplied directly by an authentication flow.
@@ -839,15 +839,27 @@ func PromptOpenURL(ctx context.Context, term TerminalSession, target, prompt str
 	}
 }
 
-type terminalWithoutEmptyEnter struct {
+type browserURLEnterTerminal struct {
 	TerminalSession
+	target string
 }
 
-func withoutEmptyEnter(term TerminalSession) TerminalSession {
+func openURLOnEmptyEnter(term TerminalSession, target string) TerminalSession {
 	if term == nil {
 		return nil
 	}
-	return terminalWithoutEmptyEnter{TerminalSession: term}
+	return browserURLEnterTerminal{TerminalSession: term, target: target}
+}
+
+func (t browserURLEnterTerminal) HandleEmptyEnter() (bool, error) {
+	opener, ok := t.TerminalSession.(BrowserURLOpener)
+	if !ok {
+		return false, errors.New("AI terminal does not support direct browser URL opening")
+	}
+	if err := opener.OpenURL(t.target); err != nil {
+		return false, fmt.Errorf("open authorization URL: %w", err)
+	}
+	return true, nil
 }
 
 func readLineFromTerm(ctx context.Context, term TerminalSession, secret bool) (string, error) {
@@ -902,10 +914,24 @@ func readLineFromTerm(ctx context.Context, term TerminalSession, secret bool) (s
 				_, _ = io.WriteString(term, "\n")
 				return "", ErrAuthCancelled
 			case b == '\r' || b == '\n':
-				if len(runes) == 0 {
-					if handler, ok := term.(EmptyEnterHandler); ok && handler.HandleEmptyEnter() {
-						i++
-						continue
+				if b == '\r' && i+1 < len(chunk) && chunk[i+1] == '\n' {
+					i++
+				}
+				if strings.TrimSpace(string(runes)) == "" {
+					if handler, ok := term.(EmptyEnterHandler); ok {
+						handled, handleErr := handler.HandleEmptyEnter()
+						if handleErr != nil {
+							_, _ = io.WriteString(term, "\n")
+							return "", handleErr
+						}
+						if handled {
+							for range runes {
+								_, _ = io.WriteString(term, "\b \b")
+							}
+							runes = runes[:0]
+							i++
+							continue
+						}
 					}
 				}
 				_, _ = io.WriteString(term, "\n")
@@ -1224,7 +1250,6 @@ func WaitForCallbackOrManualInput[T any](
 	parseManual func(input string) (T, error),
 ) (T, error) {
 	var zero T
-	term = withoutEmptyEnter(term)
 	if callback == nil {
 		input, err := PromptLine(ctx, term, "", promptMessage, false)
 		if err != nil {

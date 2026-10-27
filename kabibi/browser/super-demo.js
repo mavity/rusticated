@@ -46,69 +46,81 @@
       }
       .kabibi-keyboard-grid {
         display: grid;
-        grid-template-columns: repeat(18, minmax(0, 1fr));
+        grid-template-columns: 1.55fr repeat(18, minmax(0, 1fr));
         gap: clamp(2px, 0.42cqw, 7px);
         width: 100%;
       }
       .kabibi-keyboard--narrow .kabibi-keyboard-grid {
-        grid-template-columns: repeat(9, minmax(0, 1fr));
+        grid-template-columns: 1.55fr repeat(8, minmax(0, 1fr));
       }
       .kabibi-key {
         position: relative;
         box-sizing: border-box;
         min-width: 0;
         height: clamp(2.25rem, 6dvh, 3.5rem);
-        padding: 0 2px;
+        padding: 0 clamp(2px, 0.24cqw, 5px);
         overflow: hidden;
-        border: 1px solid #030405;
-        border-radius: clamp(4px, 0.55cqw, 9px);
-        color: #d9e0e8;
+        border: 1px solid #080a0b;
+        border-radius: 2px;
+        color: #c4d2da;
         background:
-          linear-gradient(180deg, #454b53 0%, #252a30 25%, #111417 100%);
+          linear-gradient(180deg, #555d62 0%, #343a3e 12%, #202529 78%, #111518 100%);
         box-shadow:
-          0 3px 0 #030405,
-          0 4px 6px rgba(0,0,0,.65),
-          inset 0 1px 1px rgba(255,255,255,.3),
-          inset 0 -2px 3px rgba(0,0,0,.82);
-        font: 600 clamp(.62rem, 1.45cqw, 1rem)/1 system-ui, sans-serif;
-        text-shadow: 0 -1px 1px #000, 0 1px 1px rgba(255,255,255,.15);
+          0 3px 0 #080a0b,
+          0 4px 4px rgba(0,0,0,.72),
+          inset 0 1px 0 rgba(255,255,255,.24),
+          inset 1px 0 0 rgba(255,255,255,.06),
+          inset 0 -2px 0 rgba(0,0,0,.7);
+        font: 600 clamp(.62rem, 1.35cqw, .95rem)/1 system-ui, sans-serif;
+        text-shadow: 0 -1px 1px #000, 0 1px 0 rgba(255,255,255,.12);
         cursor: pointer;
         -webkit-tap-highlight-color: transparent;
       }
       .kabibi-key::before {
         position: absolute;
-        inset: 1px 2px auto;
-        height: 31%;
-        border-radius: inherit;
-        background: linear-gradient(180deg, rgba(255,255,255,.2), transparent);
+        inset: 2px 3px auto;
+        height: 1px;
+        background: rgba(255,255,255,.15);
         content: '';
         pointer-events: none;
       }
-      .kabibi-key::after {
-        position: absolute;
-        top: 4px;
-        right: 5px;
-        width: 3px;
-        height: 3px;
-        border-radius: 50%;
-        background: #aa7733;
-        box-shadow: 0 0 3px 1px rgba(201,143,57,.38);
-        content: '';
-        opacity: .72;
+      .kabibi-key--ctrl {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: clamp(2px, 0.3cqw, 6px);
+        color: #d6e0e5;
+        letter-spacing: .03em;
+      }
+      .kabibi-key--ctrl img {
+        box-sizing: border-box;
+        width: clamp(1.05rem, 2cqw, 1.7rem);
+        height: clamp(1.05rem, 2cqw, 1.7rem);
+        padding: 2px;
+        filter: drop-shadow(0 0 0.5px white) drop-shadow(2px 1px 3px rgba(255,255,255,0.3));
+        transform: translateX(10%) scale(1.5);
+        object-fit: contain;
         pointer-events: none;
+      }
+      .kabibi-key--ctrl span {
+        font-size: clamp(.58rem, 1.1cqw, .78rem);
+      }
+      .kabibi-key--ctrl[aria-pressed="true"] {
+        border-color: #9ab0bb;
+        color: #f0c66c;
+        background: linear-gradient(180deg, #41494e 0%, #252b2f 80%, #161a1d 100%);
+        box-shadow:
+          0 1px 0 #080a0b,
+          inset 0 2px 4px rgba(0,0,0,.75),
+          inset 0 1px 0 rgba(255,255,255,.12);
+        transform: translateY(2px);
       }
       .kabibi-key:active {
         transform: translateY(2px);
-        background: linear-gradient(180deg, #252a30 0%, #101316 100%);
+        background: linear-gradient(180deg, #30363a 0%, #191e21 100%);
         box-shadow:
-          0 1px 0 #030405,
-          0 2px 3px rgba(0,0,0,.65),
-          inset 0 1px 2px rgba(0,0,0,.8);
-      }
-      .kabibi-key:active::after {
-        background: #ffd27a;
-        box-shadow: 0 0 6px 2px rgba(255,178,62,.8);
-        opacity: 1;
+          0 1px 0 #080a0b,
+          inset 0 2px 4px rgba(0,0,0,.72);
       }
       @supports not (height: 1dvh) {
         .kabibi-key { height: clamp(2.25rem, 6vh, 3.5rem); }
@@ -120,9 +132,10 @@
         }
         .kabibi-keyboard-grid { gap: clamp(2px, 0.42vw, 7px); }
         .kabibi-key {
-          border-radius: clamp(4px, 0.55vw, 9px);
-          font-size: clamp(.62rem, 1.45vw, 1rem);
+          font-size: clamp(.62rem, 1.35vw, .95rem);
         }
+        .kabibi-key--ctrl img { width: clamp(1.05rem, 2vw, 1.7rem); height: clamp(1.05rem, 2vw, 1.7rem); }
+        .kabibi-key--ctrl span { font-size: clamp(.58rem, 1.1vw, .78rem); }
       }
     `;
     const controls = document.createElement('div');
@@ -132,6 +145,34 @@
     const grid = document.createElement('div');
     grid.className = 'kabibi-keyboard-grid';
     controls.appendChild(grid);
+
+    let controlActive = false;
+    const controlButton = document.createElement('button');
+    controlButton.type = 'button';
+    controlButton.className = 'kabibi-key kabibi-key--ctrl';
+    controlButton.setAttribute('aria-label', 'Ctrl');
+    controlButton.setAttribute('aria-pressed', 'false');
+    controlButton.title = 'Toggle Ctrl modifier';
+    const logo = document.createElement('img');
+    const favicon = typeof document.querySelector === 'function'
+      ? document.querySelector('link[rel="icon"][type="image/svg+xml"]')
+      : null;
+    logo.src = favicon && favicon.href ? favicon.href : 'kabibi/kabibi.svg';
+    logo.alt = '';
+    logo.setAttribute('aria-hidden', 'true');
+    logo.draggable = false;
+    const controlLabel = document.createElement('span');
+    controlLabel.textContent = 'Ctrl';
+    controlButton.appendChild(logo);
+    controlButton.appendChild(controlLabel);
+    controlButton.addEventListener('pointerdown', (event) => event.preventDefault());
+    controlButton.addEventListener('contextmenu', (event) => event.preventDefault());
+    controlButton.addEventListener('click', (event) => {
+      event.preventDefault();
+      controlActive = !controlActive;
+      controlButton.setAttribute('aria-pressed', String(controlActive));
+    });
+    grid.appendChild(controlButton);
 
     for (const key of VIRTUAL_KEYS) {
       const button = document.createElement('button');
@@ -151,6 +192,9 @@
           );
           sequence = `\x1b${applicationMode ? 'O' : '['}${key.arrow}`;
         }
+        if (controlActive) {
+          sequence = controlSequenceForKey(key, sequence);
+        }
         terminal.input(sequence, true);
       });
       grid.appendChild(button);
@@ -163,11 +207,78 @@
       setNarrow(narrow) {
         controls.className = `kabibi-keyboard${narrow ? ' kabibi-keyboard--narrow' : ''}`;
       },
+      handleKeyEvent(event) {
+        if (!controlActive || !event || event.type !== 'keydown' ||
+            event.ctrlKey || event.metaKey || event.altKey || event.isComposing) {
+          return true;
+        }
+        const sequence = controlSequenceForPhysicalKey(event.key);
+        if (sequence === null) return true;
+        event.preventDefault();
+        if (typeof event.stopPropagation === 'function') event.stopPropagation();
+        terminal.input(sequence, true);
+        return false;
+      },
+      isControlActive() {
+        return controlActive;
+      },
       dispose() {
+        controlActive = false;
+        controlButton.setAttribute('aria-pressed', 'false');
         controls.remove();
         style.remove();
       }
     };
+  }
+
+  function controlSequenceForKey(key, sequence) {
+    if (key.arrow) return `\x1b[1;5${key.arrow}`;
+    if (key.label === 'Tab') return '\t';
+    if (key.label === 'Esc') return '\x1b';
+    const functionKey = /^F(\d+)$/.exec(key.label);
+    if (functionKey) return modifiedFunctionKeySequence(Number(functionKey[1]));
+    return controlSequenceForPhysicalKey(key.label);
+  }
+
+  function controlSequenceForPhysicalKey(key) {
+    if (key === ' ') return '\x00';
+    if (typeof key !== 'string' || key.length !== 1) {
+      const specialKeys = {
+        Backspace: '\x7f',
+        Enter: '\r',
+        Tab: '\t',
+        Escape: '\x1b',
+        ArrowUp: '\x1b[1;5A',
+        ArrowDown: '\x1b[1;5B',
+        ArrowRight: '\x1b[1;5C',
+        ArrowLeft: '\x1b[1;5D',
+        Home: '\x1b[1;5H',
+        End: '\x1b[1;5F',
+        Insert: '\x1b[2;5~',
+        Delete: '\x1b[3;5~',
+        PageUp: '\x1b[5;5~',
+        PageDown: '\x1b[6;5~'
+      };
+      if (specialKeys[key]) return specialKeys[key];
+      const functionKey = /^F(\d+)$/.exec(key);
+      return functionKey ? modifiedFunctionKeySequence(Number(functionKey[1])) : null;
+    }
+
+    const digitControls = { '2': '\x00', '3': '\x1b', '4': '\x1c', '5': '\x1d', '6': '\x1e', '7': '\x1f', '8': '\x7f' };
+    if (digitControls[key]) return digitControls[key];
+    const normalized = key.toUpperCase();
+    if (normalized >= '@' && normalized <= '_') {
+      return String.fromCharCode(normalized.charCodeAt(0) & 0x1f);
+    }
+    if (key === '?') return '\x7f';
+    return null;
+  }
+
+  function modifiedFunctionKeySequence(number) {
+    const functionFinals = { 1: 'P', 2: 'Q', 3: 'R', 4: 'S' };
+    if (functionFinals[number]) return `\x1b[1;5${functionFinals[number]}`;
+    const functionNumbers = { 5: 15, 6: 17, 7: 18, 8: 19, 9: 20, 10: 21, 11: 23, 12: 24 };
+    return functionNumbers[number] ? `\x1b[${functionNumbers[number]};5~` : null;
   }
 
   function start({ terminal, fitAddon, root, terminalContainer, dependencies = {} }) {
@@ -1145,6 +1256,9 @@
       resize,
       fallback,
       isFallback: () => usingFallback,
+      handleKeyEvent(event) {
+        return keyboard.handleKeyEvent(event);
+      },
       dispose() {
         if (!active) return;
         active = false;
