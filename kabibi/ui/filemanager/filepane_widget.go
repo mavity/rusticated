@@ -233,7 +233,7 @@ func truncateStringToWidth(s string, maxWidth int) string {
 }
 
 // FilePaneWidget is the complete model for a single file-browser pane.
-// It owns navigation state, handles keyboard input, and renders cells.
+// It owns navigation state, handles keyboard input, and returns ANSI frames.
 // Title is structural state passed by the parent; operational state (items,
 // selection, scroll) is managed internally.
 type FilePaneWidget struct {
@@ -242,13 +242,11 @@ type FilePaneWidget struct {
 	OnChangeDir     func(path string) // called when the pane changes its directory
 	OnMetadataError func(path string, err error)
 
-	active          bool
 	dir             string
 	items           []fileItem
 	selectedIdx     int
 	firstVisibleCol int
 	service         FSService
-	ctx             RenderContext
 	searchText      []rune
 	searchPos       int
 	searchStart     int
@@ -268,20 +266,6 @@ func NewFilePaneWidget(title string) *FilePaneWidget {
 		service:       &OsFSService{},
 		numberPrinter: numberPrinterFromEnv(),
 	}
-}
-
-func (w *FilePaneWidget) SetActive(v bool) {
-	if w == nil {
-		return
-	}
-	w.active = v
-}
-
-func (w *FilePaneWidget) IsActive() bool {
-	if w == nil {
-		return false
-	}
-	return w.active
 }
 
 func (w *FilePaneWidget) SetService(s FSService) {
@@ -854,15 +838,18 @@ func (w *FilePaneWidget) Layout(r Rect) {
 	w.ensureSelectedColumnVisible()
 }
 
-func (w *FilePaneWidget) Render(r Rect, ctx RenderContext) (CellBuf, CursorPos) {
+func (w *FilePaneWidget) Render(r Rect, ctx RenderContext) string {
 	if r.W > 0 || r.H > 0 {
 		w.Layout(r)
 	}
-	w.ctx = ctx
-	return w.RenderBuf(), CursorPos{Visible: false}
+	return ui.ANSIFrame(w.renderBuf(ctx.Focused), CursorPos{})
 }
 
 func (w *FilePaneWidget) RenderBuf() CellBuf {
+	return w.renderBuf(false)
+}
+
+func (w *FilePaneWidget) renderBuf(focused bool) CellBuf {
 	buf := NewCellBuf(w.Width, w.Height)
 	if w.Width <= 0 || w.Height <= 0 {
 		return buf
@@ -901,7 +888,7 @@ func (w *FilePaneWidget) RenderBuf() CellBuf {
 		start := 1 + (w.Width-2-runewidth.StringWidth(label))/2
 		titleBG := colorBlue
 		titleFG := colorGray
-		if w.active {
+		if focused {
 			titleBG = colorYellow
 			titleFG = colorDarkGray
 		}
@@ -970,7 +957,7 @@ func (w *FilePaneWidget) RenderBuf() CellBuf {
 					if cellX+colOff >= w.Width-1 {
 						break
 					}
-					buf.Set(cellX+colOff, cellY, paneCell(rn, item, idx == selectedIdx && w.active, item.selected))
+					buf.Set(cellX+colOff, cellY, paneCell(rn, item, idx == selectedIdx && focused, item.selected))
 					colOff += runewidth.RuneWidth(rn)
 				}
 			}
@@ -1267,7 +1254,7 @@ type DualPaneWidget struct {
 	Y      int
 
 	activePane int // 0=left, 1=right
-	ctx        RenderContext
+	compositor *terminal.Terminal
 }
 
 func NewDualPaneWidget() *DualPaneWidget {
@@ -1334,28 +1321,53 @@ func (w *DualPaneWidget) Layout(r Rect) {
 	}
 }
 
-func (w *DualPaneWidget) Render(r Rect, ctx RenderContext) (CellBuf, CursorPos) {
+func (w *DualPaneWidget) Render(r Rect, ctx RenderContext) string {
 	if r.W > 0 || r.H > 0 {
 		w.Layout(r)
 	}
-	w.ctx = ctx
-	return w.RenderBuf(), CursorPos{Visible: false}
+	if w.compositor == nil {
+		w.compositor = terminal.NewTerminal(1, 1)
+	}
+	buf := w.renderBuf()
+	if w.Left != nil {
+		leftANSI := w.Left.Render(
+			Rect{W: w.Left.Width, H: w.Left.Height},
+			ctx.ForChild(ctx.Focused && w.activePane == 0),
+		)
+		ctx.CompositeANSI(&buf, w.compositor, terminal.Rect{
+			X: w.Left.X - w.X, Y: w.Left.Y - w.Y, W: w.Left.Width, H: w.Left.Height,
+		}, leftANSI)
+	}
+	if w.Right != nil {
+		rightANSI := w.Right.Render(
+			Rect{W: w.Right.Width, H: w.Right.Height},
+			ctx.ForChild(ctx.Focused && w.activePane == 1),
+		)
+		ctx.CompositeANSI(&buf, w.compositor, terminal.Rect{
+			X: w.Right.X - w.X, Y: w.Right.Y - w.Y, W: w.Right.Width, H: w.Right.Height,
+		}, rightANSI)
+	}
+	return ui.ANSIFrame(buf, CursorPos{})
 }
 
 func (w *DualPaneWidget) RenderBuf() CellBuf {
+	return w.renderBuf()
+}
+
+func (w *DualPaneWidget) renderBuf() CellBuf {
 	buf := NewCellBuf(w.Width, w.Height)
 	if w == nil || w.Width <= 0 || w.Height <= 0 {
 		return buf
 	}
 	buf.Fill(Rect{X: 0, Y: 0, W: w.Width, H: w.Height}, makeCell(' ', colorWhite, colorBlue, false))
 	if w.Left != nil {
-		leftBuf := w.Left.RenderBuf()
+		leftBuf := w.Left.renderBuf(false)
 		if leftBuf.Width > 0 && leftBuf.Height > 0 {
 			buf.Blit(leftBuf, w.Left.X-w.X, w.Left.Y-w.Y)
 		}
 	}
 	if w.Right != nil {
-		rightBuf := w.Right.RenderBuf()
+		rightBuf := w.Right.renderBuf(false)
 		if rightBuf.Width > 0 && rightBuf.Height > 0 {
 			buf.Blit(rightBuf, w.Right.X-w.X, w.Right.Y-w.Y)
 		}
@@ -1453,12 +1465,6 @@ func (w *DualPaneWidget) SetActivePane(idx int) {
 		return
 	}
 	w.activePane = idx
-	if w.Left != nil {
-		w.Left.SetActive(idx == 0)
-	}
-	if w.Right != nil {
-		w.Right.SetActive(idx == 1)
-	}
 }
 
 func (w *DualPaneWidget) ToggleActivePane() {

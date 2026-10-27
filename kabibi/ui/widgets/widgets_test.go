@@ -9,6 +9,17 @@ import (
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
 
+func renderWidgetANSIForTest(t *testing.T, text string, width, height int) (terminal.CellBuf, ui.CursorPos) {
+	t.Helper()
+	frame, cursor, extent, err := terminal.NewTerminal(width, height).RenderANSIForComposition(text, width, height)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := terminal.NewCellBuf(width, extent)
+	copy(buf.Cells(), frame.Cells()[:extent*width])
+	return buf, cursor
+}
+
 func TestTextInputPasteAndSelectionReplacement(t *testing.T) {
 	inputWidget := NewTextInput(TextInputOptions{Value: "abcdef", AllowPaste: true})
 	inputWidget.moveCursor(2, false)
@@ -24,7 +35,7 @@ func TestTextInputPasteAndSelectionReplacement(t *testing.T) {
 func TestTextInputHorizontalScrollAndEllipses(t *testing.T) {
 	inputWidget := NewTextInput(TextInputOptions{Value: "0123456789abcdefghij"})
 	inputWidget.moveCursor(10, false)
-	buf, cursor := inputWidget.Render(ui.Rect{W: 8, H: 1}, ui.RenderContext{Focused: true})
+	buf, cursor := renderWidgetANSIForTest(t, inputWidget.Render(ui.Rect{W: 8, H: 1}, ui.RenderContext{Focused: true}), 8, 1)
 
 	if got := buf.Get(0, 0).Grapheme; got != "…" {
 		t.Fatalf("left overflow indicator = %q, want ellipsis", got)
@@ -39,7 +50,7 @@ func TestTextInputHorizontalScrollAndEllipses(t *testing.T) {
 
 func TestTextInputWideCharactersAndOverflow(t *testing.T) {
 	inputWidget := NewTextInput(TextInputOptions{Value: "界abc界", SelectAll: true})
-	buf, _ := inputWidget.Render(ui.Rect{W: 5, H: 1}, ui.RenderContext{Focused: true})
+	buf, _ := renderWidgetANSIForTest(t, inputWidget.Render(ui.Rect{W: 5, H: 1}, ui.RenderContext{Focused: true}), 5, 1)
 	var rendered strings.Builder
 	for x := 0; x < buf.Width; x++ {
 		rendered.WriteString(buf.Get(x, 0).Grapheme)
@@ -87,7 +98,7 @@ func TestButtonRowWrapsToAvailableHeight(t *testing.T) {
 	if size.H < 2 {
 		t.Fatalf("measured height = %d, want wrapped rows", size.H)
 	}
-	buf, _ := row.Render(ui.Rect{W: 12, H: size.H}, ui.RenderContext{})
+	buf, _ := renderWidgetANSIForTest(t, row.Render(ui.Rect{W: 12, H: size.H}, ui.RenderContext{}), 12, size.H)
 	if terminal.ToANSI(buf) == "" {
 		t.Fatal("button row rendered empty output")
 	}
@@ -99,9 +110,8 @@ func TestProgressBarRespondsToConstraints(t *testing.T) {
 	if size.W != 10 || size.H != 2 {
 		t.Fatalf("Measure() = %+v, want 10x2", size)
 	}
-	buf, _ := progress.Render(ui.Rect{W: 10, H: 2}, ui.RenderContext{})
+	buf, _ := renderWidgetANSIForTest(t, progress.Render(ui.Rect{W: 10, H: 2}, ui.RenderContext{}), 10, 2)
 	if !strings.Contains(terminal.ToANSI(buf), "50%") {
 		t.Fatal("progress output does not show percentage")
 	}
 }
-

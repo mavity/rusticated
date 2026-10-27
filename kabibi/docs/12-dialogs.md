@@ -2,7 +2,7 @@
 
 ## 1. Architectural Vision & Design Philosophy
 
-Kabibi's modal dialogs follow the same core philosophy as the rest of the shell UI: **compact, keyboard-first, zero external TUI framework bloat, and rendered directly into a `terminal.CellBuf`**.
+Kabibi's modal dialogs follow the same core philosophy as the rest of the shell UI: **compact, keyboard-first, zero external TUI framework bloat, and rendered as ANSI text**. `terminal.CellBuf` is an internal composition and host-diff representation, not the widget output contract.
 
 Inspired by FAR Manager's ergonomics while retaining Kabibi's modern dark-gray aesthetic (`#1A1F26` surface, `#FFD700` gold borders/highlights, `#E5E5E5` text), the dialog system is built around four principles:
 
@@ -220,13 +220,25 @@ In `AppWidget.Measure`, when `dlg != nil` and `panelsVisible == false`, `AppWidg
 
 ## 7. Implementation Status
 
-The shared controls, responsive dialog composition, collision-in-progress flow, and panel-free slash-command forms are implemented. The app integration also includes `/mkdir`, path history and completion relative to the shell working directory, and surfaced errors for directory creation and rename. Shared controls remain opt-in for other UI surfaces; the shell prompt and document editor have not been migrated.
+The shared controls, responsive dialog composition, collision-in-progress flow, and panel-free slash-command forms are implemented. The widget contract now returns ANSI strings from every production `Render` method; parents interpret child frames in an isolated VT and compose the resulting cells internally. The shell prompt, editor, file panes, dialogs, wizard, and `CommandBlock` use this contract. The app integration also includes `/mkdir`, path history and completion relative to the shell working directory, and surfaced errors for directory creation and rename.
 
-Focused tests cover widget editing and layout, dialog sizing/focus/collision behavior, slash-command routing, panel-free copy, collision continuation, and asynchronous relative-path completion. The broader app suite has not been established as passing; older snapshot and unrelated UI assertions may need separate follow-up.
+Focused tests cover ANSI round-tripping, widget editing and layout, dialog sizing/focus/collision behavior, slash-command routing, panel-free copy, collision continuation, and asynchronous relative-path completion. Some broader app snapshots still encode the older startup banner and therefore need separate fixture maintenance.
 
 # Widgets Followups
 
 **We want to redesign Widget system—100%.** Putting those three pieces together turns Kabibi's UI from two parallel rendering worlds (`ui.Widget` building `CellBuf`s vs. `CommandBlock` building ANSI strings) into **one unified, composable widget tree** where every component speaks the exact same language.
+
+> **Implementation update:** The original sketches below are historical where they conflict with the implemented API. The authoritative contract is `Widget.Measure(Constraints) Size`, `Widget.Render(Rect, RenderContext) string`, and `Widget.HandleEvent(input.Event) bool`. Focus and invalidation are supplied through `RenderContext`; `Measure` declares desired size and the parent chooses the allocation. Widgets return ANSI, never `CellBuf` or a separate cursor result.
+
+### Implemented composition model
+
+- Composite parents parse each child ANSI frame in a reusable, resettable `terminal.Terminal`, then blit its exact allocation into an internal `CellBuf`. `RenderContext.CompositeANSI` preserves the cursor only from the focused child and translates it into parent coordinates.
+- `CharResetForegroundDefault` and `CharResetBackgroundDefault` are per-channel inheritance markers during composition. They copy the matching destination color and reset marker independently; the child's grapheme and other attributes replace the destination cell. This is reset-as-fallback, not general alpha transparency.
+- The host interprets the root ANSI frame into its internal diff buffer. Widget output remains ANSI throughout the public tree; cell buffers are private implementation details of composition and terminal diffing.
+- `CommandBlock` implements `ui.Widget` and is rendered through the same ANSI-to-VT boundary as other shell blocks. `Shell` retains command metadata, PTY state, and settled-block cell caches; it remains responsible for routing active PTY input.
+- `ANSIFrame` serializes composed rows as positioned ANSI lines and appends cursor visibility/position controls. The composition parser uses a spare margin column to avoid VT wide-glyph-at-margin loss without shifting explicitly positioned widget rows.
+
+The sketches following this update describe the previous proposal and should not be read as the current method signatures or runtime behavior.
 
 Look at how cleanly the three parts of your design click together:
 
@@ -411,7 +423,7 @@ preserves the exact two-step layout model you want:
 1. **Query:** The parent calls `child.Measure(Constraints{MaxW, MaxH})` to ask the child its desired `Size{W, H}` within those constraints.
 2. **Decide & Render:** The parent decides the final `(w, h)` (and position `(x, y)`) to allocate to the child, calls `child.Render(..., ctx)` with that chosen size and child `RenderContext`, feeds the returned ANSI string into its reusable `vt` sized to `(w, h)`, and blits the resulting cells into its own buffer. And in `Host.runFrame`, `Host` can actually use `size := h.root.Measure(...)` instead of discarding it with `_ =`.
 
-## Proposed Alpha Channel
+## Proposed Alpha Channel (historical review; superseded by implementation update above)
 
 > The child should indeed fill the space, and that's important. But now please review again the suggestion how we should treat reset background/reset foreground bits on composited child widgets in a very different way here: these would mean take background/foreground from corresponding cell of a buffer passed inside. Include the plan to treat resets correctly with this bulletproof two stage.
 

@@ -28,6 +28,18 @@ func Serialize(buf CellBuf) string {
 	return terminal.ToANSI(buf)
 }
 
+func renderFilePaneForTest(t *testing.T, pane *FilePaneWidget, rect Rect, focused bool) CellBuf {
+	t.Helper()
+	text := pane.Render(rect, RenderContext{Focused: focused})
+	frame, _, extent, err := terminal.NewTerminal(rect.W, rect.H).RenderANSIForComposition(text, rect.W, rect.H)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := terminal.NewCellBuf(rect.W, extent)
+	copy(buf.Cells(), frame.Cells()[:extent*rect.W])
+	return buf
+}
+
 func TestFilePaneWidgetMeasureAndRender(t *testing.T) {
 	pane := NewFilePaneWidget("demo")
 	pane.SetItemsBridge([]fileItem{
@@ -35,14 +47,11 @@ func TestFilePaneWidgetMeasureAndRender(t *testing.T) {
 		{name: "beta"},
 		{name: "gamma"},
 	}, 1)
-	pane.SetActive(true)
-
 	if got := pane.Measure(Constraints{MaxW: 18, MaxH: 8}); got.W != 18 || got.H != 8 {
 		t.Fatalf("Measure returned unexpected size: %#v", got)
 	}
 
-	pane.Layout(Rect{X: 0, Y: 0, W: 18, H: 8})
-	buf := pane.RenderBuf()
+	buf := renderFilePaneForTest(t, pane, Rect{X: 0, Y: 0, W: 18, H: 8}, true)
 	if buf.Width != 18 || buf.Height != 8 {
 		t.Fatalf("Render produced unexpected size: %#v", buf)
 	}
@@ -692,12 +701,6 @@ func TestFilePaneWidgetInstantSearchOverlayRendersOnBottomBorder(t *testing.T) {
 func TestDualPaneWidgetStartsWithLeftPaneActive(t *testing.T) {
 	dp := NewDualPaneWidget()
 
-	if !dp.Left.IsActive() {
-		t.Fatal("left pane should start active")
-	}
-	if dp.Right.IsActive() {
-		t.Fatal("right pane should start inactive")
-	}
 	if dp.ActivePaneIndex() != 0 {
 		t.Fatalf("active pane index = %d, want 0", dp.ActivePaneIndex())
 	}
@@ -707,17 +710,13 @@ func TestDualPaneWidgetTabCyclesActivePane(t *testing.T) {
 	dp := NewDualPaneWidget()
 	dp.SetActivePaneBridge(0)
 
-	if !dp.Left.IsActive() {
-		t.Fatal("left pane should start active")
-	}
-
 	dp.HandleEvent(input.KeyPressEvent{Code: input.KeyTab})
-	if !dp.Right.IsActive() || dp.Left.IsActive() {
+	if dp.ActivePaneIndex() != 1 {
 		t.Fatal("Tab should make right pane active")
 	}
 
 	dp.HandleEvent(input.KeyPressEvent{Code: input.KeyTab})
-	if !dp.Left.IsActive() || dp.Right.IsActive() {
+	if dp.ActivePaneIndex() != 0 {
 		t.Fatal("second Tab should return left pane active")
 	}
 }
@@ -783,15 +782,11 @@ func TestDualPaneWidgetRoutesKeysToActiveChild(t *testing.T) {
 func TestFilePaneWidgetActiveInactiveRender(t *testing.T) {
 	active := NewFilePaneWidget("active")
 	active.SetItemsBridge([]fileItem{{name: "one"}, {name: "two"}}, 0)
-	active.SetActive(true)
-	active.Layout(Rect{X: 0, Y: 0, W: 22, H: 8})
-	actBuf := active.RenderBuf()
+	actBuf := renderFilePaneForTest(t, active, Rect{X: 0, Y: 0, W: 22, H: 8}, true)
 
 	inactive := NewFilePaneWidget("inactive")
 	inactive.SetItemsBridge([]fileItem{{name: "one"}, {name: "two"}}, 0)
-	inactive.SetActive(false)
-	inactive.Layout(Rect{X: 0, Y: 0, W: 22, H: 8})
-	inactBuf := inactive.RenderBuf()
+	inactBuf := renderFilePaneForTest(t, inactive, Rect{X: 0, Y: 0, W: 22, H: 8}, false)
 
 	// Active pane highlights selected row 1 in yellow background; inactive pane keeps blue background.
 	if got := actBuf.Get(2, 1).Style.Background(); got != colorYellow {

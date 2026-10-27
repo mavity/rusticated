@@ -49,7 +49,6 @@ type PromptInput struct {
 
 	value        string
 	cursorPos    int
-	focused      bool
 	history      []string
 	historyIdx   int
 	scrollRow    int
@@ -77,7 +76,6 @@ func NewPromptInput(opts PromptInputOptions) *PromptInput {
 		maxLines:       maxLines,
 		maxScreenRatio: ratio,
 		styleInput:     opts.StyleInput,
-		focused:        true,
 		historyIdx:     -1,
 	}
 }
@@ -186,27 +184,6 @@ func (p *PromptInput) InsertNewline() {
 	}
 	p.mu.Unlock()
 	p.invalidate()
-}
-
-// Focus gives keyboard focus to the input widget.
-func (p *PromptInput) Focus() {
-	p.mu.Lock()
-	p.focused = true
-	p.mu.Unlock()
-}
-
-// Blur removes keyboard focus from the input widget.
-func (p *PromptInput) Blur() {
-	p.mu.Lock()
-	p.focused = false
-	p.mu.Unlock()
-}
-
-// Focused reports whether the input widget currently has focus.
-func (p *PromptInput) Focused() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.focused
 }
 
 // AddHistory appends a non-empty command line to the input history and resets history navigation.
@@ -497,9 +474,8 @@ func (p *PromptInput) Measure(c ui.Constraints) ui.Size {
 	return ui.Size{W: w, H: h}
 }
 
-// Render implements ui.Widget by painting the visible slice of wrapped rows into
-// a CellBuf and returning the cursor position relative to the buffer origin.
-func (p *PromptInput) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui.CursorPos) {
+// Render implements ui.Widget by returning ANSI for the visible slice of wrapped rows.
+func (p *PromptInput) Render(rect ui.Rect, ctx ui.RenderContext) string {
 	w := rect.W
 	if w <= 0 {
 		w = 80
@@ -511,7 +487,6 @@ func (p *PromptInput) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui
 	styleInput := p.styleInput
 	value := p.value
 	cursorPos := p.cursorPos
-	focused := p.focused && ctx.Focused
 	scrollRow := p.scrollRow
 	capH := p.maxAllowedHeight(rect.H)
 	p.mu.Unlock()
@@ -583,11 +558,11 @@ func (p *PromptInput) Render(rect ui.Rect, ctx ui.RenderContext) (ui.CellBuf, ui
 		curY = visH - 1
 	}
 
-	return buf, ui.CursorPos{
+	return ui.ANSIFrame(buf, ui.CursorPos{
 		X:       layout.cursorX,
 		Y:       curY,
-		Visible: focused,
-	}
+		Visible: ctx.Focused,
+	})
 }
 
 // HandleEvent implements ui.Widget for text editing, cursor movement, and history navigation.
@@ -621,10 +596,6 @@ func (p *PromptInput) insertText(text string) bool {
 	}
 	clean := strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
 	p.mu.Lock()
-	if !p.focused {
-		p.mu.Unlock()
-		return false
-	}
 	runes := []rune(p.value)
 	ins := []rune(clean)
 	if p.cursorPos < 0 {
@@ -650,13 +621,6 @@ func (p *PromptInput) handleKeyEvent(ev input.KeyPressEvent) bool {
 	if keyStr == "enter" || keyStr == "ctrl+c" {
 		return false
 	}
-
-	p.mu.Lock()
-	if !p.focused {
-		p.mu.Unlock()
-		return false
-	}
-	p.mu.Unlock()
 
 	switch keyStr {
 	case "backspace":

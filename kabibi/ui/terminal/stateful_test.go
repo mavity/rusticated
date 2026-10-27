@@ -103,6 +103,39 @@ func TestTerminalResizePreservesStateWithoutReplay(t *testing.T) {
 	}
 }
 
+func TestTerminalRenderANSIResetsBetweenExactSizeFrames(t *testing.T) {
+	term := NewTerminal(4, 2)
+	first, _, err := term.RenderANSI("\x1b[31mred", 4, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Width != 4 || first.Height != 2 {
+		t.Fatalf("first frame size = %dx%d, want 4x2", first.Width, first.Height)
+	}
+	if first.Get(0, 0).Style.HasAttribute(CharResetForegroundDefault) {
+		t.Fatal("explicit red foreground unexpectedly reset")
+	}
+
+	second, cursor, err := term.RenderANSI("B", 3, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Width != 3 || second.Height != 3 {
+		t.Fatalf("second frame size = %dx%d, want 3x3", second.Width, second.Height)
+	}
+	if second.Get(0, 0).Grapheme != "B" ||
+		!second.Get(0, 0).Style.HasAttribute(CharResetForegroundDefault) ||
+		!second.Get(0, 0).Style.HasAttribute(CharResetBackgroundDefault) {
+		t.Fatalf("second frame first cell = %+v, want fresh default style", second.Get(0, 0))
+	}
+	if second.Get(0, 1).Grapheme != " " {
+		t.Fatalf("untouched viewport cell = %q, want space", second.Get(0, 1).Grapheme)
+	}
+	if cursor.Visible {
+		t.Fatal("fresh frame cursor should remain hidden unless the widget shows it")
+	}
+}
+
 func TestTerminalAlternateScreenDoesNotReplaceMainScreen(t *testing.T) {
 	term := NewTerminal(12, 4)
 	if _, err := term.WriteString("main"); err != nil {

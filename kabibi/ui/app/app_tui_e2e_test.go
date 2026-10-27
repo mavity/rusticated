@@ -620,7 +620,7 @@ func TestAppTUI_ModeToggle_ZeroPlumeAndPlumeHistory(t *testing.T) {
 		t.Fatalf("ModeStack Measure() = %#v, want {W:80, H:5}", got)
 	}
 
-	bufZero, curZero := wZero.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 24}, ui.RenderContext{Focused: true})
+	bufZero, curZero := renderAppANSIForTest(t, wZero.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 24}, ui.RenderContext{Focused: true}), 80, 24)
 	if bufZero.Height != 5 || curZero.Y != 3 {
 		t.Fatalf("ModeStack Render() height=%d cursorY=%d, want height=5 cursorY=3", bufZero.Height, curZero.Y)
 	}
@@ -635,7 +635,7 @@ func TestAppTUI_ModeToggle_ZeroPlumeAndPlumeHistory(t *testing.T) {
 	if got := wZero.Measure(ui.Constraints{MaxW: 80, MaxH: 24}); got != (ui.Size{W: 80, H: 24}) {
 		t.Fatalf("ModePlumeHistory Measure() with wrapped input = %#v, want {W:80, H:24}", got)
 	}
-	bufPlumeWrap, curPlumeWrap := wZero.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 24}, ui.RenderContext{Focused: true})
+	bufPlumeWrap, curPlumeWrap := renderAppANSIForTest(t, wZero.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 24}, ui.RenderContext{Focused: true}), 80, 24)
 	// In ModePlumeHistory, chromeH = 3 input rows + 1 blank footer row = 4 rows at bottom -> cursor on row 22 (above footer row 23)
 	if bufPlumeWrap.Height != 24 || curPlumeWrap.Y != 22 {
 		t.Fatalf("ModePlumeHistory wrapped Render() height=%d cursorY=%d, want height=24 cursorY=22", bufPlumeWrap.Height, curPlumeWrap.Y)
@@ -1000,7 +1000,7 @@ func TestAppTUI_BluePanels_FileOpsAndEditor(t *testing.T) {
 	appWidget.Shell().SetPrompt("፧")
 
 	// Render once at 80x24
-	_, _ = appWidget.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 24}, ui.RenderContext{Focused: true})
+	_ = appWidget.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 24}, ui.RenderContext{Focused: true})
 
 	// 1. F7: Make Directory "created_dir"
 	appWidget.HandleEvent(input.KeyPressEvent{Code: input.KeyF7})
@@ -1103,7 +1103,7 @@ func TestAppTUI_BluePanels_ShownThenWithdrawn_TopAnchoredDownwardGrowth(t *testi
 
 	// 1. Open panels (Ctrl+O) and render at 80x10 -> claims full screen and bottom-aligns stack
 	appWidget.SetPanelsVisible(true)
-	bufOpen, curOpen := appWidget.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 10}, ui.RenderContext{Focused: true})
+	bufOpen, curOpen := renderAppANSIForTest(t, appWidget.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 10}, ui.RenderContext{Focused: true}), 80, 10)
 	// When panels are open on 80x10, PromptInput sits at row 8 (above blank footer row 9)
 	if bufOpen.Height != 10 || curOpen.Y != 8 {
 		t.Fatalf("with panels open on 80x10: height=%d cursorY=%d, want height=10 cursorY=8", bufOpen.Height, curOpen.Y)
@@ -1112,7 +1112,7 @@ func TestAppTUI_BluePanels_ShownThenWithdrawn_TopAnchoredDownwardGrowth(t *testi
 	// 2. Withdraw panels (Ctrl+O again) -> stack must immediately anchor at row 0
 	// (banner rows at 0..3, PromptInput at row 4, blank footer at row 5 -> occupied height 6)
 	appWidget.SetPanelsVisible(false)
-	bufWithdrawn, curWithdrawn := appWidget.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 10}, ui.RenderContext{Focused: true})
+	bufWithdrawn, curWithdrawn := renderAppANSIForTest(t, appWidget.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 10}, ui.RenderContext{Focused: true}), 80, 10)
 	if curWithdrawn.Y != 4 {
 		t.Fatalf("after withdrawing panels, expected PromptInput cursor at top-anchored row 4, got %d", curWithdrawn.Y)
 	}

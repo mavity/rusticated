@@ -113,8 +113,8 @@ const (
 	StatusFailure                           // Command had an error (e.g., parse error)
 )
 
-// CommandBlock represents a single shell or AI interaction block in the stack:
-// banner, user command, or AI turn, along with its rendered CellBuf cache.
+// CommandBlock is a shell-stack widget for a banner, command, or AI turn. Its
+// CellBuf cache is internal to the shell's ANSI-composition boundary.
 type CommandBlock struct {
 	ID            int           // Monotonic 1-based block ID
 	Kind          BlockKind     // BlockBanner, BlockCommand, or BlockAITurn

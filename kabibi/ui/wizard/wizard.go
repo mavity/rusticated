@@ -20,11 +20,11 @@ const (
 )
 
 type Prompt struct {
-	Title    string
-	Message  string
-	Kind     Kind
-	Options  []string
-	Default  int
+	Title   string
+	Message string
+	Kind    Kind
+	Options []string
+	Default int
 }
 
 type Answer struct {
@@ -70,13 +70,13 @@ func (w *Widget) Measure(c ui.Constraints) ui.Size {
 	return ui.Size{W: width, H: height}
 }
 
-func (w *Widget) Render(rect ui.Rect, _ ui.RenderContext) (terminal.CellBuf, ui.CursorPos) {
+func (w *Widget) Render(rect ui.Rect, ctx ui.RenderContext) string {
 	size := w.Measure(ui.Constraints{MaxW: rect.W, MaxH: rect.H})
 	buf := ui.NewCellBuf(size.W, size.H)
 	fill := terminal.Cell{Grapheme: " ", Style: terminal.NewStyle(0xE5E5E5, 0x1A1F26, 0)}
 	buf.Fill(terminal.Rect{W: size.W, H: size.H}, fill)
 	if size.W < 2 || size.H < 2 {
-		return buf, ui.CursorPos{}
+		return ui.ANSIFrame(buf, ui.CursorPos{})
 	}
 	border := terminal.NewStyle(0xFFD700, 0x1A1F26, 0)
 	for x := 1; x < size.W-1; x++ {
@@ -124,9 +124,9 @@ func (w *Widget) Render(rect ui.Rect, _ ui.RenderContext) (terminal.CellBuf, ui.
 			display = strings.Repeat("•", len([]rune(value)))
 		}
 		row = drawLine(&buf, row, "> "+display, 0xFFD700, 0x1A1F26, size.H-1)
-		cursor = ui.CursorPos{X: min(size.W-2, 3+runewidth.StringWidth(display)), Y: min(row-1, size.H-2), Visible: true}
+		cursor = ui.CursorPos{X: min(size.W-2, 3+runewidth.StringWidth(display)), Y: min(row-1, size.H-2), Visible: ctx.Focused}
 	}
-	return buf, cursor
+	return ui.ANSIFrame(buf, cursor)
 }
 
 func drawLine(buf *terminal.CellBuf, row int, text string, fg, bg terminal.Color, maxRow int) int {

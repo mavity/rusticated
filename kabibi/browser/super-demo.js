@@ -98,7 +98,7 @@
         height: clamp(1.05rem, 2cqw, 1.7rem);
         padding: 2px;
         filter: drop-shadow(0 0 0.5px white) drop-shadow(2px 1px 3px rgba(255,255,255,0.3));
-        transform: translateX(10%) scale(1.5);
+        transform: translateX(-9%) scale(1.5);
         object-fit: contain;
         pointer-events: none;
       }

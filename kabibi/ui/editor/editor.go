@@ -759,8 +759,8 @@ func (e *editorModel) Measure(c ui.Constraints) ui.Size {
 	return ui.Size{W: w, H: h}
 }
 
-// Render implements ui.Widget by rendering the editor view into a CellBuf.
-func (e *editorModel) Render(r terminal.Rect, _ ui.RenderContext) (terminal.CellBuf, ui.CursorPos) {
+// Render implements ui.Widget by rendering the editor view as ANSI text.
+func (e *editorModel) Render(r terminal.Rect, ctx ui.RenderContext) string {
 	if r.W > 0 {
 		e.width = r.W
 	}
@@ -768,7 +768,7 @@ func (e *editorModel) Render(r terminal.Rect, _ ui.RenderContext) (terminal.Cell
 		e.height = r.H
 	}
 	if e.width <= 0 || e.height <= 0 {
-		return terminal.NewCellBuf(0, 0), ui.CursorPos{Visible: false}
+		return ui.ANSIFrame(terminal.NewCellBuf(0, 0), ui.CursorPos{})
 	}
 
 	e.ensureHighlight()
@@ -801,7 +801,13 @@ func (e *editorModel) Render(r terminal.Rect, _ ui.RenderContext) (terminal.Cell
 		statusStyle := terminal.NewStyle(colorWhite, colorDarkGray, 0)
 		drawEditorText(&out, 0, e.height-1, e.statusText(e.width), e.width, statusStyle)
 	}
-	return out, ui.CursorPos{Visible: false}
+	cursor := ui.CursorPos{}
+	cursorY := e.cy - e.top + 1
+	cursorX := gutterW + curVis - e.left
+	if ctx.Focused && cursorX >= gutterW && cursorX < e.width-1 && cursorY > 0 && cursorY < e.height-1 {
+		cursor = ui.CursorPos{X: cursorX, Y: cursorY, Visible: true}
+	}
+	return ui.ANSIFrame(out, cursor)
 }
 
 // HandleEvent implements ui.Widget.

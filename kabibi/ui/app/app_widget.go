@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,6 +52,7 @@ type AppWidget struct {
 	writeScrollback func(string)
 	onExit          func()
 	ctx             ui.RenderContext
+	compositor      *terminal.Terminal
 }
 
 // AppWidgetOptions contains initial parameters and service bindings for AppWidget.
@@ -68,6 +70,7 @@ func NewWidget(opts AppWidgetOptions) *AppWidget {
 	w := &AppWidget{
 		writeScrollback: opts.WriteToScrollback,
 		onExit:          opts.OnExit,
+		compositor:      terminal.NewTerminal(1, 1),
 	}
 
 	w.sh = shell.New(shell.ShellOptions{
@@ -444,7 +447,7 @@ func (w *AppWidget) Measure(c ui.Constraints) ui.Size {
 	return w.sh.Measure(c)
 }
 
-func (w *AppWidget) Render(r terminal.Rect, ctx ui.RenderContext) (terminal.CellBuf, ui.CursorPos) {
+func (w *AppWidget) Render(r terminal.Rect, ctx ui.RenderContext) string {
 	w.mu.Lock()
 	w.ctx = ctx
 	panelsVis := w.panelsVisible
@@ -453,17 +456,28 @@ func (w *AppWidget) Render(r terminal.Rect, ctx ui.RenderContext) (terminal.Cell
 	w.mu.Unlock()
 
 	if ed != nil {
-		return ed.Render(r, ctx)
+		return ed.Render(r, ctx.ForChild(true))
 	}
 
-	shellBuf, cursor := w.sh.Render(r, ctx)
+	shellANSI := w.sh.Render(r, ctx.ForChild(dlg == nil && !panelsVis))
+	shellFrame, cursor, shellHeight, err := w.compositor.RenderANSIForComposition(shellANSI, r.W, r.H)
+	if err != nil {
+		if ctx.OnError != nil {
+			ctx.OnError(err)
+		} else {
+			log.Printf("render shell ANSI: %v", err)
+		}
+		return ""
+	}
+	shellBuf := terminal.NewCellBuf(r.W, shellHeight)
+	copy(shellBuf.Cells(), shellFrame.Cells()[:shellHeight*r.W])
 	w.renderSlashHints(&shellBuf)
 
 	if panelsVis && w.panels != nil && r.W > 0 && r.H > 0 {
 		panelH, _ := w.computePanelHeight(r.W, r.H)
 		if panelH > 0 && panelH <= shellBuf.Height {
-			panelBuf, _ := w.panels.Render(ui.Rect{X: 0, Y: 0, W: r.W, H: panelH}, ctx)
-			shellBuf.Blit(panelBuf, 0, 0)
+			panelANSI := w.panels.Render(ui.Rect{X: 0, Y: 0, W: r.W, H: panelH}, ctx.ForChild(dlg == nil))
+			ctx.CompositeANSI(&shellBuf, w.compositor, terminal.Rect{W: r.W, H: panelH}, panelANSI)
 		}
 	}
 
@@ -482,20 +496,11 @@ func (w *AppWidget) Render(r terminal.Rect, ctx ui.RenderContext) (terminal.Cell
 		if dy < 0 {
 			dy = 0
 		}
-		dlgBuf, dlgCur := dlg.Render(ui.Rect{X: dx, Y: dy, W: sz.W, H: sz.H}, ctx)
-		shellBuf.Blit(dlgBuf, dx, dy)
-		if dlgCur.Visible {
-			cursor = ui.CursorPos{
-				X:       dx + dlgCur.X,
-				Y:       dy + dlgCur.Y,
-				Visible: true,
-			}
-		} else {
-			cursor.Visible = false
-		}
+		dlgANSI := dlg.Render(ui.Rect{X: 0, Y: 0, W: sz.W, H: sz.H}, ctx.ForChild(true))
+		cursor = ctx.CompositeANSI(&shellBuf, w.compositor, terminal.Rect{X: dx, Y: dy, W: sz.W, H: sz.H}, dlgANSI)
 	}
 
-	return shellBuf, cursor
+	return ui.ANSIFrame(shellBuf, cursor)
 }
 
 func (w *AppWidget) HandleEvent(e input.Event) bool {
