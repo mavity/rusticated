@@ -222,6 +222,16 @@ func PromptSelect(ctx context.Context, term TerminalSession, title, message stri
 // PromptSearchSelect renders a searchable, multi-column terminal selector.
 // Typing filters options immediately; arrow keys move the selection.
 func PromptSearchSelect(ctx context.Context, term TerminalSession, title, message string, options []string, defaultIdx int) (int, error) {
+	return promptSearchSelect(ctx, term, title, message, options, defaultIdx, false)
+}
+
+// PromptSearchSelectCompact renders a searchable selector without captions or
+// help text, for provider model catalogs.
+func PromptSearchSelectCompact(ctx context.Context, term TerminalSession, title string, options []string, defaultIdx int) (int, error) {
+	return promptSearchSelect(ctx, term, title, "", options, defaultIdx, true)
+}
+
+func promptSearchSelect(ctx context.Context, term TerminalSession, title, message string, options []string, defaultIdx int, compact bool) (int, error) {
 	if len(options) == 0 {
 		return -1, errors.New("prompt select requires at least one option")
 	}
@@ -317,14 +327,18 @@ func PromptSearchSelect(ctx context.Context, term TerminalSession, title, messag
 		cellWidth := max(1, availableWidth/max(1, columnCount))
 		totalRows := (len(filtered) + columnCount - 1) / columnCount
 
-		headerLines := 1 // Search field.
+		headerLines := 1
 		if title != "" {
 			headerLines++
 		}
-		if message != "" {
+		if !compact && message != "" {
 			headerLines += strings.Count(message, "\n") + 1
 		}
-		visibleRows := max(1, rows-headerLines-3)
+		reservedLines := 3
+		if compact {
+			reservedLines = 1
+		}
+		visibleRows := max(1, rows-headerLines-reservedLines)
 		if visibleRows > totalRows {
 			visibleRows = totalRows
 		}
@@ -343,12 +357,16 @@ func PromptSearchSelect(ctx context.Context, term TerminalSession, title, messag
 		if title != "" {
 			lines = append(lines, "\x1b[1;36m"+truncateTerminalText(title, cols)+"\x1b[0m")
 		}
-		if message != "" {
+		if !compact && message != "" {
 			for _, line := range strings.Split(message, "\n") {
 				lines = append(lines, truncateTerminalText(line, cols))
 			}
 		}
-		lines = append(lines, "Search: "+truncateTerminalText(query, max(0, cols-8)))
+		searchLine := "Search: " + truncateTerminalText(query, max(0, cols-8))
+		if compact {
+			searchLine = "> " + truncateTerminalText(query, max(0, cols-2))
+		}
+		lines = append(lines, searchLine)
 		for row := startRow; row < startRow+visibleRows; row++ {
 			var line strings.Builder
 			for column := 0; column < columnCount; column++ {
@@ -379,14 +397,23 @@ func PromptSearchSelect(ctx context.Context, term TerminalSession, title, messag
 			}
 			lines = append(lines, line.String())
 		}
-		if len(filtered) == 0 {
-			lines = append(lines, "No matches. Edit the search or press Esc to cancel.")
-		} else {
-			lines = append(lines, "Type to search · ↑/↓/←/→ select · Enter accept · Esc cancel")
+		if !compact {
+			if len(filtered) == 0 {
+				lines = append(lines, "No matches. Edit the search or press Esc to cancel.")
+			} else {
+				lines = append(lines, "Type to search · ↑/↓/←/→ select · Enter accept · Esc cancel")
+			}
 		}
 
 		var output strings.Builder
 		if renderedLines > 0 {
+			if compact {
+				searchLineIndex := 0
+				if title != "" {
+					searchLineIndex++
+				}
+				fmt.Fprintf(&output, "\x1b[%dB\r", renderedLines-searchLineIndex)
+			}
 			fmt.Fprintf(&output, "\r\x1b[%dA\x1b[J", renderedLines)
 		}
 		for _, line := range lines {
@@ -394,6 +421,19 @@ func PromptSearchSelect(ctx context.Context, term TerminalSession, title, messag
 			output.WriteByte('\n')
 		}
 		renderedLines = len(lines)
+		if compact {
+			searchLineIndex := 0
+			if title != "" {
+				searchLineIndex++
+			}
+			cursorUp := renderedLines - searchLineIndex
+			if cursorUp > 0 {
+				fmt.Fprintf(&output, "\x1b[%dA", cursorUp)
+			}
+			searchText := truncateTerminalText(query, max(0, cols-2))
+			cursorColumn := min(cols, 3+terminalTextWidth(searchText))
+			fmt.Fprintf(&output, "\x1b[%dG", max(1, cursorColumn))
+		}
 		_, err := io.WriteString(term, output.String())
 		return err
 	}
@@ -446,6 +486,10 @@ func PromptSearchSelect(ctx context.Context, term TerminalSession, title, messag
 					continue
 				}
 				choice := filtered[selected]
+				if compact {
+					_, err := io.WriteString(term, "\n")
+					return choice, err
+				}
 				_, err := fmt.Fprintf(term, "\r\x1b[2K\x1b[32m✓ %s\x1b[0m\n", strings.TrimPrefix(options[choice], "\x00"))
 				return choice, err
 			case data[0] == 0x1b:
