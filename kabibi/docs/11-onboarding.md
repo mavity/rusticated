@@ -52,10 +52,12 @@ Non-TTY/stdin setup retains a simple line-oriented flow rather than requiring
 raw key input.
 
 Provider entries show provider icons, while catalog entries use icons inferred
-from the model family. Repeated namespace/model prefixes are removed from the
-display label without changing the model ID saved to configuration. X/Twitter
-family models are excluded from every provider catalog and cannot be selected
-through manual model-ID entry or the keep-current action.
+from the model family, including Qwen and GLM/z.ai/Zhipu AI. Keep and Login
+entries place the current model's icon after the action label. Repeated
+namespace/model prefixes are removed from the display label without changing
+the model ID saved to configuration. X/Twitter family models are excluded from
+every provider catalog and cannot be selected through manual model-ID entry
+or the keep-current action.
 
 ## Gemma selection and download consent
 
