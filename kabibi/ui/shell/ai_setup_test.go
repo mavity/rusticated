@@ -105,13 +105,10 @@ func TestGitHubCopilotOpenURLPromptOpensVerificationPageOnEnter(t *testing.T) {
 
 	term, closeFn := s.openInteractiveTerminalSession(ctx, "ai setup")
 	defer closeFn(0)
-	if _, err := term.Write([]byte("Visit: " + authURL + "\n")); err != nil {
-		t.Fatalf("write verification URL: %v", err)
-	}
 
 	done := make(chan error, 1)
 	go func() {
-		done <- ai.PromptOpenURL(ctx, term, "Press Enter to open the verification page.")
+		done <- ai.PromptOpenURL(ctx, term, authURL, "Press Enter to open the verification page.")
 	}()
 	time.Sleep(25 * time.Millisecond)
 	if !s.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter}) {

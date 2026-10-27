@@ -33,14 +33,29 @@ func (s *Shell) openLatestOutputURL() bool {
 	if target == "" {
 		return false
 	}
+	_ = s.OpenURL(target)
+	return true
+}
+
+// OpenURL opens an explicit HTTP(S) URL supplied by an in-process command.
+func (s *Shell) OpenURL(target string) error {
+	if s == nil {
+		return fmt.Errorf("cannot open a URL without an active shell")
+	}
+	parsed, err := url.Parse(target)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return fmt.Errorf("invalid browser URL %q", target)
+	}
 	opener := s.opts.OpenURL
 	if opener == nil {
 		opener = openExternalURL
 	}
 	if err := opener(target); err != nil {
-		s.reportTerminalError(fmt.Errorf("open URL %s: %w", target, err))
+		openErr := fmt.Errorf("open URL %s: %w", target, err)
+		s.reportTerminalError(openErr)
+		return openErr
 	}
-	return true
+	return nil
 }
 
 func extractLastOpenableURL(text string) string {

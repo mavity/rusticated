@@ -285,6 +285,9 @@ func loginOpenRouterOAuth(ctx context.Context, term TerminalSession, client *htt
 	if cbErr == nil && callback != nil {
 		redirectURI = callback.RedirectURI
 	}
+	if callback != nil {
+		defer callback.Close()
+	}
 
 	authURL, err := url.Parse(openRouterAuthorizeURL)
 	if err != nil {
@@ -304,6 +307,9 @@ func loginOpenRouterOAuth(ctx context.Context, term TerminalSession, client *htt
 		_, _ = fmt.Fprintf(term, "Listening for callback on %s\n", callback.RedirectURI)
 	}
 	_, _ = fmt.Fprintf(term, "Open this URL in your browser:\n%s\n\n", FormatClickableURL(authURL.String()))
+	if err := PromptOpenURL(ctx, term, authURL.String(), "Press Enter to open the authorization page in your browser (Esc to cancel)."); err != nil {
+		return nil, err
+	}
 
 	// 3. Paste events (Ctrl+V / bracketed paste) arrive as raw multi-byte strings
 	// without going through handleKeyEvent. When running and no OS PTY is active,
@@ -445,11 +451,15 @@ func loginAnthropicOAuthBrowser(ctx context.Context, term TerminalSession, clien
 	redirectURI := fmt.Sprintf("http://localhost:%d%s", anthropicPreferredPort, anthropicCallbackPath)
 	if callback != nil {
 		redirectURI = callback.RedirectURI
+		defer callback.Close()
 	}
 
 	authURL := buildAnthropicAuthorizeURL(challenge, verifier, redirectURI)
 	_, _ = fmt.Fprintf(term, "\n\x1b[1;36mAnthropic Claude OAuth Sign-In\x1b[0m\n")
 	_, _ = fmt.Fprintf(term, "Complete login in your browser:\n%s\n\n", FormatClickableURL(authURL))
+	if err := PromptOpenURL(ctx, term, authURL, "Press Enter to open the authorization page in your browser (Esc to cancel)."); err != nil {
+		return nil, err
+	}
 
 	code, err := WaitForCallbackOrManualInput(
 		ctx,
@@ -482,8 +492,11 @@ func loginAnthropicOAuthCopyCode(ctx context.Context, term TerminalSession, clie
 	authURL := buildAnthropicAuthorizeURL(challenge, verifier, anthropicCopyCodeRedirect)
 	_, _ = fmt.Fprintf(term, "\n\x1b[1;36mAnthropic Claude Copy-Code Sign-In\x1b[0m\n")
 	_, _ = fmt.Fprintf(term, "Open this URL in your browser, sign in, and copy the code shown:\n%s\n\n", FormatClickableURL(authURL))
+	if err := PromptOpenURL(ctx, term, authURL, "Press Enter to open the authorization page in your browser (Esc to cancel)."); err != nil {
+		return nil, err
+	}
 
-	input, err := PromptLine(ctx, term, "", "Paste the code Anthropic shows (code#state)", false)
+	input, err := PromptLine(ctx, withoutEmptyEnter(term), "", "Paste the code Anthropic shows (code#state)", false)
 	if err != nil {
 		return nil, err
 	}
@@ -719,8 +732,14 @@ func loginOpenAIChatGPTBrowser(ctx context.Context, term TerminalSession, client
 	q.Set("nonce", nonce)
 	authURL := openAIChatGPTAuthorizeURL + "?" + q.Encode()
 
+	if callback != nil {
+		defer callback.Close()
+	}
 	_, _ = fmt.Fprintf(term, "\n\x1b[1;36mOpenAI ChatGPT Sign-In\x1b[0m\n")
 	_, _ = fmt.Fprintf(term, "Complete sign-in in your browser:\n%s\n\n", FormatClickableURL(authURL))
+	if err := PromptOpenURL(ctx, term, authURL, "Press Enter to open the authorization page in your browser (Esc to cancel)."); err != nil {
+		return nil, err
+	}
 
 	res, err := WaitForCallbackOrManualInput(
 		ctx,
@@ -864,6 +883,9 @@ func loginOpenAIDeviceCode(ctx context.Context, term TerminalSession, client *ht
 	_, _ = fmt.Fprintf(term, "Visit: \x1b[4;34m%s\x1b[0m\n", openAIDeviceVerifyURI)
 	_, _ = fmt.Fprintf(term, "Enter code: \x1b[1;33m%s\x1b[0m\n", dev.UserCode)
 	_, _ = fmt.Fprintln(term, "Waiting for authorization...")
+	if err := PromptOpenURL(ctx, term, openAIDeviceVerifyURI, "Press Enter to open the verification page in your browser (Esc to cancel)."); err != nil {
+		return nil, err
+	}
 
 	type devCodeSuccess struct {
 		AuthorizationCode string
@@ -1142,7 +1164,7 @@ func loginGitHubCopilot(ctx context.Context, term TerminalSession, client *http.
 	_, _ = fmt.Fprintf(term, "Visit: \x1b[4;34m%s\x1b[0m\n", parsedURI.String())
 	_, _ = fmt.Fprintf(term, "Enter code: \x1b[1;33m%s\x1b[0m\n", dev.UserCode)
 	_, _ = fmt.Fprintln(term, "Waiting for GitHub authorization...")
-	if err := PromptOpenURL(ctx, term, "Press Enter to open the GitHub verification page in your browser (Esc to cancel)."); err != nil {
+	if err := PromptOpenURL(ctx, term, dev.VerificationURI, "Press Enter to open the GitHub verification page in your browser (Esc to cancel)."); err != nil {
 		return nil, err
 	}
 

@@ -14,6 +14,9 @@ or a cloud provider, then asks for a tier or provider. Local setup separately
 asks for download consent. Remote setup asks for provider consent, performs
 authentication when needed, and then opens a separate model-selection prompt.
 The shared terminal selector renders one option per line and has no search.
+Interactive OAuth flows pass their known authorization URL directly to the
+browser opener; manual code entry does not infer a URL from terminal output.
+Non-interactive sessions still print the URL for manual opening.
 
 When blue file panels are visible, ordinary command execution currently leaves
 them visible while the command runs. Panel visibility is controlled by the app

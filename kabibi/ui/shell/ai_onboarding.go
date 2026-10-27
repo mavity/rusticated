@@ -32,6 +32,7 @@ type commandTerminalSession struct {
 	writer       io.Writer
 	isTTY        bool
 	onEmptyEnter func() bool
+	onOpenURL    func(string) error
 }
 
 func newCommandTerminalSession(term *CommandTerminal, writer io.Writer, isTTY bool) *commandTerminalSession {
@@ -69,6 +70,13 @@ func (s *commandTerminalSession) IsTTY() bool {
 
 func (s *commandTerminalSession) HandleEmptyEnter() bool {
 	return s != nil && s.isTTY && s.onEmptyEnter != nil && s.onEmptyEnter()
+}
+
+func (s *commandTerminalSession) OpenURL(target string) error {
+	if s == nil || !s.isTTY || s.onOpenURL == nil {
+		return fmt.Errorf("browser URL opening is unavailable in this terminal session")
+	}
+	return s.onOpenURL(target)
 }
 
 func (s *commandTerminalSession) SubscribeRawInput() (func(context.Context, []byte) (int, error), func()) {
@@ -147,6 +155,7 @@ func (s *Shell) openInteractiveTerminalSession(ctx context.Context, title string
 	})
 	term := newCommandTerminalSession(cmdTerm, writer, true)
 	term.onEmptyEnter = s.openLatestOutputURL
+	term.onOpenURL = s.OpenURL
 	return term, closeFn
 }
 
@@ -314,7 +323,16 @@ func runAIBuiltin(ctx context.Context, args []string) error {
 	}
 	var term ai.TerminalSession
 	if cmdTerm != nil {
-		term = newCommandTerminalSession(cmdTerm, hc.Stdout, isTTY)
+		commandTerm := newCommandTerminalSession(cmdTerm, hc.Stdout, isTTY)
+		if execSess != nil {
+			execSess.bgMu.Lock()
+			uiSink := execSess.uiSink
+			execSess.bgMu.Unlock()
+			if opener, ok := uiSink.(ai.BrowserURLOpener); ok {
+				commandTerm.onOpenURL = opener.OpenURL
+			}
+		}
+		term = commandTerm
 	} else {
 		term = &ai.StdioTerminalSession{Reader: hc.Stdin, Writer: hc.Stdout, TTY: false}
 	}
