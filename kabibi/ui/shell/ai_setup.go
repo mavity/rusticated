@@ -30,6 +30,10 @@ type searchableOnboardingPrompter interface {
 	SearchChoose(ctx context.Context, title, message string, options []string, defaultChoice int) (int, error)
 }
 
+type compactSearchableOnboardingPrompter interface {
+	SearchChooseCompact(ctx context.Context, title string, options []string, defaultChoice int) (int, error)
+}
+
 // RunAISetup runs the existing setup flow with caller-supplied text streams.
 func RunAISetup(ctx context.Context, es *ExecutionSession, stdin io.Reader, stdout io.Writer) error {
 	if stdin == nil {
@@ -192,6 +196,16 @@ func searchChoose(ctx context.Context, prompter OnboardingPrompter, term ai.Term
 		return ai.PromptSearchSelect(ctx, term, title, message, options, defaultChoice)
 	}
 	return prompter.Choose(ctx, title, message, options, defaultChoice)
+}
+
+func searchChooseCompact(ctx context.Context, prompter OnboardingPrompter, term ai.TerminalSession, title string, options []string, defaultChoice int) (int, error) {
+	if searchable, ok := prompter.(compactSearchableOnboardingPrompter); ok {
+		return searchable.SearchChooseCompact(ctx, title, options, defaultChoice)
+	}
+	if term != nil {
+		return ai.PromptSearchSelectCompact(ctx, term, title, options, defaultChoice)
+	}
+	return prompter.Choose(ctx, title, "", options, defaultChoice)
 }
 
 func storedCredentialForConfig(ctx context.Context, cfg config.AIConfig) (*ai.Credential, error) {
@@ -681,7 +695,7 @@ func chooseRemoteModelFromConfig(ctx context.Context, prompter OnboardingPrompte
 		defaultChoice = len(modelChoices) - 1
 	}
 	choices = append(choices, "\x00Enter a model ID manually")
-	choice, err := searchChoose(ctx, prompter, nil, "Choose a provider model", "Type to filter the provider catalog; select an exact model ID if it is not listed.", choices, defaultChoice)
+	choice, err := searchChooseCompact(ctx, prompter, nil, "LLM model, select or search", choices, defaultChoice)
 	if err != nil {
 		return "", 0, err
 	}

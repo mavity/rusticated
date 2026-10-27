@@ -129,6 +129,39 @@ func TestPromptSearchSelectKeepsManualActionAfterFilteringAllModels(t *testing.T
 	}
 }
 
+func TestPromptSearchSelectCompactOmitsDecorativeCaptions(t *testing.T) {
+	term := &searchSelectTerm{
+		keys: [][]byte{[]byte("c"), []byte("\n")},
+		cols: 80,
+		rows: 24,
+	}
+	choice, err := PromptSearchSelectCompact(context.Background(), term, "LLM model, select or search", []string{"claude-sonnet"}, 0)
+	if err != nil {
+		t.Fatalf("PromptSearchSelectCompact() error = %v", err)
+	}
+	if choice != 0 {
+		t.Fatalf("PromptSearchSelectCompact() = %d, want model index 0", choice)
+	}
+	output := term.out.String()
+	for _, caption := range []string{
+		"LLM model, select or search",
+		"> c",
+		"claude-sonnet",
+	} {
+		if !strings.Contains(output, caption) {
+			t.Errorf("compact selector output omitted %q: %q", caption, output)
+		}
+	}
+	for _, caption := range []string{"Search:", "Type to search", "No matches.", "✓ claude-sonnet"} {
+		if strings.Contains(output, caption) {
+			t.Errorf("compact selector output contains unwanted caption %q: %q", caption, output)
+		}
+	}
+	if !strings.Contains(output, "\x1b[2A\x1b[4G") {
+		t.Errorf("compact selector did not position the cursor after the search query: %q", output)
+	}
+}
+
 func TestValidateRemoteCredentialRejectsUnauthorizedResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
