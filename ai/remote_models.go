@@ -27,6 +27,24 @@ func RemoteModelDisplayName(model string) string {
 	return model
 }
 
+// IsExcludedRemoteModel reports whether a remote model belongs to the X/Twitter family.
+func IsExcludedRemoteModel(model string) bool {
+	for _, segment := range strings.Split(strings.ToLower(strings.TrimSpace(model)), "/") {
+		if segment == "x" || segment == "xai" || segment == "x-ai" || segment == "twitter" ||
+			strings.HasPrefix(segment, "x-ai-") {
+			return true
+		}
+		for _, token := range strings.FieldsFunc(segment, func(r rune) bool {
+			return !('a' <= r && r <= 'z') && !('0' <= r && r <= '9')
+		}) {
+			if token == "grok" || token == "twitter" || token == "xai" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // DefaultRemoteModel returns the preferred default model ID for a provider.
 func DefaultRemoteModel(provider RemoteProvider) string {
 	switch provider {
@@ -346,7 +364,7 @@ func conservativePositiveLimit(limits ...int) int {
 func sortedUniqueRemoteModels(models []RemoteModelInfo) []RemoteModelInfo {
 	limitsByID := make(map[string]int, len(models))
 	for _, model := range models {
-		if model.ID == "" {
+		if model.ID == "" || IsExcludedRemoteModel(model.ID) {
 			continue
 		}
 		if existing, ok := limitsByID[model.ID]; !ok {

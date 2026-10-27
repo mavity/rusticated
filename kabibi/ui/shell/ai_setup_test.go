@@ -209,6 +209,30 @@ func TestChooseRemoteModelDefaultsToGPT6LunaWhenAvailable(t *testing.T) {
 	}
 }
 
+func TestChooseRemoteModelRejectsXTwitterModelEnteredManually(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `{"data":[{"id":"gpt-6-luna"}]}`)
+	}))
+	defer server.Close()
+	prompter := &scriptedOnboardingPrompter{
+		choices: []int{1},
+		inputs:  []string{"grok-3"},
+	}
+
+	_, _, err := chooseRemoteModel(
+		context.Background(),
+		prompter,
+		ai.RemoteOpenAI,
+		&ai.Credential{Type: ai.CredentialAPIKey, Key: "test-token"},
+		server.URL+"/models",
+		"gpt-6-luna",
+		"",
+	)
+	if err == nil || !strings.Contains(err.Error(), "X/Twitter") {
+		t.Fatalf("chooseRemoteModel() error = %v, want manual X/Twitter model rejection", err)
+	}
+}
+
 func TestConfigureCustomEndpointSelectsProtocolAndPersistsModel(t *testing.T) {
 	t.Setenv("KABIBI_CONFIG_DIR", t.TempDir())
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -332,6 +356,23 @@ func TestModelSetupMenuOffersReauthenticationOnlyForStoredCredential(t *testing.
 	}
 	if len(withCredential) < 2 || withCredential[1] != "[Login] XYZ-model" {
 		t.Fatalf("second menu option = %v, want reauthentication action", withCredential)
+	}
+}
+
+func TestModelSetupMenuOmitsExcludedCurrentModelActions(t *testing.T) {
+	_, options, _, err := modelSetupMenu(context.Background(), config.AIConfig{
+		Configured: true,
+		Mode:       "remote",
+		Provider:   string(ai.RemoteOpenAI),
+		Model:      "x-ai/grok-3",
+	})
+	if err != nil {
+		t.Fatalf("modelSetupMenu() error = %v", err)
+	}
+	for _, option := range options {
+		if strings.HasPrefix(option, "[Keep]") || strings.HasPrefix(option, "[Login]") {
+			t.Fatalf("modelSetupMenu() includes action for excluded X/Twitter model: %q", option)
+		}
 	}
 }
 

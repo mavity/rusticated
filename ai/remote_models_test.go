@@ -24,6 +24,26 @@ func TestDefaultRemoteModel(t *testing.T) {
 	}
 }
 
+func TestIsExcludedRemoteModel(t *testing.T) {
+	tests := []struct {
+		model   string
+		exclude bool
+	}{
+		{model: "grok-3", exclude: true},
+		{model: "x-ai/model", exclude: true},
+		{model: "xai/model", exclude: true},
+		{model: "twitter/model", exclude: true},
+		{model: "x/model", exclude: true},
+		{model: "text-embedding-3-small", exclude: false},
+		{model: "gpt-6-luna", exclude: false},
+	}
+	for _, test := range tests {
+		if got := IsExcludedRemoteModel(test.model); got != test.exclude {
+			t.Errorf("IsExcludedRemoteModel(%q) = %t, want %t", test.model, got, test.exclude)
+		}
+	}
+}
+
 func TestListRemoteModelsOpenAIPaginatesAndSorts(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -61,6 +81,25 @@ func TestListRemoteModelsOpenAIPaginatesAndSorts(t *testing.T) {
 	}
 	if requests != 2 {
 		t.Fatalf("requests = %d, want 2", requests)
+	}
+}
+
+func TestListRemoteModelsFiltersXTwitterFamilies(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `{"data":[{"id":"gpt-6-luna"},{"id":"grok-3"},{"id":"x-ai/model"},{"id":"xai/model"},{"id":"twitter/model"},{"id":"x/model"},{"id":"text-embedding-3-small"}]}`)
+	}))
+	defer server.Close()
+
+	models, err := ListRemoteModels(context.Background(), RemoteEngineConfig{
+		Provider:   RemoteOpenAI,
+		Credential: &Credential{Type: CredentialAPIKey, Key: "test-token"},
+		BaseURL:    server.URL + "/v1/models",
+	})
+	if err != nil {
+		t.Fatalf("ListRemoteModels() error = %v", err)
+	}
+	if want := []string{"gpt-6-luna", "text-embedding-3-small"}; !reflect.DeepEqual(models, want) {
+		t.Fatalf("ListRemoteModels() = %v, want X/Twitter families removed: %v", models, want)
 	}
 }
 

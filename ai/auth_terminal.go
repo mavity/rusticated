@@ -31,6 +31,61 @@ var ErrAuthCancelled = errors.New("AI authentication cancelled")
 
 const terminalSelectionStyle = "\x1b[38;2;0;0;128;48;2;255;215;0m"
 
+type terminalSelectorIcon struct {
+	glyph string
+	color uint32
+	width int
+}
+
+func terminalSelectorIconFor(label string) terminalSelectorIcon {
+	name := strings.ToLower(label)
+	switch {
+	case strings.Contains(name, "gemini"):
+		return terminalSelectorIcon{glyph: "✦", color: 0x4E87F8, width: 1}
+	case strings.Contains(name, "claude"), strings.Contains(name, "anthropic"):
+		return terminalSelectorIcon{glyph: "✳", color: 0xD97757, width: 1}
+	case strings.Contains(name, "llama"):
+		return terminalSelectorIcon{glyph: "∞", color: 0x0081FB, width: 1}
+	case strings.Contains(name, "mistral"), strings.Contains(name, "mixtral"):
+		return terminalSelectorIcon{glyph: "𝕄", color: 0xFF7000, width: 1}
+	case strings.Contains(name, "deepseek"):
+		return terminalSelectorIcon{glyph: "🐋", width: 2}
+	case strings.Contains(name, "kimi"):
+		return terminalSelectorIcon{glyph: "𝗞", color: 0x18181B, width: 1}
+	case strings.Contains(name, "openai"), strings.Contains(name, "gpt-"),
+		strings.Contains(name, "gpt_"), strings.Contains(name, "chatgpt"),
+		strings.Contains(name, "codex"), strings.Contains(name, "o1-"),
+		strings.Contains(name, "o3-"), strings.Contains(name, "o4-"):
+		return terminalSelectorIcon{glyph: "꩜", color: 0x10A37F, width: 1}
+	}
+	if !strings.Contains(name, "/") && strings.HasPrefix(name, "openrouter") {
+		return terminalSelectorIcon{glyph: "⇄", color: 0x6566F1, width: 1}
+	}
+	if !strings.Contains(name, "/") && strings.HasPrefix(name, "github copilot") {
+		return terminalSelectorIcon{glyph: "🐙", width: 2}
+	}
+	return terminalSelectorIcon{}
+}
+
+func appendTerminalSelectorIcon(line *strings.Builder, icon terminalSelectorIcon, selected bool) int {
+	if icon.glyph == "" {
+		return 0
+	}
+	if icon.color != 0 {
+		fmt.Fprintf(line, "\x1b[38;2;%d;%d;%dm", icon.color>>16, (icon.color>>8)&0xFF, icon.color&0xFF)
+	}
+	line.WriteString(icon.glyph)
+	if icon.color != 0 {
+		if selected {
+			line.WriteString("\x1b[38;2;0;0;128m")
+		} else {
+			line.WriteString("\x1b[39m")
+		}
+	}
+	line.WriteByte(' ')
+	return icon.width + 1
+}
+
 // TerminalSession is the narrow visual and input bottleneck passed to AI
 // initialization and provider authentication flows. It models an in-process
 // virtual PTY (backed by CommandTerminal in Shell TUI mode or stdio in CLI mode).
@@ -143,11 +198,18 @@ func PromptSelect(ctx context.Context, term TerminalSession, title, message stri
 		}
 		for i, opt := range options {
 			label := RemoteModelDisplayName(opt)
-			if i == selected {
-				fmt.Fprintf(&sb, terminalSelectionStyle+" [%d] %s \x1b[0m\n", i+1, label)
-			} else {
-				fmt.Fprintf(&sb, " [%d] %s\n", i+1, label)
+			icon := terminalSelectorIconFor(opt)
+			selectedOption := i == selected
+			if selectedOption {
+				sb.WriteString(terminalSelectionStyle)
 			}
+			fmt.Fprintf(&sb, " [%d] ", i+1)
+			appendTerminalSelectorIcon(&sb, icon, selectedOption)
+			sb.WriteString(label)
+			if selectedOption {
+				sb.WriteString(" \x1b[0m")
+			}
+			sb.WriteByte('\n')
 			lines++
 		}
 		sb.WriteString("\x1b[2m(↑/↓ or 1-9 to select, Enter to confirm, Esc/Ctrl+C to cancel)\x1b[0m")
@@ -315,15 +377,20 @@ func promptSearchSelect(ctx context.Context, term TerminalSession, title, messag
 			selected = 0
 		}
 
-		maxLabelWidth := 1
+		maxOptionWidth := 1
 		for _, optionIndex := range filtered {
-			label := RemoteModelDisplayName(strings.TrimPrefix(options[optionIndex], "\x00"))
-			width := terminalTextWidth(label)
-			if width > maxLabelWidth {
-				maxLabelWidth = width
+			rawLabel := strings.TrimPrefix(options[optionIndex], "\x00")
+			label := RemoteModelDisplayName(rawLabel)
+			icon := terminalSelectorIconFor(rawLabel)
+			width := 1 + terminalTextWidth(label)
+			if icon.glyph != "" {
+				width += icon.width + 1
+			}
+			if width > maxOptionWidth {
+				maxOptionWidth = width
 			}
 		}
-		columnWidth := maxLabelWidth + 1
+		columnWidth := maxOptionWidth
 		columnCount := max(1, cols/columnWidth)
 		if columnCount > len(filtered) && len(filtered) > 0 {
 			columnCount = len(filtered)
@@ -381,21 +448,30 @@ func promptSearchSelect(ctx context.Context, term TerminalSession, title, messag
 					break
 				}
 				optionIndex := filtered[optionPosition]
-				optionLabel := RemoteModelDisplayName(strings.TrimPrefix(options[optionIndex], "\x00"))
-				label := truncateTerminalText(optionLabel, max(1, cellWidth-1))
+				rawLabel := strings.TrimPrefix(options[optionIndex], "\x00")
+				optionLabel := RemoteModelDisplayName(rawLabel)
+				icon := terminalSelectorIconFor(rawLabel)
+				iconWidth := icon.width
+				if icon.glyph != "" {
+					iconWidth++
+				}
+				label := truncateTerminalText(optionLabel, max(0, cellWidth-1-iconWidth))
+				optionWidth := 1 + iconWidth + terminalTextWidth(label)
 				if optionPosition == selected {
 					line.WriteString(terminalSelectionStyle)
 					line.WriteByte(' ')
+					appendTerminalSelectorIcon(&line, icon, true)
 					line.WriteString(label)
-					padding := cellWidth - 1 - terminalTextWidth(label)
+					padding := cellWidth - optionWidth
 					if padding > 0 {
 						line.WriteString(strings.Repeat(" ", padding))
 					}
 					line.WriteString("\x1b[0m")
 				} else {
 					line.WriteByte(' ')
+					appendTerminalSelectorIcon(&line, icon, false)
 					line.WriteString(label)
-					padding := cellWidth - 1 - terminalTextWidth(optionLabel)
+					padding := cellWidth - optionWidth
 					if padding > 0 && column+1 < columnCount {
 						line.WriteString(strings.Repeat(" ", padding))
 					}

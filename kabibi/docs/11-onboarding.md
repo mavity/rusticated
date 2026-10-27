@@ -51,6 +51,12 @@ filtered list scrolls. Resize must recalculate columns and visible rows.
 Non-TTY/stdin setup retains a simple line-oriented flow rather than requiring
 raw key input.
 
+Provider entries show provider icons, while catalog entries use icons inferred
+from the model family. Repeated namespace/model prefixes are removed from the
+display label without changing the model ID saved to configuration. X/Twitter
+family models are excluded from every provider catalog and cannot be selected
+through manual model-ID entry or the keep-current action.
+
 ## Gemma selection and download consent
 
 Check the selected model tier and all other assets required for that host
