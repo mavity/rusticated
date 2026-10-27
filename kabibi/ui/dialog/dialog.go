@@ -10,6 +10,7 @@ import (
 	"github.com/mavity/rusticated/kabibi/ui"
 	"github.com/mavity/rusticated/kabibi/ui/filemanager"
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
+	"github.com/mavity/rusticated/kabibi/ui/widgets"
 )
 
 type (
@@ -52,6 +53,7 @@ const (
 	ActionDelete
 	ActionSelectMask
 	ActionUnselectMask
+	ActionEdit
 
 	actionMkdir        = ActionMkdir
 	actionRename       = ActionRename
@@ -65,13 +67,17 @@ const (
 
 type dialogAction = DialogAction
 
-// Choice is a single FAR-style button in a choice dialog.
 type Choice struct {
-	Label  string // shown text, e.g. "Overwrite"
-	Hotkey string // single lowercase letter that resolves immediately
+	Label  string
+	Hotkey string
 }
 
 type dlgChoice = Choice
+
+type InputField struct {
+	Label string
+	Input *widgets.TextInput
+}
 
 const (
 	colorDlgBg     terminal.Color = 0x1A1F26
@@ -90,36 +96,35 @@ func makeCell(r rune, fg, bg terminal.Color, bold bool) Cell {
 	if bold {
 		attrs |= terminal.CharBold
 	}
-	return Cell{
-		Grapheme: string(r),
-		Style:    terminal.NewStyle(fg, bg, attrs),
-	}
+	return Cell{Grapheme: string(r), Style: terminal.NewStyle(fg, bg, attrs)}
 }
 
 func truncateStringToWidth(s string, maxWidth int) string {
-	displayWidth := runewidth.StringWidth(s)
-	if displayWidth <= maxWidth {
-		return s
-	}
-	effectiveWidth := maxWidth - 1
-	if effectiveWidth <= 0 {
+	if maxWidth <= 0 {
 		return ""
 	}
-	width := 0
+	if runewidth.StringWidth(s) <= maxWidth {
+		return s
+	}
+	if maxWidth == 1 {
+		return "…"
+	}
 	var b strings.Builder
+	width := 0
 	for _, r := range s {
-		w := runewidth.RuneWidth(r)
-		if width+w > effectiveWidth {
+		rw := runewidth.RuneWidth(r)
+		if rw <= 0 {
+			continue
+		}
+		if width+rw > maxWidth-1 {
 			break
 		}
 		b.WriteRune(r)
-		width += w
+		width += rw
 	}
-	return strings.TrimRight(b.String(), " ")
+	return b.String() + "…"
 }
 
-// DialogWidget renders modal dialog content into a CellBuf and handles keyboard
-// input directly via ui.Widget.
 type DialogWidget struct {
 	Kind       DialogKind
 	Action     DialogAction
@@ -129,25 +134,33 @@ type DialogWidget struct {
 	ChoiceIdx  int
 	InputValue string
 	InputWidth int
+	Fields     []InputField
 	Pending    *filemanager.FileOp
 
-	// Progress state when Kind == DialogProgress
-	Progress filemanager.FileOpProgress
+	Progress      filemanager.FileOpProgress
+	CollisionPath string
+	Collision     bool
 
-	// Callbacks
-	OnSubmitInput func(action DialogAction, value string, pending *filemanager.FileOp)
-	OnConfirm     func(action DialogAction, pending *filemanager.FileOp)
-	OnPickChoice  func(idx int)
-	OnCancel      func()
+	OnSubmitInput  func(action DialogAction, value string, pending *filemanager.FileOp)
+	OnSubmitForm   func(action DialogAction, values []string, pending *filemanager.FileOp)
+	OnConfirm      func(action DialogAction, pending *filemanager.FileOp)
+	OnPickChoice   func(idx int)
+	OnCancel       func()
+	OnCollision    func(filemanager.CollisionChoice)
 
 	Width  int
 	Height int
 	X      int
 	Y      int
+
+	buttons           *widgets.ButtonRow
+	focusedField      int
+	focusedButton     bool
+	legacyInputMirror string
 }
 
 func NewInputDialog(action DialogAction, title, prompt, initial string, pending *filemanager.FileOp) *DialogWidget {
-	return &DialogWidget{
+	d := &DialogWidget{
 		Kind:       DialogInput,
 		Action:     action,
 		Title:      title,
@@ -157,26 +170,65 @@ func NewInputDialog(action DialogAction, title, prompt, initial string, pending 
 		Width:      54,
 		Height:     10,
 	}
+	d.Fields = []InputField{{Input: widgets.NewTextInput(widgets.TextInputOptions{
+		Value: initial, SelectAll: initial != "", AllowPaste: true,
+	})}}
+	d.legacyInputMirror = initial
+	d.setButtons([]Choice{{Label: "OK"}, {Label: "Cancel"}})
+	return d
+}
+
+func NewFormDialog(action DialogAction, title, prompt string, labels, initial []string, pending *filemanager.FileOp) *DialogWidget {
+	d := &DialogWidget{
+		Kind:    DialogInput,
+		Action:  action,
+		Title:   title,
+		Prompt:  prompt,
+		Pending: pending,
+		Width:   64,
+		Height:  12,
+	}
+	for i, label := range labels {
+		value := ""
+		if i < len(initial) {
+			value = initial[i]
+		}
+		d.Fields = append(d.Fields, InputField{
+			Label: label,
+			Input: widgets.NewTextInput(widgets.TextInputOptions{
+				Value: value, SelectAll: value != "", AllowPaste: true,
+			}),
+		})
+	}
+	if len(d.Fields) > 0 {
+		d.InputValue = d.Fields[0].Input.Value()
+		d.legacyInputMirror = d.InputValue
+	}
+	d.setButtons([]Choice{{Label: "OK"}, {Label: "Cancel"}})
+	return d
 }
 
 func NewConfirmDialog(action DialogAction, title, prompt string, pending *filemanager.FileOp) *DialogWidget {
-	return &DialogWidget{
-		Kind:   DialogConfirm,
-		Action: action,
-		Title:  title,
-		Prompt: prompt,
-		Choices: []Choice{
-			{Label: "[Y]es", Hotkey: "y"},
-			{Label: "[N]o", Hotkey: "n"},
-		},
+	d := &DialogWidget{
+		Kind:    DialogConfirm,
+		Action:  action,
+		Title:   title,
+		Prompt:  prompt,
+		Choices: []Choice{{Label: "Yes", Hotkey: "y"}, {Label: "No", Hotkey: "n"}},
 		Pending: pending,
 		Width:   54,
 		Height:  10,
 	}
+	d.setButtons(d.Choices)
+	d.ChoiceIdx = 1
+	d.buttons.Index = 1
+	d.focusedButton = true
+	d.buttons.Focused = true
+	return d
 }
 
 func NewChoiceDialog(title, prompt string, choices []Choice, onPick func(idx int)) *DialogWidget {
-	return &DialogWidget{
+	d := &DialogWidget{
 		Kind:         DialogChoice,
 		Title:        title,
 		Prompt:       prompt,
@@ -185,342 +237,621 @@ func NewChoiceDialog(title, prompt string, choices []Choice, onPick func(idx int
 		Width:        54,
 		Height:       10,
 	}
+	d.setButtons(d.Choices)
+	d.focusedButton = true
+	d.buttons.Focused = true
+	return d
 }
 
 func NewProgressDialog(title string, progress filemanager.FileOpProgress, onCancel func()) *DialogWidget {
-	return &DialogWidget{
+	d := &DialogWidget{
 		Kind:     DialogProgress,
 		Title:    title,
 		Progress: progress,
 		OnCancel: onCancel,
-		Width:    58,
-		Height:   10,
+		Width:    64,
+		Height:   9,
 	}
+	d.setButtons([]Choice{{Label: "Cancel", Hotkey: "c"}})
+	d.focusedButton = true
+	d.buttons.Focused = true
+	return d
+}
+
+func (w *DialogWidget) setButtons(choices []Choice) {
+	w.Choices = append([]Choice(nil), choices...)
+	buttons := make([]widgets.Button, len(choices))
+	for i, choice := range choices {
+		index := i
+		buttons[i] = widgets.Button{
+			Label: choice.Label, Hotkey: choice.Hotkey,
+			OnPress: func() { w.activateButton(index) },
+		}
+	}
+	w.buttons = widgets.NewButtonRow(buttons)
+	if w.ChoiceIdx >= len(buttons) {
+		w.ChoiceIdx = 0
+	}
+	w.buttons.Index = w.ChoiceIdx
+}
+
+func (w *DialogWidget) SetCollision(path string, onChoice func(filemanager.CollisionChoice)) {
+	if w == nil {
+		return
+	}
+	w.Collision = true
+	w.CollisionPath = path
+	w.OnCollision = onChoice
+	w.setButtons([]Choice{
+		{Label: "Overwrite", Hotkey: "o"},
+		{Label: "Skip", Hotkey: "s"},
+		{Label: "All", Hotkey: "a"},
+		{Label: "Skip all", Hotkey: "k"},
+		{Label: "Cancel", Hotkey: "c"},
+	})
+	w.ChoiceIdx = 0
+	w.buttons.Index = 0
+}
+
+func (w *DialogWidget) ClearCollision() {
+	if w == nil {
+		return
+	}
+	w.Collision = false
+	w.CollisionPath = ""
+	w.OnCollision = nil
+	w.setButtons([]Choice{{Label: "Cancel", Hotkey: "c"}})
 }
 
 func (w *DialogWidget) Measure(c Constraints) Size {
 	if w == nil {
 		return Size{}
 	}
-	if c.MaxW > 0 && c.MaxW < 24 {
-		return Size{W: c.MaxW, H: 1}
+	maxW := c.MaxW
+	if maxW <= 0 {
+		maxW = 80
 	}
-	wW := w.Width
-	if wW <= 0 {
-		wW = 54
+	maxH := c.MaxH
+	if maxH <= 0 {
+		maxH = 24
 	}
-	if c.MaxW > 0 && wW > c.MaxW {
-		wW = c.MaxW
+	preferred := max(1, min(68, max(36, maxW*3/4)))
+	width := min(maxW, preferred)
+	if width < 1 {
+		width = 1
 	}
-	if wW < 24 {
-		wW = 24
+	compact := maxH < 10
+	promptRows := wrapTextRows(w.Prompt, max(1, width-6))
+	height := 4 + promptRows
+	if compact {
+		promptRows = 0
+		height = 2
 	}
-	return Size{W: wW, H: 10}
+	switch w.Kind {
+	case DialogInput:
+		if compact {
+			height += len(w.Fields)
+		} else {
+			height += len(w.Fields) * 2
+		}
+	case DialogProgress:
+		if compact {
+			height++
+		} else {
+			height += 3
+		}
+		if w.Collision {
+			if compact {
+				height++
+			} else {
+				height += 2
+			}
+		}
+	case DialogConfirm, DialogChoice:
+		height += 1
+	}
+	btnSize := w.buttonRow().Measure(Constraints{MaxW: max(1, width-4), MaxH: maxH})
+	height += max(1, btnSize.H)
+	if w.Kind == DialogInput && len(w.Fields) == 0 {
+		height += 2
+	}
+	height = min(height, maxH)
+	if height < 1 {
+		height = 1
+	}
+	return Size{W: width, H: height}
 }
 
 func (w *DialogWidget) Layout(r Rect) {
 	if w == nil {
 		return
 	}
-	w.X = r.X
-	w.Y = r.Y
-	w.Width = r.W
-	w.Height = r.H
+	w.X, w.Y, w.Width, w.Height = r.X, r.Y, r.W, r.H
 }
 
-func (w *DialogWidget) Render(r Rect, _ RenderContext) (CellBuf, CursorPos) {
+func (w *DialogWidget) Render(r Rect, ctx RenderContext) (CellBuf, CursorPos) {
 	if r.W > 0 || r.H > 0 {
 		w.Layout(r)
 	}
-	buf := w.RenderBuf()
-	if w != nil && w.Kind == DialogInput {
-		curX := 3 + runewidth.StringWidth(w.InputValue)
-		if curX >= buf.Width-2 {
-			curX = buf.Width - 3
-		}
-		return buf, CursorPos{X: curX, Y: 6, Visible: true}
-	}
-	return buf, CursorPos{Visible: false}
+	buf, cursor := w.RenderBufWithContext(ctx)
+	return buf, cursor
 }
 
 func (w *DialogWidget) RenderBuf() CellBuf {
-	if w == nil {
-		return NewCellBuf(0, 0)
-	}
-	width := w.Width
-	if width <= 0 {
-		width = 54
-	}
-	height := w.Height
-	if height <= 0 {
-		height = 10
-	}
-	buf := NewCellBuf(width, height)
-	buf.Fill(Rect{X: 0, Y: 0, W: width, H: height}, makeCell(' ', colorDlgText, colorDlgBg, false))
-
-	for x := 1; x < width-1; x++ {
-		buf.Set(x, 0, makeCell('─', colorDlgBorder, colorDlgBg, false))
-		buf.Set(x, height-1, makeCell('─', colorDlgBorder, colorDlgBg, false))
-	}
-	for y := 1; y < height-1; y++ {
-		buf.Set(0, y, makeCell('│', colorDlgBorder, colorDlgBg, false))
-		buf.Set(width-1, y, makeCell('│', colorDlgBorder, colorDlgBg, false))
-	}
-	if width >= 2 && height >= 2 {
-		buf.Set(0, 0, makeCell('╭', colorDlgBorder, colorDlgBg, false))
-		buf.Set(width-1, 0, makeCell('╮', colorDlgBorder, colorDlgBg, false))
-		buf.Set(0, height-1, makeCell('╰', colorDlgBorder, colorDlgBg, false))
-		buf.Set(width-1, height-1, makeCell('╯', colorDlgBorder, colorDlgBg, false))
-	}
-
-	innerW := width - 2
-	if w.Title != "" && innerW > 0 {
-		titleText := truncateStringToWidth(" "+w.Title+" ", innerW)
-		colOff := 0
-		for _, r := range titleText {
-			if colOff >= innerW {
-				break
-			}
-			buf.Set(1+colOff, 1, makeCell(r, colorBtnFg, colorDlgBorder, true))
-			colOff += runewidth.RuneWidth(r)
-		}
-	}
-	if w.Prompt != "" && innerW > 2 {
-		promptText := truncateStringToWidth(w.Prompt, innerW-2)
-		colOff := 0
-		for _, r := range promptText {
-			if colOff >= innerW-2 {
-				break
-			}
-			buf.Set(3+colOff, 3, makeCell(r, colorDlgText, colorDlgBg, false))
-			colOff += runewidth.RuneWidth(r)
-		}
-	}
-
-	if w.Kind == DialogProgress && innerW > 4 {
-		cur := filepath.Base(w.Progress.Current)
-		colOff := 0
-		for _, r := range truncateStringToWidth(cur, innerW-4) {
-			buf.Set(3+colOff, 3, makeCell(r, colorDlgText, colorDlgBg, false))
-			colOff += runewidth.RuneWidth(r)
-		}
-		barW := innerW - 10
-		if barW < 6 {
-			barW = 6
-		}
-		pct := pctOf(w.Progress.Done, w.Progress.Total)
-		barLine := fmt.Sprintf("%s %3d%%", renderProgressBarText(pct, barW), pct)
-		colOff = 0
-		for _, r := range barLine {
-			if 3+colOff >= width-2 {
-				break
-			}
-			buf.Set(3+colOff, 5, makeCell(r, colorDlgBorder, colorDlgBg, false))
-			colOff += runewidth.RuneWidth(r)
-		}
-		totals := fmt.Sprintf("%s / %s  %s/s",
-			FormatBytes(w.Progress.Done), FormatBytes(w.Progress.Total), FormatBytes(w.Progress.BytesPerSec))
-		colOff = 0
-		for _, r := range truncateStringToWidth(totals, innerW-4) {
-			buf.Set(3+colOff, 7, makeCell(r, colorDlgMuted, colorDlgBg, false))
-			colOff += runewidth.RuneWidth(r)
-		}
-		return buf
-	}
-
-	if w.Kind == DialogInput {
-		label := "Input"
-		for i, r := range label {
-			if i >= innerW-2 {
-				break
-			}
-			buf.Set(3+i, 5, makeCell(r, colorDlgMuted, colorDlgBg, false))
-		}
-		for x := 3; x < width-3; x++ {
-			buf.Set(x, 6, makeCell(' ', colorDlgText, colorBlack, false))
-		}
-		inputValue := w.InputValue
-		if runewidth.StringWidth(inputValue) > innerW-6 {
-			inputValue = truncateStringToWidth(inputValue, innerW-6)
-		}
-		colOff := 0
-		for _, r := range inputValue {
-			if 3+colOff >= width-3 {
-				break
-			}
-			buf.Set(3+colOff, 6, makeCell(r, colorDlgText, colorBlack, false))
-			colOff += runewidth.RuneWidth(r)
-		}
-	}
-
-	if len(w.Choices) > 0 {
-		btnY := height - 3
-		for i, choice := range w.Choices {
-			text := " " + choice.Label + " "
-			start := 3 + i*14
-			if start >= width-2 {
-				continue
-			}
-			colOff := 0
-			for _, r := range text {
-				if start+colOff >= width-1 {
-					break
-				}
-				fg := colorBtnAltFg
-				bg := colorBtnAltBg
-				bold := false
-				if i == w.ChoiceIdx {
-					fg = colorBtnFg
-					bg = colorBtnBg
-					bold = true
-				}
-				buf.Set(start+colOff, btnY, makeCell(r, fg, bg, bold))
-				colOff += runewidth.RuneWidth(r)
-			}
-		}
-	}
+	buf, _ := w.RenderBufWithContext(RenderContext{})
 	return buf
 }
 
-func (w *DialogWidget) HandleEvent(e input.Event) bool {
+func (w *DialogWidget) RenderBufWithContext(ctx RenderContext) (CellBuf, CursorPos) {
+	if w == nil {
+		return terminal.NewCellBuf(0, 0), CursorPos{}
+	}
+	width, height := w.Width, w.Height
+	if width <= 0 {
+		width = 54
+	}
+	if height <= 0 {
+		height = 10
+	}
+	buf := terminal.NewCellBuf(width, height)
+	buf.Fill(Rect{W: width, H: height}, makeCell(' ', colorDlgText, colorDlgBg, false))
+	if width < 2 || height < 2 {
+		return buf, CursorPos{}
+	}
+	w.drawBorder(&buf, width, height, w.Title)
+	innerW := max(1, width-4)
+	compact := height < 10
+	y := 2
+	if compact {
+		y = 1
+	}
+	if !compact {
+		for _, line := range wrapText(w.Prompt, innerW) {
+			if y >= height-1 {
+				break
+			}
+			drawText(&buf, 2, y, line, innerW, makeStyle(colorDlgText, colorDlgBg, false))
+			y++
+		}
+	}
+	var cursor CursorPos
+	switch w.Kind {
+	case DialogInput:
+		w.syncLegacyInput()
+		for i := range w.Fields {
+			field := &w.Fields[i]
+			if y >= height-2 {
+				break
+			}
+			inputX := 2
+			inputWidth := innerW
+			if compact && field.Label != "" {
+				labelWidth := min(runewidth.StringWidth(field.Label)+1, max(0, innerW-1))
+				drawText(&buf, inputX, y, field.Label, labelWidth, makeStyle(colorDlgMuted, colorDlgBg, false))
+				inputX += labelWidth
+				inputWidth -= labelWidth
+			} else if field.Label != "" {
+				drawText(&buf, 2, y, field.Label, innerW, makeStyle(colorDlgMuted, colorDlgBg, false))
+				y++
+			}
+			if y >= height-1 {
+				break
+			}
+			field.Input.SetFocused(i == w.focusedField && !w.focusedButton)
+			inputBuf, inputCursor := field.Input.Render(Rect{X: inputX, Y: y, W: inputWidth, H: 1}, ctx)
+			buf.Blit(inputBuf, inputX, y)
+			if i == w.focusedField && inputCursor.Visible {
+				cursor = CursorPos{X: inputX + inputCursor.X, Y: y + inputCursor.Y, Visible: true}
+			}
+			y++
+			if i == 0 {
+				w.InputValue = field.Input.Value()
+				w.legacyInputMirror = w.InputValue
+			}
+		}
+	case DialogProgress:
+		current := w.Progress.Current
+		progressRows := 3
+		if compact {
+			current = fmt.Sprintf("%s %d%%", filepath.Base(current), pctOf(w.Progress.Done, w.Progress.Total))
+			progressRows = 1
+		}
+		p := &widgets.ProgressBar{
+			Current: current,
+			Done: w.Progress.Done, Total: w.Progress.Total, Rate: w.Progress.BytesPerSec,
+		}
+		pbuf, _ := p.Render(Rect{X: 2, Y: y, W: innerW, H: min(progressRows, max(0, height-y-1))}, ctx)
+		buf.Blit(pbuf, 2, y)
+		y += pbuf.Height
+		if w.Collision && y < height-1 {
+			if !compact {
+				y++
+			}
+			message := "File already exists: " + filepath.Base(w.CollisionPath)
+			drawText(&buf, 2, y, message, innerW, makeStyle(0xFF6B6B, colorDlgBg, true))
+			y++
+		}
+	}
+
+	buttons := w.buttonRow()
+	if buttons != nil && height > 2 {
+		buttons.Index = w.ChoiceIdx
+		buttons.Focused = w.focusedButton || w.Kind == DialogChoice || w.Kind == DialogConfirm || w.Kind == DialogProgress
+		btnHeight := min(buttons.Measure(Constraints{MaxW: innerW, MaxH: height}).H, height-2)
+		btnY := height - 1 - btnHeight
+		if btnY < 1 {
+			btnY = 1
+		}
+		btnBuf, _ := buttons.Render(Rect{X: 2, Y: btnY, W: innerW, H: height - 1 - btnY}, ctx)
+		buf.Blit(btnBuf, 2, btnY)
+	}
+	return buf, cursor
+}
+
+func (w *DialogWidget) buttonRow() *widgets.ButtonRow {
+	if w.buttons == nil {
+		w.setButtons(w.Choices)
+	}
+	return w.buttons
+}
+
+func (w *DialogWidget) HandleEvent(event input.Event) bool {
 	if w == nil {
 		return false
 	}
-	var ev input.KeyPressEvent
-	switch k := e.(type) {
-	case input.KeyPressEvent:
-		ev = k
-	case *input.KeyPressEvent:
-		if k == nil {
-			return false
+	ev, ok := keyEvent(event)
+	if !ok {
+		if w.Kind == DialogInput && len(w.Fields) > 0 {
+			return w.currentField().Input.HandleEvent(event)
 		}
-		ev = *k
-	default:
 		return false
 	}
-
-	key := ev.String()
-
-	if w.Kind == DialogProgress {
-		if key == "esc" {
-			if w.OnCancel != nil {
-				w.OnCancel()
-			}
+	key := strings.ToLower(ev.String())
+	if key == "esc" {
+		if w.Kind == DialogProgress && w.Collision {
+			w.activateButton(len(w.Choices) - 1)
 			return true
 		}
-		return true
-	}
-
-	if w.Kind == DialogChoice {
-		switch key {
-		case "esc":
-			if w.OnPickChoice != nil {
-				w.OnPickChoice(-1)
-			}
-			if w.OnCancel != nil {
-				w.OnCancel()
-			}
-			return true
-		case "enter", " ", "space":
-			if w.OnPickChoice != nil {
-				w.OnPickChoice(w.ChoiceIdx)
-			}
-			return true
-		case "left", "up":
-			if w.ChoiceIdx > 0 {
-				w.ChoiceIdx--
-			}
-			return true
-		case "right", "down", "tab":
-			if w.ChoiceIdx < len(w.Choices)-1 {
-				w.ChoiceIdx++
-			}
-			return true
+		if w.Kind == DialogChoice && w.OnPickChoice != nil {
+			w.OnPickChoice(-1)
 		}
-		lower := strings.ToLower(key)
-		if ev.Text != "" {
-			lower = strings.ToLower(ev.Text)
-		}
-		for i, c := range w.Choices {
-			if c.Hotkey != "" && lower == strings.ToLower(c.Hotkey) {
-				if w.OnPickChoice != nil {
-					w.OnPickChoice(i)
-				}
-				return true
-			}
-		}
-		return true
-	}
-
-	if w.Kind == DialogConfirm {
-		switch key {
-		case "esc", "n", "N":
-			if w.OnCancel != nil {
-				w.OnCancel()
-			}
-			return true
-		case "enter", "y", "Y":
-			if w.ChoiceIdx == 1 && key == "enter" {
-				if w.OnCancel != nil {
-					w.OnCancel()
-				}
-				return true
-			}
-			if w.OnConfirm != nil {
-				w.OnConfirm(w.Action, w.Pending)
-			}
-			return true
-		case "left", "up":
-			w.ChoiceIdx = 0
-			return true
-		case "right", "down", "tab":
-			if len(w.Choices) > 1 {
-				w.ChoiceIdx = 1
-			}
-			return true
-		}
-		return true
-	}
-
-	// DialogInput
-	switch key {
-	case "esc":
 		if w.OnCancel != nil {
 			w.OnCancel()
 		}
 		return true
-	case "enter":
-		val := strings.TrimSpace(w.InputValue)
-		if val == "" {
+	}
+	if w.Kind == DialogProgress {
+		if w.Collision {
+			return w.handleButtons(ev)
+		}
+		if key == "enter" || key == "c" {
 			if w.OnCancel != nil {
 				w.OnCancel()
 			}
-			return true
-		}
-		if w.OnSubmitInput != nil {
-			w.OnSubmitInput(w.Action, val, w.Pending)
 		}
 		return true
-	case "backspace":
-		runes := []rune(w.InputValue)
-		if len(runes) > 0 {
-			w.InputValue = string(runes[:len(runes)-1])
-		}
-		return true
-	case " ", "space":
-		w.InputValue += " "
-		return true
-	default:
-		if ev.Text != "" {
-			w.InputValue += ev.Text
+	}
+	if w.Kind == DialogChoice || w.Kind == DialogConfirm {
+		if key == "enter" && w.Kind == DialogConfirm {
+			w.activateButton(w.ChoiceIdx)
 			return true
 		}
-		if len(key) == 1 {
-			w.InputValue += key
+		return w.handleButtons(ev)
+	}
+	if w.Kind != DialogInput || len(w.Fields) == 0 {
+		return true
+	}
+	w.syncLegacyInput()
+	if w.focusedButton {
+		switch key {
+		case "tab":
+			w.moveFocus(1)
 			return true
+		case "shift+tab", "up":
+			w.moveFocus(-1)
+			return true
+		case "down":
+			w.moveFocus(1)
+			return true
+		case "enter":
+			w.activateButton(w.ChoiceIdx)
+			return true
+		default:
+			return w.handleButtons(ev)
 		}
 	}
-	return true
+	field := w.currentField()
+	switch key {
+	case "enter":
+		if w.focusedButton {
+			w.activateButton(w.ChoiceIdx)
+		} else {
+			w.submit()
+		}
+		return true
+	case "tab":
+		if w.focusedButton {
+			w.moveFocus(1)
+			return true
+		}
+		if field.Input.HandleEvent(ev) {
+			return true
+		}
+		w.moveFocus(1)
+		return true
+	case "shift+tab":
+		w.moveFocus(-1)
+		return true
+	case "up", "down":
+		if w.focusedButton {
+			if key == "up" {
+				w.moveFocus(-1)
+			} else {
+				w.moveFocus(1)
+			}
+			return true
+		}
+		if len(w.Fields) == 1 {
+			if field.Input.HandleEvent(ev) {
+				return true
+			}
+		}
+		if key == "up" {
+			w.moveFocus(-1)
+		} else {
+			w.moveFocus(1)
+		}
+		return true
+	default:
+		if field.Input.HandleEvent(ev) {
+			w.InputValue = field.Input.Value()
+			w.legacyInputMirror = w.InputValue
+			return true
+		}
+		return true
+	}
+}
+
+func (w *DialogWidget) handleButtons(ev input.KeyPressEvent) bool {
+	buttons := w.buttonRow()
+	if buttons == nil {
+		return true
+	}
+	key := strings.ToLower(ev.String())
+	if key == "esc" {
+		if w.Kind == DialogChoice && w.OnPickChoice != nil {
+			w.OnPickChoice(-1)
+		}
+		if w.OnCancel != nil {
+			w.OnCancel()
+		}
+		return true
+	}
+	handled := buttons.HandleEvent(ev)
+	w.ChoiceIdx = buttons.Index
+	return handled || true
+}
+
+func (w *DialogWidget) activateButton(index int) {
+	switch w.Kind {
+	case DialogInput:
+		if index == 0 {
+			w.submit()
+		} else {
+			if w.OnCancel != nil {
+				w.OnCancel()
+			}
+		}
+	case DialogConfirm:
+		if index == 0 {
+			if w.OnConfirm != nil {
+				w.OnConfirm(w.Action, w.Pending)
+			}
+		} else if w.OnCancel != nil {
+			w.OnCancel()
+		}
+	case DialogChoice:
+		if w.OnPickChoice != nil {
+			w.OnPickChoice(index)
+		}
+	case DialogProgress:
+		if w.Collision {
+			choice := filemanager.ColCancel
+			switch index {
+			case 0:
+				choice = filemanager.ColOverwrite
+			case 1:
+				choice = filemanager.ColSkip
+			case 2:
+				choice = filemanager.ColOverwriteAll
+			case 3:
+				choice = filemanager.ColSkipAll
+			}
+			callback := w.OnCollision
+			w.ClearCollision()
+			if callback != nil {
+				callback(choice)
+			}
+		} else if w.OnCancel != nil {
+			w.OnCancel()
+		}
+	}
+}
+
+func (w *DialogWidget) submit() {
+	w.syncLegacyInput()
+	values := make([]string, len(w.Fields))
+	for i, field := range w.Fields {
+		values[i] = strings.TrimSpace(field.Input.Value())
+		if values[i] == "" {
+			if w.OnCancel != nil {
+				w.OnCancel()
+			}
+			return
+		}
+	}
+	if w.OnSubmitForm != nil {
+		w.OnSubmitForm(w.Action, values, w.Pending)
+		return
+	}
+	if w.OnSubmitInput != nil && len(values) > 0 {
+		w.OnSubmitInput(w.Action, values[0], w.Pending)
+	}
+}
+
+func (w *DialogWidget) currentField() *InputField {
+	if w.focusedField < 0 {
+		w.focusedField = 0
+	}
+	if w.focusedField >= len(w.Fields) {
+		w.focusedField = len(w.Fields) - 1
+	}
+	return &w.Fields[w.focusedField]
+}
+
+func (w *DialogWidget) syncLegacyInput() {
+	if len(w.Fields) == 0 {
+		return
+	}
+	field := w.Fields[0].Input
+	if field == nil {
+		field = widgets.NewTextInput(widgets.TextInputOptions{Value: w.InputValue, AllowPaste: true})
+		w.Fields[0].Input = field
+	}
+	if w.InputValue != w.legacyInputMirror {
+		field.SetValue(w.InputValue)
+	}
+	w.InputValue = field.Value()
+	w.legacyInputMirror = w.InputValue
+}
+
+func (w *DialogWidget) moveFocus(step int) {
+	total := len(w.Fields) + 1
+	if w.focusedButton {
+		w.focusedButton = false
+		w.buttonRow().Focused = false
+		w.focusedField = len(w.Fields) - 1
+		if step > 0 {
+			w.focusedButton = true
+			w.buttonRow().Focused = true
+			return
+		}
+		if len(w.Fields) > 0 {
+			w.Fields[w.focusedField].Input.SetFocused(true)
+		}
+		return
+	}
+	if len(w.Fields) == 0 {
+		w.focusedButton = true
+		w.buttonRow().Focused = true
+		return
+	}
+	w.Fields[w.focusedField].Input.SetFocused(false)
+	next := (w.focusedField + step + total) % total
+	if next == len(w.Fields) {
+		w.focusedButton = true
+		w.buttonRow().Focused = true
+		return
+	}
+	w.focusedField = next
+	w.Fields[w.focusedField].Input.SetFocused(true)
+}
+
+func (w *DialogWidget) drawBorder(buf *CellBuf, width, height int, title string) {
+	border := makeStyle(colorDlgBorder, colorDlgBg, false)
+	for x := 1; x < width-1; x++ {
+		buf.Set(x, 0, Cell{Grapheme: "─", Style: border})
+		buf.Set(x, height-1, Cell{Grapheme: "─", Style: border})
+	}
+	for y := 1; y < height-1; y++ {
+		buf.Set(0, y, Cell{Grapheme: "│", Style: border})
+		buf.Set(width-1, y, Cell{Grapheme: "│", Style: border})
+	}
+	buf.Set(0, 0, Cell{Grapheme: "╭", Style: border})
+	buf.Set(width-1, 0, Cell{Grapheme: "╮", Style: border})
+	buf.Set(0, height-1, Cell{Grapheme: "╰", Style: border})
+	buf.Set(width-1, height-1, Cell{Grapheme: "╯", Style: border})
+	titleText := " " + title + " "
+	titleWidth := runewidth.StringWidth(titleText)
+	if titleWidth > width-4 {
+		titleText = truncateStringToWidth(titleText, width-4)
+		titleWidth = runewidth.StringWidth(titleText)
+	}
+	start := max(1, (width-titleWidth)/2)
+	drawText(buf, start, 0, titleText, min(titleWidth, width-start-1), makeStyle(colorBtnFg, colorDlgBorder, true))
+}
+
+func drawText(buf *CellBuf, x, y int, text string, maxWidth int, style terminal.Style) {
+	if y < 0 || y >= buf.Height || maxWidth <= 0 {
+		return
+	}
+	col := x
+	for _, r := range text {
+		width := runewidth.RuneWidth(r)
+		if width <= 0 {
+			continue
+		}
+		if col+width > x+maxWidth || col+width > buf.Width {
+			return
+		}
+		buf.Set(col, y, Cell{Grapheme: string(r), Style: style})
+		for i := 1; i < width; i++ {
+			buf.Set(col+i, y, Cell{Grapheme: "", Style: style})
+		}
+		col += width
+	}
+}
+
+func wrapTextRows(text string, width int) int { return len(wrapText(text, width)) }
+
+func wrapText(text string, width int) []string {
+	if width < 1 {
+		width = 1
+	}
+	var rows []string
+	for _, paragraph := range strings.Split(text, "\n") {
+		words := strings.Fields(paragraph)
+		if len(words) == 0 {
+			rows = append(rows, "")
+			continue
+		}
+		line := ""
+		for _, word := range words {
+			if line == "" {
+				line = truncateStringToWidth(word, width)
+				continue
+			}
+			candidate := line + " " + word
+			if runewidth.StringWidth(candidate) <= width {
+				line = candidate
+			} else {
+				rows = append(rows, line)
+				line = truncateStringToWidth(word, width)
+			}
+		}
+		rows = append(rows, line)
+	}
+	return rows
+}
+
+func makeStyle(fg, bg terminal.Color, bold bool) terminal.Style {
+	attrs := terminal.CharAttributes(0)
+	if bold {
+		attrs |= terminal.CharBold
+	}
+	return terminal.NewStyle(fg, bg, attrs)
+}
+
+func keyEvent(event input.Event) (input.KeyPressEvent, bool) {
+	switch ev := event.(type) {
+	case input.KeyPressEvent:
+		return ev, true
+	case *input.KeyPressEvent:
+		if ev != nil {
+			return *ev, true
+		}
+	}
+	return input.KeyPressEvent{}, false
 }
 
 var _ Widget = (*DialogWidget)(nil)
@@ -529,17 +860,9 @@ func pctOf(done, total int64) int {
 	if total <= 0 {
 		return 0
 	}
-	p := int((done * 100) / total)
-	if p > 100 {
-		p = 100
-	}
-	if p < 0 {
-		p = 0
-	}
-	return p
+	return max(0, min(100, int(done*100/total)))
 }
 
-// FormatBytes renders a byte count in human-friendly units.
 func FormatBytes(n int64) string {
 	const unit = 1024
 	if n < unit {
@@ -550,10 +873,13 @@ func FormatBytes(n int64) string {
 		div *= unit
 		exp++
 	}
-	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
+	units := "KMGTPE"
+	if exp >= len(units) {
+		exp = len(units) - 1
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), units[exp])
 }
 
-// SummarizeSources produces a short human description for confirm prompts.
 func SummarizeSources(sources []string) string {
 	if len(sources) == 1 {
 		return filepath.Base(sources[0])
@@ -562,25 +888,10 @@ func SummarizeSources(sources []string) string {
 }
 
 func renderProgressBarText(percentage int, width int) string {
-	if percentage < 0 {
-		percentage = 0
+	if width < 0 {
+		width = 0
 	}
-	if percentage > 100 {
-		percentage = 100
-	}
-	filled := (width * percentage) / 100
-	if filled < 0 {
-		filled = 0
-	}
-	if filled > width {
-		filled = width
-	}
-	var bar strings.Builder
-	for i := 0; i < filled; i++ {
-		bar.WriteRune('█')
-	}
-	for i := filled; i < width; i++ {
-		bar.WriteRune('░')
-	}
-	return bar.String()
+	percentage = max(0, min(100, percentage))
+	filled := width * percentage / 100
+	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
 }
