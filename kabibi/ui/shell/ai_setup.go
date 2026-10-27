@@ -141,7 +141,7 @@ func (r *LazyAIRunner) configureAIWithPrompter(ctx context.Context, prompter Onb
 func modelSetupMenu(ctx context.Context, previous config.AIConfig) ([]modelSetupAction, []string, int, error) {
 	actions := make([]modelSetupAction, 0, len(assets.ModelTiers())+len(supportedRemoteProviders)+4)
 	options := make([]string, 0, cap(actions))
-	if previous.Configured {
+	if previous.Configured && (previous.Mode != "remote" || !ai.IsExcludedRemoteModel(previous.Model)) {
 		current := "current configuration"
 		if previous.Mode == "local" {
 			if tier, ok := assets.LookupModelTier(previous.TierID); ok {
@@ -685,7 +685,7 @@ func chooseRemoteModelFromConfig(ctx context.Context, prompter OnboardingPrompte
 			break
 		}
 	}
-	if previousModel != "" && !foundDefault {
+	if previousModel != "" && !foundDefault && !ai.IsExcludedRemoteModel(previousModel) {
 		choices = append(choices, previousModel+" (previously selected; not in provider catalog)")
 		modelChoices = append(modelChoices, ai.RemoteModelInfo{ID: previousModel})
 		defaultChoice = len(modelChoices) - 1
@@ -714,6 +714,9 @@ func enterRemoteModelID(ctx context.Context, prompter OnboardingPrompter, messag
 	model = strings.TrimSpace(model)
 	if model == "" {
 		return "", errors.New("provider model ID must not be empty")
+	}
+	if ai.IsExcludedRemoteModel(model) {
+		return "", fmt.Errorf("X/Twitter model %q cannot be selected", model)
 	}
 	return model, nil
 }

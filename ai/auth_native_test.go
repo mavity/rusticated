@@ -81,6 +81,29 @@ func TestRemoteModelDisplayNameStripsDuplicatedNamespace(t *testing.T) {
 	}
 }
 
+func TestTerminalSelectorRecognizesProviderAndModelIcons(t *testing.T) {
+	tests := []struct {
+		label string
+		want  terminalSelectorIcon
+	}{
+		{label: "Google Gemini", want: terminalSelectorIcon{glyph: "✦", color: 0x4E87F8, width: 1}},
+		{label: "anthropic/claude-sonnet", want: terminalSelectorIcon{glyph: "✳", color: 0xD97757, width: 1}},
+		{label: "openai/gpt-6-luna", want: terminalSelectorIcon{glyph: "꩜", color: 0x10A37F, width: 1}},
+		{label: "meta-llama/llama-3", want: terminalSelectorIcon{glyph: "∞", color: 0x0081FB, width: 1}},
+		{label: "mistral/large", want: terminalSelectorIcon{glyph: "𝕄", color: 0xFF7000, width: 1}},
+		{label: "deepseek-r1", want: terminalSelectorIcon{glyph: "🐋", width: 2}},
+		{label: "kimi-k2", want: terminalSelectorIcon{glyph: "𝗞", color: 0x18181B, width: 1}},
+		{label: "OpenRouter", want: terminalSelectorIcon{glyph: "⇄", color: 0x6566F1, width: 1}},
+		{label: "GitHub Copilot", want: terminalSelectorIcon{glyph: "🐙", width: 2}},
+		{label: "openrouter/auto", want: terminalSelectorIcon{}},
+	}
+	for _, test := range tests {
+		if got := terminalSelectorIconFor(test.label); got != test.want {
+			t.Errorf("terminalSelectorIconFor(%q) = %+v, want %+v", test.label, got, test.want)
+		}
+	}
+}
+
 func TestPromptSelectUsesFilePanelSelectionColors(t *testing.T) {
 	term := &searchSelectTerm{
 		keys: [][]byte{[]byte("\n")},
@@ -120,6 +143,24 @@ func TestPromptSearchSelectFiltersAndAccepts(t *testing.T) {
 	}
 	if !strings.Contains(term.out.String(), "\x1b[3A\x1b[15G") {
 		t.Fatalf("selector did not position the cursor after the search query: %q", term.out.String())
+	}
+}
+
+func TestPromptSearchSelectRendersProviderIcons(t *testing.T) {
+	term := &searchSelectTerm{
+		keys: [][]byte{[]byte("\n")},
+		cols: 80,
+		rows: 24,
+	}
+	if _, err := PromptSearchSelect(context.Background(), term, "Providers", "", []string{"OpenRouter", "GitHub Copilot"}, 0); err != nil {
+		t.Fatalf("PromptSearchSelect() error = %v", err)
+	}
+	output := term.out.String()
+	if !strings.Contains(output, "\x1b[38;2;0;0;128;48;2;255;215;0m \x1b[38;2;101;102;241m⇄\x1b[38;2;0;0;128m OpenRouter") {
+		t.Errorf("selector omitted the colored OpenRouter provider icon: %q", output)
+	}
+	if !strings.Contains(output, "🐙 GitHub Copilot") {
+		t.Errorf("selector omitted the Copilot provider icon: %q", output)
 	}
 }
 
@@ -216,8 +257,8 @@ func TestPromptSearchSelectCompactOmitsDecorativeCaptions(t *testing.T) {
 			t.Errorf("compact selector output contains unwanted caption %q: %q", caption, output)
 		}
 	}
-	if !strings.Contains(output, "\x1b[38;2;0;0;128;48;2;255;215;0m claude-sonnet") {
-		t.Errorf("compact selector did not render the selected model in file-panel colors: %q", output)
+	if !strings.Contains(output, "\x1b[38;2;0;0;128;48;2;255;215;0m \x1b[38;2;217;119;87m✳\x1b[38;2;0;0;128m claude-sonnet") {
+		t.Errorf("compact selector did not render the selected model with its brand icon and file-panel selection background: %q", output)
 	}
 	if !strings.Contains(output, "\x1b[2A\x1b[4G") {
 		t.Errorf("compact selector did not position the cursor after the search query: %q", output)
