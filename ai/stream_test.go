@@ -173,7 +173,7 @@ func TestParseChunkEvents(t *testing.T) {
 	want := []ModelEvent{
 		TextEvent{Text: "a"},
 		TextEvent{Text: "b"},
-		ToolCallEvent{ToolCalls: []ToolCall{{Name: "read_file", Arguments: map[string]any{"path": "p"}, RawArguments: json.RawMessage(`{"path":"p"}`)}}},
+		ToolCallEvent{ToolCalls: []ToolCall{{Name: "read_file", Arguments: map[string]any{"path": "p"}, RawArguments: json.RawMessage(`"{\"path\":\"p\"}"`)}}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %#v, want %#v", got, want)
@@ -184,6 +184,24 @@ func TestParseChunkEvents(t *testing.T) {
 	}
 	if got := parseChunkEvents(""); got != nil {
 		t.Fatalf("empty chunk: got %#v, want nil", got)
+	}
+}
+
+func TestParseChunkEventsPreservesMalformedToolArgumentsForDispatch(t *testing.T) {
+	got := parseChunkEvents(`{"tool_calls":[{"function":{"name":"read_file","arguments":"{not-json}"}}]}`)
+	if len(got) != 1 {
+		t.Fatalf("events = %#v, want one tool-call event", got)
+	}
+	event, ok := got[0].(ToolCallEvent)
+	if !ok || len(event.ToolCalls) != 1 {
+		t.Fatalf("event = %#v, want one tool call", got[0])
+	}
+	call := event.ToolCalls[0]
+	if call.Arguments != nil {
+		t.Fatalf("malformed arguments became a map: %#v", call.Arguments)
+	}
+	if string(call.RawArguments) != `"{not-json}"` {
+		t.Fatalf("RawArguments = %q, want original emitted JSON value", call.RawArguments)
 	}
 }
 

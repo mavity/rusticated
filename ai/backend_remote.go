@@ -237,10 +237,7 @@ func (c *remoteConversationBackend) SendStream(ctx context.Context, parts []Prom
 			return err
 		}
 	}
-	calls, err := acc.toolCalls()
-	if err != nil {
-		return err
-	}
+	calls := acc.toolCalls()
 	if err := acc.finish(calls); err != nil {
 		return err
 	}
@@ -561,8 +558,8 @@ func buildOpenAIResponsesRequest(remote RemoteEngineConfig, cfg ConversationConf
 		endpoint = strings.TrimRight(endpoint, "/") + "/responses"
 	}
 	headers := map[string]string{
-		"Content-Type":  "application/json",
-		"Accept":        "text/event-stream",
+		"Content-Type": "application/json",
+		"Accept":       "text/event-stream",
 	}
 	if remote.APIKey != "" {
 		headers["Authorization"] = "Bearer " + remote.APIKey
@@ -669,8 +666,8 @@ func buildOpenAIRequest(remote RemoteEngineConfig, cfg ConversationConfig, parts
 		}
 	}
 	headers := map[string]string{
-		"Content-Type":  "application/json",
-		"Accept":        "text/event-stream",
+		"Content-Type": "application/json",
+		"Accept":       "text/event-stream",
 	}
 	if remote.APIKey != "" {
 		headers["Authorization"] = "Bearer " + remote.APIKey
@@ -903,10 +900,10 @@ func buildGeminiRequest(remote RemoteEngineConfig, cfg ConversationConfig, parts
 		headers["x-goog-api-key"] = remote.APIKey
 	}
 	return remoteRequest{
-		method: http.MethodPost,
-		url:    url,
+		method:  http.MethodPost,
+		url:     url,
 		headers: headers,
-		body: payload,
+		body:    payload,
 	}, nil
 }
 
@@ -962,21 +959,16 @@ func geminiContents(parts []PromptPart) ([]map[string]any, error) {
 }
 
 func remoteToolArguments(call ToolCall) ([]byte, error) {
-	if len(call.RawArguments) > 0 {
-		var value any
-		if err := json.Unmarshal(call.RawArguments, &value); err != nil {
-			return nil, fmt.Errorf("decode raw arguments for tool %q: %w", call.Name, err)
-		}
-		return json.Marshal(value)
-	}
-	if call.Arguments == nil {
-		return []byte("{}"), nil
-	}
-	data, err := json.Marshal(call.Arguments)
+	_, raw, err := decodeToolArguments(call.RawArguments, call.Arguments)
 	if err != nil {
-		return nil, fmt.Errorf("encode arguments for tool %q: %w", call.Name, err)
+		if len(call.RawArguments) > 0 {
+			// Keep the provider request schema valid so its paired tool error can
+			// be sent; the original malformed arguments remain in ToolCall.
+			return []byte("{}"), nil
+		}
+		return nil, fmt.Errorf("decode arguments for tool %q: %w", call.Name, err)
 	}
-	return data, nil
+	return raw, nil
 }
 
 type remoteAccumulator struct {
@@ -1267,7 +1259,7 @@ func (a *remoteAccumulator) tool(index int) *remoteToolAssembly {
 	return call
 }
 
-func (a *remoteAccumulator) toolCalls() ([]ToolCall, error) {
+func (a *remoteAccumulator) toolCalls() []ToolCall {
 	indices := make([]int, 0, len(a.tools))
 	for index := range a.tools {
 		indices = append(indices, index)
@@ -1280,9 +1272,9 @@ func (a *remoteAccumulator) toolCalls() ([]ToolCall, error) {
 		if raw == "" {
 			raw = "{}"
 		}
-		var arguments map[string]any
-		if err := json.Unmarshal([]byte(raw), &arguments); err != nil {
-			return nil, fmt.Errorf("decode arguments for remote tool %q: %w", assembled.name, err)
+		arguments, _, err := decodeToolArguments(json.RawMessage(raw), nil)
+		if err != nil {
+			arguments = nil
 		}
 		calls = append(calls, ToolCall{
 			ID:           assembled.id,
@@ -1291,7 +1283,7 @@ func (a *remoteAccumulator) toolCalls() ([]ToolCall, error) {
 			RawArguments: json.RawMessage(raw),
 		})
 	}
-	return calls, nil
+	return calls
 }
 
 func (a *remoteAccumulator) finish(calls []ToolCall) error {

@@ -56,6 +56,8 @@ Pope will range over the `SendStream` iterator and act as the executor for tool 
    - System Execution: `exec(command)` (Using `os/exec`, which intercepts to the host when running in WASI mode).
 4. **Feedback:** After execution, Pope constructs a `PromptPart` with `RoleTool` containing the JSON result, and triggers a new `SendStream` so the model can read the output and resume. The `ai` module must format this response using the expected LiteRT-LM tool response schema: `{"role": "tool", "content": [{"type": "tool_response", "name": "<tool_name>", "response": <result>}]}`.
 
+Tool execution failures use the same response path: return `{"error": "<message>"}` as that call's `tool_response`, preserving its name and call ID when provided, then let the model continue. Invalid arguments and unknown tool names are reported this way without executing a handler. A LiteRT-LM stream/parser error that occurs before a structured call is emitted remains a stream error; there is no tool call to answer.
+
 ## 4. Context Window Management (Compaction)
 
 `ai.Session` owns logical turn history, compaction, and conversation replacement because LiteRT-LM conversation state is opaque and does not support deleting old turns in place. Callers provide a `CompactionLimit` in `SessionConfig`; Kabibi uses 80% of the selected model's declared input-context limit when its provider catalog publishes one, and otherwise uses a conservative 8K-token budget. The Session projects compacted history into a replacement conversation seeded through the backend interface. Pope and other clients should use `ai.Session` rather than implementing a second history-compaction loop.
