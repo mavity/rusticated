@@ -786,6 +786,24 @@ test('CRT image fitting preserves the source aspect ratio', () => {
   assert.ok(Math.abs(landscapeFit.y - 0.639) < 0.002);
 });
 
+test('CRT reflection oscillates left-right and back-forward over ten minutes', () => {
+  const { context } = createHarness();
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'super-demo.js'), 'utf8'), context);
+  const offset = context.KabibiBrowserSuperDemo.calculateReflectionOffset;
+  const depth = context.KabibiBrowserSuperDemo.calculateReflectionDepth;
+
+  assert.ok(Math.abs(offset(0)) < 1e-12);
+  assert.ok(Math.abs(offset(150000) - 1.2) < 1e-12);
+  assert.ok(Math.abs(offset(300000)) < 1e-12);
+  assert.ok(Math.abs(offset(450000) + 1.2) < 1e-12);
+  assert.ok(Math.abs(offset(600000)) < 1e-12);
+  assert.ok(Math.abs(depth(0) - 1.2) < 1e-12);
+  assert.ok(Math.abs(depth(150000) - 1) < 1e-12);
+  assert.ok(Math.abs(depth(300000) - 1.2) < 1e-12);
+  assert.ok(Math.abs(depth(450000) - 1.4) < 1e-12);
+  assert.ok(Math.abs(depth(600000) - 1.2) < 1e-12);
+});
+
 test('CRT capture crops the WebGL viewport rather than its unused canvas area', () => {
   const { context } = createHarness();
   vm.runInContext(fs.readFileSync(path.join(__dirname, 'super-demo.js'), 'utf8'), context);
@@ -799,7 +817,8 @@ test('CRT capture crops the WebGL viewport rather than its unused canvas area', 
 
 test('CRT blur is a final composite pass with endpoints measured on curved geometry', () => {
   const source = fs.readFileSync(path.join(__dirname, 'super-demo.js'), 'utf8');
-  const renderPass = source.slice(source.indexOf('function render()'), source.indexOf('function resize()'));
+  const renderStart = source.indexOf('function render(');
+  const renderPass = source.slice(renderStart, source.indexOf('function resize()', renderStart));
   const firstPostRender = renderPass.indexOf('renderer.render(postScene, postCamera)');
   const passOrder = [
     'renderer.setRenderTarget(renderTarget)',

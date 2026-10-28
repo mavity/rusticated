@@ -334,6 +334,8 @@
     let animationFrame = 0;
     let active = true;
     let usingFallback = false;
+    let screenNeedsUpdate = true;
+    let reflectionAnimationStart = null;
     let renderSubscription = null;
     let contextLossSubscription = null;
     let resizeObserver = null;
@@ -358,11 +360,13 @@
     let screenMesh = null;
     let glassMesh = null;
     let reflectionMesh = null;
+    let reflectionLight = null;
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
     const hitPoint = new THREE.Vector2();
     const baseScreenWidth = 2.72;
     const baseScreenHeight = 1.58;
+    const baseLightDepth = 2.2;
     let screenWidth = baseScreenWidth;
     let screenHeight = baseScreenHeight;
     const cameraTarget = { x: 0.015, y: -0.015, z: 0 };
@@ -442,6 +446,7 @@
       screenMesh = null;
       glassMesh = null;
       reflectionMesh = null;
+      reflectionLight = null;
     }
 
     function removeInputListeners() {
@@ -473,7 +478,8 @@
       }
     }
 
-    function requestFrame() {
+    function requestFrame(refreshScreen = false) {
+      if (refreshScreen) screenNeedsUpdate = true;
       if (!active || usingFallback || animationFrame) return;
       animationFrame = requestAnimationFrame(render);
     }
@@ -545,10 +551,22 @@
       }
     }
 
-    function render() {
+    function render(timestamp) {
       animationFrame = 0;
       if (!active || usingFallback) return;
-      updateScreenTexture();
+      if (screenNeedsUpdate) {
+        updateScreenTexture();
+        screenNeedsUpdate = false;
+      }
+      const now = Number.isFinite(timestamp) ? timestamp : Date.now();
+      if (reflectionAnimationStart === null) reflectionAnimationStart = now;
+      const elapsed = now - reflectionAnimationStart;
+      const lightOffset = calculateReflectionOffset(elapsed);
+      if (reflectionMaterial) reflectionMaterial.uniforms.lightOffset.value = lightOffset;
+      if (reflectionLight) {
+        reflectionLight.position.x = -1.7 + lightOffset * screenWidth;
+        reflectionLight.position.z = baseLightDepth * calculateReflectionDepth(elapsed);
+      }
       renderer.setRenderTarget(renderTarget);
       renderer.render(scene, camera);
       postMesh.material = horizontalBlurMaterial;
@@ -561,6 +579,7 @@
       postMaterial.uniforms.direction.value.set(0, 1);
       renderer.setRenderTarget(null);
       renderer.render(postScene, postCamera);
+      requestFrame();
     }
 
     function resize() {
@@ -577,7 +596,7 @@
       updateScreenDimensions(camera.aspect);
       frameCamera();
       resizePostProcess();
-      requestFrame();
+      requestFrame(true);
     }
 
     function resizePostProcess() {
@@ -1178,6 +1197,9 @@
       }
 
       if (!flat) reflectionMaterial = new THREE.ShaderMaterial({
+        uniforms: {
+          lightOffset: { value: 0 }
+        },
         transparent: true,
         depthWrite: false,
         side: THREE.DoubleSide,
@@ -1196,6 +1218,7 @@
           }
         `,
         fragmentShader: `
+          uniform float lightOffset;
           varying vec2 vUv;
           varying vec3 vViewPosition;
           varying vec3 vNormal;
@@ -1203,10 +1226,10 @@
             float facing = max(dot(normalize(vNormal), normalize(vViewPosition)), 0.0);
             float fresnel = pow(1.0 - facing, 2.0);
             float streakAxis = vUv.x + 0.34 * (1.0 - vUv.y);
-              float streak = exp(-pow((streakAxis - 0.50) / 0.12, 2.0)) *
+              float streak = exp(-pow((streakAxis - (0.50 + lightOffset)) / 0.12, 2.0)) *
                 smoothstep(0.08, 0.28, vUv.y) *
                 (1.0 - smoothstep(0.92, 0.99, vUv.y));
-              float bloom = exp(-pow((vUv.x - 0.18) / 0.22, 2.0) -
+              float bloom = exp(-pow((vUv.x - (0.18 + lightOffset)) / 0.22, 2.0) -
                 pow((vUv.y - 0.82) / 0.22, 2.0));
                 float alpha = clamp(streak * 0.34 + bloom * 0.15 + fresnel * 0.10, 0.0, 0.36);
             gl_FragColor = vec4(0.78, 0.88, 1.0, alpha);
@@ -1222,14 +1245,15 @@
 
       const ambient = new THREE.AmbientLight(0x9db4d0, 0.30);
       const key = new THREE.DirectionalLight(0xd6e4ff, 0.50);
-      key.position.set(-1.7, 1.8, 2.2);
+      key.position.set(-1.7, 1.8, baseLightDepth);
+      reflectionLight = key;
       scene.add(ambient, key);
 
       if (!terminal._core || !terminal._core._renderService ||
           typeof terminal._core._renderService.onRender !== 'function') {
         throw new Error('This xterm.js version does not expose screen redraw notifications required by the CRT surface');
       }
-      renderSubscription = terminal._core._renderService.onRender(requestFrame);
+      renderSubscription = terminal._core._renderService.onRender(() => requestFrame(true));
       contextLossSubscription = addon.onContextLoss(() => {
         fallback(new Error('xterm WebGL context was lost'));
       });
@@ -1246,7 +1270,7 @@
       resizeObserver.observe(root);
       updateScreenDimensions(stage.clientWidth / stage.clientHeight);
       resize();
-      requestFrame();
+      requestFrame(true);
     } catch (error) {
       fallback(error);
     }
@@ -1317,11 +1341,27 @@
     return { x: 0, y: 0, width: canvasWidth, height: canvasHeight };
   }
 
+  const REFLECTION_PERIOD_MS = 10 * 60 * 1000;
+
+  function calculateReflectionPhase(elapsedMs) {
+    return ((elapsedMs % REFLECTION_PERIOD_MS) / REFLECTION_PERIOD_MS) * Math.PI * 2;
+  }
+
+  function calculateReflectionOffset(elapsedMs) {
+    return 1.2 * Math.sin(calculateReflectionPhase(elapsedMs));
+  }
+
+  function calculateReflectionDepth(elapsedMs) {
+    return 1 + 0.2 * (1 - Math.sin(calculateReflectionPhase(elapsedMs)));
+  }
+
   global.KabibiBrowserSuperDemo = Object.freeze({
     start,
     createVirtualKeyboard,
     calculateGrid,
     calculateImageScale,
-    calculateCaptureViewport
+    calculateCaptureViewport,
+    calculateReflectionOffset,
+    calculateReflectionDepth
   });
 })(globalThis);
