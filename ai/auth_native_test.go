@@ -600,10 +600,7 @@ func TestOpenAIChatGPTOAuthAndResponsesWireProtocol(t *testing.T) {
 	if err := acc.consume("", `{"type":"response.function_call_arguments.delta","output_index":1,"delta":"{\"path\":\"main.go\"}"}`); err != nil {
 		t.Fatal(err)
 	}
-	calls, err := acc.toolCalls()
-	if err != nil {
-		t.Fatal(err)
-	}
+	calls := acc.toolCalls()
 	if err := acc.finish(calls); err != nil {
 		t.Fatal(err)
 	}

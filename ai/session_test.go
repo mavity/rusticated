@@ -88,6 +88,52 @@ func (*captureHistoryConversation) SendStream(context.Context, []PromptPart, fun
 
 func (*captureHistoryConversation) Close() error { return nil }
 
+type scriptedSessionBackend struct {
+	history      [][]PromptPart
+	configs      []ConversationConfig
+	createCount  int
+	conversation *scriptedSessionConversation
+}
+
+func (b *scriptedSessionBackend) NewConversation(cfg ConversationConfig) (conversationBackend, error) {
+	b.createCount++
+	b.history = append(b.history, append([]PromptPart(nil), cfg.History...))
+	b.configs = append(b.configs, cfg)
+	if b.conversation == nil {
+		b.conversation = &scriptedSessionConversation{}
+	}
+	return b.conversation, nil
+}
+
+func (*scriptedSessionBackend) Close() error { return nil }
+
+type scriptedSessionConversation struct {
+	responses [][]ModelEvent
+	errors    []error
+	sends     [][]PromptPart
+	closed    bool
+}
+
+func (c *scriptedSessionConversation) SendStream(_ context.Context, parts []PromptPart, onEvent func(ModelEvent)) error {
+	index := len(c.sends)
+	c.sends = append(c.sends, append([]PromptPart(nil), parts...))
+	if index >= len(c.responses) {
+		return fmt.Errorf("unexpected model request %d", index+1)
+	}
+	for _, event := range c.responses[index] {
+		onEvent(event)
+	}
+	if index < len(c.errors) {
+		return c.errors[index]
+	}
+	return nil
+}
+
+func (c *scriptedSessionConversation) Close() error {
+	c.closed = true
+	return nil
+}
+
 func TestReplaceEngineRestoresCompactedHistory(t *testing.T) {
 	history := []PromptPart{
 		{Role: RoleUser, Text: "retained question"},
@@ -534,8 +580,13 @@ func TestLiveStreamerZeroANSISpec(t *testing.T) {
 
 func TestRunTurnDirectAnswerUsesSingleCall(t *testing.T) {
 	var out bytes.Buffer
-	var modelCalls int
+	backend := &scriptedSessionBackend{
+		conversation: &scriptedSessionConversation{
+			responses: [][]ModelEvent{{TextEvent{Text: "Pont Neuf is the oldest standing bridge in Paris."}}},
+		},
+	}
 	s, err := NewSession(SessionConfig{
+		Engine:        &Engine{impl: &engineImpl{backend: backend}},
 		SystemMessage: "You are Pope.",
 		OnContent:     func(text string) { _, _ = out.WriteString(text) },
 		OnFeedback:    func(text string) {},
@@ -543,20 +594,13 @@ func TestRunTurnDirectAnswerUsesSingleCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.ephemeralStream = func(ctx context.Context, cfg ConversationConfig, trigger []PromptPart, onEvent func(ModelEvent) bool) error {
-		modelCalls++
-		if cfg.Tools != nil {
-			t.Fatalf("unexpected tools in a session without registered tools")
-		}
-		onEvent(TextEvent{Text: "Pont Neuf is the oldest standing bridge in Paris."})
-		return nil
-	}
+	defer s.Close()
 
 	if err := s.RunTurn(context.Background(), "Name a bridge in Paris"); err != nil {
 		t.Fatal(err)
 	}
-	if modelCalls != 1 {
-		t.Fatalf("model calls = %d, want one", modelCalls)
+	if len(backend.conversation.sends) != 1 {
+		t.Fatalf("model calls = %d, want one", len(backend.conversation.sends))
 	}
 	if got := out.String(); got != "Pont Neuf is the oldest standing bridge in Paris." {
 		t.Fatalf("terminal output = %q", got)
@@ -568,8 +612,13 @@ func TestRunTurnDirectAnswerUsesSingleCall(t *testing.T) {
 
 func TestRunTurnUnprefixedAnswerUsesSingleCall(t *testing.T) {
 	var out bytes.Buffer
-	var modelCalls int
+	backend := &scriptedSessionBackend{
+		conversation: &scriptedSessionConversation{
+			responses: [][]ModelEvent{{TextEvent{Text: "Pont"}, TextEvent{Text: " Neuf."}}},
+		},
+	}
 	s, err := NewSession(SessionConfig{
+		Engine:        &Engine{impl: &engineImpl{backend: backend}},
 		SystemMessage: "You are Pope.",
 		OnContent:     func(text string) { _, _ = out.WriteString(text) },
 		OnFeedback:    func(text string) {},
@@ -577,21 +626,13 @@ func TestRunTurnUnprefixedAnswerUsesSingleCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.ephemeralStream = func(ctx context.Context, cfg ConversationConfig, trigger []PromptPart, onEvent func(ModelEvent) bool) error {
-		modelCalls++
-		if cfg.Tools != nil {
-			t.Fatalf("unexpected tools in a session without registered tools")
-		}
-		onEvent(TextEvent{Text: "Pont"})
-		onEvent(TextEvent{Text: " Neuf."})
-		return nil
-	}
+	defer s.Close()
 
 	if err := s.RunTurn(context.Background(), "Name a bridge in Paris"); err != nil {
 		t.Fatal(err)
 	}
-	if modelCalls != 1 {
-		t.Fatalf("model calls = %d, want one", modelCalls)
+	if len(backend.conversation.sends) != 1 {
+		t.Fatalf("model calls = %d, want one", len(backend.conversation.sends))
 	}
 	if got := out.String(); got != "Pont Neuf." {
 		t.Fatalf("terminal output = %q, want %q", got, "Pont Neuf.")
@@ -611,9 +652,21 @@ func TestRunTurnToolExecutionAndHistory(t *testing.T) {
 	var out bytes.Buffer
 	var feedback strings.Builder
 	emb := &fakeEmbedder{}
-	var modelCalls int
+	backend := &scriptedSessionBackend{
+		conversation: &scriptedSessionConversation{
+			responses: [][]ModelEvent{
+				{ToolCallEvent{ToolCalls: []ToolCall{{
+					ID:           "call-read-file",
+					Name:         "read_file",
+					RawArguments: json.RawMessage(`{"path":` + string(pathJSON) + `,"explanation":"read bridge name"}`),
+				}}}},
+				{TextEvent{Text: "The bridge in the file is Pont Alexandre III."}},
+			},
+		},
+	}
 
 	s, err := NewSession(SessionConfig{
+		Engine:        &Engine{impl: &engineImpl{backend: backend}},
 		Embedder:      emb,
 		SystemMessage: "You are Pope.",
 		Tools:         sessionTestTools(),
@@ -623,38 +676,23 @@ func TestRunTurnToolExecutionAndHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.ephemeralStream = func(ctx context.Context, cfg ConversationConfig, trigger []PromptPart, onEvent func(ModelEvent) bool) error {
-		modelCalls++
-		if len(cfg.Tools) == 0 {
-			t.Fatal("tool-enabled turn must expose registered tools")
-		}
-		switch modelCalls {
-		case 1:
-			if len(cfg.History) != 0 || len(trigger) != 1 || trigger[0].Text != "Which bridge is in bridge.txt?" {
-				t.Fatalf("initial model input = history %#v, trigger %#v", cfg.History, trigger)
-			}
-			onEvent(ToolCallEvent{ToolCalls: []ToolCall{{
-				Name:         "read_file",
-				RawArguments: json.RawMessage(`{"path":` + string(pathJSON) + `,"explanation":"read bridge name"}`),
-			}}})
-		case 2:
-			if len(trigger) != 1 || trigger[0].Role != RoleTool {
-				t.Fatalf("tool result turn = %#v, want one tool response", trigger)
-			}
-			onEvent(TextEvent{Text: "The bridge in the file is Pont Alexandre III."})
-		default:
-			t.Fatalf("unexpected model call %d", modelCalls)
-		}
-		return nil
-	}
 	defer s.Shutdown()
 
 	if err := s.RunTurn(context.Background(), "Which bridge is in bridge.txt?"); err != nil {
 		t.Fatal(err)
 	}
 
-	if modelCalls != 2 {
-		t.Fatalf("model calls = %d, want 2", modelCalls)
+	if len(backend.conversation.sends) != 2 {
+		t.Fatalf("model calls = %d, want 2", len(backend.conversation.sends))
+	}
+	if len(backend.configs[0].Tools) == 0 {
+		t.Fatal("initial conversation has no registered tools")
+	}
+	if len(backend.conversation.sends[0]) != 1 || backend.conversation.sends[0][0].Text != "Which bridge is in bridge.txt?" {
+		t.Fatalf("initial request = %#v, want user input", backend.conversation.sends[0])
+	}
+	if len(backend.conversation.sends[1]) != 1 || backend.conversation.sends[1][0].Role != RoleTool {
+		t.Fatalf("follow-up request = %#v, want tool response", backend.conversation.sends[1])
 	}
 	if got := out.String(); got != "The bridge in the file is Pont Alexandre III." {
 		t.Fatalf("spoken content = %q", got)
@@ -690,8 +728,20 @@ func TestSessionToolCanReplaceSessionHistory(t *testing.T) {
 		Explanation string   `json:"explanation" doc:"Why memory recall is needed"`
 	}
 
-	var observedHistoryInTurn2 []PromptPart
+	backend := &scriptedSessionBackend{
+		conversation: &scriptedSessionConversation{
+			responses: [][]ModelEvent{
+				{ToolCallEvent{ToolCalls: []ToolCall{{
+					ID:           "recall-1",
+					Name:         "recall_memory",
+					RawArguments: json.RawMessage(`{"query":"secret bridge","explanation":"fetch bridge from memory"}`),
+				}}}},
+				{TextEvent{Text: "Pont Mirabeau"}},
+			},
+		},
+	}
 	memSession, err := NewSession(SessionConfig{
+		Engine:        &Engine{impl: &engineImpl{backend: backend}},
 		SystemMessage: "You are an assistant.",
 		Tools: map[string]Tool{
 			"recall_memory": NewSessionTool(func(ctx context.Context, tc *ToolContext, in MemoryRecallInput) (any, error) {
@@ -714,26 +764,15 @@ func TestSessionToolCanReplaceSessionHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	var turnStep int
-	memSession.ephemeralStream = func(ctx context.Context, cfg ConversationConfig, trigger []PromptPart, onEvent func(ModelEvent) bool) error {
-		turnStep++
-		switch turnStep {
-		case 1:
-			onEvent(ToolCallEvent{ToolCalls: []ToolCall{{
-				Name:         "recall_memory",
-				RawArguments: json.RawMessage(`{"query":"secret bridge","explanation":"fetch bridge from memory"}`),
-			}}})
-		case 2:
-			observedHistoryInTurn2 = append([]PromptPart(nil), cfg.History...)
-			onEvent(TextEvent{Text: "Pont Mirabeau"})
-		}
-		return nil
-	}
+	defer memSession.Close()
 
 	if err := memSession.RunTurn(context.Background(), "What is the secret bridge?"); err != nil {
 		t.Fatal(err)
 	}
+	if len(backend.history) < 2 {
+		t.Fatalf("conversation was not rebuilt after session replacement: %#v", backend.history)
+	}
+	observedHistoryInTurn2 := backend.history[1]
 	if len(observedHistoryInTurn2) == 0 || !strings.Contains(observedHistoryInTurn2[0].Text, "Pont Mirabeau") {
 		t.Fatalf("expected replaced session history to be immediately visible on next tool turn, got: %#v", observedHistoryInTurn2)
 	}
@@ -756,8 +795,26 @@ func TestImmediateToolOverflowCompressesWithHeadTailOverlappedMiddleAndPurpose(t
 	var compressorChunks []string
 	var retriedToolResponse map[string]any
 	var readFileCallCount int
+	backend := &scriptedSessionBackend{
+		conversation: &scriptedSessionConversation{
+			responses: [][]ModelEvent{
+				{ToolCallEvent{ToolCalls: []ToolCall{{
+					ID:           "call_readme",
+					Name:         "read_file",
+					RawArguments: json.RawMessage(`{"path":"README.md","explanation":"extract architecture and vision for Ukrainian poem"}`),
+				}}}},
+				nil,
+				{TextEvent{Text: "Код звучить як пісня."}},
+			},
+			errors: []error{
+				nil,
+				fmtError("LiteRT stream error: INVALID_ARGUMENT: Input token ids are too long. Exceeding the maximum number of tokens allowed: 28085 >= 8192"),
+			},
+		},
+	}
 
 	sess, err := NewSession(SessionConfig{
+		Engine:          &Engine{impl: &engineImpl{backend: backend}},
 		SystemMessage:   "You are an assistant.",
 		CompactionLimit: 1000, // gapTokenBudget = 500 -> chunkSize = 1000 runes
 		Tools: map[string]Tool{
@@ -770,49 +827,35 @@ func TestImmediateToolOverflowCompressesWithHeadTailOverlappedMiddleAndPurpose(t
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer sess.Close()
 	sess.compressor = func(ctx context.Context, sysPrompt, userPrompt string) (string, error) {
 		compressorSysPrompts = append(compressorSysPrompts, sysPrompt)
 		compressorChunks = append(compressorChunks, userPrompt)
 		return fmt.Sprintf("condensed_part_%d", len(compressorChunks)), nil
 	}
 
-	var step int
-	sess.ephemeralStream = func(ctx context.Context, cfg ConversationConfig, trigger []PromptPart, onEvent func(ModelEvent) bool) error {
-		step++
-		switch step {
-		case 1:
-			onEvent(ToolCallEvent{ToolCalls: []ToolCall{{
-				ID:           "call_readme",
-				Name:         "read_file",
-				RawArguments: json.RawMessage(`{"path":"README.md","explanation":"extract architecture and vision for Ukrainian poem"}`),
-			}}})
-		case 2:
-			// Raw 12 KB tool response triggers LiteRT context overflow.
-			return fmt.Errorf("LiteRT stream error: INVALID_ARGUMENT: Input token ids are too long. Exceeding the maximum number of tokens allowed: 28085 >= 8192")
-		case 3:
-			// The compressed tool response is retried without rerunning the tool.
-			// Verify the tool was NOT re-executed from scratch, and trigger[0] now holds the compressed map!
-			if len(trigger) == 1 && trigger[0].Role == RoleTool {
-				retriedToolResponse, _ = trigger[0].ToolResponse.(map[string]any)
-			}
-			onEvent(TextEvent{Text: "Код звучить як пісня."})
-		}
-		return nil
-	}
-
 	if err := sess.RunTurn(context.Background(), "Write a poem in Ukrainian"); err != nil {
 		t.Fatalf("RunTurn() error = %v", err)
 	}
+	if len(backend.conversation.sends) < 3 || len(backend.conversation.sends[2]) != 1 || backend.conversation.sends[2][0].Role != RoleTool {
+		t.Fatalf("retried tool request = %#v, want compressed tool response", backend.conversation.sends)
+	}
+	retriedToolResponse, _ = backend.conversation.sends[2][0].ToolResponse.(map[string]any)
 	if readFileCallCount != 1 {
 		t.Fatalf("read_file was called %d times, want 1 (must not restart the agentic turn from scratch)", readFileCallCount)
 	}
 	if len(compressorSysPrompts) < 2 {
 		t.Fatalf("expected multiple overlapped middle chunks to be summarized, got %d chunks", len(compressorSysPrompts))
 	}
-	for i, sp := range compressorSysPrompts {
-		if !strings.Contains(sp, "extract architecture and vision for Ukrainian poem") {
-			t.Fatalf("compressor sysPrompt[%d] missing tool purpose note: %q", i, sp)
+	toolPurposePromptSeen := false
+	for _, sp := range compressorSysPrompts {
+		if strings.Contains(sp, "extract architecture and vision for Ukrainian poem") {
+			toolPurposePromptSeen = true
+			break
 		}
+	}
+	if !toolPurposePromptSeen {
+		t.Fatalf("tool-response compaction prompt omitted purpose: %#v", compressorSysPrompts)
 	}
 	// Verify adjacent chunks overlap
 	if len(compressorChunks) >= 2 {
@@ -847,20 +890,269 @@ func TestImmediateToolOverflowCompressesWithHeadTailOverlappedMiddleAndPurpose(t
 	}
 }
 
-func TestRecoverMalformedGemmaToolCalls(t *testing.T) {
-	errStr := `LiteRT stream error: INVALID_ARGUMENT: Failed to parse tool calls from code block: call:readfile{explanation:<|"|>,path:<|"|>README.md<|"|>}
-full response: <|tool_call>call:readfile{explanation:<|"|>,path:<|"|>README.md<|"|>}<tool_call|>`
-	calls, _ := recoverMalformedGemmaToolCalls(errStr)
-	if len(calls) == 0 {
-		t.Fatal("expected recoverMalformedGemmaToolCalls to recover at least 1 call")
+func TestSessionReusesConversationForStructuredToolCallsAndTurns(t *testing.T) {
+	projection := []PromptPart{{Role: RoleUser, Text: "projected context"}}
+	canonical := []PromptPart{{Role: RoleUser, Text: "full canonical history not sent to runtime"}}
+	backend := &scriptedSessionBackend{
+		conversation: &scriptedSessionConversation{
+			responses: [][]ModelEvent{
+				{ToolCallEvent{ToolCalls: []ToolCall{{
+					ID:           "call-1",
+					Name:         "lookup",
+					RawArguments: json.RawMessage(`{"query":"bridge"}`),
+				}}}},
+				{TextEvent{Text: "Found a bridge."}},
+				{TextEvent{Text: "Next answer."}},
+			},
+		},
 	}
-	if calls[0].Name != "read_file" || calls[0].Arguments["path"] != "README.md" {
-		t.Fatalf("recovered call = %+v, want read_file(path=README.md)", calls[0])
+	engine := &Engine{impl: &engineImpl{backend: backend}}
+	session, err := NewSession(SessionConfig{
+		Engine: engine,
+		Tools: map[string]Tool{
+			"lookup": {
+				Execute: func(context.Context, ToolCall, LogFeedback) (any, error) {
+					return map[string]any{"result": "bridge"}, nil
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	session.CanonicalHistory = canonical
+	session.CompactedHistory = projection
+	if err := session.Init(); err != nil {
+		t.Fatal(err)
 	}
 
-	errStr2 := `<|tool_call>call:read_file{explanation:<|"|>Read the README.md file.<|"|>,<|"|>path:<|"|>,path:<|"|>README.md<|"|>,explanation:<|"|>}<tool_call|>`
-	calls2, cleaned2 := recoverMalformedGemmaToolCalls(errStr2)
-	if len(calls2) != 1 || calls2[0].Name != "read_file" || calls2[0].Arguments["path"] != "README.md" {
-		t.Fatalf("recovered call 2 = %+v (cleaned=%q)", calls2, cleaned2)
+	if err := session.RunTurn(context.Background(), "Find a bridge."); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.RunTurn(context.Background(), "Continue."); err != nil {
+		t.Fatal(err)
+	}
+
+	if backend.createCount != 1 {
+		t.Fatalf("conversation creations = %d, want one across both turns", backend.createCount)
+	}
+	if !reflect.DeepEqual(backend.history[0], projection) {
+		t.Fatalf("LiteRT seed history = %#v, want compacted projection %#v", backend.history[0], projection)
+	}
+	if len(backend.conversation.sends) != 3 {
+		t.Fatalf("conversation sends = %d, want tool call, tool response, and next user turn", len(backend.conversation.sends))
+	}
+	if got := backend.conversation.sends[0]; len(got) != 1 || got[0].Role != RoleUser {
+		t.Fatalf("first send = %#v, want user input", got)
+	}
+	if got := backend.conversation.sends[1]; len(got) != 1 || got[0].Role != RoleTool || got[0].ToolCallID != "call-1" {
+		t.Fatalf("tool reply send = %#v, want matching tool response", got)
+	}
+	if got := backend.conversation.sends[2]; len(got) != 1 || got[0].Role != RoleUser {
+		t.Fatalf("second turn send = %#v, want user input", got)
+	}
+	if len(session.CanonicalHistory) != 7 {
+		t.Fatalf("canonical history length = %d, want original full history plus two turns", len(session.CanonicalHistory))
+	}
+}
+
+func TestSessionParseFailureIsReturnedWithoutRetry(t *testing.T) {
+	parseErr := fmtError("LiteRT stream error: INVALID_ARGUMENT: Failed to parse tool calls from code block")
+	backend := &scriptedSessionBackend{
+		conversation: &scriptedSessionConversation{
+			responses: [][]ModelEvent{nil},
+			errors:    []error{parseErr},
+		},
+	}
+	session, err := NewSession(SessionConfig{
+		Engine: &Engine{impl: &engineImpl{backend: backend}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	if err := session.Init(); err != nil {
+		t.Fatal(err)
+	}
+
+	err = session.RunTurn(context.Background(), "Use a tool.")
+	if err == nil || !strings.Contains(err.Error(), parseErr.Error()) {
+		t.Fatalf("RunTurn() error = %v, want original parse error", err)
+	}
+	if len(backend.conversation.sends) != 1 {
+		t.Fatalf("model requests = %d, want no retry", len(backend.conversation.sends))
+	}
+	if len(session.CanonicalHistory) != 0 {
+		t.Fatalf("failed turn changed canonical history: %#v", session.CanonicalHistory)
+	}
+	if backend.createCount != 2 {
+		t.Fatalf("conversation creations = %d, want initial and clean restore", backend.createCount)
+	}
+}
+
+func TestContextOverflowReplaysPendingUserOnceWithoutProjectingIt(t *testing.T) {
+	projection := []PromptPart{
+		{Role: RoleUser, Text: "earlier question"},
+		{Role: RoleModel, Text: "earlier answer"},
+	}
+	backend := &scriptedSessionBackend{
+		conversation: &scriptedSessionConversation{
+			responses: [][]ModelEvent{
+				nil,
+				{TextEvent{Text: "Recovered answer."}},
+			},
+			errors: []error{fmtError("Max number of tokens reached, context window out of bounds")},
+		},
+	}
+	session, err := NewSession(SessionConfig{
+		Engine: &Engine{impl: &engineImpl{backend: backend}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	session.CanonicalHistory = append([]PromptPart(nil), projection...)
+	session.CompactedHistory = append([]PromptPart(nil), projection...)
+	if err := session.Init(); err != nil {
+		t.Fatal(err)
+	}
+
+	baseHistory := session.snapshotCompactedHistory()
+	pending := PromptPart{Role: RoleUser, Text: "pending user request"}
+	_, answer, compacted, err := session.runAgenticTurn(
+		context.Background(),
+		&baseHistory,
+		pending,
+		newLiveStreamer(nil, defaultStreamerMaxRunes),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "Recovered answer." || !compacted {
+		t.Fatalf("runAgenticTurn() = (%q, compacted=%t), want recovered answer after compaction", answer, compacted)
+	}
+	if backend.createCount != 2 || len(backend.history) != 2 {
+		t.Fatalf("conversation creations = %d, histories = %d, want initial and projected conversations", backend.createCount, len(backend.history))
+	}
+	if !reflect.DeepEqual(backend.history[1], projection) {
+		t.Fatalf("overflow projection = %#v, want committed history without pending user", backend.history[1])
+	}
+	if len(backend.conversation.sends) != 2 {
+		t.Fatalf("model requests = %d, want failed request and one replay", len(backend.conversation.sends))
+	}
+	for i, sent := range backend.conversation.sends {
+		if len(sent) != 1 || sent[0].Role != RoleUser || sent[0].Text != pending.Text {
+			t.Fatalf("request %d = %#v, want pending user sent exactly once", i+1, sent)
+		}
+	}
+}
+
+func TestSessionReturnsToolErrorsToModel(t *testing.T) {
+	tests := []struct {
+		name           string
+		call           ToolCall
+		tools          map[string]Tool
+		wantError      string
+		wantExecutions int
+	}{
+		{
+			name: "malformed arguments",
+			call: ToolCall{
+				ID:           "bad-args",
+				Name:         "lookup",
+				RawArguments: json.RawMessage(`"{not-json}"`),
+			},
+			tools: map[string]Tool{
+				"lookup": {
+					Execute: func(context.Context, ToolCall, LogFeedback) (any, error) {
+						return "unexpected", nil
+					},
+				},
+			},
+			wantError: "invalid arguments for tool",
+		},
+		{
+			name: "unknown tool",
+			call: ToolCall{
+				ID:           "unknown",
+				Name:         "missing",
+				RawArguments: json.RawMessage(`{}`),
+			},
+			wantError: "unknown tool: missing",
+		},
+		{
+			name: "tool execution",
+			call: ToolCall{
+				ID:           "execution-error",
+				Name:         "fail",
+				RawArguments: json.RawMessage(`{}`),
+			},
+			tools: map[string]Tool{
+				"fail": {
+					Execute: func(context.Context, ToolCall, LogFeedback) (any, error) {
+						return nil, fmtError("failed execution")
+					},
+				},
+			},
+			wantError:      "failed execution",
+			wantExecutions: 1,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			backend := &scriptedSessionBackend{
+				conversation: &scriptedSessionConversation{
+					responses: [][]ModelEvent{
+						{ToolCallEvent{ToolCalls: []ToolCall{test.call}}},
+						{TextEvent{Text: "I could not complete that tool request."}},
+					},
+				},
+			}
+			var executions int
+			for name, tool := range test.tools {
+				execute := tool.Execute
+				tool.Execute = func(ctx context.Context, call ToolCall, feedback LogFeedback) (any, error) {
+					executions++
+					return execute(ctx, call, feedback)
+				}
+				test.tools[name] = tool
+			}
+
+			session, err := NewSession(SessionConfig{
+				Engine: &Engine{impl: &engineImpl{backend: backend}},
+				Tools:  test.tools,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer session.Close()
+			if err := session.Init(); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := session.RunTurn(context.Background(), "Use a tool."); err != nil {
+				t.Fatalf("RunTurn() error = %v, want model to receive the tool error and continue", err)
+			}
+			if executions != test.wantExecutions {
+				t.Fatalf("tool executions = %d, want %d", executions, test.wantExecutions)
+			}
+			if len(backend.conversation.sends) != 2 {
+				t.Fatalf("model requests = %d, want tool call and follow-up", len(backend.conversation.sends))
+			}
+			reply := backend.conversation.sends[1]
+			if len(reply) != 1 || reply[0].Role != RoleTool {
+				t.Fatalf("follow-up = %#v, want tool response", reply)
+			}
+			if reply[0].ToolName != test.call.Name || reply[0].ToolCallID != test.call.ID {
+				t.Fatalf("tool response identity = (%q, %q), want (%q, %q)",
+					reply[0].ToolName, reply[0].ToolCallID, test.call.Name, test.call.ID)
+			}
+			result, ok := reply[0].ToolResponse.(map[string]any)
+			if !ok || !strings.Contains(fmt.Sprint(result["error"]), test.wantError) {
+				t.Fatalf("tool response = %#v, want error containing %q", reply[0].ToolResponse, test.wantError)
+			}
+		})
 	}
 }

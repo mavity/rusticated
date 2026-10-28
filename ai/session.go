@@ -49,8 +49,6 @@ func TurnTimingFromContext(ctx context.Context) TurnTiming {
 
 type textCompressorFunc func(ctx context.Context, systemPrompt, userPrompt string) (string, error)
 
-type ephemeralStreamFunc func(ctx context.Context, cfg ConversationConfig, trigger []PromptPart, onEvent func(ModelEvent) bool) error
-
 // PartEmbedder can embed prompt parts for background indexing and RAG compaction.
 type PartEmbedder interface {
 	Embed(parts []PromptPart) ([]float32, error)
@@ -124,18 +122,12 @@ func NewSessionTool[T any](fn func(ctx context.Context, tc *ToolContext, in T) (
 	description, properties, required := reflectStructSchema(t)
 	decode := func(call ToolCall) (T, error) {
 		var in T
-		raw := call.RawArguments
-		if len(raw) == 0 && call.Arguments != nil {
-			var err error
-			raw, err = json.Marshal(call.Arguments)
-			if err != nil {
-				return in, err
-			}
+		_, raw, err := decodeToolArguments(call.RawArguments, call.Arguments)
+		if err != nil {
+			return in, fmt.Errorf("invalid arguments: %w", err)
 		}
-		if len(raw) > 0 {
-			if err := json.Unmarshal(raw, &in); err != nil {
-				return in, fmt.Errorf("invalid arguments: %w", err)
-			}
+		if err := json.Unmarshal(raw, &in); err != nil {
+			return in, fmt.Errorf("invalid arguments: %w", err)
 		}
 		return in, nil
 	}
@@ -275,7 +267,6 @@ type Session struct {
 	engine           *Engine
 	embedder         PartEmbedder
 	compressor       textCompressorFunc
-	ephemeralStream  ephemeralStreamFunc
 	conv             *Conversation
 	systemMessage    string
 	tools            []map[string]any
@@ -399,6 +390,7 @@ func (s *Session) appendHistory(parts ...PromptPart) {
 	defer s.historyMu.Unlock()
 	s.CanonicalHistory = append(s.CanonicalHistory, parts...)
 	s.CompactedHistory = append(s.CompactedHistory, parts...)
+	s.totalTokensEst = s.estimateTokens(s.CompactedHistory)
 }
 
 // AdoptSessionState replaces s's mutable history, compaction state, and
@@ -461,8 +453,13 @@ func (s *Session) emitContent(text string) {
 func (s *Session) executeTool(ctx context.Context, tc *ToolContext, call ToolCall) any {
 	tool, ok := s.toolRegistry[call.Name]
 	if !ok {
-		return map[string]any{"error": "unknown tool: " + call.Name}
+		return toolErrorResult(fmt.Errorf("unknown tool: %s", call.Name))
 	}
+	arguments, _, err := decodeToolArguments(call.RawArguments, call.Arguments)
+	if err != nil {
+		return toolErrorResult(fmt.Errorf("invalid arguments for tool %q: %w", call.Name, err))
+	}
+	call.Arguments = arguments
 	if tc == nil {
 		tc = &ToolContext{
 			Session:  s,
@@ -496,12 +493,12 @@ func (s *Session) executeTool(ctx context.Context, tc *ToolContext, call ToolCal
 		result, err := tool.ExecuteWithContext(ctx, tc, call)
 		syncSessionAfterTool()
 		if err != nil {
-			return map[string]any{"error": err.Error()}
+			return toolErrorResult(err)
 		}
 		return result
 	}
 	if tool.Execute == nil {
-		return map[string]any{"error": "tool has no executor: " + call.Name}
+		return toolErrorResult(fmt.Errorf("tool has no executor: %s", call.Name))
 	}
 	fb := s.emitFeedback
 	if tc.Feedback != nil {
@@ -510,9 +507,13 @@ func (s *Session) executeTool(ctx context.Context, tc *ToolContext, call ToolCal
 	result, err := tool.Execute(ctx, call, fb)
 	syncSessionAfterTool()
 	if err != nil {
-		return map[string]any{"error": err.Error()}
+		return toolErrorResult(err)
 	}
 	return result
+}
+
+func toolErrorResult(err error) map[string]any {
+	return map[string]any{"error": err.Error()}
 }
 
 func (s *Session) startEmbedWorker() {
@@ -678,31 +679,49 @@ func (s *Session) FlushEmbeddings() {
 }
 
 func (s *Session) Init() error {
-	return s.initWithHistory(s.CompactedHistory)
+	return s.initWithHistory(s.snapshotCompactedHistory())
 }
 
-func (s *Session) initWithHistory(history []PromptPart) error {
+func (s *Session) createConversation(history []PromptPart) (*Conversation, error) {
 	if s.engine == nil {
-		return nil
+		return nil, errors.New("ai: engine is not initialized")
 	}
 	cfg := ConversationConfig{
 		SystemMessage: s.systemMessage,
 		Tools:         s.tools,
 		History:       history,
 	}
-	conv, err := s.engine.NewConversationWithConfig(cfg)
+	return s.engine.NewConversationWithConfig(cfg)
+}
+
+func (s *Session) replaceConversation(history []PromptPart) error {
+	s.closeConv()
+	conv, err := s.createConversation(history)
 	if err != nil {
 		return err
 	}
 	s.conv = conv
+	return nil
+}
 
-	// Accurate starting estimate: count System message, Tools, and seeded History size.
-	s.totalTokensEst = len(s.systemMessage)/4 + historySize(history)/4
-	for _, t := range s.tools {
-		if b, err := json.Marshal(t); err == nil {
-			s.totalTokensEst += len(b) / 4
+func (s *Session) estimateTokens(history []PromptPart) int {
+	total := len(s.systemMessage)/4 + historySize(history)/4
+	for _, tool := range s.tools {
+		if b, err := json.Marshal(tool); err == nil {
+			total += len(b) / 4
 		}
 	}
+	return total
+}
+
+func (s *Session) initWithHistory(history []PromptPart) error {
+	if s.engine == nil {
+		return nil
+	}
+	if err := s.replaceConversation(history); err != nil {
+		return err
+	}
+	s.totalTokensEst = s.estimateTokens(history)
 	s.startEmbedWorker()
 	return nil
 }
@@ -780,165 +799,6 @@ func isContextOverflowError(err error) bool {
 		strings.Contains(msg, "Input token ids are too long") ||
 		strings.Contains(msg, "Exceeding the maximum number of tokens") ||
 		strings.Contains(msg, "Max number of tokens reached")
-}
-
-func isToolCallParseError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "Failed to parse tool calls") ||
-		strings.Contains(msg, "Failed to parse FC tool calls")
-}
-
-// recoverMalformedGemmaToolCalls extracts valid tool calls from a LiteRT-LM
-// `Failed to parse tool calls` error or from raw `<|tool_call>call:name{...}<tool_call|>`
-// text when the model emitted an empty `<|"|>` value on one argument (such as `explanation:<|"|>,path:<|"|>README.md<|"|>`).
-func recoverMalformedGemmaToolCalls(raw string) ([]ToolCall, string) {
-	if !strings.Contains(raw, "call:") {
-		return nil, raw
-	}
-	var calls []ToolCall
-	cleaned := raw
-	for {
-		startIdx := strings.Index(cleaned, "call:")
-		if startIdx < 0 {
-			break
-		}
-		if startIdx > 0 {
-			prev := cleaned[startIdx-1]
-			if (prev >= 'a' && prev <= 'z') || (prev >= 'A' && prev <= 'Z') || (prev >= '0' && prev <= '9') || prev == '_' {
-				// Part of an identifier like `tool_call:`; advance past `call:`.
-				cleaned = cleaned[:startIdx] + " " + cleaned[startIdx+len("call:"):]
-				continue
-			}
-		}
-		rest := cleaned[startIdx+len("call:"):]
-		openBrace := strings.IndexByte(rest, '{')
-		closeBrace := strings.IndexByte(rest, '}')
-		if openBrace <= 0 || closeBrace <= openBrace {
-			break
-		}
-		toolName := strings.TrimSpace(rest[:openBrace])
-		validIdent := len(toolName) > 0
-		for i := 0; i < len(toolName); i++ {
-			c := toolName[i]
-			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
-				validIdent = false
-				break
-			}
-		}
-		if !validIdent {
-			cleaned = cleaned[:startIdx] + " " + cleaned[startIdx+len("call:"):]
-			continue
-		}
-		body := rest[openBrace+1 : closeBrace]
-
-		// Strip surrounding `<|tool_call>...<tool_call|>` tags from cleaned text
-		cutStart := startIdx
-		if prefix := strings.LastIndex(cleaned[:startIdx], "<|tool_call>"); prefix >= 0 {
-			cutStart = prefix
-		}
-		cutEnd := startIdx + len("call:") + closeBrace + 1
-		if strings.HasPrefix(cleaned[cutEnd:], "<tool_call|>") {
-			cutEnd += len("<tool_call|>")
-		}
-		cleaned = strings.TrimSpace(cleaned[:cutStart] + " " + cleaned[cutEnd:])
-
-		args := make(map[string]any)
-		// Parse key:<|"|>value<|"|> or key:value pairs inside {...}
-		rem := body
-		for len(rem) > 0 {
-			rem = strings.TrimLeft(rem, " ,")
-			if rem == "" {
-				break
-			}
-			// Skip stray `<|"|>` before a key
-			for strings.HasPrefix(rem, `<|"|>`) {
-				rem = strings.TrimLeft(rem[len(`<|"|>`):], " ,")
-			}
-			colon := strings.IndexByte(rem, ':')
-			if colon <= 0 {
-				break
-			}
-			key := strings.Trim(rem[:colon], ` "<>|`)
-			rem = rem[colon+1:]
-			if strings.HasPrefix(rem, `<|"|>`) {
-				rem = rem[len(`<|"|>`):]
-				// If immediately followed by `,` or end (i.e. empty `explanation:<|"|>,`), treat as empty string!
-				if strings.HasPrefix(rem, ",") || len(rem) == 0 {
-					if key != "" {
-						args[key] = ""
-					}
-					continue
-				}
-				endQuote := strings.Index(rem, `<|"|>`)
-				if endQuote >= 0 {
-					val := rem[:endQuote]
-					if key != "" {
-						args[key] = val
-					}
-					rem = rem[endQuote+len(`<|"|>`):]
-					continue
-				}
-			}
-			// Non-quoted scalar (bool/number) up to next comma
-			comma := strings.IndexByte(rem, ',')
-			var valStr string
-			if comma >= 0 {
-				valStr = strings.TrimSpace(rem[:comma])
-				rem = rem[comma+1:]
-			} else {
-				valStr = strings.TrimSpace(rem)
-				rem = ""
-			}
-			if key != "" && valStr != "" {
-				if valStr == "true" {
-					args[key] = true
-				} else if valStr == "false" {
-					args[key] = false
-				} else {
-					args[key] = strings.Trim(valStr, `"'`)
-				}
-			}
-		}
-
-		// Normalize common model aliases (`readfile` -> `read_file`, `listfiles` -> `list_files`, `listdir` -> `list_dir`)
-		switch strings.ToLower(toolName) {
-		case "readfile":
-			toolName = "read_file"
-		case "listfiles":
-			toolName = "list_files"
-		case "listdir":
-			toolName = "list_dir"
-		case "editfile":
-			toolName = "edit_file"
-		case "writefile":
-			toolName = "write_file"
-		}
-
-		// Reject degenerate recovered calls where `read_file` / `edit_file` / `write_file`
-		// had no usable `path` argument (e.g. `path:<|"|>,path:<|"|>` which left `path` empty or ":").
-		if toolName == "read_file" || toolName == "edit_file" || toolName == "write_file" {
-			p, _ := args["path"].(string)
-			p = strings.Trim(p, " :\"'<>|")
-			if p == "" {
-				continue
-			}
-			args["path"] = p
-		}
-
-		if toolName != "" {
-			rawArgs, _ := json.Marshal(args)
-			calls = append(calls, ToolCall{
-				ID:           fmt.Sprintf("recovered_%s_%d", toolName, len(calls)+1),
-				Name:         toolName,
-				Arguments:    args,
-				RawArguments: rawArgs,
-			})
-		}
-	}
-	return calls, strings.TrimSpace(cleaned)
 }
 
 const defaultStreamerMaxRunes = 76
@@ -1034,6 +894,12 @@ func (s *Session) snapshotCompactedHistory() []PromptPart {
 	return append([]PromptPart(nil), s.CompactedHistory...)
 }
 
+func (s *Session) snapshotCanonicalHistory() []PromptPart {
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	return append([]PromptPart(nil), s.CanonicalHistory...)
+}
+
 // runAgenticTurn runs the user's request with registered tools until the model
 // returns a final answer.
 func (s *Session) runAgenticTurn(
@@ -1041,413 +907,149 @@ func (s *Session) runAgenticTurn(
 	baseHistory *[]PromptPart,
 	userPart PromptPart,
 	streamer *liveStreamer,
-) (executedToolParts []PromptPart, draftAnswer string, err error) {
-	userText := userPart.Text
-	var retries int
+) (executedToolParts []PromptPart, draftAnswer string, compactedDuringTurn bool, err error) {
+	buildHistory := func(parts []PromptPart) []PromptPart {
+		history := append([]PromptPart(nil), (*baseHistory)...)
+		history = append(history, userPart)
+		return append(history, parts...)
+	}
 
+	if s.engine == nil {
+		streamer.Wipe()
+		return nil, "", false, errors.New("ai: engine is not initialized")
+	}
+	if s.conv == nil {
+		if err := s.initWithHistory(*baseHistory); err != nil {
+			streamer.Wipe()
+			return nil, "", false, err
+		}
+	}
+
+	turnParts := []PromptPart{userPart}
+	var overflowRetries int
 	for {
-		seed := append([]PromptPart(nil), (*baseHistory)...)
-		turnParts := []PromptPart{userPart}
-		buildHistory := func(parts []PromptPart) []PromptPart {
-			history := append([]PromptPart(nil), (*baseHistory)...)
-			history = append(history, userPart)
-			return append(history, parts...)
-		}
-
-		executedToolParts = nil
-
-		if s.ephemeralStream != nil {
-			historyCursor := append([]PromptPart(nil), seed...)
-			var stageErr error
-			for {
-				var toolCalls []ToolCall
-				var generatedText strings.Builder
-				var genStart, genEnd time.Time
-				cfg := ConversationConfig{
-					SystemMessage: s.systemMessage,
-					Tools:         s.tools,
-					History:       historyCursor,
-				}
-				streamer.StartStage("work")
-				stageErr = s.ephemeralStream(ctx, cfg, turnParts, func(event ModelEvent) bool {
-					now := time.Now()
-					if genStart.IsZero() {
-						genStart = now
-					}
-					genEnd = now
-					switch e := event.(type) {
-					case TextEvent:
-						generatedText.WriteString(e.Text)
-					case ToolCallEvent:
-						toolCalls = append(toolCalls, e.ToolCalls...)
-					}
-					return true
-				})
-				_ = streamer.EndStage()
-				if stageErr != nil {
-					if isToolCallParseError(stageErr) {
-						if recCalls, _ := recoverMalformedGemmaToolCalls(stageErr.Error()); len(recCalls) > 0 {
-							toolCalls = append(toolCalls, recCalls...)
-							stageErr = nil
-						}
-					}
-				}
-				if stageErr != nil {
-					if isContextOverflowError(stageErr) {
-						streamer.Wipe()
-						if s.tryCompressTurnPartsOnOverflow(ctx, turnParts, executedToolParts) {
-							stageErr = nil
-							continue
-						}
-					}
-					if isToolCallParseError(stageErr) && retries < 2 {
-						retries++
-						streamer.Wipe()
-						historyCursor = append(historyCursor, turnParts...)
-						turnParts = []PromptPart{{
-							Role: RoleUser,
-							Text: fmt.Sprintf("Your previous tool call had a syntax error and could not be parsed (%v). Make sure every string argument (including explanation) has a non-empty value between quotes, or write your final answer directly.", stageErr),
-						}}
-						stageErr = nil
-						continue
-					}
-					break
-				}
-				if len(toolCalls) == 0 && strings.Contains(generatedText.String(), "<|tool_call>") {
-					if recCalls, cleaned := recoverMalformedGemmaToolCalls(generatedText.String()); len(recCalls) > 0 {
-						toolCalls = append(toolCalls, recCalls...)
-						generatedText.Reset()
-						generatedText.WriteString(cleaned)
-					}
-				}
-				historyCursor = append(historyCursor, turnParts...)
-				if len(toolCalls) == 0 {
-					return executedToolParts, strings.TrimSpace(generatedText.String()), nil
-				}
-				streamer.Wipe()
-				if genStart.IsZero() {
-					genStart = time.Now()
-					genEnd = genStart
-				}
-				modelTurn := PromptPart{
-					Role:        RoleModel,
-					Text:        generatedText.String(),
-					ToolCalls:   toolCalls,
-					StartedAt:   genStart,
-					CompletedAt: genEnd,
-					Duration:    genEnd.Sub(genStart),
-				}
-				executedToolParts = append(executedToolParts, modelTurn)
-				historyCursor = append(historyCursor, modelTurn)
-
-				var toolResponses []PromptPart
-				sessionMutated := false
-				for _, call := range toolCalls {
-					if _, exists := s.toolRegistry[call.Name]; !exists {
-						continue
-					}
-					explanation := extractToolExplanation(call)
-					tc := &ToolContext{
-						Session:     s,
-						Feedback:    s.emitFeedback,
-						baseHistory: baseHistory,
-					}
-					var emittedFeedback bool
-					tc.Feedback = func(text string) {
-						if text != "" {
-							emittedFeedback = true
-						}
-						s.emitFeedback(text)
-					}
-					toolStart := time.Now()
-					result := s.executeTool(ctx, tc, call)
-					toolEnd := time.Now()
-					if tc.sessionSwapped {
-						sessionMutated = true
-					}
-					if emittedFeedback {
-						s.emitFeedback("\n")
-					}
-					toolResponses = append(toolResponses, PromptPart{
-						Role:         RoleTool,
-						ToolName:     call.Name,
-						ToolCallID:   call.ID,
-						Explanation:  explanation,
-						ToolResponse: result,
-						StartedAt:    toolStart,
-						CompletedAt:  toolEnd,
-						Duration:     toolEnd.Sub(toolStart),
-					})
-				}
-				executedToolParts = append(executedToolParts, toolResponses...)
-				if sessionMutated {
-					historyCursor = buildHistory(executedToolParts[:len(executedToolParts)-len(toolResponses)])
-				}
-				turnParts = toolResponses
-			}
-			if errors.Is(stageErr, context.Canceled) {
-				streamer.Wipe()
-				return nil, "", stageErr
-			}
-			if (isContextOverflowError(stageErr) || errors.Is(stageErr, ErrRepetitionLoop)) && retries < 2 {
-				retries++
-				streamer.Wipe()
-				if cerr := s.compactContextForRetry(ctx, 0, s.emitFeedback); cerr != nil {
-					return nil, "", cerr
-				}
-				s.emitFeedback("\n")
-				s.closeConv()
-				*baseHistory = s.snapshotCompactedHistory()
-				continue
-			}
-			streamer.Wipe()
-			return nil, "", stageErr
-		}
-
-		if s.engine == nil {
-			streamer.Wipe()
-			return nil, "", errors.New("ai: engine is not initialized")
-		}
-		cfg := ConversationConfig{
-			SystemMessage: s.systemMessage,
-			Tools:         s.tools,
-			History:       seed,
-		}
-		ephemeralConv, createErr := s.engine.NewConversationWithConfig(cfg)
-		if createErr != nil {
-			streamer.Wipe()
-			return nil, "", createErr
-		}
-
-		var stageErr error
-		var parseRetries int
-		var lastGeneratedText string
-		for {
-			var toolCalls []ToolCall
-			var generatedText strings.Builder
-			var genStart, genEnd time.Time
-			streamer.StartStage("work")
-			for event, err := range ephemeralConv.SendStream(ctx, turnParts) {
-				if err != nil {
-					stageErr = err
-					break
-				}
-				now := time.Now()
-				if genStart.IsZero() {
-					genStart = now
-				}
-				genEnd = now
-				switch e := event.(type) {
-				case TextEvent:
-					generatedText.WriteString(e.Text)
-				case ToolCallEvent:
-					toolCalls = append(toolCalls, e.ToolCalls...)
-				}
-			}
-			lastGeneratedText = generatedText.String()
-			_ = streamer.EndStage()
-			var recoveredFromParseErr bool
-			if stageErr != nil {
-				if isToolCallParseError(stageErr) {
-					if recCalls, _ := recoverMalformedGemmaToolCalls(stageErr.Error()); len(recCalls) > 0 {
-						toolCalls = append(toolCalls, recCalls...)
-						stageErr = nil
-						recoveredFromParseErr = true
-					}
-				}
-			}
-			if stageErr != nil {
-				if isContextOverflowError(stageErr) {
-					streamer.Wipe()
-					if s.tryCompressTurnPartsOnOverflow(ctx, turnParts, executedToolParts) {
-						rebuilt := buildHistory(executedToolParts[:len(executedToolParts)-len(turnParts)])
-						newConv, cerr := s.engine.NewConversationWithConfig(ConversationConfig{
-							SystemMessage: s.systemMessage,
-							Tools:         s.tools,
-							History:       rebuilt,
-						})
-						if cerr == nil {
-							ephemeralConv.Close()
-							ephemeralConv = newConv
-							stageErr = nil
-							continue
-						}
-					}
-				}
-				if isToolCallParseError(stageErr) && parseRetries < 3 {
-					parseRetries++
-					streamer.Wipe()
-					rebuilt := buildHistory(executedToolParts)
-					// After 2 failed tool-call syntax attempts (or if we already gathered tool results),
-					// disable tools on the fallback conversation so the model writes its final answer
-					// directly from the gathered context instead of failing FC grammar parsing!
-					var retryTools []map[string]any
-					retryPrompt := "Your previous tool call had a syntax error. Write your complete final answer now based on the information already gathered."
-					if parseRetries == 1 && len(executedToolParts) == 0 {
-						retryTools = s.tools
-						retryPrompt = "Your previous tool call had a syntax error. Provide a valid non-empty string for every tool argument, or write your final answer directly."
-					}
-					newConv, cerr := s.engine.NewConversationWithConfig(ConversationConfig{
-						SystemMessage: s.systemMessage,
-						Tools:         retryTools,
-						History:       rebuilt,
-					})
-					if cerr == nil {
-						ephemeralConv.Close()
-						ephemeralConv = newConv
-						turnParts = []PromptPart{{
-							Role: RoleUser,
-							Text: retryPrompt,
-						}}
-						stageErr = nil
-						continue
-					}
-				}
+		var toolCalls []ToolCall
+		var generatedText strings.Builder
+		var genStart, genEnd time.Time
+		streamer.StartStage("work")
+		for event, streamErr := range s.conv.SendStream(ctx, turnParts) {
+			if streamErr != nil {
+				err = streamErr
 				break
 			}
-			if len(toolCalls) == 0 && strings.Contains(generatedText.String(), "<|tool_call>") {
-				if recCalls, cleaned := recoverMalformedGemmaToolCalls(generatedText.String()); len(recCalls) > 0 {
-					toolCalls = append(toolCalls, recCalls...)
-					generatedText.Reset()
-					generatedText.WriteString(cleaned)
-				}
-			}
-			if len(toolCalls) == 0 {
-				ephemeralConv.Close()
-				return executedToolParts, strings.TrimSpace(generatedText.String()), nil
-			}
-
-			streamer.Wipe()
+			now := time.Now()
 			if genStart.IsZero() {
-				genStart = time.Now()
-				genEnd = genStart
+				genStart = now
 			}
-			modelTurn := PromptPart{
-				Role:        RoleModel,
-				Text:        generatedText.String(),
-				ToolCalls:   toolCalls,
-				StartedAt:   genStart,
-				CompletedAt: genEnd,
-				Duration:    genEnd.Sub(genStart),
+			genEnd = now
+			switch e := event.(type) {
+			case TextEvent:
+				generatedText.WriteString(e.Text)
+			case ToolCallEvent:
+				toolCalls = append(toolCalls, e.ToolCalls...)
 			}
-			executedToolParts = append(executedToolParts, modelTurn)
-
-			var toolResponses []PromptPart
-			sessionMutated := false
-			for _, call := range toolCalls {
-				if _, exists := s.toolRegistry[call.Name]; !exists {
-					continue
+		}
+		_ = streamer.EndStage()
+		if err != nil {
+			if isContextOverflowError(err) && overflowRetries == 0 {
+				streamer.Wipe()
+				s.tryCompressTurnPartsOnOverflow(ctx, turnParts, executedToolParts)
+				history := s.snapshotCanonicalHistory()
+				if len(history) == 0 {
+					history = append([]PromptPart(nil), (*baseHistory)...)
 				}
-				explanation := extractToolExplanation(call)
-				tc := &ToolContext{
-					Session:     s,
-					Feedback:    s.emitFeedback,
-					baseHistory: baseHistory,
+				completedParts := executedToolParts
+				if len(turnParts) > 0 && turnParts[0].Role == RoleTool &&
+					len(completedParts) >= len(turnParts) {
+					completedParts = completedParts[:len(completedParts)-len(turnParts)]
 				}
-				var emittedFeedback bool
-				tc.Feedback = func(text string) {
-					if text != "" {
-						emittedFeedback = true
-					}
-					s.emitFeedback(text)
+				if len(turnParts) > 0 && turnParts[0].Role == RoleTool {
+					history = append(history, userPart)
+					history = append(history, completedParts...)
 				}
-				toolStart := time.Now()
-				result := s.executeTool(ctx, tc, call)
-				toolEnd := time.Now()
-				if tc.sessionSwapped {
-					sessionMutated = true
+				before := historySize(*baseHistory)
+				s.emitFeedback("🗜️ ")
+				projected := s.projectHistory(ctx, history)
+				if replaceErr := s.replaceConversation(projected); replaceErr != nil {
+					return nil, "", compactedDuringTurn, fmt.Errorf("rebuild conversation after context overflow: %w", replaceErr)
 				}
-				if emittedFeedback {
-					s.emitFeedback("\n")
-				}
-				toolResponses = append(toolResponses, PromptPart{
-					Role:         RoleTool,
-					ToolName:     call.Name,
-					ToolCallID:   call.ID,
-					Explanation:  explanation,
-					ToolResponse: result,
-					StartedAt:    toolStart,
-					CompletedAt:  toolEnd,
-					Duration:     toolEnd.Sub(toolStart),
-				})
-			}
-			if len(toolResponses) == 0 {
+				*baseHistory = s.snapshotCompactedHistory()
+				s.emitFeedback(fmt.Sprintf("%d:%d\n", before, historySize(projected)))
+				overflowRetries++
+				compactedDuringTurn = true
+				err = nil
 				continue
 			}
-			executedToolParts = append(executedToolParts, toolResponses...)
-			if sessionMutated || recoveredFromParseErr {
-				// If we recovered from a LiteRT-LM tool-call parse error, the C++ ephemeralConv's
-				// internal history did NOT record the failed assistant tool_call turn!
-				// Re-create ephemeralConv seeded with executedToolParts (which includes both
-				// modelTurn and previous turns) so the C++ conversation history stays in sync.
-				rebuilt := buildHistory(executedToolParts[:len(executedToolParts)-len(toolResponses)])
-				newConv, cerr := s.engine.NewConversationWithConfig(ConversationConfig{
-					SystemMessage: s.systemMessage,
-					Tools:         s.tools,
-					History:       rebuilt,
-				})
-				if cerr == nil {
-					ephemeralConv.Close()
-					ephemeralConv = newConv
-				}
-			}
-			turnParts = toolResponses
+			streamer.Wipe()
+			return nil, "", compactedDuringTurn, err
 		}
-		ephemeralConv.Close()
 
-		if errors.Is(stageErr, context.Canceled) {
-			streamer.Wipe()
-			return nil, "", stageErr
-		}
-		if (isContextOverflowError(stageErr) || errors.Is(stageErr, ErrRepetitionLoop)) && retries < 2 {
-			retries++
-			streamer.Wipe()
-			// If we already gathered tool results and draft text before hitting a repetition loop
-			// (such as a poem with repeating rhyme/meter or a repeated tool-call attempt),
-			// synthesize the final draft directly from the gathered tool results with tools disabled
-			// instead of throwing away executedToolParts and restarting the turn from scratch!
-			if len(executedToolParts) > 0 {
-				if trimmed := strings.TrimSpace(lastGeneratedText); len(trimmed) >= 64 {
-					return executedToolParts, trimmed, nil
-				}
-				rebuilt := buildHistory(executedToolParts)
-				synthConv, cerr := s.engine.NewConversationWithConfig(ConversationConfig{
-					SystemMessage: s.systemMessage,
-					Tools:         nil,
-					History:       rebuilt,
-				})
-				if cerr == nil {
-					var synthBuf strings.Builder
-					streamer.StartStage("work")
-					for event, sErr := range synthConv.SendStream(ctx, []PromptPart{{
-						Role: RoleUser,
-						Text: "Based on the files and tool outputs already inspected above, write your complete final answer now without calling any more tools:\n" + userText,
-					}}) {
-						if sErr != nil {
-							break
-						}
-						if e, ok := event.(TextEvent); ok {
-							synthBuf.WriteString(e.Text)
-						}
-					}
-					_ = streamer.EndStage()
-					synthConv.Close()
-					if out := strings.TrimSpace(synthBuf.String()); out != "" {
-						return executedToolParts, out, nil
-					}
-				}
-			}
-			if cerr := s.compactContextForRetry(ctx, 0, s.emitFeedback); cerr != nil {
-				return nil, "", cerr
-			}
-			s.emitFeedback("\n")
-			s.closeConv()
-			*baseHistory = s.snapshotCompactedHistory()
-			continue
+		if len(toolCalls) == 0 {
+			return executedToolParts, strings.TrimSpace(generatedText.String()), compactedDuringTurn, nil
 		}
 		streamer.Wipe()
-		return nil, "", stageErr
+		if genStart.IsZero() {
+			genStart = time.Now()
+			genEnd = genStart
+		}
+		modelTurn := PromptPart{
+			Role:        RoleModel,
+			Text:        generatedText.String(),
+			ToolCalls:   toolCalls,
+			StartedAt:   genStart,
+			CompletedAt: genEnd,
+			Duration:    genEnd.Sub(genStart),
+		}
+		executedToolParts = append(executedToolParts, modelTurn)
+
+		toolResponses, sessionMutated := s.executeToolCalls(ctx, baseHistory, toolCalls)
+		executedToolParts = append(executedToolParts, toolResponses...)
+		if sessionMutated {
+			history := buildHistory(executedToolParts[:len(executedToolParts)-len(toolResponses)])
+			if err := s.replaceConversation(history); err != nil {
+				return nil, "", compactedDuringTurn, fmt.Errorf("rebuild conversation after tool-updated session: %w", err)
+			}
+		}
+		turnParts = toolResponses
 	}
+}
+
+func (s *Session) executeToolCalls(ctx context.Context, baseHistory *[]PromptPart, calls []ToolCall) ([]PromptPart, bool) {
+	toolResponses := make([]PromptPart, 0, len(calls))
+	sessionMutated := false
+	for _, call := range calls {
+		explanation := extractToolExplanation(call)
+		tc := &ToolContext{
+			Session:     s,
+			Feedback:    s.emitFeedback,
+			baseHistory: baseHistory,
+		}
+		var emittedFeedback bool
+		tc.Feedback = func(text string) {
+			if text != "" {
+				emittedFeedback = true
+			}
+			s.emitFeedback(text)
+		}
+		toolStart := time.Now()
+		result := s.executeTool(ctx, tc, call)
+		toolEnd := time.Now()
+		sessionMutated = sessionMutated || tc.sessionSwapped
+		if emittedFeedback {
+			s.emitFeedback("\n")
+		}
+		toolResponses = append(toolResponses, PromptPart{
+			Role:         RoleTool,
+			ToolName:     call.Name,
+			ToolCallID:   call.ID,
+			Explanation:  explanation,
+			ToolResponse: result,
+			StartedAt:    toolStart,
+			CompletedAt:  toolEnd,
+			Duration:     toolEnd.Sub(toolStart),
+		})
+	}
+	return toolResponses, sessionMutated
 }
 
 func (s *Session) RunTurn(ctx context.Context, userText string) error {
@@ -1479,19 +1081,18 @@ func (s *Session) RunTurnWithTiming(ctx context.Context, userText string, timing
 		Duration:    submittedAt.Sub(typedAt),
 	}
 
-	// Start this turn from the committed history in a fresh tool-enabled conversation.
-	s.closeConv()
-
 	baseHistory := s.snapshotCompactedHistory()
 	streamer := newLiveStreamer(s.emitFeedback, defaultStreamerMaxRunes)
 
 	// The removed planner calibrated response length, drafted steps, ran three critiques, and synthesized a plan.
 	// See its historical implementation around tag v0.8.9.
 	responseStartedAt := time.Now()
-	executedToolParts, finalAnswer, err := s.runAgenticTurn(ctx, &baseHistory, userPart, streamer)
+	executedToolParts, finalAnswer, compactedDuringTurn, err := s.runAgenticTurn(ctx, &baseHistory, userPart, streamer)
 	if err != nil {
 		s.closeConv()
-		_ = s.Init()
+		if restoreErr := s.initWithHistory(s.snapshotCompactedHistory()); restoreErr != nil {
+			return errors.Join(err, fmt.Errorf("restore session conversation after failed turn: %w", restoreErr))
+		}
 		return err
 	}
 	streamer.Wipe()
@@ -1515,13 +1116,10 @@ func (s *Session) RunTurnWithTiming(ctx context.Context, userText string, timing
 	})
 	s.appendHistory(spokenParts...)
 
-	if err := s.initWithHistory(s.snapshotCompactedHistory()); err != nil {
-		return err
-	}
-
-	// Check if context compaction is needed
-	if s.totalTokensEst > s.compactionLimit && len(s.CompactedHistory) > 4 {
-		_ = s.compactContext(ctx, s.emitFeedback)
+	if compactedDuringTurn || (s.totalTokensEst > s.compactionLimit && len(s.CompactedHistory) > 4) {
+		if err := s.compactContext(ctx, s.emitFeedback); err != nil {
+			return fmt.Errorf("compact session history after turn: %w", err)
+		}
 		s.emitFeedback("\n")
 	}
 

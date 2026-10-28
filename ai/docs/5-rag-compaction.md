@@ -226,35 +226,16 @@ ai.PromptPart{
 
 ---
 
-### 6. Assembly & Context Re-initialization
+### 6. Active Conversation Lifecycle
 
-1. **Reconstruct `CompactedHistory` in Chronological Order:**
-Interleave the compressed gap parts, the verbatim pinned anchor parts, and the active tail parts:
+1. **Keep the Full Record Outside LiteRT-LM:**
+`CanonicalHistory` is the complete application-side record and is never seeded into LiteRT-LM. `CompactedHistory` is the projection used to create the runtime conversation. One active `s.conv` is retained across user turns, so normal interaction adds only the new user message and any tool responses to that conversation.
 
-$$\text{CompactedHistory} = [\text{Summ}_0, \, \mathbf{Anchor_1}, \, \text{Summ}_1, \, \mathbf{Anchor_2}, \dots, \, U_{N-X}, \dots, \, U_{N-1}]$$
+2. **Handle Structured Tool Calls in the Same Conversation:**
+Consume LiteRT-LM's structured tool-call events, execute each registered application handler, then send its `RoleTool` response with the matching call ID to the same conversation. Malformed tool arguments, unknown tool names, and native parse errors are returned as errors; do not infer calls from text, fabricate arguments, retry with repair prompts, or fall back to a tool-disabled generation.
 
+3. **Rebuild Only When the Projection Changes or a Turn Fails:**
+After compaction or a session/engine replacement, replace the active conversation and seed it from the resulting `CompactedHistory`. If a turn fails, do not commit its partial interaction to `CanonicalHistory`; recreate the runtime conversation from the last committed projection.
 
-2. **Handle In-Flight Turn Retries (`compactContextForRetry`):**
-* If compaction was triggered by mid-turn overflow or a repetition loop during turn execution, separate the active `turnParts` (the pending user prompt or tool responses) from the historical units before running the projection.
-
-
-* The projection runs over historical units.
-* Re-append the active `turnParts` to the tail of `CompactedHistory`.
-
-
-
-
-3. **Re-initialize Native Engine Handle:**
-* Close `s.conv` (`s.closeConv()`) to tear down the old LiteRT-LM conversation.
-
-
-* Call `s.initWithHistory(priorCompacted)` to seed the fresh C++ instance with the newly projected context.
-
-
-* Emit the status indicator (`🗜️ <beforeTokens>:<afterTokens>`) to terminal feedback.
-
-
-
-
-4. **Resume Generation:**
-`RunTurn` resumes its `continue` retry seamlessly using the re-anchored conversation.
+4. **Resume After Mid-Turn Context Overflow:**
+Project committed canonical history together with completed interactions from the in-flight turn, but exclude the pending input that caused the overflow. Seed a replacement conversation with that projection, then resend the pending user message or tool response exactly once. On successful completion, append the complete turn to `CanonicalHistory` and update `CompactedHistory` through the normal compaction flow.

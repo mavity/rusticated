@@ -499,21 +499,16 @@ func parseChunkEvents(raw string) []ModelEvent {
 	if len(chunk.ToolCalls) > 0 {
 		var calls []ToolCall
 		for _, tc := range chunk.ToolCalls {
-			raw := tc.Function.Arguments
-			// The runtime may deliver the arguments object as a JSON-encoded string.
-			if len(raw) > 0 && raw[0] == '"' {
-				var s string
-				if json.Unmarshal(raw, &s) == nil {
-					raw = json.RawMessage(s)
-				}
+			args, _, err := decodeToolArguments(tc.Function.Arguments, nil)
+			if err != nil {
+				// Keep the call; dispatch returns malformed arguments as its tool response.
+				args = nil
 			}
-			args := make(map[string]any)
-			_ = json.Unmarshal(raw, &args)
 			calls = append(calls, ToolCall{
 				ID:           tc.ID,
 				Name:         tc.Function.Name,
 				Arguments:    args,
-				RawArguments: raw,
+				RawArguments: append(json.RawMessage(nil), tc.Function.Arguments...),
 			})
 		}
 		if len(calls) > 0 {
@@ -521,4 +516,41 @@ func parseChunkEvents(raw string) []ModelEvent {
 		}
 	}
 	return events
+}
+
+func decodeToolArguments(raw json.RawMessage, fallback map[string]any) (map[string]any, json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		if fallback != nil {
+			encoded, err := json.Marshal(fallback)
+			if err != nil {
+				return nil, nil, fmt.Errorf("encode arguments map: %w", err)
+			}
+			raw = encoded
+		} else {
+			raw = json.RawMessage("{}")
+		}
+		trimmed = bytes.TrimSpace(raw)
+	}
+
+	if trimmed[0] == '"' {
+		var encoded string
+		if err := json.Unmarshal(trimmed, &encoded); err != nil {
+			return nil, nil, fmt.Errorf("decode encoded arguments: %w", err)
+		}
+		raw = json.RawMessage(encoded)
+		trimmed = bytes.TrimSpace(raw)
+	}
+	if len(trimmed) == 0 {
+		return nil, nil, errors.New("arguments are missing")
+	}
+	if trimmed[0] != '{' {
+		return nil, nil, errors.New("arguments must be a JSON object")
+	}
+
+	var arguments map[string]any
+	if err := json.Unmarshal(trimmed, &arguments); err != nil {
+		return nil, nil, fmt.Errorf("decode arguments object: %w", err)
+	}
+	return arguments, append(json.RawMessage(nil), trimmed...), nil
 }

@@ -475,10 +475,7 @@ func TestAnthropicAndGeminiStreamEvents(t *testing.T) {
 	if err := anth.consume("content_block_delta", `{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"x\"}"}}`); err != nil {
 		t.Fatal(err)
 	}
-	anthCalls, err := anth.toolCalls()
-	if err != nil {
-		t.Fatal(err)
-	}
+	anthCalls := anth.toolCalls()
 	if err := anth.finish(anthCalls); err != nil {
 		t.Fatal(err)
 	}
@@ -496,14 +493,46 @@ func TestAnthropicAndGeminiStreamEvents(t *testing.T) {
 	if err := gem.consume("", `{"candidates":[{"content":{"parts":[{"text":"hello"},{"functionCall":{"name":"lookup","args":{"path":"y"}}}]}}]}`); err != nil {
 		t.Fatal(err)
 	}
-	gemCalls, err := gem.toolCalls()
-	if err != nil {
-		t.Fatal(err)
-	}
+	gemCalls := gem.toolCalls()
 	if err := gem.finish(gemCalls); err != nil {
 		t.Fatal(err)
 	}
 	if len(gemEvents) != 2 || gemCalls[0].ID == "" {
 		t.Fatalf("Gemini output = events %#v, calls %#v", gemEvents, gemCalls)
+	}
+}
+
+func TestRemoteMalformedToolArgumentsArePreservedForDispatch(t *testing.T) {
+	var events []ModelEvent
+	acc := newRemoteAccumulator(RemoteAnthropic, func(event ModelEvent) {
+		events = append(events, event)
+	})
+	if err := acc.consume("content_block_start", `{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_bad","name":"lookup","input":{}}}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := acc.consume("content_block_delta", `{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{not-json}"}}`); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := acc.toolCalls()
+	if err := acc.finish(calls); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %#v, want one tool-call event", events)
+	}
+	call := events[0].(ToolCallEvent).ToolCalls[0]
+	if call.ID != "toolu_bad" || call.Name != "lookup" {
+		t.Fatalf("tool call identity = (%q, %q), want (toolu_bad, lookup)", call.ID, call.Name)
+	}
+	if call.Arguments != nil || string(call.RawArguments) != "{not-json}" {
+		t.Fatalf("malformed call = %#v, want raw args retained and no decoded map", call)
+	}
+	requestArguments, err := remoteToolArguments(call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(requestArguments) != "{}" {
+		t.Fatalf("serialized arguments = %s, want schema-valid empty object for the error exchange", requestArguments)
 	}
 }

@@ -218,8 +218,13 @@ func TestTemporalWireFormattingAndDateFlipIsolation(t *testing.T) {
 }
 
 func TestRunTurnCapturesUserModelAndToolTimingsPurely(t *testing.T) {
-	var seenInitialInput []PromptPart
+	backend := &scriptedSessionBackend{
+		conversation: &scriptedSessionConversation{
+			responses: [][]ModelEvent{{TextEvent{Text: "Pont Neuf is the oldest standing bridge across the river Seine in Paris."}}},
+		},
+	}
 	s, err := NewSession(SessionConfig{
+		Engine: &Engine{impl: &engineImpl{backend: backend}},
 		Tools: map[string]Tool{
 			"check_time": {
 				Description: "Check time",
@@ -234,13 +239,7 @@ func TestRunTurnCapturesUserModelAndToolTimingsPurely(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.ephemeralStream = func(ctx context.Context, cfg ConversationConfig, trigger []PromptPart, onEvent func(ModelEvent) bool) error {
-		if len(seenInitialInput) == 0 {
-			seenInitialInput = append([]PromptPart(nil), trigger...)
-		}
-		onEvent(TextEvent{Text: "Pont Neuf is the oldest standing bridge across the river Seine in Paris."})
-		return nil
-	}
+	defer s.Close()
 
 	typedAt := time.Date(2026, 10, 18, 23, 11, 46, 0, time.Local)
 	sentAt := time.Date(2026, 10, 18, 23, 12, 0, 0, time.Local)
@@ -269,10 +268,10 @@ func TestRunTurnCapturesUserModelAndToolTimingsPurely(t *testing.T) {
 	if m.StartedAt.IsZero() || m.CompletedAt.IsZero() || m.CompletedAt.Before(m.StartedAt) {
 		t.Fatalf("model timings not recorded: start=%v end=%v", m.StartedAt, m.CompletedAt)
 	}
-	if len(seenInitialInput) != 1 || !seenInitialInput[0].CompletedAt.Equal(sentAt) {
-		t.Fatalf("initial model input did not carry timed user PromptPart: %#v", seenInitialInput)
+	if len(backend.conversation.sends) != 1 || len(backend.conversation.sends[0]) != 1 || !backend.conversation.sends[0][0].CompletedAt.Equal(sentAt) {
+		t.Fatalf("initial model input did not carry timed user PromptPart: %#v", backend.conversation.sends)
 	}
-	wire, err := buildMessageJSON(seenInitialInput)
+	wire, err := buildMessageJSON(backend.conversation.sends[0])
 	if err != nil {
 		t.Fatal(err)
 	}
