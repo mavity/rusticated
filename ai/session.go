@@ -15,7 +15,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 )
 
 // TurnTiming records user-side timestamps for a single conversational turn:
@@ -831,20 +830,6 @@ func (l *liveStreamer) write(text string) {
 	}
 }
 
-func (l *liveStreamer) StartStage(label string) {
-	if l.prevLineRunes > 0 {
-		l.write(fmt.Sprintf("\r%s\r", strings.Repeat(" ", l.prevLineRunes)))
-	}
-	l.currLineRunes = 0
-	l.isCapped = false
-	l.lastWasSpace = true
-	l.buf.Reset()
-
-	tag := "[" + label + "] "
-	l.write(tag)
-	l.currLineRunes = utf8.RuneCountInString(tag)
-}
-
 func (l *liveStreamer) Feed(tokenChunk string) {
 	l.buf.WriteString(tokenChunk)
 	if l.isCapped {
@@ -931,7 +916,6 @@ func (s *Session) runAgenticTurn(
 		var toolCalls []ToolCall
 		var generatedText strings.Builder
 		var genStart, genEnd time.Time
-		streamer.StartStage("work")
 		for event, streamErr := range s.conv.SendStream(ctx, turnParts) {
 			if streamErr != nil {
 				err = streamErr
