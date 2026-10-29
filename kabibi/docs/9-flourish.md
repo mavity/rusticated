@@ -123,8 +123,9 @@ The following sections describe the opt-in super-demo CRT presentation, engineer
 | --- | --- | --- | --- |
 | **`three`** | **`0.186.0` (r186)** | `three/webgpu` & `three/tsl` | `WebGPURenderer` (with auto WebGL2 fallback), `MeshPhysicalNodeMaterial`, `RenderPipeline`, and TSL shader graph nodes. |
 | **`@xterm/xterm`** | **`6.0.0`** | `@xterm/xterm` | Terminal emulator; DOM rendering is the default, with the WebGL renderer used only by super-demo. |
-| **`@xterm/addon-webgl`** | **`0.11.0`** | `@xterm/addon-webgl` | Super-demo GPU renderer whose screen canvas is sampled by Three.js `CanvasTexture`. |
-| **`@xterm/addon-fit`** | **`0.10.0`** | `@xterm/addon-fit` | Computes `{ cols, rows }` from the selected parent’s available bounds and font metrics. |
+| **`@xterm/addon-webgl`** | **`0.19.0`** | `@xterm/addon-webgl` | Super-demo GPU renderer whose screen canvas is sampled by Three.js `CanvasTexture`. |
+| **`@xterm/addon-fit`** | **`0.11.0`** | `@xterm/addon-fit` | Computes `{ cols, rows }` from the selected parent’s available bounds and font metrics. |
+| **`@xterm/addon-unicode-graphemes`** | **`0.4.0`** | `@xterm/addon-unicode-graphemes` | Registers and activates `'15-graphemes'` UAX #29 grapheme cluster segmentation (`allowProposedApi: true`). |
 
 *Import map for the dedicated super-demo page (or super-demo-only entrypoint):*
 
@@ -137,12 +138,12 @@ The following sections describe the opt-in super-demo CRT presentation, engineer
     "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.186.0/build/three.tsl.js",
     "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.0/examples/jsm/",
     "@xterm/xterm": "https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/+esm",
-    "@xterm/addon-webgl": "https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.11.0/+esm",
-    "@xterm/addon-fit": "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/+esm"
+    "@xterm/addon-webgl": "https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.19.0/+esm",
+    "@xterm/addon-fit": "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/+esm",
+    "@xterm/addon-unicode-graphemes": "https://cdn.jsdelivr.net/npm/@xterm/addon-unicode-graphemes@0.4.0/+esm"
   }
 }
 </script>
-
 ```
 
 ---

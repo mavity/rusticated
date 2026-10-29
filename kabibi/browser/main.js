@@ -5,8 +5,10 @@
   const XTERM_CSS_URL = 'https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css';
   const XTERM_ESM_URL = 'https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/+esm';
   const FIT_ADDON_ESM_URL = 'https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/+esm';
+  const UNICODE_GRAPHEMES_ADDON_ESM_URL = 'https://cdn.jsdelivr.net/npm/@xterm/addon-unicode-graphemes@0.4.0/+esm';
   const WEBGL_ADDON_ESM_URL = 'https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.19.0/+esm';
   const THREE_ESM_URL = 'https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js';
+  const DEFAULT_FONT_FAMILY = 'Consolas, "Cascadia Mono", "Fira Code", Menlo, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", monospace';
 
   function isElement(value) {
     return value !== null && typeof value === 'object' && value.nodeType === 1;
@@ -120,18 +122,27 @@
 
     let Terminal = options.Terminal || global.Terminal;
     let FitAddon = options.FitAddon || global.FitAddon;
-    if (typeof Terminal !== 'function' || !FitAddon) {
-      const [xtermMod, fitMod] = await Promise.all([
+    let UnicodeGraphemesAddon = options.UnicodeGraphemesAddon || global.UnicodeGraphemesAddon;
+    if (typeof Terminal !== 'function' || !FitAddon || !UnicodeGraphemesAddon) {
+      const [xtermMod, fitMod, unicodeMod] = await Promise.all([
         typeof Terminal === 'function' ? { Terminal } : importer(options.xtermUrl || XTERM_ESM_URL),
-        FitAddon ? { FitAddon } : importer(options.fitAddonUrl || FIT_ADDON_ESM_URL)
+        FitAddon ? { FitAddon } : importer(options.fitAddonUrl || FIT_ADDON_ESM_URL),
+        UnicodeGraphemesAddon
+          ? { UnicodeGraphemesAddon }
+          : Promise.resolve()
+              .then(() => importer(options.unicodeGraphemesAddonUrl || UNICODE_GRAPHEMES_ADDON_ESM_URL))
+              .catch(() => null)
       ]);
       Terminal = Terminal || (xtermMod && (xtermMod.Terminal || xtermMod.default));
       FitAddon = FitAddon || (fitMod && (fitMod.FitAddon || fitMod.default || fitMod));
+      UnicodeGraphemesAddon = UnicodeGraphemesAddon ||
+        (unicodeMod && (unicodeMod.UnicodeGraphemesAddon || unicodeMod.default || unicodeMod));
     }
 
     const result = {
       Terminal,
       FitAddon,
+      UnicodeGraphemesAddon: UnicodeGraphemesAddon || null,
       THREE: null,
       WebglAddon: null
     };
@@ -244,14 +255,23 @@
   function resolveDependencies(options) {
     const Terminal = options.Terminal || global.Terminal;
     const FitAddon = options.FitAddon || global.FitAddon;
+    const UnicodeGraphemesAddon = options.UnicodeGraphemesAddon || global.UnicodeGraphemesAddon;
     const fitConstructor = FitAddon && (FitAddon.FitAddon || FitAddon);
+    const unicodeGraphemesConstructor = UnicodeGraphemesAddon &&
+      (UnicodeGraphemesAddon.UnicodeGraphemesAddon || UnicodeGraphemesAddon);
     if (typeof Terminal !== 'function') {
       throw new Error('Kabibi browser mount requires xterm.js Terminal');
     }
     if (typeof fitConstructor !== 'function') {
       throw new Error('Kabibi browser mount requires xterm.js FitAddon');
     }
-    return { Terminal, FitAddon: fitConstructor };
+    return {
+      Terminal,
+      FitAddon: fitConstructor,
+      UnicodeGraphemesAddon: typeof unicodeGraphemesConstructor === 'function'
+        ? unicodeGraphemesConstructor
+        : null
+    };
   }
 
   function reportResize(term, host, callback, previous) {
@@ -433,16 +453,27 @@
     const term = new dependencies.Terminal({
       cursorBlink: true,
       allowProposedApi: true,
+      customGlyphs: true,
+      rescaleOverlappingGlyphs: true,
       rightClickSelectsWord: true,
-      fontFamily: options.fontFamily || 'Consolas, "Cascadia Mono", "Fira Code", Menlo, monospace',
+      fontFamily: options.fontFamily || DEFAULT_FONT_FAMILY,
       theme: {
         background: '#07090e',
         ...(options.theme || {})
       },
       ...(options.terminalOptions || {})
     });
+    const unicodeGraphemesAddon = dependencies.UnicodeGraphemesAddon
+      ? new dependencies.UnicodeGraphemesAddon()
+      : null;
     const fitAddon = new dependencies.FitAddon();
     try {
+      if (unicodeGraphemesAddon) {
+        term.loadAddon(unicodeGraphemesAddon);
+        if (term.unicode) {
+          term.unicode.activeVersion = '15-graphemes';
+        }
+      }
       term.loadAddon(fitAddon);
       term.open(terminalContainer);
       Object.assign(term.element.style, {
@@ -641,6 +672,7 @@
     return {
       term,
       fitAddon,
+      unicodeGraphemesAddon,
       host,
       parent,
       root,
@@ -712,6 +744,7 @@
       host,
       Terminal: deps.Terminal,
       FitAddon: deps.FitAddon,
+      UnicodeGraphemesAddon: deps.UnicodeGraphemesAddon,
       mode: useSuperDemo ? 'super-demo' : 'default',
       superDemoDependencies: useSuperDemo
         ? {
