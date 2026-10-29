@@ -140,21 +140,24 @@ func normalizeHostNativePath(s string) string {
 	return s
 }
 
-func (d *rusticatedDriver) stringToCPtr(s string) (uint64, func()) {
+func (d *rusticatedDriver) stringToCPtr(s string) (uint64, func(), error) {
 	s = normalizeHostNativePath(s)
 	ptr, free, err := dload.CString(lmLib, s)
 	if err != nil {
-		return 0, func() {}
+		return 0, nil, fmt.Errorf("allocate LiteRT-LM string: %w", err)
 	}
-	return ptr, free
+	return ptr, free, nil
 }
 
-func (d *rusticatedDriver) ptrToString(ptr uint64) string {
+func (d *rusticatedDriver) ptrToString(ptr uint64) (string, error) {
 	if ptr == 0 {
-		return ""
+		return "", nil
 	}
-	s, _ := dload.GoString(lmLib, ptr)
-	return s
+	s, err := dload.GoString(lmLib, ptr)
+	if err != nil {
+		return "", fmt.Errorf("read LiteRT-LM string: %w", err)
+	}
+	return s, nil
 }
 
 func (d *rusticatedDriver) settingsCreate(modelPath, backend, visionBackend, audioBackend uint64) uint64 {
@@ -267,62 +270,92 @@ func (d *rusticatedDriver) loadedFileHasSpeculativeDecodingSupport(file uint64) 
 	v, _ := callDylib(symLMLoadedFileHasSpeculativeDecodingSupport, []byte{i64}, []byte{i32}, file)
 	return int32(v) != 0
 }
-func (d *rusticatedDriver) loadedFileMaxContextTokens(file uint64) uint32 {
-	v, _ := callDylib(symLMLoadedFileMaxContextTokens, []byte{i64}, []byte{i32}, file)
-	return uint32(v)
+func (d *rusticatedDriver) loadedFileMaxContextTokens(file uint64) (uint32, error) {
+	v, err := callDylib(symLMLoadedFileMaxContextTokens, []byte{i64}, []byte{i32}, file)
+	if err != nil {
+		return 0, fmt.Errorf("call model max-context getter: %w", err)
+	}
+	return uint32(v), nil
 }
-func (d *rusticatedDriver) loadedFileIsDynamicContext(file uint64) bool {
-	v, _ := callDylib(symLMLoadedFileIsDynamicContext, []byte{i64}, []byte{i32}, file)
-	return int32(v) != 0
+func (d *rusticatedDriver) loadedFileIsDynamicContext(file uint64) (bool, error) {
+	v, err := callDylib(symLMLoadedFileIsDynamicContext, []byte{i64}, []byte{i32}, file)
+	if err != nil {
+		return false, fmt.Errorf("call model dynamic-context getter: %w", err)
+	}
+	return int32(v) != 0, nil
 }
-func (d *rusticatedDriver) loadedFileSupportsThinking(file uint64) bool {
-	v, _ := callDylib(symLMLoadedFileSupportsThinking, []byte{i64}, []byte{i32}, file)
-	return int32(v) != 0
+func (d *rusticatedDriver) loadedFileSupportsThinking(file uint64) (bool, error) {
+	v, err := callDylib(symLMLoadedFileSupportsThinking, []byte{i64}, []byte{i32}, file)
+	if err != nil {
+		return false, fmt.Errorf("call model thinking-capability getter: %w", err)
+	}
+	return int32(v) != 0, nil
 }
-func (d *rusticatedDriver) loadedFileSupportsFunctionCalling(file uint64) bool {
-	v, _ := callDylib(symLMLoadedFileSupportsFunctionCalling, []byte{i64}, []byte{i32}, file)
-	return int32(v) != 0
+func (d *rusticatedDriver) loadedFileSupportsFunctionCalling(file uint64) (bool, error) {
+	v, err := callDylib(symLMLoadedFileSupportsFunctionCalling, []byte{i64}, []byte{i32}, file)
+	if err != nil {
+		return false, fmt.Errorf("call model function-calling getter: %w", err)
+	}
+	return int32(v) != 0, nil
 }
-func (d *rusticatedDriver) loadedFileModalitySupportedBackends(file uint64, modality int32) []uint32 {
+func (d *rusticatedDriver) loadedFileModalitySupportedBackends(file uint64, modality int32) (out []uint32, err error) {
 	backendsBuf, err := dload.DylibAlloc(lmLib, uint64(8*4))
 	if err != nil {
-		return []uint32{}
+		return nil, fmt.Errorf("allocate supported-backends buffer: %w", err)
 	}
-	defer func() { _ = dload.DylibFree(lmLib, backendsBuf) }()
+	defer func() {
+		if freeErr := dload.DylibFree(lmLib, backendsBuf); freeErr != nil {
+			freeErr = fmt.Errorf("free supported-backends buffer: %w", freeErr)
+			if err == nil {
+				err = freeErr
+			} else {
+				err = fmt.Errorf("%w; %v", err, freeErr)
+			}
+		}
+	}()
 	count, err := callDylib(symLMLoadedFileModalitySupportedBackends, []byte{i64, i32, i64, i32}, []byte{i32},
 		file, uint64(modality), backendsBuf, 8)
 	if err != nil {
-		return []uint32{}
+		return nil, fmt.Errorf("call model supported-backends getter: %w", err)
 	}
 	cnt := int(int32(count))
 	if cnt > 8 {
 		cnt = 8
 	}
 	if cnt <= 0 {
-		return []uint32{}
+		return []uint32{}, nil
 	}
 	bBytes := make([]byte, cnt*4)
-	if dload.DylibReadMem(lmLib, backendsBuf, bBytes) != nil {
-		return []uint32{}
+	if err := dload.DylibReadMem(lmLib, backendsBuf, bBytes); err != nil {
+		return nil, fmt.Errorf("read supported-backends buffer: %w", err)
 	}
-	var out []uint32
+	out = make([]uint32, 0, cnt)
 	for i := 0; i < cnt; i++ {
 		val := uint32(binary.LittleEndian.Uint32(bBytes[i*4 : (i+1)*4]))
 		out = append(out, val)
 	}
-	return out
+	return out, nil
 }
-func (d *rusticatedDriver) streamChunkGetText(chunk uint64) uint64 {
-	v, _ := callDylibWithParent(symLMStreamChunkGetText, d.parentInvID, []byte{i64}, []byte{i64}, chunk)
-	return v
+func (d *rusticatedDriver) streamChunkGetText(chunk uint64) (uint64, error) {
+	v, err := callDylibWithParent(symLMStreamChunkGetText, d.parentInvID, []byte{i64}, []byte{i64}, chunk)
+	if err != nil {
+		return 0, fmt.Errorf("call stream-chunk text getter: %w", err)
+	}
+	return v, nil
 }
-func (d *rusticatedDriver) streamChunkIsFinal(chunk uint64) bool {
-	v, _ := callDylibWithParent(symLMStreamChunkIsFinal, d.parentInvID, []byte{i64}, []byte{i32}, chunk)
-	return int32(v) != 0
+func (d *rusticatedDriver) streamChunkIsFinal(chunk uint64) (bool, error) {
+	v, err := callDylibWithParent(symLMStreamChunkIsFinal, d.parentInvID, []byte{i64}, []byte{i32}, chunk)
+	if err != nil {
+		return false, fmt.Errorf("call stream-chunk final-flag getter: %w", err)
+	}
+	return int32(v) != 0, nil
 }
-func (d *rusticatedDriver) streamChunkGetError(chunk uint64) uint64 {
-	v, _ := callDylibWithParent(symLMStreamChunkGetError, d.parentInvID, []byte{i64}, []byte{i64}, chunk)
-	return v
+func (d *rusticatedDriver) streamChunkGetError(chunk uint64) (uint64, error) {
+	v, err := callDylibWithParent(symLMStreamChunkGetError, d.parentInvID, []byte{i64}, []byte{i64}, chunk)
+	if err != nil {
+		return 0, fmt.Errorf("call stream-chunk error getter: %w", err)
+	}
+	return v, nil
 }
 
 func (d *rusticatedDriver) embeddingSettingsCreate(modelPath, backend, visionBackend, audioBackend uint64) uint64 {
@@ -449,12 +482,13 @@ var (
 	rusticatedTrampoline uint64
 	trampolineOv         [512]byte
 	trampolineRegOnce    sync.Once
+	trampolineRegErr     error
 )
 
-func (d *rusticatedDriver) createTrampoline() uint64 {
+func (d *rusticatedDriver) createTrampoline() (uint64, error) {
 	trampolineRegOnce.Do(func() {
 		cbSig := []byte{0x60, 2, i64, i64, 0}
-		rusticatedTrampoline, _ = dload.DylibRegisterCallbackWithContext(lmLib, cbSig, unsafe.Pointer(&trampolineOv[0]), 512,
+		rusticatedTrampoline, trampolineRegErr = dload.DylibRegisterCallbackWithContext(lmLib, cbSig, unsafe.Pointer(&trampolineOv[0]), 512,
 			func(invID uint64, _ uint64, args []uint64) []uint64 {
 				if len(args) < 2 {
 					return nil
@@ -468,8 +502,13 @@ func (d *rusticatedDriver) createTrampoline() uint64 {
 				sharedTokenCallback(&cbDrv, userData, chunkPtr)
 				return nil
 			})
+		if trampolineRegErr != nil {
+			trampolineRegErr = fmt.Errorf("register LiteRT-LM stream callback trampoline: %w", trampolineRegErr)
+		} else if rusticatedTrampoline == 0 {
+			trampolineRegErr = fmt.Errorf("register LiteRT-LM stream callback trampoline returned NULL")
+		}
 	})
-	return rusticatedTrampoline
+	return rusticatedTrampoline, trampolineRegErr
 }
 
 // ── Library loading ────────────────────────────────────────────────────────

@@ -12,8 +12,8 @@ type conversationConfigTestDriver struct {
 	conversationCreates int
 }
 
-func (*conversationConfigTestDriver) stringToCPtr(string) (uint64, func()) {
-	return 1, func() {}
+func (*conversationConfigTestDriver) stringToCPtr(string) (uint64, func(), error) {
+	return 1, func() {}, nil
 }
 
 func (*conversationConfigTestDriver) cfgCreate(uint64) uint64            { return 1 }

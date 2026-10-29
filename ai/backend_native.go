@@ -104,20 +104,20 @@ func (d *nativeDriver) writeBool(addr uint64, val bool) {
 	*(*bool)(unsafe.Pointer(uintptr(addr))) = val
 }
 
-func (d *nativeDriver) stringToCPtr(s string) (uint64, func()) {
+func (d *nativeDriver) stringToCPtr(s string) (uint64, func(), error) {
 	b := append([]byte(s), 0)
 	var p runtime.Pinner
 	p.Pin(&b[0])
 	return uint64(uintptr(unsafe.Pointer(&b[0]))), func() {
 		p.Unpin()
 		runtime.KeepAlive(b)
-	}
+	}, nil
 }
 
-func (d *nativeDriver) ptrToString(ptr uint64) string {
+func (d *nativeDriver) ptrToString(ptr uint64) (string, error) {
 	p := uintptr(ptr)
 	if p == 0 {
-		return ""
+		return "", nil
 	}
 	var buf []byte
 	for i := uintptr(0); ; i++ {
@@ -127,7 +127,7 @@ func (d *nativeDriver) ptrToString(ptr uint64) string {
 		}
 		buf = append(buf, b)
 	}
-	return string(buf)
+	return string(buf), nil
 }
 
 func (d *nativeDriver) settingsCreate(modelPath, backend, visionBackend, audioBackend uint64) uint64 {
@@ -187,19 +187,19 @@ func (d *nativeDriver) loadedFileDelete(file uint64) { lmLoadedFileDelete(uintpt
 func (d *nativeDriver) loadedFileHasSpeculativeDecodingSupport(file uint64) bool {
 	return lmLoadedFileHasSpeculativeDecodingSupport(uintptr(file))
 }
-func (d *nativeDriver) loadedFileMaxContextTokens(file uint64) uint32 {
-	return lmLoadedFileMaxContextTokens(uintptr(file))
+func (d *nativeDriver) loadedFileMaxContextTokens(file uint64) (uint32, error) {
+	return lmLoadedFileMaxContextTokens(uintptr(file)), nil
 }
-func (d *nativeDriver) loadedFileIsDynamicContext(file uint64) bool {
-	return lmLoadedFileIsDynamicContext(uintptr(file))
+func (d *nativeDriver) loadedFileIsDynamicContext(file uint64) (bool, error) {
+	return lmLoadedFileIsDynamicContext(uintptr(file)), nil
 }
-func (d *nativeDriver) loadedFileSupportsThinking(file uint64) bool {
-	return lmLoadedFileSupportsThinking(uintptr(file))
+func (d *nativeDriver) loadedFileSupportsThinking(file uint64) (bool, error) {
+	return lmLoadedFileSupportsThinking(uintptr(file)), nil
 }
-func (d *nativeDriver) loadedFileSupportsFunctionCalling(file uint64) bool {
-	return lmLoadedFileSupportsFunctionCalling(uintptr(file))
+func (d *nativeDriver) loadedFileSupportsFunctionCalling(file uint64) (bool, error) {
+	return lmLoadedFileSupportsFunctionCalling(uintptr(file)), nil
 }
-func (d *nativeDriver) loadedFileModalitySupportedBackends(file uint64, modality int32) []uint32 {
+func (d *nativeDriver) loadedFileModalitySupportedBackends(file uint64, modality int32) ([]uint32, error) {
 	var backends [8]int32
 	count := lmLoadedFileModalitySupportedBackends(uintptr(file), modality, &backends[0], int32(len(backends)))
 	if count > 0 && count <= int32(len(backends)) {
@@ -207,18 +207,18 @@ func (d *nativeDriver) loadedFileModalitySupportedBackends(file uint64, modality
 		for i := int32(0); i < count; i++ {
 			out = append(out, uint32(backends[i]))
 		}
-		return out
+		return out, nil
 	}
-	return []uint32{}
+	return []uint32{}, nil
 }
-func (d *nativeDriver) streamChunkGetText(chunk uint64) uint64 {
-	return uint64(lmStreamChunkGetText(uintptr(chunk)))
+func (d *nativeDriver) streamChunkGetText(chunk uint64) (uint64, error) {
+	return uint64(lmStreamChunkGetText(uintptr(chunk))), nil
 }
-func (d *nativeDriver) streamChunkIsFinal(chunk uint64) bool {
-	return lmStreamChunkIsFinal(uintptr(chunk))
+func (d *nativeDriver) streamChunkIsFinal(chunk uint64) (bool, error) {
+	return lmStreamChunkIsFinal(uintptr(chunk)), nil
 }
-func (d *nativeDriver) streamChunkGetError(chunk uint64) uint64 {
-	return uint64(lmStreamChunkGetError(uintptr(chunk)))
+func (d *nativeDriver) streamChunkGetError(chunk uint64) (uint64, error) {
+	return uint64(lmStreamChunkGetError(uintptr(chunk))), nil
 }
 
 func (d *nativeDriver) embeddingSettingsCreate(modelPath, backend, visionBackend, audioBackend uint64) uint64 {
@@ -318,18 +318,18 @@ func (d *nativeDriver) embeddingEngineCompute(engine uint64, inputs []uint64, op
 
 var callbackTrampoline uintptr
 
-func (d *nativeDriver) createTrampoline() uint64 {
+func (d *nativeDriver) createTrampoline() (uint64, error) {
 	if callbackTrampoline == 0 {
 		callbackTrampoline = purego.NewCallback(nativeDriverCallback)
 	}
-	return uint64(callbackTrampoline)
+	return uint64(callbackTrampoline), nil
 }
 
 // ── Public helpers (used by tflite_native.go and other platform code) ──────
 
-func goStringToCPtr(s string) (uintptr, func()) {
-	ptr, free := nativeDrv.stringToCPtr(s)
-	return uintptr(ptr), free
+func goStringToCPtr(s string) (uintptr, func(), error) {
+	ptr, free, err := nativeDrv.stringToCPtr(s)
+	return uintptr(ptr), free, err
 }
 
 func ptrToGoString(ptr uintptr) string {

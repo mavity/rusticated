@@ -201,7 +201,11 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 			ai.Verbose = true
 			fmt.Fprintf(os.Stderr, "[kabibi] runtime library path: %s\n", libPath)
 		}
-		if info, infoErr := ai.LoadModelInfo(libPath, modelPath); infoErr == nil && info != nil {
+		info, infoErr := ai.LoadModelInfo(libPath, modelPath)
+		if infoErr != nil && r.verbose {
+			fmt.Fprintf(os.Stderr, "[info] model capability inspection failed: %v\n", infoErr)
+		}
+		if infoErr == nil && info != nil {
 			modelInfo = info
 			if r.verbose {
 				fmt.Fprintf(os.Stderr, "[info] Max Context Tokens: %d (dynamic: %v)\n", info.MaxContextTokens, info.IsDynamicContext)

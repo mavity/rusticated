@@ -535,6 +535,200 @@ func TestDloadConcurrentBackgroundCallbacksStress(t *testing.T) {
 	}
 }
 
+func isDarwinHost() bool {
+	if runtime.GOOS == "darwin" {
+		return true
+	}
+	if _, err := os.Stat("/usr/lib/libSystem.B.dylib"); err == nil {
+		return true
+	}
+	return false
+}
+
+// TestDloadAsyncStreamingCallbacksWithoutBlockingMainThread reproduces the
+// READER_BUSY race when background OS threads fire callbacks while the main
+// dload worker thread is NOT parked inside a synchronous WaitForSingleObject /
+// pthread_join call (mirroring litert_lm_conversation_send_message_stream).
+func TestDloadAsyncStreamingCallbacksWithoutBlockingMainThread(t *testing.T) {
+	var (
+		handle     uint64
+		pthreadLib uint64
+		err        error
+		symSelf    uint64
+		selfSig    []byte
+		spawnAsync func(trampoline, param uint64) error
+	)
+
+	if isWindowsHost() {
+		handle, err = DylibOpen("kernel32.dll", RTLD_NOW)
+		if err != nil {
+			t.Fatalf("DylibOpen(kernel32.dll): %v", err)
+		}
+		defer DylibClose(handle)
+
+		symQueueUserWorkItem, sErr := DylibSym(handle, "QueueUserWorkItem")
+		if sErr != nil || symQueueUserWorkItem == 0 {
+			t.Fatalf("DylibSym(QueueUserWorkItem): %v", sErr)
+		}
+		symGetCurrentThreadId, sErr := DylibSym(handle, "GetCurrentThreadId")
+		if sErr != nil || symGetCurrentThreadId == 0 {
+			t.Fatalf("DylibSym(GetCurrentThreadId): %v", sErr)
+		}
+		symSelf = symGetCurrentThreadId
+		selfSig = []byte{0x60, 0, 1, WasmTypeI32}
+		queueSig := []byte{0x60, 3, WasmTypeI64, WasmTypeI64, WasmTypeI32, 1, WasmTypeI32}
+		spawnAsync = func(trampoline, param uint64) error {
+			res, cErr := DylibCall(symQueueUserWorkItem, queueSig, []uint64{trampoline, param, 0}, 0)
+			if cErr != nil {
+				return cErr
+			}
+			if len(res) == 0 || uint32(res[0]) == 0 {
+				return os.ErrInvalid
+			}
+			return nil
+		}
+	} else {
+		libName := "libc.so.6"
+		if isDarwinHost() {
+			libName = "/usr/lib/libSystem.B.dylib"
+		} else if isAndroidEnvironment() {
+			libName = "libc.so"
+		}
+		handle, err = DylibOpen(libName, RTLD_NOW)
+		if err != nil {
+			t.Fatalf("DylibOpen(%q): %v", libName, err)
+		}
+		defer DylibClose(handle)
+
+		pthreadLib = handle
+		symPthreadCreate, sErr := DylibSym(pthreadLib, "pthread_create")
+		if (sErr != nil || symPthreadCreate == 0) && !isDarwinHost() && !isAndroidEnvironment() {
+			if ph, pErr := DylibOpen("libpthread.so.0", RTLD_NOW); pErr == nil {
+				pthreadLib = ph
+				defer DylibClose(ph)
+				symPthreadCreate, sErr = DylibSym(pthreadLib, "pthread_create")
+			}
+		}
+		if sErr != nil || symPthreadCreate == 0 {
+			t.Fatalf("DylibSym(pthread_create): %v", sErr)
+		}
+		symPthreadDetach, sErr := DylibSym(pthreadLib, "pthread_detach")
+		if sErr != nil || symPthreadDetach == 0 {
+			t.Fatalf("DylibSym(pthread_detach): %v", sErr)
+		}
+		symPthreadSelf, sErr := DylibSym(pthreadLib, "pthread_self")
+		if sErr != nil || symPthreadSelf == 0 {
+			t.Fatalf("DylibSym(pthread_self): %v", sErr)
+		}
+		tidBuf, aErr := DylibAlloc(handle, 16)
+		if aErr != nil || tidBuf == 0 {
+			t.Fatalf("DylibAlloc(tidBuf): %v", aErr)
+		}
+		defer DylibFree(handle, tidBuf)
+
+		symSelf = symPthreadSelf
+		selfSig = []byte{0x60, 0, 1, WasmTypeI64}
+		createSig := []byte{0x60, 4, WasmTypeI64, WasmTypeI64, WasmTypeI64, WasmTypeI64, 1, WasmTypeI32}
+		detachSig := []byte{0x60, 1, WasmTypeI64, 1, WasmTypeI32}
+		spawnAsync = func(trampoline, param uint64) error {
+			res, cErr := DylibCall(symPthreadCreate, createSig, []uint64{tidBuf, 0, trampoline, param}, 0)
+			if cErr != nil {
+				return cErr
+			}
+			if len(res) == 0 || int32(res[0]) != 0 {
+				return os.ErrInvalid
+			}
+			var rawTid [8]byte
+			if rErr := DylibReadMem(handle, tidBuf, rawTid[:]); rErr != nil {
+				return rErr
+			}
+			tid := uint64(rawTid[0]) | uint64(rawTid[1])<<8 | uint64(rawTid[2])<<16 | uint64(rawTid[3])<<24 |
+				uint64(rawTid[4])<<32 | uint64(rawTid[5])<<40 | uint64(rawTid[6])<<48 | uint64(rawTid[7])<<56
+			_, _ = DylibCall(symPthreadDetach, detachSig, []uint64{tid}, 0)
+			return nil
+		}
+	}
+
+	sharedBuf, err := DylibAlloc(handle, 64)
+	if err != nil || sharedBuf == 0 {
+		t.Fatalf("DylibAlloc(sharedBuf): %v", err)
+	}
+	defer DylibFree(handle, sharedBuf)
+	wantChunk := []byte("{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Pont Neuf\"}]}\x00")
+	if err := DylibWriteMem(handle, sharedBuf, wantChunk[:64]); err != nil {
+		t.Fatalf("DylibWriteMem(sharedBuf): %v", err)
+	}
+
+	var cbMarker int
+	cbSig := []byte{0x60, 1, WasmTypeI64, 1, WasmTypeI64}
+	iterDone := make(chan uint64, 128)
+	cbErrCh := make(chan error, 16)
+
+	trampoline, err := DylibRegisterCallbackWithContext(handle, cbSig, unsafe.Pointer(&cbMarker), 0,
+		func(invID uint64, _ uint64, args []uint64) []uint64 {
+			// Mirror sharedTokenCallback:
+			// 1. Re-entrant call (streamChunkGetText)
+			if _, cErr := DylibCall(symSelf, selfSig, nil, invID); cErr != nil {
+				cbErrCh <- cErr
+				return []uint64{0}
+			}
+			// 2. Memory reads (ptrToString -> GoString)
+			tmp := make([]byte, 64)
+			for k := 0; k < 40; k++ {
+				if rErr := DylibReadMem(handle, sharedBuf, tmp); rErr != nil {
+					cbErrCh <- rErr
+					return []uint64{0}
+				}
+			}
+			// 3. Re-entrant call (streamChunkIsFinal)
+			if _, cErr := DylibCall(symSelf, selfSig, nil, invID); cErr != nil {
+				cbErrCh <- cErr
+				return []uint64{0}
+			}
+			// 4. Re-entrant call (streamChunkGetError)
+			if _, cErr := DylibCall(symSelf, selfSig, nil, invID); cErr != nil {
+				cbErrCh <- cErr
+				return []uint64{0}
+			}
+			iterDone <- args[0]
+			return []uint64{0}
+		})
+	if err != nil {
+		t.Fatalf("DylibRegisterCallbackWithContext: %v", err)
+	}
+	defer DylibUnregisterCallback(unsafe.Pointer(&cbMarker))
+
+	// Register a second trampoline that serves as the background OS thread's
+	// entry point. Inside its Go handler, it sleeps briefly so the outer
+	// spawnAsync call has completely finished and the main dload thread is
+	// sitting idle in read_frame(), and then we see what happens when multiple
+	// background threads fire callbacks concurrently while the main thread is NOT
+	// in WaitForSingleObject!
+	// Even better: what if 8 background threads are spawned at once via
+	// spawnAsync, and we DO NOT call WaitForSingleObject on the main thread,
+	// instead waiting ONLY on the Go channel `iterDone`?
+	const numBatches = 15
+	const batchSize = 8
+	for batch := 0; batch < numBatches; batch++ {
+		for j := 0; j < batchSize; j++ {
+			id := uint64(batch*batchSize + j + 1)
+			if err := spawnAsync(trampoline, id); err != nil {
+				t.Fatalf("spawnAsync(%d): %v", id, err)
+			}
+		}
+		for j := 0; j < batchSize; j++ {
+			select {
+			case cbErr := <-cbErrCh:
+				t.Fatalf("batch %d callback error: %v", batch, cbErr)
+			case <-iterDone:
+			case <-time.After(3 * time.Second):
+				t.Fatalf("deadlock on batch %d (callback %d/%d) waiting for async background callback while main dload thread is active", batch, j+1, batchSize)
+			}
+		}
+	}
+}
+
+
 
 
 
