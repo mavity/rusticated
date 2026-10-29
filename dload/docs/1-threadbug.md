@@ -1,0 +1,78 @@
+# `dload` Background Callback Reader Lock Deadlock (`1-threadbug.md`)
+
+## 1. The Bug
+
+The `dload` native worker deadlocks when a background OS thread invokes a registered C callback while the main worker thread is running its normal request loop (`run()`).
+
+In `dload/src/main.rs`, the main thread releases `READER_BUSY` immediately after `read_frame()` returns, before `dispatch_frame()` executes:
+
+```rust
+loop {
+    while !try_acquire_reader_lock() {
+        core::hint::spin_loop();
+    }
+    let frame_res = read_frame();
+    release_reader_lock();
+    match frame_res {
+        Ok((hdr, body)) => dispatch_frame(hdr, &body),
+        Err(()) => break,
+    }
+}
+```
+
+Meanwhile, in `dload/src/callbacks.rs`, a background thread executing `on_callback()` sends `OP_CB_INVOKE` and loops until its `InvocationSlot` transitions to `SLOT_HAS_CALL` or `SLOT_RETURNED`. On every iteration where the slot is still `SLOT_WAITING`, the background thread attempts `try_acquire_reader_lock()` and, if acquired, calls `read_frame()` on `stdin`:
+
+```rust
+if is_reader_thread || crate::try_acquire_reader_lock() {
+    let is_temp_pump = !is_reader_thread;
+    if let Ok((hdr, body)) = read_frame() {
+        crate::dispatch_frame(hdr, &body);
+    }
+    ...
+}
+```
+
+This temporary `stdin` pump was intended only for the case where the main reader thread is blocked inside a synchronous outer C call (such as `WaitForSingleObject`). Because `run()` releases `READER_BUSY` before `dispatch_frame()`, `READER_BUSY` is `false` while the main thread is mid-dispatch and between loop iterations.
+
+When Go handles a background callback (such as LiteRT-LM's `sharedTokenCallback`), it issues multiple re-entrant requests (`OP_CALL_REQ` with `parent_inv_id = invID` and `OP_READ_MEM_REQ`) followed by `OP_CB_RETURN`. The deadlock occurs via the following sequence:
+
+1. The main thread finishes `read_frame()` for `OP_CB_RETURN` (or a re-entrant request) and calls `release_reader_lock()`.
+2. Before the main thread runs `dispatch_frame()` to set the slot state to `SLOT_RETURNED` (or `SLOT_HAS_CALL`), the background callback thread wakes from `Sleep(1)`.
+3. The background callback thread observes that its slot state is still `SLOT_WAITING`, calls `try_acquire_reader_lock()`, succeeds, and calls `read_frame()` (`ReadFile(hStdin)`).
+4. The main thread finishes `dispatch_frame()`, updates the slot state, and spins forever in `while !try_acquire_reader_lock()` waiting for the background thread to release `READER_BUSY`.
+5. The background thread remains blocked forever inside `ReadFile(hStdin)` waiting for a frame that Go will never send, because Go already sent `OP_CB_RETURN` (or is waiting for the delegated call response).
+
+Existing tests in `dload_test.go` missed this because `TestDloadBackgroundThreadCallbackFunnelsParentInvIDToSameOSThread` only fired a single callback and immediately blocked the main worker thread inside `WaitForSingleObject`. In asynchronous streaming APIs such as `litert_lm_conversation_send_message_stream`, the outer C call returns `0` immediately and the main worker thread remains active in `run()` while background threads fire repeated callbacks.
+
+---
+
+## 2. Deterministic Cross-Platform Reproduction Test (Windows, Linux, macOS)
+
+We can reproduce this deadlock deterministically in `dload_test.go` across Windows, Linux, and macOS using only standard OS libraries (`kernel32.dll`, `libc.so.6` / `libpthread.so.0`, and `libSystem.B.dylib`) without LiteRT-LM:
+
+1. Resolve the platform's fire-and-forget thread spawn primitive and thread-ID / pid query function:
+   - **Windows (`kernel32.dll`):** `QueueUserWorkItem(trampoline, param, 0)` (or `CreateThread` + `CloseHandle`) and `GetCurrentThreadId()`.
+   - **Linux (`libc.so.6` / `libpthread.so.0`) & macOS (`libSystem.B.dylib`):** `pthread_create(&tidBuf, NULL, trampoline, param)` + `pthread_detach(tid)` (which spawns a background OS thread and returns immediately on the main `dload` thread) and `getpid()` / `pthread_self()`.
+2. Allocate a shared memory buffer via `DylibAlloc` + `DylibWriteMem`.
+3. Register a callback (`void* (*start_routine)(void*)` / `DWORD WINAPI (*LPTHREAD_START_ROUTINE)(LPVOID)`) via `DylibRegisterCallbackWithContext`.
+4. Inside the Go callback handler, mirror `sharedTokenCallback` by performing multiple re-entrant operations per invocation:
+   - Call the thread-ID / pid function via `DylibCall(..., invID)`.
+   - Read the allocated memory buffer twice via `DylibReadMem` (matching `GoString` chunk reads).
+   - Call the thread-ID / pid function two more times via `DylibCall(..., invID)` (matching `streamChunkIsFinal` and `streamChunkGetError`).
+   - Signal completion of the iteration on a Go channel.
+5. From the test goroutine, run a loop of 100 iterations where each iteration spawns the async background callback with `parentInvID = 0` (returning immediately so the main `dload` thread stays active in `run()`) and waits on the Go channel with a timeout.
+6. Before the fix, the main worker thread and the background OS thread collide on `READER_BUSY` and deadlock within a few iterations on all three operating systems.
+
+---
+
+## 3. Fix Plan
+
+1. **Hold `READER_BUSY` across the entire main loop in `dload/src/main.rs`:**
+   - Acquire `READER_BUSY` once before entering the `run()` loop and keep it held across both `read_frame()` and `dispatch_frame()`.
+   - Release `READER_BUSY` **only** around synchronous outer C function calls in `OP_CALL_REQ` (where `try_delegate_call` returned `false` and the current thread is the main reader thread), and re-acquire `READER_BUSY` immediately after `arch_call::call_c_func` returns before sending `OP_CALL_RESP`.
+2. **Ensure background callback threads never steal `READER_BUSY` while the main thread is active:**
+   - Because the main thread now holds `READER_BUSY` whenever it is reading or dispatching frames, `try_acquire_reader_lock()` in `on_callback()` can only succeed when the main thread is genuinely parked inside an outer `call_c_func` (such as `WaitForSingleObject`).
+   - When a background callback thread does temporarily acquire `READER_BUSY` during a blocking outer C call, check `inv_slot.state` immediately after acquiring `READER_BUSY` (before calling `read_frame()`) so it never enters a blocking `read_frame()` if the main thread already satisfied its slot just before releasing the lock.
+3. **Verify:**
+   - Add the `QueueUserWorkItem` reproduction test to `dload/dload_test.go` and confirm it fails (deadlocks) against the unpatched worker.
+   - Apply the fix in `dload/src/main.rs` and `dload/src/callbacks.rs`, rebuild the embedded `dload` workers, and verify that all `dload` tests and Kabibi's LiteRT-LM prompt execution succeed.
