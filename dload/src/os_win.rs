@@ -20,6 +20,66 @@ unsafe extern "system" {
         lpMem: *mut core::ffi::c_void,
     ) -> i32;
     fn GetCurrentThreadId() -> u32;
+    fn GetCurrentProcess() -> *mut core::ffi::c_void;
+    fn VirtualAlloc(
+        lpAddress: *mut core::ffi::c_void,
+        dwSize: usize,
+        flAllocationType: u32,
+        flProtect: u32,
+    ) -> *mut u8;
+    fn VirtualProtect(
+        lpAddress: *mut core::ffi::c_void,
+        dwSize: usize,
+        flNewProtect: u32,
+        lpflOldProtect: *mut u32,
+    ) -> i32;
+    fn FlushInstructionCache(
+        hProcess: *mut core::ffi::c_void,
+        lpBaseAddress: *const core::ffi::c_void,
+        dwSize: usize,
+    ) -> i32;
+}
+
+pub fn alloc_executable_page(init: impl FnOnce(&mut [u8])) -> Option<*const u8> {
+    const MEM_COMMIT_RESERVE: u32 = 0x1000 | 0x2000;
+    const PAGE_READWRITE: u32 = 0x04;
+    const PAGE_EXECUTE_READ: u32 = 0x20;
+    const PAGE_SIZE: usize = 4096;
+
+    let ptr = unsafe {
+        VirtualAlloc(
+            core::ptr::null_mut(),
+            PAGE_SIZE,
+            MEM_COMMIT_RESERVE,
+            PAGE_READWRITE,
+        )
+    };
+    if ptr.is_null() {
+        return None;
+    }
+    let slice = unsafe { core::slice::from_raw_parts_mut(ptr, PAGE_SIZE) };
+    init(slice);
+
+    let mut old_prot = 0u32;
+    let ok = unsafe {
+        VirtualProtect(
+            ptr as *mut core::ffi::c_void,
+            PAGE_SIZE,
+            PAGE_EXECUTE_READ,
+            &mut old_prot,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    unsafe {
+        FlushInstructionCache(
+            GetCurrentProcess(),
+            ptr as *const core::ffi::c_void,
+            PAGE_SIZE,
+        );
+    }
+    Some(ptr as *const u8)
 }
 
 pub fn current_thread_id() -> u64 {

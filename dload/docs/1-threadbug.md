@@ -51,7 +51,7 @@ Existing tests in `dload_test.go` missed this because `TestDloadBackgroundThread
 We can reproduce this deadlock deterministically in `dload_test.go` across Windows, Linux, and macOS using only standard OS libraries (`kernel32.dll`, `libc.so.6` / `libpthread.so.0`, and `libSystem.B.dylib`) without LiteRT-LM:
 
 1. Resolve the platform's fire-and-forget thread spawn primitive and thread-ID / pid query function:
-   - **Windows (`kernel32.dll`):** `QueueUserWorkItem(trampoline, param, 0)` (or `CreateThread` + `CloseHandle`) and `GetCurrentThreadId()`.
+   - **Windows (`kernel32.dll`):** `CreateThread(NULL, 0, trampoline, param, 0, NULL)` + `CloseHandle(hThread)` (note: Windows CFG/ntdll rejects `QueueUserWorkItem` targets located in dynamically allocated `VirtualAlloc` pages, whereas `CreateThread` invokes dynamic `PAGE_EXECUTE_READ` thunks directly) and `GetCurrentThreadId()`.
    - **Linux (`libc.so.6` / `libpthread.so.0`) & macOS (`libSystem.B.dylib`):** `pthread_create(&tidBuf, NULL, trampoline, param)` + `pthread_detach(tid)` (which spawns a background OS thread and returns immediately on the main `dload` thread) and `getpid()` / `pthread_self()`.
 2. Allocate a shared memory buffer via `DylibAlloc` + `DylibWriteMem`.
 3. Register a callback (`void* (*start_routine)(void*)` / `DWORD WINAPI (*LPTHREAD_START_ROUTINE)(LPVOID)`) via `DylibRegisterCallbackWithContext`.
@@ -69,6 +69,10 @@ We can reproduce this deadlock deterministically in `dload_test.go` across Windo
 2. **Ensure background callback threads never steal `READER_BUSY` while the main thread is active:**
    - Because the main thread now holds `READER_BUSY` whenever it is reading or dispatching frames, `try_acquire_reader_lock()` in `on_callback()` can only succeed when the main thread is genuinely parked inside an outer `call_c_func` (such as `WaitForSingleObject`).
    - When a background callback thread does temporarily acquire `READER_BUSY` during a blocking outer C call, check `inv_slot.state` immediately after acquiring `READER_BUSY` (before calling `read_frame()`) so it never enters a blocking `read_frame()` if the main thread already satisfied its slot just before releasing the lock.
-3. **Verify:**
-   - Add the `QueueUserWorkItem` reproduction test to `dload/dload_test.go` and confirm it fails (deadlocks) against the unpatched worker.
-   - Apply the fix in `dload/src/main.rs` and `dload/src/callbacks.rs`, rebuild the embedded `dload` workers, and verify that all `dload` tests and Kabibi's LiteRT-LM prompt execution succeed.
+3. **Dynamic `RW -> RX` Trampoline Page Allocator (`dload/src/callbacks.rs`, `os_win.rs`, `os_unix.rs`):**
+   - Replace the static 16-slot trampoline table with a dynamic page allocator (`SLOTS_PER_PAGE = 128`, 32-byte machine-code thunks for `x86_64`, `aarch64`, and `arm` backed by heap `Box<[AtomicU64; 128]>` `cb_id` arrays).
+   - Each 4 KB (16 KB on macOS) page is populated once while `RW`, flushed from the instruction cache, and permanently locked down to `RX` (`PAGE_EXECUTE_READ` / `PROT_READ | PROT_EXEC`). Registering or unregistering (`OP_CB_UNREG_REQ`) only mutates the `RW` `AtomicU64` array and allocates additional `RX` pages on demand.
+4. **Zero-NDK ELF `.so` Stubs for Linux & Android (`mohabbat/prebuild.go`):**
+   - Generate minimal 32-bit and 64-bit ELF `ET_DYN` shared-object stubs (`libdl.so` and `libc.so` with Glibc `libdl.so.2`/`libc.so.6` and Bionic `libdl.so`/`libc.so` `DT_SONAME`s) and link the 5 Linux/Android `dload` flavours with `-Bdynamic -L<stubDir> -ldl -lc`.
+5. **Verify:**
+   - Confirm `TestDloadAsyncStreamingCallbacksWithoutBlockingMainThread` and `TestDloadDynamicTrampolineMultiPageScaling` (300 simultaneous callbacks across 3 pages) pass on Windows, Rusticated WASM (`go run . dload -t`), and WSL Linux (`aarch64`).
