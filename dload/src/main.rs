@@ -225,7 +225,19 @@ pub fn dispatch_frame(hdr: Header, body: &[u8]) {
                 return;
             }
 
+            let release_during_call = parent_inv_id == 0
+                && os::current_thread_id() == callbacks::reader_thread_id();
+            if release_during_call {
+                release_reader_lock();
+            }
+
             let ret_val = unsafe { arch_call::call_c_func(sym_addr as usize, &args) };
+
+            if release_during_call {
+                while !try_acquire_reader_lock() {
+                    core::hint::spin_loop();
+                }
+            }
 
             let mut resp = Vec::new();
             resp.push(0); // ok
@@ -345,6 +357,13 @@ pub fn dispatch_frame(hdr: Header, body: &[u8]) {
             }
             let _ = send_frame(OP_CB_REG_RESP, hdr.id, &resp);
         }
+        OP_CB_UNREG_REQ => {
+            if body.len() >= 8 {
+                let cb_id = u64::from_le_bytes(body[0..8].try_into().unwrap());
+                callbacks::unregister_trampoline(cb_id);
+            }
+            let _ = send_frame(OP_CB_UNREG_RESP, hdr.id, &[0]);
+        }
         OP_CB_RETURN => {
             let mut ret_val = 0u64;
             if body.len() >= 13 {
@@ -381,17 +400,17 @@ fn run() {
     let handshake_payload: [u8; 4] = [os_kind, arch_kind, 1, 0];
     let _ = send_frame(OP_HANDSHAKE, 0, &handshake_payload);
 
+    while !try_acquire_reader_lock() {
+        core::hint::spin_loop();
+    }
     loop {
-        while !try_acquire_reader_lock() {
-            core::hint::spin_loop();
-        }
         let frame_res = read_frame();
-        release_reader_lock();
         match frame_res {
             Ok((hdr, body)) => dispatch_frame(hdr, &body),
             Err(()) => break,
         }
     }
+    release_reader_lock();
 }
 
 #[cfg(windows)]

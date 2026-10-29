@@ -68,7 +68,8 @@ static INVOCATION_SLOTS: [InvocationSlot; MAX_INVOCATION_SLOTS] = [
 ];
 
 // Maps trampoline slot to registered cb_id
-static mut SLOT_CB_IDS: [u64; 16] = [0; 16];
+pub const MAX_TRAMPOLINE_SLOTS: usize = 64;
+static mut SLOT_CB_IDS: [u64; MAX_TRAMPOLINE_SLOTS] = [0; MAX_TRAMPOLINE_SLOTS];
 
 pub fn set_reader_thread_id(tid: u64) {
     READER_THREAD_ID.store(tid, Ordering::Release);
@@ -126,32 +127,40 @@ pub fn try_delegate_call(parent_inv_id: u64, req_id: u64, sym_addr: usize, args:
     false
 }
 
-unsafe extern "C" fn trampoline_0(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize, a7: usize) -> usize { unsafe { on_callback(0, [a0, a1, a2, a3, a4, a5, a6, a7]) } }
-unsafe extern "C" fn trampoline_1(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize, a7: usize) -> usize { unsafe { on_callback(1, [a0, a1, a2, a3, a4, a5, a6, a7]) } }
-unsafe extern "C" fn trampoline_2(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize, a7: usize) -> usize { unsafe { on_callback(2, [a0, a1, a2, a3, a4, a5, a6, a7]) } }
-unsafe extern "C" fn trampoline_3(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize, a7: usize) -> usize { unsafe { on_callback(3, [a0, a1, a2, a3, a4, a5, a6, a7]) } }
-unsafe extern "C" fn trampoline_4(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize, a7: usize) -> usize { unsafe { on_callback(4, [a0, a1, a2, a3, a4, a5, a6, a7]) } }
-unsafe extern "C" fn trampoline_5(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize, a7: usize) -> usize { unsafe { on_callback(5, [a0, a1, a2, a3, a4, a5, a6, a7]) } }
-unsafe extern "C" fn trampoline_6(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize, a7: usize) -> usize { unsafe { on_callback(6, [a0, a1, a2, a3, a4, a5, a6, a7]) } }
-unsafe extern "C" fn trampoline_7(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize, a7: usize) -> usize { unsafe { on_callback(7, [a0, a1, a2, a3, a4, a5, a6, a7]) } }
-unsafe extern "C" fn trampoline_8(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize, a7: usize) -> usize { unsafe { on_callback(8, [a0, a1, a2, a3, a4, a5, a6, a7]) } }
-unsafe extern "C" fn trampoline_9(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize, a7: usize) -> usize { unsafe { on_callback(9, [a0, a1, a2, a3, a4, a5, a6, a7]) } }
-unsafe extern "C" fn trampoline_10(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize, a7: usize) -> usize { unsafe { on_callback(10, [a0, a1, a2, a3, a4, a5, a6, a7]) } }
-unsafe extern "C" fn trampoline_11(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize, a7: usize) -> usize { unsafe { on_callback(11, [a0, a1, a2, a3, a4, a5, a6, a7]) } }
-unsafe extern "C" fn trampoline_12(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize, a7: usize) -> usize { unsafe { on_callback(12, [a0, a1, a2, a3, a4, a5, a6, a7]) } }
-unsafe extern "C" fn trampoline_13(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize, a7: usize) -> usize { unsafe { on_callback(13, [a0, a1, a2, a3, a4, a5, a6, a7]) } }
-unsafe extern "C" fn trampoline_14(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize, a7: usize) -> usize { unsafe { on_callback(14, [a0, a1, a2, a3, a4, a5, a6, a7]) } }
-unsafe extern "C" fn trampoline_15(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize, a7: usize) -> usize { unsafe { on_callback(15, [a0, a1, a2, a3, a4, a5, a6, a7]) } }
+macro_rules! define_trampolines {
+    ($($idx:expr => $name:ident),+ $(,)?) => {
+        $(
+            unsafe extern "C" fn $name(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize, a7: usize) -> usize {
+                unsafe { on_callback($idx, [a0, a1, a2, a3, a4, a5, a6, a7]) }
+            }
+        )+
+        const TRAMPOLINES: [unsafe extern "C" fn(usize, usize, usize, usize, usize, usize, usize, usize) -> usize; MAX_TRAMPOLINE_SLOTS] = [
+            $($name),+
+        ];
+    };
+}
 
-const TRAMPOLINES: [unsafe extern "C" fn(usize, usize, usize, usize, usize, usize, usize, usize) -> usize; 16] = [
-    trampoline_0, trampoline_1, trampoline_2, trampoline_3,
-    trampoline_4, trampoline_5, trampoline_6, trampoline_7,
-    trampoline_8, trampoline_9, trampoline_10, trampoline_11,
-    trampoline_12, trampoline_13, trampoline_14, trampoline_15,
-];
+define_trampolines! {
+    0 => trampoline_0, 1 => trampoline_1, 2 => trampoline_2, 3 => trampoline_3,
+    4 => trampoline_4, 5 => trampoline_5, 6 => trampoline_6, 7 => trampoline_7,
+    8 => trampoline_8, 9 => trampoline_9, 10 => trampoline_10, 11 => trampoline_11,
+    12 => trampoline_12, 13 => trampoline_13, 14 => trampoline_14, 15 => trampoline_15,
+    16 => trampoline_16, 17 => trampoline_17, 18 => trampoline_18, 19 => trampoline_19,
+    20 => trampoline_20, 21 => trampoline_21, 22 => trampoline_22, 23 => trampoline_23,
+    24 => trampoline_24, 25 => trampoline_25, 26 => trampoline_26, 27 => trampoline_27,
+    28 => trampoline_28, 29 => trampoline_29, 30 => trampoline_30, 31 => trampoline_31,
+    32 => trampoline_32, 33 => trampoline_33, 34 => trampoline_34, 35 => trampoline_35,
+    36 => trampoline_36, 37 => trampoline_37, 38 => trampoline_38, 39 => trampoline_39,
+    40 => trampoline_40, 41 => trampoline_41, 42 => trampoline_42, 43 => trampoline_43,
+    44 => trampoline_44, 45 => trampoline_45, 46 => trampoline_46, 47 => trampoline_47,
+    48 => trampoline_48, 49 => trampoline_49, 50 => trampoline_50, 51 => trampoline_51,
+    52 => trampoline_52, 53 => trampoline_53, 54 => trampoline_54, 55 => trampoline_55,
+    56 => trampoline_56, 57 => trampoline_57, 58 => trampoline_58, 59 => trampoline_59,
+    60 => trampoline_60, 61 => trampoline_61, 62 => trampoline_62, 63 => trampoline_63,
+}
 
 pub fn register_trampoline(cb_id: u64) -> Option<u64> {
-    for i in 0..16 {
+    for i in 0..MAX_TRAMPOLINE_SLOTS {
         unsafe {
             if SLOT_CB_IDS[i] == 0 || SLOT_CB_IDS[i] == cb_id {
                 SLOT_CB_IDS[i] = cb_id;
@@ -160,6 +169,19 @@ pub fn register_trampoline(cb_id: u64) -> Option<u64> {
         }
     }
     None
+}
+
+pub fn unregister_trampoline(cb_id: u64) {
+    if cb_id == 0 {
+        return;
+    }
+    for i in 0..MAX_TRAMPOLINE_SLOTS {
+        unsafe {
+            if SLOT_CB_IDS[i] == cb_id {
+                SLOT_CB_IDS[i] = 0;
+            }
+        }
+    }
 }
 
 fn alloc_invocation_slot(inv_id: u64, tid: u64) -> &'static InvocationSlot {
@@ -228,6 +250,10 @@ unsafe fn on_callback(slot_idx: usize, args: [usize; 8]) -> usize {
             // reader thread is currently blocked inside a synchronous C call (such
             // as WaitForSingleObject) so we can temporarily pump stdin frames!
             let is_temp_pump = !is_reader_thread;
+            if is_temp_pump && inv_slot.state.load(Ordering::Acquire) != SLOT_WAITING {
+                crate::release_reader_lock();
+                continue;
+            }
             if let Ok((hdr, body)) = read_frame() {
                 crate::dispatch_frame(hdr, &body);
             } else {

@@ -28,6 +28,12 @@ type handleEntry struct {
 	rawHandle uint64
 }
 
+type cbEntry struct {
+	client     *WorkerClient
+	cbID       uint64
+	trampoline uint64
+}
+
 var (
 	handlesMu    sync.RWMutex
 	handles      = make(map[uint64]handleEntry)
@@ -40,7 +46,7 @@ var (
 	defaultClientOnce sync.Once
 
 	cbEntriesMu sync.Mutex
-	cbEntries   = make(map[unsafe.Pointer]uint64)
+	cbEntries   = make(map[unsafe.Pointer]cbEntry)
 )
 
 func clientForSym(sym uint64) (*WorkerClient, error) {
@@ -340,11 +346,6 @@ func DylibRegisterCallbackWithContext(libHandle uint64, sig []byte, cbOvPtr unsa
 	}
 
 	cbID := client.registerCallback(fn)
-	if cbOvPtr != nil {
-		cbEntriesMu.Lock()
-		cbEntries[cbOvPtr] = cbID
-		cbEntriesMu.Unlock()
-	}
 
 	payload := make([]byte, 8+4+len(sig))
 	binary.LittleEndian.PutUint64(payload[0:8], cbID)
@@ -361,6 +362,11 @@ func DylibRegisterCallbackWithContext(libHandle uint64, sig []byte, cbOvPtr unsa
 		return 0, errors.New("register callback failed")
 	}
 	trampoline := binary.LittleEndian.Uint64(resp.body[1:9])
+	if cbOvPtr != nil {
+		cbEntriesMu.Lock()
+		cbEntries[cbOvPtr] = cbEntry{client: client, cbID: cbID, trampoline: trampoline}
+		cbEntriesMu.Unlock()
+	}
 	symsMu.Lock()
 	syms[trampoline] = client
 	symsMu.Unlock()
@@ -369,16 +375,17 @@ func DylibRegisterCallbackWithContext(libHandle uint64, sig []byte, cbOvPtr unsa
 
 func DylibUnregisterCallback(cbOvPtr unsafe.Pointer) {
 	cbEntriesMu.Lock()
-	cbID, ok := cbEntries[cbOvPtr]
+	entry, ok := cbEntries[cbOvPtr]
 	if ok {
 		delete(cbEntries, cbOvPtr)
 	}
 	cbEntriesMu.Unlock()
 
-	if ok {
-		if c, err := getDefaultClient(); err == nil && c != nil {
-			c.unregisterCallback(cbID)
-		}
+	if ok && entry.client != nil {
+		entry.client.unregisterCallback(entry.cbID)
+		var payload [8]byte
+		binary.LittleEndian.PutUint64(payload[:], entry.cbID)
+		_, _ = entry.client.roundTrip(opCbUnregReq, payload[:])
 	}
 }
 
