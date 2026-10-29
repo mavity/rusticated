@@ -39,6 +39,8 @@ const (
 	opCbRegResp    = 0x41
 	opCbInvoke     = 0x42
 	opCbReturn     = 0x43
+	opCbUnregReq   = 0x44
+	opCbUnregResp  = 0x45
 )
 
 type frame struct {

@@ -23,6 +23,8 @@ pub const OP_CB_REG_REQ: u8 = 0x40;
 pub const OP_CB_REG_RESP: u8 = 0x41;
 pub const OP_CB_INVOKE: u8 = 0x42;
 pub const OP_CB_RETURN: u8 = 0x43;
+pub const OP_CB_UNREG_REQ: u8 = 0x44;
+pub const OP_CB_UNREG_RESP: u8 = 0x45;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Header {
