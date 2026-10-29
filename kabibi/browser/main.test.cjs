@@ -133,6 +133,15 @@ class FakeTerminal {
     this.inputs = [];
     this.selection = 'selected text';
     this.customKeyEventHandler = null;
+    this.unicode = {
+      activeVersion: '6',
+      versions: ['6'],
+      register(provider) {
+        if (provider && provider.version && !this.versions.includes(provider.version)) {
+          this.versions.push(provider.version);
+        }
+      }
+    };
   }
 
   open(element) {
@@ -141,6 +150,9 @@ class FakeTerminal {
 
   loadAddon(addon) {
     this.loadedAddons.push(addon);
+    if (addon && typeof addon.activate === 'function') {
+      addon.activate(this);
+    }
   }
 
   onData(callback) {
@@ -971,3 +983,62 @@ test('bootFromGuest starts CRT super-demo when __super_demo__ and WebGL2 are ava
   assert.ok(attachedCallbacks);
   mounted.dispose();
 });
+
+test('bootFromGuest loads @xterm/addon-unicode-graphemes@0.4.0 and activates 15-graphemes with emoji font fallbacks', async () => {
+  const { document, window, context } = createHarness();
+  context.__super_demo__ = false;
+
+  let attachedCallbacks = null;
+  const activeHost = {
+    hasTerminal() { return Boolean(attachedCallbacks); },
+    attachTerminal(callbacks) { attachedCallbacks = callbacks; },
+    pushStdin() {},
+    triggerSignal() {},
+    terminate() {}
+  };
+  context.washmhostExports = {
+    getActiveHost: () => activeHost
+  };
+
+  class FakeUnicodeGraphemesAddon {
+    activate(term) {
+      term.unicode.register({ version: '15' });
+      term.unicode.register({ version: '15-graphemes' });
+      term.unicode.activeVersion = '6';
+    }
+  }
+
+  const importedUrls = [];
+  const mounted = await context.KabibiBrowser.bootFromGuest({
+    document,
+    window,
+    webgl2Supported: false,
+    importModule: async (url) => {
+      importedUrls.push(url);
+      if (url.includes('addon-unicode-graphemes')) {
+        return { UnicodeGraphemesAddon: FakeUnicodeGraphemesAddon };
+      }
+      return {
+        Terminal: FakeTerminal,
+        FitAddon: FakeFitAddon
+      };
+    }
+  });
+
+  assert.ok(mounted);
+  assert.ok(
+    importedUrls.includes('https://cdn.jsdelivr.net/npm/@xterm/addon-unicode-graphemes@0.4.0/+esm'),
+    'expected @xterm/addon-unicode-graphemes@0.4.0/+esm to be imported'
+  );
+  assert.equal(mounted.term.options.allowProposedApi, true);
+  assert.equal(mounted.term.options.customGlyphs, true);
+  assert.equal(mounted.term.options.rescaleOverlappingGlyphs, true);
+  assert.match(mounted.term.options.fontFamily, /Apple Color Emoji/);
+  assert.match(mounted.term.options.fontFamily, /Segoe UI Emoji/);
+  assert.match(mounted.term.options.fontFamily, /Noto Color Emoji/);
+  assert.ok(mounted.unicodeGraphemesAddon instanceof FakeUnicodeGraphemesAddon);
+  assert.equal(mounted.term.unicode.activeVersion, '15-graphemes');
+
+  mounted.dispose();
+});
+
