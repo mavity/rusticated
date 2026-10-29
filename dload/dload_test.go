@@ -659,38 +659,38 @@ func TestDloadAsyncStreamingCallbacksWithoutBlockingMainThread(t *testing.T) {
 		t.Fatalf("DylibWriteMem(sharedBuf): %v", err)
 	}
 
+	// In `dload/src/main.rs`:
+	//   let frame_res = read_frame();
+	//   release_reader_lock();
+	//   match frame_res {
+	//       Ok((hdr, body)) => dispatch_frame(hdr, &body),
+	//       Err(()) => break,
+	//   }
+	// When the main thread finishes `read_frame()` for a re-entrant `OP_CALL_REQ`
+	// (`parent_inv_id = invID`), it calls `release_reader_lock()` (`READER_BUSY = false`)
+	// BEFORE `dispatch_frame` parses `args` and calls `try_delegate_call` to transition
+	// `inv_slot.state` from `SLOT_WAITING` to `SLOT_HAS_CALL`.
+	// If the background callback thread wakes from `Sleep(1)` / `usleep(500)` during
+	// that window, it observes `inv_slot.state == SLOT_WAITING` and `READER_BUSY == false`,
+	// steals `READER_BUSY`, and calls `read_frame()` on an empty stdin pipe while Go
+	// is waiting for `OP_CALL_RESP` and the main thread spins on `try_acquire_reader_lock()`.
+	manyArgs := make([]uint64, 16_000_000)
 	var cbMarker int
 	cbSig := []byte{0x60, 1, WasmTypeI64, 1, WasmTypeI64}
-	iterDone := make(chan uint64, 128)
-	cbErrCh := make(chan error, 16)
+	deadlockTrampDone := make(chan error, 1)
 
-	trampoline, err := DylibRegisterCallbackWithContext(handle, cbSig, unsafe.Pointer(&cbMarker), 0,
-		func(invID uint64, _ uint64, args []uint64) []uint64 {
-			// Mirror sharedTokenCallback:
-			// 1. Re-entrant call (streamChunkGetText)
-			if _, cErr := DylibCall(symSelf, selfSig, nil, invID); cErr != nil {
-				cbErrCh <- cErr
+	dlTramp, err := DylibRegisterCallbackWithContext(handle, cbSig, unsafe.Pointer(&cbMarker), 0,
+		func(invID uint64, _ uint64, _ []uint64) []uint64 {
+			if _, cErr := DylibCall(symSelf, selfSig, manyArgs, invID); cErr != nil {
+				deadlockTrampDone <- cErr
 				return []uint64{0}
 			}
-			// 2. Memory reads (ptrToString -> GoString)
-			tmp := make([]byte, 64)
-			for k := 0; k < 40; k++ {
-				if rErr := DylibReadMem(handle, sharedBuf, tmp); rErr != nil {
-					cbErrCh <- rErr
-					return []uint64{0}
-				}
-			}
-			// 3. Re-entrant call (streamChunkIsFinal)
-			if _, cErr := DylibCall(symSelf, selfSig, nil, invID); cErr != nil {
-				cbErrCh <- cErr
+			var tmp [64]byte
+			if rErr := DylibReadMem(handle, sharedBuf, tmp[:]); rErr != nil {
+				deadlockTrampDone <- rErr
 				return []uint64{0}
 			}
-			// 4. Re-entrant call (streamChunkGetError)
-			if _, cErr := DylibCall(symSelf, selfSig, nil, invID); cErr != nil {
-				cbErrCh <- cErr
-				return []uint64{0}
-			}
-			iterDone <- args[0]
+			deadlockTrampDone <- nil
 			return []uint64{0}
 		})
 	if err != nil {
@@ -698,32 +698,26 @@ func TestDloadAsyncStreamingCallbacksWithoutBlockingMainThread(t *testing.T) {
 	}
 	defer DylibUnregisterCallback(unsafe.Pointer(&cbMarker))
 
-	// Register a second trampoline that serves as the background OS thread's
-	// entry point. Inside its Go handler, it sleeps briefly so the outer
-	// spawnAsync call has completely finished and the main dload thread is
-	// sitting idle in read_frame(), and then we see what happens when multiple
-	// background threads fire callbacks concurrently while the main thread is NOT
-	// in WaitForSingleObject!
-	// Even better: what if 8 background threads are spawned at once via
-	// spawnAsync, and we DO NOT call WaitForSingleObject on the main thread,
-	// instead waiting ONLY on the Go channel `iterDone`?
-	const numBatches = 15
-	const batchSize = 8
-	for batch := 0; batch < numBatches; batch++ {
-		for j := 0; j < batchSize; j++ {
-			id := uint64(batch*batchSize + j + 1)
-			if err := spawnAsync(trampoline, id); err != nil {
-				t.Fatalf("spawnAsync(%d): %v", id, err)
+	for attempt := 1; attempt <= 5; attempt++ {
+		spawnDone := make(chan error, 1)
+		go func() {
+			spawnDone <- spawnAsync(dlTramp, uint64(attempt))
+		}()
+		select {
+		case sErr := <-spawnDone:
+			if sErr != nil {
+				t.Fatalf("spawnAsync(%d): %v", attempt, sErr)
 			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("DEADLOCK REPRODUCED on attempt %d inside spawnAsync: main thread released READER_BUSY before dispatch_frame, background callback thread stole READER_BUSY and blocked in read_frame()", attempt)
 		}
-		for j := 0; j < batchSize; j++ {
-			select {
-			case cbErr := <-cbErrCh:
-				t.Fatalf("batch %d callback error: %v", batch, cbErr)
-			case <-iterDone:
-			case <-time.After(3 * time.Second):
-				t.Fatalf("deadlock on batch %d (callback %d/%d) waiting for async background callback while main dload thread is active", batch, j+1, batchSize)
+		select {
+		case cErr := <-deadlockTrampDone:
+			if cErr != nil {
+				t.Fatalf("attempt %d re-entrant DylibCall failed: %v", attempt, cErr)
 			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("DEADLOCK REPRODUCED on attempt %d: main thread released READER_BUSY before dispatch_frame, background callback thread stole READER_BUSY and blocked in read_frame()", attempt)
 		}
 	}
 }

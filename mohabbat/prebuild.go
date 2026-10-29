@@ -1,6 +1,8 @@
 package mohabbat
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -983,6 +985,15 @@ func buildDloadWorkers(ws string, verbose bool) error {
 	if err := ensureDarwinStubs(darwinStubsDir); err != nil {
 		return err
 	}
+	elfStubsBaseDir := filepath.Join(ws, "target", "dload-elf-stubs")
+	if err := ensureElfDloadStubs(elfStubsBaseDir); err != nil {
+		return err
+	}
+	gnuAmd64Stubs := filepath.ToSlash(filepath.Join(elfStubsBaseDir, "linux-gnu-amd64"))
+	gnuArm64Stubs := filepath.ToSlash(filepath.Join(elfStubsBaseDir, "linux-gnu-arm64"))
+	gnuArm32Stubs := filepath.ToSlash(filepath.Join(elfStubsBaseDir, "linux-gnu-arm32"))
+	androidArm64Stubs := filepath.ToSlash(filepath.Join(elfStubsBaseDir, "linux-android-arm64"))
+	androidArm32Stubs := filepath.ToSlash(filepath.Join(elfStubsBaseDir, "linux-android-arm32"))
 
 	type workerTarget struct {
 		flavour   string
@@ -1013,31 +1024,31 @@ func buildDloadWorkers(ws string, verbose bool) error {
 		{
 			flavour:   "linux-gnu-amd64",
 			target:    "x86_64-unknown-linux-musl",
-			rustflags: []string{"'-C'", "'link-self-contained=no'", "'-C'", "'linker=rust-lld'", "'-C'", "'linker-flavor=ld.lld'", "'-C'", "'relocation-model=pic'", "'-C'", "'link-arg=-pie'", "'-C'", "'link-arg=--dynamic-linker=/lib64/ld-linux-x86-64.so.2'", "'-C'", "'link-arg=--unresolved-symbols=ignore-all'"},
+			rustflags: []string{"'-C'", "'link-self-contained=no'", "'-C'", "'linker=rust-lld'", "'-C'", "'linker-flavor=ld.lld'", "'-C'", "'relocation-model=pic'", "'-C'", "'link-arg=-Bdynamic'", "'-C'", "'link-arg=-pie'", "'-C'", "'link-arg=--dynamic-linker=/lib64/ld-linux-x86-64.so.2'", "'-C'", fmt.Sprintf("'link-arg=-L%s'", gnuAmd64Stubs), "'-C'", "'link-arg=-ldl'", "'-C'", "'link-arg=-lc'"},
 			outExt:    "",
 		},
 		{
 			flavour:   "linux-gnu-arm64",
 			target:    "aarch64-unknown-linux-musl",
-			rustflags: []string{"'-C'", "'link-self-contained=no'", "'-C'", "'linker=rust-lld'", "'-C'", "'linker-flavor=ld.lld'", "'-C'", "'relocation-model=pic'", "'-C'", "'link-arg=-pie'", "'-C'", "'link-arg=--dynamic-linker=/lib/ld-linux-aarch64.so.1'", "'-C'", "'link-arg=--unresolved-symbols=ignore-all'"},
+			rustflags: []string{"'-C'", "'link-self-contained=no'", "'-C'", "'linker=rust-lld'", "'-C'", "'linker-flavor=ld.lld'", "'-C'", "'relocation-model=pic'", "'-C'", "'link-arg=-Bdynamic'", "'-C'", "'link-arg=-pie'", "'-C'", "'link-arg=--dynamic-linker=/lib/ld-linux-aarch64.so.1'", "'-C'", fmt.Sprintf("'link-arg=-L%s'", gnuArm64Stubs), "'-C'", "'link-arg=-ldl'", "'-C'", "'link-arg=-lc'"},
 			outExt:    "",
 		},
 		{
 			flavour:   "linux-gnu-arm32",
 			target:    "armv7-unknown-linux-musleabihf",
-			rustflags: []string{"'-C'", "'link-self-contained=no'", "'-C'", "'linker=rust-lld'", "'-C'", "'linker-flavor=ld.lld'", "'-C'", "'relocation-model=pic'", "'-C'", "'link-arg=-pie'", "'-C'", "'link-arg=--dynamic-linker=/lib/ld-linux-armhf.so.3'", "'-C'", "'link-arg=--unresolved-symbols=ignore-all'"},
+			rustflags: []string{"'-C'", "'link-self-contained=no'", "'-C'", "'linker=rust-lld'", "'-C'", "'linker-flavor=ld.lld'", "'-C'", "'relocation-model=pic'", "'-C'", "'link-arg=-Bdynamic'", "'-C'", "'link-arg=-pie'", "'-C'", "'link-arg=--dynamic-linker=/lib/ld-linux-armhf.so.3'", "'-C'", fmt.Sprintf("'link-arg=-L%s'", gnuArm32Stubs), "'-C'", "'link-arg=-ldl'", "'-C'", "'link-arg=-lc'"},
 			outExt:    "",
 		},
 		{
 			flavour:   "linux-android-arm64",
 			target:    "aarch64-unknown-linux-musl",
-			rustflags: []string{"'-C'", "'link-self-contained=no'", "'-C'", "'linker=rust-lld'", "'-C'", "'linker-flavor=ld.lld'", "'-C'", "'relocation-model=pic'", "'-C'", "'link-arg=-pie'", "'-C'", "'link-arg=--dynamic-linker=/system/bin/linker64'", "'-C'", "'link-arg=--unresolved-symbols=ignore-all'"},
+			rustflags: []string{"'-C'", "'link-self-contained=no'", "'-C'", "'linker=rust-lld'", "'-C'", "'linker-flavor=ld.lld'", "'-C'", "'relocation-model=pic'", "'-C'", "'link-arg=-Bdynamic'", "'-C'", "'link-arg=-pie'", "'-C'", "'link-arg=--dynamic-linker=/system/bin/linker64'", "'-C'", fmt.Sprintf("'link-arg=-L%s'", androidArm64Stubs), "'-C'", "'link-arg=-ldl'", "'-C'", "'link-arg=-lc'"},
 			outExt:    "",
 		},
 		{
 			flavour:   "linux-android-arm32",
 			target:    "armv7-unknown-linux-musleabihf",
-			rustflags: []string{"'-C'", "'link-self-contained=no'", "'-C'", "'linker=rust-lld'", "'-C'", "'linker-flavor=ld.lld'", "'-C'", "'relocation-model=pic'", "'-C'", "'link-arg=-pie'", "'-C'", "'link-arg=--dynamic-linker=/system/bin/linker'", "'-C'", "'link-arg=--unresolved-symbols=ignore-all'"},
+			rustflags: []string{"'-C'", "'link-self-contained=no'", "'-C'", "'linker=rust-lld'", "'-C'", "'linker-flavor=ld.lld'", "'-C'", "'relocation-model=pic'", "'-C'", "'link-arg=-Bdynamic'", "'-C'", "'link-arg=-pie'", "'-C'", "'link-arg=--dynamic-linker=/system/bin/linker'", "'-C'", fmt.Sprintf("'link-arg=-L%s'", androidArm32Stubs), "'-C'", "'link-arg=-ldl'", "'-C'", "'link-arg=-lc'"},
 			outExt:    "",
 		},
 	}
@@ -1075,3 +1086,260 @@ func buildDloadWorkers(ws string, verbose bool) error {
 	vlogf(verbose, "🍆  dload workers built and embedded.\n")
 	return nil
 }
+
+func ensureElfDloadStubs(baseDir string) error {
+	dlSyms := []string{"dlopen", "dlsym", "dlclose", "dlerror"}
+	cSyms := []string{"malloc", "free", "read", "write", "usleep", "getauxval", "_exit"}
+
+	type stubSpec struct {
+		subDir    string
+		machine   uint16
+		is64      bool
+		dlSoname  string
+		cSoname   string
+	}
+	specs := []stubSpec{
+		{subDir: "linux-gnu-amd64", machine: 62, is64: true, dlSoname: "libdl.so.2", cSoname: "libc.so.6"},
+		{subDir: "linux-gnu-arm64", machine: 183, is64: true, dlSoname: "libdl.so.2", cSoname: "libc.so.6"},
+		{subDir: "linux-gnu-arm32", machine: 40, is64: false, dlSoname: "libdl.so.2", cSoname: "libc.so.6"},
+		{subDir: "linux-android-arm64", machine: 183, is64: true, dlSoname: "libdl.so", cSoname: "libc.so"},
+		{subDir: "linux-android-arm32", machine: 40, is64: false, dlSoname: "libdl.so", cSoname: "libc.so"},
+	}
+
+	for _, sp := range specs {
+		dir := filepath.Join(baseDir, sp.subDir)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", dir, err)
+		}
+		dlBytes := buildMinimalElfSharedStub(sp.machine, sp.is64, sp.dlSoname, dlSyms)
+		if err := writeFileIfChanged(filepath.Join(dir, "libdl.so"), dlBytes); err != nil {
+			return fmt.Errorf("write %s/libdl.so: %w", sp.subDir, err)
+		}
+		cBytes := buildMinimalElfSharedStub(sp.machine, sp.is64, sp.cSoname, cSyms)
+		if err := writeFileIfChanged(filepath.Join(dir, "libc.so"), cBytes); err != nil {
+			return fmt.Errorf("write %s/libc.so: %w", sp.subDir, err)
+		}
+	}
+	return nil
+}
+
+func buildMinimalElfSharedStub(machine uint16, is64 bool, soname string, symbols []string) []byte {
+	// Section indices:
+	// 0: NULL
+	// 1: .dynsym
+	// 2: .dynstr
+	// 3: .dynamic
+	// 4: .text (16 bytes dummy code so exported FUNC symbols have a valid section)
+	// 5: .shstrtab
+	var dynstr bytes.Buffer
+	dynstr.WriteByte(0)
+	sonameOff := uint32(dynstr.Len())
+	dynstr.WriteString(soname)
+	dynstr.WriteByte(0)
+
+	symOffsets := make([]uint32, len(symbols))
+	for i, s := range symbols {
+		symOffsets[i] = uint32(dynstr.Len())
+		dynstr.WriteString(s)
+		dynstr.WriteByte(0)
+	}
+	for dynstr.Len()%8 != 0 {
+		dynstr.WriteByte(0)
+	}
+	dynstrBytes := dynstr.Bytes()
+
+	var shstrtab bytes.Buffer
+	shstrtab.WriteByte(0)
+	shOffDynsym := uint32(shstrtab.Len())
+	shstrtab.WriteString(".dynsym\x00")
+	shOffDynstr := uint32(shstrtab.Len())
+	shstrtab.WriteString(".dynstr\x00")
+	shOffDynamic := uint32(shstrtab.Len())
+	shstrtab.WriteString(".dynamic\x00")
+	shOffText := uint32(shstrtab.Len())
+	shstrtab.WriteString(".text\x00")
+	shOffShstrtab := uint32(shstrtab.Len())
+	shstrtab.WriteString(".shstrtab\x00")
+	for shstrtab.Len()%8 != 0 {
+		shstrtab.WriteByte(0)
+	}
+	shstrtabBytes := shstrtab.Bytes()
+
+	const stInfoGlobalFunc = (1 << 4) | 2 // STB_GLOBAL | STT_FUNC
+	const textSectionIdx = 4
+
+	var dynsym bytes.Buffer
+	if is64 {
+		// Null symbol (24 bytes)
+		dynsym.Write(make([]byte, 24))
+		for i, nameOff := range symOffsets {
+			var ent [24]byte
+			binary.LittleEndian.PutUint32(ent[0:4], nameOff)
+			ent[4] = stInfoGlobalFunc
+			ent[5] = 0 // STV_DEFAULT
+			binary.LittleEndian.PutUint16(ent[6:8], textSectionIdx)
+			binary.LittleEndian.PutUint64(ent[8:16], uint64(0x1000+i*4))
+			binary.LittleEndian.PutUint64(ent[16:24], 4)
+			dynsym.Write(ent[:])
+		}
+	} else {
+		// Null symbol (16 bytes)
+		dynsym.Write(make([]byte, 16))
+		for i, nameOff := range symOffsets {
+			var ent [16]byte
+			binary.LittleEndian.PutUint32(ent[0:4], nameOff)
+			binary.LittleEndian.PutUint32(ent[4:8], uint32(0x1000+i*4))
+			binary.LittleEndian.PutUint32(ent[8:12], 4)
+			ent[12] = stInfoGlobalFunc
+			ent[13] = 0 // STV_DEFAULT
+			binary.LittleEndian.PutUint16(ent[14:16], textSectionIdx)
+			dynsym.Write(ent[:])
+		}
+	}
+	dynsymBytes := dynsym.Bytes()
+
+	// .dynamic entries: DT_SONAME (14), DT_STRTAB (5), DT_SYMTAB (6), DT_STRSZ (10), DT_SYMENT (11), DT_NULL (0)
+	var dynamic bytes.Buffer
+	if is64 {
+		putDyn64 := func(tag uint64, val uint64) {
+			var d [16]byte
+			binary.LittleEndian.PutUint64(d[0:8], tag)
+			binary.LittleEndian.PutUint64(d[8:16], val)
+			dynamic.Write(d[:])
+		}
+		putDyn64(14, uint64(sonameOff))
+		putDyn64(5, 0)
+		putDyn64(6, 0)
+		putDyn64(10, uint64(len(dynstrBytes)))
+		putDyn64(11, 24)
+		putDyn64(0, 0)
+	} else {
+		putDyn32 := func(tag uint32, val uint32) {
+			var d [8]byte
+			binary.LittleEndian.PutUint32(d[0:4], tag)
+			binary.LittleEndian.PutUint32(d[4:8], val)
+			dynamic.Write(d[:])
+		}
+		putDyn32(14, sonameOff)
+		putDyn32(5, 0)
+		putDyn32(6, 0)
+		putDyn32(10, uint32(len(dynstrBytes)))
+		putDyn32(11, 16)
+		putDyn32(0, 0)
+	}
+	dynamicBytes := dynamic.Bytes()
+	textBytes := make([]byte, 64)
+
+	ehdrSize := uint32(52)
+	shEntSize := uint32(40)
+	align := uint32(4)
+	if is64 {
+		ehdrSize = 64
+		shEntSize = 64
+		align = 8
+	}
+
+	offDynsym := ehdrSize
+	offDynstr := offDynsym + uint32(len(dynsymBytes))
+	offDynamic := offDynstr + uint32(len(dynstrBytes))
+	offText := offDynamic + uint32(len(dynamicBytes))
+	offShstrtab := offText + uint32(len(textBytes))
+	offShdr := offShstrtab + uint32(len(shstrtabBytes))
+
+	var out bytes.Buffer
+	if is64 {
+		var ehdr [64]byte
+		copy(ehdr[0:4], "\x7fELF")
+		ehdr[4] = 2 // ELFCLASS64
+		ehdr[5] = 1 // ELFDATA2LSB
+		ehdr[6] = 1 // EV_CURRENT
+		binary.LittleEndian.PutUint16(ehdr[16:18], 3) // ET_DYN
+		binary.LittleEndian.PutUint16(ehdr[18:20], machine)
+		binary.LittleEndian.PutUint32(ehdr[20:24], 1) // EV_CURRENT
+		binary.LittleEndian.PutUint64(ehdr[40:48], uint64(offShdr))
+		binary.LittleEndian.PutUint16(ehdr[52:54], 64)
+		binary.LittleEndian.PutUint16(ehdr[58:60], 64)
+		binary.LittleEndian.PutUint16(ehdr[60:62], 6) // 6 sections
+		binary.LittleEndian.PutUint16(ehdr[62:64], 5) // shstrndx = 5
+		out.Write(ehdr[:])
+	} else {
+		var ehdr [52]byte
+		copy(ehdr[0:4], "\x7fELF")
+		ehdr[4] = 1 // ELFCLASS32
+		ehdr[5] = 1 // ELFDATA2LSB
+		ehdr[6] = 1 // EV_CURRENT
+		binary.LittleEndian.PutUint16(ehdr[16:18], 3) // ET_DYN
+		binary.LittleEndian.PutUint16(ehdr[18:20], machine)
+		binary.LittleEndian.PutUint32(ehdr[20:24], 1) // EV_CURRENT
+		binary.LittleEndian.PutUint32(ehdr[32:36], offShdr)
+		if machine == 40 {
+			// EF_ARM_EABI_VER5 | EF_ARM_ABI_FLOAT_HARD
+			binary.LittleEndian.PutUint32(ehdr[36:40], 0x05000400)
+		}
+		binary.LittleEndian.PutUint16(ehdr[40:42], 52)
+		binary.LittleEndian.PutUint16(ehdr[46:48], 40)
+		binary.LittleEndian.PutUint16(ehdr[48:50], 6) // 6 sections
+		binary.LittleEndian.PutUint16(ehdr[50:52], 5) // shstrndx = 5
+		out.Write(ehdr[:])
+	}
+
+	out.Write(dynsymBytes)
+	out.Write(dynstrBytes)
+	out.Write(dynamicBytes)
+	out.Write(textBytes)
+	out.Write(shstrtabBytes)
+
+	writeShdr := func(name, shType, flags, addr, offset, size, link, info, addralign, entsize uint32) {
+		if is64 {
+			var sh [64]byte
+			binary.LittleEndian.PutUint32(sh[0:4], name)
+			binary.LittleEndian.PutUint32(sh[4:8], shType)
+			binary.LittleEndian.PutUint64(sh[8:16], uint64(flags))
+			binary.LittleEndian.PutUint64(sh[16:24], uint64(addr))
+			binary.LittleEndian.PutUint64(sh[24:32], uint64(offset))
+			binary.LittleEndian.PutUint64(sh[32:40], uint64(size))
+			binary.LittleEndian.PutUint32(sh[40:44], link)
+			binary.LittleEndian.PutUint32(sh[44:48], info)
+			binary.LittleEndian.PutUint64(sh[48:56], uint64(addralign))
+			binary.LittleEndian.PutUint64(sh[56:64], uint64(entsize))
+			out.Write(sh[:])
+		} else {
+			var sh [40]byte
+			binary.LittleEndian.PutUint32(sh[0:4], name)
+			binary.LittleEndian.PutUint32(sh[4:8], shType)
+			binary.LittleEndian.PutUint32(sh[8:12], flags)
+			binary.LittleEndian.PutUint32(sh[12:16], addr)
+			binary.LittleEndian.PutUint32(sh[16:20], offset)
+			binary.LittleEndian.PutUint32(sh[20:24], size)
+			binary.LittleEndian.PutUint32(sh[24:28], link)
+			binary.LittleEndian.PutUint32(sh[28:32], info)
+			binary.LittleEndian.PutUint32(sh[32:36], addralign)
+			binary.LittleEndian.PutUint32(sh[36:40], entsize)
+			out.Write(sh[:])
+		}
+	}
+
+	symEntSize := uint32(16)
+	dynEntSize := uint32(8)
+	if is64 {
+		symEntSize = 24
+		dynEntSize = 16
+	}
+	_ = shEntSize
+
+	// 0: SHT_NULL
+	writeShdr(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+	// 1: .dynsym (SHT_DYNSYM = 11, SHF_ALLOC = 2, link = 2 (.dynstr), info = 1)
+	writeShdr(shOffDynsym, 11, 2, 0, offDynsym, uint32(len(dynsymBytes)), 2, 1, align, symEntSize)
+	// 2: .dynstr (SHT_STRTAB = 3, SHF_ALLOC = 2)
+	writeShdr(shOffDynstr, 3, 2, 0, offDynstr, uint32(len(dynstrBytes)), 0, 0, 1, 0)
+	// 3: .dynamic (SHT_DYNAMIC = 6, SHF_ALLOC|SHF_WRITE = 3, link = 2 (.dynstr))
+	writeShdr(shOffDynamic, 6, 3, 0, offDynamic, uint32(len(dynamicBytes)), 2, 0, align, dynEntSize)
+	// 4: .text (SHT_PROGBITS = 1, SHF_ALLOC|SHF_EXECINSTR = 6)
+	writeShdr(shOffText, 1, 6, 0x1000, offText, uint32(len(textBytes)), 0, 0, 16, 0)
+	// 5: .shstrtab (SHT_STRTAB = 3)
+	writeShdr(shOffShstrtab, 3, 0, 0, offShstrtab, uint32(len(shstrtabBytes)), 0, 0, 1, 0)
+
+	return out.Bytes()
+}
+
