@@ -674,9 +674,10 @@
 
     function updateScreenDimensions(aspect) {
       if (!Number.isFinite(aspect) || aspect <= 0) return;
+      const clampedAspect = clampScreenAspect(aspect);
       const area = baseScreenWidth * baseScreenHeight;
-      screenWidth = Math.sqrt(area * aspect);
-      screenHeight = Math.sqrt(area / aspect);
+      screenWidth = Math.sqrt(area * clampedAspect);
+      screenHeight = Math.sqrt(area / clampedAspect);
       const scaleX = screenWidth / baseScreenWidth;
       const scaleY = screenHeight / baseScreenHeight;
       if (screenMesh) screenMesh.scale.set(scaleX, scaleY, 1);
@@ -831,10 +832,13 @@
 
         screenWidth *= targetSpanX / spanX;
         screenHeight *= targetSpanY / spanY;
-        const normalizeScale = Math.sqrt(area / (screenWidth * screenHeight));
-        screenWidth *= normalizeScale;
-        screenHeight *= normalizeScale;
-        distance *= normalizeScale;
+        const stepAspect = clampScreenAspect(screenWidth / screenHeight);
+        screenWidth = Math.sqrt(area * stepAspect);
+        screenHeight = Math.sqrt(area / stepAspect);
+        distance = Math.max(
+          distance * (projected.maxY - projected.minY) / targetSpanY,
+          distance * (projected.maxX - projected.minX) / targetSpanX
+        );
       }
 
       const scaleX = screenWidth / baseScreenWidth;
@@ -1303,16 +1307,32 @@
     return canvas.getContext('webgl2');
   }
 
+  const REFERENCE_GRID_COLS = 72;
+  const REFERENCE_GRID_ROWS = 20;
+  const TARGET_GRID_CELLS = REFERENCE_GRID_COLS * REFERENCE_GRID_ROWS;
+  const REFERENCE_SCREEN_ASPECT = 16 / 10;
+  const MIN_SCREEN_ASPECT = 8 / 16;
+  const MAX_SCREEN_ASPECT = 16 / 8;
+  const REFERENCE_GRID_ASPECT = REFERENCE_GRID_COLS / REFERENCE_GRID_ROWS;
+  const MIN_GRID_ASPECT = REFERENCE_GRID_ASPECT * (MIN_SCREEN_ASPECT / REFERENCE_SCREEN_ASPECT);
+  const MAX_GRID_ASPECT = REFERENCE_GRID_ASPECT * (MAX_SCREEN_ASPECT / REFERENCE_SCREEN_ASPECT);
+  const MIN_GRID_COLS = Math.round(Math.sqrt(TARGET_GRID_CELLS * MIN_GRID_ASPECT));
+  const MAX_GRID_COLS = Math.round(Math.sqrt(TARGET_GRID_CELLS * MAX_GRID_ASPECT));
+  const MIN_GRID_ROWS = Math.round(TARGET_GRID_CELLS / MAX_GRID_COLS);
+  const MAX_GRID_ROWS = Math.round(TARGET_GRID_CELLS / MIN_GRID_COLS);
+
+  function clampScreenAspect(aspect) {
+    const valid = Number.isFinite(aspect) && aspect > 0 ? aspect : REFERENCE_SCREEN_ASPECT;
+    return Math.min(MAX_SCREEN_ASPECT, Math.max(MIN_SCREEN_ASPECT, valid));
+  }
+
   function calculateGrid(width, height) {
-    const viewportAspect = width > 0 && height > 0 ? width / height : 1.6;
-    const aspect = Number.isFinite(viewportAspect) ? viewportAspect : 1.6;
-    const targetCells = 72 * 20;
-    const referenceAspect = 1.6;
-    const referenceGridAspect = 72 / 20;
-    const requestedGridAspect = referenceGridAspect * (aspect / referenceAspect);
-    const gridAspect = Math.min(72 / 20, Math.max(20 / 72, requestedGridAspect));
-    const cols = Math.min(72, Math.max(20, Math.round(Math.sqrt(targetCells * gridAspect))));
-    const rows = Math.min(72, Math.max(20, Math.round(targetCells / cols)));
+    const viewportAspect = width > 0 && height > 0 ? width / height : REFERENCE_SCREEN_ASPECT;
+    const aspect = clampScreenAspect(viewportAspect);
+    const requestedGridAspect = REFERENCE_GRID_ASPECT * (aspect / REFERENCE_SCREEN_ASPECT);
+    const gridAspect = Math.min(MAX_GRID_ASPECT, Math.max(MIN_GRID_ASPECT, requestedGridAspect));
+    const cols = Math.min(MAX_GRID_COLS, Math.max(MIN_GRID_COLS, Math.round(Math.sqrt(TARGET_GRID_CELLS * gridAspect))));
+    const rows = Math.min(MAX_GRID_ROWS, Math.max(MIN_GRID_ROWS, Math.round(TARGET_GRID_CELLS / cols)));
     return { cols, rows };
   }
 
@@ -1362,6 +1382,12 @@
     calculateImageScale,
     calculateCaptureViewport,
     calculateReflectionOffset,
-    calculateReflectionDepth
+    calculateReflectionDepth,
+    MIN_SCREEN_ASPECT,
+    MAX_SCREEN_ASPECT,
+    MIN_GRID_COLS,
+    MAX_GRID_COLS,
+    MIN_GRID_ROWS,
+    MAX_GRID_ROWS
   });
 })(globalThis);
