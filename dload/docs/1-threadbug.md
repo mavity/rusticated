@@ -55,13 +55,9 @@ We can reproduce this deadlock deterministically in `dload_test.go` across Windo
    - **Linux (`libc.so.6` / `libpthread.so.0`) & macOS (`libSystem.B.dylib`):** `pthread_create(&tidBuf, NULL, trampoline, param)` + `pthread_detach(tid)` (which spawns a background OS thread and returns immediately on the main `dload` thread) and `getpid()` / `pthread_self()`.
 2. Allocate a shared memory buffer via `DylibAlloc` + `DylibWriteMem`.
 3. Register a callback (`void* (*start_routine)(void*)` / `DWORD WINAPI (*LPTHREAD_START_ROUTINE)(LPVOID)`) via `DylibRegisterCallbackWithContext`.
-4. Inside the Go callback handler, mirror `sharedTokenCallback` by performing multiple re-entrant operations per invocation:
-   - Call the thread-ID / pid function via `DylibCall(..., invID)`.
-   - Read the allocated memory buffer twice via `DylibReadMem` (matching `GoString` chunk reads).
-   - Call the thread-ID / pid function two more times via `DylibCall(..., invID)` (matching `streamChunkIsFinal` and `streamChunkGetError`).
-   - Signal completion of the iteration on a Go channel.
-5. From the test goroutine, run a loop of 100 iterations where each iteration spawns the async background callback with `parentInvID = 0` (returning immediately so the main `dload` thread stays active in `run()`) and waits on the Go channel with a timeout.
-6. Before the fix, the main worker thread and the background OS thread collide on `READER_BUSY` and deadlock within a few iterations on all three operating systems.
+4. Inside the Go callback handler, issue a re-entrant `DylibCall(symSelf, selfSig, manyArgs, invID)` (where `manyArgs` is a slice of 16,000,000 `uint64`s so `dispatch_frame`'s `for _ in 0..argc` loop in `dload/src/main.rs:217-223` takes ~20ms between `release_reader_lock()` and `try_delegate_call()`, exceeding one 15.6ms Windows `Sleep(1)` tick), followed by `DylibReadMem`.
+5. From the test goroutine, spawn the async background callback with `parentInvID = 0` (returning immediately so the main `dload` thread stays active in `run()`) and wait on the Go channel with a 3-second timeout.
+6. Before the fix, on **attempt 1** (`100%` reproducibility), the main worker thread releases `READER_BUSY` after `read_frame()`, and while it is unpacking `manyArgs` prior to `try_delegate_call()`, the background callback thread wakes from `Sleep(1)` / `usleep(500)`, sees `inv_slot.state == SLOT_WAITING` and `READER_BUSY == false`, steals `READER_BUSY`, and blocks forever inside `read_frame()` on the empty `stdin` pipe.
 
 ---
 
