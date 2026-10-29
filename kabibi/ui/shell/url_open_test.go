@@ -56,7 +56,7 @@ func TestEmptyEnterOpensLatestOutputURL(t *testing.T) {
 }
 
 func TestTypedEnterRemainsPromptSubmission(t *testing.T) {
-	runner := &fakeAIRunner{fn: func(_ context.Context, prompt string, _ ai.LogFeedback, _ ai.LogFeedback) error {
+	runner := &fakeAIRunner{fn: func(_ context.Context, prompt string, _ ai.LogFeedback, _ ai.LogFeedback, _ ai.LogFeedback) error {
 		if prompt != "please respond" {
 			t.Errorf("AI prompt = %q, want %q", prompt, "please respond")
 		}

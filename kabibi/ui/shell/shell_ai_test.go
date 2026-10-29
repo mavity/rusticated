@@ -37,13 +37,13 @@ func TestKabibiSystemMessageAppendsCLIHelpContext(t *testing.T) {
 
 type fakeAIRunner struct {
 	prompts []string
-	fn      func(ctx context.Context, prompt string, onFeedback ai.LogFeedback, onContent ai.LogFeedback) error
+	fn      func(ctx context.Context, prompt string, onFeedback, onToolFeedback, onContent ai.LogFeedback) error
 }
 
-func (f *fakeAIRunner) RunTurn(ctx context.Context, prompt string, onFeedback ai.LogFeedback, onContent ai.LogFeedback) error {
+func (f *fakeAIRunner) RunTurn(ctx context.Context, prompt string, onFeedback, onToolFeedback, onContent ai.LogFeedback) error {
 	f.prompts = append(f.prompts, prompt)
 	if f.fn != nil {
-		return f.fn(ctx, prompt, onFeedback, onContent)
+		return f.fn(ctx, prompt, onFeedback, onToolFeedback, onContent)
 	}
 	if onContent != nil {
 		onContent("AI response for: " + prompt)
@@ -71,6 +71,24 @@ func TestUpdateActiveArtifactFeedbackNormalizesAccumulatedWhitespace(t *testing.
 	}
 	if got, want := s.statusLine, "replacement status"; got != want {
 		t.Fatalf("display status text after carriage return = %q, want %q", got, want)
+	}
+}
+
+func TestUpdateActiveArtifactToolFeedbackReplacesStatusLine(t *testing.T) {
+	s := &Shell{blocks: []CommandBlock{{}}}
+	s.updateActiveArtifactFeedback(0, "[work] reading file")
+
+	s.updateActiveArtifactToolFeedback(0, "📝 user_input.txt ... ")
+	if got, want := s.statusLine, "📝 user_input.txt ..."; got != want {
+		t.Fatalf("status line after tool feedback = %q, want %q", got, want)
+	}
+
+	s.updateActiveArtifactToolFeedback(0, "22 bytes read")
+	if got, want := s.statusLine, "22 bytes read"; got != want {
+		t.Fatalf("status line after next feedback = %q, want replacement %q", got, want)
+	}
+	if strings.Contains(s.statusLine, "user_input.txt") {
+		t.Fatalf("status line retained previous tool feedback: %q", s.statusLine)
 	}
 }
 
@@ -577,7 +595,7 @@ func TestShell_NestedBuiltins_BashShKabibi_AndFallbackPosition(t *testing.T) {
 func TestShell_ExecutesValidBashAndFallsBackToAI(t *testing.T) {
 	dir := t.TempDir()
 	aiMock := &fakeAIRunner{
-		fn: func(ctx context.Context, prompt string, onFeedback ai.LogFeedback, onContent ai.LogFeedback) error {
+		fn: func(ctx context.Context, prompt string, onFeedback, onToolFeedback, onContent ai.LogFeedback) error {
 			// Simulate ai.Session live ticker with \r overwrites and wipe followed by spoken content
 			onFeedback("[goal] Identify a famous Parisian bridge…")
 			onFeedback("\r                                         \r[work] Thinking…")
@@ -788,7 +806,7 @@ type customSessionAIRunner struct {
 	aiSess   *ai.Session
 }
 
-func (c *customSessionAIRunner) RunTurn(ctx context.Context, prompt string, onFeedback ai.LogFeedback, onContent ai.LogFeedback) error {
+func (c *customSessionAIRunner) RunTurn(ctx context.Context, prompt string, onFeedback, onToolFeedback, onContent ai.LogFeedback) error {
 	return c.aiSess.RunTurn(ctx, prompt)
 }
 

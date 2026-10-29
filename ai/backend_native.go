@@ -30,10 +30,11 @@ var (
 	lmStreamChunkIsFinal  func(chunk uintptr) bool
 	lmStreamChunkGetError func(chunk uintptr) uintptr
 
-	lmCfgSetTools           func(config, toolsJson uintptr)
-	lmCfgSetSystemMessage   func(config, systemMessageJson uintptr)
-	lmCfgSetStreamToolCalls func(config uintptr, stream bool, channelName uintptr)
-	lmCfgSetMessages        func(config, messagesJson uintptr)
+	lmCfgSetTools                     func(config, toolsJson uintptr)
+	lmCfgSetSystemMessage             func(config, systemMessageJson uintptr)
+	lmCfgSetEnableConstrainedDecoding func(config uintptr, enable bool)
+	lmCfgSetStreamToolCalls           func(config uintptr, stream bool, channelName uintptr)
+	lmCfgSetMessages                  func(config, messagesJson uintptr)
 
 	lmSettingsSetEnableSpeculativeDecoding    func(settings uintptr, enable bool)
 	lmSettingsSetUseRingbuffersLocalAttention func(settings uintptr, enable bool)
@@ -160,6 +161,10 @@ func (d *nativeDriver) cfgSetTools(cfg, toolsJSON uint64) {
 }
 func (d *nativeDriver) cfgSetSystemMessage(cfg, systemMsg uint64) {
 	lmCfgSetSystemMessage(uintptr(cfg), uintptr(systemMsg))
+}
+func (d *nativeDriver) cfgSetEnableConstrainedDecoding(cfg uint64, enable bool) error {
+	lmCfgSetEnableConstrainedDecoding(uintptr(cfg), enable)
+	return nil
 }
 func (d *nativeDriver) cfgSetStreamToolCalls(cfg uint64, stream bool, channelName uint64) {
 	lmCfgSetStreamToolCalls(uintptr(cfg), stream, uintptr(channelName))
@@ -380,6 +385,7 @@ func ensureLMLibLoadedImpl(libPath string) error {
 
 		purego.RegisterLibFunc(&lmCfgSetTools, lmLib, "litert_lm_conversation_config_set_tools")
 		purego.RegisterLibFunc(&lmCfgSetSystemMessage, lmLib, "litert_lm_conversation_config_set_system_message")
+		purego.RegisterLibFunc(&lmCfgSetEnableConstrainedDecoding, lmLib, "litert_lm_conversation_config_set_enable_constrained_decoding")
 		purego.RegisterLibFunc(&lmCfgSetStreamToolCalls, lmLib, "litert_lm_conversation_config_set_stream_tool_calls")
 		purego.RegisterLibFunc(&lmCfgSetMessages, lmLib, "litert_lm_conversation_config_set_messages")
 

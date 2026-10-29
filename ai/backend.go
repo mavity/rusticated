@@ -87,6 +87,7 @@ type LMDriver interface {
 	cfgDelete(cfg uint64)
 	cfgSetTools(cfg, toolsJSON uint64)
 	cfgSetSystemMessage(cfg, systemMsg uint64)
+	cfgSetEnableConstrainedDecoding(cfg uint64, enable bool) error
 	cfgSetStreamToolCalls(cfg uint64, stream bool, channelName uint64)
 	cfgSetMessages(cfg, messagesJSON uint64)
 
@@ -438,6 +439,9 @@ func (b *drvEngineBackend) NewConversation(cfg ConversationConfig) (conversation
 		cTools, freeTools := b.drv.stringToCPtr(toolsJSON)
 		b.drv.cfgSetTools(config, cTools)
 		freeTools()
+	}
+	if err := b.drv.cfgSetEnableConstrainedDecoding(config, len(cfg.Tools) > 0); err != nil {
+		return nil, fmt.Errorf("configure constrained decoding: %w", err)
 	}
 	{
 		cChan, freeChan := b.drv.stringToCPtr("tool_call")

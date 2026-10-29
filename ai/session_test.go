@@ -236,6 +236,40 @@ func TestSessionToolDispatchReturnsErrorResults(t *testing.T) {
 	}
 }
 
+func TestToolFeedbackIsForwardedWithoutSyntheticSeparators(t *testing.T) {
+	var modelFeedback []string
+	var toolFeedback []string
+	session, err := NewSession(SessionConfig{
+		OnFeedback: func(text string) {
+			modelFeedback = append(modelFeedback, text)
+		},
+		OnToolFeedback: func(text string) {
+			toolFeedback = append(toolFeedback, text)
+		},
+		Tools: map[string]Tool{
+			"progress": {
+				Execute: func(_ context.Context, _ ToolCall, feedback LogFeedback) (any, error) {
+					feedback("reading file")
+					feedback("22 bytes read")
+					return "done", nil
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	session.executeToolCalls(context.Background(), nil, []ToolCall{{Name: "progress"}})
+
+	if !reflect.DeepEqual(toolFeedback, []string{"reading file", "22 bytes read"}) {
+		t.Fatalf("tool feedback = %#v, want the two producer values unchanged", toolFeedback)
+	}
+	if len(modelFeedback) != 0 {
+		t.Fatalf("model feedback received tool updates: %#v", modelFeedback)
+	}
+}
+
 type fakeEmbedder struct {
 	calls int
 	block chan struct{}

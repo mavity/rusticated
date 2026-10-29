@@ -2166,6 +2166,23 @@ func (s *Shell) updateActiveArtifactFeedback(blockIdx int, feedback string) {
 	s.invalidate()
 }
 
+func (s *Shell) updateActiveArtifactToolFeedback(blockIdx int, feedback string) {
+	s.mu.Lock()
+	s.statusTextRaw = feedback
+	cur := strings.Join(strings.Fields(feedback), " ")
+	s.statusLine = cur
+	if blockIdx >= 0 && blockIdx < len(s.blocks) {
+		if cur != "" {
+			glyph := stackSpinnerFrames[s.animFrame%len(stackSpinnerFrames)]
+			s.blocks[blockIdx].AnimLine = glyph + " " + cur
+		} else {
+			s.blocks[blockIdx].AnimLine = ""
+		}
+	}
+	s.mu.Unlock()
+	s.invalidate()
+}
+
 func (s *Shell) runAIFallback(
 	ctx context.Context,
 	blockIdx int,
@@ -2180,6 +2197,9 @@ func (s *Shell) runAIFallback(
 		prompt,
 		func(feedback string) {
 			s.updateActiveArtifactFeedback(blockIdx, feedback)
+		},
+		func(feedback string) {
+			s.updateActiveArtifactToolFeedback(blockIdx, feedback)
 		},
 		func(content string) {
 			s.mu.Lock()
