@@ -759,15 +759,22 @@ test('CRT grid adapts orientation while keeping a constant character budget', ()
   const { context } = createHarness();
   vm.runInContext(fs.readFileSync(path.join(__dirname, 'super-demo.js'), 'utf8'), context);
 
-  const landscape = context.KabibiBrowserSuperDemo.calculateGrid(1600, 1000);
-  const portrait = context.KabibiBrowserSuperDemo.calculateGrid(600, 1000);
-  const extremeLandscape = context.KabibiBrowserSuperDemo.calculateGrid(10000, 1000);
-  const extremePortrait = context.KabibiBrowserSuperDemo.calculateGrid(10, 1000);
+  const superDemo = context.KabibiBrowserSuperDemo;
+  const landscape = superDemo.calculateGrid(1600, 1000);
+  const widescreen = superDemo.calculateGrid(1600, 800);
+  const portrait = superDemo.calculateGrid(600, 1000);
+  const tallPortrait = superDemo.calculateGrid(800, 1600);
+  const extremeLandscape = superDemo.calculateGrid(10000, 1000);
+  const extremePortrait = superDemo.calculateGrid(10, 1000);
 
+  assert.equal(superDemo.MIN_SCREEN_ASPECT, 8 / 16);
+  assert.equal(superDemo.MAX_SCREEN_ASPECT, 16 / 8);
   assert.deepEqual({ ...landscape }, { cols: 72, rows: 20 });
+  assert.deepEqual({ ...widescreen }, { cols: 80, rows: 18 });
   assert.deepEqual({ ...portrait }, { cols: 44, rows: 33 });
-  assert.deepEqual({ ...extremeLandscape }, { cols: 72, rows: 20 });
-  assert.deepEqual({ ...extremePortrait }, { cols: 20, rows: 72 });
+  assert.deepEqual({ ...tallPortrait }, { cols: 40, rows: 36 });
+  assert.deepEqual({ ...extremeLandscape }, { cols: 80, rows: 18 });
+  assert.deepEqual({ ...extremePortrait }, { cols: 40, rows: 36 });
   assert.ok(portrait.cols < landscape.cols);
   assert.ok(portrait.rows > landscape.rows);
   assert.ok(Math.abs(portrait.cols * portrait.rows - 72 * 20) <= portrait.cols);
