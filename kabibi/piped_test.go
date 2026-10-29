@@ -17,12 +17,16 @@ import (
 )
 
 type pipedAIRunner struct {
-	prompts []string
-	runErr  error
+	prompts      []string
+	toolFeedback string
+	runErr       error
 }
 
-func (r *pipedAIRunner) RunTurn(_ context.Context, prompt string, _ ai.LogFeedback, onContent ai.LogFeedback) error {
+func (r *pipedAIRunner) RunTurn(_ context.Context, prompt string, _ ai.LogFeedback, onToolFeedback, onContent ai.LogFeedback) error {
 	r.prompts = append(r.prompts, prompt)
+	if onToolFeedback != nil && r.toolFeedback != "" {
+		onToolFeedback(r.toolFeedback)
+	}
 	if onContent != nil {
 		onContent("AI response\n")
 	}
@@ -81,7 +85,7 @@ func TestRunPipedReader_ExecutesIncrementallyAndRetainsShellState(t *testing.T) 
 		t.Fatalf("NewExecutionSession: %v", err)
 	}
 	var stdout, stderr bytes.Buffer
-	runner := &pipedAIRunner{}
+	runner := &pipedAIRunner{toolFeedback: "📝 user_input.txt ... ok "}
 	input := "export KABIBI_PIPE_TEST=retained\necho $KABIBI_PIPE_TEST\nif true; then\necho multiline\nfi\n"
 
 	if code := runPipedReader(context.Background(), strings.NewReader(input), &stdout, &stderr, cliOptions{}, es, runner); code != 0 {
@@ -109,7 +113,7 @@ func TestRunPipedReader_RoutesSlashFileCommandsBeforeAI(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	runner := &pipedAIRunner{}
+	runner := &pipedAIRunner{toolFeedback: "📝 user_input.txt ... ok "}
 	input := "/copy source dest\n/rename dest/source dest/renamed\n/delete --yes dest/renamed\n"
 	if code := runPipedReader(context.Background(), strings.NewReader(input), &stdout, &stderr, cliOptions{}, es, runner); code != 0 {
 		t.Fatalf("runPipedReader() = %d, want 0; stderr=%q", code, stderr.String())
@@ -259,7 +263,7 @@ func TestRunPipedReader_RoutesUnknownCommandToAIAndContinues(t *testing.T) {
 		t.Fatalf("NewExecutionSession: %v", err)
 	}
 	var stdout, stderr bytes.Buffer
-	runner := &pipedAIRunner{}
+	runner := &pipedAIRunner{toolFeedback: "📝 user_input.txt ... ok "}
 	input := "echo before\nName a bridge in Paris\necho after"
 
 	if code := runPipedReader(context.Background(), strings.NewReader(input), &stdout, &stderr, cliOptions{}, es, runner); code != 0 {
@@ -268,7 +272,7 @@ func TestRunPipedReader_RoutesUnknownCommandToAIAndContinues(t *testing.T) {
 	if got, want := runner.prompts, []string{"Name a bridge in Paris"}; len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("AI prompts = %v, want %v", got, want)
 	}
-	if got, want := stdout.String(), "before\nAI response\nafter\n"; got != want {
+	if got, want := stdout.String(), "before\n📝 user_input.txt ... ok AI response\nafter\n"; got != want {
 		t.Fatalf("stdout = %q, want %q", got, want)
 	}
 }

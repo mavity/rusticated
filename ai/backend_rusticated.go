@@ -40,10 +40,11 @@ var (
 	symLMStreamChunkIsFinal  uint64
 	symLMStreamChunkGetError uint64
 
-	symLMCfgSetTools           uint64
-	symLMCfgSetSystemMessage   uint64
-	symLMCfgSetStreamToolCalls uint64
-	symLMCfgSetMessages        uint64
+	symLMCfgSetTools                     uint64
+	symLMCfgSetSystemMessage             uint64
+	symLMCfgSetEnableConstrainedDecoding uint64
+	symLMCfgSetStreamToolCalls           uint64
+	symLMCfgSetMessages                  uint64
 
 	symLMSettingsSetEnableSpeculativeDecoding    uint64
 	symLMSettingsSetUseRingbuffersLocalAttention uint64
@@ -209,6 +210,23 @@ func (d *rusticatedDriver) cfgSetTools(cfg, toolsJSON uint64) {
 }
 func (d *rusticatedDriver) cfgSetSystemMessage(cfg, systemMsg uint64) {
 	_, _ = callDylib(symLMCfgSetSystemMessage, []byte{i64, i64}, nil, cfg, systemMsg)
+}
+func (d *rusticatedDriver) cfgSetEnableConstrainedDecoding(cfg uint64, enable bool) error {
+	enabled := uint64(0)
+	if enable {
+		enabled = 1
+	}
+	_, err := callDylib(
+		symLMCfgSetEnableConstrainedDecoding,
+		[]byte{i64, i32},
+		nil,
+		cfg,
+		enabled,
+	)
+	if err != nil {
+		return fmt.Errorf("call LiteRT-LM constrained-decoding setter: %w", err)
+	}
+	return nil
 }
 func (d *rusticatedDriver) cfgSetStreamToolCalls(cfg uint64, stream bool, channelName uint64) {
 	s := byte(0)
@@ -484,6 +502,7 @@ func ensureLMLibLoadedImpl(libPath string) error {
 
 		symLMCfgSetTools, _ = dload.DylibSym(lmLib, "litert_lm_conversation_config_set_tools")
 		symLMCfgSetSystemMessage, _ = dload.DylibSym(lmLib, "litert_lm_conversation_config_set_system_message")
+		symLMCfgSetEnableConstrainedDecoding, _ = dload.DylibSym(lmLib, "litert_lm_conversation_config_set_enable_constrained_decoding")
 		symLMCfgSetStreamToolCalls, _ = dload.DylibSym(lmLib, "litert_lm_conversation_config_set_stream_tool_calls")
 		symLMCfgSetMessages, _ = dload.DylibSym(lmLib, "litert_lm_conversation_config_set_messages")
 

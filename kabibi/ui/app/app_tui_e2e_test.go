@@ -112,7 +112,7 @@ type tuiMockAIRunner struct {
 	prompts []string
 }
 
-func (m *tuiMockAIRunner) RunTurn(ctx context.Context, prompt string, onFeedback ai.LogFeedback, onContent ai.LogFeedback) error {
+func (m *tuiMockAIRunner) RunTurn(ctx context.Context, prompt string, onFeedback, onToolFeedback, onContent ai.LogFeedback) error {
 	m.mu.Lock()
 	m.prompts = append(m.prompts, prompt)
 	m.mu.Unlock()

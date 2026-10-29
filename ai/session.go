@@ -258,7 +258,9 @@ type SessionConfig struct {
 	CompactionLimit int
 	OnContent       LogFeedback
 	OnFeedback      LogFeedback
-	Verbose         bool
+	// OnToolFeedback receives tool-provided status values separately from model-stage feedback.
+	OnToolFeedback LogFeedback
+	Verbose        bool
 }
 
 // Session tracks conversation state, history, and context compaction.
@@ -274,6 +276,7 @@ type Session struct {
 	verbose          bool
 	onContent        LogFeedback
 	onFeedback       LogFeedback
+	onToolFeedback   LogFeedback
 	CanonicalHistory []PromptPart
 	CompactedHistory []PromptPart
 	totalTokensEst   int
@@ -300,6 +303,7 @@ func NewSession(cfg SessionConfig) (*Session, error) {
 		verbose:         cfg.Verbose,
 		onContent:       cfg.OnContent,
 		onFeedback:      cfg.OnFeedback,
+		onToolFeedback:  cfg.OnToolFeedback,
 		toolRegistry:    make(map[string]Tool, len(cfg.Tools)),
 	}
 	if s.compactionLimit <= 0 {
@@ -438,6 +442,14 @@ func (s *Session) emitFeedback(text string) {
 	if s.onFeedback != nil {
 		s.onFeedback(text)
 	}
+}
+
+func (s *Session) emitToolFeedback(text string) {
+	if s.onToolFeedback != nil {
+		s.onToolFeedback(text)
+		return
+	}
+	s.emitFeedback(text)
 }
 
 func (s *Session) emitContent(text string) {
@@ -766,7 +778,6 @@ func (s *Session) CompactContext(ctx context.Context) error {
 		s.triggerBackgroundEmbedding()
 	}()
 	err := s.compactContext(ctx, s.emitFeedback)
-	s.emitFeedback("\n")
 	return err
 }
 
@@ -958,7 +969,7 @@ func (s *Session) runAgenticTurn(
 					return nil, "", compactedDuringTurn, fmt.Errorf("rebuild conversation after context overflow: %w", replaceErr)
 				}
 				*baseHistory = s.snapshotCompactedHistory()
-				s.emitFeedback(fmt.Sprintf("%d:%d\n", before, historySize(projected)))
+				s.emitFeedback(fmt.Sprintf("%d:%d", before, historySize(projected)))
 				overflowRetries++
 				compactedDuringTurn = true
 				err = nil
@@ -1005,23 +1016,13 @@ func (s *Session) executeToolCalls(ctx context.Context, baseHistory *[]PromptPar
 		explanation := extractToolExplanation(call)
 		tc := &ToolContext{
 			Session:     s,
-			Feedback:    s.emitFeedback,
+			Feedback:    s.emitToolFeedback,
 			baseHistory: baseHistory,
-		}
-		var emittedFeedback bool
-		tc.Feedback = func(text string) {
-			if text != "" {
-				emittedFeedback = true
-			}
-			s.emitFeedback(text)
 		}
 		toolStart := time.Now()
 		result := s.executeTool(ctx, tc, call)
 		toolEnd := time.Now()
 		sessionMutated = sessionMutated || tc.sessionSwapped
-		if emittedFeedback {
-			s.emitFeedback("\n")
-		}
 		toolResponses = append(toolResponses, PromptPart{
 			Role:         RoleTool,
 			ToolName:     call.Name,
@@ -1104,7 +1105,6 @@ func (s *Session) RunTurnWithTiming(ctx context.Context, userText string, timing
 		if err := s.compactContext(ctx, s.emitFeedback); err != nil {
 			return fmt.Errorf("compact session history after turn: %w", err)
 		}
-		s.emitFeedback("\n")
 	}
 
 	return nil

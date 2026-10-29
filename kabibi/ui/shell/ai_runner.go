@@ -23,7 +23,8 @@ You are joyful and optimistic, you use simple, straight words and lean to shorte
 // AIRunner abstracts the AI prompt execution backend so Shell can use either the
 // lazy LiteRT-LM ai.Session manager or a deterministic test double in unit tests.
 type AIRunner interface {
-	RunTurn(ctx context.Context, prompt string, onFeedback ai.LogFeedback, onContent ai.LogFeedback) error
+	// onFeedback streams model-stage updates; onToolFeedback carries tool status values.
+	RunTurn(ctx context.Context, prompt string, onFeedback, onToolFeedback, onContent ai.LogFeedback) error
 	Close()
 }
 
@@ -43,9 +44,10 @@ type LazyAIRunner struct {
 	openTerm      func(ctx context.Context, title string) (ai.TerminalSession, func(exitCode int))
 	lifecycleErr  error
 
-	cbMu       sync.Mutex
-	onFeedback ai.LogFeedback
-	onContent  ai.LogFeedback
+	cbMu           sync.Mutex
+	onFeedback     ai.LogFeedback
+	onToolFeedback ai.LogFeedback
+	onContent      ai.LogFeedback
 }
 
 // NewLazyAIRunner creates a lazy AI session manager bound to execSess.
@@ -94,10 +96,11 @@ func (r *LazyAIRunner) FlushEmbeddings() {
 	}
 }
 
-func (r *LazyAIRunner) setTurnCallbacks(onFeedback, onContent ai.LogFeedback) {
+func (r *LazyAIRunner) setTurnCallbacks(onFeedback, onToolFeedback, onContent ai.LogFeedback) {
 	r.cbMu.Lock()
 	defer r.cbMu.Unlock()
 	r.onFeedback = onFeedback
+	r.onToolFeedback = onToolFeedback
 	r.onContent = onContent
 }
 
@@ -117,6 +120,17 @@ func (r *LazyAIRunner) emitContent(text string) {
 	if fn != nil {
 		fn(text)
 	}
+}
+
+func (r *LazyAIRunner) emitToolFeedback(text string) {
+	r.cbMu.Lock()
+	fn := r.onToolFeedback
+	r.cbMu.Unlock()
+	if fn != nil {
+		fn(text)
+		return
+	}
+	r.emitFeedback(text)
 }
 
 func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
@@ -317,6 +331,7 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 		Tools:           BuildKabibiTools(r.execSess),
 		CompactionLimit: compactionLimit,
 		OnFeedback:      r.emitFeedback,
+		OnToolFeedback:  r.emitToolFeedback,
 		OnContent:       r.emitContent,
 		Verbose:         r.verbose,
 	})
@@ -371,12 +386,12 @@ func kabibiSystemMessage(envContext string, sysContext string) string {
 }
 
 // RunTurn runs a single AI turn, lazily initializing the underlying ai.Session if needed.
-func (r *LazyAIRunner) RunTurn(ctx context.Context, prompt string, onFeedback ai.LogFeedback, onContent ai.LogFeedback) error {
+func (r *LazyAIRunner) RunTurn(ctx context.Context, prompt string, onFeedback, onToolFeedback, onContent ai.LogFeedback) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.setTurnCallbacks(onFeedback, onContent)
-	defer r.setTurnCallbacks(nil, nil)
+	r.setTurnCallbacks(onFeedback, onToolFeedback, onContent)
+	defer r.setTurnCallbacks(nil, nil, nil)
 
 	if err := r.ensureInitialized(ctx); err != nil {
 		return err
@@ -479,6 +494,9 @@ func runOneShotAI(ctx context.Context, aiRunner *LazyAIRunner, prompt string, ou
 	err := aiRunner.RunTurn(
 		ctx,
 		prompt,
+		func(feedback string) {
+			_, _ = io.WriteString(out, feedback)
+		},
 		func(feedback string) {
 			_, _ = io.WriteString(out, feedback)
 		},

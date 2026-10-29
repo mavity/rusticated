@@ -304,6 +304,20 @@ func runPipedAI(
 				mu.Unlock()
 			}
 		},
+		func(feedback string) {
+			if feedback == "" {
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if outputErr == nil {
+				var n int
+				n, outputErr = io.WriteString(stdout, feedback)
+				if outputErr == nil && n != len(feedback) {
+					outputErr = io.ErrShortWrite
+				}
+			}
+		},
 		func(content string) {
 			if content == "" {
 				return
