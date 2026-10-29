@@ -643,7 +643,6 @@ func (h *HostEnv) sys_path_stat(ctx context.Context, m api.Module, stack []uint6
 		return
 	}
 	hostPathStr := h.resolveGuestPathForHost(string(buf))
-	debugLog("path_stat: path=%q flags=%d", hostPathStr, flags)
 
 	state := h.RegisterOp(ovPtr, nil)
 	go func() {
@@ -665,7 +664,6 @@ func (h *HostEnv) sys_path_stat(ctx context.Context, m api.Module, stack []uint6
 		} else {
 			stat := createAbiStatAt(fi, hostPathStr, (flags&statFlagNoFollow) != 0)
 			payload = marshalAbiStat(stat)
-			debugLog("path_stat ok: path=%q kind=%d mode=%o", hostPathStr, stat.Kind, stat.Mode)
 		}
 		h.fileOpsQueue <- func() {
 			defer h.DecOpsFor(state)
