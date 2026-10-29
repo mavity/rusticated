@@ -229,7 +229,6 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 	iteration := 0
 	for {
 		iteration++
-		debugLog("guest run iteration=%d begin pending_ops=%d active_ops=%t", iteration, hEnv.PendingOps(), hEnv.HasActiveOps())
 		res, err = runFunc.Call(ctx)
 		if err != nil {
 			debugLog("guest run iteration=%d failed: result=%v error=%v", iteration, res, err)
@@ -242,11 +241,7 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 
 		hEnv.mu.Lock()
 		forcedCode := hEnv.forcedExitCode
-		activeCount := len(hEnv.activeOps)
-		signalWaiters := len(hEnv.signalWaiters)
 		hEnv.mu.Unlock()
-		debugLog("guest run iteration=%d returned result=%v forced_exit=%d pending_ops=%d active_ops=%d signal_waiters=%d",
-			iteration, res, forcedCode, hEnv.PendingOps(), activeCount, signalWaiters)
 
 		// 1. Immediate override via process_exit
 		if forcedCode != -1 {
@@ -264,14 +259,11 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 					// so we treat "pending" as "finished with success"
 					// in the absence of any other information.
 					code = 0
-					debugLog("guest returned pending sentinel with no active operations; normalizing result to success")
 				}
 			}
-			debugLog("guest completion: no active operations, exit_code=%d", code)
 			return int(code), nil
 		}
 
-		debugLog("guest run iteration=%d polling host completions", iteration)
 		hEnv.Poll(ctx, mod)
 	}
 }
