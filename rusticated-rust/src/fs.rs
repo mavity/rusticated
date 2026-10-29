@@ -830,6 +830,32 @@ impl File {
         self.handle as i32
     }
 
+    /// Reads from an absolute file offset without changing the handle's
+    /// current position. This async API is available on the Rusticated WASM
+    /// target and uses the positioned-read `read` ABI extension.
+    #[cfg(target_family = "wasm")]
+    pub async fn read_at(&self, buf: Vec<u8>, offset: u64) -> (io::Result<usize>, Vec<u8>) {
+        if buf.capacity() == 0 {
+            return (Ok(0), buf);
+        }
+
+        let handle = self.handle;
+        let (err, read, _, buf) = crate::rt::wasm::OverlappedBufferFuture::new_read_at(
+            buf,
+            offset,
+            move |ov, ptr, len| {
+                unsafe { crate::abi::imports::read(ov, handle, ptr, len) };
+            },
+        )
+        .await;
+        if err != 0 {
+            return (Err(io::Error::from_raw_os_error(err as i32)), buf);
+        }
+        let mut buf = buf;
+        unsafe { buf.set_len(read as usize) };
+        (Ok(read as usize), buf)
+    }
+
     /// Attempts to duplicate the file handle.
     pub fn try_clone(&self) -> io::Result<Self> {
         #[cfg(any(target_family = "unix", rusticated_linux))]

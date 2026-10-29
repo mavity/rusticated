@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -265,22 +266,23 @@ type SessionConfig struct {
 
 // Session tracks conversation state, history, and context compaction.
 type Session struct {
-	engine           *Engine
-	embedder         PartEmbedder
-	compressor       textCompressorFunc
-	conv             *Conversation
-	systemMessage    string
-	tools            []map[string]any
-	toolRegistry     map[string]Tool
-	compactionLimit  int
-	verbose          bool
-	onContent        LogFeedback
-	onFeedback       LogFeedback
-	onToolFeedback   LogFeedback
-	CanonicalHistory []PromptPart
-	CompactedHistory []PromptPart
-	totalTokensEst   int
-	artifactCache    map[string]string
+	engine              *Engine
+	embedder            PartEmbedder
+	compressor          textCompressorFunc
+	conv                *Conversation
+	systemMessage       string
+	tools               []map[string]any
+	toolRegistry        map[string]Tool
+	compactionLimit     int
+	verbose             bool
+	verboseConfigLogged bool
+	onContent           LogFeedback
+	onFeedback          LogFeedback
+	onToolFeedback      LogFeedback
+	CanonicalHistory    []PromptPart
+	CompactedHistory    []PromptPart
+	totalTokensEst      int
+	artifactCache       map[string]string
 
 	historyMu      sync.Mutex
 	turnGate       sync.Mutex
@@ -456,6 +458,79 @@ func (s *Session) emitContent(text string) {
 	if s.onContent != nil {
 		s.onContent(text)
 	}
+}
+
+var verboseSessionLogMu sync.Mutex
+
+func (s *Session) logVerbose(format string, args ...any) {
+	if !s.verbose {
+		return
+	}
+	verboseSessionLogMu.Lock()
+	defer verboseSessionLogMu.Unlock()
+	fmt.Fprintf(os.Stderr, "[ai] "+format+"\n", args...)
+}
+
+func (s *Session) logConversationConfig() {
+	if !s.verbose {
+		return
+	}
+
+	s.historyMu.Lock()
+	if s.verboseConfigLogged {
+		s.historyMu.Unlock()
+		return
+	}
+	s.verboseConfigLogged = true
+	systemMessage := s.systemMessage
+	tools := make(map[string]Tool, len(s.toolRegistry))
+	for name, tool := range s.toolRegistry {
+		tools[name] = tool
+	}
+	s.historyMu.Unlock()
+
+	names := make([]string, 0, len(tools))
+	for name := range tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var log strings.Builder
+	fmt.Fprintf(&log, "[ai] conversation system prompt:\n%s\n", systemMessage)
+	fmt.Fprintf(&log, "[ai] conversation tools (%d):\n", len(names))
+	if len(names) == 0 {
+		log.WriteString("[ai]   (none)\n")
+	}
+	for _, name := range names {
+		fmt.Fprintf(&log, "[ai]   %s: %s\n", name, tools[name].Description)
+	}
+
+	verboseSessionLogMu.Lock()
+	defer verboseSessionLogMu.Unlock()
+	_, _ = fmt.Fprint(os.Stderr, log.String())
+}
+
+func formatVerboseToolArguments(call ToolCall) string {
+	if len(call.RawArguments) > 0 {
+		var pretty bytes.Buffer
+		if err := json.Indent(&pretty, call.RawArguments, "", "  "); err == nil {
+			return pretty.String()
+		}
+		return string(call.RawArguments)
+	}
+	encoded, err := json.MarshalIndent(call.Arguments, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("%#v (JSON encoding failed: %v)", call.Arguments, err)
+	}
+	return string(encoded)
+}
+
+func formatVerboseToolResult(result any) string {
+	encoded, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("%#v (JSON encoding failed: %v)", result, err)
+	}
+	return string(encoded)
 }
 
 // executeTool dispatches a model tool call and converts execution failures to
@@ -732,6 +807,7 @@ func (s *Session) initWithHistory(history []PromptPart) error {
 	if err := s.replaceConversation(history); err != nil {
 		return err
 	}
+	s.logConversationConfig()
 	s.totalTokensEst = s.estimateTokens(history)
 	s.startEmbedWorker()
 	return nil
@@ -1019,9 +1095,17 @@ func (s *Session) executeToolCalls(ctx context.Context, baseHistory *[]PromptPar
 			Feedback:    s.emitToolFeedback,
 			baseHistory: baseHistory,
 		}
+		if s.verbose {
+			s.logVerbose("tool call: id=%q name=%q\narguments:\n%s",
+				call.ID, call.Name, formatVerboseToolArguments(call))
+		}
 		toolStart := time.Now()
 		result := s.executeTool(ctx, tc, call)
 		toolEnd := time.Now()
+		if s.verbose {
+			s.logVerbose("tool result: id=%q name=%q\n%s",
+				call.ID, call.Name, formatVerboseToolResult(result))
+		}
 		sessionMutated = sessionMutated || tc.sessionSwapped
 		toolResponses = append(toolResponses, PromptPart{
 			Role:         RoleTool,

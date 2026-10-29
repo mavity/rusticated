@@ -138,6 +138,8 @@ When `term.IsTerminal(os.Stdin.Fd())` is `false`:
 2. **File Panels Permanently Disabled:** `AppWidget` and `DualPaneWidget` are never instantiated; `Ctrl+O` and F-key dialogs do not exist in this mode.
 3. **Animations Permanently Silenced:** Because `Shell` widget's 80ms `stackSpinnerFrames` ticker lives in `shell_widget.go`, bypassing `AppWidget`/`Shell` guarantees zero spinner frames are ever emitted. In `runPipedAI`, `onFeedback` is silenced by default (or logged as plain `[ai] ...` lines to `stderr` only when `--verbose` is set, stripping any `\r` spinner rewrites).
 
+In verbose mode, the AI session also writes its complete system prompt, tool names and descriptions, and each tool call's complete arguments and result to `stderr`. These diagnostics may include sensitive prompt content or data returned by tools.
+
 ### 4.2 Incremental Line-by-Line & Block-Aware Stream Loop (`runPipedSession`)
 
 Unlike a naive batch runner that slurps all of `stdin` until EOF before running the first command, `runPipedSession` uses `bufio.Reader` (`ReadString('\n')`, avoiding `bufio.Scanner`'s 64KB token limit) to process input **incrementally as lines arrive**:

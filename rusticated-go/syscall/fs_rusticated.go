@@ -13,7 +13,13 @@ import (
 
 // ── Overlapped ────────────────────────────────────────────────────────────────
 // Mirrors abi::Overlapped in the rusticated sysroot.
+// The first word uses bit 0 for completion, bits 1-23 are shared-reserved,
+// and bits 24-31 are operation-specific; see mohabbat/docs/9-positioned-read.md.
 
+// Overlapped is the shared 24-byte asynchronous completion header. Bit 0 is
+// the completion flag; bits 1-23 are shared-reserved; bits 24-31 are reserved
+// for operation-specific flags. Guests submit undefined bits as zero, and
+// hosts replace the flags word with bit 0 set on completion.
 type Overlapped struct {
 	_         structs.HostLayout
 	flags     uint32
@@ -25,9 +31,13 @@ type Overlapped struct {
 type overlappedContext struct {
 	gp uintptr
 	o  Overlapped
+	// readOffset is the read-specific u64 payload at byte 24 from &o.
+	readOffset uint64
 }
 
 func (o *Overlapped) isComplete() bool { return o.flags&1 != 0 }
+
+const readFlagPositional uint32 = 1 << 24
 
 func awaitOverlapped(ctx *overlappedContext)
 func cancelOverlapped(ctx *overlappedContext)
@@ -1027,7 +1037,31 @@ func Seek(fd int, offset int64, whence int) (int64, error) {
 	return int64(ctx.o.resultExt), nil
 }
 
-func Pread(fd int, b []byte, offset int64) (int, error)  { return 0, ENOSYS }
+// Pread submits a positioned read through the existing overlapped read import.
+// The offset follows the 24-byte header; the handle's shared position is not
+// changed by this operation.
+func Pread(fd int, b []byte, offset int64) (int, error) {
+	if offset < 0 {
+		return 0, errnoErr(EINVAL)
+	}
+	if len(b) == 0 {
+		return 0, nil
+	}
+	handle, err := fdToHandle(int32(fd))
+	if err != 0 {
+		return 0, errnoErr(err)
+	}
+	var ctx overlappedContext
+	ctx.o.flags = readFlagPositional
+	ctx.readOffset = uint64(offset)
+	rusticated_read(unsafe.Pointer(&ctx.o), handle, &b[0], uint32(len(b)))
+	runtime.KeepAlive(b)
+	awaitOverlapped(&ctx)
+	if ctx.o.hostError != 0 {
+		return 0, errnoErr(Errno(ctx.o.hostError))
+	}
+	return int(ctx.o.resultExt), nil
+}
 func Pwrite(fd int, b []byte, offset int64) (int, error) { return 0, ENOSYS }
 
 func Dup(oldfd int) (int, error) {

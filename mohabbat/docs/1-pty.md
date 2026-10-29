@@ -59,7 +59,7 @@ To spawn a process under a PTY, Section 3 allows specifying `"pty"`:
 
 ## 3. Overlapped Memory Layout
 
-In rusticated ABI, the `Overlapped` structure prefix is standard across all async calls, while the trailing payload is call-kind specific and open-ended.
+In rusticated ABI, the `Overlapped` structure prefix is standard across all async calls, while the trailing payload is call-kind specific and open-ended. The positioned-read extension is defined in the [positioned-read ABI specification](9-positioned-read.md).
 
 ### `ProcessSpawnOverlapped`
 
@@ -67,7 +67,7 @@ In rusticated ABI, the `Overlapped` structure prefix is standard across all asyn
 #[repr(C)]
 pub struct ProcessSpawnOverlapped {
     // ── Standard 24-byte Overlapped Header ─────────────────────────────
-    pub is_completed: u32,       // Offset  0: 1 when completed, 0 when pending
+    pub flags:        u32,       // Offset  0: completion and request flags
     pub error_code:   u32,       // Offset  4: WASI errno (0 = success)
     pub continued:    u64,       // Offset  8: Reserved / pagination / offset
     pub result_ext:   u64,       // Offset 16: Primary result (child process handle)
@@ -102,7 +102,7 @@ pub struct ProcessSpawnOverlapped {
   - `$cfgPtr` (`i32`): Pointer to null-delimited configuration buffer.
   - `$cfgLen` (`i32`): Length of configuration buffer.
 * **Completion:**
-  - Upon completion, `is_completed` is set to `1`.
+  - Upon completion, bit 0 of `flags` is set to `1`.
   - `child_handle` and `pty_handle` (plus `in_handle`/`out_handle`/`err_handle`) are written to their respective offsets in `$ovPtr`.
 
 ---
@@ -347,4 +347,3 @@ Direct invocation of `openpty` via standard libc or direct `/dev/ptmx` opening:
    Inspect handle: if it implements `io.Reader` / `io.Writer`, dispatch directly.
 3. **`sys_tty_set_size`:**
    Inspect handle: if it implements `Resize(cols, rows)`, call it; if `*os.File`, run `TIOCSWINSZ`.
-

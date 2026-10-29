@@ -216,6 +216,8 @@ func resolveUsableCwd() (string, error) {
 	return "", fmt.Errorf("unable to resolve cwd")
 }
 
+// writeOverlapped writes only the standard 24-byte completion header. The
+// flags word is exactly 1 (FLAG_COMPLETED); request flags are never returned.
 func writeOverlapped(mod api.Module, ovPtr uint32, errorCode uint32, continued uint64, resultExt uint64) error {
 	mem := mod.Memory()
 	if mem == nil {

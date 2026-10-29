@@ -14,7 +14,11 @@ import path from 'node:path';
 const VERBOSE = false; // {{VERBOSE}}
 const L = (...args) => (VERBOSE || process.env.MOHABBAT_VERBOSE) && console.error(...args);
 
+// Overlapped.flags: bit 0 is completion, bits 1-23 are shared-reserved, and
+// bits 24-31 are operation-specific.
 const FLAG_COMPLETED = 1;
+// This request flag selects the read-specific u64 offset at ovPtr + 24.
+const READ_FLAG_POSITIONAL = 1 << 24;
 
 let cachedRootCerts = null;
 function getRootCerts() {
@@ -473,14 +477,46 @@ export function makeBrainImports(hostState, argv) {
   }
 
   // ── read ─────────────────────────────────────────────────────────────────────
-  // Signature: (ovPtr i32, handle i64, bufferPtr i32, bufferLen i32)
+  // Signature is unchanged; positioned reads extend the Overlapped request.
   function read(ovPtr, handle, bufferPtr, bufferLen) {
-    const h = hs.getHandle(handle);
-    if (!h) { writeOverlapped(hs.view, ovPtr, wasiEBADF, 0, 0); return; }
+    const ovPtrNum = Number(ovPtr) >>> 0;
+    const view = hs.view;
+    const requestFlags = view.getUint32(ovPtrNum, true);
+    if ((requestFlags & ~READ_FLAG_POSITIONAL) !== 0) {
+      writeOverlapped(view, ovPtrNum, wasiEINVAL, 0, 0);
+      return;
+    }
 
-    const bLen = Number(bufferLen);
-    const bPtr = Number(bufferPtr);
-    const opId = hs.registerOp(ovPtr);
+    const positioned = (requestFlags & READ_FLAG_POSITIONAL) !== 0;
+    let position = null;
+    if (positioned) {
+      if (ovPtrNum + 32 > view.byteLength) {
+        writeOverlapped(view, ovPtrNum, wasiEINVAL, 0, 0);
+        return;
+      }
+      const offset = view.getBigUint64(ovPtrNum + 24, true);
+      if (offset > BigInt(Number.MAX_SAFE_INTEGER)) {
+        writeOverlapped(view, ovPtrNum, wasiEOVERFLOW, 0, 0);
+        return;
+      }
+      // fs.read's position argument is a JS Number, so reject lossy offsets.
+      position = Number(offset);
+    }
+
+    const h = hs.getHandle(handle);
+    if (!h) { writeOverlapped(view, ovPtrNum, wasiEBADF, 0, 0); return; }
+    if (positioned && h.type !== 'file') {
+      writeOverlapped(view, ovPtrNum, wasiESPIPE, 0, 0);
+      return;
+    }
+
+    const bLen = Number(bufferLen) >>> 0;
+    const bPtr = Number(bufferPtr) >>> 0;
+    if (bPtr + bLen > view.byteLength) {
+      writeOverlapped(view, ovPtrNum, wasiEINVAL, 0, 0);
+      return;
+    }
+    const opId = hs.registerOp(ovPtrNum);
 
     if (handle === 0n || h.type === 'stdio') {
       // stdin — use readable event for async
@@ -516,7 +552,8 @@ export function makeBrainImports(hostState, argv) {
 
     if (h.type === 'file') {
       const tmp = Buffer.allocUnsafe(bLen);
-      fs.read(h.fd, tmp, 0, bLen, null, (err, n) => {
+      // `position` is snapshotted from guest memory before the async read.
+      fs.read(h.fd, tmp, 0, bLen, position, (err, n) => {
         hs.enqueue(() => {
           if (!hs.isOpActive(ovPtr, opId)) return;
           if (err) { hs.completeOp(ovPtr, opId, mapErrno(err), 0, 0); return; }
@@ -1573,4 +1610,4 @@ if (isMain) {
   });
 }
 
-export { HostState };
+export { HostState, READ_FLAG_POSITIONAL };
