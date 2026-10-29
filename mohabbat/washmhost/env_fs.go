@@ -170,12 +170,45 @@ func statKindFromUnixMode(mode uint32) uint32 {
 	}
 }
 
+// readFlagPositional selects the positioned-read request extension. Its
+// little-endian u64 offset follows the 24-byte Overlapped header.
+const readFlagPositional uint32 = 1 << 24
+
 func (h *HostEnv) sys_read(ctx context.Context, m api.Module, stack []uint64) {
 	ovPtr := uint32(stack[0])
 	handle := stack[1]
 	ptr := uint32(stack[2])
 	lenBytes := uint32(stack[3])
-	debugLog("ABI read submitted: handle=%d buffer_bytes=%d", handle, lenBytes)
+
+	mem := m.Memory()
+	if mem == nil {
+		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+		return
+	}
+	request, ok := mem.Read(ovPtr, 24)
+	if !ok {
+		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+		return
+	}
+	requestFlags := binary.LittleEndian.Uint32(request[:4])
+	if requestFlags&^readFlagPositional != 0 {
+		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+		return
+	}
+	positioned := requestFlags&readFlagPositional != 0
+	var offset uint64
+	if positioned {
+		request, ok = mem.Read(ovPtr, 32)
+		if !ok {
+			writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
+			return
+		}
+		offset = binary.LittleEndian.Uint64(request[24:32])
+		if offset > uint64(^uint64(0)>>1) {
+			writeOverlapped(m, ovPtr, wasiEOVERFLOW, 0, 0)
+			return
+		}
+	}
 
 	h.mu.Lock()
 	fAny, ok := h.handles[handle]
@@ -186,13 +219,26 @@ func (h *HostEnv) sys_read(ctx context.Context, m api.Module, stack []uint64) {
 		writeOverlapped(m, ovPtr, wasiEBADF, 0, 0)
 		return
 	}
-	f, isReader := fAny.(interface{ Read([]byte) (int, error) })
-	if !isReader {
-		debugLog("ABI read rejected: handle=%d is not readable", handle)
-		writeOverlapped(m, ovPtr, wasiEBADF, 0, 0)
-		return
+	var read func([]byte) (int, error)
+	if positioned {
+		readerAt, ok := fAny.(io.ReaderAt)
+		if !ok {
+			debugLog("ABI positioned read rejected: handle=%d has no ReaderAt", handle)
+			writeOverlapped(m, ovPtr, wasiESPIPE, 0, 0)
+			return
+		}
+		read = func(p []byte) (int, error) {
+			return readerAt.ReadAt(p, int64(offset))
+		}
+	} else {
+		f, isReader := fAny.(interface{ Read([]byte) (int, error) })
+		if !isReader {
+			debugLog("ABI read rejected: handle=%d is not readable", handle)
+			writeOverlapped(m, ovPtr, wasiEBADF, 0, 0)
+			return
+		}
+		read = f.Read
 	}
-	mem := m.Memory()
 	_, memOk := mem.Read(ptr, lenBytes)
 	if !memOk {
 		debugLog("ABI read rejected: guest memory range invalid ptr=%d len=%d", ptr, lenBytes)
@@ -203,7 +249,7 @@ func (h *HostEnv) sys_read(ctx context.Context, m api.Module, stack []uint64) {
 	state := h.RegisterOp(ovPtr, fAny)
 	go func() {
 		tmp := make([]byte, lenBytes)
-		n, err := f.Read(tmp)
+		n, err := read(tmp)
 		retCode := uint32(0)
 		if err != nil && err != io.EOF {
 			retCode = mapErrno(err)
@@ -229,7 +275,6 @@ func (h *HostEnv) sys_read(ctx context.Context, m api.Module, stack []uint64) {
 					return
 				}
 			}
-			debugLog("ABI read completed: handle=%d bytes=%d error=%v wasi_error=%d", handle, n, err, retCode)
 			writeOverlapped(m, ovPtr, retCode, 0, uint64(n))
 		}
 	}()
@@ -435,8 +480,6 @@ func (h *HostEnv) sys_path_open(ctx context.Context, m api.Module, stack []uint6
 	truncateFlag := (flags & 0x200) != 0
 	appendFlag := (flags & 0x400) != 0
 
-	debugLog("DEBUG HOST path_open: path=%s flags=%d RDWR=%v WRONLY=%v CREATE=%v EXCL=%v TRUNC=%v", hostPathStr, flags, rdwr, writeOnly, createFlag, exclFlag, truncateFlag)
-
 	osFlags := 0
 	if rdwr {
 		osFlags |= os.O_RDWR
@@ -458,8 +501,6 @@ func (h *HostEnv) sys_path_open(ctx context.Context, m api.Module, stack []uint6
 		osFlags |= os.O_EXCL
 	}
 
-	debugLog("DEBUG HOST path_open: osFlags=%d", osFlags)
-
 	state := h.RegisterOp(ovPtr, nil)
 	go func() {
 		f, err := os.OpenFile(hostPathStr, osFlags, 0666)
@@ -478,7 +519,6 @@ func (h *HostEnv) sys_path_open(ctx context.Context, m api.Module, stack []uint6
 			h.handles[handle] = f
 			h.mu.Unlock()
 			extResult = handle
-			debugLog("path_open ok: path=%q flags=%d osFlags=%d handle=%d", hostPathStr, flags, osFlags, handle)
 		}
 		h.fileOpsQueue <- func() {
 			defer h.DecOpsFor(state)
@@ -507,7 +547,6 @@ func (h *HostEnv) sys_dir_read(ctx context.Context, m api.Module, stack []uint64
 		writeOverlapped(m, ovPtr, wasiEINVAL, 0, 0)
 		return
 	}
-	debugLog("dir_read: handle=%d ptr=%d len=%d", handle, ptr, lenBytes)
 
 	state := h.RegisterOp(ovPtr, nil)
 	go func() {

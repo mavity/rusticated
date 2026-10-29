@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"io"
 	"os"
 	"testing"
 	"time"
@@ -48,15 +49,38 @@ func TestSysReadExtended(t *testing.T) {
 		select {
 		case op := <-env.fileOpsQueue:
 			op()
+			if env.PendingOps() == 0 {
+				for {
+					select {
+					case wakeup := <-env.fileOpsQueue:
+						wakeup()
+					default:
+						return
+					}
+				}
+			}
 		case <-time.After(500 * time.Millisecond):
 			t.Fatal("timeout waiting for op")
 		}
+	}
+	submitRead := func(stack []uint64, flags uint32, offset uint64) {
+		requestLen := 24
+		if flags&readFlagPositional != 0 {
+			requestLen = 32
+		}
+		request := make([]byte, requestLen)
+		binary.LittleEndian.PutUint32(request[:4], flags)
+		if requestLen == 32 {
+			binary.LittleEndian.PutUint64(request[24:32], offset)
+		}
+		mem.Write(uint32(stack[0]), request)
+		env.sys_read(context.Background(), mod, stack)
 	}
 
 	t.Run("1. read small chunk happy path", func(t *testing.T) {
 		h := setupFile(t, "hello world")
 		stack := []uint64{200, h, 400, 5}
-		env.sys_read(context.Background(), mod, stack)
+		submitRead(stack, 0, 0)
 		runOp()
 		buf, _ := mem.Read(400, 5)
 		if string(buf) != "hello" {
@@ -67,7 +91,7 @@ func TestSysReadExtended(t *testing.T) {
 	t.Run("2. read zero bytes", func(t *testing.T) {
 		h := setupFile(t, "data")
 		stack := []uint64{200, h, 401, 0}
-		env.sys_read(context.Background(), mod, stack)
+		submitRead(stack, 0, 0)
 		runOp()
 		buf, _ := mem.Read(200, 8)
 		if binary.LittleEndian.Uint32(buf[4:8]) != 0 {
@@ -77,9 +101,9 @@ func TestSysReadExtended(t *testing.T) {
 
 	t.Run("3. read at EOF", func(t *testing.T) {
 		h := setupFile(t, "a")
-		env.sys_read(context.Background(), mod, []uint64{200, h, 402, 1})
+		submitRead([]uint64{200, h, 402, 1}, 0, 0)
 		runOp()
-		env.sys_read(context.Background(), mod, []uint64{200, h, 402, 1})
+		submitRead([]uint64{200, h, 402, 1}, 0, 0)
 		runOp()
 		buf, _ := mem.Read(200, 24)
 		n := binary.LittleEndian.Uint64(buf[16:24])
@@ -90,20 +114,20 @@ func TestSysReadExtended(t *testing.T) {
 
 	t.Run("4. read invalid handle", func(t *testing.T) {
 		stack := []uint64{200, 99999, 403, 5}
-		env.sys_read(context.Background(), mod, stack)
+		submitRead(stack, 0, 0)
 		buf, _ := mem.Read(200, 8)
-		if binary.LittleEndian.Uint32(buf[4:8]) != 9 { // EBADF
-			t.Errorf("errno got %d, want 9", binary.LittleEndian.Uint32(buf[4:8]))
+		if binary.LittleEndian.Uint32(buf[4:8]) != wasiEBADF {
+			t.Errorf("errno got %d, want %d", binary.LittleEndian.Uint32(buf[4:8]), wasiEBADF)
 		}
 	})
 
 	t.Run("5. read invalid guest memory", func(t *testing.T) {
 		h := setupFile(t, "data")
 		stack := []uint64{200, h, 2000000, 5}
-		env.sys_read(context.Background(), mod, stack)
+		submitRead(stack, 0, 0)
 		buf, _ := mem.Read(200, 8)
-		if binary.LittleEndian.Uint32(buf[4:8]) != 22 { // EINVAL
-			t.Errorf("errno got %d, want 22", binary.LittleEndian.Uint32(buf[4:8]))
+		if binary.LittleEndian.Uint32(buf[4:8]) != wasiEINVAL {
+			t.Errorf("errno got %d, want %d", binary.LittleEndian.Uint32(buf[4:8]), wasiEINVAL)
 		}
 	})
 
@@ -118,7 +142,7 @@ func TestSysReadExtended(t *testing.T) {
 		t.Cleanup(func() { f.Close() })
 
 		stack := []uint64{200, h, 300, 5}
-		env.sys_read(context.Background(), mod, stack)
+		submitRead(stack, 0, 0)
 		runOp()
 
 		buf, _ := mem.Read(200, 8)
@@ -131,7 +155,7 @@ func TestSysReadExtended(t *testing.T) {
 		data := bytes.Repeat([]byte("a"), 10000)
 		h := setupFile(t, string(data))
 		stack := []uint64{200, h, 404, 10000}
-		env.sys_read(context.Background(), mod, stack)
+		submitRead(stack, 0, 0)
 		runOp()
 		buf, _ := mem.Read(404, 10000)
 		if !bytes.Equal(buf, data) {
@@ -141,13 +165,87 @@ func TestSysReadExtended(t *testing.T) {
 
 	t.Run("8. sequential reads", func(t *testing.T) {
 		h := setupFile(t, "abcdef")
-		env.sys_read(context.Background(), mod, []uint64{200, h, 405, 3})
+		submitRead([]uint64{200, h, 405, 3}, 0, 0)
 		runOp()
-		env.sys_read(context.Background(), mod, []uint64{200, h, 408, 3})
+		submitRead([]uint64{200, h, 408, 3}, 0, 0)
 		runOp()
 		buf, _ := mem.Read(405, 6)
 		if string(buf) != "abcdef" {
 			t.Errorf("got %q, want %q", string(buf), "abcdef")
+		}
+	})
+
+	t.Run("8a. positioned read leaves shared position unchanged", func(t *testing.T) {
+		h := setupFile(t, "abcdef")
+		env.mu.Lock()
+		f := env.handles[h].(*os.File)
+		_, err := f.Seek(3, 0)
+		env.mu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		submitRead([]uint64{200, h, 500, 2}, readFlagPositional, 1)
+		runOp()
+		positioned, _ := mem.Read(500, 2)
+		if string(positioned) != "bc" {
+			t.Fatalf("positioned read got %q, want %q", positioned, "bc")
+		}
+		pos, err := f.Seek(0, io.SeekCurrent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pos != 3 {
+			t.Fatalf("positioned read changed shared position to %d, want 3", pos)
+		}
+
+		submitRead([]uint64{230, h, 510, 2}, 0, 0)
+		runOp()
+		completion, _ := mem.Read(230, 24)
+		if errno := binary.LittleEndian.Uint32(completion[4:8]); errno != 0 {
+			t.Fatalf("sequential read errno=%d", errno)
+		}
+		if n := binary.LittleEndian.Uint64(completion[16:24]); n != 2 {
+			t.Fatalf("sequential read returned %d bytes, want 2", n)
+		}
+		sequential, _ := mem.Read(510, 2)
+		if string(sequential) != "de" {
+			t.Errorf("sequential read got %q, want %q", sequential, "de")
+		}
+	})
+
+	t.Run("8b. rejects unsupported read flags and offsets", func(t *testing.T) {
+		h := setupFile(t, "data")
+		submitRead([]uint64{200, h, 520, 1}, 1<<25, 0)
+		flags, _ := mem.Read(204, 4)
+		if got := binary.LittleEndian.Uint32(flags); got != wasiEINVAL {
+			t.Errorf("unsupported flags errno=%d, want %d", got, wasiEINVAL)
+		}
+
+		submitRead([]uint64{230, h, 521, 1}, readFlagPositional, ^uint64(0))
+		flags, _ = mem.Read(234, 4)
+		if got := binary.LittleEndian.Uint32(flags); got != wasiEOVERFLOW {
+			t.Errorf("overflowing offset errno=%d, want %d", got, wasiEOVERFLOW)
+		}
+	})
+
+	t.Run("8c. positioned read rejects non-positionable handles", func(t *testing.T) {
+		h := uint64(63)
+		env.mu.Lock()
+		env.handles[h] = &mockReadWriter{readFunc: func(p []byte) (int, error) {
+			return copy(p, "pipe"), nil
+		}}
+		env.mu.Unlock()
+		t.Cleanup(func() {
+			env.mu.Lock()
+			delete(env.handles, h)
+			env.mu.Unlock()
+		})
+
+		submitRead([]uint64{200, h, 522, 1}, readFlagPositional, 0)
+		flags, _ := mem.Read(204, 4)
+		if got := binary.LittleEndian.Uint32(flags); got != wasiESPIPE {
+			t.Errorf("non-positionable errno=%d, want %d", got, wasiESPIPE)
 		}
 	})
 
@@ -167,7 +265,7 @@ func TestSysReadExtended(t *testing.T) {
 		})
 
 		stack := []uint64{200, h, 411, 5}
-		env.sys_read(context.Background(), mod, stack)
+		submitRead(stack, 0, 0)
 		runOp()
 		buf, _ := mem.Read(200, 8)
 		if binary.LittleEndian.Uint32(buf[4:8]) == 0 {
@@ -194,7 +292,7 @@ func TestSysReadExtended(t *testing.T) {
 		})
 
 		stack := []uint64{200, h, 412, 5}
-		env.sys_read(context.Background(), mod, stack)
+		submitRead(stack, 0, 0)
 		<-readStarted
 		env.sys_cancel(context.Background(), mod, []uint64{200})
 		runOp()
@@ -210,7 +308,7 @@ func TestSysReadExtended(t *testing.T) {
 		t.Cleanup(func() { f.Close() })
 
 		stack := []uint64{200, h, 413, 5}
-		env.sys_read(context.Background(), mod, stack)
+		submitRead(stack, 0, 0)
 		runOp()
 		buf, _ := mem.Read(200, 8)
 		if binary.LittleEndian.Uint32(buf[4:8]) == 0 {
@@ -221,7 +319,7 @@ func TestSysReadExtended(t *testing.T) {
 	t.Run("12. read partial data", func(t *testing.T) {
 		h := setupFile(t, "abc")
 		stack := []uint64{200, h, 418, 10}
-		env.sys_read(context.Background(), mod, stack)
+		submitRead(stack, 0, 0)
 		runOp()
 		buf, _ := mem.Read(200, 24)
 		n := binary.LittleEndian.Uint64(buf[16:24])
@@ -233,8 +331,8 @@ func TestSysReadExtended(t *testing.T) {
 	t.Run("13. concurrent reads different handles", func(t *testing.T) {
 		h1 := setupFile(t, "111")
 		h2 := setupFile(t, "222")
-		env.sys_read(context.Background(), mod, []uint64{200, h1, 428, 3})
-		env.sys_read(context.Background(), mod, []uint64{300, h2, 431, 3})
+		submitRead([]uint64{200, h1, 428, 3}, 0, 0)
+		submitRead([]uint64{300, h2, 431, 3}, 0, 0)
 		runOp()
 		runOp()
 		b1, _ := mem.Read(428, 3)
@@ -248,7 +346,7 @@ func TestSysReadExtended(t *testing.T) {
 		env.mu.Lock()
 		env.handles[0] = bytes.NewReader([]byte("input"))
 		env.mu.Unlock()
-		env.sys_read(context.Background(), mod, []uint64{200, 0, 440, 5})
+		submitRead([]uint64{200, 0, 440, 5}, 0, 0)
 		runOp()
 		buf, _ := mem.Read(440, 5)
 		if string(buf) != "input" {
@@ -265,9 +363,9 @@ func TestSysReadExtended(t *testing.T) {
 		f.Close()
 
 		stack := []uint64{200, h, 445, 5}
-		env.sys_read(context.Background(), mod, stack)
+		submitRead(stack, 0, 0)
 		buf, _ := mem.Read(200, 8)
-		if binary.LittleEndian.Uint32(buf[4:8]) != 9 {
+		if binary.LittleEndian.Uint32(buf[4:8]) != wasiEBADF {
 			t.Error("read should fail for removed handle")
 		}
 	})
@@ -279,7 +377,7 @@ func TestSysReadExtended(t *testing.T) {
 		f.Close()
 		env.mu.Unlock()
 		stack := []uint64{200, h, 450, 5}
-		env.sys_read(context.Background(), mod, stack)
+		submitRead(stack, 0, 0)
 		runOp()
 		buf, _ := mem.Read(200, 8)
 		if binary.LittleEndian.Uint32(buf[4:8]) == 0 {
@@ -292,8 +390,8 @@ func TestSysReadExtended(t *testing.T) {
 		stack := []uint64{200, h, 400, 0xFFFFFFFF}
 		env.sys_read(context.Background(), mod, stack)
 		buf, _ := mem.Read(200, 8)
-		if binary.LittleEndian.Uint32(buf[4:8]) != 22 {
-			t.Errorf("errno got %d, want 22", binary.LittleEndian.Uint32(buf[4:8]))
+		if binary.LittleEndian.Uint32(buf[4:8]) != wasiEINVAL {
+			t.Errorf("errno got %d, want %d", binary.LittleEndian.Uint32(buf[4:8]), wasiEINVAL)
 		}
 	})
 
@@ -303,7 +401,7 @@ func TestSysReadExtended(t *testing.T) {
 		f := env.handles[h].(*os.File)
 		f.Seek(5, 0)
 		env.mu.Unlock()
-		env.sys_read(context.Background(), mod, []uint64{200, h, 460, 2})
+		submitRead([]uint64{200, h, 460, 2}, 0, 0)
 		runOp()
 		buf, _ := mem.Read(460, 2)
 		if string(buf) != "56" {
@@ -315,7 +413,7 @@ func TestSysReadExtended(t *testing.T) {
 		h := setupFile(t, "abc")
 		lastByte := uint32(1024*1024 - 3)
 		stack := []uint64{200, h, uint64(lastByte), 3}
-		env.sys_read(context.Background(), mod, stack)
+		submitRead(stack, 0, 0)
 		runOp()
 		buf, _ := mem.Read(lastByte, 3)
 		if string(buf) != "abc" {
@@ -326,7 +424,7 @@ func TestSysReadExtended(t *testing.T) {
 	t.Run("20. concurrency queue stress", func(t *testing.T) {
 		h := setupFile(t, "data")
 		for i := 0; i < 10; i++ {
-			env.sys_read(context.Background(), mod, []uint64{uint64(500 + i*30), h, uint64(600 + i*10), 1})
+			submitRead([]uint64{uint64(500 + i*30), h, uint64(600 + i*10), 1}, 0, 0)
 		}
 		for i := 0; i < 10; i++ {
 			runOp()

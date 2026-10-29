@@ -25,6 +25,16 @@ use crate::vec::Vec;
 
 type MainFuture = Pin<Box<dyn Future<Output = ()>>>;
 
+/// Standard overlapped header followed by the positioned-read request payload.
+///
+/// The `repr(C)` layout keeps `read_offset` at byte 24, immediately after the
+/// standard 24-byte header passed to host imports.
+#[repr(C)]
+struct OverlappedStorage {
+    header: Overlapped,
+    read_offset: u64,
+}
+
 #[unsafe(no_mangle)]
 extern "Rust" fn __getrandom_v03_custom(dest: *mut u8, len: usize) -> Result<(), getrandom::Error> {
     // SAFETY: `dest`/`len` come from getrandom which validates the slice is
@@ -43,7 +53,7 @@ extern "Rust" fn __getrandom_v03_custom(dest: *mut u8, len: usize) -> Result<(),
 /// long as at least one [`Rc`] clone of the enclosing [`OpState`] exists, the
 /// pointer is valid.
 struct OpState {
-    overlapped: UnsafeCell<Overlapped>,
+    overlapped: UnsafeCell<OverlappedStorage>,
     /// Optional buffer pinned for the duration of the operation. Held here so
     /// the buffer outlives the future that originated it.
     buffer: UnsafeCell<Option<Vec<u8>>>,
@@ -54,7 +64,7 @@ impl Drop for OpState {
         // If the operation is not complete, we must tell the host to stop
         // using this pointer before we free it.
         if !self.is_complete() {
-            unsafe { imports::cancel(self.overlapped.get()) };
+            unsafe { imports::cancel(self.overlapped_ptr()) };
         }
     }
 }
@@ -62,31 +72,48 @@ impl Drop for OpState {
 impl OpState {
     fn new() -> Rc<Self> {
         Rc::new(Self {
-            overlapped: UnsafeCell::new(Overlapped::default()),
+            overlapped: UnsafeCell::new(OverlappedStorage {
+                header: Overlapped::default(),
+                read_offset: 0,
+            }),
             buffer: UnsafeCell::new(None),
         })
     }
 
     fn with_buffer(buf: Vec<u8>) -> Rc<Self> {
+        Self::with_buffer_request(buf, 0, 0)
+    }
+
+    fn with_positioned_read_buffer(buf: Vec<u8>, offset: u64) -> Rc<Self> {
+        Self::with_buffer_request(buf, imports::READ_FLAG_POSITIONAL, offset)
+    }
+
+    fn with_buffer_request(buf: Vec<u8>, flags: u32, read_offset: u64) -> Rc<Self> {
         Rc::new(Self {
-            overlapped: UnsafeCell::new(Overlapped::default()),
+            overlapped: UnsafeCell::new(OverlappedStorage {
+                header: Overlapped {
+                    flags,
+                    ..Overlapped::default()
+                },
+                read_offset,
+            }),
             buffer: UnsafeCell::new(Some(buf)),
         })
     }
 
     fn overlapped_ptr(&self) -> *mut Overlapped {
-        self.overlapped.get()
+        self.overlapped.get().cast()
     }
 
     fn is_complete(&self) -> bool {
         // SAFETY: host writes the `flags` field via the same address; reading
         // it once per `tick` is sound on the single-threaded WASM target.
-        unsafe { (*self.overlapped.get()).is_complete() }
+        unsafe { (*self.overlapped_ptr()).is_complete() }
     }
 
     fn snapshot(&self) -> (u32, u64, u64) {
         // SAFETY: completion has been signalled; the host no longer writes.
-        let ov = unsafe { &*self.overlapped.get() };
+        let ov = unsafe { &*self.overlapped_ptr() };
         (ov.error, ov.result_ext, ov.continued)
     }
 
@@ -309,6 +336,19 @@ impl OverlappedBufferFuture {
     {
         Self {
             state: OpState::with_buffer(buffer),
+            op: Some(Box::new(op)),
+            started: false,
+        }
+    }
+
+    /// Build a positioned-read future with its request flag and offset stored
+    /// contiguously after the standard overlapped header.
+    pub(crate) fn new_read_at<F>(buffer: Vec<u8>, offset: u64, op: F) -> Self
+    where
+        F: FnOnce(*mut Overlapped, *mut u8, u32) + 'static,
+    {
+        Self {
+            state: OpState::with_positioned_read_buffer(buffer, offset),
             op: Some(Box::new(op)),
             started: false,
         }

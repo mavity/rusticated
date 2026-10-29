@@ -8,7 +8,11 @@
 (function () {
 'use strict';
 
+// Overlapped.flags: bit 0 is completion, bits 1-23 are shared-reserved, and
+// bits 24-31 are operation-specific.
 const FLAG_COMPLETED = 1;
+// This request flag selects the read-specific u64 offset at ovPtr + 24.
+const READ_FLAG_POSITIONAL = 1 << 24;
 
 // ── WASI (wasip1) errno mapping ───────────────────────────────────────────────
 const wasiSuccess          = 0;
@@ -748,13 +752,44 @@ function makeBrowserImports(hostState, fs, params = {}) {
 
     // ── Overlapped I/O ───────────────────────────────────────────────────────
     read: (ovPtr, handle, ptr, len) => {
+      const ovPtrNum = Number(ovPtr) >>> 0;
+      const opId = hostState.registerOp(ovPtrNum);
+      const view = hostState.view;
+      const requestFlags = view.getUint32(ovPtrNum, true);
+      if ((requestFlags & ~READ_FLAG_POSITIONAL) !== 0) {
+        hostState.enqueue(() => hostState.completeOp(ovPtrNum, opId, wasiEINVAL, 0, 0));
+        return;
+      }
+
+      const positioned = (requestFlags & READ_FLAG_POSITIONAL) !== 0;
+      let position = null;
+      if (positioned) {
+        if (ovPtrNum + 32 > view.byteLength) {
+          hostState.enqueue(() => hostState.completeOp(ovPtrNum, opId, wasiEINVAL, 0, 0));
+          return;
+        }
+        const offset = view.getBigUint64(ovPtrNum + 24, true);
+        if (offset > BigInt(Number.MAX_SAFE_INTEGER)) {
+          hostState.enqueue(() => hostState.completeOp(ovPtrNum, opId, wasiEOVERFLOW, 0, 0));
+          return;
+        }
+        position = Number(offset);
+      }
+
       const h = hostState.getHandle(handle);
-      const opId = hostState.registerOp(Number(ovPtr));
-      const uPtr = Number(ptr);
-      const uLen = Number(len);
+      const uPtr = Number(ptr) >>> 0;
+      const uLen = Number(len) >>> 0;
 
       if (!h) {
-        hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiEBADF, 0, 0));
+        hostState.enqueue(() => hostState.completeOp(ovPtrNum, opId, wasiEBADF, 0, 0));
+        return;
+      }
+      if (positioned && h.type !== 'file') {
+        hostState.enqueue(() => hostState.completeOp(ovPtrNum, opId, wasiESPIPE, 0, 0));
+        return;
+      }
+      if (uPtr + uLen > view.byteLength) {
+        hostState.enqueue(() => hostState.completeOp(ovPtrNum, opId, wasiEINVAL, 0, 0));
         return;
       }
 
@@ -783,32 +818,32 @@ function makeBrowserImports(hostState, fs, params = {}) {
 
       if (h.type === 'file') {
         const entry = h.entry;
-        const offset = h.offset || 0;
+        const offset = positioned ? position : (h.offset || 0);
         const available = entry.content ? entry.content.length - offset : 0;
         const toRead = Math.min(uLen, Math.max(0, available));
         if (toRead > 0 && entry.content) {
           hostState.getGuestSlice(uPtr, toRead).set(entry.content.subarray(offset, offset + toRead));
-          h.offset = offset + toRead;
+          if (!positioned) h.offset = offset + toRead;
         }
-        hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, 0, 0, toRead));
+        hostState.enqueue(() => hostState.completeOp(ovPtrNum, opId, 0, 0, toRead));
         return;
       }
 
       if (h.type === 'proxy') {
         Promise.resolve(h.proxy.read(uLen)).then((chunk) => {
           hostState.enqueue(() => {
-            if (!hostState.isOpActive(Number(ovPtr), opId)) return;
+            if (!hostState.isOpActive(ovPtrNum, opId)) return;
             const n = Math.min(uLen, chunk ? chunk.length : 0);
             if (n > 0) hostState.getGuestSlice(uPtr, n).set(chunk.subarray(0, n));
-            hostState.completeOp(Number(ovPtr), opId, 0, 0, n);
+            hostState.completeOp(ovPtrNum, opId, 0, 0, n);
           });
         }).catch((err) => {
-          hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, mapErrno(err), 0, 0));
+          hostState.enqueue(() => hostState.completeOp(ovPtrNum, opId, mapErrno(err), 0, 0));
         });
         return;
       }
 
-      hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiEINVAL, 0, 0));
+      hostState.enqueue(() => hostState.completeOp(ovPtrNum, opId, wasiEINVAL, 0, 0));
     },
 
     write: (ovPtr, handle, ptr, len) => {
@@ -2175,6 +2210,7 @@ globalThis.washmhostExports = {
     STAT_KIND_DIR,
     STAT_KIND_SYMLINK,
     FLAG_COMPLETED,
+    READ_FLAG_POSITIONAL,
     wasiSuccess,
     wasiEFBIG,
     wasiENOENT,

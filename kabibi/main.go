@@ -39,7 +39,7 @@ Flags:
   -c, --command string   Execute a command or AI prompt in batch mode and exit
   -p, --prompt string    Execute a prompt in one-shot mode and exit
       --edit string      Open a file in the editor, save on exit, and close Kabibi
-  -v, --verbose          Verbose output
+  -v, --verbose          Verbose diagnostics (includes prompts and tool I/O)
   -h, --help             Show this help
 
 A single positional file path runs that file as a shell script. Other positional
@@ -69,7 +69,7 @@ func parseCLI(args []string, helpOut io.Writer) (cliOptions, error) {
 	fs.StringVarP(&opts.command, "command", "c", "", "Execute a command or AI prompt in batch mode and exit")
 	fs.StringVarP(&opts.prompt, "prompt", "p", "", "Execute a prompt in one-shot mode and exit")
 	fs.StringVar(&opts.edit, "edit", "", "Open a file in the editor, save on exit, and close Kabibi")
-	fs.BoolVarP(&opts.verbose, "verbose", "v", false, "Verbose output")
+	fs.BoolVarP(&opts.verbose, "verbose", "v", false, "Verbose diagnostics, including prompts and tool I/O")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, pflag.ErrHelp) {

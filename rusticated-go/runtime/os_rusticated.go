@@ -30,7 +30,9 @@ type iovec struct {
 }
 
 type overlapped struct {
-	_         structs.HostLayout
+	_ structs.HostLayout
+	// Bit 0 is completion; bits 1-23 are shared-reserved; bits 24-31 are
+	// operation-specific. The runtime only tests bit 0.
 	flags     uint32
 	hostError uint32
 	continued uint64

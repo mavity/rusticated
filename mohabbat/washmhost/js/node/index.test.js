@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { HostState, makeBrainImports, marshalStat } from './index.js';
+import { HostState, makeBrainImports, marshalStat, READ_FLAG_POSITIONAL } from './index.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -70,6 +70,52 @@ test('writeOverlapped sets FLAG_COMPLETED', () => {
     assert.equal(view.getUint32(0, true), 1); // FLAG_COMPLETED
     assert.equal(view.getUint32(4, true), 0); // error
     assert.equal(view.getBigUint64(16, true), 42n); // resultExt
+});
+
+test('positioned read preserves the handle position and rejects stream handles', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'washmhost-pread-'));
+    const file = path.join(dir, 'data.txt');
+    fs.writeFileSync(file, 'abcdef');
+    const fd = fs.openSync(file, 'r');
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const host = new HostState();
+    host.memory = memory;
+    const { env } = makeBrainImports(host, []);
+    const handle = host.allocHandle({ type: 'file', fd });
+    const view = new DataView(memory.buffer);
+
+    try {
+        view.setUint32(32, READ_FLAG_POSITIONAL, true);
+        view.setBigUint64(56, 2n, true);
+        env.read(32, handle, 256, 3);
+        assert.equal(await waitForHostResult(host, memory, 32), 0);
+        assert.equal(view.getBigUint64(48, true), 3n);
+        assert.equal(Buffer.from(memory.buffer, 256, 3).toString(), 'cde');
+
+        env.read(96, handle, 300, 3);
+        assert.equal(await waitForHostResult(host, memory, 96), 0);
+        assert.equal(Buffer.from(memory.buffer, 300, 3).toString(), 'abc');
+
+        const pipeHandle = host.allocHandle({ type: 'pipe_r' });
+        view.setUint32(160, READ_FLAG_POSITIONAL, true);
+        env.read(160, pipeHandle, 320, 3);
+        assert.equal(view.getUint32(164, true), 70); // ESPIPE
+
+        env.read(192, handle, 65534, 4);
+        assert.equal(view.getUint32(196, true), 28); // WASI EINVAL
+
+        view.setUint32(224, 1 << 25, true);
+        env.read(224, handle, 360, 1);
+        assert.equal(view.getUint32(228, true), 28); // WASI EINVAL
+
+        view.setUint32(256, READ_FLAG_POSITIONAL, true);
+        view.setBigUint64(280, BigInt(Number.MAX_SAFE_INTEGER) + 1n, true);
+        env.read(256, handle, 361, 1);
+        assert.equal(view.getUint32(260, true), 61); // WASI EOVERFLOW
+    } finally {
+        fs.closeSync(fd);
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
 });
 
 test('path link ABI creates hard links and reports readlink buffer requirements', async (t) => {

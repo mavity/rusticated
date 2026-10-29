@@ -6,14 +6,15 @@
 ///
 /// This struct is passed to host ABI calls to represent an async operation
 /// in progress. The host fills in `flags`, `error`, and `result_ext` before
-/// waking the guest.
+/// waking the guest. The positioned-read extension is specified in
+/// `mohabbat/docs/9-positioned-read.md`.
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Overlapped {
-    /// Completion and status flags set by the host.
+    /// Completion and operation-specific request flags.
     ///
-    /// `FLAG_COMPLETED` is used by the runtime to know when the operation has
-    /// finished, and other bits may encode additional host-specific state.
+    /// Bit 0 is `FLAG_COMPLETED`; bits 1-23 are shared-reserved; bits 24-31
+    /// are operation-specific. Undefined bits must be zero.
     pub flags: u32,
     /// Host error code returned by the operation.
     ///
@@ -32,6 +33,8 @@ pub struct Overlapped {
     /// additional result value defined by the host ABI.
     pub result_ext: u64,
 }
+
+const _: [(); 24] = [(); core::mem::size_of::<Overlapped>()];
 
 impl Overlapped {
     /// Flag indicating the host has completed the requested operation.
@@ -204,6 +207,9 @@ pub const STAT_KIND_SOCKET: u32 = 7;
 /// WASM Host Imports
 #[cfg(target_family = "wasm")]
 pub mod imports {
+    /// Request a positional read using the `read` overlapped extension.
+    pub const READ_FLAG_POSITIONAL: u32 = 1 << 24;
+
     use super::Overlapped;
 
     #[link(wasm_import_module = "env")]
@@ -229,7 +235,8 @@ pub mod imports {
         /// Cancel any pending overlapped operation (Sync).
         pub fn cancel(target_overlapped: *mut Overlapped);
 
-        /// Unified read. Result_ext = bytes transferred.
+        /// Unified read. `READ_FLAG_POSITIONAL` adds a u64 offset after the
+        /// standard 24-byte header. Result_ext = bytes transferred.
         pub fn read(overlapped: *mut Overlapped, handle: u64, buffer_ptr: *mut u8, buffer_len: u32);
         /// Unified write. Result_ext = bytes transferred.
         pub fn write(

@@ -39,6 +39,7 @@ const {
   STAT_KIND_DIR,
   STAT_KIND_SYMLINK,
   FLAG_COMPLETED,
+  READ_FLAG_POSITIONAL,
   wasiSuccess,
   wasiEFBIG,
   wasiENOENT,
@@ -238,6 +239,58 @@ test('Whitebox ABI interface handles overlapped file read/write correctly', asyn
   // Close handle
   env.handle_close(fileHandle);
   assert.equal(hostState.getHandle(fileHandle), undefined);
+});
+
+test('positioned read preserves browser file position and rejects stream handles', async () => {
+  const mem = new WebAssembly.Memory({ initial: 1 });
+  const host = await washmhost({ test: true, memory: mem });
+  const { env, hostState, fs } = host;
+  const view = new DataView(mem.buffer);
+  await fs.seed();
+
+  const pathBytes = new TextEncoder().encode('/etc/hostname');
+  new Uint8Array(mem.buffer, 128, pathBytes.length).set(pathBytes);
+  env.path_open(32, 128, pathBytes.length, 0, 0);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  hostState.drainQueue();
+  const fileHandle = view.getBigUint64(48, true);
+
+  view.setUint32(96, READ_FLAG_POSITIONAL, true);
+  view.setBigUint64(120, 7n, true);
+  env.read(96, fileHandle, 256, 3);
+  hostState.drainQueue();
+  assert.equal(view.getUint32(100, true), 0);
+  assert.equal(view.getBigUint64(112, true), 3n);
+  assert.equal(new TextDecoder().decode(new Uint8Array(mem.buffer, 256, 3)), 'ted');
+  assert.equal(hostState.getHandle(fileHandle).offset, 0);
+
+  env.read(160, fileHandle, 300, 3);
+  hostState.drainQueue();
+  assert.equal(new TextDecoder().decode(new Uint8Array(mem.buffer, 300, 3)), 'rus');
+
+  view.setUint32(160, 1 << 25, true);
+  env.read(160, fileHandle, 352, 1);
+  hostState.drainQueue();
+  assert.equal(view.getUint32(164, true), wasiEINVAL);
+
+  view.setUint32(192, READ_FLAG_POSITIONAL, true);
+  view.setBigUint64(216, BigInt(Number.MAX_SAFE_INTEGER) + 1n, true);
+  env.read(192, fileHandle, 353, 1);
+  hostState.drainQueue();
+  assert.equal(view.getUint32(196, true), 61); // WASI EOVERFLOW
+
+  env.read(288, fileHandle, 65534, 4);
+  hostState.drainQueue();
+  assert.equal(view.getUint32(292, true), wasiEINVAL);
+
+  env.process_pipe(192);
+  hostState.drainQueue();
+  const handles = view.getBigUint64(208, true);
+  const readHandle = handles & 0xffffffffn;
+  view.setUint32(224, READ_FLAG_POSITIONAL, true);
+  env.read(224, readHandle, 320, 3);
+  hostState.drainQueue();
+  assert.equal(view.getUint32(228, true), 70); // ESPIPE
 });
 
 test('process_pipe creates usable async pipe handles', async () => {
