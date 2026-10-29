@@ -225,15 +225,17 @@ pub fn dispatch_frame(hdr: Header, body: &[u8]) {
                 return;
             }
 
-            let release_during_call = parent_inv_id == 0
+            let is_outer_on_reader = parent_inv_id == 0
                 && os::current_thread_id() == callbacks::reader_thread_id();
-            if release_during_call {
+            if is_outer_on_reader {
+                callbacks::set_outer_call_depth(1);
                 release_reader_lock();
             }
 
             let ret_val = unsafe { arch_call::call_c_func(sym_addr as usize, &args) };
 
-            if release_during_call {
+            if is_outer_on_reader {
+                callbacks::set_outer_call_depth(0);
                 while !try_acquire_reader_lock() {
                     core::hint::spin_loop();
                 }

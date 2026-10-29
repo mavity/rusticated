@@ -566,9 +566,13 @@ func TestDloadAsyncStreamingCallbacksWithoutBlockingMainThread(t *testing.T) {
 		}
 		defer DylibClose(handle)
 
-		symQueueUserWorkItem, sErr := DylibSym(handle, "QueueUserWorkItem")
-		if sErr != nil || symQueueUserWorkItem == 0 {
-			t.Fatalf("DylibSym(QueueUserWorkItem): %v", sErr)
+		symCreateThread, sErr := DylibSym(handle, "CreateThread")
+		if sErr != nil || symCreateThread == 0 {
+			t.Fatalf("DylibSym(CreateThread): %v", sErr)
+		}
+		symCloseHandle, sErr := DylibSym(handle, "CloseHandle")
+		if sErr != nil || symCloseHandle == 0 {
+			t.Fatalf("DylibSym(CloseHandle): %v", sErr)
 		}
 		symGetCurrentThreadId, sErr := DylibSym(handle, "GetCurrentThreadId")
 		if sErr != nil || symGetCurrentThreadId == 0 {
@@ -576,15 +580,17 @@ func TestDloadAsyncStreamingCallbacksWithoutBlockingMainThread(t *testing.T) {
 		}
 		symSelf = symGetCurrentThreadId
 		selfSig = []byte{0x60, 0, 1, WasmTypeI32}
-		queueSig := []byte{0x60, 3, WasmTypeI64, WasmTypeI64, WasmTypeI32, 1, WasmTypeI32}
+		createSig := []byte{0x60, 6, WasmTypeI64, WasmTypeI64, WasmTypeI64, WasmTypeI64, WasmTypeI32, WasmTypeI64, 1, WasmTypeI64}
+		closeSig := []byte{0x60, 1, WasmTypeI64, 1, WasmTypeI32}
 		spawnAsync = func(trampoline, param uint64) error {
-			res, cErr := DylibCall(symQueueUserWorkItem, queueSig, []uint64{trampoline, param, 0}, 0)
+			res, cErr := DylibCall(symCreateThread, createSig, []uint64{0, 0, trampoline, param, 0, 0}, 0)
 			if cErr != nil {
 				return cErr
 			}
-			if len(res) == 0 || uint32(res[0]) == 0 {
+			if len(res) == 0 || res[0] == 0 {
 				return os.ErrInvalid
 			}
+			_, _ = DylibCall(symCloseHandle, closeSig, []uint64{res[0]}, 0)
 			return nil
 		}
 	} else {
@@ -677,10 +683,12 @@ func TestDloadAsyncStreamingCallbacksWithoutBlockingMainThread(t *testing.T) {
 	manyArgs := make([]uint64, 16_000_000)
 	var cbMarker int
 	cbSig := []byte{0x60, 1, WasmTypeI64, 1, WasmTypeI64}
+	cbEntered := make(chan uint64, 8)
 	deadlockTrampDone := make(chan error, 1)
 
 	dlTramp, err := DylibRegisterCallbackWithContext(handle, cbSig, unsafe.Pointer(&cbMarker), 0,
 		func(invID uint64, _ uint64, _ []uint64) []uint64 {
+			cbEntered <- invID
 			if _, cErr := DylibCall(symSelf, selfSig, manyArgs, invID); cErr != nil {
 				deadlockTrampDone <- cErr
 				return []uint64{0}
@@ -712,6 +720,12 @@ func TestDloadAsyncStreamingCallbacksWithoutBlockingMainThread(t *testing.T) {
 			t.Fatalf("DEADLOCK REPRODUCED on attempt %d inside spawnAsync: main thread released READER_BUSY before dispatch_frame, background callback thread stole READER_BUSY and blocked in read_frame()", attempt)
 		}
 		select {
+		case gotInv := <-cbEntered:
+			t.Logf("attempt %d: callback entered Go with invID=%d", attempt, gotInv)
+		case <-time.After(1 * time.Second):
+			t.Fatalf("attempt %d: callback NEVER entered Go after QueueUserWorkItem!", attempt)
+		}
+		select {
 		case cErr := <-deadlockTrampDone:
 			if cErr != nil {
 				t.Fatalf("attempt %d re-entrant DylibCall failed: %v", attempt, cErr)
@@ -721,6 +735,67 @@ func TestDloadAsyncStreamingCallbacksWithoutBlockingMainThread(t *testing.T) {
 		}
 	}
 }
+
+func TestDloadDynamicTrampolineMultiPageScaling(t *testing.T) {
+	libName := "kernel32.dll"
+	if !isWindowsHost() {
+		libName = "libc.so.6"
+		if isDarwinHost() {
+			libName = "/usr/lib/libSystem.B.dylib"
+		} else if isAndroidEnvironment() {
+			libName = "libc.so"
+		}
+	}
+	handle, err := DylibOpen(libName, RTLD_NOW)
+	if err != nil {
+		t.Fatalf("DylibOpen(%q): %v", libName, err)
+	}
+	defer DylibClose(handle)
+
+	// Register 300 simultaneous callbacks (spanning 3 dynamic RW->RX pages of 128
+	// thunks each), invoke all 300, and verify each one dispatches its distinct
+	// closure and preserves all 8 arguments.
+	const numCallbacks = 300
+	markers := make([]int, numCallbacks)
+	trampolines := make([]uint64, numCallbacks)
+	sig := []byte{
+		0x60, 8,
+		WasmTypeI64, WasmTypeI64, WasmTypeI64, WasmTypeI64,
+		WasmTypeI64, WasmTypeI64, WasmTypeI64, WasmTypeI64,
+		1, WasmTypeI64,
+	}
+
+	for i := 0; i < numCallbacks; i++ {
+		idx := uint64(i + 1)
+		tramp, rErr := DylibRegisterCallbackWithContext(handle, sig, unsafe.Pointer(&markers[i]), 0,
+			func(_ uint64, _ uint64, args []uint64) []uint64 {
+				var sum uint64
+				for _, a := range args {
+					sum += a
+				}
+				return []uint64{idx*1000 + sum}
+			})
+		if rErr != nil || tramp == 0 {
+			t.Fatalf("register callback #%d: tramp=0x%x err=%v", i, tramp, rErr)
+		}
+		trampolines[i] = tramp
+	}
+	defer func() {
+		for i := range markers {
+			DylibUnregisterCallback(unsafe.Pointer(&markers[i]))
+		}
+	}()
+
+	for i := 0; i < numCallbacks; i++ {
+		args := []uint64{1, 2, 3, 4, 5, 6, 7, 8} // sum = 36
+		res, cErr := DylibCall(trampolines[i], sig, args, 0)
+		want := uint64(i+1)*1000 + 36
+		if cErr != nil || len(res) == 0 || res[0] != want {
+			t.Fatalf("callback #%d returned %v, err=%v; want [%d]", i, res, cErr, want)
+		}
+	}
+}
+
 
 
 
