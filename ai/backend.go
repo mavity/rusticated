@@ -65,8 +65,8 @@ type LMDriver interface {
 	writeBool(addr uint64, val bool)
 
 	// ── String marshaling ────────────────────────────────────────────────
-	stringToCPtr(s string) (uint64, func())
-	ptrToString(ptr uint64) string
+	stringToCPtr(s string) (uint64, func(), error)
+	ptrToString(ptr uint64) (string, error)
 
 	// ── Engine settings ──────────────────────────────────────────────────
 	settingsCreate(modelPath, backend, visionBackend, audioBackend uint64) uint64
@@ -101,16 +101,16 @@ type LMDriver interface {
 	loadedFileCreate(modelPath uint64) uint64
 	loadedFileDelete(file uint64)
 	loadedFileHasSpeculativeDecodingSupport(file uint64) bool
-	loadedFileMaxContextTokens(file uint64) uint32
-	loadedFileIsDynamicContext(file uint64) bool
-	loadedFileSupportsThinking(file uint64) bool
-	loadedFileSupportsFunctionCalling(file uint64) bool
-	loadedFileModalitySupportedBackends(file uint64, modality int32) []uint32
+	loadedFileMaxContextTokens(file uint64) (uint32, error)
+	loadedFileIsDynamicContext(file uint64) (bool, error)
+	loadedFileSupportsThinking(file uint64) (bool, error)
+	loadedFileSupportsFunctionCalling(file uint64) (bool, error)
+	loadedFileModalitySupportedBackends(file uint64, modality int32) ([]uint32, error)
 
 	// ── Stream chunk inspection ──────────────────────────────────────────
-	streamChunkGetText(chunk uint64) uint64
-	streamChunkIsFinal(chunk uint64) bool
-	streamChunkGetError(chunk uint64) uint64
+	streamChunkGetText(chunk uint64) (uint64, error)
+	streamChunkIsFinal(chunk uint64) (bool, error)
+	streamChunkGetError(chunk uint64) (uint64, error)
 
 	// ── Embedding Engine ─────────────────────────────────────────────────
 	embeddingSettingsCreate(modelPath, backend, visionBackend, audioBackend uint64) uint64
@@ -129,7 +129,7 @@ type LMDriver interface {
 	// ── Callback trampoline creation ─────────────────────────────────────
 	// The trampoline is created once per process; the request is identified
 	// by the userData passed to convSendStream.
-	createTrampoline() uint64
+	createTrampoline() (uint64, error)
 }
 
 // ── Shared callback state ─────────────────────────────────────────────────
@@ -151,9 +151,11 @@ type streamState struct {
 	// bodyDone is closed by the callback thread when it finishes the onChunk
 	// that was running when stop was requested.
 	bodyDone chan struct{}
-	// doneCh is 1-buffered: the terminal chunk delivers nil on clean
-	// completion or the native error, without ever blocking the C callback.
-	doneCh chan error
+	// doneCh is 1-buffered: the terminal callback delivers completion or an
+	// error, without ever blocking the C callback.
+	doneCh        chan error
+	// callbackErrCh reports a bridge failure before a terminal callback arrives.
+	callbackErrCh chan error
 	// closeCh is closed to ask the SendStream goroutine to abandon the stream.
 	closeCh  chan struct{}
 	closeReq atomic.Bool
@@ -161,10 +163,11 @@ type streamState struct {
 
 func newStreamState(onChunk func(string)) *streamState {
 	return &streamState{
-		onChunk:  onChunk,
-		bodyDone: make(chan struct{}),
-		doneCh:   make(chan error, 1),
-		closeCh:  make(chan struct{}),
+		onChunk:       onChunk,
+		bodyDone:      make(chan struct{}),
+		doneCh:        make(chan error, 1),
+		callbackErrCh: make(chan error, 1),
+		closeCh:       make(chan struct{}),
 	}
 }
 
@@ -262,37 +265,60 @@ func sharedTokenCallback(drv LMDriver, userData, chunkPtr uint64) {
 	}
 
 	entered := st.beginCallback()
+	var callbackErr error
 	if entered {
-		if textPtr := drv.streamChunkGetText(chunkPtr); textPtr != 0 {
-			if token := drv.ptrToString(textPtr); token != "" {
+		textPtr, err := drv.streamChunkGetText(chunkPtr)
+		if err != nil {
+			callbackErr = errors.Join(callbackErr, fmt.Errorf("read LiteRT stream chunk text: %w", err))
+		} else if textPtr != 0 {
+			token, err := drv.ptrToString(textPtr)
+			if err != nil {
+				callbackErr = errors.Join(callbackErr, fmt.Errorf("read LiteRT stream chunk text: %w", err))
+			} else if token != "" {
 				st.onChunk(token)
 			}
 		}
 	}
 
-	isFinal := drv.streamChunkIsFinal(chunkPtr)
+	isFinal, finalErr := drv.streamChunkIsFinal(chunkPtr)
+	if finalErr != nil {
+		callbackErr = errors.Join(callbackErr, fmt.Errorf("read LiteRT stream final flag: %w", finalErr))
+	}
 	var streamErr error
-	if isFinal {
-		if errPtr := drv.streamChunkGetError(chunkPtr); errPtr != 0 {
+	if finalErr == nil && isFinal {
+		errPtr, err := drv.streamChunkGetError(chunkPtr)
+		if err != nil {
+			streamErr = fmt.Errorf("read LiteRT stream error: %w", err)
+		} else if errPtr != 0 {
 			// The chunk is only valid during this call, so copy the message now.
-			msg := drv.ptrToString(errPtr)
-			if msg == "" {
+			msg, err := drv.ptrToString(errPtr)
+			if err != nil {
+				streamErr = fmt.Errorf("read LiteRT stream error message: %w", err)
+			} else if msg == "" {
 				msg = "native stream reported an error without a message"
 			}
-			streamErr = fmt.Errorf("LiteRT stream error: %s", msg)
+			if err == nil {
+				streamErr = fmt.Errorf("LiteRT stream error: %s", msg)
+			}
 		}
-		if Verbose {
-			fmt.Fprintf(os.Stderr, "[ai] stream final chunk (err: %v)\n", streamErr)
-		}
+		callbackErr = errors.Join(callbackErr, streamErr)
 	}
 
 	if entered {
 		st.endCallback()
 	}
 
-	if isFinal {
+	if finalErr == nil && isFinal {
+		if Verbose {
+			fmt.Fprintf(os.Stderr, "[ai] stream final chunk (err: %v)\n", callbackErr)
+		}
 		select {
-		case st.doneCh <- streamErr:
+		case st.doneCh <- callbackErr:
+		default:
+		}
+	} else if callbackErr != nil {
+		select {
+		case st.callbackErrCh <- callbackErr:
 		default:
 		}
 	}
@@ -326,7 +352,10 @@ func sharedInspectModel(drv LMDriver, libPath, modelPath string) (*ModelInfo, er
 	if err := drv.ensureLoaded(libPath); err != nil {
 		return nil, err
 	}
-	cModel, freeModel := drv.stringToCPtr(modelPath)
+	cModel, freeModel, err := drv.stringToCPtr(modelPath)
+	if err != nil {
+		return nil, fmt.Errorf("marshal model path for inspection: %w", err)
+	}
 	defer freeModel()
 
 	file := drv.loadedFileCreate(cModel)
@@ -336,13 +365,29 @@ func sharedInspectModel(drv LMDriver, libPath, modelPath string) (*ModelInfo, er
 	defer drv.loadedFileDelete(file)
 
 	info := &ModelInfo{}
-	if maxTok := drv.loadedFileMaxContextTokens(file); maxTok > 0 {
+	maxTok, err := drv.loadedFileMaxContextTokens(file)
+	if err != nil {
+		return nil, fmt.Errorf("read model context-token limit: %w", err)
+	}
+	if maxTok > 0 {
 		info.MaxContextTokens = int(maxTok)
 	}
-	info.IsDynamicContext = drv.loadedFileIsDynamicContext(file)
-	info.SupportsThinking = drv.loadedFileSupportsThinking(file)
-	info.SupportsFunctionCalling = drv.loadedFileSupportsFunctionCalling(file)
-	backendIDs := drv.loadedFileModalitySupportedBackends(file, 0)
+	info.IsDynamicContext, err = drv.loadedFileIsDynamicContext(file)
+	if err != nil {
+		return nil, fmt.Errorf("read model dynamic-context capability: %w", err)
+	}
+	info.SupportsThinking, err = drv.loadedFileSupportsThinking(file)
+	if err != nil {
+		return nil, fmt.Errorf("read model thinking capability: %w", err)
+	}
+	info.SupportsFunctionCalling, err = drv.loadedFileSupportsFunctionCalling(file)
+	if err != nil {
+		return nil, fmt.Errorf("read model function-calling capability: %w", err)
+	}
+	backendIDs, err := drv.loadedFileModalitySupportedBackends(file, 0)
+	if err != nil {
+		return nil, fmt.Errorf("read model supported backends: %w", err)
+	}
 	for _, id := range backendIDs {
 		switch id {
 		case 1:
@@ -380,12 +425,18 @@ func sharedOpenBackend(drv LMDriver, libPath, modelPath, backend string, maxToke
 	}
 	configureLMLogging(drv)
 
-	cModel, freeModel := drv.stringToCPtr(modelPath)
+	cModel, freeModel, err := drv.stringToCPtr(modelPath)
+	if err != nil {
+		return nil, fmt.Errorf("marshal model path: %w", err)
+	}
 	defer freeModel()
 
 	supportsSpec := checkSpeculativeDecoding(drv, cModel)
 
-	cBackend, freeBackend := drv.stringToCPtr(backend)
+	cBackend, freeBackend, err := drv.stringToCPtr(backend)
+	if err != nil {
+		return nil, fmt.Errorf("marshal backend name: %w", err)
+	}
 	settings := drv.settingsCreate(cModel, cBackend, cBackend, 0)
 	freeBackend()
 	if settings == 0 {
@@ -431,12 +482,18 @@ func (b *drvEngineBackend) NewConversation(cfg ConversationConfig) (conversation
 	defer b.drv.cfgDelete(config)
 
 	if systemJSON != "" {
-		cSys, freeSys := b.drv.stringToCPtr(systemJSON)
+		cSys, freeSys, err := b.drv.stringToCPtr(systemJSON)
+		if err != nil {
+			return nil, fmt.Errorf("marshal system message: %w", err)
+		}
 		b.drv.cfgSetSystemMessage(config, cSys)
 		freeSys()
 	}
 	if toolsJSON != "" {
-		cTools, freeTools := b.drv.stringToCPtr(toolsJSON)
+		cTools, freeTools, err := b.drv.stringToCPtr(toolsJSON)
+		if err != nil {
+			return nil, fmt.Errorf("marshal tools configuration: %w", err)
+		}
 		b.drv.cfgSetTools(config, cTools)
 		freeTools()
 	}
@@ -444,12 +501,18 @@ func (b *drvEngineBackend) NewConversation(cfg ConversationConfig) (conversation
 		return nil, fmt.Errorf("configure constrained decoding: %w", err)
 	}
 	{
-		cChan, freeChan := b.drv.stringToCPtr("tool_call")
+		cChan, freeChan, err := b.drv.stringToCPtr("tool_call")
+		if err != nil {
+			return nil, fmt.Errorf("marshal tool-call channel: %w", err)
+		}
 		b.drv.cfgSetStreamToolCalls(config, true, cChan)
 		freeChan()
 	}
 	if historyJSON != "" {
-		cMsgs, freeMsgs := b.drv.stringToCPtr(historyJSON)
+		cMsgs, freeMsgs, err := b.drv.stringToCPtr(historyJSON)
+		if err != nil {
+			return nil, fmt.Errorf("marshal conversation history: %w", err)
+		}
 		b.drv.cfgSetMessages(config, cMsgs)
 		freeMsgs()
 	}
@@ -507,6 +570,11 @@ func (c *drvConversationBackend) SendStream(ctx context.Context, parts []PromptP
 	if err != nil {
 		return err
 	}
+	cMsg, freeMsg, err := c.drv.stringToCPtr(messageJSON)
+	if err != nil {
+		return fmt.Errorf("marshal stream message: %w", err)
+	}
+	defer freeMsg()
 
 	onChunk := func(raw string) {
 		for _, event := range parseChunkEvents(raw) {
@@ -525,15 +593,24 @@ func (c *drvConversationBackend) SendStream(ctx context.Context, parts []PromptP
 		return ErrClosed
 	}
 
-	streamID := registerStreamState(st)
+	callback, err := c.drv.createTrampoline()
+	if err != nil {
+		c.active.Store(nil)
+		c.releaseConv()
+		return fmt.Errorf("register LiteRT stream callback: %w", err)
+	}
+	if callback == 0 {
+		c.active.Store(nil)
+		c.releaseConv()
+		return fmt.Errorf("register LiteRT stream callback: returned NULL")
+	}
 
-	cMsg, freeMsg := c.drv.stringToCPtr(messageJSON)
-	defer freeMsg()
+	streamID := registerStreamState(st)
 
 	if Verbose {
 		fmt.Fprintf(os.Stderr, "[ai] convSendStream: calling\n")
 	}
-	rc := c.drv.convSendStream(c.conv, cMsg, 0, 0, c.drv.createTrampoline(), streamID)
+	rc := c.drv.convSendStream(c.conv, cMsg, 0, 0, callback, streamID)
 	if Verbose {
 		fmt.Fprintf(os.Stderr, "[ai] convSendStream: returned rc=%d\n", rc)
 	}
@@ -560,6 +637,9 @@ func (c *drvConversationBackend) SendStream(ctx context.Context, parts []PromptP
 			if err != nil && c.closed.Load() {
 				return ErrClosed
 			}
+			return err
+		case err := <-st.callbackErrCh:
+			c.abort(st, streamID)
 			return err
 		case <-ctx.Done():
 			c.abort(st, streamID)
@@ -610,10 +690,16 @@ func sharedOpenEmbedder(drv LMDriver, libPath, modelPath, backend string) (embed
 	}
 	configureLMLogging(drv)
 
-	cModel, freeModel := drv.stringToCPtr(modelPath)
+	cModel, freeModel, err := drv.stringToCPtr(modelPath)
+	if err != nil {
+		return nil, fmt.Errorf("marshal embedding model path: %w", err)
+	}
 	defer freeModel()
 
-	cBackend, freeBackend := drv.stringToCPtr(backend)
+	cBackend, freeBackend, err := drv.stringToCPtr(backend)
+	if err != nil {
+		return nil, fmt.Errorf("marshal embedding backend name: %w", err)
+	}
 	settings := drv.embeddingSettingsCreate(cModel, cBackend, 0, 0)
 	freeBackend()
 	if settings == 0 {

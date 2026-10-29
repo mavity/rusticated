@@ -83,7 +83,10 @@ func newInterpreterImpl(libPath, modelPath string) (*interpreterImpl, error) {
 		return nil, err
 	}
 
-	cPath, freePath := nativeDrv.stringToCPtr(modelPath)
+	cPath, freePath, err := nativeDrv.stringToCPtr(modelPath)
+	if err != nil {
+		return nil, fmt.Errorf("marshal TFLite model path: %w", err)
+	}
 	defer freePath()
 
 	modelPtr := tflModelCreateFromFile(uintptr(cPath))

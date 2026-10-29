@@ -25,6 +25,15 @@ type fakeDrv struct {
 	chunks map[uint64]fakeChunk
 	nextID uint64
 
+	stringErr         error
+	trampolineErr     error
+	textErr           error
+	finalErr          error
+	finalErrCalls     atomic.Int32
+	streamErrorErr    error
+	textStringErr     error
+	streamErrorStrErr error
+
 	// onSend runs inside convSendStream with the request's userData.
 	onSend func(d *fakeDrv, userData uint64)
 
@@ -40,8 +49,18 @@ func newFakeDrv() *fakeDrv {
 	return &fakeDrv{chunks: map[uint64]fakeChunk{}, cancelSeen: make(chan struct{})}
 }
 
-func (d *fakeDrv) stringToCPtr(s string) (uint64, func()) { return 1, func() {} }
-func (d *fakeDrv) createTrampoline() uint64               { return 1 }
+func (d *fakeDrv) stringToCPtr(s string) (uint64, func(), error) {
+	if d.stringErr != nil {
+		return 0, nil, d.stringErr
+	}
+	return 1, func() {}, nil
+}
+func (d *fakeDrv) createTrampoline() (uint64, error) {
+	if d.trampolineErr != nil {
+		return 0, d.trampolineErr
+	}
+	return 1, nil
+}
 func (d *fakeDrv) convSendStream(conv, msg, extraCtx, optArgs, callback, userData uint64) int32 {
 	d.sendCalls.Add(1)
 	d.onSend(d, userData)
@@ -67,24 +86,41 @@ func (d *fakeDrv) chunk(id uint64) fakeChunk {
 	return d.chunks[id]
 }
 
-func (d *fakeDrv) streamChunkGetText(c uint64) uint64 {
+func (d *fakeDrv) streamChunkGetText(c uint64) (uint64, error) {
+	if d.textErr != nil {
+		return 0, d.textErr
+	}
 	if d.chunk(c).text == "" {
-		return 0
+		return 0, nil
 	}
-	return c
+	return c, nil
 }
-func (d *fakeDrv) streamChunkIsFinal(c uint64) bool { return d.chunk(c).final }
-func (d *fakeDrv) streamChunkGetError(c uint64) uint64 {
+func (d *fakeDrv) streamChunkIsFinal(c uint64) (bool, error) {
+	if d.finalErr != nil && d.finalErrCalls.Add(1) == 1 {
+		return false, d.finalErr
+	}
+	return d.chunk(c).final, nil
+}
+func (d *fakeDrv) streamChunkGetError(c uint64) (uint64, error) {
+	if d.streamErrorErr != nil {
+		return 0, d.streamErrorErr
+	}
 	if d.chunk(c).errMsg == "" {
-		return 0
+		return 0, nil
 	}
-	return c | 1<<32
+	return c | 1<<32, nil
 }
-func (d *fakeDrv) ptrToString(p uint64) string {
+func (d *fakeDrv) ptrToString(p uint64) (string, error) {
 	if p>>32 == 1 {
-		return d.chunk(p & 0xffffffff).errMsg
+		if d.streamErrorStrErr != nil {
+			return "", d.streamErrorStrErr
+		}
+		return d.chunk(p & 0xffffffff).errMsg, nil
 	}
-	return d.chunk(p).text
+	if d.textStringErr != nil {
+		return "", d.textStringErr
+	}
+	return d.chunk(p).text, nil
 }
 
 // emit delivers one chunk the way the native runtime does: by calling the
@@ -211,6 +247,131 @@ func TestBackendReturnsTerminalChunkError(t *testing.T) {
 	err := newTestBackend(d).SendStream(context.Background(), testPrompt(), func(ModelEvent) {})
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("err = %v, want one mentioning boom", err)
+	}
+}
+
+func TestBackendCallbackRegistrationErrorDoesNotStartStream(t *testing.T) {
+	registrationErr := errors.New("registration failed")
+	d := newFakeDrv()
+	d.trampolineErr = registrationErr
+	c := newTestBackend(d)
+
+	err := c.SendStream(context.Background(), testPrompt(), func(ModelEvent) {})
+	if !errors.Is(err, registrationErr) {
+		t.Fatalf("SendStream() error = %v, want wrapped registration error", err)
+	}
+	if d.sendCalls.Load() != 0 {
+		t.Fatalf("native send calls = %d, want 0", d.sendCalls.Load())
+	}
+	if c.active.Load() != nil {
+		t.Fatal("callback registration failure left a stream active")
+	}
+}
+
+func TestBackendMessageMarshallingErrorDoesNotStartStream(t *testing.T) {
+	marshalErr := errors.New("string allocation failed")
+	d := newFakeDrv()
+	d.stringErr = marshalErr
+	c := newTestBackend(d)
+
+	err := c.SendStream(context.Background(), testPrompt(), func(ModelEvent) {})
+	if !errors.Is(err, marshalErr) {
+		t.Fatalf("SendStream() error = %v, want wrapped marshalling error", err)
+	}
+	if d.sendCalls.Load() != 0 || c.active.Load() != nil {
+		t.Fatal("message marshalling failure started or retained a stream")
+	}
+}
+
+func TestBackendStreamAccessorErrorReturnsAndAborts(t *testing.T) {
+	accessorErr := errors.New("text accessor failed")
+	d := newFakeDrv()
+	d.textErr = accessorErr
+	d.onSend = func(d *fakeDrv, ud uint64) {
+		go func() {
+			d.emit(ud, "a", false, "")
+			<-d.cancelSeen
+			d.emit(ud, "", true, "CANCELLED")
+		}()
+	}
+	c := newTestBackend(d)
+
+	err := c.SendStream(context.Background(), testPrompt(), func(ModelEvent) {})
+	if !errors.Is(err, accessorErr) {
+		t.Fatalf("SendStream() error = %v, want wrapped stream accessor error", err)
+	}
+	if d.cancelCalls.Load() != 1 {
+		t.Fatalf("native cancel calls = %d, want 1", d.cancelCalls.Load())
+	}
+	waitUntil(t, "conversation teardown after accessor failure", func() bool {
+		return d.deleteCalls.Load() == 1
+	})
+}
+
+func TestBackendStringConversionErrorReturnsAndAborts(t *testing.T) {
+	conversionErr := errors.New("string conversion failed")
+	d := newFakeDrv()
+	d.textStringErr = conversionErr
+	d.onSend = func(d *fakeDrv, ud uint64) {
+		go func() {
+			d.emit(ud, "a", false, "")
+			<-d.cancelSeen
+			d.emit(ud, "", true, "CANCELLED")
+		}()
+	}
+	c := newTestBackend(d)
+
+	err := c.SendStream(context.Background(), testPrompt(), func(ModelEvent) {})
+	if !errors.Is(err, conversionErr) {
+		t.Fatalf("SendStream() error = %v, want wrapped string conversion error", err)
+	}
+	waitUntil(t, "conversation teardown after string conversion failure", func() bool {
+		return d.deleteCalls.Load() == 1
+	})
+}
+
+func TestBackendFinalFlagAccessorErrorIsReturned(t *testing.T) {
+	accessorErr := errors.New("final flag accessor failed")
+	d := newFakeDrv()
+	d.finalErr = accessorErr
+	d.onSend = func(d *fakeDrv, ud uint64) {
+		go func() {
+			d.emit(ud, "a", false, "")
+			<-d.cancelSeen
+			d.emit(ud, "", true, "CANCELLED")
+		}()
+	}
+	err := newTestBackend(d).SendStream(context.Background(), testPrompt(), func(ModelEvent) {})
+	if !errors.Is(err, accessorErr) {
+		t.Fatalf("SendStream() error = %v, want wrapped final-flag accessor error", err)
+	}
+}
+
+func TestBackendTerminalErrorAccessorFailureIsReturned(t *testing.T) {
+	accessorErr := errors.New("stream error accessor failed")
+	d := newFakeDrv()
+	d.streamErrorErr = accessorErr
+	d.onSend = func(d *fakeDrv, ud uint64) {
+		go d.emit(ud, "", true, "native error")
+	}
+
+	err := newTestBackend(d).SendStream(context.Background(), testPrompt(), func(ModelEvent) {})
+	if !errors.Is(err, accessorErr) {
+		t.Fatalf("SendStream() error = %v, want wrapped terminal accessor error", err)
+	}
+}
+
+func TestBackendTerminalErrorStringConversionFailureIsReturned(t *testing.T) {
+	conversionErr := errors.New("error string conversion failed")
+	d := newFakeDrv()
+	d.streamErrorStrErr = conversionErr
+	d.onSend = func(d *fakeDrv, ud uint64) {
+		go d.emit(ud, "", true, "native error")
+	}
+
+	err := newTestBackend(d).SendStream(context.Background(), testPrompt(), func(ModelEvent) {})
+	if !errors.Is(err, conversionErr) {
+		t.Fatalf("SendStream() error = %v, want wrapped error string conversion failure", err)
 	}
 }
 
@@ -427,7 +588,7 @@ type mutexCallbackDrv struct {
 	nativeStreamMu sync.Mutex
 }
 
-func (m *mutexCallbackDrv) streamChunkIsFinal(c uint64) bool {
+func (m *mutexCallbackDrv) streamChunkIsFinal(c uint64) (bool, error) {
 	// Simulate work/delay inside sharedTokenCallback AFTER onChunk returns
 	// while the native C++ stream thread still holds nativeStreamMu.
 	time.Sleep(25 * time.Millisecond)

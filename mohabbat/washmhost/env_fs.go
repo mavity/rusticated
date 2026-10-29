@@ -647,7 +647,6 @@ func (h *HostEnv) sys_dir_read(ctx context.Context, m api.Module, stack []uint64
 					retCode = wasiEINVAL
 				}
 			}
-			debugLog("dir_read: handle=%d copied=%d retCode=%d", handle, copied, retCode)
 			writeOverlapped(m, ovPtr, retCode, 0, uint64(copied))
 		}
 	}()
