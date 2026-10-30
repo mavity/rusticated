@@ -280,7 +280,7 @@ The host provides the complete `env` import dictionary required by Go (`wasip1` 
 | `path_link` | Hard-link creation | Returns `wasiENOTSUP` until `AsyncFS` supports shared file identity |
 | `path_symlink` | Symbolic-link creation | Persists the exact target bytes and target-kind hint in `AsyncFS` |
 | `path_readlink` | Read symbolic-link target | Returns stored target bytes, reporting `wasiERANGE` and the required size |
-| `dir_read` | Directory enumeration | Paginates entries encoded as kind byte + NUL-terminated name |
+| `dir_read` | Directory enumeration | Paginates entries encoded as `[kind byte][name bytes][NUL]`; kind `0` means unknown and is valid |
 | `path_chmod` | Change file permissions | Updates `mode` in `AsyncFS` |
 | `path_remove` | File or empty dir deletion | Removes the final entry without following it; resolves intermediate links |
 | `path_mkdir` | Directory creation | Creates dir entry in `AsyncFS` |
