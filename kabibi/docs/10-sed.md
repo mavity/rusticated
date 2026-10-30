@@ -92,6 +92,18 @@ engine:
      call `parseEscape`) never emit `OpBackref`.
    * Record the referenced capture number in the `syntax.Regexp` node; do not
      infer references by scanning raw pattern text outside the parser.
+   * Reject out-of-range backreferences (`\k` where `k > p.numCap`, the total
+     number of capturing groups in the pattern) at the end of `parse()` as a
+     compile-time syntax error (`ErrInvalidEscape` or dedicated error code),
+     matching POSIX and GNU `sed`/`uutils/sed` behavior and guaranteeing that
+     `re.MaxCap()` is never smaller than any `OpBackref.Cap`. Forward,
+     currently-open (self-nested `(\1)`), and unmatched references to valid
+     group numbers (`1 <= k <= p.numCap`) remain valid at compile time and
+     fail to match at runtime until group `k` has a committed span.
+   * Also add `EmptyBeginWord` (`\<`) and `EmptyEndWord` (`\>`) to
+     `syntax.EmptyOp` (checking `!IsWordChar(r1) && IsWordChar(r2)` and
+     `IsWordChar(r1) && !IsWordChar(r2)`), since GNU `sed` and `uutils/sed`
+     rely on start/end-of-word assertions that cannot be translated to `\b`.
    * Place `OpBackref` at or before `OpCapture` in `syntax.Op` (or update the
      `sub.Op > OpCapture` precedence check in `writeRegexp`), and register
      `OpBackref` / `InstBackref` in `syntax/op_string.go`, `instOpNames`, and
@@ -115,13 +127,21 @@ engine:
      `b.cap[2*k+1] = pos`, clear `b.open[k] = -1` so `b.open[k] >= 0`
      accurately reflects whether group $k$ is currently open. On backtrack
      (`arg == true`), an opening `InstCapture` (`2*k`) restores the previous
-     `b.open[k]`, while a closing `InstCapture` (`2*k+1`) must restore
-     `b.open[k] = b.cap[2*k]` (the start offset that closing instruction had
-     just committed) **and** restore both previous committed `b.cap[2*k]` and
-     `b.cap[2*k+1]` (since a single scalar `job.pos` cannot hold both
-     `oldStart` and `oldEnd` when a repeated capture's later iteration fails
-     after committing, and backtracking into an alternation inside group $k$
-     such as `((a|ab)b)\1` needs `b.open[k]` restored before re-closing).
+     `b.open[k]` from `job.pos`, while a closing `InstCapture` (`2*k+1`) must
+     restore `b.open[k] = b.cap[2*k]` (the start offset that closing
+     instruction had just committed) **and** restore both previous committed
+     `b.cap[2*k]` and `b.cap[2*k+1]` via a dedicated LIFO `b.capStack []int` on
+     `bitState` (or widened `job` fields), since a single scalar `job.pos`
+     cannot hold both `oldStart` and `oldEnd` when a repeated capture's later
+     iteration fails after committing, and backtracking into an alternation
+     inside group $k$ such as `((a|ab)b)\1` needs `b.open[k]` restored before
+     re-closing.
+   * Because `tryBacktrackPlain` never pushes `arg == false` branch jobs after
+     initial entry (given `InstAltMatch` is disabled for `HasBackref`), every
+     mutation to `b.cap` and `b.open` is strictly unwound in LIFO order by
+     `InstCapture` (`arg == true`) jobs before any earlier `InstAlt` (`arg ==
+     true`) branch is popped. Keep `b.cap` and `b.open` live on `bitState`
+     without copying capture arrays onto each `job`.
    * For nested captures inside a repeated outer group (e.g. `((a)|b)+\2`),
      retain the prior iteration's committed binding when the inner capture is
      not entered on a later iteration, matching `regast`'s existing `RE2/Go`
@@ -129,7 +149,8 @@ engine:
      `fancy-regex` behavior.
 3. **Compilation, nullability, and static analysis:** Compile each `OpBackref`
    into a dedicated `InstBackref` instruction (carrying the capture index and
-   active `FoldCase` flag) and mark `syntax.Prog` with `HasBackref = true`.
+   active `FoldCase` flag), mark `syntax.Prog` with `HasBackref = true`, and
+   record the referenced capture bit in `Prog.BackrefMask uint16` (bits `1..9`).
    * When compiling `OpBackref`, also bump `c.p.NumCap` to at least
      `2*re.Cap + 2` (and bounds-check `2*k+1 < len(b.cap)` in `InstBackref`),
      because `(*Regexp).Simplify()` rewrites zero-count repetitions like
@@ -146,8 +167,9 @@ engine:
 4. **Execution routing and capture register sizing:** Keep programs without
    references on their existing one-pass, flat-bitvector, and linear-time
    Thompson NFA execution paths. Route programs with `HasBackref` to the
-   ordered backtracking path for every input size; do not send them through
-   `compileOnePass` or the Thompson NFA `machine`.
+   ordered plain backtracking path (`tryBacktrackPlain`) for every input size;
+   do not send them through `compileOnePass` or the Thompson NFA `machine`, and
+   disallow combining `HasNodeGroup` (`⦅...⦆`) with `HasBackref`.
    * In `bitState.reset`, gate the flat `b.visited` bitvector allocation on
      `!prog.HasNodeGroup && !prog.HasBackref` so large inputs on `HasBackref`
      programs never hit `make([]uint32, visitedSize, maxBacktrackVector/visitedBits)`
@@ -173,12 +195,11 @@ engine:
    * For case-insensitive matching (`FoldCase`), step rune-by-rune through the
      captured span `[capStart, capEnd)` and the subject at `pos` using
      byte-preserving rune decoding (`decodeByteRune` on `[]byte` inputs, and
-     preserving raw invalid UTF-8 bytes on `string` inputs rather than collapsing
-     them to `utf8.RuneError`): valid UTF-8 runes compare under
-     `unicode.SimpleFold` (allowing folded matches whose UTF-8 byte lengths
-     differ, such as `K` and `k`), while Phase 1 invalid-byte sentinels match
-     only the identical raw byte and never fold. Advance `pos` by the subject
-     bytes consumed.
+     matching `inputString`'s rune decoding on `string` inputs): valid UTF-8
+     runes compare under `unicode.SimpleFold` (allowing folded matches whose
+     UTF-8 byte lengths differ, such as `K` and `k`), while Phase 1
+     invalid-byte sentinels match only the identical raw byte and never fold.
+     Advance `pos` by the subject bytes consumed.
    * Captures and match positions continue to refer to byte offsets in the
      original input slice, so invalid bytes remain exact and sentinels are never
      serialized.
@@ -188,12 +209,13 @@ engine:
    different outcomes, and sharing flat `(pc, pos)` bits across start positions
    in an unanchored sweep can falsely prune valid matches or corrupt `longest`
    selection.
-   * Key the visited table by `(pc, pos, capStateID)`—interning, for every
-     referenced group $k$, both its committed `(start, end)` span **and** its
-     uncommitted open offset `open[k]` (`-1` when closed, `>= 0` when group $k$
-     is currently open at `pc`, so distinct paths inside an open referenced
-     group such as `((a|ab)b)\1` are not falsely pruned before closing
-     `InstCapture` commits), and scoping or resetting per start position.
+   * Key the visited table by `(pc, pos, capStateID)`—interning, only for
+     groups $k$ present in `prog.BackrefMask`, both the group's committed
+     `(start, end)` span **and** its uncommitted open offset `open[k]` (`-1`
+     when closed, `>= 0` when group $k$ is currently open at `pc`, so distinct
+     paths inside an open referenced group such as `((a|ab)b)\1` are not
+     falsely pruned before closing `InstCapture` commits), and scoping or
+     resetting per start position.
    * This preserves distinct capture alternatives, keeps memory bounded without
      hashing full capture slices on every step, and guarantees that zero-width
      cycles (including empty-capture repetitions like `(a*)\1*` compiled via
@@ -212,15 +234,14 @@ engine:
      search methods used by `sed`) that return a distinct `ErrStepLimit` error
      when `b.limitExceeded` is set; never report work-limit exhaustion as an
      ordinary non-match.
-   * Define an explicit policy for `io.RuneReader` entrypoints on `HasBackref`
-     programs (either buffer unread stream bytes so captured spans can be
-     re-read, or reject streaming reader calls on backreference programs in
-     favor of buffered `[]byte` entrypoints).
+   * Reject `io.RuneReader` (`r != nil`) calls on `HasBackref` programs in
+     `re.find` (returning `nil` / `false`, matching the existing `HasNodeGroup`
+     guard), as `sed` operates exclusively on buffered `[]byte` slices.
 
-Before implementation, define dialect-specific behavior for invalid (out-of-range
-capture index), forward (not-yet-closed capture), currently-open (self-nested
-`(\1)`), and unmatched capture references, as well as C/POSIX byte-mode vs.
-UTF-8 case folding. Do not silently inherit behavior from another regex engine.
+Before implementation, define C/POSIX byte-mode vs. UTF-8 case folding and `sed`
+default flag mapping (`DotNL` on by default for pattern space; `OneLine` on by
+default unless the `s///m` / `M` multi-line flag is active). Do not silently
+inherit behavior from another regex engine.
 
 Verify the feature with tests for:
 * Repeated captures (`/(a){2,3}\1/`, `/(?:(a)\1){2}/`) and nested captures
