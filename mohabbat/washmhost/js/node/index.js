@@ -268,6 +268,11 @@ class HostState {
 
   // ── handle helpers ──────────────────────────────────────────────────────────
   allocHandle(item) {
+    if (item.type === 'file') {
+      item.position ??= 0;
+      item.fileOperations ??= [];
+      item.fileOperationActive ??= false;
+    }
     const h = this.nextHandle++;
     this.handles.set(h, item);
     return h;
@@ -295,7 +300,7 @@ class HostState {
           item.stream.destroy();
           if (item.leftovers) item.leftovers = null;
         }
-        else if (item.type === 'pipe_w') item.stream.destroy();
+        else if (item.type === 'pipe_w') item.stream.end();
         else if (item.type === 'dirscan' && item._dir) item._dir.close().catch(() => {});
       } catch (_) { /* best effort */ }
     }
@@ -390,6 +395,30 @@ export function makeBrainImports(hostState, argv) {
   // Helper: write bytes to guest memory
   function guestWrite(ptr, buf) {
     new Uint8Array(hs.memory.buffer, ptr, buf.length).set(buf);
+  }
+
+  function queueFileOperation(handle, operation) {
+    handle.fileOperations.push(operation);
+    if (handle.fileOperationActive) return;
+
+    const runNext = () => {
+      const next = handle.fileOperations[0];
+      if (!next) {
+        handle.fileOperationActive = false;
+        return;
+      }
+
+      handle.fileOperationActive = true;
+      let completed = false;
+      next(() => {
+        if (completed) return;
+        completed = true;
+        handle.fileOperations.shift();
+        runNext();
+      });
+    };
+
+    runNext();
   }
 
   // ── get_time ────────────────────────────────────────────────────────────────
@@ -552,13 +581,17 @@ export function makeBrainImports(hostState, argv) {
 
     if (h.type === 'file') {
       const tmp = Buffer.allocUnsafe(bLen);
-      // `position` is snapshotted from guest memory before the async read.
-      fs.read(h.fd, tmp, 0, bLen, position, (err, n) => {
-        hs.enqueue(() => {
-          if (!hs.isOpActive(ovPtr, opId)) return;
-          if (err) { hs.completeOp(ovPtr, opId, mapErrno(err), 0, 0); return; }
-          guestWrite(bPtr, tmp.slice(0, n));
-          hs.completeOp(ovPtr, opId, 0, 0, n);
+      queueFileOperation(h, (done) => {
+        const filePosition = positioned ? position : h.position;
+        fs.read(h.fd, tmp, 0, bLen, filePosition, (err, n) => {
+          if (!positioned && n > 0) h.position += n;
+          hs.enqueue(() => {
+            if (!hs.isOpActive(ovPtr, opId)) return;
+            if (err) { hs.completeOp(ovPtr, opId, mapErrno(err), 0, 0); return; }
+            guestWrite(bPtr, tmp.slice(0, n));
+            hs.completeOp(ovPtr, opId, 0, 0, n);
+          });
+          done();
         });
       });
       return;
@@ -567,6 +600,35 @@ export function makeBrainImports(hostState, argv) {
     if (h.type === 'socket' || h.type === 'pipe_r') {
       const bPtrNum = Number(bufferPtr);
       const bLenNum = Number(bufferLen);
+
+      const waitForPipeData = () => {
+        const stream = h.stream;
+        const cleanup = () => {
+          stream.removeListener('data', onData);
+          stream.removeListener('end', onEnd);
+          stream.removeListener('error', onError);
+        };
+        const onData = (chunk) => {
+          cleanup();
+          stream.pause();
+          h.leftovers = Buffer.from(chunk);
+          deliver();
+        };
+        const onEnd = () => {
+          cleanup();
+          h.closed = true;
+          deliver();
+        };
+        const onError = (err) => {
+          cleanup();
+          h.error = err;
+          deliver();
+        };
+        stream.once('data', onData);
+        stream.once('end', onEnd);
+        stream.once('error', onError);
+        stream.resume();
+      };
 
       const deliver = () => {
         h.onData = null;
@@ -599,6 +661,7 @@ export function makeBrainImports(hostState, argv) {
         }
 
         h.onData = deliver;
+        if (h.type === 'pipe_r') waitForPipeData();
       };
 
       deliver();
@@ -631,10 +694,34 @@ export function makeBrainImports(hostState, argv) {
     const opId = hs.registerOp(ovPtr);
 
     if (h.type === 'file') {
-      fs.write(h.fd, dataCopy, 0, dataCopy.length, null, (err, n) => {
-        hs.enqueue(() => {
-          if (!hs.isOpActive(ovPtr, opId)) return;
-          hs.completeOp(ovPtr, opId, err ? mapErrno(err) : 0, 0, err ? 0 : n);
+      queueFileOperation(h, (done) => {
+        const filePosition = h.append ? null : h.position;
+        fs.write(h.fd, dataCopy, 0, dataCopy.length, filePosition, (err, n) => {
+          const complete = (writeErr, errno = writeErr ? mapErrno(writeErr) : wasiSuccess) => {
+            if (!writeErr && !h.append && n > 0) h.position += n;
+            hs.enqueue(() => {
+              if (!hs.isOpActive(ovPtr, opId)) return;
+              hs.completeOp(ovPtr, opId, errno, 0, errno ? 0 : n);
+            });
+            done();
+          };
+
+          if (err || !h.append) {
+            complete(err);
+            return;
+          }
+          fs.fstat(h.fd, { bigint: true }, (statErr, stat) => {
+            if (statErr) {
+              complete(statErr);
+              return;
+            }
+            if (stat.size > BigInt(Number.MAX_SAFE_INTEGER)) {
+              complete(null, wasiEOVERFLOW);
+              return;
+            }
+            h.position = Number(stat.size);
+            complete(null);
+          });
         });
       });
       return;
@@ -737,9 +824,70 @@ export function makeBrainImports(hostState, argv) {
           return;
         }
         if (err) { hs.completeOp(ovPtr, opId, mapErrno(err), 0, 0); return; }
-        const h = hs.allocHandle({ type: 'file', fd, path: pathStr });
+        const h = hs.allocHandle({ type: 'file', fd, path: pathStr, append: isAppend });
         hs.completeOp(ovPtr, opId, 0, 0, h);
       });
+    });
+  }
+
+  // ── seek ────────────────────────────────────────────────────────────────────
+  // Signature: (ovPtr i32, handle i64, offset i64, whence i32)
+  function seek(ovPtr, handle, offset, whence) {
+    const ptr = Number(ovPtr) >>> 0;
+    const h = hs.getHandle(handle);
+    if (!h || h.type !== 'file') {
+      writeOverlapped(hs.view, ptr, wasiEBADF, 0, 0);
+      return;
+    }
+
+    const seekOffset = typeof offset === 'bigint' ? offset : BigInt(offset);
+    if (seekOffset > BigInt(Number.MAX_SAFE_INTEGER) || seekOffset < BigInt(Number.MIN_SAFE_INTEGER)) {
+      writeOverlapped(hs.view, ptr, wasiEOVERFLOW, 0, 0);
+      return;
+    }
+    const origin = Number(whence);
+    if (origin !== 0 && origin !== 1 && origin !== 2) {
+      writeOverlapped(hs.view, ptr, wasiEINVAL, 0, 0);
+      return;
+    }
+
+    const opId = hs.registerOp(ptr);
+    queueFileOperation(h, (done) => {
+      const complete = (error, position) => {
+        hs.enqueue(() => hs.completeOp(ptr, opId, error, 0, position ?? 0));
+        done();
+      };
+      const applyOffset = (base) => {
+        const nextPosition = base + seekOffset;
+        if (nextPosition < 0n) {
+          complete(wasiEINVAL);
+          return;
+        }
+        if (nextPosition > BigInt(Number.MAX_SAFE_INTEGER)) {
+          complete(wasiEOVERFLOW);
+          return;
+        }
+        h.position = Number(nextPosition);
+        complete(wasiSuccess, nextPosition);
+      };
+
+      if (origin === 0) {
+        applyOffset(0n);
+      } else if (origin === 1) {
+        applyOffset(BigInt(h.position));
+      } else {
+        fs.fstat(h.fd, { bigint: true }, (err, stat) => {
+          if (err) {
+            complete(mapErrno(err));
+            return;
+          }
+          if (stat.size > BigInt(Number.MAX_SAFE_INTEGER)) {
+            complete(wasiEOVERFLOW);
+            return;
+          }
+          applyOffset(stat.size);
+        });
+      }
     });
   }
 
@@ -1398,6 +1546,12 @@ export function makeBrainImports(hostState, argv) {
     return (80 << 16) | 24;
   }
 
+  function tty_set_size(handle) {
+    const h = hs.getHandle(handle);
+    if (!h) return wasiEBADF;
+    return h.type === 'stdio' && h.stream.isTTY ? wasiSuccess : wasiENOTTY;
+  }
+
   // ── fd_isatty ────────────────────────────────────────────────────────────────
   // Signature: (fd i32) -> i32
   function fd_isatty(fd) {
@@ -1477,6 +1631,7 @@ export function makeBrainImports(hostState, argv) {
     cancel,
     read,
     write,
+    seek,
     handle_truncate,
     handle_close,
     path_open,
@@ -1502,6 +1657,7 @@ export function makeBrainImports(hostState, argv) {
     process_exit,
     tty_set_mode,
     tty_get_size,
+    tty_set_size,
     fd_isatty,
     get_platform_info,
     rusticated_debug,
