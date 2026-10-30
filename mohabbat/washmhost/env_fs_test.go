@@ -83,6 +83,29 @@ func TestSysFs(t *testing.T) {
 
 	env := NewHostEnv()
 	mod := newMockModule(0x10000)
+	runOperation := func(t *testing.T, ovPtr uint32, operation func()) {
+		t.Helper()
+		if !mod.Memory().Write(ovPtr, make([]byte, 24)) {
+			t.Fatalf("failed to clear overlapped header at %d", ovPtr)
+		}
+		operation()
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		for {
+			header, ok := mod.Memory().Read(ovPtr, 4)
+			if !ok {
+				t.Fatalf("overlapped pointer %d is out of bounds", ovPtr)
+			}
+			if binary.LittleEndian.Uint32(header) == 1 {
+				return
+			}
+			env.Poll(ctx, mod)
+			if ctx.Err() != nil {
+				t.Fatalf("timeout waiting for overlapped completion at %d", ovPtr)
+			}
+		}
+	}
 
 	// We need to set up the environment "cwd" if path_open uses it.
 	// Looking at WASHMHOST-testing.md, path_open likely uses host paths or rooted paths.
@@ -93,14 +116,10 @@ func TestSysFs(t *testing.T) {
 		mod.Memory().Write(pathPtr, []byte(path))
 
 		ovPtr := uint32(0x200)
-		// sys_path_open(ctx, mod, [ovPtr, pathPtr, pathLen, flags, mode])
-		// flags: O_RDWR = bit 0 | bit 1 = 3
-		// O_CREATE = bit 2 = 4
-		// So 3 | 4 = 7
-		env.sys_path_open(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 7, 0644})
-
-		time.Sleep(time.Millisecond * 20)
-		env.Poll(context.Background(), mod)
+		// O_RDWR is 2 and O_CREATE is 0x40 in the Rusticated Go ABI.
+		runOperation(t, ovPtr, func() {
+			env.sys_path_open(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 0x42, 0644})
+		})
 
 		val, _ := mod.Memory().Read(ovPtr, 24)
 		handle := binary.LittleEndian.Uint64(val[16:24])
@@ -124,8 +143,9 @@ func TestSysFs(t *testing.T) {
 		mod.Memory().Write(pathPtr, []byte(path))
 
 		ovPtr := uint32(0x400)
-		env.sys_path_open(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 7, 0644})
-		env.Poll(context.Background(), mod)
+		runOperation(t, ovPtr, func() {
+			env.sys_path_open(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 0x42, 0644})
+		})
 		val, _ := mod.Memory().Read(ovPtr, 24)
 		handle := binary.LittleEndian.Uint64(val[16:24])
 
@@ -134,10 +154,9 @@ func TestSysFs(t *testing.T) {
 		mod.Memory().Write(dataPtr, []byte(data))
 
 		ovPtrWrite := uint32(0x600)
-		env.sys_write(context.Background(), mod, []uint64{uint64(ovPtrWrite), handle, uint64(dataPtr), uint64(len(data))})
-
-		time.Sleep(time.Millisecond * 20)
-		env.Poll(context.Background(), mod)
+		runOperation(t, ovPtrWrite, func() {
+			env.sys_write(context.Background(), mod, []uint64{uint64(ovPtrWrite), handle, uint64(dataPtr), uint64(len(data))})
+		})
 
 		val, _ = mod.Memory().Read(ovPtrWrite, 24)
 		written := binary.LittleEndian.Uint64(val[16:24])
@@ -161,17 +180,17 @@ func TestSysFs(t *testing.T) {
 		mod.Memory().Write(pathPtr, []byte(path))
 
 		ovPtr := uint32(0x800)
-		env.sys_path_open(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 0, 0})
-		env.Poll(context.Background(), mod)
+		runOperation(t, ovPtr, func() {
+			env.sys_path_open(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 0, 0})
+		})
 		val, _ := mod.Memory().Read(ovPtr, 24)
 		handle := binary.LittleEndian.Uint64(val[16:24])
 
 		bufPtr := uint32(0x900)
 		ovPtrRead := uint32(0xA00)
-		env.sys_read(context.Background(), mod, []uint64{uint64(ovPtrRead), handle, uint64(bufPtr), 4})
-
-		time.Sleep(time.Millisecond * 20)
-		env.Poll(context.Background(), mod)
+		runOperation(t, ovPtrRead, func() {
+			env.sys_read(context.Background(), mod, []uint64{uint64(ovPtrRead), handle, uint64(bufPtr), 4})
+		})
 
 		val, _ = mod.Memory().Read(ovPtrRead, 24)
 		readBytes := binary.LittleEndian.Uint64(val[16:24])
@@ -197,9 +216,9 @@ func TestSysFs(t *testing.T) {
 		ovPtr := uint32(0x1F00)
 		statPtr := uint32(0xC00)
 		// sys_path_stat(ctx, mod, [ovPtr, pathPtr, pathLen, flags, outPtr, outLen])
-		env.sys_path_stat(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 0, uint64(statPtr), 112})
-
-		env.Poll(context.Background(), mod)
+		runOperation(t, ovPtr, func() {
+			env.sys_path_stat(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 0, uint64(statPtr), 112})
+		})
 
 		val, _ := mod.Memory().Read(statPtr, 112)
 		kind := binary.LittleEndian.Uint32(val[0:4])
@@ -219,9 +238,9 @@ func TestSysFs(t *testing.T) {
 
 		ovPtr := uint32(0x2000)
 		statPtr := uint32(0xE00)
-		env.sys_path_stat(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(tmpDir)), 0, uint64(statPtr), 112})
-
-		env.Poll(context.Background(), mod)
+		runOperation(t, ovPtr, func() {
+			env.sys_path_stat(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(tmpDir)), 0, uint64(statPtr), 112})
+		})
 
 		valOv, _ := mod.Memory().Read(ovPtr, 24)
 		if binary.LittleEndian.Uint32(valOv[4:8]) != 0 {
@@ -242,9 +261,9 @@ func TestSysFs(t *testing.T) {
 		mod.Memory().Write(pathPtr, []byte(path))
 
 		ovPtr := uint32(0x1000)
-		env.sys_path_open(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 0, 0})
-
-		env.Poll(context.Background(), mod)
+		runOperation(t, ovPtr, func() {
+			env.sys_path_open(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 0, 0})
+		})
 		val, _ := mod.Memory().Read(ovPtr, 24)
 		errCode := binary.LittleEndian.Uint32(val[4:8])
 		if errCode == 0 {
@@ -261,9 +280,9 @@ func TestSysFs(t *testing.T) {
 
 		ovPtr := uint32(0x2700)
 		// sys_path_chmod(ctx, mod, [ovPtr, pathPtr, pathLen, mode])
-		env.sys_path_chmod(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 0444})
-
-		env.Poll(context.Background(), mod)
+		runOperation(t, ovPtr, func() {
+			env.sys_path_chmod(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 0444})
+		})
 
 		fi, _ := os.Stat(path)
 		if fi.Mode().Perm() != 0444 {
@@ -285,8 +304,9 @@ func TestSysFs(t *testing.T) {
 		pathPtr := uint32(0x1180)
 		mod.Memory().Write(pathPtr, []byte(path))
 		ovPtr := uint32(0x2780)
-		env.sys_path_chmod(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 0o4755})
-		env.Poll(context.Background(), mod)
+		runOperation(t, ovPtr, func() {
+			env.sys_path_chmod(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 0o4755})
+		})
 
 		result, ok := mod.Memory().Read(ovPtr, 24)
 		if !ok || binary.LittleEndian.Uint32(result[4:8]) != 0 {
@@ -311,17 +331,17 @@ func TestSysFs(t *testing.T) {
 		mod.Memory().Write(pathPtr, []byte(d))
 
 		ovPtr := uint32(0x1300)
-		env.sys_path_open(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(d)), 0, 0})
-		env.Poll(context.Background(), mod)
+		runOperation(t, ovPtr, func() {
+			env.sys_path_open(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(d)), 0, 0})
+		})
 		val, _ := mod.Memory().Read(ovPtr, 24)
 		handle := binary.LittleEndian.Uint64(val[16:24])
 
 		bufPtr := uint32(0x1400)
 		// sys_dir_read(ctx, mod, [ovPtr, handle, bufPtr, bufLen])
-		env.sys_dir_read(context.Background(), mod, []uint64{uint64(0x1500), handle, uint64(bufPtr), 1024})
-
-		time.Sleep(time.Millisecond * 20)
-		env.Poll(context.Background(), mod)
+		runOperation(t, 0x1500, func() {
+			env.sys_dir_read(context.Background(), mod, []uint64{0x1500, handle, uint64(bufPtr), 1024})
+		})
 
 		val, _ = mod.Memory().Read(0x1500, 24)
 		n := binary.LittleEndian.Uint64(val[16:24])
@@ -339,9 +359,9 @@ func TestSysFs(t *testing.T) {
 		mod.Memory().Write(pathPtr, []byte(path))
 
 		ovPtr := uint32(0x1700)
-		env.sys_path_open(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 0, 0})
-
-		env.Poll(context.Background(), mod)
+		runOperation(t, ovPtr, func() {
+			env.sys_path_open(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 0, 0})
+		})
 		val, _ := mod.Memory().Read(ovPtr, 24)
 		errCode := binary.LittleEndian.Uint32(val[4:8])
 		if errCode == 0 {
@@ -359,16 +379,16 @@ func TestSysFs(t *testing.T) {
 		mod.Memory().Write(pathPtr, []byte(path))
 
 		ovPtr := uint32(0x1900)
-		env.sys_path_open(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 0, 0})
-		env.Poll(context.Background(), mod)
+		runOperation(t, ovPtr, func() {
+			env.sys_path_open(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 0, 0})
+		})
 		val, _ := mod.Memory().Read(ovPtr, 24)
 		handle := binary.LittleEndian.Uint64(val[16:24])
 
 		bufPtr := uint32(0x1A00)
-		env.sys_read(context.Background(), mod, []uint64{uint64(0x1B00), handle, uint64(bufPtr), 100})
-
-		time.Sleep(time.Millisecond * 20)
-		env.Poll(context.Background(), mod)
+		runOperation(t, 0x1B00, func() {
+			env.sys_read(context.Background(), mod, []uint64{0x1B00, handle, uint64(bufPtr), 100})
+		})
 
 		val, _ = mod.Memory().Read(0x1B00, 24)
 		n := binary.LittleEndian.Uint64(val[16:24])
@@ -387,15 +407,16 @@ func TestSysFs(t *testing.T) {
 		mod.Memory().Write(pathPtr, []byte(path))
 
 		ovPtr := uint32(0x1D00)
-		env.sys_path_open(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 0 /* O_RDONLY */, 0})
-		env.Poll(context.Background(), mod)
+		runOperation(t, ovPtr, func() {
+			env.sys_path_open(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 0 /* O_RDONLY */, 0})
+		})
 		val, _ := mod.Memory().Read(ovPtr, 24)
 		handle := binary.LittleEndian.Uint64(val[16:24])
 
 		ovPtrWrite := uint32(0x1E00)
-		env.sys_write(context.Background(), mod, []uint64{uint64(ovPtrWrite), handle, 0x1F00, 4})
-
-		env.Poll(context.Background(), mod)
+		runOperation(t, ovPtrWrite, func() {
+			env.sys_write(context.Background(), mod, []uint64{uint64(ovPtrWrite), handle, 0x1F00, 4})
+		})
 		val, _ = mod.Memory().Read(ovPtrWrite, 24)
 		errCode := binary.LittleEndian.Uint32(val[4:8])
 		if errCode == 0 {
@@ -413,15 +434,16 @@ func TestSysFs(t *testing.T) {
 		mod.Memory().Write(pathPtr, []byte(path))
 
 		ovPtr := uint32(0x2100)
-		env.sys_path_open(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 0, 0})
-		env.Poll(context.Background(), mod)
+		runOperation(t, ovPtr, func() {
+			env.sys_path_open(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 0, 0})
+		})
 		val, _ := mod.Memory().Read(ovPtr, 24)
 		handle := binary.LittleEndian.Uint64(val[16:24])
 
 		ovPtrDir := uint32(0x2200)
-		env.sys_dir_read(context.Background(), mod, []uint64{uint64(ovPtrDir), handle, 0x2300, 100})
-
-		env.Poll(context.Background(), mod)
+		runOperation(t, ovPtrDir, func() {
+			env.sys_dir_read(context.Background(), mod, []uint64{uint64(ovPtrDir), handle, 0x2300, 100})
+		})
 		val, _ = mod.Memory().Read(ovPtrDir, 24)
 		errCode := binary.LittleEndian.Uint32(val[4:8])
 		if errCode == 0 {
@@ -439,8 +461,9 @@ func TestSysFs(t *testing.T) {
 		mod.Memory().Write(pathPtr, []byte(path))
 
 		ovPtr := uint32(0x2500)
-		env.sys_path_open(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 0, 0})
-		env.Poll(context.Background(), mod)
+		runOperation(t, ovPtr, func() {
+			env.sys_path_open(context.Background(), mod, []uint64{uint64(ovPtr), uint64(pathPtr), uint64(len(path)), 0, 0})
+		})
 		val, _ := mod.Memory().Read(ovPtr, 24)
 		handle := binary.LittleEndian.Uint64(val[16:24])
 
@@ -451,12 +474,14 @@ func TestSysFs(t *testing.T) {
 
 	t.Run("14. sys_read from invalid handle", func(t *testing.T) {
 		ovPtr := uint32(0x2600)
-		env.sys_read(context.Background(), mod, []uint64{uint64(ovPtr), 9999, 0, 0})
+		runOperation(t, ovPtr, func() {
+			env.sys_read(context.Background(), mod, []uint64{uint64(ovPtr), 9999, 0, 0})
+		})
 
 		val, _ := mod.Memory().Read(ovPtr, 24)
 		errCode := binary.LittleEndian.Uint32(val[4:8])
-		if errCode != 9 { // EBADF
-			t.Errorf("expected EBADF (9), got %d", errCode)
+		if errCode != wasiEBADF {
+			t.Errorf("expected EBADF (%d), got %d", wasiEBADF, errCode)
 		}
 	})
 }

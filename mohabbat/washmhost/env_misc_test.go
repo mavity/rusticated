@@ -78,21 +78,20 @@ func TestSysMisc(t *testing.T) {
 	})
 
 	t.Run("6. mapErrno translation", func(t *testing.T) {
-		if mapErrno(os.ErrNotExist) != 2 {
-			t.Errorf("ENOENT mismatch: got %d", mapErrno(os.ErrNotExist))
+		if got := mapErrno(os.ErrNotExist); got != wasiENOENT {
+			t.Errorf("ENOENT mismatch: got %d, want %d", got, wasiENOENT)
 		}
-		if mapErrno(os.ErrPermission) != 13 {
-			t.Errorf("EACCES mismatch: got %d", mapErrno(os.ErrPermission))
+		if got := mapErrno(os.ErrPermission); got != wasiEACCES {
+			t.Errorf("EACCES mismatch: got %d, want %d", got, wasiEACCES)
 		}
-		ebadf := mapErrno(syscall.EBADF)
-		if ebadf == 0 {
-			t.Error("EBADF should not be 0")
+		if got := mapErrno(syscall.EBADF); got != wasiEBADF {
+			t.Errorf("EBADF mismatch: got %d, want %d", got, wasiEBADF)
 		}
-		if mapErrno(errors.New("random")) != 5 { // EIO
-			t.Error("EIO mismatch")
+		if got := mapErrno(errors.New("random")); got != wasiEIO {
+			t.Errorf("EIO mismatch: got %d, want %d", got, wasiEIO)
 		}
-		if mapErrno(nil) != 0 {
-			t.Error("nil error should be 0")
+		if got := mapErrno(nil); got != wasiSuccess {
+			t.Errorf("nil error: got %d, want %d", got, wasiSuccess)
 		}
 	})
 
@@ -180,6 +179,9 @@ func TestHostEnvTracksModuleCwd(t *testing.T) {
 	env := NewHostEnv()
 	base := t.TempDir()
 	env.cwd = base
+	if err := os.Mkdir(filepath.Join(base, "nested"), 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	rel := filepath.Join("nested", "child")
 	got := env.resolveGuestPathForHost(rel)

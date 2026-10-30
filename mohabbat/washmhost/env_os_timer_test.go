@@ -6,13 +6,17 @@ import (
 	"time"
 )
 
+func timerDelayMillis(delay time.Duration) uint64 {
+	return uint64(delay / time.Millisecond)
+}
+
 func TestSysTimerSetExtended(t *testing.T) {
 	env := NewHostEnv()
 	mod := newMockModule(0x100000)
 
 	t.Run("1. basic timer set and fire", func(t *testing.T) {
 		ovPtr := uint32(0x100)
-		stack := []uint64{uint64(ovPtr), uint64(time.Millisecond * 10)}
+		stack := []uint64{uint64(ovPtr), timerDelayMillis(time.Millisecond * 10)}
 
 		env.sys_timer_set(context.Background(), mod, stack)
 
@@ -37,12 +41,12 @@ func TestSysTimerSetExtended(t *testing.T) {
 
 	t.Run("2. timer overwrite stops old timer", func(t *testing.T) {
 		ovPtr := uint32(0x200)
-		stack1 := []uint64{uint64(ovPtr), uint64(time.Hour)}
+		stack1 := []uint64{uint64(ovPtr), timerDelayMillis(time.Hour)}
 		env.sys_timer_set(context.Background(), mod, stack1)
 
 		initialOps := env.PendingOps()
 
-		stack2 := []uint64{uint64(ovPtr), uint64(time.Millisecond)}
+		stack2 := []uint64{uint64(ovPtr), timerDelayMillis(time.Millisecond)}
 		env.sys_timer_set(context.Background(), mod, stack2)
 
 		// Counter should still be same because overwrite calls DecOps then register calls IncOps
@@ -72,7 +76,7 @@ func TestSysTimerSetExtended(t *testing.T) {
 		ovPtr := uint32(0x400)
 		mod.Memory().Write(ovPtr, make([]byte, 24)) // clear
 
-		stack := []uint64{uint64(ovPtr), uint64(time.Millisecond * 10)}
+		stack := []uint64{uint64(ovPtr), timerDelayMillis(time.Millisecond * 10)}
 		env.sys_timer_set(context.Background(), mod, stack)
 
 		env.sys_cancel(context.Background(), mod, []uint64{uint64(ovPtr)})
@@ -88,7 +92,7 @@ func TestSysTimerSetExtended(t *testing.T) {
 
 	t.Run("5. sys_cancel also works for timers", func(t *testing.T) {
 		ovPtr := uint32(0x500)
-		stack := []uint64{uint64(ovPtr), uint64(time.Hour)}
+		stack := []uint64{uint64(ovPtr), timerDelayMillis(time.Hour)}
 		env.sys_timer_set(context.Background(), mod, stack)
 
 		env.sys_cancel(context.Background(), mod, []uint64{uint64(ovPtr)})
@@ -103,7 +107,7 @@ func TestSysTimerSetExtended(t *testing.T) {
 
 	t.Run("6. timer firing removes from timers map", func(t *testing.T) {
 		ovPtr := uint32(0x600)
-		stack := []uint64{uint64(ovPtr), uint64(time.Millisecond)}
+		stack := []uint64{uint64(ovPtr), timerDelayMillis(time.Millisecond)}
 		env.sys_timer_set(context.Background(), mod, stack)
 
 		time.Sleep(time.Millisecond * 20)
@@ -120,7 +124,7 @@ func TestSysTimerSetExtended(t *testing.T) {
 	t.Run("7. high frequency timer set", func(t *testing.T) {
 		ovPtr := uint32(0x700)
 		for i := 0; i < 50; i++ {
-			env.sys_timer_set(context.Background(), mod, []uint64{uint64(ovPtr), uint64(time.Microsecond)})
+			env.sys_timer_set(context.Background(), mod, []uint64{uint64(ovPtr), timerDelayMillis(time.Millisecond)})
 		}
 		time.Sleep(time.Millisecond * 10)
 		env.Poll(context.Background(), mod)
@@ -129,7 +133,7 @@ func TestSysTimerSetExtended(t *testing.T) {
 	t.Run("8. multiple concurrent timers", func(t *testing.T) {
 		const count = 20
 		for i := 0; i < count; i++ {
-			env.sys_timer_set(context.Background(), mod, []uint64{uint64(0x800 + i), uint64(time.Millisecond)})
+			env.sys_timer_set(context.Background(), mod, []uint64{uint64(0x800 + i), timerDelayMillis(time.Millisecond)})
 		}
 		time.Sleep(time.Millisecond * 20)
 		env.Poll(context.Background(), mod)
@@ -137,7 +141,7 @@ func TestSysTimerSetExtended(t *testing.T) {
 
 	t.Run("9. large timeout behavior", func(t *testing.T) {
 		ovPtr := uint32(0x900)
-		stack := []uint64{uint64(ovPtr), uint64(time.Hour * 24)}
+		stack := []uint64{uint64(ovPtr), timerDelayMillis(time.Hour * 24)}
 		env.sys_timer_set(context.Background(), mod, stack)
 
 		if env.PendingOps() == 0 {
@@ -149,7 +153,7 @@ func TestSysTimerSetExtended(t *testing.T) {
 	t.Run("10. timer fire after host_cancel", func(t *testing.T) {
 		// Test if IsOpActive correctly prevents writeback if ID changed
 		ovPtr := uint32(0xA00)
-		stack1 := []uint64{uint64(ovPtr), uint64(time.Millisecond * 2)}
+		stack1 := []uint64{uint64(ovPtr), timerDelayMillis(time.Millisecond * 2)}
 		env.sys_timer_set(context.Background(), mod, stack1)
 
 		// Wait long enough for it to fire and be in queue
@@ -162,7 +166,7 @@ func TestSysTimerSetExtended(t *testing.T) {
 		}
 
 		// Re-register at same location immediately with longer timer
-		stack2 := []uint64{uint64(ovPtr), uint64(time.Hour)}
+		stack2 := []uint64{uint64(ovPtr), timerDelayMillis(time.Hour)}
 		env.sys_timer_set(context.Background(), mod, stack2)
 
 		// Use a context with timeout for Poll so we don't hang the whole test suite
@@ -180,7 +184,7 @@ func TestSysTimerSetExtended(t *testing.T) {
 
 	t.Run("11. timer set on max uint32 ptr", func(t *testing.T) {
 		ovPtr := uint32(0x10000 - 32)
-		stack := []uint64{uint64(ovPtr), uint64(time.Millisecond)}
+		stack := []uint64{uint64(ovPtr), timerDelayMillis(time.Millisecond)}
 		env.sys_timer_set(context.Background(), mod, stack)
 		time.Sleep(time.Millisecond * 10)
 		env.Poll(context.Background(), mod)
@@ -189,7 +193,7 @@ func TestSysTimerSetExtended(t *testing.T) {
 	t.Run("12. Poll processes multiple timers", func(t *testing.T) {
 		const count = 5
 		for i := 0; i < count; i++ {
-			env.sys_timer_set(context.Background(), mod, []uint64{uint64(0xB00 + i), uint64(time.Millisecond)})
+			env.sys_timer_set(context.Background(), mod, []uint64{uint64(0xB00 + i), timerDelayMillis(time.Millisecond)})
 		}
 		time.Sleep(time.Millisecond * 20)
 		env.Poll(context.Background(), mod)
@@ -202,19 +206,17 @@ func TestSysTimerSetExtended(t *testing.T) {
 		ovPtr := uint32(0xC00)
 		delay := 20 * time.Millisecond
 		start := time.Now()
-		stack := []uint64{uint64(ovPtr), uint64(delay)}
+		mod.Memory().Write(ovPtr, make([]byte, 24))
+		stack := []uint64{uint64(ovPtr), timerDelayMillis(delay)}
 		env.sys_timer_set(context.Background(), mod, stack)
 
-		// Busy wait for proactor work
-		for {
-			env.Poll(context.Background(), mod)
-			if false {
-				break
-			}
-			if time.Since(start) > time.Second {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		for env.PendingOps() > 0 {
+			env.Poll(ctx, mod)
+			if ctx.Err() != nil {
 				t.Fatal("timer never fired")
 			}
-			time.Sleep(time.Millisecond)
 		}
 		elapsed := time.Since(start)
 		if elapsed < delay {
@@ -226,7 +228,7 @@ func TestSysTimerSetExtended(t *testing.T) {
 		const count = 100
 		for i := 0; i < count; i++ {
 			// All fire at once
-			env.sys_timer_set(context.Background(), mod, []uint64{uint64(0xD00 + i), uint64(time.Millisecond)})
+			env.sys_timer_set(context.Background(), mod, []uint64{uint64(0xD00 + i), timerDelayMillis(time.Millisecond)})
 		}
 		time.Sleep(time.Millisecond * 50)
 		env.Poll(context.Background(), mod)
