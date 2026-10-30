@@ -80,49 +80,73 @@ Backreference support starts only after Phase 1 is complete and verified.
 The planned implementation extends `regast` rather than adding a second regex
 engine:
 
-1. **Parser and dialect boundary:** Recognize backreferences while parsing the
-   selected regex dialect via an explicit `syntax.Flags` bit (or direct BRE/GNU
-   ERE parser mode) so `\1`–`\9` produce `OpBackref` AST nodes rather than
-   colliding with `\1`–`\7` octal character escapes in `syntax/parse.go`. Record
-   the referenced capture number in the `syntax.Regexp` node; do not infer
-   references by scanning raw pattern text outside the parser.
-2. **Simplification and repeated captures:** Account for `(*Regexp).Simplify()`
-   expanding counted repetitions (such as `/(a){2,3}\1/` or `(?:(a)\1){2}`) into
-   multiple `OpCapture` nodes that share the same `Cap` index:
+1. **Parser, AST methods, and dialect boundary:** Recognize backreferences
+   while parsing the selected regex dialect via an explicit `syntax.Flags` bit
+   (or direct BRE/GNU ERE parser mode) so `\1`–`\9` produce `OpBackref` AST
+   nodes rather than colliding with `\1`–`\7` octal character escapes in
+   `syntax/parse.go`. Record the referenced capture number in the
+   `syntax.Regexp` node; do not infer references by scanning raw pattern text
+   outside the parser. Handle `OpBackref` explicitly in `(*Regexp).Equal`
+   (comparing `Cap` and `FoldCase` rather than falling through to `return true`,
+   which would treat `\1` and `\2` as identical in `simplify1` and parser
+   factoring), `calcFlags`, `writeRegexp`, and `(*parser).calcSize`.
+2. **Simplification, capture commit/restore, and repeated captures:** Account
+   for `(*Regexp).Simplify()` expanding counted repetitions (such as
+   `/(a){2,3}\1/` or `(?:(a)\1){2}`) into multiple `OpCapture` nodes that share
+   the same `Cap` index:
    * Do not allow an inner or repeated capture opening (`b.cap[2*k]`) to create
      a torn `(new_start, old_end)` pair before its closing `InstCapture`
-     commits; either stage uncommitted open positions separately from committed
-     `(start, end)` spans or save/restore the full `(start, end)` pair on the
-     backtrack stack.
-   * Define and enforce whether nested captures inside a repeated outer group
-     (e.g. `((a)|b)+\2`) reset on each outer iteration or retain their prior
-     iteration's binding according to target POSIX/GNU `sed` semantics.
-3. **Compilation and static analysis:** Compile each `OpBackref` into a
-   dedicated `InstBackref` instruction (carrying the capture index and active
-   `FoldCase` flag) and mark `syntax.Prog` with `HasBackref = true`. Ensure
-   `minInputLen` treats `OpBackref` as minimum length `0`, `Prog.Prefix()` and
-   `Prog.StartCond()` stop at `InstBackref`, and `InstAltMatch` greedy
-   shortcuts are never taken for `HasBackref` programs.
+     commits; stage uncommitted open positions (`b.open[k]`) separately from
+     committed `(start, end)` spans in `b.cap[2*k : 2*k+2]`.
+   * On backtrack (`arg == true`), an opening `InstCapture` (`2*k`) restores
+     the previous `b.open[k]`, while a closing `InstCapture` (`2*k+1`) must
+     restore **both** the previous committed `b.cap[2*k]` and `b.cap[2*k+1]`
+     (since a single scalar `job.pos` cannot hold both `oldStart` and `oldEnd`
+     when a repeated capture's later iteration fails after committing).
+   * Define and enforce the bytecode mechanism for whether nested captures
+     inside a repeated outer group (e.g. `((a)|b)+\2`) reset on each outer
+     iteration or retain their prior iteration's binding according to target
+     POSIX/GNU `sed` semantics (standard `InstCapture` only writes `cap[2*k]`
+     when the inner group is actually entered).
+3. **Compilation, nullability, and static analysis:** Compile each `OpBackref`
+   into a dedicated `InstBackref` instruction (carrying the capture index and
+   active `FoldCase` flag) and mark `syntax.Prog` with `HasBackref = true`.
+   * Keep `frag.nullable = true` for `InstBackref` so `compiler.star` rewrites
+     `\1*` via `c.quest(c.plus(...))` (`(\1+)?`), since a backreference can
+     match the empty string whenever its referenced group matched empty.
+   * Ensure `minInputLen` treats `OpBackref` as minimum length `0`, and ensure
+     `Prog.skipNop`, `Prog.Prefix()`, and `Prog.StartCond()` never skip past
+     `InstBackref` (keeping `prefixComplete == false` when an `InstBackref`
+     is present). Skipping `compileOnePass` for `HasBackref` programs also
+     ensures `makeOnePass` never rewrites `InstAlt` into `InstAltMatch`.
 4. **Execution routing and capture register sizing:** Keep programs without
    references on their existing one-pass, flat-bitvector, and linear-time
    Thompson NFA execution paths. Route programs with `HasBackref` to the
    ordered backtracking path for every input size; do not send them through
-   `compileOnePass` or the Thompson NFA `machine`. In `bitState.reset`, always
-   allocate `b.cap` to at least `prog.NumCap` (and `b.matchcap` to at least `2`
-   when `re.longest` is set) even when the caller passes `ncap == 0` (`Match`)
-   or `ncap == 2` (`FindIndex`, `ReplaceAllLiteral`), so referenced groups are
-   always recorded and `longest` comparisons never short-circuit on
-   `len(b.cap) == 0`.
-5. **Backreference matching and case folding:** At `InstBackref`, check that the
-   referenced group has a committed valid span `[capStart, capEnd]`.
-   * For exact matching, compare `input[capStart:capEnd]` with the subject at
+   `compileOnePass` or the Thompson NFA `machine`.
+   * In `bitState.reset`, always allocate `b.cap` (and `b.open`) to at least
+     `prog.NumCap` and `b.matchcap` to at least `max(ncap, 2)` even when the
+     caller passes `ncap == 0` (`Match`) or `ncap == 2` (`FindIndex`,
+     `ReplaceAllLiteral`), so referenced groups are always recorded and
+     `longest` comparisons never short-circuit on `len(b.cap) == 0`.
+   * In `InstMatch`, allow empty matches at `pos == 0` to update `b.matchcap`
+     when `old == -1`, and in `re.backtrack`, slice `b.matchcap[:ncap]` when
+     appending to `dstCap` so callers receive the exact submatch slice length
+     they requested.
+5. **Backreference matching and case folding (`[]byte` and `string` inputs):**
+   At `InstBackref`, check that the referenced group has a committed valid span
+   `[capStart, capEnd]`.
+   * Support both `inputBytes` (`ib []byte`) and `inputString` (`is string`)
+     entrypoints: for exact matching (`FoldCase == 0`), compare the slice
+     `ib[capStart:capEnd]` or `is[capStart:capEnd]` against the subject at
      `pos` and advance `pos` by `capEnd - capStart`.
    * For case-insensitive matching (`FoldCase`), step rune-by-rune through the
-     captured span and the subject at `pos` using `decodeByteRune`: valid UTF-8
-     runes compare under `unicode.SimpleFold` (allowing folded matches whose
-     UTF-8 byte lengths differ, such as `K` and `k`), while Phase 1 invalid-byte
-     sentinels match only the identical raw byte and never fold. Advance `pos`
-     by the subject bytes consumed.
+     captured span `[capStart, capEnd)` and the subject at `pos` using
+     `i.step` (`decodeByteRune` on `[]byte` inputs): valid UTF-8 runes compare
+     under `unicode.SimpleFold` (allowing folded matches whose UTF-8 byte
+     lengths differ, such as `K` and `k`), while Phase 1 invalid-byte sentinels
+     match only the identical raw byte and never fold. Advance `pos` by the
+     subject bytes consumed.
    * Captures and match positions continue to refer to byte offsets in the
      original input slice, so invalid bytes remain exact and sentinels are never
      serialized.
@@ -131,11 +155,17 @@ engine:
    because different capture bindings at the same `(pc, pos)` can lead to
    different outcomes, and sharing flat `(pc, pos)` bits across start positions
    in an unanchored sweep can falsely prune valid matches or corrupt `longest`
-   selection. Key the visited table by `(pc, pos, capStateID)`—interning the
-   active capture spans of referenced groups (similar to `bitState.internFrame`
-   for node frames) and scoping or resetting per start position—so distinct
-   capture alternatives are preserved, memory stays bounded without hashing full
-   capture slices on every step, and zero-width cycles still terminate.
+   selection.
+   * Key the visited table by `(pc, pos, capStateID)`—interning, for every
+     referenced group $k$, both its committed `(start, end)` span **and** its
+     uncommitted open offset `open[k]` when group $k$ is currently open at `pc`
+     (so distinct paths inside an open referenced group such as `((a|ab)b)\1`
+     are not falsely pruned before closing `InstCapture` commits), and scoping
+     or resetting per start position.
+   * This preserves distinct capture alternatives, keeps memory bounded without
+     hashing full capture slices on every step, and guarantees that zero-width
+     cycles (including empty-capture repetitions like `(a*)\1*` compiled via
+     `(\1+)?`) terminate once `(pc, pos, capStateID)` repeats.
 7. **Work limits, error-returning APIs, and `io.RuneReader` policy:** Count
    execution work, including backtracker steps and bytes/runes compared by
    `InstBackref`. Because standard `Regexp` methods (`Match`, `FindIndex`,
