@@ -12,7 +12,7 @@ import (
 // the appropriate pre-built washmhost binary from the vegetable's pool rather
 // than re-compiling from source via `go run .`.
 // Natively, it compiles washmhost via `go run .`.
-func runUnderWashmhost(ws, projectDir, wasmPath string, extraArgs []string, platform string, verbose bool) error {
+func runUnderWashmhost(ws, wasmPath string, extraArgs []string, platform string, verbose bool) error {
 	if verbose {
 		fmt.Printf("🍆 Running %s under washmhost", filepath.Base(wasmPath))
 		if platform != "" {

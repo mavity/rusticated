@@ -29,9 +29,9 @@ func buildGoProjectWasm(ws, absProjectDir, outputWasm string, verbose bool) erro
 		goModDir = absProjectDir
 	}
 
-	// Apply wasip1 dependency patches: copy affected modules to a mutable
-	// rusticated cache, flip their build-tag gates, and generate a temp go.mod
-	// with replace directives plus overlay entries for suffix-flip aliases.
+	// Apply dependency patches to modules replaced by project-local rusticated-jit
+	// copies. The project's go.mod resolves those copies directly; overlayExtra
+	// contains only mappings needed for suffix-flipped file aliases.
 	patchResult, err := applyWasip1DepPatches(ws, goModDir, goroot)
 	if err != nil {
 		return fmt.Errorf("wasip1 dep patches: %w", err)
@@ -97,9 +97,9 @@ func buildGoTestWasm(ws, absProjectDir, outputWasm string, verbose bool) error {
 		goModDir = absProjectDir
 	}
 
-	// Apply wasip1 dependency patches: copy affected modules to a mutable
-	// rusticated cache, flip their build-tag gates, and generate a temp go.mod
-	// with replace directives plus overlay entries for suffix-flip aliases.
+	// Apply dependency patches to modules replaced by project-local rusticated-jit
+	// copies. The project's go.mod resolves those copies directly; overlayExtra
+	// contains only mappings needed for suffix-flipped file aliases.
 	patchResult, err := applyWasip1DepPatches(ws, goModDir, goroot)
 	if err != nil {
 		return fmt.Errorf("wasip1 dep patches: %w", err)
