@@ -27,21 +27,75 @@ You see, using **`uutils/sed` as a blueprint is vastly superior to porting direc
 
 While the parser and VM loop port effortlessly, you will need a Go-specific strategy for three areas where `uutils/sed` leans on Rust crates:
 
-### A. The Regex Engine Problem (The Biggest Hurdle)
+### A. Regex Engine: Reuse `regast`
 
-* **What `uutils/sed` does:** Rust’s standard `regex` crate (like Go’s `regexp`) uses a finite automaton and refuses to support backreferences (`\1`) in matching patterns. To get GNU compatibility without sacrificing speed, `uutils/sed` inspects the pattern: if there are no backreferences, it uses the fast `regex` crate (`[]byte` friendly); if the pattern contains `\1`–`\9`, it falls back to the **`fancy-regex`** crate (which adds a backtracking VM, though it requires valid UTF-8 strings—which is why `uutils/sed` notes that backreferences don't work on raw `LC_ALL=C` invalid UTF-8 bytes).
-* **What you must do in Go:** Go’s standard `regexp` package (RE2 syntax) **strictly forbids backreferences in search patterns**. You should copy `uutils/sed`’s dual-engine architecture in Go:
-1. **Fast path (`regexp`):** When the translated regex has no backreferences (99% of script commands), run Go's native `regexp` directly on `[]byte` slices.
-2. **Backreference fallback:** When the lexer detects `\1`–`\9` in the *search* pattern, fall back to a pure-Go backtracking engine like **`[github.com/dlclark/regexp2](https://github.com/dlclark/regexp2)`** or **`modernc.org/regexp`**, or CGo-free PCRE (`modernc.org/libpcre`).
+The repository already contains `mohabbat/regast`, a fork of Go's regexp
+implementation, including its parser, compiler, one-pass engine, NFA engine,
+and bit-state matcher. Extend that engine for byte-preserving matching rather
+than creating another regex implementation or adding a second copy of the Go
+engine. Keep the Go regexp syntax and matching semantics for valid UTF-8 input.
 
+#### Phase 1: byte-preserving engine without backreferences
 
+Make byte slices the canonical subject and pattern input for the regex engine.
+Do not convert subject data to strings. In the default UTF-8 interpretation,
+decode valid UTF-8 as Unicode characters and map each invalid input byte to a
+distinct internal sentinel rune in a reserved range above `unicode.MaxRune`.
+There are at most 256 such sentinels. They are engine-internal symbols and must
+never be encoded into output; matches and captures refer to byte offsets in the
+original slices.
 
-### B. `string` vs. `[]byte` (Avoiding UTF-8 Corruption)
+Sentinels participate in ordinary matching as distinct symbols: `.` and
+negated character classes can match them, repetitions and captures preserve
+their exact byte spans, and explicit invalid-byte literals or escapes in a
+pattern can match the corresponding byte. Unicode-positive character classes
+must not classify sentinels as Unicode characters. Preserve sed's dot behavior
+for embedded newlines. If C/POSIX byte mode is supported, it treats each input
+byte as an ordinary character rather than applying UTF-8 decoding.
 
-Real-world shell scripts often run `sed` over files containing mixed encodings or arbitrary binary bytes (`LC_ALL=C`).
+The mapping must be honored consistently by the parser, instruction compiler,
+one-pass engine, NFA, bit-state matcher, character classes, boundary checks,
+and pattern-prefix optimizations. This is more than changing `inputBytes.step`:
+wildcard and complemented-class ranges currently stop at `unicode.MaxRune`, and
+the pattern parser must preserve invalid bytes too.
 
-* In Go, converting arbitrary `[]byte` to `string` and iterating with `range` replaces invalid UTF-8 sequences with `\uFFFD`, silently corrupting the stream.
-* Design your Pattern Space and Hold Space strictly around **`[]byte`**, only decoding runes via `utf8.DecodeRune` when executing character-level operations like the `y/source/dest/` transliteration command or `\U`/`\L` case conversion escapes.
+Phase 1 is complete only when:
+
+1. The existing Go regexp test corpus passes for the supported non-backreference
+   syntax, with tests for this fork's additional regexp features handled
+   separately.
+2. Differential tests against Go's standard `regexp` agree on valid UTF-8
+   inputs, including match selection, captures, empty matches, and byte
+   indexes. Invalid-byte tests verify distinct matching, exact captures, and
+   that no sentinel value can leak into output.
+3. Repeated, interleaved benchmarks compare `regast` with Go's standard
+   `regexp` on equivalent `[]byte` workloads. Report throughput/latency and
+   allocations for valid UTF-8 and malformed-byte inputs; do not claim parity
+   without measured results.
+
+#### Phase 2: backreferences
+
+Backreference support is explicitly deferred until Phase 1 is complete and
+verified. Then detect backreferences from parsed regex syntax, not with a raw
+substring scan, and evaluate a backreference-capable engine against respected
+Go and Rust implementations. First assess whole-expression fallback. Consider
+forking execution only around backreference-dependent portions if correctness
+and measured performance justify the additional complexity. Preserve the same
+byte identity and output guarantees in either design.
+
+### B. Byte and Character Semantics
+
+Pattern space, hold space, regex patterns, and regex subjects are byte slices.
+In UTF-8 mode, valid multibyte characters match as Unicode characters while
+invalid bytes remain individually identifiable through the Phase 1 sentinels.
+This intentionally differs from Go's existing `[]byte` regexp behavior, which
+decodes every invalid byte as the same `utf8.RuneError`.
+
+The regex layer must return byte offsets into the original input. Replacement,
+capture, and output code copies bytes from those original slices; it must never
+serialize an internal sentinel as a Unicode encoding. Character-oriented sed
+operations such as transliteration and case conversion need their own defined
+encoding behavior and must not corrupt untouched bytes.
 
 ### C. CLI Flag Quirks (`-i` Optional Values)
 
