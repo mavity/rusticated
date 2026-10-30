@@ -82,35 +82,59 @@ engine:
 
 1. **Parser, AST methods, and dialect boundary:** Recognize backreferences
    while parsing the selected regex dialect via an explicit `syntax.Flags` bit
-   (or direct BRE/GNU ERE parser mode) so `\1`–`\9` produce `OpBackref` AST
-   nodes rather than colliding with `\1`–`\7` octal character escapes in
-   `syntax/parse.go`. Record the referenced capture number in the
-   `syntax.Regexp` node; do not infer references by scanning raw pattern text
-   outside the parser. Handle `OpBackref` explicitly in `(*Regexp).Equal`
-   (comparing `Cap` and `FoldCase` rather than falling through to `return true`,
-   which would treat `\1` and `\2` as identical in `simplify1` and parser
-   factoring), `calcFlags`, `writeRegexp`, and `(*parser).calcSize`.
+   (or direct BRE/GNU ERE parser mode), and expose a compilation entrypoint in
+   `regast` (e.g. `CompileWithFlags` / `CompileBytesWithFlags` or
+   `CompileParsed`) so callers outside `regast/syntax` can enable that flag.
+   * Intercept `\1`–`\9` in the top-level `case '\\':` switch of `parse()`
+     (consuming a single digit `'1'`–`'9'`) rather than inside `parseEscape`,
+     so `\10` is parsed as backreference `\1` followed by literal `'0'` (rather
+     than a 2-digit octal escape) and bracket character classes (`[...]`, which
+     call `parseEscape`) never emit `OpBackref`.
+   * Record the referenced capture number in the `syntax.Regexp` node; do not
+     infer references by scanning raw pattern text outside the parser.
+   * Place `OpBackref` at or before `OpCapture` in `syntax.Op` (or update the
+     `sub.Op > OpCapture` precedence check in `writeRegexp`), and register
+     `OpBackref` / `InstBackref` in `syntax/op_string.go`, `instOpNames`, and
+     `dumpInst`.
+   * Handle `OpBackref` explicitly in `(*Regexp).Equal` (comparing `Cap` and
+     `FoldCase` rather than falling through to `return true`, which would treat
+     `\1` and `\2` as identical in `simplify1` and parser factoring),
+     `calcFlags` (returning `(flagI, 0)` when `FoldCase != 0` and `(0, flagI)`
+     when `FoldCase == 0`, since a backreference's runtime text is always
+     potentially fold-sensitive), `writeRegexp`, and `(*parser).calcSize`.
 2. **Simplification, capture commit/restore, and repeated captures:** Account
    for `(*Regexp).Simplify()` expanding counted repetitions (such as
    `/(a){2,3}\1/` or `(?:(a)\1){2}`) into multiple `OpCapture` nodes that share
    the same `Cap` index:
    * Do not allow an inner or repeated capture opening (`b.cap[2*k]`) to create
      a torn `(new_start, old_end)` pair before its closing `InstCapture`
-     commits; stage uncommitted open positions (`b.open[k]`) separately from
-     committed `(start, end)` spans in `b.cap[2*k : 2*k+2]`.
-   * On backtrack (`arg == true`), an opening `InstCapture` (`2*k`) restores
-     the previous `b.open[k]`, while a closing `InstCapture` (`2*k+1`) must
-     restore **both** the previous committed `b.cap[2*k]` and `b.cap[2*k+1]`
-     (since a single scalar `job.pos` cannot hold both `oldStart` and `oldEnd`
-     when a repeated capture's later iteration fails after committing).
-   * Define and enforce the bytecode mechanism for whether nested captures
-     inside a repeated outer group (e.g. `((a)|b)+\2`) reset on each outer
-     iteration or retain their prior iteration's binding according to target
-     POSIX/GNU `sed` semantics (standard `InstCapture` only writes `cap[2*k]`
-     when the inner group is actually entered).
+     commits; stage uncommitted open positions (`b.open[k]`, initialized to
+     `-1`) separately from committed `(start, end)` spans in
+     `b.cap[2*k : 2*k+2]`.
+   * When closing `InstCapture` (`2*k+1`) commits `b.cap[2*k] = b.open[k]` and
+     `b.cap[2*k+1] = pos`, clear `b.open[k] = -1` so `b.open[k] >= 0`
+     accurately reflects whether group $k$ is currently open. On backtrack
+     (`arg == true`), an opening `InstCapture` (`2*k`) restores the previous
+     `b.open[k]`, while a closing `InstCapture` (`2*k+1`) must restore
+     `b.open[k] = b.cap[2*k]` (the start offset that closing instruction had
+     just committed) **and** restore both previous committed `b.cap[2*k]` and
+     `b.cap[2*k+1]` (since a single scalar `job.pos` cannot hold both
+     `oldStart` and `oldEnd` when a repeated capture's later iteration fails
+     after committing, and backtracking into an alternation inside group $k$
+     such as `((a|ab)b)\1` needs `b.open[k]` restored before re-closing).
+   * For nested captures inside a repeated outer group (e.g. `((a)|b)+\2`),
+     retain the prior iteration's committed binding when the inner capture is
+     not entered on a later iteration, matching `regast`'s existing `RE2/Go`
+     expectations in `testdata/repetition.dat` and `uutils/sed`'s
+     `fancy-regex` behavior.
 3. **Compilation, nullability, and static analysis:** Compile each `OpBackref`
    into a dedicated `InstBackref` instruction (carrying the capture index and
    active `FoldCase` flag) and mark `syntax.Prog` with `HasBackref = true`.
+   * When compiling `OpBackref`, also bump `c.p.NumCap` to at least
+     `2*re.Cap + 2` (and bounds-check `2*k+1 < len(b.cap)` in `InstBackref`),
+     because `(*Regexp).Simplify()` rewrites zero-count repetitions like
+     `(a){0}\1` to `OpEmptyMatch`, removing the `OpCapture` node before
+     `Compile` runs.
    * Keep `frag.nullable = true` for `InstBackref` so `compiler.star` rewrites
      `\1*` via `c.quest(c.plus(...))` (`(\1+)?`), since a backreference can
      match the empty string whenever its referenced group matched empty.
@@ -124,15 +148,21 @@ engine:
    Thompson NFA execution paths. Route programs with `HasBackref` to the
    ordered backtracking path for every input size; do not send them through
    `compileOnePass` or the Thompson NFA `machine`.
-   * In `bitState.reset`, always allocate `b.cap` (and `b.open`) to at least
-     `prog.NumCap` and `b.matchcap` to at least `max(ncap, 2)` even when the
-     caller passes `ncap == 0` (`Match`) or `ncap == 2` (`FindIndex`,
-     `ReplaceAllLiteral`), so referenced groups are always recorded and
-     `longest` comparisons never short-circuit on `len(b.cap) == 0`.
-   * In `InstMatch`, allow empty matches at `pos == 0` to update `b.matchcap`
-     when `old == -1`, and in `re.backtrack`, slice `b.matchcap[:ncap]` when
-     appending to `dstCap` so callers receive the exact submatch slice length
-     they requested.
+   * In `bitState.reset`, gate the flat `b.visited` bitvector allocation on
+     `!prog.HasNodeGroup && !prog.HasBackref` so large inputs on `HasBackref`
+     programs never hit `make([]uint32, visitedSize, maxBacktrackVector/visitedBits)`
+     with `visitedSize > cap` and panic.
+   * When `prog.HasBackref` is true, allocate `b.cap` to at least `prog.NumCap`
+     (and `b.open` to `prog.NumCap/2`) and `b.matchcap` to at least
+     `max(ncap, 2)` even when the caller passes `ncap == 0` (`Match`) or
+     `ncap == 2` (`FindIndex`, `ReplaceAllLiteral`), while leaving non-backref
+     `ncap == 0` callers on their zero-length `b.cap` fast path.
+   * In `InstMatch`, when `ncap == 0` (`Match`), return `true` immediately even
+     for `HasBackref` and `longest` (since a valid match is already proven and
+     `Match` discards `b.matchcap`); otherwise allow empty matches at `pos == 0`
+     to update `b.matchcap` when `old == -1`, and in `re.backtrack`, slice
+     `b.matchcap[:ncap]` when appending to `dstCap` so callers receive the
+     exact submatch slice length they requested.
 5. **Backreference matching and case folding (`[]byte` and `string` inputs):**
    At `InstBackref`, check that the referenced group has a committed valid span
    `[capStart, capEnd]`.
@@ -142,11 +172,13 @@ engine:
      `pos` and advance `pos` by `capEnd - capStart`.
    * For case-insensitive matching (`FoldCase`), step rune-by-rune through the
      captured span `[capStart, capEnd)` and the subject at `pos` using
-     `i.step` (`decodeByteRune` on `[]byte` inputs): valid UTF-8 runes compare
-     under `unicode.SimpleFold` (allowing folded matches whose UTF-8 byte
-     lengths differ, such as `K` and `k`), while Phase 1 invalid-byte sentinels
-     match only the identical raw byte and never fold. Advance `pos` by the
-     subject bytes consumed.
+     byte-preserving rune decoding (`decodeByteRune` on `[]byte` inputs, and
+     preserving raw invalid UTF-8 bytes on `string` inputs rather than collapsing
+     them to `utf8.RuneError`): valid UTF-8 runes compare under
+     `unicode.SimpleFold` (allowing folded matches whose UTF-8 byte lengths
+     differ, such as `K` and `k`), while Phase 1 invalid-byte sentinels match
+     only the identical raw byte and never fold. Advance `pos` by the subject
+     bytes consumed.
    * Captures and match positions continue to refer to byte offsets in the
      original input slice, so invalid bytes remain exact and sentinels are never
      serialized.
@@ -158,25 +190,32 @@ engine:
    selection.
    * Key the visited table by `(pc, pos, capStateID)`—interning, for every
      referenced group $k$, both its committed `(start, end)` span **and** its
-     uncommitted open offset `open[k]` when group $k$ is currently open at `pc`
-     (so distinct paths inside an open referenced group such as `((a|ab)b)\1`
-     are not falsely pruned before closing `InstCapture` commits), and scoping
-     or resetting per start position.
+     uncommitted open offset `open[k]` (`-1` when closed, `>= 0` when group $k$
+     is currently open at `pc`, so distinct paths inside an open referenced
+     group such as `((a|ab)b)\1` are not falsely pruned before closing
+     `InstCapture` commits), and scoping or resetting per start position.
    * This preserves distinct capture alternatives, keeps memory bounded without
      hashing full capture slices on every step, and guarantees that zero-width
      cycles (including empty-capture repetitions like `(a*)\1*` compiled via
      `(\1+)?`) terminate once `(pc, pos, capStateID)` repeats.
 7. **Work limits, error-returning APIs, and `io.RuneReader` policy:** Count
-   execution work, including backtracker steps and bytes/runes compared by
-   `InstBackref`. Because standard `Regexp` methods (`Match`, `FindIndex`,
-   `ReplaceAll`, etc.) do not return `error`, add explicit error-returning
-   entrypoints (e.g. `TryFindSubmatchIndex` / `TryReplaceAll` or configurable
-   `MaxSteps` search methods used by `sed`) that return a distinct
-   `ErrStepLimit` error when the work limit is reached; never report work-limit
-   exhaustion as an ordinary non-match. Define an explicit policy for
-   `io.RuneReader` entrypoints on `HasBackref` programs (either buffer unread
-   stream bytes so captured spans can be re-read, or reject streaming reader
-   calls on backreference programs in favor of buffered `[]byte` entrypoints).
+   execution work across the entire search (not resetting an `O(end)` budget at
+   each start position `pos`), including backtracker steps and bytes/runes
+   compared by `InstBackref`.
+   * When the work limit is exceeded inside `tryBacktrack`, set an explicit
+     `b.limitExceeded` flag on `bitState`, immediately abort the outer
+     start-position sweep in `re.backtrack`, and discard any partial
+     `b.matchcap` recorded in `longest` mode.
+   * Because standard `Regexp` methods (`Match`, `FindIndex`, `ReplaceAll`,
+     etc.) do not return `error`, add explicit error-returning entrypoints
+     (e.g. `TryFindSubmatchIndex` / `TryReplaceAll` or configurable `MaxSteps`
+     search methods used by `sed`) that return a distinct `ErrStepLimit` error
+     when `b.limitExceeded` is set; never report work-limit exhaustion as an
+     ordinary non-match.
+   * Define an explicit policy for `io.RuneReader` entrypoints on `HasBackref`
+     programs (either buffer unread stream bytes so captured spans can be
+     re-read, or reject streaming reader calls on backreference programs in
+     favor of buffered `[]byte` entrypoints).
 
 Before implementation, define dialect-specific behavior for invalid (out-of-range
 capture index), forward (not-yet-closed capture), currently-open (self-nested
