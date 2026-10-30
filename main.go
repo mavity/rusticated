@@ -103,6 +103,7 @@ func main() {
 			runArgs = runArgs[1:]
 		}
 	}
+	runArgs = normalizeRunArgs(runArgs, testMode)
 
 	switch {
 	case runMode:
@@ -128,4 +129,24 @@ func main() {
 		// Mode 1: full build pipeline
 		mohabbat.Must(mohabbat.ModeBuild(ws, verbose))
 	}
+}
+
+func normalizeRunArgs(args []string, testMode bool) []string {
+	if len(args) > 0 && args[0] == "--" {
+		args = args[1:]
+	}
+	if !testMode {
+		return args
+	}
+
+	normalized := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-test" && i+1 < len(args) && strings.HasPrefix(args[i+1], ".") {
+			normalized = append(normalized, args[i]+args[i+1])
+			i++
+			continue
+		}
+		normalized = append(normalized, args[i])
+	}
+	return normalized
 }

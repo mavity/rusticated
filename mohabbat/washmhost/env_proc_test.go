@@ -33,6 +33,17 @@ func TestGuestEnvCanonicalizesWindowsPathAliases(t *testing.T) {
 	}
 }
 
+func TestGuestEnvDoesNotExposeWashmhostGuestArgs(t *testing.T) {
+	for _, kv := range guestEnvForWasm([]string{
+		"PATH=/bin",
+		"MOHABBAT_WASHMHOST_GUEST_ARGS=[\"-test.v\"]",
+	}) {
+		if strings.HasPrefix(strings.ToUpper(kv), "MOHABBAT_WASHMHOST_GUEST_ARGS=") {
+			t.Fatalf("host-only guest argument transport leaked into guest environment: %q", kv)
+		}
+	}
+}
+
 func TestGuestEnvPreservesWindowsUserDirs(t *testing.T) {
 	pairs := guestEnvForWasm([]string{
 		"LOCALAPPDATA=C:\\Users\\test\\AppData\\Local",

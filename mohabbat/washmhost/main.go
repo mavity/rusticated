@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,8 @@ import (
 
 	"golang.org/x/term"
 )
+
+const washmhostGuestArgsEnv = "MOHABBAT_WASHMHOST_GUEST_ARGS"
 
 var (
 	BuildVersion  = "0.0.0-dev"
@@ -251,6 +254,13 @@ func logTerminalState() {
 }
 
 func runHost(parsedArgs []string, cwd string) int {
+	guestArgs, err := decodeWashmhostGuestArgs(os.Getenv(washmhostGuestArgsEnv))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "washmhost: %v\n", err)
+		return 1
+	}
+	parsedArgs = append(parsedArgs, guestArgs...)
+
 	ref := os.Getenv("MOHABBAT_WASM_FD")
 	debugLog("host startup: cwd=%q payload_ref=%q guest_argc=%d", cwd, ref, len(parsedArgs))
 	if ref == "" {
@@ -316,6 +326,19 @@ func runHost(parsedArgs []string, cwd string) int {
 		}
 		return exitCode
 	}
-
 	return exitCode
+}
+
+func decodeWashmhostGuestArgs(raw string) ([]string, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	var args []string
+	if err := json.Unmarshal([]byte(raw), &args); err != nil {
+		return nil, fmt.Errorf("decode %s: %w", washmhostGuestArgsEnv, err)
+	}
+	if args == nil {
+		return nil, fmt.Errorf("decode %s: expected a JSON string array", washmhostGuestArgsEnv)
+	}
+	return args, nil
 }

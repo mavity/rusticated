@@ -93,6 +93,9 @@ func guestEnvForWasm(env []string) []string {
 		if !ok {
 			continue
 		}
+		if strings.EqualFold(k, washmhostGuestArgsEnv) {
+			continue
+		}
 		key := canonicalGuestEnvKey(k)
 		if !seen[key] {
 			seen[key] = true

@@ -211,10 +211,13 @@ go run . demo -r -v
 # Build tests
 go run . demo-go -t
 go run . kabibi -t -- -test.v    # pass args to test runner
+go run . kabibi -t -- -test.timeout=5m
 
 # Refill (replace brain only)
 mohab.bat demo.bat --refill
 ```
+
+Guest test binaries run with the tested package directory as their working directory.
 
 ---
 
