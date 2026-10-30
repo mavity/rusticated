@@ -135,7 +135,8 @@ func guestRuntimeEnvForWasm(env []string) []string {
 		if !ok {
 			continue
 		}
-		if strings.EqualFold(k, "PWD") || strings.EqualFold(k, "OLDPWD") {
+		if strings.EqualFold(k, "PWD") || strings.EqualFold(k, "OLDPWD") ||
+			strings.EqualFold(k, washmhostGuestArgsEnv) || strings.EqualFold(k, washmhostTestTimeoutEnv) {
 			continue
 		}
 		if _, exists := values[k]; !exists {
@@ -159,8 +160,11 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 
 	// 1. Setup Wazero using default config (picks best engine).
 	rConfig := wazero.NewRuntimeConfig()
+	if ctx.Done() != nil {
+		rConfig = rConfig.WithCloseOnContextDone(true)
+	}
 	r := wazero.NewRuntimeWithConfig(ctx, rConfig)
-	defer r.Close(ctx)
+	defer r.Close(context.Background())
 
 	// We decode earlier than module compilation to detect imports
 	compileStarted := time.Now()
@@ -209,6 +213,9 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 	mod, err := r.InstantiateModule(ctx, decoded, cfg)
 	if err != nil {
 		debugLog("WASM instantiate failed after %s: %v", time.Since(instantiateStarted), err)
+		if ctx.Err() != nil {
+			return 1, fmt.Errorf("WASM instantiation interrupted: %w", ctx.Err())
+		}
 		// Module might exit with specific exit code (e.g. WASI exit)
 		if exitErr, ok := err.(*sys.ExitError); ok {
 			debugLog("WASM instantiate exited normally: code=%d", exitErr.ExitCode())
@@ -235,11 +242,17 @@ func RunWasm(ctx context.Context, payload []byte, args []string) (int, error) {
 		res, err = runFunc.Call(ctx)
 		if err != nil {
 			debugLog("guest run iteration=%d failed: result=%v error=%v", iteration, res, err)
+			if ctx.Err() != nil {
+				return 1, fmt.Errorf("guest execution interrupted: %w", ctx.Err())
+			}
 			if exitErr, ok := err.(*sys.ExitError); ok {
 				debugLog("guest exited through WASI: iteration=%d code=%d", iteration, exitErr.ExitCode())
 				return int(exitErr.ExitCode()), nil
 			}
 			return 1, fmt.Errorf("run failed: %w", err)
+		}
+		if ctx.Err() != nil {
+			return 1, fmt.Errorf("guest execution interrupted: %w", ctx.Err())
 		}
 
 		hEnv.mu.Lock()

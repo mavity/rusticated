@@ -1,21 +1,25 @@
 package mohabbat
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
 const washmhostGuestArgsEnv = "MOHABBAT_WASHMHOST_GUEST_ARGS"
+const washmhostTestTimeoutEnv = "MOHABBAT_WASHMHOST_TEST_TIMEOUT"
 
 // runUnderWashmhost runs a WASM file under washmhost.
 // When running inside a vegetable (MOHABBAT_VEGETABLE_PATH is set), it extracts
 // the appropriate pre-built washmhost binary from the vegetable's pool rather
 // than re-compiling from source via `go run .`.
 // Natively, it compiles washmhost via `go run .`.
-func runUnderWashmhost(ws, wasmPath string, extraArgs []string, platform string, verbose bool, workingDir string) error {
+func runUnderWashmhost(ws, wasmPath string, extraArgs []string, platform string, verbose bool, workingDir string, testTimeout time.Duration) error {
 	cwd, err := resolveRunWorkingDirectory(workingDir)
 	if err != nil {
 		return err
@@ -32,12 +36,24 @@ func runUnderWashmhost(ws, wasmPath string, extraArgs []string, platform string,
 	if platform == "node" {
 		runArgs := []string{filepath.Join(ws, "mohabbat", "washmhost", "js", "node", "index.js"), wasmPath}
 		runArgs = append(runArgs, extraArgs...)
-		cmd := exec.Command("node", runArgs...)
+		ctx := context.Background()
+		cancel := func() {}
+		if testTimeout > 0 {
+			ctx, cancel = context.WithTimeout(ctx, testTimeout)
+		}
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "node", runArgs...)
 		cmd.Dir = cwd
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		cmd.Stdin = os.Stdin
-		return cmd.Run()
+		if err := cmd.Run(); err != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("guest test exceeded -test.timeout=%s: %w", testTimeout, ctx.Err())
+			}
+			return err
+		}
+		return nil
 	}
 
 	goroot, _, _ := resolveGoroot(ws)
@@ -75,6 +91,11 @@ func runUnderWashmhost(ws, wasmPath string, extraArgs []string, platform string,
 	cmd.Dir = filepath.Join(ws, "mohabbat", "washmhost")
 	env := os.Environ()
 	env = upsertEnv(env, "MOHABBAT_WASM_FD", wasmPath)
+	testTimeoutValue := ""
+	if testTimeout > 0 {
+		testTimeoutValue = testTimeout.String()
+	}
+	env = upsertEnv(env, washmhostTestTimeoutEnv, testTimeoutValue)
 	if extraArgs == nil {
 		extraArgs = []string{}
 	}
@@ -97,6 +118,37 @@ func runUnderWashmhost(ws, wasmPath string, extraArgs []string, platform string,
 		return fmt.Errorf("washmhost execution failed: %w", err)
 	}
 	return nil
+}
+
+func parseGoTestTimeout(args []string) (time.Duration, error) {
+	var raw string
+	found := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-test.timeout" || arg == "--test.timeout":
+			if i+1 >= len(args) {
+				return 0, fmt.Errorf("missing value for %s", arg)
+			}
+			raw = args[i+1]
+			found = true
+			i++
+		case strings.HasPrefix(arg, "-test.timeout="):
+			raw = strings.TrimPrefix(arg, "-test.timeout=")
+			found = true
+		case strings.HasPrefix(arg, "--test.timeout="):
+			raw = strings.TrimPrefix(arg, "--test.timeout=")
+			found = true
+		}
+	}
+	if !found {
+		return 0, nil
+	}
+	timeout, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid -test.timeout %q: %w", raw, err)
+	}
+	return timeout, nil
 }
 
 func resolveRunWorkingDirectory(workingDir string) (string, error) {

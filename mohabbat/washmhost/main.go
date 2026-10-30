@@ -11,11 +11,13 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/term"
 )
 
 const washmhostGuestArgsEnv = "MOHABBAT_WASHMHOST_GUEST_ARGS"
+const washmhostTestTimeoutEnv = "MOHABBAT_WASHMHOST_TEST_TIMEOUT"
 
 var (
 	BuildVersion  = "0.0.0-dev"
@@ -318,7 +320,21 @@ func runHost(parsedArgs []string, cwd string) int {
 		debugLog("guest working directory: %q", current)
 	}
 
-	exitCode, err := RunWasm(context.Background(), payloadBytes, argSlice)
+	ctx := context.Background()
+	cancel := func() {}
+	if rawTimeout := os.Getenv(washmhostTestTimeoutEnv); rawTimeout != "" {
+		timeout, err := time.ParseDuration(rawTimeout)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "washmhost: invalid %s value %q: %v\n", washmhostTestTimeoutEnv, rawTimeout, err)
+			return 1
+		}
+		if timeout > 0 {
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+		}
+	}
+	defer cancel()
+
+	exitCode, err := RunWasm(ctx, payloadBytes, argSlice)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "washmhost: %v\n", err)
 		if exitCode == 0 {
