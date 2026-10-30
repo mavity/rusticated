@@ -80,41 +80,94 @@ Backreference support starts only after Phase 1 is complete and verified.
 The planned implementation extends `regast` rather than adding a second regex
 engine:
 
-1. Recognize references while parsing the selected regex dialect. Record the
-   referenced capture number in the parsed expression; do not infer references
-   by scanning the pattern text.
-2. Compile each reference into a dedicated instruction and mark the compiled
-   program as requiring backreference-aware execution.
-3. Keep programs without references on their existing one-pass and linear-time
-   execution paths. Route programs with references to the existing ordered
-   backtracking path for every input size; do not send them through the
-   one-pass or Thompson-style machine.
-4. At a reference instruction, compare the captured span with the input at the
-   current position, then advance by the matched span. Captures and match
-   positions continue to refer to offsets in the original input bytes, so
-   invalid bytes remain exact and sentinels are never serialized.
-5. Change backtracking's visited-state check for these programs. The current
-   instruction-and-position key is insufficient because different capture
-   values can lead to different results. Include the capture state when
-   recognizing a repeated state, so distinct alternatives are preserved while
-   zero-width cycles still terminate.
-6. Count execution work, including bytes compared by references. If the
-   configured work limit is reached, return a distinct execution-limit error;
-   never report it as an ordinary non-match. Backreference use through reader
-   APIs also needs an explicit replay/buffering policy because matching may
-   need to revisit captured input.
+1. **Parser and dialect boundary:** Recognize backreferences while parsing the
+   selected regex dialect via an explicit `syntax.Flags` bit (or direct BRE/GNU
+   ERE parser mode) so `\1`–`\9` produce `OpBackref` AST nodes rather than
+   colliding with `\1`–`\7` octal character escapes in `syntax/parse.go`. Record
+   the referenced capture number in the `syntax.Regexp` node; do not infer
+   references by scanning raw pattern text outside the parser.
+2. **Simplification and repeated captures:** Account for `(*Regexp).Simplify()`
+   expanding counted repetitions (such as `/(a){2,3}\1/` or `(?:(a)\1){2}`) into
+   multiple `OpCapture` nodes that share the same `Cap` index:
+   * Do not allow an inner or repeated capture opening (`b.cap[2*k]`) to create
+     a torn `(new_start, old_end)` pair before its closing `InstCapture`
+     commits; either stage uncommitted open positions separately from committed
+     `(start, end)` spans or save/restore the full `(start, end)` pair on the
+     backtrack stack.
+   * Define and enforce whether nested captures inside a repeated outer group
+     (e.g. `((a)|b)+\2`) reset on each outer iteration or retain their prior
+     iteration's binding according to target POSIX/GNU `sed` semantics.
+3. **Compilation and static analysis:** Compile each `OpBackref` into a
+   dedicated `InstBackref` instruction (carrying the capture index and active
+   `FoldCase` flag) and mark `syntax.Prog` with `HasBackref = true`. Ensure
+   `minInputLen` treats `OpBackref` as minimum length `0`, `Prog.Prefix()` and
+   `Prog.StartCond()` stop at `InstBackref`, and `InstAltMatch` greedy
+   shortcuts are never taken for `HasBackref` programs.
+4. **Execution routing and capture register sizing:** Keep programs without
+   references on their existing one-pass, flat-bitvector, and linear-time
+   Thompson NFA execution paths. Route programs with `HasBackref` to the
+   ordered backtracking path for every input size; do not send them through
+   `compileOnePass` or the Thompson NFA `machine`. In `bitState.reset`, always
+   allocate `b.cap` to at least `prog.NumCap` (and `b.matchcap` to at least `2`
+   when `re.longest` is set) even when the caller passes `ncap == 0` (`Match`)
+   or `ncap == 2` (`FindIndex`, `ReplaceAllLiteral`), so referenced groups are
+   always recorded and `longest` comparisons never short-circuit on
+   `len(b.cap) == 0`.
+5. **Backreference matching and case folding:** At `InstBackref`, check that the
+   referenced group has a committed valid span `[capStart, capEnd]`.
+   * For exact matching, compare `input[capStart:capEnd]` with the subject at
+     `pos` and advance `pos` by `capEnd - capStart`.
+   * For case-insensitive matching (`FoldCase`), step rune-by-rune through the
+     captured span and the subject at `pos` using `decodeByteRune`: valid UTF-8
+     runes compare under `unicode.SimpleFold` (allowing folded matches whose
+     UTF-8 byte lengths differ, such as `K` and `k`), while Phase 1 invalid-byte
+     sentinels match only the identical raw byte and never fold. Advance `pos`
+     by the subject bytes consumed.
+   * Captures and match positions continue to refer to byte offsets in the
+     original input slice, so invalid bytes remain exact and sentinels are never
+     serialized.
+6. **Capture-aware visited state:** Change backtracking's visited-state check
+   for `HasBackref` programs. The flat `(pc, pos)` bitvector is insufficient
+   because different capture bindings at the same `(pc, pos)` can lead to
+   different outcomes, and sharing flat `(pc, pos)` bits across start positions
+   in an unanchored sweep can falsely prune valid matches or corrupt `longest`
+   selection. Key the visited table by `(pc, pos, capStateID)`—interning the
+   active capture spans of referenced groups (similar to `bitState.internFrame`
+   for node frames) and scoping or resetting per start position—so distinct
+   capture alternatives are preserved, memory stays bounded without hashing full
+   capture slices on every step, and zero-width cycles still terminate.
+7. **Work limits, error-returning APIs, and `io.RuneReader` policy:** Count
+   execution work, including backtracker steps and bytes/runes compared by
+   `InstBackref`. Because standard `Regexp` methods (`Match`, `FindIndex`,
+   `ReplaceAll`, etc.) do not return `error`, add explicit error-returning
+   entrypoints (e.g. `TryFindSubmatchIndex` / `TryReplaceAll` or configurable
+   `MaxSteps` search methods used by `sed`) that return a distinct
+   `ErrStepLimit` error when the work limit is reached; never report work-limit
+   exhaustion as an ordinary non-match. Define an explicit policy for
+   `io.RuneReader` entrypoints on `HasBackref` programs (either buffer unread
+   stream bytes so captured spans can be re-read, or reject streaming reader
+   calls on backreference programs in favor of buffered `[]byte` entrypoints).
 
-Before implementation, define dialect-specific behavior for invalid,
-forward, and unmatched capture references and for case-insensitive matching.
-Do not silently inherit behavior from another regex engine.
+Before implementation, define dialect-specific behavior for invalid (out-of-range
+capture index), forward (not-yet-closed capture), currently-open (self-nested
+`(\1)`), and unmatched capture references, as well as C/POSIX byte-mode vs.
+UTF-8 case folding. Do not silently inherit behavior from another regex engine.
 
-Verify the feature with tests for repeated and nested captures, alternate
-capture paths, empty and unmatched captures, leftmost-first and POSIX
-leftmost-longest selection, malformed-byte capture/replay, and zero-width
-cycles. Test that work-limit exhaustion is distinguishable from no match and
-that patterns without backreferences retain their existing behavior and
-performance. Backreferences can require nonlinear work; do not claim a linear
-time bound for programs that use them.
+Verify the feature with tests for:
+* Repeated captures (`/(a){2,3}\1/`, `/(?:(a)\1){2}/`) and nested captures
+  (`((a)|b)+\2`)
+* Alternate capture paths, empty captures, and unmatched/forward/self-nested
+  captures
+* Callers with `ncap == 0` (`Match`) and `ncap == 2` (`Find`, `FindIndex`,
+  `ReplaceAllLiteral`), in both leftmost-first and POSIX leftmost-longest modes
+* Case-insensitive backreferences (`FoldCase`), including multibyte UTF-8
+  folding with differing byte widths and non-folding invalid-byte sentinels
+* Malformed-byte capture/replay and zero-width cycles
+* Work-limit exhaustion returning the distinct limit error rather than `nil` /
+  `false`
+* Unchanged behavior and benchmark performance for patterns without
+  backreferences. Backreferences can require nonlinear work; do not claim a
+  linear time bound for programs that use them.
 
 ### B. Byte and Character Semantics
 
