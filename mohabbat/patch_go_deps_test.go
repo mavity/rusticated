@@ -174,7 +174,7 @@ func TestPatchMvdanKillBuiltin(t *testing.T) {
 
 func TestPatchMvdanUmaskBuiltin(t *testing.T) {
 	files := map[string][]byte{
-		"interp/builtin.go": []byte("case \"shift\":\n"),
+		"interp/builtin.go": []byte("\tcase \"shift\":\n"),
 	}
 	if err := patchMvdanUmaskBuiltinInMemory(files); err != nil {
 		t.Fatalf("patch mvdan umask builtin: %v", err)
