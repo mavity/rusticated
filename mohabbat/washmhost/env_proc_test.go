@@ -33,13 +33,16 @@ func TestGuestEnvCanonicalizesWindowsPathAliases(t *testing.T) {
 	}
 }
 
-func TestGuestEnvDoesNotExposeWashmhostGuestArgs(t *testing.T) {
-	for _, kv := range guestEnvForWasm([]string{
+func TestGuestEnvDoesNotExposeWashmhostHostSettings(t *testing.T) {
+	for _, kv := range guestRuntimeEnvForWasm([]string{
 		"PATH=/bin",
 		"MOHABBAT_WASHMHOST_GUEST_ARGS=[\"-test.v\"]",
+		"MOHABBAT_WASHMHOST_TEST_TIMEOUT=100ms",
 	}) {
-		if strings.HasPrefix(strings.ToUpper(kv), "MOHABBAT_WASHMHOST_GUEST_ARGS=") {
-			t.Fatalf("host-only guest argument transport leaked into guest environment: %q", kv)
+		upper := strings.ToUpper(kv)
+		if strings.HasPrefix(upper, "MOHABBAT_WASHMHOST_GUEST_ARGS=") ||
+			strings.HasPrefix(upper, "MOHABBAT_WASHMHOST_TEST_TIMEOUT=") {
+			t.Fatalf("washmhost-only setting leaked into guest environment: %q", kv)
 		}
 	}
 }

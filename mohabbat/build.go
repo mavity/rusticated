@@ -115,11 +115,16 @@ func ModeDevRun(ws, projectDir string, extraArgs []string, platform string, verb
 	if err := buildProjectToWasm(ws, absProject, wasmPath, verbose); err != nil {
 		return err
 	}
-	return runUnderWashmhost(ws, wasmPath, extraArgs, platform, verbose, "")
+	return runUnderWashmhost(ws, wasmPath, extraArgs, platform, verbose, "", 0)
 }
 
 // ModeTest is the test pipeline: build project tests to WASM and run under washmhost.
 func ModeTest(ws, projectDir string, extraArgs []string, platform string, verbose bool) error {
+	testTimeout, err := parseGoTestTimeout(extraArgs)
+	if err != nil {
+		return err
+	}
+
 	absProject, err := filepath.Abs(projectDir)
 	if err != nil || (!filepath.IsAbs(absProject) && !fileExists(absProject)) {
 		if !filepath.IsAbs(projectDir) {
@@ -148,7 +153,7 @@ func ModeTest(ws, projectDir string, extraArgs []string, platform string, verbos
 		return err
 	}
 
-	return runUnderWashmhost(ws, wasmPath, extraArgs, platform, verbose, absProject)
+	return runUnderWashmhost(ws, wasmPath, extraArgs, platform, verbose, absProject, testTimeout)
 }
 
 // buildAllSlots builds brot (cargo) and washmhost for all Modern Four slots.

@@ -218,6 +218,7 @@ mohab.bat demo.bat --refill
 ```
 
 Guest test binaries run with the tested package directory as their working directory.
+The `-test.timeout` value also bounds host execution and interrupts a guest that does not honor Go's in-process test timeout.
 
 ---
 
