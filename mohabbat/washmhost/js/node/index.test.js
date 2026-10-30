@@ -118,6 +118,118 @@ test('positioned read preserves the handle position and rejects stream handles',
     }
 });
 
+test('seek updates sequential file reads and writes', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'washmhost-seek-'));
+    const file = path.join(dir, 'data.txt');
+    fs.writeFileSync(file, 'abcdef');
+    const fd = fs.openSync(file, 'r+');
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const host = new HostState();
+    host.memory = memory;
+    const { env } = makeBrainImports(host, []);
+    const handle = host.allocHandle({ type: 'file', fd, path: file });
+    const view = new DataView(memory.buffer);
+    let appendFd;
+    let appendHandle;
+
+    const callAndWait = async (ovPtr, offset, whence, target = handle) => {
+        env.seek(ovPtr, target, offset, whence);
+        for (let attempt = 0; attempt < 100 &&
+            host.completionQueue.length === 0 &&
+            (view.getUint32(ovPtr, true) & 1) === 0; attempt++) {
+            await new Promise(resolve => setTimeout(resolve, 1));
+        }
+        host.drainQueue();
+        return {
+            errno: view.getUint32(ovPtr + 4, true),
+            result: view.getBigUint64(ovPtr + 16, true),
+        };
+    };
+
+    try {
+        assert.deepEqual(await callAndWait(32, 2n, 0), { errno: 0, result: 2n });
+
+        env.read(64, handle, 256, 2);
+        assert.equal(await waitForHostResult(host, memory, 64), 0);
+        assert.equal(Buffer.from(memory.buffer, 256, 2).toString(), 'cd');
+
+        assert.deepEqual(await callAndWait(96, -1n, 1), { errno: 0, result: 3n });
+        new Uint8Array(memory.buffer, 320, 1)[0] = 'X'.charCodeAt(0);
+        env.write(128, handle, 320, 1);
+        assert.equal(await waitForHostResult(host, memory, 128), 0);
+        assert.equal(fs.readFileSync(file, 'utf8'), 'abcXef');
+        assert.deepEqual(await callAndWait(160, 0n, 2), { errno: 0, result: 6n });
+        assert.deepEqual(await callAndWait(192, 1n, 2), { errno: 0, result: 7n });
+
+        assert.equal((await callAndWait(224, -1n, 0)).errno, 28); // WASI EINVAL
+        assert.equal((await callAndWait(256, 0n, 3)).errno, 28); // WASI EINVAL
+        assert.equal((await callAndWait(288, BigInt(Number.MAX_SAFE_INTEGER) + 1n, 0)).errno, 61); // WASI EOVERFLOW
+        env.seek(320, 999n, 0n, 0);
+        assert.equal(view.getUint32(324, true), 8); // WASI EBADF
+
+        appendFd = fs.openSync(file, 'a+');
+        appendHandle = host.allocHandle({ type: 'file', fd: appendFd, path: file, append: true });
+        assert.deepEqual(await callAndWait(352, 0n, 0, appendHandle), { errno: 0, result: 0n });
+        new Uint8Array(memory.buffer, 512, 1)[0] = 'X'.charCodeAt(0);
+        env.write(384, appendHandle, 512, 1);
+        assert.equal(await waitForHostResult(host, memory, 384), 0);
+        assert.equal(fs.readFileSync(file, 'utf8'), 'abcXefX');
+        assert.deepEqual(await callAndWait(416, 0n, 1, appendHandle), { errno: 0, result: 7n });
+    } finally {
+        host.handles.delete(handle);
+        if (appendHandle !== undefined) host.handles.delete(appendHandle);
+        fs.closeSync(fd);
+        if (appendFd !== undefined) fs.closeSync(appendFd);
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('tty_set_size reports handle and terminal support status', () => {
+    const handles = new Map();
+    const { env } = makeBrainImports({ getHandle: handle => handles.get(handle) }, []);
+
+    assert.equal(env.tty_set_size(999n, 80, 24), 8); // WASI EBADF
+    handles.set(1n, { type: 'stdio', stream: { isTTY: false } });
+    assert.equal(env.tty_set_size(1n, 80, 24), 59); // WASI ENOTTY
+    handles.set(1n, { type: 'stdio', stream: { isTTY: true } });
+    assert.equal(env.tty_set_size(1n, 80, 24), 0); // WASI success
+    const fileHandle = 3n;
+    handles.set(fileHandle, { type: 'file', fd: -1 });
+    assert.equal(env.tty_set_size(fileHandle, 80, 24), 59); // WASI ENOTTY
+});
+
+test('process_pipe transfers data from its write handle to its read handle', async () => {
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const host = new HostState();
+    host.memory = memory;
+    const { env } = makeBrainImports(host, []);
+    const view = new DataView(memory.buffer);
+
+    env.process_pipe(32);
+    const handles = view.getBigUint64(48, true);
+    const readHandle = handles & 0xFFFF_FFFFn;
+    const writeHandle = handles >> 32n;
+    const message = Buffer.from('pipe data');
+    new Uint8Array(memory.buffer, 512, message.length).set(message);
+
+    try {
+        env.write(64, writeHandle, 512, message.length);
+        assert.equal(await waitForHostResult(host, memory, 64), 0);
+
+        env.read(96, readHandle, 256, message.length);
+        assert.equal(await waitForHostResult(host, memory, 96), 0);
+        assert.equal(Buffer.from(memory.buffer, 256, message.length).toString(), message.toString());
+
+        host.freeHandle(writeHandle);
+        env.read(128, readHandle, 320, 1);
+        assert.equal(await waitForHostResult(host, memory, 128), 0);
+        assert.equal(view.getBigUint64(144, true), 0n);
+    } finally {
+        host.freeHandle(writeHandle);
+        host.freeHandle(readHandle);
+    }
+});
+
 test('path link ABI creates hard links and reports readlink buffer requirements', async (t) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'washmhost-links-'));
     const source = path.join(dir, 'source');
