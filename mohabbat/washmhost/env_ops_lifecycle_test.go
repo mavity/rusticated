@@ -206,13 +206,12 @@ func TestIsOpActiveExtended(t *testing.T) {
 		}
 	})
 
-	t.Run("7. active remains true if cancelled", func(t *testing.T) {
-		// IsOpActive checks existence and ID, not cancellation state
+	t.Run("7. inactive after cancellation", func(t *testing.T) {
 		ovPtr := uint32(0x700)
 		state := env.RegisterOp(ovPtr, nil)
 		env.CancelOp(ovPtr)
-		if !env.IsOpActive(ovPtr, state.opID) {
-			t.Error("op should still be 'active' (existing) even if cancelled")
+		if env.IsOpActive(ovPtr, state.opID) {
+			t.Error("cancelled op should be inactive")
 		}
 	})
 

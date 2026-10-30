@@ -349,6 +349,29 @@ func TestSysProcEnv(t *testing.T) {
 	})
 
 	t.Run("15. sys_process_spawn with pty", func(t *testing.T) {
+		waitForOverlapped := func(ovPtr, size uint32) []byte {
+			t.Helper()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			for {
+				header, ok := mod.Memory().Read(ovPtr, 4)
+				if !ok {
+					t.Fatalf("overlapped pointer %d is out of bounds", ovPtr)
+				}
+				if binary.LittleEndian.Uint32(header) == 1 {
+					result, ok := mod.Memory().Read(ovPtr, size)
+					if !ok {
+						t.Fatalf("overlapped result at %d is out of bounds", ovPtr)
+					}
+					return result
+				}
+				env.Poll(ctx, mod)
+				if ctx.Err() != nil {
+					t.Fatalf("timeout waiting for overlapped completion at %d", ovPtr)
+				}
+			}
+		}
+
 		ovPtr := uint32(0x1000)
 		// Spawn cmd.exe on Windows or sh on Unix
 		shellCmd := "cmd.exe"
@@ -368,13 +391,10 @@ func TestSysProcEnv(t *testing.T) {
 		stack := []uint64{uint64(ovPtr), uint64(ptrCfg), uint64(len(config))}
 		env.sys_process_spawn(context.Background(), mod, stack)
 
-		time.Sleep(time.Millisecond * 80)
-		env.Poll(context.Background(), mod)
-
 		// Read extended ProcessSpawnOverlapped (64 bytes total)
-		val, ok := mod.Memory().Read(ovPtr, 64)
-		if !ok {
-			t.Fatal("failed to read extended overlapped buffer")
+		val := waitForOverlapped(ovPtr, 64)
+		if !mod.Memory().Write(0x1200, make([]byte, 24)) {
+			t.Fatal("failed to initialize PTY read request")
 		}
 		errno := binary.LittleEndian.Uint32(val[4:8])
 		if errno != 0 {
@@ -404,10 +424,7 @@ func TestSysProcEnv(t *testing.T) {
 		readStack := []uint64{uint64(readOvPtr), ptyHandle, uint64(readBufPtr), 256}
 		env.sys_read(context.Background(), mod, readStack)
 
-		time.Sleep(time.Millisecond * 100)
-		env.Poll(context.Background(), mod)
-
-		readVal, _ := mod.Memory().Read(readOvPtr, 24)
+		readVal := waitForOverlapped(readOvPtr, 24)
 		readErr := binary.LittleEndian.Uint32(readVal[4:8])
 		readCount := binary.LittleEndian.Uint64(readVal[16:24])
 		if readErr != 0 {
@@ -425,11 +442,11 @@ func TestSysProcEnv(t *testing.T) {
 
 		// Wait for child process
 		waitOvPtr := uint32(0x1400)
+		if !mod.Memory().Write(waitOvPtr, make([]byte, 24)) {
+			t.Fatal("failed to initialize process wait request")
+		}
 		env.sys_process_wait(context.Background(), mod, []uint64{uint64(waitOvPtr), childHandle})
-		time.Sleep(time.Millisecond * 80)
-		env.Poll(context.Background(), mod)
-
-		waitVal, _ := mod.Memory().Read(waitOvPtr, 24)
+		waitVal := waitForOverlapped(waitOvPtr, 24)
 		waitErr := binary.LittleEndian.Uint32(waitVal[4:8])
 		if waitErr != 0 {
 			t.Errorf("wait failed: %d", waitErr)

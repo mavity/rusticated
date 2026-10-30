@@ -130,8 +130,8 @@ func TestSysNet(t *testing.T) {
 		// Should be sync failure
 		val, _ := mod.Memory().Read(ovPtr, 24)
 		errno := binary.LittleEndian.Uint32(val[4:8])
-		if errno != 9 { // EBADF
-			t.Errorf("expected EBADF (9), got %d", errno)
+		if errno != wasiEBADF {
+			t.Errorf("expected EBADF (%d), got %d", wasiEBADF, errno)
 		}
 	})
 

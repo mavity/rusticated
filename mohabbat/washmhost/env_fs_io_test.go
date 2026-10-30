@@ -459,12 +459,70 @@ func TestSysWriteExtended(t *testing.T) {
 		return h, tmp
 	}
 
-	runOp := func() {
-		select {
-		case op := <-env.fileOpsQueue:
+	clearOverlapped := func(t *testing.T, ovPtr uint32) {
+		t.Helper()
+		if !mem.Write(ovPtr, make([]byte, 24)) {
+			t.Fatalf("failed to clear overlapped header at %d", ovPtr)
+		}
+	}
+	runOp := func(t *testing.T, ovPtr uint32) {
+		t.Helper()
+		timer := time.NewTimer(time.Second)
+		defer timer.Stop()
+		for {
+			buf, ok := mem.Read(ovPtr, 4)
+			if !ok {
+				t.Fatalf("overlapped pointer %d is out of bounds", ovPtr)
+			}
+			if binary.LittleEndian.Uint32(buf) == 1 {
+				if env.PendingOps() == 0 {
+					for {
+						select {
+						case op := <-env.fileOpsQueue:
+							op()
+						default:
+							return
+						}
+					}
+				}
+				return
+			}
+
+			select {
+			case op := <-env.fileOpsQueue:
+				op()
+			case <-timer.C:
+				t.Fatalf("timeout waiting for overlapped completion at %d", ovPtr)
+			}
+		}
+	}
+	submitWrite := func(t *testing.T, stack []uint64) {
+		t.Helper()
+		ovPtr := uint32(stack[0])
+		clearOverlapped(t, ovPtr)
+		env.sys_write(context.Background(), mod, stack)
+	}
+	write := func(t *testing.T, stack []uint64) {
+		t.Helper()
+		submitWrite(t, stack)
+		runOp(t, uint32(stack[0]))
+	}
+	waitForCancelledWrite := func(t *testing.T) {
+		t.Helper()
+		timer := time.NewTimer(time.Second)
+		defer timer.Stop()
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for len(env.fileOpsQueue) < 2 {
+			select {
+			case <-timer.C:
+				t.Fatal("timeout waiting for cancelled write completion")
+			case <-ticker.C:
+			}
+		}
+		for len(env.fileOpsQueue) > 0 {
+			op := <-env.fileOpsQueue
 			op()
-		case <-time.After(500 * time.Millisecond):
-			t.Fatal("timeout waiting for op")
 		}
 	}
 
@@ -472,8 +530,7 @@ func TestSysWriteExtended(t *testing.T) {
 		h, path := setupFile(t)
 		mem.Write(400, []byte("hello"))
 		stack := []uint64{200, h, 400, 5}
-		env.sys_write(context.Background(), mod, stack)
-		runOp()
+		write(t, stack)
 		got, _ := os.ReadFile(path)
 		if string(got) != "hello" {
 			t.Errorf("got %q, want %q", string(got), "hello")
@@ -483,8 +540,7 @@ func TestSysWriteExtended(t *testing.T) {
 	t.Run("2. write zero bytes", func(t *testing.T) {
 		h, path := setupFile(t)
 		stack := []uint64{200, h, 401, 0}
-		env.sys_write(context.Background(), mod, stack)
-		runOp()
+		write(t, stack)
 		got, _ := os.ReadFile(path)
 		if len(got) != 0 {
 			t.Error("write zero bytes failed")
@@ -497,7 +553,7 @@ func TestSysWriteExtended(t *testing.T) {
 		env.handles[1] = &buf
 		env.mu.Unlock()
 		mem.Write(402, []byte("stdout text"))
-		env.sys_write(context.Background(), mod, []uint64{200, 1, 402, 11})
+		write(t, []uint64{200, 1, 402, 11})
 		if buf.String() != "stdout text" {
 			t.Errorf("stdout got %q", buf.String())
 		}
@@ -509,7 +565,7 @@ func TestSysWriteExtended(t *testing.T) {
 		env.handles[2] = &buf
 		env.mu.Unlock()
 		mem.Write(403, []byte("stderr text"))
-		env.sys_write(context.Background(), mod, []uint64{200, 2, 403, 11})
+		write(t, []uint64{200, 2, 403, 11})
 		if buf.String() != "stderr text" {
 			t.Errorf("stderr got %q", buf.String())
 		}
@@ -517,20 +573,20 @@ func TestSysWriteExtended(t *testing.T) {
 
 	t.Run("5. write to invalid handle", func(t *testing.T) {
 		stack := []uint64{200, 88888, 404, 5}
-		env.sys_write(context.Background(), mod, stack)
+		write(t, stack)
 		buf, _ := mem.Read(200, 8)
-		if binary.LittleEndian.Uint32(buf[4:8]) != 9 {
-			t.Error("should return EBADF")
+		if got := binary.LittleEndian.Uint32(buf[4:8]); got != wasiEBADF {
+			t.Errorf("invalid handle errno = %d, want %d", got, wasiEBADF)
 		}
 	})
 
 	t.Run("6. write point to invalid memory", func(t *testing.T) {
 		h, _ := setupFile(t)
 		stack := []uint64{200, h, 2000000, 5}
-		env.sys_write(context.Background(), mod, stack)
+		write(t, stack)
 		buf, _ := mem.Read(200, 8)
-		if binary.LittleEndian.Uint32(buf[4:8]) != 22 {
-			t.Error("should return EINVAL")
+		if got := binary.LittleEndian.Uint32(buf[4:8]); got != wasiEINVAL {
+			t.Errorf("invalid memory errno = %d, want %d", got, wasiEINVAL)
 		}
 	})
 
@@ -542,10 +598,9 @@ func TestSysWriteExtended(t *testing.T) {
 		f2, _ := os.Open(path)
 		env.handles[h] = f2
 		env.mu.Unlock()
-
 		mem.Write(405, []byte("fail"))
-		env.sys_write(context.Background(), mod, []uint64{200, h, 405, 4})
-		runOp()
+		mem.Write(405, []byte("fail"))
+		write(t, []uint64{200, h, 405, 4})
 		buf, _ := mem.Read(200, 8)
 		if binary.LittleEndian.Uint32(buf[4:8]) == 0 {
 			t.Error("write should fail on read-only handle")
@@ -556,8 +611,7 @@ func TestSysWriteExtended(t *testing.T) {
 		h, path := setupFile(t)
 		data := bytes.Repeat([]byte("b"), 50000)
 		mem.Write(1000, data)
-		env.sys_write(context.Background(), mod, []uint64{200, h, 1000, 50000})
-		runOp()
+		write(t, []uint64{200, h, 1000, 50000})
 		got, _ := os.ReadFile(path)
 		if !bytes.Equal(got, data) {
 			t.Error("large write data mismatch")
@@ -568,10 +622,8 @@ func TestSysWriteExtended(t *testing.T) {
 		h, path := setupFile(t)
 		mem.Write(500, []byte("part1"))
 		mem.Write(505, []byte("part2"))
-		env.sys_write(context.Background(), mod, []uint64{200, h, 500, 5})
-		runOp()
-		env.sys_write(context.Background(), mod, []uint64{300, h, 505, 5})
-		runOp()
+		write(t, []uint64{200, h, 500, 5})
+		write(t, []uint64{300, h, 505, 5})
 		got, _ := os.ReadFile(path)
 		if string(got) != "part1part2" {
 			t.Errorf("got %q", string(got))
@@ -594,8 +646,7 @@ func TestSysWriteExtended(t *testing.T) {
 		})
 
 		mem.Write(510, []byte("data"))
-		env.sys_write(context.Background(), mod, []uint64{200, h, 510, 4})
-		runOp()
+		write(t, []uint64{200, h, 510, 4})
 		buf, _ := mem.Read(200, 8)
 		if binary.LittleEndian.Uint32(buf[4:8]) == 0 {
 			t.Error("expected error")
@@ -620,10 +671,10 @@ func TestSysWriteExtended(t *testing.T) {
 			env.mu.Unlock()
 		})
 
-		env.sys_write(context.Background(), mod, []uint64{200, h, 515, 4})
+		submitWrite(t, []uint64{200, h, 515, 4})
 		<-writeStarted
 		env.sys_cancel(context.Background(), mod, []uint64{200})
-		runOp()
+		waitForCancelledWrite(t)
 	})
 
 	t.Run("12. write to append handle", func(t *testing.T) {
@@ -638,8 +689,7 @@ func TestSysWriteExtended(t *testing.T) {
 		t.Cleanup(func() { f.Close() })
 
 		mem.Write(520, []byte("append"))
-		env.sys_write(context.Background(), mod, []uint64{200, h, 520, 6})
-		runOp()
+		write(t, []uint64{200, h, 520, 6})
 		got, _ := os.ReadFile(tmp)
 		if string(got) != "initappend" {
 			t.Errorf("got %q", string(got))
@@ -651,10 +701,10 @@ func TestSysWriteExtended(t *testing.T) {
 		h2, p2 := setupFile(t)
 		mem.Write(530, []byte("data1"))
 		mem.Write(540, []byte("data2"))
-		env.sys_write(context.Background(), mod, []uint64{200, h1, 530, 5})
-		env.sys_write(context.Background(), mod, []uint64{300, h2, 540, 5})
-		runOp()
-		runOp()
+		submitWrite(t, []uint64{200, h1, 530, 5})
+		submitWrite(t, []uint64{300, h2, 540, 5})
+		runOp(t, 200)
+		runOp(t, 300)
 		g1, _ := os.ReadFile(p1)
 		g2, _ := os.ReadFile(p2)
 		if string(g1) != "data1" || string(g2) != "data2" {
@@ -671,10 +721,10 @@ func TestSysWriteExtended(t *testing.T) {
 		f.Close()
 
 		stack := []uint64{200, h, 550, 5}
-		env.sys_write(context.Background(), mod, stack)
+		write(t, stack)
 		buf, _ := mem.Read(200, 8)
-		if binary.LittleEndian.Uint32(buf[4:8]) != 9 {
-			t.Error("write should fail for removed handle")
+		if got := binary.LittleEndian.Uint32(buf[4:8]); got != wasiEBADF {
+			t.Errorf("removed handle errno = %d, want %d", got, wasiEBADF)
 		}
 	})
 
@@ -685,8 +735,7 @@ func TestSysWriteExtended(t *testing.T) {
 		f.Close()
 		env.mu.Unlock()
 		stack := []uint64{200, h, 560, 5}
-		env.sys_write(context.Background(), mod, stack)
-		runOp()
+		write(t, stack)
 		buf, _ := mem.Read(200, 8)
 		if binary.LittleEndian.Uint32(buf[4:8]) == 0 {
 			t.Error("write should fail for closed FD")
@@ -696,26 +745,26 @@ func TestSysWriteExtended(t *testing.T) {
 	t.Run("16. huge length (overflow check)", func(t *testing.T) {
 		h, _ := setupFile(t)
 		stack := []uint64{200, h, 400, 0xFFFFFFFF}
-		env.sys_write(context.Background(), mod, stack)
+		write(t, stack)
 		buf, _ := mem.Read(200, 8)
-		if binary.LittleEndian.Uint32(buf[4:8]) != 22 {
-			t.Error("huge write should return EINVAL")
+		if got := binary.LittleEndian.Uint32(buf[4:8]); got != wasiEINVAL {
+			t.Errorf("huge write errno = %d, want %d", got, wasiEINVAL)
 		}
 	})
 
 	t.Run("17. write and read back consistency", func(t *testing.T) {
 		h, path := setupFile(t)
 		mem.Write(570, []byte("consistency"))
-		env.sys_write(context.Background(), mod, []uint64{200, h, 570, 11})
-		runOp()
+		write(t, []uint64{200, h, 570, 11})
 		f2, _ := os.Open(path)
 		h2 := uint64(180)
 		env.mu.Lock()
 		env.handles[h2] = f2
 		env.mu.Unlock()
 		t.Cleanup(func() { f2.Close() })
+		clearOverlapped(t, 300)
 		env.sys_read(context.Background(), mod, []uint64{300, h2, 582, 11})
-		runOp()
+		runOp(t, 300)
 		buf, _ := mem.Read(582, 11)
 		if string(buf) != "consistency" {
 			t.Error("read back failed")
@@ -726,8 +775,7 @@ func TestSysWriteExtended(t *testing.T) {
 		h, path := setupFile(t)
 		lastPos := uint32(1024*1024 - 4)
 		mem.Write(lastPos, []byte("last"))
-		env.sys_write(context.Background(), mod, []uint64{200, h, uint64(lastPos), 4})
-		runOp()
+		write(t, []uint64{200, h, uint64(lastPos), 4})
 		got, _ := os.ReadFile(path)
 		if string(got) != "last" {
 			t.Error("write from end of memory failed")
@@ -749,8 +797,7 @@ func TestSysWriteExtended(t *testing.T) {
 			env.mu.Unlock()
 		})
 		mem.Write(590, []byte("12345"))
-		env.sys_write(context.Background(), mod, []uint64{200, h, 590, 5})
-		runOp()
+		write(t, []uint64{200, h, 590, 5})
 		buf, _ := mem.Read(200, 24)
 		n := binary.LittleEndian.Uint64(buf[16:24])
 		if n != 2 {
@@ -761,10 +808,10 @@ func TestSysWriteExtended(t *testing.T) {
 	t.Run("20. cross-boundary memory write", func(t *testing.T) {
 		h, _ := setupFile(t)
 		lastPos := uint32(1024*1024 - 2)
-		env.sys_write(context.Background(), mod, []uint64{200, h, uint64(lastPos), 5})
+		write(t, []uint64{200, h, uint64(lastPos), 5})
 		buf, _ := mem.Read(200, 8)
-		if binary.LittleEndian.Uint32(buf[4:8]) != 22 {
-			t.Error("cross boundary write should return EINVAL")
+		if got := binary.LittleEndian.Uint32(buf[4:8]); got != wasiEINVAL {
+			t.Errorf("cross-boundary write errno = %d, want %d", got, wasiEINVAL)
 		}
 	})
 }
