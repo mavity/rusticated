@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -22,6 +23,23 @@ func TestDirEntryUnknownTypeUsesFileKind(t *testing.T) {
 	if kind := dirEntryKind(unknownTypeDirEntry{}); kind != statKindFile {
 		t.Fatalf("dirEntryKind(unknown type) = %d, want file kind %d", kind, statKindFile)
 	}
+}
+
+func decodeDirEntries(buf []byte) []dirEntryInfo {
+	var entries []dirEntryInfo
+	for len(buf) >= 2 {
+		terminator := bytes.IndexByte(buf[1:], 0)
+		if terminator < 0 {
+			break
+		}
+		nameEnd := terminator + 1
+		entries = append(entries, dirEntryInfo{
+			Kind: uint32(buf[0]),
+			Name: string(buf[1:nameEnd]),
+		})
+		buf = buf[nameEnd+1:]
+	}
+	return entries
 }
 
 func TestSysDirReadExtended(t *testing.T) {
@@ -55,36 +73,87 @@ func TestSysDirReadExtended(t *testing.T) {
 		return h, tmpDir
 	}
 
-	runOp := func() {
-		select {
-		case op := <-env.fileOpsQueue:
-			op()
-		case <-time.After(500 * time.Millisecond):
-			t.Fatal("timeout waiting for op")
+	runOp := func(t *testing.T, ovPtr uint32) {
+		t.Helper()
+		timer := time.NewTimer(time.Second)
+		defer timer.Stop()
+		for {
+			buf, ok := mem.Read(ovPtr, 4)
+			if !ok {
+				t.Fatalf("overlapped pointer %d is out of bounds", ovPtr)
+			}
+			if binary.LittleEndian.Uint32(buf) == 1 {
+				if env.PendingOps() == 0 {
+					for {
+						select {
+						case op := <-env.fileOpsQueue:
+							op()
+						default:
+							return
+						}
+					}
+				}
+				return
+			}
+
+			select {
+			case op := <-env.fileOpsQueue:
+				op()
+			case <-timer.C:
+				t.Fatalf("timeout waiting for overlapped completion at %d", ovPtr)
+			}
 		}
 	}
 
-	decodeNames := func(buf []byte) []string {
-		var names []string
-		start := 0
-		for i, b := range buf {
-			if b == 0 {
-				names = append(names, string(buf[start:i]))
-				start = i + 1
+	beginDirRead := func(t *testing.T, stack []uint64) {
+		t.Helper()
+		ovPtr := uint32(stack[0])
+		if !mem.Write(ovPtr, make([]byte, 24)) {
+			t.Fatalf("failed to clear overlapped header at %d", ovPtr)
+		}
+		env.sys_dir_read(context.Background(), mod, stack)
+	}
+
+	readDir := func(t *testing.T, stack []uint64) {
+		t.Helper()
+		beginDirRead(t, stack)
+		runOp(t, uint32(stack[0]))
+	}
+
+	waitForCancelledRead := func(t *testing.T) {
+		t.Helper()
+		timer := time.NewTimer(time.Second)
+		defer timer.Stop()
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for len(env.fileOpsQueue) < 2 {
+			select {
+			case <-timer.C:
+				t.Fatal("timeout waiting for cancelled read completion")
+			case <-ticker.C:
 			}
 		}
-		return names
+		for len(env.fileOpsQueue) > 0 {
+			op := <-env.fileOpsQueue
+			op()
+		}
 	}
 
 	t.Run("1. happy path - read all in one go", func(t *testing.T) {
 		h, _ := setupDir(t, []string{"fileA", "fileB"})
 		stack := []uint64{200, h, 400, 100}
-		env.sys_dir_read(context.Background(), mod, stack)
-		runOp()
+		readDir(t, stack)
 		buf, _ := mem.Read(200, 24)
 		n := binary.LittleEndian.Uint64(buf[16:24])
 		data, _ := mem.Read(400, uint32(n))
-		names := decodeNames(data)
+		entries := decodeDirEntries(data)
+		names := make([]string, len(entries))
+		for i, entry := range entries {
+			names[i] = entry.Name
+			if entry.Kind != statKindFile {
+				t.Errorf("entry %q has kind %d, want file kind %d", entry.Name, entry.Kind, statKindFile)
+			}
+		}
 		sort.Strings(names)
 		if len(names) != 2 || names[0] != "fileA" || names[1] != "fileB" {
 			t.Errorf("got %v", names)
@@ -94,8 +163,7 @@ func TestSysDirReadExtended(t *testing.T) {
 	t.Run("2. empty directory", func(t *testing.T) {
 		h, _ := setupDir(t, nil)
 		stack := []uint64{200, h, 400, 100}
-		env.sys_dir_read(context.Background(), mod, stack)
-		runOp()
+		readDir(t, stack)
 		buf, _ := mem.Read(200, 24)
 		n := binary.LittleEndian.Uint64(buf[16:24])
 		if n != 0 {
@@ -106,15 +174,18 @@ func TestSysDirReadExtended(t *testing.T) {
 	t.Run("3. fragmentation - small buffer reading one by one", func(t *testing.T) {
 		h, _ := setupDir(t, []string{"a", "b"})
 		res := ""
-		for i := 0; i < 2; i++ {
-			env.sys_dir_read(context.Background(), mod, []uint64{200, h, 400, 2})
-			runOp()
+		for i := 0; i < 3; i++ {
+			readDir(t, []uint64{200, h, 400, 2})
 			buf, _ := mem.Read(200, 24)
 			n := binary.LittleEndian.Uint64(buf[16:24])
 			data, _ := mem.Read(400, uint32(n))
 			res += string(data)
 		}
-		names := decodeNames([]byte(res))
+		entries := decodeDirEntries([]byte(res))
+		names := make([]string, len(entries))
+		for i, entry := range entries {
+			names[i] = entry.Name
+		}
 		sort.Strings(names)
 		if len(names) != 2 || names[0] != "a" || names[1] != "b" {
 			t.Errorf("got %v", names)
@@ -124,9 +195,8 @@ func TestSysDirReadExtended(t *testing.T) {
 	t.Run("4. fragmentation - 1 byte at a time stress", func(t *testing.T) {
 		h, _ := setupDir(t, []string{"abc"})
 		res := ""
-		for i := 0; i < 4; i++ {
-			env.sys_dir_read(context.Background(), mod, []uint64{200, h, 400, 1})
-			runOp()
+		for i := 0; i < 5; i++ {
+			readDir(t, []uint64{200, h, 400, 1})
 			buf, _ := mem.Read(200, 24)
 			n := binary.LittleEndian.Uint64(buf[16:24])
 			if n != 1 {
@@ -135,43 +205,42 @@ func TestSysDirReadExtended(t *testing.T) {
 			data, _ := mem.Read(400, 1)
 			res += string(data)
 		}
-		if res != "abc\x00" {
-			t.Errorf("got %q, want %q", res, "abc\x00")
+		entries := decodeDirEntries([]byte(res))
+		if len(entries) != 1 || entries[0].Name != "abc" || entries[0].Kind != statKindFile {
+			t.Errorf("got entries %+v", entries)
 		}
 	})
 
 	t.Run("5. buffer matches entry size exactly", func(t *testing.T) {
 		h, _ := setupDir(t, []string{"longname"})
-		env.sys_dir_read(context.Background(), mod, []uint64{200, h, 400, 9})
-		runOp()
+		readDir(t, []uint64{200, h, 400, 10})
 		buf, _ := mem.Read(200, 24)
 		n := binary.LittleEndian.Uint64(buf[16:24])
-		if n != 9 {
-			t.Errorf("expected 9, got %d", n)
+		if n != 10 {
+			t.Errorf("expected 10, got %d", n)
 		}
-		data, _ := mem.Read(400, 9)
-		if string(data) != "longname\x00" {
+		data, _ := mem.Read(400, 10)
+		want := append([]byte{byte(statKindFile)}, []byte("longname\x00")...)
+		if !bytes.Equal(data, want) {
 			t.Errorf("got %q", data)
 		}
 	})
 
 	t.Run("6. large requested length, smaller available", func(t *testing.T) {
 		h, _ := setupDir(t, []string{"a"})
-		env.sys_dir_read(context.Background(), mod, []uint64{200, h, 400, 1000})
-		runOp()
+		readDir(t, []uint64{200, h, 400, 1000})
 		buf, _ := mem.Read(200, 24)
 		n := binary.LittleEndian.Uint64(buf[16:24])
-		if n != 2 { // "a\0"
-			t.Errorf("expected 2, got %d", n)
+		if n != 3 { // kind, "a", and NUL
+			t.Errorf("expected 3, got %d", n)
 		}
 	})
 
 	t.Run("7. EBADF - invalid handle", func(t *testing.T) {
-		env.sys_dir_read(context.Background(), mod, []uint64{200, 99999, 400, 100})
-		runOp()
+		readDir(t, []uint64{200, 99999, 400, 100})
 		buf, _ := mem.Read(200, 8)
-		if binary.LittleEndian.Uint32(buf[4:8]) != 9 {
-			t.Error("EBADF error mismatch")
+		if got := binary.LittleEndian.Uint32(buf[4:8]); got != wasiEBADF {
+			t.Errorf("EBADF errno = %d, want %d", got, wasiEBADF)
 		}
 	})
 
@@ -186,8 +255,7 @@ func TestSysDirReadExtended(t *testing.T) {
 		env.mu.Unlock()
 		defer f.Close()
 
-		env.sys_dir_read(context.Background(), mod, []uint64{200, h, 400, 100})
-		runOp()
+		readDir(t, []uint64{200, h, 400, 100})
 		buf, _ := mem.Read(200, 24)
 		n := binary.LittleEndian.Uint64(buf[16:24])
 		if n != 0 {
@@ -197,21 +265,19 @@ func TestSysDirReadExtended(t *testing.T) {
 
 	t.Run("9. EINVAL - invalid pointer", func(t *testing.T) {
 		h, _ := setupDir(t, []string{"a"})
-		env.sys_dir_read(context.Background(), mod, []uint64{200, h, 2000000, 100})
-		runOp()
+		readDir(t, []uint64{200, h, 2000000, 100})
 		buf, _ := mem.Read(200, 8)
-		if binary.LittleEndian.Uint32(buf[4:8]) != 22 {
-			t.Error("EINVAL expected for bad pointer")
+		if got := binary.LittleEndian.Uint32(buf[4:8]); got != wasiEINVAL {
+			t.Errorf("invalid pointer errno = %d, want %d", got, wasiEINVAL)
 		}
 	})
 
 	t.Run("10. EINVAL - invalid length", func(t *testing.T) {
 		h, _ := setupDir(t, []string{"a"})
-		env.sys_dir_read(context.Background(), mod, []uint64{200, h, 400, 2000000})
-		runOp()
+		readDir(t, []uint64{200, h, 400, 2000000})
 		buf, _ := mem.Read(200, 8)
-		if binary.LittleEndian.Uint32(buf[4:8]) != 22 {
-			t.Error("EINVAL expected for bad length")
+		if got := binary.LittleEndian.Uint32(buf[4:8]); got != wasiEINVAL {
+			t.Errorf("invalid length errno = %d, want %d", got, wasiEINVAL)
 		}
 	})
 
@@ -224,8 +290,7 @@ func TestSysDirReadExtended(t *testing.T) {
 			t.Fatal("initially should be *os.File")
 		}
 
-		env.sys_dir_read(context.Background(), mod, []uint64{200, h, 400, 10})
-		runOp()
+		readDir(t, []uint64{200, h, 400, 10})
 
 		env.mu.Lock()
 		_, isScan := env.handles[h].(*DirScan)
@@ -237,41 +302,45 @@ func TestSysDirReadExtended(t *testing.T) {
 
 	t.Run("12. handle hijacked (closed mid-scan)", func(t *testing.T) {
 		h, _ := setupDir(t, []string{"a", "b", "c"})
-		env.sys_dir_read(context.Background(), mod, []uint64{200, h, 400, 2})
-		runOp()
+		readDir(t, []uint64{200, h, 400, 2})
 
 		env.mu.Lock()
-		scan := env.handles[h].(*DirScan)
+		scan, ok := env.handles[h].(*DirScan)
+		env.mu.Unlock()
+		if !ok {
+			t.Fatal("directory handle was not converted to DirScan")
+		}
 		scan.File.Close()
+		env.mu.Lock()
 		delete(env.handles, h)
 		env.mu.Unlock()
 
-		env.sys_dir_read(context.Background(), mod, []uint64{300, h, 500, 2})
-		runOp()
+		readDir(t, []uint64{300, h, 500, 2})
 		buf, _ := mem.Read(300, 8)
-		if binary.LittleEndian.Uint32(buf[4:8]) != 9 {
-			t.Error("expected EBADF for hijacked handle")
+		if got := binary.LittleEndian.Uint32(buf[4:8]); got != wasiEBADF {
+			t.Errorf("hijacked handle errno = %d, want %d", got, wasiEBADF)
 		}
 	})
 
 	t.Run("13. concurrent reads same handle stress", func(t *testing.T) {
 		h, _ := setupDir(t, []string{"a", "b", "c", "d", "e", "f", "g", "h"})
-		for i := 0; i < 4; i++ {
-			env.sys_dir_read(context.Background(), mod, []uint64{uint64(200 + i*30), h, uint64(400 + i*5), 2})
+		for i := 0; i < 6; i++ {
+			beginDirRead(t, []uint64{uint64(200 + i*30), h, uint64(400 + i*5), 2})
 		}
-		for i := 0; i < 4; i++ {
-			runOp()
+		for i := 0; i < 6; i++ {
+			runOp(t, uint32(200+i*30))
 		}
-		all := ""
-		for i := 0; i < 4; i++ {
+		totalBytes := uint64(0)
+		for i := 0; i < 6; i++ {
 			buf, _ := mem.Read(uint32(200+i*30), 24)
 			n := binary.LittleEndian.Uint64(buf[16:24])
-			data, _ := mem.Read(uint32(400+i*5), uint32(n))
-			all += string(data)
+			if n != 2 {
+				t.Errorf("read %d returned %d bytes, want 2", i, n)
+			}
+			totalBytes += n
 		}
-		names := decodeNames([]byte(all))
-		if len(names) != 4 {
-			t.Errorf("got %d names, want 4", len(names))
+		if totalBytes != 12 {
+			t.Errorf("concurrent reads returned %d bytes, want 12", totalBytes)
 		}
 	})
 
@@ -282,21 +351,19 @@ func TestSysDirReadExtended(t *testing.T) {
 		}
 		h, _ := setupDir(t, entries)
 
-		totalNames := 0
+		var allData []byte
 		for {
-			env.sys_dir_read(context.Background(), mod, []uint64{200, h, 400, 64})
-			runOp()
+			readDir(t, []uint64{200, h, 400, 64})
 			buf, _ := mem.Read(200, 24)
 			n := binary.LittleEndian.Uint64(buf[16:24])
 			if n == 0 {
 				break
 			}
 			data, _ := mem.Read(400, uint32(n))
-			names := decodeNames(data)
-			totalNames += len(names)
+			allData = append(allData, data...)
 		}
-		if totalNames != 100 {
-			t.Errorf("got %d, want 100", totalNames)
+		if totalNames := len(decodeDirEntries(allData)); totalNames != 100 {
+			t.Errorf("got %d entries, want 100", totalNames)
 		}
 	})
 
@@ -304,40 +371,37 @@ func TestSysDirReadExtended(t *testing.T) {
 		entries := []string{".", "..", "file with space", "日本語.txt"}
 		h, _ := setupDir(t, entries)
 
-		env.sys_dir_read(context.Background(), mod, []uint64{200, h, 400, 500})
-		runOp()
+		readDir(t, []uint64{200, h, 400, 500})
 		buf, _ := mem.Read(200, 24)
 		n := binary.LittleEndian.Uint64(buf[16:24])
 		data, _ := mem.Read(400, uint32(n))
-		names := decodeNames(data)
+		decoded := decodeDirEntries(data)
 		hasSpace := false
 		hasUnicode := false
-		for _, nm := range names {
-			if nm == "file with space" {
+		for _, entry := range decoded {
+			if entry.Name == "file with space" {
 				hasSpace = true
 			}
-			if nm == "日本語.txt" {
+			if entry.Name == "日本語.txt" {
 				hasUnicode = true
 			}
 		}
 		if !hasSpace || !hasUnicode {
-			t.Errorf("got %v", names)
+			t.Errorf("got %v", decoded)
 		}
 	})
 
 	t.Run("16. cancellation mid-read", func(t *testing.T) {
 		h, _ := setupDir(t, []string{"a"})
-		env.sys_dir_read(context.Background(), mod, []uint64{200, h, 400, 10})
+		beginDirRead(t, []uint64{200, h, 400, 10})
 		env.sys_cancel(context.Background(), mod, []uint64{200})
-		runOp()
+		waitForCancelledRead(t)
 	})
 
 	t.Run("17. repeated calls after EOF", func(t *testing.T) {
 		h, _ := setupDir(t, []string{"a"})
-		env.sys_dir_read(context.Background(), mod, []uint64{200, h, 400, 100})
-		runOp()
-		env.sys_dir_read(context.Background(), mod, []uint64{200, h, 400, 100})
-		runOp()
+		readDir(t, []uint64{200, h, 400, 100})
+		readDir(t, []uint64{200, h, 400, 100})
 		buf, _ := mem.Read(200, 24)
 		n := binary.LittleEndian.Uint64(buf[16:24])
 		if n != 0 {
@@ -348,8 +412,7 @@ func TestSysDirReadExtended(t *testing.T) {
 	t.Run("18. directory re-open freshness", func(t *testing.T) {
 		entries := []string{"a"}
 		h1, path := setupDir(t, entries)
-		env.sys_dir_read(context.Background(), mod, []uint64{200, h1, 400, 100})
-		runOp()
+		readDir(t, []uint64{200, h1, 400, 100})
 
 		f2, _ := os.Open(path)
 		h2 := uint64(260)
@@ -358,11 +421,10 @@ func TestSysDirReadExtended(t *testing.T) {
 		env.mu.Unlock()
 		t.Cleanup(func() { f2.Close() })
 
-		env.sys_dir_read(context.Background(), mod, []uint64{300, h2, 500, 100})
-		runOp()
+		readDir(t, []uint64{300, h2, 500, 100})
 		buf, _ := mem.Read(300, 24)
 		n := binary.LittleEndian.Uint64(buf[16:24])
-		if n != 2 {
+		if n != 3 {
 			t.Error("re-opened dir should have content")
 		}
 	})
@@ -370,50 +432,48 @@ func TestSysDirReadExtended(t *testing.T) {
 	t.Run("19. huge length check", func(t *testing.T) {
 		h, _ := setupDir(t, []string{"a"})
 		stack := []uint64{200, h, 400, 0xFFFFFFFF}
-		env.sys_dir_read(context.Background(), mod, stack)
-		runOp()
+		readDir(t, stack)
 		buf, _ := mem.Read(200, 8)
-		if binary.LittleEndian.Uint32(buf[4:8]) != 22 {
-			t.Error("should return EINVAL for huge length")
+		if got := binary.LittleEndian.Uint32(buf[4:8]); got != wasiEINVAL {
+			t.Errorf("huge length errno = %d, want %d", got, wasiEINVAL)
 		}
 	})
 
 	t.Run("20. overwrite buffer verify", func(t *testing.T) {
 		h, _ := setupDir(t, []string{"abc"})
 		mem.Write(400, []byte("garbagegarbagegarbage"))
-		env.sys_dir_read(context.Background(), mod, []uint64{200, h, 400, 100})
-		runOp()
-		data, _ := mem.Read(400, 4)
-		if string(data) != "abc\x00" {
+		readDir(t, []uint64{200, h, 400, 100})
+		data, _ := mem.Read(400, 5)
+		want := append([]byte{byte(statKindFile)}, []byte("abc\x00")...)
+		if !bytes.Equal(data, want) {
 			t.Errorf("got %q, buffer not overwritten correctly", data)
 		}
 	})
 
 	t.Run("21. leftover partial resume", func(t *testing.T) {
 		h, _ := setupDir(t, []string{"abcd"})
-		env.sys_dir_read(context.Background(), mod, []uint64{200, h, 400, 2})
-		runOp()
-		env.sys_dir_read(context.Background(), mod, []uint64{300, h, 500, 3})
-		runOp()
+		readDir(t, []uint64{200, h, 400, 2})
+		readDir(t, []uint64{300, h, 500, 4})
 
 		b1, _ := mem.Read(400, 2)
-		b2, _ := mem.Read(500, 3)
-		if string(b1)+string(b2) != "abcd\x00" {
+		b2, _ := mem.Read(500, 4)
+		want := append([]byte{byte(statKindFile)}, []byte("abcd\x00")...)
+		if !bytes.Equal(append(b1, b2...), want) {
 			t.Errorf("got %q + %q", string(b1), string(b2))
 		}
 	})
 
 	t.Run("22. multiple entries into one buffer", func(t *testing.T) {
 		h, _ := setupDir(t, []string{"a", "b", "c"})
-		env.sys_dir_read(context.Background(), mod, []uint64{200, h, 400, 6})
-		runOp()
+		readDir(t, []uint64{200, h, 400, 9})
 		buf, _ := mem.Read(200, 24)
 		n := binary.LittleEndian.Uint64(buf[16:24])
-		if n != 6 {
-			t.Errorf("got %d bytes, want 6", n)
+		if n != 9 {
+			t.Errorf("got %d bytes, want 9", n)
 		}
-		data, _ := mem.Read(400, 6)
-		if string(data) != "a\x00b\x00c\x00" {
+		data, _ := mem.Read(400, 9)
+		want := []byte{byte(statKindFile), 'a', 0, byte(statKindFile), 'b', 0, byte(statKindFile), 'c', 0}
+		if !bytes.Equal(data, want) {
 			t.Errorf("got %q", data)
 		}
 	})
@@ -425,22 +485,23 @@ func TestSysDirReadExtended(t *testing.T) {
 		delete(env.handles, h)
 		env.mu.Unlock()
 		f.Close()
-		env.sys_dir_read(context.Background(), mod, []uint64{200, h, 400, 10})
-		runOp()
+		readDir(t, []uint64{200, h, 400, 10})
 		buf, _ := mem.Read(200, 8)
-		if binary.LittleEndian.Uint32(buf[4:8]) != 9 {
-			t.Error("should return EBADF")
+		if got := binary.LittleEndian.Uint32(buf[4:8]); got != wasiEBADF {
+			t.Errorf("invalid handle errno = %d, want %d", got, wasiEBADF)
 		}
 	})
 
 	t.Run("24. interleaved dir_read and path_stat", func(t *testing.T) {
 		h, path := setupDir(t, []string{"a"})
-		env.sys_dir_read(context.Background(), mod, []uint64{200, h, 400, 2})
-		runOp()
+		readDir(t, []uint64{200, h, 400, 2})
 
 		mem.Write(600, []byte(path))
+		if !mem.Write(300, make([]byte, 24)) {
+			t.Fatal("failed to clear path_stat overlapped header")
+		}
 		env.sys_path_stat(context.Background(), mod, []uint64{300, 600, uint64(len(path)), 0, 700, 112})
-		runOp()
+		runOp(t, 300)
 
 		buf, _ := mem.Read(300, 8)
 		if binary.LittleEndian.Uint32(buf[4:8]) != 0 {
@@ -450,18 +511,16 @@ func TestSysDirReadExtended(t *testing.T) {
 
 	t.Run("25. leftovers drainage at the end", func(t *testing.T) {
 		h, _ := setupDir(t, []string{"abc"})
-		env.sys_dir_read(context.Background(), mod, []uint64{200, h, 400, 2})
-		runOp()
-		env.sys_dir_read(context.Background(), mod, []uint64{300, h, 500, 10})
-		runOp()
+		readDir(t, []uint64{200, h, 400, 2})
+		readDir(t, []uint64{300, h, 500, 10})
 
 		br, _ := mem.Read(300, 24)
 		n := binary.LittleEndian.Uint64(br[16:24])
-		if n != 2 {
-			t.Errorf("expected 2 remaining bytes, got %d", n)
+		if n != 3 {
+			t.Errorf("expected 3 remaining bytes, got %d", n)
 		}
-		data, _ := mem.Read(500, 2)
-		if string(data) != "c\x00" {
+		data, _ := mem.Read(500, 3)
+		if string(data) != "bc\x00" {
 			t.Errorf("got %q", data)
 		}
 	})
