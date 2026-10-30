@@ -316,6 +316,18 @@ func writeDirentEntry(dst []byte, next uint64, name []byte, kind byte) int {
 	return entryLen
 }
 
+func readRusticatedDirEntry(data []byte) (kind byte, name []byte, consumed int, ok bool) {
+	if len(data) < 2 {
+		return 0, nil, 0, false
+	}
+	terminator := bytes.IndexByte(data[1:], 0)
+	if terminator < 0 {
+		return 0, nil, 0, false
+	}
+	nameEnd := terminator + 1
+	return data[0], data[1:nameEnd], nameEnd + 1, true
+}
+
 func splitNullNames(data []byte) (names [][]byte, remainder []byte) {
 	start := 0
 	for i, b := range data {
@@ -525,13 +537,11 @@ func ReadDir(fd int, buf []byte, _ uint64) (int, error) {
 		if len(pending) == 0 {
 			break
 		}
-		idx := bytes.IndexByte(pending, 0)
-		if idx < 0 {
+		kind, name, consumed, ok := readRusticatedDirEntry(pending)
+		if !ok {
 			break
 		}
 
-		kind := pending[0]
-		name := pending[1:idx]
 		required := 24 + len(name)
 		if len(buf)-written < required {
 			break
@@ -543,7 +553,7 @@ func ReadDir(fd int, buf []byte, _ uint64) (int, error) {
 			break
 		}
 		written += n
-		pending = pending[idx+1:]
+		pending = pending[consumed:]
 	}
 
 	entry.pending = pending
