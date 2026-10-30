@@ -11,6 +11,19 @@ import (
 	"time"
 )
 
+type unknownTypeDirEntry struct{}
+
+func (unknownTypeDirEntry) Name() string               { return "unknown" }
+func (unknownTypeDirEntry) IsDir() bool                { return false }
+func (unknownTypeDirEntry) Type() os.FileMode          { return 0 }
+func (unknownTypeDirEntry) Info() (os.FileInfo, error) { return nil, nil }
+
+func TestDirEntryUnknownTypeUsesFileKind(t *testing.T) {
+	if kind := dirEntryKind(unknownTypeDirEntry{}); kind != statKindFile {
+		t.Fatalf("dirEntryKind(unknown type) = %d, want file kind %d", kind, statKindFile)
+	}
+}
+
 func TestSysDirReadExtended(t *testing.T) {
 	env := NewHostEnv()
 	mod := newMockModule(1024 * 1024)

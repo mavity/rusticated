@@ -65,6 +65,16 @@ type dirEntryInfo struct {
 	Kind uint32
 }
 
+func dirEntryKind(de os.DirEntry) uint32 {
+	if de.IsDir() {
+		return statKindDir
+	}
+	if de.Type()&os.ModeSymlink != 0 {
+		return statKindSymlink
+	}
+	return statKindFile
+}
+
 type DirScan struct {
 	mu        sync.Mutex
 	Leftovers []byte
@@ -594,15 +604,7 @@ func (h *HostEnv) sys_dir_read(ctx context.Context, m api.Module, stack []uint64
 						break
 					}
 					for _, de := range des {
-						kind := uint32(statKindUnknown)
-						if de.IsDir() {
-							kind = statKindDir
-						} else if de.Type()&os.ModeSymlink != 0 {
-							kind = statKindSymlink
-						} else {
-							kind = statKindFile
-						}
-						scan.Entries = append(scan.Entries, dirEntryInfo{Name: de.Name(), Kind: kind})
+						scan.Entries = append(scan.Entries, dirEntryInfo{Name: de.Name(), Kind: dirEntryKind(de)})
 					}
 				}
 				if len(scan.Entries) > 0 {
