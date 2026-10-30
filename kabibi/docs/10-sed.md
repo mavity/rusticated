@@ -75,13 +75,46 @@ Phase 1 is complete only when:
 
 #### Phase 2: backreferences
 
-Backreference support is explicitly deferred until Phase 1 is complete and
-verified. Then detect backreferences from parsed regex syntax, not with a raw
-substring scan, and evaluate a backreference-capable engine against respected
-Go and Rust implementations. First assess whole-expression fallback. Consider
-forking execution only around backreference-dependent portions if correctness
-and measured performance justify the additional complexity. Preserve the same
-byte identity and output guarantees in either design.
+Backreference support starts only after Phase 1 is complete and verified.
+
+The planned implementation extends `regast` rather than adding a second regex
+engine:
+
+1. Recognize references while parsing the selected regex dialect. Record the
+   referenced capture number in the parsed expression; do not infer references
+   by scanning the pattern text.
+2. Compile each reference into a dedicated instruction and mark the compiled
+   program as requiring backreference-aware execution.
+3. Keep programs without references on their existing one-pass and linear-time
+   execution paths. Route programs with references to the existing ordered
+   backtracking path for every input size; do not send them through the
+   one-pass or Thompson-style machine.
+4. At a reference instruction, compare the captured span with the input at the
+   current position, then advance by the matched span. Captures and match
+   positions continue to refer to offsets in the original input bytes, so
+   invalid bytes remain exact and sentinels are never serialized.
+5. Change backtracking's visited-state check for these programs. The current
+   instruction-and-position key is insufficient because different capture
+   values can lead to different results. Include the capture state when
+   recognizing a repeated state, so distinct alternatives are preserved while
+   zero-width cycles still terminate.
+6. Count execution work, including bytes compared by references. If the
+   configured work limit is reached, return a distinct execution-limit error;
+   never report it as an ordinary non-match. Backreference use through reader
+   APIs also needs an explicit replay/buffering policy because matching may
+   need to revisit captured input.
+
+Before implementation, define dialect-specific behavior for invalid,
+forward, and unmatched capture references and for case-insensitive matching.
+Do not silently inherit behavior from another regex engine.
+
+Verify the feature with tests for repeated and nested captures, alternate
+capture paths, empty and unmatched captures, leftmost-first and POSIX
+leftmost-longest selection, malformed-byte capture/replay, and zero-width
+cycles. Test that work-limit exhaustion is distinguishable from no match and
+that patterns without backreferences retain their existing behavior and
+performance. Backreferences can require nonlinear work; do not claim a linear
+time bound for programs that use them.
 
 ### B. Byte and Character Semantics
 
