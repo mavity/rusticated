@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"testing"
 	"time"
 )
@@ -14,191 +15,246 @@ func TestSysTimerSetExtended(t *testing.T) {
 	env := NewHostEnv()
 	mod := newMockModule(0x100000)
 
+	waitForCompletion := func(t *testing.T, ovPtr uint32) []byte {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for {
+			header, ok := mod.Memory().Read(ovPtr, 4)
+			if !ok {
+				t.Fatalf("overlapped pointer %d is out of bounds", ovPtr)
+			}
+			if binary.LittleEndian.Uint32(header) == 1 {
+				result, ok := mod.Memory().Read(ovPtr, 24)
+				if !ok {
+					t.Fatalf("overlapped result at %d is out of bounds", ovPtr)
+				}
+				return result
+			}
+			env.Poll(ctx, mod)
+			if ctx.Err() != nil {
+				t.Fatalf("timeout waiting for timer completion at %d", ovPtr)
+			}
+		}
+	}
+
+	setTimer := func(t *testing.T, ovPtr uint32, delay time.Duration) {
+		t.Helper()
+		if !mod.Memory().Write(ovPtr, make([]byte, 24)) {
+			t.Fatalf("failed to initialize overlapped request at %d", ovPtr)
+		}
+		env.sys_timer_set(context.Background(), mod, []uint64{uint64(ovPtr), timerDelayMillis(delay)})
+	}
+
+	assertSuccessfulCompletion := func(t *testing.T, ovPtr uint32) {
+		t.Helper()
+		result := waitForCompletion(t, ovPtr)
+		if got := binary.LittleEndian.Uint32(result[4:8]); got != wasiSuccess {
+			t.Errorf("timer completion errno = %d, want %d", got, wasiSuccess)
+		}
+		if got := binary.LittleEndian.Uint64(result[16:24]); got != 0 {
+			t.Errorf("timer completion result = %d, want 0", got)
+		}
+	}
+
+	assertNoTimer := func(t *testing.T, ovPtr uint32) {
+		t.Helper()
+		env.mu.Lock()
+		_, exists := env.timers[ovPtr]
+		env.mu.Unlock()
+		if exists {
+			t.Errorf("timer at %d should be removed", ovPtr)
+		}
+	}
+
 	t.Run("1. basic timer set and fire", func(t *testing.T) {
 		ovPtr := uint32(0x100)
-		stack := []uint64{uint64(ovPtr), timerDelayMillis(time.Millisecond * 10)}
-
-		env.sys_timer_set(context.Background(), mod, stack)
-
-		if env.PendingOps() != 1 {
-			t.Errorf("expected 1 pending op, got %d", env.PendingOps())
+		setTimer(t, ovPtr, 10*time.Millisecond)
+		if got := env.PendingOps(); got != 1 {
+			t.Fatalf("pending ops after timer set = %d, want 1", got)
 		}
 
-		// Wait for timer to fire and be processed by the proactor
-		time.Sleep(time.Millisecond * 50)
-		env.Poll(context.Background(), mod)
-
-		if env.PendingOps() != 0 {
-			t.Errorf("expected 0 pending ops after fire, got %d", env.PendingOps())
+		assertSuccessfulCompletion(t, ovPtr)
+		if got := env.PendingOps(); got != 0 {
+			t.Errorf("pending ops after timer fire = %d, want 0", got)
 		}
-
-		// Verify memory writeback
-		val, _ := mod.Memory().Read(ovPtr, 24)
-		if val[0] != 1 { // overlapped version
-			t.Error("overlapped version mismatch")
-		}
+		assertNoTimer(t, ovPtr)
 	})
 
 	t.Run("2. timer overwrite stops old timer", func(t *testing.T) {
 		ovPtr := uint32(0x200)
-		stack1 := []uint64{uint64(ovPtr), timerDelayMillis(time.Hour)}
-		env.sys_timer_set(context.Background(), mod, stack1)
-
-		initialOps := env.PendingOps()
-
-		stack2 := []uint64{uint64(ovPtr), timerDelayMillis(time.Millisecond)}
-		env.sys_timer_set(context.Background(), mod, stack2)
-
-		// Counter should still be same because overwrite calls DecOps then register calls IncOps
-		if env.PendingOps() != initialOps {
-			t.Errorf("expected %d ops, got %d", initialOps, env.PendingOps())
+		setTimer(t, ovPtr, time.Hour)
+		if got := env.PendingOps(); got != 1 {
+			t.Fatalf("pending ops after first timer = %d, want 1", got)
 		}
 
-		// Wait for the new (short) timer to fire
-		time.Sleep(time.Millisecond * 20)
-		env.Poll(context.Background(), mod)
+		env.sys_timer_set(context.Background(), mod, []uint64{uint64(ovPtr), timerDelayMillis(time.Millisecond)})
+		if got := env.PendingOps(); got != 1 {
+			t.Fatalf("pending ops after overwrite = %d, want 1", got)
+		}
+
+		assertSuccessfulCompletion(t, ovPtr)
+		if got := env.PendingOps(); got != 0 {
+			t.Errorf("pending ops after replacement timer fired = %d, want 0", got)
+		}
+		assertNoTimer(t, ovPtr)
 	})
 
 	t.Run("3. zero timeout fires quickly", func(t *testing.T) {
 		ovPtr := uint32(0x300)
-		stack := []uint64{uint64(ovPtr), 0}
-		env.sys_timer_set(context.Background(), mod, stack)
-
-		time.Sleep(time.Millisecond * 10)
-		env.Poll(context.Background(), mod)
-
-		if env.PendingOps() != 0 {
-			// expect it to have finished
+		setTimer(t, ovPtr, 0)
+		assertSuccessfulCompletion(t, ovPtr)
+		if got := env.PendingOps(); got != 0 {
+			t.Errorf("pending ops after zero timer fired = %d, want 0", got)
 		}
+		assertNoTimer(t, ovPtr)
 	})
 
 	t.Run("4. cancelled timer does not write back", func(t *testing.T) {
 		ovPtr := uint32(0x400)
-		mod.Memory().Write(ovPtr, make([]byte, 24)) // clear
-
-		stack := []uint64{uint64(ovPtr), timerDelayMillis(time.Millisecond * 10)}
-		env.sys_timer_set(context.Background(), mod, stack)
-
+		setTimer(t, ovPtr, time.Hour)
 		env.sys_cancel(context.Background(), mod, []uint64{uint64(ovPtr)})
 
-		time.Sleep(time.Millisecond * 30)
-		env.Poll(context.Background(), mod)
-
-		val, _ := mod.Memory().Read(ovPtr, 24)
-		if val[0] != 0 {
+		if got := env.PendingOps(); got != 0 {
+			t.Errorf("pending ops after cancellation = %d, want 0", got)
+		}
+		val, ok := mod.Memory().Read(ovPtr, 24)
+		if !ok {
+			t.Fatal("failed to read cancelled timer request")
+		}
+		if binary.LittleEndian.Uint32(val[:4]) != 0 {
 			t.Error("cancelled timer should not have written to memory")
 		}
+		assertNoTimer(t, ovPtr)
 	})
 
 	t.Run("5. sys_cancel also works for timers", func(t *testing.T) {
 		ovPtr := uint32(0x500)
-		stack := []uint64{uint64(ovPtr), timerDelayMillis(time.Hour)}
-		env.sys_timer_set(context.Background(), mod, stack)
-
+		setTimer(t, ovPtr, time.Hour)
 		env.sys_cancel(context.Background(), mod, []uint64{uint64(ovPtr)})
 
-		env.mu.Lock()
-		_, exists := env.timers[ovPtr]
-		env.mu.Unlock()
-		if exists {
-			t.Error("timer should be removed from map by sys_cancel")
+		if got := env.PendingOps(); got != 0 {
+			t.Errorf("pending ops after cancellation = %d, want 0", got)
 		}
+		assertNoTimer(t, ovPtr)
 	})
 
 	t.Run("6. timer firing removes from timers map", func(t *testing.T) {
 		ovPtr := uint32(0x600)
-		stack := []uint64{uint64(ovPtr), timerDelayMillis(time.Millisecond)}
-		env.sys_timer_set(context.Background(), mod, stack)
-
-		time.Sleep(time.Millisecond * 20)
-		env.Poll(context.Background(), mod)
-
-		env.mu.Lock()
-		_, exists := env.timers[ovPtr]
-		env.mu.Unlock()
-		if exists {
-			t.Error("fired timer should be removed from map")
-		}
+		setTimer(t, ovPtr, time.Millisecond)
+		assertSuccessfulCompletion(t, ovPtr)
+		assertNoTimer(t, ovPtr)
 	})
 
 	t.Run("7. high frequency timer set", func(t *testing.T) {
 		ovPtr := uint32(0x700)
+		setTimer(t, ovPtr, time.Hour)
 		for i := 0; i < 50; i++ {
 			env.sys_timer_set(context.Background(), mod, []uint64{uint64(ovPtr), timerDelayMillis(time.Millisecond)})
 		}
-		time.Sleep(time.Millisecond * 10)
-		env.Poll(context.Background(), mod)
+		if got := env.PendingOps(); got != 1 {
+			t.Fatalf("pending ops after repeated overwrite = %d, want 1", got)
+		}
+
+		assertSuccessfulCompletion(t, ovPtr)
+		if got := env.PendingOps(); got != 0 {
+			t.Errorf("pending ops after final timer fired = %d, want 0", got)
+		}
+		assertNoTimer(t, ovPtr)
 	})
 
 	t.Run("8. multiple concurrent timers", func(t *testing.T) {
 		const count = 20
+		ovPtrs := make([]uint32, count)
 		for i := 0; i < count; i++ {
-			env.sys_timer_set(context.Background(), mod, []uint64{uint64(0x800 + i), timerDelayMillis(time.Millisecond)})
+			ovPtrs[i] = uint32(0x800 + i*32)
+			setTimer(t, ovPtrs[i], time.Millisecond)
 		}
-		time.Sleep(time.Millisecond * 20)
-		env.Poll(context.Background(), mod)
+		if got := env.PendingOps(); got != count {
+			t.Fatalf("pending ops after setting timers = %d, want %d", got, count)
+		}
+
+		for _, ovPtr := range ovPtrs {
+			assertSuccessfulCompletion(t, ovPtr)
+			assertNoTimer(t, ovPtr)
+		}
+		if got := env.PendingOps(); got != 0 {
+			t.Errorf("pending ops after all timers fired = %d, want 0", got)
+		}
 	})
 
 	t.Run("9. large timeout behavior", func(t *testing.T) {
-		ovPtr := uint32(0x900)
-		stack := []uint64{uint64(ovPtr), timerDelayMillis(time.Hour * 24)}
-		env.sys_timer_set(context.Background(), mod, stack)
-
-		if env.PendingOps() == 0 {
-			t.Error("expected timer to be active")
+		ovPtr := uint32(0xD80)
+		setTimer(t, ovPtr, 24*time.Hour)
+		if got := env.PendingOps(); got != 1 {
+			t.Fatalf("pending ops for long timer = %d, want 1", got)
 		}
 		env.sys_cancel(context.Background(), mod, []uint64{uint64(ovPtr)})
+		if got := env.PendingOps(); got != 0 {
+			t.Errorf("pending ops after cancelling long timer = %d, want 0", got)
+		}
+		assertNoTimer(t, ovPtr)
 	})
 
 	t.Run("10. timer fire after host_cancel", func(t *testing.T) {
-		// Test if IsOpActive correctly prevents writeback if ID changed
-		ovPtr := uint32(0xA00)
-		stack1 := []uint64{uint64(ovPtr), timerDelayMillis(time.Millisecond * 2)}
-		env.sys_timer_set(context.Background(), mod, stack1)
+		for len(env.fileOpsQueue) > 0 {
+			env.Poll(context.Background(), mod)
+		}
 
-		// Wait long enough for it to fire and be in queue
-		start := time.Now()
-		for env.PendingOps() == 1 && time.Since(start) < time.Second {
-			// wait for the timer goroutine to at least fire.
-			// Wait, the timer callback pushes to fileOpsQueue but doesn't DecOps immediately.
-			// So PendingOps remains 1.
+		ovPtr := uint32(0xA00)
+		setTimer(t, ovPtr, 2*time.Millisecond)
+
+		deadline := time.Now().Add(5 * time.Second)
+		for len(env.fileOpsQueue) == 0 {
+			if time.Now().After(deadline) {
+				t.Fatal("timer callback was not queued")
+			}
 			time.Sleep(time.Millisecond)
 		}
 
-		// Re-register at same location immediately with longer timer
-		stack2 := []uint64{uint64(ovPtr), timerDelayMillis(time.Hour)}
-		env.sys_timer_set(context.Background(), mod, stack2)
-
-		// Use a context with timeout for Poll so we don't hang the whole test suite
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		env.Poll(ctx, mod)
-
-		// Memory should NOT have been updated by the first (short) timer
-		val, _ := mod.Memory().Read(ovPtr, 24)
-		if val[0] != 0 {
-			t.Error("old timer shouldn't have written back")
+		env.sys_timer_set(context.Background(), mod, []uint64{uint64(ovPtr), timerDelayMillis(time.Hour)})
+		if got := env.PendingOps(); got != 1 {
+			t.Fatalf("pending ops after replacing queued timer = %d, want 1", got)
 		}
+		env.Poll(context.Background(), mod)
+
+		val, ok := mod.Memory().Read(ovPtr, 24)
+		if !ok {
+			t.Fatal("failed to read timer request")
+		}
+		if binary.LittleEndian.Uint32(val[:4]) != 0 {
+			t.Error("superseded timer should not have written back")
+		}
+
 		env.sys_cancel(context.Background(), mod, []uint64{uint64(ovPtr)})
+		if got := env.PendingOps(); got != 0 {
+			t.Errorf("pending ops after cancelling replacement = %d, want 0", got)
+		}
+		assertNoTimer(t, ovPtr)
 	})
 
-	t.Run("11. timer set on max uint32 ptr", func(t *testing.T) {
-		ovPtr := uint32(0x10000 - 32)
-		stack := []uint64{uint64(ovPtr), timerDelayMillis(time.Millisecond)}
-		env.sys_timer_set(context.Background(), mod, stack)
-		time.Sleep(time.Millisecond * 10)
-		env.Poll(context.Background(), mod)
+	t.Run("11. timer set near end of memory", func(t *testing.T) {
+		ovPtr := uint32(0x100000 - 32)
+		setTimer(t, ovPtr, time.Millisecond)
+		assertSuccessfulCompletion(t, ovPtr)
 	})
 
 	t.Run("12. Poll processes multiple timers", func(t *testing.T) {
 		const count = 5
+		ovPtrs := make([]uint32, count)
 		for i := 0; i < count; i++ {
-			env.sys_timer_set(context.Background(), mod, []uint64{uint64(0xB00 + i), timerDelayMillis(time.Millisecond)})
+			ovPtrs[i] = uint32(0xB00 + i*32)
+			setTimer(t, ovPtrs[i], time.Millisecond)
 		}
-		time.Sleep(time.Millisecond * 20)
-		env.Poll(context.Background(), mod)
-		if env.PendingOps() != 0 {
-			// Ensure it's 0 after Poll
+		if got := env.PendingOps(); got != count {
+			t.Fatalf("pending ops after setting timers = %d, want %d", got, count)
+		}
+
+		for _, ovPtr := range ovPtrs {
+			assertSuccessfulCompletion(t, ovPtr)
+		}
+		if got := env.PendingOps(); got != 0 {
+			t.Errorf("pending ops after Poll processed all timers = %d, want 0", got)
 		}
 	})
 
@@ -206,31 +262,34 @@ func TestSysTimerSetExtended(t *testing.T) {
 		ovPtr := uint32(0xC00)
 		delay := 20 * time.Millisecond
 		start := time.Now()
-		mod.Memory().Write(ovPtr, make([]byte, 24))
-		stack := []uint64{uint64(ovPtr), timerDelayMillis(delay)}
-		env.sys_timer_set(context.Background(), mod, stack)
+		setTimer(t, ovPtr, delay)
 
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		for env.PendingOps() > 0 {
-			env.Poll(ctx, mod)
-			if ctx.Err() != nil {
-				t.Fatal("timer never fired")
-			}
-		}
+		assertSuccessfulCompletion(t, ovPtr)
 		elapsed := time.Since(start)
 		if elapsed < delay {
 			t.Errorf("timer fired too early: %v", elapsed)
+		}
+		if got := env.PendingOps(); got != 0 {
+			t.Errorf("pending ops after precision timer fired = %d, want 0", got)
 		}
 	})
 
 	t.Run("14. proactor queue pressure from timers", func(t *testing.T) {
 		const count = 100
+		ovPtrs := make([]uint32, count)
 		for i := 0; i < count; i++ {
-			// All fire at once
-			env.sys_timer_set(context.Background(), mod, []uint64{uint64(0xD00 + i), timerDelayMillis(time.Millisecond)})
+			ovPtrs[i] = uint32(0xD00 + i*32)
+			setTimer(t, ovPtrs[i], time.Millisecond)
 		}
-		time.Sleep(time.Millisecond * 50)
-		env.Poll(context.Background(), mod)
+		if got := env.PendingOps(); got != count {
+			t.Fatalf("pending ops after setting timers = %d, want %d", got, count)
+		}
+
+		for _, ovPtr := range ovPtrs {
+			assertSuccessfulCompletion(t, ovPtr)
+		}
+		if got := env.PendingOps(); got != 0 {
+			t.Errorf("pending ops after queue pressure test = %d, want 0", got)
+		}
 	})
 }
