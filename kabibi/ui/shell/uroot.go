@@ -57,6 +57,7 @@ import (
 	"github.com/u-root/u-root/cmds/core/pwd"
 	"github.com/u-root/u-root/cmds/core/readlink"
 	"github.com/u-root/u-root/cmds/core/realpath"
+	rgcmd "github.com/u-root/u-root/cmds/core/rg"
 	"github.com/u-root/u-root/cmds/core/rm"
 	scpcmd "github.com/u-root/u-root/cmds/core/scp"
 	sedcmd "github.com/u-root/u-root/cmds/core/sed"
@@ -101,6 +102,7 @@ var urootRegistry = map[string]commandRunner{
 	// Pilot commands (Band 1A)
 	"cat":  cat.Main,
 	"grep": grep.Main,
+	"rg":   rgcmd.Main,
 
 	// Band 1B: Text Processing & Filters
 	"base64":  base64cmd.Main,

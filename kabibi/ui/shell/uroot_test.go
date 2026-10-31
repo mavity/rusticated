@@ -783,3 +783,25 @@ func TestURootCommand_Grep(t *testing.T) {
 		t.Fatalf("grep cancellation failed: expected code 130, got %d", code)
 	}
 }
+
+func TestURootCommand_RG(t *testing.T) {
+	runner, ok := LookupURootCommand("rg")
+	if !ok || runner == nil {
+		t.Fatal(`LookupURootCommand("rg") returned false/nil`)
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "sample.txt"), []byte("needle\nother\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runner(context.Background(), core.IO{
+		Dir:    dir,
+		Stdin:  strings.NewReader(""),
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}, "-F", "needle", "sample.txt")
+	if code != 0 || stderr.String() != "" || stdout.String() != "sample.txt:1:needle\n" {
+		t.Fatalf("rg integration: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
