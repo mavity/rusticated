@@ -34,6 +34,26 @@ func runUnderWashmhost(ws, wasmPath string, extraArgs []string, platform string,
 	}
 
 	if platform == "node" {
+		cmdEnv := os.Environ()
+		nodeArch, err := exec.Command("node", "-p", "process.platform + '/' + process.arch").Output()
+		if err != nil {
+			return fmt.Errorf("detect Node.js platform: %w", err)
+		}
+		nodeParts := strings.Split(strings.TrimSpace(string(nodeArch)), "/")
+		if len(nodeParts) != 2 {
+			return fmt.Errorf("unexpected Node.js platform response %q", strings.TrimSpace(string(nodeArch)))
+		}
+		if name := nodePtyArtifactName(nodeParts[0], nodeParts[1]); name != "" {
+			buildDir := filepath.Join(ws, "target", "mohabbat-build")
+			if err := os.MkdirAll(buildDir, 0o755); err != nil {
+				return fmt.Errorf("create Node PTY build directory: %w", err)
+			}
+			if err := buildNodePtyArtifactsFor(ws, buildDir, verbose, name); err != nil {
+				return fmt.Errorf("build Node PTY addon for %s: %w", name, err)
+			}
+			addonPath := filepath.Join(buildDir, "nodepty-"+name+".node")
+			cmdEnv = upsertEnv(cmdEnv, "MOHABBAT_NODE_PTY_ADDON", addonPath)
+		}
 		runArgs := []string{filepath.Join(ws, "mohabbat", "washmhost", "js", "node", "index.js"), wasmPath}
 		runArgs = append(runArgs, extraArgs...)
 		ctx := context.Background()
@@ -44,6 +64,7 @@ func runUnderWashmhost(ws, wasmPath string, extraArgs []string, platform string,
 		defer cancel()
 		cmd := exec.CommandContext(ctx, "node", runArgs...)
 		cmd.Dir = cwd
+		cmd.Env = cmdEnv
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		cmd.Stdin = os.Stdin

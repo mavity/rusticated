@@ -1,0 +1,1509 @@
+🍆  Test matrix host: windows/arm64
+
+🍆  Collecting Native Go windows/arm64 results
+
+🍆  Collecting Go windows/amd64 results
+
+🍆  Collecting Rusticated windows/arm64 results
+🍆  [1/31] ai
+🍆  [2/31] ai/assets
+🍆  [3/31] dload
+🍆  [4/31] github.com/mavity/rusticated/kabibi
+🍆  [5/31] github.com/mavity/rusticated/kabibi/config
+🍆  [6/31] github.com/mavity/rusticated/kabibi/credstore
+🍆  [7/31] github.com/mavity/rusticated/kabibi/gitcore
+🍆  [8/31] github.com/mavity/rusticated/kabibi/internal/sed
+🍆  [9/31] github.com/mavity/rusticated/kabibi/slashcmd
+🍆  [10/31] github.com/mavity/rusticated/kabibi/tools/browser
+🍆  [11/31] github.com/mavity/rusticated/kabibi/tools/fabric
+🍆  [12/31] github.com/mavity/rusticated/kabibi/tools/filelist
+🍆  [13/31] github.com/mavity/rusticated/kabibi/tools/hashline
+🍆  [14/31] github.com/mavity/rusticated/kabibi/ui
+🍆  [15/31] github.com/mavity/rusticated/kabibi/ui/app
+🍆  [16/31] github.com/mavity/rusticated/kabibi/ui/dialog
+🍆  [17/31] github.com/mavity/rusticated/kabibi/ui/editor
+🍆  [18/31] github.com/mavity/rusticated/kabibi/ui/filemanager
+🍆  [19/31] github.com/mavity/rusticated/kabibi/ui/shell
+🍆  [20/31] github.com/mavity/rusticated/kabibi/ui/terminal
+🍆  [21/31] github.com/mavity/rusticated/kabibi/ui/widgets
+🍆  [22/31] github.com/mavity/rusticated/platform
+🍆  [23/31] github.com/mavity/rusticated/pope
+🍆  [24/31] mohabbat
+🍆  [25/31] mohabbat/mohabbat
+🍆  [26/31] mohabbat/mohabbat/regast
+🍆  [27/31] mohabbat/mohabbat/regast/syntax
+🍆  [28/31] mohabbat/release
+🍆  [29/31] mohabbat/rusticated-go/syscall
+🍆  [30/31] pty
+🍆  [31/31] washmhost
+
+🍆  Collecting Rusticated Node v24.21.0 results
+🍆  [1/31] ai
+🍆  [2/31] ai/assets
+🍆  [3/31] dload
+🍆  [4/31] github.com/mavity/rusticated/kabibi
+🍆  [5/31] github.com/mavity/rusticated/kabibi/config
+🍆  [6/31] github.com/mavity/rusticated/kabibi/credstore
+🍆  [7/31] github.com/mavity/rusticated/kabibi/gitcore
+🍆  [8/31] github.com/mavity/rusticated/kabibi/internal/sed
+🍆  [9/31] github.com/mavity/rusticated/kabibi/slashcmd
+🍆  [10/31] github.com/mavity/rusticated/kabibi/tools/browser
+🍆  [11/31] github.com/mavity/rusticated/kabibi/tools/fabric
+🍆  [12/31] github.com/mavity/rusticated/kabibi/tools/filelist
+🍆  [13/31] github.com/mavity/rusticated/kabibi/tools/hashline
+🍆  [14/31] github.com/mavity/rusticated/kabibi/ui
+🍆  [15/31] github.com/mavity/rusticated/kabibi/ui/app
+🍆  [16/31] github.com/mavity/rusticated/kabibi/ui/dialog
+🍆  [17/31] github.com/mavity/rusticated/kabibi/ui/editor
+🍆  [18/31] github.com/mavity/rusticated/kabibi/ui/filemanager
+🍆  [19/31] github.com/mavity/rusticated/kabibi/ui/shell
+🍆  [20/31] github.com/mavity/rusticated/kabibi/ui/terminal
+🍆  [21/31] github.com/mavity/rusticated/kabibi/ui/widgets
+🍆  [22/31] github.com/mavity/rusticated/platform
+🍆  [23/31] github.com/mavity/rusticated/pope
+🍆  [24/31] mohabbat
+🍆  [25/31] mohabbat/mohabbat
+🍆  [26/31] mohabbat/mohabbat/regast
+🍆  [27/31] mohabbat/mohabbat/regast/syntax
+🍆  [28/31] mohabbat/release
+🍆  [29/31] mohabbat/rusticated-go/syscall
+🍆  [30/31] pty
+🍆  [31/31] washmhost
+
+🍆  Collecting Rusticated windows/amd64 results
+🍆  [1/31] ai
+🍆  [2/31] ai/assets
+🍆  [3/31] dload
+🍆  [4/31] github.com/mavity/rusticated/kabibi
+🍆  [5/31] github.com/mavity/rusticated/kabibi/config
+🍆  [6/31] github.com/mavity/rusticated/kabibi/credstore
+🍆  [7/31] github.com/mavity/rusticated/kabibi/gitcore
+🍆  [8/31] github.com/mavity/rusticated/kabibi/internal/sed
+🍆  [9/31] github.com/mavity/rusticated/kabibi/slashcmd
+🍆  [10/31] github.com/mavity/rusticated/kabibi/tools/browser
+🍆  [11/31] github.com/mavity/rusticated/kabibi/tools/fabric
+🍆  [12/31] github.com/mavity/rusticated/kabibi/tools/filelist
+🍆  [13/31] github.com/mavity/rusticated/kabibi/tools/hashline
+🍆  [14/31] github.com/mavity/rusticated/kabibi/ui
+🍆  [15/31] github.com/mavity/rusticated/kabibi/ui/app
+🍆  [16/31] github.com/mavity/rusticated/kabibi/ui/dialog
+🍆  [17/31] github.com/mavity/rusticated/kabibi/ui/editor
+🍆  [18/31] github.com/mavity/rusticated/kabibi/ui/filemanager
+🍆  [19/31] github.com/mavity/rusticated/kabibi/ui/shell
+🍆  [20/31] github.com/mavity/rusticated/kabibi/ui/terminal
+🍆  [21/31] github.com/mavity/rusticated/kabibi/ui/widgets
+🍆  [22/31] github.com/mavity/rusticated/platform
+🍆  [23/31] github.com/mavity/rusticated/pope
+🍆  [24/31] mohabbat
+🍆  [25/31] mohabbat/mohabbat
+🍆  [26/31] mohabbat/mohabbat/regast
+🍆  [27/31] mohabbat/mohabbat/regast/syntax
+🍆  [28/31] mohabbat/release
+🍆  [29/31] mohabbat/rusticated-go/syscall
+🍆  [30/31] pty
+🍆  [31/31] washmhost
+
+🍆  Go test matrix (columns first; test identity last)
+Native Go windows/arm64 :	Go windows/amd64 : Rusticated windows/arm64 : Rusticated Node v24.21.0 : Rusticated windows/amd64 -	Package / test
+❌	❌	❌	❌	❌	ai :: (package setup)
+✅	✅	✅	✅	✅	ai/assets :: TestBrowserTierRecommendationRequiresWebGPUArtifactCapacity
+✅	✅	✅	✅	✅	ai/assets :: TestDefaultCacheDirHasValidNativeFormat
+✅	✅	✅	✅	✅	ai/assets :: TestHardwareTierRecommendation
+✅	✅	✅	✅	✅	ai/assets :: TestHardwareTierRecommendation/16GB
+✅	✅	✅	✅	✅	ai/assets :: TestHardwareTierRecommendation/24GB_GPU
+✅	✅	✅	✅	✅	ai/assets :: TestHardwareTierRecommendation/26B_without_GPU
+✅	✅	✅	✅	✅	ai/assets :: TestHardwareTierRecommendation/32GB_GPU
+✅	✅	✅	✅	✅	ai/assets :: TestHardwareTierRecommendation/4GB
+✅	✅	✅	✅	✅	ai/assets :: TestHardwareTierRecommendation/8GB
+✅	✅	✅	✅	✅	ai/assets :: TestModelTiersHaveVerifiedArtifactsAndSizes
+✅	✅	✅	✅	✅	ai/assets :: TestModelTiersReturnsIndependentSlice
+✅	✅	✅	✅	✅	ai/assets :: TestValidateMemorySlots
+✅	✅	✅	❌	✅	dload :: TestDloadAsyncStreamingCallbacksWithoutBlockingMainThread
+✅	✅	✅	❌	✅	dload :: TestDloadBackgroundThreadCallbackFunnelsParentInvIDToSameOSThread
+✅	✅	✅	❌	✅	dload :: TestDloadBasic
+✅	✅	✅	❌	✅	dload :: TestDloadConcurrentBackgroundCallbacksStress
+✅	✅	✅	❌	✅	dload :: TestDloadDynamicTrampolineMultiPageScaling
+✅	✅	✅	❌	✅	dload :: TestDloadNestedCallbacksLIFO
+✅	✅	✅	❌	✅	dload :: TestDloadOpenAbsoluteAndLeadingSlashWindowsPaths
+✅	✅	✅	❌	✅	dload :: TestDloadOpenAbsoluteAndLeadingSlashWindowsPaths//C:/Windows/System32/kernel32.dll
+✅	✅	✅	❌	✅	dload :: TestDloadOpenAbsoluteAndLeadingSlashWindowsPaths/C:\Windows\System32\kernel32.dll
+✅	✅	✅	❌	✅	dload :: TestDloadOpenAbsoluteAndLeadingSlashWindowsPaths/\C:/Windows/System32/kernel32.dll
+✅	✅	✅	❌	✅	dload :: TestDloadOpenAbsoluteAndLeadingSlashWindowsPaths/\C:\Windows\System32\kernel32.dll
+✅	✅	✅	✅	✅	dload :: TestDloadOpenConfiguredLibrary
+✅	✅	✅	❌	✅	dload :: TestDloadOuterCallWhileCallbackInFlightDoesNotDeadlock
+✅	✅	✅	❌	✅	dload :: TestDloadSynchronousCallbackOnMainThread
+✅	✅	✅	❌	✅	dload :: TestDloadSynchronousCallbackWithReentrantCallsAndMemoryOps
+✅	✅	✅	✅	✅	dload :: TestNormalizeNativeLibraryPath
+❌	❌	✅	✅	✅	dload :: TestRusticatedWorkerPermissionsAreRepairedOnCacheHit
+❌	❌	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestExecutableDoesNotImportCharmUIStack
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestParseCLIEditorForms
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestParseCLIEditorForms/--edit=notes.txt
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestParseCLIEditorForms/--edit_notes.txt
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestParseCLIEditorForms/edit_notes.txt
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi :: TestParseCLIHelpFormsMatch
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestParseCLIPositionalPromptAndUnknownFlagFallback
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestParseCLIPositionalPromptAndUnknownFlagFallback/malformed_recognized_option
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestParseCLIPositionalPromptAndUnknownFlagFallback/multiple_positional_words
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestParseCLIPositionalPromptAndUnknownFlagFallback/unknown_option_and_words
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestParseCLIPromptAndCommandOptions
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestParseCLISinglePositionalPreservedForScriptLookup
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi :: TestRunCLIDiagnosticsFollowVerboseFlag
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi :: TestRunCLIDiagnosticsFollowVerboseFlag/disabled
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi :: TestRunCLIDiagnosticsFollowVerboseFlag/enabled
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestRunCLI_UsesPipedSessionForRedirectedStdin
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestRunPipedReader_ExecutesBeforeEOF
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestRunPipedReader_ExecutesForLoopAndHereDocument
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestRunPipedReader_ExecutesIncrementallyAndRetainsShellState
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestRunPipedReader_IncompleteSyntaxAtEOFFails
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestRunPipedReader_IncompleteSyntaxAtEOFFails/echo_unfinished_\
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestRunPipedReader_IncompleteSyntaxAtEOFFails/if_true;_then_
+❌	❌	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestRunPipedReader_ModelUsesTextSetupPrompt
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestRunPipedReader_ReportsAIRunnerFailure
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestRunPipedReader_ReportsOutputWriteFailures
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestRunPipedReader_ReportsOutputWriteFailures/AI_short_write
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestRunPipedReader_ReportsOutputWriteFailures/AI_writer_error
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestRunPipedReader_ReportsOutputWriteFailures/shell_short_write
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestRunPipedReader_ReportsOutputWriteFailures/shell_writer_error
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestRunPipedReader_RequiresDeleteConfirmationFlag
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestRunPipedReader_ReturnsLastCommandExitCode
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestRunPipedReader_ReturnsLastCommandExitCode/exit_preserves_prior_status
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestRunPipedReader_ReturnsLastCommandExitCode/failure_is_last_command
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestRunPipedReader_ReturnsLastCommandExitCode/later_success_replaces_earlier_failure
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestRunPipedReader_RoutesSlashFileCommandsBeforeAI
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestRunPipedReader_RoutesUnknownCommandToAIAndContinues
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi :: TestRunPipedReader_SettingsErrorIncludesAIConfigPath
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/config :: TestAIConfigDefaultIsUnconfigured
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/config :: TestAIConfigRejectsMalformedJSON
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi/config :: TestAIConfigRoundTripAndPrivatePermissions
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/credstore :: TestCredentialOperationsRejectEmptyIdentifiers
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/credstore :: TestCredentialStoreReportsMalformedFile
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/credstore :: TestModifyReadAndListStructuredOAuthCredentials
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi/credstore :: TestSetGetDeleteAndPrivatePermissions
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/gitcore :: TestAuthenticatedHTTPClientPreservesExistingAuthorization
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/gitcore :: TestAuthenticatedHTTPClientReadsGitCredentials
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/gitcore :: TestAuthenticatedHTTPClientReadsMultilineNetrc
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/gitcore :: TestAuthenticatedHTTPClientUsesEnvironmentToken
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/gitcore :: TestBackupDirtyFilesStoresLooseBlobs
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/gitcore :: TestDiffSeparatesStagedAndWorktreeChanges
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/gitcore :: TestDiffThreeDotUsesMergeBaseAndRightSide
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/gitcore :: TestNewSSHAuthMethodLoadsConfiguredKey
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/gitcore :: TestOpenFindsRepositoryFromShellSubdirectory
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/gitcore :: TestOpenRejectsDirectoryOutsideRepository
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/gitcore :: TestOpenRejectsFilePath
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/gitcore :: TestOpenSupportsBareRepository
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/gitcore :: TestStageCommitAndLog
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/internal/sed :: TestAddressesHoldSpaceAndBranches
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/internal/sed :: TestChangeCommandWithNegatedAddress
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/internal/sed :: TestGNUAddressFormsAndExitStatus
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/internal/sed :: TestGNUOptionsAndAppendQueueBeforeNext
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/internal/sed :: TestInPlaceBackupAndScriptFile
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/internal/sed :: TestInPlaceQuitStopsRemainingFiles
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/internal/sed :: TestInputFilesUseInvocationDirectoryAndPreserveNames
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/internal/sed :: TestInvalidScriptReturnsErrorStatus
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/internal/sed :: TestMultilineAndByteModes
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi/internal/sed :: TestReadFileCommandsAndPatternExecution
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/internal/sed :: TestSubstituteBREAndExtended
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/internal/sed :: TestWriteFilesAreTruncatedBeforeReadingInput
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/slashcmd :: TestInputToken
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/slashcmd :: TestMatchesFiltersBrowserCommands
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/slashcmd :: TestParseSlashCommand
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/slashcmd :: TestParseSlashCommandRejectsShellOperatorsAndExpansions
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/tools/browser :: TestAXTree_TagWithoutAngleBrackets_ParentLexicalDedup_AndPreserves50Siblings
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/tools/browser :: TestBiomimeticMouseAndKeystrokePhysics
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/tools/browser :: TestBrowserCandidatePathsNonWindows
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/tools/browser :: TestBrowserCandidatePathsWindows
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi/tools/browser :: TestBrowserCandidatePathsWindowsUseHomeWhenInstallEnvironmentIsMissing
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/tools/browser :: TestEnsureTabDoesNotDeadlockOnEventsDuringSetup
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/tools/browser :: TestManager_InBrowserNicknamePersistence_AndFullActions
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/tools/browser :: TestNavigateActionReportsNavigationError
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/tools/browser :: TestNavigateActionRequiresURLBeforeBrowserLaunch
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/tools/browser :: TestNetworkSummary_ExternalOriginGroupingAndLongURLTruncation
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/tools/fabric :: TestSearchAndExpand_FabricExpansionAndEllipsis
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/tools/fabric :: TestSearchAndExpand_FuzzyEscalation
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/tools/filelist :: TestListFiles_GlobExecutableAndContentSearch
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/tools/hashline :: TestApplyHashlineEdits_BottomUpAndRelocation
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/tools/hashline :: TestApplyHashlineEdits_MismatchReturnsRecoverySnippet
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/tools/hashline :: TestComputeLineHash_WhitespaceTolerantAndBlankEF
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestANSIFrameRoundTripsWideGlyphAtRightMargin
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestEmitDirtyRegion_WritesANSISequences
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestFlashColor_FadePhaseMonotonicity_DecreasesBetween150And550ms
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestFlashColor_RampPhaseMonotonicity_IncreasesBetweenZeroAnd150ms
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestFlashColor_TimelineClampBehavior_Elapsed1000ms_SafelyClampedAtBaseline
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestFlashColor_TimelinePeakValue_Elapsed150ms_ExactChannel255
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestFlashColor_TimelineReturnValue_Elapsed550ms_ExactChannel229
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestFlashColor_TimelineStartValue_ElapsedZero_ExactChannel229
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestGlowColor_ChannelLowerUnderflowGuard_NeverBelowZero
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestGlowColor_ChannelUpperOverflowGuard_NeverExceeds255
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestGlowColor_PhaseHalfGrayscaleEquality_RedGreenBlueIdentical
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestGlowColor_PhaseHalfLowerBound_ExactChannel176
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestGlowColor_PhaseOneReturnValue_ExactChannel229
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestGlowColor_PhaseOverflowWrapAround_Phase1Point25EqualsPhase0Point25
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestGlowColor_PhaseZeroGrayscaleEquality_RedGreenBlueIdentical
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestGlowColor_PhaseZeroUpperBound_ExactChannel229
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestNewHost_BindsRoot
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestNewHost_InitialDirtyFlagIsFalse
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestNewHost_StoresVerboseFlag
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestNoopWidget_MeasuresExactBounds
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestProcessLoop_CoalescesRedrawsUnderBurst
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestReadInputLoop_ExitsOnReadError
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestReadInputLoop_ParsesAndEnqueuesEvents
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestRunCore_PropagatesMakeRawError
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestRunCore_RePanicsAfterRestore
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestRunCore_RestoresTerminalBeforeRePanicking
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestRunCore_UsesInjectedRawModeBoundary
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestRunFrame_AbortsOnDimensionQueryError
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestRunFrame_ResizesBuffersWhenDimensionsChange
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestRunScrollbackFrame_AbortsOnDimensionQueryError
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestRunScrollbackFrame_RendersANSIOutputAndPayload
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestRunScrollbackFrame_RendersQueuedText
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestSpanDetect_IdenticalBuffers_NoChange
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestSpanDetect_SingleCellMutation_ExactBounds
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestStartupSequenceDefaultFallback
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestStartupSequenceErrorHandling
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestStartupSequenceNewlineCount
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestStartupSequenceNewlineCount/minimal_1-line_terminal
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestStartupSequenceNewlineCount/standard_24-line_terminal
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestStartupSequenceNewlineCount/tall_terminal_100_lines
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestStartupSequenceNewlineCount/wide_terminal_50_lines
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestStartupSequencePayloadFormat
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestStartupSequenceStdoutWritePattern
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestStartupSequenceViewportShift
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestStop_ClosesChannelOnce
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestWriteToScrollback_ConcurrentWritesAreAllPreserved
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui :: TestWriteToScrollback_QueuesText
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/app :: TestAppTUI_BluePanels_CtrlO_HiddenConveyorAndFarKeyRouting
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/app :: TestAppTUI_BluePanels_FileOpsAndEditor
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/app :: TestAppTUI_BluePanels_ShownThenWithdrawn_TopAnchoredDownwardGrowth
+❌	❌	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/app :: TestAppTUI_EndToEnd_GitLogPagerQuit
+❌	❌	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/app :: TestAppTUI_EndToEnd_RealFilesystemAndAIFallback
+❌	❌	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/app :: TestAppTUI_EndToEnd_ScrollbackEjectionOnSmallViewport
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/app :: TestAppTUI_ExitWithPanelsOpenRemovesPanelsAndRetainsHistory
+❌	❌	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/app :: TestAppTUI_ModeToggle_ZeroPlumeAndPlumeHistory
+❌	❌	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/app :: TestAppTUI_SlackGapRecovery_PushDownBeforeEjectingUp
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/app :: TestAppTUI_TrailingSpaceAndCursorMovementUpdatesImmediately
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/app :: TestAppWidgetShellCursorRemainsVisibleWhilePanelsRouteNavigation
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/app :: TestAppWidget_BluePanelsPreserveTerminalBackgroundOutsidePanels
+❌	❌	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/app :: TestAppWidget_Snapshot_BluePanels_MkdirDialog_W80H24
+❌	❌	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/app :: TestAppWidget_Snapshot_BluePanels_Open_W80H24
+❌	❌	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/app :: TestAppWidget_Snapshot_BluePanels_TabAndMark_W80H24
+❌	❌	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/app :: TestAppWidget_Snapshot_BluePanels_Withdrawn_W80H24
+❌	❌	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/app :: TestAppWidget_Snapshot_CommandSubmission_W80H24
+❌	❌	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/app :: TestAppWidget_Snapshot_CursorMovement_W80H24
+❌	❌	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/app :: TestAppWidget_Snapshot_EjectionOverflow_W80H10
+❌	❌	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/app :: TestAppWidget_Snapshot_Initial_W80H24
+❌	❌	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/app :: TestAppWidget_Snapshot_LineWrapping_W20H10
+❌	❌	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/app :: TestAppWidget_Snapshot_TypingCommand_W80H24
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/app :: TestCtrlEnterInsertsSelectedFileAtPromptCursor
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/app :: TestEnterOnNonExecutableFileOpensEditor
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/app :: TestFileCollisionKeepsProgressDialogAndResumes
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/app :: TestInstantSearchPanelKeyboardRouting
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/app :: TestOpenEditorSaveAndExit
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/app :: TestOpenEditorSaveFailureKeepsEditorOpen
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/app :: TestPanelsHideDuringCommandAndRestorePreviousVisibility
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/app :: TestPathInputCompletesRelativeToShellDirectory
+❌	❌	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/app :: TestRusticatedIndexEntryIncludesAvailableStatMetadata
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/app :: TestSlashCommandArrowSelectionAndDispatch
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/app :: TestSlashCommandEnterRunsPrefixWithFileArguments
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/app :: TestSlashCommandHintsAndUniqueCompletion
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/app :: TestSlashCommandTabCyclesMultipleMatches
+✅	✅	✅	❌	❌	github.com/mavity/rusticated/kabibi/ui/app :: TestSlashCopyOpensPathFormWithoutPanels
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/app :: TestSlashSettingsOpensDialogAndEscapeShowsPanels
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/dialog :: TestAcceptInput
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/dialog :: TestDialogMeasuresWithinSmallAndLargeConstraints
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/dialog :: TestDialogWidgetRender
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/dialog :: TestMultiFieldDialogTabFocusAndSubmit
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/dialog :: TestOpenChoiceDialog
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/dialog :: TestOpenConfirmDialog
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/dialog :: TestOpenInputDialog
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/dialog :: TestProgressCollisionExpandsInPlaceAndResolves
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/dialog :: TestUpdateChoiceArrows
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/dialog :: TestUpdateChoiceEsc
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/dialog :: TestUpdateChoiceHotkey
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestChromaStyleID
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestChromaStyleID/comment_token
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestChromaStyleID/keyword_token
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestChromaStyleID/string_literal
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestEditorCloseEditorAndModelState
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestEditorCoverageBoosters
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestEditorCoverageBoosters/backspace_no-op_and_confirm-close_keys
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestEditorCoverageBoosters/cursor_clamp_and_word_movement_edges
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestEditorCoverageBoosters/highlight_skip_paths
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestEditorExtraUpdateKeys
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestEditorInsertAndDeletePrimitives
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestEditorInsertTextAndNewlineInternal
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestEditorInvalidate
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestEditorKeyCommands
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestEditorMovementAndSelectionState
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestEditorMovementAndSelectionState2
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestEditorMovementAndViewSafety
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestEditorMovementAndViewSafety/tiny_height
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestEditorMovementAndViewSafety/tiny_window
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestEditorMovementAndViewSafety/zero_width
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestEditorRenderRowBarsAndScrollbar
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestEditorSave
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestEditorSaveCRLF
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestEditorSelectionDeleteEdgeCases
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestEditorSelectionHelpersAndDeleteIfAny
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestEditorSelectionTextAndDeleteSelection
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestEditorTinyWindowSnapshot
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestEditorUpdateKeyCoverage
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestEditorVisualColumnAndWordHelpers
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestNewEditorCRLFFile
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestNewEditorEmptyFile
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/editor :: TestNewEditorLFFile
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestCopyDirectory
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestCopyFileNoOverwritePreservesDestination
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestCopyFilePath
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestDeleteDirectory
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestDeleteFile
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestDualPaneWidgetLayoutHasSingleDividerColumn
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestDualPaneWidgetPreservesLeftSelectionOnFirstRender
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestDualPaneWidgetRoutesKeysToActiveChild
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestDualPaneWidgetStartsWithLeftPaneActive
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestDualPaneWidgetTabCyclesActivePane
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestDualPaneWidget_DividerJunctions
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestFilePaneWidgetActiveInactiveRender
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestFilePaneWidgetClipsLongNames
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestFilePaneWidgetEnterDirectoryChangesDir
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestFilePaneWidgetEnterFileCallsCallback
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestFilePaneWidgetHorizontalNavigationScrollsOneColumn
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestFilePaneWidgetInstantSearchEditsAtCaret
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestFilePaneWidgetInstantSearchFuzzyNoMatchAndClear
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestFilePaneWidgetInstantSearchOverlayRendersOnBottomBorder
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestFilePaneWidgetInstantSearchPrefersPrefixAndWraps
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestFilePaneWidgetLstatsSelectedFileAfterNavigation
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestFilePaneWidgetMeasureAndRender
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestFilePaneWidgetNavigationDownUp
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestFilePaneWidgetPageNavigationMovesWholeVisiblePage
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestFilePaneWidgetParentDirectoryDetailsUseMetadataWithoutSize
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestFilePaneWidgetRefreshClampsMissingFinalSelection
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestFilePaneWidgetRefreshKeepsMissingSelectionSortPosition
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestFilePaneWidgetRefreshesSelectedMetadataAndTotal
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestFilePaneWidgetRendersTotalAndSelectedDetails
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestIsExecutableFileUsesPlatformRules
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestMoveFileNoOverwritePreservesBothFiles
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestMovePath
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestNumberPrinterUsesLocaleEnvironmentOrCommaFallback
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestOsFSServiceReadDirMetadataAndNonRecursiveTotals
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestPathExists
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestPathSizeDirWithFiles
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestPathSizeEmptyDir
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestPathSizeFile
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/filemanager :: TestPathSizeNestedDir
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestAIBuiltinStatusAndHelpOverCommandTerminal
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestAIToolBlockTrimsOnlyTrailingWhitespaceRows
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestAssistantMarkdownRendersAndStylesHighlights
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestAssistantMarkdownSanitizesTerminalControls
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestBashInputPaletteContrastOnBlackAndWhite
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestBisectTermReadsConfiguredTerms
+✅	✅	❌	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestBrowserToolsAndWebShellBuiltins
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestBufferedGitDiffPagerAndTTYBypass
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/shell :: TestBuildPathCacheSnapshotIndexesExecutablesScriptsAndWindowsExtensions
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestCheckExecutableFileAllowsWindowsStyleExecOnNonWindowsHost
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestChooseRemoteModelDefaultsToGPT6LunaWhenAvailable
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestChooseRemoteModelRejectsXTwitterModelEnteredManually
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestChooseRemoteModelUsesCompleteCatalogAndPriorChoice
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInputForDisplayUsesPATHSnapshotOnly
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInput_BashSyntaxAndCommandResolution
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInput_BashSyntaxAndCommandResolution/backslash_escaping_trailing_space_is_not_continuation
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInput_BashSyntaxAndCommandResolution/dynamic_command_word
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInput_BashSyntaxAndCommandResolution/empty_input
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInput_BashSyntaxAndCommandResolution/exit_builtin
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInput_BashSyntaxAndCommandResolution/for_loop_construct
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInput_BashSyntaxAndCommandResolution/host_executable_go
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInput_BashSyntaxAndCommandResolution/posix_builtin_cd
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInput_BashSyntaxAndCommandResolution/posix_builtin_echo
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInput_BashSyntaxAndCommandResolution/quit_builtin
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInput_BashSyntaxAndCommandResolution/relative_script_in_cwd
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInput_BashSyntaxAndCommandResolution/syntax_error_parens_in_natural_language
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInput_BashSyntaxAndCommandResolution/syntax_error_unmatched_apostrophe
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInput_BashSyntaxAndCommandResolution/u-root_coreutil_cat_in_pipeline
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInput_BashSyntaxAndCommandResolution/u-root_coreutil_ls
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInput_BashSyntaxAndCommandResolution/valid_syntax_with_unresolved_command_routes_to_AI
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInput_BashSyntaxAndCommandResolution/variable_assignment
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInput_IncompleteShellConstructs
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInput_IncompleteShellConstructs/cat_<<EOF_hello
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInput_IncompleteShellConstructs/echo_'unfinished
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInput_IncompleteShellConstructs/echo_hi_&&
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInput_IncompleteShellConstructs/echo_hi_\
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInput_IncompleteShellConstructs/echo_hi_|
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInput_IncompleteShellConstructs/for_i_in_1_2;_do
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInput_IncompleteShellConstructs/if_true;_then
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestClassifyInput_IncompleteShellConstructs/{_echo_hi
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestCommandBlockRendersThroughWidgetANSIContract
+✅	✅	❌	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestCommandOutputStopsSubmissionAnimationImmediately
+✅	✅	❌	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestCommandSubmitAnimationTickerStopsAfterOneCycle
+✅	✅	❌	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestCommandSubmitAnimationTickerStopsWhenOutputArrives
+✅	✅	❌	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestCommandSubmitAnimationUsesCellPositionsAndPhases
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestCommandTerminalInputDefaultsToStdin
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestCommandTerminalInputReadStopsOnCancellation
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestCommandTerminalInputRoutesToControlConsumer
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestConfigureAICancelDoesNotPersistConfiguration
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestConfigureAIKeepsCurrentConfigurationFromFirstMenu
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestConfigureCustomEndpointDetectsProtocolFromURL
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestConfigureCustomEndpointSelectsProtocolAndPersistsModel
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestContextCompactionLimitScalesProportionally
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestCustomCredentialIdentityIncludesEndpointAndProtocol
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestEncodeGitNotesTreeSortsEntries
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestEndToEnd_ShellFallbackIntoAISessionWithTools
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestEndToEnd_ShellUnconfiguredPrompt_InteractiveLocalGemmaOnboardingAndTurn
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestExecuteOneShotLine_RejectsIncompleteShellInput
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestExpandWindowsEnvVars
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestExpandWindowsEnvVars/case-insensitive_expansion
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestExpandWindowsEnvVars/empty_string_unchanged
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestExpandWindowsEnvVars/nested_expansion
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestExpandWindowsEnvVars/no_variables
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestExpandWindowsEnvVars/single_variable
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestExpandWindowsEnvVars/undefined_variable_left_unchanged
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestFormatAIBytes
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestFormatPrompt_DefaultFallback
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestFormatPrompt_PS1Expansions
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestFormatPrompt_PS1Expansions/ansi_color_codes_with_zero-width_brackets
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestFormatPrompt_PS1Expansions/basename_only
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestFormatPrompt_PS1Expansions/literal_backslash_and_unknown_escapes
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestFormatPrompt_PS1Expansions/time_formatting
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestFormatPrompt_PS1Expansions/username_and_hostname
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestGitBisectRunMarksEachCommitInProcess
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestGitBuiltinAddAndCommit
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestGitBuiltinDiffLogBranchCheckout
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestGitBuiltinForwardsFullStatusAddAndCommitOptions
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestGitBuiltinHelpShowsSupportedCommands
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestGitBuiltinHonorsInlineEnvironmentAndGlobalConfigFlags
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestGitBuiltinReportsMissingRepository
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestGitBuiltinStatusUsesExecutionSessionDirectory
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestGitBuiltinSupportsInitAndGlobalConfigOutsideRepository
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestGitBuiltinVersionReportsGoGitModuleVersion
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestGitHubCopilotOpenURLPromptOpensVerificationPageOnEnter
+✅	✅	❌	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestGitInspectDiffIncludesHashlineAnchors
+✅	✅	❌	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestGitInspectRejectsUnsupportedAction
+✅	✅	❌	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestGitInspectShowDefaultsToHeadCommit
+✅	✅	❌	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestGitInspectStatusUsesShellWorkingDirectory
+✅	✅	❌	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestGitMutateBranchLifecycle
+✅	✅	❌	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestGitMutateCherryPickAppliesCommit
+✅	✅	❌	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestGitMutateHardResetBacksUpDirtyFiles
+✅	✅	❌	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestGitMutateRestoreReturnsRecoverableBlobBackup
+✅	✅	❌	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestGitMutateStagesAndCommits
+✅	✅	❌	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestGitMutateStashPushAndPop
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestGitNotesAddAppendListShowAndRemove
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestGitNotesPruneRemovesNotesForUnreachableObjects
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestGitReplaceCreatesListsAndDeletesReplacementRef
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestInteractiveShellCommandIsStyledWithoutAnimatingProgrammaticExecution
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestIsPassThroughPager
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestIsSSHRemoteURLRecognizesURIAndSCPForms
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/shell :: TestIsWindowsLikeEnv
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestIsWindowsLikeEnv/GOHOSTOS_override
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestIsWindowsLikeEnv/OS_fallback_(legacy)
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestIsWindowsLikeEnv/case-insensitive_GOOS
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/shell :: TestIsWindowsLikeEnv/empty_env_uses_runtime.GOOS
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestIsWindowsLikeEnv/explicit_GOOS=windows
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/shell :: TestIsWindowsLikeEnv/on_windows,_env_override_doesn't_matter_(runtime.GOOS_checked_first)
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestJoinShellArgumentsPreservesArgumentBoundaries
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestJoinShellArgumentsPreservesGitArgumentBoundaries
+❌	❌	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/shell :: TestKabibiSystemMessageAppendsCLIHelpContext
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestKabibiTools_RespectShellCwdAndInterstitialHistory
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestLookupEnvValue
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestLookupEnvValue/case-insensitive_match
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestLookupEnvValue/empty_env_map
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestLookupEnvValue/exact_match_in_env
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestLookupEnvValue/missing_key_in_env,_but_present_in_os.Environ
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestLookupEnvValue/nil_env_falls_back_to_os.Environ
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestModelSetupMenuOffersReauthenticationOnlyForStoredCredential
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestModelSetupMenuOmitsExcludedCurrentModelActions
+❌	❌	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/shell :: TestModernTools_ReadFileHashlineFabricAndEditFile
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestNewHostFSUsesFilesystemRootAndFastStatInterfaces
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestNodeVersionReturnsToInteractivePrompt
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestParseSSHCloneArgsHandlesCommonOptions
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestParseStreamedLogArgs
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestParseStreamedLogArgs/default_format
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestParseStreamedLogArgs/full-hash_pretty_format_falls_back
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestParseStreamedLogArgs/multiple_paths_fall_back
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestParseStreamedLogArgs/oneline_with_limit_and_path
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestParseStreamedLogArgs/symmetric_difference_falls_back
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestParseStreamedLogArgs/two-dot_range_falls_back
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestParseStreamedLogArgs/unsupported_ordering_falls_back
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestParseStreamedLogArgs/zero_count_falls_back
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/shell :: TestPathCommandCacheRefreshesAndCloses
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestPromptInput_CapturesAndResetsFirstInputAt
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestPromptInput_ClassifierGatesBashHighlighting
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestPromptInput_DynamicPromptAndWideUnicode
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestPromptInput_HeightCapSixLinesAndThreeQuartersScreen
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestPromptInput_ParentOwnsEnterAndCtrlC
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestPromptInput_PreservesAndInsertsNewlines
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestPromptInput_WrapAndShrinkBackToOneLine
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestRemoteContextTokenBudgetUsesDeclaredLimitOrConservativeFallback
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestRemoteSetupDoesNotAskForInterstitialConfirmation
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestResolveWindowsExecutableExpandsPercentEnvVarsInPath
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestResolveWindowsExecutableHonorsWindowsEnvFlags
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestResolveWindowsExecutableIgnoresExecutableBit
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestResolveWindowsExecutableUsesCaseInsensitiveEnvKeys
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestResolveWindowsExecutableUsesPATHEXT
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestReusableRemoteCredentialKeepsWorkingStoredCredential
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestRunGitSubShellPreservesExitStatus
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestRunGitSubShellUsesInProcessShell
+✅	✅	❌	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestRunMorePagesPipeWithControllingInput
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestRunPagerDoesNotPromptForShortOutput
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestRunPagerLineAdvanceAfterBackwardPageUsesOneLine
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestRunPagerStopsWhenCallerContextIsCanceled
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestRunPagerSupportsPageBackAndQuit
+❌	❌	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/shell :: TestRusticatedFilepathTreatsWindowsDrivePathsAsAbsolute
+❌	❌	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestRusticatedOpenAcceptsDriveRootedWorkingDirectory
+❌	❌	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestRusticatedUserHomeAndTempDirHaveNoLeadingSlashBeforeDrive
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestSetViewportSizeResizesBackgroundPTYFrame
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestShellCachedBlockCellsMatchANSIComposition
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestShellCompletedLiveOutputHidesCursorTrimsBlankRowsAndKeepsFrame
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestShellInteractiveTerminalSessionEmptyEnterOpensAuthURL
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestShellInteractiveTerminalSessionPasteAndComplete
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestShellRenderTracksLiveTerminalCursorAndResizesOnlyWhenFrameChanges
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestShell_AIToolOutputStaysAboveThinkingIndicator
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestShell_AlternateScreenOutputIsNotEjectedToPlume
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestShell_CtrlCClearsIncompleteMultilineInput
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestShell_DynamicPS1Update
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestShell_EnterContinuesIncompleteShellInput
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestShell_ExecutesValidBashAndFallsBackToAI
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestShell_HidesInputWhileRunningAndRestoresCursor
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestShell_LiveTerminalCursorTracksVTPosition
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestShell_NestedBuiltins_BashShKabibi_AndFallbackPosition
+✅	✅	❌	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestSilentCommandCompletionStopsSubmissionAnimation
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestStreamTTYReportsEffectiveStreamsIndependently
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestStreamedGitLogFallsBackForUnbornHead
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestStreamedGitLogPagesBeforeWalkingFullHistory
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestStreamingAssistantMarkdownIsSanitizedButNotRendered
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestSubmittedAIPromptRetainsBoldItalicInHistoryAndToolSplit
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestSubmittedCommandRetainsSyntaxStylesInPlume
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestSubprocessStreamWriterEmptyWrites
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestSubprocessStreamWriterIncompleteLineRetention
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestSubprocessStreamWriterInvalidateTrigger
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestSubprocessStreamWriterLineTokenization
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestSubprocessStreamWriterLineTokenization/incomplete_line_followed_by_completion
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestSubprocessStreamWriterLineTokenization/mixed_line_endings
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestSubprocessStreamWriterLineTokenization/multiple_lines_in_one_write
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestSubprocessStreamWriterLineTokenization/single_line_with_CRLF
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestSubprocessStreamWriterLineTokenization/single_line_with_LF
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestSubprocessStreamWriterThreadSafety
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestSubprocessStreamWriterViewportWidthUpdate
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestSubprocessStreamWriterWhitespaceStripping
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestSubprocessStreamWriterWhitespaceStripping/line_
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestSubprocessStreamWriterWhitespaceStripping/line__
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestSubprocessStreamWriterWhitespaceStripping/line__#01
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestSubprocessStreamWriterWhitespaceStripping/line___
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/shell :: TestURootHeadLineAndByteCounts
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestURootHeadLineAndByteCounts/head_-c_7_items.txt
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestURootHeadLineAndByteCounts/head_-n_2_items.txt
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/kabibi/ui/shell :: TestURootHeadLineAndByteCounts/seq_1_5_|_head_-n_3
+✅	✅	❌	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestURootTailLineAndByteCounts
+✅	✅	❌	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestURootTailLineAndByteCounts/echo_-e_'one\ntwo\nthree'_|_tail_-n_2
+✅	✅	❌	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestURootTailLineAndByteCounts/tail_-c_6_items.txt
+✅	✅	❌	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestURootTailLineAndByteCounts/tail_-n_2_items.txt
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestUpdateActiveArtifactFeedbackNormalizesAccumulatedWhitespace
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/kabibi/ui/shell :: TestUpdateActiveArtifactToolFeedbackReplacesStatusLine
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestCellBufBlitOutOfBoundsOffset
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestCellBufBlitSkipsZeroCells
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestCellBufBlitWithResetFallbackClearsOverlappedWideGlyph
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestCellBufBlitWithResetFallbackUsesDestinationChannelsIndependently
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestCellBufFillInsideBounds
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestCellBufFillNegativeOffsetClipping
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestCellBufFillOverflowClipping
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestCellBufOutOfBoundsSilent
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestCellBufSetGetRoundTrip
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSI256ColorForeground
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSIBoldColorSGR
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSICursorAbsolutePositioning
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSICursorRelativeHorizontalMove
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSIEmptyInputs
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSIEraseInLine
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSIExactWidthBoundary
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSIHardBreakBoxDrawingAtEdge
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSIHardBreakBulletListNextRow
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSIHardBreakDoubleIndentNextRow
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSIHardBreakLineDividerNextRow
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSIHardBreakNoSoftWrap
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSIHardBreakSentenceEndPeriod
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSILeadingNewlinePreservesEmptyRow
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSIOneCharOverWidth
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSISGRResetIsolation
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSIScrollbackTotalHeight
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSISingleChar
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSISoftWrapFlankDecimal
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSISoftWrapMarkedOnAutoWrappedRow
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSISoftWrapP1AtRightEdge
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSISoftWrapP2aOneTrailingSpace
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSITruecolorBackground
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSIUsesUnicodeCoreGraphemeWidth
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSIUsesUnicodeCoreGraphemeWidth/lines
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSIUsesUnicodeCoreGraphemeWidth/string
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestFromANSIWrapsToMultipleRows
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestIsBoxDrawingRanges
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestIsBulletPrefixPatterns
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestIsDividerCharSet
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestIsInlineWhitespace
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestIsSoftWrapExclusionBoxDrawing
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestIsSoftWrapExclusionBulletPrefix
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestIsSoftWrapExclusionFullStop
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestIsSoftWrapExclusionIndentation
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestIsSoftWrapExclusionLineDivider
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestIsSoftWrapFallsThrough
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestIsSoftWrapGraphemeClusters
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestIsSoftWrapInclusionP1
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestIsSoftWrapInclusionP2a
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestIsSoftWrapInclusionP2b
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestIsSpaceCharacter
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestIsTextFusion
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestNewCellBufDimensions
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRgbTo256ColorCubePrimaries
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRgbTo256Grayscale
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_BackgroundColoredTrailingSpaces
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_BackgroundColoredTrailingSpaces/W=10
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_BackgroundColoredTrailingSpaces/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_BlinkingText
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_BlinkingText/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_BlinkingText/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_BlinkingText/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_BlockDimText
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_BlockDimText/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_BlockDimText/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_BlockDimText/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_BoldRed
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_BoldRed/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_BoldRed/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_BoldRed/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_BoxDrawing
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_BoxDrawing/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_BoxDrawing/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_BoxDrawing/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_BulletList
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_BulletList/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_BulletList/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_BulletList/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_CJKText
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_CJKText/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_CJKText/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_CJKText/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_CarriageReturnOverwrite
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_CarriageReturnOverwrite/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_CarriageReturnOverwrite/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_CarriageReturnOverwrite/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_ColoredTrailingSpaces
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_ColoredTrailingSpaces/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_ColoredTrailingSpaces/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_ColoredTrailingSpaces/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_CursorAbsolute
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_CursorAbsolute/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_CursorAbsolute/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_CursorAbsolute/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_CursorRelative
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_CursorRelative/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_CursorRelative/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_CursorRelative/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_Divider
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_Divider/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_Divider/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_Divider/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_DoubleIndent
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_DoubleIndent/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_DoubleIndent/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_DoubleIndent/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_EmptyString
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_EmptyString/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_EmptyString/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_EmptyString/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_ExactFitBoundary
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_ExactFitBoundary/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_ExactFitBoundary/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_ExactFitBoundary/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_FlankedDecimal
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_FlankedDecimal/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_FlankedDecimal/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_FlankedDecimal/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_ForegroundColorThenPlainTrailingSpaces
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_ForegroundColorThenPlainTrailingSpaces/W=10
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_ForegroundColorThenPlainTrailingSpaces/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_ForegroundColorThenPlainTrailingSpaces/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_LineErase
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_LineErase/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_LineErase/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_LineErase/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_LongWordWrap
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_LongWordWrap/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_LongWordWrap/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_LongWordWrap/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_MixedMidAndTrailingSpaces
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_MixedMidAndTrailingSpaces/W=10
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_MixedMidAndTrailingSpaces/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_MixedMidAndTrailingSpaces/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_MixedPlainAndBGTrailingSpaces
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_MixedPlainAndBGTrailingSpaces/W=10
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_MixedPlainAndBGTrailingSpaces/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_MixedPlainAndBGTrailingSpaces/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_MultilineParagraph
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_MultilineParagraph/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_MultilineParagraph/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_MultilineParagraph/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_NumericDecimal
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_NumericDecimal/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_NumericDecimal/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_NumericDecimal/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_OneOverBoundary
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_OneOverBoundary/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_OneOverBoundary/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_OneOverBoundary/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_PlainTrailingSpacesAfterColor
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_PlainTrailingSpacesAfterColor/W=10
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_PlainTrailingSpacesAfterColor/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_PlainTrailingSpacesAfterColor/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_Prose
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_Prose/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_Prose/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_Prose/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_ResetMidline
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_ResetMidline/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_ResetMidline/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_ResetMidline/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_SentenceEnd
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_SentenceEnd/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_SentenceEnd/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_SentenceEnd/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_SingleRune
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_SingleRune/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_SingleRune/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_SingleRune/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_StackedAttributes
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_StackedAttributes/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_StackedAttributes/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_StackedAttributes/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_TrailingSpacesBeforeSoftWrap
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_TrailingSpacesBeforeSoftWrap/W=10
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_TrailingSpacesBeforeSoftWrap/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_TruecolorBackground
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_TruecolorBackground/W=10
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_TruecolorBackground/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_TruecolorBackground/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_TruecolorForeground
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_TruecolorForeground/W=10
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_TruecolorForeground/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_TruecolorForeground/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_TwoParagraphs
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_TwoParagraphs/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_TwoParagraphs/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_TwoParagraphs/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_UnderlineResetBeforePlainTrailingSpaces
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_UnderlineResetBeforePlainTrailingSpaces/W=10
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_UnderlineResetBeforePlainTrailingSpaces/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_UnderlineResetBeforePlainTrailingSpaces/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_UnderlinedTrailingSpaces
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_UnderlinedTrailingSpaces/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_UnderlinedTrailingSpaces/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_UnderlinedTrailingSpaces/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_WhitespaceOnly
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_WhitespaceOnly/W=20
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_WhitespaceOnly/W=5
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestRoundTrip_WhitespaceOnly/W=80
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestStyleAttributeFlags
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestStyleColorIsolation
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestStyleColorRoundTrip
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestStyleDefaultResetFlagsCoexistWithColors
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestStyleMultipleFlags
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestTerminalAlternateScreenDoesNotReplaceMainScreen
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestTerminalHonorsInBandLineFeedModeReset
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestTerminalLineFeedNewLineMode
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestTerminalRenderANSIResetsBetweenExactSizeFrames
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestTerminalResetReusesAndClearsEmulator
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestTerminalResizePreservesStateWithoutReplay
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestTerminalStreamingChunksMatchSingleWrite
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestToANSIFGResetPreservesBGPlane
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestToANSIFromANSIRoundTrip
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestToANSISoftWrapSuppressesNewline
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestToANSITier16ColorEmission
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/terminal :: TestToANSITrailingColoredSpacesRetained
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/widgets :: TestButtonRowNavigationAndHotkey
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/widgets :: TestButtonRowWrapsToAvailableHeight
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/widgets :: TestCheckboxTogglesOnlyOnSpace
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/widgets :: TestProgressBarRespondsToConstraints
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/widgets :: TestTextInputHorizontalScrollAndEllipses
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/widgets :: TestTextInputPasteAndSelectionReplacement
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/kabibi/ui/widgets :: TestTextInputWideCharactersAndOverflow
+❌	❌	✅	✅	✅	github.com/mavity/rusticated/platform :: TestHostPlatformIsReported
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/platform :: TestHostPlatformMatchesRuntime
+✅	✅	❌	❌	❌	github.com/mavity/rusticated/pope :: TestPopeToolExecution
+✅	✅	✅	❌	✅	github.com/mavity/rusticated/pope :: TestToolFeedbackIsCompactAndLineFree
+✅	✅	✅	✅	✅	github.com/mavity/rusticated/pope :: TestToolsUseDeclarativeSchemas
+✅	✅	✅	✅	✅	mohabbat :: TestNormalizeRunArgs
+✅	✅	✅	✅	✅	mohabbat :: TestNormalizeRunArgs/preserve_intact_test_flags
+✅	✅	✅	✅	✅	mohabbat :: TestNormalizeRunArgs/preserve_ordinary_run_arguments
+✅	✅	✅	✅	✅	mohabbat :: TestNormalizeRunArgs/strip_separator_and_rejoin_split_test_flags
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestAddGoGitWasip1Compatibility
+✅	✅	✅	❌	✅	mohabbat/mohabbat :: TestBuildDloadWorkers
+✅	✅	✅	❌	✅	mohabbat/mohabbat :: TestBuildRustProject
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestEncodeModPath
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestEncodeModPath/github.com/SomeOne/Repo
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestEncodeModPath/github.com/u-root/u-root
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestEncodeModPath/golang.org/x/sys
+✅	✅	✅	❌	✅	mohabbat/mohabbat :: TestEnsureSDK_DownloadAndCache
+✅	✅	✅	❌	✅	mohabbat/mohabbat :: TestFormatSize
+✅	✅	✅	❌	✅	mohabbat/mohabbat :: TestFormatSize/0
+✅	✅	✅	❌	✅	mohabbat/mohabbat :: TestFormatSize/1,000
+✅	✅	✅	❌	✅	mohabbat/mohabbat :: TestFormatSize/1,234,567
+✅	✅	✅	❌	✅	mohabbat/mohabbat :: TestFormatSize/999
+✅	✅	✅	❌	✅	mohabbat/mohabbat :: TestGenerateGoOverlayIncludesABIUserHomeTempOverride
+✅	✅	✅	❌	✅	mohabbat/mohabbat :: TestGoBinFromRoot
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestGoBuildPIE
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestGoBuildPIE/darwin-arm64
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestGoBuildPIE/linux-amd64
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestGoBuildPIE/linux-arm
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestGoBuildPIE/linux-arm64
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestGoBuildPIE/windows-amd64
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestIsKabibiClipboardDependency
+✅	✅	✅	❌	✅	mohabbat/mohabbat :: TestIsProject
+✅	✅	✅	❌	✅	mohabbat/mohabbat :: TestIsProject/go_project
+✅	✅	✅	❌	✅	mohabbat/mohabbat :: TestIsProject/invalid_project
+✅	✅	✅	❌	✅	mohabbat/mohabbat :: TestIsProject/rust_project
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestModVersionFromGomod
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestModulePathFromGomod
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestParseGoTestTimeout
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestParseGoTestTimeout/double_dash
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestParseGoTestTimeout/equals_form
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestParseGoTestTimeout/invalid_duration
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestParseGoTestTimeout/last_value_wins
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestParseGoTestTimeout/missing_value
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestParseGoTestTimeout/not_provided
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestParseGoTestTimeout/separate_value
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestParseGoTestTimeout/zero_disables_timeout
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestParseJitTargets
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestPatchAtottoClipboardInMemory
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestPatchFilepathSecurejoinForByteSeparator
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestPatchMvdanKillBuiltin
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestPatchMvdanKillBuiltin/changed_source
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestPatchMvdanKillBuiltin/duplicate_entry
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestPatchMvdanKillBuiltin/missing_file
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestPatchMvdanUmaskBuiltin
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestPatchWasiStatModePreservesSpecialBits
+✅	✅	✅	❌	✅	mohabbat/mohabbat :: TestRemoveStaleXSysCPUAliases
+✅	✅	✅	❌	✅	mohabbat/mohabbat :: TestUniqueStrings
+✅	✅	✅	❌	✅	mohabbat/mohabbat :: TestUpsertEnv
+✅	✅	✅	❌	✅	mohabbat/mohabbat :: TestUpsertEnv/insert_new
+✅	✅	✅	❌	✅	mohabbat/mohabbat :: TestUpsertEnv/update_case_insensitive_existing
+✅	✅	✅	❌	✅	mohabbat/mohabbat :: TestUpsertEnv/update_existing
+✅	✅	✅	✅	✅	mohabbat/mohabbat :: TestXSysCPUFilesAreNotFlippedForWasip1
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: Example
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleMatch
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleMatchString
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleQuoteMeta
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_Expand
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_ExpandString
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_Find
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_FindAll
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_FindAllIndex
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_FindAllString
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_FindAllStringSubmatch
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_FindAllStringSubmatchIndex
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_FindAllSubmatch
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_FindAllSubmatchIndex
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_FindIndex
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_FindString
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_FindStringIndex
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_FindStringSubmatch
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_FindSubmatch
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_FindSubmatchIndex
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_Longest
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_Match
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_MatchString
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_NumSubexp
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_ReplaceAll
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_ReplaceAllLiteralString
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_ReplaceAllString
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_ReplaceAllStringFunc
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_Split
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_SubexpIndex
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: ExampleRegexp_SubexpNames
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestASTMapEndsForStart
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestASTMapNextSignificant
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestASTMapSameTokenNoBoundary
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestASTMapTokenBoundary
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestBackrefCaseFoldingAndMalformedBytes
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestBackrefLargeInputDoesNotAllocateFlatVisitedVector
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestBackrefLongestMatch
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestBackrefMatchingAndCaptureResults
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestBackrefRejectsNodeGroups
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestBackrefTryAPIsAndReaderPolicy
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestBackrefWordBoundaries
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestBadCompile
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestBitStateReusesFlatBitsAcrossSearches
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestByteMatchesAgreeWithRegexpOnValidUTF8
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestCompileOnePass
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestCopyMatch
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestDeepEqual
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestFind
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestFindAll
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestFindAllIndex
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestFindAllNoMatchAllocs
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestFindAllNoMatchAllocs/FindAll
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestFindAllNoMatchAllocs/FindAllIndex
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestFindAllNoMatchAllocs/FindAllString
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestFindAllNoMatchAllocs/FindAllStringIndex
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestFindAllNoMatchAllocs/FindAllStringSubmatch
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestFindAllNoMatchAllocs/FindAllStringSubmatchIndex
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestFindAllNoMatchAllocs/FindAllSubmatch
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestFindAllNoMatchAllocs/FindAllSubmatchIndex
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestFindAllString
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestFindAllStringIndex
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestFindAllStringSubmatch
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestFindAllStringSubmatchIndex
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestFindAllSubmatch
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestFindAllSubmatchIndex
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestFindIndex
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestFindReaderIndex
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestFindReaderSubmatchIndex
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestFindString
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestFindStringIndex
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestFindStringSubmatch
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestFindStringSubmatchIndex
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestFindSubmatch
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestFindSubmatchIndex
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestFowler
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestGoodCompile
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestInvalidByteCapturesAndReplacementPreserveBytes
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestInvalidBytesAreDistinctSymbols
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestLiteralPrefix
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestLongest
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestMatch
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestMatchFunction
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestMergeRuneSet
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestMinInputLen
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/add_context_timeout
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/add_error_return_to_func
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/add_trailing_comma_to_struct
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/block_comment_incorrect
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/block_comment_match_and_replace
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/block_comment_match_and_replace_with_extra_whitespace_in_input
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/block_comment_match_and_replace_with_extra_whitespace_in_pattern
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/block_comment_whitespace_flexible
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/call_with_multi-line_args
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/call_with_nested_parens
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/chan_send_rename
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/change_constant_string_prefix
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/change_map_literalkey
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/change_map_retrieval
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/change_operator_precedence
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/change_slice_initialization
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/change_varied_args_call
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/comment_preservation
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/composite_literal_to_constructor
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/context_background_to_todo
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/convert_for_loop_to_range
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/convert_type_assertion_to_switch
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/convert_type_assertion_with_else
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/cross-line_binary
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/empty_interface_to_any
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/extract_error_handling_to_func
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/fix_error_message_template
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/for_range_simplify
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/generic_func_numbering
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/go_func_to_runner
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/greedy_match_avoidance
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/if_with_init_split
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/interface_method_rename
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/labeled_loop_break
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/line_comment_directive_replace
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/line_comment_match_and_replace
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/line_comment_match_and_replace_with_extra_whitespace_in_input
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/line_comment_match_and_replace_with_extra_whitespace_in_pattern
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/line_comment_no_match_in_string
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/line_comment_whitespace_flexible
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/map_key_swap
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/multiple_calls_same_line
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/multiple_imports_literal
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/nested_call_in_expression
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/nested_node_groups_numbering
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/plain_literal_replace
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/plain_regex_group_swap
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/remove_blank_identifier
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/remove_outer_parens
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/rename_channel_variable
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/rename_complex_number
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/rename_field_in_struct_init
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/rename_method_and_receiver
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/rename_method_chaining
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/rename_method_on_type
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/rename_multiple_variables_in_decl
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/rename_qualified_identifier
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/rename_receiver_in_method
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/rename_type_alias
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/rename_with_internal_spacing
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/replace_call_name
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/rewrite_bitwise_op
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/rewrite_select_case
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/simplify_if_else_boolean
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/simplify_slice_expression
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/slice_length_check_to_empty_check
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/standardize_fmt_errorwrapping
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/strip_log_prefix_from_call
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/struct_field_swap
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/swap_binary_operands
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/swap_call_arguments
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/swap_coordinates_struct
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/swap_generic_params
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/swap_struct_tags
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/switch_case_rename
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/type_switch_case_rename
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/var_to_const
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/variadic_to_append
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/variadic_to_slice
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/wrap_block_in_if
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/wrap_defer_call_in_closure
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeGolden/wrap_node_with_$1
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestNodeGroupStateIsConditional
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodePerCharSkip
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodePerCharSkip/block_comment_between_selector_parts
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodePerCharSkip/comment_between_operands
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodePerCharSkip/comment_inside_call_args
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodePerCharSkip/lax_spacing_around_line_comment
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodePerCharSkip/lax_spacing_inside_block_comment
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodePerCharSkip/match_trailing_line_comment
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodePerCharSkip/multiple_comments_alignment
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodePerCharSkip/pattern_whitespace_>_source
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeSeamRule
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeSeamRule/no_fuse_field_name_and_type
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestNodeSeamRule/no_fuse_var_name_and_type
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestOnePassCutoff
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestParseAndCompile
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestProgramTooLongForBacktrack
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestQuoteMeta
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestRE2Exhaustive
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestRE2Search
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestReplaceAll
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestReplaceAllFunc
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestReplaceAllLiteral
+✅	✅	❌	✅	❌	mohabbat/mohabbat/regast :: TestRunOnePass
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestSplit
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestSplitAll
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestSubexp
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestSwitchBacktrack
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestUnmarshalText
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestUnmarshalText/invalid_pattern
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast :: TestValidRuneErrorDiffersFromInvalidByte
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast/syntax :: ExampleParse
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast/syntax :: TestAppendRangeCollapse
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast/syntax :: TestBackrefDisabledWithoutDialectFlag
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast/syntax :: TestBackrefParsingAndCompilation
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast/syntax :: TestBackrefRejectsOutOfRangeCapture
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast/syntax :: TestCompile
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast/syntax :: TestFoldConstants
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast/syntax :: TestGNUWordBoundaryAssertions
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast/syntax :: TestParseCommentNodeGroup
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast/syntax :: TestParseFoldCase
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast/syntax :: TestParseInvalidRegexps
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast/syntax :: TestParseLiteral
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast/syntax :: TestParseMatchNL
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast/syntax :: TestParseNoMatchNL
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast/syntax :: TestParseNodeGap
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast/syntax :: TestParseNodeGroup
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast/syntax :: TestParseNodeNested
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast/syntax :: TestParseSimple
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast/syntax :: TestSimplify
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast/syntax :: TestString
+✅	✅	✅	✅	✅	mohabbat/mohabbat/regast/syntax :: TestToStringEquivalentParse
+✅	✅	✅	✅	✅	mohabbat/release :: TestBuildIndexWithEmbeddedFavicons
+✅	✅	✅	✅	✅	mohabbat/release :: TestBuildIndexWithEmbeddedFaviconsRequiresOneSourceLink
+✅	✅	✅	✅	✅	mohabbat/release :: TestBuildTestMatrixDropsResultsFromOmittedModes
+✅	✅	✅	✅	✅	mohabbat/release :: TestBuildTestMatrixMarksMissingModeResultsAsFailed
+✅	✅	✅	✅	✅	mohabbat/release :: TestConsumeTestJSONCollectsTestsAndPackageSetupFailures
+✅	✅	✅	✅	✅	mohabbat/release :: TestConsumeVerboseGoTestsCollectsPassFailAndSkip
+✅	✅	✅	✅	✅	mohabbat/release :: TestLinuxAMD64BinfmtEnabled
+✅	✅	✅	✅	✅	mohabbat/release :: TestLinuxAMD64BinfmtEnabled/disabled_registration
+✅	✅	✅	✅	✅	mohabbat/release :: TestLinuxAMD64BinfmtEnabled/enabled_registration
+✅	✅	✅	✅	✅	mohabbat/release :: TestLinuxAMD64BinfmtEnabled/missing_interpreter
+✅	✅	✅	✅	✅	mohabbat/release :: TestPlanTestModes
+✅	✅	✅	✅	✅	mohabbat/release :: TestPlanTestModes/Apple_Silicon_without_Rosetta
+✅	✅	✅	✅	✅	mohabbat/release :: TestPlanTestModes/Linux_AMD64_with_Node
+✅	✅	✅	✅	✅	mohabbat/release :: TestPlanTestModes/Linux_ARM64_with_configured_emulation
+✅	✅	✅	✅	✅	mohabbat/release :: TestPlanTestModes/Linux_ARM64_without_emulation
+✅	✅	✅	✅	✅	mohabbat/release :: TestPlanTestModes/Windows_AMD64_does_not_duplicate_AMD64_or_try_ARM64
+✅	✅	✅	✅	✅	mohabbat/release :: TestPlanTestModes/Windows_ARM64_with_Node_and_built-in_AMD64_emulation
+✅	✅	✅	✅	✅	mohabbat/release :: TestUsableNodeVersionRequirements
+❌	❌	❌	❌	❌	mohabbat/rusticated-go/syscall :: (package setup)
+✅	✅	❌	❌	❌	pty :: TestPtyExecution
+✅	✅	❌	❌	❌	pty :: TestPtyInteractive
+❌	❌	❌	❌	❌	washmhost :: (package setup)
+✅	✅	❌	❌	❌	washmhost :: TestCancelOpExtended
+✅	✅	❌	❌	❌	washmhost :: TestCancelOpExtended/1._basic_cancellation_flag
+✅	✅	❌	❌	❌	washmhost :: TestCancelOpExtended/10._nil_handle_safety
+✅	✅	❌	❌	❌	washmhost :: TestCancelOpExtended/11._non-deadline_handle_safety
+✅	✅	❌	❌	❌	washmhost :: TestCancelOpExtended/12._concurrent_cancellation_pressure
+✅	✅	❌	❌	❌	washmhost :: TestCancelOpExtended/13._cancel_after_overwrite
+✅	✅	❌	❌	❌	washmhost :: TestCancelOpExtended/14._cleanup-only_timer_cancel
+✅	✅	❌	❌	❌	washmhost :: TestCancelOpExtended/2._deadline_setting_on_handle
+✅	✅	❌	❌	❌	washmhost :: TestCancelOpExtended/3._timer_cancellation_stops_timer
+✅	✅	❌	❌	❌	washmhost :: TestCancelOpExtended/4._timer_cancellation_removes_from_map
+✅	✅	❌	❌	❌	washmhost :: TestCancelOpExtended/5._timer_cancellation_removes_from_activeOps
+✅	✅	❌	❌	❌	washmhost :: TestCancelOpExtended/6._timer_cancellation_decrements_counter
+✅	✅	❌	❌	❌	washmhost :: TestCancelOpExtended/7._idempotency_of_cancellation
+✅	✅	❌	❌	❌	washmhost :: TestCancelOpExtended/8._cancel_non-existent_op
+✅	✅	❌	❌	❌	washmhost :: TestCancelOpExtended/9._cancel_already_cancelled_op
+✅	✅	❌	❌	❌	washmhost :: TestCreateAbiStat
+✅	✅	❌	❌	❌	washmhost :: TestCreateAbiStat/dir_with_perm_700
+✅	✅	❌	❌	❌	washmhost :: TestCreateAbiStat/directory
+✅	✅	❌	❌	❌	washmhost :: TestCreateAbiStat/empty_file
+✅	✅	❌	❌	❌	washmhost :: TestCreateAbiStat/epoch_time
+✅	✅	❌	❌	❌	washmhost :: TestCreateAbiStat/execute_only
+✅	✅	❌	❌	❌	washmhost :: TestCreateAbiStat/full_permissions
+✅	✅	❌	❌	❌	washmhost :: TestCreateAbiStat/future_time
+✅	✅	❌	❌	❌	washmhost :: TestCreateAbiStat/large_file
+✅	✅	❌	❌	❌	washmhost :: TestCreateAbiStat/max_file_size
+✅	✅	❌	❌	❌	washmhost :: TestCreateAbiStat/no_permissions
+✅	✅	❌	❌	❌	washmhost :: TestCreateAbiStat/preserves_setuid_bit
+✅	✅	❌	❌	❌	washmhost :: TestCreateAbiStat/read_only
+✅	✅	❌	❌	❌	washmhost :: TestCreateAbiStat/regular_file
+✅	✅	❌	❌	❌	washmhost :: TestCreateAbiStat/symlink
+✅	✅	❌	❌	❌	washmhost :: TestCreateAbiStatUsesNativeMetadata
+✅	✅	❌	❌	❌	washmhost :: TestDecOpsExtended
+✅	✅	❌	❌	❌	washmhost :: TestDecOpsExtended/1._simple_decrement_1_to_0
+✅	✅	❌	❌	❌	washmhost :: TestDecOpsExtended/10._effect_on_HasLiveOps
+✅	✅	❌	❌	❌	washmhost :: TestDecOpsExtended/11._DecOps_on_large_value
+✅	✅	❌	❌	❌	washmhost :: TestDecOpsExtended/12._CAS_loop_simulation_-_atomic_load_consistency
+✅	✅	❌	❌	❌	washmhost :: TestDecOpsExtended/13._verify_no_side_effect_on_activeOps
+✅	✅	❌	❌	❌	washmhost :: TestDecOpsExtended/14._HasOutstandingOps_consistency
+✅	✅	❌	❌	❌	washmhost :: TestDecOpsExtended/2._decrement_from_multiple
+✅	✅	❌	❌	❌	washmhost :: TestDecOpsExtended/3._underflow_protection
+✅	✅	❌	❌	❌	washmhost :: TestDecOpsExtended/4._double_underflow
+✅	✅	❌	❌	❌	washmhost :: TestDecOpsExtended/5._high_concurrency_Inc/Dec
+✅	✅	❌	❌	❌	washmhost :: TestDecOpsExtended/6._lifecycle_check_-_RegisterOp_then_dec
+✅	✅	❌	❌	❌	washmhost :: TestDecOpsExtended/7._sequence_of_Inc/Dec
+✅	✅	❌	❌	❌	washmhost :: TestDecOpsExtended/8._DecOps_until_zero_in_loop
+✅	✅	❌	❌	❌	washmhost :: TestDecOpsExtended/9._interleaved_contention_-_10000_ops
+✅	✅	❌	❌	❌	washmhost :: TestDecodeWashmhostGuestArgs
+✅	✅	❌	❌	❌	washmhost :: TestDecodeWashmhostGuestArgs/empty
+✅	✅	❌	❌	❌	washmhost :: TestDecodeWashmhostGuestArgs/preserves_dotted_flags_and_spaces
+✅	✅	❌	❌	❌	washmhost :: TestDecodeWashmhostGuestArgs/rejects_malformed_JSON
+✅	✅	❌	❌	❌	washmhost :: TestDecodeWashmhostGuestArgs/rejects_non-array_JSON
+✅	✅	❌	❌	❌	washmhost :: TestDirEntryUnknownTypeUsesFileKind
+✅	✅	❌	❌	❌	washmhost :: TestGuestEnvCanonicalizesWindowsPathAliases
+✅	✅	❌	❌	❌	washmhost :: TestGuestEnvDoesNotExposeWashmhostHostSettings
+✅	✅	❌	❌	❌	washmhost :: TestGuestEnvDoesNotRewriteTempOrUserPaths
+✅	✅	❌	❌	❌	washmhost :: TestGuestEnvExpandsPercentVarInPath
+✅	✅	❌	❌	❌	washmhost :: TestGuestEnvPreservesWindowsUserDirs
+✅	✅	❌	❌	❌	washmhost :: TestGuestRuntimeEnvDoesNotInjectHostHomeAndTemp
+✅	✅	❌	❌	❌	washmhost :: TestGuestRuntimeEnvOmitsCwdValues
+✅	✅	❌	❌	❌	washmhost :: TestHostEnvTracksModuleCwd
+✅	✅	❌	❌	❌	washmhost :: TestIsOpActiveExtended
+✅	✅	❌	❌	❌	washmhost :: TestIsOpActiveExtended/1._basic_positive_match
+✅	✅	❌	❌	❌	washmhost :: TestIsOpActiveExtended/10._check_with_ID_zero
+✅	✅	❌	❌	❌	washmhost :: TestIsOpActiveExtended/11._concurrency_stress_-_readers
+✅	✅	❌	❌	❌	washmhost :: TestIsOpActiveExtended/12._check_after_re-initialization
+✅	✅	❌	❌	❌	washmhost :: TestIsOpActiveExtended/13._check_with_max_uint32_ptr
+✅	✅	❌	❌	❌	washmhost :: TestIsOpActiveExtended/14._check_with_non-existent_ptr
+✅	✅	❌	❌	❌	washmhost :: TestIsOpActiveExtended/2._negative_match_-_wrong_ptr
+✅	✅	❌	❌	❌	washmhost :: TestIsOpActiveExtended/3._negative_match_-_wrong_ID
+✅	✅	❌	❌	❌	washmhost :: TestIsOpActiveExtended/4._negative_match_-_both_wrong
+✅	✅	❌	❌	❌	washmhost :: TestIsOpActiveExtended/5._inactive_after_overwrite
+✅	✅	❌	❌	❌	washmhost :: TestIsOpActiveExtended/6._inactive_after_manual_removal
+✅	✅	❌	❌	❌	washmhost :: TestIsOpActiveExtended/7._inactive_after_cancellation
+✅	✅	❌	❌	❌	washmhost :: TestIsOpActiveExtended/8._cross-talk_prevention
+✅	✅	❌	❌	❌	washmhost :: TestIsOpActiveExtended/9._check_with_ovPtr_zero
+✅	✅	❌	❌	❌	washmhost :: TestMapErrnoEFBIG
+✅	✅	❌	❌	❌	washmhost :: TestMarshalAbiStat
+✅	✅	❌	❌	❌	washmhost :: TestNewHostEnvExhaustive
+✅	✅	❌	❌	❌	washmhost :: TestNewHostEnvExhaustive/ActiveOpsMapInit
+✅	✅	❌	❌	❌	washmhost :: TestNewHostEnvExhaustive/FileOpsQueueCap
+✅	✅	❌	❌	❌	washmhost :: TestNewHostEnvExhaustive/Handle0Stdin
+✅	✅	❌	❌	❌	washmhost :: TestNewHostEnvExhaustive/Handle1Stdout
+✅	✅	❌	❌	❌	washmhost :: TestNewHostEnvExhaustive/Handle2Stderr
+✅	✅	❌	❌	❌	washmhost :: TestNewHostEnvExhaustive/HandlesMapInit
+✅	✅	❌	❌	❌	washmhost :: TestNewHostEnvExhaustive/NextHandlePointer
+✅	✅	❌	❌	❌	washmhost :: TestNewHostEnvExhaustive/OutstandingOpsInit
+✅	✅	❌	❌	❌	washmhost :: TestNewHostEnvExhaustive/PendingSignalsCap
+✅	✅	❌	❌	❌	washmhost :: TestNewHostEnvExhaustive/ReturnsNonNil
+✅	✅	❌	❌	❌	washmhost :: TestNewHostEnvExhaustive/SignalWaitersMapInit
+✅	✅	❌	❌	❌	washmhost :: TestNewHostEnvExhaustive/SignalsChannelInit
+✅	✅	❌	❌	❌	washmhost :: TestNewHostEnvExhaustive/StandardHandlesCount
+✅	✅	❌	❌	❌	washmhost :: TestNewHostEnvExhaustive/TimersMapInit
+✅	✅	❌	❌	❌	washmhost :: TestNewHostEnvExtendedState
+✅	✅	❌	❌	❌	washmhost :: TestNewHostEnvExtendedState/CancelOpHandleBehavior
+✅	✅	❌	❌	❌	washmhost :: TestNewHostEnvExtendedState/CancelOpTimerBehavior
+✅	✅	❌	❌	❌	washmhost :: TestNewHostEnvExtendedState/HasOutstandingOpsBehavior
+✅	✅	❌	❌	❌	washmhost :: TestNewHostEnvExtendedState/MapWritable
+✅	✅	❌	❌	❌	washmhost :: TestNewHostEnvExtendedState/NextHandleIncrements
+✅	✅	❌	❌	❌	washmhost :: TestNewHostEnvExtendedState/NextOpIDMonotonicity
+✅	✅	❌	❌	❌	washmhost :: TestNewHostEnvExtendedState/QueueFunctionality
+✅	✅	❌	❌	❌	washmhost :: TestNewHostEnvExtendedState/RegisterOpLifecycle
+✅	✅	❌	❌	❌	washmhost :: TestPathLinkOperations
+✅	✅	❌	❌	❌	washmhost :: TestPosixModeToGoFileModePreservesSpecialBits
+✅	✅	❌	❌	❌	washmhost :: TestPosixModeToGoFileModePreservesSpecialBits/permissions_only
+✅	✅	❌	❌	❌	washmhost :: TestPosixModeToGoFileModePreservesSpecialBits/setgid
+✅	✅	❌	❌	❌	washmhost :: TestPosixModeToGoFileModePreservesSpecialBits/setuid
+✅	✅	❌	❌	❌	washmhost :: TestPosixModeToGoFileModePreservesSpecialBits/sticky
+✅	✅	❌	❌	❌	washmhost :: TestRegisterOpExtended
+✅	✅	❌	❌	❌	washmhost :: TestRegisterOpExtended/1._basic_registration_mapping
+✅	✅	❌	❌	❌	washmhost :: TestRegisterOpExtended/10._boundary_ovPtr_-_max
+✅	✅	❌	❌	❌	washmhost :: TestRegisterOpExtended/11._state_initialization_flags
+✅	✅	❌	❌	❌	washmhost :: TestRegisterOpExtended/12._concurrent_registration_stress
+✅	✅	❌	❌	❌	washmhost :: TestRegisterOpExtended/13._registration_after_full_cleanup
+✅	✅	❌	❌	❌	washmhost :: TestRegisterOpExtended/14._memory_residency_check
+✅	✅	❌	❌	❌	washmhost :: TestRegisterOpExtended/2._ID_increment_uniqueness
+✅	✅	❌	❌	❌	washmhost :: TestRegisterOpExtended/3._storage_in_activeOps_map
+✅	✅	❌	❌	❌	washmhost :: TestRegisterOpExtended/4._counter_increment
+✅	✅	❌	❌	❌	washmhost :: TestRegisterOpExtended/5._various_handle_types_-_struct
+✅	✅	❌	❌	❌	washmhost :: TestRegisterOpExtended/6._various_handle_types_-_primitive
+✅	✅	❌	❌	❌	washmhost :: TestRegisterOpExtended/7._overwrite_same_ovPtr
+✅	✅	❌	❌	❌	washmhost :: TestRegisterOpExtended/8._registration_with_nil_handle
+✅	✅	❌	❌	❌	washmhost :: TestRegisterOpExtended/9._boundary_ovPtr_-_zero
+✅	✅	❌	❌	❌	washmhost :: TestResolveGuestDriveRootedPathDoesNotPrefixCwd
+✅	✅	❌	❌	❌	washmhost :: TestRunHostHonorsTestTimeout
+✅	✅	❌	❌	❌	washmhost :: TestStatModeAndKindPreservesUnixTypeAndSpecialBits
+✅	✅	❌	❌	❌	washmhost :: TestStatModeAndKindPreservesUnixTypeAndSpecialBits/setgid_dir
+✅	✅	❌	❌	❌	washmhost :: TestStatModeAndKindPreservesUnixTypeAndSpecialBits/setuid_file
+✅	✅	❌	❌	❌	washmhost :: TestStatModeAndKindPreservesUnixTypeAndSpecialBits/socket
+✅	✅	❌	❌	❌	washmhost :: TestStatModeAndKindPreservesUnixTypeAndSpecialBits/sticky_dir
+✅	✅	❌	❌	❌	washmhost :: TestStatModeAndKindPreservesUnixTypeAndSpecialBits/symlink
+✅	✅	❌	❌	❌	washmhost :: TestSysDirReadExtended
+✅	✅	❌	❌	❌	washmhost :: TestSysDirReadExtended/1._happy_path_-_read_all_in_one_go
+✅	✅	❌	❌	❌	washmhost :: TestSysDirReadExtended/10._EINVAL_-_invalid_length
+✅	✅	❌	❌	❌	washmhost :: TestSysDirReadExtended/11._state_persistence_-_DirScan_conversion
+✅	✅	❌	❌	❌	washmhost :: TestSysDirReadExtended/12._handle_hijacked_(closed_mid-scan)
+✅	✅	❌	❌	❌	washmhost :: TestSysDirReadExtended/13._concurrent_reads_same_handle_stress
+✅	✅	❌	❌	❌	washmhost :: TestSysDirReadExtended/14._large_directory_stress_-_100_files
+✅	✅	❌	❌	❌	washmhost :: TestSysDirReadExtended/15._pathological_names_-_dots,_spaces,_unicode
+✅	✅	❌	❌	❌	washmhost :: TestSysDirReadExtended/16._cancellation_mid-read
+✅	✅	❌	❌	❌	washmhost :: TestSysDirReadExtended/17._repeated_calls_after_EOF
+✅	✅	❌	❌	❌	washmhost :: TestSysDirReadExtended/18._directory_re-open_freshness
+✅	✅	❌	❌	❌	washmhost :: TestSysDirReadExtended/19._huge_length_check
+✅	✅	❌	❌	❌	washmhost :: TestSysDirReadExtended/2._empty_directory
+✅	✅	❌	❌	❌	washmhost :: TestSysDirReadExtended/20._overwrite_buffer_verify
+✅	✅	❌	❌	❌	washmhost :: TestSysDirReadExtended/21._leftover_partial_resume
+✅	✅	❌	❌	❌	washmhost :: TestSysDirReadExtended/22._multiple_entries_into_one_buffer
+✅	✅	❌	❌	❌	washmhost :: TestSysDirReadExtended/23._handle_gone_from_map_before_call
+✅	✅	❌	❌	❌	washmhost :: TestSysDirReadExtended/24._interleaved_dir_read_and_path_stat
+✅	✅	❌	❌	❌	washmhost :: TestSysDirReadExtended/25._leftovers_drainage_at_the_end
+✅	✅	❌	❌	❌	washmhost :: TestSysDirReadExtended/3._fragmentation_-_small_buffer_reading_one_by_one
+✅	✅	❌	❌	❌	washmhost :: TestSysDirReadExtended/4._fragmentation_-_1_byte_at_a_time_stress
+✅	✅	❌	❌	❌	washmhost :: TestSysDirReadExtended/5._buffer_matches_entry_size_exactly
+✅	✅	❌	❌	❌	washmhost :: TestSysDirReadExtended/6._large_requested_length,_smaller_available
+✅	✅	❌	❌	❌	washmhost :: TestSysDirReadExtended/7._EBADF_-_invalid_handle
+✅	✅	❌	❌	❌	washmhost :: TestSysDirReadExtended/8._handle_is_a_file_instead_of_directory
+✅	✅	❌	❌	❌	washmhost :: TestSysDirReadExtended/9._EINVAL_-_invalid_pointer
+✅	✅	❌	❌	❌	washmhost :: TestSysFs
+✅	✅	❌	❌	❌	washmhost :: TestSysFs/1._sys_path_open_create_file
+✅	✅	❌	❌	❌	washmhost :: TestSysFs/10._sys_read_past_EOF
+✅	✅	❌	❌	❌	washmhost :: TestSysFs/11._sys_write_to_read-only_handle
+✅	✅	❌	❌	❌	washmhost :: TestSysFs/12._sys_dir_read_on_file_handle
+✅	✅	❌	❌	❌	washmhost :: TestSysFs/13._sys_handle_close_twice
+✅	✅	❌	❌	❌	washmhost :: TestSysFs/14._sys_read_from_invalid_handle
+✅	✅	❌	❌	❌	washmhost :: TestSysFs/2._sys_write_to_file
+✅	✅	❌	❌	❌	washmhost :: TestSysFs/3._sys_read_from_file
+✅	✅	❌	❌	❌	washmhost :: TestSysFs/4._sys_path_stat_file
+✅	✅	❌	❌	❌	washmhost :: TestSysFs/5._sys_path_stat_directory
+✅	✅	❌	❌	❌	washmhost :: TestSysFs/6._sys_path_open_non-existent
+✅	✅	❌	❌	❌	washmhost :: TestSysFs/7._sys_path_chmod
+✅	✅	❌	❌	❌	washmhost :: TestSysFs/7a._sys_path_chmod_preserves_special_bits
+✅	✅	❌	❌	❌	washmhost :: TestSysFs/8._sys_dir_read
+✅	✅	❌	❌	❌	washmhost :: TestSysFs/9._sys_path_open_jail_break_attempt
+✅	✅	❌	❌	❌	washmhost :: TestSysGetPlatformInfoCanonicalizesHostPaths
+✅	✅	❌	❌	❌	washmhost :: TestSysGetRandomExhaustive
+✅	✅	❌	❌	❌	washmhost :: TestSysGetRandomExhaustive/BoundaryWrite
+✅	✅	❌	❌	❌	washmhost :: TestSysGetRandomExhaustive/DistributionSimpleCheck
+✅	✅	❌	❌	❌	washmhost :: TestSysGetRandomExhaustive/InvalidMemory
+✅	✅	❌	❌	❌	washmhost :: TestSysGetRandomExhaustive/LargeRead
+✅	✅	❌	❌	❌	washmhost :: TestSysGetRandomExhaustive/LargeReadPanic
+✅	✅	❌	❌	❌	washmhost :: TestSysGetRandomExhaustive/MemoryPersistence
+✅	✅	❌	❌	❌	washmhost :: TestSysGetRandomExhaustive/NilModulePanic
+✅	✅	❌	❌	❌	washmhost :: TestSysGetRandomExhaustive/RandomnessDataCheck
+✅	✅	❌	❌	❌	washmhost :: TestSysGetRandomExhaustive/SmallRead
+✅	✅	❌	❌	❌	washmhost :: TestSysGetRandomExhaustive/StackParameterVerification
+✅	✅	❌	❌	❌	washmhost :: TestSysGetRandomExhaustive/StressConcurrent
+✅	✅	❌	❌	❌	washmhost :: TestSysGetRandomExhaustive/TypicalRead
+✅	✅	❌	❌	❌	washmhost :: TestSysGetRandomExhaustive/Uniqueness
+✅	✅	❌	❌	❌	washmhost :: TestSysGetRandomExhaustive/ZeroRead
+✅	✅	❌	❌	❌	washmhost :: TestSysGetTimeExhaustive
+✅	✅	❌	❌	❌	washmhost :: TestSysGetTimeExhaustive/BasicSuccess
+✅	✅	❌	❌	❌	washmhost :: TestSysGetTimeExhaustive/ConsistentWithTimeNow
+✅	✅	❌	❌	❌	washmhost :: TestSysGetTimeExhaustive/ContextIndependence
+✅	✅	❌	❌	❌	washmhost :: TestSysGetTimeExhaustive/GoroutineSafety
+✅	✅	❌	❌	❌	washmhost :: TestSysGetTimeExhaustive/HighBitUsageCheck
+✅	✅	❌	❌	❌	washmhost :: TestSysGetTimeExhaustive/IncrementalCheck
+✅	✅	❌	❌	❌	washmhost :: TestSysGetTimeExhaustive/LargeEpochCheck
+✅	✅	❌	❌	❌	washmhost :: TestSysGetTimeExhaustive/Monotonicity
+✅	✅	❌	❌	❌	washmhost :: TestSysGetTimeExhaustive/NegativeTimeCheck
+✅	✅	❌	❌	❌	washmhost :: TestSysGetTimeExhaustive/NilModule
+✅	✅	❌	❌	❌	washmhost :: TestSysGetTimeExhaustive/NoAllocationsDuringCall
+✅	✅	❌	❌	❌	washmhost :: TestSysGetTimeExhaustive/NonNilResult
+✅	✅	❌	❌	❌	washmhost :: TestSysGetTimeExhaustive/StackIsolation
+✅	✅	❌	❌	❌	washmhost :: TestSysGetTimeExhaustive/StressLoad
+✅	✅	❌	❌	❌	washmhost :: TestSysHandleTruncate
+✅	✅	❌	❌	❌	washmhost :: TestSysMisc
+✅	✅	❌	❌	❌	washmhost :: TestSysMisc/1._sys_debug_log_valid
+✅	✅	❌	❌	❌	washmhost :: TestSysMisc/10._sys_get_args_with_nil_module
+✅	✅	❌	❌	❌	washmhost :: TestSysMisc/11._sys_get_env_with_nil_module
+✅	✅	❌	❌	❌	washmhost :: TestSysMisc/12._Poll_with_no_work
+✅	✅	❌	❌	❌	washmhost :: TestSysMisc/13._resolveUsableCwd
+✅	✅	❌	❌	❌	washmhost :: TestSysMisc/14._sys_debug_log_extreme_length
+✅	✅	❌	❌	❌	washmhost :: TestSysMisc/2._sys_debug_log_invalid_ptr
+✅	✅	❌	❌	❌	washmhost :: TestSysMisc/3._sys_signal_wait_registration
+✅	✅	❌	❌	❌	washmhost :: TestSysMisc/4._sys_signal_wait_fire
+✅	✅	❌	❌	❌	washmhost :: TestSysMisc/5._sys_signal_wait_overwrite
+✅	✅	❌	❌	❌	washmhost :: TestSysMisc/6._mapErrno_translation
+✅	✅	❌	❌	❌	washmhost :: TestSysMisc/7._writeOverlapped_OOB
+✅	✅	❌	❌	❌	washmhost :: TestSysMisc/8._writeOverlapped_success
+✅	✅	❌	❌	❌	washmhost :: TestSysMisc/9._sys_signal_wait_cancellation
+✅	✅	❌	❌	❌	washmhost :: TestSysNet
+✅	✅	❌	❌	❌	washmhost :: TestSysNet/1._sys_net_open_listen
+✅	✅	❌	❌	❌	washmhost :: TestSysNet/10._sys_net_open_loopback_port_0
+✅	✅	❌	❌	❌	washmhost :: TestSysNet/11._accept_on_closed_listener
+✅	✅	❌	❌	❌	washmhost :: TestSysNet/12._write_to_closed_network_handle
+✅	✅	❌	❌	❌	washmhost :: TestSysNet/13._sys_net_open_with_localhost_addr
+✅	✅	❌	❌	❌	washmhost :: TestSysNet/14._sys_net_accept_pressure
+✅	✅	❌	❌	❌	washmhost :: TestSysNet/2._sys_net_open_dial_loopback
+✅	✅	❌	❌	❌	washmhost :: TestSysNet/3._sys_net_accept
+✅	✅	❌	❌	❌	washmhost :: TestSysNet/4._sys_net_open_invalid_address
+✅	✅	❌	❌	❌	washmhost :: TestSysNet/5._sys_net_accept_on_non-existent_handle
+✅	✅	❌	❌	❌	washmhost :: TestSysNet/6._read/write_on_network_handle
+✅	✅	❌	❌	❌	washmhost :: TestSysNet/7._sys_net_open_multiple_concurrent_dials
+✅	✅	❌	❌	❌	washmhost :: TestSysNet/8._close_listener_stops_accept
+✅	✅	❌	❌	❌	washmhost :: TestSysNet/9._sys_handle_close_on_already_closed_net_handle
+✅	✅	❌	❌	❌	washmhost :: TestSysPathSetTimes
+✅	✅	❌	❌	❌	washmhost :: TestSysPathSetTimesNoFollowSymlink
+✅	✅	❌	❌	❌	washmhost :: TestSysProcEnv
+✅	✅	❌	❌	❌	washmhost :: TestSysProcEnv/1._sys_get_args_basic_metadata
+✅	✅	❌	❌	❌	washmhost :: TestSysProcEnv/10._sys_get_env_stress
+✅	✅	❌	❌	❌	washmhost :: TestSysProcEnv/11._sys_get_cwd_buffer_exactly_right
+✅	✅	❌	❌	❌	washmhost :: TestSysProcEnv/12._sys_get_args_many_calls
+✅	✅	❌	❌	❌	washmhost :: TestSysProcEnv/13._sys_process_spawn_invalid_exe
+✅	✅	❌	❌	❌	washmhost :: TestSysProcEnv/14._sys_process_wait_on_non-process_handle
+✅	✅	❌	❌	❌	washmhost :: TestSysProcEnv/15._sys_process_spawn_with_pty
+✅	✅	❌	❌	❌	washmhost :: TestSysProcEnv/2._sys_get_args_full_retrieval
+✅	✅	❌	❌	❌	washmhost :: TestSysProcEnv/3._sys_get_args_small_buffer
+✅	✅	❌	❌	❌	washmhost :: TestSysProcEnv/4._sys_get_env_basic_metadata
+✅	✅	❌	❌	❌	washmhost :: TestSysProcEnv/5._sys_get_env_full_retrieval
+✅	✅	❌	❌	❌	washmhost :: TestSysProcEnv/6._sys_get_cwd_and_sys_set_cwd
+✅	✅	❌	❌	❌	washmhost :: TestSysProcEnv/7._sys_set_cwd_invalid_path
+✅	✅	❌	❌	❌	washmhost :: TestSysProcEnv/8._sys_process_spawn_basic
+✅	✅	❌	❌	❌	washmhost :: TestSysProcEnv/9._sys_process_signal
+✅	✅	❌	❌	❌	washmhost :: TestSysReadExtended
+✅	✅	❌	❌	❌	washmhost :: TestSysReadExtended/1._read_small_chunk_happy_path
+✅	✅	❌	❌	❌	washmhost :: TestSysReadExtended/10._read_cancelation
+✅	✅	❌	❌	❌	washmhost :: TestSysReadExtended/11._read_from_directory
+✅	✅	❌	❌	❌	washmhost :: TestSysReadExtended/12._read_partial_data
+✅	✅	❌	❌	❌	washmhost :: TestSysReadExtended/13._concurrent_reads_different_handles
+✅	✅	❌	❌	❌	washmhost :: TestSysReadExtended/14._read_from_handle_0_(stdin_mock)
+✅	✅	❌	❌	❌	washmhost :: TestSysReadExtended/15._handle_removed_from_map
+✅	✅	❌	❌	❌	washmhost :: TestSysReadExtended/16._closed_file_descriptor
+✅	✅	❌	❌	❌	washmhost :: TestSysReadExtended/17._huge_length_(overflow_check)
+✅	✅	❌	❌	❌	washmhost :: TestSysReadExtended/18._read_after_seek
+✅	✅	❌	❌	❌	washmhost :: TestSysReadExtended/19._read_into_end_of_memory
+✅	✅	❌	❌	❌	washmhost :: TestSysReadExtended/2._read_zero_bytes
+✅	✅	❌	❌	❌	washmhost :: TestSysReadExtended/20._concurrency_queue_stress
+✅	✅	❌	❌	❌	washmhost :: TestSysReadExtended/3._read_at_EOF
+✅	✅	❌	❌	❌	washmhost :: TestSysReadExtended/4._read_invalid_handle
+✅	✅	❌	❌	❌	washmhost :: TestSysReadExtended/5._read_invalid_guest_memory
+✅	✅	❌	❌	❌	washmhost :: TestSysReadExtended/6._read_from_write-only_handle
+✅	✅	❌	❌	❌	washmhost :: TestSysReadExtended/7._read_large_chunk
+✅	✅	❌	❌	❌	washmhost :: TestSysReadExtended/8._sequential_reads
+✅	✅	❌	❌	❌	washmhost :: TestSysReadExtended/8a._positioned_read_leaves_shared_position_unchanged
+✅	✅	❌	❌	❌	washmhost :: TestSysReadExtended/8b._rejects_unsupported_read_flags_and_offsets
+✅	✅	❌	❌	❌	washmhost :: TestSysReadExtended/8c._positioned_read_rejects_non-positionable_handles
+✅	✅	❌	❌	❌	washmhost :: TestSysReadExtended/9._read_error_mapping
+✅	✅	❌	❌	❌	washmhost :: TestSysTimeNowExhaustive
+✅	✅	❌	❌	❌	washmhost :: TestSysTimeNowExhaustive/Accuracy
+✅	✅	❌	❌	❌	washmhost :: TestSysTimeNowExhaustive/BasicSuccess
+✅	✅	❌	❌	❌	washmhost :: TestSysTimeNowExhaustive/ConcurrentAccess
+✅	✅	❌	❌	❌	washmhost :: TestSysTimeNowExhaustive/ContextIndependence
+✅	✅	❌	❌	❌	washmhost :: TestSysTimeNowExhaustive/ModuleIndependence
+✅	✅	❌	❌	❌	washmhost :: TestSysTimeNowExhaustive/Monotonicity
+✅	✅	❌	❌	❌	washmhost :: TestSysTimeNowExhaustive/NoPanicOnRandomStack
+✅	✅	❌	❌	❌	washmhost :: TestSysTimeNowExhaustive/NoSideEffects
+✅	✅	❌	❌	❌	washmhost :: TestSysTimeNowExhaustive/Precision
+✅	✅	❌	❌	❌	washmhost :: TestSysTimeNowExhaustive/ResultIsUint64
+✅	✅	❌	❌	❌	washmhost :: TestSysTimeNowExhaustive/StackLength1
+✅	✅	❌	❌	❌	washmhost :: TestSysTimeNowExhaustive/Stress
+✅	✅	❌	❌	❌	washmhost :: TestSysTimeNowExhaustive/TypeCheck
+✅	✅	❌	❌	❌	washmhost :: TestSysTimeNowExhaustive/UnixEpochSanity
+✅	✅	❌	❌	❌	washmhost :: TestSysTimerSetExtended
+✅	✅	❌	❌	❌	washmhost :: TestSysTimerSetExtended/1._basic_timer_set_and_fire
+✅	✅	❌	❌	❌	washmhost :: TestSysTimerSetExtended/10._timer_fire_after_host_cancel
+✅	✅	❌	❌	❌	washmhost :: TestSysTimerSetExtended/11._timer_set_near_end_of_memory
+✅	✅	❌	❌	❌	washmhost :: TestSysTimerSetExtended/12._Poll_processes_multiple_timers
+✅	✅	❌	❌	❌	washmhost :: TestSysTimerSetExtended/13._timer_precision_check_(approximate)
+✅	✅	❌	❌	❌	washmhost :: TestSysTimerSetExtended/14._proactor_queue_pressure_from_timers
+✅	✅	❌	❌	❌	washmhost :: TestSysTimerSetExtended/2._timer_overwrite_stops_old_timer
+✅	✅	❌	❌	❌	washmhost :: TestSysTimerSetExtended/3._zero_timeout_fires_quickly
+✅	✅	❌	❌	❌	washmhost :: TestSysTimerSetExtended/4._cancelled_timer_does_not_write_back
+✅	✅	❌	❌	❌	washmhost :: TestSysTimerSetExtended/5._sys_cancel_also_works_for_timers
+✅	✅	❌	❌	❌	washmhost :: TestSysTimerSetExtended/6._timer_firing_removes_from_timers_map
+✅	✅	❌	❌	❌	washmhost :: TestSysTimerSetExtended/7._high_frequency_timer_set
+✅	✅	❌	❌	❌	washmhost :: TestSysTimerSetExtended/8._multiple_concurrent_timers
+✅	✅	❌	❌	❌	washmhost :: TestSysTimerSetExtended/9._large_timeout_behavior
+✅	✅	❌	❌	❌	washmhost :: TestSysWriteExtended
+✅	✅	❌	❌	❌	washmhost :: TestSysWriteExtended/1._write_small_chunk_happy_path
+✅	✅	❌	❌	❌	washmhost :: TestSysWriteExtended/10._write_error_mapping_(mocked)
+✅	✅	❌	❌	❌	washmhost :: TestSysWriteExtended/11._write_cancelation
+✅	✅	❌	❌	❌	washmhost :: TestSysWriteExtended/12._write_to_append_handle
+✅	✅	❌	❌	❌	washmhost :: TestSysWriteExtended/13._concurrent_writes_different_handles
+✅	✅	❌	❌	❌	washmhost :: TestSysWriteExtended/14._handle_removed_from_map_during_write
+✅	✅	❌	❌	❌	washmhost :: TestSysWriteExtended/15._write_to_closed_file_descriptor
+✅	✅	❌	❌	❌	washmhost :: TestSysWriteExtended/16._huge_length_(overflow_check)
+✅	✅	❌	❌	❌	washmhost :: TestSysWriteExtended/17._write_and_read_back_consistency
+✅	✅	❌	❌	❌	washmhost :: TestSysWriteExtended/18._write_from_end_of_memory
+✅	✅	❌	❌	❌	washmhost :: TestSysWriteExtended/19._short_write_(mocked)
+✅	✅	❌	❌	❌	washmhost :: TestSysWriteExtended/2._write_zero_bytes
+✅	✅	❌	❌	❌	washmhost :: TestSysWriteExtended/20._cross-boundary_memory_write
+✅	✅	❌	❌	❌	washmhost :: TestSysWriteExtended/3._write_to_stdout_(handle_1)
+✅	✅	❌	❌	❌	washmhost :: TestSysWriteExtended/4._write_to_stderr_(handle_2)
+✅	✅	❌	❌	❌	washmhost :: TestSysWriteExtended/5._write_to_invalid_handle
+✅	✅	❌	❌	❌	washmhost :: TestSysWriteExtended/6._write_point_to_invalid_memory
+✅	✅	❌	❌	❌	washmhost :: TestSysWriteExtended/7._write_to_read-only_handle
+✅	✅	❌	❌	❌	washmhost :: TestSysWriteExtended/8._write_large_chunk
+✅	✅	❌	❌	❌	washmhost :: TestSysWriteExtended/9._sequential_writes_same_handle
+
+🍆  Test matrix warnings:
+  - Native Go windows/arm64 tests in ai exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\go-native-02-ai.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\go-native-02-ai.stderr.log
+  - Native Go windows/arm64 tests in kabibi exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\go-native-04-kabibi.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\go-native-04-kabibi.stderr.log
+  - Go windows/amd64 tests in ai exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\go-amd64-02-ai.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\go-amd64-02-ai.stderr.log
+  - Go windows/amd64 tests in kabibi exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\go-amd64-04-kabibi.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\go-amd64-04-kabibi.stderr.log
+  - Rusticated windows/arm64 tests for ai exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-001-ai.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-001-ai.stderr.log
+  - Rusticated windows/arm64 tests for github.com/mavity/rusticated/kabibi exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-004-github.com-mavity-rusticated-kabibi.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-004-github.com-mavity-rusticated-kabibi.stderr.log
+  - Rusticated windows/arm64 tests for github.com/mavity/rusticated/kabibi/config exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-005-github.com-mavity-rusticated-kabibi-config.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-005-github.com-mavity-rusticated-kabibi-config.stderr.log
+  - Rusticated windows/arm64 tests for github.com/mavity/rusticated/kabibi/credstore exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-006-github.com-mavity-rusticated-kabibi-credstore.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-006-github.com-mavity-rusticated-kabibi-credstore.stderr.log
+  - Rusticated windows/arm64 tests for github.com/mavity/rusticated/kabibi/internal/sed exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-008-github.com-mavity-rusticated-kabibi-internal-sed.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-008-github.com-mavity-rusticated-kabibi-internal-sed.stderr.log
+  - Rusticated windows/arm64 tests for github.com/mavity/rusticated/kabibi/tools/browser exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-010-github.com-mavity-rusticated-kabibi-tools-browser.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-010-github.com-mavity-rusticated-kabibi-tools-browser.stderr.log
+  - Rusticated windows/arm64 tests for github.com/mavity/rusticated/kabibi/ui/app exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-015-github.com-mavity-rusticated-kabibi-ui-app.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-015-github.com-mavity-rusticated-kabibi-ui-app.stderr.log
+  - Rusticated windows/arm64 tests for github.com/mavity/rusticated/kabibi/ui/filemanager exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-018-github.com-mavity-rusticated-kabibi-ui-filemanager.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-018-github.com-mavity-rusticated-kabibi-ui-filemanager.stderr.log
+  - Rusticated windows/arm64 tests for github.com/mavity/rusticated/kabibi/ui/shell exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-019-github.com-mavity-rusticated-kabibi-ui-shell.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-019-github.com-mavity-rusticated-kabibi-ui-shell.stderr.log
+  - Rusticated windows/arm64 tests for github.com/mavity/rusticated/pope exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-023-github.com-mavity-rusticated-pope.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-023-github.com-mavity-rusticated-pope.stderr.log
+  - Rusticated windows/arm64 tests for mohabbat/mohabbat/regast exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-026-mohabbat-mohabbat-regast.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-026-mohabbat-mohabbat-regast.stderr.log
+  - Rusticated windows/arm64 tests for mohabbat/rusticated-go/syscall exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-029-mohabbat-rusticated-go-syscall.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-029-mohabbat-rusticated-go-syscall.stderr.log
+  - Rusticated windows/arm64 tests for pty exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-030-pty.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-030-pty.stderr.log
+  - Rusticated windows/arm64 tests for washmhost exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-031-washmhost.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-default-031-washmhost.stderr.log
+  - Rusticated Node v24.21.0 tests for ai exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-001-ai.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-001-ai.stderr.log
+  - Rusticated Node v24.21.0 tests for dload exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-003-dload.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-003-dload.stderr.log
+  - Rusticated Node v24.21.0 tests for github.com/mavity/rusticated/kabibi exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-004-github.com-mavity-rusticated-kabibi.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-004-github.com-mavity-rusticated-kabibi.stderr.log
+  - Rusticated Node v24.21.0 tests for github.com/mavity/rusticated/kabibi/config exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-005-github.com-mavity-rusticated-kabibi-config.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-005-github.com-mavity-rusticated-kabibi-config.stderr.log
+  - Rusticated Node v24.21.0 tests for github.com/mavity/rusticated/kabibi/credstore exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-006-github.com-mavity-rusticated-kabibi-credstore.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-006-github.com-mavity-rusticated-kabibi-credstore.stderr.log
+  - Rusticated Node v24.21.0 tests for github.com/mavity/rusticated/kabibi/gitcore exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-007-github.com-mavity-rusticated-kabibi-gitcore.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-007-github.com-mavity-rusticated-kabibi-gitcore.stderr.log
+  - Rusticated Node v24.21.0 tests for github.com/mavity/rusticated/kabibi/internal/sed exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-008-github.com-mavity-rusticated-kabibi-internal-sed.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-008-github.com-mavity-rusticated-kabibi-internal-sed.stderr.log
+  - Rusticated Node v24.21.0 tests for github.com/mavity/rusticated/kabibi/tools/browser exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-010-github.com-mavity-rusticated-kabibi-tools-browser.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-010-github.com-mavity-rusticated-kabibi-tools-browser.stderr.log
+  - Rusticated Node v24.21.0 tests for github.com/mavity/rusticated/kabibi/tools/filelist exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-012-github.com-mavity-rusticated-kabibi-tools-filelist.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-012-github.com-mavity-rusticated-kabibi-tools-filelist.stderr.log
+  - Rusticated Node v24.21.0 tests for github.com/mavity/rusticated/kabibi/tools/hashline exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-013-github.com-mavity-rusticated-kabibi-tools-hashline.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-013-github.com-mavity-rusticated-kabibi-tools-hashline.stderr.log
+  - Rusticated Node v24.21.0 tests for github.com/mavity/rusticated/kabibi/ui/app exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-015-github.com-mavity-rusticated-kabibi-ui-app.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-015-github.com-mavity-rusticated-kabibi-ui-app.stderr.log
+  - Rusticated Node v24.21.0 tests for github.com/mavity/rusticated/kabibi/ui/editor exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-017-github.com-mavity-rusticated-kabibi-ui-editor.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-017-github.com-mavity-rusticated-kabibi-ui-editor.stderr.log
+  - Rusticated Node v24.21.0 tests for github.com/mavity/rusticated/kabibi/ui/filemanager exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-018-github.com-mavity-rusticated-kabibi-ui-filemanager.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-018-github.com-mavity-rusticated-kabibi-ui-filemanager.stderr.log
+  - Rusticated Node v24.21.0 tests for github.com/mavity/rusticated/kabibi/ui/shell exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-019-github.com-mavity-rusticated-kabibi-ui-shell.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-019-github.com-mavity-rusticated-kabibi-ui-shell.stderr.log
+  - Rusticated Node v24.21.0 tests for github.com/mavity/rusticated/pope exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-023-github.com-mavity-rusticated-pope.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-023-github.com-mavity-rusticated-pope.stderr.log
+  - Rusticated Node v24.21.0 tests for mohabbat/mohabbat exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-025-mohabbat-mohabbat.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-025-mohabbat-mohabbat.stderr.log
+  - Rusticated Node v24.21.0 tests for mohabbat/rusticated-go/syscall exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-029-mohabbat-rusticated-go-syscall.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-029-mohabbat-rusticated-go-syscall.stderr.log
+  - Rusticated Node v24.21.0 tests for pty exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-030-pty.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-030-pty.stderr.log
+  - Rusticated Node v24.21.0 tests for washmhost exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-031-washmhost.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-node-031-washmhost.stderr.log
+  - Rusticated windows/amd64 tests for ai exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-001-ai.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-001-ai.stderr.log
+  - Rusticated windows/amd64 tests for github.com/mavity/rusticated/kabibi exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-004-github.com-mavity-rusticated-kabibi.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-004-github.com-mavity-rusticated-kabibi.stderr.log
+  - Rusticated windows/amd64 tests for github.com/mavity/rusticated/kabibi/config exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-005-github.com-mavity-rusticated-kabibi-config.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-005-github.com-mavity-rusticated-kabibi-config.stderr.log
+  - Rusticated windows/amd64 tests for github.com/mavity/rusticated/kabibi/credstore exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-006-github.com-mavity-rusticated-kabibi-credstore.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-006-github.com-mavity-rusticated-kabibi-credstore.stderr.log
+  - Rusticated windows/amd64 tests for github.com/mavity/rusticated/kabibi/internal/sed exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-008-github.com-mavity-rusticated-kabibi-internal-sed.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-008-github.com-mavity-rusticated-kabibi-internal-sed.stderr.log
+  - Rusticated windows/amd64 tests for github.com/mavity/rusticated/kabibi/tools/browser exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-010-github.com-mavity-rusticated-kabibi-tools-browser.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-010-github.com-mavity-rusticated-kabibi-tools-browser.stderr.log
+  - Rusticated windows/amd64 tests for github.com/mavity/rusticated/kabibi/ui/app exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-015-github.com-mavity-rusticated-kabibi-ui-app.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-015-github.com-mavity-rusticated-kabibi-ui-app.stderr.log
+  - Rusticated windows/amd64 tests for github.com/mavity/rusticated/kabibi/ui/filemanager exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-018-github.com-mavity-rusticated-kabibi-ui-filemanager.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-018-github.com-mavity-rusticated-kabibi-ui-filemanager.stderr.log
+  - Rusticated windows/amd64 tests for github.com/mavity/rusticated/kabibi/ui/shell exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-019-github.com-mavity-rusticated-kabibi-ui-shell.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-019-github.com-mavity-rusticated-kabibi-ui-shell.stderr.log
+  - Rusticated windows/amd64 tests for github.com/mavity/rusticated/pope exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-023-github.com-mavity-rusticated-pope.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-023-github.com-mavity-rusticated-pope.stderr.log
+  - Rusticated windows/amd64 tests for mohabbat/mohabbat/regast exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-026-mohabbat-mohabbat-regast.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-026-mohabbat-mohabbat-regast.stderr.log
+  - Rusticated windows/amd64 tests for mohabbat/rusticated-go/syscall exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-029-mohabbat-rusticated-go-syscall.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-029-mohabbat-rusticated-go-syscall.stderr.log
+  - Rusticated windows/amd64 tests for pty exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-030-pty.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-030-pty.stderr.log
+  - Rusticated windows/amd64 tests for washmhost exited with error: exit status 1; logs: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-031-washmhost.stdout.log, C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500\rusticated-amd64-031-washmhost.stderr.log
+
+🍆  Test evidence: C:\Users\mihai\rustic\target\release-test-all\20261031-004120.666407500
+🍆  Matrix summary: 1346 tests, 4836 passing cells, 1894 failing cells

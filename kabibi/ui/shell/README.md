@@ -390,7 +390,7 @@ abstraction:
 ### Unified abstraction
 
 ```go
-// pty/pty.go (common interface)
+// mohabbat/pty/pty.go (common interface)
 type PTY interface {
     io.ReadWriteCloser
     Resize(width, height int) error

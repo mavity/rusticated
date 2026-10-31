@@ -241,11 +241,15 @@ func libUpToDate(libDir, wheelPath, libPrefix string) bool {
 }
 
 func selectWheelURL(ctx context.Context, pypiURL string) (string, string, int64, error) {
+	return selectWheelURLWithClient(ctx, pypiURL, &http.Client{Timeout: 60 * time.Second})
+}
+
+func selectWheelURLWithClient(ctx context.Context, pypiURL string, client *http.Client) (string, string, int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pypiURL, nil)
 	if err != nil {
 		return "", "", 0, err
 	}
-	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", 0, err
 	}

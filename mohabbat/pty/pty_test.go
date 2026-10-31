@@ -3,6 +3,7 @@ package pty_test
 import (
 	"bytes"
 	"io"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -12,9 +13,13 @@ import (
 	"pty"
 )
 
+func isWindowsHost() bool {
+	return runtime.GOOS == "windows" || strings.EqualFold(os.Getenv("OS"), "Windows_NT")
+}
+
 func TestPtyExecution(t *testing.T) {
 	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
+	if isWindowsHost() {
 		cmd = exec.Command("cmd.exe", "/c", "echo", "123")
 	} else {
 		cmd = exec.Command("sh", "-c", "echo 123")
@@ -70,7 +75,7 @@ func TestPtyExecution(t *testing.T) {
 func TestPtyInteractive(t *testing.T) {
 	var cmd *exec.Cmd
 	var inputCmd string
-	if runtime.GOOS == "windows" {
+	if isWindowsHost() {
 		cmd = exec.Command("cmd.exe")
 		inputCmd = "echo 456\r\nexit\r\n"
 	} else {

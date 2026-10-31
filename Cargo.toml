@@ -1,5 +1,5 @@
 [workspace]
-members = ["rusticated-rust", "demo", "mohabbat/brot", "demo/loch", "kabibi-rust", "dload"]
+members = ["rusticated-rust", "demo", "mohabbat/brot", "mohabbat/nodepty", "demo/loch", "kabibi-rust", "dload"]
 resolver = "3"
 
 
@@ -71,4 +71,3 @@ redundant_pub_crate = "allow"
 result_large_err = "allow"
 similar_names = "allow"
 struct_excessive_bools = "allow"
-

@@ -6,6 +6,7 @@ import child_process from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { PassThrough } from 'node:stream';
 import crypto from 'node:crypto';
+import { createRequire } from 'node:module';
 import process from 'node:process';
 import os from 'node:os';
 import path from 'node:path';
@@ -150,6 +151,86 @@ function mapErrno(e) {
   }
 }
 
+function createPtyAddonLoader(addonBytes) {
+  let addon = null;
+  const require = createRequire(process.execPath);
+  return () => {
+    if (addon) return addon;
+    if (!addonBytes || addonBytes.length === 0) {
+      throw new Error(`PTY addon is unavailable for ${process.platform}-${process.arch}`);
+    }
+
+    const digest = crypto.createHash('sha256').update(addonBytes).digest('hex');
+    const addonPath = path.join(os.tmpdir(), `mohabbat-nodepty-${digest}.node`);
+    try {
+      const fd = fs.openSync(addonPath, 'wx', 0o700);
+      try {
+        fs.writeFileSync(fd, addonBytes);
+      } catch (error) {
+        fs.closeSync(fd);
+        fs.rmSync(addonPath, { force: true });
+        throw error;
+      }
+      fs.closeSync(fd);
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      const stat = fs.lstatSync(addonPath);
+      if (!stat.isFile() || stat.isSymbolicLink()) {
+        throw new Error(`PTY addon cache path is not a regular file: ${addonPath}`);
+      }
+      const cachedBytes = fs.readFileSync(addonPath);
+      if (!crypto.timingSafeEqual(
+        crypto.createHash('sha256').update(cachedBytes).digest(),
+        Buffer.from(digest, 'hex'),
+      )) {
+        throw new Error(`PTY addon cache integrity check failed: ${addonPath}`);
+      }
+    }
+    addon = require(addonPath);
+    return addon;
+  };
+}
+
+function mapPtyError(code) {
+  if (code === 0) return wasiSuccess;
+  if (code === 22) return wasiEINVAL;
+  if (process.platform === 'win32') {
+    switch (code) {
+      case 2:
+      case 3: return wasiENOENT;
+      case 5: return wasiEACCES;
+      case 8:
+      case 14: return wasiENOMEM;
+      case 87: return wasiEINVAL;
+      case 206: return wasiENAMETOOLONG;
+      default: return wasiEIO;
+    }
+  }
+  const errno = os.constants.errno;
+  const name = Object.keys(errno).find(key => errno[key] === code);
+  return name ? mapErrno({ code: name }) : wasiEIO;
+}
+
+async function resolvePtyProgram(program, env, cwd) {
+  const searchPath = env.PATH ?? '/usr/bin:/bin';
+  const candidates = program.includes('/')
+    ? [path.resolve(cwd, program)]
+    : searchPath.split(path.delimiter).map(entry => path.resolve(cwd, entry || '.', program));
+  let denied = false;
+  for (const candidate of candidates) {
+    try {
+      await fs.promises.access(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch (error) {
+      if (error.code === 'EACCES') denied = true;
+      else if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error;
+    }
+  }
+  const error = new Error(`cannot find executable: ${program}`);
+  error.code = denied ? 'EACCES' : 'ENOENT';
+  throw error;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Path translation — only reverse the canonical guest-root encoding.
 // The guest uses /C:/... while the host OS expects C:/... . Native host paths
@@ -237,6 +318,15 @@ function writeOverlapped(view, ovPtr, errorCode, continued, resultExt) {
   view.setBigUint64(ovPtr + 16, BigInt(resultExt), true);
 }
 
+function writeOverlappedExtended(view, ovPtr, errorCode, continued, resultExt, childHandle, ptyHandle) {
+  writeOverlapped(view, ovPtr, errorCode, continued, resultExt);
+  view.setBigUint64(ovPtr + 24, BigInt(childHandle), true);
+  view.setBigUint64(ovPtr + 32, BigInt(ptyHandle), true);
+  view.setBigUint64(ovPtr + 40, 0n, true);
+  view.setBigUint64(ovPtr + 48, 0n, true);
+  view.setBigUint64(ovPtr + 56, 0n, true);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // HostState  — owns handles, pending-op tracking, signal delivery
 // ─────────────────────────────────────────────────────────────────────────────
@@ -314,6 +404,25 @@ class HostState {
         if (item.leftovers) item.leftovers = null;
       }
       else if (item.type === 'pipe_w') item.stream.end();
+      else if (item.type === 'pty') {
+        item.closed = true;
+        item.stream.destroy();
+        item.inputStream.end();
+        try {
+          const status = item.addon.closePty(item.nativeId);
+          if (status !== 0) L('[pty] closePty failed:', status);
+        } catch (error) {
+          L('[pty] closePty threw:', error);
+        }
+      }
+      else if (item.type === 'pty_child') {
+        try {
+          const status = item.addon.closeChild(item.nativeId);
+          if (status !== 0) L('[pty] closeChild failed:', status);
+        } catch (error) {
+          L('[pty] closeChild threw:', error);
+        }
+      }
       else if (item.type === 'dirscan' && item._dir) item._dir.close().catch(() => {});
     } catch (_) { /* best effort */ }
   }
@@ -342,6 +451,14 @@ class HostState {
     this.activeOps.delete(ovPtr);
     this.pendingCount--;
     writeOverlapped(this.view, ovPtr, errorCode, continued, resultExt);
+    return true;
+  }
+
+  completeOpExtended(ovPtr, opId, errorCode, continued, resultExt, childHandle, ptyHandle) {
+    if (!this.isOpActive(ovPtr, opId)) return false;
+    this.activeOps.delete(ovPtr);
+    this.pendingCount--;
+    writeOverlappedExtended(this.view, ovPtr, errorCode, continued, resultExt, childHandle, ptyHandle);
     return true;
   }
 
@@ -401,8 +518,9 @@ class HostState {
 // ─────────────────────────────────────────────────────────────────────────────
 // makeBrainImports — builds the "env" import object
 // ─────────────────────────────────────────────────────────────────────────────
-export function makeBrainImports(hostState, argv) {
+export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
   const hs = hostState;
+  const loadPtyAddon = createPtyAddonLoader(ptyAddonBytes);
 
   // Helper: write bytes to guest memory
   function guestWrite(ptr, buf) {
@@ -609,7 +727,7 @@ export function makeBrainImports(hostState, argv) {
       return;
     }
 
-    if (h.type === 'socket' || h.type === 'pipe_r') {
+    if (h.type === 'socket' || h.type === 'pipe_r' || h.type === 'pty') {
       const bPtrNum = Number(bufferPtr);
       const bLenNum = Number(bufferLen);
 
@@ -619,6 +737,7 @@ export function makeBrainImports(hostState, argv) {
           stream.removeListener('data', onData);
           stream.removeListener('end', onEnd);
           stream.removeListener('error', onError);
+          stream.removeListener('close', onClose);
         };
         const onData = (chunk) => {
           cleanup();
@@ -636,15 +755,27 @@ export function makeBrainImports(hostState, argv) {
           h.error = err;
           deliver();
         };
+        const onClose = () => {
+          cleanup();
+          h.closed = true;
+          deliver();
+        };
         stream.once('data', onData);
         stream.once('end', onEnd);
         stream.once('error', onError);
+        stream.once('close', onClose);
         stream.resume();
       };
 
       const deliver = () => {
         h.onData = null;
         if (h.error) {
+          if (h.ptyEioIsEof && h.error.code === 'EIO') {
+            h.error = null;
+            h.closed = true;
+            deliver();
+            return;
+          }
           hs.enqueue(() => {
             if (!hs.isOpActive(ovPtr, opId)) return;
             hs.completeOp(ovPtr, opId, mapErrno(h.error), 0, 0n);
@@ -673,7 +804,7 @@ export function makeBrainImports(hostState, argv) {
         }
 
         h.onData = deliver;
-        if (h.type === 'pipe_r') waitForPipeData();
+        if (h.type === 'pipe_r' || h.type === 'pty') waitForPipeData();
       };
 
       deliver();
@@ -739,8 +870,8 @@ export function makeBrainImports(hostState, argv) {
       return;
     }
 
-    if (h.type === 'socket' || h.type === 'pipe_w') {
-      const stream = h.socket || h.stream;
+    if (h.type === 'socket' || h.type === 'pipe_w' || h.type === 'pty') {
+      const stream = h.type === 'pty' ? h.inputStream : (h.socket || h.stream);
       stream.write(dataCopy, (err) => {
         hs.enqueue(() => {
           if (!hs.isOpActive(ovPtr, opId)) return;
@@ -1414,6 +1545,149 @@ export function makeBrainImports(hostState, argv) {
       if (eq > 0) envObj[kv.slice(0, eq)] = kv.slice(eq + 1);
     }
 
+    const ptySpec = stdioSpecs.find(spec => spec === 'pty' || spec.startsWith('pty:'));
+    if (ptySpec) {
+      let cols = 80;
+      let rows = 24;
+      if (ptySpec.startsWith('pty:')) {
+        const [colsText, rowsText, term] = ptySpec.slice(4).split(',');
+        const parsedCols = Number.parseInt(colsText, 10);
+        const parsedRows = Number.parseInt(rowsText, 10);
+        if (Number.isFinite(parsedCols) && parsedCols > 0) cols = parsedCols;
+        if (Number.isFinite(parsedRows) && parsedRows > 0) rows = parsedRows;
+        if (term) envObj.TERM = term;
+      }
+
+      const startPty = ptyProgram => {
+      if (!ptyAddonBytes || ptyAddonBytes.length === 0) {
+        hs.completeOp(ovPtr, opId, wasiENOSYS, 0, 0);
+        return;
+      }
+
+      let addon;
+      try {
+        addon = loadPtyAddon();
+      } catch (error) {
+        L('[pty] failed to load native addon:', error);
+        hs.completeOp(ovPtr, opId, wasiEIO, 0, 0);
+        return;
+      }
+
+      const envEntries = Object.keys(envObj)
+        .sort((a, b) => {
+          const upperA = a.toUpperCase();
+          const upperB = b.toUpperCase();
+          return upperA < upperB ? -1 : upperA > upperB ? 1 : 0;
+        })
+        .map(key => `${key}=${envObj[key]}`);
+      const nativeConfig = [
+        ptyProgram, ...spawnArgs, '',
+        ...envEntries, '',
+        cwd, '',
+        ...stdioSpecs, '',
+      ].join('\0');
+
+      let nativeResult;
+      try {
+        nativeResult = addon.spawn(nativeConfig, cols, rows);
+      } catch (error) {
+        L('[pty] native spawn failed:', error);
+        hs.completeOp(ovPtr, opId, wasiEIO, 0, 0);
+        return;
+      }
+      if (typeof nativeResult !== 'string') {
+        hs.completeOp(ovPtr, opId, mapPtyError(Number(nativeResult)), 0, 0);
+        return;
+      }
+
+      const resultFields = nativeResult.split('|');
+      const [idText, pidText, readFdText, writeFdText, inputPath, outputPath] = resultFields;
+      const nativeId = Number(idText);
+      const pid = Number(pidText);
+      const readFd = Number(readFdText);
+      const writeFd = Number(writeFdText);
+      if (resultFields.length !== 6 || nativeId <= 0 || nativeId > 32 || !Number.isSafeInteger(nativeId) ||
+          !Number.isSafeInteger(pid) || !Number.isInteger(readFd) || !Number.isInteger(writeFd) ||
+          inputPath == null || outputPath == null) {
+        L('[pty] invalid native spawn response:', nativeResult);
+        if (Number.isSafeInteger(nativeId) && nativeId > 0) {
+          addon.closePty(nativeId);
+          addon.closeChild(nativeId);
+        }
+        hs.completeOp(ovPtr, opId, wasiEIO, 0, 0);
+        return;
+      }
+
+      let outputStream;
+      let inputStream;
+      try {
+        if (process.platform === 'win32') {
+          outputStream = fs.createReadStream(outputPath);
+          inputStream = fs.createWriteStream(inputPath);
+        } else {
+          outputStream = fs.createReadStream(null, { fd: readFd, autoClose: false });
+          inputStream = fs.createWriteStream(null, { fd: writeFd, autoClose: false });
+        }
+      } catch (error) {
+        L('[pty] failed to create PTY streams:', error);
+        addon.signal(nativeId, 9);
+        addon.closePty(nativeId);
+        addon.closeChild(nativeId);
+        hs.completeOp(ovPtr, opId, mapErrno(error), 0, 0);
+        return;
+      }
+
+      const pty = {
+        type: 'pty',
+        addon,
+        nativeId,
+        pid,
+        stream: outputStream,
+        inputStream,
+        cols,
+        rows,
+        leftovers: null,
+        onData: null,
+        closed: false,
+        error: null,
+        inputError: null,
+        ptyEioIsEof: process.platform !== 'win32',
+      };
+      outputStream.on('end', () => {
+        pty.closed = true;
+        if (pty.onData) pty.onData();
+      });
+      outputStream.on('error', error => {
+        pty.error = error;
+        if (pty.onData) pty.onData();
+      });
+      inputStream.on('error', error => {
+        pty.inputError = error;
+        L('[pty] input stream failed:', error);
+      });
+
+      const childHandle = hs.allocHandle({
+        type: 'pty_child',
+        addon,
+        nativeId,
+        pid,
+      });
+      const ptyHandle = hs.allocHandle(pty);
+      const resultExt = childHandle | (ptyHandle << 32n);
+      hs.enqueue(() => hs.completeOpExtended(
+        ovPtr, opId, 0, 0, resultExt, childHandle, ptyHandle,
+      ));
+      };
+      if (process.platform === 'win32') {
+        startPty(program);
+      } else {
+        resolvePtyProgram(program, envObj, cwd).then(startPty, error => {
+          hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(error), 0, 0));
+        });
+      }
+      return;
+    }
+
     // Set up stdio
     const pipePairs = [];
     const stdioArr  = [];
@@ -1512,8 +1786,47 @@ export function makeBrainImports(hostState, argv) {
   // Returns resultExt = (exitCode << 32) | exitCode
   function process_wait(ovPtr, handle) {
     const h = hs.getHandle(handle);
-    if (!h || h.type !== 'child') { writeOverlapped(hs.view, ovPtr, wasiEBADF, 0, 0); return; }
+    if (!h || (h.type !== 'child' && h.type !== 'pty_child')) {
+      writeOverlapped(hs.view, ovPtr, wasiEBADF, 0, 0);
+      return;
+    }
     const opId = hs.registerOp(ovPtr);
+    if (h.type === 'pty_child') {
+      const pollChild = () => {
+        if (!hs.isOpActive(ovPtr, opId)) return;
+        let status;
+        try {
+          status = h.addon.poll(h.nativeId);
+        } catch (error) {
+          L('[pty] process poll failed:', error);
+          hs.enqueue(() => hs.completeOp(ovPtr, opId, wasiEIO, 0, 0));
+          return;
+        }
+        if (typeof status !== 'bigint') {
+          hs.enqueue(() => hs.completeOp(ovPtr, opId, wasiEIO, 0, 0));
+          return;
+        }
+        if (status === 0n) {
+          setTimeout(pollChild, 10);
+          return;
+        }
+          if ((status >> 63n) !== 0n) {
+          const errorCode = Number(-BigInt.asIntN(64, status));
+          hs.enqueue(() => hs.completeOp(ovPtr, opId, mapPtyError(errorCode), 0, 0));
+          return;
+        }
+        if ((status >> 32n) !== 1n) {
+          hs.enqueue(() => hs.completeOp(ovPtr, opId, wasiEIO, 0, 0));
+          return;
+        }
+        const exitCode = status & 0xFFFFFFFFn;
+        hs.enqueue(() => hs.completeOp(
+          ovPtr, opId, 0, 0, (exitCode << 32n) | exitCode,
+        ));
+      };
+      pollChild();
+      return;
+    }
     h.cp.once('exit', (code, signal) => {
       const exitCode = code != null ? code : (signal ? 1 : 0);
       const ec = BigInt(exitCode >>> 0);
@@ -1525,7 +1838,13 @@ export function makeBrainImports(hostState, argv) {
   // Signature: (handle i64, signum i32)
   function process_signal(handle, signum) {
     const h = hs.getHandle(handle);
-    if (!h || h.type !== 'child') return;
+    if (!h) return;
+    if (h.type === 'pty_child') {
+      const status = h.addon.signal(h.nativeId, Number(signum));
+      if (status !== 0) L('[pty] process signal failed:', status);
+      return;
+    }
+    if (h.type !== 'child') return;
     const sigMap = { 2: 'SIGINT', 9: 'SIGKILL', 15: 'SIGTERM' };
     const sig = sigMap[Number(signum)];
     if (sig) try { h.cp.kill(sig); } catch (_) {}
@@ -1566,6 +1885,8 @@ export function makeBrainImports(hostState, argv) {
   // ── tty_get_size ─────────────────────────────────────────────────────────────
   // Signature: (handle i64) -> i32  (width << 16) | height
   function tty_get_size(handle) {
+    const h = hs.getHandle(handle);
+    if (h && h.type === 'pty') return (h.cols << 16) | h.rows;
     if ((handle === 1n || handle === 2n) && process.stdout.isTTY) {
       const w = process.stdout.columns || 80;
       const h = process.stdout.rows    || 24;
@@ -1574,9 +1895,18 @@ export function makeBrainImports(hostState, argv) {
     return (80 << 16) | 24;
   }
 
-  function tty_set_size(handle) {
+  function tty_set_size(handle, cols, rows) {
     const h = hs.getHandle(handle);
     if (!h) return wasiEBADF;
+    if (h.type === 'pty') {
+      const status = h.addon.resize(h.nativeId, Number(cols), Number(rows));
+      if (status === 0) {
+        h.cols = Number(cols);
+        h.rows = Number(rows);
+        return wasiSuccess;
+      }
+      return mapPtyError(status);
+    }
     return h.type === 'stdio' && h.stream.isTTY ? wasiSuccess : wasiENOTTY;
   }
 
@@ -1706,9 +2036,9 @@ export function makeBrainImports(hostState, argv) {
 // ─────────────────────────────────────────────────────────────────────────────
 // runHost — instantiates and drives the WASM brain
 // ─────────────────────────────────────────────────────────────────────────────
-export async function runHost(brainWasm, argv) {
+export async function runHost(brainWasm, argv, ptyAddonBytes = null) {
   const hostState = new HostState();
-  const imports   = makeBrainImports(hostState, argv);
+  const imports   = makeBrainImports(hostState, argv, ptyAddonBytes);
 
   L('[host] instantiating brain wasm...');
   const { instance } = await WebAssembly.instantiate(brainWasm, imports);
@@ -1788,7 +2118,9 @@ if (isMain) {
   }
   const brainWasm = fs.readFileSync(brainPath);
   const argv = process.argv.slice(2); // argv[0] = wasm path, matches washmhost convention
-  runHost(brainWasm, argv).catch((err) => {
+  const ptyAddonPath = process.env.MOHABBAT_NODE_PTY_ADDON;
+  const ptyAddonBytes = ptyAddonPath ? fs.readFileSync(ptyAddonPath) : null;
+  runHost(brainWasm, argv, ptyAddonBytes).catch((err) => {
     console.error(err);
     process.exit(1);
   });

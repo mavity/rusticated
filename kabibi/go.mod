@@ -110,5 +110,5 @@ mohabbat => ..
 	golang.org/x/sys => ../mohabbat/rusticated-jit/golang.org/x/sys
 	golang.org/x/term => ../mohabbat/rusticated-jit/golang.org/x/term
 	mvdan.cc/sh/v3 => ../mohabbat/rusticated-jit/mvdan.cc/sh/v3
-	pty => ../pty
+	pty => ../mohabbat/pty
 )
