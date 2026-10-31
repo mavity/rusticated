@@ -191,7 +191,7 @@ A command checkbox `[x]` may **only** be ticked when all 5 criteria are met:
   - `go run . kabibi -r -c "echo piped | cat -"` — printed `piped` from pipeline stdin with explicit `-`.
   - `go run . kabibi -r -c "cat README.md | head -n 1"` — read the relative file and printed `<!--`.
   - `go run . kabibi -r -c "cat definitely_nonexistent_file_xyz.txt"` — reported the missing path and exited nonzero (1).
-- [x] **`grep`** (`cmds/core/grep`): Local flags (`-i`, `-v`, `-r`, `-c`, `-n`, `-q`, `-F`, `-h`, `-l`); check `ctx.Done()` in scanner; return `1` on no match.
+- [x] **`grep`** (`cmds/core/grep`): Pilot implementation with local flags (`-i`, `-v`, `-r`, `-c`, `-n`, `-q`, `-F`, `-h`, `-l`); check `ctx.Done()` in scanner; return `1` on no match. The broader GNU/BSD grep and ripgrep compatibility work is tracked in [13-grep-ripgrep.md](13-grep-ripgrep.md).
   - `go -C u-root test ./cmds/core/grep -v` — passed; covers stdin/files, recursive search, all listed flags, cancellation, and reentrancy.
   - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1A_Pilot$/grep$' -v` — passed; shell integration covered basic match, `-i`, `-v`, `-c`, `-n`, `-q`, and `-F`.
   - `go run . kabibi -r -c "printf 'Apple\nbanana\nAPRICOT\n' | grep -i -n ap"` — printed numbered case-insensitive matches (`1:Apple`, `3:APRICOT`).
