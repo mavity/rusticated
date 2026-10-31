@@ -1,0 +1,10 @@
+[package]
+name = "nodepty"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true

@@ -26,7 +26,7 @@ All the foundational hard problems in Kabibi are already solved and running at a
 * **Shell & Builtin Dispatch:** `kabibi/ui/shell` already runs a persistent `mvdan.cc/sh/v3/interp.Runner` with `u-root` coreutils builtins (`moreinterp/coreutils`) and `ClassifyInput` command routing.
 
 
-* **PTY & Virtual Terminal Rendering:** `rustica/pty` (ConPTY, `/dev/ptmx`, and `pty_rusticated.go`) and the unified `ui.Host` / `terminal.CellBuf` diff engine (`terminal.FromANSI` / `ToANSI`) are already live.
+* **PTY & Virtual Terminal Rendering:** `mohabbat/pty` (ConPTY, `/dev/ptmx`, and `pty_rusticated.go`) and the unified `ui.Host` / `terminal.CellBuf` diff engine (`terminal.FromANSI` / `ToANSI`) are already live.
 
 
 * **AI & Embeddings:** `ai.Session`, declarative tool schema compilation with auto-injected `"explanation"`, `deliberate` (via `litert_lm_conversation_clone`), and `EmbeddingGemma 2` background vector indexing are all in place.

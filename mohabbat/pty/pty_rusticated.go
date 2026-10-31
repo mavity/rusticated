@@ -98,8 +98,10 @@ func Start(cmd *exec.Cmd, opts ...Options) (PTY, error) {
 	}
 	buf.WriteByte(0) // end of env
 
-	buf.WriteString(cwd)
-	buf.WriteByte(0)
+	if cwd != "" {
+		buf.WriteString(cwd)
+		buf.WriteByte(0)
+	}
 	buf.WriteByte(0) // end of cwd
 
 	ptySpec := "pty:" + strconv.Itoa(cols) + "," + strconv.Itoa(rows) + "," + term

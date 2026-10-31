@@ -1,10 +1,12 @@
 import { readlinkSync, realpathSync } from 'node:fs';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import process from 'node:process';
 
 // Patched by buildNodeSlot:
 const VERBOSE = false; // {{VERBOSE}}
 const L = (...args) => (VERBOSE || process.env.MOHABBAT_VERBOSE) && console.error(...args);
+const NODE_PTY_ARTIFACTS = {{NODE_PTY_ARTIFACTS}};
 
 async function run() {
   L("[starter] run starting");
@@ -60,7 +62,9 @@ async function run() {
   const inPtr = brot_alloc(compressedData.length);
   new Uint8Array(memory.buffer, inPtr, compressedData.length).set(compressedData);
 
-  const uncompressedLen = Number(NODE_PAYLOAD_OFF + NODE_PAYLOAD_LEN);
+  const payloadOff = Number("{{NODE_PAYLOAD_OFF}}");
+  const payloadLen = Number("{{NODE_PAYLOAD_LEN}}");
+  const uncompressedLen = payloadOff + payloadLen;
   const packed = brot_decompress(inPtr, compressedData.length, uncompressedLen);
   L("[starter] decompress done, packed result:", packed);
   if (packed === 0n) {
@@ -77,10 +81,12 @@ async function run() {
   L("[starter] wasmhostOff:", washmhostOff, "wasmhostLen:", washmhostLen);
   const washmhostJs = pool.subarray(washmhostOff, washmhostOff + washmhostLen);
 
-  const payloadOff = "{{NODE_PAYLOAD_OFF}}";
-  const payloadLen = "{{NODE_PAYLOAD_LEN}}";
   L("[starter] payloadOff:", payloadOff, "payloadLen:", payloadLen);
   const brainWasm = pool.subarray(payloadOff, payloadOff + payloadLen);
+  const ptyLocation = NODE_PTY_ARTIFACTS[`${process.platform}-${process.arch}`];
+  const ptyAddon = ptyLocation && ptyLocation[1] > 0
+    ? Buffer.from(pool.subarray(ptyLocation[0], ptyLocation[0] + ptyLocation[1]))
+    : null;
 
   const hostCode = new TextDecoder().decode(washmhostJs);
   L("[starter] hostCode starts with:", hostCode.substring(0, 50));
@@ -97,7 +103,7 @@ async function run() {
     process.exit(8);
   }
   
-  await mod.runHost(brainWasm, process.argv.slice(2));
+  await mod.runHost(brainWasm, process.argv.slice(2), ptyAddon);
 }
 
 run().catch(err => {

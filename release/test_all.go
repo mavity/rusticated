@@ -35,7 +35,7 @@ var firstPartyGoModules = []string{
 	"ocr4",
 	"platform",
 	"pope",
-	"pty",
+	"mohabbat/pty",
 }
 
 type testMode struct {

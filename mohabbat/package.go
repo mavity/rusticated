@@ -39,7 +39,27 @@ func assembleVegetable(ws, brainPath, buildDir, outputPath string) error {
 		fmt.Printf("🍆    %s: brot=%s washmhost=%s\n", s.name, formatSize(int64(len(brotData))), formatSize(int64(len(wh))))
 	}
 
-	// Assemble pool: washmhost_0 + washmhost_1 + ... + payload
+	type nodePtyArtifact struct {
+		name string
+		file string
+	}
+	nodePtyArtifacts := []nodePtyArtifact{
+		{name: "linux-x64", file: "nodepty-linux-x64.node"},
+		{name: "linux-arm64", file: "nodepty-linux-arm64.node"},
+		{name: "darwin-arm64", file: "nodepty-darwin-arm64.node"},
+		{name: "win32-x64", file: "nodepty-win32-x64.node"},
+		{name: "win32-arm64", file: "nodepty-win32-arm64.node"},
+	}
+	nodePtyBytes := make(map[string][]byte, len(nodePtyArtifacts))
+	for _, artifact := range nodePtyArtifacts {
+		data, err := os.ReadFile(filepath.Join(buildDir, artifact.file))
+		if err != nil {
+			return fmt.Errorf("read Node PTY addon %s: %w", artifact.name, err)
+		}
+		nodePtyBytes[artifact.name] = data
+	}
+
+	// Assemble pool: washmhost variants, Node PTY addons, then payload.
 	pool := &bytes.Buffer{}
 	whOffsets := make([]uint64, len(slots))
 	whLens := make([]uint64, len(slots))
@@ -48,9 +68,22 @@ func assembleVegetable(ws, brainPath, buildDir, outputPath string) error {
 		whLens[i] = uint64(len(per[i].washmhost))
 		pool.Write(per[i].washmhost)
 	}
+	nodePtyOffsets := make(map[string][2]uint64, len(nodePtyArtifacts))
+	for _, artifact := range nodePtyArtifacts {
+		data := nodePtyBytes[artifact.name]
+		nodePtyOffsets[artifact.name] = [2]uint64{uint64(pool.Len()), uint64(len(data))}
+		pool.Write(data)
+	}
 	payloadOffset := uint64(pool.Len())
 	payloadLen := uint64(len(brainBytes))
 	pool.Write(brainBytes)
+	var nodePtyLiteral strings.Builder
+	nodePtyLiteral.WriteByte('{')
+	for _, artifact := range nodePtyArtifacts {
+		location := nodePtyOffsets[artifact.name]
+		fmt.Fprintf(&nodePtyLiteral, "%q:[%d,%d],", artifact.name, location[0], location[1])
+	}
+	nodePtyLiteral.WriteByte('}')
 
 	// Zstd compress with maximum compression settings.
 	compressed := &bytes.Buffer{}
@@ -99,6 +132,7 @@ func assembleVegetable(ws, brainPath, buildDir, outputPath string) error {
 			s = strings.ReplaceAll(s, "\"{{NODE_WASHMHOST_LEN}}\"", fmt.Sprintf("%-23d", whLens[nodeIdx]))
 			s = strings.ReplaceAll(s, "\"{{NODE_PAYLOAD_OFF}}\"", fmt.Sprintf("%-21d", payloadOffset))
 			s = strings.ReplaceAll(s, "\"{{NODE_PAYLOAD_LEN}}\"", fmt.Sprintf("%-21d", payloadLen))
+			s = strings.ReplaceAll(s, "{{NODE_PTY_ARTIFACTS}}", nodePtyLiteral.String())
 
 			dummyS := s
 			dummyS = strings.ReplaceAll(dummyS, "\"{{NODE_WASM_OFF}}\"", "01234567890123456")
@@ -139,6 +173,7 @@ func assembleVegetable(ws, brainPath, buildDir, outputPath string) error {
 				s = strings.ReplaceAll(s, "\"{{NODE_WASHMHOST_LEN}}\"", fmt.Sprintf("%-23d", whLens[nodeIdx]))
 				s = strings.ReplaceAll(s, "\"{{NODE_PAYLOAD_OFF}}\"", fmt.Sprintf("%-21d", payloadOffset))
 				s = strings.ReplaceAll(s, "\"{{NODE_PAYLOAD_LEN}}\"", fmt.Sprintf("%-21d", payloadLen))
+				s = strings.ReplaceAll(s, "{{NODE_PTY_ARTIFACTS}}", nodePtyLiteral.String())
 
 				dummyS := s
 				dummyS = strings.ReplaceAll(dummyS, "\"{{NODE_WASM_OFF}}\"", "01234567890123456")

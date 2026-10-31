@@ -2,6 +2,7 @@ package shell_test
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/charmbracelet/x/input"
 	"github.com/mavity/rusticated/kabibi/ui"
 	"github.com/mavity/rusticated/kabibi/ui/shell"
+	"github.com/mavity/rusticated/platform"
 )
 
 type processRegistrationSink struct {
@@ -76,7 +78,8 @@ func TestExecuteAIToolCommand_RegistersBeforeCreatingView(t *testing.T) {
 func TestInteractiveChildShell_LifecycleAndIO(t *testing.T) {
 	var cmd string
 	var promptChar string
-	if runtime.GOOS == "windows" {
+	hostOS := platform.HostOS()
+	if runtime.GOOS == "windows" || strings.EqualFold(hostOS, "windows") || strings.EqualFold(hostOS, "win32") {
 		cmd = "cmd"
 		promptChar = ">"
 	} else {
@@ -89,7 +92,10 @@ func TestInteractiveChildShell_LifecycleAndIO(t *testing.T) {
 	}
 
 	s := shell.New(shell.ShellOptions{
-		WorkingDir: t.TempDir(),
+		WorkingDir: os.TempDir(),
+	})
+	t.Cleanup(func() {
+		_ = s.Close()
 	})
 	s.Render(ui.Rect{W: 80, H: 24}, ui.RenderContext{Focused: true})
 
@@ -155,16 +161,17 @@ func TestInteractiveChildShell_LifecycleAndIO(t *testing.T) {
 		}
 	}
 
-	typeInput("echo 123\n")
+	const marker = "KABIBI_PTY_COMMAND_OUTPUT_7461"
+	typeInput("echo " + marker + "\n")
 
-	// 5. Verify that "123" appears in the output
+	// 5. Require both the echoed input and the command's output.
 	echoDeadline := time.Now().Add(4 * time.Second)
 	var echoReceived bool
 	for time.Now().Before(echoDeadline) {
 		blocks := s.Blocks()
 		if len(blocks) > 0 {
 			out := blocks[len(blocks)-1].Output.String()
-			if strings.Contains(out, "123") {
+			if strings.Count(out, marker) >= 2 {
 				echoReceived = true
 				break
 			}
@@ -172,7 +179,12 @@ func TestInteractiveChildShell_LifecycleAndIO(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	if !echoReceived {
-		t.Fatalf("expected output to contain '123', got: %q", s.Blocks()[len(s.Blocks())-1].Output.String())
+		blocks := s.Blocks()
+		if len(blocks) == 0 {
+			t.Fatal("expected shell output after sending echo command, got no blocks")
+		}
+		t.Fatalf("expected echoed command and command output to contain %q, got: %q",
+			marker, blocks[len(blocks)-1].Output.String())
 	}
 
 	// 6. Type `exit <Enter>` into that input
