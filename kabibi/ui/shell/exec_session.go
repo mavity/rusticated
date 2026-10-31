@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/mavity/rusticated/platform"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
@@ -239,27 +240,42 @@ func (es *ExecutionSession) EnvMap() map[string]string {
 
 func (es *ExecutionSession) envMapLocked() map[string]string {
 	env := make(map[string]string)
+	windowsHost := platform.HostOS() == "windows"
 	for _, pair := range os.Environ() {
 		if k, v, ok := strings.Cut(pair, "="); ok {
-			env[k] = v
+			setEnvironmentValue(env, k, v, windowsHost)
 		}
 	}
 	if es.runner != nil {
 		if es.runner.Env != nil {
 			es.runner.Env.Each(func(name string, vr expand.Variable) bool {
 				if vr.IsSet() {
-					env[name] = vr.String()
+					setEnvironmentValue(env, name, vr.String(), windowsHost)
 				}
 				return true
 			})
 		}
 		for name, vr := range es.runner.Vars {
 			if vr.IsSet() {
-				env[name] = vr.String()
+				setEnvironmentValue(env, name, vr.String(), windowsHost)
 			}
 		}
 	}
 	return env
+}
+
+func setEnvironmentValue(env map[string]string, name, value string, caseInsensitive bool) {
+	if caseInsensitive {
+		for existing, current := range env {
+			if strings.EqualFold(existing, name) {
+				if value == "" && current != "" {
+					value = current
+				}
+				delete(env, existing)
+			}
+		}
+	}
+	env[name] = value
 }
 
 // ClassifyInput determines how user input should be handled without executing it.

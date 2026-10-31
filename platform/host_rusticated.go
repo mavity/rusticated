@@ -52,7 +52,20 @@ func detectHostPlatform() (string, string) {
 func parseBuildPlatform(buildPlatform string) (string, string, bool) {
 	parts := strings.Split(strings.TrimSpace(buildPlatform), "-")
 	if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
-		return parts[0], parts[1], true
+		goos := strings.ToLower(parts[0])
+		switch goos {
+		case "win32":
+			goos = "windows"
+		}
+
+		goarch := strings.ToLower(parts[1])
+		switch goarch {
+		case "x64":
+			goarch = "amd64"
+		case "ia32":
+			goarch = "386"
+		}
+		return goos, goarch, true
 	}
 	return "", "", false
 }
