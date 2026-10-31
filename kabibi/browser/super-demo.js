@@ -1488,12 +1488,12 @@
             deltaLight.x + 0.30 * deltaLight.y,
             deltaLight.y - 0.12 * deltaLight.x
           );
-          // Pivot the 30-degree clockwise rotation around the visual center of the smudge on screen (baseXY ≈ (0.0, -0.75))
+          // Pivot the 20-degree clockwise rotation around the visual center of the smudge on screen (baseXY ≈ (0.0, -0.75))
           // so it turns clockwise in place without swinging off to the left panel:
           vec2 centeredXY = vec2(baseXY.x - 0.15, baseXY.y + 0.75);
           vec2 turnedXY = vec2(
-            0.866 * centeredXY.x - 0.500 * centeredXY.y,
-            0.500 * centeredXY.x + 0.866 * centeredXY.y - 0.75
+            0.939693 * centeredXY.x - 0.342020 * centeredXY.y,
+            0.342020 * centeredXY.x + 0.939693 * centeredXY.y - 0.75
           );
           vec2 normXY = turnedXY / max(uEllipsoidRadii.xy * vec2(0.85, 1.35), vec2(0.05));
           // Extend downward by 20% more (1.2x taller overall) while keeping the top edge fixed
@@ -1604,8 +1604,8 @@
             );
             vec2 centeredOutXY = vec2(baseOutXY.x - 0.15, baseOutXY.y + 0.75);
             vec2 rotEllipOut = vec2(
-              0.866 * centeredOutXY.x - 0.500 * centeredOutXY.y,
-              0.500 * centeredOutXY.x + 0.866 * centeredOutXY.y - 0.75
+              0.939693 * centeredOutXY.x - 0.342020 * centeredOutXY.y,
+              0.342020 * centeredOutXY.x + 0.939693 * centeredOutXY.y - 0.75
             ) / max(uEllipsoidRadii.xy * vec2(0.80, 1.28), vec2(0.05));
             rotEllipOut.y = (rotEllipOut.y + 0.20) / 1.20;
             float ellipOutBody = (1.0 - smoothstep(0.28, 1.90, abs(rotEllipOut.x))) *
@@ -1666,7 +1666,7 @@
             float viewGrazing = clamp(1.0 - ndotv, 0.0, 1.0);
             float curvatureFactor = smoothstep(0.04, 0.95, apexDist2);
             float lightGlintBoost = 0.85 + 1.15 * clamp(mG + sphereGlint * 0.85, 0.0, 1.4);
-            float glyphReflectWeight = (0.018 + 0.19 * curvatureFactor + 0.24 * pow(viewGrazing, 1.5)) * lightGlintBoost;
+            float glyphReflectWeight = (0.018 + 0.19 * curvatureFactor + 0.24 * pow(viewGrazing, 1.5)) * lightGlintBoost * 0.60;
             terminalColor += blurredGlyph * vec3(0.76, 0.90, 1.0) * glyphReflectWeight;
           }
 
