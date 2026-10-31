@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/u-root/u-root/cmds/core/backoff"
 	base64cmd "github.com/u-root/u-root/cmds/core/base64"
@@ -247,12 +248,14 @@ func urootBuiltinMiddleware(next interp.ExecHandlerFunc) interp.ExecHandlerFunc 
 
 		hc := interp.HandlerCtx(ctx)
 		stdoutIsTerminal := false
+		stdinIsTerminal := false
 		terminalWidth := 0
 		stdin := hc.Stdin
 		var commandTerminal *CommandTerminal
 		if session, source := execSessionFromContext(ctx); session != nil && source == SourceUserShell {
 			tty := session.StreamTTY(ctx, hc)
 			stdoutIsTerminal = tty.Stdout
+			stdinIsTerminal = tty.Stdin
 			if tty.Stdin {
 				commandTerminal = commandTerminalFromContext(ctx)
 				if commandTerminal != nil {
@@ -276,6 +279,7 @@ func urootBuiltinMiddleware(next interp.ExecHandlerFunc) interp.ExecHandlerFunc 
 			Stdout:           hc.Stdout,
 			Stderr:           hc.Stderr,
 			Dir:              hc.Dir,
+			StdinIsTerminal:  stdinIsTerminal,
 			StdoutIsTerminal: stdoutIsTerminal,
 			TerminalWidth:    terminalWidth,
 			LookupEnv: func(k string) (string, bool) {
@@ -341,6 +345,24 @@ func urootBuiltinMiddleware(next interp.ExecHandlerFunc) interp.ExecHandlerFunc 
 					return 1
 				}
 				return 0
+			},
+			ShellRunner: func(runCtx context.Context, subIO core.IO, command string) (int, error) {
+				file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+				if err != nil {
+					return 2, err
+				}
+				shellRunner, err := createRunnerWithEnv(runCtx, subIO.Stdin, subIO.Stdout, subIO.Stderr, subIO.Dir, hc.Env, nil)
+				if err != nil {
+					return 1, err
+				}
+				err = shellRunner.Run(runCtx, file)
+				if err == nil {
+					return 0, nil
+				}
+				if status, ok := interp.IsExitStatus(err); ok {
+					return int(status), nil
+				}
+				return 1, err
 			},
 			IsBuiltin: func(cmdName string) bool {
 				if cmdName == "echo" {
