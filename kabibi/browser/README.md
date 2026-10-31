@@ -8,11 +8,13 @@ The standard mode uses xterm's normal renderer. CRT mode is opt-in with `window.
 
 Super-demo mode includes an always-visible, IBM-PC-inspired on-screen keyboard for Ctrl, Esc, Tab, arrows, and F1–F12. The angular, beveled keycaps use one row on wider displays and wrap on narrow displays; key and label sizing scales with available space. Ctrl is a sticky toggle: tap it once to apply Ctrl to physical or on-screen key presses, then tap it again to turn the modifier off. The Ctrl cap displays the Kabibi SVG logo. For Kabibi-owned fullscreen hosts, the terminal tracks the browser's visual viewport as browser chrome appears or disappears. Existing caller-owned parents remain untouched and must provide their own responsive dimensions. The root demo page opts into safe-area insets so the on-screen keyboard stays clear of device edges.
 
-In CRT mode, power-on begins after the renderer and terminal host are ready. A
-centre glow grows into a horizontal line, then a vertically expanding white
-flash reveals the live terminal in about 800 ms. Host exit and `dispose()` both
-start power-off: the image collapses to a centre line and dot over about 800 ms,
-then the dot fades over another second. The bezel remains geometrically fixed.
+In CRT mode, power-on is requested after the terminal host is ready and begins
+no sooner than 800 ms after the first completed WebGL frame. The bezel remains
+visible over black during this delay. A centre glow grows into a horizontal
+line, then a vertically expanding white flash reveals the live terminal over
+about 1200 ms. Host exit and `dispose()` both wait 500 ms before starting
+power-off, then collapse the image to a centre line and dot over about 800 ms;
+the dot fades over another second. The bezel remains geometrically fixed.
 
 In super-demo mode, the page title is updated to `Kabibi v<version>` when the
 startup banner arrives; disposing the terminal restores the title that was

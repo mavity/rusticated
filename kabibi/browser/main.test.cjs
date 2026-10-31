@@ -928,15 +928,17 @@ test('CRT reflection oscillates left-right and back-forward over thirty seconds'
   assert.ok(Math.abs(depth(30000) - 1.2) < 1e-12);
 });
 
-test('CRT power transitions clamp to an 800 ms startup and 1800 ms shutdown', () => {
+test('CRT power transitions use the requested startup and shutdown timing', () => {
   const { context } = createHarness();
   vm.runInContext(fs.readFileSync(path.join(__dirname, 'super-demo.js'), 'utf8'), context);
   const superDemo = context.KabibiBrowserSuperDemo;
 
-  assert.equal(superDemo.POWER_ON_DURATION_MS, 800);
+  assert.equal(superDemo.POWER_ON_DELAY_MS, 800);
+  assert.equal(superDemo.POWER_ON_DURATION_MS, 1200);
+  assert.equal(superDemo.POWER_OFF_DELAY_MS, 500);
   assert.equal(superDemo.POWER_OFF_DURATION_MS, 1800);
-  assert.equal(superDemo.calculatePowerProgress(1, 400), 0.5);
-  assert.equal(superDemo.calculatePowerProgress(1, 800), 1);
+  assert.equal(superDemo.calculatePowerProgress(1, 600), 0.5);
+  assert.equal(superDemo.calculatePowerProgress(1, 1200), 1);
   assert.equal(superDemo.calculatePowerProgress(3, 900), 0.5);
   assert.equal(superDemo.calculatePowerProgress(3, 1800), 1);
   assert.equal(superDemo.calculatePowerProgress(3, 2400), 1);
@@ -958,6 +960,10 @@ test('CRT blur is a final composite pass with endpoints measured on curved geome
   const renderStart = source.indexOf('function render(');
   const renderPass = source.slice(renderStart, source.indexOf('function bindBlurUniforms(', renderStart));
   const firstQuadDraw = renderPass.indexOf('gl.drawArrays(gl.TRIANGLES, 0, 6)');
+  const finalQuadDraw = renderPass.indexOf('gl.drawArrays(gl.TRIANGLES, 0, 6)', firstQuadDraw + 1);
+  const firstFrameMark = renderPass.indexOf(
+    'if (firstFrameRenderedAt === null) firstFrameRenderedAt = now'
+  );
   const passOrder = [
     'gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFbo)',
     'gl.useProgram(crtProgram)',
@@ -971,6 +977,7 @@ test('CRT blur is a final composite pass with endpoints measured on curved geome
   ].map((step) => typeof step === 'number' ? step : renderPass.indexOf(step));
   assert.ok(passOrder.every((index) => index >= 0));
   assert.ok(passOrder.every((index, position) => position === 0 || index > passOrder[position - 1]));
+  assert.ok(firstFrameMark > finalQuadDraw);
   assert.match(source, /function calculateFocalBounds\(/);
   assert.match(source, /if \(dist < nearestDistance\) nearestDistance = dist/);
   assert.match(source, /if \(dist > farthestDistance\) farthestDistance = dist/);
@@ -979,6 +986,8 @@ test('CRT blur is a final composite pass with endpoints measured on curved geome
     /\(farthestDistance - distanceToFocalPoint\) \/ distanceRange/
   );
   assert.match(source, /const maxBlurPixels = 8\.0/);
+  assert.match(source, /now - firstFrameRenderedAt >= POWER_ON_DELAY_MS/);
+  assert.match(source, /if \(firstFrameRenderedAt === null\) firstFrameRenderedAt = now/);
   assert.match(source, /gl\.SRGB8_ALPHA8/);
   assert.match(source, /gl\.DEPTH_COMPONENT24/);
   assert.match(source, /float blurAmount = opticalEffects \* proximity \* proximity/);
@@ -1005,7 +1014,9 @@ test('CRT blur is a final composite pass with endpoints measured on curved geome
   assert.match(source, /uniform vec2 powerCenter/);
   assert.match(source, /powerCenter\.x = 0\.5 \+ 0\.5 \* viewProjMatrix\[12\]/);
   assert.match(source, /powerCenter \+ offset \/ vec2\(scaleX, scaleY\)/);
-  assert.match(source, /const POWER_ON_DURATION_MS = 800/);
+  assert.match(source, /const POWER_ON_DELAY_MS = 800/);
+  assert.match(source, /const POWER_ON_DURATION_MS = 1200/);
+  assert.match(source, /const POWER_OFF_DELAY_MS = 500/);
   assert.match(source, /const POWER_OFF_DURATION_MS = 1800/);
   assert.match(source, /float embossHeight = gasketWidth \* 0\.08/);
   assert.match(source, /float embossSlope = 0\.08 \* 3\.14159265/);
@@ -1013,6 +1024,8 @@ test('CRT blur is a final composite pass with endpoints measured on curved geome
   assert.match(source, /surfacePosition\.z \+= embossHeight/);
   assert.match(source, /- embossSlope \* edgeGradient\.x/);
   assert.match(source, /float lineHalfWidth = mix\(0\.008, 1\.12, lineProgress\)/);
+  assert.match(source, /float bandProgress = smoothstep\(0\.34, 0\.62, progress\)/);
+  assert.match(source, /float flareFade = exp\(-4\.0 \* flareFadeProgress\)/);
   assert.match(source, /float bandHalfHeight = mix\(0\.018, 1\.12, bandProgress\)/);
   assert.match(source, /float scaleY = mix\(1\.0, 0\.010, verticalProgress\)/);
   assert.match(source, /float scaleX = mix\(1\.0, 0\.010, horizontalProgress\)/);
