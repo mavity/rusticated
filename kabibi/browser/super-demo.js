@@ -293,6 +293,8 @@
   const BASE_LIGHT_Y = 1.8;
   const BASE_LIGHT_DEPTH = 2.2;
   const LIGHT_SPHERE_RADIUS = 0.55;
+  const LIGHT_ELLIPSOID_RADII = Object.freeze({ x: 1.05, y: 3.60, z: 0.95 });
+  const LIGHT_ELLIPSOID_OFFSET = Object.freeze({ x: 0.45, y: -0.95, z: 0.12 });
 
   function srgbChannelToLinear(c) {
     return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
@@ -449,11 +451,26 @@
   function calculateLightPosition(elapsedMs, screenWidth = 2.72) {
     const offset = calculateReflectionOffset(elapsedMs);
     const depthScale = calculateReflectionDepth(elapsedMs);
+    // Normalize swing from left (-1.2 -> sRight = 0) to right (+1.2 -> sRight = 1)
+    // On the left, the light rig stays near BASE_LIGHT_DEPTH (~2.2); on the right, it recedes visibly farther.
+    const sRight = Math.max(0, Math.min(1, (offset + 1.2) / 2.4));
+    const sphereX = BASE_LIGHT_X + offset * screenWidth;
+    const sphereY = BASE_LIGHT_Y;
+    const sphereZ = BASE_LIGHT_DEPTH * (0.95 + 1.55 * sRight * sRight);
     return {
-      x: BASE_LIGHT_X + offset * screenWidth,
-      y: BASE_LIGHT_Y,
-      z: BASE_LIGHT_DEPTH * depthScale,
-      radius: LIGHT_SPHERE_RADIUS
+      x: sphereX,
+      y: sphereY,
+      z: sphereZ,
+      radius: LIGHT_SPHERE_RADIUS,
+      depthScale,
+      ellipsoid: {
+        x: sphereX + LIGHT_ELLIPSOID_OFFSET.x * (0.85 + 0.30 * (1 - sRight)),
+        y: sphereY + LIGHT_ELLIPSOID_OFFSET.y,
+        z: sphereZ + LIGHT_ELLIPSOID_OFFSET.z,
+        rx: LIGHT_ELLIPSOID_RADII.x,
+        ry: LIGHT_ELLIPSOID_RADII.y,
+        rz: LIGHT_ELLIPSOID_RADII.z
+      }
     };
   }
 
@@ -466,6 +483,7 @@
         uvG: { x: u, y: v },
         uvB: { x: u, y: v },
         deltaUvG: { x: 0, y: 0 },
+        bounceUv: { x: u, y: v },
         lensDensity: 1,
         fresnelOuter: GLASS_F0
       };
@@ -499,20 +517,35 @@
     const cosThetaT = Math.max(0.25, -(refractedG.x * normX + refractedG.y * normY + refractedG.z * normZ));
     const thickness = GLASS_BASE_THICKNESS * (1.0 + GLASS_CORNER_THICKENING * r2);
     const stepLen = thickness / cosThetaT;
-    const deltaUvX = (refractedG.x * stepLen) / screenWidth;
-    const deltaUvY = (refractedG.y * stepLen) / screenHeight;
+
+    // Measure refraction offset in the local shell tangent frame relative to -N
+    const tangentX = refractedG.x + cosThetaT * normX;
+    const tangentY = refractedG.y + cosThetaT * normY;
+    const deltaUvX = (tangentX * stepLen) / screenWidth;
+    const deltaUvY = (tangentY * stepLen) / screenHeight;
 
     const grazing = 1.0 - ndotv * ndotv;
-    const dispStrength = 0.14 + 0.22 * grazing;
+    const dispStrength = 0.028 + 0.045 * grazing;
     const uvG = { x: u + deltaUvX, y: v + deltaUvY };
     const uvR = {
       x: u + deltaUvX * (1.0 - dispStrength),
       y: v + deltaUvY * (1.0 - dispStrength)
     };
     const uvB = {
-      x: u + deltaUvX * (1.0 + 1.28 * dispStrength),
-      y: v + deltaUvY * (1.0 + 1.28 * dispStrength)
+      x: u + deltaUvX * (1.0 + 1.18 * dispStrength),
+      y: v + deltaUvY * (1.0 + 1.18 * dispStrength)
     };
+
+    // Outward curvature-directed internal reflection offset (against the line of sight):
+    // On the left side (normX < 0), bounceUv.x > uvG.x so a fragment to the left of a letter
+    // samples the letter, placing the blurred internal reflection further to the left.
+    const reflectShiftX = ((1.95 * normX - 0.70 * tangentX) * thickness * 1.45) / screenWidth;
+    const reflectShiftY = ((1.95 * normY - 0.70 * tangentY) * thickness * 0.65) / screenHeight;
+    const bounceUv = {
+      x: uvG.x - reflectShiftX,
+      y: uvG.y - reflectShiftY
+    };
+
     const lensDensity = 1.0 + 0.28 * (1.0 - 0.65 * r2) * (cosThetaT / Math.max(ndotv, 0.22) - 1.0);
     const fresnelOuter = GLASS_F0 + (1.0 - GLASS_F0) * Math.pow(1.0 - ndotv, 5.0);
 
@@ -521,6 +554,7 @@
       uvG,
       uvB,
       deltaUvG: { x: deltaUvX, y: deltaUvY },
+      bounceUv,
       lensDensity,
       fresnelOuter
     };
@@ -954,6 +988,18 @@
       gl.uniform3f(crtUniforms.uCameraPos, cameraEye.x, cameraEye.y, cameraEye.z);
       gl.uniform3f(crtUniforms.uLightPos, lightPos.x, lightPos.y, lightPos.z);
       gl.uniform1f(crtUniforms.uLightRadius, lightPos.radius);
+      gl.uniform3f(
+        crtUniforms.uEllipsoidPos,
+        lightPos.ellipsoid.x,
+        lightPos.ellipsoid.y,
+        lightPos.ellipsoid.z
+      );
+      gl.uniform3f(
+        crtUniforms.uEllipsoidRadii,
+        lightPos.ellipsoid.rx,
+        lightPos.ellipsoid.ry,
+        lightPos.ellipsoid.rz
+      );
       gl.uniform1f(crtUniforms.uOpticalEffects, opticalEffects);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, screenTex);
@@ -1382,6 +1428,8 @@
         uniform vec3 uCameraPos;
         uniform vec3 uLightPos;
         uniform float uLightRadius;
+        uniform vec3 uEllipsoidPos;
+        uniform vec3 uEllipsoidRadii;
         uniform float uOpticalEffects;
         in vec2 vUv;
         in vec2 vSignedUv;
@@ -1400,7 +1448,7 @@
           return mix(color, uScreenBackground, backgroundPixel * 0.90);
         }
 
-        float evaluateMatteInnerLight(
+        float evaluateEllipsoidMatteLight(
           vec3 innerPos,
           vec3 innerNormal,
           vec3 internalViewDir,
@@ -1408,44 +1456,62 @@
           vec3 outerNormal,
           float thickness
         ) {
-          vec3 toLight = uLightPos - innerPos;
-          float distSq = max(dot(toLight, toLight), 0.1);
-          float dist = sqrt(distSq);
-          vec3 L = toLight / dist;
+          // 1. Large, solid-bodied vertically-elongated ellipsoid light surface (window pane / office light panel)
+          vec3 toEllipsoid = uEllipsoidPos - innerPos;
+          float rawDist = max(length(toEllipsoid), 0.1);
+          vec3 L = toEllipsoid / rawDist;
 
           // Transmission through the outer curved glass into the slab
           float ndotlOut = max(dot(outerNormal, L), 0.0);
           float fIn = 0.0426 + (1.0 - 0.0426) * pow(1.0 - ndotlOut, 5.0);
-          float transmitIn = (1.0 - fIn) * smoothstep(0.0, 0.35, ndotlOut);
+          float transmitIn = (1.0 - fIn) * smoothstep(0.0, 0.28, ndotlOut);
 
-          // Refract light ray into the leaded glass with channel-specific IOR
+          // Refract internal view ray & light ray across the curved glass
           vec3 lightEntryDir = refract(-L, outerNormal, 1.0 / iorChannel);
           vec3 lightInGlass = -lightEntryDir;
-
-          // Trace where the refracted light ray enters the outer glass relative to the bulb axis
           float cosThetaL = max(dot(lightInGlass, outerNormal), 0.25);
           vec3 entryPos = innerPos + lightInGlass * (thickness / cosThetaL);
 
-          // Anisotropic satin-matte phosphor response on the curved inner screen:
-          // Vertical phosphor stripes / aperture grille scatter wider along the curved horizontal/diagonal contour
-          vec3 H = normalize(lightInGlass + internalViewDir);
-          vec3 tangentX = normalize(vec3(1.0, 0.0, -innerNormal.x / max(innerNormal.z, 0.1)));
-          vec3 tangentY = normalize(cross(innerNormal, tangentX));
-          float hx = dot(H, tangentX);
-          float hy = dot(H, tangentY);
-          float hAniso = (hx * hx) / 0.032 + (hy * hy) / 0.085;
-          float satinStreak = exp(-hAniso);
+          // Trace where the matte-reflected internal cone meets the 3D ellipsoid plane at z = uEllipsoidPos.z:
+          // This gives the light source a cohesive, solid window/fixture body with a soft blurred edge
+          // instead of a point-centered galaxy nebula.
+          vec3 matteBounceDir = normalize(reflect(-internalViewDir, innerNormal) + 0.45 * innerNormal);
+          float tPlane = max((uEllipsoidPos.z - entryPos.z) / max(matteBounceDir.z, 0.20), 0.0);
+          vec3 hitOnLightPlane = entryPos + matteBounceDir * tPlane;
+          vec3 deltaLight = hitOnLightPlane - uEllipsoidPos;
 
-          // Localized diffuse matte pool under the refracted spherical bulb
-          float ndoth = max(dot(innerNormal, H), 0.0);
-          float mattePool = pow(ndoth, 14.0) * 0.55 + pow(ndoth, 42.0) * 0.85;
+          // Slight diagonal orientation from the low-angle perspective across the curved screen
+          vec2 rotatedXY = vec2(
+            deltaLight.x + 0.30 * deltaLight.y,
+            deltaLight.y - 0.12 * deltaLight.x
+          );
+          vec2 normXY = rotatedXY / max(uEllipsoidRadii.xy * vec2(0.85, 1.35), vec2(0.05));
+
+          // Tall window/light-bank metric: flat-topped solid plateau in X, sweeping tall band in Y
+          float bodyX = 1.0 - smoothstep(0.52, 1.32, abs(normXY.x));
+          float bodyY = 1.0 - smoothstep(0.68, 1.45, abs(normXY.y));
+          float solidPanelBody = bodyX * bodyY;
+          float softHalo = (1.0 - smoothstep(0.25, 1.85, length(normXY * vec2(0.85, 0.65)))) * 0.28;
 
           // Refracted ray-bundle convergence (caustic density change from curved outer glass)
           float entryCurvature = length(entryPos.xy / (uScreenSize * 0.5));
-          float refractionCompression = 1.0 + 0.38 * (1.0 - cosThetaL / max(ndotlOut, 0.25)) * (1.0 + 0.4 * entryCurvature);
+          float refractionCompression = 1.0 + 0.42 * (1.0 - cosThetaL / max(ndotlOut, 0.22)) * (1.0 + 0.45 * entryCurvature);
 
-          float falloff = (uLightRadius * uLightRadius * 2.6) / (distSq + uLightRadius * uLightRadius);
-          return transmitIn * falloff * refractionCompression * (0.42 * satinStreak + 0.58 * mattePool);
+          // Distance attenuation that stays bright when near on the left and softens as it recedes on the right
+          float depthAtten = 8.6 / (rawDist * rawDist + 3.4);
+          float ellipsoidSubsurface = transmitIn * depthAtten * refractionCompression *
+            (solidPanelBody * 0.82 + softHalo);
+
+          // 2. Sub-surface contribution from the secondary sphere (crisper, less smudged, upper-left accent)
+          vec3 toSphere = uLightPos - innerPos;
+          float sphereDistSq = max(dot(toSphere, toSphere), 0.1);
+          float tSphere = max(dot(toSphere, matteBounceDir), 0.0);
+          vec3 closestSphereIn = toSphere - matteBounceDir * tSphere;
+          float rSphereNorm = length(closestSphereIn) / max(uLightRadius * 0.92, 0.05);
+          float sphereDisc = (1.0 - smoothstep(0.50, 1.25, rSphereNorm)) *
+            (5.8 / (sphereDistSq + 2.2));
+
+          return ellipsoidSubsurface + 0.28 * transmitIn * sphereDisc;
         }
 
         void main() {
@@ -1454,44 +1520,31 @@
           vec3 V = -I;
           float ndotv = max(dot(N, V), 0.001);
 
-          // 1. Thick CRT glass outer-to-inner 3D Snell refraction & Newtonian spectral dispersion
+          // 1. Thick CRT glass tangent-frame Snell refraction & subtle Newtonian spectral dispersion
           float r2 = vSignedUv.x * vSignedUv.x + 0.72 * vSignedUv.y * vSignedUv.y;
           float thickness = uOpticalEffects * 0.036 * (1.0 + 0.24 * r2);
           vec3 refractG = refract(I, N, 1.0 / 1.520);
           float cosThetaT = max(dot(-refractG, N), 0.25);
-          vec3 deltaPG = refractG * (thickness / cosThetaT);
+          vec3 tangentRefract = refractG + cosThetaT * N;
+          vec3 deltaPG = tangentRefract * (thickness / cosThetaT);
           vec2 deltaUvG = deltaPG.xy / uScreenSize;
 
           float grazing = 1.0 - ndotv * ndotv;
-          float dispStrength = uOpticalEffects * (0.14 + 0.22 * grazing);
+          float dispStrength = uOpticalEffects * (0.028 + 0.045 * grazing);
           vec2 uvR = vUv + deltaUvG * (1.0 - dispStrength);
           vec2 uvG = vUv + deltaUvG;
-          vec2 uvB = vUv + deltaUvG * (1.0 + 1.28 * dispStrength);
+          vec2 uvB = vUv + deltaUvG * (1.0 + 1.18 * dispStrength);
 
           vec3 phosphorR = samplePhosphorSurface(uvR);
           vec3 phosphorG = samplePhosphorSurface(uvG);
           vec3 phosphorB = samplePhosphorSurface(uvB);
           vec3 terminalColor = vec3(phosphorR.r, phosphorG.g, phosphorB.b);
 
-          // 2. Internal reflection / halation of bright terminal glyphs inside the thick glass slab
-          if (uOpticalEffects > 0.5) {
-            vec2 bounceCenter = uvG + deltaUvG * 2.15;
-            vec2 spread = (1.6 / max(uResolution, vec2(1.0))) * (1.0 + 1.2 * r2);
-            vec3 b0 = samplePhosphorSurface(bounceCenter + vec2(spread.x, 0.0));
-            vec3 b1 = samplePhosphorSurface(bounceCenter - vec2(spread.x, 0.0));
-            vec3 b2 = samplePhosphorSurface(bounceCenter + vec2(0.0, spread.y));
-            vec3 b3 = samplePhosphorSurface(bounceCenter - vec2(0.0, spread.y));
-            vec3 bounceAvg = 0.25 * (b0 + b1 + b2 + b3);
-            vec3 excessGlyph = max(bounceAvg - uScreenBackground * 1.12, vec3(0.0));
-            float fInternal = 0.0426 + (1.0 - 0.0426) * pow(1.0 - cosThetaT, 5.0);
-            terminalColor += excessGlyph * vec3(0.80, 0.91, 1.0) * (0.20 + 0.65 * fInternal);
-          }
-
           // 3. Curvature density modulation (Jacobian lensing across curved glass meniscus)
           float lensDensity = 1.0 + uOpticalEffects * 0.28 * (1.0 - 0.65 * r2) *
             (cosThetaT / max(ndotv, 0.22) - 1.0);
 
-          // 4. Sub-surface matte illumination on the curved inner screen + Newtonian dispersion
+          // 4. Dual-source sub-surface matte illumination & outer Fresnel reflections
           vec3 matteLight = vec3(0.0);
           float fOuter = 0.0426 + (1.0 - 0.0426) * pow(1.0 - ndotv, 5.0);
           vec3 outerReflection = vec3(0.0);
@@ -1499,30 +1552,104 @@
           if (uOpticalEffects > 0.5) {
             vec3 innerNormal = normalize(vec3(N.xy * (1.0 + 0.22 * r2), N.z));
             vec3 internalView = -refractG;
-            vec3 posInR = vWorldPos + deltaPG * (1.0 - dispStrength * 2.4);
-            vec3 posInG = vWorldPos + deltaPG;
-            vec3 posInB = vWorldPos + deltaPG * (1.0 + dispStrength * 3.0);
+            vec3 slabVec = refractG * (thickness / cosThetaT);
+            vec3 posInR = vWorldPos + slabVec * (1.0 - dispStrength * 2.2);
+            vec3 posInG = vWorldPos + slabVec;
+            vec3 posInB = vWorldPos + slabVec * (1.0 + dispStrength * 2.6);
 
-            float mR = evaluateMatteInnerLight(posInR, innerNormal, internalView, 1.492, N, thickness);
-            float mG = evaluateMatteInnerLight(posInG, innerNormal, internalView, 1.520, N, thickness);
-            float mB = evaluateMatteInnerLight(posInB, innerNormal, internalView, 1.555, N, thickness);
+            float mR = evaluateEllipsoidMatteLight(posInR, innerNormal, internalView, 1.492, N, thickness);
+            float mG = evaluateEllipsoidMatteLight(posInG, innerNormal, internalView, 1.520, N, thickness);
+            float mB = evaluateEllipsoidMatteLight(posInB, innerNormal, internalView, 1.555, N, thickness);
 
-            // Sub-surface matte phosphor illumination with Newtonian spectral dispersion at the refracted rim
-            vec3 rawMatte = vec3(mR * 0.80, mG * 0.89, mB * 1.04) * 0.24;
-            float fadeY = smoothstep(0.04, 0.22, uvG.y) * (1.0 - smoothstep(0.92, 0.995, uvG.y));
-            matteLight = rawMatte * lensDensity * (0.35 + 0.65 * fadeY);
+            // Pronounced sub-surface matte phosphor smudge with subtle Newtonian dispersion at its rim
+            vec3 rawMatte = vec3(mR * 0.80, mG * 0.90, mB * 1.04) * 0.56;
+            float fadeY = smoothstep(0.02, 0.16, uvG.y) * (1.0 - smoothstep(0.93, 0.996, uvG.y));
+            matteLight = rawMatte * lensDensity * (0.45 + 0.55 * fadeY);
 
-            // 5. Restrained outer-surface dielectric Fresnel sheen & 3D bulb glint on S_outer
+            // 5. Outer-surface dielectric Fresnel reflection:
+            //    - Crisper spherical light source with stronger Fresnel response
+            //    - Cohesive outer-surface window/fixture reflection from the vertical ellipsoid
             vec3 reflectOut = reflect(I, N);
-            vec3 toLightOut = uLightPos - vWorldPos;
-            float proj = max(dot(toLightOut, reflectOut), 0.0);
-            vec3 closestVec = toLightOut - reflectOut * proj;
-            float radialDist2 = dot(closestVec, closestVec);
-            float bulbGlint = exp(-radialDist2 / (uLightRadius * uLightRadius * 0.95)) *
-              step(0.0, dot(toLightOut, reflectOut));
-            vec3 ambientGlass = vec3(0.74, 0.86, 1.0) * 0.055;
-            vec3 outerBulbColor = vec3(0.84, 0.92, 1.0) * bulbGlint * 0.42;
-            outerReflection = fOuter * (ambientGlass + outerBulbColor);
+            vec3 toSphereOut = uLightPos - vWorldPos;
+            float sphereDistSqOut = max(dot(toSphereOut, toSphereOut), 0.1);
+            float projSphere = max(dot(toSphereOut, reflectOut), 0.0);
+            vec3 closestSphere = toSphereOut - reflectOut * projSphere;
+            float rSphereOut = length(closestSphere) / max(uLightRadius * 0.82, 0.05);
+            // Solid spherical bulb profile with crisp edge (less blur than the ellipsoid)
+            float sphereGlint = (1.0 - smoothstep(0.55, 1.22, rSphereOut)) *
+              step(0.0, dot(toSphereOut, reflectOut)) *
+              (7.4 / (sphereDistSqOut + 2.0));
+
+            // Boosted Fresnel curve for the spherical accent light so it glints clearly off the glass
+            float fSphere = 0.12 + (1.0 - 0.12) * pow(1.0 - ndotv, 2.1);
+
+            vec3 toEllipOut = uEllipsoidPos - vWorldPos;
+            float projEllip = max(dot(toEllipOut, reflectOut), 0.0);
+            vec3 closestEllip = toEllipOut - reflectOut * projEllip;
+            vec2 rotEllipOut = vec2(
+              closestEllip.x + 0.30 * closestEllip.y,
+              closestEllip.y - 0.12 * closestEllip.x
+            ) / max(uEllipsoidRadii.xy * vec2(0.80, 1.28), vec2(0.05));
+            float ellipOutBody = (1.0 - smoothstep(0.52, 1.28, abs(rotEllipOut.x))) *
+              (1.0 - smoothstep(0.65, 1.40, abs(rotEllipOut.y)));
+            float ellipOuterSheen = ellipOutBody *
+              step(0.0, dot(toEllipOut, reflectOut)) *
+              (5.2 / (dot(toEllipOut, toEllipOut) + 3.2));
+
+            vec3 ambientGlass = vec3(0.74, 0.86, 1.0) * 0.075;
+            vec3 sphereOuterColor = vec3(0.88, 0.94, 1.0) * sphereGlint * 1.65;
+            vec3 ellipOuterColor = vec3(0.80, 0.90, 1.0) * ellipOuterSheen * 0.68;
+            outerReflection = fOuter * (ambientGlass + ellipOuterColor) + fSphere * sphereOuterColor;
+
+            // 2. Outward curvature-directed internal glyph reflection with continuous blurred halo & glint:
+            //    Anchored to the thick glass slab (5-11px outward shift) and smoothed with a wide
+            //    continuous 16-tap 2D Gaussian-like kernel (spanning ~14x10 texels) so thin strokes
+            //    merge into a soft, glowing thick-glass reflection rather than a sharp readable double.
+            vec2 outwardDir = vec2(1.95 * N.x - 0.70 * tangentRefract.x, (1.95 * N.y - 0.70 * tangentRefract.y) * 0.45);
+            vec2 reflectShift = (outwardDir * (thickness * 1.45)) / uScreenSize;
+            vec2 bounceCenter = uvG - reflectShift;
+            vec2 texel = 1.0 / max(uResolution, vec2(1.0));
+            vec2 radialAxis = length(outwardDir) > 0.001 ? normalize(outwardDir) : vec2(-1.0, 0.0);
+            vec2 orthoAxis = vec2(-radialAxis.y, radialAxis.x);
+            vec2 blurScale = texel * (4.8 + 4.2 * r2);
+
+            vec3 bAvg = vec3(0.0);
+            const vec2 kernel[16] = vec2[16](
+              vec2(-1.20,  0.00),
+              vec2(-0.75,  0.00),
+              vec2(-0.35,  0.00),
+              vec2( 0.00,  0.00),
+              vec2( 0.35,  0.00),
+              vec2( 0.75,  0.00),
+              vec2( 1.20,  0.00),
+              vec2(-0.85,  0.48),
+              vec2(-0.28,  0.52),
+              vec2( 0.28,  0.52),
+              vec2( 0.85,  0.48),
+              vec2(-0.85, -0.48),
+              vec2(-0.28, -0.52),
+              vec2( 0.28, -0.52),
+              vec2( 0.85, -0.48),
+              vec2( 0.00,  0.98)
+            );
+            const float weights[16] = float[16](
+              0.045, 0.068, 0.088, 0.098, 0.088, 0.068, 0.045,
+              0.048, 0.066, 0.066, 0.048,
+              0.048, 0.066, 0.066, 0.048,
+              0.044
+            );
+            for (int i = 0; i < 16; i++) {
+              vec2 offsetUv = (radialAxis * kernel[i].x * 1.15 + orthoAxis * kernel[i].y * 0.90) * blurScale;
+              vec3 tapColor = max(samplePhosphorSurface(bounceCenter + offsetUv) - uScreenBackground * 1.12, vec3(0.0));
+              bAvg += tapColor * weights[i];
+            }
+            // Soft continuous halo boost without sharp character outlines
+            vec3 blurredGlyph = bAvg * 2.15;
+            float viewGrazing = clamp(1.0 - ndotv, 0.0, 1.0);
+            float curvatureFactor = smoothstep(0.06, 0.82, r2);
+            float lightGlintBoost = 0.85 + 1.15 * clamp(mG + sphereGlint * 0.85, 0.0, 1.4);
+            float glyphReflectWeight = (0.025 + 0.16 * curvatureFactor + 0.22 * pow(viewGrazing, 1.6)) * lightGlintBoost;
+            terminalColor += blurredGlyph * vec3(0.76, 0.90, 1.0) * glyphReflectWeight;
           }
 
           float grille = mix(1.0, 0.992 + 0.008 * cos(uvG.x * uResolution.x * 2.094), uOpticalEffects);
@@ -1551,6 +1678,8 @@
         'uCameraPos',
         'uLightPos',
         'uLightRadius',
+        'uEllipsoidPos',
+        'uEllipsoidRadii',
         'uOpticalEffects'
       ]);
       crtProgram = built.program;
