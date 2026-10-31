@@ -281,15 +281,318 @@
     return functionNumbers[number] ? `\x1b[${functionNumbers[number]};5~` : null;
   }
 
+  const CRT_CURVE_KZ = 0.24;
+  const CRT_CURVE_AY = 0.72;
+  const GLASS_IOR_R = 1.506;
+  const GLASS_IOR_G = 1.520;
+  const GLASS_IOR_B = 1.538;
+  const GLASS_F0 = Math.pow((GLASS_IOR_G - 1) / (GLASS_IOR_G + 1), 2);
+  const GLASS_BASE_THICKNESS = 0.036;
+  const GLASS_CORNER_THICKENING = 0.24;
+  const BASE_LIGHT_X = -1.7;
+  const BASE_LIGHT_Y = 1.8;
+  const BASE_LIGHT_DEPTH = 2.2;
+  const LIGHT_SPHERE_RADIUS = 0.55;
+
+  function srgbChannelToLinear(c) {
+    return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  }
+
+  function parseHexColorLinear(hex, fallback = [0.002, 0.003, 0.006]) {
+    if (typeof hex !== 'string') return fallback;
+    const cleaned = hex.trim().replace(/^#/, '');
+    if (cleaned.length !== 6) return fallback;
+    const num = Number.parseInt(cleaned, 16);
+    if (!Number.isFinite(num)) return fallback;
+    const r = ((num >> 16) & 0xff) / 255;
+    const g = ((num >> 8) & 0xff) / 255;
+    const b = (num & 0xff) / 255;
+    return [srgbChannelToLinear(r), srgbChannelToLinear(g), srgbChannelToLinear(b)];
+  }
+
+  function mat4Perspective(out, fovDeg, aspect, near, far) {
+    const f = 1.0 / Math.tan((fovDeg * Math.PI) / 360.0);
+    const nf = 1.0 / (near - far);
+    out.fill(0);
+    out[0] = f / (aspect || 1);
+    out[5] = f;
+    out[10] = (far + near) * nf;
+    out[11] = -1.0;
+    out[14] = 2.0 * far * near * nf;
+    return out;
+  }
+
+  function mat4InvertPerspective(out, proj) {
+    out.fill(0);
+    out[0] = proj[0] !== 0 ? 1.0 / proj[0] : 0;
+    out[5] = proj[5] !== 0 ? 1.0 / proj[5] : 0;
+    out[11] = proj[14] !== 0 ? 1.0 / proj[14] : 0;
+    out[14] = -1.0;
+    out[15] = proj[14] !== 0 ? proj[10] / proj[14] : 0;
+    return out;
+  }
+
+  function mat4LookAt(out, eye, target, up, cameraUpOut) {
+    let zx = eye.x - target.x;
+    let zy = eye.y - target.y;
+    let zz = eye.z - target.z;
+    const zLen = Math.hypot(zx, zy, zz) || 1;
+    zx /= zLen;
+    zy /= zLen;
+    zz /= zLen;
+
+    let xx = up.y * zz - up.z * zy;
+    let xy = up.z * zx - up.x * zz;
+    let xz = up.x * zy - up.y * zx;
+    const xLen = Math.hypot(xx, xy, xz) || 1;
+    xx /= xLen;
+    xy /= xLen;
+    xz /= xLen;
+
+    const yx = zy * xz - zz * xy;
+    const yy = zz * xx - zx * xz;
+    const yz = zx * xy - zy * xx;
+    if (cameraUpOut) {
+      cameraUpOut.x = yx;
+      cameraUpOut.y = yy;
+      cameraUpOut.z = yz;
+    }
+
+    out[0] = xx;
+    out[1] = yx;
+    out[2] = zx;
+    out[3] = 0;
+    out[4] = xy;
+    out[5] = yy;
+    out[6] = zz;
+    out[7] = 0;
+    out[8] = xz;
+    out[9] = yz;
+    out[10] = zz;
+    out[11] = 0;
+    out[12] = -(xx * eye.x + xy * eye.y + xz * eye.z);
+    out[13] = -(yx * eye.x + yy * eye.y + yz * eye.z);
+    out[14] = -(zx * eye.x + zy * eye.y + zz * eye.z);
+    out[15] = 1;
+    // Fix column 1 row 2 (out[6] is zy)
+    out[6] = zy;
+    return out;
+  }
+
+  function mat4Multiply(out, a, b) {
+    const a00 = a[0], a01 = a[1], a02 = a[2], a03 = a[3];
+    const a10 = a[4], a11 = a[5], a12 = a[6], a13 = a[7];
+    const a20 = a[8], a21 = a[9], a22 = a[10], a23 = a[11];
+    const a30 = a[12], a31 = a[13], a32 = a[14], a33 = a[15];
+    for (let col = 0; col < 4; col += 1) {
+      const idx = col * 4;
+      const b0 = b[idx], b1 = b[idx + 1], b2 = b[idx + 2], b3 = b[idx + 3];
+      out[idx] = a00 * b0 + a10 * b1 + a20 * b2 + a30 * b3;
+      out[idx + 1] = a01 * b0 + a11 * b1 + a21 * b2 + a31 * b3;
+      out[idx + 2] = a02 * b0 + a12 * b1 + a22 * b2 + a32 * b3;
+      out[idx + 3] = a03 * b0 + a13 * b1 + a23 * b2 + a33 * b3;
+    }
+    return out;
+  }
+
+  function refract3D(ix, iy, iz, nx, ny, nz, eta) {
+    const dotIN = ix * nx + iy * ny + iz * nz;
+    const k = 1.0 - eta * eta * (1.0 - dotIN * dotIN);
+    if (k < 0.0) return { x: 0, y: 0, z: 0 };
+    const factor = eta * dotIN + Math.sqrt(k);
+    return {
+      x: eta * ix - factor * nx,
+      y: eta * iy - factor * ny,
+      z: eta * iz - factor * nz
+    };
+  }
+
+  function solveParaboloidRayHit(origin, dir, screenWidth, screenHeight, flat = false) {
+    if (!origin || !dir || !(screenWidth > 0) || !(screenHeight > 0)) return null;
+    const dLen = Math.hypot(dir.x, dir.y, dir.z) || 1;
+    const dx = dir.x / dLen;
+    const dy = dir.y / dLen;
+    const dz = dir.z / dLen;
+
+    let t = -1;
+    if (flat) {
+      if (Math.abs(dz) < 1e-8) return null;
+      t = -origin.z / dz;
+    } else {
+      const ax = (4.0 * CRT_CURVE_KZ) / (screenWidth * screenWidth);
+      const ay = (4.0 * CRT_CURVE_KZ * CRT_CURVE_AY) / (screenHeight * screenHeight);
+      const A = ax * dx * dx + ay * dy * dy;
+      const B = dz + 2.0 * (ax * origin.x * dx + ay * origin.y * dy);
+      const C = origin.z + ax * origin.x * origin.x + ay * origin.y * origin.y;
+      if (Math.abs(A) < 1e-10) {
+        if (Math.abs(B) < 1e-10) return null;
+        t = -C / B;
+      } else {
+        const disc = B * B - 4.0 * A * C;
+        if (disc < 0) return null;
+        const sqrtDisc = Math.sqrt(disc);
+        const t0 = (-B - sqrtDisc) / (2.0 * A);
+        const t1 = (-B + sqrtDisc) / (2.0 * A);
+        t = t0 > 1e-5 ? t0 : (t1 > 1e-5 ? t1 : -1);
+      }
+    }
+    if (!(t > 1e-5)) return null;
+    const x = origin.x + t * dx;
+    const y = origin.y + t * dy;
+    const z = origin.z + t * dz;
+    const u = x / screenWidth + 0.5;
+    const v = y / screenHeight + 0.5;
+    if (u < 0 || u > 1 || v < 0 || v > 1) return null;
+    return { t, x, y, z, u, v };
+  }
+
+  function calculateLightPosition(elapsedMs, screenWidth = 2.72) {
+    const offset = calculateReflectionOffset(elapsedMs);
+    const depthScale = calculateReflectionDepth(elapsedMs);
+    return {
+      x: BASE_LIGHT_X + offset * screenWidth,
+      y: BASE_LIGHT_Y,
+      z: BASE_LIGHT_DEPTH * depthScale,
+      radius: LIGHT_SPHERE_RADIUS
+    };
+  }
+
+  function refractThickGlassUV(uv, eye, screenWidth, screenHeight, flat = false) {
+    const u = Math.max(0, Math.min(1, uv && Number.isFinite(uv.x) ? uv.x : 0.5));
+    const v = Math.max(0, Math.min(1, uv && Number.isFinite(uv.y) ? uv.y : 0.5));
+    if (flat) {
+      return {
+        uvR: { x: u, y: v },
+        uvG: { x: u, y: v },
+        uvB: { x: u, y: v },
+        deltaUvG: { x: 0, y: 0 },
+        lensDensity: 1,
+        fresnelOuter: GLASS_F0
+      };
+    }
+
+    const nx = u * 2.0 - 1.0;
+    const ny = v * 2.0 - 1.0;
+    const px = nx * (screenWidth * 0.5);
+    const py = ny * (screenHeight * 0.5);
+    const r2 = nx * nx + CRT_CURVE_AY * ny * ny;
+    const pz = -CRT_CURVE_KZ * r2;
+
+    let normX = (4.0 * CRT_CURVE_KZ * nx) / screenWidth;
+    let normY = (4.0 * CRT_CURVE_KZ * CRT_CURVE_AY * ny) / screenHeight;
+    let normZ = 1.0;
+    const normLen = Math.hypot(normX, normY, normZ) || 1;
+    normX /= normLen;
+    normY /= normLen;
+    normZ /= normLen;
+
+    let ix = px - eye.x;
+    let iy = py - eye.y;
+    let iz = pz - eye.z;
+    const iLen = Math.hypot(ix, iy, iz) || 1;
+    ix /= iLen;
+    iy /= iLen;
+    iz /= iLen;
+
+    const ndotv = Math.max(0.001, -(ix * normX + iy * normY + iz * normZ));
+    const refractedG = refract3D(ix, iy, iz, normX, normY, normZ, 1.0 / GLASS_IOR_G);
+    const cosThetaT = Math.max(0.25, -(refractedG.x * normX + refractedG.y * normY + refractedG.z * normZ));
+    const thickness = GLASS_BASE_THICKNESS * (1.0 + GLASS_CORNER_THICKENING * r2);
+    const stepLen = thickness / cosThetaT;
+    const deltaUvX = (refractedG.x * stepLen) / screenWidth;
+    const deltaUvY = (refractedG.y * stepLen) / screenHeight;
+
+    const grazing = 1.0 - ndotv * ndotv;
+    const dispStrength = 0.14 + 0.22 * grazing;
+    const uvG = { x: u + deltaUvX, y: v + deltaUvY };
+    const uvR = {
+      x: u + deltaUvX * (1.0 - dispStrength),
+      y: v + deltaUvY * (1.0 - dispStrength)
+    };
+    const uvB = {
+      x: u + deltaUvX * (1.0 + 1.28 * dispStrength),
+      y: v + deltaUvY * (1.0 + 1.28 * dispStrength)
+    };
+    const lensDensity = 1.0 + 0.28 * (1.0 - 0.65 * r2) * (cosThetaT / Math.max(ndotv, 0.22) - 1.0);
+    const fresnelOuter = GLASS_F0 + (1.0 - GLASS_F0) * Math.pow(1.0 - ndotv, 5.0);
+
+    return {
+      uvR,
+      uvG,
+      uvB,
+      deltaUvG: { x: deltaUvX, y: deltaUvY },
+      lensDensity,
+      fresnelOuter
+    };
+  }
+
+  function calculateFocalBounds(eye, cameraUp, viewMatrix, screenWidth, screenHeight, flat = false) {
+    const surfaceZ = (nx, ny) => (flat ? 0 : -CRT_CURVE_KZ * (nx * nx + CRT_CURVE_AY * ny * ny));
+    const cornerPoint = {
+      x: screenWidth * 0.5,
+      y: -screenHeight * 0.5,
+      z: surfaceZ(1, -1)
+    };
+    const focalHeight =
+      (eye.x - cornerPoint.x) * cameraUp.x +
+      (eye.y - cornerPoint.y) * cameraUp.y +
+      (eye.z - cornerPoint.z) * cameraUp.z;
+    const focalPoint = {
+      x: cornerPoint.x + cameraUp.x * focalHeight,
+      y: cornerPoint.y + cameraUp.y * focalHeight,
+      z: cornerPoint.z + cameraUp.z * focalHeight
+    };
+    const focalPointView = {
+      x: viewMatrix[0] * focalPoint.x + viewMatrix[4] * focalPoint.y + viewMatrix[8] * focalPoint.z + viewMatrix[12],
+      y: viewMatrix[1] * focalPoint.x + viewMatrix[5] * focalPoint.y + viewMatrix[9] * focalPoint.z + viewMatrix[13],
+      z: viewMatrix[2] * focalPoint.x + viewMatrix[6] * focalPoint.y + viewMatrix[10] * focalPoint.z + viewMatrix[14]
+    };
+
+    let nearestDistance = Infinity;
+    let farthestDistance = -Infinity;
+    const cols = 48;
+    const rows = 28;
+    for (let iy = 0; iy <= rows; iy += 1) {
+      const ny = (iy / rows) * 2.0 - 1.0;
+      const py = ny * (screenHeight * 0.5);
+      for (let ix = 0; ix <= cols; ix += 1) {
+        const nx = (ix / cols) * 2.0 - 1.0;
+        const px = nx * (screenWidth * 0.5);
+        const pz = surfaceZ(nx, ny);
+        const dist = Math.hypot(px - focalPoint.x, py - focalPoint.y, pz - focalPoint.z);
+        if (dist < nearestDistance) nearestDistance = dist;
+        if (dist > farthestDistance) farthestDistance = dist;
+      }
+    }
+    // Fine local refinement around the bottom-right region for nearestDistance
+    for (let iy = 0; iy <= 16; iy += 1) {
+      const ny = -1.0 + (iy / 16) * 0.5;
+      const py = ny * (screenHeight * 0.5);
+      for (let ix = 0; ix <= 16; ix += 1) {
+        const nx = 0.5 + (ix / 16) * 0.5;
+        const px = nx * (screenWidth * 0.5);
+        const pz = surfaceZ(nx, ny);
+        const dist = Math.hypot(px - focalPoint.x, py - focalPoint.y, pz - focalPoint.z);
+        if (dist < nearestDistance) nearestDistance = dist;
+      }
+    }
+
+    return {
+      focalPoint,
+      focalPointView,
+      nearestDistance,
+      farthestDistance
+    };
+  }
+
   function start({ terminal, fitAddon, root, terminalContainer, dependencies = {} }) {
-    const THREE = dependencies.THREE;
     const WebglAddon = dependencies.WebglAddon;
     const document = dependencies.document || global.document;
     const flat = dependencies.flat === true;
     const upscaleFactor = 2;
     const scanlinePeriod = 4;
-    if (!THREE || !WebglAddon) {
-      throw new Error('Super-demo mode requires Three.js and the xterm.js WebGL addon');
+    if (!WebglAddon) {
+      throw new Error('Super-demo mode requires the xterm.js WebGL addon');
     }
 
     const stage = document.createElement('div');
@@ -329,8 +632,8 @@
     root.appendChild(stage);
     const keyboard = createVirtualKeyboard(document, terminal, root);
 
-    let addon;
-    let renderer;
+    let addon = null;
+    let gl = null;
     let animationFrame = 0;
     let active = true;
     let usingFallback = false;
@@ -339,39 +642,66 @@
     let renderSubscription = null;
     let contextLossSubscription = null;
     let resizeObserver = null;
-    let geometry = null;
-    let screenMaterial = null;
-    let postMaterial = null;
-    let horizontalBlurMaterial = null;
-    let glassMaterial = null;
-    let reflectionMaterial = null;
-    let screenTexture = null;
-    let renderTarget = null;
-    let blurTarget = null;
-    let postGeometry = null;
-    let postMesh = null;
     let screenCanvas = null;
     let textureCanvas = null;
     let textureContext = null;
-    let scene = null;
-    let camera = null;
-    let postScene = null;
-    let postCamera = null;
-    let screenMesh = null;
-    let glassMesh = null;
-    let reflectionMesh = null;
-    let reflectionLight = null;
-    const raycaster = new THREE.Raycaster();
-    const pointer = new THREE.Vector2();
-    const hitPoint = new THREE.Vector2();
+
+    let screenTex = null;
+    let sceneFbo = null;
+    let sceneColorTex = null;
+    let sceneDepthTex = null;
+    let blurFbo = null;
+    let blurColorTex = null;
+    let crtVao = null;
+    let crtVbo = null;
+    let crtIbo = null;
+    let crtIndexCount = 0;
+    let quadVao = null;
+    let quadVbo = null;
+    let crtProgram = null;
+    let crtUniforms = null;
+    let blurHProgram = null;
+    let blurHUniforms = null;
+    let blurVProgram = null;
+    let blurVUniforms = null;
+    let fboWidth = 0;
+    let fboHeight = 0;
+    let screenTexWidth = 0;
+    let screenTexHeight = 0;
+
     const baseScreenWidth = 2.72;
     const baseScreenHeight = 1.58;
-    const baseLightDepth = 2.2;
     let screenWidth = baseScreenWidth;
     let screenHeight = baseScreenHeight;
+    const cameraFov = 31;
+    const cameraNear = 0.1;
+    const cameraFar = 50;
+    let cameraAspect = 1.6;
     const cameraTarget = { x: 0.015, y: -0.015, z: 0 };
     const cameraOffset = { x: 0.295, y: -0.205, z: 2.66 };
     const cameraOffsetLength = Math.hypot(cameraOffset.x, cameraOffset.y, cameraOffset.z);
+    const cameraEye = { x: 0.31, y: -0.22, z: 2.66 };
+    const cameraLookTarget = { x: 0.015, y: -0.015, z: 0 };
+    const cameraUp = { x: 0, y: 1, z: 0 };
+    const worldUp = { x: 0, y: 1, z: 0 };
+
+    const projMatrix = new Float32Array(16);
+    const projMatrixInverse = new Float32Array(16);
+    const viewMatrix = new Float32Array(16);
+    const viewProjMatrix = new Float32Array(16);
+    const imageScale = { x: 1, y: 1 };
+    const screenResolution = { x: 1, y: 1 };
+    const postResolution = { x: 1, y: 1 };
+    const focalPointView = { x: 0, y: 0, z: 0 };
+    let nearestDistance = 0;
+    let farthestDistance = 1;
+    const maxBlurPixels = 8.0;
+    const opticalEffects = flat ? 0.0 : 1.0;
+    const terminalBackgroundRgb = parseHexColorLinear(
+      (terminal.options && terminal.options.theme && terminal.options.theme.background) || '#07090e'
+    );
+    const screenBackgroundRgb = parseHexColorLinear('#101923');
+
     let dragging = false;
     const terminalScreen = typeof terminal.element.querySelector === 'function'
       ? terminal.element.querySelector('.xterm-screen') || terminal.element
@@ -410,43 +740,48 @@
       contextLossSubscription = null;
       if (resizeObserver) resizeObserver.disconnect();
       resizeObserver = null;
-      if (renderer) renderer.dispose();
-      renderer = null;
-      if (screenTexture) screenTexture.dispose();
-      screenTexture = null;
+      if (gl) {
+        if (screenTex && typeof gl.deleteTexture === 'function') gl.deleteTexture(screenTex);
+        if (sceneColorTex && typeof gl.deleteTexture === 'function') gl.deleteTexture(sceneColorTex);
+        if (sceneDepthTex && typeof gl.deleteTexture === 'function') gl.deleteTexture(sceneDepthTex);
+        if (blurColorTex && typeof gl.deleteTexture === 'function') gl.deleteTexture(blurColorTex);
+        if (sceneFbo && typeof gl.deleteFramebuffer === 'function') gl.deleteFramebuffer(sceneFbo);
+        if (blurFbo && typeof gl.deleteFramebuffer === 'function') gl.deleteFramebuffer(blurFbo);
+        if (crtVao && typeof gl.deleteVertexArray === 'function') gl.deleteVertexArray(crtVao);
+        if (crtVbo && typeof gl.deleteBuffer === 'function') gl.deleteBuffer(crtVbo);
+        if (crtIbo && typeof gl.deleteBuffer === 'function') gl.deleteBuffer(crtIbo);
+        if (quadVao && typeof gl.deleteVertexArray === 'function') gl.deleteVertexArray(quadVao);
+        if (quadVbo && typeof gl.deleteBuffer === 'function') gl.deleteBuffer(quadVbo);
+        if (crtProgram && typeof gl.deleteProgram === 'function') gl.deleteProgram(crtProgram);
+        if (blurHProgram && typeof gl.deleteProgram === 'function') gl.deleteProgram(blurHProgram);
+        if (blurVProgram && typeof gl.deleteProgram === 'function') gl.deleteProgram(blurVProgram);
+      }
+      screenTex = null;
+      sceneColorTex = null;
+      sceneDepthTex = null;
+      blurColorTex = null;
+      sceneFbo = null;
+      blurFbo = null;
+      crtVao = null;
+      crtVbo = null;
+      crtIbo = null;
+      quadVao = null;
+      quadVbo = null;
+      crtProgram = null;
+      crtUniforms = null;
+      blurHProgram = null;
+      blurHUniforms = null;
+      blurVProgram = null;
+      blurVUniforms = null;
+      gl = null;
       screenCanvas = null;
       textureCanvas = null;
       textureContext = null;
-      if (screenMaterial) screenMaterial.dispose();
-      screenMaterial = null;
-      if (postMaterial) postMaterial.dispose();
-      postMaterial = null;
-      if (horizontalBlurMaterial) horizontalBlurMaterial.dispose();
-      horizontalBlurMaterial = null;
-      if (postGeometry) postGeometry.dispose();
-      postGeometry = null;
-      if (blurTarget) blurTarget.dispose();
-      blurTarget = null;
-      if (renderTarget) {
-        if (renderTarget.depthTexture) renderTarget.depthTexture.dispose();
-        renderTarget.dispose();
-      }
-      renderTarget = null;
-      postMesh = null;
-      if (glassMaterial) glassMaterial.dispose();
-      glassMaterial = null;
-      if (reflectionMaterial) reflectionMaterial.dispose();
-      reflectionMaterial = null;
-      if (geometry) geometry.dispose();
-      geometry = null;
-      scene = null;
-      camera = null;
-      postScene = null;
-      postCamera = null;
-      screenMesh = null;
-      glassMesh = null;
-      reflectionMesh = null;
-      reflectionLight = null;
+    }
+
+    function onWebGLContextLost(event) {
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      fallback(new Error('CRT display WebGL2 context was lost'));
     }
 
     function removeInputListeners() {
@@ -456,6 +791,7 @@
       canvas.removeEventListener('dblclick', forwardMouseEvent);
       canvas.removeEventListener('wheel', forwardMouseEvent);
       canvas.removeEventListener('contextmenu', forwardMouseEvent);
+      canvas.removeEventListener('webglcontextlost', onWebGLContextLost);
       global.removeEventListener('mousemove', onWindowMove);
       global.removeEventListener('mouseup', onWindowUp);
       dragging = false;
@@ -513,6 +849,42 @@
       textureContext.restore();
     }
 
+    function uploadScreenTexture(resized) {
+      if (!gl || !textureCanvas) return;
+      if (!screenTex) {
+        screenTex = gl.createTexture();
+      }
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, screenTex);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      if (resized || screenTexWidth !== textureCanvas.width || screenTexHeight !== textureCanvas.height) {
+        screenTexWidth = textureCanvas.width;
+        screenTexHeight = textureCanvas.height;
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(
+          gl.TEXTURE_2D,
+          0,
+          gl.SRGB8_ALPHA8,
+          gl.RGBA,
+          gl.UNSIGNED_BYTE,
+          textureCanvas
+        );
+      } else {
+        gl.texSubImage2D(
+          gl.TEXTURE_2D,
+          0,
+          0,
+          0,
+          gl.RGBA,
+          gl.UNSIGNED_BYTE,
+          textureCanvas
+        );
+      }
+    }
+
     function updateScreenTexture() {
       const latestCanvas = addon && addon._renderer && addon._renderer._canvas;
       if (latestCanvas) screenCanvas = latestCanvas;
@@ -534,26 +906,14 @@
       drawWarmTerminalImage(viewport, targetWidth, targetHeight);
       applyScanlines();
       updateImageScale();
-      const resolution = screenMaterial.uniforms.resolution.value;
-      if (resolution.x !== targetWidth || resolution.y !== targetHeight) {
-        resolution.set(targetWidth, targetHeight);
-      }
-      if (resized) {
-        const previousTexture = screenTexture;
-        screenTexture = new THREE.CanvasTexture(textureCanvas);
-        screenTexture.colorSpace = THREE.SRGBColorSpace;
-        screenTexture.minFilter = THREE.LinearFilter;
-        screenTexture.magFilter = THREE.LinearFilter;
-        screenMaterial.uniforms.screen.value = screenTexture;
-        if (previousTexture) previousTexture.dispose();
-      } else {
-        screenTexture.needsUpdate = true;
-      }
+      screenResolution.x = targetWidth;
+      screenResolution.y = targetHeight;
+      uploadScreenTexture(resized);
     }
 
     function render(timestamp) {
       animationFrame = 0;
-      if (!active || usingFallback) return;
+      if (!active || usingFallback || !gl) return;
       if (screenNeedsUpdate) {
         updateScreenTexture();
         screenNeedsUpdate = false;
@@ -561,115 +921,154 @@
       const now = Number.isFinite(timestamp) ? timestamp : Date.now();
       if (reflectionAnimationStart === null) reflectionAnimationStart = now;
       const elapsed = now - reflectionAnimationStart;
-      const lightOffset = calculateReflectionOffset(elapsed);
-      if (reflectionMaterial) reflectionMaterial.uniforms.lightOffset.value = lightOffset;
-      if (reflectionLight) {
-        reflectionLight.position.x = -1.7 + lightOffset * screenWidth;
-        reflectionLight.position.z = baseLightDepth * calculateReflectionDepth(elapsed);
-      }
-      renderer.setRenderTarget(renderTarget);
-      renderer.render(scene, camera);
-      postMesh.material = horizontalBlurMaterial;
-      horizontalBlurMaterial.uniforms.sceneColor.value = renderTarget.texture;
-      horizontalBlurMaterial.uniforms.direction.value.set(1, 0);
-      renderer.setRenderTarget(blurTarget);
-      renderer.render(postScene, postCamera);
-      postMesh.material = postMaterial;
-      postMaterial.uniforms.sceneColor.value = blurTarget.texture;
-      postMaterial.uniforms.direction.value.set(0, 1);
-      renderer.setRenderTarget(null);
-      renderer.render(postScene, postCamera);
+      const lightPos = calculateLightPosition(elapsed, screenWidth);
+
+      // Pass 1: Render curved CRT surface, thick-glass refraction, Newtonian spectral dispersion,
+      // sub-surface matte light illumination, internal glyph glint, and outer Fresnel into sceneFbo.
+      gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFbo);
+      gl.viewport(0, 0, fboWidth, fboHeight);
+      gl.enable(gl.DEPTH_TEST);
+      gl.depthFunc(gl.LEQUAL);
+      gl.depthMask(true);
+      gl.clearColor(0.0021, 0.0030, 0.0051, 1.0);
+      gl.clearDepth(1.0);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+      gl.useProgram(crtProgram);
+      gl.uniformMatrix4fv(crtUniforms.uViewProjMatrix, false, viewProjMatrix);
+      gl.uniform2f(crtUniforms.uScreenSize, screenWidth, screenHeight);
+      gl.uniform2f(crtUniforms.uResolution, screenResolution.x, screenResolution.y);
+      gl.uniform2f(crtUniforms.uImageScale, imageScale.x, imageScale.y);
+      gl.uniform3f(
+        crtUniforms.uTerminalBackground,
+        terminalBackgroundRgb[0],
+        terminalBackgroundRgb[1],
+        terminalBackgroundRgb[2]
+      );
+      gl.uniform3f(
+        crtUniforms.uScreenBackground,
+        screenBackgroundRgb[0],
+        screenBackgroundRgb[1],
+        screenBackgroundRgb[2]
+      );
+      gl.uniform3f(crtUniforms.uCameraPos, cameraEye.x, cameraEye.y, cameraEye.z);
+      gl.uniform3f(crtUniforms.uLightPos, lightPos.x, lightPos.y, lightPos.z);
+      gl.uniform1f(crtUniforms.uLightRadius, lightPos.radius);
+      gl.uniform1f(crtUniforms.uOpticalEffects, opticalEffects);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, screenTex);
+      gl.uniform1i(crtUniforms.uScreen, 0);
+
+      gl.bindVertexArray(crtVao);
+      gl.drawElements(gl.TRIANGLES, crtIndexCount, gl.UNSIGNED_SHORT, 0);
+
+      // Pass 2: Horizontal separable 13-tap Gaussian depth-of-field blur into blurFbo.
+      gl.disable(gl.DEPTH_TEST);
+      gl.depthMask(false);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, blurFbo);
+      gl.viewport(0, 0, fboWidth, fboHeight);
+      gl.useProgram(blurHProgram);
+      bindBlurUniforms(blurHUniforms, sceneColorTex, 1.0, 0.0);
+      gl.bindVertexArray(quadVao);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+      // Pass 3: Vertical separable 13-tap Gaussian depth-of-field blur + ACES tone map to canvas.
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, fboWidth, fboHeight);
+      gl.useProgram(blurVProgram);
+      bindBlurUniforms(blurVUniforms, blurColorTex, 0.0, 1.0);
+      gl.bindVertexArray(quadVao);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      gl.bindVertexArray(null);
+
       requestFrame();
     }
 
+    function bindBlurUniforms(uniforms, colorTexture, dirX, dirY) {
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, colorTexture);
+      gl.uniform1i(uniforms.sceneColor, 0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, sceneDepthTex);
+      gl.uniform1i(uniforms.sceneDepth, 1);
+      gl.uniform2f(uniforms.resolution, postResolution.x, postResolution.y);
+      gl.uniform2f(uniforms.direction, dirX, dirY);
+      gl.uniformMatrix4fv(uniforms.projectionMatrixInverse, false, projMatrixInverse);
+      gl.uniform3f(uniforms.focalPointView, focalPointView.x, focalPointView.y, focalPointView.z);
+      gl.uniform1f(uniforms.nearestDistance, nearestDistance);
+      gl.uniform1f(uniforms.farthestDistance, farthestDistance);
+      gl.uniform1f(uniforms.maxBlurPixels, maxBlurPixels);
+      gl.uniform1f(uniforms.opticalEffects, opticalEffects);
+    }
+
     function resize() {
-      if (!active || usingFallback || !renderer) return;
+      if (!active || usingFallback || !gl) return;
       const bounds = stage.getBoundingClientRect();
       if (bounds.width <= 0 || bounds.height <= 0) return;
       keyboard.setNarrow(bounds.width <= 720);
       fitTerminal();
       const pixelRatio = Math.min(global.devicePixelRatio || 1, 2);
-      renderer.setPixelRatio(pixelRatio);
-      renderer.setSize(bounds.width, bounds.height, false);
-      camera.aspect = bounds.width / bounds.height;
-      camera.updateProjectionMatrix();
-      updateScreenDimensions(camera.aspect);
+      const drawWidth = Math.max(1, Math.floor(bounds.width * pixelRatio));
+      const drawHeight = Math.max(1, Math.floor(bounds.height * pixelRatio));
+      if (canvas.width !== drawWidth || canvas.height !== drawHeight) {
+        canvas.width = drawWidth;
+        canvas.height = drawHeight;
+      }
+      cameraAspect = bounds.width / bounds.height;
+      mat4Perspective(projMatrix, cameraFov, cameraAspect, cameraNear, cameraFar);
+      mat4InvertPerspective(projMatrixInverse, projMatrix);
+      updateScreenDimensions(cameraAspect);
       frameCamera();
-      resizePostProcess();
+      resizePostProcess(drawWidth, drawHeight);
       requestFrame(true);
     }
 
-    function resizePostProcess() {
-      if (!renderer || !renderTarget || !postMaterial) return;
-      const size = renderer.getDrawingBufferSize(new THREE.Vector2());
-      const width = Math.max(1, Math.floor(size.x));
-      const height = Math.max(1, Math.floor(size.y));
-      if (renderTarget.width !== width || renderTarget.height !== height) {
-        renderTarget.setSize(width, height);
-        blurTarget.setSize(width, height);
+    function resizePostProcess(width, height) {
+      if (!gl || !sceneFbo || !blurFbo) return;
+      if (fboWidth !== width || fboHeight !== height) {
+        fboWidth = width;
+        fboHeight = height;
+
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, sceneColorTex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.SRGB8_ALPHA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+
+        gl.bindTexture(gl.TEXTURE_2D, sceneDepthTex);
+        gl.texImage2D(
+          gl.TEXTURE_2D,
+          0,
+          gl.DEPTH_COMPONENT24,
+          width,
+          height,
+          0,
+          gl.DEPTH_COMPONENT,
+          gl.UNSIGNED_INT,
+          null
+        );
+
+        gl.bindTexture(gl.TEXTURE_2D, blurColorTex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.SRGB8_ALPHA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
       }
-      postMaterial.uniforms.resolution.value.set(width, height);
-      postMaterial.uniforms.projectionMatrixInverse.value.copy(camera.projectionMatrixInverse);
+      postResolution.x = width;
+      postResolution.y = height;
       updateBlurDistanceRange();
     }
 
     function updateBlurDistanceRange() {
-      if (!screenMesh || !camera || !postMaterial || !geometry) return;
-      screenMesh.updateMatrixWorld(true);
-      camera.updateMatrixWorld(true);
-      const cameraPosition = camera.getWorldPosition(new THREE.Vector3());
-      const cameraUp = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1).normalize();
-      const positions = geometry.attributes.position;
-      const indices = geometry.index;
-      const cornerPoint = new THREE.Vector3();
-      const pointA = new THREE.Vector3();
-      const pointB = new THREE.Vector3();
-      const pointC = new THREE.Vector3();
-      const closestPoint = new THREE.Vector3();
-      const farthestPoint = new THREE.Vector3();
-      let bottomRightLocalX = -Infinity;
-      let bottomRightLocalY = Infinity;
-      let nearestDistance = Infinity;
-      let farthestDistance = -Infinity;
-
-      for (let index = 0; index < positions.count; index += 1) {
-        const localX = positions.getX(index);
-        const localY = positions.getY(index);
-        if (localX > bottomRightLocalX ||
-            (localX === bottomRightLocalX && localY < bottomRightLocalY)) {
-          bottomRightLocalX = localX;
-          bottomRightLocalY = localY;
-          cornerPoint.fromBufferAttribute(positions, index);
-        }
-      }
-      cornerPoint.applyMatrix4(screenMesh.matrixWorld);
-      const focalHeight = cameraPosition.clone().sub(cornerPoint).dot(cameraUp);
-      const focalPoint = cornerPoint.clone().addScaledVector(cameraUp, focalHeight);
-      const focalPointView = camera.worldToLocal(focalPoint.clone());
-
-      for (let index = 0; index < positions.count; index += 1) {
-        farthestPoint.fromBufferAttribute(positions, index).applyMatrix4(screenMesh.matrixWorld);
-        const distance = farthestPoint.distanceTo(focalPoint);
-        if (distance > farthestDistance) farthestDistance = distance;
-      }
-
-      const triangleCount = indices ? indices.count / 3 : positions.count / 3;
-      const vertexIndex = (index) => indices ? indices.getX(index) : index;
-      const triangleShape = new THREE.Triangle();
-      for (let triangle = 0; triangle < triangleCount; triangle += 1) {
-        const offset = triangle * 3;
-        pointA.fromBufferAttribute(positions, vertexIndex(offset)).applyMatrix4(screenMesh.matrixWorld);
-        pointB.fromBufferAttribute(positions, vertexIndex(offset + 1)).applyMatrix4(screenMesh.matrixWorld);
-        pointC.fromBufferAttribute(positions, vertexIndex(offset + 2)).applyMatrix4(screenMesh.matrixWorld);
-        triangleShape.set(pointA, pointB, pointC).closestPointToPoint(focalPoint, closestPoint);
-        const distance = closestPoint.distanceTo(focalPoint);
-        if (distance < nearestDistance) nearestDistance = distance;
-      }
-
-      if (!Number.isFinite(nearestDistance) || !Number.isFinite(farthestDistance)) return;
-      postMaterial.uniforms.focalPointView.value.copy(focalPointView);
-      postMaterial.uniforms.nearestDistance.value = nearestDistance;
-      postMaterial.uniforms.farthestDistance.value = farthestDistance;
+      const bounds = calculateFocalBounds(
+        cameraEye,
+        cameraUp,
+        viewMatrix,
+        screenWidth,
+        screenHeight,
+        flat
+      );
+      if (!Number.isFinite(bounds.nearestDistance) || !Number.isFinite(bounds.farthestDistance)) return;
+      focalPointView.x = bounds.focalPointView.x;
+      focalPointView.y = bounds.focalPointView.y;
+      focalPointView.z = bounds.focalPointView.z;
+      nearestDistance = bounds.nearestDistance;
+      farthestDistance = bounds.farthestDistance;
     }
 
     function updateScreenDimensions(aspect) {
@@ -678,17 +1077,11 @@
       const area = baseScreenWidth * baseScreenHeight;
       screenWidth = Math.sqrt(area * clampedAspect);
       screenHeight = Math.sqrt(area / clampedAspect);
-      const scaleX = screenWidth / baseScreenWidth;
-      const scaleY = screenHeight / baseScreenHeight;
-      if (screenMesh) screenMesh.scale.set(scaleX, scaleY, 1);
-      if (glassMesh) glassMesh.scale.set(scaleX, scaleY, 1);
-      if (reflectionMesh) reflectionMesh.scale.set(scaleX, scaleY, 1);
       updateImageScale();
     }
 
     function updateImageScale() {
-      if (!screenMaterial || !textureCanvas || textureCanvas.height <= 0 ||
-          screenHeight <= 0) return;
+      if (!textureCanvas || textureCanvas.height <= 0 || screenHeight <= 0) return;
       const fit = calculateImageScale(
         textureCanvas.width,
         textureCanvas.height,
@@ -700,9 +1093,8 @@
       const innerMargin = 0.032 * Math.min(screenWidth, screenHeight);
       const bezelScaleX = Math.max(0.5, 1 - (2 * innerMargin) / screenWidth);
       const bezelScaleY = Math.max(0.5, 1 - (2 * innerMargin) / screenHeight);
-      const scaleX = bezelScaleX * (fit.x < fit.y ? proportional : 1);
-      const scaleY = bezelScaleY * (fit.y < fit.x ? proportional : 1);
-      screenMaterial.uniforms.imageScale.value.set(scaleX, scaleY);
+      imageScale.x = bezelScaleX * (fit.x < fit.y ? proportional : 1);
+      imageScale.y = bezelScaleY * (fit.y < fit.x ? proportional : 1);
     }
 
     function applyScanlines() {
@@ -755,7 +1147,7 @@
       const projectPoint = (nx, ny) => {
         const px = nx * (screenWidth / 2);
         const py = ny * (screenHeight / 2);
-        const pz = flat ? 0 : -0.24 * (nx * nx + 0.72 * ny * ny);
+        const pz = flat ? 0 : -CRT_CURVE_KZ * (nx * nx + CRT_CURVE_AY * ny * ny);
         const vx = px - camX;
         const vy = py - camY;
         const vz = pz - camZ;
@@ -801,8 +1193,8 @@
       const bounds = stage.getBoundingClientRect();
       const stageWidth = Math.max(1, bounds.width || root.clientWidth || 1);
       const stageHeight = Math.max(1, bounds.height || root.clientHeight || 1);
-      const aspect = camera.aspect || (stageWidth / stageHeight) || 1.6;
-      const halfFov = camera.fov * Math.PI / 360;
+      const aspect = cameraAspect || (stageWidth / stageHeight) || 1.6;
+      const halfFov = (cameraFov * Math.PI) / 360;
       const halfTan = Math.tan(halfFov);
       const area = baseScreenWidth * baseScreenHeight;
 
@@ -841,243 +1233,521 @@
         );
       }
 
-      const scaleX = screenWidth / baseScreenWidth;
-      const scaleY = screenHeight / baseScreenHeight;
-      if (screenMesh) screenMesh.scale.set(scaleX, scaleY, 1);
-      if (glassMesh) glassMesh.scale.set(scaleX, scaleY, 1);
-      if (reflectionMesh) reflectionMesh.scale.set(scaleX, scaleY, 1);
       updateImageScale();
 
       const scale = distance / cameraOffsetLength;
-      camera.position.set(
-        target.x + cameraOffset.x * scale,
-        target.y + cameraOffset.y * scale,
-        target.z + cameraOffset.z * scale
-      );
-      camera.lookAt(target.x, target.y, target.z);
+      cameraEye.x = target.x + cameraOffset.x * scale;
+      cameraEye.y = target.y + cameraOffset.y * scale;
+      cameraEye.z = target.z + cameraOffset.z * scale;
+      cameraLookTarget.x = target.x;
+      cameraLookTarget.y = target.y;
+      cameraLookTarget.z = target.z;
+      mat4LookAt(viewMatrix, cameraEye, cameraLookTarget, worldUp, cameraUp);
+      mat4Multiply(viewProjMatrix, projMatrix, viewMatrix);
     }
 
-    function makeGeometry() {
-      const result = new THREE.PlaneGeometry(screenWidth, screenHeight, 96, 56);
-      if (flat) return result;
-      const position = result.attributes.position;
-      for (let index = 0; index < position.count; index += 1) {
-        const x = position.getX(index);
-        const y = position.getY(index);
-        const nx = x / (screenWidth / 2);
-        const ny = y / (screenHeight / 2);
-        position.setZ(index, -0.24 * (nx * nx + 0.72 * ny * ny));
+    function compileShader(type, source) {
+      const shader = gl.createShader(type);
+      gl.shaderSource(shader, source);
+      gl.compileShader(shader);
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        const log = gl.getShaderInfoLog(shader) || 'Unknown WebGL2 shader compilation error';
+        gl.deleteShader(shader);
+        throw new Error(log);
       }
-      position.needsUpdate = true;
-      result.computeVertexNormals();
-      return result;
+      return shader;
     }
 
-    function createScreenMaterial() {
-      return new THREE.ShaderMaterial({
-        uniforms: {
-          screen: { value: screenTexture },
-          resolution: { value: new THREE.Vector2(1, 1) },
-          imageScale: { value: new THREE.Vector2(1, 1) },
-          terminalBackground: { value: new THREE.Color(terminal.options.theme.background || '#07090e') },
-          screenBackground: { value: new THREE.Color(0x101923) },
-          opticalEffects: { value: flat ? 0 : 1 }
-        },
-        vertexShader: `
-          varying vec2 vUv;
-          void main() {
-            vUv = uv;
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    function createProgram(vertexSource, fragmentSource, uniformNames) {
+      const vs = compileShader(gl.VERTEX_SHADER, vertexSource);
+      const fs = compileShader(gl.FRAGMENT_SHADER, fragmentSource);
+      const program = gl.createProgram();
+      gl.attachShader(program, vs);
+      gl.attachShader(program, fs);
+      gl.linkProgram(program);
+      gl.deleteShader(vs);
+      gl.deleteShader(fs);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        const log = gl.getProgramInfoLog(program) || 'Unknown WebGL2 program link error';
+        gl.deleteProgram(program);
+        throw new Error(log);
+      }
+      const locations = {};
+      for (const name of uniformNames) {
+        locations[name] = gl.getUniformLocation(program, name);
+      }
+      return { program, locations };
+    }
+
+    function createCrtMesh() {
+      const segX = 96;
+      const segY = 56;
+      const vertexCount = (segX + 1) * (segY + 1);
+      const vertices = new Float32Array(vertexCount * 2);
+      let vOffset = 0;
+      for (let iy = 0; iy <= segY; iy += 1) {
+        const v = iy / segY;
+        for (let ix = 0; ix <= segX; ix += 1) {
+          const u = ix / segX;
+          vertices[vOffset++] = u;
+          vertices[vOffset++] = v;
+        }
+      }
+      const indices = new Uint16Array(segX * segY * 6);
+      let iOffset = 0;
+      const rowStride = segX + 1;
+      for (let iy = 0; iy < segY; iy += 1) {
+        for (let ix = 0; ix < segX; ix += 1) {
+          const a = iy * rowStride + ix;
+          const b = a + 1;
+          const c = a + rowStride;
+          const d = c + 1;
+          indices[iOffset++] = a;
+          indices[iOffset++] = b;
+          indices[iOffset++] = c;
+          indices[iOffset++] = b;
+          indices[iOffset++] = d;
+          indices[iOffset++] = c;
+        }
+      }
+      crtIndexCount = indices.length;
+      crtVao = gl.createVertexArray();
+      crtVbo = gl.createBuffer();
+      crtIbo = gl.createBuffer();
+      gl.bindVertexArray(crtVao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, crtVbo);
+      gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 8, 0);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, crtIbo);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
+      gl.bindVertexArray(null);
+    }
+
+    function createFullscreenQuad() {
+      const quadVerts = new Float32Array([
+        0, 0,
+        1, 0,
+        0, 1,
+        0, 1,
+        1, 0,
+        1, 1
+      ]);
+      quadVao = gl.createVertexArray();
+      quadVbo = gl.createBuffer();
+      gl.bindVertexArray(quadVao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, quadVbo);
+      gl.bufferData(gl.ARRAY_BUFFER, quadVerts, gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 8, 0);
+      gl.bindVertexArray(null);
+    }
+
+    function createCrtShaderProgram() {
+      const vertexShader = `#version 300 es
+        precision highp float;
+        layout(location = 0) in vec2 aUv;
+        uniform mat4 uViewProjMatrix;
+        uniform vec2 uScreenSize;
+        uniform float uOpticalEffects;
+        out vec2 vUv;
+        out vec2 vSignedUv;
+        out vec3 vWorldPos;
+        out vec3 vOuterNormal;
+        void main() {
+          vUv = aUv;
+          vec2 signedUv = aUv * 2.0 - 1.0;
+          vSignedUv = signedUv;
+          float r2 = signedUv.x * signedUv.x + 0.72 * signedUv.y * signedUv.y;
+          float z = -0.24 * r2 * uOpticalEffects;
+          vec3 worldPos = vec3(signedUv * (uScreenSize * 0.5), z);
+          vWorldPos = worldPos;
+          vec3 normal = normalize(vec3(
+            uOpticalEffects * (0.96 * signedUv.x) / max(uScreenSize.x, 0.001),
+            uOpticalEffects * (0.96 * 0.72 * signedUv.y) / max(uScreenSize.y, 0.001),
+            1.0
+          ));
+          vOuterNormal = normal;
+          gl_Position = uViewProjMatrix * vec4(worldPos, 1.0);
+        }
+      `;
+      const fragmentShader = `#version 300 es
+        precision highp float;
+        uniform sampler2D uScreen;
+        uniform vec2 uScreenSize;
+        uniform vec2 uResolution;
+        uniform vec2 uImageScale;
+        uniform vec3 uTerminalBackground;
+        uniform vec3 uScreenBackground;
+        uniform vec3 uCameraPos;
+        uniform vec3 uLightPos;
+        uniform float uLightRadius;
+        uniform float uOpticalEffects;
+        in vec2 vUv;
+        in vec2 vSignedUv;
+        in vec3 vWorldPos;
+        in vec3 vOuterNormal;
+        out vec4 fragColor;
+
+        vec3 samplePhosphorSurface(vec2 surfaceUv) {
+          vec2 imageUv = (surfaceUv - 0.5) / uImageScale + 0.5;
+          bool outsideImage = any(greaterThan(abs(surfaceUv - 0.5), uImageScale * 0.5));
+          vec3 color = uScreenBackground;
+          if (!outsideImage) {
+            color = texture(uScreen, imageUv).rgb;
           }
-        `,
-        fragmentShader: `
-          uniform sampler2D screen;
-          uniform vec2 resolution;
-          uniform vec2 imageScale;
-          uniform vec3 terminalBackground;
-          uniform vec3 screenBackground;
-          uniform float opticalEffects;
-          varying vec2 vUv;
-          void main() {
-            vec2 imageUv = (vUv - 0.5) / imageScale + 0.5;
-            bool outsideImage = any(greaterThan(abs(vUv - 0.5), imageScale * 0.5));
-            vec4 color = vec4(screenBackground, 1.0);
-            if (!outsideImage) {
-              color = texture2D(screen, imageUv);
-            }
-            float backgroundPixel = 1.0 - smoothstep(0.003, 0.018, distance(color.rgb, terminalBackground));
-            color.rgb = mix(color.rgb, screenBackground, backgroundPixel * 0.90);
-            float grille = mix(1.0, 0.992 + 0.008 * cos(vUv.x * resolution.x * 2.094), opticalEffects);
-            float vignette = mix(1.0, 1.0 - 0.10 * smoothstep(0.48, 0.90, length((vUv - 0.5) * vec2(1.0, 0.78))), opticalEffects);
-            float edgeDistance = min(min(vUv.x, 1.0 - vUv.x), min(vUv.y, 1.0 - vUv.y));
-            float edgeLine = 1.0 - smoothstep(0.002, 0.008, edgeDistance);
-            color.rgb = mix(color.rgb, vec3(0.045, 0.065, 0.085), edgeLine * 0.65);
-            gl_FragColor = vec4(color.rgb * grille * vignette, color.a);
-            #include <tonemapping_fragment>
-            #include <colorspace_fragment>
+          float backgroundPixel = 1.0 - smoothstep(0.003, 0.018, distance(color, uTerminalBackground));
+          return mix(color, uScreenBackground, backgroundPixel * 0.90);
+        }
+
+        float evaluateMatteInnerLight(
+          vec3 innerPos,
+          vec3 innerNormal,
+          vec3 internalViewDir,
+          float iorChannel,
+          vec3 outerNormal,
+          float thickness
+        ) {
+          vec3 toLight = uLightPos - innerPos;
+          float distSq = max(dot(toLight, toLight), 0.1);
+          float dist = sqrt(distSq);
+          vec3 L = toLight / dist;
+
+          // Transmission through the outer curved glass into the slab
+          float ndotlOut = max(dot(outerNormal, L), 0.0);
+          float fIn = 0.0426 + (1.0 - 0.0426) * pow(1.0 - ndotlOut, 5.0);
+          float transmitIn = (1.0 - fIn) * smoothstep(0.0, 0.35, ndotlOut);
+
+          // Refract light ray into the leaded glass with channel-specific IOR
+          vec3 lightEntryDir = refract(-L, outerNormal, 1.0 / iorChannel);
+          vec3 lightInGlass = -lightEntryDir;
+
+          // Trace where the refracted light ray enters the outer glass relative to the bulb axis
+          float cosThetaL = max(dot(lightInGlass, outerNormal), 0.25);
+          vec3 entryPos = innerPos + lightInGlass * (thickness / cosThetaL);
+
+          // Anisotropic satin-matte phosphor response on the curved inner screen:
+          // Vertical phosphor stripes / aperture grille scatter wider along the curved horizontal/diagonal contour
+          vec3 H = normalize(lightInGlass + internalViewDir);
+          vec3 tangentX = normalize(vec3(1.0, 0.0, -innerNormal.x / max(innerNormal.z, 0.1)));
+          vec3 tangentY = normalize(cross(innerNormal, tangentX));
+          float hx = dot(H, tangentX);
+          float hy = dot(H, tangentY);
+          float hAniso = (hx * hx) / 0.032 + (hy * hy) / 0.085;
+          float satinStreak = exp(-hAniso);
+
+          // Localized diffuse matte pool under the refracted spherical bulb
+          float ndoth = max(dot(innerNormal, H), 0.0);
+          float mattePool = pow(ndoth, 14.0) * 0.55 + pow(ndoth, 42.0) * 0.85;
+
+          // Refracted ray-bundle convergence (caustic density change from curved outer glass)
+          float entryCurvature = length(entryPos.xy / (uScreenSize * 0.5));
+          float refractionCompression = 1.0 + 0.38 * (1.0 - cosThetaL / max(ndotlOut, 0.25)) * (1.0 + 0.4 * entryCurvature);
+
+          float falloff = (uLightRadius * uLightRadius * 2.6) / (distSq + uLightRadius * uLightRadius);
+          return transmitIn * falloff * refractionCompression * (0.42 * satinStreak + 0.58 * mattePool);
+        }
+
+        void main() {
+          vec3 N = normalize(vOuterNormal);
+          vec3 I = normalize(vWorldPos - uCameraPos);
+          vec3 V = -I;
+          float ndotv = max(dot(N, V), 0.001);
+
+          // 1. Thick CRT glass outer-to-inner 3D Snell refraction & Newtonian spectral dispersion
+          float r2 = vSignedUv.x * vSignedUv.x + 0.72 * vSignedUv.y * vSignedUv.y;
+          float thickness = uOpticalEffects * 0.036 * (1.0 + 0.24 * r2);
+          vec3 refractG = refract(I, N, 1.0 / 1.520);
+          float cosThetaT = max(dot(-refractG, N), 0.25);
+          vec3 deltaPG = refractG * (thickness / cosThetaT);
+          vec2 deltaUvG = deltaPG.xy / uScreenSize;
+
+          float grazing = 1.0 - ndotv * ndotv;
+          float dispStrength = uOpticalEffects * (0.14 + 0.22 * grazing);
+          vec2 uvR = vUv + deltaUvG * (1.0 - dispStrength);
+          vec2 uvG = vUv + deltaUvG;
+          vec2 uvB = vUv + deltaUvG * (1.0 + 1.28 * dispStrength);
+
+          vec3 phosphorR = samplePhosphorSurface(uvR);
+          vec3 phosphorG = samplePhosphorSurface(uvG);
+          vec3 phosphorB = samplePhosphorSurface(uvB);
+          vec3 terminalColor = vec3(phosphorR.r, phosphorG.g, phosphorB.b);
+
+          // 2. Internal reflection / halation of bright terminal glyphs inside the thick glass slab
+          if (uOpticalEffects > 0.5) {
+            vec2 bounceCenter = uvG + deltaUvG * 2.15;
+            vec2 spread = (1.6 / max(uResolution, vec2(1.0))) * (1.0 + 1.2 * r2);
+            vec3 b0 = samplePhosphorSurface(bounceCenter + vec2(spread.x, 0.0));
+            vec3 b1 = samplePhosphorSurface(bounceCenter - vec2(spread.x, 0.0));
+            vec3 b2 = samplePhosphorSurface(bounceCenter + vec2(0.0, spread.y));
+            vec3 b3 = samplePhosphorSurface(bounceCenter - vec2(0.0, spread.y));
+            vec3 bounceAvg = 0.25 * (b0 + b1 + b2 + b3);
+            vec3 excessGlyph = max(bounceAvg - uScreenBackground * 1.12, vec3(0.0));
+            float fInternal = 0.0426 + (1.0 - 0.0426) * pow(1.0 - cosThetaT, 5.0);
+            terminalColor += excessGlyph * vec3(0.80, 0.91, 1.0) * (0.20 + 0.65 * fInternal);
           }
-        `,
-        toneMapped: false
-      });
+
+          // 3. Curvature density modulation (Jacobian lensing across curved glass meniscus)
+          float lensDensity = 1.0 + uOpticalEffects * 0.28 * (1.0 - 0.65 * r2) *
+            (cosThetaT / max(ndotv, 0.22) - 1.0);
+
+          // 4. Sub-surface matte illumination on the curved inner screen + Newtonian dispersion
+          vec3 matteLight = vec3(0.0);
+          float fOuter = 0.0426 + (1.0 - 0.0426) * pow(1.0 - ndotv, 5.0);
+          vec3 outerReflection = vec3(0.0);
+
+          if (uOpticalEffects > 0.5) {
+            vec3 innerNormal = normalize(vec3(N.xy * (1.0 + 0.22 * r2), N.z));
+            vec3 internalView = -refractG;
+            vec3 posInR = vWorldPos + deltaPG * (1.0 - dispStrength * 2.4);
+            vec3 posInG = vWorldPos + deltaPG;
+            vec3 posInB = vWorldPos + deltaPG * (1.0 + dispStrength * 3.0);
+
+            float mR = evaluateMatteInnerLight(posInR, innerNormal, internalView, 1.492, N, thickness);
+            float mG = evaluateMatteInnerLight(posInG, innerNormal, internalView, 1.520, N, thickness);
+            float mB = evaluateMatteInnerLight(posInB, innerNormal, internalView, 1.555, N, thickness);
+
+            // Sub-surface matte phosphor illumination with Newtonian spectral dispersion at the refracted rim
+            vec3 rawMatte = vec3(mR * 0.80, mG * 0.89, mB * 1.04) * 0.24;
+            float fadeY = smoothstep(0.04, 0.22, uvG.y) * (1.0 - smoothstep(0.92, 0.995, uvG.y));
+            matteLight = rawMatte * lensDensity * (0.35 + 0.65 * fadeY);
+
+            // 5. Restrained outer-surface dielectric Fresnel sheen & 3D bulb glint on S_outer
+            vec3 reflectOut = reflect(I, N);
+            vec3 toLightOut = uLightPos - vWorldPos;
+            float proj = max(dot(toLightOut, reflectOut), 0.0);
+            vec3 closestVec = toLightOut - reflectOut * proj;
+            float radialDist2 = dot(closestVec, closestVec);
+            float bulbGlint = exp(-radialDist2 / (uLightRadius * uLightRadius * 0.95)) *
+              step(0.0, dot(toLightOut, reflectOut));
+            vec3 ambientGlass = vec3(0.74, 0.86, 1.0) * 0.055;
+            vec3 outerBulbColor = vec3(0.84, 0.92, 1.0) * bulbGlint * 0.42;
+            outerReflection = fOuter * (ambientGlass + outerBulbColor);
+          }
+
+          float grille = mix(1.0, 0.992 + 0.008 * cos(uvG.x * uResolution.x * 2.094), uOpticalEffects);
+          float vignette = mix(
+            1.0,
+            1.0 - 0.10 * smoothstep(0.48, 0.90, length((uvG - 0.5) * vec2(1.0, 0.78))),
+            uOpticalEffects
+          );
+          float edgeDistance = min(min(uvG.x, 1.0 - uvG.x), min(uvG.y, 1.0 - uvG.y));
+          float edgeLine = 1.0 - smoothstep(0.002, 0.008, edgeDistance);
+
+          vec3 innerComposite = (terminalColor * grille * vignette + matteLight) * (1.0 - fOuter * uOpticalEffects * 0.65);
+          innerComposite = mix(innerComposite, vec3(0.045, 0.065, 0.085), edgeLine * 0.65);
+          vec3 finalLinear = innerComposite + outerReflection;
+          fragColor = vec4(finalLinear, 1.0);
+        }
+      `;
+      const built = createProgram(vertexShader, fragmentShader, [
+        'uViewProjMatrix',
+        'uScreen',
+        'uScreenSize',
+        'uResolution',
+        'uImageScale',
+        'uTerminalBackground',
+        'uScreenBackground',
+        'uCameraPos',
+        'uLightPos',
+        'uLightRadius',
+        'uOpticalEffects'
+      ]);
+      crtProgram = built.program;
+      crtUniforms = built.locations;
     }
 
     function createPostProcess() {
-      const depthTexture = new THREE.DepthTexture(1, 1, THREE.UnsignedIntType);
-      depthTexture.format = THREE.DepthFormat;
-      depthTexture.minFilter = THREE.NearestFilter;
-      depthTexture.magFilter = THREE.NearestFilter;
-      renderTarget = new THREE.WebGLRenderTarget(1, 1, {
-        depthBuffer: true,
-        stencilBuffer: false
-      });
-      renderTarget.texture.colorSpace = THREE.SRGBColorSpace;
-      renderTarget.texture.minFilter = THREE.LinearFilter;
-      renderTarget.texture.magFilter = THREE.LinearFilter;
-      renderTarget.depthTexture = depthTexture;
-      blurTarget = new THREE.WebGLRenderTarget(1, 1, {
-        depthBuffer: false,
-        stencilBuffer: false
-      });
-      blurTarget.texture.colorSpace = THREE.SRGBColorSpace;
-      blurTarget.texture.minFilter = THREE.LinearFilter;
-      blurTarget.texture.magFilter = THREE.LinearFilter;
+      sceneColorTex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, sceneColorTex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.SRGB8_ALPHA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
 
-      const uniforms = {
-        sceneColor: { value: renderTarget.texture },
-        sceneDepth: { value: depthTexture },
-        resolution: { value: new THREE.Vector2(1, 1) },
-        direction: { value: new THREE.Vector2(1, 0) },
-        projectionMatrixInverse: { value: new THREE.Matrix4() },
-        focalPointView: { value: new THREE.Vector3() },
-        nearestDistance: { value: 0 },
-        farthestDistance: { value: 1 },
-        maxBlurPixels: { value: 8.0 },
-        opticalEffects: { value: flat ? 0 : 1 }
-      };
-      const vertexShader = `
-          varying vec2 vUv;
-          void main() {
-            vUv = uv;
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-          }
-        `;
-      const fragmentShader = `
-          uniform sampler2D sceneColor;
-          uniform sampler2D sceneDepth;
-          uniform vec2 resolution;
-          uniform vec2 direction;
-          uniform mat4 projectionMatrixInverse;
-          uniform vec3 focalPointView;
-          uniform float nearestDistance;
-          uniform float farthestDistance;
-          uniform float maxBlurPixels;
-          uniform float opticalEffects;
-          varying vec2 vUv;
+      sceneDepthTex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, sceneDepthTex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, 1, 1, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
 
-          void addGaussianTap(
-            float tap,
-            float weight,
-            vec2 texel,
-            float radius,
-            inout vec4 colorSum,
-            inout float weightSum
-          ) {
-            vec2 sampleUv = clamp(
-              vUv + direction * texel * radius * (tap / 6.0),
-              vec2(0.0),
-              vec2(1.0)
-            );
-            float valid = step(texture2D(sceneDepth, sampleUv).r, 0.999999);
-            colorSum += texture2D(sceneColor, sampleUv) * (weight * valid);
-            weightSum += weight * valid;
-          }
+      sceneFbo = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, sceneColorTex, 0);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, sceneDepthTex, 0);
 
-          void main() {
-            float depth = texture2D(sceneDepth, vUv).r;
-            vec4 source = texture2D(sceneColor, vUv);
-            if (opticalEffects < 0.5) {
-              gl_FragColor = source;
-              OUTPUT_COLOR
-              return;
-            }
+      blurColorTex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, blurColorTex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.SRGB8_ALPHA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
 
-            vec4 clipPosition = vec4(vUv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
-            vec4 viewPosition = projectionMatrixInverse * clipPosition;
-            viewPosition /= viewPosition.w;
-            float distanceToFocalPoint = length(viewPosition.xyz - focalPointView);
-            float distanceRange = max(farthestDistance - nearestDistance, 0.0001);
-            float proximity = clamp(
-              (farthestDistance - distanceToFocalPoint) / distanceRange,
-              0.0,
-              1.0
-            );
-            float blurAmount = proximity * proximity * step(depth, 0.999999);
-            float radius = blurAmount * maxBlurPixels;
-            vec2 texel = 1.0 / max(resolution, vec2(1.0));
-            vec4 colorSum = vec4(0.0);
-            float weightSum = 0.0;
-            addGaussianTap(-6.0, 0.011109, texel, radius, colorSum, weightSum);
-            addGaussianTap(-5.0, 0.043937, texel, radius, colorSum, weightSum);
-            addGaussianTap(-4.0, 0.135335, texel, radius, colorSum, weightSum);
-            addGaussianTap(-3.0, 0.324652, texel, radius, colorSum, weightSum);
-            addGaussianTap(-2.0, 0.606531, texel, radius, colorSum, weightSum);
-            addGaussianTap(-1.0, 0.882497, texel, radius, colorSum, weightSum);
-            addGaussianTap(0.0, 1.0, texel, radius, colorSum, weightSum);
-            addGaussianTap(1.0, 0.882497, texel, radius, colorSum, weightSum);
-            addGaussianTap(2.0, 0.606531, texel, radius, colorSum, weightSum);
-            addGaussianTap(3.0, 0.324652, texel, radius, colorSum, weightSum);
-            addGaussianTap(4.0, 0.135335, texel, radius, colorSum, weightSum);
-            addGaussianTap(5.0, 0.043937, texel, radius, colorSum, weightSum);
-            addGaussianTap(6.0, 0.011109, texel, radius, colorSum, weightSum);
-            vec4 blurred = colorSum / max(weightSum, 0.0001);
-            gl_FragColor = mix(source, blurred, step(0.0001, weightSum));
+      blurFbo = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, blurFbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, blurColorTex, 0);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+      const vertexShader = `#version 300 es
+        precision highp float;
+        layout(location = 0) in vec2 aUv;
+        out vec2 vUv;
+        void main() {
+          vUv = aUv;
+          gl_Position = vec4(aUv * 2.0 - 1.0, 0.0, 1.0);
+        }
+      `;
+      const fragmentShader = `#version 300 es
+        precision highp float;
+        uniform sampler2D sceneColor;
+        uniform sampler2D sceneDepth;
+        uniform vec2 resolution;
+        uniform vec2 direction;
+        uniform mat4 projectionMatrixInverse;
+        uniform vec3 focalPointView;
+        uniform float nearestDistance;
+        uniform float farthestDistance;
+        uniform float maxBlurPixels;
+        uniform float opticalEffects;
+        in vec2 vUv;
+        out vec4 fragColor;
+
+        vec3 acesFilmicToneMapping(vec3 color) {
+          color *= 1.08 / 0.6;
+          vec3 a = color * (color + 0.0245786) - 0.000090537;
+          vec3 b = color * (0.983729 * color + 0.4329510) + 0.238081;
+          return clamp(a / b, 0.0, 1.0);
+        }
+
+        vec3 linearToSRGB(vec3 value) {
+          return mix(
+            pow(max(value, vec3(0.0)), vec3(0.41666)) * 1.055 - vec3(0.055),
+            value * 12.92,
+             vec3(lessThanEqual(value, vec3(0.0031308)))
+          );
+        }
+
+        void addGaussianTap(
+          float tap,
+          float weight,
+          vec2 texel,
+          float radius,
+          inout vec4 colorSum,
+          inout float weightSum
+        ) {
+          vec2 sampleUv = clamp(
+            vUv + direction * texel * radius * (tap / 6.0),
+            vec2(0.0),
+            vec2(1.0)
+          );
+          float valid = step(texture(sceneDepth, sampleUv).r, 0.999999);
+          colorSum += texture(sceneColor, sampleUv) * (weight * valid);
+          weightSum += weight * valid;
+        }
+
+        void main() {
+          float depth = texture(sceneDepth, vUv).r;
+          vec4 source = texture(sceneColor, vUv);
+          if (opticalEffects < 0.5) {
+            fragColor = source;
             OUTPUT_COLOR
+            return;
           }
-        `;
-      const outputTransform = '#include <tonemapping_fragment>\n#include <colorspace_fragment>';
+
+          vec4 clipPosition = vec4(vUv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+          vec4 viewPosition = projectionMatrixInverse * clipPosition;
+          viewPosition /= viewPosition.w;
+          float distanceToFocalPoint = length(viewPosition.xyz - focalPointView);
+          float distanceRange = max(farthestDistance - nearestDistance, 0.0001);
+          float proximity = clamp(
+            (farthestDistance - distanceToFocalPoint) / distanceRange,
+            0.0,
+            1.0
+          );
+          float blurAmount = proximity * proximity * step(depth, 0.999999);
+          float radius = blurAmount * maxBlurPixels;
+          vec2 texel = 1.0 / max(resolution, vec2(1.0));
+          vec4 colorSum = vec4(0.0);
+          float weightSum = 0.0;
+          addGaussianTap(-6.0, 0.011109, texel, radius, colorSum, weightSum);
+          addGaussianTap(-5.0, 0.043937, texel, radius, colorSum, weightSum);
+          addGaussianTap(-4.0, 0.135335, texel, radius, colorSum, weightSum);
+          addGaussianTap(-3.0, 0.324652, texel, radius, colorSum, weightSum);
+          addGaussianTap(-2.0, 0.606531, texel, radius, colorSum, weightSum);
+          addGaussianTap(-1.0, 0.882497, texel, radius, colorSum, weightSum);
+          addGaussianTap(0.0, 1.0, texel, radius, colorSum, weightSum);
+          addGaussianTap(1.0, 0.882497, texel, radius, colorSum, weightSum);
+          addGaussianTap(2.0, 0.606531, texel, radius, colorSum, weightSum);
+          addGaussianTap(3.0, 0.324652, texel, radius, colorSum, weightSum);
+          addGaussianTap(4.0, 0.135335, texel, radius, colorSum, weightSum);
+          addGaussianTap(5.0, 0.043937, texel, radius, colorSum, weightSum);
+          addGaussianTap(6.0, 0.011109, texel, radius, colorSum, weightSum);
+          vec4 blurred = colorSum / max(weightSum, 0.0001);
+          fragColor = mix(source, blurred, step(0.0001, weightSum));
+          OUTPUT_COLOR
+        }
+      `;
+      const outputTransform = 'fragColor.rgb = linearToSRGB(acesFilmicToneMapping(fragColor.rgb));';
       const horizontalShader = fragmentShader.replace(/OUTPUT_COLOR/g, '');
       const finalShader = fragmentShader.replace(/OUTPUT_COLOR/g, outputTransform);
-      horizontalBlurMaterial = new THREE.ShaderMaterial({
-        uniforms,
-        vertexShader,
-        fragmentShader: horizontalShader,
-        toneMapped: false
-      });
-      postMaterial = new THREE.ShaderMaterial({
-        uniforms,
-        vertexShader,
-        fragmentShader: finalShader,
-        toneMapped: false
-      });
-
-      postGeometry = new THREE.PlaneGeometry(2, 2);
-      postScene = new THREE.Scene();
-      postMesh = new THREE.Mesh(postGeometry, postMaterial);
-      postScene.add(postMesh);
-      postCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
-      postCamera.position.z = 1;
+      const blurUniformNames = [
+        'sceneColor',
+        'sceneDepth',
+        'resolution',
+        'direction',
+        'projectionMatrixInverse',
+        'focalPointView',
+        'nearestDistance',
+        'farthestDistance',
+        'maxBlurPixels',
+        'opticalEffects'
+      ];
+      const builtH = createProgram(vertexShader, horizontalShader, blurUniformNames);
+      blurHProgram = builtH.program;
+      blurHUniforms = builtH.locations;
+      const builtV = createProgram(vertexShader, finalShader, blurUniformNames);
+      blurVProgram = builtV.program;
+      blurVUniforms = builtV.locations;
+      createFullscreenQuad();
     }
 
     function screenCoordinates(event) {
       const bounds = canvas.getBoundingClientRect();
       if (bounds.width <= 0 || bounds.height <= 0) return null;
-      pointer.set(
-        Math.max(-1, Math.min(1, ((event.clientX - bounds.left) / bounds.width) * 2 - 1)),
-        Math.max(-1, Math.min(1, -((event.clientY - bounds.top) / bounds.height) * 2 + 1))
+      const ndcX = Math.max(-1, Math.min(1, ((event.clientX - bounds.left) / bounds.width) * 2 - 1));
+      const ndcY = Math.max(-1, Math.min(1, -((event.clientY - bounds.top) / bounds.height) * 2 + 1));
+
+      // Unproject NDC ray into camera view space, then world space
+      const viewX = ndcX * projMatrixInverse[0];
+      const viewY = ndcY * projMatrixInverse[5];
+      const viewZ = -1.0;
+      const dirWorld = {
+        x: viewMatrix[0] * viewX + viewMatrix[1] * viewY + viewMatrix[2] * viewZ,
+        y: viewMatrix[4] * viewX + viewMatrix[5] * viewY + viewMatrix[6] * viewZ,
+        z: viewMatrix[8] * viewX + viewMatrix[9] * viewY + viewMatrix[10] * viewZ
+      };
+
+      const hit = solveParaboloidRayHit(cameraEye, dirWorld, screenWidth, screenHeight, flat);
+      if (!hit) return null;
+      const refracted = refractThickGlassUV(
+        { x: hit.u, y: hit.v },
+        cameraEye,
+        screenWidth,
+        screenHeight,
+        flat
       );
-      raycaster.setFromCamera(pointer, camera);
-      const hit = raycaster.intersectObject(screenMesh, false)[0];
-      if (!hit || !hit.uv) return null;
-      const imageScale = screenMaterial && screenMaterial.uniforms && screenMaterial.uniforms.imageScale
-        ? screenMaterial.uniforms.imageScale.value
-        : { x: 1, y: 1 };
-      const u = (hit.uv.x - 0.5) / (imageScale.x || 1) + 0.5;
-      const v = (hit.uv.y - 0.5) / (imageScale.y || 1) + 0.5;
-      hitPoint.set(Math.max(0, Math.min(1, u)), Math.max(0, Math.min(1, v)));
+      const u = (refracted.uvG.x - 0.5) / (imageScale.x || 1) + 0.5;
+      const v = (refracted.uvG.y - 0.5) / (imageScale.y || 1) + 0.5;
+      const clampedU = Math.max(0, Math.min(1, u));
+      const clampedV = Math.max(0, Math.min(1, v));
       const targetBounds = terminalScreen.getBoundingClientRect();
       return {
-        clientX: targetBounds.left + hitPoint.x * targetBounds.width,
-        clientY: targetBounds.top + (1 - hitPoint.y) * targetBounds.height
+        clientX: targetBounds.left + clampedU * targetBounds.width,
+        clientY: targetBounds.top + (1 - clampedV) * targetBounds.height
       };
     }
 
@@ -1137,19 +1807,20 @@
         throw new Error('The xterm WebGL addon did not expose its rendered screen canvas');
       }
 
-      const gl = rendererContextProbe(THREE, canvas);
+      gl = rendererContextProbe(canvas);
       if (!gl) throw new Error('WebGL2 is unavailable');
-      const rendererInfo = gl.getExtension('WEBGL_debug_renderer_info');
-      if (rendererInfo) {
-        const rendererName = gl.getParameter(rendererInfo.UNMASKED_RENDERER_WEBGL);
-        if (/swiftshader|software rasterizer|llvmpipe/i.test(rendererName)) {
-          throw new Error(`software WebGL renderer detected (${rendererName})`);
+      if (typeof gl.getExtension === 'function' && typeof gl.getParameter === 'function') {
+        const rendererInfo = gl.getExtension('WEBGL_debug_renderer_info');
+        if (rendererInfo) {
+          const rendererName = gl.getParameter(rendererInfo.UNMASKED_RENDERER_WEBGL);
+          if (/swiftshader|software rasterizer|llvmpipe/i.test(rendererName)) {
+            throw new Error(`software WebGL renderer detected (${rendererName})`);
+          }
         }
       }
-      renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
-      renderer.outputColorSpace = THREE.SRGBColorSpace;
-      renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = 1.08;
+
+      createCrtMesh();
+      createCrtShaderProgram();
       createPostProcess();
 
       textureCanvas = document.createElement('canvas');
@@ -1165,93 +1836,9 @@
       textureContext.imageSmoothingEnabled = false;
       drawWarmTerminalImage(viewport, textureCanvas.width, textureCanvas.height);
       applyScanlines();
-      screenTexture = new THREE.CanvasTexture(textureCanvas);
-      screenTexture.colorSpace = THREE.SRGBColorSpace;
-      screenTexture.minFilter = THREE.LinearFilter;
-      screenTexture.magFilter = THREE.LinearFilter;
-      screenMaterial = createScreenMaterial();
-      screenMaterial.uniforms.resolution.value.set(textureCanvas.width, textureCanvas.height);
-      geometry = makeGeometry();
-
-      scene = new THREE.Scene();
-      scene.background = new THREE.Color(0x07090e);
-      camera = new THREE.PerspectiveCamera(31, 1, 0.1, 50);
-
-      screenMesh = new THREE.Mesh(geometry, screenMaterial);
-      scene.add(screenMesh);
-
-      if (!flat) glassMaterial = new THREE.MeshPhysicalMaterial({
-        color: 0xeaf3ff,
-        roughness: 0.16,
-        metalness: 0,
-        transmission: 0.045,
-        thickness: 0.04,
-        ior: 1.48,
-        clearcoat: 0.35,
-        clearcoatRoughness: 0.22,
-        transparent: true,
-        opacity: 0.10,
-        side: THREE.DoubleSide,
-        depthWrite: false
-      });
-      if (glassMaterial) {
-        glassMesh = new THREE.Mesh(geometry, glassMaterial);
-        glassMesh.position.z = 0.014;
-        scene.add(glassMesh);
-      }
-
-      if (!flat) reflectionMaterial = new THREE.ShaderMaterial({
-        uniforms: {
-          lightOffset: { value: 0 }
-        },
-        transparent: true,
-        depthWrite: false,
-        side: THREE.DoubleSide,
-        toneMapped: false,
-        blending: THREE.AdditiveBlending,
-        vertexShader: `
-          varying vec2 vUv;
-          varying vec3 vViewPosition;
-          varying vec3 vNormal;
-          void main() {
-            vUv = uv;
-            vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
-            vViewPosition = -viewPosition.xyz;
-            vNormal = normalize(normalMatrix * normal);
-            gl_Position = projectionMatrix * viewPosition;
-          }
-        `,
-        fragmentShader: `
-          uniform float lightOffset;
-          varying vec2 vUv;
-          varying vec3 vViewPosition;
-          varying vec3 vNormal;
-          void main() {
-            float facing = max(dot(normalize(vNormal), normalize(vViewPosition)), 0.0);
-            float fresnel = pow(1.0 - facing, 2.0);
-            float streakAxis = vUv.x + 0.34 * (1.0 - vUv.y);
-              float streak = exp(-pow((streakAxis - (0.50 + lightOffset)) / 0.12, 2.0)) *
-                smoothstep(0.08, 0.28, vUv.y) *
-                (1.0 - smoothstep(0.92, 0.99, vUv.y));
-              float bloom = exp(-pow((vUv.x - (0.18 + lightOffset)) / 0.22, 2.0) -
-                pow((vUv.y - 0.82) / 0.22, 2.0));
-                float alpha = clamp(streak * 0.34 + bloom * 0.15 + fresnel * 0.10, 0.0, 0.36);
-            gl_FragColor = vec4(0.78, 0.88, 1.0, alpha);
-          }
-        `
-      });
-      if (reflectionMaterial) {
-        reflectionMesh = new THREE.Mesh(geometry, reflectionMaterial);
-        reflectionMesh.position.z = 0.024;
-        reflectionMesh.renderOrder = 2;
-        scene.add(reflectionMesh);
-      }
-
-      const ambient = new THREE.AmbientLight(0x9db4d0, 0.30);
-      const key = new THREE.DirectionalLight(0xd6e4ff, 0.50);
-      key.position.set(-1.7, 1.8, baseLightDepth);
-      reflectionLight = key;
-      scene.add(ambient, key);
+      screenResolution.x = textureCanvas.width;
+      screenResolution.y = textureCanvas.height;
+      uploadScreenTexture(true);
 
       if (!terminal._core || !terminal._core._renderService ||
           typeof terminal._core._renderService.onRender !== 'function') {
@@ -1268,6 +1855,7 @@
       canvas.addEventListener('dblclick', forwardMouseEvent);
       canvas.addEventListener('wheel', forwardMouseEvent, { passive: false });
       canvas.addEventListener('contextmenu', forwardMouseEvent);
+      canvas.addEventListener('webglcontextlost', onWebGLContextLost);
       global.addEventListener('mousemove', onWindowMove);
       global.addEventListener('mouseup', onWindowUp);
       resizeObserver = new global.ResizeObserver(resize);
@@ -1302,9 +1890,14 @@
     };
   }
 
-  function rendererContextProbe(THREE, canvas) {
-    if (typeof THREE.WebGLRenderer !== 'function') return null;
-    return canvas.getContext('webgl2');
+  function rendererContextProbe(canvas) {
+    if (!canvas || typeof canvas.getContext !== 'function') return null;
+    return canvas.getContext('webgl2', {
+      antialias: true,
+      alpha: false,
+      depth: false,
+      stencil: false
+    });
   }
 
   const REFERENCE_GRID_COLS = 72;
@@ -1361,7 +1954,7 @@
     return { x: 0, y: 0, width: canvasWidth, height: canvasHeight };
   }
 
-  const REFLECTION_PERIOD_MS = 10 * 60 * 1000;
+  const REFLECTION_PERIOD_MS = 0.5 * 60 * 1000;
 
   function calculateReflectionPhase(elapsedMs) {
     return ((elapsedMs % REFLECTION_PERIOD_MS) / REFLECTION_PERIOD_MS) * Math.PI * 2;
@@ -1383,6 +1976,13 @@
     calculateCaptureViewport,
     calculateReflectionOffset,
     calculateReflectionDepth,
+    calculateLightPosition,
+    solveParaboloidRayHit,
+    refractThickGlassUV,
+    calculateFocalBounds,
+    GLASS_IOR_R,
+    GLASS_IOR_G,
+    GLASS_IOR_B,
     MIN_SCREEN_ASPECT,
     MAX_SCREEN_ASPECT,
     MIN_GRID_COLS,

@@ -837,34 +837,31 @@ test('CRT capture crops the WebGL viewport rather than its unused canvas area', 
 test('CRT blur is a final composite pass with endpoints measured on curved geometry', () => {
   const source = fs.readFileSync(path.join(__dirname, 'super-demo.js'), 'utf8');
   const renderStart = source.indexOf('function render(');
-  const renderPass = source.slice(renderStart, source.indexOf('function resize()', renderStart));
-  const firstPostRender = renderPass.indexOf('renderer.render(postScene, postCamera)');
+  const renderPass = source.slice(renderStart, source.indexOf('function bindBlurUniforms(', renderStart));
+  const firstQuadDraw = renderPass.indexOf('gl.drawArrays(gl.TRIANGLES, 0, 6)');
   const passOrder = [
-    'renderer.setRenderTarget(renderTarget)',
-    'renderer.render(scene, camera)',
-    'postMesh.material = horizontalBlurMaterial',
-    'renderer.setRenderTarget(blurTarget)',
-    firstPostRender,
-    'postMesh.material = postMaterial',
-    'renderer.setRenderTarget(null)',
-    renderPass.indexOf('renderer.render(postScene, postCamera)', firstPostRender + 1)
+    'gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFbo)',
+    'gl.useProgram(crtProgram)',
+    'gl.drawElements(gl.TRIANGLES, crtIndexCount, gl.UNSIGNED_SHORT, 0)',
+    'gl.bindFramebuffer(gl.FRAMEBUFFER, blurFbo)',
+    'gl.useProgram(blurHProgram)',
+    firstQuadDraw,
+    'gl.bindFramebuffer(gl.FRAMEBUFFER, null)',
+    'gl.useProgram(blurVProgram)',
+    renderPass.indexOf('gl.drawArrays(gl.TRIANGLES, 0, 6)', firstQuadDraw + 1)
   ].map((step) => typeof step === 'number' ? step : renderPass.indexOf(step));
   assert.ok(passOrder.every((index) => index >= 0));
   assert.ok(passOrder.every((index, position) => position === 0 || index > passOrder[position - 1]));
-  assert.match(source, /new THREE\.Vector3\(\)\.setFromMatrixColumn\(camera\.matrixWorld, 1\)\.normalize\(\)/);
-  assert.match(source, /const focalHeight = cameraPosition\.clone\(\)\.sub\(cornerPoint\)\.dot\(cameraUp\)/);
-  assert.match(source, /const focalPoint = cornerPoint\.clone\(\)\.addScaledVector\(cameraUp, focalHeight\)/);
-  assert.match(source, /triangleShape\.set\(pointA, pointB, pointC\)\.closestPointToPoint\(focalPoint, closestPoint\)/);
-  assert.match(source, /if \(distance < nearestDistance\) nearestDistance = distance/);
-  assert.match(source, /const distance = farthestPoint\.distanceTo\(focalPoint\)/);
-  assert.match(source, /if \(distance > farthestDistance\) farthestDistance = distance/);
+  assert.match(source, /function calculateFocalBounds\(/);
+  assert.match(source, /if \(dist < nearestDistance\) nearestDistance = dist/);
+  assert.match(source, /if \(dist > farthestDistance\) farthestDistance = dist/);
   assert.match(
     source,
     /\(farthestDistance - distanceToFocalPoint\) \/ distanceRange/
   );
-  assert.match(source, /maxBlurPixels: \{ value: 8\.0 \}/);
-  assert.match(source, /renderTarget\.texture\.colorSpace = THREE\.SRGBColorSpace/);
-  assert.match(source, /blurTarget\.texture\.colorSpace = THREE\.SRGBColorSpace/);
+  assert.match(source, /const maxBlurPixels = 8\.0/);
+  assert.match(source, /gl\.SRGB8_ALPHA8/);
+  assert.match(source, /gl\.DEPTH_COMPONENT24/);
   assert.match(source, /float blurAmount = proximity \* proximity/);
   assert.match(source, /float radius = blurAmount \* maxBlurPixels/);
   assert.match(source, /addGaussianTap\(-6\.0, 0\.011109/);
@@ -872,12 +869,94 @@ test('CRT blur is a final composite pass with endpoints measured on curved geome
   assert.match(source, /addGaussianTap\(6\.0, 0\.011109/);
   assert.doesNotMatch(source, /for \(int tap = -6; tap <= 6; tap\+\+\)/);
   assert.match(source, /uniform vec2 direction/);
-  assert.match(source, /textureContext\.filter = 'sepia\(10%\) saturate\(1\.05\)'/);
+  assert.match(source, /textureContext\.filter = 'sepia\(40%\) saturate\(1\.05\)'/);
   assert.equal(
     (source.match(/drawWarmTerminalImage\((?:viewport, targetWidth, targetHeight|viewport, textureCanvas\.width, textureCanvas\.height)\);\s*applyScanlines\(\);/g) || []).length,
     2
   );
-  assert.doesNotMatch(source, /cornerDistance|lowerRight/);
+  assert.doesNotMatch(source, /THREE\./);
+});
+
+test('thick CRT glass optics compute analytical paraboloid hit, Snell refraction, Newtonian dispersion, and focal bounds', () => {
+  const { context } = createHarness();
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'super-demo.js'), 'utf8'), context);
+  const superDemo = context.KabibiBrowserSuperDemo;
+
+  // 1. Analytical ray-paraboloid intersection at screen center and off-center
+  const centerHit = superDemo.solveParaboloidRayHit(
+    { x: 0, y: 0, z: 2.5 },
+    { x: 0, y: 0, z: -1 },
+    2.72,
+    1.58,
+    false
+  );
+  assert.ok(centerHit);
+  assert.ok(Math.abs(centerHit.u - 0.5) < 1e-6);
+  assert.ok(Math.abs(centerHit.v - 0.5) < 1e-6);
+  assert.ok(Math.abs(centerHit.z) < 1e-6);
+
+  const cornerRayHit = superDemo.solveParaboloidRayHit(
+    { x: 1.0, y: -0.5, z: 2.5 },
+    { x: 0, y: 0, z: -1 },
+    2.72,
+    1.58,
+    false
+  );
+  assert.ok(cornerRayHit);
+  const expectedNx = 1.0 / (2.72 * 0.5);
+  const expectedNy = -0.5 / (1.58 * 0.5);
+  const expectedZ = -0.24 * (expectedNx * expectedNx + 0.72 * expectedNy * expectedNy);
+  assert.ok(Math.abs(cornerRayHit.z - expectedZ) < 1e-5);
+
+  // Miss outside screen bounds returns null
+  const miss = superDemo.solveParaboloidRayHit(
+    { x: 5.0, y: 0, z: 2.5 },
+    { x: 0, y: 0, z: -1 },
+    2.72,
+    1.58,
+    false
+  );
+  assert.equal(miss, null);
+
+  // 2. Thick-glass refraction & Newtonian spectral dispersion ordering (|deltaR| < |deltaG| < |deltaB|)
+  const eye = { x: 0.31, y: -0.22, z: 2.66 };
+  const edgeUv = { x: 0.88, y: 0.16 };
+  const refracted = superDemo.refractThickGlassUV(edgeUv, eye, 2.72, 1.58, false);
+  const distR = Math.hypot(refracted.uvR.x - edgeUv.x, refracted.uvR.y - edgeUv.y);
+  const distG = Math.hypot(refracted.uvG.x - edgeUv.x, refracted.uvG.y - edgeUv.y);
+  const distB = Math.hypot(refracted.uvB.x - edgeUv.x, refracted.uvB.y - edgeUv.y);
+  assert.ok(distR > 0);
+  assert.ok(distR < distG, `expected red refraction (${distR}) < green (${distG})`);
+  assert.ok(distG < distB, `expected green refraction (${distG}) < blue (${distB})`);
+  assert.ok(refracted.fresnelOuter > 0.0426);
+  assert.ok(Number.isFinite(refracted.lensDensity) && refracted.lensDensity > 0.5);
+
+  const flatRefracted = superDemo.refractThickGlassUV(edgeUv, eye, 2.72, 1.58, true);
+  assert.equal(flatRefracted.deltaUvG.x, 0);
+  assert.equal(flatRefracted.deltaUvG.y, 0);
+
+  // 3. 3D pendulum light position and curved focal bounds
+  const light0 = superDemo.calculateLightPosition(0, 2.72);
+  const lightQuarter = superDemo.calculateLightPosition(150000, 2.72);
+  assert.ok(lightQuarter.x > light0.x);
+  assert.ok(lightQuarter.z < light0.z);
+
+  const identityView = new Float32Array([
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    0, 0, -2.66, 1
+  ]);
+  const focal = superDemo.calculateFocalBounds(
+    eye,
+    { x: 0, y: 1, z: 0 },
+    identityView,
+    2.72,
+    1.58,
+    false
+  );
+  assert.ok(focal.nearestDistance > 0);
+  assert.ok(focal.farthestDistance > focal.nearestDistance);
 });
 
 test('bootFromGuest honors __super_demo__ and falls back to flat full-page xterm when WebGL2 is unsupported', async () => {
