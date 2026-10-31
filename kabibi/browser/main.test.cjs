@@ -805,22 +805,22 @@ test('CRT image fitting preserves the source aspect ratio', () => {
   assert.ok(Math.abs(landscapeFit.y - 0.639) < 0.002);
 });
 
-test('CRT reflection oscillates left-right and back-forward over ten minutes', () => {
+test('CRT reflection oscillates left-right and back-forward over thirty seconds', () => {
   const { context } = createHarness();
   vm.runInContext(fs.readFileSync(path.join(__dirname, 'super-demo.js'), 'utf8'), context);
   const offset = context.KabibiBrowserSuperDemo.calculateReflectionOffset;
   const depth = context.KabibiBrowserSuperDemo.calculateReflectionDepth;
 
   assert.ok(Math.abs(offset(0)) < 1e-12);
-  assert.ok(Math.abs(offset(150000) - 1.2) < 1e-12);
-  assert.ok(Math.abs(offset(300000)) < 1e-12);
-  assert.ok(Math.abs(offset(450000) + 1.2) < 1e-12);
-  assert.ok(Math.abs(offset(600000)) < 1e-12);
+  assert.ok(Math.abs(offset(7500) - 1.2) < 1e-12);
+  assert.ok(Math.abs(offset(15000)) < 1e-12);
+  assert.ok(Math.abs(offset(22500) + 1.2) < 1e-12);
+  assert.ok(Math.abs(offset(30000)) < 1e-12);
   assert.ok(Math.abs(depth(0) - 1.2) < 1e-12);
-  assert.ok(Math.abs(depth(150000) - 1) < 1e-12);
-  assert.ok(Math.abs(depth(300000) - 1.2) < 1e-12);
-  assert.ok(Math.abs(depth(450000) - 1.4) < 1e-12);
-  assert.ok(Math.abs(depth(600000) - 1.2) < 1e-12);
+  assert.ok(Math.abs(depth(7500) - 1) < 1e-12);
+  assert.ok(Math.abs(depth(15000) - 1.2) < 1e-12);
+  assert.ok(Math.abs(depth(22500) - 1.4) < 1e-12);
+  assert.ok(Math.abs(depth(30000) - 1.2) < 1e-12);
 });
 
 test('CRT capture crops the WebGL viewport rather than its unused canvas area', () => {
@@ -935,11 +935,32 @@ test('thick CRT glass optics compute analytical paraboloid hit, Snell refraction
   assert.equal(flatRefracted.deltaUvG.x, 0);
   assert.equal(flatRefracted.deltaUvG.y, 0);
 
-  // 3. 3D pendulum light position and curved focal bounds
-  const light0 = superDemo.calculateLightPosition(0, 2.72);
-  const lightQuarter = superDemo.calculateLightPosition(150000, 2.72);
-  assert.ok(lightQuarter.x > light0.x);
-  assert.ok(lightQuarter.z < light0.z);
+  // Verify outward curvature reflection direction: on the left side (u = 0.12),
+  // bounceUv.x > uvG.x so a left-of-letter fragment samples the letter, placing the reflection on the left.
+  const leftUv = { x: 0.12, y: 0.5 };
+  const leftRefracted = superDemo.refractThickGlassUV(leftUv, eye, 2.72, 1.58, false);
+  assert.ok(
+    leftRefracted.bounceUv.x > leftRefracted.uvG.x,
+    `expected left-side bounceUv.x (${leftRefracted.bounceUv.x}) > uvG.x (${leftRefracted.uvG.x}) so reflection appears to the left`
+  );
+  const rightUv = { x: 0.88, y: 0.5 };
+  const rightRefracted = superDemo.refractThickGlassUV(rightUv, eye, 2.72, 1.58, false);
+  assert.ok(
+    rightRefracted.bounceUv.x < rightRefracted.uvG.x,
+    `expected right-side bounceUv.x (${rightRefracted.bounceUv.x}) < uvG.x (${rightRefracted.uvG.x}) so reflection appears to the right`
+  );
+
+  // 3. Dual 3D pendulum light positions (left-close to right-far) and curved focal bounds
+  const lightLeft = superDemo.calculateLightPosition(22500, 2.72);
+  const lightCenter = superDemo.calculateLightPosition(0, 2.72);
+  const lightRight = superDemo.calculateLightPosition(7500, 2.72);
+  assert.ok(lightRight.x > lightCenter.x && lightCenter.x > lightLeft.x);
+  assert.ok(
+    lightRight.z > lightLeft.z * 2.0,
+    `expected right-side light depth (${lightRight.z}) to be visibly farther than left-side (${lightLeft.z})`
+  );
+  assert.ok(Math.abs(lightLeft.z - 2.2) < 0.2);
+  assert.ok(lightCenter.ellipsoid && lightCenter.ellipsoid.ry > lightCenter.ellipsoid.rx * 2.0);
 
   const identityView = new Float32Array([
     1, 0, 0, 0,
