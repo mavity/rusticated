@@ -308,6 +308,23 @@ func TestURootPilotCommands(t *testing.T) {
 	}
 }
 
+func TestURootSedCommand(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "input.txt"), []byte("banana\napple\ncherry\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	es, err := NewExecutionSession(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := "cat input.txt | sed 's/a/A/g'"
+	_, parsed := es.ClassifyInput(line)
+	record, err := es.RunCommand(context.Background(), line, parsed, SourceUserShell, nil)
+	if err != nil || record.ExitCode != 0 || record.Output != "bAnAnA\nApple\ncherry\n" {
+		t.Fatalf("sed pipeline = (%q, %d, %v)", record.Output, record.ExitCode, err)
+	}
+}
+
 func TestURootPipelinesAndDailyDrivers(t *testing.T) {
 	dir := t.TempDir()
 	sampleFile := filepath.Join(dir, "items.txt")

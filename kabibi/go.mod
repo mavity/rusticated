@@ -6,6 +6,7 @@ require (
 	ai v0.0.0-00010101000000-000000000000
 	dload v0.0.0-00010101000000-000000000000
 	github.com/adrianliechti/go-git v0.0.0-20260927203556-92d90da1a035
+	mohabbat v0.0.0
 	github.com/alecthomas/chroma/v2 v2.27.0
 	github.com/atotto/clipboard v0.1.4
 	github.com/charmbracelet/glamour v1.0.0
@@ -97,6 +98,7 @@ require (
 replace (
 	ai => ../ai
 	dload => ../dload
+mohabbat => ..
 	github.com/atotto/clipboard => ../mohabbat/rusticated-jit/github.com/atotto/clipboard
 	github.com/charmbracelet/x/term => ../mohabbat/rusticated-jit/github.com/charmbracelet/x/term
 	github.com/cyphar/filepath-securejoin => ../mohabbat/rusticated-jit/github.com/cyphar/filepath-securejoin

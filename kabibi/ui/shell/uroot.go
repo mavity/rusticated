@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 
+	sedcmd "github.com/mavity/rusticated/kabibi/internal/sed"
 	"github.com/u-root/u-root/cmds/core/backoff"
 	base64cmd "github.com/u-root/u-root/cmds/core/base64"
 	"github.com/u-root/u-root/cmds/core/basename"
@@ -109,6 +110,7 @@ var urootRegistry = map[string]commandRunner{
 	"hexdump": hexdump.Main,
 	"more":    runMore,
 	"seq":     seq.Main,
+	"sed":     sedcmd.Main,
 	"sort":    sort.Main,
 	"strings": stringscmd.Main,
 	"tail":    tail.Main,
