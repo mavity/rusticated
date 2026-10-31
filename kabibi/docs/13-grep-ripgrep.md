@@ -14,10 +14,11 @@ Current implementation status:
 - `rg` is registered in Kabibi and supports shared regex matching, recursive traversal, basic `.gitignore`/`.ignore`/`.rgignore` rules, glob and common type filters, context and count/list output, JSON events, and NUL records. Search-zip decompression, multiline (`-U`) search, basic stats, case-insensitive globs, global Git excludes, `.git/info/exclude`, and leading PCRE lookaround assertions have been added. Full ignore/JSON/statistics parity and several ripgrep output and filtering options remain incomplete.
 - `sed`'s `e` and `s///e` now use Kabibi's injected in-process shell runner rather than starting a host shell; broad environment, redirection, and GNU behavior comparisons remain outstanding.
 - The requested 99% practical-compatibility target has not been demonstrated.
-  A small differential corpus now passes against GNU grep 3.11, GNU sed 4.9,
-  and ripgrep 15.0.0 on Windows/ARM64 (GNU references through WSL). This is
-  only a baseline, not evidence of 99% parity; macOS BSD grep, Linux, and
-  Rusticated runtime comparisons remain outstanding.
+  An expanded strict differential corpus passes against GNU grep 3.11, GNU
+  sed 4.9, and ripgrep 15.0.0 on Windows/ARM64 (GNU references through WSL).
+  It covers 28 grep, 18 sed, and 31 ripgrep scenarios; this is useful evidence,
+  not proof of 99% parity. macOS BSD grep, Linux, and Rusticated differential
+  comparisons remain outstanding.
 
 Keep both commands reentrant through `Main(ctx, ioEnv, args...)`; use the
 provided streams and `ioEnv.ResolvePath`, honor cancellation, and preserve the
@@ -182,15 +183,21 @@ and [printing only matches](https://stackoverflow.com/questions/1546711/can-grep
   search tests under that runtime so file I/O and cancellation use the custom
   sysroot rather than host-only behavior.
 
-Current differential baseline: `u-root/cmds/core/searchcompat/differential_test.go`
-compares stdout, stderr, status, and observed files. The strict run passed 8 GNU
-grep cases (basic/fixed/inverted/only-matching/quiet/no-match/multiple-file/
-NUL-record), 5 GNU sed cases (substitution/selection/deletion/`Q` status/
-in-place backup), and 10 ripgrep cases (stdin/file defaults, fixed/line-number/
-only-matching/multiline/recursive ignore-hidden, JSON events, and stats).
-References were GNU grep 3.11 and GNU sed 4.9 through WSL, plus ripgrep 15.0.0.
-Volatile elapsed-time fields are normalized; all other compared output is exact.
-This intentionally small corpus leaves the exhaustive matrix above open.
+Current strict differential corpus: `u-root/cmds/core/searchcompat/differential_test.go`
+compares stdout, stderr, exit status, and selected file side effects. It passes
+28 GNU grep cases (including binary modes, empty patterns, PCRE lookaround,
+recursive include/exclude filters, and NUL records), 18 GNU sed cases
+(including multiline EOF, multiple-file addressing, write commands, and
+in-place backups), and 31 ripgrep cases (including default output, traversal,
+filters, `--files`, context, JSON no-match/context, and statistics). References
+were GNU grep 3.11 and GNU sed 4.9 through WSL, plus ripgrep 15.0.0. Volatile
+elapsed-time fields are normalized; other compared output is exact except
+where path/order normalization is needed for platform differences or unspecified
+traversal order. The bundled Windows ripgrep delegates compressed-file decoding
+to external tools such as `gzip`; because those tools are unavailable in this
+reference environment, compressed-search parity is not part of this corpus.
+The broader feature matrix, full error/ignore precedence, Linux/macOS coverage,
+and the 99% target remain open.
 
 ### 10. Measure performance and close the plan
 
