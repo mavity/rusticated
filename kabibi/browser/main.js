@@ -514,6 +514,10 @@
     let startingHost = typeof options.wasm !== 'undefined' && options.wasm !== null;
     const pendingInput = [];
     let disposed = false;
+    let disposing = false;
+    let disposePromise = null;
+    let powerOffPromise = null;
+    let hostExited = false;
     const resizeState = { cols: -1, rows: -1 };
     const originalTitle = document.title;
     let appliedTitle = null;
@@ -540,11 +544,23 @@
       startupOutput = '';
     };
     const forwardStdout = (bytes) => {
-      if (!disposed) term.write(bytes);
+      if (!disposed && !disposing) term.write(bytes);
       updateTitleFromStartupOutput(bytes);
       if (options.onStdout) options.onStdout(bytes);
     };
+    const startPowerOff = () => {
+      hostExited = true;
+      if (!superDemo || typeof superDemo.powerOff !== 'function') return Promise.resolve();
+      if (!powerOffPromise) powerOffPromise = Promise.resolve(superDemo.powerOff());
+      return powerOffPromise;
+    };
+    const notifyHostExit = () => {
+      startPowerOff().catch((error) => {
+        console.error('Kabibi CRT power-off animation failed:', error);
+      });
+    };
     const inputSubscription = term.onData((data) => {
+      if (disposing) return;
       if (host) {
         host.pushStdin(data);
       } else if (startingHost) {
@@ -557,9 +573,10 @@
       reportResize(term, host, options.onResize, resizeState);
     });
 
-    const dispose = () => {
+    const disposeImmediately = () => {
       if (disposed) return;
       disposed = true;
+      disposing = true;
       if (appliedTitle !== null && document.title === appliedTitle) {
         document.title = originalTitle;
       }
@@ -576,6 +593,25 @@
       term.dispose();
       root.remove();
       if (createdHost) parent.remove();
+    };
+    const dispose = () => {
+      if (disposed) return Promise.resolve();
+      if (disposePromise) return disposePromise;
+      disposing = true;
+      if (!superDemo || typeof superDemo.powerOff !== 'function' ||
+          (typeof superDemo.isFallback === 'function' && superDemo.isFallback())) {
+        disposeImmediately();
+        disposePromise = Promise.resolve();
+        return disposePromise;
+      }
+      disposePromise = startPowerOff().then(
+        () => disposeImmediately(),
+        (error) => {
+          disposeImmediately();
+          throw error;
+        }
+      );
+      return disposePromise;
     };
 
     const fit = () => {
@@ -602,15 +638,16 @@
       host.attachTerminal({
         stdout: forwardStdout,
         stderr: (bytes) => {
-          if (!disposed) term.write(bytes);
+          if (!disposed && !disposing) term.write(bytes);
           if (options.onStderr) options.onStderr(bytes);
         },
         getTtySize: () => ({ cols: term.cols, rows: term.rows }),
         setTtySize: (cols, rows) => term.resize(cols, rows),
         onExit: (code) => {
-          if (!disposed && options.showExitStatus !== false) {
+          if (!disposed && !disposing && options.showExitStatus !== false) {
             term.write(`\r\n[Process exited with code ${code}]\r\n`);
           }
+          notifyHostExit();
           if (options.onExit) options.onExit(code);
         }
       });
@@ -621,7 +658,7 @@
       const hostFactory = options.washmhost ||
         (global.washmhostExports && global.washmhostExports.washmhost);
       if (typeof hostFactory !== 'function') {
-        dispose();
+        disposeImmediately();
         throw new Error('Kabibi WASM startup requires washmhostExports.washmhost');
       }
 
@@ -631,15 +668,16 @@
           wasm: options.wasm,
           stdout: forwardStdout,
           stderr: (bytes) => {
-            if (!disposed) term.write(bytes);
+            if (!disposed && !disposing) term.write(bytes);
             if (options.onStderr) options.onStderr(bytes);
           },
           getTtySize: () => ({ cols: term.cols, rows: term.rows }),
           setTtySize: (cols, rows) => term.resize(cols, rows),
           onExit: (code) => {
-            if (!disposed && options.showExitStatus !== false) {
+            if (!disposed && !disposing && options.showExitStatus !== false) {
               term.write(`\r\n[Process exited with code ${code}]\r\n`);
             }
+            notifyHostExit();
             if (options.onExit) options.onExit(code);
           }
         });
@@ -649,12 +687,16 @@
         }
       } catch (error) {
         startingHost = false;
-        dispose();
+        disposeImmediately();
         throw error;
       }
       startingHost = false;
       for (const data of pendingInput.splice(0)) host.pushStdin(data);
       reportResize(term, host, options.onResize, resizeState);
+    }
+
+    if (!hostExited && superDemo && typeof superDemo.powerOn === 'function') {
+      superDemo.powerOn();
     }
 
     const activeMode = superDemo && typeof superDemo.isFallback === 'function' && superDemo.isFallback()
@@ -726,7 +768,7 @@
     const flat = options.flat === true || Boolean(params && params.get('flat') === '1');
 
     if (global.__kabibiMountedBrowser && typeof global.__kabibiMountedBrowser.dispose === 'function') {
-      global.__kabibiMountedBrowser.dispose();
+      await global.__kabibiMountedBrowser.dispose();
     }
 
     const mounted = await mount({

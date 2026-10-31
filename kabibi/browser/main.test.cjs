@@ -529,6 +529,111 @@ test('super-demo updates the page title from its startup banner version', async 
   assert.equal(document.title, 'CRT Super-Demo');
 });
 
+test('super-demo powers on after startup and waits for its power-off animation before disposal', async () => {
+  const { document, window, context } = createHarness();
+  const lifecycle = [];
+  let resolvePowerOff;
+  const powerOffAnimation = new Promise((resolve) => {
+    resolvePowerOff = resolve;
+  });
+  let terminal;
+  let hostCallbacks;
+  context.KabibiBrowserSuperDemo = {
+    start() {
+      return {
+        powerOn() { lifecycle.push('power-on'); },
+        powerOff() {
+          lifecycle.push('power-off');
+          return powerOffAnimation;
+        },
+        resize() {},
+        dispose() { lifecycle.push('renderer-dispose'); }
+      };
+    }
+  };
+  const host = {
+    attachTerminal(callbacks) {
+      lifecycle.push('host-attached');
+      hostCallbacks = callbacks;
+    },
+    pushStdin() {},
+    triggerSignal() {},
+    terminate() { lifecycle.push('host-terminate'); }
+  };
+  const parent = document.createElement('div');
+  document.body.appendChild(parent);
+  const mounted = await context.KabibiBrowser.mount({
+    parent,
+    document,
+    window,
+    Terminal: class extends FakeTerminal {
+      constructor(options) {
+        super(options);
+        terminal = this;
+      }
+    },
+    FitAddon: FakeFitAddon,
+    host,
+    mode: 'super-demo'
+  });
+
+  assert.deepEqual(lifecycle, ['host-attached', 'power-on']);
+  hostCallbacks.onExit(0);
+  assert.equal(lifecycle.filter((entry) => entry === 'power-off').length, 1);
+  const disposal = mounted.dispose();
+  await Promise.resolve();
+  assert.equal(terminal.disposed, false);
+
+  resolvePowerOff();
+  await disposal;
+  assert.equal(terminal.disposed, true);
+  assert.deepEqual(lifecycle.slice(-3), ['power-off', 'renderer-dispose', 'host-terminate']);
+});
+
+test('super-demo powers off when a newly-started host exits', async () => {
+  const { document, window, context } = createHarness();
+  const lifecycle = [];
+  let hostCallbacks;
+  context.KabibiBrowserSuperDemo = {
+    start() {
+      return {
+        powerOn() { lifecycle.push('power-on'); },
+        powerOff() {
+          lifecycle.push('power-off');
+          return Promise.resolve();
+        },
+        resize() {},
+        dispose() { lifecycle.push('renderer-dispose'); }
+      };
+    }
+  };
+  const parent = document.createElement('div');
+  document.body.appendChild(parent);
+  const mounted = await context.KabibiBrowser.mount({
+    parent,
+    document,
+    window,
+    Terminal: FakeTerminal,
+    FitAddon: FakeFitAddon,
+    mode: 'super-demo',
+    wasm: 'kabibi.bat',
+    washmhost: (options) => {
+      hostCallbacks = options;
+      return Promise.resolve({
+        pushStdin() {},
+        triggerSignal() {},
+        terminate() {}
+      });
+    }
+  });
+
+  assert.deepEqual(lifecycle, ['power-on']);
+  hostCallbacks.onExit(0);
+  assert.deepEqual(lifecycle, ['power-on', 'power-off']);
+  await mounted.dispose();
+  assert.deepEqual(lifecycle, ['power-on', 'power-off', 'renderer-dispose']);
+});
+
 test('super-demo screen keyboard renders all keys and sends xterm sequences', () => {
   const { document, context } = createHarness();
   vm.runInContext(fs.readFileSync(path.join(__dirname, 'super-demo.js'), 'utf8'), context);
@@ -823,6 +928,20 @@ test('CRT reflection oscillates left-right and back-forward over thirty seconds'
   assert.ok(Math.abs(depth(30000) - 1.2) < 1e-12);
 });
 
+test('CRT power transitions clamp to an 800 ms startup and 1800 ms shutdown', () => {
+  const { context } = createHarness();
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'super-demo.js'), 'utf8'), context);
+  const superDemo = context.KabibiBrowserSuperDemo;
+
+  assert.equal(superDemo.POWER_ON_DURATION_MS, 800);
+  assert.equal(superDemo.POWER_OFF_DURATION_MS, 1800);
+  assert.equal(superDemo.calculatePowerProgress(1, 400), 0.5);
+  assert.equal(superDemo.calculatePowerProgress(1, 800), 1);
+  assert.equal(superDemo.calculatePowerProgress(3, 900), 0.5);
+  assert.equal(superDemo.calculatePowerProgress(3, 1800), 1);
+  assert.equal(superDemo.calculatePowerProgress(3, 2400), 1);
+});
+
 test('CRT capture crops the WebGL viewport rather than its unused canvas area', () => {
   const { context } = createHarness();
   vm.runInContext(fs.readFileSync(path.join(__dirname, 'super-demo.js'), 'utf8'), context);
@@ -862,7 +981,7 @@ test('CRT blur is a final composite pass with endpoints measured on curved geome
   assert.match(source, /const maxBlurPixels = 8\.0/);
   assert.match(source, /gl\.SRGB8_ALPHA8/);
   assert.match(source, /gl\.DEPTH_COMPONENT24/);
-  assert.match(source, /float blurAmount = proximity \* proximity/);
+  assert.match(source, /float blurAmount = opticalEffects \* proximity \* proximity/);
   assert.match(source, /float radius = blurAmount \* maxBlurPixels/);
   assert.match(source, /addGaussianTap\(-6\.0, 0\.011109/);
   assert.match(source, /addGaussianTap\(0\.0, 1\.0/);
@@ -877,8 +996,26 @@ test('CRT blur is a final composite pass with endpoints measured on curved geome
   assert.match(source, /screenHalfSize - vec2\(gasketHalfWidth\),\s+cornerRadius - gasketHalfWidth/);
   assert.match(source, /float pixelFootprint = max\([\s\S]*fwidth\(surfacePosition\.x\)[\s\S]*fwidth\(surfacePosition\.y\)/);
   assert.match(source, /float gasketCoverage = outerCoverage \* \(1\.0 - innerCoverage\) \* hitValid/);
-  assert.match(source, /\) \* 0\.60;\s+composite\.rgb = mix\(composite\.rgb, gasketColor, gasketCoverage\)/);
+  assert.match(
+    source,
+    /\) \* 0\.60,\s+vec3\(0\.16\)\);\s+composite\.rgb = mix\(composite\.rgb, gasketColor, gasketCoverage\)/
+  );
   assert.match(source, /uniform float lightRadius/);
+  assert.match(source, /uniform vec2 powerAnimation/);
+  assert.match(source, /uniform vec2 powerCenter/);
+  assert.match(source, /powerCenter\.x = 0\.5 \+ 0\.5 \* viewProjMatrix\[12\]/);
+  assert.match(source, /powerCenter \+ offset \/ vec2\(scaleX, scaleY\)/);
+  assert.match(source, /const POWER_ON_DURATION_MS = 800/);
+  assert.match(source, /const POWER_OFF_DURATION_MS = 1800/);
+  assert.match(source, /float embossHeight = gasketWidth \* 0\.08/);
+  assert.match(source, /float embossSlope = 0\.08 \* 3\.14159265/);
+  assert.match(source, /vec2 roundedRectInsideGradient\(/);
+  assert.match(source, /surfacePosition\.z \+= embossHeight/);
+  assert.match(source, /- embossSlope \* edgeGradient\.x/);
+  assert.match(source, /float lineHalfWidth = mix\(0\.008, 1\.12, lineProgress\)/);
+  assert.match(source, /float bandHalfHeight = mix\(0\.018, 1\.12, bandProgress\)/);
+  assert.match(source, /float scaleY = mix\(1\.0, 0\.010, verticalProgress\)/);
+  assert.match(source, /float scaleX = mix\(1\.0, 0\.010, horizontalProgress\)/);
   assert.match(source, /textureContext\.filter = 'sepia\(40%\) saturate\(1\.05\)'/);
   assert.equal(
     (source.match(/drawWarmTerminalImage\((?:viewport, targetWidth, targetHeight|viewport, textureCanvas\.width, textureCanvas\.height)\);\s*applyScanlines\(\);/g) || []).length,
