@@ -937,6 +937,16 @@ test('thick CRT glass optics compute analytical paraboloid hit, Snell refraction
 
   // Verify outward curvature reflection direction: on the left side (u = 0.12),
   // bounceUv.x > uvG.x so a left-of-letter fragment samples the letter, placing the reflection on the left.
+  const topLeftUv = { x: 0.04, y: 0.88 };
+  const topLeftRefracted = superDemo.refractThickGlassUV(topLeftUv, eye, 2.72, 1.58, false);
+  assert.ok(
+    topLeftRefracted.bounceUv.x > topLeftRefracted.uvG.x,
+    `expected top-left corner bounceUv.x (${topLeftRefracted.bounceUv.x}) > uvG.x (${topLeftRefracted.uvG.x}) so reflection appears to the left`
+  );
+  assert.ok(
+    topLeftRefracted.bounceUv.y < topLeftRefracted.uvG.y,
+    `expected top-left corner bounceUv.y (${topLeftRefracted.bounceUv.y}) < uvG.y (${topLeftRefracted.uvG.y}) so reflection appears upward`
+  );
   const leftUv = { x: 0.12, y: 0.5 };
   const leftRefracted = superDemo.refractThickGlassUV(leftUv, eye, 2.72, 1.58, false);
   assert.ok(
@@ -948,6 +958,12 @@ test('thick CRT glass optics compute analytical paraboloid hit, Snell refraction
   assert.ok(
     rightRefracted.bounceUv.x < rightRefracted.uvG.x,
     `expected right-side bounceUv.x (${rightRefracted.bounceUv.x}) < uvG.x (${rightRefracted.uvG.x}) so reflection appears to the right`
+  );
+  const leftShiftMag = Math.abs(leftRefracted.bounceUv.x - leftRefracted.uvG.x);
+  const rightShiftMag = Math.abs(rightRefracted.bounceUv.x - rightRefracted.uvG.x);
+  assert.ok(
+    leftShiftMag > rightShiftMag * 1.25,
+    `expected left-edge shift (${leftShiftMag}) > right-edge shift (${rightShiftMag}) due to ~0.6 apex`
   );
 
   // 3. Dual 3D pendulum light positions (left-close to right-far) and curved focal bounds
