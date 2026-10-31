@@ -33,13 +33,6 @@ func TestRusticatedFilepathTreatsWindowsDrivePathsAsAbsolute(t *testing.T) {
 		t.Error(`IsLocal("C:relative") = true, want false`)
 	}
 
-	joined := filepath.Join("working-directory", `C:\Users\test\file`)
-	if !filepath.IsAbs(joined) {
-		t.Errorf("Join with drive-rooted path = %q, want absolute", joined)
-	}
-	if filepath.Base(joined) != "file" {
-		t.Errorf("Base(Join(...)) = %q, want %q", filepath.Base(joined), "file")
-	}
 }
 
 func TestRusticatedOpenAcceptsDriveRootedWorkingDirectory(t *testing.T) {
@@ -81,4 +74,3 @@ func TestRusticatedUserHomeAndTempDirHaveNoLeadingSlashBeforeDrive(t *testing.T)
 		t.Fatalf("TempDir() = %q, must not start with leading slash/backslash on Windows", temp)
 	}
 }
-

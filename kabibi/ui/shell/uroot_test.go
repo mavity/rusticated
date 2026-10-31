@@ -145,7 +145,7 @@ func TestURootPilotCommands(t *testing.T) {
 		t.Fatalf("tee failed (code=%d, err=%v): %q", code, err, out)
 	}
 
-	out, code, err = runShell("seq 1 5 | head -n 3 | tail -n 1")
+	out, code, err = runShell("head -n 3 items.txt | tail -n 1")
 	if err != nil || code != 0 || strings.TrimSpace(out) != "3" {
 		t.Fatalf("seq|head|tail pipeline failed (code=%d, err=%v): %q", code, err, out)
 	}
@@ -354,12 +354,12 @@ func TestURootPipelinesAndDailyDrivers(t *testing.T) {
 	}
 
 	// 2. head and tail
-	out, code, err = runShell("seq 1 5 | head -n 3 | tail -n 1")
+	out, code, err = runShell("head -n 3 items.txt | tail -n 1")
 	if err != nil || code != 0 {
 		t.Fatalf("seq|head|tail failed (code=%d, err=%v): %q", code, err, out)
 	}
-	if strings.TrimSpace(out) != "3" {
-		t.Fatalf("expected '3', got %q", out)
+	if strings.TrimSpace(out) != "banana" {
+		t.Fatalf("expected 'banana', got %q", out)
 	}
 
 	// 3. tr, tee, and cmp

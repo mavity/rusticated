@@ -105,13 +105,20 @@ func TestSlashCopyOpensPathFormWithoutPanels(t *testing.T) {
 	copied := filepath.Join(destDir, "source.txt")
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(copied); err == nil {
-			return
+		if widget.Dialog() == nil {
+			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if _, err := os.Stat(copied); err != nil {
-		t.Fatalf("copy did not create %q: %v", copied, err)
+	if widget.Dialog() != nil {
+		t.Fatal("copy operation did not finish before timeout")
+	}
+	got, err := os.ReadFile(copied)
+	if err != nil {
+		t.Fatalf("read copied file %q: %v", copied, err)
+	}
+	if string(got) != "copy me" {
+		t.Fatalf("copied contents = %q, want %q", got, "copy me")
 	}
 }
 

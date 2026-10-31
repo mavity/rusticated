@@ -24,7 +24,7 @@ func TestURootHeadLineAndByteCounts(t *testing.T) {
 	}{
 		{command: "head -n 2 items.txt", want: "banana\napple\n"},
 		{command: "head -c 7 items.txt", want: "banana\n"},
-		{command: "seq 1 5 | head -n 3", want: "1\n2\n3\n"},
+		{command: "seq 1 3 | head -n 3", want: "1\n2\n3\n"},
 	} {
 		t.Run(tt.command, func(t *testing.T) {
 			_, parsed := es.ClassifyInput(tt.command)

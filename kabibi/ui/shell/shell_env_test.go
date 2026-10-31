@@ -2,8 +2,9 @@ package shell
 
 import (
 	"os"
-	"runtime"
 	"testing"
+
+	"github.com/mavity/rusticated/platform"
 )
 
 func TestLookupEnvValue(t *testing.T) {
@@ -120,15 +121,16 @@ func TestExpandWindowsEnvVars(t *testing.T) {
 }
 
 func TestIsWindowsLikeEnv(t *testing.T) {
+	hostIsWindows := platform.HostOS() == "windows"
 	tests := []struct {
 		name string
 		env  map[string]string
 		want bool
 	}{
 		{
-			name: "empty env uses runtime.GOOS",
+			name: "empty env uses host platform",
 			env:  map[string]string{},
-			want: runtime.GOOS == "windows",
+			want: hostIsWindows,
 		},
 		{
 			name: "explicit GOOS=windows",
@@ -136,9 +138,9 @@ func TestIsWindowsLikeEnv(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "on windows, env override doesn't matter (runtime.GOOS checked first)",
+			name: "host platform takes precedence over GOOS override",
 			env:  map[string]string{"GOOS": "linux"},
-			want: runtime.GOOS == "windows", // Will be true on Windows
+			want: hostIsWindows,
 		},
 		{
 			name: "case-insensitive GOOS",

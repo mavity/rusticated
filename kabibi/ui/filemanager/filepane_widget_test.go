@@ -4,13 +4,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/input"
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
+	"github.com/mavity/rusticated/platform"
 	"golang.org/x/text/number"
 )
 
@@ -221,7 +221,7 @@ func TestFilePaneWidgetEnterFileCallsCallback(t *testing.T) {
 func TestIsExecutableFileUsesPlatformRules(t *testing.T) {
 	dir := t.TempDir()
 
-	if runtime.GOOS == "windows" {
+	if platform.HostOS() == "windows" {
 		t.Setenv("PATHEXT", ".EXE;.COM")
 
 		executable := filepath.Join(dir, "tool.exe")

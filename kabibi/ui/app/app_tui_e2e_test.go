@@ -969,7 +969,8 @@ func TestAppTUI_BluePanels_CtrlO_HiddenConveyorAndFarKeyRouting(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if got := filepath.Clean(appWidget.Shell().Dir()); got != filepath.Clean(workDir) {
-		t.Fatalf("Tab to right pane did not sync shell cwd to %q: got %q", workDir, got)
+		t.Fatalf("Tab to right pane did not sync shell cwd to %q: got %q (active=%d left=%q right=%q)",
+			workDir, got, appWidget.panels.ActivePaneIndex(), appWidget.panels.Left.Dir(), appWidget.panels.Right.Dir())
 	}
 
 	// 7. Exit cleanly
