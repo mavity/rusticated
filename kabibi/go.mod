@@ -6,7 +6,6 @@ require (
 	ai v0.0.0-00010101000000-000000000000
 	dload v0.0.0-00010101000000-000000000000
 	github.com/adrianliechti/go-git v0.0.0-20260927203556-92d90da1a035
-	mohabbat v0.0.0
 	github.com/alecthomas/chroma/v2 v2.27.0
 	github.com/atotto/clipboard v0.1.4
 	github.com/charmbracelet/glamour v1.0.0
@@ -23,6 +22,7 @@ require (
 	github.com/u-root/u-root v0.16.0
 	golang.org/x/crypto v0.56.0
 	golang.org/x/text v0.41.0
+	mohabbat v0.0.0
 	mvdan.cc/sh/v3 v3.14.1
 	pty v0.0.0-00010101000000-000000000000
 )
@@ -83,6 +83,7 @@ require (
 	github.com/skeema/knownhosts v1.3.1 // indirect
 	github.com/u-root/cpuid v0.0.1-0.20250320140348-cc5fe81d966c // indirect
 	github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701 // indirect
+	github.com/ulikunitz/xz v0.5.15 // indirect
 	github.com/xanzy/ssh-agent v0.3.3 // indirect
 	github.com/xo/terminfo v1.2.0 // indirect
 	github.com/yuin/goldmark v1.7.13 // indirect
@@ -98,17 +99,17 @@ require (
 replace (
 	ai => ../ai
 	dload => ../dload
-mohabbat => ..
 	github.com/atotto/clipboard => ../mohabbat/rusticated-jit/github.com/atotto/clipboard
 	github.com/charmbracelet/x/term => ../mohabbat/rusticated-jit/github.com/charmbracelet/x/term
 	github.com/cyphar/filepath-securejoin => ../mohabbat/rusticated-jit/github.com/cyphar/filepath-securejoin
 	github.com/go-git/go-git/v5 => ../mohabbat/rusticated-jit/github.com/go-git/go-git/v5
 	github.com/mattn/go-isatty => ../mohabbat/rusticated-jit/github.com/mattn/go-isatty
-	github.com/muesli/termenv => ../mohabbat/rusticated-jit/github.com/muesli/termenv
 	github.com/mavity/rusticated/platform => ../platform
+	github.com/muesli/termenv => ../mohabbat/rusticated-jit/github.com/muesli/termenv
 	github.com/u-root/u-root => ../u-root
 	golang.org/x/sys => ../mohabbat/rusticated-jit/golang.org/x/sys
 	golang.org/x/term => ../mohabbat/rusticated-jit/golang.org/x/term
+	mohabbat => ..
 	mvdan.cc/sh/v3 => ../mohabbat/rusticated-jit/mvdan.cc/sh/v3
 	pty => ../mohabbat/pty
 )
