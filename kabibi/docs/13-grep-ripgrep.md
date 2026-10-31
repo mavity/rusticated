@@ -10,20 +10,14 @@ with no runtime dependency on host utilities.
 
 Current implementation status:
 
-- `grep` is registered in Kabibi and supports shared BRE/ERE/fixed/Perl
-  matching, common selection and output flags, streaming long records,
-  recursive selection, context, NUL-delimited records, and per-file counts.
-  Binary-file detection, locale semantics, and several GNU/BSD edge cases
-  remain incomplete.
-- `rg` is registered in Kabibi and supports shared regex matching, recursive
-  traversal, basic `.gitignore`/`.ignore`/`.rgignore` rules, glob and common
-  type filters, context and count/list output, JSON events, and NUL records.
-  Global Git excludes, full ignore negation semantics, compressed inputs,
-  multiline (`-U`) matching, and several ripgrep output and filtering options
-  remain incomplete.
+- `grep` is registered in Kabibi and supports shared BRE/ERE/fixed/Perl matching, common selection and output flags, streaming long records, recursive selection, context, NUL-delimited records, and per-file counts. Binary-file detection plus `-a`/`-I` and `--binary-files` modes are implemented; locale semantics and several GNU/BSD edge cases remain incomplete. Binary preflight on non-seekable input buffers the stream.
+- `rg` is registered in Kabibi and supports shared regex matching, recursive traversal, basic `.gitignore`/`.ignore`/`.rgignore` rules, glob and common type filters, context and count/list output, JSON events, and NUL records. Search-zip decompression, multiline (`-U`) search, basic stats, case-insensitive globs, global Git excludes, `.git/info/exclude`, and leading PCRE lookaround assertions have been added. Full ignore/JSON/statistics parity and several ripgrep output and filtering options remain incomplete.
+- `sed`'s `e` and `s///e` now use Kabibi's injected in-process shell runner rather than starting a host shell; broad environment, redirection, and GNU behavior comparisons remain outstanding.
 - The requested 99% practical-compatibility target has not been demonstrated.
-  GNU grep, macOS BSD grep, and upstream ripgrep differential runs are still
-  required before claiming that level of parity.
+  A small differential corpus now passes against GNU grep 3.11, GNU sed 4.9,
+  and ripgrep 15.0.0 on Windows/ARM64 (GNU references through WSL). This is
+  only a baseline, not evidence of 99% parity; macOS BSD grep, Linux, and
+  Rusticated runtime comparisons remain outstanding.
 
 Keep both commands reentrant through `Main(ctx, ioEnv, args...)`; use the
 provided streams and `ioEnv.ResolvePath`, honor cancellation, and preserve the
@@ -133,10 +127,11 @@ repository's Rusticated Go async-I/O and custom-sysroot build model.
 
 ### 7. Complete ripgrep's everyday CLI and output
 
-- Implement `-n`, `--column`, `-H`/`-h`, `-l`/`-L`, `-c`, `--count-matches`,
-  `-o`, `-q`, `-m`, `-A`/`-B`/`-C`, and `--context-separator`.
-- Implement `--files`, `--files-with-matches`, `--files-without-match`,
-  `--no-heading`, `--null`, `--sort`, `--stats`, and `--json`.
+- Implement `-n`, `--column`, `-H`/`-h`, `-l`/`--files-with-matches`,
+  `--files-without-match`, `-c`, `--count-matches`, `-o`, `-q`, `-m`,
+  `-A`/`-B`/`-C`, and `--context-separator`.
+- Implement `--files`, `--no-heading`, `--null`, `--sort`, `--stats`, and
+  `--json`.
 - Implement `--null-data`/`-0` for NUL-delimited input records.
 - Match ripgrep's filename-prefix defaults for stdin, one file, multiple files,
   and recursive paths. Support `--color=auto|always|never`, `NO_COLOR`, and
@@ -187,8 +182,28 @@ and [printing only matches](https://stackoverflow.com/questions/1546711/can-grep
   search tests under that runtime so file I/O and cancellation use the custom
   sysroot rather than host-only behavior.
 
+Current differential baseline: `u-root/cmds/core/searchcompat/differential_test.go`
+compares stdout, stderr, status, and observed files. The strict run passed 8 GNU
+grep cases (basic/fixed/inverted/only-matching/quiet/no-match/multiple-file/
+NUL-record), 5 GNU sed cases (substitution/selection/deletion/`Q` status/
+in-place backup), and 10 ripgrep cases (stdin/file defaults, fixed/line-number/
+only-matching/multiline/recursive ignore-hidden, JSON events, and stats).
+References were GNU grep 3.11 and GNU sed 4.9 through WSL, plus ripgrep 15.0.0.
+Volatile elapsed-time fields are normalized; all other compared output is exact.
+This intentionally small corpus leaves the exhaustive matrix above open.
+
 ### 10. Measure performance and close the plan
 
+- A native Go 1.27.1 Windows/ARM64 comparison benchmark was added at
+  `../../mohabbat/regast/compare_benchmark_test.go`. It compares compiled
+  `regast` and standard-library `FindAllIndex` on prefix hits, rune-scan misses,
+  and non-one-pass scans at 32 B, 4 KiB, and 1 MiB. Three 1-second samples
+  indicate regast is about 1.4–2.1x slower on short inputs and about 15% slower
+  on 1 MiB scan-heavy inputs; prefix-hit results at 1 MiB were noisy. The
+  no-match rune scan allocated zero bytes in both engines. This is an engine
+  baseline, not a full grep/rg or Rusticated benchmark; compilation is excluded,
+  and no CPU profile was collected, so the exact source of the overhead is
+  unconfirmed.
 - Benchmark literal and regex searches over small files, large files, long
   lines, many files, and large ignored trees; record throughput, allocations,
   and peak memory against native references.

@@ -796,11 +796,12 @@ func TestURootCommand_RG(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	code := runner(context.Background(), core.IO{
-		Dir:    dir,
-		Stdin:  strings.NewReader(""),
-		Stdout: &stdout,
-		Stderr: &stderr,
-	}, "-F", "needle", "sample.txt")
+		Dir:              dir,
+		Stdin:            strings.NewReader(""),
+		Stdout:           &stdout,
+		Stderr:           &stderr,
+		StdoutIsTerminal: true,
+	}, "-F", "--color=never", "needle", "sample.txt")
 	if code != 0 || stderr.String() != "" || stdout.String() != "sample.txt:1:needle\n" {
 		t.Fatalf("rg integration: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}

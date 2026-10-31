@@ -149,6 +149,13 @@ func TestURoot_Band1B_TextProcessing(t *testing.T) {
 	linesFile := filepath.Join(dir, "lines.txt")
 	_ = os.WriteFile(linesFile, []byte("one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\n"), 0o644)
 
+	t.Run("sed_execute_command", func(t *testing.T) {
+		out, code, err := run(`printf 'needle\n' | sed -n "s/needle/printf computed/e;p"`)
+		if err != nil || code != 0 || strings.TrimSpace(out) != "computed" {
+			t.Errorf("sed execute substitution failed: code=%d out=%q err=%v", code, out, err)
+		}
+	})
+
 	t.Run("head", func(t *testing.T) {
 		out, code, _ := run("head -n 3 lines.txt")
 		if code != 0 || strings.TrimSpace(out) != "one\ntwo\nthree" {
