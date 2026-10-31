@@ -84,7 +84,7 @@ type commandSubmitAnimation struct {
 }
 
 func getVer() string {
-	ver := "0.8.20"
+	ver := "0.8.21"
 	if info, ok := debug.ReadBuildInfo(); ok {
 		if info.Main.Version != "devel" && info.Main.Version != "(devel)" {
 			ver = info.Main.Version
