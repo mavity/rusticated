@@ -268,8 +268,9 @@ A command checkbox `[x]` may **only** be ticked when all 5 criteria are met:
   - `go run . kabibi -r -c "seq -s , 1 -1 -3"` — printed `1,0,-1,-2,-3`.
   - `go run . kabibi -r -c "seq -w -10 2 -2"` — retained zero-padding and printed `-10`, `-08`, `-06`, `-04`, `-02`.
 - [ ] **`sed`** (`cmds/core/sed`): Implement a reentrant, cross-platform stream editor with broad POSIX and GNU sed behavior; expose `Main(ctx, ioEnv, args...)`, use `ioEnv` for streams and resolved paths, honor cancellation, and never depend on a host `sed`. Use [uutils/sed](https://github.com/uutils/sed) as a permissively licensed Rust reference and GNU sed's manual/test suite as the compatibility oracle; uutils currently implements POSIX features while GNU compatibility and extensions remain ongoing, so do not treat it as GNU-complete.
-  - `go -C u-root test ./cmds/core/sed -count=1` — passing package suite covers parser/diagnostics, command execution, streams, files, cancellation, and reentrancy.
-  - `go -C kabibi test ./ui/shell -run '^TestURoot_Band1B_TextProcessing$/sed$' -count=1` — integration exercises stdin and files, flags/scripts, and `sed` in pipelines.
+  - The command is implemented in `u-root/cmds/core/sed` and registered in Kabibi's `urootRegistry`; compatibility work below remains open.
+  - `go -C u-root test ./cmds/core/sed -count=1` — passing package suite covers regex substitution, ranges/branches, pattern and hold spaces, multiline/NUL input, GNU options, file I/O/in-place edits, and invalid scripts.
+  - `go -C kabibi test ./ui/shell -run '^TestURootSedCommand$' -count=1` — passing shell integration exercises `sed` in a pipeline.
   - GNU differential suite: run the upstream GNU sed tests through a documented compatibility harness; record pass/fail/skip counts and investigate each failure rather than claiming full compatibility from package tests alone.
   - Cross-platform differential probes compare matching GNU sed results for basic and extended regular expressions, escaped delimiters, backreferences, replacement `&`, and first/global/nth substitutions.
   - Script-language probes cover `-e`/`-f`, numeric and regex addresses, address ranges and negation, `-n`, `p`, `d`, `q`/`Q`, labels and branches, and pattern/hold-space commands (`h`, `H`, `g`, `G`, `x`).
