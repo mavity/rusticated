@@ -1017,7 +1017,7 @@
       gl.bindFramebuffer(gl.FRAMEBUFFER, blurFbo);
       gl.viewport(0, 0, fboWidth, fboHeight);
       gl.useProgram(blurHProgram);
-      bindBlurUniforms(blurHUniforms, sceneColorTex, 1.0, 0.0);
+      bindBlurUniforms(blurHUniforms, sceneColorTex, 1.0, 0.0, lightPos);
       gl.bindVertexArray(quadVao);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
 
@@ -1025,7 +1025,7 @@
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.viewport(0, 0, fboWidth, fboHeight);
       gl.useProgram(blurVProgram);
-      bindBlurUniforms(blurVUniforms, blurColorTex, 0.0, 1.0);
+      bindBlurUniforms(blurVUniforms, blurColorTex, 0.0, 1.0, lightPos);
       gl.bindVertexArray(quadVao);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
       gl.bindVertexArray(null);
@@ -1033,7 +1033,7 @@
       requestFrame();
     }
 
-    function bindBlurUniforms(uniforms, colorTexture, dirX, dirY) {
+    function bindBlurUniforms(uniforms, colorTexture, dirX, dirY, lightPos) {
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, colorTexture);
       gl.uniform1i(uniforms.sceneColor, 0);
@@ -1048,6 +1048,11 @@
       gl.uniform1f(uniforms.farthestDistance, farthestDistance);
       gl.uniform1f(uniforms.maxBlurPixels, maxBlurPixels);
       gl.uniform1f(uniforms.opticalEffects, opticalEffects);
+      gl.uniformMatrix4fv(uniforms.viewMatrix, false, viewMatrix);
+      gl.uniform2f(uniforms.screenSize, screenWidth, screenHeight);
+      gl.uniform3f(uniforms.cameraPos, cameraEye.x, cameraEye.y, cameraEye.z);
+      gl.uniform3f(uniforms.lightPos, lightPos.x, lightPos.y, lightPos.z);
+      gl.uniform1f(uniforms.lightRadius, lightPos.radius);
     }
 
     function resize() {
@@ -1761,6 +1766,11 @@
         uniform vec2 resolution;
         uniform vec2 direction;
         uniform mat4 projectionMatrixInverse;
+        uniform mat4 viewMatrix;
+        uniform vec2 screenSize;
+        uniform vec3 cameraPos;
+        uniform vec3 lightPos;
+        uniform float lightRadius;
         uniform vec3 focalPointView;
         uniform float nearestDistance;
         uniform float farthestDistance;
@@ -1782,6 +1792,13 @@
             value * 12.92,
              vec3(lessThanEqual(value, vec3(0.0031308)))
           );
+        }
+
+        float roundedRectInsideDistance(vec2 position, vec2 halfSize, float cornerRadius) {
+          vec2 cornerOffset = abs(position) - (halfSize - vec2(cornerRadius));
+          float outside = length(max(cornerOffset, vec2(0.0)));
+          float inside = min(max(cornerOffset.x, cornerOffset.y), 0.0);
+          return cornerRadius - (outside + inside);
         }
 
         void addGaussianTap(
@@ -1840,7 +1857,99 @@
           addGaussianTap(5.0, 0.043937, texel, radius, colorSum, weightSum);
           addGaussianTap(6.0, 0.011109, texel, radius, colorSum, weightSum);
           vec4 blurred = colorSum / max(weightSum, 0.0001);
-          fragColor = mix(source, blurred, step(0.0001, weightSum));
+          vec4 composite = mix(source, blurred, step(0.0001, weightSum));
+          if (direction.y > 0.5 && opticalEffects > 0.5) {
+            vec2 ndc = vUv * 2.0 - 1.0;
+            vec4 viewRayH = projectionMatrixInverse * vec4(ndc, -1.0, 1.0);
+            vec3 viewRay = normalize(viewRayH.xyz / viewRayH.w);
+            vec3 worldRay = normalize(transpose(mat3(viewMatrix)) * viewRay);
+
+            float curveAx = 0.96 / (screenSize.x * screenSize.x);
+            float curveAy = 0.6912 / (screenSize.y * screenSize.y);
+            float rayA = curveAx * worldRay.x * worldRay.x + curveAy * worldRay.y * worldRay.y;
+            float rayB = worldRay.z +
+              2.0 * (curveAx * cameraPos.x * worldRay.x + curveAy * cameraPos.y * worldRay.y);
+            float rayC = cameraPos.z +
+              curveAx * cameraPos.x * cameraPos.x + curveAy * cameraPos.y * cameraPos.y;
+            float discriminant = rayB * rayB - 4.0 * rayA * rayC;
+            float rootDiscriminant = sqrt(max(discriminant, 0.0));
+            float root0 = (-rayB - rootDiscriminant) / (2.0 * max(rayA, 0.00000001));
+            float root1 = (-rayB + rootDiscriminant) / (2.0 * max(rayA, 0.00000001));
+            float quadraticT = root0 > 0.00001 ? root0 : root1;
+            float linearT = -rayC / (abs(rayB) > 0.00000001 ? rayB : 1.0);
+            float useQuadratic = step(0.00000001, abs(rayA));
+            float hitT = mix(linearT, quadraticT, useQuadratic);
+            float quadraticValid = step(0.0, discriminant) * step(0.00001, quadraticT);
+            float linearValid = step(0.00000001, abs(rayB)) * step(0.00001, linearT);
+            float hitValid = mix(linearValid, quadraticValid, useQuadratic);
+
+            vec3 surfacePosition = cameraPos + worldRay * hitT;
+            float pixelFootprint = max(
+              fwidth(surfacePosition.x) + fwidth(surfacePosition.y),
+              0.000001
+            );
+            float gasketWidth = min(screenSize.x, screenSize.y) * 0.024;
+            float gasketHalfWidth = gasketWidth * 0.5;
+            float cornerRadius = gasketWidth * 0.90;
+            vec2 screenHalfSize = screenSize * 0.5;
+            float outerInsideDistance = roundedRectInsideDistance(
+              surfacePosition.xy,
+              screenHalfSize + vec2(gasketHalfWidth),
+              cornerRadius + gasketHalfWidth
+            );
+            float innerInsideDistance = roundedRectInsideDistance(
+              surfacePosition.xy,
+              screenHalfSize - vec2(gasketHalfWidth),
+              cornerRadius - gasketHalfWidth
+            );
+            float outerCoverage = clamp(
+              0.5 + outerInsideDistance / pixelFootprint,
+              0.0,
+              1.0
+            );
+            float innerCoverage = clamp(
+              0.5 + innerInsideDistance / pixelFootprint,
+              0.0,
+              1.0
+            );
+            float gasketCoverage = outerCoverage * (1.0 - innerCoverage) * hitValid;
+            if (gasketCoverage > 0.0) {
+              vec3 surfaceNormal = normalize(vec3(
+                2.0 * curveAx * surfacePosition.x,
+                2.0 * curveAy * surfacePosition.y,
+                1.0
+              ));
+              vec3 toLight = lightPos - surfacePosition;
+              float lightDistanceSquared = max(dot(toLight, toLight), 0.01);
+              float lightDistance = sqrt(lightDistanceSquared);
+              vec3 lightDirection = toLight / lightDistance;
+              vec3 viewDirection = normalize(cameraPos - surfacePosition);
+              vec3 halfDirection = normalize(lightDirection + viewDirection);
+              float ndotl = max(dot(surfaceNormal, lightDirection), 0.0);
+              float ndotv = max(dot(surfaceNormal, viewDirection), 0.001);
+              float ndoth = max(dot(surfaceNormal, halfDirection), 0.0);
+              float vdoth = max(dot(viewDirection, halfDirection), 0.0);
+              float roughness = clamp(0.36 + 0.10 * lightRadius / lightDistance, 0.36, 0.55);
+              float alpha = roughness * roughness;
+              float alphaSquared = alpha * alpha;
+              float distributionDenominator = ndoth * ndoth * (alphaSquared - 1.0) + 1.0;
+              float distribution = alphaSquared /
+                (3.14159265 * distributionDenominator * distributionDenominator);
+              float geometryK = (roughness + 1.0) * (roughness + 1.0) / 8.0;
+              float geometryLight = ndotl / (ndotl * (1.0 - geometryK) + geometryK);
+              float geometryView = ndotv / (ndotv * (1.0 - geometryK) + geometryK);
+              float fresnel = 0.06 + 0.94 * pow(1.0 - vdoth, 5.0);
+              float attenuation = 18.0 / (lightDistanceSquared + 2.2);
+              float specular = distribution * geometryLight * geometryView * fresnel /
+                max(4.0 * ndotl * ndotv, 0.001);
+              vec3 gasketColor = (
+                vec3(0.055, 0.060, 0.066) * (0.38 + 0.70 * ndotl * attenuation) +
+                vec3(0.88, 0.94, 1.0) * specular * attenuation * 5.0
+              ) * 0.60;
+              composite.rgb = mix(composite.rgb, gasketColor, gasketCoverage);
+            }
+          }
+          fragColor = composite;
           OUTPUT_COLOR
         }
       `;
@@ -1853,6 +1962,11 @@
         'resolution',
         'direction',
         'projectionMatrixInverse',
+        'viewMatrix',
+        'screenSize',
+        'cameraPos',
+        'lightPos',
+        'lightRadius',
         'focalPointView',
         'nearestDistance',
         'farthestDistance',

@@ -869,6 +869,16 @@ test('CRT blur is a final composite pass with endpoints measured on curved geome
   assert.match(source, /addGaussianTap\(6\.0, 0\.011109/);
   assert.doesNotMatch(source, /for \(int tap = -6; tap <= 6; tap\+\+\)/);
   assert.match(source, /uniform vec2 direction/);
+  assert.match(source, /float roundedRectInsideDistance\(vec2 position, vec2 halfSize, float cornerRadius\)/);
+  assert.match(source, /float gasketWidth = min\(screenSize\.x, screenSize\.y\) \* 0\.024/);
+  assert.match(source, /float gasketHalfWidth = gasketWidth \* 0\.5/);
+  assert.match(source, /float cornerRadius = gasketWidth \* 0\.90/);
+  assert.match(source, /screenHalfSize \+ vec2\(gasketHalfWidth\),\s+cornerRadius \+ gasketHalfWidth/);
+  assert.match(source, /screenHalfSize - vec2\(gasketHalfWidth\),\s+cornerRadius - gasketHalfWidth/);
+  assert.match(source, /float pixelFootprint = max\([\s\S]*fwidth\(surfacePosition\.x\)[\s\S]*fwidth\(surfacePosition\.y\)/);
+  assert.match(source, /float gasketCoverage = outerCoverage \* \(1\.0 - innerCoverage\) \* hitValid/);
+  assert.match(source, /\) \* 0\.60;\s+composite\.rgb = mix\(composite\.rgb, gasketColor, gasketCoverage\)/);
+  assert.match(source, /uniform float lightRadius/);
   assert.match(source, /textureContext\.filter = 'sepia\(40%\) saturate\(1\.05\)'/);
   assert.equal(
     (source.match(/drawWarmTerminalImage\((?:viewport, targetWidth, targetHeight|viewport, textureCanvas\.width, textureCanvas\.height)\);\s*applyScanlines\(\);/g) || []).length,
@@ -1157,4 +1167,3 @@ test('bootFromGuest loads @xterm/addon-unicode-graphemes@0.4.0 and activates 15-
 
   mounted.dispose();
 });
-
