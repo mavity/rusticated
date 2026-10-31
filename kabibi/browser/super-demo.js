@@ -1508,7 +1508,7 @@
           // Tall window/light-bank metric: solid inner core with a much wider, softer falloff blur around it
           float bodyX = 1.0 - smoothstep(0.28, 1.95, abs(normXY.x));
           float bodyY = 1.0 - smoothstep(0.45, 1.85, abs(normXY.y));
-          float windowBar = exp(-0.5 * pow((normXY.y - 0.55) / 0.12, 2.0)) * bodyX;
+          float windowBar = exp(-0.5 * pow((normXY.y - 0.45) / 0.12, 2.0)) * bodyX;
           float solidPanelBody = bodyX * bodyY;
           float wideFalloffBlur = (1.0 - smoothstep(0.10, 2.75, length(normXY * vec2(0.70, 0.52)))) * 0.52;
 

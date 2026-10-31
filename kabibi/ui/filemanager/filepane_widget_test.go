@@ -791,6 +791,38 @@ func TestDualPaneWidgetLayoutHasSingleDividerColumn(t *testing.T) {
 			t.Fatalf("right border next to divider at x=%d,y=%d want %q, got %#v", dp.Right.X, y, wantSide, cell)
 		}
 	}
+
+	rendered, _, _, err := terminal.NewTerminal(dp.Width, dp.Height).RenderANSIForComposition(
+		dp.Render(Rect{W: dp.Width, H: dp.Height}, RenderContext{}),
+		dp.Width,
+		dp.Height,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for y := 0; y < dp.Height; y++ {
+		wantDivider := "│"
+		wantSide := " "
+		if y == 0 {
+			wantDivider = "┬"
+			wantSide = "─"
+		} else if y == dp.Height-3 {
+			wantDivider = "┼"
+			wantSide = "─"
+		} else if y == dp.Height-1 {
+			wantDivider = "┴"
+			wantSide = "─"
+		}
+		if got := rendered.Get(dividerX, y).Grapheme; got != wantDivider {
+			t.Errorf("rendered divider at x=%d,y=%d = %q, want %q", dividerX, y, got, wantDivider)
+		}
+		if got := rendered.Get(dividerX-1, y).Grapheme; got != wantSide {
+			t.Errorf("rendered left junction at x=%d,y=%d = %q, want %q", dividerX-1, y, got, wantSide)
+		}
+		if got := rendered.Get(dividerX+1, y).Grapheme; got != wantSide {
+			t.Errorf("rendered right junction at x=%d,y=%d = %q, want %q", dividerX+1, y, got, wantSide)
+		}
+	}
 }
 
 func TestDualPaneWidgetRoutesKeysToActiveChild(t *testing.T) {
