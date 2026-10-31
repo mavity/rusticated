@@ -1254,7 +1254,6 @@ type DualPaneWidget struct {
 	Y      int
 
 	activePane int // 0=left, 1=right
-	compositor *terminal.Terminal
 }
 
 func NewDualPaneWidget() *DualPaneWidget {
@@ -1325,49 +1324,27 @@ func (w *DualPaneWidget) Render(r Rect, ctx RenderContext) string {
 	if r.W > 0 || r.H > 0 {
 		w.Layout(r)
 	}
-	if w.compositor == nil {
-		w.compositor = terminal.NewTerminal(1, 1)
-	}
-	buf := w.renderBuf()
-	if w.Left != nil {
-		leftANSI := w.Left.Render(
-			Rect{X: w.Left.X, Y: w.Left.Y, W: w.Left.Width, H: w.Left.Height},
-			ctx.ForChild(ctx.Focused && w.activePane == 0),
-		)
-		ctx.CompositeANSI(&buf, w.compositor, terminal.Rect{
-			X: w.Left.X - w.X, Y: w.Left.Y - w.Y, W: w.Left.Width, H: w.Left.Height,
-		}, leftANSI)
-	}
-	if w.Right != nil {
-		rightANSI := w.Right.Render(
-			Rect{X: w.Right.X, Y: w.Right.Y, W: w.Right.Width, H: w.Right.Height},
-			ctx.ForChild(ctx.Focused && w.activePane == 1),
-		)
-		ctx.CompositeANSI(&buf, w.compositor, terminal.Rect{
-			X: w.Right.X - w.X, Y: w.Right.Y - w.Y, W: w.Right.Width, H: w.Right.Height,
-		}, rightANSI)
-	}
-	return ui.ANSIFrame(buf, CursorPos{})
+	return ui.ANSIFrame(w.renderBuf(ctx.Focused), CursorPos{})
 }
 
 func (w *DualPaneWidget) RenderBuf() CellBuf {
-	return w.renderBuf()
+	return w.renderBuf(false)
 }
 
-func (w *DualPaneWidget) renderBuf() CellBuf {
+func (w *DualPaneWidget) renderBuf(focused bool) CellBuf {
 	buf := NewCellBuf(w.Width, w.Height)
 	if w == nil || w.Width <= 0 || w.Height <= 0 {
 		return buf
 	}
 	buf.Fill(Rect{X: 0, Y: 0, W: w.Width, H: w.Height}, makeCell(' ', colorWhite, colorBlue, false))
 	if w.Left != nil {
-		leftBuf := w.Left.renderBuf(false)
+		leftBuf := w.Left.renderBuf(focused && w.activePane == 0)
 		if leftBuf.Width > 0 && leftBuf.Height > 0 {
 			buf.Blit(leftBuf, w.Left.X-w.X, w.Left.Y-w.Y)
 		}
 	}
 	if w.Right != nil {
-		rightBuf := w.Right.renderBuf(false)
+		rightBuf := w.Right.renderBuf(focused && w.activePane == 1)
 		if rightBuf.Width > 0 && rightBuf.Height > 0 {
 			buf.Blit(rightBuf, w.Right.X-w.X, w.Right.Y-w.Y)
 		}
