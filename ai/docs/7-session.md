@@ -52,11 +52,11 @@ If the user asks `"Name a bridge in Paris"` and token 1 is `"Pont"`, `"PONT"` im
 2. **Explicit `GOAL:` Check vs. Direct Default:**
 * **If `strings.HasPrefix(upper, "GOAL:")`:**
 * Set `directMode = false`.
-* Strip `"GOAL:"` (and leading spaces), call `streamer.StartStage("goal")`, and feed the remaining text into `streamer.Feed(...)`.
+* Strip `"GOAL:"` (and leading spaces) and record the remaining text as the goal.
 
 
 * **Otherwise (`DIRECT:` or No Prefix):**
-* Set `directMode = true` and call `streamer.Wipe()`.
+* Set `directMode = true`.
 * If `strings.HasPrefix(upper, "DIRECT:")`, strip `"DIRECT:"` and leading spaces.
 * Otherwise (no prefix), keep `trimmed` intact so the first word is never clipped.
 * Emit the text immediately via `OnContent` and record it into `fullDirect`.
@@ -157,9 +157,7 @@ Replace `out io.Writer` with two helper methods `s.emitFeedback(text string)` an
 
 | Callback | Purpose | What Flows Through It |
 | --- | --- | --- |
-| **`OnFeedback`** | **Impermanent / Status Output** | • `liveStreamer` stage snippets (`[goal] …`, `[steps] …`, `[work] …`) and `\r` + space wipes<br>
-
-<br>• Live tool execution progress passed to `Tool.Execute` (plus trailing `\n`)<br>
+| **`OnFeedback`** | **Impermanent / Status Output** | • Live tool execution progress passed to `Tool.Execute` (plus trailing `\n`)<br>
 
 <br>• Compaction status badges (`🗜️ 4200:1150\n`) |
 | **`OnContent`** | **Permanent Spoken Answer** | • Streamed tokens from Stage 1 `DIRECT:` / unprefixed fast-path<br>
@@ -168,8 +166,7 @@ Replace `out io.Writer` with two helper methods `s.emitFeedback(text string)` an
 
 <br>• Trailing `\n` when `Verbose` is enabled |
 
-* **`liveStreamer` Adaptation:** `liveStreamer` takes `feedback LogFeedback` instead of `io.Writer`. `StartStage`, `Feed`, and `Wipe` emit their strings (`"[goal] "`, sanitized token runes, `"…"`, and `"\r     \r"`) directly through `feedback`.
-* Right before the first spoken token is emitted in Stage 1 (fast-path) or Stage 7 (Convergence), `streamer.Wipe()` sends the final `\r<spaces>\r` through `OnFeedback`, and all answer tokens flow through `OnContent`.
+* Spoken answer tokens flow through `OnContent`.
 
 ### 4. Exported `ai.Session` API & Migration Checklist
 

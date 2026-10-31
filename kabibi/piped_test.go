@@ -165,18 +165,23 @@ func TestRunPipedReader_SettingsErrorIncludesAIConfigPath(t *testing.T) {
 }
 
 func TestRunPipedReader_ModelUsesTextSetupPrompt(t *testing.T) {
+	t.Setenv("KABIBI_CONFIG_DIR", t.TempDir())
+
 	es, err := shell.NewExecutionSession(t.TempDir())
 	if err != nil {
 		t.Fatalf("NewExecutionSession: %v", err)
 	}
 	var stdout, stderr bytes.Buffer
 	runner := &pipedAIRunner{}
-	code := runPipedReader(context.Background(), strings.NewReader("/model\n3\n"), &stdout, &stderr, cliOptions{}, es, runner)
+	code := runPipedReader(context.Background(), strings.NewReader("/model\n999999\n"), &stdout, &stderr, cliOptions{}, es, runner)
 	if code != 1 {
-		t.Fatalf("runPipedReader() = %d, want canceled setup status 1; stderr=%q", code, stderr.String())
+		t.Fatalf("runPipedReader() = %d, want setup selection error status 1; stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Choose where AI requests should run.") {
-		t.Fatalf("stdout = %q, want the text AI setup prompt", stdout.String())
+	if !strings.Contains(stdout.String(), "Choose an AI model") {
+		t.Fatalf("stdout = %q, want the current text AI model prompt", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "invalid choice") {
+		t.Fatalf("stderr = %q, want invalid text selection error", stderr.String())
 	}
 	if len(runner.prompts) != 0 {
 		t.Fatalf("model selection was routed to AI: %v", runner.prompts)

@@ -717,7 +717,7 @@ func TestURoot_Band1C_FileAndDirOps(t *testing.T) {
 		f := filepath.Join(dir, "perm.txt")
 		_ = os.WriteFile(f, []byte("perm"), 0o644)
 
-		_, code, _ := run("chmod 0755 perm.txt")
+		_, code, _ := run("chmod 0666 perm.txt")
 		if code != 0 {
 			t.Errorf("chmod failed: %d", code)
 		}

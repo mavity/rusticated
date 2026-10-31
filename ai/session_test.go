@@ -578,40 +578,6 @@ func TestCollapseUnpinnedLargeBlocksCachesAndPrefixesCompacted(t *testing.T) {
 	}
 }
 
-func TestLiveStreamerZeroANSISpec(t *testing.T) {
-	var out bytes.Buffer
-	ls := newLiveStreamer(func(text string) { _, _ = out.WriteString(text) }, 20)
-
-	ls.StartStage("goal")
-	ls.Feed("hello\n  world   from   exceedingly long text")
-	captured := ls.EndStage()
-
-	if captured != "hello\n  world   from   exceedingly long text" {
-		t.Fatalf("captured raw text = %q", captured)
-	}
-	// "[goal] " is 7 runes; with maxRunes=20, 12 runes of content + '…' = 20 runes total.
-	if got := out.String(); got != "[goal] hello world …" {
-		t.Fatalf("stage 1 visual output = %q, want %q", got, "[goal] hello world …")
-	}
-
-	out.Reset()
-	ls.StartStage("steps")
-	ls.Feed("short")
-	_ = ls.EndStage()
-
-	wantTransition := "\r" + strings.Repeat(" ", 20) + "\r[steps] short"
-	if got := out.String(); got != wantTransition {
-		t.Fatalf("stage transition = %q, want %q", got, wantTransition)
-	}
-
-	out.Reset()
-	ls.Wipe()
-	wantWipe := "\r" + strings.Repeat(" ", len("[steps] short")) + "\r"
-	if got := out.String(); got != wantWipe {
-		t.Fatalf("wipe output = %q, want %q", got, wantWipe)
-	}
-}
-
 func TestRunTurnDirectAnswerUsesSingleCall(t *testing.T) {
 	var out bytes.Buffer
 	backend := &scriptedSessionBackend{
@@ -731,7 +697,7 @@ func TestRunTurnToolExecutionAndHistory(t *testing.T) {
 	if got := out.String(); got != "The bridge in the file is Pont Alexandre III." {
 		t.Fatalf("spoken content = %q", got)
 	}
-	if status := feedback.String(); !strings.Contains(status, "📖 reading test file\n") {
+	if status := feedback.String(); !strings.Contains(status, "📖 reading test file") {
 		t.Fatalf("feedback lacks tool status: %q", status)
 	}
 	if strings.Contains(feedback.String(), "The bridge in the file is Pont Alexandre III.") {
@@ -1058,7 +1024,6 @@ func TestContextOverflowReplaysPendingUserOnceWithoutProjectingIt(t *testing.T) 
 		context.Background(),
 		&baseHistory,
 		pending,
-		newLiveStreamer(nil, defaultStreamerMaxRunes),
 	)
 	if err != nil {
 		t.Fatal(err)

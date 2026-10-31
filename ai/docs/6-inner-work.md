@@ -76,50 +76,13 @@ At the start of `RunTurn`, before any manipulation begins, take a read-locked sn
 
 ---
 
-## 3. Zero-ANSI Live Streamer Specification
+## 3. The 7-Stage Narrative Manipulation & Execution Algorithm
 
-To display the model's inner monologue in real time without polluting terminal scrollback or corrupting `>` file redirects with ANSI escape codes or per-token carriage returns:
-
-### State Variables
-
-Track four values across a turn's lifecycle:
-
-* `maxRunes` (e.g., `76` runes total line width).
-* `prevLineRunes` (visual rune count left on the current terminal line by the previous stage).
-* `currLineRunes` (visual rune count printed so far by the active stage).
-* `isCapped` (boolean flag indicating the current stage has hit `maxRunes` and printed `…`).
-
-### Transition & Streaming Rules
-
-1. **Starting a Stage (`StartStage(label)`):**
-* If `prevLineRunes > 0`: write `\r`, followed by `prevLineRunes` space characters (`' '`), followed by `\r`.
-* Reset `currLineRunes = 0` and `isCapped = false`.
-* Print the stage tag (e.g., `"[goal] "`) and set `currLineRunes` to its rune length.
-
-
-2. **Feeding Incoming Tokens (`Feed(tokenChunk)`):**
-* Always append the raw, unmodified `tokenChunk` to the stage's internal capture buffer (used for history manipulation).
-* If `isCapped == true`, return immediately (print nothing further for this stage).
-* Iterate over runes in `tokenChunk`:
-* Convert any `\n`, `\r`, or `\t` into a single space `' '`. Collapse consecutive spaces so whitespace never wastes horizontal budget.
-* If `currLineRunes + 1 == maxRunes`: print a single Unicode ellipsis `'…'`, increment `currLineRunes`, set `isCapped = true`, and break.
-* Otherwise, print the rune and increment `currLineRunes`.
-
-
-
-
-3. **Ending a Stage (`EndStage()`):**
-* Set `prevLineRunes = currLineRunes`. Do **not** print a newline.
-
-
-4. **Wiping Before Spoken Output (`Wipe()`):**
-* Right before printing real tool execution logs or the final spoken response, if `prevLineRunes > 0`, write `\r` + `prevLineRunes` spaces + `\r`, and reset `prevLineRunes = 0`.
+## 3. The 7-Stage Narrative Manipulation & Execution Algorithm
 
 
 
 ---
-
-## 4. The 7-Stage Narrative Manipulation & Execution Algorithm
 
 Let $H_{\text{base}}$ be the committed `CompactedHistory` prior to the current turn, and $P$ be the user's actual prompt string (`userText` in `RunTurn`).
 
@@ -170,7 +133,7 @@ H_base + User(P)
 * **Fast Path (`DIRECT:`):** If the trimmed stream starts with `"DIRECT:"`, strip the `"DIRECT:"` prefix (and any leading space), bypass all remaining stages, stream the rest of the response directly to `fmt.Print`, and record `CognitiveTrace{IsDirect: true}`.
 
 
-* **Reflective Path (`GOAL:` or unprefixed):** Strip `"GOAL:"` if present, initialize the live streamer with `StartStage("goal")`, feed the buffered and remaining tokens through the streamer, and capture the full text as `<goal>`.
+* **Reflective Path (`GOAL:` or unprefixed):** Strip `"GOAL:"` if present and capture the full text as `<goal>`.
 
 
 
@@ -267,10 +230,10 @@ All intermediate critique turns (`<steps>`, `<relevancy>`, `<safety>`, `<grounde
 * Run the multi-turn tool execution loop currently in `RunTurn`:
 
 
-* If the model emits `ToolCallEvent`, call `streamer.Wipe()`, execute the tools via `ExecuteTool`, record the `RoleModel` (with `ToolCalls`) and `RoleTool` (`ToolResponse`) parts into a local `executedToolParts []ai.PromptPart` slice, and feed `toolResponses` back into `SendStream`.
+* If the model emits `ToolCallEvent`, execute the tools via `ExecuteTool`, record the `RoleModel` (with `ToolCalls`) and `RoleTool` (`ToolResponse`) parts into a local `executedToolParts []ai.PromptPart` slice, and feed `toolResponses` back into `SendStream`.
 
 
-* Capture the final generated text answer as `<draft_answer>` (streaming it either into a verification buffer if Stage 6 is active, or directly to the terminal after `streamer.Wipe()`).
+* Capture the final generated text answer as `<draft_answer>` (streaming it either into a verification buffer if Stage 6 is active, or directly to the terminal).
 
 
 
@@ -293,14 +256,14 @@ To catch cases where tool execution revealed unexpected data or the model got di
 
 * **Stream Handling:**
 * Run with `StartStage("verify")`.
-* If the response begins with `"OK"`, `streamer.Wipe()` and emit `<draft_answer>` as the final spoken response.
-* Otherwise, `streamer.Wipe()` and stream the refined response directly to the user as `<final_answer>`.
+* If the response begins with `"OK"`, emit `<draft_answer>` as the final spoken response.
+* Otherwise, stream the refined response directly to the user as `<final_answer>`.
 
 
 
 ---
 
-## 5. Stage 7: Replanting the Iceberg & Syncing Session State
+## 4. Stage 7: Replanting the Iceberg & Syncing Session State
 
 Once `<final_answer>` is produced, all synthetic scaffolding (`"Wait, let me think..."`, `<goal>`, `<steps>`, the 3 critiques, `<plan>`, and the verification nudge) is discarded from the conversation timeline and packed into the iceberg:
 
@@ -324,7 +287,7 @@ Close the old `s.conv` and call `s.initWithHistory(s.CompactedHistory)` so the s
 
 
 4. **Failure & Retry Semantics:**
-* If any ephemeral stage fails with `context.Canceled`, abort the pipeline immediately, call `streamer.Wipe()`, and leave `CanonicalHistory` and `CompactedHistory` untouched (since commits now happen atomically at Stage 7 rather than at the top of `RunTurn`).
+* If any ephemeral stage fails with `context.Canceled`, abort the pipeline immediately and leave `CanonicalHistory` and `CompactedHistory` untouched (since commits now happen atomically at Stage 7 rather than at the top of `RunTurn`).
 
 
 * If a stage hits `isContextOverflowError` or `ai.ErrRepetitionLoop`, trigger compaction on `baseHistory` first, refresh `baseHistory`, and restart the stage.

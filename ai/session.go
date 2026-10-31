@@ -887,79 +887,6 @@ func isContextOverflowError(err error) bool {
 		strings.Contains(msg, "Max number of tokens reached")
 }
 
-const defaultStreamerMaxRunes = 76
-
-// liveStreamer implements the Zero-ANSI Live Streamer specification: single-line
-// stage ticker overwritten via carriage-return + space-padding, without ANSI codes.
-type liveStreamer struct {
-	feedback      LogFeedback
-	maxRunes      int
-	prevLineRunes int
-	currLineRunes int
-	isCapped      bool
-	lastWasSpace  bool
-	buf           strings.Builder
-}
-
-func newLiveStreamer(feedback LogFeedback, maxRunes int) *liveStreamer {
-	if maxRunes <= 0 {
-		maxRunes = defaultStreamerMaxRunes
-	}
-	return &liveStreamer{
-		feedback: feedback,
-		maxRunes: maxRunes,
-	}
-}
-
-func (l *liveStreamer) write(text string) {
-	if l.feedback != nil {
-		l.feedback(text)
-	}
-}
-
-func (l *liveStreamer) Feed(tokenChunk string) {
-	l.buf.WriteString(tokenChunk)
-	if l.isCapped {
-		return
-	}
-	for _, r := range tokenChunk {
-		if r == '\n' || r == '\r' || r == '\t' || r == ' ' {
-			if l.lastWasSpace {
-				continue
-			}
-			r = ' '
-			l.lastWasSpace = true
-		} else {
-			l.lastWasSpace = false
-		}
-		if l.currLineRunes+1 == l.maxRunes {
-			l.write("…")
-			l.currLineRunes++
-			l.isCapped = true
-			break
-		}
-		l.write(string(r))
-		l.currLineRunes++
-	}
-}
-
-func (l *liveStreamer) EndStage() string {
-	l.prevLineRunes = l.currLineRunes
-	return strings.TrimSpace(l.buf.String())
-}
-
-func (l *liveStreamer) Wipe() {
-	if l.prevLineRunes > 0 {
-		l.write(fmt.Sprintf("\r%s\r", strings.Repeat(" ", l.prevLineRunes)))
-		l.prevLineRunes = 0
-	} else if l.currLineRunes > 0 {
-		l.write(fmt.Sprintf("\r%s\r", strings.Repeat(" ", l.currLineRunes)))
-	}
-	l.currLineRunes = 0
-	l.isCapped = false
-	l.lastWasSpace = false
-}
-
 func (s *Session) snapshotCompactedHistory() []PromptPart {
 	s.historyMu.Lock()
 	defer s.historyMu.Unlock()
@@ -978,7 +905,6 @@ func (s *Session) runAgenticTurn(
 	ctx context.Context,
 	baseHistory *[]PromptPart,
 	userPart PromptPart,
-	streamer *liveStreamer,
 ) (executedToolParts []PromptPart, draftAnswer string, compactedDuringTurn bool, err error) {
 	buildHistory := func(parts []PromptPart) []PromptPart {
 		history := append([]PromptPart(nil), (*baseHistory)...)
@@ -987,12 +913,10 @@ func (s *Session) runAgenticTurn(
 	}
 
 	if s.engine == nil {
-		streamer.Wipe()
 		return nil, "", false, errors.New("ai: engine is not initialized")
 	}
 	if s.conv == nil {
 		if err := s.initWithHistory(*baseHistory); err != nil {
-			streamer.Wipe()
 			return nil, "", false, err
 		}
 	}
@@ -1020,10 +944,8 @@ func (s *Session) runAgenticTurn(
 				toolCalls = append(toolCalls, e.ToolCalls...)
 			}
 		}
-		_ = streamer.EndStage()
 		if err != nil {
 			if isContextOverflowError(err) && overflowRetries == 0 {
-				streamer.Wipe()
 				s.tryCompressTurnPartsOnOverflow(ctx, turnParts, executedToolParts)
 				history := s.snapshotCanonicalHistory()
 				if len(history) == 0 {
@@ -1051,14 +973,12 @@ func (s *Session) runAgenticTurn(
 				err = nil
 				continue
 			}
-			streamer.Wipe()
 			return nil, "", compactedDuringTurn, err
 		}
 
 		if len(toolCalls) == 0 {
 			return executedToolParts, strings.TrimSpace(generatedText.String()), compactedDuringTurn, nil
 		}
-		streamer.Wipe()
 		if genStart.IsZero() {
 			genStart = time.Now()
 			genEnd = genStart
@@ -1151,12 +1071,11 @@ func (s *Session) RunTurnWithTiming(ctx context.Context, userText string, timing
 	}
 
 	baseHistory := s.snapshotCompactedHistory()
-	streamer := newLiveStreamer(s.emitFeedback, defaultStreamerMaxRunes)
 
 	// The removed planner calibrated response length, drafted steps, ran three critiques, and synthesized a plan.
 	// See its historical implementation around tag v0.8.9.
 	responseStartedAt := time.Now()
-	executedToolParts, finalAnswer, compactedDuringTurn, err := s.runAgenticTurn(ctx, &baseHistory, userPart, streamer)
+	executedToolParts, finalAnswer, compactedDuringTurn, err := s.runAgenticTurn(ctx, &baseHistory, userPart)
 	if err != nil {
 		s.closeConv()
 		if restoreErr := s.initWithHistory(s.snapshotCompactedHistory()); restoreErr != nil {
@@ -1164,7 +1083,6 @@ func (s *Session) RunTurnWithTiming(ctx context.Context, userText string, timing
 		}
 		return err
 	}
-	streamer.Wipe()
 	if finalAnswer != "" {
 		s.emitContent(finalAnswer)
 		if s.verbose {
