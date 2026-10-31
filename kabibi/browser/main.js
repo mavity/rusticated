@@ -2,6 +2,7 @@
   'use strict';
 
   const CONVENTIONAL_PARENT_ID = 'kabibi-terminal';
+  const MOUNT_REQUEST_KEY = '\uE000';
   const XTERM_CSS_URL = 'https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css';
   const XTERM_ESM_URL = 'https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/+esm';
   const FIT_ADDON_ESM_URL = 'https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/+esm';
@@ -292,7 +293,45 @@
     }
   }
 
-  function installTerminalContextMenu(term, container, document, window, superDemo) {
+  function showMountError(document, error) {
+    const message = error && error.message ? error.message : String(error);
+    if (global.console && typeof global.console.error === 'function') {
+      global.console.error('Kabibi directory mount failed:', error);
+    }
+    if (!document || !document.body || typeof document.createElement !== 'function') return;
+
+    const notice = document.createElement('div');
+    notice.setAttribute('role', 'status');
+    notice.setAttribute('aria-live', 'assertive');
+    notice.textContent = `Directory mount failed: ${message}`;
+    Object.assign(notice.style, {
+      position: 'fixed',
+      left: '50%',
+      bottom: '20px',
+      transform: 'translateX(-50%)',
+      zIndex: '2147483647',
+      maxWidth: 'min(640px, calc(100vw - 32px))',
+      padding: '10px 14px',
+      border: '1px solid #FFD700',
+      borderRadius: '5px',
+      background: '#1A1F26',
+      color: '#E5E5E5',
+      boxShadow: '0 4px 18px rgba(0, 0, 0, 0.6)',
+      font: '13px system-ui, sans-serif'
+    });
+    document.body.appendChild(notice);
+    setTimeout(() => notice.remove(), 6000);
+  }
+
+  function directoryMountError(error) {
+    if (error && error.name === 'AbortError') return null;
+    if (error && (error.name === 'NotAllowedError' || error.name === 'SecurityError')) {
+      return new Error('directory access was denied; choose a directory and grant read/write access');
+    }
+    return error;
+  }
+
+  function installTerminalContextMenu(term, container, document, window, superDemo, onMountShortcut) {
     let menu = null;
     const closeMenu = () => {
       if (menu) menu.remove();
@@ -386,6 +425,13 @@
 
     if (typeof term.attachCustomKeyEventHandler === 'function') {
       term.attachCustomKeyEventHandler((event) => {
+        if (event.type === 'keydown' && (event.ctrlKey || event.metaKey) && !event.altKey &&
+            String(event.key || '').toLowerCase() === 'm') {
+          event.preventDefault();
+          if (typeof event.stopPropagation === 'function') event.stopPropagation();
+          if (typeof onMountShortcut === 'function') onMountShortcut();
+          return false;
+        }
         if (superDemo && typeof superDemo.handleKeyEvent === 'function' &&
             !superDemo.handleKeyEvent(event)) {
           return false;
@@ -509,9 +555,78 @@
       }
     }
 
-    const terminalContextMenuDispose = installTerminalContextMenu(term, terminalContainer, document, window, superDemo);
     let host = options.host || null;
     let startingHost = typeof options.wasm !== 'undefined' && options.wasm !== null;
+    const hostOptions = { ...(options.hostOptions || {}) };
+    let pendingMountDirectory = null;
+    const mountDirectoryName = (directory) => String(directory.name || 'directory')
+      .replace(/[\\/]/g, '-')
+      .replace(/[\u0000-\u001f]/g, '_') || 'directory';
+    const selectMountDirectory = async () => {
+      pendingMountDirectory = null;
+      if (!window || typeof window.showDirectoryPicker !== 'function') {
+        throw new Error('directory mounting requires the browser File System Access API');
+      }
+
+      let directory;
+      try {
+        directory = await window.showDirectoryPicker({ mode: 'readwrite' });
+      } catch (error) {
+        const mountError = directoryMountError(error);
+        if (mountError === null) return '';
+        throw mountError;
+      }
+      if (!directory) return '';
+
+      pendingMountDirectory = directory;
+      return mountDirectoryName(directory);
+    };
+
+    const selectedMountDirectoryName = () => {
+      return pendingMountDirectory ? mountDirectoryName(pendingMountDirectory) : '';
+    };
+
+    const mountSelectedDirectory = async (guestPath) => {
+      if (!pendingMountDirectory) {
+        throw new Error('choose a browser directory before mounting it');
+      }
+      if (!host || typeof host.mountDirectory !== 'function') {
+        throw new Error('browser host does not support mounted directories');
+      }
+
+      const directory = pendingMountDirectory;
+      pendingMountDirectory = null;
+      const mountedPath = await host.mountDirectory(directory, guestPath);
+      if (host && typeof host.triggerSignal === 'function') {
+        host.triggerSignal(27);
+        host.triggerSignal(28);
+      }
+      return mountedPath;
+    };
+
+    const cancelMountSelection = () => {
+      pendingMountDirectory = null;
+    };
+
+    const onMountShortcut = () => {
+      if (!host || typeof host.pushStdin !== 'function') {
+        showMountError(document, new Error('browser terminal is not ready to mount a directory'));
+        return;
+      }
+      selectMountDirectory()
+        .then((directoryName) => {
+          if (directoryName) host.pushStdin(MOUNT_REQUEST_KEY);
+        })
+        .catch((error) => showMountError(document, error));
+    };
+    const terminalContextMenuDispose = installTerminalContextMenu(
+      term,
+      terminalContainer,
+      document,
+      window,
+      superDemo,
+      onMountShortcut
+    );
     const pendingInput = [];
     let disposed = false;
     let disposing = false;
@@ -664,7 +779,7 @@
 
       try {
         host = await hostFactory({
-          ...(options.hostOptions || {}),
+          ...hostOptions,
           wasm: options.wasm,
           stdout: forwardStdout,
           stderr: (bytes) => {
@@ -715,6 +830,10 @@
       mode: activeMode,
       requestedMode: mode,
       superDemo,
+      selectMountDirectory,
+      selectedMountDirectoryName,
+      mountSelectedDirectory,
+      cancelMountSelection,
       dispose
     };
   }
@@ -825,9 +944,37 @@
     return url;
   }
 
+  function mountedBrowserApi(methodName) {
+    const mounted = global.__kabibiMountedBrowser;
+    if (!mounted || typeof mounted[methodName] !== 'function') {
+      throw new Error('Kabibi browser terminal is not ready for directory mounting');
+    }
+    return mounted[methodName];
+  }
+
+  function selectMountDirectory() {
+    return mountedBrowserApi('selectMountDirectory').call(global.__kabibiMountedBrowser);
+  }
+
+  function selectedMountDirectoryName() {
+    return mountedBrowserApi('selectedMountDirectoryName').call(global.__kabibiMountedBrowser);
+  }
+
+  function mountSelectedDirectory(path) {
+    return mountedBrowserApi('mountSelectedDirectory').call(global.__kabibiMountedBrowser, path);
+  }
+
+  function cancelMountSelection() {
+    return mountedBrowserApi('cancelMountSelection').call(global.__kabibiMountedBrowser);
+  }
+
   global.KabibiBrowser = Object.freeze({
     mount,
     bootFromGuest,
+    selectMountDirectory,
+    selectedMountDirectoryName,
+    mountSelectedDirectory,
+    cancelMountSelection,
     resolveParent,
     isSuperDemoEnabled,
     isWebGL2Supported,

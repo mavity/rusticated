@@ -54,6 +54,7 @@ const (
 	ActionSelectMask
 	ActionUnselectMask
 	ActionEdit
+	ActionMount
 
 	actionMkdir        = ActionMkdir
 	actionRename       = ActionRename

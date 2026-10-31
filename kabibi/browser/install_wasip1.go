@@ -4,6 +4,7 @@ package browser
 
 import (
 	"fmt"
+	"strconv"
 
 	"ai"
 	"ai/assets"
@@ -41,6 +42,51 @@ func Download() error {
 	}
 	if _, err := ai.EvalJS(`globalThis.KabibiBrowser.downloadLoadedArtifact()`); err != nil {
 		return fmt.Errorf("download Kabibi browser artifact: %w", err)
+	}
+	return nil
+}
+
+// MountRequestKey is sent by the browser shortcut to open the guest TUI mount dialog.
+const MountRequestKey = "\uE000"
+
+func SelectMountDirectory() (string, error) {
+	if !Available() {
+		return "", fmt.Errorf("directory mounting is only available in the browser")
+	}
+	name, err := ai.EvalJS(`globalThis.KabibiBrowser.selectMountDirectory()`)
+	if err != nil {
+		return "", fmt.Errorf("select browser directory: %w", err)
+	}
+	return name, nil
+}
+
+func SelectedMountDirectoryName() (string, error) {
+	if !Available() {
+		return "", fmt.Errorf("directory mounting is only available in the browser")
+	}
+	name, err := ai.EvalJS(`globalThis.KabibiBrowser.selectedMountDirectoryName()`)
+	if err != nil {
+		return "", fmt.Errorf("read selected browser directory: %w", err)
+	}
+	return name, nil
+}
+
+func MountDirectory(path string) error {
+	if !Available() {
+		return fmt.Errorf("directory mounting is only available in the browser")
+	}
+	if _, err := ai.EvalJS(`globalThis.KabibiBrowser.mountSelectedDirectory(` + strconv.Quote(path) + `)`); err != nil {
+		return fmt.Errorf("mount browser directory at %q: %w", path, err)
+	}
+	return nil
+}
+
+func CancelMountSelection() error {
+	if !Available() {
+		return fmt.Errorf("directory mounting is only available in the browser")
+	}
+	if _, err := ai.EvalJS(`globalThis.KabibiBrowser.cancelMountSelection()`); err != nil {
+		return fmt.Errorf("cancel browser directory selection: %w", err)
 	}
 	return nil
 }

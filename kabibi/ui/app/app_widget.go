@@ -510,6 +510,36 @@ func (w *AppWidget) HandleEvent(e input.Event) bool {
 	panelsVis := w.panelsVisible
 	w.mu.Unlock()
 
+	var keyEv input.KeyPressEvent
+	var isKey bool
+	switch k := e.(type) {
+	case input.KeyPressEvent:
+		keyEv = k
+		isKey = true
+	case *input.KeyPressEvent:
+		if k != nil {
+			keyEv = *k
+			isKey = true
+		}
+	}
+	if isKey && keyEv.Text == browser.MountRequestKey {
+		if ed != nil || dlg != nil || w.sh.IsRunning() {
+			if err := browser.CancelMountSelection(); err != nil {
+				log.Printf("cancel browser directory selection: %v", err)
+			}
+			return true
+		}
+		name, err := browser.SelectedMountDirectoryName()
+		if err != nil {
+			w.showSlashError(err)
+			return true
+		}
+		if name != "" {
+			w.openMountPathDialog("/mnt/" + name)
+		}
+		return true
+	}
+
 	// 1. Full-screen editor takeover has top priority
 	if ed != nil {
 		handled := ed.HandleEvent(e)
@@ -547,20 +577,6 @@ func (w *AppWidget) HandleEvent(e input.Event) bool {
 	// (Ctrl+C cancellation and interactive PTY keystroke/paste forwarding).
 	if w.sh.IsRunning() {
 		return w.sh.HandleEvent(e)
-	}
-
-	// Extract key press if this is a keyboard event
-	var keyEv input.KeyPressEvent
-	var isKey bool
-	switch k := e.(type) {
-	case input.KeyPressEvent:
-		keyEv = k
-		isKey = true
-	case *input.KeyPressEvent:
-		if k != nil {
-			keyEv = *k
-			isKey = true
-		}
 	}
 
 	if isKey {
@@ -908,6 +924,19 @@ func (w *AppWidget) dispatchSlashCommand(invocation slashcmd.Invocation) {
 			return
 		}
 		w.launchModelSetup()
+	case "/mount":
+		if len(invocation.Args) != 0 {
+			w.showSlashError(slashcmd.UsageError(name, ""))
+			return
+		}
+		directoryName, err := browser.SelectMountDirectory()
+		if err != nil {
+			w.showSlashError(err)
+			return
+		}
+		if directoryName != "" {
+			w.openMountPathDialog("/mnt/" + directoryName)
+		}
 	case "/download":
 		if len(invocation.Args) != 0 {
 			w.showSlashError(slashcmd.UsageError(name, ""))
@@ -1227,6 +1256,23 @@ func (w *AppWidget) openMkdirDialog() {
 	w.invalidate()
 }
 
+func (w *AppWidget) openMountPathDialog(defaultPath string) {
+	dlg := dialog.NewInputDialog(dialog.ActionMount, "Mount Directory", "Choose a guest path for the selected directory:", defaultPath, nil)
+	dlg.Fields[0].Label = "Guest path"
+	dlg.Fields[0].Input = w.newPathInput(defaultPath)
+	dlg.OnCancel = func() {
+		w.closeDialog()
+		if err := browser.CancelMountSelection(); err != nil {
+			w.showSlashError(err)
+		}
+	}
+	dlg.OnSubmitInput = w.onDialogSubmitInput
+	w.mu.Lock()
+	w.dialog = dlg
+	w.mu.Unlock()
+	w.invalidate()
+}
+
 func (w *AppWidget) openRenameDialog() {
 	sources := []string(nil)
 	if w.PanelsVisible() {
@@ -1385,6 +1431,12 @@ func (w *AppWidget) onDialogSubmitInput(action dialog.DialogAction, val string, 
 		if err := w.OpenEditor(w.resolveShellPath(val), false); err != nil {
 			w.showSlashError(fmt.Errorf("open %q: %w", val, err))
 		}
+	case dialog.ActionMount:
+		if err := browser.MountDirectory(val); err != nil {
+			w.showSlashError(err)
+			return
+		}
+		w.refreshPanels()
 	}
 	w.invalidate()
 }

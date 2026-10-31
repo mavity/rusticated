@@ -171,7 +171,7 @@ func main() {
 
 	// Step 3: Stage website bundle into release/dist
 	fmt.Println("\n--------------------------------------------------------------------------------")
-	fmt.Println("🍆  [Website Bundle] Staging index.html with embedded icons, README.md, washmhost.js, and .nojekyll")
+	fmt.Println("🍆  [Website Bundle] Staging index.html with embedded icons, README.md, washmhost.js, mount_fs.js, and .nojekyll")
 	fmt.Println("--------------------------------------------------------------------------------")
 
 	siteAssets := []struct {
@@ -180,7 +180,9 @@ func main() {
 	}{
 		{src: filepath.Join(ws, "README.md"), dst: filepath.Join(distDir, "README.md")},
 		{src: filepath.Join(ws, "mohabbat", "washmhost", "js", "browser", "index.js"), dst: filepath.Join(distDir, "washmhost.js")},
+		{src: filepath.Join(ws, "mohabbat", "washmhost", "js", "browser", "mount_fs.js"), dst: filepath.Join(distDir, "mount_fs.js")},
 		{src: filepath.Join(ws, "mohabbat", "washmhost", "js", "browser", "index.js"), dst: filepath.Join(ws, "kabibi", "vscode", "washmhost.js")},
+		{src: filepath.Join(ws, "mohabbat", "washmhost", "js", "browser", "mount_fs.js"), dst: filepath.Join(ws, "kabibi", "vscode", "mount_fs.js")},
 		{src: filepath.Join(distDir, "kabibi.bat"), dst: filepath.Join(ws, "kabibi", "vscode", "kabibi.bat")},
 	}
 

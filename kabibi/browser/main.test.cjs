@@ -415,6 +415,152 @@ test('browser terminal supports right-click clipboard menu and Ctrl/Cmd+V', asyn
   assert.equal(document.body.children.length, 0);
 });
 
+test('Ctrl/Cmd+M selects a directory and notifies the guest to open its TUI path dialog', async () => {
+  const { document, window, api } = createHarness();
+  let pickerOptions;
+  const mountedPaths = [];
+  const stdin = [];
+  let signalCount = 0;
+  window.showDirectoryPicker = async (options) => {
+    pickerOptions = options;
+    return { kind: 'directory', name: 'work files' };
+  };
+  const mounted = await api.mount({
+    document,
+    window,
+    Terminal: FakeTerminal,
+    FitAddon: FakeFitAddon,
+    host: {
+      async mountDirectory(directory, path) {
+        mountedPaths.push({ directory, path });
+        return path;
+      },
+      pushStdin(data) { stdin.push(data); },
+      triggerSignal() { signalCount += 1; }
+    }
+  });
+  const initialSignalCount = signalCount;
+
+  const event = {
+    type: 'keydown',
+    key: 'm',
+    ctrlKey: true,
+    metaKey: false,
+    altKey: false,
+    prevented: false,
+    preventDefault() { this.prevented = true; },
+    stopPropagation() {}
+  };
+  assert.equal(mounted.term.customKeyEventHandler(event), false);
+  assert.equal(event.prevented, true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(pickerOptions.mode, 'readwrite');
+  assert.deepEqual(stdin, ['\uE000']);
+  assert.equal(mounted.selectedMountDirectoryName(), 'work files');
+  assert.equal(document.getElementById('kabibi-mount-path-dialog'), null);
+  assert.equal(document.getElementById('kabibi-mount-path-input'), null);
+  assert.equal(await mounted.mountSelectedDirectory('/home/user/work'), '/home/user/work');
+  assert.equal(mountedPaths.length, 1);
+  assert.equal(mountedPaths[0].path, '/home/user/work');
+  assert.equal(mountedPaths[0].directory.name, 'work files');
+  assert.equal(signalCount - initialSignalCount, 2);
+
+  const commandEvent = {
+    type: 'keydown',
+    key: 'm',
+    ctrlKey: false,
+    metaKey: true,
+    altKey: false,
+    preventDefault() {},
+    stopPropagation() {}
+  };
+  assert.equal(mounted.term.customKeyEventHandler(commandEvent), false);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(stdin, ['\uE000', '\uE000']);
+  assert.equal(mounted.selectedMountDirectoryName(), 'work files');
+  assert.equal(mountedPaths.length, 1);
+  mounted.dispose();
+});
+
+test('unsupported directory mounting does not open a picker or DOM dialog', async () => {
+  const { document, window, api } = createHarness();
+  const mounted = await api.mount({
+    document,
+    window,
+    Terminal: FakeTerminal,
+    FitAddon: FakeFitAddon
+  });
+
+  await assert.rejects(mounted.selectMountDirectory(), /File System Access API/);
+  assert.equal(document.getElementById('kabibi-mount-path-dialog'), null);
+  mounted.dispose();
+});
+
+test('cancelling the picker or path selection leaves the host mount table unchanged', async () => {
+  const { document, window, api } = createHarness();
+  const mountedPaths = [];
+  let cancelPicker = true;
+  window.showDirectoryPicker = async () => {
+    if (cancelPicker) {
+      const error = new Error('cancelled');
+      error.name = 'AbortError';
+      throw error;
+    }
+    return { kind: 'directory', name: 'work' };
+  };
+  const mounted = await api.mount({
+    document,
+    window,
+    Terminal: FakeTerminal,
+    FitAddon: FakeFitAddon,
+    host: {
+      async mountDirectory(directory, path) {
+        mountedPaths.push({ directory, path });
+        return path;
+      },
+      pushStdin() {},
+      triggerSignal() {}
+    }
+  });
+
+  assert.equal(await mounted.selectMountDirectory(), '');
+  assert.equal(mounted.selectedMountDirectoryName(), '');
+  assert.equal(document.getElementById('kabibi-mount-path-dialog'), null);
+  cancelPicker = false;
+  assert.equal(await mounted.selectMountDirectory(), 'work');
+  mounted.cancelMountSelection();
+  assert.equal(mounted.selectedMountDirectoryName(), '');
+  assert.equal(mountedPaths.length, 0);
+  mounted.dispose();
+});
+
+test('browser mount flow delegates mounting to the active washmhost controller', async () => {
+  const { document, window, api } = createHarness();
+  const calls = [];
+  const host = {
+    mountDirectory: async (directory, path) => {
+      calls.push({ directory, path });
+      return path;
+    },
+    hasTerminal: () => false,
+    pushStdin() {},
+    triggerSignal() {}
+  };
+  const mounted = await api.mount({
+    document,
+    window,
+    host,
+    Terminal: FakeTerminal,
+    FitAddon: FakeFitAddon
+  });
+  window.showDirectoryPicker = async () => ({ kind: 'directory', name: 'work' });
+  await mounted.selectMountDirectory();
+  assert.equal(await mounted.mountSelectedDirectory('/mnt/work'), '/mnt/work');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, '/mnt/work');
+  mounted.dispose();
+});
+
 test('super-demo is only started when explicitly selected', async () => {
   const { document, window, context } = createHarness();
   const parent = document.createElement('div');

@@ -1295,7 +1295,10 @@ function makeBrowserImports(hostState, fs, params = {}) {
           return;
         }
         entry.mode = Number(mode);
-        return fs.putEntry(entry).then(() => {
+        const write = typeof fs.chmodEntry === 'function'
+          ? fs.chmodEntry(entry)
+          : fs.putEntry(entry);
+        return Promise.resolve(write).then(() => {
           hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, 0, 0, 0));
         });
       }).catch((err) => {
@@ -1347,7 +1350,10 @@ function makeBrowserImports(hostState, fs, params = {}) {
           hostState.enqueue(() => hostState.completeOp(ptr, opId, wasiSuccess, 0, 0));
           return;
         }
-        return fs.putEntry(entry).then(() => {
+        const write = typeof fs.setEntryTimes === 'function'
+          ? fs.setEntryTimes(entry)
+          : fs.putEntry(entry);
+        return Promise.resolve(write).then(() => {
           hostState.enqueue(() => hostState.completeOp(ptr, opId, wasiSuccess, 0, 0));
         });
       }).catch((err) => {
@@ -2007,6 +2013,31 @@ async function unpackVegetable(buffer) {
 // ── Main Entry Closure ───────────────────────────────────────────────────────
 let evalOverflow = '';
 let activeHost = null;
+const browserHostScriptURL = globalThis.document && globalThis.document.currentScript
+  ? globalThis.document.currentScript.src
+  : '';
+let browserMountFSLoadPromise = null;
+
+function ensureBrowserMountFS() {
+  if (globalThis.WashmhostBrowserMountFS) return Promise.resolve();
+  if (!globalThis.document || !browserHostScriptURL) return Promise.resolve();
+  if (!browserMountFSLoadPromise) {
+    browserMountFSLoadPromise = new Promise((resolve, reject) => {
+      const script = globalThis.document.createElement('script');
+      script.src = new URL('./mount_fs.js', browserHostScriptURL).href;
+      script.onload = () => {
+        if (globalThis.WashmhostBrowserMountFS) {
+          resolve();
+        } else {
+          reject(new Error('browser mount filesystem loaded but did not expose its API'));
+        }
+      };
+      script.onerror = () => reject(new Error(`failed to load ${script.src}`));
+      globalThis.document.head.appendChild(script);
+    });
+  }
+  return browserMountFSLoadPromise;
+}
 
 function normalizeVegetableCandidates(target) {
   if (Array.isArray(target)) {
@@ -2076,11 +2107,24 @@ async function loadVegetable(candidates = ['./kabibi.bat', './release/dist/kabib
 }
 
 async function washmhost(params = {}) {
+  await ensureBrowserMountFS();
   const hostState = new HostState();
   if (typeof params.cwd === 'string' && params.cwd.trim() !== '') {
     hostState.cwd = resolvePath('/', params.cwd);
   }
-  const fs = params.fs || new AsyncIndexedDBFS(params.dbName || 'RusticatedFS');
+  const baseFS = params.fs || new AsyncIndexedDBFS(params.dbName || 'RusticatedFS');
+  const fs = typeof baseFS.mountAt === 'function'
+    ? baseFS
+    : globalThis.WashmhostBrowserMountFS &&
+        typeof globalThis.WashmhostBrowserMountFS.create === 'function'
+      ? globalThis.WashmhostBrowserMountFS.create(baseFS)
+      : baseFS;
+  const mountDirectory = (directoryHandle, guestPath) => {
+    if (typeof fs.mountAt !== 'function') {
+      throw new Error('browser mount filesystem is unavailable');
+    }
+    return fs.mountAt(directoryHandle, guestPath);
+  };
 
   // Whitebox / Unit Test Mode
   if (params.test === true) {
@@ -2091,6 +2135,7 @@ async function washmhost(params = {}) {
       hostState,
       fs,
       env,
+      mountDirectory,
       resolvePath: (target) => resolvePath(hostState.cwd, target),
       marshalStat,
       writeOverlapped: (ovPtr, code, cont, ext) => hostState.writeOverlapped(ovPtr, code, cont, ext)
@@ -2174,6 +2219,7 @@ async function washmhost(params = {}) {
     getMemory: () => hostState.memory,
     getInstance: () => instance,
     getFS: () => fs,
+    mountDirectory,
     getLoadedWasmURL: () => loadedWasmURL,
     terminate: (exitCode = 0) => {
       hostState.forcedExitCode = exitCode;
