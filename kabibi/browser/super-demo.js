@@ -677,7 +677,10 @@
     let screenNeedsUpdate = true;
     let reflectionAnimationStart = null;
     let powerMode = 0;
+    let powerOnRequested = false;
+    let firstFrameRenderedAt = null;
     let powerStartedAt = null;
+    let powerOffDelayTimer = null;
     let powerOffPromise = null;
     let resolvePowerOff = null;
     let renderSubscription = null;
@@ -842,6 +845,10 @@
     function fallback(reason) {
       if (!active || usingFallback) return;
       usingFallback = true;
+      if (powerOffDelayTimer !== null) {
+        clearTimeout(powerOffDelayTimer);
+        powerOffDelayTimer = null;
+      }
       if (resolvePowerOff) {
         resolvePowerOff();
         resolvePowerOff = null;
@@ -868,25 +875,40 @@
     }
 
     function powerOn() {
-      if (!active || usingFallback || powerMode === 1 || powerMode === 2) return;
-      powerMode = 1;
-      powerStartedAt = null;
+      if (!active || usingFallback || powerMode !== 0 || powerOnRequested) return;
+      powerOnRequested = true;
       requestFrame(true);
     }
 
     function powerOff() {
-      if (!active || usingFallback || powerMode === 0) return Promise.resolve();
+      if (!active || usingFallback) return Promise.resolve();
+      powerOnRequested = false;
+      if (powerMode === 0) return Promise.resolve();
       if (powerOffPromise) return powerOffPromise;
-      powerMode = 3;
-      powerStartedAt = null;
       powerOffPromise = new Promise((resolve) => {
         resolvePowerOff = resolve;
       });
-      requestFrame();
+      powerOffDelayTimer = setTimeout(() => {
+        powerOffDelayTimer = null;
+        if (!active || usingFallback) return;
+        powerMode = 3;
+        powerStartedAt = null;
+        requestFrame();
+      }, POWER_OFF_DELAY_MS);
       return powerOffPromise;
     }
 
     function updatePowerAnimation(now) {
+      if (
+        powerMode === 0 &&
+        powerOnRequested &&
+        firstFrameRenderedAt !== null &&
+        now - firstFrameRenderedAt >= POWER_ON_DELAY_MS
+      ) {
+        powerMode = 1;
+        powerOnRequested = false;
+        powerStartedAt = now;
+      }
       if (powerMode !== 1 && powerMode !== 3) {
         return { mode: powerMode, progress: powerMode === 2 ? 1 : 0 };
       }
@@ -1098,6 +1120,7 @@
       gl.drawArrays(gl.TRIANGLES, 0, 6);
       gl.bindVertexArray(null);
 
+      if (firstFrameRenderedAt === null) firstFrameRenderedAt = now;
       requestFrame();
     }
 
@@ -2044,7 +2067,7 @@
               float lineCore = exp(-0.5 * pow(screenCoord.y / 0.018, 2.0)) *
                 lineAcross * lineProgress *
                 (0.50 + 0.18 * exp(-abs(screenCoord.x) * 12.0));
-              float bandProgress = smoothstep(0.37, 0.80, progress);
+              float bandProgress = smoothstep(0.34, 0.62, progress);
               float bandHalfHeight = mix(0.018, 1.12, bandProgress);
               float bandEdge = max(pixelFootprint / screenHalfSize.y, 0.006);
               float bandAcross = 1.0 - smoothstep(
@@ -2052,7 +2075,9 @@
                 bandHalfHeight + bandEdge,
                 abs(screenCoord.y)
               );
-              float flare = max(ignition, max(lineCore, bandAcross * bandProgress));
+              float flareFadeProgress = clamp((progress - 0.62) / 0.38, 0.0, 1.0);
+              float flareFade = exp(-4.0 * flareFadeProgress);
+              float flare = max(ignition, max(lineCore, bandAcross * bandProgress)) * flareFade;
               float reveal = smoothstep(0.90, 1.0, progress);
               vec3 poweredColor = mix(vec3(flare), composite.rgb, reveal);
               composite.rgb = mix(composite.rgb, poweredColor, screenCoverage);
@@ -2328,6 +2353,10 @@
       dispose() {
         if (!active) return;
         active = false;
+        if (powerOffDelayTimer !== null) {
+          clearTimeout(powerOffDelayTimer);
+          powerOffDelayTimer = null;
+        }
         if (resolvePowerOff) {
           resolvePowerOff();
           resolvePowerOff = null;
@@ -2412,7 +2441,9 @@
   }
 
   const REFLECTION_PERIOD_MS = 5 * 60 * 1000;
-  const POWER_ON_DURATION_MS = 800;
+  const POWER_ON_DELAY_MS = 800;
+  const POWER_ON_DURATION_MS = 1200;
+  const POWER_OFF_DELAY_MS = 500;
   const POWER_OFF_DURATION_MS = 1800;
 
   function calculatePowerProgress(mode, elapsedMs) {
@@ -2441,7 +2472,9 @@
     calculateReflectionOffset,
     calculateReflectionDepth,
     calculatePowerProgress,
+    POWER_ON_DELAY_MS,
     POWER_ON_DURATION_MS,
+    POWER_OFF_DELAY_MS,
     POWER_OFF_DURATION_MS,
     calculateLightPosition,
     solveParaboloidRayHit,
