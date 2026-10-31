@@ -186,23 +186,49 @@ func TestConsumeTestJSONCollectsTestsAndPackageSetupFailures(t *testing.T) {
 	}
 }
 
-func TestBuildTestMatrixMarksMissingModeResultsAsFailed(t *testing.T) {
+func TestBuildTestMatrixLeavesMissingModeResultsAbsent(t *testing.T) {
 	results := map[testKey]map[string]bool{
-		{Package: "example/pkg", Name: "TestOne"}: {"native": true},
+		{Package: "example/pkg", Name: "TestFail"}:   {"native": false},
+		{Package: "example/pkg", Name: "TestPass"}:   {"native": true},
 	}
 	modes := []testMode{
 		{ID: "native", Label: "Native"},
 		{ID: "node", Label: "Node"},
 	}
 	matrix := buildTestMatrix(results, modes)
-	if len(matrix) != 1 {
-		t.Fatalf("matrix length = %d, want 1", len(matrix))
+	if len(matrix) != 2 {
+		t.Fatalf("matrix length = %d, want 2", len(matrix))
 	}
-	if !matrix[0].Results["native"] {
-		t.Fatal("native result should pass")
+	if matrix[0].Test != "TestFail" || matrix[0].Results["native"] {
+		t.Fatalf("failed result = %+v, want TestFail/native false", matrix[0])
 	}
-	if matrix[0].Results["node"] {
-		t.Fatal("missing node result should fail")
+	if _, found := matrix[0].Results["node"]; found {
+		t.Fatal("missing node result should remain absent")
+	}
+	if matrix[1].Test != "TestPass" || !matrix[1].Results["native"] {
+		t.Fatalf("passing result = %+v, want TestPass/native true", matrix[1])
+	}
+	if _, found := matrix[1].Results["node"]; found {
+		t.Fatal("missing node result should remain absent")
+	}
+}
+
+func TestTestMatrixMarkDistinguishesPassFailureAndAbsence(t *testing.T) {
+	results := map[string]bool{
+		"pass": true,
+		"fail": false,
+	}
+	for _, tt := range []struct {
+		mode string
+		want string
+	}{
+		{mode: "pass", want: "🟢"},
+		{mode: "fail", want: "🔴"},
+		{mode: "absent", want: "❌"},
+	} {
+		if got := testMatrixMark(results, tt.mode); got != tt.want {
+			t.Errorf("testMatrixMark(%q) = %q, want %q", tt.mode, got, tt.want)
+		}
 	}
 }
 

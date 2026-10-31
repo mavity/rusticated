@@ -230,6 +230,53 @@ test('process_pipe transfers data from its write handle to its read handle', asy
     }
 });
 
+test('process_spawn keeps fd-backed pipe stdio alive until the child closes', async () => {
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const host = new HostState();
+    host.memory = memory;
+    const { env } = makeBrainImports(host, []);
+    const view = new DataView(memory.buffer);
+    const message = 'child stdio pipe works';
+    let readHandle;
+    let writeHandle;
+    let childHandle;
+
+    try {
+        env.process_pipe(32);
+        const pipeHandles = view.getBigUint64(48, true);
+        readHandle = pipeHandles & 0xFFFF_FFFFn;
+        writeHandle = pipeHandles >> 32n;
+
+        const config = Buffer.from([
+            process.execPath,
+            '-e',
+            `process.stdout.write(${JSON.stringify(message)})`,
+            '',
+            '',
+            '',
+            'inherit',
+            `fd:${writeHandle}`,
+            'inherit',
+            '',
+            '',
+        ].join('\0'));
+        new Uint8Array(memory.buffer, 1024, config.length).set(config);
+        env.process_spawn(64, 1024, config.length);
+        assert.equal(await waitForHostResult(host, memory, 64), 0);
+        childHandle = view.getBigUint64(80, true) & 0xFFFF_FFFFn;
+
+        env.handle_close(writeHandle);
+        env.read(96, readHandle, 2048, Buffer.byteLength(message));
+        assert.equal(await waitForHostResult(host, memory, 96), 0);
+        const readCount = Number(view.getBigUint64(112, true));
+        assert.equal(Buffer.from(memory.buffer, 2048, readCount).toString(), message);
+    } finally {
+        if (writeHandle !== undefined) env.handle_close(writeHandle);
+        if (readHandle !== undefined) env.handle_close(readHandle);
+        if (childHandle !== undefined) env.handle_close(childHandle);
+    }
+});
+
 test('path link ABI creates hard links and reports readlink buffer requirements', async (t) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'washmhost-links-'));
     const source = path.join(dir, 'source');
