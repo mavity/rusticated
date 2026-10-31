@@ -1439,6 +1439,7 @@
         in vec3 vWorldPos;
         in vec3 vOuterNormal;
         out vec4 fragColor;
+        const float ELLIPSOID_BRIGHTNESS = 0.80;
 
         vec3 samplePhosphorSurface(vec2 surfaceUv) {
           vec2 imageUv = (surfaceUv - 0.5) / uImageScale + 0.5;
@@ -1502,6 +1503,7 @@
           // Tall window/light-bank metric: solid inner core with a much wider, softer falloff blur around it
           float bodyX = 1.0 - smoothstep(0.28, 1.95, abs(normXY.x));
           float bodyY = 1.0 - smoothstep(0.45, 1.85, abs(normXY.y));
+          float windowBar = exp(-0.5 * pow((normXY.y - 0.55) / 0.12, 2.0)) * bodyX;
           float solidPanelBody = bodyX * bodyY;
           float wideFalloffBlur = (1.0 - smoothstep(0.10, 2.75, length(normXY * vec2(0.70, 0.52)))) * 0.52;
 
@@ -1512,7 +1514,7 @@
           // Distance attenuation compensated for the 1.4x farther ellipsoid distance, scaled by 0.8 brightness
           float depthAtten = (15.8 * 0.80) / (rawDist * rawDist + 5.2);
           float ellipsoidSubsurface = transmitIn * depthAtten * refractionCompression *
-            (solidPanelBody * 0.68 + wideFalloffBlur);
+            (solidPanelBody * 0.68 + wideFalloffBlur) * (1.0 - 0.4 * windowBar) * ELLIPSOID_BRIGHTNESS;
 
           // 2. Sub-surface contribution from the secondary sphere (crisper, less smudged, upper-left accent)
           vec3 toSphere = uLightPos - innerPos;
@@ -1574,7 +1576,7 @@
             float mB = evaluateEllipsoidMatteLight(posInB, innerNormal, internalView, 1.555, N, thickness);
 
             // Pronounced sub-surface matte phosphor smudge with subtle Newtonian dispersion at its rim
-            vec3 rawMatte = vec3(mR * 0.80, mG * 0.90, mB * 1.04) * 0.56;
+            vec3 rawMatte = vec3(mR * 0.80, mG * 0.90, mB * 1.04) * vec3(0.99, 1.0, 1.015) * 0.56;
             float fadeY = smoothstep(0.02, 0.16, uvG.y) * (1.0 - smoothstep(0.93, 0.996, uvG.y));
             matteLight = rawMatte * lensDensity * (0.45 + 0.55 * fadeY);
 
@@ -1616,7 +1618,7 @@
 
             vec3 ambientGlass = vec3(0.74, 0.86, 1.0) * 0.075;
             vec3 sphereOuterColor = vec3(0.88, 0.94, 1.0) * sphereGlint * 1.65;
-            vec3 ellipOuterColor = vec3(0.80, 0.90, 1.0) * ellipOuterSheen * (0.68 * 0.80);
+            vec3 ellipOuterColor = vec3(0.80, 0.90, 1.0) * ellipOuterSheen * (0.68 * 0.80) * ELLIPSOID_BRIGHTNESS;
             outerReflection = fOuter * (ambientGlass + ellipOuterColor) + fSphere * sphereOuterColor;
 
             // 2. Outward curvature-directed internal glyph reflection with continuous blurred halo & glint:
@@ -1661,12 +1663,16 @@
               vec3 tapColor = max(samplePhosphorSurface(bounceCenter + offsetUv) - uScreenBackground * 1.12, vec3(0.0));
               bAvg += tapColor * weights[i];
             }
-            // Soft continuous halo boost weighted by distance from the ~0.6/0.6 perpendicular apex
-            vec3 blurredGlyph = bAvg * 2.15;
             float viewGrazing = clamp(1.0 - ndotv, 0.0, 1.0);
             float curvatureFactor = smoothstep(0.04, 0.95, apexDist2);
+            // Add a restrained spectral split to the blurred glyph reflection; the final composite blur softens it further.
+            vec2 spectralShift = radialAxis * texel * (0.8 + 1.6 * curvatureFactor);
+            vec3 spectralRed = max(samplePhosphorSurface(bounceCenter + spectralShift) - uScreenBackground * 1.12, vec3(0.0));
+            vec3 spectralBlue = max(samplePhosphorSurface(bounceCenter - spectralShift) - uScreenBackground * 1.12, vec3(0.0));
+            vec3 spectralGlyph = vec3(spectralRed.r, bAvg.g, spectralBlue.b);
+            vec3 blurredGlyph = mix(bAvg, spectralGlyph, 0.20) * 2.15;
             float lightGlintBoost = 0.85 + 1.15 * clamp(mG + sphereGlint * 0.85, 0.0, 1.4);
-            float glyphReflectWeight = (0.018 + 0.19 * curvatureFactor + 0.24 * pow(viewGrazing, 1.5)) * lightGlintBoost * 0.60;
+            float glyphReflectWeight = (0.018 + 0.19 * curvatureFactor + 0.24 * pow(viewGrazing, 1.5)) * lightGlintBoost * 0.50;
             terminalColor += blurredGlyph * vec3(0.76, 0.90, 1.0) * glyphReflectWeight;
           }
 
@@ -2101,7 +2107,7 @@
     return { x: 0, y: 0, width: canvasWidth, height: canvasHeight };
   }
 
-  const REFLECTION_PERIOD_MS = 0.5 * 60 * 1000;
+  const REFLECTION_PERIOD_MS = 5 * 60 * 1000;
 
   function calculateReflectionPhase(elapsedMs) {
     return ((elapsedMs % REFLECTION_PERIOD_MS) / REFLECTION_PERIOD_MS) * Math.PI * 2;
