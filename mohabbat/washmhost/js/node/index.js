@@ -273,6 +273,7 @@ class HostState {
       item.fileOperations ??= [];
       item.fileOperationActive ??= false;
     }
+    item.references ??= 1;
     const h = this.nextHandle++;
     this.handles.set(h, item);
     return h;
@@ -282,28 +283,39 @@ class HostState {
     return this.handles.get(typeof h === 'bigint' ? h : BigInt(h));
   }
 
+  retainHandle(h) {
+    const item = this.getHandle(h);
+    if (!item) return null;
+    item.references = (item.references ?? 1) + 1;
+    return item;
+  }
+
   freeHandle(h) {
     const bh = typeof h === 'bigint' ? h : BigInt(h);
     const item = this.handles.get(bh);
     if (item == null) return;
     this.handles.delete(bh);
+    this.releaseHandle(item);
+  }
+
+  releaseHandle(item) {
+    item.references = (item.references ?? 1) - 1;
+    if (item.references > 0) return;
     // Close underlying resource if owned (handle >= 3)
-    if (bh >= 3n) {
-      try {
-        if (item.type === 'file')        fs.close(item.fd, () => {});
-        else if (item.type === 'socket') {
-          item.socket.destroy();
-          if (item.leftovers) item.leftovers = null;
-        }
-        else if (item.type === 'server') item.server.close();
-        else if (item.type === 'pipe_r') {
-          item.stream.destroy();
-          if (item.leftovers) item.leftovers = null;
-        }
-        else if (item.type === 'pipe_w') item.stream.end();
-        else if (item.type === 'dirscan' && item._dir) item._dir.close().catch(() => {});
-      } catch (_) { /* best effort */ }
-    }
+    try {
+      if (item.type === 'file')        fs.close(item.fd, () => {});
+      else if (item.type === 'socket') {
+        item.socket.destroy();
+        if (item.leftovers) item.leftovers = null;
+      }
+      else if (item.type === 'server') item.server.close();
+      else if (item.type === 'pipe_r') {
+        item.stream.destroy();
+        if (item.leftovers) item.leftovers = null;
+      }
+      else if (item.type === 'pipe_w') item.stream.end();
+      else if (item.type === 'dirscan' && item._dir) item._dir.close().catch(() => {});
+    } catch (_) { /* best effort */ }
   }
 
   // ── view helper ────────────────────────────────────────────────────────────
@@ -1403,8 +1415,9 @@ export function makeBrainImports(hostState, argv) {
     }
 
     // Set up stdio
-    const pipePairs = [];  // {rh, wh, rStream, wStream}
+    const pipePairs = [];
     const stdioArr  = [];
+    const retainedHandles = [];
     for (let i = 0; i < stdioSpecs.length; i++) {
       const spec = stdioSpecs[i];
       if (spec === 'inherit') {
@@ -1427,6 +1440,16 @@ export function makeBrainImports(hostState, argv) {
         const fh = BigInt(spec.slice(3));
         const fhItem = hs.getHandle(fh);
         if (fhItem && fhItem.type === 'file') stdioArr.push(fs.createReadStream(fhItem.path));
+        else if (fhItem && ((i === 0 && fhItem.type === 'pipe_r') ||
+            (i > 0 && fhItem.type === 'pipe_w'))) {
+          const retained = hs.retainHandle(fh);
+          if (retained) {
+            retainedHandles.push(retained);
+            stdioArr.push(fhItem.stream);
+          } else {
+            stdioArr.push('ignore');
+          }
+        }
         else stdioArr.push('ignore');
       } else {
         stdioArr.push('ignore');
@@ -1443,12 +1466,16 @@ export function makeBrainImports(hostState, argv) {
     }
 
     let cp;
+    const releaseRetainedHandles = () => {
+      for (const handle of retainedHandles.splice(0)) hs.releaseHandle(handle);
+    };
     try {
       cp = child_process.spawn(program, spawnArgs, {
         cwd,
         env:   envObj,
         stdio: stdioArr.map(s => typeof s === 'string' ? s : 'pipe'),
       });
+      cp.once('close', releaseRetainedHandles);
       // Wire up passthrough pipes to child stdio streams
       for (let i = 0; i < stdioArr.length; i++) {
         if (typeof stdioArr[i] !== 'string') {
@@ -1457,6 +1484,7 @@ export function makeBrainImports(hostState, argv) {
         }
       }
     } catch (e) {
+      releaseRetainedHandles();
       hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(e), 0, 0));
       return;
     }

@@ -150,16 +150,23 @@ func runTestAll(ws string) error {
 	}
 	fmt.Printf("\n🍆  Test evidence: %s\n", logDir)
 
+	passingCells := 0
 	failedCells := 0
+	absentCells := 0
 	for _, test := range report.Tests {
 		for _, mode := range activeModes {
-			if !test.Results[mode.ID] {
+			passed, found := test.Results[mode.ID]
+			if !found {
+				absentCells++
+			} else if passed {
+				passingCells++
+			} else {
 				failedCells++
 			}
 		}
 	}
-	fmt.Printf("🍆  Matrix summary: %d tests, %d passing cells, %d failing cells\n",
-		len(report.Tests), len(report.Tests)*len(activeModes)-failedCells, failedCells)
+	fmt.Printf("🍆  Matrix summary: %d tests, %d passing cells, %d failing cells, %d absent cells\n",
+		len(report.Tests), passingCells, failedCells, absentCells)
 	if len(report.Tests) == 0 {
 		return fmt.Errorf("no tests executed; see %s", reportPath)
 	}
@@ -579,7 +586,9 @@ func buildTestMatrix(results map[testKey]map[string]bool, modes []testMode) []te
 			Results: make(map[string]bool, len(modes)),
 		}
 		for _, mode := range modes {
-			row.Results[mode.ID] = results[key][mode.ID]
+			if passed, found := results[key][mode.ID]; found {
+				row.Results[mode.ID] = passed
+			}
 		}
 		entries = append(entries, row)
 	}
@@ -591,20 +600,27 @@ func printTestMatrix(tests []testMatrixEntry, modes []testMode) {
 	for _, mode := range modes {
 		fmt.Printf("%s\t", mode.Label)
 	}
-	fmt.Println("Package / test")
+	fmt.Println("Package / test\t(🟢 pass, 🔴 fail, ❌ no test result)")
 	for _, test := range tests {
 		for _, mode := range modes {
-			mark := "❌"
-			if test.Results[mode.ID] {
-				mark = "✅"
-			}
-			fmt.Printf("%s\t", mark)
+			fmt.Printf("%s\t", testMatrixMark(test.Results, mode.ID))
 		}
 		fmt.Printf("%s :: %s\n", test.Package, test.Test)
 	}
 	if len(tests) == 0 {
 		fmt.Println("(no Go tests discovered)")
 	}
+}
+
+func testMatrixMark(results map[string]bool, modeID string) string {
+	passed, found := results[modeID]
+	if !found {
+		return "❌"
+	}
+	if passed {
+		return "🟢"
+	}
+	return "🔴"
 }
 
 func safeLogName(value string) string {
