@@ -931,6 +931,28 @@ go run . demo-go -t
 
 Any differences should have a genuine explanation (e.g., test uses blocking I/O not available on rusticated).
 
+### Release Test Matrix
+
+Run all first-party Go tests before packaging the release:
+
+```bash
+go run ./release --test-all
+```
+
+The matrix runs native Go tests on the host and Rusticated tests package by
+package. Windows/ARM64 additionally runs Windows/AMD64 tests through Windows'
+built-in emulator. Linux/ARM64 adds AMD64 modes only when `qemu-x86_64` is
+registered with `binfmt_misc`; Apple Silicon adds them only when Rosetta can
+run an existing system utility. Node mode is included when Node.js 18 or newer
+is available. Duplicate AMD64 modes are omitted on AMD64 hosts, and Windows
+ARM64 is not attempted from other hosts.
+
+Each invocation's stdout and stderr, plus the merged `matrix.json`, are saved
+under `target/release-test-all/`. Test failures do not stop the remaining runs;
+if a mode cannot execute any tests, it is reported as unavailable and omitted
+from the matrix. Any failing cells or collection warnings make the release
+command exit unsuccessfully before packaging.
+
 ---
 
 ## 16. Platform Selection & Node.js Fallback

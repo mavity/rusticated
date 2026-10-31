@@ -59,10 +59,11 @@ This tool executes the build pipeline sequentially to populate release/dist/.
 The first build error immediately halts the batch.
 
 USAGE:
-    go run ./release [-v|--verbose]
+    go run ./release [-v|--verbose] [--test-all]
 
 FLAGS:
     -v, --verbose    Forward verbose build output from compilers and linkers.
+    --test-all       Run first-party Go tests in every supported runtime mode.
     -h, --help       Show this help text.
 
 TARGET VEGETABLES:
@@ -83,6 +84,7 @@ func main() {
 	meta := mohabbat.GetBuildMetadata(ws)
 
 	verbose := false
+	testAll := false
 	for _, arg := range os.Args[1:] {
 		switch arg {
 		case "-h", "--help":
@@ -90,8 +92,17 @@ func main() {
 			os.Exit(0)
 		case "-v", "--verbose":
 			verbose = true
+		case "--test-all":
+			testAll = true
 		default:
 			fmt.Fprintf(os.Stderr, "🍆  error: unrecognized argument %q (use --help for usage)\n", arg)
+			os.Exit(1)
+		}
+	}
+
+	if testAll {
+		if err := runTestAll(ws); err != nil {
+			fmt.Fprintf(os.Stderr, "\n🍆  Test matrix failed: %v\n", err)
 			os.Exit(1)
 		}
 	}
