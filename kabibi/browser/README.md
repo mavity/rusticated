@@ -10,11 +10,12 @@ Super-demo mode includes an always-visible, IBM-PC-inspired on-screen keyboard f
 
 In CRT mode, power-on is requested after the terminal host is ready and begins
 no sooner than 800 ms after the first completed WebGL frame. The bezel remains
-visible over black during this delay. A centre glow grows into a horizontal
-line, then a vertically expanding white flash reveals the live terminal over
-about 1200 ms. Host exit and `dispose()` both wait 500 ms before starting
-power-off, then collapse the image to a centre line and dot over about 800 ms;
-the dot fades over another second. The bezel remains geometrically fixed.
+visible with the moving glass reflections during this delay. The curved
+phosphor surface develops a soft, centre-weighted glow and vignetted line,
+then a vertically expanding white flare reveals the live terminal over about
+1200 ms. Host exit and `dispose()` both wait 500 ms before collapsing only the
+phosphor image to a centre line and dot over about 800 ms; the dot fades over
+another second. The glass reflections and fixed bezel remain visible throughout.
 
 In super-demo mode, the page title is updated to `Kabibi v<version>` when the
 startup banner arrives; disposing the terminal restores the title that was

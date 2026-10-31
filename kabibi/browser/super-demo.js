@@ -737,7 +737,6 @@
     const screenResolution = { x: 1, y: 1 };
     const postResolution = { x: 1, y: 1 };
     const focalPointView = { x: 0, y: 0, z: 0 };
-    const powerCenter = { x: 0.5, y: 0.5 };
     let nearestDistance = 0;
     let farthestDistance = 1;
     const maxBlurPixels = 8.0;
@@ -1029,9 +1028,6 @@
       if (reflectionAnimationStart === null) reflectionAnimationStart = now;
       const elapsed = now - reflectionAnimationStart;
       const powerAnimation = updatePowerAnimation(now);
-      const powerCenterW = Math.abs(viewProjMatrix[15]) > 0.000001 ? viewProjMatrix[15] : 1.0;
-      powerCenter.x = 0.5 + 0.5 * viewProjMatrix[12] / powerCenterW;
-      powerCenter.y = 0.5 + 0.5 * viewProjMatrix[13] / powerCenterW;
       const lightPos = calculateLightPosition(elapsed, screenWidth);
 
       // Pass 1: Render curved CRT surface, thick-glass refraction, Newtonian spectral dispersion,
@@ -1078,6 +1074,7 @@
         lightPos.ellipsoid.rz
       );
       gl.uniform1f(crtUniforms.uOpticalEffects, opticalEffects);
+      gl.uniform2f(crtUniforms.uPowerAnimation, powerAnimation.mode, powerAnimation.progress);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, screenTex);
       gl.uniform1i(crtUniforms.uScreen, 0);
@@ -1097,8 +1094,7 @@
         1.0,
         0.0,
         lightPos,
-        powerAnimation,
-        powerCenter
+        powerAnimation
       );
       gl.bindVertexArray(quadVao);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
@@ -1113,8 +1109,7 @@
         0.0,
         1.0,
         lightPos,
-        powerAnimation,
-        powerCenter
+        powerAnimation
       );
       gl.bindVertexArray(quadVao);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
@@ -1130,8 +1125,7 @@
       dirX,
       dirY,
       lightPos,
-      powerAnimation,
-      powerCenter
+      powerAnimation
     ) {
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, colorTexture);
@@ -1153,7 +1147,6 @@
       gl.uniform3f(uniforms.lightPos, lightPos.x, lightPos.y, lightPos.z);
       gl.uniform1f(uniforms.lightRadius, lightPos.radius);
       gl.uniform2f(uniforms.powerAnimation, powerAnimation.mode, powerAnimation.progress);
-      gl.uniform2f(uniforms.powerCenter, powerCenter.x, powerCenter.y);
     }
 
     function resize() {
@@ -1540,6 +1533,7 @@
         uniform vec3 uEllipsoidPos;
         uniform vec3 uEllipsoidRadii;
         uniform float uOpticalEffects;
+        uniform vec2 uPowerAnimation;
         in vec2 vUv;
         in vec2 vSignedUv;
         in vec3 vWorldPos;
@@ -1547,7 +1541,8 @@
         out vec4 fragColor;
         const float ELLIPSOID_BRIGHTNESS = 0.80;
 
-        vec3 samplePhosphorSurface(vec2 surfaceUv) {
+        vec3 samplePhosphorSurface(vec2 surfaceUv, vec2 powerSourceScale) {
+          surfaceUv = 0.5 + (surfaceUv - 0.5) / powerSourceScale;
           vec2 imageUv = (surfaceUv - 0.5) / uImageScale + 0.5;
           bool outsideImage = any(greaterThan(abs(surfaceUv - 0.5), uImageScale * 0.5));
           vec3 color = uScreenBackground;
@@ -1556,6 +1551,31 @@
           }
           float backgroundPixel = 1.0 - smoothstep(0.003, 0.018, distance(color, uTerminalBackground));
           return mix(color, uScreenBackground, backgroundPixel * 0.90);
+        }
+
+        float evaluatePowerOnFlare(vec2 surfaceUv, float progress) {
+          vec2 point = (surfaceUv - 0.5) * 2.0;
+          float spotRadius = mix(0.018, 0.055, smoothstep(0.0, 0.14, progress));
+          float spotPhase = smoothstep(0.0, 0.025, progress) *
+            (1.0 - smoothstep(0.10, 0.36, progress));
+          float ignition = 2.4 * spotPhase * exp(
+            -0.5 * pow(length(point * vec2(1.0, 1.2)) / spotRadius, 2.0)
+          );
+
+          float lineProgress = smoothstep(0.08, 0.40, progress);
+          float lineReach = mix(0.018, 1.12, lineProgress);
+          float lineAcross = exp(-1.8 * pow(point.x / lineReach, 2.0));
+          float lineThickness = exp(-0.5 * pow(point.y / 0.014, 2.0));
+          float centerWeight = mix(0.78, 0.12, lineProgress) *
+            exp(-0.5 * pow(point.x / 0.14, 2.0));
+          float line = lineProgress * lineAcross * lineThickness * (1.10 + centerWeight);
+
+          float bandProgress = smoothstep(0.34, 0.72, progress);
+          float bandSigma = mix(0.016, 1.55, bandProgress);
+          float bandAcross = exp(-0.5 * pow(point.y / bandSigma, 2.0));
+          float edgeVignette = 1.0 - 0.18 * smoothstep(0.42, 1.30, abs(point.x));
+          float band = 4.2 * bandProgress * bandAcross * edgeVignette;
+          return max(ignition, max(line, band));
         }
 
         float evaluateEllipsoidMatteLight(
@@ -1635,6 +1655,8 @@
         }
 
         void main() {
+          float powerMode = uPowerAnimation.x;
+          float powerProgress = uPowerAnimation.y;
           vec3 N = normalize(vOuterNormal);
           vec3 I = normalize(vWorldPos - uCameraPos);
           vec3 V = -I;
@@ -1655,9 +1677,30 @@
           vec2 uvG = vUv + deltaUvG;
           vec2 uvB = vUv + deltaUvG * (1.0 + 1.18 * dispStrength);
 
-          vec3 phosphorR = samplePhosphorSurface(uvR);
-          vec3 phosphorG = samplePhosphorSurface(uvG);
-          vec3 phosphorB = samplePhosphorSurface(uvB);
+          vec2 powerSourceScale = vec2(1.0);
+          float phosphorCoverage = 1.0;
+          if (powerMode > 2.5) {
+            float verticalProgress = smoothstep(0.0, 0.28, powerProgress);
+            float horizontalProgress = smoothstep(0.28, 0.44445, powerProgress);
+            powerSourceScale = mix(
+              vec2(1.0),
+              vec2(0.010),
+              vec2(horizontalProgress, verticalProgress)
+            );
+            vec2 offset = uvG - 0.5;
+            vec2 halfExtent = 0.5 * powerSourceScale;
+            vec2 edgeWidth = max(fwidth(uvG), vec2(0.000001));
+            vec2 collapseCoverage = 1.0 - smoothstep(
+              halfExtent - edgeWidth * 0.5,
+              halfExtent + edgeWidth * 0.5,
+              abs(offset)
+            );
+            phosphorCoverage = collapseCoverage.x * collapseCoverage.y;
+          }
+
+          vec3 phosphorR = samplePhosphorSurface(uvR, powerSourceScale);
+          vec3 phosphorG = samplePhosphorSurface(uvG, powerSourceScale);
+          vec3 phosphorB = samplePhosphorSurface(uvB, powerSourceScale);
           vec3 terminalColor = vec3(phosphorR.r, phosphorG.g, phosphorB.b);
 
           // 3. Curvature density modulation (Jacobian lensing across curved glass meniscus)
@@ -1766,15 +1809,15 @@
             );
             for (int i = 0; i < 16; i++) {
               vec2 offsetUv = (radialAxis * kernel[i].x * 1.15 + orthoAxis * kernel[i].y * 0.90) * blurScale;
-              vec3 tapColor = max(samplePhosphorSurface(bounceCenter + offsetUv) - uScreenBackground * 1.12, vec3(0.0));
+              vec3 tapColor = max(samplePhosphorSurface(bounceCenter + offsetUv, powerSourceScale) - uScreenBackground * 1.12, vec3(0.0));
               bAvg += tapColor * weights[i];
             }
             float viewGrazing = clamp(1.0 - ndotv, 0.0, 1.0);
             float curvatureFactor = smoothstep(0.04, 0.95, apexDist2);
             // Add a restrained spectral split to the blurred glyph reflection; the final composite blur softens it further.
             vec2 spectralShift = radialAxis * texel * (0.8 + 1.6 * curvatureFactor);
-            vec3 spectralRed = max(samplePhosphorSurface(bounceCenter + spectralShift) - uScreenBackground * 1.12, vec3(0.0));
-            vec3 spectralBlue = max(samplePhosphorSurface(bounceCenter - spectralShift) - uScreenBackground * 1.12, vec3(0.0));
+            vec3 spectralRed = max(samplePhosphorSurface(bounceCenter + spectralShift, powerSourceScale) - uScreenBackground * 1.12, vec3(0.0));
+            vec3 spectralBlue = max(samplePhosphorSurface(bounceCenter - spectralShift, powerSourceScale) - uScreenBackground * 1.12, vec3(0.0));
             vec3 spectralGlyph = vec3(spectralRed.r, bAvg.g, spectralBlue.b);
             vec3 blurredGlyph = mix(bAvg, spectralGlyph, 0.20) * 2.15;
             float lightGlintBoost = 0.85 + 1.15 * clamp(mG + sphereGlint * 0.85, 0.0, 1.4);
@@ -1791,7 +1834,28 @@
           float edgeDistance = min(min(uvG.x, 1.0 - uvG.x), min(uvG.y, 1.0 - uvG.y));
           float edgeLine = 1.0 - smoothstep(0.002, 0.008, edgeDistance);
 
-          vec3 innerComposite = (terminalColor * grille * vignette + matteLight) * (1.0 - fOuter * uOpticalEffects * 0.65);
+          vec3 phosphor = terminalColor * grille * vignette;
+          if (powerMode < 0.5) {
+            phosphor = vec3(0.0);
+          } else if (powerMode < 1.5) {
+            float flareFadeProgress = clamp((powerProgress - 0.70) / 0.30, 0.0, 1.0);
+            float flareFade = exp(-4.0 * flareFadeProgress);
+            float flare = evaluatePowerOnFlare(uvG, powerProgress) * flareFade;
+            float reveal = smoothstep(0.72, 1.0, powerProgress);
+            phosphor = mix(vec3(flare), phosphor, reveal);
+          } else if (powerMode > 2.5) {
+            float imageFade = 1.0 - smoothstep(0.40, 0.44445, powerProgress);
+            phosphor *= phosphorCoverage * imageFade;
+            float dotProgress = smoothstep(0.40, 0.44445, powerProgress);
+            float dotFade = 1.0 - smoothstep(0.44445, 1.0, powerProgress);
+            float pixelFootprint = max(fwidth(uvG.x) + fwidth(uvG.y), 0.000001);
+            float dotDistance = length((uvG - 0.5) * vec2(1.0, 1.25));
+            float dotCore = exp(-0.5 * pow(dotDistance / (pixelFootprint * 1.6), 2.0));
+            float dotHalo = 0.12 * exp(-0.5 * pow(dotDistance / (pixelFootprint * 5.5), 2.0));
+            phosphor += vec3((dotCore + dotHalo) * dotProgress * dotFade * 3.0);
+          }
+
+          vec3 innerComposite = (phosphor + matteLight) * (1.0 - fOuter * uOpticalEffects * 0.65);
           innerComposite = mix(innerComposite, vec3(0.045, 0.065, 0.085), edgeLine * 0.65);
           vec3 finalLinear = innerComposite + outerReflection;
           fragColor = vec4(finalLinear, 1.0);
@@ -1810,7 +1874,8 @@
         'uLightRadius',
         'uEllipsoidPos',
         'uEllipsoidRadii',
-        'uOpticalEffects'
+        'uOpticalEffects',
+        'uPowerAnimation'
       ]);
       crtProgram = built.program;
       crtUniforms = built.locations;
@@ -1873,7 +1938,6 @@
         uniform vec3 lightPos;
         uniform float lightRadius;
         uniform vec2 powerAnimation;
-        uniform vec2 powerCenter;
         uniform vec3 focalPointView;
         uniform float nearestDistance;
         uniform float farthestDistance;
@@ -1937,23 +2001,8 @@
           float powerMode = powerAnimation.x;
           float powerProgress = powerAnimation.y;
           vec2 sampleCenterUv = vUv;
-          float sampleValid = 1.0;
-          if (direction.y > 0.5 && powerMode > 2.5) {
-            float verticalProgress = smoothstep(0.0, 0.28, powerProgress);
-            float horizontalProgress = smoothstep(0.28, 0.44445, powerProgress);
-            float scaleY = mix(1.0, 0.010, verticalProgress);
-            float scaleX = mix(1.0, 0.010, horizontalProgress);
-            vec2 offset = vUv - powerCenter;
-            sampleValid = step(abs(offset.x), 0.5 * scaleX) *
-              step(abs(offset.y), 0.5 * scaleY);
-            sampleCenterUv = clamp(
-              powerCenter + offset / vec2(scaleX, scaleY),
-              vec2(0.0),
-              vec2(1.0)
-            );
-          }
-          float depth = sampleValid > 0.5 ? texture(sceneDepth, sampleCenterUv).r : 1.0;
-          vec4 source = sampleValid > 0.5 ? texture(sceneColor, sampleCenterUv) : vec4(0.0);
+          float depth = texture(sceneDepth, sampleCenterUv).r;
+          vec4 source = texture(sceneColor, sampleCenterUv);
           if (opticalEffects < 0.5 && powerMode == 2.0) {
             fragColor = source;
             OUTPUT_COLOR
@@ -2046,52 +2095,12 @@
               1.0
             );
             float gasketCoverage = outerCoverage * (1.0 - innerCoverage) * hitValid;
-            float screenCoverage = innerCoverage * hitValid;
-            if (powerMode < 0.5) {
-              composite.rgb = mix(composite.rgb, vec3(0.0), screenCoverage);
-            } else if (powerMode < 1.5) {
-              vec2 screenCoord = surfacePosition.xy / screenHalfSize;
-              float progress = powerProgress;
-              float centerDistance = length(screenCoord * vec2(1.0, 1.25));
-              float ignition = exp(-0.5 * pow(centerDistance / 0.11, 2.0)) *
-                smoothstep(0.0, 0.035, progress) *
-                (1.0 - smoothstep(0.12, 0.38, progress));
-              float lineProgress = smoothstep(0.10, 0.39, progress);
-              float lineHalfWidth = mix(0.008, 1.12, lineProgress);
-              float lineEdge = max(pixelFootprint / screenHalfSize.x, 0.006);
-              float lineAcross = 1.0 - smoothstep(
-                lineHalfWidth,
-                lineHalfWidth + lineEdge,
-                abs(screenCoord.x)
-              );
-              float lineCore = exp(-0.5 * pow(screenCoord.y / 0.018, 2.0)) *
-                lineAcross * lineProgress *
-                (0.50 + 0.18 * exp(-abs(screenCoord.x) * 12.0));
-              float bandProgress = smoothstep(0.34, 0.62, progress);
-              float bandHalfHeight = mix(0.018, 1.12, bandProgress);
-              float bandEdge = max(pixelFootprint / screenHalfSize.y, 0.006);
-              float bandAcross = 1.0 - smoothstep(
-                bandHalfHeight,
-                bandHalfHeight + bandEdge,
-                abs(screenCoord.y)
-              );
-              float flareFadeProgress = clamp((progress - 0.62) / 0.38, 0.0, 1.0);
-              float flareFade = exp(-4.0 * flareFadeProgress);
-              float flare = max(ignition, max(lineCore, bandAcross * bandProgress)) * flareFade;
-              float reveal = smoothstep(0.90, 1.0, progress);
-              vec3 poweredColor = mix(vec3(flare), composite.rgb, reveal);
-              composite.rgb = mix(composite.rgb, poweredColor, screenCoverage);
-              bezelIllumination = smoothstep(0.30, 0.80, progress) *
-                (1.0 - smoothstep(0.92, 1.0, progress));
+            if (powerMode > 0.5 && powerMode < 1.5) {
+              bezelIllumination = smoothstep(0.30, 0.80, powerProgress) *
+                (1.0 - smoothstep(0.92, 1.0, powerProgress));
             } else if (powerMode > 2.5) {
               float dotProgress = smoothstep(0.40, 0.44445, powerProgress);
               float dotFade = 1.0 - smoothstep(0.44445, 1.0, powerProgress);
-              vec2 dotOffset = (vUv - powerCenter) * resolution;
-              float dotDistance = length(dotOffset);
-              float dotCore = exp(-0.5 * pow(dotDistance / 1.6, 2.0));
-              float dotHalo = 0.12 * exp(-0.5 * pow(dotDistance / 5.5, 2.0));
-              float dotBrightness = (dotCore + dotHalo) * dotProgress * dotFade;
-              composite.rgb = mix(composite.rgb, vec3(dotBrightness), screenCoverage);
               bezelIllumination = 0.25 * dotProgress * dotFade;
             }
             if (gasketCoverage > 0.0 && opticalEffects > 0.5) {
@@ -2174,7 +2183,6 @@
         'lightPos',
         'lightRadius',
         'powerAnimation',
-        'powerCenter',
         'focalPointView',
         'nearestDistance',
         'farthestDistance',

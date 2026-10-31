@@ -1011,9 +1011,17 @@ test('CRT blur is a final composite pass with endpoints measured on curved geome
   );
   assert.match(source, /uniform float lightRadius/);
   assert.match(source, /uniform vec2 powerAnimation/);
-  assert.match(source, /uniform vec2 powerCenter/);
-  assert.match(source, /powerCenter\.x = 0\.5 \+ 0\.5 \* viewProjMatrix\[12\]/);
-  assert.match(source, /powerCenter \+ offset \/ vec2\(scaleX, scaleY\)/);
+  assert.match(source, /uniform vec2 uPowerAnimation/);
+  assert.match(source, /float evaluatePowerOnFlare\(vec2 surfaceUv, float progress\)/);
+  assert.match(source, /float lineAcross = exp\(-1\.8 \* pow\(point\.x \/ lineReach, 2\.0\)\)/);
+  assert.match(source, /float centerWeight = mix\(0\.78, 0\.12, lineProgress\)/);
+  assert.match(source, /float edgeVignette = 1\.0 - 0\.18 \* smoothstep/);
+  assert.match(source, /vec2 collapseCoverage = 1\.0 - smoothstep\(/);
+  assert.match(source, /samplePhosphorSurface\(vec2 surfaceUv, vec2 powerSourceScale\)/);
+  assert.match(source, /phosphor = mix\(vec3\(flare\), phosphor, reveal\)/);
+  assert.match(source, /phosphor \*= phosphorCoverage \* imageFade/);
+  assert.match(source, /vec3 innerComposite = \(phosphor \+ matteLight\)/);
+  assert.match(source, /vec3 finalLinear = innerComposite \+ outerReflection/);
   assert.match(source, /const POWER_ON_DELAY_MS = 800/);
   assert.match(source, /const POWER_ON_DURATION_MS = 1200/);
   assert.match(source, /const POWER_OFF_DELAY_MS = 500/);
@@ -1023,12 +1031,10 @@ test('CRT blur is a final composite pass with endpoints measured on curved geome
   assert.match(source, /vec2 roundedRectInsideGradient\(/);
   assert.match(source, /surfacePosition\.z \+= embossHeight/);
   assert.match(source, /- embossSlope \* edgeGradient\.x/);
-  assert.match(source, /float lineHalfWidth = mix\(0\.008, 1\.12, lineProgress\)/);
-  assert.match(source, /float bandProgress = smoothstep\(0\.34, 0\.62, progress\)/);
+  assert.match(source, /float bandProgress = smoothstep\(0\.34, 0\.72, progress\)/);
   assert.match(source, /float flareFade = exp\(-4\.0 \* flareFadeProgress\)/);
-  assert.match(source, /float bandHalfHeight = mix\(0\.018, 1\.12, bandProgress\)/);
-  assert.match(source, /float scaleY = mix\(1\.0, 0\.010, verticalProgress\)/);
-  assert.match(source, /float scaleX = mix\(1\.0, 0\.010, horizontalProgress\)/);
+  assert.match(source, /float bandSigma = mix\(0\.016, 1\.55, bandProgress\)/);
+  assert.match(source, /powerSourceScale = mix\(/);
   assert.match(source, /textureContext\.filter = 'sepia\(40%\) saturate\(1\.05\)'/);
   assert.equal(
     (source.match(/drawWarmTerminalImage\((?:viewport, targetWidth, targetHeight|viewport, textureCanvas\.width, textureCanvas\.height)\);\s*applyScanlines\(\);/g) || []).length,
