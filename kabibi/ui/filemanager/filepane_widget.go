@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"unicode"
@@ -13,6 +12,7 @@ import (
 	"github.com/mattn/go-runewidth"
 	"github.com/mavity/rusticated/kabibi/ui"
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
+	"github.com/mavity/rusticated/platform"
 	"golang.org/x/text/language"
 	"golang.org/x/text/message"
 	"golang.org/x/text/number"
@@ -144,7 +144,7 @@ func IsExecutableFile(path string) bool {
 		return false
 	}
 	ext := strings.ToLower(filepath.Ext(path))
-	if runtime.GOOS == "windows" {
+	if platform.HostOS() == "windows" {
 		if ext == ".sh" {
 			return true
 		}

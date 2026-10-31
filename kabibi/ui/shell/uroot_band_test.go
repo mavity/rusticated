@@ -26,6 +26,89 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+func TestTCPReadObservesPeerClose(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	serverAccepted := make(chan struct{})
+	serverDone := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		close(serverAccepted)
+		_, writeErr := conn.Write([]byte("tcp payload"))
+		closeErr := conn.Close()
+		if writeErr != nil {
+			serverDone <- writeErr
+			return
+		}
+		serverDone <- closeErr
+	}()
+
+	client, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	type readResult struct {
+		n    int
+		data []byte
+		err  error
+	}
+	readDone := make(chan readResult, 1)
+	go func() {
+		data := make([]byte, len("tcp payload"))
+		n, err := io.ReadFull(client, data)
+		readDone <- readResult{n: n, data: data, err: err}
+	}()
+
+	select {
+	case result := <-readDone:
+		if result.err != nil {
+			t.Fatalf("read TCP payload: n=%d err=%v", result.n, result.err)
+		}
+		if result.n != len("tcp payload") {
+			t.Fatalf("TCP payload length = %d, want %d", result.n, len("tcp payload"))
+		}
+		if string(result.data) != "tcp payload" {
+			t.Fatalf("TCP payload = %q, want %q", result.data, "tcp payload")
+		}
+	case <-time.After(3 * time.Second):
+		accepted := false
+		select {
+		case <-serverAccepted:
+			accepted = true
+		default:
+		}
+		t.Fatalf("TCP read did not receive payload (server accepted=%t)", accepted)
+	}
+
+	eofDone := make(chan error, 1)
+	go func() {
+		var b [1]byte
+		_, err := client.Read(b[:])
+		eofDone <- err
+	}()
+	select {
+	case err := <-eofDone:
+		if err != io.EOF {
+			t.Fatalf("read after peer close = %v, want EOF", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("TCP read did not return EOF after peer closed")
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatalf("server write/close: %v", err)
+	}
+}
+
 func setupTestShell(t *testing.T) (string, func(string) (string, int, error)) {
 	t.Helper()
 	dir := t.TempDir()
@@ -1086,7 +1169,7 @@ func TestURoot_Band2_DataTransferAndNetwork(t *testing.T) {
 		}()
 
 		host, port, _ := net.SplitHostPort(l.Addr().String())
-		out, code, _ := run(fmt.Sprintf("nc %s %s", host, port))
+		out, code, _ := run(fmt.Sprintf("nc --recv-only %s %s", host, port))
 		if code != 0 || !strings.Contains(out, "hello from tcp listener") {
 			t.Errorf("nc client receive failed: code=%d out=%q", code, out)
 		}
@@ -1111,7 +1194,7 @@ func TestURoot_Band2_DataTransferAndNetwork(t *testing.T) {
 		}()
 
 		host2, port2, _ := net.SplitHostPort(l2.Addr().String())
-		_, code, _ = run(fmt.Sprintf("echo 'message to listener' | netcat %s %s", host2, port2))
+		_, code, _ = run(fmt.Sprintf("echo 'message to listener' | netcat --send-only %s %s", host2, port2))
 		if code != 0 {
 			t.Errorf("netcat send failed: code=%d", code)
 		}

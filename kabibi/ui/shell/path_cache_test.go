@@ -3,10 +3,10 @@ package shell
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
+	"github.com/mavity/rusticated/platform"
 	"mvdan.cc/sh/v3/expand"
 )
 
@@ -30,7 +30,7 @@ func TestBuildPathCacheSnapshotIndexesExecutablesScriptsAndWindowsExtensions(t *
 	writeFile(filepath.Join(cwd, "local-script"), 0o644)
 	writeFile(filepath.Join(pathDir, "deploy.CMD"), 0o644)
 
-	if runtime.GOOS != "windows" {
+	if platform.HostOS() != "windows" {
 		writeFile(filepath.Join(pathDir, "path-command"), 0o755)
 		writeFile(filepath.Join(pathDir, "not-executable"), 0o644)
 		unixSnapshot := buildPathCacheSnapshot(pathCacheKey{
@@ -63,20 +63,27 @@ func TestBuildPathCacheSnapshotIndexesExecutablesScriptsAndWindowsExtensions(t *
 }
 
 func TestClassifyInputForDisplayUsesPATHSnapshotOnly(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses Unix executable permissions")
-	}
-
-	execSession, err := NewExecutionSession(t.TempDir())
+	execSession, err := NewExecutionSession("")
 	if err != nil {
 		t.Fatalf("NewExecutionSession: %v", err)
 	}
 	defer execSession.Close()
+	execSession.pathCache.close()
+	execSession.pathCache = newPathCommandCache()
 
+	windowsLike := platform.HostOS() == "windows"
 	pathDir := t.TempDir()
 	name := "kabibi-cache-probe-unique"
-	path := filepath.Join(pathDir, name)
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+	pathName := name
+	pathExt := ""
+	mode := os.FileMode(0o755)
+	if windowsLike {
+		pathName += ".CMD"
+		pathExt = ".CMD"
+		mode = 0o600
+	}
+	path := filepath.Join(pathDir, pathName)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), mode); err != nil {
 		t.Fatal(err)
 	}
 
@@ -87,12 +94,22 @@ func TestClassifyInputForDisplayUsesPATHSnapshotOnly(t *testing.T) {
 		Kind:     expand.String,
 		Str:      pathDir,
 	}
+	if windowsLike {
+		execSession.runner.Vars["PATHEXT"] = expand.Variable{
+			Set:      true,
+			Exported: true,
+			Kind:     expand.String,
+			Str:      pathExt,
+		}
+	}
 	execSession.runMu.Unlock()
 
 	env := execSession.EnvMap()
 	cacheKey := pathCacheKey{
-		cwd:  execSession.Dir(),
-		path: env["PATH"],
+		cwd:         execSession.Dir(),
+		path:        env["PATH"],
+		pathExt:     env["PATHEXT"],
+		windowsLike: windowsLike,
 	}
 	execSession.pathCache.mu.Lock()
 	execSession.pathCache.snapshot = buildPathCacheSnapshot(cacheKey)
@@ -119,14 +136,15 @@ func TestPathCommandCacheRefreshesAndCloses(t *testing.T) {
 	root := t.TempDir()
 	name := "cached-command"
 	pathExt := ""
-	if runtime.GOOS == "windows" {
+	windowsLike := platform.HostOS() == "windows"
+	if windowsLike {
 		name = "cached-command.EXE"
 		pathExt = ".EXE"
 	}
 	if err := os.WriteFile(filepath.Join(root, name), []byte("x"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	key := pathCacheKey{cwd: root, path: root, pathExt: pathExt, windowsLike: runtime.GOOS == "windows"}
+	key := pathCacheKey{cwd: root, path: root, pathExt: pathExt, windowsLike: windowsLike}
 	cache.schedule(key, true)
 
 	deadline := time.Now().Add(time.Second)

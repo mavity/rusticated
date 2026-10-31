@@ -416,6 +416,9 @@ func Syscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err Errno) {
 			rusticated_tty_set_mode(handle, mode)
 			return 0, 0, 0
 		case TCGETS:
+			if !Isatty(a1) {
+				return 0, 0, ENOTTY
+			}
 			t := (*Termios)(unsafe.Pointer(a3))
 			*t = Termios{
 				Iflag: 0x01 | 0x02 | 0x04 | 0x08 | 0x10 | 0x20 | 0x40 | 0x80 | 0x100 | 0x400, // various unix defaults

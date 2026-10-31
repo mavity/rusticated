@@ -9,11 +9,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
+	"github.com/mavity/rusticated/platform"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
@@ -253,7 +253,7 @@ func expandWindowsEnvVars(value string, env map[string]string) string {
 }
 
 func isWindowsLikeEnv(env map[string]string) bool {
-	if runtime.GOOS == "windows" {
+	if platform.HostOS() == "windows" {
 		return true
 	}
 	if _, ok := lookupEnvValue(env, "PATHEXT"); ok {
