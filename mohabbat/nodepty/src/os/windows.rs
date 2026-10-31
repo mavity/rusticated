@@ -205,9 +205,21 @@ fn to_wide(value: *const u8, output: &mut [u16]) -> Result<usize, i32> {
     Ok(written)
 }
 
-fn append_quoted(input: *const u8, command: &mut [u16], position: &mut usize) -> Result<(), i32> {
+fn append_quoted(
+    input: *const u8,
+    command: &mut [u16],
+    position: &mut usize,
+    normalize_path_separators: bool,
+) -> Result<(), i32> {
     let mut wide = [0u16; 8192];
     let length = to_wide(input, &mut wide)?;
+    if normalize_path_separators {
+        for ch in &mut wide[..length] {
+            if *ch == b'/' as u16 {
+                *ch = b'\\' as u16;
+            }
+        }
+    }
     let quote = length == 0
         || wide[..length]
             .iter()
@@ -332,7 +344,8 @@ fn ascii_to_wide(input: &[u8], output: &mut [u16]) {
 unsafe extern "system" fn connect_pipes(parameter: *mut c_void) -> u32 {
     let index = parameter as usize - 1;
     let session = unsafe { core::ptr::addr_of!(SESSIONS[index]).read() };
-    for pipe in [session.input_pipe, session.output_pipe] {
+    // Connect output first so an unopened stdin writer cannot block startup output.
+    for pipe in [session.output_pipe, session.input_pipe] {
         if unsafe { ConnectNamedPipe(pipe, core::ptr::null_mut()) } == 0 {
             let error = unsafe { GetLastError() };
             if error != ERROR_PIPE_CONNECTED {
@@ -452,12 +465,17 @@ pub fn spawn(config: &mut [u8], cols: i32, rows: i32) -> Result<SpawnResult, i32
 
     let mut command_line = [0u16; 32768];
     let mut command_len = 0;
-    for arg in spec.argv[..spec.argc].iter().copied() {
+    for (index, arg) in spec.argv[..spec.argc].iter().copied().enumerate() {
         if command_len > 0 {
             command_line[command_len] = b' ' as u16;
             command_len += 1;
         }
-        if let Err(error) = append_quoted(arg, &mut command_line, &mut command_len) {
+        if let Err(error) = append_quoted(
+            arg,
+            &mut command_line,
+            &mut command_len,
+            index == 0,
+        ) {
             close_resources(&mut session);
             return Err(error);
         }

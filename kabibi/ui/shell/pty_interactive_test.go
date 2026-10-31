@@ -103,6 +103,27 @@ func TestInteractiveChildShell_LifecycleAndIO(t *testing.T) {
 	if es == nil {
 		t.Fatal("expected non-nil ExecutionSession")
 	}
+	if strings.EqualFold(hostOS, "windows") {
+		env := es.EnvMap()
+		names := make(map[string]string, len(env))
+		foundSystemRoot := false
+		for name, value := range env {
+			canonical := strings.ToUpper(name)
+			if previous, ok := names[canonical]; ok {
+				t.Fatalf("Windows shell environment contains duplicate keys %q and %q", previous, name)
+			}
+			names[canonical] = name
+			if canonical == "SYSTEMROOT" {
+				if value == "" {
+					t.Fatal("Windows shell environment has an empty SystemRoot")
+				}
+				foundSystemRoot = true
+			}
+		}
+		if !foundSystemRoot {
+			t.Fatal("Windows shell environment is missing SystemRoot")
+		}
+	}
 
 	// 1. Launch the interactive shell command into Kabibi input
 	for _, ch := range cmd {
@@ -170,7 +191,7 @@ func TestInteractiveChildShell_LifecycleAndIO(t *testing.T) {
 	for time.Now().Before(echoDeadline) {
 		blocks := s.Blocks()
 		if len(blocks) > 0 {
-			out := blocks[len(blocks)-1].Output.String()
+			out := shell.CleanBytesToText([]byte(blocks[len(blocks)-1].Output.String()), 80, false)
 			if strings.Count(out, marker) >= 2 {
 				echoReceived = true
 				break
@@ -183,8 +204,8 @@ func TestInteractiveChildShell_LifecycleAndIO(t *testing.T) {
 		if len(blocks) == 0 {
 			t.Fatal("expected shell output after sending echo command, got no blocks")
 		}
-		t.Fatalf("expected echoed command and command output to contain %q, got: %q",
-			marker, blocks[len(blocks)-1].Output.String())
+		out := shell.CleanBytesToText([]byte(blocks[len(blocks)-1].Output.String()), 80, false)
+		t.Fatalf("expected echoed command and command output to contain %q, got: %q", marker, out)
 	}
 
 	// 6. Type `exit <Enter>` into that input
