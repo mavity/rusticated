@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"slices"
 
-	sedcmd "github.com/mavity/rusticated/kabibi/internal/sed"
 	"github.com/u-root/u-root/cmds/core/backoff"
 	base64cmd "github.com/u-root/u-root/cmds/core/base64"
 	"github.com/u-root/u-root/cmds/core/basename"
@@ -60,6 +59,7 @@ import (
 	"github.com/u-root/u-root/cmds/core/realpath"
 	"github.com/u-root/u-root/cmds/core/rm"
 	scpcmd "github.com/u-root/u-root/cmds/core/scp"
+	sedcmd "github.com/u-root/u-root/cmds/core/sed"
 	"github.com/u-root/u-root/cmds/core/seq"
 	"github.com/u-root/u-root/cmds/core/shasum"
 	"github.com/u-root/u-root/cmds/core/sleep"
