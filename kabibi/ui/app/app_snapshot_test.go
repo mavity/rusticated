@@ -131,7 +131,7 @@ func newSnapshotWidget(scrollback *string) *AppWidget {
 
 // TestAppWidget_Snapshot_Initial_W80H24 verifies initial state.
 // Viewport: 80×24
-// State: Fresh shell, retro banner, ፧ prompt ready for input, and 1 blank footer line below
+// State: Fresh shell, startup banner, ፧ prompt ready for input, and blank footer below
 func TestAppWidget_Snapshot_Initial_W80H24(t *testing.T) {
 	var scrollback string
 	widget := newSnapshotWidget(&scrollback)
@@ -236,7 +236,7 @@ func TestAppWidget_Snapshot_CursorMovement_W80H24(t *testing.T) {
 }
 
 // TestAppWidget_Snapshot_BluePanels_Open_W80H24 verifies the dual blue panels
-// HUD over the top 18 rows with a 6-row bottom gap for the retro banner,
+// HUD over the top 18 rows with a 6-row bottom gap for the startup banner,
 // spacer, ፧ prompt, and blank footer.
 func TestAppWidget_Snapshot_BluePanels_Open_W80H24(t *testing.T) {
 	var scrollback string

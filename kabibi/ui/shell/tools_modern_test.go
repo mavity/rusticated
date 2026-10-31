@@ -48,8 +48,14 @@ func TestModernTools_ReadFileHashlineFabricAndEditFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read_file search failed: %v", err)
 	}
-	readMap := readOut.(map[string]any)
-	hashlinesStr := readMap["hashlines"].(string)
+	readMap, ok := readOut.(map[string]any)
+	if !ok {
+		t.Fatalf("read_file result = %T, want map", readOut)
+	}
+	hashlinesStr, ok := readMap["content"].(string)
+	if !ok {
+		t.Fatalf("read_file content = %T, want formatted string: %#v", readMap["content"], readMap)
+	}
 	if !strings.Contains(hashlinesStr, "func Beta() string {") {
 		t.Fatalf("expected fabric expansion to include enclosing Beta header:\n%s", hashlinesStr)
 	}

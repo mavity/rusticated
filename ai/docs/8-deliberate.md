@@ -86,8 +86,7 @@ To keep existing tools ergonomic while exposing `ToolContext` cleanly:
   - `goal` (`string`, required): `"One-sentence description of the underlying goal and task required to address the user's request."`
   - `explanation` (`string`, required — auto-injected): `"Brief explanation of why deliberation is needed."`
 * **Execution Flow Inside `deliberate`:**
-  1. Initializes the `liveStreamer` on `tc.Feedback`.
-  2. Streams `[goal] <goal>` onto the ticker.
+  1. Captures the extracted goal.
   3. Creates a `Tools: nil` contemplation conversation on `tc.Engine` seeded with `baseHistory + User(userText)`, and uses `Conversation.Clone()` (`litert_lm_conversation_clone`) to fork each branch without re-prefilling `baseHistory`:
      - `[expectation]` $\rightarrow$ derives `ExpectedDetail` (`<detail_level>`).
      - Advances the base contemplation conversation with `Model("I need to think first, the goal here is probably: " + effectiveGoal)` and clones it for:
@@ -96,7 +95,7 @@ To keep existing tools ergonomic while exposing `ToolContext` cleanly:
      - `[safety]` $\rightarrow$ critiques safety/edge cases of `<steps>`.
      - `[grounded]` $\rightarrow$ critiques unverified assumptions in `<steps>`.
      - `[plan]` $\rightarrow$ tribunal synthesis producing `SynthesizedPlan` (`<plan>`).
-  4. Wipes the ticker (`streamer.Wipe()`) and records the populated `*CognitiveTrace` on the active turn so it attaches to the final `RoleModel` turn in `CanonicalHistory` (and triggers background embedding of `Goal + SynthesizedPlan`).
+  4. Records the populated `*CognitiveTrace` on the active turn so it attaches to the final `RoleModel` turn in `CanonicalHistory` (and triggers background embedding of `Goal + SynthesizedPlan`).
   5. Returns a structured tool response to the primary model:
      ```json
      {

@@ -247,7 +247,7 @@ func TestURootPilotCommands(t *testing.T) {
 		t.Fatalf("ln failed (code=%d, err=%v): %q", code, err, out)
 	}
 
-	out, code, err = runShell("chmod 0644 touched.txt")
+	out, code, err = runShell("chmod 0666 touched.txt")
 	if err != nil || code != 0 {
 		t.Fatalf("chmod failed (code=%d, err=%v): %q", code, err, out)
 	}

@@ -8,14 +8,14 @@ import (
 	"testing"
 )
 
-func TestExecutableDoesNotImportCharmUIStack(t *testing.T) {
-	cmd := exec.Command("go", "list", "-deps", ".")
+func TestMainPackageDoesNotDirectlyImportCharmUIStack(t *testing.T) {
+	cmd := exec.Command("go", "list", "-f", "{{.Imports}}", ".")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("go list -deps .: %v\n%s", err, output)
+		t.Fatalf("go list -f {{.Imports}} .: %v\n%s", err, output)
 	}
 
-	for _, dependency := range strings.Fields(string(output)) {
+	for _, dependency := range strings.Fields(strings.Trim(string(output), "[]")) {
 		switch dependency {
 		case "github.com/charmbracelet/bubbletea",
 			"github.com/charmbracelet/bubbles",

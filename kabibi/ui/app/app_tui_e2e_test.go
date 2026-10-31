@@ -240,16 +240,16 @@ func TestAppTUI_EndToEnd_RealFilesystemAndAIFallback(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// Initial stack height: 3 banner rows + 1 input row + 1 blank footer row = 5 rows.
-	const initialStackH = 5
+	// Initial stack height: 3 banner/plume rows + 1 input row + spacer and footer = 6 rows.
+	const initialStackH = 6
 	if got := appWidget.Measure(ui.Constraints{MaxW: termW, MaxH: termH}); got.H != initialStackH {
 		t.Fatalf("initial Measure() = %#v, want H=%d", got, initialStackH)
 	}
 
 	// Verify wrapped multi-line input in ModeStack: type a command longer than 80 columns
 	// ("echo " + 85 'z' chars = 90 chars + prompt chars -> 2 visual input rows),
-	// verify the Shell stack grows by 1 row (to initialStackH + 1 = 6 rows),
-	// then delete it all with Ctrl+C and verify it shrinks back to initialStackH (5 rows),
+	// verify the Shell stack grows by 1 row (to initialStackH + 1 = 7 rows),
+	// then delete it all with Ctrl+C and verify it shrinks back to initialStackH (6 rows),
 	// opening a 1-row slack gap at the bottom that gets closed before any upward ejection.
 	longPreview := "echo " + strings.Repeat("z", 85)
 	if _, err := io.WriteString(inW, longPreview); err != nil {
@@ -351,9 +351,10 @@ func TestAppTUI_EndToEnd_RealFilesystemAndAIFallback(t *testing.T) {
 
 	// Verify the ordered substrings of rendered screen lines in the VT emulator
 	wantLineSubstrings := []string{
-		"KABIBI // RUSTICATED COMPUTING SUPERVISOR",
-		"64K CELL MATRIX OK",
-		"Kabibi shell initialized. Type commands below.",
+		"wearable all-weather shell v0.8.22",
+		"- bash",
+		"file manager (Ctrl+O)",
+		"AI harness (ask anything in prompt)",
 		"፧mkdir sub && echo real_fs_content > sub/created.txt",
 		"፧cd sub && cat created.txt",
 		"real_fs_content",
@@ -485,9 +486,10 @@ func TestAppTUI_EndToEnd_ScrollbackEjectionOnSmallViewport(t *testing.T) {
 	}
 
 	wantFullHistoryAndViewport := []string{
-		"KABIBI // RUSTICATED COMPUTING SUPERVISOR",
-		"64K CELL MATRIX OK",
-		"Kabibi shell initialized. Type commands below.",
+		"wearable all-weather shell v0.8.22",
+		"- bash",
+		"file manager (Ctrl+O)",
+		"AI harness (ask anything in prompt)",
 		"፧echo line_1 > f.txt && cat f.txt",
 		"line_1",
 		"፧echo line_2 > f.txt && cat f.txt",
@@ -600,8 +602,8 @@ func TestAppTUI_TrailingSpaceAndCursorMovementUpdatesImmediately(t *testing.T) {
 }
 
 // TestAppTUI_ModeToggle_ZeroPlumeAndPlumeHistory verifies that ShellMode can be
-// toggled cleanly between ModeStack (dynamic 3-part stack: 3 banner rows + input +
-// 1 blank footer line) and ModePlumeHistory (full-viewport multi-block rendering
+// toggled cleanly between ModeStack (dynamic stack: 3 banner/plume rows + input +
+// spacer and footer) and ModePlumeHistory (full-viewport multi-block rendering
 // retained for future file-panel integration).
 func TestAppTUI_ModeToggle_ZeroPlumeAndPlumeHistory(t *testing.T) {
 	workDir := t.TempDir()
@@ -615,14 +617,14 @@ func TestAppTUI_ModeToggle_ZeroPlumeAndPlumeHistory(t *testing.T) {
 	defer wZero.Close()
 	wZero.Shell().SetPrompt("፧")
 
-	// Initial ModeStack: 3 banner rows + 1 input row + 1 blank footer row = 5 rows; cursor on row 3 (input row)
-	if got := wZero.Measure(ui.Constraints{MaxW: 80, MaxH: 24}); got != (ui.Size{W: 80, H: 5}) {
-		t.Fatalf("ModeStack Measure() = %#v, want {W:80, H:5}", got)
+	// Initial ModeStack: 3 banner/plume rows + 1 input row + spacer and footer = 6 rows; cursor on row 3.
+	if got := wZero.Measure(ui.Constraints{MaxW: 80, MaxH: 24}); got != (ui.Size{W: 80, H: 6}) {
+		t.Fatalf("ModeStack Measure() = %#v, want {W:80, H:6}", got)
 	}
 
 	bufZero, curZero := renderAppANSIForTest(t, wZero.Render(ui.Rect{X: 0, Y: 0, W: 80, H: 24}, ui.RenderContext{Focused: true}), 80, 24)
-	if bufZero.Height != 5 || curZero.Y != 3 {
-		t.Fatalf("ModeStack Render() height=%d cursorY=%d, want height=5 cursorY=3", bufZero.Height, curZero.Y)
+	if bufZero.Height != 6 || curZero.Y != 4 {
+		t.Fatalf("ModeStack Render() height=%d cursorY=%d, want height=6 cursorY=4", bufZero.Height, curZero.Y)
 	}
 
 	// Switch dynamically to ModePlumeHistory and verify full-viewport Measure & Render
@@ -642,13 +644,13 @@ func TestAppTUI_ModeToggle_ZeroPlumeAndPlumeHistory(t *testing.T) {
 	}
 
 	wZero.Shell().SetMode(shell.ModeStack)
-	// 3 banner rows + 3 wrapped input rows + 1 blank footer row = 7 rows
-	if got := wZero.Measure(ui.Constraints{MaxW: 80, MaxH: 24}); got != (ui.Size{W: 80, H: 7}) {
-		t.Fatalf("ModeStack wrapped Measure() = %#v, want {W:80, H:7}", got)
+	// 3 banner/plume rows + 3 wrapped input rows + spacer and footer = 8 rows.
+	if got := wZero.Measure(ui.Constraints{MaxW: 80, MaxH: 24}); got != (ui.Size{W: 80, H: 8}) {
+		t.Fatalf("ModeStack wrapped Measure() = %#v, want {W:80, H:8}", got)
 	}
 	wZero.Shell().SetInput("")
-	if got := wZero.Measure(ui.Constraints{MaxW: 80, MaxH: 24}); got != (ui.Size{W: 80, H: 5}) {
-		t.Fatalf("ModeStack cleared Measure() = %#v, want {W:80, H:5}", got)
+	if got := wZero.Measure(ui.Constraints{MaxW: 80, MaxH: 24}); got != (ui.Size{W: 80, H: 6}) {
+		t.Fatalf("ModeStack cleared Measure() = %#v, want {W:80, H:6}", got)
 	}
 }
 
@@ -691,7 +693,7 @@ func TestAppTUI_SlackGapRecovery_PushDownBeforeEjectingUp(t *testing.T) {
 
 	var rawTermOut syncBuffer
 	// Viewport 80x9:
-	// Initial stack = 3 banner rows + 1 input row + 1 blank footer = 5 rows.
+	// Initial stack = 3 banner/plume rows + 1 input row + spacer and footer = 6 rows.
 	const termW, termH = 80, 9
 
 	runDone := make(chan error, 1)
@@ -718,21 +720,21 @@ func TestAppTUI_SlackGapRecovery_PushDownBeforeEjectingUp(t *testing.T) {
 	_, _ = io.WriteString(inW, strings.Repeat("x", 170))
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if appWidget.Measure(ui.Constraints{MaxW: termW, MaxH: termH}).H == 7 {
+		if appWidget.Measure(ui.Constraints{MaxW: termW, MaxH: termH}).H == 8 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if got := appWidget.Measure(ui.Constraints{MaxW: termW, MaxH: termH}).H; got != 7 {
-		t.Fatalf("after 3-row input wrap, Measure().H = %d, want 7", got)
+	if got := appWidget.Measure(ui.Constraints{MaxW: termW, MaxH: termH}).H; got != 8 {
+		t.Fatalf("after 3-row input wrap, Measure().H = %d, want 8", got)
 	}
 
-	// 2. Delete wrapped input via Ctrl+C -> occupied stack shrinks back to 5 rows,
+	// 2. Delete wrapped input via Ctrl+C -> occupied stack shrinks back to 6 rows,
 	// leaving a 2-row slack gap at the bottom of the 7-row allocated footprint.
 	_, _ = io.WriteString(inW, "\x03")
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if appWidget.Measure(ui.Constraints{MaxW: termW, MaxH: termH}).H == 5 {
+		if appWidget.Measure(ui.Constraints{MaxW: termW, MaxH: termH}).H == 6 {
 			time.Sleep(20 * time.Millisecond)
 			break
 		}
@@ -846,8 +848,8 @@ func TestAppTUI_BluePanels_CtrlO_HiddenConveyorAndFarKeyRouting(t *testing.T) {
 
 	var rawTermOut syncBuffer
 	// Viewport 80x14:
-	// H_gap = 5 rows (3 banner/plume rows + 1 PromptInput + 1 blank footer row)
-	// H_panels = 14 - 5 = 9 rows at the top of the screen.
+	// H_gap = 6 rows (3 banner/plume rows + PromptInput + spacer + blank footer)
+	// H_panels = 14 - 6 = 8 rows at the top of the screen.
 	// Total block budget behind + below panels = 14 - 2 = 12 block rows.
 	// Initial banner = 3 block rows -> 9 hidden rows behind the panels before any ejection!
 	const termW, termH = 80, 14
@@ -1381,7 +1383,7 @@ func TestAppTUI_EndToEnd_GitLogPagerQuit(t *testing.T) {
 		t.Fatalf("timed out waiting for %s; terminal output: %q", description, rawTermOut.String())
 	}
 	waitUntil(3*time.Second, func() bool {
-		return strings.Contains(rawTermOut.String(), "Preliminary version: be careful.")
+		return strings.Contains(rawTermOut.String(), "፧")
 	}, "initial TUI frame")
 
 	if _, err := io.WriteString(inW, "export GIT_PAGER=less\r"); err != nil {
