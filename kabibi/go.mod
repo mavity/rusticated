@@ -14,13 +14,16 @@ require (
 	github.com/charmbracelet/x/input v0.3.7
 	github.com/charmbracelet/x/term v0.2.2
 	github.com/charmbracelet/x/vt v0.0.0-20260924144451-d676b019604b
+	github.com/go-git/go-billy/v5 v5.9.2
 	github.com/go-git/go-git/v5 v5.19.3
+	github.com/hugelgupf/p9 v0.4.1
 	github.com/mattn/go-runewidth v0.0.30
 	github.com/mavity/rusticated/platform v0.0.0-00010101000000-000000000000
 	github.com/muesli/termenv v0.16.0
 	github.com/spf13/pflag v1.0.10
 	github.com/u-root/u-root v0.16.0
 	golang.org/x/crypto v0.56.0
+	golang.org/x/sys v0.48.0
 	golang.org/x/text v0.41.0
 	mohabbat v0.0.0
 	mvdan.cc/sh/v3 v3.14.1
@@ -53,10 +56,8 @@ require (
 	github.com/ebitengine/purego v0.11.1 // indirect
 	github.com/emirpasic/gods v1.18.1 // indirect
 	github.com/go-git/gcfg v1.5.1-0.20230307220236-3a3c6141e376 // indirect
-	github.com/go-git/go-billy/v5 v5.9.2 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/gorilla/css v1.0.1 // indirect
-	github.com/hugelgupf/p9 v0.4.1 // indirect
 	github.com/ishidawataru/sctp v0.0.0-20230406120618-7ff4192f6ff2 // indirect
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
 	github.com/kevinburke/ssh_config v1.2.0 // indirect
@@ -90,7 +91,6 @@ require (
 	github.com/yuin/goldmark-emoji v1.0.6 // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/term v0.46.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	pack.ag/tftp v1.0.1-0.20181129014014-07909dfbde3c // indirect

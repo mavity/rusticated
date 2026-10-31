@@ -8,10 +8,22 @@ Use GNU grep on Linux, the system BSD grep on macOS, and upstream ripgrep as
 behavioral references. Implement the commands in Go under `u-root/cmds/core`,
 with no runtime dependency on host utilities.
 
-`grep` already exists at `u-root/cmds/core/grep` and is registered in Kabibi.
-Its current implementation is a useful pilot, not the compatibility endpoint:
-it uses Go `regexp` and `bufio.Scanner`, supports a small option set, and
-currently aggregates `-c` across files. The `rg` command does not exist yet.
+Current implementation status:
+
+- `grep` is registered in Kabibi and supports shared BRE/ERE/fixed/Perl
+  matching, common selection and output flags, streaming long records,
+  recursive selection, context, NUL-delimited records, and per-file counts.
+  Binary-file detection, locale semantics, and several GNU/BSD edge cases
+  remain incomplete.
+- `rg` is registered in Kabibi and supports shared regex matching, recursive
+  traversal, basic `.gitignore`/`.ignore`/`.rgignore` rules, glob and common
+  type filters, context and count/list output, JSON events, and NUL records.
+  Global Git excludes, full ignore negation semantics, compressed inputs,
+  multiline (`-U`) matching, and several ripgrep output and filtering options
+  remain incomplete.
+- The requested 99% practical-compatibility target has not been demonstrated.
+  GNU grep, macOS BSD grep, and upstream ripgrep differential runs are still
+  required before claiming that level of parity.
 
 Keep both commands reentrant through `Main(ctx, ioEnv, args...)`; use the
 provided streams and `ioEnv.ResolvePath`, honor cancellation, and preserve the
