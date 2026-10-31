@@ -65,3 +65,7 @@ For tests:
 * `kabibi -p "prompt"` / `kabibi --prompt "prompt"` runs a one-shot prompt and exits.
 * `kabibi --edit <file>` or `kabibi edit <file>` opens the full-screen editor; Escape saves changes and exits Kabibi.
 * A single existing positional file is executed as a shell script. Other positional words are joined with spaces and sent directly to AI with the CLI help included in system context.
+* AI tools can be invoked directly in the Kabibi shell with `ai <tool> [options]`, or one-shot from the command line with `kabibi ai <tool> [options]`; for example, `ai list-files --query "needle" --search-content`.
+* Tool names and option names accept either hyphens or underscores. Use `ai --help` to list tools and `ai <tool> --help` to see a tool's options. String arrays accept repeated options; other arrays and objects take JSON values.
+* Direct tool results are Markdown: the interactive TUI renders them as ANSI, while one-shot and redirected output prints the Markdown source.
+* One-shot invocations use a fresh shell session. Tools that depend on existing shell history, a retained PTY process, or an open browser tab need to run in the Kabibi session that owns that state.

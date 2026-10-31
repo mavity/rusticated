@@ -112,6 +112,29 @@ func TestRunCLI_UsesPipedSessionForRedirectedStdin(t *testing.T) {
 	}
 }
 
+func TestRunCLI_ExecutesAIToolDirectly(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runCLI(
+		[]string{"ai", "shell-state", "--explanation", "inspect the current shell"},
+		&stdout,
+		&stderr,
+		false,
+	); code != 0 {
+		t.Fatalf("runCLI(ai shell-state) = %d; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "### shell_state") ||
+		!strings.Contains(stdout.String(), "```json") ||
+		!strings.Contains(stdout.String(), `"cwd"`) {
+		t.Fatalf("unexpected direct tool output: %q", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("direct tool invocation wrote stderr: %q", stderr.String())
+	}
+	if strings.ContainsAny(stdout.String(), "\x1b\r") {
+		t.Fatalf("headless direct tool invocation emitted terminal controls: %q", stdout.String())
+	}
+}
+
 func TestParseCLIEditorForms(t *testing.T) {
 	for _, args := range [][]string{
 		{"--edit", "notes.txt"},

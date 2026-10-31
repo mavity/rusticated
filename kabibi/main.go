@@ -33,6 +33,7 @@ Usage:
   kabibi [flags]
   kabibi help
   kabibi edit <file>
+  kabibi ai <tool> [--option value ...]
   kabibi <prompt words...>
 
 Flags:
@@ -120,6 +121,13 @@ func main() {
 func runCLI(args []string, stdout, stderr io.Writer, verbose bool) int {
 	if verbose {
 		fmt.Fprintf(stderr, "[kabibi] CLI parse begin: argc=%d\n", len(args))
+	}
+	if name, toolArgs, ok := cliAIToolInvocation(args); ok {
+		if err := shell.ExecuteOneShotAITool(context.Background(), name, toolArgs, stdout); err != nil {
+			fmt.Fprintf(stderr, "kabibi: %v\n", err)
+			return 1
+		}
+		return 0
 	}
 	opts, err := parseCLI(args, stdout)
 	if err != nil {
@@ -235,6 +243,17 @@ func runCLI(args []string, stdout, stderr io.Writer, verbose bool) int {
 		fmt.Fprintln(stderr, "[kabibi] interactive host.Run returned normally")
 	}
 	return 0
+}
+
+func cliAIToolInvocation(args []string) (name string, toolArgs []string, ok bool) {
+	i := 0
+	for i < len(args) && (args[i] == "-v" || args[i] == "--verbose") {
+		i++
+	}
+	if i+1 >= len(args) || args[i] != "ai" || !shell.IsAIToolName(args[i+1]) {
+		return "", nil, false
+	}
+	return args[i+1], args[i+2:], true
 }
 
 func runOneShotAIPrompt(prompt string, verbose bool, stdout, stderr io.Writer) int {

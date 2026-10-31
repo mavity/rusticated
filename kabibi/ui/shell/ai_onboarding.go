@@ -301,9 +301,8 @@ func (p *StdioOnboardingPrompter) Input(ctx context.Context, title, message stri
 	return ai.PromptLine(ctx, p.terminalSession(), title, message, secret)
 }
 
-// aiBuiltinMiddleware intercepts `ai` commands (`ai setup`, `ai login [provider]`,
-// `ai logout [provider]`, `ai status`) and runs them in-process over CommandTerminal,
-// just like `git log` in git_builtin.go.
+// aiBuiltinMiddleware intercepts AI control and direct tool commands and runs
+// them in-process over CommandTerminal, just like `git log` in git_builtin.go.
 func aiBuiltinMiddleware(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 	return func(ctx context.Context, args []string) error {
 		if len(args) == 0 || args[0] != "ai" {
@@ -343,14 +342,15 @@ func runAIBuiltin(ctx context.Context, args []string) error {
 	}
 	switch sub {
 	case "help", "--help", "-h":
-		fmt.Fprintln(hc.Stdout, `Kabibi built-in AI control
+		help := `Kabibi built-in AI control
 
-Usage:
   ai setup              Configure local Gemma or cloud AI provider
   ai login [provider]   Authenticate with a cloud provider (openrouter, anthropic, openai, github-copilot, gemini)
   ai logout [provider]  Remove stored credentials for a provider
-  ai status             Show current AI configuration and stored credentials`)
-		return nil
+  ai status             Show current AI configuration and stored credentials
+
+` + formatAIToolsHelp(BuildKabibiTools(execSess))
+		return writeAIBuiltinOutput(hc.Stdout, hc.Stderr, "ai help", help)
 	case "status":
 		return runAIStatusBuiltin(ctx, hc.Stdout)
 	case "logout":
@@ -386,9 +386,55 @@ Usage:
 		}
 		return nil
 	default:
-		fmt.Fprintf(hc.Stderr, "ai: unknown subcommand %q (try 'ai --help')\n", sub)
+		return runAIBuiltinTool(ctx, execSess, sub, args[1:], hc.Stdout, hc.Stderr, cmdTerm, isTTY)
+	}
+}
+
+func runAIBuiltinTool(
+	ctx context.Context,
+	execSess *ExecutionSession,
+	name string,
+	args []string,
+	stdout, stderr io.Writer,
+	cmdTerm *CommandTerminal,
+	isTTY bool,
+) error {
+	if !IsAIToolName(name) {
+		fmt.Fprintf(stderr, "ai: unknown subcommand %q (try 'ai --help')\n", name)
 		return interp.ExitStatus(2)
 	}
+	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
+		tools := BuildKabibiTools(execSess)
+		return writeAIBuiltinOutput(stdout, stderr, "ai "+name+" --help", formatAIToolHelp(normalizeAIToolName(name), tools[normalizeAIToolName(name)]))
+	}
+
+	result, err := executeAITool(ctx, execSess, name, args)
+	if err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
+		return interp.ExitStatus(1)
+	}
+	if isTTY && cmdTerm != nil {
+		width, _ := cmdTerm.Size()
+		result, err = renderAssistantMarkdown(result, width)
+		if err != nil {
+			fmt.Fprintf(stderr, "ai %s: render Markdown: %v\n", normalizeAIToolName(name), err)
+			return interp.ExitStatus(1)
+		}
+	}
+	return writeAIBuiltinOutput(stdout, stderr, "ai "+normalizeAIToolName(name), result)
+}
+
+func writeAIBuiltinOutput(stdout, stderr io.Writer, label, output string) error {
+	n, err := io.WriteString(stdout, output)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: write output: %v\n", label, err)
+		return interp.ExitStatus(1)
+	}
+	if n != len(output) {
+		fmt.Fprintf(stderr, "%s: write output: %v\n", label, io.ErrShortWrite)
+		return interp.ExitStatus(1)
+	}
+	return nil
 }
 
 func init() {
