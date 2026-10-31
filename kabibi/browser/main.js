@@ -7,7 +7,6 @@
   const FIT_ADDON_ESM_URL = 'https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/+esm';
   const UNICODE_GRAPHEMES_ADDON_ESM_URL = 'https://cdn.jsdelivr.net/npm/@xterm/addon-unicode-graphemes@0.4.0/+esm';
   const WEBGL_ADDON_ESM_URL = 'https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.19.0/+esm';
-  const THREE_ESM_URL = 'https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js';
   const DEFAULT_FONT_FAMILY = 'Consolas, "Cascadia Mono", "Fira Code", Menlo, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", monospace';
 
   function isElement(value) {
@@ -143,23 +142,16 @@
       Terminal,
       FitAddon,
       UnicodeGraphemesAddon: UnicodeGraphemesAddon || null,
-      THREE: null,
       WebglAddon: null
     };
 
     if (options.superDemo) {
       const existingDeps = options.superDemoDependencies || global.KabibiSuperDemoDependencies || {};
-      let THREE = existingDeps.THREE || options.THREE || global.THREE;
       let WebglAddon = existingDeps.WebglAddon || options.WebglAddon || global.WebglAddon;
-      if (!THREE || !WebglAddon) {
-        const [webglMod, threeMod] = await Promise.all([
-          WebglAddon ? { WebglAddon } : importer(options.webglAddonUrl || WEBGL_ADDON_ESM_URL),
-          THREE ? THREE : importer(options.threeUrl || THREE_ESM_URL)
-        ]);
-        WebglAddon = WebglAddon || (webglMod && (webglMod.WebglAddon || webglMod.default || webglMod));
-        THREE = THREE || threeMod;
+      if (!WebglAddon) {
+        const webglMod = await importer(options.webglAddonUrl || WEBGL_ADDON_ESM_URL);
+        WebglAddon = webglMod && (webglMod.WebglAddon || webglMod.default || webglMod);
       }
-      result.THREE = THREE;
       result.WebglAddon = WebglAddon;
     }
 
@@ -715,7 +707,7 @@
     if (useSuperDemo) {
       try {
         deps = await loadBrowserDependencies({ ...options, superDemo: true });
-        if (!deps.THREE || !deps.WebglAddon) {
+        if (!deps.WebglAddon) {
           useSuperDemo = false;
         }
       } catch (error) {
@@ -749,7 +741,6 @@
       superDemoDependencies: useSuperDemo
         ? {
             ...(options.superDemoDependencies || {}),
-            THREE: deps.THREE,
             WebglAddon: deps.WebglAddon,
             flat,
             document
