@@ -21,6 +21,7 @@ var commands = []Command{
 	{Name: "/edit", Description: "Edit a selected file or path"},
 	{Name: "/mkdir", Description: "Create a directory"},
 	{Name: "/model", Description: "Choose an AI provider and model"},
+	{Name: "/mount", Description: "Mount a browser directory", BrowserOnly: true},
 	{Name: "/move", Description: "Move selected files or paths"},
 	{Name: "/panels", Description: "Show or hide the file panels"},
 	{Name: "/remove", Description: "Alias for /delete"},

@@ -151,7 +151,7 @@ func runPipedSlash(
 			return pipedSlashError(stderr, fmt.Errorf("/model: %w", err))
 		}
 		return 0
-	case "/panels", "/edit":
+	case "/panels", "/edit", "/mount":
 		if len(invocation.Args) != 0 {
 			return pipedSlashError(stderr, slashcmd.UsageError(name, ""))
 		}

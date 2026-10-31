@@ -22,6 +22,22 @@ func TestMatchesFiltersBrowserCommands(t *testing.T) {
 	}
 }
 
+func TestMountCommandIsBrowserOnly(t *testing.T) {
+	command, ok := Lookup("/mount")
+	if !ok {
+		t.Fatal("/mount is not registered")
+	}
+	if !command.BrowserOnly {
+		t.Fatal("/mount should be browser-only")
+	}
+
+	for _, command := range Commands(false) {
+		if command.Name == "/mount" {
+			t.Fatal("/mount appeared in the non-browser command list")
+		}
+	}
+}
+
 func TestInputToken(t *testing.T) {
 	for _, tt := range []struct {
 		input string
