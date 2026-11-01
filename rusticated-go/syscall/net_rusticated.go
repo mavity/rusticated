@@ -153,13 +153,6 @@ func Bind(fd int, sa Sockaddr) error {
 	return nil
 }
 
-func StopIO(fd int) error {
-	if entry, ok := fdMap[int32(fd)]; ok && entry.handle != 0 && entry.handle != netPendingHandle {
-		rusticated_handle_close(entry.handle)
-	}
-	return nil
-}
-
 func Listen(fd int, backlog int) error {
 	bind, ok := netSocketBind[int32(fd)]
 	if !ok {
