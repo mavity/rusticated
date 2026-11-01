@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"ai"
 	"github.com/charmbracelet/x/input"
@@ -514,6 +515,51 @@ func TestShell_CtrlCClearsIncompleteMultilineInput(t *testing.T) {
 	}
 	if len(aiMock.prompts) != 0 {
 		t.Fatalf("incomplete input was routed to AI: %v", aiMock.prompts)
+	}
+}
+
+func TestShell_CtrlCCancelsActiveAITurn(t *testing.T) {
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	aiMock := &fakeAIRunner{
+		fn: func(ctx context.Context, prompt string, onFeedback, onToolFeedback, onContent ai.LogFeedback) error {
+			close(started)
+			<-ctx.Done()
+			close(cancelled)
+			return ctx.Err()
+		},
+	}
+	sh := New(ShellOptions{AIRunner: aiMock})
+	defer sh.Close()
+
+	sh.SetInput("Tell me something interesting.")
+	if !sh.handleKeyEvent(input.KeyPressEvent{Code: input.KeyEnter}) {
+		t.Fatal("Enter was not handled for AI input")
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("AI turn did not start")
+	}
+
+	sh.mu.Lock()
+	doneCh := sh.doneCh
+	sh.mu.Unlock()
+	if !sh.handleKeyEvent(input.KeyPressEvent{Code: 'c', Mod: input.ModCtrl}) {
+		t.Fatal("Ctrl+C was not handled for the active AI turn")
+	}
+	select {
+	case <-cancelled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("AI turn context was not canceled")
+	}
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("shell did not finish the canceled AI turn")
+	}
+	if sh.IsRunning() {
+		t.Fatal("shell remains running after the canceled AI turn")
 	}
 }
 

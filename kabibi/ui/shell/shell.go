@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mavity/rusticated/kabibi/tools/filelist"
+
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
 	"github.com/mavity/rusticated/platform"
 	"mvdan.cc/sh/v3/expand"
@@ -114,6 +114,10 @@ const (
 	StatusFailure                           // Command had an error (e.g., parse error)
 )
 
+type CommandBlockOutputRenderer interface {
+	Render(width int) string
+}
+
 // CommandBlock is a shell-stack widget for a banner, command, or AI turn. Its
 // CellBuf cache is internal to the shell's ANSI-composition boundary.
 type CommandBlock struct {
@@ -127,7 +131,7 @@ type CommandBlock struct {
 	submitAnim        *commandSubmitAnimation
 	Output            bytes.Buffer // Full accumulated output from stdout/stderr or AI content
 	AnimLine          string       // Transient animated artifact/ticker line while Status == StatusActive
-	listFilesProgress *filelist.Progress
+	outputRenderer    CommandBlockOutputRenderer
 	Status            CommandBlockStatus // Execution status
 	ExitCode          int                // Exit code (0 = success, non-zero = failure)
 	TypedAt           time.Time          // Timestamp when user typed first character of Input

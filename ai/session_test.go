@@ -991,6 +991,45 @@ func TestSessionParseFailureIsReturnedWithoutRetry(t *testing.T) {
 	}
 }
 
+func TestSessionCanceledTurnDefersConversationRebuild(t *testing.T) {
+	backend := &scriptedSessionBackend{
+		conversation: &scriptedSessionConversation{
+			responses: [][]ModelEvent{
+				nil,
+				{TextEvent{Text: "Ready for the next turn."}},
+			},
+			errors: []error{context.Canceled},
+		},
+	}
+	session, err := NewSession(SessionConfig{
+		Engine: &Engine{impl: &engineImpl{backend: backend}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	if err := session.Init(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := session.RunTurn(context.Background(), "Cancel this turn."); err != context.Canceled {
+		t.Fatalf("canceled RunTurn() error = %v, want %v", err, context.Canceled)
+	}
+	if backend.createCount != 1 {
+		t.Fatalf("conversation creations after cancellation = %d, want no synchronous rebuild", backend.createCount)
+	}
+	if session.conv != nil {
+		t.Fatal("canceled conversation remains active")
+	}
+
+	if err := session.RunTurn(context.Background(), "Start another turn."); err != nil {
+		t.Fatalf("next RunTurn() error = %v", err)
+	}
+	if backend.createCount != 2 {
+		t.Fatalf("conversation creations after next turn = %d, want lazy rebuild", backend.createCount)
+	}
+}
+
 func TestContextOverflowReplaysPendingUserOnceWithoutProjectingIt(t *testing.T) {
 	projection := []PromptPart{
 		{Role: RoleUser, Text: "earlier question"},

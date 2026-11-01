@@ -15,24 +15,24 @@ import (
 	"github.com/mavity/rusticated/kabibi/ui"
 )
 
-func TestListFilesProgressIsEphemeralAndBounded(t *testing.T) {
+func TestListFilesProgressUsesCommandBlockOutputAndPlumeEjection(t *testing.T) {
 	var scrollback strings.Builder
-	var commandOutput bytes.Buffer
-	for i := 0; i < 30; i++ {
-		commandOutput.WriteString("normal command output\n")
-	}
+	commandOutput := bytes.NewBufferString("normal command output\n")
+	outputRenderer := newListFilesCommandOutput(6)
 	s := &Shell{
 		mode:        ModeStack,
 		input:       NewPromptInput(PromptInputOptions{}),
 		running:     true,
 		activeBlock: 0,
+		width:       64,
+		height:      6,
 		opts:        ShellOptions{WriteToScrollback: func(text string) { scrollback.WriteString(text) }},
 		blocks: []CommandBlock{{
 			Kind:   BlockCommand,
 			Source: SourceUserShell,
 			Prompt: "$ ",
 			Input:  "ai list-files",
-			Output: commandOutput,
+			Output: *commandOutput,
 			Status: StatusActive,
 		}},
 	}
@@ -47,88 +47,87 @@ func TestListFilesProgressIsEphemeralAndBounded(t *testing.T) {
 			{Path: "src/first.go", Size: 2048, Score: 0.91, HasScore: true, Quote: "image resize line"},
 			{Path: "src/second.go", Score: 0.78},
 			{Path: "src/third.go", Score: 0.66},
+			{Path: "src/fourth.go", Score: 0.54},
 		},
 	}
 
-	s.SetListFilesProgress(progress)
+	s.SetActiveCommandOutputRenderer(outputRenderer)
+	outputRenderer.setProgress(progress)
 
 	s.mu.Lock()
 	gotOutput := s.blocks[0].Output.String()
-	gotProgress := cloneListFilesProgress(s.blocks[0].listFilesProgress)
+	gotRenderer := s.blocks[0].outputRenderer
 	s.mu.Unlock()
 	if gotOutput != outputBefore {
 		t.Fatalf("progress changed command output to %q", gotOutput)
 	}
-	if gotProgress == nil || len(gotProgress.Matches) != len(progress.Matches) {
-		t.Fatalf("stored progress = %#v", gotProgress)
+	if gotRenderer != outputRenderer {
+		t.Fatal("command block did not retain the command-owned output renderer")
 	}
 
-	maxRows := listFilesProgressRows(gotProgress, 24)
-	if maxRows != 2+len(progress.Matches) {
-		t.Fatalf("progress uses %d rows with %d matches in a 24-row viewport, want all matches and two status rows", maxRows, len(progress.Matches))
+	buf := renderBlockCached(&s.blocks[0], 64)
+	if buf.Height != 8 {
+		t.Fatalf("command block height = %d, want command, six progress rows, and output", buf.Height)
 	}
-	manyMatches := *gotProgress
-	manyMatches.Matches = make([]filelist.ProgressMatch, 50)
-	if got := listFilesProgressRows(&manyMatches, 24); got != 24-reservedFooterRows {
-		t.Fatalf("progress uses %d rows for a 50-match list in a 24-row viewport, want all %d available rows", got, 24-reservedFooterRows)
-	}
-	if got := listFilesProgressRows(&manyMatches, 8); got != 8-reservedFooterRows {
-		t.Fatalf("progress uses %d rows in an 8-row viewport, want all %d available rows", got, 8-reservedFooterRows)
-	}
-	buf := renderListFilesProgress(gotProgress, 64, maxRows)
-	if buf.Height > maxRows {
-		t.Fatalf("rendered progress height = %d, max rows = %d", buf.Height, maxRows)
-	}
-	var rendered strings.Builder
+	progress.Viewed++
+	outputRenderer.setProgress(progress)
+	s.InvalidateActiveCommandOutput()
+	buf = renderBlockCached(&s.blocks[0], 64)
+	var renderedBlock strings.Builder
 	for _, cell := range buf.Cells() {
-		rendered.WriteString(cell.Grapheme)
+		renderedBlock.WriteString(cell.Grapheme)
 	}
-	for _, want := range []string{"viewed 42/100", "0.91  src/first.go", `"image resize line"`, "Matching:"} {
-		if !strings.Contains(rendered.String(), want) {
-			t.Errorf("rendered progress %q does not contain %q", rendered.String(), want)
-		}
+	if !strings.Contains(renderedBlock.String(), "viewed 43/100") {
+		t.Fatalf("rendered command block did not use latest progress: %q", renderedBlock.String())
 	}
 
-	screen, _ := renderANSIForTest(t, s.Render(ui.Rect{W: 64, H: 24}, ui.RenderContext{}), 64, 24)
+	screen, _ := renderANSIForTest(t, s.Render(ui.Rect{W: 64, H: 6}, ui.RenderContext{}), 64, 6)
 	var screenText strings.Builder
 	for _, cell := range screen.Cells() {
 		screenText.WriteString(cell.Grapheme)
 	}
-	for _, want := range []string{"src/first.go", "Matching:", "normal command output"} {
+	for _, want := range []string{"src/fourth.go", "Matching: src/current.go", "normal command output"} {
 		if !strings.Contains(screenText.String(), want) {
 			t.Errorf("shell render %q does not contain %q", screenText.String(), want)
 		}
 	}
-	if strings.Contains(scrollback.String(), "src/first.go") {
-		t.Fatal("transient search progress was written to scrollback")
+	for _, want := range []string{"Top 4 matches", "viewed 43/100", "src/first.go"} {
+		if !strings.Contains(scrollback.String(), want) {
+			t.Errorf("plume scrollback %q does not contain ejected progress %q", scrollback.String(), want)
+		}
 	}
 
-	s.SetListFilesProgress(nil)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.blocks[0].listFilesProgress != nil {
-		t.Fatal("progress was not cleared")
+	if !strings.Contains(s.Blocks()[0].Output.String(), "viewed 43/100") {
+		t.Fatal("command block snapshot omitted the command-owned rendered output")
 	}
 }
 
 func TestListFilesProgressQuoteLimitTracksViewport(t *testing.T) {
-	s := &Shell{height: 24}
-	if got, want := s.ListFilesProgressMatchLimit(), 24-reservedFooterRows-2; got != want {
+	if got, want := listFilesProgressMatchLimit(24-reservedFooterRows), 24-reservedFooterRows-2; got != want {
 		t.Fatalf("progress match limit = %d, want %d", got, want)
 	}
-	if got, want := s.ListFilesOutputMatchLimit(), 24-reservedFooterRows-3-3; got != want {
+	if got, want := listFilesOutputMatchLimit(24-reservedFooterRows), 24-reservedFooterRows-3-3; got != want {
 		t.Fatalf("output match limit = %d, want %d", got, want)
 	}
-	s.height = 2
-	if got := s.ListFilesProgressMatchLimit(); got != 0 {
+	if got := listFilesProgressMatchLimit(1); got != 0 {
 		t.Fatalf("progress match limit in a 2-row viewport = %d, want 0", got)
 	}
-	if got := s.ListFilesOutputMatchLimit(); got != 0 {
+	if got := listFilesOutputMatchLimit(1); got != 0 {
 		t.Fatalf("output match limit in a 2-row viewport = %d, want 0", got)
 	}
 }
 
 func TestCanceledListFilesProgressRemainsVisibleWhenCommandStops(t *testing.T) {
+	outputRenderer := newListFilesCommandOutput(24)
+	outputRenderer.setProgress(&filelist.Progress{
+		Phase:       "candidate",
+		Viewed:      42,
+		Total:       100,
+		CurrentPath: "src/current.go",
+		Matches: []filelist.ProgressMatch{
+			{Path: "src/image.go", Size: 572, Score: 0.91, HasScore: true},
+		},
+	})
 	s := &Shell{
 		mode:        ModeStack,
 		input:       NewPromptInput(PromptInputOptions{}),
@@ -136,20 +135,12 @@ func TestCanceledListFilesProgressRemainsVisibleWhenCommandStops(t *testing.T) {
 		height:      24,
 		activeBlock: -1,
 		blocks: []CommandBlock{{
-			Kind:   BlockCommand,
-			Source: SourceUserShell,
-			Prompt: "$ ",
-			Input:  "ai list-files --query image",
-			Status: StatusError,
-			listFilesProgress: &filelist.Progress{
-				Phase:       "candidate",
-				Viewed:      42,
-				Total:       100,
-				CurrentPath: "src/current.go",
-				Matches: []filelist.ProgressMatch{
-					{Path: "src/image.go", Size: 572, Score: 0.91, HasScore: true},
-				},
-			},
+			Kind:           BlockCommand,
+			Source:         SourceUserShell,
+			Prompt:         "$ ",
+			Input:          "ai list-files --query image",
+			Status:         StatusError,
+			outputRenderer: outputRenderer,
 		}},
 	}
 
@@ -161,6 +152,53 @@ func TestCanceledListFilesProgressRemainsVisibleWhenCommandStops(t *testing.T) {
 	for _, want := range []string{"src/image.go", "viewed 42/100", "Matching: src/current.go"} {
 		if !strings.Contains(screenText.String(), want) {
 			t.Errorf("retained progress render %q does not contain %q", screenText.String(), want)
+		}
+	}
+}
+
+func TestCanceledListFilesProgressUsesNormalBlockLayoutInBottomAlignedMode(t *testing.T) {
+	outputRenderer := newListFilesCommandOutput(24)
+	outputRenderer.setProgress(&filelist.Progress{
+		Phase:       "candidate",
+		Viewed:      42,
+		Total:       100,
+		CurrentPath: "src/current.go",
+		Matches: []filelist.ProgressMatch{
+			{Path: "src/image.go", Size: 572, Score: 0.91, HasScore: true},
+		},
+	})
+	s := &Shell{
+		mode:          ModeStack,
+		bottomAligned: true,
+		input:         NewPromptInput(PromptInputOptions{}),
+		width:         80,
+		height:        24,
+		activeBlock:   -1,
+		blocks: []CommandBlock{{
+			Kind:           BlockCommand,
+			Source:         SourceUserShell,
+			Prompt:         "$ ",
+			Input:          "ai list-files --query image",
+			Status:         StatusError,
+			outputRenderer: outputRenderer,
+		}},
+	}
+	s.SetInput("next command")
+
+	screen, cursor := renderANSIForTest(t, s.Render(ui.Rect{W: 80, H: 24}, ui.RenderContext{Focused: true}), 80, 24)
+	if !cursor.Visible {
+		t.Fatal("prompt cursor is not visible in bottom-aligned mode")
+	}
+	if want := 24 - reservedFooterRows - 1; cursor.Y != want {
+		t.Fatalf("prompt cursor row = %d, want %d below retained progress", cursor.Y, want)
+	}
+	var screenText strings.Builder
+	for _, cell := range screen.Cells() {
+		screenText.WriteString(cell.Grapheme)
+	}
+	for _, want := range []string{"viewed 42/100", "src/image.go", "next command"} {
+		if !strings.Contains(screenText.String(), want) {
+			t.Errorf("bottom-aligned render %q does not contain %q", screenText.String(), want)
 		}
 	}
 }
@@ -184,36 +222,42 @@ func TestEscapeCancelsActiveListFilesCommand(t *testing.T) {
 	}
 }
 
-type recordingListFilesProgressSink struct {
-	progress         []*filelist.Progress
-	cleared          int
-	outputMatchLimit int
-	onProgress       func()
+type recordingCommandOutputSink struct {
+	outputRenderer  CommandBlockOutputRenderer
+	lastRenderer    *listFilesCommandOutput
+	cleared         int
+	invalidations   int
+	width           int
+	availableHeight int
+	onProgress      func()
 }
 
-func (s *recordingListFilesProgressSink) OnAICommandStart(string, string) (func([]byte), func(int, time.Duration)) {
+func (s *recordingCommandOutputSink) OnAICommandStart(string, string) (func([]byte), func(int, time.Duration)) {
 	return nil, nil
 }
 
-func (s *recordingListFilesProgressSink) ListFilesProgressMatchLimit() int {
-	return 1
-}
-
-func (s *recordingListFilesProgressSink) ListFilesOutputMatchLimit() int {
-	return s.outputMatchLimit
-}
-
-func (s *recordingListFilesProgressSink) SetListFilesProgress(progress *filelist.Progress) {
-	if progress == nil {
+func (s *recordingCommandOutputSink) SetActiveCommandOutputRenderer(renderer CommandBlockOutputRenderer) {
+	s.outputRenderer = renderer
+	if renderer == nil {
 		s.cleared++
 		return
 	}
-	copy := *progress
-	copy.Matches = append([]filelist.ProgressMatch(nil), progress.Matches...)
-	s.progress = append(s.progress, &copy)
-	if s.onProgress != nil {
-		s.onProgress()
+	if listFilesRenderer, ok := renderer.(*listFilesCommandOutput); ok {
+		s.lastRenderer = listFilesRenderer
 	}
+}
+
+func (s *recordingCommandOutputSink) InvalidateActiveCommandOutput() {
+	s.invalidations++
+	if s.onProgress != nil {
+		onProgress := s.onProgress
+		s.onProgress = nil
+		onProgress()
+	}
+}
+
+func (s *recordingCommandOutputSink) CommandOutputSize() (int, int) {
+	return s.width, s.availableHeight
 }
 
 func TestInteractiveListFilesPublishesAndClearsProgress(t *testing.T) {
@@ -226,7 +270,7 @@ func TestInteractiveListFilesPublishesAndClearsProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer execSess.Close()
-	sink := &recordingListFilesProgressSink{outputMatchLimit: 10}
+	sink := &recordingCommandOutputSink{width: 80, availableHeight: 19}
 	execSess.SetAICommandUISink(sink)
 
 	result, err := executeInteractiveListFiles(context.Background(), execSess,
@@ -240,15 +284,17 @@ func TestInteractiveListFilesPublishesAndClearsProgress(t *testing.T) {
 	if !strings.Contains(result, "1.00  browser_worker.go") || !strings.Contains(result, "Search stats: processed 1/1 files; about ") {
 		t.Fatalf("semantic result is missing the leading score or final stats: %q", result)
 	}
-	if len(sink.progress) == 0 || sink.progress[0].Phase == "" {
-		t.Fatalf("interactive path did not publish progress: %#v", sink.progress)
+	if sink.invalidations == 0 {
+		t.Fatal("interactive path did not invalidate its command output")
 	}
-	lastProgress := sink.progress[len(sink.progress)-1]
-	if len(lastProgress.Matches) == 0 || lastProgress.Matches[0].Quote != "func startWorker() {}" {
-		t.Fatalf("final throttled progress did not retain the completed quote: %#v", lastProgress)
+	if sink.lastRenderer == nil {
+		t.Fatal("interactive path did not install a list-files output renderer")
+	}
+	if rendered := sink.lastRenderer.Render(80); !strings.Contains(rendered, "func startWorker() {}") {
+		t.Fatalf("final rendered progress did not retain the completed quote: %q", rendered)
 	}
 	if sink.cleared != 1 {
-		t.Fatalf("progress clear calls = %d, want one", sink.cleared)
+		t.Fatalf("output renderer clear calls = %d, want one", sink.cleared)
 	}
 }
 
@@ -263,9 +309,10 @@ func TestInteractiveListFilesDoesNotClearProgressOnCancellation(t *testing.T) {
 	}
 	defer execSess.Close()
 	ctx, cancel := context.WithCancel(context.Background())
-	sink := &recordingListFilesProgressSink{
-		outputMatchLimit: 10,
-		onProgress:       cancel,
+	sink := &recordingCommandOutputSink{
+		width:           80,
+		availableHeight: 19,
+		onProgress:      cancel,
 	}
 	execSess.SetAICommandUISink(sink)
 
@@ -277,11 +324,14 @@ func TestInteractiveListFilesDoesNotClearProgressOnCancellation(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("executeInteractiveListFiles() error = %v, want context cancellation", err)
 	}
-	if len(sink.progress) == 0 {
-		t.Fatal("cancellation did not publish a progress snapshot")
+	if sink.invalidations == 0 || sink.lastRenderer == nil {
+		t.Fatal("cancellation did not publish a renderable progress snapshot")
 	}
 	if sink.cleared != 0 {
-		t.Fatalf("cancellation cleared progress %d times, want it retained", sink.cleared)
+		t.Fatalf("cancellation cleared output %d times, want it retained", sink.cleared)
+	}
+	if got := sink.lastRenderer.Render(80); got == "" {
+		t.Fatal("canceled command did not retain visible renderer output")
 	}
 	cancel()
 }
@@ -298,7 +348,7 @@ func TestInteractiveListFilesCapsResultsToOutputFrame(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer execSess.Close()
-	sink := &recordingListFilesProgressSink{outputMatchLimit: 2}
+	sink := &recordingCommandOutputSink{width: 80, availableHeight: 8}
 	execSess.SetAICommandUISink(sink)
 
 	result, err := executeInteractiveListFiles(context.Background(), execSess,
