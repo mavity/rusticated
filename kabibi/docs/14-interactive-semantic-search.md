@@ -6,8 +6,8 @@ Extend the existing `ai list-files` command to support interactive TUI search
 progress, using the existing shared file-search implementation. During semantic
 ranking, the TUI must show a live, bounded list of the best matches and the file
 currently being assessed. Keep `ai list-files` as the search entry point. The
-AI tool and non-interactive CLI invocation keep their existing result format
-and do not render TUI progress.
+AI tool and non-interactive CLI invocation do not render TUI progress. Both
+callers and the TUI use shared match formatting and include search statistics.
 
 This is a refactor of the shared file-search core plus a TTY-specific caller
 branch for the existing command, not a second implementation of file search.
@@ -20,10 +20,10 @@ branch for the existing command, not a second implementation of file search.
 - `kabibi/ui/shell/tools_file.go` calls it for the AI `list_files` tool and the
   backward-compatible `list_dir` alias.
 - `list_files` supports `query`, `search_content`, and `max_results`.
-- Semantic ranking currently embeds all candidates through
-  `ai.EmbedBatchWithContext`, then filters and sorts the complete score set.
-  The batch API returns all vectors at once, so the current implementation
-  cannot publish genuine per-file ranking progress.
+- `ListFiles` drains a shared search iterator; semantic ranking uses bounded
+  batches and maintains a bounded top-match set as candidate scores arrive.
+- Semantic content ranking currently embeds a bounded sample of each candidate
+  file. It does not yet extract a relevant quote from the best line.
 - The existing `ai list-files` command invokes the registered AI tool; there is
   no separate TUI search command.
 
@@ -45,15 +45,50 @@ Relevant implementation: [`filelist.go`](../tools/filelist/filelist.go),
    schema and resolve the configured embedder as today, then run the shared
    search iterator directly. Search the current shell working directory.
 4. AI-tool execution and non-TTY/one-shot invocations remain silent consumers
-   of the iterator through the `ListFiles` compatibility wrapper. Their result
-   format remains unchanged and receives no progress output.
+   of the iterator through the `ListFiles` compatibility wrapper. They receive
+   no TUI progress output.
 5. While semantic candidates are being assessed, render a replace-in-place
    progress view containing:
    - the number of top matches currently shown;
    - the number of eligible files assessed so far (and total, when known);
    - an approximate elapsed time per assessed file;
    - the current file being assessed; and
-   - the current top matches, each with its semantic score.
+   - the current top matches, each with its semantic score, path, size, and
+     relevant one-line quote when available.
+
+   Use one shared match formatter for progress rows and final results. Put the
+   similarity score first when one exists, followed by path, size, and quote.
+   Reuse a literal content-match line for non-semantic content results; do not
+   invent a cosine score for glob, exact filename, or fuzzy matches. Use the
+   actual TTY width for TUI output and a reasonable fixed maximum for piped/AI
+   output, truncating long rows with an ellipsis.
+
+   For semantic matches, split candidate text into embedder-sized chunks on
+   whole-line boundaries. Reuse an existing chunk embedding where its input
+   matches exactly. Otherwise compare chunks with the query embedding, then
+   bisect the best chunk at whole-line boundaries until one line remains.
+   This is a bounded heuristic, not a guarantee of the globally closest line.
+   Route embedding requests through a bounded, context-aware scheduler with a
+   blocking `Embed(ctx, text, lowPriority, order)` API. `lowPriority` is a boolean;
+   there are exactly two buckets, high and low. When both buckets have work,
+   schedule exactly four high-priority requests for each low-priority request
+   (initial ratio 4:1; keep the ratio easy to tune). If one bucket is empty,
+   serve the other. A live quote task owns a stable order handle whose rank is
+   refreshed whenever the visible match list changes. Re-evaluate queued low
+   priority work at dispatch time using rank-weighted accumulated demand, with
+   enqueue order as a tie-breaker. Return to the scheduler between quote chunk
+   and bisection requests so each embedding is scheduled fairly against waiting
+   work.
+
+   Queue and deduplicate quote work only for visible TUI top matches. Give each
+   match's quote task a child context and cancel it when the match leaves the
+   displayed top set. The caller owns this cancellation; the scheduler remains
+   generic and accepts text, context, the low-priority flag, and an optional
+   order handle. A canceled queued request should be discarded, and a canceled
+   in-flight request must not publish its result. Treat that cancellation
+   locally as an obsolete quote, not as failure of the overall search. Search-level cancellation
+   (including Ctrl+C) cancels both scoring and quote requests. AI/non-TTY output
+   may enrich its returned top `max_results` matches after scoring completes.
 
    Use a presentation similar to:
 
@@ -67,12 +102,22 @@ Relevant implementation: [`filelist.go`](../tools/filelist/filelist.go),
 6. Consume every iterator update, but do not read/copy the current state or
    request a redraw for every update. On the first eligible update, and then no
    more frequently than once every 500 ms, read the latest iterator state and
-   publish it to the UI. Fast searches may show only an initial progress state
-   followed by the final result.
+   publish it to the UI. Coalesce intermediate updates into the latest pending
+   state rather than dropping them: when the next publication is allowed, it
+   must include any completed quote still present in the top set. Flush the
+   latest state once on completion before clearing progress and showing the
+   final result. Fast searches may show only an initial progress state followed
+   by the final result.
+   Keep the processed/total file count and average milliseconds per scored file
+   visible during search and append the same statistics to the final AI and TUI
+   results. Measure candidate-scoring time separately from query embedding and
+   quote extraction.
 7. Respect the terminal's available height. Show up to the requested
    `max_results`, but reduce the number of progress-list rows when necessary
    to leave room for the status and current-file lines. Truncate long paths to
-   the available width without corrupting terminal styling.
+   the available width without corrupting terminal styling. Cap final TUI
+   results so the complete command output fits in its output frame, leaving
+   three rows free; do not apply this display cap to AI or piped output.
 8. Publish typed progress state through a bounded, replaceable latest-value
    handoff. Never queue one item per iterator update. Each publication may
    request a redraw; host redraw coalescing is useful but is not the rate
@@ -168,7 +213,56 @@ The interactive caller consumes all update signals but rate-limits publication
 to the UI: on the first eligible update, and then at most once per 500 ms, it
 reads the latest state and replaces the pending progress snapshot. The
 latest-value handoff must be bounded and replaceable, not an unbounded queue.
+Updates during the throttle interval mark the state dirty; publish the latest
+dirty snapshot at the next allowed time, and flush it once on completion.
 Redraw coalescing in the host does not replace this publication throttle.
+
+### Prioritized embedding and quote cancellation
+
+Use a bounded concurrent embedder scheduler behind a context-aware blocking
+API such as `Embed(ctx, text, lowPriority, order)`. The low-priority flag is boolean;
+do not introduce multiple priority levels. Scoring passes `false` (high
+priority), and relevant-quote work passes `true` (low priority).
+
+When both buckets have queued requests, schedule strictly four high-priority
+requests for every one low-priority request (initial 4:1 ratio, with the ratio
+easy to tune). If one bucket is empty, use the other. Within the selected
+bucket, choose the text chunk with the greatest accumulated outstanding
+request weight. High-priority requests contribute one unit each. Low-priority
+requests with an order handle contribute `1 / (rank + 1)` each; requests without
+a handle contribute one unit. This initial rank-weighting formula is tunable.
+Re-read current ranks when selecting queued work, so a promoted match's
+outstanding quote requests can move ahead of lower-ranked matches. Use enqueue
+order to break ties.
+
+Track that accumulated weight per text chunk and per request context, separately
+for the high and low buckets. A quote task keeps a stable order handle and
+updates its rank from `liveQuoteManager.sync`; every queued embedding request
+from that task observes the latest rank. Coalesce identical role-and-text
+requests into one embedding operation and deliver its result to every
+non-canceled waiter for that chunk.
+When a request completes or its context is canceled, remove only that
+request-context's contribution. If the context is canceled, discard its queued
+requests; if the same chunk still has outstanding requests under other
+contexts, retain and schedule that remaining demand. An in-flight result for a
+canceled request must not be delivered to its canceled waiter. This prevents
+obsolete quote work from retaining scheduling priority while preserving
+non-canceled callers' interest in a shared chunk.
+
+The scheduler does not distinguish quote requests from scoring requests for
+cancellation purposes. The search caller owns per-quote child contexts and
+cancels a quote's context when its file is displaced from the displayed top
+set. This cancels that quote's queued work and makes its wait return a
+cancellation error; the quote operation unwinds and drops the obsolete result.
+That per-quote cancellation must not cancel scoring or fail the overall search.
+Only search-level cancellation, such as Ctrl+C, cancels scoring as well as all
+quote work. If an embedding is already in flight, its eventual result must be
+ignored after its context is canceled.
+
+Do not try to kill or abandon suspended Go goroutines. Quote extraction remains
+sequential within its task and returns normally on cancellation. Bound the
+number of quote workers and pending quote jobs; deduplicate by current match
+identity and discard queued work for matches no longer displayed.
 
 ### Preserve search behavior
 
@@ -261,7 +355,20 @@ Expected code areas:
   at most once per 500 ms after the first eligible update, using latest-value
   replacement rather than an unbounded queue.
 - Search progress replaces itself instead of accumulating output and includes
-  top matches, assessed count, approximate time per file, and current path.
+  top matches, assessed count, approximate milliseconds per file, current path,
+  and any quotes already computed for visible matches.
+- A controlled embedder test proves a visible quote can complete while file
+  scoring is still underway, the strict 4:1 high/low schedule and within-bucket
+  rank-weighted accumulated demand are honored, rank changes reorder queued
+  quote work, demoted matches remove only their own context's contribution, and
+  Ctrl+C cancels both.
+- Progress publication remains capped at 2 Hz without losing a completed quote
+  that remains in the latest top-match state, including a final pending update.
+- AI and TUI final match rows share score/path/size/quote formatting, and final
+  results include processed-file and per-file timing statistics.
+- Quote extraction follows line-boundary chunks and bisection, reuses matching
+  scored chunks when possible, and does not delay candidate scoring. TUI quote
+  work is limited to the currently displayable top matches.
 - Progress is ephemeral UI state and never enters command output, scrollback,
   or the virtual terminal. The final normal result appears exactly once.
 - Iterator update signals are not throttled by the search core and do not carry

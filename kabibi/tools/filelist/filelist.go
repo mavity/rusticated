@@ -1,6 +1,6 @@
 // Package filelist implements the progressive list_files tool with `**` doublestar
-// globbing, .gitignore filtering, fuzzy/semantic fallbacks, and compact single-line
-// human-readable formatting (`d`, `x`, `l`, `-`).
+// globbing, .gitignore filtering, fuzzy/semantic fallbacks, and shared match
+// formatting for score, path, size, and relevant quote.
 package filelist
 
 import (
@@ -16,8 +16,11 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
+	"unicode"
 
 	"ai"
+	"github.com/mattn/go-runewidth"
 )
 
 const DefaultMaxResults = 50
@@ -29,18 +32,33 @@ type Options struct {
 	SearchContent bool
 	MaxResults    int
 	Embedder      ai.PartEmbedder
+	MaxLineWidth  int
+	QuoteLimit    int // 0 quotes every result; positive values cap semantic quote enrichment; negative disables it.
+	LiveQuotes    bool
 }
 
 type fileEntry struct {
-	relPath    string
-	absPath    string
-	isDir      bool
-	isSymlink  bool
-	isExec     bool
-	size       int64
-	linkTarget string
-	matchNote  string
-	score      float64
+	relPath     string
+	absPath     string
+	isDir       bool
+	isSymlink   bool
+	isExec      bool
+	size        int64
+	linkTarget  string
+	quote       string
+	score       float64
+	hasScore    bool
+	scoreText   string
+	scoreVector []float32
+}
+
+type Match struct {
+	Path     string
+	Size     int64
+	IsDir    bool
+	Score    float64
+	HasScore bool
+	Quote    string
 }
 
 var defaultSkippedDirs = map[string]bool{
@@ -81,6 +99,9 @@ func listFiles(ctx context.Context, cwd string, opts Options, progress *progress
 	if maxRes <= 0 {
 		maxRes = DefaultMaxResults
 	}
+	if opts.MaxLineWidth <= 0 {
+		opts.MaxLineWidth = 160
+	}
 
 	query := strings.TrimSpace(opts.Query)
 	if query == "" {
@@ -110,13 +131,25 @@ func listFiles(ctx context.Context, cwd string, opts Options, progress *progress
 		return "", err
 	}
 
+	var embedder *concurrentEmbedder
+	if opts.Embedder != nil {
+		embedder = newConcurrentEmbedder(ctx, opts.Embedder)
+		defer embedder.Close()
+	}
+	var quoteWork *liveQuoteManager
+	if opts.LiveQuotes && embedder != nil && opts.QuoteLimit > 0 {
+		quoteWork = newLiveQuoteManager(ctx, embedder, progress, opts.QuoteLimit)
+		progress.setQuoteManager(quoteWork)
+		defer quoteWork.Close()
+	}
+
 	var matched []fileEntry
 	modeLabel := ""
 
 	if opts.SearchContent {
-		matched, modeLabel, err = filterByContent(ctx, allEntries, query, maxRes, opts.Embedder, progress)
+		matched, modeLabel, err = filterByContent(ctx, allEntries, query, maxRes, embedder, progress)
 	} else {
-		matched, modeLabel, err = filterByFilename(ctx, allEntries, query, maxRes, opts.Embedder, progress)
+		matched, modeLabel, err = filterByFilename(ctx, allEntries, query, maxRes, embedder, progress)
 	}
 	if err != nil {
 		return "", err
@@ -125,42 +158,120 @@ func listFiles(ctx context.Context, cwd string, opts Options, progress *progress
 	if len(matched) > maxRes {
 		matched = matched[:maxRes]
 	}
+	quoteLimit := maxRes
+	if opts.QuoteLimit > 0 {
+		quoteLimit = min(opts.QuoteLimit, maxRes)
+	} else if opts.QuoteLimit < 0 {
+		quoteLimit = 0
+	}
+	if quoteWork != nil {
+		if err := quoteWork.Finish(matched); err != nil {
+			return "", err
+		}
+		matched = mergeProgressQuotes(matched, progress.matches())
+	} else if err := enrichSemanticQuotes(ctx, matched, progress.queryEmbedding(), embedder, progress, quoteLimit); err != nil {
+		return "", err
+	}
 
 	displayCwd := compactHomePath(absCwd)
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "[cwd: %s] (%d entries, mode: %s)\n", displayCwd, len(matched), modeLabel)
+	header := fmt.Sprintf("[cwd: %s] (%d entries, mode: %s)", displayCwd, len(matched), modeLabel)
+	fmt.Fprintln(&sb, truncateOutputLine(header, opts.MaxLineWidth))
 
 	for _, e := range matched {
-		typeChar := "-"
-		sizeStr := formatHumanSize(e.size)
-		nameDisplay := e.relPath
-
-		if e.isDir {
-			typeChar = "d"
-			sizeStr = "-"
-			if !strings.HasSuffix(nameDisplay, "/") {
-				nameDisplay += "/"
-			}
-		} else if e.isSymlink {
-			typeChar = "l"
-			if e.linkTarget != "" {
-				nameDisplay += "@ -> " + e.linkTarget
-			} else {
-				nameDisplay += "@"
-			}
-		} else if e.isExec {
-			typeChar = "x"
-			nameDisplay += "*"
-		}
-
-		if e.matchNote != "" {
-			fmt.Fprintf(&sb, "%s  %6s  %s  %s\n", typeChar, sizeStr, nameDisplay, e.matchNote)
-		} else {
-			fmt.Fprintf(&sb, "%s  %6s  %s\n", typeChar, sizeStr, nameDisplay)
-		}
+		fmt.Fprintln(&sb, FormatMatch(toMatch(e), opts.MaxLineWidth))
+	}
+	stats := progress.current()
+	if stats.Viewed > 0 {
+		statsLine := fmt.Sprintf("Search stats: processed %d/%d files; about %s/file",
+			stats.Viewed, stats.Total, FormatAveragePerFile(stats.AvgPerFile))
+		fmt.Fprintf(&sb, "\n%s", truncateOutputLine(statsLine, opts.MaxLineWidth))
 	}
 
 	return strings.TrimSuffix(sb.String(), "\n"), nil
+}
+
+func mergeProgressQuotes(entries, progressEntries []fileEntry) []fileEntry {
+	quotes := make(map[string]string, len(progressEntries))
+	for _, entry := range progressEntries {
+		quotes[entry.relPath] = entry.quote
+	}
+	for index := range entries {
+		if quote, ok := quotes[entries[index].relPath]; ok {
+			entries[index].quote = quote
+		}
+	}
+	return entries
+}
+
+func truncateOutputLine(line string, maxWidth int) string {
+	if maxWidth > 0 && runewidth.StringWidth(line) > maxWidth {
+		return runewidth.Truncate(line, maxWidth, "…")
+	}
+	return line
+}
+
+func toMatch(entry fileEntry) Match {
+	path := entry.relPath
+	if entry.isDir && !strings.HasSuffix(path, "/") {
+		path += "/"
+	}
+	if entry.isSymlink {
+		if entry.linkTarget != "" {
+			path += "@ -> " + entry.linkTarget
+		} else {
+			path += "@"
+		}
+	} else if entry.isExec {
+		path += "*"
+	}
+	return Match{
+		Path:     path,
+		Size:     entry.size,
+		IsDir:    entry.isDir,
+		Score:    entry.score,
+		HasScore: entry.hasScore,
+		Quote:    entry.quote,
+	}
+}
+
+// FormatMatch formats a search result consistently for the TUI and CLI.
+func FormatMatch(match Match, maxWidth int) string {
+	var line strings.Builder
+	if match.HasScore {
+		fmt.Fprintf(&line, "%.2f  ", match.Score)
+	}
+	size := formatHumanSize(match.Size)
+	if match.IsDir {
+		size = "-"
+	}
+	fmt.Fprintf(&line, "%s  %s", cleanMatchField(match.Path), size)
+	if match.Quote != "" {
+		quote := cleanMatchField(match.Quote)
+		fmt.Fprintf(&line, "  %q", quote)
+	}
+	formatted := line.String()
+	if maxWidth > 0 && runewidth.StringWidth(formatted) > maxWidth {
+		formatted = runewidth.Truncate(formatted, maxWidth, "…")
+	}
+	return formatted
+}
+
+func cleanMatchField(value string) string {
+	var clean strings.Builder
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			clean.WriteByte(' ')
+		} else {
+			clean.WriteRune(r)
+		}
+	}
+	return strings.Join(strings.Fields(clean.String()), " ")
+}
+
+// FormatAveragePerFile formats candidate-scoring latency in milliseconds.
+func FormatAveragePerFile(duration time.Duration) string {
+	return fmt.Sprintf("%.1fms", float64(duration)/float64(time.Millisecond))
 }
 
 func collectCandidateFiles(ctx context.Context, root string, relPrefix string, ignorePatterns []string, shallowOnly bool) ([]fileEntry, error) {
@@ -289,7 +400,7 @@ func sortEntries(entries []fileEntry) {
 	})
 }
 
-func filterByFilename(ctx context.Context, entries []fileEntry, query string, maxRes int, embedder ai.PartEmbedder, progress *progressTracker) ([]fileEntry, string, error) {
+func filterByFilename(ctx context.Context, entries []fileEntry, query string, maxRes int, embedder *concurrentEmbedder, progress *progressTracker) ([]fileEntry, string, error) {
 	if query == "*" {
 		return entries, "glob '*'", nil
 	}
@@ -353,7 +464,7 @@ func filterByFilename(ctx context.Context, entries []fileEntry, query string, ma
 	return fuzzyMatches, fmt.Sprintf("fuzzy %q", query), nil
 }
 
-func filterByContent(ctx context.Context, entries []fileEntry, query string, maxRes int, embedder ai.PartEmbedder, progress *progressTracker) ([]fileEntry, string, error) {
+func filterByContent(ctx context.Context, entries []fileEntry, query string, maxRes int, embedder *concurrentEmbedder, progress *progressTracker) ([]fileEntry, string, error) {
 	lowerQ := strings.ToLower(query)
 	re, reErr := regexp.Compile("(?i)" + query)
 
@@ -367,7 +478,7 @@ func filterByContent(ctx context.Context, entries []fileEntry, query string, max
 			continue
 		}
 		lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
-		for idx, ln := range lines {
+		for _, ln := range lines {
 			hit := strings.Contains(strings.ToLower(ln), lowerQ)
 			if !hit && reErr == nil {
 				hit = re.MatchString(ln)
@@ -375,10 +486,7 @@ func filterByContent(ctx context.Context, entries []fileEntry, query string, max
 			if hit {
 				cp := e
 				preview := strings.TrimSpace(ln)
-				if len(preview) > 48 {
-					preview = preview[:45] + "..."
-				}
-				cp.matchNote = fmt.Sprintf("[match: L%d %q]", idx+1, preview)
+				cp.quote = preview
 				matched = append(matched, cp)
 				break
 			}
@@ -434,20 +542,21 @@ func isBinaryBlob(b []byte) bool {
 	return bytes.IndexByte(check, 0) >= 0
 }
 
-func rankPathsByEmbedding(ctx context.Context, entries []fileEntry, query string, embedder ai.PartEmbedder, maxRes int, progress *progressTracker) ([]fileEntry, error) {
+func rankPathsByEmbedding(ctx context.Context, entries []fileEntry, query string, embedder *concurrentEmbedder, maxRes int, progress *progressTracker) ([]fileEntry, error) {
 	if len(entries) == 0 {
 		return nil, nil
 	}
 	if err := progress.update("query", "", 0, len(entries)); err != nil {
 		return nil, err
 	}
-	qVec, err := ai.EmbedWithContext(ctx, embedder, []ai.PromptPart{{Role: ai.RoleUser, Text: query}})
+	qVec, err := embedder.Embed(ctx, ai.PromptPart{Role: ai.RoleUser, Text: query}, false, nil)
 	if err != nil {
 		return nil, err
 	}
 	if len(qVec) == 0 {
 		return nil, fmt.Errorf("query embedder returned an empty vector")
 	}
+	progress.setQueryEmbedding(qVec)
 	parts := make([]ai.PromptPart, len(entries))
 	for i, entry := range entries {
 		parts[i] = ai.PromptPart{Role: ai.RoleModel, Text: entry.relPath}
@@ -455,21 +564,22 @@ func rankPathsByEmbedding(ctx context.Context, entries []fileEntry, query string
 	return rankEmbeddingParts(ctx, entries, parts, qVec, embedder, maxRes, progress)
 }
 
-func rankContentByEmbedding(ctx context.Context, entries []fileEntry, parts []ai.PromptPart, query string, embedder ai.PartEmbedder, maxRes int, progress *progressTracker) ([]fileEntry, error) {
+func rankContentByEmbedding(ctx context.Context, entries []fileEntry, parts []ai.PromptPart, query string, embedder *concurrentEmbedder, maxRes int, progress *progressTracker) ([]fileEntry, error) {
 	if err := progress.update("query", "", 0, len(entries)); err != nil {
 		return nil, err
 	}
-	qVec, err := ai.EmbedWithContext(ctx, embedder, []ai.PromptPart{{Role: ai.RoleUser, Text: query}})
+	qVec, err := embedder.Embed(ctx, ai.PromptPart{Role: ai.RoleUser, Text: query}, false, nil)
 	if err != nil {
 		return nil, err
 	}
 	if len(qVec) == 0 {
 		return nil, fmt.Errorf("query embedder returned an empty vector")
 	}
+	progress.setQueryEmbedding(qVec)
 	return rankEmbeddingParts(ctx, entries, parts, qVec, embedder, maxRes, progress)
 }
 
-func rankEmbeddingParts(ctx context.Context, entries []fileEntry, parts []ai.PromptPart, qVec []float32, embedder ai.PartEmbedder, maxRes int, progress *progressTracker) ([]fileEntry, error) {
+func rankEmbeddingParts(ctx context.Context, entries []fileEntry, parts []ai.PromptPart, qVec []float32, embedder *concurrentEmbedder, maxRes int, progress *progressTracker) ([]fileEntry, error) {
 	if len(parts) != len(entries) {
 		return nil, fmt.Errorf("embed candidate input count %d does not match file count %d", len(parts), len(entries))
 	}
@@ -484,49 +594,56 @@ func rankEmbeddingParts(ctx context.Context, entries []fileEntry, parts []ai.Pro
 		entry := entries[index]
 		entry.score = cosineSim(qVec, vec)
 		if entry.score >= 0.50 {
-			entry.matchNote = fmt.Sprintf("[semantic: %.2f]", entry.score)
+			entry.hasScore = true
+			entry.scoreText = parts[index].Text
+			entry.scoreVector = append([]float32(nil), vec...)
 			progress.addMatch(entry, maxRes)
 		}
 		viewed++
 		return publish("candidate", entry.relPath)
 	}
-	if batch, ok := embedder.(ai.BatchPartEmbedder); ok {
-		const batchSize = 16
-		for start := 0; start < len(entries); start += batchSize {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			end := min(start+batchSize, len(entries))
-			if err := publish("candidate", entries[start].relPath); err != nil {
-				return nil, err
-			}
-			vectors, err := batch.EmbedBatchContext(ctx, parts[start:end])
-			if err != nil {
-				return nil, err
-			}
-			if len(vectors) != end-start {
-				return nil, fmt.Errorf("embed candidate batch returned %d vectors for %d files", len(vectors), end-start)
-			}
-			for i, vector := range vectors {
-				if err := addScore(start+i, vector); err != nil {
-					return nil, err
-				}
-			}
-		}
-		return progress.matches(), nil
+	const maxConcurrentCandidates = 4
+	type candidateEmbedding struct {
+		index  int
+		vector []float32
+		err    error
 	}
-	for i, part := range parts {
+	results := make(chan candidateEmbedding, maxConcurrentCandidates)
+	nextIndex := 0
+	inFlight := 0
+	start := func(index int) error {
+		if err := publish("candidate", entries[index].relPath); err != nil {
+			return err
+		}
+		inFlight++
+		go func() {
+			vector, err := embedder.Embed(ctx, parts[index], false, nil)
+			results <- candidateEmbedding{index: index, vector: vector, err: err}
+		}()
+		return nil
+	}
+	for nextIndex < len(entries) && inFlight < maxConcurrentCandidates {
+		if err := start(nextIndex); err != nil {
+			return nil, err
+		}
+		nextIndex++
+	}
+	for inFlight > 0 {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if err := publish("candidate", entries[i].relPath); err != nil {
-			return nil, err
+		result := <-results
+		inFlight--
+		if result.err != nil {
+			return nil, result.err
 		}
-		vector, err := ai.EmbedWithContext(ctx, embedder, []ai.PromptPart{part})
-		if err != nil {
-			return nil, err
+		if nextIndex < len(entries) {
+			if err := start(nextIndex); err != nil {
+				return nil, err
+			}
+			nextIndex++
 		}
-		if err := addScore(i, vector); err != nil {
+		if err := addScore(result.index, result.vector); err != nil {
 			return nil, err
 		}
 	}

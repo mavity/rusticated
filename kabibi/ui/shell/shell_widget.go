@@ -377,6 +377,20 @@ func (s *Shell) SetListFilesProgress(progress *filelist.Progress) {
 	s.invalidate()
 }
 
+func (s *Shell) ListFilesProgressMatchLimit() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return max(0, s.height-reservedFooterRows-2)
+}
+
+func (s *Shell) ListFilesOutputMatchLimit() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	const spareRows = 3
+	const fixedOutputRows = 3 // cwd heading, blank separator, and search statistics
+	return max(0, s.height-reservedFooterRows-spareRows-fixedOutputRows)
+}
+
 // WaitActive blocks until any currently executing command or AI turn finishes.
 func (s *Shell) WaitActive() {
 	s.mu.Lock()
@@ -757,29 +771,52 @@ func listFilesProgressRows(progress *filelist.Progress, maxHeight int) int {
 	if progress == nil || maxHeight <= reservedFooterRows {
 		return 0
 	}
-	limit := min(8, max(2, maxHeight/3))
-	limit = min(limit, maxHeight-reservedFooterRows)
-	return min(limit, 2+len(progress.Matches))
+	availableRows := maxHeight - reservedFooterRows
+	return min(availableRows, 2+len(progress.Matches))
 }
 
 func renderListFilesProgress(progress *filelist.Progress, width, maxRows int) terminal.CellBuf {
 	if progress == nil || width <= 0 || maxRows <= 0 {
 		return terminal.NewCellBuf(max(0, width), 0)
 	}
+	if maxRows == 1 {
+		current := "Preparing search"
+		if progress.Phase == "query" {
+			current = "Preparing query embedding"
+		} else if progress.Phase == "quote" && progress.CurrentPath != "" {
+			path := strings.Join(strings.Fields(sanitizeMarkdownControls(progress.CurrentPath)), " ")
+			current = "Finding quote: " + path
+		} else if progress.CurrentPath != "" {
+			path := strings.Join(strings.Fields(sanitizeMarkdownControls(progress.CurrentPath)), " ")
+			current = "Matching: " + path
+		}
+		return terminal.FromANSIString(truncateProgressLine(current, width), width)
+	}
 	matchRows := max(0, maxRows-2)
 	if matchRows > len(progress.Matches) {
 		matchRows = len(progress.Matches)
 	}
 	header := fmt.Sprintf("Top %d matches | viewed %d/%d | about %s/file",
-		matchRows, progress.Viewed, progress.Total, progress.AvgPerFile.Round(time.Millisecond))
+		matchRows, progress.Viewed, progress.Total, filelist.FormatAveragePerFile(progress.AvgPerFile))
 	lines := []string{truncateProgressLine(header, width)}
 	for _, match := range progress.Matches[:matchRows] {
 		path := strings.Join(strings.Fields(sanitizeMarkdownControls(match.Path)), " ")
-		lines = append(lines, truncateProgressLine(fmt.Sprintf("- %s [semantic: %.2f]", path, match.Score), width))
+		quote := strings.Join(strings.Fields(sanitizeMarkdownControls(match.Quote)), " ")
+		row := filelist.FormatMatch(filelist.Match{
+			Path:     path,
+			Size:     match.Size,
+			Score:    match.Score,
+			HasScore: match.HasScore,
+			Quote:    quote,
+		}, width-2)
+		lines = append(lines, truncateProgressLine("- "+row, width))
 	}
 	current := "Preparing search"
 	if progress.Phase == "query" {
 		current = "Preparing query embedding"
+	} else if progress.Phase == "quote" && progress.CurrentPath != "" {
+		path := strings.Join(strings.Fields(sanitizeMarkdownControls(progress.CurrentPath)), " ")
+		current = "Finding quote: " + path
 	} else if progress.CurrentPath != "" {
 		path := strings.Join(strings.Fields(sanitizeMarkdownControls(progress.CurrentPath)), " ")
 		current = "Matching: " + path
