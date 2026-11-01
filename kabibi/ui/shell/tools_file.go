@@ -115,9 +115,7 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		var embedder ai.PartEmbedder
 		if tc != nil {
 			feedback = tc.Feedback
-			if tc.Session != nil {
-				embedder = tc.Session.Embedder()
-			}
+			embedder = tc.PartEmbedder()
 		}
 		if feedback != nil {
 			feedback(ai.ToolLead(ReadFileInput{}, filepath.Base(resolved), 18))
@@ -150,7 +148,8 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 			var imgRanges []hashline.Range
 			note := "image OCR"
 			if strings.TrimSpace(in.Search) != "" {
-				res := fabric.SearchAndExpand(
+				res := fabric.SearchAndExpandContext(
+					ctx,
 					resolved,
 					info.ModTime().UnixNano(),
 					imgLines,
@@ -159,6 +158,9 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 					embedder,
 					fabric.DefaultTotalBudget,
 				)
+				if res.Err != nil {
+					return nil, fmt.Errorf("search OCR text in %s: %w", relDisp, res.Err)
+				}
 				imgRanges = res.Ranges
 				note = fabric.FormatMatchNote(len(imgLines), res, in.Search)
 			}
@@ -183,7 +185,8 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		var rawSlice string
 
 		if strings.TrimSpace(in.Search) != "" {
-			res := fabric.SearchAndExpand(
+			res := fabric.SearchAndExpandContext(
+				ctx,
 				resolved,
 				info.ModTime().UnixNano(),
 				allLines,
@@ -192,6 +195,9 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 				embedder,
 				fabric.DefaultTotalBudget,
 			)
+			if res.Err != nil {
+				return nil, fmt.Errorf("search file %s: %w", relDisp, res.Err)
+			}
 			ranges = res.Ranges
 			summaryNote = fabric.FormatMatchNote(totalLines, res, in.Search)
 			var matchedText []string
@@ -329,14 +335,13 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		var embedder ai.PartEmbedder
 		if tc != nil {
 			feedback = tc.Feedback
-			if tc.Session != nil {
-				embedder = tc.Session.Embedder()
-			}
+			embedder = tc.PartEmbedder()
 		}
 		if feedback != nil {
 			feedback(ai.ToolLead(ListFilesInput{}, q, 18))
 		}
 		table, err := filelist.ListFiles(execSess.Dir(), filelist.Options{
+			Context:       ctx,
 			Query:         q,
 			SearchContent: in.SearchContent,
 			MaxResults:    in.MaxResults,
@@ -384,4 +389,3 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		}, nil
 	})
 }
-

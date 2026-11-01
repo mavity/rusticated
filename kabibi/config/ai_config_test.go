@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -24,16 +25,18 @@ func TestAIConfigRoundTripAndPrivatePermissions(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	want := AIConfig{
-		Configured:    true,
-		Mode:          "remote",
-		Provider:      "openrouter",
-		Model:         "openai/gpt-6-luna",
-		ContextTokens: 128000,
-		ConsentGiven:  true,
+		Configured:                   true,
+		Mode:                         "remote",
+		Provider:                     "openrouter",
+		Model:                        "openai/gpt-6-luna",
+		ContextTokens:                128000,
+		LocalEmbeddingConsentVersion: 1,
+		ConsentGiven:                 true,
 	}
 	if err := SaveAI(want); err != nil {
 		t.Fatal(err)
 	}
+
 	got, err := LoadAI()
 	if err != nil {
 		t.Fatal(err)
@@ -54,6 +57,40 @@ func TestAIConfigRoundTripAndPrivatePermissions(t *testing.T) {
 	}
 	if filepath.Ext(path) != ".json" {
 		t.Fatalf("AI config path = %s, want .json", path)
+	}
+}
+
+func TestAIConfigIgnoresLegacyEmbedderPreference(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	path, err := AIConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := []byte(`{"configured":true,"mode":"local","tier_id":"gemma-4-e2b","embedder":false,"consent_given":true}`)
+	if err := os.WriteFile(path, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadAI()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Configured || cfg.Mode != "local" || cfg.LocalEmbeddingConsentVersion != 0 {
+		t.Fatalf("legacy config migration = %+v, want configured local config without embedding consent version", cfg)
+	}
+	if err := SaveAI(cfg); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), `"embedder"`) {
+		t.Fatalf("saved config retained legacy embedder preference: %s", data)
 	}
 }
 

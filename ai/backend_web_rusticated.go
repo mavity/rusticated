@@ -37,9 +37,11 @@ const webAdapterBootstrapJS = `
       this.corePromise = null;
       this.coreSource = '';
       this.engines = new Map();
+      this.embedders = new Map();
       this.conversations = new Map();
       this.streams = new Map();
       this.nextEngineId = 1;
+      this.nextEmbedderId = 1;
       this.nextStreamId = 1;
     }
 
@@ -159,6 +161,53 @@ const webAdapterBootstrapJS = `
       const id = this.nextEngineId++;
       this.engines.set(id, engine);
       return String(id);
+    }
+
+    async createEmbedder(cfgJson) {
+      const cfg = JSON.parse(cfgJson);
+      const mod = await this.loadCore();
+      if (!mod.EmbeddingEngine || typeof mod.EmbeddingEngine.create !== 'function') {
+        throw new Error('@litert-lm/core does not expose EmbeddingEngine.create');
+      }
+
+      let modelSource = cfg.modelUrl;
+      if (globalThis.__rustica_assets && typeof globalThis.__rustica_assets.openModelStream === 'function') {
+        const opened = await globalThis.__rustica_assets.openModelStream(cfg.modelUrl);
+        modelSource = opened && opened.stream ? opened.stream : opened;
+      }
+
+      const backendEnum = mod.Backend
+        ? (mod.Backend.GPU_ARTISAN ?? mod.Backend.GPU ?? 2)
+        : 2;
+      const engine = await mod.EmbeddingEngine.create({
+        model: modelSource,
+        backend: backendEnum
+      });
+      const id = this.nextEmbedderId++;
+      this.embedders.set(id, engine);
+      return String(id);
+    }
+
+    async computeEmbedding(embedderId, text) {
+      const engine = this.embedders.get(Number(embedderId));
+      if (!engine) throw new Error('invalid embedder id: ' + embedderId);
+      const result = await engine.computeEmbedding(text, {normalize: true});
+      if (!result || !result.embedding || typeof result.embedding.length !== 'number') {
+        throw new Error('EmbeddingEngine returned no embedding vector');
+      }
+      return JSON.stringify(Array.from(result.embedding));
+    }
+
+    async deleteEmbedder(embedderId) {
+      const engine = this.embedders.get(Number(embedderId));
+      if (!engine) return 'ok';
+      if (typeof engine.close === 'function') {
+        await engine.close();
+      } else if (typeof engine.delete === 'function') {
+        await engine.delete();
+      }
+      this.embedders.delete(Number(embedderId));
+      return 'ok';
     }
 
     async createConversation(cfgJson) {
@@ -427,6 +476,72 @@ func openWebBackend(libPath, modelPath, backend string, maxTokens int) (engineBa
 	}
 
 	return &webEngineBackend{engineID: id}, nil
+}
+
+type webEmbedderBackend struct {
+	embedderID uint64
+}
+
+func openWebEmbedderBackend(libPath, modelPath, backend string) (embedderBackend, error) {
+	if err := ensureWebAdapterLoaded(); err != nil {
+		return nil, fmt.Errorf("load web adapter: %w", err)
+	}
+	cfgBytes, err := json.Marshal(map[string]string{
+		"modelUrl": modelPath,
+		"backend":  backend,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encode web embedder configuration: %w", err)
+	}
+	rawID, err := EvalJS(fmt.Sprintf("globalThis.__rustica_ai.createEmbedder(%s)", strconv.Quote(string(cfgBytes))))
+	if err != nil {
+		return nil, fmt.Errorf("web createEmbedder: %w", err)
+	}
+	id, err := strconv.ParseUint(strings.TrimSpace(rawID), 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("parse web embedder id %q: %w", rawID, err)
+	}
+	if id == 0 {
+		return nil, fmt.Errorf("web embedder returned an empty id")
+	}
+	return &webEmbedderBackend{embedderID: id}, nil
+}
+
+func (e *webEmbedderBackend) ComputeEmbedding(inputs []embedInput) ([]float32, error) {
+	if e == nil || e.embedderID == 0 {
+		return nil, ErrClosed
+	}
+	if len(inputs) != 1 || inputs[0].dataType != inputDataTypeText {
+		return nil, fmt.Errorf("browser EmbeddingGemma backend accepts one text input")
+	}
+	raw, err := EvalJS(fmt.Sprintf(
+		"globalThis.__rustica_ai.computeEmbedding(%d,%s)",
+		e.embedderID,
+		strconv.Quote(string(inputs[0].data)),
+	))
+	if err != nil {
+		return nil, fmt.Errorf("web computeEmbedding: %w", err)
+	}
+	var vector []float32
+	if err := json.Unmarshal([]byte(raw), &vector); err != nil {
+		return nil, fmt.Errorf("decode web embedding vector: %w", err)
+	}
+	if len(vector) == 0 {
+		return nil, fmt.Errorf("web EmbeddingEngine returned an empty vector")
+	}
+	return vector, nil
+}
+
+func (e *webEmbedderBackend) Close() error {
+	if e == nil || e.embedderID == 0 {
+		return nil
+	}
+	_, err := EvalJS(fmt.Sprintf("globalThis.__rustica_ai.deleteEmbedder(%d)", e.embedderID))
+	e.embedderID = 0
+	if err != nil {
+		return fmt.Errorf("close web embedder: %w", err)
+	}
+	return nil
 }
 
 func (e *webEngineBackend) NewConversation(cfg ConversationConfig) (conversationBackend, error) {

@@ -12,16 +12,16 @@ import (
 )
 
 type AIConfig struct {
-	Configured    bool   `json:"configured"`
-	Mode          string `json:"mode,omitempty"`
-	TierID        string `json:"tier_id,omitempty"`
-	Provider      string `json:"provider,omitempty"`
-	Protocol      string `json:"protocol,omitempty"`
-	Model         string `json:"model,omitempty"`
-	ContextTokens int    `json:"context_tokens,omitempty"`
-	BaseURL       string `json:"base_url,omitempty"`
-	Embedder      bool   `json:"embedder,omitempty"`
-	ConsentGiven  bool   `json:"consent_given,omitempty"`
+	Configured                   bool   `json:"configured"`
+	Mode                         string `json:"mode,omitempty"`
+	TierID                       string `json:"tier_id,omitempty"`
+	Provider                     string `json:"provider,omitempty"`
+	Protocol                     string `json:"protocol,omitempty"`
+	Model                        string `json:"model,omitempty"`
+	ContextTokens                int    `json:"context_tokens,omitempty"`
+	BaseURL                      string `json:"base_url,omitempty"`
+	LocalEmbeddingConsentVersion int    `json:"local_embedding_consent_version,omitempty"`
+	ConsentGiven                 bool   `json:"consent_given,omitempty"`
 }
 
 func Directory() (string, error) {

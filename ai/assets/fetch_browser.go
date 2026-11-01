@@ -378,6 +378,33 @@ func ensureModelBrowser(ctx context.Context, url string, expectedSize int64, opt
 	}
 }
 
+func browserModelDownloadSize(url string, expectedSize int64) (int64, error) {
+	if browserModelSize(url) > 0 {
+		return 0, nil
+	}
+	if err := ensureBrowserAssetsBootstrap(); err != nil {
+		return 0, fmt.Errorf("bootstrap browser assets adapter: %w", err)
+	}
+	raw, err := EvalJS(fmt.Sprintf("globalThis.__rustica_assets.checkCached(%s)", strconv.Quote(url)))
+	if err != nil {
+		return 0, fmt.Errorf("check browser model cache: %w", err)
+	}
+	var result struct {
+		Cached bool  `json:"cached"`
+		Size   int64 `json:"size"`
+	}
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		return 0, fmt.Errorf("decode browser model cache status: %w", err)
+	}
+	if result.Cached {
+		if result.Size > 0 {
+			recordBrowserModelSize(url, result.Size)
+		}
+		return 0, nil
+	}
+	return expectedSize, nil
+}
+
 var (
 	browserModelSizesMu sync.Mutex
 	browserModelSizes   = make(map[string]int64)

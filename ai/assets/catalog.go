@@ -147,7 +147,7 @@ func ModelTierDownloadSize(id, cacheDir string) (int64, error) {
 
 func EmbeddingModelDownloadSize(cacheDir string) (int64, error) {
 	if HostOS() == "browser" {
-		return 0, nil
+		return browserModelDownloadSize(DefaultEmbeddingModelURL, DefaultEmbeddingModelSize)
 	}
 	path := filepath.Join(cacheDir, filepath.Base(DefaultEmbeddingModelURL))
 	if info, err := os.Stat(path); err == nil && info.Size() >= DefaultEmbeddingModelSize {

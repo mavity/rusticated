@@ -589,7 +589,10 @@ func openBackend(libPath, modelPath, backend string, maxTokens int) (engineBacke
 }
 
 func openEmbedderBackend(libPath, modelPath, backend string) (embedderBackend, error) {
-	if isBrowserHost() || libPath == "eval" {
+	if isBrowserHost() {
+		return openWebEmbedderBackend(libPath, modelPath, backend)
+	}
+	if libPath == "eval" {
 		return nil, fmt.Errorf("web embedding engine not configured")
 	}
 	return sharedOpenEmbedder(&rusticatedDrv, libPath, modelPath, backend)

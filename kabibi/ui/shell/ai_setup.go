@@ -26,6 +26,8 @@ type modelSetupAction struct {
 	tierID   string
 }
 
+const localEmbeddingConsentVersion = 1
+
 type searchableOnboardingPrompter interface {
 	SearchChoose(ctx context.Context, title, message string, options []string, defaultChoice int) (int, error)
 }
@@ -117,6 +119,9 @@ func (r *LazyAIRunner) configureAIWithPrompter(ctx context.Context, prompter Onb
 	action := actions[choice]
 	switch action.kind {
 	case "keep":
+		if previous.Mode == "local" && previous.LocalEmbeddingConsentVersion < localEmbeddingConsentVersion {
+			return r.configureLocalAI(ctx, prompter, previous, previous.TierID)
+		}
 		return previous, nil
 	case "reauth":
 		return r.reauthenticateCurrentRemote(ctx, prompter, term, previous)
@@ -453,19 +458,9 @@ func (r *LazyAIRunner) configureLocalAI(ctx context.Context, prompter Onboarding
 	if err != nil {
 		return config.AIConfig{}, fmt.Errorf("estimate runtime download: %w", err)
 	}
-	embedder := assets.HostOS() != "browser"
-	var embedderSize int64
-	if embedder {
-		embedderSize, err = assets.EmbeddingModelDownloadSize(cacheDir)
-		if err != nil {
-			return config.AIConfig{}, fmt.Errorf("estimate embedding model download: %w", err)
-		}
-		if embedderSize > 0 && runtimeSize == 0 && modelSize == 0 {
-			// If the runtime and LLM are already cached offline, don't force an embedder
-			// download unless the user wants to fetch from the network.
-			embedder = false
-			embedderSize = 0
-		}
+	embedderSize, err := assets.EmbeddingModelDownloadSize(cacheDir)
+	if err != nil {
+		return config.AIConfig{}, fmt.Errorf("estimate embedding model download: %w", err)
 	}
 	total := runtimeSize + modelSize + embedderSize
 	if total > 0 {
@@ -492,11 +487,11 @@ func (r *LazyAIRunner) configureLocalAI(ctx context.Context, prompter Onboarding
 		}
 	}
 	cfg := config.AIConfig{
-		Configured:   true,
-		Mode:         "local",
-		TierID:       tier.ID,
-		Embedder:     embedder,
-		ConsentGiven: true,
+		Configured:                   true,
+		Mode:                         "local",
+		TierID:                       tier.ID,
+		LocalEmbeddingConsentVersion: localEmbeddingConsentVersion,
+		ConsentGiven:                 true,
 	}
 	if err := config.SaveAI(cfg); err != nil {
 		return config.AIConfig{}, err
@@ -731,7 +726,7 @@ func runAIStatusBuiltin(ctx context.Context, out io.Writer) error {
 		return nil
 	}
 	if cfg.Mode == "local" {
-		fmt.Fprintf(out, "AI mode: local (tier=%s, embedder=%t)\n", cfg.TierID, cfg.Embedder)
+		fmt.Fprintf(out, "AI mode: local (tier=%s, embeddings=local)\n", cfg.TierID)
 	} else {
 		fmt.Fprintf(out, "AI mode: remote (provider=%s, model=%s)\n", cfg.Provider, cfg.Model)
 	}

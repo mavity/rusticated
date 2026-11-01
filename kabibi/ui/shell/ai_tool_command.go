@@ -35,7 +35,17 @@ func ExecuteOneShotAITool(ctx context.Context, name string, args []string, out i
 	}
 	defer execSess.Close()
 
-	result, err := executeAITool(ctx, execSess, name, args)
+	embedder, closeEmbedder, diagnostic, err := resolveOneShotAIToolEmbedder(ctx)
+	if err != nil {
+		return err
+	}
+	if closeEmbedder != nil {
+		defer closeEmbedder()
+	}
+	if diagnostic != "" {
+		fmt.Fprintf(os.Stderr, "[kabibi] %s\n", diagnostic)
+	}
+	result, err := executeAITool(ctx, execSess, name, args, embedder)
 	if err != nil {
 		return err
 	}
@@ -49,7 +59,7 @@ func ExecuteOneShotAITool(ctx context.Context, name string, args []string, out i
 	return nil
 }
 
-func executeAITool(ctx context.Context, execSess *ExecutionSession, name string, args []string) (string, error) {
+func executeAITool(ctx context.Context, execSess *ExecutionSession, name string, args []string, embedder ai.PartEmbedder) (string, error) {
 	tools := BuildKabibiTools(execSess)
 	canonicalName := normalizeAIToolName(name)
 	tool, ok := tools[canonicalName]
@@ -64,10 +74,10 @@ func executeAITool(ctx context.Context, execSess *ExecutionSession, name string,
 	if err != nil {
 		return "", fmt.Errorf("ai %s: %w", canonicalName, err)
 	}
-	result, err := tool.Execute(ctx, ai.ToolCall{
+	result, err := tool.ExecuteWithContext(ctx, &ai.ToolContext{Embedder: embedder}, ai.ToolCall{
 		Name:         canonicalName,
 		RawArguments: rawArguments,
-	}, nil)
+	})
 	if err != nil {
 		return "", fmt.Errorf("ai %s: %w", canonicalName, err)
 	}

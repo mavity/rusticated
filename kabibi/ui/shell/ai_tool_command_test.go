@@ -76,7 +76,7 @@ func TestExecuteAIToolAliasAndMarkdownResult(t *testing.T) {
 	result, err := executeAITool(context.Background(), execSess, "list-files", []string{
 		"--query", "needle",
 		"--search-content",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("execute list-files: %v", err)
 	}
@@ -100,6 +100,7 @@ func TestExecuteAIToolAliasAndMarkdownResult(t *testing.T) {
 }
 
 func TestAIBuiltinMiddlewareDispatchesTool(t *testing.T) {
+	t.Setenv("KABIBI_CONFIG_DIR", t.TempDir())
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "result.txt"), []byte("needle found\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -137,6 +138,7 @@ func TestAIBuiltinMiddlewareDispatchesTool(t *testing.T) {
 }
 
 func TestAIBuiltinMiddlewareRendersForAttachedTTY(t *testing.T) {
+	t.Setenv("KABIBI_CONFIG_DIR", t.TempDir())
 	execSess, err := NewExecutionSession(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -163,6 +165,7 @@ func TestAIBuiltinMiddlewareRendersForAttachedTTY(t *testing.T) {
 }
 
 func TestRunAIBuiltinToolRendersMarkdownForTTY(t *testing.T) {
+	t.Setenv("KABIBI_CONFIG_DIR", t.TempDir())
 	execSess, err := NewExecutionSession(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

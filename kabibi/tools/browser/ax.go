@@ -512,8 +512,8 @@ func collectSubtreeTexts(nodes []*AXNode) []string {
 }
 
 // isParentTextRedundantWithChildren returns true when parentText is non-empty and either:
-//  - matches a child's text directly, OR
-//  - all non-empty descendant texts appear inside parentText in their lexical order.
+//   - matches a child's text directly, OR
+//   - all non-empty descendant texts appear inside parentText in their lexical order.
 func isParentTextRedundantWithChildren(parentText string, children []*AXNode) bool {
 	p := collapseInlineSpaces(parentText)
 	if p == "" || len(children) == 0 {
@@ -754,14 +754,22 @@ func DiffAXSnapshots(nickname string, settleMs int64, before, after *AXSnapshot)
 // SearchAXSnapshot filters the AXSnapshot lines using Kabibi's 4-tier progressive search funnel
 // (Exact -> Regex -> Fuzzy -> EmbeddingGemma 2 semantic embeddings) with indentation fabric expansion.
 func SearchAXSnapshot(snap *AXSnapshot, query string, embedder ai.PartEmbedder) string {
+	body, err := SearchAXSnapshotContext(context.Background(), snap, query, embedder)
+	if err != nil {
+		return fmt.Sprintf("[AX search failed: %v]", err)
+	}
+	return body
+}
+
+func SearchAXSnapshotContext(ctx context.Context, snap *AXSnapshot, query string, embedder ai.PartEmbedder) (string, error) {
 	if snap == nil || len(snap.Lines) == 0 {
-		return "(empty AX tree)"
+		return "(empty AX tree)", nil
 	}
 	q := strings.TrimSpace(query)
 	if q == "" {
-		return strings.Join(snap.Lines, "\n")
+		return strings.Join(snap.Lines, "\n"), nil
 	}
-	res := fabric.SearchAndExpand(
+	res := fabric.SearchAndExpandContext(ctx,
 		"browser_ax:"+snap.URL,
 		int64(snap.StructuralHash),
 		snap.Lines,
@@ -770,8 +778,11 @@ func SearchAXSnapshot(snap *AXSnapshot, query string, embedder ai.PartEmbedder) 
 		embedder,
 		fabric.DefaultTotalBudget,
 	)
+	if res.Err != nil {
+		return "", res.Err
+	}
 	if len(res.Ranges) == 0 {
-		return fmt.Sprintf("[0 AX matches for %q on %s]", q, snap.URL)
+		return fmt.Sprintf("[0 AX matches for %q on %s]", q, snap.URL), nil
 	}
 	var out []string
 	out = append(out, fabric.FormatMatchNote(len(snap.Lines), res, q))
@@ -783,5 +794,5 @@ func SearchAXSnapshot(snap *AXSnapshot, query string, embedder ai.PartEmbedder) 
 			out = append(out, snap.Lines[ln-1])
 		}
 	}
-	return strings.Join(out, "\n")
+	return strings.Join(out, "\n"), nil
 }

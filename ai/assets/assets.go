@@ -81,9 +81,6 @@ func EnsureDefaultLLMModel(ctx context.Context, opts FetchOptions) (string, erro
 
 // EnsureDefaultEmbeddingModel ensures the default EmbeddingGemma 2 model is cached and returns its path.
 func EnsureDefaultEmbeddingModel(ctx context.Context, opts FetchOptions) (string, error) {
-	if HostOS() == "browser" {
-		return "", nil
-	}
 	return EnsureModel(ctx, DefaultEmbeddingModelURL, DefaultEmbeddingModelSize, opts)
 }
 

@@ -65,7 +65,6 @@ func (e *Engine) MaxTokens() int {
 	return e.impl.maxTokens
 }
 
-
 // Interpreter is a loaded TFLite model for generic/vision inference.
 type Interpreter struct {
 	impl *interpreterImpl
@@ -105,7 +104,8 @@ func (i *Interpreter) Close() {
 // Embedder is a loaded LiteRT-LM EmbeddingEngine model (e.g. EmbeddingGemma 2)
 // ready to compute float32 vector representations of PromptParts.
 type Embedder struct {
-	impl *embedderImpl
+	impl      *embedderImpl
+	modelPath string
 }
 
 // NewEmbedder loads the native runtime library and embedding model, selecting a
@@ -115,7 +115,14 @@ func NewEmbedder(libPath, modelPath, backend string) (*Embedder, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Embedder{impl: impl}, nil
+	return &Embedder{impl: impl, modelPath: modelPath}, nil
+}
+
+func (e *Embedder) CacheIdentity() string {
+	if e == nil {
+		return ""
+	}
+	return "litert:" + e.modelPath
 }
 
 // Embed computes a normalized float32 embedding vector for the given PromptParts.

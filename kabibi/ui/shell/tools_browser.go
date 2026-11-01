@@ -109,9 +109,7 @@ func registerBrowserTools(tools map[string]ai.Tool, execSess *ExecutionSession) 
 		var embedder ai.PartEmbedder
 		if tc != nil {
 			feedback = tc.Feedback
-			if tc.Session != nil {
-				embedder = tc.Session.Embedder()
-			}
+			embedder = tc.PartEmbedder()
 		}
 		if feedback != nil {
 			lead := in.Nickname

@@ -4,6 +4,8 @@
 package fabric
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"math"
 	"regexp"
@@ -28,12 +30,14 @@ type SearchResult struct {
 	Ranges     []hashline.Range
 	MatchLines []int  // 1-based line numbers that matched
 	TierUsed   string // "plain", "regex", "fuzzy", or "semantic"
+	Err        error
 }
 
 type chunkCacheKey struct {
 	path     string
 	modNano  int64
 	chunkIdx int
+	embedder string
 }
 
 var (
@@ -44,6 +48,21 @@ var (
 // SearchAndExpand runs the progressive 4-tier search funnel over lines and expands
 // matching anchors into indentation-coherent structural slices.
 func SearchAndExpand(
+	path string,
+	modNano int64,
+	lines []string,
+	query string,
+	mode string,
+	embedder ai.PartEmbedder,
+	totalBudget int,
+) SearchResult {
+	return SearchAndExpandContext(context.Background(), path, modNano, lines, query, mode, embedder, totalBudget)
+}
+
+// SearchAndExpandContext preserves embedder failures in SearchResult.Err and
+// uses the caller's context for semantic vector requests.
+func SearchAndExpandContext(
+	ctx context.Context,
 	path string,
 	modNano int64,
 	lines []string,
@@ -86,7 +105,11 @@ func SearchAndExpand(
 
 	case "semantic":
 		if embedder != nil {
-			matchIndices = matchSemantic(path, modNano, lines, q, embedder)
+			var err error
+			matchIndices, err = matchSemantic(ctx, path, modNano, lines, q, embedder)
+			if err != nil {
+				return SearchResult{TierUsed: "semantic", Err: err}
+			}
 			tier = "semantic"
 		}
 		if len(matchIndices) == 0 {
@@ -118,7 +141,11 @@ func SearchAndExpand(
 		// Tier 4: EmbeddingGemma 2 semantic vector search when Tiers 1-3 return 0
 		// OR when Tiers 1-3 return too many matches (> DefaultMaxMatches)
 		if embedder != nil && (len(matchIndices) == 0 || len(matchIndices) > DefaultMaxMatches) {
-			if semMatches := matchSemantic(path, modNano, lines, q, embedder); len(semMatches) > 0 {
+			semMatches, err := matchSemantic(ctx, path, modNano, lines, q, embedder)
+			if err != nil {
+				return SearchResult{TierUsed: "semantic", Err: err}
+			}
+			if len(semMatches) > 0 {
 				matchIndices = semMatches
 				tier = "semantic"
 			}
@@ -323,57 +350,103 @@ func levenshtein(a, b string) int {
 	return prev[len(b)]
 }
 
-func matchSemantic(path string, modNano int64, lines []string, query string, embedder ai.PartEmbedder) []int {
-	qVec, err := embedder.Embed([]ai.PromptPart{{Text: query}})
-	if err != nil || len(qVec) == 0 {
-		return nil
+func matchSemantic(ctx context.Context, path string, modNano int64, lines []string, query string, embedder ai.PartEmbedder) ([]int, error) {
+	qVec, err := ai.EmbedWithContext(ctx, embedder, []ai.PromptPart{{Role: ai.RoleUser, Text: query}})
+	if err != nil {
+		return nil, fmt.Errorf("embed search query: %w", err)
+	}
+	if len(qVec) == 0 {
+		return nil, errors.New("embed search query: empty vector")
 	}
 
 	const chunkLines = 20
 	const stride = 12
+	type chunk struct {
+		start int
+		end   int
+		index int
+		text  string
+		key   chunkCacheKey
+		vec   []float32
+	}
 	type scoredChunk struct {
 		centerIdx int
 		sim       float64
 	}
-	var results []scoredChunk
-
+	identity := ""
+	if cacheIdentity, ok := embedder.(ai.PartEmbedderCacheIdentity); ok {
+		identity = cacheIdentity.CacheIdentity()
+	}
+	var chunks []chunk
+	var pending []ai.PromptPart
+	var pendingChunks []int
 	chunkIdx := 0
 	for start := 0; start < len(lines); start += stride {
 		end := start + chunkLines
 		if end > len(lines) {
 			end = len(lines)
 		}
-		key := chunkCacheKey{path: path, modNano: modNano, chunkIdx: chunkIdx}
+		text := strings.Join(lines[start:end], "\n")
+		if strings.TrimSpace(text) == "" {
+			if end == len(lines) {
+				break
+			}
+			chunkIdx++
+			continue
+		}
+		current := chunk{
+			start: start,
+			end:   end,
+			index: chunkIdx,
+			text:  text,
+			key:   chunkCacheKey{path: path, modNano: modNano, chunkIdx: chunkIdx, embedder: identity},
+		}
 		chunkIdx++
-
-		embedCacheMu.Lock()
-		vec, ok := embedCache[key]
-		embedCacheMu.Unlock()
-
-		if !ok {
-			chunkText := strings.Join(lines[start:end], "\n")
-			if strings.TrimSpace(chunkText) == "" {
-				continue
-			}
-			vec, err = embedder.Embed([]ai.PromptPart{{Text: chunkText}})
-			if err != nil || len(vec) == 0 {
-				continue
-			}
+		if identity != "" {
 			embedCacheMu.Lock()
-			if len(embedCache) > 4096 {
-				embedCache = make(map[chunkCacheKey][]float32)
-			}
-			embedCache[key] = vec
+			current.vec = append([]float32(nil), embedCache[current.key]...)
 			embedCacheMu.Unlock()
 		}
-
-		sim := cosineSimilarity(qVec, vec)
-		if sim >= SemanticSimilarityTh {
-			center := (start + end - 1) / 2
-			results = append(results, scoredChunk{centerIdx: center, sim: sim})
+		if len(current.vec) == 0 {
+			pendingChunks = append(pendingChunks, len(chunks))
+			pending = append(pending, ai.PromptPart{Role: ai.RoleModel, Text: text})
 		}
+		chunks = append(chunks, current)
 		if end == len(lines) {
 			break
+		}
+	}
+	if len(pending) > 0 {
+		vectors, err := ai.EmbedBatchWithContext(ctx, embedder, pending)
+		if err != nil {
+			return nil, fmt.Errorf("embed search content: %w", err)
+		}
+		if len(vectors) != len(pending) {
+			return nil, fmt.Errorf("embed search content: got %d vectors for %d chunks", len(vectors), len(pending))
+		}
+		for i, vector := range vectors {
+			if len(vector) == 0 {
+				return nil, fmt.Errorf("embed search content: empty vector for chunk %d", i)
+			}
+			current := &chunks[pendingChunks[i]]
+			current.vec = vector
+			if identity != "" {
+				embedCacheMu.Lock()
+				if len(embedCache) > 4096 {
+					embedCache = make(map[chunkCacheKey][]float32)
+				}
+				embedCache[current.key] = append([]float32(nil), vector...)
+				embedCacheMu.Unlock()
+			}
+		}
+	}
+
+	var results []scoredChunk
+	for _, current := range chunks {
+		sim := cosineSimilarity(qVec, current.vec)
+		if sim >= SemanticSimilarityTh {
+			center := (current.start + current.end - 1) / 2
+			results = append(results, scoredChunk{centerIdx: center, sim: sim})
 		}
 	}
 
@@ -389,7 +462,7 @@ func matchSemantic(path string, modNano int64, lines []string, query string, emb
 		out = append(out, results[i].centerIdx)
 	}
 	sort.Ints(out)
-	return out
+	return out, nil
 }
 
 func cosineSimilarity(a, b []float32) float64 {

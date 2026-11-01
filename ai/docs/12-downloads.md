@@ -29,14 +29,20 @@ and wire protocols (OpenRouter, Anthropic, OpenAI, GitHub Copilot, and Google Ge
 5. **Hardware-aware choices.** Native and Rusticated platform memory slots
    inform model recommendations. The recommendation is advisory; users can
    select another supported tier.
-6. **Adaptive local embedding.** On native local setups, Kabibi first tries to
-   keep the LLM and EmbeddingGemma resident together. If embedder loading or
-   embedding fails, it switches for that runner session to a sequential
-   close/embed/reload path and restores the conversation from compacted
-   history. A successful fallback is nonfatal. If the sequential embedding
-   still fails, the error is surfaced and embeddings are disabled for that
-   session; if the LLM cannot be restored, the next AI turn reports that
-   failure.
+6. **Policy-directed embeddings.** Local sessions always initialize the
+   bundled local embedder, including browser-local sessions. Older local
+   configurations without the embedding-consent version are sent through setup
+   again before the required asset can be downloaded. Native sessions prefer
+   keeping the LLM and embedder resident together and otherwise use the
+   sequential close/embed/reload path. Embedding failures are returned to
+   semantic-search callers; they do not silently become lexical results.
+7. **Provider-matched remote embeddings.** OpenAI, OpenRouter, and Gemini use
+   embedding APIs belonging to the configured provider, preferring the
+   provider's designated model and choosing the cheapest model only when its
+   availability and price are known. Unsupported providers, missing
+   credentials, or indeterminate catalogs leave remote sessions without an
+   embedder; they never fall back to a local or third-party provider. Direct
+   `ai <tool>` commands use the same policy.
 
 ## 2. Catalog and hardware ABI
 
@@ -54,8 +60,8 @@ browser even if a URL/size is retained in the catalog.
 
 The default local embedder, `embeddinggemma-2-text-270m.litertlm`, is
 164,626,432 bytes. It is included in the single local consent estimate on
-desktop and omitted for browser-local setups, where the local embedder is not
-supported.
+native and browser-local setups, with browser cache state included in the
+estimate.
 
 `syscall.PlatformInfo` retains its 676-byte legacy prefix and appends sixteen
 16-byte tagged memory slots, for a 932-byte total layout. Memory kinds
@@ -103,7 +109,9 @@ their respective backends.
 
 `kabibi/config` stores non-secret state in `ai.json`. Fields are flat and
 include `configured`, `mode`, `tier_id`, `provider`, `model`, `base_url`,
-`embedder`, and `consent_given`. Credentials are never copied into this file,
+`local_embedding_consent_version`, and `consent_given`. Embedder availability
+is derived from the selected AI provider, not a user-configurable flag.
+Credentials are never copied into this file,
 shell history, or the conversation context.
 
 On first AI use:
@@ -169,25 +177,27 @@ base URLs must use HTTPS, except loopback HTTP URLs used for local tests.
 
 ## 6. Embedding residency policy and limits
 
-Native local setup downloads the embedder as part of the consented installation
-and attempts to load it while the LLM is resident. If the embedder loads and
-works, both remain resident. If embedder initialization or inference fails,
-the adaptive wrapper closes the active conversation and LLM engine, runs the
-embedder, closes it, reloads the LLM engine, and recreates the conversation
-from `Session.CompactedHistory`. `Session.turnGate` serializes this lifecycle
-with generation and embedding work.
+Local setup downloads the embedder as part of the consented installation. On
+native hosts it attempts to load the embedder while the LLM is resident. If
+embedder initialization or inference fails, the adaptive wrapper closes the
+active conversation and LLM engine, runs the embedder, closes it, reloads the
+LLM engine, and recreates the conversation from `Session.CompactedHistory`.
+`Session.turnGate` serializes this lifecycle with generation and embedding
+work.
 
 The fallback currently responds to any embedder load/inference error rather
 than classifying only out-of-memory errors. It is session-scoped, not persisted.
 It does not proactively detect or recover from a later LLM generation failure
-caused by both resident models competing for memory. If a sequential embedding
-failure occurs while the LLM has been restored, chat continues without further
-embeddings and the failure is written to stderr. If LLM reinitialization or
-conversation restoration fails, the error is retained and returned on the next
-turn.
+caused by both resident models competing for memory. A failed sequential
+embedding remains an error for later embedding requests; search tools surface
+that error instead of returning lexical-only results. If LLM reinitialization
+or conversation restoration fails, the error is retained and returned on the
+next turn.
 
-Cloud and browser-local modes run without a local embedder. `ai.Session`
-continues with its ordinary history/recency behavior when `Embedder` is nil.
+Remote sessions use a supported embedder from the same configured provider
+when availability and pricing can be established. Otherwise, remote sessions
+continue without semantic embeddings and report the reason; they do not load a
+local embedder.
 
 ## 7. Deferred scope
 
@@ -461,5 +471,3 @@ The specification in Sections 9–13 has been implemented across:
 - `ai/backend_remote.go` & `ai/auth.go`: Per-request credential resolution/refresh, OpenAI `/v1/responses` wire protocol for ChatGPT OAuth tokens, Anthropic Claude Code OAuth wire protocol (`Bearer` auth, `anthropic-beta`, system identity block, canonical tool casing), and GitHub Copilot dynamic `proxy-ep` base URL and per-turn headers.
 - `kabibi/credstore/credstore.go`: Structured `Credential` persistence with `Read`, `Modify`, `Remove`, and `List` (retaining backwards compatibility with legacy `Get`/`Set`/`Delete`).
 - `kabibi/ui/shell/ai_onboarding.go`, `ai_setup.go`, `ai_runner.go`, `shell_widget.go`, `shell.go`, `exec_session.go`: Retired `Shell.wizardWidget` overlay in favor of `CommandTerminal`-backed `TerminalSession` blocks and added the in-process `ai` built-in command (`ai setup`, `ai login`, `ai logout`, `ai status`).
-
-
