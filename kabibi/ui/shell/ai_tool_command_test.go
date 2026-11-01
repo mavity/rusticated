@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"ai"
 )
 
 func TestParseAIToolArguments(t *testing.T) {
@@ -99,8 +101,56 @@ func TestExecuteAIToolAliasAndMarkdownResult(t *testing.T) {
 	}
 }
 
+type commandTestEmbedder struct {
+	queryCalls int
+	batchCalls int
+}
+
+func (e *commandTestEmbedder) Embed([]ai.PromptPart) ([]float32, error) {
+	e.queryCalls++
+	return []float32{1, 0}, nil
+}
+
+func (e *commandTestEmbedder) EmbedBatchContext(_ context.Context, parts []ai.PromptPart) ([][]float32, error) {
+	e.batchCalls++
+	vectors := make([][]float32, len(parts))
+	for i := range vectors {
+		vectors[i] = []float32{1, 0}
+	}
+	return vectors, nil
+}
+
+func TestExecuteAIToolListFilesUsesProvidedEmbedder(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "browser_worker.go"), []byte("func startWorker() { launchCanvasRuntime() }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	execSess, err := NewExecutionSession(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer execSess.Close()
+
+	embedder := &commandTestEmbedder{}
+	result, err := executeAITool(context.Background(), execSess, "list_files", []string{
+		"--query", "where the browser canvas runtime starts",
+		"--search-content",
+	}, embedder)
+	if err != nil {
+		t.Fatalf("execute semantic list_files: %v", err)
+	}
+	for _, want := range []string{"mode: semantic-content", "browser_worker.go", "[semantic: 1.00]"} {
+		if !strings.Contains(result, want) {
+			t.Errorf("semantic list_files result missing %q:\n%s", want, result)
+		}
+	}
+	if embedder.queryCalls != 1 || embedder.batchCalls != 1 {
+		t.Fatalf("embedder calls = (query %d, batch %d), want (1, 1)", embedder.queryCalls, embedder.batchCalls)
+	}
+}
+
 func TestAIBuiltinMiddlewareDispatchesTool(t *testing.T) {
-	t.Setenv("KABIBI_CONFIG_DIR", t.TempDir())
+	setTestConfigDirectory(t)
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "result.txt"), []byte("needle found\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -138,7 +188,7 @@ func TestAIBuiltinMiddlewareDispatchesTool(t *testing.T) {
 }
 
 func TestAIBuiltinMiddlewareRendersForAttachedTTY(t *testing.T) {
-	t.Setenv("KABIBI_CONFIG_DIR", t.TempDir())
+	setTestConfigDirectory(t)
 	execSess, err := NewExecutionSession(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -165,7 +215,7 @@ func TestAIBuiltinMiddlewareRendersForAttachedTTY(t *testing.T) {
 }
 
 func TestRunAIBuiltinToolRendersMarkdownForTTY(t *testing.T) {
-	t.Setenv("KABIBI_CONFIG_DIR", t.TempDir())
+	setTestConfigDirectory(t)
 	execSess, err := NewExecutionSession(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -182,6 +232,7 @@ func TestRunAIBuiltinToolRendersMarkdownForTTY(t *testing.T) {
 		&stderr,
 		newCommandTerminal(context.Background(), 80, 20),
 		true,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("run TUI tool: %v; stderr=%q", err, stderr.String())

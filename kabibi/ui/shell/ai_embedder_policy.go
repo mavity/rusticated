@@ -2,6 +2,7 @@ package shell
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
@@ -10,6 +11,8 @@ import (
 	"github.com/mavity/rusticated/kabibi/config"
 	"github.com/mavity/rusticated/kabibi/credstore"
 )
+
+var errLocalEmbeddingConsentRequired = errors.New("local embeddings require updated setup consent")
 
 func remoteAIEngineConfig(ctx context.Context, cfg config.AIConfig) (ai.RemoteEngineConfig, error) {
 	provider := ai.RemoteProvider(cfg.Provider)
@@ -35,7 +38,7 @@ func remoteAIEngineConfig(ctx context.Context, cfg config.AIConfig) (ai.RemoteEn
 	}, nil
 }
 
-func resolveOneShotAIToolEmbedder(ctx context.Context) (ai.PartEmbedder, func(), string, error) {
+func resolveOneShotAIToolEmbedder(ctx context.Context, setup func() error) (ai.PartEmbedder, func(), string, error) {
 	cfg, err := config.LoadAI()
 	if err != nil {
 		return nil, nil, "", err
@@ -43,11 +46,26 @@ func resolveOneShotAIToolEmbedder(ctx context.Context) (ai.PartEmbedder, func(),
 	if !cfg.Configured {
 		return nil, nil, "AI is not configured; semantic embeddings are unavailable", nil
 	}
+	if cfg.Mode == "local" && (!cfg.ConsentGiven || cfg.LocalEmbeddingConsentVersion < localEmbeddingConsentVersion) {
+		if setup == nil {
+			return nil, nil, "", fmt.Errorf("%w; run `ai setup`", errLocalEmbeddingConsentRequired)
+		}
+		if err := setup(); err != nil {
+			return nil, nil, "", fmt.Errorf("complete local embedding setup: %w", err)
+		}
+		cfg, err = config.LoadAI()
+		if err != nil {
+			return nil, nil, "", err
+		}
+		if !cfg.Configured {
+			return nil, nil, "AI is not configured; semantic embeddings are unavailable", nil
+		}
+		if cfg.Mode == "local" && (!cfg.ConsentGiven || cfg.LocalEmbeddingConsentVersion < localEmbeddingConsentVersion) {
+			return nil, nil, "", fmt.Errorf("%w; setup completed without recording consent", errLocalEmbeddingConsentRequired)
+		}
+	}
 	switch cfg.Mode {
 	case "local":
-		if !cfg.ConsentGiven || cfg.LocalEmbeddingConsentVersion < localEmbeddingConsentVersion {
-			return nil, nil, "", fmt.Errorf("local embeddings require updated setup consent; run `ai setup`")
-		}
 		cacheDir, err := assets.DefaultCacheDir()
 		if err != nil {
 			return nil, nil, "", err

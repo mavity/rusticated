@@ -35,7 +35,10 @@ func ExecuteOneShotAITool(ctx context.Context, name string, args []string, out i
 	}
 	defer execSess.Close()
 
-	embedder, closeEmbedder, diagnostic, err := resolveOneShotAIToolEmbedder(ctx)
+	setup := func() error {
+		return RunAISetup(ctx, execSess, os.Stdin, os.Stdout)
+	}
+	embedder, closeEmbedder, diagnostic, err := resolveOneShotAIToolEmbedder(ctx, setup)
 	if err != nil {
 		return err
 	}
