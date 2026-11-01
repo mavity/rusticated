@@ -89,7 +89,7 @@ func Version() string {
 }
 
 func getVer() string {
-	ver := "0.8.24"
+	ver := "0.8.25"
 	if info, ok := debug.ReadBuildInfo(); ok {
 		if info.Main.Version != "devel" && info.Main.Version != "(devel)" {
 			ver = info.Main.Version
