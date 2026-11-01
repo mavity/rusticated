@@ -146,23 +146,6 @@ type AICommandUISink interface {
 	OnAICommandStart(command string, cwd string) (onChunk func([]byte), onFinish func(exitCode int, elapsed time.Duration))
 }
 
-type commandOutputUISink interface {
-	SetActiveCommandOutputRenderer(renderer CommandBlockOutputRenderer)
-	InvalidateActiveCommandOutput()
-	CommandOutputSize() (width int, availableHeight int)
-}
-
-func (es *ExecutionSession) commandOutputUISink() commandOutputUISink {
-	if es == nil {
-		return nil
-	}
-	es.bgMu.Lock()
-	sink := es.uiSink
-	es.bgMu.Unlock()
-	outputSink, _ := sink.(commandOutputUISink)
-	return outputSink
-}
-
 // NewExecutionSession creates a new persistent shell execution session rooted at dir.
 func NewExecutionSession(dir string) (*ExecutionSession, error) {
 	dw := &dynamicWriter{}

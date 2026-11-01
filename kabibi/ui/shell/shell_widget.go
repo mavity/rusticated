@@ -358,43 +358,6 @@ func (s *Shell) IsRunning() bool {
 	return s.running
 }
 
-func (s *Shell) SetActiveCommandOutputRenderer(renderer CommandBlockOutputRenderer) {
-	s.mu.Lock()
-	if !s.running || s.activeBlock < 0 || s.activeBlock >= len(s.blocks) {
-		s.mu.Unlock()
-		return
-	}
-	s.blocks[s.activeBlock].outputRenderer = renderer
-	s.blocks[s.activeBlock].cachePopulated = false
-	s.mu.Unlock()
-	s.invalidate()
-}
-
-func (s *Shell) InvalidateActiveCommandOutput() {
-	s.mu.Lock()
-	if !s.running || s.activeBlock < 0 || s.activeBlock >= len(s.blocks) {
-		s.mu.Unlock()
-		return
-	}
-	s.blocks[s.activeBlock].cachePopulated = false
-	s.mu.Unlock()
-	s.invalidate()
-}
-
-func (s *Shell) CommandOutputSize() (width int, availableHeight int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	width = s.width
-	if width <= 0 {
-		width = 80
-	}
-	height := s.height
-	if height <= 0 {
-		height = 24
-	}
-	return width, max(0, height-reservedFooterRows)
-}
-
 // WaitActive blocks until any currently executing command or AI turn finishes.
 func (s *Shell) WaitActive() {
 	s.mu.Lock()
@@ -411,25 +374,10 @@ func (s *Shell) Blocks() []CommandBlock {
 	defer s.mu.Unlock()
 	s.drainLiveOutputsLocked()
 	res := make([]CommandBlock, len(s.blocks))
-	renderWidth := s.width
-	if renderWidth <= 0 {
-		renderWidth = 80
-	}
 	for i := range s.blocks {
-		var output []byte
+		output := s.blocks[i].Output.Bytes()
 		if live := s.blocks[i].liveOutput; live != nil {
-			output = append(output, live.raw...)
-		} else {
-			if renderer := s.blocks[i].outputRenderer; renderer != nil {
-				rendered := renderer.Render(renderWidth)
-				if rendered != "" {
-					output = append(output, rendered...)
-					if !strings.HasSuffix(rendered, "\n") {
-						output = append(output, '\n')
-					}
-				}
-			}
-			output = append(output, s.blocks[i].Output.Bytes()...)
+			output = live.raw
 		}
 		res[i] = CommandBlock{
 			ID:            s.blocks[i].ID,
@@ -705,15 +653,6 @@ func renderBlockCached(block *CommandBlock, width int) terminal.CellBuf {
 			rawText = block.Output.String()
 		} else {
 			rawText = block.Prompt + block.Input + "\n"
-			if block.outputRenderer != nil {
-				output := block.outputRenderer.Render(width)
-				if output != "" {
-					rawText += output
-					if !strings.HasSuffix(rawText, "\n") {
-						rawText += "\n"
-					}
-				}
-			}
 			rawText += block.Output.String()
 		}
 		if block.Status == StatusActive && block.AnimLine != "" {

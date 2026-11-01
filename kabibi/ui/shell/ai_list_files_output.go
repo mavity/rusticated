@@ -2,44 +2,83 @@ package shell
 
 import (
 	"fmt"
+	"io"
 	"strings"
-	"sync"
 
 	"github.com/mattn/go-runewidth"
 	"github.com/mavity/rusticated/kabibi/tools/filelist"
 )
 
-type listFilesCommandOutput struct {
-	mu       sync.RWMutex
-	progress *filelist.Progress
-	maxRows  int
+type listFilesProgressOutput struct {
+	writer  io.Writer
+	width   int
+	maxRows int
+	rows    int
 }
 
-func newListFilesCommandOutput(maxRows int) *listFilesCommandOutput {
-	return &listFilesCommandOutput{maxRows: maxRows}
+func newListFilesProgressOutput(writer io.Writer, width, maxRows int) *listFilesProgressOutput {
+	if width <= 0 {
+		width = 80
+	}
+	return &listFilesProgressOutput{
+		writer:  writer,
+		width:   width,
+		maxRows: maxRows,
+	}
 }
 
-func (o *listFilesCommandOutput) setProgress(progress *filelist.Progress) {
-	o.mu.Lock()
-	o.progress = cloneListFilesProgress(progress)
-	o.mu.Unlock()
-}
-
-func (o *listFilesCommandOutput) Render(width int) string {
-	o.mu.RLock()
-	progress := cloneListFilesProgress(o.progress)
-	maxRows := o.maxRows
-	o.mu.RUnlock()
-	return renderListFilesProgress(progress, width, maxRows)
-}
-
-func cloneListFilesProgress(progress *filelist.Progress) *filelist.Progress {
-	if progress == nil {
+func (o *listFilesProgressOutput) publish(progress *filelist.Progress) error {
+	rendered := renderListFilesProgress(progress, o.width, o.maxRows)
+	if rendered == "" {
 		return nil
 	}
-	copy := *progress
-	copy.Matches = append([]filelist.ProgressMatch(nil), progress.Matches...)
-	return &copy
+	lines := strings.Split(rendered, "\n")
+	rows := max(o.rows, len(lines))
+	var frame strings.Builder
+	if o.rows > 0 {
+		fmt.Fprintf(&frame, "\x1b[%dA", o.rows)
+	}
+	frame.WriteByte('\r')
+	for row := 0; row < rows; row++ {
+		frame.WriteString("\x1b[2K")
+		if row < len(lines) {
+			frame.WriteString(lines[row])
+		}
+		frame.WriteString("\r\n")
+	}
+	if err := writeListFilesOutput(o.writer, frame.String()); err != nil {
+		return err
+	}
+	o.rows = rows
+	return nil
+}
+
+func (o *listFilesProgressOutput) clear() error {
+	if o.rows == 0 {
+		return nil
+	}
+	var frame strings.Builder
+	fmt.Fprintf(&frame, "\x1b[%dA\r", o.rows)
+	for row := 0; row < o.rows; row++ {
+		frame.WriteString("\x1b[2K\r\n")
+	}
+	fmt.Fprintf(&frame, "\x1b[%dA\r", o.rows)
+	if err := writeListFilesOutput(o.writer, frame.String()); err != nil {
+		return err
+	}
+	o.rows = 0
+	return nil
+}
+
+func writeListFilesOutput(writer io.Writer, text string) error {
+	written, err := io.WriteString(writer, text)
+	if err != nil {
+		return err
+	}
+	if written != len(text) {
+		return io.ErrShortWrite
+	}
+	return nil
 }
 
 func renderListFilesProgress(progress *filelist.Progress, width, maxRows int) string {
@@ -109,6 +148,10 @@ func truncateProgressLine(text string, width int) string {
 }
 
 func listFilesProgressMatchLimit(availableHeight int) int {
+	return max(0, listFilesProgressOutputRows(availableHeight)-2)
+}
+
+func listFilesProgressOutputRows(availableHeight int) int {
 	return max(0, availableHeight-2)
 }
 
