@@ -3,10 +3,10 @@ package credstore
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/mavity/rusticated/kabibi/config"
+	"github.com/mavity/rusticated/platform"
 )
 
 func TestSetGetDeleteAndPrivatePermissions(t *testing.T) {
@@ -30,7 +30,7 @@ func TestSetGetDeleteAndPrivatePermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+	if platform.HostOS() != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("credential permissions = %o, want 600", info.Mode().Perm())
 	}
 	if err := Delete("openai", "default"); err != nil {
@@ -135,4 +135,3 @@ func TestModifyReadAndListStructuredOAuthCredentials(t *testing.T) {
 		t.Fatalf("Read after Remove = %+v, %v", after, err)
 	}
 }
-

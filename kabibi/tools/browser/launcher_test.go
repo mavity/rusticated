@@ -1,6 +1,7 @@
 package browser
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -33,12 +34,25 @@ func TestBrowserCandidatePathsWindowsUseHomeWhenInstallEnvironmentIsMissing(t *t
 	t.Setenv("HOME", `C:\Users\tester`)
 	t.Setenv("USERPROFILE", `C:\Users\tester`)
 
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Fatalf("os.UserHomeDir() = %q, %v", home, err)
+	}
+	driveRoot := `C:\`
+	if driveEnd := strings.IndexByte(home, ':'); driveEnd == 1 {
+		driveRoot = home[:driveEnd+1] + `\`
+	}
+
 	got := browserCandidatePaths("windows")
-	for _, want := range []string{
-		filepath.Join(`C:`, "Program Files", `Google\Chrome\Application\chrome.exe`),
-		filepath.Join(`C:`, "Program Files (x86)", `Microsoft\Edge\Application\msedge.exe`),
-		filepath.Join(`C:\Users\tester`, "AppData", "Local", `Google\Chrome\Application\chrome.exe`),
-	} {
+	var wants []string
+	if strings.IndexByte(home, ':') == 1 {
+		wants = append(wants,
+			filepath.Join(driveRoot, "Program Files", `Google\Chrome\Application\chrome.exe`),
+			filepath.Join(driveRoot, "Program Files (x86)", `Microsoft\Edge\Application\msedge.exe`),
+		)
+	}
+	wants = append(wants, filepath.Join(home, "AppData", "Local", `Google\Chrome\Application\chrome.exe`))
+	for _, want := range wants {
 		if !containsPath(got, want) {
 			t.Errorf("Windows candidates omit fallback %q: %v", want, got)
 		}

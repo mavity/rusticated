@@ -341,13 +341,11 @@ class HostState {
     this.handles.set(2n, { type: 'stdio', stream: process.stderr, fd: 2 });
 
     // Pending-op tracking (mirrors outstandingOps / activeOps)
-    this.activeOps    = new Map();   // ovPtr(number) -> opId(number)
-    this.opCancelers  = new Map();   // ovPtr(number) -> { opId, cancel }
+    this.activeOps    = new Map();   // ovPtr(number) -> { opId, cancel }
     this.nextOpId     = 1;
     this.pendingCount = 0;
-    this._timers      = new Map();   // ovPtr(number) -> { opId, timer }
 
-    // Signal waiters: signum(number) -> {ovPtr, opId}
+    // Signal waiters: signum(number) -> Map<ovPtr(number), opId(number)>
     this.signalWaiters = new Map();
 
     // Pending completions queue (functions to call before next run())
@@ -425,7 +423,10 @@ class HostState {
           L('[pty] closeChild threw:', error);
         }
       }
-      else if (item.type === 'dirscan' && item._dir) item._dir.close().catch(() => {});
+      else if (item.type === 'dirscan') {
+        if (item.fd != null) fs.close(item.fd, () => {});
+        if (item._dir) item._dir.close().catch(() => {});
+      }
     } catch (_) { /* best effort */ }
   }
 
@@ -437,32 +438,35 @@ class HostState {
   }
 
   // ── op management ───────────────────────────────────────────────────────────
-  registerOp(ovPtr) {
+  registerOp(ovPtr, cancel = null) {
+    const existing = this.activeOps.get(ovPtr);
+    if (existing) {
+      if (typeof existing.cancel === 'function') existing.cancel();
+    } else {
+      this.pendingCount++;
+    }
     const opId = this.nextOpId++;
-    this.activeOps.set(ovPtr, opId);
-    this.pendingCount++;
+    this.activeOps.set(ovPtr, { opId, cancel });
     return opId;
   }
 
   isOpActive(ovPtr, opId) {
-    return this.activeOps.get(ovPtr) === opId;
+    const active = this.activeOps.get(ovPtr);
+    return active !== undefined && active.opId === opId;
   }
 
   completeOp(ovPtr, opId, errorCode, continued, resultExt) {
     if (!this.isOpActive(ovPtr, opId)) return false;
     this.activeOps.delete(ovPtr);
     this.pendingCount--;
-    const canceler = this.opCancelers.get(ovPtr);
-    if (canceler && canceler.opId === opId) this.opCancelers.delete(ovPtr);
-    const timer = this._timers.get(ovPtr);
-    if (timer && timer.opId === opId) this._timers.delete(ovPtr);
     writeOverlapped(this.view, ovPtr, errorCode, continued, resultExt);
     return true;
   }
 
   setOpCanceler(ovPtr, opId, cancel) {
-    if (this.isOpActive(ovPtr, opId)) {
-      this.opCancelers.set(ovPtr, { opId, cancel });
+    const active = this.activeOps.get(ovPtr);
+    if (active && active.opId === opId) {
+      active.cancel = cancel;
     }
   }
 
@@ -470,36 +474,15 @@ class HostState {
     if (!this.isOpActive(ovPtr, opId)) return false;
     this.activeOps.delete(ovPtr);
     this.pendingCount--;
-    const canceler = this.opCancelers.get(ovPtr);
-    if (canceler && canceler.opId === opId) this.opCancelers.delete(ovPtr);
-    const timer = this._timers.get(ovPtr);
-    if (timer && timer.opId === opId) this._timers.delete(ovPtr);
     writeOverlappedExtended(this.view, ovPtr, errorCode, continued, resultExt, childHandle, ptyHandle);
     return true;
   }
 
-  cancelOp(ovPtr, writeCancellation = true) {
-    const opId = this.activeOps.get(ovPtr);
-    if (opId === undefined) return;
-    this.activeOps.delete(ovPtr);
-    this.pendingCount--;
-    const canceler = this.opCancelers.get(ovPtr);
-    if (canceler && canceler.opId === opId) {
-      this.opCancelers.delete(ovPtr);
-      canceler.cancel();
-    }
-    const timer = this._timers.get(ovPtr);
-    if (timer && timer.opId === opId) {
-      clearTimeout(timer.timer);
-      this._timers.delete(ovPtr);
-    }
-    // Also remove from signal waiters
-    for (const [signum, w] of this.signalWaiters) {
-      if (w.ovPtr === ovPtr && w.opId === opId) { this.signalWaiters.delete(signum); break; }
-    }
-    if (writeCancellation && this.memory) {
-      writeOverlapped(this.view, ovPtr, wasiECANCELED, 0, 0);
-    }
+  cancelOp(ovPtr) {
+    const active = this.activeOps.get(ovPtr);
+    if (!active) return false;
+    if (typeof active.cancel === 'function') active.cancel();
+    return this.completeOp(ovPtr, active.opId, wasiECANCELED, 0, 0);
   }
 
   hasPending() {
@@ -522,18 +505,17 @@ class HostState {
   // ── signals ─────────────────────────────────────────────────────────────────
   _setupSignals() {
     const deliver = (signum) => {
-      const w = this.signalWaiters.get(signum);
-      if (w) {
+      const waiters = this.signalWaiters.get(signum);
+      if (waiters && waiters.size > 0) {
         this.signalWaiters.delete(signum);
-        this.enqueue(() => {
-          if (this.isOpActive(w.ovPtr, w.opId)) {
-            this.activeOps.delete(w.ovPtr);
-            this.pendingCount--;
-            writeOverlapped(this.view, w.ovPtr, 0, 0, BigInt(signum));
-          }
-        });
+        for (const [ovPtr, opId] of waiters) {
+          this.enqueue(() => {
+            this.completeOp(ovPtr, opId, 0, 0, BigInt(signum));
+          });
+        }
       }
     };
+    this.deliverSignal = deliver;
     try { process.on('SIGINT',  () => deliver(2));  } catch (_) {}
     try { process.on('SIGTERM', () => deliver(15)); } catch (_) {}
     // SIGWINCH = 27 — emit if terminal resizes
@@ -647,12 +629,11 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
 
   // ── timer_set ────────────────────────────────────────────────────────────────
   function timer_set(ovPtr, delayMs) {
-    hs.cancelOp(ovPtr, false);
     const opId = hs.registerOp(ovPtr);
     const id = setTimeout(() => {
       hs.enqueue(() => hs.completeOp(ovPtr, opId, 0, 0, 0));
     }, Number(delayMs));
-    hs._timers.set(ovPtr, { opId, timer: id });
+    hs.setOpCanceler(ovPtr, opId, () => clearTimeout(id));
   }
 
   // ── cancel ───────────────────────────────────────────────────────────────────
@@ -1081,7 +1062,8 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
     // Upgrade plain file handle to dirscan on first dir_read
     let scan;
     if (h.type === 'file') {
-      scan = { type: 'dirscan', fd: h.fd, path: h.path, leftovers: Buffer.alloc(0), done: false };
+      if (h.fd != null) fs.close(h.fd, () => {});
+      scan = { type: 'dirscan', fd: null, path: h.path, leftovers: Buffer.alloc(0), done: false };
       // Replace handle in map
       const bh = typeof handle === 'bigint' ? handle : BigInt(handle);
       hs.handles.set(bh, scan);
@@ -1101,7 +1083,13 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
           const batch = [];
           for (let i = 0; i < 32; i++) {
             const dirent = await scan._dir.read();
-            if (!dirent) { scan.done = true; break; }
+            if (!dirent) {
+              scan.done = true;
+              const d = scan._dir;
+              scan._dir = null;
+              await d.close().catch(() => {});
+              break;
+            }
             if (dirent.name === '.' || dirent.name === '..') continue;
             batch.push(dirent);
           }
@@ -1119,7 +1107,15 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
           const entry = Buffer.concat([Buffer.from([kind]), nameBuf, Buffer.from([0])]);
           scan.leftovers = Buffer.concat([scan.leftovers, entry]);
         }
-        if (entries.length === 0) { scan.done = true; break; }
+        if (entries.length === 0) {
+          scan.done = true;
+          if (scan._dir) {
+            const d = scan._dir;
+            scan._dir = null;
+            await d.close().catch(() => {});
+          }
+          break;
+        }
       }
 
       const toCopy = Math.min(scan.leftovers.length, bLen);
@@ -1291,12 +1287,31 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
   }
 
   // ── path_remove ──────────────────────────────────────────────────────────────
-  // Signature: (ovPtr i32, pathPtr i32, pathLen i32)
-  // Go impl uses os.Remove (non-recursive). Mirror that.
-  function path_remove(ovPtr, pathPtr, pathLen) {
+  // Signature: (ovPtr i32, pathPtr i32, pathLen i32, flags i32)
+  function path_remove(ovPtr, pathPtr, pathLen, flags = 0) {
     const pathStr = translatePath(Buffer.from(hs.getGuestSlice(Number(pathPtr), Number(pathLen))).toString());
+    const flagBits = Number(flags);
     const opId = hs.registerOp(ovPtr);
-    fs.rm(pathStr, { recursive: false }, (err) => {
+    if (flagBits !== 0 && flagBits !== 0x200) {
+      hs.enqueue(() => hs.completeOp(ovPtr, opId, wasiEINVAL, 0, 0));
+      return;
+    }
+    fs.promises.lstat(pathStr).then((st) => {
+      if (flagBits === 0x200 && !st.isDirectory()) {
+        hs.enqueue(() => hs.completeOp(ovPtr, opId, wasiENOTDIR, 0, 0));
+        return;
+      }
+      if (flagBits === 0 && st.isDirectory()) {
+        hs.enqueue(() => hs.completeOp(ovPtr, opId, wasiEISDIR, 0, 0));
+        return;
+      }
+      const removePromise = st.isDirectory()
+        ? (fs.promises.rm ? fs.promises.rm(pathStr) : fs.promises.rmdir(pathStr)) // apparently rm and rmdir are similar, but latter is deprecated
+        : fs.promises.unlink(pathStr);
+      return removePromise.then(() => {
+        hs.enqueue(() => hs.completeOp(ovPtr, opId, 0, 0, 0));
+      });
+    }).catch((err) => {
       hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(err), 0, 0));
     });
   }
@@ -1939,14 +1954,19 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
   // Signature: (ovPtr i32, signum i32)
   function signal_wait(ovPtr, signum) {
     const sn = Number(signum);
-    // Cancel any existing waiter for this signal
-    const existing = hs.signalWaiters.get(sn);
-    if (existing) {
-      hs.cancelOp(existing.ovPtr, false);
-      hs.signalWaiters.delete(sn);
+    let waiters = hs.signalWaiters.get(sn);
+    if (!waiters) {
+      waiters = new Map();
+      hs.signalWaiters.set(sn, waiters);
     }
-    const opId = hs.registerOp(ovPtr);
-    hs.signalWaiters.set(sn, { ovPtr, opId });
+    const opId = hs.registerOp(ovPtr, () => {
+      const current = hs.signalWaiters.get(sn);
+      if (current) {
+        current.delete(ovPtr);
+        if (current.size === 0) hs.signalWaiters.delete(sn);
+      }
+    });
+    waiters.set(ovPtr, opId);
   }
 
   // ── process_exit ─────────────────────────────────────────────────────────────

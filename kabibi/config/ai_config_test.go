@@ -3,9 +3,10 @@ package config
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/mavity/rusticated/platform"
 )
 
 func TestAIConfigDefaultIsUnconfigured(t *testing.T) {
@@ -52,7 +53,7 @@ func TestAIConfigRoundTripAndPrivatePermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+	if platform.HostOS() != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("ai.json permissions = %o, want 600", info.Mode().Perm())
 	}
 	if filepath.Ext(path) != ".json" {

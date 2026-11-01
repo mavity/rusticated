@@ -537,19 +537,26 @@ test('Signal dispatching completes signal_wait', async () => {
   const host = await washmhost({ test: true, memory: mem });
   const { env, hostState } = host;
 
-  const ovSig = 1200;
-  env.signal_wait(ovSig, 28); // SIGWINCH
+  const ovSig1 = 1200;
+  const ovSig2 = 1224;
+  env.signal_wait(ovSig1, 28); // SIGWINCH
+  env.signal_wait(ovSig2, 28); // SIGWINCH (second concurrent waiter)
 
   assert.equal(hostState.signalWaiters.has(28), true);
+  assert.equal(hostState.signalWaiters.get(28).size, 2);
 
   const completed = hostState.triggerSignal(28);
-  assert.equal(completed, 1);
+  assert.equal(completed, 2);
 
   hostState.drainQueue();
   const view = new DataView(mem.buffer);
-  assert.equal(view.getUint32(ovSig, true), FLAG_COMPLETED);
-  assert.equal(view.getUint32(ovSig + 4, true), 0);
-  assert.equal(view.getBigUint64(ovSig + 16, true), 28n);
+  assert.equal(view.getUint32(ovSig1, true), FLAG_COMPLETED);
+  assert.equal(view.getUint32(ovSig1 + 4, true), 0);
+  assert.equal(view.getBigUint64(ovSig1 + 16, true), 28n);
+
+  assert.equal(view.getUint32(ovSig2, true), FLAG_COMPLETED);
+  assert.equal(view.getUint32(ovSig2 + 4, true), 0);
+  assert.equal(view.getBigUint64(ovSig2 + 16, true), 28n);
 });
 
 test('Parked event loop waits for stdin and exits only on explicit process exit', async () => {
@@ -937,6 +944,9 @@ test('path_stat prefers fs.statEntry over fs.getEntry when provided', async () =
     async init() {},
     async seed() {},
     async statEntry(p) {
+      if (p === '/workspace') {
+        return { path: '/workspace', type: 'dir', size: 0, mode: 0o755, mtime: 1700000000000 };
+      }
       statCalls++;
       return { path: p, type: 'file', size: 4096, mode: 0o644, mtime: 1700000000000 };
     },
@@ -1081,10 +1091,14 @@ test('path_set_times persists independent atime and mtime values', async () => {
     mode: 0o644,
     mtime: 1700000000000
   };
+  const workspaceDir = { path: '/workspace', type: 'dir', size: 0, mode: 0o755, mtime: 1700000000000 };
   const customFS = {
     async init() {},
     async seed() {},
-    async getEntry(p) { return p === entry.path ? entry : null; },
+    async getEntry(p) {
+      if (p === '/workspace') return workspaceDir;
+      return p === entry.path ? entry : null;
+    },
     async putEntry(value) { Object.assign(entry, value); }
   };
   const host = await washmhost({ test: true, memory: mem, fs: customFS });
@@ -1118,6 +1132,7 @@ test('path_set_times persists independent atime and mtime values', async () => {
 test('path_set_times rejects invalid values and unsupported symlink updates', async () => {
   const mem = new WebAssembly.Memory({ initial: 1 });
   const entries = new Map([
+    ['/workspace', { path: '/workspace', type: 'dir', size: 0, mode: 0o755, mtime: 1700000000000 }],
     ['/workspace/link', { path: '/workspace/link', type: 'symlink', mtime: 1700000000000 }]
   ]);
   const customFS = {

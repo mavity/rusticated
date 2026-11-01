@@ -12,15 +12,12 @@ import (
 // ── Host ABI imports ───────────────────────────────────────────────────────
 
 //go:wasmimport env net_open
-//go:noescape
 func rusticated_net_open(overlapped unsafe.Pointer, addrPtr *byte, addrLen uint32, port uint32, flags uint32)
 
 //go:wasmimport env net_accept
-//go:noescape
 func rusticated_net_accept(overlapped unsafe.Pointer, handle uint64)
 
 //go:wasmimport env net_lookup
-//go:noescape
 func rusticated_net_lookup(overlapped unsafe.Pointer, namePtr *byte, nameLen uint32, bufPtr *byte, bufLen uint32)
 
 // ── Socket-state tracking ──────────────────────────────────────────────────
@@ -273,7 +270,6 @@ func Shutdown(fd int, how int) error { return nil }
 // ── Net certs ABI ─────────────────────────────────────────────────────────
 
 //go:wasmimport env net_cert_verify
-//go:noescape
 func rusticated_net_cert_verify(overlapped unsafe.Pointer, namePtr *byte, nameLen uint32, chainPtr *byte, chainLen uint32)
 
 // NetCertVerify delegates TLS certificate verification to the host.

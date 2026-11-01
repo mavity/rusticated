@@ -613,12 +613,12 @@ func TestCancelOpExtended(t *testing.T) {
 		ovPtr := uint32(0xC00)
 		s1 := env.RegisterOp(ovPtr, nil)
 		s2 := env.RegisterOp(ovPtr, nil)
+		if !s1.isCancelled {
+			t.Error("old op should be cancelled immediately upon overwrite")
+		}
 		env.CancelOp(ovPtr)
 		if !s2.isCancelled {
 			t.Error("new op should be cancelled")
-		}
-		if s1.isCancelled {
-			t.Error("old op (orphaned) should NOT be cancelled by CancelOp(ptr)")
 		}
 	})
 

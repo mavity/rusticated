@@ -83,6 +83,11 @@ type commandSubmitAnimation struct {
 	startedAt time.Time
 }
 
+// Version returns the Kabibi shell version string used in the startup banner.
+func Version() string {
+	return getVer()
+}
+
 func getVer() string {
 	ver := "0.8.24"
 	if info, ok := debug.ReadBuildInfo(); ok {
