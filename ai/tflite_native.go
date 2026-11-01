@@ -40,6 +40,19 @@ var (
 	tflLib     uintptr
 )
 
+func registerTFLiteNativeFunc(fn any, name string) (err error) {
+	if _, err := dlsym(tflLib, name); err != nil {
+		return fmt.Errorf("TFLite C API symbol %q is unavailable on %s: %w", name, runtime.GOOS, err)
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("register TFLite C API symbol %q: %v", name, recovered)
+		}
+	}()
+	purego.RegisterLibFunc(fn, tflLib, name)
+	return nil
+}
+
 func ensureTFLiteLoaded(libPath string) error {
 	tflLibOnce.Do(func() {
 		var err error
@@ -51,24 +64,39 @@ func ensureTFLiteLoaded(libPath string) error {
 			tflLibErr = fmt.Errorf("failed to load TFLite library %s: %w", libPath, err)
 			return
 		}
-		purego.RegisterLibFunc(&tflModelCreateFromFile, tflLib, "TfLiteModelCreateFromFile")
-		purego.RegisterLibFunc(&tflModelDelete, tflLib, "TfLiteModelDelete")
-		purego.RegisterLibFunc(&tflOptionsCreate, tflLib, "TfLiteInterpreterOptionsCreate")
-		purego.RegisterLibFunc(&tflOptionsDelete, tflLib, "TfLiteInterpreterOptionsDelete")
-		purego.RegisterLibFunc(&tflOptionsSetNumThreads, tflLib, "TfLiteInterpreterOptionsSetNumThreads")
-		purego.RegisterLibFunc(&tflInterpreterCreate, tflLib, "TfLiteInterpreterCreate")
-		purego.RegisterLibFunc(&tflInterpreterDelete, tflLib, "TfLiteInterpreterDelete")
-		purego.RegisterLibFunc(&tflInterpreterAllocate, tflLib, "TfLiteInterpreterAllocateTensors")
-		purego.RegisterLibFunc(&tflInterpreterInvoke, tflLib, "TfLiteInterpreterInvoke")
-		purego.RegisterLibFunc(&tflGetInputTensor, tflLib, "TfLiteInterpreterGetInputTensor")
-		purego.RegisterLibFunc(&tflGetOutputTensor, tflLib, "TfLiteInterpreterGetOutputTensor")
-		purego.RegisterLibFunc(&tflTensorCopyFromBuffer, tflLib, "TfLiteTensorCopyFromBuffer")
-		purego.RegisterLibFunc(&tflTensorCopyToBuffer, tflLib, "TfLiteTensorCopyToBuffer")
-		purego.RegisterLibFunc(&tflTensorByteSize, tflLib, "TfLiteTensorByteSize")
-		purego.RegisterLibFunc(&tflTensorNumDims, tflLib, "TfLiteTensorNumDims")
-		purego.RegisterLibFunc(&tflTensorDim, tflLib, "TfLiteTensorDim")
-		purego.RegisterLibFunc(&tflTensorType, tflLib, "TfLiteTensorType")
-		purego.RegisterLibFunc(&tflInterpreterResizeInputTensor, tflLib, "TfLiteInterpreterResizeInputTensor")
+		bindings := []struct {
+			target any
+			name   string
+		}{
+			{&tflModelCreateFromFile, "TfLiteModelCreateFromFile"},
+			{&tflModelDelete, "TfLiteModelDelete"},
+			{&tflOptionsCreate, "TfLiteInterpreterOptionsCreate"},
+			{&tflOptionsDelete, "TfLiteInterpreterOptionsDelete"},
+			{&tflOptionsSetNumThreads, "TfLiteInterpreterOptionsSetNumThreads"},
+			{&tflInterpreterCreate, "TfLiteInterpreterCreate"},
+			{&tflInterpreterDelete, "TfLiteInterpreterDelete"},
+			{&tflInterpreterAllocate, "TfLiteInterpreterAllocateTensors"},
+			{&tflInterpreterInvoke, "TfLiteInterpreterInvoke"},
+			{&tflGetInputTensor, "TfLiteInterpreterGetInputTensor"},
+			{&tflGetOutputTensor, "TfLiteInterpreterGetOutputTensor"},
+			{&tflTensorCopyFromBuffer, "TfLiteTensorCopyFromBuffer"},
+			{&tflTensorCopyToBuffer, "TfLiteTensorCopyToBuffer"},
+			{&tflTensorByteSize, "TfLiteTensorByteSize"},
+			{&tflTensorNumDims, "TfLiteTensorNumDims"},
+			{&tflTensorDim, "TfLiteTensorDim"},
+			{&tflTensorType, "TfLiteTensorType"},
+			{&tflInterpreterResizeInputTensor, "TfLiteInterpreterResizeInputTensor"},
+		}
+		for _, binding := range bindings {
+			if err = registerTFLiteNativeFunc(binding.target, binding.name); err != nil {
+				tflLibErr = fmt.Errorf(
+					"runtime library %q does not provide the required TFLite C API (LiteRT-LM 0.19.0 Unix wheels omit TfLite* exports; use a compatible TFLite library for OCR): %w",
+					libPath,
+					err,
+				)
+				return
+			}
+		}
 	})
 	return tflLibErr
 }

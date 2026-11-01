@@ -10,9 +10,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -32,6 +32,11 @@ type pypiArtifact struct {
 	URL      string `json:"url"`
 	Size     int64  `json:"size"`
 	Version  string `json:"-"`
+}
+
+type runtimeCacheMetadata struct {
+	PackageVersion string `json:"package_version"`
+	WheelFilename  string `json:"wheel_filename"`
 }
 
 // ── Validation functions ─────────────────────────────────────────────────────
@@ -183,10 +188,12 @@ func fileValidated(path string, validate func(string) error) bool {
 // ── Wheel discovery & extraction ─────────────────────────────────────────────
 
 func resolveLMLib(libDir string) string {
-	for _, name := range []string{"litert_lm_ext", "litert-lm", "liblitert-lm"} {
-		for _, ext := range nativeLibExts() {
-			if p := filepath.Join(libDir, name+ext); fileExists(p) {
-				return p
+	for _, root := range []string{libDir, filepath.Join(libDir, "litert_lm")} {
+		for _, name := range []string{"litert_lm_ext", "litert-lm", "liblitert-lm"} {
+			for _, ext := range nativeLibExts() {
+				if p := filepath.Join(root, name+ext); fileExists(p) {
+					return p
+				}
 			}
 		}
 	}
@@ -194,11 +201,15 @@ func resolveLMLib(libDir string) string {
 }
 
 func findCachedWheel(cacheDir, namePrefix string) string {
+	return findCachedWheelForPlatform(cacheDir, namePrefix, InspectRuntimePlatform())
+}
+
+func findCachedWheelForPlatform(cacheDir, namePrefix string, platform RuntimePlatformInfo) string {
 	entries, err := os.ReadDir(cacheDir)
 	if err != nil {
 		return ""
 	}
-	var best, bestVer string
+	var matches []string
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".whl") {
 			continue
@@ -206,14 +217,16 @@ func findCachedWheel(cacheDir, namePrefix string) string {
 		if namePrefix != "" && !strings.HasPrefix(strings.ToLower(e.Name()), strings.ToLower(namePrefix)) {
 			continue
 		}
-		if !wheelMatchesPlatform(e.Name()) {
+		if wheelVersion(e.Name()) != PinnedLiteRTLMVersion || !wheelMatchesRuntimePlatform(e.Name(), platform) {
 			continue
 		}
-		if ver := wheelVersion(e.Name()); best == "" || versionLess(bestVer, ver) {
-			best, bestVer = filepath.Join(cacheDir, e.Name()), ver
-		}
+		matches = append(matches, e.Name())
 	}
-	return best
+	if len(matches) == 0 {
+		return ""
+	}
+	sort.Strings(matches)
+	return filepath.Join(cacheDir, matches[0])
 }
 
 func wheelVersion(filename string) string {
@@ -224,20 +237,75 @@ func wheelVersion(filename string) string {
 	return ""
 }
 
-func libUpToDate(libDir, wheelPath, libPrefix string) bool {
-	wheelFI, err := os.Stat(wheelPath)
+func runtimeLibDir(cacheDir, wheelFilename string) string {
+	return filepath.Join(cacheDir, "lib", runtimeLibCacheDirName(wheelFilename))
+}
+
+func runtimeCacheMetadataMatches(libDir, wheelFilename string, platform RuntimePlatformInfo) bool {
+	if wheelVersion(wheelFilename) != PinnedLiteRTLMVersion || !wheelMatchesRuntimePlatform(wheelFilename, platform) {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(libDir, "runtime.json"))
 	if err != nil {
 		return false
 	}
-	entries, _ := os.ReadDir(libDir)
-	for _, e := range entries {
-		if strings.HasPrefix(strings.ToLower(e.Name()), strings.ToLower(libPrefix)) {
-			if fi, err := e.Info(); err == nil && !fi.ModTime().Before(wheelFI.ModTime()) {
-				return true
-			}
+	var metadata runtimeCacheMetadata
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return false
+	}
+	return metadata.PackageVersion == PinnedLiteRTLMVersion && metadata.WheelFilename == filepath.Base(wheelFilename)
+}
+
+func writeRuntimeCacheMetadata(libDir, wheelFilename string) error {
+	if err := os.MkdirAll(libDir, 0o755); err != nil {
+		return err
+	}
+	data, err := json.Marshal(runtimeCacheMetadata{
+		PackageVersion: PinnedLiteRTLMVersion,
+		WheelFilename:  filepath.Base(wheelFilename),
+	})
+	if err != nil {
+		return err
+	}
+	tmpPath := filepath.Join(libDir, "runtime.json.tmp")
+	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, filepath.Join(libDir, "runtime.json")); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
+}
+
+func findCachedRuntime(cacheDir string, platform RuntimePlatformInfo) (string, bool) {
+	libRoot := filepath.Join(cacheDir, "lib")
+	entries, err := os.ReadDir(libRoot)
+	if err != nil {
+		return "", false
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		libDir := filepath.Join(libRoot, entry.Name())
+		data, err := os.ReadFile(filepath.Join(libDir, "runtime.json"))
+		if err != nil {
+			continue
+		}
+		var metadata runtimeCacheMetadata
+		if err := json.Unmarshal(data, &metadata); err != nil {
+			continue
+		}
+		if entry.Name() != strings.TrimSuffix(metadata.WheelFilename, ".whl") ||
+			!runtimeCacheMetadataMatches(libDir, metadata.WheelFilename, platform) {
+			continue
+		}
+		if lib := resolveLMLib(libDir); lib != "" {
+			return lib, true
 		}
 	}
-	return false
+	return "", false
 }
 
 func selectWheelURL(ctx context.Context, pypiURL string) (string, string, int64, error) {
@@ -245,6 +313,17 @@ func selectWheelURL(ctx context.Context, pypiURL string) (string, string, int64,
 }
 
 func selectWheelURLWithClient(ctx context.Context, pypiURL string, client *http.Client) (string, string, int64, error) {
+	return selectWheelURLForPlatformWithClient(ctx, pypiURL, client, InspectRuntimePlatform())
+}
+
+func selectWheelURLForPlatform(ctx context.Context, pypiURL string, platform RuntimePlatformInfo) (string, string, int64, error) {
+	return selectWheelURLForPlatformWithClient(ctx, pypiURL, &http.Client{Timeout: 60 * time.Second}, platform)
+}
+
+func selectWheelURLForPlatformWithClient(ctx context.Context, pypiURL string, client *http.Client, platform RuntimePlatformInfo) (string, string, int64, error) {
+	if platform.OS == "android" {
+		return "", "", 0, fmt.Errorf("LiteRT-LM runtime loading is unsupported on Android in this migration")
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pypiURL, nil)
 	if err != nil {
 		return "", "", 0, err
@@ -262,71 +341,58 @@ func selectWheelURLWithClient(ctx context.Context, pypiURL string, client *http.
 		return "", "", 0, err
 	}
 	var matches []pypiArtifact
-	for version, arts := range data.Releases {
-		for _, art := range arts {
-			art.Version = version
-			if strings.HasSuffix(art.Filename, ".whl") && wheelMatchesPlatform(art.Filename) {
-				matches = append(matches, art)
-			}
+	for _, art := range data.Releases[PinnedLiteRTLMVersion] {
+		art.Version = PinnedLiteRTLMVersion
+		if strings.HasSuffix(art.Filename, ".whl") &&
+			wheelVersion(art.Filename) == PinnedLiteRTLMVersion &&
+			wheelMatchesRuntimePlatform(art.Filename, platform) {
+			matches = append(matches, art)
 		}
 	}
 	if len(matches) == 0 {
-		return "", "", 0, fmt.Errorf("no compatible wheel found for %s/%s", HostOS(), HostArch())
+		return "", "", 0, fmt.Errorf("no compatible LiteRT-LM %s wheel for %s/%s in %s mode", PinnedLiteRTLMVersion, platform.OS, platform.Arch, platform.ExecutionMode)
 	}
-	sort.Slice(matches, func(i, j int) bool {
-		return versionLess(matches[j].Version, matches[i].Version)
-	})
+	sort.Slice(matches, func(i, j int) bool { return matches[i].Filename < matches[j].Filename })
 	return matches[0].URL, matches[0].Filename, matches[0].Size, nil
 }
 
 func wheelMatchesPlatform(filename string) bool {
+	return wheelMatchesRuntimePlatform(filename, InspectRuntimePlatform())
+}
+
+func wheelMatchesRuntimePlatform(filename string, platform RuntimePlatformInfo) bool {
 	f := strings.ToLower(filename)
-	switch HostOS() {
+	switch platform.OS {
 	case "windows":
-		switch HostArch() {
+		switch platform.Arch {
 		case "amd64":
-			return strings.Contains(f, "win_amd64")
+			return strings.HasSuffix(f, "-win_amd64.whl")
 		case "arm64":
-			return strings.Contains(f, "win_arm64") || strings.Contains(f, "win_amd64")
+			return platform.ExecutionMode == "mohabbat" && strings.HasSuffix(f, "-win_amd64.whl")
 		}
 	case "darwin":
-		if HostArch() == "arm64" {
-			return strings.Contains(f, "macosx") && strings.Contains(f, "arm64")
-		}
-		return strings.Contains(f, "macosx") && strings.Contains(f, "x86_64")
+		return platform.Arch == "arm64" && strings.HasSuffix(f, "-macosx_12_0_arm64.whl")
 	case "linux":
-		if HostArch() == "amd64" {
-			return strings.Contains(f, "manylinux") && strings.Contains(f, "x86_64")
-		}
-		if HostArch() == "arm64" {
-			return strings.Contains(f, "manylinux") && strings.Contains(f, "aarch64")
+		switch platform.Arch {
+		case "amd64":
+			return strings.HasSuffix(f, "-manylinux_2_27_x86_64.whl")
+		case "arm64":
+			return strings.HasSuffix(f, "-manylinux_2_27_aarch64.whl")
 		}
 	}
 	return false
 }
 
-func versionLess(a, b string) bool {
-	af, bf := strings.Split(a, "."), strings.Split(b, ".")
-	for i := 0; i < len(af) || i < len(bf); i++ {
-		if i >= len(af) {
-			return true
-		}
-		if i >= len(bf) {
-			return false
-		}
-		an, ea := strconv.Atoi(af[i])
-		bn, eb := strconv.Atoi(bf[i])
-		if ea != nil || eb != nil {
-			if af[i] != bf[i] {
-				return af[i] < bf[i]
-			}
-			continue
-		}
-		if an != bn {
-			return an < bn
-		}
+func runtimeLibCacheDirName(wheelFilename string) string {
+	return strings.TrimSuffix(filepath.Base(wheelFilename), ".whl")
+}
+
+func isSafeWheelEntry(name string) bool {
+	if strings.Contains(name, "\\") || path.IsAbs(name) {
+		return false
 	}
-	return false
+	clean := path.Clean(name)
+	return clean != "." && clean != ".." && !strings.HasPrefix(clean, "../") && clean == name
 }
 
 func extractWheelNativeFiles(wheelPath, libDir string, opts FetchOptions) error {
@@ -343,33 +409,16 @@ func extractWheelNativeFiles(wheelPath, libDir string, opts FetchOptions) error 
 		if file.FileInfo().IsDir() {
 			continue
 		}
-		base := filepath.Base(filepath.ToSlash(file.Name))
-		ext := strings.ToLower(filepath.Ext(base))
+		if !isSafeWheelEntry(file.Name) {
+			return fmt.Errorf("unsafe path in LiteRT-LM wheel: %q", file.Name)
+		}
+		ext := strings.ToLower(filepath.Ext(file.Name))
 		if !isNativeExt(ext) {
 			continue
 		}
-		root := strings.TrimSuffix(base, ext)
-		if idx := strings.Index(root, ".cp"); idx != -1 {
-			root = root[:idx]
-		}
-		outName := base
-		if root == "litert_lm_ext" || root == "litert-lm" || root == "liblitert-lm" {
-			outName = "litert_lm_ext" + nativeLibExts()[0]
-		} else if strings.HasPrefix(root, "libGemma") {
-			outName = "libGemmaModelConstraintProvider" + nativeLibExts()[0]
-		}
-		if HostOS() == "windows" && ext == ".pyd" {
-			outName = strings.TrimSuffix(outName, ext) + ".dll"
-		}
-		if HostOS() == "darwin" && ext == ".so" {
-			outName = strings.TrimSuffix(outName, ext) + ".dylib"
-		}
-		outPath := filepath.Join(libDir, outName)
+		outPath := filepath.Join(libDir, filepath.FromSlash(file.Name))
 		if err := extractZipEntry(file, outPath); err != nil {
 			return err
-		}
-		if outName != base {
-			_ = copyFile(outPath, filepath.Join(libDir, base))
 		}
 		extracted++
 	}
@@ -432,14 +481,6 @@ func extractZipEntry(file *zip.File, dest string) error {
 	defer out.Close()
 	_, err = io.Copy(out, in)
 	return err
-}
-
-func copyFile(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(dst, data, 0o644)
 }
 
 func nativeLibExts() []string {

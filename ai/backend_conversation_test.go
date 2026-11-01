@@ -16,19 +16,21 @@ func (*conversationConfigTestDriver) stringToCPtr(string) (uint64, func(), error
 	return 1, func() {}, nil
 }
 
-func (*conversationConfigTestDriver) cfgCreate(uint64) uint64            { return 1 }
-func (*conversationConfigTestDriver) cfgDelete(uint64)                   {}
-func (*conversationConfigTestDriver) cfgSetTools(uint64, uint64)         {}
-func (*conversationConfigTestDriver) cfgSetSystemMessage(uint64, uint64) {}
+func (*conversationConfigTestDriver) cfgCreate() (uint64, error)               { return 1, nil }
+func (*conversationConfigTestDriver) cfgDelete(uint64)                         {}
+func (*conversationConfigTestDriver) cfgSetTools(uint64, uint64) error         { return nil }
+func (*conversationConfigTestDriver) cfgSetSystemMessage(uint64, uint64) error { return nil }
 func (d *conversationConfigTestDriver) cfgSetEnableConstrainedDecoding(_ uint64, enable bool) error {
 	d.constrainedDecoding = append(d.constrainedDecoding, enable)
 	return d.setterErr
 }
-func (*conversationConfigTestDriver) cfgSetStreamToolCalls(uint64, bool, uint64) {}
-func (*conversationConfigTestDriver) cfgSetMessages(uint64, uint64)              {}
-func (d *conversationConfigTestDriver) convCreate(uint64, uint64) uint64 {
+func (*conversationConfigTestDriver) cfgSetStreamToolCalls(uint64, bool, uint64) error {
+	return nil
+}
+func (*conversationConfigTestDriver) cfgSetMessages(uint64, uint64) error { return nil }
+func (d *conversationConfigTestDriver) convCreate(uint64, uint64) (uint64, error) {
 	d.conversationCreates++
-	return 2
+	return 2, nil
 }
 func (*conversationConfigTestDriver) convDelete(uint64) {}
 

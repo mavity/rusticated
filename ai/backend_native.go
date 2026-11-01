@@ -15,57 +15,64 @@ import (
 // ── Purego C API bindings (one var per exported DLL symbol) ──────────────
 
 var (
-	lmSettingsCreate      func(modelPath, backend, visionBackend, audioBackend uintptr) uintptr
-	lmSettingsDelete      func(settings uintptr)
-	lmEngineCreate        func(settings uintptr) uintptr
-	lmEngineDelete        func(engine uintptr)
-	lmCfgCreate           func(engine uintptr) uintptr
-	lmCfgDelete           func(config uintptr)
-	lmConvCreate          func(engine, config uintptr) uintptr
-	lmConvDelete          func(conv uintptr)
-	lmConvSendStream      func(conv, message, extraCtx, optArgs, callback, userData uintptr) int32
-	lmConvCancelProcess   func(conv uintptr)
-	lmSetLogLevel         func(level uintptr)
-	lmStreamChunkGetText  func(chunk uintptr) uintptr
-	lmStreamChunkIsFinal  func(chunk uintptr) bool
-	lmStreamChunkGetError func(chunk uintptr) uintptr
+	lmGetAPIVersion       func(outMajor, outMinor, outPatch uintptr) int32
+	lmGetLastErrorMessage func() uintptr
 
-	lmCfgSetTools                     func(config, toolsJson uintptr)
-	lmCfgSetSystemMessage             func(config, systemMessageJson uintptr)
-	lmCfgSetEnableConstrainedDecoding func(config uintptr, enable bool)
-	lmCfgSetStreamToolCalls           func(config uintptr, stream bool, channelName uintptr)
-	lmCfgSetMessages                  func(config, messagesJson uintptr)
+	lmSettingsCreate         func(modelPath, backend, visionBackend, audioBackend, outSettings uintptr) int32
+	lmSettingsDelete         func(settings uintptr)
+	lmSpecConfigCreate       func(outConfig uintptr) int32
+	lmSpecConfigDelete       func(config uintptr)
+	lmSpecConfigSetMode      func(config uintptr, mode int32) int32
+	lmSettingsSetSpecConfig  func(settings, config uintptr) int32
+	lmSettingsSetDispatchDir func(settings, libDir uintptr) int32
+	lmEngineCreate           func(settings, outEngine uintptr) int32
+	lmEngineDelete           func(engine uintptr)
+	lmCfgCreate              func(outConfig uintptr) int32
+	lmCfgDelete              func(config uintptr)
+	lmConvCreate             func(engine, config, outConversation uintptr) int32
+	lmConvDelete             func(conv uintptr)
+	lmConvSendStream         func(conv, message, extraCtx, optArgs, callback, userData uintptr) int32
+	lmConvCancelProcess      func(conv uintptr) int32
+	lmSetLogLevel            func(level int32) int32
+	lmStreamChunkGetText     func(chunk, outText uintptr) int32
+	lmStreamChunkIsFinal     func(chunk, outFinal uintptr) int32
+	lmStreamChunkGetError    func(chunk, outError uintptr) int32
 
-	lmSettingsSetEnableSpeculativeDecoding    func(settings uintptr, enable bool)
-	lmSettingsSetUseRingbuffersLocalAttention func(settings uintptr, enable bool)
-	lmSettingsSetGpuDecodeStepsPerSync        func(settings uintptr, steps int32)
-	lmSettingsSetNumThreads                   func(settings uintptr, threads int32)
-	lmSettingsSetMaxNumTokens                 func(settings uintptr, maxNumTokens int32)
+	lmCfgSetTools                     func(config, toolsJson uintptr) int32
+	lmCfgSetSystemMessage             func(config, systemMessageJson uintptr) int32
+	lmCfgSetEnableConstrainedDecoding func(config uintptr, enable bool) int32
+	lmCfgSetStreamToolCalls           func(config uintptr, stream bool, channelName uintptr) int32
+	lmCfgSetMessages                  func(config, messagesJson uintptr) int32
 
-	lmLoadedFileCreate                        func(modelPath uintptr) uintptr
+	lmSettingsSetUseRingbuffersLocalAttention func(settings uintptr, enable bool) int32
+	lmSettingsSetGpuDecodeStepsPerSync        func(settings uintptr, steps int32) int32
+	lmSettingsSetNumThreads                   func(settings uintptr, threads int32) int32
+	lmSettingsSetMaxNumTokens                 func(settings uintptr, maxNumTokens int32) int32
+
+	lmLoadedFileCreate                        func(modelPath, outFile uintptr) int32
 	lmLoadedFileDelete                        func(file uintptr)
-	lmLoadedFileHasSpeculativeDecodingSupport func(file uintptr) bool
-	lmLoadedFileMaxContextTokens              func(file uintptr) uint32
-	lmLoadedFileIsDynamicContext              func(file uintptr) bool
-	lmLoadedFileSupportsThinking              func(file uintptr) bool
-	lmLoadedFileSupportsFunctionCalling       func(file uintptr) bool
-	lmLoadedFileModalitySupportedBackends     func(file uintptr, modality int32, backends *int32, max_size int32) int32
+	lmLoadedFileHasSpeculativeDecodingSupport func(file, outSupported uintptr) int32
+	lmLoadedFileMaxContextTokens              func(file, outMaxTokens uintptr) int32
+	lmLoadedFileIsDynamicContext              func(file, outDynamic uintptr) int32
+	lmLoadedFileSupportsThinking              func(file, outSupported uintptr) int32
+	lmLoadedFileSupportsFunctionCalling       func(file, outSupported uintptr) int32
+	lmLoadedFileModalitySupportedBackends     func(file uintptr, modality int32, backends uintptr, maxSize, outCount uintptr) int32
 
-	lmEmbeddingSettingsCreate             func(modelPath, backend, visionBackend, audioBackend uintptr) uintptr
+	lmEmbeddingSettingsCreate             func(modelPath, backend, visionBackend, audioBackend, outSettings uintptr) int32
 	lmEmbeddingSettingsDelete             func(settings uintptr)
-	lmEmbeddingSettingsSetNumThreads      func(settings uintptr, threads int32)
-	lmEmbeddingEngineCreate               func(settings uintptr) uintptr
+	lmEmbeddingSettingsSetNumThreads      func(settings uintptr, threads int32) int32
+	lmEmbeddingEngineCreate               func(settings, outEngine uintptr) int32
 	lmEmbeddingEngineDelete               func(engine uintptr)
-	lmEmbeddingOptionsCreate              func() uintptr
+	lmEmbeddingOptionsCreate              func(outOptions uintptr) int32
 	lmEmbeddingOptionsDelete              func(options uintptr)
-	lmEmbeddingOptionsSetNormalize        func(options uintptr, normalize bool)
-	lmEmbeddingOptionsSetOverflowStrategy func(options uintptr, strategy int32)
-	lmInputDataCreate                     func(dataType int32, data uintptr, size uintptr) uintptr
+	lmEmbeddingOptionsSetNormalize        func(options uintptr, normalize bool) int32
+	lmEmbeddingOptionsSetOverflowStrategy func(options uintptr, strategy int32) int32
+	lmInputDataCreate                     func(dataType int32, data, size, outInput uintptr) int32
 	lmInputDataDelete                     func(inputData uintptr)
-	lmEmbeddingEngineCompute              func(engine uintptr, inputs uintptr, numInputs uintptr, options uintptr) uintptr
+	lmEmbeddingEngineCompute              func(engine, inputs, numInputs, options, outResponse uintptr) int32
 	lmEmbeddingResponseDelete             func(resp uintptr)
-	lmEmbeddingResponseGetSize            func(resp uintptr) uintptr
-	lmEmbeddingResponseGetValues          func(resp uintptr) *float32
+	lmEmbeddingResponseGetSize            func(resp, outSize uintptr) int32
+	lmEmbeddingResponseGetValues          func(resp, outValues uintptr) int32
 )
 
 var (
@@ -73,15 +80,8 @@ var (
 	lmLibErr  error
 	lmLib     uintptr
 
-	nativeDrv        nativeDriver
-	nativeInputPinMu sync.Mutex
-	nativeInputPins  = map[uint64]pinnedInput{}
+	nativeDrv nativeDriver
 )
-
-type pinnedInput struct {
-	pinner *runtime.Pinner
-	data   []byte
-}
 
 // ── nativeDriver — implements LMDriver via purego ─────────────────────────
 
@@ -89,19 +89,6 @@ type nativeDriver struct{}
 
 func (d *nativeDriver) ensureLoaded(libPath string) error {
 	return ensureLMLibLoadedImpl(libPath)
-}
-
-func (d *nativeDriver) getSymbol(name string) (uint64, error) {
-	ptr, err := dlsym(lmLib, name)
-	return uint64(ptr), err
-}
-
-func (d *nativeDriver) writeInt32(addr uint64, val int32) {
-	*(*int32)(unsafe.Pointer(uintptr(addr))) = val
-}
-
-func (d *nativeDriver) writeBool(addr uint64, val bool) {
-	*(*bool)(unsafe.Pointer(uintptr(addr))) = val
 }
 
 func (d *nativeDriver) stringToCPtr(s string) (uint64, func(), error) {
@@ -114,175 +101,303 @@ func (d *nativeDriver) stringToCPtr(s string) (uint64, func(), error) {
 	}, nil
 }
 
-func (d *nativeDriver) ptrToString(ptr uint64) (string, error) {
-	p := uintptr(ptr)
-	if p == 0 {
-		return "", nil
+func (d *nativeDriver) callStatus(operation string, call func() int32) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	code := call()
+	if code == liteRtStatusOK {
+		return nil
 	}
-	var buf []byte
-	for i := uintptr(0); ; i++ {
-		b := *(*byte)(unsafe.Pointer(p + i))
-		if b == 0 {
-			break
-		}
-		buf = append(buf, b)
+	message := ""
+	if lmGetLastErrorMessage != nil {
+		message = ptrToGoString(lmGetLastErrorMessage())
 	}
-	return string(buf), nil
+	return newLiteRtStatusError(operation, code, message)
 }
 
-func (d *nativeDriver) settingsCreate(modelPath, backend, visionBackend, audioBackend uint64) uint64 {
-	return uint64(lmSettingsCreate(uintptr(modelPath), uintptr(backend), uintptr(visionBackend), uintptr(audioBackend)))
+func (d *nativeDriver) ptrToString(ptr uint64) (string, error) {
+	return ptrToGoString(uintptr(ptr)), nil
+}
+
+func (d *nativeDriver) settingsCreate(modelPath, backend, visionBackend, audioBackend uint64) (uint64, error) {
+	var out uintptr
+	err := d.callStatus("litert_lm_engine_settings_create", func() int32 {
+		return lmSettingsCreate(uintptr(modelPath), uintptr(backend), uintptr(visionBackend), uintptr(audioBackend), uintptr(unsafe.Pointer(&out)))
+	})
+	runtime.KeepAlive(&out)
+	return uint64(out), err
 }
 func (d *nativeDriver) settingsDelete(settings uint64) { lmSettingsDelete(uintptr(settings)) }
-func (d *nativeDriver) settingsSetEnableSpeculativeDecoding(settings uint64, enable bool) {
-	lmSettingsSetEnableSpeculativeDecoding(uintptr(settings), enable)
+func (d *nativeDriver) speculativeDecodingConfigCreate() (uint64, error) {
+	var out uintptr
+	err := d.callStatus("litert_lm_speculative_decoding_config_create", func() int32 {
+		return lmSpecConfigCreate(uintptr(unsafe.Pointer(&out)))
+	})
+	runtime.KeepAlive(&out)
+	return uint64(out), err
 }
-func (d *nativeDriver) settingsSetUseRingbuffersLocalAttention(settings uint64, enable bool) {
-	lmSettingsSetUseRingbuffersLocalAttention(uintptr(settings), enable)
+func (d *nativeDriver) speculativeDecodingConfigDelete(config uint64) {
+	lmSpecConfigDelete(uintptr(config))
 }
-func (d *nativeDriver) settingsSetGpuDecodeStepsPerSync(settings uint64, steps int32) {
-	lmSettingsSetGpuDecodeStepsPerSync(uintptr(settings), steps)
+func (d *nativeDriver) speculativeDecodingConfigSetMode(config uint64, mode int32) error {
+	return d.callStatus("litert_lm_speculative_decoding_config_set_mode", func() int32 {
+		return lmSpecConfigSetMode(uintptr(config), mode)
+	})
 }
-func (d *nativeDriver) settingsSetNumThreads(settings uint64, threads int32) {
-	lmSettingsSetNumThreads(uintptr(settings), threads)
+func (d *nativeDriver) settingsSetSpeculativeDecodingConfig(settings, config uint64) error {
+	return d.callStatus("litert_lm_engine_settings_set_speculative_decoding_config", func() int32 {
+		return lmSettingsSetSpecConfig(uintptr(settings), uintptr(config))
+	})
 }
-func (d *nativeDriver) settingsSetMaxNumTokens(settings uint64, maxTokens int32) {
-	lmSettingsSetMaxNumTokens(uintptr(settings), maxTokens)
+func (d *nativeDriver) settingsSetLitertDispatchLibDir(settings, libDir uint64) error {
+	return d.callStatus("litert_lm_engine_settings_set_litert_dispatch_lib_dir", func() int32 {
+		return lmSettingsSetDispatchDir(uintptr(settings), uintptr(libDir))
+	})
 }
-func (d *nativeDriver) engineCreate(settings uint64) uint64 {
-	return uint64(lmEngineCreate(uintptr(settings)))
+func (d *nativeDriver) settingsSetUseRingbuffersLocalAttention(settings uint64, enable bool) error {
+	return d.callStatus("litert_lm_engine_settings_set_use_ringbuffers_local_attention", func() int32 {
+		return lmSettingsSetUseRingbuffersLocalAttention(uintptr(settings), enable)
+	})
 }
-func (d *nativeDriver) engineDelete(engine uint64)     { lmEngineDelete(uintptr(engine)) }
-func (d *nativeDriver) setLogLevel(level uint64)       { lmSetLogLevel(uintptr(level)) }
-func (d *nativeDriver) cfgCreate(engine uint64) uint64 { return uint64(lmCfgCreate(uintptr(engine))) }
-func (d *nativeDriver) cfgDelete(cfg uint64)           { lmCfgDelete(uintptr(cfg)) }
-func (d *nativeDriver) cfgSetTools(cfg, toolsJSON uint64) {
-	lmCfgSetTools(uintptr(cfg), uintptr(toolsJSON))
+func (d *nativeDriver) settingsSetGpuDecodeStepsPerSync(settings uint64, steps int32) error {
+	return d.callStatus("litert_lm_engine_settings_set_gpu_decode_steps_per_sync", func() int32 {
+		return lmSettingsSetGpuDecodeStepsPerSync(uintptr(settings), steps)
+	})
 }
-func (d *nativeDriver) cfgSetSystemMessage(cfg, systemMsg uint64) {
-	lmCfgSetSystemMessage(uintptr(cfg), uintptr(systemMsg))
+func (d *nativeDriver) settingsSetNumThreads(settings uint64, threads int32) error {
+	return d.callStatus("litert_lm_engine_settings_set_num_threads", func() int32 {
+		return lmSettingsSetNumThreads(uintptr(settings), threads)
+	})
+}
+func (d *nativeDriver) settingsSetMaxNumTokens(settings uint64, maxTokens int32) error {
+	return d.callStatus("litert_lm_engine_settings_set_max_num_tokens", func() int32 {
+		return lmSettingsSetMaxNumTokens(uintptr(settings), maxTokens)
+	})
+}
+func (d *nativeDriver) engineCreate(settings uint64) (uint64, error) {
+	var out uintptr
+	err := d.callStatus("litert_lm_engine_create", func() int32 {
+		return lmEngineCreate(uintptr(settings), uintptr(unsafe.Pointer(&out)))
+	})
+	runtime.KeepAlive(&out)
+	return uint64(out), err
+}
+func (d *nativeDriver) engineDelete(engine uint64) { lmEngineDelete(uintptr(engine)) }
+func (d *nativeDriver) setLogLevel(level int32) error {
+	return d.callStatus("litert_lm_set_min_log_level", func() int32 { return lmSetLogLevel(level) })
+}
+func (d *nativeDriver) cfgCreate() (uint64, error) {
+	var out uintptr
+	err := d.callStatus("litert_lm_conversation_config_create", func() int32 {
+		return lmCfgCreate(uintptr(unsafe.Pointer(&out)))
+	})
+	runtime.KeepAlive(&out)
+	return uint64(out), err
+}
+func (d *nativeDriver) cfgDelete(cfg uint64) { lmCfgDelete(uintptr(cfg)) }
+func (d *nativeDriver) cfgSetTools(cfg, toolsJSON uint64) error {
+	return d.callStatus("litert_lm_conversation_config_set_tools", func() int32 {
+		return lmCfgSetTools(uintptr(cfg), uintptr(toolsJSON))
+	})
+}
+func (d *nativeDriver) cfgSetSystemMessage(cfg, systemMsg uint64) error {
+	return d.callStatus("litert_lm_conversation_config_set_system_message", func() int32 {
+		return lmCfgSetSystemMessage(uintptr(cfg), uintptr(systemMsg))
+	})
 }
 func (d *nativeDriver) cfgSetEnableConstrainedDecoding(cfg uint64, enable bool) error {
-	lmCfgSetEnableConstrainedDecoding(uintptr(cfg), enable)
-	return nil
+	return d.callStatus("litert_lm_conversation_config_set_enable_constrained_decoding", func() int32 {
+		return lmCfgSetEnableConstrainedDecoding(uintptr(cfg), enable)
+	})
 }
-func (d *nativeDriver) cfgSetStreamToolCalls(cfg uint64, stream bool, channelName uint64) {
-	lmCfgSetStreamToolCalls(uintptr(cfg), stream, uintptr(channelName))
+func (d *nativeDriver) cfgSetStreamToolCalls(cfg uint64, stream bool, channelName uint64) error {
+	return d.callStatus("litert_lm_conversation_config_set_stream_tool_calls", func() int32 {
+		return lmCfgSetStreamToolCalls(uintptr(cfg), stream, uintptr(channelName))
+	})
 }
-func (d *nativeDriver) cfgSetMessages(cfg, messagesJSON uint64) {
-	lmCfgSetMessages(uintptr(cfg), uintptr(messagesJSON))
+func (d *nativeDriver) cfgSetMessages(cfg, messagesJSON uint64) error {
+	return d.callStatus("litert_lm_conversation_config_set_messages", func() int32 {
+		return lmCfgSetMessages(uintptr(cfg), uintptr(messagesJSON))
+	})
 }
-func (d *nativeDriver) convCreate(engine, cfg uint64) uint64 {
-	return uint64(lmConvCreate(uintptr(engine), uintptr(cfg)))
+func (d *nativeDriver) convCreate(engine, cfg uint64) (uint64, error) {
+	var out uintptr
+	err := d.callStatus("litert_lm_conversation_create", func() int32 {
+		return lmConvCreate(uintptr(engine), uintptr(cfg), uintptr(unsafe.Pointer(&out)))
+	})
+	runtime.KeepAlive(&out)
+	return uint64(out), err
 }
 func (d *nativeDriver) convDelete(conv uint64) { lmConvDelete(uintptr(conv)) }
-func (d *nativeDriver) convSendStream(conv, msg, extraCtx, optArgs, callback, userData uint64) int32 {
-	return lmConvSendStream(uintptr(conv), uintptr(msg), uintptr(extraCtx), uintptr(optArgs), uintptr(callback), uintptr(userData))
+func (d *nativeDriver) convSendStream(conv, msg, extraCtx, optArgs, callback, userData uint64) error {
+	return d.callStatus("litert_lm_conversation_send_message_stream", func() int32 {
+		return lmConvSendStream(uintptr(conv), uintptr(msg), uintptr(extraCtx), uintptr(optArgs), uintptr(callback), uintptr(userData))
+	})
 }
-func (d *nativeDriver) convCancelProcess(conv uint64) { lmConvCancelProcess(uintptr(conv)) }
-func (d *nativeDriver) loadedFileCreate(modelPath uint64) uint64 {
-	return uint64(lmLoadedFileCreate(uintptr(modelPath)))
+func (d *nativeDriver) convCancelProcess(conv uint64) error {
+	return d.callStatus("litert_lm_conversation_cancel_process", func() int32 {
+		return lmConvCancelProcess(uintptr(conv))
+	})
+}
+func (d *nativeDriver) loadedFileCreate(modelPath uint64) (uint64, error) {
+	var out uintptr
+	err := d.callStatus("litert_lm_loaded_file_create", func() int32 {
+		return lmLoadedFileCreate(uintptr(modelPath), uintptr(unsafe.Pointer(&out)))
+	})
+	runtime.KeepAlive(&out)
+	return uint64(out), err
 }
 func (d *nativeDriver) loadedFileDelete(file uint64) { lmLoadedFileDelete(uintptr(file)) }
-func (d *nativeDriver) loadedFileHasSpeculativeDecodingSupport(file uint64) bool {
-	return lmLoadedFileHasSpeculativeDecodingSupport(uintptr(file))
+func (d *nativeDriver) loadedFileHasSpeculativeDecodingSupport(file uint64) (bool, error) {
+	var out uint8
+	err := d.callStatus("litert_lm_loaded_file_has_speculative_decoding_support", func() int32 {
+		return lmLoadedFileHasSpeculativeDecodingSupport(uintptr(file), uintptr(unsafe.Pointer(&out)))
+	})
+	return out != 0, err
 }
 func (d *nativeDriver) loadedFileMaxContextTokens(file uint64) (uint32, error) {
-	return lmLoadedFileMaxContextTokens(uintptr(file)), nil
+	var out uint32
+	err := d.callStatus("litert_lm_loaded_file_max_context_tokens", func() int32 {
+		return lmLoadedFileMaxContextTokens(uintptr(file), uintptr(unsafe.Pointer(&out)))
+	})
+	return out, err
 }
 func (d *nativeDriver) loadedFileIsDynamicContext(file uint64) (bool, error) {
-	return lmLoadedFileIsDynamicContext(uintptr(file)), nil
+	var out uint8
+	err := d.callStatus("litert_lm_loaded_file_is_dynamic_context", func() int32 {
+		return lmLoadedFileIsDynamicContext(uintptr(file), uintptr(unsafe.Pointer(&out)))
+	})
+	return out != 0, err
 }
 func (d *nativeDriver) loadedFileSupportsThinking(file uint64) (bool, error) {
-	return lmLoadedFileSupportsThinking(uintptr(file)), nil
+	var out uint8
+	err := d.callStatus("litert_lm_loaded_file_supports_thinking", func() int32 {
+		return lmLoadedFileSupportsThinking(uintptr(file), uintptr(unsafe.Pointer(&out)))
+	})
+	return out != 0, err
 }
 func (d *nativeDriver) loadedFileSupportsFunctionCalling(file uint64) (bool, error) {
-	return lmLoadedFileSupportsFunctionCalling(uintptr(file)), nil
+	var out uint8
+	err := d.callStatus("litert_lm_loaded_file_supports_function_calling", func() int32 {
+		return lmLoadedFileSupportsFunctionCalling(uintptr(file), uintptr(unsafe.Pointer(&out)))
+	})
+	return out != 0, err
 }
 func (d *nativeDriver) loadedFileModalitySupportedBackends(file uint64, modality int32) ([]uint32, error) {
 	var backends [8]int32
-	count := lmLoadedFileModalitySupportedBackends(uintptr(file), modality, &backends[0], int32(len(backends)))
-	if count > 0 && count <= int32(len(backends)) {
-		var out []uint32
-		for i := int32(0); i < count; i++ {
-			out = append(out, uint32(backends[i]))
-		}
-		return out, nil
+	var count uintptr
+	err := d.callStatus("litert_lm_loaded_file_modality_supported_backends", func() int32 {
+		return lmLoadedFileModalitySupportedBackends(
+			uintptr(file),
+			modality,
+			uintptr(unsafe.Pointer(&backends[0])),
+			uintptr(len(backends)),
+			uintptr(unsafe.Pointer(&count)),
+		)
+	})
+	runtime.KeepAlive(&backends)
+	runtime.KeepAlive(&count)
+	if err != nil {
+		return nil, err
 	}
-	return []uint32{}, nil
+	if count > uintptr(len(backends)) {
+		count = uintptr(len(backends))
+	}
+	out := make([]uint32, int(count))
+	for i := range out {
+		out[i] = uint32(backends[i])
+	}
+	return out, nil
 }
 func (d *nativeDriver) streamChunkGetText(chunk uint64) (uint64, error) {
-	return uint64(lmStreamChunkGetText(uintptr(chunk))), nil
+	var out uintptr
+	err := d.callStatus("litert_lm_stream_chunk_get_text", func() int32 {
+		return lmStreamChunkGetText(uintptr(chunk), uintptr(unsafe.Pointer(&out)))
+	})
+	runtime.KeepAlive(&out)
+	return uint64(out), err
 }
 func (d *nativeDriver) streamChunkIsFinal(chunk uint64) (bool, error) {
-	return lmStreamChunkIsFinal(uintptr(chunk)), nil
+	var out uint8
+	err := d.callStatus("litert_lm_stream_chunk_is_final", func() int32 {
+		return lmStreamChunkIsFinal(uintptr(chunk), uintptr(unsafe.Pointer(&out)))
+	})
+	return out != 0, err
 }
 func (d *nativeDriver) streamChunkGetError(chunk uint64) (uint64, error) {
-	return uint64(lmStreamChunkGetError(uintptr(chunk))), nil
+	var out uintptr
+	err := d.callStatus("litert_lm_stream_chunk_get_error", func() int32 {
+		return lmStreamChunkGetError(uintptr(chunk), uintptr(unsafe.Pointer(&out)))
+	})
+	runtime.KeepAlive(&out)
+	return uint64(out), err
 }
 
-func (d *nativeDriver) embeddingSettingsCreate(modelPath, backend, visionBackend, audioBackend uint64) uint64 {
-	return uint64(lmEmbeddingSettingsCreate(uintptr(modelPath), uintptr(backend), uintptr(visionBackend), uintptr(audioBackend)))
+func (d *nativeDriver) embeddingSettingsCreate(modelPath, backend, visionBackend, audioBackend uint64) (uint64, error) {
+	var out uintptr
+	err := d.callStatus("litert_lm_embedding_engine_settings_create", func() int32 {
+		return lmEmbeddingSettingsCreate(uintptr(modelPath), uintptr(backend), uintptr(visionBackend), uintptr(audioBackend), uintptr(unsafe.Pointer(&out)))
+	})
+	runtime.KeepAlive(&out)
+	return uint64(out), err
 }
 func (d *nativeDriver) embeddingSettingsDelete(settings uint64) {
 	lmEmbeddingSettingsDelete(uintptr(settings))
 }
-func (d *nativeDriver) embeddingSettingsSetNumThreads(settings uint64, threads int32) {
-	lmEmbeddingSettingsSetNumThreads(uintptr(settings), threads)
+func (d *nativeDriver) embeddingSettingsSetNumThreads(settings uint64, threads int32) error {
+	return d.callStatus("litert_lm_embedding_engine_settings_set_num_threads", func() int32 {
+		return lmEmbeddingSettingsSetNumThreads(uintptr(settings), threads)
+	})
 }
-func (d *nativeDriver) embeddingEngineCreate(settings uint64) uint64 {
-	return uint64(lmEmbeddingEngineCreate(uintptr(settings)))
+func (d *nativeDriver) embeddingEngineCreate(settings uint64) (uint64, error) {
+	var out uintptr
+	err := d.callStatus("litert_lm_embedding_engine_create", func() int32 {
+		return lmEmbeddingEngineCreate(uintptr(settings), uintptr(unsafe.Pointer(&out)))
+	})
+	runtime.KeepAlive(&out)
+	return uint64(out), err
 }
 func (d *nativeDriver) embeddingEngineDelete(engine uint64) {
 	lmEmbeddingEngineDelete(uintptr(engine))
 }
-func (d *nativeDriver) embeddingOptionsCreate() uint64 {
-	return uint64(lmEmbeddingOptionsCreate())
+func (d *nativeDriver) embeddingOptionsCreate() (uint64, error) {
+	var out uintptr
+	err := d.callStatus("litert_lm_embedding_options_create", func() int32 {
+		return lmEmbeddingOptionsCreate(uintptr(unsafe.Pointer(&out)))
+	})
+	runtime.KeepAlive(&out)
+	return uint64(out), err
 }
 func (d *nativeDriver) embeddingOptionsDelete(options uint64) {
 	lmEmbeddingOptionsDelete(uintptr(options))
 }
-func (d *nativeDriver) embeddingOptionsSetNormalize(options uint64, normalize bool) {
-	lmEmbeddingOptionsSetNormalize(uintptr(options), normalize)
+func (d *nativeDriver) embeddingOptionsSetNormalize(options uint64, normalize bool) error {
+	return d.callStatus("litert_lm_embedding_options_set_normalize", func() int32 {
+		return lmEmbeddingOptionsSetNormalize(uintptr(options), normalize)
+	})
 }
-func (d *nativeDriver) embeddingOptionsSetInputOverflowStrategy(options uint64, strategy int32) {
-	lmEmbeddingOptionsSetOverflowStrategy(uintptr(options), strategy)
+func (d *nativeDriver) embeddingOptionsSetInputOverflowStrategy(options uint64, strategy int32) error {
+	return d.callStatus("litert_lm_embedding_options_set_input_overflow_strategy", func() int32 {
+		return lmEmbeddingOptionsSetOverflowStrategy(uintptr(options), strategy)
+	})
 }
-func (d *nativeDriver) inputDataCreate(dataType int32, data []byte) uint64 {
+func (d *nativeDriver) inputDataCreate(dataType int32, data []byte) (uint64, error) {
 	var ptr uintptr
-	var pinner *runtime.Pinner
+	var pinner runtime.Pinner
 	if len(data) > 0 {
-		pinner = new(runtime.Pinner)
 		pinner.Pin(&data[0])
 		ptr = uintptr(unsafe.Pointer(&data[0]))
+		defer pinner.Unpin()
 	}
-	res := lmInputDataCreate(dataType, ptr, uintptr(len(data)))
-	if res == 0 {
-		if pinner != nil {
-			pinner.Unpin()
-		}
-		return 0
-	}
-	if pinner != nil {
-		nativeInputPinMu.Lock()
-		nativeInputPins[uint64(res)] = pinnedInput{pinner: pinner, data: data}
-		nativeInputPinMu.Unlock()
-	}
-	return uint64(res)
+	var out uintptr
+	err := d.callStatus("litert_lm_input_data_create", func() int32 {
+		return lmInputDataCreate(dataType, ptr, uintptr(len(data)), uintptr(unsafe.Pointer(&out)))
+	})
+	runtime.KeepAlive(data)
+	runtime.KeepAlive(&out)
+	return uint64(out), err
 }
-func (d *nativeDriver) inputDataDelete(inputData uint64) {
-	lmInputDataDelete(uintptr(inputData))
-	nativeInputPinMu.Lock()
-	pi, ok := nativeInputPins[inputData]
-	if ok {
-		delete(nativeInputPins, inputData)
-	}
-	nativeInputPinMu.Unlock()
-	if ok && pi.pinner != nil {
-		pi.pinner.Unpin()
-		runtime.KeepAlive(pi.data)
-	}
-}
+func (d *nativeDriver) inputDataDelete(inputData uint64) { lmInputDataDelete(uintptr(inputData)) }
 func (d *nativeDriver) embeddingEngineCompute(engine uint64, inputs []uint64, options uint64) ([]float32, error) {
 	if len(inputs) == 0 {
 		return nil, fmt.Errorf("no inputs provided")
@@ -295,22 +410,43 @@ func (d *nativeDriver) embeddingEngineCompute(engine uint64, inputs []uint64, op
 	pinner.Pin(&cInputs[0])
 	defer pinner.Unpin()
 
-	resp := lmEmbeddingEngineCompute(uintptr(engine), uintptr(unsafe.Pointer(&cInputs[0])), uintptr(len(cInputs)), uintptr(options))
+	var resp uintptr
+	err := d.callStatus("litert_lm_embedding_engine_compute_embedding", func() int32 {
+		return lmEmbeddingEngineCompute(uintptr(engine), uintptr(unsafe.Pointer(&cInputs[0])), uintptr(len(cInputs)), uintptr(options), uintptr(unsafe.Pointer(&resp)))
+	})
 	runtime.KeepAlive(cInputs)
+	runtime.KeepAlive(&resp)
+	if err != nil {
+		return nil, err
+	}
 	if resp == 0 {
-		return nil, fmt.Errorf("litert_lm_embedding_engine_compute_embedding failed")
+		return nil, fmt.Errorf("embedding computation returned NULL without an error")
 	}
 	defer lmEmbeddingResponseDelete(resp)
 
-	size := lmEmbeddingResponseGetSize(resp)
-	valsPtr := lmEmbeddingResponseGetValues(resp)
+	var size uintptr
+	if err := d.callStatus("litert_lm_embedding_response_get_size", func() int32 {
+		return lmEmbeddingResponseGetSize(resp, uintptr(unsafe.Pointer(&size)))
+	}); err != nil {
+		return nil, err
+	}
+	var valsPtr uintptr
+	if err := d.callStatus("litert_lm_embedding_response_get_values", func() int32 {
+		return lmEmbeddingResponseGetValues(resp, uintptr(unsafe.Pointer(&valsPtr)))
+	}); err != nil {
+		return nil, err
+	}
 	if size == 0 {
 		return []float32{}, nil
 	}
-	if valsPtr == nil {
+	if valsPtr == 0 {
 		return nil, fmt.Errorf("invalid embedding response values pointer")
 	}
-	src := unsafe.Slice(valsPtr, int(size))
+	maxInt := uintptr(^uint(0) >> 1)
+	if size > maxInt {
+		return nil, fmt.Errorf("embedding response size %d exceeds Go slice capacity", size)
+	}
+	src := unsafe.Slice((*float32)(unsafe.Pointer(valsPtr)), int(size))
 	out := make([]float32, int(size))
 	copy(out, src)
 	return out, nil
@@ -357,6 +493,39 @@ func nativeDriverCallback(userData, chunkPtr uintptr) uintptr {
 
 // ── Library loading ────────────────────────────────────────────────────────
 
+func registerNativeLibFunc(fn any, name string) (err error) {
+	if _, err := dlsym(lmLib, name); err != nil {
+		return fmt.Errorf("resolve LiteRT-LM symbol %q: %w", name, err)
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("register LiteRT-LM symbol %q: %v", name, recovered)
+		}
+	}()
+	purego.RegisterLibFunc(fn, lmLib, name)
+	return nil
+}
+
+func verifyNativeAPIVersion() error {
+	var major, minor, patch int32
+	if err := nativeDrv.callStatus("litert_lm_get_api_version", func() int32 {
+		return lmGetAPIVersion(
+			uintptr(unsafe.Pointer(&major)),
+			uintptr(unsafe.Pointer(&minor)),
+			uintptr(unsafe.Pointer(&patch)),
+		)
+	}); err != nil {
+		return fmt.Errorf("query LiteRT-LM C API version: %w", err)
+	}
+	runtime.KeepAlive(&major)
+	runtime.KeepAlive(&minor)
+	runtime.KeepAlive(&patch)
+	if major != 1 || minor < 0 {
+		return fmt.Errorf("unsupported LiteRT-LM C API version %d.%d.%d; require 1.0 or newer within major version 1", major, minor, patch)
+	}
+	return nil
+}
+
 func ensureLMLibLoadedImpl(libPath string) error {
 	lmLibOnce.Do(func() {
 		var err error
@@ -365,60 +534,84 @@ func ensureLMLibLoadedImpl(libPath string) error {
 		}
 		lmLib, err = dlopen(libPath, RTLD_NOW|RTLD_GLOBAL)
 		if err != nil {
-			lmLibErr = fmt.Errorf("failed to load %s: %w", libPath, err)
+			lmLibErr = runtimeLibraryLoadError(libPath, runtime.GOOS, err)
 			return
 		}
-		purego.RegisterLibFunc(&lmSettingsCreate, lmLib, "litert_lm_engine_settings_create")
-		purego.RegisterLibFunc(&lmSettingsDelete, lmLib, "litert_lm_engine_settings_delete")
-		purego.RegisterLibFunc(&lmEngineCreate, lmLib, "litert_lm_engine_create")
-		purego.RegisterLibFunc(&lmEngineDelete, lmLib, "litert_lm_engine_delete")
-		purego.RegisterLibFunc(&lmCfgCreate, lmLib, "litert_lm_conversation_config_create")
-		purego.RegisterLibFunc(&lmCfgDelete, lmLib, "litert_lm_conversation_config_delete")
-		purego.RegisterLibFunc(&lmConvCreate, lmLib, "litert_lm_conversation_create")
-		purego.RegisterLibFunc(&lmConvDelete, lmLib, "litert_lm_conversation_delete")
-		purego.RegisterLibFunc(&lmConvSendStream, lmLib, "litert_lm_conversation_send_message_stream")
-		purego.RegisterLibFunc(&lmConvCancelProcess, lmLib, "litert_lm_conversation_cancel_process")
-		purego.RegisterLibFunc(&lmSetLogLevel, lmLib, "litert_lm_set_min_log_level")
-		purego.RegisterLibFunc(&lmStreamChunkGetText, lmLib, "litert_lm_stream_chunk_get_text")
-		purego.RegisterLibFunc(&lmStreamChunkIsFinal, lmLib, "litert_lm_stream_chunk_is_final")
-		purego.RegisterLibFunc(&lmStreamChunkGetError, lmLib, "litert_lm_stream_chunk_get_error")
+		if err = registerNativeLibFunc(&lmGetAPIVersion, "litert_lm_get_api_version"); err != nil {
+			lmLibErr = err
+			return
+		}
+		if err = registerNativeLibFunc(&lmGetLastErrorMessage, "litert_lm_get_last_error_message"); err != nil {
+			lmLibErr = err
+			return
+		}
+		if err = verifyNativeAPIVersion(); err != nil {
+			lmLibErr = err
+			return
+		}
 
-		purego.RegisterLibFunc(&lmCfgSetTools, lmLib, "litert_lm_conversation_config_set_tools")
-		purego.RegisterLibFunc(&lmCfgSetSystemMessage, lmLib, "litert_lm_conversation_config_set_system_message")
-		purego.RegisterLibFunc(&lmCfgSetEnableConstrainedDecoding, lmLib, "litert_lm_conversation_config_set_enable_constrained_decoding")
-		purego.RegisterLibFunc(&lmCfgSetStreamToolCalls, lmLib, "litert_lm_conversation_config_set_stream_tool_calls")
-		purego.RegisterLibFunc(&lmCfgSetMessages, lmLib, "litert_lm_conversation_config_set_messages")
-
-		purego.RegisterLibFunc(&lmSettingsSetEnableSpeculativeDecoding, lmLib, "litert_lm_engine_settings_set_enable_speculative_decoding")
-		purego.RegisterLibFunc(&lmSettingsSetUseRingbuffersLocalAttention, lmLib, "litert_lm_engine_settings_set_use_ringbuffers_local_attention")
-		purego.RegisterLibFunc(&lmSettingsSetGpuDecodeStepsPerSync, lmLib, "litert_lm_engine_settings_set_gpu_decode_steps_per_sync")
-		purego.RegisterLibFunc(&lmSettingsSetNumThreads, lmLib, "litert_lm_engine_settings_set_num_threads")
-		purego.RegisterLibFunc(&lmSettingsSetMaxNumTokens, lmLib, "litert_lm_engine_settings_set_max_num_tokens")
-
-		purego.RegisterLibFunc(&lmLoadedFileCreate, lmLib, "litert_lm_loaded_file_create")
-		purego.RegisterLibFunc(&lmLoadedFileDelete, lmLib, "litert_lm_loaded_file_delete")
-		purego.RegisterLibFunc(&lmLoadedFileHasSpeculativeDecodingSupport, lmLib, "litert_lm_loaded_file_has_speculative_decoding_support")
-		purego.RegisterLibFunc(&lmLoadedFileMaxContextTokens, lmLib, "litert_lm_loaded_file_max_context_tokens")
-		purego.RegisterLibFunc(&lmLoadedFileIsDynamicContext, lmLib, "litert_lm_loaded_file_is_dynamic_context")
-		purego.RegisterLibFunc(&lmLoadedFileSupportsThinking, lmLib, "litert_lm_loaded_file_supports_thinking")
-		purego.RegisterLibFunc(&lmLoadedFileSupportsFunctionCalling, lmLib, "litert_lm_loaded_file_supports_function_calling")
-		purego.RegisterLibFunc(&lmLoadedFileModalitySupportedBackends, lmLib, "litert_lm_loaded_file_modality_supported_backends")
-
-		purego.RegisterLibFunc(&lmEmbeddingSettingsCreate, lmLib, "litert_lm_embedding_engine_settings_create")
-		purego.RegisterLibFunc(&lmEmbeddingSettingsDelete, lmLib, "litert_lm_embedding_engine_settings_delete")
-		purego.RegisterLibFunc(&lmEmbeddingSettingsSetNumThreads, lmLib, "litert_lm_embedding_engine_settings_set_num_threads")
-		purego.RegisterLibFunc(&lmEmbeddingEngineCreate, lmLib, "litert_lm_embedding_engine_create")
-		purego.RegisterLibFunc(&lmEmbeddingEngineDelete, lmLib, "litert_lm_embedding_engine_delete")
-		purego.RegisterLibFunc(&lmEmbeddingOptionsCreate, lmLib, "litert_lm_embedding_options_create")
-		purego.RegisterLibFunc(&lmEmbeddingOptionsDelete, lmLib, "litert_lm_embedding_options_delete")
-		purego.RegisterLibFunc(&lmEmbeddingOptionsSetNormalize, lmLib, "litert_lm_embedding_options_set_normalize")
-		purego.RegisterLibFunc(&lmEmbeddingOptionsSetOverflowStrategy, lmLib, "litert_lm_embedding_options_set_input_overflow_strategy")
-		purego.RegisterLibFunc(&lmInputDataCreate, lmLib, "litert_lm_input_data_create")
-		purego.RegisterLibFunc(&lmInputDataDelete, lmLib, "litert_lm_input_data_delete")
-		purego.RegisterLibFunc(&lmEmbeddingEngineCompute, lmLib, "litert_lm_embedding_engine_compute_embedding")
-		purego.RegisterLibFunc(&lmEmbeddingResponseDelete, lmLib, "litert_lm_embedding_response_delete")
-		purego.RegisterLibFunc(&lmEmbeddingResponseGetSize, lmLib, "litert_lm_embedding_response_get_size")
-		purego.RegisterLibFunc(&lmEmbeddingResponseGetValues, lmLib, "litert_lm_embedding_response_get_values")
+		bindings := []struct {
+			target any
+			name   string
+		}{
+			{&lmSettingsCreate, "litert_lm_engine_settings_create"},
+			{&lmSettingsDelete, "litert_lm_engine_settings_delete"},
+			{&lmSpecConfigCreate, "litert_lm_speculative_decoding_config_create"},
+			{&lmSpecConfigDelete, "litert_lm_speculative_decoding_config_delete"},
+			{&lmSpecConfigSetMode, "litert_lm_speculative_decoding_config_set_mode"},
+			{&lmSettingsSetSpecConfig, "litert_lm_engine_settings_set_speculative_decoding_config"},
+			{&lmSettingsSetDispatchDir, "litert_lm_engine_settings_set_litert_dispatch_lib_dir"},
+			{&lmSettingsSetUseRingbuffersLocalAttention, "litert_lm_engine_settings_set_use_ringbuffers_local_attention"},
+			{&lmSettingsSetGpuDecodeStepsPerSync, "litert_lm_engine_settings_set_gpu_decode_steps_per_sync"},
+			{&lmSettingsSetNumThreads, "litert_lm_engine_settings_set_num_threads"},
+			{&lmSettingsSetMaxNumTokens, "litert_lm_engine_settings_set_max_num_tokens"},
+			{&lmEngineCreate, "litert_lm_engine_create"},
+			{&lmEngineDelete, "litert_lm_engine_delete"},
+			{&lmSetLogLevel, "litert_lm_set_min_log_level"},
+			{&lmCfgCreate, "litert_lm_conversation_config_create"},
+			{&lmCfgDelete, "litert_lm_conversation_config_delete"},
+			{&lmCfgSetTools, "litert_lm_conversation_config_set_tools"},
+			{&lmCfgSetSystemMessage, "litert_lm_conversation_config_set_system_message"},
+			{&lmCfgSetEnableConstrainedDecoding, "litert_lm_conversation_config_set_enable_constrained_decoding"},
+			{&lmCfgSetStreamToolCalls, "litert_lm_conversation_config_set_stream_tool_calls"},
+			{&lmCfgSetMessages, "litert_lm_conversation_config_set_messages"},
+			{&lmConvCreate, "litert_lm_conversation_create"},
+			{&lmConvDelete, "litert_lm_conversation_delete"},
+			{&lmConvSendStream, "litert_lm_conversation_send_message_stream"},
+			{&lmConvCancelProcess, "litert_lm_conversation_cancel_process"},
+			{&lmStreamChunkGetText, "litert_lm_stream_chunk_get_text"},
+			{&lmStreamChunkIsFinal, "litert_lm_stream_chunk_is_final"},
+			{&lmStreamChunkGetError, "litert_lm_stream_chunk_get_error"},
+			{&lmLoadedFileCreate, "litert_lm_loaded_file_create"},
+			{&lmLoadedFileDelete, "litert_lm_loaded_file_delete"},
+			{&lmLoadedFileHasSpeculativeDecodingSupport, "litert_lm_loaded_file_has_speculative_decoding_support"},
+			{&lmLoadedFileMaxContextTokens, "litert_lm_loaded_file_max_context_tokens"},
+			{&lmLoadedFileIsDynamicContext, "litert_lm_loaded_file_is_dynamic_context"},
+			{&lmLoadedFileSupportsThinking, "litert_lm_loaded_file_supports_thinking"},
+			{&lmLoadedFileSupportsFunctionCalling, "litert_lm_loaded_file_supports_function_calling"},
+			{&lmLoadedFileModalitySupportedBackends, "litert_lm_loaded_file_modality_supported_backends"},
+			{&lmEmbeddingSettingsCreate, "litert_lm_embedding_engine_settings_create"},
+			{&lmEmbeddingSettingsDelete, "litert_lm_embedding_engine_settings_delete"},
+			{&lmEmbeddingSettingsSetNumThreads, "litert_lm_embedding_engine_settings_set_num_threads"},
+			{&lmEmbeddingEngineCreate, "litert_lm_embedding_engine_create"},
+			{&lmEmbeddingEngineDelete, "litert_lm_embedding_engine_delete"},
+			{&lmEmbeddingOptionsCreate, "litert_lm_embedding_options_create"},
+			{&lmEmbeddingOptionsDelete, "litert_lm_embedding_options_delete"},
+			{&lmEmbeddingOptionsSetNormalize, "litert_lm_embedding_options_set_normalize"},
+			{&lmEmbeddingOptionsSetOverflowStrategy, "litert_lm_embedding_options_set_input_overflow_strategy"},
+			{&lmInputDataCreate, "litert_lm_input_data_create"},
+			{&lmInputDataDelete, "litert_lm_input_data_delete"},
+			{&lmEmbeddingEngineCompute, "litert_lm_embedding_engine_compute_embedding"},
+			{&lmEmbeddingResponseDelete, "litert_lm_embedding_response_delete"},
+			{&lmEmbeddingResponseGetSize, "litert_lm_embedding_response_get_size"},
+			{&lmEmbeddingResponseGetValues, "litert_lm_embedding_response_get_values"},
+		}
+		for _, binding := range bindings {
+			if err = registerNativeLibFunc(binding.target, binding.name); err != nil {
+				lmLibErr = err
+				return
+			}
+		}
 	})
 	return lmLibErr
 }

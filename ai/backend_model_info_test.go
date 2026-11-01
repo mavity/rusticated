@@ -16,8 +16,8 @@ func (*modelInfoTestDriver) ensureLoaded(string) error { return nil }
 func (*modelInfoTestDriver) stringToCPtr(string) (uint64, func(), error) {
 	return 1, func() {}, nil
 }
-func (*modelInfoTestDriver) loadedFileCreate(uint64) uint64 { return 1 }
-func (*modelInfoTestDriver) loadedFileDelete(uint64)        {}
+func (*modelInfoTestDriver) loadedFileCreate(uint64) (uint64, error) { return 1, nil }
+func (*modelInfoTestDriver) loadedFileDelete(uint64)                 {}
 func (d *modelInfoTestDriver) getterError(name string) error {
 	if d.failedGetter == name {
 		return d.getterErr
@@ -78,5 +78,19 @@ func TestSharedInspectModelPreservesFalseAndZeroCapabilities(t *testing.T) {
 	if info == nil || info.MaxContextTokens != 0 || info.IsDynamicContext ||
 		info.SupportsThinking || info.SupportsFunctionCalling || len(info.SupportedBackends) != 0 {
 		t.Fatalf("sharedInspectModel() info = %+v, want actual zero/false capability values", info)
+	}
+}
+
+func TestSharedInspectModelTreatsMissingContextLimitAsOptional(t *testing.T) {
+	driver := &modelInfoTestDriver{
+		failedGetter: "max context",
+		getterErr:    newLiteRtStatusError("max context", liteRtStatusNotFound, "model has no context limit"),
+	}
+	info, err := sharedInspectModel(driver, "library", "model")
+	if err != nil {
+		t.Fatalf("sharedInspectModel() error = %v, want nil for NotFound context limit", err)
+	}
+	if info == nil || info.MaxContextTokens != 0 {
+		t.Fatalf("sharedInspectModel() info = %+v, want zero context limit", info)
 	}
 }
