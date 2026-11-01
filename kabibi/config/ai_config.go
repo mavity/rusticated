@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/mavity/rusticated/kabibi/internal/privatefile"
 )
@@ -24,7 +25,33 @@ type AIConfig struct {
 	ConsentGiven                 bool   `json:"consent_given,omitempty"`
 }
 
+var testDirectory struct {
+	sync.RWMutex
+	path string
+}
+
+// SetDirectoryForTesting overrides the config directory until the returned
+// cleanup function is called.
+func SetDirectoryForTesting(path string) func() {
+	testDirectory.Lock()
+	previous := testDirectory.path
+	testDirectory.path = path
+	testDirectory.Unlock()
+	return func() {
+		testDirectory.Lock()
+		testDirectory.path = previous
+		testDirectory.Unlock()
+	}
+}
+
 func Directory() (string, error) {
+	testDirectory.RLock()
+	override := testDirectory.path
+	testDirectory.RUnlock()
+	if override != "" {
+		return override, nil
+	}
+
 	home := strings.TrimSpace(os.Getenv("USERPROFILE"))
 	if home == "" {
 		home = strings.TrimSpace(os.Getenv("HOME"))

@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/mavity/rusticated/kabibi/config"
 )
 
 func TestMainPackageDoesNotDirectlyImportCharmUIStack(t *testing.T) {
@@ -113,6 +115,9 @@ func TestRunCLI_UsesPipedSessionForRedirectedStdin(t *testing.T) {
 }
 
 func TestRunCLI_ExecutesAIToolDirectly(t *testing.T) {
+	restoreConfigDirectory := config.SetDirectoryForTesting(t.TempDir())
+	t.Cleanup(restoreConfigDirectory)
+
 	var stdout, stderr bytes.Buffer
 	if code := runCLI(
 		[]string{"ai", "shell-state", "--explanation", "inspect the current shell"},

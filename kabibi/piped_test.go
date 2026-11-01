@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"ai"
+	"github.com/mavity/rusticated/kabibi/config"
 	"github.com/mavity/rusticated/kabibi/ui/shell"
 )
 
@@ -149,8 +150,12 @@ func TestRunPipedReader_RequiresDeleteConfirmationFlag(t *testing.T) {
 }
 
 func TestRunPipedReader_SettingsErrorIncludesAIConfigPath(t *testing.T) {
-	configDir := t.TempDir()
-	t.Setenv("KABIBI_CONFIG_DIR", configDir)
+	configDir := config.SetDirectoryForTesting(t.TempDir())
+	t.Cleanup(configDir)
+	configPath, err := config.AIConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
 	es, err := shell.NewExecutionSession(t.TempDir())
 	if err != nil {
 		t.Fatalf("NewExecutionSession: %v", err)
@@ -159,13 +164,14 @@ func TestRunPipedReader_SettingsErrorIncludesAIConfigPath(t *testing.T) {
 	if code := runPipedReader(context.Background(), strings.NewReader("/settings\n"), &stdout, &stderr, cliOptions{}, es, &pipedAIRunner{}); code != 1 {
 		t.Fatalf("runPipedReader() = %d, want 1; stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), filepath.Join(configDir, "ai.json")) {
-		t.Fatalf("stderr = %q, want AI config path", stderr.String())
+	if !strings.Contains(stderr.String(), configPath) {
+		t.Fatalf("stderr = %q, want AI config path %q", stderr.String(), configPath)
 	}
 }
 
 func TestRunPipedReader_ModelUsesTextSetupPrompt(t *testing.T) {
-	t.Setenv("KABIBI_CONFIG_DIR", t.TempDir())
+	configDir := config.SetDirectoryForTesting(t.TempDir())
+	t.Cleanup(configDir)
 
 	es, err := shell.NewExecutionSession(t.TempDir())
 	if err != nil {

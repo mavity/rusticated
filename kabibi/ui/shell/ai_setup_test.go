@@ -231,7 +231,7 @@ func TestChooseRemoteModelRejectsXTwitterModelEnteredManually(t *testing.T) {
 }
 
 func TestConfigureCustomEndpointSelectsProtocolAndPersistsModel(t *testing.T) {
-	t.Setenv("KABIBI_CONFIG_DIR", t.TempDir())
+	setTestConfigDirectory(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" {
 			t.Errorf("catalog request = %s %s, want GET /v1/models", r.Method, r.URL.Path)
@@ -276,7 +276,7 @@ func TestConfigureCustomEndpointSelectsProtocolAndPersistsModel(t *testing.T) {
 }
 
 func TestConfigureCustomEndpointDetectsProtocolFromURL(t *testing.T) {
-	t.Setenv("KABIBI_CONFIG_DIR", t.TempDir())
+	setTestConfigDirectory(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {
 			t.Errorf("catalog path = %q, want /v1/models", r.URL.Path)
@@ -321,7 +321,7 @@ func TestCustomCredentialIdentityIncludesEndpointAndProtocol(t *testing.T) {
 }
 
 func TestModelSetupMenuOffersReauthenticationOnlyForStoredCredential(t *testing.T) {
-	t.Setenv("KABIBI_CONFIG_DIR", t.TempDir())
+	setTestConfigDirectory(t)
 	current := config.AIConfig{
 		Configured: true,
 		Mode:       "remote",
@@ -374,7 +374,7 @@ func TestModelSetupMenuOmitsExcludedCurrentModelActions(t *testing.T) {
 }
 
 func TestRemoteSetupDoesNotAskForInterstitialConfirmation(t *testing.T) {
-	t.Setenv("KABIBI_CONFIG_DIR", t.TempDir())
+	setTestConfigDirectory(t)
 	stored := &ai.Credential{Type: ai.CredentialAPIKey, Key: "test-token"}
 	if _, err := credstore.Modify(context.Background(), string(ai.RemoteOpenAI), func(*credstore.Credential) (*credstore.Credential, error) {
 		return stored, nil
@@ -434,7 +434,7 @@ func TestContextCompactionLimitScalesProportionally(t *testing.T) {
 }
 
 func TestConfigureAIKeepsCurrentConfigurationFromFirstMenu(t *testing.T) {
-	t.Setenv("KABIBI_CONFIG_DIR", t.TempDir())
+	setTestConfigDirectory(t)
 	if err := config.SaveAI(config.AIConfig{
 		Configured:   true,
 		Mode:         "remote",
@@ -459,8 +459,7 @@ func TestConfigureAIKeepsCurrentConfigurationFromFirstMenu(t *testing.T) {
 }
 
 func TestReusableRemoteCredentialKeepsWorkingStoredCredential(t *testing.T) {
-	configDir := t.TempDir()
-	t.Setenv("KABIBI_CONFIG_DIR", configDir)
+	setTestConfigDirectory(t)
 	stored := &ai.Credential{Type: ai.CredentialAPIKey, Key: "working-token"}
 	if _, err := credstore.Modify(context.Background(), string(ai.RemoteOpenAI), func(*credstore.Credential) (*credstore.Credential, error) {
 		return stored, nil
@@ -670,10 +669,7 @@ func TestEndToEnd_ShellUnconfiguredPrompt_InteractiveLocalGemmaOnboardingAndTurn
 		t.Skip("no Gemma 4 model tier is cached locally; skipping full local Gemma E2E test")
 	}
 
-	// Isolate config.AIConfigPath() in a temp config directory without overriding USERPROFILE
-	// (overriding USERPROFILE causes Direct3D/Qualcomm GPU shader cache D3DSCache to open locked
-	// .dxcache files inside t.TempDir()).
-	t.Setenv("KABIBI_CONFIG_DIR", t.TempDir())
+	setTestConfigDirectory(t)
 
 	s := New(ShellOptions{
 		WorkingDir: t.TempDir(),

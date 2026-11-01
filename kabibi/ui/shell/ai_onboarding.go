@@ -386,7 +386,7 @@ func runAIBuiltin(ctx context.Context, args []string) error {
 		}
 		return nil
 	default:
-		return runAIBuiltinTool(ctx, execSess, sub, args[1:], hc.Stdout, hc.Stderr, cmdTerm, isTTY)
+		return runAIBuiltinTool(ctx, execSess, sub, args[1:], hc.Stdout, hc.Stderr, cmdTerm, isTTY, term)
 	}
 }
 
@@ -398,6 +398,7 @@ func runAIBuiltinTool(
 	stdout, stderr io.Writer,
 	cmdTerm *CommandTerminal,
 	isTTY bool,
+	term ai.TerminalSession,
 ) error {
 	if !IsAIToolName(name) {
 		fmt.Fprintf(stderr, "ai: unknown subcommand %q (try 'ai --help')\n", name)
@@ -408,7 +409,13 @@ func runAIBuiltinTool(
 		return writeAIBuiltinOutput(stdout, stderr, "ai "+name+" --help", formatAIToolHelp(normalizeAIToolName(name), tools[normalizeAIToolName(name)]))
 	}
 
-	embedder, closeEmbedder, diagnostic, err := resolveOneShotAIToolEmbedder(ctx)
+	setup := func() error {
+		runner := NewLazyAIRunner(execSess)
+		defer runner.Close()
+		_, err := runner.configureAIWithTerm(ctx, term)
+		return err
+	}
+	embedder, closeEmbedder, diagnostic, err := resolveOneShotAIToolEmbedder(ctx, setup)
 	if err != nil {
 		fmt.Fprintf(stderr, "ai %s: %v\n", normalizeAIToolName(name), err)
 		return interp.ExitStatus(1)
