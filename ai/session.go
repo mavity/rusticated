@@ -1142,6 +1142,9 @@ func (s *Session) RunTurnWithTiming(ctx context.Context, userText string, timing
 	executedToolParts, finalAnswer, compactedDuringTurn, err := s.runAgenticTurn(ctx, &baseHistory, userPart)
 	if err != nil {
 		s.closeConv()
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
 		if restoreErr := s.initWithHistory(s.snapshotCompactedHistory()); restoreErr != nil {
 			return errors.Join(err, fmt.Errorf("restore session conversation after failed turn: %w", restoreErr))
 		}

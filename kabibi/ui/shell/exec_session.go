@@ -14,7 +14,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/mavity/rusticated/kabibi/tools/filelist"
 	"github.com/mavity/rusticated/platform"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
@@ -147,21 +146,21 @@ type AICommandUISink interface {
 	OnAICommandStart(command string, cwd string) (onChunk func([]byte), onFinish func(exitCode int, elapsed time.Duration))
 }
 
-type ListFilesProgressUISink interface {
-	SetListFilesProgress(progress *filelist.Progress)
-	ListFilesProgressMatchLimit() int
-	ListFilesOutputMatchLimit() int
+type commandOutputUISink interface {
+	SetActiveCommandOutputRenderer(renderer CommandBlockOutputRenderer)
+	InvalidateActiveCommandOutput()
+	CommandOutputSize() (width int, availableHeight int)
 }
 
-func (es *ExecutionSession) listFilesProgressSink() ListFilesProgressUISink {
+func (es *ExecutionSession) commandOutputUISink() commandOutputUISink {
 	if es == nil {
 		return nil
 	}
 	es.bgMu.Lock()
 	sink := es.uiSink
 	es.bgMu.Unlock()
-	progressSink, _ := sink.(ListFilesProgressUISink)
-	return progressSink
+	outputSink, _ := sink.(commandOutputUISink)
+	return outputSink
 }
 
 // NewExecutionSession creates a new persistent shell execution session rooted at dir.

@@ -123,17 +123,21 @@ Relevant implementation: [`filelist.go`](../tools/filelist/filelist.go),
    handoff. Never queue one item per iterator update. Each publication may
    request a redraw; host redraw coalescing is useful but is not the rate
    limiter.
-9. Render progress as ephemeral UI state separate from captured command output
-   and history. It may be attached transiently to the active command block, but
-   must not pass through command `stdout`, `liveOutput.raw`, or the virtual
-   terminal. Do not use alternate-screen controls or clear-screen escape
-   sequences.
-10. On iterator completion, obtain `Result()`, clear ephemeral progress, and
+9. Keep the latest typed progress snapshot in a command-owned output renderer.
+   Each publication replaces that snapshot and invalidates the active command
+   block; the renderer formats it when the block's normal `Render()` path asks
+   for output. The generic shell stores and renders only the output-renderer
+   interface, so it has no list-files-specific state or formatting. Rendered
+   progress occupies ordinary command-block rows and uses the existing
+   measurement, plume ejection, and scrollback behavior. Do not route progress
+   through child-command `stdout`, `liveOutput.raw`, or the virtual terminal.
+   Do not use alternate-screen controls or clear-screen escape sequences.
+10. On iterator completion, obtain `Result()`, clear the progress snapshot, and
     send the normal final Markdown result through the existing command-output
     path exactly once. On non-cancellation error, clear progress and surface the
     explicit failure; never treat partial matches as a successful final result.
-    On cancellation, retain the last progress snapshot while surfacing the
-    cancellation result.
+    On cancellation, retain the last snapshot as command-block content while
+    surfacing the cancellation result; the ordinary plume path handles it.
 11. Tie iterator context to the running command context and defer `Close()`.
     Ctrl+C and Escape cancel `ai list-files`; keep its last published snapshot
     visible after the command stops. Other exit paths clear transient progress.
@@ -279,12 +283,14 @@ identity and discard queued work for matches no longer displayed.
   text or ANSI output; their result formatting remains unchanged.
 - Honor context cancellation throughout scoring and progress delivery. Surface
   embedding and filesystem errors through the existing error path.
-- Publish typed progress through the shell's UI update mechanism; do not write
-  progress to command stdout, captured command output, `liveOutput.raw`, or the
-  virtual terminal, and do not mutate UI state directly from a search goroutine.
-- Clear ephemeral progress on completion and error; on cancellation retain its
-  last published snapshot without adding progress to captured command output.
-  Append the final normal result only on successful completion, exactly once.
+- Publish typed progress through the shell's generic command-output interface;
+  do not write progress to child-command stdout, `liveOutput.raw`, or the
+  virtual terminal, and do not mutate UI state directly from a search
+  goroutine. The command owns the progress snapshot and renderer; the generic
+  block renders that output as part of its ordinary layout.
+- Clear progress on completion and non-cancellation error; on cancellation
+  retain its last published snapshot as command-block content. Append the final
+  normal result only on successful completion, exactly once.
 - Preserve the repository's async-I/O and custom-sysroot build requirements;
   do not introduce host-command dependencies or new blocking I/O paths.
 
@@ -294,17 +300,15 @@ result normally.
 
 ## TTY ownership and implementation areas
 
-The current TTY progress path writes formatted status text to command stdout.
-That output is captured by `ExecutionSession.RunCommand`, appended to the
-command block's live output, and fed to the block's virtual terminal.
-`renderLiveBlock` renders that terminal snapshot, including scrollback.
-Therefore progress written to stdout is command output, not transient UI state;
-clear-screen sequences do not change that ownership. Do not solve this by
-writing ANSI control sequences or changing the virtual terminal's contents.
-
-Use the existing shell invalidation/update mechanism to publish transient
-progress separately from captured command output. Host redraw coalescing remains
-useful, but rate-limit progress publication before requesting UI updates.
+The interactive `ai list-files` command owns the latest typed progress snapshot
+and its output renderer. It publishes snapshots through the generic shell
+invalidation/update mechanism; the renderer formats the current frame when the
+block's `Render()` path requests it. This keeps progress in the normal block
+layout, measurement, plume ejection, and scrollback path without routing it
+through child-command stdout or the block's virtual terminal. The shell knows
+only the renderer interface and output dimensions, not list-files formatting or
+state. Rate-limit progress publication before requesting UI updates; host
+redraw coalescing is not the rate limiter.
 
 Expected code areas:
 
@@ -315,16 +319,20 @@ Expected code areas:
 - `ui/shell/ai_onboarding.go`: in `runAIBuiltinTool`, add the TTY-only direct
   iterator path for canonical `list_files`; parse with the existing schema,
   resolve the embedder through the existing policy, and leave all other tools
-  and non-TTY calls on `executeAITool`.
+  and non-TTY calls on `executeAITool`. Own the progress snapshot and renderer
+  in this command path.
+- `ui/shell/ai_list_files_output.go`: format the command-owned progress
+  snapshot for the current output frame.
 - `ui/shell/ai_tool_command.go` and the AI session/tool context: remove
   list-files progress callback plumbing. Remove a generic `ToolContext.Progress`
   field or optional callback parameter only if no other code uses it.
-- `ui/shell/shell_widget.go`: hold the latest typed progress snapshot as
-  transient active-block state, render it separately from command output, and
-  clear it on every completion path.
+- `ui/shell/shell_widget.go`: expose generic command-output renderer,
+  invalidation, and dimension hooks; render the supplied output as part of the
+  block's ordinary output rows. Keep list-files-specific state and formatting
+  out of the generic shell widget.
 - Replace alternate-screen progress tests with focused coverage for iterator
-  consumption, throttled latest-value publication, ephemeral rendering, final
-  output, cancellation, and errors (for example, in
+  consumption, throttled latest-value publication, block rendering/ejection,
+  final output, cancellation, and errors (for example, in
   `ui/shell/ai_progress_test.go`).
 
 ## Acceptance criteria
@@ -372,13 +380,14 @@ Expected code areas:
 - Quote extraction follows line-boundary chunks and bisection, reuses matching
   scored chunks when possible, and does not delay candidate scoring. TUI quote
   work is limited to the currently displayable top matches.
-- Progress is ephemeral UI state and never enters command output, scrollback,
-  or the virtual terminal. The final normal result appears exactly once.
+- Progress is rendered as command-block content and follows ordinary plume
+  ejection/scrollback. It never enters child-command stdout or the virtual
+  terminal. The final normal result appears exactly once.
 - Iterator update signals are not throttled by the search core and do not carry
   copies of the hot list.
 - The displayed top count respects both `max_results` and available terminal
   height; resizing does not change the search's actual candidate set.
-- Completion replaces progress with final results. Cancellation and errors
+- Completion clears progress and renders final results. Cancellation and errors
   are visibly distinguished from successful completion.
 - Ctrl+C or Escape cancellation stops iterator work and retains the last
   published progress snapshot; normal completion and non-cancellation errors
@@ -392,8 +401,9 @@ Expected code areas:
   confirm that no TUI progress is mixed into tool output.
 - Piped and one-shot invocations continue through `ListFiles` and emit no
   progress.
-- Progress never enters `stdout`, `liveOutput.raw`, virtual-terminal contents,
-  command output, or scrollback; no alternate-screen or clear-screen controls
+- Progress is rendered inside its command block and uses ordinary plume
+  ejection/scrollback; it never enters child-command `stdout`, `liveOutput.raw`,
+  or virtual-terminal contents. No alternate-screen or clear-screen controls
   are used.
 - Run the existing focused `filelist`, shell/tool, and app tests, plus the
   repository's documented Rusticated compile/test path.

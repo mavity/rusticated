@@ -463,9 +463,15 @@ func executeInteractiveListFiles(ctx context.Context, execSess *ExecutionSession
 		return "", fmt.Errorf("ai list_files: decode arguments: %w", err)
 	}
 
-	progressSink := execSess.listFilesProgressSink()
-	if progressSink != nil {
-		outputLimit := progressSink.ListFilesOutputMatchLimit()
+	outputSink := execSess.commandOutputUISink()
+	availableHeight := 0
+	if outputSink != nil {
+		outputWidth, outputHeight := outputSink.CommandOutputSize()
+		if outputWidth > 0 {
+			width = outputWidth
+		}
+		availableHeight = outputHeight
+		outputLimit := listFilesOutputMatchLimit(availableHeight)
 		if outputLimit == 0 {
 			return "", fmt.Errorf("terminal is too short to show list-files results while leaving three rows free")
 		}
@@ -475,8 +481,8 @@ func executeInteractiveListFiles(ctx context.Context, execSess *ExecutionSession
 	}
 	options := listFilesOptions(ctx, input, embedder)
 	options.MaxLineWidth = width
-	if progressSink != nil {
-		options.QuoteLimit = progressSink.ListFilesProgressMatchLimit()
+	if outputSink != nil {
+		options.QuoteLimit = listFilesProgressMatchLimit(availableHeight)
 		if options.QuoteLimit == 0 {
 			options.QuoteLimit = -1
 		}
@@ -484,15 +490,18 @@ func executeInteractiveListFiles(ctx context.Context, execSess *ExecutionSession
 	}
 	iter := filelist.NewSearchIterator(ctx, execSess.Dir(), options)
 	defer iter.Close()
-	if progressSink != nil {
+	var outputRenderer *listFilesCommandOutput
+	if outputSink != nil {
+		outputRenderer = newListFilesCommandOutput(availableHeight)
+		outputSink.SetActiveCommandOutputRenderer(outputRenderer)
 		defer func() {
 			if ctx.Err() == nil {
-				progressSink.SetListFilesProgress(nil)
+				outputSink.SetActiveCommandOutputRenderer(nil)
 			}
 		}()
 	}
-	if progressSink != nil {
-		publishInteractiveListFilesProgress(iter, progressSink)
+	if outputSink != nil {
+		publishInteractiveListFilesProgress(iter, outputRenderer, outputSink)
 	} else {
 		for range iter.Updates() {
 		}
@@ -504,7 +513,7 @@ func executeInteractiveListFiles(ctx context.Context, execSess *ExecutionSession
 	return formatAIToolResultMarkdown("list_files", table)
 }
 
-func publishInteractiveListFilesProgress(iter *filelist.SearchIterator, sink ListFilesProgressUISink) {
+func publishInteractiveListFilesProgress(iter *filelist.SearchIterator, output *listFilesCommandOutput, sink commandOutputUISink) {
 	const publishInterval = 500 * time.Millisecond
 	updates := iter.Updates()
 	var lastPublished time.Time
@@ -519,7 +528,8 @@ func publishInteractiveListFilesProgress(iter *filelist.SearchIterator, sink Lis
 	}()
 	publish := func(now time.Time) {
 		progress := iter.Current()
-		sink.SetListFilesProgress(&progress)
+		output.setProgress(&progress)
+		sink.InvalidateActiveCommandOutput()
 		lastPublished = now
 		dirty = false
 	}

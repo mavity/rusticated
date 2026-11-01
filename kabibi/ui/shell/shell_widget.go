@@ -14,8 +14,6 @@ import (
 	"ai"
 
 	"github.com/charmbracelet/x/input"
-	"github.com/mattn/go-runewidth"
-	"github.com/mavity/rusticated/kabibi/tools/filelist"
 	"github.com/mavity/rusticated/kabibi/ui"
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
@@ -360,50 +358,41 @@ func (s *Shell) IsRunning() bool {
 	return s.running
 }
 
-func (s *Shell) SetListFilesProgress(progress *filelist.Progress) {
+func (s *Shell) SetActiveCommandOutputRenderer(renderer CommandBlockOutputRenderer) {
 	s.mu.Lock()
 	if !s.running || s.activeBlock < 0 || s.activeBlock >= len(s.blocks) {
 		s.mu.Unlock()
 		return
 	}
-	if progress == nil {
-		s.blocks[s.activeBlock].listFilesProgress = nil
-	} else {
-		current := *progress
-		current.Matches = append([]filelist.ProgressMatch(nil), progress.Matches...)
-		s.blocks[s.activeBlock].listFilesProgress = &current
-	}
+	s.blocks[s.activeBlock].outputRenderer = renderer
+	s.blocks[s.activeBlock].cachePopulated = false
 	s.mu.Unlock()
 	s.invalidate()
 }
 
-func (s *Shell) listFilesProgressForDisplayLocked() *filelist.Progress {
-	if s.running {
-		if s.activeBlock >= 0 && s.activeBlock < len(s.blocks) {
-			return s.blocks[s.activeBlock].listFilesProgress
-		}
-		return nil
+func (s *Shell) InvalidateActiveCommandOutput() {
+	s.mu.Lock()
+	if !s.running || s.activeBlock < 0 || s.activeBlock >= len(s.blocks) {
+		s.mu.Unlock()
+		return
 	}
-	for index := len(s.blocks) - 1; index >= 0; index-- {
-		if progress := s.blocks[index].listFilesProgress; progress != nil {
-			return progress
-		}
-	}
-	return nil
+	s.blocks[s.activeBlock].cachePopulated = false
+	s.mu.Unlock()
+	s.invalidate()
 }
 
-func (s *Shell) ListFilesProgressMatchLimit() int {
+func (s *Shell) CommandOutputSize() (width int, availableHeight int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return max(0, s.height-reservedFooterRows-2)
-}
-
-func (s *Shell) ListFilesOutputMatchLimit() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	const spareRows = 3
-	const fixedOutputRows = 3 // cwd heading, blank separator, and search statistics
-	return max(0, s.height-reservedFooterRows-spareRows-fixedOutputRows)
+	width = s.width
+	if width <= 0 {
+		width = 80
+	}
+	height := s.height
+	if height <= 0 {
+		height = 24
+	}
+	return width, max(0, height-reservedFooterRows)
 }
 
 // WaitActive blocks until any currently executing command or AI turn finishes.
@@ -422,10 +411,25 @@ func (s *Shell) Blocks() []CommandBlock {
 	defer s.mu.Unlock()
 	s.drainLiveOutputsLocked()
 	res := make([]CommandBlock, len(s.blocks))
+	renderWidth := s.width
+	if renderWidth <= 0 {
+		renderWidth = 80
+	}
 	for i := range s.blocks {
-		output := s.blocks[i].Output.Bytes()
+		var output []byte
 		if live := s.blocks[i].liveOutput; live != nil {
-			output = live.raw
+			output = append(output, live.raw...)
+		} else {
+			if renderer := s.blocks[i].outputRenderer; renderer != nil {
+				rendered := renderer.Render(renderWidth)
+				if rendered != "" {
+					output = append(output, rendered...)
+					if !strings.HasSuffix(rendered, "\n") {
+						output = append(output, '\n')
+					}
+				}
+			}
+			output = append(output, s.blocks[i].Output.Bytes()...)
 		}
 		res[i] = CommandBlock{
 			ID:            s.blocks[i].ID,
@@ -700,7 +704,17 @@ func renderBlockCached(block *CommandBlock, width int) terminal.CellBuf {
 		} else if block.Kind == BlockBanner || (block.Prompt == "" && block.Input == "") {
 			rawText = block.Output.String()
 		} else {
-			rawText = block.Prompt + block.Input + "\n" + block.Output.String()
+			rawText = block.Prompt + block.Input + "\n"
+			if block.outputRenderer != nil {
+				output := block.outputRenderer.Render(width)
+				if output != "" {
+					rawText += output
+					if !strings.HasSuffix(rawText, "\n") {
+						rawText += "\n"
+					}
+				}
+			}
+			rawText += block.Output.String()
 		}
 		if block.Status == StatusActive && block.AnimLine != "" {
 			if rawText != "" && !strings.HasSuffix(rawText, "\n") {
@@ -771,105 +785,6 @@ func renderBlockCached(block *CommandBlock, width int) terminal.CellBuf {
 	block.cachedBuf = buf
 	block.cachePopulated = true
 	return buf
-}
-
-func cloneListFilesProgress(progress *filelist.Progress) *filelist.Progress {
-	if progress == nil {
-		return nil
-	}
-	copy := *progress
-	copy.Matches = append([]filelist.ProgressMatch(nil), progress.Matches...)
-	return &copy
-}
-
-func listFilesProgressRows(progress *filelist.Progress, maxHeight int) int {
-	if progress == nil || maxHeight <= reservedFooterRows {
-		return 0
-	}
-	availableRows := maxHeight - reservedFooterRows
-	return min(availableRows, 2+len(progress.Matches))
-}
-
-func renderListFilesProgress(progress *filelist.Progress, width, maxRows int) terminal.CellBuf {
-	if progress == nil || width <= 0 || maxRows <= 0 {
-		return terminal.NewCellBuf(max(0, width), 0)
-	}
-	if maxRows == 1 {
-		current := "Preparing search"
-		if progress.Phase == "query" {
-			current = "Preparing query embedding"
-		} else if progress.Phase == "quote" && progress.CurrentPath != "" {
-			path := strings.Join(strings.Fields(sanitizeMarkdownControls(progress.CurrentPath)), " ")
-			current = "Finding quote: " + path
-		} else if progress.CurrentPath != "" {
-			path := strings.Join(strings.Fields(sanitizeMarkdownControls(progress.CurrentPath)), " ")
-			current = "Matching: " + path
-		}
-		return terminal.FromANSIString(truncateProgressLine(current, width), width)
-	}
-	matchRows := max(0, maxRows-2)
-	if matchRows > len(progress.Matches) {
-		matchRows = len(progress.Matches)
-	}
-	header := fmt.Sprintf("Top %d matches | viewed %d/%d | about %s/file",
-		matchRows, progress.Viewed, progress.Total, filelist.FormatAveragePerFile(progress.AvgPerFile))
-	lines := []string{truncateProgressLine(header, width)}
-	for _, match := range progress.Matches[:matchRows] {
-		path := strings.Join(strings.Fields(sanitizeMarkdownControls(match.Path)), " ")
-		quote := strings.Join(strings.Fields(sanitizeMarkdownControls(match.Quote)), " ")
-		row := filelist.FormatMatch(filelist.Match{
-			Path:     path,
-			Size:     match.Size,
-			Score:    match.Score,
-			HasScore: match.HasScore,
-			Quote:    quote,
-		}, width-2)
-		lines = append(lines, truncateProgressLine("- "+row, width))
-	}
-	current := "Preparing search"
-	if progress.Phase == "query" {
-		current = "Preparing query embedding"
-	} else if progress.Phase == "quote" && progress.CurrentPath != "" {
-		path := strings.Join(strings.Fields(sanitizeMarkdownControls(progress.CurrentPath)), " ")
-		current = "Finding quote: " + path
-	} else if progress.CurrentPath != "" {
-		path := strings.Join(strings.Fields(sanitizeMarkdownControls(progress.CurrentPath)), " ")
-		current = "Matching: " + path
-	}
-	lines = append(lines, truncateProgressLine(current, width))
-	if len(lines) > maxRows {
-		lines = lines[:maxRows]
-	}
-	buf := terminal.FromANSIString(strings.Join(lines, "\n"), width)
-	if buf.Height > maxRows {
-		clipped := terminal.NewCellBuf(width, maxRows)
-		clipped.Blit(buf, 0, 0)
-		return clipped
-	}
-	return buf
-}
-
-func truncateProgressLine(text string, width int) string {
-	if width <= 0 || runewidth.StringWidth(text) <= width {
-		return text
-	}
-	if width == 1 {
-		return "…"
-	}
-	var b strings.Builder
-	used := 0
-	for _, r := range text {
-		runeWidth := runewidth.RuneWidth(r)
-		if runeWidth <= 0 {
-			continue
-		}
-		if used+runeWidth > width-1 {
-			break
-		}
-		b.WriteRune(r)
-		used += runeWidth
-	}
-	return b.String() + "…"
 }
 
 func (block *CommandBlock) Measure(c ui.Constraints) ui.Size {
@@ -1318,7 +1233,6 @@ func (s *Shell) computeStackHeight(w, maxH int) int {
 	s.drainLiveOutputsLocked()
 	var chromeH int
 	inputVisible := !s.running && !s.exiting
-	progressRows := listFilesProgressRows(s.listFilesProgressForDisplayLocked(), maxH)
 	if !s.exiting {
 		s.mu.Unlock()
 		if inputVisible {
@@ -1335,7 +1249,6 @@ func (s *Shell) computeStackHeight(w, maxH int) int {
 		}
 		s.mu.Lock()
 	}
-	chromeH = min(maxH, chromeH+progressRows)
 	totalBlockRows := 0
 	for i := range s.blocks {
 		totalBlockRows += renderBlockCached(&s.blocks[i], w).Height
@@ -1442,8 +1355,6 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) string {
 		totalBlockRows += b.Height
 	}
 	activeBlock := s.activeBlock
-	searchProgress := cloneListFilesProgress(s.listFilesProgressForDisplayLocked())
-	progressRows := listFilesProgressRows(searchProgress, maxH)
 	activeCursor := terminal.CursorPos{}
 	activeBlockStart := -1
 	renderedRow := 0
@@ -1501,7 +1412,6 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) string {
 		}
 		chromeH += footerH
 	}
-	chromeH = min(maxH, chromeH+progressRows)
 
 	// 2. Remaining Block Budget
 	hBudget := maxH - chromeH
@@ -1623,20 +1533,11 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) string {
 		sl := collected[i]
 		bufferRow = copyBlockRows(buf, bufferRow, sl.buf, w, sl.startRow, sl.endRow)
 	}
-	if progressRows > 0 {
-		progressBuf := renderListFilesProgress(searchProgress, w, progressRows)
-		for y := 0; y < progressBuf.Height && bufferRow+y < buf.Height; y++ {
-			for x := 0; x < w && x < progressBuf.Width; x++ {
-				buf.Set(x, bufferRow+y, progressBuf.Get(x, y))
-			}
-		}
-	}
 
 	// Position of PromptInput:
 	// In compact ModeStack, PromptInput sits immediately below the collected blocks (at row collectedRows),
 	// followed by the 1 reserved blank footer line at row (occH - 1).
-	// In ModePlumeHistory or bottomAligned HUD mode, PromptInput + footer are pinned to the bottom of maxH.
-	inputTopY := collectedRows + progressRows
+	inputTopY := collectedRows
 	if mode == ModePlumeHistory || (bottomAligned && !exiting) {
 		inputTopY = maxH - chromeH
 		if inputTopY < 0 {
@@ -1935,11 +1836,18 @@ func encodeKeyForPTY(ev input.KeyPressEvent) []byte {
 func (s *Shell) handleKeyEvent(ev input.KeyPressEvent) bool {
 	keyStr := ev.String()
 
-	// If a command is actively running, prioritize forwarding keystrokes (including Ctrl+C) to the child PTY
+	// Cancel AI turns before PTY forwarding; shell commands still receive terminal keystrokes first.
 	s.mu.Lock()
 	running := s.running
 	execSess := s.execSess
+	aiTurnRunning := running && s.activeBlock >= 0 && s.activeBlock < len(s.blocks) &&
+		s.blocks[s.activeBlock].Kind == BlockAITurn
+	cancel := s.activeCancel
 	s.mu.Unlock()
+	if aiTurnRunning && keyStr == "ctrl+c" && cancel != nil {
+		cancel()
+		return true
+	}
 	if running {
 		if execSess != nil && execSess.HasActivePTY() {
 			if raw := encodeKeyForPTY(ev); len(raw) > 0 {
@@ -2163,15 +2071,11 @@ func (s *Shell) submitAndExecuteAsync(animate bool) {
 
 	go func() {
 		defer func() {
-			canceled := ctx.Err() != nil
 			close(animDone)
 			cancel()
 			s.mu.Lock()
 			if blockIdx >= 0 && blockIdx < len(s.blocks) {
 				s.blocks[blockIdx].AnimLine = ""
-				if !canceled || s.blocks[blockIdx].listFilesProgress == nil {
-					s.blocks[blockIdx].listFilesProgress = nil
-				}
 				s.blocks[blockIdx].cachePopulated = false
 				stopCommandSubmitAnimationLocked(&s.blocks[blockIdx])
 			}
