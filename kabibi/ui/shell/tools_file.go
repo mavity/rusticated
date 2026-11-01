@@ -58,6 +58,20 @@ type ListDirInput struct {
 	Explanation string   `json:"explanation,omitempty" doc:"Brief explanation of why this directory is being listed"`
 }
 
+func listFilesOptions(ctx context.Context, in ListFilesInput, embedder ai.PartEmbedder) filelist.Options {
+	query := strings.TrimSpace(in.Query)
+	if query == "" {
+		query = "*"
+	}
+	return filelist.Options{
+		Context:       ctx,
+		Query:         query,
+		SearchContent: in.SearchContent,
+		MaxResults:    in.MaxResults,
+		Embedder:      embedder,
+	}
+}
+
 func resolveShellPath(cwd, target string) string {
 	cleanTarget, _ := hashline.SplitPathAndTag(strings.TrimSpace(target))
 	if cleanTarget == "" {
@@ -327,26 +341,19 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 	})
 
 	tools["list_files"] = ai.NewSessionTool(func(ctx context.Context, tc *ai.ToolContext, in ListFilesInput) (any, error) {
-		q := strings.TrimSpace(in.Query)
-		if q == "" {
-			q = "*"
-		}
+		options := listFilesOptions(ctx, in, nil)
+		q := options.Query
 		var feedback ai.LogFeedback
 		var embedder ai.PartEmbedder
 		if tc != nil {
 			feedback = tc.Feedback
 			embedder = tc.PartEmbedder()
 		}
+		options.Embedder = embedder
 		if feedback != nil {
 			feedback(ai.ToolLead(ListFilesInput{}, q, 18))
 		}
-		table, err := filelist.ListFiles(execSess.Dir(), filelist.Options{
-			Context:       ctx,
-			Query:         q,
-			SearchContent: in.SearchContent,
-			MaxResults:    in.MaxResults,
-			Embedder:      embedder,
-		})
+		table, err := filelist.ListFiles(execSess.Dir(), options)
 		if err != nil {
 			if feedback != nil {
 				feedback("failed")

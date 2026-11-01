@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/mattn/go-runewidth"
 	"github.com/mavity/rusticated/kabibi/browser"
 	"github.com/mavity/rusticated/kabibi/slashcmd"
+	"github.com/mavity/rusticated/kabibi/tools/filelist"
 	"github.com/mavity/rusticated/kabibi/ui"
 	"github.com/mavity/rusticated/kabibi/ui/dialog"
 	"github.com/mavity/rusticated/kabibi/ui/editor"
@@ -587,6 +589,13 @@ func (w *AppWidget) HandleEvent(e input.Event) bool {
 			w.TogglePanels()
 			return true
 		}
+		if panelsVis && w.panels != nil && isListFilesSearchShortcut(keyEv) {
+			if active := w.panels.ActivePane(); active != nil {
+				active.CloseSearch()
+			}
+			w.openListFilesDialog()
+			return true
+		}
 
 		inputValue := w.sh.Input().Value()
 		_, _, isSlashInput := slashcmd.InputToken(inputValue)
@@ -671,7 +680,7 @@ func (w *AppWidget) HandleEvent(e input.Event) bool {
 				}
 				return w.sh.HandleEvent(keyEv)
 
-			case "ctrl+enter", "ctrl+f":
+			case "ctrl+enter":
 				w.insertSelectedFileIntoPrompt(false)
 				w.invalidate()
 				return true
@@ -1243,6 +1252,57 @@ func (w *AppWidget) resolveShellPath(path string) string {
 		path = filepath.Join(w.sh.Dir(), path)
 	}
 	return filepath.Clean(path)
+}
+
+func isListFilesSearchShortcut(key input.KeyPressEvent) bool {
+	if (key.Code == 'f' || key.Code == 'F') &&
+		(key.Mod.Contains(input.ModCtrl) || key.Mod.Contains(input.ModMeta)) {
+		return true
+	}
+	return key.Code == input.KeyF7 &&
+		(key.Mod.Contains(input.ModAlt) || key.Mod.Contains(input.ModCtrl) || key.Mod.Contains(input.ModMeta))
+}
+
+func listFilesCommand(query string, searchContent bool, maxResults int) string {
+	query = strings.ReplaceAll(query, "'", "'\\''")
+	return "ai list-files --query '" + query + "' --search-content=" +
+		strconv.FormatBool(searchContent) + " --max-results " + strconv.Itoa(maxResults)
+}
+
+func (w *AppWidget) openListFilesDialog() {
+	dlg := dialog.NewFormDialog(
+		dialog.ActionListFiles,
+		"Search Files",
+		"Search files using the existing list-files options:",
+		[]string{"Query", "Search content (true/false)", "Maximum results"},
+		[]string{"*", "false", strconv.Itoa(filelist.DefaultMaxResults)},
+		nil,
+	)
+	dlg.OnCancel = w.closeDialog
+	dlg.OnSubmitForm = func(_ dialog.DialogAction, values []string, _ *filemanager.FileOp) {
+		if len(values) != 3 {
+			w.showSlashError(fmt.Errorf("file search requires query, content-search flag, and result limit"))
+			return
+		}
+		searchContent, err := strconv.ParseBool(values[1])
+		if err != nil {
+			w.showSlashError(fmt.Errorf("search content must be true or false"))
+			return
+		}
+		maxResults, err := strconv.Atoi(values[2])
+		if err != nil {
+			w.showSlashError(fmt.Errorf("maximum results must be an integer"))
+			return
+		}
+		command := listFilesCommand(values[0], searchContent, maxResults)
+		w.closeDialog()
+		w.sh.SetInput(command)
+		w.sh.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
+	}
+	w.mu.Lock()
+	w.dialog = dlg
+	w.mu.Unlock()
+	w.invalidate()
 }
 
 func (w *AppWidget) openMkdirDialog() {

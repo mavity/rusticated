@@ -14,6 +14,8 @@ import (
 	"ai"
 
 	"github.com/charmbracelet/x/input"
+	"github.com/mattn/go-runewidth"
+	"github.com/mavity/rusticated/kabibi/tools/filelist"
 	"github.com/mavity/rusticated/kabibi/ui"
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
@@ -356,6 +358,23 @@ func (s *Shell) IsRunning() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.running
+}
+
+func (s *Shell) SetListFilesProgress(progress *filelist.Progress) {
+	s.mu.Lock()
+	if !s.running || s.activeBlock < 0 || s.activeBlock >= len(s.blocks) {
+		s.mu.Unlock()
+		return
+	}
+	if progress == nil {
+		s.blocks[s.activeBlock].listFilesProgress = nil
+	} else {
+		current := *progress
+		current.Matches = append([]filelist.ProgressMatch(nil), progress.Matches...)
+		s.blocks[s.activeBlock].listFilesProgress = &current
+	}
+	s.mu.Unlock()
+	s.invalidate()
 }
 
 // WaitActive blocks until any currently executing command or AI turn finishes.
@@ -723,6 +742,82 @@ func renderBlockCached(block *CommandBlock, width int) terminal.CellBuf {
 	block.cachedBuf = buf
 	block.cachePopulated = true
 	return buf
+}
+
+func cloneListFilesProgress(progress *filelist.Progress) *filelist.Progress {
+	if progress == nil {
+		return nil
+	}
+	copy := *progress
+	copy.Matches = append([]filelist.ProgressMatch(nil), progress.Matches...)
+	return &copy
+}
+
+func listFilesProgressRows(progress *filelist.Progress, maxHeight int) int {
+	if progress == nil || maxHeight <= reservedFooterRows {
+		return 0
+	}
+	limit := min(8, max(2, maxHeight/3))
+	limit = min(limit, maxHeight-reservedFooterRows)
+	return min(limit, 2+len(progress.Matches))
+}
+
+func renderListFilesProgress(progress *filelist.Progress, width, maxRows int) terminal.CellBuf {
+	if progress == nil || width <= 0 || maxRows <= 0 {
+		return terminal.NewCellBuf(max(0, width), 0)
+	}
+	matchRows := max(0, maxRows-2)
+	if matchRows > len(progress.Matches) {
+		matchRows = len(progress.Matches)
+	}
+	header := fmt.Sprintf("Top %d matches | viewed %d/%d | about %s/file",
+		matchRows, progress.Viewed, progress.Total, progress.AvgPerFile.Round(time.Millisecond))
+	lines := []string{truncateProgressLine(header, width)}
+	for _, match := range progress.Matches[:matchRows] {
+		path := strings.Join(strings.Fields(sanitizeMarkdownControls(match.Path)), " ")
+		lines = append(lines, truncateProgressLine(fmt.Sprintf("- %s [semantic: %.2f]", path, match.Score), width))
+	}
+	current := "Preparing search"
+	if progress.Phase == "query" {
+		current = "Preparing query embedding"
+	} else if progress.CurrentPath != "" {
+		path := strings.Join(strings.Fields(sanitizeMarkdownControls(progress.CurrentPath)), " ")
+		current = "Matching: " + path
+	}
+	lines = append(lines, truncateProgressLine(current, width))
+	if len(lines) > maxRows {
+		lines = lines[:maxRows]
+	}
+	buf := terminal.FromANSIString(strings.Join(lines, "\n"), width)
+	if buf.Height > maxRows {
+		clipped := terminal.NewCellBuf(width, maxRows)
+		clipped.Blit(buf, 0, 0)
+		return clipped
+	}
+	return buf
+}
+
+func truncateProgressLine(text string, width int) string {
+	if width <= 0 || runewidth.StringWidth(text) <= width {
+		return text
+	}
+	if width == 1 {
+		return "…"
+	}
+	var b strings.Builder
+	used := 0
+	for _, r := range text {
+		runeWidth := runewidth.RuneWidth(r)
+		if runeWidth <= 0 {
+			continue
+		}
+		if used+runeWidth > width-1 {
+			break
+		}
+		b.WriteRune(r)
+		used += runeWidth
+	}
+	return b.String() + "…"
 }
 
 func (block *CommandBlock) Measure(c ui.Constraints) ui.Size {
@@ -1171,6 +1266,10 @@ func (s *Shell) computeStackHeight(w, maxH int) int {
 	s.drainLiveOutputsLocked()
 	var chromeH int
 	inputVisible := !s.running && !s.exiting
+	progressRows := 0
+	if s.running && s.activeBlock >= 0 && s.activeBlock < len(s.blocks) {
+		progressRows = listFilesProgressRows(s.blocks[s.activeBlock].listFilesProgress, maxH)
+	}
 	if !s.exiting {
 		s.mu.Unlock()
 		if inputVisible {
@@ -1187,6 +1286,7 @@ func (s *Shell) computeStackHeight(w, maxH int) int {
 		}
 		s.mu.Lock()
 	}
+	chromeH = min(maxH, chromeH+progressRows)
 	totalBlockRows := 0
 	for i := range s.blocks {
 		totalBlockRows += renderBlockCached(&s.blocks[i], w).Height
@@ -1293,6 +1393,12 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) string {
 		totalBlockRows += b.Height
 	}
 	activeBlock := s.activeBlock
+	var searchProgress *filelist.Progress
+	progressRows := 0
+	if running && activeBlock >= 0 && activeBlock < len(s.blocks) {
+		searchProgress = cloneListFilesProgress(s.blocks[activeBlock].listFilesProgress)
+		progressRows = listFilesProgressRows(searchProgress, maxH)
+	}
 	activeCursor := terminal.CursorPos{}
 	activeBlockStart := -1
 	renderedRow := 0
@@ -1350,6 +1456,7 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) string {
 		}
 		chromeH += footerH
 	}
+	chromeH = min(maxH, chromeH+progressRows)
 
 	// 2. Remaining Block Budget
 	hBudget := maxH - chromeH
@@ -1470,6 +1577,14 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) string {
 	for i := len(collected) - 1; i >= 0; i-- {
 		sl := collected[i]
 		bufferRow = copyBlockRows(buf, bufferRow, sl.buf, w, sl.startRow, sl.endRow)
+	}
+	if progressRows > 0 {
+		progressBuf := renderListFilesProgress(searchProgress, w, progressRows)
+		for y := 0; y < progressBuf.Height && bufferRow+y < buf.Height; y++ {
+			for x := 0; x < w && x < progressBuf.Width; x++ {
+				buf.Set(x, bufferRow+y, progressBuf.Get(x, y))
+			}
+		}
 	}
 
 	// Position of PromptInput:
@@ -1997,6 +2112,8 @@ func (s *Shell) submitAndExecuteAsync(animate bool) {
 			s.mu.Lock()
 			if blockIdx >= 0 && blockIdx < len(s.blocks) {
 				s.blocks[blockIdx].AnimLine = ""
+				s.blocks[blockIdx].listFilesProgress = nil
+				s.blocks[blockIdx].cachePopulated = false
 				stopCommandSubmitAnimationLocked(&s.blocks[blockIdx])
 			}
 			s.activeCancel = nil

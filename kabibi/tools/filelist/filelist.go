@@ -57,6 +57,14 @@ var defaultSkippedDirs = map[string]bool{
 // fuzzy -> semantic embeddings, or content search when opts.SearchContent is true),
 // and formats a compact human-readable table.
 func ListFiles(cwd string, opts Options) (string, error) {
+	iter := NewSearchIterator(opts.Context, cwd, opts)
+	defer iter.Close()
+	for range iter.Updates() {
+	}
+	return iter.Result()
+}
+
+func listFiles(ctx context.Context, cwd string, opts Options, progress *progressTracker) (string, error) {
 	if cwd == "" {
 		var err error
 		cwd, err = os.Getwd()
@@ -79,6 +87,10 @@ func ListFiles(cwd string, opts Options) (string, error) {
 		query = "*"
 	}
 
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
 	// If query points to a specific subdirectory prefix without glob chars (and not search_content),
 	// check if it's an existing directory so `list_files(query="ui/shell")` lists its contents.
 	searchRoot := absCwd
@@ -93,22 +105,18 @@ func ListFiles(cwd string, opts Options) (string, error) {
 	}
 
 	ignorePatterns := loadGitignorePatterns(absCwd)
-	allEntries, err := collectCandidateFiles(searchRoot, relPrefix, ignorePatterns, query == "*")
+	allEntries, err := collectCandidateFiles(ctx, searchRoot, relPrefix, ignorePatterns, query == "*")
 	if err != nil {
 		return "", err
 	}
 
-	ctx := opts.Context
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	var matched []fileEntry
 	modeLabel := ""
 
 	if opts.SearchContent {
-		matched, modeLabel, err = filterByContent(ctx, allEntries, query, maxRes, opts.Embedder)
+		matched, modeLabel, err = filterByContent(ctx, allEntries, query, maxRes, opts.Embedder, progress)
 	} else {
-		matched, modeLabel, err = filterByFilename(ctx, allEntries, query, maxRes, opts.Embedder)
+		matched, modeLabel, err = filterByFilename(ctx, allEntries, query, maxRes, opts.Embedder, progress)
 	}
 	if err != nil {
 		return "", err
@@ -155,7 +163,7 @@ func ListFiles(cwd string, opts Options) (string, error) {
 	return strings.TrimSuffix(sb.String(), "\n"), nil
 }
 
-func collectCandidateFiles(root string, relPrefix string, ignorePatterns []string, shallowOnly bool) ([]fileEntry, error) {
+func collectCandidateFiles(ctx context.Context, root string, relPrefix string, ignorePatterns []string, shallowOnly bool) ([]fileEntry, error) {
 	var entries []fileEntry
 	const maxWalkEntries = 4000
 
@@ -165,6 +173,9 @@ func collectCandidateFiles(root string, relPrefix string, ignorePatterns []strin
 			return nil, err
 		}
 		for _, de := range dirEntries {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			name := de.Name()
 			if name == ".git" {
 				continue
@@ -183,7 +194,10 @@ func collectCandidateFiles(root string, relPrefix string, ignorePatterns []strin
 		return entries, nil
 	}
 
-	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+	walkErr := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if err != nil {
 			return nil
 		}
@@ -213,6 +227,10 @@ func collectCandidateFiles(root string, relPrefix string, ignorePatterns []strin
 		}
 		return nil
 	})
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	_ = walkErr
 
 	sortEntries(entries)
 	return entries, nil
@@ -271,7 +289,7 @@ func sortEntries(entries []fileEntry) {
 	})
 }
 
-func filterByFilename(ctx context.Context, entries []fileEntry, query string, maxRes int, embedder ai.PartEmbedder) ([]fileEntry, string, error) {
+func filterByFilename(ctx context.Context, entries []fileEntry, query string, maxRes int, embedder ai.PartEmbedder, progress *progressTracker) ([]fileEntry, string, error) {
 	if query == "*" {
 		return entries, "glob '*'", nil
 	}
@@ -320,7 +338,7 @@ func filterByFilename(ctx context.Context, entries []fileEntry, query string, ma
 		if len(globMatches) > maxRes*3 {
 			candidates = globMatches
 		}
-		sem, err := rankPathsByEmbedding(ctx, candidates, query, embedder)
+		sem, err := rankPathsByEmbedding(ctx, candidates, query, embedder, maxRes, progress)
 		if err != nil {
 			return nil, "", fmt.Errorf("semantic filename search: %w", err)
 		}
@@ -335,7 +353,7 @@ func filterByFilename(ctx context.Context, entries []fileEntry, query string, ma
 	return fuzzyMatches, fmt.Sprintf("fuzzy %q", query), nil
 }
 
-func filterByContent(ctx context.Context, entries []fileEntry, query string, maxRes int, embedder ai.PartEmbedder) ([]fileEntry, string, error) {
+func filterByContent(ctx context.Context, entries []fileEntry, query string, maxRes int, embedder ai.PartEmbedder, progress *progressTracker) ([]fileEntry, string, error) {
 	lowerQ := strings.ToLower(query)
 	re, reErr := regexp.Compile("(?i)" + query)
 
@@ -372,13 +390,6 @@ func filterByContent(ctx context.Context, entries []fileEntry, query string, max
 	}
 
 	if embedder != nil {
-		qVec, err := ai.EmbedWithContext(ctx, embedder, []ai.PromptPart{{Role: ai.RoleUser, Text: query}})
-		if err != nil {
-			return nil, "", fmt.Errorf("embed content search query: %w", err)
-		}
-		if len(qVec) == 0 {
-			return nil, "", fmt.Errorf("embed content search query: empty vector")
-		}
 		candidates := entries
 		if len(matched) > maxRes {
 			candidates = matched
@@ -403,31 +414,10 @@ func filterByContent(ctx context.Context, entries []fileEntry, query string, max
 		if len(parts) == 0 {
 			return matched, fmt.Sprintf("content %q", query), nil
 		}
-		vectors, err := ai.EmbedBatchWithContext(ctx, embedder, parts)
+		sem, err := rankContentByEmbedding(ctx, semCandidates, parts, query, embedder, maxRes, progress)
 		if err != nil {
-			return nil, "", fmt.Errorf("embed content search candidates: %w", err)
+			return nil, "", fmt.Errorf("semantic content search: %w", err)
 		}
-		if len(vectors) != len(semCandidates) {
-			return nil, "", fmt.Errorf("embed content search candidates: got %d vectors for %d files", len(vectors), len(semCandidates))
-		}
-		var sem []fileEntry
-		for i, vec := range vectors {
-			if len(vec) == 0 {
-				return nil, "", fmt.Errorf("embed content search candidate %q: empty vector", semCandidates[i].relPath)
-			}
-			sim := cosineSim(qVec, vec)
-			if sim >= 0.50 {
-				cp := semCandidates[i]
-				cp.score = sim
-				if cp.matchNote == "" {
-					cp.matchNote = fmt.Sprintf("[semantic: %.2f]", sim)
-				}
-				sem = append(sem, cp)
-			}
-		}
-		sort.Slice(sem, func(i, j int) bool {
-			return sem[i].score > sem[j].score
-		})
 		if len(sem) > 0 {
 			return sem, fmt.Sprintf("semantic-content %q", query), nil
 		}
@@ -444,9 +434,12 @@ func isBinaryBlob(b []byte) bool {
 	return bytes.IndexByte(check, 0) >= 0
 }
 
-func rankPathsByEmbedding(ctx context.Context, entries []fileEntry, query string, embedder ai.PartEmbedder) ([]fileEntry, error) {
+func rankPathsByEmbedding(ctx context.Context, entries []fileEntry, query string, embedder ai.PartEmbedder, maxRes int, progress *progressTracker) ([]fileEntry, error) {
 	if len(entries) == 0 {
 		return nil, nil
+	}
+	if err := progress.update("query", "", 0, len(entries)); err != nil {
+		return nil, err
 	}
 	qVec, err := ai.EmbedWithContext(ctx, embedder, []ai.PromptPart{{Role: ai.RoleUser, Text: query}})
 	if err != nil {
@@ -459,30 +452,101 @@ func rankPathsByEmbedding(ctx context.Context, entries []fileEntry, query string
 	for i, entry := range entries {
 		parts[i] = ai.PromptPart{Role: ai.RoleModel, Text: entry.relPath}
 	}
-	vectors, err := ai.EmbedBatchWithContext(ctx, embedder, parts)
+	return rankEmbeddingParts(ctx, entries, parts, qVec, embedder, maxRes, progress)
+}
+
+func rankContentByEmbedding(ctx context.Context, entries []fileEntry, parts []ai.PromptPart, query string, embedder ai.PartEmbedder, maxRes int, progress *progressTracker) ([]fileEntry, error) {
+	if err := progress.update("query", "", 0, len(entries)); err != nil {
+		return nil, err
+	}
+	qVec, err := ai.EmbedWithContext(ctx, embedder, []ai.PromptPart{{Role: ai.RoleUser, Text: query}})
 	if err != nil {
 		return nil, err
 	}
-	if len(vectors) != len(entries) {
-		return nil, fmt.Errorf("path embedder returned %d vectors for %d paths", len(vectors), len(entries))
+	if len(qVec) == 0 {
+		return nil, fmt.Errorf("query embedder returned an empty vector")
 	}
-	var scored []fileEntry
-	for i, e := range entries {
-		vec := vectors[i]
+	return rankEmbeddingParts(ctx, entries, parts, qVec, embedder, maxRes, progress)
+}
+
+func rankEmbeddingParts(ctx context.Context, entries []fileEntry, parts []ai.PromptPart, qVec []float32, embedder ai.PartEmbedder, maxRes int, progress *progressTracker) ([]fileEntry, error) {
+	if len(parts) != len(entries) {
+		return nil, fmt.Errorf("embed candidate input count %d does not match file count %d", len(parts), len(entries))
+	}
+	viewed := 0
+	publish := func(phase, current string) error {
+		return progress.update(phase, current, viewed, len(entries))
+	}
+	addScore := func(index int, vec []float32) error {
 		if len(vec) == 0 {
-			return nil, fmt.Errorf("path embedder returned an empty vector for %q", e.relPath)
+			return fmt.Errorf("embed candidate %q: empty vector", entries[index].relPath)
 		}
-		sim := cosineSim(qVec, vec)
-		if sim >= 0.50 {
-			cp := e
-			cp.score = sim
-			scored = append(scored, cp)
+		entry := entries[index]
+		entry.score = cosineSim(qVec, vec)
+		if entry.score >= 0.50 {
+			entry.matchNote = fmt.Sprintf("[semantic: %.2f]", entry.score)
+			progress.addMatch(entry, maxRes)
+		}
+		viewed++
+		return publish("candidate", entry.relPath)
+	}
+	if batch, ok := embedder.(ai.BatchPartEmbedder); ok {
+		const batchSize = 16
+		for start := 0; start < len(entries); start += batchSize {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			end := min(start+batchSize, len(entries))
+			if err := publish("candidate", entries[start].relPath); err != nil {
+				return nil, err
+			}
+			vectors, err := batch.EmbedBatchContext(ctx, parts[start:end])
+			if err != nil {
+				return nil, err
+			}
+			if len(vectors) != end-start {
+				return nil, fmt.Errorf("embed candidate batch returned %d vectors for %d files", len(vectors), end-start)
+			}
+			for i, vector := range vectors {
+				if err := addScore(start+i, vector); err != nil {
+					return nil, err
+				}
+			}
+		}
+		return progress.matches(), nil
+	}
+	for i, part := range parts {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := publish("candidate", entries[i].relPath); err != nil {
+			return nil, err
+		}
+		vector, err := ai.EmbedWithContext(ctx, embedder, []ai.PromptPart{part})
+		if err != nil {
+			return nil, err
+		}
+		if err := addScore(i, vector); err != nil {
+			return nil, err
 		}
 	}
-	sort.Slice(scored, func(i, j int) bool {
-		return scored[i].score > scored[j].score
+	return progress.matches(), nil
+}
+
+func insertTopMatch(top []fileEntry, candidate fileEntry, limit int) []fileEntry {
+	index := sort.Search(len(top), func(i int) bool {
+		if top[i].score != candidate.score {
+			return top[i].score < candidate.score
+		}
+		return top[i].relPath > candidate.relPath
 	})
-	return scored, nil
+	top = append(top, fileEntry{})
+	copy(top[index+1:], top[index:])
+	top[index] = candidate
+	if limit > 0 && len(top) > limit {
+		top = top[:limit]
+	}
+	return top
 }
 
 func cosineSim(a, b []float32) float64 {

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mavity/rusticated/kabibi/tools/filelist"
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
 	"github.com/mavity/rusticated/platform"
 	"mvdan.cc/sh/v3/expand"
@@ -116,25 +117,26 @@ const (
 // CommandBlock is a shell-stack widget for a banner, command, or AI turn. Its
 // CellBuf cache is internal to the shell's ANSI-composition boundary.
 type CommandBlock struct {
-	ID            int           // Monotonic 1-based block ID
-	Kind          BlockKind     // BlockBanner, BlockCommand, or BlockAITurn
-	Source        CommandSource // SourceUserShell, SourceAITool, or SourceSystem
-	Cwd           string        // Working directory at execution time
-	Prompt        string        // e.g., "~/rustica፧"
-	Input         string        // The command or prompt text
-	inputStyles   []terminal.Style
-	submitAnim    *commandSubmitAnimation
-	Output        bytes.Buffer       // Full accumulated output from stdout/stderr or AI content
-	AnimLine      string             // Transient animated artifact/ticker line while Status == StatusActive
-	Status        CommandBlockStatus // Execution status
-	ExitCode      int                // Exit code (0 = success, non-zero = failure)
-	TypedAt       time.Time          // Timestamp when user typed first character of Input
-	StartedAt     time.Time          // Timestamp when block started / submitted
-	FirstOutputAt time.Time          // Timestamp when first output character arrived
-	CompletedAt   time.Time          // Timestamp when block completed / last output character arrived
-	Duration      time.Duration      // Execution duration
-	liveOutput    *liveOutputState
-	renderError   string
+	ID                int           // Monotonic 1-based block ID
+	Kind              BlockKind     // BlockBanner, BlockCommand, or BlockAITurn
+	Source            CommandSource // SourceUserShell, SourceAITool, or SourceSystem
+	Cwd               string        // Working directory at execution time
+	Prompt            string        // e.g., "~/rustica፧"
+	Input             string        // The command or prompt text
+	inputStyles       []terminal.Style
+	submitAnim        *commandSubmitAnimation
+	Output            bytes.Buffer // Full accumulated output from stdout/stderr or AI content
+	AnimLine          string       // Transient animated artifact/ticker line while Status == StatusActive
+	listFilesProgress *filelist.Progress
+	Status            CommandBlockStatus // Execution status
+	ExitCode          int                // Exit code (0 = success, non-zero = failure)
+	TypedAt           time.Time          // Timestamp when user typed first character of Input
+	StartedAt         time.Time          // Timestamp when block started / submitted
+	FirstOutputAt     time.Time          // Timestamp when first output character arrived
+	CompletedAt       time.Time          // Timestamp when block completed / last output character arrived
+	Duration          time.Duration      // Execution duration
+	liveOutput        *liveOutputState
+	renderError       string
 
 	// Cached visual rendering to avoid re-running FromANSI for unchanged blocks
 	cachedWidth    int

@@ -3,6 +3,7 @@ package shell
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"ai"
+	"github.com/mavity/rusticated/kabibi/tools/filelist"
 	"mvdan.cc/sh/v3/interp"
 )
 
@@ -426,7 +428,12 @@ func runAIBuiltinTool(
 	if diagnostic != "" {
 		fmt.Fprintf(stderr, "ai: %s\n", diagnostic)
 	}
-	result, err := executeAITool(ctx, execSess, name, args, embedder)
+	var result string
+	if isTTY && cmdTerm != nil && execSess != nil && normalizeAIToolName(name) == "list_files" {
+		result, err = executeInteractiveListFiles(ctx, execSess, args, embedder)
+	} else {
+		result, err = executeAITool(ctx, execSess, name, args, embedder)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "%v\n", err)
 		return interp.ExitStatus(1)
@@ -440,6 +447,43 @@ func runAIBuiltinTool(
 		}
 	}
 	return writeAIBuiltinOutput(stdout, stderr, "ai "+normalizeAIToolName(name), result)
+}
+
+func executeInteractiveListFiles(ctx context.Context, execSess *ExecutionSession, args []string, embedder ai.PartEmbedder) (string, error) {
+	tool := BuildKabibiTools(execSess)["list_files"]
+	rawArguments, err := parseAIToolArguments(tool, args)
+	if err != nil {
+		return "", fmt.Errorf("ai list_files: %w", err)
+	}
+	var input ListFilesInput
+	if err := json.Unmarshal(rawArguments, &input); err != nil {
+		return "", fmt.Errorf("ai list_files: decode arguments: %w", err)
+	}
+
+	iter := filelist.NewSearchIterator(ctx, execSess.Dir(), listFilesOptions(ctx, input, embedder))
+	defer iter.Close()
+	progressSink := execSess.listFilesProgressSink()
+	if progressSink != nil {
+		defer progressSink.SetListFilesProgress(nil)
+	}
+	var lastPublished time.Time
+	for range iter.Updates() {
+		if progressSink == nil {
+			continue
+		}
+		now := time.Now()
+		if !lastPublished.IsZero() && now.Sub(lastPublished) < 500*time.Millisecond {
+			continue
+		}
+		progress := iter.Current()
+		progressSink.SetListFilesProgress(&progress)
+		lastPublished = now
+	}
+	table, err := iter.Result()
+	if err != nil {
+		return "", fmt.Errorf("ai list_files: %w", err)
+	}
+	return formatAIToolResultMarkdown("list_files", table)
 }
 
 func writeAIBuiltinOutput(stdout, stderr io.Writer, label, output string) error {
