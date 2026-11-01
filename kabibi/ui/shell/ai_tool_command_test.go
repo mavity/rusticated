@@ -82,7 +82,7 @@ func TestExecuteAIToolAliasAndMarkdownResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("execute list-files: %v", err)
 	}
-	for _, want := range []string{"### list_files", "```text", "result.txt", "[match: L1"} {
+	for _, want := range []string{"### list_files", "```text", "result.txt", `"needle found"`} {
 		if !strings.Contains(result, want) {
 			t.Errorf("Markdown result missing %q:\n%s", want, result)
 		}
@@ -139,13 +139,13 @@ func TestExecuteAIToolListFilesUsesProvidedEmbedder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("execute semantic list_files: %v", err)
 	}
-	for _, want := range []string{"mode: semantic-content", "browser_worker.go", "[semantic: 1.00]"} {
+	for _, want := range []string{"mode: semantic-content", "1.00  browser_worker.go", `"func startWorker() { launchCanvasRuntime() }"`, "Search stats: processed 1/1 files"} {
 		if !strings.Contains(result, want) {
 			t.Errorf("semantic list_files result missing %q:\n%s", want, result)
 		}
 	}
-	if embedder.queryCalls != 1 || embedder.batchCalls != 1 {
-		t.Fatalf("embedder calls = (query %d, batch %d), want (1, 1)", embedder.queryCalls, embedder.batchCalls)
+	if embedder.queryCalls != 0 || embedder.batchCalls != 3 {
+		t.Fatalf("embedder calls = (query %d, batch %d), want (0, 3) for query, candidate, and quote chunk", embedder.queryCalls, embedder.batchCalls)
 	}
 }
 

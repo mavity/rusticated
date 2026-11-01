@@ -7,8 +7,11 @@ import (
 )
 
 type ProgressMatch struct {
-	Path  string
-	Score float64
+	Path     string
+	Size     int64
+	Score    float64
+	HasScore bool
+	Quote    string
 }
 
 type Progress struct {
@@ -34,11 +37,13 @@ type SearchIterator struct {
 }
 
 type progressTracker struct {
-	mu      sync.RWMutex
-	state   Progress
-	entries []fileEntry
-	started time.Time
-	iter    *SearchIterator
+	mu       sync.RWMutex
+	state    Progress
+	entries  []fileEntry
+	started  time.Time
+	queryVec []float32
+	quotes   *liveQuoteManager
+	iter     *SearchIterator
 }
 
 func NewSearchIterator(ctx context.Context, cwd string, opts Options) *SearchIterator {
@@ -115,7 +120,7 @@ func (p *progressTracker) update(phase, current string, viewed, total int) error
 	p.state.Viewed = viewed
 	p.state.Total = total
 	p.state.CurrentPath = current
-	if !p.started.IsZero() {
+	if phase == "candidate" && !p.started.IsZero() {
 		p.state.Elapsed = time.Since(p.started)
 		if viewed > 0 {
 			p.state.AvgPerFile = p.state.Elapsed / time.Duration(viewed)
@@ -125,10 +130,60 @@ func (p *progressTracker) update(phase, current string, viewed, total int) error
 	return p.iter.notify()
 }
 
+func (p *progressTracker) setQueryEmbedding(vector []float32) {
+	p.mu.Lock()
+	p.queryVec = append([]float32(nil), vector...)
+	quotes := p.quotes
+	entries := append([]fileEntry(nil), p.entries...)
+	p.mu.Unlock()
+	if quotes != nil {
+		quotes.setQuery(vector)
+		quotes.sync(entries)
+	}
+}
+
+func (p *progressTracker) queryEmbedding() []float32 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return append([]float32(nil), p.queryVec...)
+}
+
+func (p *progressTracker) updateQuote(path, quote string) error {
+	p.mu.Lock()
+	found := false
+	for index := range p.entries {
+		if p.entries[index].relPath == path {
+			p.entries[index].quote = quote
+			found = true
+			break
+		}
+	}
+	p.mu.Unlock()
+	if !found {
+		return nil
+	}
+	return p.iter.notify()
+}
+
 func (p *progressTracker) addMatch(entry fileEntry, limit int) {
 	p.mu.Lock()
 	p.entries = insertTopMatch(p.entries, entry, limit)
+	entries := append([]fileEntry(nil), p.entries...)
+	quotes := p.quotes
 	p.mu.Unlock()
+	if quotes != nil {
+		quotes.sync(entries)
+	}
+}
+
+func (p *progressTracker) setQuoteManager(quotes *liveQuoteManager) {
+	p.mu.Lock()
+	p.quotes = quotes
+	entries := append([]fileEntry(nil), p.entries...)
+	p.mu.Unlock()
+	if quotes != nil {
+		quotes.sync(entries)
+	}
 }
 
 func (p *progressTracker) matches() []fileEntry {
@@ -143,7 +198,13 @@ func (p *progressTracker) current() Progress {
 	state := p.state
 	state.Matches = make([]ProgressMatch, len(p.entries))
 	for i, entry := range p.entries {
-		state.Matches[i] = ProgressMatch{Path: entry.relPath, Score: entry.score}
+		state.Matches[i] = ProgressMatch{
+			Path:     entry.relPath,
+			Size:     entry.size,
+			Score:    entry.score,
+			HasScore: entry.hasScore,
+			Quote:    entry.quote,
+		}
 	}
 	return state
 }

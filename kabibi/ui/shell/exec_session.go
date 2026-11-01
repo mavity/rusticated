@@ -149,6 +149,8 @@ type AICommandUISink interface {
 
 type ListFilesProgressUISink interface {
 	SetListFilesProgress(progress *filelist.Progress)
+	ListFilesProgressMatchLimit() int
+	ListFilesOutputMatchLimit() int
 }
 
 func (es *ExecutionSession) listFilesProgressSink() ListFilesProgressUISink {

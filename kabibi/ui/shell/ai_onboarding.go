@@ -428,9 +428,13 @@ func runAIBuiltinTool(
 	if diagnostic != "" {
 		fmt.Fprintf(stderr, "ai: %s\n", diagnostic)
 	}
+	width := 0
+	if isTTY && cmdTerm != nil {
+		width, _ = cmdTerm.Size()
+	}
 	var result string
 	if isTTY && cmdTerm != nil && execSess != nil && normalizeAIToolName(name) == "list_files" {
-		result, err = executeInteractiveListFiles(ctx, execSess, args, embedder)
+		result, err = executeInteractiveListFiles(ctx, execSess, args, embedder, width)
 	} else {
 		result, err = executeAITool(ctx, execSess, name, args, embedder)
 	}
@@ -439,7 +443,6 @@ func runAIBuiltinTool(
 		return interp.ExitStatus(1)
 	}
 	if isTTY && cmdTerm != nil {
-		width, _ := cmdTerm.Size()
 		result, err = renderAssistantMarkdown(result, width)
 		if err != nil {
 			fmt.Fprintf(stderr, "ai %s: render Markdown: %v\n", normalizeAIToolName(name), err)
@@ -449,7 +452,7 @@ func runAIBuiltinTool(
 	return writeAIBuiltinOutput(stdout, stderr, "ai "+normalizeAIToolName(name), result)
 }
 
-func executeInteractiveListFiles(ctx context.Context, execSess *ExecutionSession, args []string, embedder ai.PartEmbedder) (string, error) {
+func executeInteractiveListFiles(ctx context.Context, execSess *ExecutionSession, args []string, embedder ai.PartEmbedder, width int) (string, error) {
 	tool := BuildKabibiTools(execSess)["list_files"]
 	rawArguments, err := parseAIToolArguments(tool, args)
 	if err != nil {
@@ -460,30 +463,96 @@ func executeInteractiveListFiles(ctx context.Context, execSess *ExecutionSession
 		return "", fmt.Errorf("ai list_files: decode arguments: %w", err)
 	}
 
-	iter := filelist.NewSearchIterator(ctx, execSess.Dir(), listFilesOptions(ctx, input, embedder))
-	defer iter.Close()
 	progressSink := execSess.listFilesProgressSink()
+	if progressSink != nil {
+		outputLimit := progressSink.ListFilesOutputMatchLimit()
+		if outputLimit == 0 {
+			return "", fmt.Errorf("terminal is too short to show list-files results while leaving three rows free")
+		}
+		if input.MaxResults <= 0 || input.MaxResults > outputLimit {
+			input.MaxResults = outputLimit
+		}
+	}
+	options := listFilesOptions(ctx, input, embedder)
+	options.MaxLineWidth = width
+	if progressSink != nil {
+		options.QuoteLimit = progressSink.ListFilesProgressMatchLimit()
+		if options.QuoteLimit == 0 {
+			options.QuoteLimit = -1
+		}
+		options.LiveQuotes = options.QuoteLimit > 0
+	}
+	iter := filelist.NewSearchIterator(ctx, execSess.Dir(), options)
+	defer iter.Close()
 	if progressSink != nil {
 		defer progressSink.SetListFilesProgress(nil)
 	}
-	var lastPublished time.Time
-	for range iter.Updates() {
-		if progressSink == nil {
-			continue
+	if progressSink != nil {
+		publishInteractiveListFilesProgress(iter, progressSink)
+	} else {
+		for range iter.Updates() {
 		}
-		now := time.Now()
-		if !lastPublished.IsZero() && now.Sub(lastPublished) < 500*time.Millisecond {
-			continue
-		}
-		progress := iter.Current()
-		progressSink.SetListFilesProgress(&progress)
-		lastPublished = now
 	}
 	table, err := iter.Result()
 	if err != nil {
 		return "", fmt.Errorf("ai list_files: %w", err)
 	}
 	return formatAIToolResultMarkdown("list_files", table)
+}
+
+func publishInteractiveListFilesProgress(iter *filelist.SearchIterator, sink ListFilesProgressUISink) {
+	const publishInterval = 500 * time.Millisecond
+	updates := iter.Updates()
+	var lastPublished time.Time
+	dirty := false
+	updatesClosed := false
+	var timer *time.Timer
+	var timerC <-chan time.Time
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+	publish := func(now time.Time) {
+		progress := iter.Current()
+		sink.SetListFilesProgress(&progress)
+		lastPublished = now
+		dirty = false
+	}
+	for !updatesClosed || dirty {
+		if updatesClosed && dirty && timerC == nil {
+			wait := time.Until(lastPublished.Add(publishInterval))
+			if lastPublished.IsZero() || wait <= 0 {
+				publish(time.Now())
+				continue
+			}
+			timer = time.NewTimer(wait)
+			timerC = timer.C
+		}
+		select {
+		case _, ok := <-updates:
+			if !ok {
+				updatesClosed = true
+				continue
+			}
+			dirty = true
+			now := time.Now()
+			if lastPublished.IsZero() || now.Sub(lastPublished) >= publishInterval {
+				publish(now)
+				continue
+			}
+			if timerC == nil {
+				timer = time.NewTimer(time.Until(lastPublished.Add(publishInterval)))
+				timerC = timer.C
+			}
+		case now := <-timerC:
+			timer = nil
+			timerC = nil
+			if dirty {
+				publish(now)
+			}
+		}
+	}
 }
 
 func writeAIBuiltinOutput(stdout, stderr io.Writer, label, output string) error {
