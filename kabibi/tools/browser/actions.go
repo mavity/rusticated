@@ -124,7 +124,10 @@ func (m *Manager) AXAction(ctx context.Context, nickname, search, rootSelector s
 	tab.mu.Unlock()
 
 	hdr := fmt.Sprintf("[browser_ax on tab %q | url: %s | title: %q]", tab.Nickname, snap.URL, snap.Title)
-	body := SearchAXSnapshot(snap, search, embedder)
+	body, err := SearchAXSnapshotContext(ctx, snap, search, embedder)
+	if err != nil {
+		return "", fmt.Errorf("search browser accessibility tree: %w", err)
+	}
 	return hdr + "\n" + body, nil
 }
 

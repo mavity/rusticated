@@ -1,11 +1,35 @@
 package fabric
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
+	"ai"
 	"github.com/mavity/rusticated/kabibi/tools/hashline"
 )
+
+type testSemanticEmbedder struct {
+	batchCalls int
+	batchErr   error
+}
+
+func (*testSemanticEmbedder) Embed([]ai.PromptPart) ([]float32, error) {
+	return []float32{1, 0}, nil
+}
+
+func (e *testSemanticEmbedder) EmbedBatchContext(_ context.Context, parts []ai.PromptPart) ([][]float32, error) {
+	e.batchCalls++
+	if e.batchErr != nil {
+		return nil, e.batchErr
+	}
+	vectors := make([][]float32, len(parts))
+	for i := range vectors {
+		vectors[i] = []float32{1, 0}
+	}
+	return vectors, nil
+}
 
 func TestSearchAndExpand_FabricExpansionAndEllipsis(t *testing.T) {
 	src := strings.Join([]string{
@@ -38,6 +62,7 @@ func TestSearchAndExpand_FabricExpansionAndEllipsis(t *testing.T) {
 	if len(res.MatchLines) != 2 {
 		t.Fatalf("expected 2 matches for activePTY, got %v", res.MatchLines)
 	}
+
 	if res.TierUsed != "plain" {
 		t.Fatalf("expected plain tier, got %q", res.TierUsed)
 	}
@@ -73,5 +98,26 @@ func TestSearchAndExpand_FuzzyEscalation(t *testing.T) {
 	}
 	if res.TierUsed != "fuzzy" {
 		t.Fatalf("expected fuzzy tier, got %q", res.TierUsed)
+	}
+}
+
+func TestSearchAndExpandContextBatchesAndReturnsEmbeddingErrors(t *testing.T) {
+	lines := []string{"first unrelated line", "another unrelated line"}
+	embedder := &testSemanticEmbedder{}
+	result := SearchAndExpandContext(context.Background(), "sample.go", 1, lines, "fresh semantic query", "semantic", embedder, 50)
+	if result.Err != nil {
+		t.Fatalf("semantic search error: %v", result.Err)
+	}
+	if result.TierUsed != "semantic" || len(result.MatchLines) == 0 {
+		t.Fatalf("semantic search result = %+v", result)
+	}
+	if embedder.batchCalls != 1 {
+		t.Fatalf("document batch calls = %d, want one", embedder.batchCalls)
+	}
+
+	embedFailure := errors.New("embedding service unavailable")
+	result = SearchAndExpandContext(context.Background(), "sample.go", 2, lines, "fresh semantic query", "semantic", &testSemanticEmbedder{batchErr: embedFailure}, 50)
+	if !errors.Is(result.Err, embedFailure) {
+		t.Fatalf("semantic search error = %v, want %v", result.Err, embedFailure)
 	}
 }

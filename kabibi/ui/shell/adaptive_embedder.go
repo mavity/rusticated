@@ -14,6 +14,7 @@ type adaptiveEmbedder struct {
 	runner         *LazyAIRunner
 	session        *ai.Session
 	resident       *ai.Embedder
+	cacheIdentity  string
 	openEmbedder   func() (*ai.Embedder, error)
 	reopenEngine   func() (*ai.Engine, error)
 	sequentialMode bool
@@ -34,6 +35,13 @@ func (e *adaptiveEmbedder) BindSession(session *ai.Session) {
 	e.mu.Lock()
 	e.session = session
 	e.mu.Unlock()
+}
+
+func (e *adaptiveEmbedder) CacheIdentity() string {
+	if e == nil {
+		return ""
+	}
+	return e.cacheIdentity
 }
 
 func (e *adaptiveEmbedder) Embed(parts []ai.PromptPart) ([]float32, error) {

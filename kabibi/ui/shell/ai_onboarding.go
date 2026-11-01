@@ -408,7 +408,18 @@ func runAIBuiltinTool(
 		return writeAIBuiltinOutput(stdout, stderr, "ai "+name+" --help", formatAIToolHelp(normalizeAIToolName(name), tools[normalizeAIToolName(name)]))
 	}
 
-	result, err := executeAITool(ctx, execSess, name, args)
+	embedder, closeEmbedder, diagnostic, err := resolveOneShotAIToolEmbedder(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "ai %s: %v\n", normalizeAIToolName(name), err)
+		return interp.ExitStatus(1)
+	}
+	if closeEmbedder != nil {
+		defer closeEmbedder()
+	}
+	if diagnostic != "" {
+		fmt.Fprintf(stderr, "ai: %s\n", diagnostic)
+	}
+	result, err := executeAITool(ctx, execSess, name, args, embedder)
 	if err != nil {
 		fmt.Fprintf(stderr, "%v\n", err)
 		return interp.ExitStatus(1)

@@ -5,6 +5,7 @@ package filelist
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io/fs"
 	"math"
@@ -23,6 +24,7 @@ const DefaultMaxResults = 50
 
 // Options configures a ListFiles query.
 type Options struct {
+	Context       context.Context
 	Query         string
 	SearchContent bool
 	MaxResults    int
@@ -96,13 +98,20 @@ func ListFiles(cwd string, opts Options) (string, error) {
 		return "", err
 	}
 
+	ctx := opts.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var matched []fileEntry
 	modeLabel := ""
 
 	if opts.SearchContent {
-		matched, modeLabel = filterByContent(allEntries, query, maxRes, opts.Embedder)
+		matched, modeLabel, err = filterByContent(ctx, allEntries, query, maxRes, opts.Embedder)
 	} else {
-		matched, modeLabel = filterByFilename(allEntries, query, maxRes, opts.Embedder)
+		matched, modeLabel, err = filterByFilename(ctx, allEntries, query, maxRes, opts.Embedder)
+	}
+	if err != nil {
+		return "", err
 	}
 
 	if len(matched) > maxRes {
@@ -262,9 +271,9 @@ func sortEntries(entries []fileEntry) {
 	})
 }
 
-func filterByFilename(entries []fileEntry, query string, maxRes int, embedder ai.PartEmbedder) ([]fileEntry, string) {
+func filterByFilename(ctx context.Context, entries []fileEntry, query string, maxRes int, embedder ai.PartEmbedder) ([]fileEntry, string, error) {
 	if query == "*" {
-		return entries, "glob '*'"
+		return entries, "glob '*'", nil
 	}
 
 	normQ := filepath.ToSlash(query)
@@ -282,7 +291,7 @@ func filterByFilename(entries []fileEntry, query string, maxRes int, embedder ai
 		}
 	}
 	if len(globMatches) > 0 && len(globMatches) <= maxRes*3 {
-		return globMatches, fmt.Sprintf("glob %q", query)
+		return globMatches, fmt.Sprintf("glob %q", query), nil
 	}
 
 	// 2. Fuzzy Filename Subsequence / Token Match
@@ -302,7 +311,7 @@ func filterByFilename(entries []fileEntry, query string, maxRes int, embedder ai
 	})
 
 	if len(fuzzyMatches) > 0 && (embedder == nil || (fuzzyMatches[0].score >= 0.70 && len(fuzzyMatches) <= maxRes*3)) {
-		return fuzzyMatches, fmt.Sprintf("fuzzy %q", query)
+		return fuzzyMatches, fmt.Sprintf("fuzzy %q", query), nil
 	}
 
 	// 3. Semantic Filename Embeddings via EmbeddingGemma 2
@@ -311,18 +320,22 @@ func filterByFilename(entries []fileEntry, query string, maxRes int, embedder ai
 		if len(globMatches) > maxRes*3 {
 			candidates = globMatches
 		}
-		if sem := rankPathsByEmbedding(candidates, query, embedder); len(sem) > 0 {
-			return sem, fmt.Sprintf("semantic %q", query)
+		sem, err := rankPathsByEmbedding(ctx, candidates, query, embedder)
+		if err != nil {
+			return nil, "", fmt.Errorf("semantic filename search: %w", err)
+		}
+		if len(sem) > 0 {
+			return sem, fmt.Sprintf("semantic %q", query), nil
 		}
 	}
 
 	if len(globMatches) > 0 {
-		return globMatches, fmt.Sprintf("glob %q", query)
+		return globMatches, fmt.Sprintf("glob %q", query), nil
 	}
-	return fuzzyMatches, fmt.Sprintf("fuzzy %q", query)
+	return fuzzyMatches, fmt.Sprintf("fuzzy %q", query), nil
 }
 
-func filterByContent(entries []fileEntry, query string, maxRes int, embedder ai.PartEmbedder) ([]fileEntry, string) {
+func filterByContent(ctx context.Context, entries []fileEntry, query string, maxRes int, embedder ai.PartEmbedder) ([]fileEntry, string, error) {
 	lowerQ := strings.ToLower(query)
 	re, reErr := regexp.Compile("(?i)" + query)
 
@@ -355,53 +368,72 @@ func filterByContent(entries []fileEntry, query string, maxRes int, embedder ai.
 	}
 
 	if len(matched) > 0 && (len(matched) <= maxRes || embedder == nil) {
-		return matched, fmt.Sprintf("content %q", query)
+		return matched, fmt.Sprintf("content %q", query), nil
 	}
 
 	if embedder != nil {
-		qVec, err := embedder.Embed([]ai.PromptPart{{Text: query}})
-		if err == nil && len(qVec) > 0 {
-			candidates := entries
-			if len(matched) > maxRes {
-				candidates = matched
+		qVec, err := ai.EmbedWithContext(ctx, embedder, []ai.PromptPart{{Role: ai.RoleUser, Text: query}})
+		if err != nil {
+			return nil, "", fmt.Errorf("embed content search query: %w", err)
+		}
+		if len(qVec) == 0 {
+			return nil, "", fmt.Errorf("embed content search query: empty vector")
+		}
+		candidates := entries
+		if len(matched) > maxRes {
+			candidates = matched
+		}
+		var semCandidates []fileEntry
+		var parts []ai.PromptPart
+		for _, e := range candidates {
+			if e.isDir || e.size > 256*1024 {
+				continue
 			}
-			var sem []fileEntry
-			for _, e := range candidates {
-				if e.isDir || e.size > 256*1024 {
-					continue
-				}
-				data, err := os.ReadFile(e.absPath)
-				if err != nil || isBinaryBlob(data) {
-					continue
-				}
-				sample := string(data)
-				if len(sample) > 1500 {
-					sample = sample[:1500]
-				}
-				vec, err := embedder.Embed([]ai.PromptPart{{Text: e.relPath + "\n" + sample}})
-				if err != nil || len(vec) == 0 {
-					continue
-				}
-				sim := cosineSim(qVec, vec)
-				if sim >= 0.50 {
-					cp := e
-					cp.score = sim
-					if cp.matchNote == "" {
-						cp.matchNote = fmt.Sprintf("[semantic: %.2f]", sim)
-					}
-					sem = append(sem, cp)
-				}
+			data, err := os.ReadFile(e.absPath)
+			if err != nil || isBinaryBlob(data) {
+				continue
 			}
-			sort.Slice(sem, func(i, j int) bool {
-				return sem[i].score > sem[j].score
-			})
-			if len(sem) > 0 {
-				return sem, fmt.Sprintf("semantic-content %q", query)
+			sample := string(data)
+			if len(sample) > 1500 {
+				sample = sample[:1500]
 			}
+			semCandidates = append(semCandidates, e)
+			parts = append(parts, ai.PromptPart{Role: ai.RoleModel, Text: e.relPath + "\n" + sample})
+		}
+		if len(parts) == 0 {
+			return matched, fmt.Sprintf("content %q", query), nil
+		}
+		vectors, err := ai.EmbedBatchWithContext(ctx, embedder, parts)
+		if err != nil {
+			return nil, "", fmt.Errorf("embed content search candidates: %w", err)
+		}
+		if len(vectors) != len(semCandidates) {
+			return nil, "", fmt.Errorf("embed content search candidates: got %d vectors for %d files", len(vectors), len(semCandidates))
+		}
+		var sem []fileEntry
+		for i, vec := range vectors {
+			if len(vec) == 0 {
+				return nil, "", fmt.Errorf("embed content search candidate %q: empty vector", semCandidates[i].relPath)
+			}
+			sim := cosineSim(qVec, vec)
+			if sim >= 0.50 {
+				cp := semCandidates[i]
+				cp.score = sim
+				if cp.matchNote == "" {
+					cp.matchNote = fmt.Sprintf("[semantic: %.2f]", sim)
+				}
+				sem = append(sem, cp)
+			}
+		}
+		sort.Slice(sem, func(i, j int) bool {
+			return sem[i].score > sem[j].score
+		})
+		if len(sem) > 0 {
+			return sem, fmt.Sprintf("semantic-content %q", query), nil
 		}
 	}
 
-	return matched, fmt.Sprintf("content %q", query)
+	return matched, fmt.Sprintf("content %q", query), nil
 }
 
 func isBinaryBlob(b []byte) bool {
@@ -412,16 +444,33 @@ func isBinaryBlob(b []byte) bool {
 	return bytes.IndexByte(check, 0) >= 0
 }
 
-func rankPathsByEmbedding(entries []fileEntry, query string, embedder ai.PartEmbedder) []fileEntry {
-	qVec, err := embedder.Embed([]ai.PromptPart{{Text: query}})
-	if err != nil || len(qVec) == 0 {
-		return nil
+func rankPathsByEmbedding(ctx context.Context, entries []fileEntry, query string, embedder ai.PartEmbedder) ([]fileEntry, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	qVec, err := ai.EmbedWithContext(ctx, embedder, []ai.PromptPart{{Role: ai.RoleUser, Text: query}})
+	if err != nil {
+		return nil, err
+	}
+	if len(qVec) == 0 {
+		return nil, fmt.Errorf("query embedder returned an empty vector")
+	}
+	parts := make([]ai.PromptPart, len(entries))
+	for i, entry := range entries {
+		parts[i] = ai.PromptPart{Role: ai.RoleModel, Text: entry.relPath}
+	}
+	vectors, err := ai.EmbedBatchWithContext(ctx, embedder, parts)
+	if err != nil {
+		return nil, err
+	}
+	if len(vectors) != len(entries) {
+		return nil, fmt.Errorf("path embedder returned %d vectors for %d paths", len(vectors), len(entries))
 	}
 	var scored []fileEntry
-	for _, e := range entries {
-		vec, err := embedder.Embed([]ai.PromptPart{{Text: e.relPath}})
-		if err != nil || len(vec) == 0 {
-			continue
+	for i, e := range entries {
+		vec := vectors[i]
+		if len(vec) == 0 {
+			return nil, fmt.Errorf("path embedder returned an empty vector for %q", e.relPath)
 		}
 		sim := cosineSim(qVec, vec)
 		if sim >= 0.50 {
@@ -433,7 +482,7 @@ func rankPathsByEmbedding(entries []fileEntry, query string, embedder ai.PartEmb
 	sort.Slice(scored, func(i, j int) bool {
 		return scored[i].score > scored[j].score
 	})
-	return scored
+	return scored, nil
 }
 
 func cosineSim(a, b []float32) float64 {

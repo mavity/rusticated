@@ -13,7 +13,6 @@ import (
 	"ai/assets"
 
 	"github.com/mavity/rusticated/kabibi/config"
-	"github.com/mavity/rusticated/kabibi/credstore"
 )
 
 const defaultKabibiSystemPrompt = `You are Kabibi, a clever plucky terminal shell that is exceptionally good at coding and problem-solving.
@@ -115,6 +114,18 @@ func (r *LazyAIRunner) emitFeedback(text string) {
 	}
 }
 
+func (r *LazyAIRunner) emitEmbeddingDiagnostic(text string) {
+	message := "[embeddings] " + text
+	r.cbMu.Lock()
+	fn := r.onFeedback
+	r.cbMu.Unlock()
+	if fn != nil {
+		fn(message)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[kabibi] %s\n", message)
+}
+
 func (r *LazyAIRunner) emitContent(text string) {
 	r.cbMu.Lock()
 	fn := r.onContent
@@ -150,6 +161,12 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 			return err
 		}
 	}
+	if cfg.Mode == "local" && cfg.LocalEmbeddingConsentVersion < localEmbeddingConsentVersion {
+		cfg, err = r.configureAI(ctx)
+		if err != nil {
+			return err
+		}
+	}
 	if !cfg.ConsentGiven {
 		return fmt.Errorf("AI setup has no recorded download consent; run onboarding again")
 	}
@@ -175,6 +192,7 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 	var libPath, modelPath string
 	var modelInfo *ai.ModelInfo
 	var chosenBackend string
+	var remoteConfig ai.RemoteEngineConfig
 	switch cfg.Mode {
 	case "local":
 		tier, ok := assets.LookupModelTier(cfg.TierID)
@@ -242,28 +260,10 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 		}
 	case "remote":
 		maxTokens = remoteContextTokenBudget(cfg.ContextTokens)
-		provider := ai.RemoteProvider(cfg.Provider)
-		store := credstore.NewStore()
-		credentialID := credentialStoreID(cfg)
-		cred, credErr := store.Read(ctx, credentialID)
-		if credErr != nil {
-			return fmt.Errorf("load %s AI credential: %w", cfg.Provider, credErr)
+		remoteConfig, err = remoteAIEngineConfig(ctx, cfg)
+		if err == nil {
+			engine, err = ai.NewRemoteEngine(remoteConfig)
 		}
-		if cred == nil && provider != ai.RemoteCustom {
-			return fmt.Errorf("load %s AI credential: no stored credential; run `ai login %s` or `ai setup`", cfg.Provider, cfg.Provider)
-		}
-		var credentials ai.CredentialStore
-		if provider != ai.RemoteCustom {
-			credentials = store
-		}
-		engine, err = ai.NewRemoteEngine(ai.RemoteEngineConfig{
-			Provider:    provider,
-			Protocol:    ai.RemoteAPIProtocol(cfg.Protocol),
-			Model:       cfg.Model,
-			Credential:  cred,
-			Credentials: credentials,
-			BaseURL:     cfg.BaseURL,
-		})
 	default:
 		return fmt.Errorf("unsupported AI mode %q; rerun AI setup", cfg.Mode)
 	}
@@ -276,11 +276,7 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 
 	var partEmb ai.PartEmbedder
 	var adaptiveEmb *adaptiveEmbedder
-	if cfg.Embedder {
-		if cfg.Mode != "local" || assets.HostOS() == "browser" {
-			engine.Close()
-			return fmt.Errorf("configured embedder is not supported for this AI mode")
-		}
+	if cfg.Mode == "local" {
 		embedPath, embedErr := assets.EnsureDefaultEmbeddingModel(ctx, opts)
 		if embedErr != nil {
 			engine.Close()
@@ -312,7 +308,14 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 			resident = nil
 		}
 		adaptiveEmb = newAdaptiveEmbedder(r, resident, openEmbedder, reopenEngine)
+		adaptiveEmb.cacheIdentity = "litert:" + embedPath
 		partEmb = adaptiveEmb
+	} else if cfg.Mode == "remote" {
+		var diagnostic string
+		partEmb, diagnostic = ai.ResolveRemoteEmbedder(ctx, remoteConfig)
+		if diagnostic != "" {
+			r.emitEmbeddingDiagnostic(diagnostic)
+		}
 	}
 
 	var cwd string

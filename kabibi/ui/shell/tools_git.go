@@ -50,9 +50,7 @@ func registerGitTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		var embedder ai.PartEmbedder
 		if tc != nil {
 			feedback = tc.Feedback
-			if tc.Session != nil {
-				embedder = tc.Session.Embedder()
-			}
+			embedder = tc.PartEmbedder()
 		}
 		if execSess == nil {
 			return nil, errors.New("Git inspection requires an active shell session")
@@ -97,7 +95,13 @@ func registerGitTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 				}
 				cacheKey := repo.Root() + "/.git/log"
 				contentVersion := int64(hashline.XXHash64String(strings.Join(lines, "\n")))
-				search := fabric.SearchAndExpand(cacheKey, contentVersion, lines, in.Search, "auto", embedder, fabric.DefaultTotalBudget)
+				search := fabric.SearchAndExpandContext(ctx, cacheKey, contentVersion, lines, in.Search, "auto", embedder, fabric.DefaultTotalBudget)
+				if search.Err != nil {
+					if feedback != nil {
+						feedback("failed")
+					}
+					return nil, fmt.Errorf("search git log: %w", search.Err)
+				}
 				matched := make(map[int]bool, len(search.MatchLines))
 				for _, line := range search.MatchLines {
 					matched[line-1] = true

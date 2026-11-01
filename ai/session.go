@@ -54,6 +54,56 @@ type PartEmbedder interface {
 	Embed(parts []PromptPart) ([]float32, error)
 }
 
+type ContextualPartEmbedder interface {
+	EmbedContext(ctx context.Context, parts []PromptPart) ([]float32, error)
+}
+
+type BatchPartEmbedder interface {
+	EmbedBatchContext(ctx context.Context, parts []PromptPart) ([][]float32, error)
+}
+
+// PartEmbedderCacheIdentity identifies a model for caches that outlive one query.
+type PartEmbedderCacheIdentity interface {
+	CacheIdentity() string
+}
+
+func EmbedWithContext(ctx context.Context, embedder PartEmbedder, parts []PromptPart) ([]float32, error) {
+	if embedder == nil {
+		return nil, fmt.Errorf("ai: no embedder configured")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if contextual, ok := embedder.(ContextualPartEmbedder); ok {
+		return contextual.EmbedContext(ctx, parts)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return embedder.Embed(parts)
+}
+
+func EmbedBatchWithContext(ctx context.Context, embedder PartEmbedder, parts []PromptPart) ([][]float32, error) {
+	if embedder == nil {
+		return nil, fmt.Errorf("ai: no embedder configured")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if batch, ok := embedder.(BatchPartEmbedder); ok {
+		return batch.EmbedBatchContext(ctx, parts)
+	}
+	vectors := make([][]float32, len(parts))
+	for i, part := range parts {
+		vector, err := EmbedWithContext(ctx, embedder, []PromptPart{part})
+		if err != nil {
+			return nil, fmt.Errorf("ai: embed batch item %d: %w", i, err)
+		}
+		vectors[i] = vector
+	}
+	return vectors, nil
+}
+
 // LogFeedback receives streamed text fragments.
 type LogFeedback func(text string)
 
@@ -62,9 +112,23 @@ type LogFeedback func(text string)
 // and active Conversation in place.
 type ToolContext struct {
 	Session        *Session
+	Embedder       PartEmbedder
 	Feedback       LogFeedback
 	baseHistory    *[]PromptPart
 	sessionSwapped bool
+}
+
+func (tc *ToolContext) PartEmbedder() PartEmbedder {
+	if tc == nil {
+		return nil
+	}
+	if tc.Embedder != nil {
+		return tc.Embedder
+	}
+	if tc.Session != nil {
+		return tc.Session.Embedder()
+	}
+	return nil
 }
 
 // ReplaceSession adopts next and makes its updated history available to the

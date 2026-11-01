@@ -216,6 +216,17 @@ func (e *embedderImpl) Embed(parts []PromptPart) ([]float32, error) {
 // FormatPartForEmbedding formats a single PromptPart into its canonical text
 // representation with the EmbeddingGemma 2 asymmetric task prefix.
 func FormatPartForEmbedding(p PromptPart) string {
+	text := formatEmbeddingPartContent(p)
+	if text == "" {
+		return ""
+	}
+	if strings.HasPrefix(text, "task: ") {
+		return text
+	}
+	return "task: search result | text: " + text
+}
+
+func formatEmbeddingPartContent(p PromptPart) string {
 	var body strings.Builder
 	switch p.Role {
 	case RoleTool:
@@ -258,14 +269,7 @@ func FormatPartForEmbedding(p PromptPart) string {
 	default:
 		body.WriteString(p.Text)
 	}
-	text := strings.TrimSpace(body.String())
-	if text == "" {
-		return ""
-	}
-	if strings.HasPrefix(text, "task: ") {
-		return text
-	}
-	return "task: search result | text: " + text
+	return strings.TrimSpace(body.String())
 }
 
 func buildEmbedInputs(parts []PromptPart) []embedInput {
