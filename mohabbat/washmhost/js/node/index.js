@@ -342,8 +342,10 @@ class HostState {
 
     // Pending-op tracking (mirrors outstandingOps / activeOps)
     this.activeOps    = new Map();   // ovPtr(number) -> opId(number)
+    this.opCancelers  = new Map();   // ovPtr(number) -> { opId, cancel }
     this.nextOpId     = 1;
     this.pendingCount = 0;
+    this._timers      = new Map();   // ovPtr(number) -> { opId, timer }
 
     // Signal waiters: signum(number) -> {ovPtr, opId}
     this.signalWaiters = new Map();
@@ -450,25 +452,53 @@ class HostState {
     if (!this.isOpActive(ovPtr, opId)) return false;
     this.activeOps.delete(ovPtr);
     this.pendingCount--;
+    const canceler = this.opCancelers.get(ovPtr);
+    if (canceler && canceler.opId === opId) this.opCancelers.delete(ovPtr);
+    const timer = this._timers.get(ovPtr);
+    if (timer && timer.opId === opId) this._timers.delete(ovPtr);
     writeOverlapped(this.view, ovPtr, errorCode, continued, resultExt);
     return true;
+  }
+
+  setOpCanceler(ovPtr, opId, cancel) {
+    if (this.isOpActive(ovPtr, opId)) {
+      this.opCancelers.set(ovPtr, { opId, cancel });
+    }
   }
 
   completeOpExtended(ovPtr, opId, errorCode, continued, resultExt, childHandle, ptyHandle) {
     if (!this.isOpActive(ovPtr, opId)) return false;
     this.activeOps.delete(ovPtr);
     this.pendingCount--;
+    const canceler = this.opCancelers.get(ovPtr);
+    if (canceler && canceler.opId === opId) this.opCancelers.delete(ovPtr);
+    const timer = this._timers.get(ovPtr);
+    if (timer && timer.opId === opId) this._timers.delete(ovPtr);
     writeOverlappedExtended(this.view, ovPtr, errorCode, continued, resultExt, childHandle, ptyHandle);
     return true;
   }
 
-  cancelOp(ovPtr) {
-    if (!this.activeOps.has(ovPtr)) return;
+  cancelOp(ovPtr, writeCancellation = true) {
+    const opId = this.activeOps.get(ovPtr);
+    if (opId === undefined) return;
     this.activeOps.delete(ovPtr);
     this.pendingCount--;
+    const canceler = this.opCancelers.get(ovPtr);
+    if (canceler && canceler.opId === opId) {
+      this.opCancelers.delete(ovPtr);
+      canceler.cancel();
+    }
+    const timer = this._timers.get(ovPtr);
+    if (timer && timer.opId === opId) {
+      clearTimeout(timer.timer);
+      this._timers.delete(ovPtr);
+    }
     // Also remove from signal waiters
     for (const [signum, w] of this.signalWaiters) {
-      if (w.ovPtr === ovPtr) { this.signalWaiters.delete(signum); break; }
+      if (w.ovPtr === ovPtr && w.opId === opId) { this.signalWaiters.delete(signum); break; }
+    }
+    if (writeCancellation && this.memory) {
+      writeOverlapped(this.view, ovPtr, wasiECANCELED, 0, 0);
     }
   }
 
@@ -617,21 +647,16 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
 
   // ── timer_set ────────────────────────────────────────────────────────────────
   function timer_set(ovPtr, delayMs) {
+    hs.cancelOp(ovPtr, false);
     const opId = hs.registerOp(ovPtr);
     const id = setTimeout(() => {
       hs.enqueue(() => hs.completeOp(ovPtr, opId, 0, 0, 0));
     }, Number(delayMs));
-    // store timer id on hs for cancel
-    hs._timers = hs._timers || new Map();
-    hs._timers.set(ovPtr, id);
+    hs._timers.set(ovPtr, { opId, timer: id });
   }
 
   // ── cancel ───────────────────────────────────────────────────────────────────
   function cancel(ovPtr) {
-    if (hs._timers && hs._timers.has(ovPtr)) {
-      clearTimeout(hs._timers.get(ovPtr));
-      hs._timers.delete(ovPtr);
-    }
     hs.cancelOp(ovPtr);
   }
 
@@ -703,6 +728,7 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
         stream.removeListener('end', onEnd);
         stream.removeListener('error', onError);
       };
+      hs.setOpCanceler(ovPtrNum, opId, cleanup);
       stream.once('data', onData);
       stream.once('end', onEnd);
       stream.once('error', onError);
@@ -730,6 +756,7 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
     if (h.type === 'socket' || h.type === 'pipe_r' || h.type === 'pty') {
       const bPtrNum = Number(bufferPtr);
       const bLenNum = Number(bufferLen);
+      let cleanupWait = () => {};
 
       const waitForPipeData = () => {
         const stream = h.stream;
@@ -738,6 +765,7 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
           stream.removeListener('end', onEnd);
           stream.removeListener('error', onError);
           stream.removeListener('close', onClose);
+          if (cleanupWait === cleanup) cleanupWait = () => {};
         };
         const onData = (chunk) => {
           cleanup();
@@ -760,6 +788,7 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
           h.closed = true;
           deliver();
         };
+        cleanupWait = cleanup;
         stream.once('data', onData);
         stream.once('end', onEnd);
         stream.once('error', onError);
@@ -807,6 +836,10 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
         if (h.type === 'pipe_r' || h.type === 'pty') waitForPipeData();
       };
 
+      hs.setOpCanceler(ovPtr, opId, () => {
+        if (h.onData === deliver) h.onData = null;
+        cleanupWait();
+      });
       deliver();
       return;
     }
@@ -1300,40 +1333,73 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
 
     if (isConnect) {
       const socket = net.createConnection({ host: addr, port: iPort });
-      const hItem = { type: 'socket', socket, leftovers: null, onData: null, closed: false, error: null };
-      const h = hs.allocHandle(hItem);
-
-      socket.on('data', (chunk) => {
+      let hItem = null;
+      const onData = (chunk) => {
         if (!hItem.leftovers) hItem.leftovers = chunk;
         else hItem.leftovers = Buffer.concat([hItem.leftovers, chunk]);
         if (hItem.onData) hItem.onData();
-      });
-      socket.on('end', () => {
+      };
+      const onEnd = () => {
         hItem.closed = true;
         if (hItem.onData) hItem.onData();
-      });
-      socket.on('error', (err) => {
-        hItem.error = err;
-        if (hItem.onData) hItem.onData();
-      });
-
-      socket.once('connect', () => {
-        hs.enqueue(() => hs.completeOp(ovPtr, opId, 0, 0, h));
-      });
-      socket.once('error', (e) => {
+      };
+      const onError = (e) => {
+        if (hItem) {
+          hItem.error = e;
+          if (hItem.onData) hItem.onData();
+          return;
+        }
+        socket.removeListener('connect', onConnect);
         hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(e), 0, 0n));
+      };
+      const onConnect = () => {
+        hItem = { type: 'socket', socket, leftovers: null, onData: null, closed: false, error: null };
+        socket.on('data', onData);
+        socket.on('end', onEnd);
+        hs.enqueue(() => {
+          if (!hs.isOpActive(ovPtr, opId)) {
+            socket.destroy();
+            return;
+          }
+          const h = hs.allocHandle(hItem);
+          hs.completeOp(ovPtr, opId, 0, 0, h);
+        });
+      };
+      hs.setOpCanceler(ovPtr, opId, () => {
+        socket.removeListener('connect', onConnect);
+        if (hItem) {
+          socket.removeListener('data', onData);
+          socket.removeListener('end', onEnd);
+        }
+        socket.destroy();
       });
+      socket.once('connect', onConnect);
+      socket.on('error', onError);
     } else {
       const server = net.createServer();
-      server.once('error', (e) => {
-        hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(e), 0, 0));
-      });
-      server.listen(iPort, addr, () => {
-        const h = hs.allocHandle({ type: 'server', server });
+      const onListening = () => {
         const address = server.address();
         const boundPort = (address && typeof address === 'object' && address.port) ? address.port : iPort;
-        hs.enqueue(() => hs.completeOp(ovPtr, opId, 0, boundPort, h));
+        hs.enqueue(() => {
+          if (!hs.isOpActive(ovPtr, opId)) {
+            server.close();
+            return;
+          }
+          const h = hs.allocHandle({ type: 'server', server });
+          hs.completeOp(ovPtr, opId, 0, boundPort, h);
+        });
+      };
+      const onError = (e) => {
+        server.removeListener('listening', onListening);
+        hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(e), 0, 0));
+      };
+      hs.setOpCanceler(ovPtr, opId, () => {
+        server.removeListener('listening', onListening);
+        server.close();
       });
+      server.once('error', onError);
+      server.once('listening', onListening);
+      server.listen(iPort, addr);
     }
   }
 
@@ -1343,7 +1409,16 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
     const h = hs.getHandle(listenHandle);
     if (!h || h.type !== 'server') { writeOverlapped(hs.view, ovPtr, wasiEINVAL, 0, 0); return; }
     const opId = hs.registerOp(ovPtr);
-    h.server.once('connection', (socket) => {
+    const cleanup = () => {
+      h.server.removeListener('connection', onConnection);
+      h.server.removeListener('error', onError);
+    };
+    const onConnection = (socket) => {
+      cleanup();
+      if (!hs.isOpActive(ovPtr, opId)) {
+        socket.destroy();
+        return;
+      }
       const shItem = { type: 'socket', socket, leftovers: null, onData: null, closed: false, error: null };
       socket.on('data', (chunk) => {
         if (!shItem.leftovers) shItem.leftovers = chunk;
@@ -1360,10 +1435,14 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
       });
       const sh = hs.allocHandle(shItem);
       hs.enqueue(() => hs.completeOp(ovPtr, opId, 0, 0, sh));
-    });
-    h.server.once('error', (e) => {
+    };
+    const onError = (e) => {
+      cleanup();
       hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(e), 0, 0));
-    });
+    };
+    hs.setOpCanceler(ovPtr, opId, cleanup);
+    h.server.once('connection', onConnection);
+    h.server.once('error', onError);
   }
 
   // ── net_lookup ───────────────────────────────────────────────────────────────
@@ -1792,6 +1871,7 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
     }
     const opId = hs.registerOp(ovPtr);
     if (h.type === 'pty_child') {
+      let pollTimer = null;
       const pollChild = () => {
         if (!hs.isOpActive(ovPtr, opId)) return;
         let status;
@@ -1807,7 +1887,7 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
           return;
         }
         if (status === 0n) {
-          setTimeout(pollChild, 10);
+          pollTimer = setTimeout(pollChild, 10);
           return;
         }
           if ((status >> 63n) !== 0n) {
@@ -1824,14 +1904,19 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
           ovPtr, opId, 0, 0, (exitCode << 32n) | exitCode,
         ));
       };
+      hs.setOpCanceler(ovPtr, opId, () => {
+        if (pollTimer !== null) clearTimeout(pollTimer);
+      });
       pollChild();
       return;
     }
-    h.cp.once('exit', (code, signal) => {
+    const onExit = (code, signal) => {
       const exitCode = code != null ? code : (signal ? 1 : 0);
       const ec = BigInt(exitCode >>> 0);
       hs.enqueue(() => hs.completeOp(ovPtr, opId, 0, 0, (ec << 32n) | ec));
-    });
+    };
+    hs.setOpCanceler(ovPtr, opId, () => h.cp.removeListener('exit', onExit));
+    h.cp.once('exit', onExit);
   }
 
   // ── process_signal ───────────────────────────────────────────────────────────
@@ -1857,7 +1942,7 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
     // Cancel any existing waiter for this signal
     const existing = hs.signalWaiters.get(sn);
     if (existing) {
-      hs.cancelOp(existing.ovPtr);
+      hs.cancelOp(existing.ovPtr, false);
       hs.signalWaiters.delete(sn);
     }
     const opId = hs.registerOp(ovPtr);

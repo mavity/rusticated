@@ -110,7 +110,7 @@ func TestSysTimerSetExtended(t *testing.T) {
 		assertNoTimer(t, ovPtr)
 	})
 
-	t.Run("4. cancelled timer does not write back", func(t *testing.T) {
+	t.Run("4. cancelled timer completes immediately with wasiECANCELED", func(t *testing.T) {
 		ovPtr := uint32(0x400)
 		setTimer(t, ovPtr, time.Hour)
 		env.sys_cancel(context.Background(), mod, []uint64{uint64(ovPtr)})
@@ -122,8 +122,11 @@ func TestSysTimerSetExtended(t *testing.T) {
 		if !ok {
 			t.Fatal("failed to read cancelled timer request")
 		}
-		if binary.LittleEndian.Uint32(val[:4]) != 0 {
-			t.Error("cancelled timer should not have written to memory")
+		if binary.LittleEndian.Uint32(val[:4]) != 1 {
+			t.Errorf("cancelled timer flags = %d, want 1", binary.LittleEndian.Uint32(val[:4]))
+		}
+		if binary.LittleEndian.Uint32(val[4:8]) != wasiECANCELED {
+			t.Errorf("cancelled timer errno = %d, want %d", binary.LittleEndian.Uint32(val[4:8]), wasiECANCELED)
 		}
 		assertNoTimer(t, ovPtr)
 	})

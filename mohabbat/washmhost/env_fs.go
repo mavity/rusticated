@@ -267,16 +267,15 @@ func (h *HostEnv) sys_read(ctx context.Context, m api.Module, stack []uint64) {
 		payload := tmp[:n]
 		h.fileOpsQueue <- func() {
 			defer h.DecOpsFor(state)
+			if c, ok := fAny.(interface{ SetDeadline(time.Time) error }); ok {
+				_ = c.SetDeadline(time.Time{})
+			}
 			if !h.IsOpActive(ovPtr, state.opID) {
 				return
 			}
 			h.mu.Lock()
 			delete(h.activeOps, ovPtr)
 			h.mu.Unlock()
-
-			if c, ok := fAny.(interface{ SetDeadline(time.Time) error }); ok {
-				_ = c.SetDeadline(time.Time{})
-			}
 
 			if retCode == 0 {
 				if ok := mem.Write(ptr, payload); !ok {
@@ -321,6 +320,9 @@ func (h *HostEnv) sys_seek(ctx context.Context, m api.Module, stack []uint64) {
 		}
 		h.fileOpsQueue <- func() {
 			defer h.DecOpsFor(state)
+			if c, ok := fAny.(interface{ SetDeadline(time.Time) error }); ok {
+				_ = c.SetDeadline(time.Time{})
+			}
 			if !h.IsOpActive(ovPtr, state.opID) {
 				return
 			}
@@ -430,10 +432,6 @@ func (h *HostEnv) sys_write(ctx context.Context, m api.Module, stack []uint64) {
 			h.mu.Lock()
 			delete(h.activeOps, ovPtr)
 			h.mu.Unlock()
-
-			if c, ok := fAny.(interface{ SetDeadline(time.Time) error }); ok {
-				_ = c.SetDeadline(time.Time{})
-			}
 
 			writeOverlapped(m, ovPtr, retCode, 0, uint64(n))
 		}

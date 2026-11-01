@@ -44,6 +44,8 @@ type overlappedContext struct {
 	o  overlapped
 }
 
+const rusticatedECANCELED uint32 = 11
+
 var pendingov [1024]*overlappedContext
 
 //go:linkname awaitOverlapped_syscall syscall.awaitOverlapped
@@ -71,10 +73,27 @@ func awaitOverlapped_syscall(ctx *overlappedContext) {
 	gopark(parkunlock_rusticated, nil, waitReasonIOWait, traceBlockGeneric, 1)
 }
 
-// go:linkname cancelOverlapped_syscall syscall.cancelOverlapped
+//go:linkname cancelOverlapped_syscall syscall.cancelOverlapped
 func cancelOverlapped_syscall(ctx *overlappedContext) {
-	// Remove from pending list
+	if ctx.o.flags&1 != 0 {
+		return
+	}
 	rusticated_cancel(unsafe.Pointer(&ctx.o))
+	ctx.o.flags = 1
+	ctx.o.hostError = rusticatedECANCELED
+
+	for i := range pendingov {
+		if pendingov[i] != ctx {
+			continue
+		}
+		pendingov[i] = nil
+		gp := ctx.gp
+		ctx.gp = 0
+		if gp != 0 {
+			goready((*g)(unsafe.Pointer(gp)), 0)
+		}
+		return
+	}
 }
 
 func parkunlock_rusticated(gp *g, _ unsafe.Pointer) bool {
@@ -200,7 +219,9 @@ func handleContinuation() {
 		if pendingov[i] != nil && (pendingov[i].o.flags&1) != 0 {
 			ctx := pendingov[i]
 			pendingov[i] = nil
-			goready((*g)(unsafe.Pointer(ctx.gp)), 0)
+			gp := ctx.gp
+			ctx.gp = 0
+			goready((*g)(unsafe.Pointer(gp)), 0)
 		}
 	}
 
@@ -218,14 +239,6 @@ func handleAsyncEvent() {
 }
 
 func setNetpollTimer(delayMs uint32) {
-	if netpollTimerActive {
-		if netpollTimerOv.flags&1 == 0 {
-			netpollTimerOv.flags = 0
-		} else {
-			rusticated_cancel(unsafe.Pointer(&netpollTimerOv))
-		}
-	}
-
 	netpollTimerOv.flags = 0
 	rusticated_timer_set(unsafe.Pointer(&netpollTimerOv), delayMs)
 	netpollTimerActive = true
@@ -269,13 +282,7 @@ func rusticated_sigdisable(s uint32) {
 	}
 	sigMonitorRunning[s] = false
 	ctx := &sigMonitorCtx[s]
-	rusticated_cancel(unsafe.Pointer(&ctx.o))
-	// Complete the overlapped ourselves: the host has dropped the waiter and
-	// will not write it again, so the parked monitor must be released here.
-	// resultExt is cleared so a racing re-enable that observes the wake treats
-	// it as signal 0 (SIGNONE), which sigsend ignores.
-	ctx.o.resultExt = 0
-	ctx.o.flags = 1
+	cancelOverlapped_syscall(ctx)
 }
 
 // rusticated_sigignore is the backend for runtime.sigignore. With no default
@@ -288,6 +295,9 @@ func sigMonitor(s uint32) {
 	ctx := &sigMonitorCtx[s]
 	for {
 		ctx.o.flags = 0
+		ctx.o.hostError = 0
+		ctx.o.continued = 0
+		ctx.o.resultExt = 0
 		rusticated_signal_wait(unsafe.Pointer(&ctx.o), s)
 		awaitOverlapped_syscall(ctx)
 		if !sigMonitorRunning[s] {

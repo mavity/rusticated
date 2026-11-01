@@ -67,6 +67,9 @@ func (h *HostEnv) sys_timer_set(ctx context.Context, m api.Module, stack []uint6
 
 func (h *HostEnv) sys_cancel(ctx context.Context, m api.Module, stack []uint64) {
 	ovPtr := uint32(stack[0])
+	if h.mod == nil {
+		h.mod = m
+	}
 	h.CancelOp(ovPtr)
 }
 

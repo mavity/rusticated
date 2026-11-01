@@ -424,8 +424,10 @@ class HostState {
     this.handles.set(2n, { type: 'stderr', fd: 2 });
 
     this.activeOps = new Map(); // ovPtr -> opId
+    this.opCancelers = new Map(); // ovPtr -> { opId, cancel }
     this.nextOpId = 1;
     this.pendingCount = 0;
+    this.timers = new Map(); // ovPtr -> { opId, timer }
 
     this.signalWaiters = new Map(); // signum -> { ovPtr, opId }
     this.completionQueue = [];
@@ -493,19 +495,48 @@ class HostState {
     if (!this.isOpActive(ovPtr, opId)) return false;
     this.activeOps.delete(ovPtr);
     this.pendingCount--;
+    const canceler = this.opCancelers.get(ovPtr);
+    if (canceler && canceler.opId === opId) this.opCancelers.delete(ovPtr);
+    const timer = this.timers.get(ovPtr);
+    if (timer && timer.opId === opId) this.timers.delete(ovPtr);
     writeOverlapped(this.view, ovPtr, errorCode, continued, resultExt);
     return true;
   }
 
-  cancelOp(ovPtr) {
-    if (!this.activeOps.has(ovPtr)) return;
+  setOpCanceler(ovPtr, opId, cancel) {
+    if (this.isOpActive(ovPtr, opId)) {
+      this.opCancelers.set(ovPtr, { opId, cancel });
+    }
+  }
+
+  cancelOp(ovPtr, writeCancellation = true) {
+    const opId = this.activeOps.get(ovPtr);
+    if (opId === undefined) return;
     this.activeOps.delete(ovPtr);
     this.pendingCount--;
+    const canceler = this.opCancelers.get(ovPtr);
+    if (canceler && canceler.opId === opId) {
+      this.opCancelers.delete(ovPtr);
+      canceler.cancel();
+    }
+    const timer = this.timers.get(ovPtr);
+    if (timer && timer.opId === opId) {
+      clearTimeout(timer.timer);
+      this.timers.delete(ovPtr);
+    }
     for (const [signum, w] of this.signalWaiters) {
-      if (w.ovPtr === ovPtr) { this.signalWaiters.delete(signum); break; }
+      if (w.ovPtr === ovPtr && w.opId === opId) { this.signalWaiters.delete(signum); break; }
     }
     // Also remove from pending stdin reads if present
-    this.pendingStdinReads = this.pendingStdinReads.filter(r => r.ovPtr !== ovPtr);
+    this.pendingStdinReads = this.pendingStdinReads.filter(r => r.ovPtr !== ovPtr || r.opId !== opId);
+    for (const handle of this.handles.values()) {
+      if (handle.type === 'pipe_r') {
+        handle.pipe.readers = handle.pipe.readers.filter(r => r.ovPtr !== ovPtr || r.opId !== opId);
+      }
+    }
+    if (writeCancellation && this.memory) {
+      writeOverlapped(this.view, ovPtr, wasiECANCELED, 0, 0);
+    }
   }
 
   hasPending() {
@@ -717,20 +748,19 @@ function makeBrowserImports(hostState, fs, params = {}) {
     },
 
     timer_set: (ovPtr, delayMs) => {
-      const opId = hostState.registerOp(Number(ovPtr));
-      setTimeout(() => {
+      const ptr = Number(ovPtr);
+      hostState.cancelOp(ptr, false);
+      const opId = hostState.registerOp(ptr);
+      const timer = setTimeout(() => {
         hostState.enqueue(() => {
-          hostState.completeOp(Number(ovPtr), opId, 0, 0, 0);
+          hostState.completeOp(ptr, opId, 0, 0, 0);
         });
       }, Math.max(0, Number(delayMs)));
+      hostState.timers.set(ptr, { opId, timer });
     },
 
     cancel: (ovPtr) => {
-      const p = Number(ovPtr);
-      if (hostState.activeOps.has(p)) {
-        const opId = hostState.activeOps.get(p);
-        hostState.completeOp(p, opId, wasiECANCELED, 0, 0);
-      }
+      hostState.cancelOp(Number(ovPtr));
     },
 
     process_exit: (code) => {
@@ -1756,8 +1786,18 @@ function makeBrowserImports(hostState, fs, params = {}) {
           hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiECONNREFUSED, 0, 0));
           return;
         }
-        const handle = hostState.allocHandle({ type: 'proxy', proxy });
-        hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, 0, 0, Number(handle)));
+        hostState.enqueue(() => {
+          if (!hostState.isOpActive(Number(ovPtr), opId)) {
+            if (typeof proxy.close === 'function') {
+              Promise.resolve().then(() => proxy.close()).catch((error) => {
+                console.error('failed to close cancelled network connection:', error);
+              });
+            }
+            return;
+          }
+          const handle = hostState.allocHandle({ type: 'proxy', proxy });
+          hostState.completeOp(Number(ovPtr), opId, 0, 0, Number(handle));
+        });
       } catch (err) {
         hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, mapErrno(err), 0, 0));
       }
@@ -1771,6 +1811,14 @@ function makeBrowserImports(hostState, fs, params = {}) {
         return;
       }
       Promise.resolve().then(() => extensions.net.accept(BigInt(handle))).then((proxy) => {
+        if (!hostState.isOpActive(ptr, opId)) {
+          if (proxy && typeof proxy.close === 'function') {
+            Promise.resolve().then(() => proxy.close()).catch((error) => {
+              console.error('failed to close cancelled accepted connection:', error);
+            });
+          }
+          return;
+        }
         if (!proxy) {
           hostState.enqueue(() => hostState.completeOp(ptr, opId, wasiECONNABORTED, 0, 0));
           return;

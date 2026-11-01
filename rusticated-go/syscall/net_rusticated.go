@@ -36,6 +36,39 @@ var netSocketBind = map[int32]struct {
 	port uint16
 }{}
 
+var fdOverlapped = map[int]map[*overlappedContext]struct{}{}
+
+func trackFDOverlapped(fd int, ctx *overlappedContext) {
+	active := fdOverlapped[fd]
+	if active == nil {
+		active = make(map[*overlappedContext]struct{})
+		fdOverlapped[fd] = active
+	}
+	active[ctx] = struct{}{}
+}
+
+func untrackFDOverlapped(fd int, ctx *overlappedContext) {
+	active := fdOverlapped[fd]
+	delete(active, ctx)
+	if len(active) == 0 {
+		delete(fdOverlapped, fd)
+	}
+}
+
+func awaitFDOverlapped(fd int, ctx *overlappedContext) {
+	trackFDOverlapped(fd, ctx)
+	awaitOverlapped(ctx)
+	untrackFDOverlapped(fd, ctx)
+}
+
+// CancelFD stops pending host I/O associated with fd without closing fd.
+// netFD.Close calls this before poll.FD.Close drains its references.
+func CancelFD(fd int) {
+	for ctx := range fdOverlapped[fd] {
+		cancelOverlapped(ctx)
+	}
+}
+
 // ── Helper: extract host:port from a Sockaddr ─────────────────────────────
 
 func netSockAddrToHostPort(sa Sockaddr) (addr string, port uint16, err error) {
@@ -89,10 +122,14 @@ func netFmtIPv6(addr [16]byte) string {
 		}
 		h := (int(addr[i]) << 8) | int(addr[i+1])
 		const hex = "0123456789abcdef"
-		buf[j] = hex[(h>>12)&0xf]; j++
-		buf[j] = hex[(h>>8)&0xf]; j++
-		buf[j] = hex[(h>>4)&0xf]; j++
-		buf[j] = hex[h&0xf]; j++
+		buf[j] = hex[(h>>12)&0xf]
+		j++
+		buf[j] = hex[(h>>8)&0xf]
+		j++
+		buf[j] = hex[(h>>4)&0xf]
+		j++
+		buf[j] = hex[h&0xf]
+		j++
 	}
 	return string(buf[:j])
 }
@@ -180,7 +217,7 @@ func Accept(fd int) (int, Sockaddr, error) {
 
 	var ctx overlappedContext
 	rusticated_net_accept(unsafe.Pointer(&ctx.o), handle)
-	awaitOverlapped(&ctx)
+	awaitFDOverlapped(fd, &ctx)
 	if ctx.o.hostError != 0 {
 		return -1, nil, errnoErr(Errno(ctx.o.hostError))
 	}
@@ -227,7 +264,7 @@ func GetsockoptInt(fd, level, opt int) (value int, err error) { return 0, ENOSYS
 
 func SetsockoptInt(fd int, level, opt, value int) error { return ENOSYS }
 
-func SetReadDeadline(fd int, t int64) error  { return nil }
+func SetReadDeadline(fd int, t int64) error { return nil }
 
 func SetWriteDeadline(fd int, t int64) error { return nil }
 
@@ -245,24 +282,24 @@ func rusticated_net_cert_verify(overlapped unsafe.Pointer, namePtr *byte, nameLe
 // Returns (1, nil) if trusted, (0, nil) if untrusted, or (0, err) on error.
 func NetCertVerify(name string, chain [][]byte) (int, error) {
 	var ctx overlappedContext
-	
+
 	count := len(chain)
 	if count == 0 {
 		return 0, EINVAL
 	}
-	
+
 	dersTotal := 0
 	for _, d := range chain {
 		dersTotal += len(d)
 	}
-	
+
 	payloadLen := 4 + 4*count + dersTotal
 	payload := make([]byte, payloadLen)
-	
+
 	binary.LittleEndian.PutUint32(payload[0:4], uint32(count))
 	off := 4 + 4*count
 	for i, d := range chain {
-		binary.LittleEndian.PutUint32(payload[4+4*i : 8+4*i], uint32(len(d)))
+		binary.LittleEndian.PutUint32(payload[4+4*i:8+4*i], uint32(len(d)))
 		copy(payload[off:], d)
 		off += len(d)
 	}
@@ -277,7 +314,7 @@ func NetCertVerify(name string, chain [][]byte) (int, error) {
 	debugPrintln("GUEST: net_cert_verify BEFORE await", name)
 	awaitOverlapped(&ctx)
 	debugPrintln("GUEST: net_cert_verify AFTER await", name, ctx.o.flags, ctx.o.hostError, ctx.o.resultExt)
-	
+
 	if ctx.o.hostError != 0 {
 		return 0, errnoErr(Errno(ctx.o.hostError))
 	}
@@ -288,11 +325,11 @@ func NetCertVerify(name string, chain [][]byte) (int, error) {
 // It returns a slice of IP addresses (4 or 16 bytes each).
 func NetLookup(name string) ([]IP, error) {
 	var ctx overlappedContext
-	
+
 	// We don't know the size upfront, but 4KB is plenty for DNS.
 	// The host returns the actual required size in resultExt.
 	buf := make([]byte, 4096)
-	
+
 	rusticated_net_lookup(
 		unsafe.Pointer(&ctx.o),
 		(*byte)(unsafe.StringData(name)), uint32(len(name)),
@@ -301,35 +338,39 @@ func NetLookup(name string) ([]IP, error) {
 	runtime.KeepAlive(name)
 	runtime.KeepAlive(buf)
 	awaitOverlapped(&ctx)
-	
+
 	if ctx.o.hostError != 0 {
 		return nil, errnoErr(Errno(ctx.o.hostError))
 	}
-	
+
 	totalSize := uint32(ctx.o.resultExt)
 	if totalSize < 8 {
 		return nil, EINVAL
 	}
-	
+
 	// Wire format: [totalSize u32][count u32][families u8*N][data...]
 	count := binary.LittleEndian.Uint32(buf[4:8])
 	if count == 0 {
 		return nil, nil
 	}
-	
+
 	families := buf[8 : 8+count]
 	off := 8 + int(count)
-	
+
 	var res []IP
 	for _, f := range families {
 		var ip IP
 		if f == 4 {
-			if off+4 > int(totalSize) { return nil, EINVAL }
+			if off+4 > int(totalSize) {
+				return nil, EINVAL
+			}
 			ip = make(IP, 4)
 			copy(ip, buf[off:off+4])
 			off += 4
 		} else if f == 6 {
-			if off+16 > int(totalSize) { return nil, EINVAL }
+			if off+16 > int(totalSize) {
+				return nil, EINVAL
+			}
 			ip = make(IP, 16)
 			copy(ip, buf[off:off+16])
 			off += 16
@@ -338,7 +379,7 @@ func NetLookup(name string) ([]IP, error) {
 		}
 		res = append(res, ip)
 	}
-	
+
 	return res, nil
 }
 

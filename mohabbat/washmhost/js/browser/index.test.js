@@ -447,9 +447,89 @@ test('Overlapped timer_set and cancel mechanics', async () => {
   assert.equal(hostState.hasPending(), true);
 
   env.cancel(ovCancel);
-  const viewCancel = new DataView(mem.buffer);
-  assert.equal(viewCancel.getUint32(ovCancel, true), FLAG_COMPLETED);
-  assert.equal(viewCancel.getUint32(ovCancel + 4, true), wasiECANCELED);
+  assert.equal(hostState.hasPending(), false);
+  assert.equal(view.getUint32(ovCancel, true), FLAG_COMPLETED);
+  assert.equal(view.getUint32(ovCancel + 4, true), wasiECANCELED);
+  await new Promise(r => setTimeout(r, 25));
+  hostState.drainQueue();
+  assert.equal(view.getUint32(ovCancel, true), FLAG_COMPLETED);
+  assert.equal(view.getUint32(ovCancel + 4, true), wasiECANCELED);
+});
+
+test('cancelled network accept closes a late connection without allocating a handle', async () => {
+  const mem = new WebAssembly.Memory({ initial: 1 });
+  let resolveAccept;
+  let closeCount = 0;
+  const acceptResult = new Promise(resolve => {
+    resolveAccept = resolve;
+  });
+  const host = await washmhost({
+    test: true,
+    memory: mem,
+    extensions: {
+      net: {
+        accept: () => acceptResult
+      }
+    }
+  });
+  const { env, hostState } = host;
+  const ovAccept = 1200;
+  const handleCount = hostState.handles.size;
+  const view = new DataView(mem.buffer);
+
+  env.net_accept(ovAccept, 3n);
+  env.cancel(ovAccept);
+  assert.equal(view.getUint32(ovAccept, true), FLAG_COMPLETED);
+  assert.equal(view.getUint32(ovAccept + 4, true), wasiECANCELED);
+  resolveAccept({
+    close: () => {
+      closeCount++;
+    }
+  });
+
+  await new Promise(resolve => setTimeout(resolve, 0));
+  hostState.drainQueue();
+  assert.equal(closeCount, 1);
+  assert.equal(hostState.handles.size, handleCount);
+  assert.equal(view.getUint32(ovAccept, true), FLAG_COMPLETED);
+  assert.equal(view.getUint32(ovAccept + 4, true), wasiECANCELED);
+});
+
+test('cancelled network open closes its connection without allocating a handle', async () => {
+  const mem = new WebAssembly.Memory({ initial: 1 });
+  let closeCount = 0;
+  const proxy = {
+    close: () => {
+      closeCount++;
+    }
+  };
+  const host = await washmhost({
+    test: true,
+    memory: mem,
+    extensions: {
+      net: {
+        open: () => proxy
+      }
+    }
+  });
+  const { env, hostState } = host;
+  const addr = new TextEncoder().encode('localhost');
+  new Uint8Array(mem.buffer, 256, addr.length).set(addr);
+  const ovOpen = 1280;
+  const handleCount = hostState.handles.size;
+  const view = new DataView(mem.buffer);
+
+  env.net_open(ovOpen, 256, addr.length, 80, 1);
+  env.cancel(ovOpen);
+  assert.equal(view.getUint32(ovOpen, true), FLAG_COMPLETED);
+  assert.equal(view.getUint32(ovOpen + 4, true), wasiECANCELED);
+  hostState.drainQueue();
+  await new Promise(resolve => setTimeout(resolve, 0));
+
+  assert.equal(closeCount, 1);
+  assert.equal(hostState.handles.size, handleCount);
+  assert.equal(view.getUint32(ovOpen, true), FLAG_COMPLETED);
+  assert.equal(view.getUint32(ovOpen + 4, true), wasiECANCELED);
 });
 
 test('Signal dispatching completes signal_wait', async () => {
