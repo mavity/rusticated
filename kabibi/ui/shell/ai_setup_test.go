@@ -65,7 +65,9 @@ func TestConfigureAICancelDoesNotPersistConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := NewLazyAIRunner(nil)
-	runner.SetOnboardingPrompter(&scriptedOnboardingPrompter{choices: []int{len(options) - 1}})
+	if err := runner.SetOnboardingPrompter(&scriptedOnboardingPrompter{choices: []int{len(options) - 1}}); err != nil {
+		t.Fatal(err)
+	}
 
 	_, err = runner.configureAI(context.Background())
 	if !errors.Is(err, errOnboardingCancelled) {

@@ -84,7 +84,7 @@ Compaction can trigger either:
 
 In the mid-turn case, the background worker has not yet embedded the newest turns.
 
-* **Rule:** The very first action inside `compactContext` is calling `s.FlushEmbeddings()`.
+* **Rule:** The very first action inside `compactContext` is synchronously embedding any missing canonical-history parts through the current operation context. It must not call the public `FlushEmbeddings` method, which would try to acquire the already-held session operation lease.
 
 
 * This synchronously computes any `nil` embeddings across `CanonicalHistory` so that every atomic unit has a normalized 768-dim vector before vector operations begin.

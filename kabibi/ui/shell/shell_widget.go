@@ -208,8 +208,12 @@ func New(opts ShellOptions) *Shell {
 		compositor:     terminal.NewTerminal(1, 1),
 	}
 	if lazy, ok := aiRunner.(*LazyAIRunner); ok {
-		lazy.SetTerminalOpener(s.openInteractiveTerminalSession)
-		lazy.SetOnboardingPrompter(NewTUIOnboardingPrompter(s))
+		if err := lazy.SetTerminalOpener(s.openInteractiveTerminalSession); err != nil {
+			s.sessionErr = errors.Join(s.sessionErr, err)
+		}
+		if err := lazy.SetOnboardingPrompter(NewTUIOnboardingPrompter(s)); err != nil {
+			s.sessionErr = errors.Join(s.sessionErr, err)
+		}
 	}
 	s.input = NewPromptInput(PromptInputOptions{
 		Prompt: func() string {
@@ -346,14 +350,22 @@ func (s *Shell) Close() error {
 	if cancel != nil {
 		cancel()
 	}
-	if s.execSess != nil {
-		s.execSess.SetCommandTerminalAttached(false)
-		_ = s.execSess.Close()
-	}
+	var closeErr error
 	if aiRunner != nil {
 		aiRunner.Close()
+		if waiter, ok := aiRunner.(interface {
+			WaitClosed(context.Context) error
+		}); ok {
+			closeErr = waiter.WaitClosed(context.Background())
+		}
 	}
-	return nil
+	if s.execSess != nil {
+		s.execSess.SetCommandTerminalAttached(false)
+		if err := s.execSess.Close(); closeErr == nil {
+			closeErr = err
+		}
+	}
+	return closeErr
 }
 
 // IsRunning reports whether a foreground shell command or AI turn is currently active.

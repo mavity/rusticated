@@ -185,8 +185,11 @@ native hosts it attempts to load the embedder while the LLM is resident. If
 embedder initialization or inference fails, the adaptive wrapper closes the
 active conversation and LLM engine, runs the embedder, closes it, reloads the
 LLM engine, and recreates the conversation from `Session.CompactedHistory`.
-`Session.turnGate` serializes this lifecycle with generation and embedding
-work.
+The Session's exclusive operation lease serializes this lifecycle with
+generation, compaction, and embedding work without holding its state mutex
+during inference. Concurrent operations fail fast with `ai.ErrSessionBusy`.
+Shutdown cancels active work; callers wait with `Session.WaitShutdown` before
+closing the engine or embedder.
 
 The fallback currently responds to any embedder load/inference error rather
 than classifying only out-of-memory errors. It is session-scoped, not persisted.

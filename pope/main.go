@@ -187,7 +187,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "pope: conversation init failed: %v\n", err)
 		os.Exit(1)
 	}
-	defer session.Shutdown()
+	defer func() {
+		session.Shutdown()
+		if err := session.WaitShutdown(context.Background()); err != nil {
+			fmt.Fprintf(os.Stderr, "pope: shutdown session: %v\n", err)
+		}
+	}()
 
 	// 6. Execution: One-Shot or REPL
 	if cfg.PromptFlag != "" {
@@ -195,7 +200,9 @@ func main() {
 			fmt.Fprintf(os.Stderr, "pope: turn error: %v\n", err)
 			os.Exit(1)
 		}
-		session.FlushEmbeddings()
+		if err := session.FlushEmbeddings(); err != nil {
+			fmt.Fprintf(os.Stderr, "pope: flush embeddings: %v\n", err)
+		}
 		return
 	}
 

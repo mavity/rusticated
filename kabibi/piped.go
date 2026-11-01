@@ -37,13 +37,34 @@ func runPipedSession(stdin io.Reader, stdout, stderr io.Writer, opts cliOptions)
 	}
 
 	aiRunner := shell.NewLazyAIRunner(es)
-	aiRunner.SetVerbose(opts.verbose)
-	defer func() {
-		aiRunner.FlushEmbeddings()
+	if err := aiRunner.SetVerbose(opts.verbose); err != nil {
+		fmt.Fprintf(stderr, "kabibi: AI runner setup: %v\n", err)
 		aiRunner.Close()
-	}()
+		_ = es.Close()
+		return 1
+	}
 
-	return runPipedReader(context.Background(), stdin, stdout, stderr, opts, es, aiRunner)
+	exitCode := runPipedReader(context.Background(), stdin, stdout, stderr, opts, es, aiRunner)
+	if err := aiRunner.FlushEmbeddings(); err != nil {
+		fmt.Fprintf(stderr, "kabibi: flush AI embeddings: %v\n", err)
+		if exitCode == 0 {
+			exitCode = 1
+		}
+	}
+	aiRunner.Close()
+	if err := aiRunner.WaitClosed(context.Background()); err != nil {
+		fmt.Fprintf(stderr, "kabibi: close AI runner: %v\n", err)
+		if exitCode == 0 {
+			exitCode = 1
+		}
+	}
+	if err := es.Close(); err != nil {
+		fmt.Fprintf(stderr, "kabibi: close shell session: %v\n", err)
+		if exitCode == 0 {
+			exitCode = 1
+		}
+	}
+	return exitCode
 }
 
 func runPipedReader(
