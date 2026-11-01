@@ -202,6 +202,11 @@ func (h *HostEnv) RegisterOp(ovPtr uint32, handle interface{}) *OpState {
 }
 
 func (h *HostEnv) registerOpLocked(ovPtr uint32, handle interface{}) *OpState {
+	if old, exists := h.activeOps[ovPtr]; exists && !old.isCancelled {
+		old.isCancelled = true
+		h.teardownOpLocked(old)
+		h.DecOpsFor(old)
+	}
 	h.nextOpID++
 	state := &OpState{
 		ovPtr:  ovPtr,
@@ -211,6 +216,20 @@ func (h *HostEnv) registerOpLocked(ovPtr uint32, handle interface{}) *OpState {
 	h.activeOps[ovPtr] = state
 	h.IncOps()
 	return state
+}
+
+func (h *HostEnv) teardownOpLocked(state *OpState) {
+	if state == nil {
+		return
+	}
+	pastTime := time.Unix(1, 0)
+	if state.handle != nil {
+		if c, ok := state.handle.(interface{ SetDeadline(time.Time) error }); ok {
+			_ = c.SetDeadline(pastTime)
+		} else if closer, ok := state.handle.(io.Closer); ok {
+			_ = closer.Close()
+		}
+	}
 }
 
 func (h *HostEnv) IsOpActive(ovPtr uint32, id uint64) bool {
@@ -303,7 +322,6 @@ func (h *HostEnv) HasLiveOps() bool {
 }
 
 func (h *HostEnv) CancelOp(ovPtr uint32) {
-	pastTime := time.Unix(1, 0)
 	h.mu.Lock()
 
 	if t, ok := h.timers[ovPtr]; ok {
@@ -335,11 +353,7 @@ func (h *HostEnv) CancelOp(ovPtr uint32) {
 		}
 
 		if state.handle != nil {
-			if c, ok := state.handle.(interface{ SetDeadline(time.Time) error }); ok {
-				_ = c.SetDeadline(pastTime)
-			} else if closer, ok := state.handle.(io.Closer); ok {
-				_ = closer.Close()
-			}
+			h.teardownOpLocked(state)
 		}
 		h.DecOpsFor(state)
 	} else {

@@ -338,6 +338,10 @@
         const path = normalizeGuestPath(entry.path);
         if (!resolveMountPath(path)) {
           if (typeof baseFS.chmodEntry === 'function') return baseFS.chmodEntry(entry);
+          if (entry.type === 'file' && entry.content === undefined) {
+            const current = await baseFS.getEntry(path);
+            return baseFS.putEntry({ ...(current || {}), ...entry, path });
+          }
           return baseFS.putEntry({ ...entry, path });
         }
         modeOverrides.set(path, Number(entry.mode));
@@ -349,6 +353,10 @@
           throw fsError('ENOTSUP', 'timestamps cannot be changed in browser directory mounts');
         }
         if (typeof baseFS.setEntryTimes === 'function') return baseFS.setEntryTimes(entry);
+        if (entry.type === 'file' && entry.content === undefined) {
+          const current = await baseFS.getEntry(path);
+          return baseFS.putEntry({ ...(current || {}), ...entry, path });
+        }
         return baseFS.putEntry({ ...entry, path });
       },
 
@@ -465,18 +473,20 @@
         const pending = absolute.split('/');
         const resolved = [];
         let followed = 0;
+        let finalEntry = null;
 
         while (pending.length > 0) {
           const component = pending.shift();
           if (!component || component === '.') continue;
           if (component === '..') {
             resolved.pop();
+            finalEntry = null;
             continue;
           }
 
           const candidate = `/${resolved.concat(component).join('/')}`;
-          const entry = await filesystem.getEntry(candidate);
           const hasMore = pending.some((part) => part !== '' && part !== '.');
+          const entry = await filesystem.statEntry(candidate);
           if (!entry) {
             if (hasMore) throw fsError('ENOENT', `no such file or directory: ${candidate}`);
             return { path: candidate, entry: null };
@@ -489,16 +499,21 @@
             }
             if (entry.target.startsWith('/')) resolved.length = 0;
             pending.unshift(...entry.target.replace(/\\/g, '/').split('/'));
+            finalEntry = null;
             continue;
           }
           if (hasMore && entry.type !== 'dir') {
             throw fsError('ENOTDIR', `not a directory: ${candidate}`);
           }
           resolved.push(component);
+          finalEntry = entry;
         }
 
         const path = resolved.length === 0 ? '/' : `/${resolved.join('/')}`;
-        return { path, entry: await filesystem.getEntry(path) };
+        return {
+          path,
+          entry: finalEntry !== null ? finalEntry : await filesystem.statEntry(path)
+        };
       }
     };
 

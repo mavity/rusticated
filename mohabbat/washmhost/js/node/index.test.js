@@ -204,6 +204,33 @@ test('cancel closes pending network opens without allocating handles or completi
       }
 });
 
+test('multiple concurrent signal waiters are all completed on signal', () => {
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const host = new HostState();
+    host.memory = memory;
+    const { env } = makeBrainImports(host, []);
+    const view = new DataView(memory.buffer);
+
+    const ovSig1 = 32;
+    const ovSig2 = 64;
+    env.signal_wait(ovSig1, 28);
+    env.signal_wait(ovSig2, 28);
+
+    assert.equal(host.signalWaiters.has(28), true);
+    assert.equal(host.signalWaiters.get(28).size, 2);
+
+    host.deliverSignal(28);
+    host.drainQueue();
+
+    assert.equal(view.getUint32(ovSig1, true), 1); // FLAG_COMPLETED
+    assert.equal(view.getUint32(ovSig1 + 4, true), 0);
+    assert.equal(view.getBigUint64(ovSig1 + 16, true), 28n);
+
+    assert.equal(view.getUint32(ovSig2, true), 1);
+    assert.equal(view.getUint32(ovSig2 + 4, true), 0);
+    assert.equal(view.getBigUint64(ovSig2 + 16, true), 28n);
+});
+
 test('positioned read preserves the handle position and rejects stream handles', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'washmhost-pread-'));
     const file = path.join(dir, 'data.txt');

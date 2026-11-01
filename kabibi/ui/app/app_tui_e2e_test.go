@@ -291,15 +291,17 @@ func TestAppTUI_EndToEnd_RealFilesystemAndAIFallback(t *testing.T) {
 		waitDeadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(waitDeadline) {
 			blocks := appWidget.Shell().Blocks()
-			if len(blocks) >= wantBlockCount && !appWidget.Shell().IsRunning() {
+			if len(blocks) >= wantBlockCount && !appWidget.Shell().IsRunning() &&
+				blocks[wantBlockCount-1].Status != shell.StatusActive &&
+				appWidget.Shell().Input().Value() == "" {
 				// Give Host coordinator a brief moment to flush the dirty frame
 				time.Sleep(25 * time.Millisecond)
 				return
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
-		t.Fatalf("timed out waiting for command %q to finish (blocks=%d, running=%v)",
-			line, len(appWidget.Shell().Blocks()), appWidget.Shell().IsRunning())
+		t.Fatalf("timed out waiting for command %q to finish (blocks=%d, running=%v, input=%q)",
+			line, len(appWidget.Shell().Blocks()), appWidget.Shell().IsRunning(), appWidget.Shell().Input().Value())
 	}
 
 	// Command 1: Create a subdirectory and write a file on the real filesystem using bash redirection
@@ -351,7 +353,7 @@ func TestAppTUI_EndToEnd_RealFilesystemAndAIFallback(t *testing.T) {
 
 	// Verify the ordered substrings of rendered screen lines in the VT emulator
 	wantLineSubstrings := []string{
-		"wearable all-weather shell v0.8.22",
+		"wearable all-weather shell v" + shell.Version(),
 		"- bash",
 		"file manager (Ctrl+O)",
 		"AI harness (ask anything in prompt)",
@@ -486,7 +488,7 @@ func TestAppTUI_EndToEnd_ScrollbackEjectionOnSmallViewport(t *testing.T) {
 	}
 
 	wantFullHistoryAndViewport := []string{
-		"wearable all-weather shell v0.8.22",
+		"wearable all-weather shell v" + shell.Version(),
 		"- bash",
 		"file manager (Ctrl+O)",
 		"AI harness (ask anything in prompt)",
@@ -915,7 +917,7 @@ func TestAppTUI_BluePanels_CtrlO_HiddenConveyorAndFarKeyRouting(t *testing.T) {
 	deadline = time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		blocks := appWidget.Shell().Blocks()
-		if len(blocks) >= 2 && !appWidget.Shell().IsRunning() {
+		if len(blocks) >= 2 && !appWidget.Shell().IsRunning() && appWidget.PanelsVisible() {
 			time.Sleep(25 * time.Millisecond)
 			break
 		}
@@ -944,7 +946,7 @@ func TestAppTUI_BluePanels_CtrlO_HiddenConveyorAndFarKeyRouting(t *testing.T) {
 		wantBlocks := 2 + i
 		deadline = time.Now().Add(3 * time.Second)
 		for time.Now().Before(deadline) {
-			if len(appWidget.Shell().Blocks()) >= wantBlocks && !appWidget.Shell().IsRunning() {
+			if len(appWidget.Shell().Blocks()) >= wantBlocks && !appWidget.Shell().IsRunning() && appWidget.PanelsVisible() {
 				time.Sleep(25 * time.Millisecond)
 				break
 			}

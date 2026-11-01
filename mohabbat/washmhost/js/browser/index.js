@@ -277,50 +277,6 @@ class AsyncIndexedDBFS {
     });
   }
 
-  async resolveEntryPath(path, cwd = '/', followFinal = true) {
-    const raw = String(path).replace(/\\/g, '/');
-    const absolute = raw.startsWith('/') ? raw : `${cwd}/${raw}`;
-    const pending = absolute.split('/');
-    const resolved = [];
-    let followed = 0;
-
-    while (pending.length > 0) {
-      const component = pending.shift();
-      if (!component || component === '.') continue;
-      if (component === '..') {
-        resolved.pop();
-        continue;
-      }
-
-      const candidate = `/${resolved.concat(component).join('/')}`;
-      const entry = await this.getEntry(candidate);
-      const hasMore = pending.some((part) => part !== '' && part !== '.');
-      if (!entry) {
-        if (hasMore) throw Object.assign(new Error(`no such file or directory: ${candidate}`), { code: 'ENOENT' });
-        return { path: candidate, entry: null };
-      }
-
-      if (entry.type === 'symlink' && (hasMore || followFinal)) {
-        if (++followed > 40) throw Object.assign(new Error('too many symbolic links'), { code: 'ELOOP' });
-        const target = entry.target;
-        if (typeof target !== 'string' || target.length === 0) {
-          throw Object.assign(new Error('empty symbolic link target'), { code: 'ENOENT' });
-        }
-        if (target.startsWith('/')) resolved.length = 0;
-        pending.unshift(...target.replace(/\\/g, '/').split('/'));
-        continue;
-      }
-
-      if (hasMore && entry.type !== 'dir') {
-        throw Object.assign(new Error(`not a directory: ${candidate}`), { code: 'ENOTDIR' });
-      }
-      resolved.push(component);
-    }
-
-    const resolvedPath = resolved.length === 0 ? '/' : `/${resolved.join('/')}`;
-    return { path: resolvedPath, entry: await this.getEntry(resolvedPath) };
-  }
-
   async putEntry(entry) {
     normalizeEntryTimes(entry);
     if (this.memFallback) {
@@ -423,13 +379,12 @@ class HostState {
     this.handles.set(1n, { type: 'stdout', fd: 1 });
     this.handles.set(2n, { type: 'stderr', fd: 2 });
 
-    this.activeOps = new Map(); // ovPtr -> opId
-    this.opCancelers = new Map(); // ovPtr -> { opId, cancel }
+    this.activeOps = new Map(); // ovPtr -> { opId, cancel }
     this.nextOpId = 1;
     this.pendingCount = 0;
-    this.timers = new Map(); // ovPtr -> { opId, timer }
 
-    this.signalWaiters = new Map(); // signum -> { ovPtr, opId }
+    // Signal waiters: signum -> Map<ovPtr, opId>
+    this.signalWaiters = new Map();
     this.completionQueue = [];
 
     // Stdin FIFO and pending read requests
@@ -480,63 +435,43 @@ class HostState {
     }
   }
 
-  registerOp(ovPtr) {
+  registerOp(ovPtr, cancel = null) {
+    const existing = this.activeOps.get(ovPtr);
+    if (existing) {
+      if (typeof existing.cancel === 'function') existing.cancel();
+    } else {
+      this.pendingCount++;
+    }
     const opId = this.nextOpId++;
-    this.activeOps.set(ovPtr, opId);
-    this.pendingCount++;
+    this.activeOps.set(ovPtr, { opId, cancel });
     return opId;
   }
 
+  setOpCancel(ovPtr, opId, cancel) {
+    const active = this.activeOps.get(ovPtr);
+    if (active && active.opId === opId) {
+      active.cancel = cancel;
+    }
+  }
+
   isOpActive(ovPtr, opId) {
-    return this.activeOps.get(ovPtr) === opId;
+    const active = this.activeOps.get(ovPtr);
+    return active !== undefined && active.opId === opId;
   }
 
   completeOp(ovPtr, opId, errorCode, continued, resultExt) {
     if (!this.isOpActive(ovPtr, opId)) return false;
     this.activeOps.delete(ovPtr);
     this.pendingCount--;
-    const canceler = this.opCancelers.get(ovPtr);
-    if (canceler && canceler.opId === opId) this.opCancelers.delete(ovPtr);
-    const timer = this.timers.get(ovPtr);
-    if (timer && timer.opId === opId) this.timers.delete(ovPtr);
     writeOverlapped(this.view, ovPtr, errorCode, continued, resultExt);
     return true;
   }
 
-  setOpCanceler(ovPtr, opId, cancel) {
-    if (this.isOpActive(ovPtr, opId)) {
-      this.opCancelers.set(ovPtr, { opId, cancel });
-    }
-  }
-
-  cancelOp(ovPtr, writeCancellation = true) {
-    const opId = this.activeOps.get(ovPtr);
-    if (opId === undefined) return;
-    this.activeOps.delete(ovPtr);
-    this.pendingCount--;
-    const canceler = this.opCancelers.get(ovPtr);
-    if (canceler && canceler.opId === opId) {
-      this.opCancelers.delete(ovPtr);
-      canceler.cancel();
-    }
-    const timer = this.timers.get(ovPtr);
-    if (timer && timer.opId === opId) {
-      clearTimeout(timer.timer);
-      this.timers.delete(ovPtr);
-    }
-    for (const [signum, w] of this.signalWaiters) {
-      if (w.ovPtr === ovPtr && w.opId === opId) { this.signalWaiters.delete(signum); break; }
-    }
-    // Also remove from pending stdin reads if present
-    this.pendingStdinReads = this.pendingStdinReads.filter(r => r.ovPtr !== ovPtr || r.opId !== opId);
-    for (const handle of this.handles.values()) {
-      if (handle.type === 'pipe_r') {
-        handle.pipe.readers = handle.pipe.readers.filter(r => r.ovPtr !== ovPtr || r.opId !== opId);
-      }
-    }
-    if (writeCancellation && this.memory) {
-      writeOverlapped(this.view, ovPtr, wasiECANCELED, 0, 0);
-    }
+  cancelOp(ovPtr) {
+    const active = this.activeOps.get(ovPtr);
+    if (!active) return false;
+    if (typeof active.cancel === 'function') active.cancel();
+    return this.completeOp(ovPtr, active.opId, wasiECANCELED, 0, 0);
   }
 
   hasPending() {
@@ -605,15 +540,15 @@ class HostState {
   // ── Signals ────────────────────────────────────────────────────────────────
   triggerSignal(signum) {
     let completed = 0;
-    const waiter = this.signalWaiters.get(signum);
-    if (waiter) {
+    const waiters = this.signalWaiters.get(signum);
+    if (waiters && waiters.size > 0) {
       this.signalWaiters.delete(signum);
-      this.enqueue(() => {
-        if (this.isOpActive(waiter.ovPtr, waiter.opId)) {
-          this.completeOp(waiter.ovPtr, waiter.opId, 0, 0, signum);
-        }
-      });
-      completed++;
+      for (const [ovPtr, opId] of waiters) {
+        this.enqueue(() => {
+          this.completeOp(ovPtr, opId, 0, 0, signum);
+        });
+        completed++;
+      }
     }
     this.wakeScheduler();
     return completed;
@@ -659,13 +594,7 @@ function makeBrowserImports(hostState, fs, params = {}) {
   }
 
   async function resolveStoredPath(path, followFinal = true) {
-    if (typeof fs.resolveEntryPath === 'function') {
-      return fs.resolveEntryPath(path, hostState.cwd, followFinal);
-    }
-    const entry = followFinal && typeof fs.statEntry === 'function'
-      ? await fs.statEntry(path)
-      : await fs.getEntry(path);
-    return { path, entry };
+    return fs.resolveEntryPath(path, hostState.cwd, followFinal);
   }
 
   function finishPipeReads(pipe) {
@@ -749,14 +678,13 @@ function makeBrowserImports(hostState, fs, params = {}) {
 
     timer_set: (ovPtr, delayMs) => {
       const ptr = Number(ovPtr);
-      hostState.cancelOp(ptr, false);
       const opId = hostState.registerOp(ptr);
       const timer = setTimeout(() => {
         hostState.enqueue(() => {
           hostState.completeOp(ptr, opId, 0, 0, 0);
         });
       }, Math.max(0, Number(delayMs)));
-      hostState.timers.set(ptr, { opId, timer });
+      hostState.setOpCancel(ptr, opId, () => clearTimeout(timer));
     },
 
     cancel: (ovPtr) => {
@@ -831,7 +759,12 @@ function makeBrowserImports(hostState, fs, params = {}) {
           hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, 0, 0, toRead));
         } else {
           // Park read until stdin data is pushed
-          hostState.pendingStdinReads.push({ ovPtr: Number(ovPtr), opId, ptr: uPtr, len: uLen });
+          const waiter = { ovPtr: Number(ovPtr), opId, ptr: uPtr, len: uLen };
+          hostState.pendingStdinReads.push(waiter);
+          hostState.setOpCancel(ovPtrNum, opId, () => {
+            const idx = hostState.pendingStdinReads.indexOf(waiter);
+            if (idx >= 0) hostState.pendingStdinReads.splice(idx, 1);
+          });
         }
         return;
       }
@@ -841,7 +774,12 @@ function makeBrowserImports(hostState, fs, params = {}) {
           hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, 0, 0, 0));
           return;
         }
-        h.pipe.readers.push({ ovPtr: Number(ovPtr), opId, ptr: uPtr, len: uLen });
+        const reader = { ovPtr: Number(ovPtr), opId, ptr: uPtr, len: uLen };
+        h.pipe.readers.push(reader);
+        hostState.setOpCancel(ovPtrNum, opId, () => {
+          const idx = h.pipe.readers.indexOf(reader);
+          if (idx >= 0) h.pipe.readers.splice(idx, 1);
+        });
         finishPipeReads(h.pipe);
         return;
       }
@@ -1157,6 +1095,9 @@ function makeBrowserImports(hostState, fs, params = {}) {
           updateEntryMtime(entry);
           return fs.putEntry(entry).then(() => entry);
         }
+        if (entry.type === 'file' && entry.content === undefined) {
+          return fs.getEntry(resolvedPath);
+        }
         return entry;
       }).then((entry) => {
         if (!entry) return;
@@ -1325,10 +1266,7 @@ function makeBrowserImports(hostState, fs, params = {}) {
           return;
         }
         entry.mode = Number(mode);
-        const write = typeof fs.chmodEntry === 'function'
-          ? fs.chmodEntry(entry)
-          : fs.putEntry(entry);
-        return Promise.resolve(write).then(() => {
+        return Promise.resolve(fs.chmodEntry(entry)).then(() => {
           hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, 0, 0, 0));
         });
       }).catch((err) => {
@@ -1380,10 +1318,7 @@ function makeBrowserImports(hostState, fs, params = {}) {
           hostState.enqueue(() => hostState.completeOp(ptr, opId, wasiSuccess, 0, 0));
           return;
         }
-        const write = typeof fs.setEntryTimes === 'function'
-          ? fs.setEntryTimes(entry)
-          : fs.putEntry(entry);
-        return Promise.resolve(write).then(() => {
+        return Promise.resolve(fs.setEntryTimes(entry)).then(() => {
           hostState.enqueue(() => hostState.completeOp(ptr, opId, wasiSuccess, 0, 0));
         });
       }).catch((err) => {
@@ -1433,29 +1368,9 @@ function makeBrowserImports(hostState, fs, params = {}) {
       const src = pathStr(srcPtr, srcLen);
       const dst = pathStr(dstPtr, dstLen);
       const opId = hostState.registerOp(Number(ovPtr));
-      if (typeof fs.renameEntry === 'function') {
-        Promise.all([resolveStoredPath(src, false), resolveStoredPath(dst, false)]).then(([source, destination]) =>
-          fs.renameEntry(source.path, destination.path)).then((ok) => {
-          hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, ok === false ? wasiENOENT : 0, 0, 0));
-        }).catch((err) => {
-          hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, mapErrno(err), 0, 0));
-        });
-        return;
-      }
-      Promise.all([resolveStoredPath(src, false), resolveStoredPath(dst, false)]).then(([source, destination]) => {
-        const ent = source.entry;
-        if (!ent) {
-          hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, wasiENOENT, 0, 0));
-          return;
-        }
-        if (source.path === destination.path) {
-          hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, 0, 0, 0));
-          return;
-        }
-        ent.path = destination.path;
-        return fs.putEntry(ent).then(() => fs.removeEntry(source.path)).then(() => {
-          hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, 0, 0, 0));
-        });
+      Promise.all([resolveStoredPath(src, false), resolveStoredPath(dst, false)]).then(([source, destination]) =>
+        fs.renameEntry(source.path, destination.path)).then((ok) => {
+        hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, ok === false ? wasiENOENT : 0, 0, 0));
       }).catch((err) => {
         hostState.enqueue(() => hostState.completeOp(Number(ovPtr), opId, mapErrno(err), 0, 0));
       });
@@ -1464,8 +1379,20 @@ function makeBrowserImports(hostState, fs, params = {}) {
     // ── TTY & Terminal ───────────────────────────────────────────────────────
     signal_wait: (ovPtr, signum) => {
       const sig = Number(signum);
-      const opId = hostState.registerOp(Number(ovPtr));
-      hostState.signalWaiters.set(sig, { ovPtr: Number(ovPtr), opId });
+      const ptr = Number(ovPtr);
+      let waiters = hostState.signalWaiters.get(sig);
+      if (!waiters) {
+        waiters = new Map();
+        hostState.signalWaiters.set(sig, waiters);
+      }
+      const opId = hostState.registerOp(ptr, () => {
+        const current = hostState.signalWaiters.get(sig);
+        if (current) {
+          current.delete(ptr);
+          if (current.size === 0) hostState.signalWaiters.delete(sig);
+        }
+      });
+      waiters.set(ptr, opId);
     },
 
     tty_get_size: (ptr) => {

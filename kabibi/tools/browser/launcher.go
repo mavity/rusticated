@@ -70,10 +70,10 @@ func browserCandidatePaths(hostOS string) []string {
 		if home, err := os.UserHomeDir(); err == nil && home != "" {
 			driveEnd := strings.IndexByte(home, ':')
 			if prefixes[0] == "" && driveEnd == 1 {
-				prefixes[0] = filepath.Join(home[:driveEnd+1], "Program Files")
+				prefixes[0] = filepath.Join(home[:driveEnd+1]+`\`, "Program Files")
 			}
 			if prefixes[1] == "" && driveEnd == 1 {
-				prefixes[1] = filepath.Join(home[:driveEnd+1], "Program Files (x86)")
+				prefixes[1] = filepath.Join(home[:driveEnd+1]+`\`, "Program Files (x86)")
 			}
 			if prefixes[2] == "" {
 				prefixes[2] = filepath.Join(home, "AppData", "Local")

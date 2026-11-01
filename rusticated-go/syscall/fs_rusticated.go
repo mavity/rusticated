@@ -180,54 +180,42 @@ const ImplementsGetwd = true
 // ── Rusticated host ABI imports ────────────────────────────────────────────
 
 //go:wasmimport env path_open
-//go:noescape
 func rusticated_path_open(overlapped unsafe.Pointer, pathPtr *byte, pathLen uint32, flags uint32)
 
 //go:wasmimport env read
-//go:noescape
 func rusticated_read(overlapped unsafe.Pointer, handle uint64, bufPtr *byte, bufLen uint32)
 
 //go:wasmimport env write
-//go:noescape
 func rusticated_write(overlapped unsafe.Pointer, handle uint64, bufPtr *byte, bufLen uint32)
 
 //go:wasmimport env handle_truncate
-//go:noescape
 func rusticated_handle_truncate(overlapped unsafe.Pointer, handle uint64, length int64)
 
 //go:wasmimport env handle_close
 func rusticated_handle_close(handle uint64)
 
 //go:wasmimport env dir_read
-//go:noescape
 func rusticated_dir_read(overlapped unsafe.Pointer, handle uint64, bufPtr *byte, bufLen uint32)
 
 //go:wasmimport env path_stat
-//go:noescape
 func rusticated_path_stat(overlapped unsafe.Pointer, pathPtr *byte, pathLen uint32, flags uint32, outPtr *byte, outLen uint32)
 
 //go:wasmimport env path_link
-//go:noescape
 func rusticated_path_link(overlapped unsafe.Pointer, sourcePtr *byte, sourceLen uint32, newPathPtr *byte, newPathLen uint32, flags uint32)
 
 //go:wasmimport env path_symlink
-//go:noescape
 func rusticated_path_symlink(overlapped unsafe.Pointer, targetPtr *byte, targetLen uint32, linkPathPtr *byte, linkPathLen uint32, targetKind uint32)
 
 //go:wasmimport env path_readlink
-//go:noescape
 func rusticated_path_readlink(overlapped unsafe.Pointer, pathPtr *byte, pathLen uint32, outPtr *byte, outLen uint32)
 
 //go:wasmimport env path_chmod
-//go:noescape
 func rusticated_path_chmod(overlapped unsafe.Pointer, pathPtr *byte, pathLen uint32, mode uint32)
 
 //go:wasmimport env path_set_times
-//go:noescape
 func rusticated_path_set_times(overlapped unsafe.Pointer, pathPtr *byte, pathLen uint32, atimeSec int64, atimeNsec uint32, mtimeSec int64, mtimeNsec uint32, flags uint32)
 
 //go:wasmimport env seek
-//go:noescape
 func rusticated_seek(overlapped unsafe.Pointer, handle uint64, offset int64, whence uint32)
 
 //go:wasmimport env get_random
@@ -258,15 +246,12 @@ func rusticated_get_cwd(strPtr *byte, strLen uint32) uint64
 func rusticated_set_cwd(strPtr *byte, strLen uint32) uint32
 
 //go:wasmimport env path_remove
-//go:noescape
 func rusticated_path_remove(overlapped unsafe.Pointer, pathPtr *byte, pathLen uint32, flags uint32)
 
 //go:wasmimport env path_mkdir
-//go:noescape
 func rusticated_path_mkdir(overlapped unsafe.Pointer, pathPtr *byte, pathLen uint32, mode uint32)
 
 //go:wasmimport env path_rename
-//go:noescape
 func rusticated_path_rename(overlapped unsafe.Pointer, oldPtr *byte, oldLen uint32, newPtr *byte, newLen uint32)
 
 // ── fd <-> handle mapping ────────────────────────────────────────────────

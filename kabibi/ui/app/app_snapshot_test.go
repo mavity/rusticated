@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/x/input"
 	"github.com/mavity/rusticated/kabibi/ui"
 	"github.com/mavity/rusticated/kabibi/ui/filemanager"
+	"github.com/mavity/rusticated/kabibi/ui/shell"
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
 
@@ -72,7 +74,7 @@ func assertAppSnapshot(t *testing.T, snapFile string, widget *AppWidget, scrollb
 		// Snapshots must be manually updated, NEVER automatically.
 		t.Fatalf("failed to read snapshot %s: %v", snapPath, err)
 	}
-	want := string(wantBytes)
+	want := strings.ReplaceAll(string(wantBytes), "{ver}", shell.Version())
 
 	if got != want {
 		fmt.Fprintf(os.Stderr,

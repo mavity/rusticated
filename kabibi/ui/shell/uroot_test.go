@@ -146,8 +146,8 @@ func TestURootPilotCommands(t *testing.T) {
 	}
 
 	out, code, err = runShell("head -n 3 items.txt | tail -n 1")
-	if err != nil || code != 0 || strings.TrimSpace(out) != "3" {
-		t.Fatalf("seq|head|tail pipeline failed (code=%d, err=%v): %q", code, err, out)
+	if err != nil || code != 0 || strings.TrimSpace(out) != "cherry" {
+		t.Fatalf("head|tail pipeline failed (code=%d, err=%v): %q", code, err, out)
 	}
 
 	_ = os.WriteFile(filepath.Join(dir, "c1.txt"), []byte("apple\nbanana\n"), 0o644)

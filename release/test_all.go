@@ -331,10 +331,23 @@ func planTestModes(goos, goarch, nodeVersion string, canRunAMD64 bool) []testMod
 	return modes
 }
 
+func isWASIGuestTestPackage(importPath string) bool {
+	if importPath == "washmhost" || strings.HasPrefix(importPath, "washmhost/") {
+		return false
+	}
+	if importPath == "mohabbat/rusticated-go" || strings.HasPrefix(importPath, "mohabbat/rusticated-go/") {
+		return false
+	}
+	return true
+}
+
 func discoverWASITestPackages(ws string) ([]testPackage, []string) {
 	packagesByImportPath := make(map[string]testPackage)
 	warnings := make([]string, 0)
 	for _, module := range firstPartyGoModules {
+		if module == "mohabbat/washmhost" {
+			continue
+		}
 		moduleDir := filepath.Join(ws, filepath.FromSlash(module))
 		cmd := exec.Command("go", "list", "-e", "-f",
 			`{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}|{{.Dir}}{{end}}`, "./...")
@@ -357,6 +370,9 @@ func discoverWASITestPackages(ws string) ([]testPackage, []string) {
 			fields := strings.SplitN(line, "|", 2)
 			if len(fields) != 2 || fields[0] == "" || fields[1] == "" {
 				warnings = append(warnings, fmt.Sprintf("invalid package listing from %s: %q", module, line))
+				continue
+			}
+			if !isWASIGuestTestPackage(fields[0]) {
 				continue
 			}
 			packagesByImportPath[fields[0]] = testPackage{ImportPath: fields[0], Dir: fields[1]}

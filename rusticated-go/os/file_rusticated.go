@@ -10,9 +10,6 @@ import (
 // UserHomeDir returns the host user home directory provided once by the ABI.
 func UserHomeDir() (string, error) {
 	pi := syscall.GetPlatformInfo()
-	if pi == nil || pi.UserHomeDir == "" {
-		return "", errors.New("user home dir is not defined")
-	}
 	return pi.UserHomeDir, nil
 }
 
