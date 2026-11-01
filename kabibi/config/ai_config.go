@@ -25,9 +25,6 @@ type AIConfig struct {
 }
 
 func Directory() (string, error) {
-	if custom := strings.TrimSpace(os.Getenv("KABIBI_CONFIG_DIR")); custom != "" {
-		return filepath.Clean(custom), nil
-	}
 	home := strings.TrimSpace(os.Getenv("USERPROFILE"))
 	if home == "" {
 		home = strings.TrimSpace(os.Getenv("HOME"))
