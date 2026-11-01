@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestCanonicalHistorySurvivesCompaction(t *testing.T) {
@@ -321,7 +325,9 @@ func TestBackgroundEmbedWorkerPopulatesHistoryAndYieldsToTurn(t *testing.T) {
 		PromptPart{Role: RoleModel, Text: "world"},
 	)
 
-	s.FlushEmbeddings()
+	if err := s.FlushEmbeddings(); err != nil {
+		t.Fatal(err)
+	}
 
 	if emb.calls != 2 {
 		t.Fatalf("embed calls = %d, want 2", emb.calls)
@@ -347,13 +353,17 @@ func TestBackgroundEmbedWorkerPopulatesHistoryAndYieldsToTurn(t *testing.T) {
 		PromptPart{Role: RoleModel, Text: "reply 1"},
 	)
 	s2.turnWaiting.Store(true)
-	s2.processPendingEmbeddings(false)
+	if err := s2.processPendingEmbeddings(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
 	if emb2.calls != 0 {
 		t.Fatalf("expected worker to yield when turnWaiting is true, got %d calls", emb2.calls)
 	}
 
 	s2.turnWaiting.Store(false)
-	s2.processPendingEmbeddings(false)
+	if err := s2.processPendingEmbeddings(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
 	if emb2.calls != 2 {
 		t.Fatalf("expected worker to embed 2 items once turnWaiting cleared, got %d", emb2.calls)
 	}
@@ -610,6 +620,185 @@ func TestRunTurnDirectAnswerUsesSingleCall(t *testing.T) {
 	}
 }
 
+func TestSessionRejectsReentrantTurn(t *testing.T) {
+	var session *Session
+	var reentrantErr error
+	backend := &scriptedSessionBackend{
+		conversation: &scriptedSessionConversation{
+			responses: [][]ModelEvent{{TextEvent{Text: "answer"}}},
+		},
+	}
+	var err error
+	session, err = NewSession(SessionConfig{
+		Engine: &Engine{impl: &engineImpl{backend: backend}},
+		OnContent: func(string) {
+			reentrantErr = session.RunTurn(context.Background(), "nested")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Shutdown()
+
+	if err := session.RunTurn(context.Background(), "outer"); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(reentrantErr, ErrSessionBusy) {
+		t.Fatalf("reentrant RunTurn() error = %v, want %v", reentrantErr, ErrSessionBusy)
+	}
+	if len(backend.conversation.sends) != 1 {
+		t.Fatalf("model calls = %d, want only the outer turn", len(backend.conversation.sends))
+	}
+}
+
+func TestSessionRejectsConcurrentExclusiveOperation(t *testing.T) {
+	session := &Session{embedder: &fakeEmbedder{}}
+	_, op, err := session.beginOperation(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.endOperation(op)
+
+	if err := session.CompactContext(context.Background()); !errors.Is(err, ErrSessionBusy) {
+		t.Fatalf("CompactContext() error = %v, want %v", err, ErrSessionBusy)
+	}
+	if err := session.FlushEmbeddings(); !errors.Is(err, ErrSessionBusy) {
+		t.Fatalf("FlushEmbeddings() error = %v, want %v", err, ErrSessionBusy)
+	}
+}
+
+func TestSessionShutdownFromCallbackDoesNotWaitOnActiveOperation(t *testing.T) {
+	var session *Session
+	backend := &scriptedSessionBackend{
+		conversation: &scriptedSessionConversation{
+			responses: [][]ModelEvent{{TextEvent{Text: "answer"}}},
+		},
+	}
+	var err error
+	session, err = NewSession(SessionConfig{
+		Engine: &Engine{impl: &engineImpl{backend: backend}},
+		OnContent: func(string) {
+			session.Shutdown()
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := session.RunTurn(context.Background(), "outer"); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.WaitShutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.RunTurn(context.Background(), "after shutdown"); !errors.Is(err, ErrSessionClosed) {
+		t.Fatalf("RunTurn() after shutdown error = %v, want %v", err, ErrSessionClosed)
+	}
+}
+
+type countingSessionConversation struct {
+	closeCalls atomic.Int32
+}
+
+func (*countingSessionConversation) SendStream(context.Context, []PromptPart, func(ModelEvent)) error {
+	return nil
+}
+
+func (c *countingSessionConversation) Close() error {
+	c.closeCalls.Add(1)
+	return nil
+}
+
+type countingSessionBackend struct {
+	conversation *countingSessionConversation
+}
+
+func (b *countingSessionBackend) NewConversation(ConversationConfig) (conversationBackend, error) {
+	return b.conversation, nil
+}
+
+func (*countingSessionBackend) Close() error { return nil }
+
+type blockingSessionBackend struct {
+	started      chan struct{}
+	release      chan struct{}
+	conversation *countingSessionConversation
+}
+
+func (b *blockingSessionBackend) NewConversation(ConversationConfig) (conversationBackend, error) {
+	close(b.started)
+	<-b.release
+	return b.conversation, nil
+}
+
+func (*blockingSessionBackend) Close() error { return nil }
+
+func TestConcurrentSessionShutdownClosesConversationOnce(t *testing.T) {
+	convBackend := &countingSessionConversation{}
+	engine := &Engine{impl: &engineImpl{backend: &countingSessionBackend{conversation: convBackend}}}
+	conv, err := engine.NewConversation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := &Session{conv: conv}
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			session.Shutdown()
+		}()
+	}
+	wg.Wait()
+
+	if got := convBackend.closeCalls.Load(); got != 1 {
+		t.Fatalf("conversation Close() calls = %d, want 1", got)
+	}
+}
+
+func TestShutdownDuringInitDoesNotStartEmbeddingWorker(t *testing.T) {
+	backend := &blockingSessionBackend{
+		started:      make(chan struct{}),
+		release:      make(chan struct{}),
+		conversation: &countingSessionConversation{},
+	}
+	engine := &Engine{impl: &engineImpl{backend: backend}}
+	session, err := NewSession(SessionConfig{
+		Engine:   engine,
+		Embedder: &fakeEmbedder{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	initDone := make(chan error, 1)
+	go func() { initDone <- session.Init() }()
+	<-backend.started
+	session.Shutdown()
+	close(backend.release)
+
+	select {
+	case err := <-initDone:
+		if err != nil {
+			t.Fatalf("Init() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Init() did not finish")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := session.WaitShutdown(ctx); err != nil {
+		t.Fatalf("WaitShutdown() error = %v", err)
+	}
+	if session.embedDone != nil {
+		t.Fatal("embedding worker started after shutdown")
+	}
+	if got := backend.conversation.closeCalls.Load(); got != 1 {
+		t.Fatalf("conversation Close() calls = %d, want 1", got)
+	}
+}
+
 func TestRunTurnUnprefixedAnswerUsesSingleCall(t *testing.T) {
 	var out bytes.Buffer
 	backend := &scriptedSessionBackend{
@@ -712,7 +901,9 @@ func TestRunTurnToolExecutionAndHistory(t *testing.T) {
 		t.Fatalf("finalPart.Text = %q", finalPart.Text)
 	}
 	// Flush embeddings and verify ordinary history remains indexed.
-	s.FlushEmbeddings()
+	if err := s.FlushEmbeddings(); err != nil {
+		t.Fatal(err)
+	}
 	if len(s.CanonicalHistory[3].Embedding) == 0 {
 		t.Fatalf("expected final answer embedding, got %#v", s.CanonicalHistory[3].Embedding)
 	}

@@ -296,4 +296,4 @@ Close the old `s.conv` and call `s.initWithHistory(s.CompactedHistory)` so the s
 
 
 5. **Background Embedding of the Iceberg:**
-When `RunTurn` exits and releases `s.turnGate`, `s.triggerBackgroundEmbedding()` wakes up the background worker. In addition to computing `part.Embedding` for the spoken turns, the worker can also embed `trace.Goal + "\n" + trace.SynthesizedPlan` into `trace.TraceEmbeddings`, making Pope's submerged reasoning searchable for future Contemplation passes at zero turn-time latency.
+When `RunTurn` exits and releases its session operation lease, `s.triggerBackgroundEmbedding()` wakes up the background worker. In addition to computing `part.Embedding` for the spoken turns, the worker can also embed `trace.Goal + "\n" + trace.SynthesizedPlan` into `trace.TraceEmbeddings`, making Pope's submerged reasoning searchable for future Contemplation passes at zero turn-time latency.

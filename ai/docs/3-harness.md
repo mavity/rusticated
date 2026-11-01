@@ -62,6 +62,8 @@ Tool execution failures use the same response path: return `{"error": "<message>
 
 `ai.Session` owns logical turn history, compaction, and conversation replacement because LiteRT-LM conversation state is opaque and does not support deleting old turns in place. Callers provide a `CompactionLimit` in `SessionConfig`; Kabibi uses 80% of the selected model's declared input-context limit when its provider catalog publishes one, and otherwise uses a conservative 8K-token budget. The Session projects compacted history into a replacement conversation seeded through the backend interface. Pope and other clients should use `ai.Session` rather than implementing a second history-compaction loop.
 
+Session operations use a short-held admission lock and an exclusive operation lease; inference, tool execution, embedding, and compaction do not run while holding the state lock. Callbacks also run without holding the callback-pointer lock. Overlapping operations fail immediately with `ai.ErrSessionBusy` rather than waiting or queueing. `Shutdown` marks the session closed and cancels active work; callers that must release the engine or embedder should call `WaitShutdown` after the active operation returns and before closing those resources.
+
 # Platform Abstraction
 
 The shared engine and conversation orchestration is separated from platform-specific LiteRT-LM calls by a small Go backend interface.

@@ -1,16 +1,19 @@
 package shell
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"ai"
 )
 
 type adaptiveEmbedder struct {
 	mu             sync.Mutex
+	busy           atomic.Bool
 	runner         *LazyAIRunner
 	session        *ai.Session
 	resident       *ai.Embedder
@@ -45,41 +48,64 @@ func (e *adaptiveEmbedder) CacheIdentity() string {
 }
 
 func (e *adaptiveEmbedder) Embed(parts []ai.PromptPart) ([]float32, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.disabledErr != nil {
-		return nil, e.disabledErr
+	return e.EmbedContext(context.Background(), parts)
+}
+
+func (e *adaptiveEmbedder) EmbedContext(ctx context.Context, parts []ai.PromptPart) ([]float32, error) {
+	if !e.busy.CompareAndSwap(false, true) {
+		return nil, errors.New("adaptive embedder is busy")
 	}
-	if !e.sequentialMode && e.resident != nil {
-		vector, err := e.resident.Embed(parts)
+	defer e.busy.Store(false)
+
+	e.mu.Lock()
+	disabledErr := e.disabledErr
+	sequentialMode := e.sequentialMode
+	resident := e.resident
+	e.mu.Unlock()
+	if disabledErr != nil {
+		return nil, disabledErr
+	}
+	if !sequentialMode && resident != nil {
+		vector, err := resident.Embed(parts)
 		if err == nil && len(vector) > 0 {
 			return vector, nil
 		}
 		if err == nil {
 			err = errors.New("resident embedder returned an empty vector")
 		}
-		e.resident.Close()
-		e.resident = nil
-		e.sequentialMode = true
+		e.mu.Lock()
+		if e.resident == resident {
+			e.resident = nil
+			e.sequentialMode = true
+		}
+		e.mu.Unlock()
+		resident.Close()
 	}
-	return e.embedSequential(parts)
+	return e.embedSequential(ctx, parts)
 }
 
-func (e *adaptiveEmbedder) embedSequential(parts []ai.PromptPart) ([]float32, error) {
-	if e.session == nil {
+func (e *adaptiveEmbedder) embedSequential(ctx context.Context, parts []ai.PromptPart) ([]float32, error) {
+	e.mu.Lock()
+	session := e.session
+	openEmbedder := e.openEmbedder
+	reopenEngine := e.reopenEngine
+	e.mu.Unlock()
+	if session == nil {
 		return nil, errors.New("sequential embedding has no bound AI session")
 	}
 	r := e.runner
+	if err := session.SuspendConversationDuringOperation(ctx); err != nil {
+		return nil, err
+	}
 	r.lifeMu.Lock()
-	defer r.lifeMu.Unlock()
-
-	e.session.SuspendConversation()
-	if r.engine != nil {
-		r.engine.Close()
-		r.engine = nil
+	engine := r.engine
+	r.engine = nil
+	r.lifeMu.Unlock()
+	if engine != nil {
+		engine.Close()
 	}
 
-	embedder, err := e.openEmbedder()
+	embedder, err := openEmbedder()
 	var vector []float32
 	if err == nil {
 		if embedder == nil {
@@ -93,34 +119,43 @@ func (e *adaptiveEmbedder) embedSequential(parts []ai.PromptPart) ([]float32, er
 		}
 	}
 
-	engine, reopenErr := e.reopenEngine()
+	engine, reopenErr := reopenEngine()
 	if reopenErr != nil {
 		lifecycleErr := fmt.Errorf("reload local AI engine after sequential embedding: %w", reopenErr)
+		r.lifeMu.Lock()
 		r.lifecycleErr = lifecycleErr
+		r.lifeMu.Unlock()
 		return nil, errors.Join(err, lifecycleErr)
 	}
-	r.engine = engine
-	if restoreErr := e.session.ReplaceEngine(engine); restoreErr != nil {
+	if restoreErr := session.ReplaceEngineDuringOperation(ctx, engine); restoreErr != nil {
 		engine.Close()
-		r.engine = nil
 		lifecycleErr := fmt.Errorf("restore AI conversation after sequential embedding: %w", restoreErr)
+		r.lifeMu.Lock()
 		r.lifecycleErr = lifecycleErr
+		r.lifeMu.Unlock()
 		return nil, errors.Join(err, lifecycleErr)
 	}
+	r.lifeMu.Lock()
+	r.engine = engine
+	r.lifeMu.Unlock()
 	if err != nil {
+		e.mu.Lock()
 		e.disabledErr = fmt.Errorf("sequential embedding failed: %w", err)
-		fmt.Fprintf(os.Stderr, "[kabibi] %v\n", e.disabledErr)
-		return nil, e.disabledErr
+		disabledErr := e.disabledErr
+		e.mu.Unlock()
+		fmt.Fprintf(os.Stderr, "[kabibi] %v\n", disabledErr)
+		return nil, disabledErr
 	}
 	return vector, nil
 }
 
 func (e *adaptiveEmbedder) Close() {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.resident != nil {
-		e.resident.Close()
-		e.resident = nil
+	resident := e.resident
+	e.resident = nil
+	e.mu.Unlock()
+	if resident != nil {
+		resident.Close()
 	}
 }
 

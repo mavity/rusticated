@@ -34,6 +34,11 @@ type AIRunner interface {
 // callbacks to the currently active turn.
 type LazyAIRunner struct {
 	mu            sync.Mutex
+	busy          bool
+	closing       bool
+	activeCancel  context.CancelFunc
+	closedDone    chan struct{}
+	closeOnce     sync.Once
 	lifeMu        sync.Mutex
 	execSess      *ExecutionSession
 	engine        *ai.Engine
@@ -53,47 +58,122 @@ type LazyAIRunner struct {
 
 // NewLazyAIRunner creates a lazy AI session manager bound to execSess.
 func NewLazyAIRunner(execSess *ExecutionSession) *LazyAIRunner {
-	return &LazyAIRunner{execSess: execSess}
+	return &LazyAIRunner{execSess: execSess, closedDone: make(chan struct{})}
 }
 
 // SetVerbose enables or disables verbose LiteRT-LM and embedding diagnostics.
-func (r *LazyAIRunner) SetVerbose(v bool) {
+func (r *LazyAIRunner) SetVerbose(v bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.closing {
+		return errors.New("AI runner is closed")
+	}
+	if r.busy {
+		return ErrAIRunnerBusy
+	}
 	r.verbose = v
+	return nil
 }
 
 // SetSystemContext appends additional system-message context before the
 // underlying ai.Session is initialized.
-func (r *LazyAIRunner) SetSystemContext(context string) {
+func (r *LazyAIRunner) SetSystemContext(context string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.closing {
+		return errors.New("AI runner is closed")
+	}
+	if r.busy {
+		return ErrAIRunnerBusy
+	}
 	r.systemContext = strings.TrimSpace(context)
+	return nil
 }
 
 // SetOnboardingPrompter injects the UI-specific callback used to configure AI
 // on the first turn. It must be set before the first call to RunTurn.
-func (r *LazyAIRunner) SetOnboardingPrompter(prompter OnboardingPrompter) {
+func (r *LazyAIRunner) SetOnboardingPrompter(prompter OnboardingPrompter) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.closing {
+		return errors.New("AI runner is closed")
+	}
+	if r.busy {
+		return ErrAIRunnerBusy
+	}
 	r.onboarding = prompter
+	return nil
 }
 
 // SetTerminalOpener injects the virtual PTY / CommandTerminal opener used for
 // interactive AI setup and provider authentication flows.
-func (r *LazyAIRunner) SetTerminalOpener(openFn func(ctx context.Context, title string) (ai.TerminalSession, func(exitCode int))) {
+func (r *LazyAIRunner) SetTerminalOpener(openFn func(ctx context.Context, title string) (ai.TerminalSession, func(exitCode int))) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.closing {
+		return errors.New("AI runner is closed")
+	}
+	if r.busy {
+		return ErrAIRunnerBusy
+	}
 	r.openTerm = openFn
+	return nil
 }
 
 // FlushEmbeddings waits for any pending background embeddings to complete.
-func (r *LazyAIRunner) FlushEmbeddings() {
+func (r *LazyAIRunner) FlushEmbeddings() error {
+	ctx, err := r.beginOperation(context.Background())
+	if err != nil {
+		return err
+	}
+	defer r.endOperation()
 	r.mu.Lock()
 	sess := r.session
 	r.mu.Unlock()
 	if sess != nil {
-		sess.FlushEmbeddings()
+		return sess.FlushEmbeddingsContext(ctx)
+	}
+	return nil
+}
+
+var ErrAIRunnerBusy = errors.New("AI runner is busy")
+var ErrAIRunnerClosed = errors.New("AI runner is closed")
+
+func (r *LazyAIRunner) beginOperation(ctx context.Context) (context.Context, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closing {
+		return nil, ErrAIRunnerClosed
+	}
+	if r.busy {
+		return nil, ErrAIRunnerBusy
+	}
+	opCtx, cancel := context.WithCancel(ctx)
+	r.busy = true
+	r.activeCancel = cancel
+	return opCtx, nil
+}
+
+func (r *LazyAIRunner) endOperation() {
+	r.setTurnCallbacks(nil, nil, nil)
+	r.mu.Lock()
+	if !r.busy {
+		r.mu.Unlock()
+		return
+	}
+	cancel := r.activeCancel
+	r.activeCancel = nil
+	r.busy = false
+	closing := r.closing
+	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if closing {
+		r.closeResources()
 	}
 }
 
@@ -360,9 +440,13 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 		return err
 	}
 
+	r.lifeMu.Lock()
 	r.engine = engine
 	r.embedder = partEmb
+	r.lifeMu.Unlock()
+	r.mu.Lock()
 	r.session = sess
+	r.mu.Unlock()
 	if adaptiveEmb != nil {
 		adaptiveEmb.BindSession(sess)
 	}
@@ -396,17 +480,25 @@ func kabibiSystemMessage(envContext string, sysContext string) string {
 
 // RunTurn runs a single AI turn, lazily initializing the underlying ai.Session if needed.
 func (r *LazyAIRunner) RunTurn(ctx context.Context, prompt string, onFeedback, onToolFeedback, onContent ai.LogFeedback) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	ctx, err := r.beginOperation(ctx)
+	if err != nil {
+		return err
+	}
+	defer r.endOperation()
 
 	r.setTurnCallbacks(onFeedback, onToolFeedback, onContent)
-	defer r.setTurnCallbacks(nil, nil, nil)
 
 	if err := r.ensureInitialized(ctx); err != nil {
 		return err
 	}
 
-	err := r.session.RunTurn(ctx, prompt)
+	r.mu.Lock()
+	sess := r.session
+	r.mu.Unlock()
+	if sess == nil {
+		return errors.New("AI session initialization completed without a session")
+	}
+	err = sess.RunTurn(ctx, prompt)
 	if err == nil && r.execSess != nil {
 		r.execSess.MarkAITurnCompleted()
 	}
@@ -417,7 +509,7 @@ func (r *LazyAIRunner) RunTurn(ctx context.Context, prompt string, onFeedback, o
 // headless/batch mode (`kabibi -c "..."`), routing valid shell commands to the
 // mvdan shell runner and falling back to ai.Session for syntax errors or
 // unresolvable commands.
-func ExecuteOneShotLine(ctx context.Context, line string, verbose bool, out io.Writer) (int, error) {
+func ExecuteOneShotLine(ctx context.Context, line string, verbose bool, out io.Writer) (exitCode int, retErr error) {
 	if out == nil {
 		out = os.Stdout
 	}
@@ -432,10 +524,25 @@ func ExecuteOneShotLine(ctx context.Context, line string, verbose bool, out io.W
 	}
 
 	aiRunner := NewLazyAIRunner(es)
-	aiRunner.SetVerbose(verbose)
-	aiRunner.SetOnboardingPrompter(NewStdioOnboardingPrompter(os.Stdin, out))
-	defer aiRunner.Close()
-
+	defer func() {
+		cleanupErr := closeOneShotResources(aiRunner, es)
+		if cleanupErr != nil {
+			if retErr == nil {
+				retErr = cleanupErr
+				if exitCode == 0 {
+					exitCode = 1
+				}
+			} else {
+				retErr = errors.Join(retErr, cleanupErr)
+			}
+		}
+	}()
+	if err := aiRunner.SetVerbose(verbose); err != nil {
+		return 1, err
+	}
+	if err := aiRunner.SetOnboardingPrompter(NewStdioOnboardingPrompter(os.Stdin, out)); err != nil {
+		return 1, err
+	}
 	route, parsed := es.ClassifyInput(line)
 	switch route {
 	case RouteEmpty, RouteBuiltin:
@@ -474,7 +581,7 @@ func ExecuteOneShotLine(ctx context.Context, line string, verbose bool, out io.W
 // ExecuteOneShotPrompt sends prompt directly to the AI without shell
 // classification or execution, appending systemContext to Kabibi's system
 // message. This is used for unrecognized command-line invocations.
-func ExecuteOneShotPrompt(ctx context.Context, prompt, systemContext string, verbose bool, out io.Writer) (int, error) {
+func ExecuteOneShotPrompt(ctx context.Context, prompt, systemContext string, verbose bool, out io.Writer) (exitCode int, retErr error) {
 	if out == nil {
 		out = os.Stdout
 	}
@@ -487,15 +594,44 @@ func ExecuteOneShotPrompt(ctx context.Context, prompt, systemContext string, ver
 		return 1, err
 	}
 	aiRunner := NewLazyAIRunner(es)
-	aiRunner.SetVerbose(verbose)
-	aiRunner.SetSystemContext(systemContext)
-	aiRunner.SetOnboardingPrompter(NewStdioOnboardingPrompter(os.Stdin, out))
-	defer aiRunner.Close()
-
+	defer func() {
+		cleanupErr := closeOneShotResources(aiRunner, es)
+		if cleanupErr != nil {
+			if retErr == nil {
+				retErr = cleanupErr
+				if exitCode == 0 {
+					exitCode = 1
+				}
+			} else {
+				retErr = errors.Join(retErr, cleanupErr)
+			}
+		}
+	}()
+	if err := aiRunner.SetVerbose(verbose); err != nil {
+		return 1, err
+	}
+	if err := aiRunner.SetSystemContext(systemContext); err != nil {
+		return 1, err
+	}
+	if err := aiRunner.SetOnboardingPrompter(NewStdioOnboardingPrompter(os.Stdin, out)); err != nil {
+		return 1, err
+	}
 	if err := runOneShotAI(ctx, aiRunner, prompt, out); err != nil {
 		return 1, err
 	}
 	return 0, nil
+}
+
+func closeOneShotResources(aiRunner *LazyAIRunner, execSession *ExecutionSession) error {
+	runnerErr := aiRunner.WaitClosed(context.Background())
+	sessionErr := execSession.Close()
+	if runnerErr != nil {
+		runnerErr = fmt.Errorf("close AI runner: %w", runnerErr)
+	}
+	if sessionErr != nil {
+		sessionErr = fmt.Errorf("close shell session: %w", sessionErr)
+	}
+	return errors.Join(runnerErr, sessionErr)
 }
 
 func runOneShotAI(ctx context.Context, aiRunner *LazyAIRunner, prompt string, out io.Writer) error {
@@ -522,28 +658,67 @@ func runOneShotAI(ctx context.Context, aiRunner *LazyAIRunner, prompt string, ou
 	if !endedWithNewline {
 		_, _ = io.WriteString(out, "\n")
 	}
-	aiRunner.FlushEmbeddings()
+	if err := aiRunner.FlushEmbeddings(); err != nil {
+		return err
+	}
 	return nil
 }
 
-// Close shuts down the AI session, embedder, and engine if initialized.
+// Close requests cancellation and shuts down immediately when no operation is
+// active. An active operation performs cleanup when it releases ownership.
 func (r *LazyAIRunner) Close() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.session != nil {
-		r.session.Shutdown()
-		r.session = nil
+	r.closing = true
+	cancel := r.activeCancel
+	busy := r.busy
+	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
-	r.lifeMu.Lock()
-	defer r.lifeMu.Unlock()
-	if r.embedder != nil {
-		if closer, ok := r.embedder.(interface{ Close() }); ok {
+	if !busy {
+		r.closeResources()
+	}
+}
+
+// WaitClosed waits for Close to finish releasing the runner's resources.
+// Call it outside callbacks running inside RunTurn; those callbacks should call
+// Close and let their caller wait after RunTurn returns.
+func (r *LazyAIRunner) WaitClosed(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	r.Close()
+	select {
+	case <-r.closedDone:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (r *LazyAIRunner) closeResources() {
+	r.closeOnce.Do(func() {
+		r.mu.Lock()
+		sess := r.session
+		r.session = nil
+		r.mu.Unlock()
+		if sess != nil {
+			sess.Shutdown()
+			_ = sess.WaitShutdown(context.Background())
+		}
+
+		r.lifeMu.Lock()
+		embedder := r.embedder
+		engine := r.engine
+		r.embedder = nil
+		r.engine = nil
+		r.lifeMu.Unlock()
+		if closer, ok := embedder.(interface{ Close() }); ok {
 			closer.Close()
 		}
-		r.embedder = nil
-	}
-	if r.engine != nil {
-		r.engine.Close()
-		r.engine = nil
-	}
+		if engine != nil {
+			engine.Close()
+		}
+		close(r.closedDone)
+	})
 }

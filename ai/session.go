@@ -28,6 +28,19 @@ type TurnTiming struct {
 
 type turnTimingCtxKey struct{}
 
+var (
+	ErrSessionBusy   = errors.New("ai: session is busy")
+	ErrSessionClosed = errors.New("ai: session is shutting down")
+)
+
+type sessionOperation struct {
+	session *Session
+	cancel  context.CancelFunc
+	done    chan struct{}
+}
+
+type sessionOperationCtxKey struct{}
+
 // WithTurnTiming attaches user turn timing metadata to ctx for Session.RunTurn.
 func WithTurnTiming(ctx context.Context, timing TurnTiming) context.Context {
 	if ctx == nil {
@@ -348,15 +361,76 @@ type Session struct {
 	totalTokensEst      int
 	artifactCache       map[string]string
 
-	historyMu      sync.Mutex
-	turnGate       sync.Mutex
-	turnWaiting    atomic.Bool
-	embeddedUpTo   int
-	embedTrigger   chan struct{}
-	embedStop      chan struct{}
-	embedDone      chan struct{}
-	embedOnce      sync.Once
-	embedCloseOnce sync.Once
+	historyMu                sync.Mutex
+	operationMu              sync.Mutex
+	activeOperation          *sessionOperation
+	shuttingDown             bool
+	shutdownConvCloseClaimed bool
+	turnWaiting              atomic.Bool
+	embeddedUpTo             int
+	embedTrigger             chan struct{}
+	embedStop                chan struct{}
+	embedDone                chan struct{}
+	embedOnce                sync.Once
+	embedCloseOnce           sync.Once
+}
+
+func (s *Session) beginOperation(ctx context.Context) (context.Context, *sessionOperation, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	s.operationMu.Lock()
+	if s.shuttingDown {
+		s.operationMu.Unlock()
+		return nil, nil, ErrSessionClosed
+	}
+	if s.activeOperation != nil {
+		s.operationMu.Unlock()
+		return nil, nil, ErrSessionBusy
+	}
+
+	opCtx, cancel := context.WithCancel(ctx)
+	op := &sessionOperation{
+		session: s,
+		cancel:  cancel,
+		done:    make(chan struct{}),
+	}
+	s.activeOperation = op
+	s.operationMu.Unlock()
+
+	return context.WithValue(opCtx, sessionOperationCtxKey{}, op), op, nil
+}
+
+func (s *Session) endOperation(op *sessionOperation) {
+	s.operationMu.Lock()
+	if s.activeOperation != op {
+		s.operationMu.Unlock()
+		return
+	}
+	s.activeOperation = nil
+	shuttingDown := s.shuttingDown
+	s.operationMu.Unlock()
+
+	op.cancel()
+	if shuttingDown {
+		s.closeConv()
+	}
+	close(op.done)
+}
+
+func (s *Session) operationFromContext(ctx context.Context) (*sessionOperation, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	op, ok := ctx.Value(sessionOperationCtxKey{}).(*sessionOperation)
+	if !ok || op == nil || op.session != s {
+		return nil, false
+	}
+	s.operationMu.Lock()
+	active := s.activeOperation == op
+	s.operationMu.Unlock()
+	return op, active
 }
 
 // NewSession constructs a Session from declarative configuration.
@@ -456,10 +530,16 @@ func compileToolParameters(tool Tool) map[string]any {
 
 func (s *Session) appendHistory(parts ...PromptPart) {
 	s.historyMu.Lock()
-	defer s.historyMu.Unlock()
+	compacted := append([]PromptPart(nil), s.CompactedHistory...)
+	s.historyMu.Unlock()
+	compacted = append(compacted, parts...)
+	totalTokens := s.estimateTokens(compacted)
+
+	s.historyMu.Lock()
 	s.CanonicalHistory = append(s.CanonicalHistory, parts...)
 	s.CompactedHistory = append(s.CompactedHistory, parts...)
-	s.totalTokensEst = s.estimateTokens(s.CompactedHistory)
+	s.totalTokensEst = totalTokens
+	s.historyMu.Unlock()
 }
 
 // AdoptSessionState replaces s's mutable history, compaction state, and
@@ -670,6 +750,11 @@ func (s *Session) startEmbedWorker() {
 	if !s.hasEmbedder() {
 		return
 	}
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	if s.shuttingDown {
+		return
+	}
 	s.embedOnce.Do(func() {
 		s.embedTrigger = make(chan struct{}, 1)
 		s.embedStop = make(chan struct{})
@@ -696,31 +781,37 @@ func (s *Session) embedWorkerLoop() {
 		case <-s.embedStop:
 			return
 		case <-s.embedTrigger:
-			s.processPendingEmbeddings(false)
+			_ = s.processPendingEmbeddings(context.Background(), false)
 		}
 	}
 }
 
 // processPendingEmbeddings embeds unembedded PromptPart items in CanonicalHistory
-// one by one while holding turnGate so it never contends with active LLM generation.
+// one by one while owning the session operation slot.
 // If flushAll is false, it yields immediately as soon as a user turn is waiting.
-func (s *Session) processPendingEmbeddings(flushAll bool) {
+func (s *Session) processPendingEmbeddings(parent context.Context, flushAll bool) error {
+	if !flushAll && s.turnWaiting.Load() {
+		return nil
+	}
+	ctx, op, err := s.beginOperation(parent)
+	if err != nil {
+		if !flushAll && errors.Is(err, ErrSessionBusy) {
+			return nil
+		}
+		return err
+	}
+	defer s.endOperation(op)
+
 	for {
 		if !flushAll {
 			select {
 			case <-s.embedStop:
-				return
+				return nil
 			default:
 			}
 			if s.turnWaiting.Load() {
-				return
+				return nil
 			}
-		}
-
-		s.turnGate.Lock()
-		if !flushAll && s.turnWaiting.Load() {
-			s.turnGate.Unlock()
-			return
 		}
 
 		s.historyMu.Lock()
@@ -729,18 +820,16 @@ func (s *Session) processPendingEmbeddings(flushAll bool) {
 		}
 		if s.embeddedUpTo >= len(s.CanonicalHistory) {
 			s.historyMu.Unlock()
-			s.turnGate.Unlock()
-			return
+			return nil
 		}
 		idx := s.embeddedUpTo
 		part := s.CanonicalHistory[idx]
 		s.historyMu.Unlock()
 
-		vec, err := s.embedder.Embed([]PromptPart{part})
+		vec, err := EmbedWithContext(ctx, s.embedder, []PromptPart{part})
 		s.historyMu.Lock()
 		s.applyEmbeddingLocked(idx, part, vec, err)
 		s.historyMu.Unlock()
-		s.turnGate.Unlock()
 	}
 }
 
@@ -759,7 +848,7 @@ func (s *Session) applyEmbeddingLocked(idx int, part PromptPart, vec []float32, 
 	}
 }
 
-func (s *Session) flushEmbeddingsInline() {
+func (s *Session) flushEmbeddingsInline(ctx context.Context) {
 	if !s.hasEmbedder() {
 		return
 	}
@@ -776,7 +865,7 @@ func (s *Session) flushEmbeddingsInline() {
 		part := s.CanonicalHistory[idx]
 		s.historyMu.Unlock()
 
-		vec, err := s.embedder.Embed([]PromptPart{part})
+		vec, err := EmbedWithContext(ctx, s.embedder, []PromptPart{part})
 		s.historyMu.Lock()
 		s.applyEmbeddingLocked(idx, part, vec, err)
 		s.historyMu.Unlock()
@@ -821,14 +910,23 @@ func syncCompactedEmbedding(compacted []PromptPart, target PromptPart, vec []flo
 }
 
 // FlushEmbeddings synchronously finishes any pending embeddings in CanonicalHistory.
-func (s *Session) FlushEmbeddings() {
+func (s *Session) FlushEmbeddings() error {
+	return s.FlushEmbeddingsContext(context.Background())
+}
+
+func (s *Session) FlushEmbeddingsContext(ctx context.Context) error {
 	if !s.hasEmbedder() {
-		return
+		return nil
 	}
-	s.processPendingEmbeddings(true)
+	return s.processPendingEmbeddings(ctx, true)
 }
 
 func (s *Session) Init() error {
+	_, op, err := s.beginOperation(context.Background())
+	if err != nil {
+		return err
+	}
+	defer s.endOperation(op)
 	return s.initWithHistory(s.snapshotCompactedHistory())
 }
 
@@ -878,12 +976,32 @@ func (s *Session) initWithHistory(history []PromptPart) error {
 }
 
 // ReplaceEngine rebuilds the active conversation on engine using the current
-// compacted history. Callers must hold the turn gate and ensure no generation
-// or other embedding operation is active while replacing the engine.
+// compacted history. It fails immediately if another session operation is active.
 func (s *Session) ReplaceEngine(engine *Engine) error {
 	if s == nil || engine == nil {
 		return errors.New("replace session engine requires a non-nil session and engine")
 	}
+	_, op, err := s.beginOperation(context.Background())
+	if err != nil {
+		return err
+	}
+	defer s.endOperation(op)
+	return s.replaceEngine(engine)
+}
+
+// ReplaceEngineDuringOperation replaces the engine while reusing an active
+// session operation, such as the embedding worker's engine fallback.
+func (s *Session) ReplaceEngineDuringOperation(ctx context.Context, engine *Engine) error {
+	if s == nil || engine == nil {
+		return errors.New("replace session engine requires a non-nil session and engine")
+	}
+	if _, ok := s.operationFromContext(ctx); !ok {
+		return ErrSessionBusy
+	}
+	return s.replaceEngine(engine)
+}
+
+func (s *Session) replaceEngine(engine *Engine) error {
 	s.closeConv()
 	s.engine = engine
 	s.historyMu.Lock()
@@ -897,28 +1015,59 @@ func (s *Session) ReplaceEngine(engine *Engine) error {
 }
 
 // SuspendConversation closes the current model conversation before an engine
-// is released. The caller must hold the Session turn gate.
-func (s *Session) SuspendConversation() {
-	if s != nil {
-		s.closeConv()
+// is released, failing immediately if another operation is active.
+func (s *Session) SuspendConversation() error {
+	if s == nil {
+		return nil
 	}
+	_, op, err := s.beginOperation(context.Background())
+	if err != nil {
+		return err
+	}
+	defer s.endOperation(op)
+	s.closeConv()
+	return nil
 }
 
-func (s *Session) Close() {
+// SuspendConversationDuringOperation closes the conversation while reusing the
+// caller's active session operation.
+func (s *Session) SuspendConversationDuringOperation(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	if _, ok := s.operationFromContext(ctx); !ok {
+		return ErrSessionBusy
+	}
 	s.closeConv()
+	return nil
+}
+
+func (s *Session) Close() error {
+	if s == nil {
+		return nil
+	}
+	_, op, err := s.beginOperation(context.Background())
+	if err != nil {
+		return err
+	}
+	defer s.endOperation(op)
+	s.closeConv()
+	return nil
 }
 
 // CompactContext projects canonical history into the compacted model context.
 func (s *Session) CompactContext(ctx context.Context) error {
 	s.turnWaiting.Store(true)
-	s.turnGate.Lock()
+	ctx, op, err := s.beginOperation(ctx)
 	s.turnWaiting.Store(false)
+	if err != nil {
+		return err
+	}
 	defer func() {
-		s.turnGate.Unlock()
+		s.endOperation(op)
 		s.triggerBackgroundEmbedding()
 	}()
-	err := s.compactContext(ctx, s.emitFeedback)
-	return err
+	return s.compactContext(ctx, s.emitFeedback)
 }
 
 func (s *Session) closeConv() {
@@ -928,16 +1077,64 @@ func (s *Session) closeConv() {
 	}
 }
 
-// Shutdown stops the background embedding worker and closes the active conversation.
+// Shutdown requests cancellation and closes the embedding worker. If an
+// operation is active, it returns immediately; that operation closes the
+// conversation when it releases ownership.
 func (s *Session) Shutdown() {
-	if s.embedStop != nil {
+	if s == nil {
+		return
+	}
+	s.operationMu.Lock()
+	s.shuttingDown = true
+	op := s.activeOperation
+	closeConv := op == nil && !s.shutdownConvCloseClaimed
+	s.shutdownConvCloseClaimed = true
+	embedStop := s.embedStop
+	s.operationMu.Unlock()
+	if op != nil {
+		op.cancel()
+	}
+
+	if embedStop != nil {
 		s.embedCloseOnce.Do(func() {
-			s.turnWaiting.Store(true)
-			close(s.embedStop)
-			<-s.embedDone
+			close(embedStop)
 		})
 	}
-	s.closeConv()
+	if closeConv {
+		s.closeConv()
+	}
+}
+
+// WaitShutdown waits for a prior or newly-issued Shutdown request to finish.
+// Call it outside callbacks running inside a session operation; those callbacks
+// should request Shutdown and let their caller wait after the operation returns.
+func (s *Session) WaitShutdown(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.Shutdown()
+
+	s.operationMu.Lock()
+	op := s.activeOperation
+	s.operationMu.Unlock()
+	if op != nil {
+		select {
+		case <-op.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if s.embedDone != nil {
+		select {
+		case <-s.embedDone:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
 }
 
 func isContextOverflowError(err error) bool {
@@ -1111,10 +1308,13 @@ func (s *Session) RunTurn(ctx context.Context, userText string) error {
 
 func (s *Session) RunTurnWithTiming(ctx context.Context, userText string, timing TurnTiming) error {
 	s.turnWaiting.Store(true)
-	s.turnGate.Lock()
+	ctx, op, err := s.beginOperation(ctx)
 	s.turnWaiting.Store(false)
+	if err != nil {
+		return err
+	}
 	defer func() {
-		s.turnGate.Unlock()
+		s.endOperation(op)
 		s.triggerBackgroundEmbedding()
 	}()
 
@@ -1141,6 +1341,12 @@ func (s *Session) RunTurnWithTiming(ctx context.Context, userText string, timing
 	responseStartedAt := time.Now()
 	executedToolParts, finalAnswer, compactedDuringTurn, err := s.runAgenticTurn(ctx, &baseHistory, userPart)
 	if err != nil {
+		s.operationMu.Lock()
+		shuttingDown := s.shuttingDown
+		s.operationMu.Unlock()
+		if shuttingDown {
+			return err
+		}
 		s.closeConv()
 		if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
@@ -1961,7 +2167,7 @@ func (s *Session) projectHistory(ctx context.Context, prior []PromptPart) []Prom
 
 func (s *Session) compactContextForRetry(ctx context.Context, pendingParts int, feedback LogFeedback) error {
 	// Step 1: Synchronously flush any missing embeddings in CanonicalHistory.
-	s.flushEmbeddingsInline()
+	s.flushEmbeddingsInline(ctx)
 
 	before := historySize(s.CompactedHistory)
 	if feedback != nil {
@@ -1999,15 +2205,16 @@ func (s *Session) compactContextForRetry(ctx context.Context, pendingParts int, 
 		}
 	}
 
+	compacted := append(append([]PromptPart(nil), prior...), pending...)
+	after := historySize(compacted)
 	s.historyMu.Lock()
-	s.CompactedHistory = append(append([]PromptPart(nil), prior...), pending...)
-	after := historySize(s.CompactedHistory)
+	s.CompactedHistory = compacted
 	s.historyMu.Unlock()
 	if feedback != nil {
 		feedback(fmt.Sprintf("%d:%d", before, after))
 	}
 
-	s.Close()
+	s.closeConv()
 	// Seed the new conversation with prior history only; RunTurn will send pending turnParts next.
 	return s.initWithHistory(prior)
 }
