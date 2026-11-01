@@ -723,9 +723,9 @@ func generateGoOverlay(ws, goroot string, verbose bool) error {
 		// rusticatedSocket is defined in the new overlay file net_rusticated.go.
 		{pat: `(?s)func socket\(ctx context\.Context, net string, family, sotype, proto int, ipv6only bool, laddr, raddr sockaddr, ctrlCtxFn func\(context\.Context, string, string, syscall\.RawConn\) error\) \(\*netFD, error\) \{.*?return fd, nil\n\}`,
 			repl: "func socket(ctx context.Context, net string, family, sotype, proto int, ipv6only bool, laddr, raddr sockaddr, ctrlCtxFn func(context.Context, string, string, syscall.RawConn) error) (*netFD, error) {\n\treturn rusticatedSocket(ctx, net, family, sotype, proto, ipv6only, laddr, raddr, ctrlCtxFn)\n}"},
-		// Patch Close to immediately invoke syscall.Close to avoid poll.FD refcount deadlock
+		// Cancel Rusticated host I/O before poll.FD.Close waits for active references.
 		{pat: `(?s)func \(fd \*netFD\) Close\(\) error \{.*?return fd\.pfd\.Close\(\)\n\}`,
-			repl: "func (fd *netFD) Close() error {\n\tif fd.fakeNetFD != nil {\n\t\treturn fd.fakeNetFD.Close()\n\t}\n\truntime.SetFinalizer(fd, nil)\n\tsyscall.Close(fd.pfd.Sysfd)\n\treturn fd.pfd.Close()\n}"},
+			repl: "func (fd *netFD) Close() error {\n\tif fd.fakeNetFD != nil {\n\t\treturn fd.fakeNetFD.Close()\n\t}\n\truntime.SetFinalizer(fd, nil)\n\tsyscall.CancelFD(fd.pfd.Sysfd)\n\treturn fd.pfd.Close()\n}"},
 	})
 	if err != nil {
 		return fmt.Errorf("patch net_fake.go: %w", err)
@@ -735,10 +735,8 @@ func generateGoOverlay(ws, goroot string, verbose bool) error {
 		return fmt.Errorf("could not patch socket() in net_fake.go: rusticatedSocket call not inserted")
 	}
 
-	// Patch src/net/fd_fake.go so (fd *netFD) Close() immediately invokes
-	// syscall.Close(fd.pfd.Sysfd) before fd.pfd.Close() waits on csema.
-	// Without this, closing a listener/conn while Accept()/Read() is parked in
-	// awaitOverlapped deadlocks forever waiting for the syscall to return.
+	// Patch src/net/fd_fake.go so Close cancels Rusticated overlapped operations
+	// before poll.FD.Close waits for their references to drain.
 	fdFakeSrc := filepath.Join(goroot, "src/net/fd_fake.go")
 	fdFakeContent, err := os.ReadFile(fdFakeSrc)
 	if err != nil {
@@ -752,12 +750,12 @@ func generateGoOverlay(ws, goroot string, verbose bool) error {
 	)
 	fdFakeStr, err = patchGoStr(fdFakeStr, []regastPatch{
 		{pat: `(?s)func \(fd \*netFD\) Close\(\) error \{.*?return fd\.pfd\.Close\(\)\n\}`,
-			repl: "func (fd *netFD) Close() error {\n\tif fd.fakeNetFD != nil {\n\t\treturn fd.fakeNetFD.Close()\n\t}\n\truntime.SetFinalizer(fd, nil)\n\tsyscall.Close(fd.pfd.Sysfd)\n\treturn fd.pfd.Close()\n}"},
+			repl: "func (fd *netFD) Close() error {\n\tif fd.fakeNetFD != nil {\n\t\treturn fd.fakeNetFD.Close()\n\t}\n\truntime.SetFinalizer(fd, nil)\n\tsyscall.CancelFD(fd.pfd.Sysfd)\n\treturn fd.pfd.Close()\n}"},
 	})
 	if err != nil {
 		return fmt.Errorf("patch fd_fake.go: %w", err)
 	}
-	if !strings.Contains(fdFakeStr, "syscall.Close(fd.pfd.Sysfd)") {
+	if !strings.Contains(fdFakeStr, "syscall.CancelFD(fd.pfd.Sysfd)") {
 		return fmt.Errorf("could not patch Close() in fd_fake.go")
 	}
 	genFdFakeGo := filepath.Join(genDir, "net/fd_fake.go")
@@ -1092,11 +1090,11 @@ func ensureElfDloadStubs(baseDir string) error {
 	cSyms := []string{"malloc", "free", "read", "write", "usleep", "getauxval", "_exit"}
 
 	type stubSpec struct {
-		subDir    string
-		machine   uint16
-		is64      bool
-		dlSoname  string
-		cSoname   string
+		subDir   string
+		machine  uint16
+		is64     bool
+		dlSoname string
+		cSoname  string
 	}
 	specs := []stubSpec{
 		{subDir: "linux-gnu-amd64", machine: 62, is64: true, dlSoname: "libdl.so.2", cSoname: "libc.so.6"},
@@ -1250,9 +1248,9 @@ func buildMinimalElfSharedStub(machine uint16, is64 bool, soname string, symbols
 	if is64 {
 		var ehdr [64]byte
 		copy(ehdr[0:4], "\x7fELF")
-		ehdr[4] = 2 // ELFCLASS64
-		ehdr[5] = 1 // ELFDATA2LSB
-		ehdr[6] = 1 // EV_CURRENT
+		ehdr[4] = 2                                   // ELFCLASS64
+		ehdr[5] = 1                                   // ELFDATA2LSB
+		ehdr[6] = 1                                   // EV_CURRENT
 		binary.LittleEndian.PutUint16(ehdr[16:18], 3) // ET_DYN
 		binary.LittleEndian.PutUint16(ehdr[18:20], machine)
 		binary.LittleEndian.PutUint32(ehdr[20:24], 1) // EV_CURRENT
@@ -1265,9 +1263,9 @@ func buildMinimalElfSharedStub(machine uint16, is64 bool, soname string, symbols
 	} else {
 		var ehdr [52]byte
 		copy(ehdr[0:4], "\x7fELF")
-		ehdr[4] = 1 // ELFCLASS32
-		ehdr[5] = 1 // ELFDATA2LSB
-		ehdr[6] = 1 // EV_CURRENT
+		ehdr[4] = 1                                   // ELFCLASS32
+		ehdr[5] = 1                                   // ELFDATA2LSB
+		ehdr[6] = 1                                   // EV_CURRENT
 		binary.LittleEndian.PutUint16(ehdr[16:18], 3) // ET_DYN
 		binary.LittleEndian.PutUint16(ehdr[18:20], machine)
 		binary.LittleEndian.PutUint32(ehdr[20:24], 1) // EV_CURRENT
@@ -1342,4 +1340,3 @@ func buildMinimalElfSharedStub(machine uint16, is64 bool, soname string, symbols
 
 	return out.Bytes()
 }
-

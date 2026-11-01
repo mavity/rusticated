@@ -6,12 +6,9 @@
 //!
 //! Every in-flight overlapped operation has its state ([`OpState`]) owned by an
 //! [`Rc`]. The registry holds one clone; the future awaiting completion holds
-//! another. When the future is dropped before completion, its clone goes away
-//! but the registry's clone keeps the [`Overlapped`] struct — and any
-//! associated buffer — alive at a stable address. The host may therefore
-//! continue to write into that memory safely. When [`tick()`] later observes
-//! the completion flag, the registry drops its clone; if the future is also
-//! gone, the allocation is freed cleanly with no use-after-free.
+//! another. If the future is dropped before completion, it synchronously
+//! cancels the host operation before removing the registry's clone, so the
+//! host cannot later access the overlapped memory or associated buffer.
 
 use crate::abi::Overlapped;
 use crate::abi::imports;
@@ -57,16 +54,6 @@ struct OpState {
     /// Optional buffer pinned for the duration of the operation. Held here so
     /// the buffer outlives the future that originated it.
     buffer: UnsafeCell<Option<Vec<u8>>>,
-}
-
-impl Drop for OpState {
-    fn drop(&mut self) {
-        // If the operation is not complete, we must tell the host to stop
-        // using this pointer before we free it.
-        if !self.is_complete() {
-            unsafe { imports::cancel(self.overlapped_ptr()) };
-        }
-    }
 }
 
 impl OpState {
@@ -182,6 +169,13 @@ fn register(state: Rc<OpState>, waker: Waker) {
     completion_registry().borrow_mut().push((state, waker));
 }
 
+fn cancel_registered(state: &Rc<OpState>) {
+    unsafe { imports::cancel(state.overlapped_ptr()) };
+    completion_registry()
+        .borrow_mut()
+        .retain(|(registered, _)| !Rc::ptr_eq(registered, state));
+}
+
 /// Submit the main future to the runtime.
 ///
 /// Invoked by the guest's `guest_init` callback during the first [`run()`]
@@ -254,9 +248,9 @@ fn noop_waker() -> Waker {
 /// Future awaiting a host-driven overlapped operation.
 ///
 /// The op closure is invoked on first poll with a `*mut Overlapped` whose
-/// address remains valid until the host signals completion (or the program
-/// terminates). Dropping this future before completion leaves the registry
-/// holding the state until completion; no use-after-free can occur.
+/// address remains valid until the host signals completion or the operation is
+/// synchronously cancelled. Dropping this future before completion cancels the
+/// host operation before releasing the registered state.
 pub struct OverlappedFuture {
     state: Rc<OpState>,
     op: Option<Box<dyn FnOnce(*mut Overlapped)>>,
@@ -304,9 +298,7 @@ impl Future for OverlappedFuture {
 impl Drop for OverlappedFuture {
     fn drop(&mut self) {
         if self.started && !self.state.is_complete() {
-            unsafe {
-                imports::cancel(self.state.overlapped_ptr());
-            }
+            cancel_registered(&self.state);
         }
     }
 }
@@ -318,9 +310,9 @@ impl Drop for OverlappedFuture {
 ///
 /// The buffer is moved into the future, kept alive by the [`Rc`]-shared state
 /// while the operation is in flight, and returned to the caller alongside the
-/// completion result. Dropping the future cancels the caller's claim to the
-/// buffer but the registry retains it until completion, so the host's writes
-/// remain sound.
+/// completion result. Dropping the future synchronously cancels the host
+/// operation before releasing the buffer, so the host cannot write into it
+/// afterward.
 pub struct OverlappedBufferFuture {
     state: Rc<OpState>,
     op: Option<Box<dyn FnOnce(*mut Overlapped, *mut u8, u32)>>,
@@ -389,9 +381,7 @@ impl Future for OverlappedBufferFuture {
 impl Drop for OverlappedBufferFuture {
     fn drop(&mut self) {
         if self.started && !self.state.is_complete() {
-            unsafe {
-                imports::cancel(self.state.overlapped_ptr());
-            }
+            cancel_registered(&self.state);
         }
     }
 }

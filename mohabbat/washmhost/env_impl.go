@@ -313,6 +313,9 @@ func (h *HostEnv) CancelOp(ovPtr uint32) {
 			state.isCancelled = true
 			delete(h.activeOps, ovPtr)
 			h.mu.Unlock()
+			if h.mod != nil {
+				_ = writeOverlapped(h.mod, ovPtr, wasiECANCELED, 0, 0)
+			}
 			h.DecOpsFor(state)
 			return
 		}
@@ -326,6 +329,10 @@ func (h *HostEnv) CancelOp(ovPtr uint32) {
 		}
 		delete(h.activeOps, ovPtr)
 		h.mu.Unlock()
+
+		if h.mod != nil {
+			_ = writeOverlapped(h.mod, ovPtr, wasiECANCELED, 0, 0)
+		}
 
 		if state.handle != nil {
 			if c, ok := state.handle.(interface{ SetDeadline(time.Time) error }); ok {

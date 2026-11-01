@@ -4,6 +4,9 @@ import { HostState, makeBrainImports, marshalStat, READ_FLAG_POSITIONAL } from '
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import net from 'node:net';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 
 async function waitForHostResult(host, memory, ovPtr) {
     for (let attempt = 0; attempt < 100 && host.completionQueue.length === 0; attempt++) {
@@ -70,6 +73,135 @@ test('writeOverlapped sets FLAG_COMPLETED', () => {
     assert.equal(view.getUint32(0, true), 1); // FLAG_COMPLETED
     assert.equal(view.getUint32(4, true), 0); // error
     assert.equal(view.getBigUint64(16, true), 42n); // resultExt
+});
+
+test('cancel ends a timer operation with ECANCELED and suppresses late completion', async () => {
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const host = new HostState();
+    host.memory = memory;
+    const { env } = makeBrainImports(host, []);
+    const view = new DataView(memory.buffer);
+    const ovPtr = 32;
+
+    env.timer_set(ovPtr, 10);
+    assert.equal(host.hasPending(), true);
+    env.cancel(ovPtr);
+    assert.equal(host.hasPending(), false);
+    assert.equal(view.getUint32(ovPtr, true), 1);
+    assert.equal(view.getUint32(ovPtr + 4, true), 11);
+
+    await new Promise(resolve => setTimeout(resolve, 25));
+    host.drainQueue();
+    assert.equal(view.getUint32(ovPtr, true), 1);
+    assert.equal(view.getUint32(ovPtr + 4, true), 11);
+});
+
+test('cancel removes listeners for a pending pipe read and marks ECANCELED', () => {
+      const memory = new WebAssembly.Memory({ initial: 1 });
+      const host = new HostState();
+      host.memory = memory;
+      const { env } = makeBrainImports(host, []);
+      const stream = new PassThrough();
+      const handle = host.allocHandle({
+          type: 'pipe_r',
+          stream,
+          leftovers: null,
+          onData: null,
+          closed: false,
+          error: null,
+      });
+      const view = new DataView(memory.buffer);
+      const ovPtr = 32;
+
+      env.read(ovPtr, handle, 256, 4);
+      assert.equal(stream.listenerCount('data'), 1);
+      env.cancel(ovPtr);
+
+      assert.equal(host.hasPending(), false);
+      assert.equal(stream.listenerCount('data'), 0);
+      assert.equal(stream.listenerCount('end'), 0);
+      assert.equal(stream.listenerCount('error'), 0);
+      assert.equal(stream.listenerCount('close'), 0);
+      assert.equal(view.getUint32(ovPtr, true), 1);
+      assert.equal(view.getUint32(ovPtr + 4, true), 11);
+      stream.write(Buffer.from('late'));
+      host.drainQueue();
+      assert.equal(view.getUint32(ovPtr, true), 1);
+      assert.equal(view.getUint32(ovPtr + 4, true), 11);
+      assert.deepEqual(Array.from(new Uint8Array(memory.buffer, 256, 4)), [0, 0, 0, 0]);
+      stream.destroy();
+});
+
+test('cancel removes listeners for a pending network accept', () => {
+      const memory = new WebAssembly.Memory({ initial: 1 });
+      const host = new HostState();
+      host.memory = memory;
+      const { env } = makeBrainImports(host, []);
+      const server = net.createServer();
+      const handle = host.allocHandle({ type: 'server', server });
+      const view = new DataView(memory.buffer);
+      const ovPtr = 32;
+
+      env.net_accept(ovPtr, handle);
+      assert.equal(server.listenerCount('connection'), 1);
+      assert.equal(server.listenerCount('error'), 1);
+      env.cancel(ovPtr);
+
+      assert.equal(host.hasPending(), false);
+      assert.equal(server.listenerCount('connection'), 0);
+      assert.equal(server.listenerCount('error'), 0);
+      host.drainQueue();
+      assert.equal(view.getUint32(ovPtr, true), 1);
+      assert.equal(view.getUint32(ovPtr + 4, true), 11);
+});
+
+test('cancel removes a pending child-process exit listener', () => {
+      const memory = new WebAssembly.Memory({ initial: 1 });
+      const host = new HostState();
+      host.memory = memory;
+      const { env } = makeBrainImports(host, []);
+      const child = new EventEmitter();
+      const handle = host.allocHandle({ type: 'child', cp: child });
+      const view = new DataView(memory.buffer);
+      const ovPtr = 32;
+
+      env.process_wait(ovPtr, handle);
+      assert.equal(child.listenerCount('exit'), 1);
+      env.cancel(ovPtr);
+
+      assert.equal(host.hasPending(), false);
+      assert.equal(child.listenerCount('exit'), 0);
+      child.emit('exit', 0, null);
+      host.drainQueue();
+      assert.equal(view.getUint32(ovPtr, true), 1);
+      assert.equal(view.getUint32(ovPtr + 4, true), 11);
+});
+
+test('cancel closes pending network opens without allocating handles or completing later', async () => {
+      const memory = new WebAssembly.Memory({ initial: 1 });
+      const host = new HostState();
+      host.memory = memory;
+      const { env } = makeBrainImports(host, []);
+      const view = new DataView(memory.buffer);
+      const addrPtr = 256;
+      const addrLen = writeString(memory, addrPtr, '127.0.0.1');
+      const handleCount = host.handles.size;
+      const ovConnect = 32;
+      const ovListen = 64;
+
+      env.net_open(ovConnect, addrPtr, addrLen, 9, 1);
+      env.cancel(ovConnect);
+      env.net_open(ovListen, addrPtr, addrLen, 0, 0);
+      env.cancel(ovListen);
+
+      await new Promise(resolve => setTimeout(resolve, 25));
+      host.drainQueue();
+      assert.equal(host.hasPending(), false);
+      assert.equal(host.handles.size, handleCount);
+      for (const ovPtr of [ovConnect, ovListen]) {
+          assert.equal(view.getUint32(ovPtr, true), 1);
+          assert.equal(view.getUint32(ovPtr + 4, true), 11);
+      }
 });
 
 test('positioned read preserves the handle position and rejects stream handles', async () => {

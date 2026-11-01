@@ -229,4 +229,9 @@ func TestSlashSettingsOpensDialogAndEscapeShowsPanels(t *testing.T) {
 	if !widget.PanelsVisible() {
 		t.Fatal("Escape with empty input and hidden panels did not show the panels")
 	}
+
+	widget.HandleEvent(input.KeyPressEvent{Code: input.KeyEscape})
+	if widget.PanelsVisible() {
+		t.Fatal("second Escape with visible panels did not hide the panels")
+	}
 }

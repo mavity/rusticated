@@ -109,6 +109,78 @@ func TestTCPReadObservesPeerClose(t *testing.T) {
 	}
 }
 
+func TestTCPCloseCancelsActiveReadAndAcceptWithoutDoubleClose(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	acceptDone := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if conn != nil {
+			_ = conn.Close()
+		}
+		acceptDone <- err
+	}()
+
+	time.Sleep(25 * time.Millisecond)
+	if err := listener.Close(); err != nil {
+		t.Fatalf("listener.Close() while Accept pending returned error: %v", err)
+	}
+
+	select {
+	case err := <-acceptDone:
+		if err == nil {
+			t.Fatal("Accept() after listener.Close() returned nil error")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Accept() did not unblock after listener.Close()")
+	}
+
+	l2, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l2.Close()
+
+	serverConnReady := make(chan net.Conn, 1)
+	go func() {
+		c, err := l2.Accept()
+		if err == nil {
+			serverConnReady <- c
+		}
+	}()
+
+	client, err := net.Dial("tcp", l2.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverConn := <-serverConnReady
+	defer serverConn.Close()
+
+	readDone := make(chan error, 1)
+	go func() {
+		var buf [16]byte
+		_, err := client.Read(buf[:])
+		readDone <- err
+	}()
+
+	time.Sleep(25 * time.Millisecond)
+	if err := client.Close(); err != nil {
+		t.Fatalf("client.Close() while Read pending returned error: %v", err)
+	}
+
+	select {
+	case err := <-readDone:
+		if err == nil {
+			t.Fatal("Read() after client.Close() returned nil error")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Read() did not unblock after client.Close()")
+	}
+}
+
 func setupTestShell(t *testing.T) (string, func(string) (string, int, error)) {
 	t.Helper()
 	dir := t.TempDir()

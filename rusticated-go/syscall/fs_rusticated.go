@@ -486,7 +486,7 @@ func Read(fd int, p []byte) (int, error) {
 	var ctx overlappedContext
 	rusticated_read(unsafe.Pointer(&ctx.o), handle, &p[0], uint32(len(p)))
 	runtime.KeepAlive(p)
-	awaitOverlapped(&ctx)
+	awaitFDOverlapped(fd, &ctx)
 	if ctx.o.hostError != 0 {
 		return 0, errnoErr(Errno(ctx.o.hostError))
 	}
@@ -504,7 +504,7 @@ func Write(fd int, p []byte) (int, error) {
 	var ctx overlappedContext
 	rusticated_write(unsafe.Pointer(&ctx.o), handle, &p[0], uint32(len(p)))
 	runtime.KeepAlive(p)
-	awaitOverlapped(&ctx)
+	awaitFDOverlapped(fd, &ctx)
 	if ctx.o.hostError != 0 {
 		return 0, errnoErr(Errno(ctx.o.hostError))
 	}
