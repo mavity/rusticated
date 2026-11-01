@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,6 +20,53 @@ import (
 // ErrClosed is returned by SendStream when the conversation was closed, or
 // invalidated by cancellation, before or during the request.
 var ErrClosed = errors.New("ai: conversation is closed")
+
+const (
+	liteRtStatusOK        int32 = 0
+	liteRtStatusNotFound  int32 = 5
+	liteRtStatusCancelled int32 = 1
+)
+
+var errLiteRtStatusNotFound = errors.New("LiteRT-LM status not found")
+
+type liteRtStatusError struct {
+	operation string
+	code      int32
+	message   string
+}
+
+func (e *liteRtStatusError) Error() string {
+	if e.message == "" {
+		return fmt.Sprintf("LiteRT-LM %s returned LiteRtLmStatusCode %d", e.operation, e.code)
+	}
+	return fmt.Sprintf("LiteRT-LM %s returned LiteRtLmStatusCode %d: %s", e.operation, e.code, e.message)
+}
+
+func (e *liteRtStatusError) Is(target error) bool {
+	return target == errLiteRtStatusNotFound && e.code == liteRtStatusNotFound
+}
+
+func newLiteRtStatusError(operation string, code int32, message string) error {
+	if code == liteRtStatusOK {
+		return nil
+	}
+	return &liteRtStatusError{operation: operation, code: code, message: message}
+}
+
+func runtimeLibraryLoadError(libPath, hostOS string, err error) error {
+	if hostOS == "linux" {
+		message := strings.ToLower(err.Error())
+		if strings.Contains(message, "glibc") || strings.Contains(message, "libc.so.6") {
+			return fmt.Errorf(
+				"failed to load %s: %w; LiteRT-LM %s Linux wheels require glibc 2.27 or newer and are not compatible with musl",
+				libPath,
+				err,
+				"0.19.0",
+			)
+		}
+	}
+	return fmt.Errorf("failed to load %s: %w", libPath, err)
+}
 
 // Verbose enables verbose logging of library loading and other internals.
 var Verbose bool
@@ -59,48 +108,47 @@ type LMDriver interface {
 	// ── Library loading ──────────────────────────────────────────────────
 	ensureLoaded(libPath string) error
 
-	// ── Symbol / global variable access (FLAGS_* etc.) ───────────────────
-	getSymbol(name string) (uint64, error)
-	writeInt32(addr uint64, val int32)
-	writeBool(addr uint64, val bool)
-
 	// ── String marshaling ────────────────────────────────────────────────
 	stringToCPtr(s string) (uint64, func(), error)
 	ptrToString(ptr uint64) (string, error)
 
 	// ── Engine settings ──────────────────────────────────────────────────
-	settingsCreate(modelPath, backend, visionBackend, audioBackend uint64) uint64
+	settingsCreate(modelPath, backend, visionBackend, audioBackend uint64) (uint64, error)
 	settingsDelete(settings uint64)
-	settingsSetEnableSpeculativeDecoding(settings uint64, enable bool)
-	settingsSetUseRingbuffersLocalAttention(settings uint64, enable bool)
-	settingsSetGpuDecodeStepsPerSync(settings uint64, steps int32)
-	settingsSetNumThreads(settings uint64, threads int32)
-	settingsSetMaxNumTokens(settings uint64, maxTokens int32)
+	speculativeDecodingConfigCreate() (uint64, error)
+	speculativeDecodingConfigDelete(config uint64)
+	speculativeDecodingConfigSetMode(config uint64, mode int32) error
+	settingsSetSpeculativeDecodingConfig(settings, config uint64) error
+	settingsSetUseRingbuffersLocalAttention(settings uint64, enable bool) error
+	settingsSetGpuDecodeStepsPerSync(settings uint64, steps int32) error
+	settingsSetNumThreads(settings uint64, threads int32) error
+	settingsSetMaxNumTokens(settings uint64, maxTokens int32) error
+	settingsSetLitertDispatchLibDir(settings, libDir uint64) error
 
 	// ── Engine ───────────────────────────────────────────────────────────
-	engineCreate(settings uint64) uint64
+	engineCreate(settings uint64) (uint64, error)
 	engineDelete(engine uint64)
-	setLogLevel(level uint64)
+	setLogLevel(level int32) error
 
 	// ── Conversation config ──────────────────────────────────────────────
-	cfgCreate(engine uint64) uint64
+	cfgCreate() (uint64, error)
 	cfgDelete(cfg uint64)
-	cfgSetTools(cfg, toolsJSON uint64)
-	cfgSetSystemMessage(cfg, systemMsg uint64)
+	cfgSetTools(cfg, toolsJSON uint64) error
+	cfgSetSystemMessage(cfg, systemMsg uint64) error
 	cfgSetEnableConstrainedDecoding(cfg uint64, enable bool) error
-	cfgSetStreamToolCalls(cfg uint64, stream bool, channelName uint64)
-	cfgSetMessages(cfg, messagesJSON uint64)
+	cfgSetStreamToolCalls(cfg uint64, stream bool, channelName uint64) error
+	cfgSetMessages(cfg, messagesJSON uint64) error
 
 	// ── Conversation ─────────────────────────────────────────────────────
-	convCreate(engine, cfg uint64) uint64
+	convCreate(engine, cfg uint64) (uint64, error)
 	convDelete(conv uint64)
-	convSendStream(conv, msg, extraCtx, optArgs, callback, userData uint64) int32
-	convCancelProcess(conv uint64)
+	convSendStream(conv, msg, extraCtx, optArgs, callback, userData uint64) error
+	convCancelProcess(conv uint64) error
 
 	// ── Loaded file inspection ───────────────────────────────────────────
-	loadedFileCreate(modelPath uint64) uint64
+	loadedFileCreate(modelPath uint64) (uint64, error)
 	loadedFileDelete(file uint64)
-	loadedFileHasSpeculativeDecodingSupport(file uint64) bool
+	loadedFileHasSpeculativeDecodingSupport(file uint64) (bool, error)
 	loadedFileMaxContextTokens(file uint64) (uint32, error)
 	loadedFileIsDynamicContext(file uint64) (bool, error)
 	loadedFileSupportsThinking(file uint64) (bool, error)
@@ -113,16 +161,16 @@ type LMDriver interface {
 	streamChunkGetError(chunk uint64) (uint64, error)
 
 	// ── Embedding Engine ─────────────────────────────────────────────────
-	embeddingSettingsCreate(modelPath, backend, visionBackend, audioBackend uint64) uint64
+	embeddingSettingsCreate(modelPath, backend, visionBackend, audioBackend uint64) (uint64, error)
 	embeddingSettingsDelete(settings uint64)
-	embeddingSettingsSetNumThreads(settings uint64, threads int32)
-	embeddingEngineCreate(settings uint64) uint64
+	embeddingSettingsSetNumThreads(settings uint64, threads int32) error
+	embeddingEngineCreate(settings uint64) (uint64, error)
 	embeddingEngineDelete(engine uint64)
-	embeddingOptionsCreate() uint64
+	embeddingOptionsCreate() (uint64, error)
 	embeddingOptionsDelete(options uint64)
-	embeddingOptionsSetNormalize(options uint64, normalize bool)
-	embeddingOptionsSetInputOverflowStrategy(options uint64, strategy int32)
-	inputDataCreate(dataType int32, data []byte) uint64
+	embeddingOptionsSetNormalize(options uint64, normalize bool) error
+	embeddingOptionsSetInputOverflowStrategy(options uint64, strategy int32) error
+	inputDataCreate(dataType int32, data []byte) (uint64, error)
 	inputDataDelete(inputData uint64)
 	embeddingEngineCompute(engine uint64, inputs []uint64, options uint64) ([]float32, error)
 
@@ -153,7 +201,7 @@ type streamState struct {
 	bodyDone chan struct{}
 	// doneCh is 1-buffered: the terminal callback delivers completion or an
 	// error, without ever blocking the C callback.
-	doneCh        chan error
+	doneCh chan error
 	// callbackErrCh reports a bridge failure before a terminal callback arrives.
 	callbackErrCh chan error
 	// closeCh is closed to ask the SendStream goroutine to abandon the stream.
@@ -326,26 +374,31 @@ func sharedTokenCallback(drv LMDriver, userData, chunkPtr uint64) {
 
 // ── Shared orchestration ──────────────────────────────────────────────────
 
-func configureLMLogging(drv LMDriver) {
-	if addr, err := drv.getSymbol("FLAGS_minloglevel"); err == nil && addr != 0 {
-		drv.writeInt32(addr, 2)
+func configureLMLogging(drv LMDriver) error {
+	level := int32(3)
+	if Verbose {
+		level = 0
 	}
-	if addr, err := drv.getSymbol("FLAGS_logtostderr"); err == nil && addr != 0 {
-		drv.writeBool(addr, false)
+	if err := drv.setLogLevel(level); err != nil {
+		return fmt.Errorf("configure LiteRT-LM logging: %w", err)
 	}
-	if addr, err := drv.getSymbol("FLAGS_alsologtostderr"); err == nil && addr != 0 {
-		drv.writeBool(addr, false)
-	}
-	drv.setLogLevel(10)
+	return nil
 }
 
-func checkSpeculativeDecoding(drv LMDriver, modelPtr uint64) bool {
-	file := drv.loadedFileCreate(modelPtr)
+func checkSpeculativeDecoding(drv LMDriver, modelPtr uint64) (bool, error) {
+	file, err := drv.loadedFileCreate(modelPtr)
+	if err != nil {
+		return false, fmt.Errorf("load model metadata for speculative decoding: %w", err)
+	}
 	if file == 0 {
-		return false
+		return false, fmt.Errorf("loaded_file_create returned NULL without an error")
 	}
 	defer drv.loadedFileDelete(file)
-	return drv.loadedFileHasSpeculativeDecodingSupport(file)
+	supported, err := drv.loadedFileHasSpeculativeDecodingSupport(file)
+	if err != nil {
+		return false, fmt.Errorf("inspect speculative-decoding support: %w", err)
+	}
+	return supported, nil
 }
 
 func sharedInspectModel(drv LMDriver, libPath, modelPath string) (*ModelInfo, error) {
@@ -358,15 +411,20 @@ func sharedInspectModel(drv LMDriver, libPath, modelPath string) (*ModelInfo, er
 	}
 	defer freeModel()
 
-	file := drv.loadedFileCreate(cModel)
+	file, err := drv.loadedFileCreate(cModel)
+	if err != nil {
+		return nil, fmt.Errorf("load model file %s: %w", modelPath, err)
+	}
 	if file == 0 {
-		return nil, fmt.Errorf("failed to inspect model file %s", modelPath)
+		return nil, fmt.Errorf("loaded_file_create returned NULL for %s without an error", modelPath)
 	}
 	defer drv.loadedFileDelete(file)
 
 	info := &ModelInfo{}
 	maxTok, err := drv.loadedFileMaxContextTokens(file)
-	if err != nil {
+	if errors.Is(err, errLiteRtStatusNotFound) {
+		maxTok = 0
+	} else if err != nil {
 		return nil, fmt.Errorf("read model context-token limit: %w", err)
 	}
 	if maxTok > 0 {
@@ -423,7 +481,9 @@ func sharedOpenBackend(drv LMDriver, libPath, modelPath, backend string, maxToke
 	if err := drv.ensureLoaded(libPath); err != nil {
 		return nil, err
 	}
-	configureLMLogging(drv)
+	if err := configureLMLogging(drv); err != nil {
+		return nil, err
+	}
 
 	cModel, freeModel, err := drv.stringToCPtr(modelPath)
 	if err != nil {
@@ -431,33 +491,82 @@ func sharedOpenBackend(drv LMDriver, libPath, modelPath, backend string, maxToke
 	}
 	defer freeModel()
 
-	supportsSpec := checkSpeculativeDecoding(drv, cModel)
+	supportsSpec, err := checkSpeculativeDecoding(drv, cModel)
+	if err != nil {
+		return nil, err
+	}
 
 	cBackend, freeBackend, err := drv.stringToCPtr(backend)
 	if err != nil {
 		return nil, fmt.Errorf("marshal backend name: %w", err)
 	}
-	settings := drv.settingsCreate(cModel, cBackend, cBackend, 0)
+	settings, err := drv.settingsCreate(cModel, cBackend, cBackend, 0)
 	freeBackend()
+	if err != nil {
+		return nil, fmt.Errorf("create engine settings for backend %s: %w", backend, err)
+	}
 	if settings == 0 {
-		return nil, fmt.Errorf("settings_create returned NULL for backend %s", backend)
+		return nil, fmt.Errorf("engine settings creation returned NULL for backend %s without an error", backend)
 	}
+	defer drv.settingsDelete(settings)
 	if supportsSpec {
-		drv.settingsSetEnableSpeculativeDecoding(settings, true)
+		specConfig, err := drv.speculativeDecodingConfigCreate()
+		if err != nil {
+			return nil, fmt.Errorf("create speculative-decoding config: %w", err)
+		}
+		if specConfig == 0 {
+			return nil, fmt.Errorf("speculative-decoding config creation returned NULL without an error")
+		}
+		defer drv.speculativeDecodingConfigDelete(specConfig)
+		if err := drv.speculativeDecodingConfigSetMode(specConfig, 1); err != nil {
+			return nil, fmt.Errorf("enable speculative decoding: %w", err)
+		}
+		if err := drv.settingsSetSpeculativeDecodingConfig(settings, specConfig); err != nil {
+			return nil, fmt.Errorf("configure speculative decoding: %w", err)
+		}
 	}
-	drv.settingsSetUseRingbuffersLocalAttention(settings, true)
+	if backend == "gpu_artisan" {
+		if err := drv.settingsSetUseRingbuffersLocalAttention(settings, true); err != nil {
+			return nil, fmt.Errorf("configure local-attention ring buffers: %w", err)
+		}
+	}
 	if backend == "gpu" {
-		drv.settingsSetGpuDecodeStepsPerSync(settings, 8)
+		if err := drv.settingsSetGpuDecodeStepsPerSync(settings, 8); err != nil {
+			return nil, fmt.Errorf("configure GPU decode synchronization: %w", err)
+		}
 	}
-	drv.settingsSetNumThreads(settings, int32(runtime.NumCPU()))
+	if backend == "npu" {
+		normalizedLibPath := strings.ReplaceAll(libPath, `\`, "/")
+		if strings.EqualFold(path.Ext(normalizedLibPath), ".dll") {
+			dispatchDir := path.Join(path.Dir(normalizedLibPath), "vendors", "intel_openvino", "dispatch")
+			cDispatch, freeDispatch, err := drv.stringToCPtr(dispatchDir)
+			if err != nil {
+				return nil, fmt.Errorf("marshal NPU dispatch directory: %w", err)
+			}
+			if err := drv.settingsSetLitertDispatchLibDir(settings, cDispatch); err != nil {
+				freeDispatch()
+				return nil, fmt.Errorf("configure NPU dispatch directory %s: %w", dispatchDir, err)
+			}
+			freeDispatch()
+		}
+	}
+	if backend == "cpu" {
+		if err := drv.settingsSetNumThreads(settings, int32(runtime.NumCPU())); err != nil {
+			return nil, fmt.Errorf("configure engine thread count: %w", err)
+		}
+	}
 	if maxTokens > 0 {
-		drv.settingsSetMaxNumTokens(settings, int32(maxTokens))
+		if err := drv.settingsSetMaxNumTokens(settings, int32(maxTokens)); err != nil {
+			return nil, fmt.Errorf("configure maximum token count: %w", err)
+		}
 	}
 
-	engine := drv.engineCreate(settings)
-	drv.settingsDelete(settings)
+	engine, err := drv.engineCreate(settings)
+	if err != nil {
+		return nil, fmt.Errorf("create engine for backend %s: %w", backend, err)
+	}
 	if engine == 0 {
-		return nil, fmt.Errorf("engine_create returned NULL for backend %s", backend)
+		return nil, fmt.Errorf("engine creation returned NULL for backend %s without an error", backend)
 	}
 	return &drvEngineBackend{drv: drv, engine: engine}, nil
 }
@@ -475,9 +584,12 @@ func (b *drvEngineBackend) NewConversation(cfg ConversationConfig) (conversation
 	if err != nil {
 		return nil, err
 	}
-	config := b.drv.cfgCreate(b.engine)
+	config, err := b.drv.cfgCreate()
+	if err != nil {
+		return nil, fmt.Errorf("create conversation config: %w", err)
+	}
 	if config == 0 {
-		return nil, fmt.Errorf("conversation_config_create returned NULL")
+		return nil, fmt.Errorf("conversation config creation returned NULL without an error")
 	}
 	defer b.drv.cfgDelete(config)
 
@@ -486,7 +598,10 @@ func (b *drvEngineBackend) NewConversation(cfg ConversationConfig) (conversation
 		if err != nil {
 			return nil, fmt.Errorf("marshal system message: %w", err)
 		}
-		b.drv.cfgSetSystemMessage(config, cSys)
+		if err := b.drv.cfgSetSystemMessage(config, cSys); err != nil {
+			freeSys()
+			return nil, fmt.Errorf("configure system message: %w", err)
+		}
 		freeSys()
 	}
 	if toolsJSON != "" {
@@ -494,7 +609,10 @@ func (b *drvEngineBackend) NewConversation(cfg ConversationConfig) (conversation
 		if err != nil {
 			return nil, fmt.Errorf("marshal tools configuration: %w", err)
 		}
-		b.drv.cfgSetTools(config, cTools)
+		if err := b.drv.cfgSetTools(config, cTools); err != nil {
+			freeTools()
+			return nil, fmt.Errorf("configure tools: %w", err)
+		}
 		freeTools()
 	}
 	if err := b.drv.cfgSetEnableConstrainedDecoding(config, len(cfg.Tools) > 0); err != nil {
@@ -505,7 +623,10 @@ func (b *drvEngineBackend) NewConversation(cfg ConversationConfig) (conversation
 		if err != nil {
 			return nil, fmt.Errorf("marshal tool-call channel: %w", err)
 		}
-		b.drv.cfgSetStreamToolCalls(config, true, cChan)
+		if err := b.drv.cfgSetStreamToolCalls(config, true, cChan); err != nil {
+			freeChan()
+			return nil, fmt.Errorf("configure tool-call streaming: %w", err)
+		}
 		freeChan()
 	}
 	if historyJSON != "" {
@@ -513,13 +634,19 @@ func (b *drvEngineBackend) NewConversation(cfg ConversationConfig) (conversation
 		if err != nil {
 			return nil, fmt.Errorf("marshal conversation history: %w", err)
 		}
-		b.drv.cfgSetMessages(config, cMsgs)
+		if err := b.drv.cfgSetMessages(config, cMsgs); err != nil {
+			freeMsgs()
+			return nil, fmt.Errorf("configure conversation history: %w", err)
+		}
 		freeMsgs()
 	}
 
-	conv := b.drv.convCreate(b.engine, config)
+	conv, err := b.drv.convCreate(b.engine, config)
+	if err != nil {
+		return nil, fmt.Errorf("create conversation: %w", err)
+	}
 	if conv == 0 {
-		return nil, fmt.Errorf("conversation_create returned NULL")
+		return nil, fmt.Errorf("conversation creation returned NULL without an error")
 	}
 	return &drvConversationBackend{drv: b.drv, conv: conv}, nil
 }
@@ -610,15 +737,15 @@ func (c *drvConversationBackend) SendStream(ctx context.Context, parts []PromptP
 	if Verbose {
 		fmt.Fprintf(os.Stderr, "[ai] convSendStream: calling\n")
 	}
-	rc := c.drv.convSendStream(c.conv, cMsg, 0, 0, callback, streamID)
+	sendErr := c.drv.convSendStream(c.conv, cMsg, 0, 0, callback, streamID)
 	if Verbose {
-		fmt.Fprintf(os.Stderr, "[ai] convSendStream: returned rc=%d\n", rc)
+		fmt.Fprintf(os.Stderr, "[ai] convSendStream: returned err=%v\n", sendErr)
 	}
-	if rc != 0 {
+	if sendErr != nil {
 		unregisterStreamState(streamID)
 		c.active.Store(nil)
 		c.releaseConv()
-		return fmt.Errorf("send_message_stream failed to start: %d", rc)
+		return fmt.Errorf("send_message_stream failed to start: %w", sendErr)
 	}
 
 	// Inference runs on native threads the Go scheduler knows nothing about. On
@@ -639,14 +766,11 @@ func (c *drvConversationBackend) SendStream(ctx context.Context, parts []PromptP
 			}
 			return err
 		case err := <-st.callbackErrCh:
-			c.abort(st, streamID)
-			return err
+			return errors.Join(err, c.abort(st, streamID))
 		case <-ctx.Done():
-			c.abort(st, streamID)
-			return ctx.Err()
+			return errors.Join(ctx.Err(), c.abort(st, streamID))
 		case <-st.closeCh:
-			c.abort(st, streamID)
-			return ErrClosed
+			return errors.Join(ErrClosed, c.abort(st, streamID))
 		case <-keepAlive.C:
 		}
 	}
@@ -654,10 +778,10 @@ func (c *drvConversationBackend) SendStream(ctx context.Context, parts []PromptP
 
 // abort cancels the in-flight stream and invalidates the conversation. When it
 // returns, onChunk is neither running nor will run again.
-func (c *drvConversationBackend) abort(st *streamState, streamID uint64) {
+func (c *drvConversationBackend) abort(st *streamState, streamID uint64) error {
 	c.closed.Store(true)
 	st.stop()
-	c.drv.convCancelProcess(c.conv)
+	cancelErr := c.drv.convCancelProcess(c.conv)
 
 	// The terminal chunk is delivered on the native callback thread, which is
 	// also what runs the conversation's destructor if it is deleted there, so
@@ -668,6 +792,10 @@ func (c *drvConversationBackend) abort(st *streamState, streamID uint64) {
 		c.active.Store(nil)
 		c.releaseConv()
 	}()
+	if cancelErr != nil {
+		return fmt.Errorf("cancel LiteRT-LM stream: %w", cancelErr)
+	}
+	return nil
 }
 
 // ── Shared Embedder backend ────────────────────────────────────────────────
@@ -688,7 +816,9 @@ func sharedOpenEmbedder(drv LMDriver, libPath, modelPath, backend string) (embed
 	if err := drv.ensureLoaded(libPath); err != nil {
 		return nil, err
 	}
-	configureLMLogging(drv)
+	if err := configureLMLogging(drv); err != nil {
+		return nil, err
+	}
 
 	cModel, freeModel, err := drv.stringToCPtr(modelPath)
 	if err != nil {
@@ -700,17 +830,25 @@ func sharedOpenEmbedder(drv LMDriver, libPath, modelPath, backend string) (embed
 	if err != nil {
 		return nil, fmt.Errorf("marshal embedding backend name: %w", err)
 	}
-	settings := drv.embeddingSettingsCreate(cModel, cBackend, 0, 0)
+	settings, err := drv.embeddingSettingsCreate(cModel, cBackend, 0, 0)
 	freeBackend()
-	if settings == 0 {
-		return nil, fmt.Errorf("embedding_engine_settings_create returned NULL for backend %s", backend)
+	if err != nil {
+		return nil, fmt.Errorf("create embedding engine settings for backend %s: %w", backend, err)
 	}
-	drv.embeddingSettingsSetNumThreads(settings, int32(runtime.NumCPU()))
+	if settings == 0 {
+		return nil, fmt.Errorf("embedding engine settings creation returned NULL for backend %s without an error", backend)
+	}
+	defer drv.embeddingSettingsDelete(settings)
+	if err := drv.embeddingSettingsSetNumThreads(settings, int32(runtime.NumCPU())); err != nil {
+		return nil, fmt.Errorf("configure embedding engine thread count: %w", err)
+	}
 
-	engine := drv.embeddingEngineCreate(settings)
-	drv.embeddingSettingsDelete(settings)
+	engine, err := drv.embeddingEngineCreate(settings)
+	if err != nil {
+		return nil, fmt.Errorf("create embedding engine: %w", err)
+	}
 	if engine == 0 {
-		return nil, fmt.Errorf("embedding_engine_create returned NULL for backend %s", backend)
+		return nil, fmt.Errorf("embedding engine creation returned NULL for backend %s without an error", backend)
 	}
 	return &drvEmbedderBackend{drv: drv, engine: engine}, nil
 }
@@ -723,14 +861,21 @@ func (b *drvEmbedderBackend) ComputeEmbedding(inputs []embedInput) ([]float32, e
 		return nil, fmt.Errorf("ai: cannot compute embedding for empty input")
 	}
 
-	opts := b.drv.embeddingOptionsCreate()
+	opts, err := b.drv.embeddingOptionsCreate()
+	if err != nil {
+		return nil, fmt.Errorf("create embedding options: %w", err)
+	}
 	if opts == 0 {
-		return nil, fmt.Errorf("embedding_options_create returned NULL")
+		return nil, fmt.Errorf("embedding options creation returned NULL without an error")
 	}
 	defer b.drv.embeddingOptionsDelete(opts)
 
-	b.drv.embeddingOptionsSetNormalize(opts, true)
-	b.drv.embeddingOptionsSetInputOverflowStrategy(opts, overflowStrategyTruncate)
+	if err := b.drv.embeddingOptionsSetNormalize(opts, true); err != nil {
+		return nil, fmt.Errorf("configure embedding normalization: %w", err)
+	}
+	if err := b.drv.embeddingOptionsSetInputOverflowStrategy(opts, overflowStrategyTruncate); err != nil {
+		return nil, fmt.Errorf("configure embedding input overflow strategy: %w", err)
+	}
 
 	createdPtrs := make([]uint64, 0, len(inputs))
 	defer func() {
@@ -740,9 +885,12 @@ func (b *drvEmbedderBackend) ComputeEmbedding(inputs []embedInput) ([]float32, e
 	}()
 
 	for _, in := range inputs {
-		ptr := b.drv.inputDataCreate(in.dataType, in.data)
+		ptr, err := b.drv.inputDataCreate(in.dataType, in.data)
+		if err != nil {
+			return nil, fmt.Errorf("create embedding input data: %w", err)
+		}
 		if ptr == 0 {
-			return nil, fmt.Errorf("litert_lm_input_data_create failed")
+			return nil, fmt.Errorf("input data creation returned NULL without an error")
 		}
 		createdPtrs = append(createdPtrs, ptr)
 	}

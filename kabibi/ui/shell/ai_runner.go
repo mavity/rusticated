@@ -335,8 +335,19 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 		}
 		engine, err = ai.NewEngine(libPath, modelPath, chosenBackend, maxTokens)
 		if err != nil && chosenBackend != "cpu" && assets.HostOS() != "browser" {
+			failedBackend := chosenBackend
+			backendErr := err
+			fallbackNotice := fmt.Sprintf("%s backend initialization failed; retrying with CPU: %v", failedBackend, backendErr)
+			if r.verbose {
+				fmt.Fprintf(os.Stderr, "[info] %s\n", fallbackNotice)
+			} else {
+				r.emitFeedback("[info] " + fallbackNotice)
+			}
 			chosenBackend = "cpu"
 			engine, err = ai.NewEngine(libPath, modelPath, chosenBackend, maxTokens)
+			if err != nil {
+				err = fmt.Errorf("%s backend failed and CPU fallback failed: %w", failedBackend, errors.Join(backendErr, err))
+			}
 		}
 	case "remote":
 		maxTokens = remoteContextTokenBudget(cfg.ContextTokens)

@@ -28,6 +28,8 @@ func isBrowserHost() bool {
 	return false
 }
 
+// The CDN path is pinned by Kabibi; a preloaded host module is trusted but its
+// package version cannot be verified because the published API has no version constant.
 const webAdapterBootstrapJS = `
 (() => {
   if (globalThis.__rustica_ai) return;
@@ -47,11 +49,11 @@ const webAdapterBootstrapJS = `
 
     async loadCore() {
       if (globalThis.LiteRtLmCore) {
-        this.coreSource = 'preloaded globalThis.LiteRtLmCore (package/version unknown)';
+        this.coreSource = 'preloaded globalThis.LiteRtLmCore (trusted host-supplied; version unverified)';
         return globalThis.LiteRtLmCore;
       }
       if (!this.corePromise) {
-        const litertLMURL = 'https://cdn.jsdelivr.net/npm/@litert-lm/core@0.18.0/+esm'
+        const litertLMURL = 'https://cdn.jsdelivr.net/npm/@litert-lm/core@0.19.0/+esm'
         this.coreSource = litertLMURL;
         this.corePromise = (async () => {
           try {

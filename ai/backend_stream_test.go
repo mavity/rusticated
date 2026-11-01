@@ -39,6 +39,7 @@ type fakeDrv struct {
 
 	sendCalls       atomic.Int32
 	cancelCalls     atomic.Int32
+	cancelErr       error
 	deleteCalls     atomic.Int32
 	cancelSeen      chan struct{}
 	terminalStarted atomic.Bool
@@ -61,16 +62,17 @@ func (d *fakeDrv) createTrampoline() (uint64, error) {
 	}
 	return 1, nil
 }
-func (d *fakeDrv) convSendStream(conv, msg, extraCtx, optArgs, callback, userData uint64) int32 {
+func (d *fakeDrv) convSendStream(conv, msg, extraCtx, optArgs, callback, userData uint64) error {
 	d.sendCalls.Add(1)
 	d.onSend(d, userData)
-	return 0
+	return nil
 }
 
-func (d *fakeDrv) convCancelProcess(conv uint64) {
+func (d *fakeDrv) convCancelProcess(conv uint64) error {
 	if d.cancelCalls.Add(1) == 1 {
 		close(d.cancelSeen)
 	}
+	return d.cancelErr
 }
 
 func (d *fakeDrv) convDelete(conv uint64) {
@@ -595,12 +597,12 @@ func (m *mutexCallbackDrv) streamChunkIsFinal(c uint64) (bool, error) {
 	return m.fakeDrv.streamChunkIsFinal(c)
 }
 
-func (m *mutexCallbackDrv) convCancelProcess(conv uint64) {
+func (m *mutexCallbackDrv) convCancelProcess(conv uint64) error {
 	// Simulate LiteRT-LM's C++ conversation mutex: convCancelProcess blocks if
 	// called while sharedTokenCallback is still executing on the C++ stream thread!
 	m.nativeStreamMu.Lock()
 	defer m.nativeStreamMu.Unlock()
-	m.fakeDrv.convCancelProcess(conv)
+	return m.fakeDrv.convCancelProcess(conv)
 }
 
 func (m *mutexCallbackDrv) emitLocked(userData uint64, text string, final bool, errMsg string) {
@@ -620,6 +622,8 @@ func (m *mutexCallbackDrv) emitLocked(userData uint64, text string, final bool, 
 
 func TestStreamAbortFromInsideChunkCallbackWaitsForFullCallbackExit(t *testing.T) {
 	base := newFakeDrv()
+	cancelErr := errors.New("native cancellation status failed")
+	base.cancelErr = cancelErr
 	d := &mutexCallbackDrv{fakeDrv: base}
 	d.onSend = func(_ *fakeDrv, ud uint64) {
 		go func() {
@@ -646,6 +650,9 @@ func TestStreamAbortFromInsideChunkCallbackWaitsForFullCallbackExit(t *testing.T
 	case err := <-errCh:
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("SendStream err = %v, want context.Canceled", err)
+		}
+		if !errors.Is(err, cancelErr) {
+			t.Fatalf("SendStream err = %v, want cancellation status error", err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("deadlock: convCancelProcess ran before sharedTokenCallback finished and released nativeStreamMu")

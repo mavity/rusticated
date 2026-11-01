@@ -34,6 +34,23 @@ var (
 	symTflTensorDim            uint64
 )
 
+func resolveTFLiteSymbol(target *uint64, name, libPath string) error {
+	symbol, err := dload.DylibSym(tflLib, name)
+	if err != nil {
+		return fmt.Errorf(
+			"runtime library %q does not provide required TFLite C API symbol %q; LiteRT-LM 0.19.0 Unix wheels omit TfLite* exports, so Unix OCR needs a compatible TFLite runtime: %w",
+			libPath,
+			name,
+			err,
+		)
+	}
+	if symbol == 0 {
+		return fmt.Errorf("runtime library %q resolved TFLite C API symbol %q to NULL", libPath, name)
+	}
+	*target = symbol
+	return nil
+}
+
 func ensureTFLiteLoaded(libPath string) error {
 	tflLibOnce.Do(func() {
 		var err error
@@ -45,22 +62,33 @@ func ensureTFLiteLoaded(libPath string) error {
 			tflLibErr = fmt.Errorf("failed to load TFLite library %s: %w", libPath, err)
 			return
 		}
-		symTflModelCreateFromFile, _ = dload.DylibSym(tflLib, "TfLiteModelCreateFromFile")
-		symTflModelDelete, _ = dload.DylibSym(tflLib, "TfLiteModelDelete")
-		symTflOptionsCreate, _ = dload.DylibSym(tflLib, "TfLiteInterpreterOptionsCreate")
-		symTflOptionsDelete, _ = dload.DylibSym(tflLib, "TfLiteInterpreterOptionsDelete")
-		symTflOptionsSetNumThreads, _ = dload.DylibSym(tflLib, "TfLiteInterpreterOptionsSetNumThreads")
-		symTflInterpreterCreate, _ = dload.DylibSym(tflLib, "TfLiteInterpreterCreate")
-		symTflInterpreterDelete, _ = dload.DylibSym(tflLib, "TfLiteInterpreterDelete")
-		symTflInterpreterAllocate, _ = dload.DylibSym(tflLib, "TfLiteInterpreterAllocateTensors")
-		symTflInterpreterInvoke, _ = dload.DylibSym(tflLib, "TfLiteInterpreterInvoke")
-		symTflGetInputTensor, _ = dload.DylibSym(tflLib, "TfLiteInterpreterGetInputTensor")
-		symTflGetOutputTensor, _ = dload.DylibSym(tflLib, "TfLiteInterpreterGetOutputTensor")
-		symTflTensorCopyFrom, _ = dload.DylibSym(tflLib, "TfLiteTensorCopyFromBuffer")
-		symTflTensorCopyTo, _ = dload.DylibSym(tflLib, "TfLiteTensorCopyToBuffer")
-		symTflTensorByteSize, _ = dload.DylibSym(tflLib, "TfLiteTensorByteSize")
-		symTflTensorNumDims, _ = dload.DylibSym(tflLib, "TfLiteTensorNumDims")
-		symTflTensorDim, _ = dload.DylibSym(tflLib, "TfLiteTensorDim")
+		bindings := []struct {
+			target *uint64
+			name   string
+		}{
+			{&symTflModelCreateFromFile, "TfLiteModelCreateFromFile"},
+			{&symTflModelDelete, "TfLiteModelDelete"},
+			{&symTflOptionsCreate, "TfLiteInterpreterOptionsCreate"},
+			{&symTflOptionsDelete, "TfLiteInterpreterOptionsDelete"},
+			{&symTflOptionsSetNumThreads, "TfLiteInterpreterOptionsSetNumThreads"},
+			{&symTflInterpreterCreate, "TfLiteInterpreterCreate"},
+			{&symTflInterpreterDelete, "TfLiteInterpreterDelete"},
+			{&symTflInterpreterAllocate, "TfLiteInterpreterAllocateTensors"},
+			{&symTflInterpreterInvoke, "TfLiteInterpreterInvoke"},
+			{&symTflGetInputTensor, "TfLiteInterpreterGetInputTensor"},
+			{&symTflGetOutputTensor, "TfLiteInterpreterGetOutputTensor"},
+			{&symTflTensorCopyFrom, "TfLiteTensorCopyFromBuffer"},
+			{&symTflTensorCopyTo, "TfLiteTensorCopyToBuffer"},
+			{&symTflTensorByteSize, "TfLiteTensorByteSize"},
+			{&symTflTensorNumDims, "TfLiteTensorNumDims"},
+			{&symTflTensorDim, "TfLiteTensorDim"},
+		}
+		for _, binding := range bindings {
+			if err = resolveTFLiteSymbol(binding.target, binding.name, libPath); err != nil {
+				tflLibErr = err
+				return
+			}
+		}
 	})
 	return tflLibErr
 }
@@ -72,13 +100,13 @@ type interpreterImpl struct {
 
 // tflGoStringToCPtr allocates from the tflLib linear memory rather than the LM
 // lib allocator — using the wrong WASM memory would corrupt the pointer.
-func tflGoStringToCPtr(s string) (uint64, func()) {
+func tflGoStringToCPtr(s string) (uint64, func(), error) {
 	s = normalizeHostNativePath(s)
 	ptr, free, err := dload.CString(tflLib, s)
 	if err != nil {
-		return 0, func() {}
+		return 0, nil, fmt.Errorf("allocate TFLite model path: %w", err)
 	}
-	return ptr, free
+	return ptr, free, nil
 }
 
 func newInterpreterImpl(libPath, modelPath string) (*interpreterImpl, error) {
@@ -86,7 +114,10 @@ func newInterpreterImpl(libPath, modelPath string) (*interpreterImpl, error) {
 		return nil, err
 	}
 
-	cPath, freePath := tflGoStringToCPtr(modelPath)
+	cPath, freePath, err := tflGoStringToCPtr(modelPath)
+	if err != nil {
+		return nil, err
+	}
 	defer freePath()
 
 	modelPtr, err := callDylib(symTflModelCreateFromFile, []byte{i64}, []byte{i64}, cPath)

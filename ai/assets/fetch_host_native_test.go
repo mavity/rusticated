@@ -8,6 +8,11 @@ func testRuntimeHost() (string, string) {
 	return runtime.GOOS, runtime.GOARCH
 }
 
+func testRuntimePlatform() RuntimePlatformInfo {
+	osName, arch := testRuntimeHost()
+	return RuntimePlatformInfo{OS: osName, Arch: arch, ExecutionMode: "native"}
+}
+
 func testRuntimeWheelFilename() string {
 	osName, arch := testRuntimeHost()
 	return runtimeWheelFilename(osName, arch)
@@ -16,17 +21,13 @@ func testRuntimeWheelFilename() string {
 func runtimeWheelFilename(osName, arch string) string {
 	switch osName + "/" + arch {
 	case "windows/amd64":
-		return "litert_lm_api-1.0-cp311-cp311-win_amd64.whl"
-	case "windows/arm64":
-		return "litert_lm_api-1.0-cp311-cp311-win_arm64.whl"
+		return "litert_lm_api-0.19.0-py3-none-win_amd64.whl"
 	case "linux/amd64":
-		return "litert_lm_api-1.0-cp311-cp311-manylinux_2_17_x86_64.whl"
+		return "litert_lm_api-0.19.0-py3-none-manylinux_2_27_x86_64.whl"
 	case "linux/arm64":
-		return "litert_lm_api-1.0-cp311-cp311-manylinux_2_17_aarch64.whl"
-	case "darwin/amd64":
-		return "litert_lm_api-1.0-cp311-cp311-macosx_10_9_x86_64.whl"
+		return "litert_lm_api-0.19.0-py3-none-manylinux_2_27_aarch64.whl"
 	case "darwin/arm64":
-		return "litert_lm_api-1.0-cp311-cp311-macosx_14_0_arm64.whl"
+		return "litert_lm_api-0.19.0-py3-none-macosx_12_0_arm64.whl"
 	default:
 		return ""
 	}

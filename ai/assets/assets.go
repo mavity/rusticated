@@ -13,7 +13,10 @@ import (
 
 // litertlmPyPIURL is the PyPI JSON endpoint used to discover a compatible
 // LiteRT-LM runtime wheel for the current host platform.
-const litertlmPyPIURL = "https://pypi.org/pypi/litert-lm-api/json"
+const (
+	litertlmPyPIURL       = "https://pypi.org/pypi/litert-lm-api/json"
+	PinnedLiteRTLMVersion = "0.19.0"
+)
 
 // Default model URLs and minimum expected byte sizes.
 const (
@@ -98,33 +101,31 @@ func (o FetchOptions) progress(stage, details string, percent int) {
 	}
 }
 
-// EnsureRuntime makes the LiteRT-LM native runtime library available and
-// returns its path. It is offline-first: a locally cached wheel (or an
-// already-extracted library) is used before any network request to PyPI. The
-// returned library exposes both the LiteRT-LM Engine symbols and the TFLite C
-// API used by Interpreter.
+// EnsureRuntime makes the pinned LiteRT-LM native runtime library available
+// and returns its path. It is offline-first: a compatible cached extraction or
+// wheel is used before any network request to PyPI.
 func EnsureRuntime(ctx context.Context, opts FetchOptions) (string, error) {
-	if HostOS() == "browser" {
+	platform := InspectRuntimePlatform()
+	if platform.OS == "browser" {
 		opts.progress("runtime", "LiteRT-LM WebGPU eval bridge ready", 100)
 		return "eval", nil
+	}
+	if platform.OS == "android" {
+		return "", fmt.Errorf("LiteRT-LM runtime loading is unsupported on Android in this migration")
 	}
 	if err := os.MkdirAll(opts.CacheDir, 0o755); err != nil {
 		return "", err
 	}
-	libDir := filepath.Join(opts.CacheDir, "lib")
-	if err := os.MkdirAll(libDir, 0o755); err != nil {
-		return "", err
+
+	if lib, ok := findCachedRuntime(opts.CacheDir, platform); ok {
+		opts.progress("runtime", "using cached LiteRT-LM runtime", -1)
+		return lib, nil
 	}
 
-	wheelPath := findCachedWheel(opts.CacheDir, "litert_lm")
+	wheelPath := findCachedWheelForPlatform(opts.CacheDir, "litert_lm", platform)
 	if wheelPath == "" {
-		// Offline-first: reuse an already-extracted library if present.
-		if lib := resolveLMLib(libDir); lib != "" {
-			opts.progress("runtime", "using cached LiteRT-LM runtime", -1)
-			return lib, nil
-		}
 		opts.progress("discover", "LiteRT-LM wheel from PyPI", -1)
-		url, filename, _, err := selectWheelURL(ctx, litertlmPyPIURL)
+		url, filename, _, err := selectWheelURLForPlatform(ctx, litertlmPyPIURL, platform)
 		if err != nil {
 			return "", err
 		}
@@ -134,10 +135,15 @@ func EnsureRuntime(ctx context.Context, opts FetchOptions) (string, error) {
 		}
 	}
 
-	if !libUpToDate(libDir, wheelPath, "litert_lm_ext") {
+	wheelFilename := filepath.Base(wheelPath)
+	libDir := runtimeLibDir(opts.CacheDir, wheelFilename)
+	if !runtimeCacheMetadataMatches(libDir, wheelFilename, platform) || resolveLMLib(libDir) == "" {
 		opts.progress("extract", "LiteRT-LM runtime", -1)
 		if err := extractWheelNativeFiles(wheelPath, libDir, opts); err != nil {
 			return "", err
+		}
+		if err := writeRuntimeCacheMetadata(libDir, wheelFilename); err != nil {
+			return "", fmt.Errorf("record LiteRT-LM runtime cache identity: %w", err)
 		}
 	}
 
@@ -151,17 +157,20 @@ func EnsureRuntime(ctx context.Context, opts FetchOptions) (string, error) {
 // RuntimeDownloadSize estimates the exact runtime-wheel transfer before consent.
 // It reads PyPI metadata only when a compatible wheel is not already cached.
 func RuntimeDownloadSize(ctx context.Context, cacheDir string) (int64, error) {
-	if HostOS() == "browser" {
+	platform := InspectRuntimePlatform()
+	if platform.OS == "browser" {
 		return 0, nil
 	}
-	if findCachedWheel(cacheDir, "litert_lm") != "" {
+	if platform.OS == "android" {
+		return 0, fmt.Errorf("LiteRT-LM runtime loading is unsupported on Android in this migration")
+	}
+	if _, ok := findCachedRuntime(cacheDir, platform); ok {
 		return 0, nil
 	}
-	libDir := filepath.Join(cacheDir, "lib")
-	if resolveLMLib(libDir) != "" {
+	if findCachedWheelForPlatform(cacheDir, "litert_lm", platform) != "" {
 		return 0, nil
 	}
-	_, _, size, err := selectWheelURL(ctx, litertlmPyPIURL)
+	_, _, size, err := selectWheelURLForPlatform(ctx, litertlmPyPIURL, platform)
 	if err != nil {
 		return 0, fmt.Errorf("inspect LiteRT-LM runtime download: %w", err)
 	}
