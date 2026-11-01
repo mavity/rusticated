@@ -485,7 +485,11 @@ func executeInteractiveListFiles(ctx context.Context, execSess *ExecutionSession
 	iter := filelist.NewSearchIterator(ctx, execSess.Dir(), options)
 	defer iter.Close()
 	if progressSink != nil {
-		defer progressSink.SetListFilesProgress(nil)
+		defer func() {
+			if ctx.Err() == nil {
+				progressSink.SetListFilesProgress(nil)
+			}
+		}()
 	}
 	if progressSink != nil {
 		publishInteractiveListFilesProgress(iter, progressSink)

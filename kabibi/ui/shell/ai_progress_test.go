@@ -3,12 +3,14 @@ package shell
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/input"
 	"github.com/mavity/rusticated/kabibi/tools/filelist"
 	"github.com/mavity/rusticated/kabibi/ui"
 )
@@ -126,10 +128,67 @@ func TestListFilesProgressQuoteLimitTracksViewport(t *testing.T) {
 	}
 }
 
+func TestCanceledListFilesProgressRemainsVisibleWhenCommandStops(t *testing.T) {
+	s := &Shell{
+		mode:        ModeStack,
+		input:       NewPromptInput(PromptInputOptions{}),
+		width:       80,
+		height:      24,
+		activeBlock: -1,
+		blocks: []CommandBlock{{
+			Kind:   BlockCommand,
+			Source: SourceUserShell,
+			Prompt: "$ ",
+			Input:  "ai list-files --query image",
+			Status: StatusError,
+			listFilesProgress: &filelist.Progress{
+				Phase:       "candidate",
+				Viewed:      42,
+				Total:       100,
+				CurrentPath: "src/current.go",
+				Matches: []filelist.ProgressMatch{
+					{Path: "src/image.go", Size: 572, Score: 0.91, HasScore: true},
+				},
+			},
+		}},
+	}
+
+	screen, _ := renderANSIForTest(t, s.Render(ui.Rect{W: 80, H: 24}, ui.RenderContext{}), 80, 24)
+	var screenText strings.Builder
+	for _, cell := range screen.Cells() {
+		screenText.WriteString(cell.Grapheme)
+	}
+	for _, want := range []string{"src/image.go", "viewed 42/100", "Matching: src/current.go"} {
+		if !strings.Contains(screenText.String(), want) {
+			t.Errorf("retained progress render %q does not contain %q", screenText.String(), want)
+		}
+	}
+}
+
+func TestEscapeCancelsActiveListFilesCommand(t *testing.T) {
+	canceled := false
+	s := &Shell{
+		running:     true,
+		activeBlock: 0,
+		activeCancel: func() {
+			canceled = true
+		},
+		blocks: []CommandBlock{{Input: `ai list-files --query "image encoding"`}},
+	}
+
+	if !s.handleKeyEvent(input.KeyPressEvent{Code: input.KeyEscape}) {
+		t.Fatal("Escape was not handled for active ai list-files command")
+	}
+	if !canceled {
+		t.Fatal("Escape did not cancel the active ai list-files command")
+	}
+}
+
 type recordingListFilesProgressSink struct {
 	progress         []*filelist.Progress
 	cleared          int
 	outputMatchLimit int
+	onProgress       func()
 }
 
 func (s *recordingListFilesProgressSink) OnAICommandStart(string, string) (func([]byte), func(int, time.Duration)) {
@@ -152,6 +211,9 @@ func (s *recordingListFilesProgressSink) SetListFilesProgress(progress *filelist
 	copy := *progress
 	copy.Matches = append([]filelist.ProgressMatch(nil), progress.Matches...)
 	s.progress = append(s.progress, &copy)
+	if s.onProgress != nil {
+		s.onProgress()
+	}
 }
 
 func TestInteractiveListFilesPublishesAndClearsProgress(t *testing.T) {
@@ -188,6 +250,40 @@ func TestInteractiveListFilesPublishesAndClearsProgress(t *testing.T) {
 	if sink.cleared != 1 {
 		t.Fatalf("progress clear calls = %d, want one", sink.cleared)
 	}
+}
+
+func TestInteractiveListFilesDoesNotClearProgressOnCancellation(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "browser_worker.go"), []byte("func startWorker() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	execSess, err := NewExecutionSession(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer execSess.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	sink := &recordingListFilesProgressSink{
+		outputMatchLimit: 10,
+		onProgress:       cancel,
+	}
+	execSess.SetAICommandUISink(sink)
+
+	_, err = executeInteractiveListFiles(ctx, execSess,
+		[]string{"--query", "unrelated semantic phrase", "--max-results", "1"},
+		&commandTestEmbedder{},
+		80,
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("executeInteractiveListFiles() error = %v, want context cancellation", err)
+	}
+	if len(sink.progress) == 0 {
+		t.Fatal("cancellation did not publish a progress snapshot")
+	}
+	if sink.cleared != 0 {
+		t.Fatalf("cancellation cleared progress %d times, want it retained", sink.cleared)
+	}
+	cancel()
 }
 
 func TestInteractiveListFilesCapsResultsToOutputFrame(t *testing.T) {

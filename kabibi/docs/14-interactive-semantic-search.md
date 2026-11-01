@@ -106,8 +106,9 @@ Relevant implementation: [`filelist.go`](../tools/filelist/filelist.go),
    state rather than dropping them: when the next publication is allowed, it
    must include any completed quote still present in the top set. Flush the
    latest state once on completion before clearing progress and showing the
-   final result. Fast searches may show only an initial progress state followed
-   by the final result.
+   final result. On Ctrl+C or Escape cancellation, retain the last published
+   progress snapshot in the command block after the search stops. Fast searches
+   may show only an initial progress state followed by the final result.
    Keep the processed/total file count and average milliseconds per scored file
    visible during search and append the same statistics to the final AI and TUI
    results. Measure candidate-scoring time separately from query embedding and
@@ -129,12 +130,13 @@ Relevant implementation: [`filelist.go`](../tools/filelist/filelist.go),
    sequences.
 10. On iterator completion, obtain `Result()`, clear ephemeral progress, and
     send the normal final Markdown result through the existing command-output
-    path exactly once. On cancellation or error, clear progress and surface the
-    explicit failure/cancellation result; never treat partial matches as a
-    successful final result.
-11. Tie iterator context to the running command context, defer `Close()`, and
-    clear transient progress on every exit path. Existing Ctrl+C cancellation
-    must stop search work and remove stale progress.
+    path exactly once. On non-cancellation error, clear progress and surface the
+    explicit failure; never treat partial matches as a successful final result.
+    On cancellation, retain the last progress snapshot while surfacing the
+    cancellation result.
+11. Tie iterator context to the running command context and defer `Close()`.
+    Ctrl+C and Escape cancel `ai list-files`; keep its last published snapshot
+    visible after the command stops. Other exit paths clear transient progress.
 
 The blue-panel shortcuts `Ctrl+F`, `Cmd+F`, `Alt+F7`, and `Mod+F7` should open
 the same `ai list-files` parameter flow rather than implement separate search
@@ -280,8 +282,9 @@ identity and discard queued work for matches no longer displayed.
 - Publish typed progress through the shell's UI update mechanism; do not write
   progress to command stdout, captured command output, `liveOutput.raw`, or the
   virtual terminal, and do not mutate UI state directly from a search goroutine.
-- Clear ephemeral progress on completion, error, and cancellation; append only
-  the final normal result to captured command output, exactly once.
+- Clear ephemeral progress on completion and error; on cancellation retain its
+  last published snapshot without adding progress to captured command output.
+  Append the final normal result only on successful completion, exactly once.
 - Preserve the repository's async-I/O and custom-sysroot build requirements;
   do not introduce host-command dependencies or new blocking I/O paths.
 
@@ -377,8 +380,9 @@ Expected code areas:
   height; resizing does not change the search's actual candidate set.
 - Completion replaces progress with final results. Cancellation and errors
   are visibly distinguished from successful completion.
-- Ctrl+C cancellation clears the transient progress and stops iterator work;
-  no stale progress remains after any exit path.
+- Ctrl+C or Escape cancellation stops iterator work and retains the last
+  published progress snapshot; normal completion and non-cancellation errors
+  clear progress.
 - The requested blue-panel shortcuts open the same `ai list-files` search flow
   only while the panels are visible.
 

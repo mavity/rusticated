@@ -377,6 +377,21 @@ func (s *Shell) SetListFilesProgress(progress *filelist.Progress) {
 	s.invalidate()
 }
 
+func (s *Shell) listFilesProgressForDisplayLocked() *filelist.Progress {
+	if s.running {
+		if s.activeBlock >= 0 && s.activeBlock < len(s.blocks) {
+			return s.blocks[s.activeBlock].listFilesProgress
+		}
+		return nil
+	}
+	for index := len(s.blocks) - 1; index >= 0; index-- {
+		if progress := s.blocks[index].listFilesProgress; progress != nil {
+			return progress
+		}
+	}
+	return nil
+}
+
 func (s *Shell) ListFilesProgressMatchLimit() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1303,10 +1318,7 @@ func (s *Shell) computeStackHeight(w, maxH int) int {
 	s.drainLiveOutputsLocked()
 	var chromeH int
 	inputVisible := !s.running && !s.exiting
-	progressRows := 0
-	if s.running && s.activeBlock >= 0 && s.activeBlock < len(s.blocks) {
-		progressRows = listFilesProgressRows(s.blocks[s.activeBlock].listFilesProgress, maxH)
-	}
+	progressRows := listFilesProgressRows(s.listFilesProgressForDisplayLocked(), maxH)
 	if !s.exiting {
 		s.mu.Unlock()
 		if inputVisible {
@@ -1430,12 +1442,8 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) string {
 		totalBlockRows += b.Height
 	}
 	activeBlock := s.activeBlock
-	var searchProgress *filelist.Progress
-	progressRows := 0
-	if running && activeBlock >= 0 && activeBlock < len(s.blocks) {
-		searchProgress = cloneListFilesProgress(s.blocks[activeBlock].listFilesProgress)
-		progressRows = listFilesProgressRows(searchProgress, maxH)
-	}
+	searchProgress := cloneListFilesProgress(s.listFilesProgressForDisplayLocked())
+	progressRows := listFilesProgressRows(searchProgress, maxH)
 	activeCursor := terminal.CursorPos{}
 	activeBlockStart := -1
 	renderedRow := 0
@@ -1628,7 +1636,7 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) string {
 	// In compact ModeStack, PromptInput sits immediately below the collected blocks (at row collectedRows),
 	// followed by the 1 reserved blank footer line at row (occH - 1).
 	// In ModePlumeHistory or bottomAligned HUD mode, PromptInput + footer are pinned to the bottom of maxH.
-	inputTopY := collectedRows
+	inputTopY := collectedRows + progressRows
 	if mode == ModePlumeHistory || (bottomAligned && !exiting) {
 		inputTopY = maxH - chromeH
 		if inputTopY < 0 {
@@ -1947,6 +1955,17 @@ func (s *Shell) handleKeyEvent(ev input.KeyPressEvent) bool {
 				return true
 			}
 		}
+		if ev.Code == input.KeyEscape {
+			s.mu.Lock()
+			isListFiles := s.activeBlock >= 0 && s.activeBlock < len(s.blocks) &&
+				isAIListFilesCommand(s.blocks[s.activeBlock].Input)
+			cancel := s.activeCancel
+			s.mu.Unlock()
+			if isListFiles && cancel != nil {
+				cancel()
+				return true
+			}
+		}
 		if raw := encodeKeyForPTY(ev); len(raw) > 0 {
 			return s.writeCommandTerminalInput(execSess, raw)
 		}
@@ -2144,12 +2163,15 @@ func (s *Shell) submitAndExecuteAsync(animate bool) {
 
 	go func() {
 		defer func() {
+			canceled := ctx.Err() != nil
 			close(animDone)
 			cancel()
 			s.mu.Lock()
 			if blockIdx >= 0 && blockIdx < len(s.blocks) {
 				s.blocks[blockIdx].AnimLine = ""
-				s.blocks[blockIdx].listFilesProgress = nil
+				if !canceled || s.blocks[blockIdx].listFilesProgress == nil {
+					s.blocks[blockIdx].listFilesProgress = nil
+				}
 				s.blocks[blockIdx].cachePopulated = false
 				stopCommandSubmitAnimationLocked(&s.blocks[blockIdx])
 			}
