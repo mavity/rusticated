@@ -25,6 +25,9 @@ const (
 	liteRtStatusOK        int32 = 0
 	liteRtStatusNotFound  int32 = 5
 	liteRtStatusCancelled int32 = 1
+
+	liteRtLmLogSeverityVerbose int32 = 0
+	liteRtLmLogSeveritySilent  int32 = 1000
 )
 
 var errLiteRtStatusNotFound = errors.New("LiteRT-LM status not found")
@@ -375,9 +378,9 @@ func sharedTokenCallback(drv LMDriver, userData, chunkPtr uint64) {
 // ── Shared orchestration ──────────────────────────────────────────────────
 
 func configureLMLogging(drv LMDriver) error {
-	level := int32(3)
+	level := liteRtLmLogSeveritySilent
 	if Verbose {
-		level = 0
+		level = liteRtLmLogSeverityVerbose
 	}
 	if err := drv.setLogLevel(level); err != nil {
 		return fmt.Errorf("configure LiteRT-LM logging: %w", err)
@@ -403,6 +406,9 @@ func checkSpeculativeDecoding(drv LMDriver, modelPtr uint64) (bool, error) {
 
 func sharedInspectModel(drv LMDriver, libPath, modelPath string) (*ModelInfo, error) {
 	if err := drv.ensureLoaded(libPath); err != nil {
+		return nil, err
+	}
+	if err := configureLMLogging(drv); err != nil {
 		return nil, err
 	}
 	cModel, freeModel, err := drv.stringToCPtr(modelPath)
@@ -500,7 +506,7 @@ func sharedOpenBackend(drv LMDriver, libPath, modelPath, backend string, maxToke
 	if err != nil {
 		return nil, fmt.Errorf("marshal backend name: %w", err)
 	}
-	settings, err := drv.settingsCreate(cModel, cBackend, cBackend, 0)
+	settings, err := drv.settingsCreate(cModel, cBackend, 0, 0)
 	freeBackend()
 	if err != nil {
 		return nil, fmt.Errorf("create engine settings for backend %s: %w", backend, err)

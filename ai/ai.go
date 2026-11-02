@@ -6,6 +6,8 @@ package ai
 
 // ModelInfo provides introspection into a LiteRT-LM file's capabilities.
 type ModelInfo struct {
+	// MaxContextTokens is the runtime-reported context size. For dynamic-context
+	// models, it may be the default allocation size rather than a hard maximum.
 	MaxContextTokens        int
 	IsDynamicContext        bool
 	SupportsThinking        bool
