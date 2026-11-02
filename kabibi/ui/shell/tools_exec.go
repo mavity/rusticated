@@ -52,8 +52,9 @@ func registerExecTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		if strings.TrimSpace(in.Command) == "" {
 			return nil, errors.New("command argument is required")
 		}
+		lead := ai.ToolLead(ExecInput{}, in.Command, 22)
 		if feedback != nil {
-			feedback(ai.ToolLead(ExecInput{}, in.Command, 22))
+			feedback(lead)
 		}
 
 		formatted, procID, stillRunning, exitCode, runErr := execSess.ExecuteAIToolCommand(
@@ -64,13 +65,13 @@ func registerExecTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		)
 		if feedback != nil {
 			if runErr != nil {
-				feedback("failed")
+				feedback(lead + "failed")
 			} else if stillRunning {
-				feedback(fmt.Sprintf("running (id=%d)", procID))
+				feedback(lead + fmt.Sprintf("running (id=%d)", procID))
 			} else if exitCode != 0 {
-				feedback(fmt.Sprintf("exit %d", exitCode))
+				feedback(lead + fmt.Sprintf("exit %d", exitCode))
 			} else {
-				feedback("ok")
+				feedback(lead + "ok")
 			}
 		}
 		if runErr != nil {
@@ -101,8 +102,9 @@ func registerExecTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		if !ok {
 			return nil, fmt.Errorf("managed process id=%d not found", in.ID)
 		}
+		lead := ai.ToolLead(TermReadInput{}, fmt.Sprintf("#%d", in.ID), 18)
 		if feedback != nil {
-			feedback(ai.ToolLead(TermReadInput{}, fmt.Sprintf("#%d", in.ID), 18))
+			feedback(lead)
 		}
 		waitMs := in.WaitMs
 		if waitMs <= 0 {
@@ -121,9 +123,9 @@ func registerExecTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		statusLine := formatTermStatusLine(m, exited, code, elapsed)
 		if feedback != nil {
 			if exited {
-				feedback(fmt.Sprintf("exited (%d)", code))
+				feedback(lead + fmt.Sprintf("exited (%d)", code))
 			} else {
-				feedback("running")
+				feedback(lead + "running")
 			}
 		}
 		combined := statusLine
@@ -145,12 +147,13 @@ func registerExecTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		if !ok {
 			return nil, fmt.Errorf("managed process id=%d not found", in.ID)
 		}
+		lead := ai.ToolLead(TermInputInput{}, fmt.Sprintf("#%d %s", in.ID, in.Keys), 18)
 		if feedback != nil {
-			feedback(ai.ToolLead(TermInputInput{}, fmt.Sprintf("#%d %s", in.ID, in.Keys), 18))
+			feedback(lead)
 		}
 		if err := m.WriteKeys(in.Keys); err != nil {
 			if feedback != nil {
-				feedback("failed")
+				feedback(lead + "failed")
 			}
 			return nil, err
 		}
@@ -165,7 +168,7 @@ func registerExecTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		text, exited, code, elapsed := m.Snapshot(true, false)
 		statusLine := formatTermStatusLine(m, exited, code, elapsed)
 		if feedback != nil {
-			feedback("ok")
+			feedback(lead + "ok")
 		}
 		combined := statusLine
 		if text != "" {
@@ -186,8 +189,9 @@ func registerExecTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		if !ok {
 			return nil, fmt.Errorf("managed process id=%d not found", in.ID)
 		}
+		lead := ai.ToolLead(TermKillInput{}, fmt.Sprintf("#%d", in.ID), 18)
 		if feedback != nil {
-			feedback(ai.ToolLead(TermKillInput{}, fmt.Sprintf("#%d", in.ID), 18))
+			feedback(lead)
 		}
 		sig := in.Signal
 		if strings.TrimSpace(sig) == "" {
@@ -197,7 +201,7 @@ func registerExecTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		text, exited, code, elapsed := m.Snapshot(false, false)
 		statusLine := formatTermStatusLine(m, exited, code, elapsed)
 		if feedback != nil {
-			feedback("killed")
+			feedback(lead + "killed")
 		}
 		combined := statusLine
 		if text != "" {

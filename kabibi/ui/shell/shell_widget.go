@@ -2159,39 +2159,12 @@ func stopCommandSubmitAnimationLocked(block *CommandBlock) {
 }
 
 func (s *Shell) updateActiveArtifactFeedback(blockIdx int, feedback string) {
-	if feedback == "" {
-		return
-	}
-	s.mu.Lock()
-	var raw strings.Builder
-	raw.WriteString(s.statusTextRaw)
-	for i := 0; i < len(feedback); i++ {
-		ch := feedback[i]
-		if ch == '\r' {
-			raw.Reset()
-		} else {
-			raw.WriteByte(ch)
-		}
-	}
-	s.statusTextRaw = raw.String()
-	cur := strings.Join(strings.Fields(s.statusTextRaw), " ")
-	s.statusLine = cur
-	if blockIdx >= 0 && blockIdx < len(s.blocks) {
-		if cur != "" {
-			glyph := stackSpinnerFrames[s.animFrame%len(stackSpinnerFrames)]
-			s.blocks[blockIdx].AnimLine = glyph + " " + cur
-		} else {
-			s.blocks[blockIdx].AnimLine = ""
-		}
-	}
-	s.mu.Unlock()
-	s.invalidate()
-}
-
-func (s *Shell) updateActiveArtifactToolFeedback(blockIdx int, feedback string) {
 	s.mu.Lock()
 	s.statusTextRaw = feedback
-	cur := strings.Join(strings.Fields(feedback), " ")
+	if index := strings.LastIndexByte(feedback, '\r'); index >= 0 {
+		s.statusTextRaw = feedback[index+1:]
+	}
+	cur := strings.Join(strings.Fields(s.statusTextRaw), " ")
 	s.statusLine = cur
 	if blockIdx >= 0 && blockIdx < len(s.blocks) {
 		if cur != "" {
@@ -2219,9 +2192,6 @@ func (s *Shell) runAIFallback(
 		prompt,
 		func(feedback string) {
 			s.updateActiveArtifactFeedback(blockIdx, feedback)
-		},
-		func(feedback string) {
-			s.updateActiveArtifactToolFeedback(blockIdx, feedback)
 		},
 		func(content string) {
 			s.mu.Lock()

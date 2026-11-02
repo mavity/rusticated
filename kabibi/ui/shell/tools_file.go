@@ -131,21 +131,22 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 			feedback = tc.Feedback
 			embedder = tc.PartEmbedder()
 		}
+		lead := ai.ToolLead(ReadFileInput{}, filepath.Base(resolved), 18)
 		if feedback != nil {
-			feedback(ai.ToolLead(ReadFileInput{}, filepath.Base(resolved), 18))
+			feedback(lead)
 		}
 
 		info, err := os.Stat(resolved)
 		if err != nil {
 			if feedback != nil {
-				feedback("failed")
+				feedback(lead + "failed")
 			}
 			return nil, err
 		}
 		data, err := os.ReadFile(resolved)
 		if err != nil {
 			if feedback != nil {
-				feedback("failed")
+				feedback(lead + "failed")
 			}
 			return nil, err
 		}
@@ -180,7 +181,7 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 			}
 			formatted := hashline.FormatHashlines(relDisp, imgRaw, imgRanges, note, useHashline)
 			if feedback != nil {
-				feedback("image ocr")
+				feedback(lead + "image ocr")
 			}
 			return map[string]any{
 				"path":      resolved,
@@ -247,7 +248,7 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 
 		formatted := hashline.FormatHashlines(relDisp, data, ranges, summaryNote, useHashline)
 		if feedback != nil {
-			feedback(fmt.Sprintf("%d bytes read", len(data)))
+			feedback(lead + fmt.Sprintf("%d bytes read", len(data)))
 		}
 
 		// When explicitly requested with hashline=false or start_line/end_line without hashline flag,
@@ -281,18 +282,19 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		cwd := execSess.Dir()
 		resolved := resolveShellPath(cwd, in.Path)
 		relDisp := displayRelPath(cwd, resolved)
+		lead := ai.ToolLead(EditFileInput{}, filepath.Base(resolved), 18)
 		if feedback != nil {
-			feedback(ai.ToolLead(EditFileInput{}, filepath.Base(resolved), 18))
+			feedback(lead)
 		}
 		res, err := hashline.ApplyHashlineEdits(resolved, relDisp, in.Edits)
 		if err != nil {
 			if feedback != nil {
-				feedback("failed")
+				feedback(lead + "failed")
 			}
 			return nil, err
 		}
 		if feedback != nil {
-			feedback(fmt.Sprintf("%d hunk(s)", res.AppliedHunk))
+			feedback(lead + fmt.Sprintf("%d hunk(s)", res.AppliedHunk))
 		}
 		return map[string]any{
 			"path":            res.Path,
@@ -311,24 +313,25 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		cwd := execSess.Dir()
 		resolved := resolveShellPath(cwd, in.Path)
 		relDisp := displayRelPath(cwd, resolved)
+		lead := ai.ToolLead(WriteFileInput{}, filepath.Base(resolved), 18)
 		if feedback != nil {
-			feedback(ai.ToolLead(WriteFileInput{}, filepath.Base(resolved), 18))
+			feedback(lead)
 		}
 		if err := os.MkdirAll(filepath.Dir(resolved), 0o755); err != nil {
 			if feedback != nil {
-				feedback("failed")
+				feedback(lead + "failed")
 			}
 			return nil, err
 		}
 		raw := []byte(in.Content)
 		if err := os.WriteFile(resolved, raw, 0o644); err != nil {
 			if feedback != nil {
-				feedback("failed")
+				feedback(lead + "failed")
 			}
 			return nil, err
 		}
 		if feedback != nil {
-			feedback("ok")
+			feedback(lead + "ok")
 		}
 		tag := hashline.ComputeFileTag(raw)
 		return map[string]any{
@@ -350,18 +353,19 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 			embedder = tc.PartEmbedder()
 		}
 		options.Embedder = embedder
+		lead := ai.ToolLead(ListFilesInput{}, q, 18)
 		if feedback != nil {
-			feedback(ai.ToolLead(ListFilesInput{}, q, 18))
+			feedback(lead)
 		}
 		table, err := filelist.ListFiles(execSess.Dir(), options)
 		if err != nil {
 			if feedback != nil {
-				feedback("failed")
+				feedback(lead + "failed")
 			}
 			return nil, err
 		}
 		if feedback != nil {
-			feedback("ok")
+			feedback(lead + "ok")
 		}
 		return table, nil
 	})
@@ -377,18 +381,19 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		if tc != nil {
 			feedback = tc.Feedback
 		}
+		lead := ai.ToolLead(ListDirInput{}, filepath.Base(resolved), 18)
 		if feedback != nil {
-			feedback(ai.ToolLead(ListDirInput{}, filepath.Base(resolved), 18))
+			feedback(lead)
 		}
 		table, err := filelist.ListFiles(resolved, filelist.Options{Query: "*"})
 		if err != nil {
 			if feedback != nil {
-				feedback("failed")
+				feedback(lead + "failed")
 			}
 			return nil, err
 		}
 		if feedback != nil {
-			feedback("ok")
+			feedback(lead + "ok")
 		}
 		return map[string]any{
 			"path":    resolved,

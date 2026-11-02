@@ -361,14 +361,10 @@ func TestSessionToolDispatchReturnsErrorResults(t *testing.T) {
 }
 
 func TestToolFeedbackIsForwardedWithoutSyntheticSeparators(t *testing.T) {
-	var modelFeedback []string
-	var toolFeedback []string
+	var feedbackLog []string
 	session, err := NewSession(SessionConfig{
 		OnFeedback: func(text string) {
-			modelFeedback = append(modelFeedback, text)
-		},
-		OnToolFeedback: func(text string) {
-			toolFeedback = append(toolFeedback, text)
+			feedbackLog = append(feedbackLog, text)
 		},
 		Tools: map[string]Tool{
 			"progress": {
@@ -386,11 +382,8 @@ func TestToolFeedbackIsForwardedWithoutSyntheticSeparators(t *testing.T) {
 
 	session.executeToolCalls(context.Background(), nil, []ToolCall{{Name: "progress"}})
 
-	if !reflect.DeepEqual(toolFeedback, []string{"reading file", "22 bytes read"}) {
-		t.Fatalf("tool feedback = %#v, want the two producer values unchanged", toolFeedback)
-	}
-	if len(modelFeedback) != 0 {
-		t.Fatalf("model feedback received tool updates: %#v", modelFeedback)
+	if !reflect.DeepEqual(feedbackLog, []string{"reading file", "22 bytes read"}) {
+		t.Fatalf("tool feedback = %#v, want the two producer values unchanged", feedbackLog)
 	}
 }
 

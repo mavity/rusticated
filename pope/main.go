@@ -168,15 +168,45 @@ func main() {
 		}
 	}
 
+	var prevFeedbackLen int
+	wipeFeedback := func() {
+		if prevFeedbackLen > 0 {
+			fmt.Print("\r" + strings.Repeat(" ", prevFeedbackLen) + "\r")
+			prevFeedbackLen = 0
+		}
+	}
 	session, err := ai.NewSession(ai.SessionConfig{
 		Engine:          engine,
 		Embedder:        embedder,
 		SystemMessage:   sysMsg,
 		Tools:           tools,
 		CompactionLimit: compactionLimit,
-		OnContent:       func(text string) { fmt.Print(text) },
-		OnFeedback:      func(text string) { fmt.Print(text) },
-		Verbose:         cfg.VerboseFlag,
+		OnContent: func(text string) {
+			if text != "" {
+				wipeFeedback()
+				fmt.Print(text)
+			}
+		},
+		OnFeedback: func(text string) {
+			if index := strings.LastIndexByte(text, '\r'); index >= 0 {
+				text = text[index+1:]
+			}
+			line := strings.Join(strings.Fields(text), " ")
+			if line == "" {
+				wipeFeedback()
+				return
+			}
+			newLen := len([]rune(line))
+			if prevFeedbackLen > 0 {
+				fmt.Print("\r")
+				if prevFeedbackLen > newLen {
+					fmt.Print(strings.Repeat(" ", prevFeedbackLen) + "\r")
+				}
+			}
+			fmt.Print(line)
+			prevFeedbackLen = newLen
+		},
+		Verbose: cfg.VerboseFlag,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "pope: session config error: %v\n", err)

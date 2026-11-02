@@ -59,14 +59,15 @@ func registerGitTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		if !oneOf(action, "status", "log", "diff", "show", "blame", "branches", "stash_list", "reflog") {
 			return nil, fmt.Errorf("unsupported git_inspect action %q; supported actions: status, log, diff, show, blame, branches, stash_list, reflog", in.Action)
 		}
+		lead := ai.ToolLead(GitInspectInput{}, action, 18)
 		if feedback != nil {
-			feedback(ai.ToolLead(GitInspectInput{}, action, 18))
+			feedback(lead)
 		}
 
 		repo, err := gitcore.Open(execSess.Dir())
 		if err != nil {
 			if feedback != nil {
-				feedback("failed")
+				feedback(lead + "failed")
 			}
 			return nil, err
 		}
@@ -77,14 +78,14 @@ func registerGitTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 			}
 			if limit < 1 || limit > 100 {
 				if feedback != nil {
-					feedback("failed")
+					feedback(lead + "failed")
 				}
 				return nil, fmt.Errorf("git log limit must be between 1 and 100, got %d", limit)
 			}
 			commits, err := repo.LogRevision(100, in.Path, in.Revision)
 			if err != nil {
 				if feedback != nil {
-					feedback("failed")
+					feedback(lead + "failed")
 				}
 				return nil, err
 			}
@@ -98,7 +99,7 @@ func registerGitTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 				search := fabric.SearchAndExpandContext(ctx, cacheKey, contentVersion, lines, in.Search, "auto", embedder, fabric.DefaultTotalBudget)
 				if search.Err != nil {
 					if feedback != nil {
-						feedback("failed")
+						feedback(lead + "failed")
 					}
 					return nil, fmt.Errorf("search git log: %w", search.Err)
 				}
@@ -127,7 +128,7 @@ func registerGitTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 				}
 			}
 			if feedback != nil {
-				feedback(fmt.Sprintf("%d commit(s)", len(commits)))
+				feedback(lead + fmt.Sprintf("%d commit(s)", len(commits)))
 			}
 			return map[string]any{"root": repo.Root(), "commits": results}, nil
 		}
@@ -252,20 +253,20 @@ func registerGitTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		branch, err := repo.CurrentBranch()
 		if err != nil {
 			if feedback != nil {
-				feedback("failed")
+				feedback(lead + "failed")
 			}
 			return nil, err
 		}
 		status, err := repo.Status()
 		if err != nil {
 			if feedback != nil {
-				feedback("failed")
+				feedback(lead + "failed")
 			}
 			return nil, err
 		}
 		entries := statusResults(status)
 		if feedback != nil {
-			feedback(fmt.Sprintf("%d changed path(s)", len(entries)))
+			feedback(lead + fmt.Sprintf("%d changed path(s)", len(entries)))
 		}
 		return map[string]any{
 			"root":   repo.Root(),
@@ -283,8 +284,9 @@ func registerGitTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		if !oneOf(action, "stage", "unstage", "commit", "branch_create", "branch_delete", "switch", "checkout", "restore", "reset", "stash_push", "stash_pop", "cherry_pick", "revert", "merge") {
 			return nil, fmt.Errorf("unsupported git_mutate action %q", in.Action)
 		}
+		lead := ai.ToolLead(GitMutateInput{}, action, 18)
 		if feedback != nil {
-			feedback(ai.ToolLead(GitMutateInput{}, action, 18))
+			feedback(lead)
 		}
 		if oneOf(action, "stash_push", "stash_pop", "cherry_pick", "revert", "merge") {
 			return executeGitToolMutation(ctx, execSess, action, in)
@@ -292,7 +294,7 @@ func registerGitTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		repo, err := gitcore.Open(execSess.Dir())
 		if err != nil {
 			if feedback != nil {
-				feedback("failed")
+				feedback(lead + "failed")
 			}
 			return nil, err
 		}
@@ -300,18 +302,18 @@ func registerGitTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		case "stage":
 			if in.Message != "" || in.Amend {
 				if feedback != nil {
-					feedback("failed")
+					feedback(lead + "failed")
 				}
 				return nil, errors.New("git_mutate stage does not accept message or amend")
 			}
 			if err := repo.Stage(in.Paths, in.All); err != nil {
 				if feedback != nil {
-					feedback("failed")
+					feedback(lead + "failed")
 				}
 				return nil, err
 			}
 			if feedback != nil {
-				feedback("staged")
+				feedback(lead + "staged")
 			}
 			return map[string]any{"success": true, "staged_paths": in.Paths, "all": in.All}, nil
 		case "unstage":
@@ -325,19 +327,19 @@ func registerGitTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		case "commit":
 			if len(in.Paths) > 0 {
 				if feedback != nil {
-					feedback("failed")
+					feedback(lead + "failed")
 				}
 				return nil, errors.New("git_mutate commit does not accept paths; stage paths first")
 			}
 			hash, err := repo.Commit(in.Message, in.All, in.Amend, execSess.EnvMap())
 			if err != nil {
 				if feedback != nil {
-					feedback("failed")
+					feedback(lead + "failed")
 				}
 				return nil, err
 			}
 			if feedback != nil {
-				feedback("committed " + hash[:10])
+				feedback(lead + "committed " + hash[:10])
 			}
 			return map[string]any{"success": true, "commit": hash}, nil
 		case "branch_create":

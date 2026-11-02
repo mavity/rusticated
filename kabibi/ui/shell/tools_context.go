@@ -42,12 +42,13 @@ func registerShellContextTools(tools map[string]ai.Tool, execSess *ExecutionSess
 		if in.IncludeOutput != nil {
 			includeOut = *in.IncludeOutput
 		}
+		lead := ai.ToolLead(ShellHistoryInput{}, "history", 18)
 		if feedback != nil {
-			feedback(ai.ToolLead(ShellHistoryInput{}, "history", 18))
+			feedback(lead)
 		}
 		records := execSess.QueryHistory(in.SinceLastAITurn, count, includeOut)
 		if feedback != nil {
-			feedback(fmt.Sprintf("%d command(s)", len(records)))
+			feedback(lead + fmt.Sprintf("%d command(s)", len(records)))
 		}
 		return map[string]any{
 			"cwd":      execSess.Dir(),
@@ -59,13 +60,14 @@ func registerShellContextTools(tools map[string]ai.Tool, execSess *ExecutionSess
 		if in.ID <= 0 {
 			return nil, fmt.Errorf("id must be a positive command record ID")
 		}
+		lead := ai.ToolLead(ReadCommandOutputInput{}, fmt.Sprintf("#%d", in.ID), 18)
 		if feedback != nil {
-			feedback(ai.ToolLead(ReadCommandOutputInput{}, fmt.Sprintf("#%d", in.ID), 18))
+			feedback(lead)
 		}
 		rec, ok := execSess.RecordByID(in.ID)
 		if !ok {
 			if feedback != nil {
-				feedback("not found")
+				feedback(lead + "not found")
 			}
 			return nil, fmt.Errorf("command record #%d not found", in.ID)
 		}
@@ -104,7 +106,7 @@ func registerShellContextTools(tools map[string]ai.Tool, execSess *ExecutionSess
 		}
 
 		if feedback != nil {
-			feedback(fmt.Sprintf("%d lines", len(lines)))
+			feedback(lead + fmt.Sprintf("%d lines", len(lines)))
 		}
 		return map[string]any{
 			"id":          rec.ID,
@@ -120,8 +122,9 @@ func registerShellContextTools(tools map[string]ai.Tool, execSess *ExecutionSess
 	})
 
 	tools["shell_state"] = ai.NewTool(func(ctx context.Context, in ShellStateInput, feedback ai.LogFeedback) (any, error) {
+		lead := ai.ToolLead(ShellStateInput{}, "shell_state", 18)
 		if feedback != nil {
-			feedback(ai.ToolLead(ShellStateInput{}, "shell_state", 18))
+			feedback(lead)
 		}
 		envMap := execSess.EnvMap()
 		selectedEnv := map[string]string{}
@@ -147,7 +150,7 @@ func registerShellContextTools(tools map[string]ai.Tool, execSess *ExecutionSess
 			break
 		}
 		if feedback != nil {
-			feedback("ok")
+			feedback(lead + "ok")
 		}
 		return map[string]any{
 			"cwd":          execSess.Dir(),
