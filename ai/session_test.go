@@ -138,6 +138,126 @@ func (c *scriptedSessionConversation) Close() error {
 	return nil
 }
 
+type retiringSessionBackend struct {
+	mu                 sync.Mutex
+	histories          [][]PromptPart
+	firstEvent         chan struct{}
+	retirementStarted  chan struct{}
+	retirementFinished chan struct{}
+	releaseRetirement  chan struct{}
+}
+
+func (b *retiringSessionBackend) NewConversation(cfg ConversationConfig) (conversationBackend, error) {
+	b.mu.Lock()
+	index := len(b.histories)
+	b.histories = append(b.histories, append([]PromptPart(nil), cfg.History...))
+	b.mu.Unlock()
+	return &retiringSessionConversation{backend: b, first: index == 0}, nil
+}
+
+func (*retiringSessionBackend) Close() error { return nil }
+
+type retiringSessionConversation struct {
+	backend *retiringSessionBackend
+	first   bool
+}
+
+func (c *retiringSessionConversation) SendStream(ctx context.Context, _ []PromptPart, onEvent func(ModelEvent)) error {
+	if !c.first {
+		onEvent(TextEvent{Text: "answer"})
+		return nil
+	}
+	onEvent(TextEvent{Text: "partial"})
+	close(c.backend.firstEvent)
+	<-ctx.Done()
+	close(c.backend.retirementStarted)
+	<-c.backend.releaseRetirement
+	onEvent(TextEvent{Text: "stale"})
+	close(c.backend.retirementFinished)
+	return ctx.Err()
+}
+
+func (*retiringSessionConversation) Close() error { return nil }
+
+func TestCanceledTurnReturnsBeforeRetirementAndNextTurnUsesCommittedHistory(t *testing.T) {
+	backend := &retiringSessionBackend{
+		firstEvent:         make(chan struct{}),
+		retirementStarted:  make(chan struct{}),
+		retirementFinished: make(chan struct{}),
+		releaseRetirement:  make(chan struct{}),
+	}
+	var releaseOnce sync.Once
+	releaseRetirement := func() { releaseOnce.Do(func() { close(backend.releaseRetirement) }) }
+	defer releaseRetirement()
+
+	var contentMu sync.Mutex
+	var content strings.Builder
+	session, err := NewSession(SessionConfig{
+		Engine: &Engine{impl: &engineImpl{backend: backend}},
+		OnContent: func(text string) {
+			contentMu.Lock()
+			content.WriteString(text)
+			contentMu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		session.Shutdown()
+		_ = session.WaitShutdown(context.Background())
+	}()
+	if err := session.Init(); err != nil {
+		t.Fatalf("Init(): %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	firstTurn := make(chan error, 1)
+	go func() { firstTurn <- session.RunTurn(ctx, "interrupted prompt") }()
+	<-backend.firstEvent
+	cancel()
+
+	select {
+	case err := <-firstTurn:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled RunTurn() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled RunTurn() waited for retired backend cleanup")
+	}
+	select {
+	case <-backend.retirementStarted:
+	case <-time.After(time.Second):
+		t.Fatal("retired backend cleanup did not start")
+	}
+
+	if err := session.RunTurn(context.Background(), "next prompt"); err != nil {
+		t.Fatalf("next RunTurn(): %v", err)
+	}
+	backend.mu.Lock()
+	histories := append([][]PromptPart(nil), backend.histories...)
+	backend.mu.Unlock()
+	if len(histories) != 2 || len(histories[1]) != 0 {
+		t.Fatalf("new conversation history = %#v, want an empty committed-history snapshot", histories)
+	}
+	if got := session.CanonicalHistory; len(got) != 2 || got[0].Text != "next prompt" || got[1].Text != "answer" {
+		t.Fatalf("canonical history after next turn = %#v, want only the completed next turn", got)
+	}
+	contentMu.Lock()
+	gotContent := content.String()
+	contentMu.Unlock()
+	if gotContent != "answer" {
+		t.Fatalf("content callbacks = %q, want only the completed answer", gotContent)
+	}
+
+	releaseRetirement()
+	select {
+	case <-backend.retirementFinished:
+	case <-time.After(time.Second):
+		t.Fatal("retired backend did not finish cleanup")
+	}
+}
+
 func TestReplaceEngineRestoresCompactedHistory(t *testing.T) {
 	history := []PromptPart{
 		{Role: RoleUser, Text: "retained question"},
@@ -901,8 +1021,19 @@ func TestRunTurnToolExecutionAndHistory(t *testing.T) {
 		t.Fatalf("finalPart.Text = %q", finalPart.Text)
 	}
 	// Flush embeddings and verify ordinary history remains indexed.
-	if err := s.FlushEmbeddings(); err != nil {
-		t.Fatal(err)
+	flushDeadline := time.Now().Add(5 * time.Second)
+	for {
+		err := s.FlushEmbeddings()
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, ErrSessionBusy) {
+			t.Fatal(err)
+		}
+		if time.Now().After(flushDeadline) {
+			t.Fatal("background embedding did not release the session operation")
+		}
+		time.Sleep(time.Millisecond)
 	}
 	if len(s.CanonicalHistory[3].Embedding) == 0 {
 		t.Fatalf("expected final answer embedding, got %#v", s.CanonicalHistory[3].Embedding)

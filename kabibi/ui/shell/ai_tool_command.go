@@ -17,15 +17,6 @@ func normalizeAIToolName(name string) string {
 	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(name)), "-", "_")
 }
 
-func isAIListFilesCommand(input string) bool {
-	fields := strings.Fields(input)
-	if len(fields) < 2 || fields[0] != "ai" {
-		return false
-	}
-	tool := strings.Trim(fields[1], `"'`)
-	return normalizeAIToolName(tool) == "list_files"
-}
-
 // IsAIToolName reports whether name resolves to a registered Kabibi AI tool.
 func IsAIToolName(name string) bool {
 	_, ok := BuildKabibiTools(nil)[normalizeAIToolName(name)]

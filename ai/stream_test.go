@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type fakeConvBackend struct {
@@ -36,8 +37,42 @@ func (f *fakeConvBackend) Close() error {
 	return nil
 }
 
+type callbackAfterCancelBackend struct {
+	started      chan struct{}
+	release      chan struct{}
+	callbackDone chan struct{}
+}
+
+func (b *callbackAfterCancelBackend) SendStream(ctx context.Context, _ []PromptPart, onEvent func(ModelEvent)) error {
+	close(b.started)
+	<-ctx.Done()
+	go func() {
+		<-b.release
+		onEvent(TextEvent{Text: "late"})
+		close(b.callbackDone)
+	}()
+	return ctx.Err()
+}
+
+func (*callbackAfterCancelBackend) Close() error { return nil }
+
 func newFakeConv(f *fakeConvBackend) *Conversation {
 	return &Conversation{impl: &convImpl{backend: f}}
+}
+
+func waitFakeConvFinished(t *testing.T, f *fakeConvBackend) {
+	t.Helper()
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for !f.finished.Load() {
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatal("backend stream did not finish after cancellation")
+		}
+	}
 }
 
 func textChunk(s string) string {
@@ -120,11 +155,49 @@ func TestSendStreamEarlyBreakCancelsAndInvalidates(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("loop body ran %d times after break, want 1", n)
 	}
+	waitFakeConvFinished(t, f)
 	if got, _ := f.ctxErrEnd.Load().(struct{ error }); !errors.Is(got.error, context.Canceled) {
 		t.Fatalf("backend ctx error = %v, want context.Canceled", got.error)
 	}
 	if !f.closed.Load() {
 		t.Fatal("conversation was not invalidated by the break")
+	}
+}
+
+func TestSendStreamRetainsSafeCallbackTargetAfterCancellation(t *testing.T) {
+	backend := &callbackAfterCancelBackend{
+		started:      make(chan struct{}),
+		release:      make(chan struct{}),
+		callbackDone: make(chan struct{}),
+	}
+	conv := &Conversation{impl: &convImpl{backend: backend}}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		for _, err := range conv.SendStream(ctx, []PromptPart{{Text: "hi"}}) {
+			if err != nil {
+				result <- err
+				return
+			}
+		}
+		result <- nil
+	}()
+	<-backend.started
+	cancel()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("SendStream error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SendStream waited for backend retirement")
+	}
+	close(backend.release)
+	select {
+	case <-backend.callbackDone:
+	case <-time.After(time.Second):
+		t.Fatal("late callback did not finish")
 	}
 }
 
@@ -229,6 +302,7 @@ func TestSendStreamDetectsExactTandemLoopAndCancels(t *testing.T) {
 	if events >= 30 {
 		t.Fatalf("yielded %d events before catching loop, want early stop (< 30)", events)
 	}
+	waitFakeConvFinished(t, f)
 	if got, _ := f.ctxErrEnd.Load().(struct{ error }); !errors.Is(got.error, context.Canceled) {
 		t.Fatalf("backend ctx error = %v, want context.Canceled", got.error)
 	}

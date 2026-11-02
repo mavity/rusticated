@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,16 @@ import (
 	"github.com/mavity/rusticated/kabibi/ui"
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
+
+type captureKeyPTY struct {
+	bytes.Buffer
+}
+
+func (*captureKeyPTY) Read([]byte) (int, error) { return 0, io.EOF }
+func (*captureKeyPTY) Close() error             { return nil }
+func (*captureKeyPTY) Resize(int, int) error    { return nil }
+func (*captureKeyPTY) Wait() error              { return nil }
+func (*captureKeyPTY) Fd() uintptr              { return 0 }
 
 func TestKabibiSystemMessageAppendsCLIHelpContext(t *testing.T) {
 	const help = "Kabibi command line usage and flags"
@@ -515,6 +526,44 @@ func TestShell_CtrlCClearsIncompleteMultilineInput(t *testing.T) {
 	}
 	if len(aiMock.prompts) != 0 {
 		t.Fatalf("incomplete input was routed to AI: %v", aiMock.prompts)
+	}
+}
+
+func TestShell_CtrlCCancelsAnActiveCommandGenerically(t *testing.T) {
+	canceled := false
+	s := &Shell{
+		running:      true,
+		activeCancel: func() { canceled = true },
+		blocks:       []CommandBlock{{Kind: BlockCommand, Input: "sleep 10"}},
+		activeBlock:  0,
+	}
+
+	if !s.handleKeyEvent(input.KeyPressEvent{Code: 'c', Mod: input.ModCtrl}) {
+		t.Fatal("Ctrl+C was not handled for the active command")
+	}
+	if !canceled {
+		t.Fatal("Ctrl+C did not cancel the active command")
+	}
+}
+
+func TestShell_ForwardsCtrlCToActivePTYBeforeCancellingCommand(t *testing.T) {
+	activePTY := &captureKeyPTY{}
+	execSess := &ExecutionSession{activePTY: activePTY}
+	canceled := false
+	s := &Shell{
+		running:      true,
+		execSess:     execSess,
+		activeCancel: func() { canceled = true },
+	}
+
+	if !s.handleKeyEvent(input.KeyPressEvent{Code: 'c', Mod: input.ModCtrl}) {
+		t.Fatal("Ctrl+C was not forwarded to the active PTY")
+	}
+	if canceled {
+		t.Fatal("Ctrl+C canceled the shell operation before reaching its active PTY")
+	}
+	if got := activePTY.String(); got != "\x03" {
+		t.Fatalf("active PTY received %q, want Ctrl+C byte", got)
 	}
 }
 

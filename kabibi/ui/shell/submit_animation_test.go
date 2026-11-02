@@ -357,11 +357,29 @@ func TestCommandSubmitAnimationUsesCellPositionsAndPhases(t *testing.T) {
 	}
 
 	white := renderAt(submitWipeDuration + submitRestoreDuration + submitColorDuration)
-	if got := white.Get(0, 0).Style.Background(); got != 0xFFFFFF {
-		t.Fatalf("background at flash transition = #%06X, want white", got)
+	for _, position := range layout.inputCells {
+		if position.width > 0 && white.Get(position.x, position.y).Style.Background() != 0xFFFFFF {
+			t.Fatalf("submitted input background at (%d,%d) was not white", position.x, position.y)
+		}
+	}
+	for x := 0; x < visualWidth(prompt); x++ {
+		if got := white.Get(x, 0).Style.Background(); got != 0 {
+			t.Fatalf("decorative prompt background at column %d = #%06X, want default", x, got)
+		}
+	}
+	lineEnd := last.x + last.width
+	if got := white.Get(lineEnd, last.y).Style.Background(); got != 0 {
+		t.Fatalf("background after submitted input = #%06X, want default", got)
+	}
+	ansi := terminal.ToANSI(white)
+	if !strings.Contains(ansi, "\x1b[0m\x1b[K") && !strings.Contains(ansi, "\x1b[49m\x1b[K") {
+		t.Fatalf("ANSI output did not reset the background before clearing to end of line: %q", ansi)
 	}
 	finalFrame := renderAt(submitAnimationDuration + 50*time.Millisecond)
 	if got := finalFrame.Get(last.x, last.y).Grapheme; got != "好" {
 		t.Fatalf("animation replayed after one cycle: final glyph = %q, want original input", got)
+	}
+	if got := finalFrame.Get(0, 0).Style.Background(); got != 0 {
+		t.Fatalf("decorative prompt background after animation = #%06X, want default", got)
 	}
 }

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"iter"
-	"sync/atomic"
 	"time"
 )
 
@@ -106,12 +105,11 @@ type Conversation struct {
 // (nil, err) and ends the iteration. A closed conversation yields
 // (nil, ErrClosed); so does closing it while the stream is running.
 //
-// The loop body runs directly on the native runtime's callback thread, in
-// generation order, so a slow body delays the chunks after it, and a panic in
-// it is fatal. Breaking out of the loop, like cancelling ctx, cancels the
-// native generation and invalidates the conversation for good: it must be
-// replaced (LiteRT-LM leaves a cancelled conversation unusable). The iterator
-// returns without waiting for the native runtime to finish unwinding.
+// Events are delivered to the iterator's caller in generation order. Breaking
+// out of the loop, like cancelling ctx, cancels the native generation and
+// invalidates the conversation for good: it must be replaced (LiteRT-LM leaves
+// a cancelled conversation unusable). The iterator returns without waiting for
+// the native runtime to finish unwinding.
 func (c *Conversation) SendStream(ctx context.Context, parts []PromptPart) iter.Seq2[ModelEvent, error] {
 	return func(yield func(ModelEvent, error) bool) {
 		if c == nil || c.impl == nil {
@@ -121,46 +119,80 @@ func (c *Conversation) SendStream(ctx context.Context, parts []PromptPart) iter.
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
 
-		// stopped and looped are written on the callback thread and read on this goroutine.
-		var stopped atomic.Bool
-		var looped atomic.Bool
+		const eventBufferSize = 16
+		events := make(chan ModelEvent, eventBufferSize)
+		result := make(chan error, 1)
+		go func() {
+			err := c.impl.sendStream(ctx, parts, func(event ModelEvent) {
+				if ctx.Err() != nil {
+					return
+				}
+				select {
+				case events <- event:
+				case <-ctx.Done():
+				}
+			})
+			result <- err
+		}()
+
 		var detector loopDetector
-		err := c.impl.sendStream(ctx, parts, func(event ModelEvent) {
-			if stopped.Load() {
-				return
+		handleEvent := func(event ModelEvent) bool {
+			if err := ctx.Err(); err != nil {
+				yield(nil, err)
+				return false
 			}
 			switch e := event.(type) {
 			case TextEvent:
 				if detector.feedText(e.Text) {
-					looped.Store(true)
-					stopped.Store(true)
 					cancel()
-					return
+					c.Close()
+					yield(nil, ErrRepetitionLoop)
+					return false
 				}
 			case ToolCallEvent:
 				if detector.feedToolCalls(e.ToolCalls) {
-					looped.Store(true)
-					stopped.Store(true)
 					cancel()
-					return
+					c.Close()
+					yield(nil, ErrRepetitionLoop)
+					return false
 				}
 			}
 			if !yield(event, nil) {
-				stopped.Store(true)
 				cancel()
+				c.Close()
+				return false
 			}
-		})
-		if looped.Load() {
-			c.Close()
-			yield(nil, ErrRepetitionLoop)
-			return
+			return true
 		}
-		if stopped.Load() {
-			c.Close()
-			return
-		}
-		if err != nil {
-			yield(nil, err)
+
+		var backendDone bool
+		var backendErr error
+		for {
+			if backendDone {
+				select {
+				case event := <-events:
+					if !handleEvent(event) {
+						return
+					}
+				default:
+					if backendErr != nil {
+						yield(nil, backendErr)
+					}
+					return
+				}
+				continue
+			}
+			select {
+			case event := <-events:
+				if !handleEvent(event) {
+					return
+				}
+			case backendErr = <-result:
+				backendDone = true
+			case <-ctx.Done():
+				yield(nil, ctx.Err())
+				return
+			}
 		}
 	}
 }

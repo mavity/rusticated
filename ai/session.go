@@ -1236,6 +1236,9 @@ func (s *Session) runAgenticTurn(
 			}
 			return nil, "", compactedDuringTurn, err
 		}
+		if err := ctx.Err(); err != nil {
+			return nil, "", compactedDuringTurn, err
+		}
 
 		if len(toolCalls) == 0 {
 			return executedToolParts, strings.TrimSpace(generatedText.String()), compactedDuringTurn, nil
