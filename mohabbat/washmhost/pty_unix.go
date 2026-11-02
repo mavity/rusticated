@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -22,7 +23,7 @@ func (s *unixPtySession) Read(p []byte) (int, error) {
 	n, err := s.master.Read(p)
 	if err != nil {
 		// Linux returns EIO when slave closes; treat as EOF
-		if err == syscall.EIO || err.Error() == "input/output error" {
+		if errors.Is(err, syscall.EIO) || err.Error() == "input/output error" {
 			return n, io.EOF
 		}
 		return n, err
@@ -123,7 +124,8 @@ func openPtmx(cmd *exec.Cmd, cols, rows uint16) (PtySession, *os.Process, error)
 	}
 	cmd.SysProcAttr.Setsid = true
 	cmd.SysProcAttr.Setctty = true
-	cmd.SysProcAttr.Ctty = int(pts.Fd())
+	// Ctty is the child's descriptor number; the slave is mapped to stdin.
+	cmd.SysProcAttr.Ctty = 0
 
 	err = cmd.Start()
 	if err != nil {
@@ -140,8 +142,8 @@ func openPtmx(cmd *exec.Cmd, cols, rows uint16) (PtySession, *os.Process, error)
 // Darwin / BSD ioctl constants alongside Linux TIOCSPTLCK / TIOCGPTN so a single
 // unix file cross-compiles cleanly on linux/amd64, linux/arm64, linux/arm, and darwin/arm64.
 const (
-	linuxTIOCSPTLCK  = 0x40045431
-	linuxTIOCGPTN    = 0x80045430
+	linuxTIOCSPTLCK    = 0x40045431
+	linuxTIOCGPTN      = 0x80045430
 	darwinTIOCPTYGNAME = 0x40807453
 	darwinTIOCPTYGRANT = 0x20007454
 	darwinTIOCPTYUNLK  = 0x20007452
