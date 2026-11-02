@@ -4,6 +4,8 @@
 // and generic vision (Interpreter) primitives.
 package ai
 
+import "sync"
+
 // ModelInfo provides introspection into a LiteRT-LM file's capabilities.
 type ModelInfo struct {
 	// MaxContextTokens is the runtime-reported context size. For dynamic-context
@@ -106,8 +108,11 @@ func (i *Interpreter) Close() {
 // Embedder is a loaded LiteRT-LM EmbeddingEngine model (e.g. EmbeddingGemma 2)
 // ready to compute float32 vector representations of PromptParts.
 type Embedder struct {
+	mu        sync.Mutex
 	impl      *embedderImpl
 	modelPath string
+	active    int
+	closing   bool
 }
 
 // NewEmbedder loads the native runtime library and embedding model, selecting a
@@ -129,15 +134,54 @@ func (e *Embedder) CacheIdentity() string {
 
 // Embed computes a normalized float32 embedding vector for the given PromptParts.
 func (e *Embedder) Embed(parts []PromptPart) ([]float32, error) {
-	if e == nil || e.impl == nil {
+	if e == nil {
 		return nil, ErrClosed
 	}
-	return e.impl.Embed(parts)
+	e.mu.Lock()
+	if e.impl == nil || e.closing {
+		e.mu.Unlock()
+		return nil, ErrClosed
+	}
+	impl := e.impl
+	e.active++
+	e.mu.Unlock()
+
+	vector, err := impl.Embed(parts)
+
+	e.mu.Lock()
+	e.active--
+	var closeImpl *embedderImpl
+	if e.closing && e.active == 0 {
+		closeImpl = e.impl
+		e.impl = nil
+	}
+	e.mu.Unlock()
+	if closeImpl != nil {
+		closeImpl.Close()
+	}
+	return vector, err
 }
 
-// Close releases the embedding engine. It is safe to call multiple times.
+// Close prevents new embedding calls and releases the engine after any in-flight
+// calls finish. It is safe to call multiple times and does not wait for embeds.
 func (e *Embedder) Close() {
-	if e != nil && e.impl != nil {
-		e.impl.Close()
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	if e.closing {
+		e.mu.Unlock()
+		return
+	}
+	e.closing = true
+	if e.active > 0 {
+		e.mu.Unlock()
+		return
+	}
+	impl := e.impl
+	e.impl = nil
+	e.mu.Unlock()
+	if impl != nil {
+		impl.Close()
 	}
 }

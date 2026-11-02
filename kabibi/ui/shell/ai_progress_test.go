@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"ai"
 	"github.com/charmbracelet/x/input"
 	"github.com/mavity/rusticated/kabibi/tools/filelist"
 	"github.com/mavity/rusticated/kabibi/ui"
@@ -215,10 +216,17 @@ func TestCanceledListFilesProgressUsesNormalBlockLayoutInBottomAlignedMode(t *te
 	}
 }
 
-func TestEscapeCancelsActiveListFilesCommand(t *testing.T) {
+func TestEscapeForwardsToActiveCommandControlInput(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	term := newCommandTerminal(ctx, 80, 23)
+	release := term.SubscribeControlInput()
+	defer release()
+	execSess := &ExecutionSession{activeTerminal: term}
 	canceled := false
 	s := &Shell{
 		running:     true,
+		execSess:    execSess,
 		activeBlock: 0,
 		activeCancel: func() {
 			canceled = true
@@ -227,10 +235,41 @@ func TestEscapeCancelsActiveListFilesCommand(t *testing.T) {
 	}
 
 	if !s.handleKeyEvent(input.KeyPressEvent{Code: input.KeyEscape}) {
-		t.Fatal("Escape was not handled for active ai list-files command")
+		t.Fatal("Escape was not forwarded to the running command")
 	}
-	if !canceled {
-		t.Fatal("Escape did not cancel the active ai list-files command")
+	if canceled {
+		t.Fatal("Escape directly canceled the shell operation")
+	}
+	var key [1]byte
+	if n, err := term.ReadControlInput(key[:]); err != nil || n != 1 || key[0] != 0x1b {
+		t.Fatalf("Escape control input = %d, %v, %q; want one ESC byte", n, err, key[:])
+	}
+}
+
+func TestStandaloneListFilesEscapeCancelsDuringSetup(t *testing.T) {
+	term := newCommandTerminal(context.Background(), 80, 23)
+	setupCtx, stop := withEscapeCancellation(context.Background(), term)
+	defer stop()
+
+	setupStarted := make(chan struct{})
+	setupResult := make(chan error, 1)
+	go func() {
+		close(setupStarted)
+		<-setupCtx.Done()
+		setupResult <- setupCtx.Err()
+	}()
+	<-setupStarted
+
+	if err := term.WriteInput([]byte{0x1b}); err != nil {
+		t.Fatalf("send Escape during setup: %v", err)
+	}
+	select {
+	case err := <-setupResult:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("setup context error = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Escape did not cancel setup before search started")
 	}
 }
 
@@ -344,6 +383,136 @@ func TestInteractiveListFilesDoesNotClearProgressOnCancellation(t *testing.T) {
 		t.Fatalf("canceled command cleared instead of retaining the last progress frame: %q", lastWrite)
 	}
 	cancel()
+}
+
+type escapeWaitEmbedder struct {
+	started chan struct{}
+}
+
+type blockingLegacyEmbedder struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (e *blockingLegacyEmbedder) Embed([]ai.PromptPart) ([]float32, error) {
+	select {
+	case <-e.started:
+	default:
+		close(e.started)
+	}
+	<-e.release
+	return []float32{1, 0}, nil
+}
+
+func (e *escapeWaitEmbedder) Embed([]ai.PromptPart) ([]float32, error) {
+	return nil, errors.New("Embed() should not be used by the context-aware search")
+}
+
+func (e *escapeWaitEmbedder) EmbedContext(ctx context.Context, _ []ai.PromptPart) ([]float32, error) {
+	close(e.started)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestInteractiveListFilesEscapeCancelsSearchAndRetainsProgress(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "browser_worker.go"), []byte("func startWorker() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	execSess, err := NewExecutionSession(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer execSess.Close()
+	term := newCommandTerminal(context.Background(), 80, 19)
+	embedder := &escapeWaitEmbedder{started: make(chan struct{})}
+	var progress bytes.Buffer
+	result := make(chan error, 1)
+	go func() {
+		_, err := executeInteractiveListFilesWithControlInput(
+			context.Background(),
+			term,
+			execSess,
+			[]string{"--query", "unrelated semantic phrase", "--max-results", "1"},
+			embedder,
+			&progress,
+			80,
+			19,
+		)
+		result <- err
+	}()
+
+	select {
+	case <-embedder.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("semantic search did not start embedding")
+	}
+	if err := term.WriteInput([]byte{0x1b}); err != nil {
+		t.Fatalf("send Escape through command terminal: %v", err)
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("interactive list-files error = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Escape did not cancel the search")
+	}
+	if got := progress.String(); !strings.Contains(got, "Preparing query embedding") {
+		t.Fatalf("Escape cancellation did not retain the progress snapshot: %q", got)
+	}
+	if strings.Contains(progress.String(), "\x1b[3A\r\x1b[2K") {
+		t.Fatal("Escape cancellation cleared the progress snapshot")
+	}
+}
+
+func TestInteractiveListFilesEscapeReturnsWhileLegacyEmbeddingIsBlocked(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "browser_worker.go"), []byte("func startWorker() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	execSess, err := NewExecutionSession(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer execSess.Close()
+	term := newCommandTerminal(context.Background(), 80, 19)
+	embedder := &blockingLegacyEmbedder{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	defer close(embedder.release)
+	result := make(chan error, 1)
+	go func() {
+		_, err := executeInteractiveListFilesWithControlInput(
+			context.Background(),
+			term,
+			execSess,
+			[]string{"--query", "unrelated semantic phrase", "--max-results", "1"},
+			embedder,
+			&bytes.Buffer{},
+			80,
+			19,
+		)
+		result <- err
+	}()
+
+	select {
+	case <-embedder.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("semantic search did not start embedding")
+	}
+	if err := term.WriteInput([]byte{0x1b}); err != nil {
+		t.Fatalf("send Escape through command terminal: %v", err)
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("interactive list-files error = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Escape did not return while the legacy embedder was blocked")
+	}
 }
 
 func TestInteractiveListFilesCapsResultsToOutputFrame(t *testing.T) {

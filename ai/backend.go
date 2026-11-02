@@ -468,8 +468,9 @@ func sharedInspectModel(drv LMDriver, libPath, modelPath string) (*ModelInfo, er
 // ── Shared backend structs ─────────────────────────────────────────────────
 
 type drvConversationBackend struct {
-	drv  LMDriver
-	conv uint64
+	drv    LMDriver
+	conv   uint64
+	engine *drvEngineBackend
 	// closed is set once, by Close or by cancellation, and is never cleared.
 	closed atomic.Bool
 	// deleted guards convDelete so it runs exactly once.
@@ -479,8 +480,11 @@ type drvConversationBackend struct {
 }
 
 type drvEngineBackend struct {
-	drv    LMDriver
-	engine uint64
+	drv              LMDriver
+	engine           uint64
+	mu               sync.Mutex
+	closed           bool
+	conversationRefs int
 }
 
 func sharedOpenBackend(drv LMDriver, libPath, modelPath, backend string, maxTokens int) (engineBackend, error) {
@@ -578,14 +582,56 @@ func sharedOpenBackend(drv LMDriver, libPath, modelPath, backend string, maxToke
 }
 
 func (b *drvEngineBackend) Close() error {
-	if b.engine != 0 {
-		b.drv.engineDelete(b.engine)
+	b.mu.Lock()
+	b.closed = true
+	engine := uint64(0)
+	if b.conversationRefs == 0 {
+		engine = b.engine
 		b.engine = 0
+	}
+	b.mu.Unlock()
+	if engine != 0 {
+		b.drv.engineDelete(engine)
 	}
 	return nil
 }
 
+func (b *drvEngineBackend) retainConversation() (uint64, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed || b.engine == 0 {
+		return 0, errors.New("ai: engine is closed")
+	}
+	b.conversationRefs++
+	return b.engine, nil
+}
+
+func (b *drvEngineBackend) releaseConversation() {
+	b.mu.Lock()
+	b.conversationRefs--
+	engine := uint64(0)
+	if b.closed && b.conversationRefs == 0 {
+		engine = b.engine
+		b.engine = 0
+	}
+	b.mu.Unlock()
+	if engine != 0 {
+		b.drv.engineDelete(engine)
+	}
+}
+
 func (b *drvEngineBackend) NewConversation(cfg ConversationConfig) (conversationBackend, error) {
+	engine, err := b.retainConversation()
+	if err != nil {
+		return nil, err
+	}
+	retain := true
+	defer func() {
+		if retain {
+			b.releaseConversation()
+		}
+	}()
+
 	systemJSON, toolsJSON, historyJSON, err := buildLiteRTConversationConfig(cfg)
 	if err != nil {
 		return nil, err
@@ -654,7 +700,8 @@ func (b *drvEngineBackend) NewConversation(cfg ConversationConfig) (conversation
 	if conv == 0 {
 		return nil, fmt.Errorf("conversation creation returned NULL without an error")
 	}
-	return &drvConversationBackend{drv: b.drv, conv: conv}, nil
+	retain = false
+	return &drvConversationBackend{drv: b.drv, conv: conv, engine: b}, nil
 }
 
 // Close invalidates the conversation. Without a stream in flight it releases
@@ -676,6 +723,9 @@ func (c *drvConversationBackend) Close() error {
 func (c *drvConversationBackend) releaseConv() {
 	if c.closed.Load() && c.active.Load() == nil && c.deleted.CompareAndSwap(false, true) {
 		c.drv.convDelete(c.conv)
+		if c.engine != nil {
+			c.engine.releaseConversation()
+		}
 	}
 }
 
@@ -782,8 +832,8 @@ func (c *drvConversationBackend) SendStream(ctx context.Context, parts []PromptP
 	}
 }
 
-// abort cancels the in-flight stream and invalidates the conversation. When it
-// returns, onChunk is neither running nor will run again.
+// abort invalidates the conversation and retires its native resources after
+// callbacks stop and the terminal callback confirms the runtime is finished.
 func (c *drvConversationBackend) abort(st *streamState, streamID uint64) error {
 	c.closed.Store(true)
 	st.stop()
@@ -793,9 +843,15 @@ func (c *drvConversationBackend) abort(st *streamState, streamID uint64) error {
 	// also what runs the conversation's destructor if it is deleted there, so
 	// deletion has to be done from a goroutine of our own.
 	go func() {
-		<-st.doneCh
+		st.stop()
+		select {
+		case <-st.doneCh:
+		default:
+			c.drv.convCancelProcess(c.conv)
+			<-st.doneCh
+		}
 		unregisterStreamState(streamID)
-		c.active.Store(nil)
+		c.active.CompareAndSwap(st, nil)
 		c.releaseConv()
 	}()
 	if cancelErr != nil {

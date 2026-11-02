@@ -41,6 +41,7 @@ type fakeDrv struct {
 	cancelCalls     atomic.Int32
 	cancelErr       error
 	deleteCalls     atomic.Int32
+	engineDeletes   atomic.Int32
 	cancelSeen      chan struct{}
 	terminalStarted atomic.Bool
 	deletedEarly    atomic.Bool // convDelete ran before the terminal chunk
@@ -81,6 +82,14 @@ func (d *fakeDrv) convDelete(conv uint64) {
 		d.deletedEarly.Store(true)
 	}
 }
+func (d *fakeDrv) engineDelete(engine uint64)     { d.engineDeletes.Add(1) }
+func (d *fakeDrv) cfgCreate(engine uint64) uint64 { return 1 }
+func (d *fakeDrv) cfgDelete(cfg uint64)           {}
+func (d *fakeDrv) cfgSetEnableConstrainedDecoding(cfg uint64, enable bool) error {
+	return nil
+}
+func (d *fakeDrv) cfgSetStreamToolCalls(cfg uint64, stream bool, channelName uint64) {}
+func (d *fakeDrv) convCreate(engine, cfg uint64) uint64                              { return 7 }
 
 func (d *fakeDrv) chunk(id uint64) fakeChunk {
 	d.mu.Lock()
@@ -302,9 +311,7 @@ func TestBackendStreamAccessorErrorReturnsAndAborts(t *testing.T) {
 	if !errors.Is(err, accessorErr) {
 		t.Fatalf("SendStream() error = %v, want wrapped stream accessor error", err)
 	}
-	if d.cancelCalls.Load() != 1 {
-		t.Fatalf("native cancel calls = %d, want 1", d.cancelCalls.Load())
-	}
+	waitUntil(t, "native cancellation", func() bool { return d.cancelCalls.Load() == 1 })
 	waitUntil(t, "conversation teardown after accessor failure", func() bool {
 		return d.deleteCalls.Load() == 1
 	})
@@ -433,9 +440,7 @@ func TestBackendContextCancelReturnsEarlyAndTearsDownAfterTerminalChunk(t *testi
 	case <-time.After(5 * time.Second):
 		t.Fatal("SendStream did not return after ctx cancellation")
 	}
-	if d.cancelCalls.Load() != 1 {
-		t.Fatalf("native cancel calls = %d, want 1", d.cancelCalls.Load())
-	}
+	waitUntil(t, "native cancellation", func() bool { return d.cancelCalls.Load() == 1 })
 	if err := c.SendStream(context.Background(), testPrompt(), textEventCallback(log.add)); !errors.Is(err, ErrClosed) {
 		t.Fatalf("SendStream on a cancelled conversation = %v, want ErrClosed", err)
 	}
@@ -456,9 +461,9 @@ func TestBackendContextCancelReturnsEarlyAndTearsDownAfterTerminalChunk(t *testi
 	}
 }
 
-// Cancellation must not return while onChunk is still running on the callback
-// thread, or the caller could carry on while a loop body is mid-flight.
-func TestBackendCancelWaitsForRunningOnChunk(t *testing.T) {
+// Cancellation returns while an in-flight callback is blocked; retirement
+// waits for it before invoking native cancellation.
+func TestBackendCancelReturnsWhileOnChunkIsRunning(t *testing.T) {
 	d := newFakeDrv()
 	d.onSend = func(d *fakeDrv, ud uint64) {
 		go func() {
@@ -483,20 +488,100 @@ func TestBackendCancelWaitsForRunningOnChunk(t *testing.T) {
 	cancel()
 
 	select {
-	case <-errCh:
-		t.Fatal("SendStream returned while onChunk was still running")
-	case <-time.After(50 * time.Millisecond):
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("SendStream err = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SendStream waited for the callback to finish")
+	}
+	if d.cancelCalls.Load() != 0 {
+		t.Fatal("native cancellation ran before the active callback stopped")
 	}
 	close(release)
+	waitUntil(t, "teardown", func() bool {
+		return d.deleteCalls.Load() == 1 && d.cancelCalls.Load() == 1
+	})
+}
+
+type delayedCancelDrv struct {
+	*fakeDrv
+	cancelStarted chan struct{}
+	releaseCancel chan struct{}
+}
+
+func (d *delayedCancelDrv) convCancelProcess(conv uint64) {
+	close(d.cancelStarted)
+	<-d.releaseCancel
+	d.fakeDrv.convCancelProcess(conv)
+}
+
+func TestBackendCancelDoesNotWaitForNativeCancellation(t *testing.T) {
+	d := &delayedCancelDrv{
+		fakeDrv:       newFakeDrv(),
+		cancelStarted: make(chan struct{}),
+		releaseCancel: make(chan struct{}),
+	}
+	streamStarted := make(chan struct{})
+	d.fakeDrv.onSend = func(base *fakeDrv, userData uint64) {
+		close(streamStarted)
+		go func() {
+			<-base.cancelSeen
+			base.emit(userData, "", true, "CANCELLED")
+		}()
+	}
+	c := &drvConversationBackend{drv: d, conv: 7}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- c.SendStream(ctx, testPrompt(), func(ModelEvent) {}) }()
+	<-streamStarted
+	cancel()
+
 	select {
 	case err := <-errCh:
 		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("err = %v, want context.Canceled", err)
+			t.Fatalf("SendStream err = %v, want context.Canceled", err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("SendStream did not return once onChunk finished")
+	case <-time.After(time.Second):
+		t.Fatal("SendStream waited for native cancellation")
 	}
-	waitUntil(t, "teardown", func() bool { return d.deleteCalls.Load() == 1 })
+	select {
+	case <-d.cancelStarted:
+	case <-time.After(time.Second):
+		t.Fatal("background retirement did not start native cancellation")
+	}
+	if d.deleteCalls.Load() != 0 {
+		t.Fatal("conversation was deleted while native cancellation was blocked")
+	}
+	close(d.releaseCancel)
+	waitUntil(t, "teardown after native cancellation", func() bool { return d.deleteCalls.Load() == 1 })
+}
+
+func TestEngineCloseWaitsForConversationRetirement(t *testing.T) {
+	d := newFakeDrv()
+	engine := &drvEngineBackend{drv: d, engine: 1}
+	conv, err := engine.NewConversation(ConversationConfig{})
+	if err != nil {
+		t.Fatalf("NewConversation(): %v", err)
+	}
+
+	if err := engine.Close(); err != nil {
+		t.Fatalf("Close(): %v", err)
+	}
+	if d.engineDeletes.Load() != 0 {
+		t.Fatal("engine was deleted while a conversation still referenced it")
+	}
+	if err := conv.Close(); err != nil {
+		t.Fatalf("conversation Close(): %v", err)
+	}
+	if d.deleteCalls.Load() != 1 || d.engineDeletes.Load() != 1 {
+		t.Fatalf("native deletes = (conversation %d, engine %d), want (1, 1)", d.deleteCalls.Load(), d.engineDeletes.Load())
+	}
+	_ = conv.Close()
+	if d.deleteCalls.Load() != 1 || d.engineDeletes.Load() != 1 {
+		t.Fatalf("repeated close changed native delete counts to (conversation %d, engine %d)", d.deleteCalls.Load(), d.engineDeletes.Load())
+	}
 }
 
 func TestBackendCloseMidStreamReturnsErrClosedAndDeletesAfterTerminalChunk(t *testing.T) {

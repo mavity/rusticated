@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"ai"
+	"github.com/mavity/rusticated/kabibi/config"
 )
 
 func TestParseAIToolArguments(t *testing.T) {
@@ -61,6 +62,59 @@ func TestParseAIToolArguments(t *testing.T) {
 	}
 	if got := cdpArgs["params"].(map[string]any)["include"]; got != true {
 		t.Fatalf("parsed CDP params = %#v", cdpArgs["params"])
+	}
+}
+
+func TestListFilesNeedsEmbedder(t *testing.T) {
+	tests := []struct {
+		name  string
+		input ListFilesInput
+		want  bool
+	}{
+		{name: "default all-files query"},
+		{name: "explicit all-files query", input: ListFilesInput{Query: "*"}},
+		{name: "content query", input: ListFilesInput{Query: "*", SearchContent: true}, want: true},
+		{name: "filename semantic fallback", input: ListFilesInput{Query: "unmatched concept"}, want: true},
+		{name: "glob with possible semantic fallback", input: ListFilesInput{Query: "**/*.go"}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := listFilesNeedsEmbedder(tt.input); got != tt.want {
+				t.Fatalf("listFilesNeedsEmbedder(%+v) = %t, want %t", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunAIBuiltinListFilesDefaultSkipsLocalEmbeddingRuntime(t *testing.T) {
+	setTestConfigDirectory(t)
+	if err := config.SaveAI(config.AIConfig{
+		Configured:                   true,
+		Mode:                         "local",
+		ConsentGiven:                 true,
+		LocalEmbeddingConsentVersion: localEmbeddingConsentVersion,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	execSess, err := NewExecutionSession(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer execSess.Close()
+
+	term := newCommandTerminal(context.Background(), 80, 20)
+	ctx := withCommandTerminal(context.Background(), execSess, SourceUserShell, term)
+	var stdout, stderr bytes.Buffer
+	terminal := newCommandTerminalSession(term, &stdout, true)
+	err = runAIBuiltinTool(ctx, execSess, "list-files", nil, &stdout, &stderr, term, true, terminal)
+	if err != nil {
+		t.Fatalf("run default list-files: %v; stderr: %s", err, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) == "" {
+		t.Fatal("default list-files produced no output")
+	}
+	if strings.Contains(stderr.String(), "embedding") {
+		t.Fatalf("default list-files unexpectedly initialized embeddings: %s", stderr.String())
 	}
 }
 
@@ -146,6 +200,38 @@ func TestExecuteAIToolListFilesUsesProvidedEmbedder(t *testing.T) {
 	}
 	if embedder.queryCalls != 0 || embedder.batchCalls != 3 {
 		t.Fatalf("embedder calls = (query %d, batch %d), want (0, 3) for query, candidate, and quote chunk", embedder.queryCalls, embedder.batchCalls)
+	}
+}
+
+func TestListFilesToolDoesNotSubscribeToStandaloneEscapeInput(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "result.txt"), []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	execSess, err := NewExecutionSession(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer execSess.Close()
+	term := newCommandTerminal(context.Background(), 80, 20)
+	ctx := withCommandTerminal(context.Background(), execSess, SourceUserShell, term)
+	if err := term.WriteInput([]byte{0x1b}); err != nil {
+		t.Fatalf("queue Escape without a control subscriber: %v", err)
+	}
+
+	result, err := executeAITool(ctx, execSess, "list-files", []string{"--query", "*"}, nil)
+	if err != nil {
+		t.Fatalf("execute list_files tool: %v", err)
+	}
+	if !strings.Contains(result, "result.txt") {
+		t.Fatalf("list_files tool result = %q", result)
+	}
+	if term.controlReaders != 0 {
+		t.Fatal("AI list_files tool registered the standalone command's control-input subscription")
+	}
+	var key [1]byte
+	if n, err := term.ReadInput(key[:]); err != nil || n != 1 || key[0] != 0x1b {
+		t.Fatalf("tool consumed Escape input: ReadInput() = %d, %v, %q", n, err, key[:])
 	}
 }
 

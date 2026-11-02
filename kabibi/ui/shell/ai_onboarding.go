@@ -411,30 +411,53 @@ func runAIBuiltinTool(
 		return writeAIBuiltinOutput(stdout, stderr, "ai "+name+" --help", formatAIToolHelp(normalizeAIToolName(name), tools[normalizeAIToolName(name)]))
 	}
 
-	setup := func() error {
-		runner := NewLazyAIRunner(execSess)
-		defer runner.Close()
-		_, err := runner.configureAIWithTerm(ctx, term)
-		return err
+	var err error
+	isListFiles := normalizeAIToolName(name) == "list_files"
+	var listFilesInput ListFilesInput
+	if isListFiles {
+		listFilesInput, err = parseListFilesInput(execSess, args)
+		if err != nil {
+			fmt.Fprintf(stderr, "ai list_files: %v\n", err)
+			return interp.ExitStatus(1)
+		}
 	}
-	embedder, closeEmbedder, diagnostic, err := resolveOneShotAIToolEmbedder(ctx, setup)
-	if err != nil {
-		fmt.Fprintf(stderr, "ai %s: %v\n", normalizeAIToolName(name), err)
-		return interp.ExitStatus(1)
+
+	interactiveListFiles := isTTY && cmdTerm != nil && execSess != nil && normalizeAIToolName(name) == "list_files"
+	if interactiveListFiles {
+		var stopEscapeInput func()
+		ctx, stopEscapeInput = withEscapeCancellation(ctx, cmdTerm)
+		defer stopEscapeInput()
 	}
-	if closeEmbedder != nil {
-		defer closeEmbedder()
-	}
-	if diagnostic != "" {
-		fmt.Fprintf(stderr, "ai: %s\n", diagnostic)
+
+	var embedder ai.PartEmbedder
+	if !isListFiles || listFilesNeedsEmbedder(listFilesInput) {
+		setup := func() error {
+			runner := NewLazyAIRunner(execSess)
+			defer runner.Close()
+			_, err := runner.configureAIWithTerm(ctx, term)
+			return err
+		}
+		var closeEmbedder func()
+		var diagnostic string
+		embedder, closeEmbedder, diagnostic, err = resolveOneShotAIToolEmbedder(ctx, setup)
+		if err != nil {
+			fmt.Fprintf(stderr, "ai %s: %v\n", normalizeAIToolName(name), err)
+			return interp.ExitStatus(1)
+		}
+		if closeEmbedder != nil {
+			defer closeEmbedder()
+		}
+		if diagnostic != "" {
+			fmt.Fprintf(stderr, "ai: %s\n", diagnostic)
+		}
 	}
 	width, height := 0, 0
 	if isTTY && cmdTerm != nil {
 		width, height = cmdTerm.Size()
 	}
 	var result string
-	if isTTY && cmdTerm != nil && execSess != nil && normalizeAIToolName(name) == "list_files" {
-		result, err = executeInteractiveListFiles(ctx, execSess, args, embedder, stdout, width, height)
+	if interactiveListFiles {
+		result, err = executeInteractiveListFilesInput(ctx, execSess, listFilesInput, embedder, stdout, width, height)
 	} else {
 		result, err = executeAITool(ctx, execSess, name, args, embedder)
 	}
@@ -452,17 +475,64 @@ func runAIBuiltinTool(
 	return writeAIBuiltinOutput(stdout, stderr, "ai "+normalizeAIToolName(name), result)
 }
 
-func executeInteractiveListFiles(ctx context.Context, execSess *ExecutionSession, args []string, embedder ai.PartEmbedder, stdout io.Writer, width, availableHeight int) (result string, retErr error) {
+func executeInteractiveListFilesWithControlInput(ctx context.Context, term *CommandTerminal, execSess *ExecutionSession, args []string, embedder ai.PartEmbedder, stdout io.Writer, width, availableHeight int) (string, error) {
+	searchCtx, stop := withEscapeCancellation(ctx, term)
+	defer stop()
+
+	return executeInteractiveListFiles(searchCtx, execSess, args, embedder, stdout, width, availableHeight)
+}
+
+func withEscapeCancellation(ctx context.Context, term *CommandTerminal) (context.Context, func()) {
+	searchCtx, cancel := context.WithCancel(ctx)
+	release := term.SubscribeControlInput()
+
+	go func() {
+		var key [64]byte
+		for {
+			n, err := term.ReadControlInputContext(searchCtx, key[:])
+			if err != nil {
+				return
+			}
+			if n == 1 && key[0] == 0x1b {
+				cancel()
+				return
+			}
+		}
+	}()
+
+	return searchCtx, func() {
+		cancel()
+		release()
+	}
+}
+
+func parseListFilesInput(execSess *ExecutionSession, args []string) (ListFilesInput, error) {
 	tool := BuildKabibiTools(execSess)["list_files"]
 	rawArguments, err := parseAIToolArguments(tool, args)
 	if err != nil {
-		return "", fmt.Errorf("ai list_files: %w", err)
+		return ListFilesInput{}, err
 	}
 	var input ListFilesInput
 	if err := json.Unmarshal(rawArguments, &input); err != nil {
-		return "", fmt.Errorf("ai list_files: decode arguments: %w", err)
+		return ListFilesInput{}, fmt.Errorf("decode arguments: %w", err)
 	}
+	return input, nil
+}
 
+func listFilesNeedsEmbedder(input ListFilesInput) bool {
+	query := strings.TrimSpace(input.Query)
+	return input.SearchContent || (query != "" && query != "*")
+}
+
+func executeInteractiveListFiles(ctx context.Context, execSess *ExecutionSession, args []string, embedder ai.PartEmbedder, stdout io.Writer, width, availableHeight int) (result string, retErr error) {
+	input, err := parseListFilesInput(execSess, args)
+	if err != nil {
+		return "", fmt.Errorf("ai list_files: %w", err)
+	}
+	return executeInteractiveListFilesInput(ctx, execSess, input, embedder, stdout, width, availableHeight)
+}
+
+func executeInteractiveListFilesInput(ctx context.Context, execSess *ExecutionSession, input ListFilesInput, embedder ai.PartEmbedder, stdout io.Writer, width, availableHeight int) (result string, retErr error) {
 	if width <= 0 {
 		width = 80
 	}

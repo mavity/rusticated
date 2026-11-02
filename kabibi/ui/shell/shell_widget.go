@@ -190,7 +190,6 @@ func New(opts ShellOptions) *Shell {
 	if aiRunner == nil && execSess != nil {
 		aiRunner = NewLazyAIRunner(execSess)
 	}
-
 	promptTmpl := opts.Prompt
 
 	s := &Shell{
@@ -936,21 +935,27 @@ func blendColor(from, to terminal.Color, progress float64) terminal.Color {
 
 func paintCommandBackground(buf *terminal.CellBuf, layout visualLayout, brightness uint8) {
 	background := terminal.Color(uint32(brightness)<<16 | uint32(brightness)<<8 | uint32(brightness))
-	for y := 0; y < layout.totalLines && y < buf.Height; y++ {
-		for x := 0; x < buf.Width; x++ {
-			cell := buf.Get(x, y)
+	for _, position := range layout.inputCells {
+		if position.width <= 0 || position.y < 0 || position.y >= buf.Height {
+			continue
+		}
+		for x := position.x; x < position.x+position.width && x < buf.Width; x++ {
+			cell := buf.Get(x, position.y)
 			cell.Style = cell.Style.WithBackground(background).RemoveAttribute(terminal.CharResetBackgroundDefault)
-			buf.Set(x, y, cell)
+			buf.Set(x, position.y, cell)
 		}
 	}
 }
 
 func resetCommandBackground(buf *terminal.CellBuf, layout visualLayout) {
-	for y := 0; y < layout.totalLines && y < buf.Height; y++ {
-		for x := 0; x < buf.Width; x++ {
-			cell := buf.Get(x, y)
+	for _, position := range layout.inputCells {
+		if position.width <= 0 || position.y < 0 || position.y >= buf.Height {
+			continue
+		}
+		for x := position.x; x < position.x+position.width && x < buf.Width; x++ {
+			cell := buf.Get(x, position.y)
 			cell.Style = cell.Style.WithBackground(0).AddAttribute(terminal.CharResetBackgroundDefault)
-			buf.Set(x, y, cell)
+			buf.Set(x, position.y, cell)
 		}
 	}
 }
@@ -1792,18 +1797,10 @@ func encodeKeyForPTY(ev input.KeyPressEvent) []byte {
 func (s *Shell) handleKeyEvent(ev input.KeyPressEvent) bool {
 	keyStr := ev.String()
 
-	// Cancel AI turns before PTY forwarding; shell commands still receive terminal keystrokes first.
 	s.mu.Lock()
 	running := s.running
 	execSess := s.execSess
-	aiTurnRunning := running && s.activeBlock >= 0 && s.activeBlock < len(s.blocks) &&
-		s.blocks[s.activeBlock].Kind == BlockAITurn
-	cancel := s.activeCancel
 	s.mu.Unlock()
-	if aiTurnRunning && keyStr == "ctrl+c" && cancel != nil {
-		cancel()
-		return true
-	}
 	if running {
 		if execSess != nil && execSess.HasActivePTY() {
 			if raw := encodeKeyForPTY(ev); len(raw) > 0 {
@@ -1815,17 +1812,6 @@ func (s *Shell) handleKeyEvent(ev input.KeyPressEvent) bool {
 			cancel := s.activeCancel
 			s.mu.Unlock()
 			if cancel != nil {
-				cancel()
-				return true
-			}
-		}
-		if ev.Code == input.KeyEscape {
-			s.mu.Lock()
-			isListFiles := s.activeBlock >= 0 && s.activeBlock < len(s.blocks) &&
-				isAIListFilesCommand(s.blocks[s.activeBlock].Input)
-			cancel := s.activeCancel
-			s.mu.Unlock()
-			if isListFiles && cancel != nil {
 				cancel()
 				return true
 			}
