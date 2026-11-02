@@ -10,9 +10,6 @@ import (
 	"time"
 )
 
-// ErrRepetitionLoop is yielded when the model falls into a repetitive generation loop.
-var ErrRepetitionLoop = errors.New("ai: model stuck in repetitive generation loop")
-
 // Role identifies the author of a prompt part.
 type Role string
 
@@ -143,17 +140,17 @@ func (c *Conversation) SendStream(ctx context.Context, parts []PromptPart) iter.
 			}
 			switch e := event.(type) {
 			case TextEvent:
-				if detector.feedText(e.Text) {
+				if sig := detector.feedText(e.Text); sig != "" {
 					cancel()
 					c.Close()
-					yield(nil, ErrRepetitionLoop)
+					yield(nil, fmt.Errorf("Text repetition: %s", sig))
 					return false
 				}
 			case ToolCallEvent:
-				if detector.feedToolCalls(e.ToolCalls) {
+				if sig := detector.feedToolCalls(e.ToolCalls); sig != "" {
 					cancel()
 					c.Close()
-					yield(nil, ErrRepetitionLoop)
+					yield(nil, fmt.Errorf("Tool repetition: %s", sig))
 					return false
 				}
 			}
@@ -211,9 +208,10 @@ const (
 	shortRepeatMinSpan        = 128
 	shortRepeatMinRepetitions = 8
 	shortRepeatMaxPeriod      = 16
+	maxRepetitiveToolCount       = 3
 )
 
-func (d *loopDetector) feedText(s string) bool {
+func (d *loopDetector) feedText(s string) string {
 	d.buf = append(d.buf, s...)
 	if len(d.buf) > loopWindowMax {
 		d.buf = d.buf[len(d.buf)-loopWindowMax:]
@@ -245,13 +243,13 @@ func (d *loopDetector) feedText(s string) bool {
 				}
 			}
 			if match {
-				return true
+				return s
 			}
 		}
 	}
 
 	if n < minRepeatSpan {
-		return false
+		return ""
 	}
 
 	// 2. General tandem repeat check: catches longer phrase/sentence loops and
@@ -276,7 +274,7 @@ func (d *loopDetector) feedText(s string) bool {
 			}
 		}
 		if match && !hasShorterPeriod(unit) {
-			return true
+			return s
 		}
 	}
 
@@ -284,10 +282,10 @@ func (d *loopDetector) feedText(s string) bool {
 	if n >= entropyWindowSize {
 		win := d.buf[n-entropyWindowSize:]
 		if lowComplexity(win) {
-			return true
+			return s
 		}
 	}
-	return false
+	return ""
 }
 
 func hasShorterPeriod(unit []byte) bool {
@@ -310,20 +308,20 @@ func hasShorterPeriod(unit []byte) bool {
 	return false
 }
 
-func (d *loopDetector) feedToolCalls(calls []ToolCall) bool {
+func (d *loopDetector) feedToolCalls(calls []ToolCall) string {
 	for _, call := range calls {
 		sig := call.Name + ":" + string(call.RawArguments)
 		if sig == d.lastTool {
 			d.toolCount++
-			if d.toolCount >= 3 {
-				return true
+			if d.toolCount > maxRepetitiveToolCount {
+				return call.Name
 			}
 		} else {
 			d.lastTool = sig
 			d.toolCount = 1
 		}
 	}
-	return false
+	return ""
 }
 
 // lowComplexity measures what fraction of win consists of novel 8-byte shingles.

@@ -260,6 +260,14 @@ func (st *streamState) deliver(token string) {
 // stop guarantees that sharedTokenCallback/onChunk is not running, and will
 // not run again, once it returns. It waits for a callback that is already in progress.
 func (st *streamState) stop() {
+	st.requestStop()
+	if st.delivery.Load() == deliveryStopRequested {
+		<-st.bodyDone
+	}
+}
+
+// requestStop prevents new user callbacks without waiting for an active callback.
+func (st *streamState) requestStop() {
 	for {
 		switch st.delivery.Load() {
 		case deliveryIdle:
@@ -268,7 +276,6 @@ func (st *streamState) stop() {
 			}
 		case deliveryActive:
 			if st.delivery.CompareAndSwap(deliveryActive, deliveryStopRequested) {
-				<-st.bodyDone
 				return
 			}
 		default:
@@ -693,7 +700,7 @@ func (b *drvEngineBackend) NewConversation(cfg ConversationConfig) (conversation
 		freeMsgs()
 	}
 
-	conv, err := b.drv.convCreate(b.engine, config)
+	conv, err := b.drv.convCreate(engine, config)
 	if err != nil {
 		return nil, fmt.Errorf("create conversation: %w", err)
 	}
@@ -822,11 +829,14 @@ func (c *drvConversationBackend) SendStream(ctx context.Context, parts []PromptP
 			}
 			return err
 		case err := <-st.callbackErrCh:
-			return errors.Join(err, c.abort(st, streamID))
+			c.abort(st, streamID)
+			return err
 		case <-ctx.Done():
-			return errors.Join(ctx.Err(), c.abort(st, streamID))
+			c.abort(st, streamID)
+			return ctx.Err()
 		case <-st.closeCh:
-			return errors.Join(ErrClosed, c.abort(st, streamID))
+			c.abort(st, streamID)
+			return ErrClosed
 		case <-keepAlive.C:
 		}
 	}
@@ -834,30 +844,20 @@ func (c *drvConversationBackend) SendStream(ctx context.Context, parts []PromptP
 
 // abort invalidates the conversation and retires its native resources after
 // callbacks stop and the terminal callback confirms the runtime is finished.
-func (c *drvConversationBackend) abort(st *streamState, streamID uint64) error {
+func (c *drvConversationBackend) abort(st *streamState, streamID uint64) {
 	c.closed.Store(true)
-	st.stop()
-	cancelErr := c.drv.convCancelProcess(c.conv)
+	st.requestStop()
 
-	// The terminal chunk is delivered on the native callback thread, which is
-	// also what runs the conversation's destructor if it is deleted there, so
-	// deletion has to be done from a goroutine of our own.
 	go func() {
 		st.stop()
-		select {
-		case <-st.doneCh:
-		default:
-			c.drv.convCancelProcess(c.conv)
-			<-st.doneCh
+		if err := c.drv.convCancelProcess(c.conv); err != nil {
+			fmt.Fprintf(os.Stderr, "[ai] failed to cancel LiteRT-LM stream during retirement: %v\n", err)
 		}
+		<-st.doneCh
 		unregisterStreamState(streamID)
 		c.active.CompareAndSwap(st, nil)
 		c.releaseConv()
 	}()
-	if cancelErr != nil {
-		return fmt.Errorf("cancel LiteRT-LM stream: %w", cancelErr)
-	}
-	return nil
 }
 
 // ── Shared Embedder backend ────────────────────────────────────────────────
