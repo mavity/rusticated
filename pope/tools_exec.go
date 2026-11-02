@@ -17,8 +17,9 @@ func Exec(ctx context.Context, in ExecInput, feedback LogFeedback) (any, error) 
 	if in.Command == "" {
 		return nil, errors.New("command argument is required")
 	}
+	lead := toolLead(ExecInput{}, in.Command, 18)
 	if feedback != nil {
-		feedback(toolLead(ExecInput{}, in.Command, 18))
+		feedback(lead)
 	}
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
@@ -34,9 +35,9 @@ func Exec(ctx context.Context, in ExecInput, feedback LogFeedback) (any, error) 
 	}
 	if feedback != nil {
 		if err != nil {
-			feedback("failed")
+			feedback(lead + "failed")
 		} else {
-			feedback("ok")
+			feedback(lead + "ok")
 		}
 	}
 	return result, nil

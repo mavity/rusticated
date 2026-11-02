@@ -23,10 +23,10 @@ type pipedAIRunner struct {
 	runErr       error
 }
 
-func (r *pipedAIRunner) RunTurn(_ context.Context, prompt string, _ ai.LogFeedback, onToolFeedback, onContent ai.LogFeedback) error {
+func (r *pipedAIRunner) RunTurn(_ context.Context, prompt string, onFeedback ai.LogFeedback, onContent ai.LogFeedback) error {
 	r.prompts = append(r.prompts, prompt)
-	if onToolFeedback != nil && r.toolFeedback != "" {
-		onToolFeedback(r.toolFeedback)
+	if onFeedback != nil && r.toolFeedback != "" {
+		onFeedback(r.toolFeedback)
 	}
 	if onContent != nil {
 		onContent("AI response\n")
@@ -283,7 +283,7 @@ func TestRunPipedReader_RoutesUnknownCommandToAIAndContinues(t *testing.T) {
 	if got, want := runner.prompts, []string{"Name a bridge in Paris"}; len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("AI prompts = %v, want %v", got, want)
 	}
-	if got, want := stdout.String(), "before\n📝 user_input.txt ... ok AI response\nafter\n"; got != want {
+	if got, want := stdout.String(), "before\n📝 user_input.txt ... ok\r                        \rAI response\nafter\n"; got != want {
 		t.Fatalf("stdout = %q, want %q", got, want)
 	}
 }

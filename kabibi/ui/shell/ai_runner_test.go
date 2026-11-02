@@ -1,6 +1,7 @@
 package shell
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -17,7 +18,7 @@ func TestLazyAIRunnerRejectsConcurrentTurn(t *testing.T) {
 	}
 	defer runner.endOperation()
 
-	if err := runner.RunTurn(context.Background(), "nested", nil, nil, nil); !errors.Is(err, ErrAIRunnerBusy) {
+	if err := runner.RunTurn(context.Background(), "nested", nil, nil); !errors.Is(err, ErrAIRunnerBusy) {
 		t.Fatalf("RunTurn() error = %v, want %v", err, ErrAIRunnerBusy)
 	}
 	if err := runner.SetVerbose(true); !errors.Is(err, ErrAIRunnerBusy) {
@@ -74,3 +75,30 @@ func TestLazyAIRunnerCloseCancelsActiveOperationWithoutWaiting(t *testing.T) {
 		t.Fatalf("WaitClosed() error = %v", err)
 	}
 }
+
+func TestEphemeralLineWriterRewritesAndWipesStatus(t *testing.T) {
+	var buf bytes.Buffer
+	ephemeral := NewEphemeralLineWriter(&buf)
+
+	if err := ephemeral.Feedback("📝 bridge.txt ... "); err != nil {
+		t.Fatal(err)
+	}
+	if err := ephemeral.Feedback("📝 bridge.txt ... ok"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ephemeral.Feedback("📖 bridge.txt ... 20 bytes read"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ephemeral.Wipe(); err != nil {
+		t.Fatal(err)
+	}
+
+	want := "📝 bridge.txt ..." +
+		"\r📝 bridge.txt ... ok" +
+		"\r📖 bridge.txt ... 20 bytes read" +
+		"\r                               \r"
+	if got := buf.String(); got != want {
+		t.Fatalf("EphemeralLineWriter output = %q, want %q", got, want)
+	}
+}
+

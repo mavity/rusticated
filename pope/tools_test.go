@@ -130,7 +130,7 @@ func TestToolFeedbackIsCompactAndLineFree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var feedback strings.Builder
+	var feedback []string
 	got, err := Tools["read_file"].Execute(context.Background(), ai.ToolCall{
 		Name:         "read_file",
 		RawArguments: json.RawMessage(`{"path":` + mustJSON(t, path) + `}`),
@@ -138,7 +138,7 @@ func TestToolFeedbackIsCompactAndLineFree(t *testing.T) {
 		if strings.ContainsAny(text, "\r\n") {
 			t.Fatalf("feedback contains newline: %q", text)
 		}
-		feedback.WriteString(text)
+		feedback = append(feedback, text)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -146,8 +146,8 @@ func TestToolFeedbackIsCompactAndLineFree(t *testing.T) {
 	if !reflect.DeepEqual(got, map[string]any{"content": "hello"}) {
 		t.Fatalf("read_file = %v", got)
 	}
-	if want := "📖 a-long-file-na… ... 5 bytes read"; feedback.String() != want {
-		t.Fatalf("feedback = %q, want %q", feedback.String(), want)
+	if want := []string{"📖 a-long-file-na… ... ", "📖 a-long-file-na… ... 5 bytes read"}; !reflect.DeepEqual(feedback, want) {
+		t.Fatalf("feedback = %#v, want %#v", feedback, want)
 	}
 	if len([]rune(toolLead(ExecInput{}, strings.Repeat("界", 100), 18))) > 25 {
 		t.Fatalf("exec lead exceeds compact convention: %q", toolLead(ExecInput{}, strings.Repeat("界", 100), 18))

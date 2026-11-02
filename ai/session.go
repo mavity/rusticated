@@ -336,9 +336,7 @@ type SessionConfig struct {
 	CompactionLimit int
 	OnContent       LogFeedback
 	OnFeedback      LogFeedback
-	// OnToolFeedback receives tool-provided status values separately from model-stage feedback.
-	OnToolFeedback LogFeedback
-	Verbose        bool
+	Verbose         bool
 }
 
 // Session tracks conversation state, history, and context compaction.
@@ -355,7 +353,6 @@ type Session struct {
 	verboseConfigLogged bool
 	onContent           LogFeedback
 	onFeedback          LogFeedback
-	onToolFeedback      LogFeedback
 	CanonicalHistory    []PromptPart
 	CompactedHistory    []PromptPart
 	totalTokensEst      int
@@ -443,7 +440,6 @@ func NewSession(cfg SessionConfig) (*Session, error) {
 		verbose:         cfg.Verbose,
 		onContent:       cfg.OnContent,
 		onFeedback:      cfg.OnFeedback,
-		onToolFeedback:  cfg.OnToolFeedback,
 		toolRegistry:    make(map[string]Tool, len(cfg.Tools)),
 	}
 	if s.compactionLimit <= 0 {
@@ -588,14 +584,6 @@ func (s *Session) emitFeedback(text string) {
 	if s.onFeedback != nil {
 		s.onFeedback(text)
 	}
-}
-
-func (s *Session) emitToolFeedback(text string) {
-	if s.onToolFeedback != nil {
-		s.onToolFeedback(text)
-		return
-	}
-	s.emitFeedback(text)
 }
 
 func (s *Session) emitContent(text string) {
@@ -1228,7 +1216,7 @@ func (s *Session) runAgenticTurn(
 					return nil, "", compactedDuringTurn, fmt.Errorf("rebuild conversation after context overflow: %w", replaceErr)
 				}
 				*baseHistory = s.snapshotCompactedHistory()
-				s.emitFeedback(fmt.Sprintf("%d:%d", before, historySize(projected)))
+				s.emitFeedback(fmt.Sprintf("🗜️ %d:%d", before, historySize(projected)))
 				overflowRetries++
 				compactedDuringTurn = true
 				err = nil
@@ -1276,7 +1264,7 @@ func (s *Session) executeToolCalls(ctx context.Context, baseHistory *[]PromptPar
 		explanation := extractToolExplanation(call)
 		tc := &ToolContext{
 			Session:     s,
-			Feedback:    s.emitToolFeedback,
+			Feedback:    s.emitFeedback,
 			baseHistory: baseHistory,
 		}
 		if s.verbose {
@@ -1839,7 +1827,7 @@ func (s *Session) compressImmediateToolOverflow(ctx context.Context, part Prompt
 	}
 
 	if s.onFeedback != nil {
-		s.onFeedback(fmt.Sprintf("🗜️ tool(%d chunks)\n", len(chunks)))
+		s.onFeedback(fmt.Sprintf("🗜️ tool(%d chunks)", len(chunks)))
 	}
 
 	var chunkSummaries []string
@@ -2214,7 +2202,7 @@ func (s *Session) compactContextForRetry(ctx context.Context, pendingParts int, 
 	s.CompactedHistory = compacted
 	s.historyMu.Unlock()
 	if feedback != nil {
-		feedback(fmt.Sprintf("%d:%d", before, after))
+		feedback(fmt.Sprintf("🗜️ %d:%d", before, after))
 	}
 
 	s.closeConv()

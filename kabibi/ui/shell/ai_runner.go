@@ -12,6 +12,7 @@ import (
 	"ai"
 	"ai/assets"
 
+	"github.com/mattn/go-runewidth"
 	"github.com/mavity/rusticated/kabibi/config"
 )
 
@@ -24,8 +25,7 @@ Date and time in brackets help you answer questions; use them to interpret the s
 // AIRunner abstracts the AI prompt execution backend so Shell can use either the
 // lazy LiteRT-LM ai.Session manager or a deterministic test double in unit tests.
 type AIRunner interface {
-	// onFeedback streams model-stage updates; onToolFeedback carries tool status values.
-	RunTurn(ctx context.Context, prompt string, onFeedback, onToolFeedback, onContent ai.LogFeedback) error
+	RunTurn(ctx context.Context, prompt string, onFeedback ai.LogFeedback, onContent ai.LogFeedback) error
 	Close()
 }
 
@@ -50,10 +50,9 @@ type LazyAIRunner struct {
 	openTerm      func(ctx context.Context, title string) (ai.TerminalSession, func(exitCode int))
 	lifecycleErr  error
 
-	cbMu           sync.Mutex
-	onFeedback     ai.LogFeedback
-	onToolFeedback ai.LogFeedback
-	onContent      ai.LogFeedback
+	cbMu       sync.Mutex
+	onFeedback ai.LogFeedback
+	onContent  ai.LogFeedback
 }
 
 // NewLazyAIRunner creates a lazy AI session manager bound to execSess.
@@ -158,7 +157,7 @@ func (r *LazyAIRunner) beginOperation(ctx context.Context) (context.Context, err
 }
 
 func (r *LazyAIRunner) endOperation() {
-	r.setTurnCallbacks(nil, nil, nil)
+	r.setTurnCallbacks(nil, nil)
 	r.mu.Lock()
 	if !r.busy {
 		r.mu.Unlock()
@@ -177,11 +176,10 @@ func (r *LazyAIRunner) endOperation() {
 	}
 }
 
-func (r *LazyAIRunner) setTurnCallbacks(onFeedback, onToolFeedback, onContent ai.LogFeedback) {
+func (r *LazyAIRunner) setTurnCallbacks(onFeedback, onContent ai.LogFeedback) {
 	r.cbMu.Lock()
 	defer r.cbMu.Unlock()
 	r.onFeedback = onFeedback
-	r.onToolFeedback = onToolFeedback
 	r.onContent = onContent
 }
 
@@ -213,17 +211,6 @@ func (r *LazyAIRunner) emitContent(text string) {
 	if fn != nil {
 		fn(text)
 	}
-}
-
-func (r *LazyAIRunner) emitToolFeedback(text string) {
-	r.cbMu.Lock()
-	fn := r.onToolFeedback
-	r.cbMu.Unlock()
-	if fn != nil {
-		fn(text)
-		return
-	}
-	r.emitFeedback(text)
 }
 
 func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
@@ -428,7 +415,6 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 		Tools:           BuildKabibiTools(r.execSess),
 		CompactionLimit: compactionLimit,
 		OnFeedback:      r.emitFeedback,
-		OnToolFeedback:  r.emitToolFeedback,
 		OnContent:       r.emitContent,
 		Verbose:         r.verbose,
 	})
@@ -494,14 +480,14 @@ func kabibiSystemMessage(envContext string, sysContext string) string {
 }
 
 // RunTurn runs a single AI turn, lazily initializing the underlying ai.Session if needed.
-func (r *LazyAIRunner) RunTurn(ctx context.Context, prompt string, onFeedback, onToolFeedback, onContent ai.LogFeedback) error {
+func (r *LazyAIRunner) RunTurn(ctx context.Context, prompt string, onFeedback ai.LogFeedback, onContent ai.LogFeedback) error {
 	ctx, err := r.beginOperation(ctx)
 	if err != nil {
 		return err
 	}
 	defer r.endOperation()
 
-	r.setTurnCallbacks(onFeedback, onToolFeedback, onContent)
+	r.setTurnCallbacks(onFeedback, onContent)
 
 	if err := r.ensureInitialized(ctx); err != nil {
 		return err
@@ -649,24 +635,79 @@ func closeOneShotResources(aiRunner *LazyAIRunner, execSession *ExecutionSession
 	return errors.Join(runnerErr, sessionErr)
 }
 
+// EphemeralLineWriter renders single-line ephemeral feedback onto w,
+// overwriting any previous status line via carriage-return + space-padding,
+// and wiping the line cleanly before spoken content is written.
+type EphemeralLineWriter struct {
+	w       io.Writer
+	prevLen int
+}
+
+// NewEphemeralLineWriter wraps w with ephemeral status-line rewriting.
+func NewEphemeralLineWriter(w io.Writer) *EphemeralLineWriter {
+	return &EphemeralLineWriter{w: w}
+}
+
+// Feedback replaces the current ephemeral line on w with text.
+func (e *EphemeralLineWriter) Feedback(text string) error {
+	if index := strings.LastIndexByte(text, '\r'); index >= 0 {
+		text = text[index+1:]
+	}
+	line := strings.Join(strings.Fields(text), " ")
+	if line == "" {
+		return e.Wipe()
+	}
+	newLen := runewidth.StringWidth(line)
+	var b strings.Builder
+	if e.prevLen > 0 {
+		b.WriteByte('\r')
+		if e.prevLen > newLen {
+			b.WriteString(strings.Repeat(" ", e.prevLen))
+			b.WriteByte('\r')
+		}
+	}
+	b.WriteString(line)
+	e.prevLen = newLen
+	s := b.String()
+	n, err := io.WriteString(e.w, s)
+	if err == nil && n != len(s) {
+		return io.ErrShortWrite
+	}
+	return err
+}
+
+// Wipe clears any active ephemeral status line from w.
+func (e *EphemeralLineWriter) Wipe() error {
+	if e.prevLen <= 0 {
+		return nil
+	}
+	s := "\r" + strings.Repeat(" ", e.prevLen) + "\r"
+	e.prevLen = 0
+	n, err := io.WriteString(e.w, s)
+	if err == nil && n != len(s) {
+		return io.ErrShortWrite
+	}
+	return err
+}
+
 func runOneShotAI(ctx context.Context, aiRunner *LazyAIRunner, prompt string, out io.Writer) error {
 	var endedWithNewline bool
+	ephemeral := NewEphemeralLineWriter(out)
 	err := aiRunner.RunTurn(
 		ctx,
 		prompt,
 		func(feedback string) {
-			_, _ = io.WriteString(out, feedback)
-		},
-		func(feedback string) {
-			_, _ = io.WriteString(out, feedback)
+			_ = ephemeral.Feedback(feedback)
 		},
 		func(content string) {
 			if content != "" {
+				_ = ephemeral.Wipe()
 				endedWithNewline = strings.HasSuffix(content, "\n")
 				_, _ = io.WriteString(out, content)
 			}
 		},
 	)
+	_ = ephemeral.Wipe()
 	if err != nil {
 		return err
 	}

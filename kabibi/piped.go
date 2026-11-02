@@ -304,39 +304,29 @@ func runPipedAI(
 	var feedbackErr error
 	var endedWithNewline bool
 	var mu sync.Mutex
+	ephemeral := shell.NewEphemeralLineWriter(stdout)
 	startedAt := time.Now()
 	err := aiRunner.RunTurn(
 		ctx,
 		prompt,
-		func(feedback string) {
-			if !verbose || feedback == "" {
-				return
-			}
-			line := feedback
-			if index := strings.LastIndexByte(line, '\r'); index >= 0 {
-				line = line[index+1:]
-			}
-			line = strings.TrimSpace(line)
-			if line != "" {
-				mu.Lock()
-				if feedbackErr == nil {
-					_, feedbackErr = fmt.Fprintf(stderr, "[ai] %s\n", line)
-				}
-				mu.Unlock()
-			}
-		},
 		func(feedback string) {
 			if feedback == "" {
 				return
 			}
 			mu.Lock()
 			defer mu.Unlock()
-			if outputErr == nil {
-				var n int
-				n, outputErr = io.WriteString(stdout, feedback)
-				if outputErr == nil && n != len(feedback) {
-					outputErr = io.ErrShortWrite
+			if verbose {
+				line := feedback
+				if index := strings.LastIndexByte(line, '\r'); index >= 0 {
+					line = line[index+1:]
 				}
+				line = strings.TrimSpace(line)
+				if line != "" && feedbackErr == nil {
+					_, feedbackErr = fmt.Fprintf(stderr, "[ai] %s\n", line)
+				}
+			}
+			if outputErr == nil {
+				outputErr = ephemeral.Feedback(feedback)
 			}
 		},
 		func(content string) {
@@ -345,6 +335,9 @@ func runPipedAI(
 			}
 			mu.Lock()
 			defer mu.Unlock()
+			if outputErr == nil {
+				outputErr = ephemeral.Wipe()
+			}
 			output.WriteString(content)
 			endedWithNewline = strings.HasSuffix(content, "\n")
 			if outputErr == nil {
@@ -357,6 +350,9 @@ func runPipedAI(
 		},
 	)
 	mu.Lock()
+	if outputErr == nil {
+		outputErr = ephemeral.Wipe()
+	}
 	outputText := output.String()
 	if outputErr == nil && output.Len() > 0 && !endedWithNewline {
 		_, outputErr = io.WriteString(stdout, "\n")

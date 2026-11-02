@@ -77,25 +77,26 @@ func registerBrowserTools(tools map[string]ai.Tool, execSess *ExecutionSession) 
 	mgr := browser.DefaultManager()
 
 	tools["browser_navigate"] = ai.NewTool(func(ctx context.Context, in BrowserNavigateInput, feedback ai.LogFeedback) (any, error) {
-		if feedback != nil {
-			label := in.URL
-			if label == "" {
-				if in.Back {
-					label = "back"
-				} else if in.Forward {
-					label = "forward"
-				} else if in.Reload {
-					label = "reload"
-				}
+		label := in.URL
+		if label == "" {
+			if in.Back {
+				label = "back"
+			} else if in.Forward {
+				label = "forward"
+			} else if in.Reload {
+				label = "reload"
 			}
-			feedback(ai.ToolLead(BrowserNavigateInput{}, fmt.Sprintf("[%s] %s", in.Nickname, label), 24))
+		}
+		lead := ai.ToolLead(BrowserNavigateInput{}, fmt.Sprintf("[%s] %s", in.Nickname, label), 24)
+		if feedback != nil {
+			feedback(lead)
 		}
 		out, err := mgr.NavigateAction(ctx, in.Nickname, in.URL, in.Back, in.Forward, in.Reload)
 		if feedback != nil {
 			if err != nil {
-				feedback("failed")
+				feedback(lead + "failed")
 			} else {
-				feedback("ok")
+				feedback(lead + "ok")
 			}
 		}
 		if err != nil {
@@ -111,19 +112,20 @@ func registerBrowserTools(tools map[string]ai.Tool, execSess *ExecutionSession) 
 			feedback = tc.Feedback
 			embedder = tc.PartEmbedder()
 		}
+		label := in.Nickname
+		if in.Search != "" {
+			label += " ?" + in.Search
+		}
+		lead := ai.ToolLead(BrowserAXInput{}, label, 24)
 		if feedback != nil {
-			lead := in.Nickname
-			if in.Search != "" {
-				lead += " ?" + in.Search
-			}
-			feedback(ai.ToolLead(BrowserAXInput{}, lead, 24))
+			feedback(lead)
 		}
 		out, err := mgr.AXAction(ctx, in.Nickname, in.Search, in.RootSelector, embedder)
 		if feedback != nil {
 			if err != nil {
-				feedback("failed")
+				feedback(lead + "failed")
 			} else {
-				feedback("ok")
+				feedback(lead + "ok")
 			}
 		}
 		if err != nil {
@@ -133,15 +135,16 @@ func registerBrowserTools(tools map[string]ai.Tool, execSess *ExecutionSession) 
 	})
 
 	tools["browser_click"] = ai.NewTool(func(ctx context.Context, in BrowserClickInput, feedback ai.LogFeedback) (any, error) {
+		lead := ai.ToolLead(BrowserClickInput{}, fmt.Sprintf("[%s] %s", in.Nickname, in.Target), 24)
 		if feedback != nil {
-			feedback(ai.ToolLead(BrowserClickInput{}, fmt.Sprintf("[%s] %s", in.Nickname, in.Target), 24))
+			feedback(lead)
 		}
 		out, err := mgr.ClickAction(ctx, in.Nickname, in.Target, in.Button)
 		if feedback != nil {
 			if err != nil {
-				feedback("failed")
+				feedback(lead + "failed")
 			} else {
-				feedback("ok")
+				feedback(lead + "ok")
 			}
 		}
 		if err != nil {
@@ -151,15 +154,16 @@ func registerBrowserTools(tools map[string]ai.Tool, execSess *ExecutionSession) 
 	})
 
 	tools["browser_type"] = ai.NewTool(func(ctx context.Context, in BrowserTypeInput, feedback ai.LogFeedback) (any, error) {
+		lead := ai.ToolLead(BrowserTypeInput{}, fmt.Sprintf("[%s] %s", in.Nickname, in.Target), 24)
 		if feedback != nil {
-			feedback(ai.ToolLead(BrowserTypeInput{}, fmt.Sprintf("[%s] %s", in.Nickname, in.Target), 24))
+			feedback(lead)
 		}
 		out, err := mgr.TypeAction(ctx, in.Nickname, in.Target, in.Text, in.ClearFirst, in.PressEnter)
 		if feedback != nil {
 			if err != nil {
-				feedback("failed")
+				feedback(lead + "failed")
 			} else {
-				feedback("ok")
+				feedback(lead + "ok")
 			}
 		}
 		if err != nil {
@@ -173,15 +177,16 @@ func registerBrowserTools(tools map[string]ai.Tool, execSess *ExecutionSession) 
 			return nil, errors.New("save_path is required")
 		}
 		resolved := resolveShellPath(execSess.Dir(), in.SavePath)
+		lead := ai.ToolLead(BrowserScreenshotInput{}, fmt.Sprintf("[%s] %s", in.Nickname, in.SavePath), 24)
 		if feedback != nil {
-			feedback(ai.ToolLead(BrowserScreenshotInput{}, fmt.Sprintf("[%s] %s", in.Nickname, in.SavePath), 24))
+			feedback(lead)
 		}
 		nBytes, err := mgr.ScreenshotAction(ctx, in.Nickname, resolved, in.Target, in.FullPage, in.AdornChrome)
 		if feedback != nil {
 			if err != nil {
-				feedback("failed")
+				feedback(lead + "failed")
 			} else {
-				feedback("saved")
+				feedback(lead + "saved")
 			}
 		}
 		if err != nil {
@@ -195,15 +200,16 @@ func registerBrowserTools(tools map[string]ai.Tool, execSess *ExecutionSession) 
 	})
 
 	tools["browser_eval"] = ai.NewTool(func(ctx context.Context, in BrowserEvalInput, feedback ai.LogFeedback) (any, error) {
+		lead := ai.ToolLead(BrowserEvalInput{}, fmt.Sprintf("[%s] %s", in.Nickname, in.Expression), 24)
 		if feedback != nil {
-			feedback(ai.ToolLead(BrowserEvalInput{}, fmt.Sprintf("[%s] %s", in.Nickname, in.Expression), 24))
+			feedback(lead)
 		}
 		val, delta, err := mgr.EvalAction(ctx, in.Nickname, in.Expression)
 		if feedback != nil {
 			if err != nil {
-				feedback("failed")
+				feedback(lead + "failed")
 			} else {
-				feedback("ok")
+				feedback(lead + "ok")
 			}
 		}
 		if err != nil {
@@ -219,15 +225,16 @@ func registerBrowserTools(tools map[string]ai.Tool, execSess *ExecutionSession) 
 		if strings.TrimSpace(in.Method) == "" {
 			return nil, errors.New("method is required")
 		}
+		lead := ai.ToolLead(BrowserCDPInput{}, fmt.Sprintf("[%s] %s", in.Nickname, in.Method), 24)
 		if feedback != nil {
-			feedback(ai.ToolLead(BrowserCDPInput{}, fmt.Sprintf("[%s] %s", in.Nickname, in.Method), 24))
+			feedback(lead)
 		}
 		raw, err := mgr.RawCDPAction(ctx, in.Nickname, in.Method, in.Params)
 		if feedback != nil {
 			if err != nil {
-				feedback("failed")
+				feedback(lead + "failed")
 			} else {
-				feedback("ok")
+				feedback(lead + "ok")
 			}
 		}
 		if err != nil {
