@@ -82,14 +82,16 @@ func (d *fakeDrv) convDelete(conv uint64) {
 		d.deletedEarly.Store(true)
 	}
 }
-func (d *fakeDrv) engineDelete(engine uint64)     { d.engineDeletes.Add(1) }
-func (d *fakeDrv) cfgCreate(engine uint64) uint64 { return 1 }
-func (d *fakeDrv) cfgDelete(cfg uint64)           {}
+func (d *fakeDrv) engineDelete(engine uint64) { d.engineDeletes.Add(1) }
+func (d *fakeDrv) cfgCreate() (uint64, error) { return 1, nil }
+func (d *fakeDrv) cfgDelete(cfg uint64)       {}
 func (d *fakeDrv) cfgSetEnableConstrainedDecoding(cfg uint64, enable bool) error {
 	return nil
 }
-func (d *fakeDrv) cfgSetStreamToolCalls(cfg uint64, stream bool, channelName uint64) {}
-func (d *fakeDrv) convCreate(engine, cfg uint64) uint64                              { return 7 }
+func (d *fakeDrv) cfgSetStreamToolCalls(cfg uint64, stream bool, channelName uint64) error {
+	return nil
+}
+func (d *fakeDrv) convCreate(engine, cfg uint64) (uint64, error) { return 7, nil }
 
 func (d *fakeDrv) chunk(id uint64) fakeChunk {
 	d.mu.Lock()
@@ -510,10 +512,10 @@ type delayedCancelDrv struct {
 	releaseCancel chan struct{}
 }
 
-func (d *delayedCancelDrv) convCancelProcess(conv uint64) {
+func (d *delayedCancelDrv) convCancelProcess(conv uint64) error {
 	close(d.cancelStarted)
 	<-d.releaseCancel
-	d.fakeDrv.convCancelProcess(conv)
+	return d.fakeDrv.convCancelProcess(conv)
 }
 
 func TestBackendCancelDoesNotWaitForNativeCancellation(t *testing.T) {
@@ -736,10 +738,13 @@ func TestStreamAbortFromInsideChunkCallbackWaitsForFullCallbackExit(t *testing.T
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("SendStream err = %v, want context.Canceled", err)
 		}
-		if !errors.Is(err, cancelErr) {
-			t.Fatalf("SendStream err = %v, want cancellation status error", err)
-		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("deadlock: convCancelProcess ran before sharedTokenCallback finished and released nativeStreamMu")
+		t.Fatal("SendStream waited for callback exit or native cancellation")
 	}
+	waitUntil(t, "native cancellation after callback exit", func() bool {
+		return d.cancelCalls.Load() == 1
+	})
+	waitUntil(t, "retirement after terminal callback", func() bool {
+		return d.deleteCalls.Load() == 1
+	})
 }
