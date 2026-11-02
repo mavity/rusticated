@@ -216,7 +216,7 @@ func Start(cmd *exec.Cmd, opts ...Options) (PTY, error)
 
 1. **Native POSIX (`pty_unix.go`):**
    - Calls `openpty` via standard syscalls, sets initial window size via `TIOCSWINSZ`.
-   - Sets `cmd.SysProcAttr.Setsid = true`, `Setctty = true`, `Ctty = slaveFd`.
+   - Sets `cmd.SysProcAttr.Setsid = true`, `Setctty = true`, and `Ctty = 0` because the slave is mapped to the child's stdin.
    - Returns an `*os.File` wrapper that masks Linux `syscall.EIO` into `io.EOF`.
 
 2. **Native Windows (`pty_windows.go`):**

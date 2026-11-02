@@ -3,6 +3,7 @@
 package pty
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -22,7 +23,7 @@ type unixPty struct {
 func (p *unixPty) Read(b []byte) (int, error) {
 	n, err := p.master.Read(b)
 	if err != nil {
-		if err == syscall.EIO || err.Error() == "input/output error" {
+		if errors.Is(err, syscall.EIO) || err.Error() == "input/output error" {
 			return n, io.EOF
 		}
 		return n, err
@@ -142,7 +143,8 @@ func openPtmx(cmd *exec.Cmd, cols, rows uint16) (PTY, error) {
 	}
 	cmd.SysProcAttr.Setsid = true
 	cmd.SysProcAttr.Setctty = true
-	cmd.SysProcAttr.Ctty = int(pts.Fd())
+	// Ctty is the child's descriptor number; the slave is mapped to stdin.
+	cmd.SysProcAttr.Ctty = 0
 
 	err = cmd.Start()
 	if err != nil {
