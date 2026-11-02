@@ -118,7 +118,6 @@ func EnsureRuntime(ctx context.Context, opts FetchOptions) (string, error) {
 	}
 
 	if lib, ok := findCachedRuntime(opts.CacheDir, platform); ok {
-		opts.progress("runtime", "using cached LiteRT-LM runtime", -1)
 		return lib, nil
 	}
 
