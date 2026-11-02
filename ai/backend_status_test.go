@@ -17,6 +17,7 @@ type backendOpenStatusTestDriver struct {
 	specMode          int32
 	lastString        string
 	dispatchDir       string
+	visionBackend     uint64
 	ringbufferSets    int
 	gpuDecodeSets     int
 	threadCountSets   int
@@ -43,7 +44,8 @@ func (d *backendOpenStatusTestDriver) loadedFileDelete(uint64) { d.modelFileDele
 func (d *backendOpenStatusTestDriver) loadedFileHasSpeculativeDecodingSupport(uint64) (bool, error) {
 	return d.specSupported, nil
 }
-func (*backendOpenStatusTestDriver) settingsCreate(uint64, uint64, uint64, uint64) (uint64, error) {
+func (d *backendOpenStatusTestDriver) settingsCreate(_, _, visionBackend, _ uint64) (uint64, error) {
+	d.visionBackend = visionBackend
 	return 3, nil
 }
 func (d *backendOpenStatusTestDriver) settingsDelete(uint64) { d.settingsDeletes++ }
@@ -174,8 +176,8 @@ func TestConfigureLMLoggingUsesValidSeverityAndPropagatesFailure(t *testing.T) {
 		verbose bool
 		want    int32
 	}{
-		{verbose: false, want: 3},
-		{verbose: true, want: 0},
+		{verbose: false, want: liteRtLmLogSeveritySilent},
+		{verbose: true, want: liteRtLmLogSeverityVerbose},
 	} {
 		oldVerbose := Verbose
 		Verbose = test.verbose
@@ -192,6 +194,20 @@ func TestConfigureLMLoggingUsesValidSeverityAndPropagatesFailure(t *testing.T) {
 	driver := &backendOpenStatusTestDriver{logLevelErr: statusErr}
 	if err := configureLMLogging(driver); !errors.Is(err, statusErr) {
 		t.Fatalf("configureLMLogging() error = %v, want wrapped status error", err)
+	}
+}
+
+func TestSharedOpenBackendDoesNotEnableVisionByDefault(t *testing.T) {
+	driver := &backendOpenStatusTestDriver{}
+	engine, err := sharedOpenBackend(driver, "library", "model", "gpu", 0)
+	if err != nil {
+		t.Fatalf("sharedOpenBackend() error = %v", err)
+	}
+	if driver.visionBackend != 0 {
+		t.Fatalf("vision backend = %d, want NULL to avoid enabling unused vision executors", driver.visionBackend)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatalf("engine.Close() error = %v", err)
 	}
 }
 

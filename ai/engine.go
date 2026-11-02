@@ -27,15 +27,21 @@ func resolveLMBackendCandidates(backend string) []string {
 		if backend == "cpu" {
 			return []string{"cpu"}
 		}
+		if backend == "npu" {
+			return []string{"npu", "gpu", "cpu"}
+		}
 		return []string{backend, "cpu"}
 	}
 	if env := os.Getenv("LITERTLM_BACKEND"); env != "" {
 		if env == "cpu" {
 			return []string{"cpu"}
 		}
+		if env == "npu" {
+			return []string{"npu", "gpu", "cpu"}
+		}
 		return []string{env, "cpu"}
 	}
-	return []string{"gpu", "npu", "cpu"}
+	return []string{"npu", "gpu", "cpu"}
 }
 
 func newEngineImpl(libPath, modelPath, backend string, maxTokens int) (*engineImpl, error) {

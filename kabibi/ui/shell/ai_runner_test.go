@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"ai"
 )
 
 func TestLazyAIRunnerRejectsConcurrentTurn(t *testing.T) {
@@ -20,6 +22,25 @@ func TestLazyAIRunnerRejectsConcurrentTurn(t *testing.T) {
 	}
 	if err := runner.SetVerbose(true); !errors.Is(err, ErrAIRunnerBusy) {
 		t.Fatalf("SetVerbose() error = %v, want %v", err, ErrAIRunnerBusy)
+	}
+}
+
+func TestClampModelContextTokensIgnoresDynamicDefault(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		info *ai.ModelInfo
+		want int
+	}{
+		{name: "unknown model info", want: 16384},
+		{name: "dynamic default is not a maximum", info: &ai.ModelInfo{MaxContextTokens: 4096, IsDynamicContext: true}, want: 16384},
+		{name: "fixed context is a maximum", info: &ai.ModelInfo{MaxContextTokens: 4096}, want: 4096},
+		{name: "fixed context above request", info: &ai.ModelInfo{MaxContextTokens: 32768}, want: 16384},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := clampModelContextTokens(16384, test.info); got != test.want {
+				t.Fatalf("clampModelContextTokens() = %d, want %d", got, test.want)
+			}
+		})
 	}
 }
 

@@ -8,16 +8,31 @@ import (
 
 type modelInfoTestDriver struct {
 	LMDriver
-	failedGetter string
-	getterErr    error
+	failedGetter          string
+	getterErr             error
+	maxContextTokens      uint32
+	isDynamicContext      bool
+	logLevel              int32
+	logLevelConfigured    bool
+	logLevelAtFileLoading int32
 }
 
 func (*modelInfoTestDriver) ensureLoaded(string) error { return nil }
 func (*modelInfoTestDriver) stringToCPtr(string) (uint64, func(), error) {
 	return 1, func() {}, nil
 }
-func (*modelInfoTestDriver) loadedFileCreate(uint64) (uint64, error) { return 1, nil }
-func (*modelInfoTestDriver) loadedFileDelete(uint64)                 {}
+func (d *modelInfoTestDriver) setLogLevel(level int32) error {
+	d.logLevel = level
+	d.logLevelConfigured = true
+	return nil
+}
+func (d *modelInfoTestDriver) loadedFileCreate(uint64) (uint64, error) {
+	if d.logLevelConfigured {
+		d.logLevelAtFileLoading = d.logLevel
+	}
+	return 1, nil
+}
+func (*modelInfoTestDriver) loadedFileDelete(uint64) {}
 func (d *modelInfoTestDriver) getterError(name string) error {
 	if d.failedGetter == name {
 		return d.getterErr
@@ -25,10 +40,10 @@ func (d *modelInfoTestDriver) getterError(name string) error {
 	return nil
 }
 func (d *modelInfoTestDriver) loadedFileMaxContextTokens(uint64) (uint32, error) {
-	return 0, d.getterError("max context")
+	return d.maxContextTokens, d.getterError("max context")
 }
 func (d *modelInfoTestDriver) loadedFileIsDynamicContext(uint64) (bool, error) {
-	return false, d.getterError("dynamic context")
+	return d.isDynamicContext, d.getterError("dynamic context")
 }
 func (d *modelInfoTestDriver) loadedFileSupportsThinking(uint64) (bool, error) {
 	return false, d.getterError("thinking")
@@ -92,5 +107,31 @@ func TestSharedInspectModelTreatsMissingContextLimitAsOptional(t *testing.T) {
 	}
 	if info == nil || info.MaxContextTokens != 0 {
 		t.Fatalf("sharedInspectModel() info = %+v, want zero context limit", info)
+	}
+}
+
+func TestSharedInspectModelConfiguresLoggingBeforeLoadingModel(t *testing.T) {
+	oldVerbose := Verbose
+	Verbose = false
+	defer func() { Verbose = oldVerbose }()
+
+	driver := &modelInfoTestDriver{}
+	if _, err := sharedInspectModel(driver, "library", "model"); err != nil {
+		t.Fatalf("sharedInspectModel() error = %v", err)
+	}
+	if driver.logLevelAtFileLoading != liteRtLmLogSeveritySilent {
+		t.Fatalf("log level during model load = %d, want silent level %d",
+			driver.logLevelAtFileLoading, liteRtLmLogSeveritySilent)
+	}
+}
+
+func TestSharedInspectModelReportsDynamicContextDefault(t *testing.T) {
+	driver := &modelInfoTestDriver{maxContextTokens: 4096, isDynamicContext: true}
+	info, err := sharedInspectModel(driver, "library", "model")
+	if err != nil {
+		t.Fatalf("sharedInspectModel() error = %v", err)
+	}
+	if info == nil || info.MaxContextTokens != 4096 || !info.IsDynamicContext {
+		t.Fatalf("sharedInspectModel() info = %+v, want the dynamic runtime-reported default", info)
 	}
 }

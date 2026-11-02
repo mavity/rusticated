@@ -313,9 +313,7 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 				fmt.Fprintf(os.Stderr, "[info] Supports Thinking: %v\n", info.SupportsThinking)
 				fmt.Fprintf(os.Stderr, "[info] Supported Backends: %v\n", info.SupportedBackends)
 			}
-			if info.MaxContextTokens > 0 && info.MaxContextTokens < maxTokens {
-				maxTokens = info.MaxContextTokens
-			}
+			maxTokens = clampModelContextTokens(maxTokens, info)
 
 			hasBackend := func(target string) bool {
 				for _, backend := range info.SupportedBackends {
@@ -334,19 +332,18 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 			}
 		}
 		engine, err = ai.NewEngine(libPath, modelPath, chosenBackend, maxTokens)
-		if err != nil && chosenBackend != "cpu" && assets.HostOS() != "browser" {
-			failedBackend := chosenBackend
-			backendErr := err
-			fallbackNotice := fmt.Sprintf("%s backend initialization failed; retrying with CPU: %v", failedBackend, backendErr)
-			if r.verbose {
-				fmt.Fprintf(os.Stderr, "[info] %s\n", fallbackNotice)
-			} else {
-				r.emitFeedback("[info] " + fallbackNotice)
-			}
-			chosenBackend = "cpu"
-			engine, err = ai.NewEngine(libPath, modelPath, chosenBackend, maxTokens)
-			if err != nil {
-				err = fmt.Errorf("%s backend failed and CPU fallback failed: %w", failedBackend, errors.Join(backendErr, err))
+		if err == nil && engine != nil {
+			resolvedBackend := engine.Backend()
+			if resolvedBackend != "" {
+				if chosenBackend != "" && chosenBackend != "auto" && !strings.EqualFold(chosenBackend, resolvedBackend) {
+					fallbackNotice := fmt.Sprintf("%s backend unavailable; using %s", chosenBackend, resolvedBackend)
+					if r.verbose {
+						fmt.Fprintf(os.Stderr, "[info] %s\n", fallbackNotice)
+					} else {
+						r.emitFeedback("[info] " + fallbackNotice)
+					}
+				}
+				chosenBackend = resolvedBackend
 			}
 		}
 	case "remote":
@@ -462,6 +459,13 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 		adaptiveEmb.BindSession(sess)
 	}
 	return nil
+}
+
+func clampModelContextTokens(requested int, info *ai.ModelInfo) int {
+	if info == nil || info.IsDynamicContext || info.MaxContextTokens <= 0 || info.MaxContextTokens >= requested {
+		return requested
+	}
+	return info.MaxContextTokens
 }
 
 func remoteContextTokenBudget(declaredInputTokens int) int {

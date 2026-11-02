@@ -72,15 +72,15 @@ func FormatEnvironmentContext(cfg EnvironmentConfig) string {
 	modelDetails = append(modelDetails, "backend: "+backend)
 
 	if cfg.MaxTokens > 0 {
-		if cfg.ModelInfo != nil && cfg.ModelInfo.MaxContextTokens > 0 {
-			dyn := ""
-			if cfg.ModelInfo.IsDynamicContext {
-				dyn = ", dynamic"
-			}
-			modelDetails = append(modelDetails, fmt.Sprintf("context: %d/%d tokens%s",
-				cfg.MaxTokens, cfg.ModelInfo.MaxContextTokens, dyn))
+		if cfg.ModelInfo != nil && cfg.ModelInfo.MaxContextTokens > 0 && !cfg.ModelInfo.IsDynamicContext {
+			modelDetails = append(modelDetails, fmt.Sprintf("context: %d/%d tokens",
+				cfg.MaxTokens, cfg.ModelInfo.MaxContextTokens))
 		} else {
-			modelDetails = append(modelDetails, fmt.Sprintf("context: %d tokens", cfg.MaxTokens))
+			dynamic := ""
+			if cfg.ModelInfo != nil && cfg.ModelInfo.IsDynamicContext {
+				dynamic = ", dynamic"
+			}
+			modelDetails = append(modelDetails, fmt.Sprintf("context: %d tokens%s", cfg.MaxTokens, dynamic))
 		}
 	}
 

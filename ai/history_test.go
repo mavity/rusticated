@@ -301,7 +301,7 @@ func TestFormatEnvironmentContextIncludesPlatformModelAndSize(t *testing.T) {
 		"gemma-4-E2B-it.litertlm",
 		"1.90 GB / 2038755678 bytes",
 		"backend: gpu",
-		"context: 8192/32768 tokens, dynamic",
+		"context: 8192 tokens, dynamic",
 		"thinking: true",
 		"tools: true",
 		"rag_embedder: EmbeddingGemma-2",
