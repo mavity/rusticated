@@ -10,6 +10,48 @@ import (
 	"ai"
 )
 
+func TestKabibiMainToolsExposeOnlyHelper(t *testing.T) {
+	tools := buildKabibiMainTools(nil, nil, nil, 0, false, nil)
+	if len(tools) != 1 {
+		t.Fatalf("main agent tool count = %d, want 1", len(tools))
+	}
+	helper, ok := tools["helper"]
+	if !ok {
+		t.Fatal("main agent tools do not include helper")
+	}
+	required := make(map[string]bool, len(helper.Required))
+	for _, field := range helper.Required {
+		required[field] = true
+	}
+	if !required["task"] || !required["description"] {
+		t.Fatalf("helper required fields = %#v, want task and description", helper.Required)
+	}
+
+	result, err := helper.ExecuteWithContext(context.Background(), &ai.ToolContext{}, ai.ToolCall{
+		Name:      "helper",
+		Arguments: map[string]any{"task": "inspect", "description": ""},
+	})
+	if err == nil || result != nil {
+		t.Fatalf("helper with empty description returned (%#v, %v), want an error", result, err)
+	}
+}
+
+func TestLastHelperToolResponseUsesMostRecentToolPart(t *testing.T) {
+	history := []ai.PromptPart{
+		{Role: ai.RoleTool, ToolName: "read_file", ToolResponse: "first"},
+		{Role: ai.RoleModel, Text: "intermediate"},
+		{Role: ai.RoleTool, ToolName: "write_file", ToolResponse: "last"},
+		{Role: ai.RoleModel, Text: "done"},
+	}
+	got := lastHelperToolResponse(history)
+	if got == nil || got.Name != "write_file" || got.Response != "last" {
+		t.Fatalf("lastHelperToolResponse() = %#v, want write_file response last", got)
+	}
+	if got := lastHelperToolResponse([]ai.PromptPart{{Role: ai.RoleModel, Text: "no tools"}}); got != nil {
+		t.Fatalf("lastHelperToolResponse() = %#v, want nil without tool responses", got)
+	}
+}
+
 func TestLazyAIRunnerRejectsConcurrentTurn(t *testing.T) {
 	runner := NewLazyAIRunner(nil)
 	_, err := runner.beginOperation(context.Background())
@@ -101,4 +143,3 @@ func TestEphemeralLineWriterRewritesAndWipesStatus(t *testing.T) {
 		t.Fatalf("EphemeralLineWriter output = %q, want %q", got, want)
 	}
 }
-

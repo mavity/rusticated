@@ -412,7 +412,7 @@ func (r *LazyAIRunner) ensureInitialized(ctx context.Context) error {
 		Engine:          engine,
 		Embedder:        partEmb,
 		SystemMessage:   kabibiSystemMessage(envContext, r.systemContext),
-		Tools:           BuildKabibiTools(r.execSess),
+		Tools:           buildKabibiMainTools(engine, partEmb, r.execSess, compactionLimit, r.verbose, r.emitFeedback),
 		CompactionLimit: compactionLimit,
 		OnFeedback:      r.emitFeedback,
 		OnContent:       r.emitContent,
