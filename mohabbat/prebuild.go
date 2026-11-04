@@ -692,12 +692,16 @@ func generateGoOverlay(ws, goroot string, verbose bool) error {
 			repl: "func UserHomeDir() (string, error) {\n\tpi := syscall.GetPlatformInfo()\n\tif pi == nil || pi.UserHomeDir == \"\" {\n\t\treturn \"\", errors.New(\"user home dir is not defined\")\n\t}\n\treturn pi.UserHomeDir, nil\n}"},
 		{pat: `(?s)func TempDir\(\) string \{.*?\n\}`,
 			repl: "func TempDir() string {\n\tpi := syscall.GetPlatformInfo()\n\tif pi == nil || pi.TempDir == \"\" {\n\t\treturn \"/tmp\"\n\t}\n\treturn pi.TempDir\n}"},
+		{pat: `(?s)func UserCacheDir\(\) \(string, error\) \{.*?\n\}`,
+			repl: "func UserCacheDir() (string, error) {\n\tpi := syscall.GetPlatformInfo()\n\tif pi == nil || pi.UserHomeDir == \"\" {\n\t\treturn \"\", errors.New(\"user home dir is not defined\")\n\t}\n\tseparator := pi.PathSeparator\n\tif separator == 0 {\n\t\tif pi.OSKind == 1 {\n\t\t\tseparator = '\\\\'\n\t\t} else {\n\t\t\tseparator = '/'\n\t\t}\n\t}\n\tdir := pi.UserHomeDir\n\tif dir[len(dir)-1] != separator {\n\t\tdir += string(separator)\n\t}\n\tjoin := func(parts ...string) string {\n\t\tresult := dir\n\t\tfor i, part := range parts {\n\t\t\tif i > 0 {\n\t\t\t\tresult += string(separator)\n\t\t\t}\n\t\t\tresult += part\n\t\t}\n\t\treturn result\n\t}\n\tif pi.OSKind == 1 {\n\t\treturn join(\"AppData\", \"Local\"), nil\n\t}\n\tif pi.OSKind == 3 {\n\t\treturn join(\"Library\", \"Caches\"), nil\n\t}\n\treturn join(\".cache\"), nil\n}"},
 	})
 	if err != nil {
 		return fmt.Errorf("patch os/file.go: %w", err)
 	}
-	if !strings.Contains(fileGoStr, "func TempDir() string {\n\tpi := syscall.GetPlatformInfo()") {
-		return fmt.Errorf("could not patch TempDir in os/file.go")
+	if !strings.Contains(fileGoStr, "func TempDir() string {\n\tpi := syscall.GetPlatformInfo()") ||
+		!strings.Contains(fileGoStr, "func UserCacheDir() (string, error) {\n\tpi := syscall.GetPlatformInfo()") ||
+		!strings.Contains(fileGoStr, "separator := pi.PathSeparator") {
+		return fmt.Errorf("could not patch TempDir or UserCacheDir in os/file.go")
 	}
 	genFileGo := filepath.Join(genDir, "os/file.go")
 	if err := writeFileIfChanged(genFileGo, []byte(fileGoStr)); err != nil {
