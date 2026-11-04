@@ -280,6 +280,13 @@ func (m *ManagedPTY) Resize(cols, rows int) error {
 
 // Kill terminates or interrupts the managed process.
 func (m *ManagedPTY) Kill(sigName string) error {
+	sig := strings.ToUpper(strings.TrimSpace(sigName))
+	switch sig {
+	case "SIGINT", "SIGTERM", "SIGKILL":
+	default:
+		return fmt.Errorf("unsupported signal %q; supported signals: SIGINT, SIGTERM, SIGKILL", sigName)
+	}
+
 	m.mu.Lock()
 	exited := m.exited
 	p := m.ptyHandle
@@ -295,7 +302,6 @@ func (m *ManagedPTY) Kill(sigName string) error {
 		cancel()
 	}
 
-	sig := strings.ToUpper(strings.TrimSpace(sigName))
 	if sig == "SIGINT" && p != nil {
 		// Send Ctrl+C over the PTY line discipline first
 		_, _ = p.Write([]byte{0x03})

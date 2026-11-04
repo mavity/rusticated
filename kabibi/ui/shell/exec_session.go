@@ -146,6 +146,7 @@ type ExecutionSession struct {
 	bgProcs    map[int]*ManagedPTY
 	nextProcID int
 	uiSink     AICommandUISink
+	runHooks   *managedRunHooks
 
 	pathCache *pathCommandCache
 }
@@ -173,9 +174,15 @@ type runState struct {
 	away           bool
 	ejectRequested bool
 	ejected        bool
+	finished       bool
 	directPTY      bool
 	directCommand  *exec.Cmd
 	retiredStdin   io.Reader
+}
+
+type managedRunHooks struct {
+	beforeTimeoutEject func(*ManagedPTY)
+	afterRunEnd        func(*ManagedPTY)
 }
 
 func (es *ExecutionSession) snapshotRunnerLocked() runnerSnapshot {
@@ -250,6 +257,7 @@ func (es *ExecutionSession) endRun(st *runState) io.Reader {
 		return nil
 	}
 	es.runMu.Lock()
+	st.finished = true
 	if es.current == st {
 		es.current = nil
 	}
@@ -265,7 +273,7 @@ func (es *ExecutionSession) eject(st *runState) error {
 	}
 	es.runMu.Lock()
 	defer es.runMu.Unlock()
-	if es.current != st {
+	if st.finished || es.current != st {
 		return nil
 	}
 	if st.directPTY {
@@ -282,6 +290,15 @@ func (es *ExecutionSession) eject(st *runState) error {
 	}
 	st.ejectRequested = true
 	return nil
+}
+
+func (es *ExecutionSession) runFinished(st *runState) bool {
+	if st == nil {
+		return false
+	}
+	es.runMu.Lock()
+	defer es.runMu.Unlock()
+	return st.finished
 }
 
 func (es *ExecutionSession) detachLocked(st *runState) error {
@@ -1373,6 +1390,9 @@ func (es *ExecutionSession) ExecuteAIToolCommand(
 		return formatted, procID, false, code, nil
 
 	case <-timer.C:
+		if hooks := es.runHooks; hooks != nil && hooks.beforeTimeoutEject != nil {
+			hooks.beforeTimeoutEject(m)
+		}
 		outText, exited, code, elapsed := m.Snapshot(false, keepANSI)
 		if exited {
 			m.mu.Lock()
@@ -1390,6 +1410,20 @@ func (es *ExecutionSession) ExecuteAIToolCommand(
 		if ejectErr != nil {
 			m.appendOutput([]byte(fmt.Sprintf("eject failed; the shell remains busy until this command finishes: %v\n", ejectErr)))
 			outText, _, _, elapsed = m.Snapshot(false, keepANSI)
+		}
+		if es.runFinished(st) {
+			<-m.doneCh
+			outText, _, code, elapsed = m.Snapshot(false, keepANSI)
+			m.mu.Lock()
+			finalCwd := m.Cwd
+			m.mu.Unlock()
+			footer := fmt.Sprintf("[exit: %d | elapsed: %.3fs | cwd: %s]", code, elapsed.Seconds(), filepath.ToSlash(finalCwd))
+			if outText != "" {
+				formatted = outText + "\n" + footer
+			} else {
+				formatted = footer
+			}
+			return formatted, procID, false, code, nil
 		}
 		footer := fmt.Sprintf("[status: STILL RUNNING (pid_id: %d) after %.3fs | use term_read, term_input, or term_kill with id=%d]",
 			procID, elapsed.Seconds(), procID)
@@ -1446,6 +1480,9 @@ func (es *ExecutionSession) runManagedExecution(m *ManagedPTY, st *runState, par
 	m.setCwd(finalCwd)
 	closeRunStdin(es.endRun(st))
 	st.cancel()
+	if hooks := es.runHooks; hooks != nil && hooks.afterRunEnd != nil {
+		hooks.afterRunEnd(m)
+	}
 
 	code := 0
 	if runErr != nil {

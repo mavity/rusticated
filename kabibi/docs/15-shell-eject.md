@@ -295,13 +295,32 @@ during a function, synchronous subshell, command substitution and unsafe
 pipeline wait. They also
 verify that the foreground accepts a new command, the ejected job continues
 with its own state, `term_kill` cancels an interpreted loop, and direct-PTY
-admission is released on eject.
+admission stays busy before timeout and is released on eject. The registered
+`term_read`, `term_input`, and `term_kill` handlers are exercised through their
+tool interface, including `term_kill`'s default signal, result shape, and
+unknown-job error.
 
 The helper-process and PTY integration tests require a native OS and skip under
 `wasip1`. Process-substitution ancestry is skipped there because mvdan/sh's
 non-Unix implementation does not support creating the required FIFO. The
 hot-loop `term_kill` test runs under Rusticated too; the JIT patch makes the
 interpreter yield to the async timer periodically on `wasip1`, allowing timeout
-and cancellation to be observed without blocking I/O. The finish-versus-eject
-race still lacks deterministic test hooks; the pipeline and admission tests
-exercise the observable behavior but do not force both race orderings.
+and cancellation to be observed without blocking I/O.
+
+The timed-out ejection integration test also runs registered AI `list_files`,
+`git_inspect`, and `browser_screenshot` tools from the still-running background
+job. It distinguishes background-only files and repository roots, and verifies
+that the screenshot is written in the background working directory. A separate
+test checks that nested tool execution keeps session environment entries while
+letting handler-specific values override them.
+
+The patch-generator test applies the generated files to a writable copy of the
+pinned mvdan source and runs `go test -run=^$ ./interp`; this compile-checks the
+generated interpreter package rather than stopping at syntax parsing.
+
+The finish-versus-timeout tests gate the real execution and timeout goroutines
+at lifecycle boundaries. They cover completion after admission is released but
+before `markExited`, and completion after the timeout case is selected but
+before it attempts ejection. Both assert the observable `ExecuteAIToolCommand`
+result and exercise `doneCh` rather than directly calling state-transition
+methods.

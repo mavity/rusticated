@@ -121,7 +121,7 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		if strings.TrimSpace(in.Path) == "" {
 			return nil, errors.New("path argument is required")
 		}
-		cwd := execSess.Dir()
+		cwd := shellInvocationDir(ctx, execSess)
 		resolved := resolveShellPath(cwd, in.Path)
 		relDisp := displayRelPath(cwd, resolved)
 
@@ -279,7 +279,7 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		if strings.TrimSpace(in.Path) == "" {
 			return nil, errors.New("path argument is required")
 		}
-		cwd := execSess.Dir()
+		cwd := shellInvocationDir(ctx, execSess)
 		resolved := resolveShellPath(cwd, in.Path)
 		relDisp := displayRelPath(cwd, resolved)
 		lead := ai.ToolLead(EditFileInput{}, filepath.Base(resolved), 18)
@@ -310,7 +310,7 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		if strings.TrimSpace(in.Path) == "" {
 			return nil, errors.New("path argument is required")
 		}
-		cwd := execSess.Dir()
+		cwd := shellInvocationDir(ctx, execSess)
 		resolved := resolveShellPath(cwd, in.Path)
 		relDisp := displayRelPath(cwd, resolved)
 		lead := ai.ToolLead(WriteFileInput{}, filepath.Base(resolved), 18)
@@ -357,7 +357,7 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		if feedback != nil {
 			feedback(lead)
 		}
-		table, err := filelist.ListFiles(execSess.Dir(), options)
+		table, err := filelist.ListFiles(shellInvocationDir(ctx, execSess), options)
 		if err != nil {
 			if feedback != nil {
 				feedback(lead + "failed")
@@ -376,7 +376,7 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		if target == "" {
 			target = "."
 		}
-		resolved := resolveShellPath(execSess.Dir(), target)
+		resolved := resolveShellPath(shellInvocationDir(ctx, execSess), target)
 		var feedback ai.LogFeedback
 		if tc != nil {
 			feedback = tc.Feedback

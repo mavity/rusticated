@@ -64,7 +64,7 @@ func registerGitTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 			feedback(lead)
 		}
 
-		repo, err := gitcore.Open(execSess.Dir())
+		repo, err := gitcore.Open(shellInvocationDir(ctx, execSess))
 		if err != nil {
 			if feedback != nil {
 				feedback(lead + "failed")
@@ -291,7 +291,7 @@ func registerGitTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		if oneOf(action, "stash_push", "stash_pop", "cherry_pick", "revert", "merge") {
 			return executeGitToolMutation(ctx, execSess, action, in)
 		}
-		repo, err := gitcore.Open(execSess.Dir())
+		repo, err := gitcore.Open(shellInvocationDir(ctx, execSess))
 		if err != nil {
 			if feedback != nil {
 				feedback(lead + "failed")
@@ -331,7 +331,7 @@ func registerGitTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 				}
 				return nil, errors.New("git_mutate commit does not accept paths; stage paths first")
 			}
-			hash, err := repo.Commit(in.Message, in.All, in.Amend, execSess.EnvMap())
+			hash, err := repo.Commit(in.Message, in.All, in.Amend, shellInvocationEnvMap(ctx, execSess))
 			if err != nil {
 				if feedback != nil {
 					feedback(lead + "failed")
