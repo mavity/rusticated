@@ -111,8 +111,13 @@ func (w *dynamicWriter) Write(p []byte) (int, error) {
 // ExecutionSession manages the persistent mvdan.cc/sh/v3 runner, working
 // directory, environment variables, command classification, active PTY, and history records.
 type ExecutionSession struct {
-	mu                  sync.Mutex
+	mu sync.Mutex
+	// runMu guards only the idle/running transition and the admission snapshot.
+	// It is never held while the interpreter runs; re-entry fails with ErrShellBusy.
 	runMu               sync.Mutex
+	running             bool
+	runningDesc         string
+	runSnapshot         runnerSnapshot
 	runner              *interp.Runner
 	ttyIn               io.Reader
 	streamOut           *dynamicWriter
@@ -138,6 +143,73 @@ type ExecutionSession struct {
 	uiSink     AICommandUISink
 
 	pathCache *pathCommandCache
+}
+
+// ErrShellBusy is returned when a command is submitted while the session's
+// interpreter is already running another one. Callers are never queued.
+var ErrShellBusy = errors.New("shell is busy")
+
+// runnerSnapshot is the command-resolution state captured at admission, so
+// readers never touch the runner while it runs.
+type runnerSnapshot struct {
+	cwd   string
+	env   map[string]string
+	funcs map[string]struct{}
+}
+
+// beginRun admits one interpreter run, or fails immediately when one is active.
+func (es *ExecutionSession) beginRun(desc string) error {
+	es.runMu.Lock()
+	defer es.runMu.Unlock()
+	if es.running {
+		return fmt.Errorf("%w: %s", ErrShellBusy, es.runningDesc)
+	}
+	funcs := make(map[string]struct{})
+	if es.runner != nil {
+		for name := range es.runner.Funcs {
+			funcs[name] = struct{}{}
+		}
+	}
+	es.runSnapshot = runnerSnapshot{cwd: es.Dir(), env: es.EnvMap(), funcs: funcs}
+	es.running = true
+	es.runningDesc = desc
+	return nil
+}
+
+func (es *ExecutionSession) endRun() {
+	es.runMu.Lock()
+	es.running = false
+	es.runningDesc = ""
+	es.runSnapshot = runnerSnapshot{}
+	es.runMu.Unlock()
+}
+
+// resolutionState returns the cwd, environment, and whether name is a shell
+// function, using the admission snapshot while a command is running.
+func (es *ExecutionSession) resolutionState(name string) (cwd string, env map[string]string, isFunc bool) {
+	es.runMu.Lock()
+	defer es.runMu.Unlock()
+	if es.running {
+		_, isFunc = es.runSnapshot.funcs[name]
+		return es.runSnapshot.cwd, es.runSnapshot.env, isFunc
+	}
+	if es.runner != nil && es.runner.Funcs != nil {
+		_, isFunc = es.runner.Funcs[name]
+	}
+	return es.Dir(), es.EnvMap(), isFunc
+}
+
+func busyLabel(command string) string {
+	label := []rune(strings.Join(strings.Fields(command), " "))
+	if len(label) > 60 {
+		label = append(label[:57], []rune("...")...)
+	}
+	return fmt.Sprintf("%q", string(label))
+}
+
+func execBusyDesc(id int, command string) string {
+	return fmt.Sprintf("exec #%d %s is still running; use term_read, term_input or term_kill with id=%d",
+		id, busyLabel(command), id)
 }
 
 // AICommandUISink allows the Shell widget to display live `SourceAITool` blocks
@@ -212,6 +284,11 @@ func (es *ExecutionSession) SetDir(dir string) error {
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("not a directory: %s", cleaned)
+	}
+	es.runMu.Lock()
+	defer es.runMu.Unlock()
+	if es.running {
+		return fmt.Errorf("%w: %s", ErrShellBusy, es.runningDesc)
 	}
 	es.mu.Lock()
 	defer es.mu.Unlock()
@@ -432,14 +509,7 @@ func (es *ExecutionSession) canResolveCommandFromCache(name string) bool {
 		return true
 	}
 
-	es.runMu.Lock()
-	cwd := es.Dir()
-	env := es.EnvMap()
-	hasFunction := false
-	if es.runner != nil && es.runner.Funcs != nil {
-		_, hasFunction = es.runner.Funcs[name]
-	}
-	es.runMu.Unlock()
+	cwd, env, hasFunction := es.resolutionState(name)
 	if hasFunction {
 		return true
 	}
@@ -506,15 +576,9 @@ func (es *ExecutionSession) CanResolveCommand(name string) bool {
 		return true
 	}
 
-	es.runMu.Lock()
-	defer es.runMu.Unlock()
-
-	cwd := es.Dir()
-	env := es.EnvMap()
-	if es.runner != nil && es.runner.Funcs != nil {
-		if _, ok := es.runner.Funcs[name]; ok {
-			return true
-		}
+	cwd, env, hasFunction := es.resolutionState(name)
+	if hasFunction {
+		return true
 	}
 
 	path := name
@@ -538,10 +602,12 @@ func (es *ExecutionSession) CanResolveCommand(name string) bool {
 	if _, ok := resolvePlatformExecutable(name, cwd, env); ok {
 		return true
 	}
-	if es.runner != nil && es.runner.Env != nil {
-		if _, err := interp.LookPathDir(cwd, es.runner.Env, name); err == nil {
-			return true
-		}
+	pairs := make([]string, 0, len(env))
+	for k, v := range env {
+		pairs = append(pairs, k+"="+v)
+	}
+	if _, err := interp.LookPathDir(cwd, expand.ListEnviron(pairs...), name); err == nil {
+		return true
 	}
 	return false
 }
@@ -565,8 +631,10 @@ func (es *ExecutionSession) RunCommand(
 	source CommandSource,
 	onChunk func(chunk []byte),
 ) (CommandRecord, error) {
-	es.runMu.Lock()
-	defer es.runMu.Unlock()
+	if err := es.beginRun("command " + busyLabel(command) + " is still running"); err != nil {
+		return CommandRecord{ExitCode: 1}, err
+	}
+	defer es.endRun()
 
 	start := time.Now()
 	if parsed == nil {
@@ -1067,7 +1135,7 @@ func (es *ExecutionSession) ExecuteAIToolCommand(
 	if timeoutSec <= 0 {
 		timeoutSec = 15
 	}
-	cwd := es.Dir()
+	parsed, parseErr := syntax.NewParser().Parse(strings.NewReader(command), "")
 	ptyCols, ptyRows := es.AIExecPTYSize()
 
 	es.bgMu.Lock()
@@ -1077,7 +1145,6 @@ func (es *ExecutionSession) ExecuteAIToolCommand(
 	startedAt := time.Now()
 	m := &ManagedPTY{
 		Command:   command,
-		Cwd:       cwd,
 		Cols:      ptyCols,
 		Rows:      ptyRows,
 		StartedAt: startedAt,
@@ -1085,6 +1152,21 @@ func (es *ExecutionSession) ExecuteAIToolCommand(
 		doneCh:    make(chan struct{}),
 	}
 	procID = es.RegisterManagedPTY(m)
+	if parseErr == nil {
+		if err := es.beginRun(execBusyDesc(procID, command)); err != nil {
+			es.bgMu.Lock()
+			delete(es.bgProcs, procID)
+			es.bgMu.Unlock()
+			return "", 0, false, 0, err
+		}
+	}
+	var cwd string
+	if parseErr == nil {
+		cwd = es.Dir()
+	} else {
+		cwd, _, _ = es.resolutionState("")
+	}
+	m.Cwd = cwd
 	var uiOnFinish func(int, time.Duration)
 	if sink != nil {
 		m.onChunk, uiOnFinish = sink.OnAICommandStart(command, cwd)
@@ -1100,7 +1182,7 @@ func (es *ExecutionSession) ExecuteAIToolCommand(
 		}
 	}
 
-	go es.runManagedExecution(m, command, cwd, ptyCols, ptyRows)
+	go es.runManagedExecution(m, parsed, parseErr, cwd, ptyCols, ptyRows)
 
 	timeoutDur := time.Duration(timeoutSec) * time.Second
 	timer := time.NewTimer(timeoutDur)
@@ -1145,24 +1227,27 @@ func (es *ExecutionSession) ExecuteAIToolCommand(
 	}
 }
 
-func (es *ExecutionSession) runManagedExecution(m *ManagedPTY, command string, cwd string, ptyCols, ptyRows int) {
-	es.runMu.Lock()
-
-	parser := syntax.NewParser()
-	parsed, parseErr := parser.Parse(strings.NewReader(command), "")
+// runManagedExecution owns the admission granted by ExecuteAIToolCommand (when
+// parseErr is nil) and releases it before a direct PTY process starts or once
+// the interpreter returns.
+func (es *ExecutionSession) runManagedExecution(m *ManagedPTY, parsed *syntax.File, parseErr error, cwd string, ptyCols, ptyRows int) {
 	if parseErr != nil {
-		es.runMu.Unlock()
 		m.appendOutput([]byte(parseErr.Error() + "\n"))
 		m.markExited(2, parseErr)
 		return
 	}
 
 	if cmd, ok := es.tryBuildDirectPTYCommandLocked(parsed, cwd); ok {
-		es.runMu.Unlock()
+		es.endRun()
 		if es.runDirectCommandInPTY(m, cmd, ptyCols, ptyRows) {
 			return
 		}
-		es.runMu.Lock()
+		desc := execBusyDesc(m.ID, m.Command)
+		if err := es.beginRun(desc); err != nil {
+			m.appendOutput([]byte(err.Error() + "\n"))
+			m.markExited(1, err)
+			return
+		}
 	}
 
 	runCtx := withExecSession(context.Background(), es, SourceAITool)
@@ -1172,7 +1257,7 @@ func (es *ExecutionSession) runManagedExecution(m *ManagedPTY, command string, c
 
 	runErr := es.runner.Run(runCtx, parsed)
 	es.streamOut.setTarget(nil)
-	es.runMu.Unlock()
+	es.endRun()
 
 	code := 0
 	if runErr != nil {

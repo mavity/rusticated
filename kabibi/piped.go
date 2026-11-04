@@ -282,6 +282,9 @@ func runPipedShell(
 	if errors.Is(runErr, shell.ErrUnknownCommandAtStart) {
 		return runPipedAI(ctx, aiRunner, input, stdout, stderr, verbose, es)
 	}
+	if errors.Is(runErr, shell.ErrShellBusy) {
+		fmt.Fprintf(stderr, "kabibi: %v\n", runErr)
+	}
 	if runErr != nil {
 		if rec.ExitCode != 0 {
 			return rec.ExitCode
