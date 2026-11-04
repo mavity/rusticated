@@ -3,7 +3,7 @@
   "displayName": "🐚︎ Kabibi Shell",
   "description": "Kabibi shell for VS Code with Copilot terminal tools",
   "version": "0.1.0",
-  "publisher": "rusticated",
+  "publisher": "Oleg Mihailik",
   "license": "MIT",
   "icon": "icon.png",
   "keywords": [
