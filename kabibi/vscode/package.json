@@ -1,27 +1,48 @@
 {
   "name": "kabibi-vscode",
   "displayName": "Kabibi Shell",
-  "description": "Kabibi wearable all-weather shell and AI assistant for VS Code and vscode.dev",
+  "description": "Kabibi shell for VS Code with Copilot terminal tools",
   "version": "0.1.0",
   "publisher": "rusticated",
+  "license": "MIT",
+  "icon": "icon.png",
+  "keywords": [
+    "kabibi",
+    "shell",
+    "terminal",
+    "copilot",
+    "language model tools"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/oyin-bo/rusticated"
   },
+  "galleryBanner": {
+    "color": "#202020",
+    "theme": "dark"
+  },
   "engines": {
-    "vscode": "^1.91.0"
+    "vscode": "^1.99.0"
   },
   "categories": [
-    "Other",
-    "Terminal"
+    "Other"
   ],
   "extensionKind": [
-    "ui",
-    "workspace"
+    "workspace",
+    "ui"
   ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    }
+  },
   "activationEvents": [
     "onCommand:kabibi.openTerminal",
-    "onTerminalProfile:kabibi.terminalProfile"
+    "onTerminalProfile:kabibi.terminalProfile",
+    "onLanguageModelTool:kabibi_exec",
+    "onLanguageModelTool:kabibi_term_read",
+    "onLanguageModelTool:kabibi_term_input",
+    "onLanguageModelTool:kabibi_term_kill"
   ],
   "browser": "./extension.js",
   "main": "./extension.js",
@@ -47,18 +68,142 @@
           "icon": "terminal"
         }
       ]
-    }
+    },
+    "languageModelTools": [
+      {
+        "name": "kabibi_exec",
+        "toolReferenceName": "kabibi.exec",
+        "canBeReferencedInPrompt": true,
+        "displayName": "Kabibi exec",
+        "modelDescription": "Run a shell command in a fresh Kabibi shell execution session. Commands that outlive the foreground timeout return an ID for term_read, term_input, and term_kill.",
+        "userDescription": "Execute a command in an independent Kabibi shell.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "description": "Shell command to execute."
+            },
+            "timeout_sec": {
+              "type": "integer",
+              "description": "Foreground timeout in seconds."
+            },
+            "keep_ansi": {
+              "type": "boolean",
+              "description": "Preserve bold and underline attributes."
+            },
+            "explanation": {
+              "type": "string",
+              "description": "Why this command is being run."
+            }
+          },
+          "required": [
+            "command"
+          ]
+        }
+      },
+      {
+        "name": "kabibi_term_read",
+        "toolReferenceName": "kabibi.term_read",
+        "canBeReferencedInPrompt": true,
+        "displayName": "Kabibi term_read",
+        "modelDescription": "Read output from a running or finished Kabibi background job by its ID returned from exec.",
+        "userDescription": "Read output from a Kabibi background job.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "integer",
+              "description": "Background job ID returned by exec."
+            },
+            "wait_ms": {
+              "type": "integer",
+              "description": "Maximum wait for output, up to 30000 ms."
+            },
+            "only_new": {
+              "type": "boolean",
+              "description": "Return only output not already read."
+            },
+            "keep_ansi": {
+              "type": "boolean",
+              "description": "Preserve bold and underline attributes."
+            }
+          },
+          "required": [
+            "id"
+          ]
+        }
+      },
+      {
+        "name": "kabibi_term_input",
+        "toolReferenceName": "kabibi.term_input",
+        "canBeReferencedInPrompt": true,
+        "displayName": "Kabibi term_input",
+        "modelDescription": "Send text or symbolic key tokens to a Kabibi background job by its ID returned from exec.",
+        "userDescription": "Send input to a Kabibi background job.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "integer",
+              "description": "Background job ID returned by exec."
+            },
+            "keys": {
+              "type": "string",
+              "description": "Text or symbolic key tokens to send."
+            },
+            "wait_ms": {
+              "type": "integer",
+              "description": "Maximum wait for output after input, up to 30000 ms."
+            }
+          },
+          "required": [
+            "id",
+            "keys"
+          ]
+        }
+      },
+      {
+        "name": "kabibi_term_kill",
+        "toolReferenceName": "kabibi.term_kill",
+        "canBeReferencedInPrompt": true,
+        "displayName": "Kabibi term_kill",
+        "modelDescription": "Terminate or interrupt a Kabibi background job by its ID returned from exec.",
+        "userDescription": "Terminate a Kabibi background job.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "integer",
+              "description": "Background job ID returned by exec."
+            },
+            "signal": {
+              "type": "string",
+              "enum": [
+                "SIGINT",
+                "SIGTERM",
+                "SIGKILL"
+              ],
+              "description": "Signal to send; defaults to SIGTERM."
+            }
+          },
+          "required": [
+            "id"
+          ]
+        }
+      }
+    ]
   },
   "scripts": {
-    "test": "node --test ./test/vfs.test.js",
+    "test": "node --test ./test/*.test.js",
     "start-web": "vscode-test-web --browserType=chromium --esm --extensionDevelopmentPath=. .",
     "vsce_package": "vsce package",
     "vsce_publish": "vsce publish"
   },
   "devDependencies": {
     "@types/node": "^22.15.18",
-    "@types/vscode": "^1.91.0",
+    "@types/vscode": "^1.99.0",
     "@vscode/test-web": "^0.0.81",
-    "@vscode/vsce": "^3.4.0"
+    "@vscode/vsce": "4.1.0"
   }
 }

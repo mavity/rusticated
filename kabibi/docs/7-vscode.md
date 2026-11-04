@@ -240,9 +240,9 @@ execution/ejection behavior.
 ## Packaging and Marketplace release
 
 The extension package must contain every runtime asset it loads. The release
-process currently stages the Kabibi vegetable and washmhost browser assets into
-`kabibi/vscode`; update that process when adding or selecting the Node host
-assets so a clean release build produces a complete package.
+process stages the Kabibi vegetable, browser and Node washmhost assets,
+supported native PTY addons, and the generated PNG icon into `kabibi/vscode`;
+a clean release build must produce the complete package.
 
 The Marketplace icon must be a PNG generated from the existing
 [`kabibi.svg`](../kabibi.svg). Reference the generated PNG from the extension

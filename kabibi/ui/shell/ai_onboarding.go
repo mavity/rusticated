@@ -310,6 +310,11 @@ func aiBuiltinMiddleware(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 		if len(args) == 0 || args[0] != "ai" {
 			return next(ctx, args)
 		}
+		if execSess, _ := execSessionFromContext(ctx); execSess != nil && !execSess.AIEnabled() {
+			hc := interp.HandlerCtx(ctx)
+			fmt.Fprintln(hc.Stderr, "ai: unavailable in this shell")
+			return interp.ExitStatus(127)
+		}
 		return runAIBuiltin(ctx, args[1:])
 	}
 }

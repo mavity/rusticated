@@ -2,9 +2,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const fsPromises = require('node:fs/promises');
+const os = require('node:os');
 const path = require('node:path');
 
 const ext = require('../extension.js');
+const manifest = require('../package.json');
 const vfsMod = require('../vfs.js');
 
 /**
@@ -17,6 +20,7 @@ function createMockVSCode(options = {}) {
   const openedDocs = [];
   const registeredCommands = new Map();
   const registeredProfiles = new Map();
+  const registeredTools = new Map();
   const createdTerminals = [];
 
   class MockUri {
@@ -67,6 +71,14 @@ function createMockVSCode(options = {}) {
     }
   }
 
+  class MockLanguageModelTextPart {
+    constructor(value) { this.value = value; }
+  }
+
+  class MockLanguageModelToolResult {
+    constructor(content) { this.content = content; }
+  }
+
   const extensionUri = new MockUri('vscode-extension', 'kabibi', '/ext');
 
   const ensureParentDirs = (normPath) => {
@@ -115,9 +127,19 @@ function createMockVSCode(options = {}) {
   let statCalls = 0;
 
   const vscode = {
+    UIKind: { Desktop: 1, Web: 2 },
+    env: { uiKind: 2 },
     Uri: MockUri,
     EventEmitter: MockEventEmitter,
     TerminalProfile: MockTerminalProfile,
+    LanguageModelTextPart: MockLanguageModelTextPart,
+    LanguageModelToolResult: MockLanguageModelToolResult,
+    lm: {
+      registerLanguageModelTool: (id, tool) => {
+        registeredTools.set(id, tool);
+        return { dispose: () => registeredTools.delete(id) };
+      }
+    },
     FileType: {
       Unknown: vfsMod.FILE_TYPE_UNKNOWN,
       File: vfsMod.FILE_TYPE_FILE,
@@ -265,6 +287,7 @@ function createMockVSCode(options = {}) {
       openedDocs,
       registeredCommands,
       registeredProfiles,
+      registeredTools,
       createdTerminals,
       getStats: () => ({ statCalls, readFileCalls }),
       resetStats: () => { statCalls = 0; readFileCalls = 0; }
@@ -419,6 +442,83 @@ test('VSCodeMountedFS supports multi-root workspaces under /workspace/<folder.na
   assert.equal(new TextDecoder().decode(beServer.content), 'package main\n');
 });
 
+test('workspace folder mount names disambiguate duplicate names', () => {
+  const entries = vfsMod.workspaceFolderEntries([
+    { name: 'project', uri: { path: '/first' } },
+    { name: 'project', uri: { path: '/second' } },
+    { name: 'project-2', uri: { path: '/third' } }
+  ]);
+  assert.deepEqual(
+    entries.map((entry) => [entry.name, entry.folder.uri.path]),
+    [
+      ['project', '/first'],
+      ['project-2', '/second'],
+      ['project-2-2', '/third']
+    ]
+  );
+});
+
+test('manifest contributes the one-shot tools on the supported VS Code version', () => {
+  assert.equal(manifest.engines.vscode, '^1.99.0');
+  assert.equal(manifest.icon, 'icon.png');
+  assert.equal(manifest.capabilities.untrustedWorkspaces.supported, false);
+  assert.deepEqual(
+    manifest.contributes.languageModelTools.map((tool) => tool.name),
+    ['kabibi_exec', 'kabibi_term_read', 'kabibi_term_input', 'kabibi_term_kill']
+  );
+  const execTool = manifest.contributes.languageModelTools[0];
+  assert.equal(execTool.inputSchema.properties.shell_id, undefined);
+  assert.deepEqual(execTool.inputSchema.required, ['command']);
+});
+
+test('all extension-launched shells explicitly disable Kabibi AI', () => {
+  assert.deepEqual(ext.extensionShellArgs({}), ['kabibi', '--disable-ai']);
+  assert.deepEqual(
+    ext.extensionShellArgs({ args: ['kabibi', '-c', 'echo ok'] }),
+    ['kabibi', '-c', 'echo ok', '--disable-ai']
+  );
+});
+
+test('Node host workspace mount exposes each root through a temporary mount', async () => {
+  const storage = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'kabibi-workspace-test-'));
+  const first = path.join(storage, 'first');
+  const second = path.join(storage, 'second');
+  await fsPromises.mkdir(first);
+  await fsPromises.mkdir(second);
+  await fsPromises.writeFile(path.join(first, 'seed.txt'), 'first\n');
+  await fsPromises.writeFile(path.join(second, 'seed.txt'), 'second\n');
+
+  let mount;
+  try {
+    const entries = vfsMod.workspaceFolderEntries([
+      { name: 'project', uri: { fsPath: first } },
+      { name: 'project', uri: { fsPath: second } }
+    ]);
+    mount = await ext.createNodeWorkspaceMount(
+      {},
+      { globalStorageUri: { fsPath: storage } },
+      { getWorkspaceFolderEntries: () => entries }
+    );
+
+    assert.equal(
+      await fsPromises.readFile(path.join(mount.mountPath, 'project', 'seed.txt'), 'utf8'),
+      'first\n'
+    );
+    assert.equal(
+      await fsPromises.readFile(path.join(mount.mountPath, 'project-2', 'seed.txt'), 'utf8'),
+      'second\n'
+    );
+    assert.deepEqual(mount.roots.map((root) => root.guest), [
+      '/workspace',
+      '/workspace/project',
+      '/workspace/project-2'
+    ]);
+  } finally {
+    if (mount) await mount.dispose();
+    await fsPromises.rm(storage, { recursive: true, force: true });
+  }
+});
+
 test('KabibiPseudoterminal boots packaged kabibi.bat vegetable and interacts with /workspace', async () => {
   const vscode = createMockVSCode({
     initialWorkspaceFiles: {
@@ -438,6 +538,17 @@ test('KabibiPseudoterminal boots packaged kabibi.bat vegetable and interacts wit
 
   assert.equal(vscode._debug.registeredCommands.has('kabibi.openTerminal'), true);
   assert.equal(vscode._debug.registeredProfiles.has('kabibi.terminalProfile'), true);
+  assert.deepEqual([...vscode._debug.registeredTools.keys()], [
+    'kabibi_exec',
+    'kabibi_term_read',
+    'kabibi_term_input',
+    'kabibi_term_kill'
+  ]);
+  const preparedExec = vscode._debug.registeredTools.get('kabibi_exec').prepareInvocation({
+    input: { command: 'printf ok', explanation: 'verify the extension' }
+  });
+  assert.match(preparedExec.confirmationMessages.message, /printf ok/);
+  assert.match(preparedExec.confirmationMessages.message, /verify the extension/);
 
   // Run one-shot command `-c "cat /workspace/hello.txt && echo done > /workspace/out.txt"`
   // via createKabibiPseudoterminal to verify full guest -> host -> vscode.workspace.fs round-trip!

@@ -31,6 +31,18 @@
     return '/' + parts.join('/');
   }
 
+  function workspaceFolderEntries(folders) {
+    const usedNames = new Set();
+    return folders.map((folder, index) => {
+      const baseName = folder.name || `folder-${index + 1}`;
+      let name = baseName;
+      let suffix = 2;
+      while (usedNames.has(name)) name = `${baseName}-${suffix++}`;
+      usedNames.add(name);
+      return { folder, name };
+    });
+  }
+
   function mapVSCodeFileType(ft) {
     if ((ft & FILE_TYPE_DIRECTORY) !== 0) return 'dir';
     if ((ft & FILE_TYPE_SYMLINK) !== 0) return 'symlink';
@@ -108,6 +120,10 @@
       return Array.isArray(folders) ? folders : [];
     }
 
+    getWorkspaceFolderEntries() {
+      return workspaceFolderEntries(this.getWorkspaceFolders());
+    }
+
     hasWorkspace() {
       return this.getWorkspaceFolders().length > 0;
     }
@@ -150,16 +166,16 @@
       }
 
       const folderName = segs[0];
-      const folder = folders.find((f, idx) => (f.name || `folder-${idx}`) === folderName);
-      if (!folder) {
+      const entry = workspaceFolderEntries(folders).find((item) => item.name === folderName);
+      if (!entry) {
         return { kind: 'not-found', path: norm };
       }
 
       const subSegs = segs.slice(1);
       const uri = subSegs.length === 0
-        ? folder.uri
-        : this.vscode.Uri.joinPath(folder.uri, ...subSegs);
-      return { kind: 'vscode', path: norm, uri, folder, isMountRoot: subSegs.length === 0 };
+        ? entry.folder.uri
+        : this.vscode.Uri.joinPath(entry.folder.uri, ...subSegs);
+      return { kind: 'vscode', path: norm, uri, folder: entry.folder, isMountRoot: subSegs.length === 0 };
     }
 
     async init() {
@@ -439,8 +455,8 @@
       }
       if (target.kind === 'multi-root') {
         const now = Date.now();
-        return target.folders.map((f, idx) => ({
-          path: `${this.mountPoint}/${f.name || `folder-${idx}`}`,
+        return workspaceFolderEntries(target.folders).map(({ name }) => ({
+          path: `${this.mountPoint}/${name}`,
           type: 'dir',
           size: 0,
           mode: 0o755,
@@ -472,6 +488,7 @@
   const exportsObj = {
     VSCodeMountedFS,
     normalizePath,
+    workspaceFolderEntries,
     FILE_TYPE_UNKNOWN,
     FILE_TYPE_FILE,
     FILE_TYPE_DIRECTORY,

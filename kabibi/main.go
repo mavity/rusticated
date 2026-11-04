@@ -16,11 +16,13 @@ import (
 )
 
 type cliOptions struct {
-	command string
-	prompt  string
-	edit    string
-	verbose bool
-	help    bool
+	command    string
+	prompt     string
+	edit       string
+	verbose    bool
+	help       bool
+	disableAI  bool
+	toolServer bool
 
 	positional []string
 	aiPrompt   string
@@ -40,6 +42,8 @@ Flags:
   -c, --command string   Execute a command or AI prompt in batch mode and exit
   -p, --prompt string    Execute a prompt in one-shot mode and exit
       --edit string      Open a file in the editor, save on exit, and close Kabibi
+      --disable-ai       Disable Kabibi AI behavior in this shell process
+      --vscode-tool-server  Run the VS Code terminal-tool protocol over stdio
   -v, --verbose          Verbose diagnostics (includes prompts and tool I/O)
   -h, --help             Show this help
 
@@ -71,6 +75,8 @@ func parseCLI(args []string, helpOut io.Writer) (cliOptions, error) {
 	fs.StringVarP(&opts.prompt, "prompt", "p", "", "Execute a prompt in one-shot mode and exit")
 	fs.StringVar(&opts.edit, "edit", "", "Open a file in the editor, save on exit, and close Kabibi")
 	fs.BoolVarP(&opts.verbose, "verbose", "v", false, "Verbose diagnostics, including prompts and tool I/O")
+	fs.BoolVar(&opts.disableAI, "disable-ai", false, "Disable Kabibi AI behavior in this shell process")
+	fs.BoolVar(&opts.toolServer, "vscode-tool-server", false, "Run the VS Code terminal-tool protocol over stdio")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, pflag.ErrHelp) {
@@ -138,6 +144,13 @@ func runCLI(args []string, stdout, stderr io.Writer, verbose bool) int {
 		return 2
 	}
 	verbose = verbose || opts.verbose || os.Getenv("MOHABBAT_VERBOSE") == "1"
+	if opts.toolServer {
+		if err := shell.RunVSCodeToolServer(context.Background(), os.Stdin, stdout, ""); err != nil {
+			fmt.Fprintf(stderr, "kabibi: VS Code tool server: %v\n", err)
+			return 1
+		}
+		return 0
+	}
 	mode := "interactive"
 	switch {
 	case opts.help:
@@ -162,7 +175,7 @@ func runCLI(args []string, stdout, stderr io.Writer, verbose bool) int {
 		if verbose {
 			fmt.Fprintln(stderr, "[kabibi] booting app for editor mode")
 		}
-		appWidget, host, err := app.Boot(verbose)
+		appWidget, host, err := app.BootWithOptions(verbose, opts.disableAI)
 		if err != nil {
 			if verbose {
 				fmt.Fprintf(stderr, "[kabibi] editor app boot failed: %v\n", err)
@@ -194,10 +207,17 @@ func runCLI(args []string, stdout, stderr io.Writer, verbose bool) int {
 		oneShotInput = opts.prompt
 	}
 	if oneShotInput != "" {
+		if opts.disableAI {
+			return runOneShotShellLine(oneShotInput, stdout, stderr)
+		}
 		return runOneShotLine(oneShotInput, opts.verbose, stdout, stderr)
 	}
 
 	if opts.aiFallback {
+		if opts.disableAI {
+			fmt.Fprintln(stderr, "kabibi: AI is unavailable in this shell")
+			return 2
+		}
 		return runOneShotAIPrompt(opts.aiPrompt, opts.verbose, stdout, stderr)
 	}
 
@@ -209,7 +229,14 @@ func runCLI(args []string, stdout, stderr io.Writer, verbose bool) int {
 				fmt.Fprintf(stderr, "kabibi: %v\n", readErr)
 				return 1
 			}
+			if opts.disableAI {
+				return runOneShotShellLine(string(data), stdout, stderr)
+			}
 			return runOneShotLine(string(data), opts.verbose, stdout, stderr)
+		}
+		if opts.disableAI {
+			fmt.Fprintln(stderr, "kabibi: AI is unavailable in this shell")
+			return 2
 		}
 		return runOneShotAIPrompt(strings.Join(opts.positional, " "), opts.verbose, stdout, stderr)
 	}
@@ -219,7 +246,7 @@ func runCLI(args []string, stdout, stderr io.Writer, verbose bool) int {
 		return runPipedSession(os.Stdin, stdout, stderr, opts)
 	}
 
-	appWidget, host, err := app.Boot(verbose)
+	appWidget, host, err := app.BootWithOptions(verbose, opts.disableAI)
 	if err != nil {
 		if verbose {
 			fmt.Fprintf(stderr, "[kabibi] interactive app boot failed: %v\n", err)
@@ -246,6 +273,11 @@ func runCLI(args []string, stdout, stderr io.Writer, verbose bool) int {
 }
 
 func cliAIToolInvocation(args []string) (name string, toolArgs []string, ok bool) {
+	for _, arg := range args {
+		if arg == "--disable-ai" {
+			return "", nil, false
+		}
+	}
 	i := 0
 	for i < len(args) && (args[i] == "-v" || args[i] == "--verbose") {
 		i++
@@ -254,6 +286,50 @@ func cliAIToolInvocation(args []string) (name string, toolArgs []string, ok bool
 		return "", nil, false
 	}
 	return args[i+1], args[i+2:], true
+}
+
+func runOneShotShellLine(line string, stdout, stderr io.Writer) int {
+	es, err := shell.NewExecutionSession("")
+	if err != nil {
+		fmt.Fprintf(stderr, "kabibi: session init: %v\n", err)
+		return 1
+	}
+	defer es.Close()
+	es.SetAIEnabled(false)
+
+	route, parsed := es.ClassifyInput(line)
+	switch route {
+	case shell.RouteEmpty, shell.RouteBuiltin:
+		return 0
+	case shell.RouteIncomplete:
+		fmt.Fprintln(stderr, "kabibi: incomplete shell input")
+		return 2
+	case shell.RouteShell:
+		rec, runErr := es.RunCommand(context.Background(), line, parsed, shell.SourceUserShell, func(chunk []byte) {
+			if _, writeErr := stdout.Write(chunk); writeErr != nil {
+				err = writeErr
+			}
+		})
+		if err != nil {
+			fmt.Fprintf(stderr, "kabibi: writing stdout: %v\n", err)
+			return 1
+		}
+		if errors.Is(runErr, shell.ErrUnknownCommandAtStart) {
+			fmt.Fprintf(stderr, "%q: executable file not found in $PATH\n", strings.TrimSpace(line))
+			return 127
+		}
+		if runErr != nil {
+			fmt.Fprintf(stderr, "kabibi: %v\n", runErr)
+			if rec.ExitCode != 0 {
+				return rec.ExitCode
+			}
+			return 1
+		}
+		return rec.ExitCode
+	default:
+		fmt.Fprintln(stderr, "kabibi: AI is unavailable in this shell")
+		return 2
+	}
 }
 
 func runOneShotAIPrompt(prompt string, verbose bool, stdout, stderr io.Writer) int {

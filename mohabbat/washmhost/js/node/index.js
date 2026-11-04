@@ -14,6 +14,14 @@ import path from 'node:path';
 // Patched by buildNodeSlot:
 const VERBOSE = false; // {{VERBOSE}}
 const L = (...args) => (VERBOSE || process.env.MOHABBAT_VERBOSE) && console.error(...args);
+let virtualTerminalSize = {
+  cols: Number(process.env.MOHABBAT_PSEUDO_TTY_COLS) || 80,
+  rows: Number(process.env.MOHABBAT_PSEUDO_TTY_ROWS) || 24
+};
+
+function isVirtualTerminal() {
+  return process.env.MOHABBAT_PSEUDO_TTY === '1';
+}
 
 // Overlapped.flags: bit 0 is completion, bits 1-23 are shared-reserved, and
 // bits 24-31 are operation-specific.
@@ -238,9 +246,36 @@ async function resolvePtyProgram(program, env, cwd) {
 // ─────────────────────────────────────────────────────────────────────────────
 function translatePath(p) {
   if (typeof p !== 'string' || p.length === 0) return p;
-  const s = p.replace(/\\/g, '/');
+  const s = path.posix.normalize(p.replace(/\\/g, '/'));
+  const workspaceMount = process.env.MOHABBAT_WORKSPACE_MOUNT;
+  if (workspaceMount && (s === '/workspace' || s.startsWith('/workspace/'))) {
+    const relative = s.slice('/workspace'.length).replace(/^\/+/, '');
+    return relative
+      ? path.join(workspaceMount, ...relative.split('/'))
+      : workspaceMount;
+  }
   if (/^\/[A-Za-z]:\//.test(s)) return s.slice(1);
   return s;
+}
+
+function virtualizeWorkspacePath(hostPath) {
+  const rootsJSON = process.env.MOHABBAT_WORKSPACE_ROOTS;
+  if (rootsJSON) {
+    let roots;
+    try {
+      roots = JSON.parse(rootsJSON);
+    } catch (error) {
+      throw new Error(`invalid MOHABBAT_WORKSPACE_ROOTS: ${error.message}`);
+    }
+    const absolute = path.resolve(hostPath);
+    for (const root of roots) {
+      const relative = path.relative(root.host, absolute);
+      if (relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))) {
+        return path.posix.join(root.guest, relative.split(path.sep).join('/'));
+      }
+    }
+  }
+  return hostPath;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -612,7 +647,7 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
   // ── get_cwd ──────────────────────────────────────────────────────────────────
   // Returns: i64  (0 << 32) | bytesNeeded   (high 32 = errno on failure)
   function get_cwd(ptr, len) {
-    const cwd = process.cwd();
+    const cwd = virtualizeWorkspacePath(process.cwd());
     const bytes = Buffer.byteLength(cwd);
     if (ptr !== 0 && len >= bytes) guestWrite(ptr, Buffer.from(cwd));
     return BigInt(bytes);
@@ -1979,11 +2014,13 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
   // Signature: (handle i64, mode i32)
   // mode 1 = raw, 0 = normal
   function tty_set_mode(handle, mode) {
-    if (handle === 0n && process.stdin.isTTY) {
+    if (handle === 0n && (process.stdin.isTTY || isVirtualTerminal())) {
       try {
         if (Number(mode) === 1) process.stdin.setRawMode(true);
         else                    process.stdin.setRawMode(false);
-      } catch (_) {}
+      } catch (error) {
+        if (!isVirtualTerminal()) throw error;
+      }
     }
   }
 
@@ -1992,9 +2029,9 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
   function tty_get_size(handle) {
     const h = hs.getHandle(handle);
     if (h && h.type === 'pty') return (h.cols << 16) | h.rows;
-    if ((handle === 1n || handle === 2n) && process.stdout.isTTY) {
-      const w = process.stdout.columns || 80;
-      const h = process.stdout.rows    || 24;
+    if ((handle === 1n || handle === 2n) && (process.stdout.isTTY || isVirtualTerminal())) {
+      const w = process.stdout.columns || virtualTerminalSize.cols || 80;
+      const h = process.stdout.rows || virtualTerminalSize.rows || 24;
       return (w << 16) | h;
     }
     return (80 << 16) | 24;
@@ -2018,9 +2055,9 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
   // ── fd_isatty ────────────────────────────────────────────────────────────────
   // Signature: (fd i32) -> i32
   function fd_isatty(fd) {
-    if (fd === 0) return process.stdin.isTTY  ? 1 : 0;
-    if (fd === 1) return process.stdout.isTTY ? 1 : 0;
-    if (fd === 2) return process.stderr.isTTY ? 1 : 0;
+    if (fd === 0) return process.stdin.isTTY || isVirtualTerminal() ? 1 : 0;
+    if (fd === 1) return process.stdout.isTTY || isVirtualTerminal() ? 1 : 0;
+    if (fd === 2) return process.stderr.isTTY || isVirtualTerminal() ? 1 : 0;
     return 0;
   }
 
@@ -2143,6 +2180,23 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
 // ─────────────────────────────────────────────────────────────────────────────
 export async function runHost(brainWasm, argv, ptyAddonBytes = null) {
   const hostState = new HostState();
+  const onHostMessage = (message) => {
+    if (!message || typeof message !== 'object') return;
+    if (message.type === 'resize') {
+      const cols = Number(message.cols);
+      const rows = Number(message.rows);
+      if (Number.isFinite(cols) && cols > 0) virtualTerminalSize.cols = cols;
+      if (Number.isFinite(rows) && rows > 0) virtualTerminalSize.rows = rows;
+      hostState.deliverSignal(27);
+      hostState.deliverSignal(28);
+    } else if (message.type === 'signal') {
+      const signum = Number(message.signum);
+      if (Number.isInteger(signum) && signum > 0) hostState.deliverSignal(signum);
+    }
+  };
+  if (typeof process.on === 'function' && process.send) {
+    process.on('message', onHostMessage);
+  }
   const imports   = makeBrainImports(hostState, argv, ptyAddonBytes);
 
   L('[host] instantiating brain wasm...');
@@ -2231,4 +2285,4 @@ if (isMain) {
   });
 }
 
-export { HostState, READ_FLAG_POSITIONAL };
+export { HostState, READ_FLAG_POSITIONAL, translatePath, virtualizeWorkspacePath };

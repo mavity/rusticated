@@ -88,6 +88,8 @@ func (m *ManagedPTY) markExited(code int, err error) {
 	m.runCancel = nil
 	elapsed := m.finishedAt.Sub(m.StartedAt)
 	cb := m.onFinish
+	m.onFinish = nil
+	m.onChunk = nil
 	m.signalUpdateLocked()
 	close(m.doneCh)
 	m.mu.Unlock()

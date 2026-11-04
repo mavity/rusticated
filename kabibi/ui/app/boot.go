@@ -6,6 +6,10 @@ import (
 )
 
 func Boot(verbose bool) (*AppWidget, *ui.Host, error) {
+	return BootWithOptions(verbose, false)
+}
+
+func BootWithOptions(verbose, disableAI bool) (*AppWidget, *ui.Host, error) {
 	if err := browser.Install(); err != nil {
 		return nil, nil, err
 	}
@@ -19,6 +23,7 @@ func Boot(verbose bool) (*AppWidget, *ui.Host, error) {
 
 	app := NewWidget(AppWidgetOptions{
 		WriteToScrollback: writeToScrollbackDelegate,
+		DisableAI:         disableAI,
 		OnExit: func() {
 			if h != nil {
 				h.Stop()

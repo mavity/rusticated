@@ -39,6 +39,7 @@ type AppWidget struct {
 	panelsVisible             bool
 	fullScreenClaimed         bool
 	closed                    bool
+	disableAI                 bool
 	restorePanelsAfterCommand bool
 
 	dialog *dialog.DialogWidget
@@ -65,6 +66,7 @@ type AppWidgetOptions struct {
 	ShellMode         shell.ShellMode
 	PanelsVisible     bool
 	FSService         filemanager.FSService
+	DisableAI         bool
 }
 
 // NewWidget constructs a clean AppWidget instance with wired Shell and DualPaneWidget.
@@ -72,6 +74,7 @@ func NewWidget(opts AppWidgetOptions) *AppWidget {
 	w := &AppWidget{
 		writeScrollback: opts.WriteToScrollback,
 		onExit:          opts.OnExit,
+		disableAI:       opts.DisableAI,
 		compositor:      terminal.NewTerminal(1, 1),
 	}
 
@@ -94,6 +97,7 @@ func NewWidget(opts AppWidgetOptions) *AppWidget {
 			w.onShellCommandStarted()
 		},
 		WorkingDir: opts.WorkingDir,
+		DisableAI:  opts.DisableAI,
 		Mode:       opts.ShellMode,
 	})
 
@@ -907,6 +911,10 @@ func (w *AppWidget) dispatchSlashCommand(invocation slashcmd.Invocation) {
 	}
 	if command.BrowserOnly && !browser.Available() {
 		w.showSlashError(fmt.Errorf("%s is only available in the browser", command.Name))
+		return
+	}
+	if w.disableAI && (command.Name == "/model" || command.Name == "/settings") {
+		w.showSlashError(fmt.Errorf("%s is unavailable in this shell", command.Name))
 		return
 	}
 

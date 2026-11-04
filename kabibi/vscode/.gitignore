@@ -2,5 +2,8 @@
 /.vscode-test-web/
 /kabibi.bat
 /washmhost.js
+/washmhost-node.mjs
 /mount_fs.js
+/icon.png
+/nodepty-*.node
 /*.vsix

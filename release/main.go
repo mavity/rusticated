@@ -183,7 +183,23 @@ func main() {
 		{src: filepath.Join(ws, "mohabbat", "washmhost", "js", "browser", "mount_fs.js"), dst: filepath.Join(distDir, "mount_fs.js")},
 		{src: filepath.Join(ws, "mohabbat", "washmhost", "js", "browser", "index.js"), dst: filepath.Join(ws, "kabibi", "vscode", "washmhost.js")},
 		{src: filepath.Join(ws, "mohabbat", "washmhost", "js", "browser", "mount_fs.js"), dst: filepath.Join(ws, "kabibi", "vscode", "mount_fs.js")},
+		{src: filepath.Join(ws, "mohabbat", "washmhost", "js", "node", "index.js"), dst: filepath.Join(ws, "kabibi", "vscode", "washmhost-node.mjs")},
 		{src: filepath.Join(distDir, "kabibi.bat"), dst: filepath.Join(ws, "kabibi", "vscode", "kabibi.bat")},
+	}
+	for _, name := range []string{
+		"linux-x64",
+		"linux-arm64",
+		"darwin-arm64",
+		"win32-x64",
+		"win32-arm64",
+	} {
+		siteAssets = append(siteAssets, struct {
+			src string
+			dst string
+		}{
+			src: filepath.Join(ws, "target", "mohabbat-build", "nodepty-"+name+".node"),
+			dst: filepath.Join(ws, "kabibi", "vscode", "nodepty-"+name+".node"),
+		})
 	}
 
 	for _, sa := range siteAssets {
@@ -195,6 +211,20 @@ func main() {
 			fmt.Fprintf(os.Stderr, "\n🍆  FAILED: copy %s -> %s: %v\n", sa.src, sa.dst, err)
 			os.Exit(1)
 		}
+	}
+	svg, err := os.ReadFile(filepath.Join(ws, "kabibi", "kabibi.svg"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\n🍆  FAILED: read Kabibi SVG for VS Code icon: %v\n", err)
+		os.Exit(1)
+	}
+	extensionIcon, err := renderSVGToPNG(svg, 128)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\n🍆  FAILED: render VS Code extension icon: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "kabibi", "vscode", "icon.png"), extensionIcon, 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "\n🍆  FAILED: stage VS Code extension icon: %v\n", err)
+		os.Exit(1)
 	}
 
 	if err := stageWebsiteIndex(ws, distDir); err != nil {

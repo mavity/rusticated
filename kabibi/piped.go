@@ -35,27 +35,34 @@ func runPipedSession(stdin io.Reader, stdout, stderr io.Writer, opts cliOptions)
 		fmt.Fprintf(stderr, "kabibi: session init: %v\n", err)
 		return 1
 	}
+	es.SetAIEnabled(!opts.disableAI)
 
-	aiRunner := shell.NewLazyAIRunner(es)
-	if err := aiRunner.SetVerbose(opts.verbose); err != nil {
-		fmt.Fprintf(stderr, "kabibi: AI runner setup: %v\n", err)
-		aiRunner.Close()
-		_ = es.Close()
-		return 1
+	var aiRunner shell.AIRunner
+	if !opts.disableAI {
+		lazyRunner := shell.NewLazyAIRunner(es)
+		if err := lazyRunner.SetVerbose(opts.verbose); err != nil {
+			fmt.Fprintf(stderr, "kabibi: AI runner setup: %v\n", err)
+			lazyRunner.Close()
+			_ = es.Close()
+			return 1
+		}
+		aiRunner = lazyRunner
 	}
 
 	exitCode := runPipedReader(context.Background(), stdin, stdout, stderr, opts, es, aiRunner)
-	if err := aiRunner.FlushEmbeddings(); err != nil {
-		fmt.Fprintf(stderr, "kabibi: flush AI embeddings: %v\n", err)
-		if exitCode == 0 {
-			exitCode = 1
+	if lazyRunner, ok := aiRunner.(*shell.LazyAIRunner); ok {
+		if err := lazyRunner.FlushEmbeddings(); err != nil {
+			fmt.Fprintf(stderr, "kabibi: flush AI embeddings: %v\n", err)
+			if exitCode == 0 {
+				exitCode = 1
+			}
 		}
-	}
-	aiRunner.Close()
-	if err := aiRunner.WaitClosed(context.Background()); err != nil {
-		fmt.Fprintf(stderr, "kabibi: close AI runner: %v\n", err)
-		if exitCode == 0 {
-			exitCode = 1
+		lazyRunner.Close()
+		if err := lazyRunner.WaitClosed(context.Background()); err != nil {
+			fmt.Fprintf(stderr, "kabibi: close AI runner: %v\n", err)
+			if exitCode == 0 {
+				exitCode = 1
+			}
 		}
 	}
 	if err := es.Close(); err != nil {
@@ -156,6 +163,9 @@ func runPipedSlash(
 	}
 	switch name {
 	case "/settings":
+		if !es.AIEnabled() {
+			return pipedSlashError(stderr, fmt.Errorf("%s is unavailable in this shell", name))
+		}
 		if len(invocation.Args) != 0 {
 			return pipedSlashError(stderr, slashcmd.UsageError(name, ""))
 		}
@@ -165,6 +175,9 @@ func runPipedSlash(
 		}
 		return pipedSlashError(stderr, fmt.Errorf("/settings requires the TUI; edit AI settings at %s", path))
 	case "/model":
+		if !es.AIEnabled() {
+			return pipedSlashError(stderr, fmt.Errorf("%s is unavailable in this shell", name))
+		}
 		if len(invocation.Args) != 0 {
 			return pipedSlashError(stderr, slashcmd.UsageError(name, ""))
 		}
@@ -280,7 +293,11 @@ func runPipedShell(
 		return 1
 	}
 	if errors.Is(runErr, shell.ErrUnknownCommandAtStart) {
-		return runPipedAI(ctx, aiRunner, input, stdout, stderr, verbose, es)
+		if aiRunner != nil {
+			return runPipedAI(ctx, aiRunner, input, stdout, stderr, verbose, es)
+		}
+		fmt.Fprintf(stderr, "%q: executable file not found in $PATH\n", strings.TrimSpace(input))
+		return 127
 	}
 	if errors.Is(runErr, shell.ErrShellBusy) {
 		fmt.Fprintf(stderr, "kabibi: %v\n", runErr)
