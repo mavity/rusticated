@@ -12,10 +12,10 @@ earlier, but extension-contributed tools became available in Agent mode in
 minimum release.
 
 Use stable public APIs only. The stable tool API does not expose a chat-session
-identifier or a chat-session-ended event. Do not depend on proposed/private
-chat APIs, and do not treat `toolInvocationToken` as a shell-session key.
-Copilot shell routing therefore uses the explicit tool-session handle described
-below; it is not inferred from VS Code chat identity.
+identifier or a chat-session-ended event. This design does not require either:
+each `exec` is a one-shot shell invocation, and only an execution ejected into
+the background remains addressable by its returned job ID. Do not add a
+Copilot-session shell ID or depend on proposed/private chat APIs.
 
 ## Product boundary
 
@@ -24,11 +24,10 @@ user interaction. The VS Code product intentionally separates those concerns:
 
 - The **visible Kabibi terminal** is a shell, not a Kabibi AI chat.
 - **Copilot integration** is provided by extension-owned language model tools.
-  Those tools use an explicit, extension-owned tool shell.
-- A visible terminal and a tool shell never share a shell process, working
-  directory, environment, runner, or background-job table. Different visible
-  terminals and different tool shells are separate. Tool-shell routing uses
-  the explicit handle below; VS Code does not enforce chat-to-handle binding.
+  Each `exec` starts a one-shot shell; a completed invocation is discarded.
+- Visible terminals are independent persistent shells. A Copilot `exec` never
+  attaches to one; only a command ejected by `exec` remains available to
+  `term_read`, `term_input`, or `term_kill` by its returned job ID.
 
 The extension must not attach Copilot to a particular visible terminal or
 redirect terminal keystrokes to it.
@@ -70,8 +69,8 @@ In this mode:
 - Shell commands and the Ctrl+O file manager remain available.
 
 This restriction applies to the shell processes used by both the visible
-terminal and Copilot tool sessions. It does **not** disable the extension's
-separate Copilot-facing tools.
+terminal and individual Copilot `exec` invocations. It does **not** disable the
+extension's separate Copilot-facing tools.
 
 ## Copilot-facing tools
 
@@ -88,54 +87,57 @@ Tool input and output should remain compatible with Kabibi's existing tool
 definitions in [`ui/shell/tools_exec.go`](../ui/shell/tools_exec.go). Preserve
 the structured status fields and textual result/footer. In particular, an
 `exec` result must communicate its exit status, cwd, and background job ID when
-applicable. The extension adds a `shell_id` routing field around the Kabibi
-tool contract: the first `exec` may omit it and creates a tool shell; its result
-returns the new handle. Later `exec` calls and every `term_*` call must carry
-that handle. `term_*` calls also carry the existing shell-local job ID.
+applicable. `exec` has no shell/session ID input. Each call starts a fresh
+execution session with the extension's configured starting environment and
+working directory; changes to cwd, environment, or functions are not carried
+into the next `exec`. A normally completed invocation disposes its session. If
+it is ejected, the result returns an ID for that still-running execution; only
+`term_*` calls use that ID.
 
-### Tool-shell ownership and lifetime
+### One-shot execution and ejected-job lifetime
 
-The first `exec` without a `shell_id` creates a logical tool shell and returns
-an opaque `shell_id` in both structured and textual result content. Subsequent
-calls must pass that handle so they continue the same cwd, environment,
-functions, shell state, and managed-job table. A missing, unknown, or expired
-handle on `term_*` is an explicit tool error; it must never fall back to an
-extension-global shell or a visible terminal. A later `exec` without a handle
-starts a new isolated tool shell and reports that it did so.
+Every `exec` invocation is independent. A completed command leaves no shell
+state for a later invocation to resume. A command that exceeds its foreground
+timeout is the exception: its live execution is ejected and remains addressable
+through the returned job ID. `term_read`, `term_input`, and `term_kill` accept
+that ID; they do not accept or require a shell-session ID.
 
-VS Code does not provide a stable chat identity to bind to the handle. The
-Copilot conversation is expected to retain and pass its own handle from prior
-tool results. This provides explicit routing, not an API-enforced identity
-boundary: a caller that is given another shell's handle can address that
-shell. Never claim that VS Code itself guarantees chat-to-shell binding.
+The extension's job registry must route every returned ID to exactly one
+ejected execution, including when ejections come from separate or concurrent
+Copilot calls. IDs must not collide while their executions remain live. Existing `pid_id`
+values are local to an `ExecutionSession`, so the extension must allocate a
+unique tool-visible integer ID and map it to the originating execution session
+and its local `pid_id`. The `exec` result and footer expose the tool-visible ID;
+`term_*` inputs are translated back to the local ID. Unknown or expired IDs are
+explicit tool errors; they must never target another execution or a visible
+terminal.
 
-There is no reliable chat-end callback. A tool shell may outlive the chat that
-created it; treat it as abandoned rather than waiting for a session-disposal
-event. Reclaim inactive tool shells through a bounded, extension-owned idle
-lease, terminating their managed jobs on expiry. The lease duration is an
-implementation constant covered by tests, not a user-facing setting. Extension
-host deactivation terminates every remaining tool shell and job.
+An ejected execution may outlive the Copilot call that created it. Reclaim
+abandoned background executions through a bounded, extension-owned idle lease,
+terminating the execution on expiry. The lease duration is an implementation
+constant covered by tests, not a user-facing setting. Extension-host
+deactivation terminates every remaining ejected execution.
 
 ### Background ejection
 
-Ejection applies within one tool shell identified by `shell_id`. It never
-transfers a job between tool shells or into a visible terminal.
+Ejection applies only to the current `exec` invocation. The ejected execution
+keeps running with its original runner and state; it is not resumed by a later
+`exec` and is never transferred to a visible terminal.
 
 When an `exec` exceeds its foreground timeout:
 
 1. Kabibi ejects the still-running command into a managed background job.
 2. The command keeps running with its original runner and state.
-3. The foreground shell is available for the next `exec`, seeded with the
-   shell-visible state at the instant of ejection.
-4. Changes made later by the ejected job do not flow back into the foreground
-   shell.
-5. The tool result reports the `shell_id` and job ID and directs Copilot to
-   `term_read`, `term_input`, or `term_kill` with both IDs. A later `exec`
-   never reuses the job ID.
+3. The `exec` result reports the job ID and directs Copilot to `term_read`,
+   `term_input`, or `term_kill` with that ID.
+4. The one-shot shell is not reused by a later `exec`; state changes made by
+   the ejected execution do not flow into later invocations.
+5. Once the job exits, is killed, or expires, its execution state is disposed.
 
 The implementation must use Kabibi's existing eject behavior rather than
-reimplementing state copying or job ownership in JavaScript. Relevant behavior
-and coverage are in
+reimplementing state copying or job ownership in JavaScript. The extension
+owns only the routing map from its unique tool-visible ID to the originating
+`ExecutionSession` and local `pid_id`. Relevant behavior and coverage are in
 [`ui/shell/exec_session.go`](../ui/shell/exec_session.go) and
 [`ui/shell/exec_session_eject_test.go`](../ui/shell/exec_session_eject_test.go).
 
@@ -153,7 +155,7 @@ competing Kabibi-specific prompt or claim that confirmation is a sandbox.
 The invocation cancellation token is passed to the active tool operation. If
 the user cancels a foreground invocation, the active command is cancelled using
 Kabibi's cancellation path. Cancelling a `term_read` must not kill its job.
-Timeout is different: it ejects the command and returns a job handle rather than
+Timeout is different: it ejects the command and returns a job ID rather than
 cancelling it. Cancellation is per invocation, not a chat-session-end signal.
 
 Errors must be returned as errors to VS Code, not disguised as successful tool
@@ -190,9 +192,10 @@ other virtual filesystems remain available for paths outside the workspace.
 Multi-root folder names can collide; the mount mapping must disambiguate them
 deterministically rather than silently resolving the first match.
 
-Shell state isolation does not imply filesystem isolation: shell sessions can
-read and modify the same mounted workspace files. Each shell's cwd and
-environment remain independent.
+Shell state isolation does not imply filesystem isolation: visible terminals,
+one-shot `exec` invocations, and ejected jobs can all read and modify the same
+mounted workspace files. A completed `exec` does not carry its cwd or
+environment into another invocation.
 
 The browser host does not provide arbitrary OS process spawning. Its available
 commands are therefore determined by Kabibi's interpreter, built-ins, and the
@@ -213,24 +216,26 @@ Copilot tool surface and runtime selection.
 The extension is responsible for:
 
 1. Starting a shell host for each visible terminal instance.
-2. Creating a tool shell on the first `exec` and routing later calls by its
-   explicit `shell_id`.
+2. Starting a fresh shell for each `exec`, disposing it on normal completion,
+   and retaining only executions ejected into the background.
 3. Providing a private tool-server back-channel between the VS Code tools and
-   the corresponding Kabibi tool session. The channel must not expose a
-   machine-wide unauthenticated listener.
+   Kabibi, with an extension-owned registry routing `term_*` calls by the
+   returned ejected-job ID. The channel must not expose a machine-wide
+   unauthenticated listener.
 4. Passing the AI-disabled startup mode to every extension-launched Kabibi
    shell.
 5. Mapping tool confirmation and cancellation to VS Code's tool lifecycle.
 6. Disposing visible-terminal hosts when their terminals close; expiring
-   abandoned tool shells and their jobs through the bounded idle lease; and
-   disposing all remaining hosts on extension deactivation. Do not depend on a
-   Copilot chat-ended event.
+   abandoned ejected executions through the bounded idle lease; and disposing
+   all remaining hosts on extension deactivation. Do not depend on a Copilot
+   chat-ended event.
 
-The tool server should invoke the existing terminal tools against the
-`ExecutionSession` selected by `shell_id`; it should not create a new shell for
-every `exec` that carries a valid handle, or make the visible terminal the
-Copilot shell. The extension's routing envelope must not change Kabibi's
-underlying `exec`/`term_*` behavior.
+The tool server should invoke the existing terminal tools against a fresh
+one-shot execution session for each `exec`. It must retain an ejected session
+under its unique tool-visible job ID so `term_*` reaches that exact session and
+local `pid_id`. Dispose a normally completed invocation session. The extension
+must not attach Copilot to a visible terminal or reimplement Kabibi's underlying
+execution/ejection behavior.
 
 ## Packaging and Marketplace release
 
@@ -287,22 +292,23 @@ separate from building and validating the release artifact.
 
 ### Copilot tool behavior
 
-- A first `exec` creates a unique tool shell handle; later calls carrying that
-  handle preserve its state. A separate conversation's first call receives a
-  different handle.
-- Missing, unknown, and expired handles fail explicitly. No call falls back to
-  another tool shell or a visible terminal.
+- Each `exec` starts with fresh shell state and disposes that shell when the
+  command completes normally.
+- An ejected `exec` returns an ID that uniquely addresses its background
+  execution. `term_*` calls using that ID affect only that execution.
+- Missing, unknown, and expired job IDs fail explicitly. No call falls back to
+  another execution or a visible terminal.
 - `exec` returns its output, footer, exit status, and cwd.
 - A timed-out `exec` ejects, returns a job ID, and permits another `exec` in the
-  same tool shell when called with the same `shell_id`.
+  independent fresh shell.
 - The ejected job can be read, sent input where supported, and terminated only
-  through its returned `shell_id` and job ID.
-- Ejected-job state changes do not leak into the foreground shell.
+  through its returned job ID.
+- Ejected-job state changes do not leak into a later `exec`.
 - VS Code confirmation and cancellation use the native tool lifecycle without
   duplicate prompts or success-shaped error results. Tests account for
   remembered or auto-approved tool permissions.
-- Idle expiry terminates an abandoned tool shell and its jobs; extension
-  deactivation terminates all remaining shells.
+- Idle expiry terminates an abandoned ejected execution; extension deactivation
+  terminates all remaining executions and visible-terminal hosts.
 
 Run the extension's Node tests, the relevant Kabibi tests and documented
 Rusticated/custom-sysroot builds, the web-host smoke tests, and `vsce package`.
@@ -314,15 +320,16 @@ include a current stable release in the release gate.
 
 The tests target the **boundaries where this feature could accidentally become
 the wrong product**, not just individual functions. The highest-risk changes
-are: disabling Kabibi’s AI only in extension-launched shells, routing calls by
-explicit tool-shell handle, choosing the correct washmhost for each host, and
-packaging the actual assets the extension runs.
+are: disabling Kabibi’s AI only in extension-launched shells, isolating
+one-shot `exec` invocations while routing ejected jobs by ID, choosing the
+correct washmhost for each host, and packaging the actual assets the extension
+runs.
 
 ### Likely change hotspots
 
 1. **AI-disabled startup mode.** The setting will need to reach every shell entry path, then gate parse-error fallback, `ai …` handling, and slash-command dispatch without disturbing normal Kabibi startup. Likely touchpoints include `main.go`, `piped.go`, `shell_widget.go`, `ai_onboarding.go`, and `app_widget.go`. This is the area most at risk of scattered, incomplete gates.
 
-2. **Copilot tool routing and shell lifetime.** The extension needs to create a tool shell on first `exec`, return its opaque handle, and route each later `exec` and `term_*` call by that handle. This is explicit tool-session routing, not VS Code chat identity. The router must preserve behavior in `tools_exec.go` and `exec_session.go`, not recreate it in JavaScript.
+2. **Copilot tool execution and ejected-job routing.** Each `exec` gets a fresh shell that is discarded on normal completion. An ejected execution is retained under the ID returned by that `exec`, and only `term_*` uses that ID. Ensure IDs route to the correct job across concurrent calls without relying on VS Code chat identity. Preserve behavior in `tools_exec.go` and `exec_session.go`; do not recreate it in JavaScript.
 
 3. **Extension host bootstrap.** `extension.js` will need distinct browser and Desktop host paths, while preserving workspace mounting through `vfs.js`. The VS Code terminal provider remains the only terminal UI: its output goes to VS Code to render.
 
@@ -334,13 +341,13 @@ I’d make the test pyramid build from the shell outward:
 
 - **Go behavior tests:** Test AI-disabled and normal startup side by side. With AI disabled, malformed input and unknown commands must produce shell errors, `ai …` and `/model` must not invoke Kabibi’s AI harness, and Ctrl+O must still open the file manager. Existing shell AI and slash-command tests are good places to extend.
 
-- **Shell ejection tests:** Reuse the already substantial cases in `exec_session_eject_test.go`. Add coverage at the tool contract boundary so an `exec` timeout returns the correct job ID and footer, a later `exec` succeeds in the same Copilot shell, and `term_read`/`term_input`/`term_kill` affect only the addressed job. Use gates and channels for timing-sensitive cases rather than relying on sleeps.
+- **Shell ejection tests:** Reuse the already substantial cases in `exec_session_eject_test.go`. Add coverage at the tool contract boundary so an `exec` timeout returns the correct job ID and footer, a later independent `exec` can run while the ejected job remains active, and `term_read`/`term_input`/`term_kill` affect only the addressed job. Use gates and channels for timing-sensitive cases rather than relying on sleeps.
 
-- **Extension adapter tests:** Test that the declared tool names and input schemas match the handlers, that confirmation messages include the intended command or shell/job handle, that approval invokes the handler, and that rejection or cancellation does not execute or falsely succeed. Exercise two conversations and a visible terminal concurrently: each first `exec` must receive a distinct handle, and calls using each handle must retain independent cwd, environment, runner, and job IDs. Test missing, unknown, expired, and deliberately mismatched handles. The API does not provide a chat identity, so these tests validate handle routing, not an unforgeable binding between a VS Code conversation and a shell.
+- **Extension adapter tests:** Test that `exec` has no shell/session ID input and that `term_*` accepts the returned ejected-job ID. Verify normal completion disposes the invocation shell and does not preserve cwd/environment; concurrent ejections receive unambiguous IDs; and missing, unknown, expired, or completed IDs fail explicitly. Test that confirmation rejection does not launch a command and cancellation does not create an ejected job.
 
-- **Real host acceptance tests:** Extend the existing `vfs.test.js` style, but run the **built extension assets**, not only source files substituted by the test harness. In the browser host, verify shell behavior, workspace reads/writes, resize/input, and the expected lack of arbitrary process spawning. On Desktop and remote Node hosts, verify the Node host can spawn an external command where the workspace lives while Kabibi’s interpreter still handles normal shell syntax. Include duplicate-named multi-root folders, two visible terminals, and both tool-shell handles. Verify PTY input with the packaged native addon on each supported OS/architecture.
+- **Real host acceptance tests:** Extend the existing `vfs.test.js` style, but run the **built extension assets**, not only source files substituted by the test harness. In the browser host, verify shell behavior, workspace reads/writes, resize/input, and the expected lack of arbitrary process spawning. On Desktop and remote Node hosts, verify the Node host can spawn an external command where the workspace lives while Kabibi’s interpreter still handles normal shell syntax. Include duplicate-named multi-root folders, two visible terminals, and concurrent ejected jobs. Verify PTY input with the packaged native addon on each supported OS/architecture.
 
-- **VS Code/Copilot acceptance:** Run a real VS Code extension-host smoke test for the terminal profile and tool registration in Agent mode on VS Code 1.99 or newer. Then do a release-gate Copilot check: under default approval settings, confirmation can be accepted or rejected; cancellation interrupts a foreground command; timeout ejects rather than cancels; and a later call using the returned `shell_id` can continue and manage the returned job. Remembered approvals may suppress later prompts. A real Copilot interaction should be a release check, not a CI dependency on account credentials or a live model.
+- **VS Code/Copilot acceptance:** Run a real VS Code extension-host smoke test for the terminal profile and tool registration in Agent mode on VS Code 1.99 or newer. Then do a release-gate Copilot check: under default approval settings, confirmation can be accepted or rejected; cancellation interrupts a foreground command; timeout ejects rather than cancels; and `term_*` can manage the ejected job using the returned ID. Remembered approvals may suppress later prompts. A real Copilot interaction should be a release check, not a CI dependency on account credentials or a live model.
 
 - **VSIX validation:** Build from a clean staging state, package it, and inspect the VSIX contents. Verify the PNG generated from the SVG and all selected runtime assets are present; verify that no Kabibi browser terminal renderer or WebGL UI has slipped into the package. Run Marketplace validation for categories and metadata before publishing.
 
@@ -488,7 +495,7 @@ still access the shared workspace files.
 owner values. The screenshot should show the observed independent state, not
 just two open terminal tabs.
 
-#### Copilot tools and tool-shell behavior
+#### Copilot tools and ejected-job behavior
 
 These tests require Copilot Chat in agent mode with the extension's tools
 available on VS Code 1.99 or newer. Use a disposable workspace and harmless
@@ -531,73 +538,65 @@ the chat response.
 rejection, capture the resulting chat state and shell check showing the marker
 is absent; after approval, capture the created file and verified contents.
 
-**COP-03 — Explicit tool-shell handles preserve state**
+**COP-03 — Completed exec invocations do not preserve state**
 
-1. In conversation A, invoke `exec` without `shell_id` and set
-   `/workspace/alpha` and `KABIBI_COPILOT_OWNER=alpha`.
-2. Record the returned `shell_id`; in a later call from A, pass it and run
-   `pwd` and print the variable.
-3. In a separate conversation B, invoke `exec` without a handle, set a
-   different cwd and value, and record its returned handle.
-4. Continue B with its handle, then recheck A with A's handle.
-5. Run the checks in a visible Kabibi terminal too.
+1. In conversation A, invoke `exec` with
+   `cd /workspace/alpha && export KABIBI_COPILOT_OWNER=alpha && pwd && echo "$KABIBI_COPILOT_OWNER"`.
+2. After that command completes, invoke a new `exec` from A with `pwd` and
+   `echo "$KABIBI_COPILOT_OWNER"`.
+3. In a separate conversation B, run a one-shot command that changes cwd and
+   sets a different value, then run a second `exec`.
+4. Run the same checks in a visible Kabibi terminal, whose shell remains
+   interactive and persistent.
 
-**Pass:** A and B receive different handles; later calls with each handle retain
-only that shell's cwd and variable. Calls without a handle create a new shell
-instead of silently reusing one. The visible terminal remains independent.
-This validates explicit handle routing, not a VS Code-enforced binding between
-a chat and its handle.
+**Pass:** each completed `exec` starts with the configured initial cwd and
+environment; state changed by a completed invocation is not carried into the
+next invocation. The visible terminal retains its own interactive state and
+does not share it with either Copilot call.
 
-**Screenshot:** capture both returned handles and the verified outputs for A, B,
-and the visible terminal with their distinct chat contexts apparent.
+**Screenshot:** capture the in-command state changes, the fresh state in the
+next `exec`, and the separately retained visible-terminal state.
 
-**COP-04 — Ejection preserves foreground state and isolates the job**
+**COP-04 — Ejection preserves only the background execution**
 
 Use a unique release-file name for each run. In conversation A, call `exec`
-with its `shell_id` and `timeout_sec: 1`. The fixture must wait using a
-yield-capable async shell operation; do not use a pure busy-spin loop, which can
-starve the browser host.
+with `timeout_sec: 1`. The fixture must wait using a yield-capable async shell
+operation; do not use a pure busy-spin loop, which can starve the browser host.
 
 The fixture should set `KABIBI_EJECT_VISIBLE=before`, wait for a unique release
 signal, then set `KABIBI_EJECT_BACKGROUND=after`, change cwd, and print
 `KABIBI_BACKGROUND_FINISHED`.
 
 1. Confirm `exec` returns with `still_running: true`, its job ID, current
-   output, `shell_id`, and a footer directing Copilot to the corresponding
-   `term_*` tools with both IDs.
-2. Before releasing the job, call `exec` again with A's `shell_id`. Confirm it
-   runs promptly and sees `/workspace/alpha` and
+   output, and a footer directing Copilot to the corresponding `term_*` tools
+   with that ID.
+2. Before releasing the job, call a new `exec`. Confirm it runs promptly from
+   the configured initial cwd and does not see
    `KABIBI_EJECT_VISIBLE=before`.
 3. Have that foreground `exec` write the unique release file.
-4. Use `term_read` with A's `shell_id` and the returned job ID until the job
-   reports exit and `KABIBI_BACKGROUND_FINISHED`.
-5. In another `exec` using A's handle, confirm cwd remains `/workspace/alpha`,
-   `KABIBI_EJECT_VISIBLE` is still `before`, and
-   `KABIBI_EJECT_BACKGROUND` is absent.
-6. In B and in a visible terminal, confirm neither A's handle nor its job ID
-   was returned or implicitly imported.
+4. Use `term_read` with the returned job ID until the job reports exit and
+   `KABIBI_BACKGROUND_FINISHED`.
+5. Run another fresh `exec`; confirm it still has its configured initial cwd
+   and does not see either variable set by the ejected execution.
 
-**Pass:** timeout ejects instead of cancelling; A's next `exec` works while the
-job runs; the job is controllable only with A's `shell_id` and returned job ID;
-state after ejection does not leak from the job or into another shell. Confirm
-that the browser host remains responsive while the fixture waits.
+**Pass:** timeout ejects instead of cancelling; a later independent `exec` runs
+while the job runs; the ejected execution is controllable only by its returned
+job ID; its state is not imported by later invocations. Confirm that the
+browser host remains responsive while the fixture waits.
 
-**Screenshots:** capture the `exec` result with the returned ID; then capture
-the subsequent foreground command and the final `term_read` output/status. A
-screenshot of only the timeout notice is insufficient.
+**Screenshots:** capture the ejected `exec` result with its returned ID, the
+independent later `exec`, and the final `term_read` output/status. A screenshot
+of only the timeout notice is insufficient.
 
 **COP-05 — Kill an ejected job**
 
-1. In A, start a yielding, otherwise nonterminating fixture with `timeout_sec: 1`
-   and its `shell_id`.
-2. Record the returned job ID and invoke `term_kill` with both IDs.
-3. Use `term_read` with both IDs to verify the job is exited.
-4. Run a new `exec` with A's handle and confirm the foreground shell is usable.
-5. Confirm another conversation using its own handle and the visible terminal
-   remain unaffected.
+1. Start a yielding, otherwise nonterminating fixture with `timeout_sec: 1`.
+2. Record the returned job ID and invoke `term_kill` with that ID.
+3. Use `term_read` with that ID to verify the job is exited.
+4. Run a new `exec` and confirm it starts with fresh shell state.
 
-**Pass:** the addressed job stops; the tool reports its final status; the
-foreground shell continues; no unrelated job is killed.
+**Pass:** the addressed job stops and the tool reports its final status; no
+unrelated job is killed.
 
 **Screenshot:** capture the kill result and the subsequent read showing the
 same job ID as exited, followed by a successful new `exec`.
@@ -608,9 +607,9 @@ This case uses the Desktop Node washmhost and a known interactive process
 fixture that echoes received input.
 
 1. Start the fixture through `exec` with a short timeout so it ejects; record
-   the returned `shell_id` and job ID.
-2. Send a unique line with `term_input` using both IDs.
-3. Read the output using `term_read` with both IDs.
+   the returned job ID.
+2. Send a unique line with `term_input` using that ID.
+3. Read the output using `term_read` with that ID.
 
 **Pass:** only the addressed process receives the input and emits the unique
 echo. On the Web host, where arbitrary OS process spawning is unavailable,
@@ -626,12 +625,12 @@ echo in the subsequent `term_read` result.
    not to eject during the test.
 2. Cancel it through VS Code's normal tool cancellation UI.
 3. Confirm the invocation reports cancellation rather than a successful
-   background handle.
-4. Run another `exec` with the same `shell_id` and confirm it is usable.
+   background job ID.
+4. Run another `exec` and confirm it starts with fresh shell state.
 5. Confirm no command continues silently in the background.
 
 **Pass:** user cancellation stops the foreground operation; it is not reported
-as timeout ejection, and no unrelated session is affected.
+as timeout ejection, and no unrelated execution is affected.
 
 **Screenshot:** capture the cancelled invocation's final state and the
 successful follow-up tool call. Verify process/session state independently.
@@ -654,23 +653,22 @@ retained Kabibi's shell-first execution behavior.
 **Screenshot:** capture the completed external command with both output markers
 and its reported exit status visible.
 
-**DESK-02 — Re-run terminal and tool-shell isolation**
+**DESK-02 — Re-run terminal and ejected-job isolation**
 
 Repeat WEB-07 and COP-03 on Desktop. This ensures selecting the Node host does
 not accidentally introduce shared process state between terminals and
-independently addressed tool shells.
+completed one-shot `exec` invocations.
 
 #### Close-out and evidence
 
 1. Close a visible terminal while a long-running foreground command is active.
    Confirm its host and command are disposed and a newly opened terminal starts
    with a fresh cwd and environment while workspace files remain.
-2. In a test build with an accelerated idle lease, leave a tool shell idle and
-   verify that expiry invalidates its handle and terminates its jobs. Verify
-   that a new conversation's first `exec` creates a different handle. The
-   extension must not claim to observe the chat ending.
-3. Deactivate the extension host with tool shells and jobs still present;
-   confirm all are terminated.
+2. In a test build with an accelerated idle lease, leave an ejected execution
+   idle and verify that expiry terminates it and its ID no longer targets a
+   live job.
+3. Deactivate the extension host with ejected executions still present; confirm
+   all are terminated.
 4. Repeat any failed case from a fresh host and record whether it is
    reproducible.
 5. Save screenshots under the matching test IDs above. Each image must show the
