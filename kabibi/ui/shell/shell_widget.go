@@ -2106,6 +2106,9 @@ func (s *Shell) submitAndExecuteAsync(animate bool) {
 					s.runAIFallback(ctx, blockIdx, rawInput, aiRunner, execSess, startedAt, appendBlockText)
 					return
 				}
+				if errors.Is(err, ErrShellBusy) {
+					appendBlockText(err.Error() + "\n")
+				}
 				s.finishBlockWithRecord(blockIdx, rec.ID, BlockCommand, StatusError, rec.ExitCode, startedAt)
 				return
 			}
