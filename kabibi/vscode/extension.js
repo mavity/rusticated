@@ -745,7 +745,10 @@
   }
 
   function registerLanguageModelTools(vscode, context) {
-    if (!vscode.lm || typeof vscode.lm.registerLanguageModelTool !== 'function') {
+    const registerTool = vscode.lm && (
+      vscode.lm.registerTool || vscode.lm.registerLanguageModelTool
+    );
+    if (typeof registerTool !== 'function') {
       throw new Error('Kabibi requires the VS Code Language Model Tools API');
     }
 
@@ -776,7 +779,7 @@
           token
         )
       };
-      context.subscriptions.push(vscode.lm.registerLanguageModelTool(definition.name, tool));
+      context.subscriptions.push(registerTool.call(vscode.lm, definition.name, tool));
     }
   }
 
