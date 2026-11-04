@@ -203,8 +203,11 @@ func TestGenerateGoOverlayIncludesABIUserHomeTempOverride(t *testing.T) {
 	if !strings.Contains(patchedText, "func UserHomeDir()") ||
 		!strings.Contains(patchedText, "syscall.GetPlatformInfo()") ||
 		!strings.Contains(patchedText, "func TempDir() string {\n\tpi := syscall.GetPlatformInfo()") ||
-		!strings.Contains(patchedText, "return pi.TempDir") {
-		t.Fatalf("patched os/file.go missing ABI-driven UserHomeDir or TempDir override: %s", patchedText)
+		!strings.Contains(patchedText, "return pi.TempDir") ||
+		!strings.Contains(patchedText, "func UserCacheDir() (string, error) {\n\tpi := syscall.GetPlatformInfo()") ||
+		!strings.Contains(patchedText, "separator := pi.PathSeparator") ||
+		!strings.Contains(patchedText, "return join(\".cache\"), nil") {
+		t.Fatalf("patched os/file.go missing ABI-driven UserHomeDir, TempDir, or UserCacheDir override: %s", patchedText)
 	}
 
 	data, err := os.ReadFile(filepath.Join(ws, "target", "overlay.json"))
