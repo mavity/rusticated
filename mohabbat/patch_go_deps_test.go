@@ -2,6 +2,7 @@ package mohabbat
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -248,6 +249,96 @@ func TestPatchMvdanEject(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPatchMvdanEjectCompilesAgainstPinnedSource(t *testing.T) {
+	repoRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	kabibiDir := filepath.Join(repoRoot, "kabibi")
+	versionCmd := exec.Command("go", "list", "-m", "-f", "{{.Version}}", "mvdan.cc/sh/v3")
+	versionCmd.Dir = kabibiDir
+	versionOutput, err := versionCmd.Output()
+	if err != nil {
+		t.Fatalf("resolve pinned mvdan version: %v", err)
+	}
+	version := strings.TrimSpace(string(versionOutput))
+	cacheCmd := exec.Command("go", "env", "GOMODCACHE")
+	cacheOutput, err := cacheCmd.Output()
+	if err != nil {
+		t.Fatalf("resolve Go module cache: %v", err)
+	}
+	sourceDir := filepath.Join(strings.TrimSpace(string(cacheOutput)), "mvdan.cc", "sh", "v3@"+version)
+	if _, err := os.Stat(sourceDir); err != nil {
+		t.Fatalf("pinned mvdan source is not present in the module cache at %q: %v", sourceDir, err)
+	}
+
+	tempModule := t.TempDir()
+	if err := copyModuleTree(sourceDir, tempModule); err != nil {
+		t.Fatalf("copy pinned mvdan source: %v", err)
+	}
+	files := make(map[string][]byte, 3)
+	for _, path := range []string{"interp/api.go", "interp/runner.go"} {
+		raw, err := os.ReadFile(filepath.Join(tempModule, filepath.FromSlash(path)))
+		if err != nil {
+			t.Fatalf("read pinned source %s: %v", path, err)
+		}
+		files[path] = raw
+	}
+	if err := patchMvdanEjectInMemory(files); err != nil {
+		t.Fatalf("patch pinned mvdan source: %v", err)
+	}
+	for path, content := range files {
+		target := filepath.Join(tempModule, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatalf("create patched source directory for %s: %v", path, err)
+		}
+		if err := os.WriteFile(target, content, 0o644); err != nil {
+			t.Fatalf("write patched source %s: %v", path, err)
+		}
+	}
+
+	build := exec.Command("go", "test", "-run=^$", "./interp")
+	build.Dir = tempModule
+	build.Env = append(os.Environ(), "GOWORK=off")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("compile generated mvdan interp package: %v\n%s", err, output)
+	}
+}
+
+func copyModuleTree(source, target string) error {
+	return filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		destination := filepath.Join(target, relative)
+		if entry.IsDir() {
+			if relative == "." {
+				return nil
+			}
+			return os.MkdirAll(destination, 0o755)
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(destination, content, info.Mode().Perm()|0o200)
+	})
 }
 
 func TestPatchMvdanUmaskBuiltin(t *testing.T) {

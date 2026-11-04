@@ -51,7 +51,7 @@ func registerShellContextTools(tools map[string]ai.Tool, execSess *ExecutionSess
 			feedback(lead + fmt.Sprintf("%d command(s)", len(records)))
 		}
 		return map[string]any{
-			"cwd":      execSess.Dir(),
+			"cwd":      shellInvocationDir(ctx, execSess),
 			"commands": records,
 		}, nil
 	})
@@ -126,7 +126,7 @@ func registerShellContextTools(tools map[string]ai.Tool, execSess *ExecutionSess
 		if feedback != nil {
 			feedback(lead)
 		}
-		envMap := execSess.EnvMap()
+		envMap := shellInvocationEnvMap(ctx, execSess)
 		selectedEnv := map[string]string{}
 		for _, k := range in.EnvKeys {
 			if v, ok := lookupEnvValue(envMap, k); ok {
@@ -153,7 +153,7 @@ func registerShellContextTools(tools map[string]ai.Tool, execSess *ExecutionSess
 			feedback(lead + "ok")
 		}
 		return map[string]any{
-			"cwd":          execSess.Dir(),
+			"cwd":          shellInvocationDir(ctx, execSess),
 			"os":           runtime.GOOS,
 			"env":          selectedEnv,
 			"last_command": lastCmd,

@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/mavity/rusticated/kabibi/gitcore"
-	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
 )
 
@@ -215,18 +214,8 @@ func gitInvocationHasAlternateRepo(ctx context.Context, hc interp.HandlerContext
 	if invocation.gitDir != "" || invocation.workTree != "" {
 		return true
 	}
-	env := map[string]string{}
-	if execSess, _ := execSessionFromContext(ctx); execSess != nil {
-		env = execSess.EnvMap()
-	}
-	if hc.Env != nil {
-		hc.Env.Each(func(name string, value expand.Variable) bool {
-			if value.IsSet() {
-				env[name] = value.String()
-			}
-			return true
-		})
-	}
+	execSess, _ := execSessionFromContext(ctx)
+	env := shellInvocationEnvMap(withShellInvocationState(ctx, hc), execSess)
 	return env["GIT_DIR"] != "" || env["GIT_WORK_TREE"] != ""
 }
 
@@ -348,15 +337,7 @@ func formatStreamedCommit(commit gitcore.CommitSummary, oneline bool) string {
 }
 
 func gitPagerEnabled(execSess *ExecutionSession, hc interp.HandlerContext, invocation gitInvocation, repo *gitcore.Repository, command string) (bool, error) {
-	env := execSess.EnvMap()
-	if hc.Env != nil {
-		hc.Env.Each(func(name string, value expand.Variable) bool {
-			if value.IsSet() {
-				env[name] = value.String()
-			}
-			return true
-		})
-	}
+	env := shellInvocationEnvMap(withShellInvocationState(context.Background(), hc), execSess)
 	if pager, ok := env["GIT_PAGER"]; ok {
 		return !isPassThroughPager(pager), nil
 	}

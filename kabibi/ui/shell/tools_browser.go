@@ -176,7 +176,7 @@ func registerBrowserTools(tools map[string]ai.Tool, execSess *ExecutionSession) 
 		if strings.TrimSpace(in.SavePath) == "" {
 			return nil, errors.New("save_path is required")
 		}
-		resolved := resolveShellPath(execSess.Dir(), in.SavePath)
+		resolved := resolveShellPath(shellInvocationDir(ctx, execSess), in.SavePath)
 		lead := ai.ToolLead(BrowserScreenshotInput{}, fmt.Sprintf("[%s] %s", in.Nickname, in.SavePath), 24)
 		if feedback != nil {
 			feedback(lead)

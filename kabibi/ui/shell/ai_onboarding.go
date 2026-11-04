@@ -316,6 +316,7 @@ func aiBuiltinMiddleware(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 
 func runAIBuiltin(ctx context.Context, args []string) error {
 	hc := interp.HandlerCtx(ctx)
+	ctx = withShellInvocationState(ctx, hc)
 	execSess, _ := execSessionFromContext(ctx)
 	cmdTerm := commandTerminalFromContext(ctx)
 	isTTY := false
@@ -429,8 +430,39 @@ func runAIBuiltinTool(
 		defer stopEscapeInput()
 	}
 
+	needsEmbedder := false
+	switch normalizeAIToolName(name) {
+	case "list_files":
+		needsEmbedder = listFilesNeedsEmbedder(listFilesInput)
+	case "read_file":
+		rawArguments, parseErr := parseAIToolArguments(BuildKabibiTools(execSess)["read_file"], args)
+		if parseErr != nil {
+			fmt.Fprintf(stderr, "ai read_file: %v\n", parseErr)
+			return interp.ExitStatus(1)
+		}
+		var input ReadFileInput
+		if parseErr := json.Unmarshal(rawArguments, &input); parseErr != nil {
+			fmt.Fprintf(stderr, "ai read_file: decode arguments: %v\n", parseErr)
+			return interp.ExitStatus(1)
+		}
+		needsEmbedder = strings.TrimSpace(input.Search) != ""
+	case "git_inspect":
+		rawArguments, parseErr := parseAIToolArguments(BuildKabibiTools(execSess)["git_inspect"], args)
+		if parseErr != nil {
+			fmt.Fprintf(stderr, "ai git_inspect: %v\n", parseErr)
+			return interp.ExitStatus(1)
+		}
+		var input GitInspectInput
+		if parseErr := json.Unmarshal(rawArguments, &input); parseErr != nil {
+			fmt.Fprintf(stderr, "ai git_inspect: decode arguments: %v\n", parseErr)
+			return interp.ExitStatus(1)
+		}
+		needsEmbedder = strings.EqualFold(strings.TrimSpace(input.Action), "log") &&
+			strings.TrimSpace(input.Search) != ""
+	}
+
 	var embedder ai.PartEmbedder
-	if !isListFiles || listFilesNeedsEmbedder(listFilesInput) {
+	if needsEmbedder {
 		setup := func() error {
 			runner := NewLazyAIRunner(execSess)
 			defer runner.Close()
@@ -550,7 +582,7 @@ func executeInteractiveListFilesInput(ctx context.Context, execSess *ExecutionSe
 		options.QuoteLimit = -1
 	}
 	options.LiveQuotes = options.QuoteLimit > 0
-	iter := filelist.NewSearchIterator(ctx, execSess.Dir(), options)
+	iter := filelist.NewSearchIterator(ctx, shellInvocationDir(ctx, execSess), options)
 	defer iter.Close()
 	output := newListFilesProgressOutput(stdout, width, listFilesProgressOutputRows(availableHeight))
 	defer func() {

@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
 )
 
@@ -93,6 +96,49 @@ func TestStreamTTYReportsEffectiveStreamsIndependently(t *testing.T) {
 	})
 	if status != (StreamTTYStatus{Stdout: true, Stderr: true}) {
 		t.Fatalf("piped stdin status = %+v", status)
+	}
+}
+
+func TestShellInvocationStateMergesSessionAndHandlerEnvironment(t *testing.T) {
+	root := t.TempDir()
+	jobDir := filepath.Join(root, "background")
+	if err := os.Mkdir(jobDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	es, err := NewExecutionSession(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer es.Close()
+	if _, err := es.RunCommand(
+		context.Background(),
+		"export KABIBI_SESSION_ONLY=available; export KABIBI_SHARED=foreground",
+		nil,
+		SourceUserShell,
+		nil,
+	); err != nil {
+		t.Fatalf("set session environment: %v", err)
+	}
+
+	ctx := withShellInvocationState(context.Background(), interp.HandlerContext{
+		Dir: jobDir,
+		Env: expand.ListEnviron(
+			"KABIBI_BACKGROUND_ONLY=background",
+			"KABIBI_SHARED=background",
+		),
+	})
+	if got := shellInvocationDir(ctx, es); filepath.Clean(got) != filepath.Clean(jobDir) {
+		t.Fatalf("invocation cwd = %q, want %q", got, jobDir)
+	}
+	env := shellInvocationEnvMap(ctx, es)
+	for name, want := range map[string]string{
+		"KABIBI_SESSION_ONLY":    "available",
+		"KABIBI_BACKGROUND_ONLY": "background",
+		"KABIBI_SHARED":          "background",
+	} {
+		if got := env[name]; got != want {
+			t.Errorf("invocation environment %s = %q, want %q", name, got, want)
+		}
 	}
 }
 

@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	git "github.com/go-git/go-git/v5"
+	"github.com/mavity/rusticated/kabibi/gitcore"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
@@ -311,6 +313,33 @@ func TestExecuteAIToolCommandEjectsIntoIndependentShell(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := os.WriteFile(filepath.Join(dirA, "foreground-only.txt"), []byte("foreground\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirB, "background-only.txt"), []byte("background\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRepo, err := git.PlainInit(dirB, false)
+	if err != nil {
+		t.Fatalf("initialize background repository: %v", err)
+	}
+	coreRepo, err := gitcore.Open(dirB)
+	if err != nil {
+		t.Fatalf("open background repository: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dirB, "tracked.txt"), []byte("initial\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := coreRepo.Stage([]string{"tracked.txt"}, false); err != nil {
+		t.Fatalf("stage initial repository file: %v", err)
+	}
+	if _, err := coreRepo.Commit("initial", false, false, map[string]string{
+		"GIT_AUTHOR_NAME": "Initial Author", "GIT_AUTHOR_EMAIL": "initial@example.test",
+		"GIT_COMMITTER_NAME": "Initial Author", "GIT_COMMITTER_EMAIL": "initial@example.test",
+	}); err != nil {
+		t.Fatalf("create initial background commit: %v", err)
+	}
+	startShellMockCDP(t)
 	readyPath := filepath.Join(root, "ready")
 	releasePath := filepath.Join(root, "release")
 	defer func() { _ = os.WriteFile(releasePath, []byte("release"), 0o600) }()
@@ -323,6 +352,16 @@ func TestExecuteAIToolCommandEjectsIntoIndependentShell(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer es.Close()
+	if _, err := es.RunCommand(
+		context.Background(),
+		"export GIT_AUTHOR_NAME='Foreground Author'; export GIT_AUTHOR_EMAIL=foreground@example.test; "+
+			"export GIT_COMMITTER_NAME='Foreground Author'; export GIT_COMMITTER_EMAIL=foreground@example.test",
+		nil,
+		SourceUserShell,
+		nil,
+	); err != nil {
+		t.Fatalf("set foreground Git identity: %v", err)
+	}
 	sink := &ejectTestSink{
 		started:  make(chan struct{}),
 		chunks:   make(chan string, 16),
@@ -335,7 +374,12 @@ func TestExecuteAIToolCommandEjectsIntoIndependentShell(t *testing.T) {
 		"job() { X=tmp KABIBI_EJECT_HELPER=1 KABIBI_EJECT_READY=" + strconv.Quote(readyPath) +
 			" KABIBI_EJECT_RELEASE=" + strconv.Quote(releasePath) +
 			" " + strconv.Quote(exe) + " -test.run=^TestManagedEjectHelperProcess$; cd " + strconv.Quote(dirB) +
-			"; export Z=1; echo job:$PWD:X=$X:Z=$Z; }",
+			"; export Z=1; export GIT_AUTHOR_NAME='Background Author'; export GIT_AUTHOR_EMAIL=background@example.test; " +
+			"export GIT_COMMITTER_NAME='Background Author'; export GIT_COMMITTER_EMAIL=background@example.test; " +
+			"echo job:$PWD:X=$X:Z=$Z; ai list_files --query '*' --max-results 20; " +
+			"ai git_inspect --action status; ai git_mutate --action stage --paths background-only.txt; " +
+			"ai git_mutate --action commit --message 'background ejection commit'; " +
+			"ai browser_screenshot --nickname main --save-path background.png; }",
 		"job",
 	}, "; ")
 	type execResult struct {
@@ -409,6 +453,32 @@ func TestExecuteAIToolCommandEjectsIntoIndependentShell(t *testing.T) {
 	}
 	if !strings.Contains(strings.ReplaceAll(output, `\`, "/"), "job:"+filepath.ToSlash(dirB)+":X=:Z=1") {
 		t.Fatalf("background continuation did not retain its own state: %q", output)
+	}
+	normalizedOutput := strings.ReplaceAll(output, `\`, "/")
+	if !strings.Contains(normalizedOutput, "background-only.txt") ||
+		strings.Contains(normalizedOutput, "foreground-only.txt") {
+		t.Fatalf("registered AI list_files result did not use only the ejected job cwd: %q", output)
+	}
+	if !strings.Contains(normalizedOutput, filepath.ToSlash(dirB)) {
+		t.Fatalf("registered AI git_inspect result did not report the ejected repository root %q: %q", dirB, output)
+	}
+	if _, err := os.Stat(filepath.Join(dirB, "background.png")); err != nil {
+		t.Fatalf("registered AI browser_screenshot did not save under the ejected job cwd: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dirA, "background.png")); !os.IsNotExist(err) {
+		t.Fatalf("registered AI browser_screenshot unexpectedly wrote to the foreground cwd: err=%v", err)
+	}
+	head, err := gitRepo.Head()
+	if err != nil {
+		t.Fatalf("read background repository HEAD: %v", err)
+	}
+	commit, err := gitRepo.CommitObject(head.Hash())
+	if err != nil {
+		t.Fatalf("read background repository commit: %v", err)
+	}
+	if commit.Author.Name != "Background Author" || commit.Author.Email != "background@example.test" ||
+		commit.Message != "background ejection commit" {
+		t.Fatalf("ejected Git commit identity/message = %#v / %q, want background identity", commit.Author, commit.Message)
 	}
 	rec, err = es.RunCommand(context.Background(), `echo "$PWD|${X-unset}|${Z-unset}"`, nil, SourceUserShell, nil)
 	if err != nil {
@@ -765,7 +835,7 @@ func TestDirectPTYAdmissionRemainsUntilEjectOrExit(t *testing.T) {
 		err     error
 	}, 1)
 	go func() {
-		_, id, running, _, err := es.ExecuteAIToolCommand(context.Background(), command, 2, false)
+		_, id, running, _, err := es.ExecuteAIToolCommand(context.Background(), command, 5, false)
 		resultCh <- struct {
 			id      int
 			running bool
@@ -785,6 +855,10 @@ func TestDirectPTYAdmissionRemainsUntilEjectOrExit(t *testing.T) {
 			t.Fatal("direct command did not start")
 		case <-time.After(10 * time.Millisecond):
 		}
+	}
+
+	if _, err := es.RunCommand(context.Background(), "echo must-be-busy", nil, SourceUserShell, nil); !errors.Is(err, ErrShellBusy) {
+		t.Fatalf("foreground command while direct PTY is active: got %v, want ErrShellBusy", err)
 	}
 
 	result := <-resultCh
@@ -809,6 +883,164 @@ func TestDirectPTYAdmissionRemainsUntilEjectOrExit(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		_ = job.Kill("SIGKILL")
 		t.Fatal("direct PTY job did not finish")
+	}
+}
+
+func TestTimeoutWaitsForFinalStatusAfterRunAdmissionEnds(t *testing.T) {
+	es, err := NewExecutionSession(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer es.Close()
+
+	runEnded := make(chan struct{})
+	timeoutSelected := make(chan struct{})
+	releaseFinish := make(chan struct{})
+	defer func() {
+		select {
+		case <-releaseFinish:
+		default:
+			close(releaseFinish)
+		}
+	}()
+	es.runHooks = &managedRunHooks{
+		afterRunEnd: func(*ManagedPTY) {
+			close(runEnded)
+			<-releaseFinish
+		},
+		beforeTimeoutEject: func(*ManagedPTY) {
+			close(timeoutSelected)
+		},
+	}
+
+	type result struct {
+		formatted string
+		running   bool
+		code      int
+		err       error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		formatted, _, running, code, err := es.ExecuteAIToolCommand(context.Background(), "echo completed", 1, false)
+		resultCh <- result{formatted: formatted, running: running, code: code, err: err}
+	}()
+
+	select {
+	case <-runEnded:
+	case <-time.After(5 * time.Second):
+		t.Fatal("interpreter did not reach the post-admission completion gate")
+	}
+	select {
+	case <-timeoutSelected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout path did not start while completion was gated")
+	}
+	select {
+	case got := <-resultCh:
+		t.Fatalf("timeout returned before markExited completed: %+v", got)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(releaseFinish)
+	got := <-resultCh
+	if got.err != nil {
+		t.Fatalf("ExecuteAIToolCommand: %v", got.err)
+	}
+	if got.running || got.code != 0 || !strings.Contains(got.formatted, "[exit: 0") {
+		t.Fatalf("completion/timeout result = %+v, want completed exit status", got)
+	}
+}
+
+func TestCompletionWinsAfterTimeoutSelectsBeforeEject(t *testing.T) {
+	skipNativeProcessEjectTest(t)
+	root := t.TempDir()
+	readyPath := filepath.Join(root, "race-ready")
+	releasePath := filepath.Join(root, "race-release")
+	defer func() { _ = os.WriteFile(releasePath, []byte("release"), 0o600) }()
+	t.Setenv("KABIBI_EJECT_HELPER", "1")
+	t.Setenv("KABIBI_EJECT_READY", readyPath)
+	t.Setenv("KABIBI_EJECT_RELEASE", releasePath)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	es, err := NewExecutionSession(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer es.Close()
+
+	timeoutJob := make(chan *ManagedPTY, 1)
+	resumeTimeout := make(chan struct{})
+	defer func() {
+		select {
+		case <-resumeTimeout:
+		default:
+			close(resumeTimeout)
+		}
+	}()
+	es.runHooks = &managedRunHooks{
+		beforeTimeoutEject: func(job *ManagedPTY) {
+			timeoutJob <- job
+			<-resumeTimeout
+		},
+	}
+
+	type result struct {
+		formatted string
+		running   bool
+		code      int
+		err       error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		formatted, _, running, code, err := es.ExecuteAIToolCommand(
+			context.Background(),
+			strconv.Quote(exe)+" -test.run=^TestManagedEjectHelperProcess$",
+			1,
+			false,
+		)
+		resultCh <- result{formatted: formatted, running: running, code: code, err: err}
+	}()
+
+	readyDeadline := time.After(10 * time.Second)
+	for {
+		if _, err := os.Stat(readyPath); err == nil {
+			break
+		}
+		select {
+		case <-readyDeadline:
+			t.Fatal("direct command did not start")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	var job *ManagedPTY
+	select {
+	case job = <-timeoutJob:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout path did not pause before ejecting")
+	}
+	if err := os.WriteFile(releasePath, []byte("release"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-job.doneCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("interpreter did not finish while timeout was paused")
+	}
+	close(resumeTimeout)
+
+	select {
+	case got := <-resultCh:
+		if got.err != nil {
+			t.Fatalf("ExecuteAIToolCommand: %v", got.err)
+		}
+		if got.running || got.code != 0 || !strings.Contains(got.formatted, "helper-ready") {
+			t.Fatalf("completion/timeout result = %+v, want completed command", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ExecuteAIToolCommand did not return after completion")
 	}
 }
 

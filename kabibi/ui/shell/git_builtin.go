@@ -12,7 +12,6 @@ import (
 	"github.com/adrianliechti/go-git"
 	"github.com/mavity/rusticated/kabibi/gitcore"
 	"github.com/mavity/rusticated/platform"
-	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
 )
 
@@ -150,25 +149,7 @@ func parseGitInvocation(cwd string, args []string) (gitInvocation, error) {
 }
 
 func buildGitEnv(execSess *ExecutionSession, hc interp.HandlerContext, fsys *osFS, config []string) (map[string]string, error) {
-	env := make(map[string]string)
-	for _, pair := range os.Environ() {
-		if name, value, ok := strings.Cut(pair, "="); ok {
-			env[name] = value
-		}
-	}
-	if execSess != nil {
-		for name, value := range execSess.EnvMap() {
-			env[name] = value
-		}
-	}
-	if hc.Env != nil {
-		hc.Env.Each(func(name string, value expand.Variable) bool {
-			if value.IsSet() {
-				env[name] = value.String()
-			}
-			return true
-		})
-	}
+	env := shellInvocationEnvMap(withShellInvocationState(context.Background(), hc), execSess)
 	if env["HOME"] == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {

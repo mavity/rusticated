@@ -34,10 +34,60 @@ type topLevelStartInfo struct {
 
 type execSessionCtxKey struct{}
 
+type shellInvocationStateKey struct{}
+
+type shellInvocationState struct {
+	dir string
+	env map[string]expand.Variable
+}
+
 type execSessionCtxInfo struct {
 	session  *ExecutionSession
 	source   CommandSource
 	terminal *CommandTerminal
+}
+
+func withShellInvocationState(ctx context.Context, hc interp.HandlerContext) context.Context {
+	state := &shellInvocationState{
+		dir: hc.Dir,
+		env: make(map[string]expand.Variable),
+	}
+	if hc.Env != nil {
+		hc.Env.Each(func(name string, value expand.Variable) bool {
+			state.env[name] = value
+			return true
+		})
+	}
+	return context.WithValue(ctx, shellInvocationStateKey{}, state)
+}
+
+func shellInvocationDir(ctx context.Context, execSess *ExecutionSession) string {
+	if state, ok := ctx.Value(shellInvocationStateKey{}).(*shellInvocationState); ok && state.dir != "" {
+		return state.dir
+	}
+	if execSess == nil {
+		return ""
+	}
+	return execSess.Dir()
+}
+
+func shellInvocationEnvMap(ctx context.Context, execSess *ExecutionSession) map[string]string {
+	env := envMapFromHandler(interp.HandlerContext{})
+	if execSess != nil {
+		for name, value := range execSess.EnvMap() {
+			env[name] = value
+		}
+	}
+	if state, ok := ctx.Value(shellInvocationStateKey{}).(*shellInvocationState); ok {
+		for name, value := range state.env {
+			if value.IsSet() {
+				env[name] = value.String()
+			} else {
+				delete(env, name)
+			}
+		}
+	}
+	return env
 }
 
 func withExecSession(ctx context.Context, es *ExecutionSession, source CommandSource) context.Context {
