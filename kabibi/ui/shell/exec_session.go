@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -70,6 +71,12 @@ type CommandRecord struct {
 	ByteLen       int           `json:"byte_len"`
 }
 
+func closeRunStdin(stdin io.Reader) {
+	if closer, ok := stdin.(io.Closer); ok {
+		_ = closer.Close()
+	}
+}
+
 const maxHistoryPreviewOutput = 32768
 
 // shellTTYStdin is a sentinel reader used to detect when a command inside
@@ -115,9 +122,7 @@ type ExecutionSession struct {
 	// runMu guards only the idle/running transition and the admission snapshot.
 	// It is never held while the interpreter runs; re-entry fails with ErrShellBusy.
 	runMu               sync.Mutex
-	running             bool
-	runningDesc         string
-	runSnapshot         runnerSnapshot
+	current             *runState
 	runner              *interp.Runner
 	ttyIn               io.Reader
 	streamOut           *dynamicWriter
@@ -157,31 +162,171 @@ type runnerSnapshot struct {
 	funcs map[string]struct{}
 }
 
-// beginRun admits one interpreter run, or fails immediately when one is active.
-func (es *ExecutionSession) beginRun(desc string) error {
-	es.runMu.Lock()
-	defer es.runMu.Unlock()
-	if es.running {
-		return fmt.Errorf("%w: %s", ErrShellBusy, es.runningDesc)
-	}
+type runState struct {
+	desc           string
+	snapshot       runnerSnapshot
+	runner         *interp.Runner
+	writer         *dynamicWriter
+	job            *ManagedPTY
+	ctx            context.Context
+	cancel         context.CancelFunc
+	away           bool
+	ejectRequested bool
+	ejected        bool
+	directPTY      bool
+	directCommand  *exec.Cmd
+	retiredStdin   io.Reader
+}
+
+func (es *ExecutionSession) snapshotRunnerLocked() runnerSnapshot {
 	funcs := make(map[string]struct{})
 	if es.runner != nil {
 		for name := range es.runner.Funcs {
 			funcs[name] = struct{}{}
 		}
 	}
-	es.runSnapshot = runnerSnapshot{cwd: es.Dir(), env: es.EnvMap(), funcs: funcs}
-	es.running = true
-	es.runningDesc = desc
+	return runnerSnapshot{cwd: es.dirLocked(), env: es.envMapLocked(), funcs: funcs}
+}
+
+func (es *ExecutionSession) dirLocked() string {
+	if es.runner != nil && es.runner.Dir != "" {
+		return es.runner.Dir
+	}
+	return es.initialCwd
+}
+
+// beginRun admits one interpreter run, or fails immediately when one is active.
+func (es *ExecutionSession) beginRun(desc string) (*runState, error) {
+	es.runMu.Lock()
+	defer es.runMu.Unlock()
+	if es.current != nil {
+		return nil, fmt.Errorf("%w: %s", ErrShellBusy, es.current.desc)
+	}
+	st := &runState{
+		desc:     desc,
+		snapshot: es.snapshotRunnerLocked(),
+		runner:   es.runner,
+		writer:   es.streamOut,
+	}
+	es.current = st
+	return st, nil
+}
+
+func (es *ExecutionSession) beginManagedRun(command string, job *ManagedPTY) (*runState, error) {
+	es.runMu.Lock()
+	defer es.runMu.Unlock()
+	if es.current != nil {
+		return nil, fmt.Errorf("%w: %s", ErrShellBusy, es.current.desc)
+	}
+	es.bgMu.Lock()
+	if es.bgProcs == nil {
+		es.bgProcs = make(map[int]*ManagedPTY)
+	}
+	if es.nextProcID <= 0 {
+		es.nextProcID = 1
+	}
+	job.ID = es.nextProcID
+	es.nextProcID++
+	es.bgProcs[job.ID] = job
+	es.bgMu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	st := &runState{
+		desc:     execBusyDesc(job.ID, command),
+		snapshot: es.snapshotRunnerLocked(),
+		runner:   es.runner,
+		writer:   es.streamOut,
+		job:      job,
+		ctx:      ctx,
+		cancel:   cancel,
+	}
+	es.current = st
+	job.setRunCancel(cancel)
+	return st, nil
+}
+
+func (es *ExecutionSession) endRun(st *runState) io.Reader {
+	if st == nil {
+		return nil
+	}
+	es.runMu.Lock()
+	if es.current == st {
+		es.current = nil
+	}
+	retiredStdin := st.retiredStdin
+	st.retiredStdin = nil
+	es.runMu.Unlock()
+	return retiredStdin
+}
+
+func (es *ExecutionSession) eject(st *runState) error {
+	if st == nil {
+		return nil
+	}
+	es.runMu.Lock()
+	defer es.runMu.Unlock()
+	if es.current != st {
+		return nil
+	}
+	if st.directPTY {
+		st.ejected = true
+		es.current = nil
+		return nil
+	}
+	if st.away {
+		err := es.detachLocked(st)
+		if err != nil {
+			st.ejectRequested = true
+		}
+		return err
+	}
+	st.ejectRequested = true
 	return nil
 }
 
-func (es *ExecutionSession) endRun() {
-	es.runMu.Lock()
-	es.running = false
-	es.runningDesc = ""
-	es.runSnapshot = runnerSnapshot{}
-	es.runMu.Unlock()
+func (es *ExecutionSession) detachLocked(st *runState) error {
+	if st.runner == nil || st.writer == nil || st.job == nil {
+		return errors.New("cannot eject a run without its runner, output writer, and managed job")
+	}
+	copy := st.runner.Detach()
+	ttyR, ttyW, err := os.Pipe()
+	if err != nil {
+		return fmt.Errorf("create foreground shell stdin after eject: %w", err)
+	}
+	if err := ttyW.Close(); err != nil {
+		_ = ttyR.Close()
+		return fmt.Errorf("close foreground shell stdin after eject: %w", err)
+	}
+	writer := &dynamicWriter{}
+	if err := interp.StdIO(ttyR, writer, writer)(copy); err != nil {
+		_ = ttyR.Close()
+		return fmt.Errorf("configure foreground shell after eject: %w", err)
+	}
+
+	oldWriter := st.writer
+	oldWriter.setTarget(st.job.appendOutput)
+	st.retiredStdin = es.ttyIn
+	es.ttyIn = ttyR
+	es.streamOut = writer
+	es.runner = copy
+	st.ejected = true
+	st.ejectRequested = false
+	es.current = nil
+	return nil
+}
+
+func runStateFromContext(ctx context.Context) *runState {
+	st, _ := ctx.Value(runStateContextKey{}).(*runState)
+	return st
+}
+
+type runStateContextKey struct{}
+
+func withRunState(ctx context.Context, st *runState) context.Context {
+	if st == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, runStateContextKey{}, st)
 }
 
 // resolutionState returns the cwd, environment, and whether name is a shell
@@ -189,14 +334,14 @@ func (es *ExecutionSession) endRun() {
 func (es *ExecutionSession) resolutionState(name string) (cwd string, env map[string]string, isFunc bool) {
 	es.runMu.Lock()
 	defer es.runMu.Unlock()
-	if es.running {
-		_, isFunc = es.runSnapshot.funcs[name]
-		return es.runSnapshot.cwd, es.runSnapshot.env, isFunc
+	if es.current != nil {
+		_, isFunc = es.current.snapshot.funcs[name]
+		return es.current.snapshot.cwd, es.current.snapshot.env, isFunc
 	}
 	if es.runner != nil && es.runner.Funcs != nil {
 		_, isFunc = es.runner.Funcs[name]
 	}
-	return es.Dir(), es.EnvMap(), isFunc
+	return es.dirLocked(), es.envMapLocked(), isFunc
 }
 
 func busyLabel(command string) string {
@@ -255,12 +400,12 @@ func NewExecutionSession(dir string) (*ExecutionSession, error) {
 
 // Dir returns the shell runner's current working directory.
 func (es *ExecutionSession) Dir() string {
-	es.mu.Lock()
-	defer es.mu.Unlock()
-	if es.runner != nil && es.runner.Dir != "" {
-		return es.runner.Dir
+	es.runMu.Lock()
+	defer es.runMu.Unlock()
+	if es.current != nil {
+		return es.current.snapshot.cwd
 	}
-	return es.initialCwd
+	return es.dirLocked()
 }
 
 // Close releases background cache work associated with the session.
@@ -287,11 +432,9 @@ func (es *ExecutionSession) SetDir(dir string) error {
 	}
 	es.runMu.Lock()
 	defer es.runMu.Unlock()
-	if es.running {
-		return fmt.Errorf("%w: %s", ErrShellBusy, es.runningDesc)
+	if es.current != nil {
+		return fmt.Errorf("%w: %s", ErrShellBusy, es.current.desc)
 	}
-	es.mu.Lock()
-	defer es.mu.Unlock()
 	if es.runner != nil {
 		es.runner.Dir = cleaned
 		if es.runner.Vars != nil {
@@ -310,8 +453,11 @@ func (es *ExecutionSession) SetDir(dir string) error {
 // EnvMap returns a snapshot of the shell's current environment variables,
 // layering runner.Vars on top of runner.Env and os.Environ().
 func (es *ExecutionSession) EnvMap() map[string]string {
-	es.mu.Lock()
-	defer es.mu.Unlock()
+	es.runMu.Lock()
+	defer es.runMu.Unlock()
+	if es.current != nil {
+		return maps.Clone(es.current.snapshot.env)
+	}
 	return es.envMapLocked()
 }
 
@@ -631,15 +777,23 @@ func (es *ExecutionSession) RunCommand(
 	source CommandSource,
 	onChunk func(chunk []byte),
 ) (CommandRecord, error) {
-	if err := es.beginRun("command " + busyLabel(command) + " is still running"); err != nil {
+	if parent := runStateFromContext(ctx); parent != nil {
+		es.runMu.Lock()
+		parentEjected := parent.ejected
+		es.runMu.Unlock()
+		if parentEjected {
+			return CommandRecord{ExitCode: 1}, fmt.Errorf("%w: an ejected job cannot re-enter the foreground shell", ErrShellBusy)
+		}
+	}
+	st, err := es.beginRun("command " + busyLabel(command) + " is still running")
+	if err != nil {
 		return CommandRecord{ExitCode: 1}, err
 	}
-	defer es.endRun()
+	defer es.endRun(st)
 
 	start := time.Now()
 	if parsed == nil {
 		parser := syntax.NewParser()
-		var err error
 		parsed, err = parser.Parse(strings.NewReader(command), "")
 		if err != nil {
 			rec := es.appendRecord(BlockCommand, source, command, es.Dir(), err.Error()+"\n", 2, start)
@@ -650,7 +804,7 @@ func (es *ExecutionSession) RunCommand(
 		}
 	}
 
-	runCtx := withExecSession(ctx, es, source)
+	runCtx := withRunState(withExecSession(ctx, es, source), st)
 	var commandTerminal *CommandTerminal
 	if source == SourceUserShell {
 		es.terminalMu.Lock()
@@ -680,7 +834,8 @@ func (es *ExecutionSession) RunCommand(
 
 	var outBuf bytes.Buffer
 	var outMu sync.Mutex
-	es.streamOut.setTarget(func(p []byte) {
+	writer := st.writer
+	writer.setTarget(func(p []byte) {
 		outMu.Lock()
 		outBuf.Write(p)
 		outMu.Unlock()
@@ -688,9 +843,9 @@ func (es *ExecutionSession) RunCommand(
 			onChunk(p)
 		}
 	})
-	defer es.streamOut.setTarget(nil)
+	defer writer.setTarget(nil)
 
-	runErr := es.runner.Run(runCtx, parsed)
+	runErr := st.runner.Run(runCtx, parsed)
 	if errors.Is(runErr, ErrUnknownCommandAtStart) {
 		// Do not record a shell history entry when an unrecognized leading word
 		// is being handed off to AI fallback.
@@ -719,7 +874,7 @@ func (es *ExecutionSession) RunCommand(
 	rawOut := outBuf.String()
 	outMu.Unlock()
 
-	rec := es.appendRecord(BlockCommand, source, command, es.Dir(), rawOut, exitCode, start)
+	rec := es.appendRecord(BlockCommand, source, command, st.runner.Dir, rawOut, exitCode, start)
 	return rec, runErr
 }
 
@@ -988,10 +1143,14 @@ func (es *ExecutionSession) StreamTTY(ctx context.Context, hc interp.HandlerCont
 	if es == nil || term == nil {
 		return StreamTTYStatus{}
 	}
+	es.runMu.Lock()
+	ttyIn := es.ttyIn
+	streamOut := es.streamOut
+	es.runMu.Unlock()
 	return StreamTTYStatus{
-		Stdin:  hc.Stdin == es.ttyIn,
-		Stdout: hc.Stdout == es.streamOut,
-		Stderr: hc.Stderr == es.streamOut,
+		Stdin:  hc.Stdin == ttyIn,
+		Stdout: hc.Stdout == streamOut,
+		Stderr: hc.Stderr == streamOut,
 	}
 }
 
@@ -1001,8 +1160,14 @@ func (es *ExecutionSession) IsUnredirectedTTY(hc interp.HandlerContext) bool {
 	if es == nil {
 		return false
 	}
-	return es.ActiveCommandTerminal() != nil &&
-		hc.Stdin == es.ttyIn && hc.Stdout == es.streamOut && hc.Stderr == es.streamOut
+	if es.ActiveCommandTerminal() == nil {
+		return false
+	}
+	es.runMu.Lock()
+	ttyIn := es.ttyIn
+	streamOut := es.streamOut
+	es.runMu.Unlock()
+	return hc.Stdin == ttyIn && hc.Stdout == streamOut && hc.Stderr == streamOut
 }
 
 // RecordByID looks up a recorded block/command by its 1-based ID.
@@ -1151,22 +1316,26 @@ func (es *ExecutionSession) ExecuteAIToolCommand(
 		notifyCh:  make(chan struct{}),
 		doneCh:    make(chan struct{}),
 	}
-	procID = es.RegisterManagedPTY(m)
+	var st *runState
 	if parseErr == nil {
-		if err := es.beginRun(execBusyDesc(procID, command)); err != nil {
-			es.bgMu.Lock()
-			delete(es.bgProcs, procID)
-			es.bgMu.Unlock()
+		st, err = es.beginManagedRun(command, m)
+		if err != nil {
 			return "", 0, false, 0, err
 		}
+		procID = m.ID
+	} else {
+		procID = es.RegisterManagedPTY(m)
 	}
 	var cwd string
-	if parseErr == nil {
-		cwd = es.Dir()
+	if st != nil {
+		cwd = st.snapshot.cwd
 	} else {
 		cwd, _, _ = es.resolutionState("")
 	}
 	m.Cwd = cwd
+	if st != nil {
+		st.directCommand, st.directPTY = es.tryBuildDirectPTYCommand(st.ctx, parsed, st.snapshot)
+	}
 	var uiOnFinish func(int, time.Duration)
 	if sink != nil {
 		m.onChunk, uiOnFinish = sink.OnAICommandStart(command, cwd)
@@ -1175,14 +1344,15 @@ func (es *ExecutionSession) ExecuteAIToolCommand(
 	m.onFinish = func(code int, elapsed time.Duration) {
 		m.mu.Lock()
 		rawOut := m.rawBuf.String()
+		finalCwd := m.Cwd
 		m.mu.Unlock()
-		es.appendRecord(BlockCommand, SourceAITool, command, es.Dir(), rawOut, code, startedAt)
+		es.appendRecord(BlockCommand, SourceAITool, command, finalCwd, rawOut, code, startedAt)
 		if uiOnFinish != nil {
 			uiOnFinish(code, elapsed)
 		}
 	}
 
-	go es.runManagedExecution(m, parsed, parseErr, cwd, ptyCols, ptyRows)
+	go es.runManagedExecution(m, st, parsed, parseErr, ptyCols, ptyRows)
 
 	timeoutDur := time.Duration(timeoutSec) * time.Second
 	timer := time.NewTimer(timeoutDur)
@@ -1191,7 +1361,9 @@ func (es *ExecutionSession) ExecuteAIToolCommand(
 	select {
 	case <-m.doneCh:
 		outText, _, code, elapsed := m.Snapshot(false, keepANSI)
-		finalCwd := es.Dir()
+		m.mu.Lock()
+		finalCwd := m.Cwd
+		m.mu.Unlock()
 		footer := fmt.Sprintf("[exit: %d | elapsed: %.3fs | cwd: %s]", code, elapsed.Seconds(), filepath.ToSlash(finalCwd))
 		if outText != "" {
 			formatted = outText + "\n" + footer
@@ -1203,7 +1375,9 @@ func (es *ExecutionSession) ExecuteAIToolCommand(
 	case <-timer.C:
 		outText, exited, code, elapsed := m.Snapshot(false, keepANSI)
 		if exited {
-			finalCwd := es.Dir()
+			m.mu.Lock()
+			finalCwd := m.Cwd
+			m.mu.Unlock()
 			footer := fmt.Sprintf("[exit: %d | elapsed: %.3fs | cwd: %s]", code, elapsed.Seconds(), filepath.ToSlash(finalCwd))
 			if outText != "" {
 				formatted = outText + "\n" + footer
@@ -1211,6 +1385,11 @@ func (es *ExecutionSession) ExecuteAIToolCommand(
 				formatted = footer
 			}
 			return formatted, procID, false, code, nil
+		}
+		ejectErr := es.eject(st)
+		if ejectErr != nil {
+			m.appendOutput([]byte(fmt.Sprintf("eject failed; the shell remains busy until this command finishes: %v\n", ejectErr)))
+			outText, _, _, elapsed = m.Snapshot(false, keepANSI)
 		}
 		footer := fmt.Sprintf("[status: STILL RUNNING (pid_id: %d) after %.3fs | use term_read, term_input, or term_kill with id=%d]",
 			procID, elapsed.Seconds(), procID)
@@ -1222,42 +1401,51 @@ func (es *ExecutionSession) ExecuteAIToolCommand(
 		return formatted, procID, true, 0, nil
 
 	case <-ctx.Done():
-		_ = m.Kill("SIGTERM")
+		killErr := m.Kill("SIGTERM")
+		if killErr != nil {
+			return "", procID, false, 130, errors.Join(ctx.Err(), killErr)
+		}
 		return "", procID, false, 130, ctx.Err()
 	}
 }
 
-// runManagedExecution owns the admission granted by ExecuteAIToolCommand (when
-// parseErr is nil) and releases it before a direct PTY process starts or once
-// the interpreter returns.
-func (es *ExecutionSession) runManagedExecution(m *ManagedPTY, parsed *syntax.File, parseErr error, cwd string, ptyCols, ptyRows int) {
+// runManagedExecution owns the admission granted by ExecuteAIToolCommand.
+func (es *ExecutionSession) runManagedExecution(m *ManagedPTY, st *runState, parsed *syntax.File, parseErr error, ptyCols, ptyRows int) {
 	if parseErr != nil {
 		m.appendOutput([]byte(parseErr.Error() + "\n"))
 		m.markExited(2, parseErr)
 		return
 	}
 
-	if cmd, ok := es.tryBuildDirectPTYCommandLocked(parsed, cwd); ok {
-		es.endRun()
-		if es.runDirectCommandInPTY(m, cmd, ptyCols, ptyRows) {
+	if st != nil && st.directPTY {
+		if es.runDirectCommandInPTY(m, st, st.directCommand, ptyCols, ptyRows) {
 			return
 		}
-		desc := execBusyDesc(m.ID, m.Command)
-		if err := es.beginRun(desc); err != nil {
+		es.runMu.Lock()
+		if st.ejected || es.current != st {
+			es.runMu.Unlock()
+			err := errors.New("direct PTY startup failed after the shell was ejected")
 			m.appendOutput([]byte(err.Error() + "\n"))
 			m.markExited(1, err)
 			return
 		}
+		st.directPTY = false
+		st.directCommand = nil
+		es.runMu.Unlock()
 	}
 
-	runCtx := withExecSession(context.Background(), es, SourceAITool)
-	es.streamOut.setTarget(func(p []byte) {
+	writer := st.writer
+	writer.setTarget(func(p []byte) {
 		m.appendOutput(p)
 	})
 
-	runErr := es.runner.Run(runCtx, parsed)
-	es.streamOut.setTarget(nil)
-	es.endRun()
+	runCtx := withRunState(withExecSession(st.ctx, es, SourceAITool), st)
+	runErr := st.runner.Run(runCtx, parsed)
+	writer.setTarget(nil)
+	finalCwd := st.runner.Dir
+	m.setCwd(finalCwd)
+	closeRunStdin(es.endRun(st))
+	st.cancel()
 
 	code := 0
 	if runErr != nil {
@@ -1272,7 +1460,7 @@ func (es *ExecutionSession) runManagedExecution(m *ManagedPTY, parsed *syntax.Fi
 	m.markExited(code, runErr)
 }
 
-func (es *ExecutionSession) tryBuildDirectPTYCommandLocked(parsed *syntax.File, cwd string) (*exec.Cmd, bool) {
+func (es *ExecutionSession) tryBuildDirectPTYCommand(ctx context.Context, parsed *syntax.File, snapshot runnerSnapshot) (*exec.Cmd, bool) {
 	if parsed == nil || len(parsed.Stmts) != 1 {
 		return nil, false
 	}
@@ -1296,10 +1484,8 @@ func (es *ExecutionSession) tryBuildDirectPTYCommandLocked(parsed *syntax.File, 
 	if interp.IsBuiltin(head) || isNestedShellBuiltinName(head) {
 		return nil, false
 	}
-	if es.runner != nil && es.runner.Funcs != nil {
-		if _, ok := es.runner.Funcs[head]; ok {
-			return nil, false
-		}
+	if _, ok := snapshot.funcs[head]; ok {
+		return nil, false
 	}
 	switch head {
 	case "base64", "cat", "chmod", "cp", "find", "gunzip", "gzcat", "gzip",
@@ -1310,22 +1496,24 @@ func (es *ExecutionSession) tryBuildDirectPTYCommandLocked(parsed *syntax.File, 
 		return nil, false
 	}
 
-	envMap := es.envMapLocked()
-	resolved, ok := resolvePlatformExecutable(head, cwd, envMap)
+	envMap := snapshot.env
+	resolved, ok := resolvePlatformExecutable(head, snapshot.cwd, envMap)
 	if !ok {
-		if es.runner != nil && es.runner.Env != nil {
-			if p, err := interp.LookPathDir(cwd, es.runner.Env, head); err == nil {
-				resolved = p
-				ok = true
-			}
+		pairs := make([]string, 0, len(envMap))
+		for k, v := range envMap {
+			pairs = append(pairs, k+"="+v)
+		}
+		if p, err := interp.LookPathDir(snapshot.cwd, expand.ListEnviron(pairs...), head); err == nil {
+			resolved = p
+			ok = true
 		}
 	}
 	if !ok {
 		return nil, false
 	}
 
-	cmd := exec.Command(resolved, litArgs[1:]...)
-	cmd.Dir = cwd
+	cmd := exec.CommandContext(ctx, resolved, litArgs[1:]...)
+	cmd.Dir = snapshot.cwd
 	envPairs := make([]string, 0, len(envMap))
 	for k, v := range envMap {
 		envPairs = append(envPairs, k+"="+v)
@@ -1334,7 +1522,7 @@ func (es *ExecutionSession) tryBuildDirectPTYCommandLocked(parsed *syntax.File, 
 	return cmd, true
 }
 
-func (es *ExecutionSession) runDirectCommandInPTY(m *ManagedPTY, cmd *exec.Cmd, cols, rows int) bool {
+func (es *ExecutionSession) runDirectCommandInPTY(m *ManagedPTY, st *runState, cmd *exec.Cmd, cols, rows int) bool {
 	p, err := pty.Start(cmd, pty.Options{
 		Cols: cols,
 		Rows: rows,
@@ -1383,6 +1571,11 @@ func (es *ExecutionSession) runDirectCommandInPTY(m *ManagedPTY, cmd *exec.Cmd, 
 		} else {
 			code = 1
 		}
+	}
+	m.setCwd(st.snapshot.cwd)
+	es.endRun(st)
+	if st.cancel != nil {
+		st.cancel()
 	}
 	m.markExited(code, waitErr)
 	return true

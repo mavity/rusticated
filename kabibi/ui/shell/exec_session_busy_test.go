@@ -18,11 +18,12 @@ func TestExecutionSessionRejectsReentryWhileRunning(t *testing.T) {
 		t.Fatalf("define function: %v", err)
 	}
 
-	if err := es.beginRun(execBusyDesc(3, "npm test")); err != nil {
+	st, err := es.beginRun(execBusyDesc(3, "npm test"))
+	if err != nil {
 		t.Fatalf("beginRun on idle session: %v", err)
 	}
 
-	if err := es.beginRun("second"); !errors.Is(err, ErrShellBusy) || !strings.Contains(err.Error(), "term_kill with id=3") {
+	if _, err := es.beginRun("second"); !errors.Is(err, ErrShellBusy) || !strings.Contains(err.Error(), "term_kill with id=3") {
 		t.Fatalf("second beginRun: got %v, want ErrShellBusy naming job 3", err)
 	}
 	if _, err := es.RunCommand(context.Background(), "echo hi", nil, SourceUserShell, nil); !errors.Is(err, ErrShellBusy) {
@@ -44,7 +45,7 @@ func TestExecutionSessionRejectsReentryWhileRunning(t *testing.T) {
 		t.Fatal("shell function not resolved from the admission snapshot while running")
 	}
 
-	es.endRun()
+	es.endRun(st)
 
 	rec, err := es.RunCommand(context.Background(), "echo idle-again", nil, SourceUserShell, nil)
 	if err != nil {

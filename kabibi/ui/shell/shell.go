@@ -55,6 +55,48 @@ func withCommandTerminal(ctx context.Context, es *ExecutionSession, source Comma
 	})
 }
 
+func ejectAwareMiddleware(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+	return func(ctx context.Context, args []string) error {
+		es, _ := execSessionFromContext(ctx)
+		st := runStateFromContext(ctx)
+		markedAway := false
+		if es != nil && st != nil {
+			hc := interp.HandlerCtx(ctx)
+			es.runMu.Lock()
+			if es.current == st && !st.ejected && hc.PausedIn(es.runner) {
+				st.away = true
+				markedAway = true
+			}
+			es.runMu.Unlock()
+		}
+
+		err := next(ctx, args)
+		if markedAway {
+			es.runMu.Lock()
+			st.away = false
+			es.runMu.Unlock()
+		}
+		return err
+	}
+}
+
+func ejectCallHandler(ctx context.Context, args []string) ([]string, error) {
+	es, _ := execSessionFromContext(ctx)
+	st := runStateFromContext(ctx)
+	if es == nil || st == nil {
+		return args, nil
+	}
+	hc := interp.HandlerCtx(ctx)
+	es.runMu.Lock()
+	defer es.runMu.Unlock()
+	if es.current == st && st.ejectRequested && !st.ejected && hc.PausedIn(es.runner) {
+		if err := es.detachLocked(st); err != nil {
+			return nil, err
+		}
+	}
+	return args, nil
+}
+
 func execSessionFromContext(ctx context.Context) (*ExecutionSession, CommandSource) {
 	info, ok := ctx.Value(execSessionCtxKey{}).(*execSessionCtxInfo)
 	if !ok || info == nil {
@@ -496,6 +538,7 @@ func createRunnerWithEnv(ctx context.Context, stdin io.Reader, stdout, stderr io
 		interp.Env(expand.ListEnviron(envPairs...)),
 		interp.StdIO(stdin, stdout, stderr),
 		interp.Params(args...),
+		interp.CallHandler(ejectCallHandler),
 	}
 
 	// 1. Middleware for in-process nested shells (bash, sh, kabibi) and script files (.sh / #!).
@@ -571,6 +614,7 @@ func createRunnerWithEnv(ctx context.Context, stdin io.Reader, stdout, stderr io
 	}
 
 	opts = append(opts, interp.ExecHandlers(
+		ejectAwareMiddleware,
 		nestedShellAndScriptMiddleware,
 		gitBuiltinMiddleware,
 		aiBuiltinMiddleware,

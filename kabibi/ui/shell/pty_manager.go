@@ -39,6 +39,19 @@ type ManagedPTY struct {
 	doneCh     chan struct{}
 	onChunk    func(chunk []byte)
 	onFinish   func(exitCode int, elapsed time.Duration)
+	runCancel  context.CancelFunc
+}
+
+func (m *ManagedPTY) setRunCancel(cancel context.CancelFunc) {
+	m.mu.Lock()
+	m.runCancel = cancel
+	m.mu.Unlock()
+}
+
+func (m *ManagedPTY) setCwd(cwd string) {
+	m.mu.Lock()
+	m.Cwd = cwd
+	m.mu.Unlock()
 }
 
 func (m *ManagedPTY) signalUpdateLocked() {
@@ -72,6 +85,7 @@ func (m *ManagedPTY) markExited(code int, err error) {
 	m.exitCode = code
 	m.exitErr = err
 	m.finishedAt = time.Now()
+	m.runCancel = nil
 	elapsed := m.finishedAt.Sub(m.StartedAt)
 	cb := m.onFinish
 	m.signalUpdateLocked()
@@ -271,10 +285,14 @@ func (m *ManagedPTY) Kill(sigName string) error {
 	p := m.ptyHandle
 	cmd := m.cmd
 	doneCh := m.doneCh
+	cancel := m.runCancel
 	m.mu.Unlock()
 
 	if exited {
 		return nil
+	}
+	if cancel != nil {
+		cancel()
 	}
 
 	sig := strings.ToUpper(strings.TrimSpace(sigName))
@@ -301,8 +319,8 @@ func (m *ManagedPTY) Kill(sigName string) error {
 
 	select {
 	case <-doneCh:
-	case <-time.After(500 * time.Millisecond):
-		m.markExited(137, nil)
+	case <-time.After(2 * time.Second):
+		return fmt.Errorf("process #%d did not stop after cancellation", m.ID)
 	}
 	return nil
 }

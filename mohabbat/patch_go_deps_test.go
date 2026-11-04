@@ -172,6 +172,84 @@ func TestPatchMvdanKillBuiltin(t *testing.T) {
 	}
 }
 
+func TestPatchMvdanEject(t *testing.T) {
+	fixture := map[string][]byte{
+		"interp/api.go": []byte(
+			"\tinLoop       bool\n\tinFunc       bool\n" +
+				"\tr2.fillExpandConfig(r.ectx)\n\tr2.didReset = true\n\treturn r2\n"),
+		"interp/runner.go": []byte(
+			"\t\ttype restoreVar struct {\n\t\t\tname string\n\t\t\tvr   expand.Variable\n\t\t}\n" +
+				"\t\tr.call(ctx, cm.Args[0].Pos(), fields)\n\t\tfor _, restore := range restores {\n" +
+				"\t\torigEnv := r.writeEnv\n\t\tr.writeEnv = &overlayEnviron{parent: r.writeEnv, funcScope: true}\n\n" +
+				"\t\tr.stmt(ctx, body)\n\n\t\tr.writeEnv = origEnv\n" +
+				"\tif !r.handlingTrap && (r.exit.returning || r.exit.exiting) {\n"),
+	}
+
+	sourceFiles := map[string][]byte{
+		"interp/api.go":    append([]byte(nil), fixture["interp/api.go"]...),
+		"interp/runner.go": append([]byte(nil), fixture["interp/runner.go"]...),
+	}
+	if err := patchMvdanEjectInMemory(fixture); err != nil {
+		t.Fatalf("patch mvdan eject support: %v", err)
+	}
+	if got := string(fixture["interp/api.go"]); !strings.Contains(got, "ejectParent = r") ||
+		!strings.Contains(got, "ejectConcurrent = background") ||
+		!strings.Contains(got, "ejectFrames     []ejectFrame") {
+		t.Fatalf("runner ancestry was not added: %s", got)
+	}
+	if got := string(fixture["interp/runner.go"]); strings.Contains(got, "type restoreVar struct") ||
+		!strings.Contains(got, "r.ejectRestores = append(r.ejectRestores, restores)") ||
+		!strings.Contains(got, "r.ejectFrames = append(r.ejectFrames") ||
+		!strings.Contains(got, "r.ejectStopCount >= 256") ||
+		!strings.Contains(got, "time.Sleep(time.Millisecond)") {
+		t.Fatalf("temporary shell state was not tracked: %s", got)
+	}
+	ejectSource := string(fixture["interp/kabibi_eject.go"])
+	for _, want := range []string{
+		"func (hc HandlerContext) PausedIn(target *Runner) bool",
+		"func (r *Runner) Detach() *Runner",
+		"detached.callbackExit = r.callbackExit",
+		"maps.Insert(detached.Vars, detached.writeEnv.Each)",
+	} {
+		if !strings.Contains(ejectSource, want) {
+			t.Errorf("generated eject source is missing %q", want)
+		}
+	}
+
+	for _, name := range []string{"missing api.go", "missing runner.go", "missing ancestry", "missing call", "missing function frame", "missing stop"} {
+		t.Run(name, func(t *testing.T) {
+			files := map[string][]byte{
+				"interp/api.go":    append([]byte(nil), sourceFiles["interp/api.go"]...),
+				"interp/runner.go": append([]byte(nil), sourceFiles["interp/runner.go"]...),
+			}
+			switch name {
+			case "missing api.go":
+				delete(files, "interp/api.go")
+			case "missing runner.go":
+				delete(files, "interp/runner.go")
+			case "missing ancestry":
+				files["interp/api.go"] = []byte(strings.Replace(string(files["interp/api.go"]),
+					"\tinLoop       bool\n\tinFunc       bool\n", "\tinLoop       bool\n", 1))
+			case "missing call":
+				files["interp/runner.go"] = []byte(strings.Replace(string(files["interp/runner.go"]),
+					"\t\tr.call(ctx, cm.Args[0].Pos(), fields)\n", "", 1))
+			case "missing function frame":
+				files["interp/runner.go"] = []byte(strings.Replace(string(files["interp/runner.go"]),
+					"\t\torigEnv := r.writeEnv\n"+
+						"\t\tr.writeEnv = &overlayEnviron{parent: r.writeEnv, funcScope: true}\n\n"+
+						"\t\tr.stmt(ctx, body)\n\n"+
+						"\t\tr.writeEnv = origEnv\n", "", 1))
+			case "missing stop":
+				files["interp/runner.go"] = []byte(strings.Replace(string(files["interp/runner.go"]),
+					"\tif !r.handlingTrap && (r.exit.returning || r.exit.exiting) {\n", "", 1))
+			}
+			if err := patchMvdanEjectInMemory(files); err == nil {
+				t.Fatal("patch accepted mvdan source missing a required pattern")
+			}
+		})
+	}
+}
+
 func TestPatchMvdanUmaskBuiltin(t *testing.T) {
 	files := map[string][]byte{
 		"interp/builtin.go": []byte("\tcase \"shift\":\n"),
