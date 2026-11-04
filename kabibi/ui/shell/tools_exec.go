@@ -197,7 +197,12 @@ func registerExecTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		if strings.TrimSpace(sig) == "" {
 			sig = "SIGTERM"
 		}
-		_ = m.Kill(sig)
+		if err := m.Kill(sig); err != nil {
+			if feedback != nil {
+				feedback(lead + "failed")
+			}
+			return nil, err
+		}
 		text, exited, code, elapsed := m.Snapshot(false, false)
 		statusLine := formatTermStatusLine(m, exited, code, elapsed)
 		if feedback != nil {
@@ -216,4 +221,3 @@ func registerExecTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		}, nil
 	})
 }
-

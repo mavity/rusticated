@@ -158,6 +158,9 @@ func applyWasip1DepPatches(ws, projectDir, goroot string) (*depPatchResult, erro
 		}
 
 		if target.module == "mvdan.cc/sh/v3" {
+			if err := patchMvdanEjectInMemory(files); err != nil {
+				return nil, fmt.Errorf("patch %s for shell ejection: %w", target.module, err)
+			}
 			if err := patchMvdanKillBuiltinInMemory(files); err != nil {
 				return nil, fmt.Errorf("patch %s: %w", target.module, err)
 			}
@@ -820,6 +823,182 @@ func patchMvdanKillBuiltinInMemory(files map[string][]byte) error {
 	files[sourcePath] = []byte(strings.Replace(content, killBuiltin, "", 1))
 	return nil
 }
+
+func patchMvdanEjectInMemory(files map[string][]byte) error {
+	const runnerPath = "interp/runner.go"
+	const apiPath = "interp/api.go"
+
+	apiData, ok := files[apiPath]
+	if !ok {
+		return fmt.Errorf("%s is missing", apiPath)
+	}
+	runnerData, ok := files[runnerPath]
+	if !ok {
+		return fmt.Errorf("%s is missing", runnerPath)
+	}
+	if _, exists := files["interp/kabibi_eject.go"]; exists {
+		return fmt.Errorf("interp/kabibi_eject.go already exists")
+	}
+
+	api := string(apiData)
+	runner := string(runnerData)
+
+	api, err := replaceExactlyOnce(api, "\tinLoop       bool\n\tinFunc       bool\n",
+		"\tinLoop       bool\n\tinFunc       bool\n"+
+			"\tejectParent     *Runner\n"+
+			"\tejectConcurrent bool\n"+
+			"\tejectRestores   [][]restoreVar\n"+
+			"\tejectFrames     []ejectFrame\n"+
+			"\tejectStopCount  uint16\n",
+		"runner state fields")
+	if err != nil {
+		return err
+	}
+
+	api, err = replaceExactlyOnce(api,
+		"\tr2.fillExpandConfig(r.ectx)\n\tr2.didReset = true\n\treturn r2\n",
+		"\tr2.fillExpandConfig(r.ectx)\n"+
+			"\tr2.didReset = true\n"+
+			"\tr2.ejectParent = r\n"+
+			"\tr2.ejectConcurrent = background\n"+
+			"\treturn r2\n",
+		"subshell ancestry")
+	if err != nil {
+		return err
+	}
+
+	runner, err = replaceExactlyOnce(runner,
+		"\t\ttype restoreVar struct {\n\t\t\tname string\n\t\t\tvr   expand.Variable\n\t\t}\n",
+		"",
+		"prefix assignment restore type")
+	if err != nil {
+		return err
+	}
+
+	runner, err = replaceExactlyOnce(runner,
+		"\t\tr.call(ctx, cm.Args[0].Pos(), fields)\n\t\tfor _, restore := range restores {\n",
+		"\t\tr.ejectRestores = append(r.ejectRestores, restores)\n"+
+			"\t\tr.call(ctx, cm.Args[0].Pos(), fields)\n"+
+			"\t\tr.ejectRestores = r.ejectRestores[:len(r.ejectRestores)-1]\n"+
+			"\t\tfor _, restore := range restores {\n",
+		"prefix assignment restore tracking")
+	if err != nil {
+		return err
+	}
+
+	runner, err = replaceExactlyOnce(runner,
+		"\t\torigEnv := r.writeEnv\n"+
+			"\t\tr.writeEnv = &overlayEnviron{parent: r.writeEnv, funcScope: true}\n\n"+
+			"\t\tr.stmt(ctx, body)\n\n"+
+			"\t\tr.writeEnv = origEnv\n",
+		"\t\torigEnv := r.writeEnv\n"+
+			"\t\tr.ejectFrames = append(r.ejectFrames, ejectFrame{params: oldParams, writeEnv: origEnv})\n"+
+			"\t\tr.writeEnv = &overlayEnviron{parent: r.writeEnv, funcScope: true}\n\n"+
+			"\t\tr.stmt(ctx, body)\n\n"+
+			"\t\tr.writeEnv = origEnv\n"+
+			"\t\tr.ejectFrames = r.ejectFrames[:len(r.ejectFrames)-1]\n",
+		"function frame tracking")
+	if err != nil {
+		return err
+	}
+
+	runner, err = replaceExactlyOnce(runner,
+		"\tif !r.handlingTrap && (r.exit.returning || r.exit.exiting) {\n",
+		"\tif runtime.GOOS == \"wasip1\" {\n"+
+			"\t\tr.ejectStopCount++\n"+
+			"\t\tif r.ejectStopCount >= 256 {\n"+
+			"\t\t\tr.ejectStopCount = 0\n"+
+			"\t\t\t// Yield to the host so async timers can deliver cancellation during a busy loop.\n"+
+			"\t\t\ttime.Sleep(time.Millisecond)\n"+
+			"\t\t}\n"+
+			"\t}\n"+
+			"\tif !r.handlingTrap && (r.exit.returning || r.exit.exiting) {\n",
+		"wasip1 cooperative cancellation yield")
+	if err != nil {
+		return err
+	}
+
+	files[apiPath] = []byte(api)
+	files[runnerPath] = []byte(runner)
+	files["interp/kabibi_eject.go"] = []byte(mvdanEjectSource)
+	return nil
+}
+
+func replaceExactlyOnce(source, old, replacement, description string) (string, error) {
+	count := strings.Count(source, old)
+	if count != 1 {
+		return "", fmt.Errorf("expected exactly one %s, found %d", description, count)
+	}
+	return strings.Replace(source, old, replacement, 1), nil
+}
+
+const mvdanEjectSource = `package interp
+
+import (
+	"maps"
+
+	"mvdan.cc/sh/v3/expand"
+)
+
+type restoreVar struct {
+	name string
+	vr   expand.Variable
+}
+
+type ejectFrame struct {
+	params   []string
+	writeEnv expand.WriteEnviron
+}
+
+func (hc HandlerContext) PausedIn(target *Runner) bool {
+	for current := hc.runner; current != nil; current = current.ejectParent {
+		if current == target {
+			return true
+		}
+		if current.ejectConcurrent {
+			return false
+		}
+	}
+	return false
+}
+
+func (r *Runner) Detach() *Runner {
+	sourceEnv := r.writeEnv
+	sourceParams := r.Params
+	if len(r.ejectFrames) > 0 {
+		frame := r.ejectFrames[0]
+		sourceEnv = frame.writeEnv
+		sourceParams = frame.params
+	}
+
+	originalEnv := r.writeEnv
+	originalParams := r.Params
+	var detached *Runner
+	func() {
+		defer func() {
+			r.writeEnv = originalEnv
+			r.Params = originalParams
+		}()
+		r.writeEnv = sourceEnv
+		r.Params = sourceParams
+		detached = r.subshell(true)
+	}()
+
+	for i := len(r.ejectRestores) - 1; i >= 0; i-- {
+		for _, restore := range r.ejectRestores[i] {
+			if !restore.vr.Local {
+				detached.setVar(restore.name, restore.vr)
+			}
+		}
+	}
+	detached.callbackErr = r.callbackErr
+	detached.callbackExit = r.callbackExit
+	detached.ejectParent = nil
+	detached.ejectConcurrent = false
+	maps.Insert(detached.Vars, detached.writeEnv.Each)
+	return detached
+}
+`
 
 func patchMvdanUmaskBuiltinInMemory(files map[string][]byte) error {
 	const sourcePath = "interp/builtin.go"

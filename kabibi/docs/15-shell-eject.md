@@ -1,8 +1,7 @@
 # Ejecting a Running Command into the Background
 
-Status: proposal, not implemented. The fail-fast admission (`ErrShellBusy`) in
-`kabibi/ui/shell/exec_session.go` is implemented but uncommitted. Steps 4, 7 and 8
-below rework parts of it.
+Status: implemented in `kabibi/ui/shell` and the generated mvdan/sh JIT patch.
+The remaining behavioral limits and open UI decisions are listed below.
 
 ## 1. Goal
 
@@ -286,31 +285,23 @@ background job:
 
 ## 12. Tests
 
-All of these run on native and the custom-sysroot (wasm) build:
+Behavior-level coverage lives in `kabibi/ui/shell/exec_session_eject_test.go`;
+the patch generator has a separate test in `mohabbat/patch_go_deps_test.go`.
+The tests cover interpreter ancestry across functions, synchronous subshells,
+command substitutions, pipelines, process substitutions and background jobs;
+detached state for prefix assignments, function locals/parameters, traps,
+aliases, directory stack, options and global variables; and actual ejection
+during a function, synchronous subshell, command substitution and unsafe
+pipeline wait. They also
+verify that the foreground accepts a new command, the ejected job continues
+with its own state, `term_kill` cancels an interpreted loop, and direct-PTY
+admission is released on eject.
 
-1. Eject during an external command:
-   - `cd a; long` leaves the shell in `a`;
-   - a `cd b` after `long` stays in the job.
-2. `alias`, `pushd`, `set -o pipefail`, `trap … EXIT` and a function defined
-   before `long` survive the eject. Their later changes in the job do not.
-3. `FOO=x long`: the new shell has the previous `FOO`, or no `FOO`; the ejected
-   job sees the temporary value.
-4. Eject during a function call: function locals do not leak, `$@` has the
-   top-level value in the new shell, and global changes made before the eject
-   remain visible.
-5. `long-a | while read l; do …; done`:
-   - an eject while `long-a` is the only one away is deferred, not raced;
-   - a background stage never sets `away`.
-   - the last stage is recognized as part of the synchronous chain.
-6. Eject in `( cd x; long )` and `X=$(long)`: it takes effect without waiting
-   for the subshell/command substitution to return, and their private state
-   changes do not appear in the new shell.
-7. `{ ( x ); } &` and nested synchronous subshells inside `&` never mark the
-   foreground interpreter as safe to copy.
-8. Finish and eject at the same moment. Both orders are forced with hooks: effects
-   are applied exactly once, and `endRun` never clears a newer admission.
-9. The next `exec` after an eject runs immediately in the new shell.
-   `term_read`/`term_kill` on the ejected id still work.
-10. `term_kill` stops an interpreted `while :; do :; done` job.
-11. The direct PTY path keeps the shell busy until the process exits or is ejected.
-12. A JIT-patch test fails if the patch patterns stop matching.
+The helper-process and PTY integration tests require a native OS and skip under
+`wasip1`. Process-substitution ancestry is skipped there because mvdan/sh's
+non-Unix implementation does not support creating the required FIFO. The
+hot-loop `term_kill` test runs under Rusticated too; the JIT patch makes the
+interpreter yield to the async timer periodically on `wasip1`, allowing timeout
+and cancellation to be observed without blocking I/O. The finish-versus-eject
+race still lacks deterministic test hooks; the pipeline and admission tests
+exercise the observable behavior but do not force both race orderings.
