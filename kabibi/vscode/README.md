@@ -6,7 +6,9 @@ Copilot to a visible Kabibi, CMD, or Bash terminal.
 
 ## Features
 
-- Open Kabibi from the terminal profile picker or with **Kabibi: Open Shell**.
+- Open **🐚︎ Kabibi** from the terminal profile picker or with
+  **🐚︎ Kabibi: Open Shell**. Running terminal tabs use the short label
+  **🐚︎ Kb**.
 - Use `exec` to run a command in a fresh shell execution session.
 - Use `term_read`, `term_input`, and `term_kill` only with a background job ID
   returned by `exec`.
@@ -35,8 +37,9 @@ platform and architecture.
 ## Development and packaging
 
 Run the extension's Node tests with `npm test`. Runtime assets, native PTY
-addons, and the 128px Marketplace icon are staged by the repository release
-builder before `vsce package` is run.
+addons, and the 128px Marketplace PNG generated from the repository's
+`kabibi.svg` are staged by the repository release builder before `vsce package`
+is run. Manual acceptance fixtures and screenshots are excluded from the VSIX.
 
 See the repository's [VS Code implementation and acceptance plan](../docs/7-vscode.md)
 for the host matrix and exhaustive manual validation procedure.

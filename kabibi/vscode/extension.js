@@ -8,8 +8,8 @@
  * Runs identically in Desktop VS Code, `vscode.dev`, `github.dev`, and OpenVSCode
  * clones using raw JavaScript (zero TypeScript / zero bundler).
  *
- * - Provides the `Kabibi` Terminal Profile (`kabibi.terminalProfile`) and
- *   `"Kabibi: Open Shell"` command (`kabibi.openTerminal`).
+ * - Provides the `🐚︎ Kabibi` Terminal Profile (`kabibi.terminalProfile`) and
+ *   `"🐚︎ Kabibi: Open Shell"` command (`kabibi.openTerminal`).
  * - Mounts the active VS Code workspace folder(s) at `/workspace` via
  *   `VSCodeMountedFS` (`vscode.workspace.fs` + `AsyncIndexedDBFS`).
  * - Unpacks the packaged `kabibi.bat` vegetable (or `kabibi.wasm`) in memory
@@ -21,6 +21,7 @@
   const EXTENSION_ID = 'kabibi';
   const OPEN_TERMINAL_CMD = 'kabibi.openTerminal';
   const TERMINAL_PROFILE_ID = 'kabibi.terminalProfile';
+  const TERMINAL_SHORT_NAME = '🐚︎ Kb';
 
   function isNodeExtensionHost(vscode) {
     const isWebUI = vscode.UIKind &&
@@ -801,7 +802,7 @@
         vscode.commands.registerCommand(OPEN_TERMINAL_CMD, () => {
           const pty = createKabibiPseudoterminal(vscode, context);
           const terminal = vscode.window.createTerminal({
-            name: 'Kabibi',
+            name: TERMINAL_SHORT_NAME,
             pty
           });
           terminal.show();
@@ -813,7 +814,7 @@
         provideTerminalProfile: (_token) => {
           const pty = createKabibiPseudoterminal(vscode, context);
           return new vscode.TerminalProfile({
-            name: 'Kabibi',
+            name: TERMINAL_SHORT_NAME,
             pty,
             isTransient: false
           });

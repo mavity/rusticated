@@ -1,5 +1,6 @@
 .vscode/**
 .vscode-test-web/**
+.manual-acceptance/**
 test/**
 node_modules/**
 *.vsix
