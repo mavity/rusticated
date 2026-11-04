@@ -241,3 +241,37 @@ Run the extension's Node tests, the relevant Kabibi tests and documented
 Rusticated/custom-sysroot builds, the web-host smoke tests, and `vsce package`.
 Inspect the resulting VSIX rather than relying only on tests that map staged
 asset reads back to source files.
+
+## Testing and Validation
+
+My proposal is to test the **boundaries where this feature could accidentally become the wrong product**, not just the individual functions. The highest-risk changes are: disabling Kabibi’s AI only in extension-launched shells, routing each Copilot tool call to the right persistent shell, choosing the correct washmhost for each host, and packaging the actual assets the extension runs.
+
+### Likely change hotspots
+
+1. **AI-disabled startup mode.** The setting will need to reach every shell entry path, then gate parse-error fallback, `ai …` handling, and slash-command dispatch without disturbing normal Kabibi startup. Likely touchpoints include `main.go`, `piped.go`, `shell_widget.go`, `ai_onboarding.go`, and `app_widget.go`. This is the area most at risk of scattered, incomplete gates.
+
+2. **Copilot tool routing and session lifecycle.** The extension needs to route `exec` and each `term_*` call to the Copilot session that owns that shell. That routing must preserve the existing behavior in `tools_exec.go` and `exec_session.go`, not recreate it in JavaScript.
+
+3. **Extension host bootstrap.** `extension.js` will need distinct browser and Desktop host paths, while preserving workspace mounting through `vfs.js`. The VS Code terminal provider remains the only terminal UI: its output goes to VS Code to render.
+
+4. **Build and release staging.** `release/main.go`, the extension manifest, and packaged host assets must agree. A passing source-level test is not enough if the VSIX omits a runtime file.
+
+### Testing proposal
+
+I’d make the test pyramid build from the shell outward:
+
+- **Go behavior tests:** Test AI-disabled and normal startup side by side. With AI disabled, malformed input and unknown commands must produce shell errors, `ai …` and `/model` must not invoke Kabibi’s AI harness, and Ctrl+O must still open the file manager. Existing shell AI and slash-command tests are good places to extend.
+
+- **Shell ejection tests:** Reuse the already substantial cases in `exec_session_eject_test.go`. Add coverage at the tool contract boundary so an `exec` timeout returns the correct job ID and footer, a later `exec` succeeds in the same Copilot shell, and `term_read`/`term_input`/`term_kill` affect only the addressed job. Use gates and channels for timing-sensitive cases rather than relying on sleeps.
+
+- **Extension adapter tests:** Test that the declared tool names and input schemas match the handlers, that confirmation messages include the intended command or job, that approval invokes the handler, and that rejection or cancellation does not execute or falsely succeed. Exercise two Copilot sessions and a visible terminal concurrently; each must retain independent cwd, environment, runner, and job IDs.
+
+- **Real host acceptance tests:** Extend the existing `vfs.test.js` style, but run the **built extension assets**, not only source files substituted by the test harness. In the web host, verify shell behavior, workspace reads/writes, resize/input, and the expected lack of arbitrary process spawning. On Desktop, verify the Node host can spawn an external command while Kabibi’s interpreter still handles normal shell syntax. Include two terminal instances to prove state isolation while confirming that both can access the shared workspace.
+
+- **VS Code/Copilot acceptance:** Run a real VS Code extension-host smoke test for the terminal profile and tool registration. Then do a release-gate Copilot check: VS Code presents its normal confirmation; rejecting prevents execution; approving runs the command; canceling interrupts a foreground command; timeout ejects rather than cancels; and the same Copilot session can continue and manage the returned job. A real Copilot interaction should be a release check, not a CI dependency on account credentials or a live model.
+
+- **VSIX validation:** Build from a clean staging state, package it, and inspect the VSIX contents. Verify the PNG generated from the SVG and all selected runtime assets are present; verify that no Kabibi browser terminal renderer or WebGL UI has slipped into the package.
+
+The key pass/fail criterion is end-to-end: **the tested extension artifact** must preserve those behaviors across the VS Code tool API, the session router, the Kabibi shell, and the selected host—not merely pass unit tests for each piece in isolation.
+
+### Manual Testing using AI with browser page automation
