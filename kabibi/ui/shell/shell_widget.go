@@ -101,11 +101,17 @@ func getVer() string {
 
 // formatStartupBanner constructs the pompous retro diagnostic startup banner block.
 func formatStartupBanner(sessionErr error) string {
+	return formatStartupBannerWithAI(sessionErr, true)
+}
+
+func formatStartupBannerWithAI(sessionErr error, aiEnabled bool) string {
 	lines := []string{
 		"🐚 K A B I B I : wearable all-weather shell v" + getVer(),
 		"   - bash",
 		"   - file manager (Ctrl+O)",
-		"   - AI harness (ask anything in prompt)",
+	}
+	if aiEnabled {
+		lines = append(lines, "   - AI harness (ask anything in prompt)")
 	}
 	if sessionErr != nil {
 		lines = append(lines, "Shell initialization failed: "+sessionErr.Error())
@@ -121,6 +127,7 @@ type ShellOptions struct {
 	OnCommandFinished func(cwd string)  // Optional callback invoked after a command or AI turn finishes
 	OpenURL           func(url string) error
 	WorkingDir        string    // Optional initial working directory for the shell runner
+	DisableAI         bool      // Disable AI fallback, commands, and setup in extension-launched shells
 	AIRunner          AIRunner  // Optional AI fallback runner (defaults to LazyAIRunner)
 	Mode              ShellMode // Toggle between ModeStack (default) and ModePlumeHistory
 	Prompt            string    // Optional custom prompt template or fixed prompt (supports PS1 escapes if execSess present)
@@ -186,8 +193,11 @@ type Shell struct {
 // If opts.WriteToScrollback is nil, scrollback is stored locally.
 func New(opts ShellOptions) *Shell {
 	execSess, sessionErr := NewExecutionSession(opts.WorkingDir)
+	if execSess != nil && opts.DisableAI {
+		execSess.SetAIEnabled(false)
+	}
 	aiRunner := opts.AIRunner
-	if aiRunner == nil && execSess != nil {
+	if aiRunner == nil && execSess != nil && !opts.DisableAI {
 		aiRunner = NewLazyAIRunner(execSess)
 	}
 	promptTmpl := opts.Prompt
@@ -230,7 +240,7 @@ func New(opts ShellOptions) *Shell {
 	}
 
 	// Add initial pompous retro startup banner as BlockBanner (block 0)
-	bannerText := formatStartupBanner(sessionErr)
+	bannerText := formatStartupBannerWithAI(sessionErr, !opts.DisableAI)
 	var bannerID int
 	var cwd string
 	if execSess != nil {
@@ -2105,6 +2115,13 @@ func (s *Shell) submitAndExecuteAsync(animate bool) {
 					liveState = nil
 					s.runAIFallback(ctx, blockIdx, rawInput, aiRunner, execSess, startedAt, appendBlockText)
 					return
+				}
+				if errors.Is(err, ErrUnknownCommandAtStart) {
+					head, _, _ := firstCommandHead(parsed)
+					if head == "" {
+						head = strings.TrimSpace(rawInput)
+					}
+					appendBlockText(fmt.Sprintf("%q: executable file not found in $PATH\n", head))
 				}
 				if errors.Is(err, ErrShellBusy) {
 					appendBlockText(err.Error() + "\n")

@@ -40,11 +40,15 @@ type TermKillInput struct {
 }
 
 func formatTermStatusLine(m *ManagedPTY, exited bool, exitCode int, elapsed time.Duration) string {
+	return formatTermStatusLineForID(m, exited, exitCode, elapsed, m.ID)
+}
+
+func formatTermStatusLineForID(m *ManagedPTY, exited bool, exitCode int, elapsed time.Duration, id int) string {
 	if exited {
 		return fmt.Sprintf("[status: EXITED (%d) after %.3fs]", exitCode, elapsed.Seconds())
 	}
 	return fmt.Sprintf("[status: STILL RUNNING (pid_id: %d) after %.3fs | use term_read, term_input, or term_kill with id=%d]",
-		m.ID, elapsed.Seconds(), m.ID)
+		id, elapsed.Seconds(), id)
 }
 
 func registerExecTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
@@ -106,40 +110,19 @@ func registerExecTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		if feedback != nil {
 			feedback(lead)
 		}
-		waitMs := in.WaitMs
-		if waitMs <= 0 {
-			waitMs = 2000
+		result, err := readManagedPTY(ctx, m, in.ID, in)
+		if err != nil {
+			return nil, err
 		}
-		if waitMs > 30000 {
-			waitMs = 30000
-		}
-		onlyNew := true
-		if in.OnlyNew != nil {
-			onlyNew = *in.OnlyNew
-		}
-
-		m.WaitForActivity(ctx, time.Duration(waitMs)*time.Millisecond)
-		text, exited, code, elapsed := m.Snapshot(onlyNew, in.KeepANSI)
-		statusLine := formatTermStatusLine(m, exited, code, elapsed)
+		resultMap := result
 		if feedback != nil {
-			if exited {
-				feedback(lead + fmt.Sprintf("exited (%d)", code))
+			if resultMap["exited"] == true {
+				feedback(lead + fmt.Sprintf("exited (%v)", resultMap["exit_code"]))
 			} else {
 				feedback(lead + "running")
 			}
 		}
-		combined := statusLine
-		if text != "" {
-			combined = text + "\n" + statusLine
-		}
-		return map[string]any{
-			"id":            m.ID,
-			"output":        truncateToolOutput(text),
-			"result":        truncateToolOutput(combined),
-			"exited":        exited,
-			"exit_code":     code,
-			"still_running": !exited,
-		}, nil
+		return resultMap, nil
 	})
 
 	tools["term_input"] = ai.NewTool(func(ctx context.Context, in TermInputInput, feedback ai.LogFeedback) (any, error) {
@@ -151,37 +134,17 @@ func registerExecTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		if feedback != nil {
 			feedback(lead)
 		}
-		if err := m.WriteKeys(in.Keys); err != nil {
+		result, err := inputManagedPTY(ctx, m, in.ID, in)
+		if err != nil {
 			if feedback != nil {
 				feedback(lead + "failed")
 			}
 			return nil, err
 		}
-		waitMs := in.WaitMs
-		if waitMs <= 0 {
-			waitMs = 1000
-		}
-		if waitMs > 30000 {
-			waitMs = 30000
-		}
-		m.WaitForActivity(ctx, time.Duration(waitMs)*time.Millisecond)
-		text, exited, code, elapsed := m.Snapshot(true, false)
-		statusLine := formatTermStatusLine(m, exited, code, elapsed)
 		if feedback != nil {
 			feedback(lead + "ok")
 		}
-		combined := statusLine
-		if text != "" {
-			combined = text + "\n" + statusLine
-		}
-		return map[string]any{
-			"id":            m.ID,
-			"output":        truncateToolOutput(text),
-			"result":        truncateToolOutput(combined),
-			"exited":        exited,
-			"exit_code":     code,
-			"still_running": !exited,
-		}, nil
+		return result, nil
 	})
 
 	tools["term_kill"] = ai.NewTool(func(ctx context.Context, in TermKillInput, feedback ai.LogFeedback) (any, error) {
@@ -193,31 +156,88 @@ func registerExecTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		if feedback != nil {
 			feedback(lead)
 		}
-		sig := in.Signal
-		if strings.TrimSpace(sig) == "" {
-			sig = "SIGTERM"
-		}
-		if err := m.Kill(sig); err != nil {
+		result, err := killManagedPTY(m, in.ID, in)
+		if err != nil {
 			if feedback != nil {
 				feedback(lead + "failed")
 			}
 			return nil, err
 		}
-		text, exited, code, elapsed := m.Snapshot(false, false)
-		statusLine := formatTermStatusLine(m, exited, code, elapsed)
 		if feedback != nil {
 			feedback(lead + "killed")
 		}
-		combined := statusLine
-		if text != "" {
-			combined = text + "\n" + statusLine
-		}
-		return map[string]any{
-			"id":        m.ID,
-			"output":    truncateToolOutput(text),
-			"result":    truncateToolOutput(combined),
-			"exited":    exited,
-			"exit_code": code,
-		}, nil
+		return result, nil
 	})
+}
+
+func readManagedPTY(ctx context.Context, m *ManagedPTY, responseID int, in TermReadInput) (map[string]any, error) {
+	waitMs := in.WaitMs
+	if waitMs <= 0 {
+		waitMs = 2000
+	}
+	if waitMs > 30000 {
+		waitMs = 30000
+	}
+	onlyNew := true
+	if in.OnlyNew != nil {
+		onlyNew = *in.OnlyNew
+	}
+	m.WaitForActivity(ctx, time.Duration(waitMs)*time.Millisecond)
+	text, exited, code, elapsed := m.Snapshot(onlyNew, in.KeepANSI)
+	return managedPTYResult(m, responseID, text, exited, code, elapsed, true), nil
+}
+
+func inputManagedPTY(ctx context.Context, m *ManagedPTY, responseID int, in TermInputInput) (map[string]any, error) {
+	if err := m.WriteKeys(in.Keys); err != nil {
+		return nil, err
+	}
+	waitMs := in.WaitMs
+	if waitMs <= 0 {
+		waitMs = 1000
+	}
+	if waitMs > 30000 {
+		waitMs = 30000
+	}
+	m.WaitForActivity(ctx, time.Duration(waitMs)*time.Millisecond)
+	text, exited, code, elapsed := m.Snapshot(true, false)
+	return managedPTYResult(m, responseID, text, exited, code, elapsed, true), nil
+}
+
+func killManagedPTY(m *ManagedPTY, responseID int, in TermKillInput) (map[string]any, error) {
+	signal := in.Signal
+	if strings.TrimSpace(signal) == "" {
+		signal = "SIGTERM"
+	}
+	if err := m.Kill(signal); err != nil {
+		return nil, err
+	}
+	text, exited, code, elapsed := m.Snapshot(false, false)
+	return managedPTYResult(m, responseID, text, exited, code, elapsed, false), nil
+}
+
+func managedPTYResult(
+	m *ManagedPTY,
+	responseID int,
+	text string,
+	exited bool,
+	code int,
+	elapsed time.Duration,
+	includeStillRunning bool,
+) map[string]any {
+	status := formatTermStatusLineForID(m, exited, code, elapsed, responseID)
+	combined := status
+	if text != "" {
+		combined = text + "\n" + status
+	}
+	result := map[string]any{
+		"id":        responseID,
+		"output":    truncateToolOutput(text),
+		"result":    truncateToolOutput(combined),
+		"exited":    exited,
+		"exit_code": code,
+	}
+	if includeStillRunning {
+		result["still_running"] = !exited
+	}
+	return result
 }

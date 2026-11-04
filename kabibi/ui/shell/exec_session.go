@@ -118,7 +118,8 @@ func (w *dynamicWriter) Write(p []byte) (int, error) {
 // ExecutionSession manages the persistent mvdan.cc/sh/v3 runner, working
 // directory, environment variables, command classification, active PTY, and history records.
 type ExecutionSession struct {
-	mu sync.Mutex
+	mu        sync.Mutex
+	aiEnabled bool
 	// runMu guards only the idle/running transition and the admission snapshot.
 	// It is never held while the interpreter runs; re-entry fails with ErrShellBusy.
 	runMu               sync.Mutex
@@ -389,6 +390,7 @@ func NewExecutionSession(dir string) (*ExecutionSession, error) {
 	}
 	_ = ttyPipeW.Close()
 	es := &ExecutionSession{
+		aiEnabled:    true,
 		ttyIn:        ttyPipeR,
 		streamOut:    dw,
 		nextRecordID: 1,
@@ -413,6 +415,26 @@ func NewExecutionSession(dir string) (*ExecutionSession, error) {
 	es.pathCache = newPathCommandCache()
 	es.requestPathCacheRefresh(true)
 	return es, nil
+}
+
+// SetAIEnabled controls natural-language fallback and the `ai` shell builtin.
+func (es *ExecutionSession) SetAIEnabled(enabled bool) {
+	if es == nil {
+		return
+	}
+	es.mu.Lock()
+	es.aiEnabled = enabled
+	es.mu.Unlock()
+}
+
+// AIEnabled reports whether this shell session may enter Kabibi's AI harness.
+func (es *ExecutionSession) AIEnabled() bool {
+	if es == nil {
+		return false
+	}
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	return es.aiEnabled
 }
 
 // Dir returns the shell runner's current working directory.
@@ -535,14 +557,21 @@ func (es *ExecutionSession) classifyInput(input string, canResolve func(string) 
 	if trimmed == "" {
 		return RouteEmpty, nil
 	}
+	aiEnabled := es.AIEnabled()
 
 	parser := syntax.NewParser(syntax.KeepComments(false))
 	file, err := parser.Parse(strings.NewReader(input), "")
 	if err != nil {
 		if !syntax.IsIncomplete(err) {
+			if !aiEnabled {
+				return RouteShell, nil
+			}
 			return RouteAI, nil
 		}
 		if es.hasShellHead(file, input, canResolve) {
+			return RouteIncomplete, file
+		}
+		if !aiEnabled {
 			return RouteIncomplete, file
 		}
 		return RouteAI, file
@@ -565,6 +594,9 @@ func (es *ExecutionSession) classifyInput(input string, canResolve func(string) 
 
 	head, compound, dynamic := firstCommandHead(file)
 	if compound || dynamic || head == "" || es.hasShellHead(file, input, canResolve) {
+		return RouteShell, file
+	}
+	if !aiEnabled {
 		return RouteShell, file
 	}
 	return RouteAI, file
