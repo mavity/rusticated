@@ -33,10 +33,10 @@ Use the existing Rusticated Go server project to serve the repository (in a sepa
 go run . demo-go/server -r . --addr 127.0.0.1:8080
 ```
 
-Then open `http://127.0.0.1:8080/index.html`. Pass `?artifact=<url>` to load another raw WASM or vegetable artifact; `?wasm=<url>` remains accepted as an alias. No Node-based HTTP server is needed. The browser runtime JavaScript is in standalone files, embedded into the Go package with `//go:embed`, and the browser behavior tests run with:
+Then open `http://127.0.0.1:8080/index.html`. Pass `?artifact=<url>` to load another raw WASM or vegetable artifact; `?wasm=<url>` remains accepted as an alias. No Node-based HTTP server is needed. Kabibi's browser UI and directory-mount implementation live in `kabibi/browser/main.js` and are embedded in the Go package with `//go:embed`; directory mounting does not require a separate deployment script. Browser behavior tests run with:
 
 ```powershell
-node --test .\kabibi\browser\main.test.cjs .\mohabbat\washmhost\js\browser\index.test.js .\mohabbat\washmhost\js\browser\mount_fs.test.cjs
+node --test .\kabibi\browser\main.test.cjs .\mohabbat\washmhost\js\browser\index.test.js .\kabibi\vscode\test\vfs.test.js
 ```
 
 In browser terminals, right-click opens Kabibi's Copy/Paste/Select all menu.
@@ -46,12 +46,12 @@ available; terminal-emulator paste events continue to work in native TUI use.
 Browser terminals also support `/mount` and Ctrl+M/Cmd+M; Ctrl+O remains the
 dual-pane file-manager toggle. The browser asks for read/write access to a
 selected directory, then Kabibi opens its TUI path dialog (default
-`/mnt/<directory-name>`). Washmhost owns the mounted filesystem and exposes the
-mount operation through the same controller used by guest filesystem imports.
-Mounted directories are available to shell commands and the dual-pane file
-manager for the current tab session; their handles are not persisted across
-reloads. Mounting requires the browser File System Access API in a secure
-context. If it is unavailable, the picker is not opened.
+`/mnt/<directory-name>`). Kabibi installs the directory-mount adapter from its
+embedded browser runtime on the active guest filesystem. Mounted directories
+are available to that guest's shell commands and dual-pane file manager for the
+current tab session; their handles are not persisted across reloads. Mounting
+requires the browser File System Access API in a secure context. If it is
+unavailable, the picker is not opened.
 The browser API does not expose Unix permissions, symbolic-link creation, or
 setting file timestamps; permission bits are guest-side metadata, while
 unsupported link/time operations report an error.

@@ -193,8 +193,6 @@ function createMockVSCode(options = {}) {
             const rel = uri.path.slice('/ext/'.length);
             const diskPath = rel === 'washmhost.js'
               ? path.resolve(extRoot, '..', '..', 'mohabbat', 'washmhost', 'js', 'browser', 'index.js')
-              : rel === 'mount_fs.js'
-                ? path.resolve(extRoot, '..', '..', 'mohabbat', 'washmhost', 'js', 'browser', 'mount_fs.js')
               : path.join(extRoot, rel);
             if (!fs.existsSync(diskPath)) {
               const err = new Error(`FileNotFound: ${diskPath}`);

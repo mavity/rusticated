@@ -367,6 +367,177 @@ class AsyncIndexedDBFS {
   }
 }
 
+function browserFilesystemError(code, message) {
+  return Object.assign(new Error(message), { code });
+}
+
+function createBrowserFilesystem(baseFS) {
+  const filesystem = {
+    init() {
+      return baseFS.init();
+    },
+
+    seed(extraEntries) {
+      return baseFS.seed(extraEntries);
+    },
+
+    getEntry(path) {
+      return baseFS.getEntry(path);
+    },
+
+    putEntry(entry) {
+      return baseFS.putEntry(entry);
+    },
+
+    removeEntry(path) {
+      return baseFS.removeEntry(path);
+    },
+
+    readdir(path) {
+      return baseFS.readdir(path);
+    },
+
+    async statEntry(path) {
+      if (typeof baseFS.statEntry === 'function') return baseFS.statEntry(path);
+      return baseFS.getEntry(path);
+    },
+
+    async chmodEntry(entry) {
+      if (typeof baseFS.chmodEntry === 'function') return baseFS.chmodEntry(entry);
+      if (entry.type === 'file' && entry.content === undefined) {
+        const current = await baseFS.getEntry(entry.path);
+        return baseFS.putEntry({ ...(current || {}), ...entry });
+      }
+      return baseFS.putEntry(entry);
+    },
+
+    async setEntryTimes(entry) {
+      if (typeof baseFS.setEntryTimes === 'function') return baseFS.setEntryTimes(entry);
+      if (entry.type === 'file' && entry.content === undefined) {
+        const current = await baseFS.getEntry(entry.path);
+        return baseFS.putEntry({ ...(current || {}), ...entry });
+      }
+      return baseFS.putEntry(entry);
+    },
+
+    async renameEntry(source, destination) {
+      if (source === destination) return true;
+      if (destination.startsWith(`${source}/`)) {
+        throw browserFilesystemError('EINVAL', 'cannot move a directory into itself');
+      }
+      if (typeof baseFS.renameEntry === 'function') {
+        return baseFS.renameEntry(source, destination);
+      }
+      if (!(await filesystem.getEntry(source))) return false;
+      if (await filesystem.getEntry(destination)) {
+        throw browserFilesystemError('EEXIST', `destination already exists: ${destination}`);
+      }
+
+      async function copyTree(sourcePath, destinationPath) {
+        const entry = await filesystem.getEntry(sourcePath);
+        if (!entry) {
+          throw browserFilesystemError('ENOENT', `no such file or directory: ${sourcePath}`);
+        }
+        if (entry.type === 'dir') {
+          await filesystem.putEntry({
+            path: destinationPath,
+            type: 'dir',
+            mode: entry.mode || 0o755,
+            mtime: entry.mtime
+          });
+          for (const child of await filesystem.readdir(sourcePath)) {
+            const name = child.path.slice(sourcePath === '/' ? 1 : sourcePath.length + 1);
+            await copyTree(child.path, `${destinationPath}/${name}`);
+          }
+          return;
+        }
+        await filesystem.putEntry({ ...entry, path: destinationPath });
+      }
+
+      async function removeTree(path) {
+        const entry = await filesystem.getEntry(path);
+        if (!entry) return;
+        if (entry.type === 'dir') {
+          for (const child of await filesystem.readdir(path)) {
+            await removeTree(child.path);
+          }
+        }
+        await filesystem.removeEntry(path);
+      }
+
+      await copyTree(source, destination);
+      try {
+        await removeTree(source);
+      } catch (error) {
+        try {
+          await removeTree(destination);
+        } catch (cleanupError) {
+          throw new Error(
+            `move failed: ${error.message}; destination cleanup failed: ${cleanupError.message}`
+          );
+        }
+        throw error;
+      }
+      return true;
+    },
+
+    async resolveEntryPath(pathValue, cwd = '/', followFinal = true) {
+      const raw = String(pathValue || '').replace(/\\/g, '/');
+      const absolute = raw.startsWith('/') ? raw : `${cwd}/${raw}`;
+      const pending = absolute.split('/');
+      const resolved = [];
+      let followed = 0;
+      let finalEntry = null;
+
+      while (pending.length > 0) {
+        const component = pending.shift();
+        if (!component || component === '.') continue;
+        if (component === '..') {
+          resolved.pop();
+          finalEntry = null;
+          continue;
+        }
+
+        const candidate = `/${resolved.concat(component).join('/')}`;
+        const hasMore = pending.some((part) => part !== '' && part !== '.');
+        const entry = await filesystem.statEntry(candidate);
+        if (!entry) {
+          if (hasMore) {
+            throw browserFilesystemError('ENOENT', `no such file or directory: ${candidate}`);
+          }
+          return { path: candidate, entry: null };
+        }
+
+        if (entry.type === 'symlink' && (hasMore || followFinal)) {
+          if (++followed > 40) {
+            throw browserFilesystemError('ELOOP', 'too many symbolic links');
+          }
+          if (typeof entry.target !== 'string' || entry.target.length === 0) {
+            throw browserFilesystemError('ENOENT', 'empty symbolic link target');
+          }
+          if (entry.target.startsWith('/')) resolved.length = 0;
+          pending.unshift(...entry.target.replace(/\\/g, '/').split('/'));
+          finalEntry = null;
+          continue;
+        }
+        if (hasMore && entry.type !== 'dir') {
+          throw browserFilesystemError('ENOTDIR', `not a directory: ${candidate}`);
+        }
+        resolved.push(component);
+        finalEntry = entry;
+      }
+
+      const path = resolved.length === 0 ? '/' : `/${resolved.join('/')}`;
+      return {
+        path,
+        entry: finalEntry !== null ? finalEntry : await filesystem.statEntry(path)
+      };
+    }
+  };
+
+  return filesystem;
+}
+
 // ── HostState: Handles, Overlapped Ops, and Wakers ────────────────────────────
 class HostState {
   constructor(memory = null) {
@@ -1988,31 +2159,6 @@ async function unpackVegetable(buffer) {
 // ── Main Entry Closure ───────────────────────────────────────────────────────
 let evalOverflow = '';
 let activeHost = null;
-const browserHostScriptURL = globalThis.document && globalThis.document.currentScript
-  ? globalThis.document.currentScript.src
-  : '';
-let browserMountFSLoadPromise = null;
-
-function ensureBrowserMountFS() {
-  if (globalThis.WashmhostBrowserMountFS) return Promise.resolve();
-  if (!globalThis.document || !browserHostScriptURL) return Promise.resolve();
-  if (!browserMountFSLoadPromise) {
-    browserMountFSLoadPromise = new Promise((resolve, reject) => {
-      const script = globalThis.document.createElement('script');
-      script.src = new URL('./mount_fs.js', browserHostScriptURL).href;
-      script.onload = () => {
-        if (globalThis.WashmhostBrowserMountFS) {
-          resolve();
-        } else {
-          reject(new Error('browser mount filesystem loaded but did not expose its API'));
-        }
-      };
-      script.onerror = () => reject(new Error(`failed to load ${script.src}`));
-      globalThis.document.head.appendChild(script);
-    });
-  }
-  return browserMountFSLoadPromise;
-}
 
 function normalizeVegetableCandidates(target) {
   if (Array.isArray(target)) {
@@ -2082,24 +2228,12 @@ async function loadVegetable(candidates = ['./kabibi.bat', './release/dist/kabib
 }
 
 async function washmhost(params = {}) {
-  await ensureBrowserMountFS();
   const hostState = new HostState();
   if (typeof params.cwd === 'string' && params.cwd.trim() !== '') {
     hostState.cwd = resolvePath('/', params.cwd);
   }
   const baseFS = params.fs || new AsyncIndexedDBFS(params.dbName || 'RusticatedFS');
-  const fs = typeof baseFS.mountAt === 'function'
-    ? baseFS
-    : globalThis.WashmhostBrowserMountFS &&
-        typeof globalThis.WashmhostBrowserMountFS.create === 'function'
-      ? globalThis.WashmhostBrowserMountFS.create(baseFS)
-      : baseFS;
-  const mountDirectory = (directoryHandle, guestPath) => {
-    if (typeof fs.mountAt !== 'function') {
-      throw new Error('browser mount filesystem is unavailable');
-    }
-    return fs.mountAt(directoryHandle, guestPath);
-  };
+  const fs = createBrowserFilesystem(baseFS);
 
   // Whitebox / Unit Test Mode
   if (params.test === true) {
@@ -2110,7 +2244,6 @@ async function washmhost(params = {}) {
       hostState,
       fs,
       env,
-      mountDirectory,
       resolvePath: (target) => resolvePath(hostState.cwd, target),
       marshalStat,
       writeOverlapped: (ovPtr, code, cont, ext) => hostState.writeOverlapped(ovPtr, code, cont, ext)
@@ -2194,7 +2327,6 @@ async function washmhost(params = {}) {
     getMemory: () => hostState.memory,
     getInstance: () => instance,
     getFS: () => fs,
-    mountDirectory,
     getLoadedWasmURL: () => loadedWasmURL,
     terminate: (exitCode = 0) => {
       hostState.forcedExitCode = exitCode;
