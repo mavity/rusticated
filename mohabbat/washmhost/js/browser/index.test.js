@@ -5,7 +5,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const washmhostSource = fs.readFileSync(new URL('./index.js', import.meta.url), 'utf8');
-const mountFSFactorySource = fs.readFileSync(new URL('./mount_fs.js', import.meta.url), 'utf8');
 const browserHostContext = vm.createContext({
   AbortController: globalThis.AbortController,
   ArrayBuffer,
@@ -25,7 +24,6 @@ const browserHostContext = vm.createContext({
   WebAssembly,
   console
 });
-vm.runInContext(mountFSFactorySource, browserHostContext, { filename: 'washmhost-mount-fs.js' });
 vm.runInContext(washmhostSource, browserHostContext, { filename: 'washmhost-browser.js' });
 
 const {
@@ -78,6 +76,7 @@ test('Browser host script exposes only its documented API', () => {
   assert.equal(vm.runInContext('typeof evalOverflow', browserHostContext), 'undefined');
   assert.equal(vm.runInContext('typeof __rustica_overflow', browserHostContext), 'undefined');
   assert.equal(vm.runInContext('typeof __rustica_take_overflow', browserHostContext), 'undefined');
+  assert.equal(vm.runInContext('typeof WashmhostBrowserMountFS', browserHostContext), 'undefined');
 });
 
 test('Overlapped struct marshalling and completion flags', () => {
@@ -1197,11 +1196,9 @@ test('loadVegetable tries relative candidate first and falls back to release/dis
   assert.equal(controller.getLoadedWasmURL(), './release/dist/kabibi.bat');
   assert.equal(controller.hasTerminal(), false);
   const filesystem = controller.getFS();
-  assert.equal(typeof controller.mountDirectory, 'function');
-  assert.equal(await controller.mountDirectory({ kind: 'directory' }, '/mnt/work'), '/mnt/work');
+  assert.equal(typeof controller.mountDirectory, 'undefined');
+  assert.equal(typeof filesystem.mountAt, 'undefined');
   assert.equal(controller.getFS(), filesystem);
-  assert.equal(filesystem.mounts.length, 1);
-  assert.equal(filesystem.mounts[0].path, '/mnt/work');
 
   const attachedOut = [];
   let currentSize = { cols: 72, rows: 20 };
@@ -1214,12 +1211,14 @@ test('loadVegetable tries relative candidate first and falls back to release/dis
   controller.terminate(0);
 });
 
-test('guest filesystem imports see directories mounted after host startup', async () => {
+test('guest filesystem imports use the base filesystem after host startup', async () => {
   const memory = new WebAssembly.Memory({ initial: 1 });
   const host = await washmhost({ test: true, memory });
   const filesystem = host.fs;
-  assert.equal(typeof host.mountDirectory, 'function');
-  assert.equal(await host.mountDirectory({ kind: 'directory' }, '/mnt/work'), '/mnt/work');
+  assert.equal(typeof host.mountDirectory, 'undefined');
+  assert.equal(typeof filesystem.mountAt, 'undefined');
+  await filesystem.putEntry({ path: '/mnt', type: 'dir' });
+  await filesystem.putEntry({ path: '/mnt/work', type: 'dir' });
   assert.equal(host.fs, filesystem);
 
   const pathBytes = new TextEncoder().encode('/mnt/work');

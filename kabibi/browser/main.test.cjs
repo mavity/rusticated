@@ -193,6 +193,136 @@ class FakeFitAddon {
   fit() {}
 }
 
+function namedError(name) {
+  const error = new Error(name);
+  error.name = name;
+  return error;
+}
+
+class FakeFileHandle {
+  constructor(name, content = new Uint8Array()) {
+    this.kind = 'file';
+    this.name = name;
+    this.content = new Uint8Array(content);
+  }
+
+  async getFile() {
+    const bytes = new Uint8Array(this.content);
+    return {
+      size: bytes.length,
+      lastModified: 1,
+      arrayBuffer: async () => bytes.buffer
+    };
+  }
+
+  async createWritable() {
+    let bytes = new Uint8Array();
+    return {
+      write: async (value) => { bytes = new Uint8Array(value); },
+      close: async () => { this.content = bytes; }
+    };
+  }
+}
+
+class FakeDirectoryHandle {
+  constructor(name = '') {
+    this.kind = 'directory';
+    this.name = name;
+    this.children = new Map();
+  }
+
+  async getDirectoryHandle(name, options = {}) {
+    let child = this.children.get(name);
+    if (!child && options.create) {
+      child = new FakeDirectoryHandle(name);
+      this.children.set(name, child);
+    }
+    if (!child) throw namedError('NotFoundError');
+    if (child.kind !== 'directory') throw namedError('TypeMismatchError');
+    return child;
+  }
+
+  async getFileHandle(name, options = {}) {
+    let child = this.children.get(name);
+    if (!child && options.create) {
+      child = new FakeFileHandle(name);
+      this.children.set(name, child);
+    }
+    if (!child) throw namedError('NotFoundError');
+    if (child.kind !== 'file') throw namedError('TypeMismatchError');
+    return child;
+  }
+
+  async removeEntry(name) {
+    const child = this.children.get(name);
+    if (!child) throw namedError('NotFoundError');
+    if (child.kind === 'directory' && child.children.size > 0) {
+      throw namedError('InvalidModificationError');
+    }
+    this.children.delete(name);
+  }
+
+  async *entries() {
+    yield* this.children.entries();
+  }
+}
+
+function createMemoryFilesystem(entries = []) {
+  const storedEntries = new Map([
+    ['/', { path: '/', type: 'dir', mode: 0o755 }]
+  ]);
+  for (const entry of entries) storedEntries.set(entry.path, { ...entry });
+
+  const cloneEntry = (entry) => entry && ({
+    ...entry,
+    ...(entry.content ? { content: new Uint8Array(entry.content) } : {})
+  });
+  return {
+    async init() {},
+    async seed(extraEntries = []) {
+      for (const entry of extraEntries) {
+        if (!storedEntries.has(entry.path)) storedEntries.set(entry.path, cloneEntry(entry));
+      }
+    },
+    async statEntry(path) {
+      return cloneEntry(storedEntries.get(path) || null);
+    },
+    async getEntry(path) {
+      return cloneEntry(storedEntries.get(path) || null);
+    },
+    async putEntry(entry) {
+      storedEntries.set(entry.path, cloneEntry(entry));
+    },
+    async chmodEntry(entry) {
+      const current = storedEntries.get(entry.path) || {};
+      storedEntries.set(entry.path, { ...current, ...entry });
+    },
+    async setEntryTimes(entry) {
+      const current = storedEntries.get(entry.path) || {};
+      storedEntries.set(entry.path, { ...current, ...entry });
+    },
+    async removeEntry(path) {
+      return storedEntries.delete(path);
+    },
+    async renameEntry(source, destination) {
+      const entry = storedEntries.get(source);
+      if (!entry || storedEntries.has(destination)) return false;
+      storedEntries.delete(source);
+      storedEntries.set(destination, { ...entry, path: destination });
+      return true;
+    },
+    async readdir(path) {
+      const prefix = path === '/' ? '/' : `${path}/`;
+      return Array.from(storedEntries.values())
+        .filter((entry) => {
+          if (entry.path === path || !entry.path.startsWith(prefix)) return false;
+          return !entry.path.slice(prefix.length).includes('/');
+        })
+        .map(cloneEntry);
+    }
+  };
+}
+
 function createHarness() {
   const document = new FakeDocument();
   const window = {
@@ -418,12 +548,13 @@ test('browser terminal supports right-click clipboard menu and Ctrl/Cmd+V', asyn
 test('Ctrl/Cmd+M selects a directory and notifies the guest to open its TUI path dialog', async () => {
   const { document, window, api } = createHarness();
   let pickerOptions;
-  const mountedPaths = [];
+  const guestFS = createMemoryFilesystem();
+  const selectedDirectory = new FakeDirectoryHandle('work files');
   const stdin = [];
   let signalCount = 0;
   window.showDirectoryPicker = async (options) => {
     pickerOptions = options;
-    return { kind: 'directory', name: 'work files' };
+    return selectedDirectory;
   };
   const mounted = await api.mount({
     document,
@@ -431,10 +562,7 @@ test('Ctrl/Cmd+M selects a directory and notifies the guest to open its TUI path
     Terminal: FakeTerminal,
     FitAddon: FakeFitAddon,
     host: {
-      async mountDirectory(directory, path) {
-        mountedPaths.push({ directory, path });
-        return path;
-      },
+      getFS() { return guestFS; },
       pushStdin(data) { stdin.push(data); },
       triggerSignal() { signalCount += 1; }
     }
@@ -460,9 +588,9 @@ test('Ctrl/Cmd+M selects a directory and notifies the guest to open its TUI path
   assert.equal(document.getElementById('kabibi-mount-path-dialog'), null);
   assert.equal(document.getElementById('kabibi-mount-path-input'), null);
   assert.equal(await mounted.mountSelectedDirectory('/home/user/work'), '/home/user/work');
-  assert.equal(mountedPaths.length, 1);
-  assert.equal(mountedPaths[0].path, '/home/user/work');
-  assert.equal(mountedPaths[0].directory.name, 'work files');
+  assert.equal(guestFS.mounts.length, 1);
+  assert.equal(guestFS.mounts[0].path, '/home/user/work');
+  assert.equal(guestFS.mounts[0].handle, selectedDirectory);
   assert.equal(signalCount - initialSignalCount, 2);
 
   const commandEvent = {
@@ -478,7 +606,6 @@ test('Ctrl/Cmd+M selects a directory and notifies the guest to open its TUI path
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(stdin, ['\uE000', '\uE000']);
   assert.equal(mounted.selectedMountDirectoryName(), 'work files');
-  assert.equal(mountedPaths.length, 1);
   mounted.dispose();
 });
 
@@ -498,7 +625,7 @@ test('unsupported directory mounting does not open a picker or DOM dialog', asyn
 
 test('cancelling the picker or path selection leaves the host mount table unchanged', async () => {
   const { document, window, api } = createHarness();
-  const mountedPaths = [];
+  const guestFS = createMemoryFilesystem();
   let cancelPicker = true;
   window.showDirectoryPicker = async () => {
     if (cancelPicker) {
@@ -514,10 +641,7 @@ test('cancelling the picker or path selection leaves the host mount table unchan
     Terminal: FakeTerminal,
     FitAddon: FakeFitAddon,
     host: {
-      async mountDirectory(directory, path) {
-        mountedPaths.push({ directory, path });
-        return path;
-      },
+      getFS() { return guestFS; },
       pushStdin() {},
       triggerSignal() {}
     }
@@ -530,18 +654,15 @@ test('cancelling the picker or path selection leaves the host mount table unchan
   assert.equal(await mounted.selectMountDirectory(), 'work');
   mounted.cancelMountSelection();
   assert.equal(mounted.selectedMountDirectoryName(), '');
-  assert.equal(mountedPaths.length, 0);
+  assert.equal(guestFS.mounts.length, 0);
   mounted.dispose();
 });
 
-test('browser mount flow delegates mounting to the active washmhost controller', async () => {
+test('browser mount flow uses the Kabibi-installed adapter on the active guest filesystem', async () => {
   const { document, window, api } = createHarness();
-  const calls = [];
+  const guestFS = createMemoryFilesystem();
   const host = {
-    mountDirectory: async (directory, path) => {
-      calls.push({ directory, path });
-      return path;
-    },
+    getFS: () => guestFS,
     hasTerminal: () => false,
     pushStdin() {},
     triggerSignal() {}
@@ -553,11 +674,164 @@ test('browser mount flow delegates mounting to the active washmhost controller',
     Terminal: FakeTerminal,
     FitAddon: FakeFitAddon
   });
-  window.showDirectoryPicker = async () => ({ kind: 'directory', name: 'work' });
+  const directory = new FakeDirectoryHandle('work');
+  window.showDirectoryPicker = async () => directory;
   await mounted.selectMountDirectory();
   assert.equal(await mounted.mountSelectedDirectory('/mnt/work'), '/mnt/work');
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].path, '/mnt/work');
+  assert.equal(guestFS.mounts.length, 1);
+  assert.equal(guestFS.mounts[0].handle, directory);
+  mounted.dispose();
+});
+
+test('Kabibi-installed filesystem routes reads, writes, listings, links, and moves through mounts', async () => {
+  const { document, window, api } = createHarness();
+  const guestFS = createMemoryFilesystem([
+    { path: '/home', type: 'dir', mode: 0o755 },
+    { path: '/home/user', type: 'dir', mode: 0o755 },
+    { path: '/home/user/alias', type: 'symlink', target: '/mnt/drive' }
+  ]);
+  const host = { getFS: () => guestFS, pushStdin() {}, triggerSignal() {} };
+  const mounted = await api.mount({
+    document,
+    window,
+    host,
+    Terminal: FakeTerminal,
+    FitAddon: FakeFitAddon
+  });
+  const directory = new FakeDirectoryHandle('drive');
+  directory.children.set(
+    'readme.txt',
+    new FakeFileHandle('readme.txt', new TextEncoder().encode('hello'))
+  );
+  directory.children.set(
+    ' spaced ',
+    new FakeFileHandle(' spaced ', new TextEncoder().encode('space'))
+  );
+  window.showDirectoryPicker = async () => directory;
+  await mounted.selectMountDirectory();
+  await mounted.mountSelectedDirectory('/mnt/drive');
+
+  assert.equal((await guestFS.statEntry('/mnt')).type, 'dir');
+  assert.deepEqual(
+    Array.from(await guestFS.readdir('/mnt'), (entry) => entry.path),
+    ['/mnt/drive']
+  );
+  assert.equal((await guestFS.statEntry('/mnt/drive/readme.txt')).size, 5);
+  assert.equal(
+    new TextDecoder().decode((await guestFS.getEntry('/mnt/drive/readme.txt')).content),
+    'hello'
+  );
+  assert.equal(
+    new TextDecoder().decode((await guestFS.getEntry('/mnt/drive/ spaced ')).content),
+    'space'
+  );
+  assert.equal(
+    (await guestFS.resolveEntryPath('/home/user/alias/readme.txt')).path,
+    '/mnt/drive/readme.txt'
+  );
+
+  await guestFS.putEntry({ path: '/mnt/drive/new', type: 'dir' });
+  await guestFS.putEntry({
+    path: '/mnt/drive/new/file.bin',
+    type: 'file',
+    content: new Uint8Array([0, 1, 255]),
+    size: 3
+  });
+  assert.deepEqual(
+    Array.from((await guestFS.getEntry('/mnt/drive/new/file.bin')).content),
+    [0, 1, 255]
+  );
+  const createdFile = await guestFS.getEntry('/mnt/drive/new/file.bin');
+  await guestFS.chmodEntry({ ...createdFile, mode: 0o600 });
+  assert.equal((await guestFS.statEntry('/mnt/drive/new/file.bin')).mode, 0o600);
+  await assert.rejects(guestFS.setEntryTimes(createdFile), { code: 'ENOTSUP' });
+
+  assert.equal(await guestFS.renameEntry('/mnt/drive/new/file.bin', '/home/user/copied.bin'), true);
+  assert.deepEqual(
+    Array.from((await guestFS.getEntry('/home/user/copied.bin')).content),
+    [0, 1, 255]
+  );
+  assert.equal(await guestFS.getEntry('/mnt/drive/new/file.bin'), null);
+  await guestFS.putEntry({ path: '/mnt/drive/new/deep', type: 'dir' });
+  await guestFS.putEntry({
+    path: '/mnt/drive/new/deep/nested.txt',
+    type: 'file',
+    content: new TextEncoder().encode('nested'),
+    size: 6
+  });
+  assert.equal(await guestFS.renameEntry('/mnt/drive/new', '/home/user/copied-dir'), true);
+  assert.equal(
+    new TextDecoder().decode((await guestFS.getEntry('/home/user/copied-dir/deep/nested.txt')).content),
+    'nested'
+  );
+  assert.equal(await guestFS.getEntry('/mnt/drive/new'), null);
+  assert.equal(await guestFS.removeEntry('/mnt/drive/readme.txt'), true);
+  assert.equal(await guestFS.getEntry('/mnt/drive/readme.txt'), null);
+  mounted.dispose();
+});
+
+test('Kabibi mount adapter rejects unsafe and overlapping mount points', async () => {
+  const { document, window, api } = createHarness();
+  const guestFS = createMemoryFilesystem([
+    { path: '/occupied', type: 'dir', mode: 0o755 },
+    { path: '/occupied/file', type: 'file', content: new Uint8Array([1]) }
+  ]);
+  const mounted = await api.mount({
+    document,
+    window,
+    host: { getFS: () => guestFS, pushStdin() {}, triggerSignal() {} },
+    Terminal: FakeTerminal,
+    FitAddon: FakeFitAddon
+  });
+  const first = new FakeDirectoryHandle('drive');
+
+  await assert.rejects(guestFS.mountAt(first, 'relative/path'), { code: 'EINVAL' });
+  await assert.rejects(guestFS.mountAt(first, '/../../escape'), { code: 'EINVAL' });
+  await assert.rejects(guestFS.mountAt(first, '/'), { code: 'EINVAL' });
+  await assert.rejects(guestFS.mountAt(first, '/dev/eval'), { code: 'EINVAL' });
+  await assert.rejects(guestFS.mountAt(first, '/occupied'), { code: 'EEXIST' });
+  await assert.rejects(guestFS.mountAt(first, '/occupied/file/nested'), { code: 'ENOTDIR' });
+  assert.equal(await guestFS.mountAt(first, '/mnt/drive'), '/mnt/drive');
+  await assert.rejects(
+    guestFS.mountAt(new FakeDirectoryHandle('nested'), '/mnt/drive/nested'),
+    { code: 'EBUSY' }
+  );
+  await assert.rejects(
+    guestFS.mountAt(new FakeDirectoryHandle('parent'), '/mnt'),
+    { code: 'EBUSY' }
+  );
+  await assert.rejects(
+    guestFS.putEntry({ path: '/mnt/drive/link', type: 'symlink', target: '/tmp' }),
+    { code: 'ENOTSUP' }
+  );
+  const getEntry = guestFS.getEntry;
+  const secondMount = await api.mount({
+    document,
+    window,
+    host: { getFS: () => guestFS, pushStdin() {}, triggerSignal() {} },
+    Terminal: FakeTerminal,
+    FitAddon: FakeFitAddon
+  });
+  assert.equal(guestFS.getEntry, getEntry);
+  secondMount.dispose();
+  mounted.dispose();
+});
+
+test('Kabibi mount adapter translates revoked browser directory permissions', async () => {
+  const { document, window, api } = createHarness();
+  const guestFS = createMemoryFilesystem();
+  const mounted = await api.mount({
+    document,
+    window,
+    host: { getFS: () => guestFS, pushStdin() {}, triggerSignal() {} },
+    Terminal: FakeTerminal,
+    FitAddon: FakeFitAddon
+  });
+  const restricted = new FakeDirectoryHandle('restricted');
+  restricted.getFileHandle = async () => { throw namedError('NotAllowedError'); };
+
+  await guestFS.mountAt(restricted, '/mnt/restricted');
+  await assert.rejects(guestFS.getEntry('/mnt/restricted/private.txt'), { code: 'EACCES' });
   mounted.dispose();
 });
 

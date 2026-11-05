@@ -57,7 +57,7 @@
   let toolBridgePromise = null;
 
   /**
-   * Dynamically loads the washmhost mount adapter, `washmhost.js`, and `vfs.js`
+   * Dynamically loads `washmhost.js` and `vfs.js`
    * from the extension directory via `vscode.workspace.fs.readFile` so it works
    * identically in `vscode.dev` and Desktop VS Code.
    *
@@ -66,7 +66,6 @@
    */
   async function ensureRuntimeModules(vscode, extensionUri) {
     if (globalThis.washmhostExports &&
-        globalThis.WashmhostBrowserMountFS &&
         globalThis.KabibiVSCodeVFS) {
       return {
         washmhostExports: globalThis.washmhostExports,
@@ -77,13 +76,6 @@
     if (!runtimeModulesPromise) {
       runtimeModulesPromise = (async () => {
         const decoder = new TextDecoder('utf-8');
-
-        if (!globalThis.WashmhostBrowserMountFS) {
-          const mountFSUri = vscode.Uri.joinPath(extensionUri, 'mount_fs.js');
-          const mountFSBytes = await vscode.workspace.fs.readFile(mountFSUri);
-          const mountFSCode = decoder.decode(mountFSBytes);
-          (0, eval)(mountFSCode);
-        }
 
         if (!globalThis.washmhostExports) {
           const whUri = vscode.Uri.joinPath(extensionUri, 'washmhost.js');
@@ -99,10 +91,8 @@
           (0, eval)(vfsCode);
         }
 
-        if (!globalThis.washmhostExports ||
-            !globalThis.WashmhostBrowserMountFS ||
-            !globalThis.KabibiVSCodeVFS) {
-          throw new Error('Failed to initialize washmhostExports, mount filesystem, or KabibiVSCodeVFS');
+        if (!globalThis.washmhostExports || !globalThis.KabibiVSCodeVFS) {
+          throw new Error('Failed to initialize washmhostExports or KabibiVSCodeVFS');
         }
 
         return {
