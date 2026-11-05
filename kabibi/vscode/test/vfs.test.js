@@ -460,15 +460,46 @@ test('workspace folder mount names disambiguate duplicate names', () => {
 
 test('manifest contributes the one-shot tools on the supported VS Code version', () => {
   assert.equal(manifest.engines.vscode, '^1.99.0');
+  assert.equal(manifest.displayName, '🐚︎ Kabibi Shell');
   assert.equal(manifest.icon, 'icon.png');
   assert.equal(manifest.capabilities.untrustedWorkspaces.supported, false);
+  assert.equal(manifest.contributes.terminal.profiles[0].title, '🐚︎ Kabibi');
+  assert.equal(manifest.contributes.commands[0].title, '🐚︎ Kabibi: Open Shell');
   assert.deepEqual(
     manifest.contributes.languageModelTools.map((tool) => tool.name),
     ['kabibi_exec', 'kabibi_term_read', 'kabibi_term_input', 'kabibi_term_kill']
   );
+  assert.ok(manifest.contributes.languageModelTools.every((tool) =>
+    tool.displayName.startsWith('🐚︎ Kabibi ')
+  ));
   const execTool = manifest.contributes.languageModelTools[0];
   assert.equal(execTool.inputSchema.properties.shell_id, undefined);
   assert.deepEqual(execTool.inputSchema.required, ['command']);
+});
+
+test('visible terminal instances use the compact shell marker', async () => {
+  const vscode = createMockVSCode();
+  const extension = {};
+  const context = {
+    extensionUri: vscode._debug.extensionUri,
+    subscriptions: []
+  };
+  globalThis.KabibiVSCodeExtension.registerVscodeExtension(extension, vscode);
+  extension.activate(context);
+
+  try {
+    const profile = await vscode._debug.registeredProfiles
+      .get('kabibi.terminalProfile')
+      .provideTerminalProfile();
+    assert.equal(profile.name, '🐚︎ Kb');
+
+    const opened = vscode._debug.registeredCommands
+      .get('kabibi.openTerminal')();
+    assert.equal(opened.terminal.name, '🐚︎ Kb');
+    assert.equal(opened.terminal.shown, true);
+  } finally {
+    await extension.deactivate();
+  }
 });
 
 test('registers tools through current and legacy VS Code APIs', () => {

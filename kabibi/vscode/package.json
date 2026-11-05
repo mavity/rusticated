@@ -1,6 +1,6 @@
 {
   "name": "kabibi-vscode",
-  "displayName": "Kabibi Shell",
+  "displayName": "🐚︎ Kabibi Shell",
   "description": "Kabibi shell for VS Code with Copilot terminal tools",
   "version": "0.1.0",
   "publisher": "rusticated",
@@ -15,7 +15,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/oyin-bo/rusticated"
+    "url": "https://github.com/mavity/rusticated"
   },
   "galleryBanner": {
     "color": "#202020",
@@ -50,7 +50,7 @@
     "commands": [
       {
         "command": "kabibi.openTerminal",
-        "title": "Kabibi: Open Shell"
+        "title": "🐚︎ Kabibi: Open Shell"
       }
     ],
     "menus": {
@@ -64,7 +64,7 @@
       "profiles": [
         {
           "id": "kabibi.terminalProfile",
-          "title": "Kabibi",
+          "title": "🐚︎ Kabibi",
           "icon": "terminal"
         }
       ]
@@ -74,7 +74,7 @@
         "name": "kabibi_exec",
         "toolReferenceName": "kabibi.exec",
         "canBeReferencedInPrompt": true,
-        "displayName": "Kabibi exec",
+        "displayName": "🐚︎ Kabibi exec",
         "modelDescription": "Run a shell command in a fresh Kabibi shell execution session. Commands that outlive the foreground timeout return an ID for term_read, term_input, and term_kill.",
         "userDescription": "Execute a command in an independent Kabibi shell.",
         "inputSchema": {
@@ -106,7 +106,7 @@
         "name": "kabibi_term_read",
         "toolReferenceName": "kabibi.term_read",
         "canBeReferencedInPrompt": true,
-        "displayName": "Kabibi term_read",
+        "displayName": "🐚︎ Kabibi term_read",
         "modelDescription": "Read output from a running or finished Kabibi background job by its ID returned from exec.",
         "userDescription": "Read output from a Kabibi background job.",
         "inputSchema": {
@@ -138,7 +138,7 @@
         "name": "kabibi_term_input",
         "toolReferenceName": "kabibi.term_input",
         "canBeReferencedInPrompt": true,
-        "displayName": "Kabibi term_input",
+        "displayName": "🐚︎ Kabibi term_input",
         "modelDescription": "Send text or symbolic key tokens to a Kabibi background job by its ID returned from exec.",
         "userDescription": "Send input to a Kabibi background job.",
         "inputSchema": {
@@ -167,7 +167,7 @@
         "name": "kabibi_term_kill",
         "toolReferenceName": "kabibi.term_kill",
         "canBeReferencedInPrompt": true,
-        "displayName": "Kabibi term_kill",
+        "displayName": "🐚︎ Kabibi term_kill",
         "modelDescription": "Terminate or interrupt a Kabibi background job by its ID returned from exec.",
         "userDescription": "Terminate a Kabibi background job.",
         "inputSchema": {
