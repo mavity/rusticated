@@ -1,0 +1,8 @@
+{
+  "folders": [
+    { "path": "roots/alpha" },
+    { "path": "roots/beta" },
+    { "path": "roots/duplicate-a/shared" },
+    { "path": "roots/duplicate-b/shared" }
+  ]
+}

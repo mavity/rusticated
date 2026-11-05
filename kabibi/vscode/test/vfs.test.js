@@ -471,6 +471,29 @@ test('manifest contributes the one-shot tools on the supported VS Code version',
   assert.deepEqual(execTool.inputSchema.required, ['command']);
 });
 
+test('registers tools through current and legacy VS Code APIs', () => {
+  for (const apiName of ['registerTool', 'registerLanguageModelTool']) {
+    const registered = new Map();
+    const subscriptions = [];
+    const lm = {
+      [apiName]: (name, tool) => {
+        registered.set(name, tool);
+        return { dispose: () => registered.delete(name) };
+      }
+    };
+
+    globalThis.KabibiVSCodeExtension.registerLanguageModelTools({ lm }, { subscriptions });
+
+    assert.deepEqual([...registered.keys()], [
+      'kabibi_exec',
+      'kabibi_term_read',
+      'kabibi_term_input',
+      'kabibi_term_kill'
+    ]);
+    assert.equal(subscriptions.length, 4);
+  }
+});
+
 test('all extension-launched shells explicitly disable Kabibi AI', () => {
   assert.deepEqual(ext.extensionShellArgs({}), ['kabibi', '--disable-ai']);
   assert.deepEqual(
