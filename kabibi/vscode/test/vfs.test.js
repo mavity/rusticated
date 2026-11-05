@@ -531,6 +531,17 @@ test('all extension-launched shells explicitly disable Kabibi AI', () => {
   );
 });
 
+test('Node-host terminal arguments omit the redundant guest executable name', () => {
+  assert.deepEqual(
+    ext.nodeWasmArgs('kabibi-terminal.wasm', ['kabibi', '--disable-ai']),
+    ['kabibi-terminal.wasm', '--disable-ai']
+  );
+  assert.deepEqual(
+    ext.nodeWasmArgs('kabibi-terminal.wasm', ['kabibi', '-c', 'echo ok', '--disable-ai']),
+    ['kabibi-terminal.wasm', '-c', 'echo ok', '--disable-ai']
+  );
+});
+
 test('Node host workspace mount exposes each root through a temporary mount', async () => {
   const storage = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'kabibi-workspace-test-'));
   const first = path.join(storage, 'first');

@@ -1,5 +1,10 @@
 # Change Log
 
+## 0.8.29
+
+- Fix Desktop terminal startup by omitting the redundant guest executable name
+  from Node-host WASM arguments.
+
 ## 0.1.0
 
 - Add a VS Code-owned `🐚︎ Kabibi` terminal profile with `🐚︎ Kb` terminal tabs.

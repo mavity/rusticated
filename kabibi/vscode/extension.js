@@ -38,6 +38,10 @@
     return args;
   }
 
+  function nodeWasmArgs(wasmPath, guestArgs) {
+    return [wasmPath, ...guestArgs.slice(1)];
+  }
+
   const TOOL_DEFINITIONS = [
     { name: 'kabibi_exec', operation: 'exec' },
     { name: 'kabibi_term_read', operation: 'term_read' },
@@ -440,7 +444,7 @@
     const runtime = await prepareNodeHostRuntime(vscode, context, 'terminal');
     const child = spawn(
       process.execPath,
-      [runtime.hostPath, runtime.wasmPath, ...guestArgs],
+      [runtime.hostPath, ...nodeWasmArgs(runtime.wasmPath, guestArgs)],
       {
         cwd: runtime.cwd,
         env: {
@@ -835,6 +839,7 @@
     moduleExports.createKabibiPseudoterminal = createKabibiPseudoterminal;
     moduleExports.createNodeWorkspaceMount = createNodeWorkspaceMount;
     moduleExports.extensionShellArgs = extensionShellArgs;
+    moduleExports.nodeWasmArgs = nodeWasmArgs;
     moduleExports.ensureRuntimeModules = ensureRuntimeModules;
     moduleExports.loadCachedKabibiWasm = loadCachedKabibiWasm;
     moduleExports.registerLanguageModelTools = registerLanguageModelTools;
@@ -849,6 +854,7 @@
       createKabibiPseudoterminal,
       createNodeWorkspaceMount,
       extensionShellArgs,
+      nodeWasmArgs,
       registerLanguageModelTools,
       ensureRuntimeModules,
       loadCachedKabibiWasm
