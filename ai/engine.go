@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -42,6 +43,13 @@ func resolveLMBackendCandidates(backend string) []string {
 		return []string{env, "cpu"}
 	}
 	return []string{"npu", "gpu", "cpu"}
+}
+
+func resolveEmbedderBackendCandidates(backend string) []string {
+	if !isBrowserHost() && (backend == "" || backend == "auto") && os.Getenv("LITERTLM_BACKEND") == "" {
+		return []string{"gpu", "npu", "cpu"}
+	}
+	return resolveLMBackendCandidates(backend)
 }
 
 func newEngineImpl(libPath, modelPath, backend string, maxTokens int) (*engineImpl, error) {
@@ -184,20 +192,28 @@ func (c *convImpl) sendStream(ctx context.Context, parts []PromptPart, onEvent f
 }
 
 type embedderImpl struct {
-	backend embedderBackend
+	backend     embedderBackend
+	backendName string
 }
 
 func newEmbedderImpl(libPath, modelPath, backend string) (*embedderImpl, error) {
-	var lastErr error
-	for _, cand := range resolveLMBackendCandidates(backend) {
+	var attemptErrors []error
+	for _, cand := range resolveEmbedderBackendCandidates(backend) {
 		b, err := openEmbedderBackend(libPath, modelPath, cand)
 		if err == nil && b != nil {
-			return &embedderImpl{backend: b}, nil
+			return &embedderImpl{backend: b, backendName: cand}, nil
 		}
-		lastErr = err
+		if err == nil {
+			err = fmt.Errorf("open embedder backend %s returned nil backend without an error", cand)
+		}
+		attemptErr := fmt.Errorf("open embedder backend %s: %w", cand, err)
+		attemptErrors = append(attemptErrors, attemptErr)
+		if Verbose {
+			fmt.Fprintf(os.Stderr, "[ai] %v\n", attemptErr)
+		}
 	}
-	if lastErr != nil {
-		return nil, lastErr
+	if len(attemptErrors) > 0 {
+		return nil, errors.Join(attemptErrors...)
 	}
 	return nil, fmt.Errorf("failed to initialize LiteRT-LM embedder")
 }
@@ -217,6 +233,37 @@ func (e *embedderImpl) Embed(parts []PromptPart) ([]float32, error) {
 		return nil, fmt.Errorf("ai: no embeddable content in PromptParts")
 	}
 	return e.backend.ComputeEmbedding(inputs)
+}
+
+func (e *embedderImpl) EmbedBatch(parts []PromptPart) ([][]float32, error) {
+	if e == nil || e.backend == nil {
+		return nil, ErrClosed
+	}
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("ai: no embedding inputs")
+	}
+	batchBackend, ok := e.backend.(batchEmbedderBackend)
+	if !ok {
+		return nil, fmt.Errorf("ai: embedder backend does not support batch embedding")
+	}
+
+	batches := make([][]embedInput, len(parts))
+	for i, part := range parts {
+		inputs := buildEmbedInputs([]PromptPart{part})
+		if len(inputs) == 0 {
+			return nil, fmt.Errorf("ai: no embeddable content in batch item %d", i)
+		}
+		batches[i] = inputs
+	}
+
+	vectors, err := batchBackend.ComputeEmbeddingsBatch(batches)
+	if err != nil {
+		return nil, err
+	}
+	if len(vectors) != len(parts) {
+		return nil, fmt.Errorf("embedding batch returned %d vectors, want %d", len(vectors), len(parts))
+	}
+	return vectors, nil
 }
 
 // FormatPartForEmbedding formats a single PromptPart into its canonical text

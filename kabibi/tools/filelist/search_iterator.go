@@ -40,6 +40,7 @@ type progressTracker struct {
 	mu       sync.RWMutex
 	state    Progress
 	entries  []fileEntry
+	warnings []string
 	started  time.Time
 	queryVec []float32
 	quotes   *liveQuoteManager
@@ -190,6 +191,24 @@ func (p *progressTracker) matches() []fileEntry {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return append([]fileEntry(nil), p.entries...)
+}
+
+func (p *progressTracker) addWarning(warning string) {
+	if p == nil || warning == "" {
+		return
+	}
+	p.mu.Lock()
+	p.warnings = append(p.warnings, warning)
+	p.mu.Unlock()
+}
+
+func (p *progressTracker) warningMessages() []string {
+	if p == nil {
+		return nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return append([]string(nil), p.warnings...)
 }
 
 func (p *progressTracker) current() Progress {

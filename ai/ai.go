@@ -4,7 +4,11 @@
 // and generic vision (Interpreter) primitives.
 package ai
 
-import "sync"
+import (
+	"context"
+	"fmt"
+	"sync"
+)
 
 // ModelInfo provides introspection into a LiteRT-LM file's capabilities.
 type ModelInfo struct {
@@ -132,22 +136,43 @@ func (e *Embedder) CacheIdentity() string {
 	return "litert:" + e.modelPath
 }
 
-// Embed computes a normalized float32 embedding vector for the given PromptParts.
-func (e *Embedder) Embed(parts []PromptPart) ([]float32, error) {
+// Backend returns the active LiteRT-LM backend name ("gpu", "npu", or "cpu").
+func (e *Embedder) Backend() string {
+	if e == nil || e.impl == nil {
+		return ""
+	}
+	return e.impl.backendName
+}
+
+// SupportsBatch reports whether the active embedder backend performs true
+// batched inference instead of the compatibility fallback.
+func (e *Embedder) SupportsBatch() bool {
+	if e == nil {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.impl == nil || e.closing {
+		return false
+	}
+	_, ok := e.impl.backend.(batchEmbedderBackend)
+	return ok
+}
+
+func (e *Embedder) acquire() (*embedderImpl, error) {
 	if e == nil {
 		return nil, ErrClosed
 	}
 	e.mu.Lock()
+	defer e.mu.Unlock()
 	if e.impl == nil || e.closing {
-		e.mu.Unlock()
 		return nil, ErrClosed
 	}
-	impl := e.impl
 	e.active++
-	e.mu.Unlock()
+	return e.impl, nil
+}
 
-	vector, err := impl.Embed(parts)
-
+func (e *Embedder) release() {
 	e.mu.Lock()
 	e.active--
 	var closeImpl *embedderImpl
@@ -159,7 +184,55 @@ func (e *Embedder) Embed(parts []PromptPart) ([]float32, error) {
 	if closeImpl != nil {
 		closeImpl.Close()
 	}
-	return vector, err
+}
+
+// Embed computes a normalized float32 embedding vector for the given PromptParts.
+func (e *Embedder) Embed(parts []PromptPart) ([]float32, error) {
+	impl, err := e.acquire()
+	if err != nil {
+		return nil, err
+	}
+	defer e.release()
+	return impl.Embed(parts)
+}
+
+// EmbedBatchContext computes one vector per PromptPart, preserving input order.
+func (e *Embedder) EmbedBatchContext(ctx context.Context, parts []PromptPart) ([][]float32, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	impl, err := e.acquire()
+	if err != nil {
+		return nil, err
+	}
+	defer e.release()
+
+	if _, ok := impl.backend.(batchEmbedderBackend); ok {
+		vectors, err := impl.EmbedBatch(parts)
+		if err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return vectors, nil
+	}
+
+	vectors := make([][]float32, len(parts))
+	for i, part := range parts {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		vector, err := impl.Embed([]PromptPart{part})
+		if err != nil {
+			return nil, fmt.Errorf("ai: embed batch item %d: %w", i, err)
+		}
+		vectors[i] = vector
+	}
+	return vectors, nil
 }
 
 // Close prevents new embedding calls and releases the engine after any in-flight

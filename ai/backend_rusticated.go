@@ -75,6 +75,7 @@ var (
 	symLMEmbeddingSettingsSetNumThreads      uint64
 	symLMEmbeddingEngineCreate               uint64
 	symLMEmbeddingEngineDelete               uint64
+	symLMEmbeddingEngineComputeBatch         uint64
 	symLMEmbeddingOptionsCreate              uint64
 	symLMEmbeddingOptionsDelete              uint64
 	symLMEmbeddingOptionsSetNormalize        uint64
@@ -82,6 +83,9 @@ var (
 	symLMInputDataCreate                     uint64
 	symLMInputDataDelete                     uint64
 	symLMEmbeddingEngineCompute              uint64
+	symLMEmbeddingResponsesDelete            uint64
+	symLMEmbeddingResponsesGetSize           uint64
+	symLMEmbeddingResponsesGetAt             uint64
 	symLMEmbeddingResponseDelete             uint64
 	symLMEmbeddingResponseGetSize            uint64
 	symLMEmbeddingResponseGetValues          uint64
@@ -473,11 +477,129 @@ func (d *rusticatedDriver) embeddingEngineCompute(engine uint64, inputs []uint64
 		reportRusticatedCleanupError("LiteRT-LM embedding response", deleteErr)
 	}()
 
-	size, err := d.callStatusOut("litert_lm_embedding_response_get_size", symLMEmbeddingResponseGetSize, []byte{i64}, []uint64{resp}, 8)
+	return d.embeddingResponseValues(resp)
+}
+
+func (d *rusticatedDriver) embeddingEngineComputeBatch(engine uint64, batches [][]uint64, options uint64) (vectors [][]float32, err error) {
+	if len(batches) == 0 {
+		return nil, fmt.Errorf("no embedding inputs provided")
+	}
+
+	const workerPointerSize = 8
+	var allocated []uint64
+	defer func() {
+		for _, ptr := range allocated {
+			if freeErr := dload.DylibFree(lmLib, ptr); freeErr != nil {
+				err = errors.Join(err, fmt.Errorf("free embedding batch buffer: %w", freeErr))
+			}
+		}
+	}()
+	allocAndWrite := func(label string, data []byte) (uint64, error) {
+		ptr, allocErr := dload.DylibAlloc(lmLib, uint64(len(data)))
+		if allocErr != nil {
+			return 0, fmt.Errorf("allocate %s: %w", label, allocErr)
+		}
+		allocated = append(allocated, ptr)
+		if writeErr := dload.DylibWriteMem(lmLib, ptr, data); writeErr != nil {
+			return 0, fmt.Errorf("write %s: %w", label, writeErr)
+		}
+		return ptr, nil
+	}
+
+	inputsBatchPtrs := make([]uint64, len(batches))
+	inputCounts := make([]byte, len(batches)*workerPointerSize)
+	for batchIndex, inputs := range batches {
+		if len(inputs) == 0 {
+			return nil, fmt.Errorf("embedding batch item %d has no inputs", batchIndex)
+		}
+		rawPtrs := make([]byte, len(inputs)*workerPointerSize)
+		for i, ptr := range inputs {
+			binary.LittleEndian.PutUint64(rawPtrs[i*workerPointerSize:(i+1)*workerPointerSize], ptr)
+		}
+		inputsBatchPtrs[batchIndex], err = allocAndWrite(
+			fmt.Sprintf("embedding input pointers for batch item %d", batchIndex),
+			rawPtrs,
+		)
+		if err != nil {
+			return nil, err
+		}
+		binary.LittleEndian.PutUint64(inputCounts[batchIndex*workerPointerSize:(batchIndex+1)*workerPointerSize], uint64(len(inputs)))
+	}
+
+	rawBatchPtrs := make([]byte, len(inputsBatchPtrs)*workerPointerSize)
+	for i, ptr := range inputsBatchPtrs {
+		binary.LittleEndian.PutUint64(rawBatchPtrs[i*workerPointerSize:(i+1)*workerPointerSize], ptr)
+	}
+	inputsBatchBuf, err := allocAndWrite("embedding batch pointers", rawBatchPtrs)
 	if err != nil {
 		return nil, err
 	}
-	valuesPtr, err := d.callStatusOut("litert_lm_embedding_response_get_values", symLMEmbeddingResponseGetValues, []byte{i64}, []uint64{resp}, 8)
+	inputCountsBuf, err := allocAndWrite("embedding batch input counts", inputCounts)
+	if err != nil {
+		return nil, err
+	}
+
+	responses, err := d.callStatusOut(
+		"litert_lm_embedding_engine_compute_embedding_batch",
+		symLMEmbeddingEngineComputeBatch,
+		[]byte{i64, i64, i64, i64, i64},
+		[]uint64{engine, inputsBatchBuf, inputCountsBuf, uint64(len(batches)), options},
+		8,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if responses == 0 {
+		return nil, fmt.Errorf("embedding batch computation returned NULL without an error")
+	}
+	defer func() {
+		_, deleteErr := callDylib(symLMEmbeddingResponsesDelete, []byte{i64}, nil, responses)
+		reportRusticatedCleanupError("LiteRT-LM embedding responses", deleteErr)
+	}()
+
+	responseCount, err := d.callStatusOut(
+		"litert_lm_embedding_responses_get_size",
+		symLMEmbeddingResponsesGetSize,
+		[]byte{i64},
+		[]uint64{responses},
+		8,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if responseCount != uint64(len(batches)) {
+		return nil, fmt.Errorf("embedding batch returned %d responses, want %d", responseCount, len(batches))
+	}
+
+	vectors = make([][]float32, len(batches))
+	for i := range batches {
+		response, getErr := d.callStatusOut(
+			"litert_lm_embedding_responses_get_at",
+			symLMEmbeddingResponsesGetAt,
+			[]byte{i64, i64},
+			[]uint64{responses, uint64(i)},
+			8,
+		)
+		if getErr != nil {
+			return nil, fmt.Errorf("get embedding batch response %d: %w", i, getErr)
+		}
+		if response == 0 {
+			return nil, fmt.Errorf("embedding batch response %d is NULL", i)
+		}
+		vectors[i], err = d.embeddingResponseValues(response)
+		if err != nil {
+			return nil, fmt.Errorf("read embedding batch response %d: %w", i, err)
+		}
+	}
+	return vectors, nil
+}
+
+func (d *rusticatedDriver) embeddingResponseValues(response uint64) ([]float32, error) {
+	size, err := d.callStatusOut("litert_lm_embedding_response_get_size", symLMEmbeddingResponseGetSize, []byte{i64}, []uint64{response}, 8)
+	if err != nil {
+		return nil, err
+	}
+	valuesPtr, err := d.callStatusOut("litert_lm_embedding_response_get_values", symLMEmbeddingResponseGetValues, []byte{i64}, []uint64{response}, 8)
 	if err != nil {
 		return nil, err
 	}
@@ -495,7 +617,7 @@ func (d *rusticatedDriver) embeddingEngineCompute(engine uint64, inputs []uint64
 	if err := dload.DylibReadMem(lmLib, valuesPtr, rawVals); err != nil {
 		return nil, fmt.Errorf("read embedding response values: %w", err)
 	}
-	out = make([]float32, int(size))
+	out := make([]float32, int(size))
 	for i := range out {
 		out[i] = math.Float32frombits(binary.LittleEndian.Uint32(rawVals[i*4 : (i+1)*4]))
 	}
@@ -647,6 +769,7 @@ func ensureLMLibLoadedImpl(libPath string) error {
 			{&symLMEmbeddingSettingsSetNumThreads, "litert_lm_embedding_engine_settings_set_num_threads"},
 			{&symLMEmbeddingEngineCreate, "litert_lm_embedding_engine_create"},
 			{&symLMEmbeddingEngineDelete, "litert_lm_embedding_engine_delete"},
+			{&symLMEmbeddingEngineComputeBatch, "litert_lm_embedding_engine_compute_embedding_batch"},
 			{&symLMEmbeddingOptionsCreate, "litert_lm_embedding_options_create"},
 			{&symLMEmbeddingOptionsDelete, "litert_lm_embedding_options_delete"},
 			{&symLMEmbeddingOptionsSetNormalize, "litert_lm_embedding_options_set_normalize"},
@@ -654,6 +777,9 @@ func ensureLMLibLoadedImpl(libPath string) error {
 			{&symLMInputDataCreate, "litert_lm_input_data_create"},
 			{&symLMInputDataDelete, "litert_lm_input_data_delete"},
 			{&symLMEmbeddingEngineCompute, "litert_lm_embedding_engine_compute_embedding"},
+			{&symLMEmbeddingResponsesDelete, "litert_lm_embedding_responses_delete"},
+			{&symLMEmbeddingResponsesGetSize, "litert_lm_embedding_responses_get_size"},
+			{&symLMEmbeddingResponsesGetAt, "litert_lm_embedding_responses_get_at"},
 			{&symLMEmbeddingResponseDelete, "litert_lm_embedding_response_delete"},
 			{&symLMEmbeddingResponseGetSize, "litert_lm_embedding_response_get_size"},
 			{&symLMEmbeddingResponseGetValues, "litert_lm_embedding_response_get_values"},

@@ -296,8 +296,8 @@ func TestSendStreamDetectsExactTandemLoopAndCancels(t *testing.T) {
 		}
 	}
 
-	if len(errs) != 1 || !errors.Is(errs[0], ErrRepetitionLoop) {
-		t.Fatalf("errs = %v, want [ErrRepetitionLoop]", errs)
+	if len(errs) != 1 || !strings.HasPrefix(errs[0].Error(), "Text repetition: ") {
+		t.Fatalf("errs = %v, want one text repetition error", errs)
 	}
 	if events >= 30 {
 		t.Fatalf("yielded %d events before catching loop, want early stop (< 30)", events)
@@ -313,10 +313,10 @@ func TestSendStreamDetectsExactTandemLoopAndCancels(t *testing.T) {
 
 func TestLoopDetectorRaisesShortPeriodThreshold(t *testing.T) {
 	var detector loopDetector
-	if detector.feedText(strings.Repeat("*\n", shortRepeatMinSpan/2-1)) {
+	if got := detector.feedText(strings.Repeat("*\n", shortRepeatMinSpan/2-1)); got != "" {
 		t.Fatal("detected a short-period repeat below the configured span")
 	}
-	if !detector.feedText("*\n") {
+	if got := detector.feedText("*\n"); got == "" {
 		t.Fatal("did not detect a short-period repeat at the configured span")
 	}
 }
@@ -339,8 +339,8 @@ func TestSendStreamDetectsFuzzyInterleavedLoop(t *testing.T) {
 		}
 	}
 
-	if len(errs) != 1 || !errors.Is(errs[0], ErrRepetitionLoop) {
-		t.Fatalf("errs = %v, want [ErrRepetitionLoop]", errs)
+	if len(errs) != 1 || !strings.HasPrefix(errs[0].Error(), "Text repetition: ") {
+		t.Fatalf("errs = %v, want one text repetition error", errs)
 	}
 	if !f.closed.Load() {
 		t.Fatal("conversation was not closed after fuzzy loop detection")
@@ -365,11 +365,11 @@ func TestSendStreamDetectsRepeatedToolCalls(t *testing.T) {
 		}
 	}
 
-	if yielded != 2 {
-		t.Fatalf("yielded = %d, want 2 before 3rd identical tool call trips loop", yielded)
+	if yielded != maxRepetitiveToolCount {
+		t.Fatalf("yielded = %d, want %d before the next identical tool call trips loop", yielded, maxRepetitiveToolCount)
 	}
-	if len(errs) != 1 || !errors.Is(errs[0], ErrRepetitionLoop) {
-		t.Fatalf("errs = %v, want [ErrRepetitionLoop]", errs)
+	if len(errs) != 1 || !strings.HasPrefix(errs[0].Error(), "Tool repetition: ") {
+		t.Fatalf("errs = %v, want one tool repetition error", errs)
 	}
 	if !f.closed.Load() {
 		t.Fatal("conversation was not closed after repeated tool call loop")

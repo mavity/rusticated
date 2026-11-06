@@ -64,6 +64,51 @@ func TestEmbedSchedulerUsesStrictFourToOneRatioAndChunkWeights(t *testing.T) {
 	}
 }
 
+func TestEmbedSchedulerServesLateLowPriorityWorkAfterCurrentHighBatch(t *testing.T) {
+	ctx := context.Background()
+	makeJob := func(id uint64, text string, low bool) *embeddingJob {
+		part := ai.PromptPart{Role: ai.RoleModel, Text: text}
+		request := &embeddingRequest{
+			id:          id,
+			ctx:         ctx,
+			part:        part,
+			lowPriority: low,
+		}
+		job := &embeddingJob{
+			key:      text,
+			part:     part,
+			waiters:  map[uint64]*embeddingRequest{id: request},
+			sequence: id,
+		}
+		request.job = job
+		return job
+	}
+	scheduler := &concurrentEmbedder{
+		ctx:            context.Background(),
+		jobs:           make(map[string]*embeddingJob),
+		queuedRequests: 4,
+	}
+	for index := range 4 {
+		job := makeJob(uint64(index+1), string(rune('a'+index)), false)
+		scheduler.pending = append(scheduler.pending, job)
+		scheduler.jobs[job.key] = job
+	}
+	if batch := scheduler.nextBatch(); len(batch) != 4 {
+		t.Fatalf("first high batch size = %d, want four", len(batch))
+	}
+	high := makeJob(5, "high-after-batch", false)
+	low := makeJob(6, "late-low", true)
+	scheduler.pending = append(scheduler.pending, high, low)
+	scheduler.jobs[high.key] = high
+	scheduler.jobs[low.key] = low
+	scheduler.queuedRequests += 2
+
+	next := scheduler.nextBatch()
+	if len(next) != 1 || next[0] != low {
+		t.Fatalf("next batch = %#v, want the late low-priority request before more high work", next)
+	}
+}
+
 func TestEmbedSchedulerUsesCurrentOrderForLowPriorityRequests(t *testing.T) {
 	scheduler := &concurrentEmbedder{
 		ctx:  context.Background(),
