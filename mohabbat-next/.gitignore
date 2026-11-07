@@ -1,3 +1,4 @@
+/.build/
 /probe/payload/out/
 /probe/hosts/windows/.build/
 /probe/hosts/windows/bin/

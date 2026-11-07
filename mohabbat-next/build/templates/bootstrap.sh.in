@@ -1,0 +1,54 @@
+# No shebang: the MZ DOS stub invokes Bash on this appended script.
+set -euo pipefail
+
+ME="${1:?missing bundle path}"
+shift
+case "$ME" in
+    /*) ;;
+    *) ME="$PWD/$ME" ;;
+esac
+
+SYSTEM="$(uname -s)"
+ARCH="$(uname -m)"
+[ "$ARCH" = arm64 ] && ARCH=aarch64
+
+case "$SYSTEM" in
+    Linux)
+        if [ -n "${TERMUX_VERSION:-}" ] || [ "${PREFIX:-}" = /data/data/com.termux/files/usr ]; then
+            SYSTEM=android
+        else
+            SYSTEM=linux
+        fi
+        ;;
+    Darwin) SYSTEM=darwin ;;
+    *) echo "Unsupported platform: $SYSTEM $ARCH" >&2; exit 1 ;;
+esac
+
+run() {
+    local b_off="$1" b_len="$2" p_off="$3" p_len="$4" h_off="$5" h_len="$6"
+    shift 6
+
+    local tmp_dir="${TMPDIR:-${PREFIX:+$PREFIX/tmp}}"
+    tmp_dir="${tmp_dir:-/tmp}"
+    [ -d "$tmp_dir" ] && [ -w "$tmp_dir" ] || { echo "Temporary directory not writable: $tmp_dir" >&2; exit 2; }
+
+    umask 077
+    local tmp_exe
+    tmp_exe="$(mktemp "$tmp_dir/🐚︎XXXXXXXXXXXX")" || { echo "Could not create launcher in $tmp_dir" >&2; exit 1; }
+    trap 'rm -f "$tmp_exe"' EXIT
+
+    set +o pipefail
+    tail -c "+$((b_off + 1))" "$ME" | head -c "$b_len" > "$tmp_exe"
+    set -o pipefail
+    chmod 700 "$tmp_exe"
+    exec "$tmp_exe" "$ME" "$p_off" "$p_len" "$h_off" "$h_len" "$@"
+}
+
+case "$SYSTEM/$ARCH" in
+    linux/x86_64)    run {{.BrotLinuxX86_64Offset}} {{.BrotLinuxX86_64Length}} {{.PlatformLinuxX86_64Offset}} {{.PlatformLinuxX86_64Length}} {{.HelloX86_64Offset}} {{.HelloX86_64Length}} "$@" ;;
+    linux/aarch64)   run {{.BrotLinuxAarch64Offset}} {{.BrotLinuxAarch64Length}} {{.PlatformLinuxAarch64Offset}} {{.PlatformLinuxAarch64Length}} {{.HelloAarch64Offset}} {{.HelloAarch64Length}} "$@" ;;
+    android/aarch64) run {{.BrotAndroidAarch64Offset}} {{.BrotAndroidAarch64Length}} {{.PlatformAndroidAarch64Offset}} {{.PlatformAndroidAarch64Length}} {{.HelloAarch64Offset}} {{.HelloAarch64Length}} "$@" ;;
+    darwin/x86_64)   run {{.BrotDarwinX86_64Offset}} {{.BrotDarwinX86_64Length}} {{.PlatformDarwinX86_64Offset}} {{.PlatformDarwinX86_64Length}} {{.HelloX86_64Offset}} {{.HelloX86_64Length}} "$@" ;;
+    darwin/aarch64)  run {{.BrotDarwinAarch64Offset}} {{.BrotDarwinAarch64Length}} {{.PlatformDarwinAarch64Offset}} {{.PlatformDarwinAarch64Length}} {{.HelloAarch64Offset}} {{.HelloAarch64Length}} "$@" ;;
+    *) echo "Unsupported target: $SYSTEM/$ARCH" >&2; exit 1 ;;
+esac
