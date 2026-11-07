@@ -25,10 +25,11 @@ func IsAIToolName(name string) bool {
 
 // ExecuteOneShotAITool runs a registered tool directly and writes its Markdown
 // result without starting an AI conversation.
-func ExecuteOneShotAITool(ctx context.Context, name string, args []string, out io.Writer) error {
+func ExecuteOneShotAITool(ctx context.Context, name string, args []string, out io.Writer, verbose bool) error {
 	if out == nil {
 		out = os.Stdout
 	}
+	ai.Verbose = verbose
 	execSess, err := NewExecutionSession("")
 	if err != nil {
 		return fmt.Errorf("initialize shell session: %w", err)

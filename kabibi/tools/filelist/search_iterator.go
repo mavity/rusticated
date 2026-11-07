@@ -2,6 +2,7 @@ package filelist
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -37,14 +38,15 @@ type SearchIterator struct {
 }
 
 type progressTracker struct {
-	mu       sync.RWMutex
-	state    Progress
-	entries  []fileEntry
-	warnings []string
-	started  time.Time
-	queryVec []float32
-	quotes   *liveQuoteManager
-	iter     *SearchIterator
+	mu         sync.RWMutex
+	diagnostic func(string)
+	state      Progress
+	entries    []fileEntry
+	warnings   []string
+	started    time.Time
+	queryVec   []float32
+	quotes     *liveQuoteManager
+	iter       *SearchIterator
 }
 
 func NewSearchIterator(ctx context.Context, cwd string, opts Options) *SearchIterator {
@@ -58,7 +60,7 @@ func NewSearchIterator(ctx context.Context, cwd string, opts Options) *SearchIte
 		updates: make(chan struct{}),
 		done:    make(chan struct{}),
 	}
-	iter.tracker = &progressTracker{iter: iter}
+	iter.tracker = &progressTracker{iter: iter, diagnostic: opts.OnDiagnostic}
 	go func() {
 		defer close(iter.done)
 		defer close(iter.updates)
@@ -127,8 +129,19 @@ func (p *progressTracker) update(phase, current string, viewed, total int) error
 			p.state.AvgPerFile = p.state.Elapsed / time.Duration(viewed)
 		}
 	}
+	elapsed := p.state.Elapsed
+	average := p.state.AvgPerFile
 	p.mu.Unlock()
+	p.logVerbose("progress phase=%s processed=%d/%d path=%q elapsed=%s average=%s",
+		phase, viewed, total, current, elapsed, average)
 	return p.iter.notify()
+}
+
+func (p *progressTracker) logVerbose(format string, args ...any) {
+	if p == nil || p.diagnostic == nil {
+		return
+	}
+	p.diagnostic(fmt.Sprintf(format, args...))
 }
 
 func (p *progressTracker) setQueryEmbedding(vector []float32) {
@@ -163,6 +176,7 @@ func (p *progressTracker) updateQuote(path, quote string) error {
 	if !found {
 		return nil
 	}
+	p.logVerbose("quote result path=%q bytes=%d", path, len(quote))
 	return p.iter.notify()
 }
 

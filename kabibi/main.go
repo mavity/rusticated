@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 
+	"ai"
 	"github.com/charmbracelet/x/term"
 	"github.com/mavity/rusticated/kabibi/ui/app"
 	"github.com/mavity/rusticated/kabibi/ui/shell"
@@ -44,7 +45,7 @@ Flags:
       --edit string      Open a file in the editor, save on exit, and close Kabibi
       --disable-ai       Disable Kabibi AI behavior in this shell process
       --vscode-tool-server  Run the VS Code terminal-tool protocol over stdio
-  -v, --verbose          Verbose diagnostics (includes prompts and tool I/O)
+  -v, --verbose          Verbose diagnostics (includes prompts and tool I/O; list-files progress goes to stderr)
   -h, --help             Show this help
 
 A single positional file path runs that file as a shell script. Other positional
@@ -74,7 +75,7 @@ func parseCLI(args []string, helpOut io.Writer) (cliOptions, error) {
 	fs.StringVarP(&opts.command, "command", "c", "", "Execute a command or AI prompt in batch mode and exit")
 	fs.StringVarP(&opts.prompt, "prompt", "p", "", "Execute a prompt in one-shot mode and exit")
 	fs.StringVar(&opts.edit, "edit", "", "Open a file in the editor, save on exit, and close Kabibi")
-	fs.BoolVarP(&opts.verbose, "verbose", "v", false, "Verbose diagnostics, including prompts and tool I/O")
+	fs.BoolVarP(&opts.verbose, "verbose", "v", false, "Verbose diagnostics, including prompts and tool I/O; list-files progress goes to stderr")
 	fs.BoolVar(&opts.disableAI, "disable-ai", false, "Disable Kabibi AI behavior in this shell process")
 	fs.BoolVar(&opts.toolServer, "vscode-tool-server", false, "Run the VS Code terminal-tool protocol over stdio")
 
@@ -125,11 +126,19 @@ func main() {
 }
 
 func runCLI(args []string, stdout, stderr io.Writer, verbose bool) int {
+	verbose = verbose || os.Getenv("MOHABBAT_VERBOSE") == "1"
+	for _, arg := range args {
+		if arg == "-v" || arg == "--verbose" {
+			verbose = true
+			break
+		}
+	}
+	ai.Verbose = verbose
 	if verbose {
 		fmt.Fprintf(stderr, "[kabibi] CLI parse begin: argc=%d\n", len(args))
 	}
 	if name, toolArgs, ok := cliAIToolInvocation(args); ok {
-		if err := shell.ExecuteOneShotAITool(context.Background(), name, toolArgs, stdout); err != nil {
+		if err := shell.ExecuteOneShotAITool(context.Background(), name, toolArgs, stdout, verbose); err != nil {
 			fmt.Fprintf(stderr, "kabibi: %v\n", err)
 			return 1
 		}
@@ -144,6 +153,7 @@ func runCLI(args []string, stdout, stderr io.Writer, verbose bool) int {
 		return 2
 	}
 	verbose = verbose || opts.verbose || os.Getenv("MOHABBAT_VERBOSE") == "1"
+	ai.Verbose = verbose
 	if opts.toolServer {
 		if err := shell.RunVSCodeToolServer(context.Background(), os.Stdin, stdout, ""); err != nil {
 			fmt.Fprintf(stderr, "kabibi: VS Code tool server: %v\n", err)

@@ -372,6 +372,53 @@ func TestListFilesSurfacesEmbeddingFailure(t *testing.T) {
 	}
 }
 
+func TestListFilesEmitsEmbeddingDiagnosticsWithoutPayloadText(t *testing.T) {
+	dir := t.TempDir()
+	const privateText = "do not print this document payload"
+	if err := os.WriteFile(filepath.Join(dir, "candidate.txt"), []byte(privateText+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var diagnosticsMu sync.Mutex
+	var diagnostics []string
+	_, err := ListFiles(dir, Options{
+		Query:         "unmatched semantic query",
+		SearchContent: true,
+		MaxResults:    1,
+		Embedder:      &searchTestEmbedder{},
+		OnDiagnostic: func(message string) {
+			diagnosticsMu.Lock()
+			diagnostics = append(diagnostics, message)
+			diagnosticsMu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatalf("ListFiles(): %v", err)
+	}
+
+	diagnosticsMu.Lock()
+	joined := strings.Join(diagnostics, "\n")
+	diagnosticsMu.Unlock()
+	for _, want := range []string{
+		"embedding start phase=query",
+		"embedding finish phase=query",
+		"embedding cache disabled kind=content",
+		"embedding start phase=candidate",
+		"embedding finish phase=candidate",
+		"embedding batch start",
+		"embedding batch finish",
+		"embedding start phase=quote",
+		"quote result path=",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("diagnostics missing %q:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, privateText) {
+		t.Fatalf("diagnostics exposed candidate content: %q", joined)
+	}
+}
+
 func TestListFilesSurfacesEmptyAndMismatchedEmbeddings(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "sample.go"), []byte("package sample"), 0o600); err != nil {
