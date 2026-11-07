@@ -21,8 +21,12 @@ The filename is the hash of the entry signature and embedding configuration;
 the record stores only its format marker, dimension, checksum, and vector.
 
 Do not store source-file contents. The cache stores entry signatures and
-embedding vectors only. Query embeddings remain per-search work and are not
-stored by this cache.
+embedding vectors only. Query embeddings and quote embeddings remain ephemeral
+per-search work and are not stored by this cache.
+
+Persistent cache writes must avoid disk stalls: ensure the cache directory is
+created at initialization, and publish newly embedded vectors via atomic file
+replacement without issuing a synchronous `fsync` on every individual record.
 
 ## Entry identity and cache key
 
@@ -68,7 +72,9 @@ signatures may share vectors; this is a consequence of the chosen identity.
 2. Keep the existing exact/regex content scan and fallback behavior. Consult
    the candidate cache only when semantic content ranking runs.
 3. Embed the query for each search. Reuse candidate vectors on cache hits and
-   compute only missing candidate vectors.
+   compute only missing candidate vectors. Cache hits return immediately and
+   bypass the embedder queue completely; only cache misses and uncached quote
+   requests enter the embedder queue.
 4. Do not claim that a cache hit eliminates all file reads in content search:
    the existing exact/regex scan still reads candidate contents. The cache
    avoids reading a candidate again solely to build its semantic embedding.
@@ -81,6 +87,51 @@ Because the cache key excludes directory paths, candidate embedding inputs
 must not depend on directory paths. Keep full-path lexical and fuzzy matching
 unchanged; use the basename for semantic filename candidate vectors and
 content candidate vectors.
+
+## Embedder batch queue and fair priority ordering
+
+1. **Single task pool:** The embedder queue maintains all pending embedding
+   work in one unified pool of unique tasks keyed by embedding input. Tasks
+   are never divided into separate high/low queues.
+2. **Waiter demand counts:** Each unique task in the pool records two active
+   waiter counts: `highCount` and `lowCount`. Multiple callers requesting
+   the same embedding input coalesce onto the same task and increment the
+   corresponding count.
+3. **Deterministic 4:1 quota and carryover:** The worker maintains a running
+   4:1 remainder across batches (modulo $4+1 = 5$). When forming a batch of
+   capacity $B$:
+   - The worker calculates quota $N$ (high tasks) and quota $M$ (low tasks)
+     taking into account the carryover remainder, and updates the remainder.
+   - The worker selects $N$ tasks from the pool ordered by `highCount`
+     descending, breaking ties by `lowCount` descending.
+   - The worker selects $M$ tasks from the remaining pool ordered by
+     `lowCount` descending, breaking ties by `highCount` descending.
+   - Selected tasks are removed from the pool and batched into embedder
+     inference.
+   - Tasks are never segregated or filtered prior to ordering. If tasks of a
+     priority class are scarce or absent, the selection rule proceeds
+     unaffected.
+4. **Context cancellation and task ejection:** Every enqueue call passes a
+   cancellable `context.Context`. When a caller's context cancels, the
+   corresponding count (`highCount` or `lowCount`) on that task is
+   decremented. If both `highCount == 0 && lowCount == 0`, the task is
+   immediately ejected from the pool before the worker can pick it up.
+
+## Live top-N quote lifecycle and task ejection
+
+1. **Dynamic top-N contenders:** During candidate scoring, the search
+   incrementally updates the top-$N$ highest scoring candidate files.
+2. **Cancellable extraction goroutines:** When a candidate enters the top
+   $N$, a dedicated goroutine begins quote extraction (chunking and
+   bisection) bound to a cancellable `context.Context`. Quote embedding
+   requests enter the embedder queue as low-priority work.
+3. **Immediate demotion ejection:** When a newly scored candidate displaces an
+   existing candidate from the top $N$, the displaced candidate's quote
+   context is cancelled immediately. The embedder queue processes the
+   cancellation by decrementing `lowCount` for the pending quote tasks.
+   Tasks that drop to zero active waiters are purged from the pool on the spot.
+   This guarantees the embedder worker never performs batch inference on
+   quote chunks for files that have fallen out of the top $N$.
 
 ## Implementation boundaries
 
@@ -112,6 +163,16 @@ content candidate vectors.
   and fuzzy matching remains unchanged.
 - Content search preserves its existing exact/regex behavior and avoids the
   second candidate read for embedding on a cache hit.
+- Cache writes publish via atomic rename without issuing synchronous `fsync`
+  on individual vector records.
+- Embedder batch queue verifies deterministic 4:1 quota derivation with
+  modulo-5 remainder tracking across variable batch sizes.
+- Task selection verifies primary count sorting and opposite-count secondary
+  tie-breaking from the single task pool.
+- Request context cancellation decrements task demand counts and purges
+  zero-waiter tasks from the queue immediately.
+- Live top-$N$ displacement cancels active quote extractions and confirms
+  displaced quote tasks are purged from the queue before batch formation.
 - No source contents or JSON cache files are persisted. Cache read/write
   failures, embedding failures, cancellation, and cache reopen behavior have
   explicit tests.
