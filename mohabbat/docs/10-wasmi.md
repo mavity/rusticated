@@ -1,368 +1,262 @@
-### 1. Executive Assessment: Will `wasmi` + the 10-Function Narrow ABI Deliver Massive Gains?
+# WASMI Redesign and Unified Execution Topology
 
-**Yes.** Even before applying the unmoveable direct-memory optimization—retaining explicit `host_info`, `alloc_native`, `free_native`, `read_native`, and `write_native` calls across the boundary—replacing the `brot` + `washmhost` (Go/Wazero) two-process architecture with an in-process Rust `microhost` (`wasmi` + `ruzstd` + 10-function Narrow ABI) and `facade.wasm` delivers an order-of-magnitude reduction in binary size and startup latency.
+The WASMI redesign propels forth the core unification goal: **`facade.wasm` is the single, universal implementation of the `"rusticated"` platform across all targets** (Native Desktop, Node.js, and Browser).
 
-#### A. Binary Footprint Reduction (Zone B & Zone C)
-
-In the legacy architecture:
-
-* **Zone B (`brot` Table):** Five `#![no_std]` Rust loaders (~30–50 KB each = ~200 KB total).
-
-
-* **Zone C (Compressed Pool):** Five complete Go binaries (`washmhost` for `linux-amd64`, `linux-arm64`, `windows-amd64`, `windows-arm64`, `darwin-arm64`) plus `brain.wasm`. Each `washmhost` embeds the Go runtime, garbage collector, standard library (`net`, `os`, `crypto/tls`, `x509`), and the Wazero runtime (~6–10 MB uncompressed per target; ~35–45 MB total uncompressed before pool compression).
+Below is the revised, considered and eloquently unified specification where **every host** (Native `microhost`, Node.js, and Browser `index.js`) implements only the `"narrow"` ABI, and **`facade.wasm` owns 100% of the `"rusticated"` logic everywhere**.
 
 
 
-In the **Micro-Host + Narrow ABI Architecture**:
+## 1. Unified Execution Topology Across All Hosts
 
-* **Zone B (`microhost` Table):** Each of the five native binaries is `brot` upgraded with `wasmi` (a `#![no_std]`-compatible pure-Rust interpreter), `ruzstd`, and the 10 Narrow ABI functions. A stripped `#![no_std]` Rust binary containing `wasmi` + `ruzstd` compiles to **~220 KB – 280 KB per target** (~1.25 MB total across all 5 targets).
-* **Zone C (Compressed Pool):** Contains **zero native host binaries**. It holds only `facade.wasm` (~150–300 KB uncompressed) + `brain.wasm`.
-* **Net Size Win:** Eliminates ~35–45 MB of uncompressed Go host binaries from Zone C, shrinking the compressed `.bat` vegetable baseline by **8–14 MB** and reducing build/packaging times because 5 Go cross-compilations of `washmhost` are eliminated.
-
-
-
-#### B. Cold-Start & Execution Performance
-
-In the legacy architecture, every invocation of a `.bat` vegetable executes a heavy multi-stage boot sequence:
-
-1. `brot` decompresses tens of megabytes of `washmhost` binaries + `brain.wasm`.
-
-
-2. `brot` writes the target `washmhost` executable and `brain.wasm` to temporary files on disk.
-
-
-3. `brot` calls `fork`+`execve` (Linux/macOS) or `CreateProcessW` (Windows) to launch `washmhost`, inducing OS process creation and Windows Defender / macOS Gatekeeper scan penalties on the newly written temp executable.
-
-
-4. `washmhost` initializes the Go runtime/GC, reads `brain.wasm` from disk, and compiles/instantiates it.
-
-
-5. `brot` and `washmhost` maintain a 3-layer Ghost Process watchdog (`prctl`, `CreateJobObjectW`, parent PID polling).
-
-
-
-In the **Micro-Host + Narrow ABI Architecture**:
-
-1. **Zero Temp Files & Zero Process Spawning:** `microhost` decompresses `facade.wasm` and `brain.wasm` directly into RAM and executes them **in-process**. No `execve`, no `CreateProcessW`, no disk I/O, no antivirus scan delay on freshly written binaries, and **zero Ghost Process watchdog machinery**.
-
-
-2. **Sub-5ms Cold Start:** `wasmi`'s lazy translation/validation instantiates modules in `< 2 ms`. Cold start drops from `80–350 ms` (disk write + process spawn) to **`< 10 ms`**.
-3. **Runtime Overhead of Explicit `read_native`/`write_native`:** Because `rusticated` is an I/O-orchestration ABI (file I/O, network sockets, TLS verification, DNS), the cost of `memcpy` inside `read_native` and `write_native` (operating at ~20–40 GB/s in L1/L2 cache) is negligible compared to OS kernel syscall and network latencies.
-
-
-
----
-
-### 2. System Architecture & Execution Topology
+In every environment—Native Desktop (`wasmi`), Node.js (`WebAssembly` + N-API / JS bridge), and Browser (`WebAssembly` + `eval`)—the two-module guest stack is identical:
 
 ```text
 ┌────────────────────────────────────────────────────────────────────────────┐
-│                         🍆 VEGETABLE (.bat)                                │
-├────────────────────────────────────────────────────────────────────────────┤
-│ Zone A: Polyglot Shell/Batch Header (Slices Zone B & Zone C by offset)     │
-│ Zone B: 5 × Native Micro-Host Runners (~250 KB each, Rust, no-CRT)         │
-│ Zone C: Single Zstd Stream -> [ facade.wasm ] + [ brain.wasm ] + [payload] │
+│                brain.wasm (Go / Rust Userland Application)                 │
+│     Imports ONLY: "rusticated" ABI (sys_open, sys_read, sys_net_*, ...)    │
 └─────────────────────────────────────┬──────────────────────────────────────┘
-                                      │ In-Process Decompression (RAM only)
+                                      │ Cross-Module WASM Link
                                       ▼
 ┌────────────────────────────────────────────────────────────────────────────┐
-│                    SINGLE PROCESS: Native Micro-Host                       │
+│             facade.wasm (Universal Rusticated OS Kernel in WASM)           │
+│     Exports: "rusticated" ABI   |   Imports ONLY: "narrow" ABI             │
 │                                                                            │
-│  ┌──────────────────────────────────────────────────────────────────────┐  │
-│  │ Guest Instance 2: brain.wasm (Go/Rust Userland App, e.g. Kabibi)     │  │
-│  │   Imports: "rusticated" (sys_read, sys_write, sys_net_open, ...)     │  │
-│  └──────────────────────────────────┬───────────────────────────────────┘  │
-│                                     │ Host-Routed Cross-Module Call        │
-│                                     ▼                                      │
-│  ┌──────────────────────────────────────────────────────────────────────┐  │
-│  │ Guest Instance 1: facade.wasm (Rusticated OS Kernel in WASM)         │  │
-│  │   Exports: "rusticated" ABI  |  Imports: "narrow" (10 functions)     │  │
-│  │   • Emits raw x86_64 / arm64 machine-code trampolines                │  │
-│  │   • Manages async worker threads, epoll/kqueue/IOCP & overlapped I/O │  │
-│  └──────────────────────────────────┬───────────────────────────────────┘  │
-│                                     │ 10-Function "narrow" ABI             │
-│                                     ▼                                      │
-│  ┌──────────────────────────────────────────────────────────────────────┐  │
-│  │ Micro-Host Engine (wasmi + ruzstd + 10 Narrow Primitives)            │  │
-│  │   • Zero C-FFI marshalling, zero knowledge of OS syscalls            │  │
-│  │   • Exposes alloc/free/read/write, dlopen/dlsym, mprotect, call      │  │
-│  └──────────────────────────────────────────────────────────────────────┘  │
+│  • Owns VFS, path resolution, O_TRUNC/O_APPEND, fd tables, overlapped I/O  │
+│  • Owns PlatformInfo, [16]MemorySlot, signal routing (27/28), env, cwd     │
+│  • Dispatches to backend driver by NarrowHostInfo.os_id:                   │
+│      ├─ Native (1=Linux, 2=macOS, 3=Win): Machine-code trampolines + dlsym │
+│      ├─ Node.js (4): N-API dlopen/call OR JS eval bridge                   │
+│      └─ Browser (5): JS eval bridge (IndexedDB, vscode.workspace.fs, etc.) │
+└─────────────────────────────────────┬──────────────────────────────────────┘
+                                      │ 10-Function "narrow" ABI
+                                      ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│                   Thin Host Runner (Micro-Host / JS Host)                  │
+│  • Native Zone B: Rust microhost (wasmi + ruzstd + 10 narrow functions)    │
+│  • Node.js / Browser: ~150 LOC JS loader (WebAssembly + 10 narrow funcs)   │
 └────────────────────────────────────────────────────────────────────────────┘
 
 ```
 
+### What This Eliminates
+
+1. Kills the 1,600-line `mohabbat/washmhost/js/browser/index.js` implementation: All file descriptor tables, path normalization (`resolvePath`), `O_TRUNC`/`O_APPEND` offset state, `marshalStat`, `PlatformInfo` binary packing, and `overlapped` flag marshalling move into `facade.wasm` once, written in Rust.
+
+
+2. Kills all 5 Go `washmhost` binaries in Zone C: Replaced by the single ~200 KB `facade.wasm`.
+
+
+3. Eliminates `sys_dylib_*` from the platform: As already established, `dload` is an `ai`-internal child-process side-load, and in-browser AI / HTTP uses `/dev/eval`. `facade.wasm` has zero `sys_dylib_*` surface.
+
+
+
 ---
 
-### 3. Complete Specification: The 10-Function Narrow ABI (`"narrow"` Namespace)
+## 2. Complete Specification: The Narrow ABI (`"narrow"` Namespace)
 
-All functions are imported by `facade.wasm` under the module namespace `"narrow"`. All native pointers and handles are represented as 64-bit integers (`i64` / `u64`). All WASM pointers and lengths are 32-bit integers (`i32` / `u32`).
+To support `facade.wasm` without the unmoveable-memory optimization (using explicit copy/alloc primitives across the boundary), the `"narrow"` import namespace consists of the **10 host primitives** plus **2 guest-memory bridge primitives** (`read_brain` / `write_brain`) so `facade.wasm` can read and write `brain.wasm`'s buffers and `overlapped` structs.
 
-#### 3.1 ABI Signatures
+### 2.1 WASM Import Signatures (`"narrow"`)
 
 ```wat
 (module
-  ;; 1. Host Platform & Memory Discovery
+  ;; 1. Host Platform Discovery
   (import "narrow" "host_info"      (func $host_info      (param i32) (result i32)))
 
-  ;; 2-5. Native Heap Memory Management & Copy Primitives
+  ;; 2-5. Native / Host Heap Memory & Data Transfer
   (import "narrow" "alloc_native"   (func $alloc_native   (param i64 i32) (result i64)))
   (import "narrow" "free_native"    (func $free_native    (param i64 i64)))
   (import "narrow" "read_native"    (func $read_native    (param i64 i32 i32) (result i32)))
   (import "narrow" "write_native"   (func $write_native   (param i32 i64 i32) (result i32)))
 
-  ;; 6-8. In-Process Dynamic Library Resolution
+  ;; 6-8. Dynamic Library / Host Capability Resolution
   (import "narrow" "load_library"   (func $load_library   (param i32 i32) (result i64)))
   (import "narrow" "get_symbol"     (func $get_symbol     (param i64 i32 i32) (result i64)))
   (import "narrow" "free_library"   (func $free_library   (param i64) (result i32)))
 
-  ;; 9-10. Page Protection & Raw Machine Code Invocation
+  ;; 9-10. Page Protection & Execution
   (import "narrow" "protect_page"   (func $protect_page   (param i64 i64 i32) (result i32)))
   (import "narrow" "call_native"    (func $call_native    (param i64) (result i64)))
+
+  ;; 11-12. Cross-Module Memory Bridge (facade.wasm <-> brain.wasm)
+  (import "narrow" "read_brain"     (func $read_brain     (param i32 i32 i32) (result i32)))
+  (import "narrow" "write_brain"    (func $write_brain    (param i32 i32 i32) (result i32)))
 )
 
 ```
 
-#### 3.2 Detailed Function Contracts
+---
 
-##### 1. `host_info(info_wasm_ptr: i32) -> i32`
+### 2.2 Exact Semantics Across All Three Host Environments
 
-Writes a fixed 32-byte `NarrowHostInfo` structure into the caller's WASM linear memory at `info_wasm_ptr`.
+| Function | Native `microhost` (`wasmi`) | Node.js Host (`starter.js`)
 
-```rust
-#[repr(C)]
-pub struct NarrowHostInfo {
-    pub os_id: u32,          // 1 = Linux, 2 = macOS, 3 = Windows, 4 = Node.js, 5 = Browser
-    pub arch_id: u32,        // 1 = x86_64, 2 = aarch64, 3 = wasm32
-    pub page_size: u32,      // Host OS virtual memory page size in bytes (4096 or 16384)
-    pub pid: u32,            // Host OS process ID
-    pub reserved: [u64; 2],  // Reserved (zeroed; future slot for unmoveable base pointer)
-}
+ | Browser Host (`index.js`)
 
-```
+ |
+| --- | --- | --- | --- |
+| **`host_info(ptr)`** | `os_id`: `1`=Linux, `2`=macOS, `3`=Win; `arch_id`: `1`=x64, `2`=arm64; `page_size`; `pid`. | `os_id`: `4` (or native OS if using N-API addon); `arch_id`: `1`/`2`/`3`; `pid`: `process.pid`. | `os_id`: `5` (Browser); `arch_id`: `3` (`wasm32`); `page_size`: `65536`; `pid`: `3`. |
+| **`alloc_native(sz, al)`** | `mmap` (POSIX) or `VirtualAlloc` / `HeapAlloc` (Win) returning 64-bit address. | Allocates `Uint8Array(sz)` in JS host map, returns 64-bit slot ID (or raw pointer via N-API). | Allocates `Uint8Array(sz)` in a `Map<bigint, Uint8Array>`, returns 64-bit handle ID. |
+| **`free_native(ptr, sz)`** | `munmap` / `VirtualFree` / `HeapFree`. | Deletes slot ID from JS `Map` (or frees via N-API). | Deletes handle ID from JS `Map`. |
+| **`read_native(src, dst, len)`** | `ptr::copy_nonoverlapping(src as *const u8, wasm_mem + dst, len)`. | Copies bytes from JS buffer `src` into `facadeMemory.buffer` at `dst`. | Copies bytes from JS buffer `src` into `facadeMemory.buffer` at `dst`. |
+| **`write_native(src, dst, len)`** | `ptr::copy_nonoverlapping(wasm_mem + src, dst as *mut u8, len)`. | Copies bytes from `facadeMemory.buffer` at `src` into JS buffer `dst`. | Copies bytes from `facadeMemory.buffer` at `src` into JS buffer `dst`. |
+| **`load_library(p, l)`** | `dlopen` (POSIX) / `LoadLibraryW` (Win). | Opens `"eval"` (`0xEEEE0001n`) or loads native library via built-in `process.dlopen` / N-API. | Recognizes `"eval"` and returns virtual handle `0xEEEE0001n`.
 
-* **Return:** `0` on success, `-1` if `[info_wasm_ptr .. info_wasm_ptr + 32]` is out of bounds.
+ |
+| **`get_symbol(h, n, l)`** | `dlsym` (POSIX) / `GetProcAddress` (Win). | For `"eval"`, returns `0xEEEE0002n` (or resolves symbol via N-API).
 
-##### 2. `alloc_native(size: i64, align: i32) -> i64`
+ | For `(0xEEEE0001n, "eval")`, returns `0xEEEE0002n`.
 
-Allocates `size` bytes of zero-initialized memory in the host's native 64-bit address space with alignment `align` (power of two).
+ |
+| **`free_library(h)`** | `dlclose` (POSIX) / `FreeLibrary` (Win). | No-op for `"eval"` (`0`); `dlclose` for native. | Returns `0`. |
+| **`protect_page(p, s, pr)`** | `mprotect` (+ `sys_icache_invalidate` on macOS) / `VirtualProtect` (Win). | Returns `0` in JS mode; `mprotect`/`VirtualProtect` in N-API mode. | No-op in Browser (`returns 0`). |
+| **`call_native(ptr)`** | Jumps to `transmute::<usize, extern "C" fn() -> i64>(ptr)()`. | Executes `(0, eval)` on the `CallFrame` buffer in JS mode, or jumps to native code in N-API mode. | Reads `CallFrame` from JS buffer `ptr`, runs `(0, eval)(code)`, stores result/Promise status into `CallFrame`.
 
-* **Implementation:**
-* If `align >= page_size` or `size >= page_size`, uses OS page allocation (`mmap(MAP_ANON|MAP_PRIVATE)` on POSIX; `VirtualAlloc(MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE)` on Windows) so the returned region can later be passed to `protect_page`.
-* For smaller alignments, uses the host heap allocator (`HeapAlloc` on Windows, `mmap`-backed arena on POSIX).
-
-
-* **Return:** 64-bit native address on success, `0` on allocation failure.
-
-##### 3. `free_native(nat_ptr: i64, size: i64)`
-
-Frees a native memory block previously allocated by `alloc_native`. No-op if `nat_ptr == 0`.
-
-##### 4. `read_native(nat_src: i64, wasm_dst: i32, len: i32) -> i32`
-
-Copies `len` bytes from native memory address `nat_src` into the caller's WASM linear memory at `[wasm_dst .. wasm_dst + len]`.
-
-* **Return:** `0` on success, `-1` if WASM destination range is out of bounds or `nat_src == 0`.
-
-##### 5. `write_native(wasm_src: i32, nat_dst: i64, len: i32) -> i32`
-
-Copies `len` bytes from the caller's WASM linear memory at `[wasm_src .. wasm_src + len]` into native memory address `nat_dst`.
-
-* **Return:** `0` on success, `-1` if WASM source range is out of bounds or `nat_dst == 0`.
-
-##### 6. `load_library(path_ptr: i32, path_len: i32) -> i64`
-
-Maps a dynamic shared library into the host process address space.
-
-* Reads UTF-8 string `path` from `[path_ptr .. path_ptr + path_len]`.
-* **Linux / macOS:** Calls `dlopen(c_path, RTLD_LAZY | RTLD_LOCAL)`. If `path_len == 0`, calls `dlopen(NULL, RTLD_LAZY)` to return the global process symbol handle.
-* **Windows:** Converts UTF-8 to UTF-16LE and calls `LoadLibraryW(w_path)`.
-* **Return:** Opaque 64-bit handle (`HMODULE` or `void*`), or `0` on failure.
-
-##### 7. `get_symbol(lib_handle: i64, name_ptr: i32, name_len: i32) -> i64`
-
-Resolves a symbol name from `lib_handle`.
-
-* Reads ASCII/UTF-8 symbol name from `[name_ptr .. name_ptr + name_len]`, appends NUL terminator on stack.
-* **Linux / macOS:** Calls `dlsym(lib_handle as *mut c_void, c_name)`.
-* **Windows:** Calls `GetProcAddress(lib_handle as HMODULE, c_name)`.
-* **Return:** 64-bit native memory address of the function or exported data variable, or `0` if not found.
-
-##### 8. `free_library(lib_handle: i64) -> i32`
-
-Decrements reference count of `lib_handle` via `dlclose` (POSIX) or `FreeLibrary` (Windows).
-
-* **Return:** `0` on success, `-1` on error.
-
-##### 9. `protect_page(nat_ptr: i64, size: i64, prot: i32) -> i32`
-
-Changes hardware page permissions on page-aligned native memory `[nat_ptr .. nat_ptr + size]`.
-
-* `prot` bitmask:
-* `1` (`PROT_READ`)
-* `2` (`PROT_WRITE`)
-* `4` (`PROT_EXEC`)
-
-
-* **Linux:** `mprotect(nat_ptr, size, flags)`.
-* **macOS (Apple Silicon W^X Enforcement):** Calls `mprotect(nat_ptr, size, flags)` and invokes `sys_icache_invalidate(nat_ptr, size)` when `PROT_EXEC` is set.
-* **Windows:** Translates bitmask to `PAGE_READWRITE` (`3`), `PAGE_EXECUTE_READ` (`5`), or `PAGE_EXECUTE_READWRITE` (`7`), calls `VirtualProtect`, and invokes `FlushInstructionCache(GetCurrentProcess(), nat_ptr, size)` when `PROT_EXEC` is set.
-* **Return:** `0` on success, negative OS error code on failure.
-
-##### 10. `call_native(code_ptr: i64) -> i64`
-
-Performs an indirect zero-argument function call to the native machine code located at `code_ptr`:
-
-```rust
-#[inline(always)]
-unsafe fn call_native_impl(code_ptr: i64) -> i64 {
-    let f: extern "C" fn() -> i64 = core::mem::transmute(code_ptr as usize);
-    f()
-}
-
-```
-
-* **Return:** Raw 64-bit integer returned in `rax` (`x86_64`) or `x0` (`aarch64`).
+ |
+| **`read_brain(b, f, l)`** | Copies `l` bytes from `brain.wasm` memory at `b` to `facade.wasm` memory at `f`. | `new Uint8Array(facadeMem).set(new Uint8Array(brainMem, b, l), f)` | `new Uint8Array(facadeMem).set(new Uint8Array(brainMem, b, l), f)` |
+| **`write_brain(f, b, l)`** | Copies `l` bytes from `facade.wasm` memory at `f` to `brain.wasm` memory at `b`. | `new Uint8Array(brainMem).set(new Uint8Array(facadeMem, f, l), b)` | `new Uint8Array(brainMem).set(new Uint8Array(facadeMem, f, l), b)` |
 
 ---
 
-### 4. Cross-Module Bridging: How `brain.wasm` Calls `facade.wasm`
+## 3. How `facade.wasm` Drives Browser & Node.js Over `"narrow"`
 
-Because the Narrow ABI avoids direct WASM-to-WASM shared memory assumptions in this baseline phase, the `microhost` links `brain.wasm` and `facade.wasm` together inside the same `wasmi::Store` and provides a zero-privilege **Guest Memory Bridge** so `facade.wasm` can read/write `brain.wasm`'s buffers (including `overlapped` completion structures):
+Because `facade.wasm` is the single implementation of `"rusticated"` across all platforms:
 
-```wat
-;; Imported by facade.wasm from the microhost ("narrow" namespace extension for guest access)
-(import "narrow" "read_brain"  (func $read_brain  (param i32 i32 i32) (result i32)))
-(import "narrow" "write_brain" (func $write_brain (param i32 i32 i32) (result i32)))
+### 3.1 Browser (`os_id == 5`) and Pure-JS Node.js (`os_id == 4`)
 
-```
+Instead of `index.js` implementing 30+ `"rusticated"` syscalls in JavaScript, `index.js` shrinks to **~120 lines of code** that:
 
-* `read_brain(brain_src_ptr: i32, facade_dst_ptr: i32, len: i32) -> i32`: Copies `len` bytes from `brain.wasm` linear memory to `facade.wasm` linear memory using `wasmi::Memory::data(&store)`.
-* `write_brain(facade_src_ptr: i32, brain_dst_ptr: i32, len: i32) -> i32`: Copies `len` bytes from `facade.wasm` linear memory into `brain.wasm` linear memory (used to write read buffers and flip the `overlapped` completion flag).
+1. Decompresses `facade.wasm` and `brain.wasm` from the vegetable pool.
 
 
-* **Routing `rusticated` Imports:** Every `"rusticated"` import requested by `brain.wasm` (`sys_read`, `sys_write`, `sys_open`, `sys_net_open`, etc.) is directly bound by `wasmi::Linker` to the matching exported function of `facade.wasm`. When `brain.wasm` calls `sys_read(ovPtr, handle, bufPtr, bufLen)`, execution enters `facade.wasm` directly inside the same `wasmi::Store` with zero host intervention.
+2. Instantiates `facade.wasm` with the 12 `"narrow"` imports.
+3. Instantiates `brain.wasm` with its `"rusticated"` imports wired directly to `facade.wasm`'s exports.
+
+At `facade.wasm` startup when `os_id == 4` or `os_id == 5`:
+
+1. `facade.wasm` calls `load_library("eval")` $\rightarrow$ `0xEEEE0001` and `get_symbol(0xEEEE0001, "eval")` $\rightarrow$ `0xEEEE0002`.
 
 
-
----
-
-### 5. `facade.wasm` Architecture & Trampoline Codegen Engine
-
-`facade.wasm` is a single Rust crate (`#![no_std]` + `alloc`, target `wasm32-unknown-unknown`) that replaces the entire Go `washmhost` codebase.
-
-#### 5.1 Trampoline Execution Pattern (Zero Host FFI Logic)
-
-To invoke any native OS function resolved via `get_symbol` (e.g., `open`, `read`, `write`, `CreateFileW`, `ReadFile`, `pthread_create`), `facade.wasm` allocates a persistent trampoline page via `alloc_native(page_size, page_size)` and uses a parameterized **Call Frame Block** in native memory:
-
-```rust
-#[repr(C)]
-pub struct CallFrame {
-    pub target_fn: u64,   // +0x00: Address of OS function from get_symbol()
-    pub args: [u64; 8],   // +0x08: Up to 8 64-bit arguments
-    pub ret_val: u64,     // +0x48: Return value (rax / x0)
-    pub errno_val: i32,   // +0x50: Captured thread-local errno / GetLastError()
-    pub _pad: i32,
-}
-
-```
-
-At startup, `facade.wasm` checks `NarrowHostInfo.arch_id` and `os_id`, emits a single reusable **Universal Dispatcher Trampoline** (~64 bytes of machine code) into the executable page, and calls `protect_page(exec_page, page_size, PROT_READ | PROT_EXEC)` **once**.
-
-1. **`x86_64` System V ABI (Linux / macOS) Universal Stub:**
-* Loads `CallFrame` base pointer (embedded as a 64-bit immediate in the stub).
-* Moves `args[0..5]` into `rdi, rsi, rdx, rcx, r8, r9`, pushes `args[6..7]` onto aligned stack, calls `[target_fn]`, stores `rax` into `ret_val`, calls `__errno_location` / `__error`, stores `errno` into `errno_val`, and returns `rax`.
+2. `facade.wasm` allocates a `CallFrame` in host memory via `alloc_native` and smuggles its own minimal JS storage/DOM/Node adapter into `globalThis.__facade_io` via `call_native` (using `(0, eval)`):
 
 
-2. **`x86_64` Microsoft x64 ABI (Windows) Universal Stub:**
-* Reserves 32-byte shadow space + stack arguments, moves `args[0..3]` into `rcx, rdx, r8, r9`, moves `args[4..7]` onto stack, calls `[target_fn]`, calls `GetLastError()`, stores into `errno_val`, and returns `rax`.
+* **In Browser (`os_id == 5`):** `facade.wasm` owns the entire VFS state machine, file descriptor table, `O_TRUNC`/`O_APPEND` logic, `marshalStat`, `PlatformInfo` layout, and `/dev/eval` device. It uses its smuggled JS snippets solely to persist blocks to `IndexedDB` / `vscode.workspace.fs` and push/pull terminal stdin/stdout bytes!
 
 
-3. **`aarch64` AAPCS64 (Linux / macOS / Windows ARM64) Universal Stub:**
-* Loads `args[0..7]` via `ldp` into `x0..x7`, branches with link (`blr`) to `target_fn`, stores `x0` into `ret_val`, captures `errno`/`GetLastError()`, and returns `x0`.
+* **In Node.js (`os_id == 4`):** `facade.wasm` invokes Node's built-in `fs`, `net`, `tls`, and `tty` modules through its smuggled JS bridge (or loads the native N-API 30-line bridge via `process.dlopen` to use raw machine code identically to native desktop).
 
 
 
-Because the stub is universal, **Subsequent OS calls do not call `protect_page`!** To execute any native function:
+### 3.2 Native Desktop (`os_id == 1, 2, 3`)
 
-1. `facade.wasm` writes the `CallFrame` struct (72 bytes) into native memory via `write_native`.
-2. `facade.wasm` calls `call_native(universal_stub_ptr)`.
-3. `facade.wasm` reads `ret_val` and `errno_val` (if needed) via `read_native`.
+At `facade.wasm` startup when `os_id` is Linux (`1`), macOS (`2`), or Windows (`3`):
 
-#### 5.2 Asynchronous Overlapped I/O Without Blocking WASM
-
-`rusticated` mandates that all I/O is asynchronous via guest-owned `overlapped` structs. Because WebAssembly is single-threaded per instance, `facade.wasm` implements true non-blocking I/O over the Narrow ABI using two mechanisms:
-
-1. **Non-Blocking Poll Reactor (File, TTY, TCP Sockets):**
-* Sockets and pipes are opened with `O_NONBLOCK` (POSIX) or `ioctlsocket(FIONBIO)` / Overlapped `WSASocketW` (Windows).
-* When `brain.wasm` enters its idle poll / yield loop (`sys_poll` / `sched_yield`), `facade.wasm` runs a single batch poll (`epoll_wait` on Linux, `kevent` on macOS, `GetQueuedCompletionStatusEx` on Windows), transfers completed native buffers into `brain.wasm` via `write_brain`, and flips the `overlapped` completion bit.
+1. `facade.wasm` allocates one executable page via `alloc_native(page_size, page_size)`, writes the ~64-byte architecture-specific **Universal Dispatcher Stub** (`x86_64` SysV, `x86_64` Win64, or `aarch64`), and calls `protect_page(..., PROT_READ | PROT_EXEC)` once.
+2. `facade.wasm` calls `load_library` + `get_symbol` to resolve the host OS functions (`open`, `read`, `write`, `close`, `epoll_wait` / `kevent` / `GetQueuedCompletionStatusEx`, `pthread_create` / `_beginthreadex`, `getaddrinfo`, and native OS TLS cert verification via `Security.framework` / `crypt32.dll` / `libssl`).
 
 
-
-
-2. **Native Background Worker Pool (Blocking FS, DNS `getaddrinfo`, Native TLS Verification):**
-* Operations that lack non-blocking OS primitives (e.g., `getaddrinfo` for `sys_net_lookup`, `SecTrustEvaluateWithError` / `CertVerifyCertificateChainPolicy` for `sys_net_cert_verify`) are dispatched to a small ring-buffer queue in native memory serviced by 2–4 native OS threads spawned at `facade.wasm` startup via `pthread_create` / `_beginthreadex` (executing a small native worker loop emitted into the executable page).
-
-
-* Workers never call back into `wasmi`; they simply execute the C function specified in the native ring buffer, write the result into the native slot, and set an atomic flag that `facade.wasm` harvests on the next poll tick.
-
-
+3. Every `"rusticated"` syscall from `brain.wasm` is handled by the **exact same Rust state machine inside `facade.wasm**`, dispatching the low-level OS call through `write_native(CallFrame)` + `call_native(universal_stub)`.
 
 ---
 
-### 6. Handling Out-of-Process Satellite Isolation (`sys_dylib_*`)
+## 4. Concrete Size & Performance Impact Across the Platform
 
-The Mohabbat architecture requires that dangerous third-party C dynamic libraries invoked by `brain.wasm` (such as `litert_lm_ext`) can run in an isolated **satellite** process so a native segfault does not kill the main application.
+| Metric | Legacy (`brot` + 5 Go `washmhost`s + fat `index.js`)
 
-With the Micro-Host + `facade.wasm` architecture:
+ | Unified (`microhost` + `facade.wasm` + thin `index.js`) |
+| --- | --- | --- |
+| **Zone B (5 Native Binaries)** | 5 × `brot` (~200 KB total)
 
-* **In-Process Fast Path:** Trusted OS libraries (`libc`, `libSystem`, `kernel32`, `ws2_32`, `crypt32`, `Security.framework`) are loaded directly in-process by `facade.wasm` via `narrow::load_library`.
-* **Isolated Satellite Path (`sys_dylib_*`):** When `brain.wasm` calls `sys_dylib_open`, `facade.wasm` spawns a child instance of the current executable (`argv[0] --satellite`) over an anonymous pipe using its native process-spawn syscall (`posix_spawn` / `CreateProcessW`), binding `PR_SET_PDEATHSIG` / `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` exclusively to that optional satellite child.
+ | 5 × `microhost` (`wasmi` + `ruzstd` + 12 narrow funcs: ~250 KB each, ~1.25 MB total) |
+| **Zone C (Compressed Pool)** | 5 × Go `washmhost` (~40 MB uncompressed) + `brain.wasm`
 
+ | **1 × `facade.wasm` (~200 KB)** + `brain.wasm` (0 native binaries in Zone C) |
+| **Browser / Node JS Host** | ~1,630 LOC in `washmhost/js/browser/index.js` + `starter.js` duplicating `washmhost` logic
 
+ | **~120 LOC thin `"narrow"` loader**; 100% of `"rusticated"` logic shared via `facade.wasm` |
+| **Desktop Cold-Start** | Decompress 40 MB $\rightarrow$ write temp binary $\rightarrow$ `execve`/`CreateProcessW` $\rightarrow$ Go init (~80–350 ms)
 
----
+ | Decompress `facade.wasm` + `brain.wasm` in RAM $\rightarrow$ `wasmi` in-process start (**< 10 ms**) |
+| **Process Tree & Watchdogs** | 2 processes (`brot` + `washmhost`) + 3-layer Ghost Process watchdog
 
-### 7. Node.js & Browser Fallback Alignment
+ | **1 single process**; zero temp files, zero `execve`, zero Ghost Process watchdog needed |
+| **Bug / Feature Parity** | Every bug (`O_TRUNC`, `SIGWINCH` 27 vs 28, `[16]MemorySlot`) had to be fixed twice (in Go `washmhost` AND JS `index.js`)
 
-Every vegetable supports a Node.js fallback and Browser execution (`washmhost.js`):
-
-1. **Browser (`washmhost.js`):**
-* The browser already provides a native JS implementation of the `"rusticated"` ABI (`washmhost.js` with `AsyncIndexedDBFS`, `vscode.workspace.fs`, and `/dev/eval`).
-
-
-* In the browser, `washmhost.js` simply skips `facade.wasm` and instantiates `brain.wasm` directly against the JS `"rusticated"` imports—zero change to browser compatibility!
-
-
-2. **Node.js Fallback:**
-* Can either continue instantiating `brain.wasm` directly against the JS `"rusticated"` host (sharing code with `washmhost.js`), **or** load a tiny prebuilt N-API `.node` addon (15 KB) exposing the 10 `"narrow"` functions so Node.js runs the exact same `facade.wasm` + `brain.wasm` pair.
-
-
+ | **Fixed once in `facade.wasm**`; automatically identical across Linux, macOS, Windows, Node.js, and Browser |
 
 ---
 
-### 8. Crate Layout & Implementation Plan
+## 5. Implementation Structure
 
 ```text
 mohabbat/
-├── microhost/                  # Replaces brot/ (Zone B native binary, ~250 KB)
-│   ├── Cargo.toml              # #![no_std], depends on wasmi (no_std), ruzstd
+├── microhost/                  # Zone B: Native #![no_std] Rust runner (~250 KB/target)
+│   ├── Cargo.toml              # wasmi (no_std), ruzstd
 │   └── src/
-│       ├── main.rs             # Entrypoint, slices Zone C, decompresses facade + brain
-│       ├── narrow_abi.rs       # Implements the 10 "narrow" host functions (~250 LOC)
+│       ├── main.rs             # Slices Zone C, decompresses facade.wasm + brain.wasm in RAM
+│       ├── narrow.rs           # 10 "narrow" primitives + read_brain/write_brain (~250 LOC)
 │       ├── sys_unix.rs         # mmap, mprotect, dlopen, dlsym, dlclose
 │       └── sys_windows.rs      # VirtualAlloc, VirtualProtect, LoadLibraryW, GetProcAddress
-└── facade/                     # Replaces washmhost/ (Zone C WASM kernel, ~200 KB)
-    ├── Cargo.toml              # Crate target: wasm32-unknown-unknown
+├── host-js/                    # Universal ~120 LOC JS Narrow Host (Browser & Node.js)
+│   └── narrow_host.js          # Implements the exact same 12 "narrow" imports + "eval" dylib
+└── facade/                     # Zone C: Universal Rusticated Kernel (wasm32-unknown-unknown)
+    ├── Cargo.toml              # #![no_std] + alloc
     └── src/
-        ├── lib.rs              # Exports "rusticated" ABI functions to brain.wasm
-        ├── narrow.rs           # Safe wrappers around the 10 "narrow" imports
-        ├── trampoline/
-        │   ├── mod.rs          # CallFrame & universal dispatcher lifecycle
-        │   ├── x86_64.rs       # SysV & Win64 machine code emitters
-        │   └── aarch64.rs      # ARM64 AAPCS64 machine code emitter
-        ├── reactor.rs          # Non-blocking poll loop & native worker thread ring
-        ├── env_file.rs         # sys_open, sys_read, sys_write, sys_stat, sys_list_dir
-        ├── env_net.rs          # sys_net_open, sys_net_accept, sys_net_lookup, sys_net_cert_verify
-        └── env_dylib.rs        # sys_dylib_* satellite manager
+        ├── lib.rs              # Exports all "rusticated" ABI functions to brain.wasm
+        ├── narrow_sys.rs       # Raw imports from "narrow"
+        ├── core/               # Shared OS-agnostic state (fd table, VFS overlay, overlapped, signals)
+        └── pal/                # Platform Abstraction Layer dispatched by NarrowHostInfo.os_id
+            ├── native_trampoline.rs # x86_64 (SysV/Win64) & aarch64 universal CallFrame stubs
+            ├── posix.rs             # Linux (os_id=1) & macOS (os_id=2) via libc/libSystem symbols
+            ├── windows.rs           # Windows (os_id=3) via kernel32/ws2_32/crypt32 symbols
+            └── js_eval.rs           # Node.js (os_id=4) & Browser (os_id=5) via "eval" symbol
 
 ```
+
+This keeps the boundary strict: **hosts only ever implement `"narrow"**`, and **`facade.wasm` is the sole implementation of `"rusticated"` across Desktop, Node.js, and Browser.**
+
+### 6. How the Facade Triggers and Loads the Brain
+
+Instead of handing control insecurely or introducing circular boot dependencies, the boot sequence follows a strict kernel-bootstrapping model:
+
+1. **Host Decompression:** The native `microhost` (Zone B) decompresses Zone C, holding raw binary blobs for both `facade.wasm` and `brain.wasm` in RAM.
+2. **Facade Initialization:** The host instantiates `facade.wasm` first, providing it with the **Narrow ABI** and a pointer to the raw `brain.wasm` binary payload in memory.
+3. **Kernel Bootstrapping:** `facade.wasm` acts as the WebAssembly-based OS kernel. It parses, validates, and instantiates `brain.wasm` (using its internal WASM compilation/linking logic or via host-assisted instantiation), binds the `"rusticated"` import namespace, and invokes `brain.wasm`'s entry point (`_start` / `run`).
+
+---
+
+### 2. Handling Synchronous Local I/O & Blocking OS Calls
+
+Local file access, standard I/O (stdin/stdout/stderr), and certain OS system calls are notoriously synchronous and blocking on Linux and Windows. Because WebAssembly execution within an instance is single-threaded, executing a blocking file read directly on the guest thread would freeze the entire application.
+
+To solve this without bloating the Narrow ABI, **`facade.wasm` orchestrates a native background worker threadpool entirely via raw machine code and dynamic symbol resolution.**
+
+#### The Native Worker Threadpool Architecture
+
+1. **Spawning Native Threads at Startup:**
+* During initialization, `facade.wasm` uses its Narrow ABI privileges (`get_symbol`) to resolve native threading symbols from the host OS (`pthread_create` on POSIX, `_beginthreadex` on Windows).
+* It allocates an executable worker stub and spawns **2 to 4 native OS background worker threads** directly in the host process address space, bypassing Go or JS runtimes entirely.
+
+
+2. **Shared Ring-Buffer & Overlapped Queue:**
+* `facade.wasm` maintains a lockless or mutex-protected **I/O Request Ring-Buffer** in shared native memory (`alloc_native`).
+* When `brain.wasm` issues an asynchronous file operation (e.g., `sys_read` on a file handle) via the `"rusticated"` ABI, `facade.wasm` packages the request and pushes it to the native ring-buffer.
+
+
+3. **Non-Blocking Return:**
+* `facade.wasm` immediately marks the guest's `overlapped` structure as pending and returns control back to `brain.wasm`, allowing userland green threads (goroutines) to continue executing.
+
+
+4. **Worker Execution & Completion:**
+* One of the native background worker threads picks up the request from the ring-buffer, executes the blocking OS system call (`read()` / `WriteFile()` / `stat()`), writes the result directly into the designated buffer memory, and updates the completion flag.
+* On the next guest poll tick or yield cycle, `facade.wasm` detects the completed native operation and resumes the waiting guest task.
+
+
+
+---
+
+### Summary of Responsibilities
+
+* **`microhost` (Zone B):** Provides raw OS primitives (`mmap`, `mprotect`, `dlopen`, `dlsym`, `call_native`) and holds initial bytes. Contains zero business logic.
+* **`facade.wasm` (Zone C Kernel):** Owns the virtual filesystem state, file descriptor tables, path resolution, `overlapped` completion tracking, and spawns/manages the native background threadpool for blocking local file and stdio operations.
+* **`brain.wasm` (Zone C Userland):** Runs user code (like Kabibi) purely asynchronously against the `"rusticated"` ABI, completely agnostic of whether underlying file I/O is handled by non-blocking polling or offloaded native worker threads.
