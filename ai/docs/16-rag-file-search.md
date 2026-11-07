@@ -268,3 +268,89 @@ acceptance requirement until resolved.
 3. **`embedding_cache_test.go`**:
    - Verify cache initialization and atomic replacement without `temp.Sync()`.
 
+
+#### Further tests
+
+Here is a comprehensive testing and validation plan that tests the individual complex mechanisms, their composition into subsystem blocks, and the entire system end-to-end under both native and Rusticated environments.
+
+### Level 1: Unit Validation — Discrete Algorithmic Mechanics
+
+These tests isolate the individual building blocks in direct unit tests without concurrency or I/O noise:
+
+1. **4:1 Quota Arithmetic & Modulo-5 Carryover:**
+   - **Exhaustive Quota Sweep**: Test batch capacities $B \in [1, 16]$ across all possible initial remainder states $R \in [0, 4]$. Assert that $N + M = \min(B, \text{tasks})$, $R_{\text{next}} = (B \times 4 + R) \pmod 5$, and that over a cycle of 5 items, exactly 4 high slots and 1 low slot are allocated.
+   - **Remainder Carryover Progression**: Sequence successive batches of capacity 1 (yielding $N, M$: 0/1, 1/0, 1/0, 1/0, 1/0, etc.) and capacity 2 (yielding $N, M$: 1/1, 2/0, 2/0, 1/1, 2/0, etc.) to verify that remainder carries strictly across consecutive batch formations.
+
+2. **Deterministic Task Ordering & Tie-Breaking:**
+   - **Primary vs Secondary Count Ordering**: Construct a pool with mixed tasks: `A(high: 3, low: 1)`, `B(high: 3, low: 2)`, `C(high: 1, low: 5)`, `D(high: 2, low: 0)`.
+     - High quota ($N=2$) must select `B` then `A` (`high` ties broken by `low`).
+     - Low quota ($M=2$) from remainder must select `C` then `D` (`low` ties broken by `high`).
+   - **Sequence Preservation**: When both `high` and `low` counts are equal, assert strict FIFO selection by task insertion sequence.
+   - **Exhaustion / Asymmetric Pools**: When the pool has zero high tasks, the high quota selection drains gracefully and yields to low tasks without stalling or creating empty batches. Vice-versa when the pool has zero low tasks.
+
+3. **Persistent Cache I/O Unit Verification:**
+   - **Initialization**: Verify `os.MkdirAll` is executed at cache construction time.
+   - **No Disk Stalls**: Confirm `embeddingCache.put` writes and atomically renames the temporary record without calling `Sync()` (`fsync`).
+
+---
+
+### Level 2: Queue Concurrency & Lifecycle Validation
+
+These tests exercise concurrency, racing cancellations, and multi-waiter coalescing in `embed_scheduler.go`:
+
+1. **Multi-Waiter Coalescing & Count Accounting:**
+   - Enqueue identical input text from 3 high-priority and 2 low-priority callers. Assert only 1 unique task exists in the pool with `highCount = 3` and `lowCount = 2`.
+   - Complete the batch: assert all 5 callers receive the identical vector and no error.
+   - Enqueue a task with 1 high and 1 low waiter. Cancel the high waiter: assert `highCount` becomes 0, `lowCount` remains 1, the task remains pending in the pool, and the low waiter completes successfully when the batch runs.
+
+2. **Immediate Task Ejection on Zero Waiters:**
+   - Enqueue 5 unique tasks. Cancel 2 before the worker forms a batch.
+   - Assert their waiter counts drop to 0 and they are immediately removed from the active task pool.
+   - Assert the worker selects only the 3 remaining tasks into the next batch and does not dispatch inference for the purged 2.
+
+3. **Cancellation Races:**
+   - **Cancel during Selection/In-Flight**: A caller context cancels while the batch is currently executing inference. Assert the cancellation returns `context.Canceled` to the cancelling caller, but sibling callers on the same coalesced task receive the valid embedding, and the embedder backend is not left in a broken state.
+   - **Queue Close**: Calling `scheduler.Close()` immediately fails all pending waiters with cancellation and unblocks any waiting goroutines.
+
+---
+
+### Level 3: Subsystem Integration Validation
+
+These tests verify the interplay between search, caching, quote extraction, and the embedder queue:
+
+1. **Cache Bypass Verification:**
+   - Seed `embeddingCache` with vectors for 5 out of 10 candidate files.
+   - Run semantic ranking with a mock embedder tracking calls.
+   - Assert: exactly 5 cache hits occur and **zero** requests enter the scheduler for those 5 files; exactly 5 cache misses enter the scheduler as high-priority tasks.
+
+2. **Dynamic Top-$N$ Quote Displacement & Ejection:**
+   - Configure a mock embedder with an artificial delay.
+   - Search a dataset where File 1 initially enters the top $N$ and triggers quote extraction (enqueuing quote chunks as low-priority tasks).
+   - Before the quote batch executes, File 2 and File 3 score higher and displace File 1 out of the top $N$.
+   - Assert: File 1's quote context is cancelled, its quote tasks in the embedder queue are decremented to zero and purged, and the mock embedder **never receives** inference calls for File 1's quote chunks.
+
+3. **High vs Low Interleaving during Search:**
+   - Run a search where candidate files are streaming in (generating high-priority cache misses) concurrently with active quote extractions (generating low-priority tasks).
+   - Instrument batch formation to log batch contents: verify that batches interleave high candidate tasks and low quote tasks according to the 4:1 carryover policy rather than starvation of either class.
+
+---
+
+### Level 4: End-to-End Real Embedder Acceptance
+
+These tests run the full production pipeline with the real `embeddinggemma-2-text-270m.litertlm` model:
+
+1. **Live Search Latency & Diagnostics Test:**
+   - Run a real verbose semantic content search across the test dataset.
+   - Validate diagnostics: verify reported candidate cache hits, cache misses, batch formations, and quote extractions.
+   - Assert that candidate cache hits execute at disk/page-cache speed without queuing delays.
+
+2. **Production Performance Acceptance Suite:**
+   - Execute the 4 required production acceptance benchmarks:
+     1. Semantic grouping: `duck`/`chicken` vs `iron`/`copper` mutual nearest neighbors.
+     2. Warm single-input latency: `London`, `Paris`, `Tokyo`, `Lagos` sequential under 1.0s.
+     3. Real batch latency: 4 currency terms + 4 color terms under 3.0s.
+     4. Long-input latency: 4,915-byte source slice warm embedding under 3.0s.
+
+3. **Native AMD64 and Rusticated Parity:**
+   - Run the full suite under native Go (`GOARCH=amd64 go test`).
+   - Run the `filelist` and search suite under Rusticated (`go run . -t kabibi` or targeted Rusticated test runner) to verify no async host stalls, deadlocks, or WASM ABI regressions.
