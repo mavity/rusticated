@@ -25,6 +25,4 @@ struct probe_dispatch {
     probe_exit_fn exit;
 };
 
-void PROBE_CALL probe_entry(const struct probe_dispatch *dispatch);
-
 #endif

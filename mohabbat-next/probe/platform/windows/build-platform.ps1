@@ -2,31 +2,64 @@ $ErrorActionPreference = 'Stop'
 
 $scriptDir = $PSScriptRoot
 $probeDir = Join-Path $scriptDir '..\..'
+$workspace = Join-Path $probeDir 'Cargo.toml'
+$rustBuildDir = Join-Path $probeDir 'hosts\windows\.build\rust'
+$cargoHome = Join-Path $rustBuildDir 'cargo-home'
 $outDir = Join-Path (Join-Path $probeDir 'hosts\windows') '.build\platform'
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
 $targets = @(
-    @{ Name = 'x86_64'; Triple = 'x86_64-unknown-none-elf'; FixedRegisters = @() },
-    @{ Name = 'aarch64'; Triple = 'aarch64-unknown-none-elf'; FixedRegisters = @('-ffixed-x18') }
+    @{ Name = 'x86_64'; Triple = 'x86_64-unknown-none' },
+    @{ Name = 'aarch64'; Triple = 'aarch64-unknown-none' }
 )
 
 foreach ($target in $targets) {
-    $object = Join-Path $outDir ("platform-windows-{0}.o" -f $target.Name)
     $elf = Join-Path $outDir ("platform-windows-{0}.elf" -f $target.Name)
     $binary = Join-Path $outDir ("platform-windows-{0}.bin" -f $target.Name)
 
-    & clang "--target=$($target.Triple)" -O2 -ffreestanding -fno-builtin `
-        -fno-stack-protector -fPIC -fno-unwind-tables `
-        -fno-asynchronous-unwind-tables -fno-exceptions -fno-rtti `
-        -fno-jump-tables -I (Join-Path $probeDir 'payload') `
-        $target.FixedRegisters `
-        -c (Join-Path $scriptDir 'platform.c') -o $object
-    if ($LASTEXITCODE -ne 0) {
-        throw "Windows platform compilation failed for $($target.Name)."
+    $previousCargoHome = $env:CARGO_HOME
+    $hadCargoHome = Test-Path Env:CARGO_HOME
+    $env:CARGO_HOME = $cargoHome
+    Push-Location $probeDir
+    try {
+        & cargo -Z build-std=core build --manifest-path $workspace `
+            --package mohabbat-next-windows-platform --release `
+            --target $target.Triple --target-dir $rustBuildDir
+        if ($LASTEXITCODE -ne 0) {
+            throw "Rust Windows platform compilation failed for $($target.Name)."
+        }
+    }
+    finally {
+        Pop-Location
+        if ($hadCargoHome) {
+            $env:CARGO_HOME = $previousCargoHome
+        }
+        else {
+            Remove-Item Env:CARGO_HOME
+        }
+    }
+
+    $dependencyDir = Join-Path $rustBuildDir (
+        Join-Path $target.Triple 'release\deps')
+    $archives = @()
+    foreach ($pattern in @(
+        'libmohabbat_next_windows_platform-*.rlib',
+        'libcore-*.rlib',
+        'libcompiler_builtins-*.rlib'
+    )) {
+        $archiveMatch = Get-ChildItem -LiteralPath $dependencyDir `
+            -Filter $pattern -File |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+        if (-not $archiveMatch) {
+            throw "Could not find a Rust archive matching $pattern for $($target.Name)."
+        }
+        $archives += $archiveMatch.FullName
     }
 
     & ld.lld -T (Join-Path $scriptDir 'platform.ld') --build-id=none `
-        --no-undefined -o $elf $object
+        --gc-sections `
+        --no-undefined --start-group $archives --end-group -o $elf
     if ($LASTEXITCODE -ne 0) {
         throw "Windows platform linking failed for $($target.Name)."
     }
