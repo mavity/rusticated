@@ -1,1 +1,1 @@
-MZ=1;bash <(tail -c +{{.BootstrapOffset}} "$0") "$0" "$@";exit
+MZ=1;eval "$(tail -c +{{.BootstrapOffset}} "$0")";exit

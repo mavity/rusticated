@@ -103,14 +103,14 @@ func main() {
 	}
 
 	// Step 1: Preflight
-	fmt.Println("🍆  [1/5] Checking build tools and prerequisites...")
+	fmt.Println("🍆  [1/6] Checking build tools and prerequisites...")
 	if err := checkTools(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Step 2: Build Rust flat components
-	fmt.Println("🍆  [2/5] Building flat payload and PAL components...")
+	fmt.Println("🍆  [2/6] Building flat payload and PAL components...")
 
 	type targetDef struct {
 		Name         string
@@ -237,8 +237,66 @@ func main() {
 		}
 	}
 
-	// Step 3: Compress Windows components for CLR embedding
-	fmt.Println("🍆  [3/5] Compressing Windows platform and hello payloads (Zstandard)...")
+	// Step 3: Build Unix Brot micro-launchers
+	fmt.Println("🍆  [3/6] Building Unix Brot micro-launchers...")
+
+	darwinStubsDir := filepath.Join(nextDir, "..", "target", "darwin-stubs")
+	if abs, err := filepath.Abs(darwinStubsDir); err == nil {
+		darwinStubsDir = abs
+	}
+	if err := ensureDarwinStubs(darwinStubsDir); err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating darwin stubs: %v\n", err)
+		os.Exit(1)
+	}
+
+	linuxMuslFlags := "['-C', 'panic=abort', '-C', 'relocation-model=pic', '-C', 'target-feature=+crt-static', '-C', 'link-self-contained=no', '-C', 'linker=rust-lld', '-C', 'linker-flavor=ld.lld', '-C', 'link-arg=-pie', '-C', 'link-arg=--no-dynamic-linker']"
+	darwinFlags := fmt.Sprintf("['-C', 'panic=abort', '-C', 'linker=rust-lld', '-C', 'linker-flavor=darwin-lld', '-Z', 'unstable-options', '-C', 'link-arg=-L%s']", filepath.ToSlash(darwinStubsDir))
+
+	brotConfigs := []BrotRunnerConfig{
+		{
+			Name:        "brot-x86_64-linux",
+			Triple:      "x86_64-unknown-linux-musl",
+			Rustflags:   linuxMuslFlags,
+			OutFileName: "brot-x86_64-unknown-linux-gnu",
+		},
+		{
+			Name:        "brot-aarch64-linux",
+			Triple:      "aarch64-unknown-linux-musl",
+			Rustflags:   linuxMuslFlags,
+			OutFileName: "brot-aarch64-unknown-linux-gnu",
+		},
+		{
+			Name:        "brot-aarch64-android",
+			Triple:      "aarch64-unknown-linux-musl",
+			Rustflags:   linuxMuslFlags,
+			OutFileName: "brot-aarch64-linux-android",
+		},
+		{
+			Name:        "brot-x86_64-darwin",
+			Triple:      "x86_64-apple-darwin",
+			Rustflags:   darwinFlags,
+			SdkRoot:     darwinStubsDir,
+			OutFileName: "brot-x86_64-apple-darwin",
+		},
+		{
+			Name:        "brot-aarch64-darwin",
+			Triple:      "aarch64-apple-darwin",
+			Rustflags:   darwinFlags,
+			SdkRoot:     darwinStubsDir,
+			OutFileName: "brot-aarch64-apple-darwin",
+		},
+	}
+
+	for _, bcfg := range brotConfigs {
+		fmt.Printf("🍆    Building %s (%s)...\n", bcfg.Name, bcfg.Triple)
+		if _, err := buildBrotRunner(probeDir, rustBuildDir, unixOutDir, bcfg, verbose); err != nil {
+			fmt.Fprintf(os.Stderr, "Error building brot runner %s: %v\n", bcfg.Name, err)
+			os.Exit(1)
+		}
+	}
+
+	// Step 4: Compress Windows components for CLR embedding
+	fmt.Println("🍆  [4/6] Compressing Windows platform and hello payloads (Zstandard)...")
 	type winCompDef struct {
 		SrcBin   string
 		OutZst   string
@@ -273,8 +331,8 @@ func main() {
 		})
 	}
 
-	// Step 4: Build Windows AnyCPU CLR Host
-	fmt.Println("🍆  [4/5] Compiling AnyCPU Windows CLR Host (MohabbatWindowsHost.exe)...")
+	// Step 5: Build Windows AnyCPU CLR Host
+	fmt.Println("🍆  [5/6] Compiling AnyCPU Windows CLR Host (MohabbatWindowsHost.exe)...")
 	windowsHostExe := filepath.Join(workDir, "MohabbatWindowsHost.exe")
 	if err := buildWindowsHostExe(windowsHostDir, workDir, windowsHostExe, winResources, verbose); err != nil {
 		fmt.Fprintf(os.Stderr, "Error building Windows host: %v\n", err)
@@ -286,8 +344,8 @@ func main() {
 		return
 	}
 
-	// Step 5: Vegetable Assembly
-	fmt.Println("🍆  [5/5] Assembling unified single-file vegetable...")
+	// Step 6: Vegetable Assembly
+	fmt.Println("🍆  [6/6] Assembling unified single-file vegetable...")
 
 	// Verify required Brot runners
 	brotNames := []string{

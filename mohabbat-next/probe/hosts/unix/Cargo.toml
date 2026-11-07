@@ -7,3 +7,9 @@ edition = "2021"
 
 [dependencies]
 ruzstd = { version = "0.7.3", default-features = false }
+
+[profile.release]
+opt-level = "z"
+panic = "abort"
+lto = true
+codegen-units = 1
