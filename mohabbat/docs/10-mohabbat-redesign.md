@@ -10,8 +10,9 @@ The redesigned Mohabbat transitions from an out-of-process multi-binary extracti
 
 * **The Unified Binary**: The file acts as a polyglot entry point. On Windows, it satisfies the PE/COFF specification directly, avoiding batch file parsing, command shell trampolines, or flickering console windows. On POSIX platforms, interactive shells intercept execution and evaluate it as a script.
 * **Windows Execution Pathway**: The PE header targets the built-in AnyCPU .NET runtime (pre-installed across Windows client and server platforms). It allocates executable memory via unmanaged system memory interfaces, copies the payload into memory, and branches directly into the native layer without writing temporary files to disk.
-* **Linux & Android (Termux) Pathway**: The script extracts a minimal loader directly into an anonymous, sealed memory file descriptor (`memfd_create`) and executes it via descriptor path lookup. This avoids touching non-volatile disk blocks and bypasses restrictive mount flags (such as `noexec` on temporary directories).
-* **macOS (Darwin) Pathway**: The script streams an in-memory, read-only filesystem image directly into RAM via the system disk management utility, mounting it invisibly using privacy attributes so that Desktop and Finder displays are unaffected. The binary launches, relocates all operational components into anonymous executable memory, switches thread execution entirely to anonymous memory arenas, and immediately commands the host to unmount and detach the RAM volume. Execution continues uninterrupted within swap-backed anonymous memory.
+* **Linux & Android (Termux) Pathway**: The shell stub extracts the matching Brot executable to a securely created, randomly named temporary file prefixed with `🐚︎`, executes it, and Brot unlinks its own path immediately on startup. Brot decompresses the OS-specific platform abstraction and ISA-shared hello payload from the bundle. `memfd_create` may be used as an optional launch optimization when a syscall-capable helper is already available; it is not required by the baseline.
+* **macOS (Darwin) Pathway**: The baseline also launches Brot from a random temporary file and unlinks it at startup. The macOS platform abstraction uses anonymous JIT memory, toggles thread-level write protection while populating code, and synchronizes the instruction cache. RAM-disk staging and immediate volume detachment are not assumed by this baseline; a running executable can keep its source volume busy.
+* **Storage caveat**: Unlinking removes the temporary pathname, not its backing pages. The temporary directory may be disk-backed or `noexec`, and anonymous memory may be swapped. The baseline therefore promises prompt pathname removal, not zero persistent-storage writes. An in-memory launch path is an optional optimization, not a prerequisite.
 
 ### 2. The In-Process Execution Engine (Brot & Cranelift)
 
@@ -29,13 +30,14 @@ The redesigned Mohabbat transitions from an out-of-process multi-binary extracti
 
 ## First Delivery: The Minimal Interactive Probe
 
-The first implementation stage targets Windows only. It validates the execution handoff using a self-contained, CPU-dependent but operating-system-agnostic test probe. Linux, macOS, and Termux/Android will follow shortly, using their own platform abstractions and the same ISA-matched hello-world payloads. The unified polyglot delivery format remains the intended single-asset distribution; this Windows stage does not create separate architecture-specific EXE deliverables.
+The first delivery validates the handoff using a self-contained, CPU-dependent but operating-system-agnostic test probe on Windows, Linux, macOS, and Termux/Android. The unified polyglot remains one MZ/PE distribution asset. Its DOS stub is also a shell-valid assignment and dispatches POSIX execution to Bash, which reads the appended bootstrap through process substitution so the probe retains the original terminal input. Platform-specific Brot runners and abstractions are selected by the shell/CLR bootstrap, while the two ISA-matched hello-world payloads remain shared.
 
 ### 1. Scope & Objective
 
 * Deliver one Windows AnyCPU EXE that runs on both AMD64 and ARM64 Windows. Its embedded manifest declares both supported architectures so supported Windows versions can select the native CLR.
 * Use the CLR launcher and zstd to extract the architecture-matched movable binaries. The EXE is the only Windows deliverable; do not produce separate AMD64 and ARM64 EXE assets.
-* Validate Windows anonymous executable-memory allocation, cache coherence, and native execution handoff on both architectures. This stage does not claim acceptance for Linux, macOS, or Termux.
+* Support Linux AMD64/AArch64, Android Termux AArch64, and macOS x86-64/AArch64 through the Unix shell bootstrap and matching Brot runner. The bootstrap extracts Brot to the random temporary path, and Brot removes that path immediately after startup.
+* Validate anonymous executable-memory allocation, cache coherence, and native execution handoff on every supported OS/architecture. Temporary-file backing is the baseline; optional memory-only launch methods do not gate support.
 
 The Windows EXE packages four independently compiled movable binaries:
 
@@ -77,13 +79,14 @@ The communication contract between the platform abstraction and the machine-code
 
 ### 5. The Platform Host Runner Specification
 
-Each operating system provides a platform abstraction responsible for bringing up the ISA-matched machine-code slice. The Windows stage packages two Windows abstractions (x86-64 and AArch64) in the single AnyCPU EXE; abstractions for other operating systems are added in later stages.
+Each operating system provides a platform abstraction responsible for bringing up the ISA-matched machine-code slice. One shared x86-64 payload and one shared AArch64 payload are paired with OS-specific abstractions and Brot runners in the unified asset.
 
 * **Windows Launcher**: A single AnyCPU .NET EXE uses its embedded manifest to allow native ARM64 CLR selection where supported, decompresses the matching Windows abstraction and hello-world payload with zstd, and provides the narrow low-level ABI to the abstraction. It does not itself implement the payload's standard input/output and exit primitives.
 * **Windows Platform Abstraction**: The architecture-matched movable binary uses the supplied allocation and dynamic symbol-resolution primitives, prepares and populates executable memory with the hello-world payload, synchronizes the instruction cache, constructs the three high-level dispatch functions, and invokes the payload entry point.
-* **Linux & Termux Platform Abstraction**: A later stage allocates an anonymous private page with read, write, and execute permissions using the kernel memory-mapping interface, copies the payload bytes into the mapped region, flushes the processor instruction cache on ARM platforms, constructs the three dispatch functions using the Linux/Android interfaces, and invokes the payload entry point.
-* **macOS Platform Abstraction**: A later stage uses anonymous JIT memory-mapping flags, toggles thread-level write protection to copy the payload bytes, flushes the data cache, invalidates the instruction cache, and invokes the payload. The designed outer macOS launch path mounts the RAM disk and detaches it as specified in the delivery layer.
+* **Unix Brot Runner**: The shell stub selects the OS/ISA runner and extracts its raw executable bytes to a unique `🐚︎`-prefixed temporary path. Brot unlinks that path immediately, reads the compressed component ranges from the original bundle, decompresses them, supplies dynamic symbol lookup, executable allocation/release, cache synchronization, and JIT-write-protection primitives to the platform abstraction, then transfers control.
+* **Linux & Termux Platform Abstraction**: The x86-64 or AArch64 flat Rust binary resolves the Linux/Android I/O and exit interfaces, allocates executable memory through Brot's ABI, copies and synchronizes the hello payload, creates the three-function dispatch table, and invokes the payload.
+* **macOS Platform Abstraction**: The x86-64 or AArch64 flat Rust binary uses Brot's JIT-memory and thread-level write-protection primitives to populate executable memory, synchronizes the instruction cache, constructs the dispatch table, and invokes the payload.
 
 ### 6. Acceptance Verification
 
-The Windows stage is considered successful when the single AnyCPU EXE runs on both AMD64 and ARM64 Windows, selects the matching Windows abstraction and hello-world payload, displays the startup banner, echoes typed input lines interactively, and terminates cleanly when an empty line (a bare Enter keystroke) is supplied. The full first delivery is not complete until the corresponding OS-specific abstractions and acceptance runs are added for Linux, macOS, and Android Termux; those platforms reuse the same two ISA-specific hello-world payloads.
+Acceptance requires the interactive banner/echo/empty-line-exit behavior on Windows AMD64/ARM64, Linux AMD64/AArch64, Android Termux AArch64, and macOS x86-64/AArch64, using each matching abstraction and shared ISA payload. Native target testing is required; cross-compilation alone does not count as acceptance.
