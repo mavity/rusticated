@@ -1,0 +1,7 @@
+/probe/payload/out/
+/probe/hosts/windows/.build/
+/probe/hosts/windows/bin/
+/probe/hosts/windows/obj/
+/probe/hosts/windows/packages/
+/probe/hosts/posix/build/
+/probe/hosts/windows/out/
