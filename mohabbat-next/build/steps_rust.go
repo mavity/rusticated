@@ -190,3 +190,100 @@ func findLatestArchive(dir, pattern string) (string, error) {
 	}
 	return bestPath, nil
 }
+
+const darwinTbdContent = `--- !tapi-tbd
+tbd-version:     4
+targets:         [ x86_64-macos, arm64-macos ]
+install-name:    '/usr/lib/libSystem.B.dylib'
+current-version: 1292.100.35
+compatibility-version: 1
+exports:
+  - targets:     [ x86_64-macos, arm64-macos ]
+    symbols:     [ _exit, _abort, _fork, _waitpid, _execve, _open, _read,
+                   _write, _close, _lseek, _unlink, _fchmod, _getpid,
+                   _mmap, _munmap, _mprotect, _sys_icache_invalidate, _pthread_jit_write_protect_np,
+                   _bzero, ___bzero, dyld_stub_binder,
+                   _dlopen, _dlerror, _dlsym, _dlclose, _malloc, _free, _usleep ]
+...
+`
+
+func ensureDarwinStubs(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("mkdir darwin-stubs: %w", err)
+	}
+	stubPath := filepath.Join(dir, "libSystem.tbd")
+	existing, err := os.ReadFile(stubPath)
+	if err == nil && string(existing) == darwinTbdContent {
+		return nil
+	}
+	if err := os.WriteFile(stubPath, []byte(darwinTbdContent), 0o644); err != nil {
+		return fmt.Errorf("write libSystem.tbd: %w", err)
+	}
+	return nil
+}
+
+type BrotRunnerConfig struct {
+	Name        string
+	Triple      string
+	Rustflags   string
+	SdkRoot     string
+	OutFileName string
+}
+
+func buildBrotRunner(probeDir, rustBuildDir, outDir string, cfg BrotRunnerConfig, verbose bool) (string, error) {
+	manifestPath := filepath.Join(probeDir, "hosts", "unix", "Cargo.toml")
+	cargoHome := filepath.Join(rustBuildDir, "cargo-home")
+	compTargetDir := filepath.Join(rustBuildDir, "brot-"+cfg.Triple)
+
+	if err := os.MkdirAll(cargoHome, 0o755); err != nil {
+		return "", fmt.Errorf("create cargo home %s: %w", cargoHome, err)
+	}
+
+	args := []string{
+		"+nightly",
+		"build",
+		"--manifest-path", manifestPath,
+		"--release",
+		"--target", cfg.Triple,
+		"--target-dir", compTargetDir,
+		fmt.Sprintf("--config=target.%s.rustflags=%s", cfg.Triple, cfg.Rustflags),
+	}
+
+	cmd := exec.Command("cargo", args...)
+	cmd.Dir = filepath.Join(probeDir, "hosts", "unix")
+	cmd.Env = append(os.Environ(), "CARGO_HOME="+cargoHome)
+	if cfg.SdkRoot != "" {
+		cmd.Env = append(cmd.Env, "SDKROOT="+cfg.SdkRoot)
+	}
+
+	if verbose {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	} else {
+		var errBuf bytes.Buffer
+		cmd.Stderr = &errBuf
+		defer func() {
+			if cmd.ProcessState != nil && !cmd.ProcessState.Success() && errBuf.Len() > 0 {
+				fmt.Fprintln(os.Stderr, errBuf.String())
+			}
+		}()
+	}
+
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("cargo build brot runner %s (%s): %w", cfg.Name, cfg.Triple, err)
+	}
+
+	srcExe := filepath.Join(compTargetDir, cfg.Triple, "release", "mohabbat-next-brot")
+	destExe := filepath.Join(outDir, cfg.OutFileName)
+
+	data, err := os.ReadFile(srcExe)
+	if err != nil {
+		return "", fmt.Errorf("read built brot %s: %w", srcExe, err)
+	}
+
+	if err := os.WriteFile(destExe, data, 0o755); err != nil {
+		return "", fmt.Errorf("write brot asset %s: %w", destExe, err)
+	}
+
+	return destExe, nil
+}

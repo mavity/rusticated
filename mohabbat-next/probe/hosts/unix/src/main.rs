@@ -1,299 +1,223 @@
-use std::env;
-use std::ffi::{c_char, c_void, OsString};
-use std::fs::{self, File};
-use std::io::{self, Read, Seek, SeekFrom};
-use std::path::PathBuf;
-use std::process;
+#![no_std]
+#![no_main]
 
-use ruzstd::frame_decoder::{BlockDecodingStrategy, FrameDecoder};
-use ruzstd::io::Read as RuzstdRead;
+extern crate alloc;
 
-const COMPONENT_LIMIT: usize = 4096;
-const COMPRESSED_COMPONENT_LIMIT: usize = 8192;
-const PROT_READ: i32 = 1;
-const PROT_WRITE: i32 = 2;
-const PROT_EXEC: i32 = 4;
-const MAP_PRIVATE: i32 = 2;
-#[cfg(any(target_os = "linux", target_os = "android"))]
-const MAP_ANONYMOUS: i32 = 0x20;
-#[cfg(target_os = "macos")]
-const MAP_ANONYMOUS: i32 = 0x1000;
-#[cfg(target_os = "macos")]
-const MAP_JIT: i32 = 0x800;
+mod allocator;
+mod decompress;
 
-#[repr(C)]
-struct UnixPlatformHost {
-    load_library: Option<unsafe extern "C" fn(*const c_char, i32) -> *mut c_void>,
-    get_proc_address: Option<unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_void>,
-    alloc: Option<unsafe extern "C" fn(usize) -> *mut c_void>,
-    free: Option<unsafe extern "C" fn(*mut c_void, usize)>,
-    flush_cache: Option<unsafe extern "C" fn(*mut c_void, usize)>,
-    set_jit_write_protect: Option<unsafe extern "C" fn(i32)>,
-    hello_payload: *const u8,
-    hello_payload_size: usize,
-}
-
-type PlatformEntry = unsafe extern "C" fn(*const UnixPlatformHost) -> i32;
-
-#[cfg(any(target_os = "linux", target_os = "android"))]
-#[link(name = "dl")]
-unsafe extern "C" {
-    fn dlopen(filename: *const c_char, flags: i32) -> *mut c_void;
-    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-}
+#[cfg(target_os = "linux")]
+mod linux;
 
 #[cfg(target_os = "macos")]
-unsafe extern "C" {
-    fn dlopen(filename: *const c_char, flags: i32) -> *mut c_void;
-    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-    fn pthread_jit_write_protect_np(enabled: i32);
-    fn sys_icache_invalidate(start: *const c_void, length: usize);
+mod darwin;
+
+#[global_allocator]
+static ALLOC: allocator::OsAllocator = allocator::OsAllocator;
+
+// ─── Intrinsics ──────────────────────────────────────────────────────────────
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    let mut i = 0;
+    while i < n {
+        *dest.add(i) = *src.add(i);
+        i += 1;
+    }
+    dest
 }
 
-unsafe extern "C" {
-    fn mmap(
-        address: *mut c_void,
-        length: usize,
-        protection: i32,
-        flags: i32,
-        descriptor: i32,
-        offset: i64,
-    ) -> *mut c_void;
-    fn munmap(address: *mut c_void, length: usize) -> i32;
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memset(s: *mut u8, c: i32, n: usize) -> *mut u8 {
+    let mut i = 0;
+    while i < n {
+        *s.add(i) = c as u8;
+        i += 1;
+    }
+    s
 }
 
-unsafe extern "C" fn load_library(name: *const c_char, flags: i32) -> *mut c_void {
-    unsafe { dlopen(name, flags) }
-}
-
-unsafe extern "C" fn get_proc_address(module: *mut c_void, name: *const c_char) -> *mut c_void {
-    unsafe { dlsym(module, name) }
-}
-
-unsafe extern "C" fn alloc_executable(size: usize) -> *mut c_void {
-    #[cfg(target_os = "macos")]
-    let flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_JIT;
-    #[cfg(not(target_os = "macos"))]
-    let flags = MAP_PRIVATE | MAP_ANONYMOUS;
-    let memory = unsafe {
-        mmap(
-            std::ptr::null_mut(),
-            size,
-            PROT_READ | PROT_WRITE | PROT_EXEC,
-            flags,
-            -1,
-            0,
-        )
-    };
-    if memory as isize == -1 {
-        std::ptr::null_mut()
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    if (dest as usize) < (src as usize) {
+        memcpy(dest, src, n)
     } else {
-        memory
+        let mut i = n;
+        while i > 0 {
+            i -= 1;
+            *dest.add(i) = *src.add(i);
+        }
+        dest
     }
 }
 
-unsafe extern "C" fn free_executable(memory: *mut c_void, size: usize) {
-    if !memory.is_null() {
-        unsafe {
-            munmap(memory, size);
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
+    let mut i = 0;
+    while i < n {
+        let v1 = *s1.add(i);
+        let v2 = *s2.add(i);
+        if v1 != v2 {
+            return v1 as i32 - v2 as i32;
         }
+        i += 1;
     }
+    0
 }
 
-unsafe extern "C" fn flush_instruction_cache(memory: *mut c_void, size: usize) {
-    #[cfg(all(target_arch = "aarch64", not(target_os = "macos")))]
-    unsafe {
-        let start = memory as usize;
-        let end = start.saturating_add(size);
-        let ctr: u64;
-        core::arch::asm!("mrs {0}, ctr_el0", out(reg) ctr);
-        let data_line = 4usize << ((ctr >> 16) & 0xf);
-        let instruction_line = 4usize << (ctr & 0xf);
-        let mut address = start & !(data_line - 1);
-        while address < end {
-            core::arch::asm!("dc cvau, {0}", in(reg) address, options(nostack));
-            address += data_line;
-        }
-        core::arch::asm!("dsb ish", options(nostack));
-        address = start & !(instruction_line - 1);
-        while address < end {
-            core::arch::asm!("ic ivau, {0}", in(reg) address, options(nostack));
-            address += instruction_line;
-        }
-        core::arch::asm!("dsb ish", "isb", options(nostack));
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
+    memcmp(s1, s2, n)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strlen(s: *const u8) -> usize {
+    let mut n = 0;
+    while *s.add(n) != 0 {
+        n += 1;
     }
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    n
+}
+
+// ─── Panic Handler ───────────────────────────────────────────────────────────
+
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
+    #[cfg(target_os = "linux")]
     unsafe {
-        sys_icache_invalidate(memory, size);
+        linux::sys_exit(200);
     }
+    #[cfg(target_os = "macos")]
+    unsafe {
+        #[link(name = "System")]
+        unsafe extern "C" {
+            fn exit(code: i32) -> !;
+        }
+        exit(200);
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    loop {}
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_eh_personality() {}
+
+// ─── Linux Self-Relocation & Entry Point ─────────────────────────────────────
+
+#[cfg(target_os = "linux")]
+#[inline(never)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn brot_self_relocate(dynamic: *const usize, base: usize) {
+    const DT_NULL: usize = 0;
+    const DT_RELA: usize = 7;
+    const DT_RELASZ: usize = 8;
+    const DT_REL: usize = 17;
+    const DT_RELSZ: usize = 18;
     #[cfg(target_arch = "x86_64")]
-    let _ = (memory, size);
-}
+    const R_RELATIVE: usize = 8; // R_X86_64_RELATIVE
+    #[cfg(target_arch = "aarch64")]
+    const R_RELATIVE: usize = 1027; // R_AARCH64_RELATIVE
 
-#[cfg(target_os = "macos")]
-unsafe extern "C" fn set_jit_write_protect(enabled: i32) {
-    unsafe { pthread_jit_write_protect_np(enabled) }
-}
+    #[cfg(target_pointer_width = "64")]
+    const TYPE_MASK: usize = 0xffff_ffff;
+    #[cfg(target_pointer_width = "32")]
+    const TYPE_MASK: usize = 0xff;
 
-fn decompress(frame: &[u8]) -> Result<Vec<u8>, String> {
-    let mut input = frame;
-    let mut decoder = FrameDecoder::new();
-    decoder
-        .init(&mut input)
-        .map_err(|error| format!("invalid Zstandard frame: {error:?}"))?;
+    let mut rela: usize = 0;
+    let mut rela_sz: usize = 0;
+    let mut rel: usize = 0;
+    let mut rel_sz: usize = 0;
 
-    let mut output = Vec::new();
-    let mut chunk = [0u8; 512];
+    let mut d = dynamic;
     loop {
-        decoder
-            .decode_blocks(&mut input, BlockDecodingStrategy::UptoBlocks(1))
-            .map_err(|error| format!("Zstandard decompression failed: {error:?}"))?;
-        while decoder.can_collect() > 0 {
-            let count = decoder
-                .read(&mut chunk)
-                .map_err(|error| format!("Zstandard output failed: {error:?}"))?;
-            if count == 0 {
-                break;
-            }
-            if output.len().saturating_add(count) > COMPONENT_LIMIT {
-                return Err("decompressed component exceeds the 4 KiB limit".into());
-            }
-            output.extend_from_slice(&chunk[..count]);
-        }
-        if decoder.is_finished() {
-            if !input.is_empty() {
-                return Err("trailing bytes after Zstandard frame".into());
-            }
+        let tag = *d;
+        if tag == DT_NULL {
             break;
         }
-        if input.is_empty() && decoder.can_collect() == 0 {
-            return Err("truncated Zstandard frame".into());
+        let val = *d.add(1);
+        if tag == DT_RELA {
+            rela = val;
+        } else if tag == DT_RELASZ {
+            rela_sz = val;
+        } else if tag == DT_REL {
+            rel = val;
+        } else if tag == DT_RELSZ {
+            rel_sz = val;
+        }
+        d = d.add(2);
+    }
+
+    if rela != 0 {
+        let mut p = base.wrapping_add(rela) as *const usize;
+        let end = base.wrapping_add(rela).wrapping_add(rela_sz) as *const usize;
+        while p < end {
+            let offset = *p;
+            let info = *p.add(1);
+            let addend = *p.add(2);
+            if info & TYPE_MASK == R_RELATIVE {
+                *(base.wrapping_add(offset) as *mut usize) = base.wrapping_add(addend);
+            }
+            p = p.add(3);
         }
     }
-    if output.is_empty() {
-        return Err("decompressed component is empty".into());
-    }
-    Ok(output)
-}
 
-fn read_component(file: &mut File, offset: u64, length: usize) -> Result<Vec<u8>, String> {
-    if length == 0 || length > COMPRESSED_COMPONENT_LIMIT {
-        return Err(format!("invalid compressed component length: {length}"));
-    }
-    file.seek(SeekFrom::Start(offset))
-        .map_err(|error| format!("seek bundle: {error}"))?;
-    let mut data = vec![0; length];
-    file.read_exact(&mut data)
-        .map_err(|error| format!("read bundle component: {error}"))?;
-    decompress(&data)
-}
-
-fn parse_range(offset: &OsString, length: &OsString) -> Result<(u64, usize), String> {
-    let offset = offset
-        .to_str()
-        .ok_or("component offset is not valid UTF-8")?
-        .parse::<u64>()
-        .map_err(|_| "invalid component offset")?;
-    let length = length
-        .to_str()
-        .ok_or("component length is not valid UTF-8")?
-        .parse::<usize>()
-        .map_err(|_| "invalid component length")?;
-    if length == 0 || length > COMPRESSED_COMPONENT_LIMIT {
-        return Err("component length is outside the supported range".into());
-    }
-    Ok((offset, length))
-}
-
-fn run(mut args: impl Iterator<Item = OsString>) -> Result<i32, String> {
-    let executable = args.next().ok_or("missing executable path")?;
-    fs::remove_file(PathBuf::from(executable))
-        .map_err(|error| format!("unlink temporary Brot executable: {error}"))?;
-
-    let bundle = args.next().ok_or(
-        "usage: brot <bundle> <platform-offset> <platform-length> <hello-offset> <hello-length>",
-    )?;
-    let platform_offset = args.next().ok_or("missing platform offset")?;
-    let platform_length = args.next().ok_or("missing platform length")?;
-    let hello_offset = args.next().ok_or("missing hello payload offset")?;
-    let hello_length = args.next().ok_or("missing hello payload length")?;
-    if args.next().is_some() {
-        return Err("unexpected extra arguments".into());
-    }
-    let (platform_offset, platform_length) = parse_range(&platform_offset, &platform_length)?;
-    let (hello_offset, hello_length) = parse_range(&hello_offset, &hello_length)?;
-
-    let mut file = File::open(bundle).map_err(|error| format!("open bundle: {error}"))?;
-    let bundle_size = file
-        .metadata()
-        .map_err(|error| format!("stat bundle: {error}"))?
-        .len();
-    for (offset, length) in [
-        (platform_offset, platform_length),
-        (hello_offset, hello_length),
-    ] {
-        let end = offset
-            .checked_add(length as u64)
-            .ok_or("component range overflows")?;
-        if end > bundle_size {
-            return Err("component range extends beyond the bundle".into());
+    if rel != 0 {
+        let mut p = base.wrapping_add(rel) as *const usize;
+        let end = base.wrapping_add(rel).wrapping_add(rel_sz) as *const usize;
+        while p < end {
+            let offset = *p;
+            let info = *p.add(1);
+            if info & TYPE_MASK == R_RELATIVE {
+                let slot = base.wrapping_add(offset) as *mut usize;
+                *slot = (*slot).wrapping_add(base);
+            }
+            p = p.add(2);
         }
     }
-    let platform = read_component(&mut file, platform_offset, platform_length)?;
-    let hello = read_component(&mut file, hello_offset, hello_length)?;
-    let host = UnixPlatformHost {
-        load_library: Some(load_library),
-        get_proc_address: Some(get_proc_address),
-        alloc: Some(alloc_executable),
-        free: Some(free_executable),
-        flush_cache: Some(flush_instruction_cache),
-        #[cfg(target_os = "macos")]
-        set_jit_write_protect: Some(set_jit_write_protect),
-        #[cfg(not(target_os = "macos"))]
-        set_jit_write_protect: None,
-        hello_payload: hello.as_ptr(),
-        hello_payload_size: hello.len(),
-    };
-
-    let platform_code = unsafe { alloc_executable(platform.len()) };
-    if platform_code.is_null() {
-        return Err("allocate executable memory for platform abstraction failed".into());
-    }
-    #[cfg(target_os = "macos")]
-    unsafe {
-        set_jit_write_protect(0);
-    }
-    unsafe {
-        std::ptr::copy_nonoverlapping(platform.as_ptr(), platform_code.cast(), platform.len());
-        flush_instruction_cache(platform_code, platform.len());
-    }
-    #[cfg(target_os = "macos")]
-    unsafe {
-        set_jit_write_protect(1);
-    }
-
-    let entry: PlatformEntry = unsafe { std::mem::transmute(platform_code) };
-    let status = unsafe { entry(&host) };
-    unsafe {
-        free_executable(platform_code, platform.len());
-    }
-    Err(format!(
-        "Unix platform abstraction returned unexpectedly with status {status}"
-    ))
 }
 
-fn main() {
-    let status = match run(env::args_os()) {
-        Ok(status) => status,
-        Err(error) => {
-            let _ = writeln_stderr(&error);
-            1
-        }
-    };
-    process::exit(status);
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn _start() -> ! {
+    core::arch::naked_asm!(
+        "mov rbx, rsp",
+        "xor rbp, rbp",
+        "and rsp, -16",
+        "lea rdi, [rip + _DYNAMIC]",
+        "lea rsi, [rip + __ehdr_start]",
+        "call {reloc}",
+        "mov rdi, rbx",
+        "call {run}",
+        reloc = sym brot_self_relocate,
+        run = sym linux::run,
+    );
 }
 
-fn writeln_stderr(message: &str) -> io::Result<()> {
-    use std::io::Write;
-    writeln!(io::stderr().lock(), "{message}")
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn _start() -> ! {
+    core::arch::naked_asm!(
+        "mov x19, sp",
+        "mov x29, xzr",
+        "mov x30, xzr",
+        "adrp x0, _DYNAMIC",
+        "add x0, x0, :lo12:_DYNAMIC",
+        "adrp x1, __ehdr_start",
+        "add x1, x1, :lo12:__ehdr_start",
+        "bl {reloc}",
+        "mov x0, x19",
+        "b {run}",
+        reloc = sym brot_self_relocate,
+        run = sym linux::run,
+    );
+}
+
+// ─── macOS Entry Point ───────────────────────────────────────────────────────
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn main(argc: i32, argv: *const *const u8, _envp: *const *const u8) -> i32 {
+    darwin::run(argc, argv)
 }

@@ -1,11 +1,9 @@
-# No shebang: the MZ DOS stub invokes Bash on this appended script.
-set -euo pipefail
+# No shebang: the MZ DOS stub evaluates this appended script.
+set -eu
 
-ME="${1:?missing bundle path}"
-shift
-case "$ME" in
-    /*) ;;
-    *) ME="$PWD/$ME" ;;
+case "$0" in
+    /*) ME="$0" ;;
+    *) ME="$PWD/$0" ;;
 esac
 
 SYSTEM="$(uname -s)"
@@ -25,21 +23,18 @@ case "$SYSTEM" in
 esac
 
 run() {
-    local b_off="$1" b_len="$2" p_off="$3" p_len="$4" h_off="$5" h_len="$6"
+    b_off="$1"; b_len="$2"; p_off="$3"; p_len="$4"; h_off="$5"; h_len="$6"
     shift 6
 
-    local tmp_dir="${TMPDIR:-${PREFIX:+$PREFIX/tmp}}"
+    tmp_dir="${TMPDIR:-${PREFIX:+$PREFIX/tmp}}"
     tmp_dir="${tmp_dir:-/tmp}"
     [ -d "$tmp_dir" ] && [ -w "$tmp_dir" ] || { echo "Temporary directory not writable: $tmp_dir" >&2; exit 2; }
 
     umask 077
-    local tmp_exe
     tmp_exe="$(mktemp "$tmp_dir/🐚︎XXXXXXXXXXXX")" || { echo "Could not create launcher in $tmp_dir" >&2; exit 1; }
     trap 'rm -f "$tmp_exe"' EXIT
 
-    set +o pipefail
     tail -c "+$((b_off + 1))" "$ME" | head -c "$b_len" > "$tmp_exe"
-    set -o pipefail
     chmod 700 "$tmp_exe"
     exec "$tmp_exe" "$ME" "$p_off" "$p_len" "$h_off" "$h_len" "$@"
 }
