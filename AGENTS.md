@@ -10,6 +10,10 @@
 - Do NOT use terminal commands for accessing files: reading contents, searching, writing, patching. ALWAYS use built-in tools for that, not terminal commands.
 - Do NOT embark on refactorings without consulting. Planning must be done FIRST, and discussed. Until the plan is agreed upon, no code changes should be made.
 
+# GENERAL GUIDELINES
+
+Avoid using environment variables unless expplicitly required. Do not pass values between processes via environment variables; do not signal flags or options via environment variables. Do not invent environment variables for customisations. Where environment variables are already part of convention, take a serious and disciplined approach to their usage.
+
 ## Developer Rules
 
 Follow [README.md](README.md) to understand custom sysroot/std build practice.

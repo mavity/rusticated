@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { HostState, makeBrainImports, marshalStat, READ_FLAG_POSITIONAL } from './index.js';
+import { HostState, makeBrainImports, mapErrno, marshalStat, READ_FLAG_POSITIONAL, translatePath } from './index.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -61,6 +61,35 @@ test('marshalStat encodes the 112-byte Rusticated stat record', () => {
     assert.equal(view.getBigInt64(88, true), 4096n);
     assert.equal(view.getBigInt64(96, true), 9n);
     assert.equal(view.getBigUint64(104, true) & (1n << 3n), 1n << 3n);
+});
+
+test('marshalStat exposes Windows directory execute bits like the Go host', () => {
+    const stat = marshalStat({
+        mode: 0o040666n,
+        size: 0n,
+        mtimeNs: 0n,
+        atimeNs: 0n,
+        ctimeNs: 0n,
+        birthtimeNs: 0n,
+        nlink: 1n,
+        ino: 1n,
+        dev: 1n,
+        rdev: 0n,
+        blksize: 4096n,
+        blocks: 0n,
+        uid: 0n,
+        gid: 0n,
+        isFile: () => false,
+        isDirectory: () => true,
+        isSymbolicLink: () => false,
+        isCharacterDevice: () => false,
+        isBlockDevice: () => false,
+        isFIFO: () => false,
+        isSocket: () => false,
+    });
+    const view = new DataView(stat.buffer, stat.byteOffset, stat.byteLength);
+    const executeBits = view.getUint32(4, true) & 0o111;
+    assert.equal(executeBits, process.platform === 'win32' ? 0o111 : 0);
 });
 
 test('writeOverlapped sets FLAG_COMPLETED', () => {
@@ -643,4 +672,102 @@ test('handle_truncate resizes files and rejects invalid lengths and handles', as
         fs.closeSync(fd);
         fs.rmSync(dir, { recursive: true, force: true });
     }
+});
+
+test('Windows path translation preserves native drive and UNC paths', () => {
+    if (process.platform !== 'win32') return;
+    const cwd = 'D:\\workspace';
+    assert.equal(translatePath('C:\\Users\\test\\project', cwd), 'C:\\Users\\test\\project');
+    assert.equal(translatePath('\\\\server\\share\\project', cwd), '\\\\server\\share\\project');
+    assert.equal(translatePath('/C:/Users/test/project', cwd), 'C:\\Users\\test\\project');
+});
+
+test('get_cwd returns the host-native path', () => {
+    const cwd = path.resolve(os.tmpdir(), 'washmhost-native-cwd');
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const host = new HostState({ cwd, listenProcessSignals: false });
+    host.memory = memory;
+    const { env } = makeBrainImports(host, []);
+    const ptr = 64;
+    const length = Number(env.get_cwd(0, 0));
+
+    env.get_cwd(ptr, length);
+    const actual = Buffer.from(memory.buffer, ptr, length).toString();
+    assert.equal(actual, cwd);
+    if (process.platform === 'win32') assert.match(actual, /^[A-Za-z]:\\/);
+});
+
+test('get_env canonicalizes Windows path aliases and omits PWD values', () => {
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const host = new HostState({
+        env: {
+            Path: '%TOOLS%;C:\\Windows',
+            Pathext: '.EXE;.BAT',
+            Tools: 'C:\\Tools',
+            PWD: 'C:\\wrong',
+            OLDPWD: 'C:\\old',
+            HOME: 'C:\\Users\\test',
+        },
+        listenProcessSignals: false,
+    });
+    host.memory = memory;
+    const { env } = makeBrainImports(host, []);
+    const ptr = 64;
+    const size = Number(env.get_env(0, 0) & 0xffffffffn);
+    const result = env.get_env(ptr, size);
+    const count = Number(result >> 32n);
+    const variables = Buffer.from(memory.buffer, ptr, size)
+        .toString()
+        .split('\0')
+        .filter(Boolean);
+
+    assert.equal(variables.length, count);
+    assert.ok(!variables.some(value => /^(PWD|OLDPWD)=/i.test(value)));
+    const pathKey = process.platform === 'win32' ? 'PATH' : 'Path';
+    const pathValue = process.platform === 'win32'
+        ? `C:\\Tools${path.delimiter}C:\\Windows`
+        : 'C:\\Tools;C:\\Windows';
+    assert.ok(variables.includes(`${pathKey}=${pathValue}`));
+    const pathExtKey = process.platform === 'win32' ? 'PATHEXT' : 'Pathext';
+    assert.ok(variables.includes(`${pathExtKey}=.EXE;.BAT`));
+    assert.ok(variables.includes('HOME=C:\\Users\\test'));
+});
+
+test('mapErrno matches Go host mappings for network and filesystem errors', () => {
+    assert.equal(mapErrno({ code: 'ECONNRESET' }), 15);
+    assert.equal(mapErrno({ code: 'ETIMEDOUT' }), 73);
+    assert.equal(mapErrno({ code: 'EROFS' }), 69);
+    assert.equal(mapErrno({ code: 'EAFNOSUPPORT' }), 5);
+    assert.equal(mapErrno({ code: 'ENOSYS' }), 52);
+    assert.equal(mapErrno({ code: 'EHOSTUNREACH' }), 29);
+});
+
+test('get_random handles requests larger than Web Crypto single-call limit', () => {
+    const memory = new WebAssembly.Memory({ initial: 2 });
+    const host = new HostState({ listenProcessSignals: false });
+    host.memory = memory;
+    const { env } = makeBrainImports(host, []);
+    assert.doesNotThrow(() => env.get_random(128, 70_000));
+});
+
+test('get_time exposes sub-millisecond precision', () => {
+    const host = new HostState({ listenProcessSignals: false });
+    const { env } = makeBrainImports(host, []);
+    const first = env.get_time();
+    const second = env.get_time();
+    assert.ok(first > 0n);
+    assert.ok(second > first);
+});
+
+test('net_accept returns EBADF for missing handles and EINVAL for non-listeners', () => {
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const host = new HostState({ listenProcessSignals: false });
+    host.memory = memory;
+    const { env } = makeBrainImports(host, []);
+    const view = new DataView(memory.buffer);
+
+    env.net_accept(32, 999n);
+    assert.equal(view.getUint32(36, true), 8);
+    env.net_accept(64, 1n);
+    assert.equal(view.getUint32(68, true), 28);
 });
