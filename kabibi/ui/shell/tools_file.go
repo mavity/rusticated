@@ -63,13 +63,19 @@ func listFilesOptions(ctx context.Context, in ListFilesInput, embedder ai.PartEm
 	if query == "" {
 		query = "*"
 	}
-	return filelist.Options{
+	options := filelist.Options{
 		Context:       ctx,
 		Query:         query,
 		SearchContent: in.SearchContent,
 		MaxResults:    in.MaxResults,
 		Embedder:      embedder,
 	}
+	if ai.Verbose {
+		options.OnDiagnostic = func(message string) {
+			fmt.Fprintf(os.Stderr, "[ai list-files] %s\n", message)
+		}
+	}
+	return options
 }
 
 func resolveShellPath(cwd, target string) string {

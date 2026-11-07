@@ -40,6 +40,7 @@ type Options struct {
 	MaxLineWidth  int
 	QuoteLimit    int
 	LiveQuotes    bool
+	OnDiagnostic  func(string)
 }
 
 type fileEntry struct {
@@ -149,6 +150,7 @@ func listFiles(ctx context.Context, cwd string, opts Options, progress *progress
 	cacheIdentity := ""
 	if opts.Embedder != nil {
 		scheduler = newConcurrentEmbedder(ctx, opts.Embedder)
+		scheduler.diagnostic = progress.logVerbose
 		defer scheduler.Close()
 		if identified, ok := opts.Embedder.(ai.PartEmbedderCacheIdentity); ok {
 			cacheIdentity, ok = embeddingCacheIdentity(identified)
@@ -568,10 +570,15 @@ func rankEmbeddingCandidates(ctx context.Context, entries []fileEntry, parts []a
 	if err := progress.update("query", "", 0, len(entries)); err != nil {
 		return nil, err
 	}
+	queryStarted := time.Now()
+	progress.logVerbose("embedding start phase=query items=1")
 	queryVector, err := embedder.Embed(ctx, ai.PromptPart{Role: ai.RoleUser, Text: query}, false, nil)
 	if err != nil {
+		progress.logVerbose("embedding failed phase=query duration=%s error=%q", time.Since(queryStarted), err)
 		return nil, err
 	}
+	progress.logVerbose("embedding finish phase=query duration=%s dimensions=%d",
+		time.Since(queryStarted), len(queryVector))
 	if len(queryVector) == 0 {
 		return nil, fmt.Errorf("query embedder returned an empty vector")
 	}
@@ -661,11 +668,16 @@ func cachedCandidateEmbedding(ctx context.Context, entry fileEntry, part ai.Prom
 		if cache != nil {
 			vector, ok, cacheErr := cache.get(signature, identity, kind, recipe, dimension)
 			if cacheErr != nil {
+				progress.logVerbose("embedding cache error kind=%s path=%q error=%q", kind, entry.relPath, cacheErr)
 				return nil, fmt.Errorf("read cached embedding for %q: %w", entry.relPath, cacheErr)
 			}
 			if ok {
+				progress.logVerbose("embedding cache hit kind=%s path=%q", kind, entry.relPath)
 				return vector, nil
 			}
+			progress.logVerbose("embedding cache miss kind=%s path=%q", kind, entry.relPath)
+		} else {
+			progress.logVerbose("embedding cache disabled kind=%s path=%q", kind, entry.relPath)
 		}
 		if kind != "content" || part.Text != "" {
 			break
@@ -687,10 +699,17 @@ func cachedCandidateEmbedding(ctx context.Context, entry fileEntry, part ai.Prom
 		}
 		part.Text = ""
 	}
+	embedStarted := time.Now()
+	progress.logVerbose("embedding start phase=candidate kind=%s path=%q input_bytes=%d",
+		kind, entry.relPath, len(part.Text))
 	vector, err := embedder.Embed(ctx, part, false, nil)
 	if err != nil {
+		progress.logVerbose("embedding failed phase=candidate kind=%s path=%q duration=%s error=%q",
+			kind, entry.relPath, time.Since(embedStarted), err)
 		return nil, err
 	}
+	progress.logVerbose("embedding finish phase=candidate kind=%s path=%q duration=%s dimensions=%d",
+		kind, entry.relPath, time.Since(embedStarted), len(vector))
 	if len(vector) != dimension {
 		return nil, fmt.Errorf("candidate %q embedding has %d dimensions; query embedding has %d", entry.relPath, len(vector), dimension)
 	}

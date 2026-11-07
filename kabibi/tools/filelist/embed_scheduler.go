@@ -67,9 +67,10 @@ func (job *embeddingJob) stop() {
 }
 
 type concurrentEmbedder struct {
-	ctx      context.Context
-	cancel   context.CancelFunc
-	embedder ai.PartEmbedder
+	ctx        context.Context
+	cancel     context.CancelFunc
+	embedder   ai.PartEmbedder
+	diagnostic func(string, ...any)
 
 	mu             sync.Mutex
 	pending        []*embeddingJob
@@ -311,7 +312,24 @@ func (e *concurrentEmbedder) waitForBatchWindow() bool {
 	}
 }
 
-func (e *concurrentEmbedder) embedBatch(jobs []*embeddingJob) ([][]float32, []error) {
+func (e *concurrentEmbedder) embedBatch(jobs []*embeddingJob) (vectors [][]float32, errs []error) {
+	started := time.Now()
+	_, batchAPI := e.embedder.(ai.BatchPartEmbedder)
+	e.logVerbose("embedding batch start items=%d batch_api=%t", len(jobs), batchAPI)
+	defer func() {
+		failures := 0
+		firstError := ""
+		for _, err := range errs {
+			if err != nil {
+				failures++
+				if firstError == "" {
+					firstError = err.Error()
+				}
+			}
+		}
+		e.logVerbose("embedding batch finish items=%d batch_api=%t duration=%s failures=%d error=%q",
+			len(jobs), batchAPI, time.Since(started), failures, firstError)
+	}()
 	parts := make([]ai.PromptPart, len(jobs))
 	for index, job := range jobs {
 		parts[index] = job.part
@@ -334,26 +352,27 @@ func (e *concurrentEmbedder) embedBatch(jobs []*embeddingJob) ([][]float32, []er
 				stop()
 			}
 		}()
-		vectors, err := batch.EmbedBatchContext(batchCtx, parts)
+		var err error
+		vectors, err = batch.EmbedBatchContext(batchCtx, parts)
 		if err != nil {
-			errs := make([]error, len(jobs))
+			errs = make([]error, len(jobs))
 			for index := range errs {
 				errs[index] = err
 			}
 			return make([][]float32, len(jobs)), errs
 		}
 		if len(vectors) != len(jobs) {
-			errs := make([]error, len(jobs))
+			errs = make([]error, len(jobs))
 			for index := range errs {
 				errs[index] = fmt.Errorf("embedder returned %d vectors for %d embedding requests", len(vectors), len(jobs))
 			}
 			return make([][]float32, len(jobs)), errs
 		}
-		errs := make([]error, len(jobs))
+		errs = make([]error, len(jobs))
 		return vectors, errs
 	}
-	vectors := make([][]float32, len(jobs))
-	errs := make([]error, len(jobs))
+	vectors = make([][]float32, len(jobs))
+	errs = make([]error, len(jobs))
 	for index, job := range jobs {
 		if err := job.ctx.Err(); err != nil {
 			errs[index] = err
@@ -362,6 +381,12 @@ func (e *concurrentEmbedder) embedBatch(jobs []*embeddingJob) ([][]float32, []er
 		vectors[index], errs[index] = ai.EmbedWithContext(job.ctx, e.embedder, []ai.PromptPart{job.part})
 	}
 	return vectors, errs
+}
+
+func (e *concurrentEmbedder) logVerbose(format string, args ...any) {
+	if e != nil && e.diagnostic != nil {
+		e.diagnostic(format, args...)
+	}
 }
 
 func (e *concurrentEmbedder) nextBatch() []*embeddingJob {

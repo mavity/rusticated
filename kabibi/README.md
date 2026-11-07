@@ -69,3 +69,4 @@ For tests:
 * Tool names and option names accept either hyphens or underscores. Use `ai --help` to list tools and `ai <tool> --help` to see a tool's options. String arrays accept repeated options; other arrays and objects take JSON values.
 * Direct tool results are Markdown: the interactive TUI renders them as ANSI, while one-shot and redirected output prints the Markdown source.
 * One-shot invocations use a fresh shell session. Tools that depend on existing shell history, a retained PTY process, or an open browser tab need to run in the Kabibi session that owns that state.
+* `-v` writes incremental `ai list-files` progress and embedding-stage diagnostics to stderr; result Markdown remains on stdout.

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"ai"
 	"github.com/mavity/rusticated/kabibi/config"
 )
 
@@ -137,6 +138,30 @@ func TestRunCLI_ExecutesAIToolDirectly(t *testing.T) {
 	}
 	if strings.ContainsAny(stdout.String(), "\x1b\r") {
 		t.Fatalf("headless direct tool invocation emitted terminal controls: %q", stdout.String())
+	}
+}
+
+func TestRunCLIPropagatesVerboseToDirectAITool(t *testing.T) {
+	t.Setenv("MOHABBAT_VERBOSE", "")
+	previousVerbose := ai.Verbose
+	t.Cleanup(func() { ai.Verbose = previousVerbose })
+	restoreConfigDirectory := config.SetDirectoryForTesting(t.TempDir())
+	t.Cleanup(restoreConfigDirectory)
+
+	var stdout, stderr bytes.Buffer
+	if code := runCLI(
+		[]string{"--verbose", "ai", "shell-state", "--explanation", "inspect the current shell"},
+		&stdout,
+		&stderr,
+		false,
+	); code != 0 {
+		t.Fatalf("runCLI(verbose ai shell-state) = %d; stderr=%q", code, stderr.String())
+	}
+	if !ai.Verbose {
+		t.Fatal("verbose flag was not propagated to the direct AI tool")
+	}
+	if !strings.Contains(stderr.String(), "[kabibi] CLI parse begin:") {
+		t.Fatalf("verbose diagnostics missing from stderr: %q", stderr.String())
 	}
 }
 

@@ -71,6 +71,7 @@ func (r *LazyAIRunner) SetVerbose(v bool) error {
 		return ErrAIRunnerBusy
 	}
 	r.verbose = v
+	ai.Verbose = v
 	return nil
 }
 

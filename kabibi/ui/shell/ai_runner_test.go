@@ -68,6 +68,26 @@ func TestLazyAIRunnerRejectsConcurrentTurn(t *testing.T) {
 	}
 }
 
+func TestLazyAIRunnerVerboseEnablesListFilesDiagnostics(t *testing.T) {
+	previousVerbose := ai.Verbose
+	t.Cleanup(func() { ai.Verbose = previousVerbose })
+
+	runner := NewLazyAIRunner(nil)
+	if err := runner.SetVerbose(true); err != nil {
+		t.Fatalf("SetVerbose(true): %v", err)
+	}
+	if options := listFilesOptions(context.Background(), ListFilesInput{}, nil); options.OnDiagnostic == nil {
+		t.Fatal("verbose runner did not enable list-files diagnostics")
+	}
+
+	if err := runner.SetVerbose(false); err != nil {
+		t.Fatalf("SetVerbose(false): %v", err)
+	}
+	if options := listFilesOptions(context.Background(), ListFilesInput{}, nil); options.OnDiagnostic != nil {
+		t.Fatal("non-verbose runner enabled list-files diagnostics")
+	}
+}
+
 func TestClampModelContextTokensIgnoresDynamicDefault(t *testing.T) {
 	for _, test := range []struct {
 		name string
