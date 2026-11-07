@@ -30,6 +30,13 @@ The two payloads are shared by all future OS platform abstractions for their
 respective instruction sets. Linux and macOS runners are not implemented in
 this Windows-first stage.
 
+The hello payload and Windows platform abstraction are freestanding `no_std`
+Rust components built for `x86_64-unknown-none` and `aarch64-unknown-none`,
+using `core` rather than the Rusticated WASM sysroot. Their C-compatible
+dispatch uses the Windows x64 calling convention on x86-64 and the C ABI on
+AArch64; the AArch64 build reserves x18. The separate POSIX host remains C and
+is outside this Windows-only port.
+
 ## Build and run
 
 On Windows, run:
@@ -42,7 +49,9 @@ On Windows, run:
 The build creates the single deliverable EXE in `probe/hosts/windows/out/`.
 Build tools and intermediates are kept separately under `.build/`. The
 build-time component packer uses the pinned `ZstdSharp.Port` 0.8.8 package;
-its managed runtime dependencies are embedded in the EXE.
+its managed runtime dependencies are embedded in the EXE. Building requires
+nightly Rust with `rust-src` for `-Z build-std=core`, Cargo, LLVM linker and
+inspection tools, .NET, and the .NET Framework compiler.
 
 The EXE requires a 64-bit Windows CLR. Its application manifest advertises
 AMD64 and ARM64 support, and the CLR selects the matching embedded binaries.

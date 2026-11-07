@@ -1,0 +1,121 @@
+#![no_std]
+
+use core::mem::MaybeUninit;
+use core::panic::PanicInfo;
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+compile_error!("The probe payload supports only x86-64 and AArch64.");
+
+#[cfg(target_arch = "x86_64")]
+type WriteFn = unsafe extern "win64" fn(*const u8, usize) -> i64;
+#[cfg(target_arch = "aarch64")]
+type WriteFn = unsafe extern "C" fn(*const u8, usize) -> i64;
+
+#[cfg(target_arch = "x86_64")]
+type ReadFn = unsafe extern "win64" fn(*mut u8, usize) -> i64;
+#[cfg(target_arch = "aarch64")]
+type ReadFn = unsafe extern "C" fn(*mut u8, usize) -> i64;
+
+#[cfg(target_arch = "x86_64")]
+type ExitFn = unsafe extern "win64" fn(i32);
+#[cfg(target_arch = "aarch64")]
+type ExitFn = unsafe extern "C" fn(i32);
+
+#[repr(C)]
+pub struct ProbeDispatch {
+    write: Option<WriteFn>,
+    read: Option<ReadFn>,
+    exit: Option<ExitFn>,
+}
+
+const GREETING: &[u8] = b"Anonymous-memory probe ready. Enter an empty line to exit.\n> ";
+const ECHO_PREFIX: &[u8] = b"echo: ";
+const NEWLINE: &[u8] = b"\n";
+const PROMPT: &[u8] = b"> ";
+const LINE_CAPACITY: usize = 256;
+
+fn write_all(dispatch: &ProbeDispatch, bytes: &[u8]) -> bool {
+    match dispatch.write {
+        Some(write) => unsafe { write(bytes.as_ptr(), bytes.len()) == bytes.len() as i64 },
+        None => false,
+    }
+}
+
+fn terminate(dispatch: &ProbeDispatch, status: i32) -> ! {
+    if let Some(exit) = dispatch.exit {
+        unsafe {
+            exit(status);
+        }
+    }
+    loop {}
+}
+
+unsafe fn run(dispatch: *const ProbeDispatch) {
+    let Some(dispatch) = dispatch.as_ref() else {
+        return;
+    };
+
+    let mut line = MaybeUninit::<[u8; LINE_CAPACITY]>::uninit();
+    let line_ptr = line.as_mut_ptr().cast::<u8>();
+    if !write_all(dispatch, GREETING) {
+        terminate(dispatch, 3);
+    }
+
+    loop {
+        let mut length = 0usize;
+        loop {
+            let mut byte = 0u8;
+            let count = match dispatch.read {
+                Some(read) => read(&mut byte, 1),
+                None => terminate(dispatch, 3),
+            };
+
+            if count < 0 {
+                terminate(dispatch, 3);
+            }
+            if count == 0 {
+                terminate(dispatch, 0);
+            }
+            if byte == b'\n' {
+                break;
+            }
+            if length == LINE_CAPACITY {
+                terminate(dispatch, 2);
+            }
+            line_ptr.add(length).write(byte);
+            length += 1;
+        }
+
+        if length > 0 && line_ptr.add(length - 1).read() == b'\r' {
+            length -= 1;
+        }
+        if length == 0 {
+            terminate(dispatch, 0);
+        }
+        let line = core::slice::from_raw_parts(line_ptr, length);
+        if !write_all(dispatch, ECHO_PREFIX)
+            || !write_all(dispatch, line)
+            || !write_all(dispatch, NEWLINE)
+            || !write_all(dispatch, PROMPT)
+        {
+            terminate(dispatch, 3);
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[no_mangle]
+pub unsafe extern "win64" fn probe_entry(dispatch: *const ProbeDispatch) {
+    run(dispatch);
+}
+
+#[cfg(target_arch = "aarch64")]
+#[no_mangle]
+pub unsafe extern "C" fn probe_entry(dispatch: *const ProbeDispatch) {
+    run(dispatch);
+}
+
+#[panic_handler]
+fn panic(_info: &PanicInfo) -> ! {
+    loop {}
+}

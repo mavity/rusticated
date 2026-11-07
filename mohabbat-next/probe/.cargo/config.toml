@@ -1,0 +1,19 @@
+[target.x86_64-unknown-none]
+rustflags = [
+    "-C",
+    "relocation-model=pic",
+    "-C",
+    "no-redzone=yes",
+    "-Z",
+    "function-sections=yes",
+]
+
+[target.aarch64-unknown-none]
+rustflags = [
+    "-C",
+    "relocation-model=pic",
+    "-Z",
+    "fixed-x18=yes",
+    "-Z",
+    "function-sections=yes",
+]
