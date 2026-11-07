@@ -171,8 +171,8 @@ must match the selected host.
 | VS Code host | Runtime | Required behavior |
 | --- | --- | --- |
 | Browser-only extension host (`vscode.dev`, `github.dev`, and similar) | The existing browser washmhost infrastructure | Run the Kabibi WASM guest using the browser host and its asynchronous virtual filesystem. Do not introduce a browser terminal UI or claim arbitrary OS process spawning. |
-| Desktop local Node extension host | Node-based washmhost | Use the Node host for process spawning and desktop compatibility. Keep Kabibi's shell interpreter as the primary shell execution path; use host processes for commands that require them. |
-| Remote workspace Node extension host (SSH, WSL, containers, Codespaces) | Node-based washmhost on the workspace host | Run shell commands where the workspace lives. Do not assume a browser UI implies a browser extension host when a remote Node host is available. |
+| Desktop local Node extension host | Node washmhost instantiated in the extension-host process | Use the extension host's existing Node runtime. Keep Kabibi's shell interpreter as the primary shell execution path; use host processes for commands that require them. Do not spawn a second Node process to run washmhost. |
+| Remote workspace Node extension host (SSH, WSL, containers, Codespaces) | Node washmhost instantiated in the workspace extension-host process | Run shell commands where the workspace lives. Do not assume a browser UI implies a browser extension host when a remote Node host is available. |
 
 Runtime selection belongs in the extension bootstrap. Do not force the browser
 host on Desktop when the Node host can be used, and do not assume Node APIs exist
@@ -185,23 +185,28 @@ Set `extensionKind` to prefer the workspace host when it exists (for example,
 `["workspace", "ui"]`). This lets a remote workspace use its remote Node host,
 while browser-only VS Code still uses the browser entry point.
 
-The active VS Code workspace is mounted into Kabibi at `/workspace` through
-`vscode.workspace.fs`. A single workspace folder maps to `/workspace`; a
-multi-root workspace maps folders below `/workspace/<folder-name>`. Kabibi's
-other virtual filesystems remain available for paths outside the workspace.
-Multi-root folder names can collide; the mount mapping must disambiguate them
-deterministically rather than silently resolving the first match.
+The Web extension host uses the `VSCodeMountedFS` mapping embedded directly in
+`extension.js` because it has no direct access to the user's filesystem. Do not
+split this small extension-specific adapter into a separately loaded `vfs.js`
+asset. Desktop and remote Node hosts must use real host paths and the actual
+workspace cwd, just like a native terminal. Do not create temporary workspace
+symlinks, mount projections, or `/workspace` path translations for Node. In
+multi-root workspaces, choose a real folder as the initial cwd; the other roots
+remain accessible by their actual filesystem paths.
 
 Shell state isolation does not imply filesystem isolation: visible terminals,
 one-shot `exec` invocations, and ejected jobs can all read and modify the same
-mounted workspace files. A completed `exec` does not carry its cwd or
-environment into another invocation.
+real workspace files. A completed `exec` does not carry its cwd or environment
+into another invocation.
 
 The browser host does not provide arbitrary OS process spawning. Its available
 commands are therefore determined by Kabibi's interpreter, built-ins, and the
-browser host capabilities. Desktop uses the Node washmhost for process
-compatibility. This is an intentional host distinction, not a reason to replace
-the browser runtime with a webview or a remote shell.
+browser host capabilities. Node hosts use the Node washmhost implementation in
+the extension process for process compatibility. `process_spawn` may still
+create child processes requested by the guest; those are command processes, not
+a second Node process hosting washmhost. This is an intentional host
+distinction, not a reason to replace the browser runtime with a webview or a
+remote shell.
 
 The extension executes shell commands and modifies workspace files. Declare
 and test an explicit Workspace Trust policy; do not imply that tool approval or
@@ -209,21 +214,126 @@ the browser host sandboxes commands.
 
 ## Extension implementation
 
-The existing extension is raw JavaScript with no bundler. Preserve the shared
-workspace mount and the VS Code terminal-provider approach while adding the
-Copilot tool surface and runtime selection.
+The extension is raw JavaScript with no bundler. Keep the extension bootstrap,
+including the browser workspace filesystem adapter, in `kabibi/vscode/extension.js`.
+Preserve the VS Code terminal-provider approach and Copilot tool surface.
+
+### Source-checkout development
+
+At activation, the Node extension host detects the repository layout
+`kabibi/vscode` using the repository `go.mod` and extension `package.json`
+markers. In that case select `../../release/dist/kabibi.bat` and the Node
+washmhost source at `../../mohabbat/washmhost/js/node/index.js`. The development
+vegetable path is selected even before the file has been built; a missing or
+invalid development artifact must be reported rather than silently falling back
+to a stale packaged copy. Otherwise, load `kabibi.bat` (or `kabibi.wasm`) and
+`washmhost-node.mjs` from the extension package. Browser-only hosts cannot read
+a local checkout artifact and always use the packaged assets.
+
+#### Build and launch from the source checkout
+
+Run these commands from the repository root (the directory containing the root
+`go.mod`). The first command builds the Kabibi guest vegetable directly to the
+development path consumed by the extension:
+
+```
+go run . kabibi -o release/dist/kabibi.bat
+```
+
+Then launch VS Code with the source extension and a disposable profile:
+
+```
+code --user-data-dir ./target/vscode-ext/user --extensions-dir ./target/vscode-ext/extensions --extensionDevelopmentPath=./kabibi/vscode .
+```
+
+The arguments have distinct purposes:
+
+-- `--user-data-dir` puts settings, state, and caches under `target/vscode-ext/user`
+  instead of changing the regular VS Code profile.
+-- `--extensions-dir` isolates installed extensions under
+  `target/vscode-ext/extensions`; it does not install the source extension.
+- `--extensionDevelopmentPath` loads `kabibi/vscode` directly from this
+  checkout. The final `.` opens the repository as the test workspace.
+
+On activation, the extension identifies the checkout from its directory layout
+and repository markers, selects `release/dist/kabibi.bat`, and imports the Node
+washmhost source from `mohabbat/washmhost/js/node/index.js`. It does not use a
+VSIX, download, or installed extension version for this launch. If the
+development vegetable has not been built, startup reports that missing artifact
+instead of silently running the package's stale copy.
+
+In the launched window, open **🐚︎ Kabibi** from the terminal profile picker or
+run **🐚︎ Kabibi: Open Shell**. Trust the checkout workspace if VS Code prompts
+for it. To try updated guest or extension code, close the development window,
+rebuild the vegetable, and launch the same command again; alternatively, use
+**Developer: Reload Window** after rebuilding so the extension host starts a
+fresh runtime and reads the new artifact. This source-checkout detection is for
+Node extension hosts; browser-only hosts continue to use packaged assets.
+
+### In-process Node washmhost
+
+The Node washmhost module must expose a per-instance construction API that
+creates its host state and default `env` import object without instantiating or
+starting the WASM guest. The VS Code extension obtains that instance in the
+existing extension-host Node process, adjusts only the needed import functions,
+then asks the instance to instantiate and run the guest with the finalized
+imports. WebAssembly binds the import functions during instantiation, so all
+overrides must be installed before `run`.
+
+Each instance owns its ABI environment, cwd, stdio handles, pending operations,
+signals, PTY handles, and exit state. It must not use `process.chdir`,
+`process.exit`, or process-global signal handlers to implement guest behavior.
+Relative filesystem paths and child-process cwd resolve against that instance's
+cwd; `set_cwd` updates only that instance. The extension host's cwd, environment,
+stdio, and lifetime must remain untouched.
+
+The extension wires the visible terminal's input queue to the instance's stdin
+handle and its stdout/stderr handles to VS Code's pseudoterminal write event.
+Before instantiation it overrides the Node defaults for:
+
+- `process_exit`: request termination of this guest only; resolve its host run
+  with the guest exit code and fire that pseudoterminal's `onDidClose`.
+- `fd_isatty`: report the VS Code terminal's stdio handles as terminals.
+- `tty_get_size`: return that terminal instance's current dimensions for
+  stdio, delegating non-stdio handles to the Node implementation.
+- `tty_set_size`: update the instance's stdio dimensions where supported and
+  delegate non-stdio handles.
+- `tty_set_mode`: handle the VS Code stdin terminal mode without changing the
+  extension host's process stdin; delegate non-stdio handles.
+
+The extension updates the instance's dimensions on VS Code resize and signals
+the guest through the host instance's signal-delivery API. Default `read` and
+`write` implementations continue to handle files, pipes, sockets, and PTYs;
+stdio is connected through that instance's configured streams. Overrides must
+save and call the instance's defaults for handles or behavior they do not own.
+Aliases such as `proc_spawn` must stay consistent with any replaced canonical
+imports.
+
+Use the extension host's real workspace folder path as the Node guest's initial
+cwd. Do not create a washmhost child process, tool-server child process,
+temporary wasm file, temporary workspace mount, or private IPC protocol.
+The extension reads the packaged native PTY addon and loads it into the Node
+washmhost instance. Guest `process_spawn` remains available for commands and
+PTYs as defined by Rusticated ABI.
+
+Host configuration is passed as ordinary constructor arguments, not through
+custom environment variables. Remove the `MOHABBAT_PSEUDO_TTY*`,
+`MOHABBAT_WORKSPACE_MOUNT`, `MOHABBAT_WORKSPACE_ROOTS`, and
+`MOHABBAT_NODE_PTY_ADDON` protocols, along with the Node washmhost's
+`MOHABBAT_VERBOSE` environment toggle. Shell environment variables remain
+guest environment data; they are not a host-control channel.
 
 The extension is responsible for:
 
-1. Starting a shell host for each visible terminal instance.
-2. Starting a fresh shell for each `exec`, disposing it on normal completion,
+1. Constructing an in-process washmhost instance for each visible terminal.
+2. Starting a fresh in-process washmhost instance for each `exec`, disposing it on normal completion,
    and retaining only executions ejected into the background.
-3. Providing a private tool-server back-channel between the VS Code tools and
-   Kabibi, with an extension-owned registry routing `term_*` calls by the
-   returned ejected-job ID. The channel must not expose a machine-wide
-   unauthenticated listener.
-4. Passing the AI-disabled startup mode to every extension-launched Kabibi
-   shell.
+3. Hosting the Kabibi tool-server guest in-process and routing tool requests
+   directly, with an extension-owned registry routing `term_*` calls by the
+   returned ejected-job ID. Do not create a child process or machine-wide
+   listener.
+4. Passing the AI-disabled startup mode as guest arguments to every
+   extension-launched Kabibi shell.
 5. Mapping tool confirmation and cancellation to VS Code's tool lifecycle.
 6. Disposing visible-terminal hosts when their terminals close; expiring
    abandoned ejected executions through the bounded idle lease; and disposing
@@ -258,7 +368,8 @@ Before publishing, complete and validate:
 - Explicit Workspace Trust support metadata. The public Marketplace category
   list does not include `Terminal`; use a listed category unless Marketplace
   validation confirms otherwise.
-- Correct runtime and WASM assets for both web and desktop hosts.
+- Correct runtime and WASM assets for both Web and Node extension hosts,
+  including the platform-matching Node PTY addon.
 - `.vscodeignore` exclusions that omit tests and development files without
   excluding required runtime assets.
 - Reproducible staging through the release build.
@@ -288,7 +399,9 @@ separate from building and validating the release artifact.
 - Workspace reads and writes work for single-root and multi-root workspaces.
 - Web tests run through browser washmhost without bundling or invoking Kabibi's
   terminal renderer.
-- Desktop tests verify Node washmhost process spawning and workspace access.
+- Desktop tests verify in-process Node washmhost instantiation, external
+  command spawning through the Rusticated ABI, real-path workspace access, and
+  isolation between concurrent washmhost instances.
 
 ### Copilot tool behavior
 
@@ -331,7 +444,7 @@ runs.
 
 2. **Copilot tool execution and ejected-job routing.** Each `exec` gets a fresh shell that is discarded on normal completion. An ejected execution is retained under the ID returned by that `exec`, and only `term_*` uses that ID. Ensure IDs route to the correct job across concurrent calls without relying on VS Code chat identity. Preserve behavior in `tools_exec.go` and `exec_session.go`; do not recreate it in JavaScript.
 
-3. **Extension host bootstrap.** `extension.js` will need distinct browser and Desktop host paths, while preserving workspace mounting through `vfs.js`. The VS Code terminal provider remains the only terminal UI: its output goes to VS Code to render.
+3. **Extension host bootstrap.** `extension.js` selects browser washmhost or constructs a Node washmhost instance inside the Node extension host, then overrides that instance's import functions before WASM instantiation. The Web workspace mapping is implemented in that same file; Desktop and remote Node use real paths. A source-checkout extension loads the freshly built `../../release/dist/kabibi.bat`; an installed extension loads its staged package asset. The VS Code terminal provider remains the only terminal UI: its output goes to VS Code to render.
 
 4. **Build and release staging.** `release/main.go`, the extension manifest, and packaged host assets must agree. A passing source-level test is not enough if the VSIX omits a runtime file.
 
@@ -345,7 +458,7 @@ I’d make the test pyramid build from the shell outward:
 
 - **Extension adapter tests:** Test that `exec` has no shell/session ID input and that `term_*` accepts the returned ejected-job ID. Verify normal completion disposes the invocation shell and does not preserve cwd/environment; concurrent ejections receive unambiguous IDs; and missing, unknown, expired, or completed IDs fail explicitly. Test that confirmation rejection does not launch a command and cancellation does not create an ejected job.
 
-- **Real host acceptance tests:** Extend the existing `vfs.test.js` style, but run the **built extension assets**, not only source files substituted by the test harness. In the browser host, verify shell behavior, workspace reads/writes, resize/input, and the expected lack of arbitrary process spawning. On Desktop and remote Node hosts, verify the Node host can spawn an external command where the workspace lives while Kabibi’s interpreter still handles normal shell syntax. Include duplicate-named multi-root folders, two visible terminals, and concurrent ejected jobs. Verify PTY input with the packaged native addon on each supported OS/architecture.
+- **Real host acceptance tests:** Extend the existing `vfs.test.js` style, but run the **built extension assets**, not only source files substituted by the test harness. In the browser host, verify shell behavior, workspace reads/writes, resize/input, and the expected lack of arbitrary process spawning. On Desktop and remote Node hosts, verify washmhost runs in the extension process, guest `process_spawn` can spawn an external command where the workspace lives, filesystem operations use real paths, and Kabibi's interpreter still handles normal shell syntax. Include browser duplicate-named multi-root folders, two isolated visible terminals, concurrent ejected jobs, and PTY input with the packaged native addon on each supported OS/architecture.
 
 - **VS Code/Copilot acceptance:** Run a real VS Code extension-host smoke test for the terminal profile and tool registration in Agent mode on VS Code 1.99 or newer. Then do a release-gate Copilot check: under default approval settings, confirmation can be accepted or rejected; cancellation interrupts a foreground command; timeout ejects rather than cancels; and `term_*` can manage the ejected job using the returned ID. Remembered approvals may suppress later prompts. A real Copilot interaction should be a release check, not a CI dependency on account credentials or a live model.
 
@@ -637,18 +750,23 @@ successful follow-up tool call. Verify process/session state independently.
 
 #### Desktop host
 
-**DESK-01 — Node washmhost process execution**
+**DESK-01 — In-process Node washmhost and process execution**
 
-1. Open the extension in Desktop VS Code and start a Kabibi terminal.
+1. Open the extension in Desktop VS Code and start a Kabibi terminal. Verify
+   washmhost runs in the extension-host process and no second Node host process
+   is launched.
 2. Run a controlled external-process fixture supplied by the test setup. It
    must print unique stdout and stderr markers and exit with a known nonzero
    code.
-3. Verify both streams, the exit code, and cwd/environment propagation.
+3. Verify both streams, the exit code, and cwd/environment propagation. Confirm
+   `process_exit` closes only this Kabibi terminal and leaves the extension
+   host active.
 4. Run shell-interpreter syntax and confirm it continues to be handled by
    Kabibi rather than being incorrectly passed through as one OS command.
 
-**Pass:** this demonstrates the Desktop extension selected Node washmhost and
-retained Kabibi's shell-first execution behavior.
+**Pass:** this demonstrates direct in-process Node washmhost execution,
+Rusticated ABI child-process support, and Kabibi's shell-first execution
+behavior without process-global cwd, stdio, signal, or exit side effects.
 
 **Screenshot:** capture the completed external command with both output markers
 and its reported exit status visible.
