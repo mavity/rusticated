@@ -1,14 +1,20 @@
+param(
+    [switch]$WindowsHostOnly
+)
+
 $ErrorActionPreference = 'Stop'
 
 $scriptDir = $PSScriptRoot
 $probeDir = Join-Path $scriptDir '..\..'
 $payloadDir = Join-Path $probeDir 'payload'
 $platformBuilder = Join-Path $probeDir 'platform\windows\build-platform.ps1'
+$unixAssets = Join-Path $scriptDir '..\unix\out'
 $workDir = Join-Path $scriptDir '.build'
 $componentDir = Join-Path $workDir 'components'
 $packerProject = Join-Path $scriptDir 'PackComponents.csproj'
 $outDir = Join-Path $scriptDir 'out'
 $outputExe = Join-Path $outDir 'MohabbatProbe.exe'
+$windowsHostExe = Join-Path $workDir 'MohabbatWindowsHost.exe'
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $manifest = Join-Path $scriptDir 'ProbeHost.manifest'
 
@@ -21,6 +27,11 @@ if ($LASTEXITCODE -ne 0) { throw 'Hello-world payload build failed.' }
 
 & $platformBuilder
 if ($LASTEXITCODE -ne 0) { throw 'Windows platform abstraction build failed.' }
+
+$unixPayloadDir = Join-Path $payloadDir 'out'
+New-Item -ItemType Directory -Force -Path $unixAssets | Out-Null
+Copy-Item (Join-Path $unixPayloadDir 'probe-x86_64.bin') $unixAssets -Force
+Copy-Item (Join-Path $unixPayloadDir 'probe-aarch64.bin') $unixAssets -Force
 
 dotnet build $packerProject -c Release --nologo `
     ("-p:BaseOutputPath={0}" -f (Join-Path $workDir 'packer\bin\')) `
@@ -88,7 +99,7 @@ foreach ($component in $components) {
 }
 
 & $compiler /nologo /target:exe /platform:anycpu `
-    ("/out:{0}" -f $outputExe) `
+    ("/out:{0}" -f $windowsHostExe) `
     ("/win32manifest:{0}" -f $manifest) `
     '/reference:System.dll' `
     $references `
@@ -96,4 +107,13 @@ foreach ($component in $components) {
     (Join-Path $scriptDir 'Program.cs')
 if ($LASTEXITCODE -ne 0) { throw 'AnyCPU Windows launcher build failed.' }
 
-Write-Output "Built the single Windows deliverable: $outputExe"
+if ($WindowsHostOnly) {
+    Write-Output "Built the Windows-only test host: $windowsHostExe"
+    return
+}
+
+$bootstrap = Join-Path $scriptDir '..\unix\bootstrap.sh.in'
+& $packer --assemble $windowsHostExe $bootstrap $outputExe $unixAssets
+if ($LASTEXITCODE -ne 0) { throw 'Single-file Windows/Unix assembly failed.' }
+
+Write-Output "Built the single Windows/Unix deliverable: $outputExe"

@@ -3,5 +3,8 @@
 /probe/hosts/windows/bin/
 /probe/hosts/windows/obj/
 /probe/hosts/windows/packages/
-/probe/hosts/posix/build/
+/probe/hosts/unix/.build/
+/probe/hosts/unix/out/
+/probe/hosts/unix/target/
+/probe/target/
 /probe/hosts/windows/out/

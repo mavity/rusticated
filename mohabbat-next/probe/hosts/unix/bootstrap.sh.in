@@ -1,0 +1,123 @@
+# No shebang: the MZ DOS stub invokes Bash on this appended script.
+set -euo pipefail
+
+ME="${1:?missing bundle path}"
+shift
+case "$ME" in
+    /*) ;;
+    *) ME="$PWD/$ME" ;;
+esac
+
+SYSTEM="$(uname -s)"
+ARCH="$(uname -m)"
+if [ "$ARCH" = arm64 ]; then
+    ARCH=aarch64
+fi
+
+case "$SYSTEM" in
+    Linux)
+        if [ -n "${TERMUX_VERSION:-}" ] ||
+            [ "${PREFIX:-}" = /data/data/com.termux/files/usr ]; then
+            SYSTEM=android
+        else
+            SYSTEM=linux
+        fi
+        ;;
+    Darwin) SYSTEM=darwin ;;
+    *)
+        echo "Unsupported operating system: $SYSTEM" >&2
+        exit 1
+        ;;
+esac
+
+case "$SYSTEM/$ARCH" in
+    linux/x86_64)
+        BROT_OFFSET=@BROT_LINUX_X86_64_OFFSET@
+        BROT_LENGTH=@BROT_LINUX_X86_64_LENGTH@
+        PLATFORM_OFFSET=@PLATFORM_LINUX_X86_64_OFFSET@
+        PLATFORM_LENGTH=@PLATFORM_LINUX_X86_64_LENGTH@
+        HELLO_OFFSET=@HELLO_X86_64_OFFSET@
+        HELLO_LENGTH=@HELLO_X86_64_LENGTH@
+        ;;
+    linux/aarch64)
+        BROT_OFFSET=@BROT_LINUX_AARCH64_OFFSET@
+        BROT_LENGTH=@BROT_LINUX_AARCH64_LENGTH@
+        PLATFORM_OFFSET=@PLATFORM_LINUX_AARCH64_OFFSET@
+        PLATFORM_LENGTH=@PLATFORM_LINUX_AARCH64_LENGTH@
+        HELLO_OFFSET=@HELLO_AARCH64_OFFSET@
+        HELLO_LENGTH=@HELLO_AARCH64_LENGTH@
+        ;;
+    android/aarch64)
+        BROT_OFFSET=@BROT_ANDROID_AARCH64_OFFSET@
+        BROT_LENGTH=@BROT_ANDROID_AARCH64_LENGTH@
+        PLATFORM_OFFSET=@PLATFORM_ANDROID_AARCH64_OFFSET@
+        PLATFORM_LENGTH=@PLATFORM_ANDROID_AARCH64_LENGTH@
+        HELLO_OFFSET=@HELLO_AARCH64_OFFSET@
+        HELLO_LENGTH=@HELLO_AARCH64_LENGTH@
+        ;;
+    darwin/x86_64)
+        BROT_OFFSET=@BROT_DARWIN_X86_64_OFFSET@
+        BROT_LENGTH=@BROT_DARWIN_X86_64_LENGTH@
+        PLATFORM_OFFSET=@PLATFORM_DARWIN_X86_64_OFFSET@
+        PLATFORM_LENGTH=@PLATFORM_DARWIN_X86_64_LENGTH@
+        HELLO_OFFSET=@HELLO_X86_64_OFFSET@
+        HELLO_LENGTH=@HELLO_X86_64_LENGTH@
+        ;;
+    darwin/aarch64)
+        BROT_OFFSET=@BROT_DARWIN_AARCH64_OFFSET@
+        BROT_LENGTH=@BROT_DARWIN_AARCH64_LENGTH@
+        PLATFORM_OFFSET=@PLATFORM_DARWIN_AARCH64_OFFSET@
+        PLATFORM_LENGTH=@PLATFORM_DARWIN_AARCH64_LENGTH@
+        HELLO_OFFSET=@HELLO_AARCH64_OFFSET@
+        HELLO_LENGTH=@HELLO_AARCH64_LENGTH@
+        ;;
+    *)
+        echo "Unsupported target: $SYSTEM/$ARCH" >&2
+        exit 1
+        ;;
+esac
+
+TMP_DIR="${TMPDIR:-}"
+if [ -z "$TMP_DIR" ] || [ ! -d "$TMP_DIR" ] || [ ! -w "$TMP_DIR" ]; then
+    if [ -n "${PREFIX:-}" ] && [ -d "$PREFIX/tmp" ] && [ -w "$PREFIX/tmp" ]; then
+        TMP_DIR="$PREFIX/tmp"
+    else
+        TMP_DIR=/tmp
+    fi
+fi
+[ -d "$TMP_DIR" ] && [ -w "$TMP_DIR" ] || {
+    echo "No writable temporary directory." >&2
+    exit 1
+}
+
+umask 077
+TMP_EXE="$(mktemp "$TMP_DIR/🐚︎XXXXXXXXXXXX")" || {
+    echo "Could not create temporary Brot file." >&2
+    exit 1
+}
+trap 'rm -f "$TMP_EXE"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+BLOCK=65536
+SKIP=$((BROT_OFFSET / BLOCK))
+REMAINDER=$((BROT_OFFSET % BLOCK))
+COUNT=$(((REMAINDER + BROT_LENGTH + BLOCK - 1) / BLOCK))
+set +o pipefail
+dd if="$ME" bs="$BLOCK" skip="$SKIP" count="$COUNT" 2>/dev/null |
+    tail -c "+$((REMAINDER + 1))" |
+    head -c "$BROT_LENGTH" > "$TMP_EXE"
+set -o pipefail
+chmod 700 "$TMP_EXE"
+ACTUAL_LENGTH="$(wc -c < "$TMP_EXE")"
+[ "$ACTUAL_LENGTH" -eq "$BROT_LENGTH" ] || {
+    echo "Brot extraction was incomplete." >&2
+    exit 1
+}
+
+set +e
+"$TMP_EXE" "$ME" "$PLATFORM_OFFSET" "$PLATFORM_LENGTH" \
+    "$HELLO_OFFSET" "$HELLO_LENGTH" "$@"
+STATUS=$?
+exit "$STATUS"
