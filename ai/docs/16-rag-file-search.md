@@ -213,3 +213,58 @@ acceptance requirement until resolved.
 
 - No automatic eviction is implemented. Define a cache-size and eviction
   policy before adding automatic deletion.
+
+## Implementation plan
+
+
+### Step 1: Streamline Persistent Cache in `embedding_cache.go`
+1. **Initialize directory once**: Ensure `os.MkdirAll(c.dir, 0o700)` is done during `newEmbeddingCache()` rather than on every `put` call.
+2. **Remove synchronous disk flush**: In `embeddingCache.put`, remove `temp.Sync()` (`fsync`). Close the temporary file and atomically rename it to the target `.vec` path.
+
+---
+
+### Step 2: Implement Single-Pool 4:1 Queue in `embed_scheduler.go`
+1. **Single Task Pool**:
+   - Represent each unique embedding input as an `embeddingTask` with `highCount int` and `lowCount int` tracking active waiters, a list of waiter channels/contexts, and an arrival `sequence` for stable tie-breaking.
+   - Remove the artificial queue capacity limit (`maxQueuedEmbeddings = 256`, `errEmbeddingQueueFull`).
+   - Store active tasks in a unified map `tasks map[string]*embeddingTask`.
+2. **Enqueue & Waiter Registration**:
+   - On `Embed(ctx, part, lowPriority, order)`:
+     - Find or create the task in `tasks`.
+     - Increment `task.lowCount++` or `task.highCount++` according to priority.
+     - Register the waiter and signal the worker.
+3. **Context Cancellation & Task Ejection**:
+   - If `ctx.Done()` fires while waiting:
+     - Under lock, locate the task and remove the waiter.
+     - Decrement `task.lowCount` or `task.highCount`.
+     - If `!task.inFlight && task.highCount == 0 && task.lowCount == 0`, immediately delete the task from `tasks`.
+4. **Deterministic 4:1 Batch Selection (`nextBatch`)**:
+   - The worker maintains a running remainder $R \in [0, 4]$ across batches.
+   - Given available batch slots $K \le B$:
+     - Compute high quota $N = (K \times 4 + R) / 5$.
+     - Compute low quota $M = K - N$.
+     - Update carryover remainder $R \leftarrow (K \times 4 + R) \pmod 5$.
+   - Select up to $N$ tasks ordered by: `highCount` descending, then `lowCount` descending, then `sequence` ascending.
+   - From remaining tasks, select up to $M$ tasks ordered by: `lowCount` descending, then `highCount` descending, then `sequence` ascending.
+   - Mark selected tasks as in-flight and execute batch embedding outside the queue lock.
+   - Dispatch results to all waiters on each task and remove completed tasks.
+
+---
+
+### Step 3: Validate Dynamic Top-$N$ Quote Ejection in `live_quotes.go`
+- Verify `liveQuoteManager.sync()`: when an older candidate is displaced from the visible top $N$, its `job.cancel()` is called immediately.
+- Ensure that cancellation propagates cleanly through `relevantQuote` $\to$ `embedQuoteInputs` $\to$ `embedder.Embed`, triggering immediate decrement and task ejection in the scheduler before the worker can pick it up.
+
+---
+
+### Step 4: Unit & Integration Tests
+1. **`embed_scheduler_test.go`**:
+   - Test 4:1 remainder carryover across variable batch formations (verifying exact $N$ and $M$ allocations across multiple consecutive batches).
+   - Test two-tier sorting: high quota sorts by `(highCount, lowCount)`, low quota sorts by `(lowCount, highCount)`.
+   - Test context cancellation and task ejection: cancelling waiters decrements counts, and reaching $(0, 0)$ purges the task from the pool.
+   - Test coalesced waiters: task with 1 high and 1 low waiter keeps running if 1 cancels, satisfied if completed.
+2. **`live_quotes_test.go` / `filelist_search_test.go`**:
+   - Test candidate demotion: displacing a candidate in the top $N$ cancels quote extraction and verifies that pending quote tasks are ejected.
+3. **`embedding_cache_test.go`**:
+   - Verify cache initialization and atomic replacement without `temp.Sync()`.
+
