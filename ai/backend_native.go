@@ -63,6 +63,7 @@ var (
 	lmEmbeddingSettingsSetNumThreads      func(settings uintptr, threads int32) int32
 	lmEmbeddingEngineCreate               func(settings, outEngine uintptr) int32
 	lmEmbeddingEngineDelete               func(engine uintptr)
+	lmEmbeddingEngineComputeBatch         func(engine, inputsBatch, numInputsPerBatch, batchSize, options, outResponses uintptr) int32
 	lmEmbeddingOptionsCreate              func(outOptions uintptr) int32
 	lmEmbeddingOptionsDelete              func(options uintptr)
 	lmEmbeddingOptionsSetNormalize        func(options uintptr, normalize bool) int32
@@ -70,6 +71,9 @@ var (
 	lmInputDataCreate                     func(dataType int32, data, size, outInput uintptr) int32
 	lmInputDataDelete                     func(inputData uintptr)
 	lmEmbeddingEngineCompute              func(engine, inputs, numInputs, options, outResponse uintptr) int32
+	lmEmbeddingResponsesDelete            func(responses uintptr)
+	lmEmbeddingResponsesGetSize           func(responses, outSize uintptr) int32
+	lmEmbeddingResponsesGetAt             func(responses, index, outResponse uintptr) int32
 	lmEmbeddingResponseDelete             func(resp uintptr)
 	lmEmbeddingResponseGetSize            func(resp, outSize uintptr) int32
 	lmEmbeddingResponseGetValues          func(resp, outValues uintptr) int32
@@ -113,6 +117,18 @@ func (d *nativeDriver) callStatus(operation string, call func() int32) error {
 		message = ptrToGoString(lmGetLastErrorMessage())
 	}
 	return newLiteRtStatusError(operation, code, message)
+}
+
+func (d *nativeDriver) callStatusOut(operation string, call func(uintptr) int32) (uintptr, error) {
+	out := new(uintptr)
+	var pinner runtime.Pinner
+	pinner.Pin(out)
+	defer pinner.Unpin()
+	err := d.callStatus(operation, func() int32 {
+		return call(uintptr(unsafe.Pointer(out)))
+	})
+	runtime.KeepAlive(out)
+	return *out, err
 }
 
 func (d *nativeDriver) ptrToString(ptr uint64) (string, error) {
@@ -361,11 +377,9 @@ func (d *nativeDriver) embeddingEngineDelete(engine uint64) {
 	lmEmbeddingEngineDelete(uintptr(engine))
 }
 func (d *nativeDriver) embeddingOptionsCreate() (uint64, error) {
-	var out uintptr
-	err := d.callStatus("litert_lm_embedding_options_create", func() int32 {
-		return lmEmbeddingOptionsCreate(uintptr(unsafe.Pointer(&out)))
+	out, err := d.callStatusOut("litert_lm_embedding_options_create", func(out uintptr) int32 {
+		return lmEmbeddingOptionsCreate(out)
 	})
-	runtime.KeepAlive(&out)
 	return uint64(out), err
 }
 func (d *nativeDriver) embeddingOptionsDelete(options uint64) {
@@ -410,12 +424,10 @@ func (d *nativeDriver) embeddingEngineCompute(engine uint64, inputs []uint64, op
 	pinner.Pin(&cInputs[0])
 	defer pinner.Unpin()
 
-	var resp uintptr
-	err := d.callStatus("litert_lm_embedding_engine_compute_embedding", func() int32 {
-		return lmEmbeddingEngineCompute(uintptr(engine), uintptr(unsafe.Pointer(&cInputs[0])), uintptr(len(cInputs)), uintptr(options), uintptr(unsafe.Pointer(&resp)))
+	resp, err := d.callStatusOut("litert_lm_embedding_engine_compute_embedding", func(out uintptr) int32 {
+		return lmEmbeddingEngineCompute(uintptr(engine), uintptr(unsafe.Pointer(&cInputs[0])), uintptr(len(cInputs)), uintptr(options), out)
 	})
 	runtime.KeepAlive(cInputs)
-	runtime.KeepAlive(&resp)
 	if err != nil {
 		return nil, err
 	}
@@ -423,17 +435,95 @@ func (d *nativeDriver) embeddingEngineCompute(engine uint64, inputs []uint64, op
 		return nil, fmt.Errorf("embedding computation returned NULL without an error")
 	}
 	defer lmEmbeddingResponseDelete(resp)
+	return d.embeddingResponseValues(resp)
+}
 
-	var size uintptr
-	if err := d.callStatus("litert_lm_embedding_response_get_size", func() int32 {
-		return lmEmbeddingResponseGetSize(resp, uintptr(unsafe.Pointer(&size)))
-	}); err != nil {
+func (d *nativeDriver) embeddingEngineComputeBatch(engine uint64, batches [][]uint64, options uint64) ([][]float32, error) {
+	if len(batches) == 0 {
+		return nil, fmt.Errorf("no embedding inputs provided")
+	}
+
+	inputsBatch := make([][]uintptr, len(batches))
+	inputPointers := make([]uintptr, len(batches))
+	inputCounts := make([]uintptr, len(batches))
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+	for batchIndex, inputs := range batches {
+		if len(inputs) == 0 {
+			return nil, fmt.Errorf("embedding batch item %d has no inputs", batchIndex)
+		}
+		inputsBatch[batchIndex] = make([]uintptr, len(inputs))
+		for i, input := range inputs {
+			inputsBatch[batchIndex][i] = uintptr(input)
+		}
+		pinner.Pin(&inputsBatch[batchIndex][0])
+		inputPointers[batchIndex] = uintptr(unsafe.Pointer(&inputsBatch[batchIndex][0]))
+		inputCounts[batchIndex] = uintptr(len(inputs))
+	}
+	pinner.Pin(&inputPointers[0])
+	pinner.Pin(&inputCounts[0])
+
+	responses, err := d.callStatusOut("litert_lm_embedding_engine_compute_embedding_batch", func(out uintptr) int32 {
+		return lmEmbeddingEngineComputeBatch(
+			uintptr(engine),
+			uintptr(unsafe.Pointer(&inputPointers[0])),
+			uintptr(unsafe.Pointer(&inputCounts[0])),
+			uintptr(len(batches)),
+			uintptr(options),
+			out,
+		)
+	})
+	runtime.KeepAlive(inputsBatch)
+	runtime.KeepAlive(inputPointers)
+	runtime.KeepAlive(inputCounts)
+	if err != nil {
 		return nil, err
 	}
-	var valsPtr uintptr
-	if err := d.callStatus("litert_lm_embedding_response_get_values", func() int32 {
-		return lmEmbeddingResponseGetValues(resp, uintptr(unsafe.Pointer(&valsPtr)))
-	}); err != nil {
+	if responses == 0 {
+		return nil, fmt.Errorf("embedding batch computation returned NULL without an error")
+	}
+	defer lmEmbeddingResponsesDelete(responses)
+
+	responseCount, err := d.callStatusOut("litert_lm_embedding_responses_get_size", func(out uintptr) int32 {
+		return lmEmbeddingResponsesGetSize(responses, out)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if responseCount != uintptr(len(batches)) {
+		return nil, fmt.Errorf("embedding batch returned %d responses, want %d", responseCount, len(batches))
+	}
+
+	vectors := make([][]float32, len(batches))
+	for i := range batches {
+		response, err := d.callStatusOut("litert_lm_embedding_responses_get_at", func(out uintptr) int32 {
+			return lmEmbeddingResponsesGetAt(responses, uintptr(i), out)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("get embedding batch response %d: %w", i, err)
+		}
+		if response == 0 {
+			return nil, fmt.Errorf("embedding batch response %d is NULL", i)
+		}
+		vectors[i], err = d.embeddingResponseValues(response)
+		if err != nil {
+			return nil, fmt.Errorf("read embedding batch response %d: %w", i, err)
+		}
+	}
+	return vectors, nil
+}
+
+func (d *nativeDriver) embeddingResponseValues(response uintptr) ([]float32, error) {
+	size, err := d.callStatusOut("litert_lm_embedding_response_get_size", func(out uintptr) int32 {
+		return lmEmbeddingResponseGetSize(response, out)
+	})
+	if err != nil {
+		return nil, err
+	}
+	valsPtr, err := d.callStatusOut("litert_lm_embedding_response_get_values", func(out uintptr) int32 {
+		return lmEmbeddingResponseGetValues(response, out)
+	})
+	if err != nil {
 		return nil, err
 	}
 	if size == 0 {
@@ -595,6 +685,7 @@ func ensureLMLibLoadedImpl(libPath string) error {
 			{&lmEmbeddingSettingsSetNumThreads, "litert_lm_embedding_engine_settings_set_num_threads"},
 			{&lmEmbeddingEngineCreate, "litert_lm_embedding_engine_create"},
 			{&lmEmbeddingEngineDelete, "litert_lm_embedding_engine_delete"},
+			{&lmEmbeddingEngineComputeBatch, "litert_lm_embedding_engine_compute_embedding_batch"},
 			{&lmEmbeddingOptionsCreate, "litert_lm_embedding_options_create"},
 			{&lmEmbeddingOptionsDelete, "litert_lm_embedding_options_delete"},
 			{&lmEmbeddingOptionsSetNormalize, "litert_lm_embedding_options_set_normalize"},
@@ -602,6 +693,9 @@ func ensureLMLibLoadedImpl(libPath string) error {
 			{&lmInputDataCreate, "litert_lm_input_data_create"},
 			{&lmInputDataDelete, "litert_lm_input_data_delete"},
 			{&lmEmbeddingEngineCompute, "litert_lm_embedding_engine_compute_embedding"},
+			{&lmEmbeddingResponsesDelete, "litert_lm_embedding_responses_delete"},
+			{&lmEmbeddingResponsesGetSize, "litert_lm_embedding_responses_get_size"},
+			{&lmEmbeddingResponsesGetAt, "litert_lm_embedding_responses_get_at"},
 			{&lmEmbeddingResponseDelete, "litert_lm_embedding_response_delete"},
 			{&lmEmbeddingResponseGetSize, "litert_lm_embedding_response_get_size"},
 			{&lmEmbeddingResponseGetValues, "litert_lm_embedding_response_get_values"},

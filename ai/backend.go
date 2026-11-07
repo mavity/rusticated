@@ -95,6 +95,10 @@ type embedderBackend interface {
 	Close() error
 }
 
+type batchEmbedderBackend interface {
+	ComputeEmbeddingsBatch(inputs [][]embedInput) ([][]float32, error)
+}
+
 type embedInput struct {
 	dataType int32 // 0 = TEXT, 1 = IMAGE
 	data     []byte
@@ -176,6 +180,7 @@ type LMDriver interface {
 	inputDataCreate(dataType int32, data []byte) (uint64, error)
 	inputDataDelete(inputData uint64)
 	embeddingEngineCompute(engine uint64, inputs []uint64, options uint64) ([]float32, error)
+	embeddingEngineComputeBatch(engine uint64, inputs [][]uint64, options uint64) ([][]float32, error)
 
 	// ── Callback trampoline creation ─────────────────────────────────────
 	// The trampoline is created once per process; the request is identified
@@ -958,6 +963,66 @@ func (b *drvEmbedderBackend) ComputeEmbedding(inputs []embedInput) ([]float32, e
 	}
 
 	return b.drv.embeddingEngineCompute(b.engine, createdPtrs, opts)
+}
+
+func (b *drvEmbedderBackend) ComputeEmbeddingsBatch(batches [][]embedInput) ([][]float32, error) {
+	if b == nil || b.engine == 0 {
+		return nil, ErrClosed
+	}
+	if len(batches) == 0 {
+		return nil, fmt.Errorf("ai: cannot compute an empty embedding batch")
+	}
+
+	opts, err := b.drv.embeddingOptionsCreate()
+	if err != nil {
+		return nil, fmt.Errorf("create embedding options: %w", err)
+	}
+	if opts == 0 {
+		return nil, fmt.Errorf("embedding options creation returned NULL without an error")
+	}
+	defer b.drv.embeddingOptionsDelete(opts)
+
+	if err := b.drv.embeddingOptionsSetNormalize(opts, true); err != nil {
+		return nil, fmt.Errorf("configure embedding normalization: %w", err)
+	}
+	if err := b.drv.embeddingOptionsSetInputOverflowStrategy(opts, overflowStrategyTruncate); err != nil {
+		return nil, fmt.Errorf("configure embedding input overflow strategy: %w", err)
+	}
+
+	createdPtrs := make([][]uint64, len(batches))
+	defer func() {
+		for _, batch := range createdPtrs {
+			for _, ptr := range batch {
+				b.drv.inputDataDelete(ptr)
+			}
+		}
+	}()
+
+	for batchIndex, inputs := range batches {
+		if len(inputs) == 0 {
+			return nil, fmt.Errorf("ai: embedding batch item %d has no inputs", batchIndex)
+		}
+		createdPtrs[batchIndex] = make([]uint64, 0, len(inputs))
+		for _, in := range inputs {
+			ptr, err := b.drv.inputDataCreate(in.dataType, in.data)
+			if err != nil {
+				return nil, fmt.Errorf("create embedding input data for batch item %d: %w", batchIndex, err)
+			}
+			if ptr == 0 {
+				return nil, fmt.Errorf("input data creation returned NULL for batch item %d without an error", batchIndex)
+			}
+			createdPtrs[batchIndex] = append(createdPtrs[batchIndex], ptr)
+		}
+	}
+
+	vectors, err := b.drv.embeddingEngineComputeBatch(b.engine, createdPtrs, opts)
+	if err != nil {
+		return nil, err
+	}
+	if len(vectors) != len(batches) {
+		return nil, fmt.Errorf("embedding batch returned %d vectors, want %d", len(vectors), len(batches))
+	}
+	return vectors, nil
 }
 
 func (b *drvEmbedderBackend) Close() error {

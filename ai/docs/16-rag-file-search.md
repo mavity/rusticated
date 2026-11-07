@@ -117,6 +117,37 @@ content candidate vectors.
   explicit tests.
 - Run the relevant native and Rusticated AMD64 `filelist` and shell tests.
 
+### Minimum embedding performance acceptance
+
+The real-embedder validation must also include the following performance
+acceptance tests. These tests exercise the production embedding path and model;
+fake embedders are not substitutes. Each test must log the measured duration
+and enough model/runtime and execution-mode information to interpret the
+result. Run them in native AMD64 and Rusticated AMD64 validation.
+
+1. **Real semantic grouping.** Embed `duck`, `chicken`, `iron`, and `copper`.
+   Compute and report the full cosine-similarity matrix. Assert that duck and
+   chicken are mutual nearest neighbors and iron and copper are mutual nearest
+   neighbors.
+2. **Warm single-input latency.** Embed `London`, `Paris`, `Tokyo`, and
+   `Lagos` sequentially. Log each call's duration. Require every call after
+   the first to complete in under one second.
+3. **Real batches.** Embed four currency terms in one batch, then four color
+   terms in a separate batch. Log both batch durations and validate that all
+   eight vectors are non-empty, finite, and dimensionally consistent. Require
+   the second batch to complete in under three seconds.
+4. **Long-input latency.** Embed a 4,915-byte source slice to warm the path,
+   then embed a different 4,915-byte slice from the test source. Log both
+   durations and require the second, warm embedding to complete in under
+   three seconds.
+
+These are acceptance thresholds, not merely benchmark reporting: exceeding a
+threshold or failing a semantic/vector assertion fails the performance test.
+The test output must retain all measured durations on failure. Do not silently
+skip a required execution mode because the model or runtime is unavailable;
+record the explicit unsupported-platform reason and treat it as an unmet
+acceptance requirement until resolved.
+
 ## Follow-up
 
 - No automatic eviction is implemented. Define a cache-size and eviction

@@ -403,7 +403,7 @@ func (e *concurrentEmbedder) nextBatch() []*embeddingJob {
 
 	hasHigh := highWaiters > 0
 	hasLow := lowWaiters > 0
-	if !hasHigh || !hasLow {
+	if !hasHigh {
 		e.highSinceLow = 0
 	}
 	lowPriority := !hasHigh || (hasLow && e.highSinceLow >= highRequestsPerLow)
@@ -430,7 +430,7 @@ func (e *concurrentEmbedder) nextBatch() []*embeddingJob {
 		e.queuedRequests -= len(job.waiters)
 		job.ctx, job.cancel = context.WithCancel(e.ctx)
 		selected = append(selected, job)
-		if !lowPriority && hasLow {
+		if !lowPriority && e.highSinceLow < highRequestsPerLow {
 			e.highSinceLow++
 		}
 	}

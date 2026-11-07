@@ -45,6 +45,8 @@ Owns the canonical data structures, wire serialization, session-level turn timin
 
 1. **Engine Backend Introspection (`ai/ai.go`, `ai/engine.go`):**
    - `Engine` records the resolved backend name (`e.Backend() string`) that succeeded during `newEngineImpl` (e.g. `"gpu"`, `"npu"`, `"cpu"`), plus `e.ModelPath() string` and `e.MaxTokens() int`.
+   - `Embedder.Backend()` reports the backend that successfully initialized the embedding engine. On desktop, default embedder auto-selection tries GPU, then NPU, then CPU; an explicit backend or `LITERTLM_BACKEND` override is honored.
+   - `Embedder.SupportsBatch()` reports whether the active backend has a true batch path. `EmbedBatchContext` retains sequential fallback for backends without it; performance acceptance requires the true path.
 
 2. **Succinct Environment Summary Helper (`ai/env_context.go`):**
    - `type EnvironmentConfig struct`:
