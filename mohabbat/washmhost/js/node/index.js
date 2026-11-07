@@ -13,15 +13,7 @@ import path from 'node:path';
 
 // Patched by buildNodeSlot:
 const VERBOSE = false; // {{VERBOSE}}
-const L = (...args) => (VERBOSE || process.env.MOHABBAT_VERBOSE) && console.error(...args);
-let virtualTerminalSize = {
-  cols: Number(process.env.MOHABBAT_PSEUDO_TTY_COLS) || 80,
-  rows: Number(process.env.MOHABBAT_PSEUDO_TTY_ROWS) || 24
-};
-
-function isVirtualTerminal() {
-  return process.env.MOHABBAT_PSEUDO_TTY === '1';
-}
+const L = (...args) => VERBOSE && console.error(...args);
 
 // Overlapped.flags: bit 0 is completion, bits 1-23 are shared-reserved, and
 // bits 24-31 are operation-specific.
@@ -122,22 +114,22 @@ const wasiETXTBSY      = 74;
 const wasiEXDEV        = 75;
 const wasiENOTCAPABLE  = 76;
 
-function mapErrno(e) {
+export function mapErrno(e) {
   if (!e) return wasiSuccess;
   switch (e.code) {
+    case 'EADDRNOTAVAIL': return wasiEADDRNOTAVAIL;
+    case 'EAFNOSUPPORT': return wasiEAFNOSUPPORT;
+    case 'EALREADY': return wasiEALREADY;
     case 'ENOENT':    return wasiENOENT;
-    case 'ESRCH':     return wasiESRCH;
-    case 'EINTR':     return wasiEINTR;
     case 'EIO':       return wasiEIO;
     case 'ENXIO':     return wasiENXIO;
     case 'EBADF':     return wasiEBADF;
-    case 'ECHILD':    return wasiECHILD;
     case 'EAGAIN':    return wasiEAGAIN;
-    case 'ENOMEM':    return wasiENOMEM;
     case 'EACCES':    return wasiEACCES;
     case 'EFAULT':    return wasiEFAULT;
-    case 'EBUSY':     return wasiEBUSY;
     case 'EEXIST':    return wasiEEXIST;
+    case 'ECONNABORTED': return wasiECONNABORTED;
+    case 'ECONNRESET': return wasiECONNRESET;
     case 'EFBIG':     return wasiEFBIG;
     case 'EXDEV':     return wasiEXDEV;
     case 'ENODEV':    return wasiENODEV;
@@ -146,7 +138,14 @@ function mapErrno(e) {
     case 'EPERM':     return wasiEPERM;
     case 'EINVAL':    return wasiEINVAL;
     case 'EMFILE':    return wasiEMFILE;
-    case 'ENOSPC':    return wasiENOSPC;
+    case 'ELOOP':     return wasiELOOP;
+    case 'EMLINK':    return wasiEMLINK;
+    case 'ENAMETOOLONG': return wasiENAMETOOLONG;
+    case 'ENFILE':    return wasiENFILE;
+    case 'ENOSYS':    return wasiENOSYS;
+    case 'ETIMEDOUT': return wasiETIMEDOUT;
+    case 'EROFS':     return wasiEROFS;
+    case 'ESPIPE':    return wasiESPIPE;
     case 'ENOTSUP':
     case 'EOPNOTSUPP': return wasiENOTSUP;
     case 'EPIPE':     return wasiEPIPE;
@@ -159,42 +158,78 @@ function mapErrno(e) {
   }
 }
 
-function createPtyAddonLoader(addonBytes) {
-  let addon = null;
-  const require = createRequire(process.execPath);
+function canonicalGuestEnvKey(key) {
+  if (process.platform === 'win32') {
+    const upper = key.toUpperCase();
+    if (upper === 'PATH' || upper === 'PATHEXT') return upper;
+  }
+  return key;
+}
+
+function lookupGuestEnvValue(env, key) {
+  if (Object.hasOwn(env, key)) return [env[key], true];
+  const lowerKey = key.toLowerCase();
+  for (const [candidate, value] of Object.entries(env)) {
+    if (candidate.toLowerCase() === lowerKey) return [value, true];
+  }
+  return ['', false];
+}
+
+function expandWindowsGuestEnv(value, env) {
+  for (let iteration = 0; iteration < 8; iteration++) {
+    let changed = false;
+    value = value.replace(/%([^%]+)%/g, (match, name) => {
+      const [replacement, found] = lookupGuestEnvValue(env, name);
+      if (!found) return match;
+      changed = true;
+      return replacement;
+    });
+    if (!changed) break;
+  }
+  return value;
+}
+
+function guestEnvForWasm(env) {
+  const values = Object.create(null);
+  const ordered = [];
+  for (const [rawKey, rawValue] of Object.entries(env)) {
+    const key = canonicalGuestEnvKey(rawKey);
+    if (!Object.hasOwn(values, key)) ordered.push(key);
+    values[key] = String(rawValue);
+  }
+
+  for (let iteration = 0; iteration < 8; iteration++) {
+    let changed = false;
+    for (const key of ordered) {
+      const expanded = expandWindowsGuestEnv(values[key], values);
+      if (expanded !== values[key]) {
+        values[key] = expanded;
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+
+  return ordered
+    .filter(key => key.toUpperCase() !== 'PWD' && key.toUpperCase() !== 'OLDPWD')
+    .map(key => `${key}=${values[key]}`);
+}
+
+function guestRuntimeEnvForWasm(env) {
+  const result = Object.create(null);
+  for (const variable of guestEnvForWasm(env)) {
+    const separator = variable.indexOf('=');
+    const key = variable.slice(0, separator);
+    result[key] = variable.slice(separator + 1);
+  }
+  return result;
+}
+
+function createPtyAddonLoader(addon) {
   return () => {
-    if (addon) return addon;
-    if (!addonBytes || addonBytes.length === 0) {
+    if (!addon) {
       throw new Error(`PTY addon is unavailable for ${process.platform}-${process.arch}`);
     }
-
-    const digest = crypto.createHash('sha256').update(addonBytes).digest('hex');
-    const addonPath = path.join(os.tmpdir(), `mohabbat-nodepty-${digest}.node`);
-    try {
-      const fd = fs.openSync(addonPath, 'wx', 0o700);
-      try {
-        fs.writeFileSync(fd, addonBytes);
-      } catch (error) {
-        fs.closeSync(fd);
-        fs.rmSync(addonPath, { force: true });
-        throw error;
-      }
-      fs.closeSync(fd);
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      const stat = fs.lstatSync(addonPath);
-      if (!stat.isFile() || stat.isSymbolicLink()) {
-        throw new Error(`PTY addon cache path is not a regular file: ${addonPath}`);
-      }
-      const cachedBytes = fs.readFileSync(addonPath);
-      if (!crypto.timingSafeEqual(
-        crypto.createHash('sha256').update(cachedBytes).digest(),
-        Buffer.from(digest, 'hex'),
-      )) {
-        throw new Error(`PTY addon cache integrity check failed: ${addonPath}`);
-      }
-    }
-    addon = require(addonPath);
     return addon;
   };
 }
@@ -244,38 +279,22 @@ async function resolvePtyProgram(program, env, cwd) {
 // The guest uses /C:/... while the host OS expects C:/... . Native host paths
 // are left alone and temp/user/cwd paths are never rewritten.
 // ─────────────────────────────────────────────────────────────────────────────
-function translatePath(p) {
+function translatePath(p, cwd = null) {
   if (typeof p !== 'string' || p.length === 0) return p;
-  const s = path.posix.normalize(p.replace(/\\/g, '/'));
-  const workspaceMount = process.env.MOHABBAT_WORKSPACE_MOUNT;
-  if (workspaceMount && (s === '/workspace' || s.startsWith('/workspace/'))) {
-    const relative = s.slice('/workspace'.length).replace(/^\/+/, '');
-    return relative
-      ? path.join(workspaceMount, ...relative.split('/'))
-      : workspaceMount;
-  }
-  if (/^\/[A-Za-z]:\//.test(s)) return s.slice(1);
-  return s;
-}
-
-function virtualizeWorkspacePath(hostPath) {
-  const rootsJSON = process.env.MOHABBAT_WORKSPACE_ROOTS;
-  if (rootsJSON) {
-    let roots;
-    try {
-      roots = JSON.parse(rootsJSON);
-    } catch (error) {
-      throw new Error(`invalid MOHABBAT_WORKSPACE_ROOTS: ${error.message}`);
+  if (process.platform === 'win32') {
+    if (p === '/') return path.win32.normalize(cwd || process.cwd());
+    const guestDrivePath = p.replace(/^\/([A-Za-z]:\/)/, '$1');
+    const nativePath = guestDrivePath.replace(/\//g, '\\');
+    if (cwd && !path.win32.isAbsolute(nativePath)) {
+      return path.win32.resolve(cwd, nativePath);
     }
-    const absolute = path.resolve(hostPath);
-    for (const root of roots) {
-      const relative = path.relative(root.host, absolute);
-      if (relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))) {
-        return path.posix.join(root.guest, relative.split(path.sep).join('/'));
-      }
-    }
+    return path.win32.normalize(nativePath);
   }
-  return hostPath;
+  const normalized = path.posix.normalize(p.replace(/\\/g, '/'));
+  if (cwd && !path.posix.isAbsolute(normalized)) {
+    return path.posix.resolve(cwd, normalized);
+  }
+  return path.posix.normalize(normalized);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -314,7 +333,8 @@ export function marshalStat(st) {
   else if (st.isFIFO())         kind = STAT_KIND_FIFO;
   else if (st.isSocket())       kind = STAT_KIND_SOCKET;
 
-  const mode = Number(st.mode & 0xffffffffn);
+  let mode = Number(st.mode & 0xffffffffn);
+  if (process.platform === 'win32' && kind === STAT_KIND_DIR) mode |= 0o111;
   const size = st.size;
   const blksize = st.blksize > 0n ? st.blksize : 4096n;
   const blocks = st.blocks > 0n || size === 0n ? st.blocks : (size + 511n) / 512n;
@@ -366,14 +386,27 @@ function writeOverlappedExtended(view, ovPtr, errorCode, continued, resultExt, c
 // HostState  — owns handles, pending-op tracking, signal delivery
 // ─────────────────────────────────────────────────────────────────────────────
 class HostState {
-  constructor() {
+  constructor(options = {}) {
     this.memory     = null;   // set after instantiation
     this.handles    = new Map();
     this.nextHandle = 3n;
-    // stdio
-    this.handles.set(0n, { type: 'stdio', stream: process.stdin,  fd: 0 });
-    this.handles.set(1n, { type: 'stdio', stream: process.stdout, fd: 1 });
-    this.handles.set(2n, { type: 'stdio', stream: process.stderr, fd: 2 });
+    this.stdin = options.stdin || process.stdin;
+    this.stdout = options.stdout || process.stdout;
+    this.stderr = options.stderr || process.stderr;
+    this.cwd = path.resolve(options.cwd || process.cwd());
+    this.env = { ...(options.env || process.env) };
+    const before = BigInt(Date.now()) * 1_000_000n;
+    const monotonic = process.hrtime.bigint();
+    const after = BigInt(Date.now()) * 1_000_000n;
+    this.timeOriginNs = (before + after) / 2n - monotonic;
+    this.terminalSize = {
+      cols: Number(options.terminalSize && options.terminalSize.cols) || this.stdout.columns || 80,
+      rows: Number(options.terminalSize && options.terminalSize.rows) || this.stdout.rows || 24
+    };
+    this.terminalHandles = new Set(options.terminalHandles || []);
+    this.handles.set(0n, { type: 'stdio', stream: this.stdin, fd: 0 });
+    this.handles.set(1n, { type: 'stdio', stream: this.stdout, fd: 1 });
+    this.handles.set(2n, { type: 'stdio', stream: this.stderr, fd: 2 });
 
     // Pending-op tracking (mirrors outstandingOps / activeOps)
     this.activeOps    = new Map();   // ovPtr(number) -> { opId, cancel }
@@ -387,8 +420,18 @@ class HostState {
     this.completionQueue = [];
 
     this.forcedExitCode = -1;
+    this.exitSignal = new Error('Guest exited');
+    this.deliverSignal = (signum) => {
+      const waiters = this.signalWaiters.get(signum);
+      if (!waiters || waiters.size === 0) return;
+      this.signalWaiters.delete(signum);
+      for (const [ovPtr, opId] of waiters) {
+        this.enqueue(() => this.completeOp(ovPtr, opId, 0, 0, BigInt(signum)));
+      }
+    };
 
-    this._setupSignals();
+    this.signalCleanups = [];
+    if (options.listenProcessSignals) this._setupSignals();
   }
 
   // ── handle helpers ──────────────────────────────────────────────────────────
@@ -539,25 +582,50 @@ class HostState {
 
   // ── signals ─────────────────────────────────────────────────────────────────
   _setupSignals() {
-    const deliver = (signum) => {
-      const waiters = this.signalWaiters.get(signum);
-      if (waiters && waiters.size > 0) {
-        this.signalWaiters.delete(signum);
-        for (const [ovPtr, opId] of waiters) {
-          this.enqueue(() => {
-            this.completeOp(ovPtr, opId, 0, 0, BigInt(signum));
-          });
-        }
-      }
-    };
-    this.deliverSignal = deliver;
-    try { process.on('SIGINT',  () => deliver(2));  } catch (_) {}
-    try { process.on('SIGTERM', () => deliver(15)); } catch (_) {}
-    // SIGWINCH = 27 — emit if terminal resizes
-    if (process.stdout.isTTY) {
+    const listen = (name, handler) => {
       try {
-        process.stdout.on('resize', () => deliver(27));
+        process.on(name, handler);
+        this.signalCleanups.push(() => process.removeListener(name, handler));
       } catch (_) {}
+    };
+    listen('SIGINT', () => this.deliverSignal(2));
+    listen('SIGTERM', () => this.deliverSignal(15));
+    // SIGWINCH = 27 — emit if terminal resizes
+    if (this.stdout.isTTY) {
+      const onResize = () => this.deliverSignal(27);
+      this.stdout.on('resize', onResize);
+      this.signalCleanups.push(() => this.stdout.removeListener('resize', onResize));
+    }
+  }
+
+  requestExit(code) {
+    if (this.forcedExitCode < 0) this.forcedExitCode = Math.max(0, Number(code) | 0);
+  }
+
+  exitGuest(code) {
+    this.requestExit(code);
+    throw this.exitSignal;
+  }
+
+  removeSignalListeners() {
+    for (const cleanup of this.signalCleanups.splice(0)) cleanup();
+  }
+
+  cancelPendingOperations() {
+    for (const ovPtr of this.activeOps.keys()) {
+      this.cancelOp(ovPtr);
+    }
+  }
+
+  closeHandles() {
+    for (const [handle, item] of [...this.handles]) {
+      if (handle < 3n) continue;
+      if (item.type === 'child') {
+        try { item.cp.kill('SIGKILL'); } catch (_) {}
+      } else if (item.type === 'pty_child') {
+        try { item.addon.signal(item.nativeId, 9); } catch (_) {}
+      }
+      this.freeHandle(handle);
     }
   }
 }
@@ -565,9 +633,9 @@ class HostState {
 // ─────────────────────────────────────────────────────────────────────────────
 // makeBrainImports — builds the "env" import object
 // ─────────────────────────────────────────────────────────────────────────────
-export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
+export function makeBrainImports(hostState, argv, ptyAddon = null) {
   const hs = hostState;
-  const loadPtyAddon = createPtyAddonLoader(ptyAddonBytes);
+  const loadPtyAddon = createPtyAddonLoader(ptyAddon);
 
   // Helper: write bytes to guest memory
   function guestWrite(ptr, buf) {
@@ -601,20 +669,22 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
   // ── get_time ────────────────────────────────────────────────────────────────
   // Returns: i64 nanoseconds
   function get_time() {
-    return BigInt(Date.now()) * 1_000_000n;
+    return hs.timeOriginNs + process.hrtime.bigint();
   }
 
   // ── host_panic ──────────────────────────────────────────────────────────────
   function host_panic(ptr, len) {
     const msg = Buffer.from(hs.getGuestSlice(ptr, len)).toString();
-    console.error('GUEST PANIC:', msg);
-    process.exit(1);
+    hs.stderr.write(`GUEST PANIC: ${msg}\n`);
+    hs.requestExit(1);
   }
 
   // ── get_random ──────────────────────────────────────────────────────────────
   function get_random(ptr, len) {
     const buf = hs.getGuestSlice(ptr, len);
-    crypto.getRandomValues(buf);
+    for (let offset = 0; offset < buf.length; offset += 65536) {
+      crypto.getRandomValues(buf.subarray(offset, Math.min(offset + 65536, buf.length)));
+    }
   }
 
   // ── get_args ─────────────────────────────────────────────────────────────────
@@ -634,7 +704,7 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
   // ── get_env ──────────────────────────────────────────────────────────────────
   // Returns: i64  (count << 32) | totalBytes
   function get_env(ptr, len) {
-    const vars = Object.entries(process.env).map(([k, v]) => Buffer.concat([Buffer.from(`${k}=${v}`), Buffer.from([0])]));
+    const vars = guestEnvForWasm(hs.env).map(value => Buffer.concat([Buffer.from(value), Buffer.from([0])]));
     const totalBytes = vars.reduce((s, b) => s + b.length, 0);
     const count = BigInt(vars.length);
     if (ptr !== 0 && len >= totalBytes) {
@@ -647,7 +717,7 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
   // ── get_cwd ──────────────────────────────────────────────────────────────────
   // Returns: i64  (0 << 32) | bytesNeeded   (high 32 = errno on failure)
   function get_cwd(ptr, len) {
-    const cwd = virtualizeWorkspacePath(process.cwd());
+    const cwd = hs.cwd;
     const bytes = Buffer.byteLength(cwd);
     if (ptr !== 0 && len >= bytes) guestWrite(ptr, Buffer.from(cwd));
     return BigInt(bytes);
@@ -656,10 +726,11 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
   // ── set_cwd ──────────────────────────────────────────────────────────────────
   // Returns: i32 errno
   function set_cwd(ptr, len) {
-    const guestPath = Buffer.from(hs.getGuestSlice(ptr, len)).toString();
-    const hostPath = translatePath(guestPath);
-    try { process.chdir(hostPath); return 0; }
-    catch (e) { return mapErrno(e); }
+    const guestPath = Buffer.from(hs.getGuestSlice(ptr, len)).toString().trim();
+    if (guestPath.length === 0) return wasiEINVAL;
+    const hostPath = translatePath(guestPath, hs.cwd);
+    hs.cwd = hostPath;
+    return wasiSuccess;
   }
 
   // ── timer_set ────────────────────────────────────────────────────────────────
@@ -718,9 +789,9 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
     }
     const opId = hs.registerOp(ovPtrNum);
 
-    if (handle === 0n || h.type === 'stdio') {
+    if (handle === 0n || (h.type === 'stdio' && h.fd === 0)) {
       // stdin — use readable event for async
-      const stream = process.stdin;
+      const stream = h.stream;
       const onData = (chunk) => {
         cleanup();
         const n = Math.min(chunk.length, bLen);
@@ -872,16 +943,17 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
     const bPtr = Number(bufferPtr);
     const dataCopy = Buffer.from(hs.getGuestSlice(bPtr, bLen));
 
-    // stdout / stderr — synchronous, no op registration needed
-    if (handle === 1n || handle === 2n) {
-      const stream = handle === 1n ? process.stdout : process.stderr;
-      stream.write(dataCopy);
-      writeOverlapped(hs.view, ovPtr, 0, 0, bLen);
-      return;
-    }
-
     const h = hs.getHandle(handle);
     if (!h) { writeOverlapped(hs.view, ovPtr, wasiEBADF, 0, 0); return; }
+    if (h.type === 'stdio') {
+      if (h.fd === 0) {
+        writeOverlapped(hs.view, ovPtr, wasiEBADF, 0, 0);
+        return;
+      }
+      h.stream.write(dataCopy);
+      writeOverlapped(hs.view, ovPtr, wasiSuccess, 0, bLen);
+      return;
+    }
 
     const opId = hs.registerOp(ovPtr);
 
@@ -986,7 +1058,7 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
   // flags: O_RDONLY=0, O_WRONLY=1, O_RDWR=2, O_CREAT=64, O_EXCL=128, O_TRUNC=512, O_APPEND=1024
   function path_open(ovPtr, pathPtr, pathLen, flags) {
     const rawPath = Buffer.from(hs.getGuestSlice(Number(pathPtr), Number(pathLen))).toString();
-    const pathStr  = translatePath(rawPath);
+    const pathStr  = translatePath(rawPath, hs.cwd);
     const iFlags   = Number(flags);
     const access   = iFlags & 3;
     const isCreate = (iFlags & 64)   !== 0;
@@ -1172,7 +1244,7 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
   // Signature: (ovPtr i32, pathPtr i32, pathLen i32, flags i32, outPtr i32, outLen i32)
   // flags bit 0 = STAT_FLAG_NO_FOLLOW (use lstat)
   function path_stat(ovPtr, pathPtr, pathLen, flags, outPtr, outLen) {
-    const pathStr = translatePath(Buffer.from(hs.getGuestSlice(Number(pathPtr), Number(pathLen))).toString());
+    const pathStr = translatePath(Buffer.from(hs.getGuestSlice(Number(pathPtr), Number(pathLen))).toString(), hs.cwd);
     const noFollow = (Number(flags) & 1) !== 0;
     const opId = hs.registerOp(ovPtr);
 
@@ -1191,8 +1263,8 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
 
   // ── path_link ────────────────────────────────────────────────────────────────
   function path_link(ovPtr, sourcePtr, sourceLen, newPathPtr, newPathLen, flags) {
-    const sourcePath = translatePath(Buffer.from(hs.getGuestSlice(Number(sourcePtr), Number(sourceLen))).toString());
-    const newPath = translatePath(Buffer.from(hs.getGuestSlice(Number(newPathPtr), Number(newPathLen))).toString());
+    const sourcePath = translatePath(Buffer.from(hs.getGuestSlice(Number(sourcePtr), Number(sourceLen))).toString(), hs.cwd);
+    const newPath = translatePath(Buffer.from(hs.getGuestSlice(Number(newPathPtr), Number(newPathLen))).toString(), hs.cwd);
     const flagBits = Number(flags);
     const opId = hs.registerOp(ovPtr);
     if ((flagBits & ~1) !== 0) {
@@ -1223,7 +1295,7 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
   // ── path_symlink ────────────────────────────────────────────────────────────
   function path_symlink(ovPtr, targetPtr, targetLen, linkPathPtr, linkPathLen, targetKind) {
     const target = Buffer.from(hs.getGuestSlice(Number(targetPtr), Number(targetLen))).toString();
-    const linkPath = translatePath(Buffer.from(hs.getGuestSlice(Number(linkPathPtr), Number(linkPathLen))).toString());
+    const linkPath = translatePath(Buffer.from(hs.getGuestSlice(Number(linkPathPtr), Number(linkPathLen))).toString(), hs.cwd);
     const kind = Number(targetKind);
     const opId = hs.registerOp(ovPtr);
     if (kind < 0 || kind > 2 || !Number.isInteger(kind)) {
@@ -1250,7 +1322,7 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
 
   // ── path_readlink ───────────────────────────────────────────────────────────
   function path_readlink(ovPtr, pathPtr, pathLen, outPtr, outLen) {
-    const pathStr = translatePath(Buffer.from(hs.getGuestSlice(Number(pathPtr), Number(pathLen))).toString());
+    const pathStr = translatePath(Buffer.from(hs.getGuestSlice(Number(pathPtr), Number(pathLen))).toString(), hs.cwd);
     const output = hs.getGuestSlice(Number(outPtr), Number(outLen));
     const opId = hs.registerOp(ovPtr);
     fs.promises.readlink(pathStr, { encoding: 'buffer' }).then((target) => {
@@ -1272,7 +1344,7 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
   // Signature: (ovPtr i32, pathPtr i32, pathLen i32, mode i32)
   // Go impl is synchronous for chmod; mirror that.
   function path_chmod(ovPtr, pathPtr, pathLen, mode) {
-    const pathStr = translatePath(Buffer.from(hs.getGuestSlice(Number(pathPtr), Number(pathLen))).toString());
+    const pathStr = translatePath(Buffer.from(hs.getGuestSlice(Number(pathPtr), Number(pathLen))).toString(), hs.cwd);
     const opId = hs.registerOp(ovPtr);
     fs.chmod(pathStr, Number(mode), (err) => {
       hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(err), 0, 0));
@@ -1283,7 +1355,7 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
   // Signature: (ovPtr, pathPtr, pathLen, atimeSec, atimeNsec,
   //             mtimeSec, mtimeNsec, flags)
   function path_set_times(ovPtr, pathPtr, pathLen, atimeSec, atimeNsec, mtimeSec, mtimeNsec, flags) {
-    const pathStr = translatePath(Buffer.from(hs.getGuestSlice(Number(pathPtr), Number(pathLen))).toString());
+    const pathStr = translatePath(Buffer.from(hs.getGuestSlice(Number(pathPtr), Number(pathLen))).toString(), hs.cwd);
     const opId = hs.registerOp(ovPtr);
     const flagBits = Number(flags);
     const setAtime = (flagBits & 0x01) !== 0;
@@ -1324,7 +1396,7 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
   // ── path_remove ──────────────────────────────────────────────────────────────
   // Signature: (ovPtr i32, pathPtr i32, pathLen i32, flags i32)
   function path_remove(ovPtr, pathPtr, pathLen, flags = 0) {
-    const pathStr = translatePath(Buffer.from(hs.getGuestSlice(Number(pathPtr), Number(pathLen))).toString());
+    const pathStr = translatePath(Buffer.from(hs.getGuestSlice(Number(pathPtr), Number(pathLen))).toString(), hs.cwd);
     const flagBits = Number(flags);
     const opId = hs.registerOp(ovPtr);
     if (flagBits !== 0 && flagBits !== 0x200) {
@@ -1354,7 +1426,7 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
   // ── path_mkdir ───────────────────────────────────────────────────────────────
   // Signature: (ovPtr i32, pathPtr i32, pathLen i32, mode i32)
   function path_mkdir(ovPtr, pathPtr, pathLen, mode) {
-    const pathStr = translatePath(Buffer.from(hs.getGuestSlice(Number(pathPtr), Number(pathLen))).toString());
+    const pathStr = translatePath(Buffer.from(hs.getGuestSlice(Number(pathPtr), Number(pathLen))).toString(), hs.cwd);
     const opId = hs.registerOp(ovPtr);
     fs.mkdir(pathStr, { mode: Number(mode) }, (err) => {
       hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(err), 0, 0));
@@ -1364,8 +1436,8 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
   // ── path_rename ──────────────────────────────────────────────────────────────
   // Signature: (ovPtr i32, oldPtr i32, oldLen i32, newPtr i32, newLen i32)
   function path_rename(ovPtr, oldPtr, oldLen, newPtr, newLen) {
-    const oldStr = translatePath(Buffer.from(hs.getGuestSlice(Number(oldPtr), Number(oldLen))).toString());
-    const newStr = translatePath(Buffer.from(hs.getGuestSlice(Number(newPtr), Number(newLen))).toString());
+    const oldStr = translatePath(Buffer.from(hs.getGuestSlice(Number(oldPtr), Number(oldLen))).toString(), hs.cwd);
+    const newStr = translatePath(Buffer.from(hs.getGuestSlice(Number(newPtr), Number(newLen))).toString(), hs.cwd);
     const opId = hs.registerOp(ovPtr);
     fs.rename(oldStr, newStr, (err) => {
       hs.enqueue(() => hs.completeOp(ovPtr, opId, mapErrno(err), 0, 0));
@@ -1457,7 +1529,11 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
   // Signature: (ovPtr i32, listenHandle i64)
   function net_accept(ovPtr, listenHandle) {
     const h = hs.getHandle(listenHandle);
-    if (!h || h.type !== 'server') { writeOverlapped(hs.view, ovPtr, wasiEINVAL, 0, 0); return; }
+    if (!h) {
+      writeOverlapped(hs.view, ovPtr, wasiEBADF, 0, 0);
+      return;
+    }
+    if (h.type !== 'server') { writeOverlapped(hs.view, ovPtr, wasiEINVAL, 0, 0); return; }
     const opId = hs.registerOp(ovPtr);
     const cleanup = () => {
       h.server.removeListener('connection', onConnection);
@@ -1654,7 +1730,10 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
       hs.completeOp(ovPtr, opId, wasiEINVAL, 0, 0); return;
     }
 
-    const program = translatePath(parts[0].toString());
+    const rawProgram = parts[0].toString();
+    const program = /[\\/]/.test(rawProgram)
+      ? translatePath(rawProgram, hs.cwd)
+      : translatePath(rawProgram);
     const sections = [[], [], [], []];
     let secIdx = 0;
     for (let i = 1; i < parts.length; i++) {
@@ -1664,15 +1743,16 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
 
     const spawnArgs   = sections[0];
     const envOverrides = sections[1];
-    const cwd         = sections[2][0] ? translatePath(sections[2][0]) : process.cwd();
+    const cwd         = sections[2][0] ? translatePath(sections[2][0], hs.cwd) : hs.cwd;
     const stdioSpecs  = sections[3];
 
     // Merge env
-    const envObj = { ...process.env };
+    let envObj = { ...hs.env };
     for (const kv of envOverrides) {
       const eq = kv.indexOf('=');
       if (eq > 0) envObj[kv.slice(0, eq)] = kv.slice(eq + 1);
     }
+    envObj = guestRuntimeEnvForWasm(envObj);
 
     const ptySpec = stdioSpecs.find(spec => spec === 'pty' || spec.startsWith('pty:'));
     if (ptySpec) {
@@ -1688,7 +1768,7 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
       }
 
       const startPty = ptyProgram => {
-      if (!ptyAddonBytes || ptyAddonBytes.length === 0) {
+      if (!ptyAddon) {
         hs.completeOp(ovPtr, opId, wasiENOSYS, 0, 0);
         return;
       }
@@ -1824,7 +1904,7 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
     for (let i = 0; i < stdioSpecs.length; i++) {
       const spec = stdioSpecs[i];
       if (spec === 'inherit') {
-        stdioArr.push(i === 0 ? process.stdin : i === 1 ? process.stdout : process.stderr);
+        stdioArr.push(i === 0 ? hs.stdin : i === 1 ? hs.stdout : hs.stderr);
       } else if (spec === 'pipe') {
         const p = new PassThrough();
         // parent side: for stdin slot, parent writes; for stdout/stderr, parent reads
@@ -1859,7 +1939,7 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
       }
     }
     if (stdioArr.length === 0) {
-      stdioArr.push(process.stdin, process.stdout, process.stderr);
+      stdioArr.push(hs.stdin, hs.stdout, hs.stderr);
     }
 
     // Pack pipe handles into reserved (up to 4, 16 bits each)
@@ -2007,20 +2087,16 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
   // ── process_exit ─────────────────────────────────────────────────────────────
   // Signature: (code i32)
   function process_exit(code) {
-    process.exit(Number(code));
+    hs.exitGuest(code);
   }
 
   // ── tty_set_mode ─────────────────────────────────────────────────────────────
   // Signature: (handle i64, mode i32)
   // mode 1 = raw, 0 = normal
   function tty_set_mode(handle, mode) {
-    if (handle === 0n && (process.stdin.isTTY || isVirtualTerminal())) {
-      try {
-        if (Number(mode) === 1) process.stdin.setRawMode(true);
-        else                    process.stdin.setRawMode(false);
-      } catch (error) {
-        if (!isVirtualTerminal()) throw error;
-      }
+    const h = hs.getHandle(handle);
+    if (handle === 0n && h && h.stream.isTTY && typeof h.stream.setRawMode === 'function') {
+      h.stream.setRawMode(Number(mode) === 1);
     }
   }
 
@@ -2029,10 +2105,11 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
   function tty_get_size(handle) {
     const h = hs.getHandle(handle);
     if (h && h.type === 'pty') return (h.cols << 16) | h.rows;
-    if ((handle === 1n || handle === 2n) && (process.stdout.isTTY || isVirtualTerminal())) {
-      const w = process.stdout.columns || virtualTerminalSize.cols || 80;
-      const h = process.stdout.rows || virtualTerminalSize.rows || 24;
-      return (w << 16) | h;
+    if (h && h.type === 'stdio' &&
+        (h.stream.isTTY || (hs.terminalHandles && hs.terminalHandles.has(BigInt(handle))))) {
+      const cols = hs.terminalSize ? hs.terminalSize.cols : (h.stream.columns || 80);
+      const rows = hs.terminalSize ? hs.terminalSize.rows : (h.stream.rows || 24);
+      return (cols << 16) | rows;
     }
     return (80 << 16) | 24;
   }
@@ -2049,16 +2126,20 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
       }
       return mapPtyError(status);
     }
-    return h.type === 'stdio' && h.stream.isTTY ? wasiSuccess : wasiENOTTY;
+    if (h.type === 'stdio' &&
+        (h.stream.isTTY || (hs.terminalHandles && hs.terminalHandles.has(BigInt(handle))))) {
+      if (hs.terminalSize) hs.terminalSize = { cols: Number(cols), rows: Number(rows) };
+      return wasiSuccess;
+    }
+    return wasiENOTTY;
   }
 
   // ── fd_isatty ────────────────────────────────────────────────────────────────
   // Signature: (fd i32) -> i32
   function fd_isatty(fd) {
-    if (fd === 0) return process.stdin.isTTY || isVirtualTerminal() ? 1 : 0;
-    if (fd === 1) return process.stdout.isTTY || isVirtualTerminal() ? 1 : 0;
-    if (fd === 2) return process.stderr.isTTY || isVirtualTerminal() ? 1 : 0;
-    return 0;
+    const h = hs.getHandle(BigInt(Number(fd)));
+    return h && h.type === 'stdio' &&
+      (h.stream.isTTY || (hs.terminalHandles && hs.terminalHandles.has(BigInt(Number(fd))))) ? 1 : 0;
   }
 
   // ── get_platform_info ────────────────────────────────────────────────────────
@@ -2073,6 +2154,8 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
     // Flags (bit 0: case-sensitive FS)
     const isWindows = process.platform === 'win32';
     const isDarwin  = process.platform === 'darwin';
+    const osName = isWindows ? 'windows' :
+      process.platform === 'sunos' ? 'solaris' : process.platform;
     const caseSens  = (!isWindows && !isDarwin) ? 1 : 0;
     buf.writeUInt32LE(caseSens, 0);
 
@@ -2080,29 +2163,30 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
     buf[4] = isWindows ? 0x5C : 0x2F;  // '\' or '/'
     buf[5] = isWindows ? 0x3B : 0x3A;  // ';' or ':'
 
-    // OS Kind: 1=Windows, 2=Linux, 3=Darwin
-    const osKind = isWindows ? 1 : (isDarwin ? 3 : 2);
+    // OS Kind: 1=Windows, 2=Linux, 3=Darwin, 4=Bsd/other
+    const osKind = isWindows ? 1 : (isDarwin ? 3 : (osName === 'linux' ? 2 : 4));
     buf.writeUInt16LE(osKind, 6);
 
-    // CPU type: 1=x86_64, 2=arm64
+    // CPU type: 1=x86_64, 2=arm64, 3=arm
     const arch = process.arch;
-    const cpuType = arch === 'x64' ? 1 : (arch === 'arm64' ? 2 : 0);
+    const goArch = arch === 'x64' ? 'amd64' : (arch === 'ia32' ? '386' : arch);
+    const cpuType = goArch === 'amd64' ? 1 : (goArch === 'arm64' ? 2 : (goArch === 'arm' ? 3 : 0));
     buf.writeUInt16LE(cpuType, 16);
-    buf[18] = 64; // bitness
+    buf[18] = goArch === 'arm' || goArch === '386' ? 32 : 64;
 
     const copySafe = (offset, s) => {
       const b = Buffer.from(s);
       b.copy(buf, offset, 0, Math.min(b.length, 63));
     };
 
-    copySafe(20,  process.platform);
+    copySafe(20,  osName);
     copySafe(84,  'node');
     copySafe(156, process.version);
     copySafe(220, 'washmhost-node');
     copySafe(292, '0.0.0-dev');
     copySafe(356, '0.0.0-dev');
     copySafe(420, new Date().toISOString().slice(0, 19));
-    copySafe(484, `${process.platform}-${arch}`);
+    copySafe(484, `${osName}-${goArch}`);
     copySafe(548, os.homedir());
     copySafe(612, os.tmpdir());
     buf[676] = 1;
@@ -2178,88 +2262,83 @@ export function makeBrainImports(hostState, argv, ptyAddonBytes = null) {
 // ─────────────────────────────────────────────────────────────────────────────
 // runHost — instantiates and drives the WASM brain
 // ─────────────────────────────────────────────────────────────────────────────
-export async function runHost(brainWasm, argv, ptyAddonBytes = null) {
-  const hostState = new HostState();
-  const onHostMessage = (message) => {
-    if (!message || typeof message !== 'object') return;
-    if (message.type === 'resize') {
-      const cols = Number(message.cols);
-      const rows = Number(message.rows);
-      if (Number.isFinite(cols) && cols > 0) virtualTerminalSize.cols = cols;
-      if (Number.isFinite(rows) && rows > 0) virtualTerminalSize.rows = rows;
+export function createNodeWashmhost(options = {}) {
+  const hostState = new HostState(options);
+  const env = makeBrainImports(hostState, options.args || [], options.ptyAddon).env;
+  let running = null;
+
+  const run = (brainWasm) => {
+    if (running) throw new Error('Node washmhost instance can only run once');
+    running = (async () => {
+      try {
+        L('[host] instantiating brain wasm...');
+        const { instance } = await WebAssembly.instantiate(brainWasm, { env });
+        L('[host] brain wasm exports:', Object.keys(instance.exports));
+        hostState.memory = instance.exports.memory;
+
+        const runFunc = instance.exports.run;
+        if (!runFunc) throw new Error('WASM module missing "run" export');
+
+        L('[host] starting event loop');
+        while (true) {
+          hostState.drainQueue();
+          if (hostState.forcedExitCode !== -1) return hostState.forcedExitCode;
+
+          const result = runFunc();
+          const retVal = typeof result === 'number' ? result : Number(result ?? 0);
+
+          if (hostState.forcedExitCode !== -1) return hostState.forcedExitCode;
+          if (hostState.completionQueue.length > 0) continue;
+          if (!hostState.hasPending()) return retVal === -1 ? 0 : retVal;
+
+          await new Promise(resolve => {
+            const check = () => {
+              if (hostState.forcedExitCode !== -1 || hostState.completionQueue.length > 0) resolve();
+              else setImmediate(check);
+            };
+            setImmediate(check);
+          });
+        }
+      } catch (err) {
+        if (err === hostState.exitSignal) return hostState.forcedExitCode;
+        throw err;
+      } finally {
+        hostState.removeSignalListeners();
+        hostState.cancelPendingOperations();
+        hostState.closeHandles();
+      }
+    })();
+    return running;
+  };
+
+  return {
+    env,
+    run,
+    signal: (signum) => hostState.deliverSignal(Number(signum)),
+    resize: (cols, rows) => {
+      if (Number.isFinite(Number(cols)) && Number(cols) > 0) hostState.terminalSize.cols = Number(cols);
+      if (Number.isFinite(Number(rows)) && Number(rows) > 0) hostState.terminalSize.rows = Number(rows);
       hostState.deliverSignal(27);
       hostState.deliverSignal(28);
-    } else if (message.type === 'signal') {
-      const signum = Number(message.signum);
-      if (Number.isInteger(signum) && signum > 0) hostState.deliverSignal(signum);
-    }
+    },
+    pushStdin: (data) => hostState.stdin.write(data),
+    requestExit: (code) => hostState.requestExit(code),
+    exitGuest: (code) => hostState.exitGuest(code),
+    terminate: (code = 0) => {
+      hostState.requestExit(code);
+      hostState.cancelPendingOperations();
+      hostState.closeHandles();
+    },
+    get cwd() { return hostState.cwd; }
   };
-  if (typeof process.on === 'function' && process.send) {
-    process.on('message', onHostMessage);
-  }
-  const imports   = makeBrainImports(hostState, argv, ptyAddonBytes);
+}
 
-  L('[host] instantiating brain wasm...');
-  const { instance } = await WebAssembly.instantiate(brainWasm, imports);
-  L('[host] brain wasm exports:', Object.keys(instance.exports));
-
-  hostState.memory = instance.exports.memory;
-
-  const runFunc = instance.exports.run;
-  if (!runFunc) {
-    console.error('[mohabbat] WASM module missing "run" export');
-    process.exit(1);
-  }
-
-  L('[host] starting event loop');
-  // Event loop: mirrors runtime.go RunWasm
-  // Structure: drain → run → if sync completions continue, else await.
-  // The second drainQueue is GONE — only one drain at the top ensures that
-  // synchronously-enqueued completions (e.g. dir_read EOF) are not delivered
-  // BEFORE run() gets to see FLAG_COMPLETED in WASM memory.
-  while (true) {
-    // Drain any pending completions into WASM memory first
-    hostState.drainQueue();
-
-    // Call run(); return value is i32 prospective exit code
-    let result;
-    try {
-      result = runFunc();
-    } catch (e) {
-      console.error('[host] run() threw:', e);
-      process.exit(1);
-    }
-    const retVal = typeof result === 'number' ? result : Number(result ?? 0);
-
-    // Check forced exit (process_exit called inside run)
-    if (hostState.forcedExitCode !== -1) {
-      process.exit(hostState.forcedExitCode);
-    }
-
-    // If run() synchronously enqueued completions (e.g. dir_read EOF with
-    // scan.done=true), deliver them on the next iteration via drainQueue.
-    // This mirrors Go's tight runFunc loop where Poll() is only called when
-    // there are genuinely no ready completions.
-    if (hostState.completionQueue.length > 0) continue;
-
-    // If no outstanding ops, we are done
-    if (!hostState.hasPending()) {
-      const code = (retVal === -1) ? 0 : retVal;
-      process.exit(code);
-    }
-
-    // Wait for at least one completion to be enqueued
-    await new Promise((resolve) => {
-      const check = () => {
-        if (hostState.completionQueue.length > 0) {
-          resolve();
-        } else {
-          setImmediate(check);
-        }
-      };
-      setImmediate(check);
-    });
-  }
+export async function runHost(brainWasm, argv, ptyAddon = null) {
+  return createNodeWashmhost({
+    args: argv,
+    ptyAddon,
+    listenProcessSignals: true
+  }).run(brainWasm);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2270,19 +2349,41 @@ const isMain = process.argv[1] && (
   fileURLToPath(import.meta.url) === fs.realpathSync(process.argv[1])
 );
 if (isMain) {
-  const brainPath = process.argv[2];
-  if (!brainPath) {
-    console.error('Usage: node index.js <brain.wasm> [args...]');
-    process.exit(1);
+  const cliArgs = process.argv.slice(2);
+  let addonPath = null;
+  let explicitAddonPath = false;
+  if (cliArgs[0] === '--node-pty-addon') {
+    addonPath = cliArgs[1] || null;
+    explicitAddonPath = true;
+    cliArgs.splice(0, 2);
   }
-  const brainWasm = fs.readFileSync(brainPath);
-  const argv = process.argv.slice(2); // argv[0] = wasm path, matches washmhost convention
-  const ptyAddonPath = process.env.MOHABBAT_NODE_PTY_ADDON;
-  const ptyAddonBytes = ptyAddonPath ? fs.readFileSync(ptyAddonPath) : null;
-  runHost(brainWasm, argv, ptyAddonBytes).catch((err) => {
-    console.error(err);
-    process.exit(1);
-  });
+  const brainPath = cliArgs[0];
+  if (!brainPath) {
+    console.error('Usage: node index.js [--node-pty-addon <path>] <brain.wasm> [args...]');
+    process.exitCode = 1;
+  } else {
+    const brainWasm = fs.readFileSync(brainPath);
+    const argv = cliArgs; // argv[0] = wasm path, matches washmhost convention
+    if (!addonPath) {
+      addonPath = path.join(
+        path.dirname(fileURLToPath(import.meta.url)),
+        `nodepty-${process.platform}-${process.arch}.node`
+      );
+    }
+    if (explicitAddonPath && !fs.existsSync(addonPath)) {
+      throw new Error(`Node PTY addon does not exist: ${addonPath}`);
+    }
+    const ptyAddon = fs.existsSync(addonPath)
+      ? createRequire(import.meta.url)(addonPath)
+      : null;
+    runHost(brainWasm, argv, ptyAddon).then(
+      code => { process.exitCode = code; },
+      err => {
+        console.error(err);
+        process.exitCode = 1;
+      }
+    );
+  }
 }
 
-export { HostState, READ_FLAG_POSITIONAL, translatePath, virtualizeWorkspacePath };
+export { HostState, READ_FLAG_POSITIONAL, translatePath };

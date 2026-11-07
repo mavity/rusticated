@@ -248,12 +248,18 @@ code --user-data-dir ./target/vscode-ext/user --extensions-dir ./target/vscode-e
 
 The arguments have distinct purposes:
 
--- `--user-data-dir` puts settings, state, and caches under `target/vscode-ext/user`
+- `--user-data-dir` puts settings, state, and caches under `target/vscode-ext/user`
   instead of changing the regular VS Code profile.
--- `--extensions-dir` isolates installed extensions under
-  `target/vscode-ext/extensions`; it does not install the source extension.
+- `--extensions-dir` isolates installed extensions under
+  `target\vscode-ext\extensions`; it does not install the source extension.
 - `--extensionDevelopmentPath` loads `kabibi/vscode` directly from this
   checkout. The final `.` opens the repository as the test workspace.
+
+Pass an absolute path to `--extensionDevelopmentPath`. A relative value can be
+resolved incorrectly by the VS Code CLI (for example, as `/kabibi/vscode`),
+causing the Extension Development Host to start without loading Kabibi. The
+isolated `--extensions-dir` is intentionally empty; the development extension
+is loaded from `--extensionDevelopmentPath`, not installed into that directory.
 
 On activation, the extension identifies the checkout from its directory layout
 and repository markers, selects `release/dist/kabibi.bat`, and imports the Node
