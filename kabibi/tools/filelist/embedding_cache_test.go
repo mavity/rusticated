@@ -99,11 +99,48 @@ func TestNewEmbeddingCacheUsesUserCacheDirectory(t *testing.T) {
 	}
 }
 
+func TestNewEmbeddingCacheAtCreatesDirectoryAndPutDoesNotRecreateIt(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "nested", "semantic-v1")
+	cache, err := newEmbeddingCacheAt(dir)
+	if err != nil {
+		t.Fatalf("newEmbeddingCacheAt(): %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("cache directory was not initialized: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("cache path is not a directory: %q", dir)
+	}
+
+	if err := os.Remove(dir); err != nil {
+		t.Fatalf("remove initialized cache directory: %v", err)
+	}
+	if err := cache.put([]byte("signature"), "model", "filename", "recipe", []float32{1}); err == nil {
+		t.Fatal("put() succeeded after cache directory removal; it should not recreate the directory")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("put() recreated the cache directory; stat error = %v", err)
+	}
+}
+
 func TestEmbeddingCacheRejectsCorruptRecords(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		mutate func([]byte) []byte
 	}{
+		{
+			name: "truncated header",
+			mutate: func(record []byte) []byte {
+				return record[:12]
+			},
+		},
+		{
+			name: "truncated vector",
+			mutate: func(record []byte) []byte {
+				return record[:len(record)-1]
+			},
+		},
 		{
 			name: "marker",
 			mutate: func(record []byte) []byte {
@@ -226,9 +263,53 @@ func TestCachedCandidateEmbeddingReusesVectors(t *testing.T) {
 	}
 }
 
+func TestCachedCandidateHitsBypassQueueWhileMissesAreSubmitted(t *testing.T) {
+	dir := t.TempDir()
+	hitPath := filepath.Join(dir, "hit.txt")
+	missPath := filepath.Join(dir, "miss.txt")
+	for _, path := range []string{hitPath, missPath} {
+		if err := os.WriteFile(path, []byte("candidate"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hitInfo, err := os.Lstat(hitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missInfo, err := os.Lstat(missPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := &embeddingCache{dir: t.TempDir()}
+	embedder := &cacheTestEmbedder{}
+	scheduler := newConcurrentEmbedder(context.Background(), embedder)
+	defer scheduler.Close()
+
+	if err := cache.put(entrySignature(hitPath, hitInfo), embedder.CacheIdentity(), "filename", embeddingRecipeName, []float32{1, 0}); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range []fileEntry{
+		{relPath: "hit.txt", absPath: hitPath, size: hitInfo.Size()},
+		{relPath: "miss.txt", absPath: missPath, size: missInfo.Size()},
+	} {
+		vector, err := cachedCandidateEmbedding(context.Background(), entry,
+			ai.PromptPart{Role: ai.RoleModel, Text: filepath.Base(entry.relPath)},
+			"filename", embeddingRecipeName, scheduler, cache, embedder.CacheIdentity(), 2, &progressTracker{})
+		if err != nil {
+			t.Fatalf("cachedCandidateEmbedding(%q): %v", entry.relPath, err)
+		}
+		if !reflect.DeepEqual(vector, []float32{1, 0}) {
+			t.Errorf("%s vector = %v, want cached/embedded vector", entry.relPath, vector)
+		}
+	}
+	if got := embedder.calls.Load(); got != 1 {
+		t.Fatalf("backend calls = %d, want only the cache miss to enter the queue", got)
+	}
+}
+
 func TestCachedContentCandidateUsesCacheBeforeReading(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "content.txt")
-	if err := os.WriteFile(path, []byte("sample contents"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte{0, 1, 2, 3, 4, 5, 6, 7}, 0o600); err != nil {
 		t.Fatalf("WriteFile(): %v", err)
 	}
 	info, err := os.Lstat(path)

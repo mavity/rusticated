@@ -2,8 +2,8 @@ package filelist
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -12,11 +12,9 @@ import (
 )
 
 const (
-	maxQueuedEmbeddings = 256
-	highRequestsPerLow  = 4
+	highRequestsPerLow = 4
+	maxEmbeddingBatch  = 4
 )
-
-var errEmbeddingQueueFull = errors.New("embedding request queue is full")
 
 type embeddingResult struct {
 	vector []float32
@@ -27,37 +25,21 @@ type embeddingRequest struct {
 	id          uint64
 	ctx         context.Context
 	cancel      context.CancelFunc
-	part        ai.PromptPart
 	lowPriority bool
-	order       *embeddingOrderHandle
 	result      chan embeddingResult
 	job         *embeddingJob
 }
 
-type embeddingOrderHandle struct {
-	scheduler *concurrentEmbedder
-	rank      atomic.Int64
-}
-
-func (h *embeddingOrderHandle) SetRank(rank int) {
-	if h == nil {
-		return
-	}
-	if rank < 0 {
-		rank = 0
-	}
-	h.rank.Store(int64(rank))
-	h.scheduler.signal()
-}
-
 type embeddingJob struct {
-	key      string
-	part     ai.PromptPart
-	waiters  map[uint64]*embeddingRequest
-	sequence uint64
-	ctx      context.Context
-	cancel   context.CancelFunc
-	inFlight bool
+	key       string
+	part      ai.PromptPart
+	waiters   map[uint64]*embeddingRequest
+	sequence  uint64
+	highCount int
+	lowCount  int
+	ctx       context.Context
+	cancel    context.CancelFunc
+	inFlight  bool
 }
 
 func (job *embeddingJob) stop() {
@@ -72,15 +54,14 @@ type concurrentEmbedder struct {
 	embedder   ai.PartEmbedder
 	diagnostic func(string, ...any)
 
-	mu             sync.Mutex
-	pending        []*embeddingJob
-	jobs           map[string]*embeddingJob
-	queuedRequests int
-	nextID         uint64
-	highSinceLow   int
-	closed         bool
-	wake           chan struct{}
-	workerDone     chan struct{}
+	mu         sync.Mutex
+	pending    []*embeddingJob
+	jobs       map[string]*embeddingJob
+	nextID     uint64
+	remainder  int
+	closed     bool
+	wake       chan struct{}
+	workerDone chan struct{}
 }
 
 func newConcurrentEmbedder(ctx context.Context, embedder ai.PartEmbedder) *concurrentEmbedder {
@@ -100,29 +81,37 @@ func newConcurrentEmbedder(ctx context.Context, embedder ai.PartEmbedder) *concu
 	return scheduler
 }
 
-func (e *concurrentEmbedder) NewOrderHandle() *embeddingOrderHandle {
-	handle := &embeddingOrderHandle{scheduler: e}
-	handle.rank.Store(0)
-	return handle
-}
-
 func (e *concurrentEmbedder) Close() {
 	if e == nil {
 		return
 	}
 	e.cancel()
 	e.mu.Lock()
+	if e.closed {
+		e.mu.Unlock()
+		return
+	}
 	e.closed = true
+	jobs := make([]*embeddingJob, 0, len(e.jobs))
+	var waiters []*embeddingRequest
 	for _, job := range e.jobs {
-		job.stop()
+		jobs = append(jobs, job)
 		for _, waiter := range job.waiters {
-			waiter.cancel()
+			waiters = append(waiters, waiter)
 		}
+		job.waiters = nil
+		job.highCount = 0
+		job.lowCount = 0
 	}
 	e.pending = nil
 	e.jobs = make(map[string]*embeddingJob)
-	e.queuedRequests = 0
 	e.mu.Unlock()
+	for _, job := range jobs {
+		job.stop()
+	}
+	for _, waiter := range waiters {
+		waiter.cancel()
+	}
 	e.signal()
 	select {
 	case <-e.workerDone:
@@ -130,7 +119,18 @@ func (e *concurrentEmbedder) Close() {
 	}
 }
 
-func (e *concurrentEmbedder) Embed(ctx context.Context, part ai.PromptPart, lowPriority bool, order *embeddingOrderHandle) ([]float32, error) {
+func (e *concurrentEmbedder) Embed(ctx context.Context, part ai.PromptPart, lowPriority bool) ([]float32, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	request, err := e.enqueue(ctx, part, lowPriority)
+	if err != nil {
+		return nil, err
+	}
+	return e.await(ctx, request)
+}
+
+func (e *concurrentEmbedder) enqueue(ctx context.Context, part ai.PromptPart, lowPriority bool) (*embeddingRequest, error) {
 	if e == nil || e.embedder == nil {
 		return nil, fmt.Errorf("no embedder configured")
 	}
@@ -146,9 +146,7 @@ func (e *concurrentEmbedder) Embed(ctx context.Context, part ai.PromptPart, lowP
 	request := &embeddingRequest{
 		ctx:         requestCtx,
 		cancel:      func() { stopParent(); cancel() },
-		part:        part,
 		lowPriority: lowPriority,
-		order:       order,
 		result:      make(chan embeddingResult, 1),
 	}
 
@@ -161,11 +159,6 @@ func (e *concurrentEmbedder) Embed(ctx context.Context, part ai.PromptPart, lowP
 	key := embeddingKey(part)
 	job := e.jobs[key]
 	if job == nil {
-		if e.queuedRequests >= maxQueuedEmbeddings {
-			e.mu.Unlock()
-			request.cancel()
-			return nil, errEmbeddingQueueFull
-		}
 		job = &embeddingJob{
 			key:     key,
 			part:    part,
@@ -174,22 +167,6 @@ func (e *concurrentEmbedder) Embed(ctx context.Context, part ai.PromptPart, lowP
 		e.jobs[key] = job
 		e.pending = append(e.pending, job)
 	}
-	if len(job.waiters) >= maxQueuedEmbeddings {
-		e.mu.Unlock()
-		request.cancel()
-		return nil, errEmbeddingQueueFull
-	}
-	if !job.inFlight {
-		if e.queuedRequests >= maxQueuedEmbeddings {
-			e.mu.Unlock()
-			request.cancel()
-			if len(job.waiters) == 0 {
-				e.removeEmptyJobLocked(job)
-			}
-			return nil, errEmbeddingQueueFull
-		}
-		e.queuedRequests++
-	}
 	e.nextID++
 	request.id = e.nextID
 	request.job = job
@@ -197,22 +174,36 @@ func (e *concurrentEmbedder) Embed(ctx context.Context, part ai.PromptPart, lowP
 	if job.sequence == 0 {
 		job.sequence = request.id
 	}
+	if lowPriority {
+		job.lowCount++
+	} else {
+		job.highCount++
+	}
 	e.mu.Unlock()
 	e.signal()
+	return request, nil
+}
 
+func (e *concurrentEmbedder) await(ctx context.Context, request *embeddingRequest) ([]float32, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	select {
 	case result := <-request.result:
 		request.cancel()
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		if err := e.ctx.Err(); err != nil {
+			return nil, err
+		}
 		return result.vector, result.err
 	case <-ctx.Done():
-		e.remove(request.id)
+		e.remove(request)
 		request.cancel()
 		return nil, ctx.Err()
 	case <-e.ctx.Done():
-		e.remove(request.id)
+		e.remove(request)
 		request.cancel()
 		return nil, e.ctx.Err()
 	}
@@ -225,36 +216,40 @@ func (e *concurrentEmbedder) signal() {
 	}
 }
 
-func (e *concurrentEmbedder) remove(id uint64) {
+func (e *concurrentEmbedder) remove(request *embeddingRequest) {
 	e.mu.Lock()
-	for _, job := range e.jobs {
-		_, exists := job.waiters[id]
-		if !exists {
-			continue
-		}
-		delete(job.waiters, id)
-		if !job.inFlight {
-			e.queuedRequests--
-		}
-		if len(job.waiters) == 0 {
-			job.stop()
-			delete(e.jobs, job.key)
-			if !job.inFlight {
-				e.removePendingLocked(job)
-			}
-		}
-		break
+	var cancel context.CancelFunc
+	if request != nil && request.job != nil {
+		cancel = e.removeWaiterLocked(request.job, request)
 	}
 	e.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	e.signal()
 }
 
-func (e *concurrentEmbedder) removeEmptyJobLocked(job *embeddingJob) {
-	if e.jobs[job.key] != job || job.inFlight || len(job.waiters) != 0 {
-		return
+func (e *concurrentEmbedder) removeWaiterLocked(job *embeddingJob, request *embeddingRequest) context.CancelFunc {
+	if job.waiters[request.id] != request {
+		return nil
 	}
-	delete(e.jobs, job.key)
-	e.removePendingLocked(job)
+	delete(job.waiters, request.id)
+	if request.lowPriority {
+		job.lowCount--
+	} else {
+		job.highCount--
+	}
+	if len(job.waiters) != 0 {
+		return nil
+	}
+	cancel := job.cancel
+	if e.jobs[job.key] == job {
+		delete(e.jobs, job.key)
+	}
+	if !job.inFlight {
+		e.removePendingLocked(job)
+	}
+	return cancel
 }
 
 func (e *concurrentEmbedder) removePendingLocked(job *embeddingJob) {
@@ -276,11 +271,6 @@ func (e *concurrentEmbedder) run() {
 			case <-e.wake:
 			}
 		}
-		if _, ok := e.embedder.(ai.BatchPartEmbedder); ok {
-			if !e.waitForBatchWindow() {
-				return
-			}
-		}
 		jobs := e.nextBatch()
 		if len(jobs) == 0 {
 			continue
@@ -296,20 +286,6 @@ func (e *concurrentEmbedder) hasPending() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return len(e.pending) > 0
-}
-
-func (e *concurrentEmbedder) waitForBatchWindow() bool {
-	timer := time.NewTimer(time.Millisecond)
-	defer timer.Stop()
-	for {
-		select {
-		case <-e.ctx.Done():
-			return false
-		case <-timer.C:
-			return true
-		case <-e.wake:
-		}
-	}
 }
 
 func (e *concurrentEmbedder) embedBatch(jobs []*embeddingJob) (vectors [][]float32, errs []error) {
@@ -390,99 +366,104 @@ func (e *concurrentEmbedder) logVerbose(format string, args ...any) {
 }
 
 func (e *concurrentEmbedder) nextBatch() []*embeddingJob {
-	const maxHighBatch = highRequestsPerLow
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed || e.ctx.Err() != nil {
 		return nil
 	}
 
-	active := e.pending[:0]
-	highWaiters, lowWaiters := 0, 0
+	active := make([]*embeddingJob, 0, len(e.pending))
 	for _, job := range e.pending {
 		for id, request := range job.waiters {
 			if request.ctx.Err() != nil {
 				delete(job.waiters, id)
-				e.queuedRequests--
+				if request.lowPriority {
+					job.lowCount--
+				} else {
+					job.highCount--
+				}
 				request.cancel()
 			}
 		}
 		if len(job.waiters) == 0 {
 			job.stop()
-			delete(e.jobs, job.key)
+			if e.jobs[job.key] == job {
+				delete(e.jobs, job.key)
+			}
 			continue
 		}
 		active = append(active, job)
-		for _, request := range job.waiters {
-			if request.lowPriority {
-				lowWaiters++
-			} else {
-				highWaiters++
-			}
-		}
 	}
 	e.pending = active
 	if len(active) == 0 {
 		return nil
 	}
 
-	hasHigh := highWaiters > 0
-	hasLow := lowWaiters > 0
-	if !hasHigh {
-		e.highSinceLow = 0
-	}
-	lowPriority := !hasHigh || (hasLow && e.highSinceLow >= highRequestsPerLow)
-	batchLimit := 1
-	if !lowPriority {
-		if hasLow {
-			batchLimit = highRequestsPerLow - e.highSinceLow
-		} else {
-			batchLimit = maxHighBatch
-		}
-	}
-	if lowPriority {
-		e.highSinceLow = 0
-	}
+	slots := min(maxEmbeddingBatch, len(active))
+	selected, nextRemainder := selectEmbeddingBatch(active, slots, e.remainder)
+	e.remainder = nextRemainder
 
-	var selected []*embeddingJob
-	for len(selected) < batchLimit {
-		job := e.highestWeightedJobLocked(lowPriority)
-		if job == nil {
-			break
-		}
+	for _, job := range selected {
 		e.removePendingLocked(job)
 		job.inFlight = true
-		e.queuedRequests -= len(job.waiters)
 		job.ctx, job.cancel = context.WithCancel(e.ctx)
-		selected = append(selected, job)
-		if !lowPriority && e.highSinceLow < highRequestsPerLow {
-			e.highSinceLow++
-		}
 	}
 	return selected
 }
 
-func (e *concurrentEmbedder) highestWeightedJobLocked(lowPriority bool) *embeddingJob {
-	var selected *embeddingJob
-	selectedWeight := 0.0
-	for _, job := range e.pending {
-		weight := 0.0
-		for _, request := range job.waiters {
-			if request.lowPriority == lowPriority {
-				if !lowPriority || request.order == nil {
-					weight++
-				} else {
-					rank := request.order.rank.Load()
-					weight += 1 / float64(rank+1)
-				}
-			}
+func selectEmbeddingBatch(tasks []*embeddingJob, slots, remainder int) ([]*embeddingJob, int) {
+	slots = min(slots, len(tasks))
+	if slots <= 0 {
+		return nil, remainder
+	}
+	highQuota, lowQuota, nextRemainder := batchQuotas(slots, remainder)
+	highOrdered := append([]*embeddingJob(nil), tasks...)
+	sort.Slice(highOrdered, func(i, j int) bool {
+		left, right := highOrdered[i], highOrdered[j]
+		if left.highCount != right.highCount {
+			return left.highCount > right.highCount
 		}
-		if weight > selectedWeight || weight == selectedWeight && weight > 0 && (selected == nil || job.sequence < selected.sequence) {
-			selected = job
-			selectedWeight = weight
+		if left.lowCount != right.lowCount {
+			return left.lowCount > right.lowCount
+		}
+		return left.sequence < right.sequence
+	})
+	selected := make([]*embeddingJob, 0, slots)
+	selectedSet := make(map[*embeddingJob]struct{}, slots)
+	for _, task := range highOrdered[:highQuota] {
+		selected = append(selected, task)
+		selectedSet[task] = struct{}{}
+	}
+
+	lowOrdered := make([]*embeddingJob, 0, len(tasks)-len(selected))
+	for _, task := range tasks {
+		if _, exists := selectedSet[task]; !exists {
+			lowOrdered = append(lowOrdered, task)
 		}
 	}
-	return selected
+	sort.Slice(lowOrdered, func(i, j int) bool {
+		left, right := lowOrdered[i], lowOrdered[j]
+		if left.lowCount != right.lowCount {
+			return left.lowCount > right.lowCount
+		}
+		if left.highCount != right.highCount {
+			return left.highCount > right.highCount
+		}
+		return left.sequence < right.sequence
+	})
+	selected = append(selected, lowOrdered[:lowQuota]...)
+	return selected, nextRemainder
+}
+
+func batchQuotas(slots, remainder int) (high, low, nextRemainder int) {
+	if slots <= 0 {
+		return 0, 0, remainder
+	}
+	total := slots*highRequestsPerLow + remainder
+	high = total / (highRequestsPerLow + 1)
+	low = slots - high
+	nextRemainder = total % (highRequestsPerLow + 1)
+	return high, low, nextRemainder
 }
 
 func (e *concurrentEmbedder) complete(job *embeddingJob, vector []float32, err error) {
@@ -490,18 +471,27 @@ func (e *concurrentEmbedder) complete(job *embeddingJob, vector []float32, err e
 	if e.jobs[job.key] == job {
 		delete(e.jobs, job.key)
 	}
-	job.stop()
+	cancel := job.cancel
+	waiters := make([]*embeddingRequest, 0, len(job.waiters))
 	for _, request := range job.waiters {
-		if request.ctx.Err() != nil {
-			request.cancel()
-			continue
-		}
-		request.result <- embeddingResult{vector: vector, err: err}
+		waiters = append(waiters, request)
 	}
+	job.waiters = nil
+	job.highCount = 0
+	job.lowCount = 0
 	e.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	for _, request := range waiters {
+		if request.ctx.Err() == nil {
+			request.result <- embeddingResult{vector: vector, err: err}
+		}
+		request.cancel()
+	}
 }
 
-func embedScheduledBatch(ctx context.Context, embedder *concurrentEmbedder, parts []ai.PromptPart, lowPriority bool, order *embeddingOrderHandle) ([][]float32, error) {
+func embedScheduledBatch(ctx context.Context, embedder *concurrentEmbedder, parts []ai.PromptPart, lowPriority bool) ([][]float32, error) {
 	if len(parts) == 0 {
 		return nil, nil
 	}
@@ -515,7 +505,7 @@ func embedScheduledBatch(ctx context.Context, embedder *concurrentEmbedder, part
 	results := make(chan result, len(parts))
 	for index, part := range parts {
 		go func(index int, part ai.PromptPart) {
-			vector, err := embedder.Embed(batchCtx, part, lowPriority, order)
+			vector, err := embedder.Embed(batchCtx, part, lowPriority)
 			results <- result{index: index, vector: vector, err: err}
 		}(index, part)
 	}

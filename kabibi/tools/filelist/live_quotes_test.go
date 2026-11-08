@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -176,6 +177,85 @@ func TestDemotingMatchCancelsOnlyItsQuoteContinuation(t *testing.T) {
 	}
 }
 
+func TestDemotingQuoteWithPendingEmbeddingEjectsTaskBeforeSelection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pending.txt")
+	if err := os.WriteFile(path, []byte("one line\nsecond line\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	embedder := newGatedBatchEmbedder()
+	scheduler := newConcurrentEmbedder(context.Background(), embedder)
+	embedder.scheduler = scheduler
+	defer scheduler.Close()
+
+	blockerPart := ai.PromptPart{Role: ai.RoleModel, Text: "inference-blocker"}
+	blocker, err := scheduler.enqueue(context.Background(), blockerPart, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockerDone := runAwait(scheduler, context.Background(), blocker)
+	firstCall := receiveBatch(t, embedder.calls)
+	if !reflect.DeepEqual(firstCall.inputs, []string{"inference-blocker"}) {
+		t.Fatalf("initial backend inputs = %v, want inference blocker", firstCall.inputs)
+	}
+	select {
+	case <-scheduler.wake:
+	default:
+	}
+
+	entry := fileEntry{relPath: "pending.txt", absPath: path, size: 20, score: 0.9, hasScore: true}
+	iter := &SearchIterator{ctx: context.Background(), updates: make(chan struct{}, 16)}
+	progress := &progressTracker{iter: iter, entries: []fileEntry{entry}}
+	manager := newLiveQuoteManager(context.Background(), scheduler, progress, 1)
+	defer manager.Close()
+	progress.setQuoteManager(manager)
+	progress.setQueryEmbedding([]float32{1, 0})
+
+	manager.sync([]fileEntry{entry})
+	select {
+	case <-scheduler.wake:
+	case <-time.After(2 * time.Second):
+		t.Fatal("quote extraction did not enqueue an embedding task")
+	}
+	scheduler.mu.Lock()
+	pendingCount := len(scheduler.pending)
+	scheduler.mu.Unlock()
+	if pendingCount == 0 {
+		t.Fatal("expected a pending quote task while inference worker is gated")
+	}
+
+	manager.sync(nil)
+	if err := manager.Finish(nil); err != nil {
+		t.Fatalf("Finish() after quote demotion: %v", err)
+	}
+	scheduler.mu.Lock()
+	pendingCount = len(scheduler.pending)
+	scheduler.mu.Unlock()
+	if pendingCount != 0 {
+		t.Fatalf("pending tasks after demotion = %d, want zero", pendingCount)
+	}
+
+	sentinelPart := ai.PromptPart{Role: ai.RoleModel, Text: "sentinel"}
+	sentinel, err := scheduler.enqueue(context.Background(), sentinelPart, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sentinelDone := runAwait(scheduler, context.Background(), sentinel)
+	embedder.release <- struct{}{}
+	if err := <-blockerDone; err != nil {
+		t.Fatalf("blocker result: %v", err)
+	}
+	nextCall := receiveBatch(t, embedder.calls)
+	if !reflect.DeepEqual(nextCall.inputs, []string{"sentinel"}) {
+		t.Fatalf("next backend inputs = %v; demoted quote task reached inference", nextCall.inputs)
+	}
+	embedder.release <- struct{}{}
+	if err := <-sentinelDone; err != nil {
+		t.Fatalf("sentinel result: %v", err)
+	}
+}
+
 func TestLiveQuoteQueueTracksPromotedMatchOrder(t *testing.T) {
 	scheduler := &concurrentEmbedder{ctx: context.Background(), wake: make(chan struct{}, 1)}
 	firstCtx, firstCancel := context.WithCancel(context.Background())
@@ -186,14 +266,12 @@ func TestLiveQuoteQueueTracksPromotedMatchOrder(t *testing.T) {
 		entry:  fileEntry{relPath: "first.txt", hasScore: true},
 		ctx:    firstCtx,
 		cancel: firstCancel,
-		order:  scheduler.NewOrderHandle(),
 		rank:   0,
 	}
 	second := &liveQuoteJob{
 		entry:  fileEntry{relPath: "second.txt", hasScore: true},
 		ctx:    secondCtx,
 		cancel: secondCancel,
-		order:  scheduler.NewOrderHandle(),
 		rank:   1,
 	}
 	manager := &liveQuoteManager{
@@ -212,7 +290,7 @@ func TestLiveQuoteQueueTracksPromotedMatchOrder(t *testing.T) {
 	if got := manager.next(); got != second {
 		t.Fatalf("next pending quote job = %#v, want newly promoted second match", got)
 	}
-	if got := first.order.rank.Load(); got != 1 {
-		t.Fatalf("first quote order rank = %d, want updated rank 1", got)
+	if got := first.rank; got != 1 {
+		t.Fatalf("first quote rank = %d, want updated rank 1", got)
 	}
 }
