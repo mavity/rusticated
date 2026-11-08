@@ -136,10 +136,13 @@ func TestExecuteAIToolAliasAndMarkdownResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("execute list-files: %v", err)
 	}
-	for _, want := range []string{"### list_files", "```text", "result.txt", `"needle found"`} {
+	for _, want := range []string{"### list_files", "result.txt", "line 1", "needle found", "\n  ```\n"} {
 		if !strings.Contains(result, want) {
 			t.Errorf("Markdown result missing %q:\n%s", want, result)
 		}
+	}
+	if strings.Contains(result, "```text") {
+		t.Fatalf("list_files result wrapped Markdown in a text fence:\n%s", result)
 	}
 
 	var toolsHelp strings.Builder
@@ -193,10 +196,13 @@ func TestExecuteAIToolListFilesUsesProvidedEmbedder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("execute semantic list_files: %v", err)
 	}
-	for _, want := range []string{"mode: semantic-content", "1.00  browser_worker.go", `"func startWorker() { launchCanvasRuntime() }"`, "Search stats: processed 1/1 files"} {
+	for _, want := range []string{"mode: semantic-content", "* 1.00  `browser_worker.go`", "func startWorker() { launchCanvasRuntime() }", "Search stats: processed 1/1 files"} {
 		if !strings.Contains(result, want) {
 			t.Errorf("semantic list_files result missing %q:\n%s", want, result)
 		}
+	}
+	if strings.Contains(result, "```text") || !strings.Contains(result, "```go") {
+		t.Fatalf("semantic list_files did not preserve its Markdown code block:\n%s", result)
 	}
 	if embedder.queryCalls != 0 || embedder.batchCalls != 3 {
 		t.Fatalf("embedder calls = (query %d, batch %d), want (0, 3) for query, candidate, and quote chunk", embedder.queryCalls, embedder.batchCalls)
@@ -257,7 +263,8 @@ func TestAIBuiltinMiddlewareDispatchesTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run ai tool command: %v", err)
 	}
-	if record.ExitCode != 0 || !strings.Contains(record.Output, "result.txt") || !strings.Contains(record.Output, "```text") {
+	if record.ExitCode != 0 || !strings.Contains(record.Output, "result.txt") ||
+		!strings.Contains(record.Output, "needle found") || strings.Contains(record.Output, "```text") {
 		t.Fatalf("command result = (exit %d, %q)", record.ExitCode, record.Output)
 	}
 

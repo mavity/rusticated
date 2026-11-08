@@ -99,7 +99,7 @@ func TestLiveQuoteCanCompleteBeforeCandidateScoringFinishes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SearchIterator.Result(): %v", err)
 	}
-	if !strings.Contains(result, `"relevant semantic line"`) {
+	if !strings.Contains(result, "```") || !strings.Contains(result, "relevant semantic line") {
 		t.Fatalf("final result does not contain completed live quote: %q", result)
 	}
 }

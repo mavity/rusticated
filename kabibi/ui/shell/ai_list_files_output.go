@@ -95,14 +95,16 @@ func renderListFilesProgress(progress *filelist.Progress, width, maxRows int) st
 	for _, match := range progress.Matches[:matchRows] {
 		path := strings.Join(strings.Fields(sanitizeMarkdownControls(match.Path)), " ")
 		quote := strings.Join(strings.Fields(sanitizeMarkdownControls(match.Quote)), " ")
-		row := filelist.FormatMatch(filelist.Match{
-			Path:     path,
-			Size:     match.Size,
-			Score:    match.Score,
-			HasScore: match.HasScore,
-			Quote:    quote,
-		}, width-2)
-		lines = append(lines, truncateProgressLine("- "+row, width))
+		row := filelist.FormatMatchPreview(filelist.Match{
+			Path:           path,
+			Size:           match.Size,
+			Score:          match.Score,
+			HasScore:       match.HasScore,
+			Quote:          quote,
+			QuoteStartLine: match.QuoteStartLine,
+			QuoteEndLine:   match.QuoteEndLine,
+		}, width)
+		lines = append(lines, truncateProgressLine(row, width))
 	}
 	lines = append(lines, truncateProgressLine(progressCurrentStatus(progress), width))
 	if len(lines) > maxRows {

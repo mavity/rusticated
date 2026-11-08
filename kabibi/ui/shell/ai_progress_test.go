@@ -317,7 +317,10 @@ func TestInteractiveListFilesPublishesAndClearsProgress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("executeInteractiveListFiles(): %v", err)
 	}
-	if !strings.Contains(result, "1.00  browser_worker.go") || !strings.Contains(result, "Search stats: processed 1/1 files; about ") {
+	if !strings.Contains(result, "* 1.00  `browser_worker.go`") ||
+		!strings.Contains(result, "```go") ||
+		strings.Contains(result, "```text") ||
+		!strings.Contains(result, "Search stats: processed 1/1 files; about ") {
 		t.Fatalf("semantic result is missing the leading score or final stats: %q", result)
 	}
 	if got := progressOutput.String(); !strings.Contains(got, "func startWorker() {}") || !strings.Contains(got, "\x1b[2K") {
@@ -329,6 +332,9 @@ func TestInteractiveListFilesPublishesAndClearsProgress(t *testing.T) {
 	renderedResult, err := renderAssistantMarkdown(result, 80)
 	if err != nil {
 		t.Fatalf("renderAssistantMarkdown(): %v", err)
+	}
+	if !strings.Contains(renderedResult, "startWorker") || strings.Contains(renderedResult, "```") {
+		t.Fatalf("TUI did not render the fenced quote as Markdown: %q", renderedResult)
 	}
 	state.enqueue([]byte(renderedResult))
 	if err := state.drain(false); err != nil {

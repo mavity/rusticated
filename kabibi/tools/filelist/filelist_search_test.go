@@ -355,7 +355,7 @@ func TestListFilesPreservesLexicalAndContentSearch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("content ListFiles(): %v", err)
 	}
-	if !strings.Contains(content, "nested/needle.go") || !strings.Contains(content, `"findMeInContent"`) {
+	if !strings.Contains(content, "nested/needle.go") || !strings.Contains(content, "findMeInContent") || !strings.Contains(content, "line 1") {
 		t.Fatalf("content result = %q", content)
 	}
 }
