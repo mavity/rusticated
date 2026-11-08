@@ -28,7 +28,12 @@ pub struct ProbeDispatch {
     exit: Option<ExitFn>,
 }
 
-const GREETING: &[u8] = b"Anonymous-memory probe ready. Enter an empty line to exit.\n> ";
+const GREETING_PREFIX: &[u8] = b"Anonymous-memory probe ready (compiled ";
+const BUILD_TIME: &str = match option_env!("BUILD_TIME") {
+    Some(val) => val,
+    None => "unknown",
+};
+const GREETING_SUFFIX: &[u8] = b"). Enter an empty line to exit.\n> ";
 const ECHO_PREFIX: &[u8] = b"echo: ";
 const NEWLINE: &[u8] = b"\n";
 const PROMPT: &[u8] = b"> ";
@@ -57,7 +62,10 @@ unsafe fn run(dispatch: *const ProbeDispatch) {
 
     let mut line = MaybeUninit::<[u8; LINE_CAPACITY]>::uninit();
     let line_ptr = line.as_mut_ptr().cast::<u8>();
-    if !write_all(dispatch, GREETING) {
+    if !write_all(dispatch, GREETING_PREFIX)
+        || !write_all(dispatch, BUILD_TIME.as_bytes())
+        || !write_all(dispatch, GREETING_SUFFIX)
+    {
         terminate(dispatch, 3);
     }
 

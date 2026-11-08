@@ -10,7 +10,7 @@ if (-not (Test-Path -LiteralPath $HostPath)) {
 function Invoke-ProbeCase(
     [string]$Arguments,
     [string]$InputText,
-    [string]$ExpectedOutput,
+    [string]$ExpectedOutputPattern,
     [int]$ExpectedExit
 ) {
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -37,18 +37,18 @@ function Invoke-ProbeCase(
     $stdout = $process.StandardOutput.ReadToEnd()
     $stderr = $process.StandardError.ReadToEnd()
     $actual = $stdout -replace "`r`n", "`n"
-    if ($process.ExitCode -ne $ExpectedExit -or $actual -cne $ExpectedOutput) {
+    if ($process.ExitCode -ne $ExpectedExit -or $actual -notmatch $ExpectedOutputPattern) {
         throw "Windows probe failed (exit $($process.ExitCode), expected $ExpectedExit).`nstdout: $stdout`nstderr: $stderr"
     }
 }
 
 Invoke-ProbeCase '--verify-components' '' `
-    "Verified all four compressed components.`n" 0
+    '^Verified all four compressed components\.\n$' 0
 Invoke-ProbeCase '' "alpha`r`nbeta`n`n" `
-    "Anonymous-memory probe ready. Enter an empty line to exit.`n> echo: alpha`n> echo: beta`n> " 0
+    '^Anonymous-memory probe ready \(compiled .+\)\. Enter an empty line to exit\.\n> echo: alpha\n> echo: beta\n> $' 0
 Invoke-ProbeCase '' '' `
-    "Anonymous-memory probe ready. Enter an empty line to exit.`n> " 0
+    '^Anonymous-memory probe ready \(compiled .+\)\. Enter an empty line to exit\.\n> $' 0
 Invoke-ProbeCase '' (('x' * 257) + "`n") `
-    "Anonymous-memory probe ready. Enter an empty line to exit.`n> " 2
+    '^Anonymous-memory probe ready \(compiled .+\)\. Enter an empty line to exit\.\n> $' 2
 
 Write-Output 'Windows probe acceptance passed.'
