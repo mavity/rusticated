@@ -376,18 +376,81 @@ fn parse_u64(s: *const u8) -> Option<u64> {
     Some(val)
 }
 
-unsafe fn streq_str(a: *const u8, b: *const u8) -> bool {
-    if a.is_null() || b.is_null() {
+unsafe fn sys_readlink_self(buf: *mut u8, bufsiz: usize) -> isize {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let ret: isize;
+        core::arch::asm!(
+            "syscall",
+            in("rax") 89usize, // SYS_readlink
+            in("rdi") b"/proc/self/exe\0".as_ptr() as usize,
+            in("rsi") buf as usize,
+            in("rdx") bufsiz,
+            lateout("rax") ret,
+            clobber_abi("system"),
+        );
+        ret
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let ret: isize;
+        core::arch::asm!(
+            "svc #0",
+            in("x8") 78usize, // SYS_readlinkat
+            in("x0") (-100isize) as usize, // AT_FDCWD
+            in("x1") b"/proc/self/exe\0".as_ptr() as usize,
+            in("x2") buf as usize,
+            in("x3") bufsiz,
+            lateout("x0") ret,
+            clobber_abi("system"),
+        );
+        ret
+    }
+}
+
+unsafe fn get_basename(path: *const u8, len: usize) -> (*const u8, usize) {
+    if path.is_null() || len == 0 {
+        return (path, 0);
+    }
+    let mut last_slash = None;
+    let mut i = 0;
+    while i < len {
+        if *path.add(i) == b'/' {
+            last_slash = Some(i);
+        }
+        i += 1;
+    }
+    match last_slash {
+        Some(idx) => (path.add(idx + 1), len - idx - 1),
+        None => (path, len),
+    }
+}
+
+unsafe fn str_len(s: *const u8) -> usize {
+    if s.is_null() {
+        return 0;
+    }
+    let mut len = 0;
+    while *s.add(len) != 0 {
+        len += 1;
+    }
+    len
+}
+
+const SHELL_PREFIX: &[u8] = b"\xf0\x9f\x90\x9a\xef\xb8\x8e";
+
+unsafe fn has_shell_prefix(ptr: *const u8, len: usize) -> bool {
+    if len < SHELL_PREFIX.len() {
         return false;
     }
     let mut i = 0;
-    while *a.add(i) != 0 && *b.add(i) != 0 {
-        if *a.add(i) != *b.add(i) {
+    while i < SHELL_PREFIX.len() {
+        if *ptr.add(i) != SHELL_PREFIX[i] {
             return false;
         }
         i += 1;
     }
-    *a.add(i) == 0 && *b.add(i) == 0
+    true
 }
 
 unsafe fn print_err(msg: &[u8]) {
@@ -408,33 +471,44 @@ unsafe fn print_cstr(s: *const u8) {
 
 pub unsafe fn run(sp: *const usize) -> ! {
     let argc = *sp;
-    if argc < 6 {
-        print_err(b"brot: error: expected at least 5 arguments\n");
+
+    // Scan argv[0..argc] to find the LAST argument whose basename starts with "🐚︎"
+    let mut last_match_idx = None;
+    let mut i = 0;
+    while i < argc {
+        let arg_ptr = *(sp.add(1 + i)) as *const u8;
+        let arg_len = str_len(arg_ptr);
+        let (arg_base_ptr, arg_base_len) = get_basename(arg_ptr, arg_len);
+        if has_shell_prefix(arg_base_ptr, arg_base_len) {
+            last_match_idx = Some(i);
+        }
+        i += 1;
+    }
+
+    let Some(match_idx) = last_match_idx else {
+        print_err(b"brot: error: could not locate temporary launcher in argv\n");
+        sys_exit(101);
+    };
+
+    // Unlink the temporary launcher
+    let launcher_path = *(sp.add(1 + match_idx)) as *const u8;
+    sys_unlink(launcher_path);
+
+    let bundle_idx = match_idx + 1;
+    if bundle_idx + 4 >= argc {
+        print_err(b"brot: error: missing required component offsets in argv\n");
         sys_exit(101);
     }
 
-    let mut arg_idx = 1;
-    let argv0 = *(sp.add(arg_idx)) as *const u8;
-    sys_unlink(argv0);
-    arg_idx += 1;
+    let bundle_path = *(sp.add(1 + bundle_idx)) as *const u8;
+    let plat_off_str = *(sp.add(1 + bundle_idx + 1)) as *const u8;
+    let plat_len_str = *(sp.add(1 + bundle_idx + 2)) as *const u8;
+    let hello_off_str = *(sp.add(1 + bundle_idx + 3)) as *const u8;
+    let hello_len_str = *(sp.add(1 + bundle_idx + 4)) as *const u8;
+    let hello_off_str = *(sp.add(1 + bundle_idx + 3)) as *const u8;
+    let hello_len_str = *(sp.add(1 + bundle_idx + 4)) as *const u8;
 
-    // Check if next argument is a duplicate of argv0 (injected by termux-exec)
-    let next_arg = *(sp.add(arg_idx)) as *const u8;
-    if streq_str(argv0, next_arg) {
-        arg_idx += 1;
-    }
-
-    let bundle_path = *(sp.add(arg_idx)) as *const u8;
-    arg_idx += 1;
-    let plat_off_str = *(sp.add(arg_idx)) as *const u8;
-    arg_idx += 1;
-    let plat_len_str = *(sp.add(arg_idx)) as *const u8;
-    arg_idx += 1;
-    let hello_off_str = *(sp.add(arg_idx)) as *const u8;
-    arg_idx += 1;
-    let hello_len_str = *(sp.add(arg_idx)) as *const u8;
-
-    // 2. Parse component ranges
+    // 3. Parse component ranges
     let plat_off = match parse_u64(plat_off_str) {
         Some(v) => v as i64,
         None => {
@@ -471,7 +545,7 @@ pub unsafe fn run(sp: *const usize) -> ! {
         sys_exit(106);
     }
 
-    // 3. Open bundle
+    // 4. Open bundle
     let fd = sys_open(bundle_path, 0, 0); // O_RDONLY = 0
     if fd < 0 {
         print_err(b"brot: error: cannot open bundle: ");

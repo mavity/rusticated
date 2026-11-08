@@ -202,6 +202,7 @@ exports:
     symbols:     [ _exit, _abort, _fork, _waitpid, _execve, _open, _read,
                    _write, _close, _lseek, _unlink, _fchmod, _getpid,
                    _mmap, _munmap, _mprotect, _sys_icache_invalidate, _pthread_jit_write_protect_np,
+                   __NSGetExecutablePath,
                    _bzero, ___bzero, dyld_stub_binder,
                    _dlopen, _dlerror, _dlsym, _dlclose, _malloc, _free, _usleep ]
 ...

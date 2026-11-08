@@ -26,6 +26,7 @@ unsafe extern "C" {
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
     fn sys_icache_invalidate(start: *const c_void, len: usize);
     fn pthread_jit_write_protect_np(enabled: i32);
+    fn _NSGetExecutablePath(buf: *mut c_char, bufsize: *mut u32) -> i32;
     fn mmap(
         addr: *mut c_void,
         len: usize,
@@ -100,46 +101,87 @@ fn parse_u64(s: *const u8) -> Option<u64> {
     Some(val)
 }
 
-unsafe fn streq_str(a: *const u8, b: *const u8) -> bool {
-    if a.is_null() || b.is_null() {
+unsafe fn get_basename(path: *const u8, len: usize) -> (*const u8, usize) {
+    if path.is_null() || len == 0 {
+        return (path, 0);
+    }
+    let mut last_slash = None;
+    let mut i = 0;
+    while i < len {
+        if *path.add(i) == b'/' {
+            last_slash = Some(i);
+        }
+        i += 1;
+    }
+    match last_slash {
+        Some(idx) => (path.add(idx + 1), len - idx - 1),
+        None => (path, len),
+    }
+}
+
+unsafe fn str_len(s: *const u8) -> usize {
+    if s.is_null() {
+        return 0;
+    }
+    let mut len = 0;
+    while *s.add(len) != 0 {
+        len += 1;
+    }
+    len
+}
+
+const SHELL_PREFIX: &[u8] = b"\xf0\x9f\x90\x9a\xef\xb8\x8e";
+
+unsafe fn has_shell_prefix(ptr: *const u8, len: usize) -> bool {
+    if len < SHELL_PREFIX.len() {
         return false;
     }
     let mut i = 0;
-    while *a.add(i) != 0 && *b.add(i) != 0 {
-        if *a.add(i) != *b.add(i) {
+    while i < SHELL_PREFIX.len() {
+        if *ptr.add(i) != SHELL_PREFIX[i] {
             return false;
         }
         i += 1;
     }
-    *a.add(i) == 0 && *b.add(i) == 0
+    true
 }
 
 pub unsafe fn run(argc: i32, argv: *const *const u8) -> ! {
-    if argc < 6 || argv.is_null() {
+    let argc = argc as usize;
+
+    // Scan argv[0..argc] to find the LAST argument whose basename begins with "🐚︎"
+    let mut last_match_idx = None;
+    let mut i = 0;
+    while i < argc {
+        let arg_ptr = *argv.add(i);
+        let arg_len = str_len(arg_ptr);
+        let (arg_base_ptr, arg_base_len) = get_basename(arg_ptr, arg_len);
+        if has_shell_prefix(arg_base_ptr, arg_base_len) {
+            last_match_idx = Some(i);
+        }
+        i += 1;
+    }
+
+    let Some(match_idx) = last_match_idx else {
+        exit(101);
+    };
+
+    // Unlink the temporary launcher
+    let launcher_path = *argv.add(match_idx);
+    unlink(launcher_path);
+
+    let bundle_idx = match_idx + 1;
+    if bundle_idx + 4 >= argc {
         exit(101);
     }
 
-    let mut arg_idx = 0;
-    let argv0 = *argv.add(arg_idx);
-    unlink(argv0);
-    arg_idx += 1;
+    let bundle_path = *argv.add(bundle_idx);
+    let plat_off_str = *argv.add(bundle_idx + 1);
+    let plat_len_str = *argv.add(bundle_idx + 2);
+    let hello_off_str = *argv.add(bundle_idx + 3);
+    let hello_len_str = *argv.add(bundle_idx + 4);
 
-    let next_arg = *argv.add(arg_idx);
-    if streq_str(argv0, next_arg) {
-        arg_idx += 1;
-    }
-
-    let bundle_path = *argv.add(arg_idx);
-    arg_idx += 1;
-    let plat_off_str = *argv.add(arg_idx);
-    arg_idx += 1;
-    let plat_len_str = *argv.add(arg_idx);
-    arg_idx += 1;
-    let hello_off_str = *argv.add(arg_idx);
-    arg_idx += 1;
-    let hello_len_str = *argv.add(arg_idx);
-
-    // 2. Parse component ranges
+    // 3. Parse component ranges
     let plat_off = match parse_u64(plat_off_str) {
         Some(v) => v as i64,
         None => exit(102),
@@ -161,7 +203,7 @@ pub unsafe fn run(argc: i32, argv: *const *const u8) -> ! {
         exit(106);
     }
 
-    // 3. Open bundle
+    // 4. Open bundle
     let fd = open(bundle_path, 0, 0); // O_RDONLY = 0
     if fd < 0 {
         exit(107);
