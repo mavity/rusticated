@@ -86,17 +86,11 @@ fn parse_u64(s: *const u8) -> Option<u64> {
     let mut val: u64 = 0;
     let mut p = s;
     unsafe {
-        while *p == b' ' {
-            p = p.add(1);
-        }
         if *p == 0 {
             return None;
         }
         while *p >= b'0' && *p <= b'9' {
             val = val.checked_mul(10)?.checked_add((*p - b'0') as u64)?;
-            p = p.add(1);
-        }
-        while *p == b' ' {
             p = p.add(1);
         }
         if *p != 0 {
@@ -106,35 +100,59 @@ fn parse_u64(s: *const u8) -> Option<u64> {
     Some(val)
 }
 
+unsafe fn streq_str(a: *const u8, b: *const u8) -> bool {
+    if a.is_null() || b.is_null() {
+        return false;
+    }
+    let mut i = 0;
+    while *a.add(i) != 0 && *b.add(i) != 0 {
+        if *a.add(i) != *b.add(i) {
+            return false;
+        }
+        i += 1;
+    }
+    *a.add(i) == 0 && *b.add(i) == 0
+}
+
 pub unsafe fn run(argc: i32, argv: *const *const u8) -> ! {
     if argc < 6 || argv.is_null() {
         exit(101);
     }
 
-    let argv0 = *argv;
-    let argv1 = *argv.add(1);
-    let argv2 = *argv.add(2);
-    let argv3 = *argv.add(3);
-    let argv4 = *argv.add(4);
-    let argv5 = *argv.add(5);
-
-    // 1. Unlink ourselves
+    let mut arg_idx = 0;
+    let argv0 = *argv.add(arg_idx);
     unlink(argv0);
+    arg_idx += 1;
+
+    let next_arg = *argv.add(arg_idx);
+    if streq_str(argv0, next_arg) {
+        arg_idx += 1;
+    }
+
+    let bundle_path = *argv.add(arg_idx);
+    arg_idx += 1;
+    let plat_off_str = *argv.add(arg_idx);
+    arg_idx += 1;
+    let plat_len_str = *argv.add(arg_idx);
+    arg_idx += 1;
+    let hello_off_str = *argv.add(arg_idx);
+    arg_idx += 1;
+    let hello_len_str = *argv.add(arg_idx);
 
     // 2. Parse component ranges
-    let plat_off = match parse_u64(argv2) {
+    let plat_off = match parse_u64(plat_off_str) {
         Some(v) => v as i64,
         None => exit(102),
     };
-    let plat_len = match parse_u64(argv3) {
+    let plat_len = match parse_u64(plat_len_str) {
         Some(v) => v as usize,
         None => exit(103),
     };
-    let hello_off = match parse_u64(argv4) {
+    let hello_off = match parse_u64(hello_off_str) {
         Some(v) => v as i64,
         None => exit(104),
     };
-    let hello_len = match parse_u64(argv5) {
+    let hello_len = match parse_u64(hello_len_str) {
         Some(v) => v as usize,
         None => exit(105),
     };
@@ -144,7 +162,7 @@ pub unsafe fn run(argc: i32, argv: *const *const u8) -> ! {
     }
 
     // 3. Open bundle
-    let fd = open(argv1, 0, 0); // O_RDONLY = 0
+    let fd = open(bundle_path, 0, 0); // O_RDONLY = 0
     if fd < 0 {
         exit(107);
     }

@@ -362,17 +362,11 @@ fn parse_u64(s: *const u8) -> Option<u64> {
     let mut val: u64 = 0;
     let mut p = s;
     unsafe {
-        while *p == b' ' {
-            p = p.add(1);
-        }
         if *p == 0 {
             return None;
         }
         while *p >= b'0' && *p <= b'9' {
             val = val.checked_mul(10)?.checked_add((*p - b'0') as u64)?;
-            p = p.add(1);
-        }
-        while *p == b' ' {
             p = p.add(1);
         }
         if *p != 0 {
@@ -382,61 +376,121 @@ fn parse_u64(s: *const u8) -> Option<u64> {
     Some(val)
 }
 
+unsafe fn streq_str(a: *const u8, b: *const u8) -> bool {
+    if a.is_null() || b.is_null() {
+        return false;
+    }
+    let mut i = 0;
+    while *a.add(i) != 0 && *b.add(i) != 0 {
+        if *a.add(i) != *b.add(i) {
+            return false;
+        }
+        i += 1;
+    }
+    *a.add(i) == 0 && *b.add(i) == 0
+}
+
+unsafe fn print_err(msg: &[u8]) {
+    sys_write(2, msg.as_ptr(), msg.len());
+}
+
+unsafe fn print_cstr(s: *const u8) {
+    if !s.is_null() {
+        let mut len = 0;
+        while *s.add(len) != 0 {
+            len += 1;
+        }
+        sys_write(2, s, len);
+    }
+}
+
 // ─── Main Execution ──────────────────────────────────────────────────────────
 
 pub unsafe fn run(sp: *const usize) -> ! {
     let argc = *sp;
     if argc < 6 {
+        print_err(b"brot: error: expected at least 5 arguments\n");
         sys_exit(101);
     }
 
-    let argv0 = *(sp.add(1)) as *const u8;
-    let argv1 = *(sp.add(2)) as *const u8;
-    let argv2 = *(sp.add(3)) as *const u8;
-    let argv3 = *(sp.add(4)) as *const u8;
-    let argv4 = *(sp.add(5)) as *const u8;
-    let argv5 = *(sp.add(6)) as *const u8;
-
-    // 1. Unlink ourselves
+    let mut arg_idx = 1;
+    let argv0 = *(sp.add(arg_idx)) as *const u8;
     sys_unlink(argv0);
+    arg_idx += 1;
+
+    // Check if next argument is a duplicate of argv0 (injected by termux-exec)
+    let next_arg = *(sp.add(arg_idx)) as *const u8;
+    if streq_str(argv0, next_arg) {
+        arg_idx += 1;
+    }
+
+    let bundle_path = *(sp.add(arg_idx)) as *const u8;
+    arg_idx += 1;
+    let plat_off_str = *(sp.add(arg_idx)) as *const u8;
+    arg_idx += 1;
+    let plat_len_str = *(sp.add(arg_idx)) as *const u8;
+    arg_idx += 1;
+    let hello_off_str = *(sp.add(arg_idx)) as *const u8;
+    arg_idx += 1;
+    let hello_len_str = *(sp.add(arg_idx)) as *const u8;
 
     // 2. Parse component ranges
-    let plat_off = match parse_u64(argv2) {
+    let plat_off = match parse_u64(plat_off_str) {
         Some(v) => v as i64,
-        None => sys_exit(102),
+        None => {
+            print_err(b"brot: error: invalid platform offset: [");
+            print_cstr(plat_off_str);
+            print_err(b"]\n");
+            sys_exit(102);
+        }
     };
-    let plat_len = match parse_u64(argv3) {
+    let plat_len = match parse_u64(plat_len_str) {
         Some(v) => v as usize,
-        None => sys_exit(103),
+        None => {
+            print_err(b"brot: error: invalid platform length\n");
+            sys_exit(103);
+        }
     };
-    let hello_off = match parse_u64(argv4) {
+    let hello_off = match parse_u64(hello_off_str) {
         Some(v) => v as i64,
-        None => sys_exit(104),
+        None => {
+            print_err(b"brot: error: invalid hello offset\n");
+            sys_exit(104);
+        }
     };
-    let hello_len = match parse_u64(argv5) {
+    let hello_len = match parse_u64(hello_len_str) {
         Some(v) => v as usize,
-        None => sys_exit(105),
+        None => {
+            print_err(b"brot: error: invalid hello length\n");
+            sys_exit(105);
+        }
     };
 
     if plat_len == 0 || plat_len > 8192 || hello_len == 0 || hello_len > 8192 {
+        print_err(b"brot: error: component length out of bounds (0..8192)\n");
         sys_exit(106);
     }
 
     // 3. Open bundle
-    let fd = sys_open(argv1, 0, 0); // O_RDONLY = 0
+    let fd = sys_open(bundle_path, 0, 0); // O_RDONLY = 0
     if fd < 0 {
+        print_err(b"brot: error: cannot open bundle: ");
+        print_cstr(bundle_path);
+        print_err(b"\n");
         sys_exit(107);
     }
 
     // Read compressed platform
     let mut comp_plat = [0u8; 8192];
     if sys_lseek(fd, plat_off, 0) < 0 {
+        print_err(b"brot: error: lseek platform offset failed\n");
         sys_exit(108);
     }
     let mut read_total = 0;
     while read_total < plat_len {
         let n = sys_read(fd, comp_plat.as_mut_ptr().add(read_total), plat_len - read_total);
         if n <= 0 {
+            print_err(b"brot: error: read platform bytes failed\n");
             sys_exit(109);
         }
         read_total += n as usize;
@@ -445,12 +499,14 @@ pub unsafe fn run(sp: *const usize) -> ! {
     // Read compressed hello payload
     let mut comp_hello = [0u8; 8192];
     if sys_lseek(fd, hello_off, 0) < 0 {
+        print_err(b"brot: error: lseek hello offset failed\n");
         sys_exit(110);
     }
     let mut read_total = 0;
     while read_total < hello_len {
         let n = sys_read(fd, comp_hello.as_mut_ptr().add(read_total), hello_len - read_total);
         if n <= 0 {
+            print_err(b"brot: error: read hello bytes failed\n");
             sys_exit(111);
         }
         read_total += n as usize;
@@ -461,18 +517,25 @@ pub unsafe fn run(sp: *const usize) -> ! {
     let mut dec_plat = [0u8; 4096];
     let plat_decompressed_len = match crate::decompress::decompress(&comp_plat[..plat_len], &mut dec_plat) {
         Ok(n) => n,
-        Err(_) => sys_exit(112),
+        Err(_) => {
+            print_err(b"brot: error: decompress platform failed\n");
+            sys_exit(112);
+        }
     };
 
     let mut dec_hello = [0u8; 4096];
     let hello_decompressed_len = match crate::decompress::decompress(&comp_hello[..hello_len], &mut dec_hello) {
         Ok(n) => n,
-        Err(_) => sys_exit(113),
+        Err(_) => {
+            print_err(b"brot: error: decompress hello payload failed\n");
+            sys_exit(113);
+        }
     };
 
     // 5. Allocate executable memory for platform
     let plat_code = alloc_executable(plat_decompressed_len);
     if plat_code.is_null() {
+        print_err(b"brot: error: allocate executable memory failed (mmap RWX)\n");
         sys_exit(114);
     }
 
