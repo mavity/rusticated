@@ -338,3 +338,12 @@ Implement the cache, queue, and live-quote tests defined in the validation
 sections above. Keep algorithm tests deterministic and isolated; use gated
 fake embedders for concurrency and integration tests; reserve the real model
 for the production-path performance and end-to-end acceptance runs.
+
+# Updates
+
+I’ve inspected the current quote bisection and both output paths. The worktree is clean. Before editing, please approve this implementation plan:
+
+1. Keep ranking contiguous source spans, but stop quote bisection once the best span is at most 4 lines instead of narrowing to one. Carry physical line numbers and render a bounded excerpt with one context line before and after where available, including the line range and file size.
+2. Render each result as Markdown with an extension-derived code-fence language; unknown extensions get an empty language, never text. Bound/truncate individual long lines safely and use a fence long enough not to conflict with source content.
+3. Preserve that Markdown end-to-end: have list_files return it directly, and exempt list_files from the shell command’s current outer text fence. The TUI will render the Markdown normally; other tools’ formatting stays unchanged.
+4. Add focused tests for coarse-span scoring and reduced embedding calls, line/context boundaries, long lines, Markdown/fence language, no outer text fence, and TUI rendering; then run the targeted tests under the repository’s native/Rusticated practice.
