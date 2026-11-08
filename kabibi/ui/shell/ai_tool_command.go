@@ -105,25 +105,48 @@ func executeAITool(ctx context.Context, execSess *ExecutionSession, name string,
 }
 
 func parseAIToolArguments(tool ai.Tool, args []string) (json.RawMessage, error) {
-	properties := make(map[string]string, len(tool.Parameters))
-	for name := range tool.Parameters {
-		properties[normalizeAIToolName(name)] = name
+	state, err := scanAIToolArguments(tool, args, false)
+	if err != nil {
+		return nil, err
 	}
+	for _, required := range tool.Required {
+		if _, ok := state.values[required]; !ok {
+			return nil, fmt.Errorf("--%s is required", strings.ReplaceAll(required, "_", "-"))
+		}
+	}
+	return json.Marshal(state.values)
+}
 
-	values := make(map[string]any, len(args)/2)
+type aiToolArgumentState struct {
+	values         map[string]any
+	pendingValue   map[string]any
+	pendingBoolean map[string]any
+}
+
+func scanAIToolArguments(tool ai.Tool, args []string, allowIncomplete bool) (aiToolArgumentState, error) {
+	state := aiToolArgumentState{
+		values: make(map[string]any, len(args)/2),
+	}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if !strings.HasPrefix(arg, "--") || arg == "--" {
-			return nil, fmt.Errorf("expected --option value, got %q", arg)
+			return aiToolArgumentState{}, fmt.Errorf("expected --option value, got %q", arg)
 		}
 		option, rawValue, hasValue := strings.Cut(strings.TrimPrefix(arg, "--"), "=")
-		property, ok := properties[normalizeAIToolName(option)]
+		property := ""
+		for name := range tool.Parameters {
+			if normalizeAIToolName(name) == normalizeAIToolName(option) {
+				property = name
+				break
+			}
+		}
+		ok := property != ""
 		if !ok {
-			return nil, fmt.Errorf("unknown option --%s", option)
+			return aiToolArgumentState{}, fmt.Errorf("unknown option --%s", option)
 		}
 		schema, ok := tool.Parameters[property].(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("unsupported schema for --%s", option)
+			return aiToolArgumentState{}, fmt.Errorf("unsupported schema for --%s", option)
 		}
 		kind, _ := schema["type"].(string)
 
@@ -134,11 +157,19 @@ func parseAIToolArguments(tool ai.Tool, args []string) (json.RawMessage, error) 
 				hasValue = true
 			}
 			if !hasValue {
+				if allowIncomplete && i+1 == len(args) {
+					state.pendingBoolean = schema
+					continue
+				}
 				rawValue = "true"
 			}
 		} else if !hasValue {
 			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
-				return nil, fmt.Errorf("--%s requires a value", option)
+				if allowIncomplete && i+1 == len(args) {
+					state.pendingValue = schema
+					continue
+				}
+				return aiToolArgumentState{}, fmt.Errorf("--%s requires a value", option)
 			}
 			i++
 			rawValue = args[i]
@@ -146,21 +177,26 @@ func parseAIToolArguments(tool ai.Tool, args []string) (json.RawMessage, error) 
 
 		value, err := parseAIToolOptionValue(schema, rawValue)
 		if err != nil {
-			return nil, fmt.Errorf("invalid --%s: %w", option, err)
+			return aiToolArgumentState{}, fmt.Errorf("invalid --%s: %w", option, err)
 		}
 		if kind == "array" {
-			values[property] = appendAIToolArrayValue(values[property], value)
+			state.values[property] = appendAIToolArrayValue(state.values[property], value)
 		} else {
-			values[property] = value
+			state.values[property] = value
 		}
 	}
+	return state, nil
+}
 
-	for _, required := range tool.Required {
-		if _, ok := values[required]; !ok {
-			return nil, fmt.Errorf("--%s is required", strings.ReplaceAll(required, "_", "-"))
+func aiToolOptionSchema(tool ai.Tool, option string) map[string]any {
+	for name, rawSchema := range tool.Parameters {
+		if normalizeAIToolName(name) != normalizeAIToolName(option) {
+			continue
 		}
+		schema, _ := rawSchema.(map[string]any)
+		return schema
 	}
-	return json.Marshal(values)
+	return nil
 }
 
 func parseAIToolOptionValue(schema map[string]any, raw string) (any, error) {

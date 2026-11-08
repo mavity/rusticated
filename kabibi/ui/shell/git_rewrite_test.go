@@ -235,6 +235,17 @@ func TestGitNotesAddAppendListShowAndRemove(t *testing.T) {
 	if err != nil || appendNote.ExitCode != 0 {
 		t.Fatalf("append note: (exit %d, err %v, output %q)", appendNote.ExitCode, err, appendNote.Output)
 	}
+	custom, err := session.RunCommand(context.Background(),
+		"git notes --ref=refs/notes/custom add --message=custom "+commitHash.String(),
+		nil, SourceUserShell, nil)
+	if err != nil || custom.ExitCode != 0 {
+		t.Fatalf("add custom-ref note: (exit %d, err %v, output %q)", custom.ExitCode, err, custom.Output)
+	}
+	customList, err := session.RunCommand(context.Background(),
+		"git notes list --ref refs/notes/custom", nil, SourceUserShell, nil)
+	if err != nil || customList.ExitCode != 0 || !strings.Contains(customList.Output, " "+commitHash.String()) {
+		t.Fatalf("list custom-ref notes: (exit %d, err %v, output %q)", customList.ExitCode, err, customList.Output)
+	}
 	show, err := session.RunCommand(context.Background(),
 		"git notes show "+commitHash.String(), nil, SourceUserShell, nil)
 	if err != nil || show.ExitCode != 0 || show.Output != "first\nsecond" {

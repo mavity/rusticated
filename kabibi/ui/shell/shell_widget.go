@@ -232,6 +232,7 @@ func New(opts ShellOptions) *Shell {
 			return p
 		},
 		StyleInput: s.styleInput,
+		Complete:   s.completeInput,
 	})
 	s.refreshPrompt()
 	if execSess != nil {
@@ -356,6 +357,9 @@ func (s *Shell) Close() error {
 	cancel := s.activeCancel
 	aiRunner := s.aiRunner
 	s.mu.Unlock()
+	if s.input != nil {
+		s.input.Close()
+	}
 	if cancel != nil {
 		cancel()
 	}
@@ -1206,15 +1210,21 @@ func (s *Shell) computeStackHeight(w, maxH int) int {
 	inputVisible := !s.running && !s.exiting
 	if !s.exiting {
 		s.mu.Unlock()
+		footerRows := reservedFooterRows
+		inputMaxH := maxH - footerRows
 		if inputVisible {
-			inputSize := s.input.Measure(ui.Constraints{MaxW: w, MaxH: maxH - reservedFooterRows})
+			if s.input.CompletionMenuVisible() {
+				footerRows = 0
+				inputMaxH = maxH
+			}
+			inputSize := s.input.Measure(ui.Constraints{MaxW: w, MaxH: inputMaxH})
 			inputH := inputSize.H
 			if inputH < 1 {
 				inputH = 1
 			}
 			chromeH = inputH
 		}
-		chromeH += reservedFooterRows
+		chromeH += footerRows
 		if chromeH > maxH {
 			chromeH = maxH
 		}
@@ -1356,8 +1366,12 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) string {
 	var inputCursor ui.CursorPos
 	var chromeH int
 	if !exiting {
+		footerH := reservedFooterRows
 		if !running {
-			inputMaxH := maxH - reservedFooterRows
+			if s.input.CompletionMenuVisible() {
+				footerH = 0
+			}
+			inputMaxH := maxH - footerH
 			if inputMaxH < 1 {
 				inputMaxH = 1
 			}
@@ -1374,7 +1388,6 @@ func (s *Shell) Render(rect ui.Rect, ctx ui.RenderContext) string {
 			}
 			chromeH = inputBuf.Height
 		}
-		footerH := reservedFooterRows
 		if chromeH+footerH > maxH {
 			footerH = maxH - chromeH
 			if footerH < 0 {
@@ -1840,6 +1853,13 @@ func (s *Shell) handleKeyEvent(ev input.KeyPressEvent) bool {
 			return true
 		}
 		return false
+	}
+	if keyStr == "tab" || keyStr == "ctrl+space" {
+		s.input.RequestCompletion()
+		return true
+	}
+	if keyStr == "enter" && s.input.AcceptCompletion() {
+		return true
 	}
 	if keyStr == "enter" {
 		if s.input.Value() == "" && s.openLatestOutputURL() {

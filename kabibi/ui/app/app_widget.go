@@ -641,6 +641,10 @@ func (w *AppWidget) HandleEvent(e input.Event) bool {
 				return true
 			}
 
+			if keyStr == "ctrl+space" || keyStr == "tab" && w.sh.Input().CompletionActive() {
+				return w.sh.HandleEvent(keyEv)
+			}
+
 			hasInput := w.sh.Input().Value() != ""
 
 			if keyEv.Code == input.KeyEnter && keyEv.Mod.Contains(input.ModCtrl) && keyEv.Mod.Contains(input.ModShift) {

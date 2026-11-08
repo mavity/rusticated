@@ -12,6 +12,218 @@ import (
 	"mvdan.cc/sh/v3/interp"
 )
 
+type webArgumentSpec struct {
+	name     string
+	path     bool
+	choices  []webArgumentChoice
+	variadic bool
+}
+
+type webArgumentChoice struct {
+	value  string
+	action string
+}
+
+type webOptionSpec struct {
+	name   string
+	action string
+}
+
+type webSubcommandSpec struct {
+	name        string
+	aliases     []string
+	options     []webOptionSpec
+	positionals []webArgumentSpec
+}
+
+type webBuiltinInvocation struct {
+	nickname    string
+	command     string
+	positionals [][]string
+	options     map[string]bool
+	provided    bool
+}
+
+func (invocation webBuiltinInvocation) argument(index int) string {
+	if index < 0 || index >= len(invocation.positionals) {
+		return ""
+	}
+	return strings.Join(invocation.positionals[index], " ")
+}
+
+func (invocation webBuiltinInvocation) argumentCount(index int) int {
+	if index < 0 || index >= len(invocation.positionals) {
+		return 0
+	}
+	return len(invocation.positionals[index])
+}
+
+type webGlobalOptions struct {
+	nickname         string
+	args             []string
+	nicknameExpected bool
+}
+
+type webArgumentState struct {
+	positionals [][]string
+	options     map[string]bool
+	next        int
+}
+
+var webNicknameOptions = []string{"--nick", "-n"}
+
+var webSubcommands = []webSubcommandSpec{
+	{name: "open", aliases: []string{"nav", "navigate"}, positionals: []webArgumentSpec{
+		{name: "url", choices: []webArgumentChoice{
+			{value: "--back", action: "back"},
+			{value: "--forward", action: "forward"},
+			{value: "--reload", action: "reload"},
+		}},
+	}},
+	{name: "ax", positionals: []webArgumentSpec{{name: "query", variadic: true}}},
+	{name: "click", positionals: []webArgumentSpec{{name: "target", variadic: true}}},
+	{name: "type", positionals: []webArgumentSpec{
+		{name: "target"},
+		{name: "text", variadic: true},
+	}},
+	{name: "shot", aliases: []string{"screenshot"}, options: []webOptionSpec{
+		{name: "--adorn", action: "adorn"},
+		{name: "--full", action: "full_page"},
+	}, positionals: []webArgumentSpec{{name: "output", path: true}}},
+	{name: "eval", positionals: []webArgumentSpec{{name: "expression", variadic: true}}},
+	{name: "cdp", positionals: []webArgumentSpec{
+		{name: "method"},
+		{name: "json_params"},
+	}},
+	{name: "logs"},
+}
+
+var errWebSubcommandRequired = errors.New("web subcommand required")
+
+func webSubcommand(name string) (webSubcommandSpec, bool) {
+	for _, spec := range webSubcommands {
+		if name == spec.name {
+			return spec, true
+		}
+		for _, alias := range spec.aliases {
+			if name == alias {
+				return spec, true
+			}
+		}
+	}
+	return webSubcommandSpec{}, false
+}
+
+func webSubcommandNames() []string {
+	var names []string
+	for _, spec := range webSubcommands {
+		names = append(names, spec.name)
+		names = append(names, spec.aliases...)
+	}
+	return names
+}
+
+func webOptionNames(spec webSubcommandSpec) []string {
+	names := make([]string, len(spec.options))
+	for i, option := range spec.options {
+		names[i] = option.name
+	}
+	return names
+}
+
+func webOption(spec webSubcommandSpec, name string) (webOptionSpec, bool) {
+	for _, option := range spec.options {
+		if option.name == name {
+			return option, true
+		}
+	}
+	return webOptionSpec{}, false
+}
+
+func parseWebGlobalOptions(args []string, allowIncomplete bool) webGlobalOptions {
+	state := webGlobalOptions{nickname: "main"}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if isWebNicknameOption(arg) {
+			if i+1 == len(args) && allowIncomplete {
+				state.nicknameExpected = true
+				return state
+			}
+			if i+1 < len(args) {
+				state.nickname = args[i+1]
+				i++
+				continue
+			}
+		}
+		if strings.HasPrefix(arg, "--nick=") {
+			state.nickname = strings.TrimPrefix(arg, "--nick=")
+			continue
+		}
+		state.args = append(state.args, arg)
+	}
+	return state
+}
+
+func isWebNicknameOption(arg string) bool {
+	for _, option := range webNicknameOptions {
+		if option == arg {
+			return true
+		}
+	}
+	return false
+}
+
+func parseWebArguments(spec webSubcommandSpec, args []string) webArgumentState {
+	state := webArgumentState{
+		positionals: make([][]string, len(spec.positionals)),
+		options:     make(map[string]bool, len(spec.options)),
+	}
+	for _, arg := range args {
+		if option, ok := webOption(spec, arg); ok {
+			state.options[option.name] = true
+			continue
+		}
+		if state.next >= len(spec.positionals) {
+			if len(spec.positionals) == 0 || !spec.positionals[len(spec.positionals)-1].variadic {
+				continue
+			}
+			state.next = len(spec.positionals) - 1
+		}
+		state.positionals[state.next] = append(state.positionals[state.next], arg)
+		if !spec.positionals[state.next].variadic {
+			state.next++
+		}
+	}
+	return state
+}
+
+func parseWebBuiltinInvocation(cmdName string, args []string) (webBuiltinInvocation, error) {
+	global := parseWebGlobalOptions(args, false)
+	invocation := webBuiltinInvocation{nickname: global.nickname, provided: len(global.args) > 0}
+
+	if cmdName == "cdp" {
+		invocation.command = "cdp"
+		spec, _ := webSubcommand("cdp")
+		state := parseWebArguments(spec, global.args)
+		invocation.positionals = state.positionals
+		invocation.options = state.options
+		return invocation, nil
+	}
+	if len(global.args) == 0 {
+		return webBuiltinInvocation{}, errWebSubcommandRequired
+	}
+	spec, ok := webSubcommand(global.args[0])
+	if !ok {
+		return webBuiltinInvocation{}, fmt.Errorf("unknown subcommand %q", global.args[0])
+	}
+	invocation.command = spec.name
+	state := parseWebArguments(spec, global.args[1:])
+	invocation.positionals = state.positionals
+	invocation.options = state.options
+	invocation.provided = len(global.args) > 1
+	return invocation, nil
+}
+
 type BrowserNavigateInput struct {
 	_           struct{} `doc:"Open a URL or navigate history (back/forward/reload) in a nickname-owned browser tab, wait for network + DOM/AX settling, and return the AX tree diff and network activity summary." emoji:"🌐"`
 	Nickname    string   `json:"nickname" doc:"Mandatory tab owner nickname (e.g. 'main', 'researcher', 'shopping') stored inside the browser"`
@@ -260,35 +472,33 @@ func webBuiltinMiddleware(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 func runWebBuiltin(ctx context.Context, cmdName string, args []string) error {
 	hc := interp.HandlerCtx(ctx)
 	mgr := browser.DefaultManager()
-
-	nick := "main"
-	var rest []string
-	for i := 0; i < len(args); i++ {
-		if (args[i] == "--nick" || args[i] == "-n") && i+1 < len(args) {
-			nick = args[i+1]
-			i++
-			continue
+	invocation, err := parseWebBuiltinInvocation(cmdName, args)
+	if err != nil {
+		if cmdName != "cdp" && errors.Is(err, errWebSubcommandRequired) {
+			fmt.Fprintln(hc.Stderr, "usage: web [--nick NAME] <open|ax|click|type|shot|eval|cdp|logs> [args...]")
+		} else {
+			fmt.Fprintf(hc.Stderr, "web: %v (expected %s)\n", err, strings.Join(webCanonicalSubcommandNames(), ", "))
 		}
-		if strings.HasPrefix(args[i], "--nick=") {
-			nick = strings.TrimPrefix(args[i], "--nick=")
-			continue
-		}
-		rest = append(rest, args[i])
+		return interp.ExitStatus(2)
 	}
+	nick := invocation.nickname
+	sub := invocation.command
 
 	if cmdName == "cdp" {
-		if len(rest) == 0 {
+		method := invocation.argument(0)
+		if invocation.argumentCount(0) == 0 {
 			fmt.Fprintln(hc.Stderr, "usage: cdp [--nick NAME] <Method> [json_params]")
 			return interp.ExitStatus(2)
 		}
 		var params map[string]any
-		if len(rest) > 1 {
-			if err := json.Unmarshal([]byte(rest[1]), &params); err != nil {
+		if invocation.argumentCount(1) > 0 {
+			rawParams := invocation.argument(1)
+			if err := json.Unmarshal([]byte(rawParams), &params); err != nil {
 				fmt.Fprintf(hc.Stderr, "cdp: invalid JSON params: %v\n", err)
 				return interp.ExitStatus(2)
 			}
 		}
-		raw, err := mgr.RawCDPAction(ctx, nick, rest[0], params)
+		raw, err := mgr.RawCDPAction(ctx, nick, method, params)
 		if err != nil {
 			fmt.Fprintf(hc.Stderr, "cdp: %v\n", err)
 			return interp.ExitStatus(1)
@@ -297,22 +507,22 @@ func runWebBuiltin(ctx context.Context, cmdName string, args []string) error {
 		return nil
 	}
 
-	if len(rest) == 0 {
-		fmt.Fprintln(hc.Stderr, "usage: web [--nick NAME] <open|ax|click|type|shot|eval|cdp|logs> [args...]")
-		return interp.ExitStatus(2)
-	}
-
-	sub := rest[0]
-	subArgs := rest[1:]
-
 	switch sub {
-	case "open", "nav", "navigate":
-		if len(subArgs) == 0 {
+	case "open":
+		arg := invocation.argument(0)
+		if invocation.argumentCount(0) == 0 {
 			fmt.Fprintln(hc.Stderr, "usage: web open <url|--back|--forward|--reload>")
 			return interp.ExitStatus(2)
 		}
-		arg := subArgs[0]
-		out, err := mgr.NavigateAction(ctx, nick, arg, arg == "--back", arg == "--forward", arg == "--reload")
+		spec, _ := webSubcommand(sub)
+		action := ""
+		for _, choice := range spec.positionals[0].choices {
+			if choice.value == arg {
+				action = choice.action
+				break
+			}
+		}
+		out, err := mgr.NavigateAction(ctx, nick, arg, action == "back", action == "forward", action == "reload")
 		if err != nil {
 			fmt.Fprintf(hc.Stderr, "web open: %v\n", err)
 			return interp.ExitStatus(1)
@@ -321,7 +531,7 @@ func runWebBuiltin(ctx context.Context, cmdName string, args []string) error {
 		return nil
 
 	case "ax":
-		query := strings.Join(subArgs, " ")
+		query := invocation.argument(0)
 		out, err := mgr.AXAction(ctx, nick, query, "", nil)
 		if err != nil {
 			fmt.Fprintf(hc.Stderr, "web ax: %v\n", err)
@@ -331,11 +541,11 @@ func runWebBuiltin(ctx context.Context, cmdName string, args []string) error {
 		return nil
 
 	case "click":
-		if len(subArgs) == 0 {
+		target := invocation.argument(0)
+		if invocation.argumentCount(0) == 0 {
 			fmt.Fprintln(hc.Stderr, "usage: web click <target>")
 			return interp.ExitStatus(2)
 		}
-		target := strings.Join(subArgs, " ")
 		out, err := mgr.ClickAction(ctx, nick, target, "left")
 		if err != nil {
 			fmt.Fprintf(hc.Stderr, "web click: %v\n", err)
@@ -345,11 +555,12 @@ func runWebBuiltin(ctx context.Context, cmdName string, args []string) error {
 		return nil
 
 	case "type":
-		if len(subArgs) < 2 {
+		target, text := invocation.argument(0), invocation.argument(1)
+		if invocation.argumentCount(0) == 0 || invocation.argumentCount(1) == 0 {
 			fmt.Fprintln(hc.Stderr, "usage: web type <target> <text>")
 			return interp.ExitStatus(2)
 		}
-		out, err := mgr.TypeAction(ctx, nick, subArgs[0], strings.Join(subArgs[1:], " "), false, false)
+		out, err := mgr.TypeAction(ctx, nick, target, text, false, false)
 		if err != nil {
 			fmt.Fprintf(hc.Stderr, "web type: %v\n", err)
 			return interp.ExitStatus(1)
@@ -357,26 +568,15 @@ func runWebBuiltin(ctx context.Context, cmdName string, args []string) error {
 		fmt.Fprintln(hc.Stdout, out)
 		return nil
 
-	case "shot", "screenshot":
-		if len(subArgs) == 0 {
+	case "shot":
+		if !invocation.provided {
 			fmt.Fprintln(hc.Stderr, "usage: web shot <output.png> [--adorn] [--full]")
 			return interp.ExitStatus(2)
 		}
-		var outPath string
-		adorn := false
-		full := false
-		for _, a := range subArgs {
-			switch a {
-			case "--adorn":
-				adorn = true
-			case "--full":
-				full = true
-			default:
-				if outPath == "" {
-					outPath = a
-				}
-			}
-		}
+		outPath := invocation.argument(0)
+		spec, _ := webSubcommand(sub)
+		adorn := invocation.options[spec.options[0].name]
+		full := invocation.options[spec.options[1].name]
 		resolved := resolveShellPath(hc.Dir, outPath)
 		nBytes, err := mgr.ScreenshotAction(ctx, nick, resolved, "", full, adorn)
 		if err != nil {
@@ -387,11 +587,12 @@ func runWebBuiltin(ctx context.Context, cmdName string, args []string) error {
 		return nil
 
 	case "eval":
-		if len(subArgs) == 0 {
+		expression := invocation.argument(0)
+		if invocation.argumentCount(0) == 0 {
 			fmt.Fprintln(hc.Stderr, "usage: web eval <js_expression>")
 			return interp.ExitStatus(2)
 		}
-		val, delta, err := mgr.EvalAction(ctx, nick, strings.Join(subArgs, " "))
+		val, delta, err := mgr.EvalAction(ctx, nick, expression)
 		if err != nil {
 			fmt.Fprintf(hc.Stderr, "web eval: %v\n", err)
 			return interp.ExitStatus(1)
@@ -404,18 +605,20 @@ func runWebBuiltin(ctx context.Context, cmdName string, args []string) error {
 		return nil
 
 	case "cdp":
-		if len(subArgs) == 0 {
+		method := invocation.argument(0)
+		if invocation.argumentCount(0) == 0 {
 			fmt.Fprintln(hc.Stderr, "usage: web cdp <Method> [json_params]")
 			return interp.ExitStatus(2)
 		}
 		var params map[string]any
-		if len(subArgs) > 1 {
-			if err := json.Unmarshal([]byte(subArgs[1]), &params); err != nil {
+		if invocation.argumentCount(1) > 0 {
+			rawParams := invocation.argument(1)
+			if err := json.Unmarshal([]byte(rawParams), &params); err != nil {
 				fmt.Fprintf(hc.Stderr, "web cdp: invalid JSON params: %v\n", err)
 				return interp.ExitStatus(2)
 			}
 		}
-		raw, err := mgr.RawCDPAction(ctx, nick, subArgs[0], params)
+		raw, err := mgr.RawCDPAction(ctx, nick, method, params)
 		if err != nil {
 			fmt.Fprintf(hc.Stderr, "web cdp: %v\n", err)
 			return interp.ExitStatus(1)
@@ -435,7 +638,15 @@ func runWebBuiltin(ctx context.Context, cmdName string, args []string) error {
 		return nil
 
 	default:
-		fmt.Fprintf(hc.Stderr, "web: unknown subcommand %q (expected open, ax, click, type, shot, eval, cdp, logs)\n", sub)
+		fmt.Fprintf(hc.Stderr, "web: unknown subcommand %q (expected %s)\n", sub, strings.Join(webCanonicalSubcommandNames(), ", "))
 		return interp.ExitStatus(2)
 	}
+}
+
+func webCanonicalSubcommandNames() []string {
+	names := make([]string, len(webSubcommands))
+	for i, spec := range webSubcommands {
+		names[i] = spec.name
+	}
+	return names
 }

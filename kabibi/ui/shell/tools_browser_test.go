@@ -171,6 +171,35 @@ func startShellMockCDP(t *testing.T) string {
 	return wsURL
 }
 
+func TestParseWebBuiltinInvocationUsesSharedCommandSpecs(t *testing.T) {
+	invocation, err := parseWebBuiltinInvocation("web", []string{"-n", "researcher", "navigate", "https://example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if invocation.nickname != "researcher" || invocation.command != "open" ||
+		invocation.argumentCount(0) != 1 || invocation.argument(0) != "https://example.com" {
+		t.Fatalf("web invocation = %#v", invocation)
+	}
+
+	spec, ok := webSubcommand("screenshot")
+	if !ok || spec.name != "shot" || !spec.positionals[0].path ||
+		len(webOptionNames(spec)) != 2 || webOptionNames(spec)[0] != "--adorn" {
+		t.Fatalf("screenshot syntax = %#v", spec)
+	}
+
+	invocation, err = parseWebBuiltinInvocation("cdp", []string{"--nick=researcher", "Page.getFrameTree"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if invocation.nickname != "researcher" || invocation.command != "cdp" ||
+		invocation.argumentCount(0) != 1 || invocation.argument(0) != "Page.getFrameTree" {
+		t.Fatalf("CDP invocation = %#v", invocation)
+	}
+	if _, err := parseWebBuiltinInvocation("web", []string{"unknown"}); err == nil {
+		t.Fatal("unknown web subcommand was accepted")
+	}
+}
+
 func TestBrowserToolsAndWebShellBuiltins(t *testing.T) {
 	startShellMockCDP(t)
 	dir := t.TempDir()

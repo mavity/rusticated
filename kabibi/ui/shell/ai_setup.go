@@ -62,6 +62,17 @@ var supportedRemoteProviders = []remoteProviderEntry{
 	{provider: ai.RemoteGemini, label: "Google Gemini (API key)"},
 }
 
+func supportedRemoteProviderNames() []string {
+	names := make([]string, 0, len(supportedRemoteProviders)+1)
+	for _, entry := range supportedRemoteProviders {
+		names = append(names, string(entry.provider))
+		if entry.provider == ai.RemoteCopilot {
+			names = append(names, "copilot")
+		}
+	}
+	return names
+}
+
 func (r *LazyAIRunner) configureAI(ctx context.Context) (config.AIConfig, error) {
 	if r.openTerm != nil {
 		term, closeFn := r.openTerm(ctx, "ai setup")
@@ -533,7 +544,7 @@ func (r *LazyAIRunner) configureRemoteProviderWithTerm(ctx context.Context, term
 			return r.authenticateAndSaveRemoteProvider(ctx, prompter, term, entry.provider, entry.label, previous)
 		}
 	}
-	return config.AIConfig{}, fmt.Errorf("unknown provider %q (supported: openrouter, anthropic, openai, github-copilot, gemini)", providerArg)
+	return config.AIConfig{}, fmt.Errorf("unknown provider %q (supported: %s)", providerArg, strings.Join(supportedRemoteProviderNames(), ", "))
 }
 
 func (r *LazyAIRunner) authenticateAndSaveRemoteProvider(

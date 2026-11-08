@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -140,6 +141,20 @@ func (m *Manager) Close() error {
 		return err
 	}
 	return nil
+}
+
+func (m *Manager) Nicknames() []string {
+	m.mu.Lock()
+	names := make([]string, 0, len(m.tabs)+1)
+	names = append(names, "main")
+	for nickname := range m.tabs {
+		if nickname != "main" {
+			names = append(names, nickname)
+		}
+	}
+	m.mu.Unlock()
+	sort.Strings(names)
+	return names
 }
 
 func (m *Manager) ensureConnLocked(ctx context.Context) (*Conn, error) {
