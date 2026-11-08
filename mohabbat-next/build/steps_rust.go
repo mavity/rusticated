@@ -50,9 +50,10 @@ func buildFlatComponent(probeDir, rustBuildDir, outDir string, cfg FlatComponent
 		args = append(args, "--features", cfg.Feature)
 	}
 
+	buildTime := time.Now().Format("Monday, 2 January 2006 15:04:05 MST -07:00")
 	cmd := exec.Command("cargo", args...)
 	cmd.Dir = probeDir
-	cmd.Env = append(os.Environ(), "CARGO_HOME="+cargoHome)
+	cmd.Env = append(os.Environ(), "CARGO_HOME="+cargoHome, "BUILD_TIME="+buildTime)
 	if verbose {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr

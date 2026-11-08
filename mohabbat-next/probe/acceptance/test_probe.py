@@ -1,12 +1,13 @@
 import os
+import re
 import select
 import subprocess
 import sys
 
 
-EXPECTED = (
-    b"Anonymous-memory probe ready. Enter an empty line to exit.\n> "
-    b"echo: alpha\n> echo: beta\n> "
+PATTERN = (
+    rb"^Anonymous-memory probe ready \(compiled [^\)]+\)\. Enter an empty line to exit\.\r?\n"
+    rb"> echo: alpha\r?\n> echo: beta\r?\n> $"
 )
 
 
@@ -72,9 +73,9 @@ def main() -> int:
         print(f"probe exited with status {status}", file=sys.stderr)
         print(output.decode(errors="replace"), file=sys.stderr)
         return 1
-    if output != EXPECTED:
+    if not re.match(PATTERN, output):
         print("probe output did not match the acceptance transcript", file=sys.stderr)
-        print(f"expected: {EXPECTED!r}", file=sys.stderr)
+        print(f"pattern: {PATTERN!r}", file=sys.stderr)
         print(f"actual:   {output!r}", file=sys.stderr)
         return 1
     print("interactive probe acceptance passed")
