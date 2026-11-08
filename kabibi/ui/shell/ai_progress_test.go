@@ -358,6 +358,41 @@ func TestInteractiveListFilesPublishesAndClearsProgress(t *testing.T) {
 	}
 }
 
+func TestInteractiveListFilesDirectoryScopesSearch(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "nested")
+	if err := os.Mkdir(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "inside.txt"), []byte("inside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "outside.txt"), []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	execSess, err := NewExecutionSession(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer execSess.Close()
+
+	result, err := executeInteractiveListFiles(
+		context.Background(),
+		execSess,
+		[]string{"--directory", "nested", "--query", "*", "--max-results", "1"},
+		nil,
+		&bytes.Buffer{},
+		80,
+		19,
+	)
+	if err != nil {
+		t.Fatalf("executeInteractiveListFiles(): %v", err)
+	}
+	if !strings.Contains(result, "inside.txt") || strings.Contains(result, "outside.txt") {
+		t.Fatalf("interactive list_files did not scope results to directory: %q", result)
+	}
+}
+
 func TestInteractiveListFilesDoesNotClearProgressOnCancellation(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "browser_worker.go"), []byte("func startWorker() {}\n"), 0o644); err != nil {

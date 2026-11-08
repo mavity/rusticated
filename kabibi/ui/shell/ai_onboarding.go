@@ -587,7 +587,8 @@ func executeInteractiveListFilesInput(ctx context.Context, execSess *ExecutionSe
 		options.QuoteLimit = -1
 	}
 	options.LiveQuotes = options.QuoteLimit > 0
-	iter := filelist.NewSearchIterator(ctx, shellInvocationDir(ctx, execSess), options)
+	cwd := shellInvocationDir(ctx, execSess)
+	iter := filelist.NewSearchIterator(ctx, listFilesDirectory(cwd, input), options)
 	defer iter.Close()
 	output := newListFilesProgressOutput(stdout, width, listFilesProgressOutputRows(availableHeight))
 	defer func() {

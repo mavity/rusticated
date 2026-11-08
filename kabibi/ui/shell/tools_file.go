@@ -45,7 +45,8 @@ type WriteFileInput struct {
 }
 
 type ListFilesInput struct {
-	_             struct{} `doc:"List or search files in the current working directory using doublestar globs ('**/*.go'), fuzzy filename matching, or content search." emoji:"📂"`
+	_             struct{} `doc:"List or search files in a directory using doublestar globs ('**/*.go'), fuzzy filename matching, or content search." emoji:"📂"`
+	Directory     string   `json:"directory,omitempty" doc:"Directory to search (relative to current working directory or absolute; defaults to current working directory)."`
 	Query         string   `json:"query,omitempty" doc:"Glob pattern (e.g. '**/*.go'), filename query, or concept query. Default '*'."`
 	SearchContent bool     `json:"search_content,omitempty" doc:"If true, match query against file contents (exact -> semantic embeddings) instead of just filenames."`
 	MaxResults    int      `json:"max_results,omitempty" doc:"Max entries to return (default 50)."`
@@ -76,6 +77,10 @@ func listFilesOptions(ctx context.Context, in ListFilesInput, embedder ai.PartEm
 		}
 	}
 	return options
+}
+
+func listFilesDirectory(cwd string, in ListFilesInput) string {
+	return resolveShellPath(cwd, in.Directory)
 }
 
 func resolveShellPath(cwd, target string) string {
@@ -351,6 +356,8 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 
 	tools["list_files"] = ai.NewSessionTool(func(ctx context.Context, tc *ai.ToolContext, in ListFilesInput) (any, error) {
 		options := listFilesOptions(ctx, in, nil)
+		cwd := shellInvocationDir(ctx, execSess)
+		directory := listFilesDirectory(cwd, in)
 		q := options.Query
 		var feedback ai.LogFeedback
 		var embedder ai.PartEmbedder
@@ -363,7 +370,7 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		if feedback != nil {
 			feedback(lead)
 		}
-		table, err := filelist.ListFiles(shellInvocationDir(ctx, execSess), options)
+		table, err := filelist.ListFiles(directory, options)
 		if err != nil {
 			if feedback != nil {
 				feedback(lead + "failed")
