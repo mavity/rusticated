@@ -18,6 +18,7 @@ func TestParseAIToolArguments(t *testing.T) {
 
 	raw, err := parseAIToolArguments(tools["list_files"], []string{
 		"--QUERY", "two words",
+		"--directory", "nested",
 		"--search-content",
 		"--max-results", "17",
 	})
@@ -28,7 +29,8 @@ func TestParseAIToolArguments(t *testing.T) {
 	if err := json.Unmarshal(raw, &listArgs); err != nil {
 		t.Fatal(err)
 	}
-	if listArgs["query"] != "two words" || listArgs["search_content"] != true || listArgs["max_results"] != float64(17) {
+	if listArgs["query"] != "two words" || listArgs["directory"] != "nested" ||
+		listArgs["search_content"] != true || listArgs["max_results"] != float64(17) {
 		t.Fatalf("parsed list_files arguments = %#v", listArgs)
 	}
 
@@ -206,6 +208,43 @@ func TestExecuteAIToolListFilesUsesProvidedEmbedder(t *testing.T) {
 	}
 	if embedder.queryCalls != 0 || embedder.batchCalls != 3 {
 		t.Fatalf("embedder calls = (query %d, batch %d), want (0, 3) for query, candidate, and quote chunk", embedder.queryCalls, embedder.batchCalls)
+	}
+}
+
+func TestExecuteAIToolListFilesDirectoryScopesSearch(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "nested")
+	if err := os.Mkdir(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for path, content := range map[string]string{
+		filepath.Join(nested, "inside.txt"): "inside",
+		filepath.Join(root, "outside.txt"):  "outside",
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	execSess, err := NewExecutionSession(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer execSess.Close()
+
+	for _, directory := range []string{"nested", nested} {
+		result, err := executeAITool(context.Background(), execSess, "list_files", []string{
+			"--directory", directory,
+			"--query", "*",
+		}, nil)
+		if err != nil {
+			t.Fatalf("execute list_files with directory %q: %v", directory, err)
+		}
+		if !strings.Contains(result, "inside.txt") || strings.Contains(result, "outside.txt") {
+			t.Errorf("list_files directory %q returned wrong entries:\n%s", directory, result)
+		}
+		if !strings.Contains(result, "(1 entries,") {
+			t.Errorf("list_files directory %q result count is not scoped:\n%s", directory, result)
+		}
 	}
 }
 
