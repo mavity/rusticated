@@ -411,3 +411,96 @@ The feature is ready for approval as implemented only when:
 This document defines the proposed behavior, parser contract, and validation
 gates. It does not authorize implementation. Code changes and builds begin only
 after the specification is reviewed and approved.
+
+# Feasibility of the syntax inference
+
+
+## Complete builtin/parser-source audit
+
+The parser-source requirement in `17-completions.md` is the right invariant, but the current parsers do not provide a single reusable grammar for most builtins. In particular, harvesting a `flag.FlagSet` covers option declarations—not positional argument meaning—and several major command families do not use a `FlagSet` parser at all.
+
+**Correction:** the u-root registry has **85 entries**, not 92. I initially overcounted it; I verified the count against the registry sections.
+
+### 1. u-root: all 85 registered commands
+
+The full registry is in `uroot.go`. Its entries, grouped as registered, are:
+
+- **Pilot:** `cat`, `grep`, `rg`
+- **Text/filter:** `base64`, `cmp`, `comm`, `head`, `hexdump`, `more`, `seq`, `sed`, `sort`, `strings`, `tail`, `tee`, `tr`, `ts`, `tsort`, `uniq`, `wc`, `yes`
+- **File/directory:** `basename`, `chmod`, `cp`, `dirname`, `du`, `find`, `ln`, `ls`, `mkdir`, `mktemp`, `mv`, `pwd`, `readlink`, `realpath`, `rm`, `touch`, `truncate`
+- **Archive/compression:** `cpio`, `gpgv`, `gzcat`, `gzip`, `md5sum`, `shasum`, `tar`
+- **Utility/control:** `backoff`, `date`, `false`, `hostname`, `printenv`, `sleep`, `time`, `timeout`, `true`, `which`, `xargs`
+- **Transport/subshell:** `dd`, `gosh`, `nc`, `netcat`, `nohup`, `scp`, `sshd`, `ufs`, `wget`
+- **Diagnostics/network:** `df`, `dmesg`, `free`, `id`, `ip`, `kill`, `lddfiles`, `lsdrivers`, `lsfd`, `lsmod`, `netstat`, `pci`, `pidof`, `ping`, `ps`, `stty`, `sync`, `tty`, `uname`, `uptime`
+
+**Parser inventory and fixes:**
+
+- **73 commands use Go `flag.FlagSet`**; `cp` uses `pflag`. Examples of the actual flag setup are in `cat.go`, `dd.go`, `cp.go`, `ls.go`, and `wget.go`.
+  - These flag definitions are constructed in command code, not exposed by the registry as reusable parser objects. `Main` cannot be run just to inspect them because it can perform command side effects.
+  - **Fix:** extract side-effect-free flag-set builders and use them for runtime parsing and completion. Add the separate positional grammar the flag library does not express; do not infer operand order or meaning from `Args()` or help text.
+  - The `pflag` case needs an adapter for its shorthand and optional/no-value conventions; do not treat it as standard `flag` metadata.
+
+- **Flag parsing plus additional grammar:** `dd`, `find`, `xargs`, `sed`, `tr`, `ip`, `time`, `timeout`, `scp`, `printenv`, `sleep`, `tar`, `cp`, `ln`, and `mv`.
+  - For `dd`, the user-facing syntax is `key=value`; the `FlagSet` sees arguments only after conversion. Completion must share the conversion/parser, not suggest Go-style `--` flags. See `dd.go`.
+  - `find` needs its starting-path position; `xargs`, `time`, and `timeout` need to transition to a delegated command and its arguments. `ip` has subcommands. `sed` and `tr` have script/set-expression grammars. `scp` has local/remote source and destination forms. `cp`, `ln`, and `mv` need source/destination cardinality. `tar`, `printenv`, and `sleep` also need positional roles beyond flags.
+  - **Fix:** make those additional grammar states part of the same parser used by runtime, with completion callbacks for the next argument role. Command-delegating parsers must hand off command position to command-name completion after their options.
+
+- **Handwritten/non-`FlagSet` parsers:** `grep`, `rg`, `chmod`, `kill`, and `stty`; `rg.go`, `chmod.go`, `kill.go`, and `stty.go` illustrate the exceptions.
+  - `grep`/`rg` need pattern-versus-file roles; `chmod` needs mode-expression then path; `kill` needs signal/PID roles; `stty` has setting subcommands, including `load <file>`.
+  - **Fix:** expose/refactor each parser as a reusable stateful grammar; a completion-only option map would duplicate its real parser.
+
+- **Delegated command/shell grammar:** `gosh` and `nohup`. Their syntax cannot be fully described by option flags; completion must transition into the nested shell or command grammar.
+
+- **Aliases/wrappers and no-argument commands:** `nc` shares `netcat`’s implementation; `gzcat` uses the gzip implementation family; `more` wraps `more.Main`; `false` and `true` take no operands. Reuse the target implementation’s grammar rather than defining a second one. The alias/wrapper assignments are visible in `uroot.go`.
+
+**Dispatch collisions matter:** `false`, `true`, and `pwd` are also mvdan builtins, which execute before the registered u-root handler. `time` is a shell grammar keyword, not an ordinary `IsBuiltin` entry, and is also registered in u-root. Completion must reflect actual parser/dispatch precedence; it must not blindly union registry names as executable command candidates.
+
+### 2. mvdan shell builtins
+
+The local mvdan fork’s `interp.IsBuiltin` recognizes 61 names, but that API classifies names—it does not expose their argument syntax. Runtime parsing is a handwritten switch in `builtin.go`; even its `flagParser` only consumes tokens and registers no option metadata (`flagParser`). Builtins are dispatched before external execution handlers in `runner.go`.
+
+The complete recognized-name inventory is:
+
+- POSIX regular: `alias`, `bg`, `cd`, `command`, `false`, `fc`, `fg`, `getopts`, `hash`, `jobs`, `newgrp`, `pwd`, `read`, `true`, `umask`, `unalias`, `wait`
+- POSIX special: `break`, `:`, `continue`, `.`, `eval`, `exec`, `exit`, `export`, `readonly`, `return`, `set`, `shift`, `times`, `trap`, `unset`
+- Bash: `source`, `bind`, `builtin`, `caller`, `compgen`, `complete`, `compopt`, `declare`, `typeset`, `dirs`, `disown`, `enable`, `history`, `help`, `let`, `local`, `logout`, `mapfile`, `readarray`, `popd`, `pushd`, `shopt`, `suspend`, `type`, `ulimit`
+- Utilities: `echo`, `printf`, `test`, `[`
+
+The runtime switch implements many of these, including `cd`, `read`, `getopts`, `type`, `command`, `test`/`[`, `trap`, and `mapfile`/`readarray`. But **17 names are recognized by `IsBuiltin` and have no corresponding implementation case**: `bg`, `fc`, `fg`, `jobs`, `newgrp`, `bind`, `caller`, `compgen`, `complete`, `compopt`, `disown`, `enable`, `history`, `local`, `logout`, `suspend`, `ulimit`. They fall through to “unsupported builtin.” They should not be presented as supported completable builtins unless runtime support and its parser are added.
+
+`export`, `readonly`, `declare`, `typeset`, and `let` are parser-level forms, not ordinary argv parsers. Completion must follow their shell AST/assignment grammar rather than apply a command-flag schema.
+
+**Fix:** add a shared parser/completion definition at the interpreter implementation site and make runtime consume it. This must support semantic next-argument roles for the builtins whose syntax is not a flat option list: e.g. `test` expressions; `eval` shell text; `source` file plus positional parameters; `command`/`builtin` delegated command names; `read` variable names; and `trap` action/signal pairs. Do not use a generic flag schema for those. The recognized-but-unimplemented names need an explicit unsupported status, not guessed argument grammars.
+
+### 3. Git: two parser owners, neither currently exposes a sufficient golden source
+
+Kabibi intercepts `git` and parses global options itself in `git_builtin.go`, then delegates most commands to the pinned `go-git` dependency (`go.mod`). That dependency’s runtime dispatcher maps subcommands to private command methods ([upstream git.go](https://github.com/adrianliechti/go-git/blob/92d90da1a03594ec62f56cea36e6908c53acf2ab/git.go#L254)). Its separate help/usage/options table is not consumed by those runtime parsers and covers only some commands ([upstream help.go](https://github.com/adrianliechti/go-git/blob/92d90da1a03594ec62f56cea36e6908c53acf2ab/help.go#L16)). **That help table is not a golden parser source.**
+
+The delegated command set includes `init`, `clone`, `add`, `mv`, `rm`, `restore`, `clean`, `stash`, `commit`, `status`, `log`, `show`, `diff`, `grep`, `blame`, `shortlog`, `describe`, `branch`, `checkout`, `switch`, `reset`, `merge`, `rebase`, `cherry-pick`, `revert`, `bisect`, `format-patch`, `apply`, `am`, `tag`, `remote`, `fetch`, `pull`, `push`, `submodule`, `worktree`, `ls-remote`, `reflog`, `config`, `version`, and plumbing commands including `rev-parse`, `rev-list`, `cat-file`, `hash-object`, `ls-files`, `ls-tree`, `show-ref`, `for-each-ref`, `update-ref`, `symbolic-ref`, `write-tree`, `commit-tree`, `read-tree`, `update-index`, `diff-tree`, `merge-base`, `merge-file`, and `count-objects`; `help` is handled specially by the dependency.
+
+Kabibi adds more parser surfaces:
+
+- Global Git options: `-C`, `-c`, `--git-dir`, `--work-tree`, pager flags, and `--bare`.
+- `commit --author` and `--date` are parsed by Kabibi before delegation.
+- Kabibi implements `replace`, `notes` (`list/show/add/append/remove/prune`), and `bisect run` itself. `replace` has list/delete/force/graft forms; notes has `--ref` plus subcommand-specific arguments; `bisect run` changes to command position. See `git_notes_replace.go`, `git_rewrite.go`, and `git_notes_replace.go`.
+- SSH `clone` and `ls-remote` have a local parser/intercept, then may fall back to the dependency parser (`git_remote_ssh.go`).
+- `log` and `diff` have parsers for a limited streaming/pager optimization subset. Those do not define the complete command grammar (`git_log_stream.go`).
+
+**Fix:** the dependency needs a public shared parser/command-spec API (upstream change or maintained fork). Its command runtime must consume that API, and completion must query it; copying the private help map into Kabibi would leave two sources. Kabibi’s global options and its local intercepts must likewise become shared runtime/completion parsers, including the intercepted/fallback cases. The limited log/diff optimization parsers must not be used as grammar sources.
+
+### 4. Browser and AI commands
+
+- **`web` and `cdp`:** `tools_browser.go` hand-parses `--nick`/`-n`, subcommands, and arguments. `web` has `open`/`nav`/`navigate`, `ax`, `click`, `type`, `shot`/`screenshot`, `eval`, `cdp`, and `logs`; argument roles include URL, target, text, output path, JavaScript, and JSON. The browser AI tools’ typed definitions do not serve as this shell parser.
+  - **Fix:** define each shell action’s argument grammar once and make the dispatch parser and completer use it. Add semantic providers for browser nicknames and CDP methods; mark only screenshot output as path-like.
+
+- **AI tools:** this is the good existing case. Typed definitions build `ai.Tool` schemas in `ai_tools.go`, and `parseAIToolArguments` consumes those schemas. Reuse them for completion. Explicit path metadata or the documented description heuristic can provide value semantics; do not add a second option table.
+- **AI control commands:** `ai setup/login/logout/status` use a separate switch in `ai_onboarding.go`, not the tool schema. `login`/`logout` accept provider values, while `setup`/`status` do not take operands.
+  - **Fix:** register the control subcommands and provider values with the parser the runtime actually uses; do not infer provider candidates from help prose.
+- **Nested shells:** `bash`, `sh`, and `kabibi` are Kabibi-defined command handlers with a manual flag loop in `shell.go`. It handles `-c`/`--command`, `-s`, compatibility flags, `-o`/`+o`, script/command arguments, and forwards other flags.
+  - **Fix:** share that parser’s state with completion and transition to shell-command or script-path completion at the appropriate position.
+- **App-level `quit`:** it is handled as an exact standalone input by `exec_session.go`, not by a builtin argument parser. Treat it as a no-argument app command; `exit` also has the normal shell builtin’s status argument.
+
+### Bottom line
+
+The doc’s shared-definition contract can cover these cases, but “extract flags from a `FlagSet`” is only the first layer. u-root positional grammars, handwritten parsers, mvdan builtins, Git’s dependency parser plus Kabibi intercepts, browser commands, AI control commands, and nested shells all need parser-owned completion state that runtime also consumes. Runtime registration must distinguish actual implementations from names that are merely recognized, and honor dispatch precedence/aliases rather than merge command-name registries blindly.
+
