@@ -214,7 +214,7 @@ func (m *liveQuoteManager) extract(job *liveQuoteJob) {
 	m.mu.Lock()
 	query := append([]float32(nil), m.queryVec...)
 	m.mu.Unlock()
-	quote, err := relevantQuote(job.ctx, job.entry, query, m.embedder, m.progress)
+	quote, startLine, endLine, err := relevantQuote(job.ctx, job.entry, query, m.embedder, m.progress)
 	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 		m.fail(job, err)
 		return
@@ -231,7 +231,7 @@ func (m *liveQuoteManager) extract(job *liveQuoteJob) {
 	job.cancel()
 	delete(m.jobs, job.entry.relPath)
 	m.mu.Unlock()
-	if err := m.progress.updateQuote(job.entry.relPath, quote); err != nil && m.ctx.Err() == nil {
+	if err := m.progress.updateQuote(job.entry.relPath, quote, startLine, endLine); err != nil && m.ctx.Err() == nil {
 		m.fail(job, err)
 	}
 }

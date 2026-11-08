@@ -15,10 +15,12 @@ import (
 )
 
 const maxQuoteChunkBytes = 1500
+const maxQuoteCoreLines = 4
+const quoteContextLines = 1
 
 type quoteLine struct {
-	source string
-	input  string
+	input      string
+	lineNumber int
 }
 
 type quoteChunk struct {
@@ -41,34 +43,36 @@ func enrichSemanticQuotes(ctx context.Context, entries []fileEntry, queryVector 
 		if err := progress.update("quote", entries[index].relPath, stats.Viewed, stats.Total); err != nil {
 			return err
 		}
-		quote, err := relevantQuote(ctx, entries[index], queryVector, embedder, progress)
+		quote, startLine, endLine, err := relevantQuote(ctx, entries[index], queryVector, embedder, progress)
 		if err != nil {
 			return fmt.Errorf("find relevant quote in %q: %w", entries[index].relPath, err)
 		}
 		entries[index].quote = quote
-		if err := progress.updateQuote(entries[index].relPath, quote); err != nil {
+		entries[index].quoteStartLine = startLine
+		entries[index].quoteEndLine = endLine
+		if err := progress.updateQuote(entries[index].relPath, quote, startLine, endLine); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func relevantQuote(ctx context.Context, entry fileEntry, queryVector []float32, embedder *concurrentEmbedder, progress *progressTracker) (string, error) {
+func relevantQuote(ctx context.Context, entry fileEntry, queryVector []float32, embedder *concurrentEmbedder, progress *progressTracker) (string, int, int, error) {
 	if entry.isDir {
-		return "", nil
+		return "", 0, 0, nil
 	}
 	file, err := os.Open(entry.absPath)
 	if err != nil {
-		return "", err
+		return "", 0, 0, err
 	}
 	defer file.Close()
 	reader := bufio.NewReaderSize(file, maxQuoteChunkBytes*2)
 	prefix, peekErr := reader.Peek(512)
 	if peekErr != nil && peekErr != io.EOF {
-		return "", peekErr
+		return "", 0, 0, peekErr
 	}
 	if isBinaryBlob(prefix) {
-		return "", nil
+		return "", 0, 0, nil
 	}
 
 	var pending []quoteChunk
@@ -127,17 +131,21 @@ func relevantQuote(ctx context.Context, entry fileEntry, queryVector []float32, 
 		}
 		return nil
 	}); err != nil {
-		return "", err
+		return "", 0, 0, err
 	}
 	if err := processPending(); err != nil {
-		return "", err
+		return "", 0, 0, err
 	}
 	if len(bestLines) == 0 {
-		return "", nil
+		return "", 0, 0, nil
 	}
 	for len(bestLines) > 1 {
+		coreLineSpan := bestLines[len(bestLines)-1].lineNumber - bestLines[0].lineNumber + 1
+		if len(bestLines) <= maxQuoteCoreLines && coreLineSpan <= maxQuoteCoreLines {
+			break
+		}
 		if err := ctx.Err(); err != nil {
-			return "", err
+			return "", 0, 0, err
 		}
 		middle := len(bestLines) / 2
 		left, right := bestLines[:middle], bestLines[middle:]
@@ -147,17 +155,17 @@ func relevantQuote(ctx context.Context, entry fileEntry, queryVector []float32, 
 		if err != nil {
 			progress.logVerbose("embedding failed phase=quote-bisect path=%q duration=%s error=%q",
 				entry.relPath, time.Since(embedStarted), err)
-			return "", err
+			return "", 0, 0, err
 		}
 		progress.logVerbose("embedding finish phase=quote-bisect path=%q duration=%s",
 			entry.relPath, time.Since(embedStarted))
 		leftScore, err := quoteSimilarity(queryVector, vectors[0])
 		if err != nil {
-			return "", fmt.Errorf("score left bisection: %w", err)
+			return "", 0, 0, fmt.Errorf("score left bisection: %w", err)
 		}
 		rightScore, err := quoteSimilarity(queryVector, vectors[1])
 		if err != nil {
-			return "", fmt.Errorf("score right bisection: %w", err)
+			return "", 0, 0, fmt.Errorf("score right bisection: %w", err)
 		}
 		if leftScore >= rightScore {
 			bestLines = left
@@ -165,7 +173,46 @@ func relevantQuote(ctx context.Context, entry fileEntry, queryVector []float32, 
 			bestLines = right
 		}
 	}
-	return strings.TrimSpace(bestLines[0].source), nil
+	return readQuoteExcerpt(
+		ctx,
+		entry.absPath,
+		bestLines[0].lineNumber,
+		bestLines[len(bestLines)-1].lineNumber,
+	)
+}
+
+func readQuoteExcerpt(ctx context.Context, path string, coreStart, coreEnd int) (string, int, int, error) {
+	if err := ctx.Err(); err != nil {
+		return "", 0, 0, err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", 0, 0, err
+	}
+	defer file.Close()
+
+	startLine := max(1, coreStart-quoteContextLines)
+	endLine := coreEnd + quoteContextLines
+	reader := bufio.NewReaderSize(file, maxQuoteChunkBytes*2)
+	var lines []string
+	actualEndLine := 0
+	for lineNumber := 1; lineNumber <= endLine; lineNumber++ {
+		line, ok, err := readBoundedQuoteLine(ctx, reader)
+		if ok && lineNumber >= startLine {
+			lines = append(lines, line)
+			actualEndLine = lineNumber
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", 0, 0, err
+		}
+	}
+	if len(lines) == 0 {
+		return "", 0, 0, nil
+	}
+	return strings.Join(lines, "\n"), startLine, actualEndLine, nil
 }
 
 func quoteSimilarity(query, candidate []float32) (float64, error) {
@@ -194,11 +241,15 @@ func scanQuoteChunks(ctx context.Context, reader *bufio.Reader, yield func(quote
 		currentBytes = 0
 		return nil
 	}
+	lineNumber := 0
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		line, ok, err := readBoundedQuoteLine(ctx, reader)
+		if ok {
+			lineNumber++
+		}
 		if ok && strings.TrimSpace(line) != "" {
 			input := truncateUTF8(line, maxQuoteChunkBytes)
 			lineBytes := len(input) + 1
@@ -207,7 +258,7 @@ func scanQuoteChunks(ctx context.Context, reader *bufio.Reader, yield func(quote
 					return flushErr
 				}
 			}
-			current.lines = append(current.lines, quoteLine{source: line, input: input})
+			current.lines = append(current.lines, quoteLine{input: input, lineNumber: lineNumber})
 			currentBytes += lineBytes
 		}
 		if err == io.EOF {

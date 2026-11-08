@@ -207,11 +207,13 @@ func isBooleanValue(value string) bool {
 
 func formatAIToolResultMarkdown(name string, result any) (string, error) {
 	var (
-		body     string
-		language = "text"
+		body         string
+		language     = "text"
+		markdownBody bool
 	)
 	if text, ok := result.(string); ok {
 		body = text
+		markdownBody = normalizeAIToolName(name) == "list_files"
 	} else {
 		encoded, err := json.MarshalIndent(result, "", "  ")
 		if err != nil {
@@ -221,6 +223,9 @@ func formatAIToolResultMarkdown(name string, result any) (string, error) {
 		language = "json"
 	}
 	body = strings.TrimRight(sanitizeMarkdownControls(body), "\n")
+	if markdownBody {
+		return fmt.Sprintf("### %s\n\n%s\n", name, body), nil
+	}
 	fence := markdownCodeFence(body)
 	return fmt.Sprintf("### %s\n\n%s%s\n%s\n%s\n", name, fence, language, body, fence), nil
 }

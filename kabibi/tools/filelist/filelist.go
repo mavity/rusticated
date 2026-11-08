@@ -44,27 +44,31 @@ type Options struct {
 }
 
 type fileEntry struct {
-	relPath     string
-	absPath     string
-	isDir       bool
-	isSymlink   bool
-	isExec      bool
-	size        int64
-	linkTarget  string
-	quote       string
-	score       float64
-	hasScore    bool
-	scoreText   string
-	scoreVector []float32
+	relPath        string
+	absPath        string
+	isDir          bool
+	isSymlink      bool
+	isExec         bool
+	size           int64
+	linkTarget     string
+	quote          string
+	quoteStartLine int
+	quoteEndLine   int
+	score          float64
+	hasScore       bool
+	scoreText      string
+	scoreVector    []float32
 }
 
 type Match struct {
-	Path     string
-	Size     int64
-	IsDir    bool
-	Score    float64
-	HasScore bool
-	Quote    string
+	Path           string
+	Size           int64
+	IsDir          bool
+	Score          float64
+	HasScore       bool
+	Quote          string
+	QuoteStartLine int
+	QuoteEndLine   int
 }
 
 var defaultSkippedDirs = map[string]bool{
@@ -203,8 +207,14 @@ func listFiles(ctx context.Context, cwd string, opts Options, progress *progress
 	displayCwd := compactHomePath(absCwd)
 	var output strings.Builder
 	fmt.Fprintln(&output, truncateOutputLine(fmt.Sprintf("[cwd: %s] (%d entries, mode: %s)", displayCwd, len(matched), modeLabel), opts.MaxLineWidth))
-	for _, entry := range matched {
+	if len(matched) > 0 {
+		fmt.Fprintln(&output)
+	}
+	for index, entry := range matched {
 		fmt.Fprintln(&output, FormatMatch(toMatch(entry), opts.MaxLineWidth))
+		if index+1 < len(matched) {
+			fmt.Fprintln(&output)
+		}
 	}
 	stats := progress.current()
 	if stats.Viewed > 0 {
@@ -217,13 +227,24 @@ func listFiles(ctx context.Context, cwd string, opts Options, progress *progress
 }
 
 func mergeProgressQuotes(entries, progressEntries []fileEntry) []fileEntry {
-	quotes := make(map[string]string, len(progressEntries))
+	type quoteProgress struct {
+		text      string
+		startLine int
+		endLine   int
+	}
+	quotes := make(map[string]quoteProgress, len(progressEntries))
 	for _, entry := range progressEntries {
-		quotes[entry.relPath] = entry.quote
+		quotes[entry.relPath] = quoteProgress{
+			text:      entry.quote,
+			startLine: entry.quoteStartLine,
+			endLine:   entry.quoteEndLine,
+		}
 	}
 	for index := range entries {
 		if quote, ok := quotes[entries[index].relPath]; ok {
-			entries[index].quote = quote
+			entries[index].quote = quote.text
+			entries[index].quoteStartLine = quote.startLine
+			entries[index].quoteEndLine = quote.endLine
 		}
 	}
 	return entries
@@ -241,25 +262,170 @@ func toMatch(entry fileEntry) Match {
 	if entry.isSymlink && entry.linkTarget != "" {
 		name += " -> " + entry.linkTarget
 	}
-	return Match{Path: name, Size: entry.size, IsDir: entry.isDir, Score: entry.score, HasScore: entry.hasScore, Quote: entry.quote}
+	return Match{
+		Path:           name,
+		Size:           entry.size,
+		IsDir:          entry.isDir,
+		Score:          entry.score,
+		HasScore:       entry.hasScore,
+		Quote:          entry.quote,
+		QuoteStartLine: entry.quoteStartLine,
+		QuoteEndLine:   entry.quoteEndLine,
+	}
 }
 
 func FormatMatch(match Match, maxWidth int) string {
+	header := formatMatchHeader(match)
+	quote := cleanQuote(match.Quote)
+	if quote == "" {
+		return truncateOutputLine(header, maxWidth)
+	}
+	header = truncateOutputLine(header+":", maxWidth)
+	fence := markdownQuoteFence(quote)
 	var output strings.Builder
+	fmt.Fprintf(&output, "%s\n  %s%s\n", header, fence, quoteLanguageForPath(match.Path))
+	for _, line := range strings.Split(quote, "\n") {
+		line = truncateOutputLine(cleanQuoteLine(line), maxWidth-2)
+		fmt.Fprintf(&output, "  %s\n", line)
+	}
+	fmt.Fprintf(&output, "  %s", fence)
+	return output.String()
+}
+
+func FormatMatchPreview(match Match, maxWidth int) string {
+	output := formatMatchHeader(match)
+	if quote := cleanMatchField(match.Quote); quote != "" {
+		output += fmt.Sprintf("  %q", quote)
+	}
+	return truncateOutputLine(output, maxWidth)
+}
+
+func formatMatchHeader(match Match) string {
+	var output strings.Builder
+	output.WriteString("* ")
 	if match.HasScore {
 		fmt.Fprintf(&output, "%.2f  ", match.Score)
 	}
-	output.WriteString(cleanMatchField(match.Path))
+	output.WriteString(markdownInlineCode(cleanMatchField(match.Path)))
 	if match.IsDir {
 		output.WriteByte('/')
 	}
 	if match.Size > 0 {
 		fmt.Fprintf(&output, "  %s", formatFileSize(match.Size))
 	}
-	if quote := cleanMatchField(match.Quote); quote != "" {
-		fmt.Fprintf(&output, "  %q", quote)
+	if match.QuoteStartLine > 0 {
+		if match.QuoteEndLine > match.QuoteStartLine {
+			fmt.Fprintf(&output, ", lines %d-%d", match.QuoteStartLine, match.QuoteEndLine)
+		} else {
+			fmt.Fprintf(&output, ", line %d", match.QuoteStartLine)
+		}
 	}
-	return truncateOutputLine(output.String(), maxWidth)
+	return output.String()
+}
+
+func cleanQuote(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.ReplaceAll(value, "\r", "\n")
+	var clean strings.Builder
+	for _, r := range value {
+		if r == '\n' || r == '\t' || !unicode.IsControl(r) {
+			clean.WriteRune(r)
+		} else {
+			clean.WriteByte(' ')
+		}
+	}
+	return clean.String()
+}
+
+func cleanQuoteLine(value string) string {
+	var clean strings.Builder
+	for _, r := range value {
+		if r == '\t' || !unicode.IsControl(r) {
+			clean.WriteRune(r)
+		} else {
+			clean.WriteByte(' ')
+		}
+	}
+	return clean.String()
+}
+
+func markdownQuoteFence(quote string) string {
+	longest, current := 0, 0
+	for _, r := range quote {
+		if r == '`' {
+			current++
+			longest = max(longest, current)
+		} else {
+			current = 0
+		}
+	}
+	return strings.Repeat("`", max(3, longest+1))
+}
+
+func markdownInlineCode(value string) string {
+	longest, current := 0, 0
+	for _, r := range value {
+		if r == '`' {
+			current++
+			longest = max(longest, current)
+		} else {
+			current = 0
+		}
+	}
+	fence := strings.Repeat("`", longest+1)
+	if strings.HasPrefix(value, "`") || strings.HasSuffix(value, "`") {
+		value = " " + value + " "
+	}
+	return fence + value + fence
+}
+
+func quoteLanguageForPath(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".go":
+		return "go"
+	case ".rs":
+		return "rust"
+	case ".py":
+		return "python"
+	case ".js", ".mjs", ".cjs":
+		return "javascript"
+	case ".jsx":
+		return "jsx"
+	case ".ts":
+		return "typescript"
+	case ".tsx":
+		return "tsx"
+	case ".java":
+		return "java"
+	case ".c", ".h":
+		return "c"
+	case ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx":
+		return "cpp"
+	case ".cs":
+		return "csharp"
+	case ".sh", ".bash":
+		return "bash"
+	case ".json":
+		return "json"
+	case ".yaml", ".yml":
+		return "yaml"
+	case ".toml":
+		return "toml"
+	case ".html", ".htm":
+		return "html"
+	case ".css":
+		return "css"
+	case ".xml":
+		return "xml"
+	case ".sql":
+		return "sql"
+	case ".md":
+		return "markdown"
+	case ".diff", ".patch":
+		return "diff"
+	default:
+		return ""
+	}
 }
 
 func formatFileSize(size int64) string {
@@ -492,13 +658,26 @@ func filterByContent(ctx context.Context, entries []fileEntry, query string, max
 			continue
 		}
 		textCandidates = append(textCandidates, entry)
-		for _, line := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
+		normalized := strings.ReplaceAll(string(data), "\r\n", "\n")
+		lines := strings.Split(normalized, "\n")
+		if strings.HasSuffix(normalized, "\n") {
+			lines = lines[:len(lines)-1]
+		}
+		for lineIndex, line := range lines {
 			hit := strings.Contains(strings.ToLower(line), lowerQuery)
 			if !hit && reErr == nil {
 				hit = re.MatchString(line)
 			}
 			if hit {
-				entry.quote = strings.TrimSpace(line)
+				startIndex := max(0, lineIndex-quoteContextLines)
+				endIndex := min(len(lines), lineIndex+quoteContextLines+1)
+				excerpt := make([]string, 0, endIndex-startIndex)
+				for _, excerptLine := range lines[startIndex:endIndex] {
+					excerpt = append(excerpt, truncateUTF8(excerptLine, maxQuoteChunkBytes))
+				}
+				entry.quote = strings.Join(excerpt, "\n")
+				entry.quoteStartLine = startIndex + 1
+				entry.quoteEndLine = endIndex
 				matched = append(matched, entry)
 				break
 			}

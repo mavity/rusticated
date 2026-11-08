@@ -8,11 +8,13 @@ import (
 )
 
 type ProgressMatch struct {
-	Path     string
-	Size     int64
-	Score    float64
-	HasScore bool
-	Quote    string
+	Path           string
+	Size           int64
+	Score          float64
+	HasScore       bool
+	Quote          string
+	QuoteStartLine int
+	QuoteEndLine   int
 }
 
 type Progress struct {
@@ -162,12 +164,14 @@ func (p *progressTracker) queryEmbedding() []float32 {
 	return append([]float32(nil), p.queryVec...)
 }
 
-func (p *progressTracker) updateQuote(path, quote string) error {
+func (p *progressTracker) updateQuote(path, quote string, startLine, endLine int) error {
 	p.mu.Lock()
 	found := false
 	for index := range p.entries {
 		if p.entries[index].relPath == path {
 			p.entries[index].quote = quote
+			p.entries[index].quoteStartLine = startLine
+			p.entries[index].quoteEndLine = endLine
 			found = true
 			break
 		}
@@ -232,11 +236,13 @@ func (p *progressTracker) current() Progress {
 	state.Matches = make([]ProgressMatch, len(p.entries))
 	for i, entry := range p.entries {
 		state.Matches[i] = ProgressMatch{
-			Path:     entry.relPath,
-			Size:     entry.size,
-			Score:    entry.score,
-			HasScore: entry.hasScore,
-			Quote:    entry.quote,
+			Path:           entry.relPath,
+			Size:           entry.size,
+			Score:          entry.score,
+			HasScore:       entry.hasScore,
+			Quote:          entry.quote,
+			QuoteStartLine: entry.quoteStartLine,
+			QuoteEndLine:   entry.quoteEndLine,
 		}
 	}
 	return state
