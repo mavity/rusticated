@@ -12,7 +12,6 @@ type liveQuoteJob struct {
 	entry    fileEntry
 	ctx      context.Context
 	cancel   context.CancelFunc
-	order    *embeddingOrderHandle
 	rank     int
 	started  bool
 	released bool
@@ -78,7 +77,6 @@ func (m *liveQuoteManager) sync(entries []fileEntry) {
 	for path, job := range m.jobs {
 		if rank, ok := visible[path]; ok && job.ctx.Err() == nil {
 			job.rank = rank
-			job.order.SetRank(rank)
 			continue
 		}
 		if job.ctx.Err() != nil {
@@ -118,10 +116,8 @@ func (m *liveQuoteManager) sync(entries []fileEntry) {
 			entry:  entry,
 			ctx:    jobCtx,
 			cancel: cancel,
-			order:  m.embedder.NewOrderHandle(),
 			rank:   rank,
 		}
-		job.order.SetRank(rank)
 		m.jobs[entry.relPath] = job
 		m.pending = append(m.pending, job)
 		m.activeJobs.Add(1)
@@ -218,7 +214,7 @@ func (m *liveQuoteManager) extract(job *liveQuoteJob) {
 	m.mu.Lock()
 	query := append([]float32(nil), m.queryVec...)
 	m.mu.Unlock()
-	quote, err := relevantQuote(job.ctx, job.entry, query, m.embedder, job.order, m.progress)
+	quote, err := relevantQuote(job.ctx, job.entry, query, m.embedder, m.progress)
 	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 		m.fail(job, err)
 		return

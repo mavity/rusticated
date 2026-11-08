@@ -41,7 +41,7 @@ func enrichSemanticQuotes(ctx context.Context, entries []fileEntry, queryVector 
 		if err := progress.update("quote", entries[index].relPath, stats.Viewed, stats.Total); err != nil {
 			return err
 		}
-		quote, err := relevantQuote(ctx, entries[index], queryVector, embedder, nil, progress)
+		quote, err := relevantQuote(ctx, entries[index], queryVector, embedder, progress)
 		if err != nil {
 			return fmt.Errorf("find relevant quote in %q: %w", entries[index].relPath, err)
 		}
@@ -53,7 +53,7 @@ func enrichSemanticQuotes(ctx context.Context, entries []fileEntry, queryVector 
 	return nil
 }
 
-func relevantQuote(ctx context.Context, entry fileEntry, queryVector []float32, embedder *concurrentEmbedder, order *embeddingOrderHandle, progress *progressTracker) (string, error) {
+func relevantQuote(ctx context.Context, entry fileEntry, queryVector []float32, embedder *concurrentEmbedder, progress *progressTracker) (string, error) {
 	if entry.isDir {
 		return "", nil
 	}
@@ -98,7 +98,7 @@ func relevantQuote(ctx context.Context, entry fileEntry, queryVector []float32, 
 		if len(inputs) > 0 {
 			embedStarted := time.Now()
 			progress.logVerbose("embedding start phase=quote path=%q chunks=%d", entry.relPath, len(inputs))
-			vectors, err := embedQuoteInputs(ctx, embedder, inputs, order)
+			vectors, err := embedQuoteInputs(ctx, embedder, inputs)
 			if err != nil {
 				progress.logVerbose("embedding failed phase=quote path=%q chunks=%d duration=%s error=%q",
 					entry.relPath, len(inputs), time.Since(embedStarted), err)
@@ -143,7 +143,7 @@ func relevantQuote(ctx context.Context, entry fileEntry, queryVector []float32, 
 		left, right := bestLines[:middle], bestLines[middle:]
 		embedStarted := time.Now()
 		progress.logVerbose("embedding start phase=quote-bisect path=%q chunks=2", entry.relPath)
-		vectors, err := embedQuoteInputs(ctx, embedder, []string{joinQuoteLines(left), joinQuoteLines(right)}, order)
+		vectors, err := embedQuoteInputs(ctx, embedder, []string{joinQuoteLines(left), joinQuoteLines(right)})
 		if err != nil {
 			progress.logVerbose("embedding failed phase=quote-bisect path=%q duration=%s error=%q",
 				entry.relPath, time.Since(embedStarted), err)
@@ -255,12 +255,12 @@ func validateQuoteVector(query, candidate []float32) error {
 	return nil
 }
 
-func embedQuoteInputs(ctx context.Context, embedder *concurrentEmbedder, inputs []string, order *embeddingOrderHandle) ([][]float32, error) {
+func embedQuoteInputs(ctx context.Context, embedder *concurrentEmbedder, inputs []string) ([][]float32, error) {
 	parts := make([]ai.PromptPart, len(inputs))
 	for i, input := range inputs {
 		parts[i] = ai.PromptPart{Role: ai.RoleModel, Text: input}
 	}
-	return embedScheduledBatch(ctx, embedder, parts, true, order)
+	return embedScheduledBatch(ctx, embedder, parts, true)
 }
 
 func splitQuoteChunks(content string) []quoteChunk {

@@ -35,7 +35,17 @@ func newEmbeddingCache() (*embeddingCache, error) {
 	if root == "" {
 		return nil, fmt.Errorf("resolve user cache directory: empty path")
 	}
-	return &embeddingCache{dir: filepath.Join(root, "kabibi", "filelist", embeddingCacheDirName)}, nil
+	return newEmbeddingCacheAt(filepath.Join(root, "kabibi", "filelist", embeddingCacheDirName))
+}
+
+func newEmbeddingCacheAt(dir string) (*embeddingCache, error) {
+	if dir == "" {
+		return nil, fmt.Errorf("resolve embedding cache directory: empty path")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("create embedding cache directory: %w", err)
+	}
+	return &embeddingCache{dir: dir}, nil
 }
 
 func (c *embeddingCache) get(signature []byte, identity, kind, recipe string, dimension int) ([]float32, bool, error) {
@@ -116,9 +126,6 @@ func (c *embeddingCache) put(signature []byte, identity, kind, recipe string, ve
 	binary.LittleEndian.PutUint32(header[8:12], uint32(len(vector)))
 	copy(header[12:], checksum[:])
 
-	if err := os.MkdirAll(c.dir, 0o700); err != nil {
-		return fmt.Errorf("create embedding cache directory: %w", err)
-	}
 	target := c.recordPath(signature, identity, kind, recipe, len(vector))
 	temp, err := os.CreateTemp(c.dir, ".vector-*")
 	if err != nil {
@@ -137,10 +144,6 @@ func (c *embeddingCache) put(signature []byte, identity, kind, recipe string, ve
 	if err := writeCacheBytes(temp, raw); err != nil {
 		_ = temp.Close()
 		return fmt.Errorf("write embedding cache vector: %w", err)
-	}
-	if err := temp.Sync(); err != nil {
-		_ = temp.Close()
-		return fmt.Errorf("sync embedding cache record: %w", err)
 	}
 	if err := temp.Close(); err != nil {
 		return fmt.Errorf("close embedding cache record: %w", err)

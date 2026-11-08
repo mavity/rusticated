@@ -572,7 +572,7 @@ func rankEmbeddingCandidates(ctx context.Context, entries []fileEntry, parts []a
 	}
 	queryStarted := time.Now()
 	progress.logVerbose("embedding start phase=query items=1")
-	queryVector, err := embedder.Embed(ctx, ai.PromptPart{Role: ai.RoleUser, Text: query}, false, nil)
+	queryVector, err := embedder.Embed(ctx, ai.PromptPart{Role: ai.RoleUser, Text: query}, false)
 	if err != nil {
 		progress.logVerbose("embedding failed phase=query duration=%s error=%q", time.Since(queryStarted), err)
 		return nil, err
@@ -702,7 +702,7 @@ func cachedCandidateEmbedding(ctx context.Context, entry fileEntry, part ai.Prom
 	embedStarted := time.Now()
 	progress.logVerbose("embedding start phase=candidate kind=%s path=%q input_bytes=%d",
 		kind, entry.relPath, len(part.Text))
-	vector, err := embedder.Embed(ctx, part, false, nil)
+	vector, err := embedder.Embed(ctx, part, false)
 	if err != nil {
 		progress.logVerbose("embedding failed phase=candidate kind=%s path=%q duration=%s error=%q",
 			kind, entry.relPath, time.Since(embedStarted), err)

@@ -636,16 +636,11 @@ func publishInteractiveListFilesProgress(iter *filelist.SearchIterator, output *
 		return nil
 	}
 	for !updatesClosed || dirty {
-		if updatesClosed && dirty && timerC == nil {
-			wait := time.Until(lastPublished.Add(publishInterval))
-			if lastPublished.IsZero() || wait <= 0 {
-				if err := publish(time.Now()); err != nil {
-					return err
-				}
-				continue
+		if updatesClosed && dirty {
+			if err := publish(time.Now()); err != nil {
+				return err
 			}
-			timer = time.NewTimer(wait)
-			timerC = timer.C
+			continue
 		}
 		select {
 		case _, ok := <-updates:

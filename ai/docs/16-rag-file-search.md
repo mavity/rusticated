@@ -98,8 +98,10 @@ content candidate vectors.
    the same embedding input coalesce onto the same task and increment the
    corresponding count.
 3. **Deterministic 4:1 quota and carryover:** The worker maintains a running
-   4:1 remainder across batches (modulo $4+1 = 5$). When forming a batch of
-   capacity $B$:
+   4:1 remainder across batches (modulo $4+1 = 5$). The current batch
+   capacity is $B=4$ distinct embedding tasks; this is a batch-size limit, not
+   a queue-capacity limit. For a batch, let $K$ be the lesser of $B$ and the
+   number of pending unique tasks:
    - The worker calculates quota $N$ (high tasks) and quota $M$ (low tasks)
      taking into account the carryover remainder, and updates the remainder.
    - The worker selects $N$ tasks from the pool ordered by `highCount`
