@@ -112,6 +112,39 @@ func TestCompletionDescriptionHeuristics(t *testing.T) {
 	}
 }
 
+func TestGeneratedURootSyntaxUsesRegisteredFlagsAndPositionals(t *testing.T) {
+	if len(generatedURootSyntax) != len(AllURootCommandNames()) {
+		t.Fatalf("generated syntax has %d commands, registry has %d",
+			len(generatedURootSyntax), len(AllURootCommandNames()))
+	}
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "target-dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "input.bin"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := New(ShellOptions{WorkingDir: root, DisableAI: true})
+	defer s.Close()
+
+	assertCandidate := func(line, want string) {
+		t.Helper()
+		got := s.completeInput(line, len([]rune(line)))
+		for _, candidate := range got {
+			if candidate.Display == want {
+				return
+			}
+		}
+		t.Fatalf("completion for %q = %#v, want %q", line, got, want)
+	}
+	assertCandidate("cat -", "-u")
+	assertCandidate("cat input", "input.bin")
+	assertCandidate("cp --", "--reflink")
+	assertCandidate("cp --target-directory ", "target-dir")
+	assertCandidate("dd if=", "input.bin")
+	assertCandidate("dd status=", "progress")
+}
+
 func TestShellCompletionOffersGitAndCommandsAfterSeparator(t *testing.T) {
 	s := New(ShellOptions{WorkingDir: t.TempDir(), DisableAI: true})
 	defer s.Close()
@@ -263,9 +296,16 @@ func TestCommandArgumentCompletionsCoverSpecialGrammars(t *testing.T) {
 		t.Fatalf("completion for %q = %#v, context=%#v, want %q", line, got, ctx, want)
 	}
 	assertCandidate("dd if=", "input.bin")
-	assertCandidate("dd conv=", "noerror")
+	assertCandidate("dd conv=", "notrunc")
+	assertCandidate("ip ", "address")
 	assertCandidate("ip address ", "show")
-	assertCandidate("kill -s ", "TERM")
+	assertCandidate("kill -s ", "SIGTERM")
+	assertCandidate("grep --file ", "input.bin")
+	assertCandidate("grep --color=", "auto")
+	assertCandidate("rg -f ", "input.bin")
+	assertCandidate("rg --sort=", "none")
+	assertCandidate("stty ", "pretty")
+	assertCandidate("stty load ", "input.bin")
 	assertCandidate("tar -f ", "input.bin")
 }
 

@@ -53,40 +53,10 @@ type completionSpec struct {
 var completionSpecs = map[string]completionSpec{
 	"cd":      {options: []string{"-L", "-P"}},
 	"command": {options: []string{"-p", "-v", "-V"}},
-	"chmod": {options: []string{"-R", "-c", "-f", "-v", "--reference"},
-		values: map[int][]string{-1: {"a+r", "a-r", "a+w", "a+x", "u+rwx", "go-rwx"}}},
-	"cp": {options: []string{"-f", "-i", "-n", "-p", "-R", "-r", "-v", "--reflink"},
-		paths:        map[int]bool{-1: true},
-		optionValues: map[string][]string{"--reflink": {"always", "auto", "never"}}},
-	"dd": {options: []string{"if=", "of=", "bs=", "count=", "seek=", "skip=", "conv=", "oflag=", "status="},
-		optionValues: map[string][]string{"conv=": {"ascii", "block", "fdatasync", "fsync", "noerror", "sync", "sparse", "swab", "unblock"},
-			"oflag=":  {"append", "direct", "dsync", "sync"},
-			"status=": {"none", "noxfer", "progress"}}},
-	"find": {options: []string{"-name", "-iname", "-type", "-size", "-mtime", "-maxdepth", "-mindepth", "-exec", "-print", "-delete"},
-		paths:  map[int]bool{-1: true},
-		values: map[int][]string{1: {"b", "c", "d", "f", "l", "p", "s"}}},
-	"git": {subcommands: []string{"add", "am", "apply", "bisect", "blame", "branch", "cat-file", "checkout", "cherry-pick", "clean", "clone", "commit", "commit-tree", "config", "count-objects", "describe", "diff", "diff-tree", "fetch", "for-each-ref", "format-patch", "grep", "hash-object", "init", "log", "ls-files", "ls-remote", "ls-tree", "merge", "merge-base", "merge-file", "mv", "notes", "pull", "push", "read-tree", "rebase", "reflog", "remote", "replace", "reset", "restore", "revert", "rev-list", "rev-parse", "rm", "show", "show-ref", "shortlog", "stash", "status", "submodule", "switch", "symbolic-ref", "tag", "update-index", "update-ref", "version", "worktree", "write-tree"}},
-	"grep": {options: []string{"-e", "-f", "-i", "-n", "-r", "-v", "-w", "-x", "--color", "--exclude"},
-		optionDescriptions: map[string]string{"-f": "read patterns from file", "--exclude": "exclude files matching path pattern"}},
-	"ip": {subcommands: []string{"address", "addr", "link", "route", "neigh", "neighbor", "rule", "tunnel", "help"}},
-	"kill": {options: []string{"-l", "-s", "-SIGNAL"},
-		values:       map[int][]string{0: {"HUP", "INT", "QUIT", "KILL", "TERM", "USR1", "USR2", "STOP", "CONT"}},
-		optionValues: map[string][]string{"-s": {"HUP", "INT", "QUIT", "KILL", "TERM", "USR1", "USR2", "STOP", "CONT"}}},
-	"ls":    {options: []string{"-a", "-d", "-h", "-l", "-R", "-t"}, paths: map[int]bool{-1: true}},
-	"mkdir": {options: []string{"-m", "-p", "-v"}, paths: map[int]bool{-1: true}},
-	"mv":    {options: []string{"-f", "-i", "-n", "-v"}, paths: map[int]bool{-1: true}},
-	"rg": {options: []string{"-e", "-f", "-g", "-i", "-n", "-v", "--files", "--hidden"},
-		optionDescriptions: map[string]string{"-f": "read patterns from file", "-g": "glob file path"}},
-	"rm":   {options: []string{"-f", "-i", "-r", "-R", "-v"}, paths: map[int]bool{-1: true}},
-	"stty": {subcommands: []string{"-a", "-g", "raw", "sane", "echo", "-echo", "cooked", "size", "speed", "rows", "columns"}},
-	"tar": {options: []string{"-c", "-x", "-t", "-f", "-v", "-z", "-C"},
-		optionDescriptions: map[string]string{"-f": "archive file path", "-C": "change directory"}},
-	"time": {options: []string{"-p"}},
-	"timeout": {options: []string{"-k", "--kill-after", "-s", "--signal"},
-		optionValues: map[string][]string{"-s": {"HUP", "INT", "KILL", "TERM"}, "--signal": {"HUP", "INT", "KILL", "TERM"}}},
-	"wget":  {options: []string{"-O", "-q", "-v"}, optionDescriptions: map[string]string{"-O": "output file path"}},
-	"xargs": {options: []string{"-0", "-d", "-E", "-I", "-L", "-n", "-P", "-r", "-t", "-x"}},
-	"nohup": {},
+	"git":     {subcommands: []string{"add", "am", "apply", "bisect", "blame", "branch", "cat-file", "checkout", "cherry-pick", "clean", "clone", "commit", "commit-tree", "config", "count-objects", "describe", "diff", "diff-tree", "fetch", "for-each-ref", "format-patch", "grep", "hash-object", "init", "log", "ls-files", "ls-remote", "ls-tree", "merge", "merge-base", "merge-file", "mv", "notes", "pull", "push", "read-tree", "rebase", "reflog", "remote", "replace", "reset", "restore", "revert", "rev-list", "rev-parse", "rm", "show", "show-ref", "shortlog", "stash", "status", "submodule", "switch", "symbolic-ref", "tag", "update-index", "update-ref", "version", "worktree", "write-tree"}},
+	"ip":      {},
+	"time":    {options: []string{"-p"}},
+	"nohup":   {},
 }
 
 var shellCompletionBuiltins = []string{
@@ -137,7 +107,9 @@ func (s *Shell) completeInput(value string, cursor int) []completionCandidate {
 			if values := spec.optionValues[ctx.prefix]; len(values) > 0 {
 				return completeWords(ctx, values, true)
 			}
-			return completeWords(ctx, spec.options, true)
+			if len(spec.options) > 0 {
+				return completeWords(ctx, spec.options, true)
+			}
 		}
 	}
 	if spec, ok := completionSpecs[ctx.command]; ok {
@@ -153,17 +125,6 @@ func (s *Shell) completeInput(value string, cursor int) []completionCandidate {
 			if inferCompletionValueKind(description) == completionFile {
 				return completePath(ctx, s.execSess.Dir(), false)
 			}
-		}
-		if ctx.command == "dd" {
-			if equal := strings.IndexByte(ctx.prefix, '='); equal >= 0 {
-				key, value := ctx.prefix[:equal+1], ctx.prefix[equal+1:]
-				ctx.prefix = value
-				if key == "if=" || key == "of=" {
-					return completePath(ctx, s.execSess.Dir(), false)
-				}
-				return completeWords(ctx, spec.optionValues[key], true)
-			}
-			return completeWords(ctx, spec.options, false)
 		}
 		if ctx.command == "ip" {
 			if len(ctx.args) == 1 {
@@ -189,6 +150,12 @@ func (s *Shell) completeInput(value string, cursor int) []completionCandidate {
 		if spec.paths[argIndex] || spec.paths[-1] {
 			return completePath(ctx, s.execSess.Dir(), ctx.command == "cd")
 		}
+	}
+	if syntax, ok := generatedURootSyntax[ctx.command]; ok &&
+		(len(syntax.options) > 0 || len(syntax.positionals) > 0 ||
+			len(syntax.choices) > 0 || syntax.keyEqualsValue) {
+		candidates, _ := completeGeneratedSyntax(ctx, s.execSess.Dir(), syntax)
+		return candidates
 	}
 	if completionArgumentLikelyPath(ctx.command, ctx.args) {
 		return completePath(ctx, s.execSess.Dir(), ctx.command == "cd" || ctx.command == "pushd")
@@ -611,19 +578,8 @@ func (s *Shell) completeCommand(ctx completionContext) []completionCandidate {
 }
 
 func completionArgumentLikelyPath(command string, args []string) bool {
-	switch command {
-	case "cat", "cd", "cmp", "cp", "dd", "find", "head", "more", "pushd",
-		"mv", "nano", "readlink", "realpath", "rm", "sed", "sh", "source", "tail", "tar",
-		"tee", "touch", "truncate", "vi", "vim", "wc", "wget":
-		return true
-	case "chmod":
-		return len(args) >= 1
-	case "grep", "rg":
-		return len(args) >= 1
-	}
 	if len(args) > 0 {
-		last := args[len(args)-1]
-		return strings.ContainsAny(last, `/\`) || strings.HasPrefix(last, ".") || strings.HasPrefix(last, "~")
+		return looksLikePath(args[len(args)-1])
 	}
 	return false
 }

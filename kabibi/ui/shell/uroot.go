@@ -1,5 +1,7 @@
 package shell
 
+//go:generate go run ../../internal/cmd/completiongen -registry uroot.go -out uroot_completion_generated.go
+
 import (
 	"context"
 	"fmt"

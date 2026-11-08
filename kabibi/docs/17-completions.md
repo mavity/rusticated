@@ -2,6 +2,16 @@
 
 **Status:** Approved for implementation; implementation is in progress.
 
+**Implementation decision:** Keep u-root command parsers unchanged. Generate
+completion metadata by inspecting the registered command sources: standard and
+pflag declarations, handwritten option cases, usage/synopsis text, and
+description-based value hints. This avoids changing dozens of command
+implementations or invoking commands to inspect their syntax. The generated
+metadata is source-derived, not the runtime parser itself; positional roles
+and unusual handwritten grammars are necessarily best-effort. Remaining
+exceptions must stay explicitly identified until their runtime parser can
+provide a safe syntax interface.
+
 ## 1. Purpose
 
 Add syntax-aware completion and hints to Kabibi’s interactive TUI shell prompt.
@@ -44,13 +54,17 @@ the key.
 
 ### 3.1 One definition serves execution and completion
 
-Each supported builtin must expose its argument grammar from the same
-definition that its runtime argument parser consumes. A completion-only option
-table that repeats the builtin’s flag names, aliases, value-taking behavior, or
-operand positions is not acceptable.
+The target remains that supported builtins expose argument grammar from the
+same definition their runtime parser consumes. A separately authored
+completion-only option table is not acceptable, except where explicitly
+approved below. The u-root exception is generated metadata extracted from
+command source while leaving runtime parsing unchanged; it does not claim exact
+runtime/parser equivalence. The delegated `go-git` parser is private and has no
+parser API, so Git completion for those delegated commands is an explicitly
+limited, Kabibi-maintained parallel definition. It is advisory and must not be
+described as complete or authoritative for runtime parsing.
 
-The implementation may introduce a shared parser-definition/argument-parser
-contract. It must support:
+For parser owners that can share a definition, the parser contract must support:
 
 - Building a fresh parser definition without executing the command or causing
   command side effects.
@@ -64,7 +78,24 @@ contract. It must support:
 The definition must be safe to instantiate repeatedly. It must not depend on
 global mutable flag sets or retain pointers to a previous command invocation.
 
-### 3.2 Adapting existing argument parsers: four unified methods
+For u-root, `go generate ./ui/shell` scans all 85 registry entries and emits
+`uroot_completion_generated.go`. The generator does not execute a command or
+modify its parser. Flag declarations and obvious parser switch cases are
+extracted directly; synopsis and help text provide best-effort positional and
+choice hints, while value descriptions and conservative name heuristics
+identify paths. Commands whose syntax is not recoverable this way remain
+explicit adapters or limitations; generated metadata must not be described as
+a runtime-shared parse state.
+
+### 3.2 Adapting existing argument parsers
+
+The methods below describe the desired shared-runtime contract. Approved
+exceptions are u-root source-generated syntax metadata and the bounded
+`go-git` completion definition described below. The u-root choice deliberately
+trades exact positional semantics for avoiding broad edits across registered
+tools. The Git choice deliberately trades complete argument coverage for
+avoiding a fork of `go-git`. Exceptional handwritten parsers still need
+focused adapters or a future parser-owned syntax API.
 
 All builtin families expose a single `CommandSyntax` state machine that both
 parses runtime invocations and steps through tokens up to the cursor during
@@ -159,11 +190,26 @@ webSpec.Sub("shot", Aliases("screenshot"),
   - Kabibi’s outer parser defines `-C`, `--git-dir`, `--work-tree` (`KindDir`),
     `-c`, `--no-pager`, `-P`, `--bare`, and updates `effectiveDir` before
     delegating completion to the subcommand.
-  - Kabibi-owned subcommands (`notes`, `replace`, `bisect run` $\to$
-    `KindCommand`, `commit --author/--date`) and `go-git`’s 54 subcommands use
-    a shared `git.CommandSpec` registry instead of the disconnected `help` map,
-    attaching dynamic read-only repo providers (`KindGitBranch`, `KindGitRef`,
-    `KindGitRemote`, `KindFile`).
+  - Do not fork or patch `go-git`. Its `Run` API accepts raw arguments but
+    exposes no parser or completion API; its help metadata is separate from
+    runtime parsing. Therefore Kabibi provides intentionally partial,
+    completion-only hints for delegated commands.
+  - Maintain those hints in `kabibi/ui/shell/completion.go`: consolidate the
+    current `completionSpecs["git"].subcommands` list and the option,
+    subcommand, and positional cases in `completeGitSubcommand` into a
+    `gitCompletionSpec` table consumed by `completeGit` and
+    `completeGitSubcommand`. This is the one parallel definition for
+    `go-git`-delegated syntax; keep it explicitly marked incomplete.
+  - Reuse Kabibi-owned runtime definitions where available:
+    `gitGlobalOptionSpecs`/`parseGitInvocationState` in `git_builtin.go`, and
+    `gitNotesCommands`/`gitReplaceOptions` in `git_notes_replace.go`. Do not
+    copy those into `gitCompletionSpec`.
+  - Support delegated command names, selected common option hints, local branch
+    names for `branch`/`checkout`/`switch`, and filesystem candidates for
+    selected path operands. Do not promise comprehensive revision, tag, remote,
+    refspec, object-ID, config-value, enum, or per-command option-value
+    completion. Unknown or unsupported Git argument positions return no
+    candidates rather than guessing.
 
 #### Method 4: First-class builtin specs in local `mvdan.cc/sh/v3/interp`
 
@@ -443,8 +489,12 @@ a controllable clock, timer seam, or directly testable state transition.
   required values, booleans, custom values, and `--name=value`.
 - Verify positional grammar is available from the parser source for commands
   whose flag library only returns `Args()`.
-- Exercise custom Git, web/CDP, and AI parsers to prove completion and runtime
-  parsing use the same definitions.
+- For Git, test the bounded completion-only command/option/path/branch hints
+  separately from runtime parsing; verify global options, notes, and replace
+  completion reuse their Kabibi runtime definitions. Do not assert that
+  delegated-command hints fully match the private `go-git` parser.
+- Exercise web/CDP and AI parsers to prove completion and runtime parsing use
+  the same definitions.
 - Preserve existing behavior with parser/execution regression cases, including
   help, invalid options, aliases, and repeated command invocations. No command
   may be executed merely to discover its syntax.
@@ -524,9 +574,10 @@ build path for dependent Rusticated modules.
 
 The feature is ready for approval as implemented only when:
 
-1. All supported builtin syntax used by completion comes from the same parser
-   definitions used at runtime; no parallel completion-only option/operand
-   table remains.
+1. Supported builtin syntax comes from shared runtime definitions except the
+   explicitly approved u-root generated metadata and bounded Git
+   `gitCompletionSpec`; neither exception is represented as exact parser
+   equivalence.
 2. Cursor-aware command and argument contexts work across the specified Bash
    constructs without executing input.
 3. PATH candidates use the in-memory cache and are not rescanned before the
@@ -542,9 +593,11 @@ The feature is ready for approval as implemented only when:
 
 ## 9. Approval boundary
 
-This document defines the proposed behavior, parser contract, and validation
-gates. It does not authorize implementation. Code changes and builds begin only
-after the specification is reviewed and approved.
+The user approved implementation, including the u-root source-generation
+compromise documented above. This document remains the behavioral and
+validation contract; approval does not mean every parser family is already
+unified or that known source-extraction limits are acceptable as completed
+work.
 
 # Feasibility of the syntax inference
 
@@ -620,7 +673,9 @@ Kabibi adds more parser surfaces:
 - SSH `clone` and `ls-remote` have a local parser/intercept, then may fall back to the dependency parser (`git_remote_ssh.go`).
 - `log` and `diff` have parsers for a limited streaming/pager optimization subset. Those do not define the complete command grammar (`git_log_stream.go`).
 
-**Fix:** the dependency needs a public shared parser/command-spec API (upstream change or maintained fork). Its command runtime must consume that API, and completion must query it; copying the private help map into Kabibi would leave two sources. Kabibi’s global options and its local intercepts must likewise become shared runtime/completion parsers, including the intercepted/fallback cases. The limited log/diff optimization parsers must not be used as grammar sources.
+**Completion decision:** do not create or maintain a `go-git` fork. Its parser is private and there is no public parse-only facility; its help table is not consumed by the runtime parser. Keep bounded completion-only metadata for delegated commands in `kabibi/ui/shell/completion.go`, in the `gitCompletionSpec` described above. The metadata is intentionally parallel to, and less detailed than, the dependency’s runtime grammar. It offers command names, selected common flags, local branches in a few positions, and paths in selected positions; other argument kinds may have no completion.
+
+Kabibi-owned Git syntax should reuse its runtime definition wherever possible: global options through `gitGlobalOptionSpecs`/`parseGitInvocationState`, and notes/replace syntax through `gitNotesCommands`/`gitReplaceOptions`. The SSH clone/list parsers and log/diff streaming/pager parsers are execution interceptors, not general command grammar sources. An upstream parser API may allow broader coverage in the future, but it is not a prerequisite for the limited support in this plan.
 
 ### 4. Browser and AI commands
 
@@ -636,4 +691,17 @@ Kabibi adds more parser surfaces:
 
 ### Bottom line
 
-The doc’s shared-definition contract can cover these cases, but “extract flags from a `FlagSet`” is only the first layer. u-root positional grammars, handwritten parsers, mvdan builtins, Git’s dependency parser plus Kabibi intercepts, browser commands, AI control commands, and nested shells all need parser-owned completion state that runtime also consumes. Runtime registration must distinguish actual implementations from names that are merely recognized, and honor dispatch precedence/aliases rather than merge command-name registries blindly.
+The approved u-root compromise is source-generated metadata from existing
+command code, not a shared runtime parse state. It now covers registered
+`FlagSet`/`pflag` options, several handwritten option switches, `dd`'s
+`key=value` form, common positional hints, and source-indicated path/choice
+values without editing the command packages. The generator verifies registry
+coverage, but its positional inference cannot guarantee runtime semantics.
+
+This does not complete the broader unified-parser goal. In particular,
+contextual `ip` subcommands, Git's delegated `go-git` argument grammar, mvdan
+builtin argument grammars, and handwritten u-root syntax not recoverable from
+source patterns remain incomplete or require focused adapters. Git's bounded
+parallel completion definition is an explicit exception, not evidence that
+delegated runtime parsing and completion share a source. Keep these limits
+visible; do not describe the overall feature as fully parser-unified.
