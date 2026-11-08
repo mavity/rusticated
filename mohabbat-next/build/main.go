@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -57,15 +58,13 @@ func main() {
 		verbose         bool
 		outputPath      string
 		windowsHostOnly bool
-		fixtureMode     bool
 	)
 
 	flag.BoolVar(&verbose, "v", false, "Verbose build output")
 	flag.BoolVar(&verbose, "verbose", false, "Verbose build output")
-	flag.StringVar(&outputPath, "o", "", "Output executable path (defaults to probe/hosts/windows/out/MohabbatProbe.exe)")
+	flag.StringVar(&outputPath, "o", "", "Output executable path (defaults to release/dist/MohabbatProbe.exe)")
 	flag.StringVar(&outputPath, "out", "", "Output executable path")
 	flag.BoolVar(&windowsHostOnly, "windows-host-only", false, "Build only the Windows CLR test host")
-	flag.BoolVar(&fixtureMode, "fixture", false, "Allow substituting missing Unix Brot runners with available runner for local validation")
 	flag.Parse()
 
 	totalStart := time.Now()
@@ -79,8 +78,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	repoRoot := filepath.Dir(nextDir)
 	if outputPath == "" {
-		outputPath = filepath.Join(probeDir, "hosts", "windows", "out", "MohabbatProbe.exe")
+		outputPath = filepath.Join(repoRoot, "release", "dist", "MohabbatProbe.exe")
 	}
 	outputPath, err = filepath.Abs(outputPath)
 	if err != nil {
@@ -103,14 +103,26 @@ func main() {
 	}
 
 	// Step 1: Preflight
-	fmt.Println("🍆  [1/6] Checking build tools and prerequisites...")
+	fmt.Println("🍆  [1/5] Checking build tools and prerequisites...")
 	if err := checkTools(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Step 2: Build Rust flat components
-	fmt.Println("🍆  [2/6] Building flat payload and PAL components...")
+	// Step 2: Build Rust flat components and Brot micro-launchers in parallel
+	fmt.Println("🍆  [2/5] Compiling flat components and Unix Brot launchers in parallel...")
+
+	darwinStubsDir := filepath.Join(repoRoot, "target", "darwin-stubs")
+	if abs, err := filepath.Abs(darwinStubsDir); err == nil {
+		darwinStubsDir = abs
+	}
+	if err := ensureDarwinStubs(darwinStubsDir); err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating darwin stubs: %v\n", err)
+		os.Exit(1)
+	}
+
+	linuxMuslFlags := "['-C', 'panic=abort', '-C', 'relocation-model=pic', '-C', 'target-feature=+crt-static', '-C', 'link-self-contained=no', '-C', 'linker=rust-lld', '-C', 'linker-flavor=ld.lld', '-C', 'link-arg=-pie', '-C', 'link-arg=--no-dynamic-linker']"
+	darwinFlags := fmt.Sprintf("['-C', 'panic=abort', '-C', 'linker=rust-lld', '-C', 'linker-flavor=darwin-lld', '-Z', 'unstable-options', '-C', 'link-arg=-L%s']", filepath.ToSlash(darwinStubsDir))
 
 	type targetDef struct {
 		Name         string
@@ -206,52 +218,6 @@ func main() {
 		},
 	}
 
-	builtBins := make(map[string]string)
-	for _, def := range flatDefs {
-		fmt.Printf("🍆    Building %s...\n", def.Name)
-		binPath, err := buildFlatComponent(probeDir, rustBuildDir, componentsDir, FlatComponentConfig{
-			Name:         def.Name,
-			Package:      def.Package,
-			Feature:      def.Feature,
-			Arch:         def.Arch,
-			LinkerScript: def.LinkerScript,
-			EntrySymbol:  def.EntrySymbol,
-			ArchiveGlobs: def.ArchiveGlobs,
-			OutFileName:  def.OutName,
-		}, verbose)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error building %s: %v\n", def.Name, err)
-			os.Exit(1)
-		}
-		builtBins[def.OutName] = binPath
-
-		// Mirror to unix assets directory if it's a unix or shared payload
-		if strings.HasPrefix(def.OutName, "platform-linux") ||
-			strings.HasPrefix(def.OutName, "platform-darwin") ||
-			strings.HasPrefix(def.OutName, "probe-") {
-			dest := filepath.Join(unixOutDir, def.OutName+".bin")
-			data, err := os.ReadFile(binPath)
-			if err == nil {
-				_ = os.WriteFile(dest, data, 0o644)
-			}
-		}
-	}
-
-	// Step 3: Build Unix Brot micro-launchers
-	fmt.Println("🍆  [3/6] Building Unix Brot micro-launchers...")
-
-	darwinStubsDir := filepath.Join(nextDir, "..", "target", "darwin-stubs")
-	if abs, err := filepath.Abs(darwinStubsDir); err == nil {
-		darwinStubsDir = abs
-	}
-	if err := ensureDarwinStubs(darwinStubsDir); err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating darwin stubs: %v\n", err)
-		os.Exit(1)
-	}
-
-	linuxMuslFlags := "['-C', 'panic=abort', '-C', 'relocation-model=pic', '-C', 'target-feature=+crt-static', '-C', 'link-self-contained=no', '-C', 'linker=rust-lld', '-C', 'linker-flavor=ld.lld', '-C', 'link-arg=-pie', '-C', 'link-arg=--no-dynamic-linker']"
-	darwinFlags := fmt.Sprintf("['-C', 'panic=abort', '-C', 'linker=rust-lld', '-C', 'linker-flavor=darwin-lld', '-Z', 'unstable-options', '-C', 'link-arg=-L%s']", filepath.ToSlash(darwinStubsDir))
-
 	brotConfigs := []BrotRunnerConfig{
 		{
 			Name:        "brot-x86_64-linux",
@@ -287,20 +253,76 @@ func main() {
 		},
 	}
 
-	for _, bcfg := range brotConfigs {
-		fmt.Printf("🍆    Building %s (%s)...\n", bcfg.Name, bcfg.Triple)
-		if _, err := buildBrotRunner(probeDir, rustBuildDir, unixOutDir, bcfg, verbose); err != nil {
-			fmt.Fprintf(os.Stderr, "Error building brot runner %s: %v\n", bcfg.Name, err)
-			os.Exit(1)
-		}
+	var (
+		compileWg sync.WaitGroup
+		compileMu sync.Mutex
+		builtBins = make(map[string]string)
+		errs      []error
+	)
+
+	// Spawn flat component compilation goroutines
+	for _, def := range flatDefs {
+		compileWg.Add(1)
+		go func(def targetDef) {
+			defer compileWg.Done()
+			binPath, err := buildFlatComponent(probeDir, rustBuildDir, componentsDir, FlatComponentConfig{
+				Name:         def.Name,
+				Package:      def.Package,
+				Feature:      def.Feature,
+				Arch:         def.Arch,
+				LinkerScript: def.LinkerScript,
+				EntrySymbol:  def.EntrySymbol,
+				ArchiveGlobs: def.ArchiveGlobs,
+				OutFileName:  def.OutName,
+			}, verbose)
+
+			compileMu.Lock()
+			defer compileMu.Unlock()
+			if err != nil {
+				errs = append(errs, fmt.Errorf("flat component %s: %w", def.Name, err))
+				return
+			}
+			builtBins[def.OutName] = binPath
+
+			if strings.HasPrefix(def.OutName, "platform-linux") ||
+				strings.HasPrefix(def.OutName, "platform-darwin") ||
+				strings.HasPrefix(def.OutName, "probe-") {
+				dest := filepath.Join(unixOutDir, def.OutName+".bin")
+				data, err := os.ReadFile(binPath)
+				if err == nil {
+					_ = os.WriteFile(dest, data, 0o644)
+				}
+			}
+		}(def)
 	}
 
-	// Step 4: Compress Windows components for CLR embedding
-	fmt.Println("🍆  [4/6] Compressing Windows platform and hello payloads (Zstandard)...")
+	// Spawn Brot runner compilation goroutines
+	for _, bcfg := range brotConfigs {
+		compileWg.Add(1)
+		go func(bcfg BrotRunnerConfig) {
+			defer compileWg.Done()
+			if _, err := buildBrotRunner(probeDir, rustBuildDir, unixOutDir, bcfg, verbose); err != nil {
+				compileMu.Lock()
+				errs = append(errs, fmt.Errorf("brot runner %s: %w", bcfg.Name, err))
+				compileMu.Unlock()
+			}
+		}(bcfg)
+	}
+
+	compileWg.Wait()
+	if len(errs) > 0 {
+		for _, e := range errs {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", e)
+		}
+		os.Exit(1)
+	}
+
+	// Step 3: Compress Windows components for CLR embedding (in parallel with max zstd)
+	fmt.Println("🍆  [3/5] Compressing Windows platform and hello payloads (max Zstandard)...")
 	type winCompDef struct {
-		SrcBin   string
-		OutZst   string
-		ResName  string
+		SrcBin  string
+		OutZst  string
+		ResName string
 	}
 	winComps := []winCompDef{
 		{SrcBin: builtBins["probe-x86_64"], OutZst: filepath.Join(componentsDir, "hello-x86_64.zst"), ResName: "MohabbatNext.Hello.x86_64.zst"},
@@ -309,30 +331,55 @@ func main() {
 		{SrcBin: builtBins["platform-windows-aarch64"], OutZst: filepath.Join(componentsDir, "platform-windows-aarch64.zst"), ResName: "MohabbatNext.Platform.Windows.aarch64.zst"},
 	}
 
-	var winResources []WindowsComponentResource
-	for _, c := range winComps {
-		raw, err := os.ReadFile(c.SrcBin)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error reading %s: %v\n", c.SrcBin, err)
-			os.Exit(1)
-		}
-		compressed, err := compressZstandard(raw)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error compressing %s: %v\n", c.SrcBin, err)
-			os.Exit(1)
-		}
-		if err := os.WriteFile(c.OutZst, compressed, 0o644); err != nil {
-			fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", c.OutZst, err)
-			os.Exit(1)
-		}
-		winResources = append(winResources, WindowsComponentResource{
-			FilePath:     c.OutZst,
-			ResourceName: c.ResName,
-		})
+	var (
+		compWg       sync.WaitGroup
+		compMu       sync.Mutex
+		winResources = make([]WindowsComponentResource, len(winComps))
+	)
+
+	for idx, c := range winComps {
+		compWg.Add(1)
+		go func(i int, c winCompDef) {
+			defer compWg.Done()
+			raw, err := os.ReadFile(c.SrcBin)
+			if err != nil {
+				compMu.Lock()
+				errs = append(errs, fmt.Errorf("read %s: %w", c.SrcBin, err))
+				compMu.Unlock()
+				return
+			}
+			compressed, err := compressZstandard(raw)
+			if err != nil {
+				compMu.Lock()
+				errs = append(errs, fmt.Errorf("compress %s: %w", c.SrcBin, err))
+				compMu.Unlock()
+				return
+			}
+			if err := os.WriteFile(c.OutZst, compressed, 0o644); err != nil {
+				compMu.Lock()
+				errs = append(errs, fmt.Errorf("write %s: %w", c.OutZst, err))
+				compMu.Unlock()
+				return
+			}
+			compMu.Lock()
+			winResources[i] = WindowsComponentResource{
+				FilePath:     c.OutZst,
+				ResourceName: c.ResName,
+			}
+			compMu.Unlock()
+		}(idx, c)
 	}
 
-	// Step 5: Build Windows AnyCPU CLR Host
-	fmt.Println("🍆  [5/6] Compiling AnyCPU Windows CLR Host (MohabbatWindowsHost.exe)...")
+	compWg.Wait()
+	if len(errs) > 0 {
+		for _, e := range errs {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", e)
+		}
+		os.Exit(1)
+	}
+
+	// Step 4: Build Windows AnyCPU CLR Host
+	fmt.Println("🍆  [4/5] Compiling AnyCPU Windows CLR Host (MohabbatWindowsHost.exe)...")
 	windowsHostExe := filepath.Join(workDir, "MohabbatWindowsHost.exe")
 	if err := buildWindowsHostExe(windowsHostDir, workDir, windowsHostExe, winResources, verbose); err != nil {
 		fmt.Fprintf(os.Stderr, "Error building Windows host: %v\n", err)
@@ -344,10 +391,9 @@ func main() {
 		return
 	}
 
-	// Step 6: Vegetable Assembly
-	fmt.Println("🍆  [6/6] Assembling unified single-file vegetable...")
+	// Step 5: Vegetable Assembly
+	fmt.Println("🍆  [5/5] Assembling unified single-file vegetable...")
 
-	// Verify required Brot runners
 	brotNames := []string{
 		"brot-x86_64-unknown-linux-gnu",
 		"brot-aarch64-unknown-linux-gnu",
@@ -357,39 +403,27 @@ func main() {
 	}
 
 	brotPaths := make(map[string]string)
-	linuxArmRunner := filepath.Join(unixOutDir, "brot-aarch64-unknown-linux-gnu")
-
 	for _, name := range brotNames {
 		p := filepath.Join(unixOutDir, name)
-		if _, err := os.Stat(p); err == nil {
-			brotPaths[name] = p
-		} else {
-			if fixtureMode {
-				if _, err := os.Stat(linuxArmRunner); err != nil {
-					fmt.Fprintf(os.Stderr, "Error: fixture mode requires Linux AArch64 runner at %s\n", linuxArmRunner)
-					os.Exit(1)
-				}
-				fmt.Printf("🍆    [fixture] Substituting %s -> %s\n", linuxArmRunner, name)
-				brotPaths[name] = linuxArmRunner
-			} else {
-				fmt.Fprintf(os.Stderr, "Error: missing required Brot runner: %s\n(Use --fixture to assemble a local validation fixture)\n", p)
-				os.Exit(1)
-			}
+		if _, err := os.Stat(p); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: missing required Brot runner: %s\n", p)
+			os.Exit(1)
 		}
+		brotPaths[name] = p
 	}
 
 	assemblyAssets := AssemblyAssets{
-		BrotLinuxX86_64:     brotPaths["brot-x86_64-unknown-linux-gnu"],
-		BrotLinuxAarch64:    brotPaths["brot-aarch64-unknown-linux-gnu"],
-		BrotAndroidAarch64:  brotPaths["brot-aarch64-linux-android"],
-		BrotDarwinX86_64:    brotPaths["brot-x86_64-apple-darwin"],
-		BrotDarwinAarch64:   brotPaths["brot-aarch64-apple-darwin"],
-		PlatformLinuxX86_64: builtBins["platform-linux-x86_64"],
+		BrotLinuxX86_64:      brotPaths["brot-x86_64-unknown-linux-gnu"],
+		BrotLinuxAarch64:     brotPaths["brot-aarch64-unknown-linux-gnu"],
+		BrotAndroidAarch64:   brotPaths["brot-aarch64-linux-android"],
+		BrotDarwinX86_64:     brotPaths["brot-x86_64-apple-darwin"],
+		BrotDarwinAarch64:    brotPaths["brot-aarch64-apple-darwin"],
+		PlatformLinuxX86_64:  builtBins["platform-linux-x86_64"],
 		PlatformLinuxAarch64: builtBins["platform-linux-aarch64"],
 		PlatformDarwinX86_64: builtBins["platform-darwin-x86_64"],
 		PlatformDarwinAarch64: builtBins["platform-darwin-aarch64"],
-		HelloX86_64:         builtBins["probe-x86_64"],
-		HelloAarch64:        builtBins["probe-aarch64"],
+		HelloX86_64:          builtBins["probe-x86_64"],
+		HelloAarch64:         builtBins["probe-aarch64"],
 	}
 
 	if err := assembleVegetable(windowsHostExe, assemblyAssets, templatesDir, outputPath); err != nil {
