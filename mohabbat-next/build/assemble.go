@@ -18,7 +18,7 @@ type ComponentRange struct {
 }
 
 func compressZstandard(data []byte) ([]byte, error) {
-	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBestCompression))
 	if err != nil {
 		return nil, fmt.Errorf("create zstd encoder: %w", err)
 	}

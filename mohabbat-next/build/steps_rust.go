@@ -234,7 +234,7 @@ type BrotRunnerConfig struct {
 func buildBrotRunner(probeDir, rustBuildDir, outDir string, cfg BrotRunnerConfig, verbose bool) (string, error) {
 	manifestPath := filepath.Join(probeDir, "hosts", "unix", "Cargo.toml")
 	cargoHome := filepath.Join(rustBuildDir, "cargo-home")
-	compTargetDir := filepath.Join(rustBuildDir, "brot-"+cfg.Triple)
+	compTargetDir := filepath.Join(rustBuildDir, "brot-"+cfg.Name)
 
 	if err := os.MkdirAll(cargoHome, 0o755); err != nil {
 		return "", fmt.Errorf("create cargo home %s: %w", cargoHome, err)
