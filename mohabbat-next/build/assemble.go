@@ -260,7 +260,11 @@ func assembleVegetable(windowsHostExe string, assets AssemblyAssets, templatesDi
 		return fmt.Errorf("execute bootstrap template: %w", err)
 	}
 
-	if _, err := bundle.Write(renderedBoot.Bytes()); err != nil {
+	normBoot := bytes.ReplaceAll(renderedBoot.Bytes(), []byte("\r\n"), []byte("\n"))
+	if bytes.IndexByte(normBoot, '\r') != -1 {
+		return fmt.Errorf("bootstrap script contains forbidden CR (0x0D) characters")
+	}
+	if _, err := bundle.Write(normBoot); err != nil {
 		return err
 	}
 
@@ -272,7 +276,7 @@ func assembleVegetable(windowsHostExe string, assets AssemblyAssets, templatesDi
 	}
 
 	dosTmplStr := strings.TrimRight(string(bytes.ReplaceAll(dosTmplBytes, []byte("\r\n"), []byte("\n"))), "\r\n") + "\n"
-	dosTmpl, err := template.New("dos_stub").Parse(dosTmplStr)
+	bootTmplDos, err := template.New("dos_stub").Parse(dosTmplStr)
 	if err != nil {
 		return fmt.Errorf("parse dos stub template: %w", err)
 	}
@@ -281,11 +285,14 @@ func assembleVegetable(windowsHostExe string, assets AssemblyAssets, templatesDi
 		BootstrapOffset int64
 	}
 	var renderedDos bytes.Buffer
-	if err := dosTmpl.Execute(&renderedDos, DosData{BootstrapOffset: bootstrapOffset + 1}); err != nil {
+	if err := bootTmplDos.Execute(&renderedDos, DosData{BootstrapOffset: bootstrapOffset + 1}); err != nil {
 		return fmt.Errorf("execute dos stub template: %w", err)
 	}
 
-	dosBytes := renderedDos.Bytes()
+	dosBytes := bytes.ReplaceAll(renderedDos.Bytes(), []byte("\r\n"), []byte("\n"))
+	if bytes.IndexByte(dosBytes, '\r') != -1 {
+		return fmt.Errorf("DOS stub contains forbidden CR (0x0D) characters")
+	}
 	if len(dosBytes) > 59 {
 		return fmt.Errorf("DOS stub command exceeds 59 bytes (got %d): %q", len(dosBytes), string(dosBytes))
 	}
