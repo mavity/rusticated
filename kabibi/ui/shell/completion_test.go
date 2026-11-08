@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -308,6 +309,7 @@ func TestPromptInputExplicitCompletionCyclesAndAccepts(t *testing.T) {
 	if !p.RequestCompletion() || !p.CompletionActive() {
 		t.Fatal("explicit completion did not activate candidate selection")
 	}
+	waitForExplicitCompletion(t, p)
 	if p.Value() != "git st" {
 		t.Fatalf("completion changed input before acceptance: %q", p.Value())
 	}
@@ -319,6 +321,103 @@ func TestPromptInputExplicitCompletionCyclesAndAccepts(t *testing.T) {
 	}
 	if got, want := p.Value(), "git stash "; got != want {
 		t.Fatalf("accepted input = %q, want %q", got, want)
+	}
+}
+
+func TestPromptInputExplicitSingleCompletionAcceptsImmediately(t *testing.T) {
+	p := NewPromptInput(PromptInputOptions{
+		Complete: func(string, int) []completionCandidate {
+			return []completionCandidate{{Display: "status", Insert: "atus", Space: true}}
+		},
+	})
+	p.SetValue("git st")
+	if !p.RequestCompletion() {
+		t.Fatal("explicit completion request was not handled")
+	}
+	deadline := time.Now().Add(time.Second)
+	for p.Value() == "git st" && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got, want := p.Value(), "git status "; got != want {
+		t.Fatalf("single completion = %q, want %q", got, want)
+	}
+}
+
+func waitForExplicitCompletion(t *testing.T, p *PromptInput) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		p.mu.Lock()
+		ready := p.completion != nil && !p.completion.pending
+		p.mu.Unlock()
+		if ready {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("explicit completion provider did not finish")
+}
+
+func TestPromptInputCursorMovementDoesNotTriggerSpeculation(t *testing.T) {
+	p := NewPromptInput(PromptInputOptions{
+		Complete: func(string, int) []completionCandidate {
+			return []completionCandidate{{Display: "status", Insert: "atus", Space: true}}
+		},
+	})
+	p.SetValue("git st")
+	p.SetCursorPos(3)
+	time.Sleep(speculativeCompletionDelay + 20*time.Millisecond)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.completion != nil {
+		t.Fatal("cursor movement triggered speculative completion")
+	}
+}
+
+func TestPromptInputDiscardsLateExplicitCompletion(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startOnce sync.Once
+	p := NewPromptInput(PromptInputOptions{
+		Complete: func(string, int) []completionCandidate {
+			startOnce.Do(func() { close(started) })
+			<-release
+			return []completionCandidate{{Display: "status", Insert: "atus", Space: true}}
+		},
+	})
+	p.SetValue("git st")
+	if !p.RequestCompletion() {
+		t.Fatal("explicit completion request was not handled")
+	}
+	<-started
+	p.SetValue("git stash")
+	close(release)
+	time.Sleep(10 * time.Millisecond)
+	if got, want := p.Value(), "git stash"; got != want {
+		t.Fatalf("late completion changed input to %q, want %q", got, want)
+	}
+	if p.CompletionVisible() {
+		t.Fatal("late completion was displayed for changed input")
+	}
+}
+
+func TestPromptInputEscapeDismissesCompletion(t *testing.T) {
+	p := NewPromptInput(PromptInputOptions{})
+	p.SetValue("git st")
+	p.mu.Lock()
+	p.completion = &promptCompletionState{
+		candidates: []completionCandidate{{Display: "status", Insert: "atus", Space: true}},
+		active:     true,
+	}
+	p.mu.Unlock()
+	if !p.HandleEvent(input.KeyPressEvent{Code: input.KeyEscape}) {
+		t.Fatal("Escape did not dismiss completion")
+	}
+	if p.CompletionVisible() {
+		t.Fatal("completion remained visible after Escape")
+	}
+	if got, want := p.Value(), "git st"; got != want {
+		t.Fatalf("Escape changed input = %q, want %q", got, want)
 	}
 }
 

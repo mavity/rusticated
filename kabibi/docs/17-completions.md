@@ -1,7 +1,6 @@
 # Kabibi shell completion and hints
 
-**Status:** Specification proposal; implementation is not authorized until this
-document is reviewed and approved.
+**Status:** Approved for implementation; implementation is in progress.
 
 ## 1. Purpose
 
@@ -638,4 +637,3 @@ Kabibi adds more parser surfaces:
 ### Bottom line
 
 The doc’s shared-definition contract can cover these cases, but “extract flags from a `FlagSet`” is only the first layer. u-root positional grammars, handwritten parsers, mvdan builtins, Git’s dependency parser plus Kabibi intercepts, browser commands, AI control commands, and nested shells all need parser-owned completion state that runtime also consumes. Runtime registration must distinguish actual implementations from names that are merely recognized, and honor dispatch precedence/aliases rather than merge command-name registries blindly.
-
