@@ -65,47 +65,149 @@ contract. It must support:
 The definition must be safe to instantiate repeatedly. It must not depend on
 global mutable flag sets or retain pointers to a previous command invocation.
 
-### 3.2 Adapting existing argument parsers
+### 3.2 Adapting existing argument parsers: four unified methods
 
-- **Go `flag` and `pflag`:** refactor inline setup into a side-effect-free
-  builder and harvest the options registered in that actual `FlagSet`.
-  Preserve aliases, shorthand forms, optional values such as `NoOptDefVal`,
-  boolean no-value behavior, and custom flag value types. Do not copy those
-  registrations into a separate completion map.
-- **Positional operands:** standard flag libraries do not describe the meaning
-  or path semantics of `Args()`. Add positional grammar to the shared parser
-  definition and make runtime parsing and completion both consume it. Do not
-  rely on parsing a help/usage string as the sole source of operand semantics.
-- **Custom parsers:** Git, web/CDP, and any other hand-written argument parsers
-  must be refactored so the same command grammar drives both argument parsing
-  and completion. The runtime parser must not maintain one switch/table while
-  the completer maintains another.
-- **AI tools:** reuse the existing typed tool definitions and generated
-  `ai.Tool` parameter schemas consumed by `parseAIToolArguments`; do not add a
-  second tool-option schema for completion.
-- **mvdan shell builtins:** include supported builtins in the inventory. Where
-  the underlying implementation does not expose argument syntax, amend or wrap
-  that parser at its definition site so runtime parsing and completion share
-  the syntax. Do not silently omit those builtins or add a completion-only
-  approximation.
+All builtin families expose a single `CommandSyntax` state machine that both
+parses runtime invocations and steps through tokens up to the cursor during
+completion:
+
+```go
+type ParseState interface {
+	Step(args []string, cursorIdx int) (Expectation, error)
+}
+```
+
+#### Method 1: Enhanced `FlagSet` / `pflag` builders (`u-root` flag commands)
+
+For the 74 `u-root` commands backed by `flag.FlagSet` or `pflag.FlagSet`,
+extract flag construction into a side-effect-free builder that attaches typed
+values and positional tail specifications:
+
+- **Unix dash normalization:** because `u-root` runs `unixflag.ArgsToGoArgs`,
+  single-letter flags render as `-f` and multi-character flags render as
+  `--family`, while preserving `pflag` shorthand and `NoOptDefVal` optional
+  values.
+- **Typed `flag.Value` wrappers for enums and paths:** replace post-parse
+  `switch` validation (such as `ls --color` or `cp --reflink`) with reusable
+  `flag.Value` types that both validate at runtime and expose choices or path
+  kinds to completion:
+
+```go
+fs.Var(uflag.Enum(&c.colorMode, "never", "always", "auto", "never"),
+	"color", "colorize output")
+fs.Var(uflag.DirPath(&c.targetDir), "target-directory", "destination directory")
+```
+
+- **Positional and command-delegation tail specs:** attach positional arity and
+  roles directly to the builder so runtime bounds-checking and completion share
+  one definition:
+
+```go
+spec.Positionals(uflag.Files("source", uflag.Variadic), uflag.File("dest"))
+spec.DelegatesCommand() // for time, timeout, nohup, xargs
+```
+
+- **`key=value` flag adaptation (`dd`):** mark `dd`’s builder with
+  `KeyEqualsValue` style so its `FlagSet` (`if`, `of`, `conv`, `oflag`,
+  `status`) emits `if=`/`of=` (`KindFile`) and `conv=`/`status=` (`KindEnum`
+  from `convMap`/`flagMap`).
+
+#### Method 2: Cursor-driven dry-run parsing for stateful grammars
+
+For commands where options, subcommands, and operands interleave (`ip`, `grep`,
+`rg`, `chmod`, `kill`, `stty`, `find`), run the command’s actual parser in a
+side-effect-free `ParseOnly` mode up to the cursor word index:
+
+- **`ip` recursive-descent expectation harvesting:** `ip`’s parser already
+  records `cmd.ExpectedValues` at every token via `nextToken(expectedValues...)`.
+  Decoupling netlink handle creation from token parsing lets completion read
+  `cmd.ExpectedValues` directly at the cursor:
+
+```go
+tok := cmd.nextToken("address", "link", "route", "neighbor", "help")
+if cmd.DryRunAtCursor() { return cmd.ExpectedValues }
+```
+
+- **Context-dependent positional shifts (`grep`, `rg`, `chmod`):** running
+  `parseArgs` over tokens before the cursor reveals whether `-e`/`-f`/`--files`
+  (in `grep`/`rg`) or `--reference` (in `chmod`) was already supplied,
+  automatically shifting the first positional argument from pattern/mode
+  (`KindString`) to `KindFile`.
+- **Signal and setting maps (`kill`, `stty`):** drive `kill` and `stty` from
+  their runtime `signums` map and setting table (`pretty`, `dump`, `size`,
+  `raw`, `load` $\to$ `KindFile`).
+
+#### Method 3: Declarative `SubcommandSpec` trees (`git`, `web`/`cdp`, `ai`, nested shells)
+
+Subcommand-based builtins replace ad-hoc `switch` dispatchers with a tree of
+`SubcommandSpec` nodes consumed by both execution and completion:
+
+- **`web` and `cdp`:** share global `--nick`/`-n` (`KindDynamic` querying active
+  browser nicknames) and subcommand specs (`open` with `--back|--forward|--reload`,
+  `shot` with `KindFile` and `--adorn|--full`, `ax`, `click`, `type`, `eval`,
+  `cdp`, `logs`):
+
+```go
+webSpec.Sub("shot", Aliases("screenshot"),
+	Positional("output", KindFile), Flag("--adorn"), Flag("--full"))
+```
+
+- **`ai` control and tools:** complete `setup`, `login`, `logout`, `status`,
+  `help`, plus all tool names from `BuildKabibiTools(nil)`. For `login`/`logout`,
+  complete from the runtime provider slice; for tools, inspect `tool.Parameters`
+  (boolean flags, enum lists, and path properties).
+- **Two-layer `git` grammar (Kabibi + `go-git`):**
+  - Kabibi’s outer parser defines `-C`, `--git-dir`, `--work-tree` (`KindDir`),
+    `-c`, `--no-pager`, `-P`, `--bare`, and updates `effectiveDir` before
+    delegating completion to the subcommand.
+  - Kabibi-owned subcommands (`notes`, `replace`, `bisect run` $\to$
+    `KindCommand`, `commit --author/--date`) and `go-git`’s 54 subcommands use
+    a shared `git.CommandSpec` registry instead of the disconnected `help` map,
+    attaching dynamic read-only repo providers (`KindGitBranch`, `KindGitRef`,
+    `KindGitRemote`, `KindFile`).
+
+#### Method 4: First-class builtin specs in local `mvdan.cc/sh/v3/interp`
+
+In the local `mvdan/sh` fork, separate `IsImplementedBuiltin` from the 17
+unimplemented `IsBuiltin` names and back `flagParser` with per-builtin specs:
+
+- **Directory/file builtins:** `cd` and `pushd` (`-n`, `KindDir`); `source` and
+  `.` (`KindFile`).
+- **Command/builtin delegators:** `command` (`-v`) and `exec` transition to
+  `KindCommand`; `builtin` transitions to `KindBuiltin`; `type` and `help`
+  complete commands, builtins, and keywords.
+- **Environment, alias, and option tables:** `export`, `unset`, `read`,
+  `readonly`, `declare`, `typeset` complete `KindEnvVar`; `alias`/`unalias`
+  complete runner aliases; `shopt` completes directly from `posixOptsTable`
+  (under `-o`) or `bashOptsTable`:
+
+```go
+shoptSpec := BuiltinSpec{Flags: "-s -u -o",
+	Dynamic: completeShoptFromRunnerTables}
+```
 
 ### 3.3 Semantic value kinds and description heuristics
 
-The parser definition should provide a semantic value kind when the parser
-already distinguishes it (for example: boolean, enum, integer, path, file, or
-directory). For parsers that only expose a string value, infer path-like
-values from the human-readable option/operand description as a fallback.
+Each option or positional expectation resolves to an explicit `ValueKind`:
+`KindNone`, `KindBool`, `KindString`, `KindInt`, `KindEnum`, `KindFile`,
+`KindDir`, `KindCommand`, `KindBuiltin`, `KindEnvVar`, `KindGitRef`, or
+`KindDynamic`.
 
-The fallback should recognize clear path terms such as `file`, `path`,
-`directory`, `folder`, `source`, `destination`, `target file`, and `archive`.
-It must not classify generic values such as `query`, `pattern`, `text`,
-`message`, `name`, or `URL` as paths solely because they are strings. An
-explicit parser semantic kind takes precedence over the heuristic.
+When a legacy or third-party parser only exposes an unannotated string value,
+infer `KindDir`, `KindFile`, or `KindEnum` from the option name and
+human-readable description as a conservative fallback:
 
-Descriptions are classification input, not a separately maintained syntax
-source. If a description is ambiguous, completion should remain conservative
-and offer no filesystem candidates rather than make a likely string value
-look path-like.
+- **Directory match:** `\b(dir|directory|folder|work-tree|git-dir|chdir)\b`
+  $\to$ `KindDir`.
+- **File/path match:** `\b(file|files|path|paths|filename|archive|keyring|config|source|destination)\b`
+  $\to$ `KindFile`.
+- **Inline enum match:** parenthesized pipe lists such as `(none|xfer|progress)`
+  in `dd` $\to$ `KindEnum`.
+- **Negative guard:** terms such as `pattern`, `regex`, `query`, `url`, `text`,
+  `message`, `name`, `count`, `duration`, or `mode` without a path noun remain
+  `KindString` and offer no filesystem candidates.
+
+An explicit parser `ValueKind` always takes precedence over the heuristic.
 
 ## 4. Completion context and candidate resolution
 
@@ -190,6 +292,39 @@ For path-like values:
 Each candidate is represented as a display label plus an insertion edit
 (rune-based start/end span and insertion text). Applying the edit must preserve
 all text before and after the token, including text to the right of the cursor.
+
+### 4.4 End-to-end resolution pipeline
+
+When explicit or speculative completion runs, it resolves candidates in two
+stages without mutating shell state:
+
+1. **AST cursor classification:** parse the input with `syntax.KeepComments(true)`
+   (recovering from unclosed quotes or trailing operators) and locate the node
+   at the cursor rune offset:
+   - Redirection operand (`>`, `>>`, `<`, `2>`) $\to$ `KindFile`.
+   - Command head (statement start, after `;`, `|`, `|&`, `&`, `&&`, `||`, `(`,
+     `then`, `do`, `else`, `elif`) $\to$ path completion if the token contains
+     `/` or `\`, otherwise union of valid Bash keywords, session functions and
+     aliases, implemented `mvdan` builtins, Kabibi builtins (`git`, `ai`, `web`,
+     `cdp`, `bash`, `sh`, `kabibi`, `quit`), the 85 `u-root` commands, and
+     TTL-cached `PATH` executables.
+2. **Builtin `ParseState.Step` transition:** resolve the command head using
+   exact runtime dispatch precedence (`mvdan` builtin $\to$ nested shell $\to$
+   `git` $\to$ `ai` $\to$ `web`/`cdp` $\to$ `u-root`) and step its parser over
+   the words preceding the cursor:
+   - If the parser reaches a `KindCommand` tail (`time`, `timeout`, `nohup`,
+     `xargs`, `command`, `exec`, `git bisect run`), recursively re-enter Stage 1
+     on the remaining slice:
+
+```go
+if exp.Kind == KindCommand {
+	return resolveCommandSlice(ctx, args[exp.SubSliceIdx:], cursorInSlice)
+}
+```
+
+   - Otherwise, complete the active `Expectation` (`OptionSpec` names,
+     `KindEnum` choices, `KindFile`/`KindDir` entries, `KindGitRef` refs,
+     `KindEnvVar` variables, or `KindDynamic` callback results).
 
 ## 5. User-visible completion state machine
 
