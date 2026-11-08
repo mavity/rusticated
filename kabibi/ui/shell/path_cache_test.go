@@ -10,7 +10,7 @@ import (
 	"mvdan.cc/sh/v3/expand"
 )
 
-func TestBuildPathCacheSnapshotIndexesExecutablesScriptsAndWindowsExtensions(t *testing.T) {
+func TestBuildPathCacheSnapshotIndexesPATHExecutablesAndWindowsExtensions(t *testing.T) {
 	root := t.TempDir()
 	pathDir := filepath.Join(root, "bin")
 	cwd := filepath.Join(root, "cwd")
@@ -29,6 +29,7 @@ func TestBuildPathCacheSnapshotIndexesExecutablesScriptsAndWindowsExtensions(t *
 
 	writeFile(filepath.Join(cwd, "local-script"), 0o644)
 	writeFile(filepath.Join(pathDir, "deploy.CMD"), 0o644)
+	writeFile(filepath.Join(pathDir, "not-command.txt"), 0o644)
 
 	if platform.HostOS() != "windows" {
 		writeFile(filepath.Join(pathDir, "path-command"), 0o755)
@@ -43,8 +44,8 @@ func TestBuildPathCacheSnapshotIndexesExecutablesScriptsAndWindowsExtensions(t *
 		if _, ok := unixSnapshot.commands["not-executable"]; ok {
 			t.Fatal("non-executable PATH file was indexed")
 		}
-		if _, ok := unixSnapshot.scripts["local-script"]; !ok {
-			t.Fatal("current-directory shebang script was not indexed")
+		if _, ok := unixSnapshot.commands["local-script"]; ok {
+			t.Fatal("current-directory file was indexed as a bare command")
 		}
 	}
 
@@ -59,6 +60,9 @@ func TestBuildPathCacheSnapshotIndexesExecutablesScriptsAndWindowsExtensions(t *
 	}
 	if _, ok := windowsSnapshot.commands["deploy.cmd"]; !ok {
 		t.Fatal("explicit PATHEXT extension was not indexed")
+	}
+	if _, ok := windowsSnapshot.commands["not-command.txt"]; ok {
+		t.Fatal("file outside PATHEXT was indexed as a command")
 	}
 }
 
@@ -155,4 +159,29 @@ func TestPathCommandCacheRefreshesAndCloses(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("immediate PATH cache refresh did not index the executable")
+}
+
+func TestPathCommandCacheReturnsCachedCompletionNames(t *testing.T) {
+	root := t.TempDir()
+	name := "completion-command"
+	pathExt := ""
+	windowsLike := platform.HostOS() == "windows"
+	if windowsLike {
+		name += ".EXE"
+		pathExt = ".EXE"
+	}
+	if err := os.WriteFile(filepath.Join(root, name), []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	key := pathCacheKey{cwd: root, path: root, pathExt: pathExt, windowsLike: windowsLike}
+	cache := newPathCommandCache()
+	defer cache.close()
+	cache.mu.Lock()
+	cache.snapshot = buildPathCacheSnapshot(key)
+	cache.mu.Unlock()
+
+	names := cache.commandNames(key, "completion-")
+	if len(names) == 0 {
+		t.Fatal("fresh PATH cache returned no matching command names")
+	}
 }

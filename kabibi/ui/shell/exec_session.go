@@ -727,6 +727,21 @@ func (es *ExecutionSession) canResolveCommandFromCache(name string) bool {
 	return es.pathCache.contains(key, name)
 }
 
+func (es *ExecutionSession) pathCommandNames(prefix string) []string {
+	if es == nil || es.pathCache == nil {
+		return nil
+	}
+	cwd, env, _ := es.resolutionState("")
+	path, _ := lookupEnvValue(env, "PATH")
+	pathExt, _ := lookupEnvValue(env, "PATHEXT")
+	return es.pathCache.commandNames(pathCacheKey{
+		cwd:         cwd,
+		path:        path,
+		pathExt:     pathExt,
+		windowsLike: isWindowsLikeEnv(env),
+	}, prefix)
+}
+
 func isAlwaysResolvedCommand(name string) bool {
 	if interp.IsBuiltin(name) || (!strings.ContainsAny(name, `/\`) && isNestedShellBuiltinName(name)) {
 		return true

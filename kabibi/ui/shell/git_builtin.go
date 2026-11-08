@@ -24,6 +24,77 @@ type gitInvocation struct {
 	noPager      bool
 }
 
+type gitInvocationParseState struct {
+	invocation    gitInvocation
+	pendingOption string
+}
+
+type gitGlobalOptionKind uint8
+
+const (
+	gitOptionChangeDirectory gitGlobalOptionKind = iota
+	gitOptionConfig
+	gitOptionGitDir
+	gitOptionWorkTree
+	gitOptionNoPager
+	gitOptionPassThrough
+)
+
+type gitGlobalOptionSpec struct {
+	name         string
+	aliases      []string
+	kind         gitGlobalOptionKind
+	inlinePrefix bool
+	inlineEqual  bool
+}
+
+var gitGlobalOptionSpecs = []gitGlobalOptionSpec{
+	{name: "-C", kind: gitOptionChangeDirectory, inlinePrefix: true},
+	{name: "-c", kind: gitOptionConfig, inlinePrefix: true},
+	{name: "--git-dir", kind: gitOptionGitDir, inlineEqual: true},
+	{name: "--work-tree", kind: gitOptionWorkTree, inlineEqual: true},
+	{name: "--no-pager", aliases: []string{"-P"}, kind: gitOptionNoPager},
+	{name: "--no-replace-objects", kind: gitOptionPassThrough},
+	{name: "--bare", kind: gitOptionPassThrough},
+}
+
+const (
+	gitHelpOptionLong     = "--help"
+	gitHelpOptionShort    = "-h"
+	gitVersionOptionLong  = "--version"
+	gitVersionOptionShort = "-v"
+)
+
+func gitGlobalOptionNames() []string {
+	names := make([]string, 0, len(gitGlobalOptionSpecs)+4)
+	for _, spec := range gitGlobalOptionSpecs {
+		names = append(names, spec.name)
+		names = append(names, spec.aliases...)
+	}
+	names = append(names, gitVersionOptionLong, gitVersionOptionShort, gitHelpOptionLong, gitHelpOptionShort)
+	return names
+}
+
+func matchGitGlobalOption(arg string) (gitGlobalOptionSpec, string, bool, bool) {
+	for _, spec := range gitGlobalOptionSpecs {
+		if arg == spec.name {
+			return spec, "", false, true
+		}
+		for _, alias := range spec.aliases {
+			if arg == alias {
+				return spec, "", false, true
+			}
+		}
+		if spec.inlinePrefix && strings.HasPrefix(arg, spec.name) && len(arg) > len(spec.name) {
+			return spec, arg[len(spec.name):], true, true
+		}
+		if spec.inlineEqual && strings.HasPrefix(arg, spec.name+"=") {
+			return spec, strings.TrimPrefix(arg, spec.name+"="), true, true
+		}
+	}
+	return gitGlobalOptionSpec{}, "", false, false
+}
+
 func gitBuiltinMiddleware(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 	return func(ctx context.Context, args []string) error {
 		if len(args) == 0 || args[0] != "git" {
@@ -58,7 +129,7 @@ func runGitBuiltin(ctx context.Context, args []string) error {
 	}
 
 	switch invocation.args[0] {
-	case "--help", "-h":
+	case gitHelpOptionLong, gitHelpOptionShort:
 		if len(invocation.args) == 1 {
 			writeGitHelp(hc)
 			return nil
@@ -71,7 +142,7 @@ func runGitBuiltin(ctx context.Context, args []string) error {
 		if len(invocation.args) > 1 && invocation.args[1] == "run" {
 			return runGitBisectRun(ctx, hc, invocation)
 		}
-	case "--version", "-v":
+	case gitVersionOptionLong, gitVersionOptionShort:
 		if len(invocation.args) == 1 {
 			version, err := gitcore.LibraryVersion()
 			if err != nil {
@@ -86,66 +157,70 @@ func runGitBuiltin(ctx context.Context, args []string) error {
 }
 
 func parseGitInvocation(cwd string, args []string) (gitInvocation, error) {
+	state, err := parseGitInvocationState(cwd, args, false)
+	return state.invocation, err
+}
+
+func parseGitInvocationState(cwd string, args []string, allowIncomplete bool) (gitInvocationParseState, error) {
 	if cwd == "" {
 		var err error
 		cwd, err = os.Getwd()
 		if err != nil {
-			return gitInvocation{}, fmt.Errorf("resolve current directory: %w", err)
+			return gitInvocationParseState{}, fmt.Errorf("resolve current directory: %w", err)
 		}
 	}
-	invocation := gitInvocation{effectiveDir: filepath.Clean(cwd)}
+	state := gitInvocationParseState{invocation: gitInvocation{effectiveDir: filepath.Clean(cwd)}}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		switch {
-		case arg == "--":
-			invocation.args = append(invocation.args, args[i:]...)
-			return invocation, nil
-		case arg == "-C":
+		if arg == "--" {
+			state.invocation.args = append(state.invocation.args, args[i:]...)
+			return state, nil
+		}
+		spec, value, inline, matched := matchGitGlobalOption(arg)
+		if !matched {
+			state.invocation.args = append(state.invocation.args, args[i:]...)
+			return state, nil
+		}
+		if spec.kind == gitOptionNoPager {
+			state.invocation.noPager = true
+			state.invocation.args = append(state.invocation.args, arg)
+			continue
+		}
+		if spec.kind == gitOptionPassThrough {
+			state.invocation.args = append(state.invocation.args, arg)
+			continue
+		}
+		if !inline {
 			i++
 			if i >= len(args) {
-				return gitInvocation{}, fmt.Errorf("-C requires a directory")
+				if allowIncomplete {
+					state.pendingOption = spec.name
+					return state, nil
+				}
+				switch spec.kind {
+				case gitOptionChangeDirectory:
+					return gitInvocationParseState{}, fmt.Errorf("-C requires a directory")
+				case gitOptionConfig:
+					return gitInvocationParseState{}, fmt.Errorf("-c requires a key=value pair")
+				default:
+					return gitInvocationParseState{}, fmt.Errorf("%s requires a path", spec.name)
+				}
 			}
-			invocation.effectiveDir = resolveShellPath(invocation.effectiveDir, args[i])
-		case strings.HasPrefix(arg, "-C") && len(arg) > 2:
-			invocation.effectiveDir = resolveShellPath(invocation.effectiveDir, arg[2:])
-		case arg == "-c":
-			i++
-			if i >= len(args) {
-				return gitInvocation{}, fmt.Errorf("-c requires a key=value pair")
-			}
-			invocation.config = append(invocation.config, args[i])
-			invocation.args = append(invocation.args, "-c", args[i])
-		case strings.HasPrefix(arg, "-c") && len(arg) > 2:
-			value := arg[2:]
-			invocation.config = append(invocation.config, value)
-			invocation.args = append(invocation.args, "-c", value)
-		case arg == "--git-dir":
-			i++
-			if i >= len(args) {
-				return gitInvocation{}, fmt.Errorf("--git-dir requires a path")
-			}
-			invocation.gitDir = resolveShellPath(invocation.effectiveDir, args[i])
-		case strings.HasPrefix(arg, "--git-dir="):
-			invocation.gitDir = resolveShellPath(invocation.effectiveDir, strings.TrimPrefix(arg, "--git-dir="))
-		case arg == "--work-tree":
-			i++
-			if i >= len(args) {
-				return gitInvocation{}, fmt.Errorf("--work-tree requires a path")
-			}
-			invocation.workTree = resolveShellPath(invocation.effectiveDir, args[i])
-		case strings.HasPrefix(arg, "--work-tree="):
-			invocation.workTree = resolveShellPath(invocation.effectiveDir, strings.TrimPrefix(arg, "--work-tree="))
-		case arg == "--no-pager" || arg == "-P":
-			invocation.noPager = true
-			invocation.args = append(invocation.args, arg)
-		case arg == "--no-replace-objects" || arg == "--bare":
-			invocation.args = append(invocation.args, arg)
-		default:
-			invocation.args = append(invocation.args, args[i:]...)
-			return invocation, nil
+			value = args[i]
+		}
+		switch spec.kind {
+		case gitOptionChangeDirectory:
+			state.invocation.effectiveDir = resolveShellPath(state.invocation.effectiveDir, value)
+		case gitOptionConfig:
+			state.invocation.config = append(state.invocation.config, value)
+			state.invocation.args = append(state.invocation.args, "-c", value)
+		case gitOptionGitDir:
+			state.invocation.gitDir = resolveShellPath(state.invocation.effectiveDir, value)
+		case gitOptionWorkTree:
+			state.invocation.workTree = resolveShellPath(state.invocation.effectiveDir, value)
 		}
 	}
-	return invocation, nil
+	return state, nil
 }
 
 func buildGitEnv(execSess *ExecutionSession, hc interp.HandlerContext, fsys *osFS, config []string) (map[string]string, error) {

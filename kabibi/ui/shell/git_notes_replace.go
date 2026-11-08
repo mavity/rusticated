@@ -17,6 +17,100 @@ import (
 	"mvdan.cc/sh/v3/interp"
 )
 
+type gitNotesOptionSyntax struct {
+	name       string
+	takesValue bool
+}
+
+type gitNotesCommandSyntax struct {
+	name    string
+	options []gitNotesOptionSyntax
+}
+
+var gitNotesRefOption = gitNotesOptionSyntax{name: "--ref", takesValue: true}
+
+var gitNoteMutationOptions = []gitNotesOptionSyntax{
+	{name: "-f"},
+	{name: "--force"},
+	{name: "-m", takesValue: true},
+	{name: "--message", takesValue: true},
+}
+
+var gitNotesCommands = []gitNotesCommandSyntax{
+	{name: "add", options: gitNoteMutationOptions},
+	{name: "append", options: gitNoteMutationOptions},
+	{name: "list"},
+	{name: "prune"},
+	{name: "remove"},
+	{name: "show"},
+}
+
+type gitReplaceOptionSyntax struct {
+	name string
+	mode string
+}
+
+var gitReplaceOptions = []gitReplaceOptionSyntax{
+	{name: "-l", mode: "list"},
+	{name: "--list", mode: "list"},
+	{name: "-d", mode: "delete"},
+	{name: "--delete", mode: "delete"},
+	{name: "-f", mode: "force"},
+	{name: "--force", mode: "force"},
+	{name: "-g", mode: "graft"},
+	{name: "--graft", mode: "graft"},
+}
+
+func gitNotesCommandNames() []string {
+	names := make([]string, len(gitNotesCommands))
+	for i, command := range gitNotesCommands {
+		names[i] = command.name
+	}
+	return names
+}
+
+func gitReplaceOptionNames() []string {
+	names := make([]string, len(gitReplaceOptions))
+	for i, option := range gitReplaceOptions {
+		names[i] = option.name
+	}
+	return names
+}
+
+func matchGitReplaceOption(arg string) (string, bool) {
+	for _, option := range gitReplaceOptions {
+		if arg == option.name {
+			return option.mode, true
+		}
+	}
+	return "", false
+}
+
+func gitNotesOptionNames(command string) []string {
+	options := []string{gitNotesRefOption.name}
+	for _, spec := range gitNotesCommands {
+		if spec.name == command {
+			for _, option := range spec.options {
+				options = append(options, option.name)
+			}
+			break
+		}
+	}
+	return options
+}
+
+func matchGitNotesOption(arg string, specs []gitNotesOptionSyntax) (gitNotesOptionSyntax, string, bool, bool) {
+	for _, spec := range specs {
+		if arg == spec.name {
+			return spec, "", false, true
+		}
+		if spec.takesValue && strings.HasPrefix(arg, spec.name+"=") {
+			return spec, strings.TrimPrefix(arg, spec.name+"="), true, true
+		}
+	}
+	return gitNotesOptionSyntax{}, "", false, false
+}
+
 func runGitReplace(hc interp.HandlerContext, invocation gitInvocation) error {
 	args := invocation.args[1:]
 	if len(args) == 0 {
@@ -35,8 +129,8 @@ func runGitReplace(hc interp.HandlerContext, invocation gitInvocation) error {
 		fmt.Fprintf(hc.Stderr, "git replace: %v\n", err)
 		return interp.ExitStatus(128)
 	}
-	switch args[0] {
-	case "-l", "--list":
+	mode, isOption := matchGitReplaceOption(args[0])
+	if isOption && mode == "list" {
 		pattern := ""
 		if len(args) > 1 {
 			pattern = args[1]
@@ -46,7 +140,8 @@ func runGitReplace(hc interp.HandlerContext, invocation gitInvocation) error {
 			return interp.ExitStatus(2)
 		}
 		return listGitReplacements(hc.Stdout, hc.Stderr, repo, pattern)
-	case "-d", "--delete":
+	}
+	if isOption && mode == "delete" {
 		if len(args) < 2 {
 			fmt.Fprintln(hc.Stderr, "usage: git replace -d <object>...")
 			return interp.ExitStatus(2)
@@ -67,11 +162,14 @@ func runGitReplace(hc interp.HandlerContext, invocation gitInvocation) error {
 	}
 
 	force := false
-	if args[0] == "-f" || args[0] == "--force" {
+	if isOption && mode == "force" {
 		force = true
 		args = args[1:]
 	}
-	if len(args) > 0 && (args[0] == "-g" || args[0] == "--graft") {
+	if len(args) > 0 {
+		mode, isOption = matchGitReplaceOption(args[0])
+	}
+	if len(args) > 0 && isOption && mode == "graft" {
 		return runGitReplaceGraft(hc, repo, args[1:], force)
 	}
 	if len(args) != 2 {
@@ -289,20 +387,29 @@ func runGitNotes(ctx context.Context, hc interp.HandlerContext, invocation gitIn
 	}
 	refName := plumbing.ReferenceName("refs/notes/commits")
 	for i := 0; i < len(args); {
-		if args[i] == "--ref" && i+1 < len(args) {
-			refName = plumbing.ReferenceName(args[i+1])
-			args = append(args[:i], args[i+2:]...)
-			continue
-		}
-		if strings.HasPrefix(args[i], "--ref=") {
-			refName = plumbing.ReferenceName(strings.TrimPrefix(args[i], "--ref="))
-			args = append(args[:i], args[i+1:]...)
+		spec, value, inline, matched := matchGitNotesOption(args[i], []gitNotesOptionSyntax{gitNotesRefOption})
+		if matched {
+			start, end := i, i+1
+			if !inline {
+				if end >= len(args) {
+					return gitNotesOptionError(hc, spec.name)
+				}
+				value = args[end]
+				end++
+			}
+			refName = plumbing.ReferenceName(value)
+			args = append(args[:start], args[end:]...)
+			i = start
 			continue
 		}
 		i++
 	}
 	if len(args) == 0 {
 		args = []string{"list"}
+	}
+	if !gitNotesCommandKnown(args[0]) {
+		fmt.Fprintf(hc.Stderr, "git notes: unsupported subcommand %q\n", args[0])
+		return interp.ExitStatus(2)
 	}
 	if value := env["GIT_NOTES_REF"]; value != "" && refName == "refs/notes/commits" {
 		refName = plumbing.ReferenceName(value)
@@ -416,9 +523,22 @@ func runGitNotes(ctx context.Context, hc interp.HandlerContext, invocation gitIn
 		}
 		return nil
 	default:
-		fmt.Fprintf(hc.Stderr, "git notes: unsupported subcommand %q\n", args[0])
 		return interp.ExitStatus(2)
 	}
+}
+
+func gitNotesCommandKnown(name string) bool {
+	for _, command := range gitNotesCommands {
+		if command.name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func gitNotesOptionError(hc interp.HandlerContext, option string) error {
+	fmt.Fprintf(hc.Stderr, "git notes: %s requires a value\n", option)
+	return interp.ExitStatus(2)
 }
 
 func reachableGitObjects(repo *git.Repository) (map[plumbing.Hash]struct{}, error) {
@@ -493,17 +613,23 @@ func parseGitNoteMutation(args []string) (bool, string, []string, error) {
 	var message string
 	var target []string
 	for i := 0; i < len(args); i++ {
-		switch args[i] {
+		spec, value, inline, matched := matchGitNotesOption(args[i], gitNoteMutationOptions)
+		if !matched {
+			target = append(target, args[i])
+			continue
+		}
+		switch spec.name {
 		case "-f", "--force":
 			force = true
-		case "-m", "--message":
-			if i+1 >= len(args) {
-				return false, "", nil, fmt.Errorf("%s requires a message", args[i])
-			}
-			i++
-			message = args[i]
 		default:
-			target = append(target, args[i])
+			if !inline {
+				if i+1 >= len(args) {
+					return false, "", nil, fmt.Errorf("%s requires a message", spec.name)
+				}
+				i++
+				value = args[i]
+			}
+			message = value
 		}
 	}
 	if message == "" {

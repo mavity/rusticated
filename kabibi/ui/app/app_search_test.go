@@ -77,3 +77,25 @@ func TestPlainF7StillOpensMkdirDialog(t *testing.T) {
 		t.Fatalf("F7 dialog = %#v, want ActionMkdir", dlg)
 	}
 }
+
+func TestCtrlSpaceCompletesWithPanelsVisibleAndTabCycles(t *testing.T) {
+	widget := NewWidget(AppWidgetOptions{WorkingDir: t.TempDir(), PanelsVisible: true})
+	defer widget.Close()
+	widget.Shell().SetInput("git st")
+
+	if !widget.HandleEvent(input.KeyPressEvent{Code: input.KeySpace, Mod: input.ModCtrl}) {
+		t.Fatal("Ctrl+Space was not handled")
+	}
+	if !widget.Shell().Input().CompletionActive() {
+		t.Fatal("Ctrl+Space did not activate explicit completion")
+	}
+	if !widget.HandleEvent(input.KeyPressEvent{Code: input.KeyTab}) {
+		t.Fatal("Tab did not cycle active completion while panels were visible")
+	}
+	if !widget.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter}) {
+		t.Fatal("Enter did not accept active completion")
+	}
+	if got, want := widget.Shell().Input().Value(), "git stash "; got != want {
+		t.Fatalf("accepted completion = %q, want %q", got, want)
+	}
+}

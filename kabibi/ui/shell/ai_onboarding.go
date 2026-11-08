@@ -17,6 +17,22 @@ import (
 	"mvdan.cc/sh/v3/interp"
 )
 
+const (
+	aiControlHelp   = "help"
+	aiControlSetup  = "setup"
+	aiControlLogin  = "login"
+	aiControlLogout = "logout"
+	aiControlStatus = "status"
+)
+
+var aiControlSubcommands = []string{
+	aiControlSetup,
+	aiControlLogin,
+	aiControlLogout,
+	aiControlStatus,
+	aiControlHelp,
+}
+
 var errOnboardingCancelled = ai.ErrAuthCancelled
 
 // OnboardingPrompter is retained as a backwards-compatible adapter that can
@@ -344,12 +360,12 @@ func runAIBuiltin(ctx context.Context, args []string) error {
 		term = &ai.StdioTerminalSession{Reader: hc.Stdin, Writer: hc.Stdout, TTY: false}
 	}
 
-	sub := "setup"
+	sub := aiControlSetup
 	if len(args) > 0 {
 		sub = strings.ToLower(strings.TrimSpace(args[0]))
 	}
 	switch sub {
-	case "help", "--help", "-h":
+	case aiControlHelp, "--help", "-h":
 		help := `Kabibi built-in AI control
 
   ai setup              Configure local Gemma or cloud AI provider
@@ -359,15 +375,15 @@ func runAIBuiltin(ctx context.Context, args []string) error {
 
 ` + formatAIToolsHelp(BuildKabibiTools(execSess))
 		return writeAIBuiltinOutput(hc.Stdout, hc.Stderr, "ai help", help)
-	case "status":
+	case aiControlStatus:
 		return runAIStatusBuiltin(ctx, hc.Stdout)
-	case "logout":
+	case aiControlLogout:
 		providerArg := ""
 		if len(args) > 1 {
 			providerArg = strings.ToLower(strings.TrimSpace(args[1]))
 		}
 		return runAILogoutBuiltin(ctx, term, providerArg)
-	case "login":
+	case aiControlLogin:
 		providerArg := ""
 		if len(args) > 1 {
 			providerArg = strings.ToLower(strings.TrimSpace(args[1]))
@@ -382,7 +398,7 @@ func runAIBuiltin(ctx context.Context, args []string) error {
 			return interp.ExitStatus(1)
 		}
 		return nil
-	case "setup":
+	case aiControlSetup:
 		runner := NewLazyAIRunner(execSess)
 		if _, err := runner.configureAIWithTerm(ctx, term); err != nil {
 			if errors.Is(err, errOnboardingCancelled) {

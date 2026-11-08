@@ -1,8 +1,11 @@
 package shell
 
 import (
+	"errors"
+	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -23,7 +26,6 @@ type pathCacheKey struct {
 type pathCacheSnapshot struct {
 	key       pathCacheKey
 	commands  map[string]struct{}
-	scripts   map[string]struct{}
 	refreshed time.Time
 }
 
@@ -110,8 +112,35 @@ func (c *pathCommandCache) contains(key pathCacheKey, name string) bool {
 	if _, ok := snapshot.commands[cacheCommandName(name, key.windowsLike)]; ok {
 		return true
 	}
-	_, ok := snapshot.scripts[cacheCommandName(name, key.windowsLike)]
-	return ok
+	return false
+}
+
+func (c *pathCommandCache) commandNames(key pathCacheKey, prefix string) []string {
+	now := time.Now()
+	c.mu.Lock()
+	snapshot := c.snapshot
+	valid := snapshot != nil && snapshot.key == key && now.Sub(snapshot.refreshed) < pathCacheMaxAge
+	if !valid {
+		c.mu.Unlock()
+		c.schedule(key, true)
+		return nil
+	}
+	if key.windowsLike {
+		prefix = strings.ToLower(prefix)
+	}
+	found := make(map[string]struct{}, len(snapshot.commands))
+	for name := range snapshot.commands {
+		if strings.HasPrefix(name, prefix) {
+			found[name] = struct{}{}
+		}
+	}
+	c.mu.Unlock()
+	names := make([]string, 0, len(found))
+	for name := range found {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func (c *pathCommandCache) run() {
@@ -205,7 +234,6 @@ func buildPathCacheSnapshot(key pathCacheKey) *pathCacheSnapshot {
 	snapshot := &pathCacheSnapshot{
 		key:       key,
 		commands:  make(map[string]struct{}),
-		scripts:   make(map[string]struct{}),
 		refreshed: time.Now(),
 	}
 	pathDirs := filepath.SplitList(key.path)
@@ -220,13 +248,13 @@ func buildPathCacheSnapshot(key pathCacheKey) *pathCacheSnapshot {
 		}
 		indexCommandDirectory(snapshot.commands, dir, key)
 	}
-	indexScripts(snapshot.scripts, key.cwd, key)
 	return snapshot
 }
 
 func indexCommandDirectory(commands map[string]struct{}, dir string, key pathCacheKey) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
+		logUnexpectedCompletionFSError("read command directory", dir, err)
 		return
 	}
 	extensions := pathCacheExtensions(key.pathExt, key.windowsLike)
@@ -235,11 +263,13 @@ func indexCommandDirectory(commands map[string]struct{}, dir string, key pathCac
 		fullPath := filepath.Join(dir, name)
 		info, err := entry.Info()
 		if err != nil {
+			logUnexpectedCompletionFSError("inspect command entry", fullPath, err)
 			continue
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
 			info, err = os.Stat(fullPath)
 			if err != nil {
+				logUnexpectedCompletionFSError("resolve command symlink", fullPath, err)
 				continue
 			}
 		}
@@ -257,46 +287,19 @@ func indexCommandDirectory(commands map[string]struct{}, dir string, key pathCac
 
 func indexWindowsCommand(commands map[string]struct{}, name string, extensions map[string]struct{}) {
 	lowerName := strings.ToLower(name)
-	commands[lowerName] = struct{}{}
 	ext := strings.ToLower(filepath.Ext(name))
-	if ext == "" {
+	if _, ok := extensions[ext]; !ok {
 		return
 	}
-	if _, ok := extensions[ext]; ok {
-		commands[strings.TrimSuffix(lowerName, ext)] = struct{}{}
-	}
+	commands[lowerName] = struct{}{}
+	commands[strings.TrimSuffix(lowerName, ext)] = struct{}{}
 }
 
-func indexScripts(scripts map[string]struct{}, dir string, key pathCacheKey) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
+func logUnexpectedCompletionFSError(operation, path string, err error) {
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
 		return
 	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		path := filepath.Join(dir, name)
-		info, err := os.Stat(path)
-		if err != nil || info.IsDir() {
-			continue
-		}
-		if strings.EqualFold(filepath.Ext(name), ".sh") {
-			scripts[cacheCommandName(name, key.windowsLike)] = struct{}{}
-			continue
-		}
-		file, err := os.Open(path)
-		if err != nil {
-			continue
-		}
-		var marker [2]byte
-		_, readErr := file.Read(marker[:])
-		_ = file.Close()
-		if readErr == nil && string(marker[:]) == "#!" {
-			scripts[cacheCommandName(name, key.windowsLike)] = struct{}{}
-		}
-	}
+	log.Printf("shell completion: %s %q: %v", operation, path, err)
 }
 
 func pathCacheExtensions(pathExt string, windowsLike bool) map[string]struct{} {
