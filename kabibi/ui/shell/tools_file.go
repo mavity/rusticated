@@ -44,13 +44,14 @@ type WriteFileInput struct {
 	Explanation string   `json:"explanation,omitempty" doc:"Brief explanation of why this file is being written"`
 }
 
-type ListFilesInput struct {
-	_             struct{} `doc:"List or search files in a directory using doublestar globs ('**/*.go'), fuzzy filename matching, or content search." emoji:"📂"`
-	Directory     string   `json:"directory,omitempty" doc:"Directory to search (relative to current working directory or absolute; defaults to current working directory)."`
-	Query         string   `json:"query,omitempty" doc:"Glob pattern (e.g. '**/*.go'), filename query, or concept query. Default '*'."`
-	SearchContent bool     `json:"search_content,omitempty" doc:"If true, match query against file contents (exact -> semantic embeddings) instead of just filenames."`
-	MaxResults    int      `json:"max_results,omitempty" doc:"Max entries to return (default 50)."`
-	Explanation   string   `json:"explanation,omitempty" doc:"Brief explanation of what files are being listed"`
+type FindFilesInput struct {
+	_           struct{} `doc:"Find files by structural path patterns and semantic or literal content. Use find_content for concepts, implementations, symbols, and code. Semantic content search is the default; use find_paths only for globs, names, and directory prefixes. Combine both to search within a path subset." emoji:"🔎"`
+	Directory   string   `json:"directory,omitempty" doc:"Root directory to search (relative to current working directory or absolute; defaults to current working directory)."`
+	FindPaths   string   `json:"find_paths,omitempty" doc:"Structural glob, exact path/name, or directory prefix (e.g. '**/*.go', 'ai/', 'README.md'). Never semantic. Defaults to '**' (all paths under directory)."`
+	FindContent string   `json:"find_content,omitempty" doc:"Literal text or natural-language concept to search inside file contents (e.g. 'AI browser tool', 'authentication flow'). Semantic search is on by default whenever this is set."`
+	NoSemantic  bool     `json:"no_semantic,omitempty" doc:"Disable semantic embeddings; only literal content matching is used. Default false. Has no effect without find_content."`
+	MaxResults  int      `json:"max_results,omitempty" doc:"Maximum entries to return (default 50)."`
+	Explanation string   `json:"explanation,omitempty" doc:"Brief explanation of what is being searched."`
 }
 
 type ListDirInput struct {
@@ -59,27 +60,28 @@ type ListDirInput struct {
 	Explanation string   `json:"explanation,omitempty" doc:"Brief explanation of why this directory is being listed"`
 }
 
-func listFilesOptions(ctx context.Context, in ListFilesInput, embedder ai.PartEmbedder) filelist.Options {
-	query := strings.TrimSpace(in.Query)
-	if query == "" {
-		query = "*"
+func findFilesOptions(ctx context.Context, in FindFilesInput, embedder ai.PartEmbedder) filelist.Options {
+	findPaths := strings.TrimSpace(in.FindPaths)
+	if findPaths == "" {
+		findPaths = "**"
 	}
 	options := filelist.Options{
-		Context:       ctx,
-		Query:         query,
-		SearchContent: in.SearchContent,
-		MaxResults:    in.MaxResults,
-		Embedder:      embedder,
+		Context:     ctx,
+		FindPaths:   findPaths,
+		FindContent: strings.TrimSpace(in.FindContent),
+		NoSemantic:  in.NoSemantic,
+		MaxResults:  in.MaxResults,
+		Embedder:    embedder,
 	}
 	if ai.Verbose {
 		options.OnDiagnostic = func(message string) {
-			fmt.Fprintf(os.Stderr, "[ai list-files] %s\n", message)
+			fmt.Fprintf(os.Stderr, "[ai find-files] %s\n", message)
 		}
 	}
 	return options
 }
 
-func listFilesDirectory(cwd string, in ListFilesInput) string {
+func findFilesDirectory(cwd string, in FindFilesInput) string {
 	return resolveShellPath(cwd, in.Directory)
 }
 
@@ -354,19 +356,21 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		}, nil
 	})
 
-	tools["list_files"] = ai.NewSessionTool(func(ctx context.Context, tc *ai.ToolContext, in ListFilesInput) (any, error) {
-		options := listFilesOptions(ctx, in, nil)
-		cwd := shellInvocationDir(ctx, execSess)
-		directory := listFilesDirectory(cwd, in)
-		q := options.Query
-		var feedback ai.LogFeedback
+	tools["find_files"] = ai.NewSessionTool(func(ctx context.Context, tc *ai.ToolContext, in FindFilesInput) (any, error) {
 		var embedder ai.PartEmbedder
+		var feedback ai.LogFeedback
 		if tc != nil {
 			feedback = tc.Feedback
 			embedder = tc.PartEmbedder()
 		}
-		options.Embedder = embedder
-		lead := ai.ToolLead(ListFilesInput{}, q, 18)
+		options := findFilesOptions(ctx, in, embedder)
+		cwd := shellInvocationDir(ctx, execSess)
+		directory := findFilesDirectory(cwd, in)
+		leadArg := options.FindContent
+		if leadArg == "" {
+			leadArg = options.FindPaths
+		}
+		lead := ai.ToolLead(FindFilesInput{}, leadArg, 18)
 		if feedback != nil {
 			feedback(lead)
 		}
@@ -383,7 +387,6 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		return table, nil
 	})
 
-	// Backward-compatible alias that also produces the compact list_files output
 	tools["list_dir"] = ai.NewSessionTool(func(ctx context.Context, tc *ai.ToolContext, in ListDirInput) (any, error) {
 		target := strings.TrimSpace(in.Path)
 		if target == "" {
@@ -398,7 +401,7 @@ func registerFileTools(tools map[string]ai.Tool, execSess *ExecutionSession) {
 		if feedback != nil {
 			feedback(lead)
 		}
-		table, err := filelist.ListFiles(resolved, filelist.Options{Query: "*"})
+		table, err := filelist.ListFiles(resolved, filelist.Options{FindPaths: "*"})
 		if err != nil {
 			if feedback != nil {
 				feedback(lead + "failed")

@@ -1,4 +1,4 @@
-// Package filelist implements the shared list_files search and result formatting.
+// Package filelist implements shared find_files search and result formatting.
 package filelist
 
 import (
@@ -33,6 +33,9 @@ const (
 
 type Options struct {
 	Context       context.Context
+	FindPaths     string
+	FindContent   string
+	NoSemantic    bool
 	Query         string
 	SearchContent bool
 	MaxResults    int
@@ -124,12 +127,25 @@ func listFiles(ctx context.Context, cwd string, opts Options, progress *progress
 	if query == "" {
 		query = "*"
 	}
+	findPaths := strings.TrimSpace(opts.FindPaths)
+	findContent := strings.TrimSpace(opts.FindContent)
+	newSearchAPI := findPaths != "" || findContent != ""
+	if newSearchAPI {
+		if findContent != "" {
+			query = findContent
+		} else {
+			query = findPaths
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	if findContent != "" && !opts.NoSemantic && opts.Embedder == nil {
+		return "", fmt.Errorf("semantic content search requires an embedder; set no_semantic to use literal matching only")
+	}
 
 	searchRoot, relPrefix := absCwd, ""
-	if !opts.SearchContent && query != "*" && !hasGlobChars(query) {
+	if !newSearchAPI && !opts.SearchContent && query != "*" && !hasGlobChars(query) {
 		candidate := filepath.Join(absCwd, filepath.FromSlash(query))
 		info, statErr := os.Stat(candidate)
 		if statErr == nil && info.IsDir() {
@@ -144,15 +160,18 @@ func listFiles(ctx context.Context, cwd string, opts Options, progress *progress
 	if err != nil {
 		return "", err
 	}
-	entries, err := collectCandidateFiles(ctx, searchRoot, relPrefix, ignorePatterns, query == "*")
+	entries, err := collectCandidateFiles(ctx, searchRoot, relPrefix, ignorePatterns, !newSearchAPI && query == "*")
 	if err != nil {
 		return "", err
+	}
+	if newSearchAPI && findPaths != "" {
+		entries = filterPaths(entries, findPaths)
 	}
 
 	var scheduler *concurrentEmbedder
 	var cache *embeddingCache
 	cacheIdentity := ""
-	if opts.Embedder != nil {
+	if opts.Embedder != nil && !opts.NoSemantic && (findContent != "" || !newSearchAPI) {
 		scheduler = newConcurrentEmbedder(ctx, opts.Embedder)
 		scheduler.diagnostic = progress.logVerbose
 		defer scheduler.Close()
@@ -185,8 +204,15 @@ func listFiles(ctx context.Context, cwd string, opts Options, progress *progress
 
 	var matched []fileEntry
 	modeLabel := ""
-	if opts.SearchContent {
-		matched, modeLabel, err = filterByContent(ctx, entries, query, opts.MaxResults, scheduler, progress, cache, cacheIdentity)
+	if newSearchAPI {
+		if findContent != "" {
+			matched, modeLabel, err = filterByContent(ctx, entries, query, opts.MaxResults, scheduler, progress, cache, cacheIdentity, true)
+		} else {
+			matched = entries
+			modeLabel = fmt.Sprintf("paths %q", findPaths)
+		}
+	} else if opts.SearchContent {
+		matched, modeLabel, err = filterByContent(ctx, entries, query, opts.MaxResults, scheduler, progress, cache, cacheIdentity, false)
 	} else {
 		matched, modeLabel, err = filterByFilename(ctx, entries, query, opts.MaxResults, scheduler, progress, cache, cacheIdentity)
 	}
@@ -224,6 +250,41 @@ func listFiles(ctx context.Context, cwd string, opts Options, progress *progress
 		fmt.Fprintf(&output, "\nWarning: %s", truncateOutputLine(warning, opts.MaxLineWidth))
 	}
 	return strings.TrimSuffix(output.String(), "\n"), nil
+}
+
+func filterPaths(entries []fileEntry, pattern string) []fileEntry {
+	pattern = strings.TrimSuffix(filepath.ToSlash(strings.TrimSpace(pattern)), "/")
+	if pattern == "" || pattern == "**" {
+		return entries
+	}
+	matchedDirs := make(map[string]struct{})
+	for _, entry := range entries {
+		if !entry.isDir || hasGlobChars(pattern) {
+			continue
+		}
+		if entry.relPath == pattern || path.Base(entry.relPath) == pattern {
+			matchedDirs[entry.relPath] = struct{}{}
+		}
+	}
+	filtered := make([]fileEntry, 0)
+	for _, entry := range entries {
+		matched := MatchDoublestar(pattern, entry.relPath)
+		if !matched && !hasGlobChars(pattern) {
+			matched = path.Base(entry.relPath) == pattern
+		}
+		if !matched {
+			for directory := range matchedDirs {
+				if entry.relPath == directory || strings.HasPrefix(entry.relPath, directory+"/") {
+					matched = true
+					break
+				}
+			}
+		}
+		if matched {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
 }
 
 func mergeProgressQuotes(entries, progressEntries []fileEntry) []fileEntry {
@@ -638,7 +699,7 @@ func filterByFilename(ctx context.Context, entries []fileEntry, query string, ma
 	return fuzzyMatches, fmt.Sprintf("fuzzy %q", query), nil
 }
 
-func filterByContent(ctx context.Context, entries []fileEntry, query string, maxResults int, embedder *concurrentEmbedder, progress *progressTracker, cache *embeddingCache, identity string) ([]fileEntry, string, error) {
+func filterByContent(ctx context.Context, entries []fileEntry, query string, maxResults int, embedder *concurrentEmbedder, progress *progressTracker, cache *embeddingCache, identity string, semanticByDefault bool) ([]fileEntry, string, error) {
 	lowerQuery := strings.ToLower(query)
 	re, reErr := regexp.Compile("(?i)" + query)
 	var matched []fileEntry
@@ -683,14 +744,14 @@ func filterByContent(ctx context.Context, entries []fileEntry, query string, max
 			}
 		}
 	}
-	if len(matched) > 0 && (len(matched) <= maxResults || embedder == nil) {
-		return matched, fmt.Sprintf("content %q", query), nil
-	}
 	if embedder == nil {
+		return matched, fmt.Sprintf("literal-content %q", query), nil
+	}
+	if !semanticByDefault && len(matched) > 0 && len(matched) <= maxResults {
 		return matched, fmt.Sprintf("content %q", query), nil
 	}
 	candidates := textCandidates
-	if len(matched) > maxResults {
+	if !semanticByDefault && len(matched) > maxResults {
 		candidates = matched
 	}
 	eligible := make([]fileEntry, 0, len(candidates))
@@ -700,16 +761,47 @@ func filterByContent(ctx context.Context, entries []fileEntry, query string, max
 		}
 	}
 	if len(eligible) == 0 {
-		return matched, fmt.Sprintf("content %q", query), nil
+		return matched, fmt.Sprintf("semantic-content %q", query), nil
 	}
 	semantic, err := rankContentByEmbedding(ctx, eligible, query, embedder, maxResults, progress, cache, identity)
 	if err != nil {
 		return nil, "", fmt.Errorf("semantic content search: %w", err)
 	}
 	if len(semantic) > 0 {
-		return semantic, fmt.Sprintf("semantic-content %q", query), nil
+		return combineContentMatches(matched, semantic, maxResults), fmt.Sprintf("semantic-content %q", query), nil
 	}
-	return matched, fmt.Sprintf("content %q", query), nil
+	return matched[:min(len(matched), maxResults)], fmt.Sprintf("semantic-content %q", query), nil
+}
+
+func combineContentMatches(literal, semantic []fileEntry, limit int) []fileEntry {
+	combined := make([]fileEntry, 0, min(limit, len(literal)+len(semantic)))
+	seen := make(map[string]int, len(literal)+len(semantic))
+	for _, entry := range literal {
+		if _, exists := seen[entry.relPath]; exists {
+			continue
+		}
+		seen[entry.relPath] = len(combined)
+		combined = append(combined, entry)
+		if limit > 0 && len(combined) == limit {
+			return combined
+		}
+	}
+	for _, entry := range semantic {
+		if index, exists := seen[entry.relPath]; exists {
+			literalEntry := combined[index]
+			entry.quote = literalEntry.quote
+			entry.quoteStartLine = literalEntry.quoteStartLine
+			entry.quoteEndLine = literalEntry.quoteEndLine
+			combined[index] = entry
+			continue
+		}
+		seen[entry.relPath] = len(combined)
+		combined = append(combined, entry)
+		if limit > 0 && len(combined) == limit {
+			break
+		}
+	}
+	return combined
 }
 
 func isBinaryBlob(data []byte) bool {

@@ -230,7 +230,7 @@ func TestFilterByContentSkipsBinarySemanticCandidates(t *testing.T) {
 	matches, mode, err := filterByContent(context.Background(), []fileEntry{
 		{relPath: "audio_sample.wav", absPath: binaryPath, size: binaryInfo.Size()},
 		{relPath: "notes.txt", absPath: textPath, size: textInfo.Size()},
-	}, "Budapest", 5, scheduler, progress, nil, "")
+	}, "Budapest", 5, scheduler, progress, nil, "", false)
 	closeTestProgress(progress)
 	if err != nil {
 		t.Fatalf("filterByContent(): %v", err)
@@ -357,6 +357,201 @@ func TestListFilesPreservesLexicalAndContentSearch(t *testing.T) {
 	}
 	if !strings.Contains(content, "nested/needle.go") || !strings.Contains(content, "findMeInContent") || !strings.Contains(content, "line 1") {
 		t.Fatalf("content result = %q", content)
+	}
+}
+
+func TestFindPathsIsStructuralAndDoesNotEmbed(t *testing.T) {
+	dir := t.TempDir()
+	for name, content := range map[string]string{
+		"src/handler.go": "package src",
+		"docs/guide.md":  "guide",
+		"README.md":      "readme",
+	} {
+		path := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tests := []struct {
+		name         string
+		pattern      string
+		wantPath     string
+		unwantedPath string
+	}{
+		{name: "glob", pattern: "**/*.go", wantPath: "src/handler.go", unwantedPath: "docs/guide.md"},
+		{name: "exact path", pattern: "src/handler.go", wantPath: "src/handler.go", unwantedPath: "docs/guide.md"},
+		{name: "directory prefix", pattern: "docs", wantPath: "docs/guide.md", unwantedPath: "src/handler.go"},
+		{name: "exact filename", pattern: "README.md", wantPath: "README.md", unwantedPath: "src/handler.go"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			embedder := &searchTestEmbedder{}
+			result, err := ListFiles(dir, Options{
+				FindPaths: test.pattern,
+				Embedder:  embedder,
+			})
+			if err != nil {
+				t.Fatalf("ListFiles(): %v", err)
+			}
+			if !strings.Contains(result, test.wantPath) || strings.Contains(result, test.unwantedPath) {
+				t.Fatalf("structural path result = %q", result)
+			}
+			if !strings.Contains(result, `mode: paths "`+test.pattern+`"`) {
+				t.Fatalf("structural path mode is missing for %q: %s", test.pattern, result)
+			}
+			if got := embedder.calls.Load(); got != 0 {
+				t.Fatalf("path search made %d embedding calls, want none", got)
+			}
+		})
+	}
+}
+
+func TestFindPathsRestrictsSemanticContentSearch(t *testing.T) {
+	dir := t.TempDir()
+	for name, content := range map[string]string{
+		"src/selected.go": "selected browser runtime implementation",
+		"docs/outside.md": "outside-only semantic marker",
+	} {
+		path := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	embedder := &searchTestEmbedder{}
+	result, err := ListFiles(dir, Options{
+		FindPaths:   "src/**",
+		FindContent: "browser runtime startup",
+		MaxResults:  5,
+		Embedder:    embedder,
+	})
+	if err != nil {
+		t.Fatalf("ListFiles(): %v", err)
+	}
+	if !strings.Contains(result, "src/selected.go") || strings.Contains(result, "docs/outside.md") {
+		t.Fatalf("combined path/content result = %q", result)
+	}
+	embedder.mu.Lock()
+	defer embedder.mu.Unlock()
+	for _, text := range embedder.texts {
+		if strings.Contains(text, "outside-only semantic marker") {
+			t.Fatalf("content outside find_paths was embedded: %q", text)
+		}
+	}
+}
+
+func TestFindContentReusesCachedCandidateEmbedding(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cached.txt")
+	if err := os.WriteFile(path, []byte("a unique cached semantic candidate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	embedder := &cacheTestEmbedder{}
+	cache, err := newEmbeddingCache()
+	if err != nil {
+		t.Fatalf("newEmbeddingCache(): %v", err)
+	}
+	recordPath := cache.recordPath(
+		entrySignature(path, info),
+		embedder.CacheIdentity(),
+		"content",
+		embeddingRecipeFile,
+		2,
+	)
+	defer os.Remove(recordPath)
+	if err := cache.put(entrySignature(path, info), embedder.CacheIdentity(), "content", embeddingRecipeFile, []float32{1, 0}); err != nil {
+		t.Fatalf("prewarm candidate embedding cache: %v", err)
+	}
+
+	result, err := ListFiles(dir, Options{
+		FindPaths:   "**",
+		FindContent: "semantic cache reuse query",
+		QuoteLimit:  -1,
+		Embedder:    embedder,
+	})
+	if err != nil {
+		t.Fatalf("ListFiles(): %v", err)
+	}
+	if !strings.Contains(result, `mode: semantic-content "semantic cache reuse query"`) ||
+		!strings.Contains(result, "cached.txt") {
+		t.Fatalf("cached semantic result = %q", result)
+	}
+	if got := embedder.calls.Load(); got != 1 {
+		t.Fatalf("embedding calls = %d, want query only after cached candidate reuse", got)
+	}
+}
+
+func TestFindContentUsesSemanticSearchAlongsideLiteralMatches(t *testing.T) {
+	dir := t.TempDir()
+	exactPath := filepath.Join(dir, "exact.txt")
+	relatedPath := filepath.Join(dir, "related.txt")
+	if err := os.WriteFile(exactPath, []byte("needle in exact file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(relatedPath, []byte("related concept in another file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	embedder := &searchTestEmbedder{}
+	result, err := ListFiles(dir, Options{
+		FindPaths:   "**",
+		FindContent: "needle",
+		MaxResults:  5,
+		Embedder:    embedder,
+	})
+	if err != nil {
+		t.Fatalf("ListFiles(): %v", err)
+	}
+	if !strings.Contains(result, `mode: semantic-content "needle"`) ||
+		!strings.Contains(result, "exact.txt") || !strings.Contains(result, "related.txt") {
+		t.Fatalf("semantic content result = %q", result)
+	}
+	if calls := embedder.calls.Load(); calls < 4 {
+		t.Fatalf("embedding calls = %d, want query, both candidates, and quote work", calls)
+	}
+}
+
+func TestFindContentCanDisableSemanticEmbeddings(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "match.txt")
+	if err := os.WriteFile(path, []byte("literal needle\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	embedder := &searchTestEmbedder{err: errors.New("embedder must not be called")}
+	result, err := ListFiles(dir, Options{
+		FindPaths:   "**",
+		FindContent: "needle",
+		NoSemantic:  true,
+		Embedder:    embedder,
+	})
+	if err != nil {
+		t.Fatalf("ListFiles(): %v", err)
+	}
+	if !strings.Contains(result, `mode: literal-content "needle"`) || !strings.Contains(result, "match.txt") {
+		t.Fatalf("literal content result = %q", result)
+	}
+	if calls := embedder.calls.Load(); calls != 0 {
+		t.Fatalf("no-semantic search made %d embedding calls, want none", calls)
+	}
+}
+
+func TestFindContentRequiresEmbedderUnlessDisabled(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ListFiles(dir, Options{FindPaths: "**", FindContent: "concept"})
+	if err == nil || !strings.Contains(err.Error(), "semantic content search requires an embedder") {
+		t.Fatalf("ListFiles() error = %v, want missing-embedder error", err)
 	}
 }
 

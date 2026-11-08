@@ -31,12 +31,12 @@ func TestListFilesSearchShortcut(t *testing.T) {
 	}
 }
 
-func TestListFilesCommandQuotesQuery(t *testing.T) {
-	command := listFilesCommand("what's in src?", true, 12)
-	if !strings.Contains(command, "--query 'what'\\''s in src?'") {
-		t.Fatalf("query was not shell-quoted: %q", command)
+func TestFindFilesCommandQuotesArguments(t *testing.T) {
+	command := findFilesCommand("**/*.go", "what's in src?", 12)
+	if !strings.Contains(command, "--find-paths '**/*.go'") {
+		t.Fatalf("path filter was not included: %q", command)
 	}
-	if !strings.Contains(command, "--search-content=true --max-results 12") {
+	if !strings.Contains(command, "--find-content 'what'\\''s in src?' --max-results 12") {
 		t.Fatalf("command options = %q", command)
 	}
 }
@@ -53,13 +53,13 @@ func TestListFilesSearchShortcutOpensParameterDialog(t *testing.T) {
 	dlg := widget.dialog
 	widget.mu.Unlock()
 	if dlg == nil {
-		t.Fatal("Ctrl+F did not open the list-files dialog")
+		t.Fatal("Ctrl+F did not open the find-files dialog")
 	}
 	if dlg.Action != dialog.ActionListFiles {
 		t.Fatalf("dialog action = %v, want ActionListFiles", dlg.Action)
 	}
 	if len(dlg.Fields) != 3 {
-		t.Fatalf("dialog has %d fields, want query, content-search, and result-limit", len(dlg.Fields))
+		t.Fatalf("dialog has %d fields, want path-filter, content-query, and result-limit", len(dlg.Fields))
 	}
 }
 

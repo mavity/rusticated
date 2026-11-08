@@ -376,7 +376,7 @@ func TestExecuteAIToolCommandEjectsIntoIndependentShell(t *testing.T) {
 			" " + strconv.Quote(exe) + " -test.run=^TestManagedEjectHelperProcess$; cd " + strconv.Quote(dirB) +
 			"; export Z=1; export GIT_AUTHOR_NAME='Background Author'; export GIT_AUTHOR_EMAIL=background@example.test; " +
 			"export GIT_COMMITTER_NAME='Background Author'; export GIT_COMMITTER_EMAIL=background@example.test; " +
-			"echo job:$PWD:X=$X:Z=$Z; ai list_files --query '*' --max-results 20; " +
+			"echo job:$PWD:X=$X:Z=$Z; ai find_files --find-paths '**' --max-results 20; " +
 			"ai git_inspect --action status; ai git_mutate --action stage --paths background-only.txt; " +
 			"ai git_mutate --action commit --message 'background ejection commit'; " +
 			"ai browser_screenshot --nickname main --save-path background.png; }",
@@ -457,7 +457,7 @@ func TestExecuteAIToolCommandEjectsIntoIndependentShell(t *testing.T) {
 	normalizedOutput := strings.ReplaceAll(output, `\`, "/")
 	if !strings.Contains(normalizedOutput, "background-only.txt") ||
 		strings.Contains(normalizedOutput, "foreground-only.txt") {
-		t.Fatalf("registered AI list_files result did not use only the ejected job cwd: %q", output)
+		t.Fatalf("registered AI find_files result did not use only the ejected job cwd: %q", output)
 	}
 	if !strings.Contains(normalizedOutput, filepath.ToSlash(dirB)) {
 		t.Fatalf("registered AI git_inspect result did not report the ejected repository root %q: %q", dirB, output)

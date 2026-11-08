@@ -36,18 +36,34 @@ func ExecuteOneShotAITool(ctx context.Context, name string, args []string, out i
 	}
 	defer execSess.Close()
 
-	setup := func() error {
-		return RunAISetup(ctx, execSess, os.Stdin, os.Stdout)
+	var embedder ai.PartEmbedder
+	needsEmbedder := true
+	if normalizeAIToolName(name) == "find_files" {
+		needsEmbedder = false
+		if !(len(args) == 1 && (args[0] == "--help" || args[0] == "-h")) {
+			input, parseErr := parseFindFilesInput(execSess, args)
+			if parseErr != nil {
+				return fmt.Errorf("ai find_files: %w", parseErr)
+			}
+			needsEmbedder = findFilesNeedsEmbedder(input)
+		}
 	}
-	embedder, closeEmbedder, diagnostic, err := resolveOneShotAIToolEmbedder(ctx, setup)
-	if err != nil {
-		return err
-	}
-	if closeEmbedder != nil {
-		defer closeEmbedder()
-	}
-	if diagnostic != "" {
-		fmt.Fprintf(os.Stderr, "[kabibi] %s\n", diagnostic)
+	if needsEmbedder {
+		setup := func() error {
+			return RunAISetup(ctx, execSess, os.Stdin, os.Stdout)
+		}
+		var closeEmbedder func()
+		var diagnostic string
+		embedder, closeEmbedder, diagnostic, err = resolveOneShotAIToolEmbedder(ctx, setup)
+		if err != nil {
+			return err
+		}
+		if closeEmbedder != nil {
+			defer closeEmbedder()
+		}
+		if diagnostic != "" {
+			fmt.Fprintf(os.Stderr, "[kabibi] %s\n", diagnostic)
+		}
 	}
 	result, err := executeAITool(ctx, execSess, name, args, embedder)
 	if err != nil {
@@ -213,7 +229,7 @@ func formatAIToolResultMarkdown(name string, result any) (string, error) {
 	)
 	if text, ok := result.(string); ok {
 		body = text
-		markdownBody = normalizeAIToolName(name) == "list_files"
+		markdownBody = normalizeAIToolName(name) == "find_files"
 	} else {
 		encoded, err := json.MarshalIndent(result, "", "  ")
 		if err != nil {

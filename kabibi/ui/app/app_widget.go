@@ -1271,30 +1271,37 @@ func isListFilesSearchShortcut(key input.KeyPressEvent) bool {
 		(key.Mod.Contains(input.ModAlt) || key.Mod.Contains(input.ModCtrl) || key.Mod.Contains(input.ModMeta))
 }
 
-func listFilesCommand(query string, searchContent bool, maxResults int) string {
-	query = strings.ReplaceAll(query, "'", "'\\''")
-	return "ai list-files --query '" + query + "' --search-content=" +
-		strconv.FormatBool(searchContent) + " --max-results " + strconv.Itoa(maxResults)
+func findFilesCommand(findPaths, findContent string, maxResults int) string {
+	var command strings.Builder
+	command.WriteString("ai find-files")
+	if findPaths != "" {
+		command.WriteString(" --find-paths '")
+		command.WriteString(strings.ReplaceAll(findPaths, "'", "'\\''"))
+		command.WriteByte('\'')
+	}
+	if findContent != "" {
+		command.WriteString(" --find-content '")
+		command.WriteString(strings.ReplaceAll(findContent, "'", "'\\''"))
+		command.WriteByte('\'')
+	}
+	command.WriteString(" --max-results ")
+	command.WriteString(strconv.Itoa(maxResults))
+	return command.String()
 }
 
 func (w *AppWidget) openListFilesDialog() {
 	dlg := dialog.NewFormDialog(
 		dialog.ActionListFiles,
-		"Search Files",
-		"Search files using the existing list-files options:",
-		[]string{"Query", "Search content (true/false)", "Maximum results"},
-		[]string{"*", "false", strconv.Itoa(filelist.DefaultMaxResults)},
+		"Find Files",
+		"Filter paths structurally and/or search file content semantically:",
+		[]string{"Find paths", "Find content (semantic)", "Maximum results"},
+		[]string{"**", "", strconv.Itoa(filelist.DefaultMaxResults)},
 		nil,
 	)
 	dlg.OnCancel = w.closeDialog
 	dlg.OnSubmitForm = func(_ dialog.DialogAction, values []string, _ *filemanager.FileOp) {
 		if len(values) != 3 {
-			w.showSlashError(fmt.Errorf("file search requires query, content-search flag, and result limit"))
-			return
-		}
-		searchContent, err := strconv.ParseBool(values[1])
-		if err != nil {
-			w.showSlashError(fmt.Errorf("search content must be true or false"))
+			w.showSlashError(fmt.Errorf("file search requires path filter, content query, and result limit"))
 			return
 		}
 		maxResults, err := strconv.Atoi(values[2])
@@ -1302,7 +1309,7 @@ func (w *AppWidget) openListFilesDialog() {
 			w.showSlashError(fmt.Errorf("maximum results must be an integer"))
 			return
 		}
-		command := listFilesCommand(values[0], searchContent, maxResults)
+		command := findFilesCommand(values[0], values[1], maxResults)
 		w.closeDialog()
 		w.sh.SetInput(command)
 		w.sh.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})

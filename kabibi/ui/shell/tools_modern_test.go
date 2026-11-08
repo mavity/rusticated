@@ -95,17 +95,17 @@ func TestModernTools_ReadFileHashlineFabricAndEditFile(t *testing.T) {
 		t.Fatalf("expected file to contain updated_via_hashline:\n%s", string(updatedBytes))
 	}
 
-	// 3. list_files returns compact d/x/l/- table
-	listOut, err := tools["list_files"].Execute(context.Background(), ai.ToolCall{
-		Name:         "list_files",
-		RawArguments: json.RawMessage(`{"query":"*.go"}`),
+	// 3. find_files returns structurally selected paths
+	listOut, err := tools["find_files"].Execute(context.Background(), ai.ToolCall{
+		Name:         "find_files",
+		RawArguments: json.RawMessage(`{"find_paths":"**/*.go"}`),
 	}, nil)
 	if err != nil {
-		t.Fatalf("list_files failed: %v", err)
+		t.Fatalf("find_files failed: %v", err)
 	}
 	listTable := listOut.(string)
 	if !strings.Contains(listTable, "service.go") {
-		t.Fatalf("expected list_files table to include service.go:\n%s", listTable)
+		t.Fatalf("expected find_files result to include service.go:\n%s", listTable)
 	}
 }
 

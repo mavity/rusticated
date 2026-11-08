@@ -160,48 +160,53 @@ Instead of fragile unified diffs where LLMs miscount hunk line counts (`@@ -14,7
 
 ---
 
-### Subsystem C: Progressive `list_files` Tool
+### Subsystem C: Progressive `find_files` Tool
 
-#### 1. Tool Schema (`list_files`)
+#### 1. Tool Schema (`find_files`)
 
 ```json
 {
-  "query": { "type": "string", "description": "Glob pattern (e.g. '**/*.go'), filename query, or concept query. Default '*'." },
-  "search_content": { "type": "boolean", "description": "If true, match query against file contents (exact -> semantic embeddings) instead of just filenames." },
+  "find_paths": { "type": "string", "description": "Structural glob, exact path/name, or directory prefix. Default '**'; never interpreted semantically." },
+  "find_content": { "type": "string", "description": "Semantic content query. Content search uses embeddings by default, even when literal matches exist." },
+  "no_semantic": { "type": "boolean", "description": "Opt out of embeddings and match find_content literally." },
+  "directory": { "type": "string", "description": "Search root, defaulting to the shell CWD." },
   "max_results": { "type": "integer", "description": "Max entries to return (default 50)." }
 }
 
 ```
 
-#### 2. Escalation Strategy
+`find_paths` and `find_content` may be combined. Apply the directory root and
+structural path filter before reading content. A path-only request does not
+initialize embeddings. Content requests require an embedder unless
+`no_semantic` is true. The CLI command is `ai find-files`; the former
+`list_files` name and `query` / `search_content` options are not supported.
 
-Anchored strictly to `es.Dir()` (Kabibi's shell CWD) and skipping `.git`, `node_modules`, `target`, and binary blobs:
+#### 2. Search Strategy
 
-1. **Glob / Exact Substring:** Evaluate `doublestar.Match(query, relPath)`.
-2. **Fuzzy Filename:** If 0 matches (or `query` has no glob chars and didn't match verbatim), run fuzzy subsequence matching against all relative paths.
-3. **Filename Embeddings:** If fuzzy score is weak or results exceed `max_results * 3`, rank candidate paths by `EmbeddingGemma 2` cosine similarity against `query`.
-4. **Content Embeddings (`search_content: true`):** Fast-scan files with literal/regex first; if 0 or too many files match, rank files using cached file-summary/chunk embeddings from `EmbeddingGemma 2`.
+Anchored to the requested directory (defaulting to Kabibi's shell CWD) and
+skipping ignored directories and binary blobs:
+
+1. **Structural paths:** Match `find_paths` as a glob, exact path/name, or
+   directory prefix; do not invoke embeddings.
+2. **Content:** Search only paths selected by `find_paths`, using literal
+   matches and semantic embedding similarity; semantic ranking is not skipped
+   just because literal matches exist.
+3. **Explicit literal-only mode:** When `no_semantic` is true, use literal
+   content matching without embedding setup.
 
 #### 3. Compact Human-Readable Output Format
 
-Formatting as a dense, single-line-per-entry table costs **~65% fewer tokens** than JSON arrays while remaining crystal clear to Gemma 4:
+Results are formatted as Markdown, with source excerpts in language-aware code
+fences and line numbers. Unknown file extensions use unlabeled code fences.
 
-```text
-[cwd: ~/rustica/kabibi] (8 entries, mode: glob '**/*.go')
-d       -  ui/shell/
--   14.2K  ui/shell/shell.go
-x    4.1K  build.sh*
-l     18B  latest.log@ -> /tmp/kabibi-01.log
--   31.8K  ui/shell/shell_widget.go  [match: L142 "previouslyEjected"]
+````markdown
+### find_files
 
-```
-
-* **Column 1 (Type/Perm):** `d` (directory, plus trailing `/`), `x` (executable: `mode&0o111 != 0` on POSIX, or PATHEXT/shebang on Windows, plus trailing `*`), `l` (symlink / Windows reparse point via `os.Lstat` `ModeSymlink | ModeIrregular`, plus `@ -> target`), `-` (regular file).
-
-
-* **Column 2 (Size):** Human-readable (`420B`, `14.2K`, `3.1M`).
-
----
+* 0.73 ui/shell/shell.go 14.2 KB, line 142:
+  ```go
+  previouslyEjected
+  ```
+  ````
 
 ### Subsystem D: PTY Terminal Execution, Gutter Stripe & Background Process Lifecycle
 
@@ -285,4 +290,3 @@ Register three lightweight companion tools in `kabibi/ui/shell/ai_tools.go`:
 2. **`kabibi/tools/fabric` (New Package):** Implement `ExpandAndMergeSlices(lines, matchIndices, budget)` using the indentation-gravity walker and `…` separator, plus the 4-tier search funnel (`plain` $\rightarrow$ `regex` $\rightarrow$ `fuzzy` $\rightarrow$ `EmbeddingGemma 2`).
 3. **`kabibi/tools/filelist` (New Package):** Implement `ListFiles(cwd, query, opts)` with `doublestar`, fuzzy/embedding fallbacks, and compact `d/x/l/-` human-readable formatting.
 4. **`kabibi/ui/shell/pty_manager.go` & `shell_widget.go`:** Add the `W - 2` AI gutter stripe rendering in `renderBlock`, `CleanCellBufToText` ANSI stripping, and the `bgProcs` timeout-promotion registry (`exec`, `term_read`, `term_input`, `term_kill`).
-

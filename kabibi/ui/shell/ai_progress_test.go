@@ -69,7 +69,7 @@ func TestListFilesProgressUsesCommandANSIOutputAndPlumeEjection(t *testing.T) {
 			Kind:       BlockCommand,
 			Source:     SourceUserShell,
 			Prompt:     "$ ",
-			Input:      "ai list-files",
+			Input:      "ai find-files",
 			Status:     StatusActive,
 			liveOutput: state,
 		}},
@@ -149,7 +149,7 @@ func TestCanceledListFilesProgressRemainsVisibleWhenCommandStops(t *testing.T) {
 			Kind:       BlockCommand,
 			Source:     SourceUserShell,
 			Prompt:     "$ ",
-			Input:      "ai list-files --query image",
+			Input:      "ai find-files --find-paths '**/*image*'",
 			Status:     StatusError,
 			liveOutput: state,
 		}},
@@ -191,7 +191,7 @@ func TestCanceledListFilesProgressUsesNormalBlockLayoutInBottomAlignedMode(t *te
 			Kind:       BlockCommand,
 			Source:     SourceUserShell,
 			Prompt:     "$ ",
-			Input:      "ai list-files --query image",
+			Input:      "ai find-files --find-paths '**/*image*'",
 			Status:     StatusError,
 			liveOutput: state,
 		}},
@@ -231,7 +231,7 @@ func TestEscapeForwardsToActiveCommandControlInput(t *testing.T) {
 		activeCancel: func() {
 			canceled = true
 		},
-		blocks: []CommandBlock{{Input: `ai list-files --query "image encoding"`}},
+		blocks: []CommandBlock{{Input: `ai find-files --find-content "image encoding"`}},
 	}
 
 	if !s.handleKeyEvent(input.KeyPressEvent{Code: input.KeyEscape}) {
@@ -307,15 +307,15 @@ func TestInteractiveListFilesPublishesAndClearsProgress(t *testing.T) {
 		return n, err
 	})
 
-	result, err := executeInteractiveListFiles(context.Background(), execSess,
-		[]string{"--query", "unrelated semantic phrase", "--max-results", "1"},
+	result, err := executeInteractiveFindFiles(context.Background(), execSess,
+		[]string{"--find-content", "unrelated semantic phrase", "--max-results", "1"},
 		&commandTestEmbedder{},
 		progressWriter,
 		80,
 		19,
 	)
 	if err != nil {
-		t.Fatalf("executeInteractiveListFiles(): %v", err)
+		t.Fatalf("executeInteractiveFindFiles(): %v", err)
 	}
 	if !strings.Contains(result, "* 1.00  `browser_worker.go`") ||
 		!strings.Contains(result, "```go") ||
@@ -344,7 +344,7 @@ func TestInteractiveListFilesPublishesAndClearsProgress(t *testing.T) {
 		Kind:       BlockCommand,
 		Source:     SourceUserShell,
 		Prompt:     "$ ",
-		Input:      "ai list-files",
+		Input:      "ai find-files",
 		Status:     StatusSuccess,
 		liveOutput: state,
 	}
@@ -358,7 +358,7 @@ func TestInteractiveListFilesPublishesAndClearsProgress(t *testing.T) {
 	}
 }
 
-func TestInteractiveListFilesDirectoryScopesSearch(t *testing.T) {
+func TestInteractiveFindFilesDirectoryScopesSearch(t *testing.T) {
 	root := t.TempDir()
 	nested := filepath.Join(root, "nested")
 	if err := os.Mkdir(nested, 0o755); err != nil {
@@ -376,20 +376,20 @@ func TestInteractiveListFilesDirectoryScopesSearch(t *testing.T) {
 	}
 	defer execSess.Close()
 
-	result, err := executeInteractiveListFiles(
+	result, err := executeInteractiveFindFiles(
 		context.Background(),
 		execSess,
-		[]string{"--directory", "nested", "--query", "*", "--max-results", "1"},
+		[]string{"--directory", "nested", "--find-paths", "**", "--max-results", "1"},
 		nil,
 		&bytes.Buffer{},
 		80,
 		19,
 	)
 	if err != nil {
-		t.Fatalf("executeInteractiveListFiles(): %v", err)
+		t.Fatalf("executeInteractiveFindFiles(): %v", err)
 	}
 	if !strings.Contains(result, "inside.txt") || strings.Contains(result, "outside.txt") {
-		t.Fatalf("interactive list_files did not scope results to directory: %q", result)
+		t.Fatalf("interactive find_files did not scope results to directory: %q", result)
 	}
 }
 
@@ -406,15 +406,15 @@ func TestInteractiveListFilesDoesNotClearProgressOnCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	writer := &cancelingProgressWriter{cancel: cancel}
 
-	_, err = executeInteractiveListFiles(ctx, execSess,
-		[]string{"--query", "unrelated semantic phrase", "--max-results", "1"},
+	_, err = executeInteractiveFindFiles(ctx, execSess,
+		[]string{"--find-content", "unrelated semantic phrase", "--max-results", "1"},
 		&commandTestEmbedder{},
 		writer,
 		80,
 		19,
 	)
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("executeInteractiveListFiles() error = %v, want context cancellation", err)
+		t.Fatalf("executeInteractiveFindFiles() error = %v, want context cancellation", err)
 	}
 	if len(writer.writes) == 0 {
 		t.Fatal("cancellation did not publish progress to stdout")
@@ -470,11 +470,11 @@ func TestInteractiveListFilesEscapeCancelsSearchAndRetainsProgress(t *testing.T)
 	var progress bytes.Buffer
 	result := make(chan error, 1)
 	go func() {
-		_, err := executeInteractiveListFilesWithControlInput(
+		_, err := executeInteractiveFindFilesWithControlInput(
 			context.Background(),
 			term,
 			execSess,
-			[]string{"--query", "unrelated semantic phrase", "--max-results", "1"},
+			[]string{"--find-content", "unrelated semantic phrase", "--max-results", "1"},
 			embedder,
 			&progress,
 			80,
@@ -494,7 +494,7 @@ func TestInteractiveListFilesEscapeCancelsSearchAndRetainsProgress(t *testing.T)
 	select {
 	case err := <-result:
 		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("interactive list-files error = %v, want context.Canceled", err)
+			t.Fatalf("interactive find-files error = %v, want context.Canceled", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Escape did not cancel the search")
@@ -525,11 +525,11 @@ func TestInteractiveListFilesEscapeReturnsWhileLegacyEmbeddingIsBlocked(t *testi
 	defer close(embedder.release)
 	result := make(chan error, 1)
 	go func() {
-		_, err := executeInteractiveListFilesWithControlInput(
+		_, err := executeInteractiveFindFilesWithControlInput(
 			context.Background(),
 			term,
 			execSess,
-			[]string{"--query", "unrelated semantic phrase", "--max-results", "1"},
+			[]string{"--find-content", "unrelated semantic phrase", "--max-results", "1"},
 			embedder,
 			&bytes.Buffer{},
 			80,
@@ -549,14 +549,14 @@ func TestInteractiveListFilesEscapeReturnsWhileLegacyEmbeddingIsBlocked(t *testi
 	select {
 	case err := <-result:
 		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("interactive list-files error = %v, want context.Canceled", err)
+			t.Fatalf("interactive find-files error = %v, want context.Canceled", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Escape did not return while the legacy embedder was blocked")
 	}
 }
 
-func TestInteractiveListFilesCapsResultsToOutputFrame(t *testing.T) {
+func TestInteractiveFindFilesCapsResultsToOutputFrame(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{"a.txt", "b.txt", "c.txt"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(name), 0o644); err != nil {
@@ -570,15 +570,15 @@ func TestInteractiveListFilesCapsResultsToOutputFrame(t *testing.T) {
 	defer execSess.Close()
 	var progressOutput bytes.Buffer
 
-	result, err := executeInteractiveListFiles(context.Background(), execSess,
-		[]string{"--query", "*", "--max-results", "10"},
+	result, err := executeInteractiveFindFiles(context.Background(), execSess,
+		[]string{"--find-paths", "**", "--max-results", "10"},
 		nil,
 		&progressOutput,
 		80,
 		8,
 	)
 	if err != nil {
-		t.Fatalf("executeInteractiveListFiles(): %v", err)
+		t.Fatalf("executeInteractiveFindFiles(): %v", err)
 	}
 	matchCount := 0
 	for _, name := range []string{"a.txt", "b.txt", "c.txt"} {

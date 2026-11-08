@@ -307,7 +307,7 @@ hot-loop `term_kill` test runs under Rusticated too; the JIT patch makes the
 interpreter yield to the async timer periodically on `wasip1`, allowing timeout
 and cancellation to be observed without blocking I/O.
 
-The timed-out ejection integration test also runs registered AI `list_files`,
+The timed-out ejection integration test also runs registered AI `find_files`,
 `git_inspect`, and `browser_screenshot` tools from the still-running background
 job. It distinguishes background-only files and repository roots, and verifies
 that the screenshot is written in the background working directory. A separate
