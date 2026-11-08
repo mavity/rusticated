@@ -23,6 +23,7 @@ type promptCompletionState struct {
 	candidates  []completionCandidate
 	speculative bool
 	active      bool
+	pending     bool
 	selected    int
 	insertion   string
 }
@@ -44,6 +45,35 @@ type PromptInputOptions struct {
 
 	// Complete returns candidates for the current input and rune cursor position.
 	Complete func(value string, cursor int) []completionCandidate
+}
+
+func (p *PromptInput) cursorMoved() {
+	p.mu.Lock()
+	p.completion = nil
+	p.completionGeneration++
+	if p.completionTimer != nil {
+		p.completionTimer.Stop()
+		p.completionTimer = nil
+	}
+	p.mu.Unlock()
+	p.invalidate()
+}
+
+func (p *PromptInput) dismissCompletion() bool {
+	p.mu.Lock()
+	if p.completion == nil {
+		p.mu.Unlock()
+		return false
+	}
+	p.completion = nil
+	p.completionGeneration++
+	if p.completionTimer != nil {
+		p.completionTimer.Stop()
+		p.completionTimer = nil
+	}
+	p.mu.Unlock()
+	p.invalidate()
+	return true
 }
 
 // PromptInput is a self-contained, reusable prompt + command-line input widget
@@ -186,7 +216,7 @@ func (p *PromptInput) SetCursorPos(pos int) {
 		p.cursorPos = pos
 	}
 	p.mu.Unlock()
-	p.inputChanged()
+	p.cursorMoved()
 }
 
 // InsertNewline inserts a shell continuation newline at the current cursor.
@@ -222,11 +252,17 @@ func (p *PromptInput) CompletionMenuVisible() bool {
 	return completionHasMenu(p.completion)
 }
 
+func (p *PromptInput) CompletionVisible() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.completion != nil
+}
+
 func (p *PromptInput) RequestCompletion() bool {
 	p.mu.Lock()
 	if state := p.completion; state != nil {
 		if state.active {
-			if len(state.candidates) > 0 {
+			if !state.pending && len(state.candidates) > 0 {
 				state.selected = (state.selected + 1) % len(state.candidates)
 			}
 			p.mu.Unlock()
@@ -250,29 +286,48 @@ func (p *PromptInput) RequestCompletion() bool {
 	}
 	provider := p.complete
 	value, cursor := p.value, p.cursorPos
+	if provider == nil {
+		p.mu.Unlock()
+		return false
+	}
+	p.completionGeneration++
+	generation := p.completionGeneration
+	if p.completionTimer != nil {
+		p.completionTimer.Stop()
+		p.completionTimer = nil
+	}
+	p.completion = &promptCompletionState{active: true, pending: true}
 	p.mu.Unlock()
 
-	if provider == nil {
-		return false
-	}
-	candidates := provider(value, cursor)
-	if len(candidates) == 0 {
-		return false
-	}
-	if len(candidates) == 1 {
-		p.applyCompletion(candidates[0])
-		return true
-	}
-	p.mu.Lock()
-	if p.value == value && p.cursorPos == cursor {
+	p.invalidate()
+	go func() {
+		candidates := provider(value, cursor)
+		p.mu.Lock()
+		if generation != p.completionGeneration || p.value != value || p.cursorPos != cursor {
+			p.mu.Unlock()
+			return
+		}
+		if len(candidates) == 0 {
+			p.completion = nil
+			p.mu.Unlock()
+			p.invalidate()
+			return
+		}
+		if len(candidates) == 1 {
+			p.applyCompletionLocked(candidates[0])
+			p.completion = nil
+			p.mu.Unlock()
+			p.inputChanged()
+			return
+		}
 		p.completion = &promptCompletionState{
 			candidates: candidates,
 			active:     true,
 			selected:   0,
 		}
-	}
-	p.mu.Unlock()
-	p.invalidate()
+		p.mu.Unlock()
+		p.invalidate()
+	}()
 	return true
 }
 
@@ -292,6 +347,12 @@ func (p *PromptInput) AcceptCompletion() bool {
 
 func (p *PromptInput) applyCompletion(candidate completionCandidate) {
 	p.mu.Lock()
+	p.applyCompletionLocked(candidate)
+	p.mu.Unlock()
+	p.inputChanged()
+}
+
+func (p *PromptInput) applyCompletionLocked(candidate completionCandidate) {
 	runes := []rune(p.value)
 	insert := []rune(candidate.Insert)
 	if candidate.Space {
@@ -302,8 +363,6 @@ func (p *PromptInput) applyCompletion(candidate completionCandidate) {
 	copy(runes[p.cursorPos:], insert)
 	p.value = string(runes)
 	p.cursorPos += len(insert)
-	p.mu.Unlock()
-	p.inputChanged()
 }
 
 func (p *PromptInput) inputChanged() {
@@ -811,6 +870,9 @@ func (p *PromptInput) handleKeyEvent(ev input.KeyPressEvent) bool {
 	if keyStr == "enter" || keyStr == "ctrl+c" {
 		return false
 	}
+	if keyStr == "esc" && p.dismissCompletion() {
+		return true
+	}
 
 	p.mu.Lock()
 	completion := p.completion
@@ -879,7 +941,7 @@ func (p *PromptInput) handleKeyEvent(ev input.KeyPressEvent) bool {
 		if p.cursorPos > 0 {
 			p.cursorPos--
 			p.mu.Unlock()
-			p.inputChanged()
+			p.cursorMoved()
 			return true
 		}
 		p.mu.Unlock()
@@ -890,7 +952,7 @@ func (p *PromptInput) handleKeyEvent(ev input.KeyPressEvent) bool {
 		if p.cursorPos < len([]rune(p.value)) {
 			p.cursorPos++
 			p.mu.Unlock()
-			p.inputChanged()
+			p.cursorMoved()
 			return true
 		}
 		p.mu.Unlock()
@@ -943,7 +1005,7 @@ func (p *PromptInput) handleKeyEvent(ev input.KeyPressEvent) bool {
 		if p.cursorPos != 0 {
 			p.cursorPos = 0
 			p.mu.Unlock()
-			p.inputChanged()
+			p.cursorMoved()
 			return true
 		}
 		p.mu.Unlock()
@@ -955,7 +1017,7 @@ func (p *PromptInput) handleKeyEvent(ev input.KeyPressEvent) bool {
 		if p.cursorPos != endPos {
 			p.cursorPos = endPos
 			p.mu.Unlock()
-			p.inputChanged()
+			p.cursorMoved()
 			return true
 		}
 		p.mu.Unlock()

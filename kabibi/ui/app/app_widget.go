@@ -641,7 +641,9 @@ func (w *AppWidget) HandleEvent(e input.Event) bool {
 				return true
 			}
 
-			if keyStr == "ctrl+space" || keyStr == "tab" && w.sh.Input().CompletionActive() {
+			if keyStr == "ctrl+space" ||
+				keyStr == "tab" && w.sh.Input().CompletionActive() ||
+				keyStr == "esc" && w.sh.Input().CompletionVisible() {
 				return w.sh.HandleEvent(keyEv)
 			}
 
