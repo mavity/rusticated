@@ -37,7 +37,7 @@ and wire protocols (OpenRouter, Anthropic, OpenAI, GitHub Copilot, and Google Ge
    sequential close/embed/reload path. Embedding failures are returned to
    semantic-search callers; they do not silently become lexical results.
    Direct `ai <tool>` commands use the same policy and pass the resolved
-   embedder into tools such as `list_files`; an older local configuration
+   embedder into tools such as `find_files`; an older local configuration
    runs the setup consent flow before embedding assets are prepared.
 7. **Provider-matched remote embeddings.** OpenAI, OpenRouter, and Gemini use
    embedding APIs belonging to the configured provider, preferring the

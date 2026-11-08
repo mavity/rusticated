@@ -10,9 +10,17 @@ import (
 )
 
 type helperInput struct {
-	_           struct{} `doc:"Powerful and dynamic AI helper can do tasks on this computer for you: access or modify files, run bash commands, open browser and interact with browser pages. Provide a specific concrete task, with notable details and restrictions."`
+	_           struct{} `doc:"AI helper for repository and computer tasks. For codebase discovery it has find_files with semantic content search; ask it to search concepts with find_content, optionally restricted by structural find_paths. Provide a specific task and constraints."`
 	Task        string   `json:"task" doc:"Be specific and literal, what do you actually need done?"`
 	Description string   `json:"description" doc:"Detailed requirements, constraints, and context for the AI helper, describing why and how you want the task done."`
+}
+
+const defaultKabibiHelperSystemPrompt = `You are Kabibi's task helper. Investigate the repository using the available tools and base conclusions on inspected evidence.
+
+For codebase discovery, use find_files with find_content set to a natural-language description of the behavior, implementation, symbol, or concept. Semantic content search is enabled by default. Use find_paths only for structural globs, paths, or directory prefixes; combine it with find_content to scope a semantic search. Do not treat path-only results or a filename search as evidence that file contents were searched. Use read_file on promising results before reporting conclusions.`
+
+func kabibiHelperSystemMessage(description string) string {
+	return defaultKabibiHelperSystemPrompt + "\n\nTask-specific requirements:\n" + strings.TrimSpace(description)
 }
 
 type helperToolResponse struct {
@@ -71,7 +79,7 @@ func newKabibiHelperTool(
 		helper, err := ai.NewSession(ai.SessionConfig{
 			Engine:          engine,
 			Embedder:        embedder,
-			SystemMessage:   in.Description,
+			SystemMessage:   kabibiHelperSystemMessage(in.Description),
 			Tools:           BuildKabibiTools(execSess),
 			CompactionLimit: compactionLimit,
 			OnContent:       func(text string) { finalText.WriteString(text) },

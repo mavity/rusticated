@@ -418,18 +418,18 @@ func runAIBuiltinTool(
 	}
 
 	var err error
-	isListFiles := normalizeAIToolName(name) == "list_files"
-	var listFilesInput ListFilesInput
-	if isListFiles {
-		listFilesInput, err = parseListFilesInput(execSess, args)
+	isFindFiles := normalizeAIToolName(name) == "find_files"
+	var findFilesInput FindFilesInput
+	if isFindFiles && !(len(args) == 1 && (args[0] == "--help" || args[0] == "-h")) {
+		findFilesInput, err = parseFindFilesInput(execSess, args)
 		if err != nil {
-			fmt.Fprintf(stderr, "ai list_files: %v\n", err)
+			fmt.Fprintf(stderr, "ai find_files: %v\n", err)
 			return interp.ExitStatus(1)
 		}
 	}
 
-	interactiveListFiles := isTTY && cmdTerm != nil && execSess != nil && normalizeAIToolName(name) == "list_files"
-	if interactiveListFiles {
+	interactiveFindFiles := isTTY && cmdTerm != nil && execSess != nil && isFindFiles
+	if interactiveFindFiles {
 		var stopEscapeInput func()
 		ctx, stopEscapeInput = withEscapeCancellation(ctx, cmdTerm)
 		defer stopEscapeInput()
@@ -437,8 +437,8 @@ func runAIBuiltinTool(
 
 	needsEmbedder := false
 	switch normalizeAIToolName(name) {
-	case "list_files":
-		needsEmbedder = listFilesNeedsEmbedder(listFilesInput)
+	case "find_files":
+		needsEmbedder = findFilesNeedsEmbedder(findFilesInput)
 	case "read_file":
 		rawArguments, parseErr := parseAIToolArguments(BuildKabibiTools(execSess)["read_file"], args)
 		if parseErr != nil {
@@ -493,8 +493,8 @@ func runAIBuiltinTool(
 		width, height = cmdTerm.Size()
 	}
 	var result string
-	if interactiveListFiles {
-		result, err = executeInteractiveListFilesInput(ctx, execSess, listFilesInput, embedder, stdout, width, height)
+	if interactiveFindFiles {
+		result, err = executeInteractiveFindFilesInput(ctx, execSess, findFilesInput, embedder, stdout, width, height)
 	} else {
 		result, err = executeAITool(ctx, execSess, name, args, embedder)
 	}
@@ -512,11 +512,11 @@ func runAIBuiltinTool(
 	return writeAIBuiltinOutput(stdout, stderr, "ai "+normalizeAIToolName(name), result)
 }
 
-func executeInteractiveListFilesWithControlInput(ctx context.Context, term *CommandTerminal, execSess *ExecutionSession, args []string, embedder ai.PartEmbedder, stdout io.Writer, width, availableHeight int) (string, error) {
+func executeInteractiveFindFilesWithControlInput(ctx context.Context, term *CommandTerminal, execSess *ExecutionSession, args []string, embedder ai.PartEmbedder, stdout io.Writer, width, availableHeight int) (string, error) {
 	searchCtx, stop := withEscapeCancellation(ctx, term)
 	defer stop()
 
-	return executeInteractiveListFiles(searchCtx, execSess, args, embedder, stdout, width, availableHeight)
+	return executeInteractiveFindFiles(searchCtx, execSess, args, embedder, stdout, width, availableHeight)
 }
 
 func withEscapeCancellation(ctx context.Context, term *CommandTerminal) (context.Context, func()) {
@@ -543,44 +543,43 @@ func withEscapeCancellation(ctx context.Context, term *CommandTerminal) (context
 	}
 }
 
-func parseListFilesInput(execSess *ExecutionSession, args []string) (ListFilesInput, error) {
-	tool := BuildKabibiTools(execSess)["list_files"]
+func parseFindFilesInput(execSess *ExecutionSession, args []string) (FindFilesInput, error) {
+	tool := BuildKabibiTools(execSess)["find_files"]
 	rawArguments, err := parseAIToolArguments(tool, args)
 	if err != nil {
-		return ListFilesInput{}, err
+		return FindFilesInput{}, err
 	}
-	var input ListFilesInput
+	var input FindFilesInput
 	if err := json.Unmarshal(rawArguments, &input); err != nil {
-		return ListFilesInput{}, fmt.Errorf("decode arguments: %w", err)
+		return FindFilesInput{}, fmt.Errorf("decode arguments: %w", err)
 	}
 	return input, nil
 }
 
-func listFilesNeedsEmbedder(input ListFilesInput) bool {
-	query := strings.TrimSpace(input.Query)
-	return input.SearchContent || (query != "" && query != "*")
+func findFilesNeedsEmbedder(input FindFilesInput) bool {
+	return strings.TrimSpace(input.FindContent) != "" && !input.NoSemantic
 }
 
-func executeInteractiveListFiles(ctx context.Context, execSess *ExecutionSession, args []string, embedder ai.PartEmbedder, stdout io.Writer, width, availableHeight int) (result string, retErr error) {
-	input, err := parseListFilesInput(execSess, args)
+func executeInteractiveFindFiles(ctx context.Context, execSess *ExecutionSession, args []string, embedder ai.PartEmbedder, stdout io.Writer, width, availableHeight int) (result string, retErr error) {
+	input, err := parseFindFilesInput(execSess, args)
 	if err != nil {
-		return "", fmt.Errorf("ai list_files: %w", err)
+		return "", fmt.Errorf("ai find_files: %w", err)
 	}
-	return executeInteractiveListFilesInput(ctx, execSess, input, embedder, stdout, width, availableHeight)
+	return executeInteractiveFindFilesInput(ctx, execSess, input, embedder, stdout, width, availableHeight)
 }
 
-func executeInteractiveListFilesInput(ctx context.Context, execSess *ExecutionSession, input ListFilesInput, embedder ai.PartEmbedder, stdout io.Writer, width, availableHeight int) (result string, retErr error) {
+func executeInteractiveFindFilesInput(ctx context.Context, execSess *ExecutionSession, input FindFilesInput, embedder ai.PartEmbedder, stdout io.Writer, width, availableHeight int) (result string, retErr error) {
 	if width <= 0 {
 		width = 80
 	}
 	outputLimit := listFilesOutputMatchLimit(availableHeight)
 	if outputLimit == 0 {
-		return "", fmt.Errorf("terminal is too short to show list-files results while leaving three rows free")
+		return "", fmt.Errorf("terminal is too short to show find-files results while leaving three rows free")
 	}
 	if input.MaxResults <= 0 || input.MaxResults > outputLimit {
 		input.MaxResults = outputLimit
 	}
-	options := listFilesOptions(ctx, input, embedder)
+	options := findFilesOptions(ctx, input, embedder)
 	options.MaxLineWidth = width
 	options.QuoteLimit = listFilesProgressMatchLimit(availableHeight)
 	if options.QuoteLimit == 0 {
@@ -588,13 +587,13 @@ func executeInteractiveListFilesInput(ctx context.Context, execSess *ExecutionSe
 	}
 	options.LiveQuotes = options.QuoteLimit > 0
 	cwd := shellInvocationDir(ctx, execSess)
-	iter := filelist.NewSearchIterator(ctx, listFilesDirectory(cwd, input), options)
+	iter := filelist.NewSearchIterator(ctx, findFilesDirectory(cwd, input), options)
 	defer iter.Close()
 	output := newListFilesProgressOutput(stdout, width, listFilesProgressOutputRows(availableHeight))
 	defer func() {
 		if ctx.Err() == nil {
 			if clearErr := output.clear(); clearErr != nil {
-				clearErr = fmt.Errorf("clear ai list_files progress: %w", clearErr)
+				clearErr = fmt.Errorf("clear ai find_files progress: %w", clearErr)
 				if retErr == nil {
 					result = ""
 					retErr = clearErr
@@ -605,13 +604,13 @@ func executeInteractiveListFilesInput(ctx context.Context, execSess *ExecutionSe
 		}
 	}()
 	if err := publishInteractiveListFilesProgress(iter, output); err != nil {
-		return "", fmt.Errorf("ai list_files: publish progress: %w", err)
+		return "", fmt.Errorf("ai find_files: publish progress: %w", err)
 	}
 	table, err := iter.Result()
 	if err != nil {
-		return "", fmt.Errorf("ai list_files: %w", err)
+		return "", fmt.Errorf("ai find_files: %w", err)
 	}
-	return formatAIToolResultMarkdown("list_files", table)
+	return formatAIToolResultMarkdown("find_files", table)
 }
 
 func publishInteractiveListFilesProgress(iter *filelist.SearchIterator, output *listFilesProgressOutput) error {

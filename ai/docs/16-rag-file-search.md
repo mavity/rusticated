@@ -1,5 +1,9 @@
 # RAG File Search
 
+> Historical cache plan. It uses the former `list_files` name; the current
+> search interface is documented in
+> [Find Files Tool API](./16.1-find-files-tool-api.md).
+
 ## Goal
 
 Make semantic fallback in `list_files` reuse candidate embeddings across

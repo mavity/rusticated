@@ -39,6 +39,11 @@ func TestKabibiSystemMessageAppendsCLIHelpContext(t *testing.T) {
 	if !strings.Contains(got, help) {
 		t.Fatalf("system message does not contain additional context: %q", got)
 	}
+	for _, guidance := range []string{"delegate investigation to the helper", "find_files", "find_content", "find_paths only for structural path filters"} {
+		if !strings.Contains(got, guidance) {
+			t.Errorf("system message missing code-search guidance %q", guidance)
+		}
+	}
 	if strings.Contains(strings.ToLower(got), "parse error") {
 		t.Fatalf("system message explains a CLI parse error: %q", got)
 	}

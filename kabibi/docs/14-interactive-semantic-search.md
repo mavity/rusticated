@@ -1,5 +1,10 @@
 # Interactive Semantic File Search
 
+> Historical implementation plan. Its `list_files` and `ai list-files`
+> references describe the earlier interface and are superseded by
+> [`find_files` API](../../ai/docs/16.1-find-files-tool-api.md). The current
+> tool and CLI do not accept the old name or options.
+
 ## Goal
 
 Extend the existing `ai list-files` command to support interactive TUI search

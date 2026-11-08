@@ -45,7 +45,7 @@ Flags:
       --edit string      Open a file in the editor, save on exit, and close Kabibi
       --disable-ai       Disable Kabibi AI behavior in this shell process
       --vscode-tool-server  Run the VS Code terminal-tool protocol over stdio
-  -v, --verbose          Verbose diagnostics (includes prompts and tool I/O; list-files progress goes to stderr)
+  -v, --verbose          Verbose diagnostics (includes prompts and tool I/O; find-files progress goes to stderr)
   -h, --help             Show this help
 
 A single positional file path runs that file as a shell script. Other positional
@@ -75,7 +75,7 @@ func parseCLI(args []string, helpOut io.Writer) (cliOptions, error) {
 	fs.StringVarP(&opts.command, "command", "c", "", "Execute a command or AI prompt in batch mode and exit")
 	fs.StringVarP(&opts.prompt, "prompt", "p", "", "Execute a prompt in one-shot mode and exit")
 	fs.StringVar(&opts.edit, "edit", "", "Open a file in the editor, save on exit, and close Kabibi")
-	fs.BoolVarP(&opts.verbose, "verbose", "v", false, "Verbose diagnostics, including prompts and tool I/O; list-files progress goes to stderr")
+	fs.BoolVarP(&opts.verbose, "verbose", "v", false, "Verbose diagnostics, including prompts and tool I/O; find-files progress goes to stderr")
 	fs.BoolVar(&opts.disableAI, "disable-ai", false, "Disable Kabibi AI behavior in this shell process")
 	fs.BoolVar(&opts.toolServer, "vscode-tool-server", false, "Run the VS Code terminal-tool protocol over stdio")
 

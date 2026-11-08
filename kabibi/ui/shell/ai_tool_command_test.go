@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,23 +16,60 @@ import (
 
 func TestParseAIToolArguments(t *testing.T) {
 	tools := BuildKabibiTools(nil)
+	findFiles := tools["find_files"]
+	for _, field := range []string{"directory", "find_paths", "find_content", "no_semantic", "max_results"} {
+		if _, ok := findFiles.Parameters[field]; !ok {
+			t.Errorf("find_files schema missing %q", field)
+		}
+	}
+	findContentSchema, ok := findFiles.Parameters["find_content"].(map[string]any)
+	if !ok || !strings.Contains(fmt.Sprint(findContentSchema["description"]), "Semantic search is on by default") {
+		t.Errorf("find_files find_content description does not specify semantic-by-default search: %#v", findFiles.Parameters["find_content"])
+	}
+	findPathsSchema, ok := findFiles.Parameters["find_paths"].(map[string]any)
+	if !ok || !strings.Contains(fmt.Sprint(findPathsSchema["description"]), "Never semantic") {
+		t.Errorf("find_files find_paths description does not specify structural-only search: %#v", findFiles.Parameters["find_paths"])
+	}
+	for _, legacyField := range []string{"query", "search_content"} {
+		if _, ok := findFiles.Parameters[legacyField]; ok {
+			t.Errorf("find_files schema retains legacy field %q", legacyField)
+		}
+	}
 
-	raw, err := parseAIToolArguments(tools["list_files"], []string{
-		"--QUERY", "two words",
+	raw, err := parseAIToolArguments(findFiles, []string{
+		"--FIND-CONTENT", "two words",
+		"--find-paths", "**/*.go",
 		"--directory", "nested",
-		"--search-content",
+		"--no-semantic", "false",
 		"--max-results", "17",
 	})
 	if err != nil {
-		t.Fatalf("parse list_files arguments: %v", err)
+		t.Fatalf("parse find_files arguments: %v", err)
 	}
 	var listArgs map[string]any
 	if err := json.Unmarshal(raw, &listArgs); err != nil {
 		t.Fatal(err)
 	}
-	if listArgs["query"] != "two words" || listArgs["directory"] != "nested" ||
-		listArgs["search_content"] != true || listArgs["max_results"] != float64(17) {
-		t.Fatalf("parsed list_files arguments = %#v", listArgs)
+	if listArgs["find_content"] != "two words" || listArgs["find_paths"] != "**/*.go" ||
+		listArgs["directory"] != "nested" || listArgs["no_semantic"] != false ||
+		listArgs["max_results"] != float64(17) {
+		t.Fatalf("parsed find_files arguments = %#v", listArgs)
+	}
+	if _, err := parseAIToolArguments(findFiles, []string{"--query", "old syntax"}); err == nil {
+		t.Fatal("find_files accepted the removed --query option")
+	}
+	if _, err := parseAIToolArguments(findFiles, []string{"--search-content", "true"}); err == nil {
+		t.Fatal("find_files accepted the removed --search-content option")
+	}
+	raw, err = parseAIToolArguments(findFiles, []string{"--no-semantic"})
+	if err != nil {
+		t.Fatalf("parse no-semantic flag: %v", err)
+	}
+	if err := json.Unmarshal(raw, &listArgs); err != nil {
+		t.Fatal(err)
+	}
+	if listArgs["no_semantic"] != true {
+		t.Fatalf("no-semantic flag = %#v, want true", listArgs["no_semantic"])
 	}
 
 	raw, err = parseAIToolArguments(tools["git_mutate"], []string{
@@ -67,28 +105,27 @@ func TestParseAIToolArguments(t *testing.T) {
 	}
 }
 
-func TestListFilesNeedsEmbedder(t *testing.T) {
+func TestFindFilesNeedsEmbedder(t *testing.T) {
 	tests := []struct {
 		name  string
-		input ListFilesInput
+		input FindFilesInput
 		want  bool
 	}{
-		{name: "default all-files query"},
-		{name: "explicit all-files query", input: ListFilesInput{Query: "*"}},
-		{name: "content query", input: ListFilesInput{Query: "*", SearchContent: true}, want: true},
-		{name: "filename semantic fallback", input: ListFilesInput{Query: "unmatched concept"}, want: true},
-		{name: "glob with possible semantic fallback", input: ListFilesInput{Query: "**/*.go"}, want: true},
+		{name: "paths only"},
+		{name: "content query", input: FindFilesInput{FindContent: "browser tool"}, want: true},
+		{name: "literal content query", input: FindFilesInput{FindContent: "browser tool", NoSemantic: true}},
+		{name: "empty content even with no semantic", input: FindFilesInput{NoSemantic: true}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := listFilesNeedsEmbedder(tt.input); got != tt.want {
-				t.Fatalf("listFilesNeedsEmbedder(%+v) = %t, want %t", tt.input, got, tt.want)
+			if got := findFilesNeedsEmbedder(tt.input); got != tt.want {
+				t.Fatalf("findFilesNeedsEmbedder(%+v) = %t, want %t", tt.input, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestRunAIBuiltinListFilesDefaultSkipsLocalEmbeddingRuntime(t *testing.T) {
+func TestRunAIBuiltinFindFilesPathsSkipsLocalEmbeddingRuntime(t *testing.T) {
 	setTestConfigDirectory(t)
 	if err := config.SaveAI(config.AIConfig{
 		Configured:                   true,
@@ -108,19 +145,19 @@ func TestRunAIBuiltinListFilesDefaultSkipsLocalEmbeddingRuntime(t *testing.T) {
 	ctx := withCommandTerminal(context.Background(), execSess, SourceUserShell, term)
 	var stdout, stderr bytes.Buffer
 	terminal := newCommandTerminalSession(term, &stdout, true)
-	err = runAIBuiltinTool(ctx, execSess, "list-files", nil, &stdout, &stderr, term, true, terminal)
+	err = runAIBuiltinTool(ctx, execSess, "find-files", nil, &stdout, &stderr, term, true, terminal)
 	if err != nil {
-		t.Fatalf("run default list-files: %v; stderr: %s", err, stderr.String())
+		t.Fatalf("run default find-files: %v; stderr: %s", err, stderr.String())
 	}
 	if strings.TrimSpace(stdout.String()) == "" {
-		t.Fatal("default list-files produced no output")
+		t.Fatal("default find-files produced no output")
 	}
 	if strings.Contains(stderr.String(), "embedding") {
-		t.Fatalf("default list-files unexpectedly initialized embeddings: %s", stderr.String())
+		t.Fatalf("path-only find-files unexpectedly initialized embeddings: %s", stderr.String())
 	}
 }
 
-func TestExecuteAIToolAliasAndMarkdownResult(t *testing.T) {
+func TestExecuteAIToolFindFilesAndMarkdownResult(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "result.txt"), []byte("needle found\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -131,29 +168,32 @@ func TestExecuteAIToolAliasAndMarkdownResult(t *testing.T) {
 	}
 	defer execSess.Close()
 
-	result, err := executeAITool(context.Background(), execSess, "list-files", []string{
-		"--query", "needle",
-		"--search-content",
+	result, err := executeAITool(context.Background(), execSess, "find-files", []string{
+		"--find-content", "needle",
+		"--no-semantic",
 	}, nil)
 	if err != nil {
-		t.Fatalf("execute list-files: %v", err)
+		t.Fatalf("execute find-files: %v", err)
 	}
-	for _, want := range []string{"### list_files", "result.txt", "line 1", "needle found", "\n  ```\n"} {
+	for _, want := range []string{"### find_files", "result.txt", "line 1", "needle found", "\n  ```\n"} {
 		if !strings.Contains(result, want) {
 			t.Errorf("Markdown result missing %q:\n%s", want, result)
 		}
 	}
 	if strings.Contains(result, "```text") {
-		t.Fatalf("list_files result wrapped Markdown in a text fence:\n%s", result)
+		t.Fatalf("find_files result wrapped Markdown in a text fence:\n%s", result)
 	}
 
 	var toolsHelp strings.Builder
 	tools := BuildKabibiTools(execSess)
 	toolsHelp.WriteString(formatAIToolsHelp(tools))
-	for _, want := range []string{"read-file", "edit-file", "write-file", "list-files", "exec", "term-read", "shell-history", "git-inspect", "browser-cdp"} {
+	for _, want := range []string{"read-file", "edit-file", "write-file", "find-files", "exec", "term-read", "shell-history", "git-inspect", "browser-cdp"} {
 		if !strings.Contains(toolsHelp.String(), want) {
 			t.Errorf("AI tools help missing %q", want)
 		}
+	}
+	if strings.Contains(toolsHelp.String(), "list-files") {
+		t.Fatal("AI tools help retains the removed list-files tool")
 	}
 	if len(tools) != 21 {
 		t.Errorf("registered tool count = %d, want 21", len(tools))
@@ -179,7 +219,7 @@ func (e *commandTestEmbedder) EmbedBatchContext(_ context.Context, parts []ai.Pr
 	return vectors, nil
 }
 
-func TestExecuteAIToolListFilesUsesProvidedEmbedder(t *testing.T) {
+func TestExecuteAIToolFindFilesUsesProvidedEmbedder(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "browser_worker.go"), []byte("func startWorker() { launchCanvasRuntime() }\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -191,27 +231,26 @@ func TestExecuteAIToolListFilesUsesProvidedEmbedder(t *testing.T) {
 	defer execSess.Close()
 
 	embedder := &commandTestEmbedder{}
-	result, err := executeAITool(context.Background(), execSess, "list_files", []string{
-		"--query", "where the browser canvas runtime starts",
-		"--search-content",
+	result, err := executeAITool(context.Background(), execSess, "find_files", []string{
+		"--find-content", "where the browser canvas runtime starts",
 	}, embedder)
 	if err != nil {
-		t.Fatalf("execute semantic list_files: %v", err)
+		t.Fatalf("execute semantic find_files: %v", err)
 	}
 	for _, want := range []string{"mode: semantic-content", "* 1.00  `browser_worker.go`", "func startWorker() { launchCanvasRuntime() }", "Search stats: processed 1/1 files"} {
 		if !strings.Contains(result, want) {
-			t.Errorf("semantic list_files result missing %q:\n%s", want, result)
+			t.Errorf("semantic find_files result missing %q:\n%s", want, result)
 		}
 	}
 	if strings.Contains(result, "```text") || !strings.Contains(result, "```go") {
-		t.Fatalf("semantic list_files did not preserve its Markdown code block:\n%s", result)
+		t.Fatalf("semantic find_files did not preserve its Markdown code block:\n%s", result)
 	}
 	if embedder.queryCalls != 0 || embedder.batchCalls != 3 {
 		t.Fatalf("embedder calls = (query %d, batch %d), want (0, 3) for query, candidate, and quote chunk", embedder.queryCalls, embedder.batchCalls)
 	}
 }
 
-func TestExecuteAIToolListFilesDirectoryScopesSearch(t *testing.T) {
+func TestExecuteAIToolFindFilesDirectoryScopesSearch(t *testing.T) {
 	root := t.TempDir()
 	nested := filepath.Join(root, "nested")
 	if err := os.Mkdir(nested, 0o755); err != nil {
@@ -232,23 +271,23 @@ func TestExecuteAIToolListFilesDirectoryScopesSearch(t *testing.T) {
 	defer execSess.Close()
 
 	for _, directory := range []string{"nested", nested} {
-		result, err := executeAITool(context.Background(), execSess, "list_files", []string{
+		result, err := executeAITool(context.Background(), execSess, "find_files", []string{
 			"--directory", directory,
-			"--query", "*",
+			"--find-paths", "**",
 		}, nil)
 		if err != nil {
-			t.Fatalf("execute list_files with directory %q: %v", directory, err)
+			t.Fatalf("execute find_files with directory %q: %v", directory, err)
 		}
 		if !strings.Contains(result, "inside.txt") || strings.Contains(result, "outside.txt") {
-			t.Errorf("list_files directory %q returned wrong entries:\n%s", directory, result)
+			t.Errorf("find_files directory %q returned wrong entries:\n%s", directory, result)
 		}
 		if !strings.Contains(result, "(1 entries,") {
-			t.Errorf("list_files directory %q result count is not scoped:\n%s", directory, result)
+			t.Errorf("find_files directory %q result count is not scoped:\n%s", directory, result)
 		}
 	}
 }
 
-func TestListFilesToolDoesNotSubscribeToStandaloneEscapeInput(t *testing.T) {
+func TestFindFilesToolDoesNotSubscribeToStandaloneEscapeInput(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "result.txt"), []byte("content"), 0o644); err != nil {
 		t.Fatal(err)
@@ -264,15 +303,15 @@ func TestListFilesToolDoesNotSubscribeToStandaloneEscapeInput(t *testing.T) {
 		t.Fatalf("queue Escape without a control subscriber: %v", err)
 	}
 
-	result, err := executeAITool(ctx, execSess, "list-files", []string{"--query", "*"}, nil)
+	result, err := executeAITool(ctx, execSess, "find-files", []string{"--find-paths", "**"}, nil)
 	if err != nil {
-		t.Fatalf("execute list_files tool: %v", err)
+		t.Fatalf("execute find_files tool: %v", err)
 	}
 	if !strings.Contains(result, "result.txt") {
-		t.Fatalf("list_files tool result = %q", result)
+		t.Fatalf("find_files tool result = %q", result)
 	}
 	if term.controlReaders != 0 {
-		t.Fatal("AI list_files tool registered the standalone command's control-input subscription")
+		t.Fatal("AI find_files tool registered the standalone command's control-input subscription")
 	}
 	var key [1]byte
 	if n, err := term.ReadInput(key[:]); err != nil || n != 1 || key[0] != 0x1b {
@@ -280,7 +319,7 @@ func TestListFilesToolDoesNotSubscribeToStandaloneEscapeInput(t *testing.T) {
 	}
 }
 
-func TestAIBuiltinMiddlewareDispatchesTool(t *testing.T) {
+func TestAIBuiltinMiddlewareDispatchesFindFiles(t *testing.T) {
 	setTestConfigDirectory(t)
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "result.txt"), []byte("needle found\n"), 0o644); err != nil {
@@ -294,7 +333,7 @@ func TestAIBuiltinMiddlewareDispatchesTool(t *testing.T) {
 
 	record, err := execSess.RunCommand(
 		context.Background(),
-		`ai list-files --query "needle" --search-content`,
+		`ai find-files --find-content "needle" --no-semantic`,
 		nil,
 		SourceUserShell,
 		nil,
@@ -308,7 +347,7 @@ func TestAIBuiltinMiddlewareDispatchesTool(t *testing.T) {
 	}
 
 	for _, shellName := range []string{"sh", "bash", "kabibi"} {
-		command := shellName + ` -c "ai list_files --query needle --search_content"`
+		command := shellName + ` -c "ai find_files --find_content needle --no_semantic"`
 		record, err := execSess.RunCommand(context.Background(), command, nil, SourceUserShell, nil)
 		if err != nil {
 			t.Fatalf("run tool through %s: %v", shellName, err)
@@ -377,10 +416,15 @@ func TestRunAIBuiltinToolRendersMarkdownForTTY(t *testing.T) {
 	}
 }
 
-func TestIsAIToolNameAcceptsDashAndUnderscore(t *testing.T) {
-	for _, name := range []string{"list_files", "list-files", "browser_cdp", "browser-cdp"} {
+func TestIsAIToolNameAcceptsNewToolAndRejectsLegacyListFiles(t *testing.T) {
+	for _, name := range []string{"find_files", "find-files", "browser_cdp", "browser-cdp"} {
 		if !IsAIToolName(name) {
 			t.Errorf("IsAIToolName(%q) = false", name)
+		}
+	}
+	for _, name := range []string{"list_files", "list-files"} {
+		if IsAIToolName(name) {
+			t.Errorf("IsAIToolName(%q) = true; legacy name must be removed", name)
 		}
 	}
 	if IsAIToolName("not-a-tool") {
