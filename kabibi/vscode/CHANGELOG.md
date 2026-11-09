@@ -1,6 +1,6 @@
 # Change Log
 
-## 0.8.31
+## 0.8.32
 
 - Run Desktop and remote Node washmhost instances directly in the VS Code
   extension host, with per-instance stdio, terminal, cwd, and exit handling.
