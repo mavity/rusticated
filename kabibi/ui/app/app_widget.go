@@ -604,6 +604,9 @@ func (w *AppWidget) HandleEvent(e input.Event) bool {
 		inputValue := w.sh.Input().Value()
 		_, _, isSlashInput := slashcmd.InputToken(inputValue)
 		if isSlashInput || (inputValue == "" && keyEv.Text == "/") {
+			if keyStr == "esc" && w.sh.Input().CompletionVisible() {
+				return w.sh.HandleEvent(keyEv)
+			}
 			if w.handleSlashKey(keyEv) {
 				return true
 			}
@@ -729,6 +732,9 @@ func (w *AppWidget) HandleEvent(e input.Event) bool {
 			}
 		}
 
+		if keyStr == "esc" && w.sh.Input().CompletionVisible() {
+			return w.sh.HandleEvent(keyEv)
+		}
 		if keyStr == "esc" {
 			if w.sh.Input().Value() != "" {
 				w.sh.Input().Reset()
