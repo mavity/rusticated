@@ -287,6 +287,8 @@ internal static class Program
 
     private static void RuntimeHostPanic(IntPtr msgPtr, UIntPtr msgLen)
     {
+        Console.WriteLine("ENTERED RuntimeHostPanic: msgPtr=" + msgPtr.ToInt64() + ", len=" + msgLen.ToUInt64());
+        Console.Out.Flush();
         string msg = Marshal.PtrToStringAnsi(msgPtr, (int)msgLen.ToUInt64());
         Console.WriteLine("Runtime slice panicked: " + msg);
         Console.Out.Flush();
@@ -412,6 +414,8 @@ internal static class Program
             s_sliceCode = sliceCode;
             VectoredHandlerCallback veh = OnVectoredException;
             IntPtr hVeh = AddVectoredExceptionHandler(1, veh);
+            Console.WriteLine("INFO: AddVectoredExceptionHandler handle = " + hVeh.ToInt64());
+            Console.Out.Flush();
 
             // Call #1 compiles the selected WASM scenario and runs it once.
             Console.WriteLine("INFO: entering runtime for cold JIT");
@@ -672,19 +676,30 @@ internal static class Program
     {
         try {
             IntPtr pRec = Marshal.ReadIntPtr(ptr, 0);
+            IntPtr pCtx = Marshal.ReadIntPtr(ptr, IntPtr.Size);
             uint code = (uint)Marshal.ReadInt32(pRec, 0);
             IntPtr addr = Marshal.ReadIntPtr(pRec, 16);
             long offset = addr.ToInt64() - s_sliceCode.ToInt64();
             long badAddr = Marshal.ReadIntPtr(pRec, 40).ToInt64();
-            string msg = string.Format("CRASH: Exception 0x{0:X8} at PC=0x{1:X16} (slice+0x{2:X}), bad_addr=0x{3:X16}\n",
-                code, addr.ToInt64(), offset, badAddr);
-            byte[] bytes = System.Text.Encoding.ASCII.GetBytes(msg);
-            uint written;
-            WriteFile(GetStdHandle(-12), bytes, (uint)bytes.Length, out written, IntPtr.Zero);
+            long rsp = Marshal.ReadInt64(pCtx, 0x98);
+            long rbp = Marshal.ReadInt64(pCtx, 0xa0);
+            long rax = Marshal.ReadInt64(pCtx, 0x78);
+            long rcx = Marshal.ReadInt64(pCtx, 0x80);
+            long rdx = Marshal.ReadInt64(pCtx, 0x88);
+            long rsi = Marshal.ReadInt64(pCtx, 0xa8);
+            long rdi = Marshal.ReadInt64(pCtx, 0xb0);
+            long ret_addr = 0;
+            try { ret_addr = Marshal.ReadInt64(new IntPtr(rsp), 0); } catch {}
+            string msg = string.Format("CRASH: Exception 0x{0:X8} at PC=0x{1:X16} (slice+0x{2:X}), bad_addr=0x{3:X16}\n"
+                + "  RAX=0x{4:X16} RCX=0x{5:X16} RDX=0x{6:X16}\n"
+                + "  RSI=0x{7:X16} RDI=0x{8:X16} RBP=0x{9:X16} RSP=0x{10:X16}\n"
+                + "  *(RSP)=0x{11:X16} (slice+0x{12:X})\n",
+                code, addr.ToInt64(), offset, badAddr,
+                rax, rcx, rdx, rsi, rdi, rbp, rsp,
+                ret_addr, ret_addr - s_sliceCode.ToInt64());
+            Console.Error.WriteLine(msg);
+            Console.Error.Flush();
         } catch {
-            byte[] bytes = System.Text.Encoding.ASCII.GetBytes("CRASH in VEH handler\n");
-            uint written;
-            WriteFile(GetStdHandle(-12), bytes, (uint)bytes.Length, out written, IntPtr.Zero);
         }
         return 0; // EXCEPTION_CONTINUE_SEARCH
     }

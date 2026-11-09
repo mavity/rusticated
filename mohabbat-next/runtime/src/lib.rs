@@ -13,7 +13,6 @@ pub mod abi;
 pub mod allocator;
 pub mod jit;
 
-#[cfg(not(test))]
 use crate::abi::abi;
 use crate::abi::globals;
 #[cfg(not(test))]
@@ -23,7 +22,7 @@ use core::panic::PanicInfo;
 
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     let mut i = 0;
     while i < n {
         *dest.add(i) = *src.add(i);
@@ -34,7 +33,7 @@ pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut
 
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn memset(dest: *mut u8, value: i32, n: usize) -> *mut u8 {
+unsafe extern "C" fn memset(dest: *mut u8, value: i32, n: usize) -> *mut u8 {
     let mut i = 0;
     while i < n {
         *dest.add(i) = value as u8;
@@ -45,7 +44,7 @@ pub unsafe extern "C" fn memset(dest: *mut u8, value: i32, n: usize) -> *mut u8 
 
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     if (dest as usize) < (src as usize) {
         let mut i = 0;
         while i < n {
@@ -64,7 +63,7 @@ pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mu
 
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn memcmp(lhs: *const u8, rhs: *const u8, n: usize) -> i32 {
+unsafe extern "C" fn memcmp(lhs: *const u8, rhs: *const u8, n: usize) -> i32 {
     let mut i = 0;
     while i < n {
         let left = *lhs.add(i);
@@ -79,7 +78,7 @@ pub unsafe extern "C" fn memcmp(lhs: *const u8, rhs: *const u8, n: usize) -> i32
 
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn bcmp(lhs: *const u8, rhs: *const u8, n: usize) -> i32 {
+unsafe extern "C" fn bcmp(lhs: *const u8, rhs: *const u8, n: usize) -> i32 {
     memcmp(lhs, rhs, n)
 }
 
@@ -121,13 +120,6 @@ pub unsafe extern "C" fn get_heap_ty_i64_i64() -> *const u16 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn get_heap_ty_i8x16() -> *const u16 {
     globals().heap_ty_i8x16
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rusticated_debug(val: i32) {
-    unsafe {
-        (abi().rusticated_debug)(val);
-    }
 }
 
 #[cfg(not(test))]

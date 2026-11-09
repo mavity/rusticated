@@ -123,7 +123,8 @@ func main() {
 
 	linuxMuslFlags := "['-C', 'panic=abort', '-C', 'relocation-model=pic', '-C', 'target-feature=+crt-static', '-C', 'link-self-contained=no', '-C', 'linker=rust-lld', '-C', 'linker-flavor=ld.lld', '-C', 'link-arg=-pie', '-C', 'link-arg=--no-dynamic-linker']"
 	darwinFlags := fmt.Sprintf("['-C', 'panic=abort', '-C', 'linker=rust-lld', '-C', 'linker-flavor=darwin-lld', '-Z', 'unstable-options', '-C', 'link-arg=-L%s']", filepath.ToSlash(darwinStubsDir))
-	runtimeRustflags := "-C relocation-model=pie -Zunstable-options -Zdefault-visibility=hidden -Cpanic=abort -Zlocation-detail=none -Zfmt-debug=none -Cforce-frame-pointers=yes -Cllvm-args=-enable-machine-outliner=never"
+	runtimeRustflagsX64 := "-C relocation-model=pic -Zunstable-options -Zdefault-visibility=hidden -Cpanic=abort -Zlocation-detail=none -Zfmt-debug=none -Cforce-frame-pointers=yes -Cllvm-args=-enable-machine-outliner=never -Zplt=yes"
+	runtimeRustflagsAArch64 := "-C relocation-model=pie -Zunstable-options -Zdefault-visibility=hidden -Cpanic=abort -Zlocation-detail=none -Zfmt-debug=none -Cforce-frame-pointers=yes -Cllvm-args=-enable-machine-outliner=never -Ctarget-feature=+reserve-x18"
 	runtimeDir := filepath.Join(nextDir, "runtime")
 	runtimeBuildDir, err := prepareCraneliftOverlay(runtimeDir, rustBuildDir, verbose)
 	if err != nil {
@@ -175,7 +176,7 @@ func main() {
 			Feature:           "x86_64",
 			NoDefaultFeatures: true,
 			NeedsAlloc:        true,
-			Rustflags:         runtimeRustflags,
+			Rustflags:         runtimeRustflagsX64,
 			Arch:              "x86_64",
 			LinkerScript:      filepath.Join(runtimeDir, "runtime.ld"),
 			EntrySymbol:       "slice_entry",
@@ -189,7 +190,7 @@ func main() {
 			Feature:           "aarch64",
 			NoDefaultFeatures: true,
 			NeedsAlloc:        true,
-			Rustflags:         runtimeRustflags,
+			Rustflags:         runtimeRustflagsAArch64,
 			Arch:              "aarch64",
 			LinkerScript:      filepath.Join(runtimeDir, "runtime.ld"),
 			EntrySymbol:       "slice_entry",
@@ -429,10 +430,13 @@ func main() {
 	// Step 4: Build Windows AnyCPU CLR Host
 	fmt.Println("🍆  [4/5] Compiling AnyCPU Windows CLR Host (MohabbatWindowsHost.exe)...")
 	windowsHostExe := filepath.Join(workDir, "MohabbatWindowsHost.exe")
-	if err := buildWindowsHostExe(windowsHostDir, workDir, windowsHostExe, winResources, verbose); err != nil {
+	if err := buildWindowsHostExe(windowsHostDir, workDir, windowsHostExe, "anycpu", winResources, verbose); err != nil {
 		fmt.Fprintf(os.Stderr, "Error building Windows host: %v\n", err)
 		os.Exit(1)
 	}
+
+	windowsHostX64Exe := filepath.Join(workDir, "MohabbatWindowsHost-x64.exe")
+	_ = buildWindowsHostExe(windowsHostDir, workDir, windowsHostX64Exe, "x64", winResources, verbose)
 
 	if windowsHostOnly {
 		fmt.Printf("🍆  Finished. Windows-only test host: %s\n", windowsHostExe)

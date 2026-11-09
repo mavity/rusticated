@@ -115,7 +115,7 @@ type WindowsComponentResource struct {
 	ResourceName string
 }
 
-func buildWindowsHostExe(windowsHostDir, workDir, outExePath string, components []WindowsComponentResource, verbose bool) error {
+func buildWindowsHostExe(windowsHostDir, workDir, outExePath, platform string, components []WindowsComponentResource, verbose bool) error {
 	compiler, err := findWindowsCompiler()
 	if err != nil {
 		return err
@@ -140,10 +140,14 @@ func buildWindowsHostExe(windowsHostDir, workDir, outExePath string, components 
 		targetProgramCs = toWindowsPath(programCs)
 	}
 
+	if platform == "" {
+		platform = "anycpu"
+	}
+
 	args := []string{
 		"/nologo",
 		"/target:exe",
-		"/platform:anycpu",
+		"/platform:" + platform,
 		"/out:" + targetOut,
 		"/win32manifest:" + targetManifest,
 		"/reference:System.dll",
