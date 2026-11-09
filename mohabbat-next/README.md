@@ -21,19 +21,33 @@ The executable contains four independently compiled movable binaries:
 
 The platform abstraction receives a narrow ABI from the CLR: `LoadLibrary`,
 `GetProcAddress`, executable-memory allocation/free, and the matching hello
-payload pointer and size. It resolves Windows APIs, builds the higher-level
-stdio/exit dispatch table, maps the hello payload into executable memory, and
-invokes it. The hello payload owns the banner, input loop, line trimming,
-echoing, and empty-line exit behavior; it contains no OS-specific calls.
+payload pointer and size. It resolves Windows APIs, populates the canonical
+47-field `PalAbiTable` at payload offset `-0x20000`, maps the hello payload into
+executable memory, and invokes it. `read`, `write`, and `process_exit` are
+implemented for the probe, with `process_exit` using a callback that matches
+the table's target ABI; every other function slot is a valid typed
+unsupported stub, rather than a null function pointer. The hello payload owns
+the banner, input loop, line trimming, echoing, and empty-line exit behavior;
+it contains no OS-specific calls.
+
+Probe stdio uses the ABI's asynchronous `Overlapped` contract. The payload
+stores its phase, buffers, and pending `Overlapped` in persistent globals, then
+returns to the platform after submitting each read or write. Windows performs
+the blocking standard-handle operation on a worker thread and waits for it
+before re-entering the payload; Unix does the same with a pthread. The payload
+consumes completion errors and byte counts, including short writes, before
+continuing. It never polls the completion structure or performs blocking
+stdio itself.
 
 The two payloads are shared by all future OS platform abstractions for their
 respective instruction sets.
 
 The hello payload and Windows platform abstraction are freestanding `no_std`
 Rust components built for `x86_64-unknown-none` and `aarch64-unknown-none`,
-using `core` rather than the Rusticated WASM sysroot. Their C-compatible
-dispatch uses the Windows x64 calling convention on x86-64 and the C ABI on
-AArch64; the AArch64 build reserves x18.
+using `core` rather than the Rusticated WASM sysroot. The shared
+[`probe/pal_abi.rs`](probe/pal_abi.rs) definition fixes the table layout and
+calling convention: Windows x64 on x86-64 and C on AArch64; the AArch64 build
+reserves x18.
 
 The final deliverable is one MZ/PE `MohabbatProbe.exe`. Its DOS stub begins
 with a shell-valid assignment and dispatches POSIX execution to Bash; the

@@ -5,6 +5,12 @@ use core::ffi::c_void;
 use core::panic::PanicInfo;
 use core::ptr;
 
+#[path = "../../pal_abi.rs"]
+mod pal_abi;
+#[path = "../../pal_abi_stubs.rs"]
+mod pal_abi_stubs;
+use pal_abi::{pal_fn, Overlapped, PalAbiTable};
+
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 compile_error!("The Windows platform abstraction supports only x86-64 and AArch64.");
 
@@ -72,31 +78,45 @@ type FlushInstructionCacheFn = unsafe extern "win64" fn(*mut c_void, *const c_vo
 #[cfg(target_arch = "aarch64")]
 type FlushInstructionCacheFn = unsafe extern "C" fn(*mut c_void, *const c_void, usize) -> i32;
 
-#[cfg(target_arch = "x86_64")]
-type ExitProcessFn = unsafe extern "win64" fn(u32);
-#[cfg(target_arch = "aarch64")]
-type ExitProcessFn = unsafe extern "C" fn(u32);
+type ExitProcessFn = pal_fn!(fn(code: i32) -> !);
 
 #[cfg(target_arch = "x86_64")]
-type ProbeWriteFn = unsafe extern "win64" fn(*const u8, usize) -> i64;
+type CreateThreadFn = unsafe extern "win64" fn(
+    *mut c_void,
+    usize,
+    Option<unsafe extern "win64" fn(*mut c_void) -> u32>,
+    *mut c_void,
+    u32,
+    *mut u32,
+) -> *mut c_void;
 #[cfg(target_arch = "aarch64")]
-type ProbeWriteFn = unsafe extern "C" fn(*const u8, usize) -> i64;
+type CreateThreadFn = unsafe extern "C" fn(
+    *mut c_void,
+    usize,
+    Option<unsafe extern "C" fn(*mut c_void) -> u32>,
+    *mut c_void,
+    u32,
+    *mut u32,
+) -> *mut c_void;
 
 #[cfg(target_arch = "x86_64")]
-type ProbeReadFn = unsafe extern "win64" fn(*mut u8, usize) -> i64;
+type WaitForSingleObjectFn = unsafe extern "win64" fn(*mut c_void, u32) -> u32;
 #[cfg(target_arch = "aarch64")]
-type ProbeReadFn = unsafe extern "C" fn(*mut u8, usize) -> i64;
+type WaitForSingleObjectFn = unsafe extern "C" fn(*mut c_void, u32) -> u32;
 
 #[cfg(target_arch = "x86_64")]
-type ProbeExitFn = unsafe extern "win64" fn(i32);
+type CloseHandleFn = unsafe extern "win64" fn(*mut c_void) -> i32;
 #[cfg(target_arch = "aarch64")]
-type ProbeExitFn = unsafe extern "C" fn(i32);
+type CloseHandleFn = unsafe extern "C" fn(*mut c_void) -> i32;
 
 #[repr(C)]
-pub struct ProbeDispatch {
-    write: Option<ProbeWriteFn>,
-    read: Option<ProbeReadFn>,
-    exit: Option<ProbeExitFn>,
+#[derive(Clone, Copy)]
+struct PendingIo {
+    overlapped: *mut Overlapped,
+    handle: *mut c_void,
+    buffer: *mut u8,
+    length: u32,
+    is_write: bool,
 }
 
 #[repr(C)]
@@ -108,9 +128,11 @@ struct PlatformState {
     write_file: Option<WriteFileFn>,
     get_last_error: Option<GetLastErrorFn>,
     exit_process: Option<ExitProcessFn>,
-    free_payload: Option<FreeFn>,
-    payload_alloc: *mut c_void,
-    previous_was_cr: bool,
+    create_thread: Option<CreateThreadFn>,
+    wait_for_single_object: Option<WaitForSingleObjectFn>,
+    close_handle: Option<CloseHandleFn>,
+    worker_thread: *mut c_void,
+    pending_io: PendingIo,
 }
 
 const PREFIX_ABI_OFFSET: usize = 0x20000;
@@ -118,6 +140,8 @@ const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
 const STD_OUTPUT_HANDLE: u32 = (-11i32) as u32;
 const STD_ERROR_HANDLE: u32 = (-12i32) as u32;
 const ERROR_BROKEN_PIPE: u32 = 109;
+const WAIT_OBJECT_0: u32 = 0;
+const INFINITE: u32 = u32::MAX;
 
 #[inline(always)]
 unsafe fn slice_origin() -> *mut u8 {
@@ -154,8 +178,13 @@ macro_rules! function_pointer {
 }
 
 #[inline(always)]
+unsafe fn state_ptr() -> *mut PlatformState {
+    slice_origin().sub(0x10000) as *mut PlatformState
+}
+
+#[inline(always)]
 unsafe fn state_mut() -> &'static mut PlatformState {
-    &mut *(slice_origin().sub(0x10000) as *mut PlatformState)
+    &mut *state_ptr()
 }
 
 unsafe fn resolve(
@@ -169,171 +198,194 @@ unsafe fn resolve(
     }
 }
 
-unsafe fn write_stderr(bytes: &[u8]) {
-    let (write_file, error_handle) = {
-        let state = state_mut();
-        (state.write_file, state.error_handle)
-    };
-    if let Some(write_file) = write_file {
-        let mut written = 0;
-        write_file(
-            error_handle,
-            bytes.as_ptr().cast(),
-            bytes.len() as u32,
-            &mut written,
-            ptr::null_mut(),
-        );
+unsafe fn complete_io(ov: *mut Overlapped, error: u32, result: u64) {
+    if ov.is_null() {
+        return;
     }
+    (*ov).error = error;
+    (*ov).result_ext = result;
+    (*ov).flags = pal_abi::FLAG_COMPLETED;
 }
 
-unsafe fn write_stdout_impl(buffer: *const u8, length: usize) -> i64 {
-    if length > u32::MAX as usize {
-        return -1;
+unsafe fn begin_io(
+    ov: *mut Overlapped,
+    handle: u64,
+    buffer: *mut u8,
+    length: usize,
+    is_write: bool,
+) {
+    if ov.is_null() || (buffer.is_null() && length != 0) || length > u32::MAX as usize {
+        complete_io(ov, 29, 0);
+        return;
     }
-    let (write_file, output_handle) = {
-        let state = state_mut();
-        (state.write_file, state.output_handle)
+    if length == 0 {
+        complete_io(ov, 0, 0);
+        return;
+    }
+    let state = state_ptr();
+    let native_handle = match handle {
+        0 => ptr::addr_of!((*state).input_handle).read(),
+        1 => ptr::addr_of!((*state).output_handle).read(),
+        _ => ptr::null_mut(),
     };
-    let Some(write_file) = write_file else {
-        return -1;
+    let create_thread = ptr::addr_of!((*state).create_thread).read();
+    let worker_thread = ptr::addr_of!((*state).worker_thread).read();
+    let Some(create_thread) = create_thread else {
+        complete_io(ov, 29, 0);
+        return;
     };
-    let mut written = 0;
-    if write_file(
-        output_handle,
-        buffer.cast(),
-        length as u32,
-        &mut written,
+    if native_handle.is_null() || !worker_thread.is_null() {
+        complete_io(ov, 29, 0);
+        return;
+    }
+
+    (*ov).flags = 0;
+    (*ov).error = 0;
+    (*ov).continued = 0;
+    (*ov).result_ext = 0;
+    ptr::addr_of_mut!((*state).pending_io).write(PendingIo {
+        overlapped: ov,
+        handle: native_handle,
+        buffer,
+        length: length as u32,
+        is_write,
+    });
+    #[cfg(target_arch = "x86_64")]
+    let start = run_io_worker as unsafe extern "win64" fn(*mut c_void) -> u32;
+    #[cfg(target_arch = "aarch64")]
+    let start = run_io_worker as unsafe extern "C" fn(*mut c_void) -> u32;
+    let thread = create_thread(
         ptr::null_mut(),
-    ) == 0
-    {
-        -1
+        0,
+        Some(start),
+        ptr::null_mut(),
+        0,
+        ptr::null_mut(),
+    );
+    if thread.is_null() {
+        complete_io(ov, 29, 0);
     } else {
-        written as i64
+        ptr::addr_of_mut!((*state).worker_thread).write(thread);
     }
 }
 
-unsafe fn read_stdin_impl(buffer: *mut u8, capacity: usize) -> i64 {
-    if capacity == 0 || buffer.is_null() {
-        return -1;
-    }
-
-    loop {
-        let (read_file, input_handle) = {
-            let state = state_mut();
-            (state.read_file, state.input_handle)
-        };
-        let Some(read_file) = read_file else {
-            return -1;
-        };
-
-        let mut byte = 0u8;
-        let mut count = 0u32;
-        if read_file(
-            input_handle,
-            (&mut byte as *mut u8).cast(),
-            1,
-            &mut count,
-            ptr::null_mut(),
-        ) == 0
-        {
-            let error = match state_mut().get_last_error {
-                Some(get_last_error) => get_last_error(),
-                None => return -1,
-            };
-            if error == ERROR_BROKEN_PIPE {
-                return 0;
+unsafe fn perform_io_worker() -> u32 {
+    let state = state_ptr();
+    let request = ptr::addr_of!((*state).pending_io).read();
+    let read_file = ptr::addr_of!((*state).read_file).read();
+    let write_file = ptr::addr_of!((*state).write_file).read();
+    let get_last_error = ptr::addr_of!((*state).get_last_error).read();
+    let mut transferred = 0u32;
+    let ok = if request.is_write {
+        match write_file {
+            Some(write_file) => {
+                write_file(
+                    request.handle,
+                    request.buffer.cast(),
+                    request.length,
+                    &mut transferred,
+                    ptr::null_mut(),
+                ) != 0
             }
-
-            write_stderr(b"ReadFile(stdin) failed with Win32 error ");
-            let mut digits = core::mem::MaybeUninit::<[u8; 10]>::uninit();
-            let digits_ptr = digits.as_mut_ptr().cast::<u8>();
-            let mut digit_count = 0usize;
-            let mut value = error;
-            loop {
-                digits_ptr.add(digit_count).write(b'0' + (value % 10) as u8);
-                digit_count += 1;
-                value /= 10;
-                if value == 0 || digit_count == 10 {
-                    break;
-                }
+            None => false,
+        }
+    } else {
+        match read_file {
+            Some(read_file) => {
+                read_file(
+                    request.handle,
+                    request.buffer.cast(),
+                    request.length,
+                    &mut transferred,
+                    ptr::null_mut(),
+                ) != 0
             }
-            for index in 0..digit_count / 2 {
-                let left = digits_ptr.add(index);
-                let right = digits_ptr.add(digit_count - index - 1);
-                let temporary = left.read();
-                left.write(right.read());
-                right.write(temporary);
-            }
-            write_stderr(core::slice::from_raw_parts(digits_ptr, digit_count));
-            write_stderr(b"\r\n");
-            return -1;
+            None => false,
         }
-        if count == 0 {
-            return 0;
-        }
-
-        let state = state_mut();
-        if state.previous_was_cr {
-            state.previous_was_cr = false;
-            if byte == b'\n' {
-                continue;
-            }
-        }
-        if byte == b'\r' {
-            state.previous_was_cr = true;
-            *buffer = b'\n';
-        } else {
-            *buffer = byte;
-        }
-        return 1;
-    }
-}
-
-unsafe fn exit_process_impl(status: i32) {
-    let (payload_alloc, free, exit) = {
-        let state = state_mut();
-        let payload_alloc = state.payload_alloc;
-        state.payload_alloc = ptr::null_mut();
-        (payload_alloc, state.free_payload, state.exit_process)
     };
-    if !payload_alloc.is_null() {
-        if let Some(free) = free {
-            free(payload_alloc);
+    if ok {
+        complete_io(request.overlapped, 0, transferred as u64);
+    } else {
+        let error = match get_last_error {
+            Some(get_last_error) => get_last_error(),
+            None => 0,
+        };
+        if !request.is_write && error == ERROR_BROKEN_PIPE {
+            complete_io(request.overlapped, 0, 0);
+        } else if error == ERROR_BROKEN_PIPE {
+            complete_io(request.overlapped, 64, 0);
+        } else {
+            complete_io(request.overlapped, 29, 0);
         }
     }
+    0
+}
+
+#[cfg(target_arch = "x86_64")]
+unsafe extern "win64" fn run_io_worker(_context: *mut c_void) -> u32 {
+    perform_io_worker()
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe extern "C" fn run_io_worker(_context: *mut c_void) -> u32 {
+    perform_io_worker()
+}
+
+#[cfg(target_arch = "x86_64")]
+unsafe extern "win64" fn probe_write(
+    ov: *mut Overlapped,
+    handle: u64,
+    buffer: *const u8,
+    length: usize,
+) {
+    begin_io(ov, handle, buffer as *mut u8, length, true)
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe extern "C" fn probe_write(
+    ov: *mut Overlapped,
+    handle: u64,
+    buffer: *const u8,
+    length: usize,
+) {
+    begin_io(ov, handle, buffer as *mut u8, length, true)
+}
+
+#[cfg(target_arch = "x86_64")]
+unsafe extern "win64" fn probe_read(
+    ov: *mut Overlapped,
+    handle: u64,
+    buffer: *mut u8,
+    length: usize,
+) {
+    begin_io(ov, handle, buffer, length, false)
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe extern "C" fn probe_read(ov: *mut Overlapped, handle: u64, buffer: *mut u8, length: usize) {
+    begin_io(ov, handle, buffer, length, false)
+}
+
+unsafe fn exit_process_impl(status: i32) -> ! {
+    let exit = {
+        let state = state_mut();
+        state.exit_process
+    };
     if let Some(exit) = exit {
-        exit(status as u32);
+        exit(status);
     }
     loop {}
 }
 
 #[cfg(target_arch = "x86_64")]
-unsafe extern "win64" fn probe_write_stdout(buffer: *const u8, length: usize) -> i64 {
-    write_stdout_impl(buffer, length)
-}
-
-#[cfg(target_arch = "aarch64")]
-unsafe extern "C" fn probe_write_stdout(buffer: *const u8, length: usize) -> i64 {
-    write_stdout_impl(buffer, length)
-}
-
-#[cfg(target_arch = "x86_64")]
-unsafe extern "win64" fn probe_read_stdin(buffer: *mut u8, capacity: usize) -> i64 {
-    read_stdin_impl(buffer, capacity)
-}
-
-#[cfg(target_arch = "aarch64")]
-unsafe extern "C" fn probe_read_stdin(buffer: *mut u8, capacity: usize) -> i64 {
-    read_stdin_impl(buffer, capacity)
-}
-
-#[cfg(target_arch = "x86_64")]
-unsafe extern "win64" fn probe_exit(status: i32) {
+#[no_mangle]
+unsafe extern "win64" fn pal_abi_unsupported_exit(status: i32) -> ! {
     exit_process_impl(status)
 }
 
 #[cfg(target_arch = "aarch64")]
-unsafe extern "C" fn probe_exit(status: i32) {
+#[no_mangle]
+unsafe extern "C" fn pal_abi_unsupported_exit(status: i32) -> ! {
     exit_process_impl(status)
 }
 
@@ -374,6 +426,13 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
         resolve(host, kernel32, b"GetCurrentProcess\0"),
         GetCurrentProcessFn
     );
+    let create_thread =
+        function_pointer!(resolve(host, kernel32, b"CreateThread\0"), CreateThreadFn);
+    let wait_for_single_object = function_pointer!(
+        resolve(host, kernel32, b"WaitForSingleObject\0"),
+        WaitForSingleObjectFn
+    );
+    let close_handle = function_pointer!(resolve(host, kernel32, b"CloseHandle\0"), CloseHandleFn);
     if get_std_handle.is_none()
         || read_file.is_none()
         || write_file.is_none()
@@ -381,10 +440,16 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
         || flush_instruction_cache.is_none()
         || exit_process.is_none()
         || get_current_process.is_none()
+        || create_thread.is_none()
+        || wait_for_single_object.is_none()
+        || close_handle.is_none()
     {
         return 12;
     }
 
+    let Some(exit_process) = exit_process else {
+        return 12;
+    };
     let Some(get_std_handle) = get_std_handle else {
         return 12;
     };
@@ -437,32 +502,58 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
         state.read_file = read_file;
         state.write_file = write_file;
         state.get_last_error = get_last_error;
-        state.exit_process = exit_process;
-        state.free_payload = Some(free);
-        state.payload_alloc = payload_alloc;
-        state.previous_was_cr = false;
+        state.exit_process = Some(exit_process);
+        state.create_thread = create_thread;
+        state.wait_for_single_object = wait_for_single_object;
+        state.close_handle = close_handle;
+        state.worker_thread = ptr::null_mut();
+        state.pending_io = PendingIo {
+            overlapped: ptr::null_mut(),
+            handle: ptr::null_mut(),
+            buffer: ptr::null_mut(),
+            length: 0,
+            is_write: false,
+        };
     }
-    let payload_abi = payload_alloc.cast::<ProbeDispatch>();
     ptr::write(
-        payload_abi,
-        ProbeDispatch {
-            write: Some(probe_write_stdout),
-            read: Some(probe_read_stdin),
-            exit: Some(probe_exit),
-        },
+        payload_alloc.cast::<PalAbiTable>(),
+        pal_abi_stubs::for_probe(
+            probe_read,
+            probe_write,
+            exit_process,
+        ),
     );
     let entry: ProbeEntryFn = core::mem::transmute(payload_code);
-    entry();
-
-    free(payload_alloc);
-    state_mut().payload_alloc = ptr::null_mut();
-    70
+    loop {
+        let entry_result = entry();
+        if entry_result != 1 {
+            free(payload_alloc);
+            return entry_result;
+        }
+        let state = state_ptr();
+        let thread = ptr::addr_of!((*state).worker_thread).read();
+        let wait = ptr::addr_of!((*state).wait_for_single_object).read();
+        let close = ptr::addr_of!((*state).close_handle).read();
+        let (Some(wait), Some(close)) = (wait, close) else {
+            free(payload_alloc);
+            return 16;
+        };
+        if thread.is_null() || wait(thread, INFINITE) != WAIT_OBJECT_0 {
+            if !thread.is_null() {
+                close(thread);
+            }
+            free(payload_alloc);
+            return 16;
+        }
+        close(thread);
+        ptr::addr_of_mut!((*state).worker_thread).write(ptr::null_mut());
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
-type ProbeEntryFn = unsafe extern "win64" fn();
+type ProbeEntryFn = unsafe extern "win64" fn() -> i32;
 #[cfg(target_arch = "aarch64")]
-type ProbeEntryFn = unsafe extern "C" fn();
+type ProbeEntryFn = unsafe extern "C" fn() -> i32;
 
 #[cfg(target_arch = "x86_64")]
 #[link_section = ".text.windows_platform_entry"]
