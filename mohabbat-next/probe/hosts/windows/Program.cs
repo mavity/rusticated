@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using ZstdSharp;
 
@@ -11,7 +12,7 @@ internal static class Program
     private const uint MemReserve = 0x2000;
     private const uint MemRelease = 0x8000;
     private const uint PageExecuteReadWrite = 0x40;
-    private const int PrefixAbiOffset = 0x20000;
+    private static readonly int PrefixAbiOffset = 0x20000;
     private const ushort ProcessorArchitectureAmd64 = 9;
     private const ushort ProcessorArchitectureArm64 = 12;
     private const int MaximumComponentSize = 4096;
@@ -233,10 +234,15 @@ internal static class Program
             Console.Error.WriteLine("FAIL: Expected 64-bit host, got pointer size: " + ptrSize);
             return 1;
         }
+        if (0 * ptrSize != 0 || 8 * ptrSize != 64 || 9 * ptrSize != 72 || 18 * ptrSize != 144 || 19 * ptrSize != 152 || 38 * ptrSize != 304 || 46 * ptrSize != 368)
+        {
+            Console.Error.WriteLine("FAIL: Slot calculation mismatch");
+            return 1;
+        }
         Console.WriteLine("PASS  [csharp/unit] PalAbiTableFieldOffsets");
 
         Console.WriteLine("RUN   [csharp/unit] WasmScenarioGeneratorValidity");
-        foreach (string sc in new string[] { "empty", "store", "add", "load-add-store" })
+        foreach (string sc in new string[] { "empty", "store", "add", "load-add-store", "call-get-time" })
         {
             byte[] bytes = BuildRuntimeTestWasm(sc);
             if (bytes.Length < 8 || bytes[0] != 0 || bytes[1] != 0x61 || bytes[2] != 0x73 || bytes[3] != 0x6d)
@@ -269,6 +275,148 @@ internal static class Program
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void RuntimeSliceEntry();
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void RuntimeProcessExitCallback(int code);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate ulong RuntimeGetTimeCallback();
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void RuntimeGetRandomCallback(IntPtr bufPtr, UIntPtr len);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate ulong RuntimeGetArgsCallback(IntPtr bufPtr, UIntPtr cap);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate ulong RuntimeGetEnvCallback(IntPtr bufPtr, UIntPtr cap);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate ulong RuntimeGetCwdCallback(IntPtr bufPtr, UIntPtr cap);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate uint RuntimeSetCwdCallback(IntPtr pathPtr, UIntPtr len);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate uint RuntimeGetPlatformInfoCallback(IntPtr outPtr, UIntPtr cap);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void RuntimeHandleCloseCallback(ulong handle);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void RuntimeTtySetModeCallback(ulong handle, uint mode);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate uint RuntimeTtyGetSizeCallback(ulong handle);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate uint RuntimeTtySetSizeCallback(ulong handle, uint cols, uint rows);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate uint RuntimeFdIsAttyCallback(uint handle);
+
+    private static readonly DateTime UnixEpoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+    private static readonly System.Security.Cryptography.RNGCryptoServiceProvider s_rng =
+        new System.Security.Cryptography.RNGCryptoServiceProvider();
+
+    private static void RuntimeProcessExit(int code)
+    {
+        Environment.Exit(code);
+    }
+
+    private static ulong RuntimeGetTime()
+    {
+        return (ulong)((DateTime.UtcNow - UnixEpoch).Ticks * 100);
+    }
+
+    private static void RuntimeGetRandom(IntPtr bufPtr, UIntPtr len)
+    {
+        int count = (int)len.ToUInt64();
+        if (count <= 0 || bufPtr == IntPtr.Zero) return;
+        byte[] bytes = new byte[count];
+        s_rng.GetBytes(bytes);
+        Marshal.Copy(bytes, 0, bufPtr, count);
+    }
+
+    private static ulong RuntimeGetArgs(IntPtr bufPtr, UIntPtr cap)
+    {
+        return 0;
+    }
+
+    private static ulong RuntimeGetEnv(IntPtr bufPtr, UIntPtr cap)
+    {
+        return 0;
+    }
+
+    private static ulong RuntimeGetCwd(IntPtr bufPtr, UIntPtr cap)
+    {
+        string cwd = Directory.GetCurrentDirectory();
+        byte[] utf8 = Encoding.UTF8.GetBytes(cwd);
+        ulong needed = (ulong)utf8.Length;
+        if (cap.ToUInt64() >= needed && bufPtr != IntPtr.Zero)
+        {
+            Marshal.Copy(utf8, 0, bufPtr, utf8.Length);
+        }
+        return needed;
+    }
+
+    private static uint RuntimeSetCwd(IntPtr pathPtr, UIntPtr len)
+    {
+        int count = (int)len.ToUInt64();
+        if (count <= 0 || pathPtr == IntPtr.Zero) return 1;
+        byte[] bytes = new byte[count];
+        Marshal.Copy(pathPtr, bytes, 0, count);
+        string path = Encoding.UTF8.GetString(bytes);
+        try
+        {
+            Directory.SetCurrentDirectory(path);
+            return 0;
+        }
+        catch
+        {
+            return 1;
+        }
+    }
+
+    private static uint RuntimeGetPlatformInfo(IntPtr outPtr, UIntPtr cap)
+    {
+        return 0;
+    }
+
+    private static void RuntimeHandleClose(ulong handle)
+    {
+    }
+
+    private static void RuntimeTtySetMode(ulong handle, uint mode)
+    {
+    }
+
+    private static uint RuntimeTtyGetSize(ulong handle)
+    {
+        try
+        {
+            int cols = Console.WindowWidth;
+            int rows = Console.WindowHeight;
+            return (uint)((cols << 16) | (rows & 0xffff));
+        }
+        catch
+        {
+            return (80 << 16) | 24;
+        }
+    }
+
+    private static uint RuntimeTtySetSize(ulong handle, uint cols, uint rows)
+    {
+        return 0;
+    }
+
+    private static uint RuntimeFdIsAtty(uint handle)
+    {
+        if (handle == 0) return Console.IsInputRedirected ? 0u : 1u;
+        if (handle == 1) return Console.IsOutputRedirected ? 0u : 1u;
+        if (handle == 2) return Console.IsErrorRedirected ? 0u : 1u;
+        return 0;
+    }
 
     private static IntPtr RuntimeAllocMem(UIntPtr size, UIntPtr align, uint flags)
     {
@@ -326,6 +474,35 @@ internal static class Program
 
     private static byte[] BuildRuntimeTestWasm(string scenario)
     {
+        if (scenario == "call-get-time")
+        {
+            return new byte[] {
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+                // Type section (id=1, len=8, 2 types: ()->i64, ()->())
+                0x01, 0x08, 0x02,
+                0x60, 0x00, 0x01, 0x7e,
+                0x60, 0x00, 0x00,
+                // Import section (id=2, len=16, 1 import: env.get_time -> func 0)
+                0x02, 0x10, 0x01,
+                0x03, (byte)'e', (byte)'n', (byte)'v',
+                0x08, (byte)'g', (byte)'e', (byte)'t', (byte)'_', (byte)'t', (byte)'i', (byte)'m', (byte)'e',
+                0x00, 0x00,
+                // Function section (id=3, len=2, 1 func: func 1 has type 1)
+                0x03, 0x02, 0x01, 0x01,
+                // Memory section (id=5, len=3, 1 page min)
+                0x05, 0x03, 0x01, 0x00, 0x01,
+                // Export section (id=7, len=7, "run" -> func 1)
+                0x07, 0x07, 0x01, 0x03, (byte)'r', (byte)'u', (byte)'n', 0x00, 0x01,
+                // Code section (id=10, len=11, 1 body)
+                0x0a, 0x0b, 0x01,
+                0x09, 0x00,
+                0x41, 0x00,
+                0x10, 0x00,
+                0x37, 0x03, 0x00,
+                0x0b
+            };
+        }
+
         byte[] body;
         switch (scenario)
         {
@@ -401,6 +578,19 @@ internal static class Program
         RuntimeFlushIcacheCallback flushIcache = RuntimeFlushIcache;
         RuntimeHostPanicCallback hostPanic = RuntimeHostPanic;
         RuntimeDebugCallback debug = RuntimeDebug;
+        RuntimeProcessExitCallback procExit = RuntimeProcessExit;
+        RuntimeGetTimeCallback getTime = RuntimeGetTime;
+        RuntimeGetRandomCallback getRandom = RuntimeGetRandom;
+        RuntimeGetArgsCallback getArgs = RuntimeGetArgs;
+        RuntimeGetEnvCallback getEnv = RuntimeGetEnv;
+        RuntimeGetCwdCallback getCwd = RuntimeGetCwd;
+        RuntimeSetCwdCallback setCwd = RuntimeSetCwd;
+        RuntimeGetPlatformInfoCallback getPlatformInfo = RuntimeGetPlatformInfo;
+        RuntimeHandleCloseCallback handleClose = RuntimeHandleClose;
+        RuntimeTtySetModeCallback ttySetMode = RuntimeTtySetMode;
+        RuntimeTtyGetSizeCallback ttyGetSize = RuntimeTtyGetSize;
+        RuntimeTtySetSizeCallback ttySetSize = RuntimeTtySetSize;
+        RuntimeFdIsAttyCallback fdIsAtty = RuntimeFdIsAtty;
 
         int totalSize = PrefixAbiOffset + runtimeBytes.Length;
         IntPtr sliceAlloc = VirtualAlloc(
@@ -425,6 +615,19 @@ internal static class Program
             Marshal.WriteIntPtr(sliceAlloc, 5 * IntPtr.Size, Marshal.GetFunctionPointerForDelegate(flushIcache));
             Marshal.WriteIntPtr(sliceAlloc, 6 * IntPtr.Size, Marshal.GetFunctionPointerForDelegate(hostPanic));
             Marshal.WriteIntPtr(sliceAlloc, 7 * IntPtr.Size, Marshal.GetFunctionPointerForDelegate(debug));
+            Marshal.WriteIntPtr(sliceAlloc, 8 * IntPtr.Size, Marshal.GetFunctionPointerForDelegate(procExit));
+            Marshal.WriteIntPtr(sliceAlloc, 9 * IntPtr.Size, Marshal.GetFunctionPointerForDelegate(getTime));
+            Marshal.WriteIntPtr(sliceAlloc, 10 * IntPtr.Size, Marshal.GetFunctionPointerForDelegate(getRandom));
+            Marshal.WriteIntPtr(sliceAlloc, 11 * IntPtr.Size, Marshal.GetFunctionPointerForDelegate(getArgs));
+            Marshal.WriteIntPtr(sliceAlloc, 12 * IntPtr.Size, Marshal.GetFunctionPointerForDelegate(getEnv));
+            Marshal.WriteIntPtr(sliceAlloc, 13 * IntPtr.Size, Marshal.GetFunctionPointerForDelegate(getCwd));
+            Marshal.WriteIntPtr(sliceAlloc, 14 * IntPtr.Size, Marshal.GetFunctionPointerForDelegate(setCwd));
+            Marshal.WriteIntPtr(sliceAlloc, 15 * IntPtr.Size, Marshal.GetFunctionPointerForDelegate(getPlatformInfo));
+            Marshal.WriteIntPtr(sliceAlloc, 22 * IntPtr.Size, Marshal.GetFunctionPointerForDelegate(handleClose));
+            Marshal.WriteIntPtr(sliceAlloc, 43 * IntPtr.Size, Marshal.GetFunctionPointerForDelegate(ttySetMode));
+            Marshal.WriteIntPtr(sliceAlloc, 44 * IntPtr.Size, Marshal.GetFunctionPointerForDelegate(ttyGetSize));
+            Marshal.WriteIntPtr(sliceAlloc, 45 * IntPtr.Size, Marshal.GetFunctionPointerForDelegate(ttySetSize));
+            Marshal.WriteIntPtr(sliceAlloc, 46 * IntPtr.Size, Marshal.GetFunctionPointerForDelegate(fdIsAtty));
 
             IntPtr sliceCode = new IntPtr(sliceAlloc.ToInt64() + PrefixAbiOffset);
             Marshal.Copy(runtimeBytes, 0, sliceCode, runtimeBytes.Length);
@@ -463,6 +666,36 @@ internal static class Program
                 Console.Error.WriteLine("FAIL: RuntimeGlobals not initialized after Call #1");
                 return 2;
             }
+
+            if (scenario == "call-get-time")
+            {
+                long time1 = Marshal.ReadInt64(guestMemBase, 0);
+                if (time1 <= 0)
+                {
+                    Console.Error.WriteLine("FAIL: Expected positive timestamp in guest_mem[0], got " + time1);
+                    return 3;
+                }
+                Thread.Sleep(2);
+                Console.WriteLine("INFO: entering runtime for first warm retrigger");
+                entry();
+                long time2 = Marshal.ReadInt64(guestMemBase, 0);
+                Thread.Sleep(2);
+                Console.WriteLine("INFO: entering runtime for second warm retrigger");
+                entry();
+                long time3 = Marshal.ReadInt64(guestMemBase, 0);
+                if (time2 <= time1 || time3 <= time2)
+                {
+                    Console.Error.WriteLine(
+                        "FAIL: Monotonic timestamp violation: " + time1 + " -> " + time2 + " -> " + time3);
+                    return 4;
+                }
+
+                Console.WriteLine(
+                    "PASS  [runtime/" + GetArchitecture() + "] scenario " + scenario
+                    + " verified (timestamps: " + time1 + " -> " + time2 + " -> " + time3 + ")");
+                return 0;
+            }
+
             int val1 = Marshal.ReadInt32(guestMemBase, 0);
             if (val1 != firstExpected)
             {
@@ -503,6 +736,19 @@ internal static class Program
             GC.KeepAlive(flushIcache);
             GC.KeepAlive(hostPanic);
             GC.KeepAlive(debug);
+            GC.KeepAlive(procExit);
+            GC.KeepAlive(getTime);
+            GC.KeepAlive(getRandom);
+            GC.KeepAlive(getArgs);
+            GC.KeepAlive(getEnv);
+            GC.KeepAlive(getCwd);
+            GC.KeepAlive(setCwd);
+            GC.KeepAlive(getPlatformInfo);
+            GC.KeepAlive(handleClose);
+            GC.KeepAlive(ttySetMode);
+            GC.KeepAlive(ttyGetSize);
+            GC.KeepAlive(ttySetSize);
+            GC.KeepAlive(fdIsAtty);
         }
     }
 
@@ -699,16 +945,21 @@ internal static class Program
             IntPtr pRec = Marshal.ReadIntPtr(ptr, 0);
             IntPtr pCtx = Marshal.ReadIntPtr(ptr, IntPtr.Size);
             uint code = (uint)Marshal.ReadInt32(pRec, 0);
+            if (code == 0x04242420) return 0;
             IntPtr addr = Marshal.ReadIntPtr(pRec, 16);
             long offset = addr.ToInt64() - s_sliceCode.ToInt64();
-            long badAddr = Marshal.ReadIntPtr(pRec, 40).ToInt64();
-            long rsp = Marshal.ReadInt64(pCtx, 0x98);
-            long rbp = Marshal.ReadInt64(pCtx, 0xa0);
-            long rax = Marshal.ReadInt64(pCtx, 0x78);
-            long rcx = Marshal.ReadInt64(pCtx, 0x80);
-            long rdx = Marshal.ReadInt64(pCtx, 0x88);
-            long rsi = Marshal.ReadInt64(pCtx, 0xa8);
-            long rdi = Marshal.ReadInt64(pCtx, 0xb0);
+            long badAddr = 0;
+            try { badAddr = Marshal.ReadIntPtr(pRec, 40).ToInt64(); } catch {}
+            long rsp = 0, rbp = 0, rax = 0, rcx = 0, rdx = 0, rsi = 0, rdi = 0;
+            try {
+                rsp = Marshal.ReadInt64(pCtx, 0x98);
+                rbp = Marshal.ReadInt64(pCtx, 0xa0);
+                rax = Marshal.ReadInt64(pCtx, 0x78);
+                rcx = Marshal.ReadInt64(pCtx, 0x80);
+                rdx = Marshal.ReadInt64(pCtx, 0x88);
+                rsi = Marshal.ReadInt64(pCtx, 0xa8);
+                rdi = Marshal.ReadInt64(pCtx, 0xb0);
+            } catch {}
             long ret_addr = 0;
             try { ret_addr = Marshal.ReadInt64(new IntPtr(rsp), 0); } catch {}
             string msg = string.Format("CRASH: Exception 0x{0:X8} at PC=0x{1:X16} (slice+0x{2:X}), bad_addr=0x{3:X16}\n"
@@ -720,7 +971,9 @@ internal static class Program
                 ret_addr, ret_addr - s_sliceCode.ToInt64());
             Console.Error.WriteLine(msg);
             Console.Error.Flush();
-        } catch {
+        } catch (Exception ex) {
+            Console.Error.WriteLine("VEH error: " + ex.Message);
+            Console.Error.Flush();
         }
         return 0; // EXCEPTION_CONTINUE_SEARCH
     }

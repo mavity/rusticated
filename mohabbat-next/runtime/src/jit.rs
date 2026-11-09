@@ -86,6 +86,55 @@ fn functype_to_sig(ft: &FuncType, call_conv: CallConv) -> Signature {
     sig
 }
 
+pub fn import_name_to_abi_offset(name: &str) -> Option<usize> {
+    use crate::abi::PalAbiTable;
+    use core::mem::offset_of;
+    match name {
+        "host_panic" => Some(offset_of!(PalAbiTable, host_panic)),
+        "rusticated_debug" => Some(offset_of!(PalAbiTable, rusticated_debug)),
+        "process_exit" => Some(offset_of!(PalAbiTable, process_exit)),
+        "get_time" => Some(offset_of!(PalAbiTable, get_time)),
+        "get_random" => Some(offset_of!(PalAbiTable, get_random)),
+        "get_args" => Some(offset_of!(PalAbiTable, get_args)),
+        "get_env" => Some(offset_of!(PalAbiTable, get_env)),
+        "get_cwd" => Some(offset_of!(PalAbiTable, get_cwd)),
+        "set_cwd" => Some(offset_of!(PalAbiTable, set_cwd)),
+        "get_platform_info" => Some(offset_of!(PalAbiTable, get_platform_info)),
+        "timer_set" => Some(offset_of!(PalAbiTable, timer_set)),
+        "cancel" => Some(offset_of!(PalAbiTable, cancel)),
+        "read" => Some(offset_of!(PalAbiTable, read)),
+        "write" => Some(offset_of!(PalAbiTable, write)),
+        "seek" => Some(offset_of!(PalAbiTable, seek)),
+        "handle_truncate" => Some(offset_of!(PalAbiTable, handle_truncate)),
+        "handle_close" => Some(offset_of!(PalAbiTable, handle_close)),
+        "path_open" => Some(offset_of!(PalAbiTable, path_open)),
+        "dir_read" => Some(offset_of!(PalAbiTable, dir_read)),
+        "path_stat" => Some(offset_of!(PalAbiTable, path_stat)),
+        "path_link" => Some(offset_of!(PalAbiTable, path_link)),
+        "path_symlink" => Some(offset_of!(PalAbiTable, path_symlink)),
+        "path_readlink" => Some(offset_of!(PalAbiTable, path_readlink)),
+        "path_chmod" => Some(offset_of!(PalAbiTable, path_chmod)),
+        "path_set_times" => Some(offset_of!(PalAbiTable, path_set_times)),
+        "path_remove" => Some(offset_of!(PalAbiTable, path_remove)),
+        "path_mkdir" => Some(offset_of!(PalAbiTable, path_mkdir)),
+        "path_rename" => Some(offset_of!(PalAbiTable, path_rename)),
+        "net_open" => Some(offset_of!(PalAbiTable, net_open)),
+        "net_accept" => Some(offset_of!(PalAbiTable, net_accept)),
+        "net_lookup" => Some(offset_of!(PalAbiTable, net_lookup)),
+        "net_cert_verify" => Some(offset_of!(PalAbiTable, net_cert_verify)),
+        "process_spawn" => Some(offset_of!(PalAbiTable, process_spawn)),
+        "process_pipe" => Some(offset_of!(PalAbiTable, process_pipe)),
+        "process_wait" => Some(offset_of!(PalAbiTable, process_wait)),
+        "process_signal" => Some(offset_of!(PalAbiTable, process_signal)),
+        "signal_wait" => Some(offset_of!(PalAbiTable, signal_wait)),
+        "tty_set_mode" => Some(offset_of!(PalAbiTable, tty_set_mode)),
+        "tty_get_size" => Some(offset_of!(PalAbiTable, tty_get_size)),
+        "tty_set_size" => Some(offset_of!(PalAbiTable, tty_set_size)),
+        "fd_isatty" => Some(offset_of!(PalAbiTable, fd_isatty)),
+        _ => None,
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 pub type ConcreteTargetIsa = cranelift_codegen::isa::x64::X64Backend;
 #[cfg(target_arch = "aarch64")]
@@ -219,6 +268,7 @@ pub unsafe fn compile_and_initialize_wasm() {
 
     let mut types: Vec<FuncType> = Vec::new();
     let mut func_type_indices: Vec<u32> = Vec::new();
+    let mut imported_func_names: Vec<&str> = Vec::new();
     let mut num_imported_funcs: u32 = 0;
     let mut run_export_func_idx: Option<u32> = None;
     let mut initial_mem_pages: usize = 1;
@@ -241,6 +291,7 @@ pub unsafe fn compile_and_initialize_wasm() {
                 for imports in reader {
                     if let Ok(Imports::Single(_, imp)) = imports {
                         if let wasmparser::TypeRef::Func(type_idx) = imp.ty {
+                            imported_func_names.push(imp.name);
                             func_type_indices.push(type_idx);
                             num_imported_funcs += 1;
                         }
@@ -376,8 +427,16 @@ pub unsafe fn compile_and_initialize_wasm() {
     (host.rusticated_debug)(2000);
 
     // 3. Pack compiled functions into a contiguous RW JIT arena & patch relocations
+    let mut import_offsets: Vec<usize> = Vec::with_capacity(num_imported_funcs as usize);
     let mut func_offsets: Vec<usize> = Vec::with_capacity(compiled_blobs.len());
     let mut total_code_size: usize = 0;
+
+    for _ in 0..num_imported_funcs {
+        total_code_size = (total_code_size + 15) & !15;
+        import_offsets.push(total_code_size);
+        total_code_size += 32;
+    }
+
     for blob in &compiled_blobs {
         total_code_size = (total_code_size + 15) & !15;
         func_offsets.push(total_code_size);
@@ -395,35 +454,67 @@ pub unsafe fn compile_and_initialize_wasm() {
         (host.host_panic)(b"jit code allocation failed".as_ptr(), 26);
     }
 
+    // Emit trampolines for imported PAL functions
+    let abi_ptr = host as *const _ as *const u8;
+    for (idx, &name) in imported_func_names.iter().enumerate() {
+        let tramp = code_base.add(import_offsets[idx]);
+        let slot_off = import_name_to_abi_offset(name).unwrap_or_else(|| {
+            (host.host_panic)(b"unsupported import".as_ptr(), 18);
+        });
+        let slot_addr = unsafe { abi_ptr.add(slot_off) };
+
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::ptr::write_unaligned(tramp.cast::<u32>(), 0x5800_0090); // ldr x16, [pc, #16]
+            core::ptr::write_unaligned(tramp.add(4).cast::<u32>(), 0xf940_0210); // ldr x16, [x16]
+            core::ptr::write_unaligned(tramp.add(8).cast::<u32>(), 0xd61f_0200); // br x16
+            core::ptr::write_unaligned(tramp.add(12).cast::<u32>(), 0xd503_201f); // nop
+            core::ptr::write_unaligned(tramp.add(16).cast::<u64>(), slot_addr as u64);
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::ptr::copy_nonoverlapping([0x48u8, 0xb8].as_ptr(), tramp, 2); // movabsq $slot_addr, %rax
+            core::ptr::write_unaligned(tramp.add(2).cast::<u64>(), slot_addr as u64);
+            core::ptr::copy_nonoverlapping([0xffu8, 0x20].as_ptr(), tramp.add(10), 2); // jmpq *(%rax)
+        }
+    }
+
     for (i, blob) in compiled_blobs.iter().enumerate() {
         let dst = code_base.add(func_offsets[i]);
         ptr::copy_nonoverlapping(blob.code.as_ptr(), dst, blob.code.len());
     }
     (host.rusticated_debug)(2002);
 
-    // Patch intra-module calls
+    // Patch intra-module and import calls
     for (i, blob) in compiled_blobs.iter().enumerate() {
         let func_ptr = code_base.add(func_offsets[i]);
         let mut next_veneer = 0usize;
         for reloc in &blob.relocs {
-            if reloc.target_func_idx < num_imported_funcs {
-                continue;
-            }
-            let target_local = (reloc.target_func_idx - num_imported_funcs) as usize;
-            let target_addr = code_base.add(func_offsets[target_local]) as isize
-                + (reloc.addend as isize);
+            let target_addr = if reloc.target_func_idx < num_imported_funcs {
+                code_base.add(import_offsets[reloc.target_func_idx as usize]) as isize
+            } else {
+                let target_local = (reloc.target_func_idx - num_imported_funcs) as usize;
+                code_base.add(func_offsets[target_local]) as isize + (reloc.addend as isize)
+            };
             let at = func_ptr.add(reloc.offset as usize);
 
             match reloc.kind {
+                Reloc::Abs8 => {
+                    ptr::write_unaligned(at.cast::<u64>(), target_addr as u64);
+                }
+                Reloc::Abs4 => {
+                    ptr::write_unaligned(at.cast::<u32>(), target_addr as u32);
+                }
                 Reloc::X86PCRel4 | Reloc::X86CallPCRel4 | Reloc::X86CallPLTRel4 => {
-                    let delta = target_addr - (at as isize);
+                    let delta = target_addr - (at as isize) - 4;
                     if let Ok( disp32 ) = i32::try_from(delta) {
                         ptr::write_unaligned(at.cast::<i32>(), disp32);
                     } else {
                         let veneer = func_ptr.add(blob.code.len() + next_veneer * VENEER_SIZE);
                         next_veneer += 1;
                         ptr::copy_nonoverlapping([0xffu8, 0x25, 0, 0, 0, 0].as_ptr(), veneer, 6);
-                        ptr::write_unaligned(veneer.add(6).cast::<u64>(), (target_addr + 4) as u64);
+                        ptr::write_unaligned(veneer.add(6).cast::<u64>(), target_addr as u64);
                         let v_disp = i32::try_from((veneer as isize) - (at as isize) - 4).unwrap();
                         ptr::write_unaligned(at.cast::<i32>(), v_disp);
                     }
@@ -431,10 +522,11 @@ pub unsafe fn compile_and_initialize_wasm() {
                 Reloc::Arm64Call => {
                     let diff = (target_addr - (at as isize)) >> 2;
                     let iptr = at.cast::<u32>();
+                    let before_inst = ptr::read_unaligned(iptr);
                     if (diff >> 25 == -1) || (diff >> 25 == 0) {
                         let imm26 = (diff as u32) & 0x03ff_ffff;
-                        let inst = ptr::read_unaligned(iptr);
-                        ptr::write_unaligned(iptr, inst | imm26);
+                        let inst = (before_inst & 0xfc00_0000) | imm26;
+                        ptr::write_unaligned(iptr, inst);
                     } else {
                         let veneer = func_ptr.add(blob.code.len() + next_veneer * VENEER_SIZE);
                         next_veneer += 1;
@@ -443,8 +535,8 @@ pub unsafe fn compile_and_initialize_wasm() {
                         ptr::write_unaligned(veneer.add(8).cast::<u64>(), target_addr as u64);
                         let v_diff = ((veneer as isize) - (at as isize)) >> 2;
                         let imm26 = (v_diff as u32) & 0x03ff_ffff;
-                        let inst = ptr::read_unaligned(iptr);
-                        ptr::write_unaligned(iptr, inst | imm26);
+                        let inst = (before_inst & 0xfc00_0000) | imm26;
+                        ptr::write_unaligned(iptr, inst);
                     }
                 }
                 _ => {}
@@ -848,7 +940,7 @@ pub fn translate_wasm_body_with_mem(
                 let ext_func = builder.import_function(ir::ExtFuncData {
                     name: ExternalName::User(user_name_ref),
                     signature: sig_ref,
-                    colocated: false,
+                    colocated: true,
                     patchable: false,
                 });
                 let args_start = val_stack.len() - num_args;
