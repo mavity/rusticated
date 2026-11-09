@@ -124,6 +124,9 @@ func TestRuntimeURootProvidersCompleteFlagsAndPaths(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "input.bin"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(root, "kappa.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	s := New(ShellOptions{WorkingDir: root, DisableAI: true})
 	defer s.Close()
 
@@ -139,12 +142,16 @@ func TestRuntimeURootProvidersCompleteFlagsAndPaths(t *testing.T) {
 	}
 	assertCandidate("cat -", "-u")
 	assertCandidate("cat ./input", "input.bin")
+	assertCandidate("cat in", "input.bin")
+	assertCandidate("ls ka", "kappa.txt")
 	assertCandidate("cd tar", "target-dir")
+	assertCandidate("cp ka", "kappa.txt")
 	assertCandidate("cp --", "--reflink")
 	assertCandidate("cp --target-directory ", "target-dir")
 	assertCandidate("tar -f ", "input.bin")
-	if got := s.completeInput("wc in", len([]rune("wc in"))); len(got) != 0 {
-		t.Fatalf("ordinary positional argument unexpectedly suggested paths: %#v", got)
+	assertCandidate("wc in", "input.bin")
+	if got := s.completeInput("sleep 1", len([]rune("sleep 1"))); len(got) != 0 {
+		t.Fatalf("non-path positional argument unexpectedly suggested paths: %#v", got)
 	}
 }
 

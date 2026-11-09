@@ -202,22 +202,22 @@ var urootRegistry = map[string]commandRunner{
 
 func init() {
 	commandSyntaxRegistry["cat"] = func() runtimeFlagSet {
-		return standardFlagSet(cat.NewFlagSetForCompletion(), true)
+		return standardPathFlagSet(cat.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["base64"] = func() runtimeFlagSet {
-		return standardFlagSet(base64cmd.NewFlagSetForCompletion(), true)
+		return standardPathFlagSet(base64cmd.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["cp"] = func() runtimeFlagSet {
-		return pflagSet(cpcmd.NewFlagSetForCompletion())
+		return pflagPathSet(cpcmd.NewFlagSetForCompletion())
 	}
 	commandSyntaxRegistry["ls"] = func() runtimeFlagSet {
-		return standardFlagSet(lscmd.NewFlagSetForCompletion(), true)
+		return standardPathFlagSet(lscmd.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["basename"] = func() runtimeFlagSet {
 		return standardFlagSet(basename.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["dirname"] = func() runtimeFlagSet {
-		return standardFlagSet(dirname.NewFlagSetForCompletion(), true)
+		return standardPathFlagSet(dirname.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["yes"] = func() runtimeFlagSet {
 		return standardFlagSet(yes.NewFlagSetForCompletion(), true)
@@ -235,40 +235,40 @@ func init() {
 		return standardFlagSet(uptimecmd.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["head"] = func() runtimeFlagSet {
-		return standardFlagSet(head.NewFlagSetForCompletion(), true)
+		return standardPathFlagSet(head.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["tail"] = func() runtimeFlagSet {
-		return standardFlagSet(tail.NewFlagSetForCompletion(), true)
+		return standardPathFlagSet(tail.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["wc"] = func() runtimeFlagSet {
-		return standardFlagSet(wc.NewFlagSetForCompletion(), true)
+		return standardPathFlagSet(wc.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["strings"] = func() runtimeFlagSet {
-		return standardFlagSet(stringscmd.NewFlagSetForCompletion(), true)
+		return standardPathFlagSet(stringscmd.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["seq"] = func() runtimeFlagSet {
 		return standardFlagSet(seq.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["hexdump"] = func() runtimeFlagSet {
-		return standardFlagSet(hexdump.NewFlagSetForCompletion(), true)
+		return standardPathFlagSet(hexdump.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["cmp"] = func() runtimeFlagSet {
-		return standardFlagSet(cmp.NewFlagSetForCompletion(), true)
+		return standardPathFlagSet(cmp.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["comm"] = func() runtimeFlagSet {
-		return standardFlagSet(comm.NewFlagSetForCompletion(), true)
+		return standardPathFlagSet(comm.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["sort"] = func() runtimeFlagSet {
-		return standardFlagSet(sort.NewFlagSetForCompletion(), true)
+		return standardPathFlagSet(sort.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["uniq"] = func() runtimeFlagSet {
-		return standardFlagSet(uniq.NewFlagSetForCompletion(), true)
+		return standardPathFlagSet(uniq.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["tr"] = func() runtimeFlagSet {
 		return standardFlagSet(tr.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["tee"] = func() runtimeFlagSet {
-		return standardFlagSet(tee.NewFlagSetForCompletion(), true)
+		return standardPathFlagSet(tee.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["time"] = func() runtimeFlagSet {
 		return standardFlagSet(timecmd.NewFlagSetForCompletion(), true)
@@ -283,19 +283,19 @@ func init() {
 		return standardFlagSet(hostname.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["readlink"] = func() runtimeFlagSet {
-		return standardFlagSet(readlink.NewFlagSetForCompletion(), true)
+		return standardPathFlagSet(readlink.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["realpath"] = func() runtimeFlagSet {
-		return standardFlagSet(realpath.NewFlagSetForCompletion(), true)
+		return standardPathFlagSet(realpath.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["rm"] = func() runtimeFlagSet {
-		return standardFlagSet(rm.NewFlagSetForCompletion(), true)
+		return standardPathFlagSet(rm.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["mkdir"] = func() runtimeFlagSet {
-		return standardFlagSet(mkdir.NewFlagSetForCompletion(), true)
+		return standardPathFlagSet(mkdir.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["md5sum"] = func() runtimeFlagSet {
-		return standardFlagSet(md5sum.NewFlagSetForCompletion(), true)
+		return standardPathFlagSet(md5sum.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["id"] = func() runtimeFlagSet {
 		return standardFlagSet(idcmd.NewFlagSetForCompletion(), true)
@@ -307,10 +307,10 @@ func init() {
 		return standardFlagSet(mktemp.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["truncate"] = func() runtimeFlagSet {
-		return standardFlagSet(truncate.NewFlagSetForCompletion(), true)
+		return standardPathFlagSet(truncate.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["touch"] = func() runtimeFlagSet {
-		return standardFlagSet(touch.NewFlagSetForCompletion(), true)
+		return standardPathFlagSet(touch.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["free"] = func() runtimeFlagSet {
 		return standardFlagSet(freecmd.NewFlagSetForCompletion(), true)
@@ -322,16 +322,16 @@ func init() {
 		return standardFlagSet(date.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["ln"] = func() runtimeFlagSet {
-		return standardFlagSet(ln.NewFlagSetForCompletion(), true)
+		return standardPathFlagSet(ln.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["mv"] = func() runtimeFlagSet {
-		return standardFlagSet(mv.NewFlagSetForCompletion(), true)
+		return standardPathFlagSet(mv.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["gpgv"] = func() runtimeFlagSet {
-		return standardFlagSet(gpgv.NewFlagSetForCompletion(), true)
+		return standardPathFlagSet(gpgv.NewFlagSetForCompletion(), true)
 	}
 	commandSyntaxRegistry["tar"] = func() runtimeFlagSet {
-		return standardFlagSet(tarcmd.NewFlagSetForCompletion(), true)
+		return standardPathFlagSet(tarcmd.NewFlagSetForCompletion(), true)
 	}
 }
 
