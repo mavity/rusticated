@@ -136,6 +136,48 @@ func (r *Runner) RunStage3ArtifactIntegrityTests() {
 		}
 		return nil
 	})
+
+	r.RunTest("artifact/runtime-slices", "zero-relocs-and-clean-sections", func() error {
+		compDir := filepath.Join(r.BuildDir, "components")
+		slices := []string{"runtime-aarch64", "runtime-x86_64"}
+		relocRe := regexp.MustCompile(`(?m)^\s*0x[0-9a-fA-F]+\s+`)
+		badSecRe := regexp.MustCompile(`(?m)\.(data|bss|got|tdata|tbss)\b`)
+
+		for _, name := range slices {
+			elfPath := filepath.Join(compDir, name+".elf")
+			if _, err := os.Stat(elfPath); err != nil {
+				return fmt.Errorf("missing runtime slice ELF %s: %w", elfPath, err)
+			}
+
+			// 1. Verify 0 relocations
+			relocOut, err := exec.Command("llvm-readobj", "--relocations", elfPath).Output()
+			if err != nil {
+				return fmt.Errorf("llvm-readobj relocations check on %s: %w", elfPath, err)
+			}
+			if relocRe.Match(relocOut) {
+				return fmt.Errorf("runtime slice %s contains relocations", name)
+			}
+
+			// 2. Verify clean sections (no .data, .bss, .got, .tdata, .tbss)
+			secOut, err := exec.Command("llvm-readobj", "--sections", elfPath).Output()
+			if err != nil {
+				return fmt.Errorf("llvm-readobj sections check on %s: %w", elfPath, err)
+			}
+			if badSecRe.Match(secOut) {
+				return fmt.Errorf("runtime slice %s contains disallowed data/bss/got/tls sections", name)
+			}
+
+			// 3. Verify zero undefined symbols
+			nmOut, err := exec.Command("llvm-nm", "--undefined-only", elfPath).Output()
+			if err != nil {
+				return fmt.Errorf("llvm-nm undefined-only check on %s: %w", elfPath, err)
+			}
+			if len(bytes.TrimSpace(nmOut)) > 0 {
+				return fmt.Errorf("runtime slice %s has undefined symbols:\n%s", name, string(nmOut))
+			}
+		}
+		return nil
+	})
 }
 
 func (r *Runner) RunStage3PlatformMatrix() {
