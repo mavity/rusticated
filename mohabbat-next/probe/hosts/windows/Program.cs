@@ -68,6 +68,14 @@ internal static class Program
         {
             return VerifyComponents();
         }
+        if (args.Length == 1 && args[0] == "--unit-test")
+        {
+            return RunUnitTests();
+        }
+        if (args.Length == 2 && args[0] == "--test-runtime")
+        {
+            return RunCraneliftRuntimeTest(args[1]);
+        }
         if (args.Length != 0)
         {
             Console.Error.WriteLine("This executable does not accept arguments.");
@@ -181,6 +189,186 @@ internal static class Program
         }
         Console.WriteLine("Verified all four compressed components.");
         return 0;
+    }
+
+    private static int RunUnitTests()
+    {
+        Console.WriteLine("RUN   [csharp/unit] WindowsPlatformHostLayout");
+        int hostSize = Marshal.SizeOf(typeof(WindowsPlatformHost));
+        if (hostSize != 48)
+        {
+            Console.Error.WriteLine("FAIL: Expected WindowsPlatformHost size 48, got " + hostSize);
+            return 1;
+        }
+        if (PrefixAbiOffset != 0x20000)
+        {
+            Console.Error.WriteLine("FAIL: Expected PrefixAbiOffset 0x20000, got " + PrefixAbiOffset);
+            return 1;
+        }
+        Console.WriteLine("PASS  [csharp/unit] WindowsPlatformHostLayout");
+
+        Console.WriteLine("RUN   [csharp/unit] ArchitectureDetection");
+        string arch = GetArchitecture();
+        if (arch != "x86_64" && arch != "aarch64")
+        {
+            Console.Error.WriteLine("FAIL: Unexpected architecture: " + arch);
+            return 1;
+        }
+        Console.WriteLine("PASS  [csharp/unit] ArchitectureDetection (" + arch + ")");
+
+        Console.WriteLine("RUN   [csharp/unit] EmbeddedZstandardDecompression");
+        if (VerifyComponents() != 0)
+        {
+            return 1;
+        }
+        Console.WriteLine("PASS  [csharp/unit] EmbeddedZstandardDecompression");
+        return 0;
+    }
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate IntPtr RuntimeAllocMemCallback(UIntPtr size, UIntPtr align, uint flags);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int RuntimeProtectMemCallback(IntPtr ptr, UIntPtr size, uint flags);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void RuntimeFreeMemCallback(IntPtr ptr, UIntPtr size);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void RuntimeFlushIcacheCallback(IntPtr ptr, UIntPtr size);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void RuntimeHostPanicCallback(IntPtr msgPtr, UIntPtr msgLen);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void RuntimeSliceEntry();
+
+    private static IntPtr RuntimeAllocMem(UIntPtr size, UIntPtr align, uint flags)
+    {
+        return VirtualAlloc(IntPtr.Zero, size, MemCommit | MemReserve, PageExecuteReadWrite);
+    }
+
+    private static int RuntimeProtectMem(IntPtr ptr, UIntPtr size, uint flags)
+    {
+        return 0;
+    }
+
+    private static void RuntimeFreeMem(IntPtr ptr, UIntPtr size)
+    {
+    }
+
+    private static void RuntimeFlushIcache(IntPtr ptr, UIntPtr size)
+    {
+        FlushInstructionCache(GetCurrentProcess(), ptr, size);
+    }
+
+    private static void RuntimeHostPanic(IntPtr msgPtr, UIntPtr msgLen)
+    {
+        string msg = Marshal.PtrToStringAnsi(msgPtr, (int)msgLen.ToUInt64());
+        Console.Error.WriteLine("Runtime slice panicked: " + msg);
+        Environment.Exit(99);
+    }
+
+    private static int RunCraneliftRuntimeTest(string runtimeBinPath)
+    {
+        byte[] runtimeBytes = File.ReadAllBytes(runtimeBinPath);
+        byte[] wasmBytes = new byte[] {
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+            0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00,
+            0x05, 0x03, 0x01, 0x00, 0x01,
+            0x07, 0x07, 0x01, 0x03, (byte)'r', (byte)'u', (byte)'n', 0x00, 0x00,
+            0x0a, 0x11, 0x01,
+            0x0f, 0x00,
+            0x41, 0x00,
+            0x41, 0x00,
+            0x28, 0x02, 0x00,
+            0x41, 0x07,
+            0x6a,
+            0x36, 0x02, 0x00,
+            0x0b
+        };
+
+        GCHandle wasmPin = GCHandle.Alloc(wasmBytes, GCHandleType.Pinned);
+        RuntimeAllocMemCallback allocMem = RuntimeAllocMem;
+        RuntimeProtectMemCallback protectMem = RuntimeProtectMem;
+        RuntimeFreeMemCallback freeMem = RuntimeFreeMem;
+        RuntimeFlushIcacheCallback flushIcache = RuntimeFlushIcache;
+        RuntimeHostPanicCallback hostPanic = RuntimeHostPanic;
+
+        int totalSize = PrefixAbiOffset + runtimeBytes.Length;
+        IntPtr sliceAlloc = VirtualAlloc(
+            IntPtr.Zero,
+            new UIntPtr((uint)totalSize),
+            MemCommit | MemReserve,
+            PageExecuteReadWrite);
+        if (sliceAlloc == IntPtr.Zero)
+        {
+            WriteLastError("VirtualAlloc for Cranelift runtime slice");
+            return 1;
+        }
+
+        try
+        {
+            // Populate PalAbiTable at -0x20000 (sliceAlloc + 0)
+            Marshal.WriteIntPtr(sliceAlloc, 0 * IntPtr.Size, wasmPin.AddrOfPinnedObject());
+            Marshal.WriteIntPtr(sliceAlloc, 1 * IntPtr.Size, new IntPtr(wasmBytes.Length));
+            Marshal.WriteIntPtr(sliceAlloc, 2 * IntPtr.Size, Marshal.GetFunctionPointerForDelegate(allocMem));
+            Marshal.WriteIntPtr(sliceAlloc, 3 * IntPtr.Size, Marshal.GetFunctionPointerForDelegate(protectMem));
+            Marshal.WriteIntPtr(sliceAlloc, 4 * IntPtr.Size, Marshal.GetFunctionPointerForDelegate(freeMem));
+            Marshal.WriteIntPtr(sliceAlloc, 5 * IntPtr.Size, Marshal.GetFunctionPointerForDelegate(flushIcache));
+            Marshal.WriteIntPtr(sliceAlloc, 6 * IntPtr.Size, Marshal.GetFunctionPointerForDelegate(hostPanic));
+
+            IntPtr sliceCode = new IntPtr(sliceAlloc.ToInt64() + PrefixAbiOffset);
+            Marshal.Copy(runtimeBytes, 0, sliceCode, runtimeBytes.Length);
+            FlushInstructionCache(GetCurrentProcess(), sliceCode, new UIntPtr((uint)runtimeBytes.Length));
+
+            RuntimeSliceEntry entry = Marshal.GetDelegateForFunctionPointer<RuntimeSliceEntry>(sliceCode);
+
+            // Call #1 (Cold Entry: compiles WASM with Cranelift + runs "run" once -> mem[0] == 7)
+            entry();
+
+            // Read RuntimeGlobals at -0x10000 (sliceAlloc + 0x10000)
+            IntPtr globalsPtr = new IntPtr(sliceAlloc.ToInt64() + 0x10000);
+            byte initialized = Marshal.ReadByte(globalsPtr, 0);
+            IntPtr guestMemBase = Marshal.ReadIntPtr(globalsPtr, IntPtr.Size);
+            if (initialized != 1 || guestMemBase == IntPtr.Zero)
+            {
+                Console.Error.WriteLine("FAIL: RuntimeGlobals not initialized after Call #1");
+                return 2;
+            }
+            int val1 = Marshal.ReadInt32(guestMemBase, 0);
+            if (val1 != 7)
+            {
+                Console.Error.WriteLine("FAIL: Expected guest_mem[0] == 7 after Call #1, got " + val1);
+                return 3;
+            }
+
+            // Call #2 & #3 (Warm Re-Triggers: immediately invokes compiled "run" -> mem[0] == 14, then 21)
+            entry();
+            int val2 = Marshal.ReadInt32(guestMemBase, 0);
+            entry();
+            int val3 = Marshal.ReadInt32(guestMemBase, 0);
+            if (val2 != 14 || val3 != 21)
+            {
+                Console.Error.WriteLine("FAIL: Expected guest_mem[0] == 14 then 21, got " + val2 + " then " + val3);
+                return 4;
+            }
+
+            Console.WriteLine(
+                "PASS  [runtime/" + GetArchitecture() + "] Cold JIT + 2 Warm Re-Triggers verified (mem[0]: 7 -> 14 -> 21)");
+            return 0;
+        }
+        finally
+        {
+            VirtualFree(sliceAlloc, UIntPtr.Zero, MemRelease);
+            wasmPin.Free();
+            GC.KeepAlive(allocMem);
+            GC.KeepAlive(protectMem);
+            GC.KeepAlive(freeMem);
+            GC.KeepAlive(flushIcache);
+            GC.KeepAlive(hostPanic);
+        }
     }
 
     private static byte[] ReadComponent(string resourceName)

@@ -110,7 +110,7 @@ pub fn create_target_isa() -> OwnedTargetIsa {
 }
 
 #[inline(always)]
-fn default_call_conv() -> CallConv {
+pub fn default_call_conv() -> CallConv {
     #[cfg(target_arch = "x86_64")]
     {
         CallConv::WindowsFastcall
@@ -221,7 +221,9 @@ pub unsafe fn compile_and_initialize_wasm() {
         ctx.clear();
         ctx.func = Function::with_name_signature(UserFuncName::user(0, func_idx), sig);
 
-        if translate_wasm_body(
+        let g_mem_base = g.guest_mem_base;
+        let g_mem_len = g.guest_mem_len;
+        if translate_wasm_body_with_mem(
             body,
             &mut ctx.func,
             &mut fb_ctx,
@@ -229,6 +231,8 @@ pub unsafe fn compile_and_initialize_wasm() {
             &types,
             &func_type_indices,
             call_conv,
+            g_mem_base,
+            g_mem_len,
         )
         .is_err()
         {
@@ -364,7 +368,7 @@ pub unsafe fn compile_and_initialize_wasm() {
     }
 }
 
-fn translate_wasm_body(
+pub fn translate_wasm_body_with_mem(
     body: &wasmparser::FunctionBody<'_>,
     func: &mut Function,
     fb_ctx: &mut FunctionBuilderContext,
@@ -372,6 +376,8 @@ fn translate_wasm_body(
     types: &[FuncType],
     func_type_indices: &[u32],
     call_conv: CallConv,
+    guest_mem_base: *mut u8,
+    guest_mem_len: usize,
 ) -> Result<(), BinaryReaderError> {
     let mut builder = FunctionBuilder::new(func, fb_ctx);
     let entry_block = builder.create_block();
@@ -792,19 +798,19 @@ fn translate_wasm_body(
                 );
             }
             Operator::I32Load { memarg } => {
-                let addr = emit_checked_mem_addr(&mut builder, &mut val_stack, memarg.offset as u32, 4);
+                let addr = emit_checked_mem_addr(&mut builder, &mut val_stack, memarg.offset as u32, 4, guest_mem_base, guest_mem_len);
                 let val = builder.ins().load(I32, MemFlagsData::new(), addr, 0);
                 val_stack.push(val);
             }
             Operator::I64Load { memarg } => {
-                let addr = emit_checked_mem_addr(&mut builder, &mut val_stack, memarg.offset as u32, 8);
+                let addr = emit_checked_mem_addr(&mut builder, &mut val_stack, memarg.offset as u32, 8, guest_mem_base, guest_mem_len);
                 let val = builder.ins().load(I64, MemFlagsData::new(), addr, 0);
                 val_stack.push(val);
             }
             Operator::I32Store { memarg } | Operator::I64Store { memarg } => {
                 let val = val_stack.pop().unwrap();
                 let size = if matches!(op, Operator::I32Store { .. }) { 4 } else { 8 };
-                let addr = emit_checked_mem_addr(&mut builder, &mut val_stack, memarg.offset as u32, size);
+                let addr = emit_checked_mem_addr(&mut builder, &mut val_stack, memarg.offset as u32, size, guest_mem_base, guest_mem_len);
                 builder.ins().store(MemFlagsData::new(), val, addr, 0);
             }
             Operator::I32Eqz | Operator::I64Eqz => {
@@ -958,20 +964,21 @@ fn emit_checked_mem_addr(
     val_stack: &mut Vec<Value>,
     offset: u32,
     access_size: u8,
+    guest_mem_base: *mut u8,
+    guest_mem_len: usize,
 ) -> Value {
     let index32 = val_stack.pop().unwrap();
     let index64 = builder.ins().uextend(I64, index32);
     let end_offset = (offset as i64) + (access_size as i64);
     let end_addr = builder.ins().iadd_imm_s(index64, end_offset);
 
-    let g = unsafe { globals() };
-    let bound_val = builder.ins().iconst(I64, g.guest_mem_len as i64);
+    let bound_val = builder.ins().iconst(I64, guest_mem_len as i64);
     let oob = builder
         .ins()
         .icmp(IntCC::UnsignedGreaterThan, end_addr, bound_val);
     builder.ins().trapnz(oob, TrapCode::HEAP_OUT_OF_BOUNDS);
 
-    let base_val = builder.ins().iconst(I64, g.guest_mem_base as usize as i64);
+    let base_val = builder.ins().iconst(I64, guest_mem_base as usize as i64);
     let native_base = builder.ins().iadd(base_val, index64);
     if offset == 0 {
         native_base

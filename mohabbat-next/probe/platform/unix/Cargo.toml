@@ -6,6 +6,7 @@ edition = "2021"
 [lib]
 crate-type = ["rlib"]
 path = "platform.rs"
+doctest = false
 
 [features]
 default = []

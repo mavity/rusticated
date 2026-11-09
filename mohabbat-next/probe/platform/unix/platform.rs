@@ -1,6 +1,7 @@
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
 use core::ffi::{c_char, c_void};
+#[cfg(not(test))]
 use core::panic::PanicInfo;
 use core::ptr;
 
@@ -10,7 +11,7 @@ compile_error!("The Unix platform abstraction supports only x86-64 and AArch64."
 #[cfg(all(feature = "linux", feature = "darwin"))]
 compile_error!("Select exactly one Unix platform.");
 
-#[cfg(not(any(feature = "linux", feature = "darwin")))]
+#[cfg(all(not(test), not(any(feature = "linux", feature = "darwin"))))]
 compile_error!("Select the linux or darwin platform feature.");
 
 #[cfg(target_arch = "x86_64")]
@@ -188,12 +189,12 @@ unsafe fn run() -> i32 {
         return 2;
     }
 
-    #[cfg(feature = "linux")]
+    #[cfg(not(feature = "darwin"))]
     let library_name = b"libc.so.6\0";
     #[cfg(feature = "darwin")]
     let library_name = b"/usr/lib/libSystem.B.dylib\0";
 
-    #[cfg(feature = "linux")]
+    #[cfg(not(feature = "darwin"))]
     let module = {
         let module = load_library(library_name.as_ptr().cast(), 2);
         if module.is_null() {
@@ -284,7 +285,29 @@ pub unsafe extern "C" fn unix_platform_entry() -> i32 {
     run()
 }
 
+#[cfg(not(test))]
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     loop {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::mem::{offset_of, size_of};
+
+    #[test]
+    fn test_unix_platform_prefix_layout() {
+        assert_eq!(PREFIX_ABI_OFFSET, 0x20000);
+        assert_eq!(size_of::<UnixPlatformHost>(), 64);
+        assert_eq!(offset_of!(UnixPlatformHost, load_library), 0);
+        assert_eq!(offset_of!(UnixPlatformHost, get_proc_address), 8);
+        assert_eq!(offset_of!(UnixPlatformHost, alloc), 16);
+        assert_eq!(offset_of!(UnixPlatformHost, free), 24);
+        assert_eq!(offset_of!(UnixPlatformHost, flush_cache), 32);
+        assert_eq!(offset_of!(UnixPlatformHost, set_jit_write_protect), 40);
+        assert_eq!(offset_of!(UnixPlatformHost, hello_payload), 48);
+        assert_eq!(offset_of!(UnixPlatformHost, hello_payload_size), 56);
+        assert!(size_of::<PlatformState>() <= 0x10000);
+    }
 }

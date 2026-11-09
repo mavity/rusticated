@@ -1,17 +1,19 @@
-#![no_std]
-#![no_main]
+#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(test), no_main)]
 
 extern crate alloc;
 
+#[cfg(not(test))]
 mod allocator;
 mod decompress;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(not(test), target_os = "linux"))]
 mod linux;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(not(test), target_os = "macos"))]
 mod darwin;
 
+#[cfg(not(test))]
 #[global_allocator]
 static ALLOC: allocator::OsAllocator = allocator::OsAllocator;
 
@@ -81,6 +83,7 @@ pub unsafe extern "C" fn strlen(s: *const u8) -> usize {
 
 // ─── Panic Handler ───────────────────────────────────────────────────────────
 
+#[cfg(not(test))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
     #[cfg(target_os = "linux")]
@@ -99,12 +102,13 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
     loop {}
 }
 
+#[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_eh_personality() {}
 
 // ─── Linux Self-Relocation & Entry Point ─────────────────────────────────────
 
-#[cfg(target_os = "linux")]
+#[cfg(all(not(test), target_os = "linux"))]
 #[inline(never)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn brot_self_relocate(dynamic: *const usize, base: usize) {
@@ -176,7 +180,7 @@ pub unsafe extern "C" fn brot_self_relocate(dynamic: *const usize, base: usize) 
     }
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(not(test), target_os = "linux", target_arch = "x86_64"))]
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
@@ -194,7 +198,7 @@ pub unsafe extern "C" fn _start() -> ! {
     );
 }
 
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#[cfg(all(not(test), target_os = "linux", target_arch = "aarch64"))]
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start() -> ! {
@@ -216,8 +220,37 @@ pub unsafe extern "C" fn _start() -> ! {
 
 // ─── macOS Entry Point ───────────────────────────────────────────────────────
 
-#[cfg(target_os = "macos")]
+#[cfg(all(not(test), target_os = "macos"))]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn main(argc: i32, argv: *const *const u8, _envp: *const *const u8) -> i32 {
     darwin::run(argc, argv)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_brot_intrinsics() {
+        unsafe {
+            let src = b"mohabbat-next-brot-test\0";
+            let mut dst = [0u8; 24];
+            memcpy(dst.as_mut_ptr(), src.as_ptr(), src.len());
+            assert_eq!(&dst, src);
+            assert_eq!(memcmp(dst.as_ptr(), src.as_ptr(), src.len()), 0);
+            assert_eq!(strlen(dst.as_ptr()), 23);
+
+            memset(dst.as_mut_ptr(), b'A' as i32, 4);
+            assert_eq!(&dst[..4], b"AAAA");
+
+            memmove(dst.as_mut_ptr().add(2), dst.as_ptr(), 4);
+            assert_eq!(&dst[..6], b"AAAAAA");
+        }
+    }
+
+    #[test]
+    fn test_zstd_decompress_invalid_rejects() {
+        let mut out = [0u8; 64];
+        assert!(decompress::decompress(b"not-a-valid-zstd-frame", &mut out).is_err());
+    }
 }
