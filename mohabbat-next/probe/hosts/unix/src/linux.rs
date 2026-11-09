@@ -12,7 +12,8 @@ pub struct UnixPlatformHost {
     pub hello_payload_size: usize,
 }
 
-type PlatformEntry = unsafe extern "C" fn(*const UnixPlatformHost) -> i32;
+type PlatformEntry = unsafe extern "C" fn() -> i32;
+const PREFIX_ABI_OFFSET: usize = 0x20000;
 
 // ─── Syscall primitives ──────────────────────────────────────────────────────
 
@@ -376,6 +377,7 @@ fn parse_u64(s: *const u8) -> Option<u64> {
     Some(val)
 }
 
+#[allow(dead_code)]
 unsafe fn sys_readlink_self(buf: *mut u8, bufsiz: usize) -> isize {
     #[cfg(target_arch = "x86_64")]
     {
@@ -505,8 +507,6 @@ pub unsafe fn run(sp: *const usize) -> ! {
     let plat_len_str = *(sp.add(1 + bundle_idx + 2)) as *const u8;
     let hello_off_str = *(sp.add(1 + bundle_idx + 3)) as *const u8;
     let hello_len_str = *(sp.add(1 + bundle_idx + 4)) as *const u8;
-    let hello_off_str = *(sp.add(1 + bundle_idx + 3)) as *const u8;
-    let hello_len_str = *(sp.add(1 + bundle_idx + 4)) as *const u8;
 
     // 3. Parse component ranges
     let plat_off = match parse_u64(plat_off_str) {
@@ -606,31 +606,36 @@ pub unsafe fn run(sp: *const usize) -> ! {
         }
     };
 
-    // 5. Allocate executable memory for platform
-    let plat_code = alloc_executable(plat_decompressed_len);
-    if plat_code.is_null() {
+    // 5. Allocate executable memory for platform (including 128 KiB prefix)
+    let total_plat_size = PREFIX_ABI_OFFSET + plat_decompressed_len;
+    let plat_alloc = alloc_executable(total_plat_size);
+    if plat_alloc.is_null() {
         print_err(b"brot: error: allocate executable memory failed (mmap RWX)\n");
         sys_exit(114);
     }
 
+    let plat_code = (plat_alloc as *mut u8).add(PREFIX_ABI_OFFSET) as *mut c_void;
     core::ptr::copy_nonoverlapping(dec_plat.as_ptr(), plat_code as *mut u8, plat_decompressed_len);
     flush_instruction_cache(plat_code, plat_decompressed_len);
 
-    // 6. Invoke PAL
-    let host = UnixPlatformHost {
-        load_library: Some(load_library),
-        get_proc_address: Some(get_proc_address),
-        alloc: Some(alloc_cb),
-        free: Some(free_cb),
-        flush_cache: Some(flush_cb),
-        set_jit_write_protect: None,
-        hello_payload: dec_hello.as_ptr(),
-        hello_payload_size: hello_decompressed_len,
-    };
+    // 6. Populate prefix ABI at -0x20000 and invoke PAL at +0x00000
+    core::ptr::write(
+        plat_alloc as *mut UnixPlatformHost,
+        UnixPlatformHost {
+            load_library: Some(load_library),
+            get_proc_address: Some(get_proc_address),
+            alloc: Some(alloc_cb),
+            free: Some(free_cb),
+            flush_cache: Some(flush_cb),
+            set_jit_write_protect: None,
+            hello_payload: dec_hello.as_ptr(),
+            hello_payload_size: hello_decompressed_len,
+        },
+    );
 
     let entry: PlatformEntry = core::mem::transmute(plat_code);
-    let status = entry(&host);
+    let status = entry();
 
-    free_executable(plat_code, plat_decompressed_len);
+    free_executable(plat_alloc, total_plat_size);
     sys_exit(status);
 }

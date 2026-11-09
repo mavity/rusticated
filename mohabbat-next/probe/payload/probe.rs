@@ -28,6 +28,40 @@ pub struct ProbeDispatch {
     exit: Option<ExitFn>,
 }
 
+#[repr(C)]
+pub struct ProbeGlobals {
+    pub initialized: bool,
+    pub lines_echoed: usize,
+}
+
+#[inline(always)]
+unsafe fn slice_origin() -> *mut u8 {
+    let addr: usize;
+    #[cfg(target_arch = "x86_64")]
+    core::arch::asm!(
+        "lea {0}, [rip + probe_entry]",
+        out(reg) addr,
+        options(pure, nomem, nostack),
+    );
+    #[cfg(target_arch = "aarch64")]
+    core::arch::asm!(
+        "adr {0}, probe_entry",
+        out(reg) addr,
+        options(pure, nomem, nostack),
+    );
+    addr as *mut u8
+}
+
+#[inline(always)]
+unsafe fn abi() -> &'static ProbeDispatch {
+    &*(slice_origin().sub(0x20000) as *const ProbeDispatch)
+}
+
+#[inline(always)]
+unsafe fn globals() -> &'static mut ProbeGlobals {
+    &mut *(slice_origin().sub(0x10000) as *mut ProbeGlobals)
+}
+
 const GREETING_PREFIX: &[u8] = b"Anonymous-memory probe ready (compiled ";
 const BUILD_TIME: &str = match option_env!("BUILD_TIME") {
     Some(val) => val,
@@ -55,10 +89,10 @@ fn terminate(dispatch: &ProbeDispatch, status: i32) -> ! {
     loop {}
 }
 
-unsafe fn run(dispatch: *const ProbeDispatch) {
-    let Some(dispatch) = dispatch.as_ref() else {
-        return;
-    };
+unsafe fn run() {
+    let dispatch = abi();
+    let g = globals();
+    g.initialized = true;
 
     let mut line = MaybeUninit::<[u8; LINE_CAPACITY]>::uninit();
     let line_ptr = line.as_mut_ptr().cast::<u8>();
@@ -108,19 +142,22 @@ unsafe fn run(dispatch: *const ProbeDispatch) {
         {
             terminate(dispatch, 3);
         }
+        g.lines_echoed = g.lines_echoed.wrapping_add(1);
     }
 }
 
 #[cfg(target_arch = "x86_64")]
+#[link_section = ".text.probe_entry"]
 #[no_mangle]
-pub unsafe extern "win64" fn probe_entry(dispatch: *const ProbeDispatch) {
-    run(dispatch);
+pub unsafe extern "win64" fn probe_entry() {
+    run();
 }
 
 #[cfg(target_arch = "aarch64")]
+#[link_section = ".text.probe_entry"]
 #[no_mangle]
-pub unsafe extern "C" fn probe_entry(dispatch: *const ProbeDispatch) {
-    run(dispatch);
+pub unsafe extern "C" fn probe_entry() {
+    run();
 }
 
 #[panic_handler]

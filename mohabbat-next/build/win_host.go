@@ -93,9 +93,13 @@ func ensureZstdSharpDll(windowsHostDir, workDir string, verbose bool) (string, e
 	if verbose {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-	}
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("dotnet build PackComponents.csproj: %w\n%s", err, string(out))
+		if err := cmd.Run(); err != nil {
+			return "", fmt.Errorf("dotnet build PackComponents.csproj: %w", err)
+		}
+	} else {
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("dotnet build PackComponents.csproj: %w\n%s", err, string(out))
+		}
 	}
 
 	net462Dir := filepath.Join(packerBin, "Release", "net462")

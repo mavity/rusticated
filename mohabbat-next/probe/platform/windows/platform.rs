@@ -98,6 +98,7 @@ pub struct ProbeDispatch {
     exit: Option<ProbeExitFn>,
 }
 
+#[repr(C)]
 struct PlatformState {
     input_handle: *mut c_void,
     output_handle: *mut c_void,
@@ -107,33 +108,38 @@ struct PlatformState {
     get_last_error: Option<GetLastErrorFn>,
     exit_process: Option<ExitProcessFn>,
     free_payload: Option<FreeFn>,
-    payload_code: *mut c_void,
+    payload_alloc: *mut c_void,
     previous_was_cr: bool,
 }
 
-impl PlatformState {
-    const fn empty() -> Self {
-        Self {
-            input_handle: ptr::null_mut(),
-            output_handle: ptr::null_mut(),
-            error_handle: ptr::null_mut(),
-            read_file: None,
-            write_file: None,
-            get_last_error: None,
-            exit_process: None,
-            free_payload: None,
-            payload_code: ptr::null_mut(),
-            previous_was_cr: false,
-        }
-    }
-}
-
-static mut STATE: PlatformState = PlatformState::empty();
-
+const PREFIX_ABI_OFFSET: usize = 0x20000;
 const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
 const STD_OUTPUT_HANDLE: u32 = (-11i32) as u32;
 const STD_ERROR_HANDLE: u32 = (-12i32) as u32;
 const ERROR_BROKEN_PIPE: u32 = 109;
+
+#[inline(always)]
+unsafe fn slice_origin() -> *mut u8 {
+    let addr: usize;
+    #[cfg(target_arch = "x86_64")]
+    core::arch::asm!(
+        "lea {0}, [rip + windows_platform_entry]",
+        out(reg) addr,
+        options(pure, nomem, nostack),
+    );
+    #[cfg(target_arch = "aarch64")]
+    core::arch::asm!(
+        "adr {0}, windows_platform_entry",
+        out(reg) addr,
+        options(pure, nomem, nostack),
+    );
+    addr as *mut u8
+}
+
+#[inline(always)]
+unsafe fn host_abi() -> &'static WindowsPlatformHost {
+    &*(slice_origin().sub(0x20000) as *const WindowsPlatformHost)
+}
 
 macro_rules! function_pointer {
     ($address:expr, $function_type:ty) => {{
@@ -146,8 +152,9 @@ macro_rules! function_pointer {
     }};
 }
 
+#[inline(always)]
 unsafe fn state_mut() -> &'static mut PlatformState {
-    &mut *ptr::addr_of_mut!(STATE)
+    &mut *(slice_origin().sub(0x10000) as *mut PlatformState)
 }
 
 unsafe fn resolve(
@@ -282,15 +289,15 @@ unsafe fn read_stdin_impl(buffer: *mut u8, capacity: usize) -> i64 {
 }
 
 unsafe fn exit_process_impl(status: i32) {
-    let (payload_code, free, exit) = {
+    let (payload_alloc, free, exit) = {
         let state = state_mut();
-        let payload_code = state.payload_code;
-        state.payload_code = ptr::null_mut();
-        (payload_code, state.free_payload, state.exit_process)
+        let payload_alloc = state.payload_alloc;
+        state.payload_alloc = ptr::null_mut();
+        (payload_alloc, state.free_payload, state.exit_process)
     };
-    if !payload_code.is_null() {
+    if !payload_alloc.is_null() {
         if let Some(free) = free {
-            free(payload_code);
+            free(payload_alloc);
         }
     }
     if let Some(exit) = exit {
@@ -387,10 +394,18 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
         return 13;
     }
 
-    let payload_code = alloc(host.hello_payload_size);
-    if payload_code.is_null() {
+    let total_payload_size = PREFIX_ABI_OFFSET + host.hello_payload_size;
+    let payload_alloc = alloc(total_payload_size);
+    if payload_alloc.is_null() {
         return 14;
     }
+    let alloc_bytes = payload_alloc.cast::<u8>();
+    let mut z = 0usize;
+    while z < PREFIX_ABI_OFFSET {
+        ptr::write_volatile(alloc_bytes.add(z), 0);
+        z += 1;
+    }
+    let payload_code = alloc_bytes.add(PREFIX_ABI_OFFSET).cast::<c_void>();
     let destination = payload_code.cast::<u8>();
     let mut index = 0usize;
     while index < host.hello_payload_size {
@@ -400,16 +415,16 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
     }
 
     let Some(get_current_process) = get_current_process else {
-        free(payload_code);
+        free(payload_alloc);
         return 12;
     };
     let Some(flush_instruction_cache) = flush_instruction_cache else {
-        free(payload_code);
+        free(payload_alloc);
         return 12;
     };
     let process_handle = get_current_process();
     if flush_instruction_cache(process_handle, payload_code, host.hello_payload_size) == 0 {
-        free(payload_code);
+        free(payload_alloc);
         return 15;
     }
 
@@ -423,42 +438,43 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
         state.get_last_error = get_last_error;
         state.exit_process = exit_process;
         state.free_payload = Some(free);
-        state.payload_code = payload_code;
+        state.payload_alloc = payload_alloc;
+        state.previous_was_cr = false;
     }
-    let dispatch = ProbeDispatch {
-        write: Some(probe_write_stdout),
-        read: Some(probe_read_stdin),
-        exit: Some(probe_exit),
-    };
+    let payload_abi = payload_alloc.cast::<ProbeDispatch>();
+    ptr::write(
+        payload_abi,
+        ProbeDispatch {
+            write: Some(probe_write_stdout),
+            read: Some(probe_read_stdin),
+            exit: Some(probe_exit),
+        },
+    );
     let entry: ProbeEntryFn = core::mem::transmute(payload_code);
-    entry(&dispatch);
+    entry();
 
-    free(payload_code);
-    state_mut().payload_code = ptr::null_mut();
+    free(payload_alloc);
+    state_mut().payload_alloc = ptr::null_mut();
     70
 }
 
 #[cfg(target_arch = "x86_64")]
-type ProbeEntryFn = unsafe extern "win64" fn(*const ProbeDispatch);
+type ProbeEntryFn = unsafe extern "win64" fn();
 #[cfg(target_arch = "aarch64")]
-type ProbeEntryFn = unsafe extern "C" fn(*const ProbeDispatch);
+type ProbeEntryFn = unsafe extern "C" fn();
 
 #[cfg(target_arch = "x86_64")]
+#[link_section = ".text.windows_platform_entry"]
 #[no_mangle]
-pub unsafe extern "win64" fn windows_platform_entry(host: *const WindowsPlatformHost) -> i32 {
-    match host.as_ref() {
-        Some(host) => run_platform(host),
-        None => 10,
-    }
+pub unsafe extern "win64" fn windows_platform_entry() -> i32 {
+    run_platform(host_abi())
 }
 
 #[cfg(target_arch = "aarch64")]
+#[link_section = ".text.windows_platform_entry"]
 #[no_mangle]
-pub unsafe extern "C" fn windows_platform_entry(host: *const WindowsPlatformHost) -> i32 {
-    match host.as_ref() {
-        Some(host) => run_platform(host),
-        None => 10,
-    }
+pub unsafe extern "C" fn windows_platform_entry() -> i32 {
+    run_platform(host_abi())
 }
 
 #[panic_handler]
