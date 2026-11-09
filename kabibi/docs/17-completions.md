@@ -320,9 +320,13 @@ prompt wrapping or allocate a second permanent footer row.
 - Speculative candidate rows use muted gray with no underline.
 - Active selected candidates use the normal text color and underline;
   non-selected candidates use gray with no underline.
-- Render candidates in deterministic order. If the list does not fit, keep the
-  selected candidate visible, clip the rest with an omission indicator, and
-  allow selection through the complete set.
+- Render candidates in deterministic order. When selection moves beyond the
+  visible row, horizontally shift the candidate stream just enough to keep the
+  selected candidate visible and peek up to two characters of the next
+  candidate in the direction of travel. At either end, do not scroll farther
+  for a nonexistent neighbor. If one candidate is wider than the row, show its
+  leading portion across the full row without a peek. Do not split wide
+  characters at the viewport edge.
 - The row remains one visual line at all terminal widths and does not move the
   input cursor.
 
