@@ -23,11 +23,18 @@ const (
 	completionValue
 )
 
-type completionCandidate struct {
-	Display string
-	Insert  string
-	Space   bool
+type CompletionCandidate struct {
+	Display     string
+	Insert      string
+	Space       bool
+	Description string
 }
+
+// CompletionProvider may handle app-owned syntax before shell completion.
+// Returning handled=true suppresses the shell's default candidates.
+type CompletionProvider func(value string, cursor int) ([]CompletionCandidate, bool)
+
+type completionCandidate = CompletionCandidate
 
 type completionContext struct {
 	commandPosition bool
@@ -70,6 +77,11 @@ var shellCompletionBuiltins = []string{
 }
 
 func (s *Shell) completeInput(value string, cursor int) []completionCandidate {
+	if s.opts.CompletionProvider != nil {
+		if candidates, handled := s.opts.CompletionProvider(value, cursor); handled {
+			return candidates
+		}
+	}
 	if s.execSess == nil {
 		return nil
 	}
@@ -308,7 +320,7 @@ func (s *Shell) completeGit(ctx completionContext) []completionCandidate {
 		if strings.HasPrefix(ctx.prefix, "-") {
 			return completeWords(ctx, gitGlobalOptionNames(), true)
 		}
-		return completeWords(ctx, completionSpecs["git"].subcommands, false)
+		return completeWords(ctx, completionSpecs["git"].subcommands, true)
 	}
 	return s.completeGitSubcommand(ctx, args[0], args[1:])
 }

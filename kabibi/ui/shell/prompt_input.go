@@ -421,6 +421,7 @@ func (p *PromptInput) inputChanged() {
 			p.completion = &promptCompletionState{
 				candidates:  candidates,
 				speculative: true,
+				selected:    -1,
 			}
 			p.mu.Unlock()
 			p.invalidate()
@@ -1068,7 +1069,11 @@ func (p *PromptInput) handleKeyEvent(ev input.KeyPressEvent) bool {
 }
 
 func completionHasMenu(state *promptCompletionState) bool {
-	return state != nil && len(state.candidates) > 1
+	if state == nil {
+		return false
+	}
+	return len(state.candidates) > 1 ||
+		(len(state.candidates) == 1 && state.candidates[0].Description != "")
 }
 
 func clonePromptCompletion(state *promptCompletionState) *promptCompletionState {
@@ -1164,6 +1169,28 @@ func renderCompletionMenu(buf *ui.CellBuf, row int, state *promptCompletionState
 			width := runeCellWidth(r)
 			draw(x, width, string(r), style)
 			x += width
+		}
+	}
+	descriptionIndex := state.selected
+	if descriptionIndex < 0 && len(state.candidates) == 1 {
+		descriptionIndex = 0
+	}
+	if state.scrollOffset == 0 && descriptionIndex >= 0 && descriptionIndex < len(state.candidates) {
+		description := state.candidates[descriptionIndex].Description
+		if description != "" {
+			descriptionWidth := 0
+			for _, r := range description {
+				descriptionWidth += runeCellWidth(r)
+			}
+			if x+2+descriptionWidth <= viewEnd {
+				style := terminal.NewStyle(0x9AA9B8, 0, terminal.CharResetBackgroundDefault)
+				x += 2
+				for _, r := range description {
+					width := runeCellWidth(r)
+					draw(x, width, string(r), style)
+					x += width
+				}
+			}
 		}
 	}
 }

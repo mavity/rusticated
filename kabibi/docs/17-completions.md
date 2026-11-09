@@ -1,6 +1,6 @@
 # Kabibi shell completion and hints
 
-**Status:** Approved for implementation; implementation is in progress.
+**Status:** Implemented for the current scope.
 
 **Implementation decision:** Classify the editable input with Bash syntax and
 cursor position, resolve command names using actual shell/builtin dispatch and
@@ -87,6 +87,12 @@ mode and Windows PATHEXT. It caches candidate names, not command output. An
 explicit path prefix such as `./`, `../`, or an absolute path uses filesystem
 completion; a working-directory file is not a bare command candidate unless
 the directory is in PATH.
+
+AppWidget-owned slash commands contribute their names and descriptions to the
+same prompt completion state through an app-supplied provider. This applies
+only while the cursor is in the initial slash-prefixed command token; slash
+syntax parsing and dispatch remain in `slashcmd.Parse`. Enter dispatches the
+literal input and never turns a partial command name into a different command.
 
 ### 3.3 Runtime argument-definition registry
 
@@ -320,6 +326,9 @@ prompt wrapping or allocate a second permanent footer row.
 - Speculative candidate rows use muted gray with no underline.
 - Active selected candidates use the normal text color and underline;
   non-selected candidates use gray with no underline.
+- When a selected candidate (or the only candidate) has a description and the
+  full candidate stream plus description fits, render the description muted
+  after the stream. Descriptions do not participate in scrolling.
 - Render candidates in deterministic order. When selection moves beyond the
   visible row, horizontally shift the candidate stream just enough to keep the
   selected candidate visible and peek up to two characters of the next

@@ -100,7 +100,7 @@ func TestCtrlSpaceCompletesWithPanelsVisibleAndTabCycles(t *testing.T) {
 	if !widget.HandleEvent(input.KeyPressEvent{Code: input.KeyTab}) {
 		t.Fatal("Tab did not cycle active completion while panels were visible")
 	}
-	if got, want := widget.Shell().Input().Value(), "git status "; got != want {
+	if got, want := widget.Shell().Input().Value(), "git stash "; got != want {
 		t.Fatalf("first inline preview = %q, want %q", got, want)
 	}
 	if !widget.HandleEvent(input.KeyPressEvent{Code: input.KeyEscape}) {
@@ -132,7 +132,7 @@ func TestEscapeDismissesCompletionBeforeClearingInput(t *testing.T) {
 			_ = widget.Close()
 			t.Fatal("Tab did not preview the first completion")
 		}
-		if got, want := widget.Shell().Input().Value(), "git status "; got != want {
+		if got, want := widget.Shell().Input().Value(), "git stash "; got != want {
 			_ = widget.Close()
 			t.Fatalf("inline preview = %q, want %q", got, want)
 		}
