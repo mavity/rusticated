@@ -131,6 +131,15 @@ identify the expected positional value, offer path candidates only when the
 context provides reasonable evidence that the value is path-like; otherwise
 offer no argument candidates. Completion is not command validation.
 
+For a small set of commands whose positional operands are unambiguously
+filesystem paths, the registry adds an explicit positional-path signal. This
+enables bare prefixes such as `ls ka` without treating every unknown positional
+value as a path. The current set is `base64`, `cat`, `cmp`, `comm`, `cp`,
+`dirname`, `gpgv`, `head`, `hexdump`, `ln`, `ls`, `md5sum`, `mkdir`, `mv`,
+`readlink`, `realpath`, `rm`, `sort`, `strings`, `tail`, `tar`, `tee`,
+`touch`, `truncate`, `uniq`, and `wc`. Add commands only when their positional
+operands are consistently path-like; mixed-role arguments remain conservative.
+
 For builtins that do not use FlagSet, expose their existing runtime-owned
 definition through the same registry:
 

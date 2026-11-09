@@ -9,10 +9,11 @@ import (
 )
 
 type runtimeFlagSet struct {
-	standard       *flag.FlagSet
-	pflag          *pflag.FlagSet
-	unixNormalize  bool
-	keyEqualsValue bool
+	standard        *flag.FlagSet
+	pflag           *pflag.FlagSet
+	unixNormalize   bool
+	keyEqualsValue  bool
+	positionalPaths bool
 }
 
 type runtimeOptionSyntax struct {
@@ -26,10 +27,11 @@ type runtimeOptionSyntax struct {
 }
 
 type runtimeCommandSyntax struct {
-	unixNormalize  bool
-	keyEqualsValue bool
-	pflag          bool
-	options        []runtimeOptionSyntax
+	unixNormalize   bool
+	keyEqualsValue  bool
+	pflag           bool
+	positionalPaths bool
+	options         []runtimeOptionSyntax
 }
 
 type runtimeFlagSetFactory func() runtimeFlagSet
@@ -44,11 +46,24 @@ func pflagSet(fs *pflag.FlagSet) runtimeFlagSet {
 	return runtimeFlagSet{pflag: fs}
 }
 
+func standardPathFlagSet(fs *flag.FlagSet, unixNormalize bool) runtimeFlagSet {
+	definition := standardFlagSet(fs, unixNormalize)
+	definition.positionalPaths = true
+	return definition
+}
+
+func pflagPathSet(fs *pflag.FlagSet) runtimeFlagSet {
+	definition := pflagSet(fs)
+	definition.positionalPaths = true
+	return definition
+}
+
 func inspectRuntimeFlagSet(definition runtimeFlagSet) runtimeCommandSyntax {
 	syntax := runtimeCommandSyntax{
-		unixNormalize:  definition.unixNormalize,
-		keyEqualsValue: definition.keyEqualsValue,
-		pflag:          definition.pflag != nil,
+		unixNormalize:   definition.unixNormalize,
+		keyEqualsValue:  definition.keyEqualsValue,
+		pflag:           definition.pflag != nil,
+		positionalPaths: definition.positionalPaths,
 	}
 	if definition.standard != nil {
 		definition.standard.VisitAll(func(flag *flag.Flag) {
@@ -132,7 +147,7 @@ func completeRuntimeFlagSet(ctx completionContext, cwd string, syntax runtimeCom
 	if optionsEnabled && strings.HasPrefix(ctx.prefix, "-") || syntax.keyEqualsValue {
 		return completeWords(ctx, options, false), true
 	}
-	if looksLikePath(ctx.prefix) {
+	if syntax.positionalPaths || looksLikePath(ctx.prefix) {
 		return completePath(ctx, cwd, false), true
 	}
 	return nil, true
