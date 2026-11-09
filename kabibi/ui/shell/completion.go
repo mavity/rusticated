@@ -51,7 +51,8 @@ type completionSpec struct {
 }
 
 var completionSpecs = map[string]completionSpec{
-	"cd":      {options: []string{"-L", "-P"}},
+	"cd":      {options: []string{"-L", "-P"}, paths: map[int]bool{-1: true}},
+	"pushd":   {paths: map[int]bool{-1: true}},
 	"command": {options: []string{"-p", "-v", "-V"}},
 	"git":     {subcommands: []string{"add", "am", "apply", "bisect", "blame", "branch", "cat-file", "checkout", "cherry-pick", "clean", "clone", "commit", "commit-tree", "config", "count-objects", "describe", "diff", "diff-tree", "fetch", "for-each-ref", "format-patch", "grep", "hash-object", "init", "log", "ls-files", "ls-remote", "ls-tree", "merge", "merge-base", "merge-file", "mv", "notes", "pull", "push", "read-tree", "rebase", "reflog", "remote", "replace", "reset", "restore", "revert", "rev-list", "rev-parse", "rm", "show", "show-ref", "shortlog", "stash", "status", "submodule", "switch", "symbolic-ref", "tag", "update-index", "update-ref", "version", "worktree", "write-tree"}},
 	"ip":      {},
@@ -151,10 +152,8 @@ func (s *Shell) completeInput(value string, cursor int) []completionCandidate {
 			return completePath(ctx, s.execSess.Dir(), ctx.command == "cd")
 		}
 	}
-	if syntax, ok := generatedURootSyntax[ctx.command]; ok &&
-		(len(syntax.options) > 0 || len(syntax.positionals) > 0 ||
-			len(syntax.choices) > 0 || syntax.keyEqualsValue) {
-		candidates, _ := completeGeneratedSyntax(ctx, s.execSess.Dir(), syntax)
+	if factory, ok := commandSyntaxRegistry[ctx.command]; ok {
+		candidates, _ := completeRuntimeFlagSet(ctx, s.execSess.Dir(), inspectRuntimeFlagSet(factory()))
 		return candidates
 	}
 	if completionArgumentLikelyPath(ctx.command, ctx.args) {

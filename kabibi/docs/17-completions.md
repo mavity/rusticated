@@ -107,9 +107,12 @@ definition, not a second completion-only list.
 
 Each constructor creates a fresh FlagSet and fresh bound values. Do not store a
 live FlagSet globally or retain pointers to values from a command invocation.
-Register the syntax provider beside the runtime command handler so aliases and
-dispatch precedence cannot drift. Preserve `pflag` semantics such as
-shorthands and `NoOptDefVal`.
+Maintain the u-root providers in `kabibi/ui/shell/uroot.go` alongside
+`urootRegistry`; each provider calls the command package's
+`NewFlagSetForCompletion` constructor, and the runtime command parser uses the
+same underlying FlagSet builder. Register aliases against the same factory
+when dispatch exposes them. Preserve `pflag` semantics such as shorthands and
+`NoOptDefVal`.
 
 The parser/registry inspection surface must expose the actual definition
 read-only, including whether the cursor is awaiting a flag value. This
