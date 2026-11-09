@@ -436,7 +436,10 @@ func main() {
 	}
 
 	windowsHostX64Exe := filepath.Join(workDir, "MohabbatWindowsHost-x64.exe")
-	_ = buildWindowsHostExe(windowsHostDir, workDir, windowsHostX64Exe, "x64", winResources, verbose)
+	if err := buildWindowsHostExe(windowsHostDir, workDir, windowsHostX64Exe, "x64", winResources, verbose); err != nil {
+		fmt.Fprintf(os.Stderr, "Error building x64 Windows host: %v\n", err)
+		os.Exit(1)
+	}
 
 	if windowsHostOnly {
 		fmt.Printf("🍆  Finished. Windows-only test host: %s\n", windowsHostExe)
@@ -465,17 +468,17 @@ func main() {
 	}
 
 	assemblyAssets := AssemblyAssets{
-		BrotLinuxX86_64:      brotPaths["brot-x86_64-unknown-linux-gnu"],
-		BrotLinuxAarch64:     brotPaths["brot-aarch64-unknown-linux-gnu"],
-		BrotAndroidAarch64:   brotPaths["brot-aarch64-linux-android"],
-		BrotDarwinX86_64:     brotPaths["brot-x86_64-apple-darwin"],
-		BrotDarwinAarch64:    brotPaths["brot-aarch64-apple-darwin"],
-		PlatformLinuxX86_64:  builtBins["platform-linux-x86_64"],
-		PlatformLinuxAarch64: builtBins["platform-linux-aarch64"],
-		PlatformDarwinX86_64: builtBins["platform-darwin-x86_64"],
+		BrotLinuxX86_64:       brotPaths["brot-x86_64-unknown-linux-gnu"],
+		BrotLinuxAarch64:      brotPaths["brot-aarch64-unknown-linux-gnu"],
+		BrotAndroidAarch64:    brotPaths["brot-aarch64-linux-android"],
+		BrotDarwinX86_64:      brotPaths["brot-x86_64-apple-darwin"],
+		BrotDarwinAarch64:     brotPaths["brot-aarch64-apple-darwin"],
+		PlatformLinuxX86_64:   builtBins["platform-linux-x86_64"],
+		PlatformLinuxAarch64:  builtBins["platform-linux-aarch64"],
+		PlatformDarwinX86_64:  builtBins["platform-darwin-x86_64"],
 		PlatformDarwinAarch64: builtBins["platform-darwin-aarch64"],
-		HelloX86_64:          builtBins["probe-x86_64"],
-		HelloAarch64:         builtBins["probe-aarch64"],
+		HelloX86_64:           builtBins["probe-x86_64"],
+		HelloAarch64:          builtBins["probe-aarch64"],
 	}
 
 	if err := assembleVegetable(windowsHostExe, assemblyAssets, templatesDir, outputPath); err != nil {

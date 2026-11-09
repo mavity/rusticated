@@ -190,11 +190,14 @@ unsafe fn prepare_echo(g: &mut ProbeGlobals) -> bool {
         return false;
     }
     let line_len = g.line_len;
-    core::ptr::copy_nonoverlapping(
-        g.line.as_ptr(),
-        g.output.as_mut_ptr().add(g.output_len),
-        line_len,
-    );
+    let mut index = 0;
+    while index < line_len {
+        g.output
+            .as_mut_ptr()
+            .add(g.output_len + index)
+            .write(g.line.as_ptr().add(index).read());
+        index += 1;
+    }
     g.output_len += line_len;
     g.line_len = 0;
     append_output(g, NEWLINE) && append_output(g, PROMPT)

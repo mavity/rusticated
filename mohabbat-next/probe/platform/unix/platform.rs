@@ -58,6 +58,8 @@ struct PendingIo {
     buffer: *mut c_void,
     length: usize,
     is_write: bool,
+    error: u32,
+    result: u64,
 }
 
 #[repr(C)]
@@ -202,6 +204,8 @@ unsafe fn begin_io(
         buffer,
         length,
         is_write,
+        error: 0,
+        result: 0,
     });
     let mut thread = 0usize;
     let status = create(
@@ -223,26 +227,32 @@ unsafe extern "C" fn run_io_worker(_context: *mut c_void) -> *mut c_void {
     let read = ptr::addr_of!((*state).read).read();
     let write = ptr::addr_of!((*state).write).read();
     let errno_location = ptr::addr_of!((*state).errno_location).read();
-    let result = if request.is_write {
-        match write {
-            Some(write) => write(request.fd, request.buffer.cast(), request.length),
-            None => -1,
+    let (error, result) = loop {
+        let result = if request.is_write {
+            match write {
+                Some(write) => write(request.fd, request.buffer.cast(), request.length),
+                None => -1,
+            }
+        } else {
+            match read {
+                Some(read) => read(request.fd, request.buffer, request.length),
+                None => -1,
+            }
+        };
+        if result >= 0 {
+            break (0, result as u64);
         }
-    } else {
-        match read {
-            Some(read) => read(request.fd, request.buffer, request.length),
-            None => -1,
-        }
-    };
-    if result >= 0 {
-        complete_io(request.overlapped, 0, result as u64);
-    } else {
         let errno = match errno_location {
             Some(errno_location) => *errno_location(),
             None => 0,
         };
-        complete_io(request.overlapped, if errno == 32 { 64 } else { 29 }, 0);
-    }
+        if errno == 4 {
+            continue;
+        }
+        break (if errno == 32 { 64 } else { 29 }, 0);
+    };
+    ptr::addr_of_mut!((*state).pending_io.error).write(error);
+    ptr::addr_of_mut!((*state).pending_io.result).write(result);
     ptr::null_mut()
 }
 
@@ -420,6 +430,8 @@ unsafe fn run() -> i32 {
             buffer: ptr::null_mut(),
             length: 0,
             is_write: false,
+            error: 0,
+            result: 0,
         };
         state.free = Some(free);
         state.payload_alloc = payload_alloc;
@@ -461,6 +473,8 @@ unsafe fn run() -> i32 {
             return 5;
         }
         ptr::addr_of_mut!((*state).worker_thread).write(0);
+        let pending = ptr::addr_of!((*state).pending_io).read();
+        complete_io(pending.overlapped, pending.error, pending.result);
     }
 }
 

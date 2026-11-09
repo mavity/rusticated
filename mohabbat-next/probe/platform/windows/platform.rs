@@ -117,6 +117,8 @@ struct PendingIo {
     buffer: *mut u8,
     length: u32,
     is_write: bool,
+    error: u32,
+    result: u64,
 }
 
 #[repr(C)]
@@ -249,6 +251,8 @@ unsafe fn begin_io(
         buffer,
         length: length as u32,
         is_write,
+        error: 0,
+        result: 0,
     });
     #[cfg(target_arch = "x86_64")]
     let start = run_io_worker as unsafe extern "win64" fn(*mut c_void) -> u32;
@@ -303,21 +307,23 @@ unsafe fn perform_io_worker() -> u32 {
             None => false,
         }
     };
-    if ok {
-        complete_io(request.overlapped, 0, transferred as u64);
+    let (error, result) = if ok {
+        (0, transferred as u64)
     } else {
         let error = match get_last_error {
             Some(get_last_error) => get_last_error(),
             None => 0,
         };
         if !request.is_write && error == ERROR_BROKEN_PIPE {
-            complete_io(request.overlapped, 0, 0);
+            (0, 0)
         } else if error == ERROR_BROKEN_PIPE {
-            complete_io(request.overlapped, 64, 0);
+            (64, 0)
         } else {
-            complete_io(request.overlapped, 29, 0);
+            (29, 0)
         }
-    }
+    };
+    ptr::addr_of_mut!((*state).pending_io.error).write(error);
+    ptr::addr_of_mut!((*state).pending_io.result).write(result);
     0
 }
 
@@ -513,6 +519,8 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
             buffer: ptr::null_mut(),
             length: 0,
             is_write: false,
+            error: 0,
+            result: 0,
         };
     }
     ptr::write(
@@ -547,6 +555,8 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
         }
         close(thread);
         ptr::addr_of_mut!((*state).worker_thread).write(ptr::null_mut());
+        let pending = ptr::addr_of!((*state).pending_io).read();
+        complete_io(pending.overlapped, pending.error, pending.result);
     }
 }
 
