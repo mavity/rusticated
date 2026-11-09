@@ -123,12 +123,15 @@ func buildFlatComponent(probeDir, rustBuildDir, outDir string, cfg FlatComponent
 	elfPath := filepath.Join(outDir, cfg.OutFileName+".elf")
 	binPath := filepath.Join(outDir, cfg.OutFileName+".bin")
 
+	mapPath := filepath.Join(outDir, cfg.OutFileName+".map")
+
 	// ld.lld -T <script> --build-id=none --gc-sections --no-undefined --start-group ... --end-group -o <elf>
 	lldArgs := []string{
 		"-T", cfg.LinkerScript,
 		"--build-id=none",
 		"--gc-sections",
 		"--no-undefined",
+		"-Map=" + mapPath,
 		"--start-group",
 	}
 	lldArgs = append(lldArgs, archives...)

@@ -332,20 +332,14 @@ pub unsafe fn compile_and_initialize_wasm() {
         }
         (host.rusticated_debug)(stage + 1);
         (host.rusticated_debug)(stage + 2);
-        (host.rusticated_debug)(150);
-        if ctx.optimize(&isa, &mut ctrl_plane).is_err() {
-            (host.host_panic)(b"optimize failed".as_ptr(), 15);
-        }
-        (host.rusticated_debug)(151);
         let stencil = match ctx.compile_stencil(&isa, &mut ctrl_plane) {
             Ok(s) => s,
             Err(_) => {
                 (host.host_panic)(b"compile_stencil failed".as_ptr(), 22);
             }
         };
-        (host.rusticated_debug)(152);
-        let compiled = stencil.apply_params(&ctx.func.params);
         (host.rusticated_debug)(stage + 3);
+        let compiled = stencil.apply_params(&ctx.func.params);
 
         let mut relocs = Vec::new();
         let mut veneer_count = 0;

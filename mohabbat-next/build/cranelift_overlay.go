@@ -1218,7 +1218,6 @@ func applyCraneliftIsaPatches(crateDir string) error {
 	if err != nil {
 		return err
 	}
-
 	x64Path := filepath.Join(crateDir, "src", "isa", "x64", "mod.rs")
 	x64Data, err := os.ReadFile(x64Path)
 	if err != nil {
