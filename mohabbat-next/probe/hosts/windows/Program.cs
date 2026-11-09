@@ -10,6 +10,7 @@ internal static class Program
     private const uint MemReserve = 0x2000;
     private const uint MemRelease = 0x8000;
     private const uint PageExecuteReadWrite = 0x40;
+    private const int PrefixAbiOffset = 0x20000;
     private const ushort ProcessorArchitectureAmd64 = 9;
     private const ushort ProcessorArchitectureArm64 = 12;
     private const int MaximumComponentSize = 4096;
@@ -31,7 +32,7 @@ internal static class Program
     private delegate void FreeCallback(IntPtr address);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate int PlatformEntry(IntPtr host);
+    private delegate int PlatformEntry();
 
     [StructLayout(LayoutKind.Sequential)]
     private struct WindowsPlatformHost
@@ -73,8 +74,7 @@ internal static class Program
             return 2;
         }
 
-        IntPtr platformCode = IntPtr.Zero;
-        IntPtr hostMemory = IntPtr.Zero;
+        IntPtr platformAlloc = IntPtr.Zero;
         GCHandle platformPin = new GCHandle();
         GCHandle helloPin = new GCHandle();
         LoadLibraryCallback loadLibrary = LoadLibrary;
@@ -96,17 +96,19 @@ internal static class Program
 
             platformPin = GCHandle.Alloc(platform, GCHandleType.Pinned);
             helloPin = GCHandle.Alloc(hello, GCHandleType.Pinned);
-            platformCode = VirtualAlloc(
+            int totalPlatformSize = PrefixAbiOffset + platform.Length;
+            platformAlloc = VirtualAlloc(
                 IntPtr.Zero,
-                new UIntPtr((uint)platform.Length),
+                new UIntPtr((uint)totalPlatformSize),
                 MemCommit | MemReserve,
                 PageExecuteReadWrite);
-            if (platformCode == IntPtr.Zero)
+            if (platformAlloc == IntPtr.Zero)
             {
                 WriteLastError("VirtualAlloc for platform abstraction");
                 return 1;
             }
 
+            IntPtr platformCode = new IntPtr(platformAlloc.ToInt64() + PrefixAbiOffset);
             Marshal.Copy(platform, 0, platformCode, platform.Length);
             if (!FlushInstructionCache(
                     GetCurrentProcess(),
@@ -127,13 +129,11 @@ internal static class Program
                 HelloPayload = helloPin.AddrOfPinnedObject(),
                 HelloPayloadSize = new UIntPtr((uint)hello.Length),
             };
-            hostMemory = Marshal.AllocHGlobal(
-                Marshal.SizeOf(typeof(WindowsPlatformHost)));
-            Marshal.StructureToPtr(host, hostMemory, false);
+            Marshal.StructureToPtr(host, platformAlloc, false);
 
             PlatformEntry entry =
                 Marshal.GetDelegateForFunctionPointer<PlatformEntry>(platformCode);
-            int status = entry(hostMemory);
+            int status = entry();
             Console.Error.WriteLine(
                 "Windows platform abstraction returned unexpectedly (status {0}).",
                 status);
@@ -151,13 +151,9 @@ internal static class Program
         }
         finally
         {
-            if (hostMemory != IntPtr.Zero)
+            if (platformAlloc != IntPtr.Zero)
             {
-                Marshal.FreeHGlobal(hostMemory);
-            }
-            if (platformCode != IntPtr.Zero)
-            {
-                VirtualFree(platformCode, UIntPtr.Zero, MemRelease);
+                VirtualFree(platformAlloc, UIntPtr.Zero, MemRelease);
             }
             if (platformPin.IsAllocated)
             {

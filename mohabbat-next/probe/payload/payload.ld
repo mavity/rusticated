@@ -1,5 +1,8 @@
 ENTRY(probe_entry)
 
+HIDDEN(__abi_base     = -0x20000);
+HIDDEN(__globals_base = -0x10000);
+
 SECTIONS
 {
     . = 0;
@@ -17,5 +20,7 @@ SECTIONS
         *(.note*)
         *(.data*)
         *(.bss*)
+        *(.got*)
+        *(.plt*)
     }
 }

@@ -12,7 +12,8 @@ pub struct UnixPlatformHost {
     pub hello_payload_size: usize,
 }
 
-type PlatformEntry = unsafe extern "C" fn(*const UnixPlatformHost) -> i32;
+type PlatformEntry = unsafe extern "C" fn() -> i32;
+const PREFIX_ABI_OFFSET: usize = 0x20000;
 
 #[link(name = "System")]
 unsafe extern "C" {
@@ -251,32 +252,36 @@ pub unsafe fn run(argc: i32, argv: *const *const u8) -> ! {
         Err(_) => exit(113),
     };
 
-    // 5. Allocate executable memory for platform
-    let plat_code = alloc_executable(plat_decompressed_len);
-    if plat_code.is_null() {
+    // 5. Allocate executable memory for platform (including 128 KiB prefix)
+    let total_plat_size = PREFIX_ABI_OFFSET + plat_decompressed_len;
+    let plat_alloc = alloc_executable(total_plat_size);
+    if plat_alloc.is_null() {
         exit(114);
     }
 
     pthread_jit_write_protect_np(0);
+    core::ptr::write(
+        plat_alloc as *mut UnixPlatformHost,
+        UnixPlatformHost {
+            load_library: Some(load_lib),
+            get_proc_address: Some(get_proc),
+            alloc: Some(alloc_cb),
+            free: Some(free_cb),
+            flush_cache: Some(flush_cb),
+            set_jit_write_protect: Some(jit_protect_cb),
+            hello_payload: dec_hello.as_ptr(),
+            hello_payload_size: hello_decompressed_len,
+        },
+    );
+    let plat_code = (plat_alloc as *mut u8).add(PREFIX_ABI_OFFSET) as *mut c_void;
     core::ptr::copy_nonoverlapping(dec_plat.as_ptr(), plat_code as *mut u8, plat_decompressed_len);
     pthread_jit_write_protect_np(1);
     sys_icache_invalidate(plat_code, plat_decompressed_len);
 
-    // 6. Invoke PAL
-    let host = UnixPlatformHost {
-        load_library: Some(load_lib),
-        get_proc_address: Some(get_proc),
-        alloc: Some(alloc_cb),
-        free: Some(free_cb),
-        flush_cache: Some(flush_cb),
-        set_jit_write_protect: Some(jit_protect_cb),
-        hello_payload: dec_hello.as_ptr(),
-        hello_payload_size: hello_decompressed_len,
-    };
-
+    // 6. Invoke PAL at +0x00000
     let entry: PlatformEntry = core::mem::transmute(plat_code);
-    let status = entry(&host);
+    let status = entry();
 
-    free_executable(plat_code, plat_decompressed_len);
+    free_executable(plat_alloc, total_plat_size);
     exit(status);
 }

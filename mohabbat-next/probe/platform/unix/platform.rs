@@ -57,32 +57,44 @@ struct ProbeDispatch {
     exit: Option<PayloadExitFn>,
 }
 
+#[repr(C)]
 struct PlatformState {
     read: Option<NativeReadFn>,
     write: Option<NativeWriteFn>,
     exit: Option<NativeExitFn>,
     free: Option<FreeFn>,
-    payload_code: *mut c_void,
-    payload_size: usize,
+    payload_alloc: *mut c_void,
+    payload_total_size: usize,
 }
 
-impl PlatformState {
-    const fn empty() -> Self {
-        Self {
-            read: None,
-            write: None,
-            exit: None,
-            free: None,
-            payload_code: ptr::null_mut(),
-            payload_size: 0,
-        }
-    }
+const PREFIX_ABI_OFFSET: usize = 0x20000;
+
+#[inline(always)]
+unsafe fn slice_origin() -> *mut u8 {
+    let addr: usize;
+    #[cfg(target_arch = "x86_64")]
+    core::arch::asm!(
+        "lea {0}, [rip + unix_platform_entry]",
+        out(reg) addr,
+        options(pure, nomem, nostack),
+    );
+    #[cfg(target_arch = "aarch64")]
+    core::arch::asm!(
+        "adr {0}, unix_platform_entry",
+        out(reg) addr,
+        options(pure, nomem, nostack),
+    );
+    addr as *mut u8
 }
 
-static mut STATE: PlatformState = PlatformState::empty();
+#[inline(always)]
+unsafe fn host_abi() -> &'static UnixPlatformHost {
+    &*(slice_origin().sub(0x20000) as *const UnixPlatformHost)
+}
 
+#[inline(always)]
 unsafe fn state_mut() -> &'static mut PlatformState {
-    &mut *ptr::addr_of_mut!(STATE)
+    &mut *(slice_origin().sub(0x10000) as *mut PlatformState)
 }
 
 unsafe fn write_fd(fd: i32, bytes: &[u8]) -> bool {
@@ -165,10 +177,8 @@ payload_callback!(exit_process(status: i32) -> () {
     loop {}
 });
 
-unsafe fn run(host_ptr: *const UnixPlatformHost) -> i32 {
-    let Some(host) = host_ptr.as_ref() else {
-        return 2;
-    };
+unsafe fn run() -> i32 {
+    let host = host_abi();
     let (Some(load_library), Some(alloc), Some(free), Some(flush_cache)) =
         (host.load_library, host.alloc, host.free, host.flush_cache)
     else {
@@ -206,8 +216,9 @@ unsafe fn run(host_ptr: *const UnixPlatformHost) -> i32 {
         return 3;
     };
 
-    let payload_code = alloc(host.hello_payload_size);
-    if payload_code.is_null() {
+    let total_payload_size = PREFIX_ABI_OFFSET + host.hello_payload_size;
+    let payload_alloc = alloc(total_payload_size);
+    if payload_alloc.is_null() {
         write_fd(2, b"Unix platform: executable memory allocation failed.\n");
         return 4;
     }
@@ -215,13 +226,29 @@ unsafe fn run(host_ptr: *const UnixPlatformHost) -> i32 {
     let set_jit_write_protect = match host.set_jit_write_protect {
         Some(set_jit_write_protect) => set_jit_write_protect,
         None => {
-            free(payload_code, host.hello_payload_size);
+            free(payload_alloc, total_payload_size);
             return 4;
         }
     };
     #[cfg(feature = "darwin")]
     set_jit_write_protect(0);
 
+    let alloc_bytes = payload_alloc.cast::<u8>();
+    let mut z = 0;
+    while z < PREFIX_ABI_OFFSET {
+        alloc_bytes.add(z).write_volatile(0);
+        z += 1;
+    }
+    ptr::write(
+        payload_alloc.cast::<ProbeDispatch>(),
+        ProbeDispatch {
+            write: Some(write_stdout),
+            read: Some(read_stdin),
+            exit: Some(exit_process),
+        },
+    );
+
+    let payload_code = alloc_bytes.add(PREFIX_ABI_OFFSET).cast::<c_void>();
     let payload_bytes = payload_code.cast::<u8>();
     let mut offset = 0;
     while offset < host.hello_payload_size {
@@ -239,27 +266,22 @@ unsafe fn run(host_ptr: *const UnixPlatformHost) -> i32 {
         state.write = Some(write);
         state.exit = Some(exit);
         state.free = Some(free);
-        state.payload_code = payload_code;
-        state.payload_size = host.hello_payload_size;
+        state.payload_alloc = payload_alloc;
+        state.payload_total_size = total_payload_size;
     }
 
-    let dispatch = ProbeDispatch {
-        write: Some(write_stdout),
-        read: Some(read_stdin),
-        exit: Some(exit_process),
-    };
-
     #[cfg(target_arch = "x86_64")]
-    let entry: unsafe extern "win64" fn(*const ProbeDispatch) = core::mem::transmute(payload_code);
+    let entry: unsafe extern "win64" fn() = core::mem::transmute(payload_code);
     #[cfg(target_arch = "aarch64")]
-    let entry: unsafe extern "C" fn(*const ProbeDispatch) = core::mem::transmute(payload_code);
-    entry(&dispatch);
+    let entry: unsafe extern "C" fn() = core::mem::transmute(payload_code);
+    entry();
     70
 }
 
+#[link_section = ".text.unix_platform_entry"]
 #[no_mangle]
-pub unsafe extern "C" fn unix_platform_entry(host: *const UnixPlatformHost) -> i32 {
-    run(host)
+pub unsafe extern "C" fn unix_platform_entry() -> i32 {
+    run()
 }
 
 #[panic_handler]
