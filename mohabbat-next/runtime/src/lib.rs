@@ -22,6 +22,68 @@ use crate::allocator::PalBumpAllocator;
 use core::panic::PanicInfo;
 
 #[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    let mut i = 0;
+    while i < n {
+        *dest.add(i) = *src.add(i);
+        i += 1;
+    }
+    dest
+}
+
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memset(dest: *mut u8, value: i32, n: usize) -> *mut u8 {
+    let mut i = 0;
+    while i < n {
+        *dest.add(i) = value as u8;
+        i += 1;
+    }
+    dest
+}
+
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    if (dest as usize) < (src as usize) {
+        let mut i = 0;
+        while i < n {
+            *dest.add(i) = *src.add(i);
+            i += 1;
+        }
+    } else {
+        let mut i = n;
+        while i > 0 {
+            i -= 1;
+            *dest.add(i) = *src.add(i);
+        }
+    }
+    dest
+}
+
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memcmp(lhs: *const u8, rhs: *const u8, n: usize) -> i32 {
+    let mut i = 0;
+    while i < n {
+        let left = *lhs.add(i);
+        let right = *rhs.add(i);
+        if left != right {
+            return left as i32 - right as i32;
+        }
+        i += 1;
+    }
+    0
+}
+
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bcmp(lhs: *const u8, rhs: *const u8, n: usize) -> i32 {
+    memcmp(lhs, rhs, n)
+}
+
+#[cfg(not(test))]
 #[global_allocator]
 static ALLOC: PalBumpAllocator = PalBumpAllocator;
 
@@ -112,11 +174,11 @@ mod tests {
             let x = builder.block_params(block)[0];
             let y = builder.ins().iadd_imm_s(x, 100);
             builder.ins().return_(&[y]);
-            builder.finalize(isa.frontend_config());
+            builder.finalize(jit::default_frontend_config());
         }
 
         let mut ctrl = Default::default();
-        let compiled = ctx.compile(&*isa, &mut ctrl).expect("compile simple function");
+        let compiled = ctx.compile(&isa, &mut ctrl).expect("compile simple function");
         assert!(!compiled.code_buffer().is_empty());
     }
 
@@ -182,7 +244,7 @@ mod tests {
             &code_bodies[0],
             &mut ctx.func,
             &mut fb_ctx,
-            isa.frontend_config(),
+            jit::default_frontend_config(),
             &types,
             &func_type_indices,
             call_conv,
@@ -192,7 +254,7 @@ mod tests {
         .expect("translate wasm body");
 
         let mut ctrl = Default::default();
-        let compiled = ctx.compile(&*isa, &mut ctrl).expect("compile wasm body to native machine code");
+        let compiled = ctx.compile(&isa, &mut ctrl).expect("compile wasm body to native machine code");
         assert!(!compiled.code_buffer().is_empty());
     }
 }

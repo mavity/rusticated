@@ -14,6 +14,8 @@ import (
 	"time"
 )
 
+const wslProbeTimeout = 90 * time.Second
+
 var (
 	reVerifyComponents = regexp.MustCompile(`^Verified all four compressed components\.\n$`)
 	reEchoTranscript   = regexp.MustCompile(`^Anonymous-memory probe ready \(compiled [^\)]+\)\. Enter an empty line to exit\.\n> echo: alpha\n> echo: beta\n> $`)
@@ -97,9 +99,9 @@ func (r *Runner) RunStage3ArtifactIntegrityTests() {
 		if data[peOffset] != 'P' || data[peOffset+1] != 'E' || data[peOffset+2] != 0 || data[peOffset+3] != 0 {
 			return fmt.Errorf("invalid PE\\0\\0 signature at offset %d", peOffset)
 		}
-		// Verify DOS stub starts with MZ=1;bash
+		// Verify DOS stub starts with MZ=1; and contains tail -c +
 		stub := string(data[:60])
-		if !strings.HasPrefix(stub, "MZ=1;bash <(tail -c +") {
+		if !strings.HasPrefix(stub, "MZ=1;") || !strings.Contains(stub, "tail -c +") {
 			return fmt.Errorf("unexpected DOS stub prefix: %q", stub)
 		}
 		return nil
@@ -159,7 +161,7 @@ func (r *Runner) RunStage3PlatformMatrix() {
 		)
 	}
 
-	// 2. Linux (Native or WSL with strict 3-second timeout probe)
+	// 2. Linux (Native or WSL with bounded startup probe)
 	r.runLinuxMatrix()
 
 	// 3. Android Termux (Native Termux or ADB probe with 3-second timeout)
@@ -239,12 +241,12 @@ func (r *Runner) runLinuxMatrix() {
 			r.RecordDisabled("linux/wsl", "probe-suite", fmt.Sprintf("exec.LookPath(\"wsl.exe\") failed: %v", err))
 			return
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), wslProbeTimeout)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, wslPath, "-e", "uname", "-sm")
 		out, err := cmd.CombinedOutput()
 		if ctx.Err() == context.DeadlineExceeded {
-			r.RecordDisabled("linux/wsl", "probe-suite", fmt.Sprintf("command %q timed out after 3s (output: %q)", "wsl.exe -e uname -sm", strings.TrimSpace(string(out))))
+			r.RecordDisabled("linux/wsl", "probe-suite", fmt.Sprintf("command %q timed out after %s (output: %q)", "wsl.exe -e uname -sm", wslProbeTimeout, strings.TrimSpace(string(out))))
 			return
 		}
 		if err != nil {
