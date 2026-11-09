@@ -10,6 +10,7 @@ import (
 
 	"github.com/charmbracelet/x/input"
 	"github.com/mavity/rusticated/kabibi/ui"
+	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
 
 func TestCompletionContextRecognizesCommandPositions(t *testing.T) {
@@ -358,31 +359,60 @@ func TestAICompletionUsesRuntimeToolSchemas(t *testing.T) {
 	assertCandidate("ai login git", "github-copilot")
 }
 
-func TestPromptInputExplicitCompletionCyclesAndAccepts(t *testing.T) {
+func TestPromptInputExplicitCompletionCyclesAndEscapeRestoresOriginal(t *testing.T) {
 	p := NewPromptInput(PromptInputOptions{
 		Complete: func(string, int) []completionCandidate {
 			return []completionCandidate{
-				{Display: "status", Insert: "atus", Space: true},
-				{Display: "stash", Insert: "ash", Space: true},
+				{Display: "status", Insert: "atus"},
+				{Display: "stash", Insert: "ash"},
 			}
 		},
 	})
-	p.SetValue("git st")
+	p.SetValue("git st-tail")
+	p.SetCursorPos(len([]rune("git st")))
 	if !p.RequestCompletion() || !p.CompletionActive() {
-		t.Fatal("explicit completion did not activate candidate selection")
+		t.Fatal("explicit completion did not activate candidate list")
 	}
 	waitForExplicitCompletion(t, p)
-	if p.Value() != "git st" {
-		t.Fatalf("completion changed input before acceptance: %q", p.Value())
+	if p.Value() != "git st-tail" {
+		t.Fatalf("completion changed input before selection: %q", p.Value())
+	}
+	p.mu.Lock()
+	selected := p.completion.selected
+	p.mu.Unlock()
+	if selected != -1 {
+		t.Fatalf("initial completion selection = %d, want no selection", selected)
+	}
+	if p.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter}) {
+		t.Fatal("Enter should pass through rather than accept a completion")
+	}
+	if p.Value() != "git st-tail" {
+		t.Fatalf("Enter changed unselected input: %q", p.Value())
 	}
 	if !p.HandleEvent(input.KeyPressEvent{Code: input.KeyRight}) {
-		t.Fatal("right arrow did not select the next candidate")
+		t.Fatal("right arrow did not select the first candidate")
 	}
-	if !p.AcceptCompletion() {
-		t.Fatal("Enter acceptance did not accept the selected candidate")
+	if got, want := p.Value(), "git status-tail"; got != want {
+		t.Fatalf("first inline preview = %q, want %q", got, want)
 	}
-	if got, want := p.Value(), "git stash "; got != want {
-		t.Fatalf("accepted input = %q, want %q", got, want)
+	buf, _ := renderANSIForTest(t, p.Render(ui.Rect{W: 40, H: 4}, ui.RenderContext{}), 40, 4)
+	if !buf.Get(8, 0).Style.HasAttribute(terminal.CharUnderline) {
+		t.Fatal("selected inline completion was not underlined")
+	}
+	if !p.RequestCompletion() {
+		t.Fatal("Tab did not cycle the active completion")
+	}
+	if got, want := p.Value(), "git stash-tail"; got != want {
+		t.Fatalf("second inline preview = %q, want %q", got, want)
+	}
+	if !p.HandleEvent(input.KeyPressEvent{Code: input.KeyEscape}) {
+		t.Fatal("Escape did not dismiss the active completion")
+	}
+	if got, want := p.Value(), "git st-tail"; got != want {
+		t.Fatalf("Escape-restored input = %q, want %q", got, want)
+	}
+	if got, want := p.CursorPos(), len([]rune("git st")); got != want {
+		t.Fatalf("Escape-restored cursor = %d, want %d", got, want)
 	}
 }
 
@@ -526,6 +556,12 @@ func TestPromptInputSpeculativeGhostAndRightArrowPrecedence(t *testing.T) {
 	if got := buf.Get(8, 0).Style.Foreground(); got != 0x808080 {
 		t.Fatalf("ghost foreground = %#x, want gray", got)
 	}
+	if !buf.Get(8, 0).Style.HasAttribute(terminal.CharUnderline) {
+		t.Fatal("ghost completion was not underlined")
+	}
+	if buf.Get(12, 0).Style.HasAttribute(terminal.CharUnderline) {
+		t.Fatal("completion-added trailing space was underlined")
+	}
 	if p.Value() != "git st" {
 		t.Fatalf("ghost rendering changed input: %q", p.Value())
 	}
@@ -556,10 +592,10 @@ func TestPromptInputSpeculativeGhostAndRightArrowPrecedence(t *testing.T) {
 	}
 	p.mu.Unlock()
 	if !p.HandleEvent(input.KeyPressEvent{Code: input.KeyRight}) {
-		t.Fatal("Right Arrow did not accept unique completion")
+		t.Fatal("Right Arrow was not handled")
 	}
-	if got, want := p.Value(), "git status "; got != want {
-		t.Fatalf("Right Arrow accepted value = %q, want %q", got, want)
+	if got, want := p.Value(), "git st"; got != want {
+		t.Fatalf("Right Arrow accepted weak completion: %q, want %q", got, want)
 	}
 }
 
@@ -627,7 +663,7 @@ func TestPromptInputSpeculativeMultipleChoicesRequireActivation(t *testing.T) {
 	if !ready {
 		t.Fatal("multiple speculative options were not rendered")
 	}
-	if p.AcceptCompletion() {
+	if p.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter}) {
 		t.Fatal("Enter accepted a speculative option without activation")
 	}
 	if p.Value() != "git st" {
@@ -635,5 +671,37 @@ func TestPromptInputSpeculativeMultipleChoicesRequireActivation(t *testing.T) {
 	}
 	if !p.RequestCompletion() || !p.CompletionActive() {
 		t.Fatal("Tab did not activate speculative choices")
+	}
+	if got, want := p.Value(), "git status "; got != want {
+		t.Fatalf("Tab did not preview the first speculative match: %q, want %q", got, want)
+	}
+	if !p.HandleEvent(input.KeyPressEvent{Code: input.KeyEscape}) {
+		t.Fatal("Escape did not dismiss promoted speculative choices")
+	}
+	if got, want := p.Value(), "git st"; got != want {
+		t.Fatalf("Escape did not restore speculative input: %q", got)
+	}
+}
+
+func TestCompletionMenuSelectedStyle(t *testing.T) {
+	state := &promptCompletionState{
+		candidates: []completionCandidate{
+			{Display: "status"},
+			{Display: "stash"},
+		},
+		active:   true,
+		selected: 1,
+	}
+	buf := ui.NewCellBuf(20, 1)
+	renderCompletionMenu(&buf, 0, state)
+
+	unselected := buf.Get(0, 0).Style
+	if unselected.Foreground() != 0x808080 || unselected.HasAttribute(terminal.CharUnderline) {
+		t.Fatalf("unselected hint style = %#v, want gray without underline", unselected)
+	}
+	selected := buf.Get(8, 0).Style
+	if !selected.HasAttribute(terminal.CharResetForegroundDefault) ||
+		!selected.HasAttribute(terminal.CharUnderline) {
+		t.Fatalf("selected hint style = %#v, want default foreground with underline", selected)
 	}
 }

@@ -1858,9 +1858,6 @@ func (s *Shell) handleKeyEvent(ev input.KeyPressEvent) bool {
 		s.input.RequestCompletion()
 		return true
 	}
-	if keyStr == "enter" && s.input.AcceptCompletion() {
-		return true
-	}
 	if keyStr == "enter" {
 		if s.input.Value() == "" && s.openLatestOutputURL() {
 			return true

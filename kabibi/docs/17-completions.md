@@ -250,8 +250,8 @@ The prompt has three completion states:
 1. **Idle:** no completion is displayed.
 2. **Speculative:** an uncommitted gray ghost suffix or gray candidate row is
    displayed.
-3. **Active:** candidates are selectable and Enter accepts the selected
-   candidate.
+3. **Active:** candidates are selectable; a selected candidate is previewed
+   inline and can be undone with Escape.
 
 Every result is tied to the input generation, cursor position, working
 directory, and relevant environment/cache key. Ignore late results after any
@@ -270,9 +270,10 @@ When the shell prompt owns input:
 - One candidate is applied immediately.
 - Multiple candidates enter active state immediately; do not wait for a second
   Tab and do not insert a partial common prefix. Show candidates in the
-  reserved row, select the first, use left/right to change selection, Tab to
-  cycle, and Enter to apply the selected candidate. Escape dismisses the list
-  without changing input.
+  reserved row without initially selecting one. Left/right or a subsequent Tab
+  selects and previews a candidate inline; further navigation replaces that
+  preview. Escape restores the exact input and cursor from before the first
+  Tab. Enter is not a completion-acceptance key: it submits the line as shown.
 - Zero candidates leave input and cursor unchanged.
 
 An accepted directory candidate ends in `/` and does not append a space. An
@@ -288,35 +289,37 @@ not restart the timer. If the cursor moves, input changes, session state
 changes, the prompt loses ownership, or a command starts, discard the
 speculative result.
 
-- One candidate: render its insertion text in gray at the exact insertion
-  point. The ghost is presentation-only; it is not in `PromptInput.Value`,
+- One candidate: render its insertion text in gray and underlined at the exact
+  insertion point. The ghost is presentation-only; it is not in `PromptInput.Value`,
   command history, command classification, or submitted input.
-- Multiple candidates: render them in gray in the reserved row. Do not select
-  one or change input.
+- Multiple candidates: render them in gray without underlining in the reserved
+  row. Do not select one or change input.
 - Zero candidates: render nothing.
 - A speculative list is not active: arrows do not select it and Enter submits
   the text actually typed.
 - Tab or Ctrl+Space promotes a speculative result to explicit behavior. For
-  one candidate, accept it; for multiple candidates, activate the list and
-  select its first entry.
+  one candidate, insert it immediately; for multiple candidates, activate the
+  list and immediately preview its first entry, as if a second Tab had been
+  pressed.
 
-For a unique ghost, Tab accepts it. Right Arrow accepts it only when the
-cursor is at the end of actual input and there is no character to the right of
-the insertion point. If an actual character is to the right, normal Right
-Arrow movement takes precedence: discard the ghost, move right by one actual
-character, and do not insert the suggestion. Enter always discards the ghost
-and submits only actual input.
+Escape hides a speculative result without changing input. Arrow keys never
+accept or select a speculative result; they retain their ordinary cursor
+behavior. Enter submits only the text actually typed while a result remains
+speculative.
 
 Any text edit dismisses a speculative result before applying the edit. In
-active state, text edits dismiss the candidate list and then edit actual input.
+active state, text edits keep the inline preview as input and dismiss the
+candidate list.
 
 ### 5.3 Candidate-row rendering
 
 Use the existing single reserved footer row beneath the prompt. Do not change
 prompt wrapping or allocate a second permanent footer row.
 
-- Speculative candidate rows use muted gray and have no selection marker.
-- Active rows distinguish the selected candidate from others.
+- Uncommitted inline completion text is underlined.
+- Speculative candidate rows use muted gray with no underline.
+- Active selected candidates use the normal text color and underline;
+  non-selected candidates use gray with no underline.
 - Render candidates in deterministic order. If the list does not fit, keep the
   selected candidate visible, clip the rest with an omission indicator, and
   allow selection through the complete set.
@@ -399,10 +402,10 @@ Test prompt state transitions with deterministic time and direct key events:
 - The one-second threshold, stale-result rejection, unique ghost rendering,
   speculative multi-choice row, and zero-result no-op.
 - Enter submits only actual text from either speculative state.
-- Tab and Ctrl+Space promote/accept as specified.
-- Left/right/Tab selection and Enter acceptance in active state.
-- Ghost acceptance by Tab and by Right Arrow at end; right-arrow precedence
-  when text exists to the right.
+- Tab and Ctrl+Space promote speculative completions as specified.
+- Left/right/Tab selection previews inline; Escape restores the original line.
+- Weak completion arrows do not accept suggestions; single weak candidates are
+  accepted only by Tab or Ctrl+Space.
 - Editing, cursor movement, escape, submit, and reset dismiss or invalidate
   completion as specified.
 - Cell-level assertions for gray ghost text, speculative row, active
@@ -448,8 +451,8 @@ build path for dependent Rusticated modules.
 5. Completion offers useful option, enum, command, and path candidates where
    definitions or safe value-kind evidence exist; full-fidelity positional
    grammar for every command is not required.
-6. Explicit and speculative UI behavior matches Section 5, including Enter/
-   ghost and right-arrow/suffix precedence.
+6. Explicit and speculative UI behavior matches Section 5, including preview
+   rollback, inline underline, and hint-row selection styles.
 7. Tab routing with visible blue panels remains unchanged, Ctrl+Space works
    with either panel state, and the reserved row does not disturb prompt layout.
 8. Focused and relevant module tests pass.
