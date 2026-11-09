@@ -8,6 +8,30 @@ import (
 	"runtime"
 )
 
+type runtimeScenario struct {
+	name string
+	arg  string
+}
+
+var runtimeScenarios = []runtimeScenario{
+	{name: "empty-function-codegen", arg: "empty"},
+	{name: "store-only-codegen", arg: "store"},
+	{name: "integer-add-store-codegen", arg: "add"},
+	{name: "load-add-store-cold-and-warm", arg: "load-add-store"},
+}
+
+func runRuntimeScenarios(r *Runner, suite, hostExe, runtimeBin string) {
+	for _, scenario := range runtimeScenarios {
+		scenario := scenario
+		r.RunTest(suite, scenario.name, func() error {
+			cmd := exec.Command(hostExe, "--test-runtime", runtimeBin, scenario.arg)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			return cmd.Run()
+		})
+	}
+}
+
 func (r *Runner) RunStage3CraneliftRuntimeTests() {
 	compDir := filepath.Join(r.BuildDir, "components")
 	rtAarch64 := filepath.Join(compDir, "runtime-aarch64.bin")
@@ -16,40 +40,31 @@ func (r *Runner) RunStage3CraneliftRuntimeTests() {
 	if runtime.GOOS == "windows" {
 		if runtime.GOARCH == "arm64" {
 			// 1. Native AArch64 Movable Cranelift Runtime Slice
-			r.RunTest("runtime/aarch64-native", "cold-jit-and-warm-retriggers", func() error {
-				cmd := exec.Command(r.DistExe, "--test-runtime", rtAarch64)
-				cmd.Stdout = os.Stdout
-				cmd.Stderr = os.Stderr
-				return cmd.Run()
-			})
+			runRuntimeScenarios(r, "runtime/aarch64-native", r.DistExe, rtAarch64)
 
 			// 2. Emulated x86_64 Movable Cranelift Runtime Slice
 			x64Exe := filepath.Join(r.BuildDir, "MohabbatWindowsHost-x64.exe")
 			if _, err := os.Stat(x64Exe); err == nil {
-				r.RunTest("runtime/x86_64-emulated", "cold-jit-and-warm-retriggers", func() error {
-					cmd := exec.Command(x64Exe, "--test-runtime", rtX86_64)
-					cmd.Stdout = os.Stdout
-					cmd.Stderr = os.Stderr
-					return cmd.Run()
-				})
+				runRuntimeScenarios(r, "runtime/x86_64-emulated", x64Exe, rtX86_64)
 			} else {
-				r.RecordDisabled("runtime/x86_64-emulated", "cold-jit-and-warm-retriggers", fmt.Sprintf("x64 host binary not available: %v", err))
+				for _, scenario := range runtimeScenarios {
+					r.RecordDisabled("runtime/x86_64-emulated", scenario.name, fmt.Sprintf("x64 host binary not available: %v", err))
+				}
 			}
 		} else if runtime.GOARCH == "amd64" {
-			r.RunTest("runtime/x86_64-native", "cold-jit-and-warm-retriggers", func() error {
-				cmd := exec.Command(r.DistExe, "--test-runtime", rtX86_64)
-				cmd.Stdout = os.Stdout
-				cmd.Stderr = os.Stderr
-				return cmd.Run()
-			})
-			r.RecordDisabled("runtime/aarch64", "cold-jit-and-warm-retriggers", "Windows amd64 host cannot execute AArch64 movable machine code natively")
+			runRuntimeScenarios(r, "runtime/x86_64-native", r.DistExe, rtX86_64)
+			for _, scenario := range runtimeScenarios {
+				r.RecordDisabled("runtime/aarch64", scenario.name, "Windows amd64 host cannot execute AArch64 movable machine code natively")
+			}
 		}
 		return
 	}
 
-	r.RecordDisabled(
-		"runtime/jit-slice",
-		"cold-jit-and-warm-retriggers",
-		fmt.Sprintf("host GOOS=%s runtime loader harness not yet wired (tested on Windows CLR host)", runtime.GOOS),
-	)
+	for _, scenario := range runtimeScenarios {
+		r.RecordDisabled(
+			"runtime/jit-slice",
+			scenario.name,
+			fmt.Sprintf("host GOOS=%s runtime loader harness not yet wired (tested on Windows CLR host)", runtime.GOOS),
+		)
+	}
 }

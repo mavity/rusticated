@@ -41,4 +41,33 @@ unsafe impl GlobalAlloc for PalBumpAllocator {
     unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
         // Bump arena freed in bulk or reclaimed after cold-start compilation completes.
     }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        if new_size == 0 {
+            self.dealloc(ptr, layout);
+            return ptr::null_mut();
+        }
+
+        let new_layout = match Layout::from_size_align(new_size, layout.align()) {
+            Ok(layout) => layout,
+            Err(_) => return ptr::null_mut(),
+        };
+        let new_ptr = self.alloc(new_layout);
+        if new_ptr.is_null() {
+            return ptr::null_mut();
+        }
+
+        let copy_size = layout.size().min(new_size);
+        let mut i = 0;
+        while i < copy_size {
+            let value = ptr::read_volatile(ptr.add(i).cast::<core::mem::MaybeUninit<u8>>());
+            ptr::write_volatile(
+                new_ptr.add(i).cast::<core::mem::MaybeUninit<u8>>(),
+                value,
+            );
+            i += 1;
+        }
+        self.dealloc(ptr, layout);
+        new_ptr
+    }
 }

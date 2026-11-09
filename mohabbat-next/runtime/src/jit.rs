@@ -11,11 +11,13 @@ use cranelift_codegen::ir::{
     self, AbiParam, ExternalName, Function, InstBuilder, MemFlagsData, Signature, TrapCode,
     UserExternalName, UserFuncName, Value,
 };
-use cranelift_codegen::isa::{self, CallConv, OwnedTargetIsa};
-use cranelift_codegen::settings::{self, Configurable};
+use cranelift_codegen::isa::{self, CallConv, TargetFrontendConfig};
+use cranelift_codegen::settings;
 use cranelift_codegen::{Context, FinalizedMachReloc, FinalizedRelocTarget};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
-use target_lexicon::{Architecture, BinaryFormat, Environment, OperatingSystem, Triple, Vendor};
+use target_lexicon::{
+    Architecture, BinaryFormat, Environment, OperatingSystem, PointerWidth, Triple, Vendor,
+};
 use wasmparser::{BinaryReaderError, FuncType, Imports, Operator, Parser, Payload, ValType};
 
 const WASM_PAGE_SIZE: usize = 65536;
@@ -84,29 +86,57 @@ fn functype_to_sig(ft: &FuncType, call_conv: CallConv) -> Signature {
     sig
 }
 
-pub fn create_target_isa() -> OwnedTargetIsa {
-    let mut flag_builder = settings::builder();
-    let _ = flag_builder.set("opt_level", "none");
-    let _ = flag_builder.set("regalloc_algorithm", "single_pass");
-    let _ = flag_builder.set("enable_verifier", "false");
-    let _ = flag_builder.set("use_colocated_libcalls", "false");
-    let _ = flag_builder.set("is_pic", "false");
-    let flags = settings::Flags::new(flag_builder);
+#[cfg(target_arch = "x86_64")]
+pub type ConcreteTargetIsa = cranelift_codegen::isa::x64::X64Backend;
+#[cfg(target_arch = "aarch64")]
+pub type ConcreteTargetIsa = cranelift_codegen::isa::aarch64::AArch64Backend;
+
+pub fn create_target_isa() -> ConcreteTargetIsa {
+    // Construct shared::Flags directly from its 12-byte representation (zero DESCRIPTORS / TEMPLATE tables!):
+    // Byte 0: regalloc_algorithm = 1 (SinglePass)
+    // Byte 1: opt_level = 0 (None)
+    // Byte 4: probestack_size_log2 = 12
+    let mut flag_bytes = [0u8; 12];
+    flag_bytes[0] = 1;
+    flag_bytes[4] = 12;
+    let flags: settings::Flags = unsafe { core::mem::transmute(flag_bytes) };
 
     #[cfg(target_arch = "x86_64")]
-    let arch = Architecture::X86_64;
+    {
+        let triple = Triple {
+            architecture: Architecture::X86_64,
+            vendor: Vendor::Unknown,
+            operating_system: OperatingSystem::None_,
+            environment: Environment::Unknown,
+            binary_format: BinaryFormat::Unknown,
+        };
+        let x64_flags: cranelift_codegen::isa::x64::settings::Flags =
+            unsafe { core::mem::zeroed() };
+        cranelift_codegen::isa::x64::X64Backend::new_with_flags(triple, flags, x64_flags).unwrap()
+    }
+
     #[cfg(target_arch = "aarch64")]
-    let arch = Architecture::Aarch64(target_lexicon::Aarch64Architecture::Aarch64);
+    {
+        let triple = Triple {
+            architecture: Architecture::Aarch64(target_lexicon::Aarch64Architecture::Aarch64),
+            vendor: Vendor::Unknown,
+            operating_system: OperatingSystem::None_,
+            environment: Environment::Unknown,
+            binary_format: BinaryFormat::Unknown,
+        };
+        let arm64_flags: cranelift_codegen::isa::aarch64::settings::Flags =
+            unsafe { core::mem::zeroed() };
+        cranelift_codegen::isa::aarch64::AArch64Backend::new_with_flags(triple, flags, arm64_flags)
+    }
+}
 
-    let triple = Triple {
-        architecture: arch,
-        vendor: Vendor::Unknown,
-        operating_system: OperatingSystem::None_,
-        environment: Environment::Unknown,
-        binary_format: BinaryFormat::Unknown,
-    };
-
-    isa::lookup(triple).unwrap().finish(flags).unwrap()
+#[inline(always)]
+pub fn default_frontend_config() -> TargetFrontendConfig {
+    TargetFrontendConfig {
+        default_call_conv: default_call_conv(),
+        pointer_width: PointerWidth::U64,
+        page_size_align_log2: 12,
+    }
 }
 
 #[inline(always)]
@@ -126,6 +156,7 @@ pub unsafe fn compile_and_initialize_wasm() {
     if host.wasm_bytes.is_null() || host.wasm_len == 0 {
         return;
     }
+    (host.rusticated_debug)(1);
     let wasm = core::slice::from_raw_parts(host.wasm_bytes, host.wasm_len);
     let isa = create_target_isa();
     let call_conv = default_call_conv();
@@ -194,15 +225,18 @@ pub unsafe fn compile_and_initialize_wasm() {
             _ => {}
         }
     }
+    (host.rusticated_debug)(2);
 
     // 1. Allocate guest linear memory via PAL
     let g = globals();
     let mem_len = initial_mem_pages.max(1) * WASM_PAGE_SIZE;
     let mem_cap = max_mem_pages.max(initial_mem_pages).max(1) * WASM_PAGE_SIZE;
+    (host.rusticated_debug)(10);
     let mem_ptr = (host.alloc_mem)(mem_len, WASM_PAGE_SIZE, MEM_READWRITE);
     if mem_ptr.is_null() {
         (host.host_panic)(b"guest memory allocation failed".as_ptr(), 30);
     }
+    (host.rusticated_debug)(11);
     g.guest_mem_base = mem_ptr;
     g.guest_mem_len = mem_len;
     g.guest_mem_cap = mem_cap;
@@ -214,6 +248,7 @@ pub unsafe fn compile_and_initialize_wasm() {
     let mut compiled_blobs: Vec<CompiledFuncBlob> = Vec::with_capacity(code_bodies.len());
 
     for (local_idx, body) in code_bodies.iter().enumerate() {
+        let stage = 100 + (local_idx as i32) * 10;
         let func_idx = num_imported_funcs + (local_idx as u32);
         let sig_idx = func_type_indices[func_idx as usize] as usize;
         let sig = functype_to_sig(&types[sig_idx], call_conv);
@@ -223,11 +258,12 @@ pub unsafe fn compile_and_initialize_wasm() {
 
         let g_mem_base = g.guest_mem_base;
         let g_mem_len = g.guest_mem_len;
+        (host.rusticated_debug)(stage);
         if translate_wasm_body_with_mem(
             body,
             &mut ctx.func,
             &mut fb_ctx,
-            isa.frontend_config(),
+            default_frontend_config(),
             &types,
             &func_type_indices,
             call_conv,
@@ -238,10 +274,17 @@ pub unsafe fn compile_and_initialize_wasm() {
         {
             (host.host_panic)(b"wasm translation failed".as_ptr(), 23);
         }
-
-        if ctx.compile(&*isa, &mut ctrl_plane).is_err() {
+        (host.rusticated_debug)(stage + 1);
+        (host.rusticated_debug)(stage + 2);
+        if ctx
+            .compile_with_hook(&isa, &mut ctrl_plane, |phase| {
+                (host.rusticated_debug)(stage + 10 + phase as i32);
+            })
+            .is_err()
+        {
             (host.host_panic)(b"cranelift compile failed".as_ptr(), 24);
         }
+        (host.rusticated_debug)(stage + 3);
         let compiled = ctx.compiled_code().unwrap();
 
         let mut relocs = Vec::new();
@@ -276,6 +319,7 @@ pub unsafe fn compile_and_initialize_wasm() {
             veneer_count,
         });
     }
+    (host.rusticated_debug)(2000);
 
     // 3. Pack compiled functions into a contiguous RW JIT arena & patch relocations
     let mut func_offsets: Vec<usize> = Vec::with_capacity(compiled_blobs.len());
@@ -291,6 +335,7 @@ pub unsafe fn compile_and_initialize_wasm() {
     }
 
     let arena_size = (total_code_size + 16383) & !16383;
+    (host.rusticated_debug)(2001);
     let code_base = (host.alloc_mem)(arena_size, 16384, MEM_CODE_JIT_RW);
     if code_base.is_null() {
         (host.host_panic)(b"jit code allocation failed".as_ptr(), 26);
@@ -300,6 +345,7 @@ pub unsafe fn compile_and_initialize_wasm() {
         let dst = code_base.add(func_offsets[i]);
         ptr::copy_nonoverlapping(blob.code.as_ptr(), dst, blob.code.len());
     }
+    (host.rusticated_debug)(2002);
 
     // Patch intra-module calls
     for (i, blob) in compiled_blobs.iter().enumerate() {
@@ -351,11 +397,13 @@ pub unsafe fn compile_and_initialize_wasm() {
             }
         }
     }
+    (host.rusticated_debug)(2003);
 
     // 4. Finalize W^X permissions and instruction cache
     (host.protect_mem)(code_base, arena_size, MEM_CODE_EXEC_RX);
+    (host.rusticated_debug)(2004);
     (host.flush_icache)(code_base, arena_size);
-
+    (host.rusticated_debug)(2005);
     g.jit_code_base = code_base;
     g.jit_code_len = arena_size;
 

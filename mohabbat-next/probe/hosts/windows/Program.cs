@@ -72,9 +72,11 @@ internal static class Program
         {
             return RunUnitTests();
         }
-        if (args.Length == 2 && args[0] == "--test-runtime")
+        if ((args.Length == 2 || args.Length == 3) && args[0] == "--test-runtime")
         {
-            return RunCraneliftRuntimeTest(args[1]);
+            return RunCraneliftRuntimeTest(
+                args[1],
+                args.Length == 3 ? args[2] : "load-add-store");
         }
         if (args.Length != 0)
         {
@@ -241,24 +243,44 @@ internal static class Program
     private delegate void RuntimeHostPanicCallback(IntPtr msgPtr, UIntPtr msgLen);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void RuntimeDebugCallback(int value);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void RuntimeSliceEntry();
 
     private static IntPtr RuntimeAllocMem(UIntPtr size, UIntPtr align, uint flags)
     {
-        return VirtualAlloc(IntPtr.Zero, size, MemCommit | MemReserve, PageExecuteReadWrite);
+        Console.WriteLine(
+            "INFO: runtime allocation requested (size=" + size.ToUInt64()
+            + ", align=" + align.ToUInt64() + ", flags=" + flags + ")");
+        IntPtr address = VirtualAlloc(
+            IntPtr.Zero,
+            size,
+            MemCommit | MemReserve,
+            PageExecuteReadWrite);
+        if (address == IntPtr.Zero)
+        {
+            WriteLastError("VirtualAlloc from runtime PAL callback");
+        }
+        return address;
     }
 
     private static int RuntimeProtectMem(IntPtr ptr, UIntPtr size, uint flags)
     {
+        Console.WriteLine(
+            "INFO: runtime protection requested (size=" + size.ToUInt64()
+            + ", flags=" + flags + ")");
         return 0;
     }
 
     private static void RuntimeFreeMem(IntPtr ptr, UIntPtr size)
     {
+        Console.WriteLine("INFO: runtime free requested (size=" + size.ToUInt64() + ")");
     }
 
     private static void RuntimeFlushIcache(IntPtr ptr, UIntPtr size)
     {
+        Console.WriteLine("INFO: runtime instruction-cache flush requested");
         FlushInstructionCache(GetCurrentProcess(), ptr, size);
     }
 
@@ -269,25 +291,80 @@ internal static class Program
         Environment.Exit(99);
     }
 
-    private static int RunCraneliftRuntimeTest(string runtimeBinPath)
+    private static void RuntimeDebug(int value)
     {
-        byte[] runtimeBytes = File.ReadAllBytes(runtimeBinPath);
-        byte[] wasmBytes = new byte[] {
+        Console.WriteLine("INFO: runtime checkpoint " + value);
+    }
+
+    private static byte[] BuildRuntimeTestWasm(string scenario)
+    {
+        byte[] body;
+        switch (scenario)
+        {
+            case "empty":
+                body = new byte[] { 0x00, 0x0b };
+                break;
+            case "store":
+                body = new byte[] {
+                    0x00, 0x41, 0x00, 0x41, 0x07, 0x36, 0x02, 0x00, 0x0b
+                };
+                break;
+            case "add":
+                body = new byte[] {
+                    0x00, 0x41, 0x00, 0x41, 0x03, 0x41, 0x04, 0x6a,
+                    0x36, 0x02, 0x00, 0x0b
+                };
+                break;
+            case "load-add-store":
+                body = new byte[] {
+                    0x00, 0x41, 0x00, 0x41, 0x00, 0x28, 0x02, 0x00,
+                    0x41, 0x07, 0x6a, 0x36, 0x02, 0x00, 0x0b
+                };
+                break;
+            default:
+                throw new ArgumentException("Unknown runtime WASM scenario: " + scenario);
+        }
+
+        byte[] moduleHeader = new byte[] {
             0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
             0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
             0x03, 0x02, 0x01, 0x00,
             0x05, 0x03, 0x01, 0x00, 0x01,
-            0x07, 0x07, 0x01, 0x03, (byte)'r', (byte)'u', (byte)'n', 0x00, 0x00,
-            0x0a, 0x11, 0x01,
-            0x0f, 0x00,
-            0x41, 0x00,
-            0x41, 0x00,
-            0x28, 0x02, 0x00,
-            0x41, 0x07,
-            0x6a,
-            0x36, 0x02, 0x00,
-            0x0b
+            0x07, 0x07, 0x01, 0x03, (byte)'r', (byte)'u', (byte)'n', 0x00, 0x00
         };
+        byte[] codePayload = new byte[body.Length + 2];
+        codePayload[0] = 0x01;
+        codePayload[1] = (byte)body.Length;
+        Array.Copy(body, 0, codePayload, 2, body.Length);
+
+        byte[] wasmBytes = new byte[moduleHeader.Length + codePayload.Length + 2];
+        Array.Copy(moduleHeader, wasmBytes, moduleHeader.Length);
+        int codeSectionOffset = moduleHeader.Length;
+        wasmBytes[codeSectionOffset] = 0x0a;
+        wasmBytes[codeSectionOffset + 1] = (byte)codePayload.Length;
+        Array.Copy(codePayload, 0, wasmBytes, codeSectionOffset + 2, codePayload.Length);
+        return wasmBytes;
+    }
+
+    private static int RunCraneliftRuntimeTest(string runtimeBinPath, string scenario)
+    {
+        byte[] runtimeBytes = File.ReadAllBytes(runtimeBinPath);
+        byte[] wasmBytes = BuildRuntimeTestWasm(scenario);
+        int firstExpected = 0;
+        int secondExpected = 0;
+        int thirdExpected = 0;
+        switch (scenario)
+        {
+            case "store":
+            case "add":
+                firstExpected = secondExpected = thirdExpected = 7;
+                break;
+            case "load-add-store":
+                firstExpected = 7;
+                secondExpected = 14;
+                thirdExpected = 21;
+                break;
+        }
 
         GCHandle wasmPin = GCHandle.Alloc(wasmBytes, GCHandleType.Pinned);
         RuntimeAllocMemCallback allocMem = RuntimeAllocMem;
@@ -295,6 +372,7 @@ internal static class Program
         RuntimeFreeMemCallback freeMem = RuntimeFreeMem;
         RuntimeFlushIcacheCallback flushIcache = RuntimeFlushIcache;
         RuntimeHostPanicCallback hostPanic = RuntimeHostPanic;
+        RuntimeDebugCallback debug = RuntimeDebug;
 
         int totalSize = PrefixAbiOffset + runtimeBytes.Length;
         IntPtr sliceAlloc = VirtualAlloc(
@@ -318,6 +396,7 @@ internal static class Program
             Marshal.WriteIntPtr(sliceAlloc, 4 * IntPtr.Size, Marshal.GetFunctionPointerForDelegate(freeMem));
             Marshal.WriteIntPtr(sliceAlloc, 5 * IntPtr.Size, Marshal.GetFunctionPointerForDelegate(flushIcache));
             Marshal.WriteIntPtr(sliceAlloc, 6 * IntPtr.Size, Marshal.GetFunctionPointerForDelegate(hostPanic));
+            Marshal.WriteIntPtr(sliceAlloc, 7 * IntPtr.Size, Marshal.GetFunctionPointerForDelegate(debug));
 
             IntPtr sliceCode = new IntPtr(sliceAlloc.ToInt64() + PrefixAbiOffset);
             Marshal.Copy(runtimeBytes, 0, sliceCode, runtimeBytes.Length);
@@ -325,8 +404,10 @@ internal static class Program
 
             RuntimeSliceEntry entry = Marshal.GetDelegateForFunctionPointer<RuntimeSliceEntry>(sliceCode);
 
-            // Call #1 (Cold Entry: compiles WASM with Cranelift + runs "run" once -> mem[0] == 7)
+            // Call #1 compiles the selected WASM scenario and runs it once.
+            Console.WriteLine("INFO: entering runtime for cold JIT");
             entry();
+            Console.WriteLine("INFO: cold JIT entry returned");
 
             // Read RuntimeGlobals at -0x10000 (sliceAlloc + 0x10000)
             IntPtr globalsPtr = new IntPtr(sliceAlloc.ToInt64() + 0x10000);
@@ -338,25 +419,33 @@ internal static class Program
                 return 2;
             }
             int val1 = Marshal.ReadInt32(guestMemBase, 0);
-            if (val1 != 7)
+            if (val1 != firstExpected)
             {
-                Console.Error.WriteLine("FAIL: Expected guest_mem[0] == 7 after Call #1, got " + val1);
+                Console.Error.WriteLine(
+                    "FAIL: Expected guest_mem[0] == " + firstExpected
+                    + " after Call #1, got " + val1);
                 return 3;
             }
 
-            // Call #2 & #3 (Warm Re-Triggers: immediately invokes compiled "run" -> mem[0] == 14, then 21)
+            // Calls #2 & #3 exercise warm re-entry into the already compiled function.
+            Console.WriteLine("INFO: entering runtime for first warm retrigger");
             entry();
             int val2 = Marshal.ReadInt32(guestMemBase, 0);
+            Console.WriteLine("INFO: entering runtime for second warm retrigger");
             entry();
             int val3 = Marshal.ReadInt32(guestMemBase, 0);
-            if (val2 != 14 || val3 != 21)
+            if (val2 != secondExpected || val3 != thirdExpected)
             {
-                Console.Error.WriteLine("FAIL: Expected guest_mem[0] == 14 then 21, got " + val2 + " then " + val3);
+                Console.Error.WriteLine(
+                    "FAIL: Expected guest_mem[0] == " + secondExpected + " then "
+                    + thirdExpected + ", got " + val2 + " then " + val3);
                 return 4;
             }
 
             Console.WriteLine(
-                "PASS  [runtime/" + GetArchitecture() + "] Cold JIT + 2 Warm Re-Triggers verified (mem[0]: 7 -> 14 -> 21)");
+                "PASS  [runtime/" + GetArchitecture() + "] scenario " + scenario
+                + " verified (mem[0]: " + firstExpected + " -> " + secondExpected
+                + " -> " + thirdExpected + ")");
             return 0;
         }
         finally
@@ -368,6 +457,7 @@ internal static class Program
             GC.KeepAlive(freeMem);
             GC.KeepAlive(flushIcache);
             GC.KeepAlive(hostPanic);
+            GC.KeepAlive(debug);
         }
     }
 
