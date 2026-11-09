@@ -18,7 +18,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use target_lexicon::{
     Architecture, BinaryFormat, Environment, OperatingSystem, PointerWidth, Triple, Vendor,
 };
-use wasmparser::{BinaryReaderError, FuncType, Imports, Operator, Parser, Payload, ValType};
+use wasmparser::{FuncType, Imports, Operator, Parser, Payload, ValType};
 
 const WASM_PAGE_SIZE: usize = 65536;
 const VENEER_SIZE: usize = 16;
@@ -95,10 +95,11 @@ pub fn create_target_isa() -> ConcreteTargetIsa {
     // Construct shared::Flags directly from its 12-byte representation (zero DESCRIPTORS / TEMPLATE tables!):
     // Byte 0: regalloc_algorithm = 1 (SinglePass)
     // Byte 1: opt_level = 0 (None)
-    // Byte 4: probestack_size_log2 = 12
+    // Byte 4: libcall_call_conv = 0 (IsaDefault)
+    // Byte 5: probestack_size_log2 = 12
     let mut flag_bytes = [0u8; 12];
     flag_bytes[0] = 1;
-    flag_bytes[4] = 12;
+    flag_bytes[5] = 12;
     let flags: settings::Flags = unsafe { core::mem::transmute(flag_bytes) };
 
     #[cfg(target_arch = "x86_64")]
@@ -157,6 +158,61 @@ pub unsafe fn compile_and_initialize_wasm() {
         return;
     }
     (host.rusticated_debug)(1);
+    let g = globals();
+
+    // Dynamically allocate and initialize the bumpalo empty chunk footer in the heap
+    if g.bump_empty_chunk.is_null() {
+        let chunk = (host.alloc_mem)(48, 16, MEM_READWRITE);
+        if chunk.is_null() {
+            (host.host_panic)(b"empty chunk alloc failed".as_ptr(), 24);
+        }
+        // Layout of ChunkFooter in bumpalo (48 bytes, align 16):
+        // offset 0:  data: NonNull<u8> (points to chunk)
+        // offset 8:  layout: Layout (size=48, align=16)
+        // offset 24: prev: Cell<NonNull<ChunkFooter>> (points to chunk)
+        // offset 32: ptr: Cell<NonNull<u8>> (points to chunk)
+        // offset 40: allocated_bytes: usize (0)
+        core::ptr::write(chunk.cast::<*mut u8>(), chunk);
+        core::ptr::write(chunk.add(8).cast::<usize>(), 48);
+        core::ptr::write(chunk.add(16).cast::<usize>(), 16);
+        core::ptr::write(chunk.add(24).cast::<*mut u8>(), chunk);
+        core::ptr::write(chunk.add(32).cast::<*mut u8>(), chunk);
+        core::ptr::write(chunk.add(40).cast::<usize>(), 0);
+        g.bump_empty_chunk = chunk;
+    }
+
+    // Dynamically allocate and initialize hashbrown empty control tags in the heap
+    if g.hashbrown_empty_tags.is_null() {
+        let tags = (host.alloc_mem)(64, 16, MEM_READWRITE);
+        if tags.is_null() {
+            (host.host_panic)(b"empty tags alloc failed".as_ptr(), 23);
+        }
+        core::ptr::write_bytes(tags, 0xff, 64);
+        g.hashbrown_empty_tags = tags;
+    }
+
+    // Dynamically allocate and initialize register class and type tables in the heap
+    if g.heap_rc_int.is_null() {
+        let rc_table = (host.alloc_mem)(64, 16, MEM_READWRITE);
+        if rc_table.is_null() {
+            (host.host_panic)(b"rc table alloc failed".as_ptr(), 20);
+        }
+        *rc_table = 0; // RegClass::Int
+        *rc_table.add(8) = 1; // RegClass::Float
+        *rc_table.add(16) = 0;
+        *rc_table.add(17) = 0;
+        let ty_sz = core::mem::size_of::<cranelift_codegen::ir::Type>();
+        core::ptr::write(rc_table.add(24).cast::<cranelift_codegen::ir::Type>(), cranelift_codegen::ir::types::I64);
+        core::ptr::write(rc_table.add(24 + ty_sz).cast::<cranelift_codegen::ir::Type>(), cranelift_codegen::ir::types::I64);
+        core::ptr::write(rc_table.add(32).cast::<cranelift_codegen::ir::Type>(), cranelift_codegen::ir::types::I8X16);
+
+        g.heap_rc_int = rc_table;
+        g.heap_rc_float = rc_table.add(8);
+        g.heap_rc_int_int = rc_table.add(16);
+        g.heap_ty_i64_i64 = rc_table.add(24).cast();
+        g.heap_ty_i8x16 = rc_table.add(32).cast();
+    }
+
     let wasm = core::slice::from_raw_parts(host.wasm_bytes, host.wasm_len);
     let isa = create_target_isa();
     let call_conv = default_call_conv();
@@ -276,16 +332,20 @@ pub unsafe fn compile_and_initialize_wasm() {
         }
         (host.rusticated_debug)(stage + 1);
         (host.rusticated_debug)(stage + 2);
-        if ctx
-            .compile_with_hook(&isa, &mut ctrl_plane, |phase| {
-                (host.rusticated_debug)(stage + 10 + phase as i32);
-            })
-            .is_err()
-        {
-            (host.host_panic)(b"cranelift compile failed".as_ptr(), 24);
+        (host.rusticated_debug)(150);
+        if ctx.optimize(&isa, &mut ctrl_plane).is_err() {
+            (host.host_panic)(b"optimize failed".as_ptr(), 15);
         }
+        (host.rusticated_debug)(151);
+        let stencil = match ctx.compile_stencil(&isa, &mut ctrl_plane) {
+            Ok(s) => s,
+            Err(_) => {
+                (host.host_panic)(b"compile_stencil failed".as_ptr(), 22);
+            }
+        };
+        (host.rusticated_debug)(152);
+        let compiled = stencil.apply_params(&ctx.func.params);
         (host.rusticated_debug)(stage + 3);
-        let compiled = ctx.compiled_code().unwrap();
 
         let mut relocs = Vec::new();
         let mut veneer_count = 0;
@@ -426,7 +486,7 @@ pub fn translate_wasm_body_with_mem(
     call_conv: CallConv,
     guest_mem_base: *mut u8,
     guest_mem_len: usize,
-) -> Result<(), BinaryReaderError> {
+) -> Result<(), ()> {
     let mut builder = FunctionBuilder::new(func, fb_ctx);
     let entry_block = builder.create_block();
     builder.append_block_params_for_function_params(entry_block);
@@ -441,9 +501,9 @@ pub fn translate_wasm_body_with_mem(
         builder.def_var(var, val);
     }
 
-    let mut locals_reader = body.get_locals_reader()?;
+    let mut locals_reader = body.get_locals_reader().map_err(|_| ())?;
     for _ in 0..locals_reader.get_count() {
-        let (count, wasm_ty) = locals_reader.read()?;
+        let (count, wasm_ty) = locals_reader.read().map_err(|_| ())?;
         let ir_ty = valtype_to_ir(wasm_ty);
         let zero = match ir_ty {
             I32 => builder.ins().iconst(I32, 0),
@@ -473,9 +533,9 @@ pub fn translate_wasm_body_with_mem(
     }];
     let mut reachable = true;
 
-    let mut ops_reader = body.get_operators_reader()?;
+    let mut ops_reader = body.get_operators_reader().map_err(|_| ())?;
     while !ops_reader.eof() {
-        let op = ops_reader.read()?;
+        let op = ops_reader.read().map_err(|_| ())?;
         if !reachable {
             match op {
                 Operator::Block { blockty } => {

@@ -83,6 +83,53 @@ pub unsafe extern "C" fn bcmp(lhs: *const u8, rhs: *const u8, n: usize) -> i32 {
     memcmp(lhs, rhs, n)
 }
 
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn get_bump_empty_chunk() -> *mut u8 {
+    globals().bump_empty_chunk
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn get_hashbrown_empty_tags() -> *const u8 {
+    globals().hashbrown_empty_tags
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rusticated_debug_trampoline(v: i32) {
+    (crate::abi::abi().rusticated_debug)(v);
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn get_heap_rc_int() -> *const u8 {
+    globals().heap_rc_int
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn get_heap_rc_float() -> *const u8 {
+    globals().heap_rc_float
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn get_heap_rc_int_int() -> *const u8 {
+    globals().heap_rc_int_int
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn get_heap_ty_i64_i64() -> *const u16 {
+    globals().heap_ty_i64_i64
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn get_heap_ty_i8x16() -> *const u16 {
+    globals().heap_ty_i8x16
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rusticated_debug(val: i32) {
+    unsafe {
+        (abi().rusticated_debug)(val);
+    }
+}
+
 #[cfg(not(test))]
 #[global_allocator]
 static ALLOC: PalBumpAllocator = PalBumpAllocator;
@@ -154,8 +201,42 @@ mod tests {
         assert!(size_of::<RuntimeGlobals>() <= 0x10000);
     }
 
+    fn init_test_env() {
+        unsafe {
+            let g = globals();
+            if g.bump_empty_chunk.is_null() {
+                let chunk = alloc::alloc::alloc(core::alloc::Layout::from_size_align(48, 16).unwrap());
+                core::ptr::write(chunk.cast::<*mut u8>(), chunk);
+                core::ptr::write(chunk.add(8).cast::<usize>(), 48);
+                core::ptr::write(chunk.add(16).cast::<usize>(), 16);
+                core::ptr::write(chunk.add(24).cast::<*mut u8>(), chunk);
+                core::ptr::write(chunk.add(32).cast::<*mut u8>(), chunk);
+                core::ptr::write(chunk.add(40).cast::<usize>(), 0);
+                g.bump_empty_chunk = chunk;
+            }
+            if g.hashbrown_empty_tags.is_null() {
+                let tags = alloc::alloc::alloc(core::alloc::Layout::from_size_align(64, 16).unwrap());
+                core::ptr::write_bytes(tags, 0xff, 64);
+                g.hashbrown_empty_tags = tags;
+            }
+            if g.heap_rc_int.is_null() {
+                let rc_int = alloc::boxed::Box::leak(alloc::boxed::Box::new([0u8; 1]));
+                g.heap_rc_int = rc_int.as_ptr();
+                let rc_float = alloc::boxed::Box::leak(alloc::boxed::Box::new([1u8; 1]));
+                g.heap_rc_float = rc_float.as_ptr();
+                let rc_int_int = alloc::boxed::Box::leak(alloc::boxed::Box::new([0u8; 2]));
+                g.heap_rc_int_int = rc_int_int.as_ptr();
+                let ty_i64_i64 = alloc::boxed::Box::leak(alloc::boxed::Box::new([0x0073u16; 2]));
+                g.heap_ty_i64_i64 = ty_i64_i64.as_ptr();
+                let ty_i8x16 = alloc::boxed::Box::leak(alloc::boxed::Box::new([0x00e0u16; 1]));
+                g.heap_ty_i8x16 = ty_i8x16.as_ptr();
+            }
+        }
+    }
+
     #[test]
     fn test_cranelift_target_isa_and_codegen() {
+        init_test_env();
         let isa = jit::create_target_isa();
         let mut sig = Signature::new(CallConv::SystemV);
         sig.params.push(AbiParam::new(I32));
@@ -184,6 +265,7 @@ mod tests {
 
     #[test]
     fn test_in_memory_wasm_jit_cold_and_warm_retrigger() {
+        init_test_env();
         // Minimal valid WASM module:
         //   (module
         //     (memory (export "memory") 1)

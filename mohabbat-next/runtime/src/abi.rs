@@ -143,6 +143,19 @@ pub struct RuntimeGlobals {
     pub jit_code_len:  usize,
 
     pub guest_run_fn: Option<pal_fn!(fn())>,
+
+    /// Redirection pointer to the heap-allocated bumpalo empty chunk footer.
+    pub bump_empty_chunk: *mut u8,
+
+    /// Redirection pointer to the heap-allocated hashbrown empty control tags.
+    pub hashbrown_empty_tags: *mut u8,
+
+    /// Redirection pointers to heap-allocated register classes and types for rc_for_type.
+    pub heap_rc_int: *const u8,
+    pub heap_rc_float: *const u8,
+    pub heap_rc_int_int: *const u8,
+    pub heap_ty_i64_i64: *const u16,
+    pub heap_ty_i8x16: *const u16,
 }
 
 #[inline(always)]
@@ -163,12 +176,50 @@ pub unsafe fn slice_origin() -> *mut u8 {
     addr as *mut u8
 }
 
+#[cfg(test)]
+static mut TEST_GLOBALS: RuntimeGlobals = RuntimeGlobals {
+    initialized: false,
+    guest_mem_base: core::ptr::null_mut(),
+    guest_mem_len: 0,
+    guest_mem_cap: 0,
+    heap_base: core::ptr::null_mut(),
+    heap_used: 0,
+    heap_cap: 0,
+    jit_code_base: core::ptr::null_mut(),
+    jit_code_len: 0,
+    guest_run_fn: None,
+    bump_empty_chunk: core::ptr::null_mut(),
+    hashbrown_empty_tags: core::ptr::null_mut(),
+    heap_rc_int: core::ptr::null(),
+    heap_rc_float: core::ptr::null(),
+    heap_rc_int_int: core::ptr::null(),
+    heap_ty_i64_i64: core::ptr::null(),
+    heap_ty_i8x16: core::ptr::null(),
+};
+
+#[cfg(test)]
+static mut TEST_ABI: core::mem::MaybeUninit<PalAbiTable> = core::mem::MaybeUninit::uninit();
+
 #[inline(always)]
 pub unsafe fn abi() -> &'static PalAbiTable {
-    &*(slice_origin().sub(0x20000) as *const PalAbiTable)
+    #[cfg(not(test))]
+    {
+        &*(slice_origin().sub(0x20000) as *const PalAbiTable)
+    }
+    #[cfg(test)]
+    {
+        &*(core::ptr::addr_of!(TEST_ABI).cast::<PalAbiTable>())
+    }
 }
 
 #[inline(always)]
 pub unsafe fn globals() -> &'static mut RuntimeGlobals {
-    &mut *(slice_origin().sub(0x10000) as *mut RuntimeGlobals)
+    #[cfg(not(test))]
+    {
+        &mut *(slice_origin().sub(0x10000) as *mut RuntimeGlobals)
+    }
+    #[cfg(test)]
+    {
+        &mut *(core::ptr::addr_of_mut!(TEST_GLOBALS))
+    }
 }

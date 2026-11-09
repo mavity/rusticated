@@ -49,7 +49,25 @@ func TestApplyCraneliftIsaPatches(t *testing.T) {
         ctrl_plane: &mut ControlPlane,
     ) -> CompileResult<'_, &CompiledCode> {}
 
-    pub fn canonicalize_nans(&mut self, isa: &dyn TargetIsa) -> CodegenResult<()> {}
+    pub fn canonicalize_nans(&mut self, isa: &dyn TargetIsa) -> CodegenResult<()> {
+        let has_vector_support = match isa.triple().architecture {
+            _ => true,
+        };
+    }
+
+    pub fn verify<'a, FOI: Into<FlagsOrIsa<'a>>>(&self, fisa: FOI) -> VerifierResult<()> {
+        let _ = fisa;
+        Ok(())
+    }
+
+    /// Run the verifier
+    pub fn verify_if<'a, FOI: Into<FlagsOrIsa<'a>>>(&self, fisa: FOI) -> CodegenResult<()> {
+        let _ = fisa;
+        Ok(())
+    }
+
+    /// Perform constant-phi
+    pub fn remove_constant_phis<'a, FOI: Into<FlagsOrIsa<'a>>>(&mut self, fisa: FOI) -> CodegenResult<()> {}
 
     #[deprecated]
     pub fn compile_and_emit(&mut self, isa: &dyn TargetIsa) {}
@@ -61,6 +79,10 @@ impl X64Backend {
 	manifestSource := `[dependencies.hashbrown]
 version = "0.17"
 features = ["default-hasher"]
+default-features = false
+
+[dependencies.log]
+version = "0.4.28"
 default-features = false
 `
 	libSource := `#[cfg(not(feature = "std"))]
@@ -76,7 +98,9 @@ pub type FxHashSet<V> = HashSet<V, rustc_hash::FxBuildHasher>;
         isa: &dyn TargetIsa,
         isa_flags: &M::F,
         sigs: &SigSet,
-    ) -> CodegenResult<Self> {}
+    ) -> CodegenResult<Self> {
+        let _ = CodegenError::Unsupported(format!("invalid dynamic vector type: {}", data.dyn_ty));
+    }
 }
 fn dynamic_types(f: &Function) {
     let dynamic_type_sizes = HashMap::with_capacity(f.dfg.dynamic_types.len());
@@ -86,10 +110,32 @@ fn dynamic_types(f: &Function) {
     let pool_uses = HashMap::with_capacity(expected_num_constants);
     let well_known_uses = HashMap::new();
     let u64s = HashMap::new();
+    if want_disasm && !inst.is_args() {
+        let mut s = state.clone();
+        writeln!(disasm, "  {}", inst.pretty_print_inst(&mut s)).unwrap();
+    }
+    if want_disasm {
+        writeln!(&mut disasm, "block{}:", block.index()).unwrap();
+    }
+    let user_stack_map_disasm = if want_disasm {
+        user_stack_map.as_ref().map(|m| format!("  ; {m:?}"))
+    } else {
+        None
+    };
+    (user_stack_map, user_stack_map_disasm)
+    let mut debug_tag_disasm = None;
+    if want_disasm {
+        debug_tag_disasm =
+            Some(format!("  ; ^-- debug @ {pos:?}: {tags:?}"));
+    }
 }`
 	memflagsSource := `fn make_maps() {
     let a: HashMap<u32, u32> = HashMap::new();
     let b: HashMap<u32, u32> = HashMap::new();
+}
+pub fn insert(&mut self, data: MemFlagsData) -> Result<MemFlags, MemFlagsSetOverflow> {
+    self.dedupe_map.insert(data, key);
+    Ok(key)
 }`
 	verifierSource := `fn make_map() {
     let _: HashMap<u32, u32> = crate::HashMap::new();
@@ -102,6 +148,12 @@ fn dynamic_types(f: &Function) {
         }
     }
 }`
+	timingSource := `#[doc=$desc]
+#[must_use]
+pub fn $pass() -> Box<dyn Any> {
+    start_pass(Pass::$pass)
+}`
+	lowerSource := "CodegenError::Unsupported(format!(\n    \"should be implemented in ISLE: inst = `{}`" + `, type = ` + "`{:?}`\",\n    self.f.dfg.display_inst(inst),\n    ty,\n))`"
 	if err := os.WriteFile(filepath.Join(dir, "Cargo.toml"), []byte(manifestSource), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -109,6 +161,12 @@ fn dynamic_types(f: &Function) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(contextDir, "context.rs"), []byte(contextSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(contextDir, "timing.rs"), []byte(timingSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(abiDir, "lower.rs"), []byte(lowerSource), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(abiDir, "abi.rs"), []byte(abiSource), 0o644); err != nil {
@@ -265,7 +323,12 @@ doctest = false
 	}
 
 	overlayDir := filepath.Join(rustBuildDir, craneliftOverlayName)
-	workspaceDir, err := prepareCraneliftRuntimeWorkspace(runtimeDir, rustBuildDir, overlayDir)
+	bumpaloDir := filepath.Join(rustBuildDir, bumpaloOverlayName)
+	hashbrownDir := filepath.Join(rustBuildDir, hashbrownOverlayName)
+	indexmapDir := filepath.Join(rustBuildDir, indexmapOverlayName)
+	wasmparserDir := filepath.Join(rustBuildDir, wasmparserOverlayName)
+	regalloc2Dir := filepath.Join(rustBuildDir, regalloc2OverlayName)
+	workspaceDir, err := prepareCraneliftRuntimeWorkspace(runtimeDir, rustBuildDir, overlayDir, bumpaloDir, hashbrownDir, indexmapDir, wasmparserDir, regalloc2Dir)
 	if err != nil {
 		t.Fatalf("prepare generated runtime workspace: %v", err)
 	}
@@ -278,7 +341,12 @@ doctest = false
 		t.Fatalf("generated manifest does not point at tracked runtime source:\n%s", generated)
 	}
 	if !strings.Contains(generated, `[patch.crates-io]
-cranelift-codegen = { path = "`+filepath.ToSlash(overlayDir)+`" }`) {
+cranelift-codegen = { path = "`+filepath.ToSlash(overlayDir)+`" }
+bumpalo = { path = "`+filepath.ToSlash(bumpaloDir)+`" }
+hashbrown = { path = "`+filepath.ToSlash(hashbrownDir)+`" }
+indexmap = { path = "`+filepath.ToSlash(indexmapDir)+`" }
+wasmparser = { path = "`+filepath.ToSlash(wasmparserDir)+`" }
+regalloc2 = { path = "`+filepath.ToSlash(regalloc2Dir)+`" }`) {
 		t.Fatalf("generated manifest does not patch to the Cranelift overlay:\n%s", generated)
 	}
 

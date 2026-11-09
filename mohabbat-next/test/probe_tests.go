@@ -244,7 +244,7 @@ func (r *Runner) runLinuxMatrix() {
 		ctx, cancel := context.WithTimeout(context.Background(), wslProbeTimeout)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, wslPath, "-e", "uname", "-sm")
-		out, err := cmd.CombinedOutput()
+		out, err := cmd.Output()
 		if ctx.Err() == context.DeadlineExceeded {
 			r.RecordDisabled("linux/wsl", "probe-suite", fmt.Sprintf("command %q timed out after %s (output: %q)", "wsl.exe -e uname -sm", wslProbeTimeout, strings.TrimSpace(string(out))))
 			return

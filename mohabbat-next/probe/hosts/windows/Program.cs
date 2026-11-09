@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Threading;
 using ZstdSharp;
 
 internal static class Program
@@ -406,7 +407,17 @@ internal static class Program
 
             // Call #1 compiles the selected WASM scenario and runs it once.
             Console.WriteLine("INFO: entering runtime for cold JIT");
-            entry();
+            Exception threadEx = null;
+            Thread t = new Thread(() => {
+                try {
+                    entry();
+                } catch (Exception ex) {
+                    threadEx = ex;
+                }
+            }, 8 * 1024 * 1024);
+            t.Start();
+            t.Join();
+            if (threadEx != null) throw threadEx;
             Console.WriteLine("INFO: cold JIT entry returned");
 
             // Read RuntimeGlobals at -0x10000 (sliceAlloc + 0x10000)
