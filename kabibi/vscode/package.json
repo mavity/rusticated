@@ -2,7 +2,7 @@
   "name": "kabibi-vscode",
   "displayName": "🐚︎ Kabibi Shell",
   "description": "Kabibi shell for VS Code with Copilot terminal tools",
-  "version": "0.8.31",
+  "version": "0.8.32",
   "publisher": "mihailik",
   "license": "MIT",
   "icon": "icon.png",
