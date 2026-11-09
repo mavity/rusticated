@@ -20,12 +20,16 @@ const (
 )
 
 type promptCompletionState struct {
-	candidates  []completionCandidate
-	speculative bool
-	active      bool
-	pending     bool
-	selected    int
-	insertion   string
+	candidates     []completionCandidate
+	speculative    bool
+	active         bool
+	pending        bool
+	selected       int
+	originalValue  string
+	originalCursor int
+	previewStart   int
+	previewEnd     int
+	preview        bool
 }
 
 // PromptInputOptions configures a PromptInput widget.
@@ -61,9 +65,14 @@ func (p *PromptInput) cursorMoved() {
 
 func (p *PromptInput) dismissCompletion() bool {
 	p.mu.Lock()
-	if p.completion == nil {
+	state := p.completion
+	if state == nil {
 		p.mu.Unlock()
 		return false
+	}
+	if state.preview {
+		p.value = state.originalValue
+		p.cursorPos = state.originalCursor
 	}
 	p.completion = nil
 	p.completionGeneration++
@@ -263,7 +272,7 @@ func (p *PromptInput) RequestCompletion() bool {
 	if state := p.completion; state != nil {
 		if state.active {
 			if !state.pending && len(state.candidates) > 0 {
-				state.selected = (state.selected + 1) % len(state.candidates)
+				p.cycleCompletionLocked(state, 1)
 			}
 			p.mu.Unlock()
 			p.invalidate()
@@ -272,7 +281,10 @@ func (p *PromptInput) RequestCompletion() bool {
 		if state.speculative && len(state.candidates) > 1 {
 			state.speculative = false
 			state.active = true
+			state.originalValue = p.value
+			state.originalCursor = p.cursorPos
 			state.selected = 0
+			p.previewCompletionLocked(state)
 			p.mu.Unlock()
 			p.invalidate()
 			return true
@@ -321,9 +333,11 @@ func (p *PromptInput) RequestCompletion() bool {
 			return
 		}
 		p.completion = &promptCompletionState{
-			candidates: candidates,
-			active:     true,
-			selected:   0,
+			candidates:     candidates,
+			active:         true,
+			selected:       -1,
+			originalValue:  value,
+			originalCursor: cursor,
 		}
 		p.mu.Unlock()
 		p.invalidate()
@@ -331,18 +345,31 @@ func (p *PromptInput) RequestCompletion() bool {
 	return true
 }
 
-func (p *PromptInput) AcceptCompletion() bool {
-	p.mu.Lock()
-	state := p.completion
-	if state == nil || !state.active || state.selected < 0 ||
-		state.selected >= len(state.candidates) {
-		p.mu.Unlock()
-		return false
+func (p *PromptInput) cycleCompletionLocked(state *promptCompletionState, direction int) {
+	count := len(state.candidates)
+	if count == 0 {
+		return
 	}
+	if state.selected < 0 {
+		if direction < 0 {
+			state.selected = count - 1
+		} else {
+			state.selected = 0
+		}
+	} else {
+		state.selected = (state.selected + direction + count) % count
+	}
+	p.previewCompletionLocked(state)
+}
+
+func (p *PromptInput) previewCompletionLocked(state *promptCompletionState) {
+	p.value = state.originalValue
+	p.cursorPos = state.originalCursor
 	candidate := state.candidates[state.selected]
-	p.mu.Unlock()
-	p.applyCompletion(candidate)
-	return true
+	state.previewStart = state.originalCursor
+	state.previewEnd = state.previewStart + len([]rune(candidate.Insert))
+	state.preview = true
+	p.applyCompletionLocked(candidate)
 }
 
 func (p *PromptInput) applyCompletion(candidate completionCandidate) {
@@ -877,27 +904,16 @@ func (p *PromptInput) handleKeyEvent(ev input.KeyPressEvent) bool {
 	p.mu.Lock()
 	completion := p.completion
 	if completion != nil && completion.active && (keyStr == "left" || keyStr == "right") {
-		if keyStr == "left" && completion.selected > 0 {
-			completion.selected--
-		} else if keyStr == "right" && completion.selected+1 < len(completion.candidates) {
-			completion.selected++
+		direction := 1
+		if keyStr == "left" {
+			direction = -1
 		}
+		p.cycleCompletionLocked(completion, direction)
 		p.mu.Unlock()
 		p.invalidate()
 		return true
 	}
-	speculativeRight := completion != nil && completion.speculative && keyStr == "right"
-	hasTextRight := p.cursorPos < len([]rune(p.value))
-	acceptSpeculative := speculativeRight && !hasTextRight && len(completion.candidates) == 1
-	var speculativeCandidate completionCandidate
-	if acceptSpeculative {
-		speculativeCandidate = completion.candidates[0]
-	}
 	p.mu.Unlock()
-	if acceptSpeculative {
-		p.applyCompletion(speculativeCandidate)
-		return true
-	}
 
 	switch keyStr {
 	case "backspace":
@@ -1051,17 +1067,33 @@ func clonePromptCompletion(state *promptCompletionState) *promptCompletionState 
 }
 
 func promptCompletionDisplay(value string, cursor int, state *promptCompletionState, styles []terminal.Style) (string, int, []terminal.Style) {
-	if state == nil || !state.speculative || len(state.candidates) != 1 {
+	if state == nil {
 		return value, cursor, styles
 	}
-	insert := []rune(state.candidates[0].Insert)
-	if state.candidates[0].Space {
+	runes := []rune(value)
+	if state.preview {
+		if len(styles) < len(runes) {
+			styles = append(styles, make([]terminal.Style, len(runes)-len(styles))...)
+		}
+		start := max(0, min(state.previewStart, len(runes)))
+		end := max(start, min(state.previewEnd, len(runes)))
+		for i := start; i < end; i++ {
+			styles[i] = styles[i].AddAttribute(terminal.CharUnderline)
+		}
+		return value, cursor, styles
+	}
+	if !state.speculative || len(state.candidates) != 1 {
+		return value, cursor, styles
+	}
+	candidate := state.candidates[0]
+	inserted := []rune(candidate.Insert)
+	insert := append([]rune(nil), inserted...)
+	if candidate.Space {
 		insert = append(insert, ' ')
 	}
 	if len(insert) == 0 {
 		return value, cursor, styles
 	}
-	runes := []rune(value)
 	if cursor < 0 || cursor > len(runes) {
 		cursor = len(runes)
 	}
@@ -1073,9 +1105,16 @@ func promptCompletionDisplay(value string, cursor int, state *promptCompletionSt
 	}
 	ghostStyle := terminal.NewStyle(0x808080, 0, terminal.CharResetBackgroundDefault)
 	baseStyles := append([]terminal.Style(nil), styles...)
+	if len(baseStyles) < len(runes) {
+		baseStyles = append(baseStyles, make([]terminal.Style, len(runes)-len(baseStyles))...)
+	}
 	styles = append(append([]terminal.Style(nil), baseStyles[:cursor]...), make([]terminal.Style, len(insert))...)
-	for i := cursor; i < cursor+len(insert); i++ {
-		styles[i] = ghostStyle
+	for i := range insert {
+		style := ghostStyle
+		if i < len(inserted) {
+			style = style.AddAttribute(terminal.CharUnderline)
+		}
+		styles[cursor+i] = style
 	}
 	styles = append(styles, baseStyles[cursor:]...)
 	return string(display), cursor, styles
@@ -1093,7 +1132,8 @@ func renderCompletionMenu(buf *ui.CellBuf, row int, state *promptCompletionState
 		}
 		style := terminal.NewStyle(0x808080, 0, terminal.CharResetBackgroundDefault)
 		if state.active && i == state.selected {
-			style = terminal.NewStyle(0x00FFFF, 0, terminal.CharResetBackgroundDefault|terminal.CharBold)
+			style = terminal.NewStyle(0, 0,
+				terminal.CharResetForegroundDefault|terminal.CharResetBackgroundDefault|terminal.CharUnderline)
 		}
 		for _, r := range label {
 			width := runeCellWidth(r)
