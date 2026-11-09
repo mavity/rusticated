@@ -20,16 +20,18 @@ const (
 )
 
 type promptCompletionState struct {
-	candidates     []completionCandidate
-	speculative    bool
-	active         bool
-	pending        bool
-	selected       int
-	originalValue  string
-	originalCursor int
-	previewStart   int
-	previewEnd     int
-	preview        bool
+	candidates      []completionCandidate
+	speculative     bool
+	active          bool
+	pending         bool
+	selected        int
+	originalValue   string
+	originalCursor  int
+	previewStart    int
+	previewEnd      int
+	preview         bool
+	scrollOffset    int
+	scrollDirection int
 }
 
 // PromptInputOptions configures a PromptInput widget.
@@ -284,6 +286,7 @@ func (p *PromptInput) RequestCompletion() bool {
 			state.originalValue = p.value
 			state.originalCursor = p.cursorPos
 			state.selected = 0
+			state.scrollDirection = 1
 			p.previewCompletionLocked(state)
 			p.mu.Unlock()
 			p.invalidate()
@@ -350,6 +353,7 @@ func (p *PromptInput) cycleCompletionLocked(state *promptCompletionState, direct
 	if count == 0 {
 		return
 	}
+	state.scrollDirection = direction
 	if state.selected < 0 {
 		if direction < 0 {
 			state.selected = count - 1
@@ -745,6 +749,16 @@ func (p *PromptInput) Render(rect ui.Rect, ctx ui.RenderContext) string {
 	styleInput := p.styleInput
 	value := p.value
 	cursorPos := p.cursorPos
+	if p.completion != nil && p.completion.active &&
+		p.completion.selected >= 0 && p.completion.selected < len(p.completion.candidates) {
+		p.completion.scrollOffset = completionMenuScrollOffset(
+			p.completion.candidates,
+			p.completion.selected,
+			p.completion.scrollDirection,
+			p.completion.scrollOffset,
+			w,
+		)
+	}
 	completion := clonePromptCompletion(p.completion)
 	scrollRow := p.scrollRow
 	capH := p.maxAllowedHeight(rect.H)
@@ -1125,28 +1139,130 @@ func renderCompletionMenu(buf *ui.CellBuf, row int, state *promptCompletionState
 		return
 	}
 	x := 0
+	viewStart := max(0, state.scrollOffset)
+	viewEnd := viewStart + buf.Width
+	draw := func(absoluteX, width int, grapheme string, style terminal.Style) {
+		if width <= 0 || absoluteX < viewStart || absoluteX+width > viewEnd {
+			return
+		}
+		cellX := absoluteX - viewStart
+		buf.Set(cellX, row, terminal.Cell{Grapheme: grapheme, Style: style})
+		for offset := 1; offset < width; offset++ {
+			buf.Set(cellX+offset, row, terminal.Cell{Style: style})
+		}
+	}
 	for i, candidate := range state.candidates {
-		label := candidate.Display
 		if i > 0 {
-			label = "  " + label
+			style := completionMenuItemStyle(state, -1)
+			for j := 0; j < 2; j++ {
+				draw(x, 1, " ", style)
+				x++
+			}
 		}
-		style := terminal.NewStyle(0x808080, 0, terminal.CharResetBackgroundDefault)
-		if state.active && i == state.selected {
-			style = terminal.NewStyle(0, 0,
-				terminal.CharResetForegroundDefault|terminal.CharResetBackgroundDefault|terminal.CharUnderline)
-		}
-		for _, r := range label {
+		style := completionMenuItemStyle(state, i)
+		for _, r := range candidate.Display {
 			width := runeCellWidth(r)
-			if x+width > buf.Width {
-				return
-			}
-			buf.Set(x, row, terminal.Cell{Grapheme: string(r), Style: style})
-			for offset := 1; offset < width; offset++ {
-				buf.Set(x+offset, row, terminal.Cell{Style: style})
-			}
+			draw(x, width, string(r), style)
 			x += width
 		}
 	}
+}
+
+func completionMenuItemStyle(state *promptCompletionState, index int) terminal.Style {
+	if index >= 0 && state.active && index == state.selected {
+		return terminal.NewStyle(0, 0,
+			terminal.CharResetForegroundDefault|terminal.CharResetBackgroundDefault|terminal.CharUnderline)
+	}
+	return terminal.NewStyle(0x808080, 0, terminal.CharResetBackgroundDefault)
+}
+
+type completionMenuSpan struct {
+	start int
+	end   int
+}
+
+func completionMenuSpans(candidates []completionCandidate) []completionMenuSpan {
+	spans := make([]completionMenuSpan, len(candidates))
+	x := 0
+	for i, candidate := range candidates {
+		if i > 0 {
+			x += 2
+		}
+		spans[i].start = x
+		for _, r := range candidate.Display {
+			x += runeCellWidth(r)
+		}
+		spans[i].end = x
+	}
+	return spans
+}
+
+func completionMenuScrollOffset(
+	candidates []completionCandidate,
+	selected, direction, currentOffset, width int,
+) int {
+	spans := completionMenuSpans(candidates)
+	if width <= 0 || selected < 0 || selected >= len(spans) {
+		return 0
+	}
+	span := spans[selected]
+	itemWidth := span.end - span.start
+	if itemWidth > width {
+		return span.start
+	}
+	if span.start >= currentOffset && span.end <= currentOffset+width {
+		return currentOffset
+	}
+
+	minOffset := max(0, span.end-width)
+	maxOffset := span.start
+	target := span.end - width
+	switch {
+	case direction < 0 && selected > 0:
+		previous := spans[selected-1]
+		peekWidth := completionMenuPeekWidth(candidates[selected-1].Display, true)
+		target = previous.end - peekWidth
+	case direction > 0 && selected+1 < len(spans):
+		peekWidth := completionMenuPeekWidth(candidates[selected+1].Display, false)
+		target = span.end + 2 + peekWidth - width
+	}
+	target = max(minOffset, min(target, maxOffset))
+	return snapCompletionMenuOffset(candidates, target)
+}
+
+func completionMenuPeekWidth(value string, fromStart bool) int {
+	runes := []rune(value)
+	count := min(2, len(runes))
+	width := 0
+	for i := 0; i < count; i++ {
+		index := i
+		if fromStart {
+			index = len(runes) - count + i
+		}
+		width += runeCellWidth(runes[index])
+	}
+	return width
+}
+
+func snapCompletionMenuOffset(candidates []completionCandidate, offset int) int {
+	x := 0
+	for i, candidate := range candidates {
+		if i > 0 {
+			for j := 0; j < 2; j++ {
+				if x >= offset {
+					return x
+				}
+				x++
+			}
+		}
+		for _, r := range candidate.Display {
+			if x >= offset {
+				return x
+			}
+			x += runeCellWidth(r)
+		}
+	}
+	return x
 }
 
 func (p *PromptInput) invalidate() {

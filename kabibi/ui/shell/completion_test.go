@@ -405,6 +405,12 @@ func TestPromptInputExplicitCompletionCyclesAndEscapeRestoresOriginal(t *testing
 	if got, want := p.Value(), "git stash-tail"; got != want {
 		t.Fatalf("second inline preview = %q, want %q", got, want)
 	}
+	if !p.RequestCompletion() {
+		t.Fatal("Tab did not wrap the active completion list")
+	}
+	if got, want := p.Value(), "git status-tail"; got != want {
+		t.Fatalf("wrapped inline preview = %q, want %q", got, want)
+	}
 	if !p.HandleEvent(input.KeyPressEvent{Code: input.KeyEscape}) {
 		t.Fatal("Escape did not dismiss the active completion")
 	}
@@ -703,5 +709,145 @@ func TestCompletionMenuSelectedStyle(t *testing.T) {
 	if !selected.HasAttribute(terminal.CharResetForegroundDefault) ||
 		!selected.HasAttribute(terminal.CharUnderline) {
 		t.Fatalf("selected hint style = %#v, want default foreground with underline", selected)
+	}
+}
+
+func TestCompletionMenuScrollsWithDirectionalPeeks(t *testing.T) {
+	candidates := []completionCandidate{
+		{Display: "one"},
+		{Display: "two"},
+		{Display: "three"},
+		{Display: "four"},
+	}
+	rightOffset := completionMenuScrollOffset(candidates, 2, 1, 0, 12)
+	if rightOffset != 7 {
+		t.Fatalf("rightward scroll offset = %d, want 7", rightOffset)
+	}
+	rightState := &promptCompletionState{
+		candidates:   candidates,
+		active:       true,
+		selected:     2,
+		scrollOffset: rightOffset,
+	}
+	rightBuf := ui.NewCellBuf(12, 1)
+	renderCompletionMenu(&rightBuf, 0, rightState)
+	if got, want := extractRowString(rightBuf, 0), "o  three  fo"; got != want {
+		t.Fatalf("rightward menu = %q, want %q", got, want)
+	}
+
+	leftOffset := completionMenuScrollOffset(candidates, 1, -1, rightOffset, 12)
+	if leftOffset != 1 {
+		t.Fatalf("leftward scroll offset = %d, want 1", leftOffset)
+	}
+	leftState := &promptCompletionState{
+		candidates:   candidates,
+		active:       true,
+		selected:     1,
+		scrollOffset: leftOffset,
+	}
+	leftBuf := ui.NewCellBuf(12, 1)
+	renderCompletionMenu(&leftBuf, 0, leftState)
+	if got, want := extractRowString(leftBuf, 0), "ne  two  thr"; got != want {
+		t.Fatalf("leftward menu = %q, want %q", got, want)
+	}
+}
+
+func TestCompletionMenuDoesNotOverscrollAtEndOrForOversizedItem(t *testing.T) {
+	candidates := []completionCandidate{
+		{Display: "one"},
+		{Display: "two"},
+		{Display: "three"},
+	}
+	if got := completionMenuScrollOffset(candidates, 0, 1, 0, 8); got != 0 {
+		t.Fatalf("visible first item scrolled to %d, want 0", got)
+	}
+	lastOffset := completionMenuScrollOffset(candidates, 2, 1, 0, 8)
+	if lastOffset != 7 {
+		t.Fatalf("last-item scroll offset = %d, want 7", lastOffset)
+	}
+	lastState := &promptCompletionState{
+		candidates:   candidates,
+		active:       true,
+		selected:     2,
+		scrollOffset: lastOffset,
+	}
+	lastBuf := ui.NewCellBuf(8, 1)
+	renderCompletionMenu(&lastBuf, 0, lastState)
+	if got, want := extractRowString(lastBuf, 0), "o  three"; got != want {
+		t.Fatalf("last-item menu = %q, want %q", got, want)
+	}
+
+	oversized := []completionCandidate{
+		{Display: "longcandidate"},
+		{Display: "next"},
+	}
+	oversizedOffset := completionMenuScrollOffset(oversized, 0, 1, 0, 8)
+	if oversizedOffset != 0 {
+		t.Fatalf("oversized-item offset = %d, want 0", oversizedOffset)
+	}
+	oversizedState := &promptCompletionState{
+		candidates:   oversized,
+		active:       true,
+		selected:     0,
+		scrollOffset: oversizedOffset,
+	}
+	oversizedBuf := ui.NewCellBuf(8, 1)
+	renderCompletionMenu(&oversizedBuf, 0, oversizedState)
+	if got, want := extractRowString(oversizedBuf, 0), "longcand"; got != want {
+		t.Fatalf("oversized-item menu = %q, want %q", got, want)
+	}
+}
+
+func TestCompletionMenuPeekingPreservesWideCharacters(t *testing.T) {
+	candidates := []completionCandidate{
+		{Display: "one"},
+		{Display: "two"},
+		{Display: "three"},
+		{Display: "界界"},
+	}
+	offset := completionMenuScrollOffset(candidates, 2, 1, 0, 14)
+	if offset != 7 {
+		t.Fatalf("wide-character scroll offset = %d, want 7", offset)
+	}
+	state := &promptCompletionState{
+		candidates:   candidates,
+		active:       true,
+		selected:     2,
+		scrollOffset: offset,
+	}
+	buf := ui.NewCellBuf(14, 1)
+	renderCompletionMenu(&buf, 0, state)
+	if got, want := extractRowString(buf, 0), "o  three  界界"; got != want {
+		t.Fatalf("wide-character menu = %q, want %q", got, want)
+	}
+}
+
+func TestPromptInputRenderScrollsActiveCompletionMenu(t *testing.T) {
+	p := NewPromptInput(PromptInputOptions{})
+	p.SetValue("git st")
+	p.mu.Lock()
+	p.completion = &promptCompletionState{
+		candidates: []completionCandidate{
+			{Display: "one"},
+			{Display: "two"},
+			{Display: "three"},
+			{Display: "four"},
+		},
+		active:          true,
+		selected:        2,
+		scrollDirection: 1,
+	}
+	p.mu.Unlock()
+
+	rendered := p.Render(ui.Rect{W: 12, H: 4}, ui.RenderContext{})
+	buf, _ := renderANSIForTest(t, rendered, 12, 4)
+	if got, want := extractRowString(buf, 1), "o  three  fo"; got != want {
+		t.Fatalf("rendered completion row = %q, want %q", got, want)
+	}
+	p.mu.Lock()
+	offset := p.completion.scrollOffset
+	p.mu.Unlock()
+	if offset != 7 {
+		t.Fatalf("render stored scroll offset = %d, want 7", offset)
 	}
 }
