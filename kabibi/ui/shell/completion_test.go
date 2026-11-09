@@ -712,6 +712,24 @@ func TestCompletionMenuSelectedStyle(t *testing.T) {
 	}
 }
 
+func TestCompletionMenuShowsAvailableDescription(t *testing.T) {
+	state := &promptCompletionState{
+		candidates: []completionCandidate{
+			{Display: "/settings", Description: "Open settings"},
+		},
+		speculative: true,
+		selected:    -1,
+	}
+	if !completionHasMenu(state) {
+		t.Fatal("single described candidate did not reserve the hint row")
+	}
+	buf := ui.NewCellBuf(40, 1)
+	renderCompletionMenu(&buf, 0, state)
+	if got := extractRowString(buf, 0); !strings.Contains(got, "/settings  Open settings") {
+		t.Fatalf("completion row = %q, want command and description", got)
+	}
+}
+
 func TestCompletionMenuScrollsWithDirectionalPeeks(t *testing.T) {
 	candidates := []completionCandidate{
 		{Display: "one"},

@@ -121,16 +121,17 @@ func formatStartupBannerWithAI(sessionErr error, aiEnabled bool) string {
 
 // ShellOptions configures shell behavior and callbacks
 type ShellOptions struct {
-	WriteToScrollback func(text string) // Callback to write lines to the host's scrollback
-	OnExit            func()            // Optional callback invoked when user runs 'exit' or 'quit'
-	OnCommandStarted  func()            // Optional callback invoked before a shell command or AI turn starts
-	OnCommandFinished func(cwd string)  // Optional callback invoked after a command or AI turn finishes
-	OpenURL           func(url string) error
-	WorkingDir        string    // Optional initial working directory for the shell runner
-	DisableAI         bool      // Disable AI fallback, commands, and setup in extension-launched shells
-	AIRunner          AIRunner  // Optional AI fallback runner (defaults to LazyAIRunner)
-	Mode              ShellMode // Toggle between ModeStack (default) and ModePlumeHistory
-	Prompt            string    // Optional custom prompt template or fixed prompt (supports PS1 escapes if execSess present)
+	WriteToScrollback  func(text string) // Callback to write lines to the host's scrollback
+	OnExit             func()            // Optional callback invoked when user runs 'exit' or 'quit'
+	OnCommandStarted   func()            // Optional callback invoked before a shell command or AI turn starts
+	OnCommandFinished  func(cwd string)  // Optional callback invoked after a command or AI turn finishes
+	CompletionProvider CompletionProvider
+	OpenURL            func(url string) error
+	WorkingDir         string    // Optional initial working directory for the shell runner
+	DisableAI          bool      // Disable AI fallback, commands, and setup in extension-launched shells
+	AIRunner           AIRunner  // Optional AI fallback runner (defaults to LazyAIRunner)
+	Mode               ShellMode // Toggle between ModeStack (default) and ModePlumeHistory
+	Prompt             string    // Optional custom prompt template or fixed prompt (supports PS1 escapes if execSess present)
 }
 
 // Shell is a dynamic stack shell widget that implements the ui.Widget interface.

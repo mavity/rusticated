@@ -12,7 +12,6 @@ import (
 	"sync"
 
 	"github.com/charmbracelet/x/input"
-	"github.com/mattn/go-runewidth"
 	"github.com/mavity/rusticated/kabibi/browser"
 	"github.com/mavity/rusticated/kabibi/slashcmd"
 	"github.com/mavity/rusticated/kabibi/tools/filelist"
@@ -48,8 +47,6 @@ type AppWidget struct {
 	opCancel context.CancelFunc
 	opResume chan filemanager.CollisionChoice
 
-	slashPrefix string
-	slashIndex  int
 	pathHistory []string
 
 	writeScrollback func(string)
@@ -99,6 +96,9 @@ func NewWidget(opts AppWidgetOptions) *AppWidget {
 		WorkingDir: opts.WorkingDir,
 		DisableAI:  opts.DisableAI,
 		Mode:       opts.ShellMode,
+		CompletionProvider: func(value string, cursor int) ([]shell.CompletionCandidate, bool) {
+			return slashCompletionCandidates(value, cursor, browser.Available())
+		},
 	})
 
 	w.panels = filemanager.NewDualPaneWidget()
@@ -477,7 +477,6 @@ func (w *AppWidget) Render(r terminal.Rect, ctx ui.RenderContext) string {
 	}
 	shellBuf := terminal.NewCellBuf(r.W, shellHeight)
 	copy(shellBuf.Cells(), shellFrame.Cells()[:shellHeight*r.W])
-	w.renderSlashHints(&shellBuf)
 
 	if panelsVis && w.panels != nil && r.W > 0 && r.H > 0 {
 		panelH, _ := w.computePanelHeight(r.W, r.H)
@@ -607,10 +606,12 @@ func (w *AppWidget) HandleEvent(e input.Event) bool {
 			if keyStr == "esc" && w.sh.Input().CompletionVisible() {
 				return w.sh.HandleEvent(keyEv)
 			}
-			if w.handleSlashKey(keyEv) {
+			if (keyStr == "esc" || keyStr == "enter") && w.handleSlashKey(keyEv) {
 				return true
 			}
-			return w.sh.HandleEvent(keyEv)
+			if !(panelsVis && keyStr == "tab") {
+				return w.sh.HandleEvent(keyEv)
+			}
 		}
 
 		// When blue panels are visible, apply the Far Manager Split Key-Routing Table
@@ -751,102 +752,14 @@ func (w *AppWidget) HandleEvent(e input.Event) bool {
 	return w.sh.HandleEvent(e)
 }
 
-func (w *AppWidget) slashMatches() ([]slashcmd.Command, int) {
-	token, args, isSlash := slashcmd.InputToken(w.sh.Input().Value())
-	if !isSlash || strings.Count(token, "/") != 1 {
-		w.mu.Lock()
-		w.slashPrefix = ""
-		w.slashIndex = 0
-		w.mu.Unlock()
-		return nil, 0
-	}
-	matches := slashcmd.Matches(token, browser.Available())
-	w.mu.Lock()
-	if token != w.slashPrefix {
-		w.slashPrefix = token
-		w.slashIndex = 0
-	}
-	if len(matches) == 0 {
-		w.slashIndex = 0
-	} else if w.slashIndex >= len(matches) {
-		w.slashIndex = len(matches) - 1
-	}
-	index := w.slashIndex
-	w.mu.Unlock()
-	if args != "" {
-		return nil, index
-	}
-	return matches, index
-}
-
-func (w *AppWidget) renderSlashHints(buf *terminal.CellBuf) {
-	matches, selected := w.slashMatches()
-	if len(matches) == 0 || buf.Width == 0 || buf.Height == 0 {
-		return
-	}
-
-	y := buf.Height - 1
-	plain := terminal.NewStyle(0, 0, terminal.CharResetForegroundDefault|terminal.CharResetBackgroundDefault)
-	buf.Fill(terminal.Rect{Y: y, W: buf.Width, H: 1}, terminal.Cell{Grapheme: " ", Style: plain})
-
-	var names strings.Builder
-	for i, command := range matches {
-		if i > 0 {
-			names.WriteString("  ")
-		}
-		names.WriteString(command.Name)
-	}
-	showDescription := false
-	description := "  " + matches[selected].Description
-	if runewidth.StringWidth(names.String())+runewidth.StringWidth(description) <= buf.Width {
-		showDescription = true
-	}
-
-	x := 0
-	draw := func(text string, style terminal.Style) {
-		for _, r := range text {
-			width := runewidth.RuneWidth(r)
-			if width <= 0 {
-				continue
-			}
-			if x+width > buf.Width {
-				return
-			}
-			buf.Set(x, y, terminal.Cell{Grapheme: string(r), Style: style})
-			for offset := 1; offset < width; offset++ {
-				buf.Set(x+offset, y, terminal.Cell{Grapheme: "", Style: style})
-			}
-			x += width
-		}
-	}
-	muted := terminal.NewStyle(0x9AA9B8, 0, terminal.CharResetBackgroundDefault)
-	for i, command := range matches {
-		if i > 0 {
-			draw("  ", muted)
-		}
-		style := muted
-		if i == selected {
-			style = terminal.NewStyle(0xFFFFFF, 0x005F87, terminal.CharBold)
-		}
-		draw(command.Name, style)
-	}
-	if showDescription {
-		draw(description, muted)
-	}
-}
-
 func (w *AppWidget) handleSlashKey(key input.KeyPressEvent) bool {
 	value := w.sh.Input().Value()
-	token, args, isSlash := slashcmd.InputToken(value)
+	token, _, isSlash := slashcmd.InputToken(value)
 	if !isSlash {
 		return false
 	}
 	if strings.Count(token, "/") > 1 {
 		return false
-	}
-	matches, selected := w.slashMatches()
-	if args != "" {
-		matches = slashcmd.Matches(token, browser.Available())
 	}
 
 	switch key.String() {
@@ -854,39 +767,8 @@ func (w *AppWidget) handleSlashKey(key input.KeyPressEvent) bool {
 		w.sh.Input().Reset()
 		w.invalidate()
 		return true
-	case "left", "right":
-		if args == "" && len(matches) > 1 {
-			w.mu.Lock()
-			if key.String() == "left" {
-				w.slashIndex = (w.slashIndex - 1 + len(matches)) % len(matches)
-			} else {
-				w.slashIndex = (w.slashIndex + 1) % len(matches)
-			}
-			w.mu.Unlock()
-			w.invalidate()
-			return true
-		}
-	case "tab":
-		if args == "" && len(matches) > 1 {
-			w.mu.Lock()
-			w.slashIndex = (selected + 1) % len(matches)
-			w.mu.Unlock()
-			w.invalidate()
-			return true
-		}
-		if args == "" && len(matches) == 1 {
-			w.acceptSlashMatch(matches[selected].Name, args, args == "")
-			return true
-		}
 	case "enter":
-		line := value
-		if len(matches) > 0 {
-			line = matches[selected].Name
-			if args != "" {
-				line += " " + args
-			}
-		}
-		invocation, recognized, err := slashcmd.Parse(line)
+		invocation, recognized, err := slashcmd.Parse(value)
 		if recognized {
 			w.sh.Input().Reset()
 			if err != nil {
@@ -899,20 +781,6 @@ func (w *AppWidget) handleSlashKey(key input.KeyPressEvent) bool {
 		}
 	}
 	return false
-}
-
-func (w *AppWidget) acceptSlashMatch(name, args string, addSpace bool) {
-	value := w.sh.Input().Value()
-	leading := len(value) - len(strings.TrimLeft(value, " \t\r\n"))
-	updated := value[:leading] + name
-	if args != "" {
-		updated += " " + args
-	} else if addSpace {
-		updated += " "
-	}
-	w.sh.SetInput(updated)
-	w.sh.Input().SetCursorPos(len([]rune(updated)))
-	w.invalidate()
 }
 
 func (w *AppWidget) dispatchSlashCommand(invocation slashcmd.Invocation) {
