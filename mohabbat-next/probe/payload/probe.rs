@@ -1,6 +1,7 @@
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
 use core::mem::MaybeUninit;
+#[cfg(not(test))]
 use core::panic::PanicInfo;
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
@@ -160,7 +161,52 @@ pub unsafe extern "C" fn probe_entry() {
     run();
 }
 
+#[cfg(not(test))]
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     loop {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::mem::{offset_of, size_of};
+
+    #[test]
+    fn test_probe_abi_and_globals_layout() {
+        assert_eq!(size_of::<ProbeDispatch>(), 24);
+        assert_eq!(offset_of!(ProbeDispatch, write), 0);
+        assert_eq!(offset_of!(ProbeDispatch, read), 8);
+        assert_eq!(offset_of!(ProbeDispatch, exit), 16);
+
+        assert_eq!(offset_of!(ProbeGlobals, initialized), 0);
+        assert_eq!(offset_of!(ProbeGlobals, lines_echoed), 8);
+    }
+
+    #[test]
+    fn test_write_all_callback() {
+        #[cfg(target_arch = "x86_64")]
+        unsafe extern "win64" fn mock_write(_ptr: *const u8, len: usize) -> i64 {
+            len as i64
+        }
+        #[cfg(target_arch = "aarch64")]
+        unsafe extern "C" fn mock_write(_ptr: *const u8, len: usize) -> i64 {
+            len as i64
+        }
+
+        let dispatch = ProbeDispatch {
+            write: Some(mock_write),
+            read: None,
+            exit: None,
+        };
+        assert!(write_all(&dispatch, GREETING_PREFIX));
+        assert!(write_all(&dispatch, GREETING_SUFFIX));
+
+        let empty_dispatch = ProbeDispatch {
+            write: None,
+            read: None,
+            exit: None,
+        };
+        assert!(!write_all(&empty_dispatch, b"test"));
+    }
 }

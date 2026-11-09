@@ -1,6 +1,7 @@
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
 use core::ffi::c_void;
+#[cfg(not(test))]
 use core::panic::PanicInfo;
 use core::ptr;
 
@@ -477,7 +478,27 @@ pub unsafe extern "C" fn windows_platform_entry() -> i32 {
     run_platform(host_abi())
 }
 
+#[cfg(not(test))]
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     loop {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::mem::{offset_of, size_of};
+
+    #[test]
+    fn test_windows_platform_prefix_layout() {
+        assert_eq!(PREFIX_ABI_OFFSET, 0x20000);
+        assert_eq!(size_of::<WindowsPlatformHost>(), 48);
+        assert_eq!(offset_of!(WindowsPlatformHost, load_library), 0);
+        assert_eq!(offset_of!(WindowsPlatformHost, get_proc_address), 8);
+        assert_eq!(offset_of!(WindowsPlatformHost, alloc), 16);
+        assert_eq!(offset_of!(WindowsPlatformHost, free), 24);
+        assert_eq!(offset_of!(WindowsPlatformHost, hello_payload), 32);
+        assert_eq!(offset_of!(WindowsPlatformHost, hello_payload_size), 40);
+        assert!(size_of::<PlatformState>() <= 0x10000);
+    }
 }

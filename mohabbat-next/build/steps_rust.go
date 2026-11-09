@@ -11,15 +11,21 @@ import (
 )
 
 type FlatComponentConfig struct {
-	Name         string
-	Package      string
-	Feature      string
-	Arch         string // "x86_64" or "aarch64"
-	Triple       string // "x86_64-unknown-none" or "aarch64-unknown-none"
-	LinkerScript string
-	EntrySymbol  string
-	ArchiveGlobs []string
-	OutFileName  string
+	Name              string
+	ManifestDir       string // defaults to probeDir if empty
+	Package           string
+	Feature           string
+	NoDefaultFeatures bool
+	NeedsAlloc        bool
+	Rustflags         string
+	Arch              string // "x86_64" or "aarch64"
+	Triple            string // "x86_64-unknown-none" or "aarch64-unknown-none"
+	LinkerScript      string
+	EntrySymbol       string
+	ArchiveGlobs      []string
+	StaticlibName     string // e.g. "libmohabbat_next_runtime.a" (in release/, not deps/)
+	MaxSize           int64  // defaults to 4096 if 0
+	OutFileName       string
 }
 
 func buildFlatComponent(probeDir, rustBuildDir, outDir string, cfg FlatComponentConfig, verbose bool) (string, error) {
@@ -29,22 +35,43 @@ func buildFlatComponent(probeDir, rustBuildDir, outDir string, cfg FlatComponent
 		cfg.Triple = "aarch64-unknown-none"
 	}
 
-	workspace := filepath.Join(probeDir, "Cargo.toml")
+	manifestDir := cfg.ManifestDir
+	if manifestDir == "" {
+		manifestDir = probeDir
+	}
+	workspace := filepath.Join(manifestDir, "Cargo.toml")
 	cargoHome := filepath.Join(rustBuildDir, "cargo-home")
 	compTargetDir := filepath.Join(rustBuildDir, cfg.Name)
 	if err := os.MkdirAll(cargoHome, 0o755); err != nil {
 		return "", fmt.Errorf("create cargo home %s: %w", cargoHome, err)
 	}
 
+	buildStd := "build-std=core"
+	if cfg.NeedsAlloc {
+		buildStd = "build-std=core,alloc"
+	}
+
 	args := []string{
 		"+nightly",
-		"-Z", "build-std=core",
+		"-Z", buildStd,
+	}
+	if cfg.NeedsAlloc {
+		args = append(args, "-Z", "build-std-features=compiler-builtins-mem")
+	}
+	args = append(args,
 		"build",
 		"--manifest-path", workspace,
-		"--package", cfg.Package,
+	)
+	if cfg.Package != "" {
+		args = append(args, "--package", cfg.Package)
+	}
+	args = append(args,
 		"--release",
 		"--target", cfg.Triple,
 		"--target-dir", compTargetDir,
+	)
+	if cfg.NoDefaultFeatures {
+		args = append(args, "--no-default-features")
 	}
 	if cfg.Feature != "" {
 		args = append(args, "--features", cfg.Feature)
@@ -52,8 +79,12 @@ func buildFlatComponent(probeDir, rustBuildDir, outDir string, cfg FlatComponent
 
 	buildTime := time.Now().Format("Monday, 2 January 2006 15:04:05 MST -07:00")
 	cmd := exec.Command("cargo", args...)
-	cmd.Dir = probeDir
-	cmd.Env = append(os.Environ(), "CARGO_HOME="+cargoHome, "BUILD_TIME="+buildTime)
+	cmd.Dir = manifestDir
+	env := append(os.Environ(), "CARGO_HOME="+cargoHome, "BUILD_TIME="+buildTime)
+	if cfg.Rustflags != "" {
+		env = append(env, "RUSTFLAGS="+cfg.Rustflags)
+	}
+	cmd.Env = env
 	if verbose {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -71,14 +102,22 @@ func buildFlatComponent(probeDir, rustBuildDir, outDir string, cfg FlatComponent
 		return "", fmt.Errorf("cargo build for %s (%s): %w", cfg.Name, cfg.Triple, err)
 	}
 
-	depDir := filepath.Join(compTargetDir, cfg.Triple, "release", "deps")
 	var archives []string
-	for _, pattern := range cfg.ArchiveGlobs {
-		archive, err := findLatestArchive(depDir, pattern)
-		if err != nil {
-			return "", fmt.Errorf("find archive %s for %s: %w", pattern, cfg.Name, err)
+	if cfg.StaticlibName != "" {
+		staticArchive := filepath.Join(compTargetDir, cfg.Triple, "release", cfg.StaticlibName)
+		if _, err := os.Stat(staticArchive); err != nil {
+			return "", fmt.Errorf("find staticlib %s for %s: %w", staticArchive, cfg.Name, err)
 		}
-		archives = append(archives, archive)
+		archives = append(archives, staticArchive)
+	} else {
+		depDir := filepath.Join(compTargetDir, cfg.Triple, "release", "deps")
+		for _, pattern := range cfg.ArchiveGlobs {
+			archive, err := findLatestArchive(depDir, pattern)
+			if err != nil {
+				return "", fmt.Errorf("find archive %s for %s: %w", pattern, cfg.Name, err)
+			}
+			archives = append(archives, archive)
+		}
 	}
 
 	elfPath := filepath.Join(outDir, cfg.OutFileName+".elf")
@@ -149,8 +188,12 @@ func buildFlatComponent(probeDir, rustBuildDir, outDir string, cfg FlatComponent
 	if err != nil {
 		return "", fmt.Errorf("stat binary %s: %w", binPath, err)
 	}
-	if info.Size() == 0 || info.Size() > 4096 {
-		return "", fmt.Errorf("component %s must fit within one 4 KiB page (got %d bytes)", cfg.Name, info.Size())
+	maxSize := cfg.MaxSize
+	if maxSize <= 0 {
+		maxSize = 4096
+	}
+	if info.Size() == 0 || info.Size() > maxSize {
+		return "", fmt.Errorf("component %s must fit within %d bytes (got %d bytes)", cfg.Name, maxSize, info.Size())
 	}
 
 	return binPath, nil

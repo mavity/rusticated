@@ -123,16 +123,24 @@ func main() {
 
 	linuxMuslFlags := "['-C', 'panic=abort', '-C', 'relocation-model=pic', '-C', 'target-feature=+crt-static', '-C', 'link-self-contained=no', '-C', 'linker=rust-lld', '-C', 'linker-flavor=ld.lld', '-C', 'link-arg=-pie', '-C', 'link-arg=--no-dynamic-linker']"
 	darwinFlags := fmt.Sprintf("['-C', 'panic=abort', '-C', 'linker=rust-lld', '-C', 'linker-flavor=darwin-lld', '-Z', 'unstable-options', '-C', 'link-arg=-L%s']", filepath.ToSlash(darwinStubsDir))
+	runtimeRustflags := "-C relocation-model=pie -Zunstable-options -Cpanic=immediate-abort -Zlocation-detail=none -Zfmt-debug=none"
+	runtimeDir := filepath.Join(nextDir, "runtime")
 
 	type targetDef struct {
-		Name         string
-		Package      string
-		Feature      string
-		Arch         string
-		LinkerScript string
-		EntrySymbol  string
-		ArchiveGlobs []string
-		OutName      string
+		Name              string
+		ManifestDir       string
+		Package           string
+		Feature           string
+		NoDefaultFeatures bool
+		NeedsAlloc        bool
+		Rustflags         string
+		Arch              string
+		LinkerScript      string
+		EntrySymbol       string
+		ArchiveGlobs      []string
+		StaticlibName     string
+		MaxSize           int64
+		OutName           string
 	}
 
 	flatDefs := []targetDef{
@@ -154,6 +162,35 @@ func main() {
 			EntrySymbol:  "probe_entry",
 			ArchiveGlobs: []string{"libmohabbat_next_payload-*.rlib", "libcore-*.rlib"},
 			OutName:      "probe-aarch64",
+		},
+		// Movable Cranelift Runtime Slice (ISA-shared)
+		{
+			Name:              "runtime-x86_64",
+			ManifestDir:       runtimeDir,
+			Feature:           "x86_64",
+			NoDefaultFeatures: true,
+			NeedsAlloc:        true,
+			Rustflags:         runtimeRustflags,
+			Arch:              "x86_64",
+			LinkerScript:      filepath.Join(runtimeDir, "runtime.ld"),
+			EntrySymbol:       "slice_entry",
+			StaticlibName:     "libmohabbat_next_runtime.a",
+			MaxSize:           4 * 1024 * 1024,
+			OutName:           "runtime-x86_64",
+		},
+		{
+			Name:              "runtime-aarch64",
+			ManifestDir:       runtimeDir,
+			Feature:           "aarch64",
+			NoDefaultFeatures: true,
+			NeedsAlloc:        true,
+			Rustflags:         runtimeRustflags,
+			Arch:              "aarch64",
+			LinkerScript:      filepath.Join(runtimeDir, "runtime.ld"),
+			EntrySymbol:       "slice_entry",
+			StaticlibName:     "libmohabbat_next_runtime.a",
+			MaxSize:           4 * 1024 * 1024,
+			OutName:           "runtime-aarch64",
 		},
 		// Windows PAL
 		{
@@ -266,14 +303,20 @@ func main() {
 		go func(def targetDef) {
 			defer compileWg.Done()
 			binPath, err := buildFlatComponent(probeDir, rustBuildDir, componentsDir, FlatComponentConfig{
-				Name:         def.Name,
-				Package:      def.Package,
-				Feature:      def.Feature,
-				Arch:         def.Arch,
-				LinkerScript: def.LinkerScript,
-				EntrySymbol:  def.EntrySymbol,
-				ArchiveGlobs: def.ArchiveGlobs,
-				OutFileName:  def.OutName,
+				Name:              def.Name,
+				ManifestDir:       def.ManifestDir,
+				Package:           def.Package,
+				Feature:           def.Feature,
+				NoDefaultFeatures: def.NoDefaultFeatures,
+				NeedsAlloc:        def.NeedsAlloc,
+				Rustflags:         def.Rustflags,
+				Arch:              def.Arch,
+				LinkerScript:      def.LinkerScript,
+				EntrySymbol:       def.EntrySymbol,
+				ArchiveGlobs:      def.ArchiveGlobs,
+				StaticlibName:     def.StaticlibName,
+				MaxSize:           def.MaxSize,
+				OutFileName:       def.OutName,
 			}, verbose)
 
 			compileMu.Lock()
