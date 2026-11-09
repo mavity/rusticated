@@ -125,6 +125,11 @@ func main() {
 	darwinFlags := fmt.Sprintf("['-C', 'panic=abort', '-C', 'linker=rust-lld', '-C', 'linker-flavor=darwin-lld', '-Z', 'unstable-options', '-C', 'link-arg=-L%s']", filepath.ToSlash(darwinStubsDir))
 	runtimeRustflags := "-C relocation-model=pie -Zunstable-options -Zdefault-visibility=hidden -Cpanic=immediate-abort -Zlocation-detail=none -Zfmt-debug=none"
 	runtimeDir := filepath.Join(nextDir, "runtime")
+	runtimeBuildDir, err := prepareCraneliftOverlay(runtimeDir, rustBuildDir, verbose)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error preparing Cranelift source overlay: %v\n", err)
+		os.Exit(1)
+	}
 
 	type targetDef struct {
 		Name              string
@@ -166,7 +171,7 @@ func main() {
 		// Movable Cranelift Runtime Slice (ISA-shared)
 		{
 			Name:              "runtime-x86_64",
-			ManifestDir:       runtimeDir,
+			ManifestDir:       runtimeBuildDir,
 			Feature:           "x86_64",
 			NoDefaultFeatures: true,
 			NeedsAlloc:        true,
@@ -180,7 +185,7 @@ func main() {
 		},
 		{
 			Name:              "runtime-aarch64",
-			ManifestDir:       runtimeDir,
+			ManifestDir:       runtimeBuildDir,
 			Feature:           "aarch64",
 			NoDefaultFeatures: true,
 			NeedsAlloc:        true,
