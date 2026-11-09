@@ -24,9 +24,6 @@ default = ["x86_64", "aarch64"]
 x86_64 = ["cranelift-codegen/x86"]
 aarch64 = ["cranelift-codegen/arm64"]
 
-[patch.crates-io]
-cranelift-codegen = { path = "vendor/cranelift-codegen" }
-
 [profile.release]
 opt-level = "z"
 lto = true

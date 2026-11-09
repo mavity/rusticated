@@ -46,10 +46,14 @@ func (r *Runner) RunStage2UnitTests() {
 
 	// 4. Rust Unit Tests: Movable Cranelift Runtime Slice (Overlapped/PAL layouts + CLIF codegen + WASM JIT)
 	r.RunTest("unit/rust", "mohabbat-next-runtime (cranelift JIT)", func() error {
-		manifest := filepath.Join(r.NextDir, "runtime", "Cargo.toml")
+		workspaceDir := filepath.Join(r.BuildDir, "rust", "runtime-cranelift-overlay")
+		manifest := filepath.Join(workspaceDir, "Cargo.toml")
+		if _, err := os.Stat(manifest); err != nil {
+			return fmt.Errorf("generated Cranelift runtime workspace is unavailable: %w", err)
+		}
 		targetDir := filepath.Join(r.BuildDir, "rust", "unit-runtime")
 		cmd := exec.Command("cargo", "test", "--manifest-path", manifest, "--target-dir", targetDir, "--", "--nocapture")
-		cmd.Dir = filepath.Join(r.NextDir, "runtime")
+		cmd.Dir = workspaceDir
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		return cmd.Run()
