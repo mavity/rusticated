@@ -433,4 +433,77 @@ mod tests {
             assert!(res.is_err(), "malformed wasm must return Err");
         }
     }
+
+    #[test]
+    fn test_import_name_to_abi_offset() {
+        use crate::abi::PalAbiTable;
+        use core::mem::offset_of;
+        assert_eq!(jit::import_name_to_abi_offset("host_panic"), Some(offset_of!(PalAbiTable, host_panic)));
+        assert_eq!(jit::import_name_to_abi_offset("rusticated_debug"), Some(offset_of!(PalAbiTable, rusticated_debug)));
+        assert_eq!(jit::import_name_to_abi_offset("process_exit"), Some(offset_of!(PalAbiTable, process_exit)));
+        assert_eq!(jit::import_name_to_abi_offset("get_time"), Some(offset_of!(PalAbiTable, get_time)));
+        assert_eq!(jit::import_name_to_abi_offset("get_random"), Some(offset_of!(PalAbiTable, get_random)));
+        assert_eq!(jit::import_name_to_abi_offset("get_args"), Some(offset_of!(PalAbiTable, get_args)));
+        assert_eq!(jit::import_name_to_abi_offset("get_env"), Some(offset_of!(PalAbiTable, get_env)));
+        assert_eq!(jit::import_name_to_abi_offset("get_cwd"), Some(offset_of!(PalAbiTable, get_cwd)));
+        assert_eq!(jit::import_name_to_abi_offset("set_cwd"), Some(offset_of!(PalAbiTable, set_cwd)));
+        assert_eq!(jit::import_name_to_abi_offset("get_platform_info"), Some(offset_of!(PalAbiTable, get_platform_info)));
+        assert_eq!(jit::import_name_to_abi_offset("read"), Some(offset_of!(PalAbiTable, read)));
+        assert_eq!(jit::import_name_to_abi_offset("write"), Some(offset_of!(PalAbiTable, write)));
+        assert_eq!(jit::import_name_to_abi_offset("process_spawn"), Some(offset_of!(PalAbiTable, process_spawn)));
+        assert_eq!(jit::import_name_to_abi_offset("fd_isatty"), Some(offset_of!(PalAbiTable, fd_isatty)));
+        assert_eq!(jit::import_name_to_abi_offset("nonexistent_symbol"), None);
+    }
+
+    #[test]
+    fn test_import_wasm_parsing() {
+        let wasm_bytes: &[u8] = &[
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // magic + version
+            // Type section (id=1, len=8, 2 types: ()->i64, ()->())
+            0x01, 0x08, 0x02,
+            0x60, 0x00, 0x01, 0x7e,
+            0x60, 0x00, 0x00,
+            // Import section (id=2, len=16, 1 import: env.get_time -> func 0)
+            0x02, 0x10, 0x01,
+            0x03, b'e', b'n', b'v',
+            0x08, b'g', b'e', b't', b'_', b't', b'i', b'm', b'e',
+            0x00, 0x00,
+            // Function section (id=3, len=2, 1 func: func 1 has type 1)
+            0x03, 0x02, 0x01, 0x01,
+            // Memory section (id=5, len=3, 1 page min)
+            0x05, 0x03, 0x01, 0x00, 0x01,
+            // Export section (id=7, len=7, "run" -> func 1)
+            0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x01,
+            // Code section (id=10, len=11, 1 body)
+            0x0a, 0x0b, 0x01,
+            0x09, 0x00,
+            0x41, 0x00,
+            0x10, 0x00,
+            0x37, 0x03, 0x00,
+            0x0b
+        ];
+
+        let mut imported_func_names = alloc::vec::Vec::new();
+        let mut func_type_indices = alloc::vec::Vec::new();
+        let mut num_imported_funcs = 0u32;
+
+        for payload in wasmparser::Parser::new(0).parse_all(wasm_bytes) {
+            let p = payload.expect("payload must parse");
+            if let wasmparser::Payload::ImportSection(reader) = p {
+                for imp in reader {
+                    let imp = imp.expect("import entry must parse");
+                    if let wasmparser::Imports::Single(_, imp) = imp {
+                        if let wasmparser::TypeRef::Func(type_idx) = imp.ty {
+                            imported_func_names.push(imp.name);
+                            func_type_indices.push(type_idx);
+                            num_imported_funcs += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(num_imported_funcs, 1);
+        assert_eq!(imported_func_names[0], "get_time");
+        assert_eq!(func_type_indices[0], 0);
+    }
 }

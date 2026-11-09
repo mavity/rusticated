@@ -18,6 +18,7 @@ var runtimeScenarios = []runtimeScenario{
 	{name: "store-only-codegen", arg: "store"},
 	{name: "integer-add-store-codegen", arg: "add"},
 	{name: "load-add-store-cold-and-warm", arg: "load-add-store"},
+	{name: "wasm-import-call-get-time", arg: "call-get-time"},
 }
 
 func runRuntimeScenarios(r *Runner, suite, hostExe, runtimeBin string) {
