@@ -123,7 +123,7 @@ func main() {
 
 	linuxMuslFlags := "['-C', 'panic=abort', '-C', 'relocation-model=pic', '-C', 'target-feature=+crt-static', '-C', 'link-self-contained=no', '-C', 'linker=rust-lld', '-C', 'linker-flavor=ld.lld', '-C', 'link-arg=-pie', '-C', 'link-arg=--no-dynamic-linker']"
 	darwinFlags := fmt.Sprintf("['-C', 'panic=abort', '-C', 'linker=rust-lld', '-C', 'linker-flavor=darwin-lld', '-Z', 'unstable-options', '-C', 'link-arg=-L%s']", filepath.ToSlash(darwinStubsDir))
-	runtimeRustflags := "-C relocation-model=pie -Zunstable-options -Zdefault-visibility=hidden -Cpanic=immediate-abort -Zlocation-detail=none -Zfmt-debug=none"
+	runtimeRustflags := "-C relocation-model=pie -Zunstable-options -Zdefault-visibility=hidden -Cpanic=abort -Zlocation-detail=none -Zfmt-debug=none -Cforce-frame-pointers=yes -Cllvm-args=-enable-machine-outliner=never"
 	runtimeDir := filepath.Join(nextDir, "runtime")
 	runtimeBuildDir, err := prepareCraneliftOverlay(runtimeDir, rustBuildDir, verbose)
 	if err != nil {

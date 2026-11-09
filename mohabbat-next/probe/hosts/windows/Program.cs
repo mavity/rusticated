@@ -288,13 +288,17 @@ internal static class Program
     private static void RuntimeHostPanic(IntPtr msgPtr, UIntPtr msgLen)
     {
         string msg = Marshal.PtrToStringAnsi(msgPtr, (int)msgLen.ToUInt64());
+        Console.WriteLine("Runtime slice panicked: " + msg);
+        Console.Out.Flush();
         Console.Error.WriteLine("Runtime slice panicked: " + msg);
+        Console.Error.Flush();
         Environment.Exit(99);
     }
 
     private static void RuntimeDebug(int value)
     {
         Console.WriteLine("INFO: runtime checkpoint " + value);
+        Console.Out.Flush();
     }
 
     private static byte[] BuildRuntimeTestWasm(string scenario)
@@ -405,6 +409,10 @@ internal static class Program
 
             RuntimeSliceEntry entry = Marshal.GetDelegateForFunctionPointer<RuntimeSliceEntry>(sliceCode);
 
+            s_sliceCode = sliceCode;
+            VectoredHandlerCallback veh = OnVectoredException;
+            IntPtr hVeh = AddVectoredExceptionHandler(1, veh);
+
             // Call #1 compiles the selected WASM scenario and runs it once.
             Console.WriteLine("INFO: entering runtime for cold JIT");
             Exception threadEx = null;
@@ -417,6 +425,7 @@ internal static class Program
             }, 8 * 1024 * 1024);
             t.Start();
             t.Join();
+            GC.KeepAlive(veh);
             if (threadEx != null) throw threadEx;
             Console.WriteLine("INFO: cold JIT entry returned");
 
@@ -642,4 +651,41 @@ internal static class Program
 
     [DllImport("kernel32.dll")]
     private static extern void GetSystemInfo(out SystemInfo systemInfo);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr AddVectoredExceptionHandler(uint first, VectoredHandlerCallback handler);
+
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    private delegate int VectoredHandlerCallback(IntPtr exceptionPointers);
+
+    private static IntPtr s_sliceCode = IntPtr.Zero;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool WriteFile(
+        IntPtr hFile,
+        byte[] lpBuffer,
+        uint nNumberOfBytesToWrite,
+        out uint lpNumberOfBytesWritten,
+        IntPtr lpOverlapped);
+
+    private static int OnVectoredException(IntPtr ptr)
+    {
+        try {
+            IntPtr pRec = Marshal.ReadIntPtr(ptr, 0);
+            uint code = (uint)Marshal.ReadInt32(pRec, 0);
+            IntPtr addr = Marshal.ReadIntPtr(pRec, 16);
+            long offset = addr.ToInt64() - s_sliceCode.ToInt64();
+            long badAddr = Marshal.ReadIntPtr(pRec, 40).ToInt64();
+            string msg = string.Format("CRASH: Exception 0x{0:X8} at PC=0x{1:X16} (slice+0x{2:X}), bad_addr=0x{3:X16}\n",
+                code, addr.ToInt64(), offset, badAddr);
+            byte[] bytes = System.Text.Encoding.ASCII.GetBytes(msg);
+            uint written;
+            WriteFile(GetStdHandle(-12), bytes, (uint)bytes.Length, out written, IntPtr.Zero);
+        } catch {
+            byte[] bytes = System.Text.Encoding.ASCII.GetBytes("CRASH in VEH handler\n");
+            uint written;
+            WriteFile(GetStdHandle(-12), bytes, (uint)bytes.Length, out written, IntPtr.Zero);
+        }
+        return 0; // EXCEPTION_CONTINUE_SEARCH
+    }
 }
