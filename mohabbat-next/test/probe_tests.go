@@ -188,10 +188,11 @@ func (r *Runner) RunStage3PlatformMatrix() {
 
 		// If running on Windows ARM64, also test the x86_64 Windows PAL & x86_64 Probe via a /platform:x64 CLR host!
 		if runtime.GOARCH == "arm64" {
-			x64Exe, err := r.buildPinnedX64WindowsHost()
-			if err != nil {
-				r.RecordDisabled("windows/amd64-emulated", "probe-suite", fmt.Sprintf("build x64-pinned CLR host failed: %v", err))
-			} else {
+			x64Exe, err := r.builtX64WindowsHost()
+			r.RunTest("windows/amd64-emulated", "x64-host-artifact", func() error {
+				return err
+			})
+			if err == nil {
 				runStandardProbeSuite(r, "windows/amd64-emulated", x64Exe, nil, true)
 			}
 		}
@@ -213,57 +214,16 @@ func (r *Runner) RunStage3PlatformMatrix() {
 	r.runDarwinMatrix()
 }
 
-func (r *Runner) buildPinnedX64WindowsHost() (string, error) {
-	windir := os.Getenv("WINDIR")
-	csc := filepath.Join(windir, "Microsoft.NET", "Framework64", "v4.0.30319", "csc.exe")
-	if _, err := os.Stat(csc); err != nil {
-		return "", fmt.Errorf("csc.exe not found at %s: %w", csc, err)
-	}
-
-	outExe := filepath.Join(r.BuildDir, "MohabbatWindowsHost-x64.exe")
-	winHostDir := filepath.Join(r.ProbeDir, "hosts", "windows")
-	depsDir := filepath.Join(r.BuildDir, "packer", "bin", "Release", "net462")
-	compDir := filepath.Join(r.BuildDir, "components")
-
-	args := []string{
-		"/nologo",
-		"/target:exe",
-		"/platform:x64",
-		"/out:" + outExe,
-		"/reference:System.dll",
-	}
-
-	entries, err := os.ReadDir(depsDir)
+func (r *Runner) builtX64WindowsHost() (string, error) {
+	path := filepath.Join(r.BuildDir, "MohabbatWindowsHost-x64.exe")
+	info, err := os.Stat(path)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("Go builder did not produce the x64 Windows host at %s: %w", path, err)
 	}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".dll") {
-			continue
-		}
-		full := filepath.Join(depsDir, entry.Name())
-		args = append(args, "/reference:"+full)
-		args = append(args, fmt.Sprintf("/resource:%s,MohabbatNext.Internal.%s", full, entry.Name()))
+	if info.IsDir() || info.Size() == 0 {
+		return "", fmt.Errorf("Go builder produced an invalid x64 Windows host at %s", path)
 	}
-
-	resMap := []struct{ file, name string }{
-		{"hello-x86_64.zst", "MohabbatNext.Hello.x86_64.zst"},
-		{"hello-aarch64.zst", "MohabbatNext.Hello.aarch64.zst"},
-		{"platform-windows-x86_64.zst", "MohabbatNext.Platform.Windows.x86_64.zst"},
-		{"platform-windows-aarch64.zst", "MohabbatNext.Platform.Windows.aarch64.zst"},
-	}
-	for _, rm := range resMap {
-		p := filepath.Join(compDir, rm.file)
-		args = append(args, fmt.Sprintf("/resource:%s,%s", p, rm.name))
-	}
-	args = append(args, filepath.Join(winHostDir, "Program.cs"))
-
-	cmd := exec.Command(csc, args...)
-	cmd.Dir = winHostDir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return outExe, nil
+	return path, nil
 }
 
 func (r *Runner) runLinuxMatrix() {

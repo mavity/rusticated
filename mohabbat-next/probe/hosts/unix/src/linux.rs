@@ -14,6 +14,28 @@ pub struct UnixPlatformHost {
 
 type PlatformEntry = unsafe extern "C" fn() -> i32;
 const PREFIX_ABI_OFFSET: usize = 0x20000;
+const THREAD_STACK_SIZE: usize = 1024 * 1024;
+const CLONE_VM: usize = 0x00000100;
+const CLONE_FS: usize = 0x00000200;
+const CLONE_FILES: usize = 0x00000400;
+const CLONE_SIGHAND: usize = 0x00000800;
+const CLONE_THREAD: usize = 0x00010000;
+const CLONE_SYSVSEM: usize = 0x00040000;
+const CLONE_PARENT_SETTID: usize = 0x00100000;
+const CLONE_CHILD_CLEARTID: usize = 0x00200000;
+const EAGAIN: i32 = 11;
+const EINTR: i32 = 4;
+const EINVAL: i32 = 22;
+const ENOMEM: i32 = 12;
+const ESRCH: i32 = 3;
+
+type ThreadStartFn = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
+
+static mut THREAD_CHILD_TID: i32 = 0;
+static mut THREAD_ID: usize = 0;
+static mut THREAD_STACK: *mut c_void = core::ptr::null_mut();
+static mut THREAD_ACTIVE: bool = false;
+static mut THREAD_ERRNO: i32 = 0;
 
 // ─── Syscall primitives ──────────────────────────────────────────────────────
 
@@ -208,6 +230,140 @@ pub unsafe fn sys_exit(code: i32) -> ! {
     );
 }
 
+#[cfg(target_arch = "x86_64")]
+#[unsafe(naked)]
+unsafe extern "C" fn clone_thread(
+    _flags: usize,
+    _stack: *mut u8,
+    _child_tid: *mut i32,
+    _start: ThreadStartFn,
+    _arg: *mut c_void,
+) -> isize {
+    core::arch::naked_asm!(
+        "push r12",
+        "push r13",
+        "mov r12, rcx",
+        "mov r13, r8",
+        "mov r10, rdx",
+        "xor r8d, r8d",
+        "mov eax, 56",
+        "syscall",
+        "test rax, rax",
+        "jz 2f",
+        "pop r13",
+        "pop r12",
+        "ret",
+        "2:",
+        "mov rdi, r13",
+        "call r12",
+        "mov eax, 60",
+        "xor edi, edi",
+        "syscall",
+        "ud2",
+    )
+}
+
+#[cfg(target_arch = "aarch64")]
+#[unsafe(naked)]
+unsafe extern "C" fn clone_thread(
+    _flags: usize,
+    _stack: *mut u8,
+    _child_tid: *mut i32,
+    _start: ThreadStartFn,
+    _arg: *mut c_void,
+) -> isize {
+    core::arch::naked_asm!(
+        "stp x19, x20, [sp, #-16]!",
+        "mov x19, x3",
+        "mov x20, x4",
+        "mov x4, x2",
+        "mov x3, xzr",
+        "mov x8, #220",
+        "svc #0",
+        "cbz x0, 2f",
+        "ldp x19, x20, [sp], #16",
+        "ret",
+        "2:",
+        "mov x0, x20",
+        "blr x19",
+        "mov x0, #0",
+        "mov x8, #93",
+        "svc #0",
+        "brk #0",
+    )
+}
+
+unsafe fn alloc_thread_stack() -> *mut c_void {
+    #[cfg(target_arch = "x86_64")]
+    let result: isize;
+    #[cfg(target_arch = "x86_64")]
+    core::arch::asm!(
+        "syscall",
+        in("rax") 9usize, // SYS_mmap
+        in("rdi") 0usize,
+        in("rsi") THREAD_STACK_SIZE,
+        in("rdx") 3usize, // PROT_READ | PROT_WRITE
+        in("r10") 0x22usize, // MAP_PRIVATE | MAP_ANONYMOUS
+        in("r8") (-1i64) as usize,
+        in("r9") 0usize,
+        lateout("rax") result,
+        clobber_abi("system"),
+    );
+    #[cfg(target_arch = "aarch64")]
+    let result: isize;
+    #[cfg(target_arch = "aarch64")]
+    core::arch::asm!(
+        "svc #0",
+        in("x8") 222usize, // SYS_mmap
+        in("x0") 0usize,
+        in("x1") THREAD_STACK_SIZE,
+        in("x2") 3usize, // PROT_READ | PROT_WRITE
+        in("x3") 0x22usize, // MAP_PRIVATE | MAP_ANONYMOUS
+        in("x4") (-1i64) as usize,
+        in("x5") 0usize,
+        lateout("x0") result,
+        clobber_abi("system"),
+    );
+    if result < 0 && result >= -4096 {
+        core::ptr::null_mut()
+    } else {
+        result as *mut c_void
+    }
+}
+
+unsafe fn futex_wait(address: *mut i32, expected: i32) -> isize {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let result: isize;
+        core::arch::asm!(
+            "syscall",
+            in("rax") 202usize, // SYS_futex
+            in("rdi") address as usize,
+            in("rsi") 0usize, // FUTEX_WAIT
+            in("rdx") expected as usize,
+            in("r10") 0usize, // timeout = NULL
+            lateout("rax") result,
+            clobber_abi("system"),
+        );
+        result
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let result: isize;
+        core::arch::asm!(
+            "svc #0",
+            in("x8") 98usize, // SYS_futex
+            in("x0") address as usize,
+            in("x1") 0usize, // FUTEX_WAIT
+            in("x2") expected as usize,
+            in("x3") 0usize, // timeout = NULL
+            lateout("x0") result,
+            clobber_abi("system"),
+        );
+        result
+    }
+}
+
 pub unsafe fn alloc_executable(size: usize) -> *mut c_void {
     let size = (size + 4095) & !4095;
     #[cfg(target_arch = "x86_64")]
@@ -321,11 +477,107 @@ unsafe extern "C" fn load_library(_name: *const c_char, _flags: i32) -> *mut c_v
 }
 
 unsafe extern "C" fn sys_read_cb(fd: i32, buf: *mut c_void, count: usize) -> isize {
-    sys_read(fd, buf as *mut u8, count)
+    let result = sys_read(fd, buf as *mut u8, count);
+    if result < 0 && result >= -4095 {
+        core::ptr::addr_of_mut!(THREAD_ERRNO).write_volatile((-result) as i32);
+        -1
+    } else {
+        result
+    }
 }
 
 unsafe extern "C" fn sys_write_cb(fd: i32, buf: *const c_void, count: usize) -> isize {
-    sys_write(fd, buf as *const u8, count)
+    let result = sys_write(fd, buf as *const u8, count);
+    if result < 0 && result >= -4095 {
+        core::ptr::addr_of_mut!(THREAD_ERRNO).write_volatile((-result) as i32);
+        -1
+    } else {
+        result
+    }
+}
+
+unsafe extern "C" fn errno_location_cb() -> *mut i32 {
+    core::ptr::addr_of_mut!(THREAD_ERRNO)
+}
+
+unsafe extern "C" fn pthread_create_cb(
+    thread: *mut usize,
+    attr: *const c_void,
+    start: Option<ThreadStartFn>,
+    arg: *mut c_void,
+) -> i32 {
+    if thread.is_null() || !attr.is_null() {
+        return EINVAL;
+    }
+    let Some(start) = start else {
+        return EINVAL;
+    };
+    if core::ptr::addr_of!(THREAD_ACTIVE).read_volatile() {
+        return EAGAIN;
+    }
+
+    let stack = alloc_thread_stack();
+    if stack.is_null() {
+        return ENOMEM;
+    }
+    core::ptr::addr_of_mut!(THREAD_CHILD_TID).write_volatile(0);
+    core::ptr::addr_of_mut!(THREAD_STACK).write_volatile(stack);
+    core::ptr::addr_of_mut!(THREAD_ACTIVE).write_volatile(true);
+    let flags = CLONE_VM
+        | CLONE_FS
+        | CLONE_FILES
+        | CLONE_SIGHAND
+        | CLONE_THREAD
+        | CLONE_SYSVSEM
+        | CLONE_PARENT_SETTID
+        | CLONE_CHILD_CLEARTID;
+    let child_tid = core::ptr::addr_of_mut!(THREAD_CHILD_TID);
+    let stack_top = stack.add(THREAD_STACK_SIZE).cast::<u8>();
+    let result = clone_thread(flags, stack_top, child_tid, start, arg);
+    if result <= 0 {
+        core::ptr::addr_of_mut!(THREAD_STACK).write_volatile(core::ptr::null_mut());
+        core::ptr::addr_of_mut!(THREAD_ACTIVE).write_volatile(false);
+        free_executable(stack, THREAD_STACK_SIZE);
+        let error = if result < 0 { (-result) as i32 } else { EAGAIN };
+        return error;
+    }
+    let id = result as usize;
+    core::ptr::addr_of_mut!(THREAD_ID).write_volatile(id);
+    thread.write(id);
+    0
+}
+
+unsafe extern "C" fn pthread_join_cb(thread: usize, retval: *mut *mut c_void) -> i32 {
+    if !core::ptr::addr_of!(THREAD_ACTIVE).read_volatile()
+        || thread == 0
+        || thread != core::ptr::addr_of!(THREAD_ID).read_volatile()
+    {
+        return ESRCH;
+    }
+    let child_tid = core::ptr::addr_of_mut!(THREAD_CHILD_TID);
+    loop {
+        let current_tid = child_tid.read_volatile();
+        if current_tid == 0 {
+            break;
+        }
+        let result = futex_wait(child_tid, current_tid);
+        if result < 0 {
+            let error = (-result) as i32;
+            if error == EAGAIN || error == EINTR {
+                continue;
+            }
+            return error;
+        }
+    }
+    if !retval.is_null() {
+        retval.write(core::ptr::null_mut());
+    }
+    let stack = core::ptr::addr_of!(THREAD_STACK).read_volatile();
+    core::ptr::addr_of_mut!(THREAD_STACK).write_volatile(core::ptr::null_mut());
+    core::ptr::addr_of_mut!(THREAD_ID).write_volatile(0);
+    core::ptr::addr_of_mut!(THREAD_ACTIVE).write_volatile(false);
+    free_executable(stack, THREAD_STACK_SIZE);
+    0
 }
 
 unsafe extern "C" fn sys_exit_cb(status: i32) -> ! {
@@ -337,6 +589,12 @@ unsafe extern "C" fn get_proc_address(_module: *mut c_void, name: *const c_char)
         sys_read_cb as *mut c_void
     } else if streq(name, b"write\0") {
         sys_write_cb as *mut c_void
+    } else if streq(name, b"__errno_location\0") {
+        errno_location_cb as *mut c_void
+    } else if streq(name, b"pthread_create\0") {
+        pthread_create_cb as *mut c_void
+    } else if streq(name, b"pthread_join\0") {
+        pthread_join_cb as *mut c_void
     } else if streq(name, b"_exit\0") || streq(name, b"exit\0") {
         sys_exit_cb as *mut c_void
     } else {
