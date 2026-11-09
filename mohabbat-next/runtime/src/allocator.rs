@@ -71,3 +71,22 @@ unsafe impl GlobalAlloc for PalBumpAllocator {
         new_ptr
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_align_up_properties() {
+        assert_eq!(align_up(0, 8), 0);
+        assert_eq!(align_up(1, 8), 8);
+        assert_eq!(align_up(7, 8), 8);
+        assert_eq!(align_up(8, 8), 8);
+        assert_eq!(align_up(9, 8), 16);
+        assert_eq!(align_up(15, 16), 16);
+        assert_eq!(align_up(16, 16), 16);
+        assert_eq!(align_up(17, 16), 32);
+        assert_eq!(align_up(65535, 65536), 65536);
+        assert_eq!(align_up(65536, 65536), 65536);
+    }
+}

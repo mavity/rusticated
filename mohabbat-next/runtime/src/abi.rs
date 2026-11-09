@@ -126,6 +126,22 @@ pub struct PalAbiTable {
     pub fd_isatty:    pal_fn!(fn(handle: u32) -> u32),
 }
 
+const _: () = {
+    assert!(core::mem::offset_of!(PalAbiTable, wasm_bytes) == 0);
+    assert!(core::mem::offset_of!(PalAbiTable, wasm_len) == 8);
+    assert!(core::mem::offset_of!(PalAbiTable, alloc_mem) == 16);
+    assert!(core::mem::offset_of!(PalAbiTable, protect_mem) == 24);
+    assert!(core::mem::offset_of!(PalAbiTable, free_mem) == 32);
+    assert!(core::mem::offset_of!(PalAbiTable, flush_icache) == 40);
+    assert!(core::mem::offset_of!(PalAbiTable, host_panic) == 48);
+    assert!(core::mem::offset_of!(PalAbiTable, rusticated_debug) == 56);
+    assert!(core::mem::offset_of!(PalAbiTable, process_exit) == 64);
+    assert!(core::mem::offset_of!(PalAbiTable, get_time) == 72);
+    assert!(core::mem::offset_of!(PalAbiTable, read) == 144);
+    assert!(core::mem::offset_of!(PalAbiTable, write) == 152);
+    assert!(core::mem::offset_of!(PalAbiTable, process_spawn) == 304);
+};
+
 /// Runtime private state located at `-0x10000` (`__globals_base`).
 #[repr(C)]
 pub struct RuntimeGlobals {

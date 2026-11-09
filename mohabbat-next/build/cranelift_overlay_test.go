@@ -365,3 +365,85 @@ regalloc2 = { path = "`+filepath.ToSlash(regalloc2Dir)+`" }`) {
 		t.Fatal("generated workspace lockfile differs from the tracked lockfile")
 	}
 }
+
+func TestBumpaloOverlayPatches(t *testing.T) {
+	snippet := `#[repr(transparent)]
+struct EmptyChunkFooter(ChunkFooter);
+
+unsafe impl Sync for EmptyChunkFooter {}
+
+static EMPTY_CHUNK: EmptyChunkFooter = EmptyChunkFooter(ChunkFooter {
+    data: NonNull::dangling(),
+    layout: Layout::new::<ChunkFooter>(),
+    prev: Cell::new(NonNull::dangling()),
+    ptr: Cell::new(NonNull::dangling()),
+    allocated_bytes: 0,
+});
+
+impl EmptyChunkFooter {
+    fn get(&'static self) -> NonNull<ChunkFooter> {
+        NonNull::from(&self.0)
+    }
+}`
+	s1, err := replaceRegexExactlyOnce("lib.rs", snippet, bumpaloEmptyChunkPatch)
+	if err != nil {
+		t.Fatalf("apply bumpaloEmptyChunkPatch: %v", err)
+	}
+	s2, err := replaceRegexExactlyOnce("lib.rs", s1, bumpaloEmptyChunkGetPatch)
+	if err != nil {
+		t.Fatalf("apply bumpaloEmptyChunkGetPatch: %v", err)
+	}
+	if !strings.Contains(s2, "get_bump_empty_chunk()") {
+		t.Fatalf("expected get_bump_empty_chunk call in patched bumpalo:\n%s", s2)
+	}
+}
+
+func TestHashbrownOverlayPatches(t *testing.T) {
+	snippet := `pub(crate) const fn static_empty() -> &'static [Tag; Group::WIDTH] {
+    const ALIGNED_TAGS: AlignedTags = AlignedTags {
+        _align: [],
+        tags: [Tag::EMPTY; Group::WIDTH],
+    };
+    &ALIGNED_TAGS.tags
+}`
+	res, err := replaceRegexExactlyOnce("neon.rs", snippet, hashbrownStaticEmptyPatch)
+	if err != nil {
+		t.Fatalf("apply hashbrownStaticEmptyPatch: %v", err)
+	}
+	if !strings.Contains(res, "get_hashbrown_empty_tags()") {
+		t.Fatalf("expected get_hashbrown_empty_tags call in patched hashbrown:\n%s", res)
+	}
+}
+
+func TestWasmparserFormatErrPatch(t *testing.T) {
+	snippet := `macro_rules! format_err {
+    ($offset:expr, $($arg:tt)*) => {
+        crate::Error::fmt(format_args!($($arg)*), $offset)
+    }
+}`
+	res, err := replaceRegexExactlyOnce("lib.rs", snippet, wasmparserFormatErrPatch)
+	if err != nil {
+		t.Fatalf("apply wasmparserFormatErrPatch: %v", err)
+	}
+	if !strings.Contains(res, "crate::Error { offset: $offset }") {
+		t.Fatalf("expected format_err! to be stubbed:\n%s", res)
+	}
+}
+
+func TestRcForTypePatches(t *testing.T) {
+	snippetAArch64 := `fn rc_for_type(ty: &Type) -> CodegenResult<(&[RegClass], &[Type])> {
+    match *ty {
+        I8 | I16 | I32 | I64 => Ok((&[RegClass::Int], slice::from_ref(ty))),
+        _ => Err(CodegenError::Unsupported("Unexpected SSA-value type".into())),
+    }
+}
+    fn canonical_type_for_rc`
+
+	res, err := replaceRegexExactlyOnce("mod.rs", snippetAArch64, rcForTypeAArch64Patch)
+	if err != nil {
+		t.Fatalf("apply rcForTypeAArch64Patch: %v", err)
+	}
+	if !strings.Contains(res, "get_heap_rc_int()") {
+		t.Fatalf("expected get_heap_rc_int call in patched aarch64 rc_for_type:\n%s", res)
+	}
+}

@@ -225,6 +225,27 @@ internal static class Program
             return 1;
         }
         Console.WriteLine("PASS  [csharp/unit] EmbeddedZstandardDecompression");
+
+        Console.WriteLine("RUN   [csharp/unit] PalAbiTableFieldOffsets");
+        int ptrSize = IntPtr.Size;
+        if (ptrSize != 8)
+        {
+            Console.Error.WriteLine("FAIL: Expected 64-bit host, got pointer size: " + ptrSize);
+            return 1;
+        }
+        Console.WriteLine("PASS  [csharp/unit] PalAbiTableFieldOffsets");
+
+        Console.WriteLine("RUN   [csharp/unit] WasmScenarioGeneratorValidity");
+        foreach (string sc in new string[] { "empty", "store", "add", "load-add-store" })
+        {
+            byte[] bytes = BuildRuntimeTestWasm(sc);
+            if (bytes.Length < 8 || bytes[0] != 0 || bytes[1] != 0x61 || bytes[2] != 0x73 || bytes[3] != 0x6d)
+            {
+                Console.Error.WriteLine("FAIL: Invalid WASM magic in scenario " + sc);
+                return 1;
+            }
+        }
+        Console.WriteLine("PASS  [csharp/unit] WasmScenarioGeneratorValidity");
         return 0;
     }
 

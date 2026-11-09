@@ -13,6 +13,7 @@ pub mod abi;
 pub mod allocator;
 pub mod jit;
 
+#[allow(unused_imports)]
 use crate::abi::abi;
 use crate::abi::globals;
 #[cfg(not(test))]
@@ -20,9 +21,8 @@ use crate::allocator::PalBumpAllocator;
 #[cfg(not(test))]
 use core::panic::PanicInfo;
 
-#[cfg(not(test))]
-#[unsafe(no_mangle)]
-unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+#[inline(always)]
+pub(crate) unsafe fn slice_memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     let mut i = 0;
     while i < n {
         *dest.add(i) = *src.add(i);
@@ -31,9 +31,8 @@ unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 
     dest
 }
 
-#[cfg(not(test))]
-#[unsafe(no_mangle)]
-unsafe extern "C" fn memset(dest: *mut u8, value: i32, n: usize) -> *mut u8 {
+#[inline(always)]
+pub(crate) unsafe fn slice_memset(dest: *mut u8, value: i32, n: usize) -> *mut u8 {
     let mut i = 0;
     while i < n {
         *dest.add(i) = value as u8;
@@ -42,9 +41,8 @@ unsafe extern "C" fn memset(dest: *mut u8, value: i32, n: usize) -> *mut u8 {
     dest
 }
 
-#[cfg(not(test))]
-#[unsafe(no_mangle)]
-unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+#[inline(always)]
+pub(crate) unsafe fn slice_memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     if (dest as usize) < (src as usize) {
         let mut i = 0;
         while i < n {
@@ -61,9 +59,8 @@ unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8
     dest
 }
 
-#[cfg(not(test))]
-#[unsafe(no_mangle)]
-unsafe extern "C" fn memcmp(lhs: *const u8, rhs: *const u8, n: usize) -> i32 {
+#[inline(always)]
+pub(crate) unsafe fn slice_memcmp(lhs: *const u8, rhs: *const u8, n: usize) -> i32 {
     let mut i = 0;
     while i < n {
         let left = *lhs.add(i);
@@ -76,10 +73,39 @@ unsafe extern "C" fn memcmp(lhs: *const u8, rhs: *const u8, n: usize) -> i32 {
     0
 }
 
+#[inline(always)]
+pub(crate) unsafe fn slice_bcmp(lhs: *const u8, rhs: *const u8, n: usize) -> i32 {
+    slice_memcmp(lhs, rhs, n)
+}
+
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    slice_memcpy(dest, src, n)
+}
+
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+unsafe extern "C" fn memset(dest: *mut u8, value: i32, n: usize) -> *mut u8 {
+    slice_memset(dest, value, n)
+}
+
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    slice_memmove(dest, src, n)
+}
+
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+unsafe extern "C" fn memcmp(lhs: *const u8, rhs: *const u8, n: usize) -> i32 {
+    slice_memcmp(lhs, rhs, n)
+}
+
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 unsafe extern "C" fn bcmp(lhs: *const u8, rhs: *const u8, n: usize) -> i32 {
-    memcmp(lhs, rhs, n)
+    slice_bcmp(lhs, rhs, n)
 }
 
 #[unsafe(no_mangle)]
@@ -330,5 +356,81 @@ mod tests {
         let mut ctrl = Default::default();
         let compiled = ctx.compile(&isa, &mut ctrl).expect("compile wasm body to native machine code");
         assert!(!compiled.code_buffer().is_empty());
+    }
+
+    #[test]
+    fn test_memory_intrinsics() {
+        let mut buf = [0u8; 32];
+        unsafe {
+            slice_memset(buf.as_mut_ptr(), 0xaa, 16);
+            assert_eq!(&buf[..16], &[0xaa; 16]);
+            assert_eq!(&buf[16..], &[0; 16]);
+
+            let src = [1u8, 2, 3, 4, 5, 6, 7, 8];
+            slice_memcpy(buf.as_mut_ptr(), src.as_ptr(), 8);
+            assert_eq!(&buf[..8], &[1, 2, 3, 4, 5, 6, 7, 8]);
+
+            // Forward and backward overlapping memmove
+            let mut move_buf = [1u8, 2, 3, 4, 5, 6, 7, 8];
+            slice_memmove(move_buf.as_mut_ptr().add(2), move_buf.as_ptr(), 4);
+            assert_eq!(&move_buf, &[1, 2, 1, 2, 3, 4, 7, 8]);
+
+            let mut move_buf2 = [1u8, 2, 3, 4, 5, 6, 7, 8];
+            slice_memmove(move_buf2.as_mut_ptr(), move_buf2.as_ptr().add(2), 4);
+            assert_eq!(&move_buf2[..4], &[3, 4, 5, 6]);
+
+            assert_eq!(slice_memcmp(b"abc".as_ptr(), b"abc".as_ptr(), 3), 0);
+            assert!(slice_memcmp(b"abc".as_ptr(), b"abd".as_ptr(), 3) < 0);
+            assert!(slice_memcmp(b"abd".as_ptr(), b"abc".as_ptr(), 3) > 0);
+            assert_eq!(slice_bcmp(b"xyz".as_ptr(), b"xyz".as_ptr(), 3), 0);
+        }
+    }
+
+    #[test]
+    fn test_target_isa_flags_schema() {
+        use cranelift_codegen::isa::TargetIsa;
+        let isa = jit::create_target_isa();
+        let flags = isa.flags();
+        assert_eq!(flags.probestack_size_log2(), 12);
+        assert_eq!(flags.opt_level(), cranelift_codegen::settings::OptLevel::None);
+        assert_eq!(
+            flags.regalloc_algorithm(),
+            cranelift_codegen::settings::RegallocAlgorithm::SinglePass
+        );
+        assert_eq!(
+            flags.libcall_call_conv(),
+            cranelift_codegen::settings::LibcallCallConv::IsaDefault
+        );
+    }
+
+    #[test]
+    fn test_translate_malformed_wasm_fails_cleanly() {
+        init_test_env();
+        let mut func = Function::with_name_signature(
+            UserFuncName::user(0, 0),
+            Signature::new(jit::default_call_conv()),
+        );
+        let mut fb_ctx = FunctionBuilderContext::new();
+        let types = alloc::vec::Vec::new();
+        let func_type_indices = alloc::vec::Vec::new();
+        let mut guest_mem = [0u8; 64];
+
+        // Truncated/corrupted bytecode (not a valid function body)
+        let malformed_wasm = [0x00, 0x00, 0x00];
+        let mut reader = wasmparser::BinaryReader::new(&malformed_wasm, 0);
+        if let Ok(body) = reader.read() {
+            let res = jit::translate_wasm_body_with_mem(
+                &body,
+                &mut func,
+                &mut fb_ctx,
+                jit::default_frontend_config(),
+                &types,
+                &func_type_indices,
+                jit::default_call_conv(),
+                guest_mem.as_mut_ptr(),
+                guest_mem.len(),
+            );
+            assert!(res.is_err(), "malformed wasm must return Err");
+        }
     }
 }
