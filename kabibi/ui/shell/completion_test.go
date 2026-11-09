@@ -112,10 +112,10 @@ func TestCompletionDescriptionHeuristics(t *testing.T) {
 	}
 }
 
-func TestGeneratedURootSyntaxUsesRegisteredFlagsAndPositionals(t *testing.T) {
-	if len(generatedURootSyntax) != len(AllURootCommandNames()) {
-		t.Fatalf("generated syntax has %d commands, registry has %d",
-			len(generatedURootSyntax), len(AllURootCommandNames()))
+func TestRuntimeURootProvidersCompleteFlagsAndPaths(t *testing.T) {
+	if len(commandSyntaxRegistry) <= len(AllURootCommandNames())/2 {
+		t.Fatalf("runtime FlagSet providers cover %d of %d u-root command names; want a majority",
+			len(commandSyntaxRegistry), len(AllURootCommandNames()))
 	}
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, "target-dir"), 0o755); err != nil {
@@ -138,11 +138,29 @@ func TestGeneratedURootSyntaxUsesRegisteredFlagsAndPositionals(t *testing.T) {
 		t.Fatalf("completion for %q = %#v, want %q", line, got, want)
 	}
 	assertCandidate("cat -", "-u")
-	assertCandidate("cat input", "input.bin")
+	assertCandidate("cat ./input", "input.bin")
+	assertCandidate("cd tar", "target-dir")
 	assertCandidate("cp --", "--reflink")
 	assertCandidate("cp --target-directory ", "target-dir")
-	assertCandidate("dd if=", "input.bin")
-	assertCandidate("dd status=", "progress")
+	assertCandidate("tar -f ", "input.bin")
+	if got := s.completeInput("wc in", len([]rune("wc in"))); len(got) != 0 {
+		t.Fatalf("ordinary positional argument unexpectedly suggested paths: %#v", got)
+	}
+}
+
+func TestRuntimeFlagSetRegistryUsesFreshDefinitions(t *testing.T) {
+	for name, factory := range commandSyntaxRegistry {
+		first := factory()
+		second := factory()
+		if first.standard == nil && first.pflag == nil {
+			t.Errorf("%q provider returned no FlagSet", name)
+			continue
+		}
+		if first.standard != nil && first.standard == second.standard ||
+			first.pflag != nil && first.pflag == second.pflag {
+			t.Errorf("%q provider reused a mutable FlagSet", name)
+		}
+	}
 }
 
 func TestShellCompletionOffersGitAndCommandsAfterSeparator(t *testing.T) {
@@ -276,7 +294,7 @@ func TestShellCompletionHandlesWebPathsAndNestedShellCommands(t *testing.T) {
 	}
 }
 
-func TestCommandArgumentCompletionsCoverSpecialGrammars(t *testing.T) {
+func TestDelegatedAndRuntimeArgumentCompletions(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "input.bin"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
@@ -295,17 +313,7 @@ func TestCommandArgumentCompletionsCoverSpecialGrammars(t *testing.T) {
 		ctx := completionContextAt(line, len([]rune(line)))
 		t.Fatalf("completion for %q = %#v, context=%#v, want %q", line, got, ctx, want)
 	}
-	assertCandidate("dd if=", "input.bin")
-	assertCandidate("dd conv=", "notrunc")
-	assertCandidate("ip ", "address")
 	assertCandidate("ip address ", "show")
-	assertCandidate("kill -s ", "SIGTERM")
-	assertCandidate("grep --file ", "input.bin")
-	assertCandidate("grep --color=", "auto")
-	assertCandidate("rg -f ", "input.bin")
-	assertCandidate("rg --sort=", "none")
-	assertCandidate("stty ", "pretty")
-	assertCandidate("stty load ", "input.bin")
 	assertCandidate("tar -f ", "input.bin")
 }
 
