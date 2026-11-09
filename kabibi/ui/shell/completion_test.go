@@ -1,6 +1,7 @@
 package shell
 
 import (
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/charmbracelet/x/input"
 	"github.com/mavity/rusticated/kabibi/ui"
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
+	"github.com/spf13/pflag"
 )
 
 func TestCompletionContextRecognizesCommandPositions(t *testing.T) {
@@ -199,6 +201,100 @@ func TestShellCompletionOffersGitAndCommandsAfterSeparator(t *testing.T) {
 	}
 	if !foundEcho {
 		t.Fatalf("command-position completion after then = %#v", got)
+	}
+}
+
+func TestCommandNameCompletionsCarryRegisteredDescriptions(t *testing.T) {
+	for name, command := range urootRegistry {
+		if command.runner == nil || strings.TrimSpace(command.description) == "" {
+			t.Errorf("u-root command %q must have a runner and description", name)
+		}
+	}
+	for _, commands := range [][]completionCommandInfo{shellCompletionBuiltins, customCompletionCommands} {
+		for _, command := range commands {
+			if strings.TrimSpace(command.description) == "" {
+				t.Errorf("command %q has no completion description", command.name)
+			}
+		}
+	}
+
+	s := New(ShellOptions{WorkingDir: t.TempDir(), DisableAI: true})
+	defer s.Close()
+	got := s.completeInput("ca", len([]rune("ca")))
+	for _, candidate := range got {
+		if candidate.Display == "cat" {
+			if candidate.Description != urootRegistry["cat"].description {
+				t.Fatalf("cat completion description = %q, want %q", candidate.Description, urootRegistry["cat"].description)
+			}
+			return
+		}
+	}
+	t.Fatal("command-name completion did not include cat")
+
+	got = s.completeInput("ai", len([]rune("ai")))
+	for _, candidate := range got {
+		if candidate.Display == "ai" {
+			if candidate.Description != "Run AI tools and session commands." {
+				t.Fatalf("AI command description = %q", candidate.Description)
+			}
+			return
+		}
+	}
+	t.Fatal("command-name completion did not include the AI builtin")
+}
+
+func TestRuntimeFlagAndPathCandidatesCarryDescriptions(t *testing.T) {
+	standard := flag.NewFlagSet("standard", flag.ContinueOnError)
+	standard.String("config", "", "Read configuration from a file.")
+	standardSyntax := inspectRuntimeFlagSet(standardFlagSet(standard, false))
+	candidates, _ := completeRuntimeFlagSet(
+		completionContext{prefix: "--c"},
+		t.TempDir(),
+		standardSyntax,
+	)
+	if len(candidates) != 1 || candidates[0].Display != "--config" ||
+		candidates[0].Description != "Read configuration from a file." {
+		t.Fatalf("standard flag completion = %#v", candidates)
+	}
+
+	pflags := pflag.NewFlagSet("pflag", pflag.ContinueOnError)
+	pflags.StringP("output", "o", "", "Write results to a file.")
+	pflagSyntax := inspectRuntimeFlagSet(pflagSet(pflags))
+	candidates, _ = completeRuntimeFlagSet(
+		completionContext{prefix: "-o"},
+		t.TempDir(),
+		pflagSyntax,
+	)
+	if len(candidates) != 1 || candidates[0].Display != "-o" ||
+		candidates[0].Description != "Write results to a file." {
+		t.Fatalf("pflag shorthand completion = %#v", candidates)
+	}
+
+	valueCandidates := completeRuntimeValue(
+		completionContext{prefix: "te"},
+		t.TempDir(),
+		runtimeOptionSyntax{description: "Output format (text|json)."},
+	)
+	if len(valueCandidates) != 1 || valueCandidates[0].Display != "text" ||
+		valueCandidates[0].Description != "Output format (text|json)." {
+		t.Fatalf("flag value completion = %#v", valueCandidates)
+	}
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "payload"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pathCandidates, handled := completeRuntimeFlagSet(
+		completionContext{prefix: "pay"},
+		root,
+		runtimeCommandSyntax{
+			positionalPaths:       true,
+			positionalDescription: "Filesystem path.",
+		},
+	)
+	if !handled || len(pathCandidates) != 1 || pathCandidates[0].Display != "payload" ||
+		pathCandidates[0].Description != "Filesystem path." {
+		t.Fatalf("positional path completion = %#v, handled=%t", pathCandidates, handled)
 	}
 }
 

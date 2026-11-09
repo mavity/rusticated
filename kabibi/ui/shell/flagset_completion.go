@@ -9,11 +9,12 @@ import (
 )
 
 type runtimeFlagSet struct {
-	standard        *flag.FlagSet
-	pflag           *pflag.FlagSet
-	unixNormalize   bool
-	keyEqualsValue  bool
-	positionalPaths bool
+	standard              *flag.FlagSet
+	pflag                 *pflag.FlagSet
+	unixNormalize         bool
+	keyEqualsValue        bool
+	positionalPaths       bool
+	positionalDescription string
 }
 
 type runtimeOptionSyntax struct {
@@ -27,11 +28,12 @@ type runtimeOptionSyntax struct {
 }
 
 type runtimeCommandSyntax struct {
-	unixNormalize   bool
-	keyEqualsValue  bool
-	pflag           bool
-	positionalPaths bool
-	options         []runtimeOptionSyntax
+	unixNormalize         bool
+	keyEqualsValue        bool
+	pflag                 bool
+	positionalPaths       bool
+	positionalDescription string
+	options               []runtimeOptionSyntax
 }
 
 type runtimeFlagSetFactory func() runtimeFlagSet
@@ -49,21 +51,24 @@ func pflagSet(fs *pflag.FlagSet) runtimeFlagSet {
 func standardPathFlagSet(fs *flag.FlagSet, unixNormalize bool) runtimeFlagSet {
 	definition := standardFlagSet(fs, unixNormalize)
 	definition.positionalPaths = true
+	definition.positionalDescription = "Filesystem path."
 	return definition
 }
 
 func pflagPathSet(fs *pflag.FlagSet) runtimeFlagSet {
 	definition := pflagSet(fs)
 	definition.positionalPaths = true
+	definition.positionalDescription = "Filesystem path."
 	return definition
 }
 
 func inspectRuntimeFlagSet(definition runtimeFlagSet) runtimeCommandSyntax {
 	syntax := runtimeCommandSyntax{
-		unixNormalize:   definition.unixNormalize,
-		keyEqualsValue:  definition.keyEqualsValue,
-		pflag:           definition.pflag != nil,
-		positionalPaths: definition.positionalPaths,
+		unixNormalize:         definition.unixNormalize,
+		keyEqualsValue:        definition.keyEqualsValue,
+		pflag:                 definition.pflag != nil,
+		positionalPaths:       definition.positionalPaths,
+		positionalDescription: definition.positionalDescription,
 	}
 	if definition.standard != nil {
 		definition.standard.VisitAll(func(flag *flag.Flag) {
@@ -145,12 +150,26 @@ func completeRuntimeFlagSet(ctx completionContext, cwd string, syntax runtimeCom
 		}
 	}
 	if optionsEnabled && strings.HasPrefix(ctx.prefix, "-") || syntax.keyEqualsValue {
-		return completeWords(ctx, options, false), true
+		return completeRuntimeOptions(ctx, syntax, options), true
 	}
 	if syntax.positionalPaths || looksLikePath(ctx.prefix) {
-		return completePath(ctx, cwd, false), true
+		description := syntax.positionalDescription
+		if description == "" && looksLikePath(ctx.prefix) {
+			description = "Path."
+		}
+		return describeCompletionCandidates(completePath(ctx, cwd, false), description), true
 	}
 	return nil, true
+}
+
+func completeRuntimeOptions(ctx completionContext, syntax runtimeCommandSyntax, names []string) []completionCandidate {
+	candidates := completeWords(ctx, names, false)
+	for i := range candidates {
+		if option, _, _, matched := matchRuntimeOption(syntax, candidates[i].Display); matched {
+			candidates[i].Description = option.description
+		}
+	}
+	return candidates
 }
 
 func looksLikePath(value string) bool {
@@ -231,13 +250,13 @@ func isRuntimeOptionLike(token string, syntax runtimeCommandSyntax) bool {
 
 func completeRuntimeValue(ctx completionContext, cwd string, option runtimeOptionSyntax) []completionCandidate {
 	if choices := completionDescriptionChoices(option.description); len(choices) > 0 {
-		return completeWords(ctx, choices, true)
+		return describeCompletionCandidates(completeWords(ctx, choices, true), option.description)
 	}
 	switch inferCompletionValueKind(option.description) {
 	case completionFile:
-		return completePath(ctx, cwd, false)
+		return describeCompletionCandidates(completePath(ctx, cwd, false), option.description)
 	case completionDirectory:
-		return completePath(ctx, cwd, true)
+		return describeCompletionCandidates(completePath(ctx, cwd, true), option.description)
 	default:
 		return nil
 	}
