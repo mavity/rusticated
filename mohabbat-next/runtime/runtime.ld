@@ -12,10 +12,6 @@ SECTIONS
         *(.text .text.*)
         *(.rodata .rodata.*)
         *(.data.rel.ro .data.rel.ro.*)
-        *(.got .got.*)
-        *(.data .data.*)
-        *(.bss .bss.*)
-        *(COMMON)
     }
 
     /DISCARD/ :
@@ -23,5 +19,10 @@ SECTIONS
         *(.comment*)
         *(.eh_frame*)
         *(.note*)
+        *(.data .data.*)
+        *(.bss .bss.*)
+        *(.got .got.*)
+        *(.plt .plt.*)
+        *(COMMON)
     }
 }
