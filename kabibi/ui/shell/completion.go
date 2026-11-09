@@ -67,13 +67,72 @@ var completionSpecs = map[string]completionSpec{
 	"nohup":   {},
 }
 
-var shellCompletionBuiltins = []string{
-	".", ":", "[", "alias", "break", "builtin", "case", "cd", "command", "continue",
-	"declare", "dirs", "echo", "eval", "exec", "exit", "export", "false", "for",
-	"function", "getopts", "hash", "help", "if", "kill", "let", "mapfile", "printf",
-	"pwd", "read", "readarray", "readonly", "return", "set", "shift", "shopt",
-	"source", "test", "times", "trap", "true", "type", "typeset", "umask",
-	"unalias", "unset", "wait", "while",
+type completionCommandInfo struct {
+	name        string
+	description string
+}
+
+var shellCompletionBuiltins = []completionCommandInfo{
+	{".", "Read and run a script in the current shell."},
+	{":", "Do nothing and return success."},
+	{"[", "Evaluate a conditional expression."},
+	{"alias", "Define or display command aliases."},
+	{"break", "Exit one or more enclosing loops."},
+	{"builtin", "Run a shell builtin directly."},
+	{"case", "Select commands by pattern matching."},
+	{"cd", "Change the current working directory."},
+	{"command", "Run a command without function lookup."},
+	{"continue", "Continue with the next loop iteration."},
+	{"declare", "Declare variables or functions."},
+	{"dirs", "Display the directory stack."},
+	{"echo", "Print text to standard output."},
+	{"eval", "Parse and run arguments as a shell command."},
+	{"exec", "Run a command in place of the shell or set redirections."},
+	{"exit", "Exit the shell."},
+	{"export", "Mark variables for child processes."},
+	{"false", "Return an unsuccessful status."},
+	{"for", "Run commands for each value in a list."},
+	{"function", "Define a shell function."},
+	{"getopts", "Parse positional command options."},
+	{"hash", "Display or manage cached command locations."},
+	{"help", "Show shell command help."},
+	{"if", "Run commands conditionally."},
+	{"kill", "Send a signal to a process."},
+	{"let", "Evaluate an arithmetic expression."},
+	{"mapfile", "Read lines from standard input into an array."},
+	{"printf", "Format and print values."},
+	{"pwd", "Print the current working directory."},
+	{"read", "Read a line into shell variables."},
+	{"readarray", "Read lines from standard input into an array."},
+	{"readonly", "Mark variables as read-only."},
+	{"return", "Return from a function or sourced script."},
+	{"set", "Set shell options or positional parameters."},
+	{"shift", "Shift positional parameters."},
+	{"shopt", "Display or change shell options."},
+	{"source", "Read and run a script in the current shell."},
+	{"test", "Evaluate a conditional expression."},
+	{"times", "Display accumulated process times."},
+	{"trap", "Set commands to run when signals arrive."},
+	{"true", "Return a successful status."},
+	{"type", "Describe how a command name is interpreted."},
+	{"typeset", "Declare variables or functions."},
+	{"umask", "Display or change the file-creation mask."},
+	{"unalias", "Remove command aliases."},
+	{"unset", "Remove variables or functions."},
+	{"wait", "Wait for background jobs to finish."},
+	{"while", "Run commands while a condition succeeds."},
+}
+
+var customCompletionCommands = []completionCommandInfo{
+	{"ai", "Run AI tools and session commands."},
+	{"bash", "Start a nested shell or run a command in it."},
+	{"cdp", "Send Chrome DevTools Protocol commands."},
+	{"git", "Run the integrated Git command."},
+	{"help", "Show Kabibi shell help."},
+	{"kabibi", "Start a nested Kabibi shell."},
+	{"quit", "Exit the shell."},
+	{"sh", "Start a nested shell or run a command in it."},
+	{"web", "Run browser tools or navigate to a page."},
 }
 
 func (s *Shell) completeInput(value string, cursor int) []completionCandidate {
@@ -118,10 +177,16 @@ func (s *Shell) completeInput(value string, cursor int) []completionCandidate {
 	if strings.HasPrefix(ctx.prefix, "-") {
 		if spec, ok := completionSpecs[ctx.command]; ok {
 			if values := spec.optionValues[ctx.prefix]; len(values) > 0 {
-				return completeWords(ctx, values, true)
+				return describeCompletionCandidates(
+					completeWords(ctx, values, true),
+					spec.optionDescriptions[ctx.prefix],
+				)
 			}
 			if len(spec.options) > 0 {
-				return completeWords(ctx, spec.options, true)
+				return describeCompletionCandidatesByName(
+					completeWords(ctx, spec.options, true),
+					spec.optionDescriptions,
+				)
 			}
 		}
 	}
@@ -129,14 +194,14 @@ func (s *Shell) completeInput(value string, cursor int) []completionCandidate {
 		if len(ctx.args) > 0 {
 			option := ctx.args[len(ctx.args)-1]
 			if values := spec.optionValues[option]; len(values) > 0 {
-				return completeWords(ctx, values, true)
+				return describeCompletionCandidates(completeWords(ctx, values, true), spec.optionDescriptions[option])
 			}
 			description := spec.optionDescriptions[option]
 			if choices := completionDescriptionChoices(description); len(choices) > 0 {
-				return completeWords(ctx, choices, true)
+				return describeCompletionCandidates(completeWords(ctx, choices, true), description)
 			}
 			if inferCompletionValueKind(description) == completionFile {
-				return completePath(ctx, s.execSess.Dir(), false)
+				return describeCompletionCandidates(completePath(ctx, s.execSess.Dir(), false), description)
 			}
 		}
 		if ctx.command == "ip" {
@@ -161,7 +226,14 @@ func (s *Shell) completeInput(value string, cursor int) []completionCandidate {
 			return completeWords(ctx, choices, true)
 		}
 		if spec.paths[argIndex] || spec.paths[-1] {
-			return completePath(ctx, s.execSess.Dir(), ctx.command == "cd")
+			description := "Filesystem path."
+			if ctx.command == "cd" || ctx.command == "pushd" {
+				description = "Directory path."
+			}
+			return describeCompletionCandidates(
+				completePath(ctx, s.execSess.Dir(), ctx.command == "cd" || ctx.command == "pushd"),
+				description,
+			)
 		}
 	}
 	if factory, ok := commandSyntaxRegistry[ctx.command]; ok {
@@ -169,7 +241,14 @@ func (s *Shell) completeInput(value string, cursor int) []completionCandidate {
 		return candidates
 	}
 	if completionArgumentLikelyPath(ctx.command, ctx.args) {
-		return completePath(ctx, s.execSess.Dir(), ctx.command == "cd" || ctx.command == "pushd")
+		description := "Path."
+		if ctx.command == "cd" || ctx.command == "pushd" {
+			description = "Directory path."
+		}
+		return describeCompletionCandidates(
+			completePath(ctx, s.execSess.Dir(), ctx.command == "cd" || ctx.command == "pushd"),
+			description,
+		)
 	}
 	return nil
 }
@@ -183,7 +262,13 @@ func (s *Shell) completeAI(ctx completionContext) []completionCandidate {
 		for name := range tools {
 			names = append(names, name)
 		}
-		return append(candidates, completeNormalizedWords(ctx, names)...)
+		toolCandidates := completeNormalizedWords(ctx, names)
+		for i := range toolCandidates {
+			if tool, ok := tools[normalizeAIToolName(toolCandidates[i].Display)]; ok {
+				toolCandidates[i].Description = tool.Description
+			}
+		}
+		return append(candidates, toolCandidates...)
 	}
 
 	subcommand := normalizeAIToolName(ctx.args[0])
@@ -216,10 +301,19 @@ func (s *Shell) completeAI(ctx completionContext) []completionCandidate {
 		for name := range tool.Parameters {
 			options = append(options, "--"+strings.ReplaceAll(name, "_", "-"))
 		}
-		return completeNormalizedWords(ctx, options)
+		candidates := completeNormalizedWords(ctx, options)
+		for i := range candidates {
+			candidates[i].Description = aiSchemaDescription(
+				aiToolOptionSchema(tool, strings.TrimLeft(candidates[i].Display, "-")),
+			)
+		}
+		return candidates
 	}
 	if state.pendingBoolean != nil {
-		return completeWords(ctx, []string{"true", "false"}, true)
+		return describeCompletionCandidates(
+			completeWords(ctx, []string{"true", "false"}, true),
+			aiSchemaDescription(state.pendingBoolean),
+		)
 	}
 	return nil
 }
@@ -247,14 +341,42 @@ func completeNormalizedWords(ctx completionContext, words []string) []completion
 	return candidates
 }
 
+func describeCompletionCandidates(candidates []completionCandidate, description string) []completionCandidate {
+	if description == "" {
+		return candidates
+	}
+	for i := range candidates {
+		if candidates[i].Description == "" {
+			candidates[i].Description = description
+		}
+	}
+	return candidates
+}
+
+func describeCompletionCandidatesByName(
+	candidates []completionCandidate,
+	descriptions map[string]string,
+) []completionCandidate {
+	for i := range candidates {
+		candidates[i].Description = descriptions[candidates[i].Display]
+	}
+	return candidates
+}
+
 func (s *Shell) completeAIValue(ctx completionContext, schema map[string]any, prefix string) []completionCandidate {
 	valueContext := ctx
 	valueContext.prefix = prefix
 	if choices := aiSchemaChoices(schema); len(choices) > 0 {
-		return completeWords(valueContext, choices, true)
+		return describeCompletionCandidates(
+			completeWords(valueContext, choices, true),
+			aiSchemaDescription(schema),
+		)
 	}
 	if inferCompletionValueKind(aiSchemaDescription(schema)) == completionFile {
-		return completePath(valueContext, s.execSess.Dir(), false)
+		return describeCompletionCandidates(
+			completePath(valueContext, s.execSess.Dir(), false),
+			aiSchemaDescription(schema),
+		)
 	}
 	return nil
 }
@@ -561,15 +683,19 @@ func completeGitBranches(ctx completionContext, cwd string) []completionCandidat
 }
 
 func (s *Shell) completeCommand(ctx completionContext) []completionCandidate {
-	candidates := make(map[string]struct{})
-	for _, name := range shellCompletionBuiltins {
-		candidates[name] = struct{}{}
+	descriptions := make(map[string]string)
+	for _, command := range shellCompletionBuiltins {
+		descriptions[command.name] = command.description
 	}
-	for _, name := range AllURootCommandNames() {
-		candidates[name] = struct{}{}
+	for name, command := range urootRegistry {
+		descriptions[name] = command.description
 	}
-	for _, name := range []string{"bash", "cdp", "git", "help", "kabibi", "quit", "sh", "web"} {
-		candidates[name] = struct{}{}
+	for _, command := range customCompletionCommands {
+		descriptions[command.name] = command.description
+	}
+	names := make(map[string]struct{}, len(descriptions))
+	for name := range descriptions {
+		names[name] = struct{}{}
 	}
 	if s.execSess != nil {
 		if isWindowsLikeEnv(s.execSess.EnvMap()) {
@@ -577,15 +703,19 @@ func (s *Shell) completeCommand(ctx completionContext) []completionCandidate {
 			ctx.suffix = strings.ToLower(ctx.suffix)
 		}
 		for _, name := range s.execSess.pathCommandNames(ctx.prefix) {
-			candidates[name] = struct{}{}
+			names[name] = struct{}{}
 		}
 	}
-	words := make([]string, 0, len(candidates))
-	for name := range candidates {
+	words := make([]string, 0, len(names))
+	for name := range names {
 		words = append(words, name)
 	}
 	sort.Strings(words)
-	return completeWords(ctx, words, true)
+	candidates := completeWords(ctx, words, true)
+	for i := range candidates {
+		candidates[i].Description = descriptions[candidates[i].Display]
+	}
+	return candidates
 }
 
 func completionArgumentLikelyPath(command string, args []string) bool {

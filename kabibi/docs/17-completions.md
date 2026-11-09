@@ -75,6 +75,12 @@ accepted aliases; do not blindly union every known name into executable
 candidates. A collision such as a shell builtin and a u-root command must
 resolve to the command the shell would actually invoke.
 
+Attach concise descriptions to shell builtins and Kabibi-owned command
+registrations alongside the names used to produce command candidates. This
+includes u-root commands in `urootRegistry` and Kabibi's custom builtins.
+Arbitrary PATH executables contribute names only: do not run them to scrape
+help output or infer descriptions from executable behavior.
+
 Bare host command names come from the execution session's PATH/PATHEXT index.
 The cache key includes effective working directory, PATH, PATHEXT, and
 platform mode. Reuse a matching snapshot until its current one-minute maximum
@@ -119,6 +125,12 @@ Maintain the u-root providers in `kabibi/ui/shell/uroot.go` alongside
 same underlying FlagSet builder. Register aliases against the same factory
 when dispatch exposes them. Preserve `pflag` semantics such as shorthands and
 `NoOptDefVal`.
+
+Use each command registration's description for command-name candidates.
+For argument candidates, propagate existing FlagSet usage text and AI schema
+descriptions, and add explicit descriptions to other runtime-owned syntax
+definitions when available. Do not invent detailed argument grammars solely to
+populate hint text.
 
 The parser/registry inspection surface must expose the actual definition
 read-only, including whether the cursor is awaiting a flag value. This
