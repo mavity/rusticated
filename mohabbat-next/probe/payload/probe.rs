@@ -1,40 +1,42 @@
 #![cfg_attr(not(test), no_std)]
 
-use core::mem::MaybeUninit;
 #[cfg(not(test))]
 use core::panic::PanicInfo;
+
+#[path = "../pal_abi.rs"]
+mod pal_abi;
+#[cfg(test)]
+#[path = "../pal_abi_stubs.rs"]
+mod pal_abi_stubs;
+use pal_abi::{Overlapped, PalAbiTable, FLAG_COMPLETED};
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 compile_error!("The probe payload supports only x86-64 and AArch64.");
 
-#[cfg(target_arch = "x86_64")]
-type WriteFn = unsafe extern "win64" fn(*const u8, usize) -> i64;
-#[cfg(target_arch = "aarch64")]
-type WriteFn = unsafe extern "C" fn(*const u8, usize) -> i64;
-
-#[cfg(target_arch = "x86_64")]
-type ReadFn = unsafe extern "win64" fn(*mut u8, usize) -> i64;
-#[cfg(target_arch = "aarch64")]
-type ReadFn = unsafe extern "C" fn(*mut u8, usize) -> i64;
-
-#[cfg(target_arch = "x86_64")]
-type ExitFn = unsafe extern "win64" fn(i32);
-#[cfg(target_arch = "aarch64")]
-type ExitFn = unsafe extern "C" fn(i32);
-
-#[repr(C)]
-pub struct ProbeDispatch {
-    write: Option<WriteFn>,
-    read: Option<ReadFn>,
-    exit: Option<ExitFn>,
-}
+#[cfg(not(test))]
+const PREFIX_ABI_OFFSET: usize = 0x20000;
+#[cfg(not(test))]
+const PREFIX_GLOBALS_OFFSET: usize = 0x10000;
+const LINE_CAPACITY: usize = 256;
+const OUTPUT_CAPACITY: usize = 512;
+const PHASE_WRITING: u8 = 1;
+const PHASE_READING: u8 = 2;
 
 #[repr(C)]
 pub struct ProbeGlobals {
-    pub initialized: bool,
-    pub lines_echoed: usize,
+    initialized: bool,
+    phase: u8,
+    skip_lf: bool,
+    line_len: usize,
+    output_len: usize,
+    output_offset: usize,
+    input_byte: u8,
+    overlapped: Overlapped,
+    line: [u8; LINE_CAPACITY],
+    output: [u8; OUTPUT_CAPACITY],
 }
 
+#[cfg(not(test))]
 #[inline(always)]
 unsafe fn slice_origin() -> *mut u8 {
     let addr: usize;
@@ -54,111 +56,251 @@ unsafe fn slice_origin() -> *mut u8 {
 }
 
 #[inline(always)]
-unsafe fn abi() -> &'static ProbeDispatch {
-    &*(slice_origin().sub(0x20000) as *const ProbeDispatch)
+unsafe fn abi() -> &'static PalAbiTable {
+    #[cfg(not(test))]
+    {
+        &*(slice_origin().sub(PREFIX_ABI_OFFSET) as *const PalAbiTable)
+    }
+    #[cfg(test)]
+    {
+        &*core::ptr::addr_of!(TEST_ABI).cast::<PalAbiTable>()
+    }
 }
 
 #[inline(always)]
 unsafe fn globals() -> &'static mut ProbeGlobals {
-    &mut *(slice_origin().sub(0x10000) as *mut ProbeGlobals)
+    #[cfg(not(test))]
+    {
+        &mut *(slice_origin().sub(PREFIX_GLOBALS_OFFSET) as *mut ProbeGlobals)
+    }
+    #[cfg(test)]
+    {
+        &mut *core::ptr::addr_of_mut!(TEST_GLOBALS)
+    }
 }
 
 const GREETING_PREFIX: &[u8] = b"Anonymous-memory probe ready (compiled ";
 const BUILD_TIME: &str = match option_env!("BUILD_TIME") {
-    Some(val) => val,
+    Some(value) => value,
     None => "unknown",
 };
 const GREETING_SUFFIX: &[u8] = b"). Enter an empty line to exit.\n> ";
 const ECHO_PREFIX: &[u8] = b"echo: ";
 const NEWLINE: &[u8] = b"\n";
 const PROMPT: &[u8] = b"> ";
-const LINE_CAPACITY: usize = 256;
 
-fn write_all(dispatch: &ProbeDispatch, bytes: &[u8]) -> bool {
-    match dispatch.write {
-        Some(write) => unsafe { write(bytes.as_ptr(), bytes.len()) == bytes.len() as i64 },
-        None => false,
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, len: usize) -> *mut u8 {
+    let mut index = 0;
+    while index < len {
+        dest.add(index)
+            .write_volatile(src.add(index).read_volatile());
+        index += 1;
     }
+    dest
 }
 
-fn terminate(dispatch: &ProbeDispatch, status: i32) -> ! {
-    if let Some(exit) = dispatch.exit {
-        unsafe {
-            exit(status);
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memset(dest: *mut u8, value: i32, len: usize) -> *mut u8 {
+    let mut index = 0;
+    while index < len {
+        dest.add(index).write_volatile(value as u8);
+        index += 1;
+    }
+    dest
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, len: usize) -> *mut u8 {
+    if (dest as usize) <= src as usize || (dest as usize) >= (src as usize).wrapping_add(len) {
+        memcpy(dest, src, len)
+    } else {
+        let mut index = len;
+        while index > 0 {
+            index -= 1;
+            dest.add(index)
+                .write_volatile(src.add(index).read_volatile());
         }
+        dest
     }
-    loop {}
 }
 
-unsafe fn run() {
-    let dispatch = abi();
-    let g = globals();
-    g.initialized = true;
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memcmp(left: *const u8, right: *const u8, len: usize) -> i32 {
+    let mut index = 0;
+    while index < len {
+        let left_byte = left.add(index).read_volatile();
+        let right_byte = right.add(index).read_volatile();
+        if left_byte != right_byte {
+            return left_byte as i32 - right_byte as i32;
+        }
+        index += 1;
+    }
+    0
+}
 
-    let mut line = MaybeUninit::<[u8; LINE_CAPACITY]>::uninit();
-    let line_ptr = line.as_mut_ptr().cast::<u8>();
-    if !write_all(dispatch, GREETING_PREFIX)
-        || !write_all(dispatch, BUILD_TIME.as_bytes())
-        || !write_all(dispatch, GREETING_SUFFIX)
-    {
-        terminate(dispatch, 3);
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bcmp(left: *const u8, right: *const u8, len: usize) -> i32 {
+    memcmp(left, right, len)
+}
+
+unsafe fn append_output(g: &mut ProbeGlobals, bytes: &[u8]) -> bool {
+    let Some(end) = g.output_len.checked_add(bytes.len()) else {
+        return false;
+    };
+    if end > OUTPUT_CAPACITY {
+        return false;
+    }
+    core::ptr::copy_nonoverlapping(
+        bytes.as_ptr(),
+        g.output.as_mut_ptr().add(g.output_len),
+        bytes.len(),
+    );
+    g.output_len = end;
+    true
+}
+
+unsafe fn schedule_write(g: &mut ProbeGlobals) {
+    g.overlapped = Overlapped::default();
+    (abi().write)(
+        &mut g.overlapped,
+        1,
+        g.output.as_ptr().add(g.output_offset),
+        g.output_len - g.output_offset,
+    );
+}
+
+unsafe fn schedule_read(g: &mut ProbeGlobals) {
+    g.overlapped = Overlapped::default();
+    (abi().read)(&mut g.overlapped, 0, &mut g.input_byte, 1);
+}
+
+unsafe fn prepare_greeting(g: &mut ProbeGlobals) -> bool {
+    g.output_len = 0;
+    g.output_offset = 0;
+    append_output(g, GREETING_PREFIX)
+        && append_output(g, BUILD_TIME.as_bytes())
+        && append_output(g, GREETING_SUFFIX)
+}
+
+unsafe fn prepare_echo(g: &mut ProbeGlobals) -> bool {
+    g.output_len = 0;
+    g.output_offset = 0;
+    if !append_output(g, ECHO_PREFIX) {
+        return false;
+    }
+    let line_len = g.line_len;
+    core::ptr::copy_nonoverlapping(
+        g.line.as_ptr(),
+        g.output.as_mut_ptr().add(g.output_len),
+        line_len,
+    );
+    g.output_len += line_len;
+    g.line_len = 0;
+    append_output(g, NEWLINE) && append_output(g, PROMPT)
+}
+
+unsafe fn finish_line(g: &mut ProbeGlobals) -> Option<i32> {
+    if g.line_len == 0 {
+        return Some(0);
+    }
+    if !prepare_echo(g) {
+        return Some(3);
+    }
+    g.phase = PHASE_WRITING;
+    schedule_write(g);
+    None
+}
+
+unsafe fn resume() -> Option<i32> {
+    let g = globals();
+    if !g.initialized {
+        core::ptr::write_bytes(g as *mut ProbeGlobals, 0, 1);
+        g.initialized = true;
+        if !prepare_greeting(g) {
+            return Some(3);
+        }
+        g.phase = PHASE_WRITING;
+        schedule_write(g);
     }
 
     loop {
-        let mut length = 0usize;
-        loop {
-            let mut byte = 0u8;
-            let count = match dispatch.read {
-                Some(read) => read(&mut byte, 1),
-                None => terminate(dispatch, 3),
-            };
-
-            if count < 0 {
-                terminate(dispatch, 3);
-            }
-            if count == 0 {
-                terminate(dispatch, 0);
-            }
-            if byte == b'\n' {
-                break;
-            }
-            if length == LINE_CAPACITY {
-                terminate(dispatch, 2);
-            }
-            line_ptr.add(length).write(byte);
-            length += 1;
+        if g.overlapped.flags & FLAG_COMPLETED == 0 {
+            return None;
+        }
+        if g.overlapped.error != 0 {
+            return Some(3);
         }
 
-        if length > 0 && line_ptr.add(length - 1).read() == b'\r' {
-            length -= 1;
+        match g.phase {
+            PHASE_WRITING => {
+                let count = g.overlapped.result_ext as usize;
+                let remaining = g.output_len - g.output_offset;
+                if count == 0 || count > remaining {
+                    return Some(3);
+                }
+                g.output_offset += count;
+                if g.output_offset < g.output_len {
+                    schedule_write(g);
+                    continue;
+                }
+                g.output_len = 0;
+                g.output_offset = 0;
+                g.phase = PHASE_READING;
+                schedule_read(g);
+            }
+            PHASE_READING => {
+                match g.overlapped.result_ext {
+                    0 => return Some(0),
+                    1 => {}
+                    _ => return Some(3),
+                }
+                let byte = g.input_byte;
+                if g.skip_lf {
+                    g.skip_lf = false;
+                    if byte == b'\n' {
+                        schedule_read(g);
+                        continue;
+                    }
+                }
+                if byte == b'\r' || byte == b'\n' {
+                    g.skip_lf = byte == b'\r';
+                    if let Some(status) = finish_line(g) {
+                        return Some(status);
+                    }
+                } else {
+                    if g.line_len == LINE_CAPACITY {
+                        return Some(2);
+                    }
+                    g.line.as_mut_ptr().add(g.line_len).write(byte);
+                    g.line_len += 1;
+                    schedule_read(g);
+                }
+            }
+            _ => return Some(3),
         }
-        if length == 0 {
-            terminate(dispatch, 0);
-        }
-        let line = core::slice::from_raw_parts(line_ptr, length);
-        if !write_all(dispatch, ECHO_PREFIX)
-            || !write_all(dispatch, line)
-            || !write_all(dispatch, NEWLINE)
-            || !write_all(dispatch, PROMPT)
-        {
-            terminate(dispatch, 3);
-        }
-        g.lines_echoed = g.lines_echoed.wrapping_add(1);
+    }
+}
+
+unsafe fn run() -> i32 {
+    match resume() {
+        Some(status) => (abi().process_exit)(status),
+        None => 1,
     }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[link_section = ".text.probe_entry"]
 #[no_mangle]
-pub unsafe extern "win64" fn probe_entry() {
-    run();
+pub unsafe extern "win64" fn probe_entry() -> i32 {
+    run()
 }
 
 #[cfg(target_arch = "aarch64")]
 #[link_section = ".text.probe_entry"]
 #[no_mangle]
-pub unsafe extern "C" fn probe_entry() {
-    run();
+pub unsafe extern "C" fn probe_entry() -> i32 {
+    run()
 }
 
 #[cfg(not(test))]
@@ -168,45 +310,187 @@ fn panic(_info: &PanicInfo) -> ! {
 }
 
 #[cfg(test)]
+static mut TEST_GLOBALS: ProbeGlobals = ProbeGlobals {
+    initialized: false,
+    phase: 0,
+    skip_lf: false,
+    line_len: 0,
+    output_len: 0,
+    output_offset: 0,
+    input_byte: 0,
+    overlapped: Overlapped {
+        flags: 0,
+        error: 0,
+        continued: 0,
+        result_ext: 0,
+    },
+    line: [0; LINE_CAPACITY],
+    output: [0; OUTPUT_CAPACITY],
+};
+
+#[cfg(test)]
+static mut TEST_ABI: core::mem::MaybeUninit<PalAbiTable> = core::mem::MaybeUninit::uninit();
+
+#[cfg(test)]
+static mut TEST_PENDING_KIND: u8 = 0;
+#[cfg(test)]
+static mut TEST_PENDING_PTR: usize = 0;
+#[cfg(test)]
+static mut TEST_PENDING_LEN: usize = 0;
+#[cfg(test)]
+static mut TEST_INPUT: [u8; 16] = *b"hello\r\n\r\n\0\0\0\0\0\0\0";
+#[cfg(test)]
+static mut TEST_INPUT_OFFSET: usize = 0;
+#[cfg(test)]
+static mut TEST_OUTPUT: [u8; 2048] = [0; 2048];
+#[cfg(test)]
+static mut TEST_OUTPUT_LEN: usize = 0;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use core::mem::{offset_of, size_of};
 
-    #[test]
-    fn test_probe_abi_and_globals_layout() {
-        assert_eq!(size_of::<ProbeDispatch>(), 24);
-        assert_eq!(offset_of!(ProbeDispatch, write), 0);
-        assert_eq!(offset_of!(ProbeDispatch, read), 8);
-        assert_eq!(offset_of!(ProbeDispatch, exit), 16);
+    #[cfg(target_arch = "x86_64")]
+    unsafe extern "win64" fn mock_read(
+        ov: *mut Overlapped,
+        _handle: u64,
+        buffer: *mut u8,
+        capacity: usize,
+    ) {
+        begin_pending(ov, 2, buffer as usize, capacity);
+    }
 
-        assert_eq!(offset_of!(ProbeGlobals, initialized), 0);
-        assert_eq!(offset_of!(ProbeGlobals, lines_echoed), 8);
+    #[cfg(target_arch = "aarch64")]
+    unsafe extern "C" fn mock_read(
+        ov: *mut Overlapped,
+        _handle: u64,
+        buffer: *mut u8,
+        capacity: usize,
+    ) {
+        begin_pending(ov, 2, buffer as usize, capacity);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe extern "win64" fn mock_write(
+        ov: *mut Overlapped,
+        _handle: u64,
+        buffer: *const u8,
+        length: usize,
+    ) {
+        begin_pending(ov, 1, buffer as usize, length);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    unsafe extern "C" fn mock_write(
+        ov: *mut Overlapped,
+        _handle: u64,
+        buffer: *const u8,
+        length: usize,
+    ) {
+        begin_pending(ov, 1, buffer as usize, length);
+    }
+
+    unsafe fn begin_pending(ov: *mut Overlapped, kind: u8, ptr: usize, len: usize) {
+        (*ov).flags = 0;
+        TEST_PENDING_KIND = kind;
+        TEST_PENDING_PTR = ptr;
+        TEST_PENDING_LEN = len;
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe extern "win64" fn mock_exit(_status: i32) -> ! {
+        loop {}
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    unsafe extern "C" fn mock_exit(_status: i32) -> ! {
+        loop {}
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[no_mangle]
+    unsafe extern "win64" fn pal_abi_unsupported_exit(status: i32) -> ! {
+        mock_exit(status)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[no_mangle]
+    unsafe extern "C" fn pal_abi_unsupported_exit(status: i32) -> ! {
+        mock_exit(status)
+    }
+
+    unsafe fn complete_pending() {
+        let g = globals();
+        let count = if TEST_PENDING_KIND == 1 {
+            let count = TEST_PENDING_LEN.min(3);
+            let source = core::slice::from_raw_parts(TEST_PENDING_PTR as *const u8, count);
+            core::ptr::copy_nonoverlapping(
+                source.as_ptr(),
+                core::ptr::addr_of_mut!(TEST_OUTPUT)
+                    .cast::<u8>()
+                    .add(TEST_OUTPUT_LEN),
+                count,
+            );
+            TEST_OUTPUT_LEN += count;
+            count
+        } else {
+            let input = TEST_INPUT[TEST_INPUT_OFFSET];
+            TEST_INPUT_OFFSET += 1;
+            (TEST_PENDING_PTR as *mut u8).write(input);
+            1
+        };
+        g.overlapped.error = 0;
+        g.overlapped.result_ext = count as u64;
+        g.overlapped.flags = FLAG_COMPLETED;
+        TEST_PENDING_KIND = 0;
     }
 
     #[test]
-    fn test_write_all_callback() {
-        #[cfg(target_arch = "x86_64")]
-        unsafe extern "win64" fn mock_write(_ptr: *const u8, len: usize) -> i64 {
-            len as i64
-        }
-        #[cfg(target_arch = "aarch64")]
-        unsafe extern "C" fn mock_write(_ptr: *const u8, len: usize) -> i64 {
-            len as i64
-        }
+    fn test_canonical_abi_and_globals_layout() {
+        assert_eq!(size_of::<PalAbiTable>(), 47 * 8);
+        assert_eq!(offset_of!(PalAbiTable, read), 144);
+        assert_eq!(offset_of!(PalAbiTable, write), 152);
+        assert_eq!(offset_of!(PalAbiTable, process_exit), 64);
+        assert_eq!(offset_of!(ProbeGlobals, overlapped) % 8, 0);
+    }
 
-        let dispatch = ProbeDispatch {
-            write: Some(mock_write),
-            read: None,
-            exit: None,
-        };
-        assert!(write_all(&dispatch, GREETING_PREFIX));
-        assert!(write_all(&dispatch, GREETING_SUFFIX));
+    #[test]
+    fn test_async_write_partial_completion_and_reentry() {
+        unsafe {
+            TEST_GLOBALS.initialized = false;
+            TEST_PENDING_KIND = 0;
+            TEST_INPUT_OFFSET = 0;
+            TEST_OUTPUT_LEN = 0;
+            let table = pal_abi_stubs::for_probe(mock_read, mock_write, mock_exit);
+            let mut unsupported = Overlapped::default();
+            (table.timer_set)(&mut unsupported, 1);
+            assert_eq!(unsupported.flags, FLAG_COMPLETED);
+            assert_eq!(unsupported.error, pal_abi::ERROR_UNSUPPORTED);
+            core::ptr::addr_of_mut!(TEST_ABI)
+                .cast::<PalAbiTable>()
+                .write(table);
+            assert_eq!(resume(), None);
 
-        let empty_dispatch = ProbeDispatch {
-            write: None,
-            read: None,
-            exit: None,
-        };
-        assert!(!write_all(&empty_dispatch, b"test"));
+            let mut outcome = None;
+            for _ in 0..2048 {
+                complete_pending();
+                outcome = resume();
+                if outcome.is_some() {
+                    break;
+                }
+            }
+
+            assert_eq!(outcome, Some(0));
+            let output = core::str::from_utf8(&TEST_OUTPUT[..TEST_OUTPUT_LEN]).unwrap();
+            assert!(output.starts_with("Anonymous-memory probe ready (compiled "));
+            assert!(output.contains("echo: hello\n> "));
+
+            TEST_GLOBALS.initialized = false;
+            assert_eq!(resume(), None);
+            TEST_GLOBALS.overlapped.error = 29;
+            TEST_GLOBALS.overlapped.flags = FLAG_COMPLETED;
+            assert_eq!(resume(), Some(3));
+        }
     }
 }

@@ -7,5 +7,5 @@
 /probe/hosts/unix/.build/
 /probe/hosts/unix/out/
 /probe/hosts/unix/target/
-/probe/target/
+/probe/target*/
 /probe/hosts/windows/out/
