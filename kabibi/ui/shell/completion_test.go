@@ -59,6 +59,9 @@ func TestCompletePathUsesFilesystemAndAddsDirectorySeparator(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(root, "subdir"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(root, "subdir", "child.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(root, "submit.txt"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -69,11 +72,15 @@ func TestCompletePathUsesFilesystemAndAddsDirectorySeparator(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("completion count = %d, want 2", len(got))
 	}
-	if got[0].Display != "subdir" || got[0].Insert != "dir"+quoteCompletionFor(string(os.PathSeparator), 0) || got[0].Space {
+	if got[0].Display != "subdir" || got[0].Insert != "dir/" || got[0].Space {
 		t.Fatalf("directory completion = %#v", got[0])
 	}
 	if got[1].Display != "submit.txt" || got[1].Insert != "mit.txt" || !got[1].Space {
 		t.Fatalf("file completion = %#v", got[1])
+	}
+	got = completePath(completionContext{prefix: "subdir/ch"}, root, false)
+	if len(got) != 1 || got[0].Display != "subdir/child.txt" || got[0].Insert != "ild.txt" {
+		t.Fatalf("completion below a forward-slash directory prefix = %#v", got)
 	}
 	got = completePath(completionContext{}, root, false)
 	for _, candidate := range got {

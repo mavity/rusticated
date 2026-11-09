@@ -713,7 +713,7 @@ func completePath(ctx completionContext, cwd string, directoriesOnly bool) []com
 			Space:   !isDir && suffix == "",
 		})
 		if isDir && suffix == "" {
-			candidates[len(candidates)-1].Insert += quoteCompletionFor(string(os.PathSeparator), ctx.quote)
+			candidates[len(candidates)-1].Insert += quoteCompletionFor("/", ctx.quote)
 		}
 	}
 	sort.Slice(candidates, func(i, j int) bool {
