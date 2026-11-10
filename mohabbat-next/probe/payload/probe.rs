@@ -364,6 +364,23 @@ mod tests {
     use super::*;
     use core::mem::{offset_of, size_of};
 
+    unsafe fn assert_unsupported_async(
+        overlapped: &mut Overlapped,
+        call: impl FnOnce(*mut Overlapped),
+    ) {
+        *overlapped = Overlapped {
+            flags: 0,
+            error: 0,
+            continued: 17,
+            result_ext: 23,
+        };
+        call(overlapped);
+        assert_eq!(overlapped.flags, FLAG_COMPLETED);
+        assert_eq!(overlapped.error, pal_abi::ERROR_UNSUPPORTED);
+        assert_eq!(overlapped.continued, 0);
+        assert_eq!(overlapped.result_ext, 0);
+    }
+
     #[cfg(target_arch = "x86_64")]
     unsafe extern "win64" fn mock_read(
         ov: *mut Overlapped,
@@ -455,6 +472,7 @@ mod tests {
             1
         };
         g.overlapped.error = 0;
+        g.overlapped.continued = 0;
         g.overlapped.result_ext = count as u64;
         g.overlapped.flags = FLAG_COMPLETED;
         TEST_PENDING_KIND = 0;
@@ -479,10 +497,17 @@ mod tests {
             TEST_INPUT_OFFSET = 0;
             TEST_OUTPUT_LEN = 0;
             let table = pal_abi_stubs::for_probe(mock_read, mock_write, mock_exit);
-            let mut unsupported = Overlapped::default();
+            let mut unsupported = Overlapped {
+                flags: 0,
+                error: 0,
+                continued: 17,
+                result_ext: 23,
+            };
             (table.timer_set)(&mut unsupported, 1);
             assert_eq!(unsupported.flags, FLAG_COMPLETED);
             assert_eq!(unsupported.error, pal_abi::ERROR_UNSUPPORTED);
+            assert_eq!(unsupported.continued, 0);
+            assert_eq!(unsupported.result_ext, 0);
             core::ptr::addr_of_mut!(TEST_ABI)
                 .cast::<PalAbiTable>()
                 .write(table);
@@ -506,6 +531,55 @@ mod tests {
             let output = core::str::from_utf8(&TEST_OUTPUT[..TEST_OUTPUT_LEN]).unwrap();
             assert!(output.starts_with("Anonymous-memory probe ready (compiled "));
             assert!(output.contains("echo: hello\n> "));
+        }
+    }
+
+    #[test]
+    fn test_unsupported_async_slots_publish_complete_headers() {
+        unsafe {
+            let table = pal_abi_stubs::for_probe(mock_read, mock_write, mock_exit);
+            let mut ov = Overlapped::default();
+
+            assert_unsupported_async(&mut ov, |p| (table.timer_set)(p, 1));
+            assert_unsupported_async(&mut ov, |p| (table.seek)(p, 1, 0, 0));
+            assert_unsupported_async(&mut ov, |p| (table.handle_truncate)(p, 1, 0));
+            assert_unsupported_async(&mut ov, |p| (table.path_open)(p, core::ptr::null(), 0, 0));
+            assert_unsupported_async(&mut ov, |p| {
+                (table.dir_read)(p, 1, core::ptr::null_mut(), 0)
+            });
+            assert_unsupported_async(&mut ov, |p| {
+                (table.path_stat)(p, core::ptr::null(), 0, 0, core::ptr::null_mut(), 0)
+            });
+            assert_unsupported_async(&mut ov, |p| {
+                (table.path_link)(p, core::ptr::null(), 0, core::ptr::null(), 0, 0)
+            });
+            assert_unsupported_async(&mut ov, |p| {
+                (table.path_symlink)(p, core::ptr::null(), 0, core::ptr::null(), 0, 0)
+            });
+            assert_unsupported_async(&mut ov, |p| {
+                (table.path_readlink)(p, core::ptr::null(), 0, core::ptr::null_mut(), 0)
+            });
+            assert_unsupported_async(&mut ov, |p| (table.path_chmod)(p, core::ptr::null(), 0, 0));
+            assert_unsupported_async(&mut ov, |p| {
+                (table.path_set_times)(p, core::ptr::null(), 0, 0, 0, 0, 0, 0)
+            });
+            assert_unsupported_async(&mut ov, |p| (table.path_remove)(p, core::ptr::null(), 0, 0));
+            assert_unsupported_async(&mut ov, |p| (table.path_mkdir)(p, core::ptr::null(), 0, 0));
+            assert_unsupported_async(&mut ov, |p| {
+                (table.path_rename)(p, core::ptr::null(), 0, core::ptr::null(), 0)
+            });
+            assert_unsupported_async(&mut ov, |p| (table.net_open)(p, core::ptr::null(), 0, 0, 0));
+            assert_unsupported_async(&mut ov, |p| (table.net_accept)(p, 1));
+            assert_unsupported_async(&mut ov, |p| {
+                (table.net_lookup)(p, core::ptr::null(), 0, core::ptr::null_mut(), 0)
+            });
+            assert_unsupported_async(&mut ov, |p| {
+                (table.net_cert_verify)(p, core::ptr::null(), 0, core::ptr::null(), 0)
+            });
+            assert_unsupported_async(&mut ov, |p| (table.process_spawn)(p, core::ptr::null(), 0));
+            assert_unsupported_async(&mut ov, |p| (table.process_pipe)(p));
+            assert_unsupported_async(&mut ov, |p| (table.process_wait)(p, 1));
+            assert_unsupported_async(&mut ov, |p| (table.signal_wait)(p, 0));
         }
     }
 }
