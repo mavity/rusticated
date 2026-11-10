@@ -1,0 +1,8 @@
+# Kabibi
+
+- When blue file panels are visible, arrow keys should be directed to file panels for changing file selection not shell input for moving cursor.
+- When hint/completion is displayed the blue file panels are currently shortened by 1 line so the gap between the shell input and the bottom lip of blue file panel gets wider. For no reason, probably the intention was to offset the hint row appearing below the shell input, but that line is always reserved, so no bumping up is necessary.
+- Ctrl+Enter doesn't seem to work anymore (it was meant to put the currently selected in blue file panel file/directory into shell input at the cursor point). Ctrl+Shift+Enter was meant to put whole of the currently selected absolute path, doesn't work either.
+- Add Ctrl+[ and Ctrl+] for placing the absolute path of the left/right panel into the shell input at the cursor point.
+- Dialogs look very corny, not well designed. Compare to Norton Commander and other similar file managers: the padding needs to be well set. Also consider if we can add shadow darkening on the left-bottom, possibly even make it imitate blurry shadow effect by darkening it gradually.
+- Alt+typing should move the cursor from the shell input line into the search input widget at the edge of the blue file panel. No need to use | to denote that cursor, put the actual cursor.
