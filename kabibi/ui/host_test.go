@@ -150,6 +150,50 @@ func TestReadInputLoop_ParsesAndEnqueuesEvents(t *testing.T) {
 	}
 }
 
+func TestReadInputLoop_NormalizesKittyAlternateAltKey(t *testing.T) {
+	tests := []struct {
+		name     string
+		sequence string
+		wantText string
+		wantMod  input.KeyMod
+	}{
+		{
+			name:     "alt",
+			sequence: "\x1b[8224::116;3;1;8224u",
+			wantText: "t",
+			wantMod:  input.ModAlt,
+		},
+		{
+			name:     "alt shift",
+			sequence: "\x1b[8224:84:116;4:1;8224u",
+			wantText: "T",
+			wantMod:  input.ModAlt | input.ModShift,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := NewHost(noopWidget{}, false)
+			h.readInputLoop(strings.NewReader(tt.sequence))
+
+			msg := <-h.msgCh
+			key, ok := msg.inputEvent.(input.KeyPressEvent)
+			if !ok {
+				t.Fatalf("input event = %T, want input.KeyPressEvent", msg.inputEvent)
+			}
+			if key.Code != 't' || key.BaseCode != 't' {
+				t.Fatalf("key codes = code %q, base %q; want 't'", key.Code, key.BaseCode)
+			}
+			if key.Text != tt.wantText {
+				t.Fatalf("key text = %q, want %q", key.Text, tt.wantText)
+			}
+			if key.Mod != tt.wantMod {
+				t.Fatalf("key modifiers = %v, want %v", key.Mod, tt.wantMod)
+			}
+		})
+	}
+}
+
 func TestRunScrollbackFrame_RendersANSIOutputAndPayload(t *testing.T) {
 	var out bytes.Buffer
 	h := &Host{
@@ -298,6 +342,9 @@ func TestRunCore_UsesInjectedRawModeBoundary(t *testing.T) {
 	}
 	pushKeyboard := ansi.PushKittyKeyboard(kittyKeyboardFlags)
 	popKeyboard := ansi.PopKittyKeyboard(1)
+	if kittyKeyboardFlags&ansi.KittyReportAlternateKeys == 0 {
+		t.Fatal("Kitty keyboard reporting does not enable alternate keys")
+	}
 	if !strings.Contains(gotOutput, pushKeyboard) {
 		t.Fatalf("runCore() output does not enable Kitty keyboard reporting with %q", pushKeyboard)
 	}
