@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode"
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/input"
@@ -18,6 +19,7 @@ import (
 )
 
 const kittyKeyboardFlags = ansi.KittyDisambiguateEscapeCodes |
+	ansi.KittyReportAlternateKeys |
 	ansi.KittyReportAllKeysAsEscapeCodes |
 	ansi.KittyReportAssociatedKeys
 
@@ -928,6 +930,7 @@ func (h *Host) readInputLoopWithReader(r *input.Reader) {
 
 			// Post canonical input.Events to coordinator loop.
 			for _, ev := range res.events {
+				ev = normalizeKittyAlternateKey(ev)
 				if h.verbose {
 					fmt.Fprintf(os.Stderr, "[kabibi] Host input event: type=%T\n", ev)
 				}
@@ -935,4 +938,25 @@ func (h *Host) readInputLoopWithReader(r *input.Reader) {
 			}
 		}
 	}
+}
+
+func normalizeKittyAlternateKey(ev input.Event) input.Event {
+	key, ok := ev.(input.KeyPressEvent)
+	if !ok || !key.Mod.Contains(input.ModAlt) ||
+		key.Code <= unicode.MaxASCII || !unicode.IsPrint(key.Code) ||
+		key.BaseCode > unicode.MaxASCII || !unicode.IsPrint(key.BaseCode) {
+		return ev
+	}
+
+	key.Code = key.BaseCode
+	if key.Mod.Contains(input.ModShift) && key.ShiftedCode == key.BaseCode &&
+		key.BaseCode >= 'a' && key.BaseCode <= 'z' {
+		key.ShiftedCode = unicode.ToUpper(key.BaseCode)
+	}
+	if unicode.IsPrint(key.ShiftedCode) && key.ShiftedCode <= unicode.MaxASCII {
+		key.Text = string(key.ShiftedCode)
+	} else {
+		key.Text = string(key.Code)
+	}
+	return key
 }
