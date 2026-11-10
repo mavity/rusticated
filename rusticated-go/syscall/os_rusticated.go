@@ -19,7 +19,19 @@ func rusticated_process_wait(overlapped unsafe.Pointer, handle uint64)
 //go:wasmimport env get_platform_info
 func rusticated_get_platform_info(ptr unsafe.Pointer, maxLen uint32) uint32
 
+//go:wasmimport env system_info_wait
+func rusticated_system_info_wait(overlapped unsafe.Pointer)
+
 const (
+	PlatformInfoSize                       = 1264
+	PlatformInfoSystemContextVersionOffset = 936
+	PlatformInfoLocaleOffset               = 940
+	PlatformInfoTimeZoneOffset             = 1004
+	PlatformInfoKeyboardLayoutIDOffset     = 1068
+	PlatformInfoAppearanceOffset           = 1196
+	PlatformInfoPowerSourceOffset          = 1228
+	PlatformInfoKeyboardLayoutIDSize       = 128
+
 	MemorySlotCount = 16
 
 	MemKindNone         uint8 = 0
@@ -60,6 +72,12 @@ type PlatformInfo struct {
 	UserHomeDir          string
 	TempDir              string
 	MemorySlots          [MemorySlotCount]MemorySlot
+	SystemContextVersion uint32
+	Locale               string
+	TimeZone             string
+	KeyboardLayoutID     string
+	Appearance           string
+	PowerSource          string
 }
 
 var (
@@ -83,8 +101,23 @@ func GetPlatformInfo() *PlatformInfo {
 		// Yield/Spin (minimal)
 	}
 
+	platformData = readPlatformInfo()
+	atomicStore(&platformOnce, 2)
+	return platformData
+}
+
+// RefreshPlatformInfo replaces the cached snapshot with the host's current
+// system information.
+func RefreshPlatformInfo() *PlatformInfo {
+	atomicStore(&platformOnce, 1)
+	platformData = readPlatformInfo()
+	atomicStore(&platformOnce, 2)
+	return platformData
+}
+
+func readPlatformInfo() *PlatformInfo {
 	// Fetch raw bytes
-	var buf [1024]byte
+	var buf [PlatformInfoSize]byte
 	res := rusticated_get_platform_info(unsafe.Pointer(&buf[0]), uint32(len(buf)))
 	if res != 0 {
 		panic("syscall: rusticated_get_platform_info failed")
@@ -112,17 +145,53 @@ func GetPlatformInfo() *PlatformInfo {
 	pi.UserHomeDir = stringFromBuf(buf[548:612])
 	pi.TempDir = stringFromBuf(buf[612:676])
 	for i := range pi.MemorySlots {
-		offset := 676 + i*16
+		offset := 680 + i*16
 		pi.MemorySlots[i] = MemorySlot{
 			Kind:  buf[offset],
 			Flags: buf[offset+1],
 			Bytes: readU64(buf[offset+8 : offset+16]),
 		}
 	}
-	platformData = pi
+	pi.SystemContextVersion = readU32(buf[PlatformInfoSystemContextVersionOffset : PlatformInfoSystemContextVersionOffset+4])
+	pi.Locale = stringFromBuf(buf[PlatformInfoLocaleOffset : PlatformInfoLocaleOffset+64])
+	pi.TimeZone = stringFromBuf(buf[PlatformInfoTimeZoneOffset : PlatformInfoTimeZoneOffset+64])
+	pi.KeyboardLayoutID = stringFromBuf(buf[PlatformInfoKeyboardLayoutIDOffset : PlatformInfoKeyboardLayoutIDOffset+PlatformInfoKeyboardLayoutIDSize])
+	pi.Appearance = stringFromBuf(buf[PlatformInfoAppearanceOffset : PlatformInfoAppearanceOffset+32])
+	pi.PowerSource = stringFromBuf(buf[PlatformInfoPowerSourceOffset : PlatformInfoPowerSourceOffset+32])
+	return pi
+}
 
-	atomicStore(&platformOnce, 2)
-	return platformData
+// PlatformInfoWait is a one-shot wait for a host system-information change.
+type PlatformInfoWait struct {
+	ctx overlappedContext
+}
+
+// BeginPlatformInfoWait arms an asynchronous wait for system-information
+// changes. Call it before reading the initial or refreshed snapshot.
+func BeginPlatformInfoWait() *PlatformInfoWait {
+	wait := &PlatformInfoWait{}
+	rusticated_system_info_wait(unsafe.Pointer(&wait.ctx.o))
+	return wait
+}
+
+// Wait blocks the current goroutine until the host reports a system-info
+// change or an operation error.
+func (w *PlatformInfoWait) Wait() error {
+	if w == nil {
+		return errnoErr(EINVAL)
+	}
+	awaitOverlapped(&w.ctx)
+	if w.ctx.o.hostError != 0 {
+		return errnoErr(Errno(w.ctx.o.hostError))
+	}
+	return nil
+}
+
+// Cancel cancels a pending system-information wait.
+func (w *PlatformInfoWait) Cancel() {
+	if w != nil {
+		cancelOverlapped(&w.ctx)
+	}
 }
 
 // Helpers since we don't have binary.LittleEndian in low-level runtime/syscall overlays sometimes

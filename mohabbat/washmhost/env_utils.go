@@ -287,9 +287,9 @@ func (h *HostEnv) sys_get_platform_info(ctx context.Context, m api.Module, stack
 	// Offset 484: Build platform string (64 bytes)
 	// Offset 548: User home directory string (64 bytes)
 	// Offset 612: Temp directory string (64 bytes)
-	// Offsets 676..931 contain 16 tagged 16-byte memory slots.
+	// Offsets 680..935 contain 16 tagged 16-byte memory slots.
 
-	structSize := uint32(932)
+	structSize := uint32(platformInfoSize)
 	if maxLen < structSize {
 		stack[0] = 7 // E2BIG
 		return
@@ -377,11 +377,19 @@ func (h *HostEnv) sys_get_platform_info(ctx context.Context, m api.Module, stack
 	}
 
 	for i, slot := range hostPlatformMemorySlots() {
-		offset := 676 + i*16
+		offset := 680 + i*16
 		buf[offset] = slot.kind
 		buf[offset+1] = slot.flags
 		binary.LittleEndian.PutUint64(buf[offset+8:offset+16], slot.bytes)
 	}
+
+	systemContext := h.currentSystemContext()
+	binary.LittleEndian.PutUint32(buf[platformInfoSystemContextVersionOffset:], 1)
+	copySystemInfoString(buf, platformInfoLocaleOffset, 64, systemContext.locale)
+	copySystemInfoString(buf, platformInfoTimeZoneOffset, 64, systemContext.timeZone)
+	copySystemInfoString(buf, platformInfoKeyboardLayoutIDOffset, 128, systemContext.keyboardLayoutID)
+	copySystemInfoString(buf, platformInfoAppearanceOffset, 32, systemContext.appearance)
+	copySystemInfoString(buf, platformInfoPowerSourceOffset, 32, systemContext.powerSource)
 
 	if ok := mem.Write(ptr, buf); !ok {
 		stack[0] = uint64(wasiEFAULT)

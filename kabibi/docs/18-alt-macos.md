@@ -207,3 +207,24 @@ Eliminating the unnecessary `xterm.js` / browser item narrows the implementation
 
 * **Fix Navigation / Editing Key Handling:**
 * Switch on `ev.Code` (`input.KeyLeft`, `input.KeyRight`, `input.KeyBackspace`, `input.KeyDelete`, `input.KeyHome`, `input.KeyEnd`) instead of string-matching `ev.String()`, so Alt-modified navigation does not close search.
+
+---
+
+### Implementation Update: Layout-Aware Option Recognition
+
+The approved implementation goes beyond the original Go-only transport fix so that non-Kitty macOS terminals can identify Option-produced glyphs using the active input-source ID:
+
+* `AbiPlatformInfo` retains the existing host fields' semantics and appends versioned locale, time-zone, keyboard-layout, appearance, and power-source fields. Memory slots begin at offset 680 so the Go, JavaScript, and Rust layouts agree; the resulting ABI record is 1,264 bytes.
+* Hosts expose a one-shot overlapped `system_info_wait`. Guests arm the wait before reading the initial snapshot, then repeat that order after each completion. Host changes may be coalesced; the wait is not an event history.
+* The Go file-panel event router recognizes the checked-in ABC/U.S. Option glyph table only while the panels are visible. Unrecognized layouts and glyphs are left unchanged. This intentionally allows a mapped glyph to act as a shortcut in that UI context.
+* Kitty alternate-key reporting remains enabled and takes precedence when the terminal supplies an Alt modifier. The glyph fallback is for terminals that deliver composed UTF-8 with no modifier.
+* Dead keys are excluded: if the terminal buffers an Option key as a dead key, the later composed character cannot reliably identify the original physical key.
+
+To inspect an active macOS layout's actual Option+letter/digit translations, compile and run `kabibi/tools/generate-macos-option-glyphs.c` on that Mac:
+
+```sh
+clang -framework Carbon -o generate-macos-option-glyphs kabibi/tools/generate-macos-option-glyphs.c
+./generate-macos-option-glyphs
+```
+
+The generator omits dead keys and glyphs that are not unique for the active layout. The macOS generator and terminal behavior still need verification on a Mac; they cannot be validated from the Windows development environment.

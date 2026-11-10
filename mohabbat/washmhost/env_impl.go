@@ -22,25 +22,30 @@ import (
 const sigwinch = syscall.Signal(0x1c) // SIGWINCH (28)
 
 type HostEnv struct {
-	mu             sync.Mutex
-	activeOps      map[uint32]*OpState
-	nextOpID       uint64
-	handles        map[uint64]interface{}
-	nextHandle     uint64
-	outstandingOps int32
-	fileOpsQueue   chan func()
-	ttyRawState    *term.State
-	ttyRawFd       int
-	signals        chan os.Signal
-	signalWaiters  map[uint32]*OpState // signum -> state
-	pendingSignals chan *OpState       // state to complete
-	timers         map[uint32]*time.Timer
-	lastLog        time.Time
-	forcedExitCode int32
-	args           []string
-	owningGID      uint64
-	mod            api.Module
-	cwd            string
+	mu                        sync.Mutex
+	activeOps                 map[uint32]*OpState
+	nextOpID                  uint64
+	handles                   map[uint64]interface{}
+	nextHandle                uint64
+	outstandingOps            int32
+	fileOpsQueue              chan func()
+	ttyRawState               *term.State
+	ttyRawFd                  int
+	signals                   chan os.Signal
+	signalWaiters             map[uint32]*OpState // signum -> state
+	systemInfoWaiters         map[uint32]*OpState
+	systemInfoSnapshot        systemContext
+	systemInfoTimer           *time.Timer
+	systemInfoTimerGeneration uint64
+	systemInfoProvider        func() systemContext
+	pendingSignals            chan *OpState // state to complete
+	timers                    map[uint32]*time.Timer
+	lastLog                   time.Time
+	forcedExitCode            int32
+	args                      []string
+	owningGID                 uint64
+	mod                       api.Module
+	cwd                       string
 }
 
 type OpState struct {
@@ -56,16 +61,17 @@ type OpState struct {
 
 func NewHostEnv() *HostEnv {
 	env := &HostEnv{
-		activeOps:      make(map[uint32]*OpState),
-		handles:        make(map[uint64]interface{}),
-		nextHandle:     3, // 0,1,2 reserved
-		outstandingOps: 0,
-		fileOpsQueue:   make(chan func(), 1000),
-		signals:        make(chan os.Signal, 10),
-		signalWaiters:  make(map[uint32]*OpState),
-		pendingSignals: make(chan *OpState, 100),
-		timers:         make(map[uint32]*time.Timer),
-		forcedExitCode: -1,
+		activeOps:         make(map[uint32]*OpState),
+		handles:           make(map[uint64]interface{}),
+		nextHandle:        3, // 0,1,2 reserved
+		outstandingOps:    0,
+		fileOpsQueue:      make(chan func(), 1000),
+		signals:           make(chan os.Signal, 10),
+		signalWaiters:     make(map[uint32]*OpState),
+		systemInfoWaiters: make(map[uint32]*OpState),
+		pendingSignals:    make(chan *OpState, 100),
+		timers:            make(map[uint32]*time.Timer),
+		forcedExitCode:    -1,
 	}
 	if cwd, err := resolveUsableCwd(); err == nil {
 		env.cwd = cwd
@@ -124,6 +130,11 @@ func (h *HostEnv) Close() {
 	if h.ttyRawState != nil {
 		_ = term.Restore(h.ttyRawFd, h.ttyRawState)
 		h.ttyRawState = nil
+	}
+	if h.systemInfoTimer != nil {
+		h.systemInfoTimer.Stop()
+		h.systemInfoTimer = nil
+		h.systemInfoTimerGeneration++
 	}
 }
 
@@ -324,6 +335,13 @@ func (h *HostEnv) HasLiveOps() bool {
 func (h *HostEnv) CancelOp(ovPtr uint32) {
 	h.mu.Lock()
 
+	delete(h.systemInfoWaiters, ovPtr)
+	if len(h.systemInfoWaiters) == 0 && h.systemInfoTimer != nil {
+		h.systemInfoTimer.Stop()
+		h.systemInfoTimer = nil
+		h.systemInfoTimerGeneration++
+	}
+
 	if t, ok := h.timers[ovPtr]; ok {
 		t.Stop()
 		delete(h.timers, ovPtr)
@@ -400,6 +418,7 @@ func (h *HostEnv) Register(ctx context.Context, r wazero.Runtime) error {
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_process_wait), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64}, []api.ValueType{}).Export("process_wait")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_process_signal), []api.ValueType{api.ValueTypeI64, api.ValueTypeI32}, []api.ValueType{}).Export("process_signal")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_signal_wait), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{}).Export("signal_wait")
+	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_system_info_wait), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).Export("system_info_wait")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_cancel), []api.ValueType{api.ValueTypeI32}, []api.ValueType{}).Export("cancel")
 	builder.NewFunctionBuilder().WithGoModuleFunction(h.wrapFunc(h.sys_get_platform_info), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).Export("get_platform_info")
 

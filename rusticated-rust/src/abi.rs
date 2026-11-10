@@ -128,6 +128,20 @@ pub const SYMLINK_TARGET_FILE: u32 = 1;
 /// The symbolic-link target is intended to be a directory.
 pub const SYMLINK_TARGET_DIRECTORY: u32 = 2;
 
+/// One host-reported memory measurement in `AbiPlatformInfo`.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AbiMemorySlot {
+    /// Measurement kind, using the `MEM_KIND_*` constants.
+    pub kind: u8,
+    /// Measurement-specific flags.
+    pub flags: u8,
+    /// Reserved bytes.
+    pub _reserved: [u8; 6],
+    /// Measurement in bytes.
+    pub bytes: u64,
+}
+
 /// Platform information structure populated by the host.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -172,7 +186,29 @@ pub struct AbiPlatformInfo {
     pub user_home_dir: [u8; 64],
     /// Host temporary directory string (64 bytes).
     pub temp_dir: [u8; 64],
+    /// Tagged host memory measurements (16 slots).
+    pub memory_slots: [AbiMemorySlot; 16],
+    /// Version of the system-context fields appended after the platform fields.
+    pub system_context_version: u32,
+    /// Best available host locale identifier, if known.
+    pub locale: [u8; 64],
+    /// Best available host time-zone identifier, if known.
+    pub time_zone: [u8; 64],
+    /// Active keyboard input-source identifier, if known.
+    pub keyboard_layout_id: [u8; 128],
+    /// Current UI appearance, when available (for example `dark` or `light`).
+    pub appearance: [u8; 32],
+    /// Current power source, when available.
+    pub power_source: [u8; 32],
 }
+
+const _: [(); 1264] = [(); core::mem::size_of::<AbiPlatformInfo>()];
+const _: [(); 936] = [(); core::mem::offset_of!(AbiPlatformInfo, system_context_version)];
+const _: [(); 940] = [(); core::mem::offset_of!(AbiPlatformInfo, locale)];
+const _: [(); 1004] = [(); core::mem::offset_of!(AbiPlatformInfo, time_zone)];
+const _: [(); 1068] = [(); core::mem::offset_of!(AbiPlatformInfo, keyboard_layout_id)];
+const _: [(); 1196] = [(); core::mem::offset_of!(AbiPlatformInfo, appearance)];
+const _: [(); 1228] = [(); core::mem::offset_of!(AbiPlatformInfo, power_source)];
 
 impl Default for AbiPlatformInfo {
     fn default() -> Self {
@@ -356,5 +392,7 @@ pub mod imports {
 
         /// Get detailed host platform and build information.
         pub fn get_platform_info(out_ptr: *mut u8, out_len: u32) -> u32;
+        /// Asynchronously wait for host system-context changes.
+        pub fn system_info_wait(overlapped: *mut Overlapped);
     }
 }

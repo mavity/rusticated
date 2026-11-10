@@ -488,6 +488,8 @@ pub use rt::executor;
 /// OS signal abstractions
 pub mod signal;
 /// Synchronisation primitives
+#[cfg(target_family = "wasm")]
+pub mod system_info;
 pub mod sync;
 /// Thread-local storage key type.
 pub mod thread;

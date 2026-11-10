@@ -636,6 +636,60 @@ class HostState {
 export function makeBrainImports(hostState, argv, ptyAddon = null) {
   const hs = hostState;
   const loadPtyAddon = createPtyAddonLoader(ptyAddon);
+  let systemInfoSnapshot = null;
+  const systemInfoWaiters = new Map();
+  let systemInfoTimer = null;
+  let systemInfoTimerGeneration = 0;
+
+  const currentSystemContext = () => {
+    const options = new Intl.DateTimeFormat().resolvedOptions();
+    return {
+      locale: options.locale || '',
+      timeZone: options.timeZone || ''
+    };
+  };
+
+  const stopSystemInfoPolling = () => {
+    if (systemInfoTimer !== null) {
+      clearTimeout(systemInfoTimer);
+      systemInfoTimer = null;
+      systemInfoTimerGeneration++;
+    }
+  };
+
+  const armSystemInfoPolling = () => {
+    if (systemInfoTimer !== null || systemInfoWaiters.size === 0) return;
+    const generation = ++systemInfoTimerGeneration;
+    systemInfoTimer = setTimeout(() => {
+      const current = currentSystemContext();
+      if (generation !== systemInfoTimerGeneration) return;
+      systemInfoTimer = null;
+      if (systemInfoWaiters.size === 0) return;
+      if (current.locale === systemInfoSnapshot.locale &&
+          current.timeZone === systemInfoSnapshot.timeZone) {
+        armSystemInfoPolling();
+        return;
+      }
+
+      systemInfoSnapshot = current;
+      const waiters = [...systemInfoWaiters.entries()];
+      systemInfoWaiters.clear();
+      for (const [ovPtr, opId] of waiters) {
+        hs.enqueue(() => hs.completeOp(ovPtr, opId, wasiSuccess, 0, 0));
+      }
+    }, 250);
+  };
+
+  function system_info_wait(ovPtr) {
+    const ptr = Number(ovPtr) >>> 0;
+    if (systemInfoSnapshot === null) systemInfoSnapshot = currentSystemContext();
+    const opId = hs.registerOp(ptr, () => {
+      systemInfoWaiters.delete(ptr);
+      if (systemInfoWaiters.size === 0) stopSystemInfoPolling();
+    });
+    systemInfoWaiters.set(ptr, opId);
+    armSystemInfoPolling();
+  }
 
   // Helper: write bytes to guest memory
   function guestWrite(ptr, buf) {
@@ -2144,9 +2198,9 @@ export function makeBrainImports(hostState, argv, ptyAddon = null) {
 
   // ── get_platform_info ────────────────────────────────────────────────────────
   // Signature: (ptr i32, len i32) -> i32 errno
-  // 932-byte binary struct — mirrors env_utils.go layout
+  // 1264-byte binary struct — mirrors env_utils.go layout
   function get_platform_info(ptr, maxLen) {
-    const structSize = 932;
+    const structSize = 1264;
     if (Number(maxLen) < structSize) return wasiE2BIG;
 
     const buf = Buffer.alloc(structSize);
@@ -2189,10 +2243,24 @@ export function makeBrainImports(hostState, argv, ptyAddon = null) {
     copySafe(484, `${osName}-${goArch}`);
     copySafe(548, os.homedir());
     copySafe(612, os.tmpdir());
-    buf[676] = 1;
-    buf.writeBigUInt64LE(BigInt(os.totalmem()), 684);
-    buf[692] = 2;
-    buf.writeBigUInt64LE(BigInt(os.freemem()), 700);
+    buf[680] = 1;
+    buf.writeBigUInt64LE(BigInt(os.totalmem()), 688);
+    buf[696] = 2;
+    buf.writeBigUInt64LE(BigInt(os.freemem()), 704);
+
+    const systemContext = currentSystemContext();
+    buf.writeUInt32LE(1, 936);
+    const copyContext = (offset, size, value) => {
+      let written = 0;
+      for (const character of value) {
+        const bytes = Buffer.from(character);
+        if (written + bytes.length >= size) break;
+        bytes.copy(buf, offset + written);
+        written += bytes.length;
+      }
+    };
+    copyContext(940, 64, systemContext.locale);
+    copyContext(1004, 64, systemContext.timeZone);
 
     guestWrite(Number(ptr), buf);
     return 0;
@@ -2239,6 +2307,7 @@ export function makeBrainImports(hostState, argv, ptyAddon = null) {
     process_signal,
     signal_wait,
     process_exit,
+    system_info_wait,
     tty_set_mode,
     tty_get_size,
     tty_set_size,
