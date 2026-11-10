@@ -22,6 +22,7 @@ import (
 	"github.com/mavity/rusticated/kabibi/ui/shell"
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
 	"github.com/mavity/rusticated/kabibi/ui/widgets"
+	"github.com/mavity/rusticated/platform"
 )
 
 const defaultPanelGapRows = 6
@@ -68,6 +69,7 @@ type AppWidgetOptions struct {
 
 // NewWidget constructs a clean AppWidget instance with wired Shell and DualPaneWidget.
 func NewWidget(opts AppWidgetOptions) *AppWidget {
+	startPlatformInfoWatcher()
 	w := &AppWidget{
 		writeScrollback: opts.WriteToScrollback,
 		onExit:          opts.OnExit,
@@ -586,6 +588,11 @@ func (w *AppWidget) HandleEvent(e input.Event) bool {
 	// (Ctrl+C cancellation and interactive PTY keystroke/paste forwarding).
 	if w.sh.IsRunning() {
 		return w.sh.HandleEvent(e)
+	}
+
+	if isKey && panelsVis && w.panels != nil {
+		keyEv = filemanager.NormalizeMacOptionGlyph(keyEv, platform.KeyboardLayoutID())
+		e = keyEv
 	}
 
 	if isKey {

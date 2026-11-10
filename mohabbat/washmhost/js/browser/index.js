@@ -730,6 +730,61 @@ class HostState {
 function makeBrowserImports(hostState, fs, params = {}) {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
+  let systemInfoSnapshot = null;
+  const systemInfoWaiters = new Map();
+  let systemInfoTimer = null;
+  let systemInfoTimerGeneration = 0;
+
+  const currentSystemContext = () => ({
+    locale: typeof navigator !== 'undefined' && navigator ? navigator.language || '' : '',
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || '',
+    appearance: typeof matchMedia === 'function'
+      ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+      : ''
+  });
+
+  const stopSystemInfoPolling = () => {
+    if (systemInfoTimer !== null) {
+      clearTimeout(systemInfoTimer);
+      systemInfoTimer = null;
+      systemInfoTimerGeneration++;
+    }
+  };
+
+  const armSystemInfoPolling = () => {
+    if (systemInfoTimer !== null || systemInfoWaiters.size === 0) return;
+    const generation = ++systemInfoTimerGeneration;
+    systemInfoTimer = setTimeout(() => {
+      const current = currentSystemContext();
+      if (generation !== systemInfoTimerGeneration) return;
+      systemInfoTimer = null;
+      if (systemInfoWaiters.size === 0) return;
+      if (current.locale === systemInfoSnapshot.locale &&
+          current.timeZone === systemInfoSnapshot.timeZone &&
+          current.appearance === systemInfoSnapshot.appearance) {
+        armSystemInfoPolling();
+        return;
+      }
+
+      systemInfoSnapshot = current;
+      const waiters = [...systemInfoWaiters.entries()];
+      systemInfoWaiters.clear();
+      for (const [ovPtr, opId] of waiters) {
+        hostState.enqueue(() => hostState.completeOp(ovPtr, opId, wasiSuccess, 0, 0));
+      }
+    }, 250);
+  };
+
+  const system_info_wait = (ovPtr) => {
+    const ptr = Number(ovPtr) >>> 0;
+    if (systemInfoSnapshot === null) systemInfoSnapshot = currentSystemContext();
+    const opId = hostState.registerOp(ptr, () => {
+      systemInfoWaiters.delete(ptr);
+      if (systemInfoWaiters.size === 0) stopSystemInfoPolling();
+    });
+    systemInfoWaiters.set(ptr, opId);
+    armSystemInfoPolling();
+  };
 
   if (typeof params.stdout === 'function') {
     hostState.stdoutCb = params.stdout;
@@ -1606,7 +1661,7 @@ function makeBrowserImports(hostState, fs, params = {}) {
     },
 
     get_platform_info: (ptr, maxLen) => {
-      const descriptor = new Uint8Array(932);
+      const descriptor = new Uint8Array(1264);
       const view = new DataView(descriptor.buffer);
       view.setUint32(0, 1, true);
       descriptor[4] = '/'.charCodeAt(0);
@@ -1624,15 +1679,31 @@ function makeBrowserImports(hostState, fs, params = {}) {
       setString(612, '/tmp');
       const memoryGB = Number(typeof navigator !== 'undefined' && navigator ? navigator.deviceMemory : 0);
       if (Number.isFinite(memoryGB) && memoryGB > 0) {
-        descriptor[676] = 1;
-        descriptor[677] = 2;
-        view.setBigUint64(684, BigInt(Math.floor(memoryGB * 1024 ** 3)), true);
+        descriptor[680] = 1;
+        descriptor[681] = 2;
+        view.setBigUint64(688, BigInt(Math.floor(memoryGB * 1024 ** 3)), true);
       }
+
+      const systemContext = currentSystemContext();
+      view.setUint32(936, 1, true);
+      const setContextString = (offset, size, value) => {
+        let written = 0;
+        for (const character of value) {
+          const bytes = encoder.encode(character);
+          if (written + bytes.length >= size) break;
+          descriptor.set(bytes, offset + written);
+          written += bytes.length;
+        }
+      };
+      setContextString(940, 64, systemContext.locale);
+      setContextString(1004, 64, systemContext.timeZone);
+      setContextString(1196, 32, systemContext.appearance);
 
       if (Number(maxLen) < descriptor.length) return wasiE2BIG;
       hostState.getGuestSlice(Number(ptr), descriptor.length).set(descriptor);
       return 0;
     },
+    system_info_wait,
 
     // ── Extension & Dynamic Library Hooks ────────────────────────────────────
     dylib_open: (ovPtr, pathPtr, pathLen, flags) => {

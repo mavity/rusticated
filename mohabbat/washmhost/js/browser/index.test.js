@@ -558,6 +558,19 @@ test('Signal dispatching completes signal_wait', async () => {
   assert.equal(view.getBigUint64(ovSig2 + 16, true), 28n);
 });
 
+test('system_info_wait is cancellable', async () => {
+  const mem = new WebAssembly.Memory({ initial: 1 });
+  const host = await washmhost({ test: true, memory: mem });
+  const { env, hostState } = host;
+  const ovPtr = 1248;
+
+  env.system_info_wait(ovPtr);
+  assert.equal(hostState.hasPending(), true);
+  assert.equal(hostState.cancelOp(ovPtr), true);
+  assert.equal(hostState.hasPending(), false);
+  assert.equal(new DataView(mem.buffer).getUint32(ovPtr + 4, true), wasiECANCELED);
+});
+
 test('Parked event loop waits for stdin and exits only on explicit process exit', async () => {
   const hostState = new HostState(new WebAssembly.Memory({ initial: 1 }));
   let runCount = 0;
@@ -614,13 +627,14 @@ test('WASM ABI exports metadata and seek imports with expected behavior', async 
     'dylib_write_mem',
     'dylib_callback_register',
     'net_accept',
-    'net_cert_verify'
+    'net_cert_verify',
+    'system_info_wait'
   ]) {
     assert.equal(typeof env[name], 'function', `${name} import should be callable`);
   }
 
   const infoPtr = 128;
-  assert.equal(env.get_platform_info(infoPtr, 932), 0);
+  assert.equal(env.get_platform_info(infoPtr, 1264), 0);
   assert.equal(env.get_platform_info(infoPtr, 676), wasiE2BIG);
   const infoView = new DataView(mem.buffer);
   assert.equal(infoView.getUint8(infoPtr + 4), '/'.charCodeAt(0));

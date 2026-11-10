@@ -125,6 +125,37 @@ test('cancel ends a timer operation with ECANCELED and suppresses late completio
     assert.equal(view.getUint32(ovPtr + 4, true), 11);
 });
 
+test('system_info_wait is cancellable', () => {
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const host = new HostState();
+    host.memory = memory;
+    const { env } = makeBrainImports(host, []);
+    const view = new DataView(memory.buffer);
+    const ovPtr = 32;
+
+    env.system_info_wait(ovPtr);
+    assert.equal(host.hasPending(), true);
+    env.cancel(ovPtr);
+    assert.equal(host.hasPending(), false);
+    assert.equal(view.getUint32(ovPtr, true), 1);
+    assert.equal(view.getUint32(ovPtr + 4, true), 11);
+});
+
+test('get_platform_info includes the versioned system context', () => {
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const host = new HostState();
+    host.memory = memory;
+    const { env } = makeBrainImports(host, []);
+    const ptr = 128;
+    assert.equal(env.get_platform_info(ptr, 1264), 0);
+    assert.equal(env.get_platform_info(ptr, 1263), 1);
+
+    const view = new DataView(memory.buffer);
+    assert.equal(view.getUint32(ptr + 936, true), 1);
+    const decoder = new TextDecoder();
+    assert.notEqual(decoder.decode(new Uint8Array(memory.buffer, ptr + 940, 64)).split('\0')[0], '');
+});
+
 test('cancel removes listeners for a pending pipe read and marks ECANCELED', () => {
       const memory = new WebAssembly.Memory({ initial: 1 });
       const host = new HostState();

@@ -34,13 +34,13 @@ func TestSysGetPlatformInfoCanonicalizesHostPaths(t *testing.T) {
 	env := NewHostEnv()
 	mod := newMockModule(0x10000)
 	const ptr = uint32(0x100)
-	stack := []uint64{uint64(ptr), 932}
+	stack := []uint64{uint64(ptr), platformInfoSize}
 
 	env.sys_get_platform_info(context.Background(), mod, stack)
 	if stack[0] != 0 {
 		t.Fatalf("sys_get_platform_info returned %d", stack[0])
 	}
-	data, ok := mod.Memory().Read(ptr, 932)
+	data, ok := mod.Memory().Read(ptr, platformInfoSize)
 	if !ok {
 		t.Fatal("read platform info output")
 	}
@@ -71,6 +71,106 @@ func TestSysGetPlatformInfoCanonicalizesHostPaths(t *testing.T) {
 	}
 	if got := readString(612); got != wantTemp {
 		t.Errorf("platform temp = %q, want %q", got, wantTemp)
+	}
+	if got := binary.LittleEndian.Uint32(data[platformInfoSystemContextVersionOffset:]); got != 1 {
+		t.Errorf("system context version = %d, want 1", got)
+	}
+}
+
+func TestSysGetPlatformInfoSerializesSystemContext(t *testing.T) {
+	env := NewHostEnv()
+	env.systemInfoProvider = func() systemContext {
+		return systemContext{
+			locale:           "en-GB",
+			timeZone:         "Europe/London",
+			keyboardLayoutID: "com.apple.keylayout.ABC",
+			appearance:       "dark",
+			powerSource:      "battery",
+		}
+	}
+	mod := newMockModule(0x10000)
+	const ptr = uint32(0x100)
+	stack := []uint64{uint64(ptr), platformInfoSize}
+
+	env.sys_get_platform_info(context.Background(), mod, stack)
+	if stack[0] != uint64(wasiSuccess) {
+		t.Fatalf("sys_get_platform_info returned %d", stack[0])
+	}
+	data, ok := mod.Memory().Read(ptr, platformInfoSize)
+	if !ok {
+		t.Fatal("read platform info output")
+	}
+	for _, field := range []struct {
+		offset int
+		want   string
+	}{
+		{platformInfoLocaleOffset, "en-GB"},
+		{platformInfoTimeZoneOffset, "Europe/London"},
+		{platformInfoKeyboardLayoutIDOffset, "com.apple.keylayout.ABC"},
+		{platformInfoAppearanceOffset, "dark"},
+		{platformInfoPowerSourceOffset, "battery"},
+	} {
+		if got := string(data[field.offset : field.offset+len(field.want)]); got != field.want {
+			t.Errorf("system context at %d = %q, want %q", field.offset, got, field.want)
+		}
+	}
+}
+
+func TestSystemInfoWaitCompletesWhenContextChanges(t *testing.T) {
+	env := NewHostEnv()
+	current := systemContext{locale: "en-US"}
+	env.systemInfoProvider = func() systemContext { return current }
+	mod := newMockModule(0x10000)
+	const ovPtr = uint32(0x100)
+
+	env.sys_system_info_wait(context.Background(), mod, []uint64{uint64(ovPtr)})
+	env.mu.Lock()
+	generation := env.systemInfoTimerGeneration
+	env.systemInfoTimer.Stop()
+	env.systemInfoTimer = nil
+	env.mu.Unlock()
+
+	current.locale = "fr-FR"
+	env.pollSystemInfo(generation)
+	(<-env.fileOpsQueue)()
+
+	data, ok := mod.Memory().Read(ovPtr, 24)
+	if !ok {
+		t.Fatal("read completed overlapped")
+	}
+	if got := binary.LittleEndian.Uint32(data[4:8]); got != wasiSuccess {
+		t.Errorf("system info wait error = %d, want success", got)
+	}
+	if got := env.PendingOps(); got != 0 {
+		t.Errorf("pending operations = %d, want 0", got)
+	}
+}
+
+func TestCancelSystemInfoWaitRemovesWaiterAndTimer(t *testing.T) {
+	env := NewHostEnv()
+	mod := newMockModule(0x10000)
+	const ovPtr = uint32(0x100)
+
+	env.sys_system_info_wait(context.Background(), mod, []uint64{uint64(ovPtr)})
+	env.CancelOp(ovPtr)
+
+	env.mu.Lock()
+	_, waiting := env.systemInfoWaiters[ovPtr]
+	timer := env.systemInfoTimer
+	_, active := env.activeOps[ovPtr]
+	env.mu.Unlock()
+	if waiting || timer != nil || active {
+		t.Errorf("waiter cleanup: waiting=%t timer=%v active=%t; want all cleared", waiting, timer, active)
+	}
+	if got := env.PendingOps(); got != 0 {
+		t.Errorf("pending operations = %d, want 0", got)
+	}
+	data, ok := mod.Memory().Read(ovPtr, 24)
+	if !ok {
+		t.Fatal("read canceled overlapped")
+	}
+	if got := binary.LittleEndian.Uint32(data[4:8]); got != wasiECANCELED {
+		t.Errorf("system info wait error = %d, want canceled", got)
 	}
 }
 
