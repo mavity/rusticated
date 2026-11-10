@@ -367,7 +367,10 @@ regalloc2 = { path = "`+filepath.ToSlash(regalloc2Dir)+`" }`) {
 }
 
 func TestBumpaloOverlayPatches(t *testing.T) {
-	snippet := `#[repr(transparent)]
+	snippet := `/// A wrapper type for the canonical, statically allocated empty chunk.
+///
+/// This documentation applies to the original empty chunk definition.
+#[repr(transparent)]
 struct EmptyChunkFooter(ChunkFooter);
 
 unsafe impl Sync for EmptyChunkFooter {}
@@ -395,6 +398,9 @@ impl EmptyChunkFooter {
 	}
 	if !strings.Contains(s2, "get_bump_empty_chunk()") {
 		t.Fatalf("expected get_bump_empty_chunk call in patched bumpalo:\n%s", s2)
+	}
+	if strings.Contains(s2, "A wrapper type for the canonical, statically allocated empty chunk.") {
+		t.Fatalf("obsolete EMPTY_CHUNK documentation remained in patched bumpalo:\n%s", s2)
 	}
 }
 

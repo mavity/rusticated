@@ -167,21 +167,21 @@ var vcodeDisasmPatch = craneliftSourcePatch{
 }
 
 var vcodeBlockDisasmPatch = craneliftSourcePatch{
-	name: "elide vcode block disasm",
-	pattern: `(?s)if want_disasm \{\r?\n\s*writeln!\(&mut disasm, "block\{\}:", block\.index\(\)\)\.unwrap\(\);\r?\n\s*\}`,
+	name:        "elide vcode block disasm",
+	pattern:     `(?s)if want_disasm \{\r?\n\s*writeln!\(&mut disasm, "block\{\}:", block\.index\(\)\)\.unwrap\(\);\r?\n\s*\}`,
 	replacement: `/* block disasm elided */`,
 }
 
 var vcodeStackMapDisasmPatch = craneliftSourcePatch{
-	name: "elide vcode stack map disasm",
+	name:    "elide vcode stack map disasm",
 	pattern: `(?s)let user_stack_map_disasm = if want_disasm \{.*?\};\r?\n\s*\(user_stack_map, user_stack_map_disasm\)`,
 	replacement: `let user_stack_map_disasm: Option<String> = None;
                                 (user_stack_map, user_stack_map_disasm)`,
 }
 
 var vcodeDebugTagDisasmPatch = craneliftSourcePatch{
-	name: "elide vcode debug tag disasm",
-	pattern: `(?s)let mut debug_tag_disasm = None;(.*?)if want_disasm \{\r?\n\s*debug_tag_disasm =\r?\n\s*Some\(format!\("  ; \^-- debug @ \{pos:\?\}: \{tags:\?\}"\)\);\r?\n\s*\}`,
+	name:        "elide vcode debug tag disasm",
+	pattern:     `(?s)let mut debug_tag_disasm = None;(.*?)if want_disasm \{\r?\n\s*debug_tag_disasm =\r?\n\s*Some\(format!\("  ; \^-- debug @ \{pos:\?\}: \{tags:\?\}"\)\);\r?\n\s*\}`,
 	replacement: `let mut debug_tag_disasm: Option<String> = None;$1/* debug tag disasm elided */`,
 }
 
@@ -198,7 +198,7 @@ var logDependencyPatch = craneliftSourcePatch{
 }
 
 var timingDisabledPatch = craneliftSourcePatch{
-	name: "elide timing passes and Box<dyn Any>",
+	name:    "elide timing passes and Box<dyn Any>",
 	pattern: `(?s)#\[doc=\$desc\]\r?\n\s*#\[must_use\]\r?\n\s*pub fn \$pass\(\) -> Box<dyn Any> \{\r?\n\s*start_pass\(Pass::\$pass\)\r?\n\s*\}`,
 	replacement: `#[doc=$$desc]
             #[must_use]
@@ -206,8 +206,8 @@ var timingDisabledPatch = craneliftSourcePatch{
 }
 
 var lowerIsleErrorPatch = craneliftSourcePatch{
-	name: "elide display_inst in lower ISLE error",
-	pattern: `(?s)CodegenError::Unsupported\(format!\(\s*"should be implemented in ISLE:.*?\)\s*\)`,
+	name:        "elide display_inst in lower ISLE error",
+	pattern:     `(?s)CodegenError::Unsupported\(format!\(\s*"should be implemented in ISLE:.*?\)\s*\)`,
 	replacement: `CodegenError::Unsupported("unimplemented in ISLE".into())`,
 }
 
@@ -236,8 +236,8 @@ var stringifyCodeBytesStubPatch = craneliftSourcePatch{
 }
 
 var bumpaloEmptyChunkPatch = craneliftSourcePatch{
-	name: "eject bumpalo EMPTY_CHUNK to heap redirection",
-	pattern: `(?s)#\[repr\(transparent\)\]\r?\nstruct EmptyChunkFooter\(ChunkFooter\);\r?\n\r?\nunsafe impl Sync for EmptyChunkFooter \{\}\r?\n\r?\nstatic EMPTY_CHUNK: EmptyChunkFooter = EmptyChunkFooter\(ChunkFooter \{.*?allocated_bytes: 0,\r?\n\}\);`,
+	name:    "eject bumpalo EMPTY_CHUNK to heap redirection",
+	pattern: `(?s)(///[^\r\n]*\r?\n)+#\[repr\(transparent\)\]\r?\nstruct EmptyChunkFooter\(ChunkFooter\);\r?\n\r?\nunsafe impl Sync for EmptyChunkFooter \{\}\r?\n\r?\nstatic EMPTY_CHUNK: EmptyChunkFooter = EmptyChunkFooter\(ChunkFooter \{.*?allocated_bytes: 0,\r?\n\}\);`,
 	replacement: `#[allow(improper_ctypes)]
 unsafe extern "C" {
     fn get_bump_empty_chunk() -> *mut ChunkFooter;
@@ -252,7 +252,7 @@ static EMPTY_CHUNK: EmptyChunkFooter = EmptyChunkFooter(());`,
 }
 
 var bumpaloEmptyChunkGetPatch = craneliftSourcePatch{
-	name: "bumpalo EmptyChunkFooter::get redirection",
+	name:    "bumpalo EmptyChunkFooter::get redirection",
 	pattern: `(?s)impl EmptyChunkFooter \{\r?\n\s*fn get\(&'static self\) -> NonNull<ChunkFooter> \{\r?\n\s*NonNull::from\(&self\.0\)\r?\n\s*\}\r?\n\}`,
 	replacement: `impl EmptyChunkFooter {
     #[inline(always)]
@@ -269,7 +269,7 @@ var hashbrownDefaultHasherPatch = craneliftSourcePatch{
 }
 
 var hashbrownStaticEmptyPatch = craneliftSourcePatch{
-	name: "eject hashbrown static_empty to heap redirection",
+	name:    "eject hashbrown static_empty to heap redirection",
 	pattern: `(?s)pub\(crate\) const fn static_empty\(\) -> &'static \[Tag; Group::WIDTH\] \{.*?&ALIGNED_TAGS\.tags\r?\n\s*\}`,
 	replacement: `pub(crate) fn static_empty() -> &'static [Tag; Group::WIDTH] {
         #[allow(improper_ctypes)]
@@ -285,7 +285,7 @@ var unexpectedSSAValuePatch = craneliftSourcePatch{
 }
 
 var memFlagsLinearScanPatch = craneliftSourcePatch{
-	name: "linear scan in MemFlagsSet::insert",
+	name:    "linear scan in MemFlagsSet::insert",
 	pattern: `(?s)pub fn insert\(&mut self, data: MemFlagsData\) -> Result<MemFlags, MemFlagsSetOverflow> \{.*?self\.dedupe_map\.insert\(data, key\);\r?\n\s*Ok\(key\)\r?\n\s*\}`,
 	replacement: `pub fn insert(&mut self, data: MemFlagsData) -> Result<MemFlags, MemFlagsSetOverflow> {
         for (key, &val) in self.mem_flags.iter() {
@@ -299,7 +299,7 @@ var memFlagsLinearScanPatch = craneliftSourcePatch{
 }
 
 var wasmparserFormatErrPatch = craneliftSourcePatch{
-	name: "elide format_args! in wasmparser format_err!",
+	name:    "elide format_args! in wasmparser format_err!",
 	pattern: `(?s)macro_rules! format_err \{.*?crate::Error::fmt\(format_args!\(\$\(\$arg\)\*\), \$offset\)\r?\n\s*\}\r?\n\}`,
 	replacement: `macro_rules! format_err {
     ($$offset:expr, $$($$arg:tt)*) => {
@@ -309,7 +309,7 @@ var wasmparserFormatErrPatch = craneliftSourcePatch{
 }
 
 var rcForTypeAArch64Patch = craneliftSourcePatch{
-	name: "eject AArch64 rc_for_type to heap slices",
+	name:    "eject AArch64 rc_for_type to heap slices",
 	pattern: `(?s)fn rc_for_type\(ty: &Type\) -> CodegenResult<\(&\[RegClass\], &\[Type\]\)> \{.*?(\r?\n    fn canonical_type_for_rc)`,
 	replacement: `fn rc_for_type(ty: &Type) -> CodegenResult<(&'static [RegClass], &'static [Type])> {
         #[allow(improper_ctypes)]
@@ -338,7 +338,7 @@ var rcForTypeAArch64Patch = craneliftSourcePatch{
 }
 
 var rcForTypeX64Patch = craneliftSourcePatch{
-	name: "eject x64 rc_for_type to heap slices",
+	name:    "eject x64 rc_for_type to heap slices",
 	pattern: `(?s)fn rc_for_type\(ty: &Type\) -> CodegenResult<\(&\[RegClass\], &\[Type\]\)> \{.*?(\r?\n    fn canonical_type_for_rc)`,
 	replacement: `fn rc_for_type(ty: &Type) -> CodegenResult<(&'static [RegClass], &'static [Type])> {
         #[allow(improper_ctypes)]
