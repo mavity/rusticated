@@ -127,6 +127,24 @@ static mut TEST_STATE: PlatformState = PlatformState {
 };
 
 const PREFIX_ABI_OFFSET: usize = 0x20000;
+const ERRNO_EINTR: i32 = 4;
+const ERRNO_EBADF: i32 = 9;
+const ERRNO_EINVAL: i32 = 22;
+const ERRNO_EPIPE: i32 = 32;
+#[cfg(feature = "darwin")]
+const ERRNO_EAGAIN: i32 = 35;
+#[cfg(not(feature = "darwin"))]
+const ERRNO_EAGAIN: i32 = 11;
+
+fn map_io_errno(errno: i32) -> u32 {
+    match errno {
+        ERRNO_EBADF => ERROR_BADF,
+        ERRNO_EINVAL => ERROR_INVALID,
+        ERRNO_EPIPE => ERROR_PIPE,
+        ERRNO_EAGAIN => ERROR_AGAIN,
+        _ => ERROR_IO,
+    }
+}
 
 #[inline(always)]
 unsafe fn slice_origin() -> *mut u8 {
@@ -331,10 +349,10 @@ unsafe extern "C" fn run_io_worker(_context: *mut c_void) -> *mut c_void {
             Some(errno_location) => *errno_location(),
             None => 0,
         };
-        if errno == 4 {
+        if errno == ERRNO_EINTR {
             continue;
         }
-        break (if errno == 32 { ERROR_PIPE } else { ERROR_IO }, 0);
+        break (map_io_errno(errno), 0);
     };
     ptr::addr_of_mut!((*state).pending_io.error).write(error);
     ptr::addr_of_mut!((*state).pending_io.result).write(result);
@@ -356,6 +374,27 @@ unsafe fn publish_pending_io() {
         error: 0,
         result: 0,
     });
+}
+
+unsafe fn join_and_publish_pending_io() -> bool {
+    let state = state_ptr();
+    let join = ptr::addr_of!((*state).pthread_join).read();
+    let thread = ptr::addr_of!((*state).worker_thread).read();
+    let Some(join) = join else {
+        return false;
+    };
+    if thread == 0 || join(thread, ptr::null_mut()) != 0 {
+        return false;
+    }
+    publish_pending_io();
+    true
+}
+
+unsafe fn terminate_after_worker_failure(status: i32) -> ! {
+    if let Some(exit) = state_mut().exit {
+        exit(status);
+    }
+    loop {}
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -559,28 +598,16 @@ unsafe fn run() -> i32 {
         let thread = ptr::addr_of!((*state).worker_thread).read();
         if !queued_io {
             if thread != 0 {
-                // A stray worker may still reference payload buffers; retain the mapping.
-                return 5;
+                terminate_after_worker_failure(5);
             }
             free(payload_alloc, total_payload_size);
             state_mut().payload_alloc = ptr::null_mut();
             return 0;
         }
-        let join = ptr::addr_of!((*state).pthread_join).read();
-        let Some(join) = join else {
-            // A failed join cannot prove the worker stopped using payload buffers.
-            return 5;
-        };
-        if thread == 0 {
-            free(payload_alloc, total_payload_size);
-            state_mut().payload_alloc = ptr::null_mut();
-            return 5;
+        if !join_and_publish_pending_io() {
+            // The host unloads this code when the entry returns; do not return while a worker may execute it.
+            terminate_after_worker_failure(5);
         }
-        if join(thread, ptr::null_mut()) != 0 {
-            // A failed join cannot prove the worker stopped using payload buffers.
-            return 5;
-        }
-        publish_pending_io();
     }
 }
 
@@ -649,11 +676,13 @@ mod tests {
         read_errnos: [i32; 4],
         read_data: [u8; 8],
         read_calls: usize,
-        write_result: isize,
-        write_errno: i32,
+        write_results: [isize; 4],
+        write_errnos: [i32; 4],
         write_length: usize,
         write_calls: usize,
         errno: i32,
+        join_result: i32,
+        join_calls: usize,
     }
 
     static mut TEST_IO: ScriptedIo = ScriptedIo {
@@ -661,11 +690,13 @@ mod tests {
         read_errnos: [0; 4],
         read_data: [0; 8],
         read_calls: 0,
-        write_result: 0,
-        write_errno: 0,
+        write_results: [0; 4],
+        write_errnos: [0; 4],
         write_length: 0,
         write_calls: 0,
         errno: 0,
+        join_result: 0,
+        join_calls: 0,
     };
 
     unsafe extern "C" fn scripted_read(fd: i32, buffer: *mut c_void, length: usize) -> isize {
@@ -682,17 +713,25 @@ mod tests {
         result
     }
 
-    unsafe extern "C" fn scripted_write(fd: i32, buffer: *const c_void, length: usize) -> isize {
+    unsafe extern "C" fn scripted_write(fd: i32, _buffer: *const c_void, length: usize) -> isize {
         assert_eq!(fd, 1);
         let io = &mut *ptr::addr_of_mut!(TEST_IO);
+        let index = io.write_calls;
         io.write_calls += 1;
         io.write_length = length;
-        io.errno = io.write_errno;
-        io.write_result
+        io.errno = io.write_errnos[index];
+        io.write_results[index]
     }
 
     unsafe extern "C" fn scripted_errno_location() -> *mut i32 {
         ptr::addr_of_mut!((*ptr::addr_of_mut!(TEST_IO)).errno)
+    }
+
+    unsafe extern "C" fn scripted_pthread_join(thread: usize, _result: *mut *mut c_void) -> i32 {
+        assert_eq!(thread, 7);
+        let io = &mut *ptr::addr_of_mut!(TEST_IO);
+        io.join_calls += 1;
+        io.join_result
     }
 
     unsafe fn reset_io_test_state() {
@@ -702,7 +741,7 @@ mod tests {
             exit: None,
             errno_location: Some(scripted_errno_location),
             pthread_create: None,
-            pthread_join: None,
+            pthread_join: Some(scripted_pthread_join),
             worker_thread: 0,
             queued_io: false,
             pending_io: PendingIo {
@@ -723,11 +762,13 @@ mod tests {
             read_errnos: [0; 4],
             read_data: [0; 8],
             read_calls: 0,
-            write_result: 0,
-            write_errno: 0,
+            write_results: [0; 4],
+            write_errnos: [0; 4],
             write_length: 0,
             write_calls: 0,
             errno: 0,
+            join_result: 0,
+            join_calls: 0,
         });
     }
 
@@ -804,14 +845,23 @@ mod tests {
             assert!(!(*state).queued_io);
 
             (*state).pthread_create = Some(mock_pthread_create);
-            (*ptr::addr_of_mut!(TEST_IO)).write_result = 2;
+            {
+                let io = &mut *ptr::addr_of_mut!(TEST_IO);
+                io.write_results[0] = 2;
+            }
             overlapped = Overlapped {
                 flags: 0,
                 error: 0,
                 continued: 17,
                 result_ext: 23,
             };
-            begin_io(&mut overlapped, 1, buffer.as_mut_ptr().cast(), buffer.len(), true);
+            begin_io(
+                &mut overlapped,
+                1,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                true,
+            );
             assert!((*state).queued_io);
             assert_eq!(overlapped.flags, 0);
             assert_eq!(overlapped.error, 0);
@@ -835,7 +885,7 @@ mod tests {
             run_io_worker(ptr::null_mut());
             assert_eq!(ptr::addr_of!((*state).pending_io.result).read(), 2);
             assert_eq!(overlapped.flags, 0);
-            publish_pending_io();
+            assert!(join_and_publish_pending_io());
             assert_completion(&overlapped, 0, 2);
             assert!(!ptr::addr_of!((*state).queued_io).read());
             assert_eq!(ptr::addr_of!((*state).worker_thread).read(), 0);
@@ -844,6 +894,26 @@ mod tests {
                 .is_null());
             assert_eq!((*ptr::addr_of!(TEST_IO)).write_calls, 1);
             assert_eq!((*ptr::addr_of!(TEST_IO)).write_length, 4);
+
+            second_overlapped = Overlapped {
+                flags: 0,
+                error: 0,
+                continued: 0,
+                result_ext: 0,
+            };
+            (*ptr::addr_of_mut!(TEST_IO)).write_results[1] = 1;
+            begin_io(
+                &mut second_overlapped,
+                1,
+                buffer.as_mut_ptr().cast(),
+                1,
+                true,
+            );
+            assert!((*state).queued_io);
+            run_io_worker(ptr::null_mut());
+            assert!(join_and_publish_pending_io());
+            assert_completion(&second_overlapped, 0, 1);
+            assert_eq!((*ptr::addr_of!(TEST_IO)).write_calls, 2);
 
             overlapped = Overlapped {
                 flags: 91,
@@ -877,28 +947,83 @@ mod tests {
             run_io_worker(ptr::null_mut());
             assert_eq!((*ptr::addr_of!(TEST_IO)).read_calls, 2);
             assert_eq!(read_buffer, *b"OK");
-            publish_pending_io();
+            assert!(join_and_publish_pending_io());
             assert_completion(&overlapped, 0, 2);
 
-            for (read_result, errno, expected_error, expected_result) in [
-                (0, 0, 0, 0),
-                (-1, 32, ERROR_PIPE, 0),
-                (-1, 5, ERROR_IO, 0),
+            reset_io_test_state();
+            let state = state_ptr();
+            (*state).pthread_create = Some(mock_pthread_create);
+            {
+                let io = &mut *ptr::addr_of_mut!(TEST_IO);
+                io.write_results = [-1, 1, 0, 0];
+                io.write_errnos = [ERRNO_EINTR, 0, 0, 0];
+            }
+            let mut write_byte = 0u8;
+            begin_io(
+                &mut overlapped,
+                1,
+                (&mut write_byte as *mut u8).cast(),
+                1,
+                true,
+            );
+            run_io_worker(ptr::null_mut());
+            assert_eq!((*ptr::addr_of!(TEST_IO)).write_calls, 2);
+            assert!(join_and_publish_pending_io());
+            assert_completion(&overlapped, 0, 1);
+
+            for (is_write, result, errno, expected_error) in [
+                (false, 0, 0, 0),
+                (false, -1, ERRNO_EBADF, ERROR_BADF),
+                (false, -1, ERRNO_EINVAL, ERROR_INVALID),
+                (false, -1, ERRNO_EAGAIN, ERROR_AGAIN),
+                (false, -1, ERRNO_EPIPE, ERROR_PIPE),
+                (false, -1, 5, ERROR_IO),
+                (true, -1, ERRNO_EPIPE, ERROR_PIPE),
+                (true, -1, 5, ERROR_IO),
             ] {
                 reset_io_test_state();
                 let state = state_ptr();
                 (*state).pthread_create = Some(mock_pthread_create);
                 {
                     let io = &mut *ptr::addr_of_mut!(TEST_IO);
-                    io.read_results[0] = read_result;
-                    io.read_errnos[0] = errno;
+                    if is_write {
+                        io.write_results[0] = result;
+                        io.write_errnos[0] = errno;
+                    } else {
+                        io.read_results[0] = result;
+                        io.read_errnos[0] = errno;
+                    }
                 }
                 let mut byte = 0u8;
-                begin_io(&mut overlapped, 0, &mut byte, 1, false);
+                let handle = if is_write { 1 } else { 0 };
+                begin_io(
+                    &mut overlapped,
+                    handle,
+                    (&mut byte as *mut u8).cast(),
+                    1,
+                    is_write,
+                );
                 run_io_worker(ptr::null_mut());
-                publish_pending_io();
-                assert_completion(&overlapped, expected_error, expected_result);
+                assert!(join_and_publish_pending_io());
+                assert_completion(&overlapped, expected_error, 0);
             }
+
+            reset_io_test_state();
+            let state = state_ptr();
+            (*state).pthread_create = Some(mock_pthread_create);
+            let mut failed_join = Overlapped::default();
+            let mut byte = 0u8;
+            begin_io(&mut failed_join, 0, (&mut byte as *mut u8).cast(), 1, false);
+            run_io_worker(ptr::null_mut());
+            (*ptr::addr_of_mut!(TEST_IO)).join_result = 11;
+            assert!(!join_and_publish_pending_io());
+            assert_eq!(failed_join.flags, 0);
+            assert!(ptr::addr_of!((*state).queued_io).read());
+            assert_eq!(
+                ptr::addr_of!((*state).pending_io.overlapped).read(),
+                ptr::addr_of_mut!(failed_join)
+            );
+            assert_eq!((*ptr::addr_of!(TEST_IO)).join_calls, 1);
         }
     }
 }
