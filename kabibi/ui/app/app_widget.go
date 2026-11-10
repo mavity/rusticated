@@ -546,7 +546,7 @@ func (w *AppWidget) HandleEvent(e input.Event) bool {
 			return true
 		}
 		if name != "" {
-			w.openMountPathDialog("/mnt/" + name)
+			w.openMountPathDialog()
 		}
 		return true
 	}
@@ -843,7 +843,7 @@ func (w *AppWidget) dispatchSlashCommand(invocation slashcmd.Invocation) {
 			return
 		}
 		if directoryName != "" {
-			w.openMountPathDialog("/mnt/" + directoryName)
+			w.openMountPathDialog()
 		}
 	case "/download":
 		if len(invocation.Args) != 0 {
@@ -1153,6 +1153,38 @@ func (w *AppWidget) resolveShellPath(path string) string {
 	return filepath.Clean(path)
 }
 
+func (w *AppWidget) resolveMountGuestPath(path string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("mount path cannot be empty")
+	}
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve home directory for mount path %q: %w", path, err)
+		}
+		if home == "" {
+			return "", fmt.Errorf("resolve home directory for mount path %q: home directory is empty", path)
+		}
+		if path == "~" {
+			path = home
+		} else {
+			path = filepath.Join(home, path[2:])
+		}
+	} else if !filepath.IsAbs(path) {
+		cwd := w.sh.Dir()
+		if cwd == "" {
+			return "", fmt.Errorf("resolve relative mount path %q: current directory is empty", path)
+		}
+		path = filepath.Join(cwd, path)
+	}
+
+	path = filepath.Clean(path)
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("mount path %q does not resolve to an absolute path", path)
+	}
+	return path, nil
+}
+
 func isListFilesSearchShortcut(key input.KeyPressEvent) bool {
 	if (key.Code == 'f' || key.Code == 'F') &&
 		(key.Mod.Contains(input.ModCtrl) || key.Mod.Contains(input.ModMeta)) {
@@ -1222,8 +1254,9 @@ func (w *AppWidget) openMkdirDialog() {
 	w.invalidate()
 }
 
-func (w *AppWidget) openMountPathDialog(defaultPath string) {
-	dlg := dialog.NewInputDialog(dialog.ActionMount, "Mount Directory", "Choose a guest path for the selected directory:", defaultPath, nil)
+func (w *AppWidget) openMountPathDialog() {
+	defaultPath := w.sh.Dir()
+	dlg := dialog.NewInputDialog(dialog.ActionMount, "Mount Directory", "Choose a guest path (relative paths use the current directory; ~ expands to home):", defaultPath, nil)
 	dlg.Fields[0].Label = "Guest path"
 	dlg.Fields[0].Input = w.newPathInput(defaultPath)
 	dlg.OnCancel = func() {
@@ -1398,7 +1431,12 @@ func (w *AppWidget) onDialogSubmitInput(action dialog.DialogAction, val string, 
 			w.showSlashError(fmt.Errorf("open %q: %w", val, err))
 		}
 	case dialog.ActionMount:
-		if err := browser.MountDirectory(val); err != nil {
+		mountPath, err := w.resolveMountGuestPath(val)
+		if err != nil {
+			w.showSlashError(err)
+			return
+		}
+		if err := browser.MountDirectory(mountPath); err != nil {
 			w.showSlashError(err)
 			return
 		}

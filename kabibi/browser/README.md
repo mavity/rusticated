@@ -45,8 +45,10 @@ available; terminal-emulator paste events continue to work in native TUI use.
 
 Browser terminals also support `/mount` and Ctrl+M/Cmd+M; Ctrl+O remains the
 dual-pane file-manager toggle. The browser asks for read/write access to a
-selected directory, then Kabibi opens its TUI path dialog (default
-`/mnt/<directory-name>`). Kabibi installs the directory-mount adapter from its
+selected directory, then Kabibi opens its TUI path dialog with the current
+shell directory as the default guest mount path. Relative paths resolve from
+the current shell directory, and `~` / `~/...` expand to the guest home
+directory. Kabibi installs the directory-mount adapter from its
 embedded browser runtime on the active guest filesystem. Mounted directories
 are available to that guest's shell commands and dual-pane file manager for the
 current tab session; their handles are not persisted across reloads. Mounting
