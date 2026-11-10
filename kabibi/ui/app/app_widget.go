@@ -395,7 +395,11 @@ func (w *AppWidget) computePanelHeight(totalW, totalH int) (panelH, gapH int) {
 	if inputH < 1 {
 		inputH = 1
 	}
-	gapH = 3 + inputH + 2 // 3 banner/plume peek rows + PromptInput + spacer + blank footer
+	footerH := 1 // blank footer row
+	if w.sh.Input().CompletionMenuVisible() {
+		footerH = 0
+	}
+	gapH = 3 + inputH + 1 + footerH // 3 banner/plume peek rows + PromptInput + spacer + footer
 	if gapH < defaultPanelGapRows {
 		gapH = defaultPanelGapRows
 	}
