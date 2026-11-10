@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -71,12 +72,60 @@ func runStandardProbeSuite(r *Runner, suiteName string, command string, baseArgs
 		return runProbeCase(ctx, command, baseArgs, "", 0, reEmptyEOF)
 	})
 
+	r.RunTest(suiteName, "partial-line-eof-discards-line", func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return runProbeCase(ctx, command, baseArgs, "unfinished", 0, reEmptyEOF)
+	})
+
+	r.RunTest(suiteName, "line-capacity-255", func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		line := strings.Repeat("x", 255)
+		return runProbeCase(ctx, command, baseArgs, line+"\n\n", 0, echoTranscriptRegex(line))
+	})
+
+	r.RunTest(suiteName, "line-capacity-256", func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		line := strings.Repeat("x", 256)
+		return runProbeCase(ctx, command, baseArgs, line+"\r\n\n", 0, echoTranscriptRegex(line))
+	})
+
+	r.RunTest(suiteName, "line-capacity-counts-utf8-bytes", func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		line := strings.Repeat("x", 254) + "é"
+		if len(line) != 256 {
+			return fmt.Errorf("test line is %d bytes, want 256", len(line))
+		}
+		return runProbeCase(ctx, command, baseArgs, line+"\n\n", 0, echoTranscriptRegex(line))
+	})
+
+	r.RunTest(suiteName, "cr-only-line-separators", func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return runProbeCase(ctx, command, baseArgs, "alpha\rbeta\r\r", 0, echoTranscriptRegex("alpha", "beta"))
+	})
+
 	r.RunTest(suiteName, "line-overflow-257-exit-2", func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		longLine := strings.Repeat("x", 257) + "\n"
 		return runProbeCase(ctx, command, baseArgs, longLine, 2, reEmptyEOF)
 	})
+}
+
+func echoTranscriptRegex(lines ...string) *regexp.Regexp {
+	var expected strings.Builder
+	expected.WriteString(`^Anonymous-memory probe ready \(compiled [^\)]+\)\. Enter an empty line to exit\.\n> `)
+	for _, line := range lines {
+		expected.WriteString(`echo: `)
+		expected.WriteString(regexp.QuoteMeta(line))
+		expected.WriteString(`\n> `)
+	}
+	expected.WriteByte('$')
+	return regexp.MustCompile(expected.String())
 }
 
 func (r *Runner) RunStage3ArtifactIntegrityTests() {
@@ -132,6 +181,39 @@ func (r *Runner) RunStage3ArtifactIntegrityTests() {
 			}
 			if info.Size() <= 0 || info.Size() > item.maxSize {
 				return fmt.Errorf("component %s size %d out of bounds (1..%d)", item.name, info.Size(), item.maxSize)
+			}
+		}
+		return nil
+	})
+
+	r.RunTest("artifact/raw-entry", "probe-entry-symbol-at-byte-zero", func() error {
+		compDir := filepath.Join(r.BuildDir, "components")
+		for _, arch := range []string{"x86_64", "aarch64"} {
+			elfPath := filepath.Join(compDir, "probe-"+arch+".elf")
+			out, err := exec.Command("llvm-nm", "--defined-only", "--format=posix", elfPath).Output()
+			if err != nil {
+				return fmt.Errorf("llvm-nm probe entry check on %s: %w", elfPath, err)
+			}
+			found := false
+			for _, line := range strings.Split(string(out), "\n") {
+				fields := strings.Fields(line)
+				if len(fields) < 3 || fields[0] != "probe_code_start" {
+					continue
+				}
+				if found {
+					return fmt.Errorf("probe entry symbol is duplicated in %s", elfPath)
+				}
+				found = true
+				address, err := strconv.ParseUint(fields[2], 16, 64)
+				if err != nil {
+					return fmt.Errorf("parse probe entry address %q in %s: %w", fields[2], elfPath, err)
+				}
+				if address != 0 {
+					return fmt.Errorf("probe entry symbol in %s is at %#x, want byte offset zero", elfPath, address)
+				}
+			}
+			if !found {
+				return fmt.Errorf("probe entry symbol missing from %s", elfPath)
 			}
 		}
 		return nil
