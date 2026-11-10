@@ -1,6 +1,7 @@
 //! Mohabbat-Next Movable Cranelift Runtime Slice (`#![no_std]` + `alloc`).
 //!
-//! Entry point `slice_entry` is located at byte offset `0x00000` (`.text.entry`).
+//! Raw entry label `runtime_code_start` is the first machine instruction at byte
+//! offset `0x00000` (`.text.entry`).
 //! It reads the host `PalAbiTable` at `-0x20000` (`__abi_base`) and its own
 //! `RuntimeGlobals` at `-0x10000` (`__globals_base`) via PC-relative addressing.
 
@@ -161,19 +162,38 @@ fn panic(_info: &PanicInfo<'_>) -> ! {
 }
 
 #[cfg(target_arch = "x86_64")]
-#[unsafe(link_section = ".text.entry")]
-#[unsafe(no_mangle)]
-pub unsafe extern "win64" fn slice_entry() {
+#[cfg(not(test))]
+#[inline(never)]
+unsafe extern "win64" fn runtime_activation() {
     slice_entry_inner();
 }
 
 #[cfg(target_arch = "aarch64")]
-#[unsafe(link_section = ".text.entry")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn slice_entry() {
+#[cfg(not(test))]
+#[inline(never)]
+unsafe extern "C" fn runtime_activation() {
     slice_entry_inner();
 }
 
+#[cfg(all(not(test), target_arch = "x86_64"))]
+core::arch::global_asm!(
+    ".section .text.entry,\"ax\"",
+    ".globl runtime_code_start",
+    "runtime_code_start:",
+    "jmp {activation}",
+    activation = sym runtime_activation,
+);
+
+#[cfg(all(not(test), target_arch = "aarch64"))]
+core::arch::global_asm!(
+    ".section .text.entry,\"ax\"",
+    ".globl runtime_code_start",
+    "runtime_code_start:",
+    "b {activation}",
+    activation = sym runtime_activation,
+);
+
+#[cfg(not(test))]
 #[inline(always)]
 unsafe fn slice_entry_inner() {
     let g = globals();
