@@ -37,6 +37,7 @@ macro_rules! async_stub {
             let _ = ($($arg,)*);
             if !$ov.is_null() {
                 (*$ov).error = ERROR_UNSUPPORTED;
+                (*$ov).continued = 0;
                 (*$ov).result_ext = 0;
                 (*$ov).flags = FLAG_COMPLETED;
             }
@@ -46,6 +47,7 @@ macro_rules! async_stub {
             let _ = ($($arg,)*);
             if !$ov.is_null() {
                 (*$ov).error = ERROR_UNSUPPORTED;
+                (*$ov).continued = 0;
                 (*$ov).result_ext = 0;
                 (*$ov).flags = FLAG_COMPLETED;
             }
@@ -67,7 +69,7 @@ sync_stub!(unsupported_get_cwd(buf_ptr: *mut u8, buf_cap: usize) -> u64);
 sync_stub!(unsupported_set_cwd(path_ptr: *const u8, path_len: usize) -> u32);
 sync_stub!(unsupported_get_platform_info(out_ptr: *mut u8, out_cap: usize) -> u32);
 async_stub!(unsupported_timer_set(ov: *mut Overlapped, delay_ms: u32));
-async_stub!(unsupported_cancel(ov: *mut Overlapped));
+sync_stub!(unsupported_cancel(ov: *mut Overlapped));
 async_stub!(unsupported_seek(ov: *mut Overlapped, handle: u64, offset: i64, whence: u32));
 async_stub!(unsupported_handle_truncate(ov: *mut Overlapped, handle: u64, size: i64));
 sync_stub!(unsupported_handle_close(handle: u64));

@@ -9,7 +9,9 @@ use core::ptr;
 mod pal_abi;
 #[path = "../../pal_abi_stubs.rs"]
 mod pal_abi_stubs;
-use pal_abi::{Overlapped, PalAbiTable};
+use pal_abi::{
+    Overlapped, PalAbiTable, ERROR_AGAIN, ERROR_BADF, ERROR_INVALID, ERROR_IO, ERROR_PIPE,
+};
 
 #[cfg(target_arch = "aarch64")]
 core::arch::global_asm!(
@@ -226,6 +228,7 @@ unsafe fn complete_io(ov: *mut Overlapped, error: u32, result: u64) {
         return;
     }
     (*ov).error = error;
+    (*ov).continued = 0;
     (*ov).result_ext = result;
     (*ov).flags = pal_abi::FLAG_COMPLETED;
 }
@@ -238,31 +241,31 @@ unsafe fn begin_io(
     is_write: bool,
 ) {
     if ov.is_null() || (buffer.is_null() && length != 0) {
-        complete_io(ov, 29, 0);
+        complete_io(ov, ERROR_INVALID, 0);
         return;
     }
+    let fd = match (handle, is_write) {
+        (0, false) => 0,
+        (1, true) => 1,
+        _ => {
+            complete_io(ov, ERROR_BADF, 0);
+            return;
+        }
+    };
     if length == 0 {
         complete_io(ov, 0, 0);
         return;
     }
-    let fd = match handle {
-        0 => 0,
-        1 => 1,
-        _ => {
-            complete_io(ov, 29, 0);
-            return;
-        }
-    };
     let state = state_ptr();
     let create = ptr::addr_of!((*state).pthread_create).read();
     let thread_active = ptr::addr_of!((*state).worker_thread).read() != 0;
     let queued_io = ptr::addr_of!((*state).queued_io).read();
     let Some(create) = create else {
-        complete_io(ov, 29, 0);
+        complete_io(ov, ERROR_IO, 0);
         return;
     };
     if thread_active || queued_io {
-        complete_io(ov, 29, 0);
+        complete_io(ov, ERROR_AGAIN, 0);
         return;
     }
 
@@ -296,7 +299,7 @@ unsafe fn begin_io(
             error: 0,
             result: 0,
         });
-        complete_io(ov, 29, 0);
+        complete_io(ov, ERROR_AGAIN, 0);
     } else {
         ptr::addr_of_mut!((*state).worker_thread).write(thread);
         ptr::addr_of_mut!((*state).queued_io).write(true);
@@ -331,7 +334,7 @@ unsafe extern "C" fn run_io_worker(_context: *mut c_void) -> *mut c_void {
         if errno == 4 {
             continue;
         }
-        break (if errno == 32 { 64 } else { 29 }, 0);
+        break (if errno == 32 { ERROR_PIPE } else { ERROR_IO }, 0);
     };
     ptr::addr_of_mut!((*state).pending_io.error).write(error);
     ptr::addr_of_mut!((*state).pending_io.result).write(result);
@@ -665,13 +668,29 @@ mod tests {
             let mut overlapped = Overlapped::default();
             let mut byte = 0u8;
 
-            begin_io(
-                &mut overlapped,
-                1,
-                (&mut byte as *mut u8).cast(),
-                1,
-                true,
-            );
+            overlapped.continued = 17;
+            overlapped.result_ext = 23;
+            begin_io(&mut overlapped, 1, ptr::null_mut(), 0, true);
+            assert_eq!(overlapped.flags, pal_abi::FLAG_COMPLETED);
+            assert_eq!(overlapped.error, 0);
+            assert_eq!(overlapped.continued, 0);
+            assert_eq!(overlapped.result_ext, 0);
+
+            overlapped.continued = 17;
+            overlapped.result_ext = 23;
+            begin_io(&mut overlapped, 1, ptr::null_mut(), 1, false);
+            assert_eq!(overlapped.error, ERROR_INVALID);
+            assert_eq!(overlapped.continued, 0);
+            assert_eq!(overlapped.result_ext, 0);
+
+            begin_io(&mut overlapped, 2, (&mut byte as *mut u8).cast(), 1, true);
+            assert_eq!(overlapped.error, ERROR_BADF);
+            begin_io(&mut overlapped, 0, (&mut byte as *mut u8).cast(), 1, true);
+            assert_eq!(overlapped.error, ERROR_BADF);
+            begin_io(&mut overlapped, 1, (&mut byte as *mut u8).cast(), 1, false);
+            assert_eq!(overlapped.error, ERROR_BADF);
+
+            begin_io(&mut overlapped, 1, (&mut byte as *mut u8).cast(), 1, true);
 
             assert!((*state).queued_io);
             assert_eq!(overlapped.flags, 0);
@@ -684,19 +703,16 @@ mod tests {
             assert_eq!((*state).worker_thread, 0);
             assert_eq!(overlapped.flags, pal_abi::FLAG_COMPLETED);
             assert_eq!(overlapped.result_ext, 1);
-            assert!(ptr::addr_of!((*state).pending_io.overlapped).read().is_null());
+            assert_eq!(overlapped.continued, 0);
+            assert!(ptr::addr_of!((*state).pending_io.overlapped)
+                .read()
+                .is_null());
 
             (*state).pthread_create = Some(fail_pthread_create);
-            begin_io(
-                &mut overlapped,
-                1,
-                (&mut byte as *mut u8).cast(),
-                1,
-                true,
-            );
+            begin_io(&mut overlapped, 1, (&mut byte as *mut u8).cast(), 1, true);
             assert!(!(*state).queued_io);
             assert_eq!(overlapped.flags, pal_abi::FLAG_COMPLETED);
-            assert_eq!(overlapped.error, 29);
+            assert_eq!(overlapped.error, ERROR_AGAIN);
         }
     }
 }
