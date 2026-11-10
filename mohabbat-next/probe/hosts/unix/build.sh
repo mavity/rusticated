@@ -147,7 +147,7 @@ build_flat() {
 }
 
 build_flat mohabbat-next-payload "" 'libmohabbat_next_payload-*.rlib' \
-    probe_entry "$probe_dir/payload/payload.ld" "probe-$host_arch"
+    probe_code_start "$probe_dir/payload/payload.ld" "probe-$host_arch"
 build_flat mohabbat-next-unix-platform "$flavor" \
     'libmohabbat_next_unix_platform-*.rlib' unix_platform_entry \
     "$probe_dir/platform/unix/platform.ld" "platform-$flavor-$host_arch"

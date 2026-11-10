@@ -41,13 +41,13 @@ pub unsafe fn slice_origin() -> *mut u8 {
     let addr: usize;
     #[cfg(target_arch = "x86_64")]
     core::arch::asm!(
-        "lea {0}, [rip + slice_entry]",
+        "lea {0}, [rip + runtime_code_start]",
         out(reg) addr,
         options(pure, nomem, nostack),
     );
     #[cfg(target_arch = "aarch64")]
     core::arch::asm!(
-        "adr {0}, slice_entry",
+        "adr {0}, runtime_code_start",
         out(reg) addr,
         options(pure, nomem, nostack),
     );

@@ -11,6 +11,28 @@ mod pal_abi;
 mod pal_abi_stubs;
 use pal_abi::{Overlapped, PalAbiTable};
 
+#[cfg(target_arch = "aarch64")]
+core::arch::global_asm!(
+    ".text",
+    ".globl pal_invoke_raw_entry",
+    "pal_invoke_raw_entry:",
+    "mov x16, x0",
+    "mov x0, xzr",
+    "mov x1, xzr",
+    "mov x2, xzr",
+    "mov x3, xzr",
+    "mov x4, xzr",
+    "mov x5, xzr",
+    "mov x6, xzr",
+    "mov x7, xzr",
+    "br x16",
+);
+
+#[cfg(target_arch = "aarch64")]
+unsafe extern "C" {
+    fn pal_invoke_raw_entry(code_base: *mut c_void);
+}
+
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 compile_error!("The Unix platform abstraction supports only x86-64 and AArch64.");
 
@@ -71,11 +93,36 @@ struct PlatformState {
     pthread_create: Option<PthreadCreateFn>,
     pthread_join: Option<PthreadJoinFn>,
     worker_thread: usize,
+    queued_io: bool,
     pending_io: PendingIo,
     free: Option<FreeFn>,
     payload_alloc: *mut c_void,
     payload_total_size: usize,
 }
+
+#[cfg(test)]
+static mut TEST_STATE: PlatformState = PlatformState {
+    read: None,
+    write: None,
+    exit: None,
+    errno_location: None,
+    pthread_create: None,
+    pthread_join: None,
+    worker_thread: 0,
+    queued_io: false,
+    pending_io: PendingIo {
+        overlapped: ptr::null_mut(),
+        fd: 0,
+        buffer: ptr::null_mut(),
+        length: 0,
+        is_write: false,
+        error: 0,
+        result: 0,
+    },
+    free: None,
+    payload_alloc: ptr::null_mut(),
+    payload_total_size: 0,
+};
 
 const PREFIX_ABI_OFFSET: usize = 0x20000;
 
@@ -104,12 +151,36 @@ unsafe fn host_abi() -> &'static UnixPlatformHost {
 
 #[inline(always)]
 unsafe fn state_ptr() -> *mut PlatformState {
-    slice_origin().sub(0x10000) as *mut PlatformState
+    #[cfg(not(test))]
+    {
+        slice_origin().sub(0x10000) as *mut PlatformState
+    }
+    #[cfg(test)]
+    {
+        core::ptr::addr_of_mut!(TEST_STATE)
+    }
 }
 
 #[inline(always)]
 unsafe fn state_mut() -> &'static mut PlatformState {
     &mut *state_ptr()
+}
+
+#[inline(always)]
+unsafe fn invoke_raw_entry(code_base: *mut c_void) {
+    #[cfg(target_arch = "x86_64")]
+    core::arch::asm!(
+        "mov r11, {entry}",
+        "xor ecx, ecx",
+        "xor edx, edx",
+        "xor r8d, r8d",
+        "xor r9d, r9d",
+        "call r11",
+        entry = in(reg) code_base,
+        clobber_abi("win64"),
+    );
+    #[cfg(target_arch = "aarch64")]
+    pal_invoke_raw_entry(code_base);
 }
 
 unsafe fn write_fd(fd: i32, bytes: &[u8]) -> bool {
@@ -185,11 +256,12 @@ unsafe fn begin_io(
     let state = state_ptr();
     let create = ptr::addr_of!((*state).pthread_create).read();
     let thread_active = ptr::addr_of!((*state).worker_thread).read() != 0;
+    let queued_io = ptr::addr_of!((*state).queued_io).read();
     let Some(create) = create else {
         complete_io(ov, 29, 0);
         return;
     };
-    if thread_active {
+    if thread_active || queued_io {
         complete_io(ov, 29, 0);
         return;
     }
@@ -215,9 +287,19 @@ unsafe fn begin_io(
         ptr::null_mut(),
     );
     if status != 0 || thread == 0 {
+        ptr::addr_of_mut!((*state).pending_io).write(PendingIo {
+            overlapped: ptr::null_mut(),
+            fd: 0,
+            buffer: ptr::null_mut(),
+            length: 0,
+            is_write: false,
+            error: 0,
+            result: 0,
+        });
         complete_io(ov, 29, 0);
     } else {
         ptr::addr_of_mut!((*state).worker_thread).write(thread);
+        ptr::addr_of_mut!((*state).queued_io).write(true);
     }
 }
 
@@ -254,6 +336,23 @@ unsafe extern "C" fn run_io_worker(_context: *mut c_void) -> *mut c_void {
     ptr::addr_of_mut!((*state).pending_io.error).write(error);
     ptr::addr_of_mut!((*state).pending_io.result).write(result);
     ptr::null_mut()
+}
+
+unsafe fn publish_pending_io() {
+    let state = state_ptr();
+    let pending = ptr::addr_of!((*state).pending_io).read();
+    complete_io(pending.overlapped, pending.error, pending.result);
+    ptr::addr_of_mut!((*state).worker_thread).write(0);
+    ptr::addr_of_mut!((*state).queued_io).write(false);
+    ptr::addr_of_mut!((*state).pending_io).write(PendingIo {
+        overlapped: ptr::null_mut(),
+        fd: 0,
+        buffer: ptr::null_mut(),
+        length: 0,
+        is_write: false,
+        error: 0,
+        result: 0,
+    });
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -424,6 +523,7 @@ unsafe fn run() -> i32 {
         state.pthread_create = Some(pthread_create);
         state.pthread_join = Some(pthread_join);
         state.worker_thread = 0;
+        state.queued_io = false;
         state.pending_io = PendingIo {
             overlapped: ptr::null_mut(),
             fd: 0,
@@ -449,32 +549,35 @@ unsafe fn run() -> i32 {
     set_jit_write_protect(1);
     flush_cache(payload_code, host.hello_payload_size);
 
-    #[cfg(target_arch = "x86_64")]
-    let entry: unsafe extern "win64" fn() -> i32 = core::mem::transmute(payload_code);
-    #[cfg(target_arch = "aarch64")]
-    let entry: unsafe extern "C" fn() -> i32 = core::mem::transmute(payload_code);
     loop {
-        if entry() != 1 {
+        invoke_raw_entry(payload_code);
+        let state = state_ptr();
+        let queued_io = ptr::addr_of!((*state).queued_io).read();
+        let thread = ptr::addr_of!((*state).worker_thread).read();
+        if !queued_io {
+            if thread != 0 {
+                // A stray worker may still reference payload buffers; retain the mapping.
+                return 5;
+            }
             free(payload_alloc, total_payload_size);
             state_mut().payload_alloc = ptr::null_mut();
-            return 70;
+            return 0;
         }
-        let state = state_ptr();
-        let thread = ptr::addr_of!((*state).worker_thread).read();
         let join = ptr::addr_of!((*state).pthread_join).read();
         let Some(join) = join else {
-            free(payload_alloc, total_payload_size);
-            state_mut().payload_alloc = ptr::null_mut();
+            // A failed join cannot prove the worker stopped using payload buffers.
             return 5;
         };
-        if thread == 0 || join(thread, ptr::null_mut()) != 0 {
+        if thread == 0 {
             free(payload_alloc, total_payload_size);
             state_mut().payload_alloc = ptr::null_mut();
             return 5;
         }
-        ptr::addr_of_mut!((*state).worker_thread).write(0);
-        let pending = ptr::addr_of!((*state).pending_io).read();
-        complete_io(pending.overlapped, pending.error, pending.result);
+        if join(thread, ptr::null_mut()) != 0 {
+            // A failed join cannot prove the worker stopped using payload buffers.
+            return 5;
+        }
+        publish_pending_io();
     }
 }
 
@@ -495,6 +598,39 @@ mod tests {
     use super::*;
     use core::mem::{offset_of, size_of};
 
+    static mut TEST_RAW_ENTRY_CALLS: u32 = 0;
+
+    #[cfg(target_arch = "x86_64")]
+    #[inline(never)]
+    unsafe extern "win64" fn test_raw_entry_body() {
+        TEST_RAW_ENTRY_CALLS += 1;
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[inline(never)]
+    unsafe extern "C" fn test_raw_entry_body() {
+        TEST_RAW_ENTRY_CALLS += 1;
+    }
+
+    unsafe extern "C" fn mock_pthread_create(
+        thread: *mut usize,
+        _attributes: *const c_void,
+        _start: Option<unsafe extern "C" fn(*mut c_void) -> *mut c_void>,
+        _context: *mut c_void,
+    ) -> i32 {
+        thread.write(7);
+        0
+    }
+
+    unsafe extern "C" fn fail_pthread_create(
+        _thread: *mut usize,
+        _attributes: *const c_void,
+        _start: Option<unsafe extern "C" fn(*mut c_void) -> *mut c_void>,
+        _context: *mut c_void,
+    ) -> i32 {
+        11
+    }
+
     #[test]
     fn test_unix_platform_prefix_layout() {
         assert_eq!(PREFIX_ABI_OFFSET, 0x20000);
@@ -508,5 +644,59 @@ mod tests {
         assert_eq!(offset_of!(UnixPlatformHost, hello_payload), 48);
         assert_eq!(offset_of!(UnixPlatformHost, hello_payload_size), 56);
         assert!(size_of::<PlatformState>() <= 0x10000);
+    }
+
+    #[test]
+    fn test_raw_entry_call_shim_invokes_code_without_arguments_or_result() {
+        unsafe {
+            TEST_RAW_ENTRY_CALLS = 0;
+            invoke_raw_entry(test_raw_entry_body as *const () as *mut c_void);
+            assert_eq!(ptr::addr_of!(TEST_RAW_ENTRY_CALLS).read(), 1);
+        }
+    }
+
+    #[test]
+    fn test_io_queue_tracks_submission_through_completion_publication() {
+        unsafe {
+            let state = state_ptr();
+            (*state).worker_thread = 0;
+            (*state).queued_io = false;
+            (*state).pthread_create = Some(mock_pthread_create);
+            let mut overlapped = Overlapped::default();
+            let mut byte = 0u8;
+
+            begin_io(
+                &mut overlapped,
+                1,
+                (&mut byte as *mut u8).cast(),
+                1,
+                true,
+            );
+
+            assert!((*state).queued_io);
+            assert_eq!(overlapped.flags, 0);
+            assert_eq!((*state).worker_thread, 7);
+
+            (*state).pending_io.result = 1;
+            publish_pending_io();
+
+            assert!(!(*state).queued_io);
+            assert_eq!((*state).worker_thread, 0);
+            assert_eq!(overlapped.flags, pal_abi::FLAG_COMPLETED);
+            assert_eq!(overlapped.result_ext, 1);
+            assert!(ptr::addr_of!((*state).pending_io.overlapped).read().is_null());
+
+            (*state).pthread_create = Some(fail_pthread_create);
+            begin_io(
+                &mut overlapped,
+                1,
+                (&mut byte as *mut u8).cast(),
+                1,
+                true,
+            );
+            assert!(!(*state).queued_io);
+            assert_eq!(overlapped.flags, pal_abi::FLAG_COMPLETED);
+            assert_eq!(overlapped.error, 29);
+        }
     }
 }

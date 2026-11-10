@@ -11,6 +11,28 @@ mod pal_abi;
 mod pal_abi_stubs;
 use pal_abi::{pal_fn, Overlapped, PalAbiTable};
 
+#[cfg(target_arch = "aarch64")]
+core::arch::global_asm!(
+    ".text",
+    ".globl pal_invoke_raw_entry",
+    "pal_invoke_raw_entry:",
+    "mov x16, x0",
+    "mov x0, xzr",
+    "mov x1, xzr",
+    "mov x2, xzr",
+    "mov x3, xzr",
+    "mov x4, xzr",
+    "mov x5, xzr",
+    "mov x6, xzr",
+    "mov x7, xzr",
+    "br x16",
+);
+
+#[cfg(target_arch = "aarch64")]
+unsafe extern "C" {
+    fn pal_invoke_raw_entry(code_base: *mut c_void);
+}
+
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 compile_error!("The Windows platform abstraction supports only x86-64 and AArch64.");
 
@@ -134,8 +156,34 @@ struct PlatformState {
     wait_for_single_object: Option<WaitForSingleObjectFn>,
     close_handle: Option<CloseHandleFn>,
     worker_thread: *mut c_void,
+    queued_io: bool,
     pending_io: PendingIo,
 }
+
+#[cfg(test)]
+static mut TEST_STATE: PlatformState = PlatformState {
+    input_handle: ptr::null_mut(),
+    output_handle: ptr::null_mut(),
+    error_handle: ptr::null_mut(),
+    read_file: None,
+    write_file: None,
+    get_last_error: None,
+    exit_process: None,
+    create_thread: None,
+    wait_for_single_object: None,
+    close_handle: None,
+    worker_thread: ptr::null_mut(),
+    queued_io: false,
+    pending_io: PendingIo {
+        overlapped: ptr::null_mut(),
+        handle: ptr::null_mut(),
+        buffer: ptr::null_mut(),
+        length: 0,
+        is_write: false,
+        error: 0,
+        result: 0,
+    },
+};
 
 const PREFIX_ABI_OFFSET: usize = 0x20000;
 const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
@@ -181,12 +229,36 @@ macro_rules! function_pointer {
 
 #[inline(always)]
 unsafe fn state_ptr() -> *mut PlatformState {
-    slice_origin().sub(0x10000) as *mut PlatformState
+    #[cfg(not(test))]
+    {
+        slice_origin().sub(0x10000) as *mut PlatformState
+    }
+    #[cfg(test)]
+    {
+        core::ptr::addr_of_mut!(TEST_STATE)
+    }
 }
 
 #[inline(always)]
 unsafe fn state_mut() -> &'static mut PlatformState {
     &mut *state_ptr()
+}
+
+#[inline(always)]
+unsafe fn invoke_raw_entry(code_base: *mut c_void) {
+    #[cfg(target_arch = "x86_64")]
+    core::arch::asm!(
+        "mov r11, {entry}",
+        "xor ecx, ecx",
+        "xor edx, edx",
+        "xor r8d, r8d",
+        "xor r9d, r9d",
+        "call r11",
+        entry = in(reg) code_base,
+        clobber_abi("win64"),
+    );
+    #[cfg(target_arch = "aarch64")]
+    pal_invoke_raw_entry(code_base);
 }
 
 unsafe fn resolve(
@@ -232,11 +304,12 @@ unsafe fn begin_io(
     };
     let create_thread = ptr::addr_of!((*state).create_thread).read();
     let worker_thread = ptr::addr_of!((*state).worker_thread).read();
+    let queued_io = ptr::addr_of!((*state).queued_io).read();
     let Some(create_thread) = create_thread else {
         complete_io(ov, 29, 0);
         return;
     };
-    if native_handle.is_null() || !worker_thread.is_null() {
+    if native_handle.is_null() || !worker_thread.is_null() || queued_io {
         complete_io(ov, 29, 0);
         return;
     }
@@ -267,9 +340,19 @@ unsafe fn begin_io(
         ptr::null_mut(),
     );
     if thread.is_null() {
+        ptr::addr_of_mut!((*state).pending_io).write(PendingIo {
+            overlapped: ptr::null_mut(),
+            handle: ptr::null_mut(),
+            buffer: ptr::null_mut(),
+            length: 0,
+            is_write: false,
+            error: 0,
+            result: 0,
+        });
         complete_io(ov, 29, 0);
     } else {
         ptr::addr_of_mut!((*state).worker_thread).write(thread);
+        ptr::addr_of_mut!((*state).queued_io).write(true);
     }
 }
 
@@ -344,7 +427,7 @@ unsafe extern "win64" fn probe_write(
     buffer: *const u8,
     length: usize,
 ) {
-    begin_io(ov, handle, buffer as *mut u8, length, true)
+    begin_io(ov, handle, buffer as *mut u8, length, true);
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -393,6 +476,23 @@ unsafe extern "win64" fn pal_abi_unsupported_exit(status: i32) -> ! {
 #[no_mangle]
 unsafe extern "C" fn pal_abi_unsupported_exit(status: i32) -> ! {
     exit_process_impl(status)
+}
+
+unsafe fn publish_pending_io() {
+    let state = state_ptr();
+    let pending = ptr::addr_of!((*state).pending_io).read();
+    complete_io(pending.overlapped, pending.error, pending.result);
+    ptr::addr_of_mut!((*state).worker_thread).write(ptr::null_mut());
+    ptr::addr_of_mut!((*state).queued_io).write(false);
+    ptr::addr_of_mut!((*state).pending_io).write(PendingIo {
+        overlapped: ptr::null_mut(),
+        handle: ptr::null_mut(),
+        buffer: ptr::null_mut(),
+        length: 0,
+        is_write: false,
+        error: 0,
+        result: 0,
+    });
 }
 
 unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
@@ -513,6 +613,7 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
         state.wait_for_single_object = wait_for_single_object;
         state.close_handle = close_handle;
         state.worker_thread = ptr::null_mut();
+        state.queued_io = false;
         state.pending_io = PendingIo {
             overlapped: ptr::null_mut(),
             handle: ptr::null_mut(),
@@ -531,39 +632,38 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
             exit_process,
         ),
     );
-    let entry: ProbeEntryFn = core::mem::transmute(payload_code);
     loop {
-        let entry_result = entry();
-        if entry_result != 1 {
-            free(payload_alloc);
-            return entry_result;
-        }
+        invoke_raw_entry(payload_code);
         let state = state_ptr();
+        let queued_io = ptr::addr_of!((*state).queued_io).read();
         let thread = ptr::addr_of!((*state).worker_thread).read();
+        if !queued_io {
+            if !thread.is_null() {
+                // A stray worker may still reference payload buffers; retain the mapping.
+                return 16;
+            }
+            free(payload_alloc);
+            return 0;
+        }
         let wait = ptr::addr_of!((*state).wait_for_single_object).read();
         let close = ptr::addr_of!((*state).close_handle).read();
         let (Some(wait), Some(close)) = (wait, close) else {
-            free(payload_alloc);
+            // A missing wait function cannot prove the worker stopped using payload buffers.
             return 16;
         };
-        if thread.is_null() || wait(thread, INFINITE) != WAIT_OBJECT_0 {
-            if !thread.is_null() {
-                close(thread);
-            }
+        if thread.is_null() {
             free(payload_alloc);
             return 16;
         }
+        if wait(thread, INFINITE) != WAIT_OBJECT_0 {
+            close(thread);
+            // A failed wait cannot prove the worker stopped using payload buffers.
+            return 16;
+        }
         close(thread);
-        ptr::addr_of_mut!((*state).worker_thread).write(ptr::null_mut());
-        let pending = ptr::addr_of!((*state).pending_io).read();
-        complete_io(pending.overlapped, pending.error, pending.result);
+        publish_pending_io();
     }
 }
-
-#[cfg(target_arch = "x86_64")]
-type ProbeEntryFn = unsafe extern "win64" fn() -> i32;
-#[cfg(target_arch = "aarch64")]
-type ProbeEntryFn = unsafe extern "C" fn() -> i32;
 
 #[cfg(target_arch = "x86_64")]
 #[link_section = ".text.windows_platform_entry"]
@@ -590,6 +690,68 @@ mod tests {
     use super::*;
     use core::mem::{offset_of, size_of};
 
+    static mut TEST_RAW_ENTRY_CALLS: u32 = 0;
+
+    #[cfg(target_arch = "x86_64")]
+    #[inline(never)]
+    unsafe extern "win64" fn test_raw_entry_body() {
+        TEST_RAW_ENTRY_CALLS += 1;
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[inline(never)]
+    unsafe extern "C" fn test_raw_entry_body() {
+        TEST_RAW_ENTRY_CALLS += 1;
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe extern "win64" fn mock_create_thread(
+        _attributes: *mut c_void,
+        _stack_size: usize,
+        _start: Option<unsafe extern "win64" fn(*mut c_void) -> u32>,
+        _context: *mut c_void,
+        _creation_flags: u32,
+        _thread_id: *mut u32,
+    ) -> *mut c_void {
+        7usize as *mut c_void
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    unsafe extern "C" fn mock_create_thread(
+        _attributes: *mut c_void,
+        _stack_size: usize,
+        _start: Option<unsafe extern "C" fn(*mut c_void) -> u32>,
+        _context: *mut c_void,
+        _creation_flags: u32,
+        _thread_id: *mut u32,
+    ) -> *mut c_void {
+        7usize as *mut c_void
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe extern "win64" fn fail_create_thread(
+        _attributes: *mut c_void,
+        _stack_size: usize,
+        _start: Option<unsafe extern "win64" fn(*mut c_void) -> u32>,
+        _context: *mut c_void,
+        _creation_flags: u32,
+        _thread_id: *mut u32,
+    ) -> *mut c_void {
+        ptr::null_mut()
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    unsafe extern "C" fn fail_create_thread(
+        _attributes: *mut c_void,
+        _stack_size: usize,
+        _start: Option<unsafe extern "C" fn(*mut c_void) -> u32>,
+        _context: *mut c_void,
+        _creation_flags: u32,
+        _thread_id: *mut u32,
+    ) -> *mut c_void {
+        ptr::null_mut()
+    }
+
     #[test]
     fn test_windows_platform_prefix_layout() {
         assert_eq!(PREFIX_ABI_OFFSET, 0x20000);
@@ -601,5 +763,55 @@ mod tests {
         assert_eq!(offset_of!(WindowsPlatformHost, hello_payload), 32);
         assert_eq!(offset_of!(WindowsPlatformHost, hello_payload_size), 40);
         assert!(size_of::<PlatformState>() <= 0x10000);
+    }
+
+    #[test]
+    fn test_raw_entry_call_shim_invokes_code_without_arguments_or_result() {
+        unsafe {
+            TEST_RAW_ENTRY_CALLS = 0;
+            invoke_raw_entry(test_raw_entry_body as *const () as *mut c_void);
+            assert_eq!(ptr::addr_of!(TEST_RAW_ENTRY_CALLS).read(), 1);
+        }
+    }
+
+    #[test]
+    fn test_io_queue_tracks_submission_through_completion_publication() {
+        unsafe {
+            let state = state_ptr();
+            (*state).input_handle = 1usize as *mut c_void;
+            (*state).output_handle = 2usize as *mut c_void;
+            (*state).worker_thread = ptr::null_mut();
+            (*state).queued_io = false;
+            (*state).create_thread = Some(mock_create_thread);
+            let mut overlapped = Overlapped::default();
+            let mut byte = 0u8;
+
+            begin_io(
+                &mut overlapped,
+                1,
+                &mut byte,
+                1,
+                true,
+            );
+
+            assert!((*state).queued_io);
+            assert_eq!(overlapped.flags, 0);
+            assert_eq!((*state).worker_thread, 7usize as *mut c_void);
+
+            (*state).pending_io.result = 1;
+            publish_pending_io();
+
+            assert!(!(*state).queued_io);
+            assert!((*state).worker_thread.is_null());
+            assert_eq!(overlapped.flags, pal_abi::FLAG_COMPLETED);
+            assert_eq!(overlapped.result_ext, 1);
+            assert!(ptr::addr_of!((*state).pending_io.overlapped).read().is_null());
+
+            (*state).create_thread = Some(fail_create_thread);
+            begin_io(&mut overlapped, 1, &mut byte, 1, true);
+            assert!(!(*state).queued_io);
+            assert_eq!(overlapped.flags, pal_abi::FLAG_COMPLETED);
+            assert_eq!(overlapped.error, 29);
+        }
     }
 }
