@@ -74,6 +74,9 @@ func TestAppWidget_DialogShadowDarkensRightBottomAndHaloOverDefaultColors(t *tes
 	down1 := buf.Get(dx+4, dy+dlgSize.H).Style.Background()
 	down2 := buf.Get(dx+4, dy+dlgSize.H+1).Style.Background()
 	up1 := buf.Get(dx+4, dy-1).Style.Background()
+	if down1 != 0x7C7973 {
+		t.Fatalf("first shadow row background = %#06x, want %#06x at 70%% opacity", down1, terminal.Color(0x7C7973))
+	}
 	if !(down1 < down2 && down2 < up1 && up1 < theme.DefaultBackground) {
 		t.Fatalf("vertical shadow backgrounds (down1=%#06x, down2=%#06x, up1=%#06x) want strictly increasing toward %#06x",
 			down1, down2, up1, theme.DefaultBackground)

@@ -612,7 +612,7 @@ func applyDialogShadow(buf *terminal.CellBuf, dlgRect terminal.Rect, theme ui.Th
 					hWeight = (1.0 - rightSteps[rightDist]) / (1.0 - rightSteps[1])
 				}
 				if hWeight > 0 {
-					factor = 1.0 - vDarkness*hWeight
+					factor = 1.0 - vDarkness*hWeight * 0.7
 				}
 			}
 
@@ -622,6 +622,8 @@ func applyDialogShadow(buf *terminal.CellBuf, dlgRect terminal.Rect, theme ui.Th
 		}
 	}
 }
+
+const dialogShadowOpacity = 0.7
 
 func darkenShadowCell(cell terminal.Cell, theme ui.Theme, factor float64) terminal.Cell {
 	style := cell.Style
@@ -636,6 +638,7 @@ func darkenShadowCell(cell terminal.Cell, theme ui.Theme, factor float64) termin
 		bg = theme.EffectiveBackground()
 		attrs &^= terminal.CharResetBackgroundDefault
 	}
+	factor = 1 - dialogShadowOpacity*(1-factor)
 	return terminal.Cell{
 		Grapheme: cell.Grapheme,
 		Style:    terminal.NewStyle(scaleRGB(fg, factor), scaleRGB(bg, factor), attrs),
