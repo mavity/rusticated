@@ -1,0 +1,6507 @@
+Are you saytindiff --git a/ai/assets/sysinfo_native_darwin.go b/ai/assets/sysinfo_native_darwin.go
+index 8005e54..eae4c8c 100644
+--- a/ai/assets/sysinfo_native_darwin.go
++++ b/ai/assets/sysinfo_native_darwin.go
+@@ -2,22 +2,13 @@
+ 
+ package assets
+ 
+-import (
+-	"encoding/binary"
+-	"syscall"
+-)
++import "syscall"
+ 
+ func nativeMemorySlots() ([]MemorySlot, error) {
+-	raw, err := syscall.Sysctl("hw.memsize")
++	total, err := syscall.SysctlUint64("hw.memsize")
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	if len(raw) != 7 && len(raw) != 8 {
+-		return nil, syscall.EIO
+-	}
+-	var buf [8]byte
+-	copy(buf[:], raw)
+-	total := binary.LittleEndian.Uint64(buf[:])
+ 	slots := setNativeRAM(total, 0)
+ 	if total > 0 {
+ 		slots = append(slots, MemorySlot{Kind: MemKindNPUShared, Flags: MemoryFlagUnified | MemoryFlagEstimate, Bytes: total * 3 / 4})
+diff --git a/external/LiteRT b/external/LiteRT
+new file mode 160000
+index 0000000..983312f
+--- /dev/null
++++ b/external/LiteRT
+@@ -0,0 +1 @@
++Subproject commit 983312f6d3e6cd292afab6b42dde0a2436d0d20b
+diff --git a/kabibi/ui/app/app_cancellation_test.go b/kabibi/ui/app/app_cancellation_test.go
+index 20973c7..0e60a8b 100644
+--- a/kabibi/ui/app/app_cancellation_test.go
++++ b/kabibi/ui/app/app_cancellation_test.go
+@@ -7,7 +7,6 @@ import (
+ 	"time"
+ 
+ 	"ai"
+-
+ 	"github.com/charmbracelet/x/input"
+ 	"github.com/mavity/rusticated/kabibi/ui/filemanager"
+ 	"github.com/mavity/rusticated/kabibi/ui/shell"
+@@ -20,7 +19,7 @@ type cancelInputAIRunner struct {
+ 	result    chan error
+ }
+ 
+-func (r *cancelInputAIRunner) RunTurn(ctx context.Context, _ string, _, _ ai.LogFeedback) error {
++func (r *cancelInputAIRunner) RunTurn(ctx context.Context, _ string, _, _, _ ai.LogFeedback) error {
+ 	close(r.started)
+ 	<-ctx.Done()
+ 	close(r.cancelled)
+diff --git a/kabibi/ui/app/app_mount_test.go b/kabibi/ui/app/app_mount_test.go
+index 1bc6967..d822cc3 100644
+--- a/kabibi/ui/app/app_mount_test.go
++++ b/kabibi/ui/app/app_mount_test.go
+@@ -4,8 +4,6 @@ import (
+ 	"os"
+ 	"path/filepath"
+ 	"testing"
+-
+-	"github.com/mavity/rusticated/kabibi/ui/dialog"
+ )
+ 
+ func TestMountPathDialogDefaultsToCurrentShellDirectory(t *testing.T) {
+@@ -22,11 +20,7 @@ func TestMountPathDialogDefaultsToCurrentShellDirectory(t *testing.T) {
+ 	}
+ 
+ 	widget.openMountPathDialog()
+-	mountDlg, ok := widget.Dialog().(*dialog.MountDialog)
+-	if !ok || mountDlg == nil {
+-		t.Fatalf("mount dialog = %T, want *dialog.MountDialog", widget.Dialog())
+-	}
+-	if got := mountDlg.GuestPath.Value(); got != activeDir {
++	if got := widget.dialog.Fields[0].Input.Value(); got != activeDir {
+ 		t.Fatalf("mount dialog default = %q, want current shell directory %q", got, activeDir)
+ 	}
+ }
+diff --git a/kabibi/ui/app/app_search_test.go b/kabibi/ui/app/app_search_test.go
+index 09fe464..b484bcd 100644
+--- a/kabibi/ui/app/app_search_test.go
++++ b/kabibi/ui/app/app_search_test.go
+@@ -50,12 +50,17 @@ func TestListFilesSearchShortcutOpensParameterDialog(t *testing.T) {
+ 	if !widget.HandleEvent(input.KeyPressEvent{Code: 'f', Mod: input.ModCtrl}) {
+ 		t.Fatal("Ctrl+F was not handled")
+ 	}
+-	dlg, ok := widget.Dialog().(*dialog.FindFilesDialog)
+-	if !ok || dlg == nil {
+-		t.Fatalf("Ctrl+F dialog = %T, want *dialog.FindFilesDialog", widget.Dialog())
++	widget.mu.Lock()
++	dlg := widget.dialog
++	widget.mu.Unlock()
++	if dlg == nil {
++		t.Fatal("Ctrl+F did not open the find-files dialog")
+ 	}
+-	if dlg.FindPaths == nil || dlg.FindContent == nil || dlg.MaxResults == nil {
+-		t.Fatalf("find-files dialog missing expected inputs: %#v", dlg)
++	if dlg.Action != dialog.ActionListFiles {
++		t.Fatalf("dialog action = %v, want ActionListFiles", dlg.Action)
++	}
++	if len(dlg.Fields) != 3 {
++		t.Fatalf("dialog has %d fields, want path-filter, content-query, and result-limit", len(dlg.Fields))
+ 	}
+ }
+ 
+@@ -66,9 +71,11 @@ func TestPlainF7StillOpensMkdirDialog(t *testing.T) {
+ 	if !widget.HandleEvent(input.KeyPressEvent{Code: input.KeyF7}) {
+ 		t.Fatal("F7 was not handled")
+ 	}
+-	dlg, ok := widget.Dialog().(*dialog.MkdirDialog)
+-	if !ok || dlg == nil {
+-		t.Fatalf("F7 dialog = %T, want *dialog.MkdirDialog", widget.Dialog())
++	widget.mu.Lock()
++	dlg := widget.dialog
++	widget.mu.Unlock()
++	if dlg == nil || dlg.Action != dialog.ActionMkdir {
++		t.Fatalf("F7 dialog = %#v, want ActionMkdir", dlg)
+ 	}
+ }
+ 
+diff --git a/kabibi/ui/app/app_snapshot_test.go b/kabibi/ui/app/app_snapshot_test.go
+index 8ebc5af..3397c88 100644
+--- a/kabibi/ui/app/app_snapshot_test.go
++++ b/kabibi/ui/app/app_snapshot_test.go
+@@ -46,58 +46,6 @@ func TestAppWidgetShellCursorRemainsVisibleWhilePanelsRouteNavigation(t *testing
+ 	}
+ }
+ 
+-func TestAppWidget_DialogShadowDarkensRightBottomAndHaloOverDefaultColors(t *testing.T) {
+-	widget := NewWidget(AppWidgetOptions{WorkingDir: t.TempDir(), PanelsVisible: false})
+-	defer widget.Close()
+-	widget.openMkdirDialog()
+-
+-	rect := ui.Rect{W: 80, H: 24}
+-	theme := ui.Theme{
+-		DefaultForeground: 0xD0D0D0,
+-		DefaultBackground: 0xFAF4E8,
+-		HasDefaultFG:      true,
+-		HasDefaultBG:      true,
+-	}
+-	dlgSize := widget.Dialog().Measure(ui.Constraints{MaxW: rect.W, MaxH: rect.H})
+-	buf, _ := renderAppANSIForTest(t, widget.Render(rect, ui.RenderContext{
+-		Focused: true,
+-		Theme:   theme,
+-	}), rect.W, rect.H)
+-
+-	dx := (buf.Width - dlgSize.W) / 2
+-	dy := (buf.Height - dlgSize.H) / 2
+-	if buf.Height >= dlgSize.H+2 && dy+dlgSize.H+2 > buf.Height {
+-		dy = buf.Height - dlgSize.H - 2
+-	}
+-
+-	// Vertical levels: 1 down (darkest) < 2 down (much less dark) < 1 up (very light dark) < untouched
+-	down1 := buf.Get(dx+4, dy+dlgSize.H).Style.Background()
+-	down2 := buf.Get(dx+4, dy+dlgSize.H+1).Style.Background()
+-	up1 := buf.Get(dx+4, dy-1).Style.Background()
+-	if !(down1 < down2 && down2 < up1 && up1 < theme.DefaultBackground) {
+-		t.Fatalf("vertical shadow backgrounds (down1=%#06x, down2=%#06x, up1=%#06x) want strictly increasing toward %#06x",
+-			down1, down2, up1, theme.DefaultBackground)
+-	}
+-
+-	// Horizontal 2:1 stretch with per-character gradient steps:
+-	// cols 1, 2, 3, 4 to the right must each be strictly lighter than the previous column,
+-	// and cols 1, 2 to the left must also step strictly toward DefaultBackground.
+-	right1 := buf.Get(dx+dlgRectRightOffset(dlgSize.W, 1), dy+2).Style.Background()
+-	right2 := buf.Get(dx+dlgRectRightOffset(dlgSize.W, 2), dy+2).Style.Background()
+-	right3 := buf.Get(dx+dlgRectRightOffset(dlgSize.W, 3), dy+2).Style.Background()
+-	right4 := buf.Get(dx+dlgRectRightOffset(dlgSize.W, 4), dy+2).Style.Background()
+-	left1 := buf.Get(dx-1, dy+2).Style.Background()
+-	left2 := buf.Get(dx-2, dy+2).Style.Background()
+-	if !(right1 < right2 && right2 < right3 && right3 < right4 && right4 < left1 && left1 < left2 && left2 < theme.DefaultBackground) {
+-		t.Fatalf("horizontal per-char shadow steps (right1..4=%#06x,%#06x,%#06x,%#06x left1..2=%#06x,%#06x) want strictly increasing toward %#06x",
+-			right1, right2, right3, right4, left1, left2, theme.DefaultBackground)
+-	}
+-}
+-
+-func dlgRectRightOffset(width, dist int) int {
+-	return width + dist - 1
+-}
+-
+ func assertAppSnapshot(t *testing.T, snapFile string, widget *AppWidget, scrollback *string, rect ui.Rect) {
+ 	t.Helper()
+ 
+diff --git a/kabibi/ui/app/app_tui_e2e_test.go b/kabibi/ui/app/app_tui_e2e_test.go
+index 7ba9737..7599d16 100644
+--- a/kabibi/ui/app/app_tui_e2e_test.go
++++ b/kabibi/ui/app/app_tui_e2e_test.go
+@@ -13,7 +13,6 @@ import (
+ 	"time"
+ 
+ 	"ai"
+-
+ 	"github.com/charmbracelet/x/input"
+ 	xterm "github.com/charmbracelet/x/term"
+ 	"github.com/charmbracelet/x/vt"
+@@ -1048,9 +1047,7 @@ func TestAppTUI_BluePanels_FileOpsAndEditor(t *testing.T) {
+ 	if appWidget.Dialog() == nil {
+ 		t.Fatal("F2 did not open Rename dialog")
+ 	}
+-	for _, r := range "renamed.txt" {
+-		appWidget.HandleEvent(input.KeyPressEvent{Code: r, Text: string(r)})
+-	}
++	appWidget.Dialog().InputValue = "renamed.txt"
+ 	appWidget.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
+ 	if _, err := os.Stat(filepath.Join(workDir, "renamed.txt")); err != nil {
+ 		t.Fatalf("expected renamed.txt after F2 rename: %v", err)
+diff --git a/kabibi/ui/app/app_widget.go b/kabibi/ui/app/app_widget.go
+index 5a662fc..d7a7dc7 100644
+--- a/kabibi/ui/app/app_widget.go
++++ b/kabibi/ui/app/app_widget.go
+@@ -42,7 +42,7 @@ type AppWidget struct {
+ 	disableAI                 bool
+ 	restorePanelsAfterCommand bool
+ 
+-	dialog ui.Widget
++	dialog *dialog.DialogWidget
+ 	editor *editor.EditorWidget
+ 
+ 	opCancel context.CancelFunc
+@@ -199,8 +199,8 @@ func (w *AppWidget) TogglePanels() {
+ 	w.SetPanelsVisible(!w.PanelsVisible())
+ }
+ 
+-// Dialog returns the currently active modal dialog widget, if any.
+-func (w *AppWidget) Dialog() ui.Widget {
++// Dialog returns the currently active modal dialog, if any.
++func (w *AppWidget) Dialog() *dialog.DialogWidget {
+ 	w.mu.Lock()
+ 	defer w.mu.Unlock()
+ 	return w.dialog
+@@ -450,7 +450,7 @@ func (w *AppWidget) Measure(c ui.Constraints) ui.Size {
+ 	if dlg != nil {
+ 		shellSize := w.sh.Measure(c)
+ 		dialogSize := dlg.Measure(ui.Constraints{MaxW: maxW, MaxH: maxH})
+-		height := max(shellSize.H, dialogSize.H+3)
++		height := max(shellSize.H, dialogSize.H)
+ 		if height > maxH {
+ 			height = maxH
+ 		}
+@@ -494,24 +494,19 @@ func (w *AppWidget) Render(r terminal.Rect, ctx ui.RenderContext) string {
+ 
+ 	if dlg != nil && shellBuf.Width > 0 && shellBuf.Height > 0 {
+ 		sz := dlg.Measure(ui.Constraints{MaxW: shellBuf.Width, MaxH: r.H})
+-		neededH := min(r.H, sz.H+3)
+-		if !panelsVis && shellBuf.Height < neededH {
+-			expanded := terminal.NewCellBuf(shellBuf.Width, neededH)
++		if !panelsVis && shellBuf.Height < sz.H {
++			expanded := terminal.NewCellBuf(shellBuf.Width, sz.H)
+ 			expanded.Blit(shellBuf, 0, 0)
+ 			shellBuf = expanded
+ 		}
+ 		dx := (shellBuf.Width - sz.W) / 2
+ 		dy := (shellBuf.Height - sz.H) / 2
+-		if shellBuf.Height >= sz.H+2 && dy+sz.H+2 > shellBuf.Height {
+-			dy = shellBuf.Height - sz.H - 2
+-		}
+ 		if dx < 0 {
+ 			dx = 0
+ 		}
+ 		if dy < 0 {
+ 			dy = 0
+ 		}
+-		applyDialogShadow(&shellBuf, terminal.Rect{X: dx, Y: dy, W: sz.W, H: sz.H}, ctx.Theme)
+ 		dlgANSI := dlg.Render(ui.Rect{X: 0, Y: 0, W: sz.W, H: sz.H}, ctx.ForChild(true))
+ 		cursor = ctx.CompositeANSI(&shellBuf, w.compositor, terminal.Rect{X: dx, Y: dy, W: sz.W, H: sz.H}, dlgANSI)
+ 	}
+@@ -519,142 +514,6 @@ func (w *AppWidget) Render(r terminal.Rect, ctx ui.RenderContext) string {
+ 	return ui.ANSIFrame(shellBuf, cursor)
+ }
+ 
+-func applyDialogShadow(buf *terminal.CellBuf, dlgRect terminal.Rect, theme ui.Theme) {
+-	if buf == nil || dlgRect.W <= 0 || dlgRect.H <= 0 {
+-		return
+-	}
+-	// Monospace cells are ~2:1 (height:width), so the shadow stretches 2x as
+-	// many columns horizontally (4 cols right, 2 cols left) as rows vertically
+-	// (2 rows down, 1 row up). The dark core is tightly bound to the dialog edge
+-	// with a deep initial darkness and a fast non-linear falloff outward.
+-	var (
+-		rightSteps = [5]float64{1.0, 0.25, 0.58, 0.78, 0.90} // cols 1..4 right (deep start, fast falloff)
+-		leftSteps  = [3]float64{1.0, 0.91, 0.96}             // cols 1..2 left (very light halo)
+-		downSteps  = [3]float64{1.0, 0.28, 0.78}             // rows 1..2 down (deep row 1, fast drop to row 2)
+-		upStep     = 0.91                                    // row 1 up
+-	)
+-	minX := max(0, dlgRect.X-2)
+-	maxX := min(buf.Width-1, dlgRect.X+dlgRect.W+3)
+-	minY := max(0, dlgRect.Y-1)
+-	maxY := min(buf.Height-1, dlgRect.Y+dlgRect.H+1)
+-
+-	for y := minY; y <= maxY; y++ {
+-		for x := minX; x <= maxX; x++ {
+-			if x >= dlgRect.X && x < dlgRect.X+dlgRect.W && y >= dlgRect.Y && y < dlgRect.Y+dlgRect.H {
+-				continue
+-			}
+-			topDist := 0
+-			if y < dlgRect.Y {
+-				topDist = dlgRect.Y - y
+-			}
+-			bottomDist := 0
+-			if y >= dlgRect.Y+dlgRect.H {
+-				bottomDist = y - (dlgRect.Y + dlgRect.H) + 1
+-			}
+-			leftDist := 0
+-			if x < dlgRect.X {
+-				leftDist = dlgRect.X - x
+-			}
+-			rightDist := 0
+-			if x >= dlgRect.X+dlgRect.W {
+-				rightDist = x - (dlgRect.X + dlgRect.W) + 1
+-			}
+-
+-			factor := 1.0
+-			switch {
+-			case topDist == 1:
+-				switch {
+-				case leftDist == 2:
+-					factor = 0.95
+-				case leftDist == 1:
+-					factor = 0.92
+-				case rightDist == 0:
+-					factor = upStep
+-				case rightDist <= 4:
+-					// Smooth 1-character corner taper along top-right
+-					darkness := (1.0 - upStep) * (1.0 - rightSteps[rightDist]) / (1.0 - rightSteps[1])
+-					factor = 1.0 - darkness
+-				}
+-
+-			case bottomDist == 0 && leftDist > 0:
+-				if leftDist <= 2 {
+-					factor = leftSteps[leftDist]
+-					if y == dlgRect.Y {
+-						factor = 1.0 - (1.0-factor)*0.65
+-					}
+-				}
+-
+-			case bottomDist == 0 && rightDist > 0:
+-				if rightDist <= 4 {
+-					factor = rightSteps[rightDist]
+-					if y == dlgRect.Y {
+-						// Soften the top-most row of the right shadow while keeping per-column steps
+-						factor = 1.0 - (1.0-factor)*0.55
+-					}
+-				}
+-
+-			case bottomDist >= 1 && bottomDist <= 2:
+-				baseV := downSteps[bottomDist]
+-				vDarkness := 1.0 - baseV
+-				var hWeight float64
+-				switch {
+-				case leftDist == 2:
+-					hWeight = 0.08
+-				case leftDist == 1:
+-					hWeight = 0.28
+-				case x == dlgRect.X:
+-					hWeight = 0.72
+-				case x == dlgRect.X+1:
+-					hWeight = 0.92
+-				case rightDist == 0:
+-					hWeight = 1.0
+-				case rightDist <= 4:
+-					hWeight = (1.0 - rightSteps[rightDist]) / (1.0 - rightSteps[1])
+-				}
+-				if hWeight > 0 {
+-					factor = 1.0 - vDarkness*hWeight
+-				}
+-			}
+-
+-			if factor < 1.0 {
+-				buf.Set(x, y, darkenShadowCell(buf.Get(x, y), theme, factor))
+-			}
+-		}
+-	}
+-}
+-
+-func darkenShadowCell(cell terminal.Cell, theme ui.Theme, factor float64) terminal.Cell {
+-	style := cell.Style
+-	attrs := style.Attributes()
+-	fg := style.Foreground()
+-	bg := style.Background()
+-	if attrs&terminal.CharResetForegroundDefault != 0 {
+-		fg = theme.EffectiveForeground()
+-		attrs &^= terminal.CharResetForegroundDefault
+-	}
+-	if attrs&terminal.CharResetBackgroundDefault != 0 {
+-		bg = theme.EffectiveBackground()
+-		attrs &^= terminal.CharResetBackgroundDefault
+-	}
+-	return terminal.Cell{
+-		Grapheme: cell.Grapheme,
+-		Style:    terminal.NewStyle(scaleRGB(fg, factor), scaleRGB(bg, factor), attrs),
+-	}
+-}
+-
+-func scaleRGB(c terminal.Color, factor float64) terminal.Color {
+-	if factor <= 0 {
+-		return 0
+-	}
+-	if factor >= 1 {
+-		return c
+-	}
+-	r := uint8(float64((c>>16)&0xFF) * factor)
+-	g := uint8(float64((c>>8)&0xFF) * factor)
+-	b := uint8(float64(c&0xFF) * factor)
+-	return terminal.Color(uint32(r)<<16 | uint32(g)<<8 | uint32(b))
+-}
+-
+ func (w *AppWidget) HandleEvent(e input.Event) bool {
+ 	w.mu.Lock()
+ 	ed := w.editor
+@@ -1098,34 +957,22 @@ func (w *AppWidget) slashPath(path string) string {
+ 	return filepath.Clean(path)
+ }
+ 
+-func (w *AppWidget) setDialog(dlg ui.Widget) {
++func (w *AppWidget) openSettingsDialog() {
++	dlg := dialog.NewChoiceDialog("Settings", "Choose an option:", []dialog.Choice{
++		{Label: "AI provider and model", Hotkey: "a"},
++	}, func(index int) {
++		w.closeDialog()
++		if index == 0 {
++			w.launchModelSetup()
++		}
++	})
++	dlg.OnCancel = w.closeDialog
+ 	w.mu.Lock()
+ 	w.dialog = dlg
+ 	w.mu.Unlock()
+ 	w.invalidate()
+ }
+ 
+-func (w *AppWidget) openSettingsDialog() {
+-	dlg := dialog.NewSettingsDialog(
+-		dialog.SettingsValues{
+-			ShowPanels:  w.PanelsVisible(),
+-			ConfigureAI: !w.disableAI,
+-		},
+-		func(values dialog.SettingsValues) {
+-			w.closeDialog()
+-			if values.ShowPanels != w.PanelsVisible() {
+-				w.SetPanelsVisible(values.ShowPanels)
+-			}
+-			if values.ConfigureAI && !w.disableAI {
+-				w.launchModelSetup()
+-			}
+-			w.invalidate()
+-		},
+-		w.closeDialog,
+-	)
+-	w.setDialog(dlg)
+-}
+-
+ func (w *AppWidget) launchModelSetup() {
+ 	w.sh.SetInput("ai setup")
+ 	w.sh.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
+@@ -1135,8 +982,16 @@ func (w *AppWidget) showSlashError(err error) {
+ 	if err == nil {
+ 		return
+ 	}
+-	dlg := dialog.NewErrorDialog("Slash Command Error", err.Error(), w.closeDialog)
+-	w.setDialog(dlg)
++	dlg := dialog.NewChoiceDialog("Slash Command Error", err.Error(), []dialog.Choice{
++		{Label: "[OK]", Hotkey: "o"},
++	}, func(int) {
++		w.closeDialog()
++	})
++	dlg.OnCancel = w.closeDialog
++	w.mu.Lock()
++	w.dialog = dlg
++	w.mu.Unlock()
++	w.invalidate()
+ }
+ 
+ func (w *AppWidget) refreshPanels() {
+@@ -1358,78 +1213,67 @@ func findFilesCommand(findPaths, findContent string, maxResults int) string {
+ }
+ 
+ func (w *AppWidget) openListFilesDialog() {
+-	dlg := dialog.NewFindFilesDialog(
+-		w.newPathInput("**"),
+-		"**",
+-		"",
+-		strconv.Itoa(filelist.DefaultMaxResults),
+-		func(findPaths, findContent, maxResultsText string) {
+-			maxResults, err := strconv.Atoi(maxResultsText)
+-			if err != nil {
+-				w.showSlashError(fmt.Errorf("maximum results must be an integer"))
+-				return
+-			}
+-			command := findFilesCommand(findPaths, findContent, maxResults)
+-			w.closeDialog()
+-			w.sh.SetInput(command)
+-			w.sh.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
+-		},
+-		w.closeDialog,
++	dlg := dialog.NewFormDialog(
++		dialog.ActionListFiles,
++		"Find Files",
++		"Filter paths structurally and/or search file content semantically:",
++		[]string{"Find paths", "Find content (semantic)", "Maximum results"},
++		[]string{"**", "", strconv.Itoa(filelist.DefaultMaxResults)},
++		nil,
+ 	)
+-	w.setDialog(dlg)
++	dlg.OnCancel = w.closeDialog
++	dlg.OnSubmitForm = func(_ dialog.DialogAction, values []string, _ *filemanager.FileOp) {
++		if len(values) != 3 {
++			w.showSlashError(fmt.Errorf("file search requires path filter, content query, and result limit"))
++			return
++		}
++		maxResults, err := strconv.Atoi(values[2])
++		if err != nil {
++			w.showSlashError(fmt.Errorf("maximum results must be an integer"))
++			return
++		}
++		command := findFilesCommand(values[0], values[1], maxResults)
++		w.closeDialog()
++		w.sh.SetInput(command)
++		w.sh.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
++	}
++	w.mu.Lock()
++	w.dialog = dlg
++	w.mu.Unlock()
++	w.invalidate()
+ }
+ 
+ func (w *AppWidget) openMkdirDialog() {
+-	dlg := dialog.NewMkdirDialog(
+-		w.newPathInput(""),
+-		func(dir string) {
+-			w.rememberPaths(dir)
+-			w.closeDialog()
+-			target := w.resolveShellPath(dir)
+-			if err := os.MkdirAll(target, 0o755); err != nil {
+-				w.showSlashError(fmt.Errorf("create directory %q: %w", target, err))
+-				return
+-			}
+-			w.refreshPanels()
+-			w.invalidate()
+-		},
+-		w.closeDialog,
+-	)
+-	w.setDialog(dlg)
++	dlg := dialog.NewInputDialog(dialog.ActionMkdir, "Make Directory", "Create directory:", "", nil)
++	dlg.OnCancel = w.closeDialog
++	dlg.OnSubmitInput = w.onDialogSubmitInput
++	dlg.Fields[0].Input = w.newPathInput("")
++	w.mu.Lock()
++	w.dialog = dlg
++	w.mu.Unlock()
++	w.invalidate()
+ }
+ 
+ func (w *AppWidget) openMountPathDialog() {
+ 	defaultPath := w.sh.Dir()
+-	dlg := dialog.NewMountDialog(
+-		w.newPathInput(defaultPath),
+-		defaultPath,
+-		func(val string) {
+-			w.rememberPaths(val)
+-			w.closeDialog()
+-			mountPath, err := w.resolveMountGuestPath(val)
+-			if err != nil {
+-				w.showSlashError(err)
+-				return
+-			}
+-			if err := browser.MountDirectory(mountPath); err != nil {
+-				w.showSlashError(err)
+-				return
+-			}
+-			w.refreshPanels()
+-			w.invalidate()
+-		},
+-		func() {
+-			w.closeDialog()
+-			if err := browser.CancelMountSelection(); err != nil {
+-				w.showSlashError(err)
+-			}
+-		},
+-	)
+-	w.setDialog(dlg)
++	dlg := dialog.NewInputDialog(dialog.ActionMount, "Mount Directory", "Choose a guest path (relative paths use the current directory; ~ expands to home):", defaultPath, nil)
++	dlg.Fields[0].Label = "Guest path"
++	dlg.Fields[0].Input = w.newPathInput(defaultPath)
++	dlg.OnCancel = func() {
++		w.closeDialog()
++		if err := browser.CancelMountSelection(); err != nil {
++			w.showSlashError(err)
++		}
++	}
++	dlg.OnSubmitInput = w.onDialogSubmitInput
++	w.mu.Lock()
++	w.dialog = dlg
++	w.mu.Unlock()
++	w.invalidate()
+ }
+ 
+ func (w *AppWidget) openRenameDialog() {
+-	var sources []string
++	sources := []string(nil)
+ 	if w.PanelsVisible() {
+ 		sources = w.opSources()
+ 	}
+@@ -1441,45 +1285,31 @@ func (w *AppWidget) openRenameDialog() {
+ 		w.showSlashError(fmt.Errorf("rename accepts one source at a time"))
+ 		return
+ 	}
+-	oldPath := sources[0]
+-	name := filepath.Base(oldPath)
+-	dlg := dialog.NewRenameSelectedDialog(
+-		name,
+-		w.newPathInput(name),
+-		func(val string) {
+-			w.rememberPaths(val)
+-			w.closeDialog()
+-			newPath := w.resolveShellPath(val)
+-			if err := os.Rename(oldPath, newPath); err != nil {
+-				w.showSlashError(fmt.Errorf("rename %q to %q: %w", oldPath, newPath, err))
+-				return
+-			}
+-			w.refreshPanels()
+-			w.invalidate()
+-		},
+-		w.closeDialog,
+-	)
+-	w.setDialog(dlg)
++	name := filepath.Base(sources[0])
++	pending := &filemanager.FileOp{Kind: filemanager.OpMove, Sources: sources}
++	dlg := dialog.NewInputDialog(dialog.ActionRename, "Rename", "Rename "+name+" to:", name, pending)
++	dlg.OnCancel = w.closeDialog
++	dlg.OnSubmitInput = w.onDialogSubmitInput
++	dlg.Fields[0].Input = w.newPathInput(name)
++	w.mu.Lock()
++	w.dialog = dlg
++	w.mu.Unlock()
++	w.invalidate()
+ }
+ 
+ func (w *AppWidget) openRenamePathDialog() {
+-	dlg := dialog.NewRenamePathDialog(
+-		w.newPathInput(""),
+-		w.newPathInput(""),
+-		func(src, dst string) {
+-			w.rememberPaths(src, dst)
+-			oldPath, newPath := w.resolveShellPath(src), w.resolveShellPath(dst)
+-			w.closeDialog()
+-			if err := os.Rename(oldPath, newPath); err != nil {
+-				w.showSlashError(fmt.Errorf("rename %q to %q: %w", oldPath, newPath, err))
+-				return
+-			}
+-			w.refreshPanels()
+-			w.invalidate()
+-		},
+-		w.closeDialog,
++	dlg := dialog.NewFormDialog(
++		dialog.ActionRename, "Rename", "Enter the source and new path:",
++		[]string{"Source path", "New path"}, nil, nil,
+ 	)
+-	w.setDialog(dlg)
++	dlg.Fields[0].Input = w.newPathInput("")
++	dlg.Fields[1].Input = w.newPathInput("")
++	dlg.OnCancel = w.closeDialog
++	dlg.OnSubmitForm = w.onDialogSubmitForm
++	w.mu.Lock()
++	w.dialog = dlg
++	w.mu.Unlock()
++	w.invalidate()
+ }
+ 
+ func (w *AppWidget) openTransferDialog(kind filemanager.FileOpKind) {
+@@ -1492,37 +1322,31 @@ func (w *AppWidget) openTransferDialog(kind filemanager.FileOpKind) {
+ 			dest = w.panels.ActiveDir()
+ 		}
+ 	}
+-	submitSelected := func(val string) {
+-		w.rememberPaths(val)
+-		w.closeDialog()
+-		w.startFileOp(filemanager.FileOp{
+-			Kind:    kind,
+-			Sources: sources,
+-			Dest:    w.resolveShellPath(val),
+-		})
+-	}
+-	submitPaths := func(src, dst string) {
+-		w.rememberPaths(src, dst)
+-		w.closeDialog()
+-		w.startFileOp(filemanager.FileOp{
+-			Kind:    kind,
+-			Sources: []string{w.resolveShellPath(src)},
+-			Dest:    w.resolveShellPath(dst),
+-		})
+-	}
++	action := dialog.ActionCopy
++	title := "Copy"
+ 	if kind == filemanager.OpMove {
+-		if len(sources) == 0 {
+-			w.setDialog(dialog.NewMovePathDialog(w.newPathInput(""), w.newPathInput(dest), submitPaths, w.closeDialog))
+-		} else {
+-			w.setDialog(dialog.NewMoveSelectedDialog(dialog.SummarizeSources(sources), w.newPathInput(dest), submitSelected, w.closeDialog))
+-		}
+-		return
++		action = dialog.ActionMove
++		title = "Move"
+ 	}
++	pending := &filemanager.FileOp{Kind: kind, Sources: sources}
++	var dlg *dialog.DialogWidget
+ 	if len(sources) == 0 {
+-		w.setDialog(dialog.NewCopyPathDialog(w.newPathInput(""), w.newPathInput(dest), submitPaths, w.closeDialog))
++		dlg = dialog.NewFormDialog(action, title, "Enter source and destination paths:",
++			[]string{"Source path", "Destination"}, []string{"", dest}, pending)
++		dlg.Fields[0].Input = w.newPathInput("")
++		dlg.Fields[1].Input = w.newPathInput(dest)
++		dlg.OnSubmitForm = w.onDialogSubmitForm
+ 	} else {
+-		w.setDialog(dialog.NewCopySelectedDialog(dialog.SummarizeSources(sources), w.newPathInput(dest), submitSelected, w.closeDialog))
++		dlg = dialog.NewInputDialog(action, title, fmt.Sprintf("%s %s to:", title, dialog.SummarizeSources(sources)), dest, pending)
++		dlg.Fields[0].Label = "Destination"
++		dlg.Fields[0].Input = w.newPathInput(dest)
++		dlg.OnSubmitInput = w.onDialogSubmitInput
+ 	}
++	dlg.OnCancel = w.closeDialog
++	w.mu.Lock()
++	w.dialog = dlg
++	w.mu.Unlock()
++	w.invalidate()
+ }
+ 
+ func (w *AppWidget) openDeleteDialog() {
+@@ -1535,50 +1359,140 @@ func (w *AppWidget) openDeleteDialog() {
+ }
+ 
+ func (w *AppWidget) openDeletePathDialog() {
+-	dlg := dialog.NewDeletePathDialog(
+-		w.newPathInput(""),
+-		func(value string) {
+-			w.rememberPaths(value)
+-			w.openDeleteDialogForSources([]string{w.resolveShellPath(value)})
+-		},
+-		w.closeDialog,
+-	)
+-	w.setDialog(dlg)
++	dlg := dialog.NewInputDialog(dialog.ActionDelete, "Delete", "Enter the path to delete:", "", nil)
++	dlg.Fields[0].Label = "Path"
++	dlg.Fields[0].Input = w.newPathInput("")
++	dlg.OnCancel = w.closeDialog
++	dlg.OnSubmitInput = func(_ dialog.DialogAction, value string, _ *filemanager.FileOp) {
++		w.rememberPaths(value)
++		w.openDeleteDialogForSources([]string{w.resolveShellPath(value)})
++	}
++	w.mu.Lock()
++	w.dialog = dlg
++	w.mu.Unlock()
++	w.invalidate()
+ }
+ 
+ func (w *AppWidget) openDeleteDialogForSources(sources []string) {
+ 	if len(sources) == 0 {
+ 		return
+ 	}
+-	op := filemanager.FileOp{
++	prompt := fmt.Sprintf("Delete %s?", dialog.SummarizeSources(sources))
++	pending := &filemanager.FileOp{
+ 		Kind:    filemanager.OpDelete,
+ 		Sources: sources,
+ 	}
+-	dlg := dialog.NewDeleteConfirmDialog(
+-		dialog.SummarizeSources(sources),
+-		func() {
++	dlg := dialog.NewConfirmDialog(dialog.ActionDelete, "Delete", prompt, pending)
++	dlg.OnCancel = w.closeDialog
++	dlg.OnConfirm = func(_ dialog.DialogAction, op *filemanager.FileOp) {
++		w.closeDialog()
++		if op != nil {
++			w.startFileOp(*op)
++		}
++	}
++	w.mu.Lock()
++	w.dialog = dlg
++	w.mu.Unlock()
++	w.invalidate()
++}
++
++func (w *AppWidget) onDialogSubmitInput(action dialog.DialogAction, val string, pending *filemanager.FileOp) {
++	w.rememberPaths(val)
++	w.closeDialog()
++	switch action {
++	case dialog.ActionMkdir:
++		target := w.resolveShellPath(val)
++		if err := os.MkdirAll(target, 0o755); err != nil {
++			w.showSlashError(fmt.Errorf("create directory %q: %w", target, err))
++			return
++		}
++		w.refreshPanels()
++	case dialog.ActionRename:
++		if pending == nil || len(pending.Sources) != 1 {
++			w.showSlashError(fmt.Errorf("rename source is missing"))
++			return
++		}
++		oldPath := pending.Sources[0]
++		newPath := w.resolveShellPath(val)
++		if err := os.Rename(oldPath, newPath); err != nil {
++			w.showSlashError(fmt.Errorf("rename %q to %q: %w", oldPath, newPath, err))
++			return
++		}
++		w.refreshPanels()
++	case dialog.ActionCopy, dialog.ActionMove:
++		if pending == nil || len(pending.Sources) == 0 {
++			w.showSlashError(fmt.Errorf("file operation source is missing"))
++			return
++		}
++		pending.Dest = w.resolveShellPath(val)
++		w.startFileOp(*pending)
++	case dialog.ActionEdit:
++		if err := w.OpenEditor(w.resolveShellPath(val), false); err != nil {
++			w.showSlashError(fmt.Errorf("open %q: %w", val, err))
++		}
++	case dialog.ActionMount:
++		mountPath, err := w.resolveMountGuestPath(val)
++		if err != nil {
++			w.showSlashError(err)
++			return
++		}
++		if err := browser.MountDirectory(mountPath); err != nil {
++			w.showSlashError(err)
++			return
++		}
++		w.refreshPanels()
++	}
++	w.invalidate()
++}
++
++func (w *AppWidget) onDialogSubmitForm(action dialog.DialogAction, values []string, pending *filemanager.FileOp) {
++	for _, value := range values {
++		w.rememberPaths(value)
++	}
++	switch action {
++	case dialog.ActionCopy, dialog.ActionMove:
++		if len(values) != 2 || pending == nil {
+ 			w.closeDialog()
+-			w.startFileOp(op)
+-		},
+-		w.closeDialog,
+-	)
+-	w.setDialog(dlg)
++			w.showSlashError(fmt.Errorf("source and destination paths are required"))
++			return
++		}
++		pending.Sources = []string{w.resolveShellPath(values[0])}
++		pending.Dest = w.resolveShellPath(values[1])
++		w.closeDialog()
++		w.startFileOp(*pending)
++	case dialog.ActionRename:
++		if len(values) != 2 {
++			w.closeDialog()
++			w.showSlashError(fmt.Errorf("source and new paths are required"))
++			return
++		}
++		oldPath, newPath := w.resolveShellPath(values[0]), w.resolveShellPath(values[1])
++		w.closeDialog()
++		if err := os.Rename(oldPath, newPath); err != nil {
++			w.showSlashError(fmt.Errorf("rename %q to %q: %w", oldPath, newPath, err))
++			return
++		}
++		w.refreshPanels()
++	case dialog.ActionEdit:
++		if len(values) != 1 {
++			w.closeDialog()
++			return
++		}
++		w.onDialogSubmitInput(dialog.ActionEdit, values[0], nil)
++	}
++	w.invalidate()
+ }
+ 
+ func (w *AppWidget) openEditPathDialog() {
+-	dlg := dialog.NewEditDialog(
+-		w.newPathInput(""),
+-		func(val string) {
+-			w.rememberPaths(val)
+-			w.closeDialog()
+-			if err := w.OpenEditor(w.resolveShellPath(val), false); err != nil {
+-				w.showSlashError(fmt.Errorf("open %q: %w", val, err))
+-			}
+-			w.invalidate()
+-		},
+-		w.closeDialog,
+-	)
+-	w.setDialog(dlg)
++	dlg := dialog.NewInputDialog(dialog.ActionEdit, "Edit File", "Enter the file path to edit:", "", nil)
++	dlg.Fields[0].Label = "File path"
++	dlg.Fields[0].Input = w.newPathInput("")
++	dlg.OnCancel = w.closeDialog
++	dlg.OnSubmitInput = w.onDialogSubmitInput
++	w.mu.Lock()
++	w.dialog = dlg
++	w.mu.Unlock()
++	w.invalidate()
+ }
+ 
+ func (w *AppWidget) startFileOp(op filemanager.FileOp) {
+@@ -1606,7 +1520,7 @@ func (w *AppWidget) startFileOp(op filemanager.FileOp) {
+ 			func(prog filemanager.FileOpProgress) {
+ 				w.mu.Lock()
+ 				if w.dialog == progressDialog {
+-					progressDialog.SetProgress(prog)
++					progressDialog.Progress = prog
+ 				}
+ 				w.mu.Unlock()
+ 				w.invalidate()
+diff --git a/kabibi/ui/app/slashcmd_test.go b/kabibi/ui/app/slashcmd_test.go
+index e34cfb9..d2dbb1d 100644
+--- a/kabibi/ui/app/slashcmd_test.go
++++ b/kabibi/ui/app/slashcmd_test.go
+@@ -9,7 +9,6 @@ import (
+ 
+ 	"github.com/charmbracelet/x/input"
+ 	"github.com/mavity/rusticated/kabibi/ui"
+-	"github.com/mavity/rusticated/kabibi/ui/dialog"
+ 	"github.com/mavity/rusticated/kabibi/ui/filemanager"
+ 	"github.com/mavity/rusticated/kabibi/ui/shell"
+ )
+@@ -211,18 +210,18 @@ func TestSlashCopyOpensPathFormWithoutPanels(t *testing.T) {
+ 
+ 	widget.Shell().SetInput("/copy")
+ 	widget.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
+-	dlg, ok := widget.Dialog().(*dialog.CopyDialog)
+-	if !ok || dlg == nil {
+-		t.Fatalf("/copy dialog = %T, want *dialog.CopyDialog", widget.Dialog())
++	dlg := widget.Dialog()
++	if dlg == nil {
++		t.Fatal("/copy did not open a dialog")
+ 	}
+-	if dlg.Source == nil || dlg.Destination == nil {
+-		t.Fatalf("/copy dialog missing source/destination path fields: %#v", dlg)
++	if len(dlg.Fields) != 2 {
++		t.Fatalf("/copy dialog has %d fields, want two path fields", len(dlg.Fields))
+ 	}
+ 	if widget.PanelsVisible() {
+ 		t.Fatal("/copy unexpectedly opened blue panels")
+ 	}
+-	dlg.Source.SetValue("source.txt")
+-	dlg.Destination.SetValue("destination")
++	dlg.Fields[0].Input.SetValue("source.txt")
++	dlg.Fields[1].Input.SetValue("destination")
+ 	widget.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
+ 
+ 	copied := filepath.Join(destDir, "source.txt")
+@@ -289,9 +288,9 @@ func TestFileCollisionKeepsProgressDialogAndResumes(t *testing.T) {
+ 	widget := NewWidget(AppWidgetOptions{WorkingDir: root})
+ 	defer widget.Close()
+ 	widget.startFileOp(filemanager.FileOp{Kind: filemanager.OpCopy, Sources: []string{source}, Dest: dstDir})
+-	progress, ok := widget.Dialog().(*dialog.ProgressDialog)
+-	if !ok || progress == nil {
+-		t.Fatalf("file operation dialog = %T, want *dialog.ProgressDialog", widget.Dialog())
++	progress := widget.Dialog()
++	if progress == nil {
++		t.Fatal("file operation did not open a progress dialog")
+ 	}
+ 
+ 	deadline := time.Now().Add(2 * time.Second)
+@@ -326,8 +325,8 @@ func TestSlashCommandEnterDoesNotCompletePartialName(t *testing.T) {
+ 	if !widget.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter}) {
+ 		t.Fatal("Enter did not process the slash command")
+ 	}
+-	if _, ok := widget.Dialog().(*dialog.ErrorDialog); !ok {
+-		t.Fatalf("partial slash name dialog = %T, want *dialog.ErrorDialog", widget.Dialog())
++	if widget.Dialog() == nil || len(widget.Dialog().Fields) != 0 {
++		t.Fatal("partial slash name was silently completed instead of reporting an unknown command")
+ 	}
+ 	if widget.Editor() != nil {
+ 		t.Fatal("partial slash name opened an editor")
+diff --git a/kabibi/ui/dialog/dialog.go b/kabibi/ui/dialog/dialog.go
+index 7d791b9..cf4423a 100644
+--- a/kabibi/ui/dialog/dialog.go
++++ b/kabibi/ui/dialog/dialog.go
+@@ -26,16 +26,71 @@ type (
+ 
+ var NewCellBuf = terminal.NewCellBuf
+ 
++type DialogKind int
++
++const (
++	DialogInput DialogKind = iota
++	DialogConfirm
++	DialogChoice
++	DialogProgress
++
++	dialogInput    = DialogInput
++	dialogConfirm  = DialogConfirm
++	dialogChoice   = DialogChoice
++	dialogProgress = DialogProgress
++)
++
++type dialogKind = DialogKind
++
++type DialogAction int
++
++const (
++	ActionMkdir DialogAction = iota
++	ActionRename
++	ActionNewFile
++	ActionCopy
++	ActionMove
++	ActionDelete
++	ActionSelectMask
++	ActionUnselectMask
++	ActionEdit
++	ActionMount
++	ActionListFiles
++
++	actionMkdir        = ActionMkdir
++	actionRename       = ActionRename
++	actionNewFile      = ActionNewFile
++	actionCopy         = ActionCopy
++	actionMove         = ActionMove
++	actionDelete       = ActionDelete
++	actionSelectMask   = ActionSelectMask
++	actionUnselectMask = ActionUnselectMask
++)
++
++type dialogAction = DialogAction
++
++type Choice struct {
++	Label  string
++	Hotkey string
++}
++
++type dlgChoice = Choice
++
++type InputField struct {
++	Label string
++	Input *widgets.TextInput
++}
++
+ const (
+-	colorDlgBg     terminal.Color = 0x2D3642
++	colorDlgBg     terminal.Color = 0x1A1F26
+ 	colorDlgBorder terminal.Color = 0xFFD700
+ 	colorDlgText   terminal.Color = 0xE5E5E5
+-	colorDlgMuted  terminal.Color = 0x9AA6B8
++	colorDlgMuted  terminal.Color = 0x8A95A5
+ 	colorBtnBg     terminal.Color = 0xFFD700
+ 	colorBtnFg     terminal.Color = 0x1A1F26
+-	colorBtnAltBg  terminal.Color = 0x3D4856
++	colorBtnAltBg  terminal.Color = 0x2A323D
+ 	colorBtnAltFg  terminal.Color = 0xE5E5E5
+-	colorWarnText  terminal.Color = 0xFF6B6B
++	colorBlack     terminal.Color = 0x000000
+ )
+ 
+ func makeCell(r rune, fg, bg terminal.Color, bold bool) Cell {
+@@ -46,14 +101,6 @@ func makeCell(r rune, fg, bg terminal.Color, bold bool) Cell {
+ 	return Cell{Grapheme: string(r), Style: terminal.NewStyle(fg, bg, attrs)}
+ }
+ 
+-func makeStyle(fg, bg terminal.Color, bold bool) terminal.Style {
+-	var attrs terminal.CharAttributes
+-	if bold {
+-		attrs |= terminal.CharBold
+-	}
+-	return terminal.NewStyle(fg, bg, attrs)
+-}
+-
+ func truncateStringToWidth(s string, maxWidth int) string {
+ 	if maxWidth <= 0 {
+ 		return ""
+@@ -80,1573 +127,720 @@ func truncateStringToWidth(s string, maxWidth int) string {
+ 	return b.String() + "…"
+ }
+ 
+-func stableDialogWidth(availW, minWidth, maxWidth int) int {
+-	if availW <= 0 {
+-		availW = 80
+-	}
+-	target := availW * 3 / 4
+-	if target < minWidth {
+-		target = minWidth
+-	}
+-	if maxWidth > 0 && target > maxWidth {
+-		target = maxWidth
+-	}
+-	if target > availW {
+-		target = availW
++type DialogWidget struct {
++	Kind       DialogKind
++	Action     DialogAction
++	Title      string
++	Prompt     string
++	Choices    []Choice
++	ChoiceIdx  int
++	InputValue string
++	InputWidth int
++	Fields     []InputField
++	Pending    *filemanager.FileOp
++
++	Progress      filemanager.FileOpProgress
++	CollisionPath string
++	Collision     bool
++
++	OnSubmitInput func(action DialogAction, value string, pending *filemanager.FileOp)
++	OnSubmitForm  func(action DialogAction, values []string, pending *filemanager.FileOp)
++	OnConfirm     func(action DialogAction, pending *filemanager.FileOp)
++	OnPickChoice  func(idx int)
++	OnCancel      func()
++	OnCollision   func(filemanager.CollisionChoice)
++
++	Width  int
++	Height int
++	X      int
++	Y      int
++
++	buttons           *widgets.ButtonRow
++	compositor        *terminal.Terminal
++	focusedField      int
++	focusedButton     bool
++	legacyInputMirror string
++}
++
++func NewInputDialog(action DialogAction, title, prompt, initial string, pending *filemanager.FileOp) *DialogWidget {
++	d := &DialogWidget{
++		Kind:       DialogInput,
++		Action:     action,
++		Title:      title,
++		Prompt:     prompt,
++		InputValue: initial,
++		Pending:    pending,
++		Width:      54,
++		Height:     10,
++	}
++	d.Fields = []InputField{{Input: widgets.NewTextInput(widgets.TextInputOptions{
++		Value: initial, SelectAll: initial != "", AllowPaste: true,
++	})}}
++	d.legacyInputMirror = initial
++	d.setButtons([]Choice{{Label: "OK"}, {Label: "Cancel"}})
++	return d
++}
++
++func NewFormDialog(action DialogAction, title, prompt string, labels, initial []string, pending *filemanager.FileOp) *DialogWidget {
++	d := &DialogWidget{
++		Kind:    DialogInput,
++		Action:  action,
++		Title:   title,
++		Prompt:  prompt,
++		Pending: pending,
++		Width:   64,
++		Height:  12,
++	}
++	for i, label := range labels {
++		value := ""
++		if i < len(initial) {
++			value = initial[i]
++		}
++		d.Fields = append(d.Fields, InputField{
++			Label: label,
++			Input: widgets.NewTextInput(widgets.TextInputOptions{
++				Value: value, SelectAll: value != "", AllowPaste: true,
++			}),
++		})
+ 	}
+-	if target < 1 {
+-		target = 1
++	if len(d.Fields) > 0 {
++		d.InputValue = d.Fields[0].Input.Value()
++		d.legacyInputMirror = d.InputValue
+ 	}
+-	return target
++	d.setButtons([]Choice{{Label: "OK"}, {Label: "Cancel"}})
++	return d
++}
++
++func NewConfirmDialog(action DialogAction, title, prompt string, pending *filemanager.FileOp) *DialogWidget {
++	d := &DialogWidget{
++		Kind:    DialogConfirm,
++		Action:  action,
++		Title:   title,
++		Prompt:  prompt,
++		Choices: []Choice{{Label: "Yes", Hotkey: "y"}, {Label: "No", Hotkey: "n"}},
++		Pending: pending,
++		Width:   54,
++		Height:  10,
++	}
++	d.setButtons(d.Choices)
++	d.ChoiceIdx = 1
++	d.buttons.Index = 1
++	d.focusedButton = true
++	return d
+ }
+ 
+-func dialogInnerSpan(width int) (innerX, innerW int) {
+-	if width >= 6 {
+-		return 2, width - 4
++func NewChoiceDialog(title, prompt string, choices []Choice, onPick func(idx int)) *DialogWidget {
++	d := &DialogWidget{
++		Kind:         DialogChoice,
++		Title:        title,
++		Prompt:       prompt,
++		Choices:      append([]Choice(nil), choices...),
++		OnPickChoice: onPick,
++		Width:        54,
++		Height:       10,
+ 	}
+-	if width >= 3 {
+-		return 1, width - 2
++	d.setButtons(d.Choices)
++	d.focusedButton = true
++	return d
++}
++
++func NewProgressDialog(title string, progress filemanager.FileOpProgress, onCancel func()) *DialogWidget {
++	d := &DialogWidget{
++		Kind:     DialogProgress,
++		Title:    title,
++		Progress: progress,
++		OnCancel: onCancel,
++		Width:    64,
++		Height:   9,
+ 	}
+-	return 0, max(1, width)
++	d.setButtons([]Choice{{Label: "Cancel", Hotkey: "c"}})
++	d.focusedButton = true
++	return d
+ }
+ 
+-func drawDialogBorder(buf *CellBuf, width, height int, title string) {
+-	border := makeStyle(colorDlgBorder, colorDlgBg, false)
+-	for x := 1; x < width-1; x++ {
+-		buf.Set(x, 0, Cell{Grapheme: "─", Style: border})
+-		buf.Set(x, height-1, Cell{Grapheme: "─", Style: border})
++func (w *DialogWidget) setButtons(choices []Choice) {
++	w.Choices = append([]Choice(nil), choices...)
++	buttons := make([]widgets.Button, len(choices))
++	for i, choice := range choices {
++		index := i
++		buttons[i] = widgets.Button{
++			Label: choice.Label, Hotkey: choice.Hotkey,
++			OnPress: func() { w.activateButton(index) },
++		}
+ 	}
+-	for y := 1; y < height-1; y++ {
+-		buf.Set(0, y, Cell{Grapheme: "│", Style: border})
+-		buf.Set(width-1, y, Cell{Grapheme: "│", Style: border})
++	w.buttons = widgets.NewButtonRow(buttons)
++	if w.ChoiceIdx >= len(buttons) {
++		w.ChoiceIdx = 0
+ 	}
+-	buf.Set(0, 0, Cell{Grapheme: "╭", Style: border})
+-	buf.Set(width-1, 0, Cell{Grapheme: "╮", Style: border})
+-	buf.Set(0, height-1, Cell{Grapheme: "╰", Style: border})
+-	buf.Set(width-1, height-1, Cell{Grapheme: "╯", Style: border})
+-	if title == "" || width <= 4 {
++	w.buttons.Index = w.ChoiceIdx
++}
++
++func (w *DialogWidget) SetCollision(path string, onChoice func(filemanager.CollisionChoice)) {
++	if w == nil {
+ 		return
+ 	}
+-	titleText := " " + title + " "
+-	titleWidth := runewidth.StringWidth(titleText)
+-	if titleWidth > width-4 {
+-		titleText = truncateStringToWidth(titleText, width-4)
+-		titleWidth = runewidth.StringWidth(titleText)
+-	}
+-	start := max(1, (width-titleWidth)/2)
+-	drawText(buf, start, 0, titleText, min(titleWidth, width-start-1), makeStyle(colorBtnFg, colorDlgBorder, true))
++	w.Collision = true
++	w.CollisionPath = path
++	w.OnCollision = onChoice
++	w.setButtons([]Choice{
++		{Label: "Overwrite", Hotkey: "o"},
++		{Label: "Skip", Hotkey: "s"},
++		{Label: "All", Hotkey: "a"},
++		{Label: "Skip all", Hotkey: "k"},
++		{Label: "Cancel", Hotkey: "c"},
++	})
++	w.ChoiceIdx = 0
++	w.buttons.Index = 0
+ }
+ 
+-func drawText(buf *CellBuf, x, y int, text string, maxWidth int, style terminal.Style) {
+-	if y < 0 || y >= buf.Height || maxWidth <= 0 {
++func (w *DialogWidget) ClearCollision() {
++	if w == nil {
+ 		return
+ 	}
+-	col := x
+-	for _, r := range text {
+-		width := runewidth.RuneWidth(r)
+-		if width <= 0 {
+-			continue
++	w.Collision = false
++	w.CollisionPath = ""
++	w.OnCollision = nil
++	w.setButtons([]Choice{{Label: "Cancel", Hotkey: "c"}})
++}
++
++func (w *DialogWidget) Measure(c Constraints) Size {
++	if w == nil {
++		return Size{}
++	}
++	maxW := c.MaxW
++	if maxW <= 0 {
++		maxW = 80
++	}
++	maxH := c.MaxH
++	if maxH <= 0 {
++		maxH = 24
++	}
++	preferred := max(1, min(68, max(36, maxW*3/4)))
++	width := min(maxW, preferred)
++	if width < 1 {
++		width = 1
++	}
++	compact := maxH < 10
++	promptRows := wrapTextRows(w.Prompt, max(1, width-6))
++	height := 4 + promptRows
++	if compact {
++		promptRows = 0
++		height = 2
++	}
++	switch w.Kind {
++	case DialogInput:
++		if compact {
++			height += len(w.Fields)
++		} else {
++			height += len(w.Fields) * 2
+ 		}
+-		if col+width > x+maxWidth || col+width > buf.Width {
+-			return
++	case DialogProgress:
++		if compact {
++			height++
++		} else {
++			height += 3
+ 		}
+-		buf.Set(col, y, Cell{Grapheme: string(r), Style: style})
+-		for i := 1; i < width; i++ {
+-			buf.Set(col+i, y, Cell{Grapheme: "", Style: style})
++		if w.Collision {
++			if compact {
++				height++
++			} else {
++				height += 2
++			}
+ 		}
+-		col += width
++	case DialogConfirm, DialogChoice:
++		height += 1
+ 	}
+-}
+-
+-type dialogShell struct {
+-	Title      string
+-	MinWidth   int
+-	MaxWidth   int
+-	Layout     *widgets.Grid
+-	FocusOrder []ui.Widget
+-	FocusIndex int
+-	OnSubmit   func()
+-	OnCancel   func()
+-
+-	Width      int
+-	Height     int
+-	X          int
+-	Y          int
+-	compositor *terminal.Terminal
+-}
+-
+-func (s *dialogShell) Measure(c Constraints) Size {
+-	if s == nil || s.Layout == nil {
+-		return Size{}
++	btnSize := w.buttonRow().Measure(Constraints{MaxW: max(1, width-4), MaxH: maxH})
++	height += max(1, btnSize.H)
++	if w.Kind == DialogInput && len(w.Fields) == 0 {
++		height += 2
++	}
++	height = min(height, maxH)
++	if height < 1 {
++		height = 1
+ 	}
+-	availW := c.MaxW
+-	if availW <= 0 {
+-		availW = 80
+-	}
+-	availH := c.MaxH
+-	if availH <= 0 {
+-		availH = 24
+-	}
+-	width := stableDialogWidth(availW, s.MinWidth, s.MaxWidth)
+-	_, innerW := dialogInnerSpan(width)
+-	chromeH := 2
+-	if availH < 3 {
+-		chromeH = 0
+-	}
+-	gridSize := s.Layout.Measure(Constraints{MaxW: innerW, MaxH: max(1, availH-chromeH)})
+-	var height int
+-	if availH >= gridSize.H+5 {
+-		height = gridSize.H + 5
+-	} else if availH >= gridSize.H+4 {
+-		height = gridSize.H + 4
+-	} else if availH >= gridSize.H+2 {
+-		height = gridSize.H + 2
+-	} else {
+-		height = availH
+-	}
+-	height = max(1, min(height, availH))
+ 	return Size{W: width, H: height}
+ }
+ 
+-func (s *dialogShell) Render(r Rect, ctx RenderContext) string {
+-	if s == nil {
+-		return ""
++func (w *DialogWidget) Layout(r Rect) {
++	if w == nil {
++		return
+ 	}
+-	if r.W <= 0 || r.H <= 0 {
+-		sz := s.Measure(Constraints{MaxW: r.W, MaxH: r.H})
+-		if r.W <= 0 {
+-			r.W = sz.W
+-		}
+-		if r.H <= 0 {
+-			r.H = sz.H
+-		}
++	w.X, w.Y, w.Width, w.Height = r.X, r.Y, r.W, r.H
++}
++
++func (w *DialogWidget) Render(r Rect, ctx RenderContext) string {
++	if r.W > 0 || r.H > 0 {
++		w.Layout(r)
+ 	}
+-	s.X, s.Y, s.Width, s.Height = r.X, r.Y, r.W, r.H
+-	buf, cursor := s.RenderBufWithContext(ctx)
++	buf, cursor := w.RenderBufWithContext(ctx)
+ 	return ui.ANSIFrame(buf, cursor)
+ }
+ 
+-func (s *dialogShell) RenderBuf() CellBuf {
+-	buf, _ := s.RenderBufWithContext(RenderContext{Focused: true})
++func (w *DialogWidget) RenderBuf() CellBuf {
++	buf, _ := w.RenderBufWithContext(RenderContext{})
+ 	return buf
+ }
+ 
+-func (s *dialogShell) RenderBufWithContext(ctx RenderContext) (CellBuf, CursorPos) {
+-	if s == nil {
++func (w *DialogWidget) RenderBufWithContext(ctx RenderContext) (CellBuf, CursorPos) {
++	if w == nil {
+ 		return terminal.NewCellBuf(0, 0), CursorPos{}
+ 	}
+-	width, height := s.Width, s.Height
+-	if width <= 0 || height <= 0 {
+-		sz := s.Measure(Constraints{})
+-		if width <= 0 {
+-			width = sz.W
+-		}
+-		if height <= 0 {
+-			height = sz.H
+-		}
++	width, height := w.Width, w.Height
++	if width <= 0 {
++		width = 54
++	}
++	if height <= 0 {
++		height = 10
+ 	}
+ 	buf := terminal.NewCellBuf(width, height)
+ 	buf.Fill(Rect{W: width, H: height}, makeCell(' ', colorDlgText, colorDlgBg, false))
+-	if width < 2 || height < 2 || s.Layout == nil {
++	if width < 2 || height < 2 {
+ 		return buf, CursorPos{}
+ 	}
+-	drawDialogBorder(&buf, width, height, s.Title)
+-	s.syncFocus()
+-	innerX, innerW := dialogInnerSpan(width)
+-	innerY := 1
+-	maxInnerH := max(1, height-2)
+-	gridSize := s.Layout.Measure(Constraints{MaxW: innerW, MaxH: maxInnerH})
+-	innerH := maxInnerH
+-	if height >= gridSize.H+5 {
+-		innerY = 2
+-		innerH = gridSize.H
+-		sepY := innerY + gridSize.H - 1
+-		if sepY > innerY && sepY < height-2 {
+-			// Leave a clean 1-row visual gap above the bottom button bar by rendering
+-			// top content at innerY and the final row 1 line lower.
+-			innerH = gridSize.H
++	w.drawBorder(&buf, width, height, w.Title)
++	innerW := max(1, width-4)
++	compact := height < 10
++	y := 2
++	if compact {
++		y = 1
++	}
++	if !compact {
++		for _, line := range wrapText(w.Prompt, innerW) {
++			if y >= height-1 {
++				break
++			}
++			drawText(&buf, 2, y, line, innerW, makeStyle(colorDlgText, colorDlgBg, false))
++			y++
+ 		}
+-	} else if height >= gridSize.H+4 {
+-		innerY = 2
+-		innerH = gridSize.H
+-	} else if height >= gridSize.H+2 {
+-		innerY = 1
+-		innerH = gridSize.H
+-	}
+-	gridANSI := s.Layout.Render(Rect{W: innerW, H: innerH}, ctx)
+-	cursor := ctx.CompositeANSI(&buf, s.ansiTerminal(), Rect{X: innerX, Y: innerY, W: innerW, H: innerH}, gridANSI)
+-	if height >= gridSize.H+5 && gridSize.H >= 2 {
+-		// Shift the bottom action row down by 1 line so there is a 1-row spacer
+-		// between the form fields and the centered action buttons.
+-		btnSrcY := innerY + gridSize.H - 1
+-		btnDstY := btnSrcY + 1
+-		if btnDstY < height-1 {
+-			for x := innerX; x < innerX+innerW; x++ {
+-				buf.Set(x, btnDstY, buf.Get(x, btnSrcY))
+-				buf.Set(x, btnSrcY, makeCell(' ', colorDlgText, colorDlgBg, false))
++	}
++	var cursor CursorPos
++	switch w.Kind {
++	case DialogInput:
++		w.syncLegacyInput()
++		for i := range w.Fields {
++			field := &w.Fields[i]
++			if y >= height-2 {
++				break
++			}
++			inputX := 2
++			inputWidth := innerW
++			if compact && field.Label != "" {
++				labelWidth := min(runewidth.StringWidth(field.Label)+1, max(0, innerW-1))
++				drawText(&buf, inputX, y, field.Label, labelWidth, makeStyle(colorDlgMuted, colorDlgBg, false))
++				inputX += labelWidth
++				inputWidth -= labelWidth
++			} else if field.Label != "" {
++				drawText(&buf, 2, y, field.Label, innerW, makeStyle(colorDlgMuted, colorDlgBg, false))
++				y++
+ 			}
+-			if cursor.Visible && cursor.Y == btnSrcY {
+-				cursor.Y = btnDstY
++			if y >= height-1 {
++				break
+ 			}
++			fieldCtx := ctx.ForChild(i == w.focusedField && !w.focusedButton)
++			inputANSI := field.Input.Render(Rect{W: inputWidth, H: 1}, fieldCtx)
++			inputCursor := fieldCtx.CompositeANSI(&buf, w.ansiTerminal(), Rect{X: inputX, Y: y, W: inputWidth, H: 1}, inputANSI)
++			if inputCursor.Visible {
++				cursor = inputCursor
++			}
++			y++
++			if i == 0 {
++				w.InputValue = field.Input.Value()
++				w.legacyInputMirror = w.InputValue
++			}
++		}
++	case DialogProgress:
++		current := w.Progress.Current
++		progressRows := 3
++		if compact {
++			current = fmt.Sprintf("%s %d%%", filepath.Base(current), pctOf(w.Progress.Done, w.Progress.Total))
++			progressRows = 1
++		}
++		p := &widgets.ProgressBar{
++			Current: current,
++			Done:    w.Progress.Done, Total: w.Progress.Total, Rate: w.Progress.BytesPerSec,
++		}
++		pHeight := min(progressRows, max(0, height-y-1))
++		pANSI := p.Render(Rect{W: innerW, H: pHeight}, ctx.ForChild(false))
++		if pHeight > 0 {
++			ctx.CompositeANSI(&buf, w.ansiTerminal(), Rect{X: 2, Y: y, W: innerW, H: pHeight}, pANSI)
++			y += pHeight
++		}
++		if w.Collision && y < height-1 {
++			if !compact {
++				y++
++			}
++			message := "File already exists: " + filepath.Base(w.CollisionPath)
++			drawText(&buf, 2, y, message, innerW, makeStyle(0xFF6B6B, colorDlgBg, true))
++			y++
+ 		}
+ 	}
++
++	buttons := w.buttonRow()
++	if buttons != nil && height > 2 {
++		buttons.Index = w.ChoiceIdx
++		btnHeight := min(buttons.Measure(Constraints{MaxW: innerW, MaxH: height}).H, height-2)
++		btnY := height - 1 - btnHeight
++		if btnY < 1 {
++			btnY = 1
++		}
++		buttonCtx := ctx.ForChild(w.focusedButton || w.Kind == DialogChoice || w.Kind == DialogConfirm || w.Kind == DialogProgress)
++		buttonANSI := buttons.Render(Rect{W: innerW, H: height - 1 - btnY}, buttonCtx)
++		ctx.CompositeANSI(&buf, w.ansiTerminal(), Rect{X: 2, Y: btnY, W: innerW, H: height - 1 - btnY}, buttonANSI)
++	}
+ 	return buf, cursor
+ }
+ 
+-func (s *dialogShell) HandleEvent(event input.Event) bool {
+-	if s == nil || s.Layout == nil {
++func (w *DialogWidget) ansiTerminal() *terminal.Terminal {
++	if w.compositor == nil {
++		w.compositor = terminal.NewTerminal(1, 1)
++	}
++	return w.compositor
++}
++
++func (w *DialogWidget) buttonRow() *widgets.ButtonRow {
++	if w.buttons == nil {
++		w.setButtons(w.Choices)
++	}
++	return w.buttons
++}
++
++func (w *DialogWidget) HandleEvent(event input.Event) bool {
++	if w == nil {
+ 		return false
+ 	}
+-	s.syncFocus()
+-	ev, isKey := keyEvent(event)
+-	if !isKey {
+-		return s.Layout.HandleEvent(event)
++	ev, ok := keyEvent(event)
++	if !ok {
++		if w.Kind == DialogInput && len(w.Fields) > 0 {
++			return w.currentField().Input.HandleEvent(event)
++		}
++		return false
+ 	}
+ 	key := strings.ToLower(ev.String())
+ 	if key == "esc" {
+-		if s.OnCancel != nil {
+-			s.OnCancel()
++		if w.Kind == DialogProgress && w.Collision {
++			w.activateButton(len(w.Choices) - 1)
++			return true
++		}
++		if w.Kind == DialogChoice && w.OnPickChoice != nil {
++			w.OnPickChoice(-1)
++		}
++		if w.OnCancel != nil {
++			w.OnCancel()
+ 		}
+ 		return true
+ 	}
+-
+-	focused := s.focusedWidget()
+-	switch ctrl := focused.(type) {
+-	case *widgets.TextInput:
+-		switch key {
+-		case "enter":
+-			if s.OnSubmit != nil {
+-				s.OnSubmit()
++	if w.Kind == DialogProgress {
++		if w.Collision {
++			return w.handleButtons(ev)
++		}
++		if key == "enter" || key == "c" {
++			if w.OnCancel != nil {
++				w.OnCancel()
+ 			}
++		}
++		return true
++	}
++	if w.Kind == DialogChoice || w.Kind == DialogConfirm {
++		if key == "enter" && w.Kind == DialogConfirm {
++			w.activateButton(w.ChoiceIdx)
+ 			return true
++		}
++		return w.handleButtons(ev)
++	}
++	if w.Kind != DialogInput || len(w.Fields) == 0 {
++		return true
++	}
++	w.syncLegacyInput()
++	if w.focusedButton {
++		switch key {
+ 		case "tab":
+-			if ctrl.HandleEvent(ev) {
+-				return true
+-			}
+-			s.moveFocus(1)
+-			return true
+-		case "shift+tab":
+-			s.moveFocus(-1)
++			w.moveFocus(1)
+ 			return true
+-		case "up":
+-			if s.textInputCount() == 1 && ctrl.HandleEvent(ev) {
+-				return true
+-			}
+-			s.moveFocus(-1)
++		case "shift+tab", "up":
++			w.moveFocus(-1)
+ 			return true
+ 		case "down":
+-			if s.textInputCount() == 1 && ctrl.HandleEvent(ev) {
+-				return true
+-			}
+-			s.moveFocus(1)
++			w.moveFocus(1)
+ 			return true
+-		default:
+-			ctrl.HandleEvent(ev)
+-			return true
+-		}
+-
+-	case *widgets.Checkbox:
+-		switch key {
+ 		case "enter":
+-			if s.OnSubmit != nil {
+-				s.OnSubmit()
+-			}
++			w.activateButton(w.ChoiceIdx)
+ 			return true
+-		case "tab", "down":
+-			s.moveFocus(1)
++		default:
++			return w.handleButtons(ev)
++		}
++	}
++	field := w.currentField()
++	switch key {
++	case "enter":
++		if w.focusedButton {
++			w.activateButton(w.ChoiceIdx)
++		} else {
++			w.submit()
++		}
++		return true
++	case "tab":
++		if w.focusedButton {
++			w.moveFocus(1)
+ 			return true
+-		case "shift+tab", "up":
+-			s.moveFocus(-1)
++		}
++		if field.Input.HandleEvent(ev) {
+ 			return true
+-		default:
+-			if ctrl.HandleEvent(ev) {
+-				return true
++		}
++		w.moveFocus(1)
++		return true
++	case "shift+tab":
++		w.moveFocus(-1)
++		return true
++	case "up", "down":
++		if w.focusedButton {
++			if key == "up" {
++				w.moveFocus(-1)
++			} else {
++				w.moveFocus(1)
+ 			}
+-			s.activateHotkeys(ev)
+ 			return true
+ 		}
+-
+-	case *widgets.ButtonRow:
+-		if len(s.FocusOrder) > 1 {
+-			switch key {
+-			case "tab", "down":
+-				s.moveFocus(1)
+-				return true
+-			case "shift+tab", "up":
+-				s.moveFocus(-1)
++		if len(w.Fields) == 1 {
++			if field.Input.HandleEvent(ev) {
+ 				return true
+ 			}
+ 		}
+-		if ctrl.HandleEvent(ev) {
+-			return true
++		if key == "up" {
++			w.moveFocus(-1)
++		} else {
++			w.moveFocus(1)
+ 		}
+-		s.activateHotkeys(ev)
+ 		return true
+-
+ 	default:
+-		if s.Layout.HandleEvent(ev) {
++		if field.Input.HandleEvent(ev) {
++			w.InputValue = field.Input.Value()
++			w.legacyInputMirror = w.InputValue
+ 			return true
+ 		}
+-		s.activateHotkeys(ev)
+ 		return true
+ 	}
+ }
+ 
+-func (s *dialogShell) activateHotkeys(ev input.KeyPressEvent) bool {
+-	for _, w := range s.FocusOrder {
+-		switch ctrl := w.(type) {
+-		case *widgets.ButtonRow:
+-			if ctrl.ActivateHotkey(ev) {
+-				return true
+-			}
+-		case *widgets.Checkbox:
+-			if ctrl.HandleEvent(ev) {
+-				return true
+-			}
+-		}
++func (w *DialogWidget) handleButtons(ev input.KeyPressEvent) bool {
++	buttons := w.buttonRow()
++	if buttons == nil {
++		return true
+ 	}
+-	return false
+-}
+-
+-func (s *dialogShell) textInputCount() int {
+-	count := 0
+-	for _, w := range s.FocusOrder {
+-		if _, ok := w.(*widgets.TextInput); ok {
+-			count++
++	key := strings.ToLower(ev.String())
++	if key == "esc" {
++		if w.Kind == DialogChoice && w.OnPickChoice != nil {
++			w.OnPickChoice(-1)
+ 		}
++		if w.OnCancel != nil {
++			w.OnCancel()
++		}
++		return true
+ 	}
+-	return count
+-}
+-
+-func (s *dialogShell) focusedWidget() ui.Widget {
+-	if len(s.FocusOrder) == 0 {
+-		return nil
+-	}
+-	if s.FocusIndex < 0 {
+-		s.FocusIndex = 0
+-	}
+-	if s.FocusIndex >= len(s.FocusOrder) {
+-		s.FocusIndex = len(s.FocusOrder) - 1
+-	}
+-	return s.FocusOrder[s.FocusIndex]
+-}
+-
+-func (s *dialogShell) syncFocus() {
+-	if s.Layout == nil {
+-		return
+-	}
+-	s.Layout.SetFocusedWidget(s.focusedWidget())
+-}
+-
+-func (s *dialogShell) moveFocus(step int) {
+-	if len(s.FocusOrder) == 0 {
+-		return
+-	}
+-	s.FocusIndex = (s.FocusIndex + step + len(s.FocusOrder)) % len(s.FocusOrder)
+-	s.syncFocus()
+-}
+-
+-func (s *dialogShell) ansiTerminal() *terminal.Terminal {
+-	if s.compositor == nil {
+-		s.compositor = terminal.NewTerminal(1, 1)
+-	}
+-	return s.compositor
+-}
+-
+-func newDefaultPathInput(initial string) *widgets.TextInput {
+-	return widgets.NewTextInput(widgets.TextInputOptions{
+-		Value:      initial,
+-		SelectAll:  initial != "",
+-		AllowPaste: true,
+-	})
+-}
+-
+-func ensureInput(in *widgets.TextInput, initial string) *widgets.TextInput {
+-	if in != nil {
+-		return in
+-	}
+-	return newDefaultPathInput(initial)
+-}
+-
+-// ── 1. MkdirDialog ────────────────────────────────────────────────────────────
+-
+-type MkdirDialog struct {
+-	Prompt    *widgets.Label
+-	Directory *widgets.TextInput
+-	Create    *widgets.Button
+-	Cancel    *widgets.Button
+-	Buttons   *widgets.ButtonRow
+-	Layout    *widgets.Grid
+-
+-	OnSubmit func(directory string)
+-	OnCancel func()
+-
+-	shell dialogShell
+-}
+-
+-func NewMkdirDialog(directory *widgets.TextInput, onSubmit func(string), onCancel func()) *MkdirDialog {
+-	d := &MkdirDialog{
+-		Prompt:    &widgets.Label{Text: "Create directory:"},
+-		Directory: ensureInput(directory, ""),
+-		OnSubmit:  onSubmit,
+-		OnCancel:  onCancel,
+-	}
+-	d.Create = &widgets.Button{Label: "Create", Hotkey: "c", OnClick: d.submit}
+-	d.Cancel = &widgets.Button{Label: "Cancel", OnClick: d.cancel}
+-	d.Buttons = widgets.NewButtonPtrRow(d.Create, d.Cancel)
+-	d.Layout = &widgets.Grid{
+-		Columns: []widgets.Track{{Kind: widgets.TrackFraction, Value: 1}},
+-		Children: []widgets.GridChild{
+-			{Row: 0, Child: d.Prompt},
+-			{Row: 1, Child: d.Directory},
+-			{Row: 2, Child: d.Buttons},
+-		},
+-	}
+-	d.shell = dialogShell{
+-		Title:      "Make Directory",
+-		MinWidth:   36,
+-		MaxWidth:   60,
+-		Layout:     d.Layout,
+-		FocusOrder: []ui.Widget{d.Directory, d.Buttons},
+-		OnSubmit:   d.submit,
+-		OnCancel:   d.cancel,
+-	}
+-	d.shell.syncFocus()
+-	return d
+-}
+-
+-func (d *MkdirDialog) submit() {
+-	val := strings.TrimSpace(d.Directory.Value())
+-	if val == "" {
+-		d.cancel()
+-		return
+-	}
+-	if d.OnSubmit != nil {
+-		d.OnSubmit(val)
+-	}
+-}
+-
+-func (d *MkdirDialog) cancel() {
+-	if d.OnCancel != nil {
+-		d.OnCancel()
+-	}
++	handled := buttons.HandleEvent(ev)
++	w.ChoiceIdx = buttons.Index
++	return handled || true
+ }
+ 
+-func (d *MkdirDialog) Measure(c Constraints) Size              { return d.shell.Measure(c) }
+-func (d *MkdirDialog) Render(r Rect, ctx RenderContext) string { return d.shell.Render(r, ctx) }
+-func (d *MkdirDialog) RenderBuf() CellBuf                      { return d.shell.RenderBuf() }
+-func (d *MkdirDialog) HandleEvent(event input.Event) bool      { return d.shell.HandleEvent(event) }
+-
+-// ── 2. RenameDialog ───────────────────────────────────────────────────────────
+-
+-type RenameDialog struct {
+-	Prompt       *widgets.Label
+-	SourceLabel  *widgets.Label
+-	Source       *widgets.TextInput
+-	NewPathLabel *widgets.Label
+-	NewPath      *widgets.TextInput
+-	Rename       *widgets.Button
+-	Cancel       *widgets.Button
+-	Buttons      *widgets.ButtonRow
+-	Layout       *widgets.Grid
+-
+-	OnSubmitSelected func(newName string)
+-	OnSubmitPaths    func(source, newPath string)
+-	OnCancel         func()
+-
+-	shell dialogShell
+-}
+-
+-func NewRenameSelectedDialog(selectedName string, newPath *widgets.TextInput, onSubmit func(newName string), onCancel func()) *RenameDialog {
+-	d := &RenameDialog{
+-		Prompt:           &widgets.Label{Text: "Rename " + selectedName + " to:"},
+-		NewPath:          ensureInput(newPath, selectedName),
+-		OnSubmitSelected: onSubmit,
+-		OnCancel:         onCancel,
+-	}
+-	d.Rename = &widgets.Button{Label: "Rename", Hotkey: "r", OnClick: d.submit}
+-	d.Cancel = &widgets.Button{Label: "Cancel", OnClick: d.cancel}
+-	d.Buttons = widgets.NewButtonPtrRow(d.Rename, d.Cancel)
+-	d.Layout = &widgets.Grid{
+-		Columns: []widgets.Track{{Kind: widgets.TrackFraction, Value: 1}},
+-		Children: []widgets.GridChild{
+-			{Row: 0, Child: d.Prompt},
+-			{Row: 1, Child: d.NewPath},
+-			{Row: 2, Child: d.Buttons},
+-		},
+-	}
+-	d.shell = dialogShell{
+-		Title:      "Rename",
+-		MinWidth:   36,
+-		MaxWidth:   60,
+-		Layout:     d.Layout,
+-		FocusOrder: []ui.Widget{d.NewPath, d.Buttons},
+-		OnSubmit:   d.submit,
+-		OnCancel:   d.cancel,
+-	}
+-	d.shell.syncFocus()
+-	return d
+-}
+-
+-func NewRenamePathDialog(source, newPath *widgets.TextInput, onSubmit func(source, newPath string), onCancel func()) *RenameDialog {
+-	d := &RenameDialog{
+-		SourceLabel:   &widgets.Label{Text: "Source path"},
+-		Source:        ensureInput(source, ""),
+-		NewPathLabel:  &widgets.Label{Text: "New path"},
+-		NewPath:       ensureInput(newPath, ""),
+-		OnSubmitPaths: onSubmit,
+-		OnCancel:      onCancel,
+-	}
+-	d.Rename = &widgets.Button{Label: "Rename", Hotkey: "r", OnClick: d.submit}
+-	d.Cancel = &widgets.Button{Label: "Cancel", OnClick: d.cancel}
+-	d.Buttons = widgets.NewButtonPtrRow(d.Rename, d.Cancel)
+-	d.Layout = &widgets.Grid{
+-		Columns: []widgets.Track{{Kind: widgets.TrackFraction, Value: 1}},
+-		Children: []widgets.GridChild{
+-			{Row: 0, Child: d.SourceLabel},
+-			{Row: 1, Child: d.Source},
+-			{Row: 2, Child: d.NewPathLabel},
+-			{Row: 3, Child: d.NewPath},
+-			{Row: 4, Child: d.Buttons},
+-		},
+-	}
+-	d.shell = dialogShell{
+-		Title:      "Rename",
+-		MinWidth:   48,
+-		MaxWidth:   72,
+-		Layout:     d.Layout,
+-		FocusOrder: []ui.Widget{d.Source, d.NewPath, d.Buttons},
+-		OnSubmit:   d.submit,
+-		OnCancel:   d.cancel,
+-	}
+-	d.shell.syncFocus()
+-	return d
+-}
+-
+-func (d *RenameDialog) submit() {
+-	if d.Source != nil {
+-		src := strings.TrimSpace(d.Source.Value())
+-		dst := strings.TrimSpace(d.NewPath.Value())
+-		if src == "" || dst == "" {
+-			d.cancel()
+-			return
++func (w *DialogWidget) activateButton(index int) {
++	switch w.Kind {
++	case DialogInput:
++		if index == 0 {
++			w.submit()
++		} else {
++			if w.OnCancel != nil {
++				w.OnCancel()
++			}
+ 		}
+-		if d.OnSubmitPaths != nil {
+-			d.OnSubmitPaths(src, dst)
++	case DialogConfirm:
++		if index == 0 {
++			if w.OnConfirm != nil {
++				w.OnConfirm(w.Action, w.Pending)
++			}
++		} else if w.OnCancel != nil {
++			w.OnCancel()
+ 		}
+-		return
+-	}
+-	dst := strings.TrimSpace(d.NewPath.Value())
+-	if dst == "" {
+-		d.cancel()
+-		return
+-	}
+-	if d.OnSubmitSelected != nil {
+-		d.OnSubmitSelected(dst)
+-	}
+-}
+-
+-func (d *RenameDialog) cancel() {
+-	if d.OnCancel != nil {
+-		d.OnCancel()
+-	}
+-}
+-
+-func (d *RenameDialog) Measure(c Constraints) Size              { return d.shell.Measure(c) }
+-func (d *RenameDialog) Render(r Rect, ctx RenderContext) string { return d.shell.Render(r, ctx) }
+-func (d *RenameDialog) RenderBuf() CellBuf                      { return d.shell.RenderBuf() }
+-func (d *RenameDialog) HandleEvent(event input.Event) bool      { return d.shell.HandleEvent(event) }
+-
+-// ── 3. CopyDialog ─────────────────────────────────────────────────────────────
+-
+-type CopyDialog struct {
+-	Prompt           *widgets.Label
+-	SourceLabel      *widgets.Label
+-	Source           *widgets.TextInput
+-	DestinationLabel *widgets.Label
+-	Destination      *widgets.TextInput
+-	Copy             *widgets.Button
+-	Cancel           *widgets.Button
+-	Buttons          *widgets.ButtonRow
+-	Layout           *widgets.Grid
+-
+-	OnSubmitSelected func(destination string)
+-	OnSubmitPaths    func(source, destination string)
+-	OnCancel         func()
+-
+-	shell dialogShell
+-}
+-
+-func NewCopySelectedDialog(sourceSummary string, destination *widgets.TextInput, onSubmit func(destination string), onCancel func()) *CopyDialog {
+-	d := &CopyDialog{
+-		Prompt:           &widgets.Label{Text: fmt.Sprintf("Copy %s to:", sourceSummary)},
+-		Destination:      ensureInput(destination, "."),
+-		OnSubmitSelected: onSubmit,
+-		OnCancel:         onCancel,
+-	}
+-	d.Copy = &widgets.Button{Label: "Copy", Hotkey: "c", OnClick: d.submit}
+-	d.Cancel = &widgets.Button{Label: "Cancel", OnClick: d.cancel}
+-	d.Buttons = widgets.NewButtonPtrRow(d.Copy, d.Cancel)
+-	d.Layout = &widgets.Grid{
+-		Columns: []widgets.Track{{Kind: widgets.TrackFraction, Value: 1}},
+-		Children: []widgets.GridChild{
+-			{Row: 0, Child: d.Prompt},
+-			{Row: 1, Child: d.Destination},
+-			{Row: 2, Child: d.Buttons},
+-		},
+-	}
+-	d.shell = dialogShell{
+-		Title:      "Copy",
+-		MinWidth:   48,
+-		MaxWidth:   72,
+-		Layout:     d.Layout,
+-		FocusOrder: []ui.Widget{d.Destination, d.Buttons},
+-		OnSubmit:   d.submit,
+-		OnCancel:   d.cancel,
+-	}
+-	d.shell.syncFocus()
+-	return d
+-}
+-
+-func NewCopyPathDialog(source, destination *widgets.TextInput, onSubmit func(source, destination string), onCancel func()) *CopyDialog {
+-	d := &CopyDialog{
+-		SourceLabel:      &widgets.Label{Text: "Source path"},
+-		Source:           ensureInput(source, ""),
+-		DestinationLabel: &widgets.Label{Text: "Destination"},
+-		Destination:      ensureInput(destination, "."),
+-		OnSubmitPaths:    onSubmit,
+-		OnCancel:         onCancel,
+-	}
+-	d.Copy = &widgets.Button{Label: "Copy", Hotkey: "c", OnClick: d.submit}
+-	d.Cancel = &widgets.Button{Label: "Cancel", OnClick: d.cancel}
+-	d.Buttons = widgets.NewButtonPtrRow(d.Copy, d.Cancel)
+-	d.Layout = &widgets.Grid{
+-		Columns: []widgets.Track{{Kind: widgets.TrackFraction, Value: 1}},
+-		Children: []widgets.GridChild{
+-			{Row: 0, Child: d.SourceLabel},
+-			{Row: 1, Child: d.Source},
+-			{Row: 2, Child: d.DestinationLabel},
+-			{Row: 3, Child: d.Destination},
+-			{Row: 4, Child: d.Buttons},
+-		},
+-	}
+-	d.shell = dialogShell{
+-		Title:      "Copy",
+-		MinWidth:   48,
+-		MaxWidth:   72,
+-		Layout:     d.Layout,
+-		FocusOrder: []ui.Widget{d.Source, d.Destination, d.Buttons},
+-		OnSubmit:   d.submit,
+-		OnCancel:   d.cancel,
+-	}
+-	d.shell.syncFocus()
+-	return d
+-}
+-
+-func (d *CopyDialog) submit() {
+-	if d.Source != nil {
+-		src := strings.TrimSpace(d.Source.Value())
+-		dst := strings.TrimSpace(d.Destination.Value())
+-		if src == "" || dst == "" {
+-			d.cancel()
+-			return
++	case DialogChoice:
++		if w.OnPickChoice != nil {
++			w.OnPickChoice(index)
+ 		}
+-		if d.OnSubmitPaths != nil {
+-			d.OnSubmitPaths(src, dst)
++	case DialogProgress:
++		if w.Collision {
++			choice := filemanager.ColCancel
++			switch index {
++			case 0:
++				choice = filemanager.ColOverwrite
++			case 1:
++				choice = filemanager.ColSkip
++			case 2:
++				choice = filemanager.ColOverwriteAll
++			case 3:
++				choice = filemanager.ColSkipAll
++			}
++			callback := w.OnCollision
++			w.ClearCollision()
++			if callback != nil {
++				callback(choice)
++			}
++		} else if w.OnCancel != nil {
++			w.OnCancel()
+ 		}
+-		return
+-	}
+-	dst := strings.TrimSpace(d.Destination.Value())
+-	if dst == "" {
+-		d.cancel()
+-		return
+-	}
+-	if d.OnSubmitSelected != nil {
+-		d.OnSubmitSelected(dst)
+-	}
+-}
+-
+-func (d *CopyDialog) cancel() {
+-	if d.OnCancel != nil {
+-		d.OnCancel()
+ 	}
+ }
+ 
+-func (d *CopyDialog) Measure(c Constraints) Size              { return d.shell.Measure(c) }
+-func (d *CopyDialog) Render(r Rect, ctx RenderContext) string { return d.shell.Render(r, ctx) }
+-func (d *CopyDialog) RenderBuf() CellBuf                      { return d.shell.RenderBuf() }
+-func (d *CopyDialog) HandleEvent(event input.Event) bool      { return d.shell.HandleEvent(event) }
+-
+-// ── 4. MoveDialog ─────────────────────────────────────────────────────────────
+-
+-type MoveDialog struct {
+-	Prompt           *widgets.Label
+-	SourceLabel      *widgets.Label
+-	Source           *widgets.TextInput
+-	DestinationLabel *widgets.Label
+-	Destination      *widgets.TextInput
+-	Move             *widgets.Button
+-	Cancel           *widgets.Button
+-	Buttons          *widgets.ButtonRow
+-	Layout           *widgets.Grid
+-
+-	OnSubmitSelected func(destination string)
+-	OnSubmitPaths    func(source, destination string)
+-	OnCancel         func()
+-
+-	shell dialogShell
+-}
+-
+-func NewMoveSelectedDialog(sourceSummary string, destination *widgets.TextInput, onSubmit func(destination string), onCancel func()) *MoveDialog {
+-	d := &MoveDialog{
+-		Prompt:           &widgets.Label{Text: fmt.Sprintf("Move %s to:", sourceSummary)},
+-		Destination:      ensureInput(destination, "."),
+-		OnSubmitSelected: onSubmit,
+-		OnCancel:         onCancel,
+-	}
+-	d.Move = &widgets.Button{Label: "Move", Hotkey: "m", OnClick: d.submit}
+-	d.Cancel = &widgets.Button{Label: "Cancel", OnClick: d.cancel}
+-	d.Buttons = widgets.NewButtonPtrRow(d.Move, d.Cancel)
+-	d.Layout = &widgets.Grid{
+-		Columns: []widgets.Track{{Kind: widgets.TrackFraction, Value: 1}},
+-		Children: []widgets.GridChild{
+-			{Row: 0, Child: d.Prompt},
+-			{Row: 1, Child: d.Destination},
+-			{Row: 2, Child: d.Buttons},
+-		},
+-	}
+-	d.shell = dialogShell{
+-		Title:      "Move",
+-		MinWidth:   48,
+-		MaxWidth:   72,
+-		Layout:     d.Layout,
+-		FocusOrder: []ui.Widget{d.Destination, d.Buttons},
+-		OnSubmit:   d.submit,
+-		OnCancel:   d.cancel,
+-	}
+-	d.shell.syncFocus()
+-	return d
+-}
+-
+-func NewMovePathDialog(source, destination *widgets.TextInput, onSubmit func(source, destination string), onCancel func()) *MoveDialog {
+-	d := &MoveDialog{
+-		SourceLabel:      &widgets.Label{Text: "Source path"},
+-		Source:           ensureInput(source, ""),
+-		DestinationLabel: &widgets.Label{Text: "Destination"},
+-		Destination:      ensureInput(destination, "."),
+-		OnSubmitPaths:    onSubmit,
+-		OnCancel:         onCancel,
+-	}
+-	d.Move = &widgets.Button{Label: "Move", Hotkey: "m", OnClick: d.submit}
+-	d.Cancel = &widgets.Button{Label: "Cancel", OnClick: d.cancel}
+-	d.Buttons = widgets.NewButtonPtrRow(d.Move, d.Cancel)
+-	d.Layout = &widgets.Grid{
+-		Columns: []widgets.Track{{Kind: widgets.TrackFraction, Value: 1}},
+-		Children: []widgets.GridChild{
+-			{Row: 0, Child: d.SourceLabel},
+-			{Row: 1, Child: d.Source},
+-			{Row: 2, Child: d.DestinationLabel},
+-			{Row: 3, Child: d.Destination},
+-			{Row: 4, Child: d.Buttons},
+-		},
+-	}
+-	d.shell = dialogShell{
+-		Title:      "Move",
+-		MinWidth:   48,
+-		MaxWidth:   72,
+-		Layout:     d.Layout,
+-		FocusOrder: []ui.Widget{d.Source, d.Destination, d.Buttons},
+-		OnSubmit:   d.submit,
+-		OnCancel:   d.cancel,
+-	}
+-	d.shell.syncFocus()
+-	return d
+-}
+-
+-func (d *MoveDialog) submit() {
+-	if d.Source != nil {
+-		src := strings.TrimSpace(d.Source.Value())
+-		dst := strings.TrimSpace(d.Destination.Value())
+-		if src == "" || dst == "" {
+-			d.cancel()
++func (w *DialogWidget) submit() {
++	w.syncLegacyInput()
++	values := make([]string, len(w.Fields))
++	for i, field := range w.Fields {
++		values[i] = strings.TrimSpace(field.Input.Value())
++		if values[i] == "" {
++			if w.OnCancel != nil {
++				w.OnCancel()
++			}
+ 			return
+ 		}
+-		if d.OnSubmitPaths != nil {
+-			d.OnSubmitPaths(src, dst)
+-		}
+-		return
+ 	}
+-	dst := strings.TrimSpace(d.Destination.Value())
+-	if dst == "" {
+-		d.cancel()
++	if w.OnSubmitForm != nil {
++		w.OnSubmitForm(w.Action, values, w.Pending)
+ 		return
+ 	}
+-	if d.OnSubmitSelected != nil {
+-		d.OnSubmitSelected(dst)
++	if w.OnSubmitInput != nil && len(values) > 0 {
++		w.OnSubmitInput(w.Action, values[0], w.Pending)
+ 	}
+ }
+ 
+-func (d *MoveDialog) cancel() {
+-	if d.OnCancel != nil {
+-		d.OnCancel()
++func (w *DialogWidget) currentField() *InputField {
++	if w.focusedField < 0 {
++		w.focusedField = 0
+ 	}
++	if w.focusedField >= len(w.Fields) {
++		w.focusedField = len(w.Fields) - 1
++	}
++	return &w.Fields[w.focusedField]
+ }
+ 
+-func (d *MoveDialog) Measure(c Constraints) Size              { return d.shell.Measure(c) }
+-func (d *MoveDialog) Render(r Rect, ctx RenderContext) string { return d.shell.Render(r, ctx) }
+-func (d *MoveDialog) RenderBuf() CellBuf                      { return d.shell.RenderBuf() }
+-func (d *MoveDialog) HandleEvent(event input.Event) bool      { return d.shell.HandleEvent(event) }
+-
+-// ── 5. DeletePathDialog ───────────────────────────────────────────────────────
+-
+-type DeletePathDialog struct {
+-	PathLabel *widgets.Label
+-	Path      *widgets.TextInput
+-	Continue  *widgets.Button
+-	Cancel    *widgets.Button
+-	Buttons   *widgets.ButtonRow
+-	Layout    *widgets.Grid
+-
+-	OnSubmit func(path string)
+-	OnCancel func()
+-
+-	shell dialogShell
+-}
+-
+-func NewDeletePathDialog(path *widgets.TextInput, onSubmit func(path string), onCancel func()) *DeletePathDialog {
+-	d := &DeletePathDialog{
+-		PathLabel: &widgets.Label{Text: "Path to delete"},
+-		Path:      ensureInput(path, ""),
+-		OnSubmit:  onSubmit,
+-		OnCancel:  onCancel,
+-	}
+-	d.Continue = &widgets.Button{Label: "Continue", Hotkey: "c", OnClick: d.submit}
+-	d.Cancel = &widgets.Button{Label: "Cancel", OnClick: d.cancel}
+-	d.Buttons = widgets.NewButtonPtrRow(d.Continue, d.Cancel)
+-	d.Layout = &widgets.Grid{
+-		Columns: []widgets.Track{{Kind: widgets.TrackFraction, Value: 1}},
+-		Children: []widgets.GridChild{
+-			{Row: 0, Child: d.PathLabel},
+-			{Row: 1, Child: d.Path},
+-			{Row: 2, Child: d.Buttons},
+-		},
+-	}
+-	d.shell = dialogShell{
+-		Title:      "Delete",
+-		MinWidth:   36,
+-		MaxWidth:   60,
+-		Layout:     d.Layout,
+-		FocusOrder: []ui.Widget{d.Path, d.Buttons},
+-		OnSubmit:   d.submit,
+-		OnCancel:   d.cancel,
+-	}
+-	d.shell.syncFocus()
+-	return d
+-}
+-
+-func (d *DeletePathDialog) submit() {
+-	val := strings.TrimSpace(d.Path.Value())
+-	if val == "" {
+-		d.cancel()
++func (w *DialogWidget) syncLegacyInput() {
++	if len(w.Fields) == 0 {
+ 		return
+ 	}
+-	if d.OnSubmit != nil {
+-		d.OnSubmit(val)
++	field := w.Fields[0].Input
++	if field == nil {
++		field = widgets.NewTextInput(widgets.TextInputOptions{Value: w.InputValue, AllowPaste: true})
++		w.Fields[0].Input = field
+ 	}
+-}
+-
+-func (d *DeletePathDialog) cancel() {
+-	if d.OnCancel != nil {
+-		d.OnCancel()
++	if w.InputValue != w.legacyInputMirror {
++		field.SetValue(w.InputValue)
+ 	}
++	w.InputValue = field.Value()
++	w.legacyInputMirror = w.InputValue
+ }
+ 
+-func (d *DeletePathDialog) Measure(c Constraints) Size              { return d.shell.Measure(c) }
+-func (d *DeletePathDialog) Render(r Rect, ctx RenderContext) string { return d.shell.Render(r, ctx) }
+-func (d *DeletePathDialog) RenderBuf() CellBuf                      { return d.shell.RenderBuf() }
+-func (d *DeletePathDialog) HandleEvent(event input.Event) bool      { return d.shell.HandleEvent(event) }
+-
+-// ── 6. DeleteConfirmDialog ────────────────────────────────────────────────────
+-
+-type DeleteConfirmDialog struct {
+-	Prompt  *widgets.TextBlock
+-	Delete  *widgets.Button
+-	Cancel  *widgets.Button
+-	Buttons *widgets.ButtonRow
+-	Layout  *widgets.Grid
+-
+-	OnConfirm func()
+-	OnCancel  func()
+-
+-	shell dialogShell
+-}
+-
+-func NewDeleteConfirmDialog(sourceSummary string, onConfirm func(), onCancel func()) *DeleteConfirmDialog {
+-	d := &DeleteConfirmDialog{
+-		Prompt:    &widgets.TextBlock{Text: fmt.Sprintf("Delete %s?", sourceSummary)},
+-		OnConfirm: onConfirm,
+-		OnCancel:  onCancel,
+-	}
+-	d.Delete = &widgets.Button{Label: "Delete", Hotkey: "d", OnClick: d.confirm}
+-	d.Cancel = &widgets.Button{Label: "Cancel", Hotkey: "c", OnClick: d.cancel}
+-	d.Buttons = widgets.NewButtonPtrRow(d.Delete, d.Cancel)
+-	d.Buttons.Index = 1 // Cancel is initially selected
+-	d.Layout = &widgets.Grid{
+-		Columns: []widgets.Track{{Kind: widgets.TrackFraction, Value: 1}},
+-		Children: []widgets.GridChild{
+-			{Row: 0, Child: d.Prompt},
+-			{Row: 1, Child: d.Buttons},
+-		},
+-	}
+-	d.shell = dialogShell{
+-		Title:      "Delete",
+-		MinWidth:   36,
+-		MaxWidth:   60,
+-		Layout:     d.Layout,
+-		FocusOrder: []ui.Widget{d.Buttons},
+-		OnSubmit:   d.confirm,
+-		OnCancel:   d.cancel,
+-	}
+-	d.shell.syncFocus()
+-	return d
+-}
+-
+-func (d *DeleteConfirmDialog) confirm() {
+-	if d.OnConfirm != nil {
+-		d.OnConfirm()
+-	}
+-}
+-
+-func (d *DeleteConfirmDialog) cancel() {
+-	if d.OnCancel != nil {
+-		d.OnCancel()
+-	}
+-}
+-
+-func (d *DeleteConfirmDialog) Measure(c Constraints) Size              { return d.shell.Measure(c) }
+-func (d *DeleteConfirmDialog) Render(r Rect, ctx RenderContext) string { return d.shell.Render(r, ctx) }
+-func (d *DeleteConfirmDialog) RenderBuf() CellBuf                      { return d.shell.RenderBuf() }
+-func (d *DeleteConfirmDialog) HandleEvent(event input.Event) bool {
+-	if ev, ok := keyEvent(event); ok {
+-		switch strings.ToLower(ev.String()) {
+-		case "y":
+-			d.confirm()
+-			return true
+-		case "n":
+-			d.cancel()
+-			return true
++func (w *DialogWidget) moveFocus(step int) {
++	total := len(w.Fields) + 1
++	if w.focusedButton {
++		w.focusedButton = false
++		w.focusedField = len(w.Fields) - 1
++		if step > 0 {
++			w.focusedButton = true
++			return
+ 		}
+-	}
+-	return d.shell.HandleEvent(event)
+-}
+-
+-// ── 7. EditDialog ─────────────────────────────────────────────────────────────
+-
+-type EditDialog struct {
+-	PathLabel *widgets.Label
+-	Path      *widgets.TextInput
+-	Open      *widgets.Button
+-	Cancel    *widgets.Button
+-	Buttons   *widgets.ButtonRow
+-	Layout    *widgets.Grid
+-
+-	OnSubmit func(path string)
+-	OnCancel func()
+-
+-	shell dialogShell
+-}
+-
+-func NewEditDialog(path *widgets.TextInput, onSubmit func(path string), onCancel func()) *EditDialog {
+-	d := &EditDialog{
+-		PathLabel: &widgets.Label{Text: "File path"},
+-		Path:      ensureInput(path, ""),
+-		OnSubmit:  onSubmit,
+-		OnCancel:  onCancel,
+-	}
+-	d.Open = &widgets.Button{Label: "Open", Hotkey: "o", OnClick: d.submit}
+-	d.Cancel = &widgets.Button{Label: "Cancel", OnClick: d.cancel}
+-	d.Buttons = widgets.NewButtonPtrRow(d.Open, d.Cancel)
+-	d.Layout = &widgets.Grid{
+-		Columns: []widgets.Track{{Kind: widgets.TrackFraction, Value: 1}},
+-		Children: []widgets.GridChild{
+-			{Row: 0, Child: d.PathLabel},
+-			{Row: 1, Child: d.Path},
+-			{Row: 2, Child: d.Buttons},
+-		},
+-	}
+-	d.shell = dialogShell{
+-		Title:      "Edit File",
+-		MinWidth:   36,
+-		MaxWidth:   60,
+-		Layout:     d.Layout,
+-		FocusOrder: []ui.Widget{d.Path, d.Buttons},
+-		OnSubmit:   d.submit,
+-		OnCancel:   d.cancel,
+-	}
+-	d.shell.syncFocus()
+-	return d
+-}
+-
+-func (d *EditDialog) submit() {
+-	val := strings.TrimSpace(d.Path.Value())
+-	if val == "" {
+-		d.cancel()
+ 		return
+ 	}
+-	if d.OnSubmit != nil {
+-		d.OnSubmit(val)
+-	}
+-}
+-
+-func (d *EditDialog) cancel() {
+-	if d.OnCancel != nil {
+-		d.OnCancel()
+-	}
+-}
+-
+-func (d *EditDialog) Measure(c Constraints) Size              { return d.shell.Measure(c) }
+-func (d *EditDialog) Render(r Rect, ctx RenderContext) string { return d.shell.Render(r, ctx) }
+-func (d *EditDialog) RenderBuf() CellBuf                      { return d.shell.RenderBuf() }
+-func (d *EditDialog) HandleEvent(event input.Event) bool      { return d.shell.HandleEvent(event) }
+-
+-// ── 8. MountDialog ────────────────────────────────────────────────────────────
+-
+-type MountDialog struct {
+-	Interpretation *widgets.TextBlock
+-	GuestPathLabel *widgets.Label
+-	GuestPath      *widgets.TextInput
+-	Mount          *widgets.Button
+-	Cancel         *widgets.Button
+-	Buttons        *widgets.ButtonRow
+-	Layout         *widgets.Grid
+-
+-	OnSubmit func(guestPath string)
+-	OnCancel func()
+-
+-	shell dialogShell
+-}
+-
+-func NewMountDialog(guestPath *widgets.TextInput, defaultPath string, onSubmit func(guestPath string), onCancel func()) *MountDialog {
+-	d := &MountDialog{
+-		Interpretation: &widgets.TextBlock{
+-			Text: "Choose a guest path (relative paths use the current directory; ~ expands to home):",
+-		},
+-		GuestPathLabel: &widgets.Label{Text: "Guest path"},
+-		GuestPath:      ensureInput(guestPath, defaultPath),
+-		OnSubmit:       onSubmit,
+-		OnCancel:       onCancel,
+-	}
+-	d.Mount = &widgets.Button{Label: "Mount", Hotkey: "m", OnClick: d.submit}
+-	d.Cancel = &widgets.Button{Label: "Cancel", OnClick: d.cancel}
+-	d.Buttons = widgets.NewButtonPtrRow(d.Mount, d.Cancel)
+-	d.Layout = &widgets.Grid{
+-		Columns: []widgets.Track{{Kind: widgets.TrackFraction, Value: 1}},
+-		Children: []widgets.GridChild{
+-			{Row: 0, Child: d.Interpretation},
+-			{Row: 1, Child: d.GuestPathLabel},
+-			{Row: 2, Child: d.GuestPath},
+-			{Row: 3, Child: d.Buttons},
+-		},
+-	}
+-	d.shell = dialogShell{
+-		Title:      "Mount Directory",
+-		MinWidth:   48,
+-		MaxWidth:   80,
+-		Layout:     d.Layout,
+-		FocusOrder: []ui.Widget{d.GuestPath, d.Buttons},
+-		OnSubmit:   d.submit,
+-		OnCancel:   d.cancel,
+-	}
+-	d.shell.syncFocus()
+-	return d
+-}
+-
+-func (d *MountDialog) submit() {
+-	val := strings.TrimSpace(d.GuestPath.Value())
+-	if val == "" {
+-		d.cancel()
++	if len(w.Fields) == 0 {
++		w.focusedButton = true
+ 		return
+ 	}
+-	if d.OnSubmit != nil {
+-		d.OnSubmit(val)
+-	}
+-}
+-
+-func (d *MountDialog) cancel() {
+-	if d.OnCancel != nil {
+-		d.OnCancel()
+-	}
+-}
+-
+-func (d *MountDialog) Measure(c Constraints) Size              { return d.shell.Measure(c) }
+-func (d *MountDialog) Render(r Rect, ctx RenderContext) string { return d.shell.Render(r, ctx) }
+-func (d *MountDialog) RenderBuf() CellBuf                      { return d.shell.RenderBuf() }
+-func (d *MountDialog) HandleEvent(event input.Event) bool      { return d.shell.HandleEvent(event) }
+-
+-// ── 9. FindFilesDialog ────────────────────────────────────────────────────────
+-
+-type FindFilesDialog struct {
+-	Explanation      *widgets.TextBlock
+-	FindPathsLabel   *widgets.Label
+-	FindPaths        *widgets.TextInput
+-	FindContentLabel *widgets.Label
+-	FindContent      *widgets.TextInput
+-	MaxResultsLabel  *widgets.Label
+-	MaxResults       *widgets.TextInput
+-	Search           *widgets.Button
+-	Cancel           *widgets.Button
+-	Buttons          *widgets.ButtonRow
+-	Layout           *widgets.Grid
+-
+-	OnSubmit func(findPaths, findContent, maxResults string)
+-	OnCancel func()
+-
+-	shell dialogShell
+-}
+-
+-func NewFindFilesDialog(findPaths *widgets.TextInput, defaultPaths, defaultContent, defaultMaxResults string, onSubmit func(findPaths, findContent, maxResults string), onCancel func()) *FindFilesDialog {
+-	d := &FindFilesDialog{
+-		Explanation: &widgets.TextBlock{
+-			Text: "Filter paths structurally and/or search file content semantically:",
+-		},
+-		FindPathsLabel:   &widgets.Label{Text: "Find paths"},
+-		FindPaths:        ensureInput(findPaths, defaultPaths),
+-		FindContentLabel: &widgets.Label{Text: "Find content"},
+-		FindContent:      newDefaultPathInput(defaultContent),
+-		MaxResultsLabel:  &widgets.Label{Text: "Maximum results"},
+-		MaxResults:       newDefaultPathInput(defaultMaxResults),
+-		OnSubmit:         onSubmit,
+-		OnCancel:         onCancel,
+-	}
+-	d.Search = &widgets.Button{Label: "Search", Hotkey: "s", OnClick: d.submit}
+-	d.Cancel = &widgets.Button{Label: "Cancel", OnClick: d.cancel}
+-	d.Buttons = widgets.NewButtonPtrRow(d.Search, d.Cancel)
+-	d.Layout = &widgets.Grid{
+-		Columns: []widgets.Track{{Kind: widgets.TrackFraction, Value: 1}},
+-		Children: []widgets.GridChild{
+-			{Row: 0, Child: d.Explanation},
+-			{Row: 1, Child: d.FindPathsLabel},
+-			{Row: 2, Child: d.FindPaths},
+-			{Row: 3, Child: d.FindContentLabel},
+-			{Row: 4, Child: d.FindContent},
+-			{Row: 5, Child: d.MaxResultsLabel},
+-			{Row: 6, Child: d.MaxResults},
+-			{Row: 7, Child: d.Buttons},
+-		},
+-	}
+-	d.shell = dialogShell{
+-		Title:      "Find Files",
+-		MinWidth:   52,
+-		MaxWidth:   76,
+-		Layout:     d.Layout,
+-		FocusOrder: []ui.Widget{d.FindPaths, d.FindContent, d.MaxResults, d.Buttons},
+-		OnSubmit:   d.submit,
+-		OnCancel:   d.cancel,
+-	}
+-	d.shell.syncFocus()
+-	return d
+-}
+-
+-func (d *FindFilesDialog) submit() {
+-	findPaths := strings.TrimSpace(d.FindPaths.Value())
+-	findContent := strings.TrimSpace(d.FindContent.Value())
+-	maxResults := strings.TrimSpace(d.MaxResults.Value())
+-	if findPaths == "" && findContent == "" {
+-		d.cancel()
++	next := (w.focusedField + step + total) % total
++	if next == len(w.Fields) {
++		w.focusedButton = true
+ 		return
+ 	}
+-	if d.OnSubmit != nil {
+-		d.OnSubmit(findPaths, findContent, maxResults)
+-	}
+-}
+-
+-func (d *FindFilesDialog) cancel() {
+-	if d.OnCancel != nil {
+-		d.OnCancel()
+-	}
+-}
+-
+-func (d *FindFilesDialog) Measure(c Constraints) Size              { return d.shell.Measure(c) }
+-func (d *FindFilesDialog) Render(r Rect, ctx RenderContext) string { return d.shell.Render(r, ctx) }
+-func (d *FindFilesDialog) RenderBuf() CellBuf                      { return d.shell.RenderBuf() }
+-func (d *FindFilesDialog) HandleEvent(event input.Event) bool      { return d.shell.HandleEvent(event) }
+-
+-// ── 10. SettingsDialog ────────────────────────────────────────────────────────
+-
+-type SettingsValues struct {
+-	ShowPanels      bool
+-	ShowHiddenFiles bool
+-	ConfigureAI     bool
+-}
+-
+-type SettingsDialog struct {
+-	ShowPanels      *widgets.Checkbox
+-	ShowHiddenFiles *widgets.Checkbox
+-	ConfigureAI     *widgets.Checkbox
+-	PanelFrame      *widgets.Frame
+-	DisplayFrame    *widgets.Frame
+-	OK              *widgets.Button
+-	Cancel          *widgets.Button
+-	Buttons         *widgets.ButtonRow
+-	Layout          *widgets.Grid
+-
+-	OnSubmit func(SettingsValues)
+-	OnCancel func()
+-
+-	shell dialogShell
+-}
+-
+-func NewSettingsDialog(initial SettingsValues, onSubmit func(SettingsValues), onCancel func()) *SettingsDialog {
+-	d := &SettingsDialog{
+-		ShowPanels: &widgets.Checkbox{
+-			Label:   "Show file panels",
+-			Hotkey:  "p",
+-			Checked: initial.ShowPanels,
+-		},
+-		ShowHiddenFiles: &widgets.Checkbox{
+-			Label:   "Show hidden files",
+-			Hotkey:  "h",
+-			Checked: initial.ShowHiddenFiles,
+-		},
+-		ConfigureAI: &widgets.Checkbox{
+-			Label:   "Configure AI provider and model",
+-			Hotkey:  "a",
+-			Checked: initial.ConfigureAI,
+-		},
+-		OnSubmit: onSubmit,
+-		OnCancel: onCancel,
+-	}
+-	d.PanelFrame = &widgets.Frame{
+-		Title: "Panel settings",
+-		Child: &widgets.Grid{
+-			Columns: []widgets.Track{{Kind: widgets.TrackFraction, Value: 1}},
+-			Children: []widgets.GridChild{
+-				{Row: 0, Child: d.ShowPanels},
+-				{Row: 1, Child: d.ShowHiddenFiles},
+-			},
+-		},
+-	}
+-	d.DisplayFrame = &widgets.Frame{
+-		Title: "Display settings",
+-		Child: &widgets.Grid{
+-			Columns: []widgets.Track{{Kind: widgets.TrackFraction, Value: 1}},
+-			Children: []widgets.GridChild{
+-				{Row: 0, Child: d.ConfigureAI},
+-			},
+-		},
+-	}
+-	d.OK = &widgets.Button{Label: "OK", Hotkey: "o", OnClick: d.submit}
+-	d.Cancel = &widgets.Button{Label: "Cancel", Hotkey: "c", OnClick: d.cancel}
+-	d.Buttons = widgets.NewButtonPtrRow(d.OK, d.Cancel)
+-	d.Layout = &widgets.Grid{
+-		Columns: []widgets.Track{{Kind: widgets.TrackFraction, Value: 1}},
+-		Children: []widgets.GridChild{
+-			{Row: 0, Child: d.PanelFrame},
+-			{Row: 1, Child: d.DisplayFrame},
+-			{Row: 2, Child: d.Buttons},
+-		},
+-	}
+-	d.shell = dialogShell{
+-		Title:      "Settings",
+-		MinWidth:   36,
+-		MaxWidth:   56,
+-		Layout:     d.Layout,
+-		FocusOrder: []ui.Widget{d.ShowPanels, d.ShowHiddenFiles, d.ConfigureAI, d.Buttons},
+-		OnSubmit:   d.submit,
+-		OnCancel:   d.cancel,
+-	}
+-	d.shell.syncFocus()
+-	return d
+-}
+-
+-func (d *SettingsDialog) submit() {
+-	if d.OnSubmit != nil {
+-		d.OnSubmit(SettingsValues{
+-			ShowPanels:      d.ShowPanels.Checked,
+-			ShowHiddenFiles: d.ShowHiddenFiles.Checked,
+-			ConfigureAI:     d.ConfigureAI.Checked,
+-		})
+-	}
+-}
+-
+-func (d *SettingsDialog) cancel() {
+-	if d.OnCancel != nil {
+-		d.OnCancel()
+-	}
+-}
+-
+-func (d *SettingsDialog) Measure(c Constraints) Size              { return d.shell.Measure(c) }
+-func (d *SettingsDialog) Render(r Rect, ctx RenderContext) string { return d.shell.Render(r, ctx) }
+-func (d *SettingsDialog) RenderBuf() CellBuf                      { return d.shell.RenderBuf() }
+-func (d *SettingsDialog) HandleEvent(event input.Event) bool      { return d.shell.HandleEvent(event) }
+-
+-// ── 11. ErrorDialog ───────────────────────────────────────────────────────────
+-
+-type ErrorDialog struct {
+-	Message *widgets.TextBlock
+-	OK      *widgets.Button
+-	Buttons *widgets.ButtonRow
+-	Layout  *widgets.Grid
+-
+-	OnClose func()
+-
+-	shell dialogShell
+-}
+-
+-func NewErrorDialog(title, message string, onClose func()) *ErrorDialog {
+-	if title == "" {
+-		title = "Error"
+-	}
+-	d := &ErrorDialog{
+-		Message: &widgets.TextBlock{Text: message},
+-		OnClose: onClose,
+-	}
+-	d.OK = &widgets.Button{Label: "OK", Hotkey: "o", OnClick: d.close}
+-	d.Buttons = widgets.NewButtonPtrRow(d.OK)
+-	d.Layout = &widgets.Grid{
+-		Columns: []widgets.Track{{Kind: widgets.TrackFraction, Value: 1}},
+-		Children: []widgets.GridChild{
+-			{Row: 0, Child: d.Message},
+-			{Row: 1, Child: d.Buttons},
+-		},
+-	}
+-	d.shell = dialogShell{
+-		Title:      title,
+-		MinWidth:   48,
+-		MaxWidth:   80,
+-		Layout:     d.Layout,
+-		FocusOrder: []ui.Widget{d.Buttons},
+-		OnSubmit:   d.close,
+-		OnCancel:   d.close,
+-	}
+-	d.shell.syncFocus()
+-	return d
+-}
+-
+-func (d *ErrorDialog) close() {
+-	if d.OnClose != nil {
+-		d.OnClose()
+-	}
++	w.focusedField = next
+ }
+ 
+-func (d *ErrorDialog) Measure(c Constraints) Size              { return d.shell.Measure(c) }
+-func (d *ErrorDialog) Render(r Rect, ctx RenderContext) string { return d.shell.Render(r, ctx) }
+-func (d *ErrorDialog) RenderBuf() CellBuf                      { return d.shell.RenderBuf() }
+-func (d *ErrorDialog) HandleEvent(event input.Event) bool      { return d.shell.HandleEvent(event) }
+-
+-// ── 12. ProgressDialog ────────────────────────────────────────────────────────
+-
+-type ProgressDialog struct {
+-	Progress      filemanager.FileOpProgress
+-	Collision     bool
+-	CollisionPath string
+-
+-	CurrentItem     *widgets.Text
+-	ProgressBar     *widgets.ProgressBar
+-	TransferStats   *widgets.Text
+-	Cancel          *widgets.Button
+-	CancelRow       *widgets.ButtonRow
+-	CollisionPrompt *widgets.Text
+-	ConflictingItem *widgets.Text
+-	Overwrite       *widgets.Button
+-	Skip            *widgets.Button
+-	OverwriteAll    *widgets.Button
+-	SkipAll         *widgets.Button
+-	CollisionCancel *widgets.Button
+-	CollisionRow1   *widgets.ButtonRow
+-	CollisionRow2   *widgets.ButtonRow
+-	CollisionFrame  *widgets.Frame
+-	Layout          *widgets.Grid
+-
+-	OnCancel    func()
+-	OnCollision func(filemanager.CollisionChoice)
+-
+-	shell dialogShell
+-}
+-
+-func NewProgressDialog(title string, progress filemanager.FileOpProgress, onCancel func()) *ProgressDialog {
+-	d := &ProgressDialog{
+-		Progress:      progress,
+-		CurrentItem:   &widgets.Text{},
+-		ProgressBar:   &widgets.ProgressBar{},
+-		TransferStats: &widgets.Text{Style: makeStyle(colorDlgMuted, colorDlgBg, false)},
+-		OnCancel:      onCancel,
+-	}
+-	d.Cancel = &widgets.Button{Label: "Cancel", Hotkey: "c", OnClick: d.cancel}
+-	d.CancelRow = widgets.NewButtonPtrRow(d.Cancel)
+-
+-	d.CollisionPrompt = &widgets.Text{
+-		Text:  "File already exists:",
+-		Style: makeStyle(colorWarnText, colorDlgBg, true),
+-	}
+-	d.ConflictingItem = &widgets.Text{}
+-	d.Overwrite = &widgets.Button{
+-		Label:   "Overwrite",
+-		Hotkey:  "o",
+-		OnClick: func() { d.resolveCollision(filemanager.ColOverwrite) },
+-	}
+-	d.Skip = &widgets.Button{
+-		Label:   "Skip",
+-		Hotkey:  "s",
+-		OnClick: func() { d.resolveCollision(filemanager.ColSkip) },
+-	}
+-	d.OverwriteAll = &widgets.Button{
+-		Label:   "Overwrite all",
+-		Hotkey:  "a",
+-		OnClick: func() { d.resolveCollision(filemanager.ColOverwriteAll) },
+-	}
+-	d.SkipAll = &widgets.Button{
+-		Label:   "Skip all",
+-		Hotkey:  "k",
+-		OnClick: func() { d.resolveCollision(filemanager.ColSkipAll) },
+-	}
+-	d.CollisionCancel = &widgets.Button{
+-		Label:   "Cancel",
+-		Hotkey:  "c",
+-		OnClick: func() { d.resolveCollision(filemanager.ColCancel) },
+-	}
+-	d.CollisionRow1 = widgets.NewButtonPtrRow(d.Overwrite, d.Skip, d.OverwriteAll)
+-	d.CollisionRow2 = widgets.NewButtonPtrRow(d.SkipAll, d.CollisionCancel)
+-	d.CollisionFrame = &widgets.Frame{
+-		Title: "Conflict",
+-		Child: &widgets.Grid{
+-			Columns: []widgets.Track{{Kind: widgets.TrackFraction, Value: 1}},
+-			Children: []widgets.GridChild{
+-				{Row: 0, Child: d.CollisionPrompt},
+-				{Row: 1, Child: d.ConflictingItem},
+-				{Row: 2, Child: d.CollisionRow1},
+-				{Row: 3, Child: d.CollisionRow2},
+-			},
+-		},
++func (w *DialogWidget) drawBorder(buf *CellBuf, width, height int, title string) {
++	border := makeStyle(colorDlgBorder, colorDlgBg, false)
++	for x := 1; x < width-1; x++ {
++		buf.Set(x, 0, Cell{Grapheme: "─", Style: border})
++		buf.Set(x, height-1, Cell{Grapheme: "─", Style: border})
+ 	}
+-
+-	d.Layout = &widgets.Grid{
+-		Columns: []widgets.Track{{Kind: widgets.TrackFraction, Value: 1}},
+-		Children: []widgets.GridChild{
+-			{Row: 0, Child: d.CurrentItem},
+-			{Row: 1, Child: d.ProgressBar},
+-			{Row: 2, Child: d.TransferStats},
+-			{Row: 3, Child: d.CancelRow},
+-		},
+-	}
+-	d.shell = dialogShell{
+-		Title:      title,
+-		MinWidth:   48,
+-		MaxWidth:   72,
+-		Layout:     d.Layout,
+-		FocusOrder: []ui.Widget{d.CancelRow},
+-		OnSubmit:   d.cancel,
+-		OnCancel:   d.cancelOrAbortCollision,
+-	}
+-	d.syncProgressState()
+-	d.shell.syncFocus()
+-	return d
+-}
+-
+-func (d *ProgressDialog) SetProgress(progress filemanager.FileOpProgress) {
+-	if d == nil {
+-		return
++	for y := 1; y < height-1; y++ {
++		buf.Set(0, y, Cell{Grapheme: "│", Style: border})
++		buf.Set(width-1, y, Cell{Grapheme: "│", Style: border})
+ 	}
+-	d.Progress = progress
+-	d.syncProgressState()
+-}
+-
+-func (d *ProgressDialog) SetCollision(path string, onChoice func(filemanager.CollisionChoice)) {
+-	if d == nil {
+-		return
++	buf.Set(0, 0, Cell{Grapheme: "╭", Style: border})
++	buf.Set(width-1, 0, Cell{Grapheme: "╮", Style: border})
++	buf.Set(0, height-1, Cell{Grapheme: "╰", Style: border})
++	buf.Set(width-1, height-1, Cell{Grapheme: "╯", Style: border})
++	titleText := " " + title + " "
++	titleWidth := runewidth.StringWidth(titleText)
++	if titleWidth > width-4 {
++		titleText = truncateStringToWidth(titleText, width-4)
++		titleWidth = runewidth.StringWidth(titleText)
+ 	}
+-	d.Collision = true
+-	d.CollisionPath = path
+-	d.OnCollision = onChoice
+-	d.ConflictingItem.Text = filepath.Base(path)
+-	if d.ConflictingItem.Text == "" {
+-		d.ConflictingItem.Text = path
+-	}
+-	d.CollisionRow1.Index = 0
+-	d.CollisionRow2.Index = 0
+-	d.Layout.Children[3].Child = d.CollisionFrame
+-	d.shell.MinWidth = 60
+-	d.shell.MaxWidth = 88
+-	d.shell.FocusOrder = []ui.Widget{d.CollisionRow1, d.CollisionRow2}
+-	d.shell.FocusIndex = 0
+-	d.shell.syncFocus()
++	start := max(1, (width-titleWidth)/2)
++	drawText(buf, start, 0, titleText, min(titleWidth, width-start-1), makeStyle(colorBtnFg, colorDlgBorder, true))
+ }
+ 
+-func (d *ProgressDialog) ClearCollision() {
+-	if d == nil {
++func drawText(buf *CellBuf, x, y int, text string, maxWidth int, style terminal.Style) {
++	if y < 0 || y >= buf.Height || maxWidth <= 0 {
+ 		return
+ 	}
+-	d.Collision = false
+-	d.CollisionPath = ""
+-	d.OnCollision = nil
+-	d.ConflictingItem.Text = ""
+-	d.Layout.Children[3].Child = d.CancelRow
+-	d.shell.MinWidth = 48
+-	d.shell.MaxWidth = 72
+-	d.shell.FocusOrder = []ui.Widget{d.CancelRow}
+-	d.shell.FocusIndex = 0
+-	d.shell.syncFocus()
+-}
+-
+-func (d *ProgressDialog) resolveCollision(choice filemanager.CollisionChoice) {
+-	callback := d.OnCollision
+-	d.ClearCollision()
+-	if callback != nil {
+-		callback(choice)
++	col := x
++	for _, r := range text {
++		width := runewidth.RuneWidth(r)
++		if width <= 0 {
++			continue
++		}
++		if col+width > x+maxWidth || col+width > buf.Width {
++			return
++		}
++		buf.Set(col, y, Cell{Grapheme: string(r), Style: style})
++		for i := 1; i < width; i++ {
++			buf.Set(col+i, y, Cell{Grapheme: "", Style: style})
++		}
++		col += width
+ 	}
+ }
+ 
+-func (d *ProgressDialog) cancel() {
+-	if d.OnCancel != nil {
+-		d.OnCancel()
+-	}
+-}
++func wrapTextRows(text string, width int) int { return len(wrapText(text, width)) }
+ 
+-func (d *ProgressDialog) cancelOrAbortCollision() {
+-	if d.Collision {
+-		d.resolveCollision(filemanager.ColCancel)
+-		return
++func wrapText(text string, width int) []string {
++	if width < 1 {
++		width = 1
+ 	}
+-	d.cancel()
+-}
+-
+-func (d *ProgressDialog) syncProgressState() {
+-	if d == nil {
+-		return
++	var rows []string
++	for _, paragraph := range strings.Split(text, "\n") {
++		words := strings.Fields(paragraph)
++		if len(words) == 0 {
++			rows = append(rows, "")
++			continue
++		}
++		line := ""
++		for _, word := range words {
++			if line == "" {
++				line = truncateStringToWidth(word, width)
++				continue
++			}
++			candidate := line + " " + word
++			if runewidth.StringWidth(candidate) <= width {
++				line = candidate
++			} else {
++				rows = append(rows, line)
++				line = truncateStringToWidth(word, width)
++			}
++		}
++		rows = append(rows, line)
+ 	}
+-	d.CurrentItem.Text = d.Progress.Current
+-	d.ProgressBar.Done = d.Progress.Done
+-	d.ProgressBar.Total = d.Progress.Total
+-	d.ProgressBar.Rate = d.Progress.BytesPerSec
+-	d.TransferStats.Text = fmt.Sprintf(
+-		"%s / %s  %s/s",
+-		FormatBytes(d.Progress.Done),
+-		FormatBytes(d.Progress.Total),
+-		FormatBytes(d.Progress.BytesPerSec),
+-	)
+-}
+-
+-func (d *ProgressDialog) Measure(c Constraints) Size {
+-	d.syncProgressState()
+-	return d.shell.Measure(c)
+-}
+-
+-func (d *ProgressDialog) Render(r Rect, ctx RenderContext) string {
+-	d.syncProgressState()
+-	return d.shell.Render(r, ctx)
++	return rows
+ }
+ 
+-func (d *ProgressDialog) RenderBuf() CellBuf {
+-	d.syncProgressState()
+-	return d.shell.RenderBuf()
+-}
+-
+-func (d *ProgressDialog) HandleEvent(event input.Event) bool {
+-	if d == nil {
+-		return false
++func makeStyle(fg, bg terminal.Color, bold bool) terminal.Style {
++	attrs := terminal.CharAttributes(0)
++	if bold {
++		attrs |= terminal.CharBold
+ 	}
+-	d.syncProgressState()
+-	return d.shell.HandleEvent(event)
++	return terminal.NewStyle(fg, bg, attrs)
+ }
+ 
+ func keyEvent(event input.Event) (input.KeyPressEvent, bool) {
+@@ -1661,6 +855,15 @@ func keyEvent(event input.Event) (input.KeyPressEvent, bool) {
+ 	return input.KeyPressEvent{}, false
+ }
+ 
++var _ Widget = (*DialogWidget)(nil)
++
++func pctOf(done, total int64) int {
++	if total <= 0 {
++		return 0
++	}
++	return max(0, min(100, int(done*100/total)))
++}
++
+ func FormatBytes(n int64) string {
+ 	const unit = 1024
+ 	if n < unit {
+@@ -1685,17 +888,11 @@ func SummarizeSources(sources []string) string {
+ 	return fmt.Sprintf("%d items", len(sources))
+ }
+ 
+-var (
+-	_ Widget = (*MkdirDialog)(nil)
+-	_ Widget = (*RenameDialog)(nil)
+-	_ Widget = (*CopyDialog)(nil)
+-	_ Widget = (*MoveDialog)(nil)
+-	_ Widget = (*DeletePathDialog)(nil)
+-	_ Widget = (*DeleteConfirmDialog)(nil)
+-	_ Widget = (*EditDialog)(nil)
+-	_ Widget = (*MountDialog)(nil)
+-	_ Widget = (*FindFilesDialog)(nil)
+-	_ Widget = (*SettingsDialog)(nil)
+-	_ Widget = (*ErrorDialog)(nil)
+-	_ Widget = (*ProgressDialog)(nil)
+-)
++func renderProgressBarText(percentage int, width int) string {
++	if width < 0 {
++		width = 0
++	}
++	percentage = max(0, min(100, percentage))
++	filled := width * percentage / 100
++	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
++}
+diff --git a/kabibi/ui/dialog/dialog_test.go b/kabibi/ui/dialog/dialog_test.go
+index 3a47a94..0fb40a4 100644
+--- a/kabibi/ui/dialog/dialog_test.go
++++ b/kabibi/ui/dialog/dialog_test.go
+@@ -20,163 +20,192 @@ func renderDialogANSIForTest(t *testing.T, text string, width, height int) (term
+ 	return buf, cursor
+ }
+ 
+-func bufText(buf terminal.CellBuf) string {
+-	var output strings.Builder
+-	for y := 0; y < buf.Height; y++ {
+-		for x := 0; x < buf.Width; x++ {
+-			output.WriteString(buf.Get(x, y).Grapheme)
+-		}
+-		output.WriteByte('\n')
++func TestOpenInputDialog(t *testing.T) {
++	d := NewInputDialog(ActionMkdir, "Create Dir", "Enter directory name:", "newdir", nil)
++	if d == nil {
++		t.Fatal("NewInputDialog returned nil")
++	}
++	if d.Kind != DialogInput {
++		t.Errorf("Kind = %d, want %d", d.Kind, DialogInput)
++	}
++	if d.Title != "Create Dir" {
++		t.Errorf("Title = %q, want %q", d.Title, "Create Dir")
++	}
++	if d.Prompt != "Enter directory name:" {
++		t.Errorf("Prompt = %q, want %q", d.Prompt, "Enter directory name:")
++	}
++	if d.InputValue != "newdir" {
++		t.Errorf("InputValue = %q, want %q", d.InputValue, "newdir")
+ 	}
+-	return output.String()
+ }
+ 
+-func TestMkdirDialogAcceptsInputAndRendersLabel(t *testing.T) {
+-	var submitted string
+-	d := NewMkdirDialog(nil, func(dir string) {
+-		submitted = dir
+-	}, nil)
+-	for _, r := range "myname" {
+-		d.HandleEvent(input.KeyPressEvent{Code: r, Text: string(r)})
+-	}
+-	size := d.Measure(Constraints{MaxW: 80, MaxH: 24})
+-	buf, cursor := renderDialogANSIForTest(t, d.Render(Rect{W: size.W, H: size.H}, RenderContext{Focused: true}), size.W, size.H)
+-	text := bufText(buf)
+-	if !strings.Contains(text, "Create directory:") {
+-		t.Fatalf("MkdirDialog missing prompt label: %q", text)
++func TestOpenConfirmDialog(t *testing.T) {
++	d := NewConfirmDialog(ActionDelete, "Confirm", "Really delete?", nil)
++	if d == nil {
++		t.Fatal("NewConfirmDialog returned nil")
+ 	}
+-	if !cursor.Visible {
+-		t.Fatal("MkdirDialog input cursor should be visible when focused")
++	if d.Kind != DialogConfirm {
++		t.Errorf("Kind = %d, want %d", d.Kind, DialogConfirm)
+ 	}
++}
+ 
+-	d.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
+-	if submitted != "myname" {
+-		t.Fatalf("submitted = %q, want %q", submitted, "myname")
++func TestOpenChoiceDialog(t *testing.T) {
++	choices := []Choice{
++		{Label: "Overwrite", Hotkey: "o"},
++		{Label: "Skip", Hotkey: "s"},
++	}
++	d := NewChoiceDialog("Collision", "File exists", choices, nil)
++	if d == nil {
++		t.Fatal("NewChoiceDialog returned nil")
++	}
++	if d.Kind != DialogChoice {
++		t.Errorf("Kind = %d, want %d", d.Kind, DialogChoice)
++	}
++	if len(d.Choices) != 2 {
++		t.Errorf("len(Choices) = %d, want 2", len(d.Choices))
+ 	}
+ }
+ 
+-func TestDeleteConfirmDialogDefaultsToCancelAndSupportsHotkeys(t *testing.T) {
+-	confirmed := false
+-	canceled := false
+-	d := NewDeleteConfirmDialog("target.txt", func() {
+-		confirmed = true
+-	}, func() {
+-		canceled = true
++func TestUpdateChoiceHotkey(t *testing.T) {
++	picked := -1
++	d := NewChoiceDialog("Test", "Pick", []Choice{
++		{Label: "First", Hotkey: "f"},
++		{Label: "Second", Hotkey: "s"},
++	}, func(idx int) {
++		picked = idx
+ 	})
+-	if d.Buttons.Index != 1 {
+-		t.Fatalf("initial button index = %d, want 1 (Cancel)", d.Buttons.Index)
+-	}
+ 
+-	d.HandleEvent(input.KeyPressEvent{Code: 'y', Text: "y"})
+-	if !confirmed || canceled {
+-		t.Fatalf("hotkey 'y' confirmed=%v canceled=%v, want true/false", confirmed, canceled)
++	d.HandleEvent(input.KeyPressEvent{Code: 's', Text: "s"})
++	if picked != 1 {
++		t.Errorf("hotkey 's' picked = %d, want 1", picked)
+ 	}
+ }
+ 
+-func TestCopyPathDialogTabFocusAndSubmit(t *testing.T) {
+-	var gotSrc, gotDst string
+-	d := NewCopyPathDialog(nil, nil, func(source, destination string) {
+-		gotSrc = source
+-		gotDst = destination
++func TestUpdateChoiceArrows(t *testing.T) {
++	d := NewChoiceDialog("Test", "Pick", []Choice{
++		{Label: "First", Hotkey: "f"},
++		{Label: "Second", Hotkey: "s"},
++		{Label: "Third", Hotkey: "t"},
+ 	}, nil)
+-	d.Source.SetValue("a")
+-	d.Destination.SetValue("b")
+ 
+-	if !d.HandleEvent(input.KeyPressEvent{Code: input.KeyTab}) {
+-		t.Fatal("Tab was not consumed")
++	if d.ChoiceIdx != 0 {
++		t.Fatalf("initial ChoiceIdx = %d, want 0", d.ChoiceIdx)
+ 	}
+-	d.Destination.SetValue("x")
+-	d.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
+-	if gotSrc != "a" || gotDst != "x" {
+-		t.Fatalf("submitted = (%q, %q), want (\"a\", \"x\")", gotSrc, gotDst)
++	d.HandleEvent(input.KeyPressEvent{Code: input.KeyDown})
++	if d.ChoiceIdx != 1 {
++		t.Errorf("after Down ChoiceIdx = %d, want 1", d.ChoiceIdx)
++	}
++	d.HandleEvent(input.KeyPressEvent{Code: input.KeyUp})
++	if d.ChoiceIdx != 0 {
++		t.Errorf("after Up ChoiceIdx = %d, want 0", d.ChoiceIdx)
+ 	}
+ }
+ 
+-func TestConcreteDialogsMeasureWithinSmallAndLargeConstraints(t *testing.T) {
+-	dialogs := []Widget{
+-		NewMkdirDialog(nil, nil, nil),
+-		NewRenameSelectedDialog("old.txt", nil, nil, nil),
+-		NewRenamePathDialog(nil, nil, nil, nil),
+-		NewCopySelectedDialog("file.txt", nil, nil, nil),
+-		NewCopyPathDialog(nil, nil, nil, nil),
+-		NewMoveSelectedDialog("file.txt", nil, nil, nil),
+-		NewMovePathDialog(nil, nil, nil, nil),
+-		NewDeletePathDialog(nil, nil, nil),
+-		NewDeleteConfirmDialog("file.txt", nil, nil),
+-		NewEditDialog(nil, nil, nil),
+-		NewMountDialog(nil, "/workspace", nil, nil),
+-		NewFindFilesDialog(nil, "**", "", "20", nil, nil),
+-		NewSettingsDialog(SettingsValues{}, nil, nil),
+-		NewErrorDialog("Slash Command Error", "unknown slash command \"/set\"", nil),
+-		NewProgressDialog("Copying", filemanager.FileOpProgress{Current: "a.txt", Done: 5, Total: 10}, nil),
+-	}
+-
+-	for _, dlg := range dialogs {
+-		for _, constraints := range []Constraints{
+-			{MaxW: 24, MaxH: 8},
+-			{MaxW: 80, MaxH: 24},
+-			{MaxW: 120, MaxH: 40},
+-		} {
+-			size := dlg.Measure(constraints)
+-			if size.W > constraints.MaxW || size.H > constraints.MaxH || size.W < 1 || size.H < 1 {
+-				t.Fatalf("%T.Measure(%+v) = %+v, outside constraints", dlg, constraints, size)
+-			}
+-			buf, _ := renderDialogANSIForTest(t, dlg.Render(Rect{W: size.W, H: size.H}, RenderContext{Focused: true}), size.W, size.H)
+-			if buf.Width != size.W || buf.Height != size.H {
+-				t.Fatalf("%T.Render size = %dx%d, want %dx%d", dlg, buf.Width, buf.Height, size.W, size.H)
+-			}
++func TestUpdateChoiceEsc(t *testing.T) {
++	handlerCalled := false
++	d := NewChoiceDialog("Test", "Pick", []Choice{
++		{Label: "OK", Hotkey: "o"},
++		{Label: "Cancel", Hotkey: "c"},
++	}, func(idx int) {
++		handlerCalled = true
++		if idx != -1 {
++			t.Errorf("Esc should pass idx=-1, got %d", idx)
+ 		}
++	})
++
++	d.HandleEvent(input.KeyPressEvent{Code: input.KeyEscape})
++	if !handlerCalled {
++		t.Errorf("Esc did not call handler")
+ 	}
+ }
+ 
+-func TestDialogStableWidthDoesNotResizeOnTyping(t *testing.T) {
+-	d := NewMkdirDialog(nil, nil, nil)
+-	before := d.Measure(Constraints{MaxW: 80, MaxH: 24})
+-	for _, r := range "a_very_long_directory_name_that_scrolls_horizontally_inside_input_without_changing_dialog_width" {
++func TestAcceptInput(t *testing.T) {
++	var submitted string
++	d := NewInputDialog(ActionMkdir, "Create", "Name:", "", nil)
++	d.OnSubmitInput = func(_ DialogAction, val string, _ *filemanager.FileOp) {
++		submitted = val
++	}
++	for _, r := range "myname" {
+ 		d.HandleEvent(input.KeyPressEvent{Code: r, Text: string(r)})
+ 	}
+-	after := d.Measure(Constraints{MaxW: 80, MaxH: 24})
+-	if before != after {
+-		t.Fatalf("dialog resized while typing: before=%+v after=%+v", before, after)
++	d.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
++	if submitted != "myname" {
++		t.Errorf("submitted = %q, want %q", submitted, "myname")
+ 	}
+ }
+ 
+-func TestSettingsDialogFramesAndCheckboxToggles(t *testing.T) {
+-	var submitted SettingsValues
+-	d := NewSettingsDialog(SettingsValues{ShowPanels: false}, func(v SettingsValues) {
+-		submitted = v
++func TestDialogWidgetRender(t *testing.T) {
++	d := NewChoiceDialog("Collision", "File exists", []Choice{
++		{Label: "Overwrite", Hotkey: "o"},
++		{Label: "Skip", Hotkey: "s"},
+ 	}, nil)
+-	size := d.Measure(Constraints{MaxW: 80, MaxH: 24})
+-	buf, _ := renderDialogANSIForTest(t, d.Render(Rect{W: size.W, H: size.H}, RenderContext{Focused: true}), size.W, size.H)
+-	text := bufText(buf)
+-	if !strings.Contains(text, "Panel settings") || !strings.Contains(text, "Display settings") {
+-		t.Fatalf("SettingsDialog missing grouped frame titles: %q", text)
++
++	buf := d.RenderBuf()
++	if buf.Width <= 0 || buf.Height <= 0 {
++		t.Fatalf("DialogWidget rendered empty buffer: %#v", buf)
+ 	}
+ 
+-	d.HandleEvent(input.KeyPressEvent{Code: input.KeySpace})
++	var output strings.Builder
++	for y := 0; y < buf.Height; y++ {
++		for x := 0; x < buf.Width; x++ {
++			output.WriteString(buf.Get(x, y).Grapheme)
++		}
++	}
++	out := output.String()
++	if !strings.Contains(out, "Overwrite") || !strings.Contains(out, "Skip") {
++		t.Fatalf("DialogWidget output missing expected choices: %q", out)
++	}
++}
++
++func TestDialogMeasuresWithinSmallAndLargeConstraints(t *testing.T) {
++	d := NewFormDialog(ActionCopy, "Copy", "Enter source and destination paths:",
++		[]string{"Source", "Destination"}, []string{"", "."}, nil)
++	for _, constraints := range []Constraints{
++		{MaxW: 24, MaxH: 8},
++		{MaxW: 120, MaxH: 40},
++	} {
++		size := d.Measure(constraints)
++		if size.W > constraints.MaxW || size.H > constraints.MaxH || size.W < 1 || size.H < 1 {
++			t.Fatalf("Measure(%+v) = %+v, outside constraints", constraints, size)
++		}
++		buf, cursor := renderDialogANSIForTest(t, d.Render(Rect{W: size.W, H: size.H}, RenderContext{Focused: true}), size.W, size.H)
++		if buf.Width != size.W || buf.Height != size.H {
++			t.Fatalf("Render size = %dx%d, want %dx%d", buf.Width, buf.Height, size.W, size.H)
++		}
++		if constraints.MaxW > 24 && !cursor.Visible {
++			t.Fatal("focused input dialog did not return its input cursor")
++		}
++	}
++}
++
++func TestMultiFieldDialogTabFocusAndSubmit(t *testing.T) {
++	var submitted []string
++	d := NewFormDialog(ActionCopy, "Copy", "Paths:",
++		[]string{"Source", "Destination"}, []string{"a", "b"}, nil)
++	d.OnSubmitForm = func(_ DialogAction, values []string, _ *filemanager.FileOp) {
++		submitted = values
++	}
++	if !d.HandleEvent(input.KeyPressEvent{Code: input.KeyTab}) {
++		t.Fatal("Tab was not consumed")
++	}
++	d.HandleEvent(input.KeyPressEvent{Code: 'x', Text: "x"})
+ 	d.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
+-	if !submitted.ShowPanels {
+-		t.Fatalf("SettingsDialog did not submit toggled ShowPanels checkbox: %+v", submitted)
++	if len(submitted) != 2 || submitted[0] != "a" || submitted[1] != "x" {
++		t.Fatalf("submitted values = %#v, want [a x]", submitted)
+ 	}
+ }
+ 
+-func TestProgressCollisionFrameExpandsInPlaceAndResolves(t *testing.T) {
+-	d := NewProgressDialog("Copying", filemanager.FileOpProgress{Current: "dir/file.txt", Done: 5, Total: 10}, nil)
+-	before := d.Measure(Constraints{MaxW: 100, MaxH: 24})
++func TestProgressCollisionExpandsInPlaceAndResolves(t *testing.T) {
++	d := NewProgressDialog("Copying", filemanager.FileOpProgress{Done: 5, Total: 10}, nil)
++	before := d.Measure(Constraints{MaxW: 80, MaxH: 24})
+ 	var selected filemanager.CollisionChoice
+ 	d.SetCollision("target/file.txt", func(choice filemanager.CollisionChoice) {
+ 		selected = choice
+ 	})
+-	after := d.Measure(Constraints{MaxW: 100, MaxH: 24})
+-	if !d.Collision || after.H <= before.H || after.W <= before.W {
+-		t.Fatalf("collision state did not expand into CollisionFrame profile: before=%+v after=%+v", before, after)
+-	}
+-	buf, _ := renderDialogANSIForTest(t, d.Render(Rect{W: after.W, H: after.H}, RenderContext{Focused: true}), after.W, after.H)
+-	text := bufText(buf)
+-	if !strings.Contains(text, "File already exists:") || !strings.Contains(text, "file.txt") || !strings.Contains(text, "Skip all") {
+-		t.Fatalf("ProgressDialog collision frame missing expected text: %q", text)
++	after := d.Measure(Constraints{MaxW: 80, MaxH: 24})
++	if !d.Collision || after.H <= before.H {
++		t.Fatalf("collision state did not expand: before=%+v after=%+v", before, after)
+ 	}
+-
+ 	d.HandleEvent(input.KeyPressEvent{Code: 'k', Text: "k"})
+ 	if d.Collision {
+ 		t.Fatal("collision state was not cleared after selecting Skip all")
+diff --git a/kabibi/ui/host.go b/kabibi/ui/host.go
+index c073129..153158e 100644
+--- a/kabibi/ui/host.go
++++ b/kabibi/ui/host.go
+@@ -3,7 +3,6 @@ package ui
+ import (
+ 	"bufio"
+ 	"fmt"
+-	"image/color"
+ 	"io"
+ 	"os"
+ 	"os/signal"
+@@ -11,7 +10,6 @@ import (
+ 	"strings"
+ 	"sync"
+ 	"sync/atomic"
+-	"time"
+ 	"unicode"
+ 
+ 	"github.com/charmbracelet/x/ansi"
+@@ -20,8 +18,6 @@ import (
+ 	"github.com/mavity/rusticated/kabibi/ui/terminal"
+ )
+ 
+-const themeQueryInterval = time.Second
+-
+ const kittyKeyboardFlags = ansi.KittyDisambiguateEscapeCodes |
+ 	ansi.KittyReportAlternateKeys |
+ 	ansi.KittyReportAllKeysAsEscapeCodes |
+@@ -78,10 +74,6 @@ type Host struct {
+ 	msgCh         chan hostMsg
+ 	stopCh        chan struct{}
+ 	prevTermState *term.State // holds the saved terminal state needed to restore cooked mode on exit.
+-
+-	theme            Theme
+-	queryThemeColors bool
+-	lastThemeQuery   time.Time
+ }
+ 
+ // handleSignals installs platform-specific signal handlers.
+@@ -100,10 +92,6 @@ func NewHost(root Widget, verbose bool) *Host {
+ 		out:     bufio.NewWriterSize(os.Stdout, 64*1024),
+ 		msgCh:   make(chan hostMsg, 256),
+ 		stopCh:  make(chan struct{}),
+-		theme: Theme{
+-			DefaultForeground: 0xE5E5E5,
+-			DefaultBackground: 0x000000,
+-		},
+ 	}
+ }
+ 
+@@ -214,7 +202,6 @@ func (h *Host) runCore(
+ 		}
+ 	}
+ 	h.prevTermState = state
+-	h.queryThemeColors = true
+ 	h.out.WriteString("\x1b[?1006l\x1b[?1000l")
+ 	h.out.Flush()
+ 	if _, err = h.out.WriteString(ansi.PushKittyKeyboard(kittyKeyboardFlags)); err != nil {
+@@ -372,12 +359,6 @@ func (h *Host) handleHostMsg(
+ ) {
+ 	switch msg.kind {
+ 	case hostMsgInput:
+-		if handled, changed := h.handleThemeColorEvent(msg.inputEvent); handled {
+-			if changed {
+-				*needsRender = true
+-			}
+-			return
+-		}
+ 		if h.root.HandleEvent(msg.inputEvent) {
+ 			*needsRender = true
+ 		}
+@@ -390,49 +371,6 @@ func (h *Host) handleHostMsg(
+ 	}
+ }
+ 
+-func (h *Host) handleThemeColorEvent(ev input.Event) (handled bool, changed bool) {
+-	switch c := ev.(type) {
+-	case input.ForegroundColorEvent:
+-		if rgb, ok := colorToTerminalColor(c.Color); ok {
+-			h.mu.Lock()
+-			changed = !h.theme.HasDefaultFG || h.theme.DefaultForeground != rgb
+-			h.theme.DefaultForeground = rgb
+-			h.theme.HasDefaultFG = true
+-			h.mu.Unlock()
+-		}
+-		return true, changed
+-	case *input.ForegroundColorEvent:
+-		if c != nil {
+-			return h.handleThemeColorEvent(*c)
+-		}
+-		return true, false
+-	case input.BackgroundColorEvent:
+-		if rgb, ok := colorToTerminalColor(c.Color); ok {
+-			h.mu.Lock()
+-			changed = !h.theme.HasDefaultBG || h.theme.DefaultBackground != rgb
+-			h.theme.DefaultBackground = rgb
+-			h.theme.HasDefaultBG = true
+-			h.mu.Unlock()
+-		}
+-		return true, changed
+-	case *input.BackgroundColorEvent:
+-		if c != nil {
+-			return h.handleThemeColorEvent(*c)
+-		}
+-		return true, false
+-	default:
+-		return false, false
+-	}
+-}
+-
+-func colorToTerminalColor(c color.Color) (terminal.Color, bool) {
+-	if c == nil {
+-		return 0, false
+-	}
+-	r, g, b, _ := c.RGBA()
+-	return terminal.Color((uint32(r>>8)&0xFF)<<16 | (uint32(g>>8)&0xFF)<<8 | (uint32(b>>8) & 0xFF)), true
+-}
+-
+ func (h *Host) sendMsg(msg hostMsg) {
+ 	if h.stopCh != nil {
+ 		select {
+@@ -509,7 +447,6 @@ func (h *Host) renderRootFrame(width, height int) (terminal.CellBuf, terminal.Cu
+ 			OnError: func(err error) {
+ 				fmt.Fprintf(os.Stderr, "[kabibi] compose child widget: %v\n", err)
+ 			},
+-			Theme: h.theme,
+ 		},
+ 	)
+ 	frame, cursor, extent, err := h.frameVT.RenderANSIForComposition(renderedANSI, width, height)
+@@ -779,7 +716,6 @@ func (h *Host) emitDirtyRegion(lineMin, lineMax int) {
+ 	sb.WriteString("\x1b[0m\x1b[2K")
+ 	sb.WriteString(subAnsi)
+ 	appendCursorPos(&sb, lineMax, h.cursorX, h.cursorY, h.cursorVisible)
+-	h.appendThrottledThemeQuery(&sb)
+ 
+ 	// 4. Emit the entire frame in a single WriteString and Flush.
+ 	h.out.WriteString(sb.String())
+@@ -789,19 +725,6 @@ func (h *Host) emitDirtyRegion(lineMin, lineMax int) {
+ 	}
+ }
+ 
+-func (h *Host) appendThrottledThemeQuery(sb *strings.Builder) {
+-	if !h.queryThemeColors {
+-		return
+-	}
+-	now := time.Now()
+-	if !h.lastThemeQuery.IsZero() && now.Sub(h.lastThemeQuery) < themeQueryInterval {
+-		return
+-	}
+-	h.lastThemeQuery = now
+-	sb.WriteString(ansi.RequestForegroundColor)
+-	sb.WriteString(ansi.RequestBackgroundColor)
+-}
+-
+ func (h *Host) emitCursorOnly() {
+ 	fromRow := 0
+ 	if h.hasRenderedOnce {
+diff --git a/kabibi/ui/host_test.go b/kabibi/ui/host_test.go
+index 4402aae..f3466ac 100644
+--- a/kabibi/ui/host_test.go
++++ b/kabibi/ui/host_test.go
+@@ -4,7 +4,6 @@ import (
+ 	"bufio"
+ 	"bytes"
+ 	"errors"
+-	"image/color"
+ 	"io"
+ 	"os"
+ 	"strings"
+@@ -24,7 +23,6 @@ type recordingWidget struct {
+ 	buf       terminal.CellBuf
+ 	handled   bool
+ 	lastEvent input.Event
+-	lastTheme Theme
+ }
+ 
+ type errReader struct{ err error }
+@@ -38,7 +36,6 @@ func (w *recordingWidget) Measure(c Constraints) Size {
+ }
+ 
+ func (w *recordingWidget) Render(r terminal.Rect, ctx RenderContext) string {
+-	w.lastTheme = ctx.Theme
+ 	buf := terminal.NewCellBuf(r.W, r.H)
+ 	for y := 0; y < r.H; y++ {
+ 		for x := 0; x < r.W; x++ {
+@@ -553,65 +550,3 @@ func TestProcessLoop_CoalescesRedrawsUnderBurst(t *testing.T) {
+ 		t.Fatalf("processLoop did not measure root widget with expected dimensions; got (%d, %d)", widget.measureW, widget.measureH)
+ 	}
+ }
+-
+-func TestHost_ThrottledThemeQueryAndColorEventsThreadIntoRenderContext(t *testing.T) {
+-	var out bytes.Buffer
+-	widget := &recordingWidget{}
+-	h := NewHost(widget, false)
+-	h.out = bufio.NewWriter(&out)
+-	h.queryThemeColors = true
+-
+-	sizeFn := func(uintptr) (int, int, error) { return 10, 5, nil }
+-	h.runFrame(sizeFn)
+-	firstFrame := out.String()
+-	if !strings.Contains(firstFrame, ansi.RequestForegroundColor) || !strings.Contains(firstFrame, ansi.RequestBackgroundColor) {
+-		t.Fatalf("first frame did not emit OSC 10/11 queries: %q", firstFrame)
+-	}
+-
+-	// Second redraw within 1s must not re-emit OSC 10/11 queries
+-	out.Reset()
+-	widget.cursor = CursorPos{X: 2, Y: 1, Visible: true}
+-	h.currBuf = terminal.NewCellBuf(10, 5)
+-	h.runFrame(sizeFn)
+-	if strings.Contains(out.String(), ansi.RequestForegroundColor) {
+-		t.Fatalf("second frame within 1s re-emitted OSC 10 query: %q", out.String())
+-	}
+-
+-	// ForegroundColorEvent and BackgroundColorEvent update Theme and trigger redraw only when changed
+-	needsRender := false
+-	h.handleHostMsg(hostMsg{
+-		kind:       hostMsgInput,
+-		inputEvent: input.ForegroundColorEvent{Color: color.RGBA{R: 0x12, G: 0x34, B: 0x56, A: 0xFF}},
+-	}, &needsRender, sizeFn)
+-	if !needsRender {
+-		t.Fatal("changed ForegroundColorEvent did not mark needsRender=true")
+-	}
+-	if widget.handled {
+-		t.Fatal("ForegroundColorEvent was forwarded to root.HandleEvent")
+-	}
+-
+-	needsRender = false
+-	h.handleHostMsg(hostMsg{
+-		kind:       hostMsgInput,
+-		inputEvent: input.ForegroundColorEvent{Color: color.RGBA{R: 0x12, G: 0x34, B: 0x56, A: 0xFF}},
+-	}, &needsRender, sizeFn)
+-	if needsRender {
+-		t.Fatal("unchanged ForegroundColorEvent triggered redundant redraw")
+-	}
+-
+-	h.handleHostMsg(hostMsg{
+-		kind:       hostMsgInput,
+-		inputEvent: input.BackgroundColorEvent{Color: color.RGBA{R: 0xFA, G: 0xF4, B: 0xE8, A: 0xFF}},
+-	}, &needsRender, sizeFn)
+-	if !needsRender {
+-		t.Fatal("changed BackgroundColorEvent did not mark needsRender=true")
+-	}
+-
+-	h.runFrame(sizeFn)
+-	if got, want := widget.lastTheme.DefaultForeground, terminal.Color(0x123456); got != want {
+-		t.Fatalf("RenderContext.Theme.DefaultForeground = %#06x, want %#06x", got, want)
+-	}
+-	if got, want := widget.lastTheme.DefaultBackground, terminal.Color(0xFAF4E8); got != want {
+-		t.Fatalf("RenderContext.Theme.DefaultBackground = %#06x, want %#06x", got, want)
+-	}
+-}
+diff --git a/kabibi/ui/widget.go b/kabibi/ui/widget.go
+index e59825d..5b3dbae 100644
+--- a/kabibi/ui/widget.go
++++ b/kabibi/ui/widget.go
+@@ -29,38 +29,11 @@ type Size struct{ W, H int }
+ // InvalidateFunc is called by a widget to request a host redraw.
+ type InvalidateFunc func()
+ 
+-// Theme carries terminal-level color defaults threaded through RenderContext.
+-type Theme struct {
+-	DefaultForeground terminal.Color
+-	DefaultBackground terminal.Color
+-	HasDefaultFG      bool
+-	HasDefaultBG      bool
+-}
+-
+-// EffectiveForeground returns DefaultForeground, or the standard light-gray
+-// fallback (0xE5E5E5) when no foreground color has been reported yet.
+-func (t Theme) EffectiveForeground() terminal.Color {
+-	if t.HasDefaultFG || t.DefaultForeground != 0 {
+-		return t.DefaultForeground
+-	}
+-	return 0xE5E5E5
+-}
+-
+-// EffectiveBackground returns DefaultBackground, or black (0x000000) when no
+-// background color has been reported yet.
+-func (t Theme) EffectiveBackground() terminal.Color {
+-	if t.HasDefaultBG || t.DefaultBackground != 0 {
+-		return t.DefaultBackground
+-	}
+-	return 0x000000
+-}
+-
+ // RenderContext is threaded top-down through the widget tree during Render.
+ type RenderContext struct {
+ 	Focused    bool
+ 	Invalidate InvalidateFunc
+ 	OnError    func(error)
+-	Theme      Theme
+ }
+ 
+ // ForChild returns context for a child whose focus is constrained by its parent.
+diff --git a/kabibi/ui/widgets/button.go b/kabibi/ui/widgets/button.go
+deleted file mode 100644
+index 784dec2..0000000
+--- a/kabibi/ui/widgets/button.go
++++ /dev/null
+@@ -1,277 +0,0 @@
+-package widgets
+-
+-import (
+-	"strings"
+-
+-	"github.com/charmbracelet/x/input"
+-	"github.com/mattn/go-runewidth"
+-	"github.com/mavity/rusticated/kabibi/ui"
+-	"github.com/mavity/rusticated/kabibi/ui/terminal"
+-)
+-
+-type Button struct {
+-	Label    string
+-	Hotkey   string
+-	Disabled bool
+-	OnPress  func()
+-	OnClick  func()
+-}
+-
+-func (b *Button) Activate() {
+-	if b == nil || b.Disabled {
+-		return
+-	}
+-	if b.OnClick != nil {
+-		b.OnClick()
+-	}
+-	if b.OnPress != nil {
+-		b.OnPress()
+-	}
+-}
+-
+-type ButtonStyles struct {
+-	Normal   terminal.Style
+-	Focused  terminal.Style
+-	Disabled terminal.Style
+-}
+-
+-type ButtonRow struct {
+-	Buttons []Button
+-	Items   []*Button
+-	Index   int
+-	Styles  ButtonStyles
+-}
+-
+-func NewButtonRow(buttons []Button) *ButtonRow {
+-	return &ButtonRow{Buttons: append([]Button(nil), buttons...)}
+-}
+-
+-func NewButtonPtrRow(buttons ...*Button) *ButtonRow {
+-	return &ButtonRow{Items: append([]*Button(nil), buttons...)}
+-}
+-
+-type buttonPlacement struct {
+-	index int
+-	x     int
+-	y     int
+-	text  string
+-	width int
+-}
+-
+-func (w *ButtonRow) buttonCount() int {
+-	if w == nil {
+-		return 0
+-	}
+-	if len(w.Items) > 0 {
+-		return len(w.Items)
+-	}
+-	return len(w.Buttons)
+-}
+-
+-func (w *ButtonRow) buttonAt(index int) *Button {
+-	if w == nil || index < 0 {
+-		return nil
+-	}
+-	if len(w.Items) > 0 {
+-		if index >= len(w.Items) {
+-			return nil
+-		}
+-		return w.Items[index]
+-	}
+-	if index >= len(w.Buttons) {
+-		return nil
+-	}
+-	return &w.Buttons[index]
+-}
+-
+-func (w *ButtonRow) layoutButtons(maxWidth int) ([]buttonPlacement, Size) {
+-	count := w.buttonCount()
+-	if count == 0 {
+-		return nil, Size{}
+-	}
+-	placements := make([]buttonPlacement, 0, count)
+-	x, y := 0, 0
+-	maxRowW := 0
+-	for i := 0; i < count; i++ {
+-		button := w.buttonAt(i)
+-		if button == nil {
+-			continue
+-		}
+-		text := "[ " + button.Label + " ]"
+-		textWidth := runewidth.StringWidth(text)
+-		if maxWidth > 0 && textWidth > maxWidth {
+-			text = "[" + button.Label + "]"
+-			textWidth = runewidth.StringWidth(text)
+-		}
+-		if maxWidth > 0 && x > 0 && x+textWidth > maxWidth {
+-			x = 0
+-			y++
+-		}
+-		drawWidth := textWidth
+-		if maxWidth > 0 && x+drawWidth > maxWidth {
+-			drawWidth = max(0, maxWidth-x)
+-		}
+-		placements = append(placements, buttonPlacement{
+-			index: i,
+-			x:     x,
+-			y:     y,
+-			text:  text,
+-			width: drawWidth,
+-		})
+-		if x+drawWidth > maxRowW {
+-			maxRowW = x + drawWidth
+-		}
+-		x += textWidth + 2
+-	}
+-	if len(placements) == 0 {
+-		return nil, Size{}
+-	}
+-	if maxWidth > 0 {
+-		totalRows := y + 1
+-		rowWidths := make([]int, totalRows)
+-		for _, p := range placements {
+-			if end := p.x + p.width; end > rowWidths[p.y] {
+-				rowWidths[p.y] = end
+-			}
+-		}
+-		for i := range placements {
+-			rowW := rowWidths[placements[i].y]
+-			if maxWidth > rowW {
+-				placements[i].x += (maxWidth - rowW) / 2
+-			}
+-		}
+-	}
+-	return placements, Size{W: maxRowW, H: y + 1}
+-}
+-
+-func (w *ButtonRow) Measure(c Constraints) Size {
+-	_, size := w.layoutButtons(c.MaxW)
+-	if c.MaxW > 0 && size.W > c.MaxW {
+-		size.W = c.MaxW
+-	}
+-	if c.MaxH > 0 && size.H > c.MaxH {
+-		size.H = c.MaxH
+-	}
+-	return size
+-}
+-
+-func (w *ButtonRow) Render(r Rect, ctx RenderContext) string {
+-	width, height := max(0, r.W), max(0, r.H)
+-	buf := terminal.NewCellBuf(width, height)
+-	if w == nil || width == 0 || height == 0 {
+-		return ui.ANSIFrame(buf, CursorPos{})
+-	}
+-	normal := styleOr(w.Styles.Normal, terminal.NewStyle(0xE5E5E5, 0x3D4856, 0))
+-	focused := styleOr(w.Styles.Focused, terminal.NewStyle(0x1A1F26, 0xFFD700, terminal.CharBold))
+-	disabled := styleOr(w.Styles.Disabled, terminal.NewStyle(0x8A95A5, 0, terminal.CharDim|terminal.CharResetBackgroundDefault))
+-	placements, _ := w.layoutButtons(width)
+-	for _, p := range placements {
+-		if p.y >= height {
+-			break
+-		}
+-		button := w.buttonAt(p.index)
+-		if button == nil {
+-			continue
+-		}
+-		style := normal
+-		if button.Disabled {
+-			style = disabled
+-		} else if p.index == w.Index && ctx.Focused {
+-			style = focused
+-		}
+-		col := p.x
+-		labelHotkey := -1
+-		if button.Hotkey != "" {
+-			prefixOffset := 2
+-			if strings.HasPrefix(p.text, "[") && !strings.HasPrefix(p.text, "[ ") {
+-				prefixOffset = 1
+-			}
+-			for j, r := range []rune(button.Label) {
+-				if strings.EqualFold(string(r), button.Hotkey) {
+-					labelHotkey = j + prefixOffset
+-					break
+-				}
+-			}
+-		}
+-		for textIndex, r := range []rune(p.text) {
+-			rw := runeWidth(r)
+-			if col+rw > width {
+-				break
+-			}
+-			cellStyle := style
+-			if textIndex == labelHotkey {
+-				cellStyle = style.AddAttribute(terminal.CharUnderline)
+-			}
+-			buf.Set(col, p.y, terminal.Cell{Grapheme: string(r), Style: cellStyle})
+-			for n := 1; n < rw; n++ {
+-				buf.Set(col+n, p.y, terminal.Cell{Grapheme: "", Style: cellStyle})
+-			}
+-			col += rw
+-		}
+-	}
+-	return ui.ANSIFrame(buf, CursorPos{})
+-}
+-
+-func (w *ButtonRow) HandleEvent(event input.Event) bool {
+-	if w == nil || w.buttonCount() == 0 {
+-		return false
+-	}
+-	ev, ok := keyEvent(event)
+-	if !ok {
+-		return false
+-	}
+-	switch strings.ToLower(ev.String()) {
+-	case "left", "up", "shift+tab":
+-		w.move(-1)
+-		return true
+-	case "right", "down", "tab":
+-		w.move(1)
+-		return true
+-	case "enter", "space", " ":
+-		w.activate(w.Index)
+-		return true
+-	default:
+-		return w.ActivateHotkey(ev)
+-	}
+-}
+-
+-func (w *ButtonRow) ActivateHotkey(ev input.KeyPressEvent) bool {
+-	if w == nil || w.buttonCount() == 0 {
+-		return false
+-	}
+-	key := strings.ToLower(ev.String())
+-	if ev.Text != "" {
+-		key = strings.ToLower(ev.Text)
+-	}
+-	count := w.buttonCount()
+-	for i := 0; i < count; i++ {
+-		button := w.buttonAt(i)
+-		if button != nil && !button.Disabled && button.Hotkey != "" && key == strings.ToLower(button.Hotkey) {
+-			w.Index = i
+-			w.activate(i)
+-			return true
+-		}
+-	}
+-	return false
+-}
+-
+-func (w *ButtonRow) move(step int) {
+-	count := w.buttonCount()
+-	if count == 0 {
+-		return
+-	}
+-	for n := 0; n < count; n++ {
+-		w.Index = (w.Index + step + count) % count
+-		if button := w.buttonAt(w.Index); button != nil && !button.Disabled {
+-			return
+-		}
+-	}
+-}
+-
+-func (w *ButtonRow) activate(index int) {
+-	button := w.buttonAt(index)
+-	if button == nil || button.Disabled {
+-		return
+-	}
+-	button.Activate()
+-}
+diff --git a/kabibi/ui/widgets/checkbox.go b/kabibi/ui/widgets/checkbox.go
+deleted file mode 100644
+index 3683135..0000000
+--- a/kabibi/ui/widgets/checkbox.go
++++ /dev/null
+@@ -1,79 +0,0 @@
+-package widgets
+-
+-import (
+-	"strings"
+-
+-	"github.com/charmbracelet/x/input"
+-	"github.com/mattn/go-runewidth"
+-	"github.com/mavity/rusticated/kabibi/ui"
+-	"github.com/mavity/rusticated/kabibi/ui/terminal"
+-)
+-
+-type CheckboxStyles struct {
+-	Normal   terminal.Style
+-	Focused  terminal.Style
+-	Disabled terminal.Style
+-}
+-
+-type Checkbox struct {
+-	Label     string
+-	Hotkey    string
+-	Checked   bool
+-	Disabled  bool
+-	Styles    CheckboxStyles
+-	OnToggled func(bool)
+-}
+-
+-func (w *Checkbox) Measure(c Constraints) Size {
+-	if w == nil {
+-		return Size{}
+-	}
+-	if c.MaxH > 0 && c.MaxH < 1 {
+-		return Size{}
+-	}
+-	width := runewidth.StringWidth("[ ] " + w.Label)
+-	if c.MaxW > 0 && width > c.MaxW {
+-		width = c.MaxW
+-	}
+-	return Size{W: max(0, width), H: 1}
+-}
+-
+-func (w *Checkbox) Render(r Rect, ctx RenderContext) string {
+-	buf := terminal.NewCellBuf(max(0, r.W), 1)
+-	if w == nil || r.W <= 0 {
+-		return ui.ANSIFrame(buf, CursorPos{})
+-	}
+-	style := styleOr(w.Styles.Normal, terminal.NewStyle(0xE5E5E5, 0, terminal.CharResetBackgroundDefault))
+-	if w.Disabled {
+-		style = styleOr(w.Styles.Disabled, terminal.NewStyle(0x8A95A5, 0, terminal.CharDim|terminal.CharResetBackgroundDefault))
+-	} else if ctx.Focused {
+-		style = styleOr(w.Styles.Focused, terminal.NewStyle(0x1A1F26, 0xFFD700, terminal.CharBold))
+-	}
+-	check := " "
+-	if w.Checked {
+-		check = "x"
+-	}
+-	writeText(&buf, 0, 0, truncateEnd("["+check+"] "+w.Label, buf.Width), style)
+-	return ui.ANSIFrame(buf, CursorPos{})
+-}
+-
+-func (w *Checkbox) HandleEvent(event input.Event) bool {
+-	if w == nil || w.Disabled {
+-		return false
+-	}
+-	ev, ok := keyEvent(event)
+-	if !ok {
+-		return false
+-	}
+-	key := strings.ToLower(ev.String())
+-	if key != "space" && key != " " {
+-		if w.Hotkey == "" || !strings.EqualFold(key, w.Hotkey) {
+-			return false
+-		}
+-	}
+-	w.Checked = !w.Checked
+-	if w.OnToggled != nil {
+-		w.OnToggled(w.Checked)
+-	}
+-	return true
+-}
+diff --git a/kabibi/ui/widgets/frame.go b/kabibi/ui/widgets/frame.go
+deleted file mode 100644
+index 8ad545d..0000000
+--- a/kabibi/ui/widgets/frame.go
++++ /dev/null
+@@ -1,152 +0,0 @@
+-package widgets
+-
+-import (
+-	"github.com/charmbracelet/x/input"
+-	"github.com/mattn/go-runewidth"
+-	"github.com/mavity/rusticated/kabibi/ui"
+-	"github.com/mavity/rusticated/kabibi/ui/terminal"
+-)
+-
+-type FrameStyles struct {
+-	Border terminal.Style
+-	Title  terminal.Style
+-	Fill   terminal.Style
+-}
+-
+-type Frame struct {
+-	Title    string
+-	Child    ui.Widget
+-	PaddingX int
+-	PaddingY int
+-	Styles   FrameStyles
+-
+-	compositor *terminal.Terminal
+-}
+-
+-func (w *Frame) Measure(c Constraints) Size {
+-	if w == nil {
+-		return Size{}
+-	}
+-	if (c.MaxW > 0 && c.MaxW < 2) || (c.MaxH > 0 && c.MaxH < 2) {
+-		if w.Child == nil {
+-			return Size{W: max(0, c.MaxW), H: max(0, c.MaxH)}
+-		}
+-		return w.Child.Measure(c)
+-	}
+-	padX := max(0, w.PaddingX)
+-	padY := max(0, w.PaddingY)
+-	borderW := 2 + padX*2
+-	borderH := 2 + padY*2
+-	if c.MaxW > 0 && c.MaxW <= borderW {
+-		borderW = 2
+-	}
+-	if c.MaxH > 0 && c.MaxH <= borderH {
+-		borderH = 2
+-	}
+-	childMaxW := 0
+-	if c.MaxW > 0 {
+-		childMaxW = max(1, c.MaxW-borderW)
+-	}
+-	childMaxH := 0
+-	if c.MaxH > 0 {
+-		childMaxH = max(1, c.MaxH-borderH)
+-	}
+-	var childSize Size
+-	if w.Child != nil {
+-		childSize = w.Child.Measure(Constraints{MaxW: childMaxW, MaxH: childMaxH})
+-	}
+-	titleW := 0
+-	if w.Title != "" {
+-		titleW = runewidth.StringWidth(w.Title) + 4
+-	}
+-	totalW := max(childSize.W+borderW, titleW)
+-	totalH := childSize.H + borderH
+-	if c.MaxW > 0 && totalW > c.MaxW {
+-		totalW = c.MaxW
+-	}
+-	if c.MaxH > 0 && totalH > c.MaxH {
+-		totalH = c.MaxH
+-	}
+-	return Size{W: max(0, totalW), H: max(0, totalH)}
+-}
+-
+-func (w *Frame) Render(r Rect, ctx RenderContext) string {
+-	width, height := max(0, r.W), max(0, r.H)
+-	buf := terminal.NewCellBuf(width, height)
+-	if w == nil || width == 0 || height == 0 {
+-		return ui.ANSIFrame(buf, CursorPos{})
+-	}
+-	if w.Styles.Fill != 0 {
+-		buf.Fill(Rect{W: width, H: height}, terminal.Cell{Grapheme: " ", Style: w.Styles.Fill})
+-	}
+-	if width < 2 || height < 2 {
+-		if w.Child != nil {
+-			childANSI := w.Child.Render(Rect{W: width, H: height}, ctx)
+-			cur := ctx.CompositeANSI(&buf, w.ansiTerminal(), Rect{W: width, H: height}, childANSI)
+-			return ui.ANSIFrame(buf, cur)
+-		}
+-		return ui.ANSIFrame(buf, CursorPos{})
+-	}
+-	borderStyle := styleOr(w.Styles.Border, terminal.NewStyle(0x8A95A5, 0, terminal.CharResetBackgroundDefault))
+-	titleStyle := styleOr(w.Styles.Title, terminal.NewStyle(0xFFD700, 0, terminal.CharBold|terminal.CharResetBackgroundDefault))
+-	for x := 1; x < width-1; x++ {
+-		buf.Set(x, 0, terminal.Cell{Grapheme: "─", Style: borderStyle})
+-		buf.Set(x, height-1, terminal.Cell{Grapheme: "─", Style: borderStyle})
+-	}
+-	for y := 1; y < height-1; y++ {
+-		buf.Set(0, y, terminal.Cell{Grapheme: "│", Style: borderStyle})
+-		buf.Set(width-1, y, terminal.Cell{Grapheme: "│", Style: borderStyle})
+-	}
+-	buf.Set(0, 0, terminal.Cell{Grapheme: "╭", Style: borderStyle})
+-	buf.Set(width-1, 0, terminal.Cell{Grapheme: "╮", Style: borderStyle})
+-	buf.Set(0, height-1, terminal.Cell{Grapheme: "╰", Style: borderStyle})
+-	buf.Set(width-1, height-1, terminal.Cell{Grapheme: "╯", Style: borderStyle})
+-	if w.Title != "" && width > 4 {
+-		titleText := " " + truncateEnd(w.Title, width-4) + " "
+-		writeText(&buf, 2, 0, titleText, titleStyle)
+-	}
+-	padX := max(0, w.PaddingX)
+-	padY := max(0, w.PaddingY)
+-	if width <= 2+padX*2 {
+-		padX = 0
+-	}
+-	if height <= 2+padY*2 {
+-		padY = 0
+-	}
+-	innerRect := Rect{
+-		X: 1 + padX,
+-		Y: 1 + padY,
+-		W: max(0, width-2-padX*2),
+-		H: max(0, height-2-padY*2),
+-	}
+-	var cursor CursorPos
+-	if w.Child != nil && innerRect.W > 0 && innerRect.H > 0 {
+-		childANSI := w.Child.Render(Rect{W: innerRect.W, H: innerRect.H}, ctx)
+-		cursor = ctx.CompositeANSI(&buf, w.ansiTerminal(), innerRect, childANSI)
+-	}
+-	return ui.ANSIFrame(buf, cursor)
+-}
+-
+-func (w *Frame) HandleEvent(event input.Event) bool {
+-	if w == nil || w.Child == nil {
+-		return false
+-	}
+-	return w.Child.HandleEvent(event)
+-}
+-
+-func (w *Frame) SetFocusedWidget(target ui.Widget) bool {
+-	if w == nil || w.Child == nil || target == nil {
+-		return false
+-	}
+-	if w.Child == target {
+-		return true
+-	}
+-	return setFocusedDescendant(w.Child, target)
+-}
+-
+-func (w *Frame) ansiTerminal() *terminal.Terminal {
+-	if w.compositor == nil {
+-		w.compositor = terminal.NewTerminal(1, 1)
+-	}
+-	return w.compositor
+-}
+diff --git a/kabibi/ui/widgets/grid.go b/kabibi/ui/widgets/grid.go
+deleted file mode 100644
+index 19ed45f..0000000
+--- a/kabibi/ui/widgets/grid.go
++++ /dev/null
+@@ -1,508 +0,0 @@
+-package widgets
+-
+-import (
+-	"github.com/charmbracelet/x/input"
+-	"github.com/mavity/rusticated/kabibi/ui"
+-	"github.com/mavity/rusticated/kabibi/ui/terminal"
+-)
+-
+-type TrackKind int
+-
+-const (
+-	TrackAuto TrackKind = iota
+-	TrackFixed
+-	TrackFraction
+-)
+-
+-type Track struct {
+-	Kind  TrackKind
+-	Value int
+-}
+-
+-type GridChild struct {
+-	Row     int
+-	Column  int
+-	RowSpan int
+-	ColSpan int
+-	Child   ui.Widget
+-}
+-
+-type Grid struct {
+-	Rows     []Track
+-	Columns  []Track
+-	Children []GridChild
+-	Focused  int
+-
+-	compositor *terminal.Terminal
+-}
+-
+-type resolvedGridChild struct {
+-	index int
+-	rect  Rect
+-}
+-
+-type resolvedGridLayout struct {
+-	colWidths  []int
+-	rowHeights []int
+-	children   []resolvedGridChild
+-	size       Size
+-}
+-
+-func (g *Grid) Measure(c Constraints) Size {
+-	if g == nil {
+-		return Size{}
+-	}
+-	return g.resolve(c).size
+-}
+-
+-func (g *Grid) Render(r Rect, ctx RenderContext) string {
+-	width, height := max(0, r.W), max(0, r.H)
+-	buf := terminal.NewCellBuf(width, height)
+-	if g == nil || width == 0 || height == 0 {
+-		return ui.ANSIFrame(buf, CursorPos{})
+-	}
+-	layout := g.resolve(Constraints{MaxW: width, MaxH: height})
+-	var cursor CursorPos
+-	for _, rc := range layout.children {
+-		ch := g.Children[rc.index].Child
+-		if ch == nil || rc.rect.W <= 0 || rc.rect.H <= 0 {
+-			continue
+-		}
+-		childCtx := ctx.ForChild(rc.index == g.Focused)
+-		childANSI := ch.Render(Rect{W: rc.rect.W, H: rc.rect.H}, childCtx)
+-		childCursor := childCtx.CompositeANSI(&buf, g.ansiTerminal(), rc.rect, childANSI)
+-		if childCursor.Visible {
+-			cursor = childCursor
+-		}
+-	}
+-	return ui.ANSIFrame(buf, cursor)
+-}
+-
+-func (g *Grid) HandleEvent(event input.Event) bool {
+-	if g == nil || len(g.Children) == 0 {
+-		return false
+-	}
+-	if g.Focused >= 0 && g.Focused < len(g.Children) {
+-		if child := g.Children[g.Focused].Child; child != nil {
+-			if child.HandleEvent(event) {
+-				return true
+-			}
+-		}
+-	}
+-	return false
+-}
+-
+-func (g *Grid) SetFocusedWidget(target ui.Widget) bool {
+-	if g == nil {
+-		return false
+-	}
+-	g.Focused = -1
+-	if target == nil {
+-		return false
+-	}
+-	found := false
+-	for i, ch := range g.Children {
+-		if ch.Child == nil {
+-			continue
+-		}
+-		matched := ch.Child == target
+-		if setFocusedDescendant(ch.Child, target) {
+-			matched = true
+-		}
+-		if matched && !found {
+-			g.Focused = i
+-			found = true
+-		}
+-	}
+-	return found
+-}
+-
+-func setFocusedDescendant(node, target ui.Widget) bool {
+-	switch container := node.(type) {
+-	case *Grid:
+-		return container.SetFocusedWidget(target)
+-	case *Frame:
+-		return container.SetFocusedWidget(target)
+-	default:
+-		return false
+-	}
+-}
+-
+-func (g *Grid) ansiTerminal() *terminal.Terminal {
+-	if g.compositor == nil {
+-		g.compositor = terminal.NewTerminal(1, 1)
+-	}
+-	return g.compositor
+-}
+-
+-func (g *Grid) resolve(c Constraints) resolvedGridLayout {
+-	numRows := len(g.Rows)
+-	numCols := len(g.Columns)
+-	for _, ch := range g.Children {
+-		r := max(0, ch.Row) + max(1, ch.RowSpan)
+-		col := max(0, ch.Column) + max(1, ch.ColSpan)
+-		if r > numRows {
+-			numRows = r
+-		}
+-		if col > numCols {
+-			numCols = col
+-		}
+-	}
+-	if numRows == 0 || numCols == 0 {
+-		return resolvedGridLayout{}
+-	}
+-
+-	cols := make([]Track, numCols)
+-	if len(g.Columns) == 0 && numCols == 1 {
+-		cols[0] = Track{Kind: TrackFraction, Value: 1}
+-	} else {
+-		for i := 0; i < numCols; i++ {
+-			if i < len(g.Columns) {
+-				cols[i] = g.Columns[i]
+-			} else {
+-				cols[i] = Track{Kind: TrackAuto}
+-			}
+-			if cols[i].Kind == TrackFraction && cols[i].Value <= 0 {
+-				cols[i].Value = 1
+-			}
+-		}
+-	}
+-
+-	rows := make([]Track, numRows)
+-	for i := 0; i < numRows; i++ {
+-		if i < len(g.Rows) {
+-			rows[i] = g.Rows[i]
+-		} else {
+-			rows[i] = Track{Kind: TrackAuto}
+-		}
+-		if rows[i].Kind == TrackFraction && rows[i].Value <= 0 {
+-			rows[i].Value = 1
+-		}
+-	}
+-
+-	availW := c.MaxW
+-	hasMaxW := availW > 0
+-	availH := c.MaxH
+-	hasMaxH := availH > 0
+-
+-	colWidths := make([]int, numCols)
+-	fixedW := 0
+-	for col := 0; col < numCols; col++ {
+-		if cols[col].Kind == TrackFixed {
+-			colWidths[col] = max(0, cols[col].Value)
+-			fixedW += colWidths[col]
+-		}
+-	}
+-
+-	provisionalMaxW := availW
+-	if hasMaxW {
+-		provisionalMaxW = max(1, availW-fixedW)
+-	}
+-	for _, ch := range g.Children {
+-		if ch.Child == nil {
+-			continue
+-		}
+-		col := max(0, ch.Column)
+-		cSpan := max(1, ch.ColSpan)
+-		if cSpan != 1 {
+-			continue
+-		}
+-		if cols[col].Kind == TrackAuto || (!hasMaxW && cols[col].Kind == TrackFraction) {
+-			sz := ch.Child.Measure(Constraints{MaxW: provisionalMaxW, MaxH: availH})
+-			if sz.W > colWidths[col] {
+-				colWidths[col] = sz.W
+-			}
+-		}
+-	}
+-
+-	for _, ch := range g.Children {
+-		if ch.Child == nil {
+-			continue
+-		}
+-		col := max(0, ch.Column)
+-		cSpan := max(1, ch.ColSpan)
+-		if cSpan <= 1 {
+-			continue
+-		}
+-		hasFractionInSpan := false
+-		autoTracks := 0
+-		for k := col; k < col+cSpan && k < numCols; k++ {
+-			if cols[k].Kind == TrackFraction {
+-				hasFractionInSpan = true
+-			} else if cols[k].Kind == TrackAuto {
+-				autoTracks++
+-			}
+-		}
+-		if (!hasFractionInSpan || !hasMaxW) && autoTracks > 0 {
+-			sz := ch.Child.Measure(Constraints{MaxW: provisionalMaxW, MaxH: availH})
+-			currentSpanW := spanSum(colWidths, col, cSpan)
+-			if sz.W > currentSpanW {
+-				distributeSpanDeficit(colWidths, cols, col, cSpan, sz.W-currentSpanW, TrackAuto)
+-			}
+-		}
+-	}
+-
+-	if hasMaxW {
+-		nonFracW := sumTracks(colWidths)
+-		if nonFracW <= availW {
+-			distributeFractions(colWidths, cols, availW-nonFracW)
+-		} else {
+-			squeezeAutoTracks(colWidths, cols, max(0, availW-fixedW))
+-		}
+-	}
+-
+-	for _, ch := range g.Children {
+-		if ch.Child == nil {
+-			continue
+-		}
+-		col := max(0, ch.Column)
+-		cSpan := max(1, ch.ColSpan)
+-		if cSpan <= 1 {
+-			continue
+-		}
+-		spanW := spanSum(colWidths, col, cSpan)
+-		sz := ch.Child.Measure(Constraints{MaxW: spanW, MaxH: availH})
+-		if sz.W > spanW && (!hasMaxW || sumTracks(colWidths) < availW) {
+-			extra := sz.W - spanW
+-			if hasMaxW {
+-				extra = min(extra, availW-sumTracks(colWidths))
+-			}
+-			distributeSpanDeficit(colWidths, cols, col, cSpan, extra, TrackAuto)
+-		}
+-	}
+-
+-	rowHeights := make([]int, numRows)
+-	fixedH := 0
+-	for row := 0; row < numRows; row++ {
+-		if rows[row].Kind == TrackFixed {
+-			rowHeights[row] = max(0, rows[row].Value)
+-			fixedH += rowHeights[row]
+-		}
+-	}
+-
+-	for _, ch := range g.Children {
+-		if ch.Child == nil {
+-			continue
+-		}
+-		row := max(0, ch.Row)
+-		rSpan := max(1, ch.RowSpan)
+-		if rSpan != 1 || rows[row].Kind == TrackFixed {
+-			continue
+-		}
+-		childW := spanSum(colWidths, max(0, ch.Column), max(1, ch.ColSpan))
+-		if rows[row].Kind == TrackAuto || (!hasMaxH && rows[row].Kind == TrackFraction) {
+-			sz := ch.Child.Measure(Constraints{MaxW: childW, MaxH: availH})
+-			if sz.H > rowHeights[row] {
+-				rowHeights[row] = sz.H
+-			}
+-		}
+-	}
+-
+-	for _, ch := range g.Children {
+-		if ch.Child == nil {
+-			continue
+-		}
+-		row := max(0, ch.Row)
+-		rSpan := max(1, ch.RowSpan)
+-		if rSpan <= 1 {
+-			continue
+-		}
+-		childW := spanSum(colWidths, max(0, ch.Column), max(1, ch.ColSpan))
+-		sz := ch.Child.Measure(Constraints{MaxW: childW, MaxH: availH})
+-		curSpanH := spanSum(rowHeights, row, rSpan)
+-		if sz.H > curSpanH {
+-			distributeSpanDeficit(rowHeights, rows, row, rSpan, sz.H-curSpanH, TrackAuto)
+-		}
+-	}
+-
+-	if hasMaxH {
+-		nonFracH := sumTracks(rowHeights)
+-		if nonFracH <= availH {
+-			distributeFractions(rowHeights, rows, availH-nonFracH)
+-		} else {
+-			g.squeezeRowHeights(rowHeights, rows, colWidths, max(0, availH-fixedH))
+-		}
+-	}
+-
+-	colX := prefixOffsets(colWidths)
+-	rowY := prefixOffsets(rowHeights)
+-	resolvedChildren := make([]resolvedGridChild, 0, len(g.Children))
+-	for i, ch := range g.Children {
+-		row := max(0, ch.Row)
+-		col := max(0, ch.Column)
+-		rSpan := max(1, ch.RowSpan)
+-		cSpan := max(1, ch.ColSpan)
+-		x := colX[col]
+-		y := rowY[row]
+-		w := spanSum(colWidths, col, cSpan)
+-		h := spanSum(rowHeights, row, rSpan)
+-		if hasMaxW && x+w > availW {
+-			w = max(0, availW-x)
+-		}
+-		if hasMaxH && y+h > availH {
+-			h = max(0, availH-y)
+-		}
+-		resolvedChildren = append(resolvedChildren, resolvedGridChild{
+-			index: i,
+-			rect:  Rect{X: x, Y: y, W: w, H: h},
+-		})
+-	}
+-
+-	totalW := sumTracks(colWidths)
+-	if hasMaxW && totalW > availW {
+-		totalW = availW
+-	}
+-	totalH := sumTracks(rowHeights)
+-	if hasMaxH && totalH > availH {
+-		totalH = availH
+-	}
+-	return resolvedGridLayout{
+-		colWidths:  colWidths,
+-		rowHeights: rowHeights,
+-		children:   resolvedChildren,
+-		size:       Size{W: totalW, H: totalH},
+-	}
+-}
+-
+-func (g *Grid) squeezeRowHeights(rowHeights []int, rows []Track, _ []int, targetAutoH int) {
+-	currentAutoH := 0
+-	for r, tr := range rows {
+-		if tr.Kind == TrackAuto {
+-			currentAutoH += rowHeights[r]
+-		}
+-	}
+-	if currentAutoH <= targetAutoH {
+-		return
+-	}
+-	for currentAutoH > targetAutoH {
+-		reduced := false
+-		for r := 0; r < len(rows) && currentAutoH > targetAutoH; r++ {
+-			if rows[r].Kind == TrackAuto && rowHeights[r] > 1 {
+-				rowHeights[r]--
+-				currentAutoH--
+-				reduced = true
+-			}
+-		}
+-		if !reduced {
+-			break
+-		}
+-	}
+-	for r := 0; r < len(rows) && currentAutoH > targetAutoH; r++ {
+-		if rows[r].Kind == TrackAuto && rowHeights[r] > 0 {
+-			take := min(rowHeights[r], currentAutoH-targetAutoH)
+-			rowHeights[r] -= take
+-			currentAutoH -= take
+-		}
+-	}
+-}
+-
+-func distributeFractions(sizes []int, tracks []Track, remaining int) {
+-	if remaining <= 0 {
+-		return
+-	}
+-	totalWeight := 0
+-	for i, tr := range tracks {
+-		if tr.Kind == TrackFraction {
+-			totalWeight += max(1, tr.Value)
+-			sizes[i] = 0
+-		}
+-	}
+-	if totalWeight <= 0 {
+-		return
+-	}
+-	allocated := 0
+-	for i, tr := range tracks {
+-		if tr.Kind == TrackFraction {
+-			weight := max(1, tr.Value)
+-			share := remaining * weight / totalWeight
+-			sizes[i] = share
+-			allocated += share
+-		}
+-	}
+-	leftover := remaining - allocated
+-	for i, tr := range tracks {
+-		if leftover <= 0 {
+-			break
+-		}
+-		if tr.Kind == TrackFraction {
+-			sizes[i]++
+-			leftover--
+-		}
+-	}
+-}
+-
+-func distributeSpanDeficit(sizes []int, tracks []Track, start, span, deficit int, kind TrackKind) {
+-	if deficit <= 0 {
+-		return
+-	}
+-	end := min(len(tracks), start+span)
+-	count := 0
+-	for i := start; i < end; i++ {
+-		if tracks[i].Kind == kind {
+-			count++
+-		}
+-	}
+-	if count == 0 {
+-		return
+-	}
+-	each := deficit / count
+-	rem := deficit % count
+-	for i := start; i < end; i++ {
+-		if tracks[i].Kind == kind {
+-			sizes[i] += each
+-			if rem > 0 {
+-				sizes[i]++
+-				rem--
+-			}
+-		}
+-	}
+-}
+-
+-func squeezeAutoTracks(sizes []int, tracks []Track, targetAuto int) {
+-	currentAuto := 0
+-	for i, tr := range tracks {
+-		if tr.Kind == TrackAuto {
+-			currentAuto += sizes[i]
+-		}
+-	}
+-	for currentAuto > targetAuto {
+-		maxIdx := -1
+-		maxVal := 0
+-		for i, tr := range tracks {
+-			if tr.Kind == TrackAuto && sizes[i] > maxVal {
+-				maxVal = sizes[i]
+-				maxIdx = i
+-			}
+-		}
+-		if maxIdx < 0 || maxVal == 0 {
+-			break
+-		}
+-		sizes[maxIdx]--
+-		currentAuto--
+-	}
+-}
+-
+-func spanSum(sizes []int, start, span int) int {
+-	end := min(len(sizes), start+span)
+-	sum := 0
+-	for i := max(0, start); i < end; i++ {
+-		sum += sizes[i]
+-	}
+-	return sum
+-}
+-
+-func sumTracks(sizes []int) int {
+-	sum := 0
+-	for _, s := range sizes {
+-		sum += s
+-	}
+-	return sum
+-}
+-
+-func prefixOffsets(sizes []int) []int {
+-	offsets := make([]int, len(sizes)+1)
+-	for i, s := range sizes {
+-		offsets[i+1] = offsets[i] + s
+-	}
+-	return offsets
+-}
+diff --git a/kabibi/ui/widgets/label.go b/kabibi/ui/widgets/label.go
+deleted file mode 100644
+index 4147f6e..0000000
+--- a/kabibi/ui/widgets/label.go
++++ /dev/null
+@@ -1,134 +0,0 @@
+-package widgets
+-
+-import (
+-	"strings"
+-
+-	"github.com/charmbracelet/x/input"
+-	"github.com/mattn/go-runewidth"
+-	"github.com/mavity/rusticated/kabibi/ui"
+-	"github.com/mavity/rusticated/kabibi/ui/terminal"
+-)
+-
+-type Label struct {
+-	Text  string
+-	Style terminal.Style
+-}
+-
+-func (w *Label) Measure(c Constraints) Size {
+-	if w == nil {
+-		return Size{}
+-	}
+-	if c.MaxH > 0 && c.MaxH < 1 {
+-		return Size{}
+-	}
+-	width := runewidth.StringWidth(w.Text)
+-	if c.MaxW > 0 && width > c.MaxW {
+-		width = c.MaxW
+-	}
+-	return Size{W: max(0, width), H: 1}
+-}
+-
+-func (w *Label) Render(r Rect, _ RenderContext) string {
+-	width, height := max(0, r.W), max(0, r.H)
+-	buf := terminal.NewCellBuf(width, height)
+-	if w == nil || width == 0 || height == 0 {
+-		return ui.ANSIFrame(buf, CursorPos{})
+-	}
+-	style := styleOr(w.Style, terminal.NewStyle(0, 0, terminal.CharResetForegroundDefault|terminal.CharResetBackgroundDefault))
+-	writeText(&buf, 0, 0, truncateEnd(w.Text, width), style)
+-	return ui.ANSIFrame(buf, CursorPos{})
+-}
+-
+-func (w *Label) HandleEvent(input.Event) bool { return false }
+-
+-type TextBlock struct {
+-	Text  string
+-	Style terminal.Style
+-}
+-
+-type Text = TextBlock
+-
+-func (w *TextBlock) Measure(c Constraints) Size {
+-	if w == nil {
+-		return Size{}
+-	}
+-	if c.MaxH > 0 && c.MaxH < 1 {
+-		return Size{}
+-	}
+-	wrapWidth := c.MaxW
+-	if wrapWidth <= 0 {
+-		for _, line := range strings.Split(w.Text, "\n") {
+-			if lw := runewidth.StringWidth(line); lw > wrapWidth {
+-				wrapWidth = lw
+-			}
+-		}
+-		if wrapWidth <= 0 {
+-			wrapWidth = 1
+-		}
+-	}
+-	lines := WrapText(w.Text, wrapWidth)
+-	maxW := 0
+-	for _, line := range lines {
+-		if lw := runewidth.StringWidth(line); lw > maxW {
+-			maxW = lw
+-		}
+-	}
+-	if c.MaxW > 0 && maxW > c.MaxW {
+-		maxW = c.MaxW
+-	}
+-	height := len(lines)
+-	if c.MaxH > 0 && height > c.MaxH {
+-		height = c.MaxH
+-	}
+-	return Size{W: max(0, maxW), H: max(0, height)}
+-}
+-
+-func (w *TextBlock) Render(r Rect, _ RenderContext) string {
+-	width, height := max(0, r.W), max(0, r.H)
+-	buf := terminal.NewCellBuf(width, height)
+-	if w == nil || width == 0 || height == 0 {
+-		return ui.ANSIFrame(buf, CursorPos{})
+-	}
+-	style := styleOr(w.Style, terminal.NewStyle(0, 0, terminal.CharResetForegroundDefault|terminal.CharResetBackgroundDefault))
+-	lines := WrapText(w.Text, width)
+-	for y := 0; y < len(lines) && y < height; y++ {
+-		line := lines[y]
+-		if y == height-1 && len(lines) > height {
+-			line = truncateEnd(line+"…", width)
+-		}
+-		writeText(&buf, 0, y, truncateEnd(line, width), style)
+-	}
+-	return ui.ANSIFrame(buf, CursorPos{})
+-}
+-
+-func (w *TextBlock) HandleEvent(input.Event) bool { return false }
+-
+-func WrapText(text string, width int) []string {
+-	if width < 1 {
+-		width = 1
+-	}
+-	var rows []string
+-	for _, paragraph := range strings.Split(text, "\n") {
+-		words := strings.Fields(paragraph)
+-		if len(words) == 0 {
+-			rows = append(rows, "")
+-			continue
+-		}
+-		line := ""
+-		for _, word := range words {
+-			if line == "" {
+-				line = truncateEnd(word, width)
+-				continue
+-			}
+-			candidate := line + " " + word
+-			if runewidth.StringWidth(candidate) <= width {
+-				line = candidate
+-			} else {
+-				rows = append(rows, line)
+-				line = truncateEnd(word, width)
+-			}
+-		}
+-		rows = append(rows, line)
+-	}
+-	return rows
+-}
+diff --git a/kabibi/ui/widgets/progress_bar.go b/kabibi/ui/widgets/progress_bar.go
+deleted file mode 100644
+index 06c2401..0000000
+--- a/kabibi/ui/widgets/progress_bar.go
++++ /dev/null
+@@ -1,92 +0,0 @@
+-package widgets
+-
+-import (
+-	"fmt"
+-
+-	"github.com/charmbracelet/x/input"
+-	"github.com/mattn/go-runewidth"
+-	"github.com/mavity/rusticated/kabibi/ui"
+-	"github.com/mavity/rusticated/kabibi/ui/terminal"
+-)
+-
+-type ProgressBarStyles struct {
+-	Filled   terminal.Style
+-	Empty    terminal.Style
+-	Label    terminal.Style
+-	Metadata terminal.Style
+-}
+-
+-type ProgressBar struct {
+-	Current string
+-	Done    int64
+-	Total   int64
+-	Rate    int64
+-	Styles  ProgressBarStyles
+-}
+-
+-func (w *ProgressBar) Measure(c Constraints) Size {
+-	if w == nil {
+-		return Size{}
+-	}
+-	height := 3
+-	if w.Current == "" {
+-		height = 1
+-	}
+-	if c.MaxH > 0 && c.MaxH < height {
+-		height = c.MaxH
+-	}
+-	return Size{W: max(0, c.MaxW), H: height}
+-}
+-
+-func (w *ProgressBar) Render(r Rect, _ RenderContext) string {
+-	width, height := max(0, r.W), max(0, r.H)
+-	buf := terminal.NewCellBuf(width, height)
+-	if w == nil || width == 0 || height == 0 {
+-		return ui.ANSIFrame(buf, CursorPos{})
+-	}
+-	labelStyle := styleOr(w.Styles.Label, terminal.NewStyle(0xE5E5E5, 0, terminal.CharResetBackgroundDefault))
+-	filledStyle := styleOr(w.Styles.Filled, terminal.NewStyle(0xFFD700, 0, terminal.CharResetBackgroundDefault))
+-	emptyStyle := styleOr(w.Styles.Empty, terminal.NewStyle(0x8A95A5, 0, terminal.CharResetBackgroundDefault))
+-	metaStyle := styleOr(w.Styles.Metadata, terminal.NewStyle(0x8A95A5, 0, terminal.CharResetBackgroundDefault))
+-	if height == 1 && w.Current == "" {
+-		pct := percent(w.Done, w.Total)
+-		suffix := fmt.Sprintf(" %3d%%", pct)
+-		barWidth := max(0, width-runewidth.StringWidth(suffix))
+-		filled := barWidth * pct / 100
+-		for x := 0; x < barWidth; x++ {
+-			ch := '░'
+-			style := emptyStyle
+-			if x < filled {
+-				ch = '█'
+-				style = filledStyle
+-			}
+-			buf.Set(x, 0, terminal.Cell{Grapheme: string(ch), Style: style})
+-		}
+-		writeText(&buf, barWidth, 0, suffix, labelStyle)
+-		return ui.ANSIFrame(buf, CursorPos{})
+-	}
+-	writeText(&buf, 0, 0, middleTruncate(w.Current, width), labelStyle)
+-	if height > 1 {
+-		pct := percent(w.Done, w.Total)
+-		suffix := fmt.Sprintf(" %3d%%", pct)
+-		barWidth := max(0, width-runewidth.StringWidth(suffix))
+-		filled := barWidth * pct / 100
+-		for x := 0; x < barWidth; x++ {
+-			ch := '░'
+-			style := emptyStyle
+-			if x < filled {
+-				ch = '█'
+-				style = filledStyle
+-			}
+-			buf.Set(x, 1, terminal.Cell{Grapheme: string(ch), Style: style})
+-		}
+-		writeText(&buf, barWidth, 1, suffix, labelStyle)
+-	}
+-	if height > 2 {
+-		meta := fmt.Sprintf("%s / %s  %s/s", formatBytes(w.Done), formatBytes(w.Total), formatBytes(w.Rate))
+-		writeText(&buf, 0, 2, middleTruncate(meta, width), metaStyle)
+-	}
+-	return ui.ANSIFrame(buf, CursorPos{})
+-}
+-
+-func (w *ProgressBar) HandleEvent(input.Event) bool { return false }
+diff --git a/kabibi/ui/widgets/text_input.go b/kabibi/ui/widgets/text_input.go
+deleted file mode 100644
+index 9d83244..0000000
+--- a/kabibi/ui/widgets/text_input.go
++++ /dev/null
+@@ -1,455 +0,0 @@
+-package widgets
+-
+-import (
+-	"strings"
+-	"sync"
+-
+-	"github.com/atotto/clipboard"
+-	"github.com/charmbracelet/x/input"
+-	"github.com/mavity/rusticated/kabibi/ui"
+-	"github.com/mavity/rusticated/kabibi/ui/terminal"
+-)
+-
+-type TextInputStyles struct {
+-	Text       terminal.Style
+-	Focused    terminal.Style
+-	Selected   terminal.Style
+-	Overflow   terminal.Style
+-	Label      terminal.Style
+-	Background terminal.Style
+-}
+-
+-type TextInputOptions struct {
+-	Value      string
+-	History    []string
+-	Complete   func(value string, cursor int) (string, int, bool)
+-	Styles     TextInputStyles
+-	OnChange   func(value string)
+-	OnChanged  func(value string)
+-	SelectAll  bool
+-	AllowPaste bool
+-}
+-
+-type TextInput struct {
+-	value      []rune
+-	cursor     int
+-	anchor     int
+-	selecting  bool
+-	scrollCol  int
+-	history    []string
+-	historyIdx int
+-	complete   func(string, int) (string, int, bool)
+-	styles     TextInputStyles
+-	onChange   func(string)
+-	OnChanged  func(string)
+-	selectAll  bool
+-	allowPaste bool
+-}
+-
+-func NewTextInput(opts TextInputOptions) *TextInput {
+-	w := &TextInput{
+-		value:      []rune(opts.Value),
+-		cursor:     len([]rune(opts.Value)),
+-		history:    append([]string(nil), opts.History...),
+-		historyIdx: -1,
+-		complete:   opts.Complete,
+-		styles:     opts.Styles,
+-		onChange:   opts.OnChange,
+-		OnChanged:  opts.OnChanged,
+-		selectAll:  opts.SelectAll,
+-		allowPaste: opts.AllowPaste,
+-	}
+-	if opts.SelectAll && len(w.value) > 0 {
+-		w.anchor = 0
+-		w.selecting = true
+-	}
+-	return w
+-}
+-
+-func (w *TextInput) Value() string {
+-	if w == nil {
+-		return ""
+-	}
+-	return string(w.value)
+-}
+-
+-func (w *TextInput) SetValue(value string) {
+-	if w == nil {
+-		return
+-	}
+-	w.value = []rune(value)
+-	w.cursor = len(w.value)
+-	w.anchor = w.cursor
+-	w.selecting = false
+-	w.scrollCol = 0
+-	w.changed()
+-}
+-
+-func (w *TextInput) SetHistory(history []string) {
+-	if w == nil {
+-		return
+-	}
+-	w.history = append([]string(nil), history...)
+-	w.historyIdx = -1
+-}
+-
+-func (w *TextInput) SetCompletion(complete func(value string, cursor int) (string, int, bool)) {
+-	if w == nil {
+-		return
+-	}
+-	w.complete = complete
+-}
+-
+-func (w *TextInput) Measure(c Constraints) Size {
+-	width := c.MaxW
+-	if width <= 0 {
+-		width = 40
+-	}
+-	if c.MaxH > 0 && c.MaxH < 1 {
+-		return Size{}
+-	}
+-	return Size{W: width, H: 1}
+-}
+-
+-func (w *TextInput) Render(r Rect, ctx RenderContext) string {
+-	width := r.W
+-	if width < 0 {
+-		width = 0
+-	}
+-	buf := terminal.NewCellBuf(width, 1)
+-	if w == nil || width == 0 {
+-		return ui.ANSIFrame(buf, CursorPos{})
+-	}
+-	if width == 1 {
+-		if len(w.value) > 0 {
+-			buf.Set(0, 0, terminal.Cell{Grapheme: "…", Style: styleOr(w.styles.Overflow, terminal.NewStyle(0xFFD700, 0x0D1014, terminal.CharBold))})
+-		}
+-		return ui.ANSIFrame(buf, CursorPos{Visible: ctx.Focused})
+-	}
+-
+-	styles := w.styles
+-	textStyle := styleOr(styles.Text, terminal.NewStyle(0xE5E5E5, 0x1B2129, 0))
+-	focusedStyle := styleOr(styles.Focused, terminal.NewStyle(0xFFFFFF, 0x005F87, terminal.CharBold))
+-	selectedStyle := styleOr(styles.Selected, terminal.NewStyle(0x1A1F26, 0xFFD700, 0))
+-	overflowStyle := styleOr(styles.Overflow, terminal.NewStyle(0xFFD700, 0x1B2129, terminal.CharBold))
+-	background := styleOr(styles.Background, textStyle)
+-	buf.Fill(terminal.Rect{W: width, H: 1}, terminal.Cell{Grapheme: " ", Style: background})
+-
+-	cursorCol := runeColumn(w.value, w.cursor)
+-	totalWidth := runeColumn(w.value, len(w.value))
+-	if w.scrollCol < 0 {
+-		w.scrollCol = 0
+-	}
+-	if w.scrollCol > totalWidth {
+-		w.scrollCol = totalWidth
+-	}
+-
+-	leftOverflow := w.scrollCol > 0
+-	rightOverflow := totalWidth-w.scrollCol > width-boolInt(leftOverflow)
+-	available := width - boolInt(leftOverflow) - boolInt(rightOverflow)
+-	if available < 1 {
+-		available = 1
+-	}
+-	if cursorCol < w.scrollCol {
+-		w.scrollCol = cursorCol
+-		leftOverflow = w.scrollCol > 0
+-		rightOverflow = totalWidth-w.scrollCol > width-boolInt(leftOverflow)
+-		available = max(1, width-boolInt(leftOverflow)-boolInt(rightOverflow))
+-	}
+-	if cursorCol >= w.scrollCol+available {
+-		w.scrollCol = cursorCol - available + 1
+-		leftOverflow = w.scrollCol > 0
+-		rightOverflow = totalWidth-w.scrollCol > width-boolInt(leftOverflow)
+-		available = max(1, width-boolInt(leftOverflow)-boolInt(rightOverflow))
+-	}
+-	if leftOverflow && width > 0 {
+-		buf.Set(0, 0, terminal.Cell{Grapheme: "…", Style: overflowStyle})
+-	}
+-	if rightOverflow && width > 0 {
+-		buf.Set(width-1, 0, terminal.Cell{Grapheme: "…", Style: overflowStyle})
+-	}
+-
+-	startX := boolInt(leftOverflow)
+-	col := 0
+-	selStart, selEnd := w.selectionBounds()
+-	for i, r := range w.value {
+-		rw := runeWidth(r)
+-		x := startX + col - w.scrollCol
+-		inSelection := w.selecting && i >= selStart && i < selEnd
+-		style := textStyle
+-		if ctx.Focused {
+-			style = focusedStyle
+-		}
+-		if inSelection {
+-			style = selectedStyle
+-		}
+-		if x >= startX && x+rw <= startX+available {
+-			buf.Set(x, 0, terminal.Cell{Grapheme: string(r), Style: style})
+-			for n := 1; n < rw; n++ {
+-				buf.Set(x+n, 0, terminal.Cell{Grapheme: "", Style: style})
+-			}
+-		}
+-		col += rw
+-	}
+-	cursorX := startX + cursorCol - w.scrollCol
+-	if cursorX < startX {
+-		cursorX = startX
+-	}
+-	if cursorX >= startX+available {
+-		cursorX = startX + available - 1
+-	}
+-	return ui.ANSIFrame(buf, CursorPos{X: cursorX, Y: 0, Visible: ctx.Focused})
+-}
+-
+-func (w *TextInput) HandleEvent(event input.Event) bool {
+-	if w == nil {
+-		return false
+-	}
+-	switch ev := event.(type) {
+-	case input.PasteEvent:
+-		if !w.allowPaste {
+-			return false
+-		}
+-		w.insert(strings.ReplaceAll(strings.ReplaceAll(string(ev), "\r\n", " "), "\n", " "))
+-		return true
+-	case *input.PasteEvent:
+-		return ev != nil && w.HandleEvent(*ev)
+-	case input.KeyPressEvent:
+-		return w.handleKey(ev)
+-	case *input.KeyPressEvent:
+-		return ev != nil && w.handleKey(*ev)
+-	default:
+-		return false
+-	}
+-}
+-
+-func (w *TextInput) handleKey(ev input.KeyPressEvent) bool {
+-	key := strings.ToLower(ev.String())
+-	switch key {
+-	case "left", "shift+left":
+-		w.moveCursor(w.cursor-1, strings.HasPrefix(key, "shift+"))
+-	case "right", "shift+right":
+-		w.moveCursor(w.cursor+1, strings.HasPrefix(key, "shift+"))
+-	case "home", "ctrl+a", "shift+home":
+-		if key == "ctrl+a" {
+-			w.anchor, w.cursor, w.selecting = 0, len(w.value), true
+-		} else {
+-			w.moveCursor(0, strings.HasPrefix(key, "shift+"))
+-		}
+-	case "end", "ctrl+e", "shift+end":
+-		w.moveCursor(len(w.value), strings.HasPrefix(key, "shift+"))
+-	case "ctrl+left":
+-		w.moveCursor(wordBoundary(w.value, w.cursor, -1), false)
+-	case "ctrl+right":
+-		w.moveCursor(wordBoundary(w.value, w.cursor, 1), false)
+-	case "backspace":
+-		if !w.deleteSelection() && w.cursor > 0 {
+-			w.value = append(w.value[:w.cursor-1], w.value[w.cursor:]...)
+-			w.cursor--
+-			w.changed()
+-		}
+-	case "delete":
+-		if !w.deleteSelection() && w.cursor < len(w.value) {
+-			w.value = append(w.value[:w.cursor], w.value[w.cursor+1:]...)
+-			w.changed()
+-		}
+-	case "ctrl+c":
+-		if start, end, ok := w.selectionBoundsOK(); ok {
+-			setClipboard(string(w.value[start:end]))
+-		}
+-	case "ctrl+x":
+-		if start, end, ok := w.selectionBoundsOK(); ok {
+-			setClipboard(string(w.value[start:end]))
+-			w.value = append(w.value[:start], w.value[end:]...)
+-			w.cursor = start
+-			w.selecting = false
+-			w.changed()
+-		}
+-	case "ctrl+v":
+-		value, err := clipboard.ReadAll()
+-		if err != nil {
+-			value = getClipboard()
+-		}
+-		if value != "" {
+-			w.insert(strings.ReplaceAll(strings.ReplaceAll(value, "\r\n", " "), "\n", " "))
+-		}
+-	case "ctrl+u":
+-		w.value = append([]rune(nil), w.value[w.cursor:]...)
+-		w.cursor = 0
+-		w.selecting = false
+-		w.changed()
+-	case "ctrl+k":
+-		w.value = w.value[:w.cursor]
+-		w.selecting = false
+-		w.changed()
+-	case "up", "alt+up", "ctrl+p":
+-		return w.recallHistory(-1)
+-	case "down", "alt+down", "ctrl+n":
+-		return w.recallHistory(1)
+-	case "tab":
+-		if w.complete != nil {
+-			if value, cursor, ok := w.complete(string(w.value), w.cursor); ok {
+-				w.value = []rune(value)
+-				w.cursor = clamp(cursor, 0, len(w.value))
+-				w.selecting = false
+-				w.changed()
+-				return true
+-			}
+-		}
+-		return false
+-	case "space", " ":
+-		w.insert(" ")
+-	default:
+-		if ev.Text != "" && !strings.Contains(key, "+") {
+-			w.insert(ev.Text)
+-		} else if len([]rune(key)) == 1 && key[0] >= 32 {
+-			w.insert(key)
+-		} else {
+-			return false
+-		}
+-	}
+-	return true
+-}
+-
+-func (w *TextInput) insert(text string) {
+-	runes := []rune(text)
+-	if len(runes) == 0 {
+-		return
+-	}
+-	start, end, selected := w.selectionBoundsOK()
+-	if selected {
+-		w.value = append(w.value[:start], append(runes, w.value[end:]...)...)
+-		w.cursor = start + len(runes)
+-		w.selecting = false
+-	} else {
+-		w.value = append(w.value[:w.cursor], append(runes, w.value[w.cursor:]...)...)
+-		w.cursor += len(runes)
+-	}
+-	w.changed()
+-}
+-
+-func (w *TextInput) moveCursor(pos int, extend bool) {
+-	pos = clamp(pos, 0, len(w.value))
+-	if extend {
+-		if !w.selecting {
+-			w.anchor = w.cursor
+-		}
+-		w.selecting = true
+-		w.cursor = pos
+-	} else {
+-		w.cursor = pos
+-		w.anchor = pos
+-		w.selecting = false
+-	}
+-}
+-
+-func (w *TextInput) deleteSelection() bool {
+-	start, end, ok := w.selectionBoundsOK()
+-	if !ok {
+-		return false
+-	}
+-	w.value = append(w.value[:start], w.value[end:]...)
+-	w.cursor = start
+-	w.selecting = false
+-	w.changed()
+-	return true
+-}
+-
+-func (w *TextInput) selectionBounds() (int, int) {
+-	start, end, ok := w.selectionBoundsOK()
+-	if !ok {
+-		return 0, 0
+-	}
+-	return start, end
+-}
+-
+-func (w *TextInput) selectionBoundsOK() (int, int, bool) {
+-	if !w.selecting || w.anchor == w.cursor {
+-		return 0, 0, false
+-	}
+-	start, end := w.anchor, w.cursor
+-	if start > end {
+-		start, end = end, start
+-	}
+-	return start, end, true
+-}
+-
+-func (w *TextInput) recallHistory(direction int) bool {
+-	if len(w.history) == 0 {
+-		return false
+-	}
+-	if w.historyIdx < 0 {
+-		if direction < 0 {
+-			w.historyIdx = len(w.history) - 1
+-		} else {
+-			return false
+-		}
+-	} else if direction < 0 {
+-		if w.historyIdx > 0 {
+-			w.historyIdx--
+-		}
+-	} else if w.historyIdx < len(w.history)-1 {
+-		w.historyIdx++
+-	} else {
+-		w.historyIdx = -1
+-		w.value = nil
+-		w.cursor = 0
+-		w.selecting = false
+-		w.changed()
+-		return true
+-	}
+-	w.value = []rune(w.history[w.historyIdx])
+-	w.cursor = len(w.value)
+-	w.selecting = false
+-	w.changed()
+-	return true
+-}
+-
+-func (w *TextInput) changed() {
+-	if w.onChange != nil {
+-		w.onChange(string(w.value))
+-	}
+-	if w.OnChanged != nil {
+-		w.OnChanged(string(w.value))
+-	}
+-}
+-
+-func wordBoundary(value []rune, cursor, direction int) int {
+-	isWord := func(r rune) bool {
+-		return r == '_' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r > 127
+-	}
+-	if direction < 0 {
+-		for cursor > 0 && !isWord(value[cursor-1]) {
+-			cursor--
+-		}
+-		for cursor > 0 && isWord(value[cursor-1]) {
+-			cursor--
+-		}
+-		return cursor
+-	}
+-	for cursor < len(value) && !isWord(value[cursor]) {
+-		cursor++
+-	}
+-	for cursor < len(value) && isWord(value[cursor]) {
+-		cursor++
+-	}
+-	return cursor
+-}
+-
+-var (
+-	clipboardMu       sync.Mutex
+-	clipboardFallback string
+-)
+-
+-func setClipboard(value string) {
+-	clipboardMu.Lock()
+-	clipboardFallback = value
+-	clipboardMu.Unlock()
+-	_ = clipboard.WriteAll(value)
+-}
+-
+-func getClipboard() string {
+-	clipboardMu.Lock()
+-	defer clipboardMu.Unlock()
+-	return clipboardFallback
+-}
+diff --git a/kabibi/ui/widgets/widgets.go b/kabibi/ui/widgets/widgets.go
+index 9dc480a..3dffae9 100644
+--- a/kabibi/ui/widgets/widgets.go
++++ b/kabibi/ui/widgets/widgets.go
+@@ -3,7 +3,9 @@ package widgets
+ import (
+ 	"fmt"
+ 	"strings"
++	"sync"
+ 
++	"github.com/atotto/clipboard"
+ 	"github.com/charmbracelet/x/input"
+ 	"github.com/mattn/go-runewidth"
+ 	"github.com/mavity/rusticated/kabibi/ui"
+@@ -19,6 +21,388 @@ type (
+ 	RenderContext = ui.RenderContext
+ )
+ 
++type TextInputStyles struct {
++	Text       terminal.Style
++	Focused    terminal.Style
++	Selected   terminal.Style
++	Overflow   terminal.Style
++	Label      terminal.Style
++	Background terminal.Style
++}
++
++type TextInputOptions struct {
++	Value      string
++	History    []string
++	Complete   func(value string, cursor int) (string, int, bool)
++	Styles     TextInputStyles
++	OnChange   func(value string)
++	SelectAll  bool
++	AllowPaste bool
++}
++
++type TextInput struct {
++	value      []rune
++	cursor     int
++	anchor     int
++	selecting  bool
++	scrollCol  int
++	history    []string
++	historyIdx int
++	complete   func(string, int) (string, int, bool)
++	styles     TextInputStyles
++	onChange   func(string)
++	selectAll  bool
++	allowPaste bool
++}
++
++func NewTextInput(opts TextInputOptions) *TextInput {
++	w := &TextInput{
++		value:      []rune(opts.Value),
++		cursor:     len([]rune(opts.Value)),
++		history:    append([]string(nil), opts.History...),
++		historyIdx: -1,
++		complete:   opts.Complete,
++		styles:     opts.Styles,
++		onChange:   opts.OnChange,
++		selectAll:  opts.SelectAll,
++		allowPaste: opts.AllowPaste,
++	}
++	if opts.SelectAll && len(w.value) > 0 {
++		w.anchor = 0
++		w.selecting = true
++	}
++	return w
++}
++
++func (w *TextInput) Value() string {
++	if w == nil {
++		return ""
++	}
++	return string(w.value)
++}
++
++func (w *TextInput) SetValue(value string) {
++	if w == nil {
++		return
++	}
++	w.value = []rune(value)
++	w.cursor = len(w.value)
++	w.anchor = w.cursor
++	w.selecting = false
++	w.scrollCol = 0
++	w.changed()
++}
++
++func (w *TextInput) Measure(c Constraints) Size {
++	width := c.MaxW
++	if width <= 0 {
++		width = 40
++	}
++	if c.MaxH > 0 && c.MaxH < 1 {
++		return Size{}
++	}
++	return Size{W: width, H: 1}
++}
++
++func (w *TextInput) Render(r Rect, ctx RenderContext) string {
++	width := r.W
++	if width < 0 {
++		width = 0
++	}
++	buf := terminal.NewCellBuf(width, 1)
++	if w == nil || width == 0 {
++		return ui.ANSIFrame(buf, CursorPos{})
++	}
++	if width == 1 {
++		if len(w.value) > 0 {
++			buf.Set(0, 0, terminal.Cell{Grapheme: "…", Style: styleOr(w.styles.Overflow, terminal.NewStyle(0xFFD700, 0x0D1014, terminal.CharBold))})
++		}
++		return ui.ANSIFrame(buf, CursorPos{Visible: ctx.Focused})
++	}
++
++	styles := w.styles
++	textStyle := styleOr(styles.Text, terminal.NewStyle(0xE5E5E5, 0x0D1014, 0))
++	focusedStyle := styleOr(styles.Focused, terminal.NewStyle(0xFFFFFF, 0x005F87, terminal.CharBold))
++	selectedStyle := styleOr(styles.Selected, terminal.NewStyle(0x1A1F26, 0xFFD700, 0))
++	overflowStyle := styleOr(styles.Overflow, terminal.NewStyle(0xFFD700, 0x0D1014, terminal.CharBold))
++	background := styleOr(styles.Background, textStyle)
++	buf.Fill(terminal.Rect{W: width, H: 1}, terminal.Cell{Grapheme: " ", Style: background})
++
++	cursorCol := runeColumn(w.value, w.cursor)
++	totalWidth := runeColumn(w.value, len(w.value))
++	if w.scrollCol < 0 {
++		w.scrollCol = 0
++	}
++	if w.scrollCol > totalWidth {
++		w.scrollCol = totalWidth
++	}
++
++	leftOverflow := w.scrollCol > 0
++	rightOverflow := totalWidth-w.scrollCol > width-boolInt(leftOverflow)
++	available := width - boolInt(leftOverflow) - boolInt(rightOverflow)
++	if available < 1 {
++		available = 1
++	}
++	if cursorCol < w.scrollCol {
++		w.scrollCol = cursorCol
++		leftOverflow = w.scrollCol > 0
++		rightOverflow = totalWidth-w.scrollCol > width-boolInt(leftOverflow)
++		available = max(1, width-boolInt(leftOverflow)-boolInt(rightOverflow))
++	}
++	if cursorCol >= w.scrollCol+available {
++		w.scrollCol = cursorCol - available + 1
++		leftOverflow = w.scrollCol > 0
++		rightOverflow = totalWidth-w.scrollCol > width-boolInt(leftOverflow)
++		available = max(1, width-boolInt(leftOverflow)-boolInt(rightOverflow))
++	}
++	if leftOverflow && width > 0 {
++		buf.Set(0, 0, terminal.Cell{Grapheme: "…", Style: overflowStyle})
++	}
++	if rightOverflow && width > 0 {
++		buf.Set(width-1, 0, terminal.Cell{Grapheme: "…", Style: overflowStyle})
++	}
++
++	startX := boolInt(leftOverflow)
++	col := 0
++	selStart, selEnd := w.selectionBounds()
++	for i, r := range w.value {
++		rw := runeWidth(r)
++		x := startX + col - w.scrollCol
++		inSelection := w.selecting && i >= selStart && i < selEnd
++		style := textStyle
++		if ctx.Focused {
++			style = focusedStyle
++		}
++		if inSelection {
++			style = selectedStyle
++		}
++		if x >= startX && x+rw <= startX+available {
++			buf.Set(x, 0, terminal.Cell{Grapheme: string(r), Style: style})
++			for n := 1; n < rw; n++ {
++				buf.Set(x+n, 0, terminal.Cell{Grapheme: "", Style: style})
++			}
++		}
++		col += rw
++	}
++	cursorX := startX + cursorCol - w.scrollCol
++	if cursorX < startX {
++		cursorX = startX
++	}
++	if cursorX >= startX+available {
++		cursorX = startX + available - 1
++	}
++	return ui.ANSIFrame(buf, CursorPos{X: cursorX, Y: 0, Visible: ctx.Focused})
++}
++
++func (w *TextInput) HandleEvent(event input.Event) bool {
++	if w == nil {
++		return false
++	}
++	switch ev := event.(type) {
++	case input.PasteEvent:
++		if !w.allowPaste {
++			return false
++		}
++		w.insert(strings.ReplaceAll(strings.ReplaceAll(string(ev), "\r\n", " "), "\n", " "))
++		return true
++	case *input.PasteEvent:
++		return ev != nil && w.HandleEvent(*ev)
++	case input.KeyPressEvent:
++		return w.handleKey(ev)
++	case *input.KeyPressEvent:
++		return ev != nil && w.handleKey(*ev)
++	default:
++		return false
++	}
++}
++
++func (w *TextInput) handleKey(ev input.KeyPressEvent) bool {
++	key := strings.ToLower(ev.String())
++	switch key {
++	case "left", "shift+left":
++		w.moveCursor(w.cursor-1, strings.HasPrefix(key, "shift+"))
++	case "right", "shift+right":
++		w.moveCursor(w.cursor+1, strings.HasPrefix(key, "shift+"))
++	case "home", "ctrl+a", "shift+home":
++		if key == "ctrl+a" {
++			w.anchor, w.cursor, w.selecting = 0, len(w.value), true
++		} else {
++			w.moveCursor(0, strings.HasPrefix(key, "shift+"))
++		}
++	case "end", "ctrl+e", "shift+end":
++		w.moveCursor(len(w.value), strings.HasPrefix(key, "shift+"))
++	case "ctrl+left":
++		w.moveCursor(wordBoundary(w.value, w.cursor, -1), false)
++	case "ctrl+right":
++		w.moveCursor(wordBoundary(w.value, w.cursor, 1), false)
++	case "backspace":
++		if !w.deleteSelection() && w.cursor > 0 {
++			w.value = append(w.value[:w.cursor-1], w.value[w.cursor:]...)
++			w.cursor--
++			w.changed()
++		}
++	case "delete":
++		if !w.deleteSelection() && w.cursor < len(w.value) {
++			w.value = append(w.value[:w.cursor], w.value[w.cursor+1:]...)
++			w.changed()
++		}
++	case "ctrl+c":
++		if start, end, ok := w.selectionBoundsOK(); ok {
++			setClipboard(string(w.value[start:end]))
++		}
++	case "ctrl+x":
++		if start, end, ok := w.selectionBoundsOK(); ok {
++			setClipboard(string(w.value[start:end]))
++			w.value = append(w.value[:start], w.value[end:]...)
++			w.cursor = start
++			w.selecting = false
++			w.changed()
++		}
++	case "ctrl+v":
++		value, err := clipboard.ReadAll()
++		if err != nil {
++			value = getClipboard()
++		}
++		if value != "" {
++			w.insert(strings.ReplaceAll(strings.ReplaceAll(value, "\r\n", " "), "\n", " "))
++		}
++	case "ctrl+u":
++		w.value = append([]rune(nil), w.value[w.cursor:]...)
++		w.cursor = 0
++		w.selecting = false
++		w.changed()
++	case "ctrl+k":
++		w.value = w.value[:w.cursor]
++		w.selecting = false
++		w.changed()
++	case "up":
++		w.recallHistory(-1)
++	case "down":
++		w.recallHistory(1)
++	case "tab":
++		if w.complete != nil {
++			if value, cursor, ok := w.complete(string(w.value), w.cursor); ok {
++				w.value = []rune(value)
++				w.cursor = clamp(cursor, 0, len(w.value))
++				w.selecting = false
++				w.changed()
++				return true
++			}
++		}
++		return false
++	case "space", " ":
++		w.insert(" ")
++	default:
++		if ev.Text != "" && !strings.Contains(key, "+") {
++			w.insert(ev.Text)
++		} else if len([]rune(key)) == 1 && key[0] >= 32 {
++			w.insert(key)
++		} else {
++			return false
++		}
++	}
++	return true
++}
++
++func (w *TextInput) insert(text string) {
++	runes := []rune(text)
++	if len(runes) == 0 {
++		return
++	}
++	start, end, selected := w.selectionBoundsOK()
++	if selected {
++		w.value = append(w.value[:start], append(runes, w.value[end:]...)...)
++		w.cursor = start + len(runes)
++		w.selecting = false
++	} else {
++		w.value = append(w.value[:w.cursor], append(runes, w.value[w.cursor:]...)...)
++		w.cursor += len(runes)
++	}
++	w.changed()
++}
++
++func (w *TextInput) moveCursor(pos int, extend bool) {
++	pos = clamp(pos, 0, len(w.value))
++	if extend {
++		if !w.selecting {
++			w.anchor = w.cursor
++		}
++		w.selecting = true
++		w.cursor = pos
++	} else {
++		w.cursor = pos
++		w.anchor = pos
++		w.selecting = false
++	}
++}
++
++func (w *TextInput) deleteSelection() bool {
++	start, end, ok := w.selectionBoundsOK()
++	if !ok {
++		return false
++	}
++	w.value = append(w.value[:start], w.value[end:]...)
++	w.cursor = start
++	w.selecting = false
++	w.changed()
++	return true
++}
++
++func (w *TextInput) selectionBounds() (int, int) {
++	start, end, ok := w.selectionBoundsOK()
++	if !ok {
++		return 0, 0
++	}
++	return start, end
++}
++
++func (w *TextInput) selectionBoundsOK() (int, int, bool) {
++	if !w.selecting || w.anchor == w.cursor {
++		return 0, 0, false
++	}
++	start, end := w.anchor, w.cursor
++	if start > end {
++		start, end = end, start
++	}
++	return start, end, true
++}
++
++func (w *TextInput) recallHistory(direction int) {
++	if len(w.history) == 0 {
++		return
++	}
++	if w.historyIdx < 0 {
++		if direction < 0 {
++			w.historyIdx = len(w.history) - 1
++		} else {
++			return
++		}
++	} else if direction < 0 {
++		if w.historyIdx > 0 {
++			w.historyIdx--
++		}
++	} else if w.historyIdx < len(w.history)-1 {
++		w.historyIdx++
++	} else {
++		w.historyIdx = -1
++		w.value = nil
++		w.cursor = 0
++		w.selecting = false
++		w.changed()
++		return
++	}
++	w.value = []rune(w.history[w.historyIdx])
++	w.cursor = len(w.value)
++	w.selecting = false
++	w.changed()
++}
++
++func (w *TextInput) changed() {
++	if w.onChange != nil {
++		w.onChange(string(w.value))
++	}
++}
++
+ func runeWidth(r rune) int {
+ 	width := runewidth.RuneWidth(r)
+ 	if width < 1 {
+@@ -35,6 +419,28 @@ func runeColumn(value []rune, index int) int {
+ 	return col
+ }
+ 
++func wordBoundary(value []rune, cursor, direction int) int {
++	isWord := func(r rune) bool {
++		return r == '_' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r > 127
++	}
++	if direction < 0 {
++		for cursor > 0 && !isWord(value[cursor-1]) {
++			cursor--
++		}
++		for cursor > 0 && isWord(value[cursor-1]) {
++			cursor--
++		}
++		return cursor
++	}
++	for cursor < len(value) && !isWord(value[cursor]) {
++		cursor++
++	}
++	for cursor < len(value) && isWord(value[cursor]) {
++		cursor++
++	}
++	return cursor
++}
++
+ func styleOr(style, fallback terminal.Style) terminal.Style {
+ 	if style == 0 {
+ 		return fallback
+@@ -59,6 +465,273 @@ func clamp(value, low, high int) int {
+ 	return value
+ }
+ 
++type CheckboxStyles struct {
++	Normal   terminal.Style
++	Focused  terminal.Style
++	Disabled terminal.Style
++}
++
++type Checkbox struct {
++	Label    string
++	Checked  bool
++	Disabled bool
++	Styles   CheckboxStyles
++}
++
++func (w *Checkbox) Measure(c Constraints) Size {
++	return Size{W: max(0, c.MaxW), H: 1}
++}
++
++func (w *Checkbox) Render(r Rect, ctx RenderContext) string {
++	buf := terminal.NewCellBuf(max(0, r.W), 1)
++	if w == nil || r.W <= 0 {
++		return ui.ANSIFrame(buf, CursorPos{})
++	}
++	style := styleOr(w.Styles.Normal, terminal.NewStyle(0xE5E5E5, 0x1A1F26, 0))
++	if w.Disabled {
++		style = styleOr(w.Styles.Disabled, terminal.NewStyle(0x8A95A5, 0x1A1F26, terminal.CharDim))
++	} else if ctx.Focused {
++		style = styleOr(w.Styles.Focused, terminal.NewStyle(0x1A1F26, 0xFFD700, terminal.CharBold))
++	}
++	for i, r := range []rune("[ ] " + w.Label) {
++		if i >= buf.Width {
++			break
++		}
++		buf.Set(i, 0, terminal.Cell{Grapheme: string(r), Style: style})
++	}
++	check := " "
++	if w.Checked {
++		check = "x"
++	}
++	if buf.Width > 1 {
++		buf.Set(1, 0, terminal.Cell{Grapheme: check, Style: style})
++	}
++	return ui.ANSIFrame(buf, CursorPos{})
++}
++
++func (w *Checkbox) HandleEvent(event input.Event) bool {
++	if w == nil || w.Disabled {
++		return false
++	}
++	ev, ok := keyEvent(event)
++	if !ok || (ev.String() != "space" && ev.String() != " ") {
++		return false
++	}
++	w.Checked = !w.Checked
++	return true
++}
++
++type Button struct {
++	Label    string
++	Hotkey   string
++	Disabled bool
++	OnPress  func()
++}
++
++type ButtonStyles struct {
++	Normal   terminal.Style
++	Focused  terminal.Style
++	Disabled terminal.Style
++}
++
++type ButtonRow struct {
++	Buttons []Button
++	Index   int
++	Styles  ButtonStyles
++}
++
++func NewButtonRow(buttons []Button) *ButtonRow {
++	return &ButtonRow{Buttons: append([]Button(nil), buttons...)}
++}
++
++func (w *ButtonRow) Measure(c Constraints) Size {
++	if w == nil || len(w.Buttons) == 0 {
++		return Size{}
++	}
++	width := 0
++	for _, button := range w.Buttons {
++		width += runewidth.StringWidth(button.Label) + 4
++	}
++	if len(w.Buttons) > 1 {
++		width += (len(w.Buttons) - 1) * 2
++	}
++	maxWidth := c.MaxW
++	if maxWidth <= 0 {
++		maxWidth = width
++	}
++	rows := max(1, (width+maxWidth-1)/maxWidth)
++	return Size{W: min(width, maxWidth), H: rows}
++}
++
++func (w *ButtonRow) Render(r Rect, ctx RenderContext) string {
++	width, height := max(0, r.W), max(0, r.H)
++	buf := terminal.NewCellBuf(width, height)
++	if w == nil || width == 0 || height == 0 {
++		return ui.ANSIFrame(buf, CursorPos{})
++	}
++	normal := styleOr(w.Styles.Normal, terminal.NewStyle(0xE5E5E5, 0x2A323D, 0))
++	focused := styleOr(w.Styles.Focused, terminal.NewStyle(0x1A1F26, 0xFFD700, terminal.CharBold))
++	disabled := styleOr(w.Styles.Disabled, terminal.NewStyle(0x8A95A5, 0x1A1F26, terminal.CharDim))
++	x, y := 0, 0
++	for i, button := range w.Buttons {
++		text := "[ " + button.Label + " ]"
++		textWidth := runewidth.StringWidth(text)
++		if x > 0 && x+textWidth > width {
++			x = 0
++			y++
++		}
++		if y >= height {
++			break
++		}
++		style := normal
++		if button.Disabled {
++			style = disabled
++		} else if i == w.Index && ctx.Focused {
++			style = focused
++		}
++		col := x
++		labelHotkey := -1
++		if button.Hotkey != "" {
++			for j, r := range []rune(button.Label) {
++				if strings.EqualFold(string(r), button.Hotkey) {
++					labelHotkey = j + 2
++					break
++				}
++			}
++		}
++		for textIndex, r := range []rune(text) {
++			rw := runeWidth(r)
++			if col+rw > width {
++				break
++			}
++			cellStyle := style
++			if textIndex == labelHotkey {
++				cellStyle = style.AddAttribute(terminal.CharUnderline)
++			}
++			buf.Set(col, y, terminal.Cell{Grapheme: string(r), Style: cellStyle})
++			for n := 1; n < rw; n++ {
++				buf.Set(col+n, y, terminal.Cell{Grapheme: "", Style: cellStyle})
++			}
++			col += rw
++		}
++		x += textWidth + 2
++	}
++	return ui.ANSIFrame(buf, CursorPos{})
++}
++
++func (w *ButtonRow) HandleEvent(event input.Event) bool {
++	if w == nil || len(w.Buttons) == 0 {
++		return false
++	}
++	ev, ok := keyEvent(event)
++	if !ok {
++		return false
++	}
++	switch strings.ToLower(ev.String()) {
++	case "left", "up", "shift+tab":
++		w.move(-1)
++		return true
++	case "right", "down", "tab":
++		w.move(1)
++		return true
++	case "enter", "space", " ":
++		w.activate(w.Index)
++		return true
++	default:
++		key := strings.ToLower(ev.String())
++		if ev.Text != "" {
++			key = strings.ToLower(ev.Text)
++		}
++		for i, button := range w.Buttons {
++			if button.Hotkey != "" && key == strings.ToLower(button.Hotkey) {
++				w.activate(i)
++				return true
++			}
++		}
++	}
++	return false
++}
++
++func (w *ButtonRow) move(step int) {
++	if len(w.Buttons) == 0 {
++		return
++	}
++	for n := 0; n < len(w.Buttons); n++ {
++		w.Index = (w.Index + step + len(w.Buttons)) % len(w.Buttons)
++		if !w.Buttons[w.Index].Disabled {
++			return
++		}
++	}
++}
++
++func (w *ButtonRow) activate(index int) {
++	if index < 0 || index >= len(w.Buttons) || w.Buttons[index].Disabled {
++		return
++	}
++	if w.Buttons[index].OnPress != nil {
++		w.Buttons[index].OnPress()
++	}
++}
++
++type ProgressBarStyles struct {
++	Filled   terminal.Style
++	Empty    terminal.Style
++	Label    terminal.Style
++	Metadata terminal.Style
++}
++
++type ProgressBar struct {
++	Current string
++	Done    int64
++	Total   int64
++	Rate    int64
++	Styles  ProgressBarStyles
++}
++
++func (w *ProgressBar) Measure(c Constraints) Size {
++	height := 3
++	if c.MaxH > 0 && c.MaxH < height {
++		height = c.MaxH
++	}
++	return Size{W: max(0, c.MaxW), H: height}
++}
++
++func (w *ProgressBar) Render(r Rect, _ RenderContext) string {
++	width, height := max(0, r.W), max(0, r.H)
++	buf := terminal.NewCellBuf(width, height)
++	if w == nil || width == 0 || height == 0 {
++		return ui.ANSIFrame(buf, CursorPos{})
++	}
++	labelStyle := styleOr(w.Styles.Label, terminal.NewStyle(0xE5E5E5, 0x1A1F26, 0))
++	filledStyle := styleOr(w.Styles.Filled, terminal.NewStyle(0xFFD700, 0x1A1F26, 0))
++	emptyStyle := styleOr(w.Styles.Empty, terminal.NewStyle(0x8A95A5, 0x1A1F26, 0))
++	metaStyle := styleOr(w.Styles.Metadata, terminal.NewStyle(0x8A95A5, 0x1A1F26, 0))
++	writeText(&buf, 0, 0, middleTruncate(w.Current, width), labelStyle)
++	if height > 1 {
++		pct := percent(w.Done, w.Total)
++		suffix := fmt.Sprintf(" %3d%%", pct)
++		barWidth := max(0, width-runewidth.StringWidth(suffix))
++		filled := barWidth * pct / 100
++		for x := 0; x < barWidth; x++ {
++			r := '░'
++			style := emptyStyle
++			if x < filled {
++				r = '█'
++				style = filledStyle
++			}
++			buf.Set(x, 1, terminal.Cell{Grapheme: string(r), Style: style})
++		}
++		writeText(&buf, barWidth, 1, suffix, labelStyle)
++	}
++	if height > 2 {
++		meta := fmt.Sprintf("%s / %s  %s/s", formatBytes(w.Done), formatBytes(w.Total), formatBytes(w.Rate))
++		writeText(&buf, 0, 2, middleTruncate(meta, width), metaStyle)
++	}
++	return ui.ANSIFrame(buf, CursorPos{})
++}
++
++func (w *ProgressBar) HandleEvent(input.Event) bool { return false }
++
+ func keyEvent(event input.Event) (input.KeyPressEvent, bool) {
+ 	switch ev := event.(type) {
+ 	case input.KeyPressEvent:
+@@ -86,29 +759,6 @@ func writeText(buf *CellBuf, x, y int, text string, style terminal.Style) {
+ 	}
+ }
+ 
+-func truncateEnd(text string, maxWidth int) string {
+-	if maxWidth <= 0 {
+-		return ""
+-	}
+-	if runewidth.StringWidth(text) <= maxWidth {
+-		return text
+-	}
+-	if maxWidth == 1 {
+-		return "…"
+-	}
+-	var b strings.Builder
+-	width := 0
+-	for _, r := range text {
+-		rw := runeWidth(r)
+-		if width+rw > maxWidth-1 {
+-			break
+-		}
+-		b.WriteRune(r)
+-		width += rw
+-	}
+-	return b.String() + "…"
+-}
+-
+ func middleTruncate(text string, width int) string {
+ 	if width <= 0 {
+ 		return ""
+@@ -171,13 +821,23 @@ func formatBytes(value int64) string {
+ 	return fmt.Sprintf("%.1f %cB", float64(value)/float64(div), units[exp])
+ }
+ 
+-var (
+-	_ ui.Widget = (*TextInput)(nil)
+-	_ ui.Widget = (*Checkbox)(nil)
+-	_ ui.Widget = (*ButtonRow)(nil)
+-	_ ui.Widget = (*ProgressBar)(nil)
+-	_ ui.Widget = (*Label)(nil)
+-	_ ui.Widget = (*TextBlock)(nil)
+-	_ ui.Widget = (*Grid)(nil)
+-	_ ui.Widget = (*Frame)(nil)
+-)
++var clipboardMu sync.Mutex
++var clipboardFallback string
++
++func setClipboard(value string) {
++	clipboardMu.Lock()
++	clipboardFallback = value
++	clipboardMu.Unlock()
++	_ = clipboard.WriteAll(value)
++}
++
++func getClipboard() string {
++	clipboardMu.Lock()
++	defer clipboardMu.Unlock()
++	return clipboardFallback
++}
++
++var _ ui.Widget = (*TextInput)(nil)
++var _ ui.Widget = (*Checkbox)(nil)
++var _ ui.Widget = (*ButtonRow)(nil)
++var _ ui.Widget = (*ProgressBar)(nil)
+diff --git a/kabibi/ui/widgets/widgets_test.go b/kabibi/ui/widgets/widgets_test.go
+index 4d44adf..012e5da 100644
+--- a/kabibi/ui/widgets/widgets_test.go
++++ b/kabibi/ui/widgets/widgets_test.go
+@@ -115,120 +115,3 @@ func TestProgressBarRespondsToConstraints(t *testing.T) {
+ 		t.Fatal("progress output does not show percentage")
+ 	}
+ }
+-
+-func TestControlSemanticCallbacks(t *testing.T) {
+-	var changed string
+-	in := NewTextInput(TextInputOptions{
+-		OnChanged: func(v string) { changed = v },
+-	})
+-	in.HandleEvent(input.KeyPressEvent{Code: 'a', Text: "a"})
+-	if changed != "a" {
+-		t.Fatalf("TextInput.OnChanged = %q, want %q", changed, "a")
+-	}
+-
+-	var toggled bool
+-	cb := &Checkbox{
+-		Label:     "Option",
+-		OnToggled: func(v bool) { toggled = v },
+-	}
+-	cb.HandleEvent(input.KeyPressEvent{Code: input.KeySpace})
+-	if !toggled || !cb.Checked {
+-		t.Fatalf("Checkbox.OnToggled = %v, Checked = %v; want true", toggled, cb.Checked)
+-	}
+-
+-	clicked := false
+-	btn := &Button{
+-		Label:   "OK",
+-		OnClick: func() { clicked = true },
+-	}
+-	row := NewButtonPtrRow(btn)
+-	row.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
+-	if !clicked {
+-		t.Fatal("Button.OnClick was not called on Enter")
+-	}
+-}
+-
+-func TestGridSymmetricTrackResolutionAndWrapping(t *testing.T) {
+-	in1 := NewTextInput(TextInputOptions{Value: "first"})
+-	in2 := NewTextInput(TextInputOptions{Value: "second"})
+-	explanation := &TextBlock{Text: "This is a multi-word explanation that wraps across multiple rows when narrow."}
+-	g := &Grid{
+-		Columns: []Track{
+-			{Kind: TrackFixed, Value: 10},
+-			{Kind: TrackFraction, Value: 1},
+-		},
+-		Children: []GridChild{
+-			{Row: 0, Column: 0, ColSpan: 2, Child: explanation},
+-			{Row: 1, Column: 0, Child: &Label{Text: "Source"}},
+-			{Row: 1, Column: 1, Child: in1},
+-			{Row: 2, Column: 0, Child: &Label{Text: "Target"}},
+-			{Row: 2, Column: 1, Child: in2},
+-		},
+-	}
+-	g.SetFocusedWidget(in2)
+-
+-	size := g.Measure(ui.Constraints{MaxW: 30, MaxH: 20})
+-	if size.W != 30 {
+-		t.Fatalf("Grid.Measure width = %d, want 30", size.W)
+-	}
+-	if size.H < 5 {
+-		t.Fatalf("Grid.Measure height = %d, want >= 5 with wrapped TextBlock", size.H)
+-	}
+-
+-	buf, cursor := renderWidgetANSIForTest(t, g.Render(ui.Rect{W: size.W, H: size.H}, ui.RenderContext{Focused: true}), size.W, size.H)
+-	if buf.Width != size.W || buf.Height != size.H {
+-		t.Fatalf("Grid.Render size = %dx%d, want %dx%d", buf.Width, buf.Height, size.W, size.H)
+-	}
+-	if !cursor.Visible {
+-		t.Fatal("expected visible cursor from focused second input")
+-	}
+-	if cursor.X < 10 {
+-		t.Fatalf("cursor.X = %d, want >= 10 (in column 1)", cursor.X)
+-	}
+-	if cursor.Y != size.H-1 {
+-		t.Fatalf("cursor.Y = %d, want %d (on row 2)", cursor.Y, size.H-1)
+-	}
+-}
+-
+-func TestNestedFrameAndGridFocusAndRouting(t *testing.T) {
+-	cb1 := &Checkbox{Label: "Show hidden files"}
+-	cb2 := &Checkbox{Label: "Show status bar"}
+-	frame1 := &Frame{
+-		Title: "Panel settings",
+-		Child: &Grid{
+-			Children: []GridChild{
+-				{Row: 0, Child: cb1},
+-			},
+-		},
+-	}
+-	frame2 := &Frame{
+-		Title: "Display settings",
+-		Child: &Grid{
+-			Children: []GridChild{
+-				{Row: 0, Child: cb2},
+-			},
+-		},
+-	}
+-	root := &Grid{
+-		Children: []GridChild{
+-			{Row: 0, Child: frame1},
+-			{Row: 1, Child: frame2},
+-		},
+-	}
+-	if !root.SetFocusedWidget(cb2) {
+-		t.Fatal("SetFocusedWidget(cb2) returned false")
+-	}
+-	if !root.HandleEvent(input.KeyPressEvent{Code: input.KeySpace}) {
+-		t.Fatal("Space was not routed through root Grid -> frame2 -> inner Grid -> cb2")
+-	}
+-	if cb1.Checked || !cb2.Checked {
+-		t.Fatalf("Checkbox states = (%v, %v), want (false, true)", cb1.Checked, cb2.Checked)
+-	}
+-
+-	size := root.Measure(ui.Constraints{MaxW: 40, MaxH: 20})
+-	buf, _ := renderWidgetANSIForTest(t, root.Render(ui.Rect{W: size.W, H: size.H}, ui.RenderContext{Focused: true}), size.W, size.H)
+-	out := terminal.ToANSI(buf)
+-	if !strings.Contains(out, "Panel settings") || !strings.Contains(out, "Display settings") || !strings.Contains(out, "[x] Show status bar") {
+-		t.Fatalf("rendered nested frames missing expected text: %q", out)
+-	}
+-}

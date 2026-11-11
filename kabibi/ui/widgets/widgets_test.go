@@ -115,3 +115,120 @@ func TestProgressBarRespondsToConstraints(t *testing.T) {
 		t.Fatal("progress output does not show percentage")
 	}
 }
+
+func TestControlSemanticCallbacks(t *testing.T) {
+	var changed string
+	in := NewTextInput(TextInputOptions{
+		OnChanged: func(v string) { changed = v },
+	})
+	in.HandleEvent(input.KeyPressEvent{Code: 'a', Text: "a"})
+	if changed != "a" {
+		t.Fatalf("TextInput.OnChanged = %q, want %q", changed, "a")
+	}
+
+	var toggled bool
+	cb := &Checkbox{
+		Label:     "Option",
+		OnToggled: func(v bool) { toggled = v },
+	}
+	cb.HandleEvent(input.KeyPressEvent{Code: input.KeySpace})
+	if !toggled || !cb.Checked {
+		t.Fatalf("Checkbox.OnToggled = %v, Checked = %v; want true", toggled, cb.Checked)
+	}
+
+	clicked := false
+	btn := &Button{
+		Label:   "OK",
+		OnClick: func() { clicked = true },
+	}
+	row := NewButtonPtrRow(btn)
+	row.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
+	if !clicked {
+		t.Fatal("Button.OnClick was not called on Enter")
+	}
+}
+
+func TestGridSymmetricTrackResolutionAndWrapping(t *testing.T) {
+	in1 := NewTextInput(TextInputOptions{Value: "first"})
+	in2 := NewTextInput(TextInputOptions{Value: "second"})
+	explanation := &TextBlock{Text: "This is a multi-word explanation that wraps across multiple rows when narrow."}
+	g := &Grid{
+		Columns: []Track{
+			{Kind: TrackFixed, Value: 10},
+			{Kind: TrackFraction, Value: 1},
+		},
+		Children: []GridChild{
+			{Row: 0, Column: 0, ColSpan: 2, Child: explanation},
+			{Row: 1, Column: 0, Child: &Label{Text: "Source"}},
+			{Row: 1, Column: 1, Child: in1},
+			{Row: 2, Column: 0, Child: &Label{Text: "Target"}},
+			{Row: 2, Column: 1, Child: in2},
+		},
+	}
+	g.SetFocusedWidget(in2)
+
+	size := g.Measure(ui.Constraints{MaxW: 30, MaxH: 20})
+	if size.W != 30 {
+		t.Fatalf("Grid.Measure width = %d, want 30", size.W)
+	}
+	if size.H < 5 {
+		t.Fatalf("Grid.Measure height = %d, want >= 5 with wrapped TextBlock", size.H)
+	}
+
+	buf, cursor := renderWidgetANSIForTest(t, g.Render(ui.Rect{W: size.W, H: size.H}, ui.RenderContext{Focused: true}), size.W, size.H)
+	if buf.Width != size.W || buf.Height != size.H {
+		t.Fatalf("Grid.Render size = %dx%d, want %dx%d", buf.Width, buf.Height, size.W, size.H)
+	}
+	if !cursor.Visible {
+		t.Fatal("expected visible cursor from focused second input")
+	}
+	if cursor.X < 10 {
+		t.Fatalf("cursor.X = %d, want >= 10 (in column 1)", cursor.X)
+	}
+	if cursor.Y != size.H-1 {
+		t.Fatalf("cursor.Y = %d, want %d (on row 2)", cursor.Y, size.H-1)
+	}
+}
+
+func TestNestedFrameAndGridFocusAndRouting(t *testing.T) {
+	cb1 := &Checkbox{Label: "Show hidden files"}
+	cb2 := &Checkbox{Label: "Show status bar"}
+	frame1 := &Frame{
+		Title: "Panel settings",
+		Child: &Grid{
+			Children: []GridChild{
+				{Row: 0, Child: cb1},
+			},
+		},
+	}
+	frame2 := &Frame{
+		Title: "Display settings",
+		Child: &Grid{
+			Children: []GridChild{
+				{Row: 0, Child: cb2},
+			},
+		},
+	}
+	root := &Grid{
+		Children: []GridChild{
+			{Row: 0, Child: frame1},
+			{Row: 1, Child: frame2},
+		},
+	}
+	if !root.SetFocusedWidget(cb2) {
+		t.Fatal("SetFocusedWidget(cb2) returned false")
+	}
+	if !root.HandleEvent(input.KeyPressEvent{Code: input.KeySpace}) {
+		t.Fatal("Space was not routed through root Grid -> frame2 -> inner Grid -> cb2")
+	}
+	if cb1.Checked || !cb2.Checked {
+		t.Fatalf("Checkbox states = (%v, %v), want (false, true)", cb1.Checked, cb2.Checked)
+	}
+
+	size := root.Measure(ui.Constraints{MaxW: 40, MaxH: 20})
+	buf, _ := renderWidgetANSIForTest(t, root.Render(ui.Rect{W: size.W, H: size.H}, ui.RenderContext{Focused: true}), size.W, size.H)
+	out := terminal.ToANSI(buf)
+	if !strings.Contains(out, "Panel settings") || !strings.Contains(out, "Display settings") || !strings.Contains(out, "[x] Show status bar") {
+		t.Fatalf("rendered nested frames missing expected text: %q", out)
+	}
+}

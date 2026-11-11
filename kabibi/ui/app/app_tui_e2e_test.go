@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"ai"
+
 	"github.com/charmbracelet/x/input"
 	xterm "github.com/charmbracelet/x/term"
 	"github.com/charmbracelet/x/vt"
@@ -1047,7 +1048,9 @@ func TestAppTUI_BluePanels_FileOpsAndEditor(t *testing.T) {
 	if appWidget.Dialog() == nil {
 		t.Fatal("F2 did not open Rename dialog")
 	}
-	appWidget.Dialog().InputValue = "renamed.txt"
+	for _, r := range "renamed.txt" {
+		appWidget.HandleEvent(input.KeyPressEvent{Code: r, Text: string(r)})
+	}
 	appWidget.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
 	if _, err := os.Stat(filepath.Join(workDir, "renamed.txt")); err != nil {
 		t.Fatalf("expected renamed.txt after F2 rename: %v", err)

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"ai"
+
 	"github.com/charmbracelet/x/input"
 	"github.com/mavity/rusticated/kabibi/ui/filemanager"
 	"github.com/mavity/rusticated/kabibi/ui/shell"
@@ -19,7 +20,7 @@ type cancelInputAIRunner struct {
 	result    chan error
 }
 
-func (r *cancelInputAIRunner) RunTurn(ctx context.Context, _ string, _, _, _ ai.LogFeedback) error {
+func (r *cancelInputAIRunner) RunTurn(ctx context.Context, _ string, _, _ ai.LogFeedback) error {
 	close(r.started)
 	<-ctx.Done()
 	close(r.cancelled)
