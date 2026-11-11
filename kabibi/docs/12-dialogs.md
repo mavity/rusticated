@@ -41,7 +41,7 @@ Research across the existing `kabibi/ui` packages establishes the following patt
 
 To keep the footprint minimal and prevent dialog-specific coupling, reusable controls live in **`kabibi/ui/widgets`**. This package may depend on the core `kabibi/ui` contract and terminal/input primitives, but must not import `dialog`, `app`, `shell`, `wizard`, or feature-specific packages. Feature surfaces may import `ui/widgets` and compose the controls. The initial library is intentionally limited to **four primitives**—`TextInput`, `Checkbox`, `Button` / `ButtonRow`, and `ProgressBar`—plus, only if composition proves it useful, a small generic layout helper.
 
-The package is not a mandate to replace every existing input or UI component at once. In particular, the shell's multiline `PromptInput` and the editor's document editing model have distinct responsibilities. Share well-isolated editing behavior where it reduces duplication, but keep migrations incremental and driven by real reuse.
+The package is not a mandate to replace every existing input or UI component at once. In particular, the shell's multiline `PromptInput` and the editor's document editing model have distinct responsibilities. Share well-isolated editing behavior where it reduces duplication, but keep migrations incremental and driven by real reuse. The dialog redesign also introduces a small, generic composition layer consisting of recursive `Grid` and `Frame` widgets; these are layout containers, not dialog implementations.
 
 ### 3.1 Caller-Configurable Styling
 
@@ -600,3 +600,507 @@ Parent destination buffers are initialized with the surface colors used by reset
 `CommandBlock` keeps its settled `CellBuf` cache keyed by width and content state (`Prompt`, `Input`, output length, live-output generation, animation state, and status). `Shell.renderStackBlocksLocked` now assembles those cached cells directly, avoiding the previous per-block `CommandBlock.Render` → ANSI serialization → VT parse round-trip on every frame. Dirty blocks and width changes still regenerate the cache; the public widget API remains ANSI-string rendering.
 
 `BenchmarkShellRenderSettledBlocks` compares cached-cell assembly with the previous ANSI/VT round-trip using 100 settled blocks. On the recorded run, cached-cell assembly measured **4.22 µs/op, 5.1 KB/op, 3 allocs/op**, compared with **3.63 ms/op, 2.85 MB/op, 18,502 allocs/op** for the ANSI/VT path. These figures are benchmark-specific, but confirm the avoided work is substantial.
+
+---
+
+## 8. Concrete Dialog Composition Model (Current Design)
+
+The original `DialogWidget` design grouped unrelated operations behind one
+`Kind`/`Action` object. That is not the target architecture. The production
+surface is a set of concrete widgets—`MkdirDialog`, `RenameDialog`,
+`CopyDialog`, `MoveDialog`, `DeletePathDialog`, `DeleteConfirmDialog`,
+`EditDialog`, `MountDialog`, `FindFilesDialog`, `SettingsDialog`,
+`ErrorDialog`, and `ProgressDialog`—that each own their content, state,
+measurement, focus order, and submission behavior.
+
+Small reusable controls remain shared. Layout is shared only through generic
+containers that have no knowledge of file operations or dialog actions.
+Concrete dialogs must not be reduced to constructors that merely select a
+generic kind, populate a string prompt, and provide a variable-length field
+array. A compatibility adapter may temporarily expose an old `DialogWidget`
+shape, but it is not the implementation boundary.
+
+### 8.1 Widget Ownership and Composition
+
+The ownership hierarchy is:
+
+```text
+AppWidget
+└── concrete dialog widget
+    └── dialog-owned Grid
+        ├── controls
+        ├── nested Frame
+        │   └── frame-owned Grid
+        └── other nested containers
+```
+
+Each concrete dialog owns named controls that participate in its behavior.
+For example, `CopyDialog` owns `Source`, `Destination`, `Copy`, and `Cancel`.
+Its layout refers to those controls, and its `submit` method reads their
+state. The generic `Grid` and `Frame` do not know that the operation is a
+copy, and `Button` does not know what copying means.
+
+`Frame` is a compositional widget for isolating a sub-concern visually and
+semantically. It is not a universal dialog shell. A frame may have a title,
+border or separator treatment, and frame-specific padding, and contains one
+child widget, normally a `Grid`. A dialog may contain no frames, one frame,
+or several nested frames according to its own UX.
+
+This supports, for example:
+
+```text
+ProgressDialog
+└── Grid
+    ├── current item
+    ├── progress bar
+    ├── transfer statistics
+    ├── CollisionFrame
+    │   └── Grid
+    │       ├── collision explanation
+    │       ├── conflicting item
+    │       └── collision actions
+    └── cancel action
+```
+
+It also supports settings grouped by concern:
+
+```text
+SettingsDialog
+└── Grid
+    ├── PanelSettingsFrame
+    │   └── Grid of panel checkboxes and dependent controls
+    ├── DisplaySettingsFrame
+    │   └── Grid of display/status checkboxes
+    └── action controls
+```
+
+Future option groups must be added as frames or child grids, not by adding
+more operation branches to a generic dialog renderer.
+
+### 8.2 Grid Data Model
+
+`Grid` is a recursive layout widget. Its rows and columns use the same track
+model; a track's axis is determined by whether it appears in `Rows` or
+`Columns`.
+
+The minimal model is:
+
+```go
+type TrackKind int
+
+const (
+    TrackAuto TrackKind = iota
+    TrackFixed
+    TrackFraction
+)
+
+type Track struct {
+    Kind  TrackKind
+    Value int // cells for TrackFixed; weight for TrackFraction
+}
+
+type GridChild struct {
+    Row     int
+    Column  int
+    RowSpan int
+    ColSpan int
+    Child   Widget
+}
+
+type Grid struct {
+    Rows     []Track
+    Columns  []Track
+    Children []GridChild
+}
+```
+
+`TrackAuto` is measured from the children occupying the track.
+`TrackFixed` reserves an exact number of terminal cells.
+`TrackFraction` receives a weighted share of the remaining space. Fractional
+tracks work identically on both axes: a column can receive remaining width
+and a row can receive remaining height.
+
+There is deliberately no CSS parser, implicit placement algorithm, percentage
+track syntax, subgrid, or general-purpose browser layout feature. Children
+are placed explicitly. `RowSpan` and `ColSpan` default to one; a span greater
+than one is used only when a dialog's content genuinely crosses tracks.
+
+The initial dialog layouts mostly use one column. Two-dimensional grids become
+useful inside settings and option frames, where a label/control relationship
+or a dependent setting needs aligned columns. A one-column grid is still a
+real grid and can contain nested grids or frames.
+
+### 8.3 Go Layout Construction
+
+Go keyed composite literals provide the intended declarative syntax. They
+allow nested arrays of typed objects while retaining compile-time checking:
+
+```go
+root := &Grid{
+    Columns: []Track{
+        {Kind: TrackFraction, Value: 1},
+    },
+    Children: []GridChild{
+        {Row: 0, Child: &Label{Text: "Source path"}},
+        {Row: 1, Child: d.Source},
+        {Row: 2, Child: &Label{Text: "Destination"}},
+        {Row: 3, Child: d.Destination},
+        {Row: 4, Child: &ButtonRow{
+            Buttons: []*Button{d.Copy, d.Cancel},
+        }},
+    },
+}
+```
+
+Go assignment is a statement, not an expression. A layout literal cannot
+simultaneously assign a nested control to a local variable and insert it into
+an array. Concrete dialog constructors therefore create controls first, wire
+their handlers, and then construct the layout literal:
+
+```go
+d := &CopyDialog{}
+d.Source = &TextInput{Value: source}
+d.Destination = &TextInput{Value: destination}
+d.Copy = &Button{Label: "Copy", OnClick: d.submit}
+d.Cancel = &Button{Label: "Cancel", OnClick: d.cancel}
+d.Layout = &Grid{
+    Children: []GridChild{
+        {Row: 0, Child: d.Source},
+        {Row: 1, Child: d.Destination},
+        {Row: 2, Child: &ButtonRow{
+            Buttons: []*Button{d.Copy, d.Cancel},
+        }},
+    },
+}
+```
+
+Inline callbacks are appropriate for small local behavior. Named controls and
+dialog methods are required when a handler reads or modifies sibling controls.
+There is no special binding syntax and no reflection-based layout builder.
+
+### 8.4 Stable Dialog Width
+
+A dialog's width is selected from the available window width, not from the
+current input value or from a prompt's changing text. Typing into an input
+never resizes its dialog. A dialog may change size when the terminal is
+resized or when its explicit state changes, such as a progress operation
+entering collision resolution.
+
+Each concrete dialog declares a width profile:
+
+```text
+width = clamp(floor(availableWidth * 0.75), minWidth, maxWidth)
+```
+
+The result is additionally clamped to the available width. Suggested initial
+profiles are:
+
+| Dialog | Minimum | Maximum |
+|---|---:|---:|
+| Mkdir, selected Rename, Edit, Delete path | 36 | 60 |
+| Path-based Rename, Copy, Move | 48 | 72 |
+| Find Files | 52 | 76 |
+| Mount, Error | 48 | 80 |
+| Settings | 36 | 56 |
+| Progress | 48 | 72 |
+| Progress with collision | 60 | 88 |
+
+These are dialog-level policies, not minimum widths imposed on every child.
+The dialog keeps its selected width while controls edit their values. A
+`TextInput` scrolls horizontally within its allocation; it does not request a
+larger dialog because its value is long. A label or text block truncates or
+wraps according to its own rendering contract.
+
+### 8.5 Symmetric Track Allocation
+
+`Grid.Measure` and `Grid.Render` must use the same resolved track allocation.
+The algorithm is symmetric for rows and columns:
+
+1. Establish the dialog's stable width and available height.
+2. Measure children under provisional constraints.
+3. Resolve `TrackFixed` tracks exactly.
+4. Resolve `TrackAuto` tracks from the measured children occupying them.
+5. Distribute remaining width or height among `TrackFraction` tracks by
+   weight.
+6. If a child spans tracks, measure it against the combined allocation of
+   those tracks and include that requirement when resolving the tracks.
+7. Remeasure wrapping children using their final width.
+8. Resolve row heights using those final child measurements.
+9. Render every child into the exact rectangle produced by the resolved grid.
+
+The parent must never measure one geometry and render another. A child that
+wraps at its final width must contribute the resulting height before the
+parent places later rows.
+
+If a dimension is larger than the content requires and contains fractional
+tracks, the fractional tracks consume the remaining space. This allows, for
+example, a settings list or explanatory text area to expand vertically while
+the action row remains `TrackAuto`.
+
+### 8.6 Squeezing and Overflow
+
+Squeezing applies when the available dimension is smaller than the sum of
+fixed and auto requirements:
+
+1. Fractional tracks first receive zero remaining space.
+2. Auto tracks are reduced only where their children support reduced
+   allocation.
+3. Text blocks rewrap at the reduced width.
+4. Labels ellipsize according to their own text policy.
+5. Text inputs retain their allocation and horizontally scroll.
+6. Fixed tracks are not silently changed.
+7. If the required fixed tracks alone cannot fit, the dialog uses its
+   explicitly designed narrow state or an application-level viewport policy;
+   it does not randomly remove controls or switch all dialogs to one compact
+   renderer.
+
+Height squeezing follows the same rules. A row is not inherently one terminal
+line: a wrapped `TextBlock`, a nested frame, or a child grid may require
+multiple rows. A `TrackFraction` row can absorb extra height and an `Auto` row
+can remain content-sized.
+
+### 8.7 Concrete Dialog Layouts
+
+Each dialog owns a layout appropriate to its task.
+
+#### `MkdirDialog`
+
+```text
+Grid, one fractional column:
+  row 0: Label("Create directory:")
+  row 1: TextInput(directory)
+  row 2: ButtonRow(Create, Cancel)
+```
+
+#### Selected `RenameDialog`
+
+```text
+Grid, one fractional column:
+  row 0: Label("Rename <selected name> to:")
+  row 1: TextInput(new name)
+  row 2: ButtonRow(Rename, Cancel)
+```
+
+The existing name is selected initially.
+
+#### Path-based `RenameDialog`
+
+```text
+Grid, one fractional column:
+  row 0: Label("Source path")
+  row 1: TextInput(source)
+  row 2: Label("New path")
+  row 3: TextInput(destination)
+  row 4: ButtonRow(Rename, Cancel)
+```
+
+#### Selected `CopyDialog` and `MoveDialog`
+
+```text
+Grid, one fractional column:
+  row 0: Label("<Copy|Move> <source summary> to:")
+  row 1: TextInput(destination)
+  row 2: ButtonRow(<Copy|Move>, Cancel)
+```
+
+#### Path-based `CopyDialog` and `MoveDialog`
+
+```text
+Grid, one fractional column:
+  row 0: Label("Source path")
+  row 1: TextInput(source)
+  row 2: Label("Destination")
+  row 3: TextInput(destination)
+  row 4: ButtonRow(<Copy|Move>, Cancel)
+```
+
+#### `DeletePathDialog`
+
+```text
+Grid, one fractional column:
+  row 0: Label("Path to delete")
+  row 1: TextInput(path)
+  row 2: ButtonRow(Continue, Cancel)
+```
+
+#### `DeleteConfirmDialog`
+
+```text
+Grid, one fractional column:
+  row 0: Text("Delete <source summary>?")
+  row 1: ButtonRow(Delete, Cancel)
+```
+
+Cancel is initially selected. This is a separate widget from path entry.
+
+#### `EditDialog`
+
+```text
+Grid, one fractional column:
+  row 0: Label("File path")
+  row 1: TextInput(path)
+  row 2: ButtonRow(Open, Cancel)
+```
+
+#### `MountDialog`
+
+```text
+Grid, one fractional column:
+  row 0: TextBlock(path interpretation)
+  row 1: Label("Guest path")
+  row 2: TextInput(guest path)
+  row 3: ButtonRow(Mount, Cancel)
+```
+
+The explanatory text is a real child whose wrapped height is measured; it is
+not discarded by a generic short-dialog mode.
+
+#### `FindFilesDialog`
+
+```text
+Grid, one fractional column:
+  row 0: TextBlock(search explanation)
+  row 1: Label("Find paths")
+  row 2: TextInput(path pattern)
+  row 3: Label("Find content")
+  row 4: TextInput(content query)
+  row 5: Label("Maximum results")
+  row 6: TextInput(maximum results)
+  row 7: ButtonRow(Search, Cancel)
+```
+
+#### `SettingsDialog`
+
+```text
+Grid, one fractional column:
+  row 0: Frame("Panel settings", panel settings grid)
+  row 1: Frame("Display settings", display settings grid)
+  row 2: ButtonRow(OK, Cancel)
+```
+
+The panel settings grid may contain checkbox rows and a dependent numeric
+input row. The display settings grid contains the display/status checkboxes.
+Additional settings categories become additional frames rather than more
+branches in a generic choice dialog.
+
+#### `ErrorDialog`
+
+```text
+Grid, one fractional column:
+  row 0: TextBlock(error message)
+  row 1: ButtonRow(OK)
+```
+
+The message controls its wrapped height; the dialog is not modeled as a
+one-option choice list.
+
+#### `ProgressDialog`
+
+Normal state:
+
+```text
+Grid, one fractional column:
+  row 0: Text(current item)
+  row 1: ProgressBar
+  row 2: TransferStats
+  row 3: ButtonRow(Cancel)
+```
+
+Collision state:
+
+```text
+Grid, one fractional column:
+  row 0: Text(current item)
+  row 1: ProgressBar
+  row 2: TransferStats
+  row 3: CollisionFrame
+           Grid:
+             row 0: Text("File already exists:")
+             row 1: Text(conflicting item)
+             row 2: ButtonRow(Overwrite, Skip, Overwrite all)
+             row 3: ButtonRow(Skip all, Cancel)
+```
+
+Collision resolution remains part of the same running operation. The
+`CollisionFrame` is a nested sub-concern, not a replacement generic choice
+dialog. Future collision options, such as a checkbox applying the decision to
+remaining conflicts, belong inside this frame.
+
+### 8.8 Control Callbacks and Raw Input Routing
+
+Controls expose callbacks for semantic events that they own:
+
+```go
+type Button struct {
+    Label   string
+    OnClick func()
+}
+
+type TextInput struct {
+    Value     string
+    OnChanged func(string)
+}
+
+type Checkbox struct {
+    Label     string
+    Checked   bool
+    OnToggled func(bool)
+}
+```
+
+The callback is invoked by the control after it handles the relevant input.
+`Button` does not know what its click means, `TextInput` does not know what a
+path represents, and `Checkbox` does not know which setting it changes.
+Concrete dialogs assign callbacks to dialog methods or small closures:
+
+```go
+d.Copy = &Button{Label: "Copy", OnClick: d.submit}
+d.Cancel = &Button{Label: "Cancel", OnClick: d.cancel}
+```
+
+Containers do not translate semantic events. They only route raw
+`input.Event` values to the focused descendant:
+
+```text
+Grid/Frame       route raw input to the focused child
+ButtonRow        manage button focus and invoke the selected Button
+Button           invoke OnClick
+TextInput        edit text and invoke OnChanged
+Checkbox         toggle state and invoke OnToggled
+Concrete dialog  implement operation behavior and validation
+```
+
+`Frame.HandleEvent` passes input to its child. `Grid.HandleEvent` sends input
+to its focused descendant and handles only layout-level navigation such as
+focus movement when appropriate. `ButtonRow` handles button navigation and
+activation. A concrete dialog owns the focus order and operation-specific
+shortcuts; the grid does not infer a copy, delete, or settings workflow from
+coordinates.
+
+Focus is therefore stateful and explicit. A dialog may focus a text input,
+button row, checkbox, or nested frame child. `RenderContext.Focused` is
+derived from that focus state and passed only to the focused branch.
+Unfocused inputs may still render their values but must not show the active
+cursor.
+
+### 8.9 Migration Boundary
+
+The current generic `DialogWidget` and any compatibility wrappers are
+transitional. Migration should proceed by replacing one production flow at a
+time:
+
+1. Introduce and test recursive `Grid` and `Frame` measurement/rendering.
+2. Implement concrete `MkdirDialog` and `DeleteConfirmDialog`.
+3. Implement concrete path forms for Rename, Copy, Move, Edit, Mount, and
+   Find Files.
+4. Implement grouped `SettingsDialog` frames.
+5. Move progress and collision state into the concrete `ProgressDialog`.
+6. Update `AppWidget` to store the dialog as a `ui.Widget` plus the concrete
+   result/callback contract.
+7. Remove `Kind`, operation-wide action switches, positional `Fields`, and
+   generic rendering branches once no callers depend on them.
+
+The migration must preserve panel-free slash-command behavior, path
+completion/history, cancellation, collision resume channels, and current
+keyboard semantics. Visual polish such as dialog shadow gradients is separate
+from this decomposition and should follow it, not determine its layout model.
