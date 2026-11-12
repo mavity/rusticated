@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/charmbracelet/x/input"
 	"github.com/mavity/rusticated/kabibi/browser"
@@ -54,6 +55,8 @@ type AppWidget struct {
 	onExit          func()
 	ctx             ui.RenderContext
 	compositor      *terminal.Terminal
+	budapest        *budapestScene
+	budapestStopCh  chan struct{}
 }
 
 // AppWidgetOptions contains initial parameters and service bindings for AppWidget.
@@ -151,7 +154,36 @@ func NewWidget(opts AppWidgetOptions) *AppWidget {
 		w.SetPanelsVisible(true)
 	}
 
+	if EnableBudapestBackground {
+		w.budapest = newBudapestScene()
+		w.budapestStopCh = make(chan struct{})
+		go w.runBudapestTicker(w.budapestStopCh)
+	}
+
 	return w
+}
+
+func (w *AppWidget) runBudapestTicker(stopCh <-chan struct{}) {
+	ticker := time.NewTicker(budapestFrameRate)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stopCh:
+			return
+		case <-ticker.C:
+			w.mu.Lock()
+			closed := w.closed
+			ed := w.editor
+			inv := w.ctx.Invalidate
+			w.mu.Unlock()
+			if closed {
+				return
+			}
+			if ed == nil && inv != nil {
+				inv()
+			}
+		}
+	}
 }
 
 // Panels returns the embedded DualPaneWidget for inspection and testing.
@@ -254,7 +286,12 @@ func (w *AppWidget) Close() error {
 	w.closed = true
 	w.restorePanelsAfterCommand = false
 	cancel := w.opCancel
+	stopBudapest := w.budapestStopCh
+	w.budapestStopCh = nil
 	w.mu.Unlock()
+	if stopBudapest != nil {
+		close(stopBudapest)
+	}
 	w.SetPanelsVisible(false)
 	if cancel != nil {
 		cancel()
@@ -444,7 +481,7 @@ func (w *AppWidget) Measure(c ui.Constraints) ui.Size {
 		maxH = 24
 	}
 
-	if ed != nil || panelsVis || claimed {
+	if EnableBudapestBackground || ed != nil || panelsVis || claimed {
 		return ui.Size{W: maxW, H: maxH}
 	}
 	if dlg != nil {
@@ -481,8 +518,27 @@ func (w *AppWidget) Render(r terminal.Rect, ctx ui.RenderContext) string {
 		}
 		return ""
 	}
-	shellBuf := terminal.NewCellBuf(r.W, shellHeight)
+	targetH := shellHeight
+	if EnableBudapestBackground && r.H > targetH {
+		targetH = r.H
+	}
+	shellBuf := terminal.NewCellBuf(r.W, targetH)
 	copy(shellBuf.Cells(), shellFrame.Cells()[:shellHeight*r.W])
+
+	var dlgSize ui.Size
+	if dlg != nil && shellBuf.Width > 0 && shellBuf.Height > 0 {
+		dlgSize = dlg.Measure(ui.Constraints{MaxW: shellBuf.Width, MaxH: r.H})
+		neededH := min(r.H, dlgSize.H+3)
+		if !panelsVis && shellBuf.Height < neededH {
+			expanded := terminal.NewCellBuf(shellBuf.Width, neededH)
+			expanded.Blit(shellBuf, 0, 0)
+			shellBuf = expanded
+		}
+	}
+
+	if EnableBudapestBackground && w.budapest != nil {
+		w.budapest.applyBudapestProjection(&shellBuf, r.W, r.H, ctx.Theme)
+	}
 
 	if panelsVis && w.panels != nil && r.W > 0 && r.H > 0 {
 		panelH, _ := w.computePanelHeight(r.W, r.H)
@@ -493,17 +549,10 @@ func (w *AppWidget) Render(r terminal.Rect, ctx ui.RenderContext) string {
 	}
 
 	if dlg != nil && shellBuf.Width > 0 && shellBuf.Height > 0 {
-		sz := dlg.Measure(ui.Constraints{MaxW: shellBuf.Width, MaxH: r.H})
-		neededH := min(r.H, sz.H+3)
-		if !panelsVis && shellBuf.Height < neededH {
-			expanded := terminal.NewCellBuf(shellBuf.Width, neededH)
-			expanded.Blit(shellBuf, 0, 0)
-			shellBuf = expanded
-		}
-		dx := (shellBuf.Width - sz.W) / 2
-		dy := (shellBuf.Height - sz.H) / 2
-		if shellBuf.Height >= sz.H+2 && dy+sz.H+2 > shellBuf.Height {
-			dy = shellBuf.Height - sz.H - 2
+		dx := (shellBuf.Width - dlgSize.W) / 2
+		dy := (shellBuf.Height - dlgSize.H) / 2
+		if shellBuf.Height >= dlgSize.H+2 && dy+dlgSize.H+2 > shellBuf.Height {
+			dy = shellBuf.Height - dlgSize.H - 2
 		}
 		if dx < 0 {
 			dx = 0
@@ -511,9 +560,9 @@ func (w *AppWidget) Render(r terminal.Rect, ctx ui.RenderContext) string {
 		if dy < 0 {
 			dy = 0
 		}
-		applyDialogShadow(&shellBuf, terminal.Rect{X: dx, Y: dy, W: sz.W, H: sz.H}, ctx.Theme)
-		dlgANSI := dlg.Render(ui.Rect{X: 0, Y: 0, W: sz.W, H: sz.H}, ctx.ForChild(true))
-		cursor = ctx.CompositeANSI(&shellBuf, w.compositor, terminal.Rect{X: dx, Y: dy, W: sz.W, H: sz.H}, dlgANSI)
+		applyDialogShadow(&shellBuf, terminal.Rect{X: dx, Y: dy, W: dlgSize.W, H: dlgSize.H}, ctx.Theme)
+		dlgANSI := dlg.Render(ui.Rect{X: 0, Y: 0, W: dlgSize.W, H: dlgSize.H}, ctx.ForChild(true))
+		cursor = ctx.CompositeANSI(&shellBuf, w.compositor, terminal.Rect{X: dx, Y: dy, W: dlgSize.W, H: dlgSize.H}, dlgANSI)
 	}
 
 	return ui.ANSIFrame(shellBuf, cursor)
@@ -612,7 +661,7 @@ func applyDialogShadow(buf *terminal.CellBuf, dlgRect terminal.Rect, theme ui.Th
 					hWeight = (1.0 - rightSteps[rightDist]) / (1.0 - rightSteps[1])
 				}
 				if hWeight > 0 {
-					factor = 1.0 - vDarkness*hWeight * 0.7
+					factor = 1.0 - vDarkness*hWeight*0.7
 				}
 			}
 
