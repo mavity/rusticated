@@ -116,8 +116,7 @@ func TestBudapestBackground_ExemptsBluePanelsDialogsAndScrollback(t *testing.T) 
 	widget.SetPanelsVisible(false)
 	smallRect := ui.Rect{W: 80, H: 6}
 	for i := 0; i < 6; i++ {
-		typeString(widget, "echo line")
-		widget.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
+		widget.Shell().ExecuteLine("echo line")
 		widget.Render(smallRect, ui.RenderContext{Focused: true, Theme: theme})
 	}
 	if strings.Contains(scrollback.String(), "\x1b[48;2;") {
@@ -143,7 +142,6 @@ func TestBudapestTicker_DoesNotEjectIntoScrollbackAcrossFrames(t *testing.T) {
 	})
 	defer widget.Close()
 
-	// Run through Host.RunWithIO for 250ms and inspect rawTermOut in vt.Emulator BEFORE Stop
 	inR, inW := io.Pipe()
 	defer inR.Close()
 	defer inW.Close()
@@ -155,9 +153,8 @@ func TestBudapestTicker_DoesNotEjectIntoScrollbackAcrossFrames(t *testing.T) {
 	for i := 0; i < 23; i++ {
 		_, _ = emu.WriteString("prior terminal line\r\n")
 	}
-	t.Logf("BEFORE Kabibi: scrollback=%d, cursor=(%d,%d)", emu.Scrollback().Len(), emu.CursorPosition().X, emu.CursorPosition().Y)
 
-	host = ui.NewHost(widget, true)
+	host = ui.NewHost(widget, false)
 	runDone := make(chan error, 1)
 	go func() {
 		runDone <- host.RunWithIO(
@@ -168,45 +165,13 @@ func TestBudapestTicker_DoesNotEjectIntoScrollbackAcrossFrames(t *testing.T) {
 			func(uintptr) (int, int, error) { return 80, 24, nil },
 		)
 	}()
-	time.Sleep(1200 * time.Millisecond)
-	t.Logf("AFTER 1200ms (before Stop): scrollback=%d, cursor=(%d,%d)",
-		emu.Scrollback().Len(), emu.CursorPosition().X, emu.CursorPosition().Y)
+	time.Sleep(350 * time.Millisecond)
+	if got := emu.Scrollback().Len(); got != 23 {
+		t.Fatalf("emulator scrollback lines = %d, want 23 (all prior lines pushed to scrollback, zero extra ejecta)", got)
+	}
 	host.Stop()
 	<-runDone
-	for y := 0; y < 6; y++ {
-		var rowStr strings.Builder
-		for x := 0; x < 80; x++ {
-			c := emu.CellAt(x, y)
-			if c != nil && c.Width == 0 {
-				continue
-			}
-			if c != nil && c.Content != "" {
-				rowStr.WriteString(c.Content)
-			} else {
-				rowStr.WriteByte(' ')
-			}
-		}
-		t.Logf("  row[%d]: %q", y, strings.TrimRight(rowStr.String(), " "))
-	}
-	for i := 0; i < emu.Scrollback().Len(); i++ {
-		line := emu.Scrollback().Lines()[i]
-		var rowStr strings.Builder
-		hasBg := false
-		for x := 0; x < len(line); x++ {
-			if line[x].Style.Bg != nil {
-				hasBg = true
-			}
-			if line[x].Width == 0 {
-				continue
-			}
-			if line[x].Content != "" {
-				rowStr.WriteString(line[x].Content)
-			} else {
-				rowStr.WriteByte(' ')
-			}
-		}
-		t.Logf("  scrollback[%d] (hasBg=%v): %q", i, hasBg, strings.TrimRight(rowStr.String(), " "))
-	}
+
 	if scrollback.Len() > 0 {
 		t.Fatalf("unexpected scrollback ejection during idle animation frames: %q", scrollback.String())
 	}
