@@ -56,7 +56,7 @@ type AppWidget struct {
 	ctx             ui.RenderContext
 	compositor      *terminal.Terminal
 	budapest        *budapestScene
-	budapestStopCh  chan struct{}
+	budapestTimer   *time.Timer
 }
 
 // AppWidgetOptions contains initial parameters and service bindings for AppWidget.
@@ -156,34 +156,34 @@ func NewWidget(opts AppWidgetOptions) *AppWidget {
 
 	if EnableBudapestBackground {
 		w.budapest = newBudapestScene()
-		w.budapestStopCh = make(chan struct{})
-		go w.runBudapestTicker(w.budapestStopCh)
 	}
 
 	return w
 }
 
-func (w *AppWidget) runBudapestTicker(stopCh <-chan struct{}) {
-	ticker := time.NewTicker(budapestFrameRate)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-stopCh:
-			return
-		case <-ticker.C:
+func (w *AppWidget) scheduleBudapestRedraw() {
+	if !EnableBudapestBackground {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return
+	}
+	if w.budapestTimer == nil {
+		w.budapestTimer = time.AfterFunc(budapestRedrawDelay, func() {
 			w.mu.Lock()
 			closed := w.closed
 			ed := w.editor
 			inv := w.ctx.Invalidate
 			w.mu.Unlock()
-			if closed {
-				return
-			}
-			if ed == nil && inv != nil {
+			if !closed && ed == nil && inv != nil {
 				inv()
 			}
-		}
+		})
+		return
 	}
+	w.budapestTimer.Reset(budapestRedrawDelay)
 }
 
 // Panels returns the embedded DualPaneWidget for inspection and testing.
@@ -286,11 +286,11 @@ func (w *AppWidget) Close() error {
 	w.closed = true
 	w.restorePanelsAfterCommand = false
 	cancel := w.opCancel
-	stopBudapest := w.budapestStopCh
-	w.budapestStopCh = nil
+	timer := w.budapestTimer
+	w.budapestTimer = nil
 	w.mu.Unlock()
-	if stopBudapest != nil {
-		close(stopBudapest)
+	if timer != nil {
+		timer.Stop()
 	}
 	w.SetPanelsVisible(false)
 	if cancel != nil {
@@ -565,7 +565,11 @@ func (w *AppWidget) Render(r terminal.Rect, ctx ui.RenderContext) string {
 		cursor = ctx.CompositeANSI(&shellBuf, w.compositor, terminal.Rect{X: dx, Y: dy, W: dlgSize.W, H: dlgSize.H}, dlgANSI)
 	}
 
-	return ui.ANSIFrame(shellBuf, cursor)
+	out := ui.ANSIFrame(shellBuf, cursor)
+	if EnableBudapestBackground {
+		w.scheduleBudapestRedraw()
+	}
+	return out
 }
 
 func applyDialogShadow(buf *terminal.CellBuf, dlgRect terminal.Rect, theme ui.Theme) {

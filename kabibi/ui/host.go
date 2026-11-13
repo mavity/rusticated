@@ -97,7 +97,7 @@ func NewHost(root Widget, verbose bool) *Host {
 	return &Host{
 		root:    root,
 		verbose: verbose,
-		out:     bufio.NewWriterSize(os.Stdout, 64*1024),
+		out:     bufio.NewWriterSize(os.Stdout, 256*1024),
 		msgCh:   make(chan hostMsg, 256),
 		stopCh:  make(chan struct{}),
 		theme: Theme{
@@ -155,9 +155,9 @@ func (h *Host) runCore(
 		in = os.Stdin
 	}
 	if out != nil {
-		h.out = bufio.NewWriterSize(out, 64*1024)
+		h.out = bufio.NewWriterSize(out, 256*1024)
 	} else if h.out == nil {
-		h.out = bufio.NewWriterSize(os.Stdout, 64*1024)
+		h.out = bufio.NewWriterSize(os.Stdout, 256*1024)
 	}
 	if getSizeFunc == nil {
 		getSizeFunc = term.GetSize

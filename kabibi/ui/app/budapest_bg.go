@@ -21,11 +21,13 @@ import (
 const EnableBudapestBackground = true
 
 const (
-	budapestW          = 399
-	budapestH          = 501
-	budapestSkyH       = 160
-	budapestShiftAlpha = 0.20
-	budapestFrameRate  = 33 * time.Millisecond
+	budapestW           = 399
+	budapestH           = 501
+	budapestSkyH        = 160
+	budapestSunsetW     = 140
+	budapestSunsetH     = 165
+	budapestShiftAlpha  = 0.20
+	budapestRedrawDelay = 50 * time.Millisecond
 )
 
 //go:embed lanchid.png
@@ -64,14 +66,21 @@ type budapestGlint struct {
 	isGold       bool
 }
 
+type budapestSunsetPixel struct {
+	sr, sg, sb   float64
+	w0, wMid     float64
+	active       bool
+}
+
 var (
-	budapestInitOnce sync.Once
-	budapestBaseRGBA []uint8 // 399 * 501 * 4
-	budapestSkyRGBA  []uint8 // 399 * 160 * 4 (with alpha feathering & cathedral cutout)
-	budapestLane1    budapestSpline
-	budapestLane2    budapestSpline
-	budapestLights   []budapestLight
-	budapestGlints   []budapestGlint
+	budapestInitOnce  sync.Once
+	budapestBaseRGBA  []uint8 // 399 * 501 * 4
+	budapestSkyRGBA   []uint8 // 399 * 160 * 4 (with alpha feathering & cathedral cutout)
+	budapestSunsetLUT []budapestSunsetPixel
+	budapestLane1     budapestSpline
+	budapestLane2     budapestSpline
+	budapestLights    []budapestLight
+	budapestGlints    []budapestGlint
 )
 
 func initBudapestAssets() {
@@ -80,10 +89,12 @@ func initBudapestAssets() {
 		if err != nil {
 			budapestBaseRGBA = make([]uint8, budapestW*budapestH*4)
 			budapestSkyRGBA = make([]uint8, budapestW*budapestSkyH*4)
+			budapestSunsetLUT = buildSunsetLUT()
 			return
 		}
 		budapestBaseRGBA = imageToRGBA(img, budapestW, budapestH)
 		budapestSkyRGBA = buildSkyBuffer(budapestBaseRGBA)
+		budapestSunsetLUT = buildSunsetLUT()
 		budapestLane1 = createBudapestSpline([]budapestPoint{
 			{240, 205}, {219, 219}, {186, 245}, {170, 259},
 			{153, 273}, {126, 297}, {111, 311}, {95, 325},
@@ -99,6 +110,38 @@ func initBudapestAssets() {
 		budapestLights = buildBudapestLights()
 		budapestGlints = buildBudapestGlints()
 	})
+}
+
+func buildSunsetLUT() []budapestSunsetPixel {
+	lut := make([]budapestSunsetPixel, budapestSunsetW*budapestSunsetH)
+	for y := 0; y < budapestSunsetH; y++ {
+		for x := 0; x < budapestSunsetW; x++ {
+			dist := math.Hypot(float64(x)-30.0, float64(y)-110.0)
+			if dist >= 125.0 {
+				continue
+			}
+			t := max(0, (dist-8.0)/(125.0-8.0))
+			var p budapestSunsetPixel
+			p.active = true
+			if t <= 0.45 {
+				u := t / 0.45
+				p.sr = 255.0 + (235.0-255.0)*u
+				p.sg = 185.0 + (135.0-185.0)*u
+				p.sb = 90.0 + (55.0-90.0)*u
+				p.w0 = 1.0 - u
+				p.wMid = u
+			} else {
+				u := (t - 0.45) / 0.55
+				p.sr = 235.0 + (120.0-235.0)*u
+				p.sg = 135.0 + (60.0-135.0)*u
+				p.sb = 55.0 + (30.0-55.0)*u
+				p.w0 = 0
+				p.wMid = 1.0 - u
+			}
+			lut[y*budapestSunsetW+x] = p
+		}
+	}
+	return lut
 }
 
 func imageToRGBA(img image.Image, w, h int) []uint8 {
@@ -374,31 +417,43 @@ func newBudapestScene() *budapestScene {
 }
 
 func (s *budapestScene) renderAt(timeSeconds float64) []uint8 {
+	return s.renderCropAt(timeSeconds, 0, budapestH)
+}
+
+func (s *budapestScene) renderCropAt(timeSeconds float64, cropY0, cropY1 int) []uint8 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	cropY0 = max(0, min(budapestH, cropY0))
+	cropY1 = max(cropY0, min(budapestH, cropY1))
 
 	dt := 0.016
 	if s.hasPrev {
 		dt = timeSeconds - s.prevTime
 		if dt < 0 {
 			dt = 0
-		} else if dt > 0.05 {
-			dt = 0.05
+		} else if dt > 1.0 {
+			dt = 1.0
 		}
 	}
 	s.prevTime = timeSeconds
 	s.hasPrev = true
 
-	// 1. Base plate
-	copy(s.frame, budapestBaseRGBA)
+	// 1. Base plate (within vertical crop bounds)
+	if cropY1 > cropY0 {
+		startOff := cropY0 * budapestW * 4
+		endOff := cropY1 * budapestW * 4
+		copy(s.frame[startOff:endOff], budapestBaseRGBA[startOff:endOff])
+	}
 
 	// 2. Clouds & sunset breathing
-	s.drawClouds(timeSeconds)
+	s.drawClouds(timeSeconds, cropY0, cropY1)
 
 	// 3. Danube river shimmer
-	s.drawRiverShimmer(timeSeconds)
+	s.drawRiverShimmer(timeSeconds, cropY0, cropY1)
 
 	// 4. Moving 2.5D Budapest yellow taxis
+	shutterDT := min(dt, 0.04)
 	for i := range s.cars {
 		car := &s.cars[i]
 		p := sampleBudapestSpline(car.lane, car.dist)
@@ -409,7 +464,7 @@ func (s *budapestScene) renderAt(timeSeconds float64) []uint8 {
 		if car.lane.totalLength > 0 {
 			car.dist = math.Mod(car.dist+speed*dt, car.lane.totalLength)
 		}
-		motionLen := max(1.5, speed*dt*2.2)
+		motionLen := max(1.5, speed*shutterDT*2.2)
 		edgeDist := min(car.dist, car.lane.totalLength-car.dist)
 		fadeAlpha := min(1.0, edgeDist/22.0)
 
@@ -417,25 +472,30 @@ func (s *budapestScene) renderAt(timeSeconds float64) []uint8 {
 		if p.y >= 246.0 && p.y <= 276.0 {
 			continue
 		}
-		if fadeAlpha > 0.02 {
+		if fadeAlpha > 0.02 && p.y+25.0 >= float64(cropY0) && p.y-25.0 <= float64(cropY1) {
 			s.drawCar(p, scale, car.isTaxi, motionLen, fadeAlpha)
 		}
 	}
 
 	// 5. Restore sharp stone archway (136, 215, 80x85)
-	for y := 215; y < 215+85 && y < budapestH; y++ {
+	archStart := max(215, cropY0)
+	archEnd := min(min(215+85, budapestH), cropY1)
+	for y := archStart; y < archEnd; y++ {
 		rowStart := (y*budapestW + 136) * 4
 		rowEnd := (y*budapestW + min(budapestW, 136+80)) * 4
 		copy(s.frame[rowStart:rowEnd], budapestBaseRGBA[rowStart:rowEnd])
 	}
 
 	// 6. Glimmering stationary bridge & skyline lights
-	s.drawGlimmeringLights(timeSeconds)
+	s.drawGlimmeringLights(timeSeconds, cropY0, cropY1)
 
 	return s.frame
 }
 
-func (s *budapestScene) drawClouds(timeSeconds float64) {
+func (s *budapestScene) drawClouds(timeSeconds float64, cropY0, cropY1 int) {
+	if cropY0 >= budapestSunsetH {
+		return
+	}
 	const T = 13.0
 	phase1 := math.Mod(timeSeconds/T, 1.0)
 	if phase1 < 0 {
@@ -455,7 +515,8 @@ func (s *budapestScene) drawClouds(timeSeconds float64) {
 	off1 := int(math.Round((phase1 - 0.5) * maxShift * 2.0))
 	off2 := int(math.Round((phase2 - 0.5) * maxShift * 2.0))
 
-	for y := 0; y < budapestSkyH; y++ {
+	skyEnd := min(budapestSkyH, cropY1)
+	for y := cropY0; y < skyEnd; y++ {
 		for x := 0; x < budapestW; x++ {
 			var rMix, gMix, bMix, aMix float64
 			if x1 := x - off1; x1 >= 0 && x1 < budapestW {
@@ -485,37 +546,28 @@ func (s *budapestScene) drawClouds(timeSeconds float64) {
 		}
 	}
 
-	// Sunset dusk light breathing on left horizon (screen blend)
+	// Sunset dusk light breathing on left horizon (screen blend using precomputed LUT)
 	breath := 0.5 + 0.5*math.Sin(timeSeconds*0.45)
 	a0 := 0.24 + 0.14*breath
 	aMid := 0.14 + 0.08*breath
-	for y := 0; y < 165; y++ {
-		for x := 0; x < 140; x++ {
-			dist := math.Hypot(float64(x)-30.0, float64(y)-110.0)
-			if dist >= 125.0 {
+	sunEnd := min(budapestSunsetH, cropY1)
+	for y := cropY0; y < sunEnd; y++ {
+		rowOff := y * budapestSunsetW
+		for x := 0; x < budapestSunsetW; x++ {
+			p := budapestSunsetLUT[rowOff+x]
+			if !p.active {
 				continue
 			}
-			t := max(0, (dist-8.0)/(125.0-8.0))
-			var sr, sg, sb, sa float64
-			if t <= 0.45 {
-				u := t / 0.45
-				sr = 255.0 + (235.0-255.0)*u
-				sg = 185.0 + (135.0-185.0)*u
-				sb = 90.0 + (55.0-90.0)*u
-				sa = a0 + (aMid-a0)*u
-			} else {
-				u := (t - 0.45) / 0.55
-				sr = 235.0 + (120.0-235.0)*u
-				sg = 135.0 + (60.0-135.0)*u
-				sb = 55.0 + (30.0-55.0)*u
-				sa = aMid * (1.0 - u)
-			}
-			screenBlendPixel(s.frame, x, y, sr*sa, sg*sa, sb*sa)
+			sa := a0*p.w0 + aMid*p.wMid
+			screenBlendPixel(s.frame, x, y, p.sr*sa, p.sg*sa, p.sb*sa)
 		}
 	}
 }
 
-func (s *budapestScene) drawRiverShimmer(timeSeconds float64) {
+func (s *budapestScene) drawRiverShimmer(timeSeconds float64, cropY0, cropY1 int) {
+	if cropY1 <= 220 || cropY0 >= 376 {
+		return
+	}
 	for _, glint := range budapestGlints {
 		rawWave := math.Sin(timeSeconds*glint.speed + glint.phase)
 		if rawWave <= 0 {
@@ -547,8 +599,8 @@ func (s *budapestScene) drawRiverShimmer(timeSeconds float64) {
 		ry := 2.2
 		minX := max(0, int(math.Floor(cx-rx)))
 		maxX := min(budapestW-1, int(math.Ceil(cx+rx)))
-		minY := max(0, int(math.Floor(cy-ry)))
-		maxY := min(budapestH-1, int(math.Ceil(cy+ry)))
+		minY := max(cropY0, int(math.Floor(cy-ry)))
+		maxY := min(min(budapestH-1, cropY1-1), int(math.Ceil(cy+ry)))
 
 		for y := minY; y <= maxY; y++ {
 			for x := minX; x <= maxX; x++ {
@@ -697,7 +749,7 @@ func (s *budapestScene) drawCar(p budapestPose, scale float64, isTaxi bool, moti
 	}
 }
 
-func (s *budapestScene) drawGlimmeringLights(timeSeconds float64) {
+func (s *budapestScene) drawGlimmeringLights(timeSeconds float64, cropY0, cropY1 int) {
 	for _, l := range budapestLights {
 		wave1 := math.Sin(timeSeconds*l.speed + l.phase)
 		wave2 := math.Sin(timeSeconds*l.speed*2.3 + l.phase2)
@@ -709,8 +761,8 @@ func (s *budapestScene) drawGlimmeringLights(timeSeconds float64) {
 		rad := currentR * 2.2
 		minX := max(0, int(math.Floor(l.x-rad)))
 		maxX := min(budapestW-1, int(math.Ceil(l.x+rad)))
-		minY := max(0, int(math.Floor(l.y-rad)))
-		maxY := min(budapestH-1, int(math.Ceil(l.y+rad)))
+		minY := max(cropY0, int(math.Floor(l.y-rad)))
+		maxY := min(min(budapestH-1, cropY1-1), int(math.Ceil(l.y+rad)))
 
 		for y := minY; y <= maxY; y++ {
 			for x := minX; x <= maxX; x++ {
@@ -846,10 +898,12 @@ func (s *budapestScene) applyBudapestProjection(buf *terminal.CellBuf, termW, te
 	if termH <= 0 {
 		termH = buf.Height
 	}
-	elapsed := time.Since(s.startTime).Seconds()
-	frame := s.renderAt(elapsed)
-
 	cropX, cropY, cropW, cropH := centeredCropBounds(termW, termH)
+	cropY0 := max(0, int(math.Floor(cropY)))
+	cropY1 := min(budapestH, int(math.Ceil(cropY+cropH)))
+	elapsed := time.Since(s.startTime).Seconds()
+	frame := s.renderCropAt(elapsed, cropY0, cropY1)
+
 	cellW := cropW / float64(termW)
 	cellH := cropH / float64(termH)
 
