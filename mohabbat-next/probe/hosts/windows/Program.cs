@@ -80,7 +80,8 @@ internal static class Program
                 args[1],
                 args.Length == 3 ? args[2] : "load-add-store");
         }
-        if (args.Length != 0)
+        bool fileIoTest = args.Length == 2 && args[0] == "--file-io-test";
+        if (args.Length != 0 && !fileIoTest)
         {
             Console.Error.WriteLine("This executable does not accept arguments.");
             return 2;
@@ -96,6 +97,17 @@ internal static class Program
 
         try
         {
+            if (fileIoTest)
+            {
+                string workingDirectory = Path.GetFullPath(args[1]);
+                if (!Directory.Exists(workingDirectory))
+                {
+                    Console.Error.WriteLine("File-I/O test directory does not exist: " + workingDirectory);
+                    return 2;
+                }
+                Directory.SetCurrentDirectory(workingDirectory);
+            }
+
             string architecture = GetArchitecture();
             byte[] platform = ReadComponent(
                 string.Format(
@@ -103,7 +115,9 @@ internal static class Program
                     architecture));
             byte[] hello = ReadComponent(
                 string.Format(
-                    "MohabbatNext.Hello.{0}.zst",
+                    fileIoTest
+                        ? "MohabbatNext.FileIo.{0}.zst"
+                        : "MohabbatNext.Hello.{0}.zst",
                     architecture));
 
             platformPin = GCHandle.Alloc(platform, GCHandleType.Pinned);
@@ -161,6 +175,11 @@ internal static class Program
             Console.Error.WriteLine(exception.Message);
             return 1;
         }
+        catch (UnauthorizedAccessException exception)
+        {
+            Console.Error.WriteLine(exception.Message);
+            return 1;
+        }
         finally
         {
             if (platformAlloc != IntPtr.Zero)
@@ -190,8 +209,9 @@ internal static class Program
             ReadComponent(
                 "MohabbatNext.Platform.Windows." + architecture + ".zst");
             ReadComponent("MohabbatNext.Hello." + architecture + ".zst");
+            ReadComponent("MohabbatNext.FileIo." + architecture + ".zst");
         }
-        Console.WriteLine("Verified all four compressed components.");
+        Console.WriteLine("Verified all six compressed components.");
         return 0;
     }
 

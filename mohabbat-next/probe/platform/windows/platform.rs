@@ -164,6 +164,51 @@ type PostQueuedCompletionStatusFn =
 type PostQueuedCompletionStatusFn =
     unsafe extern "C" fn(*mut c_void, u32, usize, *mut c_void) -> i32;
 
+#[cfg(target_arch = "x86_64")]
+type CreateFileWFn = unsafe extern "win64" fn(
+    *const u16,
+    u32,
+    u32,
+    *mut c_void,
+    u32,
+    u32,
+    *mut c_void,
+) -> *mut c_void;
+#[cfg(target_arch = "aarch64")]
+type CreateFileWFn =
+    unsafe extern "C" fn(*const u16, u32, u32, *mut c_void, u32, u32, *mut c_void) -> *mut c_void;
+
+#[cfg(target_arch = "x86_64")]
+type MultiByteToWideCharFn =
+    unsafe extern "win64" fn(u32, u32, *const u8, i32, *mut u16, i32) -> i32;
+#[cfg(target_arch = "aarch64")]
+type MultiByteToWideCharFn = unsafe extern "C" fn(u32, u32, *const u8, i32, *mut u16, i32) -> i32;
+
+#[cfg(target_arch = "x86_64")]
+type GetOverlappedResultFn =
+    unsafe extern "win64" fn(*mut c_void, *mut c_void, *mut u32, i32) -> i32;
+#[cfg(target_arch = "aarch64")]
+type GetOverlappedResultFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut u32, i32) -> i32;
+
+#[cfg(target_arch = "x86_64")]
+type GetFileSizeExFn = unsafe extern "win64" fn(*mut c_void, *mut i64) -> i32;
+#[cfg(target_arch = "aarch64")]
+type GetFileSizeExFn = unsafe extern "C" fn(*mut c_void, *mut i64) -> i32;
+
+#[cfg(target_arch = "x86_64")]
+type GetFileInformationByHandleExFn =
+    unsafe extern "win64" fn(*mut c_void, u32, *mut c_void, u32) -> i32;
+#[cfg(target_arch = "aarch64")]
+type GetFileInformationByHandleExFn =
+    unsafe extern "C" fn(*mut c_void, u32, *mut c_void, u32) -> i32;
+
+#[cfg(target_arch = "x86_64")]
+type SetFileInformationByHandleFn =
+    unsafe extern "win64" fn(*mut c_void, u32, *const c_void, u32) -> i32;
+#[cfg(target_arch = "aarch64")]
+type SetFileInformationByHandleFn =
+    unsafe extern "C" fn(*mut c_void, u32, *const c_void, u32) -> i32;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct NativeOverlapped {
@@ -172,6 +217,15 @@ struct NativeOverlapped {
     offset: u32,
     offset_high: u32,
     event: *mut c_void,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IoKind {
+    None,
+    Stdio,
+    FileRead,
+    FileWrite,
 }
 
 #[repr(C)]
@@ -183,8 +237,22 @@ struct PendingIo {
     buffer: *mut u8,
     length: u32,
     is_write: bool,
+    kind: IoKind,
+    token: u64,
+    file_offset: i64,
+    positional: bool,
     error: u32,
     result: u64,
+}
+
+#[repr(C)]
+struct FileHandle {
+    token: u64,
+    native_handle: *mut c_void,
+    cursor: i64,
+    access: u32,
+    append: bool,
+    next: *mut FileHandle,
 }
 
 #[repr(C)]
@@ -192,6 +260,8 @@ struct PlatformState {
     input_handle: *mut c_void,
     output_handle: *mut c_void,
     error_handle: *mut c_void,
+    alloc: Option<AllocFn>,
+    free: Option<FreeFn>,
     read_file: Option<ReadFileFn>,
     write_file: Option<WriteFileFn>,
     get_last_error: Option<GetLastErrorFn>,
@@ -202,6 +272,15 @@ struct PlatformState {
     completion_port: *mut c_void,
     get_queued_completion_status_ex: Option<GetQueuedCompletionStatusExFn>,
     post_queued_completion_status: Option<PostQueuedCompletionStatusFn>,
+    create_io_completion_port: Option<CreateIoCompletionPortFn>,
+    create_file_w: Option<CreateFileWFn>,
+    multi_byte_to_wide_char: Option<MultiByteToWideCharFn>,
+    get_overlapped_result: Option<GetOverlappedResultFn>,
+    get_file_size_ex: Option<GetFileSizeExFn>,
+    get_file_information_by_handle_ex: Option<GetFileInformationByHandleExFn>,
+    set_file_information_by_handle: Option<SetFileInformationByHandleFn>,
+    file_handles: *mut FileHandle,
+    next_file_token: u64,
     worker_completion_ready: AtomicU32,
     worker_thread: *mut c_void,
     queued_io: bool,
@@ -213,6 +292,8 @@ static mut TEST_STATE: PlatformState = PlatformState {
     input_handle: ptr::null_mut(),
     output_handle: ptr::null_mut(),
     error_handle: ptr::null_mut(),
+    alloc: None,
+    free: None,
     read_file: None,
     write_file: None,
     get_last_error: None,
@@ -223,6 +304,15 @@ static mut TEST_STATE: PlatformState = PlatformState {
     completion_port: ptr::null_mut(),
     get_queued_completion_status_ex: None,
     post_queued_completion_status: None,
+    create_io_completion_port: None,
+    create_file_w: None,
+    multi_byte_to_wide_char: None,
+    get_overlapped_result: None,
+    get_file_size_ex: None,
+    get_file_information_by_handle_ex: None,
+    set_file_information_by_handle: None,
+    file_handles: ptr::null_mut(),
+    next_file_token: 3,
     worker_completion_ready: AtomicU32::new(0),
     worker_thread: ptr::null_mut(),
     queued_io: false,
@@ -239,6 +329,10 @@ static mut TEST_STATE: PlatformState = PlatformState {
         buffer: ptr::null_mut(),
         length: 0,
         is_write: false,
+        kind: IoKind::None,
+        token: 0,
+        file_offset: 0,
+        positional: false,
         error: 0,
         result: 0,
     },
@@ -249,13 +343,45 @@ const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
 const STD_OUTPUT_HANDLE: u32 = (-11i32) as u32;
 const STD_ERROR_HANDLE: u32 = (-12i32) as u32;
 const ERROR_BROKEN_PIPE: u32 = 109;
+const ERROR_ACCESS_DENIED_CODE: u32 = 5;
+const ERROR_FILE_NOT_FOUND_CODE: u32 = 2;
+const ERROR_PATH_NOT_FOUND_CODE: u32 = 3;
+const ERROR_FILE_EXISTS_CODE: u32 = 80;
 const ERROR_INVALID_HANDLE_CODE: u32 = 6;
+const ERROR_HANDLE_EOF_CODE: u32 = 38;
 const ERROR_INVALID_PARAMETER_CODE: u32 = 87;
+const ERROR_IO_PENDING_CODE: u32 = 997;
 const ERROR_NO_DATA: u32 = 232;
+const ERROR_ALREADY_EXISTS_CODE: u32 = 183;
+const ERROR_DIRECTORY_CODE: u32 = 267;
+const ERROR_NOT_ENOUGH_MEMORY_CODE: u32 = 8;
+const ERROR_NO_UNICODE_TRANSLATION_CODE: u32 = 1113;
+const ERROR_OPERATION_ABORTED_CODE: u32 = 995;
 const WAIT_OBJECT_0: u32 = 0;
 const WAIT_TIMEOUT: u32 = 258;
 const INFINITE: u32 = u32::MAX;
 const STDIO_COMPLETION_KEY: usize = 0x535444494f;
+const CP_UTF8: u32 = 65001;
+const MB_ERR_INVALID_CHARS: u32 = 8;
+const GENERIC_READ: u32 = 0x8000_0000;
+const GENERIC_WRITE: u32 = 0x4000_0000;
+const FILE_APPEND_DATA: u32 = 0x0000_0004;
+const FILE_SHARE_ALL: u32 = 0x0000_0007;
+const CREATE_NEW: u32 = 1;
+const CREATE_ALWAYS: u32 = 2;
+const OPEN_EXISTING: u32 = 3;
+const OPEN_ALWAYS: u32 = 4;
+const TRUNCATE_EXISTING: u32 = 5;
+const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
+const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+const FILE_STANDARD_INFO_CLASS: u32 = 1;
+const FILE_END_OF_FILE_INFO_CLASS: u32 = 6;
+const ABI_O_CREATE: u32 = 0x40;
+const ABI_O_EXCL: u32 = 0x80;
+const ABI_O_TRUNC: u32 = 0x200;
+const ABI_O_APPEND: u32 = 0x400;
+const ABI_O_DIRECTORY: u32 = 0x2000;
 
 #[inline(always)]
 unsafe fn slice_origin() -> *mut u8 {
@@ -346,6 +472,64 @@ unsafe fn complete_io(ov: *mut Overlapped, error: u32, result: u64) {
     (*ov).flags = pal_abi::FLAG_COMPLETED;
 }
 
+const fn empty_pending_io() -> PendingIo {
+    PendingIo {
+        native_overlapped: NativeOverlapped {
+            internal: 0,
+            internal_high: 0,
+            offset: 0,
+            offset_high: 0,
+            event: ptr::null_mut(),
+        },
+        overlapped: ptr::null_mut(),
+        handle: ptr::null_mut(),
+        buffer: ptr::null_mut(),
+        length: 0,
+        is_write: false,
+        kind: IoKind::None,
+        token: 0,
+        file_offset: 0,
+        positional: false,
+        error: 0,
+        result: 0,
+    }
+}
+
+unsafe fn find_file_handle(token: u64) -> *mut FileHandle {
+    let mut handle = ptr::addr_of!((*state_ptr()).file_handles).read();
+    while !handle.is_null() {
+        if (*handle).token == token {
+            return handle;
+        }
+        handle = (*handle).next;
+    }
+    ptr::null_mut()
+}
+
+fn map_windows_error(error: u32) -> u32 {
+    match error {
+        ERROR_FILE_NOT_FOUND_CODE | ERROR_PATH_NOT_FOUND_CODE => pal_abi::ERROR_NOENT,
+        ERROR_ACCESS_DENIED_CODE => pal_abi::ERROR_ACCES,
+        ERROR_INVALID_HANDLE_CODE => ERROR_BADF,
+        ERROR_FILE_EXISTS_CODE | ERROR_ALREADY_EXISTS_CODE => pal_abi::ERROR_EXIST,
+        ERROR_INVALID_PARAMETER_CODE => ERROR_INVALID,
+        ERROR_NO_UNICODE_TRANSLATION_CODE => ERROR_INVALID,
+        123 => ERROR_INVALID,
+        ERROR_DIRECTORY_CODE => pal_abi::ERROR_NOTDIR,
+        ERROR_NOT_ENOUGH_MEMORY_CODE => pal_abi::ERROR_NOMEM,
+        ERROR_OPERATION_ABORTED_CODE => pal_abi::ERROR_CANCELED,
+        ERROR_BROKEN_PIPE | ERROR_NO_DATA => ERROR_PIPE,
+        _ => ERROR_IO,
+    }
+}
+
+unsafe fn reset_pending_io(state: *mut PlatformState) {
+    ptr::addr_of_mut!((*state).pending_io).write(empty_pending_io());
+    ptr::addr_of_mut!((*state).queued_io).write(false);
+    ptr::addr_of_mut!((*state).worker_thread).write(ptr::null_mut());
+    (*state).worker_completion_ready.store(0, Ordering::Relaxed);
+}
+
 unsafe fn begin_io(
     ov: *mut Overlapped,
     handle: u64,
@@ -355,6 +539,10 @@ unsafe fn begin_io(
 ) {
     if ov.is_null() || (buffer.is_null() && length != 0) || length > u32::MAX as usize {
         complete_io(ov, ERROR_INVALID, 0);
+        return;
+    }
+    if handle > 2 {
+        begin_file_io(ov, handle, buffer, length, is_write);
         return;
     }
     let state = state_ptr();
@@ -400,6 +588,10 @@ unsafe fn begin_io(
         buffer,
         length: length as u32,
         is_write,
+        kind: IoKind::Stdio,
+        token: 0,
+        file_offset: 0,
+        positional: false,
         error: 0,
         result: 0,
     });
@@ -417,26 +609,472 @@ unsafe fn begin_io(
         ptr::null_mut(),
     );
     if thread.is_null() {
-        ptr::addr_of_mut!((*state).pending_io).write(PendingIo {
-            native_overlapped: NativeOverlapped {
-                internal: 0,
-                internal_high: 0,
-                offset: 0,
-                offset_high: 0,
-                event: ptr::null_mut(),
-            },
-            overlapped: ptr::null_mut(),
-            handle: ptr::null_mut(),
-            buffer: ptr::null_mut(),
-            length: 0,
-            is_write: false,
-            error: 0,
-            result: 0,
-        });
+        reset_pending_io(state);
         complete_io(ov, ERROR_AGAIN, 0);
     } else {
         ptr::addr_of_mut!((*state).worker_thread).write(thread);
         ptr::addr_of_mut!((*state).queued_io).write(true);
+    }
+}
+
+unsafe fn begin_file_io(
+    ov: *mut Overlapped,
+    token: u64,
+    buffer: *mut u8,
+    length: usize,
+    is_write: bool,
+) {
+    if ov.is_null() || (buffer.is_null() && length != 0) || length > u32::MAX as usize {
+        complete_io(ov, ERROR_INVALID, 0);
+        return;
+    }
+    let state = state_ptr();
+    let file = find_file_handle(token);
+    if file.is_null() {
+        complete_io(ov, ERROR_BADF, 0);
+        return;
+    }
+    let access = ptr::addr_of!((*file).access).read();
+    if (is_write && access & 2 == 0) || (!is_write && access & 1 == 0) {
+        complete_io(ov, ERROR_BADF, 0);
+        return;
+    }
+    if length == 0 {
+        complete_io(ov, 0, 0);
+        return;
+    }
+    if ptr::addr_of!((*state).queued_io).read() {
+        complete_io(ov, ERROR_AGAIN, 0);
+        return;
+    }
+    let positional = !is_write && (*ov).flags & pal_abi::READ_FLAG_POSITIONAL != 0;
+    let file_offset = if positional {
+        let offset = ptr::read_unaligned(
+            ov.cast::<u8>()
+                .add(core::mem::size_of::<Overlapped>())
+                .cast::<i64>(),
+        );
+        if offset < 0 {
+            complete_io(ov, ERROR_INVALID, 0);
+            return;
+        }
+        offset
+    } else {
+        (*file).cursor
+    };
+    if file_offset < 0 {
+        complete_io(ov, ERROR_INVALID, 0);
+        return;
+    }
+    let native_handle = ptr::addr_of!((*file).native_handle).read();
+    let native_overlapped = NativeOverlapped {
+        internal: 0,
+        internal_high: 0,
+        offset: if is_write && (*file).append {
+            u32::MAX
+        } else {
+            file_offset as u32
+        },
+        offset_high: if is_write && (*file).append {
+            u32::MAX
+        } else {
+            (file_offset as u64 >> 32) as u32
+        },
+        event: ptr::null_mut(),
+    };
+    (*ov).flags = 0;
+    (*ov).error = 0;
+    (*ov).continued = 0;
+    (*ov).result_ext = 0;
+    ptr::addr_of_mut!((*state).pending_io).write(PendingIo {
+        native_overlapped,
+        overlapped: ov,
+        handle: native_handle,
+        buffer,
+        length: length as u32,
+        is_write,
+        kind: if is_write {
+            IoKind::FileWrite
+        } else {
+            IoKind::FileRead
+        },
+        token,
+        file_offset,
+        positional,
+        error: 0,
+        result: 0,
+    });
+    ptr::addr_of_mut!((*state).queued_io).write(true);
+    let mut transferred = 0u32;
+    let ok = if is_write {
+        match ptr::addr_of!((*state).write_file).read() {
+            Some(write_file) => {
+                write_file(
+                    native_handle,
+                    buffer.cast(),
+                    length as u32,
+                    &mut transferred,
+                    ptr::addr_of_mut!((*state).pending_io.native_overlapped).cast(),
+                ) != 0
+            }
+            None => false,
+        }
+    } else {
+        match ptr::addr_of!((*state).read_file).read() {
+            Some(read_file) => {
+                read_file(
+                    native_handle,
+                    buffer.cast(),
+                    length as u32,
+                    &mut transferred,
+                    ptr::addr_of_mut!((*state).pending_io.native_overlapped).cast(),
+                ) != 0
+            }
+            None => false,
+        }
+    };
+    if !ok {
+        let error = match ptr::addr_of!((*state).get_last_error).read() {
+            Some(get_last_error) => get_last_error(),
+            None => 0,
+        };
+        if error != ERROR_IO_PENDING_CODE {
+            reset_pending_io(state);
+            complete_io(ov, map_windows_error(error), 0);
+        }
+    }
+}
+
+#[repr(C)]
+struct FileStandardInfo {
+    allocation_size: i64,
+    end_of_file: i64,
+    number_of_links: u32,
+    delete_pending: u8,
+    directory: u8,
+}
+
+unsafe fn probe_path_open(ov: *mut Overlapped, path: *const u8, path_length: usize, flags: u32) {
+    if ov.is_null() || path.is_null() || path_length > i32::MAX as usize {
+        complete_io(ov, ERROR_INVALID, 0);
+        return;
+    }
+    if path_length == 0 {
+        complete_io(ov, pal_abi::ERROR_NOENT, 0);
+        return;
+    }
+    let access_mode = flags & 3;
+    let supported = 3 | ABI_O_CREATE | ABI_O_EXCL | ABI_O_TRUNC | ABI_O_APPEND | ABI_O_DIRECTORY;
+    if access_mode == 3
+        || flags & !supported != 0
+        || (flags & ABI_O_EXCL != 0 && flags & ABI_O_CREATE == 0)
+    {
+        complete_io(ov, ERROR_INVALID, 0);
+        return;
+    }
+    let access = match access_mode {
+        0 => 1,
+        1 => 2,
+        _ => 3,
+    };
+    if (flags & (ABI_O_TRUNC | ABI_O_APPEND) != 0) && access & 2 == 0 {
+        complete_io(ov, ERROR_INVALID, 0);
+        return;
+    }
+    let state = state_ptr();
+    let (Some(alloc), Some(free), Some(convert), Some(create_file), Some(create_port)) = (
+        ptr::addr_of!((*state).alloc).read(),
+        ptr::addr_of!((*state).free).read(),
+        ptr::addr_of!((*state).multi_byte_to_wide_char).read(),
+        ptr::addr_of!((*state).create_file_w).read(),
+        ptr::addr_of!((*state).create_io_completion_port).read(),
+    ) else {
+        complete_io(ov, ERROR_IO, 0);
+        return;
+    };
+    let mut byte_index = 0usize;
+    while byte_index < path_length {
+        if path.add(byte_index).read() == 0 {
+            complete_io(ov, ERROR_INVALID, 0);
+            return;
+        }
+        byte_index += 1;
+    }
+    let wide_length = convert(
+        CP_UTF8,
+        MB_ERR_INVALID_CHARS,
+        path,
+        path_length as i32,
+        ptr::null_mut(),
+        0,
+    );
+    if wide_length <= 0 {
+        let error = ptr::addr_of!((*state).get_last_error)
+            .read()
+            .map(|get_last_error| get_last_error())
+            .unwrap_or(ERROR_INVALID_PARAMETER_CODE);
+        complete_io(ov, map_windows_error(error), 0);
+        return;
+    }
+    let Some(wide_capacity) = (wide_length as usize).checked_add(1) else {
+        complete_io(ov, ERROR_INVALID, 0);
+        return;
+    };
+    let Some(wide_bytes) = wide_capacity.checked_mul(core::mem::size_of::<u16>()) else {
+        complete_io(ov, ERROR_INVALID, 0);
+        return;
+    };
+    let wide_path = alloc(wide_bytes).cast::<u16>();
+    if wide_path.is_null() {
+        complete_io(ov, pal_abi::ERROR_NOMEM, 0);
+        return;
+    }
+    let converted = convert(
+        CP_UTF8,
+        MB_ERR_INVALID_CHARS,
+        path,
+        path_length as i32,
+        wide_path,
+        wide_length,
+    );
+    if converted != wide_length {
+        free(wide_path.cast());
+        let error = ptr::addr_of!((*state).get_last_error)
+            .read()
+            .map(|get_last_error| get_last_error())
+            .unwrap_or(ERROR_INVALID_PARAMETER_CODE);
+        complete_io(ov, map_windows_error(error), 0);
+        return;
+    }
+    wide_path.add(wide_length as usize).write(0);
+
+    let mut desired_access = 0u32;
+    if access & 1 != 0 {
+        desired_access |= GENERIC_READ;
+    }
+    if access & 2 != 0 {
+        desired_access |= GENERIC_WRITE;
+        if flags & ABI_O_APPEND != 0 {
+            desired_access |= FILE_APPEND_DATA;
+        }
+    }
+    let disposition = if flags & ABI_O_CREATE != 0 && flags & ABI_O_EXCL != 0 {
+        CREATE_NEW
+    } else if flags & ABI_O_CREATE != 0 && flags & ABI_O_TRUNC != 0 {
+        CREATE_ALWAYS
+    } else if flags & ABI_O_CREATE != 0 {
+        OPEN_ALWAYS
+    } else if flags & ABI_O_TRUNC != 0 {
+        TRUNCATE_EXISTING
+    } else {
+        OPEN_EXISTING
+    };
+    let native_handle = create_file(
+        wide_path,
+        desired_access,
+        FILE_SHARE_ALL,
+        ptr::null_mut(),
+        disposition,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED | FILE_FLAG_BACKUP_SEMANTICS,
+        ptr::null_mut(),
+    );
+    free(wide_path.cast());
+    if native_handle as isize == -1 {
+        let error = ptr::addr_of!((*state).get_last_error)
+            .read()
+            .map(|get_last_error| get_last_error())
+            .unwrap_or(0);
+        complete_io(ov, map_windows_error(error), 0);
+        return;
+    }
+
+    let next_token = ptr::addr_of!((*state).next_file_token).read();
+    let Some(after_token) = next_token.checked_add(1) else {
+        ptr::addr_of!((*state).close_handle)
+            .read()
+            .map(|close| close(native_handle));
+        complete_io(ov, pal_abi::ERROR_OVERFLOW, 0);
+        return;
+    };
+    let file = alloc(core::mem::size_of::<FileHandle>()).cast::<FileHandle>();
+    if file.is_null() {
+        ptr::addr_of!((*state).close_handle)
+            .read()
+            .map(|close| close(native_handle));
+        complete_io(ov, pal_abi::ERROR_NOMEM, 0);
+        return;
+    }
+    let port = ptr::addr_of!((*state).completion_port).read();
+    if port.is_null() || create_port(native_handle, port, next_token as usize, 0) != port {
+        free(file.cast());
+        ptr::addr_of!((*state).close_handle)
+            .read()
+            .map(|close| close(native_handle));
+        let error = ptr::addr_of!((*state).get_last_error)
+            .read()
+            .map(|get_last_error| get_last_error())
+            .unwrap_or(0);
+        complete_io(ov, map_windows_error(error), 0);
+        return;
+    }
+    if flags & ABI_O_DIRECTORY != 0 {
+        let Some(get_info) = ptr::addr_of!((*state).get_file_information_by_handle_ex).read()
+        else {
+            free(file.cast());
+            ptr::addr_of!((*state).close_handle)
+                .read()
+                .map(|close| close(native_handle));
+            complete_io(ov, ERROR_IO, 0);
+            return;
+        };
+        let mut info = FileStandardInfo {
+            allocation_size: 0,
+            end_of_file: 0,
+            number_of_links: 0,
+            delete_pending: 0,
+            directory: 0,
+        };
+        if get_info(
+            native_handle,
+            FILE_STANDARD_INFO_CLASS,
+            (&mut info as *mut FileStandardInfo).cast(),
+            core::mem::size_of::<FileStandardInfo>() as u32,
+        ) == 0
+            || info.directory == 0
+        {
+            let error = if info.directory == 0 {
+                pal_abi::ERROR_NOTDIR
+            } else {
+                ptr::addr_of!((*state).get_last_error)
+                    .read()
+                    .map(|get_last_error| map_windows_error(get_last_error()))
+                    .unwrap_or(ERROR_IO)
+            };
+            free(file.cast());
+            ptr::addr_of!((*state).close_handle)
+                .read()
+                .map(|close| close(native_handle));
+            complete_io(ov, error, 0);
+            return;
+        }
+    }
+    file.write(FileHandle {
+        token: next_token,
+        native_handle,
+        cursor: 0,
+        access,
+        append: flags & ABI_O_APPEND != 0,
+        next: ptr::addr_of!((*state).file_handles).read(),
+    });
+    ptr::addr_of_mut!((*state).file_handles).write(file);
+    ptr::addr_of_mut!((*state).next_file_token).write(after_token);
+    complete_io(ov, 0, next_token);
+}
+
+unsafe fn probe_seek(ov: *mut Overlapped, token: u64, offset: i64, whence: u32) {
+    if ov.is_null() || whence > 2 {
+        complete_io(ov, ERROR_INVALID, 0);
+        return;
+    }
+    let file = find_file_handle(token);
+    if file.is_null() {
+        complete_io(ov, ERROR_BADF, 0);
+        return;
+    }
+    let base = match whence {
+        0 => 0,
+        1 => (*file).cursor,
+        _ => {
+            let state = state_ptr();
+            let Some(get_size) = ptr::addr_of!((*state).get_file_size_ex).read() else {
+                complete_io(ov, ERROR_IO, 0);
+                return;
+            };
+            let mut size = 0i64;
+            if get_size((*file).native_handle, &mut size) == 0 {
+                let error = ptr::addr_of!((*state).get_last_error)
+                    .read()
+                    .map(|get_last_error| map_windows_error(get_last_error()))
+                    .unwrap_or(ERROR_IO);
+                complete_io(ov, error, 0);
+                return;
+            }
+            size
+        }
+    };
+    let Some(position) = base.checked_add(offset) else {
+        complete_io(ov, pal_abi::ERROR_OVERFLOW, 0);
+        return;
+    };
+    if position < 0 {
+        complete_io(ov, ERROR_INVALID, 0);
+        return;
+    }
+    (*file).cursor = position;
+    complete_io(ov, 0, position as u64);
+}
+
+#[repr(C)]
+struct FileEndOfFileInfo {
+    end_of_file: i64,
+}
+
+unsafe fn probe_handle_truncate(ov: *mut Overlapped, token: u64, size: i64) {
+    if ov.is_null() || size < 0 {
+        complete_io(ov, ERROR_INVALID, 0);
+        return;
+    }
+    let file = find_file_handle(token);
+    if file.is_null() {
+        complete_io(ov, ERROR_BADF, 0);
+        return;
+    }
+    if (*file).access & 2 == 0 {
+        complete_io(ov, ERROR_BADF, 0);
+        return;
+    }
+    let state = state_ptr();
+    let Some(set_info) = ptr::addr_of!((*state).set_file_information_by_handle).read() else {
+        complete_io(ov, ERROR_IO, 0);
+        return;
+    };
+    let info = FileEndOfFileInfo { end_of_file: size };
+    if set_info(
+        (*file).native_handle,
+        FILE_END_OF_FILE_INFO_CLASS,
+        (&info as *const FileEndOfFileInfo).cast(),
+        core::mem::size_of::<FileEndOfFileInfo>() as u32,
+    ) == 0
+    {
+        let error = ptr::addr_of!((*state).get_last_error)
+            .read()
+            .map(|get_last_error| map_windows_error(get_last_error()))
+            .unwrap_or(ERROR_IO);
+        complete_io(ov, error, 0);
+    } else {
+        complete_io(ov, 0, 0);
+    }
+}
+
+unsafe fn probe_handle_close(token: u64) {
+    let state = state_ptr();
+    let mut link = ptr::addr_of_mut!((*state).file_handles);
+    while !link.read().is_null() {
+        let file = link.read();
+        if (*file).token == token {
+            let Some(close) = ptr::addr_of!((*state).close_handle).read() else {
+                return;
+            };
+            if close((*file).native_handle) == 0 {
+                return;
+            }
+            link.write((*file).next);
+            if let Some(free) = ptr::addr_of!((*state).free).read() {
+                free(file.cast());
+            }
+            return;
+        }
+        link = ptr::addr_of_mut!((*file).next);
     }
 }
 
@@ -568,6 +1206,56 @@ unsafe extern "C" fn probe_read(ov: *mut Overlapped, handle: u64, buffer: *mut u
     begin_io(ov, handle, buffer, length, false)
 }
 
+#[cfg(target_arch = "x86_64")]
+unsafe extern "win64" fn probe_path_open_abi(
+    ov: *mut Overlapped,
+    path: *const u8,
+    path_length: usize,
+    flags: u32,
+) {
+    probe_path_open(ov, path, path_length, flags)
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe extern "C" fn probe_path_open_abi(
+    ov: *mut Overlapped,
+    path: *const u8,
+    path_length: usize,
+    flags: u32,
+) {
+    probe_path_open(ov, path, path_length, flags)
+}
+
+#[cfg(target_arch = "x86_64")]
+unsafe extern "win64" fn probe_seek_abi(ov: *mut Overlapped, token: u64, offset: i64, whence: u32) {
+    probe_seek(ov, token, offset, whence)
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe extern "C" fn probe_seek_abi(ov: *mut Overlapped, token: u64, offset: i64, whence: u32) {
+    probe_seek(ov, token, offset, whence)
+}
+
+#[cfg(target_arch = "x86_64")]
+unsafe extern "win64" fn probe_handle_truncate_abi(ov: *mut Overlapped, token: u64, size: i64) {
+    probe_handle_truncate(ov, token, size)
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe extern "C" fn probe_handle_truncate_abi(ov: *mut Overlapped, token: u64, size: i64) {
+    probe_handle_truncate(ov, token, size)
+}
+
+#[cfg(target_arch = "x86_64")]
+unsafe extern "win64" fn probe_handle_close_abi(token: u64) {
+    probe_handle_close(token)
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe extern "C" fn probe_handle_close_abi(token: u64) {
+    probe_handle_close(token)
+}
+
 unsafe fn exit_process_impl(status: i32) -> ! {
     let exit = {
         let state = state_mut();
@@ -595,25 +1283,7 @@ unsafe fn publish_pending_io() {
     let state = state_ptr();
     let pending = ptr::addr_of!((*state).pending_io).read();
     complete_io(pending.overlapped, pending.error, pending.result);
-    ptr::addr_of_mut!((*state).worker_thread).write(ptr::null_mut());
-    ptr::addr_of_mut!((*state).queued_io).write(false);
-    ptr::addr_of_mut!((*state).pending_io).write(PendingIo {
-        native_overlapped: NativeOverlapped {
-            internal: 0,
-            internal_high: 0,
-            offset: 0,
-            offset_high: 0,
-            event: ptr::null_mut(),
-        },
-        overlapped: ptr::null_mut(),
-        handle: ptr::null_mut(),
-        buffer: ptr::null_mut(),
-        length: 0,
-        is_write: false,
-        error: 0,
-        result: 0,
-    });
-    (*state).worker_completion_ready.store(0, Ordering::Relaxed);
+    reset_pending_io(state);
 }
 
 unsafe fn wait_and_publish_pending_io() -> bool {
@@ -623,10 +1293,11 @@ unsafe fn wait_and_publish_pending_io() -> bool {
     let wait = ptr::addr_of!((*state).wait_for_single_object).read();
     let close = ptr::addr_of!((*state).close_handle).read();
     let thread = ptr::addr_of!((*state).worker_thread).read();
-    let (Some(get_completion), Some(wait), Some(close)) = (get_completion, wait, close) else {
+    let pending = ptr::addr_of!((*state).pending_io).read();
+    let Some(get_completion) = get_completion else {
         return false;
     };
-    if port.is_null() || thread.is_null() {
+    if port.is_null() || pending.kind == IoKind::None {
         return false;
     }
 
@@ -640,11 +1311,8 @@ unsafe fn wait_and_publish_pending_io() -> bool {
         let mut removed = 0u32;
         if get_completion(port, &mut entry, 1, &mut removed, INFINITE, 0) != 0 {
             if removed != 1
-                || entry.completion_key != STDIO_COMPLETION_KEY
                 || entry.overlapped
                     != ptr::addr_of_mut!((*state).pending_io.native_overlapped).cast()
-                || entry.internal != 0
-                || (*state).worker_completion_ready.load(Ordering::Acquire) != 1
             {
                 return false;
             }
@@ -653,13 +1321,90 @@ unsafe fn wait_and_publish_pending_io() -> bool {
         return false;
     }
 
-    if wait(thread, INFINITE) != WAIT_OBJECT_0 {
+    if pending.kind == IoKind::Stdio {
+        if entry.completion_key != STDIO_COMPLETION_KEY
+            || entry.internal != 0
+            || (*state).worker_completion_ready.load(Ordering::Acquire) != 1
+        {
+            return false;
+        }
+        let (Some(wait), Some(close)) = (wait, close) else {
+            return false;
+        };
+        if thread.is_null() || wait(thread, INFINITE) != WAIT_OBJECT_0 {
+            if !thread.is_null() {
+                close(thread);
+            }
+            return false;
+        }
         if close(thread) == 0 {
             return false;
         }
+        publish_pending_io();
+        return true;
+    }
+
+    if pending.kind != IoKind::FileRead && pending.kind != IoKind::FileWrite
+        || entry.completion_key != pending.token as usize
+        || !thread.is_null()
+    {
         return false;
     }
-    close(thread);
+    let Some(get_result) = ptr::addr_of!((*state).get_overlapped_result).read() else {
+        return false;
+    };
+    let mut transferred = 0u32;
+    let succeeded = get_result(
+        pending.handle,
+        ptr::addr_of_mut!((*state).pending_io.native_overlapped).cast(),
+        &mut transferred,
+        0,
+    ) != 0;
+    let (error, result) = if succeeded {
+        if entry.bytes_transferred != transferred {
+            (ERROR_IO, 0)
+        } else {
+            (0, transferred as u64)
+        }
+    } else {
+        let error = ptr::addr_of!((*state).get_last_error)
+            .read()
+            .map(|get_last_error| get_last_error())
+            .unwrap_or(0);
+        if pending.kind == IoKind::FileRead && error == ERROR_HANDLE_EOF_CODE {
+            (0, 0)
+        } else {
+            (map_windows_error(error), 0)
+        }
+    };
+    if error == 0 {
+        let file = find_file_handle(pending.token);
+        if file.is_null() {
+            return false;
+        }
+        if !pending.positional {
+            let new_cursor = if pending.kind == IoKind::FileWrite && (*file).append {
+                let mut size = 0i64;
+                match ptr::addr_of!((*state).get_file_size_ex).read() {
+                    Some(get_size) if get_size((*file).native_handle, &mut size) != 0 => size,
+                    _ => pending.file_offset.saturating_add(transferred as i64),
+                }
+            } else {
+                match pending.file_offset.checked_add(transferred as i64) {
+                    Some(position) => position,
+                    None => {
+                        ptr::addr_of_mut!((*state).pending_io.error).write(pal_abi::ERROR_OVERFLOW);
+                        ptr::addr_of_mut!((*state).pending_io.result).write(0);
+                        publish_pending_io();
+                        return true;
+                    }
+                }
+            };
+            ptr::addr_of_mut!((*file).cursor).write(new_cursor);
+        }
+    }
+    ptr::addr_of_mut!((*state).pending_io.error).write(error);
+    ptr::addr_of_mut!((*state).pending_io.result).write(result);
     publish_pending_io();
     true
 }
@@ -720,6 +1465,25 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
         resolve(host, kernel32, b"PostQueuedCompletionStatus\0"),
         PostQueuedCompletionStatusFn
     );
+    let create_file_w = function_pointer!(resolve(host, kernel32, b"CreateFileW\0"), CreateFileWFn);
+    let multi_byte_to_wide_char = function_pointer!(
+        resolve(host, kernel32, b"MultiByteToWideChar\0"),
+        MultiByteToWideCharFn
+    );
+    let get_overlapped_result = function_pointer!(
+        resolve(host, kernel32, b"GetOverlappedResult\0"),
+        GetOverlappedResultFn
+    );
+    let get_file_size_ex =
+        function_pointer!(resolve(host, kernel32, b"GetFileSizeEx\0"), GetFileSizeExFn);
+    let get_file_information_by_handle_ex = function_pointer!(
+        resolve(host, kernel32, b"GetFileInformationByHandleEx\0"),
+        GetFileInformationByHandleExFn
+    );
+    let set_file_information_by_handle = function_pointer!(
+        resolve(host, kernel32, b"SetFileInformationByHandle\0"),
+        SetFileInformationByHandleFn
+    );
     if get_std_handle.is_none()
         || read_file.is_none()
         || write_file.is_none()
@@ -733,6 +1497,12 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
         || create_completion_port.is_none()
         || get_completion.is_none()
         || post_completion.is_none()
+        || create_file_w.is_none()
+        || multi_byte_to_wide_char.is_none()
+        || get_overlapped_result.is_none()
+        || get_file_size_ex.is_none()
+        || get_file_information_by_handle_ex.is_none()
+        || set_file_information_by_handle.is_none()
     {
         return 12;
     }
@@ -807,6 +1577,8 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
             input_handle,
             output_handle,
             error_handle,
+            alloc: Some(alloc),
+            free: Some(free),
             read_file,
             write_file,
             get_last_error,
@@ -817,31 +1589,27 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
             completion_port,
             get_queued_completion_status_ex: Some(get_completion),
             post_queued_completion_status: Some(post_completion),
+            create_io_completion_port: Some(create_completion_port),
+            create_file_w,
+            multi_byte_to_wide_char,
+            get_overlapped_result,
+            get_file_size_ex,
+            get_file_information_by_handle_ex,
+            set_file_information_by_handle,
+            file_handles: ptr::null_mut(),
+            next_file_token: 3,
             worker_completion_ready: AtomicU32::new(0),
             worker_thread: ptr::null_mut(),
             queued_io: false,
-            pending_io: PendingIo {
-                native_overlapped: NativeOverlapped {
-                    internal: 0,
-                    internal_high: 0,
-                    offset: 0,
-                    offset_high: 0,
-                    event: ptr::null_mut(),
-                },
-                overlapped: ptr::null_mut(),
-                handle: ptr::null_mut(),
-                buffer: ptr::null_mut(),
-                length: 0,
-                is_write: false,
-                error: 0,
-                result: 0,
-            },
+            pending_io: empty_pending_io(),
         },
     );
-    ptr::write(
-        payload_alloc.cast::<PalAbiTable>(),
-        pal_abi_stubs::for_probe(probe_read, probe_write, exit_process),
-    );
+    let mut abi = pal_abi_stubs::for_probe(probe_read, probe_write, exit_process);
+    abi.path_open = probe_path_open_abi;
+    abi.seek = probe_seek_abi;
+    abi.handle_truncate = probe_handle_truncate_abi;
+    abi.handle_close = probe_handle_close_abi;
+    ptr::write(payload_alloc.cast::<PalAbiTable>(), abi);
     loop {
         invoke_raw_entry(payload_code);
         let state = state_ptr();
@@ -851,6 +1619,7 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
             if !thread.is_null() {
                 exit_process_impl(16);
             }
+            close_all_file_handles();
             if close_handle(completion_port) == 0 {
                 exit_process_impl(16);
             }
@@ -861,6 +1630,24 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
             // The host unloads this code when the entry returns; do not return while a worker may execute it.
             exit_process_impl(16);
         }
+    }
+}
+
+unsafe fn close_all_file_handles() {
+    let state = state_ptr();
+    let close = ptr::addr_of!((*state).close_handle).read();
+    let free = ptr::addr_of!((*state).free).read();
+    let mut file = ptr::addr_of!((*state).file_handles).read();
+    ptr::addr_of_mut!((*state).file_handles).write(ptr::null_mut());
+    while !file.is_null() {
+        let next = (*file).next;
+        if let Some(close) = close {
+            close((*file).native_handle);
+        }
+        if let Some(free) = free {
+            free(file.cast());
+        }
+        file = next;
     }
 }
 
@@ -888,8 +1675,167 @@ fn panic(_info: &PanicInfo) -> ! {
 mod tests {
     use super::*;
     use core::mem::{offset_of, size_of};
+    #[cfg(target_os = "windows")]
+    use std::path::PathBuf;
+    use std::sync::Mutex;
 
     static mut TEST_RAW_ENTRY_CALLS: u32 = 0;
+    static TEST_STATE_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(target_os = "windows")]
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetModuleHandleA(name: *const u8) -> *mut c_void;
+        fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
+        fn VirtualAlloc(
+            address: *mut c_void,
+            size: usize,
+            alloc_type: u32,
+            protect: u32,
+        ) -> *mut c_void;
+        fn VirtualFree(address: *mut c_void, size: usize, free_type: u32) -> i32;
+    }
+
+    #[cfg(target_os = "windows")]
+    const TEST_MEM_COMMIT: u32 = 0x1000;
+    #[cfg(target_os = "windows")]
+    const TEST_MEM_RESERVE: u32 = 0x2000;
+    #[cfg(target_os = "windows")]
+    const TEST_MEM_RELEASE: u32 = 0x8000;
+    #[cfg(target_os = "windows")]
+    const TEST_PAGE_READWRITE: u32 = 0x04;
+
+    #[cfg(target_os = "windows")]
+    unsafe fn native_test_alloc_impl(size: usize) -> *mut c_void {
+        VirtualAlloc(
+            ptr::null_mut(),
+            size,
+            TEST_MEM_COMMIT | TEST_MEM_RESERVE,
+            TEST_PAGE_READWRITE,
+        )
+    }
+
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    unsafe extern "win64" fn native_test_alloc(size: usize) -> *mut c_void {
+        native_test_alloc_impl(size)
+    }
+
+    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    unsafe extern "C" fn native_test_alloc(size: usize) -> *mut c_void {
+        native_test_alloc_impl(size)
+    }
+
+    #[cfg(target_os = "windows")]
+    unsafe fn native_test_free_impl(address: *mut c_void) {
+        if VirtualFree(address, 0, TEST_MEM_RELEASE) == 0 {
+            panic!("VirtualFree failed for test allocation");
+        }
+    }
+
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    unsafe extern "win64" fn native_test_free(address: *mut c_void) {
+        native_test_free_impl(address)
+    }
+
+    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    unsafe extern "C" fn native_test_free(address: *mut c_void) {
+        native_test_free_impl(address)
+    }
+
+    #[cfg(target_os = "windows")]
+    unsafe fn initialize_native_file_io_state() {
+        let module = GetModuleHandleA(b"kernel32.dll\0".as_ptr());
+        assert!(!module.is_null());
+        let get_proc_address: GetProcAddressFn = core::mem::transmute(GetProcAddress as *const ());
+        let host = WindowsPlatformHost {
+            load_library: None,
+            get_proc_address: Some(get_proc_address),
+            alloc: None,
+            free: None,
+            hello_payload: ptr::null(),
+            hello_payload_size: 0,
+        };
+        let get_last_error =
+            function_pointer!(resolve(&host, module, b"GetLastError\0"), GetLastErrorFn).unwrap();
+        let close_handle =
+            function_pointer!(resolve(&host, module, b"CloseHandle\0"), CloseHandleFn).unwrap();
+        let create_io_completion_port = function_pointer!(
+            resolve(&host, module, b"CreateIoCompletionPort\0"),
+            CreateIoCompletionPortFn
+        )
+        .unwrap();
+        let completion_port =
+            create_io_completion_port((-1isize) as *mut c_void, ptr::null_mut(), 0, 0);
+        assert!(!completion_port.is_null());
+        ptr::addr_of_mut!(TEST_STATE).write(PlatformState {
+            input_handle: ptr::null_mut(),
+            output_handle: ptr::null_mut(),
+            error_handle: ptr::null_mut(),
+            alloc: Some(native_test_alloc),
+            free: Some(native_test_free),
+            read_file: function_pointer!(resolve(&host, module, b"ReadFile\0"), ReadFileFn),
+            write_file: function_pointer!(resolve(&host, module, b"WriteFile\0"), WriteFileFn),
+            get_last_error: Some(get_last_error),
+            exit_process: None,
+            create_thread: None,
+            wait_for_single_object: None,
+            close_handle: Some(close_handle),
+            completion_port,
+            get_queued_completion_status_ex: function_pointer!(
+                resolve(&host, module, b"GetQueuedCompletionStatusEx\0"),
+                GetQueuedCompletionStatusExFn
+            ),
+            post_queued_completion_status: function_pointer!(
+                resolve(&host, module, b"PostQueuedCompletionStatus\0"),
+                PostQueuedCompletionStatusFn
+            ),
+            create_io_completion_port: Some(create_io_completion_port),
+            create_file_w: function_pointer!(
+                resolve(&host, module, b"CreateFileW\0"),
+                CreateFileWFn
+            ),
+            multi_byte_to_wide_char: function_pointer!(
+                resolve(&host, module, b"MultiByteToWideChar\0"),
+                MultiByteToWideCharFn
+            ),
+            get_overlapped_result: function_pointer!(
+                resolve(&host, module, b"GetOverlappedResult\0"),
+                GetOverlappedResultFn
+            ),
+            get_file_size_ex: function_pointer!(
+                resolve(&host, module, b"GetFileSizeEx\0"),
+                GetFileSizeExFn
+            ),
+            get_file_information_by_handle_ex: function_pointer!(
+                resolve(&host, module, b"GetFileInformationByHandleEx\0"),
+                GetFileInformationByHandleExFn
+            ),
+            set_file_information_by_handle: function_pointer!(
+                resolve(&host, module, b"SetFileInformationByHandle\0"),
+                SetFileInformationByHandleFn
+            ),
+            file_handles: ptr::null_mut(),
+            next_file_token: 3,
+            worker_completion_ready: AtomicU32::new(0),
+            worker_thread: ptr::null_mut(),
+            queued_io: false,
+            pending_io: empty_pending_io(),
+        });
+    }
+
+    #[cfg(target_os = "windows")]
+    struct RemoveOnDrop(PathBuf);
+
+    #[cfg(target_os = "windows")]
+    impl Drop for RemoveOnDrop {
+        fn drop(&mut self) {
+            if let Err(error) = std::fs::remove_file(&self.0) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    panic!("remove test file {}: {error}", self.0.display());
+                }
+            }
+        }
+    }
 
     #[cfg(target_arch = "x86_64")]
     #[inline(never)]
@@ -1224,6 +2170,8 @@ mod tests {
             input_handle: 1usize as *mut c_void,
             output_handle: 2usize as *mut c_void,
             error_handle: ptr::null_mut(),
+            alloc: None,
+            free: None,
             read_file: Some(scripted_read_file),
             write_file: Some(scripted_write_file),
             get_last_error: Some(scripted_get_last_error),
@@ -1234,25 +2182,19 @@ mod tests {
             completion_port: 8usize as *mut c_void,
             get_queued_completion_status_ex: Some(scripted_get_completion),
             post_queued_completion_status: Some(scripted_post_completion),
+            create_io_completion_port: None,
+            create_file_w: None,
+            multi_byte_to_wide_char: None,
+            get_overlapped_result: None,
+            get_file_size_ex: None,
+            get_file_information_by_handle_ex: None,
+            set_file_information_by_handle: None,
+            file_handles: ptr::null_mut(),
+            next_file_token: 3,
             worker_completion_ready: AtomicU32::new(0),
             worker_thread: ptr::null_mut(),
             queued_io: false,
-            pending_io: PendingIo {
-                native_overlapped: NativeOverlapped {
-                    internal: 0,
-                    internal_high: 0,
-                    offset: 0,
-                    offset_high: 0,
-                    event: ptr::null_mut(),
-                },
-                overlapped: ptr::null_mut(),
-                handle: ptr::null_mut(),
-                buffer: ptr::null_mut(),
-                length: 0,
-                is_write: false,
-                error: 0,
-                result: 0,
-            },
+            pending_io: empty_pending_io(),
         });
         ptr::addr_of_mut!(TEST_IO).write(ScriptedIo {
             read_success: 1,
@@ -1312,6 +2254,9 @@ mod tests {
 
     #[test]
     fn test_io_submission_worker_errors_and_completion_publication() {
+        let _guard = TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         unsafe {
             reset_io_test_state();
             let state = state_ptr();
@@ -1510,6 +2455,201 @@ mod tests {
             assert_eq!(overlapped.flags, 0);
             assert!(ptr::addr_of!((*state).queued_io).read());
             assert_eq!((*ptr::addr_of!(TEST_IO)).close_calls, 0);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_file_io_uses_overlapped_iocp_and_preserves_file_semantics() {
+        let _guard = TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        unsafe {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir()
+                .join(format!("mohabbat-iocp-{}-{unique}.tmp", std::process::id()));
+            let _cleanup = RemoveOnDrop(path.clone());
+            let path_bytes = path
+                .to_str()
+                .expect("test path must be valid UTF-8")
+                .as_bytes();
+
+            initialize_native_file_io_state();
+            let state = state_ptr();
+            let mut opened = Overlapped::default();
+            probe_path_open_abi(
+                &mut opened,
+                path_bytes.as_ptr(),
+                path_bytes.len(),
+                2 | ABI_O_CREATE | ABI_O_EXCL,
+            );
+            assert_eq!(
+                opened.error,
+                0,
+                "path_open returned error {}; Win32 last error is {}",
+                opened.error,
+                (*state_ptr()).get_last_error.unwrap()()
+            );
+            assert_completion(&opened, 0, 3);
+            let token = opened.result_ext;
+
+            let mut duplicate = Overlapped::default();
+            probe_path_open_abi(
+                &mut duplicate,
+                path_bytes.as_ptr(),
+                path_bytes.len(),
+                2 | ABI_O_CREATE | ABI_O_EXCL,
+            );
+            assert_completion(&duplicate, pal_abi::ERROR_EXIST, 0);
+
+            let invalid_utf8 = [0xff];
+            let mut invalid_path = Overlapped::default();
+            probe_path_open_abi(
+                &mut invalid_path,
+                invalid_utf8.as_ptr(),
+                invalid_utf8.len(),
+                0,
+            );
+            assert_completion(&invalid_path, ERROR_INVALID, 0);
+
+            let mut non_directory = Overlapped::default();
+            probe_path_open_abi(
+                &mut non_directory,
+                path_bytes.as_ptr(),
+                path_bytes.len(),
+                ABI_O_DIRECTORY,
+            );
+            assert_completion(&non_directory, pal_abi::ERROR_NOTDIR, 0);
+            let directory_path = std::env::temp_dir();
+            let directory_bytes = directory_path
+                .to_str()
+                .expect("temporary directory must be valid UTF-8")
+                .as_bytes();
+            let mut directory_open = Overlapped::default();
+            probe_path_open_abi(
+                &mut directory_open,
+                directory_bytes.as_ptr(),
+                directory_bytes.len(),
+                ABI_O_DIRECTORY,
+            );
+            assert_completion(&directory_open, 0, 4);
+            probe_handle_close_abi(directory_open.result_ext);
+
+            let contents = *b"abcdef";
+            let mut written = Overlapped::default();
+            probe_write(&mut written, token, contents.as_ptr(), contents.len());
+            assert!(wait_and_publish_pending_io());
+            assert_completion(&written, 0, contents.len() as u64);
+
+            let mut seek = Overlapped::default();
+            probe_seek_abi(&mut seek, token, 0, 0);
+            assert_completion(&seek, 0, 0);
+            let mut first_read = [0u8; 2];
+            let mut read = Overlapped::default();
+            probe_read(&mut read, token, first_read.as_mut_ptr(), first_read.len());
+            assert!(wait_and_publish_pending_io());
+            assert_completion(&read, 0, 2);
+            assert_eq!(first_read, *b"ab");
+
+            #[repr(C)]
+            struct PositionalRead {
+                overlapped: Overlapped,
+                offset: i64,
+            }
+            let mut positional = PositionalRead {
+                overlapped: Overlapped {
+                    flags: pal_abi::READ_FLAG_POSITIONAL,
+                    ..Overlapped::default()
+                },
+                offset: 4,
+            };
+            let mut positional_bytes = [0u8; 2];
+            probe_read(
+                &mut positional.overlapped,
+                token,
+                positional_bytes.as_mut_ptr(),
+                positional_bytes.len(),
+            );
+            assert!(wait_and_publish_pending_io());
+            assert_completion(&positional.overlapped, 0, 2);
+            assert_eq!(positional_bytes, *b"ef");
+
+            let mut tell = Overlapped::default();
+            probe_seek_abi(&mut tell, token, 0, 1);
+            assert_completion(&tell, 0, 2);
+            let mut remaining = [0u8; 8];
+            let mut read_remaining = Overlapped::default();
+            probe_read(
+                &mut read_remaining,
+                token,
+                remaining.as_mut_ptr(),
+                remaining.len(),
+            );
+            assert!(wait_and_publish_pending_io());
+            assert_completion(&read_remaining, 0, 4);
+            assert_eq!(&remaining[..4], b"cdef");
+            let mut eof = Overlapped::default();
+            probe_read(&mut eof, token, remaining.as_mut_ptr(), 1);
+            assert!(wait_and_publish_pending_io());
+            assert_completion(&eof, 0, 0);
+
+            let mut truncated = Overlapped::default();
+            probe_handle_truncate_abi(&mut truncated, token, 4);
+            assert_completion(&truncated, 0, 0);
+            let mut seek_end = Overlapped::default();
+            probe_seek_abi(&mut seek_end, token, 0, 2);
+            assert_completion(&seek_end, 0, 4);
+            probe_handle_close_abi(token);
+            assert!(find_file_handle(token).is_null());
+
+            let mut append_open = Overlapped::default();
+            probe_path_open_abi(
+                &mut append_open,
+                path_bytes.as_ptr(),
+                path_bytes.len(),
+                1 | ABI_O_APPEND,
+            );
+            assert_completion(&append_open, 0, 5);
+            let append_token = append_open.result_ext;
+            let append_bytes = *b"xy";
+            let mut append_write = Overlapped::default();
+            probe_write(
+                &mut append_write,
+                append_token,
+                append_bytes.as_ptr(),
+                append_bytes.len(),
+            );
+            assert!(wait_and_publish_pending_io());
+            assert_completion(&append_write, 0, 2);
+            let mut append_tell = Overlapped::default();
+            probe_seek_abi(&mut append_tell, append_token, 0, 1);
+            assert_completion(&append_tell, 0, 6);
+            probe_handle_close_abi(append_token);
+            assert_eq!(std::fs::read(&path).unwrap(), b"abcdxy");
+
+            let mut read_only = Overlapped::default();
+            probe_path_open_abi(&mut read_only, path_bytes.as_ptr(), path_bytes.len(), 0);
+            assert_completion(&read_only, 0, 6);
+            let mut denied_write = Overlapped::default();
+            probe_write(
+                &mut denied_write,
+                read_only.result_ext,
+                append_bytes.as_ptr(),
+                append_bytes.len(),
+            );
+            assert_completion(&denied_write, ERROR_BADF, 0);
+            probe_handle_close_abi(read_only.result_ext);
+
+            let mut bad_handle_read = Overlapped::default();
+            probe_read(&mut bad_handle_read, token, remaining.as_mut_ptr(), 1);
+            assert_completion(&bad_handle_read, ERROR_BADF, 0);
+            close_all_file_handles();
+            assert!((*state).file_handles.is_null());
+            let close = (*state).close_handle.unwrap();
+            assert_ne!(close((*state).completion_port), 0);
         }
     }
 }
