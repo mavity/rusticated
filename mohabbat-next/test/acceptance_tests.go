@@ -195,6 +195,8 @@ func fileIoScenarios() []fileIoScenario {
 		maxTransfer[i] = byte((i*37 + 11) & 0xff)
 	}
 	maxTransferHex := hex.EncodeToString(maxTransfer)
+	nearMaxTransfer := maxTransfer[:len(maxTransfer)-1]
+	nearMaxTransferHex := hex.EncodeToString(nearMaxTransfer)
 
 	return []fileIoScenario{
 		{
@@ -387,6 +389,289 @@ func fileIoScenarios() []fileIoScenario {
 			},
 			expectedFiles: map[string][]byte{},
 			expectedLines: []string{"0 OK open d", "1 OK close d"},
+		},
+		{
+			name: "create-existing-preserves-data",
+			args: []string{
+				"open", "f", "existing.bin", "rw", "create",
+				"read", "f", "3",
+				"close", "f",
+			},
+			initialFiles:  map[string][]byte{"existing.bin": []byte("old")},
+			expectedFiles: map[string][]byte{"existing.bin": []byte("old")},
+			expectedLines: []string{
+				"0 OK open f",
+				"1 OK read f bytes=3 eof=0 hex=6f6c64",
+				"2 OK close f",
+			},
+		},
+		{
+			name: "create-new-without-exclusive",
+			args: []string{
+				"open", "f", "created.bin", "rw", "create",
+				"write", "f", "6e6577",
+				"close", "f",
+			},
+			expectedFiles: map[string][]byte{"created.bin": []byte("new")},
+			expectedLines: []string{
+				"0 OK open f",
+				"1 OK write f bytes=3",
+				"2 OK close f",
+			},
+		},
+		{
+			name: "duplicate-handle-name-rejected",
+			args: []string{
+				"open", "f", "same.bin", "rw", "-",
+				"open", "f", "same.bin", "rw", "-",
+				"close", "f",
+			},
+			initialFiles:  map[string][]byte{"same.bin": []byte("same")},
+			expectedFiles: map[string][]byte{"same.bin": []byte("same")},
+			expectedLines: []string{
+				"0 OK open f",
+				"1 ERR open f error=20",
+				"2 OK close f",
+			},
+		},
+		{
+			name: "short-read-reports-eof",
+			args: []string{
+				"open", "f", "short.bin", "ro", "-",
+				"read", "f", "5",
+				"close", "f",
+			},
+			initialFiles:  map[string][]byte{"short.bin": []byte("abc")},
+			expectedFiles: map[string][]byte{"short.bin": []byte("abc")},
+			expectedLines: []string{
+				"0 OK open f",
+				"1 OK read f bytes=3 eof=1 hex=616263",
+				"2 OK close f",
+			},
+		},
+		{
+			name: "exact-read-does-not-report-eof",
+			args: []string{
+				"open", "f", "exact.bin", "ro", "-",
+				"read", "f", "3",
+				"close", "f",
+			},
+			initialFiles:  map[string][]byte{"exact.bin": []byte("abc")},
+			expectedFiles: map[string][]byte{"exact.bin": []byte("abc")},
+			expectedLines: []string{
+				"0 OK open f",
+				"1 OK read f bytes=3 eof=0 hex=616263",
+				"2 OK close f",
+			},
+		},
+		{
+			name: "positioned-read-at-eof-preserves-cursor",
+			args: []string{
+				"open", "f", "position.bin", "rw", "-",
+				"seek", "f", "start", "1",
+				"pread", "f", "9", "2",
+				"read", "f", "1",
+				"close", "f",
+			},
+			initialFiles:  map[string][]byte{"position.bin": []byte("abc")},
+			expectedFiles: map[string][]byte{"position.bin": []byte("abc")},
+			expectedLines: []string{
+				"0 OK open f",
+				"1 OK seek f position=1",
+				"2 OK pread f bytes=0 eof=1 hex=",
+				"3 OK read f bytes=1 eof=0 hex=62",
+				"4 OK close f",
+			},
+		},
+		{
+			name: "negative-relative-seek-rejected",
+			args: []string{
+				"open", "f", "seek.bin", "rw", "-",
+				"seek", "f", "start", "0",
+				"seek", "f", "current", "-1",
+				"seek", "f", "start", "0",
+				"read", "f", "3",
+				"close", "f",
+			},
+			initialFiles:  map[string][]byte{"seek.bin": []byte("abc")},
+			expectedFiles: map[string][]byte{"seek.bin": []byte("abc")},
+			expectedLines: []string{
+				"0 OK open f",
+				"1 OK seek f position=0",
+				"2 ERR seek f error=28",
+				"3 OK seek f position=0",
+				"4 OK read f bytes=3 eof=0 hex=616263",
+				"5 OK close f",
+			},
+		},
+		{
+			name: "seek-past-end-write-zero-fills-gap",
+			args: []string{
+				"open", "f", "sparse.bin", "rw", "-",
+				"seek", "f", "start", "5",
+				"write", "f", "5a",
+				"seek", "f", "start", "0",
+				"read", "f", "6",
+				"close", "f",
+			},
+			initialFiles:  map[string][]byte{"sparse.bin": []byte("abc")},
+			expectedFiles: map[string][]byte{"sparse.bin": []byte{'a', 'b', 'c', 0, 0, 'Z'}},
+			expectedLines: []string{
+				"0 OK open f",
+				"1 OK seek f position=5",
+				"2 OK write f bytes=1",
+				"3 OK seek f position=0",
+				"4 OK read f bytes=6 eof=0 hex=61626300005a",
+				"5 OK close f",
+			},
+		},
+		{
+			name: "negative-truncate-rejected",
+			args: []string{
+				"open", "f", "truncate.bin", "rw", "-",
+				"truncate", "f", "-1",
+				"close", "f",
+			},
+			initialFiles:  map[string][]byte{"truncate.bin": []byte("keep")},
+			expectedFiles: map[string][]byte{"truncate.bin": []byte("keep")},
+			expectedLines: []string{
+				"0 OK open f",
+				"1 ERR truncate f error=28",
+				"2 OK close f",
+			},
+		},
+		{
+			name: "close-twice-rejects-stale-handle",
+			args: []string{
+				"open", "f", "stale.bin", "ro", "-",
+				"close", "f",
+				"close", "f",
+			},
+			initialFiles:  map[string][]byte{"stale.bin": []byte("data")},
+			expectedFiles: map[string][]byte{"stale.bin": []byte("data")},
+			expectedLines: []string{
+				"0 OK open f",
+				"1 OK close f",
+				"2 ERR close f error=8",
+			},
+		},
+		{
+			name: "unknown-handle-rejected",
+			args: []string{
+				"close", "missing",
+				"open", "f", "known.bin", "ro", "-",
+				"close", "f",
+			},
+			initialFiles:  map[string][]byte{"known.bin": []byte("data")},
+			expectedFiles: map[string][]byte{"known.bin": []byte("data")},
+			expectedLines: []string{
+				"0 ERR close missing error=8",
+				"1 OK open f",
+				"2 OK close f",
+			},
+		},
+		{
+			name: "one-byte-transfer",
+			args: []string{
+				"open", "f", "one-byte.bin", "rw", "create,exclusive",
+				"write", "f", "ff",
+				"seek", "f", "start", "0",
+				"read", "f", "1",
+				"close", "f",
+			},
+			expectedFiles: map[string][]byte{"one-byte.bin": {0xff}},
+			expectedLines: []string{
+				"0 OK open f",
+				"1 OK write f bytes=1",
+				"2 OK seek f position=0",
+				"3 OK read f bytes=1 eof=0 hex=ff",
+				"4 OK close f",
+			},
+		},
+		{
+			name: "near-maximum-transfer-boundary",
+			args: []string{
+				"open", "f", "near-max.bin", "rw", "create,exclusive",
+				"write", "f", nearMaxTransferHex,
+				"seek", "f", "start", "0",
+				"read", "f", "4095",
+				"close", "f",
+			},
+			expectedFiles: map[string][]byte{"near-max.bin": nearMaxTransfer},
+			expectedLines: []string{
+				"0 OK open f",
+				"1 OK write f bytes=4095",
+				"2 OK seek f position=0",
+				"3 OK read f bytes=4095 eof=0 hex=" + nearMaxTransferHex,
+				"4 OK close f",
+			},
+		},
+		{
+			name: "path-with-spaces",
+			args: []string{
+				"open", "f", "file with spaces.bin", "rw", "create,exclusive",
+				"write", "f", "7370616365",
+				"close", "f",
+			},
+			expectedFiles: map[string][]byte{"file with spaces.bin": []byte("space")},
+			expectedLines: []string{
+				"0 OK open f",
+				"1 OK write f bytes=5",
+				"2 OK close f",
+			},
+		},
+		{
+			name: "append-multiple-writes-after-seek",
+			args: []string{
+				"open", "f", "append-multiple.bin", "rw", "append",
+				"seek", "f", "start", "0",
+				"write", "f", "41",
+				"write", "f", "42",
+				"close", "f",
+			},
+			initialFiles:  map[string][]byte{"append-multiple.bin": []byte("base")},
+			expectedFiles: map[string][]byte{"append-multiple.bin": []byte("baseAB")},
+			expectedLines: []string{
+				"0 OK open f",
+				"1 OK seek f position=0",
+				"2 OK write f bytes=1",
+				"3 OK write f bytes=1",
+				"4 OK close f",
+			},
+		},
+		{
+			name: "truncate-to-existing-length",
+			args: []string{
+				"open", "f", "same-length.bin", "rw", "-",
+				"truncate", "f", "4",
+				"seek", "f", "start", "0",
+				"read", "f", "4",
+				"close", "f",
+			},
+			initialFiles:  map[string][]byte{"same-length.bin": []byte("keep")},
+			expectedFiles: map[string][]byte{"same-length.bin": []byte("keep")},
+			expectedLines: []string{
+				"0 OK open f",
+				"1 OK truncate f",
+				"2 OK seek f position=0",
+				"3 OK read f bytes=4 eof=0 hex=6b656570",
+				"4 OK close f",
+			},
+		},
+		{
+			name: "truncate-shrinks-to-exact-length",
+			args: []string{
+				"open", "f", "shrink.bin", "rw", "-",
+				"truncate", "f", "3",
+				"close", "f",
+			},
+			initialFiles:  map[string][]byte{"shrink.bin": []byte("abcdef")},
+			expectedFiles: map[string][]byte{"shrink.bin": []byte("abc")},
+			expectedLines: []string{
+				"0 OK open f",
+				"1 OK truncate f",
+				"2 OK close f",
+			},
 		},
 	}
 }
