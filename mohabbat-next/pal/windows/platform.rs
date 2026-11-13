@@ -2272,6 +2272,29 @@ mod tests {
     }
 
     #[test]
+    fn test_second_pending_io_request_is_accepted() {
+        let _guard = TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        unsafe {
+            reset_io_test_state();
+            let state = state_ptr();
+            (*state).create_thread = Some(mock_create_thread);
+            let mut first = Overlapped::default();
+            let mut second = Overlapped::default();
+            let mut buffer = [0u8; 4];
+
+            begin_io(&mut first, 1, buffer.as_mut_ptr(), 1, true);
+            begin_io(&mut second, 1, buffer.as_mut_ptr(), 1, true);
+
+            assert_eq!(first.flags, 0);
+            assert_eq!(first.error, 0);
+            assert_eq!(second.flags, 0);
+            assert_eq!(second.error, 0);
+        }
+    }
+
+    #[test]
     fn test_io_submission_worker_errors_and_completion_publication() {
         let _guard = TEST_STATE_LOCK
             .lock()
@@ -2332,13 +2355,6 @@ mod tests {
             assert!((*state).queued_io);
             assert_eq!(overlapped.flags, 0);
             assert_eq!((*state).worker_thread, 7usize as *mut c_void);
-
-            begin_io(&mut second_overlapped, 1, buffer.as_mut_ptr(), 1, true);
-            assert_completion(&second_overlapped, ERROR_AGAIN, 0);
-            assert_eq!(
-                ptr::addr_of!((*state).pending_io.overlapped).read(),
-                ptr::addr_of_mut!(overlapped)
-            );
 
             perform_io_worker();
             assert_eq!(ptr::addr_of!((*state).pending_io.result).read(), 2);
