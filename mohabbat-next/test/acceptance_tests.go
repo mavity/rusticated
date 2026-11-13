@@ -22,7 +22,7 @@ var (
 	reVerifyComponents = regexp.MustCompile(`^Verified all six compressed components\.\n$`)
 	reEchoTranscript   = regexp.MustCompile(`^Mohabbat-next ready \(compiled [^\)]+\)\. Enter an empty line to exit\.\n> echo: alpha\n> echo: beta\n> $`)
 	reEmptyEOF         = regexp.MustCompile(`^Mohabbat-next ready \(compiled [^\)]+\)\. Enter an empty line to exit\.\n> $`)
-	reFileIoResult     = regexp.MustCompile(`^\d+ (OK|ERR) `)
+	reFileIoResult     = regexp.MustCompile(`^\d+(?:\.\d+)? (OK|ERR) `)
 )
 
 func runBundleCase(ctx context.Context, command string, args []string, stdinText string, expectedExit int, expectedRegex *regexp.Regexp) error {
@@ -197,6 +197,17 @@ func fileIoScenarios() []fileIoScenario {
 	maxTransferHex := hex.EncodeToString(maxTransfer)
 	nearMaxTransfer := maxTransfer[:len(maxTransfer)-1]
 	nearMaxTransferHex := hex.EncodeToString(nearMaxTransfer)
+	concurrentData := make([]byte, 64)
+	concurrentLines := []string{"0 OK open f"}
+	for i := range concurrentData {
+		concurrentData[i] = byte(i*29 + 7)
+		concurrentLines = append(concurrentLines, fmt.Sprintf(
+			"1.%d OK pread f bytes=1 eof=0 hex=%02x",
+			i,
+			concurrentData[i],
+		))
+	}
+	concurrentLines = append(concurrentLines, "2 OK close f")
 
 	return []fileIoScenario{
 		{
@@ -248,6 +259,17 @@ func fileIoScenarios() []fileIoScenario {
 				"3 OK read f bytes=4096 eof=0 hex=" + maxTransferHex,
 				"4 OK close f",
 			},
+		},
+		{
+			name: "simultaneous-64-positioned-reads",
+			args: []string{
+				"open", "f", "concurrent.bin", "ro", "-",
+				"pread-many", "f", "64",
+				"close", "f",
+			},
+			initialFiles:  map[string][]byte{"concurrent.bin": concurrentData},
+			expectedFiles: map[string][]byte{"concurrent.bin": concurrentData},
+			expectedLines: concurrentLines,
 		},
 		{
 			name: "missing-exclusive-and-open-truncate",
