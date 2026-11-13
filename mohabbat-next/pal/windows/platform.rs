@@ -228,11 +228,12 @@ enum IoKind {
     Stdio,
     FileRead,
     FileWrite,
+    FileSeek,
+    FileTruncate,
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
-struct PendingIo {
+struct IoOperation {
     native_overlapped: NativeOverlapped,
     overlapped: *mut Overlapped,
     handle: *mut c_void,
@@ -242,9 +243,17 @@ struct PendingIo {
     kind: IoKind,
     token: u64,
     file_offset: i64,
+    seek_offset: i64,
+    whence: u32,
     positional: bool,
+    immediate: bool,
     error: u32,
     result: u64,
+    worker_completion_ready: AtomicU32,
+    worker_thread: *mut c_void,
+    file: *mut FileHandle,
+    next: *mut IoOperation,
+    next_for_file: *mut IoOperation,
 }
 
 #[repr(C)]
@@ -255,6 +264,11 @@ struct FileHandle {
     access: u32,
     append: bool,
     next: *mut FileHandle,
+    closing: bool,
+    pending_operations: usize,
+    sequential_head: *mut IoOperation,
+    sequential_tail: *mut IoOperation,
+    sequential_active: bool,
 }
 
 #[repr(C)]
@@ -283,10 +297,7 @@ struct PlatformState {
     set_file_information_by_handle: Option<SetFileInformationByHandleFn>,
     file_handles: *mut FileHandle,
     next_file_token: u64,
-    worker_completion_ready: AtomicU32,
-    worker_thread: *mut c_void,
-    queued_io: bool,
-    pending_io: PendingIo,
+    io_operations: *mut IoOperation,
 }
 
 #[cfg(test)]
@@ -315,29 +326,7 @@ static mut TEST_STATE: PlatformState = PlatformState {
     set_file_information_by_handle: None,
     file_handles: ptr::null_mut(),
     next_file_token: 3,
-    worker_completion_ready: AtomicU32::new(0),
-    worker_thread: ptr::null_mut(),
-    queued_io: false,
-    pending_io: PendingIo {
-        native_overlapped: NativeOverlapped {
-            internal: 0,
-            internal_high: 0,
-            offset: 0,
-            offset_high: 0,
-            event: ptr::null_mut(),
-        },
-        overlapped: ptr::null_mut(),
-        handle: ptr::null_mut(),
-        buffer: ptr::null_mut(),
-        length: 0,
-        is_write: false,
-        kind: IoKind::None,
-        token: 0,
-        file_offset: 0,
-        positional: false,
-        error: 0,
-        result: 0,
-    },
+    io_operations: ptr::null_mut(),
 };
 
 const PREFIX_ABI_OFFSET: usize = 0x20000;
@@ -360,9 +349,9 @@ const ERROR_NOT_ENOUGH_MEMORY_CODE: u32 = 8;
 const ERROR_NO_UNICODE_TRANSLATION_CODE: u32 = 1113;
 const ERROR_OPERATION_ABORTED_CODE: u32 = 995;
 const WAIT_OBJECT_0: u32 = 0;
-const WAIT_TIMEOUT: u32 = 258;
 const INFINITE: u32 = u32::MAX;
 const STDIO_COMPLETION_KEY: usize = 0x535444494f;
+const IOCP_BATCH_SIZE: usize = 64;
 const CP_UTF8: u32 = 65001;
 const MB_ERR_INVALID_CHARS: u32 = 8;
 const GENERIC_READ: u32 = 0x8000_0000;
@@ -486,8 +475,8 @@ unsafe fn complete_io(ov: *mut Overlapped, error: u32, result: u64) {
     (*ov).flags = pal_abi::FLAG_COMPLETED;
 }
 
-const fn empty_pending_io() -> PendingIo {
-    PendingIo {
+fn empty_io_operation() -> IoOperation {
+    IoOperation {
         native_overlapped: NativeOverlapped {
             internal: 0,
             internal_high: 0,
@@ -503,21 +492,66 @@ const fn empty_pending_io() -> PendingIo {
         kind: IoKind::None,
         token: 0,
         file_offset: 0,
+        seek_offset: 0,
+        whence: 0,
         positional: false,
+        immediate: false,
         error: 0,
         result: 0,
+        worker_completion_ready: AtomicU32::new(0),
+        worker_thread: ptr::null_mut(),
+        file: ptr::null_mut(),
+        next: ptr::null_mut(),
+        next_for_file: ptr::null_mut(),
     }
 }
 
 unsafe fn find_file_handle(token: u64) -> *mut FileHandle {
     let mut handle = ptr::addr_of!((*state_ptr()).file_handles).read();
     while !handle.is_null() {
-        if (*handle).token == token {
+        if (*handle).token == token && !(*handle).closing {
             return handle;
         }
         handle = (*handle).next;
     }
     ptr::null_mut()
+}
+
+unsafe fn find_io_operation(native_overlapped: *mut c_void) -> *mut IoOperation {
+    let mut operation = ptr::addr_of!((*state_ptr()).io_operations).read();
+    while !operation.is_null() {
+        if ptr::addr_of_mut!((*operation).native_overlapped).cast() == native_overlapped {
+            return operation;
+        }
+        operation = (*operation).next;
+    }
+    ptr::null_mut()
+}
+
+unsafe fn allocate_io_operation() -> *mut IoOperation {
+    let state = state_ptr();
+    let (Some(alloc), Some(free)) = (
+        ptr::addr_of!((*state).alloc).read(),
+        ptr::addr_of!((*state).free).read(),
+    ) else {
+        return ptr::null_mut();
+    };
+    let operation = alloc(core::mem::size_of::<IoOperation>()).cast::<IoOperation>();
+    if operation.is_null() {
+        return ptr::null_mut();
+    }
+    operation.write(empty_io_operation());
+    if ptr::addr_of!((*state).free).read().is_none() {
+        free(operation.cast());
+        return ptr::null_mut();
+    }
+    operation
+}
+
+unsafe fn link_io_operation(operation: *mut IoOperation) {
+    let state = state_ptr();
+    (*operation).next = ptr::addr_of!((*state).io_operations).read();
+    ptr::addr_of_mut!((*state).io_operations).write(operation);
 }
 
 fn map_windows_error(error: u32) -> u32 {
@@ -537,11 +571,217 @@ fn map_windows_error(error: u32) -> u32 {
     }
 }
 
-unsafe fn reset_pending_io(state: *mut PlatformState) {
-    ptr::addr_of_mut!((*state).pending_io).write(empty_pending_io());
-    ptr::addr_of_mut!((*state).queued_io).write(false);
-    ptr::addr_of_mut!((*state).worker_thread).write(ptr::null_mut());
-    (*state).worker_completion_ready.store(0, Ordering::Relaxed);
+unsafe fn unlink_io_operation(operation: *mut IoOperation) {
+    let state = state_ptr();
+    let mut link = ptr::addr_of_mut!((*state).io_operations);
+    while !(*link).is_null() {
+        if *link == operation {
+            link.write((*operation).next);
+            return;
+        }
+        link = ptr::addr_of_mut!((*(*link)).next);
+    }
+    exit_process_impl(18);
+}
+
+unsafe fn free_io_operation(operation: *mut IoOperation) {
+    unlink_io_operation(operation);
+    if let Some(free) = ptr::addr_of!((*state_ptr()).free).read() {
+        free(operation.cast());
+    }
+}
+
+unsafe fn close_file_record(file: *mut FileHandle) {
+    let state = state_ptr();
+    if let Some(close) = ptr::addr_of!((*state).close_handle).read() {
+        let _ = close((*file).native_handle);
+    }
+    if let Some(free) = ptr::addr_of!((*state).free).read() {
+        free(file.cast());
+    }
+}
+
+unsafe fn release_file_reference(file: *mut FileHandle) {
+    if file.is_null() || (*file).pending_operations == 0 {
+        exit_process_impl(18);
+    }
+    (*file).pending_operations -= 1;
+    if (*file).closing && (*file).pending_operations == 0 {
+        close_file_record(file);
+    }
+}
+
+unsafe fn post_io_completion(operation: *mut IoOperation, key: usize) {
+    let state = state_ptr();
+    let port = ptr::addr_of!((*state).completion_port).read();
+    let Some(post) = ptr::addr_of!((*state).post_queued_completion_status).read() else {
+        exit_process_impl(16);
+    };
+    if port.is_null() {
+        exit_process_impl(16);
+    }
+    if post(
+        port,
+        0,
+        key,
+        ptr::addr_of_mut!((*operation).native_overlapped).cast(),
+    ) == 0
+    {
+        exit_process_impl(16);
+    }
+}
+
+unsafe fn dispatch_file_operation(operation: *mut IoOperation) {
+    let state = state_ptr();
+    let file = (*operation).file;
+    if file.is_null() || (*file).closing && (*file).pending_operations == 0 {
+        exit_process_impl(18);
+    }
+    if !(*operation).positional {
+        (*operation).file_offset = (*file).cursor;
+    }
+
+    match (*operation).kind {
+        IoKind::FileSeek => {
+            (*operation).immediate = true;
+            let base = match (*operation).whence {
+                0 => 0,
+                1 => (*file).cursor,
+                2 => {
+                    let Some(get_size) = ptr::addr_of!((*state).get_file_size_ex).read() else {
+                        (*operation).error = ERROR_IO;
+                        post_io_completion(operation, (*operation).token as usize);
+                        return;
+                    };
+                    let mut size = 0i64;
+                    if get_size((*file).native_handle, &mut size) == 0 {
+                        (*operation).error = ptr::addr_of!((*state).get_last_error)
+                            .read()
+                            .map(|get_last_error| map_windows_error(get_last_error()))
+                            .unwrap_or(ERROR_IO);
+                        post_io_completion(operation, (*operation).token as usize);
+                        return;
+                    }
+                    size
+                }
+                _ => {
+                    (*operation).error = ERROR_INVALID;
+                    post_io_completion(operation, (*operation).token as usize);
+                    return;
+                }
+            };
+            match base.checked_add((*operation).seek_offset) {
+                Some(position) if position >= 0 => (*operation).result = position as u64,
+                Some(_) => (*operation).error = ERROR_INVALID,
+                None => (*operation).error = pal_abi::ERROR_OVERFLOW,
+            }
+            post_io_completion(operation, (*operation).token as usize);
+            return;
+        }
+        IoKind::FileTruncate => {
+            (*operation).immediate = true;
+            let info = FileEndOfFileInfo {
+                end_of_file: (*operation).seek_offset,
+            };
+            let success = ptr::addr_of!((*state).set_file_information_by_handle)
+                .read()
+                .map(|set_info| {
+                    set_info(
+                        (*file).native_handle,
+                        FILE_END_OF_FILE_INFO_CLASS,
+                        (&info as *const FileEndOfFileInfo).cast(),
+                        core::mem::size_of::<FileEndOfFileInfo>() as u32,
+                    ) != 0
+                })
+                .unwrap_or(false);
+            if !success {
+                (*operation).error = ptr::addr_of!((*state).get_last_error)
+                    .read()
+                    .map(|get_last_error| map_windows_error(get_last_error()))
+                    .unwrap_or(ERROR_IO);
+            }
+            post_io_completion(operation, (*operation).token as usize);
+            return;
+        }
+        IoKind::FileRead | IoKind::FileWrite => {}
+        _ => exit_process_impl(18),
+    }
+
+    let append = (*operation).kind == IoKind::FileWrite && (*file).append;
+    (*operation).native_overlapped = NativeOverlapped {
+        internal: 0,
+        internal_high: 0,
+        offset: if append {
+            u32::MAX
+        } else {
+            (*operation).file_offset as u32
+        },
+        offset_high: if append {
+            u32::MAX
+        } else {
+            ((*operation).file_offset as u64 >> 32) as u32
+        },
+        event: ptr::null_mut(),
+    };
+    let mut transferred = 0u32;
+    let success = if (*operation).kind == IoKind::FileWrite {
+        ptr::addr_of!((*state).write_file)
+            .read()
+            .map(|write_file| {
+                write_file(
+                    (*operation).handle,
+                    (*operation).buffer.cast(),
+                    (*operation).length,
+                    &mut transferred,
+                    ptr::addr_of_mut!((*operation).native_overlapped).cast(),
+                ) != 0
+            })
+            .unwrap_or(false)
+    } else {
+        ptr::addr_of!((*state).read_file)
+            .read()
+            .map(|read_file| {
+                read_file(
+                    (*operation).handle,
+                    (*operation).buffer.cast(),
+                    (*operation).length,
+                    &mut transferred,
+                    ptr::addr_of_mut!((*operation).native_overlapped).cast(),
+                ) != 0
+            })
+            .unwrap_or(false)
+    };
+    if !success {
+        let error = ptr::addr_of!((*state).get_last_error)
+            .read()
+            .map(|get_last_error| get_last_error())
+            .unwrap_or(0);
+        if error != ERROR_IO_PENDING_CODE {
+            (*operation).error = map_windows_error(error);
+            (*operation).immediate = true;
+            post_io_completion(operation, (*operation).token as usize);
+        }
+    }
+}
+
+unsafe fn enqueue_file_operation(operation: *mut IoOperation) {
+    let file = (*operation).file;
+    if (*operation).positional {
+        dispatch_file_operation(operation);
+        return;
+    }
+    (*operation).next_for_file = ptr::null_mut();
+    let tail = (*file).sequential_tail;
+    if tail.is_null() {
+        ptr::addr_of_mut!((*file).sequential_head).write(operation);
+    } else {
+        ptr::addr_of_mut!((*tail).next_for_file).write(operation);
+    }
+    ptr::addr_of_mut!((*file).sequential_tail).write(operation);
+    if !(*file).sequential_active {
+        (*file).sequential_active = true;
+        dispatch_file_operation(operation);
+    }
 }
 
 unsafe fn begin_io(
@@ -573,43 +813,26 @@ unsafe fn begin_io(
         complete_io(ov, 0, 0);
         return;
     }
-    let create_thread = ptr::addr_of!((*state).create_thread).read();
-    let worker_thread = ptr::addr_of!((*state).worker_thread).read();
-    let queued_io = ptr::addr_of!((*state).queued_io).read();
-    let Some(create_thread) = create_thread else {
+    let Some(create_thread) = ptr::addr_of!((*state).create_thread).read() else {
         complete_io(ov, ERROR_IO, 0);
         return;
     };
-    if !worker_thread.is_null() || queued_io {
-        complete_io(ov, ERROR_AGAIN, 0);
+    let operation = allocate_io_operation();
+    if operation.is_null() {
+        complete_io(ov, pal_abi::ERROR_NOMEM, 0);
         return;
     }
-
     (*ov).flags = 0;
     (*ov).error = 0;
     (*ov).continued = 0;
     (*ov).result_ext = 0;
-    ptr::addr_of_mut!((*state).pending_io).write(PendingIo {
-        native_overlapped: NativeOverlapped {
-            internal: 0,
-            internal_high: 0,
-            offset: 0,
-            offset_high: 0,
-            event: ptr::null_mut(),
-        },
-        overlapped: ov,
-        handle: native_handle,
-        buffer,
-        length: length as u32,
-        is_write,
-        kind: IoKind::Stdio,
-        token: 0,
-        file_offset: 0,
-        positional: false,
-        error: 0,
-        result: 0,
-    });
-    (*state).worker_completion_ready.store(0, Ordering::Relaxed);
+    (*operation).overlapped = ov;
+    (*operation).handle = native_handle;
+    (*operation).buffer = buffer;
+    (*operation).length = length as u32;
+    (*operation).is_write = is_write;
+    (*operation).kind = IoKind::Stdio;
+    link_io_operation(operation);
     #[cfg(target_arch = "x86_64")]
     let start = run_io_worker as unsafe extern "win64" fn(*mut c_void) -> u32;
     #[cfg(target_arch = "aarch64")]
@@ -618,16 +841,15 @@ unsafe fn begin_io(
         ptr::null_mut(),
         0,
         Some(start),
-        ptr::null_mut(),
+        operation.cast(),
         0,
         ptr::null_mut(),
     );
     if thread.is_null() {
-        reset_pending_io(state);
+        free_io_operation(operation);
         complete_io(ov, ERROR_AGAIN, 0);
     } else {
-        ptr::addr_of_mut!((*state).worker_thread).write(thread);
-        ptr::addr_of_mut!((*state).queued_io).write(true);
+        (*operation).worker_thread = thread;
     }
 }
 
@@ -642,7 +864,6 @@ unsafe fn begin_file_io(
         complete_io(ov, ERROR_INVALID, 0);
         return;
     }
-    let state = state_ptr();
     let file = find_file_handle(token);
     if file.is_null() {
         complete_io(ov, ERROR_BADF, 0);
@@ -655,10 +876,6 @@ unsafe fn begin_file_io(
     }
     if length == 0 {
         complete_io(ov, 0, 0);
-        return;
-    }
-    if ptr::addr_of!((*state).queued_io).read() {
-        complete_io(ov, ERROR_AGAIN, 0);
         return;
     }
     let positional = !is_write && (*ov).flags & pal_abi::READ_FLAG_POSITIONAL != 0;
@@ -680,83 +897,36 @@ unsafe fn begin_file_io(
         complete_io(ov, ERROR_INVALID, 0);
         return;
     }
-    let native_handle = ptr::addr_of!((*file).native_handle).read();
-    let native_overlapped = NativeOverlapped {
-        internal: 0,
-        internal_high: 0,
-        offset: if is_write && (*file).append {
-            u32::MAX
-        } else {
-            file_offset as u32
-        },
-        offset_high: if is_write && (*file).append {
-            u32::MAX
-        } else {
-            (file_offset as u64 >> 32) as u32
-        },
-        event: ptr::null_mut(),
-    };
+    if (*file).pending_operations == usize::MAX {
+        complete_io(ov, pal_abi::ERROR_OVERFLOW, 0);
+        return;
+    }
+    let operation = allocate_io_operation();
+    if operation.is_null() {
+        complete_io(ov, pal_abi::ERROR_NOMEM, 0);
+        return;
+    }
     (*ov).flags = 0;
     (*ov).error = 0;
     (*ov).continued = 0;
     (*ov).result_ext = 0;
-    ptr::addr_of_mut!((*state).pending_io).write(PendingIo {
-        native_overlapped,
-        overlapped: ov,
-        handle: native_handle,
-        buffer,
-        length: length as u32,
-        is_write,
-        kind: if is_write {
-            IoKind::FileWrite
-        } else {
-            IoKind::FileRead
-        },
-        token,
-        file_offset,
-        positional,
-        error: 0,
-        result: 0,
-    });
-    ptr::addr_of_mut!((*state).queued_io).write(true);
-    let mut transferred = 0u32;
-    let ok = if is_write {
-        match ptr::addr_of!((*state).write_file).read() {
-            Some(write_file) => {
-                write_file(
-                    native_handle,
-                    buffer.cast(),
-                    length as u32,
-                    &mut transferred,
-                    ptr::addr_of_mut!((*state).pending_io.native_overlapped).cast(),
-                ) != 0
-            }
-            None => false,
-        }
+    (*operation).overlapped = ov;
+    (*operation).handle = ptr::addr_of!((*file).native_handle).read();
+    (*operation).buffer = buffer;
+    (*operation).length = length as u32;
+    (*operation).is_write = is_write;
+    (*operation).kind = if is_write {
+        IoKind::FileWrite
     } else {
-        match ptr::addr_of!((*state).read_file).read() {
-            Some(read_file) => {
-                read_file(
-                    native_handle,
-                    buffer.cast(),
-                    length as u32,
-                    &mut transferred,
-                    ptr::addr_of_mut!((*state).pending_io.native_overlapped).cast(),
-                ) != 0
-            }
-            None => false,
-        }
+        IoKind::FileRead
     };
-    if !ok {
-        let error = match ptr::addr_of!((*state).get_last_error).read() {
-            Some(get_last_error) => get_last_error(),
-            None => 0,
-        };
-        if error != ERROR_IO_PENDING_CODE {
-            reset_pending_io(state);
-            complete_io(ov, map_windows_error(error), 0);
-        }
-    }
+    (*operation).token = token;
+    (*operation).file_offset = file_offset;
+    (*operation).positional = positional;
+    (*operation).file = file;
+    (*file).pending_operations += 1;
+    link_io_operation(operation);
+    enqueue_file_operation(operation);
 }
 
 #[repr(C)]
@@ -979,6 +1149,11 @@ unsafe fn probe_path_open(ov: *mut Overlapped, path: *const u8, path_length: usi
         access,
         append: flags & ABI_O_APPEND != 0,
         next: ptr::addr_of!((*state).file_handles).read(),
+        closing: false,
+        pending_operations: 0,
+        sequential_head: ptr::null_mut(),
+        sequential_tail: ptr::null_mut(),
+        sequential_active: false,
     });
     ptr::addr_of_mut!((*state).file_handles).write(file);
     ptr::addr_of_mut!((*state).next_file_token).write(after_token);
@@ -995,37 +1170,29 @@ unsafe fn probe_seek(ov: *mut Overlapped, token: u64, offset: i64, whence: u32) 
         complete_io(ov, ERROR_BADF, 0);
         return;
     }
-    let base = match whence {
-        0 => 0,
-        1 => (*file).cursor,
-        _ => {
-            let state = state_ptr();
-            let Some(get_size) = ptr::addr_of!((*state).get_file_size_ex).read() else {
-                complete_io(ov, ERROR_IO, 0);
-                return;
-            };
-            let mut size = 0i64;
-            if get_size((*file).native_handle, &mut size) == 0 {
-                let error = ptr::addr_of!((*state).get_last_error)
-                    .read()
-                    .map(|get_last_error| map_windows_error(get_last_error()))
-                    .unwrap_or(ERROR_IO);
-                complete_io(ov, error, 0);
-                return;
-            }
-            size
-        }
-    };
-    let Some(position) = base.checked_add(offset) else {
+    if (*file).pending_operations == usize::MAX {
         complete_io(ov, pal_abi::ERROR_OVERFLOW, 0);
         return;
-    };
-    if position < 0 {
-        complete_io(ov, ERROR_INVALID, 0);
+    }
+    let operation = allocate_io_operation();
+    if operation.is_null() {
+        complete_io(ov, pal_abi::ERROR_NOMEM, 0);
         return;
     }
-    (*file).cursor = position;
-    complete_io(ov, 0, position as u64);
+    (*ov).flags = 0;
+    (*ov).error = 0;
+    (*ov).continued = 0;
+    (*ov).result_ext = 0;
+    (*operation).overlapped = ov;
+    (*operation).handle = (*file).native_handle;
+    (*operation).kind = IoKind::FileSeek;
+    (*operation).token = token;
+    (*operation).seek_offset = offset;
+    (*operation).whence = whence;
+    (*operation).file = file;
+    (*file).pending_operations += 1;
+    link_io_operation(operation);
+    enqueue_file_operation(operation);
 }
 
 #[repr(C)]
@@ -1047,27 +1214,28 @@ unsafe fn probe_handle_truncate(ov: *mut Overlapped, token: u64, size: i64) {
         complete_io(ov, ERROR_BADF, 0);
         return;
     }
-    let state = state_ptr();
-    let Some(set_info) = ptr::addr_of!((*state).set_file_information_by_handle).read() else {
-        complete_io(ov, ERROR_IO, 0);
+    if (*file).pending_operations == usize::MAX {
+        complete_io(ov, pal_abi::ERROR_OVERFLOW, 0);
         return;
-    };
-    let info = FileEndOfFileInfo { end_of_file: size };
-    if set_info(
-        (*file).native_handle,
-        FILE_END_OF_FILE_INFO_CLASS,
-        (&info as *const FileEndOfFileInfo).cast(),
-        core::mem::size_of::<FileEndOfFileInfo>() as u32,
-    ) == 0
-    {
-        let error = ptr::addr_of!((*state).get_last_error)
-            .read()
-            .map(|get_last_error| map_windows_error(get_last_error()))
-            .unwrap_or(ERROR_IO);
-        complete_io(ov, error, 0);
-    } else {
-        complete_io(ov, 0, 0);
     }
+    let operation = allocate_io_operation();
+    if operation.is_null() {
+        complete_io(ov, pal_abi::ERROR_NOMEM, 0);
+        return;
+    }
+    (*ov).flags = 0;
+    (*ov).error = 0;
+    (*ov).continued = 0;
+    (*ov).result_ext = 0;
+    (*operation).overlapped = ov;
+    (*operation).handle = (*file).native_handle;
+    (*operation).kind = IoKind::FileTruncate;
+    (*operation).token = token;
+    (*operation).seek_offset = size;
+    (*operation).file = file;
+    (*file).pending_operations += 1;
+    link_io_operation(operation);
+    enqueue_file_operation(operation);
 }
 
 unsafe fn probe_handle_close(token: u64) {
@@ -1076,15 +1244,11 @@ unsafe fn probe_handle_close(token: u64) {
     while !link.read().is_null() {
         let file = link.read();
         if (*file).token == token {
-            let Some(close) = ptr::addr_of!((*state).close_handle).read() else {
-                return;
-            };
-            if close((*file).native_handle) == 0 {
-                return;
-            }
             link.write((*file).next);
-            if let Some(free) = ptr::addr_of!((*state).free).read() {
-                free(file.cast());
+            (*file).next = ptr::null_mut();
+            (*file).closing = true;
+            if (*file).pending_operations == 0 {
+                close_file_record(file);
             }
             return;
         }
@@ -1092,20 +1256,19 @@ unsafe fn probe_handle_close(token: u64) {
     }
 }
 
-unsafe fn perform_io_worker() -> u32 {
+unsafe fn perform_io_worker(operation: *mut IoOperation) -> u32 {
     let state = state_ptr();
-    let request = ptr::addr_of!((*state).pending_io).read();
     let read_file = ptr::addr_of!((*state).read_file).read();
     let write_file = ptr::addr_of!((*state).write_file).read();
     let get_last_error = ptr::addr_of!((*state).get_last_error).read();
     let mut transferred = 0u32;
-    let ok = if request.is_write {
+    let ok = if (*operation).is_write {
         match write_file {
             Some(write_file) => {
                 write_file(
-                    request.handle,
-                    request.buffer.cast(),
-                    request.length,
+                    (*operation).handle,
+                    (*operation).buffer.cast(),
+                    (*operation).length,
                     &mut transferred,
                     ptr::null_mut(),
                 ) != 0
@@ -1116,9 +1279,9 @@ unsafe fn perform_io_worker() -> u32 {
         match read_file {
             Some(read_file) => {
                 read_file(
-                    request.handle,
-                    request.buffer.cast(),
-                    request.length,
+                    (*operation).handle,
+                    (*operation).buffer.cast(),
+                    (*operation).length,
                     &mut transferred,
                     ptr::null_mut(),
                 ) != 0
@@ -1133,7 +1296,7 @@ unsafe fn perform_io_worker() -> u32 {
             Some(get_last_error) => get_last_error(),
             None => 0,
         };
-        if !request.is_write && error == ERROR_BROKEN_PIPE {
+        if !(*operation).is_write && error == ERROR_BROKEN_PIPE {
             (0, 0)
         } else if error == ERROR_BROKEN_PIPE || error == ERROR_NO_DATA {
             (ERROR_PIPE, 0)
@@ -1145,31 +1308,18 @@ unsafe fn perform_io_worker() -> u32 {
             (ERROR_IO, 0)
         }
     };
-    ptr::addr_of_mut!((*state).pending_io.error).write(error);
-    ptr::addr_of_mut!((*state).pending_io.result).write(result);
-    (*state).worker_completion_ready.store(1, Ordering::Release);
-    let port = ptr::addr_of!((*state).completion_port).read();
-    let post = ptr::addr_of!((*state).post_queued_completion_status).read();
-    if port.is_null() {
-        return 1;
-    }
-    if let Some(post) = post {
-        if post(
-            port,
-            0,
-            STDIO_COMPLETION_KEY,
-            ptr::addr_of_mut!((*state).pending_io.native_overlapped).cast(),
-        ) != 0
-        {
-            return 0;
-        }
-    }
-    1
+    (*operation).error = error;
+    (*operation).result = result;
+    (*operation)
+        .worker_completion_ready
+        .store(1, Ordering::Release);
+    post_io_completion(operation, STDIO_COMPLETION_KEY);
+    0
 }
 
 #[cfg(target_arch = "x86_64")]
-unsafe extern "win64" fn run_io_worker(_context: *mut c_void) -> u32 {
-    let status = perform_io_worker();
+unsafe extern "win64" fn run_io_worker(context: *mut c_void) -> u32 {
+    let status = perform_io_worker(context.cast());
     if status != 0 {
         exit_process_impl(16);
     }
@@ -1177,8 +1327,8 @@ unsafe extern "win64" fn run_io_worker(_context: *mut c_void) -> u32 {
 }
 
 #[cfg(target_arch = "aarch64")]
-unsafe extern "C" fn run_io_worker(_context: *mut c_void) -> u32 {
-    let status = perform_io_worker();
+unsafe extern "C" fn run_io_worker(context: *mut c_void) -> u32 {
+    let status = perform_io_worker(context.cast());
     if status != 0 {
         exit_process_impl(16);
     }
@@ -1293,133 +1443,172 @@ unsafe extern "C" fn pal_abi_unsupported_exit(status: i32) -> ! {
     exit_process_impl(status)
 }
 
-unsafe fn publish_pending_io() {
+unsafe fn publish_one_io_completion(entry: OverlappedEntry) -> bool {
     let state = state_ptr();
-    let pending = ptr::addr_of!((*state).pending_io).read();
-    complete_io(pending.overlapped, pending.error, pending.result);
-    reset_pending_io(state);
+    let operation = find_io_operation(entry.overlapped);
+    if operation.is_null() {
+        return false;
+    }
+
+    let mut error = (*operation).error;
+    let mut result = (*operation).result;
+    if (*operation).kind == IoKind::Stdio {
+        if entry.completion_key != STDIO_COMPLETION_KEY
+            || entry.internal != 0
+            || (*operation)
+                .worker_completion_ready
+                .load(Ordering::Acquire)
+                != 1
+        {
+            return false;
+        }
+        let (Some(wait), Some(close)) = (
+            ptr::addr_of!((*state).wait_for_single_object).read(),
+            ptr::addr_of!((*state).close_handle).read(),
+        ) else {
+            return false;
+        };
+        let thread = (*operation).worker_thread;
+        if thread.is_null() || wait(thread, INFINITE) != WAIT_OBJECT_0 || close(thread) == 0 {
+            return false;
+        }
+        (*operation).worker_thread = ptr::null_mut();
+    } else {
+        if entry.completion_key != (*operation).token as usize {
+            return false;
+        }
+        if !(*operation).immediate {
+            let Some(get_result) = ptr::addr_of!((*state).get_overlapped_result).read() else {
+                return false;
+            };
+            let mut transferred = 0u32;
+            let succeeded = get_result(
+                (*operation).handle,
+                ptr::addr_of_mut!((*operation).native_overlapped).cast(),
+                &mut transferred,
+                0,
+            ) != 0;
+            if succeeded {
+                if entry.bytes_transferred != transferred {
+                    error = ERROR_IO;
+                    result = 0;
+                } else {
+                    error = 0;
+                    result = transferred as u64;
+                }
+            } else {
+                let os_error = ptr::addr_of!((*state).get_last_error)
+                    .read()
+                    .map(|get_last_error| get_last_error())
+                    .unwrap_or(0);
+                if (*operation).kind == IoKind::FileRead && os_error == ERROR_HANDLE_EOF_CODE {
+                    error = 0;
+                    result = 0;
+                } else {
+                    error = map_windows_error(os_error);
+                    result = 0;
+                }
+            }
+        }
+
+        let file = (*operation).file;
+        if error == 0 && !file.is_null() {
+            if (*operation).kind == IoKind::FileSeek {
+                (*file).cursor = result as i64;
+            } else if !(*operation).positional
+                && ((*operation).kind == IoKind::FileRead
+                    || (*operation).kind == IoKind::FileWrite)
+            {
+                let cursor = if (*operation).kind == IoKind::FileWrite && (*file).append {
+                    let mut size = 0i64;
+                    match ptr::addr_of!((*state).get_file_size_ex).read() {
+                        Some(get_size) if get_size((*file).native_handle, &mut size) != 0 => size,
+                        _ => match (*operation)
+                            .file_offset
+                            .checked_add(result as i64)
+                        {
+                            Some(position) => position,
+                            None => {
+                                error = pal_abi::ERROR_OVERFLOW;
+                                0
+                            }
+                        },
+                    }
+                } else {
+                    match (*operation).file_offset.checked_add(result as i64) {
+                        Some(position) => position,
+                        None => {
+                            error = pal_abi::ERROR_OVERFLOW;
+                            0
+                        }
+                    }
+                };
+                if error == 0 {
+                    (*file).cursor = cursor;
+                }
+            }
+        }
+    }
+
+    let file = (*operation).file;
+    if !file.is_null() && !(*operation).positional {
+        if (*file).sequential_head != operation {
+            return false;
+        }
+        let next = (*operation).next_for_file;
+        (*file).sequential_head = next;
+        if next.is_null() {
+            (*file).sequential_tail = ptr::null_mut();
+            (*file).sequential_active = false;
+        } else {
+            dispatch_file_operation(next);
+        }
+    }
+    complete_io((*operation).overlapped, error, result);
+    free_io_operation(operation);
+    if !file.is_null() {
+        release_file_reference(file);
+    }
+    true
 }
 
 unsafe fn wait_and_publish_pending_io() -> bool {
     let state = state_ptr();
     let port = ptr::addr_of!((*state).completion_port).read();
-    let get_completion = ptr::addr_of!((*state).get_queued_completion_status_ex).read();
-    let wait = ptr::addr_of!((*state).wait_for_single_object).read();
-    let close = ptr::addr_of!((*state).close_handle).read();
-    let thread = ptr::addr_of!((*state).worker_thread).read();
-    let pending = ptr::addr_of!((*state).pending_io).read();
-    let Some(get_completion) = get_completion else {
+    let Some(get_completion) = ptr::addr_of!((*state).get_queued_completion_status_ex).read()
+    else {
         return false;
     };
-    if port.is_null() || pending.kind == IoKind::None {
+    if port.is_null() {
         return false;
     }
-
-    let mut entry = OverlappedEntry {
+    let mut entries = [OverlappedEntry {
         completion_key: 0,
         overlapped: ptr::null_mut(),
         internal: 0,
         bytes_transferred: 0,
-    };
-    loop {
-        let mut removed = 0u32;
-        if get_completion(port, &mut entry, 1, &mut removed, INFINITE, 0) != 0 {
-            if removed != 1
-                || entry.overlapped
-                    != ptr::addr_of_mut!((*state).pending_io.native_overlapped).cast()
-            {
-                return false;
-            }
-            break;
-        }
-        return false;
-    }
-
-    if pending.kind == IoKind::Stdio {
-        if entry.completion_key != STDIO_COMPLETION_KEY
-            || entry.internal != 0
-            || (*state).worker_completion_ready.load(Ordering::Acquire) != 1
-        {
-            return false;
-        }
-        let (Some(wait), Some(close)) = (wait, close) else {
-            return false;
-        };
-        if thread.is_null() || wait(thread, INFINITE) != WAIT_OBJECT_0 {
-            if !thread.is_null() {
-                close(thread);
-            }
-            return false;
-        }
-        if close(thread) == 0 {
-            return false;
-        }
-        publish_pending_io();
-        return true;
-    }
-
-    if pending.kind != IoKind::FileRead && pending.kind != IoKind::FileWrite
-        || entry.completion_key != pending.token as usize
-        || !thread.is_null()
+    }; IOCP_BATCH_SIZE];
+    let mut removed = 0u32;
+    if get_completion(
+        port,
+        entries.as_mut_ptr(),
+        IOCP_BATCH_SIZE as u32,
+        &mut removed,
+        INFINITE,
+        0,
+    ) == 0
+        || removed == 0
+        || removed as usize > IOCP_BATCH_SIZE
     {
         return false;
     }
-    let Some(get_result) = ptr::addr_of!((*state).get_overlapped_result).read() else {
-        return false;
-    };
-    let mut transferred = 0u32;
-    let succeeded = get_result(
-        pending.handle,
-        ptr::addr_of_mut!((*state).pending_io.native_overlapped).cast(),
-        &mut transferred,
-        0,
-    ) != 0;
-    let (error, result) = if succeeded {
-        if entry.bytes_transferred != transferred {
-            (ERROR_IO, 0)
-        } else {
-            (0, transferred as u64)
-        }
-    } else {
-        let error = ptr::addr_of!((*state).get_last_error)
-            .read()
-            .map(|get_last_error| get_last_error())
-            .unwrap_or(0);
-        if pending.kind == IoKind::FileRead && error == ERROR_HANDLE_EOF_CODE {
-            (0, 0)
-        } else {
-            (map_windows_error(error), 0)
-        }
-    };
-    if error == 0 {
-        let file = find_file_handle(pending.token);
-        if file.is_null() {
+    let mut index = 0usize;
+    while index < removed as usize {
+        if !publish_one_io_completion(entries.as_ptr().add(index).read()) {
             return false;
         }
-        if !pending.positional {
-            let new_cursor = if pending.kind == IoKind::FileWrite && (*file).append {
-                let mut size = 0i64;
-                match ptr::addr_of!((*state).get_file_size_ex).read() {
-                    Some(get_size) if get_size((*file).native_handle, &mut size) != 0 => size,
-                    _ => pending.file_offset.saturating_add(transferred as i64),
-                }
-            } else {
-                match pending.file_offset.checked_add(transferred as i64) {
-                    Some(position) => position,
-                    None => {
-                        ptr::addr_of_mut!((*state).pending_io.error).write(pal_abi::ERROR_OVERFLOW);
-                        ptr::addr_of_mut!((*state).pending_io.result).write(0);
-                        publish_pending_io();
-                        return true;
-                    }
-                }
-            };
-            ptr::addr_of_mut!((*file).cursor).write(new_cursor);
-        }
+        index += 1;
     }
-    ptr::addr_of_mut!((*state).pending_io.error).write(error);
-    ptr::addr_of_mut!((*state).pending_io.result).write(result);
-    publish_pending_io();
     true
 }
 
@@ -1612,10 +1801,7 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
             set_file_information_by_handle,
             file_handles: ptr::null_mut(),
             next_file_token: 3,
-            worker_completion_ready: AtomicU32::new(0),
-            worker_thread: ptr::null_mut(),
-            queued_io: false,
-            pending_io: empty_pending_io(),
+            io_operations: ptr::null_mut(),
         },
     );
     let mut abi = pal_abi_stubs::for_payload(probe_read, probe_write, exit_process);
@@ -1628,12 +1814,7 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
     loop {
         invoke_raw_entry(payload_code);
         let state = state_ptr();
-        let queued_io = ptr::addr_of!((*state).queued_io).read();
-        let thread = ptr::addr_of!((*state).worker_thread).read();
-        if !queued_io {
-            if !thread.is_null() {
-                exit_process_impl(16);
-            }
+        if ptr::addr_of!((*state).io_operations).read().is_null() {
             close_all_file_handles();
             if close_handle(completion_port) == 0 {
                 exit_process_impl(16);
@@ -1833,10 +2014,7 @@ mod tests {
             ),
             file_handles: ptr::null_mut(),
             next_file_token: 3,
-            worker_completion_ready: AtomicU32::new(0),
-            worker_thread: ptr::null_mut(),
-            queued_io: false,
-            pending_io: empty_pending_io(),
+            io_operations: ptr::null_mut(),
         });
     }
 
@@ -1932,6 +2110,7 @@ mod tests {
         completion_success: i32,
         completion_error: u32,
         completion_count: u32,
+        completion_entries: [OverlappedEntry; IOCP_BATCH_SIZE],
         posted_key: usize,
         posted_overlapped: *mut c_void,
         post_success: i32,
@@ -1956,11 +2135,54 @@ mod tests {
         completion_success: 1,
         completion_error: 0,
         completion_count: 0,
+        completion_entries: [OverlappedEntry {
+            completion_key: 0,
+            overlapped: ptr::null_mut(),
+            internal: 0,
+            bytes_transferred: 0,
+        }; IOCP_BATCH_SIZE],
         posted_key: 0,
         posted_overlapped: ptr::null_mut(),
         post_success: 1,
         post_calls: 0,
     };
+    static mut TEST_HEAP: [usize; 1024] = [0; 1024];
+    static mut TEST_HEAP_USED: usize = 0;
+
+    unsafe fn scripted_alloc_impl(size: usize) -> *mut c_void {
+        let alignment = core::mem::align_of::<usize>();
+        let start = (TEST_HEAP_USED + alignment - 1) & !(alignment - 1);
+        let Some(end) = start.checked_add(size) else {
+            return ptr::null_mut();
+        };
+        if end > core::mem::size_of::<[usize; 1024]>() {
+            return ptr::null_mut();
+        }
+        TEST_HEAP_USED = end;
+        ptr::addr_of_mut!(TEST_HEAP).cast::<u8>().add(start).cast()
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe extern "win64" fn scripted_alloc(size: usize) -> *mut c_void {
+        scripted_alloc_impl(size)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    unsafe extern "C" fn scripted_alloc(size: usize) -> *mut c_void {
+        scripted_alloc_impl(size)
+    }
+
+    unsafe fn scripted_free_impl(_address: *mut c_void) {}
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe extern "win64" fn scripted_free(address: *mut c_void) {
+        scripted_free_impl(address)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    unsafe extern "C" fn scripted_free(address: *mut c_void) {
+        scripted_free_impl(address)
+    }
 
     unsafe fn scripted_read_file_impl(
         _handle: *mut c_void,
@@ -2062,7 +2284,7 @@ mod tests {
         alertable: i32,
     ) -> i32 {
         assert_eq!(port, 8usize as *mut c_void);
-        assert_eq!(count, 1);
+        assert!(count > 0);
         assert_eq!(timeout, INFINITE);
         assert_eq!(alertable, 0);
         let io = &mut *ptr::addr_of_mut!(TEST_IO);
@@ -2072,18 +2294,21 @@ mod tests {
             return 0;
         }
         if io.completion_count == 0 {
-            io.last_error = WAIT_TIMEOUT;
             removed.write(0);
             return 0;
         }
-        io.completion_count -= 1;
-        entries.write(OverlappedEntry {
-            completion_key: io.posted_key,
-            overlapped: io.posted_overlapped,
-            internal: 0,
-            bytes_transferred: 0,
-        });
-        removed.write(1);
+        let completed = core::cmp::min(count as usize, io.completion_count as usize);
+        ptr::copy_nonoverlapping(io.completion_entries.as_ptr(), entries, completed);
+        let remaining = io.completion_count as usize - completed;
+        if remaining > 0 {
+            ptr::copy(
+                io.completion_entries.as_ptr().add(completed),
+                io.completion_entries.as_mut_ptr(),
+                remaining,
+            );
+        }
+        io.completion_count = remaining as u32;
+        removed.write(completed as u32);
         1
     }
 
@@ -2123,6 +2348,16 @@ mod tests {
         io.posted_key = key;
         io.posted_overlapped = overlapped;
         if io.post_success != 0 {
+            if io.completion_count as usize == IOCP_BATCH_SIZE {
+                return 0;
+            }
+            let index = io.completion_count as usize;
+            io.completion_entries[index] = OverlappedEntry {
+                completion_key: key,
+                overlapped,
+                internal: 0,
+                bytes_transferred: 0,
+            };
             io.completion_count += 1;
         }
         io.post_success
@@ -2183,12 +2418,13 @@ mod tests {
     }
 
     unsafe fn reset_io_test_state() {
+        TEST_HEAP_USED = 0;
         ptr::addr_of_mut!(TEST_STATE).write(PlatformState {
             input_handle: 1usize as *mut c_void,
             output_handle: 2usize as *mut c_void,
             error_handle: ptr::null_mut(),
-            alloc: None,
-            free: None,
+            alloc: Some(scripted_alloc),
+            free: Some(scripted_free),
             read_file: Some(scripted_read_file),
             write_file: Some(scripted_write_file),
             get_last_error: Some(scripted_get_last_error),
@@ -2208,10 +2444,7 @@ mod tests {
             set_file_information_by_handle: None,
             file_handles: ptr::null_mut(),
             next_file_token: 3,
-            worker_completion_ready: AtomicU32::new(0),
-            worker_thread: ptr::null_mut(),
-            queued_io: false,
-            pending_io: empty_pending_io(),
+            io_operations: ptr::null_mut(),
         });
         ptr::addr_of_mut!(TEST_IO).write(ScriptedIo {
             read_success: 1,
@@ -2231,6 +2464,12 @@ mod tests {
             completion_success: 1,
             completion_error: 0,
             completion_count: 0,
+            completion_entries: [OverlappedEntry {
+                completion_key: 0,
+                overlapped: ptr::null_mut(),
+                internal: 0,
+                bytes_transferred: 0,
+            }; IOCP_BATCH_SIZE],
             posted_key: 0,
             posted_overlapped: ptr::null_mut(),
             post_success: 1,
@@ -2258,7 +2497,7 @@ mod tests {
         assert_eq!(offset_of!(WindowsPlatformHost, argv), 48);
         assert_eq!(offset_of!(WindowsPlatformHost, argc), 56);
         assert_eq!(size_of::<NativeOverlapped>(), 32);
-        assert_eq!(offset_of!(PendingIo, native_overlapped), 0);
+        assert_eq!(offset_of!(IoOperation, native_overlapped), 0);
         assert!(size_of::<PlatformState>() <= 0x10000);
     }
 
@@ -2283,6 +2522,7 @@ mod tests {
             let mut first = Overlapped::default();
             let mut second = Overlapped::default();
             let mut buffer = [0u8; 4];
+            (*ptr::addr_of_mut!(TEST_IO)).write_transferred = 1;
 
             begin_io(&mut first, 1, buffer.as_mut_ptr(), 1, true);
             begin_io(&mut second, 1, buffer.as_mut_ptr(), 1, true);
@@ -2291,6 +2531,25 @@ mod tests {
             assert_eq!(first.error, 0);
             assert_eq!(second.flags, 0);
             assert_eq!(second.error, 0);
+            let first_operation = (*state).io_operations;
+            assert!(!first_operation.is_null());
+            let second_operation = (*first_operation).next;
+            assert!(!second_operation.is_null());
+            assert_ne!(
+                ptr::addr_of_mut!((*first_operation).native_overlapped),
+                ptr::addr_of_mut!((*second_operation).native_overlapped)
+            );
+            assert_eq!(perform_io_worker(first_operation), 0);
+            assert_eq!(perform_io_worker(second_operation), 0);
+            assert_eq!((*ptr::addr_of!(TEST_IO)).completion_count, 2);
+
+            assert!(wait_and_publish_pending_io());
+            assert_completion(&first, 0, 1);
+            assert_completion(&second, 0, 1);
+            assert!((*state).io_operations.is_null());
+            assert_eq!((*ptr::addr_of!(TEST_IO)).write_calls, 2);
+            assert_eq!((*ptr::addr_of!(TEST_IO)).wait_calls, 2);
+            assert_eq!((*ptr::addr_of!(TEST_IO)).close_calls, 2);
         }
     }
 
@@ -2303,12 +2562,6 @@ mod tests {
             reset_io_test_state();
             let state = state_ptr();
             let mut overlapped = Overlapped::default();
-            let mut second_overlapped = Overlapped {
-                flags: 99,
-                error: 88,
-                continued: 77,
-                result_ext: 66,
-            };
             let mut buffer = [0u8; 4];
 
             overlapped.continued = 17;
@@ -2319,14 +2572,6 @@ mod tests {
             begin_io(&mut overlapped, 1, ptr::null_mut(), 1, true);
             assert_completion(&overlapped, ERROR_INVALID, 0);
 
-            begin_io(
-                &mut overlapped,
-                u32::MAX as usize as u64 + 1,
-                buffer.as_mut_ptr(),
-                1,
-                true,
-            );
-            assert_completion(&overlapped, ERROR_BADF, 0);
             begin_io(&mut overlapped, 3, buffer.as_mut_ptr(), 1, true);
             assert_completion(&overlapped, ERROR_BADF, 0);
             begin_io(&mut overlapped, 1, buffer.as_mut_ptr(), 1, false);
@@ -2343,62 +2588,47 @@ mod tests {
 
             begin_io(&mut overlapped, 1, buffer.as_mut_ptr(), 1, true);
             assert_completion(&overlapped, ERROR_IO, 0);
+            assert!((*state).io_operations.is_null());
 
             (*state).create_thread = Some(fail_create_thread);
             begin_io(&mut overlapped, 1, buffer.as_mut_ptr(), 1, true);
             assert_completion(&overlapped, ERROR_AGAIN, 0);
-            assert!(!(*state).queued_io);
+            assert!((*state).io_operations.is_null());
 
             (*state).create_thread = Some(mock_create_thread);
             (*ptr::addr_of_mut!(TEST_IO)).write_transferred = 2;
             begin_io(&mut overlapped, 1, buffer.as_mut_ptr(), buffer.len(), true);
-            assert!((*state).queued_io);
+            let operation = (*state).io_operations;
+            assert!(!operation.is_null());
             assert_eq!(overlapped.flags, 0);
-            assert_eq!((*state).worker_thread, 7usize as *mut c_void);
+            assert_eq!((*operation).worker_thread, 7usize as *mut c_void);
 
-            perform_io_worker();
-            assert_eq!(ptr::addr_of!((*state).pending_io.result).read(), 2);
-            assert_eq!((*state).worker_completion_ready.load(Ordering::Acquire), 1);
+            assert_eq!(perform_io_worker(operation), 0);
+            assert_eq!((*operation).result, 2);
+            assert_eq!((*operation).worker_completion_ready.load(Ordering::Acquire), 1);
             assert_eq!((*ptr::addr_of!(TEST_IO)).post_calls, 1);
             assert_eq!((*ptr::addr_of!(TEST_IO)).posted_key, STDIO_COMPLETION_KEY);
             assert_eq!(
                 (*ptr::addr_of!(TEST_IO)).posted_overlapped,
-                ptr::addr_of_mut!((*state).pending_io.native_overlapped).cast()
+                ptr::addr_of_mut!((*operation).native_overlapped).cast()
             );
             assert_eq!(overlapped.flags, 0);
             assert!(wait_and_publish_pending_io());
             assert_completion(&overlapped, 0, 2);
-            assert!(!(*state).queued_io);
-            assert!((*state).worker_thread.is_null());
-            assert!(ptr::addr_of!((*state).pending_io.overlapped)
-                .read()
-                .is_null());
+            assert!((*state).io_operations.is_null());
             assert_eq!((*ptr::addr_of!(TEST_IO)).write_calls, 1);
             assert_eq!((*ptr::addr_of!(TEST_IO)).write_length, 4);
             assert_eq!((*ptr::addr_of!(TEST_IO)).post_calls, 1);
             assert_eq!((*ptr::addr_of!(TEST_IO)).wait_calls, 1);
             assert_eq!((*ptr::addr_of!(TEST_IO)).close_calls, 1);
 
-            second_overlapped = Overlapped::default();
+            let mut second_overlapped = Overlapped::default();
             (*ptr::addr_of_mut!(TEST_IO)).write_transferred = 1;
             begin_io(&mut second_overlapped, 1, buffer.as_mut_ptr(), 1, true);
-            assert!((*state).queued_io);
-            perform_io_worker();
+            assert_eq!(perform_io_worker((*state).io_operations), 0);
             assert!(wait_and_publish_pending_io());
             assert_completion(&second_overlapped, 0, 1);
             assert_eq!((*ptr::addr_of!(TEST_IO)).write_calls, 2);
-
-            overlapped = Overlapped {
-                flags: 91,
-                error: 92,
-                continued: 93,
-                result_ext: 94,
-            };
-            publish_pending_io();
-            assert_eq!(overlapped.flags, 91);
-            assert_eq!(overlapped.error, 92);
-            assert_eq!(overlapped.continued, 93);
-            assert_eq!(overlapped.result_ext, 94);
 
             reset_io_test_state();
             let state = state_ptr();
@@ -2412,7 +2642,7 @@ mod tests {
                 read_buffer.len(),
                 false,
             );
-            perform_io_worker();
+            assert_eq!(perform_io_worker((*state).io_operations), 0);
             assert_eq!(read_buffer, *b"OK");
             assert!(wait_and_publish_pending_io());
             assert_completion(&overlapped, 0, 2);
@@ -2438,58 +2668,10 @@ mod tests {
                 }
                 let handle = if is_write { 1 } else { 0 };
                 begin_io(&mut overlapped, handle, buffer.as_mut_ptr(), 1, is_write);
-                perform_io_worker();
+                assert_eq!(perform_io_worker((*state).io_operations), 0);
                 assert!(wait_and_publish_pending_io());
                 assert_completion(&overlapped, expected_error, 0);
             }
-
-            reset_io_test_state();
-            let state = state_ptr();
-            (*state).create_thread = Some(mock_create_thread);
-            (*ptr::addr_of_mut!(TEST_IO)).wait_result = u32::MAX;
-            begin_io(&mut overlapped, 0, buffer.as_mut_ptr(), 1, false);
-            perform_io_worker();
-            assert!(!wait_and_publish_pending_io());
-            assert_eq!(overlapped.flags, 0);
-            assert!(ptr::addr_of!((*state).queued_io).read());
-            assert_eq!(
-                ptr::addr_of!((*state).pending_io.overlapped).read(),
-                ptr::addr_of_mut!(overlapped)
-            );
-            assert_eq!((*ptr::addr_of!(TEST_IO)).wait_calls, 1);
-            assert_eq!((*ptr::addr_of!(TEST_IO)).close_calls, 1);
-
-            reset_io_test_state();
-            let state = state_ptr();
-            (*state).create_thread = Some(mock_create_thread);
-            begin_io(&mut overlapped, 0, buffer.as_mut_ptr(), 1, false);
-            perform_io_worker();
-            (*ptr::addr_of_mut!(TEST_IO)).posted_key = 0;
-            assert!(!wait_and_publish_pending_io());
-            assert_eq!(overlapped.flags, 0);
-            assert!(ptr::addr_of!((*state).queued_io).read());
-
-            reset_io_test_state();
-            let state = state_ptr();
-            (*state).create_thread = Some(mock_create_thread);
-            (*ptr::addr_of_mut!(TEST_IO)).post_success = 0;
-            begin_io(&mut overlapped, 0, buffer.as_mut_ptr(), 1, false);
-            assert_eq!(perform_io_worker(), 1);
-            assert_eq!(overlapped.flags, 0);
-            assert!(ptr::addr_of!((*state).queued_io).read());
-            assert_eq!((*ptr::addr_of!(TEST_IO)).post_calls, 1);
-            assert_eq!((*ptr::addr_of!(TEST_IO)).completion_count, 0);
-
-            reset_io_test_state();
-            let state = state_ptr();
-            (*state).create_thread = Some(mock_create_thread);
-            (*state).wait_for_single_object = None;
-            begin_io(&mut overlapped, 0, buffer.as_mut_ptr(), 1, false);
-            perform_io_worker();
-            assert!(!wait_and_publish_pending_io());
-            assert_eq!(overlapped.flags, 0);
-            assert!(ptr::addr_of!((*state).queued_io).read());
-            assert_eq!((*ptr::addr_of!(TEST_IO)).close_calls, 0);
         }
     }
 
@@ -2574,13 +2756,65 @@ mod tests {
             probe_handle_close_abi(directory_open.result_ext);
 
             let contents = *b"abcdef";
-            let mut written = Overlapped::default();
-            probe_write(&mut written, token, contents.as_ptr(), contents.len());
-            assert!(wait_and_publish_pending_io());
-            assert_completion(&written, 0, contents.len() as u64);
+            let mut first_write = Overlapped::default();
+            let mut second_write = Overlapped::default();
+            probe_write(&mut first_write, token, contents.as_ptr(), 3);
+            probe_write(&mut second_write, token, contents.as_ptr().add(3), 3);
+            assert_eq!(first_write.flags, 0);
+            assert_eq!(second_write.flags, 0);
+            while first_write.flags != pal_abi::FLAG_COMPLETED
+                || second_write.flags != pal_abi::FLAG_COMPLETED
+            {
+                assert!(wait_and_publish_pending_io());
+            }
+            assert_completion(&first_write, 0, 3);
+            assert_completion(&second_write, 0, 3);
+
+            #[repr(C)]
+            #[derive(Clone, Copy)]
+            struct ConcurrentRead {
+                overlapped: Overlapped,
+                offset: i64,
+            }
+            let mut concurrent_reads = [ConcurrentRead {
+                overlapped: Overlapped {
+                    flags: pal_abi::READ_FLAG_POSITIONAL,
+                    ..Overlapped::default()
+                },
+                offset: 0,
+            }; 64];
+            let mut concurrent_buffers = [[0u8; 2]; 64];
+            for index in 0..concurrent_reads.len() {
+                let offset = (index % 5) as i64;
+                concurrent_reads[index].offset = offset;
+                probe_read(
+                    &mut concurrent_reads[index].overlapped,
+                    token,
+                    concurrent_buffers[index].as_mut_ptr(),
+                    concurrent_buffers[index].len(),
+                );
+            }
+            assert!(concurrent_reads.iter().all(|read| read.overlapped.flags == 0));
+            let mut completed = 0usize;
+            while completed < concurrent_reads.len() {
+                assert!(wait_and_publish_pending_io());
+                completed = concurrent_reads
+                    .iter()
+                    .filter(|read| read.overlapped.flags == pal_abi::FLAG_COMPLETED)
+                    .count();
+            }
+            for index in 0..concurrent_reads.len() {
+                let offset = concurrent_reads[index].offset as usize;
+                assert_completion(&concurrent_reads[index].overlapped, 0, 2);
+                assert_eq!(
+                    concurrent_buffers[index],
+                    contents[offset..offset + 2]
+                );
+            }
 
             let mut seek = Overlapped::default();
             probe_seek_abi(&mut seek, token, 0, 0);
+            assert!(wait_and_publish_pending_io());
             assert_completion(&seek, 0, 0);
             let mut first_read = [0u8; 2];
             let mut read = Overlapped::default();
@@ -2614,6 +2848,7 @@ mod tests {
 
             let mut tell = Overlapped::default();
             probe_seek_abi(&mut tell, token, 0, 1);
+            assert!(wait_and_publish_pending_io());
             assert_completion(&tell, 0, 2);
             let mut remaining = [0u8; 8];
             let mut read_remaining = Overlapped::default();
@@ -2633,9 +2868,11 @@ mod tests {
 
             let mut truncated = Overlapped::default();
             probe_handle_truncate_abi(&mut truncated, token, 4);
+            assert!(wait_and_publish_pending_io());
             assert_completion(&truncated, 0, 0);
             let mut seek_end = Overlapped::default();
             probe_seek_abi(&mut seek_end, token, 0, 2);
+            assert!(wait_and_publish_pending_io());
             assert_completion(&seek_end, 0, 4);
             probe_handle_close_abi(token);
             assert!(find_file_handle(token).is_null());
@@ -2661,6 +2898,7 @@ mod tests {
             assert_completion(&append_write, 0, 2);
             let mut append_tell = Overlapped::default();
             probe_seek_abi(&mut append_tell, append_token, 0, 1);
+            assert!(wait_and_publish_pending_io());
             assert_completion(&append_tell, 0, 6);
             probe_handle_close_abi(append_token);
             assert_eq!(std::fs::read(&path).unwrap(), b"abcdxy");

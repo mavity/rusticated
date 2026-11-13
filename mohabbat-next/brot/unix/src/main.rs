@@ -7,7 +7,7 @@ extern crate alloc;
 mod allocator;
 mod decompress;
 
-#[cfg(all(not(test), target_os = "linux"))]
+#[cfg(target_os = "linux")]
 mod linux;
 
 #[cfg(all(not(test), target_os = "macos"))]

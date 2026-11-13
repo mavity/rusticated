@@ -205,7 +205,7 @@ pub unsafe fn run(argc: i32, argv: *const *const u8) -> ! {
     let guest_argv = argv.add(guest_args_idx);
     let guest_argc = argc - guest_args_idx;
 
-    if plat_len == 0 || plat_len > 8192 || hello_len == 0 || hello_len > 65536 {
+    if plat_len == 0 || plat_len > 12 * 1024 || hello_len == 0 || hello_len > 65536 {
         exit(106);
     }
 
@@ -216,7 +216,7 @@ pub unsafe fn run(argc: i32, argv: *const *const u8) -> ! {
     }
 
     // Read compressed platform
-    let mut comp_plat = [0u8; 8192];
+    let mut comp_plat = [0u8; 12 * 1024];
     if lseek(fd, plat_off, 0) < 0 {
         exit(108);
     }
@@ -253,7 +253,7 @@ pub unsafe fn run(argc: i32, argv: *const *const u8) -> ! {
     close(fd);
 
     // 4. Decompress components
-    let mut dec_plat = [0u8; 8192];
+    let mut dec_plat = [0u8; 12 * 1024];
     let plat_decompressed_len =
         match crate::decompress::decompress(&comp_plat[..plat_len], &mut dec_plat) {
             Ok(n) => n,

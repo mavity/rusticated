@@ -70,12 +70,54 @@ type PthreadCreateFn = unsafe extern "C" fn(
     *mut c_void,
 ) -> i32;
 type PthreadJoinFn = unsafe extern "C" fn(usize, *mut *mut c_void) -> i32;
+type PthreadMutexInitFn = unsafe extern "C" fn(*mut c_void, *const c_void) -> i32;
+type PthreadMutexDestroyFn = unsafe extern "C" fn(*mut c_void) -> i32;
+type PthreadMutexLockFn = unsafe extern "C" fn(*mut c_void) -> i32;
+type PthreadMutexUnlockFn = unsafe extern "C" fn(*mut c_void) -> i32;
+type PthreadCondInitFn = unsafe extern "C" fn(*mut c_void, *const c_void) -> i32;
+type PthreadCondDestroyFn = unsafe extern "C" fn(*mut c_void) -> i32;
+type PthreadCondWaitFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
+type PthreadCondSignalFn = unsafe extern "C" fn(*mut c_void) -> i32;
+type PthreadCondBroadcastFn = unsafe extern "C" fn(*mut c_void) -> i32;
+
+const IO_WORKER_COUNT: usize = 4;
+
+#[repr(C, align(16))]
+struct PthreadSyncStorage {
+    words: [u64; 8],
+}
+
+impl PthreadSyncStorage {
+    const fn new() -> Self {
+        Self { words: [0; 8] }
+    }
+}
+
+#[repr(C)]
+struct IoSequence {
+    head: *mut IoOperation,
+    tail: *mut IoOperation,
+    active: bool,
+}
+
+impl IoSequence {
+    const fn empty() -> Self {
+        Self {
+            head: ptr::null_mut(),
+            tail: ptr::null_mut(),
+            active: false,
+        }
+    }
+}
 
 #[repr(C)]
 struct FileHandle {
     token: u64,
     fd: i32,
     next: *mut FileHandle,
+    references: usize,
+    closing: bool,
+    sequence: IoSequence,
 }
 
 #[repr(C)]
@@ -93,7 +135,7 @@ pub struct UnixPlatformHost {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 enum IoKind {
     Read,
@@ -106,7 +148,10 @@ enum IoKind {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct PendingIo {
+struct IoOperation {
+    active_next: *mut IoOperation,
+    queue_next: *mut IoOperation,
+    sequence_next: *mut IoOperation,
     overlapped: *mut Overlapped,
     kind: IoKind,
     fd: i32,
@@ -116,6 +161,23 @@ struct PendingIo {
     whence: i32,
     error: u32,
     result: u64,
+    file_handle: *mut FileHandle,
+    sequence: *mut IoSequence,
+}
+
+#[repr(C)]
+struct IoWorker {
+    thread: usize,
+    started: bool,
+}
+
+impl IoWorker {
+    const fn empty() -> Self {
+        Self {
+            thread: 0,
+            started: false,
+        }
+    }
 }
 
 #[repr(C)]
@@ -135,9 +197,29 @@ struct PlatformState {
     errno_location: Option<ErrnoLocationFn>,
     pthread_create: Option<PthreadCreateFn>,
     pthread_join: Option<PthreadJoinFn>,
-    worker_thread: usize,
-    queued_io: bool,
-    pending_io: PendingIo,
+    pthread_mutex_init: Option<PthreadMutexInitFn>,
+    pthread_mutex_destroy: Option<PthreadMutexDestroyFn>,
+    pthread_mutex_lock: Option<PthreadMutexLockFn>,
+    pthread_mutex_unlock: Option<PthreadMutexUnlockFn>,
+    pthread_cond_init: Option<PthreadCondInitFn>,
+    pthread_cond_destroy: Option<PthreadCondDestroyFn>,
+    pthread_cond_wait: Option<PthreadCondWaitFn>,
+    pthread_cond_signal: Option<PthreadCondSignalFn>,
+    pthread_cond_broadcast: Option<PthreadCondBroadcastFn>,
+    queue_mutex: PthreadSyncStorage,
+    work_ready: PthreadSyncStorage,
+    completion_ready: PthreadSyncStorage,
+    synchronization_initialized: bool,
+    stopping_workers: bool,
+    workers: [IoWorker; IO_WORKER_COUNT],
+    worker_count: usize,
+    active_operations: *mut IoOperation,
+    active_count: usize,
+    work_head: *mut IoOperation,
+    work_tail: *mut IoOperation,
+    completion_head: *mut IoOperation,
+    completion_tail: *mut IoOperation,
+    standard_sequences: [IoSequence; 3],
     free: Option<FreeFn>,
     payload_alloc: *mut c_void,
     payload_total_size: usize,
@@ -160,19 +242,33 @@ static mut TEST_STATE: PlatformState = PlatformState {
     errno_location: None,
     pthread_create: None,
     pthread_join: None,
-    worker_thread: 0,
-    queued_io: false,
-    pending_io: PendingIo {
-        overlapped: ptr::null_mut(),
-        kind: IoKind::Read,
-        fd: 0,
-        buffer: ptr::null_mut(),
-        length: 0,
-        offset: 0,
-        whence: 0,
-        error: 0,
-        result: 0,
-    },
+    pthread_mutex_init: None,
+    pthread_mutex_destroy: None,
+    pthread_mutex_lock: None,
+    pthread_mutex_unlock: None,
+    pthread_cond_init: None,
+    pthread_cond_destroy: None,
+    pthread_cond_wait: None,
+    pthread_cond_signal: None,
+    pthread_cond_broadcast: None,
+    queue_mutex: PthreadSyncStorage::new(),
+    work_ready: PthreadSyncStorage::new(),
+    completion_ready: PthreadSyncStorage::new(),
+    synchronization_initialized: false,
+    stopping_workers: false,
+    workers: [const { IoWorker::empty() }; IO_WORKER_COUNT],
+    worker_count: 0,
+    active_operations: ptr::null_mut(),
+    active_count: 0,
+    work_head: ptr::null_mut(),
+    work_tail: ptr::null_mut(),
+    completion_head: ptr::null_mut(),
+    completion_tail: ptr::null_mut(),
+    standard_sequences: [
+        IoSequence::empty(),
+        IoSequence::empty(),
+        IoSequence::empty(),
+    ],
     free: None,
     payload_alloc: ptr::null_mut(),
     payload_total_size: 0,
@@ -327,84 +423,183 @@ unsafe fn complete_io(ov: *mut Overlapped, error: u32, result: u64) {
     (*ov).flags = pal_abi::FLAG_COMPLETED;
 }
 
+unsafe fn find_file_handle(handle: u64) -> *mut FileHandle {
+    let mut entry = state_mut().file_handles;
+    while !entry.is_null() {
+        if (*entry).token == handle {
+            return entry;
+        }
+        entry = (*entry).next;
+    }
+    ptr::null_mut()
+}
+
 unsafe fn resolve_handle(handle: u64) -> Option<i32> {
     if handle <= 2 {
         return Some(handle as i32);
     }
-    let mut entry = state_mut().file_handles;
-    while !entry.is_null() {
-        if (*entry).token == handle {
-            return Some((*entry).fd);
-        }
-        entry = (*entry).next;
-    }
-    None
-}
-
-unsafe fn release_pending_resources(request: PendingIo) {
-    if let (IoKind::Open, Some(free)) = (request.kind, state_mut().libc_free) {
-        if !request.buffer.is_null() {
-            free(request.buffer);
-        }
+    let file = find_file_handle(handle);
+    if file.is_null() {
+        None
+    } else {
+        Some((*file).fd)
     }
 }
 
-unsafe fn reset_pending_io(state: *mut PlatformState) {
-    ptr::addr_of_mut!((*state).worker_thread).write(0);
-    ptr::addr_of_mut!((*state).queued_io).write(false);
-    ptr::addr_of_mut!((*state).pending_io).write(PendingIo {
-        overlapped: ptr::null_mut(),
-        kind: IoKind::Read,
-        fd: 0,
-        buffer: ptr::null_mut(),
-        length: 0,
-        offset: 0,
-        whence: 0,
-        error: 0,
-        result: 0,
-    });
+unsafe fn release_operation_resources(operation: *mut IoOperation) {
+    let state = state_ptr();
+    if (*operation).kind == IoKind::Open {
+        if let Some(free) = ptr::addr_of!((*state).libc_free).read() {
+            if !(*operation).buffer.is_null() {
+                free((*operation).buffer);
+            }
+        }
+    }
 }
 
-unsafe fn submit_io(ov: *mut Overlapped, request: PendingIo) {
+unsafe fn queue_lock(state: *mut PlatformState) {
+    if (*state).synchronization_initialized {
+        if let Some(lock) = (*state).pthread_mutex_lock {
+            if lock(ptr::addr_of_mut!((*state).queue_mutex).cast()) != 0 {
+                terminate_after_worker_failure(17);
+            }
+        }
+    }
+}
+
+unsafe fn queue_unlock(state: *mut PlatformState) {
+    if (*state).synchronization_initialized {
+        if let Some(unlock) = (*state).pthread_mutex_unlock {
+            if unlock(ptr::addr_of_mut!((*state).queue_mutex).cast()) != 0 {
+                terminate_after_worker_failure(17);
+            }
+        }
+    }
+}
+
+unsafe fn enqueue_work(state: *mut PlatformState, operation: *mut IoOperation) {
+    (*operation).queue_next = ptr::null_mut();
+    queue_lock(state);
+    let tail = ptr::addr_of!((*state).work_tail).read();
+    if tail.is_null() {
+        ptr::addr_of_mut!((*state).work_head).write(operation);
+    } else {
+        ptr::addr_of_mut!((*tail).queue_next).write(operation);
+    }
+    ptr::addr_of_mut!((*state).work_tail).write(operation);
+    if (*state).synchronization_initialized {
+        if let Some(signal) = (*state).pthread_cond_signal {
+            if signal(ptr::addr_of_mut!((*state).work_ready).cast()) != 0 {
+                queue_unlock(state);
+                terminate_after_worker_failure(17);
+            }
+        }
+    }
+    queue_unlock(state);
+}
+
+unsafe fn append_sequence(sequence: *mut IoSequence, operation: *mut IoOperation) -> bool {
+    (*operation).sequence_next = ptr::null_mut();
+    if (*sequence).tail.is_null() {
+        (*sequence).head = operation;
+    } else {
+        (*(*sequence).tail).sequence_next = operation;
+    }
+    (*sequence).tail = operation;
+    if (*sequence).active {
+        false
+    } else {
+        (*sequence).active = true;
+        true
+    }
+}
+
+unsafe fn submit_io(ov: *mut Overlapped, request: IoOperation) {
     if ov.is_null() {
-        release_pending_resources(request);
+        if request.kind == IoKind::Open {
+            if let Some(free) = state_mut().libc_free {
+                if !request.buffer.is_null() {
+                    free(request.buffer);
+                }
+            }
+        }
         return;
     }
     let state = state_ptr();
-    let create = ptr::addr_of!((*state).pthread_create).read();
-    let thread_active = ptr::addr_of!((*state).worker_thread).read() != 0;
-    let queued_io = ptr::addr_of!((*state).queued_io).read();
-    let Some(create) = create else {
-        release_pending_resources(request);
+    let Some(malloc) = ptr::addr_of!((*state).malloc).read() else {
+        if request.kind == IoKind::Open {
+            if let Some(free) = ptr::addr_of!((*state).libc_free).read() {
+                if !request.buffer.is_null() {
+                    free(request.buffer);
+                }
+            }
+        }
         complete_io(ov, ERROR_IO, 0);
         return;
     };
-    if thread_active || queued_io {
-        release_pending_resources(request);
-        complete_io(ov, ERROR_AGAIN, 0);
+    let operation = malloc(core::mem::size_of::<IoOperation>()).cast::<IoOperation>();
+    if operation.is_null() {
+        if request.kind == IoKind::Open {
+            if let Some(free) = ptr::addr_of!((*state).libc_free).read() {
+                if !request.buffer.is_null() {
+                    free(request.buffer);
+                }
+            }
+        }
+        complete_io(ov, ERROR_NOMEM, 0);
         return;
+    }
+    operation.write(request);
+    (*operation).overlapped = ov;
+
+    let mut active = ptr::addr_of!((*state).active_operations).read();
+    while !active.is_null() {
+        if (*active).overlapped == ov {
+            release_operation_resources(operation);
+            if let Some(free) = ptr::addr_of!((*state).libc_free).read() {
+                free(operation.cast());
+            }
+            terminate_after_worker_failure(18);
+        }
+        active = (*active).active_next;
+    }
+    let Some(active_count) = ptr::addr_of!((*state).active_count).read().checked_add(1) else {
+        release_operation_resources(operation);
+        if let Some(free) = ptr::addr_of!((*state).libc_free).read() {
+            free(operation.cast());
+        }
+        complete_io(ov, ERROR_OVERFLOW, 0);
+        return;
+    };
+    if !(*operation).file_handle.is_null()
+        && (*(*operation).file_handle).references == usize::MAX
+    {
+        release_operation_resources(operation);
+        if let Some(free) = ptr::addr_of!((*state).libc_free).read() {
+            free(operation.cast());
+        }
+        complete_io(ov, ERROR_OVERFLOW, 0);
+        return;
+    }
+    (*operation).active_next = ptr::addr_of!((*state).active_operations).read();
+    ptr::addr_of_mut!((*state).active_operations).write(operation);
+    ptr::addr_of_mut!((*state).active_count).write(active_count);
+    if !(*operation).file_handle.is_null() {
+        (*(*operation).file_handle).references =
+            (*(*operation).file_handle).references + 1;
     }
 
     (*ov).flags = 0;
     (*ov).error = 0;
     (*ov).continued = 0;
     (*ov).result_ext = 0;
-    ptr::addr_of_mut!((*state).pending_io).write(request);
-    ptr::addr_of_mut!((*state).pending_io.overlapped).write(ov);
-    let mut thread = 0usize;
-    let status = create(
-        &mut thread,
-        ptr::null(),
-        Some(run_io_worker),
-        ptr::null_mut(),
-    );
-    if status != 0 || thread == 0 {
-        release_pending_resources(request);
-        reset_pending_io(state);
-        complete_io(ov, ERROR_AGAIN, 0);
+
+    if !(*operation).sequence.is_null() {
+        if append_sequence((*operation).sequence, operation) {
+            enqueue_work(state, operation);
+        }
     } else {
-        ptr::addr_of_mut!((*state).worker_thread).write(thread);
-        ptr::addr_of_mut!((*state).queued_io).write(true);
+        enqueue_work(state, operation);
     }
 }
 
@@ -419,11 +614,17 @@ unsafe fn begin_io(
         complete_io(ov, ERROR_INVALID, 0);
         return;
     }
+    let file_handle = if handle > 2 {
+        find_file_handle(handle)
+    } else {
+        ptr::null_mut()
+    };
     let standard_fd = match (handle, is_write) {
         (0, false) => Some(0),
         (1 | 2, true) => Some(handle as i32),
         (0..=2, _) => None,
-        _ => resolve_handle(handle),
+        _ if !file_handle.is_null() => Some((*file_handle).fd),
+        _ => None,
     };
     let Some(fd) = standard_fd else {
         complete_io(ov, ERROR_BADF, 0);
@@ -434,7 +635,7 @@ unsafe fn begin_io(
         return;
     }
     let positional = !is_write && (*ov).flags & pal_abi::READ_FLAG_POSITIONAL != 0;
-    let (kind, offset) = if positional {
+    let (kind, offset, sequence) = if positional {
         if handle <= 2 {
             complete_io(ov, ERROR_SPIPE, 0);
             return;
@@ -453,15 +654,28 @@ unsafe fn begin_io(
             complete_io(ov, ERROR_INVALID, 0);
             return;
         }
-        (IoKind::PositionalRead, offset)
+        (IoKind::PositionalRead, offset, ptr::null_mut())
     } else if is_write {
-        (IoKind::Write, 0)
+        let sequence = if handle <= 2 {
+            ptr::addr_of_mut!((*state_ptr()).standard_sequences[handle as usize])
+        } else {
+            ptr::addr_of_mut!((*file_handle).sequence)
+        };
+        (IoKind::Write, 0, sequence)
     } else {
-        (IoKind::Read, 0)
+        let sequence = if handle <= 2 {
+            ptr::addr_of_mut!((*state_ptr()).standard_sequences[handle as usize])
+        } else {
+            ptr::addr_of_mut!((*file_handle).sequence)
+        };
+        (IoKind::Read, 0, sequence)
     };
     submit_io(
         ov,
-        PendingIo {
+        IoOperation {
+            active_next: ptr::null_mut(),
+            queue_next: ptr::null_mut(),
+            sequence_next: ptr::null_mut(),
             overlapped: ov,
             kind,
             fd,
@@ -471,6 +685,8 @@ unsafe fn begin_io(
             whence: 0,
             error: 0,
             result: 0,
+            file_handle,
+            sequence,
         },
     );
 }
@@ -480,22 +696,28 @@ unsafe fn begin_seek(ov: *mut Overlapped, handle: u64, offset: i64, whence: u32)
         complete_io(ov, ERROR_INVALID, 0);
         return;
     }
-    let Some(fd) = resolve_handle(handle) else {
+    let file_handle = find_file_handle(handle);
+    if file_handle.is_null() {
         complete_io(ov, ERROR_BADF, 0);
         return;
-    };
+    }
     submit_io(
         ov,
-        PendingIo {
+        IoOperation {
+            active_next: ptr::null_mut(),
+            queue_next: ptr::null_mut(),
+            sequence_next: ptr::null_mut(),
             overlapped: ov,
             kind: IoKind::Seek,
-            fd,
+            fd: (*file_handle).fd,
             buffer: ptr::null_mut(),
             length: 0,
             offset,
             whence: whence as i32,
             error: 0,
             result: 0,
+            file_handle,
+            sequence: ptr::addr_of_mut!((*file_handle).sequence),
         },
     );
 }
@@ -505,22 +727,28 @@ unsafe fn begin_truncate(ov: *mut Overlapped, handle: u64, length: i64) {
         complete_io(ov, ERROR_INVALID, 0);
         return;
     }
-    let Some(fd) = resolve_handle(handle) else {
+    let file_handle = find_file_handle(handle);
+    if file_handle.is_null() {
         complete_io(ov, ERROR_BADF, 0);
         return;
-    };
+    }
     submit_io(
         ov,
-        PendingIo {
+        IoOperation {
+            active_next: ptr::null_mut(),
+            queue_next: ptr::null_mut(),
+            sequence_next: ptr::null_mut(),
             overlapped: ov,
             kind: IoKind::Truncate,
-            fd,
+            fd: (*file_handle).fd,
             buffer: ptr::null_mut(),
             length: 0,
             offset: length,
             whence: 0,
             error: 0,
             result: 0,
+            file_handle,
+            sequence: ptr::addr_of_mut!((*file_handle).sequence),
         },
     );
 }
@@ -620,7 +848,10 @@ unsafe fn begin_path_open(ov: *mut Overlapped, path: *const u8, length: usize, f
     }
     submit_io(
         ov,
-        PendingIo {
+        IoOperation {
+            active_next: ptr::null_mut(),
+            queue_next: ptr::null_mut(),
+            sequence_next: ptr::null_mut(),
             overlapped: ov,
             kind: IoKind::Open,
             fd: native_flags,
@@ -630,13 +861,14 @@ unsafe fn begin_path_open(ov: *mut Overlapped, path: *const u8, length: usize, f
             whence: 0,
             error: 0,
             result: 0,
+            file_handle: ptr::null_mut(),
+            sequence: ptr::null_mut(),
         },
     );
 }
 
-unsafe extern "C" fn run_io_worker(_context: *mut c_void) -> *mut c_void {
+unsafe fn execute_io_operation(operation: *mut IoOperation) {
     let state = state_ptr();
-    let request = ptr::addr_of!((*state).pending_io).read();
     let read = ptr::addr_of!((*state).read).read();
     let write = ptr::addr_of!((*state).write).read();
     let pread = ptr::addr_of!((*state).pread).read();
@@ -645,36 +877,51 @@ unsafe extern "C" fn run_io_worker(_context: *mut c_void) -> *mut c_void {
     let ftruncate = ptr::addr_of!((*state).ftruncate).read();
     let errno_location = ptr::addr_of!((*state).errno_location).read();
     let (error, result) = loop {
-        let result = match request.kind {
+        let result = match (*operation).kind {
             IoKind::Read => match read {
-                Some(read) => read(request.fd, request.buffer, request.length),
+                Some(read) => read((*operation).fd, (*operation).buffer, (*operation).length),
                 None => -1,
             },
             IoKind::Write => match write {
-                Some(write) => write(request.fd, request.buffer.cast(), request.length),
+                Some(write) => write(
+                    (*operation).fd,
+                    (*operation).buffer.cast(),
+                    (*operation).length,
+                ),
                 None => -1,
             },
             IoKind::PositionalRead => match pread {
-                Some(pread) => pread(request.fd, request.buffer, request.length, request.offset),
+                Some(pread) => pread(
+                    (*operation).fd,
+                    (*operation).buffer,
+                    (*operation).length,
+                    (*operation).offset,
+                ),
                 None => -1,
             },
             IoKind::Open => {
                 let opened = match open {
-                    Some(open) => open(request.buffer.cast(), request.fd, 0o666),
+                    Some(open) => open((*operation).buffer.cast(), (*operation).fd, 0o666),
                     None => -1,
                 };
                 opened as isize
             }
             IoKind::Seek => match lseek {
-                Some(lseek) => lseek(request.fd, request.offset, request.whence) as isize,
+                Some(lseek) => lseek(
+                    (*operation).fd,
+                    (*operation).offset,
+                    (*operation).whence,
+                ) as isize,
                 None => -1,
             },
             IoKind::Truncate => match ftruncate {
-                Some(ftruncate) => ftruncate(request.fd, request.offset) as isize,
+                Some(ftruncate) => {
+                    ftruncate((*operation).fd, (*operation).offset) as isize
+                }
                 None => -1,
             },
         };
-        let success = if matches!(request.kind, IoKind::Truncate) {
+        let success = if matches!((*operation).kind, IoKind::Truncate) {
             result == 0
         } else {
             result >= 0
@@ -691,16 +938,176 @@ unsafe extern "C" fn run_io_worker(_context: *mut c_void) -> *mut c_void {
         }
         break (map_io_errno(errno), 0);
     };
-    ptr::addr_of_mut!((*state).pending_io.error).write(error);
-    ptr::addr_of_mut!((*state).pending_io.result).write(result);
+    ptr::addr_of_mut!((*operation).error).write(error);
+    ptr::addr_of_mut!((*operation).result).write(result);
+}
+
+unsafe fn pop_work(state: *mut PlatformState) -> *mut IoOperation {
+    let operation = ptr::addr_of!((*state).work_head).read();
+    if operation.is_null() {
+        return ptr::null_mut();
+    }
+    let next = ptr::addr_of!((*operation).queue_next).read();
+    ptr::addr_of_mut!((*state).work_head).write(next);
+    if next.is_null() {
+        ptr::addr_of_mut!((*state).work_tail).write(ptr::null_mut());
+    }
+    ptr::addr_of_mut!((*operation).queue_next).write(ptr::null_mut());
+    operation
+}
+
+unsafe fn push_completion(state: *mut PlatformState, operation: *mut IoOperation) {
+    ptr::addr_of_mut!((*operation).queue_next).write(ptr::null_mut());
+    let tail = ptr::addr_of!((*state).completion_tail).read();
+    if tail.is_null() {
+        ptr::addr_of_mut!((*state).completion_head).write(operation);
+    } else {
+        ptr::addr_of_mut!((*tail).queue_next).write(operation);
+    }
+    ptr::addr_of_mut!((*state).completion_tail).write(operation);
+}
+
+unsafe fn process_one_io_operation(state: *mut PlatformState) -> bool {
+    queue_lock(state);
+    let operation = pop_work(state);
+    queue_unlock(state);
+    if operation.is_null() {
+        return false;
+    }
+    execute_io_operation(operation);
+    queue_lock(state);
+    push_completion(state, operation);
+    if (*state).synchronization_initialized {
+        if let Some(signal) = (*state).pthread_cond_signal {
+            if signal(ptr::addr_of_mut!((*state).completion_ready).cast()) != 0 {
+                queue_unlock(state);
+                terminate_after_worker_failure(17);
+            }
+        }
+    }
+    queue_unlock(state);
+    true
+}
+
+#[cfg(not(test))]
+unsafe extern "C" fn run_io_worker(context: *mut c_void) -> *mut c_void {
+    let state = context.cast::<PlatformState>();
+    loop {
+        queue_lock(state);
+        while ptr::addr_of!((*state).work_head).read().is_null()
+            && !ptr::addr_of!((*state).stopping_workers).read()
+        {
+            let Some(wait) = ptr::addr_of!((*state).pthread_cond_wait).read() else {
+                queue_unlock(state);
+                terminate_after_worker_failure(17);
+            };
+            if wait(
+                ptr::addr_of_mut!((*state).work_ready).cast(),
+                ptr::addr_of_mut!((*state).queue_mutex).cast(),
+            ) != 0
+            {
+                queue_unlock(state);
+                terminate_after_worker_failure(17);
+            }
+        }
+        if ptr::addr_of!((*state).stopping_workers).read()
+            && ptr::addr_of!((*state).work_head).read().is_null()
+        {
+            queue_unlock(state);
+            return ptr::null_mut();
+        }
+        let operation = pop_work(state);
+        queue_unlock(state);
+        if operation.is_null() {
+            continue;
+        }
+
+        execute_io_operation(operation);
+
+        queue_lock(state);
+        push_completion(state, operation);
+        if let Some(signal) = ptr::addr_of!((*state).pthread_cond_signal).read() {
+            if signal(ptr::addr_of_mut!((*state).completion_ready).cast()) != 0 {
+                queue_unlock(state);
+                terminate_after_worker_failure(17);
+            }
+        }
+        queue_unlock(state);
+    }
+}
+
+#[cfg(test)]
+unsafe extern "C" fn run_io_worker(_context: *mut c_void) -> *mut c_void {
+    let _ = process_one_io_operation(state_ptr());
     ptr::null_mut()
 }
 
-unsafe fn publish_pending_io() {
-    let state = state_ptr();
-    let mut pending = ptr::addr_of!((*state).pending_io).read();
-    release_pending_resources(pending);
-    if matches!(pending.kind, IoKind::Open) && pending.error == 0 {
+unsafe fn pop_completion(state: *mut PlatformState) -> *mut IoOperation {
+    let operation = ptr::addr_of!((*state).completion_head).read();
+    if operation.is_null() {
+        return ptr::null_mut();
+    }
+    let next = ptr::addr_of!((*operation).queue_next).read();
+    ptr::addr_of_mut!((*state).completion_head).write(next);
+    if next.is_null() {
+        ptr::addr_of_mut!((*state).completion_tail).write(ptr::null_mut());
+    }
+    ptr::addr_of_mut!((*operation).queue_next).write(ptr::null_mut());
+    operation
+}
+
+unsafe fn unlink_active_operation(state: *mut PlatformState, operation: *mut IoOperation) {
+    let mut link = ptr::addr_of_mut!((*state).active_operations);
+    while !(*link).is_null() {
+        if *link == operation {
+            link.write((*operation).active_next);
+            (*state).active_count -= 1;
+            return;
+        }
+        link = ptr::addr_of_mut!((*(*link)).active_next);
+    }
+    terminate_after_worker_failure(18);
+}
+
+unsafe fn release_file_reference(file: *mut FileHandle) {
+    if file.is_null() {
+        return;
+    }
+    if (*file).references == 0 {
+        terminate_after_worker_failure(18);
+    }
+    (*file).references -= 1;
+    if (*file).closing && (*file).references == 0 {
+        let state = state_ptr();
+        if let Some(close) = ptr::addr_of!((*state).close).read() {
+            let _ = close((*file).fd);
+        }
+        if let Some(free) = ptr::addr_of!((*state).libc_free).read() {
+            free(file.cast());
+        }
+    }
+}
+
+unsafe fn advance_sequence(operation: *mut IoOperation) {
+    let sequence = (*operation).sequence;
+    if sequence.is_null() {
+        return;
+    }
+    if (*sequence).head != operation {
+        terminate_after_worker_failure(18);
+    }
+    let next = (*operation).sequence_next;
+    (*sequence).head = next;
+    if next.is_null() {
+        (*sequence).tail = ptr::null_mut();
+        (*sequence).active = false;
+    } else {
+        enqueue_work(state_ptr(), next);
+    }
+}
+
+unsafe fn publish_one_completion(state: *mut PlatformState, operation: *mut IoOperation) {
+    if (*operation).kind == IoKind::Open && (*operation).error == 0 {
         let next_handle = ptr::addr_of!((*state).next_handle).read();
         let malloc = ptr::addr_of!((*state).malloc).read();
         let close = ptr::addr_of!((*state).close).read();
@@ -710,48 +1117,99 @@ unsafe fn publish_pending_io() {
             .unwrap_or(ptr::null_mut());
         if next_token.is_none() || entry.is_null() {
             if let Some(close) = close {
-                let _ = close(pending.result as i32);
+                let _ = close((*operation).result as i32);
             }
             if !entry.is_null() {
                 if let Some(free) = ptr::addr_of!((*state).libc_free).read() {
                     free(entry.cast());
                 }
             }
-            pending.error = if next_token.is_none() {
+            (*operation).error = if next_token.is_none() {
                 ERROR_OVERFLOW
             } else {
                 ERROR_NOMEM
             };
-            pending.result = 0;
+            (*operation).result = 0;
         } else {
             entry.write(FileHandle {
                 token: next_handle,
-                fd: pending.result as i32,
+                fd: (*operation).result as i32,
                 next: ptr::addr_of!((*state).file_handles).read(),
+                references: 0,
+                closing: false,
+                sequence: IoSequence::empty(),
             });
             ptr::addr_of_mut!((*state).file_handles).write(entry);
             if let Some(next_token) = next_token {
                 ptr::addr_of_mut!((*state).next_handle).write(next_token);
             }
-            pending.result = next_handle;
+            (*operation).result = next_handle;
         }
     }
-    complete_io(pending.overlapped, pending.error, pending.result);
-    reset_pending_io(state);
+    complete_io(
+        (*operation).overlapped,
+        (*operation).error,
+        (*operation).result,
+    );
+    advance_sequence(operation);
+    unlink_active_operation(state, operation);
+    release_file_reference((*operation).file_handle);
+    release_operation_resources(operation);
+    if let Some(free) = ptr::addr_of!((*state).libc_free).read() {
+        free(operation.cast());
+    }
 }
 
-unsafe fn join_and_publish_pending_io() -> bool {
+unsafe fn publish_ready_completions(state: *mut PlatformState) -> usize {
+    let mut count = 0;
+    loop {
+        queue_lock(state);
+        let operation = pop_completion(state);
+        queue_unlock(state);
+        if operation.is_null() {
+            return count;
+        }
+        publish_one_completion(state, operation);
+        count += 1;
+    }
+}
+
+unsafe fn wait_and_publish_io() -> bool {
     let state = state_ptr();
-    let join = ptr::addr_of!((*state).pthread_join).read();
-    let thread = ptr::addr_of!((*state).worker_thread).read();
-    let Some(join) = join else {
-        return false;
-    };
-    if thread == 0 || join(thread, ptr::null_mut()) != 0 {
+    queue_lock(state);
+    while ptr::addr_of!((*state).completion_head).read().is_null()
+        && ptr::addr_of!((*state).active_count).read() != 0
+    {
+        let Some(wait) = ptr::addr_of!((*state).pthread_cond_wait).read() else {
+            queue_unlock(state);
+            return false;
+        };
+        if wait(
+            ptr::addr_of_mut!((*state).completion_ready).cast(),
+            ptr::addr_of_mut!((*state).queue_mutex).cast(),
+        ) != 0
+        {
+            queue_unlock(state);
+            return false;
+        }
+    }
+    let has_completion = !ptr::addr_of!((*state).completion_head).read().is_null();
+    queue_unlock(state);
+    if !has_completion {
         return false;
     }
-    publish_pending_io();
-    true
+    publish_ready_completions(state) != 0
+}
+
+unsafe fn publish_pending_io() {
+    let state = state_ptr();
+    let _ = publish_ready_completions(state);
+}
+
+#[cfg(test)]
+unsafe fn join_and_publish_pending_io() -> bool {
+    let state = state_ptr();
+    publish_ready_completions(state) != 0
 }
 
 unsafe fn terminate_after_worker_failure(status: i32) -> ! {
@@ -759,6 +1217,109 @@ unsafe fn terminate_after_worker_failure(status: i32) -> ! {
         exit(status);
     }
     loop {}
+}
+
+unsafe fn destroy_worker_pool(state: *mut PlatformState) {
+    if !(*state).synchronization_initialized {
+        return;
+    }
+    queue_lock(state);
+    ptr::addr_of_mut!((*state).stopping_workers).write(true);
+    if let Some(broadcast) = ptr::addr_of!((*state).pthread_cond_broadcast).read() {
+        if broadcast(ptr::addr_of_mut!((*state).work_ready).cast()) != 0 {
+            queue_unlock(state);
+            terminate_after_worker_failure(17);
+        }
+    }
+    queue_unlock(state);
+
+    let join = ptr::addr_of!((*state).pthread_join).read();
+    let Some(join) = join else {
+        terminate_after_worker_failure(17);
+    };
+    let mut index = 0;
+    while index < (*state).worker_count {
+        let worker = ptr::addr_of_mut!((*state).workers)
+            .cast::<IoWorker>()
+            .add(index);
+        if (*worker).started && join((*worker).thread, ptr::null_mut()) != 0 {
+            terminate_after_worker_failure(17);
+        }
+        (*worker).started = false;
+        (*worker).thread = 0;
+        index += 1;
+    }
+    (*state).worker_count = 0;
+
+    let cond_destroy = ptr::addr_of!((*state).pthread_cond_destroy).read();
+    let mutex_destroy = ptr::addr_of!((*state).pthread_mutex_destroy).read();
+    if cond_destroy
+        .map(|destroy| {
+            destroy(ptr::addr_of_mut!((*state).work_ready).cast()) == 0
+                && destroy(ptr::addr_of_mut!((*state).completion_ready).cast()) == 0
+        })
+        != Some(true)
+        || mutex_destroy
+            .map(|destroy| destroy(ptr::addr_of_mut!((*state).queue_mutex).cast()) == 0)
+            != Some(true)
+    {
+        terminate_after_worker_failure(17);
+    }
+    (*state).synchronization_initialized = false;
+    (*state).stopping_workers = false;
+}
+
+unsafe fn initialize_worker_pool(state: *mut PlatformState) -> bool {
+    let (Some(mutex_init), Some(cond_init), Some(create)) = (
+        ptr::addr_of!((*state).pthread_mutex_init).read(),
+        ptr::addr_of!((*state).pthread_cond_init).read(),
+        ptr::addr_of!((*state).pthread_create).read(),
+    ) else {
+        return false;
+    };
+    if mutex_init(ptr::addr_of_mut!((*state).queue_mutex).cast(), ptr::null()) != 0 {
+        return false;
+    }
+    if cond_init(ptr::addr_of_mut!((*state).work_ready).cast(), ptr::null()) != 0 {
+        if let Some(destroy) = (*state).pthread_mutex_destroy {
+            let _ = destroy(ptr::addr_of_mut!((*state).queue_mutex).cast());
+        }
+        return false;
+    }
+    if cond_init(ptr::addr_of_mut!((*state).completion_ready).cast(), ptr::null()) != 0 {
+        if let Some(destroy) = (*state).pthread_cond_destroy {
+            let _ = destroy(ptr::addr_of_mut!((*state).work_ready).cast());
+        }
+        if let Some(destroy) = (*state).pthread_mutex_destroy {
+            let _ = destroy(ptr::addr_of_mut!((*state).queue_mutex).cast());
+        }
+        return false;
+    }
+    (*state).synchronization_initialized = true;
+    (*state).stopping_workers = false;
+    (*state).worker_count = 0;
+
+    while (*state).worker_count < IO_WORKER_COUNT {
+        let index = (*state).worker_count;
+        let mut thread = 0usize;
+        let status = create(
+            &mut thread,
+            ptr::null(),
+            Some(run_io_worker),
+            state.cast(),
+        );
+        if status != 0 {
+            destroy_worker_pool(state);
+            return false;
+        }
+        let worker = ptr::addr_of_mut!((*state).workers)
+            .cast::<IoWorker>()
+            .add(index);
+        (*worker).thread = thread;
+        (*worker).started = true;
+        (*state).worker_count += 1;
+    }
+    true
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -826,11 +1387,15 @@ unsafe fn close_file_handle(handle: u64) {
         let entry = *link;
         if (*entry).token == handle {
             *link = (*entry).next;
-            if let Some(close) = ptr::addr_of!((*state).close).read() {
-                let _ = close((*entry).fd);
-            }
-            if let Some(free) = ptr::addr_of!((*state).libc_free).read() {
-                free(entry.cast());
+            (*entry).next = ptr::null_mut();
+            (*entry).closing = true;
+            if (*entry).references == 0 {
+                if let Some(close) = ptr::addr_of!((*state).close).read() {
+                    let _ = close((*entry).fd);
+                }
+                if let Some(free) = ptr::addr_of!((*state).libc_free).read() {
+                    free(entry.cast());
+                }
             }
             return;
         }
@@ -844,6 +1409,9 @@ unsafe fn close_all_file_handles() {
     ptr::addr_of_mut!((*state).file_handles).write(ptr::null_mut());
     while !entry.is_null() {
         let next = (*entry).next;
+        if (*entry).references != 0 {
+            terminate_after_worker_failure(18);
+        }
         if let Some(close) = ptr::addr_of!((*state).close).read() {
             let _ = close((*entry).fd);
         }
@@ -958,9 +1526,38 @@ unsafe fn run() -> i32 {
     );
     #[cfg(feature = "darwin")]
     let errno_location = function_pointer!(resolve(host, module, b"__error\0"), ErrnoLocationFn);
+    if let Some(write) = write {
+        state_mut().write = Some(write);
+    }
     let pthread_create =
         function_pointer!(resolve(host, module, b"pthread_create\0"), PthreadCreateFn);
     let pthread_join = function_pointer!(resolve(host, module, b"pthread_join\0"), PthreadJoinFn);
+    let pthread_mutex_init =
+        function_pointer!(resolve(host, module, b"pthread_mutex_init\0"), PthreadMutexInitFn);
+    let pthread_mutex_destroy = function_pointer!(
+        resolve(host, module, b"pthread_mutex_destroy\0"),
+        PthreadMutexDestroyFn
+    );
+    let pthread_mutex_lock =
+        function_pointer!(resolve(host, module, b"pthread_mutex_lock\0"), PthreadMutexLockFn);
+    let pthread_mutex_unlock = function_pointer!(
+        resolve(host, module, b"pthread_mutex_unlock\0"),
+        PthreadMutexUnlockFn
+    );
+    let pthread_cond_init =
+        function_pointer!(resolve(host, module, b"pthread_cond_init\0"), PthreadCondInitFn);
+    let pthread_cond_destroy = function_pointer!(
+        resolve(host, module, b"pthread_cond_destroy\0"),
+        PthreadCondDestroyFn
+    );
+    let pthread_cond_wait =
+        function_pointer!(resolve(host, module, b"pthread_cond_wait\0"), PthreadCondWaitFn);
+    let pthread_cond_signal =
+        function_pointer!(resolve(host, module, b"pthread_cond_signal\0"), PthreadCondSignalFn);
+    let pthread_cond_broadcast = function_pointer!(
+        resolve(host, module, b"pthread_cond_broadcast\0"),
+        PthreadCondBroadcastFn
+    );
     let (
         Some(read),
         Some(write),
@@ -975,6 +1572,15 @@ unsafe fn run() -> i32 {
         Some(errno_location),
         Some(pthread_create),
         Some(pthread_join),
+        Some(pthread_mutex_init),
+        Some(pthread_mutex_destroy),
+        Some(pthread_mutex_lock),
+        Some(pthread_mutex_unlock),
+        Some(pthread_cond_init),
+        Some(pthread_cond_destroy),
+        Some(pthread_cond_wait),
+        Some(pthread_cond_signal),
+        Some(pthread_cond_broadcast),
     ) = (
         read,
         write,
@@ -989,6 +1595,15 @@ unsafe fn run() -> i32 {
         errno_location,
         pthread_create,
         pthread_join,
+        pthread_mutex_init,
+        pthread_mutex_destroy,
+        pthread_mutex_lock,
+        pthread_mutex_unlock,
+        pthread_cond_init,
+        pthread_cond_destroy,
+        pthread_cond_wait,
+        pthread_cond_signal,
+        pthread_cond_broadcast,
     )
     else {
         write_fd(
@@ -1046,22 +1661,38 @@ unsafe fn run() -> i32 {
         state.errno_location = Some(errno_location);
         state.pthread_create = Some(pthread_create);
         state.pthread_join = Some(pthread_join);
-        state.worker_thread = 0;
-        state.queued_io = false;
-        state.pending_io = PendingIo {
-            overlapped: ptr::null_mut(),
-            kind: IoKind::Read,
-            fd: 0,
-            buffer: ptr::null_mut(),
-            length: 0,
-            offset: 0,
-            whence: 0,
-            error: 0,
-            result: 0,
-        };
+        state.pthread_mutex_init = Some(pthread_mutex_init);
+        state.pthread_mutex_destroy = Some(pthread_mutex_destroy);
+        state.pthread_mutex_lock = Some(pthread_mutex_lock);
+        state.pthread_mutex_unlock = Some(pthread_mutex_unlock);
+        state.pthread_cond_init = Some(pthread_cond_init);
+        state.pthread_cond_destroy = Some(pthread_cond_destroy);
+        state.pthread_cond_wait = Some(pthread_cond_wait);
+        state.pthread_cond_signal = Some(pthread_cond_signal);
+        state.pthread_cond_broadcast = Some(pthread_cond_broadcast);
+        state.synchronization_initialized = false;
+        state.stopping_workers = false;
+        state.workers = [const { IoWorker::empty() }; IO_WORKER_COUNT];
+        state.worker_count = 0;
+        state.active_operations = ptr::null_mut();
+        state.active_count = 0;
+        state.work_head = ptr::null_mut();
+        state.work_tail = ptr::null_mut();
+        state.completion_head = ptr::null_mut();
+        state.completion_tail = ptr::null_mut();
+        state.standard_sequences = [
+            IoSequence::empty(),
+            IoSequence::empty(),
+            IoSequence::empty(),
+        ];
         state.free = Some(free);
         state.payload_alloc = payload_alloc;
         state.payload_total_size = total_payload_size;
+    }
+    if !initialize_worker_pool(state_ptr()) {
+        free(payload_alloc, total_payload_size);
+        write_fd(2, b"Unix platform: failed to initialize I/O workers.\n");
+        return 5;
     }
     #[cfg(target_arch = "x86_64")]
     let process_exit = probe_exit;
@@ -1081,19 +1712,14 @@ unsafe fn run() -> i32 {
     loop {
         invoke_raw_entry(payload_code);
         let state = state_ptr();
-        let queued_io = ptr::addr_of!((*state).queued_io).read();
-        let thread = ptr::addr_of!((*state).worker_thread).read();
-        if !queued_io {
-            if thread != 0 {
-                terminate_after_worker_failure(5);
-            }
+        if ptr::addr_of!((*state).active_count).read() == 0 {
+            destroy_worker_pool(state);
             close_all_file_handles();
             free(payload_alloc, total_payload_size);
             state_mut().payload_alloc = ptr::null_mut();
             return 0;
         }
-        if !join_and_publish_pending_io() {
-            // The host unloads this code when the entry returns; do not return while a worker may execute it.
+        if !wait_and_publish_io() {
             terminate_after_worker_failure(5);
         }
     }
@@ -1140,25 +1766,6 @@ mod tests {
         0
     }
 
-    unsafe extern "C" fn fail_pthread_create(
-        _thread: *mut usize,
-        _attributes: *const c_void,
-        _start: Option<unsafe extern "C" fn(*mut c_void) -> *mut c_void>,
-        _context: *mut c_void,
-    ) -> i32 {
-        11
-    }
-
-    unsafe extern "C" fn zero_pthread_create(
-        thread: *mut usize,
-        _attributes: *const c_void,
-        _start: Option<unsafe extern "C" fn(*mut c_void) -> *mut c_void>,
-        _context: *mut c_void,
-    ) -> i32 {
-        thread.write(0);
-        0
-    }
-
     struct ScriptedIo {
         read_results: [isize; 4],
         read_errnos: [i32; 4],
@@ -1184,7 +1791,8 @@ mod tests {
         join_calls: usize,
     }
 
-    static mut TEST_PATH_BUFFER: [usize; 4] = [0; 4];
+    static mut TEST_HEAP: [usize; 512] = [0; 512];
+    static mut TEST_HEAP_USED: usize = 0;
 
     static mut TEST_IO: ScriptedIo = ScriptedIo {
         read_results: [0; 4],
@@ -1283,8 +1891,19 @@ mod tests {
     }
 
     unsafe extern "C" fn scripted_malloc(size: usize) -> *mut c_void {
-        assert!(size <= core::mem::size_of::<[usize; 4]>());
-        ptr::addr_of_mut!(TEST_PATH_BUFFER).cast()
+        let alignment = core::mem::align_of::<usize>();
+        let start = (TEST_HEAP_USED + alignment - 1) & !(alignment - 1);
+        let Some(end) = start.checked_add(size) else {
+            return ptr::null_mut();
+        };
+        if end > core::mem::size_of::<[usize; 512]>() {
+            return ptr::null_mut();
+        }
+        TEST_HEAP_USED = end;
+        ptr::addr_of_mut!(TEST_HEAP)
+            .cast::<u8>()
+            .add(start)
+            .cast()
     }
 
     unsafe extern "C" fn scripted_free(_buffer: *mut c_void) {
@@ -1313,6 +1932,7 @@ mod tests {
     }
 
     unsafe fn reset_io_test_state() {
+        TEST_HEAP_USED = 0;
         ptr::addr_of_mut!(TEST_STATE).write(PlatformState {
             read: Some(scripted_read),
             write: Some(scripted_write),
@@ -1329,19 +1949,33 @@ mod tests {
             errno_location: Some(scripted_errno_location),
             pthread_create: None,
             pthread_join: Some(scripted_pthread_join),
-            worker_thread: 0,
-            queued_io: false,
-            pending_io: PendingIo {
-                overlapped: ptr::null_mut(),
-                kind: IoKind::Read,
-                fd: 0,
-                buffer: ptr::null_mut(),
-                length: 0,
-                offset: 0,
-                whence: 0,
-                error: 0,
-                result: 0,
-            },
+            pthread_mutex_init: None,
+            pthread_mutex_destroy: None,
+            pthread_mutex_lock: None,
+            pthread_mutex_unlock: None,
+            pthread_cond_init: None,
+            pthread_cond_destroy: None,
+            pthread_cond_wait: None,
+            pthread_cond_signal: None,
+            pthread_cond_broadcast: None,
+            queue_mutex: PthreadSyncStorage::new(),
+            work_ready: PthreadSyncStorage::new(),
+            completion_ready: PthreadSyncStorage::new(),
+            synchronization_initialized: false,
+            stopping_workers: false,
+            workers: [const { IoWorker::empty() }; IO_WORKER_COUNT],
+            worker_count: 0,
+            active_operations: ptr::null_mut(),
+            active_count: 0,
+            work_head: ptr::null_mut(),
+            work_tail: ptr::null_mut(),
+            completion_head: ptr::null_mut(),
+            completion_tail: ptr::null_mut(),
+            standard_sequences: [
+                IoSequence::empty(),
+                IoSequence::empty(),
+                IoSequence::empty(),
+            ],
             free: None,
             payload_alloc: ptr::null_mut(),
             payload_total_size: 0,
@@ -1409,8 +2043,8 @@ mod tests {
     fn test_second_pending_io_request_is_accepted() {
         unsafe {
             reset_io_test_state();
-            let state = state_ptr();
-            (*state).pthread_create = Some(mock_pthread_create);
+            let io = &mut *ptr::addr_of_mut!(TEST_IO);
+            io.write_results = [1, 2, 0, 0];
             let mut first = Overlapped::default();
             let mut second = Overlapped::default();
             let mut buffer = [0u8; 4];
@@ -1422,6 +2056,15 @@ mod tests {
             assert_eq!(first.error, 0);
             assert_eq!(second.flags, 0);
             assert_eq!(second.error, 0);
+
+            run_io_worker(ptr::null_mut());
+            assert!(join_and_publish_pending_io());
+            assert_completion(&first, 0, 1);
+            assert_eq!(second.flags, 0);
+
+            run_io_worker(ptr::null_mut());
+            assert!(join_and_publish_pending_io());
+            assert_completion(&second, 0, 2);
         }
     }
 
@@ -1431,7 +2074,6 @@ mod tests {
             reset_io_test_state();
             let state = state_ptr();
             let mut overlapped = Overlapped::default();
-            let mut second_overlapped = Overlapped::default();
             let mut buffer = [0u8; 4];
 
             overlapped.continued = 17;
@@ -1443,25 +2085,9 @@ mod tests {
             begin_io(&mut overlapped, 1, ptr::null_mut(), 1, true);
             assert_completion(&overlapped, ERROR_INVALID, 0);
 
-            begin_io(&mut overlapped, 2, buffer.as_mut_ptr().cast(), 1, true);
-            assert_completion(&overlapped, ERROR_IO, 0);
-            begin_io(&mut overlapped, 1, buffer.as_mut_ptr().cast(), 1, false);
+            begin_io(&mut overlapped, 99, buffer.as_mut_ptr().cast(), 1, true);
             assert_completion(&overlapped, ERROR_BADF, 0);
 
-            begin_io(&mut overlapped, 1, buffer.as_mut_ptr().cast(), 1, true);
-            assert_completion(&overlapped, ERROR_IO, 0);
-
-            (*state).pthread_create = Some(fail_pthread_create);
-            begin_io(&mut overlapped, 1, buffer.as_mut_ptr().cast(), 1, true);
-            assert_completion(&overlapped, ERROR_AGAIN, 0);
-            assert!(!(*state).queued_io);
-
-            (*state).pthread_create = Some(zero_pthread_create);
-            begin_io(&mut overlapped, 1, buffer.as_mut_ptr().cast(), 1, true);
-            assert_completion(&overlapped, ERROR_AGAIN, 0);
-            assert!(!(*state).queued_io);
-
-            (*state).pthread_create = Some(mock_pthread_create);
             {
                 let io = &mut *ptr::addr_of_mut!(TEST_IO);
                 io.write_results[0] = 2;
@@ -1479,26 +2105,24 @@ mod tests {
                 buffer.len(),
                 true,
             );
-            assert!((*state).queued_io);
+            assert_eq!((*state).active_count, 1);
+            assert!(!(*state).work_head.is_null());
             assert_eq!(overlapped.flags, 0);
             assert_eq!(overlapped.error, 0);
             assert_eq!(overlapped.continued, 0);
             assert_eq!(overlapped.result_ext, 0);
 
             run_io_worker(ptr::null_mut());
-            assert_eq!(ptr::addr_of!((*state).pending_io.result).read(), 2);
+            assert_eq!((*(*state).completion_head).result, 2);
             assert_eq!(overlapped.flags, 0);
             assert!(join_and_publish_pending_io());
             assert_completion(&overlapped, 0, 2);
-            assert!(!ptr::addr_of!((*state).queued_io).read());
-            assert_eq!(ptr::addr_of!((*state).worker_thread).read(), 0);
-            assert!(ptr::addr_of!((*state).pending_io.overlapped)
-                .read()
-                .is_null());
+            assert_eq!((*state).active_count, 0);
+            assert!((*state).active_operations.is_null());
             assert_eq!((*ptr::addr_of!(TEST_IO)).write_calls, 1);
             assert_eq!((*ptr::addr_of!(TEST_IO)).write_length, 4);
 
-            second_overlapped = Overlapped {
+            let mut second_overlapped = Overlapped {
                 flags: 0,
                 error: 0,
                 continued: 0,
@@ -1512,7 +2136,7 @@ mod tests {
                 1,
                 true,
             );
-            assert!((*state).queued_io);
+            assert_eq!((*state).active_count, 1);
             run_io_worker(ptr::null_mut());
             assert!(join_and_publish_pending_io());
             assert_completion(&second_overlapped, 0, 1);
@@ -1614,23 +2238,6 @@ mod tests {
             reset_io_test_state();
             let state = state_ptr();
             (*state).pthread_create = Some(mock_pthread_create);
-            let mut failed_join = Overlapped::default();
-            let mut byte = 0u8;
-            begin_io(&mut failed_join, 0, (&mut byte as *mut u8).cast(), 1, false);
-            run_io_worker(ptr::null_mut());
-            (*ptr::addr_of_mut!(TEST_IO)).join_result = 11;
-            assert!(!join_and_publish_pending_io());
-            assert_eq!(failed_join.flags, 0);
-            assert!(ptr::addr_of!((*state).queued_io).read());
-            assert_eq!(
-                ptr::addr_of!((*state).pending_io.overlapped).read(),
-                ptr::addr_of_mut!(failed_join)
-            );
-            assert_eq!((*ptr::addr_of!(TEST_IO)).join_calls, 1);
-
-            reset_io_test_state();
-            let state = state_ptr();
-            (*state).pthread_create = Some(mock_pthread_create);
             let mut file_ov = Overlapped::default();
             begin_path_open(
                 &mut file_ov,
@@ -1638,9 +2245,9 @@ mod tests {
                 8,
                 2 | ABI_O_CREATE | ABI_O_APPEND | ABI_O_DIRECTORY,
             );
-            assert!((*state).queued_io);
+            assert_eq!((*state).active_count, 1);
             assert_eq!(
-                ptr::addr_of!((*state).pending_io.fd).read(),
+                ptr::addr_of!((*(*state).work_head).fd).read(),
                 2 | NATIVE_O_CREATE | NATIVE_O_APPEND | NATIVE_O_DIRECTORY
             );
             run_io_worker(ptr::null_mut());
@@ -1648,7 +2255,7 @@ mod tests {
             assert_completion(&file_ov, 0, 3);
             assert_eq!((*ptr::addr_of!(TEST_IO)).open_calls, 1);
             assert_eq!((*ptr::addr_of!(TEST_IO)).open_mode, 0o666);
-            assert_eq!((*ptr::addr_of!(TEST_IO)).free_calls, 1);
+            assert_eq!((*ptr::addr_of!(TEST_IO)).free_calls, 2);
 
             let mut file_read = Overlapped::default();
             (*ptr::addr_of_mut!(TEST_IO)).read_results[0] = 2;
@@ -1729,7 +2336,7 @@ mod tests {
             assert_eq!((*ptr::addr_of!(TEST_IO)).close_calls, 0);
             probe_handle_close(3);
             assert_eq!((*ptr::addr_of!(TEST_IO)).close_calls, 1);
-            assert_eq!((*ptr::addr_of!(TEST_IO)).free_calls, 2);
+            assert_eq!((*ptr::addr_of!(TEST_IO)).free_calls, 8);
             assert_eq!(resolve_handle(3), None);
 
             let mut reopened = Overlapped::default();
@@ -1741,7 +2348,7 @@ mod tests {
             assert_eq!(resolve_handle(4), Some(11));
             probe_handle_close(4);
             assert_eq!((*ptr::addr_of!(TEST_IO)).close_calls, 2);
-            assert_eq!((*ptr::addr_of!(TEST_IO)).free_calls, 4);
+            assert_eq!((*ptr::addr_of!(TEST_IO)).free_calls, 11);
 
             (*ptr::addr_of_mut!(TEST_IO)).open_errno = ERRNO_ENOENT;
             let mut failed_open = Overlapped::default();
@@ -1749,12 +2356,12 @@ mod tests {
             run_io_worker(ptr::null_mut());
             assert!(join_and_publish_pending_io());
             assert_completion(&failed_open, 44, 0);
-            assert_eq!((*ptr::addr_of!(TEST_IO)).free_calls, 5);
+            assert_eq!((*ptr::addr_of!(TEST_IO)).free_calls, 13);
 
             let mut invalid_path = Overlapped::default();
             begin_path_open(&mut invalid_path, b"bad\0path".as_ptr(), 8, 0);
             assert_completion(&invalid_path, ERROR_INVALID, 0);
-            assert_eq!((*ptr::addr_of!(TEST_IO)).free_calls, 6);
+            assert_eq!((*ptr::addr_of!(TEST_IO)).free_calls, 14);
 
             assert_eq!(map_io_errno(ERRNO_EACCES), ERROR_ACCES);
             assert_eq!(map_io_errno(ERRNO_EEXIST), ERROR_EXIST);
