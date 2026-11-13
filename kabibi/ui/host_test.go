@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"image/color"
 	"io"
 	"os"
 	"strings"
@@ -23,6 +24,7 @@ type recordingWidget struct {
 	buf       terminal.CellBuf
 	handled   bool
 	lastEvent input.Event
+	lastTheme Theme
 }
 
 type errReader struct{ err error }
@@ -36,6 +38,7 @@ func (w *recordingWidget) Measure(c Constraints) Size {
 }
 
 func (w *recordingWidget) Render(r terminal.Rect, ctx RenderContext) string {
+	w.lastTheme = ctx.Theme
 	buf := terminal.NewCellBuf(r.W, r.H)
 	for y := 0; y < r.H; y++ {
 		for x := 0; x < r.W; x++ {
@@ -548,5 +551,67 @@ func TestProcessLoop_CoalescesRedrawsUnderBurst(t *testing.T) {
 	// Ensure the loop ran and terminated cleanly upon hostMsgStop
 	if widget.measureW != 10 || widget.measureH != 5 {
 		t.Fatalf("processLoop did not measure root widget with expected dimensions; got (%d, %d)", widget.measureW, widget.measureH)
+	}
+}
+
+func TestHost_ThrottledThemeQueryAndColorEventsThreadIntoRenderContext(t *testing.T) {
+	var out bytes.Buffer
+	widget := &recordingWidget{}
+	h := NewHost(widget, false)
+	h.out = bufio.NewWriter(&out)
+	h.queryThemeColors = true
+
+	sizeFn := func(uintptr) (int, int, error) { return 10, 5, nil }
+	h.runFrame(sizeFn)
+	firstFrame := out.String()
+	if !strings.Contains(firstFrame, ansi.RequestForegroundColor) || !strings.Contains(firstFrame, ansi.RequestBackgroundColor) {
+		t.Fatalf("first frame did not emit OSC 10/11 queries: %q", firstFrame)
+	}
+
+	// Second redraw within 1s must not re-emit OSC 10/11 queries
+	out.Reset()
+	widget.cursor = CursorPos{X: 2, Y: 1, Visible: true}
+	h.currBuf = terminal.NewCellBuf(10, 5)
+	h.runFrame(sizeFn)
+	if strings.Contains(out.String(), ansi.RequestForegroundColor) {
+		t.Fatalf("second frame within 1s re-emitted OSC 10 query: %q", out.String())
+	}
+
+	// ForegroundColorEvent and BackgroundColorEvent update Theme and trigger redraw only when changed
+	needsRender := false
+	h.handleHostMsg(hostMsg{
+		kind:       hostMsgInput,
+		inputEvent: input.ForegroundColorEvent{Color: color.RGBA{R: 0x12, G: 0x34, B: 0x56, A: 0xFF}},
+	}, &needsRender, sizeFn)
+	if !needsRender {
+		t.Fatal("changed ForegroundColorEvent did not mark needsRender=true")
+	}
+	if widget.handled {
+		t.Fatal("ForegroundColorEvent was forwarded to root.HandleEvent")
+	}
+
+	needsRender = false
+	h.handleHostMsg(hostMsg{
+		kind:       hostMsgInput,
+		inputEvent: input.ForegroundColorEvent{Color: color.RGBA{R: 0x12, G: 0x34, B: 0x56, A: 0xFF}},
+	}, &needsRender, sizeFn)
+	if needsRender {
+		t.Fatal("unchanged ForegroundColorEvent triggered redundant redraw")
+	}
+
+	h.handleHostMsg(hostMsg{
+		kind:       hostMsgInput,
+		inputEvent: input.BackgroundColorEvent{Color: color.RGBA{R: 0xFA, G: 0xF4, B: 0xE8, A: 0xFF}},
+	}, &needsRender, sizeFn)
+	if !needsRender {
+		t.Fatal("changed BackgroundColorEvent did not mark needsRender=true")
+	}
+
+	h.runFrame(sizeFn)
+	if got, want := widget.lastTheme.DefaultForeground, terminal.Color(0x123456); got != want {
+		t.Fatalf("RenderContext.Theme.DefaultForeground = %#06x, want %#06x", got, want)
+	}
+	if got, want := widget.lastTheme.DefaultBackground, terminal.Color(0xFAF4E8); got != want {
+		t.Fatalf("RenderContext.Theme.DefaultBackground = %#06x, want %#06x", got, want)
 	}
 }

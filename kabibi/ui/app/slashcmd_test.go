@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/x/input"
 	"github.com/mavity/rusticated/kabibi/ui"
+	"github.com/mavity/rusticated/kabibi/ui/dialog"
 	"github.com/mavity/rusticated/kabibi/ui/filemanager"
 	"github.com/mavity/rusticated/kabibi/ui/shell"
 )
@@ -210,18 +211,18 @@ func TestSlashCopyOpensPathFormWithoutPanels(t *testing.T) {
 
 	widget.Shell().SetInput("/copy")
 	widget.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
-	dlg := widget.Dialog()
-	if dlg == nil {
-		t.Fatal("/copy did not open a dialog")
+	dlg, ok := widget.Dialog().(*dialog.CopyDialog)
+	if !ok || dlg == nil {
+		t.Fatalf("/copy dialog = %T, want *dialog.CopyDialog", widget.Dialog())
 	}
-	if len(dlg.Fields) != 2 {
-		t.Fatalf("/copy dialog has %d fields, want two path fields", len(dlg.Fields))
+	if dlg.Source == nil || dlg.Destination == nil {
+		t.Fatalf("/copy dialog missing source/destination path fields: %#v", dlg)
 	}
 	if widget.PanelsVisible() {
 		t.Fatal("/copy unexpectedly opened blue panels")
 	}
-	dlg.Fields[0].Input.SetValue("source.txt")
-	dlg.Fields[1].Input.SetValue("destination")
+	dlg.Source.SetValue("source.txt")
+	dlg.Destination.SetValue("destination")
 	widget.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
 
 	copied := filepath.Join(destDir, "source.txt")
@@ -288,9 +289,9 @@ func TestFileCollisionKeepsProgressDialogAndResumes(t *testing.T) {
 	widget := NewWidget(AppWidgetOptions{WorkingDir: root})
 	defer widget.Close()
 	widget.startFileOp(filemanager.FileOp{Kind: filemanager.OpCopy, Sources: []string{source}, Dest: dstDir})
-	progress := widget.Dialog()
-	if progress == nil {
-		t.Fatal("file operation did not open a progress dialog")
+	progress, ok := widget.Dialog().(*dialog.ProgressDialog)
+	if !ok || progress == nil {
+		t.Fatalf("file operation dialog = %T, want *dialog.ProgressDialog", widget.Dialog())
 	}
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -325,8 +326,8 @@ func TestSlashCommandEnterDoesNotCompletePartialName(t *testing.T) {
 	if !widget.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter}) {
 		t.Fatal("Enter did not process the slash command")
 	}
-	if widget.Dialog() == nil || len(widget.Dialog().Fields) != 0 {
-		t.Fatal("partial slash name was silently completed instead of reporting an unknown command")
+	if _, ok := widget.Dialog().(*dialog.ErrorDialog); !ok {
+		t.Fatalf("partial slash name dialog = %T, want *dialog.ErrorDialog", widget.Dialog())
 	}
 	if widget.Editor() != nil {
 		t.Fatal("partial slash name opened an editor")

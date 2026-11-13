@@ -3,6 +3,7 @@ package ui
 import (
 	"bufio"
 	"fmt"
+	"image/color"
 	"io"
 	"os"
 	"os/signal"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode"
 
 	"github.com/charmbracelet/x/ansi"
@@ -17,6 +19,8 @@ import (
 	"github.com/charmbracelet/x/term"
 	"github.com/mavity/rusticated/kabibi/ui/terminal"
 )
+
+const themeQueryInterval = time.Second
 
 const kittyKeyboardFlags = ansi.KittyDisambiguateEscapeCodes |
 	ansi.KittyReportAlternateKeys |
@@ -74,6 +78,10 @@ type Host struct {
 	msgCh         chan hostMsg
 	stopCh        chan struct{}
 	prevTermState *term.State // holds the saved terminal state needed to restore cooked mode on exit.
+
+	theme            Theme
+	queryThemeColors bool
+	lastThemeQuery   time.Time
 }
 
 // handleSignals installs platform-specific signal handlers.
@@ -92,6 +100,10 @@ func NewHost(root Widget, verbose bool) *Host {
 		out:     bufio.NewWriterSize(os.Stdout, 64*1024),
 		msgCh:   make(chan hostMsg, 256),
 		stopCh:  make(chan struct{}),
+		theme: Theme{
+			DefaultForeground: 0xE5E5E5,
+			DefaultBackground: 0x000000,
+		},
 	}
 }
 
@@ -202,6 +214,7 @@ func (h *Host) runCore(
 		}
 	}
 	h.prevTermState = state
+	h.queryThemeColors = true
 	h.out.WriteString("\x1b[?1006l\x1b[?1000l")
 	h.out.Flush()
 	if _, err = h.out.WriteString(ansi.PushKittyKeyboard(kittyKeyboardFlags)); err != nil {
@@ -359,6 +372,12 @@ func (h *Host) handleHostMsg(
 ) {
 	switch msg.kind {
 	case hostMsgInput:
+		if handled, changed := h.handleThemeColorEvent(msg.inputEvent); handled {
+			if changed {
+				*needsRender = true
+			}
+			return
+		}
 		if h.root.HandleEvent(msg.inputEvent) {
 			*needsRender = true
 		}
@@ -369,6 +388,49 @@ func (h *Host) handleHostMsg(
 	case hostMsgScrollback:
 		h.runScrollbackFrame(getSizeFunc)
 	}
+}
+
+func (h *Host) handleThemeColorEvent(ev input.Event) (handled bool, changed bool) {
+	switch c := ev.(type) {
+	case input.ForegroundColorEvent:
+		if rgb, ok := colorToTerminalColor(c.Color); ok {
+			h.mu.Lock()
+			changed = !h.theme.HasDefaultFG || h.theme.DefaultForeground != rgb
+			h.theme.DefaultForeground = rgb
+			h.theme.HasDefaultFG = true
+			h.mu.Unlock()
+		}
+		return true, changed
+	case *input.ForegroundColorEvent:
+		if c != nil {
+			return h.handleThemeColorEvent(*c)
+		}
+		return true, false
+	case input.BackgroundColorEvent:
+		if rgb, ok := colorToTerminalColor(c.Color); ok {
+			h.mu.Lock()
+			changed = !h.theme.HasDefaultBG || h.theme.DefaultBackground != rgb
+			h.theme.DefaultBackground = rgb
+			h.theme.HasDefaultBG = true
+			h.mu.Unlock()
+		}
+		return true, changed
+	case *input.BackgroundColorEvent:
+		if c != nil {
+			return h.handleThemeColorEvent(*c)
+		}
+		return true, false
+	default:
+		return false, false
+	}
+}
+
+func colorToTerminalColor(c color.Color) (terminal.Color, bool) {
+	if c == nil {
+		return 0, false
+	}
+	r, g, b, _ := c.RGBA()
+	return terminal.Color((uint32(r>>8)&0xFF)<<16 | (uint32(g>>8)&0xFF)<<8 | (uint32(b>>8) & 0xFF)), true
 }
 
 func (h *Host) sendMsg(msg hostMsg) {
@@ -447,6 +509,7 @@ func (h *Host) renderRootFrame(width, height int) (terminal.CellBuf, terminal.Cu
 			OnError: func(err error) {
 				fmt.Fprintf(os.Stderr, "[kabibi] compose child widget: %v\n", err)
 			},
+			Theme: h.theme,
 		},
 	)
 	frame, cursor, extent, err := h.frameVT.RenderANSIForComposition(renderedANSI, width, height)
@@ -716,6 +779,7 @@ func (h *Host) emitDirtyRegion(lineMin, lineMax int) {
 	sb.WriteString("\x1b[0m\x1b[2K")
 	sb.WriteString(subAnsi)
 	appendCursorPos(&sb, lineMax, h.cursorX, h.cursorY, h.cursorVisible)
+	h.appendThrottledThemeQuery(&sb)
 
 	// 4. Emit the entire frame in a single WriteString and Flush.
 	h.out.WriteString(sb.String())
@@ -723,6 +787,19 @@ func (h *Host) emitDirtyRegion(lineMin, lineMax int) {
 	if h.verbose {
 		fmt.Fprintf(os.Stderr, "[kabibi] Host.emitDirtyRegion: rows=%d..%d bytes=%d flush_error=%v\n", lineMin, lineMax, sb.Len(), flushErr)
 	}
+}
+
+func (h *Host) appendThrottledThemeQuery(sb *strings.Builder) {
+	if !h.queryThemeColors {
+		return
+	}
+	now := time.Now()
+	if !h.lastThemeQuery.IsZero() && now.Sub(h.lastThemeQuery) < themeQueryInterval {
+		return
+	}
+	h.lastThemeQuery = now
+	sb.WriteString(ansi.RequestForegroundColor)
+	sb.WriteString(ansi.RequestBackgroundColor)
 }
 
 func (h *Host) emitCursorOnly() {

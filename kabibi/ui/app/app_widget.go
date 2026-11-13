@@ -42,7 +42,7 @@ type AppWidget struct {
 	disableAI                 bool
 	restorePanelsAfterCommand bool
 
-	dialog *dialog.DialogWidget
+	dialog ui.Widget
 	editor *editor.EditorWidget
 
 	opCancel context.CancelFunc
@@ -199,8 +199,8 @@ func (w *AppWidget) TogglePanels() {
 	w.SetPanelsVisible(!w.PanelsVisible())
 }
 
-// Dialog returns the currently active modal dialog, if any.
-func (w *AppWidget) Dialog() *dialog.DialogWidget {
+// Dialog returns the currently active modal dialog widget, if any.
+func (w *AppWidget) Dialog() ui.Widget {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.dialog
@@ -450,7 +450,7 @@ func (w *AppWidget) Measure(c ui.Constraints) ui.Size {
 	if dlg != nil {
 		shellSize := w.sh.Measure(c)
 		dialogSize := dlg.Measure(ui.Constraints{MaxW: maxW, MaxH: maxH})
-		height := max(shellSize.H, dialogSize.H)
+		height := max(shellSize.H, dialogSize.H+3)
 		if height > maxH {
 			height = maxH
 		}
@@ -494,24 +494,165 @@ func (w *AppWidget) Render(r terminal.Rect, ctx ui.RenderContext) string {
 
 	if dlg != nil && shellBuf.Width > 0 && shellBuf.Height > 0 {
 		sz := dlg.Measure(ui.Constraints{MaxW: shellBuf.Width, MaxH: r.H})
-		if !panelsVis && shellBuf.Height < sz.H {
-			expanded := terminal.NewCellBuf(shellBuf.Width, sz.H)
+		neededH := min(r.H, sz.H+3)
+		if !panelsVis && shellBuf.Height < neededH {
+			expanded := terminal.NewCellBuf(shellBuf.Width, neededH)
 			expanded.Blit(shellBuf, 0, 0)
 			shellBuf = expanded
 		}
 		dx := (shellBuf.Width - sz.W) / 2
 		dy := (shellBuf.Height - sz.H) / 2
+		if shellBuf.Height >= sz.H+2 && dy+sz.H+2 > shellBuf.Height {
+			dy = shellBuf.Height - sz.H - 2
+		}
 		if dx < 0 {
 			dx = 0
 		}
 		if dy < 0 {
 			dy = 0
 		}
+		applyDialogShadow(&shellBuf, terminal.Rect{X: dx, Y: dy, W: sz.W, H: sz.H}, ctx.Theme)
 		dlgANSI := dlg.Render(ui.Rect{X: 0, Y: 0, W: sz.W, H: sz.H}, ctx.ForChild(true))
 		cursor = ctx.CompositeANSI(&shellBuf, w.compositor, terminal.Rect{X: dx, Y: dy, W: sz.W, H: sz.H}, dlgANSI)
 	}
 
 	return ui.ANSIFrame(shellBuf, cursor)
+}
+
+func applyDialogShadow(buf *terminal.CellBuf, dlgRect terminal.Rect, theme ui.Theme) {
+	if buf == nil || dlgRect.W <= 0 || dlgRect.H <= 0 {
+		return
+	}
+	// Monospace cells are ~2:1 (height:width), so the shadow stretches 2x as
+	// many columns horizontally (4 cols right, 2 cols left) as rows vertically
+	// (2 rows down, 1 row up). The dark core is tightly bound to the dialog edge
+	// with a deep initial darkness and a fast non-linear falloff outward.
+	var (
+		rightSteps = [5]float64{1.0, 0.25, 0.58, 0.78, 0.90} // cols 1..4 right (deep start, fast falloff)
+		leftSteps  = [3]float64{1.0, 0.91, 0.96}             // cols 1..2 left (very light halo)
+		downSteps  = [3]float64{1.0, 0.28, 0.78}             // rows 1..2 down (deep row 1, fast drop to row 2)
+		upStep     = 0.91                                    // row 1 up
+	)
+	minX := max(0, dlgRect.X-2)
+	maxX := min(buf.Width-1, dlgRect.X+dlgRect.W+3)
+	minY := max(0, dlgRect.Y-1)
+	maxY := min(buf.Height-1, dlgRect.Y+dlgRect.H+1)
+
+	for y := minY; y <= maxY; y++ {
+		for x := minX; x <= maxX; x++ {
+			if x >= dlgRect.X && x < dlgRect.X+dlgRect.W && y >= dlgRect.Y && y < dlgRect.Y+dlgRect.H {
+				continue
+			}
+			topDist := 0
+			if y < dlgRect.Y {
+				topDist = dlgRect.Y - y
+			}
+			bottomDist := 0
+			if y >= dlgRect.Y+dlgRect.H {
+				bottomDist = y - (dlgRect.Y + dlgRect.H) + 1
+			}
+			leftDist := 0
+			if x < dlgRect.X {
+				leftDist = dlgRect.X - x
+			}
+			rightDist := 0
+			if x >= dlgRect.X+dlgRect.W {
+				rightDist = x - (dlgRect.X + dlgRect.W) + 1
+			}
+
+			factor := 1.0
+			switch {
+			case topDist == 1:
+				switch {
+				case leftDist == 2:
+					factor = 0.95
+				case leftDist == 1:
+					factor = 0.92
+				case rightDist == 0:
+					factor = upStep
+				case rightDist <= 4:
+					// Smooth 1-character corner taper along top-right
+					darkness := (1.0 - upStep) * (1.0 - rightSteps[rightDist]) / (1.0 - rightSteps[1])
+					factor = 1.0 - darkness
+				}
+
+			case bottomDist == 0 && leftDist > 0:
+				if leftDist <= 2 {
+					factor = leftSteps[leftDist]
+					if y == dlgRect.Y {
+						factor = 1.0 - (1.0-factor)*0.65
+					}
+				}
+
+			case bottomDist == 0 && rightDist > 0:
+				if rightDist <= 4 {
+					factor = rightSteps[rightDist]
+					if y == dlgRect.Y {
+						// Soften the top-most row of the right shadow while keeping per-column steps
+						factor = 1.0 - (1.0-factor)*0.55
+					}
+				}
+
+			case bottomDist >= 1 && bottomDist <= 2:
+				baseV := downSteps[bottomDist]
+				vDarkness := 1.0 - baseV
+				var hWeight float64
+				switch {
+				case leftDist == 2:
+					hWeight = 0.08
+				case leftDist == 1:
+					hWeight = 0.28
+				case x == dlgRect.X:
+					hWeight = 0.72
+				case x == dlgRect.X+1:
+					hWeight = 0.92
+				case rightDist == 0:
+					hWeight = 1.0
+				case rightDist <= 4:
+					hWeight = (1.0 - rightSteps[rightDist]) / (1.0 - rightSteps[1])
+				}
+				if hWeight > 0 {
+					factor = 1.0 - vDarkness*hWeight
+				}
+			}
+
+			if factor < 1.0 {
+				buf.Set(x, y, darkenShadowCell(buf.Get(x, y), theme, factor))
+			}
+		}
+	}
+}
+
+func darkenShadowCell(cell terminal.Cell, theme ui.Theme, factor float64) terminal.Cell {
+	style := cell.Style
+	attrs := style.Attributes()
+	fg := style.Foreground()
+	bg := style.Background()
+	if attrs&terminal.CharResetForegroundDefault != 0 {
+		fg = theme.EffectiveForeground()
+		attrs &^= terminal.CharResetForegroundDefault
+	}
+	if attrs&terminal.CharResetBackgroundDefault != 0 {
+		bg = theme.EffectiveBackground()
+		attrs &^= terminal.CharResetBackgroundDefault
+	}
+	return terminal.Cell{
+		Grapheme: cell.Grapheme,
+		Style:    terminal.NewStyle(scaleRGB(fg, factor), scaleRGB(bg, factor), attrs),
+	}
+}
+
+func scaleRGB(c terminal.Color, factor float64) terminal.Color {
+	if factor <= 0 {
+		return 0
+	}
+	if factor >= 1 {
+		return c
+	}
+	r := uint8(float64((c>>16)&0xFF) * factor)
+	g := uint8(float64((c>>8)&0xFF) * factor)
+	b := uint8(float64(c&0xFF) * factor)
+	return terminal.Color(uint32(r)<<16 | uint32(g)<<8 | uint32(b))
 }
 
 func (w *AppWidget) HandleEvent(e input.Event) bool {
@@ -957,20 +1098,32 @@ func (w *AppWidget) slashPath(path string) string {
 	return filepath.Clean(path)
 }
 
-func (w *AppWidget) openSettingsDialog() {
-	dlg := dialog.NewChoiceDialog("Settings", "Choose an option:", []dialog.Choice{
-		{Label: "AI provider and model", Hotkey: "a"},
-	}, func(index int) {
-		w.closeDialog()
-		if index == 0 {
-			w.launchModelSetup()
-		}
-	})
-	dlg.OnCancel = w.closeDialog
+func (w *AppWidget) setDialog(dlg ui.Widget) {
 	w.mu.Lock()
 	w.dialog = dlg
 	w.mu.Unlock()
 	w.invalidate()
+}
+
+func (w *AppWidget) openSettingsDialog() {
+	dlg := dialog.NewSettingsDialog(
+		dialog.SettingsValues{
+			ShowPanels:  w.PanelsVisible(),
+			ConfigureAI: !w.disableAI,
+		},
+		func(values dialog.SettingsValues) {
+			w.closeDialog()
+			if values.ShowPanels != w.PanelsVisible() {
+				w.SetPanelsVisible(values.ShowPanels)
+			}
+			if values.ConfigureAI && !w.disableAI {
+				w.launchModelSetup()
+			}
+			w.invalidate()
+		},
+		w.closeDialog,
+	)
+	w.setDialog(dlg)
 }
 
 func (w *AppWidget) launchModelSetup() {
@@ -982,16 +1135,8 @@ func (w *AppWidget) showSlashError(err error) {
 	if err == nil {
 		return
 	}
-	dlg := dialog.NewChoiceDialog("Slash Command Error", err.Error(), []dialog.Choice{
-		{Label: "[OK]", Hotkey: "o"},
-	}, func(int) {
-		w.closeDialog()
-	})
-	dlg.OnCancel = w.closeDialog
-	w.mu.Lock()
-	w.dialog = dlg
-	w.mu.Unlock()
-	w.invalidate()
+	dlg := dialog.NewErrorDialog("Slash Command Error", err.Error(), w.closeDialog)
+	w.setDialog(dlg)
 }
 
 func (w *AppWidget) refreshPanels() {
@@ -1213,67 +1358,78 @@ func findFilesCommand(findPaths, findContent string, maxResults int) string {
 }
 
 func (w *AppWidget) openListFilesDialog() {
-	dlg := dialog.NewFormDialog(
-		dialog.ActionListFiles,
-		"Find Files",
-		"Filter paths structurally and/or search file content semantically:",
-		[]string{"Find paths", "Find content (semantic)", "Maximum results"},
-		[]string{"**", "", strconv.Itoa(filelist.DefaultMaxResults)},
-		nil,
+	dlg := dialog.NewFindFilesDialog(
+		w.newPathInput("**"),
+		"**",
+		"",
+		strconv.Itoa(filelist.DefaultMaxResults),
+		func(findPaths, findContent, maxResultsText string) {
+			maxResults, err := strconv.Atoi(maxResultsText)
+			if err != nil {
+				w.showSlashError(fmt.Errorf("maximum results must be an integer"))
+				return
+			}
+			command := findFilesCommand(findPaths, findContent, maxResults)
+			w.closeDialog()
+			w.sh.SetInput(command)
+			w.sh.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
+		},
+		w.closeDialog,
 	)
-	dlg.OnCancel = w.closeDialog
-	dlg.OnSubmitForm = func(_ dialog.DialogAction, values []string, _ *filemanager.FileOp) {
-		if len(values) != 3 {
-			w.showSlashError(fmt.Errorf("file search requires path filter, content query, and result limit"))
-			return
-		}
-		maxResults, err := strconv.Atoi(values[2])
-		if err != nil {
-			w.showSlashError(fmt.Errorf("maximum results must be an integer"))
-			return
-		}
-		command := findFilesCommand(values[0], values[1], maxResults)
-		w.closeDialog()
-		w.sh.SetInput(command)
-		w.sh.HandleEvent(input.KeyPressEvent{Code: input.KeyEnter})
-	}
-	w.mu.Lock()
-	w.dialog = dlg
-	w.mu.Unlock()
-	w.invalidate()
+	w.setDialog(dlg)
 }
 
 func (w *AppWidget) openMkdirDialog() {
-	dlg := dialog.NewInputDialog(dialog.ActionMkdir, "Make Directory", "Create directory:", "", nil)
-	dlg.OnCancel = w.closeDialog
-	dlg.OnSubmitInput = w.onDialogSubmitInput
-	dlg.Fields[0].Input = w.newPathInput("")
-	w.mu.Lock()
-	w.dialog = dlg
-	w.mu.Unlock()
-	w.invalidate()
+	dlg := dialog.NewMkdirDialog(
+		w.newPathInput(""),
+		func(dir string) {
+			w.rememberPaths(dir)
+			w.closeDialog()
+			target := w.resolveShellPath(dir)
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				w.showSlashError(fmt.Errorf("create directory %q: %w", target, err))
+				return
+			}
+			w.refreshPanels()
+			w.invalidate()
+		},
+		w.closeDialog,
+	)
+	w.setDialog(dlg)
 }
 
 func (w *AppWidget) openMountPathDialog() {
 	defaultPath := w.sh.Dir()
-	dlg := dialog.NewInputDialog(dialog.ActionMount, "Mount Directory", "Choose a guest path (relative paths use the current directory; ~ expands to home):", defaultPath, nil)
-	dlg.Fields[0].Label = "Guest path"
-	dlg.Fields[0].Input = w.newPathInput(defaultPath)
-	dlg.OnCancel = func() {
-		w.closeDialog()
-		if err := browser.CancelMountSelection(); err != nil {
-			w.showSlashError(err)
-		}
-	}
-	dlg.OnSubmitInput = w.onDialogSubmitInput
-	w.mu.Lock()
-	w.dialog = dlg
-	w.mu.Unlock()
-	w.invalidate()
+	dlg := dialog.NewMountDialog(
+		w.newPathInput(defaultPath),
+		defaultPath,
+		func(val string) {
+			w.rememberPaths(val)
+			w.closeDialog()
+			mountPath, err := w.resolveMountGuestPath(val)
+			if err != nil {
+				w.showSlashError(err)
+				return
+			}
+			if err := browser.MountDirectory(mountPath); err != nil {
+				w.showSlashError(err)
+				return
+			}
+			w.refreshPanels()
+			w.invalidate()
+		},
+		func() {
+			w.closeDialog()
+			if err := browser.CancelMountSelection(); err != nil {
+				w.showSlashError(err)
+			}
+		},
+	)
+	w.setDialog(dlg)
 }
 
 func (w *AppWidget) openRenameDialog() {
-	sources := []string(nil)
+	var sources []string
 	if w.PanelsVisible() {
 		sources = w.opSources()
 	}
@@ -1285,31 +1441,45 @@ func (w *AppWidget) openRenameDialog() {
 		w.showSlashError(fmt.Errorf("rename accepts one source at a time"))
 		return
 	}
-	name := filepath.Base(sources[0])
-	pending := &filemanager.FileOp{Kind: filemanager.OpMove, Sources: sources}
-	dlg := dialog.NewInputDialog(dialog.ActionRename, "Rename", "Rename "+name+" to:", name, pending)
-	dlg.OnCancel = w.closeDialog
-	dlg.OnSubmitInput = w.onDialogSubmitInput
-	dlg.Fields[0].Input = w.newPathInput(name)
-	w.mu.Lock()
-	w.dialog = dlg
-	w.mu.Unlock()
-	w.invalidate()
+	oldPath := sources[0]
+	name := filepath.Base(oldPath)
+	dlg := dialog.NewRenameSelectedDialog(
+		name,
+		w.newPathInput(name),
+		func(val string) {
+			w.rememberPaths(val)
+			w.closeDialog()
+			newPath := w.resolveShellPath(val)
+			if err := os.Rename(oldPath, newPath); err != nil {
+				w.showSlashError(fmt.Errorf("rename %q to %q: %w", oldPath, newPath, err))
+				return
+			}
+			w.refreshPanels()
+			w.invalidate()
+		},
+		w.closeDialog,
+	)
+	w.setDialog(dlg)
 }
 
 func (w *AppWidget) openRenamePathDialog() {
-	dlg := dialog.NewFormDialog(
-		dialog.ActionRename, "Rename", "Enter the source and new path:",
-		[]string{"Source path", "New path"}, nil, nil,
+	dlg := dialog.NewRenamePathDialog(
+		w.newPathInput(""),
+		w.newPathInput(""),
+		func(src, dst string) {
+			w.rememberPaths(src, dst)
+			oldPath, newPath := w.resolveShellPath(src), w.resolveShellPath(dst)
+			w.closeDialog()
+			if err := os.Rename(oldPath, newPath); err != nil {
+				w.showSlashError(fmt.Errorf("rename %q to %q: %w", oldPath, newPath, err))
+				return
+			}
+			w.refreshPanels()
+			w.invalidate()
+		},
+		w.closeDialog,
 	)
-	dlg.Fields[0].Input = w.newPathInput("")
-	dlg.Fields[1].Input = w.newPathInput("")
-	dlg.OnCancel = w.closeDialog
-	dlg.OnSubmitForm = w.onDialogSubmitForm
-	w.mu.Lock()
-	w.dialog = dlg
-	w.mu.Unlock()
-	w.invalidate()
+	w.setDialog(dlg)
 }
 
 func (w *AppWidget) openTransferDialog(kind filemanager.FileOpKind) {
@@ -1322,31 +1492,37 @@ func (w *AppWidget) openTransferDialog(kind filemanager.FileOpKind) {
 			dest = w.panels.ActiveDir()
 		}
 	}
-	action := dialog.ActionCopy
-	title := "Copy"
+	submitSelected := func(val string) {
+		w.rememberPaths(val)
+		w.closeDialog()
+		w.startFileOp(filemanager.FileOp{
+			Kind:    kind,
+			Sources: sources,
+			Dest:    w.resolveShellPath(val),
+		})
+	}
+	submitPaths := func(src, dst string) {
+		w.rememberPaths(src, dst)
+		w.closeDialog()
+		w.startFileOp(filemanager.FileOp{
+			Kind:    kind,
+			Sources: []string{w.resolveShellPath(src)},
+			Dest:    w.resolveShellPath(dst),
+		})
+	}
 	if kind == filemanager.OpMove {
-		action = dialog.ActionMove
-		title = "Move"
+		if len(sources) == 0 {
+			w.setDialog(dialog.NewMovePathDialog(w.newPathInput(""), w.newPathInput(dest), submitPaths, w.closeDialog))
+		} else {
+			w.setDialog(dialog.NewMoveSelectedDialog(dialog.SummarizeSources(sources), w.newPathInput(dest), submitSelected, w.closeDialog))
+		}
+		return
 	}
-	pending := &filemanager.FileOp{Kind: kind, Sources: sources}
-	var dlg *dialog.DialogWidget
 	if len(sources) == 0 {
-		dlg = dialog.NewFormDialog(action, title, "Enter source and destination paths:",
-			[]string{"Source path", "Destination"}, []string{"", dest}, pending)
-		dlg.Fields[0].Input = w.newPathInput("")
-		dlg.Fields[1].Input = w.newPathInput(dest)
-		dlg.OnSubmitForm = w.onDialogSubmitForm
+		w.setDialog(dialog.NewCopyPathDialog(w.newPathInput(""), w.newPathInput(dest), submitPaths, w.closeDialog))
 	} else {
-		dlg = dialog.NewInputDialog(action, title, fmt.Sprintf("%s %s to:", title, dialog.SummarizeSources(sources)), dest, pending)
-		dlg.Fields[0].Label = "Destination"
-		dlg.Fields[0].Input = w.newPathInput(dest)
-		dlg.OnSubmitInput = w.onDialogSubmitInput
+		w.setDialog(dialog.NewCopySelectedDialog(dialog.SummarizeSources(sources), w.newPathInput(dest), submitSelected, w.closeDialog))
 	}
-	dlg.OnCancel = w.closeDialog
-	w.mu.Lock()
-	w.dialog = dlg
-	w.mu.Unlock()
-	w.invalidate()
 }
 
 func (w *AppWidget) openDeleteDialog() {
@@ -1359,140 +1535,50 @@ func (w *AppWidget) openDeleteDialog() {
 }
 
 func (w *AppWidget) openDeletePathDialog() {
-	dlg := dialog.NewInputDialog(dialog.ActionDelete, "Delete", "Enter the path to delete:", "", nil)
-	dlg.Fields[0].Label = "Path"
-	dlg.Fields[0].Input = w.newPathInput("")
-	dlg.OnCancel = w.closeDialog
-	dlg.OnSubmitInput = func(_ dialog.DialogAction, value string, _ *filemanager.FileOp) {
-		w.rememberPaths(value)
-		w.openDeleteDialogForSources([]string{w.resolveShellPath(value)})
-	}
-	w.mu.Lock()
-	w.dialog = dlg
-	w.mu.Unlock()
-	w.invalidate()
+	dlg := dialog.NewDeletePathDialog(
+		w.newPathInput(""),
+		func(value string) {
+			w.rememberPaths(value)
+			w.openDeleteDialogForSources([]string{w.resolveShellPath(value)})
+		},
+		w.closeDialog,
+	)
+	w.setDialog(dlg)
 }
 
 func (w *AppWidget) openDeleteDialogForSources(sources []string) {
 	if len(sources) == 0 {
 		return
 	}
-	prompt := fmt.Sprintf("Delete %s?", dialog.SummarizeSources(sources))
-	pending := &filemanager.FileOp{
+	op := filemanager.FileOp{
 		Kind:    filemanager.OpDelete,
 		Sources: sources,
 	}
-	dlg := dialog.NewConfirmDialog(dialog.ActionDelete, "Delete", prompt, pending)
-	dlg.OnCancel = w.closeDialog
-	dlg.OnConfirm = func(_ dialog.DialogAction, op *filemanager.FileOp) {
-		w.closeDialog()
-		if op != nil {
-			w.startFileOp(*op)
-		}
-	}
-	w.mu.Lock()
-	w.dialog = dlg
-	w.mu.Unlock()
-	w.invalidate()
-}
-
-func (w *AppWidget) onDialogSubmitInput(action dialog.DialogAction, val string, pending *filemanager.FileOp) {
-	w.rememberPaths(val)
-	w.closeDialog()
-	switch action {
-	case dialog.ActionMkdir:
-		target := w.resolveShellPath(val)
-		if err := os.MkdirAll(target, 0o755); err != nil {
-			w.showSlashError(fmt.Errorf("create directory %q: %w", target, err))
-			return
-		}
-		w.refreshPanels()
-	case dialog.ActionRename:
-		if pending == nil || len(pending.Sources) != 1 {
-			w.showSlashError(fmt.Errorf("rename source is missing"))
-			return
-		}
-		oldPath := pending.Sources[0]
-		newPath := w.resolveShellPath(val)
-		if err := os.Rename(oldPath, newPath); err != nil {
-			w.showSlashError(fmt.Errorf("rename %q to %q: %w", oldPath, newPath, err))
-			return
-		}
-		w.refreshPanels()
-	case dialog.ActionCopy, dialog.ActionMove:
-		if pending == nil || len(pending.Sources) == 0 {
-			w.showSlashError(fmt.Errorf("file operation source is missing"))
-			return
-		}
-		pending.Dest = w.resolveShellPath(val)
-		w.startFileOp(*pending)
-	case dialog.ActionEdit:
-		if err := w.OpenEditor(w.resolveShellPath(val), false); err != nil {
-			w.showSlashError(fmt.Errorf("open %q: %w", val, err))
-		}
-	case dialog.ActionMount:
-		mountPath, err := w.resolveMountGuestPath(val)
-		if err != nil {
-			w.showSlashError(err)
-			return
-		}
-		if err := browser.MountDirectory(mountPath); err != nil {
-			w.showSlashError(err)
-			return
-		}
-		w.refreshPanels()
-	}
-	w.invalidate()
-}
-
-func (w *AppWidget) onDialogSubmitForm(action dialog.DialogAction, values []string, pending *filemanager.FileOp) {
-	for _, value := range values {
-		w.rememberPaths(value)
-	}
-	switch action {
-	case dialog.ActionCopy, dialog.ActionMove:
-		if len(values) != 2 || pending == nil {
+	dlg := dialog.NewDeleteConfirmDialog(
+		dialog.SummarizeSources(sources),
+		func() {
 			w.closeDialog()
-			w.showSlashError(fmt.Errorf("source and destination paths are required"))
-			return
-		}
-		pending.Sources = []string{w.resolveShellPath(values[0])}
-		pending.Dest = w.resolveShellPath(values[1])
-		w.closeDialog()
-		w.startFileOp(*pending)
-	case dialog.ActionRename:
-		if len(values) != 2 {
-			w.closeDialog()
-			w.showSlashError(fmt.Errorf("source and new paths are required"))
-			return
-		}
-		oldPath, newPath := w.resolveShellPath(values[0]), w.resolveShellPath(values[1])
-		w.closeDialog()
-		if err := os.Rename(oldPath, newPath); err != nil {
-			w.showSlashError(fmt.Errorf("rename %q to %q: %w", oldPath, newPath, err))
-			return
-		}
-		w.refreshPanels()
-	case dialog.ActionEdit:
-		if len(values) != 1 {
-			w.closeDialog()
-			return
-		}
-		w.onDialogSubmitInput(dialog.ActionEdit, values[0], nil)
-	}
-	w.invalidate()
+			w.startFileOp(op)
+		},
+		w.closeDialog,
+	)
+	w.setDialog(dlg)
 }
 
 func (w *AppWidget) openEditPathDialog() {
-	dlg := dialog.NewInputDialog(dialog.ActionEdit, "Edit File", "Enter the file path to edit:", "", nil)
-	dlg.Fields[0].Label = "File path"
-	dlg.Fields[0].Input = w.newPathInput("")
-	dlg.OnCancel = w.closeDialog
-	dlg.OnSubmitInput = w.onDialogSubmitInput
-	w.mu.Lock()
-	w.dialog = dlg
-	w.mu.Unlock()
-	w.invalidate()
+	dlg := dialog.NewEditDialog(
+		w.newPathInput(""),
+		func(val string) {
+			w.rememberPaths(val)
+			w.closeDialog()
+			if err := w.OpenEditor(w.resolveShellPath(val), false); err != nil {
+				w.showSlashError(fmt.Errorf("open %q: %w", val, err))
+			}
+			w.invalidate()
+		},
+		w.closeDialog,
+	)
+	w.setDialog(dlg)
 }
 
 func (w *AppWidget) startFileOp(op filemanager.FileOp) {
@@ -1520,7 +1606,7 @@ func (w *AppWidget) startFileOp(op filemanager.FileOp) {
 			func(prog filemanager.FileOpProgress) {
 				w.mu.Lock()
 				if w.dialog == progressDialog {
-					progressDialog.Progress = prog
+					progressDialog.SetProgress(prog)
 				}
 				w.mu.Unlock()
 				w.invalidate()

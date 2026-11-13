@@ -29,11 +29,38 @@ type Size struct{ W, H int }
 // InvalidateFunc is called by a widget to request a host redraw.
 type InvalidateFunc func()
 
+// Theme carries terminal-level color defaults threaded through RenderContext.
+type Theme struct {
+	DefaultForeground terminal.Color
+	DefaultBackground terminal.Color
+	HasDefaultFG      bool
+	HasDefaultBG      bool
+}
+
+// EffectiveForeground returns DefaultForeground, or the standard light-gray
+// fallback (0xE5E5E5) when no foreground color has been reported yet.
+func (t Theme) EffectiveForeground() terminal.Color {
+	if t.HasDefaultFG || t.DefaultForeground != 0 {
+		return t.DefaultForeground
+	}
+	return 0xE5E5E5
+}
+
+// EffectiveBackground returns DefaultBackground, or black (0x000000) when no
+// background color has been reported yet.
+func (t Theme) EffectiveBackground() terminal.Color {
+	if t.HasDefaultBG || t.DefaultBackground != 0 {
+		return t.DefaultBackground
+	}
+	return 0x000000
+}
+
 // RenderContext is threaded top-down through the widget tree during Render.
 type RenderContext struct {
 	Focused    bool
 	Invalidate InvalidateFunc
 	OnError    func(error)
+	Theme      Theme
 }
 
 // ForChild returns context for a child whose focus is constrained by its parent.

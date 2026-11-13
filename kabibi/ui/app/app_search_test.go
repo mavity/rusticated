@@ -50,17 +50,12 @@ func TestListFilesSearchShortcutOpensParameterDialog(t *testing.T) {
 	if !widget.HandleEvent(input.KeyPressEvent{Code: 'f', Mod: input.ModCtrl}) {
 		t.Fatal("Ctrl+F was not handled")
 	}
-	widget.mu.Lock()
-	dlg := widget.dialog
-	widget.mu.Unlock()
-	if dlg == nil {
-		t.Fatal("Ctrl+F did not open the find-files dialog")
+	dlg, ok := widget.Dialog().(*dialog.FindFilesDialog)
+	if !ok || dlg == nil {
+		t.Fatalf("Ctrl+F dialog = %T, want *dialog.FindFilesDialog", widget.Dialog())
 	}
-	if dlg.Action != dialog.ActionListFiles {
-		t.Fatalf("dialog action = %v, want ActionListFiles", dlg.Action)
-	}
-	if len(dlg.Fields) != 3 {
-		t.Fatalf("dialog has %d fields, want path-filter, content-query, and result-limit", len(dlg.Fields))
+	if dlg.FindPaths == nil || dlg.FindContent == nil || dlg.MaxResults == nil {
+		t.Fatalf("find-files dialog missing expected inputs: %#v", dlg)
 	}
 }
 
@@ -71,11 +66,9 @@ func TestPlainF7StillOpensMkdirDialog(t *testing.T) {
 	if !widget.HandleEvent(input.KeyPressEvent{Code: input.KeyF7}) {
 		t.Fatal("F7 was not handled")
 	}
-	widget.mu.Lock()
-	dlg := widget.dialog
-	widget.mu.Unlock()
-	if dlg == nil || dlg.Action != dialog.ActionMkdir {
-		t.Fatalf("F7 dialog = %#v, want ActionMkdir", dlg)
+	dlg, ok := widget.Dialog().(*dialog.MkdirDialog)
+	if !ok || dlg == nil {
+		t.Fatalf("F7 dialog = %T, want *dialog.MkdirDialog", widget.Dialog())
 	}
 }
 

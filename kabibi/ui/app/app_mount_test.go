@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/mavity/rusticated/kabibi/ui/dialog"
 )
 
 func TestMountPathDialogDefaultsToCurrentShellDirectory(t *testing.T) {
@@ -20,7 +22,11 @@ func TestMountPathDialogDefaultsToCurrentShellDirectory(t *testing.T) {
 	}
 
 	widget.openMountPathDialog()
-	if got := widget.dialog.Fields[0].Input.Value(); got != activeDir {
+	mountDlg, ok := widget.Dialog().(*dialog.MountDialog)
+	if !ok || mountDlg == nil {
+		t.Fatalf("mount dialog = %T, want *dialog.MountDialog", widget.Dialog())
+	}
+	if got := mountDlg.GuestPath.Value(); got != activeDir {
 		t.Fatalf("mount dialog default = %q, want current shell directory %q", got, activeDir)
 	}
 }

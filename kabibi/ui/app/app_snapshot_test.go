@@ -46,6 +46,58 @@ func TestAppWidgetShellCursorRemainsVisibleWhilePanelsRouteNavigation(t *testing
 	}
 }
 
+func TestAppWidget_DialogShadowDarkensRightBottomAndHaloOverDefaultColors(t *testing.T) {
+	widget := NewWidget(AppWidgetOptions{WorkingDir: t.TempDir(), PanelsVisible: false})
+	defer widget.Close()
+	widget.openMkdirDialog()
+
+	rect := ui.Rect{W: 80, H: 24}
+	theme := ui.Theme{
+		DefaultForeground: 0xD0D0D0,
+		DefaultBackground: 0xFAF4E8,
+		HasDefaultFG:      true,
+		HasDefaultBG:      true,
+	}
+	dlgSize := widget.Dialog().Measure(ui.Constraints{MaxW: rect.W, MaxH: rect.H})
+	buf, _ := renderAppANSIForTest(t, widget.Render(rect, ui.RenderContext{
+		Focused: true,
+		Theme:   theme,
+	}), rect.W, rect.H)
+
+	dx := (buf.Width - dlgSize.W) / 2
+	dy := (buf.Height - dlgSize.H) / 2
+	if buf.Height >= dlgSize.H+2 && dy+dlgSize.H+2 > buf.Height {
+		dy = buf.Height - dlgSize.H - 2
+	}
+
+	// Vertical levels: 1 down (darkest) < 2 down (much less dark) < 1 up (very light dark) < untouched
+	down1 := buf.Get(dx+4, dy+dlgSize.H).Style.Background()
+	down2 := buf.Get(dx+4, dy+dlgSize.H+1).Style.Background()
+	up1 := buf.Get(dx+4, dy-1).Style.Background()
+	if !(down1 < down2 && down2 < up1 && up1 < theme.DefaultBackground) {
+		t.Fatalf("vertical shadow backgrounds (down1=%#06x, down2=%#06x, up1=%#06x) want strictly increasing toward %#06x",
+			down1, down2, up1, theme.DefaultBackground)
+	}
+
+	// Horizontal 2:1 stretch with per-character gradient steps:
+	// cols 1, 2, 3, 4 to the right must each be strictly lighter than the previous column,
+	// and cols 1, 2 to the left must also step strictly toward DefaultBackground.
+	right1 := buf.Get(dx+dlgRectRightOffset(dlgSize.W, 1), dy+2).Style.Background()
+	right2 := buf.Get(dx+dlgRectRightOffset(dlgSize.W, 2), dy+2).Style.Background()
+	right3 := buf.Get(dx+dlgRectRightOffset(dlgSize.W, 3), dy+2).Style.Background()
+	right4 := buf.Get(dx+dlgRectRightOffset(dlgSize.W, 4), dy+2).Style.Background()
+	left1 := buf.Get(dx-1, dy+2).Style.Background()
+	left2 := buf.Get(dx-2, dy+2).Style.Background()
+	if !(right1 < right2 && right2 < right3 && right3 < right4 && right4 < left1 && left1 < left2 && left2 < theme.DefaultBackground) {
+		t.Fatalf("horizontal per-char shadow steps (right1..4=%#06x,%#06x,%#06x,%#06x left1..2=%#06x,%#06x) want strictly increasing toward %#06x",
+			right1, right2, right3, right4, left1, left2, theme.DefaultBackground)
+	}
+}
+
+func dlgRectRightOffset(width, dist int) int {
+	return width + dist - 1
+}
+
 func assertAppSnapshot(t *testing.T, snapFile string, widget *AppWidget, scrollback *string, rect ui.Rect) {
 	t.Helper()
 
