@@ -8,10 +8,10 @@ import (
 	"time"
 )
 
-func findMohabbatNextDirs() (string, string, error) {
+func findMohabbatNextDir() (string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 
 	candidates := []string{
@@ -21,13 +21,16 @@ func findMohabbatNextDirs() (string, string, error) {
 	}
 
 	for _, cand := range candidates {
-		probeDir := filepath.Join(cand, "probe")
-		if info, err := os.Stat(probeDir); err == nil && info.IsDir() {
-			return cand, probeDir, nil
+		palDir := filepath.Join(cand, "pal")
+		brotDir := filepath.Join(cand, "brot")
+		if palInfo, palErr := os.Stat(palDir); palErr == nil && palInfo.IsDir() {
+			if brotInfo, brotErr := os.Stat(brotDir); brotErr == nil && brotInfo.IsDir() {
+				return cand, nil
+			}
 		}
 	}
 
-	return "", "", fmt.Errorf("could not locate mohabbat-next directory from %s", cwd)
+	return "", fmt.Errorf("could not locate mohabbat-next directory from %s", cwd)
 }
 
 func main() {
@@ -36,14 +39,14 @@ func main() {
 	fmt.Fprintln(os.Stdout, "🧪  Mohabbat-Next Unified Build & Test Runner (Go)")
 	fmt.Fprintln(os.Stdout, "================================================================================")
 
-	nextDir, probeDir, err := findMohabbatNextDirs()
+	nextDir, err := findMohabbatNextDir()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
-	distExe := filepath.Join(probeDir, "hosts", "windows", "out", "MohabbatProbe.exe")
-	runner := NewRunner(nextDir, probeDir, distExe)
+	distExe := filepath.Join(nextDir, "brot", "windows-host", "out", "MohabbatNext.exe")
+	runner := NewRunner(nextDir, distExe)
 
 	// Stage 1: Always Build First (Unbuffered)
 	fmt.Fprintln(os.Stdout, "\n================================================================================")

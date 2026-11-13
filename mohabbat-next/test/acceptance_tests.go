@@ -15,15 +15,15 @@ import (
 	"time"
 )
 
-const wslProbeTimeout = 90 * time.Second
+const wslStartupTimeout = 90 * time.Second
 
 var (
 	reVerifyComponents = regexp.MustCompile(`^Verified all six compressed components\.\n$`)
-	reEchoTranscript   = regexp.MustCompile(`^Anonymous-memory probe ready \(compiled [^\)]+\)\. Enter an empty line to exit\.\n> echo: alpha\n> echo: beta\n> $`)
-	reEmptyEOF         = regexp.MustCompile(`^Anonymous-memory probe ready \(compiled [^\)]+\)\. Enter an empty line to exit\.\n> $`)
+	reEchoTranscript   = regexp.MustCompile(`^Mohabbat-next ready \(compiled [^\)]+\)\. Enter an empty line to exit\.\n> echo: alpha\n> echo: beta\n> $`)
+	reEmptyEOF         = regexp.MustCompile(`^Mohabbat-next ready \(compiled [^\)]+\)\. Enter an empty line to exit\.\n> $`)
 )
 
-func runProbeCase(ctx context.Context, command string, args []string, stdinText string, expectedExit int, expectedRegex *regexp.Regexp) error {
+func runBundleCase(ctx context.Context, command string, args []string, stdinText string, expectedExit int, expectedRegex *regexp.Regexp) error {
 	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Stdin = strings.NewReader(stdinText)
 	var stdout, stderr bytes.Buffer
@@ -50,46 +50,46 @@ func runProbeCase(ctx context.Context, command string, args []string, stdinText 
 	return nil
 }
 
-func runStandardProbeSuite(r *Runner, suiteName string, command string, baseArgs []string, supportVerifyFlag bool) {
+func runStandardAcceptanceSuite(r *Runner, suiteName string, command string, baseArgs []string, supportVerifyFlag bool) {
 	if supportVerifyFlag {
 		r.RunTest(suiteName, "verify-components", func() error {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			args := append(append([]string(nil), baseArgs...), "--verify-components")
-			return runProbeCase(ctx, command, args, "", 0, reVerifyComponents)
+			return runBundleCase(ctx, command, args, "", 0, reVerifyComponents)
 		})
 	}
 
 	r.RunTest(suiteName, "interactive-echo-crlf-lf", func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		return runProbeCase(ctx, command, baseArgs, "alpha\r\nbeta\n\n", 0, reEchoTranscript)
+		return runBundleCase(ctx, command, baseArgs, "alpha\r\nbeta\n\n", 0, reEchoTranscript)
 	})
 
 	r.RunTest(suiteName, "immediate-eof-exit-0", func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		return runProbeCase(ctx, command, baseArgs, "", 0, reEmptyEOF)
+		return runBundleCase(ctx, command, baseArgs, "", 0, reEmptyEOF)
 	})
 
 	r.RunTest(suiteName, "partial-line-eof-discards-line", func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		return runProbeCase(ctx, command, baseArgs, "unfinished", 0, reEmptyEOF)
+		return runBundleCase(ctx, command, baseArgs, "unfinished", 0, reEmptyEOF)
 	})
 
 	r.RunTest(suiteName, "line-capacity-255", func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		line := strings.Repeat("x", 255)
-		return runProbeCase(ctx, command, baseArgs, line+"\n\n", 0, echoTranscriptRegex(line))
+		return runBundleCase(ctx, command, baseArgs, line+"\n\n", 0, echoTranscriptRegex(line))
 	})
 
 	r.RunTest(suiteName, "line-capacity-256", func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		line := strings.Repeat("x", 256)
-		return runProbeCase(ctx, command, baseArgs, line+"\r\n\n", 0, echoTranscriptRegex(line))
+		return runBundleCase(ctx, command, baseArgs, line+"\r\n\n", 0, echoTranscriptRegex(line))
 	})
 
 	r.RunTest(suiteName, "line-capacity-counts-utf8-bytes", func() error {
@@ -99,26 +99,26 @@ func runStandardProbeSuite(r *Runner, suiteName string, command string, baseArgs
 		if len(line) != 256 {
 			return fmt.Errorf("test line is %d bytes, want 256", len(line))
 		}
-		return runProbeCase(ctx, command, baseArgs, line+"\n\n", 0, echoTranscriptRegex(line))
+		return runBundleCase(ctx, command, baseArgs, line+"\n\n", 0, echoTranscriptRegex(line))
 	})
 
 	r.RunTest(suiteName, "cr-only-line-separators", func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		return runProbeCase(ctx, command, baseArgs, "alpha\rbeta\r\r", 0, echoTranscriptRegex("alpha", "beta"))
+		return runBundleCase(ctx, command, baseArgs, "alpha\rbeta\r\r", 0, echoTranscriptRegex("alpha", "beta"))
 	})
 
 	r.RunTest(suiteName, "line-overflow-257-exit-2", func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		longLine := strings.Repeat("x", 257) + "\n"
-		return runProbeCase(ctx, command, baseArgs, longLine, 2, reEmptyEOF)
+		return runBundleCase(ctx, command, baseArgs, longLine, 2, reEmptyEOF)
 	})
 }
 
 func echoTranscriptRegex(lines ...string) *regexp.Regexp {
 	var expected strings.Builder
-	expected.WriteString(`^Anonymous-memory probe ready \(compiled [^\)]+\)\. Enter an empty line to exit\.\n> `)
+	expected.WriteString(`^Mohabbat-next ready \(compiled [^\)]+\)\. Enter an empty line to exit\.\n> `)
 	for _, line := range lines {
 		expected.WriteString(`echo: `)
 		expected.WriteString(regexp.QuoteMeta(line))
@@ -162,10 +162,10 @@ func (r *Runner) RunStage3ArtifactIntegrityTests() {
 			name    string
 			maxSize int64
 		}{
-			{"probe-x86_64.bin", 4096},
-			{"probe-aarch64.bin", 4096},
-			{"probe-fileio-x86_64.bin", 8192},
-			{"probe-fileio-aarch64.bin", 8192},
+			{"hello-x86_64.bin", 4096},
+			{"hello-aarch64.bin", 4096},
+			{"hello-fileio-x86_64.bin", 8192},
+			{"hello-fileio-aarch64.bin", 8192},
 			{"platform-windows-x86_64.bin", 8192},
 			{"platform-windows-aarch64.bin", 8192},
 			{"platform-linux-x86_64.bin", 8192},
@@ -188,9 +188,9 @@ func (r *Runner) RunStage3ArtifactIntegrityTests() {
 		return nil
 	})
 
-	r.RunTest("artifact/raw-entry", "probe-entry-symbol-at-byte-zero", func() error {
+	r.RunTest("artifact/raw-entry", "hello-entry-symbol-at-byte-zero", func() error {
 		compDir := filepath.Join(r.BuildDir, "components")
-		for _, payload := range []string{"probe", "probe-fileio"} {
+		for _, payload := range []string{"hello", "hello-fileio"} {
 			for _, arch := range []string{"x86_64", "aarch64"} {
 				elfPath := filepath.Join(compDir, payload+"-"+arch+".elf")
 				out, err := exec.Command("llvm-nm", "--defined-only", "--format=posix", elfPath).Output()
@@ -200,23 +200,23 @@ func (r *Runner) RunStage3ArtifactIntegrityTests() {
 				found := false
 				for _, line := range strings.Split(string(out), "\n") {
 					fields := strings.Fields(line)
-					if len(fields) < 3 || fields[0] != "probe_code_start" {
+					if len(fields) < 3 || fields[0] != "hello_payload_code_start" {
 						continue
 					}
 					if found {
-						return fmt.Errorf("probe entry symbol is duplicated in %s", elfPath)
+						return fmt.Errorf("hello payload entry symbol is duplicated in %s", elfPath)
 					}
 					found = true
 					address, err := strconv.ParseUint(fields[2], 16, 64)
 					if err != nil {
-						return fmt.Errorf("parse probe entry address %q in %s: %w", fields[2], elfPath, err)
+						return fmt.Errorf("parse hello payload entry address %q in %s: %w", fields[2], elfPath, err)
 					}
 					if address != 0 {
-						return fmt.Errorf("probe entry symbol in %s is at %#x, want byte offset zero", elfPath, address)
+						return fmt.Errorf("hello payload entry symbol in %s is at %#x, want byte offset zero", elfPath, address)
 					}
 				}
 				if !found {
-					return fmt.Errorf("probe entry symbol missing from %s", elfPath)
+					return fmt.Errorf("hello payload entry symbol missing from %s", elfPath)
 				}
 			}
 		}
@@ -270,24 +270,24 @@ func (r *Runner) RunStage3PlatformMatrix() {
 	// 1. Windows Native (ARM64 or x86_64) + Windows Cross-Arch Emulation
 	if runtime.GOOS == "windows" {
 		nativeSuite := fmt.Sprintf("windows/%s-native", runtime.GOARCH)
-		runStandardProbeSuite(r, nativeSuite, r.DistExe, nil, true)
-		runWindowsFileIoProbeSuite(r, nativeSuite, r.DistExe, nil)
+		runStandardAcceptanceSuite(r, nativeSuite, r.DistExe, nil, true)
+		runWindowsFileIoAcceptanceSuite(r, nativeSuite, r.DistExe, nil)
 
-		// If running on Windows ARM64, also test the x86_64 Windows PAL & x86_64 Probe via a /platform:x64 CLR host!
+		// If running on Windows ARM64, also test the x86_64 Windows PAL and hello payload via a /platform:x64 CLR host.
 		if runtime.GOARCH == "arm64" {
 			x64Exe, err := r.builtX64WindowsHost()
 			r.RunTest("windows/amd64-emulated", "x64-host-artifact", func() error {
 				return err
 			})
 			if err == nil {
-				runStandardProbeSuite(r, "windows/amd64-emulated", x64Exe, nil, true)
-				runWindowsFileIoProbeSuite(r, "windows/amd64-emulated", x64Exe, nil)
+				runStandardAcceptanceSuite(r, "windows/amd64-emulated", x64Exe, nil, true)
+				runWindowsFileIoAcceptanceSuite(r, "windows/amd64-emulated", x64Exe, nil)
 			}
 		}
 	} else {
 		r.RecordDisabled(
 			"windows/native",
-			"probe-suite",
+			"bundle-acceptance",
 			fmt.Sprintf("host GOOS=%s cannot run Windows PE %s natively", runtime.GOOS, filepath.Base(r.DistExe)),
 		)
 	}
@@ -302,7 +302,7 @@ func (r *Runner) RunStage3PlatformMatrix() {
 	r.runDarwinMatrix()
 }
 
-func runWindowsFileIoProbeSuite(r *Runner, suiteName, command string, baseArgs []string) {
+func runWindowsFileIoAcceptanceSuite(r *Runner, suiteName, command string, baseArgs []string) {
 	r.RunTest(suiteName, "raw-abi-fileio-real-filesystem", func() (testErr error) {
 		workDir, err := os.MkdirTemp("", "mohabbat-fileio-")
 		if err != nil {
@@ -321,7 +321,7 @@ func runWindowsFileIoProbeSuite(r *Runner, suiteName, command string, baseArgs [
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		args := append(append([]string(nil), baseArgs...), "--file-io-test", workDir)
-		if err := runProbeCase(ctx, command, args, "", 0, nil); err != nil {
+		if err := runBundleCase(ctx, command, args, "", 0, nil); err != nil {
 			return err
 		}
 
@@ -352,30 +352,30 @@ func (r *Runner) builtX64WindowsHost() (string, error) {
 func (r *Runner) runLinuxMatrix() {
 	if runtime.GOOS == "linux" {
 		if os.Getenv("TERMUX_VERSION") != "" || os.Getenv("PREFIX") == "/data/data/com.termux/files/usr" {
-			r.RecordDisabled("linux/gnu-musl", "probe-suite", "running inside Android Termux environment (tested under android/aarch64 instead)")
+			r.RecordDisabled("linux/gnu-musl", "bundle-acceptance", "running inside Android Termux environment (tested under android/aarch64 instead)")
 			return
 		}
 		suite := fmt.Sprintf("linux/%s-native", runtime.GOARCH)
-		runStandardProbeSuite(r, suite, "bash", []string{r.DistExe}, false)
+		runStandardAcceptanceSuite(r, suite, "bash", []string{r.DistExe}, false)
 		return
 	}
 
 	if runtime.GOOS == "windows" {
 		wslPath, err := exec.LookPath("wsl.exe")
 		if err != nil {
-			r.RecordDisabled("linux/wsl", "probe-suite", fmt.Sprintf("exec.LookPath(\"wsl.exe\") failed: %v", err))
+			r.RecordDisabled("linux/wsl", "bundle-acceptance", fmt.Sprintf("exec.LookPath(\"wsl.exe\") failed: %v", err))
 			return
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), wslProbeTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), wslStartupTimeout)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, wslPath, "-e", "uname", "-sm")
 		out, err := cmd.Output()
 		if ctx.Err() == context.DeadlineExceeded {
-			r.RecordDisabled("linux/wsl", "probe-suite", fmt.Sprintf("command %q timed out after %s (output: %q)", "wsl.exe -e uname -sm", wslProbeTimeout, strings.TrimSpace(string(out))))
+			r.RecordDisabled("linux/wsl", "bundle-acceptance", fmt.Sprintf("command %q timed out after %s (output: %q)", "wsl.exe -e uname -sm", wslStartupTimeout, strings.TrimSpace(string(out))))
 			return
 		}
 		if err != nil {
-			r.RecordDisabled("linux/wsl", "probe-suite", fmt.Sprintf("command %q failed (%v): %q", "wsl.exe -e uname -sm", err, strings.TrimSpace(string(out))))
+			r.RecordDisabled("linux/wsl", "bundle-acceptance", fmt.Sprintf("command %q failed (%v): %q", "wsl.exe -e uname -sm", err, strings.TrimSpace(string(out))))
 			return
 		}
 
@@ -383,22 +383,22 @@ func (r *Runner) runLinuxMatrix() {
 		drive := strings.ToLower(r.DistExe[:1])
 		unixBundle := "/mnt/" + drive + "/" + filepath.ToSlash(r.DistExe[3:])
 		suite := fmt.Sprintf("linux/wsl (%s)", strings.TrimSpace(string(out)))
-		runStandardProbeSuite(r, suite, wslPath, []string{"-e", "bash", unixBundle}, false)
+		runStandardAcceptanceSuite(r, suite, wslPath, []string{"-e", "bash", unixBundle}, false)
 		return
 	}
 
-	r.RecordDisabled("linux/native", "probe-suite", fmt.Sprintf("host GOOS=%s cannot execute Linux ELF binaries locally", runtime.GOOS))
+	r.RecordDisabled("linux/native", "bundle-acceptance", fmt.Sprintf("host GOOS=%s cannot execute Linux ELF binaries locally", runtime.GOOS))
 }
 
 func (r *Runner) runAndroidMatrix() {
 	if runtime.GOOS == "linux" && (os.Getenv("TERMUX_VERSION") != "" || os.Getenv("PREFIX") == "/data/data/com.termux/files/usr") {
-		runStandardProbeSuite(r, "android/aarch64-termux", "bash", []string{r.DistExe}, false)
+		runStandardAcceptanceSuite(r, "android/aarch64-termux", "bash", []string{r.DistExe}, false)
 		return
 	}
 
 	adbPath, err := exec.LookPath("adb")
 	if err != nil {
-		r.RecordDisabled("android/aarch64", "probe-suite", fmt.Sprintf("not in Termux and exec.LookPath(\"adb\") failed: %v", err))
+		r.RecordDisabled("android/aarch64", "bundle-acceptance", fmt.Sprintf("not in Termux and exec.LookPath(\"adb\") failed: %v", err))
 		return
 	}
 
@@ -406,7 +406,7 @@ func (r *Runner) runAndroidMatrix() {
 	defer cancel()
 	out, err := exec.CommandContext(ctx, adbPath, "devices").CombinedOutput()
 	if err != nil {
-		r.RecordDisabled("android/aarch64", "probe-suite", fmt.Sprintf("command \"adb devices\" failed (%v): %q", err, strings.TrimSpace(string(out))))
+		r.RecordDisabled("android/aarch64", "bundle-acceptance", fmt.Sprintf("command \"adb devices\" failed (%v): %q", err, strings.TrimSpace(string(out))))
 		return
 	}
 
@@ -419,29 +419,29 @@ func (r *Runner) runAndroidMatrix() {
 		}
 	}
 	if !hasDevice {
-		r.RecordDisabled("android/aarch64", "probe-suite", fmt.Sprintf("command \"adb devices\" reported no connected Android devices: %q", strings.TrimSpace(string(out))))
+		r.RecordDisabled("android/aarch64", "bundle-acceptance", fmt.Sprintf("command \"adb devices\" reported no connected Android devices: %q", strings.TrimSpace(string(out))))
 		return
 	}
-	r.RecordDisabled("android/aarch64", "probe-suite", "ADB device detected but Termux shell path not configured")
+	r.RecordDisabled("android/aarch64", "bundle-acceptance", "ADB device detected but Termux shell path not configured")
 }
 
 func (r *Runner) runDarwinMatrix() {
 	if runtime.GOOS != "darwin" {
-		r.RecordDisabled("darwin/native", "probe-suite", fmt.Sprintf("host GOOS=%s/%s cannot execute Darwin Mach-O binaries locally", runtime.GOOS, runtime.GOARCH))
+		r.RecordDisabled("darwin/native", "bundle-acceptance", fmt.Sprintf("host GOOS=%s/%s cannot execute Darwin Mach-O binaries locally", runtime.GOOS, runtime.GOARCH))
 		return
 	}
 
 	suite := fmt.Sprintf("darwin/%s-native", runtime.GOARCH)
-	runStandardProbeSuite(r, suite, "bash", []string{r.DistExe}, false)
+	runStandardAcceptanceSuite(r, suite, "bash", []string{r.DistExe}, false)
 
 	if runtime.GOARCH == "arm64" {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		out, err := exec.CommandContext(ctx, "arch", "-x86_64", "/usr/bin/true").CombinedOutput()
 		if err != nil {
-			r.RecordDisabled("darwin/x86_64-rosetta2", "probe-suite", fmt.Sprintf("command \"arch -x86_64 /usr/bin/true\" failed (%v): %q", err, strings.TrimSpace(string(out))))
+			r.RecordDisabled("darwin/x86_64-rosetta2", "bundle-acceptance", fmt.Sprintf("command \"arch -x86_64 /usr/bin/true\" failed (%v): %q", err, strings.TrimSpace(string(out))))
 			return
 		}
-		runStandardProbeSuite(r, "darwin/x86_64-rosetta2", "arch", []string{"-x86_64", "bash", r.DistExe}, false)
+		runStandardAcceptanceSuite(r, "darwin/x86_64-rosetta2", "arch", []string{"-x86_64", "bash", r.DistExe}, false)
 	}
 }

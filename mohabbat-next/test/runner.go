@@ -25,7 +25,6 @@ type TestResult struct {
 
 type Runner struct {
 	NextDir   string
-	ProbeDir  string
 	BuildDir  string
 	DistExe   string
 	Results   []TestResult
@@ -34,10 +33,9 @@ type Runner struct {
 	DisCount  int
 }
 
-func NewRunner(nextDir, probeDir, distExe string) *Runner {
+func NewRunner(nextDir, distExe string) *Runner {
 	return &Runner{
 		NextDir:  nextDir,
-		ProbeDir: probeDir,
 		BuildDir: filepath.Join(nextDir, ".build"),
 		DistExe:  distExe,
 	}

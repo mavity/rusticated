@@ -5,7 +5,7 @@ edition = "2021"
 
 [lib]
 crate-type = ["rlib"]
-path = "probe.rs"
+path = "hello.rs"
 doctest = false
 
 [features]

@@ -98,7 +98,7 @@ sync_stub!(unsupported_tty_get_size(handle: u64) -> u32);
 sync_stub!(unsupported_tty_set_size(handle: u64, cols: u32, rows: u32) -> u32);
 sync_stub!(unsupported_fd_isatty(handle: u32) -> u32);
 
-pub fn for_probe(
+pub fn for_payload(
     read: pal_fn!(fn(ov: *mut Overlapped, handle: u64, buf_ptr: *mut u8, buf_len: usize)),
     write: pal_fn!(fn(ov: *mut Overlapped, handle: u64, buf_ptr: *const u8, buf_len: usize)),
     process_exit: pal_fn!(fn(code: i32) -> !),

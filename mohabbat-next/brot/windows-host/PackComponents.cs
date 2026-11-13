@@ -110,9 +110,9 @@ internal static class PackComponents
                 "platform-darwin-aarch64.bin", true, "PLATFORM_DARWIN_AARCH64");
 
             AddAsset(bundle, cachedAssets, replacements, assetsDirectory,
-                "probe-x86_64.bin", true, "HELLO_X86_64");
+                "hello-x86_64.bin", true, "HELLO_X86_64");
             AddAsset(bundle, cachedAssets, replacements, assetsDirectory,
-                "probe-aarch64.bin", true, "HELLO_AARCH64");
+                "hello-aarch64.bin", true, "HELLO_AARCH64");
 
             long bootstrapOffset = bundle.Position;
             foreach (KeyValuePair<string, string> replacement in replacements)
@@ -134,7 +134,7 @@ internal static class PackComponents
             File.WriteAllBytes(outputPath, completeBundle);
         }
 
-        Console.WriteLine("Assembled the single Windows/Unix probe: " + outputPath);
+        Console.WriteLine("Assembled the single Windows/Unix bundle: " + outputPath);
         return 0;
     }
 

@@ -3,10 +3,10 @@
 #[cfg(not(test))]
 use core::panic::PanicInfo;
 
-#[path = "../pal_abi.rs"]
+#[path = "../pal/abi/guest.rs"]
 mod pal_abi;
 #[cfg(test)]
-#[path = "../pal_abi_stubs.rs"]
+#[path = "../pal/abi/guest_stubs.rs"]
 mod pal_abi_stubs;
 use pal_abi::{Overlapped, PalAbiTable, FLAG_COMPLETED};
 
@@ -14,7 +14,7 @@ use pal_abi::{Overlapped, PalAbiTable, FLAG_COMPLETED};
 mod fileio;
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-compile_error!("The probe payload supports only x86-64 and AArch64.");
+compile_error!("The hello payload supports only x86-64 and AArch64.");
 
 #[cfg(not(test))]
 const PREFIX_ABI_OFFSET: usize = 0x20000;
@@ -26,7 +26,7 @@ const PHASE_WRITING: u8 = 1;
 const PHASE_READING: u8 = 2;
 
 #[repr(C)]
-pub struct ProbeGlobals {
+pub struct HelloGlobals {
     initialized: bool,
     phase: u8,
     skip_lf: bool,
@@ -45,13 +45,13 @@ unsafe fn slice_origin() -> *mut u8 {
     let addr: usize;
     #[cfg(target_arch = "x86_64")]
     core::arch::asm!(
-        "lea {0}, [rip + probe_code_start]",
+        "lea {0}, [rip + hello_payload_code_start]",
         out(reg) addr,
         options(pure, nomem, nostack),
     );
     #[cfg(target_arch = "aarch64")]
     core::arch::asm!(
-        "adr {0}, probe_code_start",
+        "adr {0}, hello_payload_code_start",
         out(reg) addr,
         options(pure, nomem, nostack),
     );
@@ -71,10 +71,10 @@ unsafe fn abi() -> &'static PalAbiTable {
 }
 
 #[inline(always)]
-unsafe fn globals() -> &'static mut ProbeGlobals {
+unsafe fn globals() -> &'static mut HelloGlobals {
     #[cfg(not(test))]
     {
-        &mut *(slice_origin().sub(PREFIX_GLOBALS_OFFSET) as *mut ProbeGlobals)
+        &mut *(slice_origin().sub(PREFIX_GLOBALS_OFFSET) as *mut HelloGlobals)
     }
     #[cfg(test)]
     {
@@ -82,7 +82,7 @@ unsafe fn globals() -> &'static mut ProbeGlobals {
     }
 }
 
-const GREETING_PREFIX: &[u8] = b"Anonymous-memory probe ready (compiled ";
+const GREETING_PREFIX: &[u8] = b"Mohabbat-next ready (compiled ";
 const BUILD_TIME: &str = match option_env!("BUILD_TIME") {
     Some(value) => value,
     None => "unknown",
@@ -147,7 +147,7 @@ pub unsafe extern "C" fn bcmp(left: *const u8, right: *const u8, len: usize) -> 
     memcmp(left, right, len)
 }
 
-unsafe fn append_output(g: &mut ProbeGlobals, bytes: &[u8]) -> bool {
+unsafe fn append_output(g: &mut HelloGlobals, bytes: &[u8]) -> bool {
     let Some(end) = g.output_len.checked_add(bytes.len()) else {
         return false;
     };
@@ -163,7 +163,7 @@ unsafe fn append_output(g: &mut ProbeGlobals, bytes: &[u8]) -> bool {
     true
 }
 
-unsafe fn schedule_write(g: &mut ProbeGlobals) {
+unsafe fn schedule_write(g: &mut HelloGlobals) {
     g.overlapped = Overlapped::default();
     (abi().write)(
         &mut g.overlapped,
@@ -173,12 +173,12 @@ unsafe fn schedule_write(g: &mut ProbeGlobals) {
     );
 }
 
-unsafe fn schedule_read(g: &mut ProbeGlobals) {
+unsafe fn schedule_read(g: &mut HelloGlobals) {
     g.overlapped = Overlapped::default();
     (abi().read)(&mut g.overlapped, 0, &mut g.input_byte, 1);
 }
 
-unsafe fn prepare_greeting(g: &mut ProbeGlobals) -> bool {
+unsafe fn prepare_greeting(g: &mut HelloGlobals) -> bool {
     g.output_len = 0;
     g.output_offset = 0;
     append_output(g, GREETING_PREFIX)
@@ -186,7 +186,7 @@ unsafe fn prepare_greeting(g: &mut ProbeGlobals) -> bool {
         && append_output(g, GREETING_SUFFIX)
 }
 
-unsafe fn prepare_echo(g: &mut ProbeGlobals) -> bool {
+unsafe fn prepare_echo(g: &mut HelloGlobals) -> bool {
     g.output_len = 0;
     g.output_offset = 0;
     if !append_output(g, ECHO_PREFIX) {
@@ -206,7 +206,7 @@ unsafe fn prepare_echo(g: &mut ProbeGlobals) -> bool {
     append_output(g, NEWLINE) && append_output(g, PROMPT)
 }
 
-unsafe fn finish_line(g: &mut ProbeGlobals) {
+unsafe fn finish_line(g: &mut HelloGlobals) {
     if g.line_len == 0 {
         (abi().process_exit)(0);
     }
@@ -220,7 +220,7 @@ unsafe fn finish_line(g: &mut ProbeGlobals) {
 unsafe fn resume() {
     let g = globals();
     if !g.initialized {
-        core::ptr::write_bytes(g as *mut ProbeGlobals, 0, 1);
+        core::ptr::write_bytes(g as *mut HelloGlobals, 0, 1);
         g.initialized = true;
         if !prepare_greeting(g) {
             (abi().process_exit)(3);
@@ -288,7 +288,7 @@ unsafe fn resume() {
 #[cfg(target_arch = "x86_64")]
 #[cfg(not(test))]
 #[inline(never)]
-unsafe extern "win64" fn probe_activation() {
+unsafe extern "win64" fn payload_activation() {
     #[cfg(feature = "file-io-test")]
     fileio::resume();
     #[cfg(not(feature = "file-io-test"))]
@@ -298,7 +298,7 @@ unsafe extern "win64" fn probe_activation() {
 #[cfg(target_arch = "aarch64")]
 #[cfg(not(test))]
 #[inline(never)]
-unsafe extern "C" fn probe_activation() {
+unsafe extern "C" fn payload_activation() {
     #[cfg(feature = "file-io-test")]
     fileio::resume();
     #[cfg(not(feature = "file-io-test"))]
@@ -307,20 +307,20 @@ unsafe extern "C" fn probe_activation() {
 
 #[cfg(all(not(test), target_arch = "x86_64"))]
 core::arch::global_asm!(
-    ".section .text.probe_entry,\"ax\"",
-    ".globl probe_code_start",
-    "probe_code_start:",
+    ".section .text.hello_payload_entry,\"ax\"",
+    ".globl hello_payload_code_start",
+    "hello_payload_code_start:",
     "jmp {activation}",
-    activation = sym probe_activation,
+    activation = sym payload_activation,
 );
 
 #[cfg(all(not(test), target_arch = "aarch64"))]
 core::arch::global_asm!(
-    ".section .text.probe_entry,\"ax\"",
-    ".globl probe_code_start",
-    "probe_code_start:",
+    ".section .text.hello_payload_entry,\"ax\"",
+    ".globl hello_payload_code_start",
+    "hello_payload_code_start:",
     "b {activation}",
-    activation = sym probe_activation,
+    activation = sym payload_activation,
 );
 
 #[cfg(not(test))]
@@ -330,7 +330,7 @@ fn panic(_info: &PanicInfo) -> ! {
 }
 
 #[cfg(test)]
-static mut TEST_GLOBALS: ProbeGlobals = ProbeGlobals {
+static mut TEST_GLOBALS: HelloGlobals = HelloGlobals {
     initialized: false,
     phase: 0,
     skip_lf: false,
@@ -494,7 +494,7 @@ mod tests {
         assert_eq!(offset_of!(PalAbiTable, read), 144);
         assert_eq!(offset_of!(PalAbiTable, write), 152);
         assert_eq!(offset_of!(PalAbiTable, process_exit), 64);
-        assert_eq!(offset_of!(ProbeGlobals, overlapped) % 8, 0);
+        assert_eq!(offset_of!(HelloGlobals, overlapped) % 8, 0);
     }
 
     #[test]
@@ -505,7 +505,7 @@ mod tests {
             TEST_OPERATION_QUEUED = false;
             TEST_INPUT_OFFSET = 0;
             TEST_OUTPUT_LEN = 0;
-            let table = pal_abi_stubs::for_probe(mock_read, mock_write, mock_exit);
+            let table = pal_abi_stubs::for_payload(mock_read, mock_write, mock_exit);
             let mut unsupported = Overlapped {
                 flags: 0,
                 error: 0,
@@ -538,7 +538,7 @@ mod tests {
             assert!(TEST_OPERATION_QUEUED);
             assert_eq!(core::ptr::addr_of!(TEST_PENDING_KIND).read(), 2);
             let output = core::str::from_utf8(&TEST_OUTPUT[..TEST_OUTPUT_LEN]).unwrap();
-            assert!(output.starts_with("Anonymous-memory probe ready (compiled "));
+            assert!(output.starts_with("Mohabbat-next ready (compiled "));
             assert!(output.contains("echo: hello\n> "));
         }
     }
@@ -546,7 +546,7 @@ mod tests {
     #[test]
     fn test_unsupported_async_slots_publish_complete_headers() {
         unsafe {
-            let table = pal_abi_stubs::for_probe(mock_read, mock_write, mock_exit);
+            let table = pal_abi_stubs::for_payload(mock_read, mock_write, mock_exit);
             let mut ov = Overlapped::default();
 
             assert_unsupported_async(&mut ov, |p| (table.timer_set)(p, 1));
