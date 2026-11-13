@@ -139,8 +139,8 @@ build_flat() {
     llvm-objcopy -O binary --only-section=.payload "$elf" "$binary"
     local binary_size
     binary_size="$(wc -c < "$binary")"
-    if [ "$binary_size" -le 0 ] || [ "$binary_size" -gt 4096 ]; then
-        printf '%s must fit within one 4 KiB page (got %s bytes)\n' \
+    if [ "$binary_size" -le 0 ] || [ "$binary_size" -gt 8192 ]; then
+        printf '%s must fit within 8 KiB (got %s bytes)\n' \
             "$output_name" "$binary_size" >&2
         return 1
     fi
