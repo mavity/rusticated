@@ -571,6 +571,41 @@ test('system_info_wait is cancellable', async () => {
   assert.equal(new DataView(mem.buffer).getUint32(ovPtr + 4, true), wasiECANCELED);
 });
 
+test('system_info_wait completes when the browser locale changes', async () => {
+  const previousNavigator = browserHostContext.navigator;
+  const testNavigator = { language: 'en-US' };
+  browserHostContext.navigator = testNavigator;
+
+  const mem = new WebAssembly.Memory({ initial: 1 });
+  const ovPtr = 1248;
+  let hostState = null;
+
+  try {
+    const host = await washmhost({ test: true, memory: mem });
+    const { env } = host;
+    hostState = host.hostState;
+    env.system_info_wait(ovPtr);
+    testNavigator.language = 'fr-FR';
+    for (let attempt = 0; attempt < 100 && hostState.completionQueue.length === 0; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+
+    assert.ok(hostState.completionQueue.length > 0, 'locale change should enqueue completion');
+    hostState.drainQueue();
+    const view = new DataView(mem.buffer);
+    assert.equal(view.getUint32(ovPtr, true), FLAG_COMPLETED);
+    assert.equal(view.getUint32(ovPtr + 4, true), wasiSuccess);
+  } finally {
+    if (hostState && hostState.hasPending()) hostState.cancelOp(ovPtr);
+    if (hostState) hostState.drainQueue();
+    if (previousNavigator === undefined) {
+      delete browserHostContext.navigator;
+    } else {
+      browserHostContext.navigator = previousNavigator;
+    }
+  }
+});
+
 test('Parked event loop waits for stdin and exits only on explicit process exit', async () => {
   const hostState = new HostState(new WebAssembly.Memory({ initial: 1 }));
   let runCount = 0;

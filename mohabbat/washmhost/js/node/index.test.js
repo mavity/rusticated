@@ -141,6 +141,40 @@ test('system_info_wait is cancellable', () => {
     assert.equal(view.getUint32(ovPtr + 4, true), 11);
 });
 
+test('system_info_wait completes when the system context changes', async () => {
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const host = new HostState();
+    host.memory = memory;
+    const { env } = makeBrainImports(host, []);
+    const view = new DataView(memory.buffer);
+    const ovPtr = 32;
+    const systemContext = { locale: 'en-US', timeZone: 'UTC' };
+    const originalDateTimeFormat = Intl.DateTimeFormat;
+
+    Intl.DateTimeFormat = class {
+        resolvedOptions() {
+            return { ...systemContext };
+        }
+    };
+
+    try {
+        env.system_info_wait(ovPtr);
+        systemContext.locale = 'fr-FR';
+        for (let attempt = 0; attempt < 100 && host.completionQueue.length === 0; attempt++) {
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+
+        assert.ok(host.completionQueue.length > 0, 'system-info change should enqueue completion');
+        host.drainQueue();
+        assert.equal(view.getUint32(ovPtr, true), 1);
+        assert.equal(view.getUint32(ovPtr + 4, true), 0);
+    } finally {
+        if (host.hasPending()) host.cancelOp(ovPtr);
+        host.drainQueue();
+        Intl.DateTimeFormat = originalDateTimeFormat;
+    }
+});
+
 test('get_platform_info includes the versioned system context', () => {
     const memory = new WebAssembly.Memory({ initial: 1 });
     const host = new HostState();
