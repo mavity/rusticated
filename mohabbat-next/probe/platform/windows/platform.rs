@@ -4,6 +4,7 @@ use core::ffi::c_void;
 #[cfg(not(test))]
 use core::panic::PanicInfo;
 use core::ptr;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 #[path = "../../pal_abi.rs"]
 mod pal_abi;
@@ -133,9 +134,50 @@ type CloseHandleFn = unsafe extern "win64" fn(*mut c_void) -> i32;
 #[cfg(target_arch = "aarch64")]
 type CloseHandleFn = unsafe extern "C" fn(*mut c_void) -> i32;
 
+#[cfg(target_arch = "x86_64")]
+type CreateIoCompletionPortFn =
+    unsafe extern "win64" fn(*mut c_void, *mut c_void, usize, u32) -> *mut c_void;
+#[cfg(target_arch = "aarch64")]
+type CreateIoCompletionPortFn =
+    unsafe extern "C" fn(*mut c_void, *mut c_void, usize, u32) -> *mut c_void;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct OverlappedEntry {
+    completion_key: usize,
+    overlapped: *mut c_void,
+    internal: usize,
+    bytes_transferred: u32,
+}
+
+#[cfg(target_arch = "x86_64")]
+type GetQueuedCompletionStatusExFn =
+    unsafe extern "win64" fn(*mut c_void, *mut OverlappedEntry, u32, *mut u32, u32, i32) -> i32;
+#[cfg(target_arch = "aarch64")]
+type GetQueuedCompletionStatusExFn =
+    unsafe extern "C" fn(*mut c_void, *mut OverlappedEntry, u32, *mut u32, u32, i32) -> i32;
+
+#[cfg(target_arch = "x86_64")]
+type PostQueuedCompletionStatusFn =
+    unsafe extern "win64" fn(*mut c_void, u32, usize, *mut c_void) -> i32;
+#[cfg(target_arch = "aarch64")]
+type PostQueuedCompletionStatusFn =
+    unsafe extern "C" fn(*mut c_void, u32, usize, *mut c_void) -> i32;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NativeOverlapped {
+    internal: usize,
+    internal_high: usize,
+    offset: u32,
+    offset_high: u32,
+    event: *mut c_void,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct PendingIo {
+    native_overlapped: NativeOverlapped,
     overlapped: *mut Overlapped,
     handle: *mut c_void,
     buffer: *mut u8,
@@ -157,6 +199,10 @@ struct PlatformState {
     create_thread: Option<CreateThreadFn>,
     wait_for_single_object: Option<WaitForSingleObjectFn>,
     close_handle: Option<CloseHandleFn>,
+    completion_port: *mut c_void,
+    get_queued_completion_status_ex: Option<GetQueuedCompletionStatusExFn>,
+    post_queued_completion_status: Option<PostQueuedCompletionStatusFn>,
+    worker_completion_ready: AtomicU32,
     worker_thread: *mut c_void,
     queued_io: bool,
     pending_io: PendingIo,
@@ -174,9 +220,20 @@ static mut TEST_STATE: PlatformState = PlatformState {
     create_thread: None,
     wait_for_single_object: None,
     close_handle: None,
+    completion_port: ptr::null_mut(),
+    get_queued_completion_status_ex: None,
+    post_queued_completion_status: None,
+    worker_completion_ready: AtomicU32::new(0),
     worker_thread: ptr::null_mut(),
     queued_io: false,
     pending_io: PendingIo {
+        native_overlapped: NativeOverlapped {
+            internal: 0,
+            internal_high: 0,
+            offset: 0,
+            offset_high: 0,
+            event: ptr::null_mut(),
+        },
         overlapped: ptr::null_mut(),
         handle: ptr::null_mut(),
         buffer: ptr::null_mut(),
@@ -196,7 +253,9 @@ const ERROR_INVALID_HANDLE_CODE: u32 = 6;
 const ERROR_INVALID_PARAMETER_CODE: u32 = 87;
 const ERROR_NO_DATA: u32 = 232;
 const WAIT_OBJECT_0: u32 = 0;
+const WAIT_TIMEOUT: u32 = 258;
 const INFINITE: u32 = u32::MAX;
+const STDIO_COMPLETION_KEY: usize = 0x535444494f;
 
 #[inline(always)]
 unsafe fn slice_origin() -> *mut u8 {
@@ -329,6 +388,13 @@ unsafe fn begin_io(
     (*ov).continued = 0;
     (*ov).result_ext = 0;
     ptr::addr_of_mut!((*state).pending_io).write(PendingIo {
+        native_overlapped: NativeOverlapped {
+            internal: 0,
+            internal_high: 0,
+            offset: 0,
+            offset_high: 0,
+            event: ptr::null_mut(),
+        },
         overlapped: ov,
         handle: native_handle,
         buffer,
@@ -337,6 +403,7 @@ unsafe fn begin_io(
         error: 0,
         result: 0,
     });
+    (*state).worker_completion_ready.store(0, Ordering::Relaxed);
     #[cfg(target_arch = "x86_64")]
     let start = run_io_worker as unsafe extern "win64" fn(*mut c_void) -> u32;
     #[cfg(target_arch = "aarch64")]
@@ -351,6 +418,13 @@ unsafe fn begin_io(
     );
     if thread.is_null() {
         ptr::addr_of_mut!((*state).pending_io).write(PendingIo {
+            native_overlapped: NativeOverlapped {
+                internal: 0,
+                internal_high: 0,
+                offset: 0,
+                offset_high: 0,
+                event: ptr::null_mut(),
+            },
             overlapped: ptr::null_mut(),
             handle: ptr::null_mut(),
             buffer: ptr::null_mut(),
@@ -421,17 +495,42 @@ unsafe fn perform_io_worker() -> u32 {
     };
     ptr::addr_of_mut!((*state).pending_io.error).write(error);
     ptr::addr_of_mut!((*state).pending_io.result).write(result);
-    0
+    (*state).worker_completion_ready.store(1, Ordering::Release);
+    let port = ptr::addr_of!((*state).completion_port).read();
+    let post = ptr::addr_of!((*state).post_queued_completion_status).read();
+    if port.is_null() {
+        return 1;
+    }
+    if let Some(post) = post {
+        if post(
+            port,
+            0,
+            STDIO_COMPLETION_KEY,
+            ptr::addr_of_mut!((*state).pending_io.native_overlapped).cast(),
+        ) != 0
+        {
+            return 0;
+        }
+    }
+    1
 }
 
 #[cfg(target_arch = "x86_64")]
 unsafe extern "win64" fn run_io_worker(_context: *mut c_void) -> u32 {
-    perform_io_worker()
+    let status = perform_io_worker();
+    if status != 0 {
+        exit_process_impl(16);
+    }
+    status
 }
 
 #[cfg(target_arch = "aarch64")]
 unsafe extern "C" fn run_io_worker(_context: *mut c_void) -> u32 {
-    perform_io_worker()
+    let status = perform_io_worker();
+    if status != 0 {
+        exit_process_impl(16);
+    }
+    status
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -499,6 +598,13 @@ unsafe fn publish_pending_io() {
     ptr::addr_of_mut!((*state).worker_thread).write(ptr::null_mut());
     ptr::addr_of_mut!((*state).queued_io).write(false);
     ptr::addr_of_mut!((*state).pending_io).write(PendingIo {
+        native_overlapped: NativeOverlapped {
+            internal: 0,
+            internal_high: 0,
+            offset: 0,
+            offset_high: 0,
+            event: ptr::null_mut(),
+        },
         overlapped: ptr::null_mut(),
         handle: ptr::null_mut(),
         buffer: ptr::null_mut(),
@@ -507,21 +613,50 @@ unsafe fn publish_pending_io() {
         error: 0,
         result: 0,
     });
+    (*state).worker_completion_ready.store(0, Ordering::Relaxed);
 }
 
 unsafe fn wait_and_publish_pending_io() -> bool {
     let state = state_ptr();
+    let port = ptr::addr_of!((*state).completion_port).read();
+    let get_completion = ptr::addr_of!((*state).get_queued_completion_status_ex).read();
     let wait = ptr::addr_of!((*state).wait_for_single_object).read();
     let close = ptr::addr_of!((*state).close_handle).read();
     let thread = ptr::addr_of!((*state).worker_thread).read();
-    let (Some(wait), Some(close)) = (wait, close) else {
+    let (Some(get_completion), Some(wait), Some(close)) = (get_completion, wait, close) else {
         return false;
     };
-    if thread.is_null() {
+    if port.is_null() || thread.is_null() {
         return false;
     }
+
+    let mut entry = OverlappedEntry {
+        completion_key: 0,
+        overlapped: ptr::null_mut(),
+        internal: 0,
+        bytes_transferred: 0,
+    };
+    loop {
+        let mut removed = 0u32;
+        if get_completion(port, &mut entry, 1, &mut removed, INFINITE, 0) != 0 {
+            if removed != 1
+                || entry.completion_key != STDIO_COMPLETION_KEY
+                || entry.overlapped
+                    != ptr::addr_of_mut!((*state).pending_io.native_overlapped).cast()
+                || entry.internal != 0
+                || (*state).worker_completion_ready.load(Ordering::Acquire) != 1
+            {
+                return false;
+            }
+            break;
+        }
+        return false;
+    }
+
     if wait(thread, INFINITE) != WAIT_OBJECT_0 {
-        close(thread);
+        if close(thread) == 0 {
+            return false;
+        }
         return false;
     }
     close(thread);
@@ -573,6 +708,18 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
         WaitForSingleObjectFn
     );
     let close_handle = function_pointer!(resolve(host, kernel32, b"CloseHandle\0"), CloseHandleFn);
+    let create_completion_port = function_pointer!(
+        resolve(host, kernel32, b"CreateIoCompletionPort\0"),
+        CreateIoCompletionPortFn
+    );
+    let get_completion = function_pointer!(
+        resolve(host, kernel32, b"GetQueuedCompletionStatusEx\0"),
+        GetQueuedCompletionStatusExFn
+    );
+    let post_completion = function_pointer!(
+        resolve(host, kernel32, b"PostQueuedCompletionStatus\0"),
+        PostQueuedCompletionStatusFn
+    );
     if get_std_handle.is_none()
         || read_file.is_none()
         || write_file.is_none()
@@ -583,6 +730,9 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
         || create_thread.is_none()
         || wait_for_single_object.is_none()
         || close_handle.is_none()
+        || create_completion_port.is_none()
+        || get_completion.is_none()
+        || post_completion.is_none()
     {
         return 12;
     }
@@ -591,6 +741,18 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
         return 12;
     };
     let Some(get_std_handle) = get_std_handle else {
+        return 12;
+    };
+    let Some(create_completion_port) = create_completion_port else {
+        return 12;
+    };
+    let Some(get_completion) = get_completion else {
+        return 12;
+    };
+    let Some(post_completion) = post_completion else {
+        return 12;
+    };
+    let Some(close_handle) = close_handle else {
         return 12;
     };
     let input_handle = get_std_handle(STD_INPUT_HANDLE);
@@ -633,31 +795,49 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
         free(payload_alloc);
         return 15;
     }
-
-    {
-        let state = state_mut();
-        state.input_handle = input_handle;
-        state.output_handle = output_handle;
-        state.error_handle = error_handle;
-        state.read_file = read_file;
-        state.write_file = write_file;
-        state.get_last_error = get_last_error;
-        state.exit_process = Some(exit_process);
-        state.create_thread = create_thread;
-        state.wait_for_single_object = wait_for_single_object;
-        state.close_handle = close_handle;
-        state.worker_thread = ptr::null_mut();
-        state.queued_io = false;
-        state.pending_io = PendingIo {
-            overlapped: ptr::null_mut(),
-            handle: ptr::null_mut(),
-            buffer: ptr::null_mut(),
-            length: 0,
-            is_write: false,
-            error: 0,
-            result: 0,
-        };
+    let completion_port = create_completion_port((-1isize) as *mut c_void, ptr::null_mut(), 0, 0);
+    if completion_port.is_null() {
+        free(payload_alloc);
+        return 15;
     }
+
+    ptr::write(
+        state_ptr(),
+        PlatformState {
+            input_handle,
+            output_handle,
+            error_handle,
+            read_file,
+            write_file,
+            get_last_error,
+            exit_process: Some(exit_process),
+            create_thread,
+            wait_for_single_object,
+            close_handle: Some(close_handle),
+            completion_port,
+            get_queued_completion_status_ex: Some(get_completion),
+            post_queued_completion_status: Some(post_completion),
+            worker_completion_ready: AtomicU32::new(0),
+            worker_thread: ptr::null_mut(),
+            queued_io: false,
+            pending_io: PendingIo {
+                native_overlapped: NativeOverlapped {
+                    internal: 0,
+                    internal_high: 0,
+                    offset: 0,
+                    offset_high: 0,
+                    event: ptr::null_mut(),
+                },
+                overlapped: ptr::null_mut(),
+                handle: ptr::null_mut(),
+                buffer: ptr::null_mut(),
+                length: 0,
+                is_write: false,
+                error: 0,
+                result: 0,
+            },
+        },
+    );
     ptr::write(
         payload_alloc.cast::<PalAbiTable>(),
         pal_abi_stubs::for_probe(probe_read, probe_write, exit_process),
@@ -669,6 +849,9 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
         let thread = ptr::addr_of!((*state).worker_thread).read();
         if !queued_io {
             if !thread.is_null() {
+                exit_process_impl(16);
+            }
+            if close_handle(completion_port) == 0 {
                 exit_process_impl(16);
             }
             free(payload_alloc);
@@ -783,6 +966,13 @@ mod tests {
         wait_result: u32,
         wait_calls: usize,
         close_calls: usize,
+        completion_success: i32,
+        completion_error: u32,
+        completion_count: u32,
+        posted_key: usize,
+        posted_overlapped: *mut c_void,
+        post_success: i32,
+        post_calls: usize,
     }
 
     static mut TEST_IO: ScriptedIo = ScriptedIo {
@@ -800,6 +990,13 @@ mod tests {
         wait_result: WAIT_OBJECT_0,
         wait_calls: 0,
         close_calls: 0,
+        completion_success: 1,
+        completion_error: 0,
+        completion_count: 0,
+        posted_key: 0,
+        posted_overlapped: ptr::null_mut(),
+        post_success: 1,
+        post_calls: 0,
     };
 
     unsafe fn scripted_read_file_impl(
@@ -893,6 +1090,101 @@ mod tests {
         scripted_get_last_error_impl()
     }
 
+    unsafe fn scripted_get_completion_impl(
+        port: *mut c_void,
+        entries: *mut OverlappedEntry,
+        count: u32,
+        removed: *mut u32,
+        timeout: u32,
+        alertable: i32,
+    ) -> i32 {
+        assert_eq!(port, 8usize as *mut c_void);
+        assert_eq!(count, 1);
+        assert_eq!(timeout, INFINITE);
+        assert_eq!(alertable, 0);
+        let io = &mut *ptr::addr_of_mut!(TEST_IO);
+        if io.completion_success == 0 {
+            io.last_error = io.completion_error;
+            removed.write(0);
+            return 0;
+        }
+        if io.completion_count == 0 {
+            io.last_error = WAIT_TIMEOUT;
+            removed.write(0);
+            return 0;
+        }
+        io.completion_count -= 1;
+        entries.write(OverlappedEntry {
+            completion_key: io.posted_key,
+            overlapped: io.posted_overlapped,
+            internal: 0,
+            bytes_transferred: 0,
+        });
+        removed.write(1);
+        1
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe extern "win64" fn scripted_get_completion(
+        port: *mut c_void,
+        entries: *mut OverlappedEntry,
+        count: u32,
+        removed: *mut u32,
+        timeout: u32,
+        alertable: i32,
+    ) -> i32 {
+        scripted_get_completion_impl(port, entries, count, removed, timeout, alertable)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    unsafe extern "C" fn scripted_get_completion(
+        port: *mut c_void,
+        entries: *mut OverlappedEntry,
+        count: u32,
+        removed: *mut u32,
+        timeout: u32,
+        alertable: i32,
+    ) -> i32 {
+        scripted_get_completion_impl(port, entries, count, removed, timeout, alertable)
+    }
+
+    unsafe fn scripted_post_completion_impl(
+        port: *mut c_void,
+        _bytes: u32,
+        key: usize,
+        overlapped: *mut c_void,
+    ) -> i32 {
+        assert_eq!(port, 8usize as *mut c_void);
+        let io = &mut *ptr::addr_of_mut!(TEST_IO);
+        io.post_calls += 1;
+        io.posted_key = key;
+        io.posted_overlapped = overlapped;
+        if io.post_success != 0 {
+            io.completion_count += 1;
+        }
+        io.post_success
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe extern "win64" fn scripted_post_completion(
+        port: *mut c_void,
+        bytes: u32,
+        key: usize,
+        overlapped: *mut c_void,
+    ) -> i32 {
+        scripted_post_completion_impl(port, bytes, key, overlapped)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    unsafe extern "C" fn scripted_post_completion(
+        port: *mut c_void,
+        bytes: u32,
+        key: usize,
+        overlapped: *mut c_void,
+    ) -> i32 {
+        scripted_post_completion_impl(port, bytes, key, overlapped)
+    }
+
     unsafe fn scripted_wait_impl(_handle: *mut c_void, timeout: u32) -> u32 {
         assert_eq!(timeout, INFINITE);
         let io = &mut *ptr::addr_of_mut!(TEST_IO);
@@ -939,9 +1231,20 @@ mod tests {
             create_thread: None,
             wait_for_single_object: Some(scripted_wait),
             close_handle: Some(scripted_close),
+            completion_port: 8usize as *mut c_void,
+            get_queued_completion_status_ex: Some(scripted_get_completion),
+            post_queued_completion_status: Some(scripted_post_completion),
+            worker_completion_ready: AtomicU32::new(0),
             worker_thread: ptr::null_mut(),
             queued_io: false,
             pending_io: PendingIo {
+                native_overlapped: NativeOverlapped {
+                    internal: 0,
+                    internal_high: 0,
+                    offset: 0,
+                    offset_high: 0,
+                    event: ptr::null_mut(),
+                },
                 overlapped: ptr::null_mut(),
                 handle: ptr::null_mut(),
                 buffer: ptr::null_mut(),
@@ -966,6 +1269,13 @@ mod tests {
             wait_result: WAIT_OBJECT_0,
             wait_calls: 0,
             close_calls: 0,
+            completion_success: 1,
+            completion_error: 0,
+            completion_count: 0,
+            posted_key: 0,
+            posted_overlapped: ptr::null_mut(),
+            post_success: 1,
+            post_calls: 0,
         });
     }
 
@@ -986,6 +1296,8 @@ mod tests {
         assert_eq!(offset_of!(WindowsPlatformHost, free), 24);
         assert_eq!(offset_of!(WindowsPlatformHost, hello_payload), 32);
         assert_eq!(offset_of!(WindowsPlatformHost, hello_payload_size), 40);
+        assert_eq!(size_of::<NativeOverlapped>(), 32);
+        assert_eq!(offset_of!(PendingIo, native_overlapped), 0);
         assert!(size_of::<PlatformState>() <= 0x10000);
     }
 
@@ -1066,6 +1378,13 @@ mod tests {
 
             perform_io_worker();
             assert_eq!(ptr::addr_of!((*state).pending_io.result).read(), 2);
+            assert_eq!((*state).worker_completion_ready.load(Ordering::Acquire), 1);
+            assert_eq!((*ptr::addr_of!(TEST_IO)).post_calls, 1);
+            assert_eq!((*ptr::addr_of!(TEST_IO)).posted_key, STDIO_COMPLETION_KEY);
+            assert_eq!(
+                (*ptr::addr_of!(TEST_IO)).posted_overlapped,
+                ptr::addr_of_mut!((*state).pending_io.native_overlapped).cast()
+            );
             assert_eq!(overlapped.flags, 0);
             assert!(wait_and_publish_pending_io());
             assert_completion(&overlapped, 0, 2);
@@ -1076,6 +1395,7 @@ mod tests {
                 .is_null());
             assert_eq!((*ptr::addr_of!(TEST_IO)).write_calls, 1);
             assert_eq!((*ptr::addr_of!(TEST_IO)).write_length, 4);
+            assert_eq!((*ptr::addr_of!(TEST_IO)).post_calls, 1);
             assert_eq!((*ptr::addr_of!(TEST_IO)).wait_calls, 1);
             assert_eq!((*ptr::addr_of!(TEST_IO)).close_calls, 1);
 
@@ -1158,6 +1478,27 @@ mod tests {
             );
             assert_eq!((*ptr::addr_of!(TEST_IO)).wait_calls, 1);
             assert_eq!((*ptr::addr_of!(TEST_IO)).close_calls, 1);
+
+            reset_io_test_state();
+            let state = state_ptr();
+            (*state).create_thread = Some(mock_create_thread);
+            begin_io(&mut overlapped, 0, buffer.as_mut_ptr(), 1, false);
+            perform_io_worker();
+            (*ptr::addr_of_mut!(TEST_IO)).posted_key = 0;
+            assert!(!wait_and_publish_pending_io());
+            assert_eq!(overlapped.flags, 0);
+            assert!(ptr::addr_of!((*state).queued_io).read());
+
+            reset_io_test_state();
+            let state = state_ptr();
+            (*state).create_thread = Some(mock_create_thread);
+            (*ptr::addr_of_mut!(TEST_IO)).post_success = 0;
+            begin_io(&mut overlapped, 0, buffer.as_mut_ptr(), 1, false);
+            assert_eq!(perform_io_worker(), 1);
+            assert_eq!(overlapped.flags, 0);
+            assert!(ptr::addr_of!((*state).queued_io).read());
+            assert_eq!((*ptr::addr_of!(TEST_IO)).post_calls, 1);
+            assert_eq!((*ptr::addr_of!(TEST_IO)).completion_count, 0);
 
             reset_io_test_state();
             let state = state_ptr();
