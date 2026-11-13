@@ -101,8 +101,8 @@ func assembleVegetable(windowsHostExe string, assets AssemblyAssets, templatesDi
 
 		var payload []byte
 		if compress {
-			if len(raw) > 4096 {
-				return ComponentRange{}, fmt.Errorf("uncompressed component exceeds 4 KiB: %s (%d bytes)", filePath, len(raw))
+			if len(raw) > 8192 {
+				return ComponentRange{}, fmt.Errorf("uncompressed component exceeds 8 KiB: %s (%d bytes)", filePath, len(raw))
 			}
 			compressed, err := compressZstandard(raw)
 			if err != nil {

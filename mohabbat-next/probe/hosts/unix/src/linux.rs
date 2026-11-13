@@ -169,6 +169,66 @@ pub unsafe fn sys_lseek(fd: i32, offset: i64, whence: i32) -> i64 {
     ret
 }
 
+#[cfg(target_arch = "x86_64")]
+pub unsafe fn sys_pread(fd: i32, buf: *mut c_void, n: usize, offset: i64) -> isize {
+    let ret: isize;
+    core::arch::asm!(
+        "syscall",
+        in("rax") 17usize, // SYS_pread64
+        in("rdi") fd as usize,
+        in("rsi") buf as usize,
+        in("rdx") n,
+        in("r10") offset as usize,
+        lateout("rax") ret,
+        clobber_abi("system"),
+    );
+    ret
+}
+
+#[cfg(target_arch = "aarch64")]
+pub unsafe fn sys_pread(fd: i32, buf: *mut c_void, n: usize, offset: i64) -> isize {
+    let ret: isize;
+    core::arch::asm!(
+        "svc #0",
+        in("x8") 67usize, // SYS_pread64
+        in("x0") fd as usize,
+        in("x1") buf as usize,
+        in("x2") n,
+        in("x3") offset as usize,
+        lateout("x0") ret,
+        clobber_abi("system"),
+    );
+    ret
+}
+
+#[cfg(target_arch = "x86_64")]
+pub unsafe fn sys_ftruncate(fd: i32, length: i64) -> i32 {
+    let ret: isize;
+    core::arch::asm!(
+        "syscall",
+        in("rax") 77usize, // SYS_ftruncate
+        in("rdi") fd as usize,
+        in("rsi") length as usize,
+        lateout("rax") ret,
+        clobber_abi("system"),
+    );
+    ret as i32
+}
+
+#[cfg(target_arch = "aarch64")]
+pub unsafe fn sys_ftruncate(fd: i32, length: i64) -> i32 {
+    let ret: isize;
+    core::arch::asm!(
+        "svc #0",
+        in("x8") 46usize, // SYS_ftruncate
+        in("x0") fd as usize,
+        in("x1") length as usize,
+        lateout("x0") ret,
+        clobber_abi("system"),
+    );
+    ret as i32
+}
+
 #[cfg(target_arch = "aarch64")]
 pub unsafe fn sys_lseek(fd: i32, offset: i64, whence: i32) -> i64 {
     let ret: i64;
@@ -433,6 +493,106 @@ pub unsafe fn free_executable(ptr: *mut c_void, size: usize) {
     }
 }
 
+unsafe fn map_pal_memory(size: usize) -> *mut c_void {
+    let Some(size) = size.checked_add(4095).map(|size| size & !4095) else {
+        return core::ptr::null_mut();
+    };
+    #[cfg(target_arch = "x86_64")]
+    let result: isize;
+    #[cfg(target_arch = "x86_64")]
+    core::arch::asm!(
+        "syscall",
+        in("rax") 9usize, // SYS_mmap
+        in("rdi") 0usize,
+        in("rsi") size,
+        in("rdx") 3usize, // PROT_READ | PROT_WRITE
+        in("r10") 0x22usize, // MAP_PRIVATE | MAP_ANONYMOUS
+        in("r8") (-1i64) as usize,
+        in("r9") 0usize,
+        lateout("rax") result,
+        clobber_abi("system"),
+    );
+    #[cfg(target_arch = "aarch64")]
+    let result: isize;
+    #[cfg(target_arch = "aarch64")]
+    core::arch::asm!(
+        "svc #0",
+        in("x8") 222usize, // SYS_mmap
+        in("x0") 0usize,
+        in("x1") size,
+        in("x2") 3usize, // PROT_READ | PROT_WRITE
+        in("x3") 0x22usize, // MAP_PRIVATE | MAP_ANONYMOUS
+        in("x4") (-1i64) as usize,
+        in("x5") 0usize,
+        lateout("x0") result,
+        clobber_abi("system"),
+    );
+    if result < 0 && result >= -4095 {
+        core::ptr::null_mut()
+    } else {
+        result as *mut c_void
+    }
+}
+
+unsafe fn unmap_pal_memory(ptr: *mut c_void, size: usize) -> isize {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let result: isize;
+        core::arch::asm!(
+            "syscall",
+            in("rax") 11usize, // SYS_munmap
+            in("rdi") ptr as usize,
+            in("rsi") size,
+            lateout("rax") result,
+            clobber_abi("system"),
+        );
+        result
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let result: isize;
+        core::arch::asm!(
+            "svc #0",
+            in("x8") 215usize, // SYS_munmap
+            in("x0") ptr as usize,
+            in("x1") size,
+            lateout("x0") result,
+            clobber_abi("system"),
+        );
+        result
+    }
+}
+
+unsafe extern "C" fn pal_malloc_cb(size: usize) -> *mut c_void {
+    let Some(total) = size
+        .checked_add(core::mem::size_of::<usize>())
+        .and_then(|total| total.checked_add(4095))
+        .map(|total| total & !4095)
+    else {
+        core::ptr::addr_of_mut!(THREAD_ERRNO).write_volatile(ENOMEM);
+        return core::ptr::null_mut();
+    };
+    let base = map_pal_memory(total);
+    if base.is_null() {
+        core::ptr::addr_of_mut!(THREAD_ERRNO).write_volatile(ENOMEM);
+        return core::ptr::null_mut();
+    }
+    base.cast::<usize>().write(total);
+    base.cast::<usize>().add(1).cast()
+}
+
+unsafe extern "C" fn pal_free_cb(ptr: *mut c_void) {
+    if ptr.is_null() {
+        return;
+    }
+    let base = ptr.cast::<usize>().sub(1);
+    let size = base.read();
+    let result = unmap_pal_memory(base.cast(), size);
+    if result < 0 && result >= -4095 {
+        core::ptr::addr_of_mut!(THREAD_ERRNO).write_volatile((-result) as i32);
+    }
+}
+
 pub unsafe fn flush_instruction_cache(memory: *mut c_void, size: usize) {
     #[cfg(target_arch = "aarch64")]
     {
@@ -494,6 +654,51 @@ unsafe extern "C" fn sys_write_cb(fd: i32, buf: *const c_void, count: usize) -> 
     } else {
         result
     }
+}
+
+unsafe extern "C" fn sys_pread_cb(fd: i32, buf: *mut c_void, count: usize, offset: i64) -> isize {
+    let result = sys_pread(fd, buf, count, offset);
+    if result < 0 && result >= -4095 {
+        core::ptr::addr_of_mut!(THREAD_ERRNO).write_volatile((-result) as i32);
+        -1
+    } else {
+        result
+    }
+}
+
+unsafe extern "C" fn sys_open_cb(path: *const c_char, flags: i32, mode: u32) -> i32 {
+    let result = sys_open(path.cast(), flags, mode);
+    if result < 0 && result >= -4095 {
+        core::ptr::addr_of_mut!(THREAD_ERRNO).write_volatile(-result);
+        -1
+    } else {
+        result
+    }
+}
+
+unsafe extern "C" fn sys_lseek_cb(fd: i32, offset: i64, whence: i32) -> i64 {
+    let result = sys_lseek(fd, offset, whence);
+    if result < 0 && result >= -4095 {
+        core::ptr::addr_of_mut!(THREAD_ERRNO).write_volatile((-result) as i32);
+        -1
+    } else {
+        result
+    }
+}
+
+unsafe extern "C" fn sys_ftruncate_cb(fd: i32, length: i64) -> i32 {
+    let result = sys_ftruncate(fd, length);
+    if result < 0 && result >= -4095 {
+        core::ptr::addr_of_mut!(THREAD_ERRNO).write_volatile(-result);
+        -1
+    } else {
+        result
+    }
+}
+
+unsafe extern "C" fn sys_close_cb(fd: i32) -> i32 {
+    sys_close(fd);
+    0
 }
 
 unsafe extern "C" fn errno_location_cb() -> *mut i32 {
@@ -589,6 +794,20 @@ unsafe extern "C" fn get_proc_address(_module: *mut c_void, name: *const c_char)
         sys_read_cb as *mut c_void
     } else if streq(name, b"write\0") {
         sys_write_cb as *mut c_void
+    } else if streq(name, b"pread\0") {
+        sys_pread_cb as *mut c_void
+    } else if streq(name, b"open\0") {
+        sys_open_cb as *mut c_void
+    } else if streq(name, b"lseek\0") {
+        sys_lseek_cb as *mut c_void
+    } else if streq(name, b"ftruncate\0") {
+        sys_ftruncate_cb as *mut c_void
+    } else if streq(name, b"close\0") {
+        sys_close_cb as *mut c_void
+    } else if streq(name, b"malloc\0") {
+        pal_malloc_cb as *mut c_void
+    } else if streq(name, b"free\0") {
+        pal_free_cb as *mut c_void
     } else if streq(name, b"__errno_location\0") {
         errno_location_cb as *mut c_void
     } else if streq(name, b"pthread_create\0") {
@@ -820,7 +1039,11 @@ pub unsafe fn run(sp: *const usize) -> ! {
     }
     let mut read_total = 0;
     while read_total < plat_len {
-        let n = sys_read(fd, comp_plat.as_mut_ptr().add(read_total), plat_len - read_total);
+        let n = sys_read(
+            fd,
+            comp_plat.as_mut_ptr().add(read_total),
+            plat_len - read_total,
+        );
         if n <= 0 {
             print_err(b"brot: error: read platform bytes failed\n");
             sys_exit(109);
@@ -836,7 +1059,11 @@ pub unsafe fn run(sp: *const usize) -> ! {
     }
     let mut read_total = 0;
     while read_total < hello_len {
-        let n = sys_read(fd, comp_hello.as_mut_ptr().add(read_total), hello_len - read_total);
+        let n = sys_read(
+            fd,
+            comp_hello.as_mut_ptr().add(read_total),
+            hello_len - read_total,
+        );
         if n <= 0 {
             print_err(b"brot: error: read hello bytes failed\n");
             sys_exit(111);
@@ -846,23 +1073,25 @@ pub unsafe fn run(sp: *const usize) -> ! {
     sys_close(fd);
 
     // 4. Decompress components
-    let mut dec_plat = [0u8; 4096];
-    let plat_decompressed_len = match crate::decompress::decompress(&comp_plat[..plat_len], &mut dec_plat) {
-        Ok(n) => n,
-        Err(_) => {
-            print_err(b"brot: error: decompress platform failed\n");
-            sys_exit(112);
-        }
-    };
+    let mut dec_plat = [0u8; 8192];
+    let plat_decompressed_len =
+        match crate::decompress::decompress(&comp_plat[..plat_len], &mut dec_plat) {
+            Ok(n) => n,
+            Err(_) => {
+                print_err(b"brot: error: decompress platform failed\n");
+                sys_exit(112);
+            }
+        };
 
     let mut dec_hello = [0u8; 4096];
-    let hello_decompressed_len = match crate::decompress::decompress(&comp_hello[..hello_len], &mut dec_hello) {
-        Ok(n) => n,
-        Err(_) => {
-            print_err(b"brot: error: decompress hello payload failed\n");
-            sys_exit(113);
-        }
-    };
+    let hello_decompressed_len =
+        match crate::decompress::decompress(&comp_hello[..hello_len], &mut dec_hello) {
+            Ok(n) => n,
+            Err(_) => {
+                print_err(b"brot: error: decompress hello payload failed\n");
+                sys_exit(113);
+            }
+        };
 
     // 5. Allocate executable memory for platform (including 128 KiB prefix)
     let total_plat_size = PREFIX_ABI_OFFSET + plat_decompressed_len;
@@ -873,7 +1102,11 @@ pub unsafe fn run(sp: *const usize) -> ! {
     }
 
     let plat_code = (plat_alloc as *mut u8).add(PREFIX_ABI_OFFSET) as *mut c_void;
-    core::ptr::copy_nonoverlapping(dec_plat.as_ptr(), plat_code as *mut u8, plat_decompressed_len);
+    core::ptr::copy_nonoverlapping(
+        dec_plat.as_ptr(),
+        plat_code as *mut u8,
+        plat_decompressed_len,
+    );
     flush_instruction_cache(plat_code, plat_decompressed_len);
 
     // 6. Populate prefix ABI at -0x20000 and invoke PAL at +0x00000

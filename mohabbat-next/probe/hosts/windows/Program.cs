@@ -15,7 +15,7 @@ internal static class Program
     private static readonly int PrefixAbiOffset = 0x20000;
     private const ushort ProcessorArchitectureAmd64 = 9;
     private const ushort ProcessorArchitectureArm64 = 12;
-    private const int MaximumComponentSize = 4096;
+    private const int MaximumComponentSize = 8192;
     private const string InternalResourcePrefix = "MohabbatNext.Internal.";
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]

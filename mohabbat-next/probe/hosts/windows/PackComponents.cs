@@ -8,7 +8,7 @@ using ZstdSharp;
 
 internal static class PackComponents
 {
-    private const int MaximumComponentSize = 4096;
+    private const int MaximumComponentSize = 8192;
     private const int MaximumCompressedComponentSize = 8192;
     private const int MaximumBrotSize = 16 * 1024 * 1024;
     private const int DosHeaderSize = 60;
@@ -164,7 +164,7 @@ internal static class PackComponents
                 if (data.Length > MaximumComponentSize)
                 {
                     throw new InvalidOperationException(
-                        "Flat component exceeds 4 KiB: " + path);
+                        "Flat component exceeds 8 KiB: " + path);
                 }
                 data = CompressAndVerify(data);
                 if (data.Length > MaximumCompressedComponentSize)

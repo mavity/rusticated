@@ -28,11 +28,20 @@ pub const MEM_CODE_JIT_RW: u32 = 2;
 #[allow(dead_code)]
 pub const MEM_CODE_EXEC_RX: u32 = 3;
 pub const ERROR_AGAIN: u32 = 6;
+pub const ERROR_ACCES: u32 = 2;
 pub const ERROR_BADF: u32 = 8;
 pub const ERROR_CANCELED: u32 = 11;
+pub const ERROR_EXIST: u32 = 20;
 pub const ERROR_INVALID: u32 = 28;
 pub const ERROR_IO: u32 = 29;
+pub const ERROR_ISDIR: u32 = 31;
+pub const ERROR_NOMEM: u32 = 48;
+pub const ERROR_NOENT: u32 = 44;
+pub const ERROR_NOTDIR: u32 = 54;
+pub const ERROR_OVERFLOW: u32 = 61;
+pub const ERROR_PERM: u32 = 63;
 pub const ERROR_PIPE: u32 = 64;
+pub const ERROR_SPIPE: u32 = 70;
 pub const ERROR_UNSUPPORTED: u32 = 52;
 
 #[repr(C)]

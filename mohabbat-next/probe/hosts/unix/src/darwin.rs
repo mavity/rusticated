@@ -217,7 +217,11 @@ pub unsafe fn run(argc: i32, argv: *const *const u8) -> ! {
     }
     let mut read_total = 0;
     while read_total < plat_len {
-        let n = read(fd, comp_plat.as_mut_ptr().add(read_total), plat_len - read_total);
+        let n = read(
+            fd,
+            comp_plat.as_mut_ptr().add(read_total),
+            plat_len - read_total,
+        );
         if n <= 0 {
             exit(109);
         }
@@ -231,7 +235,11 @@ pub unsafe fn run(argc: i32, argv: *const *const u8) -> ! {
     }
     let mut read_total = 0;
     while read_total < hello_len {
-        let n = read(fd, comp_hello.as_mut_ptr().add(read_total), hello_len - read_total);
+        let n = read(
+            fd,
+            comp_hello.as_mut_ptr().add(read_total),
+            hello_len - read_total,
+        );
         if n <= 0 {
             exit(111);
         }
@@ -240,17 +248,19 @@ pub unsafe fn run(argc: i32, argv: *const *const u8) -> ! {
     close(fd);
 
     // 4. Decompress components
-    let mut dec_plat = [0u8; 4096];
-    let plat_decompressed_len = match crate::decompress::decompress(&comp_plat[..plat_len], &mut dec_plat) {
-        Ok(n) => n,
-        Err(_) => exit(112),
-    };
+    let mut dec_plat = [0u8; 8192];
+    let plat_decompressed_len =
+        match crate::decompress::decompress(&comp_plat[..plat_len], &mut dec_plat) {
+            Ok(n) => n,
+            Err(_) => exit(112),
+        };
 
     let mut dec_hello = [0u8; 4096];
-    let hello_decompressed_len = match crate::decompress::decompress(&comp_hello[..hello_len], &mut dec_hello) {
-        Ok(n) => n,
-        Err(_) => exit(113),
-    };
+    let hello_decompressed_len =
+        match crate::decompress::decompress(&comp_hello[..hello_len], &mut dec_hello) {
+            Ok(n) => n,
+            Err(_) => exit(113),
+        };
 
     // 5. Allocate executable memory for platform (including 128 KiB prefix)
     let total_plat_size = PREFIX_ABI_OFFSET + plat_decompressed_len;
@@ -274,7 +284,11 @@ pub unsafe fn run(argc: i32, argv: *const *const u8) -> ! {
         },
     );
     let plat_code = (plat_alloc as *mut u8).add(PREFIX_ABI_OFFSET) as *mut c_void;
-    core::ptr::copy_nonoverlapping(dec_plat.as_ptr(), plat_code as *mut u8, plat_decompressed_len);
+    core::ptr::copy_nonoverlapping(
+        dec_plat.as_ptr(),
+        plat_code as *mut u8,
+        plat_decompressed_len,
+    );
     pthread_jit_write_protect_np(1);
     sys_icache_invalidate(plat_code, plat_decompressed_len);
 
