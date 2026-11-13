@@ -88,6 +88,8 @@ pub struct UnixPlatformHost {
     set_jit_write_protect: Option<SetJitWriteProtectFn>,
     hello_payload: *const u8,
     hello_payload_size: usize,
+    argv: *const *const u8,
+    argc: usize,
 }
 
 #[repr(C)]
@@ -229,6 +231,18 @@ unsafe fn slice_origin() -> *mut u8 {
 #[inline(always)]
 unsafe fn host_abi() -> &'static UnixPlatformHost {
     &*(slice_origin().sub(0x20000) as *const UnixPlatformHost)
+}
+
+#[cfg(target_arch = "x86_64")]
+unsafe extern "win64" fn probe_get_args(buffer: *mut u8, capacity: usize) -> u64 {
+    let host = host_abi();
+    pal_abi::pack_args(host.argv, host.argc, buffer, capacity)
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe extern "C" fn probe_get_args(buffer: *mut u8, capacity: usize) -> u64 {
+    let host = host_abi();
+    pal_abi::pack_args(host.argv, host.argc, buffer, capacity)
 }
 
 #[inline(always)]
@@ -1054,6 +1068,7 @@ unsafe fn run() -> i32 {
     #[cfg(target_arch = "aarch64")]
     let process_exit = exit;
     let mut abi_table = pal_abi_stubs::for_payload(probe_read, probe_write, process_exit);
+    abi_table.get_args = probe_get_args;
     abi_table.seek = probe_seek;
     abi_table.handle_truncate = probe_truncate;
     abi_table.handle_close = probe_handle_close;
@@ -1367,7 +1382,7 @@ mod tests {
     #[test]
     fn test_unix_platform_prefix_layout() {
         assert_eq!(PREFIX_ABI_OFFSET, 0x20000);
-        assert_eq!(size_of::<UnixPlatformHost>(), 64);
+        assert_eq!(size_of::<UnixPlatformHost>(), 80);
         assert_eq!(offset_of!(UnixPlatformHost, load_library), 0);
         assert_eq!(offset_of!(UnixPlatformHost, get_proc_address), 8);
         assert_eq!(offset_of!(UnixPlatformHost, alloc), 16);
@@ -1376,6 +1391,8 @@ mod tests {
         assert_eq!(offset_of!(UnixPlatformHost, set_jit_write_protect), 40);
         assert_eq!(offset_of!(UnixPlatformHost, hello_payload), 48);
         assert_eq!(offset_of!(UnixPlatformHost, hello_payload_size), 56);
+        assert_eq!(offset_of!(UnixPlatformHost, argv), 64);
+        assert_eq!(offset_of!(UnixPlatformHost, argc), 72);
         assert!(size_of::<PlatformState>() <= 0x10000);
     }
 

@@ -10,6 +10,8 @@ pub struct UnixPlatformHost {
     pub set_jit_write_protect: Option<unsafe extern "C" fn(i32)>,
     pub hello_payload: *const u8,
     pub hello_payload_size: usize,
+    pub argv: *const *const u8,
+    pub argc: usize,
 }
 
 type PlatformEntry = unsafe extern "C" fn() -> i32;
@@ -1016,9 +1018,12 @@ pub unsafe fn run(sp: *const usize) -> ! {
             sys_exit(105);
         }
     };
+    let guest_args_idx = bundle_idx + 5;
+    let guest_argv = sp.add(1 + guest_args_idx).cast::<*const u8>();
+    let guest_argc = argc - guest_args_idx;
 
-    if plat_len == 0 || plat_len > 8192 || hello_len == 0 || hello_len > 8192 {
-        print_err(b"brot: error: component length out of bounds (0..8192)\n");
+    if plat_len == 0 || plat_len > 8192 || hello_len == 0 || hello_len > 65536 {
+        print_err(b"brot: error: component length out of bounds\n");
         sys_exit(106);
     }
 
@@ -1052,7 +1057,7 @@ pub unsafe fn run(sp: *const usize) -> ! {
     }
 
     // Read compressed hello payload
-    let mut comp_hello = [0u8; 8192];
+    let mut comp_hello = [0u8; 65536];
     if sys_lseek(fd, hello_off, 0) < 0 {
         print_err(b"brot: error: lseek hello offset failed\n");
         sys_exit(110);
@@ -1083,7 +1088,7 @@ pub unsafe fn run(sp: *const usize) -> ! {
             }
         };
 
-    let mut dec_hello = [0u8; 4096];
+    let mut dec_hello = [0u8; 65536];
     let hello_decompressed_len =
         match crate::decompress::decompress(&comp_hello[..hello_len], &mut dec_hello) {
             Ok(n) => n,
@@ -1121,6 +1126,8 @@ pub unsafe fn run(sp: *const usize) -> ! {
             set_jit_write_protect: None,
             hello_payload: dec_hello.as_ptr(),
             hello_payload_size: hello_decompressed_len,
+            argv: guest_argv,
+            argc: guest_argc,
         },
     );
 

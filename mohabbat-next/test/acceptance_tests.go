@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -21,9 +22,15 @@ var (
 	reVerifyComponents = regexp.MustCompile(`^Verified all six compressed components\.\n$`)
 	reEchoTranscript   = regexp.MustCompile(`^Mohabbat-next ready \(compiled [^\)]+\)\. Enter an empty line to exit\.\n> echo: alpha\n> echo: beta\n> $`)
 	reEmptyEOF         = regexp.MustCompile(`^Mohabbat-next ready \(compiled [^\)]+\)\. Enter an empty line to exit\.\n> $`)
+	reFileIoResult     = regexp.MustCompile(`^\d+ (OK|ERR) `)
 )
 
 func runBundleCase(ctx context.Context, command string, args []string, stdinText string, expectedExit int, expectedRegex *regexp.Regexp) error {
+	_, err := runBundleCaseCapture(ctx, command, args, stdinText, expectedExit, expectedRegex)
+	return err
+}
+
+func runBundleCaseCapture(ctx context.Context, command string, args []string, stdinText string, expectedExit int, expectedRegex *regexp.Regexp) (string, error) {
 	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Stdin = strings.NewReader(stdinText)
 	var stdout, stderr bytes.Buffer
@@ -36,18 +43,18 @@ func runBundleCase(ctx context.Context, command string, args []string, stdinText
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
 		} else {
-			return fmt.Errorf("launch %s %v failed: %w (stderr: %s)", command, args, err, stderr.String())
+			return "", fmt.Errorf("launch %s %v failed: %w (stderr: %s)", command, args, err, stderr.String())
 		}
 	}
 
 	normalizedOut := strings.ReplaceAll(stdout.String(), "\r\n", "\n")
 	if exitCode != expectedExit {
-		return fmt.Errorf("exit code %d != expected %d\nstdout: %q\nstderr: %q", exitCode, expectedExit, normalizedOut, stderr.String())
+		return "", fmt.Errorf("exit code %d != expected %d\nstdout: %q\nstderr: %q", exitCode, expectedExit, normalizedOut, stderr.String())
 	}
 	if expectedRegex != nil && !expectedRegex.MatchString(normalizedOut) {
-		return fmt.Errorf("output mismatch:\n  expected pattern: %s\n  actual output:    %q\n  stderr:           %q", expectedRegex.String(), normalizedOut, stderr.String())
+		return "", fmt.Errorf("output mismatch:\n  expected pattern: %s\n  actual output:    %q\n  stderr:           %q", expectedRegex.String(), normalizedOut, stderr.String())
 	}
-	return nil
+	return normalizedOut, nil
 }
 
 func runStandardAcceptanceSuite(r *Runner, suiteName string, command string, baseArgs []string, supportVerifyFlag bool) {
@@ -116,6 +123,301 @@ func runStandardAcceptanceSuite(r *Runner, suiteName string, command string, bas
 	})
 }
 
+type fileIoScenario struct {
+	name          string
+	args          []string
+	initialFiles  map[string][]byte
+	expectedFiles map[string][]byte
+	expectedLines []string
+}
+
+func runFileIoAcceptanceSuite(r *Runner, suiteName, command string, baseArgs []string, mapWorkDir func(string) (string, error)) {
+	for _, scenario := range fileIoScenarios() {
+		scenario := scenario
+		r.RunTest(suiteName, "fileio-"+scenario.name, func() (testErr error) {
+			workDir, err := os.MkdirTemp("", "mohabbat-fileio-")
+			if err != nil {
+				return fmt.Errorf("create file-I/O test directory: %w", err)
+			}
+			defer func() {
+				if cleanupErr := os.RemoveAll(workDir); cleanupErr != nil {
+					if testErr == nil {
+						testErr = fmt.Errorf("remove file-I/O test directory: %w", cleanupErr)
+					} else {
+						testErr = fmt.Errorf("%v; remove file-I/O test directory: %w", testErr, cleanupErr)
+					}
+				}
+			}()
+
+			for name, content := range scenario.initialFiles {
+				if err := os.WriteFile(filepath.Join(workDir, name), content, 0o600); err != nil {
+					return fmt.Errorf("create initial file %s: %w", name, err)
+				}
+			}
+
+			workDirArg := workDir
+			if mapWorkDir != nil {
+				workDirArg, err = mapWorkDir(workDir)
+				if err != nil {
+					return fmt.Errorf("map file-I/O working directory: %w", err)
+				}
+			}
+			args := append(append([]string(nil), baseArgs...), "--file-io-test", workDirArg)
+			args = append(args, scenario.args...)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			output, err := runBundleCaseCapture(ctx, command, args, "", 0, nil)
+			if err != nil {
+				return err
+			}
+			var records []string
+			for _, line := range strings.Split(output, "\n") {
+				if reFileIoResult.MatchString(line) {
+					records = append(records, line)
+				}
+			}
+			if len(records) != len(scenario.expectedLines) {
+				return fmt.Errorf("guest emitted %d result records, want %d\nstdout: %q", len(records), len(scenario.expectedLines), output)
+			}
+			for i, expected := range scenario.expectedLines {
+				if records[i] != expected {
+					return fmt.Errorf("result record %d: %q != %q\nstdout: %q", i, records[i], expected, output)
+				}
+			}
+			return verifyFileIoScenario(workDir, scenario.expectedFiles)
+		})
+	}
+}
+
+func fileIoScenarios() []fileIoScenario {
+	maxTransfer := make([]byte, 4096)
+	for i := range maxTransfer {
+		maxTransfer[i] = byte((i*37 + 11) & 0xff)
+	}
+	maxTransferHex := hex.EncodeToString(maxTransfer)
+
+	return []fileIoScenario{
+		{
+			name: "binary-unicode-and-positional-read",
+			args: []string{
+				"open", "f", "binary-λ.bin", "rw", "create,exclusive",
+				"write", "f", "0061",
+				"write", "f", "00ff7f80",
+				"seek", "f", "start", "0",
+				"read", "f", "6",
+				"seek", "f", "start", "2",
+				"pread", "f", "0", "2",
+				"seek", "f", "current", "1",
+				"read", "f", "2",
+				"seek", "f", "end", "-2",
+				"read", "f", "2",
+				"close", "f",
+			},
+			expectedFiles: map[string][]byte{"binary-λ.bin": {0x00, 'a', 0x00, 0xff, 0x7f, 0x80}},
+			expectedLines: []string{
+				"0 OK open f",
+				"1 OK write f bytes=2",
+				"2 OK write f bytes=4",
+				"3 OK seek f position=0",
+				"4 OK read f bytes=6 eof=0 hex=006100ff7f80",
+				"5 OK seek f position=2",
+				"6 OK pread f bytes=2 eof=0 hex=0061",
+				"7 OK seek f position=3",
+				"8 OK read f bytes=2 eof=0 hex=ff7f",
+				"9 OK seek f position=4",
+				"10 OK read f bytes=2 eof=0 hex=7f80",
+				"11 OK close f",
+			},
+		},
+		{
+			name: "maximum-transfer-boundary",
+			args: []string{
+				"open", "f", "max-transfer.bin", "rw", "create,exclusive",
+				"write", "f", maxTransferHex,
+				"seek", "f", "start", "0",
+				"read", "f", "4096",
+				"close", "f",
+			},
+			expectedFiles: map[string][]byte{"max-transfer.bin": maxTransfer},
+			expectedLines: []string{
+				"0 OK open f",
+				"1 OK write f bytes=4096",
+				"2 OK seek f position=0",
+				"3 OK read f bytes=4096 eof=0 hex=" + maxTransferHex,
+				"4 OK close f",
+			},
+		},
+		{
+			name: "missing-exclusive-and-open-truncate",
+			args: []string{
+				"open", "x", "missing.bin", "ro", "-",
+				"open", "x", "replace.bin", "rw", "create,exclusive",
+				"open", "f", "replace.bin", "rw", "truncate",
+				"read", "f", "1",
+				"write", "f", "6e6577",
+				"close", "f",
+			},
+			initialFiles:  map[string][]byte{"replace.bin": []byte("old-data")},
+			expectedFiles: map[string][]byte{"replace.bin": []byte("new")},
+			expectedLines: []string{
+				"0 ERR open x error=44",
+				"1 ERR open x error=20",
+				"2 OK open f",
+				"3 OK read f bytes=0 eof=1 hex=",
+				"4 OK write f bytes=3",
+				"5 OK close f",
+			},
+		},
+		{
+			name: "zero-length-and-repeated-eof",
+			args: []string{
+				"open", "f", "empty.bin", "rw", "create,exclusive",
+				"write", "f", "",
+				"seek", "f", "start", "0",
+				"read", "f", "0",
+				"read", "f", "1",
+				"read", "f", "1",
+				"close", "f",
+			},
+			expectedFiles: map[string][]byte{"empty.bin": {}},
+			expectedLines: []string{
+				"0 OK open f",
+				"1 OK write f bytes=0",
+				"2 OK seek f position=0",
+				"3 OK read f bytes=0 eof=0 hex=",
+				"4 OK read f bytes=0 eof=1 hex=",
+				"5 OK read f bytes=0 eof=1 hex=",
+				"6 OK close f",
+			},
+		},
+		{
+			name: "seek-truncate-extend-and-shrink",
+			args: []string{
+				"open", "f", "resize.bin", "rw", "-",
+				"seek", "f", "end", "0",
+				"truncate", "f", "3",
+				"seek", "f", "start", "0",
+				"read", "f", "3",
+				"truncate", "f", "6",
+				"seek", "f", "start", "3",
+				"read", "f", "3",
+				"truncate", "f", "0",
+				"seek", "f", "end", "0",
+				"close", "f",
+			},
+			initialFiles:  map[string][]byte{"resize.bin": []byte("abcdef")},
+			expectedFiles: map[string][]byte{"resize.bin": {}},
+			expectedLines: []string{
+				"0 OK open f",
+				"1 OK seek f position=6",
+				"2 OK truncate f",
+				"3 OK seek f position=0",
+				"4 OK read f bytes=3 eof=0 hex=616263",
+				"5 OK truncate f",
+				"6 OK seek f position=3",
+				"7 OK read f bytes=3 eof=0 hex=000000",
+				"8 OK truncate f",
+				"9 OK seek f position=0",
+				"10 OK close f",
+			},
+		},
+		{
+			name: "append-and-independent-handles",
+			args: []string{
+				"open", "a", "append.bin", "rw", "append",
+				"open", "b", "append.bin", "ro", "-",
+				"seek", "a", "start", "0",
+				"write", "a", "5859",
+				"seek", "b", "start", "0",
+				"read", "b", "8",
+				"close", "a",
+				"close", "b",
+			},
+			initialFiles:  map[string][]byte{"append.bin": []byte("abcdef")},
+			expectedFiles: map[string][]byte{"append.bin": []byte("abcdefXY")},
+			expectedLines: []string{
+				"0 OK open a",
+				"1 OK open b",
+				"2 OK seek a position=0",
+				"3 OK write a bytes=2",
+				"4 OK seek b position=0",
+				"5 OK read b bytes=8 eof=0 hex=6162636465665859",
+				"6 OK close a",
+				"7 OK close b",
+			},
+		},
+		{
+			name: "access-modes-close-and-reopen",
+			args: []string{
+				"open", "r", "handles.bin", "ro", "-",
+				"write", "r", "5a",
+				"read", "r", "1",
+				"open", "w", "handles.bin", "wo", "-",
+				"read", "w", "1",
+				"write", "w", "5a",
+				"close", "r",
+				"read", "r", "1",
+				"close", "w",
+				"open", "fresh", "handles.bin", "ro", "-",
+				"read", "fresh", "3",
+				"close", "fresh",
+			},
+			initialFiles:  map[string][]byte{"handles.bin": []byte("abc")},
+			expectedFiles: map[string][]byte{"handles.bin": []byte("Zbc")},
+			expectedLines: []string{
+				"0 OK open r",
+				"1 ERR write r error=8 bytes=0",
+				"2 OK read r bytes=1 eof=0 hex=61",
+				"3 OK open w",
+				"4 ERR read w error=8 bytes=0 hex=",
+				"5 OK write w bytes=1",
+				"6 OK close r",
+				"7 ERR read r error=8 bytes=0 hex=",
+				"8 OK close w",
+				"9 OK open fresh",
+				"10 OK read fresh bytes=3 eof=0 hex=5a6263",
+				"11 OK close fresh",
+			},
+		},
+		{
+			name: "directory-open-and-close",
+			args: []string{
+				"open", "d", ".", "ro", "directory",
+				"close", "d",
+			},
+			expectedFiles: map[string][]byte{},
+			expectedLines: []string{"0 OK open d", "1 OK close d"},
+		},
+	}
+}
+
+func verifyFileIoScenario(workDir string, expected map[string][]byte) error {
+	entries, err := os.ReadDir(workDir)
+	if err != nil {
+		return fmt.Errorf("read file-I/O working directory: %w", err)
+	}
+	if len(entries) != len(expected) {
+		return fmt.Errorf("working directory contains %d entries, want %d", len(entries), len(expected))
+	}
+	for _, entry := range entries {
+		want, ok := expected[entry.Name()]
+		if !ok {
+			return fmt.Errorf("unexpected filesystem entry %q", entry.Name())
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("filesystem entry %q is not a regular file", entry.Name())
+		}
+		got, err := os.ReadFile(filepath.Join(workDir, entry.Name()))
+		if err != nil {
+			return fmt.Errorf("read filesystem entry %q: %w", entry.Name(), err)
+		}
+		if !bytes.Equal(got, want) {
+			return fmt.Errorf("file %q contents %x != expected %x", entry.Name(), got, want)
+		}
+	}
+	return nil
+}
+
 func echoTranscriptRegex(lines ...string) *regexp.Regexp {
 	var expected strings.Builder
 	expected.WriteString(`^Mohabbat-next ready \(compiled [^\)]+\)\. Enter an empty line to exit\.\n> `)
@@ -164,8 +466,8 @@ func (r *Runner) RunStage3ArtifactIntegrityTests() {
 		}{
 			{"hello-x86_64.bin", 4096},
 			{"hello-aarch64.bin", 4096},
-			{"hello-fileio-x86_64.bin", 8192},
-			{"hello-fileio-aarch64.bin", 8192},
+			{"hello-fileio-x86_64.bin", 64 * 1024},
+			{"hello-fileio-aarch64.bin", 64 * 1024},
 			{"platform-windows-x86_64.bin", 8192},
 			{"platform-windows-aarch64.bin", 8192},
 			{"platform-linux-x86_64.bin", 8192},
@@ -271,7 +573,7 @@ func (r *Runner) RunStage3PlatformMatrix() {
 	if runtime.GOOS == "windows" {
 		nativeSuite := fmt.Sprintf("windows/%s-native", runtime.GOARCH)
 		runStandardAcceptanceSuite(r, nativeSuite, r.DistExe, nil, true)
-		runWindowsFileIoAcceptanceSuite(r, nativeSuite, r.DistExe, nil)
+		runFileIoAcceptanceSuite(r, nativeSuite, r.DistExe, nil, nil)
 
 		// If running on Windows ARM64, also test the x86_64 Windows PAL and hello payload via a /platform:x64 CLR host.
 		if runtime.GOARCH == "arm64" {
@@ -281,7 +583,7 @@ func (r *Runner) RunStage3PlatformMatrix() {
 			})
 			if err == nil {
 				runStandardAcceptanceSuite(r, "windows/amd64-emulated", x64Exe, nil, true)
-				runWindowsFileIoAcceptanceSuite(r, "windows/amd64-emulated", x64Exe, nil)
+				runFileIoAcceptanceSuite(r, "windows/amd64-emulated", x64Exe, nil, nil)
 			}
 		}
 	} else {
@@ -300,41 +602,6 @@ func (r *Runner) RunStage3PlatformMatrix() {
 
 	// 4. macOS Darwin (Native Darwin + Rosetta 2 x86_64 on Apple Silicon)
 	r.runDarwinMatrix()
-}
-
-func runWindowsFileIoAcceptanceSuite(r *Runner, suiteName, command string, baseArgs []string) {
-	r.RunTest(suiteName, "raw-abi-fileio-real-filesystem", func() (testErr error) {
-		workDir, err := os.MkdirTemp("", "mohabbat-fileio-")
-		if err != nil {
-			return fmt.Errorf("create file-I/O test directory: %w", err)
-		}
-		defer func() {
-			if cleanupErr := os.RemoveAll(workDir); cleanupErr != nil {
-				if testErr == nil {
-					testErr = fmt.Errorf("remove file-I/O test directory: %w", cleanupErr)
-				} else {
-					testErr = fmt.Errorf("%v; remove file-I/O test directory: %w", testErr, cleanupErr)
-				}
-			}
-		}()
-
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		args := append(append([]string(nil), baseArgs...), "--file-io-test", workDir)
-		if err := runBundleCase(ctx, command, args, "", 0, nil); err != nil {
-			return err
-		}
-
-		path := filepath.Join(workDir, "fileio-λ.bin")
-		content, err := os.ReadFile(path)
-		if err != nil {
-			return fmt.Errorf("read guest-created file %s: %w", path, err)
-		}
-		if !bytes.Equal(content, []byte("abcdxy")) {
-			return fmt.Errorf("guest file contents %q != %q", content, "abcdxy")
-		}
-		return nil
-	})
 }
 
 func (r *Runner) builtX64WindowsHost() (string, error) {
@@ -357,6 +624,7 @@ func (r *Runner) runLinuxMatrix() {
 		}
 		suite := fmt.Sprintf("linux/%s-native", runtime.GOARCH)
 		runStandardAcceptanceSuite(r, suite, "bash", []string{r.DistExe}, false)
+		runFileIoAcceptanceSuite(r, suite, "bash", []string{r.DistExe}, nil)
 		return
 	}
 
@@ -384,6 +652,12 @@ func (r *Runner) runLinuxMatrix() {
 		unixBundle := "/mnt/" + drive + "/" + filepath.ToSlash(r.DistExe[3:])
 		suite := fmt.Sprintf("linux/wsl (%s)", strings.TrimSpace(string(out)))
 		runStandardAcceptanceSuite(r, suite, wslPath, []string{"-e", "bash", unixBundle}, false)
+		runFileIoAcceptanceSuite(r, suite, wslPath, []string{"-e", "bash", unixBundle}, func(path string) (string, error) {
+			if len(path) < 3 || path[1] != ':' {
+				return "", fmt.Errorf("expected an absolute Windows path, got %q", path)
+			}
+			return "/mnt/" + strings.ToLower(path[:1]) + "/" + filepath.ToSlash(path[3:]), nil
+		})
 		return
 	}
 
@@ -393,6 +667,7 @@ func (r *Runner) runLinuxMatrix() {
 func (r *Runner) runAndroidMatrix() {
 	if runtime.GOOS == "linux" && (os.Getenv("TERMUX_VERSION") != "" || os.Getenv("PREFIX") == "/data/data/com.termux/files/usr") {
 		runStandardAcceptanceSuite(r, "android/aarch64-termux", "bash", []string{r.DistExe}, false)
+		runFileIoAcceptanceSuite(r, "android/aarch64-termux", "bash", []string{r.DistExe}, nil)
 		return
 	}
 
@@ -433,6 +708,7 @@ func (r *Runner) runDarwinMatrix() {
 
 	suite := fmt.Sprintf("darwin/%s-native", runtime.GOARCH)
 	runStandardAcceptanceSuite(r, suite, "bash", []string{r.DistExe}, false)
+	runFileIoAcceptanceSuite(r, suite, "bash", []string{r.DistExe}, nil)
 
 	if runtime.GOARCH == "arm64" {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -443,5 +719,6 @@ func (r *Runner) runDarwinMatrix() {
 			return
 		}
 		runStandardAcceptanceSuite(r, "darwin/x86_64-rosetta2", "arch", []string{"-x86_64", "bash", r.DistExe}, false)
+		runFileIoAcceptanceSuite(r, "darwin/x86_64-rosetta2", "arch", []string{"-x86_64", "bash", r.DistExe}, nil)
 	}
 }

@@ -176,7 +176,7 @@ func main() {
 			Name:         "payload-fileio-x86_64",
 			Package:      "mohabbat-next-payload",
 			Feature:      "file-io-test",
-			MaxSize:      8192,
+			MaxSize:      64 * 1024,
 			Arch:         "x86_64",
 			LinkerScript: filepath.Join(nextDir, "payload", "payload.ld"),
 			EntrySymbol:  "hello_payload_code_start",
@@ -187,7 +187,7 @@ func main() {
 			Name:         "payload-fileio-aarch64",
 			Package:      "mohabbat-next-payload",
 			Feature:      "file-io-test",
-			MaxSize:      8192,
+			MaxSize:      64 * 1024,
 			Arch:         "aarch64",
 			LinkerScript: filepath.Join(nextDir, "payload", "payload.ld"),
 			EntrySymbol:  "hello_payload_code_start",
@@ -512,6 +512,8 @@ func main() {
 		PlatformDarwinAarch64: builtBins["platform-darwin-aarch64"],
 		HelloX86_64:           builtBins["hello-x86_64"],
 		HelloAarch64:          builtBins["hello-aarch64"],
+		FileIoX86_64:          builtBins["hello-fileio-x86_64"],
+		FileIoAarch64:         builtBins["hello-fileio-aarch64"],
 	}
 
 	if err := assembleVegetable(windowsHostExe, assemblyAssets, templatesDir, outputPath); err != nil {
