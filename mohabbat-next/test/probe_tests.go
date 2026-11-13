@@ -18,7 +18,7 @@ import (
 const wslProbeTimeout = 90 * time.Second
 
 var (
-	reVerifyComponents = regexp.MustCompile(`^Verified all four compressed components\.\n$`)
+	reVerifyComponents = regexp.MustCompile(`^Verified all six compressed components\.\n$`)
 	reEchoTranscript   = regexp.MustCompile(`^Anonymous-memory probe ready \(compiled [^\)]+\)\. Enter an empty line to exit\.\n> echo: alpha\n> echo: beta\n> $`)
 	reEmptyEOF         = regexp.MustCompile(`^Anonymous-memory probe ready \(compiled [^\)]+\)\. Enter an empty line to exit\.\n> $`)
 )
@@ -164,8 +164,10 @@ func (r *Runner) RunStage3ArtifactIntegrityTests() {
 		}{
 			{"probe-x86_64.bin", 4096},
 			{"probe-aarch64.bin", 4096},
-			{"platform-windows-x86_64.bin", 4096},
-			{"platform-windows-aarch64.bin", 4096},
+			{"probe-fileio-x86_64.bin", 8192},
+			{"probe-fileio-aarch64.bin", 8192},
+			{"platform-windows-x86_64.bin", 8192},
+			{"platform-windows-aarch64.bin", 8192},
 			{"platform-linux-x86_64.bin", 8192},
 			{"platform-linux-aarch64.bin", 8192},
 			{"platform-darwin-x86_64.bin", 8192},
@@ -188,32 +190,34 @@ func (r *Runner) RunStage3ArtifactIntegrityTests() {
 
 	r.RunTest("artifact/raw-entry", "probe-entry-symbol-at-byte-zero", func() error {
 		compDir := filepath.Join(r.BuildDir, "components")
-		for _, arch := range []string{"x86_64", "aarch64"} {
-			elfPath := filepath.Join(compDir, "probe-"+arch+".elf")
-			out, err := exec.Command("llvm-nm", "--defined-only", "--format=posix", elfPath).Output()
-			if err != nil {
-				return fmt.Errorf("llvm-nm probe entry check on %s: %w", elfPath, err)
-			}
-			found := false
-			for _, line := range strings.Split(string(out), "\n") {
-				fields := strings.Fields(line)
-				if len(fields) < 3 || fields[0] != "probe_code_start" {
-					continue
-				}
-				if found {
-					return fmt.Errorf("probe entry symbol is duplicated in %s", elfPath)
-				}
-				found = true
-				address, err := strconv.ParseUint(fields[2], 16, 64)
+		for _, payload := range []string{"probe", "probe-fileio"} {
+			for _, arch := range []string{"x86_64", "aarch64"} {
+				elfPath := filepath.Join(compDir, payload+"-"+arch+".elf")
+				out, err := exec.Command("llvm-nm", "--defined-only", "--format=posix", elfPath).Output()
 				if err != nil {
-					return fmt.Errorf("parse probe entry address %q in %s: %w", fields[2], elfPath, err)
+					return fmt.Errorf("llvm-nm %s entry check on %s: %w", payload, elfPath, err)
 				}
-				if address != 0 {
-					return fmt.Errorf("probe entry symbol in %s is at %#x, want byte offset zero", elfPath, address)
+				found := false
+				for _, line := range strings.Split(string(out), "\n") {
+					fields := strings.Fields(line)
+					if len(fields) < 3 || fields[0] != "probe_code_start" {
+						continue
+					}
+					if found {
+						return fmt.Errorf("probe entry symbol is duplicated in %s", elfPath)
+					}
+					found = true
+					address, err := strconv.ParseUint(fields[2], 16, 64)
+					if err != nil {
+						return fmt.Errorf("parse probe entry address %q in %s: %w", fields[2], elfPath, err)
+					}
+					if address != 0 {
+						return fmt.Errorf("probe entry symbol in %s is at %#x, want byte offset zero", elfPath, address)
+					}
 				}
-			}
-			if !found {
-				return fmt.Errorf("probe entry symbol missing from %s", elfPath)
+				if !found {
+					return fmt.Errorf("probe entry symbol missing from %s", elfPath)
+				}
 			}
 		}
 		return nil
@@ -267,6 +271,7 @@ func (r *Runner) RunStage3PlatformMatrix() {
 	if runtime.GOOS == "windows" {
 		nativeSuite := fmt.Sprintf("windows/%s-native", runtime.GOARCH)
 		runStandardProbeSuite(r, nativeSuite, r.DistExe, nil, true)
+		runWindowsFileIoProbeSuite(r, nativeSuite, r.DistExe, nil)
 
 		// If running on Windows ARM64, also test the x86_64 Windows PAL & x86_64 Probe via a /platform:x64 CLR host!
 		if runtime.GOARCH == "arm64" {
@@ -276,6 +281,7 @@ func (r *Runner) RunStage3PlatformMatrix() {
 			})
 			if err == nil {
 				runStandardProbeSuite(r, "windows/amd64-emulated", x64Exe, nil, true)
+				runWindowsFileIoProbeSuite(r, "windows/amd64-emulated", x64Exe, nil)
 			}
 		}
 	} else {
@@ -294,6 +300,41 @@ func (r *Runner) RunStage3PlatformMatrix() {
 
 	// 4. macOS Darwin (Native Darwin + Rosetta 2 x86_64 on Apple Silicon)
 	r.runDarwinMatrix()
+}
+
+func runWindowsFileIoProbeSuite(r *Runner, suiteName, command string, baseArgs []string) {
+	r.RunTest(suiteName, "raw-abi-fileio-real-filesystem", func() (testErr error) {
+		workDir, err := os.MkdirTemp("", "mohabbat-fileio-")
+		if err != nil {
+			return fmt.Errorf("create file-I/O test directory: %w", err)
+		}
+		defer func() {
+			if cleanupErr := os.RemoveAll(workDir); cleanupErr != nil {
+				if testErr == nil {
+					testErr = fmt.Errorf("remove file-I/O test directory: %w", cleanupErr)
+				} else {
+					testErr = fmt.Errorf("%v; remove file-I/O test directory: %w", testErr, cleanupErr)
+				}
+			}
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		args := append(append([]string(nil), baseArgs...), "--file-io-test", workDir)
+		if err := runProbeCase(ctx, command, args, "", 0, nil); err != nil {
+			return err
+		}
+
+		path := filepath.Join(workDir, "fileio-λ.bin")
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read guest-created file %s: %w", path, err)
+		}
+		if !bytes.Equal(content, []byte("abcdxy")) {
+			return fmt.Errorf("guest file contents %q != %q", content, "abcdxy")
+		}
+		return nil
+	})
 }
 
 func (r *Runner) builtX64WindowsHost() (string, error) {

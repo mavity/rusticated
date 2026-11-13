@@ -1,11 +1,2 @@
 /.build/
-/probe/payload/out/
-/probe/hosts/windows/.build/
-/probe/hosts/windows/bin/
-/probe/hosts/windows/obj/
-/probe/hosts/windows/packages/
-/probe/hosts/unix/.build/
-/probe/hosts/unix/out/
-/probe/hosts/unix/target/
-/probe/target*/
-/probe/hosts/windows/out/
+/target/

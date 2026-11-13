@@ -10,6 +10,9 @@ mod pal_abi;
 mod pal_abi_stubs;
 use pal_abi::{Overlapped, PalAbiTable, FLAG_COMPLETED};
 
+#[cfg(all(feature = "file-io-test", not(test)))]
+mod fileio;
+
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 compile_error!("The probe payload supports only x86-64 and AArch64.");
 
@@ -286,6 +289,9 @@ unsafe fn resume() {
 #[cfg(not(test))]
 #[inline(never)]
 unsafe extern "win64" fn probe_activation() {
+    #[cfg(feature = "file-io-test")]
+    fileio::resume();
+    #[cfg(not(feature = "file-io-test"))]
     resume();
 }
 
@@ -293,7 +299,10 @@ unsafe extern "win64" fn probe_activation() {
 #[cfg(not(test))]
 #[inline(never)]
 unsafe extern "C" fn probe_activation() {
-    resume();
+    #[cfg(feature = "file-io-test")]
+    fileio::resume();
+    #[cfg(not(feature = "file-io-test"))]
+    resume()
 }
 
 #[cfg(all(not(test), target_arch = "x86_64"))]

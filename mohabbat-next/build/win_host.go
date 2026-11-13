@@ -178,7 +178,7 @@ func buildWindowsHostExe(windowsHostDir, workDir, outExePath, platform string, c
 		return fmt.Errorf("no managed runtime dependencies found in %s", depsDir)
 	}
 
-	// Add the 4 compressed components
+	// Add the compressed platform and payload components.
 	for _, comp := range components {
 		compPath := comp.FilePath
 		if isWindowsBinary {

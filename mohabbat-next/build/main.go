@@ -169,6 +169,28 @@ func main() {
 			ArchiveGlobs: []string{"libmohabbat_next_payload-*.rlib", "libcore-*.rlib"},
 			OutName:      "probe-aarch64",
 		},
+		{
+			Name:         "payload-fileio-x86_64",
+			Package:      "mohabbat-next-payload",
+			Feature:      "file-io-test",
+			MaxSize:      8192,
+			Arch:         "x86_64",
+			LinkerScript: filepath.Join(probeDir, "payload", "payload.ld"),
+			EntrySymbol:  "probe_code_start",
+			ArchiveGlobs: []string{"libmohabbat_next_payload-*.rlib", "libcore-*.rlib"},
+			OutName:      "probe-fileio-x86_64",
+		},
+		{
+			Name:         "payload-fileio-aarch64",
+			Package:      "mohabbat-next-payload",
+			Feature:      "file-io-test",
+			MaxSize:      8192,
+			Arch:         "aarch64",
+			LinkerScript: filepath.Join(probeDir, "payload", "payload.ld"),
+			EntrySymbol:  "probe_code_start",
+			ArchiveGlobs: []string{"libmohabbat_next_payload-*.rlib", "libcore-*.rlib"},
+			OutName:      "probe-fileio-aarch64",
+		},
 		// Movable Cranelift Runtime Slice (ISA-shared)
 		{
 			Name:              "runtime-x86_64",
@@ -202,6 +224,7 @@ func main() {
 		{
 			Name:         "platform-windows-x86_64",
 			Package:      "mohabbat-next-windows-platform",
+			MaxSize:      8192,
 			Arch:         "x86_64",
 			LinkerScript: filepath.Join(probeDir, "platform", "windows", "platform.ld"),
 			EntrySymbol:  "windows_platform_entry",
@@ -211,6 +234,7 @@ func main() {
 		{
 			Name:         "platform-windows-aarch64",
 			Package:      "mohabbat-next-windows-platform",
+			MaxSize:      8192,
 			Arch:         "aarch64",
 			LinkerScript: filepath.Join(probeDir, "platform", "windows", "platform.ld"),
 			EntrySymbol:  "windows_platform_entry",
@@ -371,7 +395,7 @@ func main() {
 	}
 
 	// Step 3: Compress Windows components for CLR embedding (in parallel with max zstd)
-	fmt.Println("🍆  [3/5] Compressing Windows platform and hello payloads (max Zstandard)...")
+	fmt.Println("🍆  [3/5] Compressing Windows platform, hello, and file-I/O payloads (max Zstandard)...")
 	type winCompDef struct {
 		SrcBin  string
 		OutZst  string
@@ -380,6 +404,8 @@ func main() {
 	winComps := []winCompDef{
 		{SrcBin: builtBins["probe-x86_64"], OutZst: filepath.Join(componentsDir, "hello-x86_64.zst"), ResName: "MohabbatNext.Hello.x86_64.zst"},
 		{SrcBin: builtBins["probe-aarch64"], OutZst: filepath.Join(componentsDir, "hello-aarch64.zst"), ResName: "MohabbatNext.Hello.aarch64.zst"},
+		{SrcBin: builtBins["probe-fileio-x86_64"], OutZst: filepath.Join(componentsDir, "fileio-x86_64.zst"), ResName: "MohabbatNext.FileIo.x86_64.zst"},
+		{SrcBin: builtBins["probe-fileio-aarch64"], OutZst: filepath.Join(componentsDir, "fileio-aarch64.zst"), ResName: "MohabbatNext.FileIo.aarch64.zst"},
 		{SrcBin: builtBins["platform-windows-x86_64"], OutZst: filepath.Join(componentsDir, "platform-windows-x86_64.zst"), ResName: "MohabbatNext.Platform.Windows.x86_64.zst"},
 		{SrcBin: builtBins["platform-windows-aarch64"], OutZst: filepath.Join(componentsDir, "platform-windows-aarch64.zst"), ResName: "MohabbatNext.Platform.Windows.aarch64.zst"},
 	}

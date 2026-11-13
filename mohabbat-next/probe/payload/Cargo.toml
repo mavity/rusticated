@@ -7,3 +7,6 @@ edition = "2021"
 crate-type = ["rlib"]
 path = "probe.rs"
 doctest = false
+
+[features]
+file-io-test = []
