@@ -14,12 +14,14 @@ const MAX_ARGUMENT_BYTES: usize = 16 * 1024;
 const MAX_ARGUMENT_COUNT: usize = 2048;
 const MAX_TRANSFER_BYTES: usize = 4096;
 const MAX_OUTPUT_BYTES: usize = MAX_TRANSFER_BYTES * 2 + 512;
+const MAX_CONCURRENT_READS: usize = 64;
 const MAX_HANDLES: usize = 16;
 const HANDLE_NAME_BYTES: usize = 32;
 
 const PHASE_READY: u32 = 0;
 const PHASE_OPERATION: u32 = 1;
 const PHASE_OUTPUT: u32 = 2;
+const PHASE_CONCURRENT_WAIT: u32 = 3;
 
 const OP_OPEN: u32 = 1;
 const OP_WRITE: u32 = 2;
@@ -44,6 +46,25 @@ const EMPTY_HANDLE: Handle = Handle {
     name: [0; HANDLE_NAME_BYTES],
     name_len: 0,
     token: 0,
+};
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ConcurrentRead {
+    overlapped: Overlapped,
+    offset: i64,
+    byte: u8,
+}
+
+const EMPTY_CONCURRENT_READ: ConcurrentRead = ConcurrentRead {
+    overlapped: Overlapped {
+        flags: 0,
+        error: 0,
+        continued: 0,
+        result_ext: 0,
+    },
+    offset: 0,
+    byte: 0,
 };
 
 #[derive(Clone, Copy)]
@@ -75,6 +96,8 @@ struct FileIoGlobals {
     requested: usize,
     transferred: usize,
     data: [u8; MAX_TRANSFER_BYTES],
+    concurrent_read_count: usize,
+    concurrent_reads: [ConcurrentRead; MAX_CONCURRENT_READS],
     output: [u8; MAX_OUTPUT_BYTES],
     output_length: usize,
     output_offset: usize,
@@ -490,6 +513,48 @@ unsafe fn schedule_transfer(g: &mut FileIoGlobals) {
     g.phase = PHASE_OPERATION;
 }
 
+unsafe fn queue_concurrent_read_results(g: &mut FileIoGlobals) {
+    g.output_length = 0;
+    let mut index = 0usize;
+    while index < g.concurrent_read_count {
+        let request = &*g.concurrent_reads.as_ptr().add(index);
+        append_number(g, g.current_index as u64);
+        append_output(g, b".");
+        append_number(g, index as u64);
+        if request.overlapped.error == 0 {
+            let count = request.overlapped.result_ext as usize;
+            if count > 1 {
+                fail(90);
+            }
+            append_output(g, b" OK pread ");
+            append_name(g);
+            append_output(g, b" bytes=");
+            append_number(g, count as u64);
+            append_output(
+                g,
+                if count == 0 {
+                    b" eof=1 hex="
+                } else {
+                    b" eof=0 hex="
+                },
+            );
+            if count == 1 {
+                g.data.as_mut_ptr().write(request.byte);
+                append_hex(g, 1);
+            }
+        } else {
+            append_output(g, b" ERR pread ");
+            append_name(g);
+            append_output(g, b" error=");
+            append_number(g, request.overlapped.error as u64);
+            append_output(g, b" bytes=0 hex=");
+        }
+        append_output(g, b"\n");
+        index += 1;
+    }
+    schedule_output(g);
+}
+
 unsafe fn start_command(g: &mut FileIoGlobals) {
     let command = required_token(g);
     g.current_index = g.command_index;
@@ -497,6 +562,42 @@ unsafe fn start_command(g: &mut FileIoGlobals) {
     g.current_name_len = 0;
     g.current_handle = 0;
     g.transferred = 0;
+
+    if token_eq(command, b"pread-many") {
+        g.operation = OP_PREAD;
+        let name = required_token(g);
+        let Some(name_len) = parse_name(name, &mut g.current_name) else {
+            fail(2);
+        };
+        g.current_name_len = name_len;
+        let Some(slot) = find_handle(g, &g.current_name, g.current_name_len) else {
+            queue_error(g, ERROR_BADF);
+            return;
+        };
+        let count = match parse_unsigned(required_token(g)) {
+            Some(count) if (2..=MAX_CONCURRENT_READS as u64).contains(&count) => count as usize,
+            _ => fail(2),
+        };
+        g.current_handle_slot = slot;
+        g.current_handle = (*g.handles.as_ptr().add(slot)).token;
+        g.concurrent_read_count = count;
+        let mut index = 0usize;
+        while index < count {
+            let request = g.concurrent_reads.as_mut_ptr().add(index);
+            request.write(EMPTY_CONCURRENT_READ);
+            (*request).offset = index as i64;
+            (*request).overlapped.flags = READ_FLAG_POSITIONAL;
+            (abi().read)(
+                &mut (*request).overlapped,
+                g.current_handle,
+                &mut (*request).byte,
+                1,
+            );
+            index += 1;
+        }
+        g.phase = PHASE_CONCURRENT_WAIT;
+        return;
+    }
 
     if token_eq(command, b"open") {
         g.operation = OP_OPEN;
@@ -746,6 +847,18 @@ pub(super) unsafe fn resume() {
                     return;
                 }
                 complete_operation(g);
+            }
+            PHASE_CONCURRENT_WAIT => {
+                let mut index = 0usize;
+                while index < g.concurrent_read_count {
+                    if (*g.concurrent_reads.as_ptr().add(index)).overlapped.flags & FLAG_COMPLETED
+                        == 0
+                    {
+                        return;
+                    }
+                    index += 1;
+                }
+                queue_concurrent_read_results(g);
             }
             PHASE_OUTPUT => {
                 if g.overlapped.flags & FLAG_COMPLETED == 0 {
