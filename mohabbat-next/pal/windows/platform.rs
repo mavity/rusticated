@@ -68,6 +68,8 @@ pub struct WindowsPlatformHost {
     free: Option<FreeFn>,
     hello_payload: *const u8,
     hello_payload_size: usize,
+    argv: *const *const u8,
+    argc: usize,
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -404,6 +406,18 @@ unsafe fn slice_origin() -> *mut u8 {
 #[inline(always)]
 unsafe fn host_abi() -> &'static WindowsPlatformHost {
     &*(slice_origin().sub(0x20000) as *const WindowsPlatformHost)
+}
+
+#[cfg(target_arch = "x86_64")]
+unsafe extern "win64" fn probe_get_args(buffer: *mut u8, capacity: usize) -> u64 {
+    let host = host_abi();
+    pal_abi::pack_args(host.argv, host.argc, buffer, capacity)
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe extern "C" fn probe_get_args(buffer: *mut u8, capacity: usize) -> u64 {
+    let host = host_abi();
+    pal_abi::pack_args(host.argv, host.argc, buffer, capacity)
 }
 
 macro_rules! function_pointer {
@@ -1605,6 +1619,7 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
         },
     );
     let mut abi = pal_abi_stubs::for_payload(probe_read, probe_write, exit_process);
+    abi.get_args = probe_get_args;
     abi.path_open = probe_path_open_abi;
     abi.seek = probe_seek_abi;
     abi.handle_truncate = probe_handle_truncate_abi;
@@ -1754,6 +1769,8 @@ mod tests {
             free: None,
             hello_payload: ptr::null(),
             hello_payload_size: 0,
+            argv: ptr::null(),
+            argc: 0,
         };
         let get_last_error =
             function_pointer!(resolve(&host, module, b"GetLastError\0"), GetLastErrorFn).unwrap();
@@ -2231,13 +2248,15 @@ mod tests {
     #[test]
     fn test_windows_platform_prefix_layout() {
         assert_eq!(PREFIX_ABI_OFFSET, 0x20000);
-        assert_eq!(size_of::<WindowsPlatformHost>(), 48);
+        assert_eq!(size_of::<WindowsPlatformHost>(), 64);
         assert_eq!(offset_of!(WindowsPlatformHost, load_library), 0);
         assert_eq!(offset_of!(WindowsPlatformHost, get_proc_address), 8);
         assert_eq!(offset_of!(WindowsPlatformHost, alloc), 16);
         assert_eq!(offset_of!(WindowsPlatformHost, free), 24);
         assert_eq!(offset_of!(WindowsPlatformHost, hello_payload), 32);
         assert_eq!(offset_of!(WindowsPlatformHost, hello_payload_size), 40);
+        assert_eq!(offset_of!(WindowsPlatformHost, argv), 48);
+        assert_eq!(offset_of!(WindowsPlatformHost, argc), 56);
         assert_eq!(size_of::<NativeOverlapped>(), 32);
         assert_eq!(offset_of!(PendingIo, native_overlapped), 0);
         assert!(size_of::<PlatformState>() <= 0x10000);

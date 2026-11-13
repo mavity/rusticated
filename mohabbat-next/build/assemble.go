@@ -57,17 +57,19 @@ func validatePE(data []byte) (int, error) {
 }
 
 type AssemblyAssets struct {
-	BrotLinuxX86_64     string
-	BrotLinuxAarch64    string
-	BrotAndroidAarch64  string
-	BrotDarwinX86_64    string
-	BrotDarwinAarch64   string
-	PlatformLinuxX86_64 string
-	PlatformLinuxAarch64 string
-	PlatformDarwinX86_64 string
+	BrotLinuxX86_64       string
+	BrotLinuxAarch64      string
+	BrotAndroidAarch64    string
+	BrotDarwinX86_64      string
+	BrotDarwinAarch64     string
+	PlatformLinuxX86_64   string
+	PlatformLinuxAarch64  string
+	PlatformDarwinX86_64  string
 	PlatformDarwinAarch64 string
-	HelloX86_64         string
-	HelloAarch64        string
+	HelloX86_64           string
+	HelloAarch64          string
+	FileIoX86_64          string
+	FileIoAarch64         string
 }
 
 func assembleVegetable(windowsHostExe string, assets AssemblyAssets, templatesDir string, outputExe string) error {
@@ -101,15 +103,15 @@ func assembleVegetable(windowsHostExe string, assets AssemblyAssets, templatesDi
 
 		var payload []byte
 		if compress {
-			if len(raw) > 8192 {
-				return ComponentRange{}, fmt.Errorf("uncompressed component exceeds 8 KiB: %s (%d bytes)", filePath, len(raw))
+			if len(raw) > 64*1024 {
+				return ComponentRange{}, fmt.Errorf("uncompressed component exceeds 64 KiB: %s (%d bytes)", filePath, len(raw))
 			}
 			compressed, err := compressZstandard(raw)
 			if err != nil {
 				return ComponentRange{}, fmt.Errorf("compress %s: %w", filePath, err)
 			}
-			if len(compressed) > 8192 {
-				return ComponentRange{}, fmt.Errorf("compressed component exceeds 8 KiB: %s (%d bytes)", filePath, len(compressed))
+			if len(compressed) > 64*1024 {
+				return ComponentRange{}, fmt.Errorf("compressed component exceeds 64 KiB: %s (%d bytes)", filePath, len(compressed))
 			}
 			payload = compressed
 		} else {
@@ -184,6 +186,14 @@ func assembleVegetable(windowsHostExe string, assets AssemblyAssets, templatesDi
 	if err != nil {
 		return err
 	}
+	fileIoX86_64, err := addAsset(assets.FileIoX86_64, true)
+	if err != nil {
+		return err
+	}
+	fileIoAarch64, err := addAsset(assets.FileIoAarch64, true)
+	if err != nil {
+		return err
+	}
 
 	bootstrapOffset := int64(bundle.Len())
 
@@ -195,12 +205,16 @@ func assembleVegetable(windowsHostExe string, assets AssemblyAssets, templatesDi
 		PlatformLinuxX86_64Length    int64
 		HelloX86_64Offset            int64
 		HelloX86_64Length            int64
+		FileIoX86_64Offset           int64
+		FileIoX86_64Length           int64
 		BrotLinuxAarch64Offset       int64
 		BrotLinuxAarch64Length       int64
 		PlatformLinuxAarch64Offset   int64
 		PlatformLinuxAarch64Length   int64
 		HelloAarch64Offset           int64
 		HelloAarch64Length           int64
+		FileIoAarch64Offset          int64
+		FileIoAarch64Length          int64
 		BrotAndroidAarch64Offset     int64
 		BrotAndroidAarch64Length     int64
 		PlatformAndroidAarch64Offset int64
@@ -222,12 +236,16 @@ func assembleVegetable(windowsHostExe string, assets AssemblyAssets, templatesDi
 		PlatformLinuxX86_64Length:    platLinuxX86_64.Length,
 		HelloX86_64Offset:            helloX86_64.Offset,
 		HelloX86_64Length:            helloX86_64.Length,
+		FileIoX86_64Offset:           fileIoX86_64.Offset,
+		FileIoX86_64Length:           fileIoX86_64.Length,
 		BrotLinuxAarch64Offset:       brotLinuxAarch64.Offset,
 		BrotLinuxAarch64Length:       brotLinuxAarch64.Length,
 		PlatformLinuxAarch64Offset:   platLinuxAarch64.Offset,
 		PlatformLinuxAarch64Length:   platLinuxAarch64.Length,
 		HelloAarch64Offset:           helloAarch64.Offset,
 		HelloAarch64Length:           helloAarch64.Length,
+		FileIoAarch64Offset:          fileIoAarch64.Offset,
+		FileIoAarch64Length:          fileIoAarch64.Length,
 		BrotAndroidAarch64Offset:     brotAndroidAarch64.Offset,
 		BrotAndroidAarch64Length:     brotAndroidAarch64.Length,
 		PlatformAndroidAarch64Offset: platAndroidAarch64.Offset,

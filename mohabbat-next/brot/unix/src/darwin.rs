@@ -10,6 +10,8 @@ pub struct UnixPlatformHost {
     pub set_jit_write_protect: Option<unsafe extern "C" fn(i32)>,
     pub hello_payload: *const u8,
     pub hello_payload_size: usize,
+    pub argv: *const *const u8,
+    pub argc: usize,
 }
 
 type PlatformEntry = unsafe extern "C" fn() -> i32;
@@ -199,8 +201,11 @@ pub unsafe fn run(argc: i32, argv: *const *const u8) -> ! {
         Some(v) => v as usize,
         None => exit(105),
     };
+    let guest_args_idx = bundle_idx + 5;
+    let guest_argv = argv.add(guest_args_idx);
+    let guest_argc = argc - guest_args_idx;
 
-    if plat_len == 0 || plat_len > 8192 || hello_len == 0 || hello_len > 8192 {
+    if plat_len == 0 || plat_len > 8192 || hello_len == 0 || hello_len > 65536 {
         exit(106);
     }
 
@@ -229,7 +234,7 @@ pub unsafe fn run(argc: i32, argv: *const *const u8) -> ! {
     }
 
     // Read compressed hello payload
-    let mut comp_hello = [0u8; 8192];
+    let mut comp_hello = [0u8; 65536];
     if lseek(fd, hello_off, 0) < 0 {
         exit(110);
     }
@@ -255,7 +260,7 @@ pub unsafe fn run(argc: i32, argv: *const *const u8) -> ! {
             Err(_) => exit(112),
         };
 
-    let mut dec_hello = [0u8; 4096];
+    let mut dec_hello = [0u8; 65536];
     let hello_decompressed_len =
         match crate::decompress::decompress(&comp_hello[..hello_len], &mut dec_hello) {
             Ok(n) => n,
@@ -281,6 +286,8 @@ pub unsafe fn run(argc: i32, argv: *const *const u8) -> ! {
             set_jit_write_protect: Some(jit_protect_cb),
             hello_payload: dec_hello.as_ptr(),
             hello_payload_size: hello_decompressed_len,
+            argv: guest_argv,
+            argc: guest_argc,
         },
     );
     let plat_code = (plat_alloc as *mut u8).add(PREFIX_ABI_OFFSET) as *mut c_void;

@@ -200,6 +200,61 @@ pub struct PalAbiTable {
     pub fd_isatty: pal_fn!(fn(handle: u32) -> u32),
 }
 
+pub unsafe fn pack_args(
+    argv: *const *const u8,
+    argc: usize,
+    buffer: *mut u8,
+    capacity: usize,
+) -> u64 {
+    if argc > u32::MAX as usize || (argc != 0 && argv.is_null()) {
+        return u64::MAX;
+    }
+
+    let mut required = 0usize;
+    let mut index = 0usize;
+    while index < argc {
+        let argument = argv.add(index).read_volatile();
+        if argument.is_null() {
+            return u64::MAX;
+        }
+        let mut length = 0usize;
+        while argument.add(length).read_volatile() != 0 {
+            length += 1;
+        }
+        let Some(argument_size) = length.checked_add(1) else {
+            return u64::MAX;
+        };
+        let Some(total) = required.checked_add(argument_size) else {
+            return u64::MAX;
+        };
+        required = total;
+        index += 1;
+    }
+    if required > u32::MAX as usize {
+        return u64::MAX;
+    }
+
+    if capacity >= required && !buffer.is_null() {
+        let mut offset = 0usize;
+        index = 0;
+        while index < argc {
+            let argument = argv.add(index).read_volatile();
+            let mut length = 0usize;
+            while argument.add(length).read_volatile() != 0 {
+                buffer
+                    .add(offset + length)
+                    .write(argument.add(length).read_volatile());
+                length += 1;
+            }
+            buffer.add(offset + length).write(0);
+            offset += length + 1;
+            index += 1;
+        }
+    }
+
+    ((argc as u64) << 32) | required as u64
+}
+
 const _: () = {
     assert!(core::mem::size_of::<Overlapped>() == 24);
     assert!(core::mem::offset_of!(Overlapped, flags) == 0);
@@ -256,3 +311,31 @@ const _: () = {
     assert!(core::mem::offset_of!(PalAbiTable, tty_set_size) == 360);
     assert!(core::mem::offset_of!(PalAbiTable, fd_isatty) == 368);
 };
+
+#[cfg(test)]
+mod tests {
+    use super::pack_args;
+
+    #[test]
+    fn pack_args_preserves_argument_boundaries() {
+        let first = b"open\0";
+        let second = b"file name\0";
+        let argv = [first.as_ptr(), second.as_ptr()];
+        let mut output = [0u8; 32];
+        let packed =
+            unsafe { pack_args(argv.as_ptr(), argv.len(), output.as_mut_ptr(), output.len()) };
+        assert_eq!(packed, (2u64 << 32) | 15);
+        assert_eq!(&output[..15], b"open\0file name\0");
+    }
+
+    #[test]
+    fn pack_args_reports_required_size_without_partial_writes() {
+        let first = b"alpha\0";
+        let second = b"beta\0";
+        let argv = [first.as_ptr(), second.as_ptr()];
+        let mut output = [0xA5u8; 8];
+        let packed = unsafe { pack_args(argv.as_ptr(), argv.len(), output.as_mut_ptr(), 4) };
+        assert_eq!(packed, (2u64 << 32) | 11);
+        assert_eq!(output, [0xA5; 8]);
+    }
+}

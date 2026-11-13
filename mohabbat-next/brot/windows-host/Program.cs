@@ -15,7 +15,7 @@ internal static class Program
     private static readonly int PrefixAbiOffset = 0x20000;
     private const ushort ProcessorArchitectureAmd64 = 9;
     private const ushort ProcessorArchitectureArm64 = 12;
-    private const int MaximumComponentSize = 8192;
+    private const int MaximumComponentSize = 64 * 1024;
     private const string InternalResourcePrefix = "MohabbatNext.Internal.";
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -45,6 +45,8 @@ internal static class Program
         public IntPtr Free;
         public IntPtr HelloPayload;
         public UIntPtr HelloPayloadSize;
+        public IntPtr Argv;
+        public UIntPtr Argc;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -80,7 +82,7 @@ internal static class Program
                 args[1],
                 args.Length == 3 ? args[2] : "load-add-store");
         }
-        bool fileIoTest = args.Length == 2 && args[0] == "--file-io-test";
+        bool fileIoTest = args.Length >= 2 && args[0] == "--file-io-test";
         if (args.Length != 0 && !fileIoTest)
         {
             Console.Error.WriteLine("This executable does not accept arguments.");
@@ -88,6 +90,8 @@ internal static class Program
         }
 
         IntPtr platformAlloc = IntPtr.Zero;
+        IntPtr argumentVector = IntPtr.Zero;
+        UIntPtr argumentCount = UIntPtr.Zero;
         GCHandle platformPin = new GCHandle();
         GCHandle helloPin = new GCHandle();
         LoadLibraryCallback loadLibrary = LoadLibrary;
@@ -107,6 +111,12 @@ internal static class Program
                 }
                 Directory.SetCurrentDirectory(workingDirectory);
             }
+            string[] guestArgs = new string[fileIoTest ? args.Length - 2 : 0];
+            if (guestArgs.Length != 0)
+            {
+                Array.Copy(args, 2, guestArgs, 0, guestArgs.Length);
+            }
+            argumentVector = AllocateArgumentVector(guestArgs, out argumentCount);
 
             string architecture = GetArchitecture();
             byte[] platform = ReadComponent(
@@ -154,6 +164,8 @@ internal static class Program
                 Free = Marshal.GetFunctionPointerForDelegate(free),
                 HelloPayload = helloPin.AddrOfPinnedObject(),
                 HelloPayloadSize = new UIntPtr((uint)hello.Length),
+                Argv = argumentVector,
+                Argc = argumentCount,
             };
             Marshal.StructureToPtr(host, platformAlloc, false);
 
@@ -185,6 +197,10 @@ internal static class Program
             if (platformAlloc != IntPtr.Zero)
             {
                 VirtualFree(platformAlloc, UIntPtr.Zero, MemRelease);
+            }
+            if (argumentVector != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(argumentVector);
             }
             if (platformPin.IsAllocated)
             {
@@ -219,9 +235,15 @@ internal static class Program
     {
         Console.WriteLine("RUN   [csharp/unit] WindowsPlatformHostLayout");
         int hostSize = Marshal.SizeOf(typeof(WindowsPlatformHost));
-        if (hostSize != 48)
+        if (hostSize != 64)
         {
-            Console.Error.WriteLine("FAIL: Expected WindowsPlatformHost size 48, got " + hostSize);
+            Console.Error.WriteLine("FAIL: Expected WindowsPlatformHost size 64, got " + hostSize);
+            return 1;
+        }
+        if (Marshal.OffsetOf(typeof(WindowsPlatformHost), "Argv").ToInt32() != 48
+            || Marshal.OffsetOf(typeof(WindowsPlatformHost), "Argc").ToInt32() != 56)
+        {
+            Console.Error.WriteLine("FAIL: Unexpected WindowsPlatformHost argument offsets");
             return 1;
         }
         if (PrefixAbiOffset != 0x20000)
@@ -273,6 +295,53 @@ internal static class Program
         }
         Console.WriteLine("PASS  [csharp/unit] WasmScenarioGeneratorValidity");
         return 0;
+    }
+
+    private static IntPtr AllocateArgumentVector(string[] args, out UIntPtr count)
+    {
+        count = new UIntPtr((uint)args.Length);
+        if (args.Length == 0)
+        {
+            return IntPtr.Zero;
+        }
+
+        byte[][] encoded = new byte[args.Length][];
+        int dataLength = 0;
+        for (int i = 0; i < args.Length; i++)
+        {
+            encoded[i] = Encoding.UTF8.GetBytes(args[i]);
+            if (Array.IndexOf(encoded[i], (byte)0) >= 0)
+            {
+                throw new InvalidOperationException("Command-line argument contains a NUL byte.");
+            }
+            dataLength = checked(dataLength + encoded[i].Length + 1);
+        }
+
+        int pointerBytes = checked(args.Length * IntPtr.Size);
+        int totalBytes = checked(pointerBytes + dataLength);
+        IntPtr block = Marshal.AllocHGlobal(totalBytes);
+        bool complete = false;
+        try
+        {
+            int dataOffset = pointerBytes;
+            for (int i = 0; i < encoded.Length; i++)
+            {
+                IntPtr argument = IntPtr.Add(block, dataOffset);
+                Marshal.WriteIntPtr(block, i * IntPtr.Size, argument);
+                Marshal.Copy(encoded[i], 0, argument, encoded[i].Length);
+                Marshal.WriteByte(argument, encoded[i].Length, 0);
+                dataOffset += encoded[i].Length + 1;
+            }
+            complete = true;
+            return block;
+        }
+        finally
+        {
+            if (!complete)
+            {
+                Marshal.FreeHGlobal(block);
+            }
+        }
     }
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]

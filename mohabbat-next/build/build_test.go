@@ -126,6 +126,8 @@ func TestAssembleVegetableBashHandoff(t *testing.T) {
 		PlatformDarwinAarch64: writeAsset("platform-darwin-aarch64"),
 		HelloX86_64:           writeAsset("hello-x86_64"),
 		HelloAarch64:          writeAsset("hello-aarch64"),
+		FileIoX86_64:          writeAsset("fileio-x86_64"),
+		FileIoAarch64:         writeAsset("fileio-aarch64"),
 	}
 
 	templatesDir := filepath.Join(workDir, "templates")
