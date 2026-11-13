@@ -126,7 +126,7 @@ func buildWindowsHostExe(windowsHostDir, workDir, outExePath, platform string, c
 		return fmt.Errorf("ensure ZstdSharp dependency: %w", err)
 	}
 
-	manifest := filepath.Join(windowsHostDir, "ProbeHost.manifest")
+	manifest := filepath.Join(windowsHostDir, "WindowsHost.manifest")
 	programCs := filepath.Join(windowsHostDir, "Program.cs")
 
 	isWindowsBinary := strings.HasSuffix(compiler, ".exe") && runtime.GOOS != "windows"

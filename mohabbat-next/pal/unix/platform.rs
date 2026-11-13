@@ -5,9 +5,9 @@ use core::ffi::{c_char, c_void};
 use core::panic::PanicInfo;
 use core::ptr;
 
-#[path = "../../pal_abi.rs"]
+#[path = "../abi/guest.rs"]
 mod pal_abi;
-#[path = "../../pal_abi_stubs.rs"]
+#[path = "../abi/guest_stubs.rs"]
 mod pal_abi_stubs;
 use pal_abi::{
     Overlapped, PalAbiTable, ERROR_ACCES, ERROR_AGAIN, ERROR_BADF, ERROR_EXIST, ERROR_INVALID,
@@ -1053,7 +1053,7 @@ unsafe fn run() -> i32 {
     let process_exit = probe_exit;
     #[cfg(target_arch = "aarch64")]
     let process_exit = exit;
-    let mut abi_table = pal_abi_stubs::for_probe(probe_read, probe_write, process_exit);
+    let mut abi_table = pal_abi_stubs::for_payload(probe_read, probe_write, process_exit);
     abi_table.seek = probe_seek;
     abi_table.handle_truncate = probe_truncate;
     abi_table.handle_close = probe_handle_close;

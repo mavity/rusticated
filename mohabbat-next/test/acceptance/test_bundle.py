@@ -6,7 +6,7 @@ import sys
 
 
 PATTERN = (
-    rb"^Anonymous-memory probe ready \(compiled [^\)]+\)\. Enter an empty line to exit\.\r?\n"
+    rb"^Mohabbat-next ready \(compiled [^\)]+\)\. Enter an empty line to exit\.\r?\n"
     rb"> echo: alpha\r?\n> echo: beta\r?\n> $"
 )
 
@@ -47,7 +47,7 @@ def run_with_pty(command: list[str]) -> tuple[int, bytes]:
         ready, _, _ = select.select([master], [], [], 10)
         if not ready:
             process.kill()
-            raise TimeoutError("probe did not finish its interactive exchange")
+            raise TimeoutError("payload did not finish its interactive exchange")
         try:
             chunk = os.read(master, 4096)
         except OSError:
@@ -60,7 +60,7 @@ def run_with_pty(command: list[str]) -> tuple[int, bytes]:
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print("usage: test_probe.py <probe-command> [arguments...]", file=sys.stderr)
+        print("usage: test_bundle.py <bundle-command> [arguments...]", file=sys.stderr)
         return 2
 
     command = sys.argv[1:]
@@ -70,15 +70,15 @@ def main() -> int:
         status, output = run_with_pty(command)
 
     if status != 0:
-        print(f"probe exited with status {status}", file=sys.stderr)
+        print(f"bundle exited with status {status}", file=sys.stderr)
         print(output.decode(errors="replace"), file=sys.stderr)
         return 1
     if not re.match(PATTERN, output):
-        print("probe output did not match the acceptance transcript", file=sys.stderr)
+        print("bundle output did not match the acceptance transcript", file=sys.stderr)
         print(f"pattern: {PATTERN!r}", file=sys.stderr)
         print(f"actual:   {output!r}", file=sys.stderr)
         return 1
-    print("interactive probe acceptance passed")
+    print("interactive bundle acceptance passed")
     return 0
 
 

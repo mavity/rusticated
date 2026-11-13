@@ -57,9 +57,9 @@ func TestValidatePE(t *testing.T) {
 }
 
 func TestDosStubAndBootstrapTemplates(t *testing.T) {
-	nextDir, _, err := findProbeDir()
+	nextDir, err := findMohabbatNextDir()
 	if err != nil {
-		t.Fatalf("findProbeDir: %v", err)
+		t.Fatalf("findMohabbatNextDir: %v", err)
 	}
 	templatesDir := filepath.Join(nextDir, "build", "templates")
 
@@ -86,9 +86,9 @@ func TestDosStubAndBootstrapTemplates(t *testing.T) {
 }
 
 func TestAssembleVegetableBashHandoff(t *testing.T) {
-	nextDir, _, err := findProbeDir()
+	nextDir, err := findMohabbatNextDir()
 	if err != nil {
-		t.Fatalf("findProbeDir: %v", err)
+		t.Fatalf("findMohabbatNextDir: %v", err)
 	}
 
 	workDir := t.TempDir()

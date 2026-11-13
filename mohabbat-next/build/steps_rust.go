@@ -12,7 +12,7 @@ import (
 
 type FlatComponentConfig struct {
 	Name              string
-	ManifestDir       string // defaults to probeDir if empty
+	ManifestDir       string // defaults to nextDir if empty
 	Package           string
 	Feature           string
 	NoDefaultFeatures bool
@@ -28,7 +28,7 @@ type FlatComponentConfig struct {
 	OutFileName       string
 }
 
-func buildFlatComponent(probeDir, rustBuildDir, outDir string, cfg FlatComponentConfig, verbose bool) (string, error) {
+func buildFlatComponent(nextDir, rustBuildDir, outDir string, cfg FlatComponentConfig, verbose bool) (string, error) {
 	if cfg.Arch == "x86_64" && cfg.Triple == "" {
 		cfg.Triple = "x86_64-unknown-none"
 	} else if cfg.Arch == "aarch64" && cfg.Triple == "" {
@@ -37,7 +37,7 @@ func buildFlatComponent(probeDir, rustBuildDir, outDir string, cfg FlatComponent
 
 	manifestDir := cfg.ManifestDir
 	if manifestDir == "" {
-		manifestDir = probeDir
+		manifestDir = nextDir
 	}
 	workspace := filepath.Join(manifestDir, "Cargo.toml")
 	cargoHome := filepath.Join(rustBuildDir, "cargo-home")
@@ -278,8 +278,9 @@ type BrotRunnerConfig struct {
 	OutFileName string
 }
 
-func buildBrotRunner(probeDir, rustBuildDir, outDir string, cfg BrotRunnerConfig, verbose bool) (string, error) {
-	manifestPath := filepath.Join(probeDir, "hosts", "unix", "Cargo.toml")
+func buildBrotRunner(nextDir, rustBuildDir, outDir string, cfg BrotRunnerConfig, verbose bool) (string, error) {
+	brotUnixDir := filepath.Join(nextDir, "brot", "unix")
+	manifestPath := filepath.Join(brotUnixDir, "Cargo.toml")
 	cargoHome := filepath.Join(rustBuildDir, "cargo-home")
 	compTargetDir := filepath.Join(rustBuildDir, "brot-"+cfg.Name)
 
@@ -298,7 +299,7 @@ func buildBrotRunner(probeDir, rustBuildDir, outDir string, cfg BrotRunnerConfig
 	}
 
 	cmd := exec.Command("cargo", args...)
-	cmd.Dir = filepath.Join(probeDir, "hosts", "unix")
+	cmd.Dir = brotUnixDir
 	cmd.Env = append(os.Environ(), "CARGO_HOME="+cargoHome)
 	if cfg.SdkRoot != "" {
 		cmd.Env = append(cmd.Env, "SDKROOT="+cfg.SdkRoot)

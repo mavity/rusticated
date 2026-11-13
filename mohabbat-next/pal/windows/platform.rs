@@ -6,9 +6,9 @@ use core::panic::PanicInfo;
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-#[path = "../../pal_abi.rs"]
+#[path = "../abi/guest.rs"]
 mod pal_abi;
-#[path = "../../pal_abi_stubs.rs"]
+#[path = "../abi/guest_stubs.rs"]
 mod pal_abi_stubs;
 use pal_abi::{
     pal_fn, Overlapped, PalAbiTable, ERROR_AGAIN, ERROR_BADF, ERROR_INVALID, ERROR_IO, ERROR_PIPE,
@@ -1604,7 +1604,7 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
             pending_io: empty_pending_io(),
         },
     );
-    let mut abi = pal_abi_stubs::for_probe(probe_read, probe_write, exit_process);
+    let mut abi = pal_abi_stubs::for_payload(probe_read, probe_write, exit_process);
     abi.path_open = probe_path_open_abi;
     abi.seek = probe_seek_abi;
     abi.handle_truncate = probe_handle_truncate_abi;

@@ -22,12 +22,12 @@ func (r *Runner) RunStage2UnitTests() {
 		return cmd.Run()
 	})
 
-	// 2. Rust Unit Tests: probe workspace (payload, platform/windows, platform/unix)
-	r.RunTest("unit/rust", "probe-workspace (payload + windows/unix PAL)", func() error {
-		manifest := filepath.Join(r.ProbeDir, "Cargo.toml")
-		targetDir := filepath.Join(r.BuildDir, "rust", "unit-probe")
+	// 2. Rust Unit Tests: PAL and payload workspace
+	r.RunTest("unit/rust", "pal-and-payload-workspace", func() error {
+		manifest := filepath.Join(r.NextDir, "Cargo.toml")
+		targetDir := filepath.Join(r.BuildDir, "rust", "unit-pal-payload")
 		cmd := exec.Command("cargo", "test", "--manifest-path", manifest, "--workspace", "--target-dir", targetDir, "--", "--nocapture")
-		cmd.Dir = r.ProbeDir
+		cmd.Dir = r.NextDir
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		return cmd.Run()
@@ -35,10 +35,11 @@ func (r *Runner) RunStage2UnitTests() {
 
 	// 3. Rust Unit Tests: Unix Brot micro-launcher (intrinsics + zstd decompressor)
 	r.RunTest("unit/rust", "mohabbat-next-brot (unix host)", func() error {
-		manifest := filepath.Join(r.ProbeDir, "hosts", "unix", "Cargo.toml")
+		brotUnixDir := filepath.Join(r.NextDir, "brot", "unix")
+		manifest := filepath.Join(brotUnixDir, "Cargo.toml")
 		targetDir := filepath.Join(r.BuildDir, "rust", "unit-brot")
 		cmd := exec.Command("cargo", "test", "--manifest-path", manifest, "--target-dir", targetDir, "--", "--nocapture")
-		cmd.Dir = filepath.Join(r.ProbeDir, "hosts", "unix")
+		cmd.Dir = brotUnixDir
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		return cmd.Run()
@@ -59,7 +60,7 @@ func (r *Runner) RunStage2UnitTests() {
 		return cmd.Run()
 	})
 
-	// 5. C# Unit Tests (MohabbatProbe.exe --unit-test)
+	// 5. C# Unit Tests (MohabbatNext.exe --unit-test)
 	if runtime.GOOS == "windows" {
 		r.RunTest("unit/csharp", "WindowsHost (--unit-test)", func() error {
 			cmd := exec.Command(r.DistExe, "--unit-test")

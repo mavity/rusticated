@@ -13,11 +13,11 @@ import (
 	"time"
 )
 
-func findProbeDir() (string, string, error) {
+func findMohabbatNextDir() (string, error) {
 	// Try current working directory
 	cwd, err := os.Getwd()
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 
 	candidates := []string{
@@ -27,13 +27,16 @@ func findProbeDir() (string, string, error) {
 	}
 
 	for _, cand := range candidates {
-		probeDir := filepath.Join(cand, "probe")
-		if info, err := os.Stat(probeDir); err == nil && info.IsDir() {
-			return cand, probeDir, nil
+		palDir := filepath.Join(cand, "pal")
+		brotDir := filepath.Join(cand, "brot")
+		if palInfo, palErr := os.Stat(palDir); palErr == nil && palInfo.IsDir() {
+			if brotInfo, brotErr := os.Stat(brotDir); brotErr == nil && brotInfo.IsDir() {
+				return cand, nil
+			}
 		}
 	}
 
-	return "", "", fmt.Errorf("could not locate mohabbat-next directory from %s", cwd)
+	return "", fmt.Errorf("could not locate mohabbat-next directory from %s", cwd)
 }
 
 func checkTools() error {
@@ -62,7 +65,7 @@ func main() {
 
 	flag.BoolVar(&verbose, "v", false, "Verbose build output")
 	flag.BoolVar(&verbose, "verbose", false, "Verbose build output")
-	flag.StringVar(&outputPath, "o", "", "Output executable path (defaults to release/dist/MohabbatProbe.exe)")
+	flag.StringVar(&outputPath, "o", "", "Output executable path (defaults to release/dist/MohabbatNext.exe)")
 	flag.StringVar(&outputPath, "out", "", "Output executable path")
 	flag.BoolVar(&windowsHostOnly, "windows-host-only", false, "Build only the Windows CLR test host")
 	flag.Parse()
@@ -72,7 +75,7 @@ func main() {
 	fmt.Println("🍆  Mohabbat-next Vegetable Builder (Go)")
 	fmt.Println("================================================================================")
 
-	nextDir, probeDir, err := findProbeDir()
+	nextDir, err := findMohabbatNextDir()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -80,7 +83,7 @@ func main() {
 
 	repoRoot := filepath.Dir(nextDir)
 	if outputPath == "" {
-		outputPath = filepath.Join(repoRoot, "release", "dist", "MohabbatProbe.exe")
+		outputPath = filepath.Join(repoRoot, "release", "dist", "MohabbatNext.exe")
 	}
 	outputPath, err = filepath.Abs(outputPath)
 	if err != nil {
@@ -92,8 +95,8 @@ func main() {
 	rustBuildDir := filepath.Join(workDir, "rust")
 	componentsDir := filepath.Join(workDir, "components")
 	templatesDir := filepath.Join(nextDir, "build", "templates")
-	unixOutDir := filepath.Join(probeDir, "hosts", "unix", "out")
-	windowsHostDir := filepath.Join(probeDir, "hosts", "windows")
+	unixOutDir := filepath.Join(nextDir, "brot", "unix", "out")
+	windowsHostDir := filepath.Join(nextDir, "brot", "windows-host")
 
 	for _, dir := range []string{workDir, rustBuildDir, componentsDir, unixOutDir, filepath.Dir(outputPath)} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -155,19 +158,19 @@ func main() {
 			Name:         "payload-x86_64",
 			Package:      "mohabbat-next-payload",
 			Arch:         "x86_64",
-			LinkerScript: filepath.Join(probeDir, "payload", "payload.ld"),
-			EntrySymbol:  "probe_code_start",
+			LinkerScript: filepath.Join(nextDir, "payload", "payload.ld"),
+			EntrySymbol:  "hello_payload_code_start",
 			ArchiveGlobs: []string{"libmohabbat_next_payload-*.rlib", "libcore-*.rlib"},
-			OutName:      "probe-x86_64",
+			OutName:      "hello-x86_64",
 		},
 		{
 			Name:         "payload-aarch64",
 			Package:      "mohabbat-next-payload",
 			Arch:         "aarch64",
-			LinkerScript: filepath.Join(probeDir, "payload", "payload.ld"),
-			EntrySymbol:  "probe_code_start",
+			LinkerScript: filepath.Join(nextDir, "payload", "payload.ld"),
+			EntrySymbol:  "hello_payload_code_start",
 			ArchiveGlobs: []string{"libmohabbat_next_payload-*.rlib", "libcore-*.rlib"},
-			OutName:      "probe-aarch64",
+			OutName:      "hello-aarch64",
 		},
 		{
 			Name:         "payload-fileio-x86_64",
@@ -175,10 +178,10 @@ func main() {
 			Feature:      "file-io-test",
 			MaxSize:      8192,
 			Arch:         "x86_64",
-			LinkerScript: filepath.Join(probeDir, "payload", "payload.ld"),
-			EntrySymbol:  "probe_code_start",
+			LinkerScript: filepath.Join(nextDir, "payload", "payload.ld"),
+			EntrySymbol:  "hello_payload_code_start",
 			ArchiveGlobs: []string{"libmohabbat_next_payload-*.rlib", "libcore-*.rlib"},
-			OutName:      "probe-fileio-x86_64",
+			OutName:      "hello-fileio-x86_64",
 		},
 		{
 			Name:         "payload-fileio-aarch64",
@@ -186,10 +189,10 @@ func main() {
 			Feature:      "file-io-test",
 			MaxSize:      8192,
 			Arch:         "aarch64",
-			LinkerScript: filepath.Join(probeDir, "payload", "payload.ld"),
-			EntrySymbol:  "probe_code_start",
+			LinkerScript: filepath.Join(nextDir, "payload", "payload.ld"),
+			EntrySymbol:  "hello_payload_code_start",
 			ArchiveGlobs: []string{"libmohabbat_next_payload-*.rlib", "libcore-*.rlib"},
-			OutName:      "probe-fileio-aarch64",
+			OutName:      "hello-fileio-aarch64",
 		},
 		// Movable Cranelift Runtime Slice (ISA-shared)
 		{
@@ -226,7 +229,7 @@ func main() {
 			Package:      "mohabbat-next-windows-platform",
 			MaxSize:      8192,
 			Arch:         "x86_64",
-			LinkerScript: filepath.Join(probeDir, "platform", "windows", "platform.ld"),
+			LinkerScript: filepath.Join(nextDir, "pal", "windows", "platform.ld"),
 			EntrySymbol:  "windows_platform_entry",
 			ArchiveGlobs: []string{"libmohabbat_next_windows_platform-*.rlib", "libcore-*.rlib", "libcompiler_builtins-*.rlib"},
 			OutName:      "platform-windows-x86_64",
@@ -236,7 +239,7 @@ func main() {
 			Package:      "mohabbat-next-windows-platform",
 			MaxSize:      8192,
 			Arch:         "aarch64",
-			LinkerScript: filepath.Join(probeDir, "platform", "windows", "platform.ld"),
+			LinkerScript: filepath.Join(nextDir, "pal", "windows", "platform.ld"),
 			EntrySymbol:  "windows_platform_entry",
 			ArchiveGlobs: []string{"libmohabbat_next_windows_platform-*.rlib", "libcore-*.rlib", "libcompiler_builtins-*.rlib"},
 			OutName:      "platform-windows-aarch64",
@@ -248,7 +251,7 @@ func main() {
 			Feature:      "linux",
 			MaxSize:      8192,
 			Arch:         "x86_64",
-			LinkerScript: filepath.Join(probeDir, "platform", "unix", "platform.ld"),
+			LinkerScript: filepath.Join(nextDir, "pal", "unix", "platform.ld"),
 			EntrySymbol:  "unix_platform_entry",
 			ArchiveGlobs: []string{"libmohabbat_next_unix_platform-*.rlib", "libcore-*.rlib", "libcompiler_builtins-*.rlib"},
 			OutName:      "platform-linux-x86_64",
@@ -259,7 +262,7 @@ func main() {
 			Feature:      "linux",
 			MaxSize:      8192,
 			Arch:         "aarch64",
-			LinkerScript: filepath.Join(probeDir, "platform", "unix", "platform.ld"),
+			LinkerScript: filepath.Join(nextDir, "pal", "unix", "platform.ld"),
 			EntrySymbol:  "unix_platform_entry",
 			ArchiveGlobs: []string{"libmohabbat_next_unix_platform-*.rlib", "libcore-*.rlib", "libcompiler_builtins-*.rlib"},
 			OutName:      "platform-linux-aarch64",
@@ -271,7 +274,7 @@ func main() {
 			Feature:      "darwin",
 			MaxSize:      8192,
 			Arch:         "x86_64",
-			LinkerScript: filepath.Join(probeDir, "platform", "unix", "platform.ld"),
+			LinkerScript: filepath.Join(nextDir, "pal", "unix", "platform.ld"),
 			EntrySymbol:  "unix_platform_entry",
 			ArchiveGlobs: []string{"libmohabbat_next_unix_platform-*.rlib", "libcore-*.rlib", "libcompiler_builtins-*.rlib"},
 			OutName:      "platform-darwin-x86_64",
@@ -282,7 +285,7 @@ func main() {
 			Feature:      "darwin",
 			MaxSize:      8192,
 			Arch:         "aarch64",
-			LinkerScript: filepath.Join(probeDir, "platform", "unix", "platform.ld"),
+			LinkerScript: filepath.Join(nextDir, "pal", "unix", "platform.ld"),
 			EntrySymbol:  "unix_platform_entry",
 			ArchiveGlobs: []string{"libmohabbat_next_unix_platform-*.rlib", "libcore-*.rlib", "libcompiler_builtins-*.rlib"},
 			OutName:      "platform-darwin-aarch64",
@@ -336,7 +339,7 @@ func main() {
 		compileWg.Add(1)
 		go func(def targetDef) {
 			defer compileWg.Done()
-			binPath, err := buildFlatComponent(probeDir, rustBuildDir, componentsDir, FlatComponentConfig{
+			binPath, err := buildFlatComponent(nextDir, rustBuildDir, componentsDir, FlatComponentConfig{
 				Name:              def.Name,
 				ManifestDir:       def.ManifestDir,
 				Package:           def.Package,
@@ -363,7 +366,7 @@ func main() {
 
 			if strings.HasPrefix(def.OutName, "platform-linux") ||
 				strings.HasPrefix(def.OutName, "platform-darwin") ||
-				strings.HasPrefix(def.OutName, "probe-") {
+				strings.HasPrefix(def.OutName, "hello-") {
 				dest := filepath.Join(unixOutDir, def.OutName+".bin")
 				data, err := os.ReadFile(binPath)
 				if err == nil {
@@ -378,7 +381,7 @@ func main() {
 		compileWg.Add(1)
 		go func(bcfg BrotRunnerConfig) {
 			defer compileWg.Done()
-			if _, err := buildBrotRunner(probeDir, rustBuildDir, unixOutDir, bcfg, verbose); err != nil {
+			if _, err := buildBrotRunner(nextDir, rustBuildDir, unixOutDir, bcfg, verbose); err != nil {
 				compileMu.Lock()
 				errs = append(errs, fmt.Errorf("brot runner %s: %w", bcfg.Name, err))
 				compileMu.Unlock()
@@ -402,10 +405,10 @@ func main() {
 		ResName string
 	}
 	winComps := []winCompDef{
-		{SrcBin: builtBins["probe-x86_64"], OutZst: filepath.Join(componentsDir, "hello-x86_64.zst"), ResName: "MohabbatNext.Hello.x86_64.zst"},
-		{SrcBin: builtBins["probe-aarch64"], OutZst: filepath.Join(componentsDir, "hello-aarch64.zst"), ResName: "MohabbatNext.Hello.aarch64.zst"},
-		{SrcBin: builtBins["probe-fileio-x86_64"], OutZst: filepath.Join(componentsDir, "fileio-x86_64.zst"), ResName: "MohabbatNext.FileIo.x86_64.zst"},
-		{SrcBin: builtBins["probe-fileio-aarch64"], OutZst: filepath.Join(componentsDir, "fileio-aarch64.zst"), ResName: "MohabbatNext.FileIo.aarch64.zst"},
+		{SrcBin: builtBins["hello-x86_64"], OutZst: filepath.Join(componentsDir, "hello-x86_64.zst"), ResName: "MohabbatNext.Hello.x86_64.zst"},
+		{SrcBin: builtBins["hello-aarch64"], OutZst: filepath.Join(componentsDir, "hello-aarch64.zst"), ResName: "MohabbatNext.Hello.aarch64.zst"},
+		{SrcBin: builtBins["hello-fileio-x86_64"], OutZst: filepath.Join(componentsDir, "fileio-x86_64.zst"), ResName: "MohabbatNext.FileIo.x86_64.zst"},
+		{SrcBin: builtBins["hello-fileio-aarch64"], OutZst: filepath.Join(componentsDir, "fileio-aarch64.zst"), ResName: "MohabbatNext.FileIo.aarch64.zst"},
 		{SrcBin: builtBins["platform-windows-x86_64"], OutZst: filepath.Join(componentsDir, "platform-windows-x86_64.zst"), ResName: "MohabbatNext.Platform.Windows.x86_64.zst"},
 		{SrcBin: builtBins["platform-windows-aarch64"], OutZst: filepath.Join(componentsDir, "platform-windows-aarch64.zst"), ResName: "MohabbatNext.Platform.Windows.aarch64.zst"},
 	}
@@ -507,8 +510,8 @@ func main() {
 		PlatformLinuxAarch64:  builtBins["platform-linux-aarch64"],
 		PlatformDarwinX86_64:  builtBins["platform-darwin-x86_64"],
 		PlatformDarwinAarch64: builtBins["platform-darwin-aarch64"],
-		HelloX86_64:           builtBins["probe-x86_64"],
-		HelloAarch64:          builtBins["probe-aarch64"],
+		HelloX86_64:           builtBins["hello-x86_64"],
+		HelloAarch64:          builtBins["hello-aarch64"],
 	}
 
 	if err := assembleVegetable(windowsHostExe, assemblyAssets, templatesDir, outputPath); err != nil {

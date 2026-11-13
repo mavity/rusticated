@@ -1,7 +1,7 @@
 //! Canonical Native Rusticated PAL ABI (`PalAbiTable` at `-0x20000`) and
 //! private Runtime Globals (`RuntimeGlobals` at `-0x10000`).
 
-#[path = "../../probe/pal_abi.rs"]
+#[path = "../../pal/abi/guest.rs"]
 mod shared;
 
 pub use shared::{
