@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"image/color"
 	"io"
 	"os"
@@ -508,21 +509,63 @@ func TestSpanDetect_SingleCellMutation_ExactBounds(t *testing.T) {
 	}
 }
 
-func TestEmitDirtyRegion_WritesANSISequences(t *testing.T) {
+func TestEmitDirtyRegion_SynchronizesRedrawAndPreservesCursorVisibility(t *testing.T) {
+	for _, cursorVisible := range []bool{true, false} {
+		t.Run(fmt.Sprintf("visible_%t", cursorVisible), func(t *testing.T) {
+			var out bytes.Buffer
+			h := &Host{
+				currBuf:       terminal.NewCellBuf(3, 2),
+				prevBuf:       terminal.NewCellBuf(3, 2),
+				out:           bufio.NewWriter(&out),
+				cursorX:       1,
+				cursorY:       1,
+				cursorVisible: cursorVisible,
+			}
+			h.currBuf.Set(0, 0, terminal.Cell{Grapheme: "A"})
+			h.emitDirtyRegion(0, 0)
+			got := out.String()
+
+			if !strings.HasPrefix(got, "\x1b[?2026h") || !strings.HasSuffix(got, "\x1b[?2026l") {
+				t.Fatalf("emitDirtyRegion() output = %q, want synchronized-output begin/end around redraw", got)
+			}
+			redrawAt := strings.Index(got, "\x1b[0m\x1b[2K")
+			endAt := strings.LastIndex(got, "\x1b[?2026l")
+			if redrawAt < len("\x1b[?2026h") || endAt <= redrawAt || !strings.Contains(got, "A") {
+				t.Fatalf("emitDirtyRegion() output = %q, want redraw inside synchronized output", got)
+			}
+
+			positionAt := strings.LastIndex(got, "\x1b[1C")
+			if positionAt < 0 || positionAt >= endAt {
+				t.Fatalf("emitDirtyRegion() output = %q, want cursor positioning before synchronized output ends", got)
+			}
+			if cursorVisible {
+				showAt := strings.LastIndex(got, "\x1b[?25h")
+				if strings.Contains(got, "\x1b[?25l") || showAt <= positionAt || showAt >= endAt {
+					t.Fatalf("emitDirtyRegion() output = %q, want cursor shown after final positioning", got)
+				}
+			} else {
+				hideAt := strings.LastIndex(got, "\x1b[?25l")
+				if strings.Contains(got, "\x1b[?25h") || hideAt <= positionAt || hideAt >= endAt {
+					t.Fatalf("emitDirtyRegion() output = %q, want cursor left hidden after final positioning", got)
+				}
+			}
+		})
+	}
+}
+
+func TestEmitCursorOnly_DoesNotSynchronizeRedraw(t *testing.T) {
 	var out bytes.Buffer
 	h := &Host{
-		currBuf:       terminal.NewCellBuf(3, 2),
-		prevBuf:       terminal.NewCellBuf(3, 2),
 		out:           bufio.NewWriter(&out),
-		cursorX:       1,
-		cursorY:       1,
 		cursorVisible: true,
 	}
-	h.currBuf.Set(0, 0, terminal.Cell{Grapheme: "A"})
-	h.emitDirtyRegion(0, 0)
+	h.emitCursorOnly()
 	got := out.String()
-	if !strings.Contains(got, "\x1b[1B") || !strings.Contains(got, "\x1b[?25h") || !strings.Contains(got, "A") {
-		t.Fatalf("emitDirtyRegion() output = %q, want relative cursor movement + visible cursor + data", got)
+	if strings.Contains(got, "\x1b[?2026") {
+		t.Fatalf("emitCursorOnly() output = %q, want no synchronized-output sequences", got)
+	}
+	if !strings.Contains(got, "\x1b[?25h") {
+		t.Fatalf("emitCursorOnly() output = %q, want cursor visibility preserved", got)
 	}
 }
 

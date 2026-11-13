@@ -767,19 +767,23 @@ func (h *Host) emitDirtyRegion(lineMin, lineMax int) {
 		}
 	}
 
-	// 3. Assemble the entire rerender into ONE atomic string chunk:
+	// 3. Assemble the entire rerender into ONE synchronized string chunk:
+	// - Begin synchronized output
 	// - Cursor movement to lineMin
 	// - SGR reset (\x1b[0m) so BCE uses default background color
 	// - Clear line (\x1b[2K)
 	// - The ToANSI serialized cells
 	// - Cursor positioning to (h.cursorX, h.cursorY) and visibility
+	// - End synchronized output
 	var sb strings.Builder
-	sb.Grow(len(subAnsi) + 64)
+	sb.Grow(len(subAnsi) + 80)
+	sb.WriteString("\x1b[?2026h")
 	appendRelativeRow(&sb, fromRow, lineMin)
 	sb.WriteString("\x1b[0m\x1b[2K")
 	sb.WriteString(subAnsi)
 	appendCursorPos(&sb, lineMax, h.cursorX, h.cursorY, h.cursorVisible)
 	h.appendThrottledThemeQuery(&sb)
+	sb.WriteString("\x1b[?2026l")
 
 	// 4. Emit the entire frame in a single WriteString and Flush.
 	h.out.WriteString(sb.String())
@@ -821,13 +825,14 @@ func appendCursorPos(sb *strings.Builder, fromRow, cursorX, cursorY int, cursorV
 	} else if dy > 0 {
 		fmt.Fprintf(sb, "\x1b[%dB", dy)
 	}
+	sb.WriteString("\r")
+	if cursorX > 0 {
+		fmt.Fprintf(sb, "\x1b[%dC", cursorX)
+	}
 	if cursorVisible {
-		sb.WriteString("\x1b[?25h\r")
-		if cursorX > 0 {
-			fmt.Fprintf(sb, "\x1b[%dC", cursorX)
-		}
+		sb.WriteString("\x1b[?25h")
 	} else {
-		sb.WriteString("\r\x1b[?25l")
+		sb.WriteString("\x1b[?25l")
 	}
 }
 
