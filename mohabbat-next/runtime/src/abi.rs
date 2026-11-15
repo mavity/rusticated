@@ -5,8 +5,8 @@
 mod shared;
 
 pub use shared::{
-    FLAG_COMPLETED, MEM_CODE_EXEC_RX, MEM_CODE_JIT_RW, MEM_READWRITE, Overlapped, PalAbiTable,
-    ProcessSpawnOverlapped, READ_FLAG_POSITIONAL,
+    AbiPlatformInfo, FLAG_COMPLETED, MEM_CODE_EXEC_RX, MEM_CODE_JIT_RW, MEM_READWRITE, Overlapped,
+    PalAbiTable, ProcessSpawnOverlapped, READ_FLAG_POSITIONAL,
 };
 pub(crate) use shared::pal_fn;
 
@@ -34,6 +34,10 @@ pub struct RuntimeGlobals {
     pub heap_rc_int_int: *const u8,
     pub heap_ty_i64_i64: *const u16,
     pub heap_ty_i8x16: *const u16,
+    pub wasmtime_tls_slots: [*mut u8; 2],
+    pub wasm_instance_state: *mut u8,
+    pub wasmtime_global_code: *mut u8,
+    pub wasmtime_id_counters: [u64; 4],
 }
 
 #[inline(always)]
@@ -47,7 +51,8 @@ pub unsafe fn slice_origin() -> *mut u8 {
     );
     #[cfg(target_arch = "aarch64")]
     core::arch::asm!(
-        "adr {0}, runtime_code_start",
+        "adrp {0}, runtime_code_start",
+        "add {0}, {0}, :lo12:runtime_code_start",
         out(reg) addr,
         options(pure, nomem, nostack),
     );
@@ -73,10 +78,19 @@ static mut TEST_GLOBALS: RuntimeGlobals = RuntimeGlobals {
     heap_rc_int_int: core::ptr::null(),
     heap_ty_i64_i64: core::ptr::null(),
     heap_ty_i8x16: core::ptr::null(),
+    wasmtime_tls_slots: [core::ptr::null_mut(); 2],
+    wasm_instance_state: core::ptr::null_mut(),
+    wasmtime_global_code: core::ptr::null_mut(),
+    wasmtime_id_counters: [0; 4],
 };
 
 #[cfg(test)]
 static mut TEST_ABI: core::mem::MaybeUninit<PalAbiTable> = core::mem::MaybeUninit::uninit();
+
+#[cfg(test)]
+pub unsafe fn test_abi_mut() -> &'static mut PalAbiTable {
+    &mut *(core::ptr::addr_of_mut!(TEST_ABI).cast::<PalAbiTable>())
+}
 
 #[inline(always)]
 pub unsafe fn abi() -> &'static PalAbiTable {

@@ -14,6 +14,7 @@ pub mod abi;
 pub mod allocator;
 pub mod jit;
 pub mod wasm_env;
+pub mod wasmtime_pal;
 
 #[allow(unused_imports)]
 use crate::abi::abi;
@@ -202,9 +203,7 @@ unsafe fn slice_entry_inner() {
         jit::compile_and_initialize_wasm();
         g.initialized = true;
     }
-    if let Some(run_fn) = g.guest_run_fn {
-        run_fn();
-    }
+    jit::reenter_wasm();
 }
 
 #[cfg(test)]
@@ -212,11 +211,6 @@ mod tests {
     use super::*;
     use crate::abi::{FLAG_COMPLETED, Overlapped, PalAbiTable, ProcessSpawnOverlapped, RuntimeGlobals};
     use core::mem::{offset_of, size_of};
-    use cranelift_codegen::Context;
-    use cranelift_codegen::ir::types::I32;
-    use cranelift_codegen::ir::{AbiParam, Function, InstBuilder, Signature, UserFuncName};
-    use cranelift_codegen::isa::CallConv;
-    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 
     #[test]
     fn test_overlapped_and_pal_abi_layouts() {
@@ -274,37 +268,9 @@ mod tests {
     }
 
     #[test]
-    fn test_cranelift_target_isa_and_codegen() {
+    fn test_wasmtime_engine_smoke() {
         init_test_env();
-        let isa = jit::create_target_isa();
-        let mut sig = Signature::new(CallConv::SystemV);
-        sig.params.push(AbiParam::new(I32));
-        sig.returns.push(AbiParam::new(I32));
-
-        let mut ctx = Context::new();
-        ctx.func = Function::with_name_signature(UserFuncName::user(0, 0), sig);
-
-        let mut fb_ctx = FunctionBuilderContext::new();
-        {
-            let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
-            let block = builder.create_block();
-            builder.append_block_params_for_function_params(block);
-            builder.switch_to_block(block);
-            builder.seal_block(block);
-            let x = builder.block_params(block)[0];
-            let y = builder.ins().iadd_imm_s(x, 100);
-            builder.ins().return_(&[y]);
-            builder.finalize(jit::default_frontend_config());
-        }
-
-        let mut ctrl = Default::default();
-        let compiled = ctx.compile(&isa, &mut ctrl).expect("compile simple function");
-        assert!(!compiled.code_buffer().is_empty());
-    }
-
-    #[test]
-    fn test_in_memory_wasm_jit_cold_and_warm_retrigger() {
-        init_test_env();
+        let engine = jit::build_engine().expect("build wasmtime engine");
         // Minimal valid WASM module:
         //   (module
         //     (memory (export "memory") 1)
@@ -327,56 +293,13 @@ mod tests {
             0x36, 0x02, 0x00,                               // i32.store align=4 offset=0
             0x0b,                                           // end
         ];
-
-        let isa = jit::create_target_isa();
-        let call_conv = jit::default_call_conv();
-
-        let mut types = alloc::vec::Vec::new();
-        let mut func_type_indices = alloc::vec::Vec::new();
-        let mut code_bodies = alloc::vec::Vec::new();
-
-        for payload in wasmparser::Parser::new(0).parse_all(wasm_bytes) {
-            match payload.expect("valid wasm payload") {
-                wasmparser::Payload::TypeSection(r) => {
-                    for ft in r.into_iter_err_on_gc_types() {
-                        types.push(ft.unwrap());
-                    }
-                }
-                wasmparser::Payload::FunctionSection(r) => {
-                    for idx in r {
-                        func_type_indices.push(idx.unwrap());
-                    }
-                }
-                wasmparser::Payload::CodeSectionEntry(body) => {
-                    code_bodies.push(body);
-                }
-                _ => {}
-            }
-        }
-
-        assert_eq!(code_bodies.len(), 1);
-        let mut guest_mem = alloc::vec![0u8; 65536];
-        let mut sig = Signature::new(call_conv);
-        let _ = &mut sig;
-        let mut ctx = Context::new();
-        ctx.func = Function::with_name_signature(UserFuncName::user(0, 0), Signature::new(call_conv));
-        let mut fb_ctx = FunctionBuilderContext::new();
-        jit::translate_wasm_body_with_mem(
-            &code_bodies[0],
-            &mut ctx.func,
-            &mut fb_ctx,
-            jit::default_frontend_config(),
-            &types,
-            &func_type_indices,
-            call_conv,
-            guest_mem.as_mut_ptr(),
-            guest_mem.len(),
-        )
-        .expect("translate wasm body");
-
-        let mut ctrl = Default::default();
-        let compiled = ctx.compile(&isa, &mut ctrl).expect("compile wasm body to native machine code");
-        assert!(!compiled.code_buffer().is_empty());
+        let module = wasmtime::Module::new(&engine, wasm_bytes).expect("compile wasm module");
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let run = instance
+            .get_typed_func::<(), ()>(&mut store, "run")
+            .expect("get run export");
+        run.call(&mut store, ()).expect("call run");
     }
 
     #[test]
@@ -408,123 +331,66 @@ mod tests {
     }
 
     #[test]
-    fn test_target_isa_flags_schema() {
-        use cranelift_codegen::isa::TargetIsa;
-        let isa = jit::create_target_isa();
-        let flags = isa.flags();
-        assert_eq!(flags.probestack_size_log2(), 12);
-        assert_eq!(flags.opt_level(), cranelift_codegen::settings::OptLevel::None);
-        assert_eq!(
-            flags.regalloc_algorithm(),
-            cranelift_codegen::settings::RegallocAlgorithm::SinglePass
-        );
-        assert_eq!(
-            flags.libcall_call_conv(),
-            cranelift_codegen::settings::LibcallCallConv::IsaDefault
-        );
-    }
-
-    #[test]
-    fn test_translate_malformed_wasm_fails_cleanly() {
+    fn test_malformed_wasm_fails_cleanly() {
         init_test_env();
-        let mut func = Function::with_name_signature(
-            UserFuncName::user(0, 0),
-            Signature::new(jit::default_call_conv()),
-        );
-        let mut fb_ctx = FunctionBuilderContext::new();
-        let types = alloc::vec::Vec::new();
-        let func_type_indices = alloc::vec::Vec::new();
-        let mut guest_mem = [0u8; 64];
-
-        // Truncated/corrupted bytecode (not a valid function body)
+        let engine = jit::build_engine().expect("build wasmtime engine");
         let malformed_wasm = [0x00, 0x00, 0x00];
-        let mut reader = wasmparser::BinaryReader::new(&malformed_wasm, 0);
-        if let Ok(body) = reader.read() {
-            let res = jit::translate_wasm_body_with_mem(
-                &body,
-                &mut func,
-                &mut fb_ctx,
-                jit::default_frontend_config(),
-                &types,
-                &func_type_indices,
-                jit::default_call_conv(),
-                guest_mem.as_mut_ptr(),
-                guest_mem.len(),
-            );
-            assert!(res.is_err(), "malformed wasm must return Err");
+        assert!(wasmtime::Module::new(&engine, &malformed_wasm).is_err());
+    }
+
+    #[test]
+    fn test_linker_env_import_and_memory_grow() {
+        use core::sync::atomic::{AtomicI32, Ordering};
+        static LAST_DEBUG_VAL: AtomicI32 = AtomicI32::new(0);
+        #[cfg(target_arch = "x86_64")]
+        unsafe extern "win64" fn test_debug(val: i32) {
+            LAST_DEBUG_VAL.store(val, Ordering::SeqCst);
         }
-    }
+        #[cfg(not(target_arch = "x86_64"))]
+        unsafe extern "C" fn test_debug(val: i32) {
+            LAST_DEBUG_VAL.store(val, Ordering::SeqCst);
+        }
 
-    #[test]
-    fn test_import_name_to_abi_offset() {
-        use crate::abi::PalAbiTable;
-        use core::mem::offset_of;
-        assert_eq!(jit::import_name_to_abi_offset("host_panic"), Some(offset_of!(PalAbiTable, host_panic)));
-        assert_eq!(jit::import_name_to_abi_offset("rusticated_debug"), Some(offset_of!(PalAbiTable, rusticated_debug)));
-        assert_eq!(jit::import_name_to_abi_offset("process_exit"), Some(offset_of!(PalAbiTable, process_exit)));
-        assert_eq!(jit::import_name_to_abi_offset("get_time"), Some(offset_of!(PalAbiTable, get_time)));
-        assert_eq!(jit::import_name_to_abi_offset("get_random"), Some(offset_of!(PalAbiTable, get_random)));
-        assert_eq!(jit::import_name_to_abi_offset("get_args"), Some(offset_of!(PalAbiTable, get_args)));
-        assert_eq!(jit::import_name_to_abi_offset("get_env"), Some(offset_of!(PalAbiTable, get_env)));
-        assert_eq!(jit::import_name_to_abi_offset("get_cwd"), Some(offset_of!(PalAbiTable, get_cwd)));
-        assert_eq!(jit::import_name_to_abi_offset("set_cwd"), Some(offset_of!(PalAbiTable, set_cwd)));
-        assert_eq!(jit::import_name_to_abi_offset("get_platform_info"), Some(offset_of!(PalAbiTable, get_platform_info)));
-        assert_eq!(jit::import_name_to_abi_offset("read"), Some(offset_of!(PalAbiTable, read)));
-        assert_eq!(jit::import_name_to_abi_offset("write"), Some(offset_of!(PalAbiTable, write)));
-        assert_eq!(jit::import_name_to_abi_offset("process_spawn"), Some(offset_of!(PalAbiTable, process_spawn)));
-        assert_eq!(jit::import_name_to_abi_offset("fd_isatty"), Some(offset_of!(PalAbiTable, fd_isatty)));
-        assert_eq!(jit::import_name_to_abi_offset("nonexistent_symbol"), None);
-    }
-
-    #[test]
-    fn test_import_wasm_parsing() {
+        init_test_env();
+        unsafe {
+            abi::test_abi_mut().rusticated_debug = test_debug;
+        }
+        let engine = jit::build_engine().expect("build wasmtime engine");
         let wasm_bytes: &[u8] = &[
-            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // magic + version
-            // Type section (id=1, len=8, 2 types: ()->i64, ()->())
-            0x01, 0x08, 0x02,
-            0x60, 0x00, 0x01, 0x7e,
-            0x60, 0x00, 0x00,
-            // Import section (id=2, len=16, 1 import: env.get_time -> func 0)
-            0x02, 0x10, 0x01,
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+            // Type section: 2 types: (i32)->(), ()->()
+            0x01, 0x08, 0x02, 0x60, 0x01, 0x7f, 0x00, 0x60, 0x00, 0x00,
+            // Import section: env.rusticated_debug : type 0
+            0x02, 0x18, 0x01,
             0x03, b'e', b'n', b'v',
-            0x08, b'g', b'e', b't', b'_', b't', b'i', b'm', b'e',
+            0x10, b'r', b'u', b's', b't', b'i', b'c', b'a', b't', b'e', b'd', b'_', b'd', b'e', b'b', b'u', b'g',
             0x00, 0x00,
-            // Function section (id=3, len=2, 1 func: func 1 has type 1)
+            // Function section: func 1 -> type 1
             0x03, 0x02, 0x01, 0x01,
-            // Memory section (id=5, len=3, 1 page min)
+            // Memory section: 1 page min
             0x05, 0x03, 0x01, 0x00, 0x01,
-            // Export section (id=7, len=7, "run" -> func 1)
-            0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x01,
-            // Code section (id=10, len=11, 1 body)
-            0x0a, 0x0b, 0x01,
-            0x09, 0x00,
-            0x41, 0x00,
-            0x10, 0x00,
-            0x37, 0x03, 0x00,
-            0x0b
+            // Export section: "memory" -> mem 0, "run" -> func 1
+            0x07, 0x10, 0x02,
+            0x06, b'm', b'e', b'm', b'o', b'r', b'y', 0x02, 0x00,
+            0x03, b'r', b'u', b'n', 0x00, 0x01,
+            // Code section: memory.grow(1); drop; call 0(42);
+            0x0a, 0x0d, 0x01, 0x0b, 0x00,
+            0x41, 0x01, 0x40, 0x00, 0x1a,
+            0x41, 0x2a, 0x10, 0x00,
+            0x0b,
         ];
-
-        let mut imported_func_names = alloc::vec::Vec::new();
-        let mut func_type_indices = alloc::vec::Vec::new();
-        let mut num_imported_funcs = 0u32;
-
-        for payload in wasmparser::Parser::new(0).parse_all(wasm_bytes) {
-            let p = payload.expect("payload must parse");
-            if let wasmparser::Payload::ImportSection(reader) = p {
-                for imp in reader {
-                    let imp = imp.expect("import entry must parse");
-                    if let wasmparser::Imports::Single(_, imp) = imp {
-                        if let wasmparser::TypeRef::Func(type_idx) = imp.ty {
-                            imported_func_names.push(imp.name);
-                            func_type_indices.push(type_idx);
-                            num_imported_funcs += 1;
-                        }
-                    }
-                }
-            }
+        let module = wasmtime::Module::new(&engine, wasm_bytes).expect("compile wasm module");
+        let mut store = wasmtime::Store::new(&engine, ());
+        let mut linker = wasmtime::Linker::new(&engine);
+        wasm_env::register_env_imports(&mut linker).expect("register env imports");
+        let instance = linker.instantiate(&mut store, &module).expect("instantiate");
+        let run = instance
+            .get_typed_func::<(), ()>(&mut store, "run")
+            .expect("get run export");
+        run.call(&mut store, ()).expect("call run");
+        unsafe {
+            assert_eq!(abi::globals().guest_mem_len, 2 * 65536);
         }
-        assert_eq!(num_imported_funcs, 1);
-        assert_eq!(imported_func_names[0], "get_time");
-        assert_eq!(func_type_indices[0], 0);
+        assert_eq!(LAST_DEBUG_VAL.load(Ordering::SeqCst), 42);
     }
 }

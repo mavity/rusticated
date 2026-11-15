@@ -11,13 +11,18 @@ import (
 )
 
 const (
-	craneliftOverlayName   = "cranelift-codegen-overlay"
-	bumpaloOverlayName     = "bumpalo-overlay"
-	hashbrownOverlayName   = "hashbrown-overlay"
-	indexmapOverlayName    = "indexmap-overlay"
-	wasmparserOverlayName  = "wasmparser-overlay"
-	regalloc2OverlayName   = "regalloc2-overlay"
-	craneliftWorkspaceName = "runtime-cranelift-overlay"
+	craneliftOverlayName         = "cranelift-codegen-overlay"
+	bumpaloOverlayName           = "bumpalo-overlay"
+	hashbrownOverlayName         = "hashbrown-overlay"
+	indexmapOverlayName          = "indexmap-overlay"
+	wasmparserOverlayName        = "wasmparser-overlay"
+	regalloc2OverlayName         = "regalloc2-overlay"
+	wasmtimeOverlayName          = "wasmtime-overlay"
+	wasmtimeEnvironOverlayName   = "wasmtime-environ-overlay"
+	wasmtimeCraneliftOverlayName = "wasmtime-internal-cranelift-overlay"
+	craneliftNativeOverlayName   = "cranelift-native-overlay"
+	memchrOverlayName            = "memchr-overlay"
+	craneliftWorkspaceName       = "runtime-cranelift-overlay"
 )
 
 type craneliftSourcePatch struct {
@@ -272,9 +277,19 @@ var hashbrownStaticEmptyPatch = craneliftSourcePatch{
 	name:    "eject hashbrown static_empty to heap redirection",
 	pattern: `(?s)pub\(crate\) const fn static_empty\(\) -> &'static \[Tag; Group::WIDTH\] \{.*?&ALIGNED_TAGS\.tags\r?\n\s*\}`,
 	replacement: `pub(crate) fn static_empty() -> &'static [Tag; Group::WIDTH] {
-        #[allow(improper_ctypes)]
-        unsafe extern "C" { fn get_hashbrown_empty_tags() -> *const Tag; }
-        unsafe { &*(get_hashbrown_empty_tags() as *const [Tag; Group::WIDTH]) }
+        #[cfg(target_os = "none")]
+        {
+            #[allow(improper_ctypes)]
+            unsafe extern "C" { fn get_hashbrown_empty_tags() -> *const Tag; }
+            unsafe { &*(get_hashbrown_empty_tags() as *const [Tag; Group::WIDTH]) }
+        }
+        #[cfg(not(target_os = "none"))]
+        {
+            #[repr(C, align(16))]
+            struct AlignedTags([Tag; Group::WIDTH]);
+            static EMPTY: AlignedTags = AlignedTags([Tag::EMPTY; Group::WIDTH]);
+            &EMPTY.0
+        }
     }`,
 }
 
@@ -522,6 +537,8 @@ impl Error {
 
     pub(crate) fn set_message(&mut self, _message: impl Into<String>) {}
 
+    pub(crate) fn add_context(&mut self, _context: String) {}
+
     pub fn missing_wasm_feature(&self) -> Option<WasmFeatures> {
         None
     }
@@ -584,7 +601,46 @@ func prepareCraneliftOverlay(runtimeDir, rustBuildDir string, verbose bool) (wor
 		return "", err
 	}
 
-	workspaceDir, err = prepareCraneliftRuntimeWorkspace(runtimeDir, rustBuildDir, craneliftOverlayDir, bumpaloOverlayDir, hashbrownOverlayDir, indexmapOverlayDir, wasmparserOverlayDir, regalloc2OverlayDir)
+	wasmtimeOverlayDir, err := prepareWasmtimeOverlay(string(lockData), rustBuildDir, cargoHome, verbose)
+	if err != nil {
+		return "", err
+	}
+
+	wasmtimeEnvironOverlayDir, err := prepareWasmtimeEnvironOverlay(string(lockData), rustBuildDir, cargoHome, verbose)
+	if err != nil {
+		return "", err
+	}
+
+	wasmtimeCraneliftOverlayDir, err := prepareWasmtimeCraneliftOverlay(string(lockData), rustBuildDir, cargoHome, verbose)
+	if err != nil {
+		return "", err
+	}
+
+	craneliftNativeOverlayDir, err := prepareCraneliftNativeOverlay(string(lockData), rustBuildDir, cargoHome, verbose)
+	if err != nil {
+		return "", err
+	}
+
+	memchrOverlayDir, err := prepareMemchrOverlay(string(lockData), rustBuildDir, cargoHome, verbose)
+	if err != nil {
+		return "", err
+	}
+
+	workspaceDir, err = prepareCraneliftRuntimeWorkspace(
+		runtimeDir,
+		rustBuildDir,
+		craneliftOverlayDir,
+		bumpaloOverlayDir,
+		hashbrownOverlayDir,
+		indexmapOverlayDir,
+		wasmparserOverlayDir,
+		regalloc2OverlayDir,
+		wasmtimeOverlayDir,
+		wasmtimeEnvironOverlayDir,
+		wasmtimeCraneliftOverlayDir,
+		craneliftNativeOverlayDir,
+		memchrOverlayDir,
+	)
 	if err != nil {
 		return "", err
 	}
@@ -631,6 +687,33 @@ func prepareCraneliftCodegen(runtimeDir, lock, rustBuildDir, cargoHome string, v
 	}
 	if err := applyCraneliftIsaPatches(stagingDir); err != nil {
 		return "", fmt.Errorf("patch Cranelift source overlay: %w", err)
+	}
+	cgManifestPath := filepath.Join(stagingDir, "Cargo.toml")
+	if cgData, err := os.ReadFile(cgManifestPath); err == nil {
+		cgSrc, err := replaceLiteralExactlyOnce(
+			cgManifestPath,
+			string(cgData),
+			"all-arch = [\n    \"all-native-arch\",\n    \"pulley\",\n]",
+			"all-arch = [\"all-native-arch\"]",
+		)
+		if err != nil {
+			return "", err
+		}
+		if err := os.WriteFile(cgManifestPath, []byte(cgSrc), 0o644); err != nil {
+			return "", err
+		}
+	}
+	pulleyInstModPath := filepath.Join(stagingDir, "src", "isa", "pulley_shared", "inst", "mod.rs")
+	if piData, err := os.ReadFile(pulleyInstModPath); err == nil {
+		piSrc := strings.Replace(
+			string(piData),
+			"//! This module defines Pulley-specific machine instruction types.",
+			"//! This module defines Pulley-specific machine instruction types.\n#[cfg(not(feature = \"std\"))]\nmod std { pub use core::fmt; }",
+			1,
+		)
+		if err := os.WriteFile(pulleyInstModPath, []byte(piSrc), 0o644); err != nil {
+			return "", err
+		}
 	}
 	_ = os.RemoveAll(overlayDir)
 	if err := os.Rename(stagingDir, overlayDir); err != nil {
@@ -828,6 +911,9 @@ func prepareIndexmapOverlay(lock, rustBuildDir, cargoHome string, verbose bool) 
 			src = strings.ReplaceAll(src, "pub(crate) const fn new()", "pub(crate) fn new()")
 			src = strings.ReplaceAll(src, "pub const fn new()", "pub fn new()")
 			src = strings.ReplaceAll(src, "pub const fn with_hasher(", "pub fn with_hasher(")
+			src = strings.ReplaceAll(src, "pub struct IndexMap<K, V, S> {", "pub struct IndexMap<K, V, S = hashbrown::DefaultHashBuilder> {")
+			src = strings.ReplaceAll(src, "pub struct IndexSet<T, S> {", "pub struct IndexSet<T, S = hashbrown::DefaultHashBuilder> {")
+			src = strings.ReplaceAll(src, "#[cfg(feature = \"std\")]\n#[cfg_attr(docsrs, doc(cfg(feature = \"std\")))]\nimpl<K, V> IndexMap<K, V> {", "impl<K, V> IndexMap<K, V> {")
 			_ = os.WriteFile(p, []byte(src), 0o644)
 		}
 	}
@@ -893,6 +979,32 @@ func prepareWasmparserOverlay(lock, rustBuildDir, cargoHome string, verbose bool
 		re2 := regexp.MustCompile(`format!\("invalid atomic consistency ordering \{x\}"\)`)
 		src = re2.ReplaceAllString(src, `"invalid atomic consistency ordering"`)
 		_ = os.WriteFile(readerPath, []byte(src), 0o644)
+	}
+
+	valPath := filepath.Join(stagingDir, "src", "validator.rs")
+	if valData, err := os.ReadFile(valPath); err == nil {
+		src := strings.ReplaceAll(
+			string(valData),
+			"static ID_COUNTER: AtomicUsize = AtomicUsize::new(0);",
+			"struct IdCounter;\n        impl IdCounter { fn fetch_add(&self, _: usize, _: Ordering) -> usize { unsafe extern \"C\" { fn mohabbat_next_id(slot: usize) -> u64; } unsafe { mohabbat_next_id(0) as usize } } }\n        const ID_COUNTER: IdCounter = IdCounter;",
+		)
+		_ = os.WriteFile(valPath, []byte(src), 0o644)
+	}
+
+	compTypesPath := filepath.Join(stagingDir, "src", "validator", "component_types.rs")
+	if ctData, err := os.ReadFile(compTypesPath); err == nil {
+		src := strings.ReplaceAll(
+			string(ctData),
+			"static NEXT_GLOBAL_ID: AtomicUsize = AtomicUsize::new(0);",
+			"struct NextGlobalId;\n        impl NextGlobalId { fn fetch_add(&self, _: usize, _: Ordering) -> usize { unsafe extern \"C\" { fn mohabbat_next_id(slot: usize) -> u64; } unsafe { mohabbat_next_id(1) as usize } } fn store(&self, _: usize, _: Ordering) {} }\n        const NEXT_GLOBAL_ID: NextGlobalId = NextGlobalId;",
+		)
+		_ = os.WriteFile(compTypesPath, []byte(src), 0o644)
+	}
+
+	manifestPath := filepath.Join(stagingDir, "Cargo.toml")
+	if mData, err := os.ReadFile(manifestPath); err == nil {
+		mSrc := strings.ReplaceAll(string(mData), "unsafe_code = \"deny\"", "unsafe_code = \"allow\"")
+		_ = os.WriteFile(manifestPath, []byte(mSrc), 0o644)
 	}
 
 	_ = os.RemoveAll(overlayDir)
@@ -1016,7 +1128,7 @@ func fetchCraneliftSource(runtimeDir, version, cargoHome string, verbose bool) (
 	return fetchCrateSource(cargoHome, "cranelift-codegen", version)
 }
 
-func prepareCraneliftRuntimeWorkspace(runtimeDir, rustBuildDir, craneliftDir, bumpaloDir, hashbrownDir, indexmapDir, wasmparserDir, regalloc2Dir string) (string, error) {
+func prepareCraneliftRuntimeWorkspace(runtimeDir, rustBuildDir, craneliftDir, bumpaloDir, hashbrownDir, indexmapDir, wasmparserDir, regalloc2Dir, wasmtimeDir, wasmtimeEnvironDir, wasmtimeCraneliftDir, craneliftNativeDir, memchrDir string) (string, error) {
 	manifestPath := filepath.Join(runtimeDir, "Cargo.toml")
 	manifestData, err := os.ReadFile(manifestPath)
 	if err != nil {
@@ -1037,13 +1149,18 @@ func prepareCraneliftRuntimeWorkspace(runtimeDir, rustBuildDir, craneliftDir, bu
 		return "", fmt.Errorf("runtime manifest still contains a tracked [patch.crates-io] override")
 	}
 	manifest += fmt.Sprintf(
-		"\n[patch.crates-io]\ncranelift-codegen = { path = %q }\nbumpalo = { path = %q }\nhashbrown = { path = %q }\nindexmap = { path = %q }\nwasmparser = { path = %q }\nregalloc2 = { path = %q }\n",
+		"\n[patch.crates-io]\ncranelift-codegen = { path = %q }\nbumpalo = { path = %q }\nhashbrown = { path = %q }\nindexmap = { path = %q }\nwasmparser = { path = %q }\nregalloc2 = { path = %q }\nwasmtime = { path = %q }\nwasmtime-environ = { path = %q }\nwasmtime-internal-cranelift = { path = %q }\ncranelift-native = { path = %q }\nmemchr = { path = %q }\n",
 		filepath.ToSlash(craneliftDir),
 		filepath.ToSlash(bumpaloDir),
 		filepath.ToSlash(hashbrownDir),
 		filepath.ToSlash(indexmapDir),
 		filepath.ToSlash(wasmparserDir),
 		filepath.ToSlash(regalloc2Dir),
+		filepath.ToSlash(wasmtimeDir),
+		filepath.ToSlash(wasmtimeEnvironDir),
+		filepath.ToSlash(wasmtimeCraneliftDir),
+		filepath.ToSlash(craneliftNativeDir),
+		filepath.ToSlash(memchrDir),
 	)
 
 	workspaceDir := filepath.Join(rustBuildDir, craneliftWorkspaceName)
@@ -1176,12 +1293,6 @@ func applyCraneliftIsaPatches(crateDir string) error {
 		return fmt.Errorf("read %s: %w", contextPath, err)
 	}
 	contextSource := string(contextData)
-	for _, patch := range contextIsaPatches {
-		contextSource, err = replaceRegexExactlyOnce(contextPath, contextSource, patch)
-		if err != nil {
-			return err
-		}
-	}
 
 	abiPath := filepath.Join(crateDir, "src", "machinst", "abi.rs")
 	abiData, err := os.ReadFile(abiPath)
@@ -1447,4 +1558,555 @@ func replaceLiteralExactlyOnce(file, source, old, replacement string) (string, e
 		return "", fmt.Errorf("%s: expected exactly one occurrence in %s, found %d", old, file, count)
 	}
 	return strings.Replace(source, old, replacement, 1), nil
+}
+
+func prepareCrateOverlay(
+	lock, pkgName, overlayName, rustBuildDir, cargoHome string,
+	verbose bool,
+	patchFn func(stagingDir string) error,
+) (string, error) {
+	version, err := lockedPackageVersion(lock, pkgName)
+	if err != nil {
+		return "", fmt.Errorf("resolve locked %s version: %w", pkgName, err)
+	}
+	sourceDir, err := fetchCrateSource(cargoHome, pkgName, version)
+	if err != nil {
+		return "", err
+	}
+
+	overlayDir := filepath.Join(rustBuildDir, overlayName)
+	stagingDir := overlayDir + ".staging"
+	_ = os.RemoveAll(stagingDir)
+	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
+		return "", fmt.Errorf("create %s staging directory %s: %w", pkgName, stagingDir, err)
+	}
+	defer func() {
+		_ = os.RemoveAll(stagingDir)
+	}()
+
+	if err := copyCraneliftSource(sourceDir, stagingDir); err != nil {
+		return "", fmt.Errorf("copy %s source into overlay: %w", pkgName, err)
+	}
+	if err := patchFn(stagingDir); err != nil {
+		return "", fmt.Errorf("patch %s overlay: %w", pkgName, err)
+	}
+
+	_ = os.RemoveAll(overlayDir)
+	if err := os.Rename(stagingDir, overlayDir); err != nil {
+		return "", fmt.Errorf("publish %s overlay %s: %w", pkgName, overlayDir, err)
+	}
+	if verbose {
+		fmt.Printf("🍆  Prepared %s %s source overlay at %s\n", pkgName, version, overlayDir)
+	}
+	return overlayDir, nil
+}
+
+func prepareMemchrOverlay(lock, rustBuildDir, cargoHome string, verbose bool) (string, error) {
+	return prepareCrateOverlay(lock, "memchr", memchrOverlayName, rustBuildDir, cargoHome, verbose, func(stagingDir string) error {
+		x64MemchrPath := filepath.Join(stagingDir, "src", "arch", "x86_64", "memchr.rs")
+		if data, err := os.ReadFile(x64MemchrPath); err == nil {
+			src := string(data)
+			src = strings.ReplaceAll(src, "        static FN: AtomicPtr<()> = AtomicPtr::new(detect as Fn);\n", "")
+			src = strings.ReplaceAll(src, "            FN.store(fun as Fn, Ordering::Relaxed);\n", "")
+			src = strings.ReplaceAll(src, "            let fun = FN.load(Ordering::Relaxed);\n            core::mem::transmute::<Fn, RealFn>(fun)(", "            detect(")
+			if err := os.WriteFile(x64MemchrPath, []byte(src), 0o644); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func prepareWasmtimeOverlay(lock, rustBuildDir, cargoHome string, verbose bool) (string, error) {
+	return prepareCrateOverlay(lock, "wasmtime", wasmtimeOverlayName, rustBuildDir, cargoHome, verbose, func(stagingDir string) error {
+		manifestPath := filepath.Join(stagingDir, "Cargo.toml")
+		data, err := os.ReadFile(manifestPath)
+		if err != nil {
+			return err
+		}
+		src := string(data)
+		src, err = replaceLiteralExactlyOnce(
+			manifestPath,
+			src,
+			"cranelift = [\n    \"dep:wasmtime-cranelift\",\n    \"std\",\n    \"wasmtime-unwinder/cranelift\",\n]",
+			"cranelift = [\n    \"dep:wasmtime-cranelift\",\n    \"wasmtime-unwinder/cranelift\",\n]",
+		)
+		if err != nil {
+			return err
+		}
+		src, err = replaceLiteralExactlyOnce(
+			manifestPath,
+			src,
+			"[dependencies.libc]\nversion = \"0.2.185\"\ndefault-features = true",
+			"[dependencies.libc]\nversion = \"0.2.185\"\ndefault-features = false",
+		)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(manifestPath, []byte(src), 0o644); err != nil {
+			return err
+		}
+		adaptPath := filepath.Join(stagingDir, "src", "component", "translate", "adapt.rs")
+		if adaptData, err := os.ReadFile(adaptPath); err == nil {
+			adaptSrc := strings.ReplaceAll(string(adaptData), "wasmprinter::print_bytes(wasm)", "Err::<alloc::string::String, ()>(())")
+			if err := os.WriteFile(adaptPath, []byte(adaptSrc), 0o644); err != nil {
+				return err
+			}
+		}
+		compilePath := filepath.Join(stagingDir, "src", "compile.rs")
+		if cData, err := os.ReadFile(compilePath); err == nil {
+			cSrc := strings.ReplaceAll(string(cData), "use std::{any::Any, borrow::Cow, mem, ops::Range};", "use alloc::borrow::Cow;\nuse core::{any::Any, mem, ops::Range};")
+			if err := os.WriteFile(compilePath, []byte(cSrc), 0o644); err != nil {
+				return err
+			}
+		}
+		stratifyPath := filepath.Join(stagingDir, "src", "compile", "stratify.rs")
+		if sData, err := os.ReadFile(stratifyPath); err == nil {
+			sSrc := strings.ReplaceAll(string(sData), "use std::{fmt::Debug, ops::Range};", "use core::{fmt::Debug, ops::Range};")
+			if err := os.WriteFile(stratifyPath, []byte(sSrc), 0o644); err != nil {
+				return err
+			}
+		}
+		configPath := filepath.Join(stagingDir, "src", "config.rs")
+		if cfgData, err := os.ReadFile(configPath); err == nil {
+			cfgSrc := strings.ReplaceAll(string(cfgData), "use std::path::Path;", "type Path = str;")
+			cfgSrc = strings.ReplaceAll(cfgSrc, "clif_dir: Option<std::path::PathBuf>,", "clif_dir: Option<String>,")
+			cfgSrc = strings.ReplaceAll(cfgSrc, "path.to_path_buf()", "path.to_owned()")
+			if err := os.WriteFile(configPath, []byte(cfgSrc), 0o644); err != nil {
+				return err
+			}
+		}
+		codeBuilderPath := filepath.Join(stagingDir, "src", "compile", "code_builder.rs")
+		if cbData, err := os.ReadFile(codeBuilderPath); err == nil {
+			cbSrc := strings.ReplaceAll(string(cbData), "use std::path::Path;", "type Path = str;")
+			cbSrc = strings.ReplaceAll(cbSrc, "let wasm = std::fs::read(file)\n            .with_context(|| format!(\"failed to read input file: {}\", file.display()))?;", "bail!(\"failed to read input file: {file}\");\n        #[allow(unreachable_code)]\n        let wasm: Vec<u8> = Vec::new();")
+			cbSrc = strings.ReplaceAll(cbSrc, "let dwarf_package = std::fs::read(file)\n            .with_context(|| format!(\"failed to read dwarf input file: {}\", file.display()))?;", "bail!(\"failed to read dwarf input file: {file}\");\n        #[allow(unreachable_code)]\n        let dwarf_package: Vec<u8> = Vec::new();")
+			cbSrc = strings.ReplaceAll(cbSrc, "let dwarf_package_path_buf = self.wasm_path.as_ref().unwrap().with_extension(\"dwp\");\n        if dwarf_package_path_buf.exists() {\n            return self.dwarf_package_file(dwarf_package_path_buf.as_path());\n        }", "let _ = &self.wasm_path;")
+			if err := os.WriteFile(codeBuilderPath, []byte(cbSrc), 0o644); err != nil {
+				return err
+			}
+		}
+		vmPath := filepath.Join(stagingDir, "src", "runtime", "vm.rs")
+		if vmData, err := os.ReadFile(vmPath); err == nil {
+			vmSrc := strings.ReplaceAll(
+				string(vmData),
+				"    static PAGE_SIZE: AtomicUsize = AtomicUsize::new(0);\n\n    return match PAGE_SIZE.load(Ordering::Relaxed) {\n        0 => {\n            let size = sys::vm::get_page_size();\n            assert!(size != 0);\n            PAGE_SIZE.store(size, Ordering::Relaxed);\n            size\n        }\n        n => n,\n    };",
+				"    let size = sys::vm::get_page_size();\n    assert!(size != 0);\n    size",
+			)
+			if err := os.WriteFile(vmPath, []byte(vmSrc), 0o644); err != nil {
+				return err
+			}
+		}
+		storeDataPath := filepath.Join(stagingDir, "src", "runtime", "store", "data.rs")
+		if sdData, err := os.ReadFile(storeDataPath); err == nil {
+			sdSrc := strings.ReplaceAll(
+				string(sdData),
+				"static NEXT_ID: AtomicU64 = AtomicU64::new(0);",
+				"struct NextStoreId;\n            impl NextStoreId {\n                fn fetch_add(&self, _: u64, _: core::sync::atomic::Ordering) -> u64 { unsafe extern \"C\" { fn mohabbat_next_id(slot: usize) -> u64; } unsafe { mohabbat_next_id(2) } }\n                fn store(&self, _: u64, _: core::sync::atomic::Ordering) {}\n            }\n            const NEXT_ID: NextStoreId = NextStoreId;",
+			)
+			if err := os.WriteFile(storeDataPath, []byte(sdSrc), 0o644); err != nil {
+				return err
+			}
+		}
+		regPath := filepath.Join(stagingDir, "src", "runtime", "module", "registry.rs")
+		if regData, err := os.ReadFile(regPath); err == nil {
+			regSrc := strings.ReplaceAll(
+				string(regData),
+				"fn global_code() -> &'static RwLock<GlobalRegistry> {\n    static GLOBAL_CODE: OnceLock<RwLock<GlobalRegistry>> = OnceLock::new();\n    GLOBAL_CODE.get_or_init(Default::default)\n}",
+				"fn global_code() -> &'static RwLock<GlobalRegistry> {\n    unsafe extern \"C\" { fn mohabbat_wasmtime_global_code_slot() -> *mut *mut u8; }\n    unsafe {\n        let slot = mohabbat_wasmtime_global_code_slot();\n        if (*slot).is_null() {\n            *slot = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(RwLock::<GlobalRegistry>::default())).cast::<u8>();\n        }\n        &*(*slot).cast::<RwLock<GlobalRegistry>>()\n    }\n}",
+			)
+			regSrc = strings.ReplaceAll(regSrc, "use crate::sync::{OnceLock, RwLock};", "use crate::sync::RwLock;")
+			if err := os.WriteFile(regPath, []byte(regSrc), 0o644); err != nil {
+				return err
+			}
+		}
+		return patchNoStdRustTree(filepath.Join(stagingDir, "src"))
+	})
+}
+
+func prepareWasmtimeEnvironOverlay(lock, rustBuildDir, cargoHome string, verbose bool) (string, error) {
+	return prepareCrateOverlay(lock, "wasmtime-environ", wasmtimeEnvironOverlayName, rustBuildDir, cargoHome, verbose, func(stagingDir string) error {
+		manifestPath := filepath.Join(stagingDir, "Cargo.toml")
+		data, err := os.ReadFile(manifestPath)
+		if err != nil {
+			return err
+		}
+		src := string(data)
+		src, err = replaceLiteralExactlyOnce(
+			manifestPath,
+			src,
+			"compile = [\n    \"gimli/write\",\n    \"object/write_core\",\n    \"std\",\n    \"dep:wasm-encoder\",\n    \"dep:wasmprinter\",\n]",
+			"compile = [\n    \"gimli/write\",\n    \"object/write_core\",\n    \"dep:wasm-encoder\",\n]",
+		)
+		if err != nil {
+			return err
+		}
+		src, err = replaceLiteralExactlyOnce(
+			manifestPath,
+			src,
+			`threads = ["std"]`,
+			`threads = []`,
+		)
+		if err != nil {
+			return err
+		}
+		src, err = replaceLiteralExactlyOnce(
+			manifestPath,
+			src,
+			"[dependencies.wasm-encoder]\nversion = \"0.261.0\"\noptional = true",
+			"[dependencies.wasm-encoder]\nversion = \"0.261.0\"\noptional = true\ndefault-features = false",
+		)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(manifestPath, []byte(src), 0o644); err != nil {
+			return err
+		}
+		adaptPath := filepath.Join(stagingDir, "src", "component", "translate", "adapt.rs")
+		if adaptData, err := os.ReadFile(adaptPath); err == nil {
+			adaptSrc := strings.ReplaceAll(string(adaptData), "wasmprinter::print_bytes(wasm)", "Err::<alloc::string::String, &'static str>(\"wasmprinter disabled\")")
+			if err := os.WriteFile(adaptPath, []byte(adaptSrc), 0o644); err != nil {
+				return err
+			}
+		}
+		moduleTypesPath := filepath.Join(stagingDir, "src", "compile", "module_types.rs")
+		if mtData, err := os.ReadFile(moduleTypesPath); err == nil {
+			mtSrc := strings.ReplaceAll(string(mtData), "self.trampoline_types.get(&trampoline)", "self.trampoline_types.get(&*trampoline)")
+			if err := os.WriteFile(moduleTypesPath, []byte(mtSrc), 0o644); err != nil {
+				return err
+			}
+		}
+		inlinePath := filepath.Join(stagingDir, "src", "component", "translate", "inline.rs")
+		if inlineData, err := os.ReadFile(inlinePath); err == nil {
+			inlineSrc := strings.ReplaceAll(
+				string(inlineData),
+				"    let mut inliner = Inliner {",
+				"    let types_ref = result.types_ref();\n    let mut inliner = Inliner {",
+			)
+			inlineSrc = strings.ReplaceAll(
+				inlineSrc,
+				"    types.resources_mut().set_current_instance(index);\n    let types_ref = result.types_ref();",
+				"    types.resources_mut().set_current_instance(index);",
+			)
+			if err := os.WriteFile(inlinePath, []byte(inlineSrc), 0o644); err != nil {
+				return err
+			}
+		}
+		for _, colFile := range []string{"hash_map.rs", "hash_set.rs", "index_map.rs"} {
+			colPath := filepath.Join(stagingDir, "src", "collections", colFile)
+			if colData, err := os.ReadFile(colPath); err == nil {
+				colSrc := strings.ReplaceAll(string(colData), "pub const fn with_hasher(", "pub fn with_hasher(")
+				if err := os.WriteFile(colPath, []byte(colSrc), 0o644); err != nil {
+					return err
+				}
+			}
+		}
+		return patchNoStdRustTree(filepath.Join(stagingDir, "src"))
+	})
+}
+
+func prepareWasmtimeCraneliftOverlay(lock, rustBuildDir, cargoHome string, verbose bool) (string, error) {
+	return prepareCrateOverlay(lock, "wasmtime-internal-cranelift", wasmtimeCraneliftOverlayName, rustBuildDir, cargoHome, verbose, func(stagingDir string) error {
+		manifestPath := filepath.Join(stagingDir, "Cargo.toml")
+		data, err := os.ReadFile(manifestPath)
+		if err != nil {
+			return err
+		}
+		src := string(data)
+		src, err = replaceLiteralExactlyOnce(
+			manifestPath,
+			src,
+			"features = [\n    \"unwind\",\n    \"host-arch\",\n    \"timing\",\n    \"incremental-cache\",\n]",
+			"features = [\n    \"unwind\",\n    \"host-arch\",\n    \"incremental-cache\",\n]",
+		)
+		if err != nil {
+			return err
+		}
+		src, err = replaceLiteralExactlyOnce(
+			manifestPath,
+			src,
+			"[dependencies.cranelift-entity]\nversion = \"0.137.1\"",
+			"[dependencies.cranelift-entity]\nversion = \"0.137.1\"\ndefault-features = false",
+		)
+		if err != nil {
+			return err
+		}
+		src, err = replaceLiteralExactlyOnce(
+			manifestPath,
+			src,
+			"[dependencies.cranelift-frontend]\nversion = \"0.137.1\"",
+			"[dependencies.cranelift-frontend]\nversion = \"0.137.1\"\ndefault-features = false",
+		)
+		if err != nil {
+			return err
+		}
+		src, err = replaceLiteralExactlyOnce(
+			manifestPath,
+			src,
+			"[dependencies.gimli]\nversion = \"0.33.0\"\nfeatures = [\n    \"read\",\n    \"std\",\n]\ndefault-features = false",
+			"[dependencies.gimli]\nversion = \"0.33.0\"\nfeatures = [\"read\"]\ndefault-features = false",
+		)
+		if err != nil {
+			return err
+		}
+		src, err = replaceLiteralExactlyOnce(
+			manifestPath,
+			src,
+			"[dependencies.itertools]\nversion = \"0.14.0\"",
+			"[dependencies.itertools]\nversion = \"0.14.0\"\nfeatures = [\"use_alloc\"]\ndefault-features = false",
+		)
+		if err != nil {
+			return err
+		}
+		src, err = replaceLiteralExactlyOnce(
+			manifestPath,
+			src,
+			"[dependencies.object]\nversion = \"0.40.0\"\nfeatures = [\n    \"read_core\",\n    \"elf\",\n    \"write\",\n    \"std\",\n]\ndefault-features = false",
+			"[dependencies.object]\nversion = \"0.40.0\"\nfeatures = [\n    \"read_core\",\n    \"elf\",\n    \"write_core\",\n]\ndefault-features = false",
+		)
+		if err != nil {
+			return err
+		}
+		src, err = replaceLiteralExactlyOnce(
+			manifestPath,
+			src,
+			"[dependencies.thiserror]\nversion = \"2.0.17\"",
+			"[dependencies.thiserror]\nversion = \"2.0.17\"\ndefault-features = false",
+		)
+		if err != nil {
+			return err
+		}
+		src, err = replaceLiteralExactlyOnce(
+			manifestPath,
+			src,
+			"[dependencies.cranelift-native]\nversion = \"0.137.1\"",
+			"[dependencies.cranelift-native]\nversion = \"0.137.1\"\ndefault-features = false\n\n[dependencies.hashbrown]\nversion = \"0.17.1\"\ndefault-features = false",
+		)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(manifestPath, []byte(src), 0o644); err != nil {
+			return err
+		}
+
+		builderPath := filepath.Join(stagingDir, "src", "builder.rs")
+		if bData, err := os.ReadFile(builderPath); err == nil {
+			bSrc := strings.ReplaceAll(string(bData), "path.to_path_buf()", "path.to_owned()")
+			if err := os.WriteFile(builderPath, []byte(bSrc), 0o644); err != nil {
+				return err
+			}
+		}
+
+		libPath := filepath.Join(stagingDir, "src", "lib.rs")
+		libData, err := os.ReadFile(libPath)
+		if err != nil {
+			return err
+		}
+		libSrc := "#![no_std]\n" + string(libData)
+		if err := os.WriteFile(libPath, []byte(libSrc), 0o644); err != nil {
+			return err
+		}
+		compilerPath := filepath.Join(stagingDir, "src", "compiler.rs")
+		if cData, err := os.ReadFile(compilerPath); err == nil {
+			cSrc := string(cData)
+			cSrc = strings.ReplaceAll(cSrc, "use std::sync::{Arc, Mutex};", "use alloc::sync::Arc;\n#[derive(Default)]\nstruct Mutex<T>(core::cell::UnsafeCell<T>);\nunsafe impl<T: Send> Sync for Mutex<T> {}\nimpl<T> Mutex<T> {\n    fn new(v: T) -> Self { Self(core::cell::UnsafeCell::new(v)) }\n    fn lock(&self) -> Result<&mut T, ()> { Ok(unsafe { &mut *self.0.get() }) }\n}")
+			cSrc = strings.ReplaceAll(cSrc, "let timing = cranelift_codegen::timing::take_current();\n        log::debug!(\"`{symbol}` translated to CLIF in {:?}\", timing.total());\n        log::trace!(\"`{symbol}` timing info\\n{timing}\");", "let _ = &symbol;")
+			cSrc = strings.ReplaceAll(cSrc, "let timing = cranelift_codegen::timing::take_current();\n        log::debug!(\"`{symbol}` compiled in {:?}\", timing.total());\n        log::trace!(\"`{symbol}` timing info\\n{timing}\");", "let _ = &symbol;")
+			cSrc = strings.ReplaceAll(cSrc, "let timing = cranelift_codegen::timing::take_current();\n            log::debug!(\"`{symbol}` compiled in {:?}\", timing.total());\n            log::trace!(\"`{symbol}` timing info\\n{timing}\");", "let _ = &symbol;")
+			cSrc = strings.ReplaceAll(cSrc, "if let Some(path) = &self.compiler.clif_dir {\n            use std::io::Write;\n\n            let mut path = path.join(symbol.replace(\":\", \"-\"));\n            path.set_extension(\"clif\");\n\n            let mut output = std::fs::File::create(path).unwrap();\n            write!(\n                output,\n                \";; Intermediate Representation of function <{symbol}>:\\n\",\n            )\n            .unwrap();\n            write!(output, \"{}\", context.func.display()).unwrap();\n        }", "let _ = &self.compiler.clif_dir;")
+			if err := os.WriteFile(compilerPath, []byte(cSrc), 0o644); err != nil {
+				return err
+			}
+		}
+		exprPath := filepath.Join(stagingDir, "src", "debug", "transform", "expression.rs")
+		if eData, err := os.ReadFile(exprPath); err == nil {
+			eSrc := strings.ReplaceAll(string(eData), "use std::rc::Rc;", "use alloc::rc::Rc;")
+			eSrc = strings.ReplaceAll(eSrc, "label_location.get(&label)", "label_location.get(label)")
+			if err := os.WriteFile(exprPath, []byte(eSrc), 0o644); err != nil {
+				return err
+			}
+		}
+		simPath := filepath.Join(stagingDir, "src", "debug", "transform", "simulate.rs")
+		if sData, err := os.ReadFile(simPath); err == nil {
+			sSrc := strings.ReplaceAll(
+				string(sData),
+				"fn check_invalid_chars_in_path(path: PathBuf) -> Option<PathBuf> {\n    path.clone()\n        .to_str()\n        .and_then(move |s| if s.contains('\\x00') { None } else { Some(path) })\n}",
+				"fn check_invalid_chars_in_path(path: PathBuf) -> Option<PathBuf> {\n    if path.contains('\\x00') { None } else { Some(path) }\n}",
+			)
+			sSrc = strings.ReplaceAll(
+				sSrc,
+				"        let comp_dir_id = out_strings.add(assert_dwarf_str!(\n            path.parent()\n                .context(\"path dir\")?\n                .to_str()\n                .context(\"path dir encoding\")?\n        ));\n        let name = path\n            .file_name()\n            .context(\"path name\")?\n            .to_str()\n            .context(\"path name encoding\")?;",
+				"        let (dir, name) = path.rsplit_once('/').unwrap_or((\"\", path.as_str()));\n        let comp_dir_id = out_strings.add(assert_dwarf_str!(dir));",
+			)
+			sSrc = strings.ReplaceAll(
+				sSrc,
+				"static NEXT_ID: AtomicUsize = AtomicUsize::new(0);",
+				"struct NextDwarfId;\n    impl NextDwarfId { fn fetch_add(&self, _: usize, _: core::sync::atomic::Ordering) -> usize { unsafe extern \"C\" { fn mohabbat_next_id(slot: usize) -> u64; } unsafe { mohabbat_next_id(3) as usize } } }\n    const NEXT_ID: NextDwarfId = NextDwarfId;",
+			)
+			if err := os.WriteFile(simPath, []byte(sSrc), 0o644); err != nil {
+				return err
+			}
+		}
+		if err := patchNoStdRustTree(filepath.Join(stagingDir, "src")); err != nil {
+			return err
+		}
+		ssInstrPath := filepath.Join(stagingDir, "src", "func_environ", "stack_switching", "instructions.rs")
+		if ssData, err := os.ReadFile(ssInstrPath); err == nil {
+			ssSrc := strings.ReplaceAll(string(ssData), "-> Vec<ir::Value>", "-> alloc::vec::Vec<ir::Value>")
+			if err := os.WriteFile(ssInstrPath, []byte(ssSrc), 0o644); err != nil {
+				return err
+			}
+		}
+		return injectAllocPrelude(filepath.Join(stagingDir, "src"))
+	})
+}
+
+func injectAllocPrelude(srcDir string) error {
+	return filepath.WalkDir(srcDir, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() || filepath.Ext(path) != ".rs" {
+			return walkErr
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		orig := string(data)
+		lines := strings.SplitAfter(orig, "\n")
+		insertAt := 0
+		inInnerAttr := false
+		parenDepth := 0
+		for insertAt < len(lines) {
+			trimmed := strings.TrimSpace(lines[insertAt])
+			if inInnerAttr {
+				parenDepth += strings.Count(trimmed, "(") + strings.Count(trimmed, "[") - strings.Count(trimmed, ")") - strings.Count(trimmed, "]")
+				insertAt++
+				if parenDepth <= 0 {
+					inInnerAttr = false
+				}
+				continue
+			}
+			if trimmed == "" || strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "extern crate ") {
+				insertAt++
+				continue
+			}
+			if strings.HasPrefix(trimmed, "#!") {
+				parenDepth = strings.Count(trimmed, "(") + strings.Count(trimmed, "[") - strings.Count(trimmed, ")") - strings.Count(trimmed, "]")
+				insertAt++
+				if parenDepth > 0 {
+					inInnerAttr = true
+				}
+				continue
+			}
+			break
+		}
+		prelude := "#[allow(unused_imports)]\nuse alloc::{borrow::ToOwned, boxed::Box, format, string::{String, ToString}, vec};\n"
+		if !strings.Contains(orig, "use alloc::vec::Vec;") {
+			prelude = "#[allow(unused_imports)]\nuse alloc::{borrow::ToOwned, boxed::Box, format, string::{String, ToString}, vec, vec::Vec};\n"
+		}
+		if filepath.Base(path) == "lib.rs" && !strings.Contains(orig, "extern crate alloc;") {
+			prelude = "#[macro_use]\nextern crate alloc;\n" + prelude
+		}
+		var out strings.Builder
+		for i := 0; i < insertAt; i++ {
+			out.WriteString(lines[i])
+		}
+		out.WriteString(prelude)
+		for i := insertAt; i < len(lines); i++ {
+			out.WriteString(lines[i])
+		}
+		return os.WriteFile(path, []byte(out.String()), 0o644)
+	})
+}
+
+func patchNoStdRustTree(srcDir string) error {
+	replacements := []string{
+		"use std::{\n    collections::{HashMap, hash_map::Entry},\n    ops::Index,\n};", "use core::ops::Index;\nuse hashbrown::{HashMap, hash_map::Entry};",
+		"use std::collections::{HashMap, hash_map::Entry};", "use hashbrown::{HashMap, hash_map::Entry};",
+		"use std::collections::{HashMap, hash_map};", "use hashbrown::{HashMap, hash_map};",
+		"use std::collections::{hash_map, hash_set};", "use hashbrown::{hash_map, hash_set};",
+		"use std::collections::{HashMap, HashSet};", "use hashbrown::{HashMap, HashSet};",
+		"use std::collections::{BTreeMap, BTreeSet};", "use alloc::collections::{BTreeMap, BTreeSet};",
+		"use std::path::PathBuf;", "use alloc::string::String as PathBuf;",
+		"use std::path;", "mod path { pub type Path = str; pub type PathBuf = alloc::string::String; }",
+		"std::collections::hash_map", "hashbrown::hash_map",
+		"std::collections::hash_set", "hashbrown::hash_set",
+		"std::collections::HashMap", "hashbrown::HashMap",
+		"std::collections::HashSet", "hashbrown::HashSet",
+		"std::collections::BTreeMap", "alloc::collections::BTreeMap",
+		"std::collections::BTreeSet", "alloc::collections::BTreeSet",
+		"std::collections::VecDeque", "alloc::collections::VecDeque",
+		"std::collections::BinaryHeap", "alloc::collections::BinaryHeap",
+		"std::collections::", "alloc::collections::",
+		"std::borrow::", "alloc::borrow::",
+		"std::boxed::", "alloc::boxed::",
+		"std::string::", "alloc::string::",
+		"std::vec::", "alloc::vec::",
+		"std::sync::Arc", "alloc::sync::Arc",
+		"std::sync::Weak", "alloc::sync::Weak",
+		"std::format!", "alloc::format!",
+		"std::vec!", "alloc::vec!",
+		"std::fmt", "core::fmt",
+		"std::iter", "core::iter",
+		"std::slice", "core::slice",
+		"std::ops", "core::ops",
+		"std::mem", "core::mem",
+		"std::ptr", "core::ptr",
+		"std::cmp", "core::cmp",
+		"std::hash", "core::hash",
+		"std::marker", "core::marker",
+		"std::any", "core::any",
+		"std::cell", "core::cell",
+		"std::num", "core::num",
+		"std::str", "core::str",
+		"std::error", "core::error",
+		"std::convert", "core::convert",
+		"std::result", "core::result",
+		"std::option", "core::option",
+		"std::default", "core::default",
+		"std::clone", "core::clone",
+		"std::array", "core::array",
+		"std::pin", "core::pin",
+		"std::task", "core::task",
+		"std::future", "core::future",
+		"std::sync::atomic", "core::sync::atomic",
+		"std::write!", "core::write!",
+		"std::writeln!", "core::writeln!",
+	}
+	r := strings.NewReplacer(replacements...)
+	return filepath.WalkDir(srcDir, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() || filepath.Ext(path) != ".rs" {
+			return walkErr
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		orig := string(data)
+		updated := r.Replace(orig)
+		if updated != orig {
+			return os.WriteFile(path, []byte(updated), 0o644)
+		}
+		return nil
+	})
+}
+
+func prepareCraneliftNativeOverlay(lock, rustBuildDir, cargoHome string, verbose bool) (string, error) {
+	return prepareCrateOverlay(lock, "cranelift-native", craneliftNativeOverlayName, rustBuildDir, cargoHome, verbose, func(stagingDir string) error {
+		libPath := filepath.Join(stagingDir, "src", "lib.rs")
+		libData, err := os.ReadFile(libPath)
+		if err != nil {
+			return err
+		}
+		src := "#![no_std]\n" + string(libData)
+		src, err = replaceLiteralExactlyOnce(
+			libPath,
+			src,
+			"pub fn infer_native_flags(isa_builder: &mut dyn Configurable) -> Result<(), &'static str> {",
+			"#[cfg(not(feature = \"std\"))]\npub fn infer_native_flags(_isa_builder: &mut dyn Configurable) -> Result<(), &'static str> { Ok(()) }\n#[cfg(feature = \"std\")]\npub fn infer_native_flags(isa_builder: &mut dyn Configurable) -> Result<(), &'static str> {",
+		)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(libPath, []byte(src), 0o644)
+	})
 }

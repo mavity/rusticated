@@ -11,18 +11,17 @@ path = "src/lib.rs"
 doctest = false
 
 [dependencies]
-wasmparser = { version = "0.263.0", default-features = false }
-cranelift-codegen = { version = "0.136.5", default-features = false }
-cranelift-frontend = { version = "0.136.5", default-features = false }
-cranelift-entity = { version = "0.136.5", default-features = false }
-smallvec = { version = "1.15.1", default-features = false }
-target-lexicon = { version = "0.13.3", default-features = false }
+wasmtime = { version = "=50.0.1", default-features = false, features = [
+    "runtime",
+    "cranelift",
+    "custom-virtual-memory",
+] }
 log = { version = "0.4", default-features = false, features = ["release_max_level_off"] }
 
 [features]
 default = ["x86_64", "aarch64"]
-x86_64 = ["cranelift-codegen/x86"]
-aarch64 = ["cranelift-codegen/arm64"]
+x86_64 = []
+aarch64 = []
 
 [profile.release]
 opt-level = "z"

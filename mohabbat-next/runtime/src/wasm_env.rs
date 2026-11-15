@@ -458,6 +458,78 @@ pub fn resolve_env_import(name: &str) -> Option<usize> {
     }
 }
 
+#[inline(always)]
+unsafe fn sync_guest_memory(caller: &mut wasmtime::Caller<'_, ()>) {
+    if let Some(wasmtime::Extern::Memory(mem)) = caller.get_export("memory") {
+        let g = globals();
+        g.guest_mem_base = mem.data_ptr(&*caller);
+        g.guest_mem_len = mem.data_size(&*caller);
+    }
+}
+
+macro_rules! wrap_env {
+    ($linker:expr, $name:literal, $func:ident, ($($arg:ident : $ty:ty),*) -> $ret:ty) => {
+        $linker.func_wrap(
+            "env",
+            $name,
+            |mut caller: wasmtime::Caller<'_, ()>, $($arg: $ty),*| -> $ret {
+                unsafe {
+                    sync_guest_memory(&mut caller);
+                    $func($($arg),*)
+                }
+            },
+        )?;
+    };
+    ($linker:expr, $name:literal, $func:ident, ($($arg:ident : $ty:ty),*)) => {
+        wrap_env!($linker, $name, $func, ($($arg: $ty),*) -> ());
+    };
+}
+
+pub fn register_env_imports(linker: &mut wasmtime::Linker<()>) -> wasmtime::Result<()> {
+    wrap_env!(linker, "host_panic", env_host_panic, (msg_ptr: u32, msg_len: u32));
+    wrap_env!(linker, "rusticated_debug", env_rusticated_debug, (val: i32));
+    wrap_env!(linker, "process_exit", env_process_exit, (code: i32));
+    wrap_env!(linker, "get_time", env_get_time, () -> u64);
+    wrap_env!(linker, "get_random", env_get_random, (buf_ptr: u32, buf_len: u32));
+    wrap_env!(linker, "get_args", env_get_args, (buf_ptr: u32, buf_cap: u32) -> u64);
+    wrap_env!(linker, "get_env", env_get_env, (buf_ptr: u32, buf_cap: u32) -> u64);
+    wrap_env!(linker, "get_cwd", env_get_cwd, (buf_ptr: u32, buf_cap: u32) -> u64);
+    wrap_env!(linker, "set_cwd", env_set_cwd, (path_ptr: u32, path_len: u32) -> u32);
+    wrap_env!(linker, "get_platform_info", env_get_platform_info, (out_ptr: u32, out_cap: u32) -> u32);
+    wrap_env!(linker, "timer_set", env_timer_set, (ov_ptr: u32, delay_ms: u32));
+    wrap_env!(linker, "cancel", env_cancel, (ov_ptr: u32));
+    wrap_env!(linker, "read", env_read, (ov_ptr: u32, handle: u64, buf_ptr: u32, buf_len: u32));
+    wrap_env!(linker, "write", env_write, (ov_ptr: u32, handle: u64, buf_ptr: u32, buf_len: u32));
+    wrap_env!(linker, "seek", env_seek, (ov_ptr: u32, handle: u64, offset: i64, whence: u32));
+    wrap_env!(linker, "handle_truncate", env_handle_truncate, (ov_ptr: u32, handle: u64, size: i64));
+    wrap_env!(linker, "handle_close", env_handle_close, (handle: u64));
+    wrap_env!(linker, "path_open", env_path_open, (ov_ptr: u32, path_ptr: u32, path_len: u32, flags: u32));
+    wrap_env!(linker, "dir_read", env_dir_read, (ov_ptr: u32, handle: u64, buf_ptr: u32, buf_len: u32));
+    wrap_env!(linker, "path_stat", env_path_stat, (ov_ptr: u32, path_ptr: u32, path_len: u32, flags: u32, stat_ptr: u32, stat_cap: u32));
+    wrap_env!(linker, "path_link", env_path_link, (ov_ptr: u32, old_ptr: u32, old_len: u32, new_ptr: u32, new_len: u32, flags: u32));
+    wrap_env!(linker, "path_symlink", env_path_symlink, (ov_ptr: u32, target_ptr: u32, target_len: u32, link_ptr: u32, link_len: u32, target_kind: u32));
+    wrap_env!(linker, "path_readlink", env_path_readlink, (ov_ptr: u32, path_ptr: u32, path_len: u32, buf_ptr: u32, buf_len: u32));
+    wrap_env!(linker, "path_chmod", env_path_chmod, (ov_ptr: u32, path_ptr: u32, path_len: u32, mode: u32));
+    wrap_env!(linker, "path_set_times", env_path_set_times, (ov_ptr: u32, path_ptr: u32, path_len: u32, atime_sec: i64, atime_nsec: u32, mtime_sec: i64, mtime_nsec: u32, flags: u32));
+    wrap_env!(linker, "path_remove", env_path_remove, (ov_ptr: u32, path_ptr: u32, path_len: u32, flags: u32));
+    wrap_env!(linker, "path_mkdir", env_path_mkdir, (ov_ptr: u32, path_ptr: u32, path_len: u32, mode: u32));
+    wrap_env!(linker, "path_rename", env_path_rename, (ov_ptr: u32, old_ptr: u32, old_len: u32, new_ptr: u32, new_len: u32));
+    wrap_env!(linker, "net_open", env_net_open, (ov_ptr: u32, addr_ptr: u32, addr_len: u32, port: u32, flags: u32));
+    wrap_env!(linker, "net_accept", env_net_accept, (ov_ptr: u32, listener_handle: u64));
+    wrap_env!(linker, "net_lookup", env_net_lookup, (ov_ptr: u32, name_ptr: u32, name_len: u32, buf_ptr: u32, buf_cap: u32));
+    wrap_env!(linker, "net_cert_verify", env_net_cert_verify, (ov_ptr: u32, name_ptr: u32, name_len: u32, chain_ptr: u32, chain_len: u32));
+    wrap_env!(linker, "process_spawn", env_process_spawn, (ov_ptr: u32, cfg_ptr: u32, cfg_len: u32));
+    wrap_env!(linker, "process_pipe", env_process_pipe, (ov_ptr: u32));
+    wrap_env!(linker, "process_wait", env_process_wait, (ov_ptr: u32, proc_handle: u64));
+    wrap_env!(linker, "process_signal", env_process_signal, (proc_handle: u64, signum: u32));
+    wrap_env!(linker, "signal_wait", env_signal_wait, (ov_ptr: u32, signum: u32));
+    wrap_env!(linker, "tty_set_mode", env_tty_set_mode, (handle: u64, raw_mode: u32));
+    wrap_env!(linker, "tty_get_size", env_tty_get_size, (handle: u64) -> u32);
+    wrap_env!(linker, "tty_set_size", env_tty_set_size, (handle: u64, cols: u32, rows: u32) -> u32);
+    wrap_env!(linker, "fd_isatty", env_fd_isatty, (handle: u32) -> u32);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
