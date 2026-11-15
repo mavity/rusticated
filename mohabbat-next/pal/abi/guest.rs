@@ -43,6 +43,86 @@ pub const ERROR_PERM: u32 = 63;
 pub const ERROR_PIPE: u32 = 64;
 pub const ERROR_SPIPE: u32 = 70;
 pub const ERROR_UNSUPPORTED: u32 = 52;
+pub const ERROR_CONNREFUSED: u32 = 14;
+pub const ERROR_TIMEDOUT: u32 = 73;
+
+pub const OS_KIND_WINDOWS: u32 = 1;
+pub const OS_KIND_LINUX: u32 = 2;
+pub const OS_KIND_DARWIN: u32 = 3;
+
+pub const CPU_TYPE_X86_64: u32 = 1;
+pub const CPU_TYPE_AARCH64: u32 = 2;
+
+pub const STAT_KIND_UNKNOWN: u32 = 0;
+pub const STAT_KIND_FILE: u32 = 1;
+pub const STAT_KIND_DIR: u32 = 2;
+pub const STAT_KIND_SYMLINK: u32 = 3;
+pub const STAT_KIND_CHAR: u32 = 4;
+pub const STAT_KIND_FIFO: u32 = 5;
+pub const STAT_KIND_SOCKET: u32 = 6;
+
+pub const OPEN_FLAG_CREATE: u32 = 0x40;
+pub const OPEN_FLAG_EXCL: u32 = 0x80;
+pub const OPEN_FLAG_TRUNC: u32 = 0x200;
+pub const OPEN_FLAG_APPEND: u32 = 0x400;
+pub const OPEN_FLAG_DIRECTORY: u32 = 0x2000;
+
+pub const PATH_STAT_FLAG_NOFOLLOW: u32 = 1 << 0;
+pub const PATH_REMOVE_FLAG_DIR: u32 = 1 << 0;
+pub const PATH_SET_TIMES_FLAG_NOFOLLOW: u32 = 1 << 0;
+pub const NET_OPEN_FLAG_LISTEN: u32 = 1 << 0;
+pub const NET_OPEN_FLAG_IPV6: u32 = 1 << 1;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct AbiDirEntryHeader {
+    pub kind: u32,
+    pub name_len: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct AbiStat {
+    pub dev: u64,
+    pub ino: u64,
+    pub kind: u32,
+    pub mode: u32,
+    pub nlink: u64,
+    pub size: u64,
+    pub atime_sec: i64,
+    pub atime_nsec: u32,
+    pub atime_pad: u32,
+    pub mtime_sec: i64,
+    pub mtime_nsec: u32,
+    pub mtime_pad: u32,
+    pub ctime_sec: i64,
+    pub ctime_nsec: u32,
+    pub ctime_pad: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub blksize: u64,
+    pub blocks: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct AbiPlatformInfo {
+    pub os_kind: u32,
+    pub cpu_type: u32,
+    pub abi_version: u32,
+    pub page_size: u32,
+    pub pid: u64,
+    pub ppid: u64,
+    pub uid: u32,
+    pub gid: u32,
+    pub cpu_count: u32,
+    pub flags: u32,
+    pub hostname: [u8; 64],
+    pub os_release: [u8; 64],
+    pub exe_path: [u8; 256],
+    pub temp_dir: [u8; 256],
+    pub reserved: [u8; 80],
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -262,6 +342,23 @@ const _: () = {
     assert!(core::mem::offset_of!(Overlapped, continued) == 8);
     assert!(core::mem::offset_of!(Overlapped, result_ext) == 16);
     assert!(core::mem::size_of::<ProcessSpawnOverlapped>() == 64);
+    assert!(core::mem::size_of::<AbiDirEntryHeader>() == 8);
+    assert!(core::mem::offset_of!(AbiDirEntryHeader, kind) == 0);
+    assert!(core::mem::offset_of!(AbiDirEntryHeader, name_len) == 4);
+    assert!(core::mem::size_of::<AbiStat>() == 112);
+    assert!(core::mem::offset_of!(AbiStat, dev) == 0);
+    assert!(core::mem::offset_of!(AbiStat, ino) == 8);
+    assert!(core::mem::offset_of!(AbiStat, kind) == 16);
+    assert!(core::mem::offset_of!(AbiStat, size) == 32);
+    assert!(core::mem::offset_of!(AbiStat, mtime_sec) == 56);
+    assert!(core::mem::size_of::<AbiPlatformInfo>() == 768);
+    assert!(core::mem::offset_of!(AbiPlatformInfo, os_kind) == 0);
+    assert!(core::mem::offset_of!(AbiPlatformInfo, cpu_type) == 4);
+    assert!(core::mem::offset_of!(AbiPlatformInfo, pid) == 16);
+    assert!(core::mem::offset_of!(AbiPlatformInfo, hostname) == 48);
+    assert!(core::mem::offset_of!(AbiPlatformInfo, exe_path) == 176);
+    assert!(core::mem::offset_of!(AbiPlatformInfo, temp_dir) == 432);
+    assert!(core::mem::offset_of!(AbiPlatformInfo, reserved) == 688);
     assert!(core::mem::size_of::<PalAbiTable>() == 47 * 8);
     assert!(core::mem::offset_of!(PalAbiTable, wasm_bytes) == 0);
     assert!(core::mem::offset_of!(PalAbiTable, wasm_len) == 8);

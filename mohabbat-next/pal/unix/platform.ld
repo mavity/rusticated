@@ -11,6 +11,7 @@ SECTIONS
         KEEP(*(.text.unix_platform_entry))
         *(.text*)
         *(.rodata*)
+        *(.data.rel.ro .data.rel.ro.*)
     }
 
     /DISCARD/ :
@@ -18,7 +19,7 @@ SECTIONS
         *(.comment*)
         *(.eh_frame*)
         *(.note*)
-        *(.data*)
+        *(.data .data.*)
         *(.bss*)
         *(COMMON)
         *(.got*)

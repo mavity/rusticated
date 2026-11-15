@@ -9,6 +9,9 @@ use core::ptr;
 mod pal_abi;
 #[path = "../abi/guest_stubs.rs"]
 mod pal_abi_stubs;
+mod linux_syscall;
+mod unix_abi;
+mod worker_pool;
 use pal_abi::{
     Overlapped, PalAbiTable, ERROR_ACCES, ERROR_AGAIN, ERROR_BADF, ERROR_EXIST, ERROR_INVALID,
     ERROR_IO, ERROR_ISDIR, ERROR_NOENT, ERROR_NOMEM, ERROR_NOTDIR, ERROR_OVERFLOW, ERROR_PERM,
@@ -120,6 +123,7 @@ struct FileHandle {
     sequence: IoSequence,
 }
 
+#[cfg(feature = "darwin")]
 #[repr(C)]
 pub struct UnixPlatformHost {
     load_library: Option<LoadLibraryFn>,
@@ -134,6 +138,20 @@ pub struct UnixPlatformHost {
     argc: usize,
 }
 
+#[cfg(not(feature = "darwin"))]
+#[repr(C)]
+pub struct UnixPlatformHost {
+    hello_payload: *const u8,
+    hello_payload_size: usize,
+    argv: *const *const u8,
+    argc: usize,
+    envp: *const *const u8,
+    envc: usize,
+    pid: u32,
+    wasm_bytes: *const u8,
+    wasm_len: usize,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -144,6 +162,25 @@ enum IoKind {
     Open,
     Seek,
     Truncate,
+    Timer,
+    DirRead,
+    PathStat,
+    PathLink,
+    PathSymlink,
+    PathReadlink,
+    PathChmod,
+    PathSetTimes,
+    PathRemove,
+    PathMkdir,
+    PathRename,
+    NetOpen,
+    NetAccept,
+    NetLookup,
+    NetCertVerify,
+    ProcessSpawn,
+    ProcessPipe,
+    ProcessWait,
+    SignalWait,
 }
 
 #[repr(C)]
@@ -163,6 +200,37 @@ struct IoOperation {
     result: u64,
     file_handle: *mut FileHandle,
     sequence: *mut IoSequence,
+    extra_ptr: *mut c_void,
+    extra_len: usize,
+    aux_u32: u32,
+    aux_u64: u64,
+    cancelled: bool,
+}
+
+impl IoOperation {
+    const fn new(overlapped: *mut Overlapped, kind: IoKind) -> Self {
+        Self {
+            active_next: ptr::null_mut(),
+            queue_next: ptr::null_mut(),
+            sequence_next: ptr::null_mut(),
+            overlapped,
+            kind,
+            fd: -1,
+            buffer: ptr::null_mut(),
+            length: 0,
+            offset: 0,
+            whence: 0,
+            error: 0,
+            result: 0,
+            file_handle: ptr::null_mut(),
+            sequence: ptr::null_mut(),
+            extra_ptr: ptr::null_mut(),
+            extra_len: 0,
+            aux_u32: 0,
+            aux_u64: 0,
+            cancelled: false,
+        }
+    }
 }
 
 #[repr(C)]
@@ -223,6 +291,13 @@ struct PlatformState {
     free: Option<FreeFn>,
     payload_alloc: *mut c_void,
     payload_total_size: usize,
+    envp: *const *const u8,
+    envc: usize,
+    pid: u32,
+    pipe_fds: [i32; 2],
+    io_uring_fd: i32,
+    comp_lock: i32,
+    linux_pool: *mut c_void,
 }
 
 #[cfg(test)]
@@ -272,6 +347,13 @@ static mut TEST_STATE: PlatformState = PlatformState {
     free: None,
     payload_alloc: ptr::null_mut(),
     payload_total_size: 0,
+    envp: ptr::null(),
+    envc: 0,
+    pid: 0,
+    pipe_fds: [-1, -1],
+    io_uring_fd: -1,
+    comp_lock: 0,
+    linux_pool: ptr::null_mut(),
 };
 
 const PREFIX_ABI_OFFSET: usize = 0x20000;
@@ -391,6 +473,7 @@ unsafe fn write_fd(fd: i32, bytes: &[u8]) -> bool {
     true
 }
 
+#[cfg(feature = "darwin")]
 unsafe fn resolve(
     host: &UnixPlatformHost,
     module: *mut c_void,
@@ -402,6 +485,7 @@ unsafe fn resolve(
     }
 }
 
+#[cfg(feature = "darwin")]
 macro_rules! function_pointer {
     ($address:expr, $function_type:ty) => {{
         let address: *mut c_void = $address;
@@ -478,24 +562,42 @@ unsafe fn queue_unlock(state: *mut PlatformState) {
 }
 
 unsafe fn enqueue_work(state: *mut PlatformState, operation: *mut IoOperation) {
-    (*operation).queue_next = ptr::null_mut();
-    queue_lock(state);
-    let tail = ptr::addr_of!((*state).work_tail).read();
-    if tail.is_null() {
-        ptr::addr_of_mut!((*state).work_head).write(operation);
-    } else {
-        ptr::addr_of_mut!((*tail).queue_next).write(operation);
+    #[cfg(all(
+        not(test),
+        not(feature = "darwin"),
+        any(feature = "linux", target_os = "linux", target_os = "android")
+    ))]
+    {
+        let _ = state;
+        let handle_key = (*operation).sequence as usize;
+        let _ = linux_runtime::pool().submit(operation as usize, handle_key);
+        return;
     }
-    ptr::addr_of_mut!((*state).work_tail).write(operation);
-    if (*state).synchronization_initialized {
-        if let Some(signal) = (*state).pthread_cond_signal {
-            if signal(ptr::addr_of_mut!((*state).work_ready).cast()) != 0 {
-                queue_unlock(state);
-                terminate_after_worker_failure(17);
+    #[cfg(not(all(
+        not(test),
+        not(feature = "darwin"),
+        any(feature = "linux", target_os = "linux", target_os = "android")
+    )))]
+    {
+        (*operation).queue_next = ptr::null_mut();
+        queue_lock(state);
+        let tail = ptr::addr_of!((*state).work_tail).read();
+        if tail.is_null() {
+            ptr::addr_of_mut!((*state).work_head).write(operation);
+        } else {
+            ptr::addr_of_mut!((*tail).queue_next).write(operation);
+        }
+        ptr::addr_of_mut!((*state).work_tail).write(operation);
+        if (*state).synchronization_initialized {
+            if let Some(signal) = (*state).pthread_cond_signal {
+                if signal(ptr::addr_of_mut!((*state).work_ready).cast()) != 0 {
+                    queue_unlock(state);
+                    terminate_after_worker_failure(17);
+                }
             }
         }
+        queue_unlock(state);
     }
-    queue_unlock(state);
 }
 
 unsafe fn append_sequence(sequence: *mut IoSequence, operation: *mut IoOperation) -> bool {
@@ -673,20 +775,13 @@ unsafe fn begin_io(
     submit_io(
         ov,
         IoOperation {
-            active_next: ptr::null_mut(),
-            queue_next: ptr::null_mut(),
-            sequence_next: ptr::null_mut(),
-            overlapped: ov,
-            kind,
             fd,
             buffer,
             length,
             offset,
-            whence: 0,
-            error: 0,
-            result: 0,
             file_handle,
             sequence,
+            ..IoOperation::new(ov, kind)
         },
     );
 }
@@ -704,20 +799,12 @@ unsafe fn begin_seek(ov: *mut Overlapped, handle: u64, offset: i64, whence: u32)
     submit_io(
         ov,
         IoOperation {
-            active_next: ptr::null_mut(),
-            queue_next: ptr::null_mut(),
-            sequence_next: ptr::null_mut(),
-            overlapped: ov,
-            kind: IoKind::Seek,
             fd: (*file_handle).fd,
-            buffer: ptr::null_mut(),
-            length: 0,
             offset,
             whence: whence as i32,
-            error: 0,
-            result: 0,
             file_handle,
             sequence: ptr::addr_of_mut!((*file_handle).sequence),
+            ..IoOperation::new(ov, IoKind::Seek)
         },
     );
 }
@@ -735,20 +822,11 @@ unsafe fn begin_truncate(ov: *mut Overlapped, handle: u64, length: i64) {
     submit_io(
         ov,
         IoOperation {
-            active_next: ptr::null_mut(),
-            queue_next: ptr::null_mut(),
-            sequence_next: ptr::null_mut(),
-            overlapped: ov,
-            kind: IoKind::Truncate,
             fd: (*file_handle).fd,
-            buffer: ptr::null_mut(),
-            length: 0,
             offset: length,
-            whence: 0,
-            error: 0,
-            result: 0,
             file_handle,
             sequence: ptr::addr_of_mut!((*file_handle).sequence),
+            ..IoOperation::new(ov, IoKind::Truncate)
         },
     );
 }
@@ -849,20 +927,10 @@ unsafe fn begin_path_open(ov: *mut Overlapped, path: *const u8, length: usize, f
     submit_io(
         ov,
         IoOperation {
-            active_next: ptr::null_mut(),
-            queue_next: ptr::null_mut(),
-            sequence_next: ptr::null_mut(),
-            overlapped: ov,
-            kind: IoKind::Open,
             fd: native_flags,
             buffer: path_buffer.cast(),
             length,
-            offset: 0,
-            whence: 0,
-            error: 0,
-            result: 0,
-            file_handle: ptr::null_mut(),
-            sequence: ptr::null_mut(),
+            ..IoOperation::new(ov, IoKind::Open)
         },
     );
 }
@@ -920,8 +988,279 @@ unsafe fn execute_io_operation(operation: *mut IoOperation) {
                 }
                 None => -1,
             },
+            IoKind::Timer => {
+                #[cfg(any(feature = "linux", target_os = "linux", target_os = "android"))]
+                {
+                    let delay_ms = (*operation).offset.max(0) as u64;
+                    let req = linux_syscall::Timespec {
+                        tv_sec: (delay_ms / 1000) as i64,
+                        tv_nsec: ((delay_ms % 1000) * 1_000_000) as i64,
+                    };
+                    let mut rem = linux_syscall::Timespec::default();
+                    let _ = linux_syscall::syscall2(
+                        linux_syscall::nr::NANOSLEEP,
+                        (&req as *const linux_syscall::Timespec) as usize,
+                        (&mut rem as *mut linux_syscall::Timespec) as usize,
+                    );
+                    0
+                }
+                #[cfg(not(any(feature = "linux", target_os = "linux", target_os = "android")))]
+                {
+                    0
+                }
+            }
+            IoKind::DirRead => {
+                #[cfg(any(feature = "linux", target_os = "linux", target_os = "android"))]
+                {
+                    let mut raw_buf = [0u8; 4096];
+                    let n = linux_syscall::syscall3(
+                        linux_syscall::nr::GETDENTS64,
+                        (*operation).fd as usize,
+                        raw_buf.as_mut_ptr() as usize,
+                        raw_buf.len(),
+                    );
+                    if n < 0 {
+                        n
+                    } else {
+                        let out = (*operation).buffer.cast::<u8>();
+                        let cap = (*operation).length;
+                        let mut pos = 0usize;
+                        let mut out_pos = 0usize;
+                        let total = n as usize;
+                        while pos + 19 <= total {
+                            let d_ino = u64::from_le_bytes(
+                                raw_buf[pos..pos + 8].try_into().unwrap_or([0; 8]),
+                            );
+                            let d_reclen = u16::from_le_bytes([raw_buf[pos + 16], raw_buf[pos + 17]]) as usize;
+                            let d_type = raw_buf[pos + 18];
+                            if d_reclen < 19 || pos + d_reclen > total {
+                                break;
+                            }
+                            let name_start = pos + 19;
+                            let mut name_end = name_start;
+                            while name_end < pos + d_reclen && raw_buf[name_end] != 0 {
+                                name_end += 1;
+                            }
+                            let name = &raw_buf[name_start..name_end];
+                            let entry_bytes = 8 + name.len();
+                            if out_pos + entry_bytes > cap {
+                                break;
+                            }
+                            let kind: u16 = match d_type {
+                                4 => unix_abi::ABI_STAT_KIND_DIR as u16,
+                                8 => unix_abi::ABI_STAT_KIND_FILE as u16,
+                                10 => unix_abi::ABI_STAT_KIND_SYMLINK as u16,
+                                _ => unix_abi::ABI_STAT_KIND_OTHER as u16,
+                            };
+                            let hdr = unix_abi::AbiDirEntryHeader {
+                                ino: d_ino as u32,
+                                kind,
+                                name_len: name.len() as u16,
+                            };
+                            ptr::write_unaligned(out.add(out_pos).cast(), hdr);
+                            ptr::copy_nonoverlapping(name.as_ptr(), out.add(out_pos + 8), name.len());
+                            out_pos += entry_bytes;
+                            pos += d_reclen;
+                        }
+                        out_pos as isize
+                    }
+                }
+                #[cfg(not(any(feature = "linux", target_os = "linux", target_os = "android")))]
+                {
+                    0
+                }
+            }
+            IoKind::PathStat => {
+                #[cfg(any(feature = "linux", target_os = "linux", target_os = "android"))]
+                {
+                    let mut cpath = [0u8; 4096];
+                    if let Some(p) = unix_abi::copy_cstr(
+                        (*operation).buffer.cast(),
+                        (*operation).length,
+                        &mut cpath,
+                    ) {
+                        let mut st = linux_syscall::LinuxStat::default();
+                        let flags = if ((*operation).aux_u32 & unix_abi::ABI_PATH_FOLLOW_SYMLINKS) != 0 {
+                            0
+                        } else {
+                            linux_syscall::AT_SYMLINK_NOFOLLOW
+                        };
+                        let r = linux_syscall::syscall4(
+                            linux_syscall::nr::NEWFSTATAT,
+                            linux_syscall::AT_FDCWD as usize,
+                            p as usize,
+                            (&mut st as *mut linux_syscall::LinuxStat) as usize,
+                            flags as usize,
+                        );
+                        if r == 0 && !(*operation).extra_ptr.is_null() && (*operation).extra_len >= core::mem::size_of::<unix_abi::AbiStat>() {
+                            let abi = unix_abi::linux_stat_to_abi(&st);
+                            ptr::write_unaligned((*operation).extra_ptr.cast(), abi);
+                        }
+                        r
+                    } else {
+                        -(linux_syscall::EINVAL as isize)
+                    }
+                }
+                #[cfg(not(any(feature = "linux", target_os = "linux", target_os = "android")))]
+                {
+                    -(38isize)
+                }
+            }
+            IoKind::PathMkdir => {
+                #[cfg(any(feature = "linux", target_os = "linux", target_os = "android"))]
+                {
+                    let mut cpath = [0u8; 4096];
+                    if let Some(p) = unix_abi::copy_cstr((*operation).buffer.cast(), (*operation).length, &mut cpath) {
+                        linux_syscall::syscall3(
+                            linux_syscall::nr::MKDIRAT,
+                            linux_syscall::AT_FDCWD as usize,
+                            p as usize,
+                            (*operation).aux_u32 as usize,
+                        )
+                    } else {
+                        -(linux_syscall::EINVAL as isize)
+                    }
+                }
+                #[cfg(not(any(feature = "linux", target_os = "linux", target_os = "android")))]
+                {
+                    -(38isize)
+                }
+            }
+            IoKind::PathRemove => {
+                #[cfg(any(feature = "linux", target_os = "linux", target_os = "android"))]
+                {
+                    let mut cpath = [0u8; 4096];
+                    if let Some(p) = unix_abi::copy_cstr((*operation).buffer.cast(), (*operation).length, &mut cpath) {
+                        let flags = if ((*operation).aux_u32 & unix_abi::ABI_PATH_REMOVE_DIR) != 0 {
+                            linux_syscall::AT_REMOVEDIR
+                        } else {
+                            0
+                        };
+                        linux_syscall::syscall3(
+                            linux_syscall::nr::UNLINKAT,
+                            linux_syscall::AT_FDCWD as usize,
+                            p as usize,
+                            flags as usize,
+                        )
+                    } else {
+                        -(linux_syscall::EINVAL as isize)
+                    }
+                }
+                #[cfg(not(any(feature = "linux", target_os = "linux", target_os = "android")))]
+                {
+                    -(38isize)
+                }
+            }
+            IoKind::PathRename => {
+                #[cfg(any(feature = "linux", target_os = "linux", target_os = "android"))]
+                {
+                    let mut old_c = [0u8; 4096];
+                    let mut new_c = [0u8; 4096];
+                    match (
+                        unix_abi::copy_cstr((*operation).buffer.cast(), (*operation).length, &mut old_c),
+                        unix_abi::copy_cstr((*operation).extra_ptr.cast(), (*operation).extra_len, &mut new_c),
+                    ) {
+                        (Some(o), Some(n)) => linux_syscall::syscall5(
+                            linux_syscall::nr::RENAMEAT2,
+                            linux_syscall::AT_FDCWD as usize,
+                            o as usize,
+                            linux_syscall::AT_FDCWD as usize,
+                            n as usize,
+                            0,
+                        ),
+                        _ => -(linux_syscall::EINVAL as isize),
+                    }
+                }
+                #[cfg(not(any(feature = "linux", target_os = "linux", target_os = "android")))]
+                {
+                    -(38isize)
+                }
+            }
+            IoKind::PathLink | IoKind::PathSymlink | IoKind::PathReadlink | IoKind::PathChmod | IoKind::PathSetTimes => {
+                #[cfg(any(feature = "linux", target_os = "linux", target_os = "android"))]
+                {
+                    let mut c1 = [0u8; 4096];
+                    let mut c2 = [0u8; 4096];
+                    match (*operation).kind {
+                        IoKind::PathSymlink => {
+                            match (
+                                unix_abi::copy_cstr((*operation).buffer.cast(), (*operation).length, &mut c1),
+                                unix_abi::copy_cstr((*operation).extra_ptr.cast(), (*operation).extra_len, &mut c2),
+                            ) {
+                                (Some(target), Some(linkp)) => linux_syscall::syscall3(
+                                    linux_syscall::nr::SYMLINKAT,
+                                    target as usize,
+                                    linux_syscall::AT_FDCWD as usize,
+                                    linkp as usize,
+                                ),
+                                _ => -(linux_syscall::EINVAL as isize),
+                            }
+                        }
+                        IoKind::PathReadlink => {
+                            if let Some(p) = unix_abi::copy_cstr((*operation).buffer.cast(), (*operation).length, &mut c1) {
+                                linux_syscall::syscall4(
+                                    linux_syscall::nr::READLINKAT,
+                                    linux_syscall::AT_FDCWD as usize,
+                                    p as usize,
+                                    (*operation).extra_ptr as usize,
+                                    (*operation).extra_len,
+                                )
+                            } else {
+                                -(linux_syscall::EINVAL as isize)
+                            }
+                        }
+                        IoKind::PathChmod => {
+                            if let Some(p) = unix_abi::copy_cstr((*operation).buffer.cast(), (*operation).length, &mut c1) {
+                                linux_syscall::syscall4(
+                                    linux_syscall::nr::FCHMODAT,
+                                    linux_syscall::AT_FDCWD as usize,
+                                    p as usize,
+                                    (*operation).aux_u32 as usize,
+                                    0,
+                                )
+                            } else {
+                                -(linux_syscall::EINVAL as isize)
+                            }
+                        }
+                        _ => -(linux_syscall::ENOSYS as isize),
+                    }
+                }
+                #[cfg(not(any(feature = "linux", target_os = "linux", target_os = "android")))]
+                {
+                    -(38isize)
+                }
+            }
+            IoKind::ProcessPipe => {
+                #[cfg(any(feature = "linux", target_os = "linux", target_os = "android"))]
+                {
+                    let mut fds = [0i32; 2];
+                    let r = linux_syscall::pipe2(&mut fds, linux_syscall::O_CLOEXEC);
+                    if r == 0 {
+                        (*operation).aux_u64 = ((fds[0] as u64) & 0xffff_ffff) | (((fds[1] as u64) & 0xffff_ffff) << 32);
+                    }
+                    r
+                }
+                #[cfg(not(any(feature = "linux", target_os = "linux", target_os = "android")))]
+                {
+                    -(38isize)
+                }
+            }
+            IoKind::NetOpen | IoKind::NetAccept | IoKind::NetLookup | IoKind::NetCertVerify | IoKind::ProcessSpawn | IoKind::ProcessWait | IoKind::SignalWait => {
+                -(38isize)
+            }
         };
-        let success = if matches!((*operation).kind, IoKind::Truncate) {
+        let success = if matches!(
+            (*operation).kind,
+            IoKind::Truncate
+                | IoKind::Timer
+                | IoKind::PathStat
+                | IoKind::PathMkdir
+                | IoKind::PathRemove
+                | IoKind::PathRename
+                | IoKind::PathSymlink
+                | IoKind::PathChmod
+                | IoKind::ProcessPipe
+        ) {
             result == 0
         } else {
             result >= 0
@@ -929,6 +1268,16 @@ unsafe fn execute_io_operation(operation: *mut IoOperation) {
         if success {
             break (0, result as u64);
         }
+        #[cfg(any(feature = "linux", target_os = "linux", target_os = "android"))]
+        let errno = if result < 0 && result >= -4095 {
+            (-result) as i32
+        } else {
+            match errno_location {
+                Some(errno_location) => *errno_location(),
+                None => 0,
+            }
+        };
+        #[cfg(not(any(feature = "linux", target_os = "linux", target_os = "android")))]
         let errno = match errno_location {
             Some(errno_location) => *errno_location(),
             None => 0,
@@ -1163,9 +1512,28 @@ unsafe fn publish_one_completion(state: *mut PlatformState, operation: *mut IoOp
 unsafe fn publish_ready_completions(state: *mut PlatformState) -> usize {
     let mut count = 0;
     loop {
-        queue_lock(state);
-        let operation = pop_completion(state);
-        queue_unlock(state);
+        #[cfg(all(
+            not(test),
+            not(feature = "darwin"),
+            any(feature = "linux", target_os = "linux", target_os = "android")
+        ))]
+        let operation = {
+            linux_runtime::comp_lock().lock();
+            let op = pop_completion(state);
+            linux_runtime::comp_lock().unlock();
+            op
+        };
+        #[cfg(not(all(
+            not(test),
+            not(feature = "darwin"),
+            any(feature = "linux", target_os = "linux", target_os = "android")
+        )))]
+        let operation = {
+            queue_lock(state);
+            let op = pop_completion(state);
+            queue_unlock(state);
+            op
+        };
         if operation.is_null() {
             return count;
         }
@@ -1176,6 +1544,44 @@ unsafe fn publish_ready_completions(state: *mut PlatformState) -> usize {
 
 unsafe fn wait_and_publish_io() -> bool {
     let state = state_ptr();
+    #[cfg(all(
+        not(test),
+        not(feature = "darwin"),
+        any(feature = "linux", target_os = "linux", target_os = "android")
+    ))]
+    {
+        loop {
+            linux_runtime::comp_lock().lock();
+            let has_comp = !ptr::addr_of!((*state).completion_head).read().is_null();
+            linux_runtime::comp_lock().unlock();
+            if has_comp {
+                return publish_ready_completions(state) != 0;
+            }
+            if ptr::addr_of!((*state).active_count).read() == 0 {
+                return false;
+            }
+            let rfd = (*state).pipe_fds[0];
+            let mut pfd = linux_syscall::PollFd {
+                fd: rfd,
+                events: linux_syscall::POLLIN,
+                revents: 0,
+            };
+            let _ = linux_syscall::ppoll(&mut pfd, 1, ptr::null());
+            let mut drain = [0u8; 64];
+            let _ = linux_syscall::syscall3(
+                linux_syscall::nr::READ,
+                rfd as usize,
+                drain.as_mut_ptr() as usize,
+                drain.len(),
+            );
+        }
+    }
+    #[cfg(not(all(
+        not(test),
+        not(feature = "darwin"),
+        any(feature = "linux", target_os = "linux", target_os = "android")
+    )))]
+    {
     queue_lock(state);
     while ptr::addr_of!((*state).completion_head).read().is_null()
         && ptr::addr_of!((*state).active_count).read() != 0
@@ -1199,6 +1605,7 @@ unsafe fn wait_and_publish_io() -> bool {
         return false;
     }
     publish_ready_completions(state) != 0
+    }
 }
 
 unsafe fn publish_pending_io() {
@@ -1478,7 +1885,896 @@ unsafe extern "C" fn pal_abi_unsupported_exit(status: i32) -> ! {
     loop {}
 }
 
+#[cfg(all(
+    not(test),
+    not(feature = "darwin"),
+    any(feature = "linux", target_os = "linux", target_os = "android")
+))]
+mod linux_runtime {
+    use super::*;
+    use crate::linux_syscall as sys;
+    use crate::worker_pool::{FutexMutex, LinuxWorkerPool};
+
+    pub unsafe fn comp_lock() -> &'static FutexMutex {
+        &*ptr::addr_of!((*super::state_ptr()).comp_lock).cast::<FutexMutex>()
+    }
+
+    pub unsafe fn pool() -> &'static mut LinuxWorkerPool {
+        &mut *(ptr::addr_of!((*super::state_ptr()).linux_pool).read() as *mut LinuxWorkerPool)
+    }
+
+    pub unsafe fn execute_work_item(op_id: usize) {
+        let op = op_id as *mut IoOperation;
+        if (*op).cancelled {
+            (*op).error = unix_abi::ABI_ERROR_CANCELLED;
+            (*op).result = 0;
+        } else {
+            super::execute_io_operation(op);
+        }
+        comp_lock().lock();
+        super::push_completion(super::state_ptr(), op);
+        comp_lock().unlock();
+    }
+
+    pub unsafe extern "C" fn raw_read(fd: i32, buf: *mut c_void, count: usize) -> isize {
+        sys::syscall3(sys::nr::READ, fd as usize, buf as usize, count)
+    }
+    pub unsafe extern "C" fn raw_write(fd: i32, buf: *const c_void, count: usize) -> isize {
+        sys::syscall3(sys::nr::WRITE, fd as usize, buf as usize, count)
+    }
+    pub unsafe extern "C" fn raw_pread(
+        fd: i32,
+        buf: *mut c_void,
+        count: usize,
+        offset: i64,
+    ) -> isize {
+        sys::syscall4(
+            sys::nr::PREAD64,
+            fd as usize,
+            buf as usize,
+            count,
+            offset as usize,
+        )
+    }
+    pub unsafe extern "C" fn raw_open(path: *const c_char, flags: i32, mode: u32) -> i32 {
+        sys::syscall4(
+            sys::nr::OPENAT,
+            sys::AT_FDCWD as usize,
+            path as usize,
+            flags as usize,
+            mode as usize,
+        ) as i32
+    }
+    pub unsafe extern "C" fn raw_lseek(fd: i32, offset: i64, whence: i32) -> i64 {
+        sys::syscall3(sys::nr::LSEEK, fd as usize, offset as usize, whence as usize) as i64
+    }
+    pub unsafe extern "C" fn raw_ftruncate(fd: i32, len: i64) -> i32 {
+        sys::syscall2(sys::nr::FTRUNCATE, fd as usize, len as usize) as i32
+    }
+    pub unsafe extern "C" fn raw_close(fd: i32) -> i32 {
+        sys::syscall1(sys::nr::CLOSE, fd as usize) as i32
+    }
+    pub unsafe extern "C" fn raw_malloc(size: usize) -> *mut c_void {
+        let total = (size.saturating_add(16).saturating_add(4095)) & !4095;
+        let ptr = sys::mmap(
+            0,
+            total,
+            sys::PROT_READ | sys::PROT_WRITE,
+            sys::MAP_PRIVATE | sys::MAP_ANONYMOUS,
+            -1,
+            0,
+        );
+        if ptr < 0 && ptr >= -4095 {
+            ptr::null_mut()
+        } else {
+            let base = ptr as *mut usize;
+            base.write(total);
+            base.cast::<u8>().add(16).cast()
+        }
+    }
+    pub unsafe extern "C" fn raw_free(ptr: *mut c_void) {
+        if ptr.is_null() {
+            return;
+        }
+        let base = ptr.cast::<u8>().sub(16).cast::<usize>();
+        let total = base.read();
+        let _ = sys::munmap(base as usize, total);
+    }
+    pub unsafe extern "C" fn raw_exit(status: i32) -> ! {
+        sys::exit_group(status)
+    }
+}
+
+macro_rules! abi_fn {
+    (fn $name:ident ($($arg:ident : $ty:ty),* $(,)?) $(-> $ret:ty)? $body:block) => {
+        #[cfg(target_arch = "x86_64")]
+        unsafe extern "win64" fn $name($($arg: $ty),*) $(-> $ret)? $body
+        #[cfg(target_arch = "aarch64")]
+        unsafe extern "C" fn $name($($arg: $ty),*) $(-> $ret)? $body
+    };
+}
+
+abi_fn!(fn abi_alloc_mem(size: usize, _align: usize, flags: u32) -> *mut u8 {
+    #[cfg(all(not(test), not(feature = "darwin"), any(feature = "linux", target_os = "linux", target_os = "android")))]
+    {
+        let total = (size.saturating_add(4095)) & !4095;
+        if total == 0 {
+            return ptr::null_mut();
+        }
+        let prot = if flags & 0x4 != 0 {
+            linux_syscall::PROT_READ | linux_syscall::PROT_WRITE | linux_syscall::PROT_EXEC
+        } else {
+            linux_syscall::PROT_READ | linux_syscall::PROT_WRITE
+        };
+        let r = linux_syscall::mmap(0, total, prot, linux_syscall::MAP_PRIVATE | linux_syscall::MAP_ANONYMOUS, -1, 0);
+        if r < 0 && r >= -4095 { ptr::null_mut() } else { r as *mut u8 }
+    }
+    #[cfg(not(all(not(test), not(feature = "darwin"), any(feature = "linux", target_os = "linux", target_os = "android"))))]
+    {
+        let _ = flags;
+        match ptr::addr_of!((*state_ptr()).malloc).read() {
+            Some(m) => m(size).cast(),
+            None => ptr::null_mut(),
+        }
+    }
+});
+
+abi_fn!(fn abi_protect_mem(ptr_addr: *mut u8, size: usize, flags: u32) -> i32 {
+    #[cfg(all(not(test), not(feature = "darwin"), any(feature = "linux", target_os = "linux", target_os = "android")))]
+    {
+        let mut prot = 0usize;
+        if flags & 1 != 0 { prot |= linux_syscall::PROT_READ; }
+        if flags & 2 != 0 { prot |= linux_syscall::PROT_WRITE; }
+        if flags & 4 != 0 { prot |= linux_syscall::PROT_EXEC; }
+        let r = linux_syscall::mprotect(ptr_addr as usize, (size + 4095) & !4095, prot);
+        if r < 0 { -1 } else { 0 }
+    }
+    #[cfg(not(all(not(test), not(feature = "darwin"), any(feature = "linux", target_os = "linux", target_os = "android"))))]
+    {
+        let _ = (ptr_addr, size, flags);
+        0
+    }
+});
+
+abi_fn!(fn abi_free_mem(ptr_addr: *mut u8, size: usize) {
+    #[cfg(all(not(test), not(feature = "darwin"), any(feature = "linux", target_os = "linux", target_os = "android")))]
+    {
+        if !ptr_addr.is_null() && size > 0 {
+            let _ = linux_syscall::munmap(ptr_addr as usize, (size + 4095) & !4095);
+        }
+    }
+    #[cfg(not(all(not(test), not(feature = "darwin"), any(feature = "linux", target_os = "linux", target_os = "android"))))]
+    {
+        let _ = size;
+        if let Some(free) = ptr::addr_of!((*state_ptr()).libc_free).read() {
+            free(ptr_addr.cast());
+        }
+    }
+});
+
+abi_fn!(fn abi_flush_icache(ptr_addr: *const u8, size: usize) {
+    unix_abi::flush_icache_impl(ptr_addr, size);
+});
+
+abi_fn!(fn abi_host_panic(msg_ptr: *const u8, msg_len: usize) -> ! {
+    if !msg_ptr.is_null() && msg_len > 0 {
+        let slice = core::slice::from_raw_parts(msg_ptr, msg_len.min(4096));
+        write_fd(2, slice);
+        write_fd(2, b"\n");
+    }
+    if let Some(exit) = ptr::addr_of!((*state_ptr()).exit).read() {
+        exit(101);
+    }
+    loop {}
+});
+
+abi_fn!(fn abi_rusticated_debug(val: i32) {
+    let _ = val;
+});
+
+abi_fn!(fn abi_get_time() -> u64 {
+    #[cfg(any(feature = "linux", target_os = "linux", target_os = "android"))]
+    {
+        linux_syscall::clock_gettime_ns(linux_syscall::CLOCK_MONOTONIC)
+    }
+    #[cfg(not(any(feature = "linux", target_os = "linux", target_os = "android")))]
+    {
+        0
+    }
+});
+
+abi_fn!(fn abi_get_random(buf_ptr: *mut u8, buf_len: usize) {
+    #[cfg(any(feature = "linux", target_os = "linux", target_os = "android"))]
+    if !buf_ptr.is_null() && buf_len > 0 {
+        let mut off = 0usize;
+        while off < buf_len {
+            let n = linux_syscall::syscall3(
+                linux_syscall::nr::GETRANDOM,
+                buf_ptr.add(off) as usize,
+                buf_len - off,
+                0,
+            );
+            if n <= 0 {
+                break;
+            }
+            off += n as usize;
+        }
+    }
+    #[cfg(not(any(feature = "linux", target_os = "linux", target_os = "android")))]
+    let _ = (buf_ptr, buf_len);
+});
+
+abi_fn!(fn abi_get_env(buf_ptr: *mut u8, buf_cap: usize) -> u64 {
+    let state = state_ptr();
+    unix_abi::pack_env_entries(
+        ptr::addr_of!((*state).envp).read(),
+        ptr::addr_of!((*state).envc).read(),
+        buf_ptr,
+        buf_cap,
+    )
+});
+
+abi_fn!(fn abi_get_cwd(buf_ptr: *mut u8, buf_cap: usize) -> u64 {
+    #[cfg(any(feature = "linux", target_os = "linux", target_os = "android"))]
+    {
+        if buf_ptr.is_null() || buf_cap == 0 {
+            return u64::MAX;
+        }
+        let r = linux_syscall::syscall2(linux_syscall::nr::GETCWD, buf_ptr as usize, buf_cap);
+        if r <= 0 {
+            return u64::MAX;
+        }
+        (r as usize).saturating_sub(1) as u64
+    }
+    #[cfg(not(any(feature = "linux", target_os = "linux", target_os = "android")))]
+    {
+        let _ = (buf_ptr, buf_cap);
+        u64::MAX
+    }
+});
+
+abi_fn!(fn abi_set_cwd(path_ptr: *const u8, path_len: usize) -> u32 {
+    #[cfg(any(feature = "linux", target_os = "linux", target_os = "android"))]
+    {
+        let mut buf = [0u8; 4096];
+        let Some(p) = unix_abi::copy_cstr(path_ptr, path_len, &mut buf) else {
+            return unix_abi::ABI_ERROR_INVALID_INPUT;
+        };
+        let r = linux_syscall::syscall1(linux_syscall::nr::CHDIR, p as usize);
+        if r == 0 { 0 } else { unix_abi::error_from_errno((-r) as i32) }
+    }
+    #[cfg(not(any(feature = "linux", target_os = "linux", target_os = "android")))]
+    {
+        let _ = (path_ptr, path_len);
+        unix_abi::ABI_ERROR_NOT_SUPPORTED
+    }
+});
+
+abi_fn!(fn abi_get_platform_info(out_ptr: *mut u8, out_cap: usize) -> u32 {
+    unix_abi::fill_platform_info(out_ptr, out_cap, ptr::addr_of!((*state_ptr()).pid).read())
+});
+
+abi_fn!(fn abi_timer_set(ov: *mut Overlapped, delay_ms: u32) {
+    if ov.is_null() {
+        return;
+    }
+    submit_io(
+        ov,
+        IoOperation {
+            offset: delay_ms as i64,
+            ..IoOperation::new(ov, IoKind::Timer)
+        },
+    );
+});
+
+abi_fn!(fn abi_cancel(ov: *mut Overlapped) {
+    if ov.is_null() {
+        return;
+    }
+    let state = state_ptr();
+    let mut active = ptr::addr_of!((*state).active_operations).read();
+    while !active.is_null() {
+        if (*active).overlapped == ov {
+            (*active).cancelled = true;
+            break;
+        }
+        active = (*active).active_next;
+    }
+});
+
+abi_fn!(fn abi_dir_read(ov: *mut Overlapped, handle: u64, buf_ptr: *mut u8, buf_len: usize) {
+    if ov.is_null() || (buf_ptr.is_null() && buf_len != 0) {
+        complete_io(ov, ERROR_INVALID, 0);
+        return;
+    }
+    let file_handle = find_file_handle(handle);
+    if file_handle.is_null() {
+        complete_io(ov, ERROR_BADF, 0);
+        return;
+    }
+    submit_io(
+        ov,
+        IoOperation {
+            fd: (*file_handle).fd,
+            buffer: buf_ptr.cast(),
+            length: buf_len,
+            file_handle,
+            sequence: ptr::addr_of_mut!((*file_handle).sequence),
+            ..IoOperation::new(ov, IoKind::DirRead)
+        },
+    );
+});
+
+abi_fn!(fn abi_path_stat(
+    ov: *mut Overlapped,
+    path_ptr: *const u8,
+    path_len: usize,
+    flags: u32,
+    stat_ptr: *mut u8,
+    stat_cap: usize,
+) {
+    submit_io(
+        ov,
+        IoOperation {
+            buffer: path_ptr as *mut c_void,
+            length: path_len,
+            extra_ptr: stat_ptr.cast(),
+            extra_len: stat_cap,
+            aux_u32: flags,
+            ..IoOperation::new(ov, IoKind::PathStat)
+        },
+    );
+});
+
+abi_fn!(fn abi_path_link(
+    ov: *mut Overlapped,
+    old_ptr: *const u8,
+    old_len: usize,
+    new_ptr: *const u8,
+    new_len: usize,
+    flags: u32,
+) {
+    submit_io(
+        ov,
+        IoOperation {
+            buffer: old_ptr as *mut c_void,
+            length: old_len,
+            extra_ptr: new_ptr as *mut c_void,
+            extra_len: new_len,
+            aux_u32: flags,
+            ..IoOperation::new(ov, IoKind::PathLink)
+        },
+    );
+});
+
+abi_fn!(fn abi_path_symlink(
+    ov: *mut Overlapped,
+    target_ptr: *const u8,
+    target_len: usize,
+    link_ptr: *const u8,
+    link_len: usize,
+    target_kind: u32,
+) {
+    submit_io(
+        ov,
+        IoOperation {
+            buffer: target_ptr as *mut c_void,
+            length: target_len,
+            extra_ptr: link_ptr as *mut c_void,
+            extra_len: link_len,
+            aux_u32: target_kind,
+            ..IoOperation::new(ov, IoKind::PathSymlink)
+        },
+    );
+});
+
+abi_fn!(fn abi_path_readlink(
+    ov: *mut Overlapped,
+    path_ptr: *const u8,
+    path_len: usize,
+    buf_ptr: *mut u8,
+    buf_len: usize,
+) {
+    submit_io(
+        ov,
+        IoOperation {
+            buffer: path_ptr as *mut c_void,
+            length: path_len,
+            extra_ptr: buf_ptr.cast(),
+            extra_len: buf_len,
+            ..IoOperation::new(ov, IoKind::PathReadlink)
+        },
+    );
+});
+
+abi_fn!(fn abi_path_chmod(ov: *mut Overlapped, path_ptr: *const u8, path_len: usize, mode: u32) {
+    submit_io(
+        ov,
+        IoOperation {
+            buffer: path_ptr as *mut c_void,
+            length: path_len,
+            aux_u32: mode,
+            ..IoOperation::new(ov, IoKind::PathChmod)
+        },
+    );
+});
+
+abi_fn!(fn abi_path_set_times(
+    ov: *mut Overlapped,
+    path_ptr: *const u8,
+    path_len: usize,
+    atime_sec: i64,
+    atime_nsec: u32,
+    mtime_sec: i64,
+    mtime_nsec: u32,
+    flags: u32,
+) {
+    let _ = (atime_sec, atime_nsec, mtime_sec, mtime_nsec);
+    submit_io(
+        ov,
+        IoOperation {
+            buffer: path_ptr as *mut c_void,
+            length: path_len,
+            aux_u32: flags,
+            ..IoOperation::new(ov, IoKind::PathSetTimes)
+        },
+    );
+});
+
+abi_fn!(fn abi_path_remove(ov: *mut Overlapped, path_ptr: *const u8, path_len: usize, flags: u32) {
+    submit_io(
+        ov,
+        IoOperation {
+            buffer: path_ptr as *mut c_void,
+            length: path_len,
+            aux_u32: flags,
+            ..IoOperation::new(ov, IoKind::PathRemove)
+        },
+    );
+});
+
+abi_fn!(fn abi_path_mkdir(ov: *mut Overlapped, path_ptr: *const u8, path_len: usize, mode: u32) {
+    submit_io(
+        ov,
+        IoOperation {
+            buffer: path_ptr as *mut c_void,
+            length: path_len,
+            aux_u32: mode,
+            ..IoOperation::new(ov, IoKind::PathMkdir)
+        },
+    );
+});
+
+abi_fn!(fn abi_path_rename(
+    ov: *mut Overlapped,
+    old_ptr: *const u8,
+    old_len: usize,
+    new_ptr: *const u8,
+    new_len: usize,
+) {
+    submit_io(
+        ov,
+        IoOperation {
+            buffer: old_ptr as *mut c_void,
+            length: old_len,
+            extra_ptr: new_ptr as *mut c_void,
+            extra_len: new_len,
+            ..IoOperation::new(ov, IoKind::PathRename)
+        },
+    );
+});
+
+abi_fn!(fn abi_net_open(
+    ov: *mut Overlapped,
+    addr_ptr: *const u8,
+    addr_len: usize,
+    port: u32,
+    flags: u32,
+) {
+    submit_io(
+        ov,
+        IoOperation {
+            buffer: addr_ptr as *mut c_void,
+            length: addr_len,
+            aux_u32: port,
+            aux_u64: flags as u64,
+            ..IoOperation::new(ov, IoKind::NetOpen)
+        },
+    );
+});
+
+abi_fn!(fn abi_net_accept(ov: *mut Overlapped, listener_handle: u64) {
+    submit_io(
+        ov,
+        IoOperation {
+            aux_u64: listener_handle,
+            ..IoOperation::new(ov, IoKind::NetAccept)
+        },
+    );
+});
+
+abi_fn!(fn abi_net_lookup(
+    ov: *mut Overlapped,
+    name_ptr: *const u8,
+    name_len: usize,
+    buf_ptr: *mut u8,
+    buf_cap: usize,
+) {
+    submit_io(
+        ov,
+        IoOperation {
+            buffer: name_ptr as *mut c_void,
+            length: name_len,
+            extra_ptr: buf_ptr.cast(),
+            extra_len: buf_cap,
+            ..IoOperation::new(ov, IoKind::NetLookup)
+        },
+    );
+});
+
+abi_fn!(fn abi_net_cert_verify(
+    ov: *mut Overlapped,
+    name_ptr: *const u8,
+    name_len: usize,
+    chain_ptr: *const u8,
+    chain_len: usize,
+) {
+    submit_io(
+        ov,
+        IoOperation {
+            buffer: name_ptr as *mut c_void,
+            length: name_len,
+            extra_ptr: chain_ptr as *mut c_void,
+            extra_len: chain_len,
+            ..IoOperation::new(ov, IoKind::NetCertVerify)
+        },
+    );
+});
+
+abi_fn!(fn abi_process_spawn(ov: *mut Overlapped, cfg_ptr: *const u8, cfg_len: usize) {
+    submit_io(
+        ov,
+        IoOperation {
+            buffer: cfg_ptr as *mut c_void,
+            length: cfg_len,
+            ..IoOperation::new(ov, IoKind::ProcessSpawn)
+        },
+    );
+});
+
+abi_fn!(fn abi_process_pipe(ov: *mut Overlapped) {
+    submit_io(ov, IoOperation::new(ov, IoKind::ProcessPipe));
+});
+
+abi_fn!(fn abi_process_wait(ov: *mut Overlapped, proc_handle: u64) {
+    submit_io(
+        ov,
+        IoOperation {
+            aux_u64: proc_handle,
+            ..IoOperation::new(ov, IoKind::ProcessWait)
+        },
+    );
+});
+
+abi_fn!(fn abi_process_signal(proc_handle: u64, signum: u32) {
+    #[cfg(any(feature = "linux", target_os = "linux", target_os = "android"))]
+    if proc_handle > 0 {
+        let _ = linux_syscall::syscall2(
+            linux_syscall::nr::KILL,
+            proc_handle as usize,
+            signum as usize,
+        );
+    }
+    #[cfg(not(any(feature = "linux", target_os = "linux", target_os = "android")))]
+    let _ = (proc_handle, signum);
+});
+
+abi_fn!(fn abi_signal_wait(ov: *mut Overlapped, signum: u32) {
+    submit_io(
+        ov,
+        IoOperation {
+            aux_u32: signum,
+            ..IoOperation::new(ov, IoKind::SignalWait)
+        },
+    );
+});
+
+abi_fn!(fn abi_tty_set_mode(handle: u64, raw_mode: u32) {
+    let _ = (handle, raw_mode);
+});
+
+abi_fn!(fn abi_tty_get_size(handle: u64) -> u32 {
+    #[cfg(any(feature = "linux", target_os = "linux", target_os = "android"))]
+    {
+        let Some(fd) = resolve_handle(handle) else {
+            return 0;
+        };
+        #[repr(C)]
+        #[derive(Default)]
+        struct WinSize {
+            ws_row: u16,
+            ws_col: u16,
+            ws_xpixel: u16,
+            ws_ypixel: u16,
+        }
+        let mut ws = WinSize::default();
+        const TIOCGWINSZ: usize = 0x5413;
+        let r = linux_syscall::syscall3(
+            linux_syscall::nr::IOCTL,
+            fd as usize,
+            TIOCGWINSZ,
+            (&mut ws as *mut WinSize) as usize,
+        );
+        if r == 0 {
+            ((ws.ws_col as u32) << 16) | (ws.ws_row as u32)
+        } else {
+            0
+        }
+    }
+    #[cfg(not(any(feature = "linux", target_os = "linux", target_os = "android")))]
+    {
+        let _ = handle;
+        0
+    }
+});
+
+abi_fn!(fn abi_tty_set_size(handle: u64, cols: u32, rows: u32) -> u32 {
+    let _ = (handle, cols, rows);
+    0
+});
+
+abi_fn!(fn abi_fd_isatty(handle: u32) -> u32 {
+    #[cfg(any(feature = "linux", target_os = "linux", target_os = "android"))]
+    {
+        let Some(fd) = resolve_handle(handle as u64) else {
+            return 0;
+        };
+        let mut ws = [0u16; 4];
+        const TIOCGWINSZ: usize = 0x5413;
+        let r = linux_syscall::syscall3(
+            linux_syscall::nr::IOCTL,
+            fd as usize,
+            TIOCGWINSZ,
+            ws.as_mut_ptr() as usize,
+        );
+        if r == 0 { 1 } else { 0 }
+    }
+    #[cfg(not(any(feature = "linux", target_os = "linux", target_os = "android")))]
+    {
+        let _ = handle;
+        0
+    }
+});
+
+unsafe fn populate_all_abi_slots(
+    abi: &mut PalAbiTable,
+    #[cfg(target_arch = "x86_64")] process_exit: unsafe extern "win64" fn(i32) -> !,
+    #[cfg(target_arch = "aarch64")] process_exit: unsafe extern "C" fn(i32) -> !,
+) {
+    *abi = pal_abi_stubs::for_payload(probe_read, probe_write, process_exit);
+    abi.alloc_mem = abi_alloc_mem;
+    abi.protect_mem = abi_protect_mem;
+    abi.free_mem = abi_free_mem;
+    abi.flush_icache = abi_flush_icache;
+    abi.host_panic = abi_host_panic;
+    abi.rusticated_debug = abi_rusticated_debug;
+    abi.process_exit = process_exit;
+    abi.get_time = abi_get_time;
+    abi.get_random = abi_get_random;
+    abi.get_args = probe_get_args;
+    abi.get_env = abi_get_env;
+    abi.get_cwd = abi_get_cwd;
+    abi.set_cwd = abi_set_cwd;
+    abi.get_platform_info = abi_get_platform_info;
+    abi.timer_set = abi_timer_set;
+    abi.cancel = abi_cancel;
+    abi.read = probe_read;
+    abi.write = probe_write;
+    abi.seek = probe_seek;
+    abi.handle_truncate = probe_truncate;
+    abi.handle_close = probe_handle_close;
+    abi.path_open = probe_path_open;
+    abi.dir_read = abi_dir_read;
+    abi.path_stat = abi_path_stat;
+    abi.path_link = abi_path_link;
+    abi.path_symlink = abi_path_symlink;
+    abi.path_readlink = abi_path_readlink;
+    abi.path_chmod = abi_path_chmod;
+    abi.path_set_times = abi_path_set_times;
+    abi.path_remove = abi_path_remove;
+    abi.path_mkdir = abi_path_mkdir;
+    abi.path_rename = abi_path_rename;
+    abi.net_open = abi_net_open;
+    abi.net_accept = abi_net_accept;
+    abi.net_lookup = abi_net_lookup;
+    abi.net_cert_verify = abi_net_cert_verify;
+    abi.process_spawn = abi_process_spawn;
+    abi.process_pipe = abi_process_pipe;
+    abi.process_wait = abi_process_wait;
+    abi.process_signal = abi_process_signal;
+    abi.signal_wait = abi_signal_wait;
+    abi.tty_set_mode = abi_tty_set_mode;
+    abi.tty_get_size = abi_tty_get_size;
+    abi.tty_set_size = abi_tty_set_size;
+    abi.fd_isatty = abi_fd_isatty;
+}
+
 unsafe fn run() -> i32 {
+    #[cfg(all(
+        not(test),
+        not(feature = "darwin"),
+        any(feature = "linux", target_os = "linux", target_os = "android")
+    ))]
+    {
+        return run_linux();
+    }
+
+    #[cfg(not(all(
+        not(test),
+        not(feature = "darwin"),
+        any(feature = "linux", target_os = "linux", target_os = "android")
+    )))]
+    run_darwin_or_host()
+}
+
+#[cfg(all(
+    not(test),
+    not(feature = "darwin"),
+    any(feature = "linux", target_os = "linux", target_os = "android")
+))]
+unsafe fn run_linux() -> i32 {
+    let host = host_abi();
+    if host.hello_payload.is_null() || host.hello_payload_size == 0 {
+        return 2;
+    }
+
+    let total_payload_size = PREFIX_ABI_OFFSET + host.hello_payload_size;
+    let total_aligned = (total_payload_size + 4095) & !4095;
+    let payload_raw = linux_syscall::mmap(
+        0,
+        total_aligned,
+        linux_syscall::PROT_READ | linux_syscall::PROT_WRITE,
+        linux_syscall::MAP_PRIVATE | linux_syscall::MAP_ANONYMOUS,
+        -1,
+        0,
+    );
+    if payload_raw < 0 && payload_raw >= -4095 {
+        return 4;
+    }
+    let payload_alloc = payload_raw as *mut c_void;
+    let alloc_bytes = payload_alloc.cast::<u8>();
+    let mut z = 0;
+    while z < PREFIX_ABI_OFFSET {
+        alloc_bytes.add(z).write_volatile(0);
+        z += 1;
+    }
+    let payload_code = alloc_bytes.add(PREFIX_ABI_OFFSET).cast::<c_void>();
+    let payload_bytes = payload_code.cast::<u8>();
+    let mut offset = 0;
+    while offset < host.hello_payload_size {
+        let byte = host.hello_payload.add(offset).read_volatile();
+        payload_bytes.add(offset).write_volatile(byte);
+        offset += 1;
+    }
+
+    {
+        let state = state_mut();
+        state.read = Some(linux_runtime::raw_read);
+        state.write = Some(linux_runtime::raw_write);
+        state.pread = Some(linux_runtime::raw_pread);
+        state.open = Some(linux_runtime::raw_open);
+        state.lseek = Some(linux_runtime::raw_lseek);
+        state.ftruncate = Some(linux_runtime::raw_ftruncate);
+        state.close = Some(linux_runtime::raw_close);
+        state.malloc = Some(linux_runtime::raw_malloc);
+        state.libc_free = Some(linux_runtime::raw_free);
+        state.exit = Some(linux_runtime::raw_exit);
+        state.file_handles = ptr::null_mut();
+        state.next_handle = 3;
+        state.active_operations = ptr::null_mut();
+        state.active_count = 0;
+        state.work_head = ptr::null_mut();
+        state.work_tail = ptr::null_mut();
+        state.completion_head = ptr::null_mut();
+        state.completion_tail = ptr::null_mut();
+        state.standard_sequences = [
+            IoSequence::empty(),
+            IoSequence::empty(),
+            IoSequence::empty(),
+        ];
+        state.payload_alloc = payload_alloc;
+        state.payload_total_size = total_aligned;
+        state.envp = host.envp;
+        state.envc = host.envc;
+        state.pid = host.pid;
+        state.pipe_fds = [-1, -1];
+        state.io_uring_fd = -1;
+        state.comp_lock = 0;
+        state.linux_pool = ptr::null_mut();
+    }
+
+    if linux_syscall::pipe2(
+        ptr::addr_of_mut!((*state_ptr()).pipe_fds),
+        linux_syscall::O_NONBLOCK | linux_syscall::O_CLOEXEC,
+    ) < 0
+    {
+        let _ = linux_syscall::munmap(payload_alloc as usize, total_aligned);
+        return 5;
+    }
+    let pool_mem = linux_runtime::raw_malloc(core::mem::size_of::<worker_pool::LinuxWorkerPool>());
+    if pool_mem.is_null() {
+        let _ = linux_syscall::munmap(payload_alloc as usize, total_aligned);
+        return 5;
+    }
+    ptr::write(
+        pool_mem.cast::<worker_pool::LinuxWorkerPool>(),
+        worker_pool::LinuxWorkerPool::new((*state_ptr()).pipe_fds[1], linux_runtime::execute_work_item),
+    );
+    (*state_ptr()).linux_pool = pool_mem;
+    if let Some((ring_fd, _)) = linux_syscall::probe_io_uring(64) {
+        (*state_ptr()).io_uring_fd = ring_fd;
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    let process_exit = probe_exit;
+    #[cfg(target_arch = "aarch64")]
+    let process_exit = linux_runtime::raw_exit;
+
+    let mut abi_table = pal_abi_stubs::for_payload(probe_read, probe_write, process_exit);
+    populate_all_abi_slots(&mut abi_table, process_exit);
+    ptr::write(payload_alloc.cast::<PalAbiTable>(), abi_table);
+
+    unix_abi::flush_icache_impl(payload_code.cast(), host.hello_payload_size);
+    // Strict W^X: ABI table is RO, guest state (+0x10000..+0x20000) is RW, code (+0x20000..) is RX.
+    let _ = linux_syscall::mprotect(
+        payload_alloc as usize,
+        0x10000,
+        linux_syscall::PROT_READ,
+    );
+    let _ = linux_syscall::mprotect(
+        (payload_alloc as usize) + PREFIX_ABI_OFFSET,
+        total_aligned - PREFIX_ABI_OFFSET,
+        linux_syscall::PROT_READ | linux_syscall::PROT_EXEC,
+    );
+
+    loop {
+        invoke_raw_entry(payload_code);
+        let state = state_ptr();
+        if ptr::addr_of!((*state).active_count).read() == 0 {
+            linux_runtime::pool().shutdown();
+            linux_runtime::raw_free((*state).linux_pool);
+            (*state).linux_pool = ptr::null_mut();
+            let pfds = (*state).pipe_fds;
+            if pfds[0] >= 0 {
+                let _ = linux_syscall::syscall1(linux_syscall::nr::CLOSE, pfds[0] as usize);
+            }
+            if pfds[1] >= 0 {
+                let _ = linux_syscall::syscall1(linux_syscall::nr::CLOSE, pfds[1] as usize);
+            }
+            if (*state).io_uring_fd >= 0 {
+                let _ = linux_syscall::syscall1(
+                    linux_syscall::nr::CLOSE,
+                    (*state).io_uring_fd as usize,
+                );
+            }
+            close_all_file_handles();
+            let _ = linux_syscall::munmap(payload_alloc as usize, total_aligned);
+            state_mut().payload_alloc = ptr::null_mut();
+            return 0;
+        }
+        if !wait_and_publish_io() {
+            terminate_after_worker_failure(5);
+        }
+    }
+}
+
+unsafe fn run_darwin_or_host() -> i32 {
+    #[cfg(not(feature = "darwin"))]
+    {
+        return 2;
+    }
+    #[cfg(feature = "darwin")]
+    {
     let host = host_abi();
     let (Some(load_library), Some(alloc), Some(free), Some(flush_cache)) =
         (host.load_library, host.alloc, host.free, host.flush_cache)
@@ -1699,11 +2995,7 @@ unsafe fn run() -> i32 {
     #[cfg(target_arch = "aarch64")]
     let process_exit = exit;
     let mut abi_table = pal_abi_stubs::for_payload(probe_read, probe_write, process_exit);
-    abi_table.get_args = probe_get_args;
-    abi_table.seek = probe_seek;
-    abi_table.handle_truncate = probe_truncate;
-    abi_table.handle_close = probe_handle_close;
-    abi_table.path_open = probe_path_open;
+    populate_all_abi_slots(&mut abi_table, process_exit);
     ptr::write(payload_alloc.cast::<PalAbiTable>(), abi_table);
     #[cfg(feature = "darwin")]
     set_jit_write_protect(1);
@@ -1722,6 +3014,7 @@ unsafe fn run() -> i32 {
         if !wait_and_publish_io() {
             terminate_after_worker_failure(5);
         }
+    }
     }
 }
 
@@ -1979,6 +3272,13 @@ mod tests {
             free: None,
             payload_alloc: ptr::null_mut(),
             payload_total_size: 0,
+            envp: ptr::null(),
+            envc: 0,
+            pid: 0,
+            pipe_fds: [-1, -1],
+            io_uring_fd: -1,
+            comp_lock: 0,
+            linux_pool: ptr::null_mut(),
         });
         ptr::addr_of_mut!(TEST_IO).write(ScriptedIo {
             read_results: [0; 4],
@@ -2016,17 +3316,33 @@ mod tests {
     #[test]
     fn test_unix_platform_prefix_layout() {
         assert_eq!(PREFIX_ABI_OFFSET, 0x20000);
-        assert_eq!(size_of::<UnixPlatformHost>(), 80);
-        assert_eq!(offset_of!(UnixPlatformHost, load_library), 0);
-        assert_eq!(offset_of!(UnixPlatformHost, get_proc_address), 8);
-        assert_eq!(offset_of!(UnixPlatformHost, alloc), 16);
-        assert_eq!(offset_of!(UnixPlatformHost, free), 24);
-        assert_eq!(offset_of!(UnixPlatformHost, flush_cache), 32);
-        assert_eq!(offset_of!(UnixPlatformHost, set_jit_write_protect), 40);
-        assert_eq!(offset_of!(UnixPlatformHost, hello_payload), 48);
-        assert_eq!(offset_of!(UnixPlatformHost, hello_payload_size), 56);
-        assert_eq!(offset_of!(UnixPlatformHost, argv), 64);
-        assert_eq!(offset_of!(UnixPlatformHost, argc), 72);
+        #[cfg(feature = "darwin")]
+        {
+            assert_eq!(size_of::<UnixPlatformHost>(), 80);
+            assert_eq!(offset_of!(UnixPlatformHost, load_library), 0);
+            assert_eq!(offset_of!(UnixPlatformHost, get_proc_address), 8);
+            assert_eq!(offset_of!(UnixPlatformHost, alloc), 16);
+            assert_eq!(offset_of!(UnixPlatformHost, free), 24);
+            assert_eq!(offset_of!(UnixPlatformHost, flush_cache), 32);
+            assert_eq!(offset_of!(UnixPlatformHost, set_jit_write_protect), 40);
+            assert_eq!(offset_of!(UnixPlatformHost, hello_payload), 48);
+            assert_eq!(offset_of!(UnixPlatformHost, hello_payload_size), 56);
+            assert_eq!(offset_of!(UnixPlatformHost, argv), 64);
+            assert_eq!(offset_of!(UnixPlatformHost, argc), 72);
+        }
+        #[cfg(not(feature = "darwin"))]
+        {
+            assert_eq!(size_of::<UnixPlatformHost>(), 72);
+            assert_eq!(offset_of!(UnixPlatformHost, hello_payload), 0);
+            assert_eq!(offset_of!(UnixPlatformHost, hello_payload_size), 8);
+            assert_eq!(offset_of!(UnixPlatformHost, argv), 16);
+            assert_eq!(offset_of!(UnixPlatformHost, argc), 24);
+            assert_eq!(offset_of!(UnixPlatformHost, envp), 32);
+            assert_eq!(offset_of!(UnixPlatformHost, envc), 40);
+            assert_eq!(offset_of!(UnixPlatformHost, pid), 48);
+            assert_eq!(offset_of!(UnixPlatformHost, wasm_bytes), 56);
+            assert_eq!(offset_of!(UnixPlatformHost, wasm_len), 64);
+        }
         assert!(size_of::<PlatformState>() <= 0x10000);
     }
 

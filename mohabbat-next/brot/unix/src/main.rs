@@ -106,6 +106,12 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_eh_personality() {}
 
+#[cfg(all(not(test), target_os = "linux", target_arch = "aarch64"))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getauxval(_type: usize) -> usize {
+    0
+}
+
 // ─── Linux Self-Relocation & Entry Point ─────────────────────────────────────
 
 #[cfg(all(not(test), target_os = "linux"))]

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -171,14 +172,16 @@ func buildFlatComponent(nextDir, rustBuildDir, outDir string, cfg FlatComponentC
 		return "", fmt.Errorf("component %s has undefined symbols:\n%s", cfg.Name, string(nmOut))
 	}
 
-	// Validate system calls / traps in entry symbol
-	disOut, err := exec.Command("llvm-objdump", "--disassemble-symbols="+cfg.EntrySymbol, elfPath).Output()
-	if err != nil {
-		return "", fmt.Errorf("llvm-objdump on %s (%s): %w", cfg.Name, cfg.EntrySymbol, err)
-	}
-	trapRe := regexp.MustCompile(`(?i)\b(syscall|sysenter|svc)\b|\bint\s+0x80\b`)
-	if trapRe.Match(disOut) {
-		return "", fmt.Errorf("component %s contains direct system call or trap instructions in %s", cfg.Name, cfg.EntrySymbol)
+	// Validate system calls / traps in entry symbol (guest payloads and non-Linux platforms must not emit raw syscalls)
+	if !strings.HasPrefix(cfg.Name, "platform-linux-") {
+		disOut, err := exec.Command("llvm-objdump", "--disassemble-symbols="+cfg.EntrySymbol, elfPath).Output()
+		if err != nil {
+			return "", fmt.Errorf("llvm-objdump on %s (%s): %w", cfg.Name, cfg.EntrySymbol, err)
+		}
+		trapRe := regexp.MustCompile(`(?i)\b(syscall|sysenter|svc)\b|\bint\s+0x80\b`)
+		if trapRe.Match(disOut) {
+			return "", fmt.Errorf("component %s contains direct system call or trap instructions in %s", cfg.Name, cfg.EntrySymbol)
+		}
 	}
 
 	// Extract .payload section into raw binary

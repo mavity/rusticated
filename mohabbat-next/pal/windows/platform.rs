@@ -10,6 +10,12 @@ use core::sync::atomic::{AtomicU32, Ordering};
 mod pal_abi;
 #[path = "../abi/guest_stubs.rs"]
 mod pal_abi_stubs;
+mod env_time;
+mod fs_ops;
+mod mem;
+mod net_ops;
+mod proc_tty;
+mod win_ffi;
 use pal_abi::{
     pal_fn, Overlapped, PalAbiTable, ERROR_AGAIN, ERROR_BADF, ERROR_INVALID, ERROR_IO, ERROR_PIPE,
 };
@@ -230,6 +236,7 @@ enum IoKind {
     FileWrite,
     FileSeek,
     FileTruncate,
+    Timer,
 }
 
 #[repr(C)]
@@ -298,6 +305,13 @@ struct PlatformState {
     file_handles: *mut FileHandle,
     next_file_token: u64,
     io_operations: *mut IoOperation,
+    load_library: Option<LoadLibraryFn>,
+    get_proc_address: Option<GetProcAddressFn>,
+    kernel32: *mut c_void,
+    ws2_32: *mut c_void,
+    bcrypt: *mut c_void,
+    crypt32: *mut c_void,
+    wsa_initialized: bool,
 }
 
 #[cfg(test)]
@@ -327,6 +341,13 @@ static mut TEST_STATE: PlatformState = PlatformState {
     file_handles: ptr::null_mut(),
     next_file_token: 3,
     io_operations: ptr::null_mut(),
+    load_library: None,
+    get_proc_address: None,
+    kernel32: ptr::null_mut(),
+    ws2_32: ptr::null_mut(),
+    bcrypt: ptr::null_mut(),
+    crypt32: ptr::null_mut(),
+    wsa_initialized: false,
 };
 
 const PREFIX_ABI_OFFSET: usize = 0x20000;
@@ -504,6 +525,33 @@ fn empty_io_operation() -> IoOperation {
         next: ptr::null_mut(),
         next_for_file: ptr::null_mut(),
     }
+}
+
+pub(crate) unsafe fn register_extra_handle(native_handle: *mut c_void) -> Option<u64> {
+    let state = state_ptr();
+    let alloc = (*state).alloc?;
+    let next_token = (*state).next_file_token.checked_add(1)?;
+    let entry = alloc(core::mem::size_of::<FileHandle>()).cast::<FileHandle>();
+    if entry.is_null() {
+        return None;
+    }
+    let token = (*state).next_file_token;
+    (*state).next_file_token = next_token;
+    entry.write(FileHandle {
+        token,
+        native_handle,
+        cursor: 0,
+        access: 2,
+        append: false,
+        next: (*state).file_handles,
+        closing: false,
+        pending_operations: 0,
+        sequential_head: ptr::null_mut(),
+        sequential_tail: ptr::null_mut(),
+        sequential_active: false,
+    });
+    (*state).file_handles = entry;
+    Some(token)
 }
 
 unsafe fn find_file_handle(token: u64) -> *mut FileHandle {
@@ -1473,6 +1521,10 @@ unsafe fn publish_one_io_completion(entry: OverlappedEntry) -> bool {
             return false;
         }
         (*operation).worker_thread = ptr::null_mut();
+    } else if (*operation).kind == IoKind::Timer {
+        if entry.completion_key != STDIO_COMPLETION_KEY {
+            return false;
+        }
     } else {
         if entry.completion_key != (*operation).token as usize {
             return false;
@@ -1802,14 +1854,59 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
             file_handles: ptr::null_mut(),
             next_file_token: 3,
             io_operations: ptr::null_mut(),
+            load_library: host.load_library,
+            get_proc_address: host.get_proc_address,
+            kernel32,
+            ws2_32: ptr::null_mut(),
+            bcrypt: ptr::null_mut(),
+            crypt32: ptr::null_mut(),
+            wsa_initialized: false,
         },
     );
+    let _ = mem::virtual_protect_rx(payload_code, host.hello_payload_size);
     let mut abi = pal_abi_stubs::for_payload(probe_read, probe_write, exit_process);
+    abi.alloc_mem = mem::pal_alloc_mem;
+    abi.protect_mem = mem::pal_protect_mem;
+    abi.free_mem = mem::pal_free_mem;
+    abi.flush_icache = mem::pal_flush_icache;
+    abi.host_panic = mem::pal_host_panic;
+    abi.rusticated_debug = mem::pal_rusticated_debug;
+    abi.get_time = env_time::pal_get_time;
+    abi.get_random = env_time::pal_get_random;
     abi.get_args = probe_get_args;
-    abi.path_open = probe_path_open_abi;
+    abi.get_env = env_time::pal_get_env;
+    abi.get_cwd = env_time::pal_get_cwd;
+    abi.set_cwd = env_time::pal_set_cwd;
+    abi.get_platform_info = env_time::pal_get_platform_info;
+    abi.timer_set = env_time::pal_timer_set;
+    abi.cancel = env_time::pal_cancel;
     abi.seek = probe_seek_abi;
     abi.handle_truncate = probe_handle_truncate_abi;
     abi.handle_close = probe_handle_close_abi;
+    abi.path_open = probe_path_open_abi;
+    abi.dir_read = fs_ops::pal_dir_read;
+    abi.path_stat = fs_ops::pal_path_stat;
+    abi.path_link = fs_ops::pal_path_link;
+    abi.path_symlink = fs_ops::pal_path_symlink;
+    abi.path_readlink = fs_ops::pal_path_readlink;
+    abi.path_chmod = fs_ops::pal_path_chmod;
+    abi.path_set_times = fs_ops::pal_path_set_times;
+    abi.path_remove = fs_ops::pal_path_remove;
+    abi.path_mkdir = fs_ops::pal_path_mkdir;
+    abi.path_rename = fs_ops::pal_path_rename;
+    abi.net_open = net_ops::pal_net_open;
+    abi.net_accept = net_ops::pal_net_accept;
+    abi.net_lookup = net_ops::pal_net_lookup;
+    abi.net_cert_verify = net_ops::pal_net_cert_verify;
+    abi.process_spawn = proc_tty::pal_process_spawn;
+    abi.process_pipe = proc_tty::pal_process_pipe;
+    abi.process_wait = proc_tty::pal_process_wait;
+    abi.process_signal = proc_tty::pal_process_signal;
+    abi.signal_wait = proc_tty::pal_signal_wait;
+    abi.tty_set_mode = proc_tty::pal_tty_set_mode;
+    abi.tty_get_size = proc_tty::pal_tty_get_size;
+    abi.tty_set_size = proc_tty::pal_tty_set_size;
+    abi.fd_isatty = proc_tty::pal_fd_isatty;
     ptr::write(payload_alloc.cast::<PalAbiTable>(), abi);
     loop {
         invoke_raw_entry(payload_code);
@@ -2015,6 +2112,13 @@ mod tests {
             file_handles: ptr::null_mut(),
             next_file_token: 3,
             io_operations: ptr::null_mut(),
+            load_library: None,
+            get_proc_address: None,
+            kernel32: ptr::null_mut(),
+            ws2_32: ptr::null_mut(),
+            bcrypt: ptr::null_mut(),
+            crypt32: ptr::null_mut(),
+            wsa_initialized: false,
         });
     }
 
@@ -2445,6 +2549,13 @@ mod tests {
             file_handles: ptr::null_mut(),
             next_file_token: 3,
             io_operations: ptr::null_mut(),
+            load_library: None,
+            get_proc_address: None,
+            kernel32: ptr::null_mut(),
+            ws2_32: ptr::null_mut(),
+            bcrypt: ptr::null_mut(),
+            crypt32: ptr::null_mut(),
+            wsa_initialized: false,
         });
         ptr::addr_of_mut!(TEST_IO).write(ScriptedIo {
             read_success: 1,

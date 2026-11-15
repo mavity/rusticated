@@ -6,6 +6,10 @@ rustflags = [
     "no-redzone=yes",
     "-Z",
     "function-sections=yes",
+    "-Z",
+    "location-detail=none",
+    "-Z",
+    "fmt-debug=none",
 ]
 
 [target.aarch64-unknown-none]
@@ -16,4 +20,8 @@ rustflags = [
     "fixed-x18=yes",
     "-Z",
     "function-sections=yes",
+    "-Z",
+    "location-detail=none",
+    "-Z",
+    "fmt-debug=none",
 ]
