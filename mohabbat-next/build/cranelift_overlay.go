@@ -323,64 +323,6 @@ var wasmparserFormatErrPatch = craneliftSourcePatch{
 }`,
 }
 
-var rcForTypeAArch64Patch = craneliftSourcePatch{
-	name:    "eject AArch64 rc_for_type to heap slices",
-	pattern: `(?s)fn rc_for_type\(ty: &Type\) -> CodegenResult<\(&\[RegClass\], &\[Type\]\)> \{.*?(\r?\n    fn canonical_type_for_rc)`,
-	replacement: `fn rc_for_type(ty: &Type) -> CodegenResult<(&'static [RegClass], &'static [Type])> {
-        #[allow(improper_ctypes)]
-        unsafe extern "C" {
-            fn get_heap_rc_int() -> *const RegClass;
-            fn get_heap_rc_float() -> *const RegClass;
-            fn get_heap_rc_int_int() -> *const RegClass;
-            fn get_heap_ty_i64_i64() -> *const Type;
-            fn get_heap_ty_i8x16() -> *const Type;
-        }
-        unsafe {
-            let rc_int = core::slice::from_raw_parts(get_heap_rc_int(), 1);
-            let rc_float = core::slice::from_raw_parts(get_heap_rc_float(), 1);
-            let rc_int_int = core::slice::from_raw_parts(get_heap_rc_int_int(), 2);
-            let ty_i64_i64 = core::slice::from_raw_parts(get_heap_ty_i64_i64(), 2);
-            let ty_i8x16 = core::slice::from_raw_parts(get_heap_ty_i8x16(), 1);
-            match *ty {
-                I8 | I16 | I32 | I64 => Ok((rc_int, alloc::boxed::Box::leak(alloc::boxed::Box::new([*ty])))),
-                F16 | F32 | F64 | F128 => Ok((rc_float, alloc::boxed::Box::leak(alloc::boxed::Box::new([*ty])))),
-                I128 => Ok((rc_int_int, ty_i64_i64)),
-                _ if ty.is_dynamic_vector() => Ok((rc_float, ty_i8x16)),
-                _ => Err(CodegenError::Unsupported("Unexpected SSA-value type".into())),
-            }
-        }
-    }$1`,
-}
-
-var rcForTypeX64Patch = craneliftSourcePatch{
-	name:    "eject x64 rc_for_type to heap slices",
-	pattern: `(?s)fn rc_for_type\(ty: &Type\) -> CodegenResult<\(&\[RegClass\], &\[Type\]\)> \{.*?(\r?\n    fn canonical_type_for_rc)`,
-	replacement: `fn rc_for_type(ty: &Type) -> CodegenResult<(&'static [RegClass], &'static [Type])> {
-        #[allow(improper_ctypes)]
-        unsafe extern "C" {
-            fn get_heap_rc_int() -> *const RegClass;
-            fn get_heap_rc_float() -> *const RegClass;
-            fn get_heap_rc_int_int() -> *const RegClass;
-            fn get_heap_ty_i64_i64() -> *const Type;
-            fn get_heap_ty_i8x16() -> *const Type;
-        }
-        unsafe {
-            let rc_int = core::slice::from_raw_parts(get_heap_rc_int(), 1);
-            let rc_float = core::slice::from_raw_parts(get_heap_rc_float(), 1);
-            let rc_int_int = core::slice::from_raw_parts(get_heap_rc_int_int(), 2);
-            let ty_i64_i64 = core::slice::from_raw_parts(get_heap_ty_i64_i64(), 2);
-            let ty_i8x16 = core::slice::from_raw_parts(get_heap_ty_i8x16(), 1);
-            match *ty {
-                types::I8 | types::I16 | types::I32 | types::I64 => Ok((rc_int, alloc::boxed::Box::leak(alloc::boxed::Box::new([*ty])))),
-                types::F16 | types::F32 | types::F64 | types::F128 => Ok((rc_float, alloc::boxed::Box::leak(alloc::boxed::Box::new([*ty])))),
-                types::I128 => Ok((rc_int_int, ty_i64_i64)),
-                _ if ty.is_dynamic_vector() => Ok((rc_float, ty_i8x16)),
-                _ => Err(CodegenError::Unsupported("Unexpected SSA-value type".into())),
-            }
-        }
-    }$1`,
-}
-
 const selfContainedHasherSource = `use core::hash::{BuildHasher, Hasher};
 
 #[allow(missing_docs)]
@@ -1361,11 +1303,6 @@ func applyCraneliftIsaPatches(crateDir string) error {
 			return err
 		}
 		src = patched
-		patched, err = replaceRegexExactlyOnce(x64InstPath, src, rcForTypeX64Patch)
-		if err != nil {
-			return err
-		}
-		src = patched
 		if err := os.WriteFile(x64InstPath, []byte(src), 0o644); err != nil {
 			return err
 		}
@@ -1375,11 +1312,6 @@ func applyCraneliftIsaPatches(crateDir string) error {
 	if aarch64InstData, err := os.ReadFile(aarch64InstPath); err == nil {
 		src := string(aarch64InstData)
 		patched, err := replaceRegexExactlyOnce(aarch64InstPath, src, aarch64PrintWithStateStubPatch)
-		if err != nil {
-			return err
-		}
-		src = patched
-		patched, err = replaceRegexExactlyOnce(aarch64InstPath, src, rcForTypeAArch64Patch)
 		if err != nil {
 			return err
 		}

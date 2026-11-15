@@ -106,9 +106,9 @@ pub unsafe extern "C" fn wasmtime_memory_image_new(
 pub unsafe extern "C" fn wasmtime_memory_image_map_at(
     _image: *mut u8,
     _addr: *mut u8,
-    _len: usize,
+    _size: usize,
 ) -> i32 {
-    22 // EINVAL: memory images are disabled
+    22 // EINVAL (no CoW image backing; falls back to eager copy)
 }
 
 #[unsafe(no_mangle)]
@@ -116,9 +116,9 @@ pub unsafe extern "C" fn wasmtime_memory_image_free(_image: *mut u8) {}
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasmtime_tls_get(slot: usize) -> *mut u8 {
-    let g = globals();
-    if slot < g.wasmtime_tls_slots.len() {
-        g.wasmtime_tls_slots[slot]
+    let slots = &globals().wasmtime_tls_slots;
+    if slot < slots.len() {
+        slots[slot]
     } else {
         core::ptr::null_mut()
     }
@@ -126,25 +126,22 @@ pub unsafe extern "C" fn wasmtime_tls_get(slot: usize) -> *mut u8 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasmtime_tls_set(slot: usize, ptr: *mut u8) {
-    let g = globals();
-    if slot < g.wasmtime_tls_slots.len() {
-        g.wasmtime_tls_slots[slot] = ptr;
+    let slots = &mut globals().wasmtime_tls_slots;
+    if slot < slots.len() {
+        slots[slot] = ptr;
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mohabbat_wasmtime_global_code_slot() -> *mut *mut u8 {
-    &raw mut globals().wasmtime_global_code
+    core::ptr::addr_of_mut!(globals().wasmtime_global_code)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mohabbat_next_id(slot: usize) -> u64 {
-    let g = globals();
-    if slot < g.wasmtime_id_counters.len() {
-        let prev = g.wasmtime_id_counters[slot];
-        g.wasmtime_id_counters[slot] = prev.wrapping_add(1);
-        prev
-    } else {
-        0
-    }
+    let counters = &mut globals().wasmtime_id_counters;
+    let idx = if slot < counters.len() { slot } else { 0 };
+    let val = counters[idx];
+    counters[idx] = val.wrapping_add(1);
+    val
 }

@@ -76,6 +76,8 @@ pub struct WindowsPlatformHost {
     hello_payload_size: usize,
     argv: *const *const u8,
     argc: usize,
+    wasm_payload: *const u8,
+    wasm_payload_size: usize,
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -1863,7 +1865,9 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
             wsa_initialized: false,
         },
     );
-    let _ = mem::virtual_protect_rx(payload_code, host.hello_payload_size);
+    if host.wasm_payload_size == 0 {
+        let _ = mem::virtual_protect_rx(payload_code, host.hello_payload_size);
+    }
     let mut abi = pal_abi_stubs::for_payload(probe_read, probe_write, exit_process);
     abi.alloc_mem = mem::pal_alloc_mem;
     abi.protect_mem = mem::pal_protect_mem;
@@ -1907,6 +1911,8 @@ unsafe fn run_platform(host: &WindowsPlatformHost) -> i32 {
     abi.tty_get_size = proc_tty::pal_tty_get_size;
     abi.tty_set_size = proc_tty::pal_tty_set_size;
     abi.fd_isatty = proc_tty::pal_fd_isatty;
+    abi.wasm_bytes = host.wasm_payload;
+    abi.wasm_len = host.wasm_payload_size;
     ptr::write(payload_alloc.cast::<PalAbiTable>(), abi);
     loop {
         invoke_raw_entry(payload_code);

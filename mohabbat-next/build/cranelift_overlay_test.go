@@ -196,11 +196,11 @@ pub fn $pass() -> Box<dyn Any> {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(patchedContext), "&impl TargetIsa") != len(contextIsaPatches)+1 {
-		t.Fatalf("expected %d generic Context ISA parameters including the diagnostic wrapper, got source:\n%s", len(contextIsaPatches)+1, patchedContext)
+	if strings.Count(string(patchedContext), "&impl TargetIsa") != 1 {
+		t.Fatalf("expected 1 generic Context ISA parameter for compile_with_hook, got source:\n%s", patchedContext)
 	}
 	for _, expected := range []string{
-		"pub fn compile_and_emit(&mut self, isa: &impl TargetIsa)",
+		"pub fn compile_and_emit(&mut self, isa: &dyn TargetIsa)",
 		"pub fn compile_with_hook(",
 		"on_phase(1);",
 	} {
@@ -328,7 +328,26 @@ doctest = false
 	indexmapDir := filepath.Join(rustBuildDir, indexmapOverlayName)
 	wasmparserDir := filepath.Join(rustBuildDir, wasmparserOverlayName)
 	regalloc2Dir := filepath.Join(rustBuildDir, regalloc2OverlayName)
-	workspaceDir, err := prepareCraneliftRuntimeWorkspace(runtimeDir, rustBuildDir, overlayDir, bumpaloDir, hashbrownDir, indexmapDir, wasmparserDir, regalloc2Dir)
+	wasmtimeDir := filepath.Join(rustBuildDir, wasmtimeOverlayName)
+	wasmtimeEnvironDir := filepath.Join(rustBuildDir, wasmtimeEnvironOverlayName)
+	wasmtimeCraneliftDir := filepath.Join(rustBuildDir, wasmtimeCraneliftOverlayName)
+	craneliftNativeDir := filepath.Join(rustBuildDir, craneliftNativeOverlayName)
+	memchrDir := filepath.Join(rustBuildDir, memchrOverlayName)
+	workspaceDir, err := prepareCraneliftRuntimeWorkspace(
+		runtimeDir,
+		rustBuildDir,
+		overlayDir,
+		bumpaloDir,
+		hashbrownDir,
+		indexmapDir,
+		wasmparserDir,
+		regalloc2Dir,
+		wasmtimeDir,
+		wasmtimeEnvironDir,
+		wasmtimeCraneliftDir,
+		craneliftNativeDir,
+		memchrDir,
+	)
 	if err != nil {
 		t.Fatalf("prepare generated runtime workspace: %v", err)
 	}
@@ -433,23 +452,5 @@ func TestWasmparserFormatErrPatch(t *testing.T) {
 	}
 	if !strings.Contains(res, "crate::Error { offset: $offset }") {
 		t.Fatalf("expected format_err! to be stubbed:\n%s", res)
-	}
-}
-
-func TestRcForTypePatches(t *testing.T) {
-	snippetAArch64 := `fn rc_for_type(ty: &Type) -> CodegenResult<(&[RegClass], &[Type])> {
-    match *ty {
-        I8 | I16 | I32 | I64 => Ok((&[RegClass::Int], slice::from_ref(ty))),
-        _ => Err(CodegenError::Unsupported("Unexpected SSA-value type".into())),
-    }
-}
-    fn canonical_type_for_rc`
-
-	res, err := replaceRegexExactlyOnce("mod.rs", snippetAArch64, rcForTypeAArch64Patch)
-	if err != nil {
-		t.Fatalf("apply rcForTypeAArch64Patch: %v", err)
-	}
-	if !strings.Contains(res, "get_heap_rc_int()") {
-		t.Fatalf("expected get_heap_rc_int call in patched aarch64 rc_for_type:\n%s", res)
 	}
 }

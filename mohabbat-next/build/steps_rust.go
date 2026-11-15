@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -190,6 +192,12 @@ func buildFlatComponent(nextDir, rustBuildDir, outDir string, cfg FlatComponentC
 		return "", fmt.Errorf("llvm-objcopy extract payload for %s: %w\n%s", cfg.Name, err, string(out))
 	}
 
+	if cfg.StaticlibName == "libmohabbat_next_runtime.a" {
+		if err := appendRuntimeSelfRelocTable(binPath, cfg.LinkerScript, archives, outDir, cfg.OutFileName); err != nil {
+			return "", fmt.Errorf("append self-relocation table for %s: %w", cfg.Name, err)
+		}
+	}
+
 	info, err := os.Stat(binPath)
 	if err != nil {
 		return "", fmt.Errorf("stat binary %s: %w", binPath, err)
@@ -203,6 +211,53 @@ func buildFlatComponent(nextDir, rustBuildDir, outDir string, cfg FlatComponentC
 	}
 
 	return binPath, nil
+}
+
+func appendRuntimeSelfRelocTable(binPath, linkerScript string, archives []string, outDir, outName string) error {
+	preElfPath := filepath.Join(outDir, ".pre-"+outName+".elf")
+	defer os.Remove(preElfPath)
+
+	lldArgs := []string{
+		"-T", linkerScript,
+		"--build-id=none",
+		"--gc-sections",
+		"--no-undefined",
+		"--emit-relocs",
+		"--start-group",
+	}
+	lldArgs = append(lldArgs, archives...)
+	lldArgs = append(lldArgs, "--end-group", "-o", preElfPath)
+
+	if out, err := exec.Command("ld.lld", lldArgs...).CombinedOutput(); err != nil {
+		return fmt.Errorf("ld.lld --emit-relocs: %w\n%s", err, string(out))
+	}
+
+	relocOut, err := exec.Command("llvm-readobj", "--relocations", preElfPath).Output()
+	if err != nil {
+		return fmt.Errorf("llvm-readobj --relocations: %w", err)
+	}
+
+	re := regexp.MustCompile(`(?m)^\s*0x([0-9a-fA-F]+)\s+(?:R_AARCH64_ABS64|R_X86_64_64)\s+`)
+	matches := re.FindAllSubmatch(relocOut, -1)
+
+	var buf bytes.Buffer
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(0x52454C4F))
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(len(matches)))
+	for _, m := range matches {
+		off, err := strconv.ParseUint(string(m[1]), 16, 32)
+		if err != nil {
+			return fmt.Errorf("parse relocation offset %q: %w", string(m[1]), err)
+		}
+		_ = binary.Write(&buf, binary.LittleEndian, uint32(off))
+	}
+
+	f, err := os.OpenFile(binPath, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.Write(buf.Bytes())
+	return err
 }
 
 func findLatestArchive(dir, pattern string) (string, error) {

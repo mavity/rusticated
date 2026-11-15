@@ -39,18 +39,25 @@ pub unsafe fn compile_and_initialize_wasm() {
 
     let module = match Module::new(&engine, wasm_bytes) {
         Ok(m) => m,
-        Err(_) => host_abort(b"wasmtime Module::new failed"),
+        Err(err) => {
+            let msg = alloc::format!("wasmtime Module::new failed: {}", err);
+            host_abort(msg.as_bytes());
+        }
     };
 
     let mut store = Store::new(&engine, ());
     let mut linker = Linker::new(&engine);
-    if crate::wasm_env::register_env_imports(&mut linker).is_err() {
-        host_abort(b"wasmtime Linker registration failed");
+    if let Err(err) = crate::wasm_env::register_env_imports(&mut linker) {
+        let msg = alloc::format!("wasmtime Linker registration failed: {}", err);
+        host_abort(msg.as_bytes());
     }
 
     let instance = match linker.instantiate(&mut store, &module) {
         Ok(i) => i,
-        Err(_) => host_abort(b"wasmtime Linker::instantiate failed"),
+        Err(err) => {
+            let msg = alloc::format!("wasmtime Linker::instantiate failed: {}", err);
+            host_abort(msg.as_bytes());
+        }
     };
 
     if let Some(mem) = instance.get_memory(&mut store, "memory") {
@@ -59,9 +66,13 @@ pub unsafe fn compile_and_initialize_wasm() {
         g.guest_mem_len = mem.data_size(&store);
     }
 
-    let run = match instance.get_typed_func::<(), ()>(&mut store, "run") {
+    let run = match instance
+        .get_typed_func::<(), ()>(&mut store, "run")
+        .or_else(|_| instance.get_typed_func::<(), ()>(&mut store, "_initialize"))
+        .or_else(|_| instance.get_typed_func::<(), ()>(&mut store, "_start"))
+    {
         Ok(f) => f,
-        Err(_) => host_abort(b"wasm module missing export 'run'"),
+        Err(_) => host_abort(b"wasm module missing export 'run' or '_start'"),
     };
 
     let state = Box::new(WasmInstanceState { store, run });
@@ -74,7 +85,22 @@ pub unsafe fn reenter_wasm() {
         return;
     }
     let state = &mut *ptr.cast::<WasmInstanceState>();
-    if state.run.call(&mut state.store, ()).is_err() {
-        host_abort(b"wasm trap during run()");
+    if let Err(err) = state.run.call(&mut state.store, ()) {
+        let trap_name = match err.downcast_ref::<wasmtime::Trap>() {
+            Some(wasmtime::Trap::StackOverflow) => "StackOverflow",
+            Some(wasmtime::Trap::MemoryOutOfBounds) => "MemoryOutOfBounds",
+            Some(wasmtime::Trap::HeapMisaligned) => "HeapMisaligned",
+            Some(wasmtime::Trap::TableOutOfBounds) => "TableOutOfBounds",
+            Some(wasmtime::Trap::IndirectCallToNull) => "IndirectCallToNull",
+            Some(wasmtime::Trap::BadSignature) => "BadSignature",
+            Some(wasmtime::Trap::IntegerOverflow) => "IntegerOverflow",
+            Some(wasmtime::Trap::IntegerDivisionByZero) => "IntegerDivisionByZero",
+            Some(wasmtime::Trap::BadConversionToInteger) => "BadConversionToInteger",
+            Some(wasmtime::Trap::UnreachableCodeReached) => "UnreachableCodeReached",
+            Some(_) => "OtherTrap",
+            None => "NonTrapError",
+        };
+        let msg = alloc::format!("wasm trap ({}) during run(): {}", trap_name, err);
+        host_abort(msg.as_bytes());
     }
 }

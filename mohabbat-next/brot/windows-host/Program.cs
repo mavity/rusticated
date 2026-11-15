@@ -15,7 +15,7 @@ internal static class Program
     private static readonly int PrefixAbiOffset = 0x20000;
     private const ushort ProcessorArchitectureAmd64 = 9;
     private const ushort ProcessorArchitectureArm64 = 12;
-    private const int MaximumComponentSize = 64 * 1024;
+    private const int MaximumComponentSize = 128 * 1024 * 1024;
     private const string InternalResourcePrefix = "MohabbatNext.Internal.";
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -47,6 +47,8 @@ internal static class Program
         public UIntPtr HelloPayloadSize;
         public IntPtr Argv;
         public UIntPtr Argc;
+        public IntPtr WasmPayload;
+        public UIntPtr WasmPayloadSize;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -83,7 +85,8 @@ internal static class Program
                 args.Length == 3 ? args[2] : "load-add-store");
         }
         bool fileIoTest = args.Length >= 2 && args[0] == "--file-io-test";
-        if (args.Length != 0 && !fileIoTest)
+        bool hasBrain = typeof(Program).Assembly.GetManifestResourceInfo("MohabbatNext.Brain.wasm.zst") != null;
+        if (args.Length != 0 && !fileIoTest && !hasBrain)
         {
             Console.Error.WriteLine("This executable does not accept arguments.");
             return 2;
@@ -94,6 +97,7 @@ internal static class Program
         UIntPtr argumentCount = UIntPtr.Zero;
         GCHandle platformPin = new GCHandle();
         GCHandle helloPin = new GCHandle();
+        GCHandle wasmPin = new GCHandle();
         LoadLibraryCallback loadLibrary = LoadLibrary;
         GetProcAddressCallback getProcAddress = GetProcAddress;
         AllocCallback alloc = Allocate;
@@ -111,10 +115,28 @@ internal static class Program
                 }
                 Directory.SetCurrentDirectory(workingDirectory);
             }
-            string[] guestArgs = new string[fileIoTest ? args.Length - 2 : 0];
-            if (guestArgs.Length != 0)
+            string[] guestArgs;
+            if (fileIoTest)
             {
-                Array.Copy(args, 2, guestArgs, 0, guestArgs.Length);
+                guestArgs = new string[args.Length - 2];
+                if (guestArgs.Length != 0)
+                {
+                    Array.Copy(args, 2, guestArgs, 0, guestArgs.Length);
+                }
+            }
+            else if (hasBrain)
+            {
+                guestArgs = new string[args.Length + 1];
+                string[] rawCmd = Environment.GetCommandLineArgs();
+                guestArgs[0] = rawCmd.Length > 0 ? rawCmd[0] : AppDomain.CurrentDomain.FriendlyName;
+                if (args.Length != 0)
+                {
+                    Array.Copy(args, 0, guestArgs, 1, args.Length);
+                }
+            }
+            else
+            {
+                guestArgs = new string[0];
             }
             argumentVector = AllocateArgumentVector(guestArgs, out argumentCount);
 
@@ -123,15 +145,21 @@ internal static class Program
                 string.Format(
                     "MohabbatNext.Platform.Windows.{0}.zst",
                     architecture));
+            bool useBrain = hasBrain && !fileIoTest;
             byte[] hello = ReadComponent(
                 string.Format(
                     fileIoTest
                         ? "MohabbatNext.FileIo.{0}.zst"
-                        : "MohabbatNext.Hello.{0}.zst",
+                        : (useBrain ? "MohabbatNext.Runtime.{0}.zst" : "MohabbatNext.Hello.{0}.zst"),
                     architecture));
+            byte[] wasm = useBrain ? ReadComponent("MohabbatNext.Brain.wasm.zst") : null;
 
             platformPin = GCHandle.Alloc(platform, GCHandleType.Pinned);
             helloPin = GCHandle.Alloc(hello, GCHandleType.Pinned);
+            if (wasm != null)
+            {
+                wasmPin = GCHandle.Alloc(wasm, GCHandleType.Pinned);
+            }
             int totalPlatformSize = PrefixAbiOffset + platform.Length;
             platformAlloc = VirtualAlloc(
                 IntPtr.Zero,
@@ -166,6 +194,8 @@ internal static class Program
                 HelloPayloadSize = new UIntPtr((uint)hello.Length),
                 Argv = argumentVector,
                 Argc = argumentCount,
+                WasmPayload = wasm != null ? wasmPin.AddrOfPinnedObject() : IntPtr.Zero,
+                WasmPayloadSize = wasm != null ? new UIntPtr((uint)wasm.Length) : UIntPtr.Zero,
             };
             Marshal.StructureToPtr(host, platformAlloc, false);
 
@@ -210,6 +240,10 @@ internal static class Program
             {
                 helloPin.Free();
             }
+            if (wasmPin.IsAllocated)
+            {
+                wasmPin.Free();
+            }
             GC.KeepAlive(loadLibrary);
             GC.KeepAlive(getProcAddress);
             GC.KeepAlive(alloc);
@@ -235,13 +269,15 @@ internal static class Program
     {
         Console.WriteLine("RUN   [csharp/unit] WindowsPlatformHostLayout");
         int hostSize = Marshal.SizeOf(typeof(WindowsPlatformHost));
-        if (hostSize != 64)
+        if (hostSize != 80)
         {
-            Console.Error.WriteLine("FAIL: Expected WindowsPlatformHost size 64, got " + hostSize);
+            Console.Error.WriteLine("FAIL: Expected WindowsPlatformHost size 80, got " + hostSize);
             return 1;
         }
         if (Marshal.OffsetOf(typeof(WindowsPlatformHost), "Argv").ToInt32() != 48
-            || Marshal.OffsetOf(typeof(WindowsPlatformHost), "Argc").ToInt32() != 56)
+            || Marshal.OffsetOf(typeof(WindowsPlatformHost), "Argc").ToInt32() != 56
+            || Marshal.OffsetOf(typeof(WindowsPlatformHost), "WasmPayload").ToInt32() != 64
+            || Marshal.OffsetOf(typeof(WindowsPlatformHost), "WasmPayloadSize").ToInt32() != 72)
         {
             Console.Error.WriteLine("FAIL: Unexpected WindowsPlatformHost argument offsets");
             return 1;
@@ -580,8 +616,10 @@ internal static class Program
                 0x03, 0x02, 0x01, 0x01,
                 // Memory section (id=5, len=3, 1 page min)
                 0x05, 0x03, 0x01, 0x00, 0x01,
-                // Export section (id=7, len=7, "run" -> func 1)
-                0x07, 0x07, 0x01, 0x03, (byte)'r', (byte)'u', (byte)'n', 0x00, 0x01,
+                // Export section (id=7, len=16, "run" -> func 1, "memory" -> mem 0)
+                0x07, 0x10, 0x02,
+                0x03, (byte)'r', (byte)'u', (byte)'n', 0x00, 0x01,
+                0x06, (byte)'m', (byte)'e', (byte)'m', (byte)'o', (byte)'r', (byte)'y', 0x02, 0x00,
                 // Code section (id=10, len=11, 1 body)
                 0x0a, 0x0b, 0x01,
                 0x09, 0x00,
@@ -624,7 +662,9 @@ internal static class Program
             0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
             0x03, 0x02, 0x01, 0x00,
             0x05, 0x03, 0x01, 0x00, 0x01,
-            0x07, 0x07, 0x01, 0x03, (byte)'r', (byte)'u', (byte)'n', 0x00, 0x00
+            0x07, 0x10, 0x02,
+            0x03, (byte)'r', (byte)'u', (byte)'n', 0x00, 0x00,
+            0x06, (byte)'m', (byte)'e', (byte)'m', (byte)'o', (byte)'r', (byte)'y', 0x02, 0x00
         };
         byte[] codePayload = new byte[body.Length + 2];
         codePayload[0] = 0x01;

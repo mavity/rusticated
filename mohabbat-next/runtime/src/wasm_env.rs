@@ -411,6 +411,12 @@ env_fn!(fn env_fd_isatty(handle: u32) -> u32 {
     (abi().fd_isatty)(handle)
 });
 
+env_fn!(fn env_system_info_wait(ov_ptr: u32) {
+    if let Some(ov) = guest_ov(ov_ptr) {
+        fail_ov(ov, 52);
+    }
+});
+
 pub fn resolve_env_import(name: &str) -> Option<usize> {
     match name {
         "host_panic" => Some(env_host_panic as *const () as usize),
@@ -454,6 +460,7 @@ pub fn resolve_env_import(name: &str) -> Option<usize> {
         "tty_get_size" => Some(env_tty_get_size as *const () as usize),
         "tty_set_size" => Some(env_tty_set_size as *const () as usize),
         "fd_isatty" => Some(env_fd_isatty as *const () as usize),
+        "system_info_wait" => Some(env_system_info_wait as *const () as usize),
         _ => None,
     }
 }
@@ -527,6 +534,7 @@ pub fn register_env_imports(linker: &mut wasmtime::Linker<()>) -> wasmtime::Resu
     wrap_env!(linker, "tty_get_size", env_tty_get_size, (handle: u64) -> u32);
     wrap_env!(linker, "tty_set_size", env_tty_set_size, (handle: u64, cols: u32, rows: u32) -> u32);
     wrap_env!(linker, "fd_isatty", env_fd_isatty, (handle: u32) -> u32);
+    wrap_env!(linker, "system_info_wait", env_system_info_wait, (ov_ptr: u32));
     Ok(())
 }
 
@@ -544,7 +552,7 @@ mod tests {
             "path_chmod", "path_set_times", "path_remove", "path_mkdir", "path_rename",
             "net_open", "net_accept", "net_lookup", "net_cert_verify",
             "process_spawn", "process_pipe", "process_wait", "process_signal", "signal_wait",
-            "tty_set_mode", "tty_get_size", "tty_set_size", "fd_isatty",
+            "tty_set_mode", "tty_get_size", "tty_set_size", "fd_isatty", "system_info_wait",
         ];
         for name in names {
             assert!(resolve_env_import(name).is_some(), "missing env import {name}");

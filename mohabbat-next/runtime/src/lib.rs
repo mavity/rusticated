@@ -157,9 +157,23 @@ static ALLOC: PalBumpAllocator = PalBumpAllocator;
 
 #[cfg(not(test))]
 #[panic_handler]
-fn panic(_info: &PanicInfo<'_>) -> ! {
+fn panic(info: &PanicInfo<'_>) -> ! {
+    let g = unsafe { globals() };
+    let (file, line) = match info.location() {
+        Some(loc) => (loc.file(), loc.line()),
+        None => ("<unknown>", 0),
+    };
+    let msg = alloc::format!(
+        "runtime panic: {} at {}:{} (heap_base={:#x}, used={}, cap={})",
+        info.message(),
+        file,
+        line,
+        g.heap_base as usize,
+        g.heap_used,
+        g.heap_cap,
+    );
     unsafe {
-        (abi().host_panic)(b"runtime panic".as_ptr(), 13);
+        (abi().host_panic)(msg.as_ptr(), msg.len());
     }
 }
 
@@ -195,11 +209,63 @@ core::arch::global_asm!(
     activation = sym runtime_activation,
 );
 
+unsafe fn init_overlay_globals() {
+    let g = globals();
+    if g.bump_empty_chunk.is_null() {
+        let chunk = alloc::alloc::alloc(core::alloc::Layout::from_size_align(48, 16).unwrap());
+        core::ptr::write(chunk.cast::<*mut u8>(), chunk);
+        core::ptr::write(
+            chunk.add(8).cast::<core::alloc::Layout>(),
+            core::alloc::Layout::from_size_align(48, 16).unwrap(),
+        );
+        core::ptr::write(chunk.add(24).cast::<*mut u8>(), chunk);
+        core::ptr::write(chunk.add(32).cast::<*mut u8>(), chunk);
+        core::ptr::write(chunk.add(40).cast::<usize>(), 0);
+        g.bump_empty_chunk = chunk;
+    }
+    if g.hashbrown_empty_tags.is_null() {
+        let tags = alloc::alloc::alloc(core::alloc::Layout::from_size_align(64, 16).unwrap());
+        core::ptr::write_bytes(tags, 0xff, 64);
+        g.hashbrown_empty_tags = tags;
+    }
+    if g.heap_rc_int.is_null() {
+        let rc_int = alloc::boxed::Box::leak(alloc::boxed::Box::new([0u8; 1]));
+        g.heap_rc_int = rc_int.as_ptr();
+        let rc_float = alloc::boxed::Box::leak(alloc::boxed::Box::new([1u8; 1]));
+        g.heap_rc_float = rc_float.as_ptr();
+        let rc_int_int = alloc::boxed::Box::leak(alloc::boxed::Box::new([0u8; 2]));
+        g.heap_rc_int_int = rc_int_int.as_ptr();
+        let ty_i64_i64 = alloc::boxed::Box::leak(alloc::boxed::Box::new([0x0073u16; 2]));
+        g.heap_ty_i64_i64 = ty_i64_i64.as_ptr();
+        let ty_i8x16 = alloc::boxed::Box::leak(alloc::boxed::Box::new([0x00e0u16; 1]));
+        g.heap_ty_i8x16 = ty_i8x16.as_ptr();
+    }
+}
+
+#[cfg(not(test))]
+unsafe fn relocate_self() {
+    let origin = abi::slice_origin() as usize;
+    let end = abi::slice_end();
+    let magic = (end as *const u32).read_unaligned();
+    if magic != 0x5245_4C4F {
+        return;
+    }
+    let count = (end.add(4) as *const u32).read_unaligned() as usize;
+    let offsets = end.add(8) as *const u32;
+    for i in 0..count {
+        let off = offsets.add(i).read_unaligned() as usize;
+        let slot = (origin + off) as *mut usize;
+        slot.write_unaligned(slot.read_unaligned().wrapping_add(origin));
+    }
+}
+
 #[cfg(not(test))]
 #[inline(always)]
 unsafe fn slice_entry_inner() {
     let g = globals();
     if !g.initialized {
+        relocate_self();
+        init_overlay_globals();
         jit::compile_and_initialize_wasm();
         g.initialized = true;
     }
@@ -236,34 +302,7 @@ mod tests {
 
     pub(crate) fn init_test_env() {
         unsafe {
-            let g = globals();
-            if g.bump_empty_chunk.is_null() {
-                let chunk = alloc::alloc::alloc(core::alloc::Layout::from_size_align(48, 16).unwrap());
-                core::ptr::write(chunk.cast::<*mut u8>(), chunk);
-                core::ptr::write(chunk.add(8).cast::<usize>(), 48);
-                core::ptr::write(chunk.add(16).cast::<usize>(), 16);
-                core::ptr::write(chunk.add(24).cast::<*mut u8>(), chunk);
-                core::ptr::write(chunk.add(32).cast::<*mut u8>(), chunk);
-                core::ptr::write(chunk.add(40).cast::<usize>(), 0);
-                g.bump_empty_chunk = chunk;
-            }
-            if g.hashbrown_empty_tags.is_null() {
-                let tags = alloc::alloc::alloc(core::alloc::Layout::from_size_align(64, 16).unwrap());
-                core::ptr::write_bytes(tags, 0xff, 64);
-                g.hashbrown_empty_tags = tags;
-            }
-            if g.heap_rc_int.is_null() {
-                let rc_int = alloc::boxed::Box::leak(alloc::boxed::Box::new([0u8; 1]));
-                g.heap_rc_int = rc_int.as_ptr();
-                let rc_float = alloc::boxed::Box::leak(alloc::boxed::Box::new([1u8; 1]));
-                g.heap_rc_float = rc_float.as_ptr();
-                let rc_int_int = alloc::boxed::Box::leak(alloc::boxed::Box::new([0u8; 2]));
-                g.heap_rc_int_int = rc_int_int.as_ptr();
-                let ty_i64_i64 = alloc::boxed::Box::leak(alloc::boxed::Box::new([0x0073u16; 2]));
-                g.heap_ty_i64_i64 = ty_i64_i64.as_ptr();
-                let ty_i8x16 = alloc::boxed::Box::leak(alloc::boxed::Box::new([0x00e0u16; 1]));
-                g.heap_ty_i8x16 = ty_i8x16.as_ptr();
-            }
+            init_overlay_globals();
         }
     }
 

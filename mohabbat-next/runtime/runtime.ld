@@ -12,6 +12,8 @@ SECTIONS
         *(.text .text.*)
         *(.rodata .rodata.*)
         *(.data.rel.ro .data.rel.ro.*)
+        . = ALIGN(16);
+        HIDDEN(runtime_code_end = .);
     }
 
     /DISCARD/ :

@@ -21,6 +21,7 @@ pub struct RuntimeGlobals {
     pub heap_base: *mut u8,
     pub heap_used: usize,
     pub heap_cap: usize,
+    pub heap_free_bins: [*mut u8; 14],
 
     pub jit_code_base: *mut u8,
     pub jit_code_len: usize,
@@ -59,6 +60,26 @@ pub unsafe fn slice_origin() -> *mut u8 {
     addr as *mut u8
 }
 
+#[cfg(not(test))]
+#[inline(always)]
+pub unsafe fn slice_end() -> *const u8 {
+    let addr: usize;
+    #[cfg(target_arch = "x86_64")]
+    core::arch::asm!(
+        "lea {0}, [rip + runtime_code_end]",
+        out(reg) addr,
+        options(pure, nomem, nostack),
+    );
+    #[cfg(target_arch = "aarch64")]
+    core::arch::asm!(
+        "adrp {0}, runtime_code_end",
+        "add {0}, {0}, :lo12:runtime_code_end",
+        out(reg) addr,
+        options(pure, nomem, nostack),
+    );
+    addr as *const u8
+}
+
 #[cfg(test)]
 static mut TEST_GLOBALS: RuntimeGlobals = RuntimeGlobals {
     initialized: false,
@@ -68,6 +89,7 @@ static mut TEST_GLOBALS: RuntimeGlobals = RuntimeGlobals {
     heap_base: core::ptr::null_mut(),
     heap_used: 0,
     heap_cap: 0,
+    heap_free_bins: [core::ptr::null_mut(); 14],
     jit_code_base: core::ptr::null_mut(),
     jit_code_len: 0,
     guest_run_fn: None,

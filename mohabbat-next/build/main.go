@@ -82,8 +82,16 @@ func main() {
 	}
 
 	repoRoot := filepath.Dir(nextDir)
+	targetName := ""
+	if flag.NArg() > 0 {
+		targetName = strings.TrimSpace(flag.Arg(0))
+	}
 	if outputPath == "" {
-		outputPath = filepath.Join(repoRoot, "release", "dist", "MohabbatNext.exe")
+		if targetName != "" {
+			outputPath = filepath.Join(repoRoot, "release", "dist", targetName+".exe")
+		} else {
+			outputPath = filepath.Join(repoRoot, "release", "dist", "MohabbatNext.exe")
+		}
 	}
 	outputPath, err = filepath.Abs(outputPath)
 	if err != nil {
@@ -127,7 +135,7 @@ func main() {
 	linuxMuslFlags := "['-C', 'panic=abort', '-C', 'relocation-model=pic', '-C', 'target-feature=+crt-static', '-C', 'link-self-contained=no', '-C', 'linker=rust-lld', '-C', 'linker-flavor=ld.lld', '-C', 'link-arg=-pie', '-C', 'link-arg=--no-dynamic-linker']"
 	darwinFlags := fmt.Sprintf("['-C', 'panic=abort', '-C', 'linker=rust-lld', '-C', 'linker-flavor=darwin-lld', '-Z', 'unstable-options', '-C', 'link-arg=-L%s']", filepath.ToSlash(darwinStubsDir))
 	runtimeRustflagsX64 := "-C relocation-model=pic -Zunstable-options -Zdefault-visibility=hidden -Cpanic=abort -Zlocation-detail=none -Zfmt-debug=none -Cforce-frame-pointers=yes -Cllvm-args=-enable-machine-outliner=never -Zplt=yes"
-	runtimeRustflagsAArch64 := "-C relocation-model=pie -Zunstable-options -Zdefault-visibility=hidden -Cpanic=abort -Zlocation-detail=none -Zfmt-debug=none -Cforce-frame-pointers=yes -Cllvm-args=-enable-machine-outliner=never -Ctarget-feature=+reserve-x18"
+	runtimeRustflagsAArch64 := "-C relocation-model=pie -Zunstable-options -Zdefault-visibility=hidden -Cpanic=abort -Zfmt-debug=none -Cforce-frame-pointers=yes -Cllvm-args=-enable-machine-outliner=never -Ctarget-feature=+reserve-x18"
 	runtimeDir := filepath.Join(nextDir, "runtime")
 	runtimeBuildDir, err := prepareCraneliftOverlay(runtimeDir, rustBuildDir, verbose)
 	if err != nil {
@@ -206,7 +214,7 @@ func main() {
 			LinkerScript:      filepath.Join(runtimeDir, "runtime.ld"),
 			EntrySymbol:       "runtime_code_start",
 			StaticlibName:     "libmohabbat_next_runtime.a",
-			MaxSize:           4 * 1024 * 1024,
+			MaxSize:           8 * 1024 * 1024,
 			OutName:           "runtime-x86_64",
 		},
 		{
@@ -220,7 +228,7 @@ func main() {
 			LinkerScript:      filepath.Join(runtimeDir, "runtime.ld"),
 			EntrySymbol:       "runtime_code_start",
 			StaticlibName:     "libmohabbat_next_runtime.a",
-			MaxSize:           4 * 1024 * 1024,
+			MaxSize:           8 * 1024 * 1024,
 			OutName:           "runtime-aarch64",
 		},
 		// Windows PAL
@@ -397,6 +405,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	var brainWasmPath string
+	if targetName != "" {
+		targetDir := filepath.Join(repoRoot, targetName)
+		overlayPath := filepath.Join(repoRoot, "target", "overlay.json")
+		brainWasmPath = filepath.Join(componentsDir, targetName+".wasm")
+		fmt.Printf("🍆  Compiling Go WASM brain %s -> %s...\n", targetName, brainWasmPath)
+		goCmd := exec.Command("go", "build", "-C", targetDir, "-buildmode=c-shared", "-overlay", overlayPath, "-trimpath", "-ldflags=-s -w", "-o", brainWasmPath, ".")
+		goCmd.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm", "CGO_ENABLED=0")
+		if out, err := goCmd.CombinedOutput(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error building %s.wasm: %v\n%s\n", targetName, err, string(out))
+			os.Exit(1)
+		}
+	}
+
 	// Step 3: Compress Windows components for CLR embedding (in parallel with max zstd)
 	fmt.Println("🍆  [3/5] Compressing Windows platform, hello, and file-I/O payloads (max Zstandard)...")
 	type winCompDef struct {
@@ -411,6 +433,15 @@ func main() {
 		{SrcBin: builtBins["hello-fileio-aarch64"], OutZst: filepath.Join(componentsDir, "fileio-aarch64.zst"), ResName: "MohabbatNext.FileIo.aarch64.zst"},
 		{SrcBin: builtBins["platform-windows-x86_64"], OutZst: filepath.Join(componentsDir, "platform-windows-x86_64.zst"), ResName: "MohabbatNext.Platform.Windows.x86_64.zst"},
 		{SrcBin: builtBins["platform-windows-aarch64"], OutZst: filepath.Join(componentsDir, "platform-windows-aarch64.zst"), ResName: "MohabbatNext.Platform.Windows.aarch64.zst"},
+		{SrcBin: builtBins["runtime-x86_64"], OutZst: filepath.Join(componentsDir, "runtime-x86_64.zst"), ResName: "MohabbatNext.Runtime.x86_64.zst"},
+		{SrcBin: builtBins["runtime-aarch64"], OutZst: filepath.Join(componentsDir, "runtime-aarch64.zst"), ResName: "MohabbatNext.Runtime.aarch64.zst"},
+	}
+	if brainWasmPath != "" {
+		winComps = append(winComps, winCompDef{
+			SrcBin:  brainWasmPath,
+			OutZst:  filepath.Join(componentsDir, targetName+".wasm.zst"),
+			ResName: "MohabbatNext.Brain.wasm.zst",
+		})
 	}
 
 	var (
