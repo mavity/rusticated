@@ -454,29 +454,25 @@ pub unsafe fn compile_and_initialize_wasm() {
         (host.host_panic)(b"jit code allocation failed".as_ptr(), 26);
     }
 
-    // Emit trampolines for imported PAL functions
-    let abi_ptr = host as *const _ as *const u8;
+    // Emit trampolines for imported WASM "env" functions via the 32-bit guest adapter
     for (idx, &name) in imported_func_names.iter().enumerate() {
         let tramp = code_base.add(import_offsets[idx]);
-        let slot_off = import_name_to_abi_offset(name).unwrap_or_else(|| {
+        let adapter_addr = crate::wasm_env::resolve_env_import(name).unwrap_or_else(|| {
             (host.host_panic)(b"unsupported import".as_ptr(), 18);
         });
-        let slot_addr = unsafe { abi_ptr.add(slot_off) };
 
         #[cfg(target_arch = "aarch64")]
         unsafe {
-            core::ptr::write_unaligned(tramp.cast::<u32>(), 0x5800_0090); // ldr x16, [pc, #16]
-            core::ptr::write_unaligned(tramp.add(4).cast::<u32>(), 0xf940_0210); // ldr x16, [x16]
-            core::ptr::write_unaligned(tramp.add(8).cast::<u32>(), 0xd61f_0200); // br x16
-            core::ptr::write_unaligned(tramp.add(12).cast::<u32>(), 0xd503_201f); // nop
-            core::ptr::write_unaligned(tramp.add(16).cast::<u64>(), slot_addr as u64);
+            core::ptr::write_unaligned(tramp.cast::<u32>(), 0x5800_0050); // ldr x16, [pc, #8]
+            core::ptr::write_unaligned(tramp.add(4).cast::<u32>(), 0xd61f_0200); // br x16
+            core::ptr::write_unaligned(tramp.add(8).cast::<u64>(), adapter_addr as u64);
         }
 
         #[cfg(target_arch = "x86_64")]
         unsafe {
-            core::ptr::copy_nonoverlapping([0x48u8, 0xb8].as_ptr(), tramp, 2); // movabsq $slot_addr, %rax
-            core::ptr::write_unaligned(tramp.add(2).cast::<u64>(), slot_addr as u64);
-            core::ptr::copy_nonoverlapping([0xffu8, 0x20].as_ptr(), tramp.add(10), 2); // jmpq *(%rax)
+            core::ptr::copy_nonoverlapping([0x48u8, 0xb8].as_ptr(), tramp, 2); // movabsq $adapter_addr, %rax
+            core::ptr::write_unaligned(tramp.add(2).cast::<u64>(), adapter_addr as u64);
+            core::ptr::copy_nonoverlapping([0xffu8, 0xe0].as_ptr(), tramp.add(10), 2); // jmpq *%rax
         }
     }
 

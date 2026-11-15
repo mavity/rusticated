@@ -13,6 +13,7 @@ extern crate alloc;
 pub mod abi;
 pub mod allocator;
 pub mod jit;
+pub mod wasm_env;
 
 #[allow(unused_imports)]
 use crate::abi::abi;
@@ -239,7 +240,7 @@ mod tests {
         assert!(size_of::<RuntimeGlobals>() <= 0x10000);
     }
 
-    fn init_test_env() {
+    pub(crate) fn init_test_env() {
         unsafe {
             let g = globals();
             if g.bump_empty_chunk.is_null() {
