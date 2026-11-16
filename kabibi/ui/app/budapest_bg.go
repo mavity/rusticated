@@ -18,7 +18,7 @@ import (
 // Budapest Chain Bridge background projection behind the shell. Set to false
 // to completely disable the bitmap renderer, background colour shifting, and
 // animation ticker.
-const EnableBudapestBackground = true
+const EnableBudapestBackground = false
 
 const (
 	budapestW           = 399
