@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -630,9 +631,12 @@ func validateNativeAbiOutput(suite string, output []byte) error {
 	return nil
 }
 
-func (r *Runner) RunStage3NativeAbiConformanceTests() {
+func (r *Runner) RunStage3NativeAbiConformanceTests(idleTimeout time.Duration) {
 	if runtime.GOOS != "windows" {
 		return
+	}
+	if idleTimeout <= 0 {
+		idleTimeout = 10 * time.Minute
 	}
 
 	tmpRoot, err := os.MkdirTemp("", "mohabbat-abi-*")
@@ -649,14 +653,14 @@ func (r *Runner) RunStage3NativeAbiConformanceTests() {
 			if err := os.MkdirAll(workDir, 0o755); err != nil {
 				return err
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			cmd := exec.CommandContext(ctx, r.DistExe, "--abi-test", workDir, suite)
-			out, err := cmd.CombinedOutput()
+			cmd := exec.Command(r.DistExe, "--abi-test", workDir, suite)
+			var out strings.Builder
+			cmd.Dir = workDir
+			err := runCommandWithStdioIdleTimeout(cmd, idleTimeout, io.MultiWriter(os.Stdout, &out), io.MultiWriter(os.Stderr, &out))
 			if err != nil {
-				return fmt.Errorf("%w\n%s", err, string(out))
+				return fmt.Errorf("%w\n%s", err, out.String())
 			}
-			return validateNativeAbiOutput(suite, out)
+			return validateNativeAbiOutput(suite, []byte(out.String()))
 		})
 	}
 
@@ -673,14 +677,13 @@ func (r *Runner) RunStage3NativeAbiConformanceTests() {
 					wslDir := fmt.Sprintf("/tmp/mohabbat-abi-%d-%s", os.Getpid(), suite)
 					script := fmt.Sprintf("mkdir -p %s && bash %s --abi-test %s %s; rc=$?; rm -rf %s; exit $rc",
 						wslDir, unixBundle, wslDir, suite, wslDir)
-					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-					defer cancel()
-					cmd := exec.CommandContext(ctx, wslPath, "-e", "sh", "-c", script)
-					cmdOut, err := cmd.CombinedOutput()
+					cmd := exec.Command(wslPath, "-e", "sh", "-c", script)
+					var cmdOut strings.Builder
+					err := runCommandWithStdioIdleTimeout(cmd, idleTimeout, io.MultiWriter(os.Stdout, &cmdOut), io.MultiWriter(os.Stderr, &cmdOut))
 					if err != nil {
-						return fmt.Errorf("%w\n%s", err, string(cmdOut))
+						return fmt.Errorf("%w\n%s", err, cmdOut.String())
 					}
-					return validateNativeAbiOutput(suite, cmdOut)
+					return validateNativeAbiOutput(suite, []byte(cmdOut.String()))
 				})
 			}
 		}

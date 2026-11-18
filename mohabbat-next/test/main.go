@@ -116,7 +116,7 @@ func main() {
 		// Stage 3: Holistic Multi-Platform & Multi-Arch Acceptance Matrix
 		runner.RunStage3ArtifactIntegrityTests()
 		runner.RunStage3PlatformMatrix()
-		runner.RunStage3NativeAbiConformanceTests()
+		runner.RunStage3NativeAbiConformanceTests(testIdleTimeout)
 		runner.RunStage3ZwasmRuntimeTests()
 	}
 

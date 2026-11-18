@@ -1209,7 +1209,11 @@ fn abiProcessSpawn(ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8, cfg_len: usize
         child_fds = .{ in_fds[0], out_fds[1], err_fds[1] };
     }
 
-    const pid_res = sys.sys1(sys.NR.fork, 0);
+    const pid_res = switch (builtin.cpu.arch) {
+        .x86_64 => sys.sys1(sys.NR.fork, 0),
+        .aarch64 => sys.sys2(sys.NR.clone, 17, 0), // SIGCHLD
+        else => @compileError("Unsupported arch"),
+    };
     if (sys.isErr(pid_res)) |e| {
         if (!has_stdio) {
             _ = sys.sys1(sys.NR.close, @intCast(in_fds[0]));

@@ -434,22 +434,6 @@ pub fn processSpawn(s: *PalState, ov: *pal_abi.Overlapped, cfg_ptr: [*]const u8,
             ok = create_proc(b, @constCast(wcmd), null, null, 1, 0x0800_0000, null, wcwd, &si, &pi);
         }
     }
-    if (ok == 0) {
-        var bare_buf: [8192]u8 = undefined;
-        var bare_len: usize = 0;
-        appendCmdArg(&bare_buf, &bare_len, "cmd.exe");
-        var bare_pos: usize = 0;
-        _ = nextNullStr(cfg, &bare_pos);
-        while (nextNullStr(cfg, &bare_pos)) |arg| {
-            if (arg.len == 0) break;
-            appendCmdArg(&bare_buf, &bare_len, arg);
-        }
-        if (mem.utf8ToWideAlloc(s, &bare_buf, bare_len)) |wb| {
-            defer if (s.host.free) |free| free(@ptrCast(@constCast(wb)));
-            @memset(std.mem.asBytes(&pi), 0);
-            ok = create_proc(null, wb, null, null, 1, 0x0800_0000, null, wcwd, &si, &pi);
-        }
-    }
     if (s.p_close_handle) |ch| {
         if (has_stdio) {
             for (dup_to_close) |dh| {

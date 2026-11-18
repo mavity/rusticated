@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -301,10 +303,10 @@ func runCommandWithStdioIdleTimeout(cmd *exec.Cmd, idleTimeout time.Duration, st
 				continue
 			}
 
-			killErr := cmd.Process.Kill()
+			killErr := killProcessTree(cmd)
 			waitErr := <-wait
 			if waitErr == nil {
-				return nil
+				return fmt.Errorf("no stdout/stderr output for %s; host process exited during termination", idleTimeout)
 			}
 			if killErr != nil {
 				return fmt.Errorf("no stdout/stderr output for %s; failed to stop host process: %v (wait error: %w)", idleTimeout, killErr, waitErr)
@@ -317,6 +319,23 @@ func runCommandWithStdioIdleTimeout(cmd *exec.Cmd, idleTimeout time.Duration, st
 func remainingIdleTime(started time.Time, lastOutput *atomic.Int64, idleTimeout time.Duration) time.Duration {
 	timeSinceOutput := time.Since(started) - time.Duration(lastOutput.Load())
 	return idleTimeout - timeSinceOutput
+}
+
+func killProcessTree(cmd *exec.Cmd) error {
+	if cmd.Process == nil {
+		return nil
+	}
+	if runtime.GOOS == "windows" {
+		taskkill := exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid))
+		taskkill.Stdout = io.Discard
+		taskkill.Stderr = io.Discard
+		if err := taskkill.Run(); err != nil {
+			_ = cmd.Process.Kill()
+			return err
+		}
+		return nil
+	}
+	return cmd.Process.Kill()
 }
 
 func resetTimer(timer *time.Timer, duration time.Duration) {
