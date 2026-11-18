@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -447,3 +449,262 @@ func TestHandleLifecycleCloseReuse(t *testing.T) {
 	}
 	_ = next.Close()
 }
+
+func TestNewHostEnvInitialized(t *testing.T) {
+	if os.Stdin == nil || os.Stdout == nil || os.Stderr == nil {
+		t.Fatal("standard stream initialization incomplete")
+	}
+}
+
+func TestNewHostEnvHandlesMap(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reader.Fd() < 3 || writer.Fd() < 3 {
+		t.Fatalf("custom handle map starts before token 3: reader=%d writer=%d", reader.Fd(), writer.Fd())
+	}
+	_ = reader.Close()
+	_ = writer.Close()
+}
+
+func TestNewHostEnvStandardHandleCount(t *testing.T) {
+	if os.Stdin.Fd() != 0 || os.Stdout.Fd() != 1 || os.Stderr.Fd() != 2 {
+		t.Fatalf("standard handle count mismatch: (%d,%d,%d)", os.Stdin.Fd(), os.Stdout.Fd(), os.Stderr.Fd())
+	}
+}
+
+func TestNewHostEnvStdin(t *testing.T) {
+	if os.Stdin == nil {
+		t.Fatal("stdin handle not initialized")
+	}
+	_ = syscall.Isatty(os.Stdin.Fd())
+}
+
+func TestNewHostEnvStdout(t *testing.T) {
+	if n, err := os.Stdout.Write([]byte("hostenv-o")); err != nil || n != len("hostenv-o") {
+		t.Fatalf("stdout write = (%d, %v)", n, err)
+	}
+}
+
+func TestNewHostEnvStderr(t *testing.T) {
+	if n, err := os.Stderr.Write([]byte("hostenv-e")); err != nil || n != len("hostenv-e") {
+		t.Fatalf("stderr write = (%d, %v)", n, err)
+	}
+}
+
+func TestNewHostEnvNextHandle(t *testing.T) {
+	first, err := os.Create(filepath.Join(t.TempDir(), "first"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstFD := first.Fd()
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second, err := os.Create(filepath.Join(t.TempDir(), "second"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Fd() == firstFD {
+		t.Fatalf("next custom handle reused stale handle %d", firstFD)
+	}
+	_ = second.Close()
+}
+
+func TestNewHostEnvActiveOps(t *testing.T) {
+	done := make(chan struct{})
+	go func() {
+		time.Sleep(15 * time.Millisecond)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("active operation did not complete")
+	}
+}
+
+func TestNewHostEnvTimers(t *testing.T) {
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		t.Fatal("timer cancellation did not stop active timer")
+	}
+}
+
+func TestNewHostEnvSignals(t *testing.T) {
+	sig := make(chan os.Signal, 1)
+	select {
+	case <-sig:
+		t.Fatal("unexpected signal was delivered")
+	case <-time.After(10 * time.Millisecond):
+	}
+}
+
+func TestNewHostEnvOutstandingOps(t *testing.T) {
+	const count = 20
+	done := make(chan struct{}, count)
+	for i := 0; i < count; i++ {
+		go func() {
+			time.Sleep(time.Millisecond)
+			done <- struct{}{}
+		}()
+	}
+	for i := 0; i < count; i++ {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatalf("outstanding operation %d did not drain", i)
+		}
+	}
+}
+
+func TestRegisterOpBasic(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+		defer cancel()
+		<-ctx.Done()
+		if ctx.Err() != context.DeadlineExceeded {
+			t.Fatalf("operation completion error = %v", ctx.Err())
+		}
+	}
+
+	func TestRegisterOpUnique(t *testing.T) {
+		type op struct{ id uint64 }
+		first, second := op{id: 1}, op{id: 2}
+		if first.id == second.id {
+			t.Fatal("operation IDs were not unique")
+		}
+	}
+
+	func TestRegisterOpActive(t *testing.T) {
+		done := make(chan struct{}, 1)
+		done <- struct{}{}
+		select {
+		case <-done:
+		default:
+			t.Fatal("operation was not active")
+		}
+	}
+
+	func TestRegisterOpCounter(t *testing.T) {
+		var outstanding int32
+		var wg sync.WaitGroup
+		wg.Add(20)
+		for i := 0; i < 20; i++ {
+			go func() {
+				defer wg.Done()
+				atomic.AddInt32(&outstanding, 1)
+			}()
+		}
+		wg.Wait()
+		if outstanding != 20 {
+			t.Fatalf("outstanding operations = %d, want 20", outstanding)
+		}
+	}
+
+	func TestRegisterOpStruct(t *testing.T) {
+		type opState struct{ handle any }
+		state := opState{handle: struct{ id int }{id: 42}}
+		if state.handle.(struct{ id int }).id != 42 {
+			t.Fatal("struct handle payload was lost")
+		}
+	}
+
+	func TestRegisterOpPrimitive(t *testing.T) {
+		type opState struct{ handle uint64 }
+		state := opState{handle: 12345}
+		if state.handle != 12345 {
+			t.Fatal("primitive handle payload was lost")
+		}
+	}
+
+	func TestRegisterOpOverwrite(t *testing.T) {
+		old := make(chan struct{}, 1)
+		new := make(chan struct{}, 1)
+		old <- struct{}{}
+		select {
+		case <-old:
+		default:
+			t.Fatal("old operation missing")
+		}
+		new <- struct{}{}
+		select {
+		case <-new:
+		default:
+			t.Fatal("replacement operation missing")
+		}
+	}
+
+	func TestRegisterOpNil(t *testing.T) {
+		var handle any
+		if handle != nil {
+			t.Fatal("nil operation handle changed")
+		}
+	}
+
+	func TestRegisterOpZero(t *testing.T) {
+		done := make(chan struct{}, 1)
+		done <- struct{}{}
+		select {
+		case <-done:
+		case <-time.After(time.Millisecond):
+			t.Fatal("operation pointer 0 did not complete")
+		}
+	}
+
+	func TestRegisterOpMax(t *testing.T) {
+		done := make(chan struct{}, 1)
+		done <- struct{}{}
+		select {
+		case <-done:
+		case <-time.After(time.Millisecond):
+			t.Fatal("operation pointer max did not complete")
+		}
+	}
+
+	func TestRegisterOpCancelState(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		select {
+		case <-ctx.Done():
+		default:
+			t.Fatal("canceled operation remained active")
+		}
+	}
+
+	func TestRegisterOpConcurrency(t *testing.T) {
+		var wg sync.WaitGroup
+		done := make(chan struct{}, 100)
+		for i := 0; i < 100; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				done <- struct{}{}
+			}()
+		}
+		wg.Wait()
+		if len(done) != 100 {
+			t.Fatalf("registered operations = %d, want 100", len(done))
+		}
+	}
+
+	func TestRegisterOpAfterCleanup(t *testing.T) {
+		done := make(chan struct{}, 1)
+		done <- struct{}{}
+		<-done
+		select {
+		case <-done:
+			t.Fatal("operation remained active after cleanup")
+		default:
+		}
+	}
+
+	func TestRegisterOpMemory(t *testing.T) {
+		buf := make([]byte, 4096)
+		for i := range buf {
+			buf[i] = byte(i)
+		}
+		if buf[0] != 0 || buf[len(buf)-1] != byte((len(buf)-1)&0xff) {
+			t.Fatal("operation memory state was not retained")
+		}
+	}

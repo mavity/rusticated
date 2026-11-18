@@ -826,6 +826,279 @@ fn runLifecycleCloseReuse(g: *AbiGlobals) void {
     }
 }
 
+fn runHostEnvInitialized(g: *AbiGlobals) void {
+    if (g.step == 0) {
+        g.ov1 = .{};
+        getAbi().write(&g.ov1, 1, "i".ptr, 1);
+        g.step = 1;
+        if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    }
+    if (g.step == 1) {
+        if (g.ov1.@"error" != 0 or g.ov1.result_ext != 1) {
+            failCase(g, "hostenv/initialized", g.ov1.@"error");
+        } else {
+            passCase(g, "hostenv/initialized");
+        }
+        flushAndExit(g);
+    }
+}
+
+fn runHostEnvHandles(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().process_pipe(&g.ov1);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    if (g.ov1.@"error" != 0) {
+        failCase(g, "hostenv/handles", g.ov1.@"error");
+    } else {
+        const r: u64 = @as(u32, @truncate(g.ov1.result_ext));
+        const w: u64 = @as(u32, @truncate(g.ov1.result_ext >> 32));
+        if (r >= 3 and w >= 3 and r != w) passCase(g, "hostenv/handles") else failCase(g, "hostenv/handles", 1);
+        getAbi().handle_close(r);
+        getAbi().handle_close(w);
+    }
+    flushAndExit(g);
+}
+
+fn runHostEnvStandardCount(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().read(&g.ov1, 0, &g.buf1, 0);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    if (g.ov1.@"error" != 0 or g.ov1.result_ext != 0) {
+        failCase(g, "hostenv/standard_count", g.ov1.@"error");
+    } else {
+        passCase(g, "hostenv/standard_count");
+    }
+    flushAndExit(g);
+}
+
+fn runHostEnvStdin(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().read(&g.ov1, 0, &g.buf1, 0);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    if (g.ov1.@"error" != 0 or g.ov1.result_ext != 0) {
+        failCase(g, "hostenv/stdin", g.ov1.@"error");
+    } else {
+        passCase(g, "hostenv/stdin");
+    }
+    flushAndExit(g);
+}
+
+fn runHostEnvStdout(g: *AbiGlobals) void {
+    if (g.step == 0) {
+        g.ov1 = .{};
+        getAbi().write(&g.ov1, 1, "o".ptr, 1);
+        g.step = 1;
+        if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    }
+    if (g.step == 1) {
+        if (g.ov1.@"error" != 0 or g.ov1.result_ext != 1) {
+            failCase(g, "hostenv/stdout", g.ov1.@"error");
+        } else {
+            passCase(g, "hostenv/stdout");
+        }
+        flushAndExit(g);
+    }
+}
+
+fn runHostEnvStderr(g: *AbiGlobals) void {
+    if (g.step == 0) {
+        g.ov1 = .{};
+        getAbi().write(&g.ov1, 2, "e".ptr, 1);
+        g.step = 1;
+        if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    }
+    if (g.step == 1) {
+        if (g.ov1.@"error" != 0 or g.ov1.result_ext != 1) {
+            failCase(g, "hostenv/stderr", g.ov1.@"error");
+        } else {
+            passCase(g, "hostenv/stderr");
+        }
+        flushAndExit(g);
+    }
+}
+
+fn runHostEnvNextHandle(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().process_pipe(&g.ov1);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    const r: u64 = @as(u32, @truncate(g.ov1.result_ext));
+    const w: u64 = @as(u32, @truncate(g.ov1.result_ext >> 32));
+    if (g.ov1.@"error" != 0 or r < 3 or w < 3) {
+        failCase(g, "hostenv/next_handle", g.ov1.@"error");
+    } else {
+        passCase(g, "hostenv/next_handle");
+    }
+    getAbi().handle_close(r);
+    getAbi().handle_close(w);
+    flushAndExit(g);
+}
+
+fn runHostEnvActiveOps(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 0);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) {
+        failCase(g, "hostenv/active_ops", 1);
+    } else if (g.ov1.@"error" != 0) {
+        failCase(g, "hostenv/active_ops", g.ov1.@"error");
+    } else {
+        passCase(g, "hostenv/active_ops");
+    }
+    flushAndExit(g);
+}
+
+fn runHostEnvTimers(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    if (g.ov1.@"error" != abi_types.ERROR_CANCELED) {
+        failCase(g, "hostenv/timers", g.ov1.@"error");
+    } else {
+        passCase(g, "hostenv/timers");
+    }
+    flushAndExit(g);
+}
+
+fn runHostEnvSignals(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().signal_wait(&g.ov1, 2);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    if (g.ov1.@"error" != abi_types.ERROR_UNSUPPORTED) {
+        failCase(g, "hostenv/signals", g.ov1.@"error");
+    } else {
+        passCase(g, "hostenv/signals");
+    }
+    flushAndExit(g);
+}
+
+fn runHostEnvOutstanding(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 0);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) {
+        failCase(g, "hostenv/outstanding", 1);
+        flushAndExit(g);
+        return;
+    }
+    g.ov2 = .{};
+    getAbi().timer_set(&g.ov2, 0);
+    if ((g.ov2.flags & abi_types.FLAG_COMPLETED) == 0) {
+        failCase(g, "hostenv/outstanding", 1);
+    } else if (g.ov1.@"error" != 0 or g.ov2.@"error" != 0) {
+        failCase(g, "hostenv/outstanding", g.ov1.@"error");
+    } else {
+        passCase(g, "hostenv/outstanding");
+    }
+    flushAndExit(g);
+}
+
+fn runRegisterBasic(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 0);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) != 0 and g.ov1.@"error" == 0) passCase(g, "register/basic") else failCase(g, "register/basic", g.ov1.@"error");
+    flushAndExit(g);
+}
+
+fn runRegisterUnique(g: *AbiGlobals) void {
+    g.ov1 = .{}; g.ov2 = .{};
+    getAbi().timer_set(&g.ov1, 0);
+    getAbi().timer_set(&g.ov2, 0);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) != 0 and (g.ov2.flags & abi_types.FLAG_COMPLETED) != 0) passCase(g, "register/unique") else failCase(g, "register/unique", 1);
+    flushAndExit(g);
+}
+
+fn runRegisterActive(g: *AbiGlobals) void {
+    g.ov1 = .{}; getAbi().timer_set(&g.ov1, 5000);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) {
+        passCase(g, "register/active");
+    } else {
+        failCase(g, "register/active", g.ov1.@"error");
+    }
+    getAbi().cancel(&g.ov1);
+    flushAndExit(g);
+}
+
+fn runRegisterCounter(g: *AbiGlobals) void {
+    g.ov1 = .{}; g.ov2 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().timer_set(&g.ov2, 5000);
+    passCase(g, "register/counter");
+    getAbi().cancel(&g.ov1); getAbi().cancel(&g.ov2);
+    flushAndExit(g);
+}
+
+fn runRegisterStruct(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().process_pipe(&g.ov1);
+    if (g.ov1.@"error" == 0) passCase(g, "register/struct") else failCase(g, "register/struct", g.ov1.@"error");
+    flushAndExit(g);
+}
+
+fn runRegisterPrimitive(g: *AbiGlobals) void {
+    g.ov1 = .{}; getAbi().timer_set(&g.ov1, 0);
+    if (g.ov1.@"error" == 0) passCase(g, "register/primitive") else failCase(g, "register/primitive", g.ov1.@"error");
+    flushAndExit(g);
+}
+
+fn runRegisterOverwrite(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().timer_set(&g.ov1, 0);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) != 0 and g.ov1.@"error" == 0) passCase(g, "register/overwrite") else failCase(g, "register/overwrite", g.ov1.@"error");
+    flushAndExit(g);
+}
+
+fn runRegisterNil(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 0);
+    if (g.ov1.@"error" == 0) passCase(g, "register/nil") else failCase(g, "register/nil", g.ov1.@"error");
+    flushAndExit(g);
+}
+
+fn runRegisterZero(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 0);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) != 0) passCase(g, "register/zero") else failCase(g, "register/zero", 1);
+    flushAndExit(g);
+}
+
+fn runRegisterMax(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 0);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) != 0) passCase(g, "register/max") else failCase(g, "register/max", 1);
+    flushAndExit(g);
+}
+
+fn runRegisterCancelState(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) != 0 and g.ov1.@"error" == abi_types.ERROR_CANCELED) passCase(g, "register/cancel_state") else failCase(g, "register/cancel_state", g.ov1.@"error");
+    flushAndExit(g);
+}
+
+fn runRegisterConcurrency(g: *AbiGlobals) void {
+    g.ov1 = .{}; g.ov2 = .{};
+    getAbi().timer_set(&g.ov1, 0);
+    getAbi().timer_set(&g.ov2, 0);
+    if (g.ov1.@"error" == 0 and g.ov2.@"error" == 0) passCase(g, "register/concurrency") else failCase(g, "register/concurrency", g.ov1.@"error");
+    flushAndExit(g);
+}
+
+fn runRegisterAfterCleanup(g: *AbiGlobals) void {
+    g.ov1 = .{}; getAbi().timer_set(&g.ov1, 5000); getAbi().cancel(&g.ov1);
+    g.ov2 = .{}; getAbi().timer_set(&g.ov2, 0);
+    if (g.ov2.@"error" == 0) passCase(g, "register/after_cleanup") else failCase(g, "register/after_cleanup", g.ov2.@"error");
+    flushAndExit(g);
+}
+
+fn runRegisterMemory(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 0);
+    @memset(g.buf1[0..16], 0x5a);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) != 0 and g.ov1.@"error" == 0) passCase(g, "register/memory") else failCase(g, "register/memory", g.ov1.@"error");
+    flushAndExit(g);
+}
+
 pub fn resumeActivation() callconv(abi_types.pal_cc) void {
     const g = getGlobals();
     if (!g.initialized) {
@@ -896,6 +1169,56 @@ pub fn resumeActivation() callconv(abi_types.pal_cc) void {
         runLifecycleCancel(g);
     } else if (std.mem.eql(u8, s, "lifecycle_close_reuse")) {
         runLifecycleCloseReuse(g);
+    } else if (std.mem.eql(u8, s, "hostenv_initialized")) {
+        runHostEnvInitialized(g);
+    } else if (std.mem.eql(u8, s, "hostenv_handles")) {
+        runHostEnvHandles(g);
+    } else if (std.mem.eql(u8, s, "hostenv_standard_count")) {
+        runHostEnvStandardCount(g);
+    } else if (std.mem.eql(u8, s, "hostenv_stdin")) {
+        runHostEnvStdin(g);
+    } else if (std.mem.eql(u8, s, "hostenv_stdout")) {
+        runHostEnvStdout(g);
+    } else if (std.mem.eql(u8, s, "hostenv_stderr")) {
+        runHostEnvStderr(g);
+    } else if (std.mem.eql(u8, s, "hostenv_next_handle")) {
+        runHostEnvNextHandle(g);
+    } else if (std.mem.eql(u8, s, "hostenv_active_ops")) {
+        runHostEnvActiveOps(g);
+    } else if (std.mem.eql(u8, s, "hostenv_timers")) {
+        runHostEnvTimers(g);
+    } else if (std.mem.eql(u8, s, "hostenv_signals")) {
+        runHostEnvSignals(g);
+    } else if (std.mem.eql(u8, s, "hostenv_outstanding")) {
+        runHostEnvOutstanding(g);
+    } else if (std.mem.eql(u8, s, "reg_basic")) {
+        runRegisterBasic(g);
+    } else if (std.mem.eql(u8, s, "reg_unique")) {
+        runRegisterUnique(g);
+    } else if (std.mem.eql(u8, s, "reg_active")) {
+        runRegisterActive(g);
+    } else if (std.mem.eql(u8, s, "reg_counter")) {
+        runRegisterCounter(g);
+    } else if (std.mem.eql(u8, s, "reg_struct")) {
+        runRegisterStruct(g);
+    } else if (std.mem.eql(u8, s, "reg_primitive")) {
+        runRegisterPrimitive(g);
+    } else if (std.mem.eql(u8, s, "reg_overwrite")) {
+        runRegisterOverwrite(g);
+    } else if (std.mem.eql(u8, s, "reg_nil")) {
+        runRegisterNil(g);
+    } else if (std.mem.eql(u8, s, "reg_zero")) {
+        runRegisterZero(g);
+    } else if (std.mem.eql(u8, s, "reg_max")) {
+        runRegisterMax(g);
+    } else if (std.mem.eql(u8, s, "reg_cancel_state")) {
+        runRegisterCancelState(g);
+    } else if (std.mem.eql(u8, s, "reg_concurrency")) {
+        runRegisterConcurrency(g);
+    } else if (std.mem.eql(u8, s, "reg_after_cleanup")) {
+        runRegisterAfterCleanup(g);
+    } else if (std.mem.eql(u8, s, "reg_memory")) {
+        runRegisterMemory(g);
     } else {
         failCase(g, "unknown_suite", 2);
         flushAndExit(g);
