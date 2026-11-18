@@ -9,35 +9,34 @@ The redesigned Mohabbat transitions from an out-of-process multi-binary extracti
 ### 1. File Format & Delivery Layer (The Vegetable)
 
 * **The Unified Binary**: The file acts as a polyglot entry point. On Windows, it satisfies the PE/COFF specification directly, avoiding batch file parsing, command shell trampolines, or flickering console windows. On POSIX platforms, interactive shells intercept execution and evaluate it as a script.
-* **Windows Execution Pathway**: The PE header targets the built-in AnyCPU .NET runtime (pre-installed across Windows client and server platforms). It acts as Brot on Windows: it decompresses the bundled single Zstandard-compressed data slice, allocates executable memory via unmanaged system memory interfaces, copies PAL into memory, and branches directly into the native layer without writing temporary files to disk.
+* **Windows Execution Pathway**: The PE header targets the built-in AnyCPU .NET runtime (pre-installed across Windows client and server platforms). It acts as Brot on Windows: it reads the `MHBTTAIL` EOF trailer, decompresses the **shared** Zstandard-compressed `MHBTPOOL` blob, allocates executable memory via unmanaged system memory interfaces, copies PAL into memory, and branches directly into the native layer without writing temporary files to disk.
 * **Linux & Android (Termux) Pathway**: The shell stub extracts the matching target-specific Brot executable to a securely created, randomly named temporary file prefixed with `🐚︎`, executes it, and Brot unlinks its own path immediately on startup. Brot decompresses the bundled single Zstandard-compressed data slice containing the OS-specific PAL and ISA-shared runtime. `memfd_create` may be used as an optional launch optimization when a syscall-capable helper is already available; it is not required by the baseline.
 * **macOS (Darwin) Pathway**: The baseline also launches the target-specific Brot from a random temporary file and unlinks it at startup. Brot decompresses the single bundled data slice. The macOS PAL uses anonymous JIT memory, toggles thread-level write protection while populating code, and synchronizes the instruction cache. RAM-disk staging and immediate volume detachment are not assumed by this baseline; a running executable can keep its source volume busy.
 * **Storage caveat**: Unlinking removes the temporary pathname, not its backing pages. The temporary directory may be disk-backed or `noexec`, and anonymous memory may be swapped. The baseline therefore promises prompt pathname removal, not zero persistent-storage writes. An in-memory launch path is an optional optimization, not a prerequisite.
 
-### 2. The In-Process Execution Engine (Brot, PAL, and Cranelift)
+### 2. The In-Process Execution Engine (Brot, PAL, and `zwasm`)
 
 The architecture establishes a strict layered execution chain:
 ```
-Brot --(PAL bindings)--> PAL --(PAL-to-runtime ABI)--> runtime/Cranelift --(Rusticated ABI)--> WASM brain
+Brot --(PAL bindings)--> PAL --(PAL-to-runtime ABI)--> runtime/zwasm --(Rusticated ABI)--> WASM brain
 ```
 
 * **Layer Responsibilities**:
-  * **Brot**: The entry binary launcher (AnyCPU PE on Windows; tiny target-specific binary on Unix). It decompresses the single bundled Zstandard-compressed data slice into memory, sets up PAL bindings, and jumps to PAL. Brot launchers are strictly target-specific micro-loaders that avoid generic Rust `std` to eliminate CRT overhead, thread-local bloat, and platform lock-in.
+  * **Brot**: The entry binary launcher (AnyCPU PE on Windows; tiny target-specific Zig binary on Unix using `std.compress.zstd`). It decompresses the shared Zstandard-compressed `MHBTPOOL` blob into memory, sets up PAL bindings, and jumps to PAL. Brot launchers are strictly target-specific micro-loaders built without libc/CRT overhead or thread-local bloat.
   * **PAL bindings**: The low-level interface between Brot and PAL. This interface is strictly per-OS+CPU. On Windows and macOS, it provides dynamic symbol lookup and memory/JIT protection; on Linux, PAL may invoke kernel system calls directly without dynamic loader bindings.
-  * **PAL (Platform Abstraction Layer)**: Pure relocatable machine code (1 per OS+CPU combination), built without headers, standard libraries, or relocations. It adapts host OS services into the native PAL-to-runtime ABI.
-  * **PAL-to-runtime ABI**: The native interface between PAL and the runtime. In full Mohabbat-next, it operates at roughly the complexity of the Rusticated ABI, providing host I/O primitives, event loop integration, and potential thread management hooks.
-  * **Runtime / Cranelift**: The native execution engine (1 per CPU architecture, shared across all OSes on that CPU). In the first delivery, this is the minimal interactive hello-world probe; in full delivery, it is Cranelift JIT compiling the WASM bytecode.
-  * **Rusticated ABI**: The guest ABI exposed by the runtime to the compiled WASM brain.
-  * **WASM brain**: The portable application WebAssembly bytecode.
+  * **PAL (Platform Abstraction Layer)**: Pure zero-relocation machine code (1 per OS+CPU combination), built in freestanding Zig without headers, standard libraries, or relocations. It adapts host OS services into the native PAL-to-runtime ABI.
+  * **PAL-to-runtime ABI**: The native interface between PAL and the runtime (`PalAbiTable` at `-0x20000`), providing host I/O primitives, event loop integration, memory allocation/protection, and thread/process hooks.
+  * **Runtime / `zwasm`**: The native execution engine (1 per CPU architecture, shared across all OSes on that CPU). Built in freestanding Zig (`-O ReleaseFast`) embedding **`zwasm`** (`2.12.0`, `-Dwasi=none`, `-Dengine=jit`, native `x86_64` and `aarch64` single-pass JIT / interpreter) to execute the WASM bytecode.
+  * **Rusticated ABI**: The guest ABI (`"env"`) exposed by the runtime to the compiled WASM brain.
+  * **WASM brain**: The portable application WebAssembly bytecode (`brain.wasm` in `MHBTPOOL`).
 
 * **Zero Child Processes & No Watchdogs**: The standalone Go/Wazero runner binary (`washmhost`) is retired on desktop hosts. All host services—including file system virtualization, asynchronous input/output, and terminal handles—are implemented directly inside this in-process stack. Because execution never forks or spawns secondary processes, ghost-process watchdogs, parent-death signals, and OS job objects are eliminated.
-* **Deduplicated ISA Pool (Zone C)**: Instead of packaging five redundant operating-system-specific host binaries, the compressed pool is reduced to two position-independent machine-code slices of the Cranelift compiler:
-* One compilation slice for sixty-four-bit x86 architectures.
-* One compilation slice for sixty-four-bit ARM architectures.
-* Thin native PAL machine-code modules providing dynamic system call and host interface resolution.
-* The target WebAssembly application payload (the brain).
+* **Deduplicated ISA Pool (Zone C)**: Instead of packaging five redundant operating-system-specific host binaries, the shared compressed pool (`MHBTPOOL`) contains:
+  * Two position-independent, zero-relocation machine-code slices of the `zwasm` runtime (`runtime-x86_64`, `runtime-aarch64`).
+  * Thin native PAL machine-code modules (`platform-{windows,linux,darwin}-{x86_64,aarch64}`).
+  * Test probe payloads (`hello-*`, `fileio-*`) and the target WebAssembly application payload (`brain.wasm`).
 
-* **In-Memory Compilation & Execution**: Brot allocates anonymous code pages, decompresses the bundled data slice, hands execution to PAL via PAL bindings, which in turn invokes Cranelift via the PAL-to-runtime ABI. Cranelift compiles the WebAssembly bytecode directly into that arena, synchronizes the CPU instruction cache, transitions memory protection flags to read-and-execute, binds native host system-call vectors into the guest execution context, and branches directly into the compiled application.
+* **In-Memory Compilation & Execution**: Brot allocates anonymous code pages, decompresses the shared `MHBTPOOL` blob, hands execution to PAL via PAL bindings, which in turn invokes `zwasm` via the PAL-to-runtime ABI. `zwasm` compiles the WebAssembly bytecode in a single pass directly into JIT memory allocated through `PalAbiTable`, synchronizes the CPU instruction cache, enforces $W \oplus X$ (`RX`), binds native host system-call vectors (`"env"`) into the guest execution context, and branches directly into the compiled application.
 
 ---
 
@@ -48,8 +47,8 @@ The first delivery validates the handoff using a self-contained, CPU-dependent b
 ### 1. Scope & Objective
 
 * Deliver one Windows AnyCPU EXE that runs on both AMD64 and ARM64 Windows. Its embedded manifest declares both supported architectures so supported Windows versions can select the native CLR.
-* The Windows EXE acts as Brot on Windows: it decompresses the bundled single Zstandard-compressed data slice and sets up the architecture-matched PAL and runtime binaries. The EXE is the only Windows deliverable; do not produce separate AMD64 and ARM64 EXE assets.
-* Support Linux AMD64/AArch64, Android Termux AArch64, and macOS x86-64/AArch64 through the Unix shell bootstrap and matching tiny Brot launcher. The bootstrap extracts Brot to the random temporary path, and Brot removes that path immediately after startup. Brot launchers avoid generic Rust `std`.
+* The Windows EXE acts as Brot on Windows: it reads `MHBTPOOL` via `MHBTTAIL` and sets up the architecture-matched PAL and runtime binaries. The EXE is the only Windows deliverable; do not produce separate AMD64 and ARM64 EXE assets.
+* Support Linux AMD64/AArch64, Android Termux AArch64, and macOS x86-64/AArch64 through the Unix shell bootstrap and matching tiny Zig Brot launcher. The bootstrap extracts Brot to the random temporary path, and Brot removes that path immediately after startup.
 * Validate anonymous executable-memory allocation, cache coherence, and native execution handoff on every supported OS/architecture. Temporary-file backing is the baseline; optional memory-only launch methods do not gate support.
 
 The unified vegetable packages the movable binaries inside a single Zstandard-compressed data slice:
