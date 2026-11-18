@@ -5,11 +5,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -18,6 +20,52 @@ type testRoundTripper func(*http.Request) (*http.Response, error)
 
 func (roundTripper testRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	return roundTripper(req)
+}
+
+func TestRuntimeWheelSourcesWithPyPIOffline(t *testing.T) {
+	platform := RuntimePlatformInfo{OS: "windows", Arch: "arm64", ExecutionMode: "mohabbat"}
+	const filename = "litert_lm_api-0.19.0-py3-none-win_amd64.whl"
+	root := "https://assets.kabi.bi/" + filename
+	prefixed := "https://assets.kabi.bi/gemma4/" + filename
+	var requests []string
+	client := &http.Client{Transport: testRoundTripper(func(req *http.Request) (*http.Response, error) {
+		requests = append(requests, req.Method+" "+req.URL.String())
+		switch req.URL.String() {
+		case litertlmPyPIURL:
+			return nil, errors.New("PyPI is unreachable")
+		case root:
+			return &http.Response{StatusCode: http.StatusNotFound, Status: "404 Not Found", ContentLength: 123, Body: http.NoBody}, nil
+		case prefixed:
+			return &http.Response{StatusCode: http.StatusOK, ContentLength: 456, Body: http.NoBody}, nil
+		default:
+			return nil, errors.New("unexpected URL")
+		}
+	})}
+	urls, name, size, err := runtimeWheelSources(context.Background(), client, platform)
+	if err != nil || name != filename || size != 456 || !slices.Equal(urls, []string{prefixed}) {
+		t.Fatalf("wheel discovery = (%v, %q, %d, %v), want prefixed mirror and its exact size", urls, name, size, err)
+	}
+	if want := []string{"GET " + litertlmPyPIURL, "HEAD " + root, "HEAD " + prefixed}; !slices.Equal(requests, want) {
+		t.Fatalf("requests = %v, want %v (no wheel downloads before consent)", requests, want)
+	}
+}
+
+func TestRuntimeWheelSourcesPrefersPyPI(t *testing.T) {
+	platform := RuntimePlatformInfo{OS: "linux", Arch: "arm64"}
+	const filename = "litert_lm_api-0.19.0-py3-none-manylinux_2_27_aarch64.whl"
+	const primary = "https://files.pythonhosted.org/" + filename
+	client := &http.Client{Transport: testRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodGet || req.URL.String() != litertlmPyPIURL {
+			t.Errorf("unexpected request: %s %s", req.Method, req.URL)
+		}
+		payload := `{"releases":{"0.19.0":[{"filename":"` + filename + `","url":"` + primary + `","size":123}]}}`
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(payload))}, nil
+	})}
+	urls, name, size, err := runtimeWheelSources(context.Background(), client, platform)
+	want := []string{primary, "https://assets.kabi.bi/" + filename, "https://assets.kabi.bi/gemma4/" + filename}
+	if err != nil || name != filename || size != 123 || !slices.Equal(urls, want) {
+		t.Fatalf("wheel discovery = (%v, %q, %d, %v), want (%v, %q, 123, nil)", urls, name, size, err, want, filename)
+	}
 }
 
 func TestDownloadAndValidateFromSourcesFallsBackInOrder(t *testing.T) {

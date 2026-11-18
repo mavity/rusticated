@@ -64,12 +64,23 @@ func TestModelAssetURLsUseHuggingFaceBeforeR2Fallbacks(t *testing.T) {
 func TestModelAssetURLsDoNotFallbackForOtherHostsOrModels(t *testing.T) {
 	for _, url := range []string{
 		"https://example.test/gemma-4-E2B-it.litertlm",
-		"https://huggingface.co/litert-community/embeddinggemma-2-text-270m-litert-lm/resolve/main/embeddinggemma-2-text-270m.litertlm",
+		"https://huggingface.co/example/resolve/main/unrelated.litertlm",
 	} {
 		got := modelAssetURLs(url)
 		if len(got) != 1 || got[0] != url {
 			t.Errorf("modelAssetURLs(%q) = %#v, want only the original URL", url, got)
 		}
+	}
+}
+
+func TestEmbeddingModelAssetURLs(t *testing.T) {
+	want := []string{
+		DefaultEmbeddingModelURL,
+		"https://assets.kabi.bi/embeddinggemma-2-text-270m.litertlm",
+		"https://assets.kabi.bi/gemma4/embeddinggemma-2-text-270m.litertlm",
+	}
+	if got := modelAssetURLs(DefaultEmbeddingModelURL); !reflect.DeepEqual(got, want) {
+		t.Fatalf("embedding sources = %v, want %v", got, want)
 	}
 }
 

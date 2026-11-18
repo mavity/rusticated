@@ -334,8 +334,45 @@ func selectWheelURLWithClient(ctx context.Context, pypiURL string, client *http.
 	return selectWheelURLForPlatformWithClient(ctx, pypiURL, client, InspectRuntimePlatform())
 }
 
-func selectWheelURLForPlatform(ctx context.Context, pypiURL string, platform RuntimePlatformInfo) (string, string, int64, error) {
-	return selectWheelURLForPlatformWithClient(ctx, pypiURL, &http.Client{Timeout: 60 * time.Second}, platform)
+func runtimeWheelSources(ctx context.Context, client *http.Client, platform RuntimePlatformInfo) ([]string, string, int64, error) {
+	tag := runtimeWheelPlatformTag(platform)
+	if tag == "" {
+		return nil, "", 0, fmt.Errorf("no compatible LiteRT-LM %s wheel for %s/%s in %s mode", PinnedLiteRTLMVersion, platform.OS, platform.Arch, platform.ExecutionMode)
+	}
+
+	primary, filename, size, upstreamErr := selectWheelURLForPlatformWithClient(ctx, litertlmPyPIURL, client, platform)
+	if upstreamErr == nil && primary != "" && size > 0 {
+		return append([]string{primary}, assetMirrorURLs(filename)...), filename, size, nil
+	}
+	if upstreamErr == nil {
+		upstreamErr = fmt.Errorf("PyPI did not provide a valid LiteRT-LM wheel URL and size")
+	}
+
+	// The pinned release's published wheel names let a fresh install find the
+	// mirror objects even when PyPI metadata is unavailable.
+	filename = "litert_lm_api-" + PinnedLiteRTLMVersion + "-py3-none-" + tag + ".whl"
+	mirrors := assetMirrorURLs(filename)
+	failures := []error{upstreamErr}
+	for i, mirror := range mirrors {
+		if err := ctx.Err(); err != nil {
+			return nil, "", 0, err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodHead, mirror, nil)
+		if err != nil {
+			return nil, "", 0, err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("inspect mirrored wheel %s: %w", mirror, err))
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK && resp.ContentLength > 0 {
+			return mirrors[i:], filename, resp.ContentLength, nil
+		}
+		failures = append(failures, fmt.Errorf("inspect mirrored wheel %s: HTTP %s, content length %d", mirror, resp.Status, resp.ContentLength))
+	}
+	return nil, "", 0, errors.Join(failures...)
 }
 
 func selectWheelURLForPlatformWithClient(ctx context.Context, pypiURL string, client *http.Client, platform RuntimePlatformInfo) (string, string, int64, error) {
@@ -379,26 +416,29 @@ func wheelMatchesPlatform(filename string) bool {
 }
 
 func wheelMatchesRuntimePlatform(filename string, platform RuntimePlatformInfo) bool {
-	f := strings.ToLower(filename)
+	tag := runtimeWheelPlatformTag(platform)
+	return tag != "" && strings.HasSuffix(strings.ToLower(filename), "-"+tag+".whl")
+}
+
+func runtimeWheelPlatformTag(platform RuntimePlatformInfo) string {
 	switch platform.OS {
 	case "windows":
-		switch platform.Arch {
-		case "amd64":
-			return strings.HasSuffix(f, "-win_amd64.whl")
-		case "arm64":
-			return platform.ExecutionMode == "mohabbat" && strings.HasSuffix(f, "-win_amd64.whl")
+		if platform.Arch == "amd64" || (platform.Arch == "arm64" && platform.ExecutionMode == "mohabbat") {
+			return "win_amd64"
 		}
 	case "darwin":
-		return platform.Arch == "arm64" && strings.HasSuffix(f, "-macosx_12_0_arm64.whl")
+		if platform.Arch == "arm64" {
+			return "macosx_12_0_arm64"
+		}
 	case "linux":
 		switch platform.Arch {
 		case "amd64":
-			return strings.HasSuffix(f, "-manylinux_2_27_x86_64.whl")
+			return "manylinux_2_27_x86_64"
 		case "arm64":
-			return strings.HasSuffix(f, "-manylinux_2_27_aarch64.whl")
+			return "manylinux_2_27_aarch64"
 		}
 	}
-	return false
+	return ""
 }
 
 func runtimeLibCacheDirName(wheelFilename string) string {

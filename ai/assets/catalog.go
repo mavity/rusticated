@@ -21,13 +21,16 @@ func modelAssetURLs(primary string) []string {
 	}
 	filename := path.Base(parsed.Path)
 	lowerFilename := strings.ToLower(filename)
-	if !strings.HasPrefix(lowerFilename, "gemma-4-") || !strings.HasSuffix(lowerFilename, ".litertlm") {
+	if primary != DefaultEmbeddingModelURL &&
+		(!strings.HasPrefix(lowerFilename, "gemma-4-") || !strings.HasSuffix(lowerFilename, ".litertlm")) {
 		return urls
 	}
-	return append(urls,
-		modelFallbackBase+"/"+filename,
-		modelFallbackBase+"/gemma4/"+filename,
-	)
+	return append(urls, assetMirrorURLs(filename)...)
+}
+
+func assetMirrorURLs(filename string) []string {
+	key := url.PathEscape(filename)
+	return []string{modelFallbackBase + "/" + key, modelFallbackBase + "/gemma4/" + key}
 }
 
 // ModelTier describes one supported Gemma 4 LiteRT-LM artifact.

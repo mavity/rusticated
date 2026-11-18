@@ -48,13 +48,13 @@ const browserAssetBootstrapJS = `
       const parsed = new URL(url);
       const filename = filenameOf(url);
       if (parsed.hostname.toLowerCase() !== 'huggingface.co' ||
-          !/^gemma-4-.*\.litertlm$/i.test(filename)) {
+          (url !== '` + DefaultEmbeddingModelURL + `' && !/^gemma-4-.*\.litertlm$/i.test(filename))) {
         return urls;
       }
       const encodedFilename = encodeURIComponent(filename);
       urls.push(
-        'https://assets.kabi.bi/' + encodedFilename,
-        'https://assets.kabi.bi/gemma4/' + encodedFilename
+        '` + modelFallbackBase + `/' + encodedFilename,
+        '` + modelFallbackBase + `/gemma4/' + encodedFilename
       );
     } catch (e) {}
     return urls;

@@ -6,9 +6,11 @@ package assets
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // litertlmPyPIURL is the PyPI JSON endpoint used to discover a compatible
@@ -123,13 +125,13 @@ func EnsureRuntime(ctx context.Context, opts FetchOptions) (string, error) {
 
 	wheelPath := findCachedWheelForPlatform(opts.CacheDir, "litert_lm", platform)
 	if wheelPath == "" {
-		opts.progress("discover", "LiteRT-LM wheel from PyPI", -1)
-		url, filename, _, err := selectWheelURLForPlatform(ctx, litertlmPyPIURL, platform)
+		opts.progress("discover", "LiteRT-LM wheel", -1)
+		urls, filename, _, err := runtimeWheelSources(ctx, &http.Client{Timeout: 15 * time.Second}, platform)
 		if err != nil {
 			return "", err
 		}
 		wheelPath = filepath.Join(opts.CacheDir, filename)
-		if err := downloadAndValidate(ctx, url, wheelPath, validateWheel, opts); err != nil {
+		if err := downloadAndValidateFromSources(ctx, urls, wheelPath, validateWheel, opts); err != nil {
 			return "", err
 		}
 	}
@@ -154,7 +156,7 @@ func EnsureRuntime(ctx context.Context, opts FetchOptions) (string, error) {
 }
 
 // RuntimeDownloadSize estimates the exact runtime-wheel transfer before consent.
-// It reads PyPI metadata only when a compatible wheel is not already cached.
+// It queries PyPI metadata or mirror headers only on a cache miss.
 func RuntimeDownloadSize(ctx context.Context, cacheDir string) (int64, error) {
 	platform := InspectRuntimePlatform()
 	if platform.OS == "browser" {
@@ -169,12 +171,9 @@ func RuntimeDownloadSize(ctx context.Context, cacheDir string) (int64, error) {
 	if findCachedWheelForPlatform(cacheDir, "litert_lm", platform) != "" {
 		return 0, nil
 	}
-	_, _, size, err := selectWheelURLForPlatform(ctx, litertlmPyPIURL, platform)
+	_, _, size, err := runtimeWheelSources(ctx, &http.Client{Timeout: 15 * time.Second}, platform)
 	if err != nil {
 		return 0, fmt.Errorf("inspect LiteRT-LM runtime download: %w", err)
-	}
-	if size <= 0 {
-		return 0, fmt.Errorf("PyPI did not provide a valid LiteRT-LM wheel size")
 	}
 	return size, nil
 }

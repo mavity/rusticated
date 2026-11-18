@@ -11,9 +11,9 @@ and wire protocols (OpenRouter, Anthropic, OpenAI, GitHub Copilot, and Google Ge
 1. **Explicit local-download consent.** An unconfigured runner prompts before
    fetching the LiteRT-LM runtime, local model, or embedding model. The prompt
    includes estimated transfer bytes and the cache directory. Cached assets are
-   excluded from the estimate. Runtime wheel metadata may be queried to obtain
-   the selected wheel's exact size, but the wheel and model files are not
-   downloaded before confirmation.
+   excluded from the estimate. PyPI metadata or mirror response headers may
+   be queried for the wheel's exact size, but the wheel and model files are
+   not downloaded before confirmation.
 2. **UI-independent prompting.** `LazyAIRunner` uses `OnboardingPrompter`.
    Kabibi's interactive Shell mounts a wizard widget; one-shot/headless
    execution uses the line-oriented stdio implementation. A missing or
@@ -66,12 +66,14 @@ The default local embedder, `embeddinggemma-2-text-270m.litertlm`, is
 native and browser-local setups, with browser cache state included in the
 estimate.
 
-Gemma 4 model downloads try the catalogued Hugging Face URL first, then the
-same filename at `https://assets.kabi.bi/`, and finally under
-`https://assets.kabi.bi/gemma4/`. The fallback also applies to direct browser
-model streams; browser deployments must allow the app origin through CORS on
-the asset domain. The LiteRT-LM runtime wheel remains sourced from PyPI, and
-the EmbeddingGemma model remains sourced from Hugging Face.
+Gemma 4 and EmbeddingGemma prefer Hugging Face; native LiteRT-LM wheels prefer
+PyPI. On failure Kabibi tries the matching filename at `https://assets.kabi.bi/`
+and then under `https://assets.kabi.bi/gemma4/`. If PyPI metadata is unavailable,
+Kabibi derives the pinned wheel filename for the host and uses a mirror HEAD
+request to size the download. A fresh setup can therefore proceed without
+Hugging Face or PyPI if the required mirror objects are available. Model
+fallback also applies to browser streams, which require CORS on the asset
+domain. The separate browser JavaScript runtime still comes from jsDelivr.
 
 `syscall.PlatformInfo` retains its 676-byte legacy prefix and appends sixteen
 16-byte tagged memory slots, for a 932-byte total layout. Memory kinds
