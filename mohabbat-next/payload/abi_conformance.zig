@@ -597,6 +597,235 @@ fn runProc(g: *AbiGlobals) void {
     }
 }
 
+fn runLifecycleTty(g: *AbiGlobals) void {
+    _ = getAbi().fd_isatty(0);
+    _ = getAbi().fd_isatty(1);
+    _ = getAbi().fd_isatty(2);
+    passCase(g, "lifecycle/tty");
+    flushAndExit(g);
+}
+
+fn runLifecycleStdWrite(g: *AbiGlobals) void {
+    const msg = "x";
+    switch (g.step) {
+        0 => {
+            g.ov1 = .{};
+            getAbi().write(&g.ov1, 1, msg.ptr, msg.len);
+            g.step = 1;
+            if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+        },
+        else => {},
+    }
+    if (g.step == 1) {
+        if (g.ov1.@"error" != 0 or g.ov1.result_ext != 1) {
+            failCase(g, "lifecycle/std_write", g.ov1.@"error");
+            flushAndExit(g);
+            return;
+        }
+        g.ov1 = .{};
+        getAbi().write(&g.ov1, 2, msg.ptr, msg.len);
+        g.step = 2;
+        if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    }
+    if (g.step == 2) {
+        if (g.ov1.@"error" != 0 or g.ov1.result_ext != 1) {
+            failCase(g, "lifecycle/std_write", g.ov1.@"error");
+        } else {
+            passCase(g, "lifecycle/std_write");
+        }
+        flushAndExit(g);
+    }
+}
+
+fn runLifecycleInvalidHandles(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().read(&g.ov1, 0xffff_ffff_ffff_ffff, &g.buf1, 1);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    if (g.ov1.@"error" != abi_types.ERROR_BADF) {
+        failCase(g, "lifecycle/invalid_handles", g.ov1.@"error");
+        flushAndExit(g);
+        return;
+    }
+    g.ov1 = .{};
+    getAbi().write(&g.ov1, 0xffff_ffff_ffff_ffff, "x".ptr, 1);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    if (g.ov1.@"error" != abi_types.ERROR_BADF) {
+        failCase(g, "lifecycle/invalid_handles", g.ov1.@"error");
+    } else {
+        passCase(g, "lifecycle/invalid_handles");
+    }
+    flushAndExit(g);
+}
+
+fn runLifecycleStdClose(g: *AbiGlobals) void {
+    getAbi().handle_close(0);
+    getAbi().handle_close(1);
+    getAbi().handle_close(2);
+    const msg = "x";
+    if (g.step == 0) {
+        g.ov1 = .{};
+        getAbi().write(&g.ov1, 1, msg.ptr, msg.len);
+        g.step = 1;
+        if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    }
+    if (g.step == 1) {
+        if (g.ov1.@"error" != 0 or g.ov1.result_ext != 1) {
+            failCase(g, "lifecycle/std_close", g.ov1.@"error");
+        } else {
+            passCase(g, "lifecycle/std_close");
+        }
+        flushAndExit(g);
+    }
+}
+
+fn runLifecycleDoubleClose(g: *AbiGlobals) void {
+    if (g.step == 0) {
+        g.ov1 = .{};
+        getAbi().path_open(&g.ov1, "abi_double_close.txt".ptr, "abi_double_close.txt".len, 2 | abi_types.OPEN_FLAG_CREATE | abi_types.OPEN_FLAG_TRUNC);
+        g.step = 1;
+        if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    }
+    if (g.step == 1) {
+        if (g.ov1.@"error" != 0) {
+            failCase(g, "lifecycle/double_close", g.ov1.@"error");
+            flushAndExit(g);
+            return;
+        }
+        g.h1 = g.ov1.result_ext;
+        getAbi().handle_close(g.h1);
+        getAbi().handle_close(g.h1);
+        g.ov1 = .{};
+        getAbi().read(&g.ov1, g.h1, &g.buf1, 1);
+        g.step = 2;
+        if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    }
+    if (g.step == 2) {
+        if (g.ov1.@"error" != abi_types.ERROR_BADF) {
+            failCase(g, "lifecycle/double_close", g.ov1.@"error");
+        } else {
+            passCase(g, "lifecycle/double_close");
+        }
+        getAbi().path_remove(&g.ov1, "abi_double_close.txt".ptr, "abi_double_close.txt".len, 0);
+        flushAndExit(g);
+    }
+}
+
+fn runLifecycleHandleTokens(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().process_pipe(&g.ov1);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    const r: u64 = @as(u32, @truncate(g.ov1.result_ext));
+    const w: u64 = @as(u32, @truncate(g.ov1.result_ext >> 32));
+    if (g.ov1.@"error" != 0 or r < 3 or w < 3 or r == w) {
+        failCase(g, "lifecycle/handle_tokens", g.ov1.@"error");
+    } else {
+        passCase(g, "lifecycle/handle_tokens");
+    }
+    getAbi().handle_close(r);
+    getAbi().handle_close(w);
+    flushAndExit(g);
+}
+
+fn runLifecycleStale(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().process_pipe(&g.ov1);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    const r: u64 = @as(u32, @truncate(g.ov1.result_ext));
+    const w: u64 = @as(u32, @truncate(g.ov1.result_ext >> 32));
+    getAbi().handle_close(r);
+    getAbi().handle_close(w);
+    g.ov1 = .{};
+    getAbi().read(&g.ov1, r, &g.buf1, 1);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    if (g.ov1.@"error" != abi_types.ERROR_BADF) {
+        failCase(g, "lifecycle/stale", g.ov1.@"error");
+    } else {
+        passCase(g, "lifecycle/stale");
+    }
+    flushAndExit(g);
+}
+
+fn runLifecycleTokenReuse(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().process_pipe(&g.ov1);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    const r1: u64 = @as(u32, @truncate(g.ov1.result_ext));
+    const w1: u64 = @as(u32, @truncate(g.ov1.result_ext >> 32));
+    getAbi().handle_close(r1);
+    getAbi().handle_close(w1);
+    g.ov1 = .{};
+    getAbi().process_pipe(&g.ov1);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    const r2: u64 = @as(u32, @truncate(g.ov1.result_ext));
+    const w2: u64 = @as(u32, @truncate(g.ov1.result_ext >> 32));
+    if (g.ov1.@"error" != 0 or r2 == r1 or w2 == w1) {
+        failCase(g, "lifecycle/token_reuse", g.ov1.@"error");
+    } else {
+        passCase(g, "lifecycle/token_reuse");
+    }
+    getAbi().handle_close(r2);
+    getAbi().handle_close(w2);
+    flushAndExit(g);
+}
+
+fn runLifecycleOverlappedOnce(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 0);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) {
+        failCase(g, "lifecycle/overlapped_once", 1);
+    } else if (g.ov1.@"error" != 0) {
+        failCase(g, "lifecycle/overlapped_once", g.ov1.@"error");
+    } else {
+        passCase(g, "lifecycle/overlapped_once");
+    }
+    flushAndExit(g);
+}
+
+fn runLifecycleCancel(g: *AbiGlobals) void {
+    if (g.step == 0) {
+        g.ov1 = .{};
+        getAbi().timer_set(&g.ov1, 5000);
+        getAbi().cancel(&g.ov1);
+        g.step = 1;
+        if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    }
+    if (g.step == 1) {
+        if (g.ov1.@"error" != abi_types.ERROR_CANCELED) {
+            failCase(g, "lifecycle/cancel", g.ov1.@"error");
+        } else {
+            passCase(g, "lifecycle/cancel");
+        }
+        flushAndExit(g);
+    }
+}
+
+fn runLifecycleCloseReuse(g: *AbiGlobals) void {
+    if (g.step == 0) {
+        g.ov1 = .{};
+        getAbi().process_pipe(&g.ov1);
+        g.step = 1;
+        if ((g.ov1.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    }
+    if (g.step == 1) {
+        const r: u64 = @as(u32, @truncate(g.ov1.result_ext));
+        const w: u64 = @as(u32, @truncate(g.ov1.result_ext >> 32));
+        getAbi().handle_close(r);
+        getAbi().handle_close(w);
+        g.ov2 = .{};
+        getAbi().timer_set(&g.ov2, 15);
+        g.step = 2;
+        if ((g.ov2.flags & abi_types.FLAG_COMPLETED) == 0) return;
+    }
+    if (g.step == 2) {
+        if (g.ov2.@"error" != 0) {
+            failCase(g, "lifecycle/close_reuse", g.ov2.@"error");
+        } else {
+            passCase(g, "lifecycle/close_reuse");
+        }
+        flushAndExit(g);
+    }
+}
+
 pub fn resumeActivation() callconv(abi_types.pal_cc) void {
     const g = getGlobals();
     if (!g.initialized) {
@@ -645,6 +874,28 @@ pub fn resumeActivation() callconv(abi_types.pal_cc) void {
         runNet(g);
     } else if (std.mem.eql(u8, s, "proc")) {
         runProc(g);
+    } else if (std.mem.eql(u8, s, "lifecycle_tty")) {
+        runLifecycleTty(g);
+    } else if (std.mem.eql(u8, s, "lifecycle_std_write")) {
+        runLifecycleStdWrite(g);
+    } else if (std.mem.eql(u8, s, "lifecycle_invalid_handles")) {
+        runLifecycleInvalidHandles(g);
+    } else if (std.mem.eql(u8, s, "lifecycle_std_close")) {
+        runLifecycleStdClose(g);
+    } else if (std.mem.eql(u8, s, "lifecycle_double_close")) {
+        runLifecycleDoubleClose(g);
+    } else if (std.mem.eql(u8, s, "lifecycle_handle_tokens")) {
+        runLifecycleHandleTokens(g);
+    } else if (std.mem.eql(u8, s, "lifecycle_stale")) {
+        runLifecycleStale(g);
+    } else if (std.mem.eql(u8, s, "lifecycle_token_reuse")) {
+        runLifecycleTokenReuse(g);
+    } else if (std.mem.eql(u8, s, "lifecycle_overlapped_once")) {
+        runLifecycleOverlappedOnce(g);
+    } else if (std.mem.eql(u8, s, "lifecycle_cancel")) {
+        runLifecycleCancel(g);
+    } else if (std.mem.eql(u8, s, "lifecycle_close_reuse")) {
+        runLifecycleCloseReuse(g);
     } else {
         failCase(g, "unknown_suite", 2);
         flushAndExit(g);

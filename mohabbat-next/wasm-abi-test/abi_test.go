@@ -4,6 +4,7 @@ package wasmabitest
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"io"
 	"net"
@@ -281,4 +282,168 @@ func TestOverlappedPipeReadWriteAndEOF(t *testing.T) {
 	if err := <-writeDone; err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestHandleLifecycleTty(t *testing.T) {
+	for _, file := range []*os.File{os.Stdin, os.Stdout, os.Stderr} {
+		if file == nil {
+			t.Fatal("standard stream is nil")
+		}
+		_ = syscall.Isatty(file.Fd())
+	}
+}
+
+func TestHandleLifecycleStdWrite(t *testing.T) {
+	if n, err := os.Stdout.Write([]byte("x")); err != nil || n != 1 {
+		t.Fatalf("stdout write = (%d, %v), want (1, nil)", n, err)
+	}
+	if n, err := os.Stderr.Write([]byte("x")); err != nil || n != 1 {
+		t.Fatalf("stderr write = (%d, %v), want (1, nil)", n, err)
+	}
+}
+
+func TestHandleLifecycleInvalidHandles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "invalid")
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedFD := file.Fd()
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	invalid, err := os.NewFile(closedFD, "invalid").Read(make([]byte, 1))
+	if err == nil {
+		t.Fatalf("read on stale fd %d succeeded with %d bytes", closedFD, invalid)
+	}
+}
+
+func TestHandleLifecycleStdClose(t *testing.T) {
+	if os.Stdin.Fd() != 0 || os.Stdout.Fd() != 1 || os.Stderr.Fd() != 2 {
+		t.Fatalf("standard fds = (%d,%d,%d), want (0,1,2)", os.Stdin.Fd(), os.Stdout.Fd(), os.Stderr.Fd())
+	}
+	if n, err := os.Stdout.Write([]byte("x")); err != nil || n != 1 {
+		t.Fatalf("stdout remained unusable: (%d, %v)", n, err)
+	}
+}
+
+func TestHandleLifecycleDoubleClose(t *testing.T) {
+	file, err := os.Create(filepath.Join(t.TempDir(), "double-close"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err == nil {
+		t.Fatal("second close unexpectedly succeeded")
+	}
+}
+
+func TestHandleLifecycleHandleTokens(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reader.Fd() < 3 || writer.Fd() < 3 {
+		t.Fatalf("pipe handles are not in custom range: reader=%d writer=%d", reader.Fd(), writer.Fd())
+	}
+	if reader.Fd() == writer.Fd() {
+		t.Fatalf("pipe reused one handle for both ends: %d", reader.Fd())
+	}
+	_ = reader.Close()
+	_ = writer.Close()
+}
+
+func TestHandleLifecycleStale(t *testing.T) {
+	file, err := os.Create(filepath.Join(t.TempDir(), "stale"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fd := file.Fd()
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Read(make([]byte, 1)); err == nil {
+		t.Fatalf("closed handle %d remained readable", fd)
+	}
+	if _, err := file.Write([]byte("x")); err == nil {
+		t.Fatalf("closed handle %d remained writable", fd)
+	}
+}
+
+func TestHandleLifecycleTokenReuse(t *testing.T) {
+	first, err := os.Create(filepath.Join(t.TempDir(), "first"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstFD := first.Fd()
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second, err := os.Create(filepath.Join(t.TempDir(), "second"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondFD := second.Fd()
+	if secondFD == firstFD {
+		t.Fatalf("new handle reused stale/live handle %d", firstFD)
+	}
+	_ = second.Close()
+}
+
+func TestHandleLifecycleOverlappedOnce(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := writer.Write([]byte("z"))
+		done <- err
+	}()
+	buf := make([]byte, 1)
+	n, err := io.ReadFull(reader, buf)
+	if err != nil || n != 1 {
+		t.Fatalf("one overlapped pipe read = (%d, %v)", n, err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	_ = reader.Close()
+	_ = writer.Close()
+}
+
+func TestHandleLifecycleCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	select {
+	case <-ctx.Done():
+		if ctx.Err() != context.Canceled {
+			t.Fatalf("canceled context error = %v", ctx.Err())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled operation completed incorrectly")
+	}
+}
+
+func TestHandleLifecycleCloseReuse(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	next, err := os.Create(filepath.Join(t.TempDir(), "next"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := next.Write([]byte("alive")); err != nil {
+		t.Fatal(err)
+	}
+	_ = next.Close()
 }

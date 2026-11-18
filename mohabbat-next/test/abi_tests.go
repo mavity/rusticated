@@ -11,7 +11,75 @@ import (
 	"time"
 )
 
-var nativeAbiSuites = []string{"misc", "timer", "fs", "links", "net", "proc"}
+var nativeAbiSuites = []string{
+	"misc", "timer", "fs", "links", "net", "proc",
+	"lifecycle_tty", "lifecycle_std_write", "lifecycle_invalid_handles",
+	"lifecycle_std_close", "lifecycle_double_close", "lifecycle_handle_tokens",
+	"lifecycle_stale", "lifecycle_token_reuse", "lifecycle_overlapped_once",
+	"lifecycle_cancel", "lifecycle_close_reuse",
+}
+
+var nativeAbiExpectedPasses = map[string][]string{
+	"misc":                      {"misc/get_time", "misc/get_random", "misc/cwd_roundtrip", "misc/get_platform_info", "misc/tty_get_size"},
+	"timer":                     {"timer/zero_inline", "timer/async_15ms", "timer/cancel"},
+	"fs":                        {"fs/mkdir", "fs/open", "fs/write", "fs/truncate", "fs/path_stat", "fs/rename", "fs/dir_read", "fs/remove_dir"},
+	"links":                     {"links/hardlink", "links/symlink", "links/readlink"},
+	"net":                       {"net/lookup", "net/listen", "net/connect", "net/accept", "net/echo"},
+	"proc":                      {"proc/pipe", "proc/pipe_rw"},
+	"lifecycle_tty":             {"lifecycle/tty"},
+	"lifecycle_std_write":       {"lifecycle/std_write"},
+	"lifecycle_invalid_handles": {"lifecycle/invalid_handles"},
+	"lifecycle_std_close":       {"lifecycle/std_close"},
+	"lifecycle_double_close":    {"lifecycle/double_close"},
+	"lifecycle_handle_tokens":   {"lifecycle/handle_tokens"},
+	"lifecycle_stale":           {"lifecycle/stale"},
+	"lifecycle_token_reuse":     {"lifecycle/token_reuse"},
+	"lifecycle_overlapped_once": {"lifecycle/overlapped_once"},
+	"lifecycle_cancel":          {"lifecycle/cancel"},
+	"lifecycle_close_reuse":     {"lifecycle/close_reuse"},
+}
+
+func validateNativeAbiOutput(suite string, output []byte) error {
+	expected := nativeAbiExpectedPasses[suite]
+	if len(expected) == 0 {
+		return fmt.Errorf("no expected PASS cases configured for suite %q", suite)
+	}
+	seen := make(map[string]int)
+	var failures []string
+	for _, line := range strings.Split(string(output), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "PASS "):
+			seen[strings.TrimPrefix(line, "PASS ")]++
+		case strings.HasPrefix(line, "FAIL "):
+			failures = append(failures, line)
+		}
+	}
+	if len(failures) != 0 {
+		return fmt.Errorf("suite reported failures:\n%s\noutput:\n%s", strings.Join(failures, "\n"), string(output))
+	}
+	var missing, unexpected []string
+	allowed := make(map[string]bool, len(expected))
+	for _, name := range expected {
+		allowed[name] = true
+		switch seen[name] {
+		case 0:
+			missing = append(missing, name)
+		case 1:
+		default:
+			unexpected = append(unexpected, fmt.Sprintf("%s (repeated %d times)", name, seen[name]))
+		}
+	}
+	for name := range seen {
+		if !allowed[name] {
+			unexpected = append(unexpected, name)
+		}
+	}
+	if len(missing) != 0 || len(unexpected) != 0 {
+		return fmt.Errorf("suite output mismatch: missing=%v unexpected=%v\noutput:\n%s", missing, unexpected, string(output))
+	}
+	return nil
+}
 
 func (r *Runner) RunStage3NativeAbiConformanceTests() {
 	if runtime.GOOS != "windows" {
@@ -39,7 +107,7 @@ func (r *Runner) RunStage3NativeAbiConformanceTests() {
 			if err != nil {
 				return fmt.Errorf("%w\n%s", err, string(out))
 			}
-			return nil
+			return validateNativeAbiOutput(suite, out)
 		})
 	}
 
@@ -63,7 +131,7 @@ func (r *Runner) RunStage3NativeAbiConformanceTests() {
 					if err != nil {
 						return fmt.Errorf("%w\n%s", err, string(cmdOut))
 					}
-					return nil
+					return validateNativeAbiOutput(suite, cmdOut)
 				})
 			}
 		}
