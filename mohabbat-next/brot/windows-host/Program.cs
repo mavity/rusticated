@@ -96,7 +96,18 @@ internal static class Program
                 args.Length == 3 ? args[2] : "load-add-store");
         }
         bool fileIoTest = args.Length >= 2 && args[0] == "--file-io-test";
-        bool hasBrain = TryReadComponent("brain.wasm") != null;
+        string overrideWasmPath = null;
+        int guestArgStart = 0;
+        if (args.Length >= 2 && args[0] == "--wasm")
+        {
+            overrideWasmPath = args[1];
+            guestArgStart = 2;
+            if (args.Length > 2 && args[2] == "--")
+            {
+                guestArgStart = 3;
+            }
+        }
+        bool hasBrain = overrideWasmPath != null || TryReadComponent("brain.wasm") != null;
         if (args.Length != 0 && !fileIoTest && !hasBrain)
         {
             Console.Error.WriteLine("This executable does not accept arguments.");
@@ -135,6 +146,16 @@ internal static class Program
                     Array.Copy(args, 2, guestArgs, 0, guestArgs.Length);
                 }
             }
+            else if (overrideWasmPath != null)
+            {
+                int extraCount = args.Length - guestArgStart;
+                guestArgs = new string[1 + extraCount];
+                guestArgs[0] = overrideWasmPath;
+                if (extraCount > 0)
+                {
+                    Array.Copy(args, guestArgStart, guestArgs, 1, extraCount);
+                }
+            }
             else if (hasBrain)
             {
                 guestArgs = new string[args.Length + 1];
@@ -158,7 +179,9 @@ internal static class Program
                 fileIoTest
                     ? "fileio-" + architecture
                     : (useBrain ? "runtime-" + architecture : "hello-" + architecture));
-            byte[] wasm = useBrain ? TryReadComponent("brain.wasm") : null;
+            byte[] wasm = useBrain
+                ? (overrideWasmPath != null ? File.ReadAllBytes(overrideWasmPath) : TryReadComponent("brain.wasm"))
+                : null;
 
             platformPin = GCHandle.Alloc(platform, GCHandleType.Pinned);
             helloPin = GCHandle.Alloc(hello, GCHandleType.Pinned);

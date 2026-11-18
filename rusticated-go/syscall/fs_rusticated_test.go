@@ -1,4 +1,4 @@
-//go:build wasip1
+Can //go:build wasip1
 
 package syscall
 

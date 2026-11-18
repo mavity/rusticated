@@ -243,9 +243,9 @@ fn abiGetCwd(buf: [*]u8, cap: usize) callconv(pal_abi.pal_cc) u64 {
     const res = sys.sys2(sys.NR.getcwd, @intFromPtr(&tmp), tmp.len);
     if (sys.isErr(res) != null or res == 0) return 0;
     const n = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(&tmp)), 0).len;
-    if (n > cap) return (1 << 32) | @as(u64, @intCast(n));
+    if (n > cap) return @as(u64, @intCast(n));
     @memcpy(buf[0..n], tmp[0..n]);
-    return (1 << 32) | @as(u64, @intCast(n));
+    return @as(u64, @intCast(n));
 }
 
 fn abiSetCwd(path: [*]const u8, len: usize) callconv(pal_abi.pal_cc) u32 {

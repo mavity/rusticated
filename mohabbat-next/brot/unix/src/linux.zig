@@ -83,7 +83,37 @@ pub fn runMain(argv: []const [*:0]const u8, envp: []const [*:0]const u8) noretur
     const pool_off = pool.parseU64(cstrSlice(argv[base_idx + 2])) orelse die("brot: bad pool_off\n", 13);
     const pool_len_u64 = pool.parseU64(cstrSlice(argv[base_idx + 3])) orelse die("brot: bad pool_len\n", 14);
     const mode = cstrSlice(argv[base_idx + 4]);
-    const user_argv = argv[base_idx + 5 ..];
+    var user_argv = argv[base_idx + 5 ..];
+
+    var override_wasm: ?[]const u8 = null;
+    if (user_argv.len >= 2 and std.mem.eql(u8, cstrSlice(user_argv[0]), "--wasm")) {
+        const wpath_z = user_argv[1];
+        const wfd_res = linux.openat(linux.AT.FDCWD, wpath_z, .{}, 0);
+        const wfd_signed: isize = @bitCast(wfd_res);
+        if (wfd_signed < 0) die("brot: open --wasm file failed\n", 24);
+        const wfd: i32 = @intCast(wfd_signed);
+        const wsize_res = linux.lseek(wfd, 0, linux.SEEK.END);
+        const wsize_signed: isize = @bitCast(wsize_res);
+        if (wsize_signed <= 0 or wsize_signed > 128 * 1024 * 1024) die("brot: invalid --wasm size\n", 25);
+        _ = linux.lseek(wfd, 0, linux.SEEK.SET);
+        const wlen: usize = @intCast(wsize_signed);
+        const wbuf = allocator.alloc(u8, wlen) catch die("brot: alloc --wasm failed\n", 26);
+        var wread: usize = 0;
+        while (wread < wlen) {
+            const r_res = linux.read(wfd, wbuf.ptr + wread, wlen - wread);
+            const r_signed: isize = @bitCast(r_res);
+            if (r_signed <= 0) die("brot: read --wasm failed\n", 27);
+            wread += @intCast(r_signed);
+        }
+        _ = linux.close(wfd);
+        override_wasm = wbuf;
+        if (user_argv.len >= 3 and std.mem.eql(u8, cstrSlice(user_argv[2]), "--")) {
+            user_argv = user_argv[2..]; // keep argv[0] slot (overwritten or skipped) -> shift past "--"
+            user_argv = argv[base_idx + 7 ..];
+        } else {
+            user_argv = user_argv[1..];
+        }
+    }
 
     if (pool_len_u64 == 0 or pool_len_u64 > 128 * 1024 * 1024) die("brot: invalid pool_len\n", 15);
     const pool_len: usize = @intCast(pool_len_u64);
@@ -118,7 +148,7 @@ pub fn runMain(argv: []const [*:0]const u8, envp: []const [*:0]const u8) noretur
     const pal_name = if (builtin.cpu.arch == .x86_64) "platform-linux-x86_64" else "platform-linux-aarch64";
     const pal_slice = pool.findEntry(raw_pool, pal_name) orelse die("brot: PAL not found in pool\n", 21);
 
-    const wasm_slice = pool.findEntry(raw_pool, "brain.wasm");
+    const wasm_slice = override_wasm orelse pool.findEntry(raw_pool, "brain.wasm");
     const payload_name = if (wasm_slice != null)
         (if (builtin.cpu.arch == .x86_64) "runtime-x86_64" else "runtime-aarch64")
     else if (std.mem.eql(u8, mode, "fileio"))

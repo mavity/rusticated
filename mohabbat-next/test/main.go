@@ -1,10 +1,12 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -34,6 +36,49 @@ func findMohabbatNextDir() (string, error) {
 }
 
 func main() {
+	var (
+		projectFilter string
+		onlyWasm      bool
+		skipWasm      bool
+		testRun       string
+		testVerbose   bool
+		testTimeout   time.Duration
+		verbose       bool
+	)
+	flag.StringVar(&projectFilter, "p", "", "Comma-separated project or package filter for WASM tests (e.g. demo-go,ai,u-root,demo)")
+	flag.StringVar(&projectFilter, "project", "", "Comma-separated project or package filter for WASM tests")
+	flag.BoolVar(&onlyWasm, "only-wasm", false, "Run only Stage 1 build + Stage 4 WASM project tests")
+	flag.BoolVar(&skipWasm, "skip-wasm", false, "Skip Stage 4 WASM project tests")
+	flag.StringVar(&testRun, "run", "", "Forwarded as -test.run=<pattern> to WASM Go tests")
+	flag.StringVar(&testRun, "test.run", "", "Forwarded as -test.run=<pattern> to WASM Go tests")
+	flag.BoolVar(&testVerbose, "test.v", false, "Forwarded as -test.v to WASM Go tests")
+	flag.DurationVar(&testTimeout, "test.timeout", 30*time.Second, "Per-package timeout for WASM project tests")
+	flag.BoolVar(&verbose, "v", false, "Verbose build output")
+	flag.Parse()
+
+	var projectFilters []string
+	if projectFilter != "" {
+		for _, p := range strings.Split(projectFilter, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				projectFilters = append(projectFilters, p)
+			}
+		}
+	}
+	var guestTestArgs []string
+	if testVerbose {
+		guestTestArgs = append(guestTestArgs, "-test.v")
+	}
+	if testRun != "" {
+		guestTestArgs = append(guestTestArgs, "-test.run="+testRun)
+	}
+	for _, arg := range flag.Args() {
+		if strings.HasPrefix(arg, "-test.") {
+			guestTestArgs = append(guestTestArgs, arg)
+		} else if !strings.HasPrefix(arg, "-") {
+			projectFilters = append(projectFilters, arg)
+		}
+	}
+
 	totalStart := time.Now()
 	fmt.Fprintln(os.Stdout, "================================================================================")
 	fmt.Fprintln(os.Stdout, "🧪  Mohabbat-Next Unified Build & Test Runner (Go)")
@@ -48,7 +93,7 @@ func main() {
 	distExe := filepath.Join(nextDir, "brot", "windows-host", "out", "MohabbatNext.exe")
 	runner := NewRunner(nextDir, distExe)
 
-	// Stage 1: Always Build First (Unbuffered)
+	// Stage 1: Always Build First (Unbuffered, incremental via writeFileIfChanged)
 	fmt.Fprintln(os.Stdout, "\n================================================================================")
 	fmt.Fprintln(os.Stdout, "🔨  Stage 1: Building All Artifacts (Unbuffered)")
 	fmt.Fprintln(os.Stdout, "================================================================================")
@@ -64,13 +109,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Stage 2: Package-Level Unit Tests (Go, Zig, C#)
-	runner.RunStage2UnitTests()
+	if !onlyWasm && len(projectFilters) == 0 {
+		// Stage 2: Package-Level Unit Tests (Go, Zig, C#)
+		runner.RunStage2UnitTests()
 
-	// Stage 3: Holistic Multi-Platform & Multi-Arch Acceptance Matrix
-	runner.RunStage3ArtifactIntegrityTests()
-	runner.RunStage3PlatformMatrix()
-	runner.RunStage3ZwasmRuntimeTests()
+		// Stage 3: Holistic Multi-Platform & Multi-Arch Acceptance Matrix
+		runner.RunStage3ArtifactIntegrityTests()
+		runner.RunStage3PlatformMatrix()
+		runner.RunStage3ZwasmRuntimeTests()
+	}
+
+	if !skipWasm {
+		// Stage 4: Rusticated WASM Project Tests (all projects by default, or filtered)
+		runner.RunStage4WasmProjectTests(projectFilters, guestTestArgs, testTimeout, verbose)
+	}
 
 	runner.PrintSummary(time.Since(totalStart))
 	if runner.FailCount > 0 {

@@ -95,9 +95,9 @@ pub fn getCwd(s: *PalState, buf: [*]u8, cap: usize) u64 {
     var tmp: [2048]u8 = undefined;
     const n = mem.wideToUtf8(s, &wbuf, @intCast(wlen), &tmp, tmp.len);
     if (n == 0) return 0;
-    if (n > cap) return (1 << 32) | @as(u64, @intCast(n));
+    if (n > cap) return @as(u64, @intCast(n));
     @memcpy(buf[0..n], tmp[0..n]);
-    return (1 << 32) | @as(u64, @intCast(n));
+    return @as(u64, @intCast(n));
 }
 
 pub fn setCwd(s: *PalState, path: [*]const u8, len: usize) u32 {

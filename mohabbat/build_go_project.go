@@ -89,6 +89,19 @@ func buildGoProjectWasm(ws, absProjectDir, outputWasm string, verbose bool) erro
 	return postProcessWasm(outputWasm)
 }
 
+// BuildGoTestWasm generates the Go stdlib overlay if needed and compiles a Go
+// package's tests (`go test -c -buildmode=c-shared`) to a rusticated WASM binary.
+func BuildGoTestWasm(ws, absProjectDir, outputWasm string, verbose bool) error {
+	goroot, _, err := resolveGoroot(ws)
+	if err != nil {
+		return fmt.Errorf("cannot resolve GOROOT: %w", err)
+	}
+	if err := generateGoOverlay(ws, goroot, verbose); err != nil {
+		return fmt.Errorf("generate Go overlay: %w", err)
+	}
+	return buildGoTestWasm(ws, absProjectDir, outputWasm, verbose)
+}
+
 // buildGoTestWasm compiles a Go project's tests to rusticated WASM.
 func buildGoTestWasm(ws, absProjectDir, outputWasm string, verbose bool) error {
 	overlayPath := filepath.Join(ws, "target", "overlay.json")

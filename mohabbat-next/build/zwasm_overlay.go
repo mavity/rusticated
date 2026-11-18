@@ -924,6 +924,80 @@ const c_alloc: std.mem.Allocator = if (@import("builtin").os.tag == .freestandin
 			old:  `std.debug.print(`,
 			new:  `if (comptime @import("builtin").os.tag != .freestanding) std.debug.print(`,
 		},
+		// 10. runtime/instance/memory_backing.zig: fixed-base linear memory on freestanding
+		{
+			file: "src/runtime/instance/memory_backing.zig",
+			old: `const std = @import("std");
+const guarded_mem = @import("../../platform/guarded_mem.zig");`,
+			new: `const std = @import("std");
+const builtin = @import("builtin");
+const guarded_mem = @import("../../platform/guarded_mem.zig");
+
+const freestanding_fixed_mem = if (builtin.os.tag == .freestanding) struct {
+    extern fn mohabbat_raw_alloc(size: usize, align_bytes: usize) callconv(.c) ?[*]u8;
+    extern fn mohabbat_raw_free(ptr: [*]u8, size: usize) callconv(.c) void;
+    const max_guest_linear_bytes: usize = 128 * 1024 * 1024;
+} else struct {};`,
+		},
+		{
+			file: "src/runtime/instance/memory_backing.zig",
+			old: `pub fn allocBacking(
+    alloc: std.mem.Allocator,
+    bytes_total: usize,
+    idx_type: sections.MemoryEntry.IdxType,
+    page_size_log2: u8,
+) error{OutOfMemory}!Backing {`,
+			new: `pub fn allocBacking(
+    alloc: std.mem.Allocator,
+    bytes_total: usize,
+    idx_type: sections.MemoryEntry.IdxType,
+    page_size_log2: u8,
+) error{OutOfMemory}!Backing {
+    if (comptime builtin.os.tag == .freestanding) {
+        if (bytes_total > freestanding_fixed_mem.max_guest_linear_bytes) return error.OutOfMemory;
+        const raw = freestanding_fixed_mem.mohabbat_raw_alloc(freestanding_fixed_mem.max_guest_linear_bytes, 65536) orelse return error.OutOfMemory;
+        if (bytes_total > 0) @memset(raw[0..bytes_total], 0);
+        const aligned: [*]align(guarded_mem.page_size) u8 = @ptrCast(@alignCast(raw));
+        return .{
+            .bytes = raw[0..bytes_total],
+            .reservation = .{
+                .base = aligned,
+                .reserve_len = freestanding_fixed_mem.max_guest_linear_bytes,
+                .committed = bytes_total,
+            },
+        };
+    }`,
+		},
+		{
+			file: "src/runtime/instance/memory_backing.zig",
+			old: `pub fn growGuarded(res: *guarded_mem.Reservation, new_bytes: usize) ?[]u8 {
+    if (new_bytes > (1 << 32)) return null;`,
+			new: `pub fn growGuarded(res: *guarded_mem.Reservation, new_bytes: usize) ?[]u8 {
+    if (comptime builtin.os.tag == .freestanding) {
+        if (new_bytes > res.reserve_len) return null;
+        if (new_bytes > res.committed) {
+            @memset(res.base[res.committed..new_bytes], 0);
+            res.committed = new_bytes;
+        }
+        return res.base[0..new_bytes];
+    }
+    if (new_bytes > (1 << 32)) return null;`,
+		},
+		{
+			file: "src/runtime/instance/memory_backing.zig",
+			old: `pub fn freeBacking(alloc: std.mem.Allocator, b: Backing) void {
+    if (b.reservation) |res| {`,
+			new: `pub fn freeBacking(alloc: std.mem.Allocator, b: Backing) void {
+    if (comptime builtin.os.tag == .freestanding) {
+        if (b.reservation) |res| {
+            freestanding_fixed_mem.mohabbat_raw_free(res.base, res.reserve_len);
+            return;
+        }
+        if (b.bytes.len > 0) alloc.free(b.bytes);
+        return;
+    }
+    if (b.reservation) |res| {`,
+		},
 	}
 }
 
