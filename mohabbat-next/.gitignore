@@ -2,3 +2,4 @@
 /target/
 /brot/*/out/
 /brot/*/target/
+/runtime/zwasm/

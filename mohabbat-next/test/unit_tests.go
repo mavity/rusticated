@@ -10,7 +10,7 @@ import (
 
 func (r *Runner) RunStage2UnitTests() {
 	fmt.Fprintln(os.Stdout, "\n================================================================================")
-	fmt.Fprintln(os.Stdout, "🧪  Stage 2: Package-Level Unit Tests (Go, Rust, C#)")
+	fmt.Fprintln(os.Stdout, "🧪  Stage 2: Package-Level Unit Tests (Go, Zig, C#)")
 	fmt.Fprintln(os.Stdout, "================================================================================")
 
 	// 1. Go Unit Tests (mohabbat-next/build)
@@ -22,45 +22,74 @@ func (r *Runner) RunStage2UnitTests() {
 		return cmd.Run()
 	})
 
-	// 2. Rust Unit Tests: PAL and payload workspace
-	r.RunTest("unit/rust", "pal-and-payload-workspace", func() error {
-		manifest := filepath.Join(r.NextDir, "Cargo.toml")
-		targetDir := filepath.Join(r.BuildDir, "rust", "unit-pal-payload")
-		cmd := exec.Command("cargo", "test", "--manifest-path", manifest, "--workspace", "--target-dir", targetDir, "--", "--nocapture")
+	palAbi := filepath.Join(r.NextDir, "pal", "abi", "guest.zig")
+	zwasmRoot := filepath.Join(r.NextDir, "runtime", "zwasm", "src", "zwasm.zig")
+	zwasmOpts := filepath.Join(r.NextDir, "runtime", "src", "build_options.zig")
+
+	// 2. Zig Unit Tests: ABI, Payloads, Unix Brot, PALs, zwasm Runtime
+	r.RunTest("unit/zig", "pal/abi/guest.zig", func() error {
+		cmd := exec.Command("zig", "test", palAbi)
 		cmd.Dir = r.NextDir
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		return cmd.Run()
 	})
 
-	// 3. Rust Unit Tests: Unix Brot micro-launcher (intrinsics + zstd decompressor)
-	r.RunTest("unit/rust", "mohabbat-next-brot (unix host)", func() error {
-		brotUnixDir := filepath.Join(r.NextDir, "brot", "unix")
-		manifest := filepath.Join(brotUnixDir, "Cargo.toml")
-		targetDir := filepath.Join(r.BuildDir, "rust", "unit-brot")
-		cmd := exec.Command("cargo", "test", "--manifest-path", manifest, "--target-dir", targetDir, "--", "--nocapture")
-		cmd.Dir = brotUnixDir
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		return cmd.Run()
-	})
-
-	// 4. Rust Unit Tests: Movable Cranelift Runtime Slice (Overlapped/PAL layouts + CLIF codegen + WASM JIT)
-	r.RunTest("unit/rust", "mohabbat-next-runtime (cranelift JIT)", func() error {
-		workspaceDir := filepath.Join(r.BuildDir, "rust", "runtime-cranelift-overlay")
-		manifest := filepath.Join(workspaceDir, "Cargo.toml")
-		if _, err := os.Stat(manifest); err != nil {
-			return fmt.Errorf("generated Cranelift runtime workspace is unavailable: %w", err)
+	r.RunTest("unit/zig", "payload/hello.zig & fileio.zig", func() error {
+		for _, f := range []string{"hello.zig", "fileio.zig"} {
+			cmd := exec.Command("zig", "test", "--dep", "pal_abi", "-Mroot="+filepath.Join(r.NextDir, "payload", f), "-Mpal_abi="+palAbi)
+			cmd.Dir = r.NextDir
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				return err
+			}
 		}
-		targetDir := filepath.Join(r.BuildDir, "rust", "unit-runtime")
-		cmd := exec.Command("cargo", "test", "--manifest-path", manifest, "--target-dir", targetDir, "--", "--nocapture")
-		cmd.Dir = workspaceDir
+		return nil
+	})
+
+	r.RunTest("unit/zig", "brot/unix (pool + zstd)", func() error {
+		cmd := exec.Command("zig", "test", filepath.Join(r.NextDir, "brot", "unix", "src", "main.zig"))
+		cmd.Dir = r.NextDir
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		return cmd.Run()
 	})
 
-	// 5. C# Unit Tests (MohabbatNext.exe --unit-test)
+	r.RunTest("unit/zig", "pal/windows & pal/unix", func() error {
+		for _, f := range []string{
+			filepath.Join(r.NextDir, "pal", "windows", "platform.zig"),
+			filepath.Join(r.NextDir, "pal", "unix", "platform_linux.zig"),
+		} {
+			cmd := exec.Command("zig", "test", "--dep", "pal_abi", "-Mroot="+f, "-Mpal_abi="+palAbi)
+			cmd.Dir = r.NextDir
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+
+	r.RunTest("unit/zig", "runtime/zwasm", func() error {
+		cmd := exec.Command(
+			"zig", "test",
+			"--dep", "pal_abi",
+			"--dep", "zwasm",
+			"-Mroot="+filepath.Join(r.NextDir, "runtime", "src", "main.zig"),
+			"-Mpal_abi="+palAbi,
+			"--dep", "build_options",
+			"-Mzwasm="+zwasmRoot,
+			"-Mbuild_options="+zwasmOpts,
+		)
+		cmd.Dir = r.NextDir
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		return cmd.Run()
+	})
+
+	// 3. C# Unit Tests (MohabbatNext.exe --unit-test)
 	if runtime.GOOS == "windows" {
 		r.RunTest("unit/csharp", "WindowsHost (--unit-test)", func() error {
 			cmd := exec.Command(r.DistExe, "--unit-test")

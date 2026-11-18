@@ -41,7 +41,7 @@ func findMohabbatNextDir() (string, error) {
 
 func checkTools() error {
 	tools := []string{
-		"cargo",
+		"zig",
 		"ld.lld",
 		"llvm-objcopy",
 		"llvm-readobj",
@@ -100,13 +100,13 @@ func main() {
 	}
 
 	workDir := filepath.Join(nextDir, ".build")
-	rustBuildDir := filepath.Join(workDir, "rust")
+	zigBuildDir := filepath.Join(workDir, "zig")
 	componentsDir := filepath.Join(workDir, "components")
 	templatesDir := filepath.Join(nextDir, "build", "templates")
 	unixOutDir := filepath.Join(nextDir, "brot", "unix", "out")
 	windowsHostDir := filepath.Join(nextDir, "brot", "windows-host")
 
-	for _, dir := range []string{workDir, rustBuildDir, componentsDir, unixOutDir, filepath.Dir(outputPath)} {
+	for _, dir := range []string{workDir, zigBuildDir, componentsDir, unixOutDir, filepath.Dir(outputPath)} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: create directory %s: %v\n", dir, err)
 			os.Exit(1)
@@ -120,217 +120,190 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Step 2: Build Rust flat components and Brot micro-launchers in parallel
-	fmt.Println("🍆  [2/5] Compiling flat components and Unix Brot launchers in parallel...")
+	// Step 2: Build Zig flat components and Brot micro-launchers in parallel
+	fmt.Println("🍆  [2/5] Compiling Zig flat components and Unix Brot launchers in parallel...")
 
-	darwinStubsDir := filepath.Join(repoRoot, "target", "darwin-stubs")
-	if abs, err := filepath.Abs(darwinStubsDir); err == nil {
-		darwinStubsDir = abs
-	}
-	if err := ensureDarwinStubs(darwinStubsDir); err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating darwin stubs: %v\n", err)
-		os.Exit(1)
-	}
-
-	linuxMuslFlags := "['-C', 'panic=abort', '-C', 'relocation-model=pic', '-C', 'target-feature=+crt-static', '-C', 'link-self-contained=no', '-C', 'linker=rust-lld', '-C', 'linker-flavor=ld.lld', '-C', 'link-arg=-pie', '-C', 'link-arg=--no-dynamic-linker']"
-	darwinFlags := fmt.Sprintf("['-C', 'panic=abort', '-C', 'linker=rust-lld', '-C', 'linker-flavor=darwin-lld', '-Z', 'unstable-options', '-C', 'link-arg=-L%s']", filepath.ToSlash(darwinStubsDir))
-	runtimeRustflagsX64 := "-C relocation-model=pic -Zunstable-options -Zdefault-visibility=hidden -Cpanic=abort -Zlocation-detail=none -Zfmt-debug=none -Cforce-frame-pointers=yes -Cllvm-args=-enable-machine-outliner=never -Zplt=yes"
-	runtimeRustflagsAArch64 := "-C relocation-model=pie -Zunstable-options -Zdefault-visibility=hidden -Cpanic=abort -Zfmt-debug=none -Cforce-frame-pointers=yes -Cllvm-args=-enable-machine-outliner=never -Ctarget-feature=+reserve-x18"
+	darwinStubTbd := filepath.Join(nextDir, "brot", "unix", "darwin-stubs", "libSystem.tbd")
+	palAbiPath := filepath.Join(nextDir, "pal", "abi", "guest.zig")
+	zwasmRootPath := filepath.Join(nextDir, "runtime", "zwasm", "src", "zwasm.zig")
+	zwasmOptsPath := filepath.Join(nextDir, "runtime", "src", "build_options.zig")
 	runtimeDir := filepath.Join(nextDir, "runtime")
-	runtimeBuildDir, err := prepareCraneliftOverlay(runtimeDir, rustBuildDir, verbose)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error preparing Cranelift source overlay: %v\n", err)
-		os.Exit(1)
+
+	palAbiDep := ZigDep{Name: "pal_abi", Path: palAbiPath}
+	zwasmDep := ZigDep{
+		Name: "zwasm",
+		Path: zwasmRootPath,
+		Deps: []ZigDep{{Name: "build_options", Path: zwasmOptsPath}},
 	}
 
-	type targetDef struct {
-		Name              string
-		ManifestDir       string
-		Package           string
-		Feature           string
-		NoDefaultFeatures bool
-		NeedsAlloc        bool
-		Rustflags         string
-		Arch              string
-		LinkerScript      string
-		EntrySymbol       string
-		ArchiveGlobs      []string
-		StaticlibName     string
-		MaxSize           int64
-		OutName           string
-	}
-
-	flatDefs := []targetDef{
+	flatDefs := []ZigFlatConfig{
 		// Hello payload
 		{
 			Name:         "payload-x86_64",
-			Package:      "mohabbat-next-payload",
+			RootFile:     filepath.Join(nextDir, "payload", "hello.zig"),
+			Deps:         []ZigDep{palAbiDep},
 			Arch:         "x86_64",
+			Optimize:     "ReleaseSmall",
 			LinkerScript: filepath.Join(nextDir, "payload", "payload.ld"),
 			EntrySymbol:  "hello_payload_code_start",
-			ArchiveGlobs: []string{"libmohabbat_next_payload-*.rlib", "libcore-*.rlib"},
-			OutName:      "hello-x86_64",
+			MaxSize:      16 * 1024,
+			OutFileName:  "hello-x86_64",
 		},
 		{
 			Name:         "payload-aarch64",
-			Package:      "mohabbat-next-payload",
+			RootFile:     filepath.Join(nextDir, "payload", "hello.zig"),
+			Deps:         []ZigDep{palAbiDep},
 			Arch:         "aarch64",
+			Optimize:     "ReleaseSmall",
 			LinkerScript: filepath.Join(nextDir, "payload", "payload.ld"),
 			EntrySymbol:  "hello_payload_code_start",
-			ArchiveGlobs: []string{"libmohabbat_next_payload-*.rlib", "libcore-*.rlib"},
-			OutName:      "hello-aarch64",
+			MaxSize:      16 * 1024,
+			OutFileName:  "hello-aarch64",
 		},
 		{
 			Name:         "payload-fileio-x86_64",
-			Package:      "mohabbat-next-payload",
-			Feature:      "file-io-test",
-			MaxSize:      64 * 1024,
+			RootFile:     filepath.Join(nextDir, "payload", "fileio.zig"),
+			Deps:         []ZigDep{palAbiDep},
 			Arch:         "x86_64",
+			Optimize:     "ReleaseSmall",
 			LinkerScript: filepath.Join(nextDir, "payload", "payload.ld"),
 			EntrySymbol:  "hello_payload_code_start",
-			ArchiveGlobs: []string{"libmohabbat_next_payload-*.rlib", "libcore-*.rlib"},
-			OutName:      "hello-fileio-x86_64",
+			MaxSize:      64 * 1024,
+			OutFileName:  "hello-fileio-x86_64",
 		},
 		{
 			Name:         "payload-fileio-aarch64",
-			Package:      "mohabbat-next-payload",
-			Feature:      "file-io-test",
-			MaxSize:      64 * 1024,
+			RootFile:     filepath.Join(nextDir, "payload", "fileio.zig"),
+			Deps:         []ZigDep{palAbiDep},
 			Arch:         "aarch64",
+			Optimize:     "ReleaseSmall",
 			LinkerScript: filepath.Join(nextDir, "payload", "payload.ld"),
 			EntrySymbol:  "hello_payload_code_start",
-			ArchiveGlobs: []string{"libmohabbat_next_payload-*.rlib", "libcore-*.rlib"},
-			OutName:      "hello-fileio-aarch64",
+			MaxSize:      64 * 1024,
+			OutFileName:  "hello-fileio-aarch64",
 		},
-		// Movable Cranelift Runtime Slice (ISA-shared)
+		// Movable zwasm Runtime Slice (ISA-shared)
 		{
-			Name:              "runtime-x86_64",
-			ManifestDir:       runtimeBuildDir,
-			Feature:           "x86_64",
-			NoDefaultFeatures: true,
-			NeedsAlloc:        true,
-			Rustflags:         runtimeRustflagsX64,
-			Arch:              "x86_64",
-			LinkerScript:      filepath.Join(runtimeDir, "runtime.ld"),
-			EntrySymbol:       "runtime_code_start",
-			StaticlibName:     "libmohabbat_next_runtime.a",
-			MaxSize:           8 * 1024 * 1024,
-			OutName:           "runtime-x86_64",
+			Name:         "runtime-x86_64",
+			RootFile:     filepath.Join(runtimeDir, "src", "main.zig"),
+			Deps:         []ZigDep{palAbiDep, zwasmDep},
+			Arch:         "x86_64",
+			Optimize:     "ReleaseFast",
+			LinkerScript: filepath.Join(runtimeDir, "runtime.ld"),
+			EntrySymbol:  "runtime_code_start",
+			MaxSize:      8 * 1024 * 1024,
+			IsRuntime:    true,
+			OutFileName:  "runtime-x86_64",
 		},
 		{
-			Name:              "runtime-aarch64",
-			ManifestDir:       runtimeBuildDir,
-			Feature:           "aarch64",
-			NoDefaultFeatures: true,
-			NeedsAlloc:        true,
-			Rustflags:         runtimeRustflagsAArch64,
-			Arch:              "aarch64",
-			LinkerScript:      filepath.Join(runtimeDir, "runtime.ld"),
-			EntrySymbol:       "runtime_code_start",
-			StaticlibName:     "libmohabbat_next_runtime.a",
-			MaxSize:           8 * 1024 * 1024,
-			OutName:           "runtime-aarch64",
+			Name:         "runtime-aarch64",
+			RootFile:     filepath.Join(runtimeDir, "src", "main.zig"),
+			Deps:         []ZigDep{palAbiDep, zwasmDep},
+			Arch:         "aarch64",
+			Optimize:     "ReleaseFast",
+			LinkerScript: filepath.Join(runtimeDir, "runtime.ld"),
+			EntrySymbol:  "runtime_code_start",
+			MaxSize:      8 * 1024 * 1024,
+			IsRuntime:    true,
+			OutFileName:  "runtime-aarch64",
 		},
 		// Windows PAL
 		{
 			Name:         "platform-windows-x86_64",
-			Package:      "mohabbat-next-windows-platform",
-			MaxSize:      64 * 1024,
+			RootFile:     filepath.Join(nextDir, "pal", "windows", "platform.zig"),
+			Deps:         []ZigDep{palAbiDep},
 			Arch:         "x86_64",
+			Optimize:     "ReleaseSmall",
 			LinkerScript: filepath.Join(nextDir, "pal", "windows", "platform.ld"),
 			EntrySymbol:  "windows_platform_entry",
-			ArchiveGlobs: []string{"libmohabbat_next_windows_platform-*.rlib", "libcore-*.rlib", "libcompiler_builtins-*.rlib"},
-			OutName:      "platform-windows-x86_64",
+			MaxSize:      256 * 1024,
+			OutFileName:  "platform-windows-x86_64",
 		},
 		{
 			Name:         "platform-windows-aarch64",
-			Package:      "mohabbat-next-windows-platform",
-			MaxSize:      64 * 1024,
+			RootFile:     filepath.Join(nextDir, "pal", "windows", "platform.zig"),
+			Deps:         []ZigDep{palAbiDep},
 			Arch:         "aarch64",
+			Optimize:     "ReleaseSmall",
 			LinkerScript: filepath.Join(nextDir, "pal", "windows", "platform.ld"),
 			EntrySymbol:  "windows_platform_entry",
-			ArchiveGlobs: []string{"libmohabbat_next_windows_platform-*.rlib", "libcore-*.rlib", "libcompiler_builtins-*.rlib"},
-			OutName:      "platform-windows-aarch64",
+			MaxSize:      256 * 1024,
+			OutFileName:  "platform-windows-aarch64",
 		},
 		// Linux PAL
 		{
 			Name:         "platform-linux-x86_64",
-			Package:      "mohabbat-next-unix-platform",
-			Feature:      "linux",
-			MaxSize:      64 * 1024,
+			RootFile:     filepath.Join(nextDir, "pal", "unix", "platform_linux.zig"),
+			Deps:         []ZigDep{palAbiDep},
 			Arch:         "x86_64",
+			Optimize:     "ReleaseFast",
 			LinkerScript: filepath.Join(nextDir, "pal", "unix", "platform.ld"),
 			EntrySymbol:  "unix_platform_entry",
-			ArchiveGlobs: []string{"libmohabbat_next_unix_platform-*.rlib", "libcore-*.rlib", "libcompiler_builtins-*.rlib"},
-			OutName:      "platform-linux-x86_64",
+			MaxSize:      64 * 1024,
+			OutFileName:  "platform-linux-x86_64",
 		},
 		{
 			Name:         "platform-linux-aarch64",
-			Package:      "mohabbat-next-unix-platform",
-			Feature:      "linux",
-			MaxSize:      64 * 1024,
+			RootFile:     filepath.Join(nextDir, "pal", "unix", "platform_linux.zig"),
+			Deps:         []ZigDep{palAbiDep},
 			Arch:         "aarch64",
+			Optimize:     "ReleaseFast",
 			LinkerScript: filepath.Join(nextDir, "pal", "unix", "platform.ld"),
 			EntrySymbol:  "unix_platform_entry",
-			ArchiveGlobs: []string{"libmohabbat_next_unix_platform-*.rlib", "libcore-*.rlib", "libcompiler_builtins-*.rlib"},
-			OutName:      "platform-linux-aarch64",
+			MaxSize:      64 * 1024,
+			OutFileName:  "platform-linux-aarch64",
 		},
 		// Darwin PAL
 		{
 			Name:         "platform-darwin-x86_64",
-			Package:      "mohabbat-next-unix-platform",
-			Feature:      "darwin",
-			MaxSize:      64 * 1024,
+			RootFile:     filepath.Join(nextDir, "pal", "unix", "platform_darwin.zig"),
+			Deps:         []ZigDep{palAbiDep},
 			Arch:         "x86_64",
+			Optimize:     "ReleaseFast",
 			LinkerScript: filepath.Join(nextDir, "pal", "unix", "platform.ld"),
 			EntrySymbol:  "unix_platform_entry",
-			ArchiveGlobs: []string{"libmohabbat_next_unix_platform-*.rlib", "libcore-*.rlib", "libcompiler_builtins-*.rlib"},
-			OutName:      "platform-darwin-x86_64",
+			MaxSize:      64 * 1024,
+			OutFileName:  "platform-darwin-x86_64",
 		},
 		{
 			Name:         "platform-darwin-aarch64",
-			Package:      "mohabbat-next-unix-platform",
-			Feature:      "darwin",
-			MaxSize:      64 * 1024,
+			RootFile:     filepath.Join(nextDir, "pal", "unix", "platform_darwin.zig"),
+			Deps:         []ZigDep{palAbiDep},
 			Arch:         "aarch64",
+			Optimize:     "ReleaseFast",
 			LinkerScript: filepath.Join(nextDir, "pal", "unix", "platform.ld"),
 			EntrySymbol:  "unix_platform_entry",
-			ArchiveGlobs: []string{"libmohabbat_next_unix_platform-*.rlib", "libcore-*.rlib", "libcompiler_builtins-*.rlib"},
-			OutName:      "platform-darwin-aarch64",
+			MaxSize:      64 * 1024,
+			OutFileName:  "platform-darwin-aarch64",
 		},
 	}
 
-	brotConfigs := []BrotRunnerConfig{
+	brotConfigs := []ZigBrotConfig{
 		{
 			Name:        "brot-x86_64-linux",
-			Triple:      "x86_64-unknown-linux-musl",
-			Rustflags:   linuxMuslFlags,
+			ZigTarget:   "x86_64-linux",
 			OutFileName: "brot-x86_64-unknown-linux-gnu",
 		},
 		{
 			Name:        "brot-aarch64-linux",
-			Triple:      "aarch64-unknown-linux-musl",
-			Rustflags:   linuxMuslFlags,
+			ZigTarget:   "aarch64-linux",
 			OutFileName: "brot-aarch64-unknown-linux-gnu",
 		},
 		{
 			Name:        "brot-aarch64-android",
-			Triple:      "aarch64-unknown-linux-musl",
-			Rustflags:   linuxMuslFlags,
+			ZigTarget:   "aarch64-linux",
 			OutFileName: "brot-aarch64-linux-android",
 		},
 		{
 			Name:        "brot-x86_64-darwin",
-			Triple:      "x86_64-apple-darwin",
-			Rustflags:   darwinFlags,
-			SdkRoot:     darwinStubsDir,
+			ZigTarget:   "x86_64-macos",
+			DarwinStub:  darwinStubTbd,
 			OutFileName: "brot-x86_64-apple-darwin",
 		},
 		{
 			Name:        "brot-aarch64-darwin",
-			Triple:      "aarch64-apple-darwin",
-			Rustflags:   darwinFlags,
-			SdkRoot:     darwinStubsDir,
+			ZigTarget:   "aarch64-macos",
+			DarwinStub:  darwinStubTbd,
 			OutFileName: "brot-aarch64-apple-darwin",
 		},
 	}
@@ -345,24 +318,9 @@ func main() {
 	// Spawn flat component compilation goroutines
 	for _, def := range flatDefs {
 		compileWg.Add(1)
-		go func(def targetDef) {
+		go func(def ZigFlatConfig) {
 			defer compileWg.Done()
-			binPath, err := buildFlatComponent(nextDir, rustBuildDir, componentsDir, FlatComponentConfig{
-				Name:              def.Name,
-				ManifestDir:       def.ManifestDir,
-				Package:           def.Package,
-				Feature:           def.Feature,
-				NoDefaultFeatures: def.NoDefaultFeatures,
-				NeedsAlloc:        def.NeedsAlloc,
-				Rustflags:         def.Rustflags,
-				Arch:              def.Arch,
-				LinkerScript:      def.LinkerScript,
-				EntrySymbol:       def.EntrySymbol,
-				ArchiveGlobs:      def.ArchiveGlobs,
-				StaticlibName:     def.StaticlibName,
-				MaxSize:           def.MaxSize,
-				OutFileName:       def.OutName,
-			}, verbose)
+			binPath, err := buildZigFlatComponent(nextDir, zigBuildDir, componentsDir, def, verbose)
 
 			compileMu.Lock()
 			defer compileMu.Unlock()
@@ -370,12 +328,12 @@ func main() {
 				errs = append(errs, fmt.Errorf("flat component %s: %w", def.Name, err))
 				return
 			}
-			builtBins[def.OutName] = binPath
+			builtBins[def.OutFileName] = binPath
 
-			if strings.HasPrefix(def.OutName, "platform-linux") ||
-				strings.HasPrefix(def.OutName, "platform-darwin") ||
-				strings.HasPrefix(def.OutName, "hello-") {
-				dest := filepath.Join(unixOutDir, def.OutName+".bin")
+			if strings.HasPrefix(def.OutFileName, "platform-linux") ||
+				strings.HasPrefix(def.OutFileName, "platform-darwin") ||
+				strings.HasPrefix(def.OutFileName, "hello-") {
+				dest := filepath.Join(unixOutDir, def.OutFileName+".bin")
 				data, err := os.ReadFile(binPath)
 				if err == nil {
 					_ = os.WriteFile(dest, data, 0o644)
@@ -387,9 +345,9 @@ func main() {
 	// Spawn Brot runner compilation goroutines
 	for _, bcfg := range brotConfigs {
 		compileWg.Add(1)
-		go func(bcfg BrotRunnerConfig) {
+		go func(bcfg ZigBrotConfig) {
 			defer compileWg.Done()
-			if _, err := buildBrotRunner(nextDir, rustBuildDir, unixOutDir, bcfg, verbose); err != nil {
+			if _, err := buildZigBrotRunner(nextDir, unixOutDir, bcfg, verbose); err != nil {
 				compileMu.Lock()
 				errs = append(errs, fmt.Errorf("brot runner %s: %w", bcfg.Name, err))
 				compileMu.Unlock()
@@ -486,6 +444,14 @@ func main() {
 
 	if err := assembleVegetable(windowsHostExe, assemblyAssets, templatesDir, outputPath); err != nil {
 		fmt.Fprintf(os.Stderr, "Error during vegetable assembly: %v\n", err)
+		os.Exit(1)
+	}
+	if err := assembleVegetable(windowsHostX64Exe, assemblyAssets, templatesDir, windowsHostX64Exe+".tmp"); err != nil {
+		fmt.Fprintf(os.Stderr, "Error assembling x64 host vegetable: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.Rename(windowsHostX64Exe+".tmp", windowsHostX64Exe); err != nil {
+		fmt.Fprintf(os.Stderr, "Error replacing x64 host vegetable: %v\n", err)
 		os.Exit(1)
 	}
 

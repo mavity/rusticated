@@ -64,13 +64,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Stage 2: Package-Level Unit Tests (Go, Rust, C#)
+	// Stage 2: Package-Level Unit Tests (Go, Zig, C#)
 	runner.RunStage2UnitTests()
 
 	// Stage 3: Holistic Multi-Platform & Multi-Arch Acceptance Matrix
 	runner.RunStage3ArtifactIntegrityTests()
 	runner.RunStage3PlatformMatrix()
-	runner.RunStage3CraneliftRuntimeTests()
+	runner.RunStage3ZwasmRuntimeTests()
 
 	runner.PrintSummary(time.Since(totalStart))
 	if runner.FailCount > 0 {

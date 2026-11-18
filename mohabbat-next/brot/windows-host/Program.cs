@@ -67,6 +67,17 @@ internal static class Program
         public ushort ProcessorRevision;
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static unsafe void PrecommitStack()
+    {
+        const int bytes = 512 * 1024;
+        byte* p = stackalloc byte[bytes];
+        for (int i = 0; i < bytes; i += 4096)
+        {
+            p[i] = 0;
+        }
+    }
+
     private static int Main(string[] args)
     {
         AppDomain.CurrentDomain.AssemblyResolve += ResolveEmbeddedAssembly;
@@ -196,6 +207,7 @@ internal static class Program
 
             PlatformEntry entry =
                 Marshal.GetDelegateForFunctionPointer<PlatformEntry>(platformCode);
+            PrecommitStack();
             int status = entry();
             Console.Error.WriteLine(
                 "Windows platform abstraction returned unexpectedly (status {0}).",
@@ -770,6 +782,7 @@ internal static class Program
             Exception threadEx = null;
             Thread t = new Thread(() => {
                 try {
+                    PrecommitStack();
                     entry();
                 } catch (Exception ex) {
                     threadEx = ex;
@@ -782,7 +795,7 @@ internal static class Program
             Console.WriteLine("INFO: cold JIT entry returned");
 
             // Read RuntimeGlobals at -0x10000 (sliceAlloc + 0x10000)
-            IntPtr globalsPtr = new IntPtr(sliceAlloc.ToInt64() + 0x10000);
+            IntPtr globalsPtr = new IntPtr(sliceAlloc.ToInt64() + (PrefixAbiOffset - 0x0400));
             byte initialized = Marshal.ReadByte(globalsPtr, 0);
             IntPtr guestMemBase = Marshal.ReadIntPtr(globalsPtr, IntPtr.Size);
             if (initialized != 1 || guestMemBase == IntPtr.Zero)

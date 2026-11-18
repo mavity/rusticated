@@ -19,7 +19,7 @@ import (
 const wslStartupTimeout = 90 * time.Second
 
 var (
-	reVerifyComponents = regexp.MustCompile(`^Verified all six compressed components\.\n$`)
+	reVerifyComponents = regexp.MustCompile(`^Verified all shared compressed pool components\.\n$`)
 	reEchoTranscript   = regexp.MustCompile(`^Mohabbat-next ready \(compiled [^\)]+\)\. Enter an empty line to exit\.\n> echo: alpha\n> echo: beta\n> $`)
 	reEmptyEOF         = regexp.MustCompile(`^Mohabbat-next ready \(compiled [^\)]+\)\. Enter an empty line to exit\.\n> $`)
 	reFileIoResult     = regexp.MustCompile(`^\d+(?:\.\d+)? (OK|ERR) `)
@@ -771,12 +771,12 @@ func (r *Runner) RunStage3ArtifactIntegrityTests() {
 			name    string
 			maxSize int64
 		}{
-			{"hello-x86_64.bin", 4096},
-			{"hello-aarch64.bin", 4096},
+			{"hello-x86_64.bin", 16 * 1024},
+			{"hello-aarch64.bin", 16 * 1024},
 			{"hello-fileio-x86_64.bin", 64 * 1024},
 			{"hello-fileio-aarch64.bin", 64 * 1024},
-			{"platform-windows-x86_64.bin", 64 * 1024},
-			{"platform-windows-aarch64.bin", 64 * 1024},
+			{"platform-windows-x86_64.bin", 256 * 1024},
+			{"platform-windows-aarch64.bin", 256 * 1024},
 			{"platform-linux-x86_64.bin", 64 * 1024},
 			{"platform-linux-aarch64.bin", 64 * 1024},
 			{"platform-darwin-x86_64.bin", 64 * 1024},
@@ -836,7 +836,7 @@ func (r *Runner) RunStage3ArtifactIntegrityTests() {
 		compDir := filepath.Join(r.BuildDir, "components")
 		slices := []string{"runtime-aarch64", "runtime-x86_64"}
 		relocRe := regexp.MustCompile(`(?m)^\s*0x[0-9a-fA-F]+\s+`)
-		badSecRe := regexp.MustCompile(`(?m)\.(data|bss|got|tdata|tbss)\b`)
+		badSecRe := regexp.MustCompile(`(?m)\.(data|got|plt|tdata|tbss)\b`)
 
 		for _, name := range slices {
 			elfPath := filepath.Join(compDir, name+".elf")
@@ -844,7 +844,7 @@ func (r *Runner) RunStage3ArtifactIntegrityTests() {
 				return fmt.Errorf("missing runtime slice ELF %s: %w", elfPath, err)
 			}
 
-			// 1. Verify 0 relocations
+			// 1. Verify 0 relocations (stripped in final ELF; .rwinit relocs live in 0x52454C4F footer)
 			relocOut, err := exec.Command("llvm-readobj", "--relocations", elfPath).Output()
 			if err != nil {
 				return fmt.Errorf("llvm-readobj relocations check on %s: %w", elfPath, err)
@@ -853,13 +853,13 @@ func (r *Runner) RunStage3ArtifactIntegrityTests() {
 				return fmt.Errorf("runtime slice %s contains relocations", name)
 			}
 
-			// 2. Verify clean sections (no .data, .bss, .got, .tdata, .tbss)
+			// 2. Verify clean sections (no .data, .got, .plt, .tdata, .tbss)
 			secOut, err := exec.Command("llvm-readobj", "--sections", elfPath).Output()
 			if err != nil {
 				return fmt.Errorf("llvm-readobj sections check on %s: %w", elfPath, err)
 			}
 			if badSecRe.Match(secOut) {
-				return fmt.Errorf("runtime slice %s contains disallowed data/bss/got/tls sections", name)
+				return fmt.Errorf("runtime slice %s contains disallowed data/got/plt/tls sections", name)
 			}
 
 			// 3. Verify zero undefined symbols

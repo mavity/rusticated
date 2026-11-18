@@ -5,13 +5,26 @@ HIDDEN(__globals_base = -0x10000);
 
 SECTIONS
 {
+    . = -0x1F000;
+    .bss (NOLOAD) :
+    {
+        *(.bss .bss.*)
+        *(COMMON)
+    }
+
+    . = -0x18000;
+    .rwinit :
+    {
+        *(.data.rel.ro .data.rel.ro.*)
+    }
+
     . = 0x0;
     .payload :
     {
         KEEP(*(.text.entry))
         *(.text .text.*)
+        *(zwasm_interp)
         *(.rodata .rodata.*)
-        *(.data.rel.ro .data.rel.ro.*)
         . = ALIGN(16);
         HIDDEN(runtime_code_end = .);
     }
@@ -24,6 +37,5 @@ SECTIONS
         *(.data .data.*)
         *(.got .got.*)
         *(.plt .plt.*)
-        *(COMMON)
     }
 }

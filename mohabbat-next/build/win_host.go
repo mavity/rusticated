@@ -146,6 +146,7 @@ func buildWindowsHostExe(windowsHostDir, workDir, outExePath, platform string, c
 
 	args := []string{
 		"/nologo",
+		"/unsafe",
 		"/target:exe",
 		"/platform:" + platform,
 		"/out:" + targetOut,

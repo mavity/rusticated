@@ -33,7 +33,7 @@ func runRuntimeScenarios(r *Runner, suite, hostExe, runtimeBin string) {
 	}
 }
 
-func (r *Runner) RunStage3CraneliftRuntimeTests() {
+func (r *Runner) RunStage3ZwasmRuntimeTests() {
 	compDir := filepath.Join(r.BuildDir, "components")
 	rtAarch64 := filepath.Join(compDir, "runtime-aarch64.bin")
 	rtX86_64 := filepath.Join(compDir, "runtime-x86_64.bin")
