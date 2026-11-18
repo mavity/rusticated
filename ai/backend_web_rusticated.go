@@ -171,6 +171,9 @@ const webAdapterBootstrapJS = `
       if (!mod.EmbeddingEngine || typeof mod.EmbeddingEngine.create !== 'function') {
         throw new Error('@litert-lm/core does not expose EmbeddingEngine.create');
       }
+      if (mod.Backend?.GPU == null) {
+        throw new Error('@litert-lm/core does not expose Backend.GPU for EmbeddingGemma');
+      }
 
       let modelSource = cfg.modelUrl;
       if (globalThis.__rustica_assets && typeof globalThis.__rustica_assets.openModelStream === 'function') {
@@ -178,12 +181,9 @@ const webAdapterBootstrapJS = `
         modelSource = opened && opened.stream ? opened.stream : opened;
       }
 
-      const backendEnum = mod.Backend
-        ? (mod.Backend.GPU_ARTISAN ?? mod.Backend.GPU ?? 2)
-        : 2;
       const engine = await mod.EmbeddingEngine.create({
         model: modelSource,
-        backend: backendEnum
+        backend: mod.Backend.GPU
       });
       const id = this.nextEmbedderId++;
       this.embedders.set(id, engine);

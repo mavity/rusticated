@@ -66,6 +66,8 @@ The default local embedder, `embeddinggemma-2-text-270m.litertlm`, is
 native and browser-local setups, with browser cache state included in the
 estimate. The browser cache check passes only cache status and byte count
 to Go; model contents stay binary and are not transferred by the estimate.
+The browser requests LiteRT-LM's `Backend.GPU` for EmbeddingGemma and
+continues to use `Backend.GPU_ARTISAN` for Gemma 4 chat.
 
 Gemma 4 and EmbeddingGemma prefer Hugging Face; native LiteRT-LM wheels prefer
 PyPI. On failure Kabibi tries the matching filename at `https://assets.kabi.bi/`
