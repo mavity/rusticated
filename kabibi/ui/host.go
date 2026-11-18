@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -233,17 +234,19 @@ func (h *Host) runCore(
 		}
 	}()
 
-	// Ctrl+C on all platforms → graceful stop.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt)
-	defer signal.Stop(sigCh)
-	go func() {
-		select {
-		case <-sigCh:
-			h.Stop()
-		case <-h.stopCh:
-		}
-	}()
+	// WASI has no OS signals; signal.Notify starts a polling goroutine there.
+	if runtime.GOOS != "wasip1" {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt)
+		defer signal.Stop(sigCh)
+		go func() {
+			select {
+			case <-sigCh:
+				h.Stop()
+			case <-h.stopCh:
+			}
+		}()
+	}
 
 	// Platform-specific signals (SIGTERM on Unix, SIGWINCH resize).
 	cleanupSignals := h.handleSignals()

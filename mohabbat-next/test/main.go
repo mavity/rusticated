@@ -37,13 +37,13 @@ func findMohabbatNextDir() (string, error) {
 
 func main() {
 	var (
-		projectFilter string
-		onlyWasm      bool
-		skipWasm      bool
-		testRun       string
-		testVerbose   bool
-		testTimeout   time.Duration
-		verbose       bool
+		projectFilter   string
+		onlyWasm        bool
+		skipWasm        bool
+		testRun         string
+		testVerbose     bool
+		testIdleTimeout time.Duration
+		verbose         bool
 	)
 	flag.StringVar(&projectFilter, "p", "", "Comma-separated project or package filter for WASM tests (e.g. demo-go,ai,u-root,demo)")
 	flag.StringVar(&projectFilter, "project", "", "Comma-separated project or package filter for WASM tests")
@@ -51,8 +51,8 @@ func main() {
 	flag.BoolVar(&skipWasm, "skip-wasm", false, "Skip Stage 4 WASM project tests")
 	flag.StringVar(&testRun, "run", "", "Forwarded as -test.run=<pattern> to WASM Go tests")
 	flag.StringVar(&testRun, "test.run", "", "Forwarded as -test.run=<pattern> to WASM Go tests")
-	flag.BoolVar(&testVerbose, "test.v", false, "Forwarded as -test.v to WASM Go tests")
-	flag.DurationVar(&testTimeout, "test.timeout", 30*time.Second, "Per-package timeout for WASM project tests")
+	flag.BoolVar(&testVerbose, "test.v", true, "Forward --test.v to WASM Go tests")
+	flag.DurationVar(&testIdleTimeout, "stdio-idle-timeout", 10*time.Minute, "Fail WASM tests after this long without stdout or stderr output")
 	flag.BoolVar(&verbose, "v", false, "Verbose build output")
 	flag.Parse()
 
@@ -66,14 +66,14 @@ func main() {
 	}
 	var guestTestArgs []string
 	if testVerbose {
-		guestTestArgs = append(guestTestArgs, "-test.v")
+		guestTestArgs = append(guestTestArgs, "--test.v")
 	}
 	if testRun != "" {
-		guestTestArgs = append(guestTestArgs, "-test.run="+testRun)
+		guestTestArgs = append(guestTestArgs, "--test.run="+testRun)
 	}
 	for _, arg := range flag.Args() {
-		if strings.HasPrefix(arg, "-test.") {
-			guestTestArgs = append(guestTestArgs, arg)
+		if strings.HasPrefix(arg, "-test.") || strings.HasPrefix(arg, "--test.") {
+			guestTestArgs = append(guestTestArgs, normalizeGuestTestFlag(arg))
 		} else if !strings.HasPrefix(arg, "-") {
 			projectFilters = append(projectFilters, arg)
 		}
@@ -122,11 +122,21 @@ func main() {
 
 	if !skipWasm {
 		// Stage 4: Rusticated WASM Project Tests (all projects by default, or filtered)
-		runner.RunStage4WasmProjectTests(projectFilters, guestTestArgs, testTimeout, verbose)
+		runner.RunStage4WasmProjectTests(projectFilters, guestTestArgs, testIdleTimeout, verbose)
 	}
 
 	runner.PrintSummary(time.Since(totalStart))
 	if runner.FailCount > 0 {
 		os.Exit(1)
 	}
+}
+
+func normalizeGuestTestFlag(arg string) string {
+	if strings.HasPrefix(arg, "--test.") {
+		return arg
+	}
+	if strings.HasPrefix(arg, "-test.") {
+		return "-" + arg
+	}
+	return arg
 }

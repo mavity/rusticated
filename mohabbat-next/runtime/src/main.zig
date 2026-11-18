@@ -71,7 +71,12 @@ fn invokeEntry(g: *RuntimeGlobals) void {
         .none => return,
     };
     var results: [0]zwasm.Value = .{};
-    g.instance.invoke(name, &.{}, &results) catch panicMsg("zwasm: guest entry trapped");
+    g.instance.invoke(name, &.{}, &results) catch |err| {
+        var msg: [96]u8 = undefined;
+        const detail = std.fmt.bufPrint(&msg, "zwasm: guest entry trapped: {s}", .{@errorName(err)}) catch
+            panicMsg("zwasm: guest entry trapped");
+        panicMsg(detail);
+    };
 }
 
 const runtime_code_end_ptr = @extern([*]const u8, .{ .name = "runtime_code_end", .visibility = .hidden });
@@ -131,7 +136,7 @@ pub fn runtimeActivation() callconv(pal_abi.pal_cc) void {
 
         g.linker = zwasm.Linker.init(&g.engine);
         wasm_env.registerAll(&g.linker) catch panicMsg("zwasm: Linker.registerAll failed");
-        g.instance = g.linker.instantiate(&g.module, .{}) catch panicMsg("zwasm: Linker.instantiate failed");
+        g.instance = g.linker.instantiate(&g.module, .{ .fuel = .unmetered }) catch panicMsg("zwasm: Linker.instantiate failed");
     }
 
     invokeEntry(g);

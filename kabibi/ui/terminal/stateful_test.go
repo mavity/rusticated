@@ -218,3 +218,4 @@ func TestTerminalAlternateScreenDoesNotReplaceMainScreen(t *testing.T) {
 		t.Fatalf("main screen begins with %q, want %q", main.Get(0, 0).Grapheme, "m")
 	}
 }
+

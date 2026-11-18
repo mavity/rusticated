@@ -1,15 +1,16 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"mohabbat/mohabbat"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -155,7 +156,7 @@ func matchesProjectFilter(t wasmTestTarget, filters []string) bool {
 	return false
 }
 
-func (r *Runner) RunStage4WasmProjectTests(projectFilters []string, guestTestArgs []string, perPkgTimeout time.Duration, verbose bool) {
+func (r *Runner) RunStage4WasmProjectTests(projectFilters []string, guestTestArgs []string, idleTimeout time.Duration, verbose bool) {
 	fmt.Fprintln(os.Stdout, "\n================================================================================")
 	fmt.Fprintln(os.Stdout, "🧪  Stage 4: Rusticated WASM Project Tests (Go & Rust)")
 	fmt.Fprintln(os.Stdout, "================================================================================")
@@ -173,8 +174,8 @@ func (r *Runner) RunStage4WasmProjectTests(projectFilters []string, guestTestArg
 		return
 	}
 
-	if perPkgTimeout <= 0 {
-		perPkgTimeout = 30 * time.Second
+	if idleTimeout <= 0 {
+		idleTimeout = 10 * time.Minute
 	}
 
 	matched := 0
@@ -194,7 +195,7 @@ func (r *Runner) RunStage4WasmProjectTests(projectFilters []string, guestTestArg
 				if err := mohabbat.BuildGoTestWasm(repoRoot, t.Dir, wasmPath, verbose); err != nil {
 					return err
 				}
-				return r.execWasmUnderHost(wasmPath, t.Dir, guestTestArgs, perPkgTimeout)
+				return r.execWasmUnderHost(wasmPath, t.Dir, guestTestArgs, idleTimeout)
 			})
 		} else {
 			r.RunTest(suite, t.PkgRel, func() error {
@@ -206,7 +207,7 @@ func (r *Runner) RunStage4WasmProjectTests(projectFilters []string, guestTestArg
 					return fmt.Errorf("no test wasm artifacts produced for %s", t.PkgRel)
 				}
 				for _, wp := range wasmPaths {
-					if err := r.execWasmUnderHost(wp, t.Dir, guestTestArgs, perPkgTimeout); err != nil {
+					if err := r.execWasmUnderHost(wp, t.Dir, guestTestArgs, idleTimeout); err != nil {
 						return err
 					}
 				}
@@ -220,27 +221,113 @@ func (r *Runner) RunStage4WasmProjectTests(projectFilters []string, guestTestArg
 	}
 }
 
-func (r *Runner) execWasmUnderHost(wasmPath, workDir string, guestArgs []string, timeout time.Duration) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
+func (r *Runner) execWasmUnderHost(wasmPath, workDir string, guestArgs []string, idleTimeout time.Duration) error {
 	args := []string{"--wasm", wasmPath}
 	if len(guestArgs) > 0 {
 		args = append(args, "--")
 		args = append(args, guestArgs...)
 	}
 
-	cmd := exec.CommandContext(ctx, r.DistExe, args...)
+	cmd := exec.Command(r.DistExe, args...)
 	cmd.Dir = workDir
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return fmt.Errorf("timed out after %s", timeout)
+	return runCommandWithStdioIdleTimeout(cmd, idleTimeout, os.Stdout, os.Stderr)
+}
+
+type stdioActivityWriter struct {
+	dst        io.Writer
+	activity   chan<- struct{}
+	started    time.Time
+	lastOutput *atomic.Int64
+}
+
+func (w stdioActivityWriter) Write(p []byte) (int, error) {
+	if len(p) > 0 {
+		outputAt := time.Since(w.started).Nanoseconds()
+		for {
+			previous := w.lastOutput.Load()
+			if outputAt <= previous || w.lastOutput.CompareAndSwap(previous, outputAt) {
+				break
+			}
 		}
+		select {
+		case w.activity <- struct{}{}:
+		default:
+		}
+	}
+	return w.dst.Write(p)
+}
+
+func runCommandWithStdioIdleTimeout(cmd *exec.Cmd, idleTimeout time.Duration, stdout, stderr io.Writer) error {
+	if idleTimeout <= 0 {
+		return fmt.Errorf("stdio idle timeout must be positive")
+	}
+
+	activity := make(chan struct{}, 1)
+	started := time.Now()
+	var lastOutput atomic.Int64
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	cmd.Stdout = stdioActivityWriter{dst: stdout, activity: activity, started: started, lastOutput: &lastOutput}
+	cmd.Stderr = stdioActivityWriter{dst: stderr, activity: activity, started: started, lastOutput: &lastOutput}
+
+	if err := cmd.Start(); err != nil {
 		return err
 	}
-	return nil
+
+	wait := make(chan error, 1)
+	go func() {
+		wait <- cmd.Wait()
+	}()
+
+	timer := time.NewTimer(idleTimeout)
+	defer timer.Stop()
+	for {
+		select {
+		case err := <-wait:
+			return err
+		case <-activity:
+			resetTimer(timer, remainingIdleTime(started, &lastOutput, idleTimeout))
+		case <-timer.C:
+			select {
+			case err := <-wait:
+				return err
+			default:
+			}
+			if remaining := remainingIdleTime(started, &lastOutput, idleTimeout); remaining > 0 {
+				resetTimer(timer, remaining)
+				continue
+			}
+
+			killErr := cmd.Process.Kill()
+			waitErr := <-wait
+			if waitErr == nil {
+				return nil
+			}
+			if killErr != nil {
+				return fmt.Errorf("no stdout/stderr output for %s; failed to stop host process: %v (wait error: %w)", idleTimeout, killErr, waitErr)
+			}
+			return fmt.Errorf("no stdout/stderr output for %s; host process terminated: %w", idleTimeout, waitErr)
+		}
+	}
+}
+
+func remainingIdleTime(started time.Time, lastOutput *atomic.Int64, idleTimeout time.Duration) time.Duration {
+	timeSinceOutput := time.Since(started) - time.Duration(lastOutput.Load())
+	return idleTimeout - timeSinceOutput
+}
+
+func resetTimer(timer *time.Timer, duration time.Duration) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(duration)
 }
 
 func buildRustTestWasm(repoRoot, crateDir, buildDir string) ([]string, error) {
@@ -272,8 +359,8 @@ func buildRustTestWasm(repoRoot, crateDir, buildDir string) ([]string, error) {
 			continue
 		}
 		var msg struct {
-			Reason     string   `json:"reason"`
-			Executable string   `json:"executable"`
+			Reason     string `json:"reason"`
+			Executable string `json:"executable"`
 			Target     struct {
 				Kind []string `json:"kind"`
 			} `json:"target"`
