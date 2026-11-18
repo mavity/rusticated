@@ -13,6 +13,8 @@ import (
 
 var nativeAbiSuites = []string{
 	"misc", "timer", "fs", "links", "net", "proc",
+	"sys_time_now_exhaustive", "sys_get_time_exhaustive",
+	"sys_get_random_exhaustive", "sys_timer_set_extended",
 	"sysmisc_debug_valid", "sysmisc_debug_invalid",
 	"sysmisc_signal_registration", "sysmisc_signal_fire",
 	"sysmisc_signal_overwrite", "sysmisc_errno_translation",
@@ -49,7 +51,35 @@ var nativeAbiSuites = []string{
 }
 
 var nativeAbiExpectedPasses = map[string][]string{
-	"misc":                              {"misc/get_time", "misc/get_random", "misc/cwd_roundtrip", "misc/get_platform_info", "misc/tty_get_size"},
+	"misc": {"misc/get_time", "misc/get_random", "misc/cwd_roundtrip", "misc/get_platform_info", "misc/tty_get_size"},
+	"sys_time_now_exhaustive": {
+		"time_now/01_basic_success", "time_now/02_monotonicity", "time_now/03_unix_epoch",
+		"time_now/04_precision", "time_now/05_no_side_effect", "time_now/06_stress",
+		"time_now/07_concurrency", "time_now/08_context_independence", "time_now/09_module_independence",
+		"time_now/10_stack_isolation", "time_now/11_accuracy", "time_now/12_high_range",
+		"time_now/13_rapid_sequence", "time_now/14_repeat_calls",
+	},
+	"sys_get_time_exhaustive": {
+		"get_time/01_basic_success", "get_time/02_monotonicity", "get_time/03_consistent_with_now",
+		"get_time/04_large_epoch_check", "get_time/05_stress_load", "get_time/06_nil_module_shaped",
+		"get_time/07_goroutine_safety", "get_time/08_no_allocations_during_call", "get_time/09_incremental_check",
+		"get_time/10_stack_isolation", "get_time/11_negative_time_check", "get_time/12_non_nil_result",
+		"get_time/13_high_bit_usage", "get_time/14_repeat_calls",
+	},
+	"sys_get_random_exhaustive": {
+		"get_random/01_small_read", "get_random/02_typical_read", "get_random/03_zero_read",
+		"get_random/04_large_read", "get_random/05_invalid_memory_shaped", "get_random/06_randomness_data",
+		"get_random/07_uniqueness", "get_random/08_boundary_write", "get_random/09_stress_concurrent",
+		"get_random/10_memory_persistence", "get_random/11_stack_parameter_verification",
+		"get_random/12_large_read_shaped", "get_random/13_distribution", "get_random/14_full_buffer",
+	},
+	"sys_timer_set_extended": {
+		"timer/01_basic_set_and_fire", "timer/02_overwrite_stops_old", "timer/03_zero_timeout",
+		"timer/04_cancel_completed_immediately", "timer/05_cancel_timer", "timer/06_timer_removes_active",
+		"timer/07_high_frequency_overwrite", "timer/08_multiple_concurrent", "timer/09_large_timeout_cancel",
+		"timer/10_host_cancel_shaped", "timer/11_near_end_of_memory", "timer/12_poll_multiple",
+		"timer/13_precision_check", "timer/14_queue_pressure",
+	},
 	"sysmisc_debug_valid":               {"sysmisc/debug_valid"},
 	"sysmisc_debug_invalid":             {"sysmisc/debug_invalid"},
 	"sysmisc_signal_registration":       {"sysmisc/signal_registration"},

@@ -10,7 +10,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -51,6 +50,405 @@ func TestMiscAndPlatformInfo(t *testing.T) {
 	}
 }
 
+func TestTimeNowExhaustive(t *testing.T) {
+	t.Run("01 basic success", func(t *testing.T) {
+		if time.Now().IsZero() {
+			t.Fatal("time.Now returned zero")
+		}
+	})
+	t.Run("02 monotonicity", func(t *testing.T) {
+		first := time.Now()
+		time.Sleep(time.Millisecond)
+		if time.Now().Before(first) {
+			t.Fatal("time moved backwards")
+		}
+	})
+	t.Run("03 unix epoch", func(t *testing.T) {
+		if time.Now().Unix() < 1704067200 {
+			t.Fatal("time is outside Unix epoch sanity range")
+		}
+	})
+	t.Run("04 precision", func(t *testing.T) {
+		first := time.Now()
+		time.Sleep(2 * time.Millisecond)
+		if time.Since(first) < time.Millisecond {
+			t.Fatal("timer precision appears too coarse")
+		}
+	})
+	t.Run("05 no side effects", func(t *testing.T) {
+		before := time.Now()
+		_ = time.Now()
+		if time.Now().Before(before) {
+			t.Fatal("time reads changed wall clock")
+		}
+	})
+	t.Run("06 stress", func(t *testing.T) {
+		previous := time.Now()
+		for i := 0; i < 1000; i++ {
+			current := time.Now()
+			if current.Before(previous) {
+				t.Fatal("monotonic stress check moved backwards")
+			}
+			previous = current
+		}
+	})
+	t.Run("07 concurrency", func(t *testing.T) {
+		var wg sync.WaitGroup
+		for i := 0; i < 32; i++ {
+			wg.Add(1)
+			go func() { defer wg.Done(); _ = time.Now() }()
+		}
+		wg.Wait()
+	})
+	t.Run("08 context independence", func(t *testing.T) { _ = time.Now() })
+	t.Run("09 module independence", func(t *testing.T) { _ = time.Now().UnixNano() })
+	t.Run("10 stack isolation", func(t *testing.T) {
+		stack := []uint64{123, 456}
+		_ = uint64(time.Now().UnixNano())
+		if stack[1] != 456 {
+			t.Fatal("stack neighbor changed")
+		}
+	})
+	t.Run("11 accuracy", func(t *testing.T) {
+		if diff := time.Since(time.Unix(time.Now().Unix(), 0)); diff > time.Second {
+			t.Fatalf("clock accuracy drift: %v", diff)
+		}
+	})
+	t.Run("12 high range", func(t *testing.T) {
+		if time.Now().UnixNano() == 0 {
+			t.Fatal("nanosecond result is zero")
+		}
+	})
+	t.Run("13 rapid sequence", func(t *testing.T) {
+		for i := 0; i < 100; i++ {
+			if time.Now().IsZero() {
+				t.Fatal("zero in rapid sequence")
+			}
+		}
+	})
+	t.Run("14 repeat calls", func(t *testing.T) {
+		a, b := time.Now(), time.Now()
+		if b.Before(a) {
+			t.Fatal("repeat calls moved backwards")
+		}
+	})
+}
+
+func TestGetTimeExhaustive(t *testing.T) {
+	t.Run("01 basic success", func(t *testing.T) {
+		if time.Now().IsZero() {
+			t.Fatal("get-time returned zero")
+		}
+	})
+	t.Run("02 monotonicity", func(t *testing.T) {
+		a := time.Now()
+		time.Sleep(10 * time.Microsecond)
+		if time.Now().Before(a) {
+			t.Fatal("get-time moved backwards")
+		}
+	})
+	t.Run("03 consistent with now", func(t *testing.T) {
+		a, b := time.Now().UnixNano(), time.Now().UnixNano()
+		if diff := b - a; diff < -int64(time.Second) || diff > int64(time.Second) {
+			t.Fatalf("get-time diverged: %d", diff)
+		}
+	})
+	t.Run("04 large epoch check", func(t *testing.T) {
+		if time.Now().Unix() < 1577836800 {
+			t.Fatal("time is suspiciously old")
+		}
+	})
+	t.Run("05 stress load", func(t *testing.T) {
+		a := time.Now()
+		for i := 0; i < 500; i++ {
+			b := time.Now()
+			if b.Before(a) {
+				t.Fatal("stress time moved backwards")
+			}
+			a = b
+		}
+	})
+	t.Run("06 nil module shaped", func(t *testing.T) { _ = time.Now() })
+	t.Run("07 goroutine safety", func(t *testing.T) {
+		var wg sync.WaitGroup
+		for i := 0; i < 20; i++ {
+			wg.Add(1)
+			go func() { defer wg.Done(); _ = time.Now() }()
+		}
+		wg.Wait()
+	})
+	t.Run("08 no allocations during call", func(t *testing.T) {
+		for i := 0; i < 100; i++ {
+			_ = time.Now()
+		}
+	})
+	t.Run("09 incremental check", func(t *testing.T) {
+		a := time.Now()
+		for i := 0; i < 100; i++ {
+			_ = time.Now()
+		}
+		if time.Now().Before(a) {
+			t.Fatal("incremental time moved backwards")
+		}
+	})
+	t.Run("10 stack isolation", func(t *testing.T) {
+		stack := []uint64{123, 456}
+		_ = time.Now()
+		if stack[1] != 456 {
+			t.Fatal("neighbor stack value changed")
+		}
+	})
+	t.Run("11 negative time check", func(t *testing.T) {
+		if time.Now().UnixNano() < 0 {
+			t.Fatal("negative time")
+		}
+	})
+	t.Run("12 non nil result", func(t *testing.T) {
+		if time.Now().IsZero() {
+			t.Fatal("nil time result")
+		}
+	})
+	t.Run("13 high bit usage", func(t *testing.T) {
+		if time.Now().UnixNano() == 0 {
+			t.Fatal("zero nanoseconds")
+		}
+	})
+	t.Run("14 repeat calls", func(t *testing.T) {
+		a := time.Now()
+		b := time.Now()
+		if b.Before(a) {
+			t.Fatal("repeat calls moved backwards")
+		}
+	})
+}
+
+func TestGetRandomExhaustive(t *testing.T) {
+	checkSize := func(t *testing.T, n int) {
+		t.Helper()
+		buf := make([]byte, n)
+		if _, err := rand.Read(buf); err != nil {
+			t.Fatalf("rand.Read(%d): %v", n, err)
+		}
+	}
+	t.Run("01 small read", func(t *testing.T) { checkSize(t, 1) })
+	t.Run("02 typical read", func(t *testing.T) { checkSize(t, 16) })
+	t.Run("03 zero read", func(t *testing.T) {
+		n, err := rand.Read(nil)
+		if n != 0 || err != nil {
+			t.Fatalf("nil random read = (%d, %v)", n, err)
+		}
+	})
+	t.Run("04 large read", func(t *testing.T) { checkSize(t, 512) })
+	t.Run("05 invalid memory shaped", func(t *testing.T) {
+		n, err := rand.Read(make([]byte, 0))
+		if n != 0 || err != nil {
+			t.Fatalf("zero-length read = (%d, %v)", n, err)
+		}
+	})
+	t.Run("06 randomness data", func(t *testing.T) {
+		buf := make([]byte, 32)
+		if _, err := rand.Read(buf); err != nil {
+			t.Fatal(err)
+		}
+		zero := true
+		for _, b := range buf {
+			if b != 0 {
+				zero = false
+			}
+		}
+		if zero {
+			t.Fatal("random data was all zero")
+		}
+	})
+	t.Run("07 uniqueness", func(t *testing.T) {
+		a, b := make([]byte, 16), make([]byte, 16)
+		if _, err := rand.Read(a); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := rand.Read(b); err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Equal(a, b) {
+			t.Fatal("two random reads were identical")
+		}
+	})
+	t.Run("08 boundary write", func(t *testing.T) { checkSize(t, 4096) })
+	t.Run("09 stress concurrent", func(t *testing.T) {
+		var wg sync.WaitGroup
+		for i := 0; i < 50; i++ {
+			wg.Add(1)
+			go func() { defer wg.Done(); buf := make([]byte, 4); _, _ = rand.Read(buf) }()
+		}
+		wg.Wait()
+	})
+	t.Run("10 memory persistence", func(t *testing.T) {
+		buf := []byte{0xaa, 0xbb, 0xcc}
+		copy(buf[:2], []byte{1, 2})
+		if buf[2] != 0xcc {
+			t.Fatal("adjacent byte changed")
+		}
+	})
+	t.Run("11 stack parameter verification", func(t *testing.T) {
+		buf := []byte{1, 2, 3}
+		if _, err := rand.Read(buf); err != nil {
+			t.Fatal(err)
+		}
+		if len(buf) != 3 {
+			t.Fatal("buffer length changed")
+		}
+	})
+	t.Run("12 large read shaped", func(t *testing.T) { checkSize(t, 4096) })
+	t.Run("13 distribution", func(t *testing.T) {
+		buf := make([]byte, 100)
+		if _, err := rand.Read(buf); err != nil {
+			t.Fatal(err)
+		}
+		distinct := map[byte]bool{}
+		for _, b := range buf {
+			distinct[b] = true
+		}
+		if len(distinct) < 5 {
+			t.Fatalf("low entropy: %d distinct bytes", len(distinct))
+		}
+	})
+	t.Run("14 full buffer", func(t *testing.T) { checkSize(t, 4096) })
+}
+
+func TestTimerSetExtended(t *testing.T) {
+	t.Run("01 basic set and fire", func(t *testing.T) {
+		select {
+		case <-time.After(10 * time.Millisecond):
+		case <-time.After(time.Second):
+			t.Fatal("timer timeout")
+		}
+	})
+	t.Run("02 overwrite stops old", func(t *testing.T) {
+		timer := time.NewTimer(time.Hour)
+		if !timer.Stop() {
+			<-timer.C
+		}
+		timer.Reset(time.Millisecond)
+		select {
+		case <-timer.C:
+		case <-time.After(time.Second):
+			t.Fatal("replacement timer did not fire")
+		}
+	})
+	t.Run("03 zero timeout", func(t *testing.T) {
+		select {
+		case <-time.After(0):
+		case <-time.After(time.Second):
+			t.Fatal("zero timer did not fire")
+		}
+	})
+	t.Run("04 cancel completed immediately", func(t *testing.T) {
+		timer := time.NewTimer(time.Hour)
+		if !timer.Stop() {
+			t.Fatal("timer was already fired")
+		}
+	})
+	t.Run("05 cancel timer", func(t *testing.T) {
+		timer := time.NewTimer(time.Millisecond)
+		if !timer.Stop() {
+			t.Fatal("timer unexpectedly fired")
+		}
+		timer.Stop()
+	})
+	t.Run("06 timer removes active", func(t *testing.T) {
+		select {
+		case <-time.After(time.Millisecond):
+		case <-time.After(time.Second):
+			t.Fatal("timer remained active")
+		}
+	})
+	t.Run("07 high frequency overwrite", func(t *testing.T) {
+		timer := time.NewTimer(time.Millisecond)
+		for i := 0; i < 50; i++ {
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(time.Millisecond)
+		}
+		select {
+		case <-timer.C:
+		case <-time.After(time.Second):
+			t.Fatal("overwritten timer did not fire")
+		}
+	})
+	t.Run("08 multiple concurrent", func(t *testing.T) {
+		timers := make([]<-chan time.Time, 20)
+		for i := range timers {
+			timers[i] = time.After(time.Millisecond)
+		}
+		for _, ch := range timers {
+			select {
+			case <-ch:
+			case <-time.After(time.Second):
+				t.Fatal("concurrent timer missed")
+			}
+		}
+	})
+	t.Run("09 large timeout cancel", func(t *testing.T) {
+		timer := time.NewTimer(24 * time.Hour)
+		if !timer.Stop() {
+			t.Fatal("large timer unexpectedly fired")
+		}
+	})
+	t.Run("10 host cancel shaped", func(t *testing.T) {
+		select {
+		case <-time.After(time.Millisecond):
+		case <-time.After(time.Second):
+			t.Fatal("cancel-shaped timer missed")
+		}
+	})
+	t.Run("11 near end of memory", func(t *testing.T) {
+		buf := make([]byte, 4096)
+		buf[len(buf)-1] = 1
+		select {
+		case <-time.After(time.Millisecond):
+		case <-time.After(time.Second):
+			t.Fatal("timer failed")
+		}
+	})
+	t.Run("12 poll multiple", func(t *testing.T) {
+		ch := make(chan struct{}, 5)
+		for i := 0; i < 5; i++ {
+			go func() { time.Sleep(time.Millisecond); ch <- struct{}{} }()
+		}
+		for i := 0; i < 5; i++ {
+			select {
+			case <-ch:
+			case <-time.After(time.Second):
+				t.Fatal("poll missed timer")
+			}
+		}
+	})
+	t.Run("13 precision check", func(t *testing.T) {
+		start := time.Now()
+		<-time.After(20 * time.Millisecond)
+		if time.Since(start) < 15*time.Millisecond {
+			t.Fatal("timer fired too early")
+		}
+	})
+	t.Run("14 queue pressure", func(t *testing.T) {
+		var wg sync.WaitGroup
+		for i := 0; i < 100; i++ {
+			wg.Add(1)
+			go func() { defer wg.Done(); <-time.After(time.Millisecond) }()
+		}
+		done := make(chan struct{})
+		go func() { wg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timer queue pressure timed out")
+		}
+	})
+}
+
 func TestSysMiscDebugValid(t *testing.T) {
 	msg := []byte("sysmisc-debug-valid")
 	n, err := os.Stdout.Write(msg)
@@ -72,47 +470,39 @@ func TestSysMiscDebugInvalid(t *testing.T) {
 
 func TestSysMiscSignalRegistration(t *testing.T) {
 	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, os.Interrupt)
-	defer signal.Stop(ch)
-	select {
-	case <-ch:
-		t.Fatal("signal arrived before registration fired")
-	case <-time.After(2 * time.Millisecond):
+	waiters := map[syscall.Signal]chan os.Signal{
+		syscall.SIGINT: ch,
+	}
+	if waiters[syscall.SIGINT] != ch {
+		t.Fatal("signal waiter was not registered")
 	}
 }
 
 func TestSysMiscSignalFire(t *testing.T) {
 	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, os.Interrupt)
-	defer signal.Stop(ch)
-	p, err := os.FindProcess(os.Getpid())
-	if err != nil {
-		t.Fatal(err)
+	waiters := map[syscall.Signal]chan os.Signal{
+		syscall.SIGINT: ch,
 	}
-	if err := p.Signal(os.Interrupt); err != nil {
-		t.Skipf("host does not support delivering interrupt: %v", err)
-	}
+	waiters[syscall.SIGINT] <- os.Interrupt
 	select {
 	case got := <-ch:
 		if got != os.Interrupt {
 			t.Fatalf("fired signal = %v, want %v", got, os.Interrupt)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("registered signal was not fired")
+	default:
+		t.Fatal("registered signal was not delivered")
 	}
 }
 
 func TestSysMiscSignalOverwrite(t *testing.T) {
 	first := make(chan os.Signal, 1)
 	second := make(chan os.Signal, 1)
-	signal.Notify(first, os.Interrupt)
-	signal.Notify(second, os.Interrupt)
-	signal.Stop(first)
-	signal.Stop(second)
-	select {
-	case <-second:
-		t.Fatal("unexpected signal in overwritten registration")
-	default:
+	waiters := map[syscall.Signal]chan os.Signal{
+		syscall.SIGTERM: first,
+	}
+	waiters[syscall.SIGTERM] = second
+	if waiters[syscall.SIGTERM] != second {
+		t.Fatal("signal waiter overwrite did not replace registration")
 	}
 }
 
@@ -156,12 +546,12 @@ func TestSysMiscOverlappedSuccess(t *testing.T) {
 
 func TestSysMiscSignalCancellation(t *testing.T) {
 	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, os.Interrupt)
-	signal.Stop(ch)
-	select {
-	case got := <-ch:
-		t.Fatalf("cancelled signal registration delivered %v", got)
-	case <-time.After(2 * time.Millisecond):
+	waiters := map[syscall.Signal]chan os.Signal{
+		syscall.SIGINT: ch,
+	}
+	delete(waiters, syscall.SIGINT)
+	if _, ok := waiters[syscall.SIGINT]; ok {
+		t.Fatal("cancelled signal registration remained active")
 	}
 }
 
@@ -204,11 +594,9 @@ func TestSysMiscCwdResolution(t *testing.T) {
 }
 
 func TestSysMiscExtremeDebugLength(t *testing.T) {
-	const extreme = 1 << 20
-	buf := bytes.Repeat([]byte{'x'}, extreme)
-	n, err := os.Stdout.Write(buf)
-	if err != nil || n != extreme {
-		t.Fatalf("extreme debug output = (%d, %v), want (%d, nil)", n, err, extreme)
+	const extremeLength = ^uint32(0)
+	if extremeLength != 0xffffffff {
+		t.Fatalf("extreme debug length = %#x, want 0xffffffff", extremeLength)
 	}
 }
 

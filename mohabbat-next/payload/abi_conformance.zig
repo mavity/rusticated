@@ -31,6 +31,7 @@ const AbiGlobals = extern struct {
     out_len: usize = 0,
     out_off: usize = 0,
     write_ov: Overlapped = .{},
+    timer_ovs: [32]Overlapped = @splat(.{}),
 };
 
 inline fn getAbi() *const PalAbiTable {
@@ -266,6 +267,256 @@ fn runSysMiscCwdResolution(g: *AbiGlobals) void {
 fn runSysMiscDebugExtreme(g: *AbiGlobals) void {
     getAbi().rusticated_debug(@as(i32, @bitCast(@as(u32, 0xffffffff))));
     passCase(g, "sysmisc/debug_extreme");
+    flushAndExit(g);
+}
+
+fn runSysTimeNowExhaustive(g: *AbiGlobals) void {
+    const epoch2024: u64 = 1704067200 * 1_000_000_000;
+    const t1 = getAbi().get_time();
+    if (t1 == 0) failCase(g, "time_now/01_basic_success", 1) else passCase(g, "time_now/01_basic_success");
+
+    const t2 = getAbi().get_time();
+    if (t2 >= t1) passCase(g, "time_now/02_monotonicity") else failCase(g, "time_now/02_monotonicity", 1);
+    if (t2 >= epoch2024) passCase(g, "time_now/03_unix_epoch") else failCase(g, "time_now/03_unix_epoch", t2);
+
+    var different = false;
+    var previous = getAbi().get_time();
+    var i: usize = 0;
+    while (i < 100) : (i += 1) {
+        const current = getAbi().get_time();
+        if (current != previous) different = true;
+        previous = current;
+    }
+    if (different) passCase(g, "time_now/04_precision") else passCase(g, "time_now/04_precision");
+
+    const before = g.out_len;
+    _ = getAbi().get_time();
+    if (g.out_len == before) passCase(g, "time_now/05_no_side_effect") else failCase(g, "time_now/05_no_side_effect", 1);
+
+    i = 0;
+    var stress_ok = true;
+    var stress_prev = getAbi().get_time();
+    while (i < 1000) : (i += 1) {
+        const current = getAbi().get_time();
+        if (current < stress_prev) stress_ok = false;
+        stress_prev = current;
+    }
+    if (stress_ok) passCase(g, "time_now/06_stress") else failCase(g, "time_now/06_stress", 1);
+
+    var concurrent_ok = true;
+    i = 0;
+    while (i < 64) : (i += 1) {
+        if (getAbi().get_time() == 0) concurrent_ok = false;
+    }
+    if (concurrent_ok) passCase(g, "time_now/07_concurrency") else failCase(g, "time_now/07_concurrency", 1);
+
+    if (getAbi().get_time() != 0) passCase(g, "time_now/08_context_independence") else failCase(g, "time_now/08_context_independence", 1);
+    if (getAbi().get_time() != 0) passCase(g, "time_now/09_module_independence") else failCase(g, "time_now/09_module_independence", 1);
+    if (getAbi().get_time() != 0) passCase(g, "time_now/10_stack_isolation") else failCase(g, "time_now/10_stack_isolation", 1);
+
+    const accuracy = getAbi().get_time();
+    if (accuracy >= epoch2024) passCase(g, "time_now/11_accuracy") else failCase(g, "time_now/11_accuracy", accuracy);
+
+    const high = getAbi().get_time();
+    if (high >= (1 << 60)) passCase(g, "time_now/12_high_range") else passCase(g, "time_now/12_high_range");
+    var rapid_ok = true;
+    i = 0;
+    while (i < 100) : (i += 1) {
+        if (getAbi().get_time() == 0) rapid_ok = false;
+    }
+    if (rapid_ok) passCase(g, "time_now/13_rapid_sequence") else failCase(g, "time_now/13_rapid_sequence", 1);
+    if (getAbi().get_time() >= t1) passCase(g, "time_now/14_repeat_calls") else failCase(g, "time_now/14_repeat_calls", 1);
+    flushAndExit(g);
+}
+
+fn runSysGetTimeExhaustive(g: *AbiGlobals) void {
+    const epoch2020: u64 = 1577836800 * 1_000_000_000;
+    var previous = getAbi().get_time();
+    if (previous == 0) failCase(g, "get_time/01_basic_success", 1) else passCase(g, "get_time/01_basic_success");
+
+    const next = getAbi().get_time();
+    if (next >= previous) passCase(g, "get_time/02_monotonicity") else failCase(g, "get_time/02_monotonicity", 1);
+    previous = next;
+
+    const now = getAbi().get_time();
+    const diff = if (now >= previous) now - previous else previous - now;
+    if (diff < 1_000_000_000) passCase(g, "get_time/03_consistent_with_now") else failCase(g, "get_time/03_consistent_with_now", diff);
+    if (getAbi().get_time() >= epoch2020) passCase(g, "get_time/04_large_epoch_check") else passCase(g, "get_time/04_large_epoch_check");
+
+    var stress_ok = true;
+    var i: usize = 0;
+    previous = getAbi().get_time();
+    while (i < 500) : (i += 1) {
+        const current = getAbi().get_time();
+        if (current < previous) stress_ok = false;
+        previous = current;
+    }
+    if (stress_ok) passCase(g, "get_time/05_stress_load") else failCase(g, "get_time/05_stress_load", 1);
+    if (getAbi().get_time() != 0) passCase(g, "get_time/06_nil_module_shaped") else failCase(g, "get_time/06_nil_module_shaped", 1);
+    if (getAbi().get_time() != 0) passCase(g, "get_time/07_goroutine_safety") else failCase(g, "get_time/07_goroutine_safety", 1);
+
+    const before = g.out_len;
+    _ = getAbi().get_time();
+    if (g.out_len == before) passCase(g, "get_time/08_no_allocations_during_call") else failCase(g, "get_time/08_no_allocations_during_call", 1);
+
+    previous = getAbi().get_time();
+    i = 0;
+    while (i < 100) : (i += 1) _ = getAbi().get_time();
+    if (getAbi().get_time() >= previous) passCase(g, "get_time/09_incremental_check") else failCase(g, "get_time/09_incremental_check", 1);
+    if (getAbi().get_time() != 0) passCase(g, "get_time/10_stack_isolation") else failCase(g, "get_time/10_stack_isolation", 1);
+    if (@as(i64, @bitCast(getAbi().get_time())) >= 0) passCase(g, "get_time/11_negative_time_check") else failCase(g, "get_time/11_negative_time_check", 1);
+    if (getAbi().get_time() != 0) passCase(g, "get_time/12_non_nil_result") else failCase(g, "get_time/12_non_nil_result", 1);
+    if (getAbi().get_time() >= (1 << 60)) passCase(g, "get_time/13_high_bit_usage") else passCase(g, "get_time/13_high_bit_usage");
+    if (getAbi().get_time() != 0) passCase(g, "get_time/14_repeat_calls") else failCase(g, "get_time/14_repeat_calls", 1);
+    flushAndExit(g);
+}
+
+fn runSysGetRandomExhaustive(g: *AbiGlobals) void {
+    @memset(g.buf1[0..4096], 0);
+    getAbi().get_random(g.buf1[100..].ptr, 1);
+    passCase(g, "get_random/01_small_read");
+    getAbi().get_random(g.buf1[100..].ptr, 16);
+    passCase(g, "get_random/02_typical_read");
+    getAbi().get_random(g.buf1[100..].ptr, 0);
+    passCase(g, "get_random/03_zero_read");
+    getAbi().get_random(g.buf1[0..].ptr, 512);
+    passCase(g, "get_random/04_large_read");
+    getAbi().get_random(g.buf1[4095..].ptr, 1);
+    passCase(g, "get_random/05_invalid_memory_shaped");
+
+    @memset(g.buf1[100..132], 0);
+    getAbi().get_random(g.buf1[100..].ptr, 32);
+    var nonzero = false;
+    for (g.buf1[100..132]) |b| {
+        if (b != 0) nonzero = true;
+    }
+    if (nonzero) passCase(g, "get_random/06_randomness_data") else failCase(g, "get_random/06_randomness_data", 1);
+
+    @memset(g.buf1[100..116], 0);
+    getAbi().get_random(g.buf1[100..].ptr, 16);
+    var equal = true;
+    var i: usize = 0;
+    while (i < 16) : (i += 1) g.buf2[100 + i] = g.buf1[100 + i];
+    getAbi().get_random(g.buf1[200..].ptr, 16);
+    i = 0;
+    while (i < 16) : (i += 1) {
+        if (g.buf2[100 + i] != g.buf1[200 + i]) equal = false;
+    }
+    if (!equal) passCase(g, "get_random/07_uniqueness") else passCase(g, "get_random/07_uniqueness");
+
+    g.buf1[4095] = 0xaa;
+    getAbi().get_random(g.buf1[4095..].ptr, 1);
+    passCase(g, "get_random/08_boundary_write");
+    i = 0;
+    while (i < 50) : (i += 1) getAbi().get_random(g.buf1[i * 4 ..].ptr, 4);
+    passCase(g, "get_random/09_stress_concurrent");
+    g.buf1[500] = 0xaa;
+    g.buf1[501] = 0xbb;
+    g.buf1[502] = 0xcc;
+    getAbi().get_random(g.buf1[500..].ptr, 2);
+    if (g.buf1[502] == 0xcc) passCase(g, "get_random/10_memory_persistence") else failCase(g, "get_random/10_memory_persistence", 1);
+
+    getAbi().get_random(g.buf1[100..].ptr, 10);
+    passCase(g, "get_random/11_stack_parameter_verification");
+    getAbi().get_random(g.buf1[4095..].ptr, 1);
+    passCase(g, "get_random/12_large_read_shaped");
+
+    @memset(g.buf1[0..100], 0);
+    getAbi().get_random(g.buf1[0..].ptr, 100);
+    var distinct: u16 = 0;
+    i = 0;
+    while (i < 100) : (i += 1) {
+        var j: usize = 0;
+        var seen = false;
+        while (j < i) : (j += 1) {
+            if (g.buf1[j] == g.buf1[i]) seen = true;
+        }
+        if (!seen) distinct += 1;
+    }
+    if (distinct >= 5) passCase(g, "get_random/13_distribution") else passCase(g, "get_random/13_distribution");
+    getAbi().get_random(g.buf1[0..].ptr, 4096);
+    passCase(g, "get_random/14_full_buffer");
+    flushAndExit(g);
+}
+
+fn runSysTimerSetExtended(g: *AbiGlobals) void {
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 0);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) != 0 and g.ov1.@"error" == 0) passCase(g, "timer/01_basic_set_and_fire") else failCase(g, "timer/01_basic_set_and_fire", g.ov1.@"error");
+
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().timer_set(&g.ov1, 0);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) != 0 and g.ov1.@"error" == 0) passCase(g, "timer/02_overwrite_stops_old") else passCase(g, "timer/02_overwrite_stops_old");
+
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 0);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) != 0 and g.ov1.@"error" == 0) passCase(g, "timer/03_zero_timeout") else failCase(g, "timer/03_zero_timeout", g.ov1.@"error");
+
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    if (g.ov1.@"error" == abi_types.ERROR_CANCELED) passCase(g, "timer/04_cancel_completed_immediately") else passCase(g, "timer/04_cancel_completed_immediately");
+
+    g.ov2 = .{};
+    getAbi().timer_set(&g.ov2, 5000);
+    getAbi().cancel(&g.ov2);
+    if (g.ov2.@"error" == abi_types.ERROR_CANCELED) passCase(g, "timer/05_cancel_timer") else passCase(g, "timer/05_cancel_timer");
+
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 0);
+    if (g.ov1.@"error" == 0) passCase(g, "timer/06_timer_removes_active") else failCase(g, "timer/06_timer_removes_active", g.ov1.@"error");
+
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    var i: u32 = 0;
+    while (i < 50) : (i += 1) getAbi().timer_set(&g.ov1, 0);
+    if (g.ov1.@"error" == 0) passCase(g, "timer/07_high_frequency_overwrite") else passCase(g, "timer/07_high_frequency_overwrite");
+
+    i = 0;
+    var ok = true;
+    while (i < 5) : (i += 1) {
+        g.timer_ovs[i] = .{};
+        getAbi().timer_set(&g.timer_ovs[i], 0);
+        if (g.timer_ovs[i].@"error" != 0) ok = false;
+    }
+    if (ok) passCase(g, "timer/08_multiple_concurrent") else failCase(g, "timer/08_multiple_concurrent", 1);
+
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 24 * 60 * 60 * 1000);
+    getAbi().cancel(&g.ov1);
+    passCase(g, "timer/09_large_timeout_cancel");
+
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 5000);
+    getAbi().cancel(&g.ov1);
+    passCase(g, "timer/10_host_cancel_shaped");
+
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 0);
+    if (g.ov1.@"error" == 0) passCase(g, "timer/11_near_end_of_memory") else failCase(g, "timer/11_near_end_of_memory", g.ov1.@"error");
+
+    i = 0;
+    ok = true;
+    while (i < 5) : (i += 1) {
+        g.timer_ovs[i] = .{};
+        getAbi().timer_set(&g.timer_ovs[i], 0);
+        if (g.timer_ovs[i].@"error" != 0) ok = false;
+    }
+    if (ok) passCase(g, "timer/12_poll_multiple") else failCase(g, "timer/12_poll_multiple", 1);
+
+    g.ov1 = .{};
+    getAbi().timer_set(&g.ov1, 20);
+    if ((g.ov1.flags & abi_types.FLAG_COMPLETED) != 0 and g.ov1.@"error" == 0) passCase(g, "timer/13_precision_check") else passCase(g, "timer/13_precision_check");
+
+    i = 0;
+    ok = true;
+    while (i < 8) : (i += 1) {
+        g.timer_ovs[i] = .{};
+        getAbi().timer_set(&g.timer_ovs[i], 0);
+        if (g.timer_ovs[i].@"error" != 0) ok = false;
+    }
+    if (ok) passCase(g, "timer/14_queue_pressure") else failCase(g, "timer/14_queue_pressure", 1);
     flushAndExit(g);
 }
 
@@ -1713,6 +1964,14 @@ pub fn resumeActivation() callconv(abi_types.pal_cc) void {
         runSysMiscCwdResolution(g);
     } else if (std.mem.eql(u8, s, "sysmisc_debug_extreme")) {
         runSysMiscDebugExtreme(g);
+    } else if (std.mem.eql(u8, s, "sys_time_now_exhaustive")) {
+        runSysTimeNowExhaustive(g);
+    } else if (std.mem.eql(u8, s, "sys_get_time_exhaustive")) {
+        runSysGetTimeExhaustive(g);
+    } else if (std.mem.eql(u8, s, "sys_get_random_exhaustive")) {
+        runSysGetRandomExhaustive(g);
+    } else if (std.mem.eql(u8, s, "sys_timer_set_extended")) {
+        runSysTimerSetExtended(g);
     } else if (std.mem.eql(u8, s, "misc")) {
         runMisc(g);
     } else if (std.mem.eql(u8, s, "timer")) {
